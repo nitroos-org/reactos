@@ -623,7 +623,7 @@ BasepOpenFileForMove(IN LPCWSTR File,
             {
                 /* This cannot happen on mount points */
                 if (TagInfo.FileAttributes & FILE_ATTRIBUTE_DEVICE ||
-                    TagInfo.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT)
+                    IsReparseTagNameSurrogate(TagInfo.ReparseTag))
                 {
                     _SEH2_LEAVE;
                 }
@@ -818,7 +818,7 @@ MoveFileWithProgressW(IN LPCWSTR lpExistingFileName,
             }
             /* Validate the reparse point (do we support it?) */
             else if ((TagInfo.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
-                     (TagInfo.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT))
+                     (!IsReparseTagNameSurrogate(TagInfo.ReparseTag)))
             {
                 NtClose(SourceHandle);
                 SourceHandle = INVALID_HANDLE_VALUE;
