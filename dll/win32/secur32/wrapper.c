@@ -18,9 +18,35 @@
  */
 #include "precomp.h"
 
+#include <pseh/pseh2.h>
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(secur32);
+
+/* The handles given to the callers hold a pointer to the package in dwUpper and a pointer to a copy of
+ * the provider's handle in dwLower. A handle that was never filled in (for example the one of a failed
+ * AcquireCredentialsHandle) must not be followed: it is SEC_E_INVALID_HANDLE, as on Windows. */
+static BOOL SECUR32_copyRealHandle(const SecHandle *phSec, PSecHandle real)
+{
+    BOOL ok = FALSE;
+
+    if (!SECUR32_validPackage(phSec->dwUpper))
+        return FALSE;
+    _SEH2_TRY
+    {
+        const SecHandle *src = (const SecHandle *)phSec->dwLower;
+        real->dwUpper = src->dwUpper;
+        real->dwLower = src->dwLower;
+        ok = TRUE;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ok = FALSE;
+    }
+    _SEH2_END;
+    return ok;
+}
+
 
 /* Tries to allocate a new SecHandle, into which it stores package (in
  * phSec->dwUpper) and a copy of realHandle (allocated with SECUR32_ALLOC,
@@ -156,15 +182,17 @@ SECURITY_STATUS WINAPI FreeCredentialsHandle(
     TRACE("%p\n", phCredential);
     if (phCredential)
     {
-        SecurePackage *package = (SecurePackage *)phCredential->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phCredential->dwUpper);
         PCredHandle cred = (PCredHandle)phCredential->dwLower;
 
         if (package && package->provider &&
          package->provider->fnTableW.FreeCredentialsHandle)
+        {
             ret = package->provider->fnTableW.FreeCredentialsHandle(cred);
+            HeapFree(GetProcessHeap(), 0, cred);
+        }
         else
             ret = SEC_E_INVALID_HANDLE;
-        HeapFree(GetProcessHeap(), 0, cred);
     }
     else
         ret = SEC_E_INVALID_HANDLE;
@@ -182,7 +210,7 @@ SECURITY_STATUS WINAPI QueryCredentialsAttributesA(
     TRACE("%p %d %p\n", phCredential, ulAttribute, pBuffer);
     if (phCredential)
     {
-        SecurePackage *package = (SecurePackage *)phCredential->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phCredential->dwUpper);
         PCredHandle cred = (PCredHandle)phCredential->dwLower;
 
         if (package && package->provider)
@@ -212,7 +240,7 @@ SECURITY_STATUS WINAPI QueryCredentialsAttributesW(
     TRACE("%p %d %p\n", phCredential, ulAttribute, pBuffer);
     if (phCredential)
     {
-        SecurePackage *package = (SecurePackage *)phCredential->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phCredential->dwUpper);
         PCredHandle cred = (PCredHandle)phCredential->dwLower;
 
         if (package && package->provider)
@@ -252,12 +280,12 @@ SECURITY_STATUS WINAPI InitializeSecurityContextA(
 
     if (phContext)
     {
-        package = (SecurePackage *)phContext->dwUpper;
+        package = SECUR32_validPackage(phContext->dwUpper);
         ctxt = (PCtxtHandle)phContext->dwLower;
     }
     if (phCredential)
     {
-        package = (SecurePackage *)phCredential->dwUpper;
+        package = SECUR32_validPackage(phCredential->dwUpper);
         cred = (PCredHandle)phCredential->dwLower;
     }
 
@@ -267,12 +295,8 @@ SECURITY_STATUS WINAPI InitializeSecurityContextA(
         {
             CtxtHandle myCtxt;
 
-            if (phContext)
-            {
-                PCtxtHandle realCtxt = (PCtxtHandle)phContext->dwLower;
-                myCtxt.dwUpper = realCtxt->dwUpper;
-                myCtxt.dwLower = realCtxt->dwLower;
-            }
+            if (phContext && !SECUR32_copyRealHandle(phContext, &myCtxt))
+                return SEC_E_INVALID_HANDLE;
 
             ret = package->provider->fnTableA.InitializeSecurityContextA(
                  cred, ctxt, pszTargetName, fContextReq,
@@ -316,12 +340,12 @@ SECURITY_STATUS WINAPI InitializeSecurityContextW(
 
     if (phContext)
     {
-        package = (SecurePackage *)phContext->dwUpper;
+        package = SECUR32_validPackage(phContext->dwUpper);
         ctxt = (PCtxtHandle)phContext->dwLower;
     }
     if (phCredential)
     {
-        package = (SecurePackage *)phCredential->dwUpper;
+        package = SECUR32_validPackage(phCredential->dwUpper);
         cred = (PCredHandle)phCredential->dwLower;
     }
 
@@ -331,12 +355,8 @@ SECURITY_STATUS WINAPI InitializeSecurityContextW(
         {
             CtxtHandle myCtxt;
 
-            if (phContext)
-            {
-                PCtxtHandle realCtxt = (PCtxtHandle)phContext->dwLower;
-                myCtxt.dwUpper = realCtxt->dwUpper;
-                myCtxt.dwLower = realCtxt->dwLower;
-            }
+            if (phContext && !SECUR32_copyRealHandle(phContext, &myCtxt))
+                return SEC_E_INVALID_HANDLE;
 
             ret = package->provider->fnTableW.InitializeSecurityContextW(
                  cred, ctxt, pszTargetName, fContextReq,
@@ -374,7 +394,7 @@ SECURITY_STATUS WINAPI AcceptSecurityContext(
      ptsExpiry);
     if (phCredential)
     {
-        SecurePackage *package = (SecurePackage *)phCredential->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phCredential->dwUpper);
         PCredHandle cred = (PCredHandle)phCredential->dwLower;
 
         if (package && package->provider)
@@ -383,13 +403,8 @@ SECURITY_STATUS WINAPI AcceptSecurityContext(
             {
                 CtxtHandle myCtxt;
 
-                if(phContext)
-                {
-                    PCtxtHandle realCtxt = (PCtxtHandle)phContext->dwLower;
-                    TRACE("realCtx: %p\n", realCtxt);
-                    myCtxt.dwUpper = realCtxt->dwUpper;
-                    myCtxt.dwLower = realCtxt->dwLower;
-                }
+                if (phContext && !SECUR32_copyRealHandle(phContext, &myCtxt))
+                    return SEC_E_INVALID_HANDLE;
                 
                 ret = package->provider->fnTableW.AcceptSecurityContext(
                  cred, phContext ? &myCtxt : NULL, pInput, fContextReq,
@@ -425,7 +440,7 @@ SECURITY_STATUS WINAPI CompleteAuthToken(PCtxtHandle phContext,
     TRACE("%p %p\n", phContext, pToken);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider)
@@ -454,15 +469,19 @@ SECURITY_STATUS WINAPI DeleteSecurityContext(PCtxtHandle phContext)
     TRACE("%p\n", phContext);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider &&
          package->provider->fnTableW.DeleteSecurityContext)
+        {
             ret = package->provider->fnTableW.DeleteSecurityContext(ctxt);
+            HeapFree(GetProcessHeap(), 0, ctxt);
+        }
+        else if (!phContext->dwUpper && !phContext->dwLower)
+            ret = SEC_E_OK;     /* Windows: a zeroed handle is deleted without error */
         else
             ret = SEC_E_INVALID_HANDLE;
-        HeapFree(GetProcessHeap(), 0, ctxt);
     }
     else
         ret = SEC_E_INVALID_HANDLE;
@@ -480,7 +499,7 @@ SECURITY_STATUS WINAPI ApplyControlToken(PCtxtHandle phContext,
     TRACE("%p %p\n", phContext, pInput);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider)
@@ -510,7 +529,7 @@ SECURITY_STATUS WINAPI QueryContextAttributesA(PCtxtHandle phContext,
     TRACE("%p %d %p\n", phContext, ulAttribute, pBuffer);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider)
@@ -540,7 +559,7 @@ SECURITY_STATUS WINAPI QueryContextAttributesW(PCtxtHandle phContext,
     TRACE("%p %d %p\n", phContext, ulAttribute, pBuffer);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider)
@@ -569,7 +588,7 @@ SECURITY_STATUS WINAPI ImpersonateSecurityContext(PCtxtHandle phContext)
     TRACE("%p\n", phContext);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider)
@@ -598,7 +617,7 @@ SECURITY_STATUS WINAPI RevertSecurityContext(PCtxtHandle phContext)
     TRACE("%p\n", phContext);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider)
@@ -628,7 +647,7 @@ SECURITY_STATUS WINAPI MakeSignature(PCtxtHandle phContext, ULONG fQOP,
     TRACE("%p %d %p %d\n", phContext, fQOP, pMessage, MessageSeqNo);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider)
@@ -658,7 +677,7 @@ SECURITY_STATUS WINAPI VerifySignature(PCtxtHandle phContext,
     TRACE("%p %p %d %p\n", phContext, pMessage, MessageSeqNo, pfQOP);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider)
@@ -812,7 +831,7 @@ SECURITY_STATUS WINAPI ExportSecurityContext(PCtxtHandle phContext,
     TRACE("%p %d %p %p\n", phContext, fFlags, pPackedContext, pToken);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider)
@@ -915,7 +934,7 @@ SECURITY_STATUS WINAPI AddCredentialsA(PCredHandle hCredentials,
      pvGetKeyArgument, ptsExpiry);
     if (hCredentials)
     {
-        SecurePackage *package = (SecurePackage *)hCredentials->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(hCredentials->dwUpper);
         PCredHandle cred = (PCtxtHandle)hCredentials->dwLower;
 
         if (package && package->provider)
@@ -950,7 +969,7 @@ SECURITY_STATUS WINAPI AddCredentialsW(PCredHandle hCredentials,
      pvGetKeyArgument, ptsExpiry);
     if (hCredentials)
     {
-        SecurePackage *package = (SecurePackage *)hCredentials->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(hCredentials->dwUpper);
         PCredHandle cred = (PCtxtHandle)hCredentials->dwLower;
 
         if (package && package->provider)
@@ -981,7 +1000,7 @@ SECURITY_STATUS WINAPI QuerySecurityContextToken(PCtxtHandle phContext,
     TRACE("%p %p\n", phContext, phToken);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider)
@@ -1011,7 +1030,7 @@ SECURITY_STATUS WINAPI EncryptMessage(PCtxtHandle phContext, ULONG fQOP,
     TRACE("%p %d %p %d\n", phContext, fQOP, pMessage, MessageSeqNo);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider)
@@ -1041,7 +1060,7 @@ SECURITY_STATUS WINAPI DecryptMessage(PCtxtHandle phContext,
     TRACE("%p %p %d %p\n", phContext, pMessage, MessageSeqNo, pfQOP);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider)
@@ -1071,7 +1090,7 @@ SECURITY_STATUS WINAPI SetContextAttributesA(PCtxtHandle phContext,
     TRACE("%p %d %p %d\n", phContext, ulAttribute, pBuffer, cbBuffer);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider)
@@ -1101,7 +1120,7 @@ SECURITY_STATUS WINAPI SetContextAttributesW(PCtxtHandle phContext,
     TRACE("%p %d %p %d\n", phContext, ulAttribute, pBuffer, cbBuffer);
     if (phContext)
     {
-        SecurePackage *package = (SecurePackage *)phContext->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phContext->dwUpper);
         PCtxtHandle ctxt = (PCtxtHandle)phContext->dwLower;
 
         if (package && package->provider)
@@ -1139,7 +1158,7 @@ SECURITY_STATUS WINAPI SetCredentialsAttributesA(PCredHandle phCredential,
     TRACE("%p %d %p %d\n", phCredential, ulAttribute, pBuffer, cbBuffer);
     if (phCredential)
     {
-        SecurePackage *package = (SecurePackage *)phCredential->dwUpper;
+        SecurePackage *package = SECUR32_validPackage(phCredential->dwUpper);
 
         if (package && package->provider)
             ret = SEC_E_UNSUPPORTED_FUNCTION;

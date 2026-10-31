@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     AcquireCredentialsHandleVersions.c
+    InvalidHandles.c
     LsaLogonContext.c
     ReadConfigHandles.c
     SchannelHandshake.c

@@ -574,6 +574,21 @@ static void SECUR32_initializeProviders(void)
 
 }
 
+/* TRUE when package is one of the packages of the table (a handle's dwUpper is only followed then) */
+SecurePackage *SECUR32_validPackage(ULONG_PTR package)
+{
+    SecurePackage *entry;
+
+    if (!package || !packageTable)
+        return NULL;
+    LIST_FOR_EACH_ENTRY(entry, &packageTable->table, SecurePackage, entry)
+    {
+        if ((ULONG_PTR)entry == package)
+            return entry;
+    }
+    return NULL;
+}
+
 SecurePackage *SECUR32_findPackageW(PCWSTR packageName)
 {
     SecurePackage *ret = NULL;

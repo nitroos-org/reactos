@@ -63,6 +63,9 @@ void SECUR32_addPackages(SecureProvider *provider, ULONG toAdd,
  */
 SecurePackage *SECUR32_findPackageW(PCWSTR packageName) DECLSPEC_HIDDEN;
 
+/* Returns the package when it is in the table, NULL for anything else (a stale or never filled in handle) */
+SecurePackage *SECUR32_validPackage(ULONG_PTR package) DECLSPEC_HIDDEN;
+
 /* Tries to find the package named packageName.  (Thunks to _findPackageW)
  */
 SecurePackage *SECUR32_findPackageA(PCSTR packageName) DECLSPEC_HIDDEN;
