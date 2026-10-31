@@ -874,9 +874,9 @@
 @ stdcall -version=0x600+ RtlFlsAlloc(ptr ptr)
 @ stdcall -version=0xA00+ RtlFlsAllocEx(ptr ptr ptr) # Windows 11
 @ stdcall -version=0x600+ RtlFlsFree(long)
-@ stdcall -version=0xA00+ RtlFlsGetValue(long ptr)
+@ stdcall -version=0x600+ RtlFlsGetValue(long ptr)
 @ stdcall -version=0xA00+ RtlFlsGetValue2(long) # Windows 11
-@ stdcall -version=0xA00+ RtlFlsSetValue(long ptr)
+@ stdcall -version=0x600+ RtlFlsSetValue(long ptr)
 @ stdcall RtlFlushSecureMemoryCache(ptr ptr)
 @ stdcall RtlFormatCurrentUserKeyPath(ptr)
 @ stdcall RtlFormatMessage(ptr long long long long ptr ptr long ptr)
@@ -1037,7 +1037,7 @@
 @ stdcall -version=0x601+ RtlIsNameInExpression(ptr ptr long ptr)
 @ stdcall RtlIsNameLegalDOS8Dot3(ptr ptr ptr)
 @ stdcall -stub -version=0x600+ RtlIsNormalizedString(long ptr long ptr)
-@ stdcall -version=0xA00+ RtlIsProcessorFeaturePresent(long)
+@ stdcall -version=0x601+ RtlIsProcessorFeaturePresent(long)
 @ stdcall RtlIsTextUnicode(ptr long ptr)
 @ stdcall RtlIsThreadWithinLoaderCallout()
 @ stdcall RtlIsValidHandle(ptr ptr)

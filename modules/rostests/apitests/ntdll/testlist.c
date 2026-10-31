@@ -54,6 +54,7 @@ extern void func_NtCompareTokens(void);
 extern void func_NtConnectPortTerminate(void);
 extern void func_NtContinue(void);
 extern void func_RtlBitmapRanges(void);
+extern void func_RtlFlsValue(void);
 extern void func_Wow64Continue(void);
 extern void func_Wow64ServiceArguments(void);
 extern void func_NtCreateDirectoryObject(void);
@@ -273,6 +274,7 @@ const struct test winetest_testlist[] =
     { "NtConnectPortTerminate",         func_NtConnectPortTerminate },
     { "NtContinue",                     func_NtContinue },
     { "RtlBitmapRanges",                func_RtlBitmapRanges },
+    { "RtlFlsValue",                    func_RtlFlsValue },
     { "Wow64Continue",                  func_Wow64Continue },
     { "Wow64ServiceArguments",          func_Wow64ServiceArguments },
     { "NtCreateDirectoryObject",        func_NtCreateDirectoryObject },
