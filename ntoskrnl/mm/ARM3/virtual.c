@@ -619,6 +619,14 @@ MiDeletePteCommon(IN PMMPTE PointerPte,
         MiDecrementShareCount(MiGetPfnEntry(PointerPde->u.Hard.PageFrameNumber),
             PointerPde->u.Hard.PageFrameNumber);
 
+        /*
+         * A VirtualLock on a page of a section view goes with the last mapping of the
+         * page: its lock reference would otherwise keep the page, and with it the
+         * segment's prototype PTE page, in use after the segment is freed.
+         */
+        if (Pfn1->u2.ShareCount == 1)
+            MiDropVirtualLock(Pfn1);
+
         /* Drop the share count, which may make the page reusable from the standby list */
         if (KeepShare)
             *KeepShare = Pfn1;

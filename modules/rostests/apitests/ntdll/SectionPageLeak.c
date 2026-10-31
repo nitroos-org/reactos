@@ -79,7 +79,12 @@ static BOOLEAN Cycle(VARIANT Variant, HANDLE Process)
         Status = NtAllocateVirtualMemory(Process, &CommitBase, 0, &CommitSize,
                                          MEM_COMMIT, PAGE_READWRITE);
         if (!NT_SUCCESS(Status))
+        {
             ok(0, "NtAllocateVirtualMemory failed: 0x%lx\n", Status);
+            NtUnmapViewOfSection(Process, Base);
+            NtClose(Section);
+            return FALSE;
+        }
     }
 
     /* The write faults the page in, in whichever process maps the view */
