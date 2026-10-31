@@ -314,9 +314,10 @@ static void mutex_ready(struct mutex *m)
 }
 /*
  * count: 0 free, 1 held, more: held with waiters.  Only contention reaches the dispatcher, as with
- * a FAST_MUTEX.  An uncontended wait on a signaled event would still be charged a quantum unit
- * (KiAdjustQuantumThread): with every processor busy at the holder's priority, a loop over the
- * cached inodes then gave the processor away every few inodes while holding the volume lock.
+ * a FAST_MUTEX.  The kernel used to charge a quantum unit for a wait on a signaled event that
+ * was satisfied at once (NT 5.2; it no longer does), so with every processor busy at the holder's
+ * priority a loop over the cached inodes gave the processor away every few inodes while holding
+ * the volume lock; the free path keeps such a loop out of the dispatcher altogether.
  * An unlock that finds a waiter sets the event once; a waiter that has not reached its wait yet
  * finds it signaled.
  */
@@ -335,7 +336,11 @@ int mutex_trylock(struct mutex *m)
 }
 void mutex_unlock(struct mutex *m)
 {
-	if (__atomic_sub_fetch(&m->count, 1, __ATOMIC_SEQ_CST) != 0)
+	long n = __atomic_sub_fetch(&m->count, 1, __ATOMIC_SEQ_CST);
+
+	/* An unlock without a lock; the shim has no NT_ASSERT, so this is the checked-build diagnostic */
+	WARN_ON(n < 0);
+	if (n != 0)
 		ngos_ev_set(&m->ev);
 }
 int mutex_is_locked(struct mutex *m) { return __atomic_load_n(&m->count, __ATOMIC_SEQ_CST) != 0; }
