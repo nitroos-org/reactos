@@ -369,8 +369,27 @@ SetSecurityDescriptorSacl(PSECURITY_DESCRIPTOR pSecurityDescriptor,
 }
 
 
+#ifndef ATTRIBUTE_SECURITY_INFORMATION
+#define ATTRIBUTE_SECURITY_INFORMATION          0x00000020
+#endif
+#ifndef SCOPE_SECURITY_INFORMATION
+#define SCOPE_SECURITY_INFORMATION              0x00000040
+#endif
+#ifndef PROCESS_TRUST_LABEL_SECURITY_INFORMATION
+#define PROCESS_TRUST_LABEL_SECURITY_INFORMATION 0x00000080
+#endif
+#ifndef ACCESS_FILTER_SECURITY_INFORMATION
+#define ACCESS_FILTER_SECURITY_INFORMATION      0x00000100
+#endif
+#ifndef BACKUP_SECURITY_INFORMATION
+#define BACKUP_SECURITY_INFORMATION             0x00010000
+#endif
+
 /*
  * @implemented
+ *
+ * The access to read the parts of a security descriptor; the table of Windows 10 22H2 (build 19045, measured for
+ * every combination of the nine low bits and of the backup bit).
  */
 VOID
 WINAPI
@@ -379,9 +398,14 @@ QuerySecurityAccessMask(IN SECURITY_INFORMATION SecurityInformation,
 {
     *DesiredAccess = 0;
 
+    if (SecurityInformation & BACKUP_SECURITY_INFORMATION)
+        *DesiredAccess = ACCESS_SYSTEM_SECURITY | READ_CONTROL;
+
     if (SecurityInformation & (OWNER_SECURITY_INFORMATION |
                                GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
-                               LABEL_SECURITY_INFORMATION))
+                               LABEL_SECURITY_INFORMATION | ATTRIBUTE_SECURITY_INFORMATION |
+                               SCOPE_SECURITY_INFORMATION | PROCESS_TRUST_LABEL_SECURITY_INFORMATION |
+                               ACCESS_FILTER_SECURITY_INFORMATION))
     {
         *DesiredAccess |= READ_CONTROL;
     }
@@ -393,6 +417,8 @@ QuerySecurityAccessMask(IN SECURITY_INFORMATION SecurityInformation,
 
 /*
  * @implemented
+ *
+ * The access to change the parts of a security descriptor (the same measurement as for the query).
  */
 VOID
 WINAPI
@@ -401,14 +427,18 @@ SetSecurityAccessMask(IN SECURITY_INFORMATION SecurityInformation,
 {
     *DesiredAccess = 0;
 
+    if (SecurityInformation & BACKUP_SECURITY_INFORMATION)
+        *DesiredAccess = ACCESS_SYSTEM_SECURITY | WRITE_DAC | WRITE_OWNER;
+
     if (SecurityInformation & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
                                LABEL_SECURITY_INFORMATION))
         *DesiredAccess |= WRITE_OWNER;
 
-    if (SecurityInformation & DACL_SECURITY_INFORMATION)
+    if (SecurityInformation & (DACL_SECURITY_INFORMATION | ATTRIBUTE_SECURITY_INFORMATION |
+                               PROCESS_TRUST_LABEL_SECURITY_INFORMATION | ACCESS_FILTER_SECURITY_INFORMATION))
         *DesiredAccess |= WRITE_DAC;
 
-    if (SecurityInformation & SACL_SECURITY_INFORMATION)
+    if (SecurityInformation & (SACL_SECURITY_INFORMATION | SCOPE_SECURITY_INFORMATION))
         *DesiredAccess |= ACCESS_SYSTEM_SECURITY;
 }
 
