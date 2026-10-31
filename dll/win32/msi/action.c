@@ -4895,6 +4895,40 @@ static UINT ACTION_UnpublishFeatures(MSIPACKAGE *package)
     return ERROR_SUCCESS;
 }
 
+/* The size in KiB of the package file and the files installed, each rounded up to a page. */
+static DWORD msi_get_estimated_size( MSIPACKAGE *package )
+{
+    SYSTEM_INFO si;
+    MSIFILE *file;
+    const WCHAR *path;
+    HANDLE handle;
+    ULONGLONG pages = 0;
+    DWORD size;
+
+    GetSystemInfo( &si );
+
+    path = package->localfile ? package->localfile : package->PackagePath;
+    if (path)
+    {
+        handle = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              NULL, OPEN_EXISTING, 0, NULL );
+        if (handle != INVALID_HANDLE_VALUE)
+        {
+            size = GetFileSize( handle, NULL );
+            if (size != INVALID_FILE_SIZE) pages += ((ULONGLONG)size + si.dwPageSize - 1) / si.dwPageSize;
+            CloseHandle( handle );
+        }
+    }
+
+    LIST_FOR_EACH_ENTRY( file, &package->files, MSIFILE, entry )
+    {
+        if (!file->Component->Enabled || file->Component->Action != INSTALLSTATE_LOCAL) continue;
+        if (file->state == msifs_skipped) continue;
+        pages += ((ULONGLONG)file->FileSize + si.dwPageSize - 1) / si.dwPageSize;
+    }
+    return (DWORD)(pages * si.dwPageSize / 1024);
+}
+
 static UINT publish_install_properties(MSIPACKAGE *package, HKEY hkey)
 {
     static const WCHAR *propval[] =
@@ -4958,8 +4992,7 @@ static UINT publish_install_properties(MSIPACKAGE *package, HKEY hkey)
         free(buffer);
     }
 
-    /* FIXME: Write real Estimated Size when we have it */
-    msi_reg_set_val_dword(hkey, L"EstimatedSize", 0);
+    msi_reg_set_val_dword(hkey, L"EstimatedSize", msi_get_estimated_size(package));
 
     GetLocalTime(&systime);
     swprintf(date, ARRAY_SIZE(date), L"%d%02d%02d", systime.wYear, systime.wMonth, systime.wDay);
