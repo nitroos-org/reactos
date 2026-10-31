@@ -271,6 +271,10 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
    BOOL thickframe;
    BOOL iconic;
    BOOL moved = FALSE;
+   BOOL hookCancel = FALSE, hookChanged = FALSE;
+   RECT hookRect;
+   POINT ptSavedCursor;
+   BOOL fromKeyboard;
    BOOL DragFullWindows = FALSE;
    PWND pWndParent = NULL;
    WPARAM syscommand = (wParam & 0xfff0);
@@ -293,6 +297,11 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
    // Show window contents while dragging the window, get flag from registry data.
    //
    UserSystemParametersInfo(SPI_GETDRAGFULLWINDOWS, 0, &DragFullWindows, 0);
+
+   /* From the system menu or the keyboard: no mouse hit starts it, the loop follows the keys (and the mouse if
+    * it is moved) and ends with Return, Escape or a click */
+   fromKeyboard = (hittest == 0);
+   ptSavedCursor = gpsi->ptCursor;
 
    pt.x = pti->ptLast.x;
    pt.y = pti->ptLast.y;
@@ -424,12 +433,12 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
          break; // Exit on Return or Esc
 
       if (!g_bWindowSnapEnabled && (msg.message == WM_LBUTTONUP ||
-         (msg.message == WM_MOUSEMOVE && (msg.wParam & MK_LBUTTON) == 0)))
+         (msg.message == WM_MOUSEMOVE && !fromKeyboard && (msg.wParam & MK_LBUTTON) == 0)))
       { // If no WindowSnapEnabled: Exit on button-up immediately
          break;
       }
       else if (g_bWindowSnapEnabled && (msg.message == WM_LBUTTONUP ||
-              (msg.message == WM_MOUSEMOVE && (msg.wParam & MK_LBUTTON) == 0)))
+              (msg.message == WM_MOUSEMOVE && !fromKeyboard && (msg.wParam & MK_LBUTTON) == 0)))
       { // If WindowSnapEnabled: Decide whether to snap before exiting
          if (hittest == HTCAPTION && thickframe && /* Check for snapping if was moved by caption */
              IntIsSnapAllowedForWindow(pwnd) && (ExStyle & WS_EX_MDICHILD) == 0)
@@ -459,12 +468,18 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
 
       pt = msg.pt;
 
-      if (msg.message == WM_KEYDOWN) switch(msg.wParam)
+      if (msg.message == WM_KEYDOWN)
       {
-      case VK_UP:    pt.y -= 8; break;
-      case VK_DOWN:  pt.y += 8; break;
-      case VK_LEFT:  pt.x -= 8; break;
-      case VK_RIGHT: pt.x += 8; break;
+         /* A key moves the point the loop tracks by a step: it starts from there, not from the
+          * cursor position the key message was stamped with */
+         pt = capturePoint;
+         switch(msg.wParam)
+         {
+         case VK_UP:    pt.y -= 8; break;
+         case VK_DOWN:  pt.y += 8; break;
+         case VK_LEFT:  pt.x -= 8; break;
+         case VK_RIGHT: pt.x += 8; break;
+         }
       }
 
       pt.x = max( pt.x, mouseRect.left );
@@ -490,10 +505,10 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
       }
 
       if (msg.message == WM_KEYDOWN)
-      {
           UserSetCursorPos(pt.x, pt.y, 0, 0, FALSE);
-      }
-      else
+
+      /* The window follows the key as it follows the mouse (Wine gets here through the WM_MOUSEMOVE
+       * that SetCursorPos posts, ReactOS does not post one) */
       {
           RECT newRect = unmodRect;
 
@@ -669,13 +684,25 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
 
    UserReleaseDC(NULL, hdc, FALSE);
 
+   /* The loop warps the cursor for the keys; it goes back where it was unless the mouse took over */
+   if (fromKeyboard && gpsi->ptCursor.x == capturePoint.x && gpsi->ptCursor.y == capturePoint.y)
+      UserSetCursorPos(ptSavedCursor.x, ptSavedCursor.y, 0, 0, FALSE);
+
    //// This causes the mdi child window to jump up when it is moved.
    //if (pWndParent) IntMapWindowPoints( 0, pWndParent, (POINT *)&sizingRect, 2 );
 
-   if (co_HOOK_CallHooks(WH_CBT, HCBT_MOVESIZE, (WPARAM)UserHMGetHandle(pwnd), (LPARAM)&sizingRect))
+   /* The hook runs once, at the end of the loop, with the final rectangle. What it changes there is
+    * where the window ends up, and a nonzero result cancels the move or size */
+   hookRect = sizingRect;
+   if (co_HOOK_CallHooks(WH_CBT, HCBT_MOVESIZE, (WPARAM)UserHMGetHandle(pwnd), (LPARAM)&hookRect))
    {
-      ERR("DoSizeMove : WH_CBT Call Hook return!\n");
-      moved = FALSE;
+      hookCancel = TRUE;
+   }
+   else if (!RtlEqualMemory(&hookRect, &sizingRect, sizeof(RECT)))
+   {
+      sizingRect = hookRect;
+      hookChanged = TRUE;
+      moved = TRUE;
    }
 
    IntNotifyWinEvent( EVENT_SYSTEM_MOVESIZEEND, pwnd, OBJID_WINDOW, CHILDID_SELF, 0);
@@ -695,12 +722,12 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
       /* if the moving/resizing isn't canceled call SetWindowPos
        * with the new position or the new size of the window
        */
-      if (!((msg.message == WM_KEYDOWN) && (msg.wParam == VK_ESCAPE)) )
+      if (!hookCancel && !((msg.message == WM_KEYDOWN) && (msg.wParam == VK_ESCAPE)) )
       {
          /* NOTE: SWP_NOACTIVATE prevents document window activation in Word 6 */
-         if (!DragFullWindows || iconic)
+         if (!DragFullWindows || iconic || hookChanged)
          {
-            if (snap)
+            if (snap && !hookChanged)
             {
                co_IntSnapWindow(pwnd, snap);
             }
@@ -726,6 +753,13 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
          }
          else if (DragFullWindows)
          {
+            if (snap)
+            {
+               /* the window was snapped when the button went up: the hook cancels that too */
+               IntSetStyle(pwnd, 0, WS_MAXIMIZE);
+               IntSetSnapInfo(pwnd, HTNOWHERE, NULL);
+               swp = 0;
+            }
             co_WinPosSetWindowPos(pwnd, HWND_TOP, origRect.left, origRect.top,
                                   origRect.right - origRect.left,
                                   origRect.bottom - origRect.top, swp);
