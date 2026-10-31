@@ -1545,6 +1545,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtSetValueKey:
         return NtSetValueKey(H(0), String32(&Name, P(1)), a[2], a[3], P(4), a[5]);
     case W64_NtDeleteKey: return NtDeleteKey(H(0));
+    case W64_NtRenameKey: return NtRenameKey(H(0), String32(&Name, P(1)));
     case W64_NtDeleteValueKey: return NtDeleteValueKey(H(0), String32(&Name, P(1)));
     case W64_NtFlushKey: return NtFlushKey(H(0));
     case W64_NtCreateJobObject:

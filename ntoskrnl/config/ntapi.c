@@ -1671,13 +1671,112 @@ NtQueryOpenSubKeysEx(IN POBJECT_ATTRIBUTES TargetKey,
     return STATUS_NOT_IMPLEMENTED;
 }
 
+/* The longest name a key may be renamed to (Windows: 256 characters) */
+#define CMP_MAX_RENAME_NAME_LENGTH  (256 * sizeof(WCHAR))
+
 NTSTATUS
 NTAPI
 NtRenameKey(IN HANDLE KeyHandle,
             IN PUNICODE_STRING ReplacementName)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status = STATUS_SUCCESS;
+    PCM_KEY_BODY KeyObject;
+    REG_RENAME_KEY_INFORMATION RenameKeyInfo;
+    REG_POST_OPERATION_INFORMATION PostOperationInfo;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    UNICODE_STRING NewName = {0, 0, NULL};
+    PWCHAR CapturedBuffer = NULL;
+    ULONG i;
+    PAGED_CODE();
+    DPRINT("NtRenameKey(KH 0x%p)\n", KeyHandle);
+
+    /* Capture the name: one non-empty key name of whole characters. As on
+     * Windows, it is checked before the handle. */
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode)
+            NewName = ProbeForReadUnicodeString(ReplacementName);
+        else
+            NewName = *ReplacementName;
+
+        if (!NewName.Length ||
+            (NewName.Length & (sizeof(WCHAR) - 1)) ||
+            (NewName.Length > CMP_MAX_RENAME_NAME_LENGTH))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+        }
+        else if (PreviousMode != KernelMode)
+        {
+            ProbeForRead(NewName.Buffer, NewName.Length, sizeof(WCHAR));
+            CapturedBuffer = ExAllocatePoolWithTag(PagedPool, NewName.Length, TAG_CM);
+            if (!CapturedBuffer)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+            }
+            else
+            {
+                RtlCopyMemory(CapturedBuffer, NewName.Buffer, NewName.Length);
+                NewName.Buffer = CapturedBuffer;
+                NewName.MaximumLength = NewName.Length;
+            }
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status)) goto Quit;
+
+    /* No path separators: the key stays where it is */
+    for (i = 0; i < NewName.Length / sizeof(WCHAR); i++)
+    {
+        if (NewName.Buffer[i] == OBJ_NAME_PATH_SEPARATOR)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto Quit;
+        }
+    }
+
+    /* Windows asks for all of KEY_WRITE on the key being renamed */
+    Status = ObReferenceObjectByHandle(KeyHandle,
+                                       KEY_WRITE,
+                                       CmpKeyObjectType,
+                                       PreviousMode,
+                                       (PVOID*)&KeyObject,
+                                       NULL);
+    if (!NT_SUCCESS(Status)) goto Quit;
+
+    /* Do the callback */
+    RenameKeyInfo.Object = (PVOID)KeyObject;
+    RenameKeyInfo.NewName = &NewName;
+    Status = CmiCallRegisteredCallbacks(RegNtPreRenameKey, &RenameKeyInfo);
+    if (NT_SUCCESS(Status))
+    {
+        /* Don't touch read-only keys */
+        if ((KeyObject->KeyControlBlock->ExtFlags & CM_KCB_READ_ONLY_KEY) ||
+            (KeyObject->KeyControlBlock->ParentKcb &&
+             (KeyObject->KeyControlBlock->ParentKcb->ExtFlags & CM_KCB_READ_ONLY_KEY)))
+        {
+            Status = STATUS_ACCESS_DENIED;
+        }
+        else
+        {
+            /* Call the internal API */
+            Status = CmRenameKey(KeyObject->KeyControlBlock, &NewName);
+        }
+
+        /* Do the post callback */
+        PostOperationInfo.Object = (PVOID)KeyObject;
+        PostOperationInfo.Status = Status;
+        CmiCallRegisteredCallbacks(RegNtPostRenameKey, &PostOperationInfo);
+    }
+
+    ObDereferenceObject(KeyObject);
+
+Quit:
+    if (CapturedBuffer) ExFreePoolWithTag(CapturedBuffer, TAG_CM);
+    return Status;
 }
 
 NTSTATUS

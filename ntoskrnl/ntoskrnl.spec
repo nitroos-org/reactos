@@ -1559,6 +1559,7 @@
 @ stdcall ZwQueryValueKey(ptr ptr long ptr long ptr)
 @ stdcall ZwQueryVolumeInformationFile(ptr ptr ptr long long)
 @ stdcall ZwReadFile(ptr ptr ptr ptr ptr ptr long ptr ptr)
+@ stdcall ZwRenameKey(ptr ptr)
 @ stdcall ZwReplaceKey(ptr ptr ptr)
 @ stdcall ZwRequestWaitReplyPort(ptr ptr ptr)
 @ stdcall ZwResetEvent(ptr ptr)

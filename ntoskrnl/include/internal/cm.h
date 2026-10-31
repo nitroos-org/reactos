@@ -325,6 +325,24 @@ typedef struct _CM_KEY_CONTROL_BLOCK
 } CM_KEY_CONTROL_BLOCK, *PCM_KEY_CONTROL_BLOCK;
 
 //
+// Renaming a KCB (CmpPrepareKcbRename): its new name block and hash key, and
+// the cached KCBs below it with their new hash keys
+//
+typedef struct _CM_KCB_REHASH_ENTRY
+{
+    PCM_KEY_CONTROL_BLOCK Kcb;
+    ULONG ConvKey;
+} CM_KCB_REHASH_ENTRY, *PCM_KCB_REHASH_ENTRY;
+
+typedef struct _CM_KCB_RENAME_CONTEXT
+{
+    PCM_NAME_CONTROL_BLOCK NameBlock;
+    ULONG ConvKey;
+    ULONG Count;
+    PCM_KCB_REHASH_ENTRY Entries;
+} CM_KCB_RENAME_CONTEXT, *PCM_KCB_RENAME_CONTEXT;
+
+//
 // Notify Block
 //
 typedef struct _CM_NOTIFY_BLOCK
@@ -636,6 +654,34 @@ CmpReportNotify(
     IN PHHIVE Hive,
     IN HCELL_INDEX Cell,
     IN ULONG Filter
+);
+
+NTSTATUS
+NTAPI
+CmpPrepareKcbRename(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ PCUNICODE_STRING NewName,
+    _Out_ PCM_KCB_RENAME_CONTEXT Context
+);
+
+VOID
+NTAPI
+CmpCommitKcbRename(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ HCELL_INDEX NewCell,
+    _Inout_ PCM_KCB_RENAME_CONTEXT Context
+);
+
+VOID
+NTAPI
+CmpAbortKcbRename(
+    _Inout_ PCM_KCB_RENAME_CONTEXT Context
+);
+
+VOID
+NTAPI
+CmpReportNotifyRename(
+    IN PCM_KEY_CONTROL_BLOCK Kcb
 );
 
 VOID
@@ -1314,6 +1360,13 @@ NTSTATUS
 NTAPI
 CmDeleteKey(
     IN PCM_KEY_BODY KeyBody
+);
+
+NTSTATUS
+NTAPI
+CmRenameKey(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ PCUNICODE_STRING NewName
 );
 
 NTSTATUS

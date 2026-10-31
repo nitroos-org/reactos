@@ -4729,6 +4729,48 @@ LSTATUS WINAPI RegQueryValueW( HKEY hkey, LPCWSTR name, LPWSTR data, LPLONG coun
 
 
 /************************************************************************
+ *  RegRenameKey
+ *
+ * @implemented
+ */
+LSTATUS
+WINAPI
+RegRenameKey(
+    _In_ HKEY hKey,
+    _In_opt_ LPCWSTR lpSubKeyName,
+    _In_ LPCWSTR lpNewKeyName)
+{
+    UNICODE_STRING NewName;
+    HKEY KeyHandle = hKey;
+    NTSTATUS Status;
+    LONG ErrorCode;
+
+    TRACE("RegRenameKey(%p, %S, %S)\n", hKey, lpSubKeyName, lpNewKeyName);
+
+    /*
+     * As on Windows: a subkey name, even an empty one, is opened for KEY_WRITE
+     * (the caller's handle needs no more than the right to open it); without
+     * one the handle itself is renamed, and a predefined handle is not mapped
+     * to its key (ERROR_INVALID_HANDLE). The rename itself is NtRenameKey's.
+     */
+    if (lpSubKeyName)
+    {
+        ErrorCode = RegOpenKeyExW(hKey, lpSubKeyName, 0, KEY_WRITE, &KeyHandle);
+        if (ErrorCode != ERROR_SUCCESS)
+            return ErrorCode;
+    }
+
+    RtlInitUnicodeString(&NewName, lpNewKeyName);
+    Status = NtRenameKey((HANDLE)KeyHandle, &NewName);
+
+    if (KeyHandle != hKey)
+        RegCloseKey(KeyHandle);
+
+    return RtlNtStatusToDosError(Status);
+}
+
+
+/************************************************************************
  *  RegReplaceKeyA
  *
  * @implemented

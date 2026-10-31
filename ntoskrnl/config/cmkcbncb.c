@@ -1418,3 +1418,195 @@ CmpFlushNotifiesOnKeyBodyList(IN PCM_KEY_CONTROL_BLOCK Kcb,
         break;
     }
 }
+
+/*
+ * Renaming a KCB (CmRenameKey). A KCB's hash key is its parent's, carried on
+ * over the characters of its own name (COMPUTE_HASH_CHAR, modulo 2^32), so a
+ * new name changes the hash key of the KCB and of every cached KCB below it:
+ * a descendant N name characters further down moves by 37^N times the KCB's
+ * change. Prepare gets everything that can fail (the name block, the list of
+ * descendants) before the hive is touched; commit moves the KCBs; abort
+ * drops what prepare got. All under the exclusive registry lock.
+ */
+static
+ULONG
+CmpPowerOf37(
+    _In_ ULONG Exponent)
+{
+    ULONG Result = 1, Base = 37;
+
+    while (Exponent)
+    {
+        if (Exponent & 1) Result *= Base;
+        Base *= Base;
+        Exponent >>= 1;
+    }
+    return Result;
+}
+
+static
+ULONG
+CmpHashedNameChars(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb)
+{
+    PCM_NAME_CONTROL_BLOCK Ncb = Kcb->NameBlock;
+    ULONG i, Count = 0;
+
+    /* The characters COMPUTE_HASH_CHAR went over when the KCB was made */
+    if (Ncb->Compressed)
+    {
+        for (i = 0; i < Ncb->NameLength; i++)
+        {
+            if (((PUCHAR)Ncb->Name)[i] != OBJ_NAME_PATH_SEPARATOR) Count++;
+        }
+    }
+    else
+    {
+        for (i = 0; i < Ncb->NameLength / sizeof(WCHAR); i++)
+        {
+            if (Ncb->Name[i] != OBJ_NAME_PATH_SEPARATOR) Count++;
+        }
+    }
+    return Count;
+}
+
+static
+ULONG
+CmpCollectKcbSubtree(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ ULONG Delta,
+    _Out_writes_opt_(MaxEntries) PCM_KCB_REHASH_ENTRY Entries,
+    _In_ ULONG MaxEntries)
+{
+    ULONG i, Count = 0, Chars;
+    PCM_KEY_HASH Entry;
+    PCM_KEY_CONTROL_BLOCK Current, Walk;
+
+    /* Every cached KCB below Kcb: open ones and those in delayed close */
+    for (i = 0; i < CmpHashTableSize; i++)
+    {
+        for (Entry = CmpCacheTable[i].Entry; Entry; Entry = Entry->NextHash)
+        {
+            Current = CONTAINING_RECORD(Entry, CM_KEY_CONTROL_BLOCK, KeyHash);
+            if (Current->TotalLevels <= Kcb->TotalLevels) continue;
+
+            Chars = 0;
+            for (Walk = Current;
+                 Walk && (Walk->TotalLevels > Kcb->TotalLevels);
+                 Walk = Walk->ParentKcb)
+            {
+                Chars += CmpHashedNameChars(Walk);
+            }
+            if (Walk != Kcb) continue;
+
+            if (Entries && (Count < MaxEntries))
+            {
+                Entries[Count].Kcb = Current;
+                Entries[Count].ConvKey = Current->ConvKey + CmpPowerOf37(Chars) * Delta;
+            }
+            Count++;
+        }
+    }
+    return Count;
+}
+
+NTSTATUS
+NTAPI
+CmpPrepareKcbRename(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ PCUNICODE_STRING NewName,
+    _Out_ PCM_KCB_RENAME_CONTEXT Context)
+{
+    ULONG i, Delta;
+
+    CMP_ASSERT_EXCLUSIVE_REGISTRY_LOCK();
+    ASSERT(Kcb->ParentKcb);
+    RtlZeroMemory(Context, sizeof(*Context));
+
+    /* The hash key of the new path, as CmpCreateKeyControlBlock makes it */
+    Context->ConvKey = Kcb->ParentKcb->ConvKey;
+    for (i = 0; i < NewName->Length / sizeof(WCHAR); i++)
+    {
+        if (NewName->Buffer[i] != OBJ_NAME_PATH_SEPARATOR)
+            Context->ConvKey = COMPUTE_HASH_CHAR(Context->ConvKey, NewName->Buffer[i]);
+    }
+
+    Context->NameBlock = CmpGetNameControlBlock((PUNICODE_STRING)NewName);
+    if (!Context->NameBlock)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Delta = Context->ConvKey - Kcb->ConvKey;
+    Context->Count = CmpCollectKcbSubtree(Kcb, Delta, NULL, 0);
+    if (Context->Count)
+    {
+        Context->Entries = CmpAllocate(Context->Count * sizeof(CM_KCB_REHASH_ENTRY), TRUE, TAG_CM);
+        if (!Context->Entries)
+        {
+            CmpDereferenceNameControlBlockWithLock(Context->NameBlock);
+            Context->NameBlock = NULL;
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        i = CmpCollectKcbSubtree(Kcb, Delta, Context->Entries, Context->Count);
+        ASSERT(i == Context->Count);
+    }
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+CmpRehashKcb(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ ULONG ConvKey,
+    _In_ HCELL_INDEX Cell)
+{
+    PCM_KEY_CONTROL_BLOCK Existing;
+
+    /* Hash key and cell are the hash entry: change them out of the table */
+    CmpRemoveKeyHash(&Kcb->KeyHash);
+    Kcb->ConvKey = ConvKey;
+    Kcb->KeyCell = Cell;
+    Existing = CmpInsertKeyHash(&Kcb->KeyHash, FALSE);
+    ASSERT(Existing == NULL);
+    UNREFERENCED_PARAMETER(Existing);
+}
+
+VOID
+NTAPI
+CmpCommitKcbRename(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ HCELL_INDEX NewCell,
+    _Inout_ PCM_KCB_RENAME_CONTEXT Context)
+{
+    PCM_NAME_CONTROL_BLOCK OldNameBlock;
+    ULONG i;
+
+    CMP_ASSERT_EXCLUSIVE_REGISTRY_LOCK();
+
+    CmpRehashKcb(Kcb, Context->ConvKey, NewCell);
+
+    OldNameBlock = Kcb->NameBlock;
+    Kcb->NameBlock = Context->NameBlock;
+    Context->NameBlock = OldNameBlock;
+
+    for (i = 0; i < Context->Count; i++)
+    {
+        CmpRehashKcb(Context->Entries[i].Kcb,
+                     Context->Entries[i].ConvKey,
+                     Context->Entries[i].Kcb->KeyCell);
+    }
+
+    /* What is left is the old name block and the list */
+    CmpAbortKcbRename(Context);
+}
+
+VOID
+NTAPI
+CmpAbortKcbRename(
+    _Inout_ PCM_KCB_RENAME_CONTEXT Context)
+{
+    if (Context->NameBlock)
+        CmpDereferenceNameControlBlockWithLock(Context->NameBlock);
+    if (Context->Entries)
+        CmpFree(Context->Entries, 0);
+    RtlZeroMemory(Context, sizeof(*Context));
+}
