@@ -989,7 +989,6 @@
 @ stdcall QueryMemoryResourceNotification(ptr ptr)
 @ stdcall QueryPerformanceCounter(ptr)
 @ stdcall QueryPerformanceFrequency(ptr)
-@ stdcall -version=0x601+ QueryUnbiasedInterruptTime(ptr)
 @ stub -version=0x600+ QueryProcessAffinityUpdateMode
 @ stdcall -version=0x600+ QueryProcessCycleTime(ptr ptr)
 @ stdcall -version=0x600+ QueryThreadCycleTime(ptr ptr)
@@ -1051,7 +1050,6 @@
 @ stdcall RequestWakeupLatency(long)
 @ stdcall ResolveDelayLoadedAPI(ptr ptr ptr ptr ptr long) ntdll.LdrResolveDelayLoadedAPI
 @ stdcall ResetEvent(long)
-@ stdcall -version=0x601+ ResolveLocaleName(wstr ptr long)
 @ stdcall ResetWriteWatch(ptr long)
 @ stdcall -version=0x601+ ResolveLocaleName(wstr ptr long)
 @ stdcall RestoreLastError(long) ntdll.RtlRestoreLastWin32Error
@@ -1306,8 +1304,6 @@
 @ stdcall VirtualQuery(ptr ptr long)
 @ stdcall VirtualQueryEx(long ptr ptr long)
 @ stdcall VirtualUnlock(ptr long)
-@ stdcall -version=0x601+ WerRegisterRuntimeExceptionModule(wstr ptr)
-@ stdcall -version=0x601+ WerUnregisterRuntimeExceptionModule(wstr ptr)
 @ stdcall WTSGetActiveConsoleSessionId()
 @ stdcall WaitCommEvent(long ptr ptr)
 @ stdcall WaitForDebugEvent(ptr long)
