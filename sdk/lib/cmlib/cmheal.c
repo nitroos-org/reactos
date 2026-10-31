@@ -910,4 +910,483 @@ CmpRepairSubKeyList(
     return TRUE;
 }
 
+/* CASE TABLE REPAIR **********************************************************/
+
+#if !defined(_BLDR_)
+
+/*
+ * The name of a key is looked up in the subkey index by comparing the names
+ * upper cased, and a hash leaf (lh) holds a hash of the upper cased name. Both
+ * depend on the Unicode case table. A hive written while a different table
+ * was in use (a table that upper cased a character differently) has hashes
+ * that are no longer found and, for the same reason, names that are no longer
+ * in order. The functions below bring the index up to date: they recompute
+ * the hash of every name that is not plain ASCII and, if the names are out of
+ * order, sort the index again, in place, keeping the shape of the leaves.
+ */
+
+#define CMP_NAME_IS_COMPRESSED(Node)    (((Node)->Flags & KEY_COMP_NAME) != 0)
+
+static
+__inline
+ULONG
+CmpKeyNodeNameChars(
+    _In_ PCM_KEY_NODE Node)
+{
+    return CMP_NAME_IS_COMPRESSED(Node) ? Node->NameLength :
+                                          Node->NameLength / sizeof(WCHAR);
+}
+
+static
+__inline
+WCHAR
+CmpKeyNodeNameChar(
+    _In_ PCM_KEY_NODE Node,
+    _In_ ULONG Index)
+{
+    return CMP_NAME_IS_COMPRESSED(Node) ? (WCHAR)((PUCHAR)Node->Name)[Index] :
+                                          Node->Name[Index];
+}
+
+/* A name that is not plain ASCII is the only one the case table can change */
+static
+BOOLEAN
+CmpKeyNodeNameIsNotAscii(
+    _In_ PCM_KEY_NODE Node)
+{
+    ULONG i, Chars = CmpKeyNodeNameChars(Node);
+
+    for (i = 0; i < Chars; i++)
+    {
+        if (CmpKeyNodeNameChar(Node, i) >= 0x80)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* Same value as CmpComputeHashKey gives for the name */
+static
+ULONG
+CmpHashKeyNodeName(
+    _In_ PCM_KEY_NODE Node)
+{
+    ULONG i, Chars = CmpKeyNodeNameChars(Node), Hash = 0;
+
+    for (i = 0; i < Chars; i++)
+    {
+        Hash *= 37;
+        Hash += RtlUpcaseUnicodeChar(CmpKeyNodeNameChar(Node, i));
+    }
+    return Hash;
+}
+
+/* The order the subkey index keeps: names compared upper cased */
+static
+LONG
+CmpCompareKeyNodeNames(
+    _In_ PCM_KEY_NODE Node1,
+    _In_ PCM_KEY_NODE Node2)
+{
+    ULONG i, Chars1 = CmpKeyNodeNameChars(Node1), Chars2 = CmpKeyNodeNameChars(Node2);
+    ULONG Common = min(Chars1, Chars2);
+    WCHAR Char1, Char2;
+    LONG Result;
+
+    for (i = 0; i < Common; i++)
+    {
+        Char1 = CmpKeyNodeNameChar(Node1, i);
+        Char2 = CmpKeyNodeNameChar(Node2, i);
+        if (Char1 != Char2)
+        {
+            Result = (LONG)RtlUpcaseUnicodeChar(Char1) -
+                     (LONG)RtlUpcaseUnicodeChar(Char2);
+            if (Result)
+                return Result;
+        }
+    }
+    return (LONG)Chars1 - (LONG)Chars2;
+}
+
+/* The key node of a subkey, only if it can be trusted to be read */
+static
+PCM_KEY_NODE
+CmpGetSubKeyNodeForCase(
+    _In_ PHHIVE Hive,
+    _In_ HCELL_INDEX Cell)
+{
+    PCM_KEY_NODE Node;
+    LONG CellSize;
+
+    if (Cell == HCELL_NIL || !HvIsCellAllocated(Hive, Cell))
+        return NULL;
+
+    Node = (PCM_KEY_NODE)HvGetCell(Hive, Cell);
+    if (!Node || Node->Signature != CM_KEY_NODE_SIGNATURE || Node->NameLength == 0)
+        return NULL;
+
+    CellSize = HvGetCellSize(Hive, Node);
+    if (CellSize <= 0 ||
+        (ULONG)CellSize < FIELD_OFFSET(CM_KEY_NODE, Name) + (ULONG)Node->NameLength)
+    {
+        return NULL;
+    }
+    return Node;
+}
+
+/* A leaf of the subkey index (the index itself, or a leaf of its root) */
+static
+PCM_KEY_INDEX
+CmpGetSubKeyLeafForCase(
+    _In_ PHHIVE Hive,
+    _In_ PCM_KEY_INDEX Top,
+    _In_ HCELL_INDEX TopCell,
+    _In_ ULONG LeafNumber,
+    _Out_ PHCELL_INDEX LeafCell)
+{
+    PCM_KEY_INDEX Leaf;
+    ULONG EntrySize;
+    LONG CellSize;
+
+    if (Top->Signature == CM_KEY_INDEX_ROOT)
+    {
+        *LeafCell = Top->List[LeafNumber];
+        if (*LeafCell == HCELL_NIL || !HvIsCellAllocated(Hive, *LeafCell))
+            return NULL;
+        Leaf = (PCM_KEY_INDEX)HvGetCell(Hive, *LeafCell);
+    }
+    else
+    {
+        *LeafCell = TopCell;
+        Leaf = Top;
+    }
+
+    if (!Leaf ||
+        (Leaf->Signature != CM_KEY_INDEX_LEAF &&
+         Leaf->Signature != CM_KEY_FAST_LEAF &&
+         Leaf->Signature != CM_KEY_HASH_LEAF))
+    {
+        return NULL;
+    }
+
+    /* The entries must lie within the cell */
+    EntrySize = (Leaf->Signature == CM_KEY_INDEX_LEAF) ? sizeof(HCELL_INDEX) :
+                                                         sizeof(CM_INDEX);
+    CellSize = HvGetCellSize(Hive, Leaf);
+    if (CellSize < (LONG)FIELD_OFFSET(CM_KEY_INDEX, List) ||
+        ((ULONG)CellSize - FIELD_OFFSET(CM_KEY_INDEX, List)) / EntrySize < Leaf->Count)
+    {
+        return NULL;
+    }
+    return Leaf;
+}
+
+static
+__inline
+HCELL_INDEX
+CmpGetLeafEntryCell(
+    _In_ PCM_KEY_INDEX Leaf,
+    _In_ ULONG Number)
+{
+    if (Leaf->Signature == CM_KEY_INDEX_LEAF)
+        return Leaf->List[Number];
+    return ((PCM_KEY_FAST_INDEX)Leaf)->List[Number].Cell;
+}
+
+static
+LONG
+CmpCompareIndexEntries(
+    _In_ PHHIVE Hive,
+    _In_ PCM_INDEX Entry1,
+    _In_ PCM_INDEX Entry2)
+{
+    PCM_KEY_NODE Node1 = CmpGetSubKeyNodeForCase(Hive, Entry1->Cell);
+    PCM_KEY_NODE Node2 = CmpGetSubKeyNodeForCase(Hive, Entry2->Cell);
+
+    /* The nodes were all checked by the caller */
+    if (!Node1 || !Node2)
+        return 0;
+    return CmpCompareKeyNodeNames(Node1, Node2);
+}
+
+/* Stable merge sort of the entries; Temp is as large as Entries */
+static
+VOID
+CmpSortIndexEntries(
+    _In_ PHHIVE Hive,
+    _Inout_ PCM_INDEX Entries,
+    _Inout_ PCM_INDEX Temp,
+    _In_ ULONG Count)
+{
+    PCM_INDEX From = Entries, To = Temp, Swap;
+    ULONG Width, Low, Mid, High, i, j, k;
+
+    for (Width = 1; Width < Count; Width *= 2)
+    {
+        for (Low = 0; Low < Count; Low += 2 * Width)
+        {
+            Mid = min(Low + Width, Count);
+            High = min(Low + 2 * Width, Count);
+            i = Low;
+            j = Mid;
+            k = Low;
+
+            /* Two runs that are already in order are just copied */
+            if (Mid >= High || CmpCompareIndexEntries(Hive, &From[Mid - 1], &From[Mid]) <= 0)
+            {
+                RtlCopyMemory(&To[Low], &From[Low], (High - Low) * sizeof(CM_INDEX));
+                continue;
+            }
+
+            while (i < Mid && j < High)
+            {
+                if (CmpCompareIndexEntries(Hive, &From[j], &From[i]) < 0)
+                    To[k++] = From[j++];
+                else
+                    To[k++] = From[i++];
+            }
+            while (i < Mid)
+                To[k++] = From[i++];
+            while (j < High)
+                To[k++] = From[j++];
+        }
+
+        Swap = From;
+        From = To;
+        To = Swap;
+    }
+
+    /* The sorted run is in From; make sure it is in Entries */
+    if (From != Entries)
+        RtlCopyMemory(Entries, From, Count * sizeof(CM_INDEX));
+}
+
+/**
+ * @brief
+ * Brings the subkey index of a key up to date with the Unicode case table
+ * in use. A hash leaf entry of a name that is not plain ASCII gets the hash
+ * of the name as the current table computes it, and if the names are not in
+ * order any more (the table upper cases a character differently), the index
+ * is sorted again. The leaves keep their number of entries, so the root, the
+ * key and its subkey count are not touched. Every cell changed is marked as
+ * dirty so that the flush of the hive writes the repair.
+ *
+ * @param[in,out] Hive
+ * A pointer to the hive descriptor the key belongs to.
+ *
+ * @param[in] KeyNode
+ * The key whose stable subkey index is brought up to date.
+ *
+ * @param[in,out] Stats
+ * If given, counts what has been done.
+ *
+ * @remarks
+ * Nothing is changed if the index cannot be read safely (it is the job of the
+ * rest of the check to find that out). A list with names that are equal under
+ * the current table (two names that differed under the old one) is sorted but
+ * the pair stays, and is left to the lexicographical order check.
+ */
+VOID
+CMAPI
+CmpRepairSubKeyIndexCase(
+    _Inout_ PHHIVE Hive,
+    _In_ PCM_KEY_NODE KeyNode,
+    _In_opt_ PCMP_CASE_REPAIR_STATS Stats)
+{
+    HCELL_INDEX TopCell, LeafCell;
+    PCM_KEY_INDEX Top, Leaf;
+    PCM_KEY_FAST_INDEX FastLeaf;
+    PCM_KEY_NODE Node, PrevNode = NULL;
+    PCM_INDEX Entries, Temp, Entry;
+    ULONG LeafCount, LeafNumber, i, k, Hash, Total = 0, BufferSize;
+    USHORT Type = 0;
+    BOOLEAN NotAscii, PrevNotAscii = FALSE, Unsorted = FALSE, Mixed = FALSE, Dirty;
+
+    PAGED_CODE();
+
+    TopCell = KeyNode->SubKeyLists[Stable];
+    if (KeyNode->SubKeyCounts[Stable] == 0 ||
+        TopCell == HCELL_NIL ||
+        !HvIsCellAllocated(Hive, TopCell))
+    {
+        return;
+    }
+
+    Top = (PCM_KEY_INDEX)HvGetCell(Hive, TopCell);
+    if (!Top)
+        return;
+
+    if (Top->Signature == CM_KEY_INDEX_ROOT)
+    {
+        LONG CellSize = HvGetCellSize(Hive, Top);
+
+        if (CellSize < (LONG)FIELD_OFFSET(CM_KEY_INDEX, List) ||
+            ((ULONG)CellSize - FIELD_OFFSET(CM_KEY_INDEX, List)) / sizeof(HCELL_INDEX) < Top->Count)
+        {
+            return;
+        }
+        LeafCount = Top->Count;
+    }
+    else
+    {
+        LeafCount = 1;
+    }
+
+    /*
+     * First pass: fix the hashes in place and find out if the names are in
+     * order. The common case, a hive without a name that is not ASCII, only
+     * reads the names.
+     */
+    for (LeafNumber = 0; LeafNumber < LeafCount; LeafNumber++)
+    {
+        Leaf = CmpGetSubKeyLeafForCase(Hive, Top, TopCell, LeafNumber, &LeafCell);
+        if (!Leaf)
+            return;
+
+        if (Type == 0)
+            Type = Leaf->Signature;
+        else if (Type != Leaf->Signature)
+            Mixed = TRUE;
+
+        FastLeaf = (PCM_KEY_FAST_INDEX)Leaf;
+        Dirty = FALSE;
+        for (i = 0; i < Leaf->Count; i++)
+        {
+            Node = CmpGetSubKeyNodeForCase(Hive, CmpGetLeafEntryCell(Leaf, i));
+            if (!Node)
+                return;
+
+            NotAscii = CmpKeyNodeNameIsNotAscii(Node);
+            if (NotAscii && Leaf->Signature == CM_KEY_HASH_LEAF)
+            {
+                Hash = CmpHashKeyNodeName(Node);
+                if (FastLeaf->List[i].HashKey != Hash)
+                {
+                    if (!Dirty)
+                    {
+                        if (!Hive->ReadOnly)
+                            HvMarkCellDirty(Hive, LeafCell, FALSE);
+                        Dirty = TRUE;
+                    }
+                    FastLeaf->List[i].HashKey = Hash;
+                    if (Stats)
+                        Stats->Hashes++;
+                }
+            }
+
+            if (PrevNode && (PrevNotAscii || NotAscii) &&
+                CmpCompareKeyNodeNames(PrevNode, Node) > 0)
+            {
+                Unsorted = TRUE;
+            }
+            PrevNode = Node;
+            PrevNotAscii = NotAscii;
+            Total++;
+        }
+    }
+
+    if (!Unsorted)
+        return;
+
+    /* Entries of different kinds of leaves cannot be moved from one to another */
+    if (Mixed)
+    {
+        DPRINT1("The subkey index has different kinds of leaves, can't sort it\n");
+        if (Stats)
+            Stats->Skipped++;
+        return;
+    }
+
+    /* Second pass: take all the entries, sort them, put them back */
+    BufferSize = Total * 2 * sizeof(CM_INDEX);
+    Entries = (PCM_INDEX)Hive->Allocate(BufferSize, TRUE, TAG_CM);
+    if (!Entries)
+    {
+        DPRINT1("No memory to sort the subkey index\n");
+        if (Stats)
+            Stats->Skipped++;
+        return;
+    }
+    Temp = Entries + Total;
+
+    k = 0;
+    for (LeafNumber = 0; LeafNumber < LeafCount; LeafNumber++)
+    {
+        Leaf = CmpGetSubKeyLeafForCase(Hive, Top, TopCell, LeafNumber, &LeafCell);
+        if (!Leaf)
+        {
+            /* It was fine a moment ago: leave the index as it is */
+            Hive->Free(Entries, BufferSize);
+            return;
+        }
+        FastLeaf = (PCM_KEY_FAST_INDEX)Leaf;
+        for (i = 0; i < Leaf->Count; i++, k++)
+        {
+            if (Type == CM_KEY_INDEX_LEAF)
+            {
+                Entries[k].Cell = Leaf->List[i];
+                Entries[k].HashKey = 0;
+            }
+            else
+            {
+                Entries[k] = FastLeaf->List[i];
+            }
+        }
+    }
+    if (k != Total)
+    {
+        Hive->Free(Entries, BufferSize);
+        return;
+    }
+
+    CmpSortIndexEntries(Hive, Entries, Temp, Total);
+
+    k = 0;
+    for (LeafNumber = 0; LeafNumber < LeafCount; LeafNumber++)
+    {
+        Leaf = CmpGetSubKeyLeafForCase(Hive, Top, TopCell, LeafNumber, &LeafCell);
+        if (!Leaf)
+            break;
+        FastLeaf = (PCM_KEY_FAST_INDEX)Leaf;
+        Dirty = FALSE;
+        for (i = 0; i < Leaf->Count; i++, k++)
+        {
+            Entry = &Entries[k];
+            if (CmpGetLeafEntryCell(Leaf, i) == Entry->Cell)
+                continue;
+
+            if (!Dirty)
+            {
+                if (!Hive->ReadOnly)
+                    HvMarkCellDirty(Hive, LeafCell, FALSE);
+                Dirty = TRUE;
+            }
+            if (Type == CM_KEY_INDEX_LEAF)
+                Leaf->List[i] = Entry->Cell;
+            else
+                FastLeaf->List[i] = *Entry;
+        }
+    }
+
+    Hive->Free(Entries, BufferSize);
+    if (Stats)
+        Stats->Sorted++;
+}
+
+#else /* _BLDR_ */
+
+VOID
+CMAPI
+CmpRepairSubKeyIndexCase(
+    _Inout_ PHHIVE Hive,
+    _In_ PCM_KEY_NODE KeyNode,
+    _In_opt_ PCMP_CASE_REPAIR_STATS Stats)
+{
+    /* The loader only reads the hive */
+    UNREFERENCED_PARAMETER(Hive);
+    UNREFERENCED_PARAMETER(KeyNode);
+    UNREFERENCED_PARAMETER(Stats);
+}
+
+#endif /* _BLDR_ */
+
 /* EOF */

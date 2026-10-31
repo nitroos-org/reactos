@@ -660,6 +660,21 @@ CmpRepairSubKeyList(
     _Inout_ PCELL_DATA CellData,
     _In_ BOOLEAN FixHive);
 
+/* What CmpRepairSubKeyIndexCase did to the hive, summed up over all the keys */
+typedef struct _CMP_CASE_REPAIR_STATS
+{
+    ULONG Hashes;   /* hash leaf entries given the hash of the current case table */
+    ULONG Sorted;   /* subkey indexes sorted again */
+    ULONG Skipped;  /* subkey indexes out of order that could not be sorted */
+} CMP_CASE_REPAIR_STATS, *PCMP_CASE_REPAIR_STATS;
+
+VOID
+CMAPI
+CmpRepairSubKeyIndexCase(
+    _Inout_ PHHIVE Hive,
+    _In_ PCM_KEY_NODE KeyNode,
+    _In_opt_ PCMP_CASE_REPAIR_STATS Stats);
+
 /* Old-style Public "Cmlib" functions */
 
 BOOLEAN CMAPI
