@@ -601,7 +601,14 @@ RtlInitAnsiStringEx(IN OUT PANSI_STRING DestinationString,
     if (SourceString)
     {
         Size = strlen(SourceString);
-        if (Size > (MAXUSHORT - sizeof(CHAR))) return STATUS_NAME_TOO_LONG;
+        if (Size > (MAXUSHORT - sizeof(CHAR)))
+        {
+            /* As on Windows: an empty string that still points at the source */
+            DestinationString->Length = 0;
+            DestinationString->MaximumLength = 0;
+            DestinationString->Buffer = (PCHAR)SourceString;
+            return STATUS_NAME_TOO_LONG;
+        }
         DestinationString->Length = (USHORT)Size;
         DestinationString->MaximumLength = (USHORT)Size + sizeof(CHAR);
     }

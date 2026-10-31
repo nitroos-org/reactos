@@ -42,6 +42,8 @@ list(APPEND SOURCE
     CrtSecure.c
     RtlBitmapRanges.c
     RtlFlsValue.c
+    RtlUtf8String.c
+    RtlWin10Helpers.c
     ZeroBits.c
     CommitCharge.c
     RtlCurrentTransaction.c
