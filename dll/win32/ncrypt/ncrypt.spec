@@ -59,12 +59,12 @@
 @ stub GetSChannelInterface
 @ stub NCryptCloseKeyProtector
 @ stub NCryptCloseProtectionDescriptor
-@ stub NCryptCreateClaim
+@ stdcall NCryptCreateClaim(long long long ptr ptr long ptr long)
 @ stdcall NCryptCreatePersistedKey(long ptr wstr wstr long long)
 @ stub NCryptCreateProtectionDescriptor
 @ stdcall NCryptDecrypt(long ptr long ptr ptr long ptr long)
 @ stdcall NCryptDeleteKey(long long)
-@ stub NCryptDeriveKey
+@ stdcall NCryptDeriveKey(long wstr ptr ptr long ptr long)
 @ stub NCryptDuplicateKeyProtectorHandle
 @ stdcall NCryptEncrypt(long ptr long ptr ptr long ptr long)
 @ stdcall NCryptEnumAlgorithms(long long ptr ptr long)
@@ -88,7 +88,7 @@
 @ stub NCryptProtectSecret
 @ stub NCryptQueryProtectionDescriptorName
 @ stub NCryptRegisterProtectionDescriptorName
-@ stub NCryptSecretAgreement
+@ stdcall NCryptSecretAgreement(long long ptr long)
 @ stub NCryptSetAuditingInterface
 @ stdcall NCryptSetProperty(ptr wstr ptr long long)
 @ stdcall NCryptSignHash(long ptr ptr long ptr long ptr long)
@@ -97,7 +97,7 @@
 @ stub NCryptStreamOpenToUnprotect
 @ stub NCryptStreamOpenToUnprotectEx
 @ stub NCryptStreamUpdate
-@ stub NCryptTranslateHandle
+@ stdcall NCryptTranslateHandle(ptr ptr long long long long)
 @ stub NCryptUnprotectKey
 @ stub NCryptUnprotectSecret
 @ stub NCryptVerifyClaim
