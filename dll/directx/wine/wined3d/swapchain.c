@@ -222,6 +222,7 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
         const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override,
         unsigned int swap_interval, uint32_t flags)
 {
+    bool wait_for_present;
     RECT s, d;
 
     TRACE("swapchain %p, src_rect %s, dst_rect %s, dst_window_override %p, swap_interval %u, flags %#x.\n",
@@ -256,7 +257,19 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
     wined3d_cs_emit_present(swapchain->device->cs, swapchain, src_rect,
             dst_rect, dst_window_override, swap_interval, flags);
 
+    /* The first frame of a swapchain is not on screen until the command stream thread has run everything queued
+     * for it, and with the software GL renderer that includes compiling the shaders the frame uses (the
+     * first draws and the swapchain blit), which takes hundreds of milliseconds, and more on a loaded
+     * machine. Native drivers present the first frame at once, and applications (Direct2D window render
+     * targets among them) rely on it being visible when Present returns. Wait for the first present only:
+     * later frames find the shaders compiled. */
+    wait_for_present = !swapchain->first_present_done;
+    swapchain->first_present_done = true;
+
     wined3d_mutex_unlock();
+
+    if (wait_for_present)
+        wined3d_cs_finish(swapchain->device->cs, WINED3D_CS_QUEUE_DEFAULT);
 
     return WINED3D_OK;
 }

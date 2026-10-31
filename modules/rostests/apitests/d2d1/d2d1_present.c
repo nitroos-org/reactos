@@ -130,9 +130,59 @@ static void test_hwnd_target_present(void)
     for (frame = 0; frame < 2; ++frame)
     {
         fill((ID2D1RenderTarget *)rt, 0.0f, 0.0f, 1.0f);
-        pump(300);
-        check_screen("window target");
+        /* The first frame of a window target is on screen when EndDraw returns, on Windows, whatever
+         * the window target did before: no waiting before reading it back */
+        if (frame)
+            pump(300);
+        check_screen(frame ? "window target, second frame" : "window target, first frame");
     }
+
+    ID2D1HwndRenderTarget_Release(rt);
+    DestroyWindow(hwnd);
+}
+
+/* One frame on a window target and nothing else: the process's first window present on a fresh Direct3D
+ * device. The rectangle has to be on the screen when EndDraw returns: no pump, no sleep (Windows shows it
+ * at once: the first screen read after EndDraw already sees it). It used to show up 270 ms to over a second
+ * later, while the command stream thread compiled the shaders of the first frame. */
+static void test_hwnd_target_single_frame(void)
+{
+    D2D1_RENDER_TARGET_PROPERTIES desc;
+    D2D1_HWND_RENDER_TARGET_PROPERTIES hwnd_desc;
+    ID2D1HwndRenderTarget *rt;
+    HWND hwnd;
+    HRESULT hr;
+
+    if (!screen_readable())
+    {
+        skip("The screen is not accessible\n");
+        return;
+    }
+
+    hwnd = create_window();
+    if (!hwnd)
+        return;
+
+    memset(&desc, 0, sizeof(desc));
+    desc.type = D2D1_RENDER_TARGET_TYPE_DEFAULT;
+    desc.pixelFormat.format = DXGI_FORMAT_UNKNOWN;
+    desc.pixelFormat.alphaMode = D2D1_ALPHA_MODE_UNKNOWN;
+    memset(&hwnd_desc, 0, sizeof(hwnd_desc));
+    hwnd_desc.hwnd = hwnd;
+    hwnd_desc.pixelSize.width = WND_SIZE;
+    hwnd_desc.pixelSize.height = WND_SIZE;
+    hwnd_desc.presentOptions = D2D1_PRESENT_OPTIONS_NONE;
+
+    hr = ID2D1Factory_CreateHwndRenderTarget(factory, &desc, &hwnd_desc, &rt);
+    if (FAILED(hr))
+    {
+        skip("Cannot create a window render target, hr %#lx\n", hr);
+        DestroyWindow(hwnd);
+        return;
+    }
+
+    fill((ID2D1RenderTarget *)rt, 0.0f, 0.0f, 1.0f);
+    check_screen("window target, single frame");
 
     ID2D1HwndRenderTarget_Release(rt);
     DestroyWindow(hwnd);
@@ -249,6 +299,7 @@ START_TEST(d2d1_present)
     if (FAILED(hr))
         return;
 
+    test_hwnd_target_single_frame();
     test_dc_target_dib();
     test_dc_target_screen();
     test_hwnd_target_present();
