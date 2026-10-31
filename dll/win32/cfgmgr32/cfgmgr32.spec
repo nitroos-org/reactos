@@ -204,3 +204,44 @@
 @ stub CM_Remove_Unmarked_Children_Ex # setupapi.CM_Remove_Unmarked_Children_Ex
 @ stub CM_Reset_Children_Marks # setupapi.CM_Reset_Children_Marks
 @ stub CM_Reset_Children_Marks_Ex # setupapi.CM_Reset_Children_Marks_Ex
+@ stdcall -version=0x600+ CM_MapCrToWin32Err(long long) setupapi.CM_MapCrToWin32Err
+@ stdcall -version=0x600+ CM_MapCrToSpErr(long long) setupapi.CM_MapCrToSpErr
+@ stdcall -version=0x600+ CM_Get_DevNode_Property_Keys(long ptr ptr long) setupapi.CM_Get_DevNode_Property_Keys
+@ stdcall -version=0x600+ CM_Get_DevNode_Property_Keys_Ex(long ptr ptr long ptr) setupapi.CM_Get_DevNode_Property_Keys_Ex
+@ stdcall -version=0x600+ CM_Get_Device_Interface_PropertyW(wstr ptr ptr ptr ptr long) setupapi.CM_Get_Device_Interface_PropertyW
+@ stdcall -version=0x600+ CM_Get_Device_Interface_Property_ExW(wstr ptr ptr ptr ptr long ptr) setupapi.CM_Get_Device_Interface_Property_ExW
+@ stdcall -version=0x600+ CM_Get_Device_Interface_Property_KeysW(wstr ptr ptr long) setupapi.CM_Get_Device_Interface_Property_KeysW
+@ stdcall -version=0x600+ CM_Get_Device_Interface_Property_Keys_ExW(wstr ptr ptr long ptr) setupapi.CM_Get_Device_Interface_Property_Keys_ExW
+@ stdcall -version=0x600+ CM_Get_Class_PropertyW(ptr ptr ptr ptr ptr long) setupapi.CM_Get_Class_PropertyW
+@ stdcall -version=0x600+ CM_Get_Class_Property_ExW(ptr ptr ptr ptr ptr long ptr) setupapi.CM_Get_Class_Property_ExW
+@ stdcall -version=0x600+ CM_Get_Class_Property_Keys(ptr ptr ptr long) setupapi.CM_Get_Class_Property_Keys
+@ stdcall -version=0x600+ CM_Get_Class_Property_Keys_Ex(ptr ptr ptr long ptr) setupapi.CM_Get_Class_Property_Keys_Ex
+@ stdcall -version=0x600+ CM_Delete_Device_Interface_KeyA(str long) setupapi.CM_Delete_Device_Interface_KeyA
+@ stdcall -version=0x600+ CM_Delete_Device_Interface_KeyW(wstr long) setupapi.CM_Delete_Device_Interface_KeyW
+@ stdcall -version=0x600+ CM_Delete_Device_Interface_Key_ExA(str long ptr) setupapi.CM_Delete_Device_Interface_Key_ExA
+@ stdcall -version=0x600+ CM_Delete_Device_Interface_Key_ExW(wstr long ptr) setupapi.CM_Delete_Device_Interface_Key_ExW
+@ stdcall -version=0x600+ CM_Open_Device_Interface_KeyA(str long long ptr long) setupapi.CM_Open_Device_Interface_KeyA
+@ stdcall -version=0x600+ CM_Open_Device_Interface_KeyW(wstr long long ptr long) setupapi.CM_Open_Device_Interface_KeyW
+@ stdcall -version=0x600+ CM_Open_Device_Interface_Key_ExA(str long long ptr long ptr) setupapi.CM_Open_Device_Interface_Key_ExA
+@ stdcall -version=0x600+ CM_Open_Device_Interface_Key_ExW(wstr long long ptr long ptr) setupapi.CM_Open_Device_Interface_Key_ExW
+@ stdcall CM_Get_DevNode_Custom_PropertyA(long str ptr ptr ptr long) setupapi.CM_Get_DevNode_Custom_PropertyA
+@ stdcall CM_Get_DevNode_Custom_PropertyW(long wstr ptr ptr ptr long) setupapi.CM_Get_DevNode_Custom_PropertyW
+@ stdcall CM_Get_DevNode_Custom_Property_ExA(long str ptr ptr ptr long ptr) setupapi.CM_Get_DevNode_Custom_Property_ExA
+@ stdcall CM_Get_DevNode_Custom_Property_ExW(long wstr ptr ptr ptr long ptr) setupapi.CM_Get_DevNode_Custom_Property_ExW
+@ stdcall CM_Is_Version_Available(long) setupapi.CM_Is_Version_Available
+@ stdcall CM_Is_Version_Available_Ex(long ptr) setupapi.CM_Is_Version_Available_Ex
+@ stdcall CM_Request_Device_EjectA(long ptr str long long) setupapi.CM_Request_Device_EjectA
+@ stdcall CM_Request_Device_EjectW(long ptr wstr long long) setupapi.CM_Request_Device_EjectW
+@ stdcall CM_Request_Device_Eject_ExA(long ptr str long long ptr) setupapi.CM_Request_Device_Eject_ExA
+@ stdcall CM_Request_Device_Eject_ExW(long ptr wstr long long ptr) setupapi.CM_Request_Device_Eject_ExW
+@ stdcall CMP_GetBlockedDriverInfo(wstr ptr long ptr) setupapi.CMP_GetBlockedDriverInfo
+@ stdcall CMP_GetServerSideDeviceInstallFlags(ptr long ptr) setupapi.CMP_GetServerSideDeviceInstallFlags
+@ stdcall -version=0x600+ CM_Apply_PowerScheme() setupapi.CM_Apply_PowerScheme
+@ stdcall -version=0x600+ CM_Delete_PowerScheme(long long) setupapi.CM_Delete_PowerScheme
+@ stdcall -version=0x600+ CM_Duplicate_PowerScheme(long long long) setupapi.CM_Duplicate_PowerScheme
+@ stdcall -version=0x600+ CM_Import_PowerScheme(long long long) setupapi.CM_Import_PowerScheme
+@ stdcall -version=0x600+ CM_RestoreAll_DefaultPowerSchemes(long) setupapi.CM_RestoreAll_DefaultPowerSchemes
+@ stdcall -version=0x600+ CM_Restore_DefaultPowerScheme(long long) setupapi.CM_Restore_DefaultPowerScheme
+@ stdcall -version=0x600+ CM_Set_ActiveScheme(long long) setupapi.CM_Set_ActiveScheme
+@ stdcall -version=0x600+ CM_Write_UserPowerKey(long long long long long long long long) setupapi.CM_Write_UserPowerKey
+@ stdcall -version=0x600+ CMP_RegisterServiceNotification(long long long long) setupapi.CMP_RegisterServiceNotification
