@@ -114,7 +114,6 @@
 @ DeriveCapabilitySidsFromName -version=0x601+
 @ DeviceIoControl
 @ DisableThreadLibraryCalls
-@ DisassociateCurrentThreadFromCallback -version=0x600+
 @ DiscardVirtualMemory -version=0x601+
 @ DisconnectNamedPipe
 @ DuplicateHandle
@@ -188,7 +187,6 @@
 @ FreeEnvironmentStringsW
 @ FreeLibrary
 @ FreeLibraryAndExitThread
-@ FreeLibraryWhenCallbackReturns -version=0x600+
 @ FreeResource
 @ FreeUserPhysicalPages
 @ GenerateConsoleCtrlEvent
@@ -488,7 +486,6 @@
 @ LCMapStringA
 @ LCMapStringEx -version=0x600+
 @ LCMapStringW
-@ LeaveCriticalSectionWhenCallbackReturns -version=0x600+
 @ LoadLibraryA
 @ LoadLibraryExA
 @ LoadLibraryExW
@@ -559,8 +556,6 @@
 @ QueueUserWorkItem
 @ RaiseException
 @ RaiseFailFastException -version=0x601+
-@ ReleaseMutexWhenCallbackReturns -version=0x600+
-@ ReleaseSemaphoreWhenCallbackReturns -version=0x600+
 @ ReOpenFile
 @ ReadConsoleA
 @ ReadConsoleInputA
@@ -627,7 +622,6 @@
 @ SetEnvironmentVariableA
 @ SetEnvironmentVariableW
 @ SetErrorMode
-@ SetEventWhenCallbackReturns -version=0x600+
 @ SetFileApisToANSI
 @ SetFileApisToOEM
 @ SetFileAttributesA
