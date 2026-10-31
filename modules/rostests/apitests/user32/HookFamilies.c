@@ -65,6 +65,11 @@ static POINT g_wheelPoint;
 #define WHEEL_TIME 0x1234567
 /* WH_SHELL, WH_FOREGROUNDIDLE, WH_DEBUG */
 static LONG g_shellCreated, g_shellDestroyed, g_idle, g_debug;
+/* WH_DEBUG: bit (id + 1) of g_debugIds is set for each hook it was called for, the calls whose DEBUGHOOKINFO is
+ * wrong, and the hook whose call the debug hook stops (g_debugBlock, its id) */
+static ULONG g_debugIds;
+static LONG g_debugBad, g_debugBlocked;
+static int g_debugBlock = -100;
 /* WH_GETMESSAGE, WH_CALLWNDPROC(RET) */
 static LONG g_getMessage, g_callWnd, g_callWndRet;
 static BOOL g_getMessageOk, g_callWndOk, g_callWndRetOk;
@@ -396,7 +401,24 @@ static LRESULT CALLBACK IdleProc(int code, WPARAM wParam, LPARAM lParam)
 
 static LRESULT CALLBACK DebugProc(int code, WPARAM wParam, LPARAM lParam)
 {
-    g_debug++;
+    DEBUGHOOKINFO *info = (DEBUGHOOKINFO *)lParam;
+    int id = (int)wParam;
+
+    if (code == HC_ACTION)
+    {
+        g_debug++;
+        if (id >= WH_MIN && id <= WH_MAX)
+            g_debugIds |= 1UL << (id - WH_MIN);
+        /* the thread of the hook that is about to run; a global WH_KEYBOARD hook of another process (ReactOS
+         * has one in kbswitch) runs in its own */
+        if (info->idThread != GetCurrentThreadId() && id != WH_KEYBOARD)
+            g_debugBad++;
+        if (id == g_debugBlock)
+        {
+            g_debugBlocked++;
+            return 1;
+        }
+    }
     return CallNextHookEx(NULL, code, wParam, lParam);
 }
 
@@ -495,6 +517,80 @@ static DWORD WINAPI DragThread(LPVOID param)
     Sleep(200);
     SendMouseButton(MOUSEEVENTF_LEFTUP);
     return 0;
+}
+
+static void SendVirtualKey(WORD vk, DWORD flags)
+{
+    INPUT in;
+
+    ZeroMemory(&in, sizeof(in));
+    in.type = INPUT_KEYBOARD;
+    in.ki.wVk = vk;
+    in.ki.wScan = (WORD)MapVirtualKeyW(vk, 0);
+    in.ki.dwFlags = flags;
+    if (vk >= VK_LEFT && vk <= VK_DOWN)
+        in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    SendInput(1, &in, sizeof(in));
+}
+
+static void TapVirtualKey(WORD vk)
+{
+    SendVirtualKey(vk, 0);
+    Sleep(40);
+    SendVirtualKey(vk, KEYEVENTF_KEYUP);
+    Sleep(150);
+}
+
+/* Alt+Space, the menu key for Move or Size, three arrow keys right and two down, Return. The window thread is in
+ * the system menu and then in the move loop of its DefWindowProc for that time */
+static DWORD WINAPI KeyMoveThread(LPVOID param)
+{
+    WORD menuKey = (WORD)(ULONG_PTR)param;
+
+    SendVirtualKey(VK_MENU, 0);
+    Sleep(40);
+    SendVirtualKey(VK_SPACE, 0);
+    Sleep(40);
+    SendVirtualKey(VK_SPACE, KEYEVENTF_KEYUP);
+    Sleep(40);
+    SendVirtualKey(VK_MENU, KEYEVENTF_KEYUP);
+    Sleep(500);
+    TapVirtualKey(menuKey);
+    Sleep(400);
+    TapVirtualKey(VK_RIGHT);
+    TapVirtualKey(VK_RIGHT);
+    TapVirtualKey(VK_RIGHT);
+    TapVirtualKey(VK_DOWN);
+    TapVirtualKey(VK_DOWN);
+    Sleep(200);
+    TapVirtualKey(VK_RETURN);
+    return 0;
+}
+
+/* Moves (menuKey 'M') or sizes ('S') g_main with the keyboard */
+static void MoveWithKeyboard(int mode, WORD menuKey, RECT *before, RECT *after)
+{
+    HANDLE thread;
+
+    SetWindowPos(g_main, NULL, 100, 100, 321, 211, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetForegroundWindow(g_main);
+    SetActiveWindow(g_main);
+    Pump(200);
+    GetWindowRect(g_main, before);
+    g_moveMode = mode;
+    g_cbtMoveSize = g_innerMoveSize = 0;
+    ZeroMemory(&g_moveRect, sizeof(RECT));
+    ZeroMemory(&g_moveSent, sizeof(RECT));
+    ZeroMemory(&g_moveInner, sizeof(RECT));
+    ZeroMemory(&g_moveAfterChain, sizeof(RECT));
+    g_moveChain = 0xbad;
+    thread = CreateThread(NULL, 0, KeyMoveThread, (LPVOID)(ULONG_PTR)menuKey, 0, NULL);
+    Pump(3300);
+    WaitForSingleObject(thread, 5000);
+    CloseHandle(thread);
+    Pump(200);
+    g_moveMode = MOVE_NONE;
+    GetWindowRect(g_main, after);
 }
 
 /* Moves g_main by its caption. Returns FALSE when the caption cannot be hit */
@@ -672,9 +768,8 @@ START_TEST(HookFamilies)
        "chained HCBT_ACTIVATE: inner hook got wParam %p, fMouse %d\n", g_innerActivateHwnd, g_innerActivateMouse);
     ok(g_innerActivateActive == g_activateActive, "chained HCBT_ACTIVATE: hWndActive %p in the inner hook, %p in the outer\n",
        g_innerActivateActive, g_activateActive);
-    /* Windows passes the window that is being activated, not the one that was active (g_other);
-     * ReactOS passes the one that was active */
-    todo_ros ok(g_activateActive == g_main && g_activateActive != g_other, "HCBT_ACTIVATE: hWndActive %p, the window is %p\n",
+    /* Windows passes the window that is being activated, not the one that was active (g_other) */
+    ok(g_activateActive == g_main && g_activateActive != g_other, "HCBT_ACTIVATE: hWndActive %p, the window is %p\n",
        g_activateActive, g_main);
     g_child = CreateWindowExW(0, L"EDIT", NULL, WS_CHILD | WS_VISIBLE, 0, 0, 50, 20, g_main, NULL, wc.hInstance, NULL);
     ok(g_child != NULL, "child window: error %lu\n", GetLastError());
@@ -748,10 +843,12 @@ START_TEST(HookFamilies)
     in.type = INPUT_MOUSE;
     in.mi.dx = 1;
     in.mi.dwFlags = MOUSEEVENTF_MOVE;
+    in.mi.time = WHEEL_TIME + 1;
     in.mi.dwExtraInfo = EXTRA_INFO;
     SendInput(1, &in, sizeof(in));
     Pump(300);
     ok(g_llMouse >= 1 && g_llMouseOk, "WH_MOUSE_LL: %ld calls, ok %d\n", g_llMouse, g_llMouseOk);
+    ok(g_llMouseCopy[0].time == WHEEL_TIME + 1, "WH_MOUSE_LL move: time %lx\n", g_llMouseCopy[0].time);
     ok(g_innerLlMouse[0] == g_llMouse, "chained WH_MOUSE_LL: inner hook ran %ld times, the outer one %ld\n",
        g_innerLlMouse[0], g_llMouse);
     if (foreground)
@@ -786,8 +883,8 @@ START_TEST(HookFamilies)
        g_wheelPoint.x, g_wheelPoint.y);
     ok((SHORT)HIWORD(g_llWheelRecord.mouseData) == 120, "WH_MOUSE_LL wheel: mouseData %lx\n", g_llWheelRecord.mouseData);
     ok((g_llWheelRecord.flags & LLMHF_INJECTED) != 0, "WH_MOUSE_LL wheel: flags %lx\n", g_llWheelRecord.flags);
-    /* ReactOS takes the time of the event itself, not the one SendInput was given */
-    todo_ros ok(g_llWheelRecord.time == WHEEL_TIME, "WH_MOUSE_LL wheel: time %lx\n", g_llWheelRecord.time);
+    /* the time SendInput was given */
+    ok(g_llWheelRecord.time == WHEEL_TIME, "WH_MOUSE_LL wheel: time %lx\n", g_llWheelRecord.time);
     ok(g_innerLlMouse[1] == g_llWheel, "chained WH_MOUSE_LL: inner hook ran %ld times for the wheel, the outer one %ld\n",
        g_innerLlMouse[1], g_llWheel);
     ok(g_innerLlMouseBad == 0, "chained WH_MOUSE_LL: %ld wrong MSLLHOOKSTRUCT in the inner hook\n", g_innerLlMouseBad);
@@ -837,8 +934,7 @@ START_TEST(HookFamilies)
            g_cbtMoveSize, g_innerMoveSize);
         ok(EqualRect(&g_moveInner, &expect), "chained HCBT_MOVESIZE: inner hook got " RECT_FMT ", expected " RECT_FMT "\n",
            RECT_ARGS(g_moveInner), RECT_ARGS(expect));
-        /* ReactOS: co_HOOK_CallHooks hands the hooks a copy of the rectangle of DefWindowProc's move loop */
-        todo_ros ok(EqualRect(&after, &expect), "HCBT_MOVESIZE: the hook set " RECT_FMT ", the window is at " RECT_FMT "\n",
+        ok(EqualRect(&after, &expect), "HCBT_MOVESIZE: the hook set " RECT_FMT ", the window is at " RECT_FMT "\n",
            RECT_ARGS(expect), RECT_ARGS(after));
 
         /* the inner hook changes its copy: the outer hook does not see it and the window is not affected */
@@ -860,13 +956,47 @@ START_TEST(HookFamilies)
               RECT_ARGS(before), RECT_ARGS(g_moveRect), RECT_ARGS(after));
         ok(g_cbtMoveSize == 1 && g_innerMoveSize == 0, "HCBT_MOVESIZE: %ld calls, %ld in the inner hook\n",
            g_cbtMoveSize, g_innerMoveSize);
-        /* ReactOS moves the window while it is dragged, the hook comes at the end */
-        todo_ros ok(EqualRect(&after, &before), "HCBT_MOVESIZE: the hook returned 1, the window moved from " RECT_FMT " to " RECT_FMT "\n",
+        ok(EqualRect(&after, &before), "HCBT_MOVESIZE: the hook returned 1, the window moved from " RECT_FMT " to " RECT_FMT "\n",
            RECT_ARGS(before), RECT_ARGS(after));
     }
     else if (!foreground)
     {
         skip("the test window is not in the foreground, no mouse input for the move\n");
+    }
+
+    /* The same with the keyboard: Alt+Space, M, the arrow keys, Return moves the window, one HCBT_MOVESIZE at the end
+     * with the final rectangle. The step of an arrow key is not the same everywhere, only its direction is tested */
+    if (foreground)
+    {
+        MoveWithKeyboard(MOVE_PASS, 'M', &before, &after);
+        trace("keyboard move pass: before " RECT_FMT " hook " RECT_FMT " after " RECT_FMT "\n", RECT_ARGS(before),
+              RECT_ARGS(g_moveRect), RECT_ARGS(after));
+        ok(after.left > before.left && after.top > before.top &&
+           after.right - after.left == before.right - before.left && after.bottom - after.top == before.bottom - before.top,
+           "keyboard move: the window moved from " RECT_FMT " to " RECT_FMT "\n", RECT_ARGS(before), RECT_ARGS(after));
+        ok(g_cbtMoveSize == 1 && g_innerMoveSize == 1, "keyboard move: HCBT_MOVESIZE %ld calls, %ld in the inner hook\n",
+           g_cbtMoveSize, g_innerMoveSize);
+        ok(EqualRect(&g_moveRect, &after), "keyboard move: the hook got " RECT_FMT ", the window is at " RECT_FMT "\n",
+           RECT_ARGS(g_moveRect), RECT_ARGS(after));
+
+        MoveWithKeyboard(MOVE_OUTER, 'M', &before, &after);
+        expect = g_moveRect;
+        OffsetRect(&expect, 13, 17);
+        ok(g_cbtMoveSize == 1 && EqualRect(&after, &expect), "keyboard move: the hook set " RECT_FMT ", the window is at " RECT_FMT "\n",
+           RECT_ARGS(expect), RECT_ARGS(after));
+
+        MoveWithKeyboard(MOVE_CANCEL, 'M', &before, &after);
+        ok(g_cbtMoveSize == 1 && EqualRect(&after, &before), "keyboard move: the hook returned 1, the window moved from " RECT_FMT " to " RECT_FMT "\n",
+           RECT_ARGS(before), RECT_ARGS(after));
+
+        /* Alt+Space, S sizes it: the first arrow key picks the edge, the window grows with the following ones */
+        MoveWithKeyboard(MOVE_PASS, 'S', &before, &after);
+        trace("keyboard size: before " RECT_FMT " hook " RECT_FMT " after " RECT_FMT "\n", RECT_ARGS(before),
+              RECT_ARGS(g_moveRect), RECT_ARGS(after));
+        ok(g_cbtMoveSize == 1 && EqualRect(&g_moveRect, &after), "keyboard size: HCBT_MOVESIZE %ld calls, the hook got " RECT_FMT ", the window is at " RECT_FMT "\n",
+           g_cbtMoveSize, RECT_ARGS(g_moveRect), RECT_ARGS(after));
+        ok(after.left == before.left && after.top == before.top && after.right > before.right,
+           "keyboard size: the window went from " RECT_FMT " to " RECT_FMT "\n", RECT_ARGS(before), RECT_ARGS(after));
     }
 
     /* WH_FOREGROUNDIDLE runs when the foreground thread waits for input */
@@ -879,15 +1009,32 @@ START_TEST(HookFamilies)
         DispatchMessageW(&msg);
     }
     KillTimer(g_main, 1);
-    /* ReactOS calls the idle hook from PeekMessage and MsgWaitForMultipleObjects, not
-     * before GetMessage waits */
     if (foreground)
-        todo_ros ok(g_idle >= 1, "WH_FOREGROUNDIDLE: %ld calls\n", g_idle);
+        ok(g_idle >= 1, "WH_FOREGROUNDIDLE: %ld calls\n", g_idle);
     else
         skip("the test window is not in the foreground, no idle hook\n");
 
-    /* Windows calls WH_DEBUG before each other hook */
-    todo_ros ok(g_debug > 0, "WH_DEBUG: %ld calls\n", g_debug);
+    /* Windows calls WH_DEBUG before each other hook of the thread: wParam is the id of that hook and the
+     * DEBUGHOOKINFO tells the thread it runs in. Not for itself and not for the low-level hooks */
+    ok(g_debug > 0, "WH_DEBUG: %ld calls\n", g_debug);
+    ok(g_debugBad == 0, "WH_DEBUG: %ld calls with the wrong idThread\n", g_debugBad);
+    ok((g_debugIds & (1UL << (WH_CBT - WH_MIN))) && (g_debugIds & (1UL << (WH_GETMESSAGE - WH_MIN))) &&
+       (g_debugIds & (1UL << (WH_CALLWNDPROC - WH_MIN))) && (g_debugIds & (1UL << (WH_CALLWNDPROCRET - WH_MIN))) &&
+       (g_debugIds & (1UL << (WH_SHELL - WH_MIN))),
+       "WH_DEBUG: called for the hooks %lx\n", g_debugIds);
+    ok(!(g_debugIds & ((1UL << (WH_DEBUG - WH_MIN)) | (1UL << (WH_KEYBOARD_LL - WH_MIN)) | (1UL << (WH_MOUSE_LL - WH_MIN)))),
+       "WH_DEBUG: called for itself or a low-level hook: %lx\n", g_debugIds);
+
+    /* a nonzero result keeps the hook that was about to run from running, the message still arrives */
+    g_debugBlock = WH_CALLWNDPROC;
+    g_debugBlocked = 0;
+    g_callWnd = 0;
+    ok(SendMessageW(g_main, TEST_MESSAGE, 0x32, (LPARAM)(LONG)0x82345678) == 0x7654, "wrong SendMessage result\n");
+    g_debugBlock = -100;
+    ok(g_debugBlocked >= 1 && g_callWnd == 0, "WH_DEBUG returned 1: %ld calls, WH_CALLWNDPROC ran %ld times\n",
+       g_debugBlocked, g_callWnd);
+    ok(SendMessageW(g_main, TEST_MESSAGE, 0x32, (LPARAM)(LONG)0x82345678) == 0x7654, "wrong SendMessage result\n");
+    ok(g_callWnd == 1, "WH_CALLWNDPROC: %ld calls after the debug hook stopped blocking\n", g_callWnd);
 
     if (g_other)
         DestroyWindow(g_other);
