@@ -4072,7 +4072,7 @@ static UINT publish_product_properties(MSIPACKAGE *package, HKEY hkey)
         free(buffer);
     }
 
-    msi_reg_set_val_dword(hkey, L"Assignment", 0);
+    msi_reg_set_val_dword(hkey, L"Assignment", package->Context == MSIINSTALLCONTEXT_MACHINE ? 1 : 0);
     msi_reg_set_val_dword(hkey, L"AdvertiseFlags", 0x184);
     msi_reg_set_val_dword(hkey, INSTALLPROPERTY_INSTANCETYPEW, 0);
     msi_reg_set_val_multi_str(hkey, L"Clients", L":\0");
@@ -4309,6 +4309,17 @@ static UINT ACTION_PublishProduct(MSIPACKAGE *package)
                                        NULL, &hudkey, TRUE);
     if (rc != ERROR_SUCCESS)
         goto end;
+
+    /* Windows always creates the Patches key, with an empty AllPatches when nothing is patched */
+    {
+        HKEY patches;
+        if (!RegCreateKeyExW( hudkey, L"Patches", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &patches, NULL ))
+        {
+            if (RegQueryValueExW( patches, L"AllPatches", NULL, NULL, NULL, NULL ))
+                msi_reg_set_val_str( patches, L"AllPatches", NULL );
+            RegCloseKey( patches );
+        }
+    }
 
     rc = publish_upgrade_code(package);
     if (rc != ERROR_SUCCESS)
@@ -5020,7 +5031,7 @@ static UINT ACTION_RegisterProduct(MSIPACKAGE *package)
 {
     WCHAR *upgrade_code, squashed_pc[SQUASHED_GUID_SIZE];
     MSIRECORD *uirow;
-    HKEY hkey, props, upgrade_key;
+    HKEY hkey, props, upgrade_key, usage_parent;
     UINT rc;
 
     if (package->script == SCRIPT_NONE)
@@ -5060,6 +5071,15 @@ static UINT ACTION_RegisterProduct(MSIPACKAGE *package)
     }
     msi_reg_set_val_str( props, INSTALLPROPERTY_LOCALPACKAGEW, package->localfile );
     package->delete_on_close = FALSE;
+
+    /* Windows creates the (initially empty) Usage key next to InstallProperties */
+    if (MSIREG_OpenUserDataProductKey( package->ProductCode, package->Context, NULL, &usage_parent, TRUE ) == ERROR_SUCCESS)
+    {
+        HKEY usage;
+        if (!RegCreateKeyExW( usage_parent, L"Usage", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &usage, NULL ))
+            RegCloseKey( usage );
+        RegCloseKey( usage_parent );
+    }
 
 done:
     uirow = MSI_CreateRecord( 1 );
