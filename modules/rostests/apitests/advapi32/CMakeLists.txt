@@ -50,6 +50,7 @@ list(APPEND SOURCE
     RegPerformanceData.c
     RegQueryInfoKey.c
     RegQueryValueExW.c
+    RegKeyNameCase.c
     RegRenameKey.c
     RegGetValue.c
     RtlEncryptMemory.c

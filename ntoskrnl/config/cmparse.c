@@ -1034,8 +1034,16 @@ CmpCreateLinkNode(IN PHHIVE Hive,
         /* Now add the subkey */
         if (!CmpAddSubKey(Hive, Cell, LinkCell))
         {
-            /* Failure! We don't handle this yet! */
-            ASSERT(FALSE);
+            /*
+             * Not linked (no cell for the master hive's index): give the link
+             * node back. The child hive's root was only pointed at it
+             * (Parent), so the hive load fails as for any other error here;
+             * the caller then drops the hive.
+             */
+            HvReleaseCell(Hive, Cell);
+            HvFreeCell(Hive, LinkCell);
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Exit;
         }
 
         /* Get the key body */

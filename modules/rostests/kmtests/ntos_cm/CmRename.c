@@ -192,6 +192,36 @@ START_TEST(CmRename)
         ZwClose(Check);
     }
 
+    /* The direct children of the master hive hold the hives up... */
+    Status = OpenKey(NULL, L"\\Registry\\Machine", KEY_READ, &Check);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = RenameKey(Check, L"ReactOS kmtest CmRename machine");
+        ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+        ZwClose(Check);
+    }
+    Status = OpenKey(NULL, L"\\Registry\\User", KEY_READ, &Check);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = RenameKey(Check, L"ReactOS kmtest CmRename user");
+        ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+        ZwClose(Check);
+    }
+
+    /* ... the keys below are ordinary volatile keys of that hive (unmeasured on Windows) */
+    Check = CreateKey(NULL, L"\\Registry\\Machine\\HARDWARE\\ReactOS kmtest CmRename", REG_OPTION_VOLATILE);
+    if (Check)
+    {
+        Status = RenameKey(Check, L"ReactOS kmtest CmRename 2");
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok(NameEndsWith(Check, L"\\HARDWARE\\ReactOS kmtest CmRename 2"), "master hive key name\n");
+        Status = ZwDeleteKey(Check);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(Check);
+    }
+
     /* A deleted key */
     Status = ZwDeleteKey(Sibling);
     ok_eq_hex(Status, STATUS_SUCCESS);
