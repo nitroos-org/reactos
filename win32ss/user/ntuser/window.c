@@ -545,7 +545,10 @@ UserFreeWindowInfo(PTHREADINFO ti, PWND Wnd)
 
     if (!Wnd) return;
 
-    if (ClientInfo->CallbackWnd.pWnd == DesktopHeapAddressToUser(Wnd))
+    /* A desktop window is never the callback window of a thread, and a thread that
+       frees one for a deleted desktop may not have a TEB at all */
+    if (Wnd->head.pti != gptiDesktopThread &&
+        ClientInfo->CallbackWnd.pWnd == DesktopHeapAddressToUser(Wnd))
     {
         ClientInfo->CallbackWnd.hWnd = NULL;
         ClientInfo->CallbackWnd.pWnd = NULL;
