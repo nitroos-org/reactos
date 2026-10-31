@@ -881,6 +881,8 @@ static VOID set_installer_properties(MSIPACKAGE *package)
         GetSystemWow64DirectoryW( pth, MAX_PATH );
         PathAddBackslashW( pth );
         msi_set_property( package->db, L"SystemFolder", pth, -1 );
+        /* There are no 16-bit programs on a 64-bit system, Windows does not set this one */
+        msi_set_property( package->db, L"System16Folder", NULL, 0 );
 
         len = sizeof(pth);
         RegQueryValueExW(hkey, L"ProgramFilesDir", 0, &type, (BYTE *)pth, &len);
