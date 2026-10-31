@@ -676,6 +676,14 @@ IntCoalesceMouseMove(PTHREADINFO pti)
 VOID FASTCALL
 co_MsqInsertMouseMessage(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook)
 {
+   co_MsqInsertMouseMessageEx(Msg, flags, dwExtraInfo, Hook, 0);
+}
+
+/* dwHookTime: the time SendInput or mouse_event supplied for the event, for the low-level hook; zero is the time of
+   the event itself */
+VOID FASTCALL
+co_MsqInsertMouseMessageEx(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook, DWORD dwHookTime)
+{
    MSLLHOOKSTRUCT MouseHookData;
 //   PDESKTOP pDesk;
    PWND pwnd, pwndDesktop;
@@ -709,7 +717,7 @@ co_MsqInsertMouseMessage(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook
    }
 
    MouseHookData.flags = flags; // LLMHF_INJECTED
-   MouseHookData.time = Msg->time;
+   MouseHookData.time = dwHookTime ? dwHookTime : Msg->time;
    MouseHookData.dwExtraInfo = dwExtraInfo;
 
    /* If the hook procedure returned non zero, dont send the message */
