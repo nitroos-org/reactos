@@ -319,6 +319,8 @@
 @ stdcall -version=0x601+ GetGestureInfo(long ptr)
 @ stdcall GetGuiResources(long long) NtUserGetGuiResources
 @ stdcall GetIconInfo(long ptr)
+@ stdcall -version=0x600+ GetIconInfoExA(long ptr)
+@ stdcall -version=0x600+ GetIconInfoExW(long ptr)
 @ stdcall GetInputDesktop()
 @ stdcall GetInputState()
 @ stdcall GetInternalWindowPos(long ptr ptr) NtUserGetInternalWindowPos

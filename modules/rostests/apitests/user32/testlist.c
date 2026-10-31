@@ -112,6 +112,7 @@ extern void func_WndProc(void);
 extern void func_Win8User(void);
 extern void func_PhysicalCoords(void);
 extern void func_DialogDpiBehavior(void);
+extern void func_GetIconInfoEx(void);
 extern void func_wsprintfApi(void);
 
 const struct test winetest_testlist[] =
@@ -223,6 +224,7 @@ const struct test winetest_testlist[] =
     { "Win8User", func_Win8User },
     { "PhysicalCoords", func_PhysicalCoords },
     { "DialogDpiBehavior", func_DialogDpiBehavior },
+    { "GetIconInfoEx", func_GetIconInfoEx },
     { "WinEventHook", func_WinEventHook },
     { "WmPrint", func_WmPrint },
     { "WndProc", func_WndProc },
