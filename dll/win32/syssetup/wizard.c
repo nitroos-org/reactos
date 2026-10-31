@@ -2414,12 +2414,26 @@ RegisterWow64Dlls(VOID)
          * clients (installers, VBScript from SysWOW64) create them by CLSID */
         L"wbem\\wbemprox.dll", L"wbem\\wbemdisp.dll", L"wbem\\wmiutils.dll",
         /* Script engines and WScript.Shell/FileSystemObject for 32-bit scripts */
-        L"vbscript.dll", L"jscript.dll", L"scrrun.dll", L"wshom.ocx"
+        L"vbscript.dll", L"jscript.dll", L"scrrun.dll", L"wshom.ocx",
+        /* The COM servers among the other SysWOW64 files (DirectShow, DirectMusic,
+         * DirectPlay, ATL, the shell and Internet helpers): the same set that setup
+         * registers for the native view (OleControlDlls in syssetup.inf) */
+        L"atl.dll", L"acppage.dll", L"amstream.dll", L"cabview.dll", L"comcat.dll",
+        /* quartz and devenum register through each other: whichever goes first fails once, so
+         * the loop below retries a failed DLL after the others */
+        L"d3dxof.dll", L"quartz.dll", L"devenum.dll", L"qcap.dll", L"qedit.dll",
+        L"dmband.dll", L"dmcompos.dll", L"dmime.dll", L"dmloader.dll", L"dmscript.dll",
+        L"dmstyle.dll", L"dmusic.dll", L"dplayx.dll", L"dpnet.dll", L"dpnhupnp.dll",
+        L"dxdiagn.dll", L"fontext.dll", L"hlink.dll", L"hnetcfg.dll", L"ieproxy.dll",
+        L"inetcomm.dll", L"inseng.dll", L"itss.dll", L"mmcshext.dll", L"mstask.dll",
+        L"msxml6.dll", L"objsel.dll", L"pstorec.dll", L"sendmail.dll", L"sti.dll",
+        L"stobject.dll"
     };
     WCHAR Directory[MAX_PATH], Application[MAX_PATH], Command[2 * MAX_PATH + 64];
     STARTUPINFOW Startup = {sizeof(Startup)};
     PROCESS_INFORMATION Process;
-    DWORD Count, i, ExitCode, Wait, Error;
+    DWORD Count, i, Pass, ExitCode, Wait, Error, Result = ERROR_SUCCESS;
+    DWORD Failed[sizeof(Dlls) / sizeof(Dlls[0])] = {0};
 
     Count = GetWindowsDirectoryW(Directory, ARRAYSIZE(Directory));
     if (!Count) return GetLastError();
@@ -2428,34 +2442,41 @@ RegisterWow64Dlls(VOID)
     wcscat(Directory, L"\\SysWOW64");
     wcscpy(Application, Directory);
     wcscat(Application, L"\\regsvr32.exe");
-    for (i = 0; i < ARRAYSIZE(Dlls); ++i)
+    /* Pass 0 registers every DLL; pass 1 repeats those that failed, now that the rest is in place
+     * (quartz and devenum need each other). A failure does not stop the remaining DLLs. */
+    for (Pass = 0; Pass < 2; ++Pass)
     {
-        _snwprintf(Command, ARRAYSIZE(Command), L"\"%s\" /s \"%s\\%s\"",
-                   Application, Directory, Dlls[i]);
-        if (!CreateProcessW(Application, Command, NULL, NULL, FALSE, 0,
-                            NULL, NULL, &Startup, &Process))
-            return GetLastError();
-        Wait = WaitForSingleObject(Process.hProcess, 60000);
-        if (Wait == WAIT_OBJECT_0)
+        for (i = 0; i < ARRAYSIZE(Dlls); ++i)
         {
-            Error = GetExitCodeProcess(Process.hProcess, &ExitCode) ?
-                    (ExitCode ? ERROR_DLL_INIT_FAILED : ERROR_SUCCESS) : GetLastError();
-        }
-        else
-        {
-            Error = Wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
-            TerminateProcess(Process.hProcess, Error);
-            WaitForSingleObject(Process.hProcess, INFINITE);
-        }
-        CloseHandle(Process.hThread);
-        CloseHandle(Process.hProcess);
-        if (Error)
-        {
-            DPRINT1("SysWOW64 registration of %S failed: %lu\n", Dlls[i], Error);
-            return Error;
+            if (Pass && !Failed[i]) continue;
+            _snwprintf(Command, ARRAYSIZE(Command), L"\"%s\" /s \"%s\\%s\"",
+                       Application, Directory, Dlls[i]);
+            if (!CreateProcessW(Application, Command, NULL, NULL, FALSE, 0,
+                                NULL, NULL, &Startup, &Process))
+                return GetLastError();
+            Wait = WaitForSingleObject(Process.hProcess, 60000);
+            if (Wait == WAIT_OBJECT_0)
+            {
+                Error = GetExitCodeProcess(Process.hProcess, &ExitCode) ?
+                        (ExitCode ? ERROR_DLL_INIT_FAILED : ERROR_SUCCESS) : GetLastError();
+            }
+            else
+            {
+                Error = Wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+                TerminateProcess(Process.hProcess, Error);
+                WaitForSingleObject(Process.hProcess, INFINITE);
+            }
+            CloseHandle(Process.hThread);
+            CloseHandle(Process.hProcess);
+            Failed[i] = Error;
+            if (Error && Pass)
+            {
+                DPRINT1("SysWOW64 registration of %S failed: %lu\n", Dlls[i], Error);
+                if (Result == ERROR_SUCCESS) Result = Error;
+            }
         }
     }
-    return ERROR_SUCCESS;
+    return Result;
 }
 
 /* The .NET Framework shim finds the runtime through
