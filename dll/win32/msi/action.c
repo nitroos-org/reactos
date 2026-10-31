@@ -2639,15 +2639,14 @@ static WCHAR *join_multi_string_values( enum join_op op, WCHAR **old, DWORD old_
     }
 }
 
-static BYTE *build_multi_string_value( BYTE *old_value, DWORD old_size,
-                                       BYTE *new_value, DWORD new_size, DWORD *size )
+/* Split the data of a multi-string registry record into its strings and the way they combine with the old value. */
+static WCHAR **parse_new_multi_string_values( BYTE *new_value, DWORD new_size, enum join_op *op, DWORD *count )
 {
-    DWORD i, old_len = 0, new_len = 0, old_count = 0, new_count = 0;
-    const WCHAR *new_ptr = NULL, *old_ptr = NULL;
-    enum join_op op = JOIN_OP_REPLACE;
-    WCHAR **old = NULL, **new = NULL;
-    BYTE *ret;
+    const WCHAR *new_ptr = NULL;
+    DWORD new_len = 0;
 
+    *op = JOIN_OP_REPLACE;
+    *count = 0;
     if (new_size / sizeof(WCHAR) - 1 > 1)
     {
         new_ptr = (const WCHAR *)new_value;
@@ -2655,23 +2654,36 @@ static BYTE *build_multi_string_value( BYTE *old_value, DWORD old_size,
 
         if (!new_ptr[0] && new_ptr[new_len - 1])
         {
-            op = JOIN_OP_APPEND;
+            *op = JOIN_OP_APPEND;
             new_len--;
             new_ptr++;
         }
         else if (new_ptr[0] && !new_ptr[new_len - 1])
         {
-            op = JOIN_OP_PREPEND;
+            *op = JOIN_OP_PREPEND;
             new_len--;
         }
         else if (new_len > 2 && !new_ptr[0] && !new_ptr[new_len - 1])
         {
-            op = JOIN_OP_REPLACE;
+            *op = JOIN_OP_REPLACE;
             new_len -= 2;
             new_ptr++;
         }
-        new = split_multi_string_values( new_ptr, new_len, &new_count );
+        return split_multi_string_values( new_ptr, new_len, count );
     }
+    return NULL;
+}
+
+static BYTE *build_multi_string_value( BYTE *old_value, DWORD old_size,
+                                       BYTE *new_value, DWORD new_size, DWORD *size )
+{
+    DWORD i, old_len = 0, old_count = 0, new_count = 0;
+    const WCHAR *old_ptr = NULL;
+    enum join_op op;
+    WCHAR **old = NULL, **new;
+    BYTE *ret;
+
+    new = parse_new_multi_string_values( new_value, new_size, &op, &new_count );
     if (old_size / sizeof(WCHAR) - 1 > 1)
     {
         old_ptr = (const WCHAR *)old_value;
@@ -2679,6 +2691,30 @@ static BYTE *build_multi_string_value( BYTE *old_value, DWORD old_size,
         old = split_multi_string_values( old_ptr, old_len, &old_count );
     }
     ret = (BYTE *)join_multi_string_values( op, old, old_count, new, new_count, size );
+    for (i = 0; i < old_count; i++) free( old[i] );
+    for (i = 0; i < new_count; i++) free( new[i] );
+    free( old );
+    free( new );
+    return ret;
+}
+
+/* Take the strings a record added out of an existing value; NULL when none are left. */
+static BYTE *remove_multi_string_value( BYTE *old_value, DWORD old_size,
+                                        BYTE *new_value, DWORD new_size, DWORD *size )
+{
+    DWORD i, old_count = 0, new_count = 0;
+    enum join_op op;
+    WCHAR **old = NULL, **new;
+    BYTE *ret = NULL;
+
+    new = parse_new_multi_string_values( new_value, new_size, &op, &new_count );
+    if (old_size / sizeof(WCHAR) - 1 > 1)
+        old = split_multi_string_values( (const WCHAR *)old_value, old_size / sizeof(WCHAR) - 1, &old_count );
+    if (old)
+    {
+        DWORD left = remove_duplicate_values( old, old_count, new, new_count );
+        if (left) ret = (BYTE *)flatten_multi_string_values( old, left, NULL, 0, size );
+    }
     for (i = 0; i < old_count; i++) free( old[i] );
     for (i = 0; i < new_count; i++) free( new[i] );
     free( old );
@@ -2907,6 +2943,47 @@ static void delete_tree( const MSICOMPONENT *comp, HKEY root, const WCHAR *path 
     RegCloseKey( hkey );
 }
 
+/* A multi-string record only owns its strings: remove those and keep the rest of the value.
+ * Returns FALSE when the value is to be deleted as a whole. */
+static BOOL remove_multi_string_registry_value( MSIPACKAGE *package, MSIRECORD *row, const MSICOMPONENT *comp,
+                                                HKEY root, const WCHAR *path, const WCHAR *name )
+{
+    BYTE *new_value, *old_value, *left;
+    DWORD type, old_type, new_size, old_size, left_size, len;
+    WCHAR *deformated;
+    const WCHAR *str;
+    BOOL ret = FALSE;
+    HKEY hkey;
+
+    if (MSI_RecordIsNull( row, 5 )) return FALSE;
+    str = msi_record_get_string( row, 5, NULL );
+    len = deformat_string( package, str, &deformated );
+    new_value = parse_value( package, deformated, len, &type, &new_size );
+    free( deformated );
+    if (!new_value || type != REG_MULTI_SZ)
+    {
+        free( new_value );
+        return FALSE;
+    }
+    if (!(hkey = open_key( comp, root, path, FALSE, KEY_QUERY_VALUE | KEY_SET_VALUE )))
+    {
+        free( new_value );
+        return FALSE;
+    }
+    old_value = reg_get_value( hkey, name, &old_type, &old_size );
+    if (old_value && old_type == REG_MULTI_SZ &&
+        (left = remove_multi_string_value( old_value, old_size, new_value, new_size, &left_size )))
+    {
+        RegSetValueExW( hkey, name, 0, REG_MULTI_SZ, left, left_size );
+        free( left );
+        ret = TRUE;
+    }
+    RegCloseKey( hkey );
+    free( old_value );
+    free( new_value );
+    return ret;
+}
+
 static UINT ITERATE_RemoveRegistryValuesOnUninstall( MSIRECORD *row, LPVOID param )
 {
     MSIPACKAGE *package = param;
@@ -2961,7 +3038,8 @@ static UINT ITERATE_RemoveRegistryValuesOnUninstall( MSIRECORD *row, LPVOID para
     deformat_string( package, name, &deformated_name );
 
     if (delete_key) delete_tree( comp, hkey_root, deformated_key );
-    else delete_value( comp, hkey_root, deformated_key, deformated_name );
+    else if (!remove_multi_string_registry_value( package, row, comp, hkey_root, deformated_key, deformated_name ))
+        delete_value( comp, hkey_root, deformated_key, deformated_name );
     free( deformated_key );
 
     uirow = MSI_CreateRecord( 2 );
