@@ -687,6 +687,12 @@ MiSegmentDelete(IN PSEGMENT Segment)
                  */
                 MiDecrementShareCount(MI_PFN_ELEMENT(Pfn1->u4.PteFrame), Pfn1->u4.PteFrame);
 
+                /*
+                 * Nothing maps it any more. This is not ShareCount == 0: on a list the
+                 * field holds the Blink link.
+                 */
+                ASSERT(Pfn1->u3.e1.PageLocation != ActiveAndValid);
+
                 /* A page still locked (by an MDL) is freed by its last dereference */
                 if (Pfn1->u3.e2.ReferenceCount == 0)
                 {
