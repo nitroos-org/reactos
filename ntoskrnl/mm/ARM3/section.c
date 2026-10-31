@@ -674,21 +674,32 @@ MiSegmentDelete(IN PSEGMENT Segment)
                 DPRINT("Releasing page for transition PTE %p\n", PointerPte);
                 PageFrameIndex = PFN_FROM_PTE(&TempPte);
                 Pfn1 = MI_PFN_ELEMENT(PageFrameIndex);
+                ASSERT(Pfn1->u3.e1.PrototypePte == 1);
+                ASSERT(Pfn1->PteAddress == PointerPte);
 
-                /* As this is a paged-backed section, nobody should reference it anymore (no cache or whatever) */
-                ASSERT(Pfn1->u3.ReferenceCount == 0);
-
-                /* And it should be in standby or modified list */
-                ASSERT((Pfn1->u3.e1.PageLocation == ModifiedPageList) || (Pfn1->u3.e1.PageLocation == StandbyPageList));
-
-                /* Unlink it and put it back in free list */
-                MiUnlinkPageFromList(Pfn1);
-
-                /* Temporarily mark this as active and make it free again */
-                Pfn1->u3.e1.PageLocation = ActiveAndValid;
+                /* The page is gone with its prototype PTE */
                 MI_SET_PFN_DELETED(Pfn1);
 
-                MiInsertPageInFreeList(PageFrameIndex);
+                /*
+                 * Since it was made valid, the page has held a share count on the
+                 * page of the segment that holds its prototype PTE. Drop it now, or
+                 * that page stays in use after the segment is freed.
+                 */
+                MiDecrementShareCount(MI_PFN_ELEMENT(Pfn1->u4.PteFrame), Pfn1->u4.PteFrame);
+
+                /* A page still locked (by an MDL) is freed by its last dereference */
+                if (Pfn1->u3.e2.ReferenceCount == 0)
+                {
+                    /* Otherwise it is in the standby or modified list */
+                    ASSERT((Pfn1->u3.e1.PageLocation == ModifiedPageList) || (Pfn1->u3.e1.PageLocation == StandbyPageList));
+
+                    /* Unlink it and put it back in free list */
+                    MiUnlinkPageFromList(Pfn1);
+
+                    /* Temporarily mark this as active and make it free again */
+                    Pfn1->u3.e1.PageLocation = ActiveAndValid;
+                    MiInsertPageInFreeList(PageFrameIndex);
+                }
             }
             else if (TempPte.u.Soft.PageFileHigh != 0)
             {

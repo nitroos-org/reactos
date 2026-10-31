@@ -218,6 +218,7 @@ list(APPEND SOURCE
     RtlUpcaseUnicodeStringToCountedOemString.c
     RtlValidateUnicodeString.c
     SectionFaultCost.c
+    SectionPageLeak.c
     strcpy_s.c
     RtlWaitOnAddress.c
     RtlxUnicodeStringToAnsiSize.c
