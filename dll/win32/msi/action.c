@@ -6927,6 +6927,8 @@ static UINT ITERATE_WriteEnvironmentString( MSIRECORD *rec, LPVOID param )
     size = 0;
     type = REG_SZ;
     res = RegQueryValueExW(env, name, NULL, &type, NULL, &size);
+    /* Windows sets the type to REG_NONE when the value does not exist, and a new value must be REG_SZ. */
+    if (res == ERROR_FILE_NOT_FOUND) type = REG_SZ;
     if ((res != ERROR_SUCCESS && res != ERROR_FILE_NOT_FOUND) ||
         (res == ERROR_SUCCESS && type != REG_SZ && type != REG_EXPAND_SZ))
         goto done;
