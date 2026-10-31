@@ -584,6 +584,9 @@ static HRESULT WINAPI class_object_Get(
 
     TRACE("%p, %s, %08x, %p, %p, %p\n", iface, debugstr_w(wszName), lFlags, pVal, pType, plFlavor);
 
+#ifdef __REACTOS__
+    if (!wszName) return WBEM_E_INVALID_PARAMETER;
+#endif
     if (co->record)
     {
         UINT index;
@@ -959,13 +962,22 @@ static HRESULT WINAPI class_object_GetObjectText(
 {
     struct class_object *co = impl_from_IWbemClassObject( iface );
     struct enum_class_object *ec = impl_from_IEnumWbemClassObject( co->iter );
-    struct view *view = ec->query->view;
+    struct view *view;
     BSTR text;
 
     TRACE("%p, %08x, %p\n", iface, lFlags, pstrObjectText);
 
     if (lFlags) FIXME("flags %08x not implemented\n", lFlags);
 
+#ifdef __REACTOS__
+    /* only the text of an instance (a row of a view) is produced: not a class definition, whose view has
+     * no rows, nor the object of a record */
+    if (!co->iter) return E_NOTIMPL;
+    view = ec->query->view;
+    if (co->index >= view->result_count) return E_NOTIMPL;
+#else
+    view = ec->query->view;
+#endif
     if (!(text = get_object_text( view, co->index ))) return E_OUTOFMEMORY;
     *pstrObjectText = text;
     return S_OK;

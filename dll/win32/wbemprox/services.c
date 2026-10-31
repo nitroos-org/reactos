@@ -406,7 +406,12 @@ HRESULT parse_path( const WCHAR *str, struct path **ret )
     }
 
     q = p;
+#ifdef __REACTOS__
+    while (*p && *p != '.' && !(p[0] == '=' && p[1] == '@' && !p[2])) p++;
+    if (p[0] == '=') path->singleton = TRUE;
+#else
     while (*p && *p != '.') p++;
+#endif
 
     len = p - q;
     if (!(path->class = heap_alloc( (len + 1) * sizeof(WCHAR) )))
@@ -516,7 +521,7 @@ HRESULT get_object( const WCHAR *object_path, IWbemClassObject **obj )
     if (hr != S_OK) return hr;
 
 #ifdef __REACTOS__
-    if (!path->filter)
+    if (!path->filter && !path->singleton)
     {
         /* a class definition: never run a provider for it, nor for its subclasses (static data and
          * signature tables, which have no subclasses, keep their row of defaults) */
@@ -556,7 +561,7 @@ HRESULT get_object( const WCHAR *object_path, IWbemClassObject **obj )
         /* WMI: an unknown class is WBEM_E_NOT_FOUND, and so is a key path that matches no instance */
         hr = IEnumWbemClassObject_Next( iter, WBEM_INFINITE, 1, &first, &count );
         if (first) IWbemClassObject_Release( first );
-        if (hr == WBEM_E_INVALID_CLASS || (hr == WBEM_S_FALSE && path->filter))
+        if (hr == WBEM_E_INVALID_CLASS || (hr == WBEM_S_FALSE && (path->filter || path->singleton)))
         {
             IEnumWbemClassObject_Release( iter );
             free_path( path );
