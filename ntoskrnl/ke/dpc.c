@@ -505,9 +505,16 @@ KiQuantumEnd(VOID)
             /* Check if a new thread is scheduled */
             if (!Prcb->NextThread)
             {
-                /* Get a new ready thread; one that waits on another
-                   processor's list must have a higher priority */
+                /* Get a new ready thread of at least the same priority, from
+                   another processor's list when there is none on this one:
+                   when more threads of one priority are ready than there are
+                   processors, each processor that ends a quantum takes its
+                   turn, so they all share the processors, as on Windows. Of
+                   the same priority, only a thread that may run on every
+                   processor of the node; Windows leaves the others where
+                   they are */
                 NextThread = KiSelectReadyThreadAny(Prcb,
+                                                    Thread->Priority,
                                                     Thread->Priority,
                                                     Thread->Priority + 1);
                 if (NextThread)
