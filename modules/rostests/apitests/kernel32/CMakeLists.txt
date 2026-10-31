@@ -183,6 +183,7 @@ list(APPEND SOURCE
     UnhandledExceptionExit.c
     UnmapViewOfFileEx.c
     WaitOnAddress.c
+    WaitQuantum.c
     WerFlags.c
     WerRegisterMemoryFile.c
     WerRuntimeExceptionModule.c

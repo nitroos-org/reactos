@@ -917,56 +917,6 @@ KiReadyThread(IN PKTHREAD Thread)
 }
 
 VOID
-NTAPI
-KiAdjustQuantumThread(IN PKTHREAD Thread)
-{
-    PKPRCB Prcb = KeGetCurrentPrcb();
-    PKTHREAD NextThread;
-
-    /* Acquire thread and PRCB lock */
-    KiAcquireThreadLock(Thread);
-    KiAcquirePrcbLock(Prcb);
-
-    /* Don't adjust for RT threads */
-    if ((Thread->Priority < LOW_REALTIME_PRIORITY) &&
-        (Thread->BasePriority < (LOW_REALTIME_PRIORITY - 2)))
-    {
-        /* Decrease Quantum by one and see if we've ran out */
-        if (--Thread->Quantum <= 0)
-        {
-            /* Return quantum */
-            Thread->Quantum = Thread->QuantumReset;
-
-            /* Calculate new Priority */
-            Thread->Priority = KiComputeNewPriority(Thread, 1);
-
-            /* Check if there's no next thread scheduled */
-            if (!Prcb->NextThread)
-            {
-                /* Select a ready thread and check if we found one */
-                NextThread = KiSelectReadyThread(Thread->Priority, Prcb);
-                if (NextThread)
-                {
-                    /* Set it on standby and switch to it */
-                    NextThread->State = Standby;
-                    Prcb->NextThread = NextThread;
-                }
-            }
-            else
-            {
-                /* This thread can be preempted again */
-                Thread->Preempted = FALSE;
-            }
-        }
-    }
-
-    /* Release locks */
-    KiReleasePrcbLock(Prcb);
-    KiReleaseThreadLock(Thread);
-    KiExitDispatcher(Thread->WaitIrql);
-}
-
-VOID
 FASTCALL
 KiSetPriorityThread(IN PKTHREAD Thread,
                     IN KPRIORITY Priority)
