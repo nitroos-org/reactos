@@ -44,6 +44,8 @@ typedef struct
     WOW64_CPU_STATE *Previous;
     PVOID Native;
     ULONG NativeLength, GuestLength, Id, ExceptionList;
+    /* HOOKPROC callbacks: the hook the callback runs, read once from the native buffer */
+    INT HookId, Code;
     ULONG64 Handles[7];
 } CALLBACK_FRAME;
 
@@ -429,6 +431,7 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
     if (!Previous || !GuestDispatcher) return Status;
     Frame.Previous = Previous; Frame.Native = Buffer;
     Frame.NativeLength = Length; Frame.Id = Id;
+    Frame.HookId = Frame.Code = 0;
     Frame.ExceptionList = WOW64_TEB32(NtCurrentTeb())->NtTib.ExceptionList;
     _SEH2_TRY
     {
@@ -439,6 +442,7 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
             HOOKPROC_CALLBACK_ARGUMENTS *Native = Buffer;
             ULONG Base, NativeRecord, GuestRecord;
             if (Length < sizeof(*Native)) break;
+            Frame.HookId = Native->HookId; Frame.Code = Native->Code;
             if (Native->HookId != WH_CALLWNDPROC && Native->HookId != WH_CALLWNDPROCRET)
             {
                 if (!HookRecordSizes(Native->HookId, Native->Code, &NativeRecord, &GuestRecord))
@@ -652,9 +656,9 @@ NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Statu
             Native->Result = ((HOOK32 *)Buffer)->Result;
             /* The records win32k copies back; CALLWND hooks have no
              * message-buffer writeback contract. */
-            if (Native->HookId == WH_GETMESSAGE)
+            if (Frame->HookId == WH_GETMESSAGE)
                 Msg32ToNative((MSG *)(Native + 1), (const MSG32 *)((HOOK32 *)Buffer + 1));
-            else if (Native->HookId == WH_CBT && Native->Code == HCBT_CREATEWND)
+            else if (Frame->HookId == WH_CBT && Frame->Code == HCBT_CREATEWND)
             {
                 HOOKPROC_CBT_CREATEWND_EXTRA_ARGUMENTS *Create = (PVOID)(Native + 1);
                 const CBTCREATE32 *Guest = (const VOID *)((HOOK32 *)Buffer + 1);
@@ -663,7 +667,7 @@ NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Statu
                 /* HWND_TOPMOST and HWND_NOTOPMOST are negative */
                 Create->WndInsertAfter = H32(Guest->WndInsertAfter);
             }
-            else if (Native->HookId == WH_CBT && Native->Code == HCBT_MOVESIZE)
+            else if (Frame->HookId == WH_CBT && Frame->Code == HCBT_MOVESIZE)
                 RtlCopyMemory(Native + 1, (HOOK32 *)Buffer + 1, sizeof(RECTL));
             Output = Native; OutputLength = Frame->NativeLength;
             break;
@@ -744,7 +748,9 @@ ULONG_PTR Wow64WinCallNextHook(ULONG *a)
         RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED);
         return 0;
     }
-    HookId = ((HOOKPROC_CALLBACK_ARGUMENTS *)Frame->Native)->HookId;
+    HookId = Frame->HookId;
+    /* Padding and unread fields must not carry stack garbage to the next hook */
+    RtlZeroMemory(&Native, sizeof(Native));
     switch (HookId)
     {
     case WH_GETMESSAGE: case WH_MSGFILTER: case WH_SYSMSGFILTER:
@@ -767,7 +773,17 @@ ULONG_PTR Wow64WinCallNextHook(ULONG *a)
     case WH_MOUSE:
         if (!a[2]) break;
         Mouse32ToNative(&Native.Mouse.MOUSEHOOKSTRUCT, P32(a[2]));
-        Native.Mouse.mouseData = ((MOUSEHOOKEX32 *)P32(a[2]))->mouseData;
+        /* Windows reads the MOUSEHOOKSTRUCTEX; a caller may have chained the plain 20-byte record
+         * whose end is the end of its memory. Like win32k, keep mouseData zero when it is not there. */
+        _SEH2_TRY
+        {
+            Native.Mouse.mouseData = ((MOUSEHOOKEX32 *)P32(a[2]))->mouseData;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Native.Mouse.mouseData = 0;
+        }
+        _SEH2_END;
         Lparam = (LPARAM)&Native.Mouse;
         break;
     case WH_KEYBOARD: case WH_SHELL: case WH_FOREGROUNDIDLE:
