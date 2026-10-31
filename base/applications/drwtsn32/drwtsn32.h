@@ -82,6 +82,7 @@ void GetProblemSignature(DumpData& data, ProblemSignature& Signature);
 void WriteApplicationErrorEvent(DumpData& data, const ProblemSignature& Signature);
 
 /* crashdlg.cpp */
+bool CanShowUi();
 int ShowCrashDialog(DumpData& data, const ProblemSignature& Signature, LPCWSTR DumpPath, LPCWSTR ReportPath,
                     bool OfferDebug);
 
