@@ -85,7 +85,8 @@ list(APPEND SOURCE
     winnls/string/idn.c
     winnls/string/IdnToAscii.c
     winnls/string/IdnToUnicode.c
-    winnls/string/nameprep.c
+    winnls/string/normalize.c
+    winnls/string/normdata.c
     client/actctx.c
     client/appcache.c
     client/atom.c
