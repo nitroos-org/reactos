@@ -11,6 +11,7 @@
  */
 
 #include <apitest.h>
+#include <stdio.h>
 #include <string.h>
 #include <windef.h>
 #include <winbase.h>
@@ -151,9 +152,95 @@ static void test_wrappers(HMODULE module)
         FreeLibrary(ret);
 }
 
+#ifndef PF_FASTFAIL_AVAILABLE
+#define PF_FASTFAIL_AVAILABLE 23
+#endif
+#define EH_EXCEPTION_NUMBER     0xE06D7363
+#ifndef STATUS_STACK_BUFFER_OVERRUN
+#define STATUS_STACK_BUFFER_OVERRUN 0xC0000409
+#endif
+
+/* A C++ exception that reaches __FrameUnwindFilter, and abort(), end the process through terminate: the process
+ * is gone at once with STATUS_STACK_BUFFER_OVERRUN (__fastfail), on x86 as on x64. The crash handler must not
+ * be involved: an unattended machine used to hang in it on i386, where the fast fail was not available. */
+static void child_run(const char *mode)
+{
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    if (!strcmp(mode, "abort"))
+    {
+        void (__cdecl *abort_fn)(void) = (void *)GetProcAddress(LoadLibraryA("ucrtbase.dll"), "abort");
+
+        if (abort_fn)
+            abort_fn();
+    }
+    else
+    {
+        HMODULE module = LoadLibraryA("vcruntime140.dll");
+        FrameUnwindFilter_t filter = (void *)GetProcAddress(module, "__FrameUnwindFilter");
+        processing_throw_t processing = (void *)GetProcAddress(module, "__processing_throw");
+        EXCEPTION_RECORD record;
+        EXCEPTION_POINTERS pointers;
+        CONTEXT context;
+
+        if (filter && processing)
+        {
+            *processing() = 3;
+            memset(&record, 0, sizeof(record));
+            memset(&context, 0, sizeof(context));
+            record.ExceptionCode = EH_EXCEPTION_NUMBER;
+            pointers.ExceptionRecord = &record;
+            pointers.ContextRecord = &context;
+            filter(&pointers);
+        }
+    }
+    ExitProcess(0x7E57DEAD);   /* the process was not ended */
+}
+
+static void test_terminate_child(const char *exe, const char *mode)
+{
+    char command[MAX_PATH + 64];
+    STARTUPINFOA startup;
+    PROCESS_INFORMATION info;
+    DWORD wait, code = 0;
+
+    sprintf(command, "\"%s\" FrameHelpers %s", exe, mode);
+    memset(&startup, 0, sizeof(startup));
+    startup.cb = sizeof(startup);
+    if (!CreateProcessA(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &info))
+    {
+        skip("CreateProcess failed: %lu\n", GetLastError());
+        return;
+    }
+    wait = WaitForSingleObject(info.hProcess, 60000);
+    ok(wait == WAIT_OBJECT_0, "%s: the child did not end (%lu)\n", mode, wait);
+    if (wait != WAIT_OBJECT_0)
+        TerminateProcess(info.hProcess, 0);
+    else
+    {
+        GetExitCodeProcess(info.hProcess, &code);
+        ok(code == STATUS_STACK_BUFFER_OVERRUN, "%s: exit code %08lx\n", mode, code);
+    }
+    CloseHandle(info.hThread);
+    CloseHandle(info.hProcess);
+}
+
 START_TEST(FrameHelpers)
 {
-    HMODULE module = LoadLibraryA("vcruntime140.dll");
+    HMODULE module;
+    char **argv;
+    int argc = winetest_get_mainargs(&argv);
+
+    if (argc >= 4 && !strcmp(argv[2], "child"))
+    {
+        child_run(argv[3]);
+        return;
+    }
+
+    ok(IsProcessorFeaturePresent(PF_FASTFAIL_AVAILABLE), "fast fail is not available\n");
+    test_terminate_child(argv[0], "child filter");
+    test_terminate_child(argv[0], "child abort");
+
+    module = LoadLibraryA("vcruntime140.dll");
 
     if (!module)
     {

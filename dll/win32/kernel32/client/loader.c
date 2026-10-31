@@ -568,6 +568,10 @@ FreeLibraryAndExitThread(HMODULE hLibModule,
 
 /*
  * @implemented
+ *
+ * Like Windows (XP and later): when the name does not fit, it is truncated to
+ * nSize - 1 characters plus a terminating zero, the return value is nSize and
+ * the last error is ERROR_INSUFFICIENT_BUFFER. A success clears the last error.
  */
 DWORD
 WINAPI
@@ -578,10 +582,20 @@ GetModuleFileNameA(HINSTANCE hModule,
     UNICODE_STRING FilenameW;
     ANSI_STRING FilenameA;
     NTSTATUS Status;
-    DWORD Length = 0, LengthToCopy;
+    DWORD Length, LengthW, LastError, BufferChars;
+    BOOLEAN Truncated;
+
+    if (nSize == 0)
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+
+    /* A module path never needs more than 32K characters */
+    BufferChars = min(nSize, 0x8000);
 
     /* Allocate a unicode buffer */
-    FilenameW.Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, nSize * sizeof(WCHAR));
+    FilenameW.Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, BufferChars * sizeof(WCHAR));
     if (!FilenameW.Buffer)
     {
         BaseSetLastNTError(STATUS_NO_MEMORY);
@@ -589,39 +603,50 @@ GetModuleFileNameA(HINSTANCE hModule,
     }
 
     /* Call unicode API */
-    FilenameW.Length = (USHORT)GetModuleFileNameW(hModule, FilenameW.Buffer, nSize) * sizeof(WCHAR);
-    FilenameW.MaximumLength = FilenameW.Length + sizeof(WCHAR);
-
-    if (FilenameW.Length)
+    LengthW = GetModuleFileNameW(hModule, FilenameW.Buffer, BufferChars);
+    LastError = GetLastError();
+    if (LengthW == 0)
     {
-        /* Convert to ansi string */
-        Status = BasepUnicodeStringTo8BitString(&FilenameA, &FilenameW, TRUE);
-        if (!NT_SUCCESS(Status))
-        {
-            /* Set last error, free string and return failure */
-            BaseSetLastNTError(Status);
-            RtlFreeUnicodeString(&FilenameW);
-            return 0;
-        }
-
-        /* Calculate size to copy */
-        Length = min(nSize, FilenameA.Length);
-
-        /* Include terminating zero */
-        if (nSize > Length)
-            LengthToCopy = Length + 1;
-        else
-            LengthToCopy = nSize;
-
-        /* Now copy back to the caller amount he asked */
-        RtlMoveMemory(lpFilename, FilenameA.Buffer, LengthToCopy);
-
-        /* Free ansi filename */
-        RtlFreeAnsiString(&FilenameA);
+        /* Failure: the last error is already set */
+        RtlFreeHeap(RtlGetProcessHeap(), 0, FilenameW.Buffer);
+        return 0;
     }
 
-    /* Free unicode filename */
+    /* A truncated string is zero terminated and counted with the zero */
+    Truncated = (LastError == ERROR_INSUFFICIENT_BUFFER);
+    if (Truncated) LengthW--;
+    FilenameW.Length = (USHORT)(LengthW * sizeof(WCHAR));
+    FilenameW.MaximumLength = FilenameW.Length + sizeof(WCHAR);
+
+    /* Convert to ansi string */
+    Status = BasepUnicodeStringTo8BitString(&FilenameA, &FilenameW, TRUE);
     RtlFreeHeap(RtlGetProcessHeap(), 0, FilenameW.Buffer);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Set last error and return failure */
+        BaseSetLastNTError(Status);
+        return 0;
+    }
+
+    if (!Truncated && FilenameA.Length < nSize)
+    {
+        /* Copy with the terminating zero */
+        Length = FilenameA.Length;
+        RtlMoveMemory(lpFilename, FilenameA.Buffer, Length);
+        lpFilename[Length] = ANSI_NULL;
+        SetLastError(ERROR_SUCCESS);
+    }
+    else
+    {
+        /* Truncate, keep the terminating zero */
+        Length = nSize;
+        RtlMoveMemory(lpFilename, FilenameA.Buffer, min(FilenameA.Length, nSize - 1));
+        lpFilename[min(FilenameA.Length, nSize - 1)] = ANSI_NULL;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+    }
+
+    /* Free ansi filename */
+    RtlFreeAnsiString(&FilenameA);
 
     /* Return length copied */
     return Length;
@@ -638,14 +663,13 @@ GetModuleFileNameW(HINSTANCE hModule,
 {
     PLIST_ENTRY ModuleListHead, Entry;
     PLDR_DATA_TABLE_ENTRY Module;
-    ULONG Length = 0;
-    ULONG_PTR Cookie;
+    ULONG Length = 0, NameChars;
+    ULONG_PTR Cookie = 0;
+    BOOLEAN Locked = FALSE;
+    DWORD LastError = ERROR_MOD_NOT_FOUND;
     PPEB Peb;
 
     hModule = BasepMapModuleHandle(hModule, FALSE);
-
-    /* Upscale nSize from chars to bytes */
-    nSize *= sizeof(WCHAR);
 
     _SEH2_TRY
     {
@@ -656,6 +680,7 @@ GetModuleFileNameW(HINSTANCE hModule,
 
         /* Acquire a loader lock */
         LdrLockLoaderLock(LDR_LOCK_LOADER_LOCK_FLAG_RAISE_ON_ERRORS, NULL, &Cookie);
+        Locked = TRUE;
 
         /* Traverse the module list */
         ModuleListHead = &Peb->Ldr->InLoadOrderModuleList;
@@ -667,15 +692,30 @@ GetModuleFileNameW(HINSTANCE hModule,
             /* Check if this is the requested module */
             if (Module->DllBase == (PVOID)hModule)
             {
-                /* Calculate size to copy */
-                Length = min(nSize, Module->FullDllName.MaximumLength);
+                NameChars = Module->FullDllName.Length / sizeof(WCHAR);
 
-                /* Copy contents */
-                RtlMoveMemory(lpFilename, Module->FullDllName.Buffer, Length);
-
-                /* Subtract a terminating zero */
-                if (Length == Module->FullDllName.MaximumLength)
-                    Length -= sizeof(WCHAR);
+                if (nSize == 0)
+                {
+                    /* Nothing can be written */
+                    Length = 0;
+                    LastError = ERROR_INSUFFICIENT_BUFFER;
+                }
+                else if (nSize > NameChars)
+                {
+                    /* It fits, with the terminating zero */
+                    RtlMoveMemory(lpFilename, Module->FullDllName.Buffer, NameChars * sizeof(WCHAR));
+                    lpFilename[NameChars] = UNICODE_NULL;
+                    Length = NameChars;
+                    LastError = ERROR_SUCCESS;
+                }
+                else
+                {
+                    /* Truncate to nSize - 1 characters and a zero, return nSize */
+                    RtlMoveMemory(lpFilename, Module->FullDllName.Buffer, (nSize - 1) * sizeof(WCHAR));
+                    lpFilename[nSize - 1] = UNICODE_NULL;
+                    Length = nSize;
+                    LastError = ERROR_INSUFFICIENT_BUFFER;
+                }
 
                 /* Break out of the loop */
                 break;
@@ -687,14 +727,15 @@ GetModuleFileNameW(HINSTANCE hModule,
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
-        BaseSetLastNTError(_SEH2_GetExceptionCode());
+        LastError = RtlNtStatusToDosError(_SEH2_GetExceptionCode());
         Length = 0;
     } _SEH2_END
 
     /* Release the loader lock */
-    LdrUnlockLoaderLock(LDR_UNLOCK_LOADER_LOCK_FLAG_RAISE_ON_ERRORS, Cookie);
+    if (Locked) LdrUnlockLoaderLock(LDR_UNLOCK_LOADER_LOCK_FLAG_RAISE_ON_ERRORS, Cookie);
 
-    return Length / sizeof(WCHAR);
+    SetLastError(LastError);
+    return Length;
 }
 
 HMODULE
