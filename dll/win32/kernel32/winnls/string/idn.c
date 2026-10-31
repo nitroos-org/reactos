@@ -84,7 +84,8 @@ static INT IdnConvert(IDN_FUNC convert, DWORD dwFlags, LPCWSTR src, INT cchSrc, 
         SetLastError(ERROR_INVALID_NAME);
         return 0;
     }
-    return convert(dwFlags, src, cchSrc, dst, cchDst);
+    /* a size of zero is the size query, with or without a buffer */
+    return convert(dwFlags, src, cchSrc, cchDst ? dst : NULL, cchDst);
 }
 
 /******************************************************************************

@@ -5,6 +5,8 @@
 #define NDEBUG
 #include <debug.h>
 
+#include "normdata.h"
+
 #ifndef IDN_ALLOW_UNASSIGNED
 #define IDN_ALLOW_UNASSIGNED 0x01
 #define IDN_USE_STD3_ASCII_RULES 0x02
@@ -34,26 +36,19 @@ static inline INT adapt(INT delta, INT numpoints, BOOL firsttime)
     return k+((BASE-TMIN+1)*delta)/(delta+SKEW);
 }
 
-static inline unsigned short get_table_entry( const unsigned short *table, WCHAR ch )
-{
-    return table[table[table[ch >> 8] + ((ch >> 4) & 0x0f)] + (ch & 0xf)];
-}
-
 INT WINAPI IdnpToUnicode(DWORD dwFlags, LPCWSTR lpASCIICharStr, INT cchASCIIChar,
                          LPWSTR lpUnicodeCharStr, INT cchUnicodeChar)
 {
-    extern const unsigned short nameprep_char_type[];
-
-    INT i, label_start, label_end, out_label, out = 0;
+    INT i, label_start, label_end, out = 0;
     WCHAR ch;
+    ULONG lab[128];
 
     DPRINT("%x %p %d %p %d\n", dwFlags, lpASCIICharStr, cchASCIIChar,
            lpUnicodeCharStr, cchUnicodeChar);
 
     for(label_start=0; label_start<cchASCIIChar;) {
-        INT n = INIT_N, pos = 0, old_pos, w, k, bias = INIT_BIAS, delim=0, digit, t;
+        INT n = INIT_N, pos = 0, old_pos, w, k, bias = INIT_BIAS, delim=0, digit, t, cnt, units;
 
-        out_label = out;
         for(i=label_start; i<cchASCIIChar; i++) {
             ch = lpASCIICharStr[i];
 
@@ -117,17 +112,15 @@ INT WINAPI IdnpToUnicode(DWORD dwFlags, LPCWSTR lpASCIICharStr, INT cchASCIIChar
 
         if(delim == label_start+3)
             delim++;
-        if(!lpUnicodeCharStr) {
-            out += delim-label_start-4;
-        }else if(out+delim-label_start-4 <= cchUnicodeChar) {
-            memcpy(lpUnicodeCharStr+out, lpASCIICharStr+label_start+4,
-                    (delim-label_start-4)*sizeof(WCHAR));
-            out += delim-label_start-4;
-        }else {
-            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        /* the label is built as code points: the basic ones, then the decoded ones inserted at their places */
+        cnt = delim-label_start-4;
+        if(cnt > 63) {
+            SetLastError(ERROR_INVALID_NAME);
             return 0;
         }
-        if(out != out_label)
+        for(i=0; i<cnt; i++)
+            lab[i] = lpASCIICharStr[label_start+4+i];
+        if(cnt)
             delim++;
 
         for(i=delim; i<label_end;) {
@@ -140,38 +133,55 @@ INT WINAPI IdnpToUnicode(DWORD dwFlags, LPCWSTR lpASCIICharStr, INT cchASCIIChar
                     return 0;
                 }
                 digit = ch<='9' ? ch-'0'+'z'-'a'+1 : ch-'a';
+                if(digit && w > (0x7fffffff-pos)/digit) {
+                    SetLastError(ERROR_INVALID_NAME);
+                    return 0;
+                }
                 pos += digit*w;
                 t = k<=bias ? TMIN : k>=bias+TMAX ? TMAX : k-bias;
                 if(digit < t)
                     break;
+                if(w > 0x7fffffff/(BASE-t)) {
+                    SetLastError(ERROR_INVALID_NAME);
+                    return 0;
+                }
                 w *= BASE-t;
             }
-            bias = adapt(pos-old_pos, out-out_label+1, old_pos==0);
-            n += pos/(out-out_label+1);
-            pos %= out-out_label+1;
+            bias = adapt(pos-old_pos, cnt+1, old_pos==0);
+            n += pos/(cnt+1);
+            pos %= cnt+1;
 
-            if((dwFlags&IDN_ALLOW_UNASSIGNED)==0 &&
-                    get_table_entry(nameprep_char_type, n)==1/*UNASSIGNED*/) {
+            if(n > 0x10FFFF || (n >= 0xD800 && n < 0xE000) || cnt >= 64 ||
+                    ((dwFlags&IDN_ALLOW_UNASSIGNED)==0 && NormpIsUnassigned(n))) {
                 SetLastError(ERROR_INVALID_NAME);
                 return 0;
             }
-            if(!lpUnicodeCharStr) {
-                out++;
-            }else if(out+1 <= cchUnicodeChar) {
-                memmove(lpUnicodeCharStr+out_label+pos+1,
-                        lpUnicodeCharStr+out_label+pos,
-                        (out-out_label-pos)*sizeof(WCHAR));
-                lpUnicodeCharStr[out_label+pos] = n;
-                out++;
-            }else {
-                SetLastError(ERROR_INSUFFICIENT_BUFFER);
-                return 0;
-            }
+            memmove(lab+pos+1, lab+pos, (cnt-pos)*sizeof(ULONG));
+            lab[pos] = n;
+            cnt++;
             pos++;
         }
 
-        if(out-out_label > 63) {
+        if(cnt > 63) {
             SetLastError(ERROR_INVALID_NAME);
+            return 0;
+        }
+
+        for(i=0, units=0; i<cnt; i++)
+            units += lab[i] > 0xFFFF ? 2 : 1;
+        if(!lpUnicodeCharStr) {
+            out += units;
+        }else if(out+units <= cchUnicodeChar) {
+            for(i=0; i<cnt; i++) {
+                if(lab[i] > 0xFFFF) {
+                    lpUnicodeCharStr[out++] = (WCHAR)(0xD800 + ((lab[i]-0x10000) >> 10));
+                    lpUnicodeCharStr[out++] = (WCHAR)(0xDC00 + ((lab[i]-0x10000) & 0x3FF));
+                }else {
+                    lpUnicodeCharStr[out++] = (WCHAR)lab[i];
+                }
+            }
+        }else {
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
             return 0;
         }
 

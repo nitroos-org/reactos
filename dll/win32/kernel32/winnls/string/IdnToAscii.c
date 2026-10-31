@@ -5,6 +5,8 @@
 #define NDEBUG
 #include <debug.h>
 
+#include "normdata.h"
+
 #ifndef IDN_ALLOW_UNASSIGNED
 #define IDN_ALLOW_UNASSIGNED 0x01
 #define IDN_USE_STD3_ASCII_RULES 0x02
@@ -40,28 +42,42 @@ static inline INT adapt(INT delta, INT numpoints, BOOL firsttime)
     return k+((BASE-TMIN+1)*delta)/(delta+SKEW);
 }
 
-static inline unsigned short get_table_entry( const unsigned short *table, WCHAR ch )
+/* the units of a string as code points: a surrogate pair is one, any other unit is itself */
+static INT IdnpToCodePoints(const WCHAR *str, INT len, ULONG *cps)
 {
-    return table[table[table[ch >> 8] + ((ch >> 4) & 0x0f)] + (ch & 0xf)];
+    INT i = 0, n = 0;
+
+    while (i < len)
+    {
+        ULONG cp = str[i++];
+
+        if (cp >= 0xD800 && cp < 0xDC00 && i < len && str[i] >= 0xDC00 && str[i] < 0xE000)
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (str[i++] - 0xDC00);
+        cps[n++] = cp;
+    }
+    return n;
 }
 
+/*
+ * The nameprep of RFC 3491 as Windows 10 does it (measured for every code point and each flag). A label of ASCII
+ * only is not mapped (its case stays unless another label of the string has more than ASCII, then it is folded as
+ * well), but a control character is invalid in it. Any other label is mapped by the
+ * form NormalizationIdna of NormalizeString (the Unicode 11.0 case folding and NFKC, see normalize.c), then
+ *  - what is not assigned in Unicode 11.0 (private use and the Hangul fillers included) is an invalid name,
+ *    unless IDN_ALLOW_UNASSIGNED is given (the checks of RFC 3454 for the direction of text are not made),
+ *  - in a string that has more than ASCII, a last label of ASCII only (after the mapping) that ends in an at sign is
+ *    an invalid name,
+ *  - with IDN_USE_STD3_ASCII_RULES the label has letters, digits and hyphens only, and no hyphen at either end.
+ * What the mapping refuses or removes altogether (an empty result) is an invalid name.
+ */
 INT WINAPI IdnpToNameprep(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicodeChar,
                           LPWSTR lpNameprepCharStr, INT cchNameprepChar)
 {
-    enum {
-        UNASSIGNED = 0x1,
-        PROHIBITED = 0x2,
-        BIDI_RAL   = 0x4,
-        BIDI_L     = 0x8
-    };
-
-    extern const unsigned short nameprep_char_type[];
-    extern const WCHAR nameprep_mapping[];
-    const WCHAR *ptr;
-    WORD flags;
-    WCHAR buf[64], *map_str, norm_str[64], ch;
-    DWORD i, map_len, norm_len, mask, label_start, label_end, out = 0;
-    BOOL ascii_only;
+    WCHAR *mapped;
+    DWORD i, label_start, label_end, out = 0;
+    INT map_len, map_error;
+    BOOL ascii_only, any_non_ascii = FALSE, last_label;
+    WCHAR ch;
 
     DPRINT("%x %p %d %p %d\n", dwFlags, lpUnicodeCharStr, cchUnicodeChar,
            lpNameprepCharStr, cchNameprepChar);
@@ -83,6 +99,10 @@ INT WINAPI IdnpToNameprep(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicod
         return 0;
     }
 
+    for(i=0; i<(DWORD)cchUnicodeChar; i++)
+        if(lpUnicodeCharStr[i] > 0x7f)
+            any_non_ascii = TRUE;
+
     for(label_start=0; label_start<(UINT)cchUnicodeChar;) {
         ascii_only = TRUE;
         for(i=label_start; i<(UINT)cchUnicodeChar; i++) {
@@ -95,6 +115,11 @@ INT WINAPI IdnpToNameprep(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicod
             /* check if ch is one of label separators defined in RFC3490 */
             if(!ch || ch=='.' || ch==0x3002 || ch==0xff0e || ch==0xff61)
                 break;
+
+            if(ch < 0x20 || ch == 0x7f) {
+                SetLastError(ERROR_INVALID_NAME);
+                return 0;
+            }
 
             if(ch > 0x7f) {
                 ascii_only = FALSE;
@@ -123,7 +148,13 @@ INT WINAPI IdnpToNameprep(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicod
             return 0;
         }
 
+        last_label = label_end >= (UINT)cchUnicodeChar - (lpUnicodeCharStr[cchUnicodeChar-1] ? 0 : 1);
+
         if(ascii_only) {
+            if(any_non_ascii && last_label && label_end > label_start && lpUnicodeCharStr[label_end-1] == '@') {
+                SetLastError(ERROR_INVALID_NAME);
+                return 0;
+            }
             /* maximal label length is 63 characters */
             if(label_end-label_start > 63) {
                 SetLastError(ERROR_INVALID_NAME);
@@ -137,6 +168,12 @@ INT WINAPI IdnpToNameprep(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicod
             }else if(out+label_end-label_start <= (UINT)cchNameprepChar) {
                 memcpy(lpNameprepCharStr+out, lpUnicodeCharStr+label_start,
                         (label_end-label_start)*sizeof(WCHAR));
+                if(any_non_ascii) {
+                    /* a string with more than ASCII is mapped as a whole: the case of its ASCII labels is folded too */
+                    for(i=0; i<label_end-label_start; i++)
+                        if(lpNameprepCharStr[out+i] >= 'A' && lpNameprepCharStr[out+i] <= 'Z')
+                            lpNameprepCharStr[out+i] += 'a'-'A';
+                }
                 if(lpUnicodeCharStr[label_end-1] > 0x7f)
                     lpNameprepCharStr[out+label_end-label_start-1] = '.';
                 out += label_end-label_start;
@@ -149,88 +186,61 @@ INT WINAPI IdnpToNameprep(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicod
             continue;
         }
 
-        map_len = 0;
-        for(i=label_start; i<label_end; i++) {
-            ch = lpUnicodeCharStr[i];
-            ptr = nameprep_mapping + nameprep_mapping[ch>>8];
-            ptr = nameprep_mapping + ptr[(ch>>4)&0x0f] + 3*(ch&0x0f);
-
-            if(!ptr[0]) map_len++;
-            else if(!ptr[1]) map_len++;
-            else if(!ptr[2]) map_len += 2;
-            else if(ptr[0]!=0xffff || ptr[1]!=0xffff || ptr[2]!=0xffff) map_len += 3;
-        }
-        if(map_len*sizeof(WCHAR) > sizeof(buf)) {
-            map_str = HeapAlloc(GetProcessHeap(), 0, map_len*sizeof(WCHAR));
-            if(!map_str) {
-                SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-                return 0;
-            }
-        }else {
-            map_str = buf;
-        }
-        map_len = 0;
-        for(i=label_start; i<label_end; i++) {
-            ch = lpUnicodeCharStr[i];
-            ptr = nameprep_mapping + nameprep_mapping[ch>>8];
-            ptr = nameprep_mapping + ptr[(ch>>4)&0x0f] + 3*(ch&0x0f);
-
-            if(!ptr[0]) {
-                map_str[map_len++] = ch;
-            }else if(!ptr[1]) {
-                map_str[map_len++] = ptr[0];
-            }else if(!ptr[2]) {
-                map_str[map_len++] = ptr[0];
-                map_str[map_len++] = ptr[1];
-            }else if(ptr[0]!=0xffff || ptr[1]!=0xffff || ptr[2]!=0xffff) {
-                map_str[map_len++] = ptr[0];
-                map_str[map_len++] = ptr[1];
-                map_str[map_len++] = ptr[2];
-            }
-        }
-
-        norm_len = FoldStringW(MAP_FOLDCZONE, map_str, map_len,
-                norm_str, sizeof(norm_str)/sizeof(WCHAR)-1);
-        if(map_str != buf)
-            HeapFree(GetProcessHeap(), 0, map_str);
-        if(!norm_len) {
-            if(GetLastError() == ERROR_INSUFFICIENT_BUFFER)
-                SetLastError(ERROR_INVALID_NAME);
+        mapped = NormpIdnaMap(lpUnicodeCharStr+label_start, label_end-label_start, FALSE, &map_len, &map_error, NULL);
+        if(!mapped || map_error >= 0 || !map_len) {
+            SetLastError(!mapped ? ERROR_NOT_ENOUGH_MEMORY : ERROR_INVALID_NAME);
+            NormpFree(mapped);
             return 0;
         }
 
-        if(label_end < (UINT)cchUnicodeChar) {
-            norm_str[norm_len++] = lpUnicodeCharStr[label_end] ? '.' : 0;
-            label_end++;
+        /* the checks of what the label has become */
+        for(i=0; i<(DWORD)map_len;) {
+            ULONG cp = mapped[i++];
+
+            if(cp >= 0xD800 && cp < 0xDC00 && i < (DWORD)map_len && mapped[i] >= 0xDC00 && mapped[i] < 0xE000)
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (mapped[i++] - 0xDC00);
+            if(((dwFlags&IDN_ALLOW_UNASSIGNED) == 0 && NormpIsUnassigned(cp)) ||
+               (cp < 0x80 && (dwFlags&IDN_USE_STD3_ASCII_RULES) &&
+                !((cp>='a' && cp<='z') || (cp>='A' && cp<='Z') || (cp>='0' && cp<='9') || cp=='-'))) {
+                NormpFree(mapped);
+                SetLastError(ERROR_INVALID_NAME);
+                return 0;
+            }
+        }
+        if(last_label && mapped[map_len-1] == '@') {
+            for(i=0; i<(DWORD)map_len && mapped[i] < 0x80; i++);
+            if(i == (DWORD)map_len) {
+                NormpFree(mapped);
+                SetLastError(ERROR_INVALID_NAME);
+                return 0;
+            }
+        }
+        if((dwFlags&IDN_USE_STD3_ASCII_RULES) && (mapped[0]=='-' || mapped[map_len-1]=='-')) {
+            NormpFree(mapped);
+            SetLastError(ERROR_INVALID_NAME);
+            return 0;
         }
 
+        /* the separator after the label is a dot (or the end of the string) */
+        i = map_len;
+        if(label_end < (UINT)cchUnicodeChar)
+            i++;
         if(!lpNameprepCharStr) {
-            out += norm_len;
-        }else if(out+norm_len <= (UINT)cchNameprepChar) {
-            memcpy(lpNameprepCharStr+out, norm_str, norm_len*sizeof(WCHAR));
-            out += norm_len;
+            out += i;
+        }else if(out+i <= (UINT)cchNameprepChar) {
+            memcpy(lpNameprepCharStr+out, mapped, map_len*sizeof(WCHAR));
+            if(label_end < (UINT)cchUnicodeChar)
+                lpNameprepCharStr[out+map_len] = lpUnicodeCharStr[label_end] ? '.' : 0;
+            out += i;
         }else {
+            NormpFree(mapped);
             SetLastError(ERROR_INSUFFICIENT_BUFFER);
             return 0;
         }
+        NormpFree(mapped);
 
-        mask = PROHIBITED;
-        if((dwFlags&IDN_ALLOW_UNASSIGNED) == 0)
-            mask |= UNASSIGNED;
-        for(i=0; i<norm_len; i++) {
-            ch = norm_str[i];
-            flags = get_table_entry( nameprep_char_type, ch );
-
-            if(flags & mask) {
-                SetLastError((flags & PROHIBITED) ? ERROR_INVALID_NAME
-                        : ERROR_NO_UNICODE_TRANSLATION);
-                return 0;
-            }
-        }
-
-        /* the rules for the right-to-left text (RFC 3454, 6) are not checked: Windows converts a label that
-           mixes both directions, the string of the other direction is not rejected */
-
+        if(label_end < (UINT)cchUnicodeChar)
+            label_end++;
         label_start = label_end;
     }
 
@@ -243,7 +253,8 @@ INT WINAPI IdnpToAscii(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicodeCh
     static const WCHAR prefixW[] = {'x','n','-','-'};
 
     WCHAR *norm_str;
-    INT i, label_start, label_end, norm_len, out_label, out = 0;
+    ULONG *cps;
+    INT i, label_start, label_end, norm_len, ncp, out_label, out = 0;
 
     DPRINT("%x %p %d %p %d\n", dwFlags, lpUnicodeCharStr, cchUnicodeChar,
            lpASCIICharStr, cchASCIIChar);
@@ -262,28 +273,38 @@ INT WINAPI IdnpToAscii(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicodeCh
         HeapFree(GetProcessHeap(), 0, norm_str);
         return 0;
     }
+    /* the punycode works on code points: a pair of surrogates is one */
+    cps = HeapAlloc(GetProcessHeap(), 0, norm_len*sizeof(ULONG));
+    if(!cps) {
+        HeapFree(GetProcessHeap(), 0, norm_str);
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
+    }
+    ncp = IdnpToCodePoints(norm_str, norm_len, cps);
+    HeapFree(GetProcessHeap(), 0, norm_str);
 
-    for(label_start=0; label_start<norm_len;) {
+    for(label_start=0; label_start<ncp;) {
         INT n = INIT_N, bias = INIT_BIAS;
         INT delta = 0, b = 0, h;
 
         out_label = out;
-        for(i=label_start; i<norm_len && norm_str[i]!='.' &&
-                norm_str[i]!=0x3002 && norm_str[i]!='\0'; i++)
-            if(norm_str[i] < 0x80)
+        for(i=label_start; i<ncp && cps[i]!='.' &&
+                cps[i]!=0x3002 && cps[i]!='\0'; i++)
+            if(cps[i] < 0x80)
                 b++;
         label_end = i;
 
         if(b == label_end-label_start) {
-            if(label_end < norm_len)
+            if(label_end < ncp)
                 b++;
             if(!lpASCIICharStr) {
                 out += b;
             }else if(out+b <= cchASCIIChar) {
-                memcpy(lpASCIICharStr+out, norm_str+label_start, b*sizeof(WCHAR));
+                for(i=0; i<b; i++)
+                    lpASCIICharStr[out+i] = (WCHAR)cps[label_start+i];
                 out += b;
             }else {
-                HeapFree(GetProcessHeap(), 0, norm_str);
+                HeapFree(GetProcessHeap(), 0, cps);
                 SetLastError(ERROR_INSUFFICIENT_BUFFER);
                 return 0;
             }
@@ -297,11 +318,11 @@ INT WINAPI IdnpToAscii(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicodeCh
             memcpy(lpASCIICharStr+out, prefixW, sizeof(prefixW));
             out += 4;
             for(i=label_start; i<label_end; i++)
-                if(norm_str[i] < 0x80)
-                    lpASCIICharStr[out++] = norm_str[i];
+                if(cps[i] < 0x80)
+                    lpASCIICharStr[out++] = (WCHAR)cps[i];
             lpASCIICharStr[out++] = '-';
         }else {
-            HeapFree(GetProcessHeap(), 0, norm_str);
+            HeapFree(GetProcessHeap(), 0, cps);
             SetLastError(ERROR_INSUFFICIENT_BUFFER);
             return 0;
         }
@@ -309,19 +330,19 @@ INT WINAPI IdnpToAscii(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicodeCh
             out--;
 
         for(h=b; h<label_end-label_start;) {
-            INT m = 0xffff, q, k;
+            INT m = 0x7fffffff, q, k;
 
             for(i=label_start; i<label_end; i++) {
-                if(norm_str[i]>=n && m>norm_str[i])
-                    m = norm_str[i];
+                if((INT)cps[i]>=n && m>(INT)cps[i])
+                    m = (INT)cps[i];
             }
             delta += (m-n)*(h+1);
             n = m;
 
             for(i=label_start; i<label_end; i++) {
-                if(norm_str[i] < n) {
+                if((INT)cps[i] < n) {
                     delta++;
-                }else if(norm_str[i] == n) {
+                }else if((INT)cps[i] == n) {
                     for(q=delta, k=BASE; ; k+=BASE) {
                         INT t = k<=bias ? TMIN : k>=bias+TMAX ? TMAX : k-bias;
                         INT disp = q<t ? q : t+(q-t)%(BASE-t);
@@ -331,7 +352,7 @@ INT WINAPI IdnpToAscii(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicodeCh
                             lpASCIICharStr[out++] = disp<='z'-'a' ?
                                 'a'+disp : '0'+disp-'z'+'a'-1;
                         }else {
-                            HeapFree(GetProcessHeap(), 0, norm_str);
+                            HeapFree(GetProcessHeap(), 0, cps);
                             SetLastError(ERROR_INSUFFICIENT_BUFFER);
                             return 0;
                         }
@@ -349,18 +370,18 @@ INT WINAPI IdnpToAscii(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicodeCh
         }
 
         if(out-out_label > 63) {
-            HeapFree(GetProcessHeap(), 0, norm_str);
+            HeapFree(GetProcessHeap(), 0, cps);
             SetLastError(ERROR_INVALID_NAME);
             return 0;
         }
 
-        if(label_end < norm_len) {
+        if(label_end < ncp) {
             if(!lpASCIICharStr) {
                 out++;
             }else if(out+1 <= cchASCIIChar) {
-                lpASCIICharStr[out++] = norm_str[label_end] ? '.' : 0;
+                lpASCIICharStr[out++] = cps[label_end] ? '.' : 0;
             }else {
-                HeapFree(GetProcessHeap(), 0, norm_str);
+                HeapFree(GetProcessHeap(), 0, cps);
                 SetLastError(ERROR_INSUFFICIENT_BUFFER);
                 return 0;
             }
@@ -368,6 +389,6 @@ INT WINAPI IdnpToAscii(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicodeCh
         label_start = label_end+1;
     }
 
-    HeapFree(GetProcessHeap(), 0, norm_str);
+    HeapFree(GetProcessHeap(), 0, cps);
     return out;
 }

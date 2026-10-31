@@ -449,6 +449,7 @@
 @ IsDBCSLeadByteEx
 @ IsDebuggerPresent
 @ IsNLSDefinedString
+@ IsNormalizedString -version=0x600+
 @ IsProcessInJob
 @ IsProcessorFeaturePresent
 @ IsThreadAFiber -version=0x600+
@@ -516,6 +517,7 @@
 @ NeedCurrentDirectoryForExePathA
 @ NeedCurrentDirectoryForExePathW
 @ NlsGetCacheUpdateCount
+@ NormalizeString -version=0x600+
 @ OpenFileById -version=0x600+
 @ OpenFileMappingW
 @ OpenProcess
