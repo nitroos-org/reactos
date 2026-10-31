@@ -429,6 +429,9 @@
 @ HeapUnlock
 @ HeapValidate
 @ HeapWalk
+@ IdnToAscii -version=0x600+
+@ IdnToNameprepUnicode -version=0x600+
+@ IdnToUnicode -version=0x600+
 @ InitializeProcThreadAttributeList -version=0x600+
 @ InitializeSListHead
 @ InterlockedCompareExchange -arch=i386
