@@ -1564,21 +1564,17 @@ CmpQueryNameInformation(
             ULONG NameLength;
 
             if (CurrentKcb->NameBlock->Compressed)
-            {
                 NameLength = CmpCompressedNameSize(CurrentKcb->NameBlock->Name, CurrentKcb->NameBlock->NameLength);
-                /* Copy the compressed name */
-                CmpCopyCompressedName(&KeyNameInfo->Name[(NeededLength - NameLength)/sizeof(WCHAR)],
-                                      NameLength,
-                                      CurrentKcb->NameBlock->Name,
-                                      CurrentKcb->NameBlock->NameLength);
-            }
             else
-            {
                 NameLength = CurrentKcb->NameBlock->NameLength;
-                /* Otherwise, copy the raw name */
-                RtlCopyMemory(&KeyNameInfo->Name[(NeededLength - NameLength)/sizeof(WCHAR)],
-                              CurrentKcb->NameBlock->Name,
-                              NameLength);
+
+            /* The name cache is uppercased: copy the stored spelling from the key node */
+            if (!CmpCopyKcbComponentName(CurrentKcb,
+                                         !CurrentKcb->Delete,
+                                         NameLength,
+                                         &KeyNameInfo->Name[(NeededLength - NameLength)/sizeof(WCHAR)]))
+            {
+                _SEH2_YIELD(return STATUS_INSUFFICIENT_RESOURCES);
             }
 
             NeededLength -= NameLength;

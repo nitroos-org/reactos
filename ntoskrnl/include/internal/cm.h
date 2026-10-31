@@ -1059,6 +1059,15 @@ CmpConstructName(
 
 BOOLEAN
 NTAPI
+CmpCopyKcbComponentName(
+    IN PCM_KEY_CONTROL_BLOCK Kcb,
+    IN BOOLEAN UseKeyNode,
+    IN ULONG ComponentLength,
+    OUT PWCHAR Target
+);
+
+BOOLEAN
+NTAPI
 CmpReferenceKeyControlBlock(
     IN PCM_KEY_CONTROL_BLOCK Kcb
 );
