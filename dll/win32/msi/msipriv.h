@@ -1142,6 +1142,7 @@ extern HANDLE msi_create_file( MSIPACKAGE *, const WCHAR *, DWORD, DWORD, DWORD,
 extern BOOL msi_copy_file( MSIPACKAGE *, const WCHAR *, const WCHAR *, BOOL );
 extern BOOL msi_delete_file( MSIPACKAGE *, const WCHAR * );
 extern BOOL msi_remove_directory( MSIPACKAGE *, const WCHAR * );
+extern void msi_remove_empty_folders( MSIPACKAGE *, MSIFOLDER *, BOOL );
 extern DWORD msi_get_file_attributes( MSIPACKAGE *, const WCHAR * );
 extern BOOL msi_set_file_attributes( MSIPACKAGE *, const WCHAR *, DWORD );
 extern HANDLE msi_find_first_file( MSIPACKAGE *, const WCHAR *, WIN32_FIND_DATAW * );

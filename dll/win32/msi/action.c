@@ -753,6 +753,7 @@ static UINT ITERATE_RemoveFolders( MSIRECORD *row, LPVOID param )
 
     folder = msi_get_loaded_folder( package, dir );
     remove_persistent_folder( folder );
+    msi_remove_empty_folders( package, folder, FALSE );
     return ERROR_SUCCESS;
 }
 
@@ -3960,6 +3961,7 @@ static UINT ITERATE_RemoveShortcuts( MSIRECORD *row, LPVOID param )
     LPWSTR link_file;
     LPCWSTR component;
     MSICOMPONENT *comp;
+    MSIFOLDER *folder;
 
     component = MSI_RecordGetString( row, 4 );
     comp = msi_get_loaded_component( package, component );
@@ -3978,6 +3980,9 @@ static UINT ITERATE_RemoveShortcuts( MSIRECORD *row, LPVOID param )
     TRACE("Removing shortcut file %s\n", debugstr_w( link_file ));
     if (!msi_delete_file( package, link_file )) WARN( "failed to remove shortcut file %lu\n", GetLastError() );
     free( link_file );
+
+    if ((folder = msi_get_loaded_folder( package, MSI_RecordGetString( row, 2 ) )))
+        msi_remove_empty_folders( package, folder, TRUE );
 
     return ERROR_SUCCESS;
 }
