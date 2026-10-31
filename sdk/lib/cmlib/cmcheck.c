@@ -123,10 +123,14 @@ CmpValidateLexicalOrder(
 
 #if defined(_BLDR_)
     /*
-     * The boot loader has no case table, it upper cases ASCII only. It cannot
-     * tell what order the kernel gave names that are not plain ASCII (and it
-     * would refuse a hive just for that, so the system cannot boot), so these
-     * are left to the kernel, which checks every hive when it loads it.
+     * The boot loader looks names up with the case table of the kernel (it
+     * has it as C data) but it cannot repair a hive. A name that is not plain
+     * ASCII may stand in the order an older kernel, with another case table,
+     * gave it, or be equal to its sibling under this table: refusing the hive
+     * for that would leave the system unbootable, while the kernel repairs
+     * it (CmpRepairSubKeyIndexCase, then the check below drops the second of
+     * two siblings that are equal, as Windows does). So these are left to the
+     * kernel, which checks every hive when it loads it.
      */
     if (CmpKeyNodeNameHasNonAscii(ChildNode) ||
         CmpKeyNodeNameHasNonAscii(SiblingNode))
@@ -161,9 +165,34 @@ CmpValidateLexicalOrder(
     if ((ChildNode->Flags & KEY_COMP_NAME) &&
         (SiblingNode->Flags & KEY_COMP_NAME))
     {
-        /* FIXME: Checks for two compressed names not implemented yet */
-        DPRINT("Lexicographical order checks for two compressed names is UNIMPLEMENTED, assume the key is healthy...\n");
-        return TRUE;
+        /*
+         * The same rule as for the Unicode names: the sibling must be
+         * lesser, names that are equal when upper cased are as much out
+         * of order as names that are in the wrong order (Windows removes
+         * the second of such siblings when it loads the hive).
+         */
+        PUCHAR SiblingName = (PUCHAR)SiblingNode->Name;
+        PUCHAR ChildName = (PUCHAR)ChildNode->Name;
+        ULONG Common = min(SiblingNode->NameLength, ChildNode->NameLength);
+        ULONG i;
+
+        Result = 0;
+        for (i = 0; i < Common && Result == 0; i++)
+        {
+            if (SiblingName[i] != ChildName[i])
+            {
+                Result = (LONG)RtlUpcaseUnicodeChar(SiblingName[i]) -
+                         (LONG)RtlUpcaseUnicodeChar(ChildName[i]);
+            }
+        }
+        if (Result == 0)
+            Result = (LONG)SiblingNode->NameLength - (LONG)ChildNode->NameLength;
+
+        if (Result >= 0)
+        {
+            DPRINT1("The compressed sibling node name is greater or equal to that of the compressed child\n");
+            return FALSE;
+        }
     }
 
     /* CASE 3: The child name is compressed but the sibling is not */
