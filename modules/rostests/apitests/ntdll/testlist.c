@@ -33,6 +33,7 @@ extern void func_DllLoadNotification(void);
 extern void func_EmptyPxeFree(void);
 extern void func_EmptyPxeProtect(void);
 extern void func_ApiSetQueryApiSetPresence(void);
+extern void func_CrtSecure(void);
 extern void func_LdrEnumResources(void);
 extern void func_LdrFindResource_U(void);
 extern void func_LdrLoadDll(void);
@@ -250,6 +251,7 @@ const struct test winetest_testlist[] =
     { "EmptyPxeFree",                   func_EmptyPxeFree },
     { "EmptyPxeProtect",                func_EmptyPxeProtect },
     { "ApiSetQueryApiSetPresence",     func_ApiSetQueryApiSetPresence },
+    { "CrtSecure",                      func_CrtSecure },
     { "LdrEnumResources",               func_LdrEnumResources },
     { "LdrFindResource_U",              func_LdrFindResource_U },
     { "LdrLoadDll",                     func_LdrLoadDll },

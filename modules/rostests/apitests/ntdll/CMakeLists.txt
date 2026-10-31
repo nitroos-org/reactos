@@ -39,6 +39,7 @@ target_link_libraries(ntdll_crt_test_lib ${PSEH_LIB})
 add_dependencies(ntdll_crt_test_lib psdk)
 
 list(APPEND SOURCE
+    CrtSecure.c
     ZeroBits.c
     CommitCharge.c
     RtlCurrentTransaction.c
