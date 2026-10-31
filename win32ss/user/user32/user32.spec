@@ -790,6 +790,7 @@
 @ stdcall ShowWindowAsync(long long) NtUserShowWindowAsync
 @ stdcall -version=0x600+ ShutdownBlockReasonCreate(long wstr)
 @ stdcall -version=0x600+ ShutdownBlockReasonDestroy(long)
+@ stdcall -version=0x600+ ShutdownBlockReasonQuery(long ptr ptr)
 @ stdcall -version=0x601+ SkipPointerFrameMessages(long)
 @ stdcall SoftModalMessageBox(ptr)
 @ stdcall SubtractRect(ptr ptr ptr)

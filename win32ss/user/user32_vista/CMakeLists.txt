@@ -15,7 +15,8 @@ list(APPEND VISTA_SOURCE
      pointer.c
      win8user.c
      physical.c
-     dialogdpi.c)
+     dialogdpi.c
+     shutdown.c)
      
 
 list(APPEND SOURCE

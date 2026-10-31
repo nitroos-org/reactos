@@ -114,6 +114,7 @@ list(APPEND SOURCE
     DialogDpiBehavior.c
     GetIconInfoEx.c
     CreateDesktopEx.c
+    ShutdownBlockReason.c
     wsprintf.c)
 
 list(APPEND PCH_SKIP_SOURCE
