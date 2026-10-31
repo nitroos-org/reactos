@@ -260,25 +260,37 @@ TestOtherLaunchers(void)
         return;
     }
     /* Windows hands the link to the running shell, which starts it without this process's environment:
-       the marker file is named in the link arguments. It also starts it with SW_SHOWDEFAULT (10) where
-       ShellExecuteEx gives the link's own SW_SHOWNORMAL, so the show command is not compared here */
+       the marker file is named in the link arguments. The explorer.exe the caller started exits with 1
+       and the shell starts the target with SW_SHOWDEFAULT (10), whatever the link's own show command is
+       (ShellExecuteEx with SW_SHOWNORMAL gives the link's) */
     WCHAR Arguments[2 * MAX_PATH];
     StringCchPrintfW(Arguments, _countof(Arguments), LNK_MARKER_ARGUMENT L"%s\" one \"two three\"", s_Marker);
-    MakeLink(LinkPath, s_SubCopy, Arguments, s_WorkDir, SW_SHOWNORMAL);
     WCHAR ExplorerPath[MAX_PATH];
     GetWindowsDirectoryW(ExplorerPath, _countof(ExplorerPath));
     StringCchPrintfW(CommandLine, _countof(CommandLine), L"\"%s\\explorer.exe\" \"%s\"", ExplorerPath, LinkPath);
-    DeleteFileW(s_Marker);
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    if (CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+    static const INT LinkShows[] = { SW_SHOWNORMAL, SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE };
+    for (UINT i = 0; i < _countof(LinkShows); i++)
     {
-        WaitForSingleObject(pi.hProcess, 20 * 1000);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
+        MakeLink(LinkPath, s_SubCopy, Arguments, s_WorkDir, LinkShows[i]);
+        DeleteFileW(s_Marker);
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+        if (CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+        {
+            DWORD dwExitCode = 0xdead;
+            ok(WaitForSingleObject(pi.hProcess, 20 * 1000) == WAIT_OBJECT_0, "explorer.exe <link> did not exit\n");
+            GetExitCodeProcess(pi.hProcess, &dwExitCode);
+            ok_dec(dwExitCode, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+        else
+        {
+            ok(0, "CreateProcess(explorer.exe) failed with %lu\n", GetLastError());
+        }
+        ReadMarker(Line, _countof(Line), 20 * 1000);
+        CheckLine("explorer.exe <link>", Line, s_WorkDir, SW_SHOWDEFAULT, L"one \"two three\"|");
     }
-    ReadMarker(Line, _countof(Line), 20 * 1000);
-    CheckLine("explorer.exe <link>", Line, s_WorkDir, SHOW_ANY, L"one \"two three\"|");
 }
 
 START_TEST(ShellExecuteExLnk)
