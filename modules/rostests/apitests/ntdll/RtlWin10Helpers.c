@@ -229,6 +229,170 @@ static void Test_Ethernet(void)
     }
 }
 
+
+/* RtlWakeAddress*NoFence, RtlAcquireReleaseSRWLockExclusive, RtlWow64GetCurrentMachine, RtlQueryRegistryValuesEx,
+   RtlAllocateAndInitializeSidEx */
+
+typedef NTSTATUS (NTAPI *PFN_WaitOnAddress)(PVOID, PVOID, SIZE_T, PLARGE_INTEGER);
+typedef VOID (NTAPI *PFN_Wake)(PVOID);
+
+static PFN_WaitOnAddress pRtlWaitOnAddress;
+static volatile LONG WakeValue;
+static volatile LONG Woken;
+
+static DWORD WINAPI WaitThread(LPVOID Param)
+{
+    LONG Undesired = 0;
+
+    while (WakeValue == 0)
+        pRtlWaitOnAddress((PVOID)&WakeValue, &Undesired, sizeof(Undesired), NULL);
+    InterlockedIncrement(&Woken);
+    return 0;
+}
+
+static void Test_Wake(void)
+{
+    PFN_Wake pWakeAll = Get("RtlWakeAddressAllNoFence");
+    PFN_Wake pWakeSingle = Get("RtlWakeAddressSingleNoFence");
+    HANDLE Threads[2];
+    ULONG i;
+
+    pRtlWaitOnAddress = Get("RtlWaitOnAddress");
+    if (!pWakeAll || !pWakeSingle || !pRtlWaitOnAddress)
+        return;
+
+    for (i = 0; i < 2; i++)
+    {
+        WakeValue = 0;
+        Woken = 0;
+        Threads[0] = CreateThread(NULL, 0, WaitThread, NULL, 0, NULL);
+        Threads[1] = CreateThread(NULL, 0, WaitThread, NULL, 0, NULL);
+        Sleep(200);
+        ok(Woken == 0, "the waiters left before the wake\n");
+        WakeValue = 1;
+        if (i == 0)
+        {
+            pWakeAll((PVOID)&WakeValue);
+            ok(WaitForMultipleObjects(2, Threads, TRUE, 5000) == WAIT_OBJECT_0, "RtlWakeAddressAllNoFence did not wake both waiters\n");
+        }
+        else
+        {
+            /* the waiters re-check the value before they wait again, so one wake plus a second ends both */
+            pWakeSingle((PVOID)&WakeValue);
+            pWakeSingle((PVOID)&WakeValue);
+            ok(WaitForMultipleObjects(2, Threads, TRUE, 5000) == WAIT_OBJECT_0, "RtlWakeAddressSingleNoFence did not wake the waiters\n");
+        }
+        ok(Woken == 2, "%ld waiters woke\n", Woken);
+        CloseHandle(Threads[0]);
+        CloseHandle(Threads[1]);
+    }
+}
+
+static RTL_SRWLOCK ExclusiveLock;
+static volatile LONG AcquireReleaseDone;
+
+static DWORD WINAPI AcquireReleaseThread(LPVOID Param)
+{
+    VOID (NTAPI *pAcquireRelease)(PRTL_SRWLOCK) = Param;
+
+    pAcquireRelease(&ExclusiveLock);
+    AcquireReleaseDone = 1;
+    return 0;
+}
+
+static void Test_AcquireRelease(void)
+{
+    VOID (NTAPI *pAcquireRelease)(PRTL_SRWLOCK) = Get("RtlAcquireReleaseSRWLockExclusive");
+    VOID (NTAPI *pAcquire)(PRTL_SRWLOCK) = Get("RtlAcquireSRWLockExclusive");
+    VOID (NTAPI *pRelease)(PRTL_SRWLOCK) = Get("RtlReleaseSRWLockExclusive");
+    BOOLEAN (NTAPI *pTry)(PRTL_SRWLOCK) = Get("RtlTryAcquireSRWLockExclusive");
+    HANDLE Thread;
+
+    if (!pAcquireRelease || !pAcquire || !pRelease || !pTry)
+        return;
+
+    ExclusiveLock.Ptr = NULL;
+    pAcquireRelease(&ExclusiveLock);
+    ok(pTry(&ExclusiveLock) == TRUE, "the lock is free after RtlAcquireReleaseSRWLockExclusive\n");
+    pRelease(&ExclusiveLock);
+
+    /* it waits for the owner, then leaves the lock free */
+    pAcquire(&ExclusiveLock);
+    AcquireReleaseDone = 0;
+    Thread = CreateThread(NULL, 0, AcquireReleaseThread, pAcquireRelease, 0, NULL);
+    Sleep(300);
+    ok(AcquireReleaseDone == 0, "RtlAcquireReleaseSRWLockExclusive returned while the lock was owned\n");
+    pRelease(&ExclusiveLock);
+    ok(WaitForSingleObject(Thread, 5000) == WAIT_OBJECT_0 && AcquireReleaseDone == 1, "RtlAcquireReleaseSRWLockExclusive did not return after the release\n");
+    CloseHandle(Thread);
+    ok(pTry(&ExclusiveLock) == TRUE, "the lock is free again\n");
+    pRelease(&ExclusiveLock);
+}
+
+static void Test_MoreMisc(void)
+{
+    USHORT (NTAPI *pCurrentMachine)(void) = Get("RtlWow64GetCurrentMachine");
+    NTSTATUS (NTAPI *pQueryEx)(ULONG, PCWSTR, PVOID, PVOID, PVOID) = Get("RtlQueryRegistryValuesEx");
+    NTSTATUS (NTAPI *pQuery)(ULONG, PCWSTR, PVOID, PVOID, PVOID) = Get("RtlQueryRegistryValues");
+    NTSTATUS (NTAPI *pAllocSidEx)(PSID_IDENTIFIER_AUTHORITY, UCHAR, PULONG, PSID *) = Get("RtlAllocateAndInitializeSidEx");
+    ULONG (NTAPI *pLengthSid)(PSID) = Get("RtlLengthSid");
+    PVOID (NTAPI *pFreeSid)(PSID) = Get("RtlFreeSid");
+
+    if (pCurrentMachine)
+        ok(pCurrentMachine() == (sizeof(void *) == 8 ? 0x8664 : 0x14c), "RtlWow64GetCurrentMachine: %x\n", pCurrentMachine());
+
+    if (pQueryEx && pQuery)
+    {
+        struct { PVOID QueryRoutine; ULONG Flags; PWSTR Name; PVOID Context; ULONG Type; PVOID Default; ULONG DefaultLength; } Table[2];
+        struct { USHORT Length; USHORT Max; PWSTR Buffer; } Value1 = { 0 }, Value2 = { 0 };
+        NTSTATUS Status1, Status2;
+
+        memset(Table, 0, sizeof(Table));
+        Table[0].QueryRoutine = NULL;
+        Table[0].Flags = 0x20;   /* RTL_QUERY_REGISTRY_DIRECT */
+        Table[0].Name = L"CurrentVersion";
+        Table[0].Context = &Value1;
+        Status1 = pQuery(0, L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion", Table, NULL, NULL);
+        Table[0].Context = &Value2;
+        Status2 = pQueryEx(0, L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion", Table, NULL, NULL);
+        ok(Status1 == STATUS_SUCCESS, "RtlQueryRegistryValues: %lx\n", Status1);
+        ok(Status2 == Status1, "RtlQueryRegistryValuesEx: %lx, RtlQueryRegistryValues %lx\n", Status2, Status1);
+        if (Status1 == STATUS_SUCCESS && Status2 == STATUS_SUCCESS)
+            ok(Value1.Length == Value2.Length && !memcmp(Value1.Buffer, Value2.Buffer, Value1.Length), "the same value\n");
+    }
+
+    if (pAllocSidEx && pLengthSid && pFreeSid)
+    {
+        SID_IDENTIFIER_AUTHORITY Authority = { { 0, 0, 0, 0, 0, 5 } };
+        ULONG SubAuthorities[16] = { 21, 11, 22, 33, 44, 55, 66, 77, 88, 99, 110, 121, 132, 143, 154, 165 };
+        static const UCHAR Counts[] = { 0, 1, 3, 8, 15 };
+        ULONG i;
+        PSID Sid;
+        NTSTATUS Status;
+
+        for (i = 0; i < sizeof(Counts); i++)
+        {
+            Sid = NULL;
+            Status = pAllocSidEx(&Authority, Counts[i], SubAuthorities, &Sid);
+            ok(Status == STATUS_SUCCESS && Sid != NULL, "RtlAllocateAndInitializeSidEx(%u): %lx\n", Counts[i], Status);
+            if (Sid)
+            {
+                PISID IdSid = Sid;
+
+                ok(IdSid->Revision == 1 && IdSid->SubAuthorityCount == Counts[i] && IdSid->IdentifierAuthority.Value[5] == 5,
+                   "the SID of %u: revision %u count %u\n", Counts[i], IdSid->Revision, IdSid->SubAuthorityCount);
+                ok(pLengthSid(Sid) == 8 + 4 * Counts[i], "length of the SID of %u: %lu\n", Counts[i], pLengthSid(Sid));
+                ok(Counts[i] == 0 || (IdSid->SubAuthority[0] == 21 && IdSid->SubAuthority[Counts[i] - 1] == SubAuthorities[Counts[i] - 1]),
+                   "the sub-authorities of %u\n", Counts[i]);
+                pFreeSid(Sid);
+            }
+        }
+        Sid = (PSID)(ULONG_PTR)1;
+        Status = pAllocSidEx(&Authority, 16, SubAuthorities, &Sid);
+        ok(Status == STATUS_INVALID_PARAMETER, "RtlAllocateAndInitializeSidEx(16): %lx\n", Status);
+    }
+}
+
 START_TEST(RtlWin10Helpers)
 {
     Ntdll = GetModuleHandleW(L"ntdll.dll");
@@ -239,4 +403,7 @@ START_TEST(RtlWin10Helpers)
     Test_FillUlonglong();
 #endif
     Test_Ethernet();
+    Test_Wake();
+    Test_AcquireRelease();
+    Test_MoreMisc();
 }

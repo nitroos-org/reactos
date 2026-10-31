@@ -617,6 +617,7 @@
 @ stdcall RtlAbsoluteToSelfRelativeSD(ptr ptr ptr)
 @ stdcall RtlAcquirePebLock()
 @ stdcall RtlAcquirePrivilege(ptr long long ptr)
+@ stdcall -version=0x601+ RtlAcquireReleaseSRWLockExclusive(ptr)
 @ stdcall RtlAcquireResourceExclusive(ptr long)
 @ stdcall RtlAcquireResourceShared(ptr long)
 @ stdcall -version=0x600+ RtlAcquireSRWLockExclusive(ptr)
@@ -650,6 +651,7 @@
 @ stdcall RtlAdjustPrivilege(long long long ptr)
 @ stdcall RtlAllocateActivationContextStack(ptr) ; CHECKME
 @ stdcall RtlAllocateAndInitializeSid(ptr long long long long long long long long long ptr)
+@ stdcall -version=0x601+ RtlAllocateAndInitializeSidEx(ptr long ptr ptr)
 @ stdcall RtlAllocateHandle(ptr ptr)
 @ stdcall RtlAllocateHeap(ptr long ptr)
 @ stdcall -stub -version=0x600+ RtlAllocateMemoryBlockLookaside(ptr long ptr) ; not present in Win11
@@ -1160,6 +1162,7 @@
 @ stdcall -version=0x601+ RtlQueryProcessPlaceholderCompatibilityMode()
 @ stdcall -stub RtlQueryProcessLockInformation(ptr)
 @ stdcall RtlQueryRegistryValues(long ptr ptr ptr ptr)
+@ stdcall -version=0x601+ RtlQueryRegistryValuesEx(long wstr ptr ptr ptr) RtlQueryRegistryValues
 @ stdcall RtlQuerySecurityObject(ptr long ptr long ptr)
 @ stdcall RtlQueryTagHeap(ptr long long long ptr)
 @ stdcall RtlQueryTimeZoneInformation(ptr)
@@ -1342,7 +1345,9 @@
 @ stdcall -arch=x86_64 RtlVirtualUnwind(long int64 int64 ptr ptr ptr ptr ptr)
 @ stdcall RtlWaitOnAddress(ptr ptr long ptr)
 @ stdcall RtlWakeAddressAll(ptr)
+@ stdcall -version=0x601+ RtlWakeAddressAllNoFence(ptr) RtlWakeAddressAll
 @ stdcall RtlWakeAddressSingle(ptr)
+@ stdcall -version=0x601+ RtlWakeAddressSingleNoFence(ptr) RtlWakeAddressSingle
 @ stdcall -version=0x600+ RtlWakeAllConditionVariable(ptr)
 @ stdcall -version=0x600+ RtlWakeConditionVariable(ptr)
 @ stdcall RtlWalkFrameChain(ptr long long)
@@ -1351,6 +1356,7 @@
 @ stdcall -stub -version=0x600+ RtlWow64CallFunction64()
 @ stdcall RtlWow64EnableFsRedirection(long)
 @ stdcall RtlWow64EnableFsRedirectionEx(long ptr)
+@ stdcall -version=0x601+ RtlWow64GetCurrentMachine()
 @ stdcall -stub -version=0x600+ -arch=x86_64 RtlWow64GetThreadContext(ptr ptr)
 @ stdcall -stub -version=0x600+ -arch=x86_64 RtlWow64LogMessageInEventLogger(long long long)
 @ stdcall -stub -version=0x600+ -arch=x86_64 RtlWow64SetThreadContext(long long)

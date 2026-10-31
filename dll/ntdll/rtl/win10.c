@@ -388,3 +388,59 @@ RtlEthernetStringToAddressW(
 {
     ETHERNET_STRING_TO_ADDRESS(WCHAR)
 }
+
+/* SYNCHRONIZATION **********************************************************/
+
+/* Waits until no one owns the lock, then leaves it free */
+VOID
+NTAPI
+RtlAcquireReleaseSRWLockExclusive(
+    _Inout_ PRTL_SRWLOCK SRWLock)
+{
+    RtlAcquireSRWLockExclusive(SRWLock);
+    RtlReleaseSRWLockExclusive(SRWLock);
+}
+
+/* WOW64 ********************************************************************/
+
+/* The machine of the code that is running: the architecture ntdll was built for */
+USHORT
+NTAPI
+RtlWow64GetCurrentMachine(VOID)
+{
+#if defined(_M_AMD64)
+    return IMAGE_FILE_MACHINE_AMD64;
+#elif defined(_M_ARM)
+    return IMAGE_FILE_MACHINE_ARMNT;
+#else
+    return IMAGE_FILE_MACHINE_I386;
+#endif
+}
+
+/* SECURITY *****************************************************************/
+
+NTSTATUS
+NTAPI
+RtlAllocateAndInitializeSidEx(
+    _In_ PSID_IDENTIFIER_AUTHORITY IdentifierAuthority,
+    _In_ UCHAR SubAuthorityCount,
+    _In_reads_(SubAuthorityCount) PULONG SubAuthorities,
+    _Outptr_ PSID *Sid)
+{
+    PSID NewSid;
+    ULONG i;
+
+    if (SubAuthorityCount > SID_MAX_SUB_AUTHORITIES)
+        return STATUS_INVALID_PARAMETER;
+
+    NewSid = RtlAllocateHeap(RtlGetProcessHeap(), 0, RtlLengthRequiredSid(SubAuthorityCount));
+    if (!NewSid)
+        return STATUS_NO_MEMORY;
+
+    RtlInitializeSid(NewSid, IdentifierAuthority, SubAuthorityCount);
+    for (i = 0; i < SubAuthorityCount; i++)
+        *RtlSubAuthoritySid(NewSid, i) = SubAuthorities[i];
+
+    *Sid = NewSid;
+    return STATUS_SUCCESS;
+}
