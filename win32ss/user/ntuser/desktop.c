@@ -1598,8 +1598,29 @@ DesktopWindowProc(PWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam, LRESULT *lRe
 
             if (bShow)
             {
+                PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+                HDESK hdeskOld = pti ? pti->hdesk : NULL;
                 HDESK hdesk = UserOpenInputDesktop(0, FALSE, DESKTOP_ALL_ACCESS);
-                IntSetThreadDesktop(hdesk, FALSE);
+
+                /* Every switch opens a handle to the new input desktop for this thread. Close
+                   it if the thread did not take the desktop, and the previous one if it did:
+                   a leaked handle keeps a desktop (and its heap) alive after the last user
+                   closed it */
+                if (hdesk != NULL)
+                {
+                    if (IntSetThreadDesktop(hdesk, FALSE))
+                    {
+                        if (hdeskOld != NULL && hdeskOld != hdesk &&
+                            hdeskOld != pti->ppi->hdeskStartup)
+                        {
+                            ObCloseHandle(hdeskOld, UserMode);
+                        }
+                    }
+                    else
+                    {
+                        ObCloseHandle(hdesk, UserMode);
+                    }
+                }
             }
             break;
         }
