@@ -15,6 +15,7 @@
 #endif
 
 #include "mkhive.h"
+#include <l_intl_upcase.h>
 #include <bitmap.c>
 
 /*
@@ -80,17 +81,9 @@ WCHAR NTAPI
 RtlUpcaseUnicodeChar(
     IN WCHAR Source)
 {
-    USHORT Offset;
-
-    if (Source < 'a')
-        return Source;
-
-    if (Source <= 'z')
-        return (Source - ('a' - 'A'));
-
-    Offset = 0;
-
-    return Source + (SHORT)Offset;
+    /* The case table of the kernel (media/nls/l_intl.nls), so that the names
+     * of the keys are put in the order the kernel keeps them */
+    return NlsUpcaseTableChar(Source);
 }
 
 VOID NTAPI
