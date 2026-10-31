@@ -219,6 +219,7 @@ list(APPEND SOURCE
     RtlValidateUnicodeString.c
     SectionFaultCost.c
     SectionPageLeak.c
+    SectionVirtualLockLeak.c
     strcpy_s.c
     RtlWaitOnAddress.c
     RtlWow64GetProcessMachines.c
