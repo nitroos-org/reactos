@@ -2453,6 +2453,10 @@ co_MsqWaitForNewMessages(PTHREADINFO pti, PWND WndFilter,
       IntCoalesceMouseMove(pti);
    }
 
+   /* The queue has nothing for the caller and the thread is about to wait for input: the foreground
+    * idle hook runs now, before the wait state is set, as it does in MsgWaitForMultipleObjectsEx */
+   IdlePing();
+
    /* The thread waits for input from here until it owns the lock again */
    pti->pcti->fsWakeMask = GetWakeMask(MsgFilterMin, MsgFilterMax);
 
