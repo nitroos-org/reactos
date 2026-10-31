@@ -260,7 +260,7 @@ NTAPI
 RtlInitializeBitMap(
     _Out_ PRTL_BITMAP BitMapHeader,
     _In_opt_ __drv_aliasesMem PBITMAP_BUFFER BitMapBuffer,
-    _In_opt_ ULONG SizeOfBitMap)
+    _In_opt_ BITMAP_INDEX SizeOfBitMap)
 {
     /* Setup the bitmap header */
     BitMapHeader->SizeOfBitMap = SizeOfBitMap;
@@ -296,7 +296,7 @@ RtlClearBit(
     _In_ BITMAP_INDEX BitNumber)
 {
     ASSERT(BitNumber <= BitMapHeader->SizeOfBitMap);
-    BitMapHeader->Buffer[BitNumber / _BITCOUNT] &= ~(1 << (BitNumber & (_BITCOUNT - 1)));
+    BitMapHeader->Buffer[BitNumber / _BITCOUNT] &= ~((BITMAP_INDEX)1 << (BitNumber & (_BITCOUNT - 1)));
 }
 
 VOID

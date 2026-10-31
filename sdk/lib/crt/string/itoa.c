@@ -161,6 +161,8 @@ int CDECL _ui64toa_s(unsigned __int64 value, char *str,
 
     if (!MSVCRT_CHECK_PMT(str != NULL) || !MSVCRT_CHECK_PMT(size > 0) ||
         !MSVCRT_CHECK_PMT(radix>=2) || !MSVCRT_CHECK_PMT(radix<=36)) {
+        if (str && size)
+            str[0] = '\0';
 #ifndef _LIBCNT_
         *_errno() = EINVAL;
 #endif
@@ -181,8 +183,9 @@ int CDECL _ui64toa_s(unsigned __int64 value, char *str,
     }while(value != 0);
 
     if((unsigned)(buffer-pos+65) > size) {
-        MSVCRT_INVALID_PMT("str[size] is too small", EINVAL);
-        return EINVAL;
+        MSVCRT_INVALID_PMT("str[size] is too small", ERANGE);
+        str[0] = '\0';
+        return ERANGE;
     }
 
     memcpy(str, pos, buffer-pos+65);

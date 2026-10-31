@@ -33,6 +33,7 @@ extern void func_DllLoadNotification(void);
 extern void func_EmptyPxeFree(void);
 extern void func_EmptyPxeProtect(void);
 extern void func_ApiSetQueryApiSetPresence(void);
+extern void func_CrtSecure(void);
 extern void func_LdrEnumResources(void);
 extern void func_LdrFindResource_U(void);
 extern void func_LdrLoadDll(void);
@@ -52,6 +53,10 @@ extern void func_NtApphelpCacheControl(void);
 extern void func_NtCompareTokens(void);
 extern void func_NtConnectPortTerminate(void);
 extern void func_NtContinue(void);
+extern void func_RtlBitmapRanges(void);
+extern void func_RtlFlsValue(void);
+extern void func_RtlUtf8String(void);
+extern void func_RtlWin10Helpers(void);
 extern void func_Wow64Continue(void);
 extern void func_Wow64ServiceArguments(void);
 extern void func_NtCreateDirectoryObject(void);
@@ -250,6 +255,7 @@ const struct test winetest_testlist[] =
     { "EmptyPxeFree",                   func_EmptyPxeFree },
     { "EmptyPxeProtect",                func_EmptyPxeProtect },
     { "ApiSetQueryApiSetPresence",     func_ApiSetQueryApiSetPresence },
+    { "CrtSecure",                      func_CrtSecure },
     { "LdrEnumResources",               func_LdrEnumResources },
     { "LdrFindResource_U",              func_LdrFindResource_U },
     { "LdrLoadDll",                     func_LdrLoadDll },
@@ -269,6 +275,10 @@ const struct test winetest_testlist[] =
     { "NtCompareTokens",                func_NtCompareTokens },
     { "NtConnectPortTerminate",         func_NtConnectPortTerminate },
     { "NtContinue",                     func_NtContinue },
+    { "RtlBitmapRanges",                func_RtlBitmapRanges },
+    { "RtlFlsValue",                    func_RtlFlsValue },
+    { "RtlUtf8String",                  func_RtlUtf8String },
+    { "RtlWin10Helpers",                func_RtlWin10Helpers },
     { "Wow64Continue",                  func_Wow64Continue },
     { "Wow64ServiceArguments",          func_Wow64ServiceArguments },
     { "NtCreateDirectoryObject",        func_NtCreateDirectoryObject },

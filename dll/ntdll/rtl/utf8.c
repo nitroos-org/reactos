@@ -182,3 +182,122 @@ NTSTATUS NTAPI RtlpUTF8ToUnicodeNWindows(WCHAR *uni_dest, ULONG uni_bytes_max,
     *uni_bytes_written = Count * sizeof(WCHAR);
     return Status;
 }
+
+NTSTATUS NTAPI RtlUnicodeToUTF8N(CHAR *utf8_dest, ULONG utf8_bytes_max, ULONG *utf8_bytes_written,
+                                 const WCHAR *uni_src, ULONG uni_bytes);
+
+/******************************************************************************
+ * UTF-8 strings: the STRING structure holding UTF-8, converted to and from UNICODE_STRING
+ *
+ * The answers (statuses, what is left in the structures after a failure) are measured on Windows 10 22H2.
+ */
+
+/*
+ * The result is the Windows 10 behaviour for a UNICODE_STRING that holds at most 0xFFFF bytes: the converted
+ * string and its terminator have to fit.
+ */
+NTSTATUS
+NTAPI
+RtlUTF8StringToUnicodeString(
+    _Inout_ PUNICODE_STRING DestinationString,
+    _In_ PSTRING SourceString,
+    _In_ BOOLEAN AllocateDestinationString)
+{
+    NTSTATUS Status;
+    ULONG Needed;
+    PWCHAR Buffer;
+
+    Status = RtlpUTF8ToUnicodeNWindows(NULL, 0, &Needed, SourceString->Buffer, SourceString->Length);
+    if (!NT_SUCCESS(Status) && Status != STATUS_SOME_NOT_MAPPED)
+        return Status;
+
+    if (Needed + sizeof(WCHAR) > MAXUSHORT)
+        return STATUS_INVALID_PARAMETER_2;
+
+    if (AllocateDestinationString)
+    {
+        Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Needed + sizeof(WCHAR));
+        if (!Buffer)
+            return STATUS_NO_MEMORY;
+        DestinationString->Buffer = Buffer;
+        DestinationString->MaximumLength = (USHORT)(Needed + sizeof(WCHAR));
+    }
+    else
+    {
+        if (DestinationString->MaximumLength < Needed + sizeof(WCHAR))
+        {
+            DestinationString->Length = (USHORT)Needed;
+            return STATUS_BUFFER_OVERFLOW;
+        }
+        Buffer = DestinationString->Buffer;
+    }
+
+    RtlpUTF8ToUnicodeNWindows(Buffer, Needed, &Needed, SourceString->Buffer, SourceString->Length);
+    Buffer[Needed / sizeof(WCHAR)] = UNICODE_NULL;
+    DestinationString->Length = (USHORT)Needed;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+RtlUnicodeStringToUTF8String(
+    _Inout_ PSTRING DestinationString,
+    _In_ PCUNICODE_STRING SourceString,
+    _In_ BOOLEAN AllocateDestinationString)
+{
+    NTSTATUS Status;
+    ULONG Needed, Written;
+    PCHAR Buffer;
+
+    Status = RtlUnicodeToUTF8N(NULL, 0, &Needed, SourceString->Buffer, SourceString->Length);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (Needed + sizeof(CHAR) > MAXUSHORT)
+        return STATUS_INVALID_PARAMETER_2;
+
+    if (AllocateDestinationString)
+    {
+        Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Needed + sizeof(CHAR));
+        if (!Buffer)
+            return STATUS_NO_MEMORY;
+        DestinationString->Buffer = Buffer;
+        DestinationString->MaximumLength = (USHORT)(Needed + sizeof(CHAR));
+    }
+    else
+    {
+        if (DestinationString->MaximumLength == 0)
+        {
+            DestinationString->Length = (USHORT)Needed;
+            return STATUS_BUFFER_OVERFLOW;
+        }
+        Buffer = DestinationString->Buffer;
+    }
+
+    /* A buffer that is too small takes the part of the string that fits and is not terminated */
+    Status = RtlUnicodeToUTF8N(Buffer,
+                               DestinationString->MaximumLength - sizeof(CHAR),
+                               &Written,
+                               SourceString->Buffer,
+                               SourceString->Length);
+    DestinationString->Length = (USHORT)Written;
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Buffer[Written] = ANSI_NULL;
+    return STATUS_SUCCESS;
+}
+
+VOID
+NTAPI
+RtlFreeUTF8String(
+    _Inout_ PSTRING UTF8String)
+{
+    if (UTF8String->Buffer)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, UTF8String->Buffer);
+        UTF8String->Buffer = NULL;
+        UTF8String->Length = 0;
+        UTF8String->MaximumLength = 0;
+    }
+}

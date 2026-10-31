@@ -63,9 +63,12 @@ list(APPEND SOURCE
     ldr/ldrutils.c
     ldr/verifier.c
     rtl/apisetquery.c
+    rtl/bitmapx.c
     rtl/capsid.c
+    rtl/crt_s.c
     rtl/strcpy_s.c
-    rtl/utf8.c)
+    rtl/utf8.c
+    rtl/win10.c)
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
     list(APPEND SOURCE rtl/placeholder.c rtl/sysinfoex.c rtl/xcontext.c)

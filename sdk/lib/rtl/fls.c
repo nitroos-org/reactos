@@ -272,7 +272,8 @@ RtlProcessFlsData(
 }
 #endif
 
-#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_WIN10)
+/* RtlFlsGetValue and RtlFlsSetValue only touch the thread's FLS data that RtlFlsAlloc (Vista and later) sets up */
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
 
 // Windows 10
 NTSTATUS
@@ -287,11 +288,12 @@ RtlFlsGetValue(
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Check if we have a thread FLS data structure */
+    /* A thread that has not used FLS yet has no value (measured on Windows 10: success and NULL) */
     PTEB teb = NtCurrentTeb();
     if (teb->FlsData == NULL)
     {
-        return ERROR_INVALID_PARAMETER;
+        *FlsData = NULL;
+        return STATUS_SUCCESS;
     }
 
     /* Return the value (the function doesnt check the bitmap!) */
@@ -353,4 +355,4 @@ RtlFlsSetValue(
     return STATUS_SUCCESS;
 }
 
-#endif // (DLL_EXPORT_VERSION >= DLL_EXPORT_VERSION_WIN10)
+#endif // (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
