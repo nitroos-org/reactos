@@ -575,3 +575,14 @@ SysWOW64/c_949.nls
 SysWOW64/c_950.nls
 SysWOW64/c_856.nls
 SysWOW64/c_878.nls
+
+# DLLs that Windows 10 ships in SysWOW64 and that 32-bit programs import by name (T-SYSWOW64 unbuilt-DLL follow-up):
+# xinput1_4 is the first XInput library games and Chromium try; sechost, kernel.appcore and msvcp_win are forward-only
+# modules; dcomp (Chrome, WinUI components of the 32-bit Firefox) and bcp47langs fail every call, so that
+# the importers take their fallback.
+SysWOW64/xinput1_4.dll
+SysWOW64/sechost.dll
+SysWOW64/kernel.appcore.dll
+@0x600 SysWOW64/msvcp_win.dll
+@0x601 SysWOW64/dcomp.dll
+@0x601 SysWOW64/bcp47langs.dll
