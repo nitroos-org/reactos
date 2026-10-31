@@ -712,7 +712,7 @@ void msi_set_context_folders( MSIPACKAGE *package )
 static VOID set_installer_properties(MSIPACKAGE *package)
 {
     WCHAR *ptr;
-    RTL_OSVERSIONINFOEXW OSVersion;
+    OSVERSIONINFOEXW OSVersion;
     MEMORYSTATUSEX msex;
     DWORD verval, len, type;
     WCHAR pth[MAX_PATH], verstr[11], bufstr[22];
@@ -805,8 +805,10 @@ static VOID set_installer_properties(MSIPACKAGE *package)
     msi_set_property( package->db, L"MsiTrueAdminUser", L"1", -1 );
 
     /* set the os things */
+    /* Windows reports the version the process sees, so that a manifest that does not list Windows 10
+       gets the version that GetVersionEx gives it, and not the real one */
     OSVersion.dwOSVersionInfoSize = sizeof(OSVersion);
-    RtlGetVersion(&OSVersion);
+    if (!GetVersionExW( (OSVERSIONINFOW *)&OSVersion )) RtlGetVersion( (RTL_OSVERSIONINFOEXW *)&OSVersion );
     verval = OSVersion.dwMinorVersion + OSVersion.dwMajorVersion * 100;
     /* The system reports 5.2 and provides the Windows 7 platform: packages see Windows 7, unless a Windows Server 2003
        compatibility layer (the only version layers that also say 5.2) was chosen */
@@ -817,11 +819,6 @@ static VOID set_installer_properties(MSIPACKAGE *package)
         OSVersion.dwBuildNumber = 7601;
         OSVersion.wServicePackMajor = 1;
         OSVersion.wServicePackMinor = 0;
-    }
-    if (verval > 603)
-    {
-        verval = 603;
-        OSVersion.dwBuildNumber = 9600;
     }
     len = swprintf( verstr, ARRAY_SIZE(verstr), L"%u", verval );
     switch (OSVersion.dwPlatformId)

@@ -753,6 +753,7 @@ static UINT ITERATE_RemoveFolders( MSIRECORD *row, LPVOID param )
 
     folder = msi_get_loaded_folder( package, dir );
     remove_persistent_folder( folder );
+    msi_remove_empty_folders( package, folder, FALSE );
     return ERROR_SUCCESS;
 }
 
@@ -3960,6 +3961,7 @@ static UINT ITERATE_RemoveShortcuts( MSIRECORD *row, LPVOID param )
     LPWSTR link_file;
     LPCWSTR component;
     MSICOMPONENT *comp;
+    MSIFOLDER *folder;
 
     component = MSI_RecordGetString( row, 4 );
     comp = msi_get_loaded_component( package, component );
@@ -3978,6 +3980,9 @@ static UINT ITERATE_RemoveShortcuts( MSIRECORD *row, LPVOID param )
     TRACE("Removing shortcut file %s\n", debugstr_w( link_file ));
     if (!msi_delete_file( package, link_file )) WARN( "failed to remove shortcut file %lu\n", GetLastError() );
     free( link_file );
+
+    if ((folder = msi_get_loaded_folder( package, MSI_RecordGetString( row, 2 ) )))
+        msi_remove_empty_folders( package, folder, TRUE );
 
     return ERROR_SUCCESS;
 }
@@ -4549,6 +4554,57 @@ static UINT ACTION_WriteIniValues(MSIPACKAGE *package)
     return rc;
 }
 
+/* Windows deletes an ini file once the last value is gone: the profile functions leave the file
+ * with the section headers of the sections that were emptied, and the installer removes it then.
+ * A file with anything else in it (comments, values, a Unicode file) is left alone. */
+static void remove_empty_ini_file( MSIPACKAGE *package, const WCHAR *filename )
+{
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    char *buf, *p, *end;
+    BOOL empty = TRUE;
+    DWORD read;
+    HANDLE file;
+
+    if (!GetFileAttributesExW( filename, GetFileExInfoStandard, &data )) return;
+    if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return;
+    if (data.nFileSizeHigh || data.nFileSizeLow > 0x10000) return;
+
+    if (data.nFileSizeLow)
+    {
+        file = CreateFileW( filename, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL );
+        if (file == INVALID_HANDLE_VALUE) return;
+        if (!(buf = malloc( data.nFileSizeLow + 1 )))
+        {
+            CloseHandle( file );
+            return;
+        }
+        if (!ReadFile( file, buf, data.nFileSizeLow, &read, NULL ) || read != data.nFileSizeLow) empty = FALSE;
+        CloseHandle( file );
+        buf[read] = 0;
+
+        for (p = buf; empty && p < buf + read; p = end + 1)
+        {
+            char *q;
+
+            if (!(end = strchr( p, '\n' ))) end = buf + read;
+            while (p < end && (*p == ' ' || *p == '\t' || *p == '\r')) p++;
+            if (p == end) continue;
+            if (*p != '[') empty = FALSE;
+            else
+            {
+                q = end;
+                while (q > p && (q[-1] == ' ' || q[-1] == '\t' || q[-1] == '\r')) q--;
+                if (q[-1] != ']' || memchr( p, 0, q - p )) empty = FALSE;
+            }
+        }
+        free( buf );
+    }
+    if (!empty) return;
+
+    TRACE("removing empty ini file %s\n", debugstr_w(filename));
+    msi_delete_file( package, filename );
+}
+
 static UINT ITERATE_RemoveIniValuesOnUninstall( MSIRECORD *row, LPVOID param )
 {
     MSIPACKAGE *package = param;
@@ -4591,6 +4647,7 @@ static UINT ITERATE_RemoveIniValuesOnUninstall( MSIRECORD *row, LPVOID param )
         {
             WARN( "unable to remove key %lu\n", GetLastError() );
         }
+        else remove_empty_ini_file( package, filename );
         free( filename );
     }
     else
@@ -4653,6 +4710,7 @@ static UINT ITERATE_RemoveIniValuesOnInstall( MSIRECORD *row, LPVOID param )
         {
             WARN( "unable to remove key %lu\n", GetLastError() );
         }
+        else remove_empty_ini_file( package, filename );
         free( filename );
     }
     else

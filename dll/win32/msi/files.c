@@ -1525,6 +1525,100 @@ static void remove_folder( MSIFOLDER *folder )
     }
 }
 
+/* Directories that belong to the system or to the user, never to a product. The Directory table
+ * names them as the parents of the product's own directories (usually with DefaultDir "."). */
+static const WCHAR * const system_folder_names[] =
+{
+    L"TARGETDIR", L"ROOTDRIVE", L"AdminToolsFolder", L"AppDataFolder", L"CommonAppDataFolder",
+    L"CommonFilesFolder", L"CommonFiles64Folder", L"DesktopFolder", L"FavoritesFolder", L"FontsFolder",
+    L"LocalAppDataFolder", L"MyPicturesFolder", L"NetHoodFolder", L"PersonalFolder", L"PrintHoodFolder",
+    L"ProgramFilesFolder", L"ProgramFiles64Folder", L"ProgramMenuFolder", L"RecentFolder", L"SendToFolder",
+    L"StartMenuFolder", L"StartupFolder", L"System16Folder", L"SystemFolder", L"System64Folder",
+    L"TempFolder", L"TemplateFolder", L"WindowsFolder", L"WindowsVolume",
+};
+
+static BOOL same_folder_path( const WCHAR *a, const WCHAR *b )
+{
+    size_t la = lstrlenW( a ), lb = lstrlenW( b );
+
+    while (la && a[la - 1] == '\\') la--;
+    while (lb && b[lb - 1] == '\\') lb--;
+    return la == lb && !_wcsnicmp( a, b, la );
+}
+
+/* a folder the removal of empty directories must never touch */
+static BOOL is_protected_folder( MSIPACKAGE *package, MSIFOLDER *folder )
+{
+    UINT i;
+
+    if (!folder->Parent || !folder->Parent[0]) return TRUE;                  /* root of the tree */
+    if (!folder->TargetDefault || !folder->TargetDefault[0]) return TRUE;    /* same path as its parent */
+    if (!folder->ResolvedTarget || lstrlenW( folder->ResolvedTarget ) <= 3) return TRUE; /* drive root */
+    if (folder->persistent) return TRUE;                                     /* CreateFolder, RemoveFolders owns it */
+
+    for (i = 0; i < ARRAY_SIZE(system_folder_names); i++)
+    {
+        WCHAR *path;
+        BOOL same;
+
+        if (!wcsicmp( folder->Directory, system_folder_names[i] )) return TRUE;
+        if (!(path = msi_dup_property( package->db, system_folder_names[i] ))) continue;
+        same = same_folder_path( path, folder->ResolvedTarget );
+        free( path );
+        if (same) return TRUE;
+    }
+    return FALSE;
+}
+
+/* a folder that a component that stays installed, or is being installed, lives in */
+static BOOL is_folder_in_use( MSIPACKAGE *package, MSIFOLDER *folder )
+{
+    MSICOMPONENT *comp;
+
+    LIST_FOR_EACH_ENTRY( comp, &package->components, MSICOMPONENT, entry )
+    {
+        if (!comp->Directory || wcscmp( comp->Directory, folder->Directory )) continue;
+        if (msi_get_component_action( package, comp ) != INSTALLSTATE_ABSENT) return TRUE;
+    }
+    return FALSE;
+}
+
+/* "path" is a directory strictly below "base" */
+static BOOL is_below_folder( const WCHAR *path, const WCHAR *base )
+{
+    size_t len = lstrlenW( base );
+
+    while (len && base[len - 1] == '\\') len--;
+    return len && !_wcsnicmp( path, base, len ) && path[len] == '\\';
+}
+
+/* Windows removes the directories a product used when they are empty afterwards: the directory
+ * itself and the chain of parent directories of the Directory table up to, but not including, a
+ * system folder. RemoveDirectory fails on one that still has content, which ends the walk. */
+void msi_remove_empty_folders( MSIPACKAGE *package, MSIFOLDER *folder, BOOL include_self )
+{
+    MSIFOLDER *next;
+
+    while (folder)
+    {
+        if (!include_self)
+        {
+            if (!folder->Parent || !(next = msi_get_loaded_folder( package, folder->Parent )) || next == folder) return;
+            if (!folder->ResolvedTarget || !next->ResolvedTarget) return;
+            if (!is_below_folder( folder->ResolvedTarget, next->ResolvedTarget )) return;
+            folder = next;
+        }
+        include_self = FALSE;
+
+        if (is_protected_folder( package, folder ) || is_folder_in_use( package, folder )) return;
+        if (folder->State != FOLDER_STATE_REMOVED)
+        {
+            if (!msi_remove_directory( package, folder->ResolvedTarget )) return;
+            folder->State = FOLDER_STATE_REMOVED;
+        }
+    }
+}
+
 UINT ACTION_RemoveFiles( MSIPACKAGE *package )
 {
     MSIQUERY *view;
@@ -1611,7 +1705,11 @@ UINT ACTION_RemoveFiles( MSIPACKAGE *package )
         else
         {
             MSIFOLDER *folder = msi_get_loaded_folder( package, comp->Directory );
-            if (folder) remove_folder( folder );
+            if (folder)
+            {
+                remove_folder( folder );
+                msi_remove_empty_folders( package, folder, FALSE );
+            }
         }
     }
     return ERROR_SUCCESS;
