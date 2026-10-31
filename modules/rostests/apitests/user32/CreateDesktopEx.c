@@ -42,7 +42,7 @@ START_TEST(CreateDesktopEx)
     HDESK Desktop;
     CHAR NameA[40];
     WCHAR NameW[40];
-    ULONG i;
+    ULONG i, Round;
     static ULONG Counter;
 
     pCreateDesktopExW = (PFN_CreateDesktopExW)GetProcAddress(User32, "CreateDesktopExW");
@@ -55,21 +55,25 @@ START_TEST(CreateDesktopEx)
 
     GetSystemMetrics(SM_CXSCREEN);
 
-    for (i = 0; i < sizeof(GoodHeaps) / sizeof(GoodHeaps[0]); i++)
+    /* Every desktop is closed again: the desktops of 20 rounds do not use up the desktop heap */
+    for (Round = 0; Round < 20; Round++)
     {
-        wsprintfA(NameA, "DesktopExW%lu_%lu", GetCurrentProcessId(), Counter);
-        wsprintfW(NameW, L"DesktopExW%lu_%lu", GetCurrentProcessId(), Counter++);
+        for (i = 0; i < sizeof(GoodHeaps) / sizeof(GoodHeaps[0]); i++)
+        {
+            wsprintfA(NameA, "DesktopExW%lu_%lu", GetCurrentProcessId(), Counter);
+            wsprintfW(NameW, L"DesktopExW%lu_%lu", GetCurrentProcessId(), Counter++);
 
-        SetLastError(PENDING_ERROR);
-        Desktop = pCreateDesktopExW(NameW, NULL, NULL, 0, DESKTOP_ALL_ACCESS, NULL, GoodHeaps[i], NULL);
-        CheckCreated("wide", Desktop, NameA);
-    }
+            SetLastError(PENDING_ERROR);
+            Desktop = pCreateDesktopExW(NameW, NULL, NULL, 0, DESKTOP_ALL_ACCESS, NULL, GoodHeaps[i], NULL);
+            CheckCreated("wide", Desktop, NameA);
+        }
 
-    for (i = 0; i < sizeof(GoodHeaps) / sizeof(GoodHeaps[0]); i++)
-    {
-        wsprintfA(NameA, "DesktopExA%lu_%lu", GetCurrentProcessId(), Counter++);
-        Desktop = pCreateDesktopExA(NameA, NULL, NULL, 0, DESKTOP_ALL_ACCESS, NULL, GoodHeaps[i], NULL);
-        CheckCreated("ansi", Desktop, NameA);
+        for (i = 0; i < sizeof(GoodHeaps) / sizeof(GoodHeaps[0]); i++)
+        {
+            wsprintfA(NameA, "DesktopExA%lu_%lu", GetCurrentProcessId(), Counter++);
+            Desktop = pCreateDesktopExA(NameA, NULL, NULL, 0, DESKTOP_ALL_ACCESS, NULL, GoodHeaps[i], NULL);
+            CheckCreated("ansi", Desktop, NameA);
+        }
     }
 
     for (i = 0; i < sizeof(BadHeaps) / sizeof(BadHeaps[0]); i++)
