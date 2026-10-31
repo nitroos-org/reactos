@@ -259,25 +259,38 @@ KiTryAcquireThreadLock(
  * list of the processor it was given to, and no other processor takes it
  * from there: while that processor stays busy with threads of the same or a
  * higher priority, the thread can starve, even when another processor it may
- * run on runs a thread of a lower priority or goes idle. Take the highest priority ready
- * thread of at least Priority that may run on Prcb's processor from another
- * processor's ready list. The other PRCB locks and the thread locks are only
- * tried, never waited for, so processors that look at each other's lists
- * cannot deadlock against each other or against the thread-then-PRCB lock
- * order; a busy list or thread is looked at again at the next switch. The
- * thread lock is needed because KiUpdateEffectiveAffinityThread locks the
- * PRCB of NextProcessor under it and does not look at NextProcessor again.
+ * run on runs a thread of a lower priority or goes idle, and when more
+ * threads of one priority are ready than there are processors, the ones that
+ * share a processor get a fraction of the time the others get.
+ *
+ * Take the highest priority ready thread of at least Priority that may run
+ * on Prcb's processor from another processor's ready list. Of one priority,
+ * a thread whose ideal processor is Prcb's first, so that threads drift back
+ * to their ideal processor rather than away from it. Of a priority below
+ * AnyAffinityPriority, only a thread that may run on every processor of
+ * Prcb's node: Windows shares the ready threads of one priority among the
+ * processors only for those (on Windows 10, spinners restricted to 2 of 4
+ * processors stay on their processors and share them unevenly).
+ *
+ * The other PRCB locks and the thread locks are only tried, never waited
+ * for, so processors that look at each other's lists cannot deadlock against
+ * each other or against the thread-then-PRCB lock order; a busy list or
+ * thread is looked at again at the next switch. The thread lock is needed
+ * because KiUpdateEffectiveAffinityThread locks the PRCB of NextProcessor
+ * under it and does not look at NextProcessor again.
  */
 static
 PKTHREAD
 KiTakeRemoteReadyThread(
     _In_ PKPRCB Prcb,
-    _In_ KPRIORITY Priority)
+    _In_ KPRIORITY Priority,
+    _In_ KPRIORITY AnyAffinityPriority)
 {
     PKPRCB RemotePrcb;
     PKTHREAD Thread;
     PLIST_ENTRY ListHead, ListEntry;
-    ULONG Count, Number, Summary, Mask, Index;
+    ULONG Count, Number, Summary, Mask, Index, Pass;
+    KAFFINITY NodeSet = Prcb->ParentNode->ProcessorMask & KeActiveProcessors;
 
     if (Priority > HIGH_PRIORITY) return NULL;
     ASSERT(Priority >= 0);
@@ -295,12 +308,15 @@ KiTakeRemoteReadyThread(
     }
 
     /* Highest priority first, on every processor before a lower priority:
-       the threads of one priority may all be bound to their processors */
+       the threads of one priority may all be bound to their processors.
+       Of one priority, a thread whose ideal processor is this one on every
+       processor first (pass 0), then any thread that may run here (pass 1) */
     while (Summary)
     {
         BitScanReverse(&Index, Summary);
         Summary &= ~PRIORITY_MASK(Index);
 
+        for (Pass = 0; Pass < 2; Pass++)
         for (Count = 1; Count < (ULONG)KeNumberProcessors; Count++)
         {
             Number = (Prcb->Number + Count) % KeNumberProcessors;
@@ -319,6 +335,9 @@ KiTakeRemoteReadyThread(
                 {
                     Thread = CONTAINING_RECORD(ListEntry, KTHREAD, WaitListEntry);
                     if ((Thread->Affinity & Prcb->SetMember) &&
+                        (((KPRIORITY)Index >= AnyAffinityPriority) ||
+                         ((Thread->Affinity & NodeSet) == NodeSet)) &&
+                        ((Pass != 0) || (Thread->IdealProcessor == Prcb->Number)) &&
                         KiTryAcquireThreadLock(Thread))
                     {
                         break;
@@ -357,15 +376,18 @@ KiTakeRemoteReadyThread(
 /*
  * Called with the PRCB lock held. Select the ready thread the processor
  * runs next: a thread of a priority of at least RemotePriority and above
- * every thread on its own list from another processor's list, else the
- * highest priority thread of at least Priority on its own list.
+ * every thread on its own list from another processor's list (of a priority
+ * below AnyAffinityPriority, only one that may run on every processor of the
+ * node),
+ * else the highest priority thread of at least Priority on its own list.
  */
 PKTHREAD
 FASTCALL
 KiSelectReadyThreadAny(
     _In_ PKPRCB Prcb,
     _In_ KPRIORITY Priority,
-    _In_ KPRIORITY RemotePriority)
+    _In_ KPRIORITY RemotePriority,
+    _In_ KPRIORITY AnyAffinityPriority)
 {
     PKTHREAD Thread;
     ULONG Summary, Highest;
@@ -378,8 +400,10 @@ KiSelectReadyThreadAny(
         if (RemotePriority <= (KPRIORITY)Highest)
             RemotePriority = Highest + 1;
     }
+    if (AnyAffinityPriority < RemotePriority)
+        AnyAffinityPriority = RemotePriority;
 
-    Thread = KiTakeRemoteReadyThread(Prcb, RemotePriority);
+    Thread = KiTakeRemoteReadyThread(Prcb, RemotePriority, AnyAffinityPriority);
     if (Thread) return Thread;
 
     return KiSelectReadyThread(Priority, Prcb);
@@ -417,7 +441,7 @@ KiIdleTakeReadyThread(
     KiAcquirePrcbLock(Prcb);
     if (!Prcb->NextThread)
     {
-        Thread = KiTakeRemoteReadyThread(Prcb, 0);
+        Thread = KiTakeRemoteReadyThread(Prcb, 0, 0);
         if (Thread)
         {
             Thread->State = Standby;
@@ -772,7 +796,7 @@ KiSelectNextThread(IN PKPRCB Prcb)
     PKTHREAD Thread;
 
     /* Select a ready thread */
-    Thread = KiSelectReadyThreadAny(Prcb, 0, 0);
+    Thread = KiSelectReadyThreadAny(Prcb, 0, 0, 0);
     if (!Thread)
     {
         /* Didn't find any, get the current idle thread */
@@ -836,7 +860,7 @@ KiSwapThread(IN PKTHREAD CurrentThread,
     else
     {
         /* Try to find a ready thread */
-        NextThread = KiSelectReadyThreadAny(Prcb, 0, 0);
+        NextThread = KiSelectReadyThreadAny(Prcb, 0, 0, 0);
         if (NextThread)
         {
             /* Switch to it */

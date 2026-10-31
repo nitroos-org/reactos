@@ -2808,7 +2808,7 @@ BasepSetIdealProcessor(
     _In_ HANDLE ThreadHandle,
     _In_ const PROCESSOR_NUMBER *IdealProcessor)
 {
-    ULONG_PTR Number = IdealProcessor->Number;
+    ULONG Number = IdealProcessor->Number;
 
     return NtSetInformationThread(ThreadHandle, ThreadIdealProcessor, &Number, sizeof(Number));
 }

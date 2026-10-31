@@ -305,7 +305,8 @@ FASTCALL
 KiSelectReadyThreadAny(
     _In_ PKPRCB Prcb,
     _In_ KPRIORITY Priority,
-    _In_ KPRIORITY RemotePriority
+    _In_ KPRIORITY RemotePriority,
+    _In_ KPRIORITY AnyAffinityPriority
 );
 
 BOOLEAN
@@ -314,7 +315,7 @@ KiIdleTakeReadyThread(
     _In_ PKPRCB Prcb
 );
 #else
-#define KiSelectReadyThreadAny(Prcb, Priority, RemotePriority) \
+#define KiSelectReadyThreadAny(Prcb, Priority, RemotePriority, AnyAffinityPriority) \
     KiSelectReadyThread((Priority), (Prcb))
 #endif
 

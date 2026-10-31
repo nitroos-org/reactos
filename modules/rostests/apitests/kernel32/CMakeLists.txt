@@ -175,6 +175,7 @@ list(APPEND SOURCE
     TerminateProcess.c
     ThreadContextNpx.c
     ThreadContextObjects.c
+    ThreadFairness.c
     ThreadHandleLeak.c
     ThreadInformation.c
     TunnelCache.c
