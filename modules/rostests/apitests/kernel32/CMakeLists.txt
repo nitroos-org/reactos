@@ -145,6 +145,7 @@ list(APPEND SOURCE
     PrefetchVirtualMemory.c
     PrivMoveFileIdentityW.c
     ProcessAffinity.c
+    ProcessorNumber.c
     ProcessInformation.c
     ProcessMitigationPolicy.c
     ProcThreadMitigation.c
@@ -244,6 +245,11 @@ if(ARCH STREQUAL "i386")
     set_module_type(wow64_localhello win32cui ENTRYPOINT mainCRTStartup)
     add_importlibs(wow64_localhello wow64_local kernel32)
     add_rostests_file(TARGET wow64_localhello)
+
+    add_executable(wow64_procnum wow64_procnum.c)
+    set_module_type(wow64_procnum win32cui ENTRYPOINT mainCRTStartup)
+    add_importlibs(wow64_procnum msvcrt kernel32)
+    add_rostests_file(TARGET wow64_procnum)
 endif()
 
 list(APPEND MANIFEST_FILES

@@ -1265,6 +1265,28 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     }
     case W64_NtTestAlert: return NtTestAlert();
     case W64_NtYieldExecution: return NtYieldExecution();
+    case W64_NtGetCurrentProcessorNumber:
+        /* The result is the processor number, not an NTSTATUS. The thunk runs on the guest thread's own
+         * native thread, so this is the processor the guest code was running on. */
+        return NtGetCurrentProcessorNumber();
+    case W64_NtGetCurrentProcessorNumberEx:
+    {
+        /* PROCESSOR_NUMBER has the same layout in both ABIs. The native ntdll only exports the Rtl
+         * function at the 0x601 level (the Nt one is exported from 0xA00 on), so use that, and fail
+         * like the system service when the guest buffer cannot be written. */
+        PROCESSOR_NUMBER Number;
+        RtlGetCurrentProcessorNumberEx(&Number);
+        _SEH2_TRY
+        {
+            *(PROCESSOR_NUMBER *)P(0) = Number;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+        _SEH2_END;
+        return STATUS_SUCCESS;
+    }
     case W64_NtFlushProcessWriteBuffers: return NtFlushProcessWriteBuffers();
     case W64_NtIsProcessInJob: return NtIsProcessInJob(H(0), H(1));
     case W64_NtTerminateProcess: return NtTerminateProcess(H(0), a[1]);
