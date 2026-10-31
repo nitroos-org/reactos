@@ -74,6 +74,12 @@ static bool IsInteractive()
            (Flags.dwFlags & WSF_VISIBLE);
 }
 
+/* Whether a dialog could be answered: not turned off, and a window station with a display */
+bool CanShowUi()
+{
+    return !IsUiDisabled() && IsInteractive();
+}
+
 /* The file description of the program, as Windows names it, else its file name */
 static std::wstring GetProgramName(const DumpData& data)
 {
@@ -517,7 +523,7 @@ int ShowCrashDialog(DumpData& data, const ProblemSignature& Signature, LPCWSTR D
                     bool OfferDebug)
 {
     /* As on Windows, without a dialog the program is closed and no debugger is offered */
-    if (IsUiDisabled() || !IsInteractive())
+    if (!CanShowUi())
         return CRASH_REPORTER_CLOSE;
 
     CrashDialogData Dlg;

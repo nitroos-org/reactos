@@ -182,6 +182,7 @@ list(APPEND SOURCE
     VolumeMountPoint.c
     TzSetPrivilege.c
     UEFIFirmware.c
+    UnattendedCrash.c
     UnhandledExceptionExit.c
     UnmapViewOfFileEx.c
     WaitOnAddress.c

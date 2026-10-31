@@ -33,11 +33,13 @@ NTSYSAPI ULONG NTAPI vDbgPrintEx(_In_ ULONG ComponentId, _In_ ULONG Level, _In_z
 
 void xfprintf(FILE* stream, const char *fmt, ...)
 {
-    va_list ap;
+    va_list ap, ap2;
 
     va_start(ap, fmt);
+    va_copy(ap2, ap);
     vfprintf(stream, fmt, ap);
-    vDbgPrintEx(-1, DPFLTR_ERROR_LEVEL, fmt, ap);
+    vDbgPrintEx(-1, DPFLTR_ERROR_LEVEL, fmt, ap2);
+    va_end(ap2);
     va_end(ap);
 }
 
@@ -174,14 +176,57 @@ void PrintBugreport(FILE* output, DumpData& data)
 }
 
 
+/* Whether a key press could come: a console on the input and someone to look at it */
+static bool CanWaitForKey()
+{
+    DWORD Mode;
+    return CanShowUi() && GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &Mode);
+}
+
 int abort(FILE* output, int err)
 {
-    if (output != stdout)
+    if (output && output != stdout)
         fclose(output);
-    else
+    else if (CanWaitForKey())
         _getch();
 
     return err;
+}
+
+/* A message box blocks until someone answers it: without a display the text goes to the output only */
+static void Notify(HWND hWnd, LPCWSTR Text, LPCWSTR Title, UINT Type)
+{
+    if (CanShowUi())
+        MessageBoxW(hWnd, Text, Title, Type);
+    else
+        xfprintf(stdout, "%ls: %ls\n", Title, Text);
+}
+
+/*
+ * The process is being terminated, but it ends only once the debugger has
+ * released the event that stopped it and taken the exit events: do so, and
+ * the process is gone when this returns.
+ */
+static void FinishDebuggee(DWORD pid, const DEBUG_EVENT& Pending)
+{
+    DEBUG_EVENT evt;
+
+    ContinueDebugEvent(Pending.dwProcessId, Pending.dwThreadId,
+                       (Pending.dwDebugEventCode == EXCEPTION_DEBUG_EVENT) ? DBG_EXCEPTION_NOT_HANDLED : DBG_CONTINUE);
+    while (WaitForDebugEvent(&evt, 5000))
+    {
+        DWORD Status = DBG_CONTINUE;
+        if (evt.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT)
+            CloseHandle(evt.u.CreateProcessInfo.hFile);
+        else if (evt.dwDebugEventCode == LOAD_DLL_DEBUG_EVENT)
+            CloseHandle(evt.u.LoadDll.hFile);
+        else if (evt.dwDebugEventCode == EXCEPTION_DEBUG_EVENT)
+            Status = DBG_EXCEPTION_NOT_HANDLED;
+        ContinueDebugEvent(evt.dwProcessId, evt.dwThreadId, Status);
+        if (evt.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT && evt.dwProcessId == pid)
+            break;
+    }
+    DebugActiveProcessStop(pid);
 }
 
 std::wstring Settings_GetOutputPath(void)
@@ -311,7 +356,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, INT)
         }
         else if (!wcscmp(arg, L"-?"))
         {
-            MessageBoxA(NULL, szUsage, "ReactOS Crash Reporter", MB_OK);
+            xfprintf(stdout, "%s\n", szUsage);
+            if (CanShowUi())
+                MessageBoxA(NULL, szUsage, "ReactOS Crash Reporter", MB_OK);
             return abort(output, 0);
         }
         else if (!wcscmp(arg, L"/?"))
@@ -323,7 +370,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, INT)
 
     if (!pid)
     {
-        MessageBoxA(NULL, szUsage, "ReactOS Crash Reporter", MB_OK);
+        xfprintf(stdout, "%s\n", szUsage);
+        if (CanShowUi())
+            MessageBoxA(NULL, szUsage, "ReactOS Crash Reporter", MB_OK);
         return abort(stdout, 0);
     }
 
@@ -338,7 +387,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, INT)
         if (res != ERROR_SUCCESS && res != ERROR_ALREADY_EXISTS)
         {
             xfprintf(stdout, "Could not create output directory, not writing dump\n");
-            MessageBoxA(NULL, "Could not create directory to write crash report.", "ReactOS Crash Reporter", MB_ICONERROR | MB_OK);
+            Notify(NULL, L"Could not create directory to write crash report.", L"ReactOS Crash Reporter", MB_ICONERROR | MB_OK);
             return abort(stdout, 0);
         }
     }
@@ -382,13 +431,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, INT)
     }
 
     TerminateProcess(data.ProcessHandle, data.ExceptionInfo.ExceptionRecord.ExceptionCode);
+    FinishDebuggee(data.ProcessID, evt);
 
     CStringW FormattedMessage;
     FormattedMessage.Format(IDS_USER_ALERT_MESSAGE, data.ProcessName.c_str(), OutputPath.c_str());
     CStringW DialogTitle;
     DialogTitle.LoadString(hInstance, IDS_APP_TITLE);
 
-    MessageBoxW(NULL, FormattedMessage.GetString(), DialogTitle.GetString(), MB_OK);
+    Notify(NULL, FormattedMessage.GetString(), DialogTitle.GetString(), MB_OK);
 
     return abort(output, 0);
 }
