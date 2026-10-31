@@ -221,6 +221,86 @@ WSCEnumProtocols(IN LPINT lpiProtocols,
     return Status;
 }
 
+typedef struct _PROVIDER_INFO_CONTEXT
+{
+    GUID ProviderId;
+    BOOL Found;
+} PROVIDER_INFO_CONTEXT, *PPROVIDER_INFO_CONTEXT;
+
+BOOL
+WSAAPI
+ProviderInfoEnumerationProc(PVOID EnumContext,
+                            PTCATALOG_ENTRY Entry)
+{
+    PPROVIDER_INFO_CONTEXT Context = (PPROVIDER_INFO_CONTEXT)EnumContext;
+
+    if (IsEqualGUID(&Entry->ProtocolInfo.ProviderId, &Context->ProviderId))
+        Context->Found = TRUE;
+
+    /* Continue enumeration */
+    return TRUE;
+}
+
+/*
+ * WSCGetProviderInfo
+ *
+ * Only the LSP categories of a provider (ProviderInfoLspCategories, a DWORD) are defined; the audit
+ * information is not implemented on Windows either. The categories of a provider are kept by its installer
+ * (WSCInstallProviderAndChains): the providers of the catalog have none that could be read, which Windows
+ * reports as WSAEINVALIDPROVIDER for them too (the providers of a default installation).
+ *
+ * @implemented
+ */
+INT
+WSPAPI
+WSCGetProviderInfo(IN LPGUID lpProviderId,
+                   IN INT InfoType,
+                   OUT PBYTE Info,
+                   IN OUT size_t *InfoSize,
+                   IN DWORD Flags,
+                   OUT LPINT lpErrno)
+{
+    PTCATALOG Catalog;
+    PROVIDER_INFO_CONTEXT Context;
+    INT ErrorCode;
+
+    DPRINT("WSCGetProviderInfo: %p %d %p %p %lx %p\n", lpProviderId, InfoType, Info, InfoSize, Flags, lpErrno);
+
+    if (!lpProviderId)
+    {
+        ErrorCode = WSAEFAULT;
+        goto Fail;
+    }
+
+    /* Look for the provider in the catalog */
+    Catalog = OpenInitializedCatalog();
+    if (!Catalog)
+    {
+        ErrorCode = WSAENOBUFS;
+        goto Fail;
+    }
+    Context.ProviderId = *lpProviderId;
+    Context.Found = FALSE;
+    WsTcEnumerateCatalogItems(Catalog, ProviderInfoEnumerationProc, &Context);
+    WsTcDelete(Catalog);
+
+    if (!Context.Found)
+        ErrorCode = WSANO_RECOVERY;
+    else if (InfoType == 1 /* ProviderInfoAudit */)
+        ErrorCode = ERROR_CALL_NOT_IMPLEMENTED;
+    else if (InfoType != 0 /* ProviderInfoLspCategories */)
+        ErrorCode = WSANO_RECOVERY;
+    else if (!Info || !InfoSize || *InfoSize != sizeof(DWORD))
+        ErrorCode = WSAEINVAL;
+    else
+        ErrorCode = WSAEINVALIDPROVIDER;
+
+Fail:
+    if (lpErrno)
+        *lpErrno = ErrorCode;
+    return SOCKET_ERROR;
+}
+
 /*
  * @implemented
  */

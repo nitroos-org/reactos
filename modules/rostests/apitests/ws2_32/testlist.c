@@ -64,6 +64,7 @@ extern void func_WSARecvFrom(void);
 extern void func_WSAStartup(void);
 extern void func_WSARecvMsg(void);
 extern void func_WSASendMsg(void);
+extern void func_WSCGetProviderInfo(void);
 
 const struct test winetest_testlist[] =
 {
@@ -128,6 +129,7 @@ const struct test winetest_testlist[] =
     { "WSAStartup", func_WSAStartup },
     { "WSARecvMsg", func_WSARecvMsg },
     { "WSASendMsg", func_WSASendMsg },
+    { "WSCGetProviderInfo", func_WSCGetProviderInfo },
     { 0, 0 }
 };
 

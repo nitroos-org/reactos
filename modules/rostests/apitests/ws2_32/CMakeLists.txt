@@ -61,6 +61,7 @@ list(APPEND SOURCE
     WSAStartup.c)
 
 list(APPEND PCH_SKIP_SOURCE
+    WSCGetProviderInfo.c
     testlist.c)
 
 add_executable(ws2_32_apitest
