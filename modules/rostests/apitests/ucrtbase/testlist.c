@@ -26,6 +26,7 @@ extern void func_math_errno(void);
 extern void func_c99_math(void);
 extern void func_fenv(void);
 extern void func_version(void);
+extern void func_fpexcept(void);
 
 
 const struct test winetest_testlist[] =
@@ -54,5 +55,6 @@ const struct test winetest_testlist[] =
     { "fenv", func_fenv },
     { "version", func_version },
 
+    { "fpexcept", func_fpexcept },
     { 0, 0 }
 };

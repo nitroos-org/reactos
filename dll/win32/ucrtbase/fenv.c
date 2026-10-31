@@ -10,6 +10,7 @@
 #include <float.h>
 #include <fenv.h>
 #include <math.h>
+#include <stdint.h>
 
 #if defined(_M_IX86) || defined(_M_AMD64) || defined(_M_X64)
 
@@ -618,6 +619,132 @@ int __cdecl __fpe_flt_rounds(void)
         case _RC_UP: return 2;
         default: return 3;
     }
+}
+
+/* _except1: the floating-point exception hook of the math functions (the _FpCode* operations of the x87 and SSE
+   math library). fpe holds the exception flags (1 overflow, 2 underflow, 4 divide by zero, 8 invalid, 0x10
+   inexact) and cw the control word of the caller (the x87 control word on i386, the MXCSR on amd64). When
+   every exception in fpe is masked the flags are set and the result is returned (infinity of the sign of res
+   for an overflow, a signed zero for an underflow); otherwise the exception is raised, the highest of
+   invalid, overflow, underflow, divide by zero and inexact first. The control word that is left is cw. */
+__declspec(dllimport) void __stdcall RaiseException(unsigned long code, unsigned long flags, unsigned long argc,
+                                                     const uintptr_t *argv);
+
+double __cdecl _except1(unsigned long fpe, int op, double arg, double res, unsigned long cw, void *unk)
+{
+    /* the bits of the exception masks of an x87 control word: 1 invalid, 4 divide by zero, 8 overflow,
+       0x10 underflow, 0x20 inexact */
+    static const struct { unsigned long fpe, mask, code; unsigned int sw; } exc[] =
+    {
+        { 0x08, 0x01, 0xC0000090 /* STATUS_FLOAT_INVALID_OPERATION */, _SW_INVALID },
+        { 0x01, 0x08, 0xC0000091 /* STATUS_FLOAT_OVERFLOW */, _SW_OVERFLOW },
+        { 0x02, 0x10, 0xC0000093 /* STATUS_FLOAT_UNDERFLOW */, _SW_UNDERFLOW },
+        { 0x04, 0x04, 0xC000008E /* STATUS_FLOAT_DIVIDE_BY_ZERO */, _SW_ZERODIVIDE },
+        { 0x10, 0x20, 0xC000008F /* STATUS_FLOAT_INEXACT_RESULT */, _SW_INEXACT },
+    };
+    unsigned long masks, required = 0, code = 0;
+    unsigned int raise = 0, flags, cwmask;
+    unsigned short operation;
+    uintptr_t argument;
+    unsigned int i;
+
+#ifdef _M_IX86
+    masks = cw & 0x3f;
+#else
+    masks = (cw >> 7) & 0x3f;
+#endif
+    for (i = 0; i < sizeof(exc) / sizeof(exc[0]); i++)
+    {
+        if (!(fpe & exc[i].fpe))
+            continue;
+        required |= exc[i].mask;
+        raise |= exc[i].sw;
+        /* the exception that is raised is the first of the table, inexact only if nothing else is in fpe */
+        if (!code)
+            code = exc[i].code;
+    }
+    /* all of them have to be masked, else the exception of the first is raised */
+    if ((masks & required) == required)
+        code = 0;
+
+    /* the parameter of the exception is the address of the operation code shifted by five */
+    operation = (unsigned short)(op << 5);
+    argument = (uintptr_t)&operation;
+    if (code)
+        RaiseException(code, 0, 1, &argument);
+
+    if (fpe & 0x01)
+    {
+        /* (HUGE_VAL is computed by an operation that overflows, it would set the flags) */
+        static const union { unsigned long long bits; double value; } infinity = { 0x7ff0000000000000ULL };
+
+        res = signbit(res) ? -infinity.value : infinity.value;
+    }
+    else if (fpe & 0x02)
+        res = signbit(res) ? -0.0 : 0.0;
+#ifdef _M_IX86
+    /* the x87 code sets the inexact flag with the overflow and the underflow */
+    if (fpe & 0x03)
+        raise |= _SW_INEXACT;
+#endif
+
+    /* the control word of the caller becomes the control word of the thread */
+    flags = 0;
+    cwmask = _MCW_EM | _MCW_RC;
+#ifdef _M_IX86
+    if (cw & 0x01) flags |= _EM_INVALID;
+    if (cw & 0x02) flags |= _EM_DENORMAL;
+    if (cw & 0x04) flags |= _EM_ZERODIVIDE;
+    if (cw & 0x08) flags |= _EM_OVERFLOW;
+    if (cw & 0x10) flags |= _EM_UNDERFLOW;
+    if (cw & 0x20) flags |= _EM_INEXACT;
+    switch (cw & 0xc00)
+    {
+        case 0xc00: flags |= _RC_UP | _RC_DOWN; break;
+        case 0x800: flags |= _RC_UP; break;
+        case 0x400: flags |= _RC_DOWN; break;
+    }
+    switch (cw & 0x300)
+    {
+        case 0x0: flags |= _PC_24; break;
+        case 0x200: flags |= _PC_53; break;
+        case 0x300: flags |= _PC_64; break;
+    }
+    if (cw & 0x1000) flags |= _IC_AFFINE;
+    cwmask |= _MCW_PC | _MCW_IC;
+#else
+    if (cw & 0x80) flags |= _EM_INVALID;
+    if (cw & 0x100) flags |= _EM_DENORMAL;
+    if (cw & 0x200) flags |= _EM_ZERODIVIDE;
+    if (cw & 0x400) flags |= _EM_OVERFLOW;
+    if (cw & 0x800) flags |= _EM_UNDERFLOW;
+    if (cw & 0x1000) flags |= _EM_INEXACT;
+    switch (cw & 0x6000)
+    {
+        case 0x6000: flags |= _RC_UP | _RC_DOWN; break;
+        case 0x4000: flags |= _RC_UP; break;
+        case 0x2000: flags |= _RC_DOWN; break;
+    }
+    switch (cw & 0x8040)
+    {
+        case 0x0040: flags |= _DN_FLUSH_OPERANDS_SAVE_RESULTS; break;
+        case 0x8000: flags |= _DN_SAVE_OPERANDS_FLUSH_RESULTS; break;
+        case 0x8040: flags |= _DN_FLUSH; break;
+    }
+    cwmask |= _MCW_DN;
+#endif
+    _control87(flags, cwmask);
+
+    /* the flags are set last: a change of the control word clears them */
+    if (raise)
+    {
+        unsigned int sw = 0;
+
+        _setfp(NULL, 0, &sw, 0);
+        sw |= raise;
+        _setfp(NULL, 0, &sw, _MCW_EM);
+    }
+    return res;
 }
 
 #endif /* x86 */

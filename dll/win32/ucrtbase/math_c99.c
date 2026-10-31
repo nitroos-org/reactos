@@ -402,3 +402,14 @@ float __cdecl _o__logbf(float x)
     return ilogbf(x);
 }
 #endif
+
+/* Ordered comparison of two doubles, the helper of isgreater() and the other comparison macros: 0 if either
+   is a NaN, else _FP_LT (1), _FP_EQ (2) or _FP_GT (4). _ldpcomp is the same function. */
+int __cdecl _dpcomp(double x, double y)
+{
+    if (isnan(x) || isnan(y))
+        return 0;
+    if (x == y)
+        return 2;
+    return x < y ? 1 : 4;
+}
