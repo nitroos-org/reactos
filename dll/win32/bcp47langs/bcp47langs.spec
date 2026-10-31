@@ -36,15 +36,12 @@
 @ stub GetAppropriateUserLocaleForUserLanguages
 @ stub GetAppropriateUserPreferredAndDisplayLanguagesForUser
 @ stub GetClosestMatchingUserLanguage
-@ stub GetDisplayLanguagesForAllUsers
 @ stub GetFontFallbackLanguageList
 @ stub GetHttpAcceptLanguageOptOut
 @ stub GetInputMethodOverrideForUser
 @ stub GetPendingUserDisplayLanguage
 @ stub GetRelevantLocalesFromLanguageTags
 @ stub GetSerializedUserLanguageProfile
-@ stub GetSerializedUserLanguagesForUser
-@ stub GetStartingUserDisplayLanguage
 @ stub GetUserDisplayLanguageOverride
 @ stub GetUserLanguageInputMethods
 @ stub GetUserLanguageInputMethodsForUser
@@ -63,7 +60,6 @@
 @ stub SetHttpAcceptLanguageOptOut
 @ stub SetInputMethodOverride
 @ stub SetPreviousUserDisplayLanguages
-@ stub SetStartingUserDisplayLanguage
 @ stub SetUserDisplayLanguageOverride
 @ stub SetUserLanguageInputMethods
 @ stub SetUserLanguagesInternal

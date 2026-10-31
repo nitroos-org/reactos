@@ -1,0 +1,5 @@
+#define REACTOS_VERSION_DLL
+#define REACTOS_STR_FILE_DESCRIPTION  "Microsoft C Runtime Library (forwarder to msvcp140)"
+#define REACTOS_STR_INTERNAL_NAME     "msvcp_win"
+#define REACTOS_STR_ORIGINAL_FILENAME "msvcp_win.dll"
+#include <reactos/version.rc>
