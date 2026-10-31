@@ -54,6 +54,7 @@ extern void func_RegOpenKeyExW(void);
 extern void func_RegPerformanceData(void);
 extern void func_RegQueryInfoKey(void);
 extern void func_RegQueryValueExW(void);
+extern void func_RegKeyNameCase(void);
 extern void func_RegRenameKey(void);
 extern void func_RegRenameKeyPersist(void);
 extern void func_RegRenameKeyStress(void);
@@ -159,6 +160,7 @@ const struct test winetest_testlist[] =
     { "RegOpenKeyExW", func_RegOpenKeyExW },
     { "RegPerformanceData", func_RegPerformanceData },
     { "RegQueryValueExW", func_RegQueryValueExW },
+    { "RegKeyNameCase", func_RegKeyNameCase },
     { "RegRenameKey", func_RegRenameKey },
     { "RegRenameKeyPersist", func_RegRenameKeyPersist },
     { "RegRenameKeyStress", func_RegRenameKeyStress },
