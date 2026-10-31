@@ -668,6 +668,7 @@
 @ stdcall RtlAreAllAccessesGranted(long long)
 @ stdcall RtlAreAnyAccessesGranted(long long)
 @ stdcall RtlAreBitsClear(ptr long long)
+@ stdcall -arch=x86_64 -version=0x601+ RtlAreBitsClearEx(ptr int64 int64) RtlAreBitsClear64
 @ stdcall RtlAreBitsSet(ptr long long)
 @ stdcall RtlAssert(ptr ptr long ptr)
 @ stdcall -stub -version=0x600+ RtlBarrier(ptr long)
@@ -682,7 +683,11 @@
 @ stdcall RtlCheckRegistryKey(long ptr)
 @ stdcall -stub -version=0x600+ RtlCleanUpTEBLangLists()
 @ stdcall RtlClearAllBits(ptr)
+@ stdcall -arch=x86_64 -version=0x601+ RtlClearAllBitsEx(ptr) RtlClearAllBits64
+@ stdcall -version=0x601+ RtlClearBit(ptr long)
+@ stdcall -arch=x86_64 -version=0x601+ RtlClearBitEx(ptr int64) RtlClearBit64
 @ stdcall RtlClearBits(ptr long long)
+@ stdcall -arch=x86_64 -version=0x601+ RtlClearBitsEx(ptr int64 int64) RtlClearBits64
 @ stdcall RtlCloneMemoryStream(ptr ptr)
 @ stdcall -stub -version=0x600+ RtlCloneUserProcess(long long long long long)
 @ stdcall -ret64 -version=0x600+ RtlCmDecodeMemIoResource(ptr ptr)
@@ -711,6 +716,7 @@
 @ stdcall RtlConvertToAutoInheritSecurityObject(ptr ptr ptr ptr long ptr)
 @ stdcall RtlConvertUiListToApiList(ptr ptr long)
 @ stdcall -arch=win32 -ret64 RtlConvertUlongToLargeInteger(long)
+@ stdcall -version=0x601+ RtlCopyBitMap(ptr ptr long)
 @ stdcall -version=0x601+ -arch=i386,x86_64 RtlCopyContext(ptr long ptr)
 @ stdcall -version=0x601+ -arch=i386,x86_64 RtlCopyExtendedContext(ptr long ptr)
 @ stdcall RtlCopyLuid(ptr ptr)
@@ -850,6 +856,7 @@
 @ stdcall RtlFindCharInUnicodeString(long ptr ptr ptr)
 @ stdcall RtlFindClearBits(ptr long long)
 @ stdcall RtlFindClearBitsAndSet(ptr long long)
+@ stdcall -arch=x86_64 -version=0x601+ RtlFindClearBitsEx(ptr int64 int64) RtlFindClearBits64
 @ stdcall RtlFindClearRuns(ptr ptr long long)
 @ stdcall -version=0x600+ RtlFindClosestEncodableLength(int64 ptr)
 @ stdcall RtlFindLastBackwardRunClear(ptr long ptr)
@@ -860,6 +867,8 @@
 @ stdcall RtlFindNextForwardRunClear(ptr long ptr)
 @ stdcall RtlFindSetBits(ptr long long)
 @ stdcall RtlFindSetBitsAndClear(ptr long long)
+@ stdcall -arch=x86_64 -version=0x601+ RtlFindSetBitsAndClearEx(ptr int64 int64) RtlFindSetBitsAndClear64
+@ stdcall -arch=x86_64 -version=0x601+ RtlFindSetBitsEx(ptr int64 int64) RtlFindSetBits64
 @ stdcall RtlFirstEntrySList(ptr)
 @ stdcall RtlFirstFreeAce(ptr ptr)
 @ stdcall -version=0x600+ RtlFlsAlloc(ptr ptr)
@@ -965,6 +974,7 @@
 @ stdcall RtlInitUnicodeStringEx(ptr wstr)
 @ stdcall -stub RtlInitializeAtomPackage(ptr)
 @ stdcall RtlInitializeBitMap(ptr long long)
+@ stdcall -arch=x86_64 -version=0x601+ RtlInitializeBitMapEx(ptr ptr int64) RtlInitializeBitMap64
 @ stdcall -version=0x600+ RtlInitializeConditionVariable(ptr)
 @ stdcall RtlInitializeContext(ptr ptr ptr ptr ptr)
 @ stdcall RtlInitializeCriticalSection(ptr)
@@ -989,6 +999,7 @@
 @ stdcall RtlInt64ToUnicodeString(double long ptr)
 @ stdcall RtlIntegerToChar(long long long ptr)
 @ stdcall RtlIntegerToUnicodeString(long long ptr)
+@ stdcall -version=0x601+ RtlInterlockedClearBitRun(ptr long long)
 @ stdcall -arch=win32 -ret64 RtlInterlockedCompareExchange64(ptr double double)
 @ stdcall RtlInterlockedFlushSList(ptr)
 @ stdcall RtlInterlockedPopEntrySList(ptr)
@@ -996,6 +1007,7 @@
 @ stdcall -arch=x86_64 RtlInterlockedPushListSList(ptr ptr ptr long)
 @ stdcall -arch=i386 RtlInterlockedPushListSListEx(ptr ptr ptr long)
 @ stdcall -arch=!i386 RtlInterlockedPushListSListEx(ptr ptr ptr long) RtlInterlockedPushListSList
+@ stdcall -version=0x601+ RtlInterlockedSetBitRun(ptr long long)
 @ stdcall -ret64 -version=0x600+ RtlIoDecodeMemIoResource(ptr ptr ptr ptr)
 @ stdcall -version=0x600+ RtlIoEncodeMemIoResource(ptr long int64 int64 int64 int64)
 @ stdcall RtlIpv4AddressToStringA(ptr ptr)
@@ -1088,7 +1100,11 @@
 @ stdcall RtlNumberGenericTableElements(ptr)
 @ stdcall RtlNumberGenericTableElementsAvl(ptr)
 @ stdcall RtlNumberOfClearBits(ptr)
+@ stdcall -arch=x86_64 -version=0x601+ RtlNumberOfClearBitsEx(ptr) RtlNumberOfClearBits64
+@ stdcall -version=0x601+ RtlNumberOfClearBitsInRange(ptr long long)
 @ stdcall RtlNumberOfSetBits(ptr)
+@ stdcall -arch=x86_64 -version=0x601+ RtlNumberOfSetBitsEx(ptr) RtlNumberOfSetBits64
+@ stdcall -version=0x601+ RtlNumberOfSetBitsInRange(ptr long long)
 @ stdcall -stub -version=0x600+ RtlNumberOfSetBitsUlongPtr(long)
 @ stdcall RtlOemStringToUnicodeSize(ptr) RtlxOemStringToUnicodeSize
 @ stdcall RtlOemStringToUnicodeString(ptr ptr long)
@@ -1177,8 +1193,12 @@
 @ stdcall RtlSelfRelativeToAbsoluteSD(ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr)
 @ stdcall -stub -version=0x600+ RtlSendMsgToSm(ptr ptr)
 @ stdcall RtlSetAllBits(ptr)
+@ stdcall -arch=x86_64 -version=0x601+ RtlSetAllBitsEx(ptr) RtlSetAllBits64
 @ stdcall RtlSetAttributesSecurityDescriptor(ptr long ptr)
+@ stdcall -version=0x601+ RtlSetBit(ptr long)
+@ stdcall -arch=x86_64 -version=0x601+ RtlSetBitEx(ptr int64) RtlSetBit64
 @ stdcall RtlSetBits(ptr long long)
+@ stdcall -arch=x86_64 -version=0x601+ RtlSetBitsEx(ptr int64 int64) RtlSetBits64
 @ stdcall RtlSetControlSecurityDescriptor(ptr long long)
 @ stdcall RtlSetCriticalSectionSpinCount(ptr long)
 @ stdcall RtlSetCurrentDirectory_U(ptr)
@@ -1233,6 +1253,7 @@
 @ stdcall RtlSubtreeSuccessor(ptr)
 @ stdcall RtlSystemTimeToLocalTime(ptr ptr)
 @ stdcall -version=0x600+ RtlTestBit(ptr long)
+@ stdcall -arch=x86_64 -version=0x601+ RtlTestBitEx(ptr int64) RtlTestBit64
 @ stdcall RtlTimeFieldsToTime(ptr ptr)
 @ stdcall RtlTimeToElapsedTimeFields(long long)
 @ stdcall RtlTimeToSecondsSince1970(ptr ptr)
