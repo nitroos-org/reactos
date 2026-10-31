@@ -3,7 +3,7 @@ id	name	implementation	detail
 1	SENDASYNCPROC	translated	five scalar/pointer slots; callback return has no output
 2	LOADSYSMENUTEMPLATE	translated	32-bit LRESULT widened to native HMENU
 3	LOADDEFAULTCURSORS	translated	BOOL input; HCURSOR result widened
-4	HOOKPROC	partial	all families win32k calls back with, on this process's threads (global hooks reach them; LL/KEYBOARD/MOUSE run on the setter): CALLWND scalar and supported message buffers; MSG, CBT (CREATEWND position/z-order and MOVESIZE writeback), mouse and low-level records; chaining per family; signed result; other-process thread hooks rejected
+4	HOOKPROC	partial	all families win32k calls back with, on this process's threads (global hooks reach them; LL/KEYBOARD/MOUSE run on the setter): CALLWND scalar and supported message buffers; MSG, CBT (CREATEWND position/z-order and MOVESIZE writeback), mouse and low-level records; WH_DEBUG (DEBUGHOOKINFO with MSG, mouse and CBT rectangle/activate/click records); chaining per family; signed result; other-process thread hooks rejected
 5	EVENTPROC	unsupported	registration is not supported
 6	LOADMENU	translated	module and resource/name input; HMENU result
 7	CLIENTTHREADSTARTUP	translated	no payload or output

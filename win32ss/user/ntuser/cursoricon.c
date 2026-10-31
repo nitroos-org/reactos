@@ -237,6 +237,12 @@ IntSystemSetCursor(PCURICON_OBJECT pcurNew)
 
 BOOL UserSetCursorPos( INT x, INT y, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook)
 {
+    return UserSetCursorPosEx(x, y, flags, dwExtraInfo, Hook, 0);
+}
+
+/* dwHookTime: the time SendInput or mouse_event supplied for the move, for the low-level hook; zero is now */
+BOOL UserSetCursorPosEx( INT x, INT y, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Hook, DWORD dwHookTime)
+{
     PWND DesktopWindow;
     PSYSTEM_CURSORINFO CurInfo;
     MSG Msg;
@@ -273,7 +279,7 @@ BOOL UserSetCursorPos( INT x, INT y, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Ho
     Msg.wParam = UserGetMouseButtonsState();
     Msg.lParam = MAKELPARAM(x, y);
     Msg.pt = pt;
-    co_MsqInsertMouseMessage(&Msg, flags, dwExtraInfo, Hook);
+    co_MsqInsertMouseMessageEx(&Msg, flags, dwExtraInfo, Hook, dwHookTime);
 
     /* 2. Store the new cursor position */
     gpsi->ptCursor = pt;

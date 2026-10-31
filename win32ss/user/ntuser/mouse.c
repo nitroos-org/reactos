@@ -294,7 +294,7 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
     /* Update cursor position */
     if (dwFlags & MOUSEEVENTF_MOVE)
     {
-        UserSetCursorPos(ptCursor.x, ptCursor.y, bInjected, pmi->dwExtraInfo, TRUE);
+        UserSetCursorPosEx(ptCursor.x, ptCursor.y, bInjected, pmi->dwExtraInfo, TRUE, bInjected ? pmi->time : 0);
     }
 
     if (IS_KEY_DOWN(gafAsyncKeyState, VK_SHIFT))
@@ -314,7 +314,7 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
         Msg.message = WM_LBUTTONDOWN;
         pCurInfo->ButtonsDown |= MK_LBUTTON;
         Msg.wParam |= MK_LBUTTON;
-        co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+        co_MsqInsertMouseMessageEx(&Msg, bInjected, pmi->dwExtraInfo, TRUE, bInjected ? pmi->time : 0);
     }
     else if (dwFlags & MOUSEEVENTF_LEFTUP)
     {
@@ -322,7 +322,7 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
         Msg.message = WM_LBUTTONUP;
         pCurInfo->ButtonsDown &= ~MK_LBUTTON;
         Msg.wParam &= ~MK_LBUTTON;
-        co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+        co_MsqInsertMouseMessageEx(&Msg, bInjected, pmi->dwExtraInfo, TRUE, bInjected ? pmi->time : 0);
     }
 
     /* Middle button */
@@ -332,7 +332,7 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
         Msg.message = WM_MBUTTONDOWN;
         pCurInfo->ButtonsDown |= MK_MBUTTON;
         Msg.wParam |= MK_MBUTTON;
-        co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+        co_MsqInsertMouseMessageEx(&Msg, bInjected, pmi->dwExtraInfo, TRUE, bInjected ? pmi->time : 0);
     }
     else if (dwFlags & MOUSEEVENTF_MIDDLEUP)
     {
@@ -340,7 +340,7 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
         Msg.message = WM_MBUTTONUP;
         pCurInfo->ButtonsDown &= ~MK_MBUTTON;
         Msg.wParam &= ~MK_MBUTTON;
-        co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+        co_MsqInsertMouseMessageEx(&Msg, bInjected, pmi->dwExtraInfo, TRUE, bInjected ? pmi->time : 0);
     }
 
     /* Right button */
@@ -350,7 +350,7 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
         Msg.message = WM_RBUTTONDOWN;
         pCurInfo->ButtonsDown |= MK_RBUTTON;
         Msg.wParam |= MK_RBUTTON;
-        co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+        co_MsqInsertMouseMessageEx(&Msg, bInjected, pmi->dwExtraInfo, TRUE, bInjected ? pmi->time : 0);
     }
     else if (dwFlags & MOUSEEVENTF_RIGHTUP)
     {
@@ -358,7 +358,7 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
         Msg.message = WM_RBUTTONUP;
         pCurInfo->ButtonsDown &= ~MK_RBUTTON;
         Msg.wParam &= ~MK_RBUTTON;
-        co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+        co_MsqInsertMouseMessageEx(&Msg, bInjected, pmi->dwExtraInfo, TRUE, bInjected ? pmi->time : 0);
     }
 
     /* X-Button (4 or 5) */
@@ -370,14 +370,14 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
             SET_KEY_DOWN(gafAsyncKeyState, VK_XBUTTON1, TRUE);
             pCurInfo->ButtonsDown |= MK_XBUTTON1;
             Msg.wParam |= MAKEWPARAM(MK_XBUTTON1, XBUTTON1);
-            co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+            co_MsqInsertMouseMessageEx(&Msg, bInjected, pmi->dwExtraInfo, TRUE, bInjected ? pmi->time : 0);
         }
         if (pmi->mouseData & XBUTTON2)
         {
             SET_KEY_DOWN(gafAsyncKeyState, VK_XBUTTON2, TRUE);
             pCurInfo->ButtonsDown |= MK_XBUTTON2;
             Msg.wParam |= MAKEWPARAM(MK_XBUTTON2, XBUTTON2);
-            co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+            co_MsqInsertMouseMessageEx(&Msg, bInjected, pmi->dwExtraInfo, TRUE, bInjected ? pmi->time : 0);
         }
     }
     else if (dwFlags & MOUSEEVENTF_XUP)
@@ -389,7 +389,7 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
             pCurInfo->ButtonsDown &= ~MK_XBUTTON1;
             Msg.wParam &= ~MK_XBUTTON1;
             Msg.wParam |= MAKEWPARAM(0, XBUTTON1);
-            co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+            co_MsqInsertMouseMessageEx(&Msg, bInjected, pmi->dwExtraInfo, TRUE, bInjected ? pmi->time : 0);
         }
         if (pmi->mouseData & XBUTTON2)
         {
@@ -397,7 +397,7 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
             pCurInfo->ButtonsDown &= ~MK_XBUTTON2;
             Msg.wParam &= ~MK_XBUTTON2;
             Msg.wParam |= MAKEWPARAM(0, XBUTTON2);
-            co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+            co_MsqInsertMouseMessageEx(&Msg, bInjected, pmi->dwExtraInfo, TRUE, bInjected ? pmi->time : 0);
         }
     }
 
@@ -410,7 +410,7 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
         {
             Msg.message = (dwFlags & MOUSEEVENTF_WHEEL) ? WM_MOUSEWHEEL : WM_MOUSEHWHEEL;
             Msg.wParam = MAKEWPARAM(pCurInfo->ButtonsDown, (WORD)sDelta);
-            co_MsqInsertMouseMessage(&Msg, bInjected, pmi->dwExtraInfo, TRUE);
+            co_MsqInsertMouseMessageEx(&Msg, bInjected, pmi->dwExtraInfo, TRUE, bInjected ? pmi->time : 0);
         }
     }
 

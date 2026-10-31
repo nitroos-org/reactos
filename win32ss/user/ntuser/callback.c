@@ -541,6 +541,67 @@ co_IntLoadDefaultCursors(VOID)
 
 static INT iTheId = -2; // Set it out of range.
 
+/*
+ * WH_DEBUG: the callback gets the DEBUGHOOKINFO of the hook that is about to run, and with it a copy of the record the
+ * lParam of that hook points to, when that is one of the flat records below (the user-mode procedure then gets an
+ * lParam that is the offset of the record from the header, as for the other hooks). The lParam of a hook that
+ * carries a plain value goes through as it is, the lParam of the others (CBT_CREATEWND, CALLWNDPROC(RET)) is
+ * not passed on: zero. wow64win converts the same records.
+ */
+static UINT
+IntDebugHookRecordSize(INT HookId, INT Code, LPARAM lParam)
+{
+    if (!lParam)
+        return 0;
+
+    switch (HookId)
+    {
+        case WH_MSGFILTER:
+        case WH_SYSMSGFILTER:
+        case WH_GETMESSAGE:
+            return sizeof(MSG);
+        case WH_MOUSE:
+            return sizeof(MOUSEHOOKSTRUCTEX);
+        case WH_CBT:
+            switch (Code)
+            {
+                case HCBT_MOVESIZE:
+                    return sizeof(RECTL);
+                case HCBT_ACTIVATE:
+                    return sizeof(CBTACTIVATESTRUCT);
+                case HCBT_CLICKSKIPPED:
+                    return sizeof(MOUSEHOOKSTRUCT);
+            }
+            break;
+    }
+    return 0;
+}
+
+static BOOL
+IntDebugHookPlainLParam(INT HookId, INT Code)
+{
+    switch (HookId)
+    {
+        case WH_KEYBOARD:
+        case WH_SHELL:
+        case WH_FOREGROUNDIDLE:
+            return TRUE;
+        case WH_CBT:
+            switch (Code)
+            {
+                case HCBT_KEYSKIPPED:
+                case HCBT_MINMAX:
+                case HCBT_SETFOCUS:
+                case HCBT_SYSCOMMAND:
+                case HCBT_DESTROYWND:
+                case HCBT_QS:
+                    return TRUE;
+            }
+            break;
+    }
+    return FALSE;
+}
+
 LRESULT APIENTRY
 co_IntCallHookProc(INT HookId,
                    INT Code,
@@ -569,6 +630,7 @@ co_IntCallHookProc(INT HookId,
    UINT lParamSize = 0;
    CWPSTRUCT* pCWP = NULL;
    CWPRETSTRUCT* pCWPR = NULL;
+   PDEBUGHOOKINFO pDebug = NULL;
 
    ASSERT(Proc);
    /* Do not allow the desktop thread to do callback to user mode */
@@ -670,6 +732,14 @@ co_IntCallHookProc(INT HookId,
       case WH_FOREGROUNDIDLE:
       case WH_KEYBOARD:
       case WH_SHELL:
+         break;
+      case WH_DEBUG:
+         /* wParam: the hook that is about to run, lParam: its DEBUGHOOKINFO */
+         pDebug = (PDEBUGHOOKINFO)lParam;
+         if (!pDebug)
+            goto Fault_Exit;
+         lParamSize = IntDebugHookRecordSize((INT)wParam, pDebug->code, pDebug->lParam);
+         ArgumentLength += sizeof(DEBUGHOOKINFO) + lParamSize;
          break;
       default:
          ERR("Trying to call unsupported window hook %d\n", HookId);
@@ -779,6 +849,31 @@ co_IntCallHookProc(INT HookId,
       case WH_KEYBOARD:
       case WH_SHELL:
          break;
+      case WH_DEBUG:
+      {
+         PDEBUGHOOKINFO pOut = (PDEBUGHOOKINFO)Extra;
+
+         *pOut = *pDebug;
+         if (lParamSize)
+         {
+            pOut->lParam = (LPARAM)((PCHAR)(pOut + 1) - (PCHAR)Common);
+            _SEH2_TRY
+            {
+               RtlCopyMemory(pOut + 1, (PVOID)pDebug->lParam, lParamSize);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+               RtlZeroMemory(pOut + 1, lParamSize);
+            }
+            _SEH2_END;
+         }
+         else if (!IntDebugHookPlainLParam((INT)wParam, pDebug->code))
+         {
+            pOut->lParam = 0;
+         }
+         Common->lParam = (LPARAM) (Extra - (PCHAR) Common);
+         break;
+      }
    }
 
    ResultPointer = NULL;

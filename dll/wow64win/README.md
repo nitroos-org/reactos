@@ -62,7 +62,10 @@ threads of the calling process, or be global; win32k runs a global hook only
 in the setter's process (low-level, keyboard and mouse hooks on the setter's
 thread). CBT, message-filter, keyboard, mouse, low-level, shell and idle hook
 records are translated both ways, including CallNextHookEx and the CBT
-CREATEWND/MOVESIZE writeback. CALLWND message payload coverage follows the
+CREATEWND/MOVESIZE writeback. A WH_DEBUG call carries the DEBUGHOOKINFO of the
+hook about to run and, for the MSG, mouse and CBT rectangle/activate/click
+records, a translated copy of the record its lParam points to (CBT_CREATEWND
+and CALLWND hooks pass lParam 0). CALLWND message payload coverage follows the
 window-message translator.
 The `wow64_message_hook` fixture covers current-thread GETMESSAGE hooks,
 chaining, signed hook results and MSG writeback for PeekMessage/GetMessage.

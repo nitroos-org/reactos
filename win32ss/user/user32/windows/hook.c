@@ -762,6 +762,25 @@ User32CallHookProcFromKernel(PVOID Arguments, ULONG ArgumentLength)
          RtlCopyMemory(pMsg, pcMsg, sizeof(MSG));
       HeapFree( GetProcessHeap(), 0, pcMsg );
       break;
+    case WH_DEBUG: /* SEH support */
+    {
+      /* wParam: the hook that is about to run, lParam: its DEBUGHOOKINFO. When a record came with it,
+       * the lParam in that is the record's offset from the header */
+      DEBUGHOOKINFO DebugInfo = *(PDEBUGHOOKINFO)((PCHAR) Common + Common->lParam);
+
+      if (Common->lParamSize)
+         DebugInfo.lParam = (LPARAM)((PCHAR) Common + DebugInfo.lParam);
+      _SEH2_TRY
+      {
+         Result = Proc(Common->Code, Common->wParam, (LPARAM) &DebugInfo);
+      }
+      _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+      {
+         Hit = TRUE;
+      }
+      _SEH2_END;
+      break;
+    }
     case WH_KEYBOARD:
     case WH_SHELL:
       Result = Proc(Common->Code, Common->wParam, Common->lParam);
