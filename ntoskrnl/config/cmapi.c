@@ -2040,7 +2040,7 @@ CmRenameKey(
     ParentKcb = Kcb->ParentKcb;
     if (!ParentKcb ||
         (ParentKcb->KeyHive != Hive) ||
-        (Hive == &CmiVolatileHive->Hive) ||
+        ((Hive == &CmiVolatileHive->Hive) && !ParentKcb->ParentKcb) ||
         (Kcb->Flags & (KEY_HIVE_ENTRY | KEY_HIVE_EXIT | KEY_NO_DELETE)) ||
         (Kcb->ExtFlags & CM_KCB_KEY_NON_EXIST))
     {
