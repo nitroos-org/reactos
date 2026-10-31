@@ -209,6 +209,7 @@ extern void func_RtlVirtualUnwind(void);
 extern void func_RtlxUnicodeStringToAnsiSize(void);
 extern void func_RtlxUnicodeStringToOemSize(void);
 extern void func_SectionFaultCost(void);
+extern void func_SectionPageLeak(void);
 extern void func_StackDeepRecursion(void);
 extern void func_BadSegmentFault(void);
 extern void func_ExceptionInfoLeak(void);
@@ -428,6 +429,7 @@ const struct test winetest_testlist[] =
     { "RtlVerifyVersionInfo",           func_RtlVerifyVersionInfo },
     { "RtlWaitOnAddress",               func_RtlWaitOnAddress },
     { "SectionFaultCost",               func_SectionFaultCost },
+    { "SectionPageLeak",                func_SectionPageLeak },
     { "StackDeepRecursion",             func_StackDeepRecursion },
     { "BadSegmentFault",                func_BadSegmentFault },
     { "ExceptionInfoLeak",              func_ExceptionInfoLeak },
