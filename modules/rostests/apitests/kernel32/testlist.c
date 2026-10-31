@@ -61,6 +61,7 @@ extern void func_CallbackCompletion(void);
 extern void func_GetAppContainerNamedObjectPath(void);
 extern void func_CompareObjectHandles(void);
 extern void func_CancelSynchronousIo(void);
+extern void func_IdnTo(void);
 extern void func_IsWow64Process2(void);
 extern void func_VirtualAllocExNuma(void);
 extern void func_DeviceIoControl(void);
@@ -262,6 +263,7 @@ const struct test winetest_testlist[] =
     { "GetAppContainerNamedObjectPath", func_GetAppContainerNamedObjectPath },
     { "CompareObjectHandles", func_CompareObjectHandles },
     { "CancelSynchronousIo", func_CancelSynchronousIo },
+    { "IdnTo", func_IdnTo },
     { "IsWow64Process2", func_IsWow64Process2 },
     { "VirtualAllocExNuma", func_VirtualAllocExNuma },
     { "DeviceIoControl",             func_DeviceIoControl },
