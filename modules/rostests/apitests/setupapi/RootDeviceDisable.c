@@ -564,6 +564,56 @@ TestBootDeviceNotDisableable(void)
     SetupDiDestroyDeviceInfoList(Set);
 }
 
+/* The notifications of CM_Register_Notification (Windows 8 and later): the device interface arrivals and removals that
+ * disabling and enabling the device cause, for any class. Windows 10 calls the callback on a thread of its own. */
+typedef CONFIGRET (WINAPI *FN_REGISTER_NOTIFICATION)(PCM_NOTIFY_FILTER, PVOID, PCM_NOTIFY_CALLBACK, PHCMNOTIFICATION);
+typedef CONFIGRET (WINAPI *FN_UNREGISTER_NOTIFICATION)(HCMNOTIFICATION);
+
+static volatile LONG Arrivals, Removals, WrongData;
+static DWORD MainThread;
+static volatile LONG OnMainThread;
+
+static
+DWORD
+CALLBACK
+NotifyCallback(
+    HCMNOTIFICATION hNotify,
+    PVOID Context,
+    CM_NOTIFY_ACTION Action,
+    PCM_NOTIFY_EVENT_DATA Data,
+    DWORD Size)
+{
+    if (GetCurrentThreadId() == MainThread)
+        InterlockedIncrement(&OnMainThread);
+    if (Context != (PVOID)(ULONG_PTR)0x1357 || Data->FilterType != CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE ||
+        Size < FIELD_OFFSET(CM_NOTIFY_EVENT_DATA, u.DeviceInterface.SymbolicLink) + sizeof(WCHAR) ||
+        wcslen(Data->u.DeviceInterface.SymbolicLink) * sizeof(WCHAR) + FIELD_OFFSET(CM_NOTIFY_EVENT_DATA, u.DeviceInterface.SymbolicLink) + sizeof(WCHAR) != Size)
+        InterlockedIncrement(&WrongData);
+    if (Action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL)
+        InterlockedIncrement(&Arrivals);
+    else if (Action == CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL)
+        InterlockedIncrement(&Removals);
+    return ERROR_SUCCESS;
+}
+
+/* Waits until the count of calls stops growing, at most Seconds */
+static
+void
+SettleCalls(ULONG Seconds)
+{
+    LONG Last = -1, Now;
+    ULONG i;
+
+    for (i = 0; i < Seconds * 2; i++)
+    {
+        Sleep(500);
+        Now = Arrivals + Removals;
+        if (Now == Last && i >= 2)
+            break;
+        Last = Now;
+    }
+}
+
 START_TEST(RootDeviceDisable)
 {
     DEVINST DevInst, RootDevInst;
@@ -572,6 +622,10 @@ START_TEST(RootDeviceDisable)
     PNP_VETO_TYPE Veto = PNP_VetoTypeUnknown;
     WCHAR VetoName[MAX_PATH] = L"";
     ULONG i;
+    FN_REGISTER_NOTIFICATION pRegisterNotification;
+    FN_UNREGISTER_NOTIFICATION pUnregisterNotification;
+    HCMNOTIFICATION hNotify = NULL;
+    HMODULE hCfgMgr;
 
     if (is_reactos())
         TestBootDeviceNotDisableable();
@@ -631,11 +685,39 @@ START_TEST(RootDeviceDisable)
     Cr = CM_Enable_DevNode(DevInst, 0);
     ok(Cr == CR_SUCCESS, "CM_Enable_DevNode of a running device failed: 0x%lx\n", Cr);
 
+    /* Device interface notifications (ReactOS delivers them through the plug and play manager's window messages) */
+    hCfgMgr = LoadLibraryW(L"cfgmgr32.dll");
+    pRegisterNotification = hCfgMgr == NULL ? NULL : (FN_REGISTER_NOTIFICATION)GetProcAddress(hCfgMgr, "CM_Register_Notification");
+    pUnregisterNotification = hCfgMgr == NULL ? NULL : (FN_UNREGISTER_NOTIFICATION)GetProcAddress(hCfgMgr, "CM_Unregister_Notification");
+    MainThread = GetCurrentThreadId();
+    if (pRegisterNotification && pUnregisterNotification)
+    {
+        CM_NOTIFY_FILTER Filter;
+
+        memset(&Filter, 0, sizeof(Filter));
+        Filter.cbSize = sizeof(Filter);
+        Filter.FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE;
+        Filter.Flags = CM_NOTIFY_FILTER_FLAG_ALL_INTERFACE_CLASSES;
+        Cr = pRegisterNotification(&Filter, (PVOID)(ULONG_PTR)0x1357, NotifyCallback, &hNotify);
+        ok(Cr == CR_SUCCESS, "CM_Register_Notification failed: 0x%lx\n", Cr);
+        SettleCalls(10);
+        Arrivals = 0;
+        Removals = 0;
+    }
+
     for (i = 1; i <= 2; i++)
     {
         Cr = CM_Disable_DevNode(DevInst, 0);
         ok(Cr == CR_SUCCESS, "Cycle %lu: CM_Disable_DevNode failed: 0x%lx\n", i, Cr);
         CheckDisabled(DevInst, i, i, "after disable");
+        if (hNotify && i == 1)
+        {
+            SettleCalls(10);
+            trace("disabled: %ld arrivals, %ld removals\n", Arrivals, Removals);
+            ok(Removals > 0, "no device interface was removed by the disable\n");
+            Removals = 0;
+            Arrivals = 0;
+        }
 
         /* Disabling again changes nothing (as measured on ReactOS) */
         if (is_reactos())
@@ -661,6 +743,20 @@ START_TEST(RootDeviceDisable)
             ok(St.Initializes == i + 1, "Cycle %lu: %lu initializes, expected %lu\n", i, St.Initializes, i + 1);
             ok(St.Halted == 0, "Cycle %lu: the miniport is halted after the enable\n", i);
         }
+        if (hNotify && i == 1)
+        {
+            SettleCalls(10);
+            trace("enabled: %ld arrivals, %ld removals\n", Arrivals, Removals);
+            ok(Arrivals > 0, "no device interface arrived with the enable\n");
+            ok(WrongData == 0, "%ld calls with data that is not that of a device interface\n", WrongData);
+            ok(OnMainThread == 0, "%ld calls on the thread that registered\n", OnMainThread);
+        }
+    }
+    if (hNotify)
+    {
+        Cr = pUnregisterNotification(hNotify);
+        ok(Cr == CR_SUCCESS, "CM_Unregister_Notification failed: 0x%lx\n", Cr);
+        hNotify = NULL;
     }
 
     /* The disable that setupapi records for the next boot goes to the instance key, and is

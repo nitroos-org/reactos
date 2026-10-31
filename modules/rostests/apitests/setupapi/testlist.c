@@ -13,6 +13,11 @@ extern void func_SetupDiGetActualModelsSection(void);
 extern void func_SetupDiGetDeviceProperty(void);
 extern void func_SetupDiInstallClassExA(void);
 extern void func_SetupInstallServicesFromInfSectionEx(void);
+extern void func_CM_MapCrToErr(void);
+extern void func_CM_PowerScheme(void);
+extern void func_CM_Get_DevNode_Property_Keys(void);
+extern void func_CM_Get_Device_Interface_Property(void);
+extern void func_CM_Get_Class_Property(void);
 
 const struct test winetest_testlist[] =
 {
@@ -27,5 +32,10 @@ const struct test winetest_testlist[] =
     { "SetupDiGetDeviceProperty", func_SetupDiGetDeviceProperty },
     { "SetupDiInstallClassExA", func_SetupDiInstallClassExA },
     { "SetupInstallServicesFromInfSectionEx", func_SetupInstallServicesFromInfSectionEx },
+    { "CM_MapCrToErr", func_CM_MapCrToErr },
+    { "CM_PowerScheme", func_CM_PowerScheme },
+    { "CM_Get_DevNode_Property_Keys", func_CM_Get_DevNode_Property_Keys },
+    { "CM_Get_Device_Interface_Property", func_CM_Get_Device_Interface_Property },
+    { "CM_Get_Class_Property", func_CM_Get_Class_Property },
     { 0, 0 }
 };
