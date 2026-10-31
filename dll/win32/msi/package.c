@@ -836,8 +836,11 @@ static VOID set_installer_properties(MSIPACKAGE *package)
     msi_set_property( package->db, L"WindowsBuild", bufstr, len );
     len = swprintf( bufstr, ARRAY_SIZE(bufstr), L"%u", OSVersion.wServicePackMajor );
     msi_set_property( package->db, L"ServicePackLevel", bufstr, len );
+    len = swprintf( bufstr, ARRAY_SIZE(bufstr), L"%u", OSVersion.wServicePackMinor );
+    msi_set_property( package->db, L"ServicePackLevelMinor", bufstr, len );
 
-    len = swprintf( bufstr, ARRAY_SIZE(bufstr), L"%u.%u", MSI_MAJORVERSION, MSI_MINORVERSION );
+    /* Windows formats the minor version with two digits: "5.00" */
+    len = swprintf( bufstr, ARRAY_SIZE(bufstr), L"%u.%02u", MSI_MAJORVERSION, MSI_MINORVERSION );
     msi_set_property( package->db, L"VersionMsi", bufstr, len );
     len = swprintf( bufstr, ARRAY_SIZE(bufstr), L"%u", MSI_MAJORVERSION * 100 );
     msi_set_property( package->db, L"VersionDatabase", bufstr, len );
@@ -1194,6 +1197,14 @@ static UINT parse_suminfo( MSISUMMARYINFO *si, MSIPACKAGE *package )
 
     package->version = msi_suminfo_get_int32( si, PID_PAGECOUNT );
     TRACE("version: %d\n", package->version);
+
+    /* VersionDatabase is the schema version of the package: its summary page count */
+    if (package->version > 0)
+    {
+        WCHAR ver[16];
+        int len = swprintf( ver, ARRAY_SIZE(ver), L"%d", package->version );
+        msi_set_property( package->db, L"VersionDatabase", ver, len );
+    }
 
     package->platform = PLATFORM_INTEL;
 
