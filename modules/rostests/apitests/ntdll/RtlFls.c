@@ -82,6 +82,15 @@ FN_RtlFlsGetValue2* pRtlFlsGetValue2;
 FN_RtlFlsSetValue* pRtlFlsSetValue;
 FN_RtlProcessFlsData_Vista* pRtlProcessFlsData;
 
+/*
+ * Which data structures the FLS functions use. Windows 10 keeps the callbacks and values in a two level table that
+ * hangs off the TEB and leaves the PEB fields empty. Windows Vista to 8.1 and ReactOS keep them in the PEB (callback
+ * array, bitmap) and in one array of 128 values per thread. The version that GetNTVersion reports does not tell
+ * which one a system has (ReactOS can report Windows 10 and still use the PEB), so ask the PEB: the Windows 10
+ * layout has no FLS bitmap there before the first allocation.
+ */
+static BOOLEAN g_Win10Layout;
+
 static ULONG g_SharedFlsIndex1;
 static ULONG g_SharedFlsIndex2;
 static ULONG g_SharedFlsIndex3;
@@ -114,8 +123,10 @@ typedef struct _RTL_FLS_DATA_VISTA
 
 typedef struct _RTLP_FLS_VALUE_ARRAY
 {
-    ULONG64 Unknown1;
-    ULONG64 Unknown2;
+    /* Pointer sized: the header is 16 bytes in a 64-bit process and 8 bytes in a 32-bit one (measured on Windows 10,
+       a WoW64 process included) */
+    ULONG_PTR Unknown1;
+    ULONG_PTR Unknown2;
     PVOID Elements[510]; // The size doubles per index
 } RTLP_FLS_VALUE_ARRAY, *PRTLP_FLS_VALUE_ARRAY;
 
@@ -150,7 +161,7 @@ ULONG FlsBadCallbackFilter(PEXCEPTION_POINTERS ExceptionPointers)
     ok_ntstatus(ExceptionPointers->ExceptionRecord->ExceptionCode, STATUS_PRIVILEGED_INSTRUCTION);
 
     PTEB teb = NtCurrentTeb();;
-    if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+    if (g_Win10Layout)
     {
         PRTL_FLS_DATA_WIN10 flsData = (PRTL_FLS_DATA_WIN10)teb->FlsData;
         ok_eq_pointer(flsData->ValueArrays[0]->Elements[g_SharedFlsIndex3 - 1], NULL);
@@ -234,10 +245,10 @@ void Test_RtlFlsAllocFree(void)
     /* Allocate index without a callback and set the value */
     status = pRtlFlsAlloc(NULL, &flsIndex1);
     ok_ntstatus(status, STATUS_SUCCESS);
-    ok_eq_ulong(flsIndex1, (GetNTVersion() >= _WIN32_WINNT_WIN10) ? flsIndex2 + 1 : flsIndexFirst);
+    ok_eq_ulong(flsIndex1, (g_Win10Layout) ? flsIndex2 + 1 : flsIndexFirst);
     FlsSetValue(flsIndex1, (PVOID)0x1234);
 
-    if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+    if (g_Win10Layout)
     {
         PRTL_FLS_DATA_WIN10 flsData = (PRTL_FLS_DATA_WIN10)teb->FlsData;
         ok_eq_pointer(flsData->ValueArrays[0]->Elements[flsIndex1 - 1], (PVOID)0x1234);
@@ -256,7 +267,7 @@ void Test_RtlFlsAllocFree(void)
     ok_ntstatus(status, STATUS_SUCCESS);
     ok_eq_ulong(FlsCallbackCount, 0);
 
-    if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+    if (g_Win10Layout)
     {
         PRTL_FLS_DATA_WIN10 flsData = (PRTL_FLS_DATA_WIN10)teb->FlsData;
         ok_eq_pointer(flsData->ValueArrays[0]->Elements[flsIndex1 - 1], NULL);
@@ -278,7 +289,7 @@ void Test_RtlFlsAllocFree(void)
     ok_eq_ulong(flsIndex1, flsIndexFirst);
     FlsSetValue(flsIndex1, (PVOID)(ULONG_PTR)0x1234);
 
-    if (GetNTVersion() < _WIN32_WINNT_WIN10)
+    if (!g_Win10Layout)
     {
         PFLS_CALLBACK_INFO callbackInfo = (PFLS_CALLBACK_INFO)peb->FlsCallback;
         ok(callbackInfo != NULL, "peb->FlsCallback is NULL. Bye.\n");
@@ -291,7 +302,7 @@ void Test_RtlFlsAllocFree(void)
     ok_eq_ulong(FlsCallbackCount, 1);
     FlsCallbackCount = 0;
 
-    if (GetNTVersion() < _WIN32_WINNT_WIN10)
+    if (!g_Win10Layout)
     {
         PFLS_CALLBACK_INFO callbackInfo = (PFLS_CALLBACK_INFO)peb->FlsCallback;
         ok_eq_pointer(callbackInfo[flsIndex1].Callback, NULL);
@@ -322,7 +333,7 @@ void Test_RtlFlsAllocFree(void)
     /* Final index is not overwritten */
     ok(flsIndex2 == flsIndexFirst + NumberAllocated - 1, "Invalid index: %lu != %lu + %lu - 1\n", flsIndex2, flsIndexFirst, NumberAllocated);
 
-    if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+    if (g_Win10Layout)
     {
         ok_eq_ulong(NumberAllocated, 4080 - flsIndexFirst);
     }
@@ -338,7 +349,7 @@ void Test_RtlFlsAllocFree(void)
         ok_ntstatus(status, STATUS_SUCCESS);
     }
 
-    if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+    if (g_Win10Layout)
     {
         /* All arrays are still allocated */
         PRTL_FLS_DATA_WIN10 flsData = (PRTL_FLS_DATA_WIN10)teb->FlsData;
@@ -363,7 +374,7 @@ void Test_RtlFlsAllocFree(void)
     status = pRtlFlsFree(g_SharedFlsIndex2);
     ok_ntstatus(status, STATUS_SUCCESS);
 
-    if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+    if (g_Win10Layout)
     {
         PRTL_FLS_DATA_WIN10 flsData = (PRTL_FLS_DATA_WIN10)teb->FlsData;
         ok_eq_pointer(flsData->ValueArrays[0]->Elements[g_SharedFlsIndex1 - 1], NULL);
@@ -450,7 +461,7 @@ void Test_RtlFlsGetSetValue(void)
     ok_eq_pointer(value, (PVOID)0x1234);
     ok_eq_ulong(GetLastError(), ERROR_SUCCESS);
 
-    if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+    if (g_Win10Layout)
     {
         PRTL_FLS_DATA_WIN10 flsData = (PRTL_FLS_DATA_WIN10)teb->FlsData;
         ok_eq_pointer(flsData->ValueArrays[2]->Elements[28], (PVOID)0x1234);
@@ -521,7 +532,7 @@ void Test_RtlFlsGetSetValue(void)
     ok_eq_pointer(value, (PVOID)(ULONG_PTR)0x1234);
     ok_eq_ulong(GetLastError(), 0xdeadbeef);
 
-    if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+    if (g_Win10Layout)
     {
         PRTL_FLS_DATA_WIN10 flsData = (PRTL_FLS_DATA_WIN10)teb->FlsData;
         ok_eq_pointer(flsData->ValueArrays[2]->Elements[50], (PVOID)0x1234);
@@ -574,7 +585,7 @@ void Test_RtlProcessFlsData_Win10(void)
 
 void Test_RtlProcessFlsData(void)
 {
-    if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+    if (g_Win10Layout)
     {
         Test_RtlProcessFlsData_Win10();
     }
@@ -590,7 +601,7 @@ static DWORD WINAPI TestThreadProc(LPVOID lpParameter)
     PPEB peb = NtCurrentPeb();
 
     /* Test the initial state */
-    if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+    if (g_Win10Layout)
     {
         /* Windows 10 doesn't use the PEB fields anymore */
         ok_eq_pointer(peb->FlsCallback, NULL);
@@ -631,7 +642,7 @@ static DWORD WINAPI TestThreadProc(LPVOID lpParameter)
            "Unexpected value for peb->FlsHighIndex: 0x%lx\n", peb->FlsHighIndex);
         ok(peb->FlsListHead.Flink != NULL, "peb->FlsListHead.Flink is NULL\n");
         ok(peb->FlsListHead.Blink != NULL, "peb->FlsListHead.Blink is NULL\n");
-        todo_ros ok(teb->FlsData != NULL, "teb->FlsData == %p\n", teb->FlsData);
+        todo_if(is_reactos()) ok(teb->FlsData != NULL, "teb->FlsData == %p\n", teb->FlsData);
         if (teb->FlsData != NULL)
         {
             PRTL_FLS_DATA_VISTA flsData = (PRTL_FLS_DATA_VISTA)teb->FlsData;
@@ -655,6 +666,8 @@ static DWORD WINAPI TestThreadProc(LPVOID lpParameter)
 START_TEST(RtlFls)
 {
     HANDLE hThread;
+
+    g_Win10Layout = (GetNTVersion() >= _WIN32_WINNT_WIN10) && (NtCurrentPeb()->FlsBitmap == NULL);
 
     InitFunctionPtrs();
 
@@ -688,7 +701,7 @@ START_TEST(RtlFls)
     CloseHandle(hThread);
 
     /* Check the shared indices */
-    if (GetNTVersion() < _WIN32_WINNT_WIN10)
+    if (!g_Win10Layout)
     {
         PPEB peb = NtCurrentPeb();
         PTEB teb = NtCurrentTeb();;
