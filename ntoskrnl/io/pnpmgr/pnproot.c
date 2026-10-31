@@ -977,6 +977,33 @@ cleanup:
 }
 
 /*
+ * FUNCTION: Report the capabilities of the root device node (HTREE\ROOT\0)
+ * RETURNS:
+ *     Status
+ *
+ * Windows reports CM_DRP_CAPABILITIES 0x70 (unique ID, silent install, raw device OK)
+ * for the root, UI number 0 and no address.
+ */
+static NTSTATUS
+PnpRootFdoQueryCapabilities(
+    IN PIO_STACK_LOCATION IrpSp)
+{
+    PDEVICE_CAPABILITIES DeviceCapabilities;
+
+    DeviceCapabilities = IrpSp->Parameters.DeviceCapabilities.Capabilities;
+
+    if (DeviceCapabilities->Version != 1)
+        return STATUS_REVISION_MISMATCH;
+
+    DeviceCapabilities->UniqueID = TRUE;
+    DeviceCapabilities->SilentInstall = TRUE;
+    DeviceCapabilities->RawDeviceOK = TRUE;
+    DeviceCapabilities->UINumber = 0;
+
+    return STATUS_SUCCESS;
+}
+
+/*
  * FUNCTION: Handle Plug and Play IRPs for the root bus device object
  * ARGUMENTS:
  *     DeviceObject = Pointer to functional device object of the root bus driver
@@ -999,13 +1026,21 @@ PnpRootFdoPnpControl(
     {
         case IRP_MN_QUERY_DEVICE_RELATIONS:
             DPRINT("IRP_MJ_PNP / IRP_MN_QUERY_DEVICE_RELATIONS\n");
-            Status = PnpRootQueryDeviceRelations(DeviceObject, Irp);
+            /* Only the children are reported; the other relations are not ours */
+            if (IrpSp->Parameters.QueryDeviceRelations.Type == BusRelations)
+                Status = PnpRootQueryDeviceRelations(DeviceObject, Irp);
+            break;
+
+        case IRP_MN_QUERY_CAPABILITIES:
+            DPRINT("IRP_MJ_PNP / IRP_MN_QUERY_CAPABILITIES\n");
+            Status = PnpRootFdoQueryCapabilities(IrpSp);
             break;
 
         default:
-            // The root device object can receive only IRP_MN_QUERY_DEVICE_RELATIONS
-            ASSERT(FALSE);
-            DPRINT("IRP_MJ_PNP / Unknown minor function 0x%lx\n", IrpSp->MinorFunction);
+            /* The device node of the root can be asked anything (a property query, a
+             * request of the PnP manager). What the root enumerator does not handle is
+             * completed with the status it came with (STATUS_NOT_SUPPORTED) */
+            DPRINT("IRP_MJ_PNP / Unsupported minor function 0x%lx\n", IrpSp->MinorFunction);
             break;
     }
 

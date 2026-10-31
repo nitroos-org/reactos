@@ -182,6 +182,87 @@ static void CheckDevNode(HMODULE hCfgMgr, DEVINST Dev, ULONG *Counts)
     UNREFERENCED_PARAMETER(hCfgMgr);
 }
 
+typedef struct
+{
+    ULONG PD_Size;
+    ULONG PD_MostRecentPowerState;
+    ULONG PD_Capabilities;
+} ROOT_POWER_DATA;  /* the head of CM_POWER_DATA, which is 56 bytes */
+#define ROOT_POWER_DATA_SIZE 56
+
+/* The capabilities of the root devnode (HTREE\ROOT\0): asking for them sends IRP_MN_QUERY_CAPABILITIES to the root */
+static void CheckRootCapabilities(DEVINST Root)
+{
+    BYTE Buffer[256];
+    DEVPROPTYPE Type;
+    ULONG Size, RegType, i;
+    CONFIGRET cr;
+
+    /* CM_DRP_CAPABILITIES */
+    RegType = NOT_SET;
+    Size = sizeof(Buffer);
+    cr = CM_Get_DevNode_Registry_PropertyW(Root, CM_DRP_CAPABILITIES, &RegType, Buffer, &Size, 0);
+    ok(cr == CR_SUCCESS, "root: CM_DRP_CAPABILITIES: %lx\n", cr);
+    if (cr == CR_SUCCESS)
+    {
+        ok(RegType == REG_DWORD && Size == sizeof(ULONG), "root: capabilities type %lx, size %lu\n", RegType, Size);
+        ok(*(PULONG)Buffer == (CM_DEVCAP_UNIQUEID | CM_DEVCAP_SILENTINSTALL | CM_DEVCAP_RAWDEVICEOK),
+           "root: capabilities 0x%lx\n", *(PULONG)Buffer);
+    }
+
+    /* DEVPKEY_Device_Capabilities */
+    Type = NOT_SET;
+    Size = sizeof(Buffer);
+    cr = pGetProperty(Root, &DEVPKEY_Device_Capabilities, &Type, Buffer, &Size, 0);
+    ok(cr == CR_SUCCESS && Type == DEVPROP_TYPE_UINT32 && Size == sizeof(ULONG), "root: Capabilities: %lx, type %lx, size %lu\n",
+       cr, Type, Size);
+    if (cr == CR_SUCCESS)
+        ok(*(PULONG)Buffer == (CM_DEVCAP_UNIQUEID | CM_DEVCAP_SILENTINSTALL | CM_DEVCAP_RAWDEVICEOK),
+           "root: Capabilities 0x%lx\n", *(PULONG)Buffer);
+
+    /* the UI number is 0 */
+    RegType = NOT_SET;
+    Size = sizeof(Buffer);
+    cr = CM_Get_DevNode_Registry_PropertyW(Root, CM_DRP_UI_NUMBER, &RegType, Buffer, &Size, 0);
+    ok(cr == CR_SUCCESS && Size == sizeof(ULONG) && *(PULONG)Buffer == 0,
+       "root: CM_DRP_UI_NUMBER: %lx, size %lu, value %lu\n", cr, Size, *(PULONG)Buffer);
+
+    /* the address is not set: the capabilities of the root have none */
+    Type = NOT_SET;
+    Size = sizeof(Buffer);
+    cr = pGetProperty(Root, &DEVPKEY_Device_Address, &Type, Buffer, &Size, 0);
+    ok(cr == CR_NO_SUCH_VALUE, "root: Address: %lx\n", cr);
+    Size = sizeof(Buffer);
+    cr = CM_Get_DevNode_Registry_PropertyW(Root, CM_DRP_ADDRESS, NULL, Buffer, &Size, 0);
+    ok(cr == CR_NO_SUCH_VALUE, "root: CM_DRP_ADDRESS: %lx\n", cr);
+
+    /* the power data comes from the same capabilities: D0 and D3, most recently in D0 */
+    RegType = NOT_SET;
+    Size = sizeof(Buffer);
+    memset(Buffer, 0, sizeof(Buffer));
+    cr = CM_Get_DevNode_Registry_PropertyW(Root, CM_DRP_DEVICE_POWER_DATA, &RegType, Buffer, &Size, 0);
+    ok(cr == CR_SUCCESS, "root: CM_DRP_DEVICE_POWER_DATA: %lx\n", cr);
+    if (cr == CR_SUCCESS)
+    {
+        ROOT_POWER_DATA *Power = (ROOT_POWER_DATA *)Buffer;
+
+        ok(Power->PD_Size == ROOT_POWER_DATA_SIZE, "root: power data %lu bytes, PD_Size %lu\n", Size, Power->PD_Size);
+        ok(Power->PD_MostRecentPowerState == 1 /* PowerDeviceD0 */, "root: most recent power state %lu\n", Power->PD_MostRecentPowerState);
+        ok(Power->PD_Capabilities == (0x1 /* PDCAP_D0_SUPPORTED */ | 0x8 /* PDCAP_D3_SUPPORTED */), "root: power capabilities 0x%lx\n",
+           Power->PD_Capabilities);
+    }
+
+    /* every other registry property of the root answers too (the reserved numbers with CR_FAILURE, Windows) */
+    for (i = CM_DRP_DEVICEDESC; i <= CM_DRP_MAX; i++)
+    {
+        Size = sizeof(Buffer);
+        cr = CM_Get_DevNode_Registry_PropertyW(Root, i, NULL, Buffer, &Size, 0);
+        ok(cr == CR_SUCCESS || cr == CR_NO_SUCH_VALUE || cr == CR_BUFFER_SMALL || cr == CR_FAILURE || cr == CR_INVALID_PROPERTY ||
+           cr == CR_CALL_NOT_IMPLEMENTED,
+           "root: registry property %lu: %lx\n", i, cr);
+    }
+}
+
 START_TEST(CM_Get_DevNode_Property)
 {
     HMODULE hCfgMgr = LoadLibraryW(L"cfgmgr32.dll");
@@ -250,7 +331,11 @@ START_TEST(CM_Get_DevNode_Property)
         ok(cr == CR_SUCCESS && Type == DEVPROP_TYPE_STRING, "extended call: %lx, type %lx\n", cr, Type);
     }
 
-    /* the devnodes below the root (not the root: its capabilities are not queried on ReactOS, which asserts there) */
+    /* the root itself: Windows reports 0x70 (unique ID, silent install, raw device OK), no address, and power data */
+    CheckRootCapabilities(Root);
+    CheckDevNode(hCfgMgr, Root, Counts);
+
+    /* the devnodes below the root */
     for (cr = CM_Get_Child(&Child, Root, 0); cr == CR_SUCCESS && Seen < 6; cr = CM_Get_Sibling(&Child, Child, 0), Seen++)
     {
         CheckDevNode(hCfgMgr, Child, Counts);
