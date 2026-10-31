@@ -56,5 +56,6 @@ endif()
 
 add_asm_files(blrtl_asm ${ASM_SOURCE})
 add_library(blrtl ${SOURCE} ${blrtl_asm})
+target_include_directories(blrtl PRIVATE ${REACTOS_SOURCE_DIR}/media/nls)
 add_pch(blrtl ${NTOS_RTL_SOURCE_DIR}/rtl.h SOURCE)
 add_dependencies(blrtl psdk asm)

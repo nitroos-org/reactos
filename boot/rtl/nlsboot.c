@@ -11,6 +11,7 @@
 /* INCLUDES ******************************************************************/
 
 #include <rtl.h>
+#include <l_intl_upcase.h>
 
 /* GLOBALS *******************************************************************/
 
@@ -161,15 +162,12 @@ NTAPI
 RtlpUpcaseUnicodeChar(
     _In_ WCHAR Source)
 {
-    USHORT Offset = 0;
-
-    if (Source < 'a')
-        return Source;
-
-    if (Source <= 'z')
-        return (Source - ('a' - 'A'));
-
-    return Source + (SHORT)Offset;
+    /*
+     * The case table of the kernel (media/nls/l_intl.nls) as C data: registry
+     * key names are compared and hashed upper cased, so the boot hives need
+     * the same upper casing for the names that are not ASCII.
+     */
+    return NlsUpcaseTableChar(Source);
 }
 
 WCHAR
