@@ -290,7 +290,7 @@ KiTakeRemoteReadyThread(
     PKTHREAD Thread;
     PLIST_ENTRY ListHead, ListEntry;
     ULONG Count, Number, Summary, Mask, Index, Pass;
-    KAFFINITY NodeSet = Prcb->ParentNode->ProcessorMask & KeActiveProcessors;
+    KAFFINITY NodeSet = 0;
 
     if (Priority > HIGH_PRIORITY) return NULL;
     ASSERT(Priority >= 0);
@@ -316,57 +316,78 @@ KiTakeRemoteReadyThread(
         BitScanReverse(&Index, Summary);
         Summary &= ~PRIORITY_MASK(Index);
 
-        for (Pass = 0; Pass < 2; Pass++)
-        for (Count = 1; Count < (ULONG)KeNumberProcessors; Count++)
+        /* Below AnyAffinityPriority only a thread that may run on every
+           processor of the node moves; the node's processors are looked up
+           once, when a restricted priority is first scanned. The node of
+           this processor stands for all of them: the kernel has a single
+           node (KeNodeBlock[0]), while the scan below covers every
+           processor. A multi-node port must limit the scan to the node. */
+        if (((KPRIORITY)Index < AnyAffinityPriority) && !NodeSet)
         {
-            Number = (Prcb->Number + Count) % KeNumberProcessors;
-            RemotePrcb = KiProcessorBlock[Number];
-            if (!RemotePrcb) continue;
-            if (!(*(volatile ULONG *)&RemotePrcb->ReadySummary & PRIORITY_MASK(Index))) continue;
-            if (!KiTryAcquirePrcbLock(RemotePrcb)) continue;
+            NodeSet = Prcb->ParentNode->ProcessorMask & KeActiveProcessors;
+        }
 
-            Thread = NULL;
-            if (RemotePrcb->ReadySummary & PRIORITY_MASK(Index))
+        for (Pass = 0; Pass < 2; Pass++)
+        {
+            for (Count = 1; Count < (ULONG)KeNumberProcessors; Count++)
             {
-                ListHead = &RemotePrcb->DispatcherReadyListHead[Index];
-                for (ListEntry = ListHead->Flink;
-                     ListEntry != ListHead;
-                     ListEntry = ListEntry->Flink)
+                Number = (Prcb->Number + Count) % KeNumberProcessors;
+                RemotePrcb = KiProcessorBlock[Number];
+                if (!RemotePrcb) continue;
+                if (!(*(volatile ULONG *)&RemotePrcb->ReadySummary & PRIORITY_MASK(Index))) continue;
+                if (!KiTryAcquirePrcbLock(RemotePrcb)) continue;
+
+                Thread = NULL;
+                if (RemotePrcb->ReadySummary & PRIORITY_MASK(Index))
                 {
-                    Thread = CONTAINING_RECORD(ListEntry, KTHREAD, WaitListEntry);
-                    if ((Thread->Affinity & Prcb->SetMember) &&
-                        (((KPRIORITY)Index >= AnyAffinityPriority) ||
-                         ((Thread->Affinity & NodeSet) == NodeSet)) &&
-                        ((Pass != 0) || (Thread->IdealProcessor == Prcb->Number)) &&
-                        KiTryAcquireThreadLock(Thread))
+                    ListHead = &RemotePrcb->DispatcherReadyListHead[Index];
+                    for (ListEntry = ListHead->Flink;
+                         ListEntry != ListHead;
+                         ListEntry = ListEntry->Flink)
                     {
-                        break;
+                        Thread = CONTAINING_RECORD(ListEntry, KTHREAD, WaitListEntry);
+                        if ((Thread->Affinity & Prcb->SetMember) &&
+                            (((KPRIORITY)Index >= AnyAffinityPriority) ||
+                             ((Thread->Affinity & NodeSet) == NodeSet)) &&
+                            ((Pass != 0) || (Thread->IdealProcessor == Prcb->Number)) &&
+                            KiTryAcquireThreadLock(Thread))
+                        {
+                            /* The affinity can change until the thread is
+                               locked: look again, now that it cannot */
+                            if ((Thread->Affinity & Prcb->SetMember) &&
+                                (((KPRIORITY)Index >= AnyAffinityPriority) ||
+                                 ((Thread->Affinity & NodeSet) == NodeSet)))
+                            {
+                                break;
+                            }
+                            KiReleaseThreadLock(Thread);
+                        }
+                        Thread = NULL;
                     }
-                    Thread = NULL;
                 }
-            }
 
-            if (Thread)
-            {
-                ASSERT(Thread->State == Ready);
-                ASSERT(Thread->Priority == (KPRIORITY)Index);
-                ASSERT(Thread->NextProcessor == RemotePrcb->Number);
-
-                /* Remove it from the list */
-                if (RemoveEntryList(&Thread->WaitListEntry))
+                if (Thread)
                 {
-                    RemotePrcb->ReadySummary ^= PRIORITY_MASK(Index);
+                    ASSERT(Thread->State == Ready);
+                    ASSERT(Thread->Priority == (KPRIORITY)Index);
+                    ASSERT(Thread->NextProcessor == RemotePrcb->Number);
+
+                    /* Remove it from the list */
+                    if (RemoveEntryList(&Thread->WaitListEntry))
+                    {
+                        RemotePrcb->ReadySummary ^= PRIORITY_MASK(Index);
+                    }
+
+                    /* The thread stays Ready until the caller, which holds the PRCB
+                       lock of the new processor, gives it a state there; anyone
+                       that finds it Ready locks that PRCB and looks again */
+                    Thread->NextProcessor = Prcb->Number;
+                    KiReleaseThreadLock(Thread);
                 }
 
-                /* The thread stays Ready until the caller, which holds the PRCB
-                   lock of the new processor, gives it a state there; anyone
-                   that finds it Ready locks that PRCB and looks again */
-                Thread->NextProcessor = Prcb->Number;
-                KiReleaseThreadLock(Thread);
+                KiReleasePrcbLock(RemotePrcb);
+                if (Thread) return Thread;
             }
-
-            KiReleasePrcbLock(RemotePrcb);
-            if (Thread) return Thread;
         }
     }
 

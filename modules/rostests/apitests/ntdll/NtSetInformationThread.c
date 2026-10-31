@@ -172,9 +172,54 @@ Test_ThreadZeroTlsCell(void)
        (unsigned long)Status);
 }
 
+static
+DWORD
+WINAPI
+IdealProcessorThread(
+    _In_ PVOID Parameter)
+{
+    UNREFERENCED_PARAMETER(Parameter);
+    return 0;
+}
+
+static
+void
+Test_ThreadIdealProcessorLength(void)
+{
+    NTSTATUS Status;
+    HANDLE Thread;
+    ULONGLONG Ideal = 0; /* 8 bytes of well-formed, zeroed buffer: only the length is wrong */
+
+    Thread = CreateThread(NULL, 0, IdealProcessorThread, NULL, CREATE_SUSPENDED, NULL);
+    if (Thread == NULL)
+    {
+        skip("Failed to create a thread (%lu)\n", GetLastError());
+        return;
+    }
+
+    /* The value is a ULONG on every architecture (Windows 10, x64 and x86: only 4 is accepted, 2 and 8 return STATUS_INFO_LENGTH_MISMATCH) */
+    Status = NtSetInformationThread(Thread, ThreadIdealProcessor, &Ideal, sizeof(ULONGLONG));
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+
+    Status = NtSetInformationThread(Thread, ThreadIdealProcessor, &Ideal, sizeof(USHORT));
+    ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+
+    /* The success status carries the previous ideal processor (Windows 10 returned 2 and 3), so check for success only */
+    Status = NtSetInformationThread(Thread, ThreadIdealProcessor, &Ideal, sizeof(ULONG));
+    ok(NT_SUCCESS(Status), "ThreadIdealProcessor with length %lu returned 0x%lx\n", (ULONG)sizeof(ULONG), (ULONG)Status);
+
+    /* This is what SetThreadIdealProcessor passes */
+    ok(SetThreadIdealProcessor(Thread, 0) != (DWORD)-1, "SetThreadIdealProcessor failed (%lu)\n", GetLastError());
+
+    ResumeThread(Thread);
+    WaitForSingleObject(Thread, 10000);
+    CloseHandle(Thread);
+}
+
 START_TEST(NtSetInformationThread)
 {
     Test_ThreadPriorityClass();
     Test_ThreadSetAlignmentProbe();
     Test_ThreadZeroTlsCell();
+    Test_ThreadIdealProcessorLength();
 }
