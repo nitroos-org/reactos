@@ -475,6 +475,10 @@ co_IntCallDebugHook(PHOOK Hook,
         }
         break;
 
+        case WH_MOUSE:
+            Size = sizeof(MOUSEHOOKSTRUCTEX);
+            break;
+
         case WH_MOUSE_LL:
             Size = sizeof(MSLLHOOKSTRUCT);
             break;
@@ -1205,6 +1209,58 @@ IntRemoveHook(PVOID Object)
 }
 
 /*
+ * The WH_DEBUG hooks run before every other hook: wParam is the id of the hook that is about to run and lParam
+ * points to a DEBUGHOOKINFO with the code, wParam and lParam it gets. A nonzero result keeps that hook from running.
+ * Windows does not call them for the low-level and journal hooks, nor for themselves. The record lParam points to
+ * (and the plain lParams) is marshaled by co_IntCallHookProc.
+ */
+static
+BOOL
+FASTCALL
+co_HOOK_DebugBlocks(PTHREADINFO pti,
+                    PDESKTOP pdo,
+                    PHOOK Hook,
+                    INT HookId,
+                    INT Code,
+                    WPARAM wParam,
+                    LPARAM lParam)
+{
+    DEBUGHOOKINFO Debug;
+    PTHREADINFO ptiHook;
+
+    switch (HookId)
+    {
+        case WH_DEBUG:
+        case WH_KEYBOARD_LL:
+        case WH_MOUSE_LL:
+        case WH_JOURNALRECORD:
+        case WH_JOURNALPLAYBACK:
+            return FALSE;
+    }
+
+    if (!(pti->fsHooks & HOOKID_TO_FLAG(WH_DEBUG)) &&
+        !(pdo->pDeskInfo->fsHooks & HOOKID_TO_FLAG(WH_DEBUG)))
+        return FALSE;
+
+    /* A debug hook procedure that causes hooks of its own is not debugged again */
+    if (pti->sphkCurrent && pti->sphkCurrent->HookId == WH_DEBUG)
+        return FALSE;
+
+    ptiHook = Hook->ptiHooked ? Hook->ptiHooked : Hook->head.pti;
+    if (!ptiHook || !ptiHook->pEThread)
+        ptiHook = pti;
+
+    RtlZeroMemory(&Debug, sizeof(Debug));
+    Debug.idThread = PtrToUint(ptiHook->pEThread->Cid.UniqueThread);
+    Debug.idThreadInstaller = 0; /* as Windows, for the hooks of a thread */
+    Debug.lParam = lParam;
+    Debug.wParam = wParam;
+    Debug.code = Code;
+
+    return co_HOOK_CallHooks(WH_DEBUG, HC_ACTION, (WPARAM)(INT_PTR)HookId, (LPARAM)&Debug) != 0;
+}
+
+/*
   Win32k Kernel Space Hook Caller.
  */
 LRESULT
@@ -1312,15 +1368,18 @@ co_HOOK_CallHooks( INT HookId,
           }
           _SEH2_END;
        }
-       Result = co_IntCallHookProc( HookId,
-                                    Code,
-                                    wParam,
-                                    lParam,
-                                    Hook->Proc,
-                                    Hook->ihmod,
-                                    Hook->offPfn,
-                                    Hook->Ansi,
-                                   &Hook->ModuleName);
+       if (co_HOOK_DebugBlocks(pti, pdo, Hook, HookId, Code, wParam, lParam))
+          Result = 0;
+       else
+          Result = co_IntCallHookProc( HookId,
+                                       Code,
+                                       wParam,
+                                       lParam,
+                                       Hook->Proc,
+                                       Hook->ihmod,
+                                       Hook->offPfn,
+                                       Hook->Ansi,
+                                      &Hook->ModuleName);
        if (ClientInfo)
        {
           _SEH2_TRY
@@ -1389,22 +1448,28 @@ co_HOOK_CallHooks( INT HookId,
                   HookId == WH_MOUSE_LL )         //   0   |   300
              {
                 TRACE("\nGlobal Hook posting to another Thread! %d\n",HookId );
-                Result = co_IntCallLowLevelHook(Hook, Code, wParam, lParam);
+                if (co_HOOK_DebugBlocks(pti, pdo, Hook, HookId, Code, wParam, lParam))
+                   Result = 0;
+                else
+                   Result = co_IntCallLowLevelHook(Hook, Code, wParam, lParam);
              }
              else if (ptiHook->ppi == pti->ppi)
              {
                 TRACE("\nGlobal Hook calling to another Thread! %d\n",HookId );
                 ObReferenceObject(ptiHook->pEThread);
                 IntReferenceThreadInfo(ptiHook);
-                Result = co_IntCallHookProc( HookId,
-                                             Code,
-                                             wParam,
-                                             lParam,
-                                             Hook->Proc,
-                                             Hook->ihmod,
-                                             Hook->offPfn,
-                                             Hook->Ansi,
-                                            &Hook->ModuleName);
+                if (co_HOOK_DebugBlocks(pti, pdo, Hook, HookId, Code, wParam, lParam))
+                   Result = 0;
+                else
+                   Result = co_IntCallHookProc( HookId,
+                                                Code,
+                                                wParam,
+                                                lParam,
+                                                Hook->Proc,
+                                                Hook->ihmod,
+                                                Hook->offPfn,
+                                                Hook->Ansi,
+                                               &Hook->ModuleName);
                 IntDereferenceThreadInfo(ptiHook);
                 ObDereferenceObject(ptiHook->pEThread);
              }
@@ -1414,15 +1479,18 @@ co_HOOK_CallHooks( INT HookId,
              TRACE("Global going Local Hook calling to Thread! %d\n",HookId );
              ObReferenceObject(pti->pEThread);
              IntReferenceThreadInfo(pti);
-             Result = co_IntCallHookProc( HookId,
-                                          Code,
-                                          wParam,
-                                          lParam,
-                                          Hook->Proc,
-                                          Hook->ihmod,
-                                          Hook->offPfn,
-                                          Hook->Ansi,
-                                         &Hook->ModuleName);
+             if (co_HOOK_DebugBlocks(pti, pdo, Hook, HookId, Code, wParam, lParam))
+                Result = 0;
+             else
+                Result = co_IntCallHookProc( HookId,
+                                             Code,
+                                             wParam,
+                                             lParam,
+                                             Hook->Proc,
+                                             Hook->ihmod,
+                                             Hook->offPfn,
+                                             Hook->Ansi,
+                                            &Hook->ModuleName);
              IntDereferenceThreadInfo(pti);
              ObDereferenceObject(pti->pEThread);
           }

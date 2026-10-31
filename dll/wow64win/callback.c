@@ -31,6 +31,7 @@ typedef struct { ULONG lpcs, hwndInsertAfter; } CBTCREATEWND32;
 typedef struct { BOOL fMouse; ULONG hWndActive; } CBTACTIVATE32;
 typedef struct { POINT pt; ULONG hwnd; UINT wHitTestCode; ULONG dwExtraInfo; } MOUSEHOOK32;
 typedef struct { MOUSEHOOK32 Base; DWORD mouseData; } MOUSEHOOKEX32;
+typedef struct { DWORD idThread, idThreadInstaller; ULONG lParam, wParam; INT code; } DEBUGHOOK32;
 typedef struct { DWORD vkCode, scanCode, flags, time; ULONG dwExtraInfo; } KBDLL32;
 typedef struct { POINT pt; DWORD mouseData, flags, time; ULONG dwExtraInfo; } MSLL32;
 C_ASSERT(sizeof(CBTCREATE32) == 52);
@@ -38,6 +39,7 @@ C_ASSERT(sizeof(CBTACTIVATE32) == 8);
 C_ASSERT(sizeof(MOUSEHOOK32) == 20);
 C_ASSERT(sizeof(MOUSEHOOKEX32) == 24);
 C_ASSERT(sizeof(KBDLL32) == 20);
+C_ASSERT(sizeof(DEBUGHOOK32) == 20);
 C_ASSERT(sizeof(MSLL32) == 24);
 typedef struct
 {
@@ -299,11 +301,10 @@ static VOID MouseLl32ToNative(MSLLHOOKSTRUCT *To, const MSLL32 *From)
     To->time = From->time; To->dwExtraInfo = From->dwExtraInfo;
 }
 
-static VOID PackHookRecord(HOOK32 *To, const HOOKPROC_CALLBACK_ARGUMENTS *From)
+/* The record win32k puts at Input for the hook HookId and code Code, as the i386 record at Output */
+static VOID PackRecord(INT HookId, INT Code, PVOID Output, const VOID *Input)
 {
-    const VOID *Input = From + 1;
-    PVOID Output = To + 1;
-    switch (From->HookId)
+    switch (HookId)
     {
     case WH_GETMESSAGE: case WH_MSGFILTER: case WH_SYSMSGFILTER:
         MsgNativeTo32(Output, Input);
@@ -333,7 +334,7 @@ static VOID PackHookRecord(HOOK32 *To, const HOOKPROC_CALLBACK_ARGUMENTS *From)
         break;
     }
     case WH_CBT:
-        switch (From->Code)
+        switch (Code)
         {
         case HCBT_CREATEWND:
         {
@@ -365,6 +366,28 @@ static VOID PackHookRecord(HOOK32 *To, const HOOKPROC_CALLBACK_ARGUMENTS *From)
     }
 }
 
+static VOID PackHookRecord(HOOK32 *To, const HOOKPROC_CALLBACK_ARGUMENTS *From)
+{
+    PackRecord(From->HookId, From->Code, To + 1, From + 1);
+}
+
+/* The records a WH_DEBUG call carries behind its DEBUGHOOKINFO: those of the hooks whose lParam win32k's
+ * IntDebugHookRecordSize copies. Their sizes are those of the hook itself. */
+static VOID DebugRecordSizes(INT HookId, INT Code, ULONG *Native, ULONG *Guest)
+{
+    *Native = *Guest = 0;
+    switch (HookId)
+    {
+    case WH_MSGFILTER: case WH_SYSMSGFILTER: case WH_GETMESSAGE: case WH_MOUSE:
+        HookRecordSizes(HookId, Code, Native, Guest);
+        break;
+    case WH_CBT:
+        if (Code == HCBT_MOVESIZE || Code == HCBT_ACTIVATE || Code == HCBT_CLICKSKIPPED)
+            HookRecordSizes(HookId, Code, Native, Guest);
+        break;
+    }
+}
+
 static VOID PackHook(HOOK32 *To, const HOOKPROC_CALLBACK_ARGUMENTS *From, LONG Size)
 {
     const CWPSTRUCT *Native;
@@ -377,6 +400,24 @@ static VOID PackHook(HOOK32 *To, const HOOKPROC_CALLBACK_ARGUMENTS *From, LONG S
     To->offPfn = From->offPfn; To->Ansi = From->Ansi;
     To->Result = 0; To->lParamSize = Size;
     RtlCopyMemory(To->ModuleName, From->ModuleName, sizeof(To->ModuleName));
+    if (From->HookId == WH_DEBUG)
+    {
+        /* The DEBUGHOOKINFO follows the header; a record, when there is one, follows that */
+        const DEBUGHOOKINFO *NativeInfo = (const DEBUGHOOKINFO *)(From + 1);
+        DEBUGHOOK32 *GuestInfo = (DEBUGHOOK32 *)(To + 1);
+        To->lParam = sizeof(*To);
+        GuestInfo->idThread = NativeInfo->idThread;
+        GuestInfo->idThreadInstaller = NativeInfo->idThreadInstaller;
+        GuestInfo->wParam = (ULONG)NativeInfo->wParam;
+        GuestInfo->code = NativeInfo->code;
+        if (Size)
+        {
+            GuestInfo->lParam = sizeof(*To) + sizeof(*GuestInfo);
+            PackRecord((INT)From->wParam, NativeInfo->code, GuestInfo + 1, NativeInfo + 1);
+        }
+        else GuestInfo->lParam = (ULONG)NativeInfo->lParam;
+        return;
+    }
     if (From->HookId != WH_CALLWNDPROC && From->HookId != WH_CALLWNDPROCRET)
     {
         /* The callback validated the family and its record size */
@@ -443,6 +484,19 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
             ULONG Base, NativeRecord, GuestRecord;
             if (Length < sizeof(*Native)) break;
             Frame.HookId = Native->HookId; Frame.Code = Native->Code;
+            if (Native->HookId == WH_DEBUG)
+            {
+                const DEBUGHOOKINFO *Info = (const DEBUGHOOKINFO *)(Native + 1);
+                if (Length < sizeof(*Native) + sizeof(*Info) || (ULONG_PTR)Native->lParam != sizeof(*Native)) break;
+                DebugRecordSizes((INT)Native->wParam, Info->code, &NativeRecord, &GuestRecord);
+                /* No record: the lParam of the hook was a plain value or not passed on */
+                if (Native->lParamSize && Native->lParamSize != NativeRecord) break;
+                if (Length != sizeof(*Native) + sizeof(*Info) + Native->lParamSize) break;
+                Payload = Native->lParamSize ? GuestRecord : 0;
+                GuestLength = sizeof(HOOK32) + sizeof(DEBUGHOOK32) + Payload;
+                Status = STATUS_SUCCESS;
+                break;
+            }
             if (Native->HookId != WH_CALLWNDPROC && Native->HookId != WH_CALLWNDPROCRET)
             {
                 if (!HookRecordSizes(Native->HookId, Native->Code, &NativeRecord, &GuestRecord))
