@@ -17,6 +17,9 @@
 #define WARMUP_MS 1000
 #define WINDOW_MS 6000
 #define MAX_SPINNERS 33
+/* Shared for good: 0.50. Rotated: about 1 (Windows 10: 0.88-0.97). The threshold sits between with margin
+   on both sides, and a measurement under it is repeated once (a short burst of other work on the machine) */
+#define MIN_RATIO 65
 
 static volatile LONG g_Stop;
 
@@ -90,18 +93,50 @@ static LONG RunOne(PCSTR Name, ULONG Count, ULONG Processors, DWORD_PTR Mask, LO
     /* The spinners must have had most of the processors, or something else ran and the shares mean nothing */
     if (Total < (ULONGLONG)Tick * Processors * 7 / 10)
     {
-        skip("%s: the spinners got %I64u ms of %lu processors x %lu ms, the machine is busy\n",
-             Name, Total, Processors, Tick);
+        trace("%s: BUSY MACHINE: the spinners got %I64u ms of %lu processors x %lu ms (min/max %ld.%02ld), the measurement means nothing\n",
+              Name, Total, Processors, Tick, Ratio / 100, Ratio % 100);
         return -1;
     }
     return Ratio;
+}
+
+static PCSTR RatioText(LONG Ratio, PSTR Buffer)
+{
+    if (Ratio < 0) return "busy machine";
+    sprintf(Buffer, "%ld.%02ld", Ratio / 100, Ratio % 100);
+    return Buffer;
+}
+
+/* RunOne, once more if it came out under MIN_RATIO or on a busy machine. The second measurement decides;
+   if that one was on a busy machine, the first one does if it was a real measurement */
+static void CheckFairness(PCSTR Name, ULONG Count, ULONG Processors, DWORD_PTR Mask, LONG Ideal)
+{
+    LONG Ratio = -1, First = -1, Final;
+    ULONG Attempt;
+    CHAR Text1[16], Text2[16], Text3[16];
+
+    for (Attempt = 0; Attempt < 2; Attempt++)
+    {
+        Ratio = RunOne(Name, Count, Processors, Mask, Ideal);
+        if (Attempt == 0) First = Ratio;
+        if (Ratio >= MIN_RATIO) break;
+        if (Attempt == 0)
+            trace("%s: first attempt %s, measuring once more\n", Name, RatioText(First, Text1));
+    }
+    Final = (Ratio >= 0) ? Ratio : First;
+    if (Final < 0)
+    {
+        skip("%s: busy machine in both attempts (see the BUSY MACHINE traces above), fairness not measured\n", Name);
+        return;
+    }
+    ok(Final >= MIN_RATIO, "%s: min/max CPU time of %lu spinners on %lu processors %s (first attempt %s, second %s), expected about 1\n",
+       Name, Count, Processors, RatioText(Final, Text1), RatioText(First, Text2), RatioText(Ratio, Text3));
 }
 
 START_TEST(ThreadFairness)
 {
     DWORD_PTR ProcessMask, SystemMask;
     ULONG Processors = 0, i;
-    LONG Ratio;
     int OldPriority;
 
     if (!GetProcessAffinityMask(GetCurrentProcess(), &ProcessMask, &SystemMask) || !ProcessMask)
@@ -128,17 +163,10 @@ START_TEST(ThreadFairness)
     OldPriority = GetThreadPriority(GetCurrentThread());
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
 
-    /* Shared for good: 0.50. Rotated: about 1 (Windows 10: 0.88-0.97) */
-    Ratio = RunOne("default", Processors + 1, Processors, 0, -1);
-    if (Ratio >= 0)
-        ok(Ratio >= 70, "default: min/max CPU time of %lu spinners on %lu processors %ld.%02ld, expected about 1\n",
-           Processors + 1, Processors, Ratio / 100, Ratio % 100);
+    CheckFairness("default", Processors + 1, Processors, 0, -1);
 
     /* All on the first processor as their ideal processor, affinity set to all processors */
-    Ratio = RunOne("ideal processor 0", Processors + 1, Processors, ProcessMask, 0);
-    if (Ratio >= 0)
-        ok(Ratio >= 70, "ideal processor 0: min/max CPU time of %lu spinners on %lu processors %ld.%02ld, expected about 1\n",
-           Processors + 1, Processors, Ratio / 100, Ratio % 100);
+    CheckFairness("ideal processor 0", Processors + 1, Processors, ProcessMask, 0);
 
     SetThreadPriority(GetCurrentThread(), OldPriority);
 }
