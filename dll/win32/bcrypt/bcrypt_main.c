@@ -236,6 +236,8 @@ struct secret
     struct object hdr;
     UCHAR        *derived_key;
     ULONG         derived_key_len;
+    BOOL          consumed;
+    enum alg_id   concat_hash;   /* the hash of the SP800-56A KDF, chosen by the strength of the agreement */
 };
 
 void * SYMCRYPT_CALL SymCryptCallbackAlloc( SIZE_T size )
@@ -4139,6 +4141,16 @@ NTSTATUS WINAPI BCryptSecretAgreement( BCRYPT_KEY_HANDLE privkey_handle, BCRYPT_
     if (!(secret = calloc( 1, sizeof(*secret) ))) return STATUS_NO_MEMORY;
     secret->hdr.magic = MAGIC_SECRET;
     secret->derived_key_len = len_from_bitlen( privkey->a.bitlen );
+    switch (privkey->alg_id)
+    {
+    case ALG_ID_DH:
+        secret->concat_hash = privkey->a.bitlen >= 3072 ? ALG_ID_SHA512 : ALG_ID_SHA256;
+        break;
+    default:
+        secret->concat_hash = privkey->a.bitlen <= 256 ? ALG_ID_SHA256 : privkey->a.bitlen <= 384 ? ALG_ID_SHA384
+                                                                                                   : ALG_ID_SHA512;
+        break;
+    }
     if (!(secret->derived_key = malloc( secret->derived_key_len )))
     {
         free( secret );
@@ -4223,81 +4235,332 @@ NTSTATUS WINAPI BCryptDeriveKeyPBKDF2( BCRYPT_ALG_HANDLE handle, UCHAR *pwd, ULO
     return STATUS_SUCCESS;
 }
 
-static const struct algorithm *get_hash_from_desc( const BCryptBufferDesc *desc )
+#define KDF_USE_SECRET_AS_HMAC_KEY_FLAG 0x00000001
+#define KDF_TLS_PRF_SECRET_LENGTH       48
+
+/* The hash names that KDF_HASH_ALGORITHM takes, and the pseudo handles of the hash and of its HMAC. */
+static const struct kdf_hash
 {
-    const struct algorithm *alg = get_alg_object( BCRYPT_SHA1_ALG_HANDLE );
+    const WCHAR *name;
+    enum alg_id id;
+    BCRYPT_ALG_HANDLE hash;
+    BCRYPT_ALG_HANDLE hmac;
+} kdf_hashes[] =
+{
+    { BCRYPT_MD2_ALGORITHM,    ALG_ID_MD2,    BCRYPT_MD2_ALG_HANDLE,    BCRYPT_HMAC_MD2_ALG_HANDLE },
+    { BCRYPT_MD4_ALGORITHM,    ALG_ID_MD4,    BCRYPT_MD4_ALG_HANDLE,    BCRYPT_HMAC_MD4_ALG_HANDLE },
+    { BCRYPT_MD5_ALGORITHM,    ALG_ID_MD5,    BCRYPT_MD5_ALG_HANDLE,    BCRYPT_HMAC_MD5_ALG_HANDLE },
+    { BCRYPT_SHA1_ALGORITHM,   ALG_ID_SHA1,   BCRYPT_SHA1_ALG_HANDLE,   BCRYPT_HMAC_SHA1_ALG_HANDLE },
+    { BCRYPT_SHA256_ALGORITHM, ALG_ID_SHA256, BCRYPT_SHA256_ALG_HANDLE, BCRYPT_HMAC_SHA256_ALG_HANDLE },
+    { BCRYPT_SHA384_ALGORITHM, ALG_ID_SHA384, BCRYPT_SHA384_ALG_HANDLE, BCRYPT_HMAC_SHA384_ALG_HANDLE },
+    { BCRYPT_SHA512_ALGORITHM, ALG_ID_SHA512, BCRYPT_SHA512_ALG_HANDLE, BCRYPT_HMAC_SHA512_ALG_HANDLE },
+};
+
+/* Like Windows, the first buffer of a type counts and the others of that type are ignored. */
+static const BCryptBuffer *find_kdf_buffer( const BCryptBufferDesc *desc, ULONG type )
+{
     ULONG i;
 
-    if (!desc) return alg;
+    if (!desc) return NULL;
     for (i = 0; i < desc->cBuffers; i++)
-    {
-        if (desc->pBuffers[i].BufferType == KDF_HASH_ALGORITHM)
-        {
-            const WCHAR *str = desc->pBuffers[i].pvBuffer;
+        if (desc->pBuffers[i].BufferType == type) return &desc->pBuffers[i];
+    return NULL;
+}
 
-            if (!wcscmp( str, BCRYPT_SHA1_ALGORITHM )) alg = get_alg_object( BCRYPT_SHA1_ALG_HANDLE );
-            else if (!wcscmp( str, BCRYPT_SHA256_ALGORITHM )) alg = get_alg_object( BCRYPT_SHA256_ALG_HANDLE );
-            else if (!wcscmp( str, BCRYPT_SHA384_ALGORITHM )) alg = get_alg_object( BCRYPT_SHA384_ALG_HANDLE );
-            else if (!wcscmp( str, BCRYPT_SHA512_ALGORITHM )) alg = get_alg_object( BCRYPT_SHA512_ALG_HANDLE );
-            else
-            {
-                FIXME( "hash %s not suported\n", debugstr_w(str) );
-                return NULL;
-            }
-        }
-        else if (desc->pBuffers[i].BufferType == KDF_SECRET_PREPEND) continue;
-        else FIXME( "buffer type %lu not supported\n", desc->pBuffers[i].BufferType );
+/* The hash named by KDF_HASH_ALGORITHM, or def when there is none. The name has to end inside its buffer. */
+static NTSTATUS get_kdf_hash( const BCryptBufferDesc *desc, enum alg_id def, const struct kdf_hash **ret )
+{
+    const BCryptBuffer *buf = find_kdf_buffer( desc, KDF_HASH_ALGORITHM );
+    const WCHAR *name = NULL;
+    ULONG i, count;
+
+    if (buf)
+    {
+        name = buf->pvBuffer;
+        count = buf->cbBuffer / sizeof(WCHAR);
+        if (!name) return STATUS_INVALID_PARAMETER;
+        for (i = 0; i < count; i++) if (!name[i]) break;
+        if (i == count) return STATUS_INVALID_PARAMETER;
     }
-    return alg;
+
+    for (i = 0; i < ARRAY_SIZE(kdf_hashes); i++)
+    {
+        if (name ? !wcscmp( name, kdf_hashes[i].name ) : kdf_hashes[i].id == def)
+        {
+            *ret = &kdf_hashes[i];
+            return STATUS_SUCCESS;
+        }
+    }
+    return STATUS_NOT_SUPPORTED;
+}
+
+/* All the KDF_SECRET_PREPEND buffers in order, the secret (most significant byte first) and all the
+ * KDF_SECRET_APPEND buffers in order. */
+static NTSTATUS build_kdf_secret( const struct secret *secret, const BCryptBufferDesc *desc, UCHAR **ret,
+                                  ULONG *ret_len )
+{
+    SIZE_T total = secret->derived_key_len;
+    ULONG i, count = desc ? desc->cBuffers : 0, pos = 0;
+    UCHAR *buf;
+
+    for (i = 0; i < count; i++)
+    {
+        if (desc->pBuffers[i].BufferType != KDF_SECRET_PREPEND && desc->pBuffers[i].BufferType != KDF_SECRET_APPEND)
+            continue;
+        if (desc->pBuffers[i].cbBuffer && !desc->pBuffers[i].pvBuffer) return STATUS_INVALID_PARAMETER;
+        total += desc->pBuffers[i].cbBuffer;
+    }
+    if (total > 0x7fffffff) return STATUS_INVALID_PARAMETER;
+    if (!(buf = malloc( total ))) return STATUS_NO_MEMORY;
+
+    for (i = 0; i < count; i++)
+    {
+        if (desc->pBuffers[i].BufferType != KDF_SECRET_PREPEND || !desc->pBuffers[i].cbBuffer) continue;
+        memcpy( buf + pos, desc->pBuffers[i].pvBuffer, desc->pBuffers[i].cbBuffer );
+        pos += desc->pBuffers[i].cbBuffer;
+    }
+    memcpy( buf + pos, secret->derived_key, secret->derived_key_len );
+    pos += secret->derived_key_len;
+    for (i = 0; i < count; i++)
+    {
+        if (desc->pBuffers[i].BufferType != KDF_SECRET_APPEND || !desc->pBuffers[i].cbBuffer) continue;
+        memcpy( buf + pos, desc->pBuffers[i].pvBuffer, desc->pBuffers[i].cbBuffer );
+        pos += desc->pBuffers[i].cbBuffer;
+    }
+
+    *ret = buf;
+    *ret_len = pos;
+    return STATUS_SUCCESS;
 }
 
 static NTSTATUS derive_key_hash( const struct secret *secret, const BCryptBufferDesc *desc, UCHAR *output,
                                  ULONG output_len, ULONG *ret_len )
 {
-    ULONG derived_key_len = secret->derived_key_len, secret_len = 0;
-    ULONG i, buffer_count = desc ? desc->cBuffers : 0;
-    UCHAR *derived_key = secret->derived_key;
-    const struct algorithm *alg;
-    ULONG len;
-    UCHAR hash[MAX_HASH_OUTPUT_BYTES];
+    const struct kdf_hash *hash;
+    UCHAR digest[MAX_HASH_OUTPUT_BYTES], *msg;
+    ULONG len, msg_len;
     NTSTATUS status;
 
-    if (!(alg = get_hash_from_desc( desc ))) return STATUS_NOT_SUPPORTED;
-    len = builtin_algorithms[alg->id].hash_length;
+    if ((status = get_kdf_hash( desc, ALG_ID_SHA1, &hash ))) return status;
+    len = builtin_algorithms[hash->id].hash_length;
 
-    if (!output)
+    if (!output || !output_len)
     {
         *ret_len = len;
         return STATUS_SUCCESS;
     }
 
-    for (i = 0; i < buffer_count; i++)
-        if (desc->pBuffers[i].BufferType == KDF_SECRET_PREPEND) secret_len += desc->pBuffers[i].cbBuffer;
-
-    if (secret_len)
-    {
-        if (!(derived_key = malloc( secret_len + derived_key_len ))) return STATUS_NO_MEMORY;
-
-        derived_key_len = 0;
-        for (i = 0; i < buffer_count; i++)
-        {
-            if (desc->pBuffers[i].BufferType != KDF_SECRET_PREPEND) continue;
-            memcpy( derived_key + derived_key_len, desc->pBuffers[i].pvBuffer, desc->pBuffers[i].cbBuffer );
-            derived_key_len += desc->pBuffers[i].cbBuffer;
-        }
-
-        memcpy( derived_key + derived_key_len, secret->derived_key, secret->derived_key_len );
-        derived_key_len += secret->derived_key_len;
-    }
-
-    status = hash_single( alg, NULL, 0, derived_key, derived_key_len, hash );
-    if (derived_key != secret->derived_key) free( derived_key );
+    if ((status = build_kdf_secret( secret, desc, &msg, &msg_len ))) return status;
+    status = hash_single( get_alg_object( hash->hash ), NULL, 0, msg, msg_len, digest );
+    secure_zero( msg, msg_len );
+    free( msg );
     if (status) return status;
 
     len = min( len, output_len );
-    memcpy( output, hash, len );
+    memcpy( output, digest, len );
+    secure_zero( digest, sizeof(digest) );
 
     *ret_len = len;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS derive_key_hmac( const struct secret *secret, const BCryptBufferDesc *desc, UCHAR *output,
+                                 ULONG output_len, ULONG *ret_len, ULONG flags )
+{
+    static UCHAR no_key;
+    const BCryptBuffer *key_buf = find_kdf_buffer( desc, KDF_HMAC_KEY );
+    const struct kdf_hash *hash;
+    UCHAR digest[MAX_HASH_OUTPUT_BYTES], *msg, *key;
+    ULONG len, msg_len, key_len;
+    NTSTATUS status;
+
+    if ((status = get_kdf_hash( desc, ALG_ID_SHA1, &hash ))) return status;
+    len = builtin_algorithms[hash->id].hash_length;
+
+    if (!output || !output_len)
+    {
+        *ret_len = len;
+        return STATUS_SUCCESS;
+    }
+
+    if (flags & KDF_USE_SECRET_AS_HMAC_KEY_FLAG)
+    {
+        /* the secret is the key, so a key of its own is a contradiction */
+        if (key_buf) return STATUS_INVALID_PARAMETER;
+        key = secret->derived_key;
+        key_len = secret->derived_key_len;
+    }
+    else
+    {
+        if (!key_buf || (key_buf->cbBuffer && !key_buf->pvBuffer)) return STATUS_INVALID_PARAMETER;
+        key = key_buf->pvBuffer ? key_buf->pvBuffer : &no_key;
+        key_len = key_buf->cbBuffer;
+    }
+
+    if ((status = build_kdf_secret( secret, desc, &msg, &msg_len ))) return status;
+    status = hash_single( get_alg_object( hash->hmac ), key, key_len, msg, msg_len, digest );
+    secure_zero( msg, msg_len );
+    free( msg );
+    if (status) return status;
+
+    len = min( len, output_len );
+    memcpy( output, digest, len );
+    secure_zero( digest, sizeof(digest) );
+
+    *ret_len = len;
+    return STATUS_SUCCESS;
+}
+
+/* P_hash of RFC 5246 section 5, over label || seed */
+static NTSTATUS tls1_2_prf( const struct kdf_hash *hash, UCHAR *key, ULONG key_len, const UCHAR *label,
+                            ULONG label_len, const UCHAR *seed, ULONG seed_len, UCHAR *output, ULONG output_len )
+{
+    const struct algorithm *hmac = get_alg_object( hash->hmac );
+    ULONG hash_len = builtin_algorithms[hash->id].hash_length, info_len = label_len + seed_len, pos, len;
+    UCHAR a[MAX_HASH_OUTPUT_BYTES], block[MAX_HASH_OUTPUT_BYTES], *buf;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (!(buf = malloc( hash_len + info_len ))) return STATUS_NO_MEMORY;
+    memcpy( buf + hash_len, label, label_len );
+    memcpy( buf + hash_len + label_len, seed, seed_len );
+
+    /* A(1) = HMAC(key, label || seed) */
+    if ((status = hash_single( hmac, key, key_len, buf + hash_len, info_len, a ))) goto done;
+    for (pos = 0; pos < output_len; pos += hash_len)
+    {
+        memcpy( buf, a, hash_len );
+        if ((status = hash_single( hmac, key, key_len, buf, hash_len + info_len, block ))) goto done;
+        len = min( hash_len, output_len - pos );
+        memcpy( output + pos, block, len );
+        /* A(i+1) = HMAC(key, A(i)) */
+        if ((status = hash_single( hmac, key, key_len, a, hash_len, block ))) goto done;
+        memcpy( a, block, hash_len );
+    }
+
+done:
+    secure_zero( a, sizeof(a) );
+    secure_zero( block, sizeof(block) );
+    free( buf );
+    return status;
+}
+
+/* The secret is the TLS pre-master secret (most significant byte first) and the result is always the 48 bytes of
+ * the master secret. A protocol of 0x0303 or more selects the TLS 1.2 PRF with the hash that was asked for
+ * (SHA256 by default), anything else the TLS 1.0 and 1.1 PRF, which takes no hash. */
+static NTSTATUS derive_key_tls_prf( const struct secret *secret, const BCryptBufferDesc *desc, UCHAR *output,
+                                    ULONG output_len, ULONG *ret_len )
+{
+    const BCryptBuffer *label = find_kdf_buffer( desc, KDF_TLS_PRF_LABEL );
+    const BCryptBuffer *seed = find_kdf_buffer( desc, KDF_TLS_PRF_SEED );
+    const BCryptBuffer *proto = find_kdf_buffer( desc, KDF_TLS_PRF_PROTOCOL );
+    static const UCHAR no_label;
+    const struct kdf_hash *hash = NULL;
+    const UCHAR *label_data;
+    NTSTATUS status;
+
+    if (!output || !output_len)
+    {
+        *ret_len = KDF_TLS_PRF_SECRET_LENGTH;
+        return STATUS_SUCCESS;
+    }
+
+    if (output_len != KDF_TLS_PRF_SECRET_LENGTH || !label || !seed) return STATUS_INVALID_PARAMETER;
+    if ((label->cbBuffer && !label->pvBuffer) || !seed->pvBuffer) return STATUS_INVALID_PARAMETER;
+    switch (seed->cbBuffer)
+    {
+    case 32:
+    case 36:
+    case 48:
+    case 64:
+        break;
+    default:
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (proto && (proto->cbBuffer != sizeof(ULONG) || !proto->pvBuffer)) return STATUS_INVALID_PARAMETER;
+    label_data = label->pvBuffer ? label->pvBuffer : &no_label;
+
+    if (proto && *(const ULONG *)proto->pvBuffer >= 0x0303)
+    {
+        if ((status = get_kdf_hash( desc, ALG_ID_SHA256, &hash ))) return status;
+        if ((status = tls1_2_prf( hash, secret->derived_key, secret->derived_key_len, label_data,
+                                  label->cbBuffer, seed->pvBuffer, seed->cbBuffer, output, output_len )))
+            return status;
+    }
+    else if (SymCryptTlsPrf1_1( secret->derived_key, secret->derived_key_len, label_data, label->cbBuffer,
+                                seed->pvBuffer, seed->cbBuffer, output, output_len ))
+        return STATUS_INTERNAL_ERROR;
+
+    *ret_len = output_len;
+    return STATUS_SUCCESS;
+}
+
+/* NIST SP 800-56A concatenation KDF, single step. As on Windows the hash is not the one KDF_HASH_ALGORITHM names but
+ * follows the agreement: SHA256 for P-256 and for DH up to 2048 bits, SHA384 for P-384, SHA512 for P-521 and
+ * for DH of 3072 bits and more. The output is HASH(counter || secret || AlgorithmID || PartyUInfo || PartyVInfo || SuppPubInfo ||
+ * SuppPrivInfo) for counter 1, 2, ... (32 bits, big endian), cut to the length asked for. The three first pieces
+ * have to be there; the last two may be left out. The query gives the length of the hash. A derivation that
+ * produced bytes uses the secret up. */
+static NTSTATUS derive_key_sp80056a_concat( struct secret *secret, const BCryptBufferDesc *desc, UCHAR *output,
+                                            ULONG output_len, ULONG *ret_len )
+{
+    static const ULONG types[] = { KDF_ALGORITHMID, KDF_PARTYUINFO, KDF_PARTYVINFO, KDF_SUPPPUBINFO,
+                                   KDF_SUPPPRIVINFO };
+    const BCryptBuffer *info[ARRAY_SIZE(types)];
+    const struct algorithm *hash_alg = NULL;
+    UCHAR digest[MAX_HASH_OUTPUT_BYTES], *msg;
+    ULONG i, pos, info_len = 0, counter, len, hash_len;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    for (i = 0; i < ARRAY_SIZE(types); i++)
+    {
+        info[i] = find_kdf_buffer( desc, types[i] );
+        if (i < 3 && !info[i]) return STATUS_INVALID_PARAMETER;
+        if (info[i])
+        {
+            if (info[i]->cbBuffer && !info[i]->pvBuffer) return STATUS_INVALID_PARAMETER;
+            if (info[i]->cbBuffer > 0x7fffffff - info_len) return STATUS_INVALID_PARAMETER;
+            info_len += info[i]->cbBuffer;
+        }
+    }
+
+    for (i = 0; i < ARRAY_SIZE(kdf_hashes); i++)
+        if (kdf_hashes[i].id == secret->concat_hash) hash_alg = get_alg_object( kdf_hashes[i].hash );
+    if (!hash_alg) return STATUS_INTERNAL_ERROR;
+    hash_len = builtin_algorithms[hash_alg->id].hash_length;
+
+    if (!output || !output_len)
+    {
+        *ret_len = hash_len;
+        return STATUS_SUCCESS;
+    }
+
+    if (!(msg = malloc( sizeof(counter) + secret->derived_key_len + info_len ))) return STATUS_NO_MEMORY;
+    memcpy( msg + sizeof(counter), secret->derived_key, secret->derived_key_len );
+    pos = sizeof(counter) + secret->derived_key_len;
+    for (i = 0; i < ARRAY_SIZE(types); i++)
+    {
+        if (!info[i] || !info[i]->cbBuffer) continue;
+        memcpy( msg + pos, info[i]->pvBuffer, info[i]->cbBuffer );
+        pos += info[i]->cbBuffer;
+    }
+
+    for (counter = 1, i = 0; i < output_len; counter++, i += hash_len)
+    {
+        msg[0] = counter >> 24;
+        msg[1] = counter >> 16;
+        msg[2] = counter >> 8;
+        msg[3] = counter;
+        if ((status = hash_single( hash_alg, NULL, 0, msg, pos, digest ))) break;
+        len = min( hash_len, output_len - i );
+        memcpy( output + i, digest, len );
+    }
+    secure_zero( msg, pos );
+    free( msg );
+    secure_zero( digest, sizeof(digest) );
+    if (status) return status;
+
+    secret->consumed = TRUE;
+    *ret_len = output_len;
     return STATUS_SUCCESS;
 }
 
@@ -4305,7 +4568,7 @@ static NTSTATUS derive_key_raw( const struct secret *secret, UCHAR *output, ULON
 {
     ULONG i, len = secret->derived_key_len;
 
-    if (!output)
+    if (!output || !output_len)
     {
         *ret_len = len;
         return STATUS_SUCCESS;
@@ -4321,24 +4584,31 @@ static NTSTATUS derive_key_raw( const struct secret *secret, UCHAR *output, ULON
 NTSTATUS WINAPI BCryptDeriveKey( BCRYPT_SECRET_HANDLE handle, const WCHAR *kdf, BCryptBufferDesc *desc, UCHAR *output,
                                  ULONG output_len, ULONG *ret_len, ULONG flags )
 {
-    const struct secret *secret = get_secret_object( handle );
+    struct secret *secret = get_secret_object( handle );
 
     TRACE( "%p, %s, %p, %p, %lu, %p, %#lx\n", secret, debugstr_w(kdf), desc, output, output_len, ret_len, flags );
-    if (flags) FIXME( "ignoring flags %#lx\n", flags );
 
     if (!secret) return STATUS_INVALID_HANDLE;
-    if (!kdf || !ret_len) return STATUS_INVALID_PARAMETER;
+    if (!kdf || !ret_len || (flags & ~KDF_USE_SECRET_AS_HMAC_KEY_FLAG)) return STATUS_INVALID_PARAMETER;
+    if (desc && desc->cBuffers && !desc->pBuffers) return STATUS_INVALID_PARAMETER;
+    /* an SP800-56A derivation uses the secret up */
+    if (secret->consumed) return STATUS_INVALID_PARAMETER;
 
     if (!wcscmp( kdf, BCRYPT_KDF_HASH ))
-    {
         return derive_key_hash( secret, desc, output, output_len, ret_len );
-    }
+    if (!wcscmp( kdf, BCRYPT_KDF_HMAC ))
+        return derive_key_hmac( secret, desc, output, output_len, ret_len, flags );
+    if (!wcscmp( kdf, BCRYPT_KDF_TLS_PRF ))
+        return derive_key_tls_prf( secret, desc, output, output_len, ret_len );
+    if (!wcscmp( kdf, BCRYPT_KDF_SP80056A_CONCAT ))
+        return derive_key_sp80056a_concat( secret, desc, output, output_len, ret_len );
     if (!wcscmp( kdf, BCRYPT_KDF_RAW_SECRET ))
-    {
         return derive_key_raw( secret, output, output_len, ret_len );
-    }
 
-    FIXME( "kdf %s not supportedi\n", debugstr_w(kdf) );
+    /* the name of the HKDF algorithm is known to Windows, but not as a secret agreement KDF */
+    if (!wcscmp( kdf, L"HKDF" )) return STATUS_INVALID_PARAMETER;
+
+    FIXME( "kdf %s not supported\n", debugstr_w(kdf) );
     return STATUS_NOT_SUPPORTED;
 }
 

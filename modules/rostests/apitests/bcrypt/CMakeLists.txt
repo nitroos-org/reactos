@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    BCryptDeriveKey.c
     BCryptKeyExport.c
     testlist.c)
 
