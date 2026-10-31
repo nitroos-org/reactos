@@ -2471,7 +2471,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             return NtSetInformationThread(H(0), a[1], &Index, sizeof(Index));
         }
         case ThreadQuerySetWin32StartAddress: case ThreadAffinityMask:
-        case ThreadIdealProcessor: case ThreadPriorityBoost:
+        case ThreadPriorityBoost:
         {
             ULONG_PTR Value;
             if (a[3] != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
@@ -2487,7 +2487,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             return NtSetInformationThread(H(0), a[1], &Token, sizeof(Token));
         }
         case ThreadHideFromDebugger: case ThreadPriority: case ThreadBasePriority:
-        case ThreadBreakOnTermination:
+        case ThreadBreakOnTermination: case ThreadIdealProcessor:
             return NtSetInformationThread(H(0), a[1], P(2), a[3]);
         case ThreadNameInformation:
         {
