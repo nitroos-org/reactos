@@ -370,6 +370,8 @@
 @ stdcall -version=0x601+ GetPointerCursorId(long ptr)
 @ stdcall -version=0x601+ GetPointerDevice(ptr ptr)
 @ stdcall -version=0x601+ GetPointerDeviceCursors(ptr ptr ptr)
+@ stdcall -version=0x601+ GetPointerDeviceInputSpace(ptr ptr)
+@ stdcall -version=0x601+ GetPointerDeviceOrientation(ptr ptr)
 @ stdcall -version=0x601+ GetPointerDeviceProperties(ptr ptr ptr)
 @ stdcall -version=0x601+ GetPointerDeviceRects(ptr ptr ptr)
 @ stdcall -version=0x601+ GetPointerDevices(ptr ptr)

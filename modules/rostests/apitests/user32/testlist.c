@@ -115,6 +115,7 @@ extern void func_DialogDpiBehavior(void);
 extern void func_GetIconInfoEx(void);
 extern void func_CreateDesktopEx(void);
 extern void func_ShutdownBlockReason(void);
+extern void func_PointerDeviceFunctions(void);
 extern void func_wsprintfApi(void);
 
 const struct test winetest_testlist[] =
@@ -229,6 +230,7 @@ const struct test winetest_testlist[] =
     { "GetIconInfoEx", func_GetIconInfoEx },
     { "CreateDesktopEx", func_CreateDesktopEx },
     { "ShutdownBlockReason", func_ShutdownBlockReason },
+    { "PointerDeviceFunctions", func_PointerDeviceFunctions },
     { "WinEventHook", func_WinEventHook },
     { "WmPrint", func_WmPrint },
     { "WndProc", func_WndProc },

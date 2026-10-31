@@ -281,6 +281,30 @@ SkipPointerFrameMessages(_In_ UINT32 pointerId)
     return Fail(pointerId == MOUSE_POINTER_ID ? ERROR_ACCESS_DENIED : ERROR_INVALID_PARAMETER);
 }
 
+/* Without a pointer device there is no handle that these could be asked about: Windows 10
+ * answers ERROR_INVALID_HANDLE whatever the arguments are */
+BOOL
+WINAPI
+GetPointerDeviceOrientation(
+    _In_ HANDLE device,
+    _Out_ PVOID orientation)
+{
+    UNREFERENCED_PARAMETER(device);
+    UNREFERENCED_PARAMETER(orientation);
+    return Fail(ERROR_INVALID_HANDLE);
+}
+
+BOOL
+WINAPI
+GetPointerDeviceInputSpace(
+    _In_ HANDLE device,
+    _Out_ PVOID inputSpace)
+{
+    UNREFERENCED_PARAMETER(device);
+    UNREFERENCED_PARAMETER(inputSpace);
+    return Fail(ERROR_INVALID_HANDLE);
+}
+
 BOOL
 WINAPI
 GetPointerDevices(

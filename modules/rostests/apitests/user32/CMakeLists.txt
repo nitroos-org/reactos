@@ -115,6 +115,7 @@ list(APPEND SOURCE
     GetIconInfoEx.c
     CreateDesktopEx.c
     ShutdownBlockReason.c
+    PointerDeviceFunctions.c
     wsprintf.c)
 
 list(APPEND PCH_SKIP_SOURCE
