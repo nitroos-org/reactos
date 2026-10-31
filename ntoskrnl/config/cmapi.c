@@ -1925,14 +1925,77 @@ Quickie:
 }
 
 /*
+ * Collect the cells of every child of Node, checking that each one is
+ * readable and points back at Parent, and mark them dirty: the rename rewrites
+ * their Parent. It runs before anything is changed, so any failure is clean.
+ */
+static
+NTSTATUS
+CmpRenameCollectChildren(
+    _In_ PHHIVE Hive,
+    _In_ PCM_KEY_NODE Node,
+    _In_ HCELL_INDEX Parent,
+    _Out_ PHCELL_INDEX *Children,
+    _Out_ PULONG ChildCount)
+{
+    PHCELL_INDEX List = NULL;
+    PCM_KEY_NODE ChildNode;
+    HCELL_INDEX ChildCell;
+    ULONG i, Count;
+
+    *Children = NULL;
+    Count = Node->SubKeyCounts[Stable] + Node->SubKeyCounts[Volatile];
+    *ChildCount = Count;
+    if (!Count)
+        return STATUS_SUCCESS;
+
+    if (Count > MAXULONG / sizeof(HCELL_INDEX))
+        return STATUS_REGISTRY_CORRUPT;
+    List = CmpAllocate(Count * sizeof(HCELL_INDEX), TRUE, TAG_CM);
+    if (!List)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    for (i = 0; i < Count; i++)
+    {
+        /* The counts and the index have to agree: no child may be missing */
+        ChildCell = CmpFindSubKeyByNumber(Hive, Node, i);
+        if (ChildCell == HCELL_NIL)
+            goto Corrupt;
+        ChildNode = (PCM_KEY_NODE)HvGetCell(Hive, ChildCell);
+        if (!ChildNode)
+            goto Corrupt;
+        if (ChildNode->Parent != Parent)
+        {
+            HvReleaseCell(Hive, ChildCell);
+            goto Corrupt;
+        }
+        HvReleaseCell(Hive, ChildCell);
+        if (!HvMarkCellDirty(Hive, ChildCell, FALSE))
+        {
+            CmpFree(List, 0);
+            return STATUS_NO_LOG_SPACE;
+        }
+        List[i] = ChildCell;
+    }
+
+    *Children = List;
+    return STATUS_SUCCESS;
+
+Corrupt:
+    CmpFree(List, 0);
+    return STATUS_REGISTRY_CORRUPT;
+}
+
+/*
  * Renaming a key (NtRenameKey). The key keeps its values, class, security,
  * subkeys and open handles; only its name changes, as on Windows.
  *
  * Hive: the key node is copied into a new cell that carries the new name. The
  * new cell is linked into the parent's subkey index (which stays sorted by
  * name, whatever its lf/lh/li/ri form) before the old one is unlinked, so a
- * failure leaves the key as it was; then the children point at the new cell
- * and the old one is freed. Every cell written is marked dirty while the
+ * failure leaves the key as it was (CmpAddSubKey fails cleanly when the index
+ * cannot grow, and the children are checked and dirtied before it runs);
+ * then the children point at the new cell and the old one is freed. Every cell written is marked dirty while the
  * registry is locked exclusively, and the flushers need the registry lock
  * too, so a flush writes the whole change through the log or none of it.
  *
@@ -1951,9 +2014,10 @@ CmRenameKey(
     PCM_KEY_CONTROL_BLOCK ParentKcb;
     PCM_KEY_NODE OldNode, NewNode = NULL, ParentNode, ChildNode;
     HCELL_INDEX OldCell, NewCell = HCELL_NIL, ParentCell, ChildCell;
+    PHCELL_INDEX Children = NULL;
     CM_KCB_RENAME_CONTEXT Context;
     LARGE_INTEGER TimeStamp;
-    ULONG i, ChildCount;
+    ULONG i, ChildCount = 0, BadChildren = 0;
     BOOLEAN Prepared = FALSE, Linked = FALSE;
 
     /* Renaming moves cells and rehashes KCBs: nobody may look meanwhile */
@@ -1966,9 +2030,11 @@ CmRenameKey(
     }
 
     /*
-     * The root of a hive is linked from another hive and the keys of the
-     * master hive (\REGISTRY and its children) hold the hives up: neither can
-     * be renamed. Windows denies the root of a hive with ACCESS_DENIED.
+     * The root of a hive is linked from another hive and the direct children
+     * of the master hive (\REGISTRY\MACHINE, \REGISTRY\USER, ...) hold the
+     * hives up: neither can be renamed. Windows denies the root of a hive with
+     * ACCESS_DENIED. The keys below those (\REGISTRY\MACHINE\HARDWARE and
+     * on) are ordinary volatile keys.
      */
     Hive = Kcb->KeyHive;
     ParentKcb = Kcb->ParentKcb;
@@ -2040,6 +2106,14 @@ CmRenameKey(
         goto Quickie;
     }
 
+    /* Check and dirty every child while the hive is untouched */
+    Status = CmpRenameCollectChildren(Hive, OldNode, OldCell, &Children, &ChildCount);
+    if (!NT_SUCCESS(Status))
+    {
+        HvReleaseCell(Hive, OldCell);
+        goto Quickie;
+    }
+
     /* The new node: everything of the old one but the name. Neither the key's
      * own write time nor the security cell's reference count changes. */
     RtlCopyMemory(NewNode, OldNode, FIELD_OFFSET(CM_KEY_NODE, Name));
@@ -2063,24 +2137,27 @@ CmRenameKey(
     }
     Linked = FALSE;
 
-    /* The children now hang off the new node */
-    ChildCount = NewNode->SubKeyCounts[Stable] + NewNode->SubKeyCounts[Volatile];
+    /* The children now hang off the new node. They were read and dirtied
+     * above, so none can be missing; count them rather than skip one */
     for (i = 0; i < ChildCount; i++)
     {
-        ChildCell = CmpFindSubKeyByNumber(Hive, NewNode, i);
-        if (ChildCell == HCELL_NIL)
-            continue;
-        ChildNode = (PCM_KEY_NODE)HvGetCell(Hive, ChildCell);
+        ChildNode = (PCM_KEY_NODE)HvGetCell(Hive, Children[i]);
         if (!ChildNode)
+        {
+            BadChildren++;
             continue;
+        }
         ASSERT(ChildNode->Parent == OldCell);
-        HvMarkCellDirty(Hive, ChildCell, FALSE);
         ChildNode->Parent = NewCell;
-        HvReleaseCell(Hive, ChildCell);
+        HvReleaseCell(Hive, Children[i]);
     }
+    ASSERT(BadChildren == 0);
 
-    /* The old node is gone; what it pointed to belongs to the new one */
-    HvFreeCell(Hive, OldCell);
+    /* The old node is gone; what it pointed to belongs to the new one. A
+     * child that could not be repointed (cannot happen) still names it as its
+     * parent: keep the cell then, a leak is safer than a dangling Parent. */
+    if (!BadChildren)
+        HvFreeCell(Hive, OldCell);
 
     /* The parent: its name list changed */
     ParentNode = (PCM_KEY_NODE)HvGetCell(Hive, ParentCell);
@@ -2110,7 +2187,7 @@ CmRenameKey(
     /* As on Windows: the parent (and a watched tree above) sees a name
      * change, and whatever waits on the key itself completes */
     CmpReportNotifyRename(Kcb);
-    Status = STATUS_SUCCESS;
+    Status = BadChildren ? STATUS_REGISTRY_CORRUPT : STATUS_SUCCESS;
 
 Quickie:
     if (NewNode)
@@ -2124,6 +2201,8 @@ Quickie:
         HvFreeCell(Hive, NewCell);
     if (Prepared)
         CmpAbortKcbRename(&Context);
+    if (Children)
+        CmpFree(Children, 0);
     CmpUnlockHiveFlusher((PCMHIVE)Hive);
     CmpUnlockRegistry();
     return Status;
