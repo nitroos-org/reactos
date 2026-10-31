@@ -942,7 +942,8 @@ CmpValidateKey(
     _In_ HCELL_INDEX ParentCell,
     _In_ HCELL_INDEX CurrentCell,
     _In_ ULONG Flags,
-    _In_ BOOLEAN FixHive)
+    _In_ BOOLEAN FixHive,
+    _Inout_ PCMP_CASE_REPAIR_STATS CaseStats)
 {
     CM_CHECK_REGISTRY_STATUS CmStatusCode;
     PCELL_DATA CellData;
@@ -1099,6 +1100,15 @@ CmpValidateKey(
         }
     }
 
+    /*
+     * The hashes and the order of the subkey names depend on the Unicode
+     * case table. If an older release wrote the hive with another table,
+     * bring the index up to date before the names of the subkeys are checked
+     * against each other, or looked up.
+     */
+    if (!IS_CELL_VOLATILE(CurrentCell))
+        CmpRepairSubKeyIndexCase(Hive, &CellData->u.KeyNode, CaseStats);
+
     /* Purge volatile data if needed */
     CmpPurgeVolatiles(Hive, CurrentCell, CellData, Flags);
     return CM_CHECK_REGISTRY_GOOD;
@@ -1159,6 +1169,7 @@ CmpValidateRegistryInternal(
     ULONG WorkStateLength;
     LONG StackDepth;
     BOOLEAN AllChildrenChecked;
+    CMP_CASE_REPAIR_STATS CaseStats = {0, 0, 0};
 
     PAGED_CODE();
 
@@ -1226,7 +1237,8 @@ RestartValidation:
                                           ParentCell,
                                           CurrentCell,
                                           Flags,
-                                          FixHive);
+                                          FixHive,
+                                          &CaseStats);
             if (!CM_CHECK_REGISTRY_SUCCESS(CmStatusCode))
             {
                 /*
@@ -1382,6 +1394,13 @@ RestartValidation:
     }
 
     CmpFree(WorkState, WorkStateLength);
+
+    if (CaseStats.Hashes || CaseStats.Sorted || CaseStats.Skipped)
+    {
+        DPRINT1("Subkey indexes brought up to date with the Unicode case table: "
+                "%lu hashes, %lu indexes sorted, %lu not sorted\n",
+                CaseStats.Hashes, CaseStats.Sorted, CaseStats.Skipped);
+    }
     return CM_CHECK_REGISTRY_GOOD;
 }
 
