@@ -243,6 +243,46 @@ static void TestTemplate(LPCWSTR pszTemplate, LPCWSTR pszOnly32, LPCWSTR pszOnly
     DeleteFileW(szPath);
 }
 
+/*
+ * A 32-bit client that has switched the WoW64 file system redirection off, as installers do while they look at the
+ * 64-bit side, can still open a package. Windows has apphelp.dll mapped in every process, ReactOS loads it on demand
+ * and used to fail with the delay-load exception 0xC06D007E (module not found) in MsiOpenPackage here. Run this
+ * before any other package is opened: apphelp.dll stays loaded afterwards.
+ * Windows 10 22H2: MsiOpenPackage returns ERROR_SUCCESS with the redirection off, in 64-bit and in 32-bit clients.
+ */
+static void TestOpenWithoutRedirection(void)
+{
+    WCHAR szPath[MAX_PATH], szValue[MAX_PATH];
+    MSIHANDLE hPackage;
+    PVOID pOld = NULL;
+    UINT r;
+
+    GetTempPathW(ARRAYSIZE(szPath), szPath);
+    StringCchCatW(szPath, ARRAYSIZE(szPath), L"wow64open.msi");
+    if (!CreatePackage(szPath, L"Intel;1033", L"x", L"y"))
+    {
+        skip("Could not create the package\n");
+        return;
+    }
+
+    if (!pDisableRedirection(&pOld))
+    {
+        skip("Could not disable the file system redirection\n");
+        DeleteFileW(szPath);
+        return;
+    }
+    r = MsiOpenPackageW(szPath, &hPackage);
+    pRevertRedirection(pOld);
+    ok(r == ERROR_SUCCESS, "MsiOpenPackageW without file system redirection failed: %u\n", r);
+    if (r == ERROR_SUCCESS)
+    {
+        GetPkgProp(hPackage, L"ProductName", szValue, ARRAYSIZE(szValue));
+        ok(!wcscmp(szValue, L"WoW64 folders test"), "ProductName is '%S'\n", szValue);
+        MsiCloseHandle(hPackage);
+    }
+    DeleteFileW(szPath);
+}
+
 START_TEST(Wow64Folders)
 {
     FN_IsWow64Process pIsWow64Process;
@@ -274,12 +314,9 @@ START_TEST(Wow64Folders)
         return;
     }
 
-    if (bWow64 && is_reactos())
-    {
-        /* The 32-bit msi.dll of ReactOS raises a delay-load exception (apphelp.dll) in MsiOpenPackage here */
-        skip("A 32-bit client of the installer does not work in ReactOS\n");
-        return;
-    }
+    /* First: once any package was opened, apphelp.dll is loaded and no longer needs a search */
+    if (bWow64 && pDisableRedirection && pRevertRedirection)
+        TestOpenWithoutRedirection();
 
     if (!FindOnlyIn(g_System32, g_SysWOW64, szOnly64, ARRAYSIZE(szOnly64)) ||
         !FindOnlyIn(g_SysWOW64, g_System32, szOnly32, ARRAYSIZE(szOnly32)))

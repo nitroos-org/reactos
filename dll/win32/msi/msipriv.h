@@ -1112,6 +1112,22 @@ extern UINT msi_strncpyW(const WCHAR *str, int len, WCHAR *buf, DWORD *sz);
 extern WCHAR *msi_get_package_code(MSIDATABASE *db) __WINE_DEALLOC(free) __WINE_MALLOC;
 
 /* wrappers for filesystem functions */
+#ifdef __REACTOS__
+/*
+ * On Windows the engine runs in the installer service, a 64-bit process, whatever the client is, so that the paths of
+ * a package of any platform are not redirected (a search of [WindowsFolder]System32 finds the 64-bit System32 for a
+ * 32-bit package as well). A 32-bit client of ReactOS runs the engine in its own process: switch the redirection off
+ * for every package, not only for the 64-bit ones.
+ */
+static inline void msi_disable_fs_redirection( MSIPACKAGE *package )
+{
+    if (is_wow64) Wow64DisableWow64FsRedirection( &package->cookie );
+}
+static inline void msi_revert_fs_redirection( MSIPACKAGE *package )
+{
+    if (is_wow64) Wow64RevertWow64FsRedirection( package->cookie );
+}
+#else
 static inline void msi_disable_fs_redirection( MSIPACKAGE *package )
 {
     if (is_wow64 && is_platform_64bit( package->platform )) Wow64DisableWow64FsRedirection( &package->cookie );
@@ -1120,6 +1136,7 @@ static inline void msi_revert_fs_redirection( MSIPACKAGE *package )
 {
     if (is_wow64 && is_platform_64bit( package->platform )) Wow64RevertWow64FsRedirection( package->cookie );
 }
+#endif
 extern BOOL msi_get_temp_file_name( MSIPACKAGE *, const WCHAR *, const WCHAR *, WCHAR * );
 extern HANDLE msi_create_file( MSIPACKAGE *, const WCHAR *, DWORD, DWORD, DWORD, DWORD );
 extern BOOL msi_copy_file( MSIPACKAGE *, const WCHAR *, const WCHAR *, BOOL );
