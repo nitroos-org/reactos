@@ -26,8 +26,8 @@ enum
 
 static volatile LONG g_Stop;
 static LONG g_Op;
-static LONGLONG g_Waits;
-static DWORD g_Unexpected;
+static volatile LONGLONG g_Waits;
+static volatile DWORD g_Unexpected;
 static HANDLE g_Signaled, g_Signaled2, g_Unsignaled, g_Semaphore, g_Mutex;
 
 static void Work(void)
@@ -83,13 +83,14 @@ static ULONGLONG CpuTime(HANDLE Thread)
             (((ULONGLONG)User.dwHighDateTime << 32) | User.dwLowDateTime)) / 10000;
 }
 
-/* Returns 100 * worker CPU time / spinner CPU time */
-static ULONG RunOne(LONG Op, PCSTR Name, DWORD_PTR Cpu)
+/* Returns 100 * worker CPU time / spinner CPU time, or -1 if the threads could not be set up or pinned */
+static LONG RunOne(LONG Op, PCSTR Name, DWORD_PTR Cpu)
 {
     HANDLE Threads[2];
     ULONGLONG WorkerMs, SpinnerMs;
     ULONG Ratio;
     DWORD Wait;
+    BOOL Pinned;
 
     g_Stop = 0;
     g_Op = Op;
@@ -105,10 +106,28 @@ static ULONG RunOne(LONG Op, PCSTR Name, DWORD_PTR Cpu)
         if (Threads[0]) { ResumeThread(Threads[0]); WaitForSingleObject(Threads[0], 10000); CloseHandle(Threads[0]); }
         if (Threads[1]) { ResumeThread(Threads[1]); WaitForSingleObject(Threads[1], 10000); CloseHandle(Threads[1]); }
         CloseHandle(g_Mutex);
-        return 0;
+        return -1;
     }
-    SetThreadAffinityMask(Threads[0], Cpu);
-    SetThreadAffinityMask(Threads[1], Cpu);
+    /* On different processors the threads would not compete and the ratio would pass whatever the kernel does */
+    Pinned = SetThreadAffinityMask(Threads[0], Cpu) != 0;
+    ok(Pinned, "%s: SetThreadAffinityMask(worker) failed (%lu)\n", Name, GetLastError());
+    if (Pinned)
+    {
+        Pinned = SetThreadAffinityMask(Threads[1], Cpu) != 0;
+        ok(Pinned, "%s: SetThreadAffinityMask(spinner) failed (%lu)\n", Name, GetLastError());
+    }
+    if (!Pinned)
+    {
+        skip("%s: the threads could not be pinned to one processor, nothing measured\n", Name);
+        g_Stop = 1;
+        ResumeThread(Threads[0]);
+        ResumeThread(Threads[1]);
+        WaitForMultipleObjects(2, Threads, TRUE, 10000);
+        CloseHandle(Threads[0]);
+        CloseHandle(Threads[1]);
+        CloseHandle(g_Mutex);
+        return -1;
+    }
     ResumeThread(Threads[0]);
     ResumeThread(Threads[1]);
     Sleep(WINDOW_MS);
@@ -125,7 +144,7 @@ static ULONG RunOne(LONG Op, PCSTR Name, DWORD_PTR Cpu)
     trace("%s: worker %I64u ms, spinner %I64u ms, ratio %lu.%02lu, %I64d waits\n",
           Name, WorkerMs, SpinnerMs, Ratio / 100, Ratio % 100, g_Waits);
     ok(g_Unexpected == 0, "%s: unexpected wait result 0x%lx\n", Name, g_Unexpected & 0x7FFFFFFF);
-    return Ratio;
+    return (LONG)Ratio;
 }
 
 START_TEST(WaitQuantum)
@@ -143,7 +162,8 @@ START_TEST(WaitQuantum)
         { OP_DELAY_DUE, "delay already due" },
     };
     DWORD_PTR ProcessMask, SystemMask, Cpu;
-    ULONG i, Ratio;
+    ULONG i;
+    LONG Ratio;
     int OldPriority;
 
     pNtDelayExecution = (PFN_NtDelayExecution)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtDelayExecution");
@@ -166,9 +186,13 @@ START_TEST(WaitQuantum)
 
     /* Control: two spinners must share the processor about evenly, or the measurement means nothing */
     Ratio = RunOne(OP_NONE, "control (no wait)", Cpu);
-    if (Ratio < 50 || Ratio > 200)
+    if (Ratio < 0)
     {
-        skip("two spinners on one processor got worker/spinner %lu.%02lu, the processor is not shared evenly\n",
+        /* RunOne has reported why */
+    }
+    else if (Ratio < 50 || Ratio > 200)
+    {
+        skip("two spinners on one processor got worker/spinner %ld.%02ld, the processor is not shared evenly\n",
              Ratio / 100, Ratio % 100);
     }
     else
@@ -176,8 +200,9 @@ START_TEST(WaitQuantum)
         for (i = 0; i < RTL_NUMBER_OF(Tests); i++)
         {
             Ratio = RunOne(Tests[i].Op, Tests[i].Name, Cpu);
+            if (Ratio < 0) continue;
             /* Charged: about 0.0x. Not charged: about 1 (Windows 10: 0.80-1.09) */
-            ok(Ratio >= 40 && Ratio <= 250, "%s: worker/spinner CPU time %lu.%02lu, expected about 1\n",
+            ok(Ratio >= 40 && Ratio <= 250, "%s: worker/spinner CPU time %ld.%02ld, expected about 1\n",
                Tests[i].Name, Ratio / 100, Ratio % 100);
         }
     }
