@@ -527,6 +527,86 @@ CreateDesktopW(LPCWSTR lpszDesktop,
 
 
 /*
+ * Measured on Windows 10 22H2 (build 19045): the desktop heap size is in kilobytes, 0 means the
+ * default, and a size below 16 or above 4194236 is ERROR_NOT_ENOUGH_MEMORY. The size is only
+ * checked here, the heap of every desktop has the one size win32k gives it. The last parameter
+ * is reserved: the ANSI version rejects a value in it as an invalid parameter, the wide one
+ * does not look at it.
+ */
+#define DESKTOP_HEAP_MIN_KB 16
+#define DESKTOP_HEAP_MAX_KB 4194236
+
+HDESK WINAPI
+CreateDesktopExW(LPCWSTR lpszDesktop,
+                 LPCWSTR lpszDevice,
+                 LPDEVMODEW pDevmode,
+                 DWORD dwFlags,
+                 ACCESS_MASK dwDesiredAccess,
+                 LPSECURITY_ATTRIBUTES lpsa,
+                 ULONG ulHeapSize,
+                 PVOID pvoid)
+{
+    UNREFERENCED_PARAMETER(pvoid);
+
+    if (ulHeapSize != 0 && (ulHeapSize < DESKTOP_HEAP_MIN_KB || ulHeapSize > DESKTOP_HEAP_MAX_KB))
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
+
+    return CreateDesktopW(lpszDesktop, lpszDevice, pDevmode, dwFlags, dwDesiredAccess, lpsa);
+}
+
+HDESK WINAPI
+CreateDesktopExA(LPCSTR lpszDesktop,
+                 LPCSTR lpszDevice,
+                 LPDEVMODEA pDevmode,
+                 DWORD dwFlags,
+                 ACCESS_MASK dwDesiredAccess,
+                 LPSECURITY_ATTRIBUTES lpsa,
+                 ULONG ulHeapSize,
+                 PVOID pvoid)
+{
+    UNICODE_STRING DesktopNameU, DeviceNameU;
+    HDESK hDesktop;
+    LPDEVMODEW DevmodeW = NULL;
+
+    if (pvoid)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    if (lpszDesktop)
+        RtlCreateUnicodeStringFromAsciiz(&DesktopNameU, lpszDesktop);
+    else
+        RtlInitUnicodeString(&DesktopNameU, NULL);
+
+    if (lpszDevice)
+        RtlCreateUnicodeStringFromAsciiz(&DeviceNameU, lpszDevice);
+    else
+        RtlInitUnicodeString(&DeviceNameU, NULL);
+
+    if (pDevmode)
+        DevmodeW = GdiConvertToDevmodeW(pDevmode);
+
+    hDesktop = CreateDesktopExW(DesktopNameU.Buffer,
+                                DeviceNameU.Buffer,
+                                DevmodeW,
+                                dwFlags,
+                                dwDesiredAccess,
+                                lpsa,
+                                ulHeapSize,
+                                NULL);
+
+    if (lpszDesktop) RtlFreeUnicodeString(&DesktopNameU);
+    if (lpszDevice) RtlFreeUnicodeString(&DeviceNameU);
+
+    return hDesktop;
+}
+
+
+/*
  * @implemented
  */
 BOOL

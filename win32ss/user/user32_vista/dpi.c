@@ -349,6 +349,21 @@ GetDpiForSystem(VOID)
     return GetSystemDpiValue();
 }
 
+/* The system DPI of a process; on Windows 10 the handle needs PROCESS_QUERY_LIMITED_INFORMATION, NULL
+ * stands for the calling process, and every failure is an invalid parameter (measured on build 19045) */
+UINT
+WINAPI
+GetSystemDpiForProcess(
+    _In_opt_ HANDLE hProcess)
+{
+    if (hProcess && !GetProcessId(hProcess))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    return GetSystemDpiValue();
+}
+
 UINT
 WINAPI
 GetDpiForWindow(
@@ -1246,15 +1261,4 @@ GetSystemMetricsForDpi(
     return Value;
 }
 
-/*
- * @stub
- */
-BOOL
-WINAPI
-LogicalToPhysicalPoint(
-    _In_ HWND hwnd,
-    _Inout_ POINT *point)
-{
-    UNIMPLEMENTED;
-    return TRUE;
-}
+/* LogicalToPhysicalPoint and PhysicalToLogicalPoint are in physical.c */

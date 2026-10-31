@@ -1739,8 +1739,10 @@ CURSORICON_LoadImageW(
     DWORD cbBits;
     CURSORDATA cursorData;
     BOOL bStatus;
-    UNICODE_STRING ustrRsrc;
+    UNICODE_STRING ustrRsrc, ustrKey;
     UNICODE_STRING ustrModule = {0, 0, NULL};
+    BOOL bSystemImage = FALSE;
+    LPCWSTR lpszOemName = NULL;
 
     /* Fix width/height */
     if(fuLoad & LR_DEFAULTSIZE)
@@ -1762,6 +1764,8 @@ CURSORICON_LoadImageW(
         #endif
 
         hinst = User32Instance;
+        bSystemImage = TRUE;
+        lpszOemName = lpszName;
 
         /* Map IDI to resource id */
         if (bIcon && lpszName >= IDI_APPLICATION && lpszName <= IDI_SHIELD)
@@ -1786,7 +1790,28 @@ CURSORICON_LoadImageW(
             RtlInitUnicodeString(&ustrRsrc, lpszName);
     }
 
-    if(LDR_IS_RESOURCE(hinst))
+    /* What win32k keeps and what GetIconInfoEx reports. The images of the system are known by
+     * the module "USER32" and their OEM id (IDI_ERROR, not the id of the resource in user32);
+     * every other image by the file name of its module and the name or id it was loaded with. */
+    ustrKey = ustrRsrc;
+    if(bSystemImage && IS_INTRESOURCE(lpszOemName))
+        ustrKey.Buffer = (LPWSTR)lpszOemName;
+
+    if(bSystemImage)
+    {
+        static const WCHAR szUser32[] = L"USER32";
+
+        ustrModule.MaximumLength = sizeof(szUser32);
+        ustrModule.Buffer = HeapAlloc(GetProcessHeap(), 0, ustrModule.MaximumLength);
+        if (!ustrModule.Buffer)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return NULL;
+        }
+        RtlCopyMemory(ustrModule.Buffer, szUser32, sizeof(szUser32));
+        ustrModule.Length = sizeof(szUser32) - sizeof(WCHAR);
+    }
+    else if(LDR_IS_RESOURCE(hinst))
     {
         /* We don't have a real module for GetModuleFileName, construct a fake name instead.
          * GetIconInfoEx reveals the name used by Windows. */
@@ -1844,7 +1869,7 @@ CURSORICON_LoadImageW(
         param.bIcon = bIcon;
         param.cx = cxDesired;
         param.cy = cyDesired;
-        hCurIcon = NtUserFindExistingCursorIcon(&ustrModule, &ustrRsrc, &param);
+        hCurIcon = NtUserFindExistingCursorIcon(&ustrModule, &ustrKey, &param);
         if(hCurIcon)
         {
             /* Woohoo, got it! */
@@ -1956,7 +1981,7 @@ CURSORICON_LoadImageW(
     }
 
     /* Tell win32k */
-    bStatus = NtUserSetCursorIconData(hCurIcon, hinst ? &ustrModule : NULL, lpszName ? &ustrRsrc : NULL, &cursorData);
+    bStatus = NtUserSetCursorIconData(hCurIcon, hinst ? &ustrModule : NULL, lpszName ? &ustrKey : NULL, &cursorData);
 
     if(!bStatus)
     {
@@ -2315,6 +2340,19 @@ CURSORICON_CopyImage(
         TRACE("Got module %wZ, resource %p (%S).\n", &ustrModule,
             ustrRsrc.Buffer, IS_INTRESOURCE(ustrRsrc.Buffer) ? L"" : ustrRsrc.Buffer);
 
+        /* An image of the system is known by "USER32" and its OEM id, and is loaded like LoadImage with no module does */
+        if (lstrcmpiW(ustrModule.Buffer, L"USER32") == 0)
+        {
+            ret = CURSORICON_LoadImageW(
+                NULL,
+                ustrRsrc.Buffer,
+                cxDesired,
+                cyDesired,
+                fuFlags & (LR_DEFAULTSIZE | LR_SHARED),
+                bIcon);
+            goto leave;
+        }
+
         /* Get the module handle or load the module */
         hModule = LoadLibraryExW(ustrModule.Buffer, NULL, /* NT6+: LOAD_LIBRARY_AS_IMAGE_RESOURCE | */ LOAD_LIBRARY_AS_DATAFILE);
         if (!hModule)
@@ -2531,6 +2569,110 @@ BOOL WINAPI GetIconInfo(
 )
 {
     return NtUserGetIconInfo(hIcon, piconinfo, NULL, NULL, NULL, FALSE);
+}
+
+/*
+ * GetIconInfoExW: GetIconInfo plus the module and the resource that the icon was loaded from.
+ * Measured on Windows 10 22H2 (build 19045): cbSize has to be sizeof(ICONINFOEXW) exactly, or
+ * the call is ERROR_INVALID_PARAMETER; wResID is the resource id for an id and 0 for a name, and
+ * szResName is the name, or empty for an id; an icon that has no module (made by
+ * CreateIconIndirect, copied, loaded from a file) has empty strings and a wResID of 0.
+ */
+BOOL WINAPI GetIconInfoExW(
+  _In_     HICON hIcon,
+  _Inout_  PICONINFOEXW piconinfoex
+)
+{
+    UNICODE_STRING Module, ResName;
+    ICONINFO Info;
+
+    if (!piconinfoex || piconinfoex->cbSize != sizeof(*piconinfoex))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (!NtUserGetIconInfo(hIcon, &Info, NULL, NULL, NULL, FALSE))
+        return FALSE;
+
+    piconinfoex->fIcon = Info.fIcon;
+    piconinfoex->xHotspot = Info.xHotspot;
+    piconinfoex->yHotspot = Info.yHotspot;
+    piconinfoex->hbmMask = Info.hbmMask;
+    piconinfoex->hbmColor = Info.hbmColor;
+
+    piconinfoex->wResID = 0;
+    piconinfoex->szModName[0] = UNICODE_NULL;
+    piconinfoex->szResName[0] = UNICODE_NULL;
+
+    /* Neither string is there for every icon, and then the call has nothing to report */
+    Module.Length = 0;
+    Module.MaximumLength = sizeof(piconinfoex->szModName);
+    Module.Buffer = piconinfoex->szModName;
+    if (NtUserGetIconInfo(hIcon, NULL, &Module, NULL, NULL, FALSE) &&
+        Module.Length < sizeof(piconinfoex->szModName))
+    {
+        piconinfoex->szModName[Module.Length / sizeof(WCHAR)] = UNICODE_NULL;
+    }
+    else
+    {
+        piconinfoex->szModName[0] = UNICODE_NULL;
+    }
+
+    ResName.Length = 0;
+    ResName.MaximumLength = sizeof(piconinfoex->szResName);
+    ResName.Buffer = piconinfoex->szResName;
+    if (NtUserGetIconInfo(hIcon, NULL, NULL, &ResName, NULL, FALSE))
+    {
+        if (IS_INTRESOURCE(ResName.Buffer))
+        {
+            piconinfoex->wResID = (WORD)(ULONG_PTR)ResName.Buffer;
+            piconinfoex->szResName[0] = UNICODE_NULL;
+        }
+        else if (ResName.Length < sizeof(piconinfoex->szResName))
+        {
+            piconinfoex->szResName[ResName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+        }
+        else
+        {
+            piconinfoex->szResName[0] = UNICODE_NULL;
+        }
+    }
+    return TRUE;
+}
+
+/* The same in ANSI. The module name is converted like the resource name; Windows 10 x64 cuts
+ * the module name after its first character (x86 does not) and that is not reproduced */
+BOOL WINAPI GetIconInfoExA(
+  _In_     HICON hIcon,
+  _Inout_  PICONINFOEXA piconinfoex
+)
+{
+    ICONINFOEXW InfoW;
+
+    if (!piconinfoex || piconinfoex->cbSize != sizeof(*piconinfoex))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    InfoW.cbSize = sizeof(InfoW);
+    if (!GetIconInfoExW(hIcon, &InfoW))
+        return FALSE;
+
+    piconinfoex->fIcon = InfoW.fIcon;
+    piconinfoex->xHotspot = InfoW.xHotspot;
+    piconinfoex->yHotspot = InfoW.yHotspot;
+    piconinfoex->hbmMask = InfoW.hbmMask;
+    piconinfoex->hbmColor = InfoW.hbmColor;
+    piconinfoex->wResID = InfoW.wResID;
+    if (!WideCharToMultiByte(CP_ACP, 0, InfoW.szModName, -1, piconinfoex->szModName,
+                             sizeof(piconinfoex->szModName), NULL, NULL))
+        piconinfoex->szModName[0] = ANSI_NULL;
+    if (!WideCharToMultiByte(CP_ACP, 0, InfoW.szResName, -1, piconinfoex->szResName,
+                             sizeof(piconinfoex->szResName), NULL, NULL))
+        piconinfoex->szResName[0] = ANSI_NULL;
+    return TRUE;
 }
 
 BOOL WINAPI DestroyIcon(

@@ -110,6 +110,12 @@ extern void func_WinEventHook(void);
 extern void func_WmPrint(void);
 extern void func_WndProc(void);
 extern void func_Win8User(void);
+extern void func_PhysicalCoords(void);
+extern void func_DialogDpiBehavior(void);
+extern void func_GetIconInfoEx(void);
+extern void func_CreateDesktopEx(void);
+extern void func_ShutdownBlockReason(void);
+extern void func_PointerDeviceFunctions(void);
 extern void func_wsprintfApi(void);
 
 const struct test winetest_testlist[] =
@@ -219,6 +225,12 @@ const struct test winetest_testlist[] =
     { "UserHandleGrantAccess", func_UserHandleGrantAccess },
     { "VirtualKey", func_VirtualKey },
     { "Win8User", func_Win8User },
+    { "PhysicalCoords", func_PhysicalCoords },
+    { "DialogDpiBehavior", func_DialogDpiBehavior },
+    { "GetIconInfoEx", func_GetIconInfoEx },
+    { "CreateDesktopEx", func_CreateDesktopEx },
+    { "ShutdownBlockReason", func_ShutdownBlockReason },
+    { "PointerDeviceFunctions", func_PointerDeviceFunctions },
     { "WinEventHook", func_WinEventHook },
     { "WmPrint", func_WmPrint },
     { "WndProc", func_WndProc },

@@ -88,6 +88,8 @@
 @ stdcall CreateCaret(long long long long) NtUserCreateCaret
 @ stdcall CreateCursor(long long long long long ptr ptr)
 @ stdcall CreateDesktopA(str str ptr long long ptr)
+@ stdcall CreateDesktopExA(str str ptr long long ptr long ptr)
+@ stdcall CreateDesktopExW(wstr wstr ptr long long ptr long ptr)
 @ stdcall CreateDesktopW(wstr wstr ptr long long ptr)
 @ stdcall CreateDialogIndirectParamA(long ptr long ptr long)
 @ stdcall CreateDialogIndirectParamAorW(long ptr long ptr long long)
@@ -296,6 +298,8 @@
 # GetDbgTagFlags
 @ stdcall GetDesktopWindow()
 @ stdcall GetDialogBaseUnits()
+@ stdcall GetDialogControlDpiChangeBehavior(long)
+@ stdcall GetDialogDpiChangeBehavior(long)
 @ stdcall -version=0x601+ GetDisplayAutoRotationPreferences(ptr)
 @ stdcall -version=0x600+ GetDisplayConfigBufferSizes(long ptr ptr)
 @ stdcall GetDlgCtrlID(long)
@@ -317,6 +321,8 @@
 @ stdcall -version=0x601+ GetGestureInfo(long ptr)
 @ stdcall GetGuiResources(long long) NtUserGetGuiResources
 @ stdcall GetIconInfo(long ptr)
+@ stdcall -version=0x600+ GetIconInfoExA(long ptr)
+@ stdcall -version=0x600+ GetIconInfoExW(long ptr)
 @ stdcall GetInputDesktop()
 @ stdcall GetInputState()
 @ stdcall GetInternalWindowPos(long ptr ptr) NtUserGetInternalWindowPos
@@ -360,9 +366,12 @@
 @ stdcall GetNextDlgTabItem(long long long)
 @ stdcall GetOpenClipboardWindow() NtUserGetOpenClipboardWindow
 @ stdcall GetParent(long)
+@ stdcall GetPhysicalCursorPos(ptr)
 @ stdcall -version=0x601+ GetPointerCursorId(long ptr)
 @ stdcall -version=0x601+ GetPointerDevice(ptr ptr)
 @ stdcall -version=0x601+ GetPointerDeviceCursors(ptr ptr ptr)
+@ stdcall -version=0x601+ GetPointerDeviceInputSpace(ptr ptr)
+@ stdcall -version=0x601+ GetPointerDeviceOrientation(ptr ptr)
 @ stdcall -version=0x601+ GetPointerDeviceProperties(ptr ptr ptr)
 @ stdcall -version=0x601+ GetPointerDeviceRects(ptr ptr ptr)
 @ stdcall -version=0x601+ GetPointerDevices(ptr ptr)
@@ -405,6 +414,7 @@
 @ stdcall GetSubMenu(long long)
 @ stdcall GetSysColor(long)
 @ stdcall GetSysColorBrush(long)
+@ stdcall GetSystemDpiForProcess(ptr)
 @ stdcall GetSystemMenu(long long) ; NtUserGetSystemMenu
 @ stdcall GetSystemMetrics(long)
 @ stdcall GetSystemMetricsForDpi(long long)
@@ -415,8 +425,10 @@
 @ stdcall GetThreadDpiAwarenessContext()
 @ stdcall GetThreadDpiHostingBehavior()
 @ stdcall GetTitleBarInfo(long ptr) NtUserGetTitleBarInfo
+@ stdcall GetTopLevelWindow(long)
 @ stdcall GetTopWindow(long)
 @ stdcall -version=0x601+ GetTouchInputInfo(long long ptr long)
+@ stdcall GetUnpredictedMessagePos()
 @ stdcall GetUpdateRect(long ptr long)
 @ stdcall GetUpdateRgn(long long long)
 @ stdcall -version=0x600+ GetUpdatedClipboardFormats(ptr long ptr)
@@ -504,6 +516,7 @@
 @ stdcall IsRectEmpty(ptr)
 @ stdcall IsSETEnabled()
 @ stdcall IsServerSideWindow(long)
+@ stdcall IsTopLevelWindow(long)
 @ stdcall -version=0x601+ IsTouchWindow(long ptr)
 @ stdcall IsValidDpiAwarenessContext(ptr)
 @ stdcall IsWinEventHookInstalled(long)
@@ -597,6 +610,7 @@
 @ stdcall PaintMenuBar(long long long long long long) NtUserPaintMenuBar
 @ stdcall PeekMessageA(ptr long long long long)
 @ stdcall PeekMessageW(ptr long long long long)
+@ stdcall PhysicalToLogicalPoint(long ptr)
 @ stdcall PhysicalToLogicalPointForPerMonitorDPI(long ptr)
 @ stdcall PostMessageA(long long long long)
 @ stdcall PostMessageW(long long long long)
@@ -692,6 +706,8 @@
 # SetDbgTag
 @ stdcall SetDebugErrorLevel(long)
 @ stdcall SetDeskWallpaper(ptr)
+@ stdcall SetDialogControlDpiChangeBehavior(long long long)
+@ stdcall SetDialogDpiChangeBehavior(long long long)
 @ stdcall -version=0x601+ SetDisplayAutoRotationPreferences(long)
 @ stdcall -version=0x600+ SetDisplayConfig(long ptr long ptr long)
 @ stdcall SetDlgItemInt(long long long long)
@@ -716,6 +732,7 @@
 @ stdcall SetMessageExtraInfo(long)
 @ stdcall SetMessageQueue(long)
 @ stdcall SetParent(long long) NtUserSetParent
+@ stdcall SetPhysicalCursorPos(long long)
 @ stdcall SetProcessDPIAware()
 @ stdcall SetProcessDefaultLayout(long)
 @ stdcall SetProcessDpiAwarenessContext(ptr)
@@ -775,6 +792,7 @@
 @ stdcall ShowWindowAsync(long long) NtUserShowWindowAsync
 @ stdcall -version=0x600+ ShutdownBlockReasonCreate(long wstr)
 @ stdcall -version=0x600+ ShutdownBlockReasonDestroy(long)
+@ stdcall -version=0x600+ ShutdownBlockReasonQuery(long ptr ptr)
 @ stdcall -version=0x601+ SkipPointerFrameMessages(long)
 @ stdcall SoftModalMessageBox(ptr)
 @ stdcall SubtractRect(ptr ptr ptr)
@@ -839,6 +857,7 @@
 @ stdcall VkKeyScanExW(long long)
 @ stdcall VkKeyScanW(long)
 @ stdcall WCSToMBEx(long wstr long str long long)
+@ stdcall WindowFromPhysicalPoint(double)
 @ stdcall WINNLSEnableIME(long long)
 @ stdcall WINNLSGetEnableStatus(long)
 @ stdcall WINNLSGetIMEHotkey(long)

@@ -13,7 +13,10 @@ list(APPEND VISTA_SOURCE
      autorotation.c
      suspendresume.c
      pointer.c
-     win8user.c)
+     win8user.c
+     physical.c
+     dialogdpi.c
+     shutdown.c)
      
 
 list(APPEND SOURCE

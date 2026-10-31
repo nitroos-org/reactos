@@ -599,25 +599,4 @@ BOOL WINAPI ChangeWindowMessageFilterEx( HWND hwnd, UINT message, DWORD action, 
     return TRUE;
 }
 
-//wine/user_main.c
-/***********************************************************************
- *		ShutdownBlockReasonDestroy (USER32.@)
- */
-
-BOOL WINAPI ShutdownBlockReasonDestroy(HWND hwnd)
-{
-    FIXME("(%p): stub\n", hwnd);
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
-}
-
-/***********************************************************************
- *		ShutdownBlockReasonCreate (USER32.@)
- */
-BOOL WINAPI ShutdownBlockReasonCreate(HWND hwnd, LPCWSTR reason)
-{
-    FIXME("(%p, %s): stub\n", hwnd, debugstr_w(reason));
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
-}
 #endif
