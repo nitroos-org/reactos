@@ -1470,11 +1470,13 @@ static UINT get_package_open_error( const WCHAR *file )
 #endif
 
 #ifdef __REACTOS__
-BOOL WINAPI ApphelpCheckRunAppEx(HANDLE FileHandle, PVOID Unk1, PVOID Unk2, PCWSTR ApplicationName, PVOID Environment, USHORT ExeType, PULONG Reason, PVOID *SdbQueryAppCompatData, PULONG SdbQueryAppCompatDataSize,
+typedef BOOL (WINAPI *FN_ApphelpCheckRunAppEx)(HANDLE FileHandle, PVOID Unk1, PVOID Unk2, PCWSTR ApplicationName,
+    PVOID Environment, USHORT ExeType, PULONG Reason, PVOID *SdbQueryAppCompatData, PULONG SdbQueryAppCompatDataSize,
     PVOID *SxsData, PULONG SxsDataSize, PULONG FusionFlags, PULONG64 SomeFlag1, PULONG SomeFlag2);
-BOOL WINAPI SE_DynamicShim(LPCWSTR ProcessImage, PVOID hsdb, PVOID pQueryResult, LPCSTR Module, LPDWORD lpdwDynamicToken);
-PVOID WINAPI SdbInitDatabase(DWORD flags, LPCWSTR path);
-PVOID WINAPI SdbReleaseDatabase(PVOID hsdb);
+typedef BOOL (WINAPI *FN_SE_DynamicShim)(LPCWSTR ProcessImage, PVOID hsdb, PVOID pQueryResult, LPCSTR Module,
+    LPDWORD lpdwDynamicToken);
+typedef PVOID (WINAPI *FN_SdbInitDatabase)(DWORD flags, LPCWSTR path);
+typedef PVOID (WINAPI *FN_SdbReleaseDatabase)(PVOID hsdb);
 
 #define HID_DOS_PATHS 0x1
 #define SDB_DATABASE_MAIN_SHIM 0x80030000
@@ -1482,9 +1484,42 @@ PVOID WINAPI SdbReleaseDatabase(PVOID hsdb);
 #define APPHELP_VALID_RESULT 0x10000
 #define APPHELP_RESULT_FOUND 0x40000
 
+/*
+ * Windows maps apphelp.dll into every process at its start, so that the installer never has to load it. Here it is
+ * loaded on demand. A delay-load import is not good enough for that: a 32-bit process that has switched off the WoW64
+ * file system redirection (Wow64DisableWow64FsRedirection) would look for it in the 64-bit System32 directory and
+ * MsiOpenPackage would die with the delay-load exception 0xC06D007E. Load it by the full path of the system
+ * directory of this process instead, and go on without the check when it is not there.
+ */
+static HMODULE
+load_apphelp(void)
+{
+    WCHAR path[MAX_PATH];
+    HMODULE module = GetModuleHandleW(L"apphelp.dll");
+    UINT len;
+
+    if (module)
+        return module;
+
+    len = GetSystemDirectoryW(path, ARRAY_SIZE(path));
+    if (len && len + ARRAY_SIZE(L"\\apphelp.dll") <= ARRAY_SIZE(path))
+    {
+        lstrcatW(path, L"\\apphelp.dll");
+        module = LoadLibraryW(path);
+    }
+    if (!module)
+        module = LoadLibraryW(L"apphelp.dll");
+    return module;
+}
+
 static void
 AppHelpCheckPackage(LPCWSTR szPackage)
 {
+    FN_ApphelpCheckRunAppEx pApphelpCheckRunAppEx;
+    FN_SE_DynamicShim pSE_DynamicShim;
+    FN_SdbInitDatabase pSdbInitDatabase;
+    FN_SdbReleaseDatabase pSdbReleaseDatabase;
+    HMODULE apphelp;
     USHORT ExeType = 0;
     ULONG Reason = 0;
 
@@ -1492,7 +1527,25 @@ AppHelpCheckPackage(LPCWSTR szPackage)
     ULONG QueryResultSize = 0;
 
     HANDLE Handle = NULL;
-    BOOL Continue = ApphelpCheckRunAppEx(
+    BOOL Continue;
+
+    apphelp = load_apphelp();
+    if (!apphelp)
+    {
+        WARN("apphelp.dll is not available (%u), no application compatibility check\n", GetLastError());
+        return;
+    }
+    pApphelpCheckRunAppEx = (FN_ApphelpCheckRunAppEx)GetProcAddress(apphelp, "ApphelpCheckRunAppEx");
+    pSE_DynamicShim = (FN_SE_DynamicShim)GetProcAddress(apphelp, "SE_DynamicShim");
+    pSdbInitDatabase = (FN_SdbInitDatabase)GetProcAddress(apphelp, "SdbInitDatabase");
+    pSdbReleaseDatabase = (FN_SdbReleaseDatabase)GetProcAddress(apphelp, "SdbReleaseDatabase");
+    if (!pApphelpCheckRunAppEx || !pSE_DynamicShim || !pSdbInitDatabase || !pSdbReleaseDatabase)
+    {
+        WARN("apphelp.dll lacks an export, no application compatibility check\n");
+        return;
+    }
+
+    Continue = pApphelpCheckRunAppEx(
         Handle, NULL, NULL, szPackage, NULL, ExeType, &Reason, &QueryResult, &QueryResultSize, NULL,
         NULL, NULL, NULL, NULL);
 
@@ -1501,13 +1554,13 @@ AppHelpCheckPackage(LPCWSTR szPackage)
         if ((Reason & (APPHELP_VALID_RESULT | APPHELP_RESULT_FOUND)) == (APPHELP_VALID_RESULT | APPHELP_RESULT_FOUND))
         {
             DWORD dwToken;
-            PVOID hsdb = SdbInitDatabase(HID_DOS_PATHS | SDB_DATABASE_MAIN_SHIM, NULL);
+            PVOID hsdb = pSdbInitDatabase(HID_DOS_PATHS | SDB_DATABASE_MAIN_SHIM, NULL);
             if (hsdb)
             {
-                BOOL bShim = SE_DynamicShim(szPackage, hsdb, QueryResult, "msi.dll", &dwToken);
+                BOOL bShim = pSE_DynamicShim(szPackage, hsdb, QueryResult, "msi.dll", &dwToken);
                 ERR("ReactOS HACK(CORE-13283): Used SE_DynamicShim %d!\n", bShim);
 
-                SdbReleaseDatabase(hsdb);
+                pSdbReleaseDatabase(hsdb);
             }
             else
             {
