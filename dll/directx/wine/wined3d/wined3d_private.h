@@ -4064,6 +4064,7 @@ struct wined3d_swapchain
     RECT front_buffer_update;
     unsigned int swap_interval;
     unsigned int max_frame_latency;
+    bool first_present_done;
 
     /* Performance tracking */
     LARGE_INTEGER last_present_time;
