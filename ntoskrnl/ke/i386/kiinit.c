@@ -570,6 +570,8 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
         (KeFeatureBits & KF_RDTSC) ? TRUE: FALSE;
     SharedUserData->ProcessorFeatures[PF_RDRAND_INSTRUCTION_AVAILABLE] =
         (KeFeatureBits & KF_RDRAND) ? TRUE : FALSE;
+    /* INT 29h (__fastfail) is handled by KiRaiseSecurityCheckFailure: abort() and the CRT use it, as on Windows */
+    SharedUserData->ProcessorFeatures[PF_FASTFAIL_AVAILABLE] = TRUE;
     // Note: On x86 we lack support for saving/restoring SSE state
     SharedUserData->ProcessorFeatures[PF_SSE3_INSTRUCTIONS_AVAILABLE] =
         (KeFeatureBits & KF_SSE3) ? TRUE : FALSE;
