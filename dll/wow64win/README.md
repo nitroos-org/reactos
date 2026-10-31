@@ -39,8 +39,8 @@ removal remains with the i386 unwinder. Callback allocation touches guest
 stack pages in order to grow the guard page, preserving the reserved stack
 guarantee. Normal returns preserve changes to x87 and MXCSR control state.
 
-Current limits include global/other-thread hooks and hook families other than
-CALLWNDPROC/CALLWNDPROCRET/GETMESSAGE, DDE conversation callbacks, IME callbacks,
+Current limits include hooks on threads of other processes, journal hooks,
+DDE conversation callbacks, IME callbacks,
 remaining private structures, printer driver pointers, and unconverted
 pointer messages. DDE initialization and string handles work; StartDoc
 retains the native service's stub result. Arbitrary
@@ -57,9 +57,13 @@ common dialogs and a native driver for the guest notepad/regedit executables.
 All remain excluded from default image contents. The unwind fixture can run
 its child cases through guest CreateProcess or accept individual case numbers.
 Installer fixtures also cover outline-font offsets, input contexts, monitor
-handles, the thread desktop, and CALLWND hook payloads. Hooks are currently
-limited to the calling guest thread; their message payload coverage follows
-the window-message translator.
+handles, the thread desktop, and CALLWND hook payloads. Hooks may target the
+threads of the calling process, or be global; win32k runs a global hook only
+in the setter's process (low-level, keyboard and mouse hooks on the setter's
+thread). CBT, message-filter, keyboard, mouse, low-level, shell and idle hook
+records are translated both ways, including CallNextHookEx and the CBT
+CREATEWND/MOVESIZE writeback. CALLWND message payload coverage follows the
+window-message translator.
 The `wow64_message_hook` fixture covers current-thread GETMESSAGE hooks,
 chaining, signed hook results and MSG writeback for PeekMessage/GetMessage.
 WM_NOTIFY records, including application-defined NMHDR extensions, retain

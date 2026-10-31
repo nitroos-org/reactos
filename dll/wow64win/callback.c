@@ -25,6 +25,20 @@ typedef struct { HOOK32 Header; CWPR32 Cwp; ULONG Extra[4]; } CWPRCALL32;
 C_ASSERT(sizeof(HOOK32) == 1064);
 C_ASSERT(sizeof(CWPCALL32) == 1096);
 C_ASSERT(sizeof(CWPRCALL32) == 1100);
+/* i386 layouts of the records the other hook families carry after the header */
+typedef struct { CREATE32 Cs; ULONG WndInsertAfter; } CBTCREATE32;
+typedef struct { ULONG lpcs, hwndInsertAfter; } CBTCREATEWND32;
+typedef struct { BOOL fMouse; ULONG hWndActive; } CBTACTIVATE32;
+typedef struct { POINT pt; ULONG hwnd; UINT wHitTestCode; ULONG dwExtraInfo; } MOUSEHOOK32;
+typedef struct { MOUSEHOOK32 Base; DWORD mouseData; } MOUSEHOOKEX32;
+typedef struct { DWORD vkCode, scanCode, flags, time; ULONG dwExtraInfo; } KBDLL32;
+typedef struct { POINT pt; DWORD mouseData, flags, time; ULONG dwExtraInfo; } MSLL32;
+C_ASSERT(sizeof(CBTCREATE32) == 52);
+C_ASSERT(sizeof(CBTACTIVATE32) == 8);
+C_ASSERT(sizeof(MOUSEHOOK32) == 20);
+C_ASSERT(sizeof(MOUSEHOOKEX32) == 24);
+C_ASSERT(sizeof(KBDLL32) == 20);
+C_ASSERT(sizeof(MSLL32) == 24);
 typedef struct
 {
     WOW64_CPU_STATE *Previous;
@@ -221,21 +235,155 @@ static LONG HookPayloadSize(const HOOKPROC_CALLBACK_ARGUMENTS *Header)
     return Size;
 }
 
+/* Sizes of the record that win32k's co_IntCallHookProc places after the
+ * header (lParam is then its offset) for the non-CALLWND families. A zero
+ * size means lParam is a plain value. FALSE: no translation. */
+static BOOL HookRecordSizes(INT HookId, INT Code, ULONG *Native, ULONG *Guest)
+{
+    *Native = *Guest = 0;
+    switch (HookId)
+    {
+    case WH_GETMESSAGE: case WH_MSGFILTER: case WH_SYSMSGFILTER:
+        *Native = sizeof(MSG); *Guest = sizeof(MSG32); return TRUE;
+    case WH_KEYBOARD_LL:
+        *Native = sizeof(KBDLLHOOKSTRUCT); *Guest = sizeof(KBDLL32); return TRUE;
+    case WH_MOUSE_LL:
+        *Native = sizeof(MSLLHOOKSTRUCT); *Guest = sizeof(MSLL32); return TRUE;
+    case WH_MOUSE:
+        *Native = sizeof(MOUSEHOOKSTRUCTEX); *Guest = sizeof(MOUSEHOOKEX32); return TRUE;
+    case WH_KEYBOARD: case WH_SHELL: case WH_FOREGROUNDIDLE:
+        return TRUE;
+    case WH_CBT:
+        switch (Code)
+        {
+        case HCBT_CREATEWND:
+            *Native = sizeof(HOOKPROC_CBT_CREATEWND_EXTRA_ARGUMENTS); *Guest = sizeof(CBTCREATE32); return TRUE;
+        case HCBT_MOVESIZE:
+            *Native = *Guest = sizeof(RECTL); return TRUE;
+        case HCBT_ACTIVATE:
+            *Native = sizeof(CBTACTIVATESTRUCT); *Guest = sizeof(CBTACTIVATE32); return TRUE;
+        case HCBT_CLICKSKIPPED:
+            *Native = sizeof(MOUSEHOOKSTRUCT); *Guest = sizeof(MOUSEHOOK32); return TRUE;
+        case HCBT_KEYSKIPPED: case HCBT_MINMAX: case HCBT_SETFOCUS: case HCBT_SYSCOMMAND:
+        case HCBT_DESTROYWND: case HCBT_QS:
+            return TRUE;
+        }
+        return FALSE;
+    }
+    return FALSE;
+}
+
+static VOID MouseNativeTo32(MOUSEHOOK32 *To, const MOUSEHOOKSTRUCT *From)
+{
+    To->pt = From->pt; To->hwnd = HandleToUlong(From->hwnd);
+    To->wHitTestCode = From->wHitTestCode; To->dwExtraInfo = (ULONG)From->dwExtraInfo;
+}
+
+static VOID Mouse32ToNative(MOUSEHOOKSTRUCT *To, const MOUSEHOOK32 *From)
+{
+    To->pt = From->pt; To->hwnd = H32(From->hwnd);
+    To->wHitTestCode = From->wHitTestCode; To->dwExtraInfo = From->dwExtraInfo;
+}
+
+static VOID KeyboardLl32ToNative(KBDLLHOOKSTRUCT *To, const KBDLL32 *From)
+{
+    To->vkCode = From->vkCode; To->scanCode = From->scanCode; To->flags = From->flags;
+    To->time = From->time; To->dwExtraInfo = From->dwExtraInfo;
+}
+
+static VOID MouseLl32ToNative(MSLLHOOKSTRUCT *To, const MSLL32 *From)
+{
+    To->pt = From->pt; To->mouseData = From->mouseData; To->flags = From->flags;
+    To->time = From->time; To->dwExtraInfo = From->dwExtraInfo;
+}
+
+static VOID PackHookRecord(HOOK32 *To, const HOOKPROC_CALLBACK_ARGUMENTS *From)
+{
+    const VOID *Input = From + 1;
+    PVOID Output = To + 1;
+    switch (From->HookId)
+    {
+    case WH_GETMESSAGE: case WH_MSGFILTER: case WH_SYSMSGFILTER:
+        MsgNativeTo32(Output, Input);
+        break;
+    case WH_KEYBOARD_LL:
+    {
+        const KBDLLHOOKSTRUCT *Native = Input;
+        KBDLL32 *Guest = Output;
+        Guest->vkCode = Native->vkCode; Guest->scanCode = Native->scanCode; Guest->flags = Native->flags;
+        Guest->time = Native->time; Guest->dwExtraInfo = (ULONG)Native->dwExtraInfo;
+        break;
+    }
+    case WH_MOUSE_LL:
+    {
+        const MSLLHOOKSTRUCT *Native = Input;
+        MSLL32 *Guest = Output;
+        Guest->pt = Native->pt; Guest->mouseData = Native->mouseData; Guest->flags = Native->flags;
+        Guest->time = Native->time; Guest->dwExtraInfo = (ULONG)Native->dwExtraInfo;
+        break;
+    }
+    case WH_MOUSE:
+    {
+        const MOUSEHOOKSTRUCTEX *Native = Input;
+        MOUSEHOOKEX32 *Guest = Output;
+        MouseNativeTo32(&Guest->Base, &Native->MOUSEHOOKSTRUCT);
+        Guest->mouseData = Native->mouseData;
+        break;
+    }
+    case WH_CBT:
+        switch (From->Code)
+        {
+        case HCBT_CREATEWND:
+        {
+            const HOOKPROC_CBT_CREATEWND_EXTRA_ARGUMENTS *Native = Input;
+            CBTCREATE32 *Guest = Output;
+            /* The class and window name are the creator's pointers, desktop
+             * heap copies or atoms; all are guest addresses here. */
+            if ((ULONG_PTR)Native->Cs.lpszName > MAXULONG || (ULONG_PTR)Native->Cs.lpszClass > MAXULONG)
+                RtlRaiseStatus(STATUS_NOT_SUPPORTED);
+            CreateNativeTo32(&Guest->Cs, &Native->Cs);
+            Guest->WndInsertAfter = HandleToUlong(Native->WndInsertAfter);
+            break;
+        }
+        case HCBT_MOVESIZE:
+            RtlCopyMemory(Output, Input, sizeof(RECTL));
+            break;
+        case HCBT_ACTIVATE:
+        {
+            const CBTACTIVATESTRUCT *Native = Input;
+            CBTACTIVATE32 *Guest = Output;
+            Guest->fMouse = Native->fMouse; Guest->hWndActive = HandleToUlong(Native->hWndActive);
+            break;
+        }
+        case HCBT_CLICKSKIPPED:
+            MouseNativeTo32(Output, Input);
+            break;
+        }
+        break;
+    }
+}
+
 static VOID PackHook(HOOK32 *To, const HOOKPROC_CALLBACK_ARGUMENTS *From, LONG Size)
 {
     const CWPSTRUCT *Native;
     CWP32 *Guest;
     PVOID Input, Output;
+    ULONG NativeRecord, GuestRecord;
     To->HookId = From->HookId; To->Code = From->Code;
     To->wParam = From->wParam; To->lParam = From->lParam;
     To->Proc = PtrToUlong(From->Proc); To->Mod = From->Mod;
     To->offPfn = From->offPfn; To->Ansi = From->Ansi;
     To->Result = 0; To->lParamSize = Size;
     RtlCopyMemory(To->ModuleName, From->ModuleName, sizeof(To->ModuleName));
-    if (From->HookId == WH_GETMESSAGE)
+    if (From->HookId != WH_CALLWNDPROC && From->HookId != WH_CALLWNDPROCRET)
     {
-        To->lParam = sizeof(*To);
-        MsgNativeTo32((MSG32 *)(To + 1), (const MSG *)(From + 1));
+        /* The callback validated the family and its record size */
+        HookRecordSizes(From->HookId, From->Code, &NativeRecord, &GuestRecord);
+        if (NativeRecord)
+        {
+            To->lParam = sizeof(*To);
+            PackHookRecord(To, From);
+        }
         return;
     }
     if (From->HookId == WH_CALLWNDPROC)
@@ -289,20 +437,26 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
         case USER32_CALLBACK_HOOKPROC:
         {
             HOOKPROC_CALLBACK_ARGUMENTS *Native = Buffer;
-            ULONG Base;
+            ULONG Base, NativeRecord, GuestRecord;
             if (Length < sizeof(*Native)) break;
-            if (Native->HookId == WH_GETMESSAGE)
+            if (Native->HookId != WH_CALLWNDPROC && Native->HookId != WH_CALLWNDPROCRET)
             {
-                if (Length != sizeof(*Native) + sizeof(MSG) ||
-                    (ULONG_PTR)Native->lParam != sizeof(*Native) || Native->lParamSize) break;
-                GuestLength = sizeof(HOOK32) + sizeof(MSG32);
+                if (!HookRecordSizes(Native->HookId, Native->Code, &NativeRecord, &GuestRecord))
+                {
+                    if (Wow64WinFirstReport(2, (ULONG)(Native->HookId + 1) << 16 | (USHORT)Native->Code))
+                        DbgPrint("WoW64win: unsupported hook callback %d code %d\n", Native->HookId, Native->Code);
+                    Payload = -2;
+                    break;
+                }
+                if (Length != sizeof(*Native) + NativeRecord || Native->lParamSize ||
+                    (NativeRecord && (ULONG_PTR)Native->lParam != sizeof(*Native))) break;
+                GuestLength = sizeof(HOOK32) + GuestRecord;
                 Payload = 0;
                 Status = STATUS_SUCCESS;
                 break;
             }
             if (Native->HookId == WH_CALLWNDPROC) Base = sizeof(CWP_Struct);
-            else if (Native->HookId == WH_CALLWNDPROCRET) Base = sizeof(CWPR_Struct);
-            else break;
+            else Base = sizeof(CWPR_Struct);
             if (Length < Base || Native->lParamSize != Length - Base) break;
             Payload = HookPayloadSize(Native);
             if (Payload < 0) break;
@@ -496,9 +650,21 @@ NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Statu
             HOOKPROC_CALLBACK_ARGUMENTS *Native = Frame->Native;
             if (!Buffer || Length != Frame->GuestLength) { Status = STATUS_INFO_LENGTH_MISMATCH; break; }
             Native->Result = ((HOOK32 *)Buffer)->Result;
+            /* The records win32k copies back; CALLWND hooks have no
+             * message-buffer writeback contract. */
             if (Native->HookId == WH_GETMESSAGE)
                 Msg32ToNative((MSG *)(Native + 1), (const MSG32 *)((HOOK32 *)Buffer + 1));
-            /* CALLWND hooks have no message-buffer writeback contract. */
+            else if (Native->HookId == WH_CBT && Native->Code == HCBT_CREATEWND)
+            {
+                HOOKPROC_CBT_CREATEWND_EXTRA_ARGUMENTS *Create = (PVOID)(Native + 1);
+                const CBTCREATE32 *Guest = (const VOID *)((HOOK32 *)Buffer + 1);
+                Create->Cs.x = Guest->Cs.x; Create->Cs.y = Guest->Cs.y;
+                Create->Cs.cx = Guest->Cs.cx; Create->Cs.cy = Guest->Cs.cy;
+                /* HWND_TOPMOST and HWND_NOTOPMOST are negative */
+                Create->WndInsertAfter = H32(Guest->WndInsertAfter);
+            }
+            else if (Native->HookId == WH_CBT && Native->Code == HCBT_MOVESIZE)
+                RtlCopyMemory(Native + 1, (HOOK32 *)Buffer + 1, sizeof(RECTL));
             Output = Native; OutputLength = Frame->NativeLength;
             break;
         }
@@ -559,20 +725,94 @@ ULONG_PTR Wow64WinCallNextHook(ULONG *a)
 {
     WOW64_CPU_STATE *Cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPU];
     CALLBACK_FRAME *Frame = Cpu ? Cpu->CallbackFrame : NULL;
-    MSG Message;
+    union
+    {
+        MSG Message;
+        KBDLLHOOKSTRUCT KeyboardLl;
+        MSLLHOOKSTRUCT MouseLl;
+        MOUSEHOOKSTRUCTEX Mouse;
+        CBTACTIVATESTRUCT Activate;
+        struct { CBT_CREATEWNDW Cbt; CREATESTRUCTW Cs; } Create;
+    } Native;
+    INT HookId, Code = (INT)a[0];
+    LPARAM Lparam = a[2];
     LRESULT Result;
-    /* The callback, not a caller-supplied selector, determines lParam's ABI. */
-    if (!Frame || Frame->Id != USER32_CALLBACK_HOOKPROC ||
-        ((HOOKPROC_CALLBACK_ARGUMENTS *)Frame->Native)->HookId != WH_GETMESSAGE)
+    /* The callback, not a caller-supplied selector, determines lParam's ABI:
+     * win32k chains the hook that this callback runs. */
+    if (!Frame || Frame->Id != USER32_CALLBACK_HOOKPROC)
     {
         RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED);
         return 0;
     }
-    if (!a[2]) return (LONG_PTR)NtUserCallNextHookEx(a[0], a[1], 0, a[3]);
-    Msg32ToNative(&Message, P32(a[2]));
-    Result = NtUserCallNextHookEx(a[0], a[1], (LPARAM)&Message, a[3]);
-    MsgNativeTo32(P32(a[2]), &Message);
-    return (LONG_PTR)Result;
+    HookId = ((HOOKPROC_CALLBACK_ARGUMENTS *)Frame->Native)->HookId;
+    switch (HookId)
+    {
+    case WH_GETMESSAGE: case WH_MSGFILTER: case WH_SYSMSGFILTER:
+        if (!a[2]) break;
+        Msg32ToNative(&Native.Message, P32(a[2]));
+        Result = NtUserCallNextHookEx(Code, a[1], (LPARAM)&Native.Message, a[3]);
+        /* Only GETMESSAGE hooks may change the message */
+        if (HookId == WH_GETMESSAGE) MsgNativeTo32(P32(a[2]), &Native.Message);
+        return (LONG_PTR)Result;
+    case WH_KEYBOARD_LL:
+        if (!a[2]) break;
+        KeyboardLl32ToNative(&Native.KeyboardLl, P32(a[2]));
+        Lparam = (LPARAM)&Native.KeyboardLl;
+        break;
+    case WH_MOUSE_LL:
+        if (!a[2]) break;
+        MouseLl32ToNative(&Native.MouseLl, P32(a[2]));
+        Lparam = (LPARAM)&Native.MouseLl;
+        break;
+    case WH_MOUSE:
+        if (!a[2]) break;
+        Mouse32ToNative(&Native.Mouse.MOUSEHOOKSTRUCT, P32(a[2]));
+        Native.Mouse.mouseData = ((MOUSEHOOKEX32 *)P32(a[2]))->mouseData;
+        Lparam = (LPARAM)&Native.Mouse;
+        break;
+    case WH_KEYBOARD: case WH_SHELL: case WH_FOREGROUNDIDLE:
+        break;
+    case WH_CBT:
+        if (!a[2]) break;
+        switch (Code)
+        {
+        case HCBT_CREATEWND:
+        {
+            CBTCREATEWND32 *Guest = P32(a[2]);
+            CREATE32 *GuestCs = P32(Guest->lpcs);
+            /* win32k reads the strings and writes the position back */
+            Create32ToNative(&Native.Create.Cs, GuestCs);
+            Native.Create.Cbt.lpcs = &Native.Create.Cs;
+            Native.Create.Cbt.hwndInsertAfter = H32(Guest->hwndInsertAfter);
+            Result = NtUserCallNextHookEx(Code, a[1], (LPARAM)&Native.Create.Cbt, a[3]);
+            GuestCs->x = Native.Create.Cs.x; GuestCs->y = Native.Create.Cs.y;
+            GuestCs->cx = Native.Create.Cs.cx; GuestCs->cy = Native.Create.Cs.cy;
+            Guest->hwndInsertAfter = HandleToUlong(Native.Create.Cbt.hwndInsertAfter);
+            return (LONG_PTR)Result;
+        }
+        case HCBT_ACTIVATE:
+        {
+            CBTACTIVATE32 *Guest = P32(a[2]);
+            Native.Activate.fMouse = Guest->fMouse;
+            Native.Activate.hWndActive = H32(Guest->hWndActive);
+            Lparam = (LPARAM)&Native.Activate;
+            break;
+        }
+        case HCBT_CLICKSKIPPED:
+            /* win32k accepts the record without mouseData */
+            RtlZeroMemory(&Native.Mouse, sizeof(Native.Mouse));
+            Mouse32ToNative(&Native.Mouse.MOUSEHOOKSTRUCT, P32(a[2]));
+            Lparam = (LPARAM)&Native.Mouse;
+            break;
+        /* HCBT_MOVESIZE: a RECT has the same layout. The other codes pass values. */
+        }
+        break;
+    default:
+        /* CALLWND chaining goes through NtUserMessageCall. */
+        RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED);
+        return 0;
+    }
+    return (LONG_PTR)NtUserCallNextHookEx(Code, a[1], Lparam, a[3]);
 }
 
 #define DEFINE_USER32_CALLBACK(id, value, fn) \

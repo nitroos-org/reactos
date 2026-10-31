@@ -114,5 +114,5 @@ BOOL NTAPI NtGdiGetRealizationInfo(HDC hdc, PREALIZATION_INFO Info, HFONT Font);
 DWORD NTAPI NtDxEngGetRedirectionBitmap(DWORD Unknown);
 
 ULONG_PTR Wow64WinFailure(ULONG Number, NTSTATUS Status);
-/* Kind 0: service number, 1: callback message. TRUE the first time in the process */
+/* Kind 0: service number, 1: callback message, 2: hook id and code. TRUE the first time in the process */
 BOOLEAN Wow64WinFirstReport(ULONG Kind, ULONG Value);

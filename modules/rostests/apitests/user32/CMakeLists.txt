@@ -45,6 +45,7 @@ list(APPEND SOURCE
     GW_ENABLEDPOPUP.c
     Handle32.c
     HookChainUnhookUaf.c
+    HookFamilies.c
     HungWindow.c
     InitializeLpkHooks.c
     IsDialogMessage.c
