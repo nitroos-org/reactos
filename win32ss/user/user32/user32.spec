@@ -88,6 +88,8 @@
 @ stdcall CreateCaret(long long long long) NtUserCreateCaret
 @ stdcall CreateCursor(long long long long long ptr ptr)
 @ stdcall CreateDesktopA(str str ptr long long ptr)
+@ stdcall CreateDesktopExA(str str ptr long long ptr long ptr)
+@ stdcall CreateDesktopExW(wstr wstr ptr long long ptr long ptr)
 @ stdcall CreateDesktopW(wstr wstr ptr long long ptr)
 @ stdcall CreateDialogIndirectParamA(long ptr long ptr long)
 @ stdcall CreateDialogIndirectParamAorW(long ptr long ptr long long)

@@ -113,6 +113,7 @@ list(APPEND SOURCE
     PhysicalCoords.c
     DialogDpiBehavior.c
     GetIconInfoEx.c
+    CreateDesktopEx.c
     wsprintf.c)
 
 list(APPEND PCH_SKIP_SOURCE
