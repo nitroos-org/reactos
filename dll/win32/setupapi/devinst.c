@@ -5137,14 +5137,6 @@ DevPropReadSpdrp(
     PBYTE Data;
     CONFIGRET cr;
 
-    /*
-     * The root node answers the capability request behind these two with an assertion in the checked kernel (the root
-     * enumerator handles no request but the one for the device relations). It has neither property.
-     */
-    if ((Property == SPDRP_ADDRESS || Property == SPDRP_DEVICE_POWER_DATA) &&
-        !_wcsnicmp(DevInfo->instanceId, L"HTREE\\ROOT\\", 11))
-        return ERROR_NOT_FOUND;
-
     /* The kernel reports the size of the buffer, not of the value, for these: ask for exactly their size */
     if (Property == SPDRP_DEVICE_POWER_DATA)
         Capacity = DEVPROP_POWER_DATA_SIZE;

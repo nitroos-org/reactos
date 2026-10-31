@@ -401,7 +401,7 @@ typedef struct
 } POWER_DATA_HEAD;
 
 /* One SPDRP_* property of a device from the system */
-static void TestProperty(HDEVINFO Set, SP_DEVINFO_DATA *Device, unsigned Index, PCWSTR InstanceId, DWORD Property,
+static void TestProperty(HDEVINFO Set, SP_DEVINFO_DATA *Device, unsigned Index, DWORD Property,
                          unsigned *Counts)
 {
     DEVPROPKEY Key = SpdrpKey(Property);
@@ -421,21 +421,6 @@ static void TestProperty(HDEVINFO Set, SP_DEVINFO_DATA *Device, unsigned Index, 
         Ret = pSetupDiGetDevicePropertyW(Set, Device, &Key, &Type, Buffer, sizeof(Buffer), &Size, 0);
         ok(!Ret && GetLastError() == ERROR_INVALID_REG_PROPERTY && Type == DEVPROP_TYPE_EMPTY && Size == NOT_SET,
            "%S, property %lu: %d, error 0x%lx, type 0x%lx, size 0x%lx\n", Label, Property, Ret, GetLastError(), Type, Size);
-        return;
-    }
-
-    /* Asking the root node for its capabilities (address, power data) makes a checked kernel assert */
-    if ((Property == SPDRP_ADDRESS || Property == SPDRP_DEVICE_POWER_DATA) && !_wcsnicmp(InstanceId, L"HTREE\\ROOT\\", 11))
-    {
-        if (is_reactos())
-        {
-            BYTE Buffer[128];
-
-            Type = NOT_SET; Size = NOT_SET; SetLastError(0xDEADBEEF);
-            Ret = pSetupDiGetDevicePropertyW(Set, Device, &Key, &Type, Buffer, sizeof(Buffer), &Size, 0);
-            ok(!Ret && GetLastError() == ERROR_NOT_FOUND && Type == DEVPROP_TYPE_EMPTY,
-               "Root node, property %lu: %d, error 0x%lx, type 0x%lx\n", Property, Ret, GetLastError(), Type);
-        }
         return;
     }
 
@@ -616,7 +601,7 @@ static void TestDevice(HDEVINFO Set, SP_DEVINFO_DATA *Device, unsigned Index, un
     }
 
     for (Property = 0; Property < SPDRP_TESTED; Property++)
-        TestProperty(Set, Device, Index, InstanceId, Property, Counts);
+        TestProperty(Set, Device, Index, Property, Counts);
 
     /* The name is the friendly name, else the description */
     Ret = ReadDeviceProperty(Set, Device, &DEVPKEY_NAME, &Type, &Value, &Size, &Error);

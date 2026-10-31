@@ -631,6 +631,8 @@ IopGetDeviceProperty(PPLUGPLAY_CONTROL_PROPERTY_DATA PropertyData)
                 DPRINT("Got device capabiliities\n");
 
                 PowerData->PD_MostRecentPowerState = PowerDeviceD0; // FIXME
+                /* Every device can be in D0 and in D3 (off) */
+                PowerData->PD_Capabilities = PDCAP_D0_SUPPORTED | PDCAP_D3_SUPPORTED;
                 if (DeviceCapabilities.DeviceD1)
                     PowerData->PD_Capabilities |= PDCAP_D1_SUPPORTED;
                 if (DeviceCapabilities.DeviceD2)

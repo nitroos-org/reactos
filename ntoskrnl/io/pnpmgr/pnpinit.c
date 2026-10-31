@@ -457,6 +457,12 @@ IopInitializePlugPlayServices(VOID)
 
     PiSetDevNodeState(IopRootDeviceNode, DeviceNodeStarted);
 
+    /* Record the capabilities of the root device node, as for any other (CM_DRP_CAPABILITIES) */
+    {
+        DEVICE_CAPABILITIES RootCapabilities;
+        IopQueryDeviceCapabilities(IopRootDeviceNode, &RootCapabilities);
+    }
+
     /* Initialize PnP-Event notification support */
     Status = IopInitPlugPlayEvents();
     if (!NT_SUCCESS(Status)) return Status;
