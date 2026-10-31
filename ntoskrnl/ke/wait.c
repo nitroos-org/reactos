@@ -432,9 +432,8 @@ NoWait:
         return NtYieldExecution();
     }
 
-    /* Unlock the dispatcher and adjust the quantum for a no-wait */
-    KiReleaseDispatcherLockFromSynchLevel();
-    KiAdjustQuantumThread(Thread);
+    /* The due time had passed: no quantum charge (see KeWaitForSingleObject) */
+    KiReleaseDispatcherLock(Thread->WaitIrql);
     return STATUS_SUCCESS;
 }
 
@@ -600,11 +599,16 @@ WaitStart:
     return WaitStatus;
 
 DontWait:
-    /* Release dispatcher lock but maintain high IRQL */
-    KiReleaseDispatcherLockFromSynchLevel();
-
-    /* Adjust the Quantum and return the wait status */
-    KiAdjustQuantumThread(Thread);
+    /* A wait that is satisfied at once, or times out at once, is not charged
+       a quantum unit. NT 5.2 charged WAIT_QUANTUM_DECREMENT here; Windows 6.0+
+       charges the quantum for run time only. Measured on Windows 10 22H2 with a
+       thread looping on such waits against equal-priority spinners: it keeps a
+       full time slice (about 20000 waits per slice, the same CPU share as a
+       spinner) for signaled events, semaphores, owned mutants, timeout 0,
+       alertable waits, multiple-object waits and an expired delay. Charging it
+       made a lock holder that waits on a signaled event in a loop give the
+       processor away every few waits. */
+    KiReleaseDispatcherLock(Thread->WaitIrql);
     return WaitStatus;
 }
 
@@ -893,11 +897,8 @@ WaitStart:
     return WaitStatus;
 
 DontWait:
-    /* Release dispatcher lock but maintain high IRQL */
-    KiReleaseDispatcherLockFromSynchLevel();
-
-    /* Adjust the Quantum and return the wait status */
-    KiAdjustQuantumThread(Thread);
+    /* No quantum charge (see KeWaitForSingleObject) */
+    KiReleaseDispatcherLock(Thread->WaitIrql);
     return WaitStatus;
 }
 

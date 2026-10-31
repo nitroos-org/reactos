@@ -280,10 +280,6 @@ KiSwapContext(
 );
 
 VOID
-NTAPI
-KiAdjustQuantumThread(IN PKTHREAD Thread);
-
-VOID
 FASTCALL
 KiExitDispatcher(KIRQL OldIrql);
 
