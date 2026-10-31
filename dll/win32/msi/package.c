@@ -1209,14 +1209,15 @@ static UINT parse_suminfo( MSISUMMARYINFO *si, MSIPACKAGE *package )
     p = wcschr( template, ';' );
     if (p) *p++ = 0;
 
+    /* An empty platform means Intel only when the whole field is empty; in a list it is never a match. */
     platform = template;
     if ((q = wcschr( platform, ',' ))) *q = 0;
-    package->platform = parse_platform( platform );
+    package->platform = q && !platform[0] ? PLATFORM_UNRECOGNIZED : parse_platform( platform );
     while (package->platform == PLATFORM_UNRECOGNIZED && q)
     {
         platform = q + 1;
         if ((q = wcschr( platform, ',' ))) *q = 0;
-        package->platform = parse_platform( platform );
+        package->platform = platform[0] ? parse_platform( platform ) : PLATFORM_UNRECOGNIZED;
     }
     if (package->platform == PLATFORM_UNRECOGNIZED)
     {
@@ -1261,6 +1262,9 @@ static BOOL validate_package_platform( enum platform platform )
 #ifdef __REACTOS__
     // IsWow64Process2 is Windows 10 1709+, so use wine's implementation from commit c3f77b0f9a187109385d1dad17796241004057f4.
     // The usage of the function was introduced in wine commit 2e32067f1f80b169169fa662576a75b1c2382204
+    /* Intel64 is Itanium, which no supported Windows version runs */
+    if (platform == PLATFORM_INTEL64)
+        return FALSE;
     #ifndef __arm__
     if (platform == PLATFORM_ARM)
         return FALSE;
