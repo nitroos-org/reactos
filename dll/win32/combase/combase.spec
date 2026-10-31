@@ -285,7 +285,7 @@
 @ stdcall RoActivateInstance(ptr ptr)
 @ stub RoCaptureErrorContext
 @ stub RoClearError
-@ stub RoFailFastWithErrorContext
+@ stdcall RoFailFastWithErrorContext(long)
 @ stub RoFailFastWithErrorContextInternal
 @ stub RoFailFastWithErrorContextInternal2
 @ stub RoFreeParameterizedTypeExtra
@@ -310,7 +310,7 @@
 @ stub RoReportFailedDelegate
 @ stub RoReportUnhandledError
 @ stub RoResolveRestrictedErrorInfoReference
-@ stub RoRevokeActivationFactories
+@ stdcall RoRevokeActivationFactories(ptr)
 @ stdcall RoSetErrorReportingFlags(long)
 @ stub RoTransformError
 @ stub RoTransformErrorW

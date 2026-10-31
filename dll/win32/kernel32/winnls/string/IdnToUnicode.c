@@ -5,6 +5,11 @@
 #define NDEBUG
 #include <debug.h>
 
+#ifndef IDN_ALLOW_UNASSIGNED
+#define IDN_ALLOW_UNASSIGNED 0x01
+#define IDN_USE_STD3_ASCII_RULES 0x02
+#endif
+
 /* Taken from Wine kernel32/locale.c */
 
 enum {
@@ -34,8 +39,8 @@ static inline unsigned short get_table_entry( const unsigned short *table, WCHAR
     return table[table[table[ch >> 8] + ((ch >> 4) & 0x0f)] + (ch & 0xf)];
 }
 
-INT WINAPI IdnToUnicode(DWORD dwFlags, LPCWSTR lpASCIICharStr, INT cchASCIIChar,
-                        LPWSTR lpUnicodeCharStr, INT cchUnicodeChar)
+INT WINAPI IdnpToUnicode(DWORD dwFlags, LPCWSTR lpASCIICharStr, INT cchASCIIChar,
+                         LPWSTR lpUnicodeCharStr, INT cchUnicodeChar)
 {
     extern const unsigned short nameprep_char_type[];
 
@@ -152,7 +157,7 @@ INT WINAPI IdnToUnicode(DWORD dwFlags, LPCWSTR lpASCIICharStr, INT cchASCIIChar,
             }
             if(!lpUnicodeCharStr) {
                 out++;
-            }else if(out+1 <= cchASCIIChar) {
+            }else if(out+1 <= cchUnicodeChar) {
                 memmove(lpUnicodeCharStr+out_label+pos+1,
                         lpUnicodeCharStr+out_label+pos,
                         (out-out_label-pos)*sizeof(WCHAR));

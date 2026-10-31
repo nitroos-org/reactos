@@ -25,6 +25,10 @@ target_link_libraries(kernel32_shared PRIVATE pseh)
 add_dependencies(kernel32_shared psdk)
 
 list(APPEND SOURCE
+    winnls/string/idn.c
+    winnls/string/IdnToAscii.c
+    winnls/string/IdnToUnicode.c
+    winnls/string/nameprep.c
     client/actctx.c
     client/appcache.c
     client/atom.c

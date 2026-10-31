@@ -11,7 +11,7 @@
 @ stub __BuildCatchObject
 @ stub __BuildCatchObjectHelper
 @ stdcall -arch=!i386 __C_specific_handler(ptr long ptr ptr) ucrtbase.__C_specific_handler
-@ stub __C_specific_handler_noexcept
+@ stdcall -arch=win64 __C_specific_handler_noexcept(ptr long ptr ptr)
 @ cdecl __CxxDetectRethrow(ptr) ucrtbase.__CxxDetectRethrow
 @ cdecl __CxxExceptionFilter(ptr ptr long ptr) ucrtbase.__CxxExceptionFilter
 @ cdecl -norelay __CxxFrameHandler(ptr ptr ptr ptr) ucrtbase.__CxxFrameHandler
@@ -22,7 +22,7 @@
 @ cdecl __CxxRegisterExceptionObject(ptr ptr) ucrtbase.__CxxRegisterExceptionObject
 @ cdecl __CxxUnregisterExceptionObject(ptr long) ucrtbase.__CxxUnregisterExceptionObject
 @ cdecl __DestructExceptionObject(ptr) ucrtbase.__DestructExceptionObject
-@ stub __FrameUnwindFilter
+@ cdecl __FrameUnwindFilter(ptr)
 @ stub __GetPlatformExceptionInfo
 @ stub __NLG_Dispatch2
 @ stub __NLG_Return2
@@ -50,10 +50,10 @@
 @ cdecl __unDNameEx(ptr str long ptr ptr ptr long) ucrtbase.__unDNameEx
 @ cdecl __uncaught_exception() ucrtbase.__uncaught_exception
 @ cdecl __uncaught_exceptions()
-@ stub __vcrt_GetModuleFileNameW
-@ stub __vcrt_GetModuleHandleW
+@ cdecl __vcrt_GetModuleFileNameW(long ptr long)
+@ cdecl __vcrt_GetModuleHandleW(wstr)
 @ cdecl __vcrt_InitializeCriticalSectionEx(ptr long long)
-@ stub __vcrt_LoadLibraryExW
+@ cdecl __vcrt_LoadLibraryExW(wstr long long)
 @ cdecl -arch=i386 -norelay _chkesp() ucrtbase._chkesp
 @ cdecl -arch=i386 _except_handler2(ptr ptr ptr ptr) ucrtbase._except_handler2
 @ cdecl -arch=i386 _except_handler3(ptr ptr ptr ptr) ucrtbase._except_handler3

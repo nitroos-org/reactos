@@ -9,10 +9,12 @@
 #include <apitest.h>
 
 extern void func_vcruntime140(void);
+extern void func_FrameHelpers(void);
 
 const struct test winetest_testlist[] =
 {
     { "vcruntime140", func_vcruntime140 },
 
+    { "FrameHelpers", func_FrameHelpers },
     { 0, 0 }
 };

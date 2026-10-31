@@ -29,6 +29,7 @@ list(APPEND SOURCE
     c99_math.c
     fenv.c
     version.c
+    fpexcept.c
     testlist.c
 )
 

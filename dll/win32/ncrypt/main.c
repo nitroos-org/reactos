@@ -28,6 +28,7 @@
 #include "windef.h"
 #include "winbase.h"
 #include "ncrypt.h"
+#include "wincrypt.h"
 #include "bcrypt.h"
 #include "ncrypt_internal.h"
 #include "wine/debug.h"
@@ -172,6 +173,12 @@ static struct object *get_provider_object(NCRYPT_HANDLE handle)
 {
     struct object *object = get_object(handle);
     return object && object->type == STORAGE_PROVIDER ? object : NULL;
+}
+
+static struct object *get_secret_object(NCRYPT_HANDLE handle)
+{
+    struct object *object = get_object(handle);
+    return object && object->type == SECRET ? object : NULL;
 }
 
 static void provider_addref(NCRYPT_PROV_HANDLE handle)
@@ -536,6 +543,11 @@ SECURITY_STATUS WINAPI NCryptFreeObject(NCRYPT_HANDLE handle)
         free_object(object);
         break;
 
+    case SECRET:
+        BCryptDestroySecret(object->secret);
+        free_object(object);
+        break;
+
     default:
         WARN("invalid handle %#Ix\n", handle);
         return NTE_INVALID_HANDLE;
@@ -573,7 +585,8 @@ SECURITY_STATUS WINAPI NCryptGetProperty(NCRYPT_HANDLE handle, const WCHAR *name
     TRACE("(%#Ix, %s, %p, %lu, %p, %#lx)\n", handle, wine_dbgstr_w(name), output, outsize, result, flags);
     if (flags & ~(NCRYPT_PERSIST_ONLY_FLAG | NCRYPT_SILENT_FLAG)) FIXME("flags %#lx not supported\n", flags);
 
-    if (!object) return NTE_INVALID_HANDLE;
+    /* a secret has no properties: it is not a handle for this function */
+    if (!object || object->type == SECRET) return NTE_INVALID_HANDLE;
     if (!name) return NTE_INVALID_PARAMETER;
     if ((flags & NCRYPT_PERSIST_ONLY_FLAG) && !(key = custom_property_name(name, custom, ARRAYSIZE(custom))))
         return NTE_INVALID_PARAMETER;
@@ -1246,7 +1259,7 @@ SECURITY_STATUS WINAPI NCryptSetProperty(NCRYPT_HANDLE handle, const WCHAR *name
     if (flags & ~(NCRYPT_PERSIST_ONLY_FLAG | NCRYPT_PERSIST_FLAG | NCRYPT_SILENT_FLAG))
         FIXME("flags %#lx not supported\n", flags);
 
-    if (!object) return NTE_INVALID_HANDLE;
+    if (!object || object->type == SECRET) return NTE_INVALID_HANDLE;
     if (!name || (insize && !input)) return NTE_INVALID_PARAMETER;
     if (flags & NCRYPT_PERSIST_ONLY_FLAG)
     {
@@ -1314,4 +1327,101 @@ SECURITY_STATUS WINAPI NCryptVerifySignature(NCRYPT_KEY_HANDLE handle, void *pad
 
     return map_ntstatus(BCryptVerifySignature(key_object->key.bcrypt_key, padding, hash, hash_size, signature,
                                               signature_size, flags & ~NCRYPT_SILENT_FLAG));
+}
+
+/* a key with its private part: a public key (imported from a public blob) cannot be an agreement's own key */
+static BOOL key_has_private_part(const struct key *key)
+{
+    ULONG size = 0;
+
+    if (!is_ecc(key->algid)) return FALSE;
+    return !BCryptExportKey(key->bcrypt_key, NULL, BCRYPT_ECCPRIVATE_BLOB, NULL, 0, &size, 0);
+}
+
+SECURITY_STATUS WINAPI NCryptSecretAgreement(NCRYPT_KEY_HANDLE privkey_handle, NCRYPT_KEY_HANDLE pubkey_handle,
+                                             NCRYPT_SECRET_HANDLE *secret_handle, DWORD flags)
+{
+    struct object *privkey = get_key_object(privkey_handle);
+    struct object *pubkey = get_key_object(pubkey_handle);
+    struct object *secret;
+    NTSTATUS status;
+
+    TRACE("(%#Ix, %#Ix, %p, %#lx)\n", privkey_handle, pubkey_handle, secret_handle, flags);
+
+    if (!privkey || !pubkey) return NTE_INVALID_HANDLE;
+    if (flags) return NTE_BAD_FLAGS;
+    if (!secret_handle) return NTE_INVALID_PARAMETER;
+    if (!privkey->key.finalized || !pubkey->key.finalized) return NTE_BAD_KEY_STATE;
+    /* an agreement is made with elliptic curve Diffie-Hellman keys: the algorithm of the own key is checked
+       first, then the other key (a key of another algorithm or of another curve is an invalid parameter) */
+    if (!is_ecdh(privkey->key.algid)) return NTE_BAD_ALGID;
+    if (!is_ecdh(pubkey->key.algid) || privkey->key.bits != pubkey->key.bits) return NTE_INVALID_PARAMETER;
+    if (!key_has_private_part(&privkey->key)) return NTE_NO_KEY;
+
+    if (!(secret = allocate_object(SECRET))) return NTE_NO_MEMORY;
+    if ((status = BCryptSecretAgreement(privkey->key.bcrypt_key, pubkey->key.bcrypt_key, &secret->secret, 0)))
+    {
+        free_object(secret);
+        return map_ntstatus(status);
+    }
+    *secret_handle = (NCRYPT_SECRET_HANDLE)secret;
+    return ERROR_SUCCESS;
+}
+
+SECURITY_STATUS WINAPI NCryptDeriveKey(NCRYPT_SECRET_HANDLE secret_handle, const WCHAR *kdf,
+                                       NCryptBufferDesc *params, BYTE *output, DWORD output_len,
+                                       DWORD *ret_len, ULONG flags)
+{
+    struct object *secret = get_secret_object(secret_handle);
+    NTSTATUS status;
+
+    TRACE("(%#Ix, %s, %p, %p, %lu, %p, %#lx)\n", secret_handle, wine_dbgstr_w(kdf), params, output, output_len,
+          ret_len, flags);
+
+    if (!secret) return NTE_INVALID_HANDLE;
+    /* a missing pointer is the RPC error of a null reference (the Microsoft provider is in the key isolation
+       service) */
+    if (!kdf || !ret_len) return HRESULT_FROM_WIN32(RPC_X_NULL_REF_POINTER);
+
+    /* NCryptBufferDesc and BCryptBufferDesc are one structure */
+    status = BCryptDeriveKey(secret->secret, kdf, (BCryptBufferDesc *)params, output, output_len, ret_len, flags);
+    if (status) *ret_len = 0;
+    return map_ntstatus(status);
+}
+
+SECURITY_STATUS WINAPI NCryptTranslateHandle(NCRYPT_PROV_HANDLE *provider, NCRYPT_KEY_HANDLE *key,
+                                             HCRYPTPROV legacy_provider, HCRYPTKEY legacy_key,
+                                             DWORD legacy_keyspec, DWORD flags)
+{
+    DWORD size = 0;
+
+    TRACE("(%p, %p, %#Ix, %#Ix, %lu, %#lx)\n", provider, key, legacy_provider, legacy_key, legacy_keyspec, flags);
+
+    if (flags) return NTE_BAD_FLAGS;
+    if (!key || !legacy_provider) return NTE_INVALID_PARAMETER;
+
+    /* a legacy provider handle is validated by asking it for its name */
+    if (!CryptGetProvParam(legacy_provider, PP_NAME, NULL, &size, 0) && GetLastError() != ERROR_MORE_DATA)
+        return NTE_INVALID_PARAMETER;
+
+    /* Windows makes a key of the Microsoft key storage provider for the key of a persisted legacy container
+       (NTE_BAD_TYPE for a provider with no container). The key storage provider here only has ephemeral
+       keys, the keys of a legacy container are not reachable: this is not supported */
+    return NTE_NOT_SUPPORTED;
+}
+
+SECURITY_STATUS WINAPI NCryptCreateClaim(NCRYPT_KEY_HANDLE subject_key, NCRYPT_KEY_HANDLE authority_key,
+                                         DWORD claim_type, NCryptBufferDesc *params, BYTE *claim,
+                                         DWORD claim_len, DWORD *ret_len, DWORD flags)
+{
+    TRACE("(%#Ix, %#Ix, %#lx, %p, %p, %lu, %p, %#lx)\n", subject_key, authority_key, claim_type, params, claim,
+          claim_len, ret_len, flags);
+
+    if (!ret_len) return HRESULT_FROM_WIN32(RPC_X_NULL_REF_POINTER);
+    if (!get_key_object(subject_key)) return NTE_INVALID_HANDLE;
+    if (authority_key && !get_key_object(authority_key)) return NTE_INVALID_HANDLE;
+
+    /* a claim is made by a key of a platform (TPM) provider, a software key cannot make one */
+    *ret_len = 0;
+    return NTE_NOT_SUPPORTED;
 }

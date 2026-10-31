@@ -58,6 +58,7 @@ list(APPEND SOURCE
     GetAppContainerNamedObjectPath.c
     CompareObjectHandles.c
     CancelSynchronousIo.c
+    IdnTo.c
     IsWow64Process2.c
     VirtualAllocExNuma.c
     DeviceIoControl.c

@@ -5,6 +5,17 @@
 #define NDEBUG
 #include <debug.h>
 
+#ifndef IDN_ALLOW_UNASSIGNED
+#define IDN_ALLOW_UNASSIGNED 0x01
+#define IDN_USE_STD3_ASCII_RULES 0x02
+#endif
+
+/* kernel32 does not call its own HeapAlloc and HeapFree, they are the heap functions of ntdll */
+NTSYSAPI PVOID NTAPI RtlAllocateHeap(PVOID HeapHandle, ULONG Flags, SIZE_T Size);
+NTSYSAPI BOOLEAN NTAPI RtlFreeHeap(PVOID HeapHandle, ULONG Flags, PVOID BaseAddress);
+#define HeapAlloc(heap, flags, size) RtlAllocateHeap(heap, flags, size)
+#define HeapFree(heap, flags, ptr) RtlFreeHeap(heap, flags, ptr)
+
 /* Taken from Wine kernel32/locale.c */
 
 enum {
@@ -34,8 +45,8 @@ static inline unsigned short get_table_entry( const unsigned short *table, WCHAR
     return table[table[table[ch >> 8] + ((ch >> 4) & 0x0f)] + (ch & 0xf)];
 }
 
-INT WINAPI IdnToNameprepUnicode(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicodeChar,
-                                LPWSTR lpNameprepCharStr, INT cchNameprepChar)
+INT WINAPI IdnpToNameprep(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicodeChar,
+                          LPWSTR lpNameprepCharStr, INT cchNameprepChar)
 {
     enum {
         UNASSIGNED = 0x1,
@@ -50,7 +61,7 @@ INT WINAPI IdnToNameprepUnicode(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cch
     WORD flags;
     WCHAR buf[64], *map_str, norm_str[64], ch;
     DWORD i, map_len, norm_len, mask, label_start, label_end, out = 0;
-    BOOL have_bidi_ral, prohibit_bidi_ral, ascii_only;
+    BOOL ascii_only;
 
     DPRINT("%x %p %d %p %d\n", dwFlags, lpUnicodeCharStr, cchUnicodeChar,
            lpNameprepCharStr, cchNameprepChar);
@@ -203,7 +214,6 @@ INT WINAPI IdnToNameprepUnicode(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cch
             return 0;
         }
 
-        have_bidi_ral = prohibit_bidi_ral = FALSE;
         mask = PROHIBITED;
         if((dwFlags&IDN_ALLOW_UNASSIGNED) == 0)
             mask |= UNASSIGNED;
@@ -216,29 +226,10 @@ INT WINAPI IdnToNameprepUnicode(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cch
                         : ERROR_NO_UNICODE_TRANSLATION);
                 return 0;
             }
-
-            if(flags & BIDI_RAL)
-                have_bidi_ral = TRUE;
-            if(flags & BIDI_L)
-                prohibit_bidi_ral = TRUE;
         }
 
-        if(have_bidi_ral) {
-            ch = norm_str[0];
-            flags = get_table_entry( nameprep_char_type, ch );
-            if((flags & BIDI_RAL) == 0)
-                prohibit_bidi_ral = TRUE;
-
-            ch = norm_str[norm_len-1];
-            flags = get_table_entry( nameprep_char_type, ch );
-            if((flags & BIDI_RAL) == 0)
-                prohibit_bidi_ral = TRUE;
-        }
-
-        if(have_bidi_ral && prohibit_bidi_ral) {
-            SetLastError(ERROR_INVALID_NAME);
-            return 0;
-        }
+        /* the rules for the right-to-left text (RFC 3454, 6) are not checked: Windows converts a label that
+           mixes both directions, the string of the other direction is not rejected */
 
         label_start = label_end;
     }
@@ -246,8 +237,8 @@ INT WINAPI IdnToNameprepUnicode(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cch
     return out;
 }
 
-INT WINAPI IdnToAscii(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicodeChar,
-                      LPWSTR lpASCIICharStr, INT cchASCIIChar)
+INT WINAPI IdnpToAscii(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicodeChar,
+                       LPWSTR lpASCIICharStr, INT cchASCIIChar)
 {
     static const WCHAR prefixW[] = {'x','n','-','-'};
 
@@ -257,7 +248,7 @@ INT WINAPI IdnToAscii(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicodeCha
     DPRINT("%x %p %d %p %d\n", dwFlags, lpUnicodeCharStr, cchUnicodeChar,
            lpASCIICharStr, cchASCIIChar);
 
-    norm_len = IdnToNameprepUnicode(dwFlags, lpUnicodeCharStr, cchUnicodeChar, NULL, 0);
+    norm_len = IdnpToNameprep(dwFlags, lpUnicodeCharStr, cchUnicodeChar, NULL, 0);
     if(!norm_len)
         return 0;
     norm_str = HeapAlloc(GetProcessHeap(), 0, norm_len*sizeof(WCHAR));
@@ -265,7 +256,7 @@ INT WINAPI IdnToAscii(DWORD dwFlags, LPCWSTR lpUnicodeCharStr, INT cchUnicodeCha
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return 0;
     }
-    norm_len = IdnToNameprepUnicode(dwFlags, lpUnicodeCharStr,
+    norm_len = IdnpToNameprep(dwFlags, lpUnicodeCharStr,
             cchUnicodeChar, norm_str, norm_len);
     if(!norm_len) {
         HeapFree(GetProcessHeap(), 0, norm_str);

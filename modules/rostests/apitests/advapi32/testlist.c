@@ -86,6 +86,7 @@ extern void func_RegWow64RelativeView(void);
 extern void func_ServiceProcess(void);
 extern void func_ServiceStructLayout(void);
 extern void func_ServiceTriggerPrivileges(void);
+extern void func_Saferi(void);
 
 const struct test winetest_testlist[] =
 {
@@ -172,6 +173,7 @@ const struct test winetest_testlist[] =
     { "ServiceProcess", func_ServiceProcess },
     { "ServiceStructLayout", func_ServiceStructLayout },
     { "ServiceTriggerPrivileges", func_ServiceTriggerPrivileges },
+    { "Saferi", func_Saferi },
     { 0, 0 }
 };
 

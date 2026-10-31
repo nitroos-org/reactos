@@ -55,6 +55,7 @@ enum object_type
 {
     KEY,
     STORAGE_PROVIDER,
+    SECRET,
 };
 
 struct object_property
@@ -77,5 +78,6 @@ struct object
     {
         struct key key;
         struct storage_provider storage_provider;
+        BCRYPT_SECRET_HANDLE secret;
     };
 };

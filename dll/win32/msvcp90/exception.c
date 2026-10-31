@@ -1242,6 +1242,41 @@ void __cdecl _Throw_C_error(int code)
     _CxxThrowException(&se, &system_error_exception_type);
 }
 
+#if _MSVCP_VER >= 140
+/* ?_Throw_Cpp_error@std@@YAXH@Z */
+void __cdecl _Throw_Cpp_error(int code)
+{
+    /* The errors of the thread and mutex classes of <thread>: a std::system_error of the generic category,
+       whose what() is the message twice (the message of the code, then the one of the category) */
+    static const struct { errno_t err; const char *msg; } errors[] =
+    {
+        { EBUSY, "device or resource busy: device or resource busy" },
+        { EINVAL, "invalid argument: invalid argument" },
+        { ESRCH, "no such process: no such process" },
+        { ENOMEM, "not enough memory: not enough memory" },
+        { EPERM, "operation not permitted: operation not permitted" },
+        { EDEADLK, "resource deadlock would occur: resource deadlock would occur" },
+        { EAGAIN, "resource unavailable try again: resource unavailable try again" },
+    };
+    system_error se;
+    const char *msg;
+
+    TRACE("(%d)\n", code);
+
+    /* Windows reads past its table for a code that is not one of them */
+    if (code < 0 || code >= ARRAY_SIZE(errors))
+        abort();
+
+    msg = errors[code].msg;
+    MSVCP_runtime_error_ctor(&se.base, &msg);
+    se.code.code = errors[code].err;
+    se.code.category = std_generic_category();
+    se.base.e.vtable = &system_error_vtable;
+
+    _CxxThrowException(&se, &system_error_exception_type);
+}
+#endif
+
 /* compute the this pointer for a base class of a given type */
 static inline void *get_this_pointer( const this_ptr_offsets *off, void *object )
 {

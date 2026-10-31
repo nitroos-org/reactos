@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     vcruntime140.c
+    FrameHelpers.c
     testlist.c)
 
 add_executable(vcruntime140_apitest ${SOURCE})

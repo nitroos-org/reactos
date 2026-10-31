@@ -188,3 +188,24 @@ SECURITY_STATUS SEC_ENTRY SspiPrepareForCredWrite( PSEC_WINNT_AUTH_IDENTITY_OPAQ
 
     return SEC_E_OK;
 }
+
+/***********************************************************************
+ *		QueryContextAttributesExA (SSPICLI.@)
+ *
+ * The same as QueryContextAttributesA: Windows does not look at the size of the buffer for the attributes
+ * that it measured (the sizes of the buffer, 0 or 4 bytes, do not change the result).
+ */
+SECURITY_STATUS SEC_ENTRY QueryContextAttributesExA(PCtxtHandle context, ULONG attribute, void *buffer, ULONG size)
+{
+    TRACE( "%p %lu %p %lu\n", context, attribute, buffer, size );
+    return QueryContextAttributesA( context, attribute, buffer );
+}
+
+/***********************************************************************
+ *		QueryContextAttributesExW (SSPICLI.@)
+ */
+SECURITY_STATUS SEC_ENTRY QueryContextAttributesExW(PCtxtHandle context, ULONG attribute, void *buffer, ULONG size)
+{
+    TRACE( "%p %lu %p %lu\n", context, attribute, buffer, size );
+    return QueryContextAttributesW( context, attribute, buffer );
+}

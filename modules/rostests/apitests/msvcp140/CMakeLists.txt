@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     Msvcp140MoneyIds.c
+    Msvcp140ThrowCppError.c
     testlist.c)
 
 add_executable(msvcp140_apitest ${SOURCE})

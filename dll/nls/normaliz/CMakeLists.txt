@@ -5,9 +5,6 @@ add_definitions(-D_WIN32_WINNT=0x600 -DWINVER=0x600)
 spec2def(normaliz.dll normaliz.spec ADD_IMPORTLIB)
 
 list(APPEND SOURCE
-    IdnToAscii.c
-    IdnToUnicode.c
-    nameprep.c
     normalize.c
     ${CMAKE_CURRENT_BINARY_DIR}/normaliz.def)
 

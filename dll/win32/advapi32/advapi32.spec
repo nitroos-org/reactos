@@ -600,11 +600,11 @@
 @ stub SaferSetPolicyInformation
 @ stub SaferiChangeRegistryScope
 @ stub SaferiCompareTokenLevels
-@ stub SaferiIsExecutableFileType
+@ stdcall SaferiIsExecutableFileType(wstr long)
 @ stub SaferiPopulateDefaultsInRegistry
 @ stub SaferiRecordEventLogEntry
 @ stub SaferiReplaceProcessThreadTokens
-@ stub SaferiSearchMatchingHashRules
+@ stdcall SaferiSearchMatchingHashRules(long ptr long long ptr ptr)
 @ stdcall SetAclInformation(ptr ptr long long)
 @ stub SetEntriesInAccessListA
 @ stub SetEntriesInAccessListW
