@@ -178,6 +178,7 @@ extern void func_UEFIFirmware(void);
 extern void func_UnhandledExceptionExit(void);
 extern void func_UnmapViewOfFileEx(void);
 extern void func_WaitOnAddress(void);
+extern void func_WaitQuantum(void);
 extern void func_WerFlags(void);
 extern void func_WerRegisterMemoryFile(void);
 extern void func_WerRuntimeExceptionModule(void);
@@ -372,6 +373,7 @@ const struct test winetest_testlist[] =
     { "UnhandledExceptionExit",      func_UnhandledExceptionExit },
     { "UnmapViewOfFileEx",           func_UnmapViewOfFileEx },
     { "WaitOnAddress",               func_WaitOnAddress },
+    { "WaitQuantum",                 func_WaitQuantum },
     { "WerFlags",                    func_WerFlags },
     { "WerRegisterMemoryFile",      func_WerRegisterMemoryFile },
     { "WerRuntimeExceptionModule",   func_WerRuntimeExceptionModule },
