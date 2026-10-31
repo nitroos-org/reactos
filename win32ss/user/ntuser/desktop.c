@@ -187,6 +187,39 @@ IntDesktopObjectParse(IN PVOID ParseObject,
     return STATUS_SUCCESS;
 }
 
+/*
+ * Frees the desktop window or the message window of a desktop that is deleted.
+ * The windows belong to the desktop thread, which is not the thread that drops the
+ * last reference. The window procedures are in win32k and the windows have no children,
+ * so no message is needed: do what the desktop thread would do when it destroys them.
+ * A process that exits with the last handle to a desktop (a sandboxed child on its
+ * alternate desktop) has no Win32 thread any more, it borrows the desktop thread's.
+ */
+static VOID
+IntFreeDesktopWindow(IN PWND pwnd)
+{
+    USER_REFERENCE_ENTRY Ref;
+    PETHREAD Thread = PsGetCurrentThread();
+    BOOLEAN bBorrowed = FALSE;
+
+    ASSERT(gptiDesktopThread != NULL);
+    ASSERT(pwnd->head.pti == gptiDesktopThread);
+    ASSERT(pwnd->spwndChild == NULL);
+
+    if (PsGetCurrentThreadWin32Thread() == NULL)
+    {
+        PsSetThreadWin32Thread(Thread, gptiDesktopThread, NULL);
+        bBorrowed = TRUE;
+    }
+
+    UserRefObjectCo(pwnd, &Ref);
+    co_UserFreeWindow(pwnd, gptiDesktopThread->ppi, gptiDesktopThread, FALSE);
+    UserDerefObjectCo(pwnd);
+
+    if (bBorrowed)
+        PsSetThreadWin32Thread(Thread, NULL, gptiDesktopThread);
+}
+
 NTSTATUS
 NTAPI
 IntDesktopObjectDelete(
@@ -197,15 +230,21 @@ IntDesktopObjectDelete(
 
     TRACE("Deleting desktop object 0x%p\n", pdesk);
 
+    /* Free the desktop window and the message window */
+    UserEnterExclusive();
+    pdesk->dwDTFlags |= DF_DESTROYED;
+
     if (pdesk->pDeskInfo &&
         pdesk->pDeskInfo->spwnd)
     {
-        ASSERT(pdesk->pDeskInfo->spwnd->spwndChild == NULL);
-        co_UserDestroyWindow(pdesk->pDeskInfo->spwnd);
+        IntFreeDesktopWindow(pdesk->pDeskInfo->spwnd);
     }
 
     if (pdesk->spwndMessage)
-        co_UserDestroyWindow(pdesk->spwndMessage);
+    {
+        IntFreeDesktopWindow(pdesk->spwndMessage);
+    }
+    UserLeave();
 
     /* Remove the desktop from the window station's list of associated desktops */
     RemoveEntryList(&pdesk->ListEntry);
@@ -1559,8 +1598,29 @@ DesktopWindowProc(PWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam, LRESULT *lRe
 
             if (bShow)
             {
+                PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+                HDESK hdeskOld = pti ? pti->hdesk : NULL;
                 HDESK hdesk = UserOpenInputDesktop(0, FALSE, DESKTOP_ALL_ACCESS);
-                IntSetThreadDesktop(hdesk, FALSE);
+
+                /* Every switch opens a handle to the new input desktop for this thread. Close
+                   it if the thread did not take the desktop, and the previous one if it did:
+                   a leaked handle keeps a desktop (and its heap) alive after the last user
+                   closed it */
+                if (hdesk != NULL)
+                {
+                    if (IntSetThreadDesktop(hdesk, FALSE))
+                    {
+                        if (hdeskOld != NULL && hdeskOld != hdesk &&
+                            hdeskOld != pti->ppi->hdeskStartup)
+                        {
+                            ObCloseHandle(hdeskOld, UserMode);
+                        }
+                    }
+                    else
+                    {
+                        ObCloseHandle(hdesk, UserMode);
+                    }
+                }
             }
             break;
         }
@@ -1871,11 +1931,32 @@ BOOL IntDeRegisterShellHookWindow(HWND hWnd)
 static VOID
 IntFreeDesktopHeap(IN OUT PDESKTOP Desktop)
 {
-    /* FIXME: Disable until unmapping works in mm */
-#if 0
+    /* The heap belongs to the desktop: its view in session space and its section
+     * go away with the desktop object, like on Windows. Every process view was
+     * unmapped by IntUnmapDesktopView, each holds a reference to the desktop. */
     if (Desktop->pheapDesktop != NULL)
     {
-        MmUnmapViewInSessionSpace(Desktop->pheapDesktop);
+        PEPROCESS Process = PsGetCurrentProcess();
+        KAPC_STATE ApcState;
+        BOOLEAN bAttached = FALSE;
+        NTSTATUS Status;
+
+        /* The view is in session space: unmap it from a process of the session
+         * (the last reference can be dropped from the system process) */
+        if (!Process->ProcessInSession && gpepCSRSS != NULL)
+        {
+            KeStackAttachProcess(&gpepCSRSS->Pcb, &ApcState);
+            bAttached = TRUE;
+        }
+
+        Status = MmUnmapViewInSessionSpace(Desktop->pheapDesktop);
+        if (!NT_SUCCESS(Status))
+            ERR("Failed to unmap the heap of desktop %p, Status 0x%08lx\n", Desktop, Status);
+
+        if (bAttached)
+            KeUnstackDetachProcess(&ApcState);
+
+        Desktop->pDeskInfo = NULL;
         Desktop->pheapDesktop = NULL;
     }
 
@@ -1884,7 +1965,6 @@ IntFreeDesktopHeap(IN OUT PDESKTOP Desktop)
         ObDereferenceObject(Desktop->hsectionDesktop);
         Desktop->hsectionDesktop = NULL;
     }
-#endif
 }
 
 static VOID
@@ -2625,6 +2705,11 @@ IntCreateDesktop(
     pdesk->DesktopWindow = UserHMGetHandle(pWnd);
     pdesk->pDeskInfo->spwnd = pWnd;
 
+    /* IntCreateWindow returns a locked window: the handle keeps it alive, release the
+       caller's reference (co_UserCreateWindowEx does the same) or the window, its handle
+       entry and its memory in the desktop heap are never freed */
+    UserDereferenceObject(pWnd);
+
     ClassName.Buffer = MAKEINTATOM(gpsi->atomSysClass[ICLS_HWNDMESSAGE]);
     ClassName.Length = 0;
     pcls = IntGetAndReferenceClass(&ClassName, 0, TRUE);
@@ -2653,6 +2738,7 @@ IntCreateDesktop(
 
     /* Assign the message window to the desktop */
     pdesk->spwndMessage = pWnd;
+    UserDereferenceObject(pWnd);
 
     /* Now...
        if !(WinStaObject->Flags & WSF_NOIO) is (not set) for desktop input output mode (see wiki)

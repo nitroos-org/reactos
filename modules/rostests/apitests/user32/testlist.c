@@ -114,6 +114,7 @@ extern void func_PhysicalCoords(void);
 extern void func_DialogDpiBehavior(void);
 extern void func_GetIconInfoEx(void);
 extern void func_CreateDesktopEx(void);
+extern void func_DesktopHeapLeak(void);
 extern void func_ShutdownBlockReason(void);
 extern void func_PointerDeviceFunctions(void);
 extern void func_wsprintfApi(void);
@@ -229,6 +230,7 @@ const struct test winetest_testlist[] =
     { "DialogDpiBehavior", func_DialogDpiBehavior },
     { "GetIconInfoEx", func_GetIconInfoEx },
     { "CreateDesktopEx", func_CreateDesktopEx },
+    { "DesktopHeapLeak", func_DesktopHeapLeak },
     { "ShutdownBlockReason", func_ShutdownBlockReason },
     { "PointerDeviceFunctions", func_PointerDeviceFunctions },
     { "WinEventHook", func_WinEventHook },

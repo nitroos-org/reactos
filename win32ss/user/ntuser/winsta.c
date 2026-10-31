@@ -1588,7 +1588,8 @@ UserGetProcessWindowStation(VOID)
 {
     PPROCESSINFO ppi = PsGetCurrentProcessWin32Process();
 
-    return ppi->hwinsta;
+    /* No PROCESSINFO while the last reference to a desktop of an exiting process is dropped */
+    return ppi ? ppi->hwinsta : NULL;
 }
 
 

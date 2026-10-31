@@ -114,6 +114,7 @@ list(APPEND SOURCE
     DialogDpiBehavior.c
     GetIconInfoEx.c
     CreateDesktopEx.c
+    DesktopHeapLeak.c
     ShutdownBlockReason.c
     PointerDeviceFunctions.c
     wsprintf.c)
