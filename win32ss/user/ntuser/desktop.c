@@ -2625,6 +2625,11 @@ IntCreateDesktop(
     pdesk->DesktopWindow = UserHMGetHandle(pWnd);
     pdesk->pDeskInfo->spwnd = pWnd;
 
+    /* IntCreateWindow returns a locked window: the handle keeps it alive, release the
+       caller's reference (co_UserCreateWindowEx does the same) or the window, its handle
+       entry and its memory in the desktop heap are never freed */
+    UserDereferenceObject(pWnd);
+
     ClassName.Buffer = MAKEINTATOM(gpsi->atomSysClass[ICLS_HWNDMESSAGE]);
     ClassName.Length = 0;
     pcls = IntGetAndReferenceClass(&ClassName, 0, TRUE);
@@ -2653,6 +2658,7 @@ IntCreateDesktop(
 
     /* Assign the message window to the desktop */
     pdesk->spwndMessage = pWnd;
+    UserDereferenceObject(pWnd);
 
     /* Now...
        if !(WinStaObject->Flags & WSF_NOIO) is (not set) for desktop input output mode (see wiki)
