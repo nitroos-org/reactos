@@ -87,6 +87,10 @@ extern void func_ServiceProcess(void);
 extern void func_ServiceStructLayout(void);
 extern void func_ServiceTriggerPrivileges(void);
 extern void func_Saferi(void);
+extern void func_SecurityAccessMask(void);
+extern void func_Win10Exports(void);
+extern void func_ControlServiceEx(void);
+extern void func_LsaLookupSids2(void);
 
 const struct test winetest_testlist[] =
 {
@@ -174,6 +178,10 @@ const struct test winetest_testlist[] =
     { "ServiceStructLayout", func_ServiceStructLayout },
     { "ServiceTriggerPrivileges", func_ServiceTriggerPrivileges },
     { "Saferi", func_Saferi },
+    { "SecurityAccessMask", func_SecurityAccessMask },
+    { "Win10Exports", func_Win10Exports },
+    { "ControlServiceEx", func_ControlServiceEx },
+    { "LsaLookupSids2", func_LsaLookupSids2 },
     { 0, 0 }
 };
 

@@ -30,6 +30,37 @@ Callback(HCMNOTIFICATION hNotify, PVOID Context, CM_NOTIFY_ACTION Action, PCM_NO
     return ERROR_SUCCESS;
 }
 
+/*
+ * The plug and play manager of ReactOS delivers the device interface arrivals and removals one after the other, and
+ * after the start of the system it still has a queue of them to deliver; a registration made then gets those. Nothing
+ * is delivered on Windows, which delivers each event as it happens: wait until the calls stop.
+ */
+static VOID
+DrainEvents(VOID)
+{
+    CM_NOTIFY_FILTER Filter;
+    HCMNOTIFICATION Handle = NULL;
+    LONG Last;
+    ULONG Quiet = 0, Total = 0;
+
+    memset(&Filter, 0, sizeof(Filter));
+    Filter.cbSize = sizeof(Filter);
+    Filter.FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE;
+    Filter.Flags = CM_NOTIFY_FILTER_FLAG_ALL_INTERFACE_CLASSES;
+    if (pRegister(&Filter, NULL, Callback, &Handle) != CR_SUCCESS)
+        return;
+
+    g_Calls = 0;
+    while (Quiet < 6 && Total < 240)
+    {
+        Last = g_Calls;
+        Sleep(500);
+        Total++;
+        Quiet = (g_Calls == Last) ? Quiet + 1 : 0;
+    }
+    pUnregister(Handle);
+}
+
 /* Register with a filter, expect a result; a handle comes back only with success, and is given back */
 static VOID
 Check(PCSTR Name, PCM_NOTIFY_FILTER Filter, CONFIGRET Expected)
@@ -77,6 +108,8 @@ START_TEST(CM_Register_Notification)
         skip("CM_Register_Notification is not exported\n");
         return;
     }
+
+    DrainEvents();
 
     ok(sizeof(CM_NOTIFY_FILTER) == 416, "sizeof(CM_NOTIFY_FILTER) = %lu\n", (ULONG)sizeof(CM_NOTIFY_FILTER));
     InitFilter(&Filter, CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE, 0);
@@ -182,7 +215,9 @@ START_TEST(CM_Register_Notification)
     cr = pUnregister(Handle);
     ok(cr == CR_SUCCESS, "unregister: cr = 0x%lx\n", cr);
     cr = pUnregister(Handle);
-    ok(cr == CR_INVALID_DATA, "unregister again: cr = 0x%lx\n", cr);
+    /* The block of the registration was given back: Windows 10 and ReactOS answer invalid data while that memory is still
+     * mapped, and failure (a handle that is not memory) when the heap has taken the page away; either is as measured */
+    ok(cr == CR_INVALID_DATA || cr == CR_FAILURE, "unregister again: cr = 0x%lx\n", cr);
     cr = pUnregister(Handle2);
     ok(cr == CR_SUCCESS, "unregister the second: cr = 0x%lx\n", cr);
     cr = pUnregister(NULL);

@@ -70,6 +70,10 @@ list(APPEND SOURCE
     ServiceProcess.c
     ServiceStructLayout.c
     ServiceTriggerPrivileges.c
+    SecurityAccessMask.c
+    Win10Exports.c
+    ControlServiceEx.c
+    LsaLookupSids2.c
     svchlp.c)
 
 list(APPEND PCH_SKIP_SOURCE

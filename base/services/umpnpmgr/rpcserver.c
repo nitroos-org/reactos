@@ -2768,7 +2768,8 @@ PNP_GetInterfaceDeviceList(
     DPRINT("PNP_GetInterfaceDeviceList(%p %p %S %p %p 0x%08lx)\n",
            hBinding, InterfaceGuid, pszDeviceID, Buffer, pulLength, ulFlags);
 
-    if (!IsValidDeviceInstanceID(pszDeviceID))
+    /* No device instance (a null pointer, as CM_Get_Device_Interface_List passes it) lists the interfaces of all devices */
+    if (pszDeviceID != NULL && !IsValidDeviceInstanceID(pszDeviceID))
         return CR_INVALID_DEVINST;
 
     RtlInitUnicodeString(&PlugPlayData.DeviceInstance,
@@ -2815,7 +2816,8 @@ PNP_GetInterfaceDeviceListSize(
     DPRINT("PNP_GetInterfaceDeviceListSize(%p %p %p %S 0x%08lx)\n",
            hBinding, pulLen, InterfaceGuid, pszDeviceID, ulFlags);
 
-    if (!IsValidDeviceInstanceID(pszDeviceID))
+    /* No device instance (a null pointer) sizes the list of the interfaces of all devices */
+    if (pszDeviceID != NULL && !IsValidDeviceInstanceID(pszDeviceID))
         return CR_INVALID_DEVINST;
 
     RtlInitUnicodeString(&PlugPlayData.DeviceInstance,
@@ -5719,7 +5721,8 @@ PNP_GetVersionInternal(
 {
     UNREFERENCED_PARAMETER(hBinding);
 
-    *pwVersion = WINVER;
+    /* The version of the configuration manager of Windows 10, which CM_Is_Version_Available accepts up to (measured) */
+    *pwVersion = 0x0A00;
     return CR_SUCCESS;
 }
 

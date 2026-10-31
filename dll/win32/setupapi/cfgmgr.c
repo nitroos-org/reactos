@@ -6115,9 +6115,10 @@ CM_Is_Version_Available_Ex(
             return FALSE;
     }
 
+    /* The version the manager answers here is the internal one (0xA00 on Windows 10), not CM_Get_Version's 0x400 */
     RpcTryExcept
     {
-        ret = PNP_GetVersion(BindingHandle, &wServerVersion);
+        ret = PNP_GetVersionInternal(BindingHandle, &wServerVersion);
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -9005,14 +9006,742 @@ CM_Unregister_Device_Interface_ExW(
 }
 
 /***********************************************************************
+ * The errors of Windows 10 22H2 for the registry and property calls below, as measured through cfgmgr32.dll
+ */
+static
+CONFIGRET
+DevPropErrorToCr(
+    _In_ DWORD Error)
+{
+    switch (Error)
+    {
+        case ERROR_SUCCESS:
+            return CR_SUCCESS;
+        case ERROR_INSUFFICIENT_BUFFER:
+            return CR_BUFFER_SMALL;
+        case ERROR_NOT_FOUND:
+            return CR_NO_SUCH_VALUE;
+        case ERROR_INVALID_DATA:
+            return CR_INVALID_DATA;
+        case ERROR_NO_SUCH_DEVICE_INTERFACE:
+            return CR_NO_SUCH_DEVICE_INTERFACE;
+        case ERROR_INVALID_CLASS:
+        case ERROR_KEY_DOES_NOT_EXIST:
+            return CR_NO_SUCH_REGISTRY_KEY;
+        case ERROR_ACCESS_DENIED:
+            return CR_ACCESS_DENIED;
+        case ERROR_NOT_ENOUGH_MEMORY:
+            return CR_OUT_OF_MEMORY;
+        default:
+            return CR_FAILURE;
+    }
+}
+
+
+/* The name of the machine of a handle, NULL for the local machine; FALSE for a machine that is not usable */
+static
+BOOL
+MachineNameFromHandle(
+    _In_opt_ HMACHINE hMachine,
+    _Out_ PCWSTR *MachineName)
+{
+    *MachineName = NULL;
+    if (hMachine == NULL || ((PMACHINE_INFO)hMachine)->bLocal)
+        return TRUE;
+    return FALSE;
+}
+
+
+/***********************************************************************
+ * CM_MapCrToWin32Err and CM_MapCrToSpErr [SETUPAPI.@]
+ *
+ * The tables are those of Windows 10 22H2 (every code from 0 to 0x3C and a few beyond, measured). A code with no
+ * entry gives the default the caller passes.
+ */
+DWORD
+WINAPI
+CM_MapCrToWin32Err(
+    _In_ CONFIGRET CmReturnCode,
+    _In_ DWORD DefaultErr)
+{
+    TRACE("CM_MapCrToWin32Err(%lx %lx)\n", CmReturnCode, DefaultErr);
+
+    switch (CmReturnCode)
+    {
+        case CR_SUCCESS:                    return ERROR_SUCCESS;
+        case CR_OUT_OF_MEMORY:              return ERROR_NOT_ENOUGH_MEMORY;
+        case CR_INVALID_POINTER:            return ERROR_INVALID_USER_BUFFER;
+        case CR_INVALID_FLAG:               return ERROR_INVALID_FLAGS;
+        case CR_INVALID_DEVNODE:            return ERROR_INVALID_DATA;
+        case CR_NO_SUCH_DEVNODE:            return ERROR_NOT_FOUND;
+        case CR_ALREADY_SUCH_DEVNODE:       return ERROR_ALREADY_EXISTS;
+        case CR_BUFFER_SMALL:               return ERROR_INSUFFICIENT_BUFFER;
+        case CR_NO_REGISTRY_HANDLE:         return ERROR_INVALID_HANDLE;
+        case CR_REGISTRY_ERROR:             return ERROR_REGISTRY_CORRUPT;
+        case CR_INVALID_DEVICE_ID:          return ERROR_INVALID_DATA;
+        case CR_NO_SUCH_VALUE:              return ERROR_NOT_FOUND;
+        case CR_NO_SUCH_REGISTRY_KEY:       return ERROR_FILE_NOT_FOUND;
+        case CR_INVALID_MACHINENAME:        return ERROR_INVALID_DATA;
+        case CR_REMOTE_COMM_FAILURE:
+        case CR_MACHINE_UNAVAILABLE:
+        case CR_NO_CM_SERVICES:             return ERROR_SERVICE_NOT_ACTIVE;
+        case CR_ACCESS_DENIED:              return ERROR_ACCESS_DENIED;
+        case CR_CALL_NOT_IMPLEMENTED:       return ERROR_CALL_NOT_IMPLEMENTED;
+        case CR_INVALID_PROPERTY:           return ERROR_INVALID_DATA;
+        case CR_NO_SUCH_DEVICE_INTERFACE:   return ERROR_NOT_FOUND;
+        case CR_INVALID_REFERENCE_STRING:   return ERROR_INVALID_DATA;
+        default:                            return DefaultErr;
+    }
+}
+
+
+DWORD
+WINAPI
+CM_MapCrToSpErr(
+    _In_ CONFIGRET CmReturnCode,
+    _In_ DWORD DefaultErr)
+{
+    TRACE("CM_MapCrToSpErr(%lx %lx)\n", CmReturnCode, DefaultErr);
+
+    switch (CmReturnCode)
+    {
+        case CR_SUCCESS:                    return ERROR_SUCCESS;
+        case CR_OUT_OF_MEMORY:              return ERROR_NOT_ENOUGH_MEMORY;
+        case CR_INVALID_POINTER:            return ERROR_INVALID_USER_BUFFER;
+        case CR_INVALID_FLAG:               return ERROR_INVALID_FLAGS;
+        case CR_INVALID_DEVNODE:
+        case CR_NO_SUCH_DEVNODE:            return ERROR_NO_SUCH_DEVINST;
+        case CR_ALREADY_SUCH_DEVNODE:       return ERROR_DEVINST_ALREADY_EXISTS;
+        case CR_BUFFER_SMALL:               return ERROR_INSUFFICIENT_BUFFER;
+        case CR_NO_REGISTRY_HANDLE:         return ERROR_INVALID_HANDLE;
+        case CR_REGISTRY_ERROR:             return 0xE000023A; /* ERROR_PNP_REGISTRY_ERROR */
+        case CR_INVALID_DEVICE_ID:          return ERROR_INVALID_DEVINST_NAME;
+        case CR_NO_SUCH_VALUE:              return ERROR_NOT_FOUND;
+        case CR_NOT_DISABLEABLE:            return ERROR_NOT_DISABLEABLE;
+        case CR_NO_SUCH_REGISTRY_KEY:       return ERROR_KEY_DOES_NOT_EXIST;
+        case CR_INVALID_MACHINENAME:        return ERROR_INVALID_MACHINENAME;
+        case CR_REMOTE_COMM_FAILURE:        return ERROR_REMOTE_COMM_FAILURE;
+        case CR_MACHINE_UNAVAILABLE:        return ERROR_MACHINE_UNAVAILABLE;
+        case CR_NO_CM_SERVICES:             return ERROR_NO_CONFIGMGR_SERVICES;
+        case CR_ACCESS_DENIED:              return ERROR_ACCESS_DENIED;
+        case CR_CALL_NOT_IMPLEMENTED:       return ERROR_CALL_NOT_IMPLEMENTED;
+        case CR_INVALID_PROPERTY:           return ERROR_INVALID_REG_PROPERTY;
+        case CR_NO_SUCH_DEVICE_INTERFACE:   return ERROR_NO_SUCH_DEVICE_INTERFACE;
+        case CR_INVALID_REFERENCE_STRING:   return ERROR_INVALID_REFERENCE_STRING;
+        default:                            return DefaultErr;
+    }
+}
+
+
+/***********************************************************************
+ * CM_Get_DevNode_Property_Keys and CM_Get_DevNode_Property_Keys_Ex [SETUPAPI.@]
+ *
+ * The keys of SetupDiGetDevicePropertyKeys for the devnode. Too small an array is CR_BUFFER_SMALL with the count
+ * set and the array untouched (measured on Windows 10 22H2).
+ */
+CONFIGRET
+WINAPI
+CM_Get_DevNode_Property_Keys_Ex(
+    _In_ DEVINST dnDevInst,
+    _Out_writes_opt_(*PropertyKeyCount) DEVPROPKEY *PropertyKeyArray,
+    _Inout_ PULONG PropertyKeyCount,
+    _In_ ULONG ulFlags,
+    _In_opt_ HMACHINE hMachine)
+{
+    WCHAR DeviceId[MAX_DEVICE_ID_LEN];
+    SP_DEVINFO_DATA DeviceInfoData;
+    PCWSTR MachineName = NULL;
+    HDEVINFO DeviceInfoSet;
+    DWORD Required = 0, Error;
+
+    TRACE("CM_Get_DevNode_Property_Keys_Ex(%lx %p %p %lx %p)\n",
+          dnDevInst, PropertyKeyArray, PropertyKeyCount, ulFlags, hMachine);
+
+    if (!PropertyKeyCount || (!PropertyKeyArray && *PropertyKeyCount))
+        return CR_INVALID_POINTER;
+
+    if (ulFlags != 0)
+        return CR_INVALID_FLAG;
+
+    if (dnDevInst == 0)
+        return CR_INVALID_DEVNODE;
+
+    if (CM_Get_Device_ID_ExW(dnDevInst, DeviceId, ARRAYSIZE(DeviceId), 0, hMachine) != CR_SUCCESS)
+        return CR_INVALID_DEVNODE;
+
+    if (hMachine && !((PMACHINE_INFO)hMachine)->bLocal)
+        MachineName = ((PMACHINE_INFO)hMachine)->szMachineName;
+
+    DeviceInfoSet = SetupDiCreateDeviceInfoListExW(NULL, NULL, MachineName, NULL);
+    if (DeviceInfoSet == INVALID_HANDLE_VALUE)
+        return CR_FAILURE;
+
+    DeviceInfoData.cbSize = sizeof(DeviceInfoData);
+    if (!SetupDiOpenDeviceInfoW(DeviceInfoSet, DeviceId, NULL, 0, &DeviceInfoData))
+    {
+        SetupDiDestroyDeviceInfoList(DeviceInfoSet);
+        return CR_INVALID_DEVNODE;
+    }
+
+    /* Ask for the count first: the array is only written when it is big enough */
+    if (SetupDiGetDevicePropertyKeys(DeviceInfoSet, &DeviceInfoData, NULL, 0, &Required, 0))
+        Error = ERROR_SUCCESS;
+    else
+        Error = GetLastError();
+
+    if (Error == ERROR_SUCCESS || Error == ERROR_INSUFFICIENT_BUFFER)
+    {
+        if (Required <= *PropertyKeyCount)
+        {
+            if (Required != 0 &&
+                !SetupDiGetDevicePropertyKeys(DeviceInfoSet, &DeviceInfoData, PropertyKeyArray, *PropertyKeyCount,
+                                              &Required, 0))
+                Error = GetLastError();
+            else
+                Error = ERROR_SUCCESS;
+        }
+        else
+        {
+            Error = ERROR_INSUFFICIENT_BUFFER;
+        }
+    }
+    SetupDiDestroyDeviceInfoList(DeviceInfoSet);
+
+    if (Error != ERROR_SUCCESS && Error != ERROR_INSUFFICIENT_BUFFER)
+        return CR_FAILURE;
+
+    *PropertyKeyCount = Required;
+    return Error == ERROR_SUCCESS ? CR_SUCCESS : CR_BUFFER_SMALL;
+}
+
+
+CONFIGRET
+WINAPI
+CM_Get_DevNode_Property_Keys(
+    _In_ DEVINST dnDevInst,
+    _Out_writes_opt_(*PropertyKeyCount) DEVPROPKEY *PropertyKeyArray,
+    _Inout_ PULONG PropertyKeyCount,
+    _In_ ULONG ulFlags)
+{
+    TRACE("CM_Get_DevNode_Property_Keys(%lx %p %p %lx)\n", dnDevInst, PropertyKeyArray, PropertyKeyCount, ulFlags);
+
+    return CM_Get_DevNode_Property_Keys_Ex(dnDevInst, PropertyKeyArray, PropertyKeyCount, ulFlags, NULL);
+}
+
+
+/***********************************************************************
+ * CM_Get_Device_Interface_PropertyW, ..._Property_ExW, ..._Property_KeysW and ..._Property_Keys_ExW [SETUPAPI.@]
+ *
+ * The properties and keys of a device interface, by its symbolic link. A property the interface does not have is
+ * CR_NO_SUCH_VALUE with the size set to zero, a buffer that is too small is CR_BUFFER_SMALL with the type and the size
+ * set; a name that cannot be an interface is CR_INVALID_DATA and one that is none CR_NO_SUCH_DEVICE_INTERFACE, which
+ * also zero the size (all measured on Windows 10 22H2).
+ */
+CONFIGRET
+WINAPI
+CM_Get_Device_Interface_Property_ExW(
+    _In_ LPCWSTR pszDeviceInterface,
+    _In_ CONST DEVPROPKEY *PropertyKey,
+    _Out_ DEVPROPTYPE *PropertyType,
+    _Out_writes_bytes_opt_(*PropertyBufferSize) PBYTE PropertyBuffer,
+    _Inout_ PULONG PropertyBufferSize,
+    _In_ ULONG ulFlags,
+    _In_opt_ HMACHINE hMachine)
+{
+    DEVPROPTYPE Type = DEVPROP_TYPE_EMPTY;
+    PCWSTR MachineName;
+    DWORD Required = 0, Error;
+    CONFIGRET ret;
+
+    TRACE("CM_Get_Device_Interface_Property_ExW(%s %p %p %p %p %lx %p)\n",
+          debugstr_w(pszDeviceInterface), PropertyKey, PropertyType, PropertyBuffer, PropertyBufferSize, ulFlags,
+          hMachine);
+
+    if (!pszDeviceInterface || !PropertyType || !PropertyBufferSize || (!PropertyBuffer && *PropertyBufferSize))
+        return CR_INVALID_POINTER;
+
+    if (ulFlags != 0)
+        return CR_INVALID_FLAG;
+
+    if (!PropertyKey)
+        return CR_FAILURE;
+
+    if (!MachineNameFromHandle(hMachine, &MachineName))
+        return CR_CALL_NOT_IMPLEMENTED;
+
+    Error = SETUP_GetInterfaceProperty(pszDeviceInterface, PropertyKey, &Type, PropertyBuffer, *PropertyBufferSize,
+                                       &Required);
+    ret = DevPropErrorToCr(Error);
+    if (ret == CR_SUCCESS || ret == CR_BUFFER_SMALL)
+    {
+        *PropertyType = Type;
+        *PropertyBufferSize = Required;
+    }
+    else
+    {
+        *PropertyBufferSize = 0;
+    }
+    return ret;
+}
+
+
+CONFIGRET
+WINAPI
+CM_Get_Device_Interface_PropertyW(
+    _In_ LPCWSTR pszDeviceInterface,
+    _In_ CONST DEVPROPKEY *PropertyKey,
+    _Out_ DEVPROPTYPE *PropertyType,
+    _Out_writes_bytes_opt_(*PropertyBufferSize) PBYTE PropertyBuffer,
+    _Inout_ PULONG PropertyBufferSize,
+    _In_ ULONG ulFlags)
+{
+    TRACE("CM_Get_Device_Interface_PropertyW(%s %p %p %p %p %lx)\n",
+          debugstr_w(pszDeviceInterface), PropertyKey, PropertyType, PropertyBuffer, PropertyBufferSize, ulFlags);
+
+    return CM_Get_Device_Interface_Property_ExW(pszDeviceInterface, PropertyKey, PropertyType, PropertyBuffer,
+                                                PropertyBufferSize, ulFlags, NULL);
+}
+
+
+CONFIGRET
+WINAPI
+CM_Get_Device_Interface_Property_Keys_ExW(
+    _In_ LPCWSTR pszDeviceInterface,
+    _Out_writes_opt_(*PropertyKeyCount) DEVPROPKEY *PropertyKeyArray,
+    _Inout_ PULONG PropertyKeyCount,
+    _In_ ULONG ulFlags,
+    _In_opt_ HMACHINE hMachine)
+{
+    PCWSTR MachineName;
+    DWORD Required = 0, Error;
+
+    TRACE("CM_Get_Device_Interface_Property_Keys_ExW(%s %p %p %lx %p)\n",
+          debugstr_w(pszDeviceInterface), PropertyKeyArray, PropertyKeyCount, ulFlags, hMachine);
+
+    if (!pszDeviceInterface || !PropertyKeyCount || (!PropertyKeyArray && *PropertyKeyCount))
+        return CR_INVALID_POINTER;
+
+    if (ulFlags != 0)
+        return CR_INVALID_FLAG;
+
+    if (!MachineNameFromHandle(hMachine, &MachineName))
+        return CR_CALL_NOT_IMPLEMENTED;
+
+    /* The array is written only when it is big enough: count first */
+    Error = SETUP_GetInterfacePropertyKeys(pszDeviceInterface, NULL, 0, &Required);
+    if (Error == ERROR_SUCCESS || Error == ERROR_INSUFFICIENT_BUFFER)
+    {
+        if (Required > *PropertyKeyCount)
+        {
+            *PropertyKeyCount = Required;
+            return CR_BUFFER_SMALL;
+        }
+        if (Required != 0)
+            Error = SETUP_GetInterfacePropertyKeys(pszDeviceInterface, PropertyKeyArray, *PropertyKeyCount, &Required);
+        else
+            Error = ERROR_SUCCESS;
+    }
+    if (Error != ERROR_SUCCESS)
+    {
+        *PropertyKeyCount = 0;
+        return DevPropErrorToCr(Error);
+    }
+
+    *PropertyKeyCount = Required;
+    return CR_SUCCESS;
+}
+
+
+CONFIGRET
+WINAPI
+CM_Get_Device_Interface_Property_KeysW(
+    _In_ LPCWSTR pszDeviceInterface,
+    _Out_writes_opt_(*PropertyKeyCount) DEVPROPKEY *PropertyKeyArray,
+    _Inout_ PULONG PropertyKeyCount,
+    _In_ ULONG ulFlags)
+{
+    TRACE("CM_Get_Device_Interface_Property_KeysW(%s %p %p %lx)\n",
+          debugstr_w(pszDeviceInterface), PropertyKeyArray, PropertyKeyCount, ulFlags);
+
+    return CM_Get_Device_Interface_Property_Keys_ExW(pszDeviceInterface, PropertyKeyArray, PropertyKeyCount, ulFlags,
+                                                     NULL);
+}
+
+
+/***********************************************************************
+ * CM_Get_Class_PropertyW, ..._Property_ExW, CM_Get_Class_Property_Keys and ..._Keys_Ex [SETUPAPI.@]
+ *
+ * The properties of a device setup class (flags 0, CM_CLASS_PROPERTY_INSTALLER) or of a device interface class
+ * (flags 1, CM_CLASS_PROPERTY_INTERFACE, which has none of the properties here). A class without a registry key is
+ * CR_NO_SUCH_REGISTRY_KEY with the size zeroed, and keys with the count zeroed (measured on Windows 10 22H2).
+ */
+CONFIGRET
+WINAPI
+CM_Get_Class_Property_ExW(
+    _In_ CONST GUID *ClassGUID,
+    _In_ CONST DEVPROPKEY *PropertyKey,
+    _Out_ DEVPROPTYPE *PropertyType,
+    _Out_writes_bytes_opt_(*PropertyBufferSize) PBYTE PropertyBuffer,
+    _Inout_ PULONG PropertyBufferSize,
+    _In_ ULONG ulFlags,
+    _In_opt_ HMACHINE hMachine)
+{
+    DEVPROPTYPE Type = DEVPROP_TYPE_EMPTY;
+    PCWSTR MachineName;
+    DWORD Required = 0, Error;
+    CONFIGRET ret;
+
+    TRACE("CM_Get_Class_Property_ExW(%p %p %p %p %p %lx %p)\n",
+          ClassGUID, PropertyKey, PropertyType, PropertyBuffer, PropertyBufferSize, ulFlags, hMachine);
+
+    if (!ClassGUID || !PropertyType || !PropertyBufferSize || (!PropertyBuffer && *PropertyBufferSize))
+        return CR_INVALID_POINTER;
+
+    if (ulFlags > 1)
+        return CR_INVALID_FLAG;
+
+    if (!PropertyKey)
+        return CR_FAILURE;
+
+    if (!MachineNameFromHandle(hMachine, &MachineName))
+        return CR_CALL_NOT_IMPLEMENTED;
+
+    Error = SETUP_GetClassProperty(ClassGUID, ulFlags ? DIOCR_INTERFACE : DIOCR_INSTALLER, MachineName, PropertyKey,
+                                   &Type, PropertyBuffer, *PropertyBufferSize, &Required);
+    ret = DevPropErrorToCr(Error);
+    if (ret == CR_SUCCESS || ret == CR_BUFFER_SMALL)
+    {
+        *PropertyType = Type;
+        *PropertyBufferSize = Required;
+    }
+    else
+    {
+        *PropertyBufferSize = 0;
+    }
+    return ret;
+}
+
+
+CONFIGRET
+WINAPI
+CM_Get_Class_PropertyW(
+    _In_ CONST GUID *ClassGUID,
+    _In_ CONST DEVPROPKEY *PropertyKey,
+    _Out_ DEVPROPTYPE *PropertyType,
+    _Out_writes_bytes_opt_(*PropertyBufferSize) PBYTE PropertyBuffer,
+    _Inout_ PULONG PropertyBufferSize,
+    _In_ ULONG ulFlags)
+{
+    TRACE("CM_Get_Class_PropertyW(%p %p %p %p %p %lx)\n",
+          ClassGUID, PropertyKey, PropertyType, PropertyBuffer, PropertyBufferSize, ulFlags);
+
+    return CM_Get_Class_Property_ExW(ClassGUID, PropertyKey, PropertyType, PropertyBuffer, PropertyBufferSize,
+                                     ulFlags, NULL);
+}
+
+
+CONFIGRET
+WINAPI
+CM_Get_Class_Property_Keys_Ex(
+    _In_ CONST GUID *ClassGUID,
+    _Out_writes_opt_(*PropertyKeyCount) DEVPROPKEY *PropertyKeyArray,
+    _Inout_ PULONG PropertyKeyCount,
+    _In_ ULONG ulFlags,
+    _In_opt_ HMACHINE hMachine)
+{
+    PCWSTR MachineName;
+    DWORD Required = 0, Error, Kind;
+
+    TRACE("CM_Get_Class_Property_Keys_Ex(%p %p %p %lx %p)\n",
+          ClassGUID, PropertyKeyArray, PropertyKeyCount, ulFlags, hMachine);
+
+    if (!ClassGUID || !PropertyKeyCount || (!PropertyKeyArray && *PropertyKeyCount))
+        return CR_INVALID_POINTER;
+
+    if (ulFlags > 1)
+        return CR_INVALID_FLAG;
+
+    if (!MachineNameFromHandle(hMachine, &MachineName))
+        return CR_CALL_NOT_IMPLEMENTED;
+
+    Kind = ulFlags ? DIOCR_INTERFACE : DIOCR_INSTALLER;
+    Error = SETUP_GetClassPropertyKeys(ClassGUID, Kind, MachineName, NULL, 0, &Required);
+    if (Error == ERROR_SUCCESS || Error == ERROR_INSUFFICIENT_BUFFER)
+    {
+        if (Required > *PropertyKeyCount)
+        {
+            *PropertyKeyCount = Required;
+            return CR_BUFFER_SMALL;
+        }
+        if (Required != 0)
+            Error = SETUP_GetClassPropertyKeys(ClassGUID, Kind, MachineName, PropertyKeyArray, *PropertyKeyCount,
+                                               &Required);
+        else
+            Error = ERROR_SUCCESS;
+    }
+    if (Error != ERROR_SUCCESS)
+    {
+        *PropertyKeyCount = 0;
+        return DevPropErrorToCr(Error);
+    }
+
+    *PropertyKeyCount = Required;
+    return CR_SUCCESS;
+}
+
+
+CONFIGRET
+WINAPI
+CM_Get_Class_Property_Keys(
+    _In_ CONST GUID *ClassGUID,
+    _Out_writes_opt_(*PropertyKeyCount) DEVPROPKEY *PropertyKeyArray,
+    _Inout_ PULONG PropertyKeyCount,
+    _In_ ULONG ulFlags)
+{
+    TRACE("CM_Get_Class_Property_Keys(%p %p %p %lx)\n", ClassGUID, PropertyKeyArray, PropertyKeyCount, ulFlags);
+
+    return CM_Get_Class_Property_Keys_Ex(ClassGUID, PropertyKeyArray, PropertyKeyCount, ulFlags, NULL);
+}
+
+
+/***********************************************************************
+ * CM_Open_Device_Interface_Key[_Ex][AW] and CM_Delete_Device_Interface_Key[_Ex][AW] [SETUPAPI.@]
+ *
+ * The "Device Parameters" key under the instance key of the interface. Disposition 0 (RegDisposition_OpenAlways)
+ * creates it, 1 (RegDisposition_OpenExisting) opens it and says CR_NO_SUCH_REGISTRY_KEY if it is not there, which is
+ * also the answer when the interface does not exist; any other disposition is CR_INVALID_DATA, and the key handle is
+ * zeroed on every failure after the parameters were checked (measured on Windows 10 22H2).
+ */
+CONFIGRET
+WINAPI
+CM_Open_Device_Interface_Key_ExW(
+    _In_ LPCWSTR pszDeviceInterface,
+    _In_ REGSAM samDesired,
+    _In_ REGDISPOSITION Disposition,
+    _Out_ PHKEY phkDeviceInterface,
+    _In_ ULONG ulFlags,
+    _In_opt_ HMACHINE hMachine)
+{
+    PCWSTR MachineName;
+    DWORD Error;
+
+    TRACE("CM_Open_Device_Interface_Key_ExW(%s %lx %lu %p %lx %p)\n",
+          debugstr_w(pszDeviceInterface), samDesired, Disposition, phkDeviceInterface, ulFlags, hMachine);
+
+    if (!pszDeviceInterface || !phkDeviceInterface)
+        return CR_INVALID_POINTER;
+
+    if (ulFlags != 0)
+        return CR_INVALID_FLAG;
+
+    if (!MachineNameFromHandle(hMachine, &MachineName))
+        return CR_CALL_NOT_IMPLEMENTED;
+
+    *phkDeviceInterface = NULL;
+    if (Disposition > RegDisposition_OpenExisting)
+        return CR_INVALID_DATA;
+
+    Error = SETUP_OpenInterfaceParameters(pszDeviceInterface, samDesired, Disposition == RegDisposition_OpenExisting,
+                                          phkDeviceInterface);
+    return DevPropErrorToCr(Error);
+}
+
+
+CONFIGRET
+WINAPI
+CM_Open_Device_Interface_KeyW(
+    _In_ LPCWSTR pszDeviceInterface,
+    _In_ REGSAM samDesired,
+    _In_ REGDISPOSITION Disposition,
+    _Out_ PHKEY phkDeviceInterface,
+    _In_ ULONG ulFlags)
+{
+    return CM_Open_Device_Interface_Key_ExW(pszDeviceInterface, samDesired, Disposition, phkDeviceInterface,
+                                            ulFlags, NULL);
+}
+
+
+CONFIGRET
+WINAPI
+CM_Open_Device_Interface_Key_ExA(
+    _In_ LPCSTR pszDeviceInterface,
+    _In_ REGSAM samDesired,
+    _In_ REGDISPOSITION Disposition,
+    _Out_ PHKEY phkDeviceInterface,
+    _In_ ULONG ulFlags,
+    _In_opt_ HMACHINE hMachine)
+{
+    LPWSTR pszDeviceInterfaceW = NULL;
+    CONFIGRET ret;
+
+    TRACE("CM_Open_Device_Interface_Key_ExA(%s %lx %lu %p %lx %p)\n",
+          debugstr_a(pszDeviceInterface), samDesired, Disposition, phkDeviceInterface, ulFlags, hMachine);
+
+    if (pszDeviceInterface == NULL || phkDeviceInterface == NULL)
+        return CR_INVALID_POINTER;
+
+    pszDeviceInterfaceW = pSetupMultiByteToUnicode(pszDeviceInterface, CP_ACP);
+    if (pszDeviceInterfaceW == NULL)
+        return CR_INVALID_DATA;
+
+    ret = CM_Open_Device_Interface_Key_ExW(pszDeviceInterfaceW, samDesired, Disposition, phkDeviceInterface, ulFlags,
+                                           hMachine);
+    MyFree(pszDeviceInterfaceW);
+    return ret;
+}
+
+
+CONFIGRET
+WINAPI
+CM_Open_Device_Interface_KeyA(
+    _In_ LPCSTR pszDeviceInterface,
+    _In_ REGSAM samDesired,
+    _In_ REGDISPOSITION Disposition,
+    _Out_ PHKEY phkDeviceInterface,
+    _In_ ULONG ulFlags)
+{
+    return CM_Open_Device_Interface_Key_ExA(pszDeviceInterface, samDesired, Disposition, phkDeviceInterface,
+                                            ulFlags, NULL);
+}
+
+
+CONFIGRET
+WINAPI
+CM_Delete_Device_Interface_Key_ExW(
+    _In_ LPCWSTR pszDeviceInterface,
+    _In_ ULONG ulFlags,
+    _In_opt_ HMACHINE hMachine)
+{
+    PCWSTR MachineName;
+
+    TRACE("CM_Delete_Device_Interface_Key_ExW(%s %lx %p)\n", debugstr_w(pszDeviceInterface), ulFlags, hMachine);
+
+    if (!pszDeviceInterface)
+        return CR_INVALID_POINTER;
+
+    if (ulFlags != 0)
+        return CR_INVALID_FLAG;
+
+    if (!MachineNameFromHandle(hMachine, &MachineName))
+        return CR_CALL_NOT_IMPLEMENTED;
+
+    return DevPropErrorToCr(SETUP_DeleteInterfaceParameters(pszDeviceInterface));
+}
+
+
+CONFIGRET
+WINAPI
+CM_Delete_Device_Interface_KeyW(
+    _In_ LPCWSTR pszDeviceInterface,
+    _In_ ULONG ulFlags)
+{
+    return CM_Delete_Device_Interface_Key_ExW(pszDeviceInterface, ulFlags, NULL);
+}
+
+
+CONFIGRET
+WINAPI
+CM_Delete_Device_Interface_Key_ExA(
+    _In_ LPCSTR pszDeviceInterface,
+    _In_ ULONG ulFlags,
+    _In_opt_ HMACHINE hMachine)
+{
+    LPWSTR pszDeviceInterfaceW = NULL;
+    CONFIGRET ret;
+
+    TRACE("CM_Delete_Device_Interface_Key_ExA(%s %lx %p)\n", debugstr_a(pszDeviceInterface), ulFlags, hMachine);
+
+    if (pszDeviceInterface == NULL)
+        return CR_INVALID_POINTER;
+
+    pszDeviceInterfaceW = pSetupMultiByteToUnicode(pszDeviceInterface, CP_ACP);
+    if (pszDeviceInterfaceW == NULL)
+        return CR_INVALID_DATA;
+
+    ret = CM_Delete_Device_Interface_Key_ExW(pszDeviceInterfaceW, ulFlags, hMachine);
+    MyFree(pszDeviceInterfaceW);
+    return ret;
+}
+
+
+CONFIGRET
+WINAPI
+CM_Delete_Device_Interface_KeyA(
+    _In_ LPCSTR pszDeviceInterface,
+    _In_ ULONG ulFlags)
+{
+    return CM_Delete_Device_Interface_Key_ExA(pszDeviceInterface, ulFlags, NULL);
+}
+
+
+/***********************************************************************
+ * The power scheme calls of cfgmgr32 [SETUPAPI.@]
+ *
+ * Windows 10 answers CR_CALL_NOT_IMPLEMENTED to all of them, whatever the arguments (the numbers of arguments are those of
+ * the x86 version, which cleans its stack by them), and CMP_RegisterServiceNotification answers CR_SUCCESS.
+ */
+CONFIGRET WINAPI CM_Apply_PowerScheme(VOID)
+{
+    return CR_CALL_NOT_IMPLEMENTED;
+}
+
+CONFIGRET WINAPI CM_Delete_PowerScheme(ULONG_PTR Scheme, ULONG_PTR Flags)
+{
+    return CR_CALL_NOT_IMPLEMENTED;
+}
+
+CONFIGRET WINAPI CM_Duplicate_PowerScheme(ULONG_PTR Scheme, ULONG_PTR Copy, ULONG_PTR Flags)
+{
+    return CR_CALL_NOT_IMPLEMENTED;
+}
+
+CONFIGRET WINAPI CM_Import_PowerScheme(ULONG_PTR Path, ULONG_PTR Scheme, ULONG_PTR Flags)
+{
+    return CR_CALL_NOT_IMPLEMENTED;
+}
+
+CONFIGRET WINAPI CM_RestoreAll_DefaultPowerSchemes(ULONG_PTR Flags)
+{
+    return CR_CALL_NOT_IMPLEMENTED;
+}
+
+CONFIGRET WINAPI CM_Restore_DefaultPowerScheme(ULONG_PTR Scheme, ULONG_PTR Flags)
+{
+    return CR_CALL_NOT_IMPLEMENTED;
+}
+
+CONFIGRET WINAPI CM_Set_ActiveScheme(ULONG_PTR Scheme, ULONG_PTR Flags)
+{
+    return CR_CALL_NOT_IMPLEMENTED;
+}
+
+CONFIGRET WINAPI CM_Write_UserPowerKey(ULONG_PTR A1, ULONG_PTR A2, ULONG_PTR A3, ULONG_PTR A4, ULONG_PTR A5, ULONG_PTR A6,
+                                       ULONG_PTR A7, ULONG_PTR A8)
+{
+    return CR_CALL_NOT_IMPLEMENTED;
+}
+
+CONFIGRET WINAPI CMP_RegisterServiceNotification(ULONG_PTR A1, ULONG_PTR A2, ULONG_PTR A3, ULONG_PTR A4)
+{
+    return CR_SUCCESS;
+}
+
+
+/***********************************************************************
  * CM_Register_Notification and CM_Unregister_Notification (Windows 8 and later)
  *
- * The registration is checked as Windows 10 checks it, and kept: the handle that comes back is one that
- * CM_Unregister_Notification accepts once. Nothing is delivered: the callback is never called, as if no device of
- * the filter ever changed (Windows calls nothing at registration either; it calls when a device comes, goes or
- * changes). Programs that watch for devices (browsers, audio and camera code) register at start and then work
- * with the devices that were there at that time. Differences from Windows: a handle of a device that has no
- * device node (the NUL device) is accepted, and the callback thread of Windows does not exist.
+ * The registration is checked as Windows 10 checks it (build 19045), kept, and answered with a handle that
+ * CM_Unregister_Notification accepts once. Windows calls nothing at registration; it calls the callback when a
+ * device interface of the filter comes or goes (with the class GUID and the symbolic link as the event data), which
+ * is delivered here for CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE: one thread of the process registers a window for
+ * the device interface arrival and removal messages of the plug and play manager (the notification path of
+ * RegisterDeviceNotification) and calls the callbacks of the registrations whose class matches, one at a time.
+ * Unregistering waits for a callback of that registration that is running, unless it is called from a callback.
+ *
+ * Differences from Windows: the callbacks of device handles (query removal, removal complete, custom events) and of
+ * device instances (enumerated, started, removed) are never called, because the plug and play manager does not send
+ * them; a handle of a device that has no device node (the NUL device) is accepted; the callback thread is created
+ * by the first registration for interfaces and ends with the last one.
  */
 
 typedef struct _CM_NOTIFY_ENTRY
@@ -9021,9 +9750,11 @@ typedef struct _CM_NOTIFY_ENTRY
     PCM_NOTIFY_CALLBACK pCallback;
     PVOID pContext;
     CM_NOTIFY_FILTER Filter;
+    LONG Calls;                 /* callbacks of this registration that are running */
+    BOOLEAN Removed;            /* unregistered; a callback in progress frees it when it returns */
 } CM_NOTIFY_ENTRY, *PCM_NOTIFY_ENTRY;
 
-static CRITICAL_SECTION CmNotifyLock;
+static CRITICAL_SECTION CmNotifyLock;       /* the list and the counts */
 static CRITICAL_SECTION_DEBUG CmNotifyLockDebug =
 {
     0, 0, &CmNotifyLock,
@@ -9031,7 +9762,257 @@ static CRITICAL_SECTION_DEBUG CmNotifyLockDebug =
     0, 0, { (DWORD_PTR)(__FILE__ ": CmNotifyLock") }
 };
 static CRITICAL_SECTION CmNotifyLock = { &CmNotifyLockDebug, -1, 0, 0, 0, 0 };
+
+static CRITICAL_SECTION CmNotifyThreadLock; /* starting and stopping the thread; taken before CmNotifyLock */
+static CRITICAL_SECTION_DEBUG CmNotifyThreadLockDebug =
+{
+    0, 0, &CmNotifyThreadLock,
+    { &CmNotifyThreadLockDebug.ProcessLocksList, &CmNotifyThreadLockDebug.ProcessLocksList },
+    0, 0, { (DWORD_PTR)(__FILE__ ": CmNotifyThreadLock") }
+};
+static CRITICAL_SECTION CmNotifyThreadLock = { &CmNotifyThreadLockDebug, -1, 0, 0, 0, 0 };
+
 static LIST_ENTRY CmNotifyList = { &CmNotifyList, &CmNotifyList };
+static ULONG CmInterfaceEntries;            /* registrations for interfaces, under CmNotifyLock */
+static HANDLE CmNotifyThread;               /* under CmNotifyThreadLock */
+static volatile DWORD CmNotifyThreadId;
+static HWND CmNotifyWindow;
+static const WCHAR CmNotifyWindowClass[] = L"CmNotifyWindow";
+
+#define CM_NOTIFY_STOP_TIMEOUT 5000
+
+static
+VOID
+CmNotifyDeliver(
+    _In_ CM_NOTIFY_ACTION Action,
+    _In_ PDEV_BROADCAST_DEVICEINTERFACE_W Interface)
+{
+    PCM_NOTIFY_ENTRY *Targets = NULL, Entry;
+    PCM_NOTIFY_EVENT_DATA Data;
+    PLIST_ENTRY Current;
+    ULONG Count = 0, Capacity = 0, i;
+    DWORD DataSize;
+    SIZE_T Chars;
+
+    Chars = wcsnlen(Interface->dbcc_name, (Interface->dbcc_size > FIELD_OFFSET(DEV_BROADCAST_DEVICEINTERFACE_W, dbcc_name)) ?
+                    (Interface->dbcc_size - FIELD_OFFSET(DEV_BROADCAST_DEVICEINTERFACE_W, dbcc_name)) / sizeof(WCHAR) : 0);
+    DataSize = FIELD_OFFSET(CM_NOTIFY_EVENT_DATA, u.DeviceInterface.SymbolicLink) + (Chars + 1) * sizeof(WCHAR);
+    Data = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, DataSize);
+    if (Data == NULL)
+        return;
+    Data->FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE;
+    Data->u.DeviceInterface.ClassGuid = Interface->dbcc_classguid;
+    memcpy(Data->u.DeviceInterface.SymbolicLink, Interface->dbcc_name, Chars * sizeof(WCHAR));
+
+    /* The registrations whose class matches; each is marked as in use so that unregistering waits for it */
+    EnterCriticalSection(&CmNotifyLock);
+    for (Current = CmNotifyList.Flink; Current != &CmNotifyList; Current = Current->Flink)
+    {
+        Entry = CONTAINING_RECORD(Current, CM_NOTIFY_ENTRY, ListEntry);
+        if (Entry->Filter.FilterType != CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE)
+            continue;
+        if (!(Entry->Filter.Flags & CM_NOTIFY_FILTER_FLAG_ALL_INTERFACE_CLASSES) &&
+            !IsEqualGUID(&Entry->Filter.u.DeviceInterface.ClassGuid, &Interface->dbcc_classguid))
+            continue;
+
+        if (Count == Capacity)
+        {
+            PCM_NOTIFY_ENTRY *Grown = Targets ? HeapReAlloc(GetProcessHeap(), 0, Targets, (Capacity + 8) * sizeof(*Targets)) :
+                                                HeapAlloc(GetProcessHeap(), 0, (Capacity + 8) * sizeof(*Targets));
+            if (Grown == NULL)
+                break;
+            Targets = Grown;
+            Capacity += 8;
+        }
+        InterlockedIncrement(&Entry->Calls);
+        Targets[Count++] = Entry;
+    }
+    LeaveCriticalSection(&CmNotifyLock);
+
+    for (i = 0; i < Count; i++)
+    {
+        Entry = Targets[i];
+        if (!Entry->Removed)
+            Entry->pCallback((HCMNOTIFICATION)Entry, Entry->pContext, Action, Data, DataSize);
+        if (InterlockedDecrement(&Entry->Calls) == 0 && Entry->Removed)
+            MyFree(Entry);
+    }
+
+    if (Targets)
+        HeapFree(GetProcessHeap(), 0, Targets);
+    HeapFree(GetProcessHeap(), 0, Data);
+}
+
+static
+LRESULT
+CALLBACK
+CmNotifyWindowProc(
+    _In_ HWND hWnd,
+    _In_ UINT Message,
+    _In_ WPARAM wParam,
+    _In_ LPARAM lParam)
+{
+    PDEV_BROADCAST_DEVICEINTERFACE_W Interface = (PDEV_BROADCAST_DEVICEINTERFACE_W)lParam;
+
+    if (Message == WM_DEVICECHANGE)
+    {
+        if ((wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE) &&
+            Interface != NULL && Interface->dbcc_devicetype == DBT_DEVTYP_DEVICEINTERFACE)
+        {
+            CmNotifyDeliver(wParam == DBT_DEVICEARRIVAL ? CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL :
+                                                          CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL,
+                            Interface);
+        }
+        return TRUE;
+    }
+    return DefWindowProcW(hWnd, Message, wParam, lParam);
+}
+
+typedef struct _CM_NOTIFY_START
+{
+    HANDLE hReady;
+    BOOL bStarted;
+    LONG Refs;                  /* the starter and the thread; the last one frees it */
+} CM_NOTIFY_START, *PCM_NOTIFY_START;
+
+static
+VOID
+CmNotifyReleaseStart(
+    _In_ PCM_NOTIFY_START Start)
+{
+    if (InterlockedDecrement(&Start->Refs) == 0)
+    {
+        CloseHandle(Start->hReady);
+        HeapFree(GetProcessHeap(), 0, Start);
+    }
+}
+
+static
+DWORD
+WINAPI
+CmNotifyThreadProc(
+    _In_ LPVOID Parameter)
+{
+    PCM_NOTIFY_START Start = Parameter;
+    DEV_BROADCAST_DEVICEINTERFACE_W Filter;
+    WNDCLASSW WindowClass = { 0 };
+    HDEVNOTIFY hNotify = NULL;
+    HWND hWnd;
+    MSG Message;
+
+    WindowClass.lpfnWndProc = CmNotifyWindowProc;
+    WindowClass.hInstance = hInstance;
+    WindowClass.lpszClassName = CmNotifyWindowClass;
+    RegisterClassW(&WindowClass);
+
+    hWnd = CreateWindowExW(0, CmNotifyWindowClass, NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInstance, NULL);
+    if (hWnd != NULL)
+    {
+        ZeroMemory(&Filter, sizeof(Filter));
+        Filter.dbcc_size = sizeof(Filter);
+        Filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+        if (CMP_RegisterNotification(hWnd, &Filter, DEVICE_NOTIFY_WINDOW_HANDLE | DEVICE_NOTIFY_ALL_INTERFACE_CLASSES,
+                                     &hNotify) != CR_SUCCESS)
+        {
+            WARN("The plug and play manager did not take the notification window\n");
+            hNotify = NULL;
+        }
+    }
+    else
+    {
+        WARN("No notification window (%lu)\n", GetLastError());
+    }
+
+    CmNotifyWindow = hWnd;
+    Start->bStarted = (hWnd != NULL && hNotify != NULL);
+    SetEvent(Start->hReady);
+    CmNotifyReleaseStart(Start);
+
+    if (hWnd != NULL && hNotify != NULL)
+    {
+        while (GetMessageW(&Message, NULL, 0, 0) > 0)
+        {
+            TranslateMessage(&Message);
+            DispatchMessageW(&Message);
+        }
+        CMP_UnregisterNotification(hNotify);
+    }
+    if (hWnd != NULL)
+        DestroyWindow(hWnd);
+    UnregisterClassW(CmNotifyWindowClass, hInstance);
+    return 0;
+}
+
+/* Called with CmNotifyThreadLock held */
+static
+VOID
+CmNotifyStartThread(VOID)
+{
+    PCM_NOTIFY_START Start;
+    HANDLE hThread;
+    DWORD ThreadId;
+
+    if (CmNotifyThread != NULL)
+        return;
+
+    Start = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Start));
+    if (Start == NULL)
+        return;
+    Start->hReady = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (Start->hReady == NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, Start);
+        return;
+    }
+    Start->Refs = 2;
+
+    hThread = CreateThread(NULL, 0, CmNotifyThreadProc, Start, 0, &ThreadId);
+    if (hThread == NULL)
+    {
+        Start->Refs = 1;
+        CmNotifyReleaseStart(Start);
+        return;
+    }
+
+    if (WaitForSingleObject(Start->hReady, 15000) == WAIT_OBJECT_0 && Start->bStarted)
+    {
+        CmNotifyThread = hThread;
+        CmNotifyThreadId = ThreadId;
+    }
+    else
+    {
+        /* The thread ends by itself when it could not start; a registration then never gets a callback */
+        WARN("Device interface notifications are not delivered\n");
+        CloseHandle(hThread);
+    }
+    CmNotifyReleaseStart(Start);
+}
+
+/* Called with CmNotifyThreadLock held, and not from the notification thread */
+static
+VOID
+CmNotifyStopThread(VOID)
+{
+    if (CmNotifyThread == NULL)
+        return;
+
+    PostThreadMessageW(CmNotifyThreadId, WM_QUIT, 0, 0);
+    WaitForSingleObject(CmNotifyThread, CM_NOTIFY_STOP_TIMEOUT);
+    CloseHandle(CmNotifyThread);
+    CmNotifyThread = NULL;
+    CmNotifyThreadId = 0;
+    CmNotifyWindow = NULL;
+}
+
+/* Called when setupapi.dll is unloaded while the process goes on */
+VOID
+CmNotifyShutdown(VOID)
+{
+    EnterCriticalSection(&CmNotifyThreadLock);
+    if (GetCurrentThreadId() != CmNotifyThreadId)
+        CmNotifyStopThread();
+    LeaveCriticalSection(&CmNotifyThreadLock);
+}
 
 CONFIGRET
 WINAPI
@@ -9042,6 +10023,7 @@ CM_Register_Notification(
     _Out_ PHCMNOTIFICATION pNotifyContext)
 {
     PCM_NOTIFY_ENTRY Entry;
+    BOOL FromCallback;
 
     TRACE("CM_Register_Notification(%p %p %p %p)\n", pFilter, pContext, pCallback, pNotifyContext);
 
@@ -9106,13 +10088,28 @@ CM_Register_Notification(
     if (Entry == NULL)
         return CR_OUT_OF_MEMORY;
 
+    ZeroMemory(Entry, sizeof(*Entry));
     Entry->pCallback = pCallback;
     Entry->pContext = pContext;
     Entry->Filter = *pFilter;
 
+    /* A callback that registers another notification runs on the thread that exists already: it must not wait for a
+     * caller that is waiting for that callback */
+    FromCallback = (GetCurrentThreadId() == CmNotifyThreadId);
+    if (!FromCallback)
+    {
+        EnterCriticalSection(&CmNotifyThreadLock);
+        if (pFilter->FilterType == CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE)
+            CmNotifyStartThread();
+    }
+
     EnterCriticalSection(&CmNotifyLock);
     InsertTailList(&CmNotifyList, &Entry->ListEntry);
+    if (pFilter->FilterType == CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE)
+        CmInterfaceEntries++;
     LeaveCriticalSection(&CmNotifyLock);
+    if (!FromCallback)
+        LeaveCriticalSection(&CmNotifyThreadLock);
 
     *pNotifyContext = (HCMNOTIFICATION)Entry;
     return CR_SUCCESS;
@@ -9125,8 +10122,13 @@ CM_Unregister_Notification(
 {
     PLIST_ENTRY Current;
     PCM_NOTIFY_ENTRY Entry = NULL;
+    BOOL FromCallback = (GetCurrentThreadId() == CmNotifyThreadId), Stop = FALSE;
 
     TRACE("CM_Unregister_Notification(%p)\n", NotifyContext);
+
+    /* A callback that unregisters itself must not wait for the thread it runs on */
+    if (!FromCallback)
+        EnterCriticalSection(&CmNotifyThreadLock);
 
     EnterCriticalSection(&CmNotifyLock);
     for (Current = CmNotifyList.Flink; Current != &CmNotifyList; Current = Current->Flink)
@@ -9135,6 +10137,12 @@ CM_Unregister_Notification(
         {
             Entry = CONTAINING_RECORD(Current, CM_NOTIFY_ENTRY, ListEntry);
             RemoveEntryList(&Entry->ListEntry);
+            Entry->Removed = TRUE;
+            if (Entry->Filter.FilterType == CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE)
+            {
+                CmInterfaceEntries--;
+                Stop = (CmInterfaceEntries == 0);
+            }
             break;
         }
     }
@@ -9143,6 +10151,9 @@ CM_Unregister_Notification(
     if (Entry == NULL)
     {
         BOOL Readable = FALSE;
+
+        if (!FromCallback)
+            LeaveCriticalSection(&CmNotifyThreadLock);
 
         /* Windows answers a handle that is not a registration as invalid data, and one that is not even memory as failure */
         if (NotifyContext == NULL)
@@ -9160,6 +10171,22 @@ CM_Unregister_Notification(
 
         return Readable ? CR_INVALID_DATA : CR_FAILURE;
     }
+
+    if (FromCallback)
+    {
+        /* The callback that is running frees it when it returns; no other one can have it */
+        if (Entry->Calls == 0)
+            MyFree(Entry);
+        return CR_SUCCESS;
+    }
+
+    /* No callback of this registration is running or can start any more */
+    while (Entry->Calls != 0)
+        Sleep(1);
+
+    if (Stop)
+        CmNotifyStopThread();
+    LeaveCriticalSection(&CmNotifyThreadLock);
 
     MyFree(Entry);
     return CR_SUCCESS;

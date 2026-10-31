@@ -5424,6 +5424,92 @@ SetupDiGetDevicePropertyW(
 
 
 /***********************************************************************
+ *		SetupDiGetDevicePropertyKeys (SETUPAPI.@)
+ *
+ * The keys of the properties SetupDiGetDevicePropertyW has for the device, those that this device has a value for.
+ * Windows lists more (the properties of the property store, which nothing here keeps).
+ */
+BOOL WINAPI
+SetupDiGetDevicePropertyKeys(
+    HDEVINFO DeviceInfoSet,
+    PSP_DEVINFO_DATA DeviceInfoData,
+    DEVPROPKEY *PropertyKeyArray,
+    DWORD PropertyKeyCount,
+    PDWORD RequiredPropertyKeyCount,
+    DWORD Flags)
+{
+    struct DeviceInfoSet *Set = (struct DeviceInfoSet *)DeviceInfoSet;
+    const DEVPROPKEY *Others[] = { &DevPropKeyName, &DevPropKeyInstanceId, &DevPropKeyStatus, &DevPropKeyProblem,
+                                   &DevPropKeyParent };
+    DEVPROPKEY Key;
+    DEVPROPTYPE Type;
+    DWORD Found = 0, Index, Error;
+
+    TRACE("%s(%p %p %p %lu %p %lx)\n", __FUNCTION__, DeviceInfoSet, DeviceInfoData, PropertyKeyArray,
+        PropertyKeyCount, RequiredPropertyKeyCount, Flags);
+
+    if (!DeviceInfoSet || DeviceInfoSet == INVALID_HANDLE_VALUE || Set->magic != SETUP_DEVICE_INFO_SET_MAGIC)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+    if (!DeviceInfoData || DeviceInfoData->cbSize != sizeof(SP_DEVINFO_DATA) ||
+        !IsDeviceInfoInDeviceInfoSet(Set, (struct DeviceInfo *)DeviceInfoData->Reserved))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (Flags)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return FALSE;
+    }
+    if (!PropertyKeyArray && PropertyKeyCount)
+    {
+        SetLastError(ERROR_INVALID_USER_BUFFER);
+        return FALSE;
+    }
+
+    for (Index = 0; Index < ARRAYSIZE(DevPropSpdrpTypes) + ARRAYSIZE(Others); Index++)
+    {
+        if (Index < ARRAYSIZE(DevPropSpdrpTypes))
+        {
+            if (!DevPropSpdrpTypes[Index])
+                continue;
+            Key.fmtid = DevPropFmtidDevice;
+            Key.pid = DEVPROP_SPDRP_ID_BASE + Index;
+        }
+        else
+        {
+            Key = *Others[Index - ARRAYSIZE(DevPropSpdrpTypes)];
+        }
+
+        /* A property the device has is found with no room for it: success, or a buffer that is too small */
+        if (SetupDiGetDevicePropertyW(DeviceInfoSet, DeviceInfoData, &Key, &Type, NULL, 0, NULL, 0))
+            Error = ERROR_SUCCESS;
+        else
+            Error = GetLastError();
+        if (Error != ERROR_SUCCESS && Error != ERROR_INSUFFICIENT_BUFFER)
+            continue;
+
+        if (Found < PropertyKeyCount)
+            PropertyKeyArray[Found] = Key;
+        Found++;
+    }
+
+    if (RequiredPropertyKeyCount)
+        *RequiredPropertyKeyCount = Found;
+    if (Found > PropertyKeyCount)
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
+
+
+/***********************************************************************
  *		SetupDiOpenDeviceInfoA (SETUPAPI.@)
  */
 BOOL WINAPI

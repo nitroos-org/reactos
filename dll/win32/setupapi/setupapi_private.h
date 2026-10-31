@@ -337,6 +337,42 @@ DestroyDriverInfoElement(struct DriverInfoElement* driverInfo);
 BOOL
 GetStringField( PINFCONTEXT context, DWORD index, PWSTR *value);
 
+/* cfgmgr.c */
+
+VOID CmNotifyShutdown(VOID);
+
+BOOL
+WINAPI
+SetupDiGetDevicePropertyKeys(
+    HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData, DEVPROPKEY *PropertyKeyArray, DWORD PropertyKeyCount,
+    PDWORD RequiredPropertyKeyCount, DWORD Flags);
+
+/* devprop.c: class and device interface properties */
+
+DWORD
+SETUP_GetClassProperty(
+    CONST GUID *ClassGuid, DWORD ClassKind, PCWSTR MachineName, CONST DEVPROPKEY *PropertyKey,
+    DEVPROPTYPE *PropertyType, PBYTE PropertyBuffer, DWORD PropertyBufferSize, PDWORD RequiredSize);
+
+DWORD
+SETUP_GetClassPropertyKeys(
+    CONST GUID *ClassGuid, DWORD ClassKind, PCWSTR MachineName, DEVPROPKEY *KeyArray, DWORD KeyCount,
+    PDWORD RequiredCount);
+
+DWORD
+SETUP_GetInterfaceProperty(
+    PCWSTR Link, CONST DEVPROPKEY *PropertyKey, DEVPROPTYPE *PropertyType, PBYTE PropertyBuffer,
+    DWORD PropertyBufferSize, PDWORD RequiredSize);
+
+DWORD
+SETUP_GetInterfacePropertyKeys(PCWSTR Link, DEVPROPKEY *KeyArray, DWORD KeyCount, PDWORD RequiredCount);
+
+DWORD
+SETUP_OpenInterfaceParameters(PCWSTR Link, REGSAM Access, BOOL OpenExisting, HKEY *Key);
+
+DWORD
+SETUP_DeleteInterfaceParameters(PCWSTR Link);
+
 /* interface.c */
 
 BOOL

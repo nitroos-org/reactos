@@ -751,3 +751,14 @@
 @ stdcall WriteEncryptedFileRaw(ptr ptr ptr)
 @ stdcall -version=0x600+ RegLoadMUIStringW(ptr wstr wstr long ptr long wstr) advapi32_vista.RegLoadMUIStringW
 @ stdcall -version=0x600+ RegLoadMUIStringA(ptr str str long ptr long str) advapi32_vista.RegLoadMUIStringA
+@ stdcall -version=0x600+ ControlServiceExA(long long long ptr)
+@ stdcall -version=0x600+ ControlServiceExW(long long long ptr)
+@ stdcall -version=0x600+ EventWriteEndScenario(int64 ptr long ptr)
+@ stdcall -version=0x600+ EventWriteStartScenario(int64 ptr long ptr)
+@ stdcall -version=0x600+ FreeEncryptedFileMetadata(ptr)
+@ stdcall -version=0x600+ IsValidRelativeSecurityDescriptor(ptr long long)
+@ stdcall -version=0x600+ LsaLookupSids2(ptr long long ptr ptr ptr)
+@ stdcall -version=0x600+ QuerySecurityAccessMask(long ptr)
+@ stdcall -version=0x600+ RegDisablePredefinedCacheEx()
+@ stdcall -version=0x600+ SetSecurityAccessMask(long ptr)
+@ stdcall -version=0x600+ TreeSetNamedSecurityInfoA(str long long ptr ptr ptr ptr long ptr long ptr)
