@@ -103,6 +103,9 @@ Signature = "$Windows NT$"
 81 = winsxs\arm64_microsoft.windows.gdiplus_6595b64144ccf1df_1.0.14393.0_none_deadbeef
 82 = Featmgr\Catalog
 83 = Featmgr\Payload\gl-sw-pack
+84 = Microsoft.NET\Framework\v4.0.30319
+85 = Microsoft.NET\Framework64
+86 = Microsoft.NET\Framework64\v4.0.30319
 
 .InfEnd
 

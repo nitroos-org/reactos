@@ -89,6 +89,8 @@ SysWOW64/mi.dll
 SysWOW64/wbem/wbemprox.dll
 SysWOW64/wbem/wbemdisp.dll
 SysWOW64/wbem/wmiutils.dll
+# System.Management's native helper for 32-bit callers (the Wow6432Node .NETFramework InstallRoot).
+Microsoft.NET/Framework/v4.0.30319/wminet_utils.dll
 # Windows Script Host and the script engines for 32-bit scripts (GetObject("winmgmts:")
 # from a 32-bit cscript/wscript: scripts that load 32-bit COM objects run in these).
 SysWOW64/cscript.exe
