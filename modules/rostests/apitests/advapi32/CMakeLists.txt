@@ -72,6 +72,7 @@ list(APPEND SOURCE
     svchlp.c)
 
 list(APPEND PCH_SKIP_SOURCE
+    Saferi.c
     testlist.c)
 
 add_executable(advapi32_apitest
