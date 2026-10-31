@@ -111,6 +111,7 @@ list(APPEND SOURCE
     WmPrint.c
     WndProc.c
     PhysicalCoords.c
+    DialogDpiBehavior.c
     wsprintf.c)
 
 list(APPEND PCH_SKIP_SOURCE

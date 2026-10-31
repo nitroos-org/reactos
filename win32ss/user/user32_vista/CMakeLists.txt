@@ -14,7 +14,8 @@ list(APPEND VISTA_SOURCE
      suspendresume.c
      pointer.c
      win8user.c
-     physical.c)
+     physical.c
+     dialogdpi.c)
      
 
 list(APPEND SOURCE
