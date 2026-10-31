@@ -142,6 +142,8 @@ typedef struct ExplorerCommandLineParseResults
 // unknown/unused                         0x00800000
 // unknown/unused                         0x01000000
 #define SH_EXPLORER_CMDLINE_FLAG_STRING   0x02000000
+// ReactOS private: the item is not a folder, the receiving shell runs it (SW_SHOWDEFAULT) instead of browsing to it
+#define SH_EXPLORER_CMDLINE_FLAG_EXECUTE  0x08000000
 
 #define WM_EXPLORER_OPEN_NEW_WINDOW (WM_USER+11)
 #define WM_EXPLORER_1037 (WM_USER+13)

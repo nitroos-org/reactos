@@ -150,7 +150,7 @@ IsExplorerSystemShell()
 #if !WIN7_COMPAT_MODE
 /* "explorer.exe <file>" runs the file (a shortcut starts its target) instead of browsing to it */
 static BOOL
-TryExecuteNonFolder(IN const EXPLORER_CMDLINE_PARSE_RESULTS *pResults, OUT PBOOL pbResult)
+TryExecuteNonFolder(IN EXPLORER_CMDLINE_PARSE_RESULTS *pResults, OUT PBOOL pbResult)
 {
     if (!pResults->pidlPath ||
         (pResults->dwFlags & (SH_EXPLORER_CMDLINE_FLAG_SELECT | SH_EXPLORER_CMDLINE_FLAG_EMBED |
@@ -168,6 +168,18 @@ TryExecuteNonFolder(IN const EXPLORER_CMDLINE_PARSE_RESULTS *pResults, OUT PBOOL
         {
             return FALSE;
         }
+    }
+
+    /* As on Windows, hand the item to the running shell, which starts it (with SW_SHOWDEFAULT); this process exits */
+    if (GetShellWindow() && !(pResults->dwFlags & SH_EXPLORER_CMDLINE_FLAG_SEPARATE))
+    {
+        pResults->dwFlags |= SH_EXPLORER_CMDLINE_FLAG_EXECUTE;
+        if (SHCreateFromDesktop(pResults))
+        {
+            *pbResult = TRUE;
+            return TRUE;
+        }
+        pResults->dwFlags &= ~SH_EXPLORER_CMDLINE_FLAG_EXECUTE;
     }
 
     WCHAR szPath[MAX_PATH];

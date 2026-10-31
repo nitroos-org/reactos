@@ -549,6 +549,54 @@ extern "C" void WINAPI SHDestroyIETHREADPARAM(IEThreadParamBlock *param)
     LocalFree(param);
 }
 
+/* "explorer.exe <file>" with a running shell: the shell (not the new explorer.exe) starts the item, with
+ * SW_SHOWDEFAULT. It runs on a worker thread so a slow or modal launch does not block the shell's window procedure. */
+static DWORD WINAPI ExecuteThreadProc(LPVOID lpThreadParameter)
+{
+    IEThreadParamBlock * parameters = (IEThreadParamBlock *) lpThreadParameter;
+    WCHAR szPath[MAX_PATH];
+
+    OleInitialize(NULL);
+
+    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+    sei.fMask = SEE_MASK_NOASYNC;
+    sei.nShow = SW_SHOWDEFAULT;
+    if (SHGetPathFromIDListW(parameters->directoryPIDL, szPath))
+    {
+        sei.lpFile = szPath;
+    }
+    else
+    {
+        sei.fMask |= SEE_MASK_INVOKEIDLIST;
+        sei.lpIDList = parameters->directoryPIDL;
+    }
+    if (!ShellExecuteExW(&sei))
+        WARN("ShellExecuteExW failed %lu\n", GetLastError());
+
+    SHDestroyIETHREADPARAM(parameters);
+    OleUninitialize();
+    return 0;
+}
+
+static HRESULT ExecuteInShell(IEThreadParamBlock * parameters)
+{
+    if (!parameters->directoryPIDL)
+    {
+        SHDestroyIETHREADPARAM(parameters);
+        return E_INVALIDARG;
+    }
+
+    SHGetInstanceExplorer(&(parameters->pExplorerInstance));
+    HANDLE hThread = CreateThread(NULL, 0, ExecuteThreadProc, parameters, 0, NULL);
+    if (hThread)
+    {
+        CloseHandle(hThread);
+        return S_OK;
+    }
+    SHDestroyIETHREADPARAM(parameters);
+    return E_FAIL;
+}
+
 /*************************************************************************
 * SHOnCWMCommandLine			[BROWSEUI.127]
 */
@@ -557,6 +605,9 @@ extern "C" BOOL WINAPI SHOnCWMCommandLine(HANDLE hSharedInfo)
     TRACE("SHOnCWMCommandLine\n");
 
     PIE_THREAD_PARAM_BLOCK params = ParseSharedPacket(hSharedInfo);
+
+    if (params && (params->dwFlags & SH_EXPLORER_CMDLINE_FLAG_EXECUTE))
+        return SUCCEEDED(ExecuteInShell(params));
 
     if (params)
         return SHOpenFolderWindow(params);
@@ -677,6 +728,13 @@ BOOL WINAPI SHCreateFromDesktop(_In_ PEXPLORER_CMDLINE_PARSE_RESULTS parseResult
     HWND desktop = NULL;
     if (!(parseResults->dwFlags & SH_EXPLORER_CMDLINE_FLAG_SEPARATE))
         desktop = FindShellProxy(parameters->directoryPIDL);
+
+    // An item the shell has to run is no use to a window of our own: the caller runs it itself
+    if (!desktop && (parseResults->dwFlags & SH_EXPLORER_CMDLINE_FLAG_EXECUTE))
+    {
+        SHDestroyIETHREADPARAM(parameters);
+        return FALSE;
+    }
 
     // If found, ask it to open the new window
     if (desktop)
