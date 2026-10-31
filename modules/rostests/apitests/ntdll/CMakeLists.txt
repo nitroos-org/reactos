@@ -220,6 +220,7 @@ list(APPEND SOURCE
     SectionFaultCost.c
     strcpy_s.c
     RtlWaitOnAddress.c
+    RtlWow64GetProcessMachines.c
     RtlxUnicodeStringToAnsiSize.c
     RtlxUnicodeStringToOemSize.c
     BadSegmentFault.c

@@ -61,7 +61,6 @@ RtlpQuerySupportedArchitectures(
     _Out_opt_ PULONG ReturnLength)
 {
     SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION Machines[MAX_ARCHITECTURES + 1];
-    PROCESS_BASIC_INFORMATION BasicInfo;
     USHORT ProcessMachine = 0, NativeMachine;
     HANDLE ProcessHandle;
     NTSTATUS Status;
@@ -85,24 +84,17 @@ RtlpQuerySupportedArchitectures(
     /* A zero handle asks about no particular process: nothing gets the Process flag */
     if (ProcessHandle != NULL)
     {
-        /* Validate the handle (on a kernel without WOW64 the machine query does not look at it) */
-        if (ProcessHandle != NtCurrentProcess())
-        {
-            Status = NtQueryInformationProcess(ProcessHandle,
-                                               ProcessBasicInformation,
-                                               &BasicInfo,
-                                               sizeof(BasicInfo),
-                                               NULL);
-            if (!NT_SUCCESS(Status))
-            {
-                return Status;
-            }
-        }
-
+        /* The query validates the handle and needs PROCESS_QUERY_LIMITED_INFORMATION */
         Status = RtlWow64GetProcessMachines(ProcessHandle, &ProcessMachine, &NativeMachine);
         if (!NT_SUCCESS(Status))
         {
             return Status;
+        }
+
+        /* A native process answers 0: it runs as the machine the kernel runs on */
+        if (ProcessMachine == IMAGE_FILE_MACHINE_UNKNOWN)
+        {
+            ProcessMachine = NativeMachine;
         }
     }
 

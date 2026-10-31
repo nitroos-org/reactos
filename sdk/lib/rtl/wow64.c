@@ -20,17 +20,14 @@ RtlWow64GetProcessMachines(
     _Out_opt_ PUSHORT NativeMachine)
 {
     NTSTATUS Status;
-    ULONG_PTR Wow64Info;
+    ULONG_PTR Wow64Info = 0;
 
-    /* Check if the caller wants the current process */
-    if (ProcessHandle == NtCurrentProcess())
+    /* A NULL handle is not rejected, it reads as a native process (Windows 10 does the same).
+       Every other handle, the current process pseudo handle included, is validated by the
+       query: a bad handle, a thread or other object handle and a handle without
+       PROCESS_QUERY_LIMITED_INFORMATION fail, and nothing is written to the outputs then. */
+    if (ProcessHandle != NULL)
     {
-        /* Easy: process machine is current architecture */
-        *ProcessMachine  = IMAGE_FILE_MACHINE_NATIVE;
-    }
-    else if (SharedUserData->ImageNumberLow == IMAGE_FILE_MACHINE_AMD64)
-    {
-        /* Kernel architecture is AMD64, query whether the process is WOW64 */
         Status = NtQueryInformationProcess(ProcessHandle,
                                            ProcessWow64Information,
                                            &Wow64Info,
@@ -40,14 +37,10 @@ RtlWow64GetProcessMachines(
         {
             return Status;
         }
+    }
 
-        *ProcessMachine = Wow64Info ? IMAGE_FILE_MACHINE_I386 : IMAGE_FILE_MACHINE_AMD64;
-    }
-    else
-    {
-        /* kernel is something else, assume no WOW64 */
-        *ProcessMachine  = IMAGE_FILE_MACHINE_NATIVE;
-    }
+    /* The only guest machine is i386. A native process reports 0 (IMAGE_FILE_MACHINE_UNKNOWN) */
+    *ProcessMachine = Wow64Info ? IMAGE_FILE_MACHINE_I386 : IMAGE_FILE_MACHINE_UNKNOWN;
 
     if (NativeMachine != NULL)
     {
