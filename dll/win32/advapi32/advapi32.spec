@@ -557,7 +557,7 @@
 @ stdcall RegQueryValueExA(long str ptr ptr ptr ptr)
 @ stdcall RegQueryValueExW(long wstr ptr ptr ptr ptr)
 @ stdcall RegQueryValueW(long wstr ptr ptr)
-@ stdcall -stub -version=0x600+ RegRenameKey(long wstr wstr)
+@ stdcall -version=0x600+ RegRenameKey(long wstr wstr)
 @ stdcall RegReplaceKeyA(long str str str)
 @ stdcall RegReplaceKeyW(long wstr wstr wstr)
 @ stdcall RegRestoreKeyA(long str long)
