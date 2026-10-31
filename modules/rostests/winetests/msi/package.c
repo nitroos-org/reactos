@@ -3708,6 +3708,140 @@ static void test_states(void)
     DeleteFileA(msifile4);
 }
 
+static INSTALLSTATE tree_state( char c )
+{
+    switch (c)
+    {
+    case 'L': return INSTALLSTATE_LOCAL;
+    case 'S': return INSTALLSTATE_SOURCE;
+    case 'A': return INSTALLSTATE_ADVERTISED;
+    default:  return INSTALLSTATE_UNKNOWN;
+    }
+}
+
+/* Feature tree: P (parent, attributes as given) with children C (follow parent), D, S (favor source);
+ * G (follow parent) is a child of C; X is a second top level feature. The expected actions are
+ * listed in that order: P C D G S X. The components are optional (local or source). */
+static void test_tree_case( UINT line, int parent_attributes, const char *props, const char *expected )
+{
+    static const char *names[] = { "P", "C", "D", "G", "S", "X" };
+    static const char *parents[] = { "", "P", "P", "C", "P", "" };
+    static const int attributes[] = { 0, 2, 0, 2, 1, 0 };
+    char buf[512], list[128];
+    MSIHANDLE hdb, hpkg;
+    UINT r;
+    int i;
+
+    hdb = create_package_db();
+    ok( hdb, "%u: failed to create package database\n", line );
+
+    add_directory_entry( hdb, "'TARGETDIR', '', 'SourceDir'" );
+    create_property_table( hdb );
+    add_property_entry( hdb, "'ProductCode', '{7262AC98-EEBD-4364-8CE3-D654F6A425C1}'" );
+    add_property_entry( hdb, "'ProductLanguage', '1033'" );
+    add_property_entry( hdb, "'ProductName', 'MSITEST'" );
+    add_property_entry( hdb, "'ProductVersion', '1.1.1'" );
+    add_property_entry( hdb, "'UpgradeCode', '{3494EEEA-4221-4A66-802E-DED8916BC5C6}'" );
+
+    create_media_table( hdb );
+    add_media_entry( hdb, "'1', '6', '', '', 'DISK1', ''" );
+
+    create_feature_table( hdb );
+    create_component_table( hdb );
+    create_feature_components_table( hdb );
+    create_file_table( hdb );
+
+    for (i = 0; i < ARRAY_SIZE(names); i++)
+    {
+        sprintf( buf, "'%s', '%s', '', '', 2, 1, '', %d", names[i], parents[i], i ? attributes[i] : parent_attributes );
+        add_feature_entry( hdb, buf );
+        sprintf( buf, "'c%s', '{5A5A0000-0000-4000-8000-00000000000%d}', 'TARGETDIR', 2, '', 'f%s'", names[i], i + 1, names[i] );
+        add_component_entry( hdb, buf );
+        sprintf( buf, "'%s', 'c%s'", names[i], names[i] );
+        add_feature_components_entry( hdb, buf );
+        sprintf( buf, "'f%s', 'c%s', 'f%s.txt', 100, '', '1033', 8192, %d", names[i], names[i], names[i], i + 1 );
+        add_file_entry( hdb, buf );
+    }
+
+    r = MsiDatabaseCommit( hdb );
+    ok( r == ERROR_SUCCESS, "%u: failed to commit database %u\n", line, r );
+
+    strcpy( list, props );
+    for (char *tok = strtok( list, " " ); tok; tok = strtok( NULL, " " ))
+    {
+        char *eq = strchr( tok, '=' );
+        *eq = 0;
+        sprintf( buf, "'%s', '%s'", tok, eq + 1 );
+        add_property_entry( hdb, buf );
+    }
+
+    r = package_from_db( hdb, &hpkg );
+    if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+    {
+        skip( "Not enough rights to perform tests\n" );
+        MsiCloseHandle( hdb );
+        DeleteFileA( msifile );
+        return;
+    }
+    ok( r == ERROR_SUCCESS, "%u: failed to create package %u\n", line, r );
+    MsiCloseHandle( hdb );
+
+    MsiSetInternalUI( INSTALLUILEVEL_NONE, NULL );
+
+    r = MsiDoActionA( hpkg, "CostInitialize" );
+    ok( r == ERROR_SUCCESS, "%u: CostInitialize failed %u\n", line, r );
+    r = MsiDoActionA( hpkg, "FileCost" );
+    ok( r == ERROR_SUCCESS, "%u: FileCost failed %u\n", line, r );
+    r = MsiDoActionA( hpkg, "CostFinalize" );
+    ok( r == ERROR_SUCCESS, "%u: CostFinalize failed %u\n", line, r );
+
+    for (i = 0; i < ARRAY_SIZE(names); i++)
+    {
+        INSTALLSTATE state = 0xdeadbee, action = 0xdeadbee;
+
+        r = MsiGetFeatureStateA( hpkg, names[i], &state, &action );
+        ok( r == ERROR_SUCCESS, "%u: %s: failed to get the feature state %u\n", line, names[i], r );
+        ok( state == INSTALLSTATE_ABSENT, "%u: %s: expected state %d, got %d\n", line, names[i], INSTALLSTATE_ABSENT, state );
+        ok( action == tree_state( expected[i] ), "%u: [%d %s] %s: expected action %d, got %d\n", line,
+            parent_attributes, props, names[i], tree_state( expected[i] ), action );
+    }
+
+    MsiCloseHandle( hpkg );
+    DeleteFileA( msifile );
+}
+
+/* The expected actions are what Windows 10 reports for the same databases. */
+static void test_feature_tree_states(void)
+{
+    /* default selection: a feature follows its parent only when it says so, and nothing is
+       installed below an advertised feature */
+    test_tree_case( __LINE__, 0, "", "LLLLSL" );
+    test_tree_case( __LINE__, 1, "", "SSLSSL" );
+    test_tree_case( __LINE__, 4, "", "AAAAAL" );
+
+    /* the properties name the features: nothing follows its parent, the ancestors of a named
+       feature are installed the same way, removing a feature removes everything below it */
+    test_tree_case( __LINE__, 0, "ADDLOCAL=P", "LUUUUU" );
+    test_tree_case( __LINE__, 0, "ADDLOCAL=C", "LLUUUU" );
+    test_tree_case( __LINE__, 0, "ADDLOCAL=G", "LLULUU" );
+    test_tree_case( __LINE__, 0, "ADDLOCAL=D", "LULUUU" );
+    test_tree_case( __LINE__, 0, "ADDSOURCE=P", "SUUUUU" );
+    test_tree_case( __LINE__, 0, "ADDSOURCE=C", "SSUUUU" );
+    test_tree_case( __LINE__, 0, "ADDSOURCE=G", "SSUSUU" );
+    test_tree_case( __LINE__, 0, "ADVERTISE=C", "AAUUUU" );
+    test_tree_case( __LINE__, 0, "ADDLOCAL=ALL REMOVE=C", "LULULL" );
+    test_tree_case( __LINE__, 0, "ADDLOCAL=ALL REMOVE=P", "UUUUUL" );
+    test_tree_case( __LINE__, 0, "ADDLOCAL=ALL REMOVE=D", "LLULLL" );
+    test_tree_case( __LINE__, 0, "ADDLOCAL=C,D REMOVE=P", "UUUUUU" );
+    test_tree_case( __LINE__, 0, "ADDLOCAL=G REMOVE=C", "LUUUUU" );
+    test_tree_case( __LINE__, 0, "ADDSOURCE=ALL REMOVE=D", "SSSSSS" );
+    test_tree_case( __LINE__, 0, "ADDLOCAL=C ADDSOURCE=P", "SSUUUU" );
+    test_tree_case( __LINE__, 0, "ADDLOCAL=P ADDSOURCE=C", "LLUUUU" );
+    test_tree_case( __LINE__, 0, "ADDLOCAL=C ADVERTISE=P", "AAUUUU" );
+    test_tree_case( __LINE__, 1, "ADDLOCAL=D", "LULUUU" );
+    test_tree_case( __LINE__, 1, "ADDLOCAL=ALL", "LLLLLL" );
+}
+
 static void test_removefiles(void)
 {
     MSIHANDLE hpkg;
@@ -10080,6 +10214,7 @@ START_TEST(package)
     test_formatrecord2();
     test_formatrecord_tables();
     test_states();
+    test_feature_tree_states();
     test_removefiles();
     test_appsearch();
     test_appsearch_complocator();
