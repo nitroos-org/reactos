@@ -472,6 +472,64 @@ CmpReportNotify(IN PCM_KEY_CONTROL_BLOCK Kcb,
 
 VOID
 NTAPI
+CmpReportNotifyRename(IN PCM_KEY_CONTROL_BLOCK Kcb)
+{
+    LIST_ENTRY Matched;
+    PLIST_ENTRY Entry, Next;
+    PCM_NOTIFY_REQUEST Request;
+    PCM_KEY_CONTROL_BLOCK Parent;
+    BOOLEAN Match;
+    KIRQL OldIrql;
+
+    /*
+     * A renamed key, as measured on Windows: whatever waits on the key itself
+     * completes, whatever its filter or subtree; the parent, and a watched
+     * tree above it, see a name change.
+     */
+    if (IsListEmpty(&CmpNotifyList))
+        return;
+
+    InitializeListHead(&Matched);
+
+    KeAcquireSpinLock(&CmpNotifyLock, &OldIrql);
+    for (Entry = CmpNotifyList.Flink; Entry != &CmpNotifyList; Entry = Next)
+    {
+        Next = Entry->Flink;
+        Request = CONTAINING_RECORD(Entry, CM_NOTIFY_REQUEST, Link);
+
+        Match = (Request->Kcb == Kcb);
+        if (!Match && (Request->Filter & REG_NOTIFY_CHANGE_NAME))
+        {
+            if (Kcb->ParentKcb == Request->Kcb)
+            {
+                Match = TRUE;
+            }
+            else if (Request->WatchTree)
+            {
+                for (Parent = Kcb->ParentKcb; Parent; Parent = Parent->ParentKcb)
+                {
+                    if (Parent == Request->Kcb)
+                    {
+                        Match = TRUE;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (Match)
+        {
+            RemoveEntryList(&Request->Link);
+            InsertTailList(&Matched, &Request->Link);
+        }
+    }
+    KeReleaseSpinLock(&CmpNotifyLock, OldIrql);
+
+    CmpNotifyCompleteList(&Matched, STATUS_SUCCESS);
+}
+
+VOID
+NTAPI
 CmpFlushNotify(IN PCM_KEY_BODY KeyBody,
                IN BOOLEAN LockHeld)
 {

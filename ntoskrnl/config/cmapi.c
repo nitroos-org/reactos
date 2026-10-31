@@ -1928,6 +1928,211 @@ Quickie:
     return Status;
 }
 
+/*
+ * Renaming a key (NtRenameKey). The key keeps its values, class, security,
+ * subkeys and open handles; only its name changes, as on Windows.
+ *
+ * Hive: the key node is copied into a new cell that carries the new name. The
+ * new cell is linked into the parent's subkey index (which stays sorted by
+ * name, whatever its lf/lh/li/ri form) before the old one is unlinked, so a
+ * failure leaves the key as it was; then the children point at the new cell
+ * and the old one is freed. Every cell written is marked dirty while the
+ * registry is locked exclusively, and the flushers need the registry lock
+ * too, so a flush writes the whole change through the log or none of it.
+ *
+ * Cache: the KCB moves to the new cell and name block, and it and the cached
+ * KCBs below it are rehashed (CmpPrepareKcbRename); the open handles of the
+ * key and of its subkeys keep working, and report the new path.
+ */
+NTSTATUS
+NTAPI
+CmRenameKey(
+    _In_ PCM_KEY_CONTROL_BLOCK Kcb,
+    _In_ PCUNICODE_STRING NewName)
+{
+    NTSTATUS Status;
+    PHHIVE Hive;
+    PCM_KEY_CONTROL_BLOCK ParentKcb;
+    PCM_KEY_NODE OldNode, NewNode = NULL, ParentNode, ChildNode;
+    HCELL_INDEX OldCell, NewCell = HCELL_NIL, ParentCell, ChildCell;
+    CM_KCB_RENAME_CONTEXT Context;
+    LARGE_INTEGER TimeStamp;
+    ULONG i, ChildCount;
+    BOOLEAN Prepared = FALSE, Linked = FALSE;
+
+    /* Renaming moves cells and rehashes KCBs: nobody may look meanwhile */
+    CmpLockRegistryExclusive();
+
+    if (Kcb->Delete)
+    {
+        CmpUnlockRegistry();
+        return STATUS_KEY_DELETED;
+    }
+
+    /*
+     * The root of a hive is linked from another hive and the keys of the
+     * master hive (\REGISTRY and its children) hold the hives up: neither can
+     * be renamed. Windows denies the root of a hive with ACCESS_DENIED.
+     */
+    Hive = Kcb->KeyHive;
+    ParentKcb = Kcb->ParentKcb;
+    if (!ParentKcb ||
+        (ParentKcb->KeyHive != Hive) ||
+        (Hive == &CmiVolatileHive->Hive) ||
+        (Kcb->Flags & (KEY_HIVE_ENTRY | KEY_HIVE_EXIT | KEY_NO_DELETE)) ||
+        (Kcb->ExtFlags & CM_KCB_KEY_NON_EXIST))
+    {
+        CmpUnlockRegistry();
+        return STATUS_ACCESS_DENIED;
+    }
+
+    CmpLockHiveFlusherShared((PCMHIVE)Hive);
+
+    OldCell = Kcb->KeyCell;
+    ParentCell = ParentKcb->KeyCell;
+
+    /* The new name must not be taken: by the key itself or any sibling,
+     * stable or volatile, in any case */
+    ParentNode = (PCM_KEY_NODE)HvGetCell(Hive, ParentCell);
+    if (!ParentNode)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Quickie;
+    }
+    ChildCell = CmpFindSubKeyByName(Hive, ParentNode, NewName);
+    HvReleaseCell(Hive, ParentCell);
+    if (ChildCell != HCELL_NIL)
+    {
+        Status = STATUS_CANNOT_DELETE;
+        goto Quickie;
+    }
+
+    /* Get everything that can fail before the hive is touched */
+    Status = CmpPrepareKcbRename(Kcb, NewName, &Context);
+    if (!NT_SUCCESS(Status))
+        goto Quickie;
+    Prepared = TRUE;
+
+    NewCell = HvAllocateCell(Hive,
+                             FIELD_OFFSET(CM_KEY_NODE, Name) + CmpNameSize(Hive, NewName),
+                             HvGetCellType(OldCell),
+                             HCELL_NIL);
+    if (NewCell == HCELL_NIL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Quickie;
+    }
+
+    NewNode = (PCM_KEY_NODE)HvGetCell(Hive, NewCell);
+    OldNode = (PCM_KEY_NODE)HvGetCell(Hive, OldCell);
+    if (!NewNode || !OldNode)
+    {
+        if (OldNode) HvReleaseCell(Hive, OldCell);
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Quickie;
+    }
+    ASSERT(OldNode->Flags == Kcb->Flags);
+
+    /* Dirty what is rewritten: the old node, the parent and its index */
+    if (!HvMarkCellDirty(Hive, NewCell, FALSE) ||
+        !HvMarkCellDirty(Hive, OldCell, FALSE) ||
+        !HvMarkCellDirty(Hive, ParentCell, FALSE) ||
+        !CmpMarkIndexDirty(Hive, ParentCell, OldCell))
+    {
+        HvReleaseCell(Hive, OldCell);
+        Status = STATUS_NO_LOG_SPACE;
+        goto Quickie;
+    }
+
+    /* The new node: everything of the old one but the name. Neither the key's
+     * own write time nor the security cell's reference count changes. */
+    RtlCopyMemory(NewNode, OldNode, FIELD_OFFSET(CM_KEY_NODE, Name));
+    NewNode->Flags &= ~KEY_COMP_NAME;
+    NewNode->NameLength = CmpCopyName(Hive, NewNode->Name, NewName);
+    if (NewNode->NameLength < NewName->Length)
+        NewNode->Flags |= KEY_COMP_NAME;
+    HvReleaseCell(Hive, OldCell);
+
+    /* Link the new node first; on failure the old one is still in place */
+    if (!CmpAddSubKey(Hive, ParentCell, NewCell))
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Quickie;
+    }
+    Linked = TRUE;
+    if (!CmpRemoveSubKey(Hive, ParentCell, OldCell))
+    {
+        Status = STATUS_REGISTRY_CORRUPT;
+        goto Quickie;
+    }
+    Linked = FALSE;
+
+    /* The children now hang off the new node */
+    ChildCount = NewNode->SubKeyCounts[Stable] + NewNode->SubKeyCounts[Volatile];
+    for (i = 0; i < ChildCount; i++)
+    {
+        ChildCell = CmpFindSubKeyByNumber(Hive, NewNode, i);
+        if (ChildCell == HCELL_NIL)
+            continue;
+        ChildNode = (PCM_KEY_NODE)HvGetCell(Hive, ChildCell);
+        if (!ChildNode)
+            continue;
+        ASSERT(ChildNode->Parent == OldCell);
+        HvMarkCellDirty(Hive, ChildCell, FALSE);
+        ChildNode->Parent = NewCell;
+        HvReleaseCell(Hive, ChildCell);
+    }
+
+    /* The old node is gone; what it pointed to belongs to the new one */
+    HvFreeCell(Hive, OldCell);
+
+    /* The parent: its name list changed */
+    ParentNode = (PCM_KEY_NODE)HvGetCell(Hive, ParentCell);
+    if (ParentNode)
+    {
+        if (ParentNode->MaxNameLen < NewName->Length)
+        {
+            ParentNode->MaxNameLen = NewName->Length;
+            ParentKcb->KcbMaxNameLen = NewName->Length;
+        }
+        KeQuerySystemTime(&TimeStamp);
+        ParentNode->LastWriteTime = TimeStamp;
+        ParentKcb->KcbLastWriteTime = TimeStamp;
+        HvReleaseCell(Hive, ParentCell);
+    }
+    CmpCleanUpSubKeyInfo(ParentKcb);
+
+    /* The KCB follows the node, and the KCBs below it the new path */
+    Kcb->Flags = NewNode->Flags;
+    CmpCommitKcbRename(Kcb, NewCell, &Context);
+    Prepared = FALSE;
+
+    HvReleaseCell(Hive, NewCell);
+    NewNode = NULL;
+    NewCell = HCELL_NIL;
+
+    /* As on Windows: the parent (and a watched tree above) sees a name
+     * change, and whatever waits on the key itself completes */
+    CmpReportNotifyRename(Kcb);
+    Status = STATUS_SUCCESS;
+
+Quickie:
+    if (NewNode)
+        HvReleaseCell(Hive, NewCell);
+    if (Linked)
+    {
+        /* Take the new node out of the index again */
+        CmpRemoveSubKey(Hive, ParentCell, NewCell);
+    }
+    if (NewCell != HCELL_NIL)
+        HvFreeCell(Hive, NewCell);
+    if (Prepared)
+        CmpAbortKcbRename(&Context);
+    CmpUnlockHiveFlusher((PCMHIVE)Hive);
+    CmpUnlockRegistry();
+    return Status;
+}
+
 NTSTATUS
 NTAPI
 CmFlushKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
