@@ -45,8 +45,8 @@
 @ stub LsaUnregisterPolicyChangeNotification
 @ stdcall MakeSignature(ptr long ptr long) secur32.MakeSignature
 @ stdcall QueryContextAttributesA(ptr long ptr) secur32.QueryContextAttributesA
-@ stub QueryContextAttributesExA
-@ stub QueryContextAttributesExW
+@ stdcall QueryContextAttributesExA(ptr long ptr long)
+@ stdcall QueryContextAttributesExW(ptr long ptr long)
 @ stdcall QueryContextAttributesW(ptr long ptr) secur32.QueryContextAttributesW
 @ stdcall QueryCredentialsAttributesA(ptr long ptr) secur32.QueryCredentialsAttributesA
 @ stub QueryCredentialsAttributesExA
