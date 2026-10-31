@@ -1771,6 +1771,38 @@ HRESULT put_propval( const struct view *view, UINT index, const WCHAR *name, VAR
     return set_value( table, row, column, val, type );
 }
 
+#ifdef __REACTOS__
+/* the system properties, in the order Windows lists them (all are served by get_system_propval) */
+static const WCHAR * const system_prop_names[] =
+{
+    L"__GENUS", L"__CLASS", L"__SUPERCLASS", L"__DYNASTY", L"__RELPATH", L"__PROPERTY_COUNT",
+    L"__DERIVATION", L"__SERVER", L"__NAMESPACE", L"__PATH"
+};
+
+#define WBEM_SYSTEM_ONLY_MASK 0x30 /* WBEM_FLAG_SYSTEM_ONLY is 0x30, WBEM_FLAG_LOCAL_ONLY is 0x10 */
+
+/* the number of names get_properties returns for flags: the array must not be larger than what is
+ * filled in (the unused elements are NULL names) */
+static UINT count_reported_properties( const struct view *view, const struct table *table, LONG flags )
+{
+    UINT i, count = 0;
+
+    if ((flags & WBEM_SYSTEM_ONLY_MASK) == WBEM_SYSTEM_ONLY_MASK) count = ARRAY_SIZE( system_prop_names );
+    for (i = 0; i < table->num_cols; i++)
+    {
+        BOOL is_system;
+
+        if (is_method( table, i )) continue;
+        if (!is_result_prop( view, table->columns[i].name )) continue;
+        is_system = is_system_prop( table->columns[i].name );
+        if ((flags & WBEM_FLAG_NONSYSTEM_ONLY) && is_system) continue;
+        else if ((flags & WBEM_FLAG_SYSTEM_ONLY) && !is_system) continue;
+        count++;
+    }
+    return count;
+}
+#endif
+
 HRESULT get_properties( const struct view *view, UINT index, LONG flags, SAFEARRAY **props )
 {
     SAFEARRAY *sa;
@@ -1782,10 +1814,14 @@ HRESULT get_properties( const struct view *view, UINT index, LONG flags, SAFEARR
 
     if ((hr = map_view_index( view, index, &table_index, &result_index )) != S_OK) return hr;
 
+    table = view->table[table_index];
+#ifdef __REACTOS__
+    num_props = count_reported_properties( view, table, flags );
+#else
     num_props = count_result_properties( view, table_index );
+#endif
     if (!(sa = SafeArrayCreateVector( VT_BSTR, 0, num_props ))) return E_OUTOFMEMORY;
 
-    table = view->table[table_index];
 #ifdef __REACTOS__
     {
         /* in the order Windows reports the properties of the class */
@@ -1796,7 +1832,23 @@ HRESULT get_properties( const struct view *view, UINT index, LONG flags, SAFEARR
             return E_OUTOFMEMORY;
         }
         get_column_order( table, order );
-        for (n = 0, j = 0; n < table->num_cols; n++)
+        j = 0;
+        if ((flags & WBEM_SYSTEM_ONLY_MASK) == WBEM_SYSTEM_ONLY_MASK)
+        {
+            for (n = 0; n < ARRAY_SIZE( system_prop_names ); n++, j++)
+            {
+                str = SysAllocString( system_prop_names[n] );
+                if (!str || SafeArrayPutElement( sa, &j, str ) != S_OK)
+                {
+                    SysFreeString( str );
+                    SafeArrayDestroy( sa );
+                    heap_free( order );
+                    return E_OUTOFMEMORY;
+                }
+                SysFreeString( str );
+            }
+        }
+        for (n = 0; n < table->num_cols; n++)
         {
             BOOL is_system;
 

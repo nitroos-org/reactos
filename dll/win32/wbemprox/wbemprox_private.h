@@ -217,6 +217,9 @@ struct path
     UINT   class_len;
     WCHAR *filter;
     UINT   filter_len;
+#ifdef __REACTOS__
+    BOOL   singleton; /* "Class=@": the one instance of the class */
+#endif
 };
 
 HRESULT parse_path( const WCHAR *, struct path ** ) DECLSPEC_HIDDEN;
