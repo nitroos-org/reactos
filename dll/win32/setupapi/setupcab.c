@@ -659,6 +659,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
         break;
     case DLL_PROCESS_DETACH:
         if (lpvReserved) break;
+        CmNotifyShutdown();
         SetupCloseLog();
         if (CABINET_hInstance) FreeLibrary(CABINET_hInstance);
         break;

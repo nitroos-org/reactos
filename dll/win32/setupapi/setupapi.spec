@@ -15,7 +15,7 @@
 @ stdcall CM_Add_Range(int64 int64 ptr long)
 @ stdcall CM_Add_Res_Des(ptr ptr long ptr long long)
 @ stdcall CM_Add_Res_Des_Ex(ptr ptr long ptr long long ptr)
-@ stub -version=0x600+ CM_Apply_PowerScheme
+@ stdcall -version=0x600+ CM_Apply_PowerScheme()
 @ stdcall CM_Connect_MachineA(str ptr)
 @ stdcall CM_Connect_MachineW(wstr ptr)
 @ stdcall CM_Create_DevNodeA(ptr str long long)
@@ -27,11 +27,11 @@
 @ stdcall CM_Delete_Class_Key_Ex(ptr long ptr)
 @ stdcall CM_Delete_DevNode_Key(long long long)
 @ stdcall CM_Delete_DevNode_Key_Ex(long long long ptr)
-@ stub -version=0x600+ CM_Delete_Device_Interface_KeyA
-@ stub -version=0x600+ CM_Delete_Device_Interface_KeyW
-@ stub -version=0x600+ CM_Delete_Device_Interface_Key_ExA
-@ stub -version=0x600+ CM_Delete_Device_Interface_Key_ExW
-@ stub -version=0x600+ CM_Delete_PowerScheme
+@ stdcall -version=0x600+ CM_Delete_Device_Interface_KeyA(str long)
+@ stdcall -version=0x600+ CM_Delete_Device_Interface_KeyW(wstr long)
+@ stdcall -version=0x600+ CM_Delete_Device_Interface_Key_ExA(str long ptr)
+@ stdcall -version=0x600+ CM_Delete_Device_Interface_Key_ExW(wstr long ptr)
+@ stdcall -version=0x600+ CM_Delete_PowerScheme(long long)
 @ stdcall CM_Delete_Range(int64 int64 ptr long)
 @ stdcall CM_Detect_Resource_Conflict(long long ptr long ptr long)
 @ stdcall CM_Detect_Resource_Conflict_Ex(long long ptr long ptr long ptr)
@@ -39,7 +39,7 @@
 @ stdcall CM_Disable_DevNode_Ex(long long ptr)
 @ stdcall CM_Disconnect_Machine(ptr)
 @ stdcall CM_Dup_Range_List(ptr ptr long)
-@ stub -version=0x600+ CM_Duplicate_PowerScheme
+@ stdcall -version=0x600+ CM_Duplicate_PowerScheme(long long long)
 @ stdcall CM_Enable_DevNode(long long)
 @ stdcall CM_Enable_DevNode_Ex(long long ptr)
 @ stdcall CM_Enumerate_Classes(long ptr long)
@@ -82,6 +82,18 @@
 @ stdcall CM_Get_DevNode_Registry_Property_ExW(long long ptr ptr ptr long ptr)
 @ stdcall -version=0x600+ CM_Get_DevNode_PropertyW(long ptr ptr ptr ptr long)
 @ stdcall -version=0x600+ CM_Get_DevNode_Property_ExW(long ptr ptr ptr ptr long ptr)
+@ stdcall -version=0x600+ CM_MapCrToWin32Err(long long)
+@ stdcall -version=0x600+ CM_MapCrToSpErr(long long)
+@ stdcall -version=0x600+ CM_Get_DevNode_Property_Keys(long ptr ptr long)
+@ stdcall -version=0x600+ CM_Get_DevNode_Property_Keys_Ex(long ptr ptr long ptr)
+@ stdcall -version=0x600+ CM_Get_Device_Interface_PropertyW(wstr ptr ptr ptr ptr long)
+@ stdcall -version=0x600+ CM_Get_Device_Interface_Property_ExW(wstr ptr ptr ptr ptr long ptr)
+@ stdcall -version=0x600+ CM_Get_Device_Interface_Property_KeysW(wstr ptr ptr long)
+@ stdcall -version=0x600+ CM_Get_Device_Interface_Property_Keys_ExW(wstr ptr ptr long ptr)
+@ stdcall -version=0x600+ CM_Get_Class_PropertyW(ptr ptr ptr ptr ptr long)
+@ stdcall -version=0x600+ CM_Get_Class_Property_ExW(ptr ptr ptr ptr ptr long ptr)
+@ stdcall -version=0x600+ CM_Get_Class_Property_Keys(ptr ptr ptr long)
+@ stdcall -version=0x600+ CM_Get_Class_Property_Keys_Ex(ptr ptr ptr long ptr)
 @ stdcall CM_Get_DevNode_Status(ptr ptr long long)
 @ stdcall CM_Get_DevNode_Status_Ex(ptr ptr long long ptr)
 @ stdcall CM_Get_Device_IDA(long str long long)
@@ -141,7 +153,7 @@
 @ stdcall CM_Get_Sibling_Ex(ptr long long ptr)
 @ stdcall CM_Get_Version()
 @ stdcall CM_Get_Version_Ex(ptr)
-@ stub -version=0x600+ CM_Import_PowerScheme
+@ stdcall -version=0x600+ CM_Import_PowerScheme(long long long)
 @ stub -version=0x600+ CM_Install_DevNodeW
 @ stub -version=0x600+ CM_Install_DevNode_ExW
 @ stdcall CM_Intersect_Range_List(ptr ptr ptr long)
@@ -166,10 +178,10 @@
 @ stdcall CM_Open_Class_Key_ExW(ptr wstr long long ptr long ptr)
 @ stdcall CM_Open_DevNode_Key(ptr long long long ptr long)
 @ stdcall CM_Open_DevNode_Key_Ex(ptr long long long ptr long ptr)
-@ stub -version=0x600+ CM_Open_Device_Interface_KeyA
-@ stub -version=0x600+ CM_Open_Device_Interface_KeyW
-@ stub -version=0x600+ CM_Open_Device_Interface_Key_ExA
-@ stub -version=0x600+ CM_Open_Device_Interface_Key_ExW
+@ stdcall -version=0x600+ CM_Open_Device_Interface_KeyA(str long long ptr long)
+@ stdcall -version=0x600+ CM_Open_Device_Interface_KeyW(wstr long long ptr long)
+@ stdcall -version=0x600+ CM_Open_Device_Interface_Key_ExA(str long long ptr long ptr)
+@ stdcall -version=0x600+ CM_Open_Device_Interface_Key_ExW(wstr long long ptr long ptr)
 @ stdcall CM_Query_And_Remove_SubTreeA(long ptr str long long)
 @ stdcall CM_Query_And_Remove_SubTreeW(long ptr wstr long long)
 @ stdcall CM_Query_And_Remove_SubTree_ExA(long ptr str long long ptr)
@@ -198,11 +210,11 @@
 @ stdcall CM_Request_Device_Eject_ExW(long ptr wstr long long ptr)
 @ stdcall CM_Request_Eject_PC()
 @ stdcall CM_Request_Eject_PC_Ex(ptr)
-@ stub -version=0x600+ CM_RestoreAll_DefaultPowerSchemes
-@ stub -version=0x600+ CM_Restore_DefaultPowerScheme
+@ stdcall -version=0x600+ CM_RestoreAll_DefaultPowerSchemes(long)
+@ stdcall -version=0x600+ CM_Restore_DefaultPowerScheme(long long)
 @ stdcall CM_Run_Detection(long)
 @ stdcall CM_Run_Detection_Ex(long ptr)
-@ stub -version=0x600+ CM_Set_ActiveScheme
+@ stdcall -version=0x600+ CM_Set_ActiveScheme(long long)
 @ stdcall CM_Set_Class_Registry_PropertyA(ptr long ptr long long ptr)
 @ stdcall CM_Set_Class_Registry_PropertyW(ptr long ptr long long ptr)
 @ stdcall CM_Set_DevNode_Problem(long long long)
@@ -227,7 +239,7 @@
 @ stdcall CM_Unregister_Device_Interface_ExA(str long ptr)
 @ stdcall CM_Unregister_Device_Interface_ExW(wstr long ptr)
 @ stdcall CM_Unregister_Notification(ptr)
-@ stub -version=0x600+ CM_Write_UserPowerKey
+@ stdcall -version=0x600+ CM_Write_UserPowerKey(long long long long long long long long)
 @ stdcall DoesUserHavePrivilege(wstr)
 @ stub -version=0x600+ DriverStoreAddDriverPackageA
 @ stub -version=0x600+ DriverStoreAddDriverPackageW
@@ -349,10 +361,10 @@
 @ stdcall SetupDiGetClassImageListExW(ptr wstr ptr)
 @ stdcall SetupDiGetClassInstallParamsA(ptr ptr ptr long ptr)
 @ stdcall SetupDiGetClassInstallParamsW(ptr ptr ptr long ptr)
-@ stub -version=0x600+ SetupDiGetClassPropertyExW
-@ stub -version=0x600+ SetupDiGetClassPropertyKeys
-@ stub -version=0x600+ SetupDiGetClassPropertyKeysExW
-@ stub -version=0x600+ SetupDiGetClassPropertyW
+@ stdcall -version=0x600+ SetupDiGetClassPropertyExW(ptr ptr ptr ptr long ptr long wstr ptr)
+@ stdcall -version=0x600+ SetupDiGetClassPropertyKeys(ptr ptr long ptr long)
+@ stdcall -version=0x600+ SetupDiGetClassPropertyKeysExW(ptr ptr long ptr long wstr ptr)
+@ stdcall -version=0x600+ SetupDiGetClassPropertyW(ptr ptr ptr ptr long ptr long)
 @ stdcall SetupDiGetClassRegistryPropertyA(ptr long ptr ptr long ptr str ptr)
 @ stdcall SetupDiGetClassRegistryPropertyW(ptr long ptr ptr long ptr wstr ptr)
 @ stdcall SetupDiGetCustomDevicePropertyA(ptr ptr str long ptr ptr long ptr)
@@ -367,9 +379,9 @@
 @ stdcall SetupDiGetDeviceInterfaceAlias(ptr ptr ptr ptr)
 @ stdcall SetupDiGetDeviceInterfaceDetailA(long ptr ptr long ptr ptr)
 @ stdcall SetupDiGetDeviceInterfaceDetailW(long ptr ptr long ptr ptr)
-@ stub -version=0x600+ SetupDiGetDeviceInterfacePropertyKeys
-@ stub -version=0x600+ SetupDiGetDeviceInterfacePropertyW
-@ stub -version=0x600+ SetupDiGetDevicePropertyKeys
+@ stdcall -version=0x600+ SetupDiGetDeviceInterfacePropertyKeys(ptr ptr ptr long ptr long)
+@ stdcall -version=0x600+ SetupDiGetDeviceInterfacePropertyW(ptr ptr ptr ptr ptr long ptr long)
+@ stdcall -version=0x600+ SetupDiGetDevicePropertyKeys(ptr ptr ptr long ptr long)
 @ stdcall -version=0x600+ SetupDiGetDevicePropertyW(ptr ptr ptr ptr ptr long ptr long)
 @ stdcall SetupDiGetDeviceRegistryPropertyA(long ptr long ptr ptr long ptr)
 @ stdcall SetupDiGetDeviceRegistryPropertyW(long ptr long ptr ptr long ptr)
@@ -693,3 +705,4 @@
 @ stub pSetupWriteLogError
 @ stub -version=0x600 pSpAddInboxDriverPackage # Vista only
 @ stub -version=0x600 pSpDeleteInboxDriverPackage # Vista only
+@ stdcall -version=0x600+ CMP_RegisterServiceNotification(long long long long)

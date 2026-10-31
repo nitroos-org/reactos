@@ -5721,7 +5721,8 @@ PNP_GetVersionInternal(
 {
     UNREFERENCED_PARAMETER(hBinding);
 
-    *pwVersion = WINVER;
+    /* The version of the configuration manager of Windows 10, which CM_Is_Version_Available accepts up to (measured) */
+    *pwVersion = 0x0A00;
     return CR_SUCCESS;
 }
 
