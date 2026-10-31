@@ -1037,7 +1037,6 @@ co_IntSetActiveWindow(
    PTHREADINFO pti;
    PUSER_MESSAGE_QUEUE ThreadQueue;
    PWND pWndChg, WndPrev; // State changes.
-   HWND hWndPrev;
    HWND hWnd = 0;
    BOOL InAAPM;
    CBTACTIVATESTRUCT cbt;
@@ -1049,7 +1048,6 @@ co_IntSetActiveWindow(
    ASSERT(ThreadQueue != 0);
 
    pWndChg = ThreadQueue->spwndActive; // Keep to notify of a preemptive switch.
-   hWndPrev = (pWndChg ? UserHMGetHandle(pWndChg) : NULL);
 
    if ( !Wnd || Wnd == UserGetDesktopWindow() )
    {
@@ -1087,7 +1085,8 @@ co_IntSetActiveWindow(
 
    /* Call CBT hook chain */
    cbt.fMouse     = bMouse;
-   cbt.hWndActive = hWndPrev;
+   /* Windows gives the hook the window that is being activated, not the one that was active */
+   cbt.hWndActive = hWnd;
    if (co_HOOK_CallHooks( WH_CBT, HCBT_ACTIVATE, (WPARAM)hWnd, (LPARAM)&cbt))
    {
       ERR("SetActiveWindow: WH_CBT Call Hook return!\n");
