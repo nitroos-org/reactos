@@ -110,6 +110,7 @@ list(APPEND SOURCE
     WinEventHook.c
     WmPrint.c
     WndProc.c
+    PhysicalCoords.c
     wsprintf.c)
 
 list(APPEND PCH_SKIP_SOURCE
