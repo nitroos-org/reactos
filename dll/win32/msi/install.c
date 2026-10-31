@@ -1421,6 +1421,10 @@ static UINT MSI_SetComponentStateW(MSIPACKAGE *package, LPCWSTR szComponent,
     if (!comp)
         return ERROR_UNKNOWN_COMPONENT;
 
+    /* nothing to remove when the component is not installed: Windows keeps no action for it */
+    if (iState == INSTALLSTATE_ABSENT && comp->Installed == INSTALLSTATE_UNKNOWN)
+        iState = INSTALLSTATE_UNKNOWN;
+
     if (comp->Enabled)
         comp->Action = iState;
 

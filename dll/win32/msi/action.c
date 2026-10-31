@@ -1652,18 +1652,12 @@ UINT MSI_SetFeatureStates(MSIPACKAGE *package)
         {
             if (!is_feature_selected( feature, level )) continue;
 
+            /* a preselected product leaves the features the properties do not name alone: Windows
+               reports no action for them (their installed components are kept by the component pass) */
             if (feature->ActionRequest == INSTALLSTATE_UNKNOWN)
             {
-                if (feature->Installed == INSTALLSTATE_ABSENT)
-                {
-                    feature->Action = INSTALLSTATE_UNKNOWN;
-                    feature->ActionRequest = INSTALLSTATE_UNKNOWN;
-                }
-                else
-                {
-                    feature->Action = feature->Installed;
-                    feature->ActionRequest = feature->Installed;
-                }
+                feature->Action = INSTALLSTATE_UNKNOWN;
+                feature->ActionRequest = INSTALLSTATE_UNKNOWN;
             }
         }
     }
@@ -1773,6 +1767,29 @@ UINT MSI_SetFeatureStates(MSIPACKAGE *package)
                 feature->Action = INSTALLSTATE_LOCAL;
                 feature->ActionRequest = INSTALLSTATE_LOCAL;
                 break;
+            }
+        }
+
+        /* a feature whose components all have to be installed from the source can only be installed
+           from the source, whatever was asked for */
+        if (feature->ActionRequest == INSTALLSTATE_LOCAL && !list_empty( &feature->Components ))
+        {
+            BOOL all_source = TRUE;
+
+            LIST_FOR_EACH_ENTRY( cl, &feature->Components, ComponentList, entry )
+            {
+                if (!(cl->component->Attributes & msidbComponentAttributesSourceOnly) ||
+                    (cl->component->Attributes & msidbComponentAttributesOptional) ||
+                    cl->component->ForceLocalState)
+                {
+                    all_source = FALSE;
+                    break;
+                }
+            }
+            if (all_source)
+            {
+                feature->Action = INSTALLSTATE_SOURCE;
+                feature->ActionRequest = INSTALLSTATE_SOURCE;
             }
         }
 
