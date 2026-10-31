@@ -65,6 +65,29 @@ static BOOL CheckSize(ULONG Address, ULONG Size)
     return TRUE;
 }
 
+/* 0 when a guest hook may target ThreadId (0: global), else the Win32 error */
+static ULONG HookThreadError(ULONG ThreadId)
+{
+    OBJECT_ATTRIBUTES Attributes;
+    CLIENT_ID Client;
+    THREAD_BASIC_INFORMATION Info;
+    HANDLE Thread;
+    NTSTATUS Status;
+    if (!ThreadId || ThreadId == HandleToUlong(NtCurrentTeb()->ClientId.UniqueThread)) return 0;
+    InitializeObjectAttributes(&Attributes, NULL, 0, NULL, NULL);
+    Client.UniqueProcess = NULL;
+    Client.UniqueThread = UlongToHandle(ThreadId);
+    Status = NtOpenThread(&Thread, THREAD_QUERY_INFORMATION, &Attributes, &Client);
+    /* win32k's error for a thread that does not exist */
+    if (Status == STATUS_INVALID_CID || Status == STATUS_INVALID_PARAMETER) return ERROR_INVALID_PARAMETER;
+    if (!NT_SUCCESS(Status)) return ERROR_CALL_NOT_IMPLEMENTED;
+    Status = NtQueryInformationThread(Thread, ThreadBasicInformation, &Info, sizeof(Info), NULL);
+    NtClose(Thread);
+    if (!NT_SUCCESS(Status) || Info.ClientId.UniqueProcess != NtCurrentTeb()->ClientId.UniqueProcess)
+        return ERROR_CALL_NOT_IMPLEMENTED;
+    return 0;
+}
+
 static ULONG_PTR SystemParameters(ULONG *a)
 {
     switch (a[0])
@@ -147,13 +170,18 @@ ULONG_PTR Wow64WinExtraService(ULONG Number, ULONG *a)
     case W64_NtUserSetWindowsHookEx:
     {
         UNICODE_STRING Module;
-        /* A guest procedure must never be installed on a native thread.
-         * Cross-thread/global hooks need a separate bitness-aware dispatcher. */
-        if (a[2] != HandleToUlong(NtCurrentTeb()->ClientId.UniqueThread) ||
-            ((INT)a[3] != WH_CALLWNDPROC && (INT)a[3] != WH_CALLWNDPROCRET &&
-             (INT)a[3] != WH_GETMESSAGE))
+        ULONG Error;
+        /* callback.c translates every family win32k calls back with
+         * (win32k never calls journal or WH_DEBUG procedures), and win32k
+         * gives the errors for the hook id. A guest procedure must run only
+         * on guest threads: this process's threads, which a global hook also
+         * reaches (low-level, mouse and keyboard hooks run on the setter's
+         * thread). Threads of another process need the bitness-aware
+         * cross-process path. */
+        Error = HookThreadError(a[2]);
+        if (Error)
         {
-            RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED);
+            RtlSetLastWin32Error(Error);
             return 0;
         }
         if (a[1]) StringIn(&Module, a[1]);
