@@ -576,6 +576,9 @@ CNetConnectionManager::EnumerateINetConnections()
     if (dwResult!= ERROR_BUFFER_OVERFLOW)
     {
         CoTaskMemFree(pIfTable);
+        /* No adapters at all is not a failure: there is just nothing to list */
+        if (dwResult == ERROR_NO_DATA)
+            return S_FALSE;
         return HRESULT_FROM_WIN32(dwResult);
     }
 
