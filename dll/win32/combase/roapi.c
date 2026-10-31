@@ -496,6 +496,37 @@ HRESULT WINAPI RoRegisterActivationFactories(HSTRING *classes, PFNGETACTIVATIONF
 #endif
 }
 
+#if DLL_EXPORT_VERSION >= 0x601
+VOID WINAPI RaiseFailFastException(PEXCEPTION_RECORD record, PCONTEXT context, DWORD flags);
+#endif
+
+/***********************************************************************
+ *      RoRevokeActivationFactories (combase.@)
+ *
+ * Nothing to take back: RoRegisterActivationFactories fails and gives out no cookie. A cookie that is not one
+ * of a registration is ignored (Windows does not check it either).
+ */
+void WINAPI RoRevokeActivationFactories(RO_REGISTRATION_COOKIE cookie)
+{
+    FIXME("(%p): stub\n", cookie);
+}
+
+/***********************************************************************
+ *      RoFailFastWithErrorContext (combase.@)
+ *
+ * Ends the process like RaiseFailFastException does (STATUS_FAIL_FAST_EXCEPTION, no handler runs and no
+ * exit code of its own); Windows first reports the error and its context to the error reporting.
+ */
+void WINAPI RoFailFastWithErrorContext(HRESULT hr)
+{
+    FIXME("(%#lx): the error context is not reported\n", hr);
+#if DLL_EXPORT_VERSION >= 0x601
+    RaiseFailFastException(NULL, NULL, 0);
+#else
+    RaiseException(0xC0000602 /* STATUS_FAIL_FAST_EXCEPTION */, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
+}
+
 /***********************************************************************
  *      GetRestrictedErrorInfo (combase.@)
  */
