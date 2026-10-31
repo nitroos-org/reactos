@@ -11,6 +11,9 @@ if "%errorlevel%"=="1" (
     exit 0
 )
 
+:: Nobody answers a crash dialog during an automated run; the crash is still reported and the program ends with its exception code.
+reg add "HKLM\Software\Microsoft\Windows\Windows Error Reporting" /v DontShowUI /t REG_DWORD /d 1 /f
+
 move "%WINDIR%\bin\redirtest1.dll" "%WINDIR%\bin\kernel32test_versioned.dll"
 move "%WINDIR%\bin\testdata\redirtest2.dll" "%WINDIR%\bin\testdata\kernel32test_versioned.dll"
 if exist "%WINDIR%\bin\AHKAppTests.cmd" (
