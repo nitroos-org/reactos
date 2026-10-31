@@ -149,6 +149,7 @@ extern void func_PowerRequest(void);
 extern void func_PrefetchVirtualMemory(void);
 extern void func_PrivMoveFileIdentityW(void);
 extern void func_ProcessAffinity(void);
+extern void func_ProcessorNumber(void);
 extern void func_ProcessInformation(void);
 extern void func_ProcessMitigationPolicy(void);
 extern void func_PssSnapshot(void);
@@ -357,6 +358,7 @@ const struct test winetest_testlist[] =
     { "PssSnapshot",                 func_PssSnapshot },
     { "ProcThreadMitigation",        func_ProcThreadMitigation },
     { "ProcessAffinity",             func_ProcessAffinity },
+    { "ProcessorNumber",             func_ProcessorNumber },
     { "ProcessInformation",         func_ProcessInformation },
     { "QueryCycleTime",              func_QueryCycleTime },
     { "QueryUnbiasedInterruptTime",  func_QueryUnbiasedInterruptTime },
