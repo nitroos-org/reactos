@@ -120,6 +120,7 @@ typedef struct tagMSIDATABASE
     MSISTREAM *streams;
     UINT num_streams;
     UINT num_streams_allocated;
+    BOOL empty_package; /* the database of MsiOpenPackage(""): no storage, no _Streams, no summary information */
 } MSIDATABASE;
 
 typedef struct tagMSIVIEW MSIVIEW;
@@ -488,6 +489,7 @@ typedef struct tagMSIPACKAGE
     unsigned char need_reboot_at_end : 1;
     unsigned char need_reboot_now : 1;
     unsigned char need_rollback : 1;
+    unsigned char user_cancelled : 1;
     unsigned char install_validated : 1;
     unsigned char rpc_server_started : 1;
 #ifdef __REACTOS__
@@ -915,6 +917,7 @@ extern UINT MSI_SetInstallLevel( MSIPACKAGE *package, int iInstallLevel );
 
 /* package internals */
 #define WINE_OPENPACKAGEFLAGS_RECACHE 0x80000000
+#define ROS_OPENPACKAGEFLAGS_INSTALL  0x40000000
 extern MSIPACKAGE *MSI_CreatePackage( MSIDATABASE * );
 extern UINT MSI_OpenPackageW( LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage );
 extern UINT MSI_SetTargetPathW( MSIPACKAGE *, LPCWSTR, LPCWSTR );
@@ -1153,6 +1156,10 @@ extern BOOL msi_move_file( MSIPACKAGE *, const WCHAR *, const WCHAR *, DWORD );
 extern DWORD msi_get_file_version_info( MSIPACKAGE *, const WCHAR *, DWORD, BYTE * );
 extern BOOL msi_create_full_path( MSIPACKAGE *, const WCHAR * );
 extern void msi_rollback_record_file( MSIPACKAGE *, const WCHAR * );
+extern void msi_rollback_record_move( MSIPACKAGE *, const WCHAR *, const WCHAR * );
+extern void msi_rollback_record_key( MSIPACKAGE *, HKEY, const WCHAR *, REGSAM );
+extern void msi_rollback_record_value( MSIPACKAGE *, HKEY, const WCHAR *, REGSAM, const WCHAR *, const BYTE *, DWORD, DWORD );
+extern void msi_rollback_cleanup_stale( MSIPACKAGE * );
 extern void msi_rollback_finish( MSIPACKAGE *, BOOL );
 extern DWORD msi_get_disk_file_size( MSIPACKAGE *, const WCHAR * );
 extern VS_FIXEDFILEINFO *msi_get_disk_file_version( MSIPACKAGE *, const WCHAR * );

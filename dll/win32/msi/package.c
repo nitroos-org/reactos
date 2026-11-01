@@ -1846,6 +1846,9 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
     MSI_RecordSetInteger(data_row, 2, package->num_langids ? package->langids[0] : 0);
     MSI_RecordSetInteger(data_row, 3, msi_get_string_table_codepage(package->db->strings));
     MSI_ProcessMessageVerbatim(package, INSTALLMESSAGE_COMMONDATA, data_row);
+    /* MsiInstallProduct sends the common data twice (the second one stands for the progress) */
+    if (dwOptions & ROS_OPENPACKAGEFLAGS_INSTALL)
+        MSI_ProcessMessageVerbatim(package, INSTALLMESSAGE_COMMONDATA, data_row);
 
     info_row = MSI_CreateRecord(0);
     if (!info_row)
@@ -1874,6 +1877,41 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
     return ERROR_SUCCESS;
 }
 
+/* The shell folder cache of an empty package (probe of Windows 10): the folders by CSIDL, each
+   with its path and a trailing backslash.  The table is temporary, so it is not persistent. */
+static void msi_create_folder_cache( MSIDATABASE *db )
+{
+    static const int csidls[] = { 2, 5, 6, 7, 8, 9, 11, 16, 19, 21, 22, 23, 24, 25, 26, 27, 28, 35, 39, 47, 48 };
+    MSIQUERY *view;
+    WCHAR path[MAX_PATH + 1];
+    MSIRECORD *rec;
+    UINT i;
+
+    if (MSI_DatabaseOpenViewW( db, L"CREATE TABLE `#_FolderCache` ( `FolderId` INT NOT NULL TEMPORARY, "
+                               L"`FolderPath` CHAR NOT NULL TEMPORARY PRIMARY KEY `FolderId`) HOLD", &view )) return;
+    MSI_ViewExecute( view, 0 );
+    MSI_ViewClose( view );
+    msiobj_release( &view->hdr );
+
+    if (MSI_DatabaseOpenViewW( db, L"INSERT INTO `#_FolderCache` ( `FolderId`, `FolderPath` ) VALUES ( ?, ? )",
+                               &view )) return;
+    for (i = 0; i < ARRAY_SIZE(csidls); i++)
+    {
+        UINT len;
+
+        if (SHGetFolderPathW( NULL, csidls[i], NULL, SHGFP_TYPE_CURRENT, path ) != S_OK) continue;
+        len = wcslen( path );
+        if (len && path[len - 1] != '\\') wcscpy( path + len, L"\\" );
+        if (!(rec = MSI_CreateRecord( 2 ))) break;
+        MSI_RecordSetInteger( rec, 1, csidls[i] );
+        MSI_RecordSetStringW( rec, 2, path );
+        MSI_ViewExecute( view, rec );
+        MSI_ViewClose( view );
+        msiobj_release( &rec->hdr );
+    }
+    msiobj_release( &view->hdr );
+}
+
 /* MsiOpenPackage("") gives a package on an empty database, kept in a temporary file that goes
    with the package */
 static UINT msi_open_empty_package( MSIHANDLE *phPackage )
@@ -1892,6 +1930,7 @@ static UINT msi_open_empty_package( MSIHANDLE *phPackage )
         DeleteFileW( file );
         return r;
     }
+    db->empty_package = TRUE;
     package = create_package( db, FALSE ); /* an empty database has no summary information */
     if (!package)
     {
@@ -1902,6 +1941,7 @@ static UINT msi_open_empty_package( MSIHANDLE *phPackage )
     package->localfile = wcsdup( file );
     package->delete_on_close = TRUE;
     msi_set_property( package->db, L"DATABASE", db->path, -1 );
+    msi_create_folder_cache( db );
     msiobj_release( &db->hdr );
 
     if (!(*phPackage = alloc_msihandle( &package->hdr ))) r = ERROR_NOT_ENOUGH_MEMORY;
@@ -2194,6 +2234,18 @@ INT MSI_ProcessMessageVerbatim(MSIPACKAGE *package, INSTALLMESSAGE eMessageType,
 
     if (!rc)
         rc = internal_ui_handler(package, eMessageType, record, message);
+
+    if (rc == IDCANCEL && package)
+    {
+        switch (eMessageType & 0xff000000)
+        {
+        case INSTALLMESSAGE_ACTIONSTART:
+        case INSTALLMESSAGE_ACTIONDATA:
+        case INSTALLMESSAGE_PROGRESS:
+            package->user_cancelled = 1;
+            break;
+        }
+    }
 
     if (!rc && package && package->log_file != INVALID_HANDLE_VALUE &&
         (eMessageType & 0xff000000) != INSTALLMESSAGE_PROGRESS)

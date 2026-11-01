@@ -85,11 +85,21 @@ BOOL msi_delete_file( MSIPACKAGE *package, const WCHAR *filename )
     return ret;
 }
 
-/* Undo log for a failed install: files and directories the install script created or replaced.
+/* Undo log for a failed install: what the install script created, replaced or moved.
    Entries are appended as the install script does the work and replayed in reverse order
-   when the install fails (msi_rollback_finish).  The standard actions with an inverse are
-   rolled back by the ROLLBACK script, this covers what has none (InstallFiles, CreateFolders). */
-enum rollback_type { ROLLBACK_FILE_CREATED, ROLLBACK_FILE_REPLACED, ROLLBACK_DIR_CREATED };
+   when the install fails or is cancelled (msi_rollback_finish).  The standard actions with an
+   inverse are rolled back by the ROLLBACK script, this covers what has none (InstallFiles,
+   CreateFolders, MoveFiles, PatchFiles) and what the script cannot know: the registry keys
+   WriteRegistryValues created and the values it overwrote. */
+enum rollback_type
+{
+    ROLLBACK_FILE_CREATED,
+    ROLLBACK_FILE_REPLACED,
+    ROLLBACK_DIR_CREATED,
+    ROLLBACK_FILE_MOVED,    /* path = source, backup = destination */
+    ROLLBACK_KEY_CREATED,   /* root, path = subkey, view */
+    ROLLBACK_VALUE_SET      /* root, path = subkey, view, name, previous value */
+};
 
 struct rollback_entry
 {
@@ -97,7 +107,129 @@ struct rollback_entry
     enum rollback_type type;
     WCHAR *path;
     WCHAR *backup;
+    HKEY root;
+    REGSAM view;
+    WCHAR *name;
+    DWORD reg_type;
+    BYTE *data;
+    DWORD data_size;
+    BOOL had_value;
 };
+
+/* A crash in the middle of an install leaves the backup copies next to the files.  Every
+   backup is noted in this key (value = backup path, data = "<pid>|<original>") until it is
+   restored or dropped; the next install deletes the ones whose process is gone. */
+static const WCHAR rollback_journal[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\RosPendingBackups";
+
+static void journal_add( const WCHAR *backup, const WCHAR *orig )
+{
+    HKEY roots[2] = { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER }, key;
+    WCHAR *data;
+    DWORD len;
+    int i;
+
+    len = wcslen( orig ) + 16;
+    if (!(data = malloc( len * sizeof(WCHAR) ))) return;
+    swprintf( data, len, L"%lu|%s", GetCurrentProcessId(), orig );
+    for (i = 0; i < 2; i++)
+    {
+        if (RegCreateKeyExW( roots[i], rollback_journal, 0, NULL, 0, KEY_SET_VALUE | KEY_WOW64_64KEY,
+                             NULL, &key, NULL )) continue;
+        RegSetValueExW( key, backup, 0, REG_SZ, (BYTE *)data, (wcslen( data ) + 1) * sizeof(WCHAR) );
+        RegCloseKey( key );
+        break;
+    }
+    free( data );
+}
+
+static void journal_remove( const WCHAR *backup )
+{
+    HKEY roots[2] = { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER }, key;
+    int i;
+
+    for (i = 0; i < 2; i++)
+    {
+        if (RegOpenKeyExW( roots[i], rollback_journal, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, &key )) continue;
+        RegDeleteValueW( key, backup );
+        RegCloseKey( key );
+    }
+}
+
+static BOOL is_process_running( DWORD pid )
+{
+    HANDLE process;
+    BOOL ret;
+
+    if (!pid) return FALSE;
+    if (pid == GetCurrentProcessId()) return TRUE;
+    if (!(process = OpenProcess( SYNCHRONIZE, FALSE, pid ))) return GetLastError() == ERROR_ACCESS_DENIED;
+    ret = WaitForSingleObject( process, 0 ) == WAIT_TIMEOUT;
+    CloseHandle( process );
+    return ret;
+}
+
+/* "rbfXXXX.tmp", what msi_get_temp_file_name( ..., L"rbf", ... ) makes */
+static BOOL is_backup_name( const WCHAR *path )
+{
+    const WCHAR *name = wcsrchr( path, '\\' );
+    size_t len;
+
+    name = name ? name + 1 : path;
+    len = wcslen( name );
+    return len > 7 && len <= 12 && !wcsnicmp( name, L"rbf", 3 ) && !wcsicmp( name + len - 4, L".tmp" );
+}
+
+/* Install start: delete the backups a crashed install left behind. */
+void msi_rollback_cleanup_stale( MSIPACKAGE *package )
+{
+    HKEY roots[2] = { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER }, key;
+    WCHAR *name, *data;
+    DWORD index, name_len, data_len, type;
+    int i;
+
+    if (!(name = malloc( 32768 * sizeof(WCHAR) ))) return;
+    if (!(data = malloc( 32768 * sizeof(WCHAR) )))
+    {
+        free( name );
+        return;
+    }
+    for (i = 0; i < 2; i++)
+    {
+        if (RegOpenKeyExW( roots[i], rollback_journal, 0, KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY, &key ))
+            continue;
+        index = 0;
+        for (;;)
+        {
+            LONG res;
+
+            name_len = 32768;
+            data_len = 32767 * sizeof(WCHAR);
+            res = RegEnumValueW( key, index, name, &name_len, NULL, &type, (BYTE *)data, &data_len );
+            if (res == ERROR_NO_MORE_ITEMS) break;
+            if (res) { index++; continue; }
+            data[data_len / sizeof(WCHAR)] = 0;
+            if (type == REG_SZ && is_process_running( wcstoul( data, NULL, 10 ) ))
+            {
+                index++;
+                continue;
+            }
+            if (is_backup_name( name ))
+            {
+                DWORD attrs = msi_get_file_attributes( package, name );
+                if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)))
+                {
+                    TRACE("deleting stale backup %s\n", debugstr_w(name));
+                    msi_set_file_attributes( package, name, FILE_ATTRIBUTE_NORMAL );
+                    msi_delete_file( package, name );
+                }
+            }
+            RegDeleteValueW( key, name ); /* the next value is at the same index now */
+        }
+        RegCloseKey( key );
+    }
+    free( name );
+    free( data );
+}
 
 static BOOL rollback_is_recording( MSIPACKAGE *package )
 {
@@ -105,21 +237,21 @@ static BOOL rollback_is_recording( MSIPACKAGE *package )
            !msi_get_property_int( package->db, L"RollbackDisabled", 0 );
 }
 
-static void rollback_add( MSIPACKAGE *package, enum rollback_type type, const WCHAR *path, WCHAR *backup )
+static struct rollback_entry *rollback_add( MSIPACKAGE *package, enum rollback_type type, const WCHAR *path, WCHAR *backup )
 {
     struct rollback_entry *e;
 
-    if (!(e = calloc( 1, sizeof(*e) ))) return;
+    if (!(e = calloc( 1, sizeof(*e) ))) return NULL;
     e->type = type;
     e->path = wcsdup( path );
     e->backup = backup;
     if (!e->path)
     {
-        free( e->backup );
         free( e );
-        return;
+        return NULL;
     }
     list_add_tail( &package->rollback_files, &e->entry );
+    return e;
 }
 
 /* Call before a file of the install script is written: remember it as created, or keep a
@@ -147,8 +279,13 @@ void msi_rollback_record_file( MSIPACKAGE *package, const WCHAR *path )
             msi_copy_file( package, path, backup, FALSE ))
         {
             TRACE("backed up %s to %s\n", debugstr_w(path), debugstr_w(backup));
-            rollback_add( package, ROLLBACK_FILE_REPLACED, path, backup );
-            backup = NULL;
+            journal_add( backup, path );
+            if (rollback_add( package, ROLLBACK_FILE_REPLACED, path, backup )) backup = NULL;
+            else
+            {
+                journal_remove( backup );
+                msi_delete_file( package, backup );
+            }
         }
         else
         {
@@ -158,6 +295,52 @@ void msi_rollback_record_file( MSIPACKAGE *package, const WCHAR *path )
         free( backup );
     }
     free( dir );
+}
+
+/* A file was moved from source to dest (call after the move, and after msi_rollback_record_file
+   for dest): the undo moves it back. */
+void msi_rollback_record_move( MSIPACKAGE *package, const WCHAR *source, const WCHAR *dest )
+{
+    WCHAR *copy;
+
+    if (!rollback_is_recording( package )) return;
+    if (!(copy = wcsdup( dest ))) return;
+    if (!rollback_add( package, ROLLBACK_FILE_MOVED, source, copy )) free( copy );
+}
+
+/* Call right after RegCreateKeyEx created the key (REG_CREATED_NEW_KEY). */
+void msi_rollback_record_key( MSIPACKAGE *package, HKEY root, const WCHAR *path, REGSAM view )
+{
+    struct rollback_entry *e;
+
+    if (!rollback_is_recording( package )) return;
+    if ((e = rollback_add( package, ROLLBACK_KEY_CREATED, path, NULL )))
+    {
+        e->root = root;
+        e->view = view;
+    }
+}
+
+/* Call before a registry value is written: old is the value that was there (NULL: none). */
+void msi_rollback_record_value( MSIPACKAGE *package, HKEY root, const WCHAR *path, REGSAM view,
+                                const WCHAR *name, const BYTE *old, DWORD old_size, DWORD old_type )
+{
+    struct rollback_entry *e;
+
+    if (!rollback_is_recording( package )) return;
+    if (!(e = rollback_add( package, ROLLBACK_VALUE_SET, path, NULL ))) return;
+    e->root = root;
+    e->view = view;
+    e->name = name ? wcsdup( name ) : NULL;
+    if (old)
+    {
+        e->had_value = TRUE;
+        e->reg_type = old_type;
+        e->data_size = old_size;
+        e->data = malloc( old_size ? old_size : 1 );
+        if (e->data) memcpy( e->data, old, old_size );
+        else e->had_value = FALSE;
+    }
 }
 
 static BOOL create_directory( MSIPACKAGE *package, const WCHAR *path )
@@ -170,7 +353,44 @@ static BOOL create_directory( MSIPACKAGE *package, const WCHAR *path )
     return ret;
 }
 
-/* The install is over: undo the log (failed install) or drop the backups (success). */
+static void rollback_undo_key( const struct rollback_entry *e )
+{
+    DWORD subkeys, values;
+    HKEY key;
+
+    if (RegOpenKeyExW( e->root, e->path, 0, KEY_QUERY_VALUE | e->view, &key )) return;
+    if (RegQueryInfoKeyW( key, NULL, NULL, NULL, &subkeys, NULL, NULL, &values, NULL, NULL, NULL, NULL ))
+        subkeys = values = 1;
+    RegCloseKey( key );
+    /* only an empty key goes: something else may live in it now */
+    if (!subkeys && !values)
+    {
+        TRACE("rollback: removing key %s\n", debugstr_w(e->path));
+        RegDeleteKeyExW( e->root, e->path, e->view, 0 );
+    }
+}
+
+static void rollback_undo_value( const struct rollback_entry *e )
+{
+    HKEY key;
+
+    if (e->had_value)
+    {
+        /* the undo of WriteRegistryValues deleted it, and the key with it when it was empty */
+        if (RegCreateKeyExW( e->root, e->path, 0, NULL, 0, KEY_SET_VALUE | e->view, NULL, &key, NULL )) return;
+        TRACE("rollback: restoring value %s of %s\n", debugstr_w(e->name), debugstr_w(e->path));
+        RegSetValueExW( key, e->name, 0, e->reg_type, e->data, e->data_size );
+    }
+    else
+    {
+        if (RegOpenKeyExW( e->root, e->path, 0, KEY_SET_VALUE | e->view, &key )) return;
+        TRACE("rollback: deleting value %s of %s\n", debugstr_w(e->name), debugstr_w(e->path));
+        RegDeleteValueW( key, e->name );
+    }
+    RegCloseKey( key );
+}
+
+/* The install is over: undo the log (failed or cancelled install) or drop the backups (success). */
 void msi_rollback_finish( MSIPACKAGE *package, BOOL undo )
 {
     struct list *item, *cursor;
@@ -207,6 +427,7 @@ void msi_rollback_finish( MSIPACKAGE *package, BOOL undo )
                 msi_set_file_attributes( package, e->backup, FILE_ATTRIBUTE_NORMAL );
                 msi_delete_file( package, e->backup );
             }
+            journal_remove( e->backup );
             break;
         case ROLLBACK_DIR_CREATED:
             if (undo)
@@ -215,9 +436,26 @@ void msi_rollback_finish( MSIPACKAGE *package, BOOL undo )
                 msi_remove_directory( package, e->path ); /* fails if something else lives there */
             }
             break;
+        case ROLLBACK_FILE_MOVED:
+            if (undo && msi_get_file_attributes( package, e->path ) == INVALID_FILE_ATTRIBUTES &&
+                msi_get_file_attributes( package, e->backup ) != INVALID_FILE_ATTRIBUTES)
+            {
+                TRACE("rollback: moving %s back to %s\n", debugstr_w(e->backup), debugstr_w(e->path));
+                if (!msi_move_file( package, e->backup, e->path, MOVEFILE_COPY_ALLOWED ))
+                    WARN("failed to move %s back (%lu)\n", debugstr_w(e->backup), GetLastError());
+            }
+            break;
+        case ROLLBACK_KEY_CREATED:
+            if (undo) rollback_undo_key( e );
+            break;
+        case ROLLBACK_VALUE_SET:
+            if (undo) rollback_undo_value( e );
+            break;
         }
         free( e->path );
         free( e->backup );
+        free( e->name );
+        free( e->data );
         free( e );
     }
 }
@@ -839,6 +1077,7 @@ static UINT patch_file( MSIPACKAGE *package, MSIFILEPATCH *patch )
     if (!tmpfile) return ERROR_INSTALL_FAILURE;
     if (apply_filepatch( package, patch->path, patch->File->TargetPath, tmpfile ))
     {
+        msi_rollback_record_file( package, patch->File->TargetPath );
         msi_delete_file( package, patch->File->TargetPath );
         msi_move_file( package, tmpfile, patch->File->TargetPath, 0 );
     }
@@ -1004,16 +1243,19 @@ static BOOL move_file( MSIPACKAGE *package, const WCHAR *source, const WCHAR *de
     if (options == msidbMoveFileOptionsMove)
     {
         TRACE("moving %s -> %s\n", debugstr_w(source), debugstr_w(dest));
+        msi_rollback_record_file( package, dest );
         ret = msi_move_file( package, source, dest, MOVEFILE_REPLACE_EXISTING );
         if (!ret)
         {
             WARN( "msi_move_file failed: %lu\n", GetLastError() );
             return FALSE;
         }
+        msi_rollback_record_move( package, source, dest );
     }
     else
     {
         TRACE("copying %s -> %s\n", debugstr_w(source), debugstr_w(dest));
+        msi_rollback_record_file( package, dest );
         ret = msi_copy_file( package, source, dest, FALSE );
         if (!ret)
         {

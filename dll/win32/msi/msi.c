@@ -253,7 +253,7 @@ UINT WINAPI MsiInstallProductW(LPCWSTR szPackagePath, LPCWSTR szCommandLine)
         }
     }
 
-    r = MSI_OpenPackageW( szPackagePath, options, &package );
+    r = MSI_OpenPackageW( szPackagePath, options | ROS_OPENPACKAGEFLAGS_INSTALL, &package );
     if (r == ERROR_SUCCESS)
     {
         r = MSI_InstallPackage( package, szPackagePath, szCommandLine );

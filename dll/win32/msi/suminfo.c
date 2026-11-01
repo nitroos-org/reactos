@@ -565,7 +565,9 @@ UINT WINAPI MsiGetSummaryInformationW( MSIHANDLE hDatabase, const WCHAR *szDatab
     ret = msi_get_suminfo( db->storage, uiUpdateCount, &si );
     if (ret != ERROR_SUCCESS)
         ret = msi_get_db_suminfo( db, uiUpdateCount, &si );
-    if (ret != ERROR_SUCCESS)
+    if (ret != ERROR_SUCCESS && db->empty_package)
+        ret = ERROR_INSTALL_PACKAGE_INVALID;
+    else if (ret != ERROR_SUCCESS)
     {
         if ((si = create_suminfo( db->storage, uiUpdateCount )))
             ret = ERROR_SUCCESS;
