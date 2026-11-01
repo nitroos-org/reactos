@@ -1,0 +1,56 @@
+System ICU (icu.dll, icuuc.dll, icuin.dll) for ReactOS
+======================================================
+
+What
+  Windows 10 (1903 and later) ships ICU 64.2 as %SystemRoot%\System32\icu.dll (and the same in SysWOW64), with
+  icuuc.dll and icuin.dll as forward-only modules, and the data package as
+  %SystemRoot%\Globalization\ICU\icudtl.dat. Windows Terminal (TerminalApp.dll, Microsoft.Terminal.UI.dll,
+  Microsoft.Terminal.Settings.Model.dll) and .NET 5+ (System.Globalization.Native, via LoadLibrary("icu.dll")) use it.
+  This directory builds the same DLL set from the upstream ICU4C source.
+
+Origin and version
+  ICU4C 64.2, https://github.com/unicode-org/icu/releases/download/release-64-2/icu4c-64_2-src.tgz
+  sha256 627d5d8478e6d96fc8c90fed4851239079a561a6a8b9e48b0892f24e82d31d6c
+  The version matches what Windows 10 22H2 reports (u_getVersion 64.2, u_getDataVersion 64.2; checked on the
+  reference VM). Do not bump it casually: the C API is unversioned (U_DISABLE_RENAMING), applications bind to
+  names only, and .NET / Windows Terminal were built against the 64.x headers.
+
+What is vendored (unmodified unless listed below)
+  common/   source/common/*.cpp and *.h (incl. unicode/*.h)
+  i18n/     source/i18n/*.cpp and *.h (incl. unicode/*.h)
+  stubdata/ source/stubdata/stubdata.cpp (the empty icudt64_dat symbol the ICU data loader references)
+  data/     icudtl.dat = source/data/in/icudt64l.dat, byte for byte, the upstream little-endian data package (27.5 MB;
+            Windows icudtl.dat is 27.3 MB). Renamed because add_cd_file cannot rename files inside reactos.cab.
+  LICENSE   the ICU / Unicode license, as shipped in the tarball
+  Not vendored: tools, tests, samples, io, layoutex, extra, the data sources, the configure/make files.
+
+Local changes (search for "ReactOS" in the sources)
+  common/umutex.h, common/umutex.cpp  std::mutex / std::condition_variable (they need the posix/mcf thread model, which
+      the RosBE win32-thread-model GCC does not have) replaced by SRWLOCK / CONDITION_VARIABLE (kernel32, NT 6.0+).
+      This is the only change inside the ICU sources. Upstream marks user-provided mutexes as withdrawn (ICU-20185).
+  icu_crt.cpp    snprintf() (the ReactOS msvcrt has _snprintf and vsnprintf but no snprintf; MinGW code imports it).
+  icu_main.cpp   DllMain maps %SystemRoot%\Globalization\ICU\icudtl.dat and calls udata_setCommonData().
+  icu_compat.h   force-included: ::max_align_t, which libstdc++ <cstddef> needs and the ReactOS CRT <stddef.h> lacks.
+  CMakeLists.txt, icu.spec, icuuc.spec, icuin.spec, *.rc   the build (see below).
+  Outside this directory: sdk/include/psdk/winnls.h declares GetNumberFormatEx / GetCurrencyFormatEx (kernel32 already
+  exports them; ICU winnmfmt.cpp calls them); boot/bootdata/packages/reactos.dff.in + sdk/cmake/CMakeMacros.cmake
+  add the Globalization and Globalization\ICU directories; boot/bootdata/packages/syswow64.lst lists the three DLLs.
+
+Build
+  DLL_EXPORT_VERSION >= 0x600 only (SRW locks). Defines: U_DISABLE_RENAMING=1 (unversioned names), U_STATIC_IMPLEMENTATION
+  (exports come from the .spec, not __declspec(dllexport)), U_COMMON_IMPLEMENTATION, U_I18N_IMPLEMENTATION (common and
+  i18n are linked into one DLL, as in the Windows icu.dll), -D_CMATH_ (libstdc++ <cmath> provides the float overloads).
+  RTTI on, C++ exceptions off (ICU does not use them).
+  icu.spec is the export list of the Windows 10 22H2 icu.dll: 969 C API names (checked on the reference VM; names only,
+  no code or data taken from Microsoft). icuuc.spec (542) and icuin.spec (416) forward to icu.dll, as on Windows.
+  A name in icu.spec that the ICU source does not define fails the link.
+
+Data file
+  data/icudtl.dat is installed as Globalization\ICU\icudtl.dat (the Windows name). If it is missing or unreadable ICU
+  fails with U_MISSING_RESOURCE_ERROR. NOTE: .NET (System.Globalization.Native) calls abort() when icu.dll loads but the
+  data does not (ValidateICUDataCanLoad), or when a symbol it needs is not exported, so never ship icu.dll without the data.
+  To shrink the file (not done: parity first) use icupkg -r to drop items, e.g. locale-specific curr/lang/region/zone/unit.
+
+Updating
+  Download the new tarball, replace common/ and i18n/ (re-apply the ReactOS changes to the two umutex files),
+  stubdata.cpp, data/icudtl.dat (the new icudt<N>l.dat) and LICENSE; regenerate the .spec files only if the Windows export set changes.

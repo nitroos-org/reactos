@@ -26,6 +26,13 @@ Used Version: 1.1
 License: MIT (https://spdx.org/licenses/MIT.html)
 URL: http://www.geocities.com/dborca/opengl/tc.html
 
+Title: ICU (International Components for Unicode, ICU4C)
+Path: dll/3rdparty/icu
+Used Version: 64.2 (the version of the Windows 10 1903 - 22H2 system icu.dll)
+License: Unicode License (ICU 58 and later, https://www.unicode.org/copyright.html; see dll/3rdparty/icu/LICENSE)
+URL: https://icu.unicode.org/ (https://github.com/unicode-org/icu/releases/tag/release-64-2)
+Modifications: only source/common, source/i18n (.cpp/.h) and stubdata.cpp are vendored; umutex.h/.cpp use Win32 SRW locks instead of std::mutex (win32 thread model); added .spec files, icu_main.cpp (maps the data file), icu_compat.h. data/icudtl.dat is the unmodified upstream icudt64l.dat data package of the same release. See dll/3rdparty/icu/README.ReactOS.
+
 Title: libjpeg
 Path: dll/3rdparty/libjpeg
 Used Version: 10

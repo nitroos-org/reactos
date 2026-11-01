@@ -900,6 +900,16 @@ GetCurrencyFormatW(
   _Out_writes_opt_(cchCurrency) LPWSTR lpCurrencyStr,
   _In_ int cchCurrency);
 
+int
+WINAPI
+GetCurrencyFormatEx(
+  _In_opt_ LPCWSTR lpLocaleName,
+  _In_ DWORD dwFlags,
+  _In_ LPCWSTR lpValue,
+  _In_opt_ const CURRENCYFMTW *lpFormat,
+  _Out_writes_opt_(cchCurrency) LPWSTR lpCurrencyStr,
+  _In_ int cchCurrency);
+
 int WINAPI GetDateFormatA(LCID,DWORD,const SYSTEMTIME*,LPCSTR,LPSTR,int);
 int WINAPI GetDateFormatW(LCID,DWORD,const SYSTEMTIME*,LPCWSTR,LPWSTR,int);
 int WINAPI GetDateFormatEx(LPCWSTR,DWORD,const SYSTEMTIME*,LPCWSTR,LPWSTR,int,LPCWSTR);
@@ -946,6 +956,16 @@ GetNLSVersionEx(
   _In_ NLS_FUNCTION function,
   _In_ LPCWSTR lpLocaleName,
   _Inout_ LPNLSVERSIONINFOEX lpVersionInformation);
+
+int
+WINAPI
+GetNumberFormatEx(
+  _In_opt_ LPCWSTR lpLocaleName,
+  _In_ DWORD dwFlags,
+  _In_ LPCWSTR lpValue,
+  _In_opt_ const NUMBERFMTW *lpFormat,
+  _Out_writes_opt_(cchNumber) LPWSTR lpNumberStr,
+  _In_ int cchNumber);
 
 int
 WINAPI

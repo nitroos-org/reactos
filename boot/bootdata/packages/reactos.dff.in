@@ -123,6 +123,8 @@ Signature = "$Windows NT$"
 101 = system32\WindowsPowerShell\v1.0\Modules\ScheduledTasks\1.0.0.0
 102 = Featmgr\Payload\powershell-7
 103 = Rapps\Overlay
+104 = Globalization
+105 = Globalization\ICU
 
 .InfEnd
 
