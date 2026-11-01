@@ -5270,6 +5270,8 @@ error:
  * feature that was not installed names it as its directory. */
 static void test_remove_empty_directory_partial_install(void)
 {
+    const char prodcode[] = "{7DF88A48-996F-4EC8-A022-BF956F9B2CBB}";
+    INSTALLSTATE state;
     UINT r;
 
     if (!is_process_elevated())
@@ -5297,6 +5299,11 @@ static void test_remove_empty_directory_partial_install(void)
     ok(pf_exists("msitest\\first\\one.txt"), "file not installed\n");
     ok(!pf_exists("msitest\\two.txt"), "file installed\n");
 
+    state = MsiQueryFeatureStateA(prodcode, "One");
+    ok(state == INSTALLSTATE_LOCAL, "feature One: expected LOCAL, got %d\n", state);
+    state = MsiQueryFeatureStateA(prodcode, "Two");
+    ok(state == INSTALLSTATE_ABSENT, "feature Two: expected ABSENT, got %d\n", state);
+
     /* only the installed feature is removed: its directory and the parent directory, which a
      * component of the feature that was never installed names, must not stay */
     r = MsiInstallProductA(msifile, "REMOVE=ALL");
@@ -5318,12 +5325,22 @@ static void test_remove_empty_directory_partial_install(void)
     ok(pf_exists("msitest\\first\\one.txt"), "file removed\n");
     ok(pf_exists("msitest\\two.txt"), "file not installed\n");
 
+    state = MsiQueryFeatureStateA(prodcode, "One");
+    ok(state == INSTALLSTATE_LOCAL, "feature One: expected LOCAL, got %d\n", state);
+    state = MsiQueryFeatureStateA(prodcode, "Two");
+    ok(state == INSTALLSTATE_LOCAL, "feature Two: expected LOCAL, got %d\n", state);
+
     r = MsiInstallProductA(msifile, "REMOVE=Two");
     ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
 
     ok(pf_exists("msitest\\first\\one.txt"), "file removed\n");
     ok(!pf_exists("msitest\\two.txt"), "file not removed\n");
     ok(pf_exists("msitest"), "directory removed\n");
+
+    state = MsiQueryFeatureStateA(prodcode, "One");
+    ok(state == INSTALLSTATE_LOCAL, "feature One: expected LOCAL, got %d\n", state);
+    state = MsiQueryFeatureStateA(prodcode, "Two");
+    ok(state == INSTALLSTATE_ABSENT, "feature Two: expected ABSENT, got %d\n", state);
 
     r = MsiInstallProductA(msifile, "REMOVE=ALL");
     ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
