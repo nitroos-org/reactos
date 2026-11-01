@@ -246,6 +246,17 @@ NtFlushBuffersFile(
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
+NtFlushBuffersFileEx(
+    _In_ HANDLE FileHandle,
+    _In_ ULONG Flags,
+    _In_reads_bytes_opt_(ParametersSize) PVOID Parameters,
+    _In_ ULONG ParametersSize,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
 NtFlushWriteBuffer(VOID);
 
 __kernel_entry
