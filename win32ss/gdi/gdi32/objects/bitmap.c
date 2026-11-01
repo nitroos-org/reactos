@@ -375,7 +375,9 @@ CreateCompatibleBitmap(
     if (!Width || !Height)
         return GetStockObject(DEFAULT_BITMAP);
 
-    if (!(pDc_Attr->ulDirty_ & DC_DIBSECTION))
+    /* The DC_ATTR can be missing when its allocation failed at DC creation,
+       the kernel then uses its own copy. Do not touch it in that case. */
+    if (!pDc_Attr || !(pDc_Attr->ulDirty_ & DC_DIBSECTION))
     {
         return NtGdiCreateCompatibleBitmap(hDC, Width, Height);
     }

@@ -11,6 +11,7 @@ extern void func_CombineRgn(void);
 extern void func_CombineTransform(void);
 extern void func_CreateBitmap(void);
 extern void func_CreateBitmapIndirect(void);
+extern void func_CreateCompatibleBitmap(void);
 extern void func_CreateCompatibleDC(void);
 extern void func_CreateDIBitmap(void);
 extern void func_CreateDIBPatternBrush(void);
@@ -104,6 +105,7 @@ const struct test winetest_testlist[] =
     { "CombineTransform", func_CombineTransform },
     { "CreateBitmap", func_CreateBitmap },
     { "CreateBitmapIndirect", func_CreateBitmapIndirect },
+    { "CreateCompatibleBitmap", func_CreateCompatibleBitmap },
     { "CreateCompatibleDC", func_CreateCompatibleDC },
     { "CreateDIBitmap", func_CreateDIBitmap },
     { "CreateDIBPatternBrush", func_CreateDIBPatternBrush },

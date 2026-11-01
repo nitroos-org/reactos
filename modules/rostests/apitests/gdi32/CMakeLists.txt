@@ -11,6 +11,7 @@ list(APPEND SOURCE
     CombineTransform.c
     CreateBitmap.c
     CreateBitmapIndirect.c
+    CreateCompatibleBitmap.c
     CreateCompatibleDC.c
     CreateDIBitmap.c
     CreateDIBPatternBrush.c
