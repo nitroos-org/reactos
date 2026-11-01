@@ -81,9 +81,9 @@ static inline void get_rpc_endpoint(LPWSTR endpoint, const OXID *oxid)
 {
     /* FIXME: should get endpoint from rpcss */
 #ifdef __REACTOS__
-    /* One endpoint per process, as on Windows: calls are dispatched by IPID, not by endpoint, and the
-     * RPC runtime never removes an endpoint, so one per apartment (oxid = pid << 32 | tid) left a pipe
-     * and an event behind for every thread that had exported an object */
+    /* One endpoint per process: calls are dispatched by IPID, not by endpoint, and the RPC runtime
+     * never removes an endpoint, so one per apartment (oxid = pid << 32 | tid) left a pipe and an
+     * event behind for every thread that had exported an object */
     wsprintfW(endpoint, L"\\pipe\\OLE_%08lx", (ULONG)(*oxid >> 32));
 #else
     wsprintfW(endpoint, L"\\pipe\\OLE_%016I64x", *oxid);
@@ -2275,7 +2275,7 @@ void rpc_start_remoting(struct apartment *apt)
             endpoint,
             NULL);
         if (status != RPC_S_OK)
-            ERR("Couldn't register endpoint %s\n", debugstr_w(endpoint));
+            ERR("Couldn't register endpoint %s, status %ld\n", debugstr_w(endpoint), status);
 
         /* FIXME: move remote unknown exporting into this function */
     }
