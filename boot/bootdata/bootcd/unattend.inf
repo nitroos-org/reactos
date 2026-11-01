@@ -6,10 +6,10 @@ Signature = "$ReactOS$"
 ; no - unattend setup disabled
 UnattendSetupEnabled = no
 
-; Install to \Device\Harddisk0\Partition1\ReactOS
+; Install to \Device\Harddisk0\Partition1\Windows (the default; any 8.3 path such as ReactOS works too)
 DestinationDiskNumber = 0
 DestinationPartitionNumber = 1
-InstallationDirectory=ReactOS
+InstallationDirectory=Windows
 
 ; BootLoaderLocation=0  Skip installation
 ; BootLoaderLocation=1  Install on removable media (floppy)

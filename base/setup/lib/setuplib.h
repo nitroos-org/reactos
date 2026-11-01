@@ -211,6 +211,11 @@ NTAPI
 IsValidInstallDirectory(
     _In_ PCWSTR InstallDir);
 
+BOOLEAN
+NTAPI
+IsInstallDirectoryInUse(
+    _In_ PUSETUP_DATA pSetupData);
+
 NTSTATUS
 NTAPI
 InitDestinationPaths(

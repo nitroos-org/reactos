@@ -62,6 +62,7 @@
 @ stdcall CheckUnattendedSetup(ptr)
 @ stdcall FinishSetup(ptr)
 @ stdcall IsValidInstallDirectory(wstr)
+@ stdcall IsInstallDirectoryInUse(ptr)
 @ stdcall InitDestinationPaths(ptr wstr ptr)
 @ stdcall InitializeSetup(ptr ptr ptr ptr)
 @ stdcall InitSystemPartition(ptr ptr ptr ptr ptr)
