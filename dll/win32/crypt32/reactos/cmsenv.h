@@ -51,6 +51,14 @@ struct cms_env
     CRYPT_DATA_BLOB attrs;      /* the complete [1] unprotectedAttrs element */
 };
 
+/* The largest content, in bytes, the CMS code buffers or encrypts at once: keeps every size sum and block
+ * padding inside a DWORD (and a 32 bit size_t). Above it the call fails with ERROR_OUTOFMEMORY, as a
+ * failed allocation of that size does. */
+#define CMS_MAX_CONTENT 0x7fffff00
+
+/* ncrypt.dll from the system directory only, never from the default DLL search order */
+HMODULE CMSEnv_LoadNcrypt(void);
+
 BOOL CMSEnv_Decode(const BYTE *pb, DWORD cb, struct cms_env **out);
 void CMSEnv_Free(struct cms_env *env);
 
@@ -85,5 +93,14 @@ struct cms_enc *CMSEnv_EncNew(const char *content_type, const char *content_alg,
 BOOL CMSEnv_EncContent(struct cms_enc *enc, const BYTE *data, DWORD len);
 BOOL CMSEnv_EncGetBare(const struct cms_enc *enc, void *pv, DWORD *pcb);
 void CMSEnv_EncFree(struct cms_enc *enc);
+
+/* Streamed output, which Windows does as follows: the header (everything up to the opening of the encrypted
+ * content) comes with the first update, the encrypted content and the closing bytes with the final update
+ * (definite length: the ciphertext, then the unprotected attributes, if any; indefinite length: the OCTET
+ * STRING header, the ciphertext, two end-of-contents, the attributes, three end-of-contents). */
+typedef BOOL (*cms_emit_fn)(void *ctx, const BYTE *pb, DWORD cb, BOOL final);
+BOOL CMSEnv_EncStreamStart(struct cms_enc *enc, BOOL indefinite, DWORD cb_content, cms_emit_fn emit, void *ctx);
+BOOL CMSEnv_EncStreamFinish(struct cms_enc *enc, BOOL indefinite, const BYTE *data, DWORD len,
+                            cms_emit_fn emit, void *ctx);
 
 #endif

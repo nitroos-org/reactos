@@ -1502,7 +1502,55 @@ typedef struct _CEnvelopedEncodeMsg
     CryptMsgBase    base;
     HCRYPTPROV      prov;       /* the application's provider, released with the message on request */
     struct cms_enc *enc;
+    BOOL            header_sent;/* streamed: the header went out with the first update */
+    BYTE           *stream_buf; /* streamed: the plaintext so far, Windows encrypts it with the final update */
+    DWORD           stream_len, stream_cap;
 } CEnvelopedEncodeMsg;
+
+static BOOL CEnvelopedEncodeMsg_Emit(void *ctx, const BYTE *pb, DWORD cb, BOOL final)
+{
+    CEnvelopedEncodeMsg *msg = ctx;
+
+    if (!msg->base.stream_info.pfnStreamOutput)
+        return TRUE;
+    return msg->base.stream_info.pfnStreamOutput(msg->base.stream_info.pvArg, (BYTE *)pb, cb, final);
+}
+
+/* appends to the buffered plaintext; the size is checked before anything is read from pbData */
+static BOOL CEnvelopedEncodeMsg_Buffer(CEnvelopedEncodeMsg *msg, const BYTE *pbData, DWORD cbData)
+{
+    if (cbData > CMS_MAX_CONTENT - msg->stream_len)
+    {
+        SetLastError(ERROR_OUTOFMEMORY);
+        return FALSE;
+    }
+    if (msg->stream_len + cbData > msg->stream_cap)
+    {
+        DWORD cap = msg->stream_cap ? msg->stream_cap : 4096;
+        BYTE *buf;
+
+        while (cap < msg->stream_len + cbData)
+            cap = cap > CMS_MAX_CONTENT / 2 ? CMS_MAX_CONTENT : cap * 2;
+        if (!(buf = CryptMemAlloc(cap)))
+        {
+            SetLastError(ERROR_OUTOFMEMORY);
+            return FALSE;
+        }
+        if (msg->stream_len)
+            memcpy(buf, msg->stream_buf, msg->stream_len);
+        if (msg->stream_buf)
+        {
+            SecureZeroMemory(msg->stream_buf, msg->stream_cap);
+            CryptMemFree(msg->stream_buf);
+        }
+        msg->stream_buf = buf;
+        msg->stream_cap = cap;
+    }
+    if (cbData)
+        memcpy(msg->stream_buf + msg->stream_len, pbData, cbData);
+    msg->stream_len += cbData;
+    return TRUE;
+}
 
 static void CEnvelopedEncodeMsg_Close(HCRYPTMSG hCryptMsg)
 {
@@ -1510,6 +1558,11 @@ static void CEnvelopedEncodeMsg_Close(HCRYPTMSG hCryptMsg)
 
     if (msg->prov && (msg->base.open_flags & CMSG_CRYPT_RELEASE_CONTEXT_FLAG))
         CryptReleaseContext(msg->prov, 0);
+    if (msg->stream_buf)
+    {
+        SecureZeroMemory(msg->stream_buf, msg->stream_cap);
+        CryptMemFree(msg->stream_buf);
+    }
     CMSEnv_EncFree(msg->enc);
 }
 
@@ -1571,9 +1624,26 @@ static BOOL CEnvelopedEncodeMsg_Update(HCRYPTMSG hCryptMsg, const BYTE *pbData,
         SetLastError(CRYPT_E_MSG_ERROR);
     else if (msg->base.streamed)
     {
-        FIXME("streamed stub\n");
-        msg->base.state = fFinal ? MsgStateFinalized : MsgStateUpdated;
+        BOOL indefinite = msg->base.stream_info.cbContent == 0xffffffff;
+
+        /* Like Windows: the header goes out with the first update, everything else with the final one */
         ret = TRUE;
+        if (!msg->header_sent)
+        {
+            ret = CMSEnv_EncStreamStart(msg->enc, indefinite, msg->base.stream_info.cbContent,
+             CEnvelopedEncodeMsg_Emit, msg);
+            msg->header_sent = ret;
+        }
+        if (ret)
+            ret = CEnvelopedEncodeMsg_Buffer(msg, pbData, cbData);
+        if (ret && fFinal)
+        {
+            ret = CMSEnv_EncStreamFinish(msg->enc, indefinite, msg->stream_buf, msg->stream_len,
+             CEnvelopedEncodeMsg_Emit, msg);
+            msg->base.state = MsgStateFinalized;
+        }
+        else if (ret)
+            msg->base.state = MsgStateUpdated;
     }
     else
     {
@@ -1701,6 +1771,9 @@ static HCRYPTMSG CEnvelopedEncodeMsg_Open(DWORD dwFlags,
          CEnvelopedEncodeMsg_Close, CEnvelopedEncodeMsg_GetParam,
          CEnvelopedEncodeMsg_Update, CRYPT_DefaultMsgControl);
         msg->prov = info->hCryptProv;
+        msg->header_sent = FALSE;
+        msg->stream_buf = NULL;
+        msg->stream_len = msg->stream_cap = 0;
         msg->enc = CMSEnv_EncNew(pszInnerContentObjID,
          info->ContentEncryptionAlgorithm.pszObjId,
          &info->ContentEncryptionAlgorithm.Parameters, info->pvEncryptionAuxInfo,
@@ -1794,7 +1867,7 @@ static void CEnvelopedDecodeMsg_ReleaseKey(CEnvelopedDecodeMsg *msg)
 {
     if (msg->crypt_prov_ncrypt)
     {
-        HMODULE ncrypt = LoadLibraryW(L"ncrypt.dll");
+        HMODULE ncrypt = CMSEnv_LoadNcrypt();
         LONG (WINAPI *free_object)(ULONG_PTR) = ncrypt ? (void *)GetProcAddress(ncrypt, "NCryptFreeObject") : NULL;
 
         if (free_object)
@@ -1845,13 +1918,20 @@ static BOOL CDecodeMsg_CopyData(CRYPT_DATA_BLOB *blob, const BYTE *pbData,
 
     if (cbData)
     {
-        if (blob->cbData)
-            blob->pbData = CryptMemRealloc(blob->pbData,
-             blob->cbData + cbData);
-        else
-            blob->pbData = CryptMemAlloc(cbData);
-        if (blob->pbData)
+        BYTE *data;
+
+        if (cbData > 0xffffffff - blob->cbData)
         {
+            SetLastError(ERROR_OUTOFMEMORY);
+            return FALSE;
+        }
+        if (blob->cbData)
+            data = CryptMemRealloc(blob->pbData, blob->cbData + cbData);
+        else
+            data = CryptMemAlloc(cbData);
+        if (data)
+        {
+            blob->pbData = data;
             memcpy(blob->pbData + blob->cbData, pbData, cbData);
             blob->cbData += cbData;
         }
@@ -3351,6 +3431,16 @@ static BOOL CDecodeEnvelopedMsg_Decrypt(CDecodeMsg *msg, DWORD index,
         {
             enveloped_data->crypt_prov = key;
             enveloped_data->crypt_prov_ncrypt = keySpec == CERT_NCRYPT_KEY_SPEC;
+        }
+        /* a streamed message hands the plaintext to the callback when it is decrypted, in one piece:
+         * Windows streams nothing while the message is read */
+        if (msg->base.streamed && msg->base.stream_info.pfnStreamOutput)
+        {
+            static BYTE none;
+            DWORD cb = enveloped_data->content.cbData;
+
+            ret = msg->base.stream_info.pfnStreamOutput(msg->base.stream_info.pvArg,
+             cb ? enveloped_data->content.pbData : &none, cb, TRUE);
         }
     }
     return ret;

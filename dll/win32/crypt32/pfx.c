@@ -35,6 +35,7 @@
 #include "snmp.h"
 #include "crypt32_private.h"
 #include "reactos/pkcs12.h"
+#include "reactos/cmsenv.h"
 
 #include "wine/debug.h"
 
@@ -451,7 +452,7 @@ typedef LONG (WINAPI *PNCryptSetProperty)( ULONG_PTR, LPCWSTR, BYTE *, DWORD, DW
 static BOOL export_cng_key( ULONG_PTR key, const WCHAR *prov_name, const WCHAR *key_name, DWORD flags,
                             BYTE **pkcs8, DWORD *len )
 {
-    HMODULE mod = LoadLibraryW( L"ncrypt.dll" );
+    HMODULE mod = CMSEnv_LoadNcrypt();
     PNCryptOpenStorageProvider open_provider;
     PNCryptOpenKey open_key;
     PNCryptExportKey export_key;
