@@ -1067,6 +1067,9 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Segoe UI Se
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Segoe UI Semibold",0x00000000,"Selawik Semibold"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Segoe UI Symbol",0x00000000,"Noto Sans Symbols 2"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Segoe UI Emoji",0x00000000,"Noto Emoji"
+; Windows 10/11 caption-button symbol fonts -> project-drawn glyphs for the four caption buttons (U+E921/E922/E923/E8BB and the EF2C-EF2F high-contrast points); Firefox draws its titlebar buttons from these
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Segoe MDL2 Assets",0x00000000,"Nitro Caption Icons"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Segoe Fluent Icons",0x00000000,"Nitro Caption Icons"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Calibri",0x00000000,"Carlito"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Cambria",0x00000000,"Caladea"
 ; East Asian proportional face names (Windows and common legacy names) -> Noto Sans SC / Noto Sans KR

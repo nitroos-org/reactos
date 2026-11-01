@@ -34,6 +34,7 @@ list(APPEND FONT_FILES
     lucon.ttf
     Marlett.ttf
     micross.ttf
+    NitroCaptionIcons.ttf
     NotoEmoji-Regular.ttf
     NotoSansKR-Regular.otf
     NotoSansSC-Regular.otf
