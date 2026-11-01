@@ -235,6 +235,7 @@ list(APPEND SOURCE
     BadSegmentFault.c
     RaiseExceptionLeak.c
     ExceptionInfoLeak.c
+    X87Fault.c
     StackOverflow.c
     StackOverflowDispatch.c
     SystemCallStubs.c

@@ -140,7 +140,8 @@ KeContextToTrapFrame(IN PCONTEXT Context,
                 TrapFrame->SegCs = (KGDT64_R3_CMCODE | RPL_MASK);
             }
 
-            TrapFrame->SegSs = Context->SegSs;
+            /* The stack selector is not user controllable */
+            TrapFrame->SegSs = KGDT64_R3_DATA | RPL_MASK;
 
             /* Set valid EFLAGS */
             TrapFrame->EFlags &= EFLAGS_USER_SANITIZE;
@@ -162,11 +163,13 @@ KeContextToTrapFrame(IN PCONTEXT Context,
         }
         else
         {
-            /* Copy selectors */
-            TrapFrame->SegDs = Context->SegDs;
-            TrapFrame->SegEs = Context->SegEs;
-            TrapFrame->SegFs = Context->SegFs;
-            TrapFrame->SegGs = Context->SegGs;
+            /* The data segment selectors are not user controllable: a bogus
+             * value from user mode would fault when they are reloaded on the
+             * way back to user mode, with the kernel GS base already in use */
+            TrapFrame->SegDs = KGDT64_R3_DATA | RPL_MASK;
+            TrapFrame->SegEs = KGDT64_R3_DATA | RPL_MASK;
+            TrapFrame->SegFs = KGDT64_R3_CMTEB | RPL_MASK;
+            TrapFrame->SegGs = KGDT64_R3_DATA | RPL_MASK;
         }
     }
 

@@ -18,6 +18,7 @@ EXTERN KiSystemFatalException:PROC
 EXTERN KiNpxNotAvailableFaultHandler:PROC
 EXTERN KiGeneralProtectionFaultHandler:PROC
 EXTERN KiXmmExceptionHandler:PROC
+EXTERN KiFloatingErrorHandler:PROC
 EXTERN KiRaiseSecurityCheckFailureKernel:PROC
 EXTERN KiDeliverApc:PROC
 EXTERN KiDpcInterruptHandler:PROC
@@ -572,8 +573,32 @@ FUNC KiFloatingErrorFault
     /* Push pseudo error code */
     EnterTrap TF_SAVE_ALL
 
-    UNIMPLEMENTED KiFloatingErrorFault
-    int 3
+    /* Enable interrupts if the interrupted code had them enabled */
+    EnableInterruptsIfEnabledBefore
+
+    /* Local storage for the data offset, keeps the stack 16 byte aligned */
+    sub rsp, 16
+
+    /* Call the C handler: it reads and clears the pending x87 error */
+    mov rcx, rbp
+    lea rdx, [rsp]
+    call KiFloatingErrorHandler
+
+    /* Check for success (nothing to dispatch) */
+    test eax, eax
+    jge KiFloatingErrorExit
+
+    /* Stack check carries the data offset as second parameter */
+    cmp eax, STATUS_FLOAT_STACK_CHECK
+    jne KiFloatingErrorOneParam
+    DispatchException eax, 2, 0, [rsp], 0
+    jmp KiFloatingErrorExit
+
+KiFloatingErrorOneParam:
+    DispatchException eax, 1, 0, 0, 0
+
+KiFloatingErrorExit:
+    add rsp, 16
 
     /* Return */
     ExitTrap TF_SAVE_ALL

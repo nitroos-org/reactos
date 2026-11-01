@@ -216,8 +216,10 @@ KiInitializeCpu(PKIPCR Pcr)
     /* Disable fpu monitoring */
     __writecr0(__readcr0() & ~CR0_MP);
 
-    /* Disable x87 fpu exceptions */
-    __writecr0(__readcr0() & ~CR0_NE);
+    /* Report x87 errors natively as #MF (KiFloatingErrorFault). With CR0.NE
+     * clear they would be signalled through the legacy FERR#/IRQ13 path,
+     * which is not wired up, and the faulting thread never sees them. */
+    __writecr0(__readcr0() | CR0_NE);
 
     /* Check if XSAVE is supported */
     if (FeatureBits & KF_XSTATE)
