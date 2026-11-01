@@ -1508,6 +1508,50 @@ static inline BOOL is_feature_selected( MSIFEATURE *feature, INT level )
     return (feature->Level > 0 && feature->Level <= level);
 }
 
+/* A feature that is asked to be installed needs its ancestors installed in the same way, unless
+   they were asked for something else already. */
+static void raise_ancestors( MSIPACKAGE *package, MSIFEATURE *feature, INSTALLSTATE state )
+{
+    MSIFEATURE *parent = feature;
+
+    while (parent->Feature_Parent && (parent = msi_get_loaded_feature( package, parent->Feature_Parent )))
+    {
+        if (parent->Level <= 0) continue;
+        if (parent->ActionRequest != INSTALLSTATE_UNKNOWN) continue;
+        parent->Action = state;
+        parent->ActionRequest = state;
+    }
+}
+
+/* Removing a feature removes everything below it. */
+static void remove_children( MSIFEATURE *feature )
+{
+    FeatureList *fl;
+
+    LIST_FOR_EACH_ENTRY( fl, &feature->Children, FeatureList, entry )
+    {
+        if (fl->feature->Level > 0)
+        {
+            INSTALLSTATE state = (fl->feature->Installed == INSTALLSTATE_ABSENT ? INSTALLSTATE_UNKNOWN : INSTALLSTATE_ABSENT);
+            fl->feature->Action = state;
+            fl->feature->ActionRequest = state;
+        }
+        remove_children( fl->feature );
+    }
+}
+
+static void set_requested_state( MSIPACKAGE *package, MSIFEATURE *feature, INSTALLSTATE state,
+                                 BOOL remove )
+{
+    feature->Action = state;
+    feature->ActionRequest = state;
+
+    if (remove)
+        remove_children( feature );
+    else if (state == INSTALLSTATE_LOCAL || state == INSTALLSTATE_SOURCE || state == INSTALLSTATE_ADVERTISED)
+        raise_ancestors( package, feature, state );
+}
+
 static BOOL process_state_property(MSIPACKAGE* package, int level,
                                    LPCWSTR property, INSTALLSTATE state)
 {
@@ -1532,8 +1576,7 @@ static BOOL process_state_property(MSIPACKAGE* package, int level,
 
         if (!wcsicmp( override, L"ALL" ))
         {
-            feature->Action = state;
-            feature->ActionRequest = state;
+            set_requested_state( package, feature, state, remove );
         }
         else
         {
@@ -1547,8 +1590,7 @@ static BOOL process_state_property(MSIPACKAGE* package, int level,
                 if ((ptr2 && lstrlenW(feature->Feature) == len && !wcsncmp(ptr, feature->Feature, len))
                     || (!ptr2 && !wcscmp(ptr, feature->Feature)))
                 {
-                    feature->Action = state;
-                    feature->ActionRequest = state;
+                    set_requested_state( package, feature, state, remove );
                     break;
                 }
                 if (ptr2)
@@ -1636,6 +1678,33 @@ static void follow_parent( MSIFEATURE *feature )
     }
 }
 
+/* Windows keeps the children of a feature in line with it: below an advertised feature nothing is
+   installed, and when the properties name both, a child that follows its parent is installed the
+   way its parent is (local or source). */
+static void constrain_children( MSIFEATURE *feature, BOOL preselected )
+{
+    FeatureList *fl;
+
+    LIST_FOR_EACH_ENTRY( fl, &feature->Children, FeatureList, entry )
+    {
+        MSIFEATURE *child = fl->feature;
+        BOOL child_installs = (child->ActionRequest == INSTALLSTATE_LOCAL || child->ActionRequest == INSTALLSTATE_SOURCE);
+
+        if (feature->ActionRequest == INSTALLSTATE_ADVERTISED && child_installs)
+        {
+            child->Action = INSTALLSTATE_ADVERTISED;
+            child->ActionRequest = INSTALLSTATE_ADVERTISED;
+        }
+        else if (preselected && child_installs && (child->Attributes & msidbFeatureAttributesFollowParent) &&
+                 (feature->ActionRequest == INSTALLSTATE_LOCAL || feature->ActionRequest == INSTALLSTATE_SOURCE))
+        {
+            child->Action = feature->Action;
+            child->ActionRequest = feature->ActionRequest;
+        }
+        constrain_children( child, preselected );
+    }
+}
+
 UINT MSI_SetFeatureStates(MSIPACKAGE *package)
 {
     int level;
@@ -1652,18 +1721,12 @@ UINT MSI_SetFeatureStates(MSIPACKAGE *package)
         {
             if (!is_feature_selected( feature, level )) continue;
 
+            /* a preselected product leaves the features the properties do not name alone: Windows
+               reports no action for them (their installed components are kept by the component pass) */
             if (feature->ActionRequest == INSTALLSTATE_UNKNOWN)
             {
-                if (feature->Installed == INSTALLSTATE_ABSENT)
-                {
-                    feature->Action = INSTALLSTATE_UNKNOWN;
-                    feature->ActionRequest = INSTALLSTATE_UNKNOWN;
-                }
-                else
-                {
-                    feature->Action = feature->Installed;
-                    feature->ActionRequest = feature->Installed;
-                }
+                feature->Action = INSTALLSTATE_UNKNOWN;
+                feature->ActionRequest = INSTALLSTATE_UNKNOWN;
             }
         }
     }
@@ -1747,12 +1810,15 @@ UINT MSI_SetFeatureStates(MSIPACKAGE *package)
         }
     }
 
-    /* disable child features of unselected parent or follow parent */
+    /* disable child features of unselected parent or follow parent: when the properties name the
+       features to install (Windows), a child that is not named does not follow its parent */
     LIST_FOR_EACH_ENTRY( feature, &package->features, MSIFEATURE, entry )
     {
         if (feature->Feature_Parent) continue;
         disable_children( feature, level );
-        follow_parent( feature );
+        if (!msi_get_property_int( package->db, L"Preselected", 0 ))
+            follow_parent( feature );
+        constrain_children( feature, msi_get_property_int( package->db, L"Preselected", 0 ) );
     }
 
     /* now we want to set component state based based on feature state */
@@ -1773,6 +1839,50 @@ UINT MSI_SetFeatureStates(MSIPACKAGE *package)
                 feature->Action = INSTALLSTATE_LOCAL;
                 feature->ActionRequest = INSTALLSTATE_LOCAL;
                 break;
+            }
+        }
+
+        /* a feature whose components all have to be installed from the source can only be installed
+           from the source, whatever was asked for */
+        if (feature->ActionRequest == INSTALLSTATE_LOCAL && !list_empty( &feature->Components ))
+        {
+            BOOL all_source = TRUE;
+
+            LIST_FOR_EACH_ENTRY( cl, &feature->Components, ComponentList, entry )
+            {
+                if (!(cl->component->Attributes & msidbComponentAttributesSourceOnly) ||
+                    (cl->component->Attributes & msidbComponentAttributesOptional) ||
+                    cl->component->ForceLocalState)
+                {
+                    all_source = FALSE;
+                    break;
+                }
+            }
+            if (all_source)
+            {
+                feature->Action = INSTALLSTATE_SOURCE;
+                feature->ActionRequest = INSTALLSTATE_SOURCE;
+            }
+        }
+
+        /* and one whose components all have to be installed locally cannot be installed from the source */
+        if (feature->ActionRequest == INSTALLSTATE_SOURCE && !list_empty( &feature->Components ))
+        {
+            BOOL all_local = TRUE;
+
+            LIST_FOR_EACH_ENTRY( cl, &feature->Components, ComponentList, entry )
+            {
+                if (!cl->component->ForceLocalState &&
+                    (cl->component->Attributes & (msidbComponentAttributesSourceOnly | msidbComponentAttributesOptional)))
+                {
+                    all_local = FALSE;
+                    break;
+                }
+            }
+            if (all_local)
+            {
+                feature->Action = INSTALLSTATE_LOCAL;
+                feature->ActionRequest = INSTALLSTATE_LOCAL;
             }
         }
 
@@ -1851,8 +1961,9 @@ UINT MSI_SetFeatureStates(MSIPACKAGE *package)
         }
         if (component->hasAdvertisedFeature)
         {
-            component->Action = INSTALLSTATE_ADVERTISED;
-            component->ActionRequest = INSTALLSTATE_ADVERTISED;
+            /* Windows keeps no action for the components of an advertised feature */
+            component->Action = INSTALLSTATE_UNKNOWN;
+            component->ActionRequest = INSTALLSTATE_UNKNOWN;
             continue;
         }
         TRACE("nobody wants component %s\n", debugstr_w(component->Component));
