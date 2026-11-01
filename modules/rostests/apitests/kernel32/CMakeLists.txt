@@ -183,6 +183,7 @@ list(APPEND SOURCE
     ThreadFairness.c
     ThreadHandleLeak.c
     ThreadInformation.c
+    ThreadTimesTimerResolution.c
     TunnelCache.c
     VolumeMountPoint.c
     TzSetPrivilege.c
