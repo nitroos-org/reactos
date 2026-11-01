@@ -414,15 +414,33 @@ MEMBERS(GetHistoryLength) = { EXE_NAME(CONSOLE_GETCOMMANDHISTORYLENGTH), V(CONSO
 MEMBERS(GetHistory) = { EXE_NAME(CONSOLE_GETCOMMANDHISTORY), V(CONSOLE_GETCOMMANDHISTORY, HistoryLength),
     B(INOUT, CONSOLE_GETCOMMANDHISTORY, History, HistoryLength, 1) };
 #undef EXE_NAME
+MEMBERS(SetIcon) = { H(CONSOLE_SETICON, ConsoleHandle), H(CONSOLE_SETICON, IconHandle) };
+MEMBERS(SetCursor) = { H(CONSOLE_SETCURSOR, ConsoleHandle), H(CONSOLE_SETCURSOR, OutputHandle),
+    H(CONSOLE_SETCURSOR, CursorHandle) };
+MEMBERS(SetPalette) = { H(CONSOLE_SETPALETTE, ConsoleHandle), H(CONSOLE_SETPALETTE, OutputHandle),
+    H(CONSOLE_SETPALETTE, PaletteHandle), V(CONSOLE_SETPALETTE, Usage) };
+MEMBERS(MenuControl) = { H(CONSOLE_MENUCONTROL, ConsoleHandle), H(CONSOLE_MENUCONTROL, OutputHandle),
+    V(CONSOLE_MENUCONTROL, CmdIdLow), V(CONSOLE_MENUCONTROL, CmdIdHigh), H(CONSOLE_MENUCONTROL, MenuHandle) };
+MEMBERS(InvalidateDIBits) = { H(CONSOLE_INVALIDATEDIBITS, ConsoleHandle), H(CONSOLE_INVALIDATEDIBITS, OutputHandle),
+    V(CONSOLE_INVALIDATEDIBITS, Region) };
+MEMBERS(HardwareState) = { H(CONSOLE_GETSETHWSTATE, ConsoleHandle), H(CONSOLE_GETSETHWSTATE, OutputHandle),
+    V(CONSOLE_GETSETHWSTATE, Flags), V(CONSOLE_GETSETHWSTATE, State) };
+MEMBERS(SoundSentry) = { V(BASE_SOUND_SENTRY, VideoMode) };
+MEMBERS(EndTask) = { V(USER_END_TASK, LastError), H(USER_END_TASK, WndHandle), V(USER_END_TASK, Force),
+    V(USER_END_TASK, Success) };
 MEMBERS(FillOutput) = { H(CONSOLE_FILLOUTPUTCODE, ConsoleHandle), H(CONSOLE_FILLOUTPUTCODE, OutputHandle),
     V(CONSOLE_FILLOUTPUTCODE, WriteCoord), V(CONSOLE_FILLOUTPUTCODE, CodeType), V(CONSOLE_FILLOUTPUTCODE, Code),
     V(CONSOLE_FILLOUTPUTCODE, NumCodes) };
 
-#define REQUEST(Api, T, Name) { CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, Consolep##Api), \
+#define SERVER_REQUEST(Server, Api, T, Name) { CSR_CREATE_API_NUMBER(Server, Api), \
     sizeof(WOW64_##T), sizeof(T), RTL_NUMBER_OF(Name##Members), Name##Members }
-/* Not translated: requests carrying GUI handles (SetIcon, SetCursor, MenuControl, SetPalette),
- * graphics screen buffers (InvalidateBitMapRect), VDM, hardware state, OS/2, IME and NLS mode. */
-static const WOW64_CSR_REQUEST ConsoleRequests[] =
+#define REQUEST(Api, T, Name) SERVER_REQUEST(CONSRV_SERVERDLL_INDEX, Consolep##Api, T, Name)
+/* The last two entries are a base and a user server request, as small as the console ones: values and
+ * handles only. Not translated (they end in UnsupportedApi): VDM requests, the console IME (conime.exe
+ * registers it), graphics screen buffers (a bitmap section), UserpDeviceEvent (the server only returns
+ * STATUS_NOT_IMPLEMENTED, and its DEV_BROADCAST_HANDLE data is pointer-sized), the logon and service
+ * registrations (winlogon and services only), and every request no client library sends. */
+static const WOW64_CSR_REQUEST MemberRequests[] =
 {
     REQUEST(GetNumberOfFonts, CONSOLE_GETNUMFONTS, GetNumFonts),
     REQUEST(GetNumberOfInputEvents, CONSOLE_GETNUMINPUTEVENTS, GetNumInputEvents),
@@ -469,8 +487,18 @@ static const WOW64_CSR_REQUEST ConsoleRequests[] =
     REQUEST(GetCommandHistoryLength, CONSOLE_GETCOMMANDHISTORYLENGTH, GetHistoryLength),
     REQUEST(GetCommandHistory, CONSOLE_GETCOMMANDHISTORY, GetHistory),
     REQUEST(FillConsoleOutput, CONSOLE_FILLOUTPUTCODE, FillOutput),
+    REQUEST(SetIcon, CONSOLE_SETICON, SetIcon),
+    REQUEST(SetCursor, CONSOLE_SETCURSOR, SetCursor),
+    REQUEST(SetPalette, CONSOLE_SETPALETTE, SetPalette),
+    REQUEST(MenuControl, CONSOLE_MENUCONTROL, MenuControl),
+    REQUEST(InvalidateBitMapRect, CONSOLE_INVALIDATEDIBITS, InvalidateDIBits),
+    REQUEST(GetHardwareState, CONSOLE_GETSETHWSTATE, HardwareState),
+    REQUEST(SetHardwareState, CONSOLE_GETSETHWSTATE, HardwareState),
+    SERVER_REQUEST(BASESRV_SERVERDLL_INDEX, BasepSoundSentryNotification, BASE_SOUND_SENTRY, SoundSentry),
+    SERVER_REQUEST(USERSRV_SERVERDLL_INDEX, UserpEndTask, USER_END_TASK, EndTask),
 };
 #undef REQUEST
+#undef SERVER_REQUEST
 #undef MEMBERS
 #undef B
 #undef V
@@ -478,6 +506,10 @@ static const WOW64_CSR_REQUEST ConsoleRequests[] =
 #undef SAME_SIZE
 
 #define WOW64_CSR_MAX_BUFFERS 4
+
+/* The requests of the three servers share one message layout: a header, then the request data */
+C_ASSERT(FIELD_OFFSET(BASE_API_MESSAGE, Data) == FIELD_OFFSET(CONSOLE_API_MESSAGE, Data));
+C_ASSERT(FIELD_OFFSET(USER_API_MESSAGE, Data) == FIELD_OFFSET(CONSOLE_API_MESSAGE, Data));
 
 static NTSTATUS CallMembers(const WOW64_CSR_REQUEST *Request, PUCHAR Guest, ULONG Length)
 {
@@ -1207,8 +1239,8 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
     default:
     {
         ULONG i;
-        for (i = 0; i < RTL_NUMBER_OF(ConsoleRequests); ++i)
-            if (ConsoleRequests[i].Api == Api) return CallMembers(&ConsoleRequests[i], (PUCHAR)Data, a[3]);
+        for (i = 0; i < RTL_NUMBER_OF(MemberRequests); ++i)
+            if (MemberRequests[i].Api == Api) return CallMembers(&MemberRequests[i], (PUCHAR)Data, a[3]);
         return UnsupportedApi(Api, a[3], Reported);
     }
     }

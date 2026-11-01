@@ -14,6 +14,12 @@
  * expectations are those of Windows 10, for both PE32 and PE32+ builds. The calls run in a
  * child process with a new console, so the test does not depend on (or change) the console of
  * the test runner.
+ *
+ * The requests that reach the console window (icon, cursor, palette, menu, DIB bits, hardware
+ * state) are the exception: the Windows 10 22H2 console host fails all of them with error 16385,
+ * for a 32-bit and a 64-bit process alike, and ReactOS does not. Their expected results are
+ * given for both systems (TestWindowRequests). A 32-bit process under WoW64 on ReactOS used to
+ * get error 50 (ERROR_NOT_SUPPORTED) from each, as the request was not passed to the server.
  */
 #define CHILD_TIMEOUT_MS 60000
 
@@ -419,6 +425,174 @@ TestAliasesAndHistory(VOID)
     }
 }
 
+/* Results of the console window requests: ERR_KEEP is a last error that stays as set before the call */
+#define ERR_KEEP 0xdeadbeef
+#define ERR_WIN10 16385
+
+static
+VOID
+CheckBool(
+    _In_ PCSTR Name,
+    _In_ BOOL Ret,
+    _In_ DWORD Error,
+    _In_ BOOL ReactOSRet,
+    _In_ DWORD ReactOSError,
+    _In_ DWORD WindowsError)
+{
+    BOOL ExpectedRet = is_reactos() ? ReactOSRet : FALSE;
+    DWORD ExpectedError = is_reactos() ? ReactOSError : WindowsError;
+
+    ok(Ret == ExpectedRet, "%s returned %d\n", Name, Ret);
+    ok(Error == ExpectedError, "%s: error %lu, expected %lu\n", Name, Error, ExpectedError);
+}
+
+static
+VOID
+TestWindowRequests(VOID)
+{
+    typedef HICON (WINAPI *PLOADICON)(HINSTANCE, LPCWSTR);
+    typedef HCURSOR (WINAPI *PLOADCURSOR)(HINSTANCE, LPCWSTR);
+    typedef HMENU (WINAPI *PGETSYSTEMMENU)(HWND, BOOL);
+    BOOL (WINAPI *pSetConsoleIcon)(HICON);
+    BOOL (WINAPI *pSetConsoleCursor)(HANDLE, HCURSOR);
+    HMENU (WINAPI *pConsoleMenuControl)(HANDLE, DWORD, DWORD);
+    BOOL (WINAPI *pSetConsolePalette)(HANDLE, HPALETTE, UINT);
+    BOOL (WINAPI *pInvalidateConsoleDIBits)(HANDLE, PSMALL_RECT);
+    BOOL (WINAPI *pGetConsoleHardwareState)(HANDLE, PDWORD, PDWORD);
+    BOOL (WINAPI *pSetConsoleHardwareState)(HANDLE, DWORD, DWORD);
+    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll"), hUser32 = LoadLibraryW(L"user32.dll");
+    PLOADICON pLoadIconW = hUser32 ? (PLOADICON)GetProcAddress(hUser32, "LoadIconW") : NULL;
+    PLOADCURSOR pLoadCursorW = hUser32 ? (PLOADCURSOR)GetProcAddress(hUser32, "LoadCursorW") : NULL;
+    PGETSYSTEMMENU pGetSystemMenu = hUser32 ? (PGETSYSTEMMENU)GetProcAddress(hUser32, "GetSystemMenu") : NULL;
+    HANDLE hBad = (HANDLE)(ULONG_PTR)0x1234;
+    SMALL_RECT Rect = { 0, 0, 3, 3 };
+    DWORD Flags = 0x11111111, State = 0x22222222;
+    HICON hIcon;
+    HCURSOR hCursor;
+    HMENU hMenu;
+    HWND hWnd;
+    BOOL Ret;
+
+    pSetConsoleIcon = (PVOID)GetProcAddress(hKernel32, "SetConsoleIcon");
+    pSetConsoleCursor = (PVOID)GetProcAddress(hKernel32, "SetConsoleCursor");
+    pConsoleMenuControl = (PVOID)GetProcAddress(hKernel32, "ConsoleMenuControl");
+    pSetConsolePalette = (PVOID)GetProcAddress(hKernel32, "SetConsolePalette");
+    pInvalidateConsoleDIBits = (PVOID)GetProcAddress(hKernel32, "InvalidateConsoleDIBits");
+    pGetConsoleHardwareState = (PVOID)GetProcAddress(hKernel32, "GetConsoleHardwareState");
+    pSetConsoleHardwareState = (PVOID)GetProcAddress(hKernel32, "SetConsoleHardwareState");
+
+    if (pSetConsoleIcon)
+    {
+        SetLastError(ERR_KEEP);
+        Ret = pSetConsoleIcon(NULL);
+        CheckBool("SetConsoleIcon(NULL)", Ret, GetLastError(), TRUE, ERR_KEEP, ERR_WIN10);
+        if (pLoadIconW && (hIcon = pLoadIconW(NULL, ((LPCWSTR)(ULONG_PTR)32512) /* IDI_APPLICATION */)))
+        {
+            SetLastError(ERR_KEEP);
+            Ret = pSetConsoleIcon(hIcon);
+            CheckBool("SetConsoleIcon(IDI_APPLICATION)", Ret, GetLastError(), TRUE, ERR_KEEP, ERR_WIN10);
+        }
+        SetLastError(ERR_KEEP);
+        Ret = pSetConsoleIcon((HICON)hBad);
+        CheckBool("SetConsoleIcon(invalid)", Ret, GetLastError(), FALSE, ERROR_GEN_FAILURE, ERR_WIN10);
+    }
+    if (pSetConsoleCursor)
+    {
+        hCursor = pLoadCursorW ? pLoadCursorW(NULL, ((LPCWSTR)(ULONG_PTR)32512) /* IDC_ARROW */) : NULL;
+        /* Only graphics screen buffers take a cursor */
+        SetLastError(ERR_KEEP);
+        Ret = pSetConsoleCursor(hOut, hCursor);
+        CheckBool("SetConsoleCursor(text buffer)", Ret, GetLastError(), FALSE, ERROR_INVALID_HANDLE, ERR_WIN10);
+        SetLastError(ERR_KEEP);
+        Ret = pSetConsoleCursor(hBad, hCursor);
+        CheckBool("SetConsoleCursor(invalid handle)", Ret, GetLastError(), FALSE, ERROR_INVALID_HANDLE,
+                  ERROR_INVALID_HANDLE);
+    }
+    if (pConsoleMenuControl)
+    {
+        hWnd = GetConsoleWindow();
+        hMenu = pConsoleMenuControl(hOut, 0, 0);
+        if (is_reactos())
+        {
+            /* The console window's own system menu */
+            if (hWnd && pGetSystemMenu)
+                ok(hMenu && hMenu == pGetSystemMenu(hWnd, FALSE), "ConsoleMenuControl returned %p\n", hMenu);
+        }
+        else
+            ok(hMenu == NULL, "ConsoleMenuControl returned %p\n", hMenu);
+        hMenu = pConsoleMenuControl(hBad, 0, 0);
+        ok(hMenu == NULL, "ConsoleMenuControl(invalid handle) returned %p\n", hMenu);
+    }
+    if (pSetConsolePalette)
+    {
+        SetLastError(ERR_KEEP);
+        Ret = pSetConsolePalette(hOut, NULL, 1 /* SYSPAL_STATIC */);
+        CheckBool("SetConsolePalette(NULL)", Ret, GetLastError(), FALSE, ERROR_GEN_FAILURE, ERR_WIN10);
+        SetLastError(ERR_KEEP);
+        Ret = pSetConsolePalette(hBad, NULL, 1 /* SYSPAL_STATIC */);
+        CheckBool("SetConsolePalette(invalid handle)", Ret, GetLastError(), FALSE, ERROR_INVALID_HANDLE,
+                  ERROR_INVALID_HANDLE);
+    }
+    if (pInvalidateConsoleDIBits)
+    {
+        SetLastError(ERR_KEEP);
+        Ret = pInvalidateConsoleDIBits(hOut, &Rect);
+        CheckBool("InvalidateConsoleDIBits", Ret, GetLastError(), TRUE, ERR_KEEP, ERR_WIN10);
+        SetLastError(ERR_KEEP);
+        Ret = pInvalidateConsoleDIBits(hBad, &Rect);
+        CheckBool("InvalidateConsoleDIBits(invalid handle)", Ret, GetLastError(), FALSE, ERROR_INVALID_HANDLE,
+                  ERROR_INVALID_HANDLE);
+    }
+    if (pGetConsoleHardwareState)
+    {
+        SetLastError(ERR_KEEP);
+        Ret = pGetConsoleHardwareState(hOut, &Flags, &State);
+        CheckBool("GetConsoleHardwareState", Ret, GetLastError(), FALSE, ERROR_INVALID_FUNCTION, ERR_WIN10);
+        ok(Flags == 0x11111111 && State == 0x22222222, "Hardware state %lx %lx\n", Flags, State);
+    }
+    if (pSetConsoleHardwareState)
+    {
+        SetLastError(ERR_KEEP);
+        Ret = pSetConsoleHardwareState(hOut, 0, 1);
+        CheckBool("SetConsoleHardwareState", Ret, GetLastError(), FALSE, ERROR_INVALID_FUNCTION, ERR_WIN10);
+    }
+}
+
+/* Beep tells the base server's sound sentry (BasepSoundSentryNotification) and ignores the answer.
+ * The request is also sent raw, with the numbering of ReactOS: it must be accepted. */
+static
+VOID
+TestBeep(VOID)
+{
+    typedef LONG (NTAPI *PCSRCALL)(PVOID, PVOID, ULONG, ULONG);
+    struct
+    {
+        CHAR Header[sizeof(PVOID) == 8 ? 40 : 24]; /* PORT_MESSAGE */
+        PVOID CaptureData;
+        ULONG ApiNumber;
+        LONG Status;
+        ULONG Reserved;
+        ULONGLONG Data[32];
+    } Message;
+    PCSRCALL pCsrClientCallServer = (PVOID)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "CsrClientCallServer");
+    LONG Status;
+    BOOL Ret;
+
+    SetLastError(0xdeadbeef);
+    Ret = Beep(0, 0);
+    ok(Ret, "Beep(0, 0) failed with %lu\n", GetLastError());
+
+    if (!is_reactos() || !pCsrClientCallServer)
+    {
+        skip("The raw sound sentry request is for ReactOS\n");
+        return;
+    }
+    RtlZeroMemory(&Message, sizeof(Message));
+    /* BASESRV_SERVERDLL_INDEX 1, BasepSoundSentryNotification 21, one ULONG (VideoMode: windowed) */
+    Status = pCsrClientCallServer(&Message, NULL, (1 << 16) | 21, sizeof(ULONG));
+    ok(Status == 0, "BasepSoundSentryNotification returned %08lx\n", Status);
+}
+
 static
 VOID
 TestAllocConsole(VOID)
@@ -464,6 +638,8 @@ RunChild(VOID)
     TestHandles();
     TestMisc();
     TestAliasesAndHistory();
+    TestWindowRequests();
+    TestBeep();
 
     ok(CloseHandle(hOut), "CloseHandle(screen buffer) failed with %lu\n", GetLastError());
     ok(CloseHandle(hIn), "CloseHandle(CONIN$) failed with %lu\n", GetLastError());

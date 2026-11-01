@@ -4,6 +4,7 @@
 #include <mountdev.h>
 #include <winioctl.h>
 #include <ntddstor.h>
+#include <ntddbeep.h>
 #include <winsock2.h>
 #include <tdi.h>
 #include <tcpioctl.h>
@@ -1939,6 +1940,8 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         /* Volume extents (LARGE_INTEGERs at multiples of 8) and the storage property query: no pointers. */
         case IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS:
         case IOCTL_STORAGE_QUERY_PROPERTY:
+        /* Beep: BEEP_SET_PARAMETERS, two ULONGs (frequency, duration), no output. */
+        case IOCTL_BEEP_SET:
         case IOCTL_TCP_QUERY_INFORMATION_EX: /* TCP captures the guest context offset. */
         case IOCTL_TCP_SET_INFORMATION_EX: /* setsockopt partner: TDIObjectID + BufferSize + inline bytes, no pointers. */
         case IOCTL_SET_IP_ADDRESS: /* AddIPAddress: three integers, no pointers. */

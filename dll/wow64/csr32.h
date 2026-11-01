@@ -340,6 +340,23 @@ typedef struct
     ULONG LastError, Flags, Success;
 } WOW64_USER_EXIT_REACTOS;
 
+/* More console requests with handles and values only, and a base and a user request, translated
+ * member by member (csr.c). The window, icon, cursor, palette and menu handles are USER and GDI
+ * handles, 32 bits wide in both bitnesses and widened like the others. */
+typedef struct { ULONG ConsoleHandle, IconHandle; } WOW64_CONSOLE_SETICON;
+typedef struct { ULONG ConsoleHandle, OutputHandle, CursorHandle; } WOW64_CONSOLE_SETCURSOR;
+typedef struct { ULONG ConsoleHandle, OutputHandle, PaletteHandle; UINT Usage; } WOW64_CONSOLE_SETPALETTE;
+typedef struct { ULONG ConsoleHandle, OutputHandle; ULONG CmdIdLow, CmdIdHigh; ULONG MenuHandle; }
+    WOW64_CONSOLE_MENUCONTROL;
+typedef struct { ULONG ConsoleHandle, OutputHandle; SMALL_RECT Region; } WOW64_CONSOLE_INVALIDATEDIBITS;
+typedef struct { ULONG ConsoleHandle, OutputHandle; ULONG Flags, State; } WOW64_CONSOLE_GETSETHWSTATE;
+typedef struct { ULONG VideoMode; } WOW64_BASE_SOUND_SENTRY;
+typedef struct { DWORD LastError; ULONG WndHandle; BOOL Force, Success; } WOW64_USER_END_TASK;
+C_ASSERT(sizeof(WOW64_CONSOLE_SETICON) == 8 && sizeof(WOW64_CONSOLE_SETCURSOR) == 12);
+C_ASSERT(sizeof(WOW64_CONSOLE_SETPALETTE) == 16 && sizeof(WOW64_CONSOLE_MENUCONTROL) == 20);
+C_ASSERT(sizeof(WOW64_CONSOLE_INVALIDATEDIBITS) == 16 && sizeof(WOW64_CONSOLE_GETSETHWSTATE) == 16);
+C_ASSERT(sizeof(WOW64_BASE_SOUND_SENTRY) == 4 && sizeof(WOW64_USER_END_TASK) == 16);
+
 C_ASSERT(sizeof(WOW64_USER_EXIT_REACTOS) == sizeof(USER_EXIT_REACTOS));
 C_ASSERT(sizeof(WOW64_CONSOLE_READCONSOLE) == 120 && FIELD_OFFSET(WOW64_CONSOLE_READCONSOLE, Buffer) == 92);
 C_ASSERT(sizeof(WOW64_CONSOLE_GETINPUT) == 120 && sizeof(WOW64_CONSOLE_WRITEINPUT) == 120);
