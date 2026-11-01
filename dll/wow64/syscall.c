@@ -5,6 +5,7 @@
 #include <winioctl.h>
 #include <ntddstor.h>
 #include <ntddbeep.h>
+#include <ntddscsi.h>
 #include <winsock2.h>
 #include <tdi.h>
 #include <tcpioctl.h>
@@ -257,12 +258,10 @@ typedef struct { ULONG Flags, NewTlsData, OldTlsData, ThreadId; } WOW64_THREAD_T
 C_ASSERT(sizeof(WOW64_THREAD_TLS_INFORMATION) == 16);
 C_ASSERT(FIELD_OFFSET(PROCESS_TLS_INFORMATION, ThreadData) == 16);
 
-static VOID ProbeOutput(ULONG Address, ULONG Size);
-static VOID ProbeInput(ULONG Address, ULONG Size);
 
 /* Read one byte per page, plus the last byte, so that a bad guest range faults here under
  * the dispatcher SEH instead of in the kernel after the request was queued */
-static VOID ProbeInput(ULONG Address, ULONG Size)
+VOID ProbeInput(ULONG Address, ULONG Size)
 {
     volatile const UCHAR *Bytes = PTR32(Address);
     ULONG i;
@@ -323,7 +322,7 @@ static NTSTATUS SetProcessTls32(HANDLE Process, ULONG Address, ULONG Length, WOW
     return Status;
 }
 
-static VOID ProbeOutput(ULONG Address, ULONG Size)
+VOID ProbeOutput(ULONG Address, ULONG Size)
 {
     /* A locked compare-exchange of a byte with its own value is a write the
      * hardware performs atomically: it faults on read-only or unmapped memory
@@ -339,7 +338,7 @@ static VOID ProbeOutput(ULONG Address, ULONG Size)
 }
 
 /* Size bytes at a guest address lie below the guest's highest address */
-static BOOLEAN GuestSpan(ULONG Address, ULONG64 Size)
+BOOLEAN GuestSpan(ULONG Address, ULONG64 Size)
 {
     return (ULONG64)Address + Size <= (ULONG64)Wow64HighestUserAddress + 1;
 }
@@ -841,7 +840,7 @@ KeyViewAccess(const OBJECT_ATTRIBUTES *Attributes, ACCESS_MASK Access)
  * first (the kernel only sees a local one) and is the starting point of the local one: the kernel
  * writes it only for a request it started, and a request refused before that leaves the guest's
  * block as it was, as on Windows. A NULL block is for the kernel to judge. */
-static IO_STATUS_BLOCK *IoBegin(ULONG Address, IO_STATUS_BLOCK *Io)
+IO_STATUS_BLOCK *IoBegin(ULONG Address, IO_STATUS_BLOCK *Io)
 {
     const volatile WOW64_IOSB *From = PTR32(Address);
     if (!Address) return NULL;
@@ -851,7 +850,7 @@ static IO_STATUS_BLOCK *IoBegin(ULONG Address, IO_STATUS_BLOCK *Io)
     return Io;
 }
 
-static VOID IoEnd(ULONG Address, const IO_STATUS_BLOCK *Io)
+VOID IoEnd(ULONG Address, const IO_STATUS_BLOCK *Io)
 {
     if (Address) StoreIo(Address, Io);
 }
@@ -2167,6 +2166,14 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             InputLength = sizeof(Transfer);
             break;
         }
+        case IOCTL_SCSI_PASS_THROUGH:
+        case IOCTL_SCSI_PASS_THROUGH_DIRECT:
+        case IOCTL_ATA_PASS_THROUGH:
+        case IOCTL_ATA_PASS_THROUGH_DIRECT:
+            /* The headers hold ULONG_PTR/PVOID fields (scsi.c). The result is stored before this returns,
+             * so a guest APC routine cannot be called back: refused as a QueryDirectoryFile does. */
+            if (a[2]) UNSUPPORTED(MODE, 1);
+            return Wow64ScsiPassThrough(a);
         default:
             /* Codes whose buffers are pointer-free and the same in both ABIs (ioctl.c) */
             if (!Wow64IsPlainIoctl(a[5]))

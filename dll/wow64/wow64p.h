@@ -63,6 +63,14 @@ NTSTATUS Wow64Unsupported(ULONG Service, ULONG Kind, ULONG Value, BOOLEAN *Repor
 BOOLEAN Wow64IsPlainIoctl(ULONG Code);
 BOOLEAN Wow64IsPlainFsctl(ULONG Code);
 NTSTATUS Wow64Allocate(SIZE_T Size, PVOID *Base);
+/* syscall.c guest-memory helpers used by scsi.c */
+VOID ProbeInput(ULONG Address, ULONG Size);
+VOID ProbeOutput(ULONG Address, ULONG Size);
+BOOLEAN GuestSpan(ULONG Address, ULONG64 Size);
+IO_STATUS_BLOCK *IoBegin(ULONG Address, IO_STATUS_BLOCK *Io);
+VOID IoEnd(ULONG Address, const IO_STATUS_BLOCK *Io);
+/* scsi.c: SCSI and ATA pass-through of a 32-bit caller (the arguments of NtDeviceIoControlFile) */
+NTSTATUS Wow64ScsiPassThrough(const ULONG *a);
 extern ULONG Wow64HighestUserAddress;
 ULONG_PTR Wow64ZeroBits(ULONG ZeroBits);
 
