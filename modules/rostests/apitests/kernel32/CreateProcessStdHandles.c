@@ -28,7 +28,9 @@ typedef struct
     HANDLE Value[3];
     ULONG Type[3];
     ULONG DupError[3];  /* 0 = DuplicateHandle works */
-    ULONG ListHandleValid;
+    ULONG ListHandleValid;  /* the parent's event handle value is open in the child */
+    ULONG ListHandleSet;    /* ... and SetEvent works on it */
+    ULONG ListSignaled;     /* the parent's event was signaled once the child exited (parent side) */
     /* MODE_RUST: the Rust standard library's spawn, run inside the child */
     ULONG RustDupError[3];
     ULONG RustCreateOk, RustCreateError, RustLeafDone;
@@ -146,7 +148,11 @@ static VOID Child(PCSTR Name, ULONG SlotIndex, PCSTR Mode)
     Report = Data;
     S = &Data->Slot[SlotIndex];
     RecordStd(S);
+    /* A handle table that is empty or holds other objects can still have an open handle with the
+     * same numeric value, so the handle must also be the parent's event: signal it, the parent
+     * looks at the event afterwards. */
     S->ListHandleValid = GetHandleInformation(Data->ListHandle, &Flags);
+    S->ListHandleSet = S->ListHandleValid && SetEvent(Data->ListHandle);
     if (!strcmp(Mode, "rust")) RustSpawn(S);
     S->Done = 1;
     ExitProcess(0);
@@ -233,6 +239,7 @@ static SLOT *Spawn(const SPAWN *P, DWORD *Error)
     }
     StringCchPrintfW(Cmd, _countof(Cmd), L"\"%s\" CreateProcessStdHandles child %s %lu %S",
                      P->Gui ? GuiImage : Image, MappingName, Index, P->Mode);
+    ResetEvent(Report->ListHandle);
     SetLastError(0xdeadbeef);
     Ret = CreateProcessW(P->Gui ? GuiImage : Image, Cmd, NULL, NULL, P->Inherit, Flags, NULL, NULL,
                          &si.StartupInfo, &pi);
@@ -248,7 +255,14 @@ static SLOT *Spawn(const SPAWN *P, DWORD *Error)
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     ok(Report->Slot[Index].Done, "child did not report\n");
+    Report->Slot[Index].ListSignaled = WaitForSingleObject(Report->ListHandle, 0) == WAIT_OBJECT_0;
     return &Report->Slot[Index];
+}
+
+/* Did the child inherit the parent's event (not merely have some handle with the same value)? */
+static BOOL ListHandleInherited(const SLOT *S)
+{
+    return S->ListHandleSet && S->ListSignaled;
 }
 
 static BOOL IsValid(const SLOT *S, ULONG i)
@@ -482,7 +496,7 @@ static VOID TestHandleList(HANDLE ConOut)
         P.ListCount = 1;
         S = Spawn(&P, &Error);
         ok(S != NULL, "%s, list {event}: CreateProcess failed with %lu\n", Kind, Error);
-        if (S) ok(S->ListHandleValid, "%s, list {event}: the handle is not in the child\n", Kind);
+        if (S) ok(ListHandleInherited(S), "%s, list {event}: the handle is not in the child\n", Kind);
 
         /* a NULL entry is accepted */
         BEGIN();
@@ -497,7 +511,7 @@ static VOID TestHandleList(HANDLE ConOut)
         P.ListCount = 2;
         S = Spawn(&P, &Error);
         ok(S != NULL, "%s, list {event, NULL}: CreateProcess failed with %lu\n", Kind, Error);
-        if (S) ok(!S->ListHandleValid, "%s, list {event, NULL}: a NULL entry makes the list empty\n", Kind);
+        if (S) ok(!ListHandleInherited(S), "%s, list {event, NULL}: a NULL entry makes the list empty\n", Kind);
 
         /* a console handle of the parent */
         BEGIN();
