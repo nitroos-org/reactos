@@ -2572,8 +2572,8 @@ ConWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
                 break;
             }
-            /* Detect Alt-Esc/Space/Tab presses defer to DefWindowProc */
-            if ( (HIWORD(lParam) & KF_ALTDOWN) && (wParam == VK_ESCAPE || wParam == VK_SPACE || wParam == VK_TAB))
+            /* Detect Alt-Esc/Space/Tab/F4 presses defer to DefWindowProc (Alt-F4 posts SC_CLOSE) */
+            if ( (HIWORD(lParam) & KF_ALTDOWN) && (wParam == VK_ESCAPE || wParam == VK_SPACE || wParam == VK_TAB || wParam == VK_F4))
             {
                 return DefWindowProcW(hWnd, msg, wParam, lParam);
             }
