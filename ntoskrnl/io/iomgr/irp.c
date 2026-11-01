@@ -2507,33 +2507,36 @@ IoSetTopLevelIrp(IN PIRP Irp)
 #if defined (_WIN64)
 /*
  * @implemented
+ *
+ * The answer depends on the process the request comes from (the process of the thread that issued
+ * it), as on Windows, and on nothing the request carries: a WoW64 process gets TRUE whether the
+ * request has the caller's IO_STATUS_BLOCK or one of the I/O manager's own (create, query and set
+ * information, flush and unlock requests have one), whether it completes inline, from an APC or
+ * through a completion port, and whichever thread the driver runs in when it asks.
  */
 BOOLEAN
 NTAPI
 IoIs32bitProcess(
     IN PIRP Irp OPTIONAL)
 {
-    PETHREAD pThread;
-    PEPROCESS pProcess;
+    PETHREAD Thread;
 
     if (Irp == NULL)
     {
-        pThread = PsGetCurrentThread();
-    }
-    else
-    {
-        /* If it's a kernel mode IRP, it could not have originated from WOW64 */
-        if (Irp->RequestorMode == KernelMode ||
-            (PVOID)Irp->UserIosb > MmHighestUserAddress)
-        {
-            return FALSE;
-        }
-
-        pThread = Irp->Tail.Overlay.Thread;
+        /* The process the caller runs in */
+        return PsGetCurrentProcess()->Wow64Process != NULL;
     }
 
-    pProcess = CONTAINING_RECORD(pThread->Tcb.Process, EPROCESS, Pcb);
+    /* A request that comes from kernel mode holds native structures, whatever thread it is sent in */
+    if (Irp->RequestorMode == KernelMode)
+        return FALSE;
 
-    return pProcess->Wow64Process != NULL;
+    /* A request the system made for itself has no thread, so no WoW64 process either */
+    Thread = Irp->Tail.Overlay.Thread;
+    if (Thread == NULL)
+        return FALSE;
+
+    /* The process of the thread that issued the request */
+    return Thread->ThreadsProcess->Wow64Process != NULL;
 }
 #endif
