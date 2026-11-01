@@ -727,6 +727,10 @@ co_MsqInsertMouseMessageEx(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Ho
          return;
    }
 
+   /* The window message carries the time SendInput or mouse_event supplied too (GetMessageTime) */
+   if (dwHookTime)
+      Msg->time = dwHookTime;
+
    /* Get the desktop window */
    pwndDesktop = UserGetDesktopWindow();
    if (!pwndDesktop) return;

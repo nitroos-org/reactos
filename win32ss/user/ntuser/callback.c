@@ -545,14 +545,59 @@ static INT iTheId = -2; // Set it out of range.
  * WH_DEBUG: the callback gets the DEBUGHOOKINFO of the hook that is about to run, and with it a copy of the record the
  * lParam of that hook points to, when that is one of the flat records below (the user-mode procedure then gets an
  * lParam that is the offset of the record from the header, as for the other hooks). The lParam of a hook that
- * carries a plain value goes through as it is, the lParam of the others (CBT_CREATEWND, CALLWNDPROC(RET)) is
- * not passed on: zero. wow64win converts the same records.
+ * carries a plain value goes through as it is. The records of CALLWNDPROC(RET) and CBT_CREATEWND go the way they do
+ * to the hook itself: the CWPSTRUCT or CWPRETSTRUCT with the data its lParam points to behind it, and the
+ * CREATESTRUCT and hwndInsertAfter of the CBT_CREATEWND (the user-mode side builds the CBT_CREATEWND pointing at
+ * them). The lParam of the debug record of any other hook is not passed on: zero. wow64win converts the same records.
  */
 static UINT
 IntDebugHookRecordSize(INT HookId, INT Code, LPARAM lParam)
 {
     if (!lParam)
         return 0;
+
+    switch (HookId)
+    {
+        case WH_CALLWNDPROC:
+        case WH_CALLWNDPROCRET:
+        {
+            UINT Base = (HookId == WH_CALLWNDPROC) ? sizeof(CWPSTRUCT) : sizeof(CWPRETSTRUCT);
+            UINT Msg = 0, Extra = 0;
+            WPARAM Wp = 0;
+            LPARAM Lp = 0;
+
+            _SEH2_TRY
+            {
+                if (HookId == WH_CALLWNDPROC)
+                {
+                    CWPSTRUCT *pCwp = (CWPSTRUCT *)lParam;
+                    Msg = pCwp->message; Wp = pCwp->wParam; Lp = pCwp->lParam;
+                }
+                else
+                {
+                    CWPRETSTRUCT *pCwpr = (CWPRETSTRUCT *)lParam;
+                    Msg = pCwpr->message; Wp = pCwpr->wParam; Lp = pCwpr->lParam;
+                }
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return 0;
+            }
+            _SEH2_END;
+
+            if (Msg == WM_CREATE || Msg == WM_NCCREATE)
+                Extra = sizeof(CREATESTRUCTW);
+            else
+                Extra = lParamMemorySize(Msg, Wp, Lp);
+            return Base + Extra;
+        }
+        case WH_CBT:
+            if (Code == HCBT_CREATEWND)
+                return sizeof(HOOKPROC_CBT_CREATEWND_EXTRA_ARGUMENTS);
+            break;
+        default:
+            break;
+    }
 
     switch (HookId)
     {
@@ -575,6 +620,43 @@ IntDebugHookRecordSize(INT HookId, INT Code, LPARAM lParam)
             break;
     }
     return 0;
+}
+
+/* The record a debug call carries for the hook HookId: Size bytes behind the DEBUGHOOKINFO, from the lParam Src of
+ * that hook. All zero if Src cannot be read. */
+static VOID
+IntDebugHookCopyRecord(INT HookId, INT Code, PVOID Dest, UINT Size, PVOID Src)
+{
+    _SEH2_TRY
+    {
+        if (HookId == WH_CBT && Code == HCBT_CREATEWND)
+        {
+            PHOOKPROC_CBT_CREATEWND_EXTRA_ARGUMENTS pExtra = Dest;
+            CBT_CREATEWNDW *pCbt = Src;
+
+            RtlCopyMemory(&pExtra->Cs, pCbt->lpcs, sizeof(CREATESTRUCTW));
+            pExtra->WndInsertAfter = pCbt->hwndInsertAfter;
+        }
+        else if (HookId == WH_CALLWNDPROC || HookId == WH_CALLWNDPROCRET)
+        {
+            UINT Base = (HookId == WH_CALLWNDPROC) ? sizeof(CWPSTRUCT) : sizeof(CWPRETSTRUCT);
+            LPARAM Inner = (HookId == WH_CALLWNDPROC) ? ((CWPSTRUCT *)Src)->lParam : ((CWPRETSTRUCT *)Src)->lParam;
+
+            RtlCopyMemory(Dest, Src, Base);
+            /* what the lParam of the message points to follows the record */
+            if (Size > Base && Inner)
+                RtlCopyMemory((PCHAR)Dest + Base, (PVOID)Inner, Size - Base);
+        }
+        else
+        {
+            RtlCopyMemory(Dest, Src, Size);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        RtlZeroMemory(Dest, Size);
+    }
+    _SEH2_END;
 }
 
 static BOOL
@@ -857,15 +939,7 @@ co_IntCallHookProc(INT HookId,
          if (lParamSize)
          {
             pOut->lParam = (LPARAM)((PCHAR)(pOut + 1) - (PCHAR)Common);
-            _SEH2_TRY
-            {
-               RtlCopyMemory(pOut + 1, (PVOID)pDebug->lParam, lParamSize);
-            }
-            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-            {
-               RtlZeroMemory(pOut + 1, lParamSize);
-            }
-            _SEH2_END;
+            IntDebugHookCopyRecord((INT)wParam, pDebug->code, pOut + 1, lParamSize, (PVOID)pDebug->lParam);
          }
          else if (!IntDebugHookPlainLParam((INT)wParam, pDebug->code))
          {

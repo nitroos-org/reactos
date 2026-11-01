@@ -10,8 +10,11 @@
 
 #include "precomp.h"
 
+#include <string.h>
+
 #define CLASS_NAME L"HookFamiliesWnd"
 #define TEST_MESSAGE (WM_USER + 0x77)
+#define TEST_MESSAGE2 (WM_USER + 0x78)
 #define FILTER_CODE 0x4321
 #define EXTRA_INFO 0x5A5A1234
 #define CREATE_PARAMS ((LPVOID)(ULONG_PTR)0x1234ABCD)
@@ -35,6 +38,11 @@ static int g_moveMode;
 static LONG g_cbtMoveSize, g_innerMoveSize;
 static RECT g_moveRect, g_moveSent, g_moveInner, g_moveAfterChain;
 static LRESULT g_moveChain;
+/* the events of the move loop after the last HCBT_MOVESIZE: 'P' WM_WINDOWPOSCHANGING, 'X' WM_EXITSIZEMOVE (the
+ * log starts over with the hook, 'H') */
+static char g_moveSeq[64];
+/* the arrow keys of the keyboard move or size, zero ends them */
+static const WORD *g_keySeq;
 static LPARAM g_minMaxShow;
 static WPARAM g_sysCommand, g_keySkipped;
 static LONG g_innerCreate, g_innerCreateOk;
@@ -63,6 +71,9 @@ static LONG g_llWheel, g_innerLlMouse[2], g_innerLlMouseBad;
 static MSLLHOOKSTRUCT g_llMouseCopy[2], g_llWheelRecord;
 static POINT g_wheelPoint;
 #define WHEEL_TIME 0x1234567
+/* GetMessageTime of the mouse messages in the window procedure: the last one seen for each message */
+static DWORD g_msgTime[4];
+enum { MT_MOVE, MT_DOWN, MT_UP, MT_WHEEL };
 /* WH_SHELL, WH_FOREGROUNDIDLE, WH_DEBUG */
 static LONG g_shellCreated, g_shellDestroyed, g_idle, g_debug;
 /* WH_DEBUG: bit (id + 1) of g_debugIds is set for each hook it was called for, the calls whose DEBUGHOOKINFO is
@@ -73,13 +84,59 @@ static int g_debugBlock = -100;
 /* WH_GETMESSAGE, WH_CALLWNDPROC(RET) */
 static LONG g_getMessage, g_callWnd, g_callWndRet;
 static BOOL g_getMessageOk, g_callWndOk, g_callWndRetOk;
+/* WH_DEBUG for the hooks CallNextHookEx reaches: the events of a SendMessage(TEST_MESSAGE2) in order, 'D' for a
+ * call of the debug hook for WH_CALLWNDPROC, 'a', 'b', 'c' for the three hooks of that, and what the debug hook
+ * may do: block the calls whose number is a bit of g_dbgBlockMask. What it got for CALLWNDPROC(RET) and CBT_CREATEWND */
+static BOOL g_dbgSeqOn;
+static char g_dbgSeq[32];
+static ULONG g_dbgBlockMask;
+static LONG g_dbgCwpCalls, g_dbgCwpBad, g_dbgRetCalls, g_dbgRetBad;
+static BOOL g_dbgCbtTrack;
+static LONG g_dbgCbtCalls, g_dbgCbtBad, g_dbgCbtBlock;
+
+static void MoveEvent(char c)
+{
+    size_t n = strlen(g_moveSeq);
+
+    if (g_moveMode == MOVE_NONE)
+        return;
+    if (c == 'H')
+        n = 0;
+    if (n + 2 < sizeof(g_moveSeq))
+    {
+        g_moveSeq[n] = c;
+        g_moveSeq[n + 1] = 0;
+    }
+}
+
+/* the events after the hook start with expect */
+static BOOL MoveSeqIs(const char *expect)
+{
+    return g_moveSeq[0] == 'H' && !strncmp(g_moveSeq + 1, expect, strlen(expect));
+}
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    if (msg == TEST_MESSAGE)
+    if (msg == TEST_MESSAGE || msg == TEST_MESSAGE2)
         return 0x7654;
     if (msg == WM_KEYDOWN && wParam == VK_F14)
         g_wmKeyF14++;
+    if (hwnd == g_main)
+    {
+        switch (msg)
+        {
+            case WM_WINDOWPOSCHANGING: MoveEvent('P'); break;
+            case WM_EXITSIZEMOVE: MoveEvent('X'); break;
+            /* a move of the real mouse or of the system can come in between: the one SendInput gave is looked for */
+            case WM_MOUSEMOVE:
+                if ((DWORD)GetMessageTime() == WHEEL_TIME + 1 || !g_msgTime[MT_MOVE])
+                    g_msgTime[MT_MOVE] = (DWORD)GetMessageTime();
+                break;
+            case WM_LBUTTONDOWN: g_msgTime[MT_DOWN] = (DWORD)GetMessageTime(); break;
+            case WM_LBUTTONUP: g_msgTime[MT_UP] = (DWORD)GetMessageTime(); break;
+            case WM_MOUSEWHEEL: g_msgTime[MT_WHEEL] = (DWORD)GetMessageTime(); break;
+        }
+    }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
@@ -151,6 +208,7 @@ static LRESULT CALLBACK CbtProc(int code, WPARAM wParam, LPARAM lParam)
                 RECT *rc = (RECT *)lParam;
                 LRESULT res;
 
+                MoveEvent('H');
                 g_cbtMoveSize++;
                 g_moveRect = *rc;
                 if (g_moveMode == MOVE_CANCEL)
@@ -399,6 +457,17 @@ static LRESULT CALLBACK IdleProc(int code, WPARAM wParam, LPARAM lParam)
     return CallNextHookEx(NULL, code, wParam, lParam);
 }
 
+static void DbgSeq(char c)
+{
+    size_t n = strlen(g_dbgSeq);
+
+    if (n + 2 < sizeof(g_dbgSeq))
+    {
+        g_dbgSeq[n] = c;
+        g_dbgSeq[n + 1] = 0;
+    }
+}
+
 static LRESULT CALLBACK DebugProc(int code, WPARAM wParam, LPARAM lParam)
 {
     DEBUGHOOKINFO *info = (DEBUGHOOKINFO *)lParam;
@@ -418,7 +487,57 @@ static LRESULT CALLBACK DebugProc(int code, WPARAM wParam, LPARAM lParam)
             g_debugBlocked++;
             return 1;
         }
+        if (id == WH_CALLWNDPROC && g_dbgSeqOn)
+        {
+            /* a real CWPSTRUCT: Windows passes the record the hook gets, not zero */
+            const CWPSTRUCT *cwp = (const CWPSTRUCT *)info->lParam;
+            BOOL real = info->lParam && !IsBadReadPtr(cwp, sizeof(*cwp));
+
+            if (!real || cwp->message == TEST_MESSAGE2)
+            {
+                DbgSeq('D');
+                if (!real || cwp->hwnd != g_main || cwp->wParam != 0x33 || cwp->lParam != (LPARAM)(LONG)0x83456789)
+                    g_dbgCwpBad++;
+                if (g_dbgBlockMask & (1UL << g_dbgCwpCalls++))
+                    return 1;
+            }
+        }
+        else if (id == WH_CALLWNDPROCRET && g_dbgSeqOn)
+        {
+            const CWPRETSTRUCT *cwpr = (const CWPRETSTRUCT *)info->lParam;
+            BOOL real = info->lParam && !IsBadReadPtr(cwpr, sizeof(*cwpr));
+
+            if (!real || cwpr->message == TEST_MESSAGE2)
+            {
+                g_dbgRetCalls++;
+                if (!real || cwpr->hwnd != g_main || cwpr->wParam != 0x33 || cwpr->lResult != 0x7654)
+                    g_dbgRetBad++;
+            }
+        }
+        else if (id == WH_CBT && g_dbgCbtTrack && info->code == HCBT_CREATEWND)
+        {
+            /* a CBT_CREATEWND of the hook's lParam is readable; what its lpcs points to is not told: Windows
+             * gives a pointer that cannot be read in user mode */
+            if (!info->lParam || IsBadReadPtr((const void *)info->lParam, sizeof(CBT_CREATEWNDW)))
+                g_dbgCbtBad++;
+            if (g_dbgCbtBlock & (1L << g_dbgCbtCalls++))
+                return 1;
+        }
     }
+    return CallNextHookEx(NULL, code, wParam, lParam);
+}
+
+static LRESULT CALLBACK CallWndProcA(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code == HC_ACTION && g_dbgSeqOn && ((CWPSTRUCT *)lParam)->message == TEST_MESSAGE2)
+        DbgSeq('a');
+    return CallNextHookEx(NULL, code, wParam, lParam);
+}
+
+static LRESULT CALLBACK CallWndProcB(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code == HC_ACTION && g_dbgSeqOn && ((CWPSTRUCT *)lParam)->message == TEST_MESSAGE2)
+        DbgSeq('b');
     return CallNextHookEx(NULL, code, wParam, lParam);
 }
 
@@ -443,6 +562,8 @@ static LRESULT CALLBACK CallWndProc(int code, WPARAM wParam, LPARAM lParam)
         g_callWnd++;
         g_callWndOk = cwp->hwnd == g_main && cwp->wParam == 0x32 && cwp->lParam == (LPARAM)(LONG)0x82345678;
     }
+    else if (code == HC_ACTION && g_dbgSeqOn && cwp->message == TEST_MESSAGE2)
+        DbgSeq('c');
     return CallNextHookEx(NULL, code, wParam, lParam);
 }
 
@@ -541,11 +662,12 @@ static void TapVirtualKey(WORD vk)
     Sleep(150);
 }
 
-/* Alt+Space, the menu key for Move or Size, three arrow keys right and two down, Return. The window thread is in
- * the system menu and then in the move loop of its DefWindowProc for that time */
+/* Alt+Space, the menu key for Move or Size, the arrow keys of g_keySeq, Return. The window thread is in the system
+ * menu and then in the move loop of its DefWindowProc for that time */
 static DWORD WINAPI KeyMoveThread(LPVOID param)
 {
     WORD menuKey = (WORD)(ULONG_PTR)param;
+    int i;
 
     SendVirtualKey(VK_MENU, 0);
     Sleep(40);
@@ -557,11 +679,8 @@ static DWORD WINAPI KeyMoveThread(LPVOID param)
     Sleep(500);
     TapVirtualKey(menuKey);
     Sleep(400);
-    TapVirtualKey(VK_RIGHT);
-    TapVirtualKey(VK_RIGHT);
-    TapVirtualKey(VK_RIGHT);
-    TapVirtualKey(VK_DOWN);
-    TapVirtualKey(VK_DOWN);
+    for (i = 0; g_keySeq[i]; i++)
+        TapVirtualKey(g_keySeq[i]);
     Sleep(200);
     TapVirtualKey(VK_RETURN);
     return 0;
@@ -584,6 +703,7 @@ static void MoveWithKeyboard(int mode, WORD menuKey, RECT *before, RECT *after)
     ZeroMemory(&g_moveInner, sizeof(RECT));
     ZeroMemory(&g_moveAfterChain, sizeof(RECT));
     g_moveChain = 0xbad;
+    g_moveSeq[0] = 0;
     thread = CreateThread(NULL, 0, KeyMoveThread, (LPVOID)(ULONG_PTR)menuKey, 0, NULL);
     Pump(3300);
     WaitForSingleObject(thread, 5000);
@@ -614,6 +734,7 @@ static BOOL MoveWithMouse(int mode, RECT *before, RECT *after)
     ZeroMemory(&g_moveInner, sizeof(RECT));
     ZeroMemory(&g_moveAfterChain, sizeof(RECT));
     g_moveChain = 0xbad;
+    g_moveSeq[0] = 0;
     thread = CreateThread(NULL, 0, DragThread, &start, 0, NULL);
     /* the button press starts the move loop inside DispatchMessage */
     Pump(1800);
@@ -656,9 +777,9 @@ START_TEST(HookFamilies)
     HWND hwnd;
     RECT rc, before, after, expect;
     MSG msg;
-    POINT saved;
+    POINT saved, pt;
     INPUT in;
-    BOOL foreground, moved = FALSE;
+    BOOL foreground, mouseOver = FALSE, moved = FALSE;
     size_t i;
 
     trace("%u-bit process\n", (UINT)(sizeof(void *) * 8));
@@ -723,8 +844,15 @@ START_TEST(HookFamilies)
         DestroyWindow(hwnd);
 
     g_chainResult = 0xbad;
+    g_dbgCbtTrack = TRUE;
+    g_dbgCbtCalls = g_dbgCbtBad = 0;
     hwnd = CreateWindowExW(0, CLASS_NAME, L"chain", WS_OVERLAPPEDWINDOW, 40, 50, 210, 110, NULL, NULL,
                            wc.hInstance, CREATE_PARAMS);
+    g_dbgCbtTrack = FALSE;
+    /* WH_DEBUG runs before each of the two WH_CBT hooks, the second one reached through CallNextHookEx, with a
+     * CBT_CREATEWND that can be read */
+    ok(g_dbgCbtCalls == 2 && g_dbgCbtBad == 0, "WH_DEBUG for HCBT_CREATEWND: %ld calls, %ld without a CBT_CREATEWND\n",
+       g_dbgCbtCalls, g_dbgCbtBad);
     ok(hwnd != NULL, "chained HCBT_CREATEWND: no window, error %lu\n", GetLastError());
     ok(g_innerCreate == 1, "chained HCBT_CREATEWND: inner hook ran %ld times\n", g_innerCreate);
     ok(g_innerCreateOk, "chained HCBT_CREATEWND: wrong CREATESTRUCT in the inner hook\n");
@@ -735,6 +863,44 @@ START_TEST(HookFamilies)
         DestroyWindow(hwnd);
         ok(g_cbtDestroy == 1 && g_destroyHwnd == hwnd, "HCBT_DESTROYWND: %ld calls, wParam %p, window %p\n",
            g_cbtDestroy, g_destroyHwnd, hwnd);
+    }
+
+    /* the debug hook blocks the first WH_CBT hook: the next one of the chain runs (and is debugged) */
+    {
+        LONG outer = g_cbtCreate, inner = g_innerCreate;
+
+        g_dbgCbtTrack = TRUE;
+        g_dbgCbtCalls = g_dbgCbtBad = 0;
+        g_dbgCbtBlock = 1;
+        g_chainResult = 0xbad;
+        hwnd = CreateWindowExW(0, CLASS_NAME, L"chain", WS_OVERLAPPEDWINDOW, 40, 50, 210, 110, NULL, NULL,
+                               wc.hInstance, CREATE_PARAMS);
+        g_dbgCbtTrack = FALSE;
+        g_dbgCbtBlock = 0;
+        ok(hwnd != NULL, "HCBT_CREATEWND with the first hook blocked: no window\n");
+        ok(g_dbgCbtCalls == 2 && g_cbtCreate == outer && g_innerCreate == inner + 1,
+           "WH_DEBUG blocked the first WH_CBT hook: %ld debug calls, the outer hook ran %ld times, the inner %ld\n",
+           g_dbgCbtCalls, g_cbtCreate - outer, g_innerCreate - inner);
+        if (hwnd)
+            DestroyWindow(hwnd);
+
+        /* and the second one, reached through CallNextHookEx, is skipped: CallNextHookEx returns 0 */
+        outer = g_cbtCreate;
+        inner = g_innerCreate;
+        g_dbgCbtTrack = TRUE;
+        g_dbgCbtCalls = g_dbgCbtBad = 0;
+        g_dbgCbtBlock = 2;
+        g_chainResult = 0xbad;
+        hwnd = CreateWindowExW(0, CLASS_NAME, L"chain", WS_OVERLAPPEDWINDOW, 40, 50, 210, 110, NULL, NULL,
+                               wc.hInstance, CREATE_PARAMS);
+        g_dbgCbtTrack = FALSE;
+        g_dbgCbtBlock = 0;
+        ok(hwnd != NULL, "HCBT_CREATEWND with the second hook blocked: no window\n");
+        ok(g_dbgCbtCalls == 2 && g_cbtCreate == outer + 1 && g_innerCreate == inner && g_chainResult == 0,
+           "WH_DEBUG blocked the second WH_CBT hook: %ld debug calls, the outer hook ran %ld times, the inner %ld, CallNextHookEx %Id\n",
+           g_dbgCbtCalls, g_cbtCreate - outer, g_innerCreate - inner, g_chainResult);
+        if (hwnd)
+            DestroyWindow(hwnd);
     }
 
     /* WH_SHELL, HCBT_ACTIVATE, HCBT_SETFOCUS. Another window is active first, to know hWndActive */
@@ -839,16 +1005,37 @@ START_TEST(HookFamilies)
     GetWindowRect(g_main, &rc);
     SetCursorPos((rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2);
     Pump(100);
+    /* the messages of the mouse reach the window only if nothing else is over its middle */
+    pt.x = (rc.left + rc.right) / 2;
+    pt.y = (rc.top + rc.bottom) / 2;
+    hwnd = WindowFromPoint(pt);
+    mouseOver = foreground && hwnd == g_main;
+    if (foreground && !mouseOver)
+        trace("the window at %ld,%ld is %p, not the test window %p\n", pt.x, pt.y, hwnd, g_main);
     ZeroMemory(&in, sizeof(in));
     in.type = INPUT_MOUSE;
-    in.mi.dx = 1;
+    /* Windows scales a small relative move by the speed of the pointer, 1 can end in no move and no message */
+    in.mi.dx = 8;
     in.mi.dwFlags = MOUSEEVENTF_MOVE;
     in.mi.time = WHEEL_TIME + 1;
     in.mi.dwExtraInfo = EXTRA_INFO;
+    g_msgTime[MT_MOVE] = 0;
     SendInput(1, &in, sizeof(in));
     Pump(300);
+    /* another mouse on the desktop can move the cursor meanwhile, and the queue joins moves: send it again */
+    for (i = 0; mouseOver && i < 4 && g_msgTime[MT_MOVE] != WHEEL_TIME + 1; i++)
+    {
+        in.mi.dx = (i & 1) ? 8 : -8;
+        SendInput(1, &in, sizeof(in));
+        Pump(300);
+    }
     ok(g_llMouse >= 1 && g_llMouseOk, "WH_MOUSE_LL: %ld calls, ok %d\n", g_llMouse, g_llMouseOk);
     ok(g_llMouseCopy[0].time == WHEEL_TIME + 1, "WH_MOUSE_LL move: time %lx\n", g_llMouseCopy[0].time);
+    /* GetMessageTime of the injected move is the time SendInput was given */
+    if (mouseOver)
+        ok(g_msgTime[MT_MOVE] == WHEEL_TIME + 1, "WM_MOUSEMOVE: GetMessageTime %lx\n", g_msgTime[MT_MOVE]);
+    else
+        skip("another window is over the middle of the test window, no mouse messages for it\n");
     ok(g_innerLlMouse[0] == g_llMouse, "chained WH_MOUSE_LL: inner hook ran %ld times, the outer one %ld\n",
        g_innerLlMouse[0], g_llMouse);
     if (foreground)
@@ -888,6 +1075,23 @@ START_TEST(HookFamilies)
     ok(g_innerLlMouse[1] == g_llWheel, "chained WH_MOUSE_LL: inner hook ran %ld times for the wheel, the outer one %ld\n",
        g_innerLlMouse[1], g_llWheel);
     ok(g_innerLlMouseBad == 0, "chained WH_MOUSE_LL: %ld wrong MSLLHOOKSTRUCT in the inner hook\n", g_innerLlMouseBad);
+    if (mouseOver)
+    {
+        ok(g_msgTime[MT_WHEEL] == WHEEL_TIME, "WM_MOUSEWHEEL: GetMessageTime %lx\n", g_msgTime[MT_WHEEL]);
+
+        /* the same for the buttons: a click in the client area of the window */
+        in.mi.mouseData = 0;
+        in.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        in.mi.time = WHEEL_TIME + 2;
+        SendInput(1, &in, sizeof(in));
+        Pump(200);
+        in.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        in.mi.time = WHEEL_TIME + 3;
+        SendInput(1, &in, sizeof(in));
+        Pump(200);
+        ok(g_msgTime[MT_DOWN] == WHEEL_TIME + 2, "WM_LBUTTONDOWN: GetMessageTime %lx\n", g_msgTime[MT_DOWN]);
+        ok(g_msgTime[MT_UP] == WHEEL_TIME + 3, "WM_LBUTTONUP: GetMessageTime %lx\n", g_msgTime[MT_UP]);
+    }
     SetCursorPos(saved.x, saved.y);
 
     /* HCBT_SYSCOMMAND, HCBT_MINMAX */
@@ -923,6 +1127,8 @@ START_TEST(HookFamilies)
            "chained HCBT_MOVESIZE: inner hook ran %ld times with " RECT_FMT ", the outer one got " RECT_FMT "\n",
            g_innerMoveSize, RECT_ARGS(g_moveInner), RECT_ARGS(g_moveRect));
         ok(g_moveChain == 0, "chained HCBT_MOVESIZE: CallNextHookEx returned %Id\n", g_moveChain);
+        /* the hook comes before the end of the loop */
+        ok(strchr(g_moveSeq, 'X') != NULL, "HCBT_MOVESIZE pass: events after the hook '%s', no WM_EXITSIZEMOVE\n", g_moveSeq + 1);
 
         /* the outer hook changes the rectangle and chains: the inner hook sees the change, the window follows */
         MoveWithMouse(MOVE_OUTER, &before, &after);
@@ -936,6 +1142,8 @@ START_TEST(HookFamilies)
            RECT_ARGS(g_moveInner), RECT_ARGS(expect));
         ok(EqualRect(&after, &expect), "HCBT_MOVESIZE: the hook set " RECT_FMT ", the window is at " RECT_FMT "\n",
            RECT_ARGS(expect), RECT_ARGS(after));
+        /* the order is the hook, the window position change it causes, and then WM_EXITSIZEMOVE */
+        ok(MoveSeqIs("PX"), "HCBT_MOVESIZE changed rectangle: events after the hook '%s', expected 'PX'\n", g_moveSeq + 1);
 
         /* the inner hook changes its copy: the outer hook does not see it and the window is not affected */
         MoveWithMouse(MOVE_INNER, &before, &after);
@@ -958,6 +1166,7 @@ START_TEST(HookFamilies)
            g_cbtMoveSize, g_innerMoveSize);
         ok(EqualRect(&after, &before), "HCBT_MOVESIZE: the hook returned 1, the window moved from " RECT_FMT " to " RECT_FMT "\n",
            RECT_ARGS(before), RECT_ARGS(after));
+        ok(MoveSeqIs("PX"), "HCBT_MOVESIZE canceled: events after the hook '%s', expected 'PX'\n", g_moveSeq + 1);
     }
     else if (!foreground)
     {
@@ -965,38 +1174,78 @@ START_TEST(HookFamilies)
     }
 
     /* The same with the keyboard: Alt+Space, M, the arrow keys, Return moves the window, one HCBT_MOVESIZE at the end
-     * with the final rectangle. The step of an arrow key is not the same everywhere, only its direction is tested */
+     * with the final rectangle. An arrow key moves half the height of the caption buttons: 11 pixels at the metrics of
+     * Windows 10 (SM_CYSIZE 22; SM_CYCAPTION is 23, which of the two is halved is not told apart there) */
     if (foreground)
     {
+        static const WORD rrrdd[] = { VK_RIGHT, VK_RIGHT, VK_RIGHT, VK_DOWN, VK_DOWN, 0 };
+        static const WORD rrlll[] = { VK_RIGHT, VK_RIGHT, VK_LEFT, VK_LEFT, VK_LEFT, 0 };
+        static const WORD dddrr[] = { VK_DOWN, VK_DOWN, VK_DOWN, VK_RIGHT, VK_RIGHT, 0 };
+        static const WORD lllr[] = { VK_LEFT, VK_LEFT, VK_LEFT, VK_RIGHT, 0 };
+        LONG step = GetSystemMetrics(SM_CYSIZE) / 2;
+
+        trace("arrow key step %ld (SM_CYSIZE %d, SM_CYCAPTION %d)\n", step, GetSystemMetrics(SM_CYSIZE), GetSystemMetrics(SM_CYCAPTION));
+        g_keySeq = rrrdd;
         MoveWithKeyboard(MOVE_PASS, 'M', &before, &after);
         trace("keyboard move pass: before " RECT_FMT " hook " RECT_FMT " after " RECT_FMT "\n", RECT_ARGS(before),
               RECT_ARGS(g_moveRect), RECT_ARGS(after));
-        ok(after.left > before.left && after.top > before.top &&
+        ok(after.left - before.left == 3 * step && after.top - before.top == 2 * step &&
            after.right - after.left == before.right - before.left && after.bottom - after.top == before.bottom - before.top,
-           "keyboard move: the window moved from " RECT_FMT " to " RECT_FMT "\n", RECT_ARGS(before), RECT_ARGS(after));
+           "keyboard move: the window moved from " RECT_FMT " to " RECT_FMT ", the step is %ld\n", RECT_ARGS(before), RECT_ARGS(after), step);
         ok(g_cbtMoveSize == 1 && g_innerMoveSize == 1, "keyboard move: HCBT_MOVESIZE %ld calls, %ld in the inner hook\n",
            g_cbtMoveSize, g_innerMoveSize);
         ok(EqualRect(&g_moveRect, &after), "keyboard move: the hook got " RECT_FMT ", the window is at " RECT_FMT "\n",
            RECT_ARGS(g_moveRect), RECT_ARGS(after));
+        ok(strchr(g_moveSeq, 'X') != NULL, "keyboard move pass: events after the hook '%s', no WM_EXITSIZEMOVE\n", g_moveSeq + 1);
 
         MoveWithKeyboard(MOVE_OUTER, 'M', &before, &after);
         expect = g_moveRect;
         OffsetRect(&expect, 13, 17);
         ok(g_cbtMoveSize == 1 && EqualRect(&after, &expect), "keyboard move: the hook set " RECT_FMT ", the window is at " RECT_FMT "\n",
            RECT_ARGS(expect), RECT_ARGS(after));
+        ok(MoveSeqIs("PX"), "keyboard move changed rectangle: events after the hook '%s', expected 'PX'\n", g_moveSeq + 1);
 
         MoveWithKeyboard(MOVE_CANCEL, 'M', &before, &after);
         ok(g_cbtMoveSize == 1 && EqualRect(&after, &before), "keyboard move: the hook returned 1, the window moved from " RECT_FMT " to " RECT_FMT "\n",
            RECT_ARGS(before), RECT_ARGS(after));
+        ok(MoveSeqIs("PX"), "keyboard move canceled: events after the hook '%s', expected 'PX'\n", g_moveSeq + 1);
 
-        /* Alt+Space, S sizes it: the first arrow key picks the edge, the window grows with the following ones */
+        /* Alt+Space, S sizes it: the first arrow key of an axis picks the edge that axis moves and takes no step.
+         * Right x3 and Down x2: the right edge moves two steps, the bottom edge one */
         MoveWithKeyboard(MOVE_PASS, 'S', &before, &after);
         trace("keyboard size: before " RECT_FMT " hook " RECT_FMT " after " RECT_FMT "\n", RECT_ARGS(before),
               RECT_ARGS(g_moveRect), RECT_ARGS(after));
         ok(g_cbtMoveSize == 1 && EqualRect(&g_moveRect, &after), "keyboard size: HCBT_MOVESIZE %ld calls, the hook got " RECT_FMT ", the window is at " RECT_FMT "\n",
            g_cbtMoveSize, RECT_ARGS(g_moveRect), RECT_ARGS(after));
-        ok(after.left == before.left && after.top == before.top && after.right > before.right,
-           "keyboard size: the window went from " RECT_FMT " to " RECT_FMT "\n", RECT_ARGS(before), RECT_ARGS(after));
+        ok(after.left == before.left && after.top == before.top && after.right == before.right + 2 * step &&
+           after.bottom == before.bottom + step,
+           "keyboard size right, right, right, down, down: the window went from " RECT_FMT " to " RECT_FMT ", the step is %ld\n",
+           RECT_ARGS(before), RECT_ARGS(after), step);
+
+        /* the opposite key of the axis moves the same edge back: Right x2 and Left x3 leave the right edge two steps in */
+        g_keySeq = rrlll;
+        MoveWithKeyboard(MOVE_PASS, 'S', &before, &after);
+        ok(after.left == before.left && after.top == before.top && after.right == before.right - 2 * step &&
+           after.bottom == before.bottom,
+           "keyboard size right, right, left, left, left: the window went from " RECT_FMT " to " RECT_FMT ", the step is %ld\n",
+           RECT_ARGS(before), RECT_ARGS(after), step);
+
+        /* the second axis is picked the same way after the first: Down x3, Right x2 */
+        g_keySeq = dddrr;
+        MoveWithKeyboard(MOVE_PASS, 'S', &before, &after);
+        ok(after.left == before.left && after.top == before.top && after.right == before.right + step &&
+           after.bottom == before.bottom + 2 * step,
+           "keyboard size down, down, down, right, right: the window went from " RECT_FMT " to " RECT_FMT ", the step is %ld\n",
+           RECT_ARGS(before), RECT_ARGS(after), step);
+
+        /* the left edge: it moves out with Left and in with Right */
+        g_keySeq = lllr;
+        MoveWithKeyboard(MOVE_PASS, 'S', &before, &after);
+        ok(after.left == before.left - step && after.top == before.top && after.right == before.right &&
+           after.bottom == before.bottom,
+           "keyboard size left, left, left, right: the window went from " RECT_FMT " to " RECT_FMT ", the step is %ld\n",
+           RECT_ARGS(before), RECT_ARGS(after), step);
+        g_keySeq = rrrdd;
     }
 
     /* WH_FOREGROUNDIDLE runs when the foreground thread waits for input */
@@ -1035,6 +1284,51 @@ START_TEST(HookFamilies)
        g_debugBlocked, g_callWnd);
     ok(SendMessageW(g_main, TEST_MESSAGE, 0x32, (LPARAM)(LONG)0x82345678) == 0x7654, "wrong SendMessage result\n");
     ok(g_callWnd == 1, "WH_CALLWNDPROC: %ld calls after the debug hook stopped blocking\n", g_callWnd);
+
+    /* WH_DEBUG is called before every hook of the chain, those reached through CallNextHookEx too, and a hook it
+     * blocks is skipped for the next one, which is called, after the debug hook. Three WH_CALLWNDPROC hooks, 'a'
+     * runs first and calls on 'b', which calls on 'c'; 'D' is a call of the debug hook for one of them */
+    {
+        static const struct { ULONG mask; const char *events; } cwpCases[] =
+        {
+            { 0, "DaDbDc" },
+            { 1, "DDbDc" },
+            { 2, "DaDDc" },
+            { 4, "DaDbD" },
+            { 3, "DDDc" },
+            { 7, "DDD" },
+        };
+        HHOOK hookA, hookB;
+        size_t k;
+
+        hookB = SetWindowsHookExW(WH_CALLWNDPROC, CallWndProcB, NULL, GetCurrentThreadId());
+        hookA = SetWindowsHookExW(WH_CALLWNDPROC, CallWndProcA, NULL, GetCurrentThreadId());
+        ok(hookA && hookB, "WH_CALLWNDPROC: SetWindowsHookExW failed, error %lu\n", GetLastError());
+        for (k = 0; k < ARRAYSIZE(cwpCases); k++)
+        {
+            LRESULT res;
+
+            g_dbgSeq[0] = 0;
+            g_dbgCwpCalls = g_dbgCwpBad = g_dbgRetCalls = g_dbgRetBad = 0;
+            g_dbgBlockMask = cwpCases[k].mask;
+            g_dbgSeqOn = TRUE;
+            res = SendMessageW(g_main, TEST_MESSAGE2, 0x33, (LPARAM)(LONG)0x83456789);
+            g_dbgSeqOn = FALSE;
+            g_dbgBlockMask = 0;
+            ok(res == 0x7654, "WH_DEBUG case %u: SendMessage returned %Ix\n", (UINT)k, res);
+            ok(!strcmp(g_dbgSeq, cwpCases[k].events), "WH_DEBUG blocks calls %lx of WH_CALLWNDPROC: events '%s', expected '%s'\n",
+               cwpCases[k].mask, g_dbgSeq, cwpCases[k].events);
+            /* what it gets for WH_CALLWNDPROC and WH_CALLWNDPROCRET is the record the hook gets */
+            ok(g_dbgCwpBad == 0, "WH_DEBUG case %u: %ld of %ld calls for WH_CALLWNDPROC without the CWPSTRUCT\n", (UINT)k,
+               g_dbgCwpBad, g_dbgCwpCalls);
+            ok(g_dbgRetCalls == 1 && g_dbgRetBad == 0, "WH_DEBUG case %u: %ld calls for WH_CALLWNDPROCRET, %ld without the CWPRETSTRUCT\n",
+               (UINT)k, g_dbgRetCalls, g_dbgRetBad);
+        }
+        if (hookA)
+            UnhookWindowsHookEx(hookA);
+        if (hookB)
+            UnhookWindowsHookEx(hookB);
+    }
 
     if (g_other)
         DestroyWindow(g_other);
