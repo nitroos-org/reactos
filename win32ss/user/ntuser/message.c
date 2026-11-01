@@ -1417,11 +1417,12 @@ co_IntGetPeekMessage( PMSG pMsg,
         {
            if (!(RemoveMsg & PM_NOYIELD))
            {
+              /* The yield of PeekMessage releases the threads waiting for this
+                 one to go idle (WaitForInputIdle); it does not give the
+                 processor away, as on Windows: NtYieldExecution queued the
+                 thread behind a CPU-bound thread of lower priority for that
+                 one's quantum (a menu loop polls with PeekMessage) */
               IdlePing();
-              // Yield this thread!
-              UserLeave();
-              ZwYieldExecution();
-              UserEnterExclusive();
               // Fall through to exit.
               IdlePong();
            }

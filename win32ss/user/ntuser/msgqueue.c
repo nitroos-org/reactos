@@ -481,6 +481,9 @@ co_MsqMsgWait(PMSGWAITINFO pUserInfo)
     return Status;
 }
 
+/* Priority increment of a GUI thread woken by window activity (Windows: 2) */
+#define MSQ_WAKE_INCREMENT 2
+
 /*
    Due to the uncertainty of knowing what was set in our multilevel message queue,
    and even if the bits are all cleared. The same as cTimers/cPaintsReady.
@@ -522,8 +525,13 @@ MsqWakeQueue(PTHREADINFO pti, DWORD MessageBits, BOOL KeyEvent)
    if (KeyEvent)
    {
       /* Input wakes the thread with the same priority increment the input
-         class drivers use when they complete the request: keyboard or mouse. */
-      KPRIORITY Increment = IO_NO_INCREMENT;
+         class drivers use when they complete the request: keyboard or mouse.
+         Other window activity (posted and sent messages, replies, paint,
+         timers) gives the GUI thread the boost Windows gives it: without one
+         a normal-priority receiver waits behind every CPU-bound thread of its
+         priority for a quantum, which a sent message or a hook call to another
+         thread (the WH_KEYBOARD hook of kbswitch) passes on to the sender. */
+      KPRIORITY Increment = MSQ_WAKE_INCREMENT;
       if (MessageBits & QS_KEY)
          Increment = IO_KEYBOARD_INCREMENT;
       else if (MessageBits & QS_MOUSE)
@@ -1128,10 +1136,10 @@ co_MsqDispatchOneSentMessage(
    // Clear busy signal.
    Message->flags &= ~SMF_RECEIVERBUSY;
 
-   /* Notify the sender. */
+   /* Notify the sender, with the boost of a window message wake */
    if (Message->pkCompletionEvent != NULL)
    {
-      KeSetEvent(Message->pkCompletionEvent, IO_NO_INCREMENT, FALSE);
+      KeSetEvent(Message->pkCompletionEvent, MSQ_WAKE_INCREMENT, FALSE);
    }
 
    /* free the message */
@@ -2501,8 +2509,10 @@ co_MsqWaitForNewMessages(PTHREADINFO pti, PWND WndFilter,
 
    UserLeaveCo();
 
-   ZwYieldExecution(); // Let someone else run!
-
+   /* No yield before the wait (the wait gives the processor away): a yield
+      queued the thread behind a CPU-bound thread of lower priority on this
+      processor until that one's quantum ended, and a message that came
+      meanwhile waited for it */
    ret = KeWaitForSingleObject( pti->pEventQueueServer,
                                 UserRequest,
                                 UserMode,
