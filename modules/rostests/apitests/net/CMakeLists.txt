@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    NetExit.c
     NetShare.c
     testlist.c)
 

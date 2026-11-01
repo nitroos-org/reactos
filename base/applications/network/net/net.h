@@ -61,6 +61,10 @@ VOID
 PrintErrorMessage(
     DWORD dwError);
 
+INT
+PrintCommandStatus(
+    DWORD dwStatus);
+
 VOID
 PrintNetMessage(
     DWORD dwMessage);
@@ -85,6 +89,11 @@ PrintCommandSyntax(
     DWORD dwSyntaxMessage,
     DWORD dwMessage,
     PCWSTR pszInsert);
+
+INT
+PrintUnknownOption(
+    DWORD dwSyntaxMessage,
+    PCWSTR pszOption);
 
 VOID
 PrintCommandHelpText(

@@ -16196,7 +16196,7 @@ Severity=Success
 Facility=System
 SymbolicName=APPERR_3515
 Language=English
-The command can be used only on a Domain Controller.
+This command can be used only on a Windows Domain Controller.
 .
 Language=Polish
 Tego polecenia można używać tylko na kontrolerze domeny systemu ReactOS.

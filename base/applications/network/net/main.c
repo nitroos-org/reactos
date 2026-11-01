@@ -227,6 +227,27 @@ PrintErrorMessage(
 }
 
 
+/*
+ * Prints the result of a command that ended with a status: "The command completed successfully."
+ * on standard output, or the error text (with the NET HELPMSG hint or the "System error" line) on
+ * standard error. Returns the exit code of the command: 0, or 2 like Windows.
+ */
+INT
+PrintCommandStatus(
+    DWORD dwStatus)
+{
+    if (dwStatus == NERR_Success)
+    {
+        PrintMessageString(3500);
+        ConPuts(StdOut, L"\n");
+        return 0;
+    }
+
+    PrintErrorMessage(dwStatus);
+    return 2;
+}
+
+
 VOID
 PrintNetMessage(
     DWORD dwMessage)
@@ -330,9 +351,8 @@ int wmain(int argc, WCHAR **argv)
 done:
     if (bRun == FALSE)
     {
-        PrintMessageString(4381);
-        ConPuts(StdOut, L"\n");
-        PrintNetMessage(MSG_NET_SYNTAX);
+        /* Like Windows: the syntax goes to standard error and the exit code is 1 */
+        nResult = PrintCommandSyntax(MSG_NET_SYNTAX, 0, NULL);
     }
 
     if (hModuleNetMsg != NULL)
