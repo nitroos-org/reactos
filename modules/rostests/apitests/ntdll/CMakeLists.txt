@@ -111,6 +111,7 @@ list(APPEND SOURCE
     NtFlushVirtualMemory.c
     NtEaFile.c
     VolumeControlCodes.c
+    IoctlAllowlist.c
     NtQueryInformationFile.c
     NtQueryInformationProcess.c
     NtQueryInformationThread.c
