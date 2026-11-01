@@ -296,6 +296,8 @@ macro(dir_to_num dir var)
         set(${var} 100)
     elseif(${dir} STREQUAL reactos/system32/WindowsPowerShell/v1.0/Modules/ScheduledTasks/1.0.0.0)
         set(${var} 101)
+    elseif(${dir} STREQUAL reactos/Featmgr/Payload/powershell-7)
+        set(${var} 102)
 
     else()
         message(FATAL_ERROR "Wrong destination: ${dir}")
