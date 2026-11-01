@@ -42,8 +42,16 @@ function New-ScoopAcl($isDir) {
         $inh = [System.Security.AccessControl.InheritanceFlags]::None
     }
     $sec.SetAccessRuleProtection($true, $false)                # nothing inherited from the parent
-    foreach ($g in @(@('S-1-5-18', $fs::FullControl), @('S-1-5-32-544', $fs::FullControl),
-                     @('S-1-5-32-545', $fs::ReadAndExecute), @('S-1-5-11', $fs::ReadAndExecute))) {
+    $grants = @(@('S-1-5-18', $fs::FullControl), @('S-1-5-32-544', $fs::FullControl),
+                @('S-1-5-32-545', $fs::ReadAndExecute), @('S-1-5-11', $fs::ReadAndExecute))
+    # The installing account's own SID too. Administrators alone is not enough: a program that drops the
+    # Administrators group from its token (PostgreSQL's initdb and pg_ctl re-run themselves with
+    # CreateRestrictedToken, Administrators deny-only) is left with Users / Authenticated Users, i.e.
+    # read-only, and its chmod of the data directory fails with "Permission denied". Windows does the same
+    # with the same ACL (measured on Windows 10 22H2); an ACE for the user's own SID lets it through.
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    if ($me -and $me.Value -ne 'S-1-5-18') { $grants += ,@($me.Value, $fs::FullControl) }
+    foreach ($g in $grants) {
         $sid = New-Object System.Security.Principal.SecurityIdentifier($g[0])
         $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $g[1], $inh, $none, $allow)))
     }

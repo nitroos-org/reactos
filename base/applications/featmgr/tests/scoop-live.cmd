@@ -63,6 +63,9 @@ find "BUILTIN\Users" %O%\acl.txt | find "Modify" >nul
 call :rc1 "L12b Users have no Modify/Write on C:\scoop"
 find "Authenticated Users" %O%\acl.txt | find "Modify" >nul
 call :rc1 "L12c Authenticated Users have no Modify on C:\scoop"
+rem the installing account must keep its own ACE: programs that drop the Administrators group from their token (PostgreSQL initdb) need it
+"%PSDIR%\pwsh.exe" -NoProfile -Command "$me=[Security.Principal.WindowsIdentity]::GetCurrent().Name; $ok=@((Get-Acl 'C:\scoop').Access | Where-Object { $_.IdentityReference.Value -eq $me -and $_.FileSystemRights -eq 'FullControl' }).Count; if ($ok -ge 1) { exit 0 } else { exit 1 }"
+call :rc0 "L12d the installing user has its own FullControl ACE on C:\scoop (restricted-token programs)"
 set SCOOP=%SROOT%
 set PATH=%SROOT%\shims;%PSDIR%;%PATH%
 call scoop --version > %O%\ver.txt 2>&1
@@ -261,6 +264,15 @@ call :rc1 "E2a /add-bucket of a name Scoop does not know is refused"
 call :rc1 "E2b ...and so is a known name with a URL, without /trust"
 %FM% /install git > %O%\install-git.txt 2>&1
 call :rc0 "E3 featmgr /install git rc0"
+rem --- postgresql: initdb re-runs itself with a restricted token (no Administrators) and chmods its data dir
+call scoop install postgresql > %O%\install-pg.txt 2>&1
+type %O%\install-pg.txt >> %LOG%
+find "could not change permissions" %O%\install-pg.txt >nul
+call :rc1 "E3a scoop install postgresql: initdb does not fail with 'could not change permissions'"
+find "Success. You can now start the database server" %O%\install-pg.txt >nul
+call :rc0 "E3b initdb initialised the cluster"
+%FM% /uninstall postgresql > %O%\uninstall-pg.txt 2>&1
+call :rc0 "E3c featmgr /uninstall postgresql rc0 (so the later /uninstall scoop is not blocked by a dependent)"
 type %O%\install-git.txt >> %LOG%
 %FM% /add-bucket extras > %O%\bucket.txt 2>&1
 call :rc0 "E4 featmgr /add-bucket extras (known bucket, added through Scoop, imported) rc0"
