@@ -512,6 +512,89 @@ test_Functions()
     }
 }
 
+/* Number of handles in the System process (pid 4: the kernel handle table), or -1 on failure */
+static
+LONG
+CountSystemProcessHandles(VOID)
+{
+    SYSTEM_HANDLE_INFORMATION *Info = NULL;
+    ULONG Size = 0x10000, ReturnLength;
+    NTSTATUS Status;
+    LONG Count = 0;
+    ULONG i;
+
+    for (;;)
+    {
+        Info = HeapAlloc(GetProcessHeap(), 0, Size);
+        if (!Info)
+            return -1;
+        Status = NtQuerySystemInformation(SystemHandleInformation, Info, Size, &ReturnLength);
+        if (Status != STATUS_INFO_LENGTH_MISMATCH)
+            break;
+        HeapFree(GetProcessHeap(), 0, Info);
+        Size = ReturnLength + 0x4000;
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        HeapFree(GetProcessHeap(), 0, Info);
+        return -1;
+    }
+    for (i = 0; i < Info->NumberOfHandles; i++)
+    {
+        if (Info->Handles[i].UniqueProcessId == 4)
+            Count++;
+    }
+    HeapFree(GetProcessHeap(), 0, Info);
+    return Count;
+}
+
+/* GetSystemFirmwareTable(RSMB) (the WMI SMBIOS query that Win32_ComputerSystem
+ * makes, so every Get-CimInstance Win32_ComputerSystem) must not leave kernel
+ * handles open in the System process. */
+static
+VOID
+test_NoSystemHandleLeak(VOID)
+{
+    enum { Iterations = 60, Tolerance = 8 };
+    LONG Before, After;
+    UINT Size, Last = 0;
+    PVOID Buffer;
+    int i;
+
+    Size = pGetSystemFirmwareTable('RSMB', 0, NULL, 0);
+    if (Size == 0)
+    {
+        skip("No raw SMBIOS table\n");
+        return;
+    }
+    Buffer = HeapAlloc(GetProcessHeap(), 0, Size + 4096);
+    ok(Buffer != NULL, "HeapAlloc failed\n");
+    if (!Buffer)
+        return;
+
+    /* warm up, then take the baseline */
+    pGetSystemFirmwareTable('RSMB', 0, Buffer, Size + 4096);
+    Before = CountSystemProcessHandles();
+    if (Before < 0)
+    {
+        skip("Cannot enumerate the system handle table\n");
+        HeapFree(GetProcessHeap(), 0, Buffer);
+        return;
+    }
+
+    for (i = 0; i < Iterations; i++)
+    {
+        Last = pGetSystemFirmwareTable('RSMB', 0, NULL, 0);
+        pGetSystemFirmwareTable('RSMB', 0, Buffer, Size + 4096);
+    }
+    After = CountSystemProcessHandles();
+    ok(Last == Size, "RSMB size changed: %u vs %u\n", Last, Size);
+    ok(After - Before <= Tolerance,
+       "System process handles grew from %ld to %ld over %d GetSystemFirmwareTable(RSMB) rounds\n",
+       Before, After, Iterations);
+    HeapFree(GetProcessHeap(), 0, Buffer);
+}
+
 START_TEST(SystemFirmware)
 {
     HANDLE hKernel;
@@ -542,4 +625,5 @@ START_TEST(SystemFirmware)
         return;
     }
     test_Functions();
+    test_NoSystemHandleLeak();
 }
