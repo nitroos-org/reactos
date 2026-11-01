@@ -252,6 +252,81 @@ DefWndStartSizeMove(PWND Wnd, WPARAM wParam, POINT *capturePoint)
 
 //
 //  System Command Size and Move
+/*
+ * Keyboard size: the first arrow key of an axis picks the edge that axis moves (left or right, top or bottom) and
+ * takes no step. DefWndStartSizeMove did that for the first key; this does it for a key of the other axis when the
+ * size loop gets it, as the oracle does. Returns TRUE if the key picked an edge.
+ */
+static BOOL
+DefWndKeySelectEdge(WPARAM vk, PWND pWndParent, LONG *pHittest, const RECT *pRect, POINT *pCapture,
+                    RECT *pMouseRect, POINT minTrack, POINT maxTrack)
+{
+   LONG hittest = *pHittest;
+   int h = ON_LEFT_BORDER(hittest) ? -1 : (ON_RIGHT_BORDER(hittest) ? 1 : 0);
+   int v = ON_TOP_BORDER(hittest) ? -1 : (ON_BOTTOM_BORDER(hittest) ? 1 : 0);
+   static const LONG table[3][3] = /* [v + 1][h + 1] */
+   {
+      { HTTOPLEFT,    HTTOP,        HTTOPRIGHT },
+      { HTLEFT,       0,            HTRIGHT },
+      { HTBOTTOMLEFT, HTBOTTOM,     HTBOTTOMRIGHT }
+   };
+   POINT pt;
+
+   switch (vk)
+   {
+      case VK_LEFT:  if (h) return FALSE; h = -1; break;
+      case VK_RIGHT: if (h) return FALSE; h = 1; break;
+      case VK_UP:    if (v) return FALSE; v = -1; break;
+      case VK_DOWN:  if (v) return FALSE; v = 1; break;
+      default: return FALSE;
+   }
+
+   *pHittest = hittest = table[v + 1][h + 1];
+
+   /* The cursor goes to the edge, as DefWndStartSizeMove puts it there; the loop follows it from there */
+   pt = *pCapture;
+   if (vk == VK_LEFT)
+      pt.x = pRect->left + UserGetSystemMetrics(SM_CXFRAME) / 2;
+   else if (vk == VK_RIGHT)
+      pt.x = pRect->right - UserGetSystemMetrics(SM_CXFRAME) / 2;
+   else if (vk == VK_UP)
+      pt.y = pRect->top + UserGetSystemMetrics(SM_CYFRAME) / 2;
+   else
+      pt.y = pRect->bottom - UserGetSystemMetrics(SM_CYFRAME) / 2;
+   if (pWndParent)
+   {
+      /* the rectangle is the window's, in the coordinates of its parent */
+      if (vk == VK_LEFT || vk == VK_RIGHT) { POINT q = { pt.x, 0 }; IntMapWindowPoints(pWndParent, 0, &q, 1); pt.x = q.x; }
+      else { POINT q = { 0, pt.y }; IntMapWindowPoints(pWndParent, 0, &q, 1); pt.y = q.y; }
+   }
+   *pCapture = pt;
+
+   /* the limits of the new edge, as the loop computes them for the edge it starts with */
+   if (vk == VK_LEFT)
+   {
+      pMouseRect->left  = max( pMouseRect->left, pRect->right-maxTrack.x+pt.x-pRect->left );
+      pMouseRect->right = min( pMouseRect->right, pRect->right-minTrack.x+pt.x-pRect->left );
+   }
+   else if (vk == VK_RIGHT)
+   {
+      pMouseRect->left  = max( pMouseRect->left, pRect->left+minTrack.x+pt.x-pRect->right );
+      pMouseRect->right = min( pMouseRect->right, pRect->left+maxTrack.x+pt.x-pRect->right );
+   }
+   else if (vk == VK_UP)
+   {
+      pMouseRect->top    = max( pMouseRect->top, pRect->bottom-maxTrack.y+pt.y-pRect->top );
+      pMouseRect->bottom = min( pMouseRect->bottom, pRect->bottom-minTrack.y+pt.y-pRect->top );
+   }
+   else
+   {
+      pMouseRect->top    = max( pMouseRect->top, pRect->top+minTrack.y+pt.y-pRect->bottom );
+      pMouseRect->bottom = min( pMouseRect->bottom, pRect->top+maxTrack.y+pt.y-pRect->bottom );
+   }
+
+   UserSetCursorPos(pt.x, pt.y, 0, 0, FALSE);
+   return TRUE;
+}
+
 //
 //  Perform SC_MOVE and SC_SIZE commands.
 //
@@ -275,6 +350,7 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
    RECT hookRect;
    POINT ptSavedCursor;
    BOOL fromKeyboard;
+   int keyStep;
    BOOL DragFullWindows = FALSE;
    PWND pWndParent = NULL;
    WPARAM syscommand = (wParam & 0xfff0);
@@ -301,6 +377,9 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
    /* From the system menu or the keyboard: no mouse hit starts it, the loop follows the keys (and the mouse if
     * it is moved) and ends with Return, Escape or a click */
    fromKeyboard = (hittest == 0);
+   /* An arrow key moves half the height of the caption buttons: 11 pixels at the oracle's metrics (SM_CYSIZE 22,
+    * SM_CYCAPTION 23, which half is not told apart there) */
+   keyStep = max(UserGetSystemMetrics(SM_CYSIZE) / 2, 1);
    ptSavedCursor = gpsi->ptCursor;
 
    pt.x = pti->ptLast.x;
@@ -473,12 +552,15 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
          /* A key moves the point the loop tracks by a step: it starts from there, not from the
           * cursor position the key message was stamped with */
          pt = capturePoint;
+         if (fromKeyboard && syscommand == SC_SIZE &&
+             DefWndKeySelectEdge(msg.wParam, pWndParent, &hittest, &unmodRect, &capturePoint, &mouseRect, minTrack, maxTrack))
+            continue; /* the key picked the edge of its axis: no step */
          switch(msg.wParam)
          {
-         case VK_UP:    pt.y -= 8; break;
-         case VK_DOWN:  pt.y += 8; break;
-         case VK_LEFT:  pt.x -= 8; break;
-         case VK_RIGHT: pt.x += 8; break;
+         case VK_UP:    pt.y -= keyStep; break;
+         case VK_DOWN:  pt.y += keyStep; break;
+         case VK_LEFT:  pt.x -= keyStep; break;
+         case VK_RIGHT: pt.x += keyStep; break;
          }
       }
 
