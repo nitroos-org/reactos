@@ -85,7 +85,7 @@ GetColorSpace(HDC hDC)
 {
     PDC_ATTR pDc_Attr;
 
-    if (!GdiGetHandleUserData(hDC, GDI_OBJECT_TYPE_DC, (PVOID)&pDc_Attr))
+    if (!GdiGetHandleUserData(hDC, GDI_OBJECT_TYPE_DC, (PVOID)&pDc_Attr) || !pDc_Attr)
     {
         SetLastError(ERROR_INVALID_HANDLE);
         return NULL;

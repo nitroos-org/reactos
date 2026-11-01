@@ -268,6 +268,7 @@ GetBrushOrgEx(HDC hdc,LPPOINT pt)
     PDC_ATTR Dc_Attr;
 
     if (!GdiGetHandleUserData((HGDIOBJ) hdc, GDI_OBJECT_TYPE_DC, (PVOID) &Dc_Attr)) return FALSE;
+    if (!Dc_Attr) return FALSE;
     if (pt)
     {
         pt->x = Dc_Attr->ptlBrushOrigin.x;
@@ -304,7 +305,7 @@ SetBrushOrgEx(HDC hdc,
         return FALSE;
     }
 #endif
-    if (GdiGetHandleUserData((HGDIOBJ) hdc, GDI_OBJECT_TYPE_DC, (PVOID)&Dc_Attr))
+    if (GdiGetHandleUserData((HGDIOBJ) hdc, GDI_OBJECT_TYPE_DC, (PVOID)&Dc_Attr) && Dc_Attr)
     {
         PGDIBSSETBRHORG pgSBO;
 

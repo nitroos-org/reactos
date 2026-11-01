@@ -346,7 +346,8 @@ CancelDC(HDC hDC)
 
     if (GdiGetHandleUserData((HGDIOBJ) hDC, GDI_OBJECT_TYPE_DC, (PVOID) &pDc_Attr))
     {
-        pDc_Attr->ulDirty_ &= ~DC_PLAYMETAFILE;
+        if (pDc_Attr)
+            pDc_Attr->ulDirty_ &= ~DC_PLAYMETAFILE;
         return TRUE;
     }
 
