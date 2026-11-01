@@ -21,6 +21,8 @@ typedef NTSTATUS (NTAPI *PFN_NtQueryTimerResolution)(PULONG, PULONG, PULONG);
 #define SLACK_MS(Wall) (32 + (Wall) / 10)
 
 static LARGE_INTEGER g_Frequency;
+/* The processors this process may run on, one bit each, in the order of the affinity mask */
+static DWORD_PTR g_Cpu[MAX_CPUS];
 
 static DWORD WINAPI Spinner(PVOID Parameter)
 {
@@ -54,7 +56,8 @@ static void RunPhase(PCSTR Name, ULONG Processors)
         Threads[i] = CreateThread(NULL, 0, Spinner, NULL, CREATE_SUSPENDED, NULL);
         ok(Threads[i] != NULL, "%s: CreateThread failed (%lu)\n", Name, GetLastError());
         if (!Threads[i]) break;
-        SetThreadAffinityMask(Threads[i], (DWORD_PTR)1 << i);
+        ok(SetThreadAffinityMask(Threads[i], g_Cpu[i]) != 0, "%s: SetThreadAffinityMask(%p) failed (%lu)\n",
+           Name, (PVOID)g_Cpu[i], GetLastError());
         Created++;
     }
     for (i = 0; i < Created; i++) ResumeThread(Threads[i]);
@@ -87,9 +90,9 @@ START_TEST(ThreadTimesTimerResolution)
     PFN_NtQueryTimerResolution pNtQueryTimerResolution;
     HMODULE Ntdll = GetModuleHandleA("ntdll.dll");
     ULONG Minimum, Maximum, Current, Actual;
-    SYSTEM_INFO Info;
+    DWORD_PTR ProcessMask, SystemMask, Bit;
     NTSTATUS Status;
-    ULONG Processors;
+    ULONG Processors = 0;
 
     pNtSetTimerResolution = (PFN_NtSetTimerResolution)GetProcAddress(Ntdll, "NtSetTimerResolution");
     pNtQueryTimerResolution = (PFN_NtQueryTimerResolution)GetProcAddress(Ntdll, "NtQueryTimerResolution");
@@ -100,8 +103,21 @@ START_TEST(ThreadTimesTimerResolution)
     }
 
     QueryPerformanceFrequency(&g_Frequency);
-    GetSystemInfo(&Info);
-    Processors = min(Info.dwNumberOfProcessors, MAX_CPUS);
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &ProcessMask, &SystemMask))
+    {
+        skip("GetProcessAffinityMask failed (%lu)\n", GetLastError());
+        return;
+    }
+    for (Bit = 1; Bit && Processors < MAX_CPUS; Bit <<= 1)
+    {
+        if (ProcessMask & Bit) g_Cpu[Processors++] = Bit;
+    }
+    /* The bug is in the charging of the processors other than the first one */
+    if (Processors < 2)
+    {
+        skip("Needs at least two processors (affinity mask %p)\n", (PVOID)ProcessMask);
+        return;
+    }
 
     RunPhase("default resolution", Processors);
 

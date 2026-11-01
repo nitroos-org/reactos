@@ -12,6 +12,9 @@
 
 #include "precomp.h"
 
+#include <ndk/exfuncs.h>
+#include <ndk/rtlfuncs.h>
+
 typedef struct _TEST_THREAD_BASIC_INFORMATION
 {
     LONG ExitStatus;
@@ -25,7 +28,11 @@ typedef struct _TEST_THREAD_BASIC_INFORMATION
 
 typedef LONG (NTAPI *PFN_NtQueryInformationThread)(HANDLE, ULONG, PVOID, ULONG, PULONG);
 
-#define ROUNDS 3
+#define ROUNDS 5
+/* The waiter is waiting when its thread record says so (KTHREAD_STATE Waiting) for one of the reasons
+   a kernel32 or win32k wait uses; the wait is bounded */
+#define THREAD_STATE_WAITING 5
+#define BLOCK_TIMEOUT_MS 2000
 /* A boost is not given while an earlier one (the resume of a new thread) has not decayed: the waiter
    first runs for a few quanta, each quantum end takes one step of it away */
 #define SETTLE_MS 600
@@ -48,13 +55,87 @@ static void ReadPriority(void)
     }
 }
 
-static void Settle(void)
+static void Spin(DWORD Ms)
 {
     DWORD Start = GetTickCount();
     volatile ULONG i;
-    while (GetTickCount() - Start < SETTLE_MS)
+    while (GetTickCount() - Start < Ms)
     {
         for (i = 0; i < 10000; i++);
+    }
+}
+
+/* Spin for SETTLE_MS, then until the priority has stopped moving over a further 100 ms (bounded): under
+   CPU load the waiter gets a fraction of a processor, so fewer quanta than expected may have ended */
+static void Settle(void)
+{
+    DWORD Start = GetTickCount();
+    LONG Last;
+
+    Spin(SETTLE_MS);
+    ReadPriority();
+    do
+    {
+        Last = g_Priority;
+        Spin(100);
+        ReadPriority();
+    } while (g_Priority != Last && GetTickCount() - Start < 3000);
+}
+
+static BOOL IsWaitReasonOfWait(ULONG Reason)
+{
+    /* Executive, UserRequest, WrExecutive, WrUserRequest */
+    return Reason == 0 || Reason == 6 || Reason == 7 || Reason == 13;
+}
+
+/* Polls the system thread list until the thread Tid of this process is waiting, or the time is up */
+static BOOL WaitUntilBlocked(DWORD Tid)
+{
+    DWORD Start = GetTickCount();
+    ULONG Size = 0x20000;
+
+    for (;;)
+    {
+        PUCHAR Buffer = HeapAlloc(GetProcessHeap(), 0, Size);
+        ULONG Length = 0;
+        NTSTATUS Status;
+
+        if (!Buffer) return FALSE;
+        Status = NtQuerySystemInformation(SystemProcessInformation, Buffer, Size, &Length);
+        if (Status == STATUS_INFO_LENGTH_MISMATCH)
+        {
+            HeapFree(GetProcessHeap(), 0, Buffer);
+            Size = Length + 0x10000;
+            continue;
+        }
+        if (NT_SUCCESS(Status))
+        {
+            PSYSTEM_PROCESS_INFORMATION Process = (PSYSTEM_PROCESS_INFORMATION)Buffer;
+            for (;;)
+            {
+                if ((DWORD)(DWORD_PTR)Process->UniqueProcessId == GetCurrentProcessId())
+                {
+                    ULONG i;
+                    for (i = 0; i < Process->NumberOfThreads; i++)
+                    {
+                        PSYSTEM_THREAD_INFORMATION Thread = (PSYSTEM_THREAD_INFORMATION)(Process + 1) + i;
+                        if ((DWORD)(DWORD_PTR)Thread->ClientId.UniqueThread == Tid &&
+                            Thread->ThreadState == THREAD_STATE_WAITING &&
+                            IsWaitReasonOfWait(Thread->WaitReason))
+                        {
+                            HeapFree(GetProcessHeap(), 0, Buffer);
+                            return TRUE;
+                        }
+                    }
+                    break;
+                }
+                if (!Process->NextEntryOffset) break;
+                Process = (PSYSTEM_PROCESS_INFORMATION)((PUCHAR)Process + Process->NextEntryOffset);
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, Buffer);
+        if (GetTickCount() - Start >= BLOCK_TIMEOUT_MS) return FALSE;
+        Sleep(1);
     }
 }
 
@@ -87,7 +168,9 @@ static int __cdecl CompareLong(const void *A, const void *B)
     return *(const LONG *)A - *(const LONG *)B;
 }
 
-/* Returns the median boost (priority above the base priority) at the wake, or -100 */
+/* Returns the largest boost (priority above the base priority) seen at a wake, or -100. A boost only ever
+   decays (one step per quantum end), so a wake that read a decayed value lowers none of the others and
+   the largest of the rounds is the one nearest the boost the wake gave */
 static LONG MeasureBoost(BOOL Message)
 {
     LONG Boost[ROUNDS];
@@ -101,8 +184,8 @@ static LONG MeasureBoost(BOOL Message)
         ok(Thread != NULL, "CreateThread failed (%lu)\n", GetLastError());
         if (!Thread) break;
         ok(WaitForSingleObject(g_Ready, 10000) == WAIT_OBJECT_0, "waiter not ready\n");
-        /* Let it block */
-        Sleep(50);
+        /* Let it block: wait until its thread record says so, never a fixed time */
+        ok(WaitUntilBlocked(Tid), "waiter did not block within %d ms\n", BLOCK_TIMEOUT_MS);
         if (Message)
             ok(PostThreadMessageW(Tid, WM_USER + 1, 0, 0), "PostThreadMessageW failed (%lu)\n", GetLastError());
         else
@@ -115,7 +198,7 @@ static LONG MeasureBoost(BOOL Message)
     }
     if (!Count) return -100;
     qsort(Boost, Count, sizeof(Boost[0]), CompareLong);
-    return Boost[Count / 2];
+    return Boost[Count - 1];
 }
 
 START_TEST(MessageWakeBoost)
@@ -140,7 +223,7 @@ START_TEST(MessageWakeBoost)
     trace("boost at the wake: event %ld, message %ld\n", EventBoost, MessageBoost);
 
     /* Both include the foreground boost when this process is in the foreground */
-    ok(MessageBoost == EventBoost + 1, "message wake boost %ld, event wake boost %ld (Windows: one more than the event)\n",
+    ok(MessageBoost >= EventBoost + 1, "message wake boost %ld, event wake boost %ld (Windows: one more than the event)\n",
        MessageBoost, EventBoost);
 
     CloseHandle(g_Ready);

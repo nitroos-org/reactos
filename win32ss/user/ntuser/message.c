@@ -1423,9 +1423,14 @@ co_IntGetPeekMessage( PMSG pMsg,
            {
               /* The yield of PeekMessage releases the threads waiting for this
                  one to go idle (WaitForInputIdle); it does not give the
-                 processor away, as on Windows: NtYieldExecution queued the
-                 thread behind a CPU-bound thread of lower priority for that
-                 one's quantum (a menu loop polls with PeekMessage) */
+                 processor away: NtYieldExecution queued the thread behind a
+                 CPU-bound thread of lower priority for that one's quantum (a
+                 menu loop polls with PeekMessage).
+                 Not Windows behaviour: Windows 10 hands the processor to a
+                 ready lower-priority thread on the same CPU after an
+                 empty-queue PeekMessage, even with PM_NOYIELD (probably its
+                 spin detection, cSpins below); measured on a Windows 10
+                 22H2 machine, not implemented here */
               IdlePing();
               // Fall through to exit.
               IdlePong();
