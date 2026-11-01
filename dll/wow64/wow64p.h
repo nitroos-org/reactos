@@ -59,6 +59,9 @@ enum
 #define WOW64_SERVICE_CREATE_PROCESS 0x10003
 BOOLEAN Wow64FirstReport(ULONG Service, ULONG Kind, ULONG Value);
 NTSTATUS Wow64Unsupported(ULONG Service, ULONG Kind, ULONG Value, BOOLEAN *Reported);
+/* ioctl.c: control codes passed to the native call without translation */
+BOOLEAN Wow64IsPlainIoctl(ULONG Code);
+BOOLEAN Wow64IsPlainFsctl(ULONG Code);
 NTSTATUS Wow64Allocate(SIZE_T Size, PVOID *Base);
 extern ULONG Wow64HighestUserAddress;
 ULONG_PTR Wow64ZeroBits(ULONG ZeroBits);
