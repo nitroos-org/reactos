@@ -121,6 +121,7 @@ Signature = "$Windows NT$"
 99 = system32\WindowsPowerShell\v1.0\Modules\Storage\2.0.0.0
 100 = system32\WindowsPowerShell\v1.0\Modules\ScheduledTasks
 101 = system32\WindowsPowerShell\v1.0\Modules\ScheduledTasks\1.0.0.0
+102 = Rapps\Overlay
 
 .InfEnd
 

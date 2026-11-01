@@ -1,0 +1,36 @@
+; nitro RAPPS overlay entry: replaces the upstream package "firefox" (Mozilla Firefox 48, win32 only).
+; rapps stages every *.txt of %SystemRoot%\Rapps\Overlay over the cached database (CAppDB::StageOverlay),
+; so the Applications Manager, "rapps /install firefox" and the first-login browser chooser all get this
+; entry. Nothing is bundled: the installer is downloaded from Mozilla at install time.
+;
+; Unpinned on purpose: download.mozilla.org redirects to the newest release installer, so a new user gets a
+; current browser without a nitro release. RAPPS only verifies SHA1/SHA256 when the entry has one, and no
+; hash can exist for a moving target; integrity is HTTPS to Mozilla. The cost: a release that was never
+; tested on nitro is installed as soon as Mozilla ships it. To pin a tested release instead (hash checked),
+; see "Pinning" below. Version is shown in the Applications Manager only; the real version is whatever
+; Mozilla serves.
+;
+; Pinning: replace URLDownload in both arch sections with
+;   https://download-installer.cdn.mozilla.net/pub/firefox/releases/<ver>/<win64|win32>/en-US/Firefox%20Setup%20<ver>.exe
+; and add SHA256 = <value from https://archive.mozilla.org/pub/firefox/releases/<ver>/SHA256SUMS
+; for win64/en-US/Firefox Setup <ver>.exe or win32/...> plus SizeBytes.
+;
+; Tested on nitro: 159.0 x64 and x86 (chooser and Applications Manager install, starts, loads a page); reCAPTCHA on 159 was checked by the captcha lane. Silent switch: /S.
+[Section]
+Name = Mozilla Firefox (current release)
+Version = latest
+License = MPL/GPL/LGPL
+LicenseType = 1
+Description = Mozilla Firefox, current release. The newest official installer is downloaded from Mozilla at install time. Use "Mozilla Firefox ESR" for the extended-support branch.
+Category = 5
+URLSite = https://www.mozilla.org/en-US/firefox/
+Publisher = Mozilla
+Icon = firefox_new.ico
+SaveAs = firefox-setup.exe
+SilentParameters = /S
+
+[Section.amd64]
+URLDownload = https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=en-US
+
+[Section.x86]
+URLDownload = https://download.mozilla.org/?product=firefox-latest-ssl&os=win&lang=en-US

@@ -1,0 +1,1 @@
+; nitro RAPPS overlay: hides upstream package firefox36 from the Applications Manager (rapps deletes the cached firefox36.txt).

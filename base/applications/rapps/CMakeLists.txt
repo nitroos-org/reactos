@@ -51,3 +51,10 @@ add_importlibs(rapps advapi32 comctl32 gdi32 wininet crypt32 cryptui user32 shel
 add_dependencies(rapps rappsmsg)
 add_message_headers(ANSI rappsmsg.mc)
 add_cd_file(TARGET rapps DESTINATION reactos/system32 FOR all)
+
+# ReactOS-Nitro overlay: entries that replace or hide upstream database packages (see CAppDB::StageOverlay).
+# Source of truth for the nitro Firefox entries; nothing from Mozilla is bundled.
+foreach(_ovl firefox.txt firefox-esr.txt firefox28.hide firefox36.hide)
+    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/overlay/${_ovl}
+                DESTINATION reactos/Rapps/Overlay FOR all)
+endforeach()

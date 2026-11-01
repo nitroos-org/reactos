@@ -1,0 +1,1 @@
+; nitro RAPPS overlay: hides upstream package firefox28 from the Applications Manager (rapps deletes the cached firefox28.txt).

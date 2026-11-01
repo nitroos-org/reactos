@@ -1,0 +1,24 @@
+; nitro RAPPS overlay entry: replaces the upstream package "firefox-esr" (Mozilla Firefox 52 ESR).
+; Same mechanism and policy as firefox.txt (unpinned "latest ESR" redirect, no hash, installer downloaded
+; from Mozilla at install time; see the comments there for pinning).
+;
+; The ESR branch trails the current release by months and is a second choice on nitro: ESR 128 never
+; finished the reCAPTCHA check (FIREFOX128-recaptcha-timeout). The redirect currently serves ESR 153.6 (installs and loads a page on nitro; reCAPTCHA not checked on it).
+[Section]
+Name = Mozilla Firefox ESR (extended support)
+Version = latest ESR
+License = MPL/GPL/LGPL
+LicenseType = 1
+Description = Mozilla Firefox, Extended Support Release. The newest official ESR installer is downloaded from Mozilla at install time. Prefer "Mozilla Firefox (current release)" unless you need the ESR branch.
+Category = 5
+URLSite = https://www.mozilla.org/en-US/firefox/enterprise/
+Publisher = Mozilla
+Icon = firefox_new.ico
+SaveAs = firefox-esr-setup.exe
+SilentParameters = /S
+
+[Section.amd64]
+URLDownload = https://download.mozilla.org/?product=firefox-esr-latest-ssl&os=win64&lang=en-US
+
+[Section.x86]
+URLDownload = https://download.mozilla.org/?product=firefox-esr-latest-ssl&os=win&lang=en-US
