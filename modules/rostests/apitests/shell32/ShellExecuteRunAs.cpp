@@ -9,8 +9,8 @@
  * token, ShellExecuteEx returns TRUE with a valid hProcess and no UI, with or without
  * SEE_MASK_FLAG_NO_UI. The target is never more elevated than the caller.
  *
- * ReactOS keeps its Run As dialog for a caller that is not elevated and allows UI; cancelling it
- * fails with ERROR_CANCELLED.
+ * ReactOS shows no Run As dialog either: a caller that is not elevated gets its target started
+ * unelevated, with its own token, as on Windows with UAC off.
  *
  * ShellExecuteRunAs              tests with the caller's token, then runs the step below
  * ShellExecuteRunAs restricted   tests with a filtered, medium-integrity copy of it
@@ -115,7 +115,21 @@ static BOOL RunAs(ULONG Mask, LPSHELLEXECUTEINFOW Sei, PDWORD Error, PLONG Dialo
     return Ret;
 }
 
-/* The target started: its token must be as elevated as the caller's, never more */
+static BOOL QueryIdentity(HANDLE Token, PSID Sid, DWORD cbSid, PLUID AuthId)
+{
+    BYTE UserBuffer[SECURITY_MAX_SID_SIZE + sizeof(TOKEN_USER)];
+    TOKEN_STATISTICS Stats;
+    DWORD Length;
+
+    if (!GetTokenInformation(Token, TokenUser, UserBuffer, sizeof(UserBuffer), &Length) ||
+        !GetTokenInformation(Token, TokenStatistics, &Stats, sizeof(Stats), &Length) ||
+        !CopySid(cbSid, Sid, ((PTOKEN_USER)UserBuffer)->User.Sid))
+        return FALSE;
+    *AuthId = Stats.AuthenticationId;
+    return TRUE;
+}
+
+/* The target started: its token must be the caller's (same user, same logon session, as elevated, never more) */
 static void CheckChild(PCSTR What, HANDLE hProcess, DWORD CallerElevated, TOKEN_ELEVATION_TYPE CallerType)
 {
     HANDLE Token;
@@ -130,6 +144,26 @@ static void CheckChild(PCSTR What, HANDLE hProcess, DWORD CallerElevated, TOKEN_
         ok((Elevated != 0) == (CallerElevated != 0), "%s: child TokenIsElevated %lu, caller %lu\n", What, Elevated,
            CallerElevated);
         ok(Type == CallerType, "%s: child elevation type %d, caller %d\n", What, Type, CallerType);
+        {
+            BYTE ChildSid[SECURITY_MAX_SID_SIZE], CallerSid[SECURITY_MAX_SID_SIZE];
+            LUID ChildAuth, CallerAuth;
+            HANDLE CallerToken;
+
+            if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &CallerToken))
+            {
+                BOOL Both = QueryIdentity(Token, ChildSid, sizeof(ChildSid), &ChildAuth) &&
+                            QueryIdentity(CallerToken, CallerSid, sizeof(CallerSid), &CallerAuth);
+                ok(Both, "%s: token identity query failed: %lu\n", What, GetLastError());
+                if (Both)
+                {
+                    ok(EqualSid(ChildSid, CallerSid), "%s: the child runs as another user\n", What);
+                    ok(ChildAuth.LowPart == CallerAuth.LowPart && ChildAuth.HighPart == CallerAuth.HighPart,
+                       "%s: the child is in another logon session: %lx:%lx, caller %lx:%lx\n", What,
+                       ChildAuth.HighPart, ChildAuth.LowPart, CallerAuth.HighPart, CallerAuth.LowPart);
+                }
+                CloseHandle(CallerToken);
+            }
+        }
         CloseHandle(Token);
     }
     else
@@ -156,8 +190,7 @@ static void CheckChild(PCSTR What, HANDLE hProcess, DWORD CallerElevated, TOKEN_
     }
 }
 
-static void TestRunAs(PCSTR What, ULONG Mask, DWORD CallerElevated, TOKEN_ELEVATION_TYPE CallerType,
-                      BOOL MayPrompt)
+static void TestRunAs(PCSTR What, ULONG Mask, DWORD CallerElevated, TOKEN_ELEVATION_TYPE CallerType)
 {
     SHELLEXECUTEINFOW Sei;
     DWORD Error;
@@ -165,24 +198,10 @@ static void TestRunAs(PCSTR What, ULONG Mask, DWORD CallerElevated, TOKEN_ELEVAT
     BOOL Ret;
 
     Ret = RunAs(Mask, &Sei, &Error, &Dialogs);
-    if (MayPrompt && Dialogs)
-    {
-        /* The Run As dialog, cancelled by the watcher */
-        ok(!Ret, "%s: ShellExecuteEx succeeded after cancel\n", What);
-        ok(Error == ERROR_CANCELLED, "%s: error %lu after cancel, expected ERROR_CANCELLED\n", What, Error);
-        ok(Sei.hProcess == NULL, "%s: hProcess %p after cancel\n", What, Sei.hProcess);
-        ok((ULONG_PTR)Sei.hInstApp <= 32, "%s: hInstApp %Iu after cancel\n", What, (ULONG_PTR)Sei.hInstApp);
-    }
-    else
-    {
-        ok(Ret, "%s: ShellExecuteEx failed: %lu\n", What, Error);
-        ok(Dialogs == 0, "%s: %ld dialogs shown\n", What, Dialogs);
-        ok((ULONG_PTR)Sei.hInstApp > 32, "%s: hInstApp %Iu\n", What, (ULONG_PTR)Sei.hInstApp);
-        ok(Sei.hProcess != NULL, "%s: no hProcess\n", What);
-    }
-    if (MayPrompt && is_reactos())
-        ok(Dialogs == 1, "%s: %ld dialogs, ReactOS should show its Run As dialog once to a caller that is not "
-           "elevated\n", What, Dialogs);
+    ok(Ret, "%s: ShellExecuteEx failed: %lu\n", What, Error);
+    ok(Dialogs == 0, "%s: %ld dialogs shown\n", What, Dialogs);
+    ok((ULONG_PTR)Sei.hInstApp > 32, "%s: hInstApp %Iu\n", What, (ULONG_PTR)Sei.hInstApp);
+    ok(Sei.hProcess != NULL, "%s: no hProcess\n", What);
     if (Sei.hProcess)
     {
         CheckChild(What, Sei.hProcess, CallerElevated, CallerType);
@@ -304,9 +323,10 @@ static void TestRestrictedStep(void)
     ok(!Elevated, "The filtered token is elevated\n");
     if (Elevated)
         return;
-    TestRunAs("filtered, NO_UI", SEE_MASK_FLAG_NO_UI, Elevated, Type, FALSE);
-    TestRunAs("filtered, UI allowed", 0, Elevated, Type, TRUE);
-    TestRunAs("filtered, UI allowed, exefile class", SEE_MASK_CLASSNAME, Elevated, Type, TRUE);
+    /* UI allowed or not: no dialog, the target runs with the filtered token */
+    TestRunAs("filtered, NO_UI", SEE_MASK_FLAG_NO_UI, Elevated, Type);
+    TestRunAs("filtered, UI allowed", 0, Elevated, Type);
+    TestRunAs("filtered, UI allowed, exefile class", SEE_MASK_CLASSNAME, Elevated, Type);
 }
 
 /* Run "ShellExecuteRunAs restricted" with a filtered, medium-integrity copy of the own token */
@@ -416,9 +436,9 @@ START_TEST(ShellExecuteRunAs)
     if (Elevated)
     {
         /* No prompt: the target runs with the caller's full token */
-        TestRunAs("elevated", 0, Elevated, Type, FALSE);
-        TestRunAs("elevated, NO_UI", SEE_MASK_FLAG_NO_UI, Elevated, Type, FALSE);
-        TestRunAs("elevated, exefile class", SEE_MASK_CLASSNAME, Elevated, Type, FALSE);
+        TestRunAs("elevated", 0, Elevated, Type);
+        TestRunAs("elevated, NO_UI", SEE_MASK_FLAG_NO_UI, Elevated, Type);
+        TestRunAs("elevated, exefile class", SEE_MASK_CLASSNAME, Elevated, Type);
     }
     else
     {

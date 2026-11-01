@@ -760,38 +760,16 @@ again:
  * hProcess, for an elevated caller and for a filtered, medium-integrity one
  * alike, with or without SEE_MASK_FLAG_NO_UI.
  *
- * Starting the target with the caller's token cannot elevate anything, so an
- * elevated caller and a caller that forbids UI get exactly that. A caller
- * that is not elevated and allows UI still gets the Run As dialog, the only
- * way to run the target with another account's token, and only with that
- * account's credentials.
+ * So "runas" always starts the target with the caller's own token and
+ * never shows the Run As dialog. That cannot elevate anything: a caller that
+ * is not an administrator gets an unelevated child, as on Windows. The
+ * credentials dialog (PromptAndRunProcessAs) is kept for a future policy that
+ * wants it; nothing asks for it today.
  */
-static BOOL SHELL_IsProcessElevated(VOID)
-{
-    HANDLE hToken;
-    TOKEN_ELEVATION Elevation;
-    DWORD cbRet;
-    BOOL bElevated = FALSE, bKnown = FALSE;
-
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
-    {
-        if (GetTokenInformation(hToken, TokenElevation, &Elevation, sizeof(Elevation), &cbRet))
-        {
-            bElevated = (Elevation.TokenIsElevated != 0);
-            bKnown = TRUE;
-        }
-        CloseHandle(hToken);
-    }
-    if (!bKnown)
-        bElevated = IsUserAnAdmin(); /* No TokenElevation: an enabled Administrators group */
-    return bElevated;
-}
-
 static BOOL SHELL_RunAsNeedsPrompt(_In_ const SHELLEXECUTEINFOW *psei)
 {
-    if (psei->fMask & SEE_MASK_FLAG_NO_UI)
-        return FALSE;
-    return !SHELL_IsProcessElevated();
+    UNREFERENCED_PARAMETER(psei);
+    return FALSE;
 }
 
 /*
