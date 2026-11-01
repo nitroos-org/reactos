@@ -6,8 +6,9 @@
  *
  * The output formats of /query (TABLE, LIST, CSV, with and without /v and /nh) and the messages
  * follow what Windows 10 22H2 prints, measured with read-only queries.
- * Not done (reported as such): remote machines (/s /u /p), weekly, monthly, idle and event
- * schedules, tasks that run with a stored password (/ru user /rp password), changing /tr.
+ * Not done (reported as such): remote machines (/s /u /p), idle and event schedules (the service
+ * stores such triggers from an XML file and never runs them, so /create refuses them),
+ * tasks that run with a stored password (/ru user /rp password), changing /tr.
  */
 
 #define COBJMACROS
@@ -200,7 +201,7 @@ static HRESULT get_task(const WCHAR *name, IRegisteredTask **task)
 
 struct options
 {
-    const WCHAR *tn, *tr, *sc, *st, *sd, *ed, *mo, *ri, *du, *ru, *rp, *rl, *xml, *fo, *s;
+    const WCHAR *tn, *tr, *sc, *st, *sd, *ed, *mo, *ri, *du, *ru, *rp, *rl, *xml, *fo, *s, *d, *m, *i;
     BOOL f, nh, v, enable, disable, it, help;
     BOOL have_xml_switch;
 };
@@ -223,7 +224,8 @@ static BOOL parse_options(int argc, WCHAR **argv, struct options *opt, const WCH
         { L"du", offsetof(struct options, du) }, { L"ru", offsetof(struct options, ru) },
         { L"rp", offsetof(struct options, rp) }, { L"rl", offsetof(struct options, rl) },
         { L"xml", offsetof(struct options, xml) }, { L"fo", offsetof(struct options, fo) },
-        { L"s", offsetof(struct options, s) },
+        { L"s", offsetof(struct options, s) }, { L"d", offsetof(struct options, d) },
+        { L"m", offsetof(struct options, m) }, { L"i", offsetof(struct options, i) },
     };
     int i;
     unsigned int j;
@@ -481,6 +483,104 @@ static void account_name(const WCHAR *id, WCHAR *text, size_t size)
         _snwprintf(text, size, L"%s", slash + 1);
 }
 
+static const WCHAR *const day_words[7] = { L"SUNDAY", L"MONDAY", L"TUESDAY", L"WEDNESDAY", L"THURSDAY", L"FRIDAY", L"SATURDAY" };
+static const WCHAR *const month_words[12] = { L"JANUARY", L"FEBRUARY", L"MARCH", L"APRIL", L"MAY", L"JUNE", L"JULY",
+                                              L"AUGUST", L"SEPTEMBER", L"OCTOBER", L"NOVEMBER", L"DECEMBER" };
+
+/* "MONDAY, FRIDAY" */
+static void list_set(WCHAR *text, size_t size, const WCHAR *const *words, unsigned int count, unsigned int mask)
+{
+    unsigned int i;
+    size_t n = 0;
+
+    text[0] = 0;
+    for (i = 0; i < count; i++)
+    {
+        if (!(mask & (1u << i))) continue;
+        n += _snwprintf(text + n, size - n, L"%s%s", n ? L", " : L"", words[i]);
+    }
+}
+
+/* the schedule fields of a weekly, monthly or monthly day-of-week trigger */
+static void fill_calendar_fields(struct record *rec, ITrigger *trigger, TASK_TRIGGER_TYPE2 type)
+{
+    WCHAR text[256], more[128];
+
+    if (type == TASK_TRIGGER_WEEKLY)
+    {
+        IWeeklyTrigger *weekly;
+        SHORT days = 0, weeks = 1;
+
+        if (SUCCEEDED(ITrigger_QueryInterface(trigger, &IID_IWeeklyTrigger, (void **)&weekly)))
+        {
+            IWeeklyTrigger_get_DaysOfWeek(weekly, &days);
+            IWeeklyTrigger_get_WeeksInterval(weekly, &weeks);
+            IWeeklyTrigger_Release(weekly);
+        }
+        list_set(text, ARRAYSIZE(text), day_words, 7, days);
+        if (weeks > 1)
+        {
+            _snwprintf(more, ARRAYSIZE(more), L"Every %d week(s) on: %s", weeks, text);
+            set_field(rec, C_DAYS, more);
+        }
+        else set_field(rec, C_DAYS, text);
+        set_field(rec, C_STYPE, L"Weekly");
+    }
+    else if (type == TASK_TRIGGER_MONTHLY)
+    {
+        IMonthlyTrigger *monthly;
+        LONG days = 0;
+        SHORT months = 0;
+        VARIANT_BOOL last = VARIANT_FALSE;
+        unsigned int i;
+        size_t n = 0;
+
+        if (SUCCEEDED(ITrigger_QueryInterface(trigger, &IID_IMonthlyTrigger, (void **)&monthly)))
+        {
+            IMonthlyTrigger_get_DaysOfMonth(monthly, &days);
+            IMonthlyTrigger_get_MonthsOfYear(monthly, &months);
+            IMonthlyTrigger_get_RunOnLastDayOfMonth(monthly, &last);
+            IMonthlyTrigger_Release(monthly);
+        }
+        text[0] = 0;
+        for (i = 0; i < 31; i++)
+            if (days & (1 << i)) n += _snwprintf(text + n, ARRAYSIZE(text) - n, L"%s%u", n ? L", " : L"", i + 1);
+        if (last) n += _snwprintf(text + n, ARRAYSIZE(text) - n, L"%sLAST", n ? L", " : L"");
+        set_field(rec, C_DAYS, text);
+        list_set(text, ARRAYSIZE(text), month_words, 12, months);
+        set_field(rec, C_MONTHS, text);
+        set_field(rec, C_STYPE, L"Monthly");
+    }
+    else
+    {
+        IMonthlyDOWTrigger *dow;
+        SHORT days = 0, weeks = 0, months = 0;
+        VARIANT_BOOL last = VARIANT_FALSE;
+        static const WCHAR *const nth[4] = { L"FIRST", L"SECOND", L"THIRD", L"FOURTH" };
+        unsigned int i;
+        size_t n = 0;
+
+        if (SUCCEEDED(ITrigger_QueryInterface(trigger, &IID_IMonthlyDOWTrigger, (void **)&dow)))
+        {
+            IMonthlyDOWTrigger_get_DaysOfWeek(dow, &days);
+            IMonthlyDOWTrigger_get_WeeksOfMonth(dow, &weeks);
+            IMonthlyDOWTrigger_get_MonthsOfYear(dow, &months);
+            IMonthlyDOWTrigger_get_RunOnLastWeekOfMonth(dow, &last);
+            IMonthlyDOWTrigger_Release(dow);
+        }
+        more[0] = 0;
+        for (i = 0; i < 4; i++)
+            if (weeks & (1 << i)) n += _snwprintf(more + n, ARRAYSIZE(more) - n, L"%s%s", n ? L", " : L"", nth[i]);
+        if (last) n += _snwprintf(more + n, ARRAYSIZE(more) - n, L"%sLAST", n ? L", " : L"");
+        list_set(text, ARRAYSIZE(text), day_words, 7, days);
+        _snwprintf(text + wcslen(text), ARRAYSIZE(text) - wcslen(text), L" (%s)", more);
+        set_field(rec, C_DAYS, text);
+        list_set(text, ARRAYSIZE(text), month_words, 12, months);
+        set_field(rec, C_MONTHS, text);
+        set_field(rec, C_STYPE, L"Monthly");
+    }
+}
+
 /* the fields that come from one trigger of the task (or none: on demand only) */
 static void fill_trigger_fields(struct record *rec, ITrigger *trigger)
 {
@@ -504,8 +604,13 @@ static void fill_trigger_fields(struct record *rec, ITrigger *trigger)
     case TASK_TRIGGER_LOGON: set_field(rec, C_STYPE, L"At logon time"); return;
     case TASK_TRIGGER_BOOT: set_field(rec, C_STYPE, L"At system start up"); return;
     case TASK_TRIGGER_EVENT: set_field(rec, C_STYPE, L"When an event occurs"); return;
+    case TASK_TRIGGER_IDLE: set_field(rec, C_STYPE, L"On idle"); return;
+    case TASK_TRIGGER_SESSION_STATE_CHANGE: set_field(rec, C_STYPE, L"On session state change"); return;
     case TASK_TRIGGER_TIME:
-    case TASK_TRIGGER_DAILY: break;
+    case TASK_TRIGGER_DAILY:
+    case TASK_TRIGGER_WEEKLY:
+    case TASK_TRIGGER_MONTHLY:
+    case TASK_TRIGGER_MONTHLYDOW: break;
     default: set_field(rec, C_STYPE, L"Undefined"); return;
     }
 
@@ -563,6 +668,8 @@ static void fill_trigger_fields(struct record *rec, ITrigger *trigger)
         set_field(rec, C_DAYS, text);
         set_field(rec, C_STYPE, L"Daily ");
     }
+    else if (type == TASK_TRIGGER_WEEKLY || type == TASK_TRIGGER_MONTHLY || type == TASK_TRIGGER_MONTHLYDOW)
+        fill_calendar_fields(rec, trigger, type);
     else
     {
         if (secs > 0)
@@ -1512,6 +1619,135 @@ static BOOL is_current_user(const WCHAR *ru)
            !wcsnicmp(ru, L".", slash - ru));
 }
 
+/* a list of names or numbers separated by commas, "*" for all: the bits of the ones the words give */
+static BOOL parse_word_list(const WCHAR *str, const WCHAR *const *words, unsigned int count, unsigned int *mask)
+{
+    WCHAR item[32];
+    const WCHAR *p = str;
+    unsigned int i, n;
+
+    *mask = 0;
+    if (!wcscmp(str, L"*"))
+    {
+        *mask = (1u << count) - 1;
+        return TRUE;
+    }
+    while (*p)
+    {
+        for (n = 0; *p && *p != ',' && n + 1 < ARRAYSIZE(item); p++) item[n++] = *p;
+        item[n] = 0;
+        if (*p == ',') p++;
+        else if (*p) return FALSE;
+        for (i = 0; i < count; i++)
+            if (!wcsnicmp(item, words[i], 3) && (n == 3 || !wcsicmp(item, words[i]))) break;
+        if (i == count) return FALSE;
+        *mask |= 1u << i;
+    }
+    return *mask != 0;
+}
+
+/* SCHTASKS /Create /SC WEEKLY [/MO weeks] [/D MON,TUE,...|*]: Monday when /D is not given */
+static BOOL set_weekly(ITrigger *trigger, const struct options *opt, long weeks)
+{
+    IWeeklyTrigger *weekly;
+    unsigned int days = 2;
+
+    if (weeks < 1 || weeks > 52)
+    {
+        error_usage(L"Invalid syntax. Invalid /MO value for the WEEKLY schedule; use 1 to 52.", L"CREATE");
+        return FALSE;
+    }
+    if (opt->d && !parse_word_list(opt->d, day_words, 7, &days))
+    {
+        error_usage(L"Invalid syntax. Invalid /D value for the WEEKLY schedule; use MON, TUE, ... or *.", L"CREATE");
+        return FALSE;
+    }
+    if (FAILED(ITrigger_QueryInterface(trigger, &IID_IWeeklyTrigger, (void **)&weekly))) return FALSE;
+    IWeeklyTrigger_put_DaysOfWeek(weekly, (SHORT)days);
+    IWeeklyTrigger_put_WeeksInterval(weekly, (SHORT)weeks);
+    IWeeklyTrigger_Release(weekly);
+    return TRUE;
+}
+
+/* SCHTASKS /Create /SC MONTHLY [/MO 1-12|FIRST|SECOND|THIRD|FOURTH|LAST|LASTDAY] [/D day|weekday] [/M months]:
+ * every month on day 1 when nothing is given; 'nth' is the week of a /MO FIRST..LAST (1..5) */
+static BOOL set_monthly(ITrigger *trigger, const struct options *opt, TASK_TRIGGER_TYPE2 type, int nth,
+                        const SYSTEMTIME *start)
+{
+    unsigned int months = 0xfff, days = 0, k;
+    BOOL lastday = opt->mo && !wcsicmp(opt->mo, L"LASTDAY");
+    long every = 1;
+
+    if (opt->m && !parse_word_list(opt->m, month_words, 12, &months))
+    {
+        error_usage(L"Invalid syntax. Invalid /M value for the MONTHLY schedule; use JAN, FEB, ... or *.", L"CREATE");
+        return FALSE;
+    }
+    if (opt->mo && !nth && !lastday)
+    {
+        every = wcstol(opt->mo, NULL, 10);
+        if (every < 1 || every > 12)
+        {
+            error_usage(L"Invalid syntax. Invalid /MO value for the MONTHLY schedule.", L"CREATE");
+            return FALSE;
+        }
+        if (every > 1)
+        {
+            /* every N months, counted from the month of the start: the months of that pattern */
+            if (opt->m)
+            {
+                error_usage(L"Invalid syntax. /M cannot be combined with /MO for a number of months.", L"CREATE");
+                return FALSE;
+            }
+            months = 0;
+            for (k = start->wMonth - 1; !(months & (1u << (k % 12))); k += every)
+                months |= 1u << (k % 12);
+        }
+    }
+
+    if (type == TASK_TRIGGER_MONTHLYDOW)
+    {
+        IMonthlyDOWTrigger *dow;
+
+        if (!opt->d || !parse_word_list(opt->d, day_words, 7, &days))
+        {
+            error_usage(L"Invalid syntax. /D with MON, TUE, ... is required for FIRST, SECOND, THIRD, FOURTH and LAST.",
+                        L"CREATE");
+            return FALSE;
+        }
+        if (FAILED(ITrigger_QueryInterface(trigger, &IID_IMonthlyDOWTrigger, (void **)&dow))) return FALSE;
+        IMonthlyDOWTrigger_put_DaysOfWeek(dow, (SHORT)days);
+        IMonthlyDOWTrigger_put_MonthsOfYear(dow, (SHORT)months);
+        /* a new trigger has the first week: the week asked for replaces it */
+        IMonthlyDOWTrigger_put_WeeksOfMonth(dow, nth == 5 ? 0 : (SHORT)(1 << (nth - 1)));
+        if (nth == 5) IMonthlyDOWTrigger_put_RunOnLastWeekOfMonth(dow, VARIANT_TRUE);
+        IMonthlyDOWTrigger_Release(dow);
+    }
+    else
+    {
+        IMonthlyTrigger *monthly;
+        long day = 1;
+
+        if (!lastday && opt->d)
+        {
+            WCHAR *end;
+
+            day = wcstol(opt->d, &end, 10);
+            if (*end || day < 1 || day > 31)
+            {
+                error_usage(L"Invalid syntax. Invalid /D value for the MONTHLY schedule; use 1 to 31.", L"CREATE");
+                return FALSE;
+            }
+        }
+        if (FAILED(ITrigger_QueryInterface(trigger, &IID_IMonthlyTrigger, (void **)&monthly))) return FALSE;
+        if (lastday) IMonthlyTrigger_put_RunOnLastDayOfMonth(monthly, VARIANT_TRUE);
+        else IMonthlyTrigger_put_DaysOfMonth(monthly, 1L << (day - 1));
+        IMonthlyTrigger_put_MonthsOfYear(monthly, (SHORT)months);
+        IMonthlyTrigger_Release(monthly);
+    }
+    return TRUE;
+}
+
 static int create_command(int argc, WCHAR **argv)
 {
     struct options opt;
@@ -1594,7 +1830,8 @@ static int create_command(int argc, WCHAR **argv)
         error_usage(L"Invalid syntax. Invalid /SD value; use MM/DD/YYYY.", L"CREATE");
         return 1;
     }
-    if (opt.mo)
+    /* for MONTHLY, /MO is a number of months or a word (FIRST..LAST, LASTDAY), read with the schedule */
+    if (opt.mo && !(opt.sc && !wcsicmp(opt.sc, L"MONTHLY")))
     {
         interval = wcstol(opt.mo, NULL, 10);
         if (interval < 1 || interval > 32767)
@@ -1641,15 +1878,23 @@ static int create_command(int argc, WCHAR **argv)
         TASK_TRIGGER_TYPE2 type;
         BOOL repeat = FALSE;
         WCHAR boundary[64], period[32];
+        int nth = 0;
 
         if (!wcsicmp(sc, L"ONCE")) type = TASK_TRIGGER_TIME;
         else if (!wcsicmp(sc, L"DAILY")) type = TASK_TRIGGER_DAILY;
         else if (!wcsicmp(sc, L"MINUTE") || !wcsicmp(sc, L"HOURLY")) { type = TASK_TRIGGER_TIME; repeat = TRUE; }
         else if (!wcsicmp(sc, L"ONLOGON")) type = TASK_TRIGGER_LOGON;
         else if (!wcsicmp(sc, L"ONSTART")) type = TASK_TRIGGER_BOOT;
+        else if (!wcsicmp(sc, L"WEEKLY")) type = TASK_TRIGGER_WEEKLY;
+        else if (!wcsicmp(sc, L"MONTHLY")) type = TASK_TRIGGER_MONTHLY;
+        else if (!wcsicmp(sc, L"ONIDLE") || !wcsicmp(sc, L"ONEVENT"))
+        {
+            error_text(L"The ONIDLE and ONEVENT schedules are not supported: this system never runs such a task.");
+            goto fail;
+        }
         else
         {
-            error_text(L"The schedule type is not supported; use ONCE, DAILY, MINUTE, HOURLY, ONLOGON or ONSTART.");
+            error_text(L"The schedule type is not supported; use ONCE, DAILY, WEEKLY, MONTHLY, MINUTE, HOURLY, ONLOGON or ONSTART.");
             goto fail;
         }
         if (type == TASK_TRIGGER_TIME && !repeat && !opt.st)
@@ -1689,11 +1934,23 @@ static int create_command(int argc, WCHAR **argv)
             ITaskSettings_put_StartWhenAvailable(settings, VARIANT_FALSE);
             ITaskSettings_Release(settings);
         }
+        if (type == TASK_TRIGGER_MONTHLY)
+        {
+            static const WCHAR *const nth_words[] = { L"FIRST", L"SECOND", L"THIRD", L"FOURTH", L"LAST" };
+            unsigned int k;
+
+            /* /MO FIRST..LAST with /D weekday: a day of the week of the month */
+            for (k = 0; opt.mo && k < ARRAYSIZE(nth_words); k++)
+                if (!wcsicmp(opt.mo, nth_words[k])) { nth = k + 1; break; }
+            if (nth) type = TASK_TRIGGER_MONTHLYDOW;
+        }
+
         if (FAILED(hr = ITaskDefinition_get_Triggers(def, &triggers)) ||
             FAILED(hr = ITriggerCollection_Create(triggers, type, &trigger)))
             goto fail;
 
-        if (type == TASK_TRIGGER_TIME || type == TASK_TRIGGER_DAILY)
+        if (type == TASK_TRIGGER_TIME || type == TASK_TRIGGER_DAILY || type == TASK_TRIGGER_WEEKLY ||
+            type == TASK_TRIGGER_MONTHLY || type == TASK_TRIGGER_MONTHLYDOW)
         {
             format_boundary(&start, boundary, ARRAYSIZE(boundary));
             ITrigger_put_StartBoundary(trigger, boundary);
@@ -1721,6 +1978,9 @@ static int create_command(int argc, WCHAR **argv)
                 IDailyTrigger_Release(daily);
             }
         }
+        if (type == TASK_TRIGGER_WEEKLY && !set_weekly(trigger, &opt, interval)) goto fail;
+        if ((type == TASK_TRIGGER_MONTHLY || type == TASK_TRIGGER_MONTHLYDOW) && !set_monthly(trigger, &opt, type, nth, &start))
+            goto fail;
         if (repeat || opt.ri)
         {
             IRepetitionPattern *repetition = NULL;
