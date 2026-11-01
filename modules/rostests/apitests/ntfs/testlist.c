@@ -12,6 +12,7 @@ extern void func_NtfsAccess(void);
 extern void func_NtfsAllInformation(void);
 extern void func_NtfsBackup(void);
 extern void func_NtfsCreate(void);
+extern void func_NtfsCreateDeletePool(void);
 extern void func_NtfsDelete(void);
 extern void func_NtfsDeleteRunning(void);
 extern void func_NtfsDirRename(void);
@@ -21,6 +22,7 @@ extern void func_NtfsNotifyRename(void);
 extern void func_NtfsNotifyScale(void);
 extern void func_NtfsOpenById(void);
 extern void func_NtfsPagingFile(void);
+extern void func_NtfsRecordReuse(void);
 extern void func_NtfsRelativeOpen(void);
 extern void func_NtfsRelativeOpenJunctionAcl(void);
 extern void func_NtfsRename(void);
@@ -41,6 +43,7 @@ const struct test winetest_testlist[] =
     { "NtfsAllInformation", func_NtfsAllInformation },
     { "NtfsBackup", func_NtfsBackup },
     { "NtfsCreate", func_NtfsCreate },
+    { "NtfsCreateDeletePool", func_NtfsCreateDeletePool },
     { "NtfsDelete", func_NtfsDelete },
     { "NtfsDeleteRunning", func_NtfsDeleteRunning },
     { "NtfsDirRename", func_NtfsDirRename },
@@ -50,6 +53,7 @@ const struct test winetest_testlist[] =
     { "NtfsNotifyScale", func_NtfsNotifyScale },
     { "NtfsOpenById", func_NtfsOpenById },
     { "NtfsPagingFile", func_NtfsPagingFile },
+    { "NtfsRecordReuse", func_NtfsRecordReuse },
     { "NtfsRelativeOpen", func_NtfsRelativeOpen },
     { "NtfsRelativeOpenJunctionAcl", func_NtfsRelativeOpenJunctionAcl },
     { "NtfsRename", func_NtfsRename },

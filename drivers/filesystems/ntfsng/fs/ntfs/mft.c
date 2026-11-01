@@ -2820,6 +2820,17 @@ int ntfs_mft_record_free(struct ntfs_volume *vol, struct ntfs_inode *ni)
 	err = ntfs_bitmap_clear_bit(vol->mftbmp_ino, mft_no);
 	if (!err)
 		ntfs_inc_free_mft_records(vol, 1);
+	/*
+	 * The next file gets the lowest free record, as on NTFS for Windows, which reuses a freed
+	 * record at once.  Allocating onward from the last record allocated walked the whole MFT
+	 * before reusing any: every file created after a delete touched an MFT page not cached yet,
+	 * so create/delete churn (an install and uninstall) read new MFT pages and filled the $MFT
+	 * cache in nonpaged pool up to its limit.  The search starts at mft_data_pos, so lowering it
+	 * to every freed record makes it find the lowest free one; records of $MFT itself are left
+	 * to the metadata reserve.
+	 */
+	if (!err && base_ni->mft_no != FILE_MFT && (s64)mft_no < vol->mft_data_pos)
+		vol->mft_data_pos = mft_no;
 	if (!err && base_ni->mft_no == FILE_MFT &&
 	    mft_no + 1 == vol->mft_record_reserve_pos &&
 	    mft_no < vol->mft_record_reserve_end)
