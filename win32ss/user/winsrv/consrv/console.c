@@ -1366,10 +1366,22 @@ static NTSTATUS CtrlEventStatus = STATUS_UNSUCCESSFUL;
  * thread, and terminates the process when a handler took the event (the
  * thread's exit code is non-zero) or when the handler does not finish in time.
  * Windows ends the process with STATUS_CONTROL_C_EXIT in both cases.
+ *
+ * CTRL_LOGOFF_EVENT and CTRL_SHUTDOWN_EVENT carry CTRL_EVENT_SERVICE_FLAG for
+ * a system or service process: the flag kernel32's control dispatcher reads
+ * (it then skips the default handler, and a handler that took the event makes
+ * the thread exit code carry the flag). Such a process is told about the
+ * event, but a handler returning TRUE means "keep running", as the
+ * SetConsoleCtrlHandler documentation describes for services: it is not
+ * terminated for it. A service handler that is still running when the time is
+ * up is terminated at shutdown only: a logoff does not end services.
  */
+#define CTRL_EVENT_SERVICE_FLAG 0x80000000UL
+
 static BOOLEAN
 ConSrvIsTerminatingCtrlEvent(IN ULONG CtrlEvent)
 {
+    CtrlEvent &= ~CTRL_EVENT_SERVICE_FLAG;
     return (CtrlEvent == CTRL_CLOSE_EVENT ||
             CtrlEvent == CTRL_LOGOFF_EVENT ||
             CtrlEvent == CTRL_SHUTDOWN_EVENT);
@@ -1401,11 +1413,18 @@ ConSrvSendCtrlEvent(IN HANDLE ProcessHandle,
             {
                 DWORD ExitCode = 0;
                 BOOLEAN Terminate = FALSE;
+                BOOLEAN Service = (CtrlEvent & CTRL_EVENT_SERVICE_FLAG) != 0;
 
                 if (WaitForSingleObject(Thread, Timeout) != WAIT_OBJECT_0)
-                    Terminate = TRUE; /* The handler did not return in time */
+                {
+                    /* The handler did not return in time */
+                    Terminate = !Service || (CtrlEvent & ~CTRL_EVENT_SERVICE_FLAG) == CTRL_SHUTDOWN_EVENT;
+                }
                 else if (GetExitCodeThread(Thread, &ExitCode) && ExitCode != 0)
-                    Terminate = TRUE; /* A handler handled the event */
+                {
+                    /* A handler handled the event */
+                    Terminate = !Service;
+                }
 
                 if (Terminate)
                     NtTerminateProcess(ProcessHandle, STATUS_CONTROL_C_EXIT);
