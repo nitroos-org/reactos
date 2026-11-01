@@ -1721,6 +1721,7 @@
 @ stdcall ZwQuerySystemEnvironmentValue(ptr ptr long ptr)
 @ stdcall ZwQuerySystemEnvironmentValueEx(ptr ptr ptr ptr ptr)
 @ stdcall ZwQuerySystemInformation(long long long long)
+@ stdcall -version=0x601+ ZwQuerySystemInformationEx(long ptr long ptr long ptr) NtQuerySystemInformationEx
 @ stdcall ZwQuerySystemTime(ptr)
 @ stdcall ZwQueryTimer(ptr long ptr long ptr)
 @ stdcall ZwQueryTimerResolution(long long long)
