@@ -28,6 +28,7 @@ list(APPEND SOURCE
     ConsoleCaret.c
     ConsoleCreateRace.c
     ConsoleOrphanChild.c
+    ConsoleCloseTerminate.c
     ConsoleCsrRequests.c
     ConsoleCtrlEventRace.c
     ConsoleCtrlHandler.c
