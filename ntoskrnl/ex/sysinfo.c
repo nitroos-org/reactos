@@ -2898,12 +2898,33 @@ QSI_DEF(SystemObjectSecurityMode)
     return STATUS_SUCCESS;
 }
 
+/* Physical package (socket) of a processor: its initial APIC ID without the bits that number the
+ * logical processors of a package (CPUID 1 EBX[23:16], rounded up to a power of two). */
+static
+ULONG
+ExpGetProcessorPackageId(
+    _In_ PKPRCB Prcb)
+{
+#if defined(_M_IX86) || defined(_M_AMD64)
+    ULONG Shift = 0;
+
+    while ((Shift < 8) && ((1UL << Shift) < Prcb->LogicalProcessorsPerPhysicalProcessor))
+        Shift++;
+
+    return Prcb->InitialApicId >> Shift;
+#else
+    UNREFERENCED_PARAMETER(Prcb);
+    return 0;
+#endif
+}
+
 /* Class 73 - Logical processor information */
 QSI_DEF(SystemLogicalProcessorInformation)
 {
     LONG i;
     PKPRCB Prcb;
-    KAFFINITY CurrentProc;
+    KAFFINITY CurrentProc, Remaining, PackageMask;
+    ULONG PackageId;
     NTSTATUS Status = STATUS_SUCCESS;
     ULONG DataSize = 0, ProcessorFlags;
     PSYSTEM_LOGICAL_PROCESSOR_INFORMATION CurrentInfo;
@@ -2954,6 +2975,42 @@ QSI_DEF(SystemLogicalProcessorInformation)
         ++i;
     /* Loop while there's someone in the bitmask */
     } while (CurrentProc != 0);
+
+    /* Then the processor packages, one entry per package with the mask of its processors. Windows
+     * returns them, and the Microsoft C++ runtime's std::thread::hardware_concurrency() counts the
+     * processors of the package entries (none: 0, and thread pools sized by it get no threads). */
+    Remaining = KeActiveProcessors;
+    while (Remaining != 0)
+    {
+        /* The lowest processor not yet in a package starts the next one */
+        for (i = 0; !(Remaining & AFFINITY_MASK(i)); ++i);
+        PackageId = ExpGetProcessorPackageId(KiProcessorBlock[i]);
+
+        PackageMask = 0;
+        for (; i < (LONG)(sizeof(KAFFINITY) * 8); ++i)
+        {
+            if ((Remaining & AFFINITY_MASK(i)) &&
+                (ExpGetProcessorPackageId(KiProcessorBlock[i]) == PackageId))
+            {
+                PackageMask |= AFFINITY_MASK(i);
+            }
+        }
+        Remaining &= ~PackageMask;
+
+        /* Check we have enough room to return */
+        DataSize += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+        if (DataSize > Size)
+        {
+            Status = STATUS_INFO_LENGTH_MISMATCH;
+        }
+        else
+        {
+            RtlZeroMemory(CurrentInfo, sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION));
+            CurrentInfo->ProcessorMask = PackageMask;
+            CurrentInfo->Relationship = RelationProcessorPackage;
+            ++CurrentInfo;
+        }
+    }
 
     /* Now, return the NUMA nodes */
     for (i = 0; i < KeNumberNodes; ++i)

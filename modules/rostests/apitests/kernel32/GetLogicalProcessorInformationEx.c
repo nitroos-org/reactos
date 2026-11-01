@@ -254,6 +254,73 @@ TestRelationship(
         ok(Groups == 0, "%d: %lu group entries\n", Relationship, Groups);
 }
 
+/* Processor packages: Windows returns at least one, the packages split the active processors, and
+ * every core lies in one of them. The Microsoft C++ runtime counts the processors of the package
+ * entries for std::thread::hardware_concurrency(), so without them it is 0. */
+static
+void
+TestProcessorPackages(void)
+{
+    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX Entry;
+    SYSTEM_INFO SystemInfo;
+    KAFFINITY Packages = 0;
+    ULONG Index, Index2, PackageCount = 0, Logical = 0;
+    DWORD Length, Offset;
+    BOOL Success, Inside;
+
+    GetSystemInfo(&SystemInfo);
+
+    for (Index = 0; Index < InfoCount; Index++)
+    {
+        if (Info[Index].Relationship != RelationProcessorPackage)
+            continue;
+        PackageCount++;
+        ok(Info[Index].ProcessorMask != 0, "package %lu: empty mask\n", Index);
+        ok((Packages & Info[Index].ProcessorMask) == 0, "package %lu: mask 0x%Ix overlaps 0x%Ix\n",
+           Index, Info[Index].ProcessorMask, Packages);
+        Packages |= Info[Index].ProcessorMask;
+    }
+    ok(PackageCount >= 1, "no processor package entries\n");
+    ok(Packages == SystemInfo.dwActiveProcessorMask, "packages cover 0x%Ix, active processors 0x%Ix\n",
+       Packages, SystemInfo.dwActiveProcessorMask);
+
+    for (Index = 0; Index < InfoCount; Index++)
+    {
+        if (Info[Index].Relationship != RelationProcessorCore)
+            continue;
+        Inside = FALSE;
+        for (Index2 = 0; Index2 < InfoCount; Index2++)
+        {
+            if (Info[Index2].Relationship == RelationProcessorPackage &&
+                (Info[Index].ProcessorMask & ~Info[Index2].ProcessorMask) == 0)
+            {
+                Inside = TRUE;
+            }
+        }
+        ok(Inside, "core mask 0x%Ix is in no package\n", Info[Index].ProcessorMask);
+    }
+
+    /* std::thread::hardware_concurrency() */
+    Length = sizeof(Buffer);
+    Success = pGetLogicalProcessorInformationEx(RelationProcessorPackage,
+                                                (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)Buffer,
+                                                &Length);
+    ok(Success, "Success = %d, error %lu\n", Success, GetLastError());
+    if (!Success)
+        return;
+    for (Offset = 0; Offset + FIELD_OFFSET(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Processor) < Length; )
+    {
+        Entry = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)(Buffer + Offset);
+        if (!Entry->Size)
+            break;
+        for (Index = 0; Index < Entry->Processor.GroupCount; Index++)
+            Logical += CountBits(Entry->Processor.GroupMask[Index].Mask);
+        Offset += Entry->Size;
+    }
+    ok(Logical == SystemInfo.dwNumberOfProcessors, "package entries hold %lu processors, expected %lu\n",
+       Logical, SystemInfo.dwNumberOfProcessors);
+}
+
 START_TEST(GetLogicalProcessorInformationEx)
 {
     HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
@@ -303,4 +370,5 @@ START_TEST(GetLogicalProcessorInformationEx)
     TestRelationship(RelationProcessorPackage);
     TestRelationship(RelationGroup);
     TestRelationship(RelationAll);
+    TestProcessorPackages();
 }
