@@ -200,6 +200,7 @@ list(APPEND SOURCE
     WindowsDirJunction.c
     Wow64Process.c
     Wow64Run.c
+    Wow64StartContext.c
     Wow64SystemDlls.c
     WriteFile.c
     XState.c

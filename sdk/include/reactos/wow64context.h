@@ -67,7 +67,9 @@ static __inline VOID Wow64CpuToContext(WOW64_CONTEXT *To, const WOW64_CPU_STATE 
     COPY(Ebp); COPY(Esp); COPY(Eip); COPY(EFlags);
     COPY(Dr0); COPY(Dr1); COPY(Dr2); COPY(Dr3); COPY(Dr6); COPY(Dr7);
 #undef COPY
-    To->SegCs = 0x23; To->SegSs = To->SegDs = To->SegEs = 0x2b; To->SegFs = 0x53;
+    /* The selectors wow64cpu loads for the guest (cpu.S Wow64CpuReturn); GS keeps the
+     * flat data selector the guest was started with */
+    To->SegCs = 0x23; To->SegSs = To->SegDs = To->SegEs = To->SegGs = 0x2b; To->SegFs = 0x53;
     RtlCopyMemory(To->ExtendedRegisters, From->ExtendedRegisters, 512);
     Wow64FloatToLegacy(To);
 }

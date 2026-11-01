@@ -3684,8 +3684,26 @@ LdrpInit(PCONTEXT Context,
 /* EOF */
 
 #if defined(_M_IX86) && defined(SYSWOW64_GUEST)
-/* Entered only by the native WoW64 loader, with an initialized PEB32/TEB32. */
+VOID NTAPI LdrpWow64StartProcess(ULONG_PTR StartEntry);
+
+/* Entered only by the native WoW64 loader, with an initialized PEB32/TEB32.
+ * The main thread's StartContext is the one the kernel staged when the thread
+ * was created (and a debugger may have changed since): it enters
+ * LdrWow64ProcessStart with the image's entry in EAX, which the loader
+ * replaces for an IL-only .NET image. Without one, the process starts here. */
 VOID NTAPI LdrInitializeWow64(PVOID NtdllBase, PCONTEXT StartContext)
+{
+    CONTEXT Context;
+    if (StartContext) Context = *StartContext;
+    else RtlCaptureContext(&Context);
+    LdrpInit(&Context, NtdllBase, NULL);
+    if (StartContext) NtContinue(&Context, TRUE);
+    LdrpWow64StartProcess(0);
+}
+
+/* The process half of LdrWow64ProcessStart (dispatch.S): StartEntry is EAX of
+ * the start context, 0 for the loader's own choice. */
+VOID NTAPI LdrpWow64StartProcess(ULONG_PTR StartEntry)
 {
     static ANSI_STRING FilterName = RTL_CONSTANT_STRING("UnhandledExceptionFilter");
     static ANSI_STRING ExitThreadName = RTL_CONSTANT_STRING("ExitThread");
@@ -3694,14 +3712,13 @@ VOID NTAPI LdrInitializeWow64(PVOID NtdllBase, PCONTEXT StartContext)
     ULONG (NTAPI *Entry)(VOID);
     PIMAGE_NT_HEADERS Header;
     PVOID Kernel32;
-    CONTEXT Context;
-    if (StartContext) Context = *StartContext;
-    else RtlCaptureContext(&Context);
-    LdrpInit(&Context, NtdllBase, NULL);
-    if (StartContext) NtContinue(&Context, TRUE);
     /* The loader's entry for the image, which the IL-only start of a .NET
      * image without an entry point replaced with mscoree!_CorExeMain */
-    if (LdrpImageEntry && LdrpImageEntry->EntryPoint)
+    if (StartEntry)
+    {
+        Entry = (PVOID)StartEntry;
+    }
+    else if (LdrpImageEntry && LdrpImageEntry->EntryPoint)
     {
         Entry = LdrpImageEntry->EntryPoint;
     }

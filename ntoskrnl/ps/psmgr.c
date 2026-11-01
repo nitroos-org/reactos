@@ -50,6 +50,8 @@ UNICODE_STRING PsNtDllPathName =
 static PVOID PspSystemDllSection32;
 static volatile LONG PspSystemDllRetry32;
 static PVOID PspSystemDllBase32;
+/* LdrWow64ProcessStart in it, where a WoW64 main thread's start context enters (psctx.c) */
+static ULONG PspSystemDll32StartRva;
 static UNICODE_STRING PsNtDll32PathName =
     RTL_CONSTANT_STRING(L"\\SystemRoot\\SysWOW64\\ntdll.dll");
 #endif
@@ -288,6 +290,8 @@ PspLocateSystemDll32(VOID)
         NtHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC &&
         NtHeaders->OptionalHeader.ImageBase == (ULONG_PTR)Base)
     {
+        PVOID Start = RtlFindExportedRoutineByName(Base, "LdrWow64ProcessStart");
+        if (Start) PspSystemDll32StartRva = (ULONG)((ULONG_PTR)Start - (ULONG_PTR)Base);
         /* Publish the base before the section: readers test the section */
         PspSystemDllBase32 = Base;
         InterlockedExchangePointer(&PspSystemDllSection32, Section);
@@ -350,6 +354,21 @@ PspMapSystemDll32(IN PEPROCESS Process)
         /* Only the preferred base: the guest loader runs it unrelocated */
         MmUnmapViewOfSection(Process, Base);
     }
+    else if (NT_SUCCESS(Status))
+    {
+        Process->Wow64Process->Ntdll32 = Base;
+    }
+}
+
+/* Where the start context of the process's main thread enters the guest, NULL when the process
+ * has no i386 ntdll view or the view has no LdrWow64ProcessStart */
+PVOID
+NTAPI
+PspGetWow64ProcessStart(IN PEPROCESS Process)
+{
+    if (!Process->Wow64Process || !Process->Wow64Process->Ntdll32 || !PspSystemDll32StartRva)
+        return NULL;
+    return (PUCHAR)Process->Wow64Process->Ntdll32 + PspSystemDll32StartRva;
 }
 
 /* The preferred base and file of the i386 ntdll that PspMapSystemDll32 maps, for the debugger's

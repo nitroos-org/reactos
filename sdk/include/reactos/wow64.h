@@ -38,6 +38,17 @@ C_ASSERT(FIELD_OFFSET(WOW64_CONTEXT, ExtendedRegisters) == 204);
 #define WOW64_PEB32(Peb) ((PEB32 *)((ULONG_PTR)(Peb) + ROUND_TO_PAGES(sizeof(PEB))))
 #define WOW64_TEB32(Teb) ((TEB32 *)((ULONG_PTR)(Teb) + ROUND_TO_PAGES(sizeof(TEB))))
 
+/* The WoW64 layer's own 64-bit code: native ntdll, wow64.dll, wow64win.dll,
+ * wow64cpu.dll and the low-address gate page. A thread in 64-bit mode while
+ * InTransition is set is in the middle of a transition only when it runs
+ * there; anywhere else it runs 64-bit code its guest entered with a far
+ * transfer, and the saved state is the guest's last known context. */
+#define WOW64_LAYER_RANGES 5
+typedef struct _WOW64_LAYER_CODE
+{
+    struct { ULONG64 Start, End; } Range[WOW64_LAYER_RANGES];
+} WOW64_LAYER_CODE;
+
 typedef struct DECLSPEC_ALIGN(16) _WOW64_CPU_STATE
 {
     ULONG64 NativeStack;
@@ -62,6 +73,7 @@ typedef struct DECLSPEC_ALIGN(16) _WOW64_CPU_STATE
     PVOID ApcFrame;
     PVOID CallbackFrame;
     PVOID ProcessParameters;
+    const WOW64_LAYER_CODE *LayerCode;
 
 } WOW64_CPU_STATE;
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, NativeStack) == 0);

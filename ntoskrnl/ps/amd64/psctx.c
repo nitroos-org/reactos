@@ -111,6 +111,24 @@ PspWow64ContextRundown(PKAPC Apc)
     KeSetEvent(&Request->Event, IO_NO_INCREMENT, FALSE);
 }
 
+/* While InTransition is set, a thread in 64-bit mode is between the guest and its saved state
+ * only inside the WoW64 layer's own code (wow64.h, WOW64_LAYER_CODE). A guest that entered
+ * other 64-bit code with a far transfer is not: its saved state is the 32-bit context, as on
+ * Windows. A thread without the table is treated as in transition. */
+static BOOLEAN
+PspWow64InLayerCode(const WOW64_CPU_STATE *Cpu, ULONG64 Rip)
+{
+    const WOW64_LAYER_CODE *Layer = Cpu->LayerCode;
+    ULONG i;
+    if (!Layer) return TRUE;
+    ProbeForRead(Layer, sizeof(*Layer), sizeof(ULONG64));
+    for (i = 0; i < WOW64_LAYER_RANGES; ++i)
+    {
+        if (Rip >= Layer->Range[i].Start && Rip < Layer->Range[i].End) return TRUE;
+    }
+    return FALSE;
+}
+
 static VOID NTAPI
 PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
                    PVOID *Argument1, PVOID *Argument2)
@@ -156,7 +174,7 @@ PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
             ProbeForRead(Cpu, sizeof(*Cpu), 16);
             /* The target cannot progress while its special APC runs. A
              * suspended caller must resume and retry to leave the gate. */
-            if (Cpu->InTransition) ExRaiseStatus(STATUS_RETRY);
+            if (Cpu->InTransition && PspWow64InLayerCode(Cpu, Trap->Rip)) ExRaiseStatus(STATUS_RETRY);
             if (Request->Set)
             {
                 ProbeForWrite(Cpu, sizeof(*Cpu), 16);
@@ -279,5 +297,144 @@ PspWow64ContextThread(HANDLE Handle, PVOID Buffer, ULONG Length, BOOLEAN Set,
         _SEH2_END;
     }
     return Status;
+}
+
+/*
+ * A WoW64 process's main thread has its 32-bit state from creation, as on Windows: the guest
+ * stack in TEB32 and, in the CPU area at the top of the native stack (TlsSlots[WOW64_TLS_CPU],
+ * the new native stack base), the start context. That context enters ntdll32's
+ * LdrWow64ProcessStart once the guest loader has run, with the image's entry in EAX and the
+ * PEB32 in EBX; Get/SetThreadContext read and change it until wow64.dll takes it over
+ * (init.c, Wow64LdrpInitialize). The thread stages it itself, in PspUserThreadStartup before
+ * any APC reaches it, so a context request or a suspension never sees it half done. Nothing
+ * is staged when the process has no i386 ntdll view: wow64.dll then builds the state itself.
+ */
+VOID
+NTAPI
+PspWow64StageMainThread(VOID)
+{
+    PETHREAD Thread = PsGetCurrentThread();
+    PEPROCESS Process = PsGetCurrentProcess();
+    PKTRAP_FRAME Trap = KeGetTrapFrame(&Thread->Tcb);
+    PTEB Teb = Thread->Tcb.Teb;
+    TEB32 *Teb32;
+    SECTION_IMAGE_INFORMATION Image;
+    PIMAGE_NT_HEADERS Header;
+    SIZE_T Reserve, Commit, Size = 0;
+    PVOID Base = NULL, Limit, Page, Start;
+    ULONG_PTR ZeroBits, Entry = 0, StackBase;
+    ULONG OldProtect;
+    WOW64_CPU_STATE *Cpu;
+    BOOLEAN First, Guard = FALSE;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+    if (!Process->Wow64Process || !Teb) return;
+    /* The first thread only; wow64.dll gives the guest threads it creates their own state */
+    KeEnterCriticalRegion();
+    ExAcquirePushLockShared(&Process->ProcessLock);
+    First = (Process->ThreadListHead.Flink == &Thread->ThreadListEntry);
+    ExReleasePushLockShared(&Process->ProcessLock);
+    KeLeaveCriticalRegion();
+    if (!First || Trap->Rdx == WOW64_THREAD_START_MARKER) return;
+    Start = PspGetWow64ProcessStart(Process);
+    if (!Start) return;
+
+    /* The stack a native i386 process gets for its first thread, as wow64.dll's CreateGuestStack */
+    Status = ZwQueryInformationProcess(NtCurrentProcess(), ProcessImageInformation,
+                                       &Image, sizeof(Image), NULL);
+    if (!NT_SUCCESS(Status)) return;
+    ZeroBits = (Image.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) ? 0xfffeffff : 0x7ffeffff;
+    Reserve = max(256 * 1024, (ULONG)Image.MaximumStackSize);
+    Commit = ROUND_TO_PAGES((ULONG)Image.CommittedStackSize);
+    _SEH2_TRY
+    {
+        if (Commit < Process->Peb->MinimumStackCommit)
+            Commit = ROUND_TO_PAGES(Process->Peb->MinimumStackCommit);
+        /* The entry of the image, which the guest loader replaces for an IL-only .NET image */
+        Header = RtlImageNtHeader(Process->Peb->ImageBaseAddress);
+        if (Header && Header->FileHeader.Machine == IMAGE_FILE_MACHINE_I386 &&
+            Header->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC &&
+            ((PIMAGE_NT_HEADERS32)Header)->OptionalHeader.AddressOfEntryPoint)
+        {
+            Entry = (ULONG_PTR)Process->Peb->ImageBaseAddress +
+                    ((PIMAGE_NT_HEADERS32)Header)->OptionalHeader.AddressOfEntryPoint;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return);
+    }
+    _SEH2_END;
+    Reserve = ALIGN_UP_BY(Reserve, 64 * 1024);
+    if (Commit >= Reserve) Reserve = ALIGN_UP_BY(Commit, 1024 * 1024);
+    Status = ZwAllocateVirtualMemory(NtCurrentProcess(), &Base, ZeroBits, &Reserve,
+                                     MEM_RESERVE, PAGE_READWRITE);
+    if (!NT_SUCCESS(Status)) return;
+    Limit = (PUCHAR)Base + Reserve - Commit;
+    if (Reserve >= Commit + PAGE_SIZE)
+    {
+        Limit = (PUCHAR)Limit - PAGE_SIZE;
+        Commit += PAGE_SIZE;
+        Guard = TRUE;
+    }
+    Status = ZwAllocateVirtualMemory(NtCurrentProcess(), &Limit, 0, &Commit,
+                                     MEM_COMMIT, PAGE_READWRITE);
+    if (NT_SUCCESS(Status) && Guard)
+    {
+        SIZE_T PageSize = PAGE_SIZE;
+        Page = Limit;
+        Status = ZwProtectVirtualMemory(NtCurrentProcess(), &Page, &PageSize,
+                                        PAGE_READWRITE | PAGE_GUARD, &OldProtect);
+        Limit = (PUCHAR)Limit + PAGE_SIZE;
+    }
+    if (!NT_SUCCESS(Status)) goto Fail;
+    StackBase = (ULONG_PTR)Base + Reserve;
+
+    _SEH2_TRY
+    {
+        Teb32 = WOW64_TEB32(Teb);
+        Teb32->NtTib.StackBase = (ULONG)StackBase;
+        Teb32->NtTib.StackLimit = PtrToUlong(Limit);
+        Teb32->DeallocationStack = PtrToUlong(Base);
+
+        /* The CPU area tops the native stack, which the thread's native code runs below */
+        Cpu = (WOW64_CPU_STATE *)(((ULONG_PTR)Teb->NtTib.StackBase - sizeof(*Cpu)) & ~(ULONG_PTR)63);
+        ProbeForWrite(Cpu, sizeof(*Cpu), 16);
+        RtlZeroMemory(Cpu, sizeof(*Cpu));
+        Cpu->Eip = PtrToUlong(Start);
+        Cpu->Eax = (ULONG)Entry;
+        Cpu->Ebx = PtrToUlong(Process->Wow64Process->Peb);
+        /* Windows 10 starts it 0x2c4 below the guest stack base (oracle probe); code that runs
+         * the stack down to its guard page (StackOverflow apitest) depends on the depth */
+        Cpu->Esp = (ULONG)StackBase - 0x2c4;
+        Cpu->EFlags = 0x202;
+        *(USHORT *)Cpu->ExtendedRegisters = 0x27f;
+        *(ULONG *)(Cpu->ExtendedRegisters + 24) = 0x1f80;
+        Teb->NtTib.StackBase = Cpu;
+        if (Trap->Rsp > ((ULONG_PTR)Cpu & ~(ULONG_PTR)15) - 0x28)
+            Trap->Rsp = ((ULONG_PTR)Cpu & ~(ULONG_PTR)15) - 0x28;
+        /* Published last: a request that finds it finds it complete */
+        Teb->TlsSlots[WOW64_TLS_CPU] = Cpu;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (NT_SUCCESS(Status)) return;
+
+Fail:
+    DPRINT1("WoW64: main thread state not staged: %08lx\n", Status);
+    _SEH2_TRY
+    {
+        Teb32 = WOW64_TEB32(Teb);
+        Teb32->NtTib.StackBase = Teb32->NtTib.StackLimit = Teb32->DeallocationStack = 0;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+    _SEH2_END;
+    ZwFreeVirtualMemory(NtCurrentProcess(), &Base, &Size, MEM_RELEASE);
 }
 #endif

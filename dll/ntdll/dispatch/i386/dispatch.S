@@ -48,6 +48,16 @@ _RtlWow64CreateProcess@4:
     mov eax, HEX(10003)
     call dword ptr fs:[HEX(c0)]
     ret 4
+
+/* The start context the kernel stages for a WoW64 process's main thread
+ * enters here once the loader has run, with the image's entry in EAX
+ * (ldrinit.c, LdrInitializeWow64). It does not return. */
+EXTERN _LdrpWow64StartProcess@4:PROC
+PUBLIC _LdrWow64ProcessStart@0
+_LdrWow64ProcessStart@0:
+    push eax
+    call _LdrpWow64StartProcess@4
+    int 3
 #endif
 
 PUBLIC _LdrInitializeThunk@16

@@ -305,6 +305,31 @@ static NTSTATUS MapNtdll(PVOID *Base)
 }
 
 static PVOID Wow64Ntdll32, Wow64Loader32, Wow64Gate, Wow64ExitThread32;
+/* Published with the other process state (wow64.h); read by the kernel's context requests */
+static WOW64_LAYER_CODE Wow64LayerCode;
+
+static VOID InitializeLayerCode(PVOID Gate)
+{
+    static const PCWSTR Names[] = { L"ntdll.dll", L"wow64.dll", L"wow64win.dll", L"wow64cpu.dll" };
+    UNICODE_STRING Name;
+    PIMAGE_NT_HEADERS Headers;
+    PVOID Base;
+    ULONG i;
+
+    C_ASSERT(RTL_NUMBER_OF(Names) == WOW64_LAYER_RANGES - 1);
+    for (i = 0; i < RTL_NUMBER_OF(Names); ++i)
+    {
+        RtlInitUnicodeString(&Name, Names[i]);
+        if (!NT_SUCCESS(LdrGetDllHandle(NULL, NULL, &Name, &Base))) continue;
+        Headers = RtlImageNtHeader(Base);
+        if (!Headers) continue;
+        Wow64LayerCode.Range[i].Start = (ULONG_PTR)Base;
+        Wow64LayerCode.Range[i].End = (ULONG_PTR)Base + Headers->OptionalHeader.SizeOfImage;
+    }
+    /* The gate page's far jump lands in 64-bit code on the same page */
+    Wow64LayerCode.Range[i].Start = (ULONG_PTR)Gate;
+    Wow64LayerCode.Range[i].End = (ULONG_PTR)Gate + PAGE_SIZE;
+}
 /* Only the native loader's process initializer may build the guest process.
  * Publish all shared pointers together, including on weakly ordered hosts. */
 static LONG Wow64ProcessReady;
@@ -378,6 +403,9 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
     PEB32 *Peb32 = WOW64_PEB32(Peb);
     TEB32 *Teb32 = WOW64_TEB32(Teb);
     WOW64_CPU_STATE State = {0};
+    /* The CPU area the kernel staged for the main thread, with its start context (psctx.c) */
+    WOW64_CPU_STATE *Staged = Teb->TlsSlots[WOW64_TLS_CPU];
+    WOW64_CONTEXT StartContext;
     PVOID Ntdll32, Entry, Gate;
     INITIAL_TEB Stack;
     ANSI_STRING Name = RTL_CONSTANT_STRING("LdrInitializeWow64");
@@ -389,6 +417,12 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
     {
         LARGE_INTEGER Delay;
         ULONG Routine, Parameter;
+        /* Staged on a first thread that is not the one the native loader initialized the process on */
+        if (Staged)
+        {
+            Teb->TlsSlots[WOW64_TLS_CPU] = NULL;
+            Staged = NULL;
+        }
         /* Native helper threads never initialize or enter the guest loader,
          * except the console server's control event threads. */
         if (Context->Rdx != WOW64_THREAD_START_MARKER &&
@@ -420,7 +454,16 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
     /* Establish the guest stack before variable-size startup data. A child
      * may replace its bootstrap stack with the parent's stack reservation;
      * RuntimeData must not take that range merely because it is nonempty. */
-    Status = CreateGuestStack(&Stack);
+    if (Staged)
+    {
+        /* The guest stack staged with the start context */
+        RtlZeroMemory(&Stack, sizeof(Stack));
+        Stack.StackBase = PTR32(Teb32->NtTib.StackBase);
+        Stack.StackLimit = PTR32(Teb32->NtTib.StackLimit);
+        Stack.AllocatedStackBase = PTR32(Teb32->DeallocationStack);
+        Status = Stack.StackBase ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+    }
+    else Status = CreateGuestStack(&Stack);
     if (!NT_SUCCESS(Status)) goto Failed;
     Status = Wow64InitializeRedirection();
     if (!NT_SUCCESS(Status)) goto Failed;
@@ -463,6 +506,7 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
     }
     Status = Wow64CpuInitialize(Wow64SystemService, &Gate);
     if (!NT_SUCCESS(Status)) goto Failed;
+    InitializeLayerCode(Gate);
     Wow64Ntdll32 = Ntdll32;
     Wow64Loader32 = Entry;
     Wow64Gate = Gate;
@@ -482,10 +526,19 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
     Teb32->WOW32Reserved = PtrToUlong(Gate);
     Teb32->StaticUnicodeString.Buffer = PtrToUlong(Teb32->StaticUnicodeBuffer);
     Teb32->StaticUnicodeString.MaximumLength = sizeof(Teb32->StaticUnicodeBuffer);
+    if (Staged)
+    {
+        /* Take the start context over, with any change a debugger made: from here a
+         * context request waits (STATUS_RETRY) until the guest runs */
+        InterlockedExchange(&Staged->InTransition, 1);
+        Wow64CpuToContext(&StartContext, Staged);
+        GuestContext = &StartContext;
+    }
     InterlockedExchange(&Wow64ProcessReady, 1);
 ThreadReady:
     /* Preserve the parent's pre-resume activation-context setup in TEB32. */
     Teb32->WOW32Reserved = PtrToUlong(Gate);
+    State.LayerCode = &Wow64LayerCode;
     if (GuestContext)
     {
         State.Esp = (GuestContext->Esp - sizeof(*GuestContext)) & ~15;
@@ -505,6 +558,14 @@ ThreadReady:
     if (!GuestContext)
         DbgPrint("WoW64: entering i386 ntdll at %lx, PEB32 %p TEB32 %p\n", State.Eip, Peb32, Teb32);
 #endif
+    if (Staged)
+    {
+        /* The staged area stays the thread's CPU area, at the top of its native stack as on
+         * Windows. InTransition is 1 in both, so no request sees the copy half done. */
+        State.InTransition = 1;
+        *Staged = State;
+        Wow64CpuRun(Staged);
+    }
     Wow64CpuRun(&State);
 Failed:
     DbgPrint("WoW64: initialization failed: %08lx\n", Status);

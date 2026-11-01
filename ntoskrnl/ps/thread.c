@@ -57,9 +57,20 @@ PspUserThreadStartup(IN PKSTART_ROUTINE StartRoutine,
     PSTRACE(PS_THREAD_DEBUG,
             "StartRoutine: %p StartContext: %p\n", StartRoutine, StartContext);
 
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+    /* A WoW64 main thread stages its 32-bit state before any APC (a suspension, a
+     * context request) can run in it: hold them until it is done */
+    KeEnterGuardedRegion();
+#endif
+
     /* Go to Passive Level */
     KeLowerIrql(PASSIVE_LEVEL);
     Thread = PsGetCurrentThread();
+
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+    if (!Thread->DeadThread) PspWow64StageMainThread();
+    KeLeaveGuardedRegion();
+#endif
 
     /* Check if the thread is dead */
     if (Thread->DeadThread)

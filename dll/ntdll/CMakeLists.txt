@@ -9,7 +9,8 @@ if(SYSWOW64_GUEST)
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ntdll-guest.spec" "${guest_thread_spec}")
     file(APPEND "${CMAKE_CURRENT_BINARY_DIR}/ntdll-guest.spec"
         "@ stdcall -arch=i386 LdrInitializeWow64(ptr ptr)\n"
-        "@ stdcall -arch=i386 RtlWow64CreateProcess(ptr)\n")
+        "@ stdcall -arch=i386 RtlWow64CreateProcess(ptr)\n"
+        "@ stdcall -arch=i386 LdrWow64ProcessStart()\n")
     file(RELATIVE_PATH ntdll_spec "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_BINARY_DIR}/ntdll-guest.spec")
 endif()
