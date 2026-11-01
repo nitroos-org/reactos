@@ -5,6 +5,7 @@
 extern void func_AttachThreadInput(void);
 extern void func_AttachThreadInputQueue(void);
 extern void func_AutoRotation(void);
+extern void func_BroadcastHung(void);
 extern void func_CharFuncs(void);
 extern void func_CloseWindow(void);
 extern void func_CopyImage(void);
@@ -130,6 +131,7 @@ const struct test winetest_testlist[] =
     { "AttachThreadInput", func_AttachThreadInput },
     { "AttachThreadInputQueue", func_AttachThreadInputQueue },
     { "AutoRotation", func_AutoRotation },
+    { "BroadcastHung", func_BroadcastHung },
     { "CharFuncs", func_CharFuncs },
     { "CloseWindow", func_CloseWindow },
     { "CopyImage", func_CopyImage },

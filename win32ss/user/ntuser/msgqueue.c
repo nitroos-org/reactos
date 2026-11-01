@@ -1290,6 +1290,7 @@ co_MsqSendMessage(PTHREADINFO ptirec,
    LARGE_INTEGER Timeout;
    PWND pWnd;
    BOOLEAN SwapStateEnabled;
+   ULONGLONG Deadline;
    LRESULT Result = 0;   //// Result could be trashed. ////
 
    pti = PsGetCurrentThreadWin32Thread();
@@ -1443,8 +1444,20 @@ co_MsqSendMessage(PTHREADINFO ptirec,
       WaitObjects[1] = pti->pEventQueueServer;     // Wait 1
       WaitObjects[2] = ptirec->pEThread;           // Wait 2
 
+      /* The timeout covers the whole call. The queue event wakes this thread for any
+         message (a timer, a posted message), not only for a sent one: a fresh relative
+         timeout on every wake never expired for a sender that gets such wakes more often
+         than its timeout, and the call waited for as long as the receiver hung. A timeout
+         of 0x80000000 or more keeps the single value computed above, as before. */
+      Deadline = KeQueryInterruptTime() + (ULONGLONG)uTimeout * 10000;
       do
       {
+         if ((LONG)uTimeout > 0)
+         {
+            ULONGLONG Now = KeQueryInterruptTime();
+            Timeout.QuadPart = (Now < Deadline) ? -(LONGLONG)(Deadline - Now) : 0;
+         }
+
          UserLeaveCo();
 
          WaitStatus = KeWaitForMultipleObjects( 3,
@@ -1457,6 +1470,11 @@ co_MsqSendMessage(PTHREADINFO ptirec,
                                                 NULL);
 
          UserEnterCo();
+
+         /* Woken by the queue event after the deadline: the call has timed out (the
+            completion event, index 0, takes precedence in the wait) */
+         if (WaitStatus == STATUS_WAIT_1 && (LONG)uTimeout > 0 && KeQueryInterruptTime() >= Deadline)
+            WaitStatus = STATUS_TIMEOUT;
 
          if (WaitStatus == STATUS_TIMEOUT)
          {

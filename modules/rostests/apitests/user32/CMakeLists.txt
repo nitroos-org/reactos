@@ -6,6 +6,7 @@ list(APPEND SOURCE
     AttachThreadInput.c
     AttachThreadInputQueue.c
     AutoRotation.c
+    BroadcastHung.c
     ../include/msgtrace.c
     CharFuncs.c
     CloseWindow.c

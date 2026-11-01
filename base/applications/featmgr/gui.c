@@ -250,6 +250,11 @@ static void UpdateButtons(void)
     BOOL canInstall = FALSE, canEnable = FALSE, canDisable = FALSE, canUninstall = FALSE, canUpdate = FALSE;
     WCHAR text[FM_MAX_DESC + FM_MAX_DEPS * 2 + 256];
 
+    /* While an op runs, SetBusy owns the buttons and the "Working..." text: a selection change
+     * must neither re-enable a verb nor hide that the window is busy (it then looks hung). */
+    if (g_busy)
+        return;
+
     if (i >= 0 && i < g_count)
     {
         const FM_FEATURE *f = &g_arr[i];

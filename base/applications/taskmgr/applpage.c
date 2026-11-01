@@ -824,6 +824,43 @@ void ApplicationPage_OnSwitchTo(void)
     }
 }
 
+typedef struct _ENDTASK_REQUEST
+{
+    HWND hWnd;
+    BOOL Force;
+} ENDTASK_REQUEST, *PENDTASK_REQUEST;
+
+/* EndTask waits until the window is gone, which takes as long as the application wants (or
+ * until the user answers the "not responding" dialog): call it off the UI thread, so that
+ * Task Manager keeps responding while it waits. */
+static DWORD WINAPI EndTaskThread(LPVOID Parameter)
+{
+    PENDTASK_REQUEST Request = (PENDTASK_REQUEST)Parameter;
+
+    /* EndTask is refused to a thread that has not made a user32 call yet */
+    GetDesktopWindow();
+    EndTask(Request->hWnd, FALSE, Request->Force);
+    HeapFree(GetProcessHeap(), 0, Request);
+    return 0;
+}
+
+static void EndTaskAsync(HWND hWnd, BOOL Force)
+{
+    PENDTASK_REQUEST Request;
+    HANDLE hThread;
+
+    Request = HeapAlloc(GetProcessHeap(), 0, sizeof(*Request));
+    if (!Request)
+        return;
+    Request->hWnd = hWnd;
+    Request->Force = Force;
+    hThread = CreateThread(NULL, 0, EndTaskThread, Request, 0, NULL);
+    if (hThread)
+        CloseHandle(hThread);
+    else
+        HeapFree(GetProcessHeap(), 0, Request);
+}
+
 void ApplicationPage_OnEndTask(void)
 {
     LPAPPLICATION_PAGE_LIST_ITEM  pAPLI = NULL;
@@ -842,7 +879,7 @@ void ApplicationPage_OnEndTask(void)
         if (item.state & LVIS_SELECTED) {
             pAPLI = (LPAPPLICATION_PAGE_LIST_ITEM)item.lParam;
             if (pAPLI) {
-                EndTask(pAPLI->hWnd, 0, ForceEndTask);
+                EndTaskAsync(pAPLI->hWnd, ForceEndTask);
             }
         }
     }

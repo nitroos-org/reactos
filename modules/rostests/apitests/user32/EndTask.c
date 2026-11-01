@@ -280,30 +280,125 @@ TestChild(
     EndChild(&pi);
 }
 
-/* Without fForce, a window that ignores WM_CLOSE (or hangs) keeps the call waiting. */
+/* The "End Program - <title>" dialog that a waiting EndTask shows, or NULL */
+static
+HWND
+FindEndProgramDialog(
+    _In_ HWND hWnd)
+{
+    WCHAR Title[128], Caption[160];
+
+    if (!InternalGetWindowText(hWnd, Title, ARRAYSIZE(Title)))
+        return NULL;
+    wsprintfW(Caption, L"End Program - %s", Title);
+    return FindWindowW(L"#32770", Caption);
+}
+
+/*
+ * Without fForce, a window that ignores WM_CLOSE (or hangs) keeps the call waiting. After about
+ * five seconds a dialog "End Program - <title>" is shown (Windows 10: by another process, for a
+ * hung window and for one that ignores WM_CLOSE alike). The call returns TRUE once the window is
+ * gone, here because the test ends its process; the dialog goes away with it.
+ */
 static
 void
 TestChildBlocks(
     _In_ PCSTR ModeName)
 {
     PROCESS_INFORMATION pi;
-    HWND hWnd;
+    HWND hWnd, hDlg = NULL;
     CALL Call = { 0 };
     HANDLE hThread;
-    DWORD Wait;
+    DWORD Wait, Start;
 
     if (!StartChild(ModeName, &pi, &hWnd))
         return;
     Call.hWnd = hWnd;
     Call.Prime = TRUE;
+    Start = GetTickCount();
     hThread = CreateThread(NULL, 0, CallThread, &Call, 0, NULL);
     Wait = WaitForSingleObject(hThread, 2000);
     ok(Wait == WAIT_TIMEOUT, "%s: EndTask returned (%d, error %lu) for a window that does not close\n", ModeName, Call.Ret, Call.Error);
     ok(IsWindow(hWnd), "%s: the window is gone\n", ModeName);
+    ok(FindEndProgramDialog(hWnd) == NULL, "%s: the End Program dialog is there after 2 s\n", ModeName);
+
+    /* the dialog comes after about five seconds */
+    while (Wait == WAIT_TIMEOUT && !hDlg && GetTickCount() - Start < 9000)
+    {
+        Wait = WaitForSingleObject(hThread, 100);
+        hDlg = FindEndProgramDialog(hWnd);
+    }
+    ok(Wait == WAIT_TIMEOUT, "%s: EndTask returned (%d, error %lu) while the window is there\n", ModeName, Call.Ret, Call.Error);
+    ok(hDlg != NULL, "%s: no End Program dialog after %lu ms\n", ModeName, GetTickCount() - Start);
+    if (hDlg)
+    {
+        DWORD Pid = 0;
+
+        ok(IsWindowVisible(hDlg), "%s: the End Program dialog is not visible\n", ModeName);
+        GetWindowThreadProcessId(hDlg, &Pid);
+        ok(Pid != GetCurrentProcessId() && Pid != pi.dwProcessId, "%s: the dialog belongs to process %lu\n", ModeName, Pid);
+    }
+
     /* free the waiting call: ending the process destroys the window */
     TerminateProcess(pi.hProcess, 1);
     Wait = WaitForSingleObject(hThread, 15000);
     ok(Wait == WAIT_OBJECT_0, "%s: EndTask did not return after the process ended\n", ModeName);
+    if (Wait == WAIT_OBJECT_0)
+    {
+        ok(Call.Ret, "%s: EndTask failed with %lu after the process ended\n", ModeName, Call.Error);
+        ok(Call.Error == ERR_KEEP, "%s: the last error is %lu\n", ModeName, Call.Error);
+    }
+    if (hDlg)
+    {
+        Start = GetTickCount();
+        while (IsWindow(hDlg) && GetTickCount() - Start < 5000)
+            Sleep(50);
+        ok(!IsWindow(hDlg), "%s: the End Program dialog is still there\n", ModeName);
+    }
+    CloseHandle(hThread);
+    EndChild(&pi);
+}
+
+/*
+ * End Now in the dialog ends the process and the call returns TRUE. Not measured on Windows
+ * (the oracle probe did not click); skipped when the dialog has no "End Now" button.
+ */
+static
+void
+TestEndNow(void)
+{
+    PROCESS_INFORMATION pi;
+    HWND hWnd, hDlg = NULL, hButton;
+    CALL Call = { 0 };
+    HANDLE hThread;
+    DWORD Start;
+
+    if (!StartChild("hung", &pi, &hWnd))
+        return;
+    Call.hWnd = hWnd;
+    Call.Prime = TRUE;
+    Start = GetTickCount();
+    hThread = CreateThread(NULL, 0, CallThread, &Call, 0, NULL);
+    while (!hDlg && GetTickCount() - Start < 9000)
+    {
+        Sleep(100);
+        hDlg = FindEndProgramDialog(hWnd);
+    }
+    ok(hDlg != NULL, "no End Program dialog\n");
+    hButton = hDlg ? FindWindowExW(hDlg, NULL, L"Button", L"&End Now") : NULL;
+    if (!hButton)
+    {
+        skip("no End Now button\n");
+        TerminateProcess(pi.hProcess, 1);
+    }
+    else
+    {
+        PostMessageW(hButton, BM_CLICK, 0, 0);
+        ok(WaitForSingleObject(pi.hProcess, 10000) == WAIT_OBJECT_0, "End Now: the process did not end\n");
+    }
+    ok(WaitForSingleObject(hThread, 15000) == WAIT_OBJECT_0, "End Now: EndTask did not return\n");
+    if (hButton)
+        ok(Call.Ret, "End Now: EndTask failed with %lu\n", Call.Error);
     CloseHandle(hThread);
     EndChild(&pi);
 }
@@ -395,6 +490,7 @@ START_TEST(EndTask)
     TestChild("delayed", FALSE, FALSE, 800);
     TestChildBlocks("ignore");
     TestChildBlocks("hung");
+    TestEndNow();
     TestNonGuiThread();
 
 }
