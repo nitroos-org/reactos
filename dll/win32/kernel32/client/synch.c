@@ -428,6 +428,13 @@ SetWaitableTimer(IN HANDLE hTimer,
 {
     NTSTATUS Status;
 
+    /* No due time: ERROR_INVALID_PARAMETER, as Windows 10 (no fault) */
+    if (!pDueTime)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     /* Set the timer */
     Status = NtSetTimer(hTimer,
                         (PLARGE_INTEGER)pDueTime,
@@ -469,6 +476,13 @@ SetWaitableTimerEx(IN HANDLE hTimer,
      * timer, as Windows does); a negative period is invalid. The wake context is passed on but
      * not used: wake timers are not supported.
      */
+    /* No due time: ERROR_INVALID_PARAMETER, as Windows 10 (no fault) */
+    if (!pDueTime)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     Info.DueTime = *pDueTime;
     Info.TimerApcRoutine = (PTIMER_APC_ROUTINE)pfnCompletionRoutine;
     Info.TimerContext = lpArgToCompletionRoutine;
