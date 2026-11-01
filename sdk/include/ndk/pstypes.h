@@ -984,6 +984,14 @@ typedef enum _APPCOMPAT_USERFLAGS_HIGHPART
 #undef EXPLICIT_64BIT
 #endif
 
+/*
+ * TEB.WowTebOffset of Windows 10: in the 64-bit TEB of a WOW64 thread the offset to its TEB32 (+0x2000),
+ * in the TEB32 the offset back to the 64-bit TEB (-0x2000), 0 in native TEBs. Fixed offsets, because the
+ * TEB declared for an older NTDDI_VERSION has no such field.
+ */
+#define PS_TEB_WOW_TEB_OFFSET(Teb)   (*(LONG*)((ULONG_PTR)(Teb) + 0x180C))
+#define PS_TEB32_WOW_TEB_OFFSET(Teb) (*(LONG*)((ULONG_PTR)(Teb) + 0xFDC))
+
 #ifdef _WIN64
 //
 // WOW64 Macros

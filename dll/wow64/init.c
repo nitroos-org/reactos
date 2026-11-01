@@ -314,6 +314,8 @@ VOID Wow64InitializeTeb(TEB32 *Teb32, const TEB *Teb, PTEB RemoteTeb, const INIT
     RtlZeroMemory(Teb32, sizeof(*Teb32));
     Teb32->NtTib.ExceptionList = MAXULONG;
     Teb32->NtTib.Version = 30 << 8;
+    /* Windows 10: the TEB32 holds the (negative) distance back to the 64-bit TEB, which holds +0x2000 */
+    PS_TEB32_WOW_TEB_OFFSET(Teb32) = -(LONG)ROUND_TO_PAGES(sizeof(TEB));
     Teb32->NtTib.Self = PtrToUlong(WOW64_TEB32(RemoteTeb));
     Teb32->NtTib.StackBase = PtrToUlong(Stack->StackBase);
     Teb32->NtTib.StackLimit = PtrToUlong(Stack->StackLimit);
@@ -467,6 +469,7 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
     RtlZeroMemory(Teb32, sizeof(*Teb32));
     Teb32->NtTib.ExceptionList = MAXULONG;
     Teb32->NtTib.Version = 30 << 8;
+    PS_TEB32_WOW_TEB_OFFSET(Teb32) = -(LONG)ROUND_TO_PAGES(sizeof(TEB));
     Teb32->NtTib.Self = PtrToUlong(Teb32);
     Teb32->NtTib.StackBase = PtrToUlong(Stack.StackBase);
     Teb32->NtTib.StackLimit = PtrToUlong(Stack.StackLimit);
