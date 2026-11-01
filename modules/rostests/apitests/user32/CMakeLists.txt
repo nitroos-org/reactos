@@ -27,6 +27,7 @@ list(APPEND SOURCE
     ClipboardSynthBitmap.c
     ConsoleClipText.c
     EmptyClipboard.c
+    EndTask.c
     EnumDisplayDevices.c
     EnumDisplaySettings.c
     ExitWindowsEx.c
