@@ -272,331 +272,571 @@ static HRESULT put_repetition(IRepetitionPattern **stored, IRepetitionPattern *r
     return S_OK;
 }
 
-typedef struct {
-    IDailyTrigger IDailyTrigger_iface;
+/* The triggers that share one implementation: daily, weekly, monthly and monthly day-of-week
+ * (all four are a CalendarTrigger in the task XML), and the idle, event and session state
+ * change triggers.  One object holds the fields of all of them and its type picks the
+ * interface (and so the vtable) it presents; a trigger read from a CalendarTrigger element is
+ * a daily one until its ScheduleByXxx child says otherwise (trigger_set_calendar_type).
+ * Whatever the XML of such a trigger holds that the object does not model (the event trigger's
+ * ValueQueries and occurrence settings, for one) is kept as text in 'extra' and written back, so
+ * that a task read and registered again is not changed. */
+typedef struct
+{
+    ITrigger ITrigger_iface;    /* the interface pointer of every interface of the object */
     LONG ref;
-    short interval;
+    TASK_TRIGGER_TYPE2 type;
+    BOOL enabled;
     WCHAR *id;
     WCHAR *start_boundary;
     WCHAR *end_boundary;
-    BOOL enabled;
+    WCHAR *execution_time_limit;
+    WCHAR *random_delay;
+    WCHAR *delay;               /* event, session state change */
+    WCHAR *user_id;             /* session state change */
+    WCHAR *subscription;        /* event */
+    WCHAR *extra;               /* XML of the elements that are not modelled */
     IRepetitionPattern *repetition;
-} DailyTrigger;
+    short days_interval;        /* daily */
+    short days_of_week;         /* weekly, monthly day-of-week: bit 0 = Sunday */
+    short weeks_interval;       /* weekly */
+    short months;               /* monthly, monthly day-of-week: bit 0 = January */
+    short weeks;                /* monthly day-of-week: bit 0 = first week */
+    LONG days_of_month;         /* monthly: bit 0 = day 1 */
+    BOOL run_last;              /* monthly: the last day, monthly day-of-week: the last week */
+    LONG state_change;          /* session state change */
+} SchedTrigger;
 
-static inline DailyTrigger *impl_from_IDailyTrigger(IDailyTrigger *iface)
+static const IDailyTriggerVtbl DailyTrigger_vtbl;
+static const IWeeklyTriggerVtbl WeeklyTrigger_vtbl;
+static const IMonthlyTriggerVtbl MonthlyTrigger_vtbl;
+static const IMonthlyDOWTriggerVtbl MonthlyDOWTrigger_vtbl;
+static const IIdleTriggerVtbl IdleTrigger_vtbl;
+static const IEventTriggerVtbl EventTrigger_vtbl;
+static const ISessionStateChangeTriggerVtbl SessionStateChangeTrigger_vtbl;
+
+static const IID *trigger_iid(TASK_TRIGGER_TYPE2 type)
 {
-    return CONTAINING_RECORD(iface, DailyTrigger, IDailyTrigger_iface);
+    switch (type)
+    {
+    case TASK_TRIGGER_WEEKLY: return &IID_IWeeklyTrigger;
+    case TASK_TRIGGER_MONTHLY: return &IID_IMonthlyTrigger;
+    case TASK_TRIGGER_MONTHLYDOW: return &IID_IMonthlyDOWTrigger;
+    case TASK_TRIGGER_IDLE: return &IID_IIdleTrigger;
+    case TASK_TRIGGER_EVENT: return &IID_IEventTrigger;
+    case TASK_TRIGGER_SESSION_STATE_CHANGE: return &IID_ISessionStateChangeTrigger;
+    default: return &IID_IDailyTrigger;
+    }
 }
 
-static HRESULT WINAPI DailyTrigger_QueryInterface(IDailyTrigger *iface, REFIID riid, void **ppv)
+static const void *trigger_vtbl(TASK_TRIGGER_TYPE2 type)
 {
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-
-    TRACE("(%p)->(%s %p)\n", This, debugstr_guid(riid), ppv);
-
-    if(IsEqualGUID(&IID_IUnknown, riid) ||
-       IsEqualGUID(&IID_IDispatch, riid) ||
-       IsEqualGUID(&IID_ITrigger, riid) ||
-       IsEqualGUID(&IID_IDailyTrigger, riid))
+    switch (type)
     {
-        *ppv = &This->IDailyTrigger_iface;
+    case TASK_TRIGGER_WEEKLY: return &WeeklyTrigger_vtbl;
+    case TASK_TRIGGER_MONTHLY: return &MonthlyTrigger_vtbl;
+    case TASK_TRIGGER_MONTHLYDOW: return &MonthlyDOWTrigger_vtbl;
+    case TASK_TRIGGER_IDLE: return &IdleTrigger_vtbl;
+    case TASK_TRIGGER_EVENT: return &EventTrigger_vtbl;
+    case TASK_TRIGGER_SESSION_STATE_CHANGE: return &SessionStateChangeTrigger_vtbl;
+    default: return &DailyTrigger_vtbl;
     }
-    else
-    {
-        FIXME("unsupported riid %s\n", debugstr_guid(riid));
-        *ppv = NULL;
-        return E_NOINTERFACE;
-    }
+}
 
-    IUnknown_AddRef((IUnknown*)*ppv);
+static BOOL is_sched_trigger(ITrigger *trigger)
+{
+    return trigger->lpVtbl == trigger_vtbl(TASK_TRIGGER_DAILY) ||
+           trigger->lpVtbl == trigger_vtbl(TASK_TRIGGER_WEEKLY) ||
+           trigger->lpVtbl == trigger_vtbl(TASK_TRIGGER_MONTHLY) ||
+           trigger->lpVtbl == trigger_vtbl(TASK_TRIGGER_MONTHLYDOW) ||
+           trigger->lpVtbl == trigger_vtbl(TASK_TRIGGER_IDLE) ||
+           trigger->lpVtbl == trigger_vtbl(TASK_TRIGGER_EVENT) ||
+           trigger->lpVtbl == trigger_vtbl(TASK_TRIGGER_SESSION_STATE_CHANGE);
+}
+
+/* the defaults are those of a trigger Windows creates */
+static void trigger_set_defaults(SchedTrigger *This)
+{
+    This->days_interval = 1;
+    This->weeks_interval = 1;
+    switch (This->type)
+    {
+    case TASK_TRIGGER_MONTHLY: This->months = 0xfff; break;
+    case TASK_TRIGGER_MONTHLYDOW: This->days_of_week = 1; This->weeks = 1; This->months = 1; break;
+    default: break;
+    }
+}
+
+static HRESULT SchedTrigger_create(TASK_TRIGGER_TYPE2 type, ITrigger **trigger)
+{
+    SchedTrigger *This = calloc(1, sizeof(*This));
+
+    if (!This) return E_OUTOFMEMORY;
+
+    This->ITrigger_iface.lpVtbl = trigger_vtbl(type);
+    This->ref = 1;
+    This->type = type;
+    This->enabled = TRUE;
+    trigger_set_defaults(This);
+
+    *trigger = &This->ITrigger_iface;
     return S_OK;
 }
 
-static ULONG WINAPI DailyTrigger_AddRef(IDailyTrigger *iface)
+/* a daily trigger that a CalendarTrigger element turned out to be a weekly, monthly or monthly
+ * day-of-week one: the same object, so everything read so far is kept */
+static void trigger_set_calendar_type(ITrigger *trigger, TASK_TRIGGER_TYPE2 type)
 {
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
+    SchedTrigger *This = CONTAINING_RECORD(trigger, SchedTrigger, ITrigger_iface);
+
+    This->type = type;
+    This->ITrigger_iface.lpVtbl = trigger_vtbl(type);
+    This->days_interval = 1;
+    This->weeks_interval = 1;
+    This->days_of_week = 0;
+    This->months = 0;
+    This->weeks = 0;
+    This->days_of_month = 0;
+    This->run_last = FALSE;
+}
+
+/* text of an element that the trigger has no property for, written back as it came */
+static HRESULT trigger_add_extra(ITrigger *trigger, const WCHAR *xml)
+{
+    SchedTrigger *This = CONTAINING_RECORD(trigger, SchedTrigger, ITrigger_iface);
+    size_t old = This->extra ? wcslen(This->extra) : 0;
+    WCHAR *str = realloc(This->extra, (old + wcslen(xml) + 1) * sizeof(WCHAR));
+
+    if (!str) return E_OUTOFMEMORY;
+    wcscpy(str + old, xml);
+    This->extra = str;
+    return S_OK;
+}
+
+static const WCHAR *trigger_get_extra(ITrigger *trigger)
+{
+    return CONTAINING_RECORD(trigger, SchedTrigger, ITrigger_iface)->extra;
+}
+
+static HRESULT trigger_get_string(const WCHAR *value, BSTR *out)
+{
+    if (!out) return E_POINTER;
+    if (!value) *out = NULL;
+    else if (!(*out = SysAllocString(value))) return E_OUTOFMEMORY;
+    return S_OK;
+}
+
+static HRESULT trigger_put_string(WCHAR **field, BSTR value)
+{
+    WCHAR *str = NULL;
+
+    if (value && !(str = wcsdup(value))) return E_OUTOFMEMORY;
+    free(*field);
+    *field = str;
+    return S_OK;
+}
+
+static HRESULT trigger_QueryInterface(SchedTrigger *This, REFIID riid, void **ppv)
+{
+    TRACE("(%p)->(%s %p)\n", This, debugstr_guid(riid), ppv);
+
+    if (IsEqualGUID(&IID_IUnknown, riid) || IsEqualGUID(&IID_IDispatch, riid) ||
+        IsEqualGUID(&IID_ITrigger, riid) || IsEqualGUID(trigger_iid(This->type), riid))
+    {
+        *ppv = &This->ITrigger_iface;
+        IUnknown_AddRef((IUnknown *)*ppv);
+        return S_OK;
+    }
+    *ppv = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG trigger_AddRef(SchedTrigger *This)
+{
     LONG ref = InterlockedIncrement(&This->ref);
 
     TRACE("(%p) ref=%ld\n", This, ref);
-
     return ref;
 }
 
-static ULONG WINAPI DailyTrigger_Release(IDailyTrigger *iface)
+static ULONG trigger_Release(SchedTrigger *This)
 {
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
     LONG ref = InterlockedDecrement(&This->ref);
 
     TRACE("(%p) ref=%ld\n", This, ref);
-
-    if(!ref)
+    if (!ref)
     {
-        TRACE("destroying %p\n", iface);
         free(This->id);
         free(This->start_boundary);
         free(This->end_boundary);
+        free(This->execution_time_limit);
+        free(This->random_delay);
+        free(This->delay);
+        free(This->user_id);
+        free(This->subscription);
+        free(This->extra);
         if (This->repetition) IRepetitionPattern_Release(This->repetition);
         free(This);
     }
-
     return ref;
 }
 
-static HRESULT WINAPI DailyTrigger_GetTypeInfoCount(IDailyTrigger *iface, UINT *count)
+/* the methods of ITrigger, for every interface that derives from it */
+#define TRIGGER_METHODS(Cls, Iface) \
+static HRESULT WINAPI Cls##_QueryInterface(Iface *iface, REFIID riid, void **ppv) \
+{ return trigger_QueryInterface((SchedTrigger *)iface, riid, ppv); } \
+static ULONG WINAPI Cls##_AddRef(Iface *iface) { return trigger_AddRef((SchedTrigger *)iface); } \
+static ULONG WINAPI Cls##_Release(Iface *iface) { return trigger_Release((SchedTrigger *)iface); } \
+static HRESULT WINAPI Cls##_GetTypeInfoCount(Iface *iface, UINT *count) { return taskschd_GetTypeInfoCount(count); } \
+static HRESULT WINAPI Cls##_GetTypeInfo(Iface *iface, UINT index, LCID lcid, ITypeInfo **info) \
+{ return taskschd_GetTypeInfo(trigger_iid(((SchedTrigger *)iface)->type), index, lcid, info); } \
+static HRESULT WINAPI Cls##_GetIDsOfNames(Iface *iface, REFIID riid, LPOLESTR *names, UINT count, LCID lcid, \
+                                          DISPID *dispid) \
+{ return taskschd_GetIDsOfNames(trigger_iid(((SchedTrigger *)iface)->type), riid, names, count, lcid, dispid); } \
+static HRESULT WINAPI Cls##_Invoke(Iface *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags, \
+                                   DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr) \
+{ return taskschd_Invoke(trigger_iid(((SchedTrigger *)iface)->type), iface, dispid, riid, lcid, flags, params, \
+                         result, excepinfo, argerr); } \
+static HRESULT WINAPI Cls##_get_Type(Iface *iface, TASK_TRIGGER_TYPE2 *type) \
+{ if (!type) return E_POINTER; *type = ((SchedTrigger *)iface)->type; return S_OK; } \
+static HRESULT WINAPI Cls##_get_Id(Iface *iface, BSTR *id) \
+{ return trigger_get_string(((SchedTrigger *)iface)->id, id); } \
+static HRESULT WINAPI Cls##_put_Id(Iface *iface, BSTR id) \
+{ return trigger_put_string(&((SchedTrigger *)iface)->id, id); } \
+static HRESULT WINAPI Cls##_get_Repetition(Iface *iface, IRepetitionPattern **repeat) \
+{ return get_repetition(&((SchedTrigger *)iface)->repetition, repeat); } \
+static HRESULT WINAPI Cls##_put_Repetition(Iface *iface, IRepetitionPattern *repeat) \
+{ return put_repetition(&((SchedTrigger *)iface)->repetition, repeat); } \
+static HRESULT WINAPI Cls##_get_ExecutionTimeLimit(Iface *iface, BSTR *limit) \
+{ return trigger_get_string(((SchedTrigger *)iface)->execution_time_limit, limit); } \
+static HRESULT WINAPI Cls##_put_ExecutionTimeLimit(Iface *iface, BSTR limit) \
+{ return trigger_put_string(&((SchedTrigger *)iface)->execution_time_limit, limit); } \
+static HRESULT WINAPI Cls##_get_StartBoundary(Iface *iface, BSTR *start) \
+{ return trigger_get_string(((SchedTrigger *)iface)->start_boundary, start); } \
+static HRESULT WINAPI Cls##_put_StartBoundary(Iface *iface, BSTR start) \
+{ return trigger_put_string(&((SchedTrigger *)iface)->start_boundary, start); } \
+static HRESULT WINAPI Cls##_get_EndBoundary(Iface *iface, BSTR *end) \
+{ return trigger_get_string(((SchedTrigger *)iface)->end_boundary, end); } \
+static HRESULT WINAPI Cls##_put_EndBoundary(Iface *iface, BSTR end) \
+{ return trigger_put_string(&((SchedTrigger *)iface)->end_boundary, end); } \
+static HRESULT WINAPI Cls##_get_Enabled(Iface *iface, VARIANT_BOOL *enabled) \
+{ if (!enabled) return E_POINTER; *enabled = ((SchedTrigger *)iface)->enabled ? VARIANT_TRUE : VARIANT_FALSE; \
+  return S_OK; } \
+static HRESULT WINAPI Cls##_put_Enabled(Iface *iface, VARIANT_BOOL enabled) \
+{ ((SchedTrigger *)iface)->enabled = !!enabled; return S_OK; }
+
+#define TRIGGER_VTBL_HEAD(Cls) \
+    Cls##_QueryInterface, Cls##_AddRef, Cls##_Release, Cls##_GetTypeInfoCount, Cls##_GetTypeInfo, \
+    Cls##_GetIDsOfNames, Cls##_Invoke, Cls##_get_Type, Cls##_get_Id, Cls##_put_Id, Cls##_get_Repetition, \
+    Cls##_put_Repetition, Cls##_get_ExecutionTimeLimit, Cls##_put_ExecutionTimeLimit, Cls##_get_StartBoundary, \
+    Cls##_put_StartBoundary, Cls##_get_EndBoundary, Cls##_put_EndBoundary, Cls##_get_Enabled, Cls##_put_Enabled
+
+#define TRIGGER_RANDOM_DELAY(Cls, Iface) \
+static HRESULT WINAPI Cls##_get_RandomDelay(Iface *iface, BSTR *delay) \
+{ return trigger_get_string(((SchedTrigger *)iface)->random_delay, delay); } \
+static HRESULT WINAPI Cls##_put_RandomDelay(Iface *iface, BSTR delay) \
+{ return trigger_put_string(&((SchedTrigger *)iface)->random_delay, delay); }
+
+/* a short property with a range */
+static HRESULT trigger_put_short(short *field, short value, short min, short max)
 {
-    return taskschd_GetTypeInfoCount(count);
-}
-
-static HRESULT WINAPI DailyTrigger_GetTypeInfo(IDailyTrigger *iface, UINT index, LCID lcid, ITypeInfo **info)
-{
-    return taskschd_GetTypeInfo(&IID_IDailyTrigger, index, lcid, info);
-}
-
-static HRESULT WINAPI DailyTrigger_GetIDsOfNames(IDailyTrigger *iface, REFIID riid, LPOLESTR *names,
-                                            UINT count, LCID lcid, DISPID *dispid)
-{
-    return taskschd_GetIDsOfNames(&IID_IDailyTrigger, riid, names, count, lcid, dispid);
-}
-
-static HRESULT WINAPI DailyTrigger_Invoke(IDailyTrigger *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
-                                     DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
-{
-    return taskschd_Invoke(&IID_IDailyTrigger, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
-}
-
-static HRESULT WINAPI DailyTrigger_get_Type(IDailyTrigger *iface, TASK_TRIGGER_TYPE2 *type)
-{
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-
-    TRACE("(%p)->(%p)\n", This, type);
-
-    if (!type) return E_POINTER;
-
-    *type = TASK_TRIGGER_DAILY;
+    if (value < min || value > max) return E_INVALIDARG;
+    *field = value;
     return S_OK;
 }
 
-static HRESULT WINAPI DailyTrigger_get_Id(IDailyTrigger *iface, BSTR *id)
+static HRESULT trigger_get_short(short value, short *out)
 {
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-
-    TRACE("(%p)->(%p)\n", This, id);
-
-    if (!id) return E_POINTER;
-
-    if (!This->id) *id = NULL;
-    else if (!(*id = SysAllocString(This->id))) return E_OUTOFMEMORY;
-
+    if (!out) return E_POINTER;
+    *out = value;
     return S_OK;
 }
 
-static HRESULT WINAPI DailyTrigger_put_Id(IDailyTrigger *iface, BSTR id)
-{
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-    WCHAR *str = NULL;
+/* daily */
 
-    TRACE("(%p)->(%s)\n", This, debugstr_w(id));
-
-    if (id && !(str = wcsdup(id))) return E_OUTOFMEMORY;
-    free(This->id);
-    This->id = str;
-    return S_OK;
-}
-
-static HRESULT WINAPI DailyTrigger_get_Repetition(IDailyTrigger *iface, IRepetitionPattern **repeat)
-{
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-
-    TRACE("(%p)->(%p)\n", This, repeat);
-
-    return get_repetition(&This->repetition, repeat);
-}
-
-static HRESULT WINAPI DailyTrigger_put_Repetition(IDailyTrigger *iface, IRepetitionPattern *repeat)
-{
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-
-    TRACE("(%p)->(%p)\n", This, repeat);
-
-    return put_repetition(&This->repetition, repeat);
-}
-
-static HRESULT WINAPI DailyTrigger_get_ExecutionTimeLimit(IDailyTrigger *iface, BSTR *limit)
-{
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-    FIXME("(%p)->(%p)\n", This, limit);
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI DailyTrigger_put_ExecutionTimeLimit(IDailyTrigger *iface, BSTR limit)
-{
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-    FIXME("(%p)->(%s)\n", This, debugstr_w(limit));
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI DailyTrigger_get_StartBoundary(IDailyTrigger *iface, BSTR *start)
-{
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-
-    TRACE("(%p)->(%p)\n", This, start);
-
-    if (!start) return E_POINTER;
-
-    if (!This->start_boundary) *start = NULL;
-    else if (!(*start = SysAllocString(This->start_boundary))) return E_OUTOFMEMORY;
-
-    return S_OK;
-}
-
-static HRESULT WINAPI DailyTrigger_put_StartBoundary(IDailyTrigger *iface, BSTR start)
-{
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-    WCHAR *str = NULL;
-
-    TRACE("(%p)->(%s)\n", This, debugstr_w(start));
-
-    if (start && !(str = wcsdup(start))) return E_OUTOFMEMORY;
-    free(This->start_boundary);
-    This->start_boundary = str;
-
-    return S_OK;
-}
-
-static HRESULT WINAPI DailyTrigger_get_EndBoundary(IDailyTrigger *iface, BSTR *end)
-{
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-
-    TRACE("(%p)->(%p)\n", This, end);
-
-    if (!end) return E_POINTER;
-
-    if (!This->end_boundary) *end = NULL;
-    else if (!(*end = SysAllocString(This->end_boundary))) return E_OUTOFMEMORY;
-
-    return S_OK;
-}
-
-static HRESULT WINAPI DailyTrigger_put_EndBoundary(IDailyTrigger *iface, BSTR end)
-{
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-    WCHAR *str = NULL;
-
-    TRACE("(%p)->(%s)\n", This, debugstr_w(end));
-
-    if (end && !(str = wcsdup(end))) return E_OUTOFMEMORY;
-    free(This->end_boundary);
-    This->end_boundary = str;
-
-    return S_OK;
-}
-
-static HRESULT WINAPI DailyTrigger_get_Enabled(IDailyTrigger *iface, VARIANT_BOOL *enabled)
-{
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-
-    TRACE("(%p)->(%p)\n", This, enabled);
-
-    if (!enabled) return E_POINTER;
-
-    *enabled = This->enabled ? VARIANT_TRUE : VARIANT_FALSE;
-    return S_OK;
-}
-
-static HRESULT WINAPI DailyTrigger_put_Enabled(IDailyTrigger *iface, VARIANT_BOOL enabled)
-{
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-
-    TRACE("(%p)->(%x)\n", This, enabled);
-
-    This->enabled = !!enabled;
-    return S_OK;
-}
+TRIGGER_METHODS(DailyTrigger, IDailyTrigger)
+TRIGGER_RANDOM_DELAY(DailyTrigger, IDailyTrigger)
 
 static HRESULT WINAPI DailyTrigger_get_DaysInterval(IDailyTrigger *iface, short *days)
 {
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-
-    TRACE("(%p)->(%p)\n", This, days);
-
-    *days = This->interval;
-    return S_OK;
+    return trigger_get_short(((SchedTrigger *)iface)->days_interval, days);
 }
 
 static HRESULT WINAPI DailyTrigger_put_DaysInterval(IDailyTrigger *iface, short days)
 {
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-
-    TRACE("(%p)->(%d)\n", This, days);
-
-    if(days <= 0)
-        return E_INVALIDARG;
-
-    This->interval = days;
-    return S_OK;
+    return trigger_put_short(&((SchedTrigger *)iface)->days_interval, days, 1, 32767);
 }
 
-static HRESULT WINAPI DailyTrigger_get_RandomDelay(IDailyTrigger *iface, BSTR *pRandomDelay)
+static const IDailyTriggerVtbl DailyTrigger_vtbl =
 {
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-    FIXME("(%p)->(%p)\n", This, pRandomDelay);
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI DailyTrigger_put_RandomDelay(IDailyTrigger *iface, BSTR randomDelay)
-{
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-    FIXME("(%p)->(%s)\n", This, debugstr_w(randomDelay));
-    return E_NOTIMPL;
-}
-
-static const IDailyTriggerVtbl DailyTrigger_vtbl = {
-    DailyTrigger_QueryInterface,
-    DailyTrigger_AddRef,
-    DailyTrigger_Release,
-    DailyTrigger_GetTypeInfoCount,
-    DailyTrigger_GetTypeInfo,
-    DailyTrigger_GetIDsOfNames,
-    DailyTrigger_Invoke,
-    DailyTrigger_get_Type,
-    DailyTrigger_get_Id,
-    DailyTrigger_put_Id,
-    DailyTrigger_get_Repetition,
-    DailyTrigger_put_Repetition,
-    DailyTrigger_get_ExecutionTimeLimit,
-    DailyTrigger_put_ExecutionTimeLimit,
-    DailyTrigger_get_StartBoundary,
-    DailyTrigger_put_StartBoundary,
-    DailyTrigger_get_EndBoundary,
-    DailyTrigger_put_EndBoundary,
-    DailyTrigger_get_Enabled,
-    DailyTrigger_put_Enabled,
+    TRIGGER_VTBL_HEAD(DailyTrigger),
     DailyTrigger_get_DaysInterval,
     DailyTrigger_put_DaysInterval,
     DailyTrigger_get_RandomDelay,
     DailyTrigger_put_RandomDelay
 };
 
-static HRESULT DailyTrigger_create(ITrigger **trigger)
+/* weekly */
+
+TRIGGER_METHODS(WeeklyTrigger, IWeeklyTrigger)
+TRIGGER_RANDOM_DELAY(WeeklyTrigger, IWeeklyTrigger)
+
+static HRESULT WINAPI WeeklyTrigger_get_DaysOfWeek(IWeeklyTrigger *iface, short *days)
 {
-    DailyTrigger *daily_trigger;
+    return trigger_get_short(((SchedTrigger *)iface)->days_of_week, days);
+}
 
-    daily_trigger = malloc(sizeof(*daily_trigger));
-    if (!daily_trigger)
-        return E_OUTOFMEMORY;
+static HRESULT WINAPI WeeklyTrigger_put_DaysOfWeek(IWeeklyTrigger *iface, short days)
+{
+    return trigger_put_short(&((SchedTrigger *)iface)->days_of_week, days, 0, 0x7f);
+}
 
-    daily_trigger->IDailyTrigger_iface.lpVtbl = &DailyTrigger_vtbl;
-    daily_trigger->ref = 1;
-    daily_trigger->interval = 1;
-    daily_trigger->id = NULL;
-    daily_trigger->start_boundary = NULL;
-    daily_trigger->end_boundary = NULL;
-    daily_trigger->enabled = TRUE;
-    daily_trigger->repetition = NULL;
+static HRESULT WINAPI WeeklyTrigger_get_WeeksInterval(IWeeklyTrigger *iface, short *weeks)
+{
+    return trigger_get_short(((SchedTrigger *)iface)->weeks_interval, weeks);
+}
 
-    *trigger = (ITrigger*)&daily_trigger->IDailyTrigger_iface;
+static HRESULT WINAPI WeeklyTrigger_put_WeeksInterval(IWeeklyTrigger *iface, short weeks)
+{
+    return trigger_put_short(&((SchedTrigger *)iface)->weeks_interval, weeks, 1, 52);
+}
+
+static const IWeeklyTriggerVtbl WeeklyTrigger_vtbl =
+{
+    TRIGGER_VTBL_HEAD(WeeklyTrigger),
+    WeeklyTrigger_get_DaysOfWeek,
+    WeeklyTrigger_put_DaysOfWeek,
+    WeeklyTrigger_get_WeeksInterval,
+    WeeklyTrigger_put_WeeksInterval,
+    WeeklyTrigger_get_RandomDelay,
+    WeeklyTrigger_put_RandomDelay
+};
+
+/* monthly */
+
+TRIGGER_METHODS(MonthlyTrigger, IMonthlyTrigger)
+TRIGGER_RANDOM_DELAY(MonthlyTrigger, IMonthlyTrigger)
+
+static HRESULT WINAPI MonthlyTrigger_get_DaysOfMonth(IMonthlyTrigger *iface, LONG *days)
+{
+    if (!days) return E_POINTER;
+    *days = ((SchedTrigger *)iface)->days_of_month;
     return S_OK;
 }
+
+static HRESULT WINAPI MonthlyTrigger_put_DaysOfMonth(IMonthlyTrigger *iface, LONG days)
+{
+    if (days < 0) return E_INVALIDARG;
+    ((SchedTrigger *)iface)->days_of_month = days;
+    return S_OK;
+}
+
+static HRESULT WINAPI MonthlyTrigger_get_MonthsOfYear(IMonthlyTrigger *iface, short *months)
+{
+    return trigger_get_short(((SchedTrigger *)iface)->months, months);
+}
+
+static HRESULT WINAPI MonthlyTrigger_put_MonthsOfYear(IMonthlyTrigger *iface, short months)
+{
+    return trigger_put_short(&((SchedTrigger *)iface)->months, months, 0, 0xfff);
+}
+
+static HRESULT WINAPI MonthlyTrigger_get_RunOnLastDayOfMonth(IMonthlyTrigger *iface, VARIANT_BOOL *last)
+{
+    if (!last) return E_POINTER;
+    *last = ((SchedTrigger *)iface)->run_last ? VARIANT_TRUE : VARIANT_FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI MonthlyTrigger_put_RunOnLastDayOfMonth(IMonthlyTrigger *iface, VARIANT_BOOL last)
+{
+    ((SchedTrigger *)iface)->run_last = !!last;
+    return S_OK;
+}
+
+static const IMonthlyTriggerVtbl MonthlyTrigger_vtbl =
+{
+    TRIGGER_VTBL_HEAD(MonthlyTrigger),
+    MonthlyTrigger_get_DaysOfMonth,
+    MonthlyTrigger_put_DaysOfMonth,
+    MonthlyTrigger_get_MonthsOfYear,
+    MonthlyTrigger_put_MonthsOfYear,
+    MonthlyTrigger_get_RunOnLastDayOfMonth,
+    MonthlyTrigger_put_RunOnLastDayOfMonth,
+    MonthlyTrigger_get_RandomDelay,
+    MonthlyTrigger_put_RandomDelay
+};
+
+/* monthly day-of-week */
+
+TRIGGER_METHODS(MonthlyDOWTrigger, IMonthlyDOWTrigger)
+TRIGGER_RANDOM_DELAY(MonthlyDOWTrigger, IMonthlyDOWTrigger)
+
+static HRESULT WINAPI MonthlyDOWTrigger_get_DaysOfWeek(IMonthlyDOWTrigger *iface, short *days)
+{
+    return trigger_get_short(((SchedTrigger *)iface)->days_of_week, days);
+}
+
+static HRESULT WINAPI MonthlyDOWTrigger_put_DaysOfWeek(IMonthlyDOWTrigger *iface, short days)
+{
+    return trigger_put_short(&((SchedTrigger *)iface)->days_of_week, days, 0, 0x7f);
+}
+
+static HRESULT WINAPI MonthlyDOWTrigger_get_WeeksOfMonth(IMonthlyDOWTrigger *iface, short *weeks)
+{
+    return trigger_get_short(((SchedTrigger *)iface)->weeks, weeks);
+}
+
+static HRESULT WINAPI MonthlyDOWTrigger_put_WeeksOfMonth(IMonthlyDOWTrigger *iface, short weeks)
+{
+    return trigger_put_short(&((SchedTrigger *)iface)->weeks, weeks, 0, 0xf);
+}
+
+static HRESULT WINAPI MonthlyDOWTrigger_get_MonthsOfYear(IMonthlyDOWTrigger *iface, short *months)
+{
+    return trigger_get_short(((SchedTrigger *)iface)->months, months);
+}
+
+static HRESULT WINAPI MonthlyDOWTrigger_put_MonthsOfYear(IMonthlyDOWTrigger *iface, short months)
+{
+    return trigger_put_short(&((SchedTrigger *)iface)->months, months, 0, 0xfff);
+}
+
+static HRESULT WINAPI MonthlyDOWTrigger_get_RunOnLastWeekOfMonth(IMonthlyDOWTrigger *iface, VARIANT_BOOL *last)
+{
+    if (!last) return E_POINTER;
+    *last = ((SchedTrigger *)iface)->run_last ? VARIANT_TRUE : VARIANT_FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI MonthlyDOWTrigger_put_RunOnLastWeekOfMonth(IMonthlyDOWTrigger *iface, VARIANT_BOOL last)
+{
+    ((SchedTrigger *)iface)->run_last = !!last;
+    return S_OK;
+}
+
+static const IMonthlyDOWTriggerVtbl MonthlyDOWTrigger_vtbl =
+{
+    TRIGGER_VTBL_HEAD(MonthlyDOWTrigger),
+    MonthlyDOWTrigger_get_DaysOfWeek,
+    MonthlyDOWTrigger_put_DaysOfWeek,
+    MonthlyDOWTrigger_get_WeeksOfMonth,
+    MonthlyDOWTrigger_put_WeeksOfMonth,
+    MonthlyDOWTrigger_get_MonthsOfYear,
+    MonthlyDOWTrigger_put_MonthsOfYear,
+    MonthlyDOWTrigger_get_RunOnLastWeekOfMonth,
+    MonthlyDOWTrigger_put_RunOnLastWeekOfMonth,
+    MonthlyDOWTrigger_get_RandomDelay,
+    MonthlyDOWTrigger_put_RandomDelay
+};
+
+/* idle: nothing but what every trigger has */
+
+TRIGGER_METHODS(IdleTrigger, IIdleTrigger)
+
+static const IIdleTriggerVtbl IdleTrigger_vtbl =
+{
+    TRIGGER_VTBL_HEAD(IdleTrigger)
+};
+
+/* event */
+
+TRIGGER_METHODS(EventTrigger, IEventTrigger)
+
+static HRESULT WINAPI EventTrigger_get_Subscription(IEventTrigger *iface, BSTR *query)
+{
+    return trigger_get_string(((SchedTrigger *)iface)->subscription, query);
+}
+
+static HRESULT WINAPI EventTrigger_put_Subscription(IEventTrigger *iface, BSTR query)
+{
+    return trigger_put_string(&((SchedTrigger *)iface)->subscription, query);
+}
+
+static HRESULT WINAPI EventTrigger_get_Delay(IEventTrigger *iface, BSTR *delay)
+{
+    return trigger_get_string(((SchedTrigger *)iface)->delay, delay);
+}
+
+static HRESULT WINAPI EventTrigger_put_Delay(IEventTrigger *iface, BSTR delay)
+{
+    return trigger_put_string(&((SchedTrigger *)iface)->delay, delay);
+}
+
+static HRESULT WINAPI EventTrigger_get_ValueQueries(IEventTrigger *iface, ITaskNamedValueCollection **queries)
+{
+    FIXME("(%p)->(%p) the value queries are kept in the XML only\n", iface, queries);
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI EventTrigger_put_ValueQueries(IEventTrigger *iface, ITaskNamedValueCollection *queries)
+{
+    FIXME("(%p)->(%p)\n", iface, queries);
+    return E_NOTIMPL;
+}
+
+static const IEventTriggerVtbl EventTrigger_vtbl =
+{
+    TRIGGER_VTBL_HEAD(EventTrigger),
+    EventTrigger_get_Subscription,
+    EventTrigger_put_Subscription,
+    EventTrigger_get_Delay,
+    EventTrigger_put_Delay,
+    EventTrigger_get_ValueQueries,
+    EventTrigger_put_ValueQueries
+};
+
+/* session state change */
+
+TRIGGER_METHODS(SessionStateChangeTrigger, ISessionStateChangeTrigger)
+
+static HRESULT WINAPI SessionStateChangeTrigger_get_Delay(ISessionStateChangeTrigger *iface, BSTR *delay)
+{
+    return trigger_get_string(((SchedTrigger *)iface)->delay, delay);
+}
+
+static HRESULT WINAPI SessionStateChangeTrigger_put_Delay(ISessionStateChangeTrigger *iface, BSTR delay)
+{
+    return trigger_put_string(&((SchedTrigger *)iface)->delay, delay);
+}
+
+static HRESULT WINAPI SessionStateChangeTrigger_get_UserId(ISessionStateChangeTrigger *iface, BSTR *user)
+{
+    return trigger_get_string(((SchedTrigger *)iface)->user_id, user);
+}
+
+static HRESULT WINAPI SessionStateChangeTrigger_put_UserId(ISessionStateChangeTrigger *iface, BSTR user)
+{
+    return trigger_put_string(&((SchedTrigger *)iface)->user_id, user);
+}
+
+static HRESULT WINAPI SessionStateChangeTrigger_get_StateChange(ISessionStateChangeTrigger *iface,
+                                                                TASK_SESSION_STATE_CHANGE_TYPE *type)
+{
+    if (!type) return E_POINTER;
+    *type = ((SchedTrigger *)iface)->state_change;
+    return S_OK;
+}
+
+static HRESULT WINAPI SessionStateChangeTrigger_put_StateChange(ISessionStateChangeTrigger *iface,
+                                                                TASK_SESSION_STATE_CHANGE_TYPE type)
+{
+    if (type != TASK_CONSOLE_CONNECT && type != TASK_CONSOLE_DISCONNECT && type != TASK_REMOTE_CONNECT &&
+        type != TASK_REMOTE_DISCONNECT && type != TASK_SESSION_LOCK && type != TASK_SESSION_UNLOCK)
+        return E_INVALIDARG;
+    ((SchedTrigger *)iface)->state_change = type;
+    return S_OK;
+}
+
+static const ISessionStateChangeTriggerVtbl SessionStateChangeTrigger_vtbl =
+{
+    TRIGGER_VTBL_HEAD(SessionStateChangeTrigger),
+    SessionStateChangeTrigger_get_Delay,
+    SessionStateChangeTrigger_put_Delay,
+    SessionStateChangeTrigger_get_UserId,
+    SessionStateChangeTrigger_put_UserId,
+    SessionStateChangeTrigger_get_StateChange,
+    SessionStateChangeTrigger_put_StateChange
+};
 
 typedef struct {
     IRegistrationTrigger IRegistrationTrigger_iface;
@@ -2013,7 +2253,13 @@ static HRESULT WINAPI TriggerCollection_Create(ITriggerCollection *iface, TASK_T
         hr = TimeTrigger_create(trigger);
         break;
     case TASK_TRIGGER_DAILY:
-        hr = DailyTrigger_create(trigger);
+    case TASK_TRIGGER_WEEKLY:
+    case TASK_TRIGGER_MONTHLY:
+    case TASK_TRIGGER_MONTHLYDOW:
+    case TASK_TRIGGER_IDLE:
+    case TASK_TRIGGER_EVENT:
+    case TASK_TRIGGER_SESSION_STATE_CHANGE:
+        hr = SchedTrigger_create(type, trigger);
         break;
     case TASK_TRIGGER_BOOT:
         hr = BootTrigger_create(trigger);
@@ -4862,6 +5108,129 @@ static HRESULT write_repetition(IStream *stream, ITrigger *trigger)
     return hr;
 }
 
+static const WCHAR *const day_names[7] =
+{
+    L"Sunday", L"Monday", L"Tuesday", L"Wednesday", L"Thursday", L"Friday", L"Saturday"
+};
+
+static const WCHAR *const month_names[12] =
+{
+    L"January", L"February", L"March", L"April", L"May", L"June", L"July", L"August", L"September", L"October",
+    L"November", L"December"
+};
+
+static const struct { const WCHAR *name; TASK_SESSION_STATE_CHANGE_TYPE type; } state_changes[] =
+{
+    { L"ConsoleConnect", TASK_CONSOLE_CONNECT },
+    { L"ConsoleDisconnect", TASK_CONSOLE_DISCONNECT },
+    { L"RemoteConnect", TASK_REMOTE_CONNECT },
+    { L"RemoteDisconnect", TASK_REMOTE_DISCONNECT },
+    { L"SessionLock", TASK_SESSION_LOCK },
+    { L"SessionUnlock", TASK_SESSION_UNLOCK },
+};
+
+/* <name><Monday /><Friday /></name>: the members of a set, in the order of the schema */
+static HRESULT write_name_set(IStream *stream, const WCHAR *name, const WCHAR *const *names, unsigned int count,
+                              unsigned int mask)
+{
+    unsigned int i;
+
+    if (!(mask & ((1u << count) - 1))) return write_empty_element(stream, name);
+
+    write_element(stream, name);
+    push_indent();
+    for (i = 0; i < count; i++)
+        if (mask & (1u << i)) write_empty_element(stream, names[i]);
+    pop_indent();
+    return write_element_end(stream, name);
+}
+
+/* <name><item>1</item><item>Last</item></name>: a set of numbers, 1 for bit 0, and the last one */
+static HRESULT write_number_set(IStream *stream, const WCHAR *name, const WCHAR *item, unsigned int count,
+                                unsigned int mask, BOOL last)
+{
+    unsigned int i;
+
+    if (!(mask & (count >= 32 ? ~0u : (1u << count) - 1)) && !last) return write_empty_element(stream, name);
+
+    write_element(stream, name);
+    push_indent();
+    for (i = 0; i < count; i++)
+        if (mask & (1u << i)) write_int_value(stream, item, i + 1);
+    if (last) write_text_value(stream, item, L"Last");
+    pop_indent();
+    return write_element_end(stream, name);
+}
+
+/* the ScheduleByWeek, ScheduleByMonth or ScheduleByMonthDayOfWeek element of a calendar trigger */
+static HRESULT write_calendar_schedule(IStream *stream, ITrigger *trigger, TASK_TRIGGER_TYPE2 type)
+{
+    switch (type)
+    {
+    case TASK_TRIGGER_WEEKLY:
+    {
+        IWeeklyTrigger *weekly;
+        short days = 0, weeks = 1;
+
+        if (ITrigger_QueryInterface(trigger, &IID_IWeeklyTrigger, (void **)&weekly) != S_OK) break;
+        IWeeklyTrigger_get_DaysOfWeek(weekly, &days);
+        IWeeklyTrigger_get_WeeksInterval(weekly, &weeks);
+        IWeeklyTrigger_Release(weekly);
+
+        write_element(stream, L"ScheduleByWeek");
+        push_indent();
+        write_name_set(stream, L"DaysOfWeek", day_names, 7, days);
+        write_int_value(stream, L"WeeksInterval", weeks);
+        pop_indent();
+        return write_element_end(stream, L"ScheduleByWeek");
+    }
+    case TASK_TRIGGER_MONTHLY:
+    {
+        IMonthlyTrigger *monthly;
+        LONG days = 0;
+        short months = 0;
+        VARIANT_BOOL last = VARIANT_FALSE;
+
+        if (ITrigger_QueryInterface(trigger, &IID_IMonthlyTrigger, (void **)&monthly) != S_OK) break;
+        IMonthlyTrigger_get_DaysOfMonth(monthly, &days);
+        IMonthlyTrigger_get_MonthsOfYear(monthly, &months);
+        IMonthlyTrigger_get_RunOnLastDayOfMonth(monthly, &last);
+        IMonthlyTrigger_Release(monthly);
+
+        write_element(stream, L"ScheduleByMonth");
+        push_indent();
+        write_number_set(stream, L"DaysOfMonth", L"Day", 31, days, last != VARIANT_FALSE);
+        write_name_set(stream, L"Months", month_names, 12, months);
+        pop_indent();
+        return write_element_end(stream, L"ScheduleByMonth");
+    }
+    case TASK_TRIGGER_MONTHLYDOW:
+    {
+        IMonthlyDOWTrigger *dow;
+        short days = 0, weeks = 0, months = 0;
+        VARIANT_BOOL last = VARIANT_FALSE;
+
+        if (ITrigger_QueryInterface(trigger, &IID_IMonthlyDOWTrigger, (void **)&dow) != S_OK) break;
+        IMonthlyDOWTrigger_get_DaysOfWeek(dow, &days);
+        IMonthlyDOWTrigger_get_WeeksOfMonth(dow, &weeks);
+        IMonthlyDOWTrigger_get_MonthsOfYear(dow, &months);
+        IMonthlyDOWTrigger_get_RunOnLastWeekOfMonth(dow, &last);
+        IMonthlyDOWTrigger_Release(dow);
+
+        write_element(stream, L"ScheduleByMonthDayOfWeek");
+        push_indent();
+        write_number_set(stream, L"Weeks", L"Week", 4, weeks, last != VARIANT_FALSE);
+        write_name_set(stream, L"DaysOfWeek", day_names, 7, days);
+        write_name_set(stream, L"Months", month_names, 12, months);
+        pop_indent();
+        return write_element_end(stream, L"ScheduleByMonthDayOfWeek");
+    }
+    default:
+        break;
+    }
+    return S_OK;
+}
+
 static HRESULT write_trigger(IStream *stream, ITrigger *trigger)
 {
     TASK_TRIGGER_TYPE2 type;
@@ -4880,10 +5249,16 @@ static HRESULT write_trigger(IStream *stream, ITrigger *trigger)
     switch (type)
     {
     case TASK_TRIGGER_TIME: name = L"TimeTrigger"; break;
-    case TASK_TRIGGER_DAILY: name = L"CalendarTrigger"; break;
+    case TASK_TRIGGER_DAILY:
+    case TASK_TRIGGER_WEEKLY:
+    case TASK_TRIGGER_MONTHLY:
+    case TASK_TRIGGER_MONTHLYDOW: name = L"CalendarTrigger"; break;
     case TASK_TRIGGER_BOOT: name = L"BootTrigger"; break;
     case TASK_TRIGGER_LOGON: name = L"LogonTrigger"; break;
     case TASK_TRIGGER_REGISTRATION: name = L"RegistrationTrigger"; break;
+    case TASK_TRIGGER_IDLE: name = L"IdleTrigger"; break;
+    case TASK_TRIGGER_EVENT: name = L"EventTrigger"; break;
+    case TASK_TRIGGER_SESSION_STATE_CHANGE: name = L"SessionStateChangeTrigger"; break;
     default:
         FIXME("trigger type %d\n", type);
         return S_OK;
@@ -4917,6 +5292,72 @@ static HRESULT write_trigger(IStream *stream, ITrigger *trigger)
             hr = ITimeTrigger_get_RandomDelay(time_trigger, &bstr);
             write_bstr_value(stream, L"RandomDelay", hr, hr == S_OK ? bstr : NULL);
             ITimeTrigger_Release(time_trigger);
+        }
+        break;
+    }
+    case TASK_TRIGGER_WEEKLY:
+    case TASK_TRIGGER_MONTHLY:
+    case TASK_TRIGGER_MONTHLYDOW:
+    {
+        IWeeklyTrigger *weekly;
+        IMonthlyTrigger *monthly;
+        IMonthlyDOWTrigger *monthly_dow;
+
+        /* RandomDelay comes before the schedule, as in the XML Windows writes */
+        if (type == TASK_TRIGGER_WEEKLY && ITrigger_QueryInterface(trigger, &IID_IWeeklyTrigger, (void **)&weekly) == S_OK)
+        {
+            hr = IWeeklyTrigger_get_RandomDelay(weekly, &bstr);
+            write_bstr_value(stream, L"RandomDelay", hr, hr == S_OK ? bstr : NULL);
+            IWeeklyTrigger_Release(weekly);
+        }
+        else if (type == TASK_TRIGGER_MONTHLY &&
+                 ITrigger_QueryInterface(trigger, &IID_IMonthlyTrigger, (void **)&monthly) == S_OK)
+        {
+            hr = IMonthlyTrigger_get_RandomDelay(monthly, &bstr);
+            write_bstr_value(stream, L"RandomDelay", hr, hr == S_OK ? bstr : NULL);
+            IMonthlyTrigger_Release(monthly);
+        }
+        else if (type == TASK_TRIGGER_MONTHLYDOW &&
+                 ITrigger_QueryInterface(trigger, &IID_IMonthlyDOWTrigger, (void **)&monthly_dow) == S_OK)
+        {
+            hr = IMonthlyDOWTrigger_get_RandomDelay(monthly_dow, &bstr);
+            write_bstr_value(stream, L"RandomDelay", hr, hr == S_OK ? bstr : NULL);
+            IMonthlyDOWTrigger_Release(monthly_dow);
+        }
+        write_calendar_schedule(stream, trigger, type);
+        break;
+    }
+    case TASK_TRIGGER_EVENT:
+    {
+        IEventTrigger *event_trigger;
+
+        if (ITrigger_QueryInterface(trigger, &IID_IEventTrigger, (void **)&event_trigger) == S_OK)
+        {
+            hr = IEventTrigger_get_Subscription(event_trigger, &bstr);
+            write_bstr_value(stream, L"Subscription", hr, hr == S_OK ? bstr : NULL);
+            hr = IEventTrigger_get_Delay(event_trigger, &bstr);
+            write_bstr_value(stream, L"Delay", hr, hr == S_OK ? bstr : NULL);
+            IEventTrigger_Release(event_trigger);
+        }
+        break;
+    }
+    case TASK_TRIGGER_SESSION_STATE_CHANGE:
+    {
+        ISessionStateChangeTrigger *session;
+        TASK_SESSION_STATE_CHANGE_TYPE change = 0;
+        unsigned int i;
+
+        if (ITrigger_QueryInterface(trigger, &IID_ISessionStateChangeTrigger, (void **)&session) == S_OK)
+        {
+            hr = ISessionStateChangeTrigger_get_UserId(session, &bstr);
+            write_bstr_value(stream, L"UserId", hr, hr == S_OK ? bstr : NULL);
+            hr = ISessionStateChangeTrigger_get_Delay(session, &bstr);
+            write_bstr_value(stream, L"Delay", hr, hr == S_OK ? bstr : NULL);
+            ISessionStateChangeTrigger_get_StateChange(session, &change);
+            ISessionStateChangeTrigger_Release(session);
+            for (i = 0; i < ARRAY_SIZE(state_changes); i++)
+                if (state_changes[i].type == change)
+                    write_text_value(stream, L"StateChange", state_changes[i].name);
         }
         break;
     }
@@ -4979,6 +5420,21 @@ static HRESULT write_trigger(IStream *stream, ITrigger *trigger)
     }
     default:
         break;
+    }
+
+    if (is_sched_trigger(trigger) && trigger_get_extra(trigger))
+    {
+        /* one line per element that was kept as text */
+        WCHAR *text = wcsdup(trigger_get_extra(trigger)), *line, *nl;
+
+        for (line = text; line && *line; line = nl ? nl + 1 : NULL)
+        {
+            if ((nl = wcschr(line, '\n'))) *nl = 0;
+            write_indent(stream);
+            write_stringW(stream, line);
+            write_stringW(stream, L"\n");
+        }
+        free(text);
     }
 
     pop_indent();
@@ -5369,6 +5825,256 @@ static HRESULT read_schedule_by_day(IXmlReader *reader, ITrigger *trigger)
     return SCHED_E_MALFORMEDXML;
 }
 
+/* appends text to a buffer that grows */
+static HRESULT append_text(WCHAR **buf, size_t *len, size_t *cap, const WCHAR *text, size_t n)
+{
+    if (*len + n + 1 > *cap)
+    {
+        size_t size = max(*cap * 2, *len + n + 1 + 64);
+        WCHAR *str = realloc(*buf, size * sizeof(WCHAR));
+
+        if (!str) return E_OUTOFMEMORY;
+        *buf = str;
+        *cap = size;
+    }
+    memcpy(*buf + *len, text, n * sizeof(WCHAR));
+    *len += n;
+    (*buf)[*len] = 0;
+    return S_OK;
+}
+
+static HRESULT append_escaped(WCHAR **buf, size_t *len, size_t *cap, const WCHAR *text)
+{
+    const WCHAR *entity;
+    HRESULT hr = S_OK;
+
+    for (; *text && hr == S_OK; text++)
+    {
+        switch (*text)
+        {
+        case '&': entity = L"&amp;"; break;
+        case '<': entity = L"&lt;"; break;
+        case '>': entity = L"&gt;"; break;
+        case '"': entity = L"&quot;"; break;
+        default: hr = append_text(buf, len, cap, text, 1); continue;
+        }
+        hr = append_text(buf, len, cap, entity, wcslen(entity));
+    }
+    return hr;
+}
+
+/* the element the reader is on, with everything in it, as one line of XML without the indentation
+ * (the text of an element that a trigger keeps as it came); the reader is left on its end */
+static HRESULT capture_element(IXmlReader *reader, WCHAR **out)
+{
+    WCHAR *buf = NULL;
+    size_t len = 0, cap = 0;
+    XmlNodeType type;
+    const WCHAR *name, *value;
+    unsigned int depth = 0;
+    HRESULT hr = S_OK;
+    BOOL element = TRUE;    /* the reader is on the first element */
+
+    for (;;)
+    {
+        if (element)
+        {
+            BOOL empty = IXmlReader_IsEmptyElement(reader);
+            HRESULT attr;
+
+            element = FALSE;
+            if ((hr = IXmlReader_GetLocalName(reader, &name, NULL)) != S_OK) break;
+            if ((hr = append_text(&buf, &len, &cap, L"<", 1)) != S_OK) break;
+            if ((hr = append_text(&buf, &len, &cap, name, wcslen(name))) != S_OK) break;
+            for (attr = IXmlReader_MoveToFirstAttribute(reader); attr == S_OK; attr = IXmlReader_MoveToNextAttribute(reader))
+            {
+                if (IXmlReader_GetLocalName(reader, &name, NULL) != S_OK ||
+                    IXmlReader_GetValue(reader, &value, NULL) != S_OK) continue;
+                append_text(&buf, &len, &cap, L" ", 1);
+                append_text(&buf, &len, &cap, name, wcslen(name));
+                append_text(&buf, &len, &cap, L"=\"", 2);
+                append_escaped(&buf, &len, &cap, value);
+                append_text(&buf, &len, &cap, L"\"", 1);
+            }
+            IXmlReader_MoveToElement(reader);
+            if ((hr = append_text(&buf, &len, &cap, empty ? L"/>" : L">", empty ? 2 : 1)) != S_OK) break;
+            if (empty && !depth) break;
+            if (!empty) depth++;
+        }
+        else if (IXmlReader_Read(reader, &type) != S_OK)
+        {
+            hr = SCHED_E_MALFORMEDXML;
+            break;
+        }
+        else switch (type)
+        {
+        case XmlNodeType_Element:
+            element = TRUE;
+            continue;
+        case XmlNodeType_EndElement:
+            if (IXmlReader_GetLocalName(reader, &name, NULL) != S_OK) { hr = E_FAIL; break; }
+            append_text(&buf, &len, &cap, L"</", 2);
+            append_text(&buf, &len, &cap, name, wcslen(name));
+            hr = append_text(&buf, &len, &cap, L">", 1);
+            if (!--depth) goto done;
+            continue;
+        case XmlNodeType_Text:
+        case XmlNodeType_CDATA:
+            if (IXmlReader_GetValue(reader, &value, NULL) == S_OK) hr = append_escaped(&buf, &len, &cap, value);
+            continue;
+        default:
+            continue;
+        }
+        if (hr != S_OK) break;
+    }
+done:
+    if (hr == S_OK && (hr = append_text(&buf, &len, &cap, L"\n", 1)) == S_OK)
+    {
+        *out = buf;
+        return S_OK;
+    }
+    free(buf);
+    return hr;
+}
+
+/* the members of a set given as elements (<Monday />, <March />): their bits */
+static HRESULT read_name_set(IXmlReader *reader, const WCHAR *end_name, const WCHAR *const *names, unsigned int count,
+                             int *mask)
+{
+    XmlNodeType type;
+    const WCHAR *name;
+    unsigned int i;
+    WCHAR *end_copy;
+
+    *mask = 0;
+    if (IXmlReader_IsEmptyElement(reader)) return S_OK;
+    if (!(end_copy = wcsdup(end_name))) return E_OUTOFMEMORY;
+
+    while (IXmlReader_Read(reader, &type) == S_OK)
+    {
+        if (type == XmlNodeType_EndElement)
+        {
+            if (IXmlReader_GetLocalName(reader, &name, NULL) == S_OK && !lstrcmpW(name, end_copy))
+            {
+                free(end_copy);
+                return S_OK;
+            }
+        }
+        else if (type == XmlNodeType_Element)
+        {
+            if (IXmlReader_GetLocalName(reader, &name, NULL) != S_OK) break;
+            for (i = 0; i < count; i++)
+                if (!lstrcmpW(name, names[i])) break;
+            if (i < count) *mask |= 1 << i;
+            else FIXME("unknown name %s in %s\n", debugstr_w(name), debugstr_w(end_copy));
+            skip_element(reader);
+        }
+    }
+    free(end_copy);
+    return SCHED_E_MALFORMEDXML;
+}
+
+/* <Days><Day>1</Day><Day>Last</Day></Days>: numbers 1..count as bits, and "Last" */
+static HRESULT read_number_set(IXmlReader *reader, const WCHAR *end_name, unsigned int count, int *mask, BOOL *last)
+{
+    XmlNodeType type;
+    const WCHAR *name;
+    WCHAR *value, *end_copy;
+    long n;
+
+    *mask = 0;
+    *last = FALSE;
+    if (IXmlReader_IsEmptyElement(reader)) return S_OK;
+    if (!(end_copy = wcsdup(end_name))) return E_OUTOFMEMORY;
+
+    while (IXmlReader_Read(reader, &type) == S_OK)
+    {
+        if (type == XmlNodeType_EndElement)
+        {
+            if (IXmlReader_GetLocalName(reader, &name, NULL) == S_OK && !lstrcmpW(name, end_copy))
+            {
+                free(end_copy);
+                return S_OK;
+            }
+        }
+        else if (type == XmlNodeType_Element)
+        {
+            if (read_text_value(reader, &value) != S_OK) break;
+            if (!lstrcmpW(value, L"Last")) *last = TRUE;
+            else
+            {
+                n = wcstol(value, NULL, 10);
+                if (n >= 1 && n <= (long)count) *mask |= 1 << (n - 1);
+                else FIXME("value %s out of range in %s\n", debugstr_w(value), debugstr_w(end_copy));
+            }
+        }
+    }
+    free(end_copy);
+    return SCHED_E_MALFORMEDXML;
+}
+
+/* ScheduleByWeek, ScheduleByMonth and ScheduleByMonthDayOfWeek: the trigger, read as a daily one
+ * so far, becomes a weekly, monthly or monthly day-of-week one */
+static HRESULT read_schedule_calendar(IXmlReader *reader, ITrigger *trigger, const WCHAR *element)
+{
+    TASK_TRIGGER_TYPE2 type;
+    XmlNodeType node;
+    const WCHAR *name;
+    WCHAR *end_copy, *value;
+    int mask, weeks = 0, days = 0, months = 0, dom = 0, interval = 1;
+    BOOL last = FALSE, have_interval = FALSE, empty = IXmlReader_IsEmptyElement(reader);
+    SchedTrigger *This;
+
+    if (!lstrcmpW(element, L"ScheduleByWeek")) type = TASK_TRIGGER_WEEKLY;
+    else if (!lstrcmpW(element, L"ScheduleByMonth")) type = TASK_TRIGGER_MONTHLY;
+    else type = TASK_TRIGGER_MONTHLYDOW;
+
+    if (!is_sched_trigger(trigger)) return skip_element(reader);
+    if (!(end_copy = wcsdup(element))) return E_OUTOFMEMORY;
+
+    while (!empty && IXmlReader_Read(reader, &node) == S_OK)
+    {
+        if (node == XmlNodeType_EndElement)
+        {
+            if (IXmlReader_GetLocalName(reader, &name, NULL) == S_OK && !lstrcmpW(name, end_copy)) break;
+        }
+        else if (node == XmlNodeType_Element)
+        {
+            if (IXmlReader_GetLocalName(reader, &name, NULL) != S_OK) break;
+            if (!lstrcmpW(name, L"DaysOfWeek") && type != TASK_TRIGGER_MONTHLY)
+                read_name_set(reader, L"DaysOfWeek", day_names, 7, &days);
+            else if (!lstrcmpW(name, L"Months") && type != TASK_TRIGGER_WEEKLY)
+                read_name_set(reader, L"Months", month_names, 12, &months);
+            else if (!lstrcmpW(name, L"WeeksInterval") && type == TASK_TRIGGER_WEEKLY)
+            {
+                if (read_text_value(reader, &value) == S_OK) { interval = wcstol(value, NULL, 10); have_interval = TRUE; }
+            }
+            else if (!lstrcmpW(name, L"DaysOfMonth") && type == TASK_TRIGGER_MONTHLY)
+                read_number_set(reader, L"DaysOfMonth", 31, &dom, &last);
+            else if (!lstrcmpW(name, L"Weeks") && type == TASK_TRIGGER_MONTHLYDOW)
+                read_number_set(reader, L"Weeks", 4, &weeks, &last);
+            else
+            {
+                FIXME("unhandled %s element %s\n", debugstr_w(end_copy), debugstr_w(name));
+                skip_element(reader);
+            }
+        }
+    }
+    free(end_copy);
+
+    trigger_set_calendar_type(trigger, type);
+    This = CONTAINING_RECORD(trigger, SchedTrigger, ITrigger_iface);
+    This->days_of_week = days;
+    This->months = months;
+    This->weeks = weeks;
+    This->days_of_month = dom;
+    This->run_last = last;
+    mask = have_interval ? interval : 1;
+    if (mask < 1 || mask > 52) return SCHED_E_INVALIDVALUE;
+    This->weeks_interval = mask;
+    return S_OK;
+}
+
 static void put_trigger_delay(ITrigger *trigger, const WCHAR *element, BSTR value)
 {
     ILogonTrigger *logon_trigger;
@@ -5376,6 +6082,11 @@ static void put_trigger_delay(ITrigger *trigger, const WCHAR *element, BSTR valu
     IRegistrationTrigger *registration_trigger;
     ITimeTrigger *time_trigger;
     IDailyTrigger *daily_trigger;
+    IWeeklyTrigger *weekly_trigger;
+    IMonthlyTrigger *monthly_trigger;
+    IMonthlyDOWTrigger *monthly_dow_trigger;
+    IEventTrigger *event_trigger;
+    ISessionStateChangeTrigger *session_trigger;
 
     if (!lstrcmpW(element, L"Delay"))
     {
@@ -5394,6 +6105,16 @@ static void put_trigger_delay(ITrigger *trigger, const WCHAR *element, BSTR valu
             IRegistrationTrigger_put_Delay(registration_trigger, value);
             IRegistrationTrigger_Release(registration_trigger);
         }
+        else if (ITrigger_QueryInterface(trigger, &IID_IEventTrigger, (void **)&event_trigger) == S_OK)
+        {
+            IEventTrigger_put_Delay(event_trigger, value);
+            IEventTrigger_Release(event_trigger);
+        }
+        else if (ITrigger_QueryInterface(trigger, &IID_ISessionStateChangeTrigger, (void **)&session_trigger) == S_OK)
+        {
+            ISessionStateChangeTrigger_put_Delay(session_trigger, value);
+            ISessionStateChangeTrigger_Release(session_trigger);
+        }
     }
     else
     {
@@ -5406,6 +6127,21 @@ static void put_trigger_delay(ITrigger *trigger, const WCHAR *element, BSTR valu
         {
             IDailyTrigger_put_RandomDelay(daily_trigger, value);
             IDailyTrigger_Release(daily_trigger);
+        }
+        else if (ITrigger_QueryInterface(trigger, &IID_IWeeklyTrigger, (void **)&weekly_trigger) == S_OK)
+        {
+            IWeeklyTrigger_put_RandomDelay(weekly_trigger, value);
+            IWeeklyTrigger_Release(weekly_trigger);
+        }
+        else if (ITrigger_QueryInterface(trigger, &IID_IMonthlyTrigger, (void **)&monthly_trigger) == S_OK)
+        {
+            IMonthlyTrigger_put_RandomDelay(monthly_trigger, value);
+            IMonthlyTrigger_Release(monthly_trigger);
+        }
+        else if (ITrigger_QueryInterface(trigger, &IID_IMonthlyDOWTrigger, (void **)&monthly_dow_trigger) == S_OK)
+        {
+            IMonthlyDOWTrigger_put_RandomDelay(monthly_dow_trigger, value);
+            IMonthlyDOWTrigger_Release(monthly_dow_trigger);
         }
     }
 }
@@ -5473,6 +6209,44 @@ static HRESULT read_trigger(IXmlReader *reader, ITrigger *trigger, const WCHAR *
                 read_repetition(reader, trigger);
             else if (!lstrcmpW(name, L"ScheduleByDay"))
                 read_schedule_by_day(reader, trigger);
+            else if (!lstrcmpW(name, L"ScheduleByWeek") || !lstrcmpW(name, L"ScheduleByMonth") ||
+                     !lstrcmpW(name, L"ScheduleByMonthDayOfWeek"))
+            {
+                WCHAR *schedule_name = wcsdup(name);
+
+                hr = schedule_name ? read_schedule_calendar(reader, trigger, schedule_name) : E_OUTOFMEMORY;
+                free(schedule_name);
+                if (hr != S_OK)
+                {
+                    free(element_name);
+                    return hr;
+                }
+            }
+            else if (!lstrcmpW(name, L"Subscription"))
+            {
+                IEventTrigger *event_trigger;
+
+                if (read_text_value(reader, &value) == S_OK &&
+                    ITrigger_QueryInterface(trigger, &IID_IEventTrigger, (void **)&event_trigger) == S_OK)
+                {
+                    IEventTrigger_put_Subscription(event_trigger, value);
+                    IEventTrigger_Release(event_trigger);
+                }
+            }
+            else if (!lstrcmpW(name, L"StateChange"))
+            {
+                ISessionStateChangeTrigger *session;
+                unsigned int i;
+
+                if (read_text_value(reader, &value) == S_OK &&
+                    ITrigger_QueryInterface(trigger, &IID_ISessionStateChangeTrigger, (void **)&session) == S_OK)
+                {
+                    for (i = 0; i < ARRAY_SIZE(state_changes); i++)
+                        if (!lstrcmpW(value, state_changes[i].name))
+                            ISessionStateChangeTrigger_put_StateChange(session, state_changes[i].type);
+                    ISessionStateChangeTrigger_Release(session);
+                }
+            }
             else if (!lstrcmpW(name, L"Delay") || !lstrcmpW(name, L"RandomDelay"))
             {
                 WCHAR *delay_name = wcsdup(name);
@@ -5485,11 +6259,37 @@ static HRESULT read_trigger(IXmlReader *reader, ITrigger *trigger, const WCHAR *
             {
                 ILogonTrigger *logon_trigger;
 
-                if (read_text_value(reader, &value) == S_OK &&
-                    ITrigger_QueryInterface(trigger, &IID_ILogonTrigger, (void **)&logon_trigger) == S_OK)
+                ISessionStateChangeTrigger *session;
+
+                if (read_text_value(reader, &value) != S_OK) break;
+                if (ITrigger_QueryInterface(trigger, &IID_ILogonTrigger, (void **)&logon_trigger) == S_OK)
                 {
                     ILogonTrigger_put_UserId(logon_trigger, value);
                     ILogonTrigger_Release(logon_trigger);
+                }
+                else if (ITrigger_QueryInterface(trigger, &IID_ISessionStateChangeTrigger, (void **)&session) == S_OK)
+                {
+                    ISessionStateChangeTrigger_put_UserId(session, value);
+                    ISessionStateChangeTrigger_Release(session);
+                }
+            }
+            else if (is_sched_trigger(trigger))
+            {
+                /* not modelled by the object: kept as text, so that it is registered as it was read */
+                WCHAR *text;
+
+                TRACE("keeping %s element %s\n", debugstr_w(element_name), debugstr_w(name));
+                if ((hr = capture_element(reader, &text)) != S_OK)
+                {
+                    free(element_name);
+                    return hr;
+                }
+                hr = trigger_add_extra(trigger, text);
+                free(text);
+                if (hr != S_OK)
+                {
+                    free(element_name);
+                    return hr;
                 }
             }
             else
@@ -5518,6 +6318,9 @@ static HRESULT read_triggers(IXmlReader *reader, ITaskDefinition *taskdef)
         { L"BootTrigger", TASK_TRIGGER_BOOT },
         { L"LogonTrigger", TASK_TRIGGER_LOGON },
         { L"RegistrationTrigger", TASK_TRIGGER_REGISTRATION },
+        { L"IdleTrigger", TASK_TRIGGER_IDLE },
+        { L"EventTrigger", TASK_TRIGGER_EVENT },
+        { L"SessionStateChangeTrigger", TASK_TRIGGER_SESSION_STATE_CHANGE },
     };
     ITriggerCollection *triggers;
     ITrigger *trigger;

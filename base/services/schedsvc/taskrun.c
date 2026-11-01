@@ -27,8 +27,13 @@
  * be updated, deleted or read only by whoever registered it or by an administrator, and the
  * request size, the path shape and the number of tasks per user are limited.
  *
- * Triggers: TimeTrigger and CalendarTrigger/ScheduleByDay (with Repetition, StartBoundary and
- * EndBoundary), LogonTrigger and BootTrigger (with Delay). The other trigger types are ignored.
+ * Triggers: TimeTrigger and CalendarTrigger (ScheduleByDay, ScheduleByWeek, ScheduleByMonth and
+ * ScheduleByMonthDayOfWeek, with Repetition, StartBoundary and EndBoundary), LogonTrigger and
+ * BootTrigger (with Delay). A calendar trigger runs at the time of day of its StartBoundary on the
+ * days its schedule picks, counted on the calendar of the zone of the StartBoundary: the machine's
+ * local time, daylight saving included, when the StartBoundary has no zone. The other trigger types
+ * (idle, event, session state change, registration) are kept in the task as registered and never
+ * run: as on Windows for a trigger that has no time, the task has no next run time.
  */
 
 #include <stdarg.h>
@@ -95,6 +100,18 @@ struct trigger
     ULONGLONG start;        /* UTC, 0 if absent */
     ULONGLONG end;          /* UTC, 0 if absent */
     ULONGLONG period;       /* CalendarTrigger/ScheduleByDay */
+    /* the StartBoundary as its own zone reads it, for the calendar triggers */
+    BOOL start_local;       /* no zone: the local time of the machine */
+    LONGLONG start_offset;  /* with a zone: its offset east of UTC, in 100 ns */
+    LONGLONG start_day;     /* days since 1970-01-01 */
+    LONG start_secs;        /* time of day */
+    /* ScheduleByWeek, ScheduleByMonth, ScheduleByMonthDayOfWeek */
+    unsigned int days_of_week;      /* bit 0 = Sunday */
+    unsigned int weeks_interval;
+    unsigned int months;            /* bit 0 = January */
+    unsigned int days_of_month;     /* bit 0 = day 1 */
+    unsigned int weeks;             /* bit 0 = first week */
+    BOOL run_last;                  /* the last day, or the last week, of the month */
     ULONGLONG rep_interval;
     ULONGLONG rep_duration;
     ULONGLONG delay;
@@ -150,8 +167,19 @@ static WCHAR *strdupW(const WCHAR *str)
     return str ? wcsdup(str) : NULL;
 }
 
+/* the date and time of a boundary as they are written, for the calendar triggers */
+struct boundary
+{
+    BOOL local;
+    LONGLONG offset;
+    LONGLONG day;
+    LONG secs;
+};
+
+static LONGLONG days_from_civil(int y, int m, int d);
+
 /* "YYYY-MM-DDTHH:MM:SS[.fff][Z|+HH:MM|-HH:MM]"; no zone means local time */
-static BOOL parse_datetime(const WCHAR *str, ULONGLONG *time)
+static BOOL parse_datetime(const WCHAR *str, ULONGLONG *time, struct boundary *fields)
 {
     SYSTEMTIME st = {0}, utc;
     FILETIME ft;
@@ -186,6 +214,13 @@ static BOOL parse_datetime(const WCHAR *str, ULONGLONG *time)
     st.wHour = hour;
     st.wMinute = minute;
     st.wSecond = second;
+    if (fields)
+    {
+        fields->local = !zone;
+        fields->offset = offset;
+        fields->secs = hour * 3600 + minute * 60 + second;
+        fields->day = days_from_civil(year, month, day);
+    }
     if (!zone)
     {
         if (!TzSpecificLocalTimeToSystemTime(NULL, &st, &utc)) return FALSE;
@@ -244,15 +279,201 @@ static BOOL parse_bool(const WCHAR *str)
     return !wcscmp(str, L"true") || !wcscmp(str, L"1");
 }
 
+/* Calendar arithmetic for the calendar triggers: days are counted since 1970-01-01 on the
+ * calendar of the zone of the trigger's StartBoundary. */
+
+/* the proleptic Gregorian calendar, after H. Hinnant's days_from_civil */
+static LONGLONG days_from_civil(int y, int m, int d)
+{
+    LONGLONG era, yoe, doy, doe;
+
+    y -= m <= 2;
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = y - era * 400;
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+static void civil_from_days(LONGLONG z, int *year, int *month, int *day)
+{
+    LONGLONG era, doe, yoe, y, doy, mp;
+
+    z += 719468;
+    era = (z >= 0 ? z : z - 146096) / 146097;
+    doe = z - era * 146097;
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    y = yoe + era * 400;
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    mp = (5 * doy + 2) / 153;
+    *day = (int)(doy - (153 * mp + 2) / 5 + 1);
+    *month = (int)(mp < 10 ? mp + 3 : mp - 9);
+    *year = (int)(y + (*month <= 2));
+}
+
+static int days_in_month(int year, int month)
+{
+    static const int days[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+
+    if (month == 2 && ((year % 4 == 0 && year % 100) || year % 400 == 0)) return 29;
+    return days[(month - 1) % 12];
+}
+
+/* 0 = Sunday; 1970-01-01 was a Thursday */
+static int weekday_of(LONGLONG day)
+{
+    LONGLONG w = (day + 4) % 7;
+
+    return (int)(w < 0 ? w + 7 : w);
+}
+
+#define EPOCH_DIFF_SECONDS 11644473600LL
+#define MIN_CALENDAR_YEAR 1601
+#define MAX_CALENDAR_YEAR 30000
+/* a calendar trigger looks this far ahead of its start (a 29th of February, and then some) */
+#define MAX_CALENDAR_DAYS 40000
+
+/* the day of a time in the zone of the trigger's StartBoundary */
+static BOOL calendar_day_of(const struct trigger *trigger, ULONGLONG time, LONGLONG *day)
+{
+    FILETIME ft;
+    SYSTEMTIME utc, local;
+    LONGLONG secs;
+
+    if (!trigger->start_local)
+    {
+        secs = (LONGLONG)(time / TICKS_PER_SECOND) - EPOCH_DIFF_SECONDS + trigger->start_offset / (LONGLONG)TICKS_PER_SECOND;
+        *day = secs >= 0 ? secs / 86400 : -((-secs + 86399) / 86400);
+        return TRUE;
+    }
+    ft.dwLowDateTime = (DWORD)time;
+    ft.dwHighDateTime = (DWORD)(time >> 32);
+    if (!FileTimeToSystemTime(&ft, &utc) || !SystemTimeToTzSpecificLocalTime(NULL, &utc, &local)) return FALSE;
+    *day = days_from_civil(local.wYear, local.wMonth, local.wDay);
+    return TRUE;
+}
+
+/* the time (UTC) at which a day of the trigger's calendar has the time of day of its StartBoundary;
+ * a local time that the clock skips or repeats at a daylight saving change is what the system makes of it */
+static ULONGLONG calendar_time_of(const struct trigger *trigger, LONGLONG day)
+{
+    SYSTEMTIME local, utc;
+    FILETIME ft;
+    LONGLONG secs;
+    int y, m, d;
+
+    civil_from_days(day, &y, &m, &d);
+    if (y < MIN_CALENDAR_YEAR || y > MAX_CALENDAR_YEAR) return NO_TIME;
+
+    if (!trigger->start_local)
+    {
+        secs = day * 86400 + trigger->start_secs + EPOCH_DIFF_SECONDS - trigger->start_offset / (LONGLONG)TICKS_PER_SECOND;
+        return secs <= 0 ? NO_TIME : (ULONGLONG)secs * TICKS_PER_SECOND;
+    }
+
+    memset(&local, 0, sizeof(local));
+    local.wYear = y;
+    local.wMonth = m;
+    local.wDay = d;
+    local.wHour = trigger->start_secs / 3600;
+    local.wMinute = trigger->start_secs / 60 % 60;
+    local.wSecond = trigger->start_secs % 60;
+    if (!TzSpecificLocalTimeToSystemTime(NULL, &local, &utc) || !SystemTimeToFileTime(&utc, &ft)) return NO_TIME;
+    return ((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+}
+
+/* does the schedule of a calendar trigger pick this day of its calendar */
+static BOOL calendar_day_matches(const struct trigger *trigger, LONGLONG day)
+{
+    int year, month, mday, dim, wday = weekday_of(day);
+    unsigned int interval;
+    LONGLONG weeks;
+
+    if (day < trigger->start_day) return FALSE;
+    civil_from_days(day, &year, &month, &mday);
+    dim = days_in_month(year, month);
+
+    switch (trigger->type)
+    {
+    case TASK_TRIGGER_DAILY:
+        return !((day - trigger->start_day) % (LONGLONG)(trigger->period / (86400 * TICKS_PER_SECOND)));
+
+    case TASK_TRIGGER_WEEKLY:
+        if (!(trigger->days_of_week & (1u << wday))) return FALSE;
+        /* the weeks count from the one the StartBoundary is in, a week starts on Sunday */
+        interval = trigger->weeks_interval ? trigger->weeks_interval : 1;
+        weeks = ((day - wday) - (trigger->start_day - weekday_of(trigger->start_day))) / 7;
+        return !(weeks % interval);
+
+    case TASK_TRIGGER_MONTHLY:
+        if (!(trigger->months & (1u << (month - 1)))) return FALSE;
+        if (trigger->days_of_month & (1u << (mday - 1))) return TRUE;
+        return trigger->run_last && mday == dim;
+
+    case TASK_TRIGGER_MONTHLYDOW:
+        if (!(trigger->months & (1u << (month - 1))) || !(trigger->days_of_week & (1u << wday))) return FALSE;
+        if ((mday - 1) / 7 < 4 && (trigger->weeks & (1u << ((mday - 1) / 7)))) return TRUE;
+        return trigger->run_last && mday + 7 > dim;
+
+    default:
+        return FALSE;
+    }
+}
+
+/* the first run of a calendar trigger strictly after 'after', NO_TIME if none: the first day of the
+ * schedule after it, and the repetition of the day before, which may reach past midnight */
+static ULONGLONG calendar_next_run(const struct trigger *trigger, ULONGLONG after)
+{
+    ULONGLONG prev = NO_TIME, base, next = NO_TIME, rep, j;
+    LONGLONG day, first, limit, today;
+
+    first = trigger->start_day;
+    limit = first + MAX_CALENDAR_DAYS;
+    /* without a repetition nothing before the day of 'after' (less a day of zone) matters */
+    if (!trigger->rep_interval && calendar_day_of(trigger, after, &today) && today - 1 > first)
+        first = today - 1;
+    else if (trigger->rep_interval && trigger->rep_duration && calendar_day_of(trigger, after, &today) &&
+             today - 2 - (LONGLONG)(trigger->rep_duration / (86400 * TICKS_PER_SECOND)) > first)
+        first = today - 2 - (LONGLONG)(trigger->rep_duration / (86400 * TICKS_PER_SECOND));
+    if (limit < first + MAX_CALENDAR_DAYS) limit = first + MAX_CALENDAR_DAYS;
+
+    for (day = first; day <= limit; day++)
+    {
+        if (!calendar_day_matches(trigger, day)) continue;
+        if ((base = calendar_time_of(trigger, day)) == NO_TIME) continue;
+        if (trigger->end && base > trigger->end) break;
+        if (base <= after) { prev = base; continue; }
+        next = base;
+        break;
+    }
+
+    if (prev != NO_TIME && trigger->rep_interval)
+    {
+        j = (after - prev) / trigger->rep_interval + 1;
+        if (!trigger->rep_duration || j * trigger->rep_interval < trigger->rep_duration)
+        {
+            rep = prev + j * trigger->rep_interval;
+            if (rep < next) next = rep;
+        }
+    }
+    if (trigger->end && next != NO_TIME && next > trigger->end) return NO_TIME;
+    return next;
+}
+
 /* the first run of a time-based trigger strictly after 'after', NO_TIME if none */
 static ULONGLONG trigger_next_run(const struct trigger *trigger, ULONGLONG after)
 {
     ULONGLONG base, next, j;
 
     if (!trigger->supported || !trigger->enabled || !trigger->start) return NO_TIME;
+    if (trigger->type == TASK_TRIGGER_WEEKLY || trigger->type == TASK_TRIGGER_MONTHLY ||
+        trigger->type == TASK_TRIGGER_MONTHLYDOW)
+        return calendar_next_run(trigger, after);
     if (trigger->type != TASK_TRIGGER_TIME && trigger->type != TASK_TRIGGER_DAILY) return NO_TIME;
     /* the period and the interval divide below: a task must never get a zero one */
     if (trigger->type == TASK_TRIGGER_DAILY && !trigger->period) return NO_TIME;
+    /* a daily trigger on the local clock keeps its time of day through a daylight saving change */
+    if (trigger->type == TASK_TRIGGER_DAILY && trigger->start_local) return calendar_next_run(trigger, after);
 
     if (after < trigger->start)
         next = trigger->start;
@@ -348,8 +569,42 @@ static void begin_element(struct task *task, const WCHAR **names, unsigned int d
     else if (depth == 4 && !wcscmp(names[1], L"Triggers") && !wcscmp(names[2], L"CalendarTrigger") &&
              wcscmp(names[3], L"ScheduleByDay") && !wcsncmp(names[3], L"ScheduleBy", 10))
     {
-        FIXME("%s: CalendarTrigger/%s is not supported\n", debugstr_w(task->path), debugstr_w(names[3]));
-        if ((trigger = current_trigger(task))) trigger->supported = FALSE;
+        if (!(trigger = current_trigger(task))) return;
+        if (!wcscmp(names[3], L"ScheduleByWeek"))
+        {
+            trigger->type = TASK_TRIGGER_WEEKLY;
+            trigger->weeks_interval = 1;
+        }
+        else if (!wcscmp(names[3], L"ScheduleByMonth")) trigger->type = TASK_TRIGGER_MONTHLY;
+        else if (!wcscmp(names[3], L"ScheduleByMonthDayOfWeek")) trigger->type = TASK_TRIGGER_MONTHLYDOW;
+        else
+        {
+            FIXME("%s: CalendarTrigger/%s is not supported\n", debugstr_w(task->path), debugstr_w(names[3]));
+            trigger->supported = FALSE;
+        }
+    }
+    else if (depth == 6 && !wcscmp(names[1], L"Triggers") && !wcscmp(names[2], L"CalendarTrigger") &&
+             (trigger = current_trigger(task)) &&
+             ((trigger->type == TASK_TRIGGER_WEEKLY && !wcscmp(names[4], L"DaysOfWeek")) ||
+              (trigger->type == TASK_TRIGGER_MONTHLYDOW && !wcscmp(names[4], L"DaysOfWeek")) ||
+              (trigger->type != TASK_TRIGGER_WEEKLY && !wcscmp(names[4], L"Months"))))
+    {
+        static const WCHAR *const days[7] = { L"Sunday", L"Monday", L"Tuesday", L"Wednesday", L"Thursday", L"Friday", L"Saturday" };
+        static const WCHAR *const months[12] = { L"January", L"February", L"March", L"April", L"May", L"June", L"July",
+                                                 L"August", L"September", L"October", L"November", L"December" };
+        BOOL is_day = !wcscmp(names[4], L"DaysOfWeek");
+        const WCHAR *const *list = is_day ? days : months;
+        unsigned int n = is_day ? 7 : 12;
+
+        for (i = 0; i < n; i++)
+        {
+            if (wcscmp(names[5], list[i])) continue;
+            if (is_day) trigger->days_of_week |= 1u << i;
+            else trigger->months |= 1u << i;
+            return;
+        }
+        FIXME("%s: unknown name %s\n", debugstr_w(task->path), debugstr_w(names[5]));
+        trigger->supported = FALSE;
     }
     else if (depth == 3 && !wcscmp(names[1], L"Actions"))
     {
@@ -394,12 +649,21 @@ static void element_text(struct task *task, const WCHAR **names, unsigned int de
             if (!wcscmp(name, L"Enabled")) trigger->enabled = parse_bool(value);
             else if (!wcscmp(name, L"StartBoundary"))
             {
-                if (!parse_datetime(value, &trigger->start)) trigger->supported = FALSE;
+                struct boundary b;
+
+                if (!parse_datetime(value, &trigger->start, &b)) trigger->supported = FALSE;
+                else
+                {
+                    trigger->start_local = b.local;
+                    trigger->start_offset = b.offset;
+                    trigger->start_day = b.day;
+                    trigger->start_secs = b.secs;
+                }
             }
             else if (!wcscmp(name, L"EndBoundary"))
             {
                 /* an end that cannot be read must not leave the trigger without one */
-                if (!parse_datetime(value, &trigger->end)) trigger->supported = FALSE;
+                if (!parse_datetime(value, &trigger->end, NULL)) trigger->supported = FALSE;
             }
             else if (!wcscmp(name, L"Delay")) trigger->delay = parse_duration(value);
             else if (!wcscmp(name, L"UserId"))
@@ -418,6 +682,31 @@ static void element_text(struct task *task, const WCHAR **names, unsigned int de
                     trigger->rep_interval = MIN_REPETITION_SECONDS * TICKS_PER_SECOND;
             }
             else if (!wcscmp(name, L"Duration")) trigger->rep_duration = parse_duration(value);
+        }
+        else if (depth == 5 && !wcscmp(names[3], L"ScheduleByWeek") && !wcscmp(name, L"WeeksInterval"))
+        {
+            LONGLONG weeks = _wtoi64(value);
+
+            if (weeks < 1 || weeks > 52) trigger->supported = FALSE;
+            else trigger->weeks_interval = (unsigned int)weeks;
+        }
+        else if (depth == 6 && !wcscmp(names[3], L"ScheduleByMonth") && !wcscmp(names[4], L"DaysOfMonth") &&
+                 !wcscmp(name, L"Day"))
+        {
+            LONGLONG day = _wtoi64(value);
+
+            if (!wcscmp(value, L"Last")) trigger->run_last = TRUE;
+            else if (day >= 1 && day <= 31) trigger->days_of_month |= 1u << (day - 1);
+            else trigger->supported = FALSE;
+        }
+        else if (depth == 6 && !wcscmp(names[3], L"ScheduleByMonthDayOfWeek") && !wcscmp(names[4], L"Weeks") &&
+                 !wcscmp(name, L"Week"))
+        {
+            LONGLONG week = _wtoi64(value);
+
+            if (!wcscmp(value, L"Last")) trigger->run_last = TRUE;
+            else if (week >= 1 && week <= 4) trigger->weeks |= 1u << (week - 1);
+            else trigger->supported = FALSE;
         }
         else if (depth == 5 && !wcscmp(names[3], L"ScheduleByDay") && !wcscmp(name, L"DaysInterval"))
         {

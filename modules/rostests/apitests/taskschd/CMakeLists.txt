@@ -3,6 +3,7 @@ include_directories(BEFORE ${REACTOS_SOURCE_DIR}/sdk/include/wine ${REACTOS_BINA
 add_rpc_files(client schrpc.idl)
 
 list(APPEND SOURCE
+    Calendar.c
     Dispatch.c
     Schtasks.c
     Security.c
