@@ -44,4 +44,14 @@ if(ARCH STREQUAL "amd64")
             add_cd_file(FILE ${_net_file} DESTINATION ${_PSM_DST}/${_net_dir} FOR all)
         endforeach()
     endforeach()
+
+    # Storage (Get-Volume, Get-Disk, Get-Partition, Get-PhysicalDisk): one native helper in its own namespace, shipped beside the module.
+    foreach(_stor_file
+            Storage.psd1
+            Storage.psm1
+            Storage.Types.psm1
+            Storage.format.ps1xml
+            NitroStorageNative.cs)
+        add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/Storage/${_stor_file} DESTINATION ${_PSM_DST}/Storage/2.0.0.0 FOR all)
+    endforeach()
 endif()
