@@ -66,6 +66,7 @@ extern void func_NtCreateProfile(void);
 extern void func_NtCreateSectionImage(void);
 extern void func_NtCreateSectionSize(void);
 extern void func_NtCreateThread(void);
+extern void func_NtCreateTimer2(void);
 extern void func_NtGetNextThread(void);
 extern void func_NtDeleteKey(void);
 extern void func_NtDelayExecution(void);
@@ -290,6 +291,7 @@ const struct test winetest_testlist[] =
     { "NtCreateSectionImage",           func_NtCreateSectionImage },
     { "NtCreateSectionSize",            func_NtCreateSectionSize },
     { "NtCreateThread",                 func_NtCreateThread },
+    { "NtCreateTimer2",                 func_NtCreateTimer2 },
     { "NtGetNextThread",                func_NtGetNextThread },
     { "NtDeleteKey",                    func_NtDeleteKey },
     { "NtDelayExecution",               func_NtDelayExecution },

@@ -80,6 +80,7 @@ list(APPEND SOURCE
     NtCreateSectionImage.c
     NtCreateSectionSize.c
     NtCreateThread.c
+    NtCreateTimer2.c
     NtDeleteKey.c
     NtDelayExecution.c
     NtDuplicateObject.c
