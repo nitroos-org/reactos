@@ -2039,16 +2039,28 @@ PWND FASTCALL IntCreateWindow(CREATESTRUCTW* Cs,
    if (Class->atomClassName == gpsi->atomSysClass[ICLS_EDIT])
    {
       PCALLPROCDATA CallProc;
-      CallProc = CreateCallProc(pWnd->head.rpdesk, pWnd->lpfnWndProc, pWnd->Unicode , pWnd->head.pti->ppi);
 
+      /* The CallProc is owned by the class, which keeps it until the class is
+         destroyed, so a window must reuse the one an earlier window of the class
+         already added instead of adding another per window. Otherwise every
+         EDIT (and every COMBOBOX, which contains one) window consumes one USER
+         object of the process quota for the life of the process. */
+      CallProc = UserSearchForCallProc(Class->pclsBase->spcpdFirst,
+                                       pWnd->lpfnWndProc,
+                                       pWnd->Unicode ? UserGetCPDA2U : UserGetCPDU2A);
       if (!CallProc)
       {
-         EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
-         ERR("Warning: Unable to create CallProc for edit control. Control may not operate correctly! hwnd %p\n", hWnd);
-      }
-      else
-      {
-         UserAddCallProcToClass(pWnd->pcls, CallProc);
+         CallProc = CreateCallProc(pWnd->head.rpdesk, pWnd->lpfnWndProc, pWnd->Unicode , pWnd->head.pti->ppi);
+
+         if (!CallProc)
+         {
+            EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            ERR("Warning: Unable to create CallProc for edit control. Control may not operate correctly! hwnd %p\n", hWnd);
+         }
+         else
+         {
+            UserAddCallProcToClass(pWnd->pcls, CallProc);
+         }
       }
    }
 
