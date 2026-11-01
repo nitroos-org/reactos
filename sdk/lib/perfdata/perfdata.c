@@ -268,7 +268,7 @@ static struct { DWORD gen; DWORD count; struct net_info *net; } snap_net;
 static struct
 {
     DWORD gen;
-    DWORD count, threads;
+    DWORD count, threads, ready;
     BYTE *buf;
     struct pdh_process **proc;
     WCHAR **name;
@@ -556,6 +556,35 @@ static BOOL ensure_net( BOOL force )
     return TRUE;
 }
 
+/* SYSTEM_THREAD_INFORMATION entries follow the IO counters of a SYSTEM_PROCESS_INFORMATION record */
+#ifdef _WIN64
+#define PDH_THREADS_OFFSET   0x100
+#define PDH_THREAD_SIZE      0x50
+#define PDH_THREAD_STATE_OFF 0x44
+#else
+#define PDH_THREADS_OFFSET   0xB8
+#define PDH_THREAD_SIZE      0x40
+#define PDH_THREAD_STATE_OFF 0x34
+#endif
+#define PDH_THREAD_STATE_READY          1
+#define PDH_THREAD_STATE_DEFERREDREADY  7
+
+/* threads that are ready to run but not running: the value of System\\Processor Queue Length */
+static DWORD count_ready_threads( const struct pdh_process *p, const BYTE *buf, ULONG len )
+{
+    const BYTE *thr = (const BYTE *)p + PDH_THREADS_OFFSET;
+    DWORD i, ready = 0;
+
+    for (i = 0; i < p->NumberOfThreads; i++, thr += PDH_THREAD_SIZE)
+    {
+        ULONG state;
+        if (thr + PDH_THREAD_SIZE > buf + len) break;
+        state = *(const ULONG *)(thr + PDH_THREAD_STATE_OFF);
+        if (state == PDH_THREAD_STATE_READY || state == PDH_THREAD_STATE_DEFERREDREADY) ready++;
+    }
+    return ready;
+}
+
 static BOOL ensure_proc( BOOL force )
 {
     ULONG size = 0x20000, ret;
@@ -586,6 +615,7 @@ static BOOL ensure_proc( BOOL force )
     {
         n++;
         snap_proc.threads += p->NumberOfThreads;
+        snap_proc.ready += count_ready_threads( p, buf, ret );
         if (!p->NextEntryOffset) break;
     }
     snap_proc.buf = buf;
@@ -943,6 +973,10 @@ static void fetch_system( DWORD id, LONGLONG *first, LONGLONG *second, BOOL *ok 
     case CID_SYSTEM_THREADS:
         if (!(*ok = ensure_proc( FALSE ))) return;
         *first = snap_proc.threads;
+        return;
+    case CID_SYSTEM_PROCESSOR_QUEUE_LENGTH:
+        if (!(*ok = ensure_proc( FALSE ))) return;
+        *first = snap_proc.ready;
         return;
     }
 

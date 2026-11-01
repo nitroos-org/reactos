@@ -1425,11 +1425,11 @@ static void test_data_source(void)
 
 static void test_counter_values(void)
 {
-    PDH_HCOUNTER avail, cpu, procs, uptime;
+    PDH_HCOUNTER avail, cpu, procs, uptime, queue;
     PDH_FMT_COUNTERVALUE value;
     PDH_HQUERY query;
     PDH_STATUS ret;
-    DWORD type;
+    DWORD type, index;
 
     ret = PdhOpenQueryW( NULL, 0, &query );
     ok(ret == ERROR_SUCCESS, "PdhOpenQueryW failed 0x%08lx\n", ret);
@@ -1441,6 +1441,12 @@ static void test_counter_values(void)
     ok(ret == ERROR_SUCCESS, "PdhAddEnglishCounterW failed 0x%08lx\n", ret);
     ret = PdhAddEnglishCounterW( query, L"\\System\\System Up Time", 0, &uptime );
     ok(ret == ERROR_SUCCESS, "PdhAddEnglishCounterW failed 0x%08lx\n", ret);
+    /* btop4win and other monitors read the run queue through this counter */
+    ret = PdhAddEnglishCounterW( query, L"\\System\\Processor Queue Length", 0, &queue );
+    ok(ret == ERROR_SUCCESS, "PdhAddEnglishCounterW failed 0x%08lx\n", ret);
+    ret = PdhLookupPerfIndexByNameW( NULL, L"Processor Queue Length", &index );
+    ok(ret == ERROR_SUCCESS, "PdhLookupPerfIndexByNameW failed 0x%08lx\n", ret);
+    ok(index == 44, "got index %lu\n", index);
 
     ret = PdhCollectQueryData( query );
     ok(ret == ERROR_SUCCESS, "PdhCollectQueryData failed 0x%08lx\n", ret);
@@ -1458,6 +1464,12 @@ static void test_counter_values(void)
     ret = PdhGetFormattedCounterValue( procs, PDH_FMT_LONG, &type, &value );
     ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterValue failed 0x%08lx\n", ret);
     ok(value.longValue >= 1, "processes %ld\n", value.longValue);
+
+    ret = PdhGetFormattedCounterValue( queue, PDH_FMT_LONG, &type, &value );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterValue failed 0x%08lx\n", ret);
+    ok(type == PERF_COUNTER_RAWCOUNT, "got type %#lx\n", type);
+    ok(value.CStatus == PDH_CSTATUS_VALID_DATA, "got 0x%08lx\n", value.CStatus);
+    ok(value.longValue >= 0 && value.longValue < 1000, "processor queue length %ld\n", value.longValue);
 
     Sleep( 1100 );
     ret = PdhCollectQueryData( query );
