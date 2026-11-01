@@ -1631,6 +1631,7 @@ SepAccessCheck(
     ACCESS_MASK SingleGrantedAccess = 0;
     NTSTATUS SingleAccessStatus = STATUS_ACCESS_DENIED;
     BOOLEAN TokenLocked = FALSE;
+    BOOLEAN IsPseudoHandle = FALSE;
     BOOLEAN OutputAccessResults = FALSE;
     BOOLEAN WriteRequiredLength = FALSE;
     NTSTATUS FunctionStatus = STATUS_SUCCESS;
@@ -1707,20 +1708,23 @@ SepAccessCheck(
     }
 
     /* Reference the token */
-    Status = ObReferenceObjectByHandle(ClientToken,
-                                       TOKEN_QUERY,
-                                       SeTokenObjectType,
-                                       PreviousMode,
-                                       (PVOID*)&Token,
-                                       NULL);
+    Status = SepReferenceTokenHandle(ClientToken,
+                                     TOKEN_QUERY,
+                                     PreviousMode,
+                                     &Token,
+                                     &IsPseudoHandle);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("Failed to reference token (Status 0x%08lx)\n", Status);
         return Status;
     }
 
-    /* Check token type */
-    if (Token->TokenType != TokenImpersonation)
+    /*
+     * A real handle must name an impersonation token. The token pseudo
+     * handles are the exception (as on Windows 10): the primary token
+     * they resolve to is checked as it is, with no impersonation level.
+     */
+    if (Token->TokenType != TokenImpersonation && !IsPseudoHandle)
     {
         DPRINT("No impersonation token\n");
         ObDereferenceObject(Token);
@@ -1728,7 +1732,8 @@ SepAccessCheck(
     }
 
     /* Check the impersonation level */
-    if (Token->ImpersonationLevel < SecurityIdentification)
+    if (Token->TokenType == TokenImpersonation &&
+        Token->ImpersonationLevel < SecurityIdentification)
     {
         DPRINT1("Impersonation level < SecurityIdentification\n");
         ObDereferenceObject(Token);

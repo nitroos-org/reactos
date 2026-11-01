@@ -2480,6 +2480,96 @@ SeTokenType(
 
 /**
  * @brief
+ * References a token by handle for the services that only read it, and
+ * accepts the Windows 8+ token pseudo handles.
+ *
+ * @param[in] TokenHandle
+ * A handle to a token, or one of the pseudo handles NtCurrentProcessToken()
+ * (-4, the primary token of the current process), NtCurrentThreadToken()
+ * (-5, the impersonation token of the current thread) and
+ * NtCurrentEffectiveToken() (-6, the impersonation token of the current
+ * thread, or the primary token of the process when it is not impersonating).
+ *
+ * @param[in] DesiredAccess
+ * The access the caller needs. A pseudo handle only stands for TOKEN_QUERY
+ * and TOKEN_QUERY_SOURCE; a request for any other right is not resolved
+ * and fails like any invalid handle (STATUS_INVALID_HANDLE), as on
+ * Windows 10, where e.g. NtDuplicateToken or NtPrivilegeCheck reject them.
+ *
+ * @param[in] PreviousMode
+ * The processor access mode of the caller.
+ *
+ * @param[out] Token
+ * The referenced token, to be released with ObDereferenceObject.
+ *
+ * @param[out] IsPseudoHandle
+ * Optional. Set to TRUE if TokenHandle was resolved as a pseudo handle.
+ *
+ * @return
+ * STATUS_SUCCESS, STATUS_NO_TOKEN if NtCurrentThreadToken() is used while the
+ * thread is not impersonating, or the failure of ObReferenceObjectByHandle.
+ */
+NTSTATUS
+NTAPI
+SepReferenceTokenHandle(
+    _In_ HANDLE TokenHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ KPROCESSOR_MODE PreviousMode,
+    _Out_ PTOKEN *Token,
+    _Out_opt_ PBOOLEAN IsPseudoHandle)
+{
+    PACCESS_TOKEN ResolvedToken;
+    BOOLEAN CopyOnOpen, EffectiveOnly;
+    SECURITY_IMPERSONATION_LEVEL ImpersonationLevel;
+
+    PAGED_CODE();
+
+    *Token = NULL;
+    if (IsPseudoHandle)
+        *IsPseudoHandle = FALSE;
+
+    if ((TokenHandle != NtCurrentProcessToken()) &&
+        (TokenHandle != NtCurrentThreadToken()) &&
+        (TokenHandle != NtCurrentEffectiveToken()))
+    {
+        goto ByHandle;
+    }
+
+    /* The pseudo handles stand for TOKEN_QUERY | TOKEN_QUERY_SOURCE and nothing more */
+    if (DesiredAccess & ~(TOKEN_QUERY | TOKEN_QUERY_SOURCE))
+        goto ByHandle;
+
+    ResolvedToken = NULL;
+    if (TokenHandle != NtCurrentProcessToken())
+    {
+        ResolvedToken = PsReferenceImpersonationToken(PsGetCurrentThread(),
+                                                      &CopyOnOpen,
+                                                      &EffectiveOnly,
+                                                      &ImpersonationLevel);
+        if (ResolvedToken == NULL && TokenHandle == NtCurrentThreadToken())
+            return STATUS_NO_TOKEN;
+    }
+
+    /* The process token, or the effective token of a thread that is not impersonating */
+    if (ResolvedToken == NULL)
+        ResolvedToken = PsReferencePrimaryToken(PsGetCurrentProcess());
+
+    *Token = (PTOKEN)ResolvedToken;
+    if (IsPseudoHandle)
+        *IsPseudoHandle = TRUE;
+    return STATUS_SUCCESS;
+
+ByHandle:
+    return ObReferenceObjectByHandle(TokenHandle,
+                                     DesiredAccess,
+                                     SeTokenObjectType,
+                                     PreviousMode,
+                                     (PVOID*)Token,
+                                     NULL);
+}
+
+/**
+ * @brief
  * Determines if a token is either an admin token or not. Such
  * condition is checked based upon TOKEN_HAS_ADMIN_GROUP flag,
  * which means if the respective access token belongs to an

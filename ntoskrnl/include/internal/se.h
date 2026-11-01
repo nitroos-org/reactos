@@ -345,6 +345,24 @@ CODE_SEG("INIT")
 PTOKEN
 SepCreateSystemAnonymousLogonTokenNoEveryone(VOID);
 
+//
+// Windows 8+ pseudo handles for the access token of the current process,
+// the impersonation token of the current thread, and the effective token
+// of the current thread (impersonation token, else the process token)
+//
+#define NtCurrentProcessToken()     ((HANDLE)(LONG_PTR)-4)
+#define NtCurrentThreadToken()      ((HANDLE)(LONG_PTR)-5)
+#define NtCurrentEffectiveToken()   ((HANDLE)(LONG_PTR)-6)
+
+NTSTATUS
+NTAPI
+SepReferenceTokenHandle(
+    _In_ HANDLE TokenHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ KPROCESSOR_MODE PreviousMode,
+    _Out_ PTOKEN *Token,
+    _Out_opt_ PBOOLEAN IsPseudoHandle);
+
 NTSTATUS
 NTAPI
 SepDuplicateToken(

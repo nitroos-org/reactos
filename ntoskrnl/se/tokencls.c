@@ -662,12 +662,11 @@ NtQueryInformationToken(
         return Status;
     }
 
-    Status = ObReferenceObjectByHandle(TokenHandle,
-                                       (TokenInformationClass == TokenSource) ? TOKEN_QUERY_SOURCE : TOKEN_QUERY,
-                                       SeTokenObjectType,
-                                       PreviousMode,
-                                       (PVOID*)&Token,
-                                       NULL);
+    Status = SepReferenceTokenHandle(TokenHandle,
+                                     (TokenInformationClass == TokenSource) ? TOKEN_QUERY_SOURCE : TOKEN_QUERY,
+                                     PreviousMode,
+                                     &Token,
+                                     NULL);
     if (NT_SUCCESS(Status))
     {
         /* Lock the token */

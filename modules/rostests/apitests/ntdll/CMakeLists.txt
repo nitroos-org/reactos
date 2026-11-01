@@ -142,6 +142,7 @@ list(APPEND SOURCE
     NtSetInformationProcess.c
     NtSetInformationThread.c
     NtSetInformationToken.c
+    NtTokenPseudoHandles.c
     NtSetLdtEntries.c
     NtSetValueKey.c
     NtSetVolumeInformationFile.c
