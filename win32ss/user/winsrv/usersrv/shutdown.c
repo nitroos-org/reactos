@@ -915,6 +915,246 @@ EndTaskTerminate(
     return Ret;
 }
 
+/*
+ * EndTask without fForce on a window that does not go away. Measured on Windows 10 22H2: the
+ * call keeps waiting, and after about five seconds (the hung-app timeout) a dialog "End
+ * Program - <window title>" ("This program is not responding", End Now / Cancel) appears,
+ * whether the window does not pump messages or pumps them and ignores WM_CLOSE. The call
+ * returns TRUE once the window is gone, also when something else ended its process.
+ * The dialog runs on its own thread, so the waiting thread never depends on it, and it never
+ * sends a message to the window (the title is read with InternalGetWindowText). The two
+ * threads share END_TASK_UI by reference count: whichever lets go last frees it.
+ */
+typedef struct _END_TASK_UI
+{
+    LONG Refs;
+    HWND hWndTarget;
+    HANDLE hReady;          /* set once the dialog exists, or could not be created */
+    BOOL Shown;             /* the dialog was created */
+    volatile LONG Choice;   /* 0 = none yet, IDC_END_NOW, IDCANCEL */
+    volatile LONG Cancelled;/* the waiting thread no longer wants the dialog */
+} END_TASK_UI, *PEND_TASK_UI;
+
+static VOID
+EndTaskUiRelease(PEND_TASK_UI Ui)
+{
+    if (InterlockedDecrement(&Ui->Refs) == 0)
+    {
+        CloseHandle(Ui->hReady);
+        RtlFreeHeap(UserServerHeap, 0, Ui);
+    }
+}
+
+static INT_PTR CALLBACK
+NotRespondingDlgProc(HWND Dlg, UINT Msg, WPARAM wParam, LPARAM lParam)
+{
+    PEND_TASK_UI Ui;
+
+    switch (Msg)
+    {
+    case WM_INITDIALOG:
+    {
+        WCHAR Title[256];
+        int Len;
+
+        Ui = (PEND_TASK_UI)lParam;
+        SetWindowLongPtrW(Dlg, DWLP_USER, (LONG_PTR)Ui);
+        Len = GetWindowTextW(Dlg, Title, ARRAYSIZE(Title));
+        if (Len >= 0 && Len < (int)ARRAYSIZE(Title) - 1)
+        {
+            InternalGetWindowText(Ui->hWndTarget, Title + Len, ARRAYSIZE(Title) - Len);
+            SetWindowTextW(Dlg, Title);
+        }
+        return TRUE;
+    }
+
+    case WM_COMMAND:
+        if (HIWORD(wParam) == BN_CLICKED &&
+            (LOWORD(wParam) == IDC_END_NOW || LOWORD(wParam) == IDCANCEL))
+        {
+            Ui = (PEND_TASK_UI)GetWindowLongPtrW(Dlg, DWLP_USER);
+            InterlockedCompareExchange(&Ui->Choice, LOWORD(wParam), 0);
+            DestroyWindow(Dlg);
+            return TRUE;
+        }
+        break;
+
+    case WM_CLOSE:
+        /* The close box answers Cancel */
+        Ui = (PEND_TASK_UI)GetWindowLongPtrW(Dlg, DWLP_USER);
+        InterlockedCompareExchange(&Ui->Choice, IDCANCEL, 0);
+        DestroyWindow(Dlg);
+        return TRUE;
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* The dialog thread. It ends when the dialog is answered, or when the waiting thread posts it
+ * WM_QUIT (the window went away); either way it destroys its own dialog. */
+static DWORD WINAPI
+NotRespondingThreadProc(LPVOID Parameter)
+{
+    PEND_TASK_UI Ui = (PEND_TASK_UI)Parameter;
+    HWND Dlg = NULL;
+    MSG Msg;
+
+    if (NT_SUCCESS(NtUserSetInformationThread(NtCurrentThread(), UserThreadUseActiveDesktop, NULL, 0)))
+    {
+        /* The queue must exist before Cancelled is checked (win32k already made it in the call
+         * above; this makes sure): a WM_QUIT the waiting thread posts after setting Cancelled
+         * then reaches this thread, and one it posted earlier finds Cancelled set below. Keep
+         * both Cancelled checks. */
+        PeekMessageW(&Msg, NULL, 0, 0, PM_NOREMOVE);
+        if (!Ui->Cancelled)
+            Dlg = CreateDialogParamW(UserServerDllInstance, MAKEINTRESOURCEW(IDD_NOT_RESPONDING),
+                                     NULL, NotRespondingDlgProc, (LPARAM)Ui);
+        Ui->Shown = (Dlg != NULL);
+        SetEvent(Ui->hReady);
+        if (Dlg && !Ui->Cancelled)
+        {
+            ShowWindow(Dlg, SW_SHOWNORMAL);
+            SetForegroundWindow(Dlg);
+            while (GetMessageW(&Msg, NULL, 0, 0) > 0)
+            {
+                if (!IsDialogMessageW(Dlg, &Msg))
+                {
+                    TranslateMessage(&Msg);
+                    DispatchMessageW(&Msg);
+                }
+            }
+        }
+        if (Dlg && IsWindow(Dlg))
+            DestroyWindow(Dlg);
+        NtUserSetInformationThread(NtCurrentThread(), UserThreadRestoreDesktop, NULL, 0);
+    }
+    else
+    {
+        SetEvent(Ui->hReady);
+    }
+
+    EndTaskUiRelease(Ui);
+    return 0;
+}
+
+/* Start the not-responding dialog; NULL when it cannot be shown */
+static HANDLE
+EndTaskStartUi(HWND hWnd, PEND_TASK_UI *pUi, PDWORD ThreadId)
+{
+    PEND_TASK_UI Ui;
+    HANDLE hThread;
+
+    *pUi = NULL;
+    Ui = RtlAllocateHeap(UserServerHeap, HEAP_ZERO_MEMORY, sizeof(*Ui));
+    if (!Ui)
+        return NULL;
+    Ui->hWndTarget = hWnd;
+    Ui->Refs = 2;   /* the waiting thread and the dialog thread */
+    Ui->hReady = CreateEventW(NULL, TRUE, FALSE, NULL);
+    hThread = Ui->hReady ? CreateThread(NULL, 0, NotRespondingThreadProc, Ui, 0, ThreadId) : NULL;
+    if (!hThread)
+    {
+        if (Ui->hReady)
+            CloseHandle(Ui->hReady);
+        RtlFreeHeap(UserServerHeap, 0, Ui);
+        return NULL;
+    }
+    *pUi = Ui;
+    return hThread;
+}
+
+/*
+ * Wait until the window is gone (TRUE), the caller has ended (FALSE), or the user answered the
+ * not-responding dialog (End Now: the process is ended as with fForce; Cancel: FALSE). When the
+ * dialog cannot be shown the wait for the window goes on, as without it. Every wait here is
+ * bounded; the dialog thread is never waited for without a timeout.
+ */
+static BOOL
+EndTaskWaitForWindow(
+    IN PCSR_THREAD CsrThread,
+    IN HWND hWnd,
+    IN DWORD ProcessId,
+    OUT PDWORD LastError)
+{
+    PEND_TASK_UI Ui = NULL;
+    HANDLE hUiThread = NULL;
+    DWORD UiThreadId = 0;
+    DWORD Start = GetTickCount();
+    BOOL Tried = FALSE, Ret = FALSE;
+    HANDLE Waits[2];
+    DWORD Wait;
+
+    Waits[0] = CsrThread->ThreadHandle;
+    Waits[1] = CsrThread->Process->ProcessHandle;
+    *LastError = ERROR_SUCCESS;
+    for (;;)
+    {
+        if (!IsWindow(hWnd))
+        {
+            Ret = TRUE;
+            break;
+        }
+        /* Give up when the calling thread or its process has ended (should the thread handle
+         * not allow a wait, watch the process alone) */
+        Wait = WaitForMultipleObjects(2, Waits, FALSE, 50);
+        if (Wait == WAIT_FAILED)
+            Wait = WaitForSingleObject(Waits[1], 50);
+        if (Wait == WAIT_OBJECT_0 || Wait == WAIT_OBJECT_0 + 1)
+            break;
+
+        if (!Tried && GetTickCount() - Start >= ShutdownSettings.HungAppTimeout)
+        {
+            Tried = TRUE;
+            hUiThread = EndTaskStartUi(hWnd, &Ui, &UiThreadId);
+        }
+
+        if (hUiThread && WaitForSingleObject(hUiThread, 0) == WAIT_OBJECT_0)
+        {
+            if (!Ui->Shown)
+            {
+                /* No dialog: keep waiting for the window */
+                CloseHandle(hUiThread);
+                hUiThread = NULL;
+                EndTaskUiRelease(Ui);
+                Ui = NULL;
+                continue;
+            }
+            if (Ui->Choice == IDC_END_NOW)
+            {
+                Ret = EndTaskTerminate(CsrThread, ProcessId, LastError);
+            }
+            else
+            {
+                /* Cancel, the close box, or the dialog went away otherwise: the call gives up
+                 * (not measured on Windows) */
+                *LastError = ERROR_CANCELLED;
+            }
+            break;
+        }
+    }
+
+    if (hUiThread)
+    {
+        /* Take the dialog down when the window went away (or the caller ended) while it was
+         * up, or keep it from coming up: ask its thread, which owns the dialog, rather than a
+         * window handle. A WM_QUIT posted before that thread has a queue is lost, so Cancelled
+         * is set first and the thread checks it once its queue exists. */
+        InterlockedExchange(&Ui->Cancelled, TRUE);
+        PostThreadMessageW(UiThreadId, WM_QUIT, 0, 0);
+        if (WaitForSingleObject(Ui->hReady, 5000) == WAIT_OBJECT_0)
+            PostThreadMessageW(UiThreadId, WM_QUIT, 0, 0);
+        if (WaitForSingleObject(hUiThread, 5000) != WAIT_OBJECT_0)
+            DPRINT1("EndTask: the not-responding dialog did not close\n");
+        CloseHandle(hUiThread);
+    }
+    if (Ui)
+        EndTaskUiRelease(Ui);
+    return Ret;
+}
+
 /* API_NUMBER: UserpEndTask */
 CSR_API(SrvEndTask)
 {
@@ -956,16 +1196,15 @@ CSR_API(SrvEndTask)
     }
     else
     {
-        /* Ask the window to close and wait, like Windows, until it is gone (a window that
-         * ignores WM_CLOSE keeps the call waiting) or the caller has ended. */
-        SendMessageW(hWnd, WM_CLOSE, 0, 0);
-        while (IsWindow(hWnd))
-        {
-            if (WaitForSingleObject(CsrThread->Process->ProcessHandle, 50) == WAIT_OBJECT_0)
-                goto Quit;
-        }
-        EndTaskRequest->Success   = TRUE;
-        EndTaskRequest->LastError = ERROR_SUCCESS;
+        DWORD LastError;
+
+        /* Ask the window to close without waiting for it to answer: a window whose thread does
+         * not pump messages must not hold this server thread (a plain SendMessage waited for
+         * ever, and so did the caller, with no way out). The message stays queued until the
+         * window's thread reads it. Then wait, like Windows, until the window is gone. */
+        SendNotifyMessageW(hWnd, WM_CLOSE, 0, 0);
+        EndTaskRequest->Success   = EndTaskWaitForWindow(CsrThread, hWnd, ProcessId, &LastError);
+        EndTaskRequest->LastError = LastError;
     }
 
 Quit:
