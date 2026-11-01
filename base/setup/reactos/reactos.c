@@ -2065,9 +2065,7 @@ PrepareAndDoCopyThread(
     {
         Success = FALSE;
         DisplayMessage(hWndParent, MB_ICONERROR, NULL,
-                       L"The installation directory %s already exists on the selected partition. "
-                       L"It may hold another Windows or ReactOS installation, and Setup will not overwrite it.\n\n"
-                       L"Run Setup again and choose another directory, or format the partition.",
+                       MAKEINTRESOURCEW(IDS_ERROR_INSTALLDIR_IN_USE),
                        pSetupData->USetupData.InstallationDirectory);
         goto Quit;
     }

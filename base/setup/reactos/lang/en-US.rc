@@ -311,3 +311,12 @@ the Setup program cannot install ReactOS.\
 \nClick on OK to continue anyway."
     IDS_ERROR_BOOTLDR_FAILED "Setup could not install the bootloader (Status 0x%08lx)."
 END
+
+/* Note to translators: this block is only defined in en-US, other languages show the English text. */
+STRINGTABLE
+BEGIN
+    IDS_ERROR_INSTALLDIR_IN_USE "The installation directory %s already exists on the selected partition, \
+or lies inside another Windows or ReactOS directory. Setup will not overwrite it.\n\n\
+This installer cannot choose another directory. Format the partition, \
+or set InstallationDirectory in unattend.inf, and run Setup again."
+END
