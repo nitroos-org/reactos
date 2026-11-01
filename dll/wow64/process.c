@@ -183,6 +183,7 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer, BOOLEAN *Reported)
     WCHAR ModulePath[MAX_PATH];
     ANSI_STRING Export = RTL_CONSTANT_STRING("CreateProcessInternalW");
     CREATE_PROCESS Create;
+    BOOL Created;
     NTSTATUS Status = STATUS_SUCCESS;
     ULONG *Result = PTR32(Request.ProcessInformation);
     ULONG i;
@@ -275,11 +276,20 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer, BOOLEAN *Reported)
         }
 
         Cpu->ProcessParameters = &Parent;
-        if (!Create(HANDLE32(Request.Token), Application, PTR32(Request.CommandLine), Ps, Ts,
-                    Request.InheritHandles, Request.CreationFlags | CREATE_SUSPENDED,
-                    Request.Environment ? PTR32(Request.Environment) : Parent.Environment,
-                    Request.CurrentDirectory ? PTR32(Request.CurrentDirectory) : Parent.CurrentDirectory.DosPath.Buffer,
-                    &Startup.StartupInfo, &Info, Request.NewToken ? &NewToken : NULL))
+        /* A debugged child is attached by the native creator to the debug object of the native
+         * TEB (DbgUiConnectToDbg): that is the guest's own object, in TEB32, which the guest's
+         * WaitForDebugEvent and ContinueDebugEvent use. One object, as for a native debugger. */
+        if (Request.CreationFlags & (DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS))
+            NtCurrentTeb()->DbgSsReserved[1] = HANDLE32(WOW64_TEB32(NtCurrentTeb())->DbgSsReserved[1]);
+        Created = Create(HANDLE32(Request.Token), Application, PTR32(Request.CommandLine), Ps, Ts,
+                         Request.InheritHandles, Request.CreationFlags | CREATE_SUSPENDED,
+                         Request.Environment ? PTR32(Request.Environment) : Parent.Environment,
+                         Request.CurrentDirectory ? PTR32(Request.CurrentDirectory) : Parent.CurrentDirectory.DosPath.Buffer,
+                         &Startup.StartupInfo, &Info, Request.NewToken ? &NewToken : NULL);
+        /* The object the creator made (or kept) is the guest's from now on, also when it failed */
+        if (Request.CreationFlags & (DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS))
+            WOW64_TEB32(NtCurrentTeb())->DbgSsReserved[1] = HandleToUlong(NtCurrentTeb()->DbgSsReserved[1]);
+        if (!Created)
         {
             Out->Error = NtCurrentTeb()->LastErrorValue;
             if (!Out->Error) Out->Error = ERROR_GEN_FAILURE;

@@ -351,6 +351,17 @@ PspMapSystemDll32(IN PEPROCESS Process)
         MmUnmapViewOfSection(Process, Base);
     }
 }
+
+/* The preferred base and file of the i386 ntdll that PspMapSystemDll32 maps, for the debugger's
+ * module events; NULL when there is none. Whether a process has the view is the caller's check. */
+PVOID
+NTAPI
+PspGetSystemDll32(OUT PCUNICODE_STRING *FileName)
+{
+    if (!PspSystemDllSection32) return NULL;
+    *FileName = &PsNtDll32PathName;
+    return PspSystemDllBase32;
+}
 #endif
 
 CODE_SEG("INIT")

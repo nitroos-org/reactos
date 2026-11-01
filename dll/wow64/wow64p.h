@@ -109,6 +109,9 @@ NTSTATUS Wow64CreateThread(HANDLE *, ACCESS_MASK, OBJECT_ATTRIBUTES *, HANDLE,
 #define WOW64_MAX_ARRAY_COUNT 0x10000UL
 
 NTSTATUS Wow64QueryThread(HANDLE, ULONG, PVOID, ULONG, PULONG);
+/* debug.c: NtDebugContinue and NtWaitForDebugEvent of a 32-bit debugger (the captured arguments) */
+NTSTATUS Wow64DebugContinue(const ULONG *);
+NTSTATUS Wow64WaitForDebugEvent(const ULONG *);
 
 extern PVOID Wow64ApcDispatcher;
 
