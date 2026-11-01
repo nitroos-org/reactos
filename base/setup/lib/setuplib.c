@@ -992,10 +992,37 @@ IsValidInstallDirectory(
 
 /**
  * @brief
+ * Query an NT path. Returns FALSE when the file system reports it as absent
+ * (name or path not found); anything else (found, access denied, ...) counts
+ * as existing. The query status is returned in *pStatus.
+ **/
+static BOOLEAN
+NtPathExists(
+    _In_ PCWSTR Path,
+    _Out_ PNTSTATUS pStatus)
+{
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    FILE_BASIC_INFORMATION BasicInfo;
+
+    RtlInitUnicodeString(&Name, Path);
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    *pStatus = NtQueryAttributesFile(&ObjectAttributes, &BasicInfo);
+
+    return !(*pStatus == STATUS_OBJECT_NAME_NOT_FOUND ||
+             *pStatus == STATUS_OBJECT_PATH_NOT_FOUND);
+}
+
+/**
+ * @brief
  * Check whether the installation directory computed by InitDestinationPaths()
- * (pSetupData->DestinationPath) already exists on the target volume, as a
- * directory or as anything else. A new installation must never be made into
- * it: it can be another operating system, e.g. a Windows in \Windows.
+ * (pSetupData->DestinationPath) must not receive a new installation:
+ *  - it already exists on the target volume, as a directory or as anything
+ *    else (it can be another operating system, e.g. a Windows in \Windows);
+ *  - or one of its existing parent directories looks like a system directory,
+ *    i.e. holds a System32 subdirectory (e.g. \Windows\Sub next to
+ *    \Windows\System32): it would pollute that system's tree. Ordinary parent
+ *    folders (e.g. \OS in \OS\Nitro) are fine.
  * Anything but "not found" (e.g. access denied) counts as existing.
  **/
 BOOLEAN
@@ -1004,24 +1031,66 @@ IsInstallDirectoryInUse(
     _In_ PUSETUP_DATA pSetupData)
 {
     NTSTATUS Status;
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    FILE_BASIC_INFORMATION BasicInfo;
+    WCHAR Prefix[MAX_PATH + 64];
+    WCHAR Probe[MAX_PATH + 64];
+    PCWSTR p, Comp;
+    SIZE_T Length;
 
     if (!pSetupData->DestinationPath.Buffer || !pSetupData->DestinationPath.Length)
         return FALSE;
 
-    InitializeObjectAttributes(&ObjectAttributes,
-                               &pSetupData->DestinationPath,
-                               OBJ_CASE_INSENSITIVE,
-                               NULL,
-                               NULL);
-    Status = NtQueryAttributesFile(&ObjectAttributes, &BasicInfo);
-    if (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_OBJECT_PATH_NOT_FOUND)
-        return FALSE;
+    if (NtPathExists(pSetupData->DestinationPath.Buffer, &Status))
+    {
+        DPRINT1("Installation directory '%wZ' already exists (Status 0x%08lx)\n",
+                &pSetupData->DestinationPath, Status);
+        return TRUE;
+    }
 
-    DPRINT1("Installation directory '%wZ' already exists (Status 0x%08lx)\n",
-            &pSetupData->DestinationPath, Status);
-    return TRUE;
+    /* Check every parent directory of the installation directory (not the volume root) */
+    if (!pSetupData->DestinationRootPath.Buffer || !pSetupData->InstallPath.Buffer)
+        return FALSE;
+    if (!NT_SUCCESS(RtlStringCchCopyW(Prefix, ARRAYSIZE(Prefix),
+                                      pSetupData->DestinationRootPath.Buffer)))
+        return TRUE; /* too long: fail closed */
+    Length = wcslen(Prefix);
+    while (Length > 0 && IS_PATH_SEPARATOR(Prefix[Length - 1]))
+        Prefix[--Length] = UNICODE_NULL;
+
+    p = pSetupData->InstallPath.Buffer;
+    while (TRUE)
+    {
+        SIZE_T CompLen;
+
+        while (IS_PATH_SEPARATOR(*p))
+            ++p;
+        Comp = p;
+        while (*p && !IS_PATH_SEPARATOR(*p))
+            ++p;
+        CompLen = (SIZE_T)(p - Comp);
+        if (CompLen == 0)
+            break;
+        while (IS_PATH_SEPARATOR(*p))
+            ++p;
+        /* The last component is the installation directory itself, checked above */
+        if (!*p)
+            break;
+
+        if (!NT_SUCCESS(RtlStringCchCatW(Prefix, ARRAYSIZE(Prefix), L"\\")) ||
+            !NT_SUCCESS(RtlStringCchCatNW(Prefix, ARRAYSIZE(Prefix), Comp, CompLen)) ||
+            !NT_SUCCESS(RtlStringCchPrintfW(Probe, ARRAYSIZE(Probe), L"%s\\System32", Prefix)))
+        {
+            return TRUE;
+        }
+
+        if (NtPathExists(Probe, &Status))
+        {
+            DPRINT1("Installation directory '%wZ' is inside a system directory ('%S' exists, Status 0x%08lx)\n",
+                    &pSetupData->DestinationPath, Probe, Status);
+            return TRUE;
+        }
+    }
+
+    return FALSE;
 }
 
 

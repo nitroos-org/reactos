@@ -71,8 +71,9 @@ static WCHAR DefaultKBLayout[20];   // Copy of string inside KeyboardList
 
 static BOOLEAN RepairUpdateFlag = FALSE;
 
-/* The installation directory was refused because it exists: ask the user, even in unattended mode */
-static BOOLEAN InstallDirInUse = FALSE;
+/* Set when an unattended setup cannot continue: QuitPage shows it, then waits
+ * a bounded time instead of blocking on a popup, and reboots */
+static PCSTR UnattendedFailureText[5] = {NULL};
 
 /* Global partition list on the system */
 static PPARTLIST PartitionList = NULL;
@@ -2926,7 +2927,7 @@ InstallDirectoryPage(PINPUT_RECORD Ir)
      * of an invalid path, or we are in regular setup), display the UI and allow
      * the user to specify a new installation path.
      */
-    if (RepairUpdateFlag || (IsUnattendedSetup && !InstallDirInUse))
+    if (RepairUpdateFlag || IsUnattendedSetup)
     {
         /* Check for the validity of the installation directory and pop up
          * an error if it is not the case. Then the user can fix it. */
@@ -3084,15 +3085,27 @@ InitInstallDir:
 
     /*
      * A new installation never goes into an existing directory: it can be another
-     * system, e.g. a Windows in \Windows on this partition. Nothing is overwritten;
-     * the user chooses another directory (an unattended setup stops here and asks).
+     * system, e.g. a Windows in \Windows on this partition, or sit inside the
+     * tree of one. Nothing is overwritten. Interactively the user chooses another
+     * directory; an unattended setup has nobody to ask and fails.
      */
     if (!RepairUpdateFlag && IsInstallDirectoryInUse(&USetupData))
     {
-        InstallDirInUse = TRUE;
+        if (IsUnattendedSetup)
+        {
+            DPRINT1("Unattended setup failed: the installation directory '%wZ' exists or is inside a system directory\n",
+                    &USetupData.DestinationPath);
+            UnattendedFailureText[0] = "Unattended setup failed: the installation directory";
+            UnattendedFailureText[1] = "already exists on the selected partition, or lies inside";
+            UnattendedFailureText[2] = "another Windows or ReactOS directory. Setup will not";
+            UnattendedFailureText[3] = "overwrite it. Format the partition, or set another";
+            UnattendedFailureText[4] = "InstallationDirectory in unattend.inf.";
+            return QUIT_PAGE;
+        }
+
         PopupError("The installation directory already exists on the\n"
-                   "selected partition. It may hold another Windows or\n"
-                   "ReactOS installation. Setup will not overwrite it.\n"
+                   "selected partition, or lies inside another Windows or\n"
+                   "ReactOS directory. Setup will not overwrite it.\n"
                    "Press ENTER and choose another directory.",
                    MUIGetString(STRING_CONTINUE),
                    Ir, POPUP_WAIT_ENTER);
@@ -4003,6 +4016,17 @@ QuitPage(PINPUT_RECORD Ir)
     }
 
     CONSOLE_SetStatusText(MUIGetString(STRING_REBOOTCOMPUTER2));
+
+    if (IsUnattendedSetup && UnattendedFailureText[0])
+    {
+        ULONG i;
+
+        /* Show why an unattended setup failed, below the countdown bar, for at most 15 seconds, then reboot */
+        for (i = 0; i < RTL_NUMBER_OF(UnattendedFailureText); ++i)
+            CONSOLE_SetTextXY(6, 14 + i, UnattendedFailureText[i]);
+        ProgressCountdown(Ir, 15);
+        return FLUSH_PAGE;
+    }
 
     if (IsUnattendedSetup)
         return FLUSH_PAGE;

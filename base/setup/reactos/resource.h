@@ -210,3 +210,6 @@
 #define IDS_ERROR_BOOTLDR_ARCH_UNSUPPORTED      5319
 // ERROR_BOOTLDR_FAILED // TODO
 #define IDS_ERROR_BOOTLDR_FAILED    5320
+
+// Own string-table block (5328-5343): only en-US defines it, other languages fall back to English
+#define IDS_ERROR_INSTALLDIR_IN_USE 5330
