@@ -4543,6 +4543,20 @@ static void testGetCertChain(void)
     /* Pass store that does not contain all certs in chain. */
     ret = CertGetCertificateChain(NULL, cert, &fileTime, store, &para, 0, NULL, &chain);
     ok(ret, "CertGetCertificateChain failed: %lu\n", GetLastError());
+    if (!ret)
+        goto done_aia;
+
+#ifdef __REACTOS__
+    /* The intermediate certificate of this chain is not in any local store; Windows (and Wine)
+     * retrieve it through the AIA extension, which needs network access. Without it the chain
+     * stops after the leaf and the checks below would index past the last element. */
+    if (chain->rgpChain[0]->cElement < 3 && (chain->TrustStatus.dwErrorStatus & CERT_TRUST_IS_PARTIAL_CHAIN))
+    {
+        skip("Issuer certificates are not available (AIA retrieval needs network access)\n");
+        CertFreeCertificateChain(chain);
+        goto done_aia;
+    }
+#endif
 
     ok(chain->TrustStatus.dwErrorStatus == CERT_TRUST_HAS_EXACT_MATCH_ISSUER, "chain->TrustStatus.dwErrorStatus = %lx\n",
        chain->TrustStatus.dwErrorStatus);
@@ -4616,6 +4630,7 @@ static void testGetCertChain(void)
     ok(ret, "CertGetCertificateChain failed: %lu\n", GetLastError());
     CertFreeCertificateChain(chain);
 
+done_aia:
     CertFreeCertificateContext(cert);
     CertCloseStore(store, 0);
 }
