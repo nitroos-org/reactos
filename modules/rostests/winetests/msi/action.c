@@ -2199,7 +2199,14 @@ static const char rb_registry_dat[] =
     "s72\ti2\tl255\tL255\tL0\ts72\n"
     "Registry\tRegistry\n"
     "rbreg0\t2\tSOFTWARE\\msitest_rollback\tsz\tstring\tOne\n"
-    "rbreg1\t2\tSOFTWARE\\msitest_rollback\\subkey\t+\t\tOne\n";
+    "rbreg1\t2\tSOFTWARE\\msitest_rollback\\subkey\t+\t\tOne\n"
+    "rbreg2\t2\tSOFTWARE\\msitest_rollback_pre\tpre\tnew\tOne\n";
+
+static const char rb_move_file_dat[] =
+    "FileKey\tComponent_\tSourceName\tDestName\tSourceFolder\tDestFolder\tOptions\n"
+    "s72\ts72\tS255\tS255\tS72\ts72\ti2\n"
+    "MoveFile\tFileKey\n"
+    "rbmove0\tOne\tmoveme.txt\t\tMOVESRC\tMSITESTDIR\t1\n";
 
 static const char rb_environment_dat[] =
     "Environment\tName\tValue\tComponent_\n"
@@ -2224,9 +2231,47 @@ static const char rb_install_exec_seq_dat[] =
     "WriteEnvironmentStrings\t\t3800\n"
     "RegisterProduct\t\t3900\n"
     "PublishFeatures\t\t3950\n"
+    "MoveFiles\t\t3980\n"
     "InstallFiles\t\t4000\n"
     "InstallFinalize\t\t6600\n"
     "LaunchConditions\t\t100\n";
+
+/* the same, but the files are all there and RegisterUser follows InstallFiles: the test
+ * cancels the install at RegisterUser */
+static const char rbc_install_exec_seq_dat[] =
+    "Action\tCondition\tSequence\n"
+    "s72\tS255\tI2\n"
+    "InstallExecuteSequence\tAction\n"
+    "CostFinalize\t\t1000\n"
+    "CostInitialize\t\t800\n"
+    "FileCost\t\t900\n"
+    "InstallValidate\t\t1400\n"
+    "InstallInitialize\t\t1500\n"
+    "ProcessComponents\t\t1600\n"
+    "CreateFolders\t\t3600\n"
+    "WriteRegistryValues\t\t3700\n"
+    "WriteEnvironmentStrings\t\t3800\n"
+    "RegisterProduct\t\t3900\n"
+    "PublishFeatures\t\t3950\n"
+    "InstallFiles\t\t4000\n"
+    "RegisterUser\t\t4100\n"
+    "InstallFinalize\t\t6600\n"
+    "LaunchConditions\t\t100\n";
+
+static const msi_table rbc_tables[] =
+{
+    ADD_TABLE(ed_component),
+    ADD_TABLE(cf_directory),
+    ADD_TABLE(cf_feature),
+    ADD_TABLE(cf_feature_comp),
+    ADD_TABLE(cf_file),
+    ADD_TABLE(cf_create_folders),
+    ADD_TABLE(rb_registry),
+    ADD_TABLE(rb_environment),
+    ADD_TABLE(rbc_install_exec_seq),
+    ADD_TABLE(media),
+    ADD_TABLE(property)
+};
 
 static const msi_table rb_tables[] =
 {
@@ -2238,6 +2283,7 @@ static const msi_table rb_tables[] =
     ADD_TABLE(cf_create_folders),
     ADD_TABLE(rb_registry),
     ADD_TABLE(rb_environment),
+    ADD_TABLE(rb_move_file),
     ADD_TABLE(rb_install_exec_seq),
     ADD_TABLE(media),
     ADD_TABLE(property)
@@ -5428,55 +5474,81 @@ static BOOL pf_file_has(const char *rel, const char *data)
     return size >= strlen(data) && !memcmp(buf, data, strlen(data)); /* create_pf_data pads the file */
 }
 
-/* A failed install is rolled back: what it created or replaced is restored, the product is not
- * registered.  InstallFiles fails on the second file, after the registry, the environment, the
- * product registration and the folders were done. */
-static void test_rollback_failed_install(void)
+static DWORD file_size_a(const char *path)
 {
-    const char prodcode[] = "{7DF88A48-996F-4EC8-A022-BF956F9B2CBB}";
-    const char uninst[] = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{7DF88A48-996F-4EC8-A022-BF956F9B2CBB}";
+    HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    DWORD size = INVALID_FILE_SIZE;
+
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        size = GetFileSize(file, NULL);
+        CloseHandle(file);
+    }
+    return size;
+}
+
+static BOOL reg_key_exists(HKEY root, const char *path)
+{
+    HKEY key;
+
+    if (RegOpenKeyExA(root, path, 0, KEY_READ | KEY_WOW64_32KEY, &key)) return FALSE;
+    RegCloseKey(key);
+    return TRUE;
+}
+
+static void rollback_cleanup(void)
+{
+    DeleteFileA("msitest\\first\\one.txt");
+    DeleteFileA("msitest\\two.txt");
+    DeleteFileA("msitest_mv\\moveme.txt");
+    RemoveDirectoryA("msitest\\first");
+    RemoveDirectoryA("msitest");
+    RemoveDirectoryA("msitest_mv");
+    DeleteFileA(msifile);
+    delete_pf("msitest\\first\\one.txt", TRUE);
+    delete_pf("msitest\\two.txt", TRUE);
+    delete_pf("msitest\\moveme.txt", TRUE);
+    delete_pf("msitest\\first", FALSE);
+    delete_pf("msitest\\second", FALSE);
+    delete_pf("msitest\\third", FALSE);
+    delete_pf("msitest", FALSE);
+    RegDeleteKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\msitest_rollback\\subkey", KEY_WOW64_32KEY, 0);
+    RegDeleteKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\msitest_rollback", KEY_WOW64_32KEY, 0);
+    RegDeleteKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\msitest_rollback_pre", KEY_WOW64_32KEY, 0);
+}
+
+/* what must be left after the rollback, the same for a failed and a cancelled install */
+static void check_rolled_back(const char *prodcode, const char *uninst, BOOL pre_existing)
+{
     INSTALLSTATE state;
     HKEY key;
     LONG res;
-    UINT r;
+    char buf[16];
+    DWORD size;
 
-    if (!is_process_elevated())
+    if (!pre_existing)
     {
-        skip("process is limited\n");
-        return;
+        ok(!pf_exists("msitest\\first\\one.txt"), "file installed\n");
+        ok(!pf_exists("msitest\\two.txt"), "file installed\n");
+        ok(!pf_exists("msitest\\first"), "directory created\n");
+        ok(!pf_exists("msitest\\second"), "directory created\n");
+        ok(!pf_exists("msitest\\third"), "directory created\n");
+        ok(!pf_exists("msitest"), "directory created\n");
     }
 
-    CreateDirectoryA("msitest", NULL);
-    CreateDirectoryA("msitest\\first", NULL);
-    create_file("msitest\\first\\one.txt", 1000);
-    /* msitest\two.txt is missing */
-    create_database(msifile, rb_tables, ARRAY_SIZE(rb_tables));
-
-    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
-
-    r = MsiInstallProductA(msifile, NULL);
-    if (r == ERROR_INSTALL_PACKAGE_REJECTED)
-    {
-        skip("Not enough rights to perform tests\n");
-        goto error;
-    }
-    ok(r == ERROR_INSTALL_FAILURE, "Expected ERROR_INSTALL_FAILURE, got %u\n", r);
-
-    ok(!pf_exists("msitest\\first\\one.txt"), "file installed\n");
-    ok(!pf_exists("msitest\\two.txt"), "file installed\n");
-    ok(!pf_exists("msitest\\first"), "directory created\n");
-    ok(!pf_exists("msitest\\second"), "directory created\n");
-    ok(!pf_exists("msitest\\third"), "directory created\n");
-    ok(!pf_exists("msitest"), "directory created\n");
-
-    /* the package is a 32-bit one: its registry values go to the 32-bit view */
-    res = RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\msitest_rollback", 0, KEY_READ | KEY_WOW64_32KEY, &key);
+    /* the package is a 32-bit one: its registry values go to the 32-bit view.  The values and
+     * the keys the install created are gone, the value it overwrote is back */
+    ok(!reg_key_exists(HKEY_LOCAL_MACHINE, "SOFTWARE\\msitest_rollback\\subkey"), "empty registry key left behind\n");
+    ok(!reg_key_exists(HKEY_LOCAL_MACHINE, "SOFTWARE\\msitest_rollback"), "registry key left behind\n");
+    res = RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\msitest_rollback_pre", 0, KEY_READ | KEY_WOW64_32KEY, &key);
+    ok(!res, "pre-existing registry key removed, got %ld\n", res);
     if (!res)
     {
-        /* the undo of the registry writes removes the values; the empty keys the install
-         * created stay (Windows removes them too) */
-        res = RegQueryValueExA(key, "sz", NULL, NULL, NULL, NULL);
-        ok(res == ERROR_FILE_NOT_FOUND, "registry value left behind, got %ld\n", res);
+        buf[0] = 0;
+        size = sizeof(buf);
+        res = RegQueryValueExA(key, "pre", NULL, NULL, (BYTE *)buf, &size);
+        ok(!res, "pre-existing registry value removed, got %ld\n", res);
+        ok(!strcmp(buf, "old"), "registry value not restored, got \"%s\"\n", buf);
         RegCloseKey(key);
     }
 
@@ -5495,38 +5567,218 @@ static void test_rollback_failed_install(void)
     ok(state == INSTALLSTATE_UNKNOWN, "product registered, state %d\n", state);
     state = MsiQueryFeatureStateA(prodcode, "One");
     ok(state == INSTALLSTATE_UNKNOWN, "feature registered, state %d\n", state);
+}
+
+static void create_rollback_registry(void)
+{
+    HKEY key;
+
+    if (!RegCreateKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\msitest_rollback_pre", 0, NULL, 0,
+                         KEY_SET_VALUE | KEY_WOW64_32KEY, NULL, &key, NULL))
+    {
+        RegSetValueExA(key, "pre", 0, REG_SZ, (const BYTE *)"old", 4);
+        RegCloseKey(key);
+    }
+}
+
+/* A failed install is rolled back: what it created, replaced or moved is restored, the registry
+ * keys and values it wrote are removed (or put back), the product is not registered.
+ * InstallFiles fails on the second file, after the registry, the environment, the product
+ * registration, the folders and MoveFiles were done. */
+static void test_rollback_failed_install(void)
+{
+    const char prodcode[] = "{7DF88A48-996F-4EC8-A022-BF956F9B2CBB}";
+    const char uninst[] = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{7DF88A48-996F-4EC8-A022-BF956F9B2CBB}";
+    char cmdline[MAX_PATH + 16], cwd[MAX_PATH];
+    INSTALLSTATE state;
+    UINT r;
+
+    if (!is_process_elevated())
+    {
+        skip("process is limited\n");
+        return;
+    }
+
+    GetCurrentDirectoryA(sizeof(cwd), cwd);
+    sprintf(cmdline, "MOVESRC=%s\\msitest_mv", cwd);
+
+    CreateDirectoryA("msitest", NULL);
+    CreateDirectoryA("msitest\\first", NULL);
+    CreateDirectoryA("msitest_mv", NULL);
+    create_file("msitest\\first\\one.txt", 1000);
+    create_file("msitest_mv\\moveme.txt", 777);
+    /* msitest\two.txt is missing */
+    create_database(msifile, rb_tables, ARRAY_SIZE(rb_tables));
+    create_rollback_registry();
+
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
+
+    r = MsiInstallProductA(msifile, cmdline);
+    if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+    {
+        skip("Not enough rights to perform tests\n");
+        goto error;
+    }
+    ok(r == ERROR_INSTALL_FAILURE, "Expected ERROR_INSTALL_FAILURE, got %u\n", r);
+
+    check_rolled_back(prodcode, uninst, FALSE);
+    ok(!pf_exists("msitest\\moveme.txt"), "moved file left in the destination\n");
+    ok(file_size_a("msitest_mv\\moveme.txt") == 777, "moved file not moved back, size %lu\n",
+       file_size_a("msitest_mv\\moveme.txt"));
 
     /* a file and the directories that were there before are kept, with their contents */
     create_pf("msitest", FALSE);
     create_pf("msitest\\first", FALSE);
     create_pf_data("msitest\\first\\one.txt", "orig", TRUE);
+    create_pf_data("msitest\\moveme.txt", "orig2", TRUE);
+    create_rollback_registry();
 
-    r = MsiInstallProductA(msifile, NULL);
+    r = MsiInstallProductA(msifile, cmdline);
     ok(r == ERROR_INSTALL_FAILURE, "Expected ERROR_INSTALL_FAILURE, got %u\n", r);
 
+    check_rolled_back(prodcode, uninst, TRUE);
     ok(pf_exists("msitest\\first\\one.txt"), "file removed\n");
     ok(pf_file_has("msitest\\first\\one.txt", "orig"), "file contents not restored\n");
     ok(!pf_exists("msitest\\two.txt"), "file installed\n");
     ok(pf_exists("msitest\\first"), "directory removed\n");
     ok(!pf_exists("msitest\\second"), "directory created\n");
     ok(pf_exists("msitest"), "directory removed\n");
+    ok(pf_file_has("msitest\\moveme.txt", "orig2"), "replaced file not restored by the undo of MoveFiles\n");
+    ok(file_size_a("msitest_mv\\moveme.txt") == 777, "moved file not moved back, size %lu\n",
+       file_size_a("msitest_mv\\moveme.txt"));
     state = MsiQueryProductStateA(prodcode);
     ok(state == INSTALLSTATE_UNKNOWN, "product registered, state %d\n", state);
 
 error:
-    DeleteFileA("msitest\\first\\one.txt");
-    RemoveDirectoryA("msitest\\first");
-    RemoveDirectoryA("msitest");
-    DeleteFileA(msifile);
-    delete_pf("msitest\\first\\one.txt", TRUE);
-    delete_pf("msitest\\two.txt", TRUE);
-    delete_pf("msitest\\first", FALSE);
-    delete_pf("msitest\\second", FALSE);
-    delete_pf("msitest\\third", FALSE);
-    delete_pf("msitest", FALSE);
-    RegDeleteKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\msitest_rollback\\subkey", KEY_WOW64_32KEY, 0);
-    RegDeleteKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\msitest_rollback", KEY_WOW64_32KEY, 0);
+    rollback_cleanup();
 }
+
+static int cancel_actionstarts;
+
+static INT CALLBACK cancel_at_register_user(void *context, UINT type, MSIHANDLE record)
+{
+    char action[64] = "";
+    DWORD size = sizeof(action);
+
+    if ((type & 0xff000000) != INSTALLMESSAGE_ACTIONSTART) return 0;
+    MsiRecordGetStringA(record, 1, action, &size);
+    /* the first one is the scheduling, the second the execution of the install script */
+    if (!strcmp(action, "RegisterUser") && ++cancel_actionstarts == 2) return IDCANCEL;
+    return 0;
+}
+
+/* The user cancels after InstallFiles: the install is rolled back like a failed one */
+static void test_rollback_cancelled_install(void)
+{
+    const char prodcode[] = "{7DF88A48-996F-4EC8-A022-BF956F9B2CBB}";
+    const char uninst[] = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{7DF88A48-996F-4EC8-A022-BF956F9B2CBB}";
+    UINT r;
+
+    if (!is_process_elevated())
+    {
+        skip("process is limited\n");
+        return;
+    }
+
+    CreateDirectoryA("msitest", NULL);
+    CreateDirectoryA("msitest\\first", NULL);
+    create_file("msitest\\first\\one.txt", 1000);
+    create_file("msitest\\two.txt", 1000);
+    create_database(msifile, rbc_tables, ARRAY_SIZE(rbc_tables));
+    create_rollback_registry();
+
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
+    cancel_actionstarts = 0;
+    r = MsiSetExternalUIRecord(cancel_at_register_user, INSTALLLOGMODE_ACTIONSTART, NULL, NULL);
+    ok(!r, "got %u\n", r);
+
+    r = MsiInstallProductA(msifile, NULL);
+    MsiSetExternalUIRecord(NULL, 0, NULL, NULL);
+    if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+    {
+        skip("Not enough rights to perform tests\n");
+        goto error;
+    }
+    ok(r == ERROR_INSTALL_USEREXIT, "Expected ERROR_INSTALL_USEREXIT, got %u\n", r);
+    ok(cancel_actionstarts == 2, "RegisterUser started %d times\n", cancel_actionstarts);
+
+    check_rolled_back(prodcode, uninst, FALSE);
+
+error:
+    rollback_cleanup();
+}
+
+#ifdef __REACTOS__
+/* The backups of a crashed install are noted in the registry; the next install deletes them */
+static void test_rollback_stale_backups(void)
+{
+    static const char journal[] = "Software\\Microsoft\\Windows\\CurrentVersion\\Installer\\RosPendingBackups";
+    char backup[MAX_PATH], data[MAX_PATH + 16], live[MAX_PATH];
+    char other[MAX_PATH];
+    HKEY key;
+    LONG res;
+    UINT r;
+
+    if (!is_process_elevated())
+    {
+        skip("process is limited\n");
+        return;
+    }
+
+    CreateDirectoryA("msitest", NULL);
+    CreateDirectoryA("msitest\\first", NULL);
+    create_file("msitest\\first\\one.txt", 1000);
+    create_file("msitest\\two.txt", 1000);
+    create_database(msifile, rbc_tables, ARRAY_SIZE(rbc_tables));
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
+
+    GetCurrentDirectoryA(sizeof(backup), backup);
+    strcat(backup, "\\msitest\\rbf1A2B.tmp");
+    strcpy(live, backup);
+    strcpy(strrchr(live, '\\') + 1, "rbf3C4D.tmp");
+    strcpy(other, backup);
+    strcpy(strrchr(other, '\\') + 1, "keepme.txt");
+    create_file("msitest\\rbf1A2B.tmp", 10); /* of a process that is gone */
+    create_file("msitest\\rbf3C4D.tmp", 10); /* of a running process (this one) */
+    create_file("msitest\\keepme.txt", 10);  /* named by a journal entry, but not a backup name */
+
+    res = RegCreateKeyExA(HKEY_LOCAL_MACHINE, journal, 0, NULL, 0, KEY_SET_VALUE | KEY_QUERY_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL);
+    ok(!res, "got %ld\n", res);
+    if (res) goto error;
+    sprintf(data, "%lu|%s", 0x7ffffff0ul, "x");
+    RegSetValueExA(key, backup, 0, REG_SZ, (BYTE *)data, strlen(data) + 1);
+    sprintf(data, "%lu|%s", GetCurrentProcessId(), "x");
+    RegSetValueExA(key, live, 0, REG_SZ, (BYTE *)data, strlen(data) + 1);
+    sprintf(data, "%lu|%s", 0x7ffffff0ul, "x");
+    RegSetValueExA(key, other, 0, REG_SZ, (BYTE *)data, strlen(data) + 1);
+
+    r = MsiInstallProductA(msifile, "REMOVE=ALL");
+    if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+    {
+        skip("Not enough rights to perform tests\n");
+        RegCloseKey(key);
+        goto error;
+    }
+
+    ok(GetFileAttributesA(backup) == INVALID_FILE_ATTRIBUTES, "stale backup not deleted\n");
+    ok(GetFileAttributesA(live) != INVALID_FILE_ATTRIBUTES, "backup of a running process deleted\n");
+    ok(GetFileAttributesA(other) != INVALID_FILE_ATTRIBUTES, "file that is not a backup deleted\n");
+    res = RegQueryValueExA(key, backup, NULL, NULL, NULL, NULL);
+    ok(res == ERROR_FILE_NOT_FOUND, "journal entry left, got %ld\n", res);
+    res = RegQueryValueExA(key, live, NULL, NULL, NULL, NULL);
+    ok(!res, "journal entry of a running process removed, got %ld\n", res);
+    RegDeleteValueA(key, live);
+    RegDeleteValueA(key, other);
+    RegDeleteValueA(key, backup);
+    RegCloseKey(key);
+
+error:
+    DeleteFileA("msitest\\rbf1A2B.tmp");
+    DeleteFileA("msitest\\rbf3C4D.tmp");
+    DeleteFileA("msitest\\keepme.txt");
+    rollback_cleanup();
+}
+#endif
 
 static void test_start_stop_services(void)
 {
@@ -7007,6 +7259,10 @@ START_TEST(action)
     test_create_remove_folder();
     test_remove_empty_directory_partial_install();
     test_rollback_failed_install();
+    test_rollback_cancelled_install();
+#ifdef __REACTOS__
+    test_rollback_stale_backups();
+#endif
     test_start_stop_services();
     test_delete_services();
     test_install_services();

@@ -2640,6 +2640,37 @@ static HKEY open_key( const MSICOMPONENT *comp, HKEY root, const WCHAR *path, BO
     return ret;
 }
 
+/* open_key( ..., TRUE, ... ) that notes the keys it creates in the undo log */
+static HKEY open_key_logged( MSIPACKAGE *package, const MSICOMPONENT *comp, HKEY root, const WCHAR *path, REGSAM access )
+{
+    WCHAR *subkey, *p, *q;
+    HKEY hkey, parent = NULL;
+    REGSAM view = get_registry_view( comp );
+    DWORD disp;
+    LONG res;
+
+    if (!(subkey = wcsdup( path ))) return NULL;
+    for (p = subkey;; p = q + 1)
+    {
+        if ((q = wcschr( p, '\\' ))) *q = 0;
+        res = RegCreateKeyExW( parent ? parent : root, p, 0, NULL, 0, access | view, NULL, &hkey, &disp );
+        if (parent) RegCloseKey( parent );
+        if (res)
+        {
+            TRACE( "failed to create key %s (%ld)\n", debugstr_w(p), res );
+            free( subkey );
+            return NULL;
+        }
+        /* subkey is cut at q: it is the path of the key just opened */
+        if (disp == REG_CREATED_NEW_KEY) msi_rollback_record_key( package, root, subkey, view );
+        parent = hkey;
+        if (!q || !q[1]) break;
+        *q = '\\';
+    }
+    free( subkey );
+    return hkey;
+}
+
 static BOOL is_special_entry( const WCHAR *name )
 {
      return (name && (name[0] == '*' || name[0] == '+') && !name[1]);
@@ -2849,7 +2880,7 @@ static UINT ITERATE_WriteRegistryValues(MSIRECORD *row, LPVOID param)
     BYTE *new_value, *old_value = NULL;
     HKEY  root_key, hkey;
     DWORD type, old_type, new_size, old_size = 0;
-    LPWSTR deformated, uikey;
+    LPWSTR deformated, uikey, keypath;
     const WCHAR *szRoot, *component, *name, *key, *str;
     MSICOMPONENT *comp;
     MSIRECORD * uirow;
@@ -2893,14 +2924,14 @@ static UINT ITERATE_WriteRegistryValues(MSIRECORD *row, LPVOID param)
     lstrcpyW(uikey,szRoot);
     lstrcatW(uikey,deformated);
 
-    if (!(hkey = open_key( comp, root_key, deformated, TRUE, KEY_QUERY_VALUE | KEY_SET_VALUE )))
+    if (!(hkey = open_key_logged( package, comp, root_key, deformated, KEY_QUERY_VALUE | KEY_SET_VALUE )))
     {
         ERR("Could not create key %s\n", debugstr_w(deformated));
         free(uikey);
         free(deformated);
         return ERROR_FUNCTION_FAILED;
     }
-    free( deformated );
+    keypath = deformated;
     str = msi_record_get_string( row, 5, NULL );
     len = deformat_string( package, str, &deformated );
     new_value = parse_value( package, deformated, len, &type, &new_size );
@@ -2911,6 +2942,9 @@ static UINT ITERATE_WriteRegistryValues(MSIRECORD *row, LPVOID param)
     if (!is_special_entry( name ))
     {
         old_value = reg_get_value( hkey, deformated, &old_type, &old_size );
+        if (!check_first || !old_value)
+            msi_rollback_record_value( package, root_key, keypath, get_registry_view( comp ), deformated,
+                                       old_value, old_size, old_type );
         if (type == REG_MULTI_SZ)
         {
             BYTE *new;
@@ -2952,6 +2986,7 @@ static UINT ITERATE_WriteRegistryValues(MSIRECORD *row, LPVOID param)
     free(new_value);
     free(old_value);
     free(deformated);
+    free(keypath);
     free(uikey);
 
     return ERROR_SUCCESS;
@@ -8154,12 +8189,29 @@ static UINT ACTION_HandleStandardAction(MSIPACKAGE *package, LPCWSTR action)
             if (StandardActions[i].template != 0)
                 LoadStringW(msi_hInstance, StandardActions[i].template, (LPWSTR)&template, 100);
 
-            ui_actionstart(package, action, description, template);
+            if (ui_actionstart(package, action, description, template) == IDCANCEL && !package->need_rollback)
+            {
+                TRACE("user cancelled at %s\n", debugstr_w(action));
+                rc = ERROR_INSTALL_USEREXIT;
+                break;
+            }
             if (StandardActions[i].handler)
             {
                 ui_actioninfo( package, action, TRUE, 0 );
                 rc = StandardActions[i].handler( package );
                 ui_actioninfo( package, action, FALSE, !rc );
+
+                /* a standard action that had nothing to do: reported as 0, but it is not a custom action */
+                if (rc == ERROR_FUNCTION_NOT_CALLED) rc = ERROR_SUCCESS;
+
+                /* the UI answered IDCANCEL to a progress or action data message of the action;
+                   the rollback itself cannot be cancelled */
+                if (!rc && package->user_cancelled && !package->need_rollback)
+                {
+                    TRACE("user cancelled during %s\n", debugstr_w(action));
+                    rc = ERROR_INSTALL_USEREXIT;
+                    break;
+                }
 
                 if (StandardActions[i].action_rollback && !package->need_rollback)
                 {
@@ -8267,6 +8319,17 @@ static UINT ACTION_PerformEndAction( MSIPACKAGE *package, const WCHAR *action, U
  * TOP level entry points
  *****************************************************/
 
+/* The last message of an install, for the log: "=== Logging stopped: [Date]  [Time] ===" */
+static void msi_log_stopped( MSIPACKAGE *package )
+{
+    MSIRECORD *row;
+
+    if (!(row = MSI_CreateRecord( 0 ))) return;
+    MSI_RecordSetStringW( row, 0, L"=== Logging stopped: [Date]  [Time] ===" );
+    MSI_ProcessMessage( package, INSTALLMESSAGE_INFO|MB_ICONHAND, row );
+    msiobj_release( &row->hdr );
+}
+
 UINT MSI_InstallPackage( MSIPACKAGE *package, LPCWSTR szPackagePath,
                          LPCWSTR szCommandLine )
 {
@@ -8345,13 +8408,22 @@ UINT MSI_InstallPackage( MSIPACKAGE *package, LPCWSTR szPackagePath,
         msi_set_property( package->db, L"RollbackDisabled", L"1", -1 );
     }
 
+    msi_rollback_cleanup_stale( package );
+
     rc = ACTION_PerformAction(package, action);
+    /* a top-level action that is neither a standard nor a custom action is a failure */
+    if (rc == ERROR_FUNCTION_NOT_CALLED) rc = ERROR_INSTALL_FAILURE;
 
     /* process the ending type action */
     if (rc == ERROR_SUCCESS)
         ACTION_PerformEndAction(package, action, -1);
     else if (rc == ERROR_INSTALL_USEREXIT)
+    {
         ACTION_PerformEndAction(package, action, -2);
+        /* a cancelled install is undone like a failed one */
+        if (!msi_get_property_int( package->db, L"RollbackDisabled", 0 ))
+            package->need_rollback = TRUE;
+    }
     else if (rc == ERROR_INSTALL_SUSPEND)
         ACTION_PerformEndAction(package, action, -4);
     else  /* failed */
@@ -8378,6 +8450,8 @@ UINT MSI_InstallPackage( MSIPACKAGE *package, LPCWSTR szPackagePath,
     }
     else msi_rollback_finish( package, FALSE );
     free( action );
+
+    msi_log_stopped( package );
 
     if (rc == ERROR_SUCCESS && package->need_reboot_at_end)
         return ERROR_SUCCESS_REBOOT_REQUIRED;

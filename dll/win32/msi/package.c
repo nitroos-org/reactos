@@ -2195,6 +2195,18 @@ INT MSI_ProcessMessageVerbatim(MSIPACKAGE *package, INSTALLMESSAGE eMessageType,
     if (!rc)
         rc = internal_ui_handler(package, eMessageType, record, message);
 
+    if (rc == IDCANCEL && package)
+    {
+        switch (eMessageType & 0xff000000)
+        {
+        case INSTALLMESSAGE_ACTIONSTART:
+        case INSTALLMESSAGE_ACTIONDATA:
+        case INSTALLMESSAGE_PROGRESS:
+            package->user_cancelled = 1;
+            break;
+        }
+    }
+
     if (!rc && package && package->log_file != INVALID_HANDLE_VALUE &&
         (eMessageType & 0xff000000) != INSTALLMESSAGE_PROGRESS)
     {
