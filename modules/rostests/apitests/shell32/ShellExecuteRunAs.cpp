@@ -190,11 +190,16 @@ static void TestRunAs(PCSTR What, ULONG Mask, DWORD CallerElevated, TOKEN_ELEVAT
     }
 }
 
-/* A failure that has nothing to do with "runas" is not taken for a cancel because the last error
- * happened to be ERROR_CANCELLED before the call. Windows 10: FALSE, ERROR_NO_ASSOCIATION, SE_ERR_NOASSOC
- * for a verb the file type does not have and for a class that does not exist. (An unassociated extension
- * is not used: Windows 10 starts OpenWith.exe for it even with SEE_MASK_FLAG_NO_UI.) */
-static void StaleCancelCase(PCSTR What, PCWSTR Verb, PCWSTR Path, PCWSTR Class)
+/* The no-association failures and the other plain failures. Windows 10 22H2, measured with ShellExecuteEx
+ * and SEE_MASK_FLAG_NO_UI (x64 and x86) and with ShellExecute (which implies NO_UI):
+ *   a verb the file type does not have, a class that does not exist (with or without a verb):
+ *                               FALSE, ERROR_NO_ASSOCIATION (1155), hInstApp SE_ERR_NOASSOC (31)
+ *   a file that does not exist, with or without a directory that does, with "open" or any verb:
+ *                               FALSE, ERROR_FILE_NOT_FOUND (2), hInstApp SE_ERR_FNF (2)
+ * An unassociated extension is not used: Windows 10 starts OpenWith.exe for "open" even with
+ * SEE_MASK_FLAG_NO_UI. A stale ERROR_CANCELLED last error is set before each call: a failure that has
+ * nothing to do with "runas" is not taken for a cancelled Run As dialog. */
+static void NoAssocCase(PCSTR What, PCWSTR Verb, PCWSTR Path, PCWSTR Class, DWORD ExpError, UINT_PTR ExpInst)
 {
     SHELLEXECUTEINFOW Sei;
     DWORD Error;
@@ -211,14 +216,11 @@ static void StaleCancelCase(PCSTR What, PCWSTR Verb, PCWSTR Path, PCWSTR Class)
     Ret = ShellExecuteExW(&Sei);
     Error = GetLastError();
     ok(!Ret, "%s: ShellExecuteEx succeeded\n", What);
-    /* What matters here: the failure is not reported as a cancelled Run As dialog */
     ok(Error != ERROR_CANCELLED, "%s: error ERROR_CANCELLED\n", What);
     ok((ULONG_PTR)Sei.hInstApp != SE_ERR_ACCESSDENIED, "%s: hInstApp SE_ERR_ACCESSDENIED\n", What);
-    /* ReactOS reports these failures with other codes (ERROR_FILE_NOT_FOUND; hInstApp 0 for the class) */
-    todo_if(is_reactos())
-    ok(Error == ERROR_NO_ASSOCIATION, "%s: error %lu\n", What, Error);
-    todo_if(is_reactos() && Class != NULL)
-    ok((ULONG_PTR)Sei.hInstApp == SE_ERR_NOASSOC, "%s: hInstApp %Iu\n", What, (ULONG_PTR)Sei.hInstApp);
+    ok(Error == ExpError, "%s: error %lu, expected %lu\n", What, Error, ExpError);
+    ok((ULONG_PTR)Sei.hInstApp == ExpInst, "%s: hInstApp %Iu, expected %Iu\n", What, (ULONG_PTR)Sei.hInstApp, ExpInst);
+    ok(Sei.hProcess == NULL, "%s: hProcess %p\n", What, Sei.hProcess);
     if (Sei.hProcess)
     {
         TerminateProcess(Sei.hProcess, 1);
@@ -226,20 +228,54 @@ static void StaleCancelCase(PCSTR What, PCWSTR Verb, PCWSTR Path, PCWSTR Class)
     }
 }
 
-static void TestStaleCancelError(void)
+/* ShellExecute returns hInstApp and leaves the error (the same cases, no class) */
+static void NoAssocPlainCase(PCSTR What, PCWSTR Verb, PCWSTR Path, DWORD ExpError, UINT_PTR ExpInst)
 {
-    WCHAR Path[MAX_PATH];
+    HINSTANCE Inst;
+    DWORD Error;
+
+    SetLastError(ERROR_CANCELLED);
+    Inst = ShellExecuteW(NULL, Verb, Path, NULL, NULL, SW_HIDE);
+    Error = GetLastError();
+    ok((ULONG_PTR)Inst == ExpInst, "ShellExecute %s: returned %Iu, expected %Iu\n", What, (ULONG_PTR)Inst, ExpInst);
+    ok(Error == ExpError, "ShellExecute %s: error %lu, expected %lu\n", What, Error, ExpError);
+}
+
+static void TestNoAssocCodes(void)
+{
+    static const WCHAR NoVerb[] = L"zzShellExecuteRunAsNoVerb";
+    static const WCHAR NoClass[] = L"zzShellExecuteRunAsNoClass";
+    WCHAR Path[MAX_PATH], Missing[MAX_PATH], NoDir[MAX_PATH], NoDirExe[MAX_PATH];
     HANDLE hFile;
 
     GetTempPathW(_countof(Path), Path);
+    StringCchCopyW(Missing, _countof(Missing), Path);
+    StringCchCatW(Missing, _countof(Missing), L"ShellExecuteRunAs-missing.txt");
+    StringCchCopyW(NoDir, _countof(NoDir), Path);
+    StringCchCatW(NoDir, _countof(NoDir), L"ShellExecuteRunAs-nodir\\missing.txt");
+    StringCchCopyW(NoDirExe, _countof(NoDirExe), Path);
+    StringCchCatW(NoDirExe, _countof(NoDirExe), L"ShellExecuteRunAs-nodir\\missing.exe");
     StringCchCatW(Path, _countof(Path), L"ShellExecuteRunAs.txt");
     hFile = CreateFileW(Path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     ok(hFile != INVALID_HANDLE_VALUE, "CreateFile(%ls) failed: %lu\n", Path, GetLastError());
     if (hFile == INVALID_HANDLE_VALUE)
         return;
     CloseHandle(hFile);
-    StaleCancelCase("stale ERROR_CANCELLED, unknown verb", L"zzShellExecuteRunAsNoVerb", Path, NULL);
-    StaleCancelCase("stale ERROR_CANCELLED, unknown class", L"open", Path, L"zzShellExecuteRunAsNoClass");
+    DeleteFileW(Missing);
+
+    NoAssocCase("unknown verb", NoVerb, Path, NULL, ERROR_NO_ASSOCIATION, SE_ERR_NOASSOC);
+    NoAssocCase("unknown class", L"open", Path, NoClass, ERROR_NO_ASSOCIATION, SE_ERR_NOASSOC);
+    NoAssocCase("unknown class, no verb", NULL, Path, NoClass, ERROR_NO_ASSOCIATION, SE_ERR_NOASSOC);
+    NoAssocCase("unknown class and verb", NoVerb, Path, NoClass, ERROR_NO_ASSOCIATION, SE_ERR_NOASSOC);
+    NoAssocCase("missing file", L"open", Missing, NULL, ERROR_FILE_NOT_FOUND, SE_ERR_FNF);
+    NoAssocCase("missing file, unknown verb", NoVerb, Missing, NULL, ERROR_FILE_NOT_FOUND, SE_ERR_FNF);
+    NoAssocCase("missing directory", L"open", NoDir, NULL, ERROR_FILE_NOT_FOUND, SE_ERR_FNF);
+    NoAssocCase("missing directory, exe", L"open", NoDirExe, NULL, ERROR_FILE_NOT_FOUND, SE_ERR_FNF);
+    NoAssocPlainCase("unknown verb", NoVerb, Path, ERROR_NO_ASSOCIATION, SE_ERR_NOASSOC);
+    NoAssocPlainCase("missing file", L"open", Missing, ERROR_FILE_NOT_FOUND, SE_ERR_FNF);
+    NoAssocPlainCase("missing file, unknown verb", NoVerb, Missing, ERROR_FILE_NOT_FOUND, SE_ERR_FNF);
+    NoAssocPlainCase("missing directory", L"open", NoDir, ERROR_FILE_NOT_FOUND, SE_ERR_FNF);
+    NoAssocPlainCase("missing directory, exe", L"open", NoDirExe, ERROR_FILE_NOT_FOUND, SE_ERR_FNF);
     DeleteFileW(Path);
 }
 
@@ -389,6 +425,6 @@ START_TEST(ShellExecuteRunAs)
         skip("Not elevated, the elevated caller cases need an administrator\n");
     }
     RunRestricted();
-    TestStaleCancelError();
+    TestNoAssocCodes();
     CoUninitialize();
 }
