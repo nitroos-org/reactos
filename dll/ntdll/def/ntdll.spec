@@ -331,6 +331,7 @@
 @ stdcall NtFilterToken(ptr long ptr ptr ptr ptr)
 @ stdcall NtFindAtom(ptr long ptr)
 @ stdcall NtFlushBuffersFile(long ptr)
+@ stdcall -version=0x600+ NtFlushBuffersFileEx(long long ptr long ptr)
 @ stdcall -stub -version=0x600+ NtFlushInstallUILanguage(long long)
 @ stdcall NtFlushInstructionCache(long ptr long)
 @ stdcall NtFlushKey(long)
@@ -1583,6 +1584,7 @@
 @ stdcall ZwFilterToken(ptr long ptr ptr ptr ptr)
 @ stdcall ZwFindAtom(ptr long ptr)
 @ stdcall ZwFlushBuffersFile(long ptr)
+@ stdcall -version=0x600+ ZwFlushBuffersFileEx(long long ptr long ptr)
 @ stdcall -stub -version=0x600+ ZwFlushInstallUILanguage(long long)
 @ stdcall ZwFlushInstructionCache(long ptr long)
 @ stdcall ZwFlushKey(long)
@@ -1719,6 +1721,7 @@
 @ stdcall ZwQuerySystemEnvironmentValue(ptr ptr long ptr)
 @ stdcall ZwQuerySystemEnvironmentValueEx(ptr ptr ptr ptr ptr)
 @ stdcall ZwQuerySystemInformation(long long long long)
+@ stdcall -version=0x601+ ZwQuerySystemInformationEx(long ptr long ptr long ptr) NtQuerySystemInformationEx
 @ stdcall ZwQuerySystemTime(ptr)
 @ stdcall ZwQueryTimer(ptr long ptr long ptr)
 @ stdcall ZwQueryTimerResolution(long long long)

@@ -105,6 +105,7 @@ list(APPEND SOURCE
     NtQueryDirectoryFile.c
     DefineDosDevice.c
     NtFlushBuffersFile.c
+    NtFlushBuffersFileEx.c
     NtFsControlFilePipe.c
     NtFlushVirtualMemory.c
     NtEaFile.c
@@ -234,6 +235,7 @@ list(APPEND SOURCE
     SystemDllTls.c
     SystemInfo.c
     UserModeException.c
+    ZwQuerySystemInformationEx.c
     Timer.c
     precomp.h)
 

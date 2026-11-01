@@ -308,4 +308,5 @@
     SVC_(FlushProcessWriteBuffers, 0)
     SVC_(CancelSynchronousIoFile, 3)
     SVC_(CompareObjects, 2)
+    SVC_(FlushBuffersFileEx, 5)
 #endif

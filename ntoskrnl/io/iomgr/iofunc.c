@@ -1538,10 +1538,10 @@ NtFsControlFile(IN HANDLE DeviceHandle,
                                 FALSE);
 }
 
+static
 NTSTATUS
-NTAPI
-NtFlushBuffersFile(IN HANDLE FileHandle,
-                   OUT PIO_STATUS_BLOCK IoStatusBlock)
+IopFlushBuffersFile(IN HANDLE FileHandle,
+                    OUT PIO_STATUS_BLOCK IoStatusBlock)
 {
     PFILE_OBJECT FileObject;
     PIRP Irp;
@@ -1670,6 +1670,36 @@ NtFlushBuffersFile(IN HANDLE FileHandle,
 
     /* Return the Status */
     return Status;
+}
+
+NTSTATUS
+NTAPI
+NtFlushBuffersFile(IN HANDLE FileHandle,
+                   OUT PIO_STATUS_BLOCK IoStatusBlock)
+{
+    return IopFlushBuffersFile(FileHandle, IoStatusBlock);
+}
+
+/*
+ * Windows 8 and later. The flags (FLUSH_FLAGS_FILE_DATA_ONLY, _NO_SYNC, _FILE_DATA_SYNC_ONLY) select how much a
+ * file system has to write; every file system here flushes everything, which satisfies each of them. Windows
+ * (measured, NTFS) does not look at the flags itself and accepts any value; the parameter block is reserved: both
+ * the pointer and the size have to be zero, and that is checked before anything else, the handle included.
+ */
+NTSTATUS
+NTAPI
+NtFlushBuffersFileEx(IN HANDLE FileHandle,
+                     IN ULONG Flags,
+                     IN PVOID Parameters OPTIONAL,
+                     IN ULONG ParametersSize,
+                     OUT PIO_STATUS_BLOCK IoStatusBlock)
+{
+    UNREFERENCED_PARAMETER(Flags);
+
+    if ((Parameters != NULL) || (ParametersSize != 0))
+        return STATUS_INVALID_PARAMETER;
+
+    return IopFlushBuffersFile(FileHandle, IoStatusBlock);
 }
 
 /*

@@ -2130,6 +2130,12 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         Status = NtFlushBuffersFile(H(0), IoBegin(a[1], &Io));
         IoEnd(a[1], &Io);
         return Status;
+    case W64_NtFlushBuffersFileEx:
+        /* The parameter block is reserved and has to be NULL, so there is nothing to translate; the checks
+         * that precede the handle are made by the service on the values as they are. */
+        Status = NtFlushBuffersFileEx(H(0), a[1], P(2), a[3], IoBegin(a[4], &Io));
+        IoEnd(a[4], &Io);
+        return Status;
     case W64_NtQueryEaFile:
         /* Extended attribute lists are flat records: the same bytes in both ABIs */
         Status = NtQueryEaFile(H(0), IoBegin(a[1], &Io), P(2), a[3], (BOOLEAN)a[4], P(5), a[6], P(7), (BOOLEAN)a[8]);
