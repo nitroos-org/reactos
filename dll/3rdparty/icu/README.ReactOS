@@ -19,8 +19,10 @@ What is vendored (unmodified unless listed below)
   common/   source/common/*.cpp and *.h (incl. unicode/*.h)
   i18n/     source/i18n/*.cpp and *.h (incl. unicode/*.h)
   stubdata/ source/stubdata/stubdata.cpp (the empty icudt64_dat symbol the ICU data loader references)
-  data/     icudtl.dat = source/data/in/icudt64l.dat, byte for byte, the upstream little-endian data package (27.5 MB;
-            Windows icudtl.dat is 27.3 MB). Renamed because add_cd_file cannot rename files inside reactos.cab.
+  data/     icudtl.dat = the ICU 64.2 data package filtered to the ReactOS NLS locales (24.9 MB; the unfiltered upstream
+            icudt64l.dat is 27.5 MB, Windows icudtl.dat 27.3 MB), see "Data file". Named icudtl.dat because add_cd_file
+            cannot rename files inside reactos.cab.
+            nls-locales.txt, build-filtered-data.sh: the locale list and the script that produce it.
   LICENSE   the ICU / Unicode license, as shipped in the tarball
   Not vendored: tools, tests, samples, io, layoutex, extra, the data sources, the configure/make files.
 
@@ -49,8 +51,21 @@ Data file
   data/icudtl.dat is installed as Globalization\ICU\icudtl.dat (the Windows name). If it is missing or unreadable ICU
   fails with U_MISSING_RESOURCE_ERROR. NOTE: .NET (System.Globalization.Native) calls abort() when icu.dll loads but the
   data does not (ValidateICUDataCanLoad), or when a symbol it needs is not exported, so never ship icu.dll without the data.
-  To shrink the file (not done: parity first) use icupkg -r to drop items, e.g. locale-specific curr/lang/region/zone/unit.
+  The package is the upstream data FILTERED to the locales the ReactOS NLS knows. Reason: .NET in ICU mode builds
+  CultureInfo.GetCultures() / Get-Culture -ListAvailable from uloc_getAvailable() and constructs every entry, which needs
+  GetLocaleInfoEx(name, LOCALE_SNAME) to succeed; upstream lists 750 locales, ReactOS knows 253 (146 specific locales
+  of the NLS plus the neutral names of the rtl locale table), so the first unknown one (af-NA) made the enumeration throw.
+  data/nls-locales.txt = those 253 ICU locale names, probed on a ReactOS build (every name of the upstream list, converted
+  with uloc_toLanguageTag, tested with GetLocaleInfoEx(LOCALE_SNAME)). build-filtered-data.sh builds the package from the
+  ICU 64.2 source + data zip with the ICU data filter (ICU_DATA_FILTER_FILE, localeFilter, includeChildren false): the locale
+  files (locales, curr, lang, region, zone, unit, coll, brkitr and rbnf trees) of the listed locales and their ancestors
+  (en_001, es_419, root, yue for rbnf, ...) only; everything that is not a locale file (converters, normalization, uprops,
+  ucase, ubidi, unames, collation root, break iterator rules and dictionaries, zoneinfo64, supplementalData, metaZones, ...)
+  is untouched. The ICU 64.2 filter drops the res_index.res requests, so the script writes them: the root index lists exactly
+  nls-locales.txt (ancestors such as en_001 stay as data but are not enumerated: ReactOS does not know en-001), the sub tree
+  indexes list what is present.
+  Growing the NLS table: add the names to nls-locales.txt and rerun: build-filtered-data.sh WORKDIR nls-locales.txt icudtl.dat
 
 Updating
   Download the new tarball, replace common/ and i18n/ (re-apply the ReactOS changes to the two umutex files),
-  stubdata.cpp, data/icudtl.dat (the new icudt<N>l.dat) and LICENSE; regenerate the .spec files only if the Windows export set changes.
+  stubdata.cpp, data/icudtl.dat (build-filtered-data.sh, new tarball hashes) and LICENSE; regenerate the .spec files only if the Windows export set changes.
