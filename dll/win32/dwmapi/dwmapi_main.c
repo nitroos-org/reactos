@@ -93,16 +93,52 @@ HRESULT WINAPI DwmGetColorizationColor(DWORD *colorization, BOOL *opaque_blend)
     return E_NOTIMPL;
 }
 
+#ifdef __REACTOS__
+static int get_display_frequency(void);
+#endif
+
 /**********************************************************************
  *                  DwmFlush              (DWMAPI.@)
  */
 HRESULT WINAPI DwmFlush(void)
 {
+#ifdef __REACTOS__
+    /* DwmFlush blocks until the next composition pass, at most one refresh
+     * period. Applications pace their vsync threads with it (Firefox ESR 128
+     * D3DVsyncSource: NotifyVsync, DwmFlush, repeat): an immediate return
+     * turns that thread into a busy loop that floods the refresh driver and
+     * the content processes. Wait for the next vblank boundary on the grid
+     * DwmGetCompositionTimingInfo reports (qpcVBlank + qpcRefreshPeriod). */
+    LARGE_INTEGER frequency, qpc;
+    LONGLONG period, next;
+    DWORD ms;
+    int hz;
+
+    TRACE("()\n");
+
+    /* 0 and 1 mean "hardware default"; never wait a second or spin */
+    hz = get_display_frequency();
+    if (hz < 2 || hz > 1000)
+        hz = 60;
+
+    QueryPerformanceFrequency(&frequency);
+    period = frequency.QuadPart / hz;
+    if (period <= 0)
+        period = 1;
+
+    QueryPerformanceCounter(&qpc);
+    next = (qpc.QuadPart / period + 1) * period;
+    ms = (DWORD)(((next - qpc.QuadPart) * 1000 + frequency.QuadPart - 1) / frequency.QuadPart);
+    Sleep(ms ? ms : 1);
+
+    return S_OK;
+#else
     static BOOL once;
 
     if (!once++) FIXME("() stub\n");
 
     return S_OK;
+#endif
 }
 
 /**********************************************************************
