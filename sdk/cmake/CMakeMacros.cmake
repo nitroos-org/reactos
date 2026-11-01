@@ -298,6 +298,8 @@ macro(dir_to_num dir var)
         set(${var} 101)
     elseif(${dir} STREQUAL reactos/Featmgr/Payload/powershell-7)
         set(${var} 102)
+    elseif(${dir} STREQUAL reactos/Rapps/Overlay)
+        set(${var} 103)
 
     else()
         message(FATAL_ERROR "Wrong destination: ${dir}")

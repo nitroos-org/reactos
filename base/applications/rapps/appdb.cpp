@@ -143,6 +143,62 @@ CAppDB::GetApps(CAtlList<CAppInfo *> &List, AppsCategories Type) const
     }
 }
 
+/* ReactOS-Nitro: entries that ship in the image (%SystemRoot%\Rapps\Overlay) win over the upstream
+ * database, which nitro cannot edit.
+ *   <pkg>.txt   replaces (or adds) the cached <pkg>.txt, e.g. a current Firefox for the 8-year-old "firefox"
+ *   <pkg>.hide  removes the cached <pkg>.txt, so the Applications Manager does not offer it
+ * It is applied to the cached copy (the same place featmgr stages its own entries), so every consumer sees
+ * it: the Applications Manager, "rapps /install <pkg>" and featmgr's catalog import. Only called when the
+ * database already has entries: a lone staged entry would stop UpdateAvailable from downloading the rest. */
+static VOID
+StageOverlay(const CPathW &AppsPath)
+{
+    WCHAR szOverlay[MAX_PATH];
+    UINT len = GetWindowsDirectoryW(szOverlay, _countof(szOverlay));
+    if (!len || len >= _countof(szOverlay) || !PathAppendW(szOverlay, L"Rapps\\Overlay"))
+        return;
+
+    CPathW Pattern(szOverlay);
+    Pattern += L"*";
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(Pattern, &fd);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return;
+
+    do
+    {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            continue;
+
+        LPCWSTR pszExt = PathFindExtensionW(fd.cFileName);
+        BOOL bHide = !_wcsicmp(pszExt, L".hide");
+        if (!bHide && _wcsicmp(pszExt, MANIFEST_DOTEXT))
+            continue;
+
+        CStringW Pkg = fd.cFileName;
+        PathRemoveExtensionW(Pkg.GetBuffer(MAX_PATH));
+        Pkg.ReleaseBuffer();
+
+        CPathW Dest = AppsPath;
+        Dest += Pkg + MANIFEST_DOTEXT;
+        if (GetFileAttributesW(Dest) != INVALID_FILE_ATTRIBUTES)
+            SetFileAttributesW(Dest, FILE_ATTRIBUTE_NORMAL); // image files may be read-only; so would be the copy
+
+        if (bHide)
+        {
+            DeleteFileW(Dest);
+        }
+        else
+        {
+            CPathW Src(szOverlay);
+            Src += fd.cFileName;
+            if (CopyFileW(Src, Dest, FALSE))
+                SetFileAttributesW(Dest, FILE_ATTRIBUTE_NORMAL);
+        }
+    } while (FindNextFileW(hFind, &fd));
+    FindClose(hFind);
+}
+
 BOOL
 CAppDB::EnumerateFiles()
 {
@@ -155,6 +211,15 @@ CAppDB::EnumerateFiles()
 
     WIN32_FIND_DATAW FindFileData;
     HANDLE hFind = FindFirstFileW(WildcardPath, &FindFileData);
+    if (hFind == INVALID_HANDLE_VALUE)
+    {
+        return FALSE;
+    }
+
+    // The database is present: apply the image's overlay, then list again
+    FindClose(hFind);
+    StageOverlay(AppsPath);
+    hFind = FindFirstFileW(WildcardPath, &FindFileData);
     if (hFind == INVALID_HANDLE_VALUE)
     {
         return FALSE;

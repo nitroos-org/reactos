@@ -47,7 +47,8 @@ static const WCHAR szStartMenuInternet[] = L"SOFTWARE\\Clients\\StartMenuInterne
 static const WCHAR szRegisteredApps[]    = L"SOFTWARE\\RegisteredApplications";
 static const WCHAR szClasses[]           = L"SOFTWARE\\Classes";
 static const WCHAR szConfigKey[]         = L"SOFTWARE\\ReactOS\\BrowserChooser";
-static const WCHAR szDefaultFfPackage[]  = L"firefox-esr";
+/* nitro overlay entry (rapps/overlay/firefox.txt): the current Firefox release. "firefox-esr" is the ESR one. */
+static const WCHAR szDefaultFfPackage[]  = L"firefox";
 
 /* ------------------------------------------------------------------ */
 /* Logging                                                            */
