@@ -216,6 +216,7 @@ list(APPEND KMTEST_SOURCE
     ntos_io/IoCreateFile_user.c
     ntos_io/IoCreateFileEx_user.c
     ntos_io/IoDeviceObject_user.c
+    ntos_io/IoIs32bitProcess_user.c
     ntos_io/IoReadWrite_user.c
     ntos_kd/NtSystemDebugControl.c
     ntos_ke/KeSystemCall32_user.c
@@ -260,6 +261,8 @@ add_dependencies(kmtest_drivers
     iocreatefile_drv
     iodeviceobject_drv
     iohelper_drv
+    iois32bitprocess_drv
+    iois32bitprocess_client
     ioreadwrite_drv
     kernel32_drv
     mmmaplockedpagesspecifycache_drv

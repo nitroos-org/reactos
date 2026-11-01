@@ -29,6 +29,7 @@ KMT_TESTFUNC Test_HidPDescription;
 KMT_TESTFUNC Test_IoCreateFile;
 KMT_TESTFUNC Test_IoCreateFileEx;
 KMT_TESTFUNC Test_IoDeviceObject;
+KMT_TESTFUNC Test_IoIs32bitProcess;
 KMT_TESTFUNC Test_IoReadWrite;
 KMT_TESTFUNC Test_MmMapLockedPagesProcessExit;
 KMT_TESTFUNC Test_MmMapLockedPagesSpecifyCache;
@@ -74,6 +75,7 @@ const KMT_TEST TestList[] =
     { "IoCreateFile",                 Test_IoCreateFile },
     { "IoCreateFileEx",               Test_IoCreateFileEx },
     { "IoDeviceObject",               Test_IoDeviceObject },
+    { "IoIs32bitProcess",             Test_IoIs32bitProcess },
     { "IoReadWrite",                  Test_IoReadWrite },
     { "KeTrapFrame",                  Test_KeTrapFrame },
     { "KeProfile",                    Test_KeProfile },

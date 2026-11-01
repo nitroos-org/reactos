@@ -19,15 +19,19 @@
  *   sizeof                      44           56         40          48
  *
  * The storage drivers of this tree (sptilib, classpnp, cdrom) read the 32-bit layout themselves, as on
- * Windows, when IoIs32bitProcess() is true for the request: the process is a WoW64 process and the request's
- * user IO_STATUS_BLOCK is a user address. Translating the header to the native layout therefore does not
- * work (measured: every request fails with STATUS_REVISION_MISMATCH, because the drivers expect Length 44).
+ * Windows, when IoIs32bitProcess() is true for the request, which it is for every request of a WoW64
+ * process (it depends on the process, not on the request's IO_STATUS_BLOCK or event). Translating the
+ * header to the native layout therefore does not work (measured: every request fails with
+ * STATUS_REVISION_MISMATCH, because the drivers expect Length 44).
  * What the drivers cannot do for a 32-bit caller is these three things, done here:
  *
- *  - the request must reach the driver as a 32-bit one whatever the handle: for a synchronous handle and no
- *    event the kernel uses an internal IO_STATUS_BLOCK and the driver would see a native request. A private
- *    event and a private IO_STATUS_BLOCK always make it a user IO_STATUS_BLOCK; the guest's event and
- *    IO_STATUS_BLOCK are set only after the result is in the guest's buffers;
+ *  - the request is sent with a private event and a private IO_STATUS_BLOCK, and the guest's event and
+ *    IO_STATUS_BLOCK are set only after the result is in the guest's buffers: the kernel would set them as
+ *    soon as the driver completes the request, before the copy-out below. The private event is also how a
+ *    request that pends on an overlapped handle is waited for, and how the code knows the request reached
+ *    the driver. They do not make the driver see a 32-bit request: NtDeviceIoControlFile hands the
+ *    IO_STATUS_BLOCK it is given to the driver whatever the handle, and IoIs32bitProcess() looks at the
+ *    process only;
  *  - the request is copied in, validated on the copy and sent from the copy (so the guest cannot change the
  *    header after the check), and the result is copied out: the data pointer of a _DIRECT request is the
  *    one the driver locks, and a range outside the guest address space must not reach it. The offsets and
@@ -153,7 +157,7 @@ NTSTATUS Wow64ScsiPassThrough(const ULONG *a)
         }
         else
         {
-            /* The private event and block make the driver see a request of a 32-bit process */
+            /* The private event and block keep the guest's own from being set before the result is copied out */
             Status = NtCreateEvent(&Event, EVENT_ALL_ACCESS, NULL, NotificationEvent, FALSE);
             if (NT_SUCCESS(Status))
             {
