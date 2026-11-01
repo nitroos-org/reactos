@@ -14,6 +14,53 @@
 #include <ndk/haltypes.h>
 #include <debug.h>
 
+/*
+ * Windows keeps the name of a port in the PortName value of its devnode's
+ * Device Parameters key (written by the ports class installer, which reserves
+ * the number in ComDB). Read it, so that the COMx name belongs to the devnode
+ * and does not depend on the order in which PnP calls AddDevice.
+ */
+static
+BOOLEAN
+SerialGetPortNameNumber(
+	IN PDEVICE_OBJECT Pdo,
+	OUT PULONG pComPortNumber)
+{
+	UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"PortName");
+	UCHAR Buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + 16 * sizeof(WCHAR)];
+	PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+	PWCHAR Name;
+	ULONG Length, Number = 0, i;
+	HANDLE hKey;
+	NTSTATUS Status;
+
+	Status = IoOpenDeviceRegistryKey(Pdo, PLUGPLAY_REGKEY_DEVICE, KEY_READ, &hKey);
+	if (!NT_SUCCESS(Status))
+		return FALSE;
+	Status = ZwQueryValueKey(hKey, &ValueName, KeyValuePartialInformation,
+	                         Info, sizeof(Buffer), &Length);
+	ZwClose(hKey);
+	if (!NT_SUCCESS(Status) || Info->Type != REG_SZ || Info->DataLength < 5 * sizeof(WCHAR))
+		return FALSE;
+
+	/* "COM" followed by one or more digits */
+	Name = (PWCHAR)Info->Data;
+	Length = Info->DataLength / sizeof(WCHAR);
+	if ((Name[0] | 0x20) != L'c' || (Name[1] | 0x20) != L'o' || (Name[2] | 0x20) != L'm')
+		return FALSE;
+	for (i = 3; i < Length && Name[i] != UNICODE_NULL; i++)
+	{
+		if (Name[i] < L'0' || Name[i] > L'9' || Number > 9999)
+			return FALSE;
+		Number = Number * 10 + (Name[i] - L'0');
+	}
+	if (i == 3 || Number == 0)
+		return FALSE;
+
+	*pComPortNumber = Number;
+	return TRUE;
+}
+
 NTSTATUS NTAPI
 SerialAddDeviceInternal(
 	IN PDRIVER_OBJECT DriverObject,
@@ -61,10 +108,10 @@ SerialAddDeviceInternal(
 	}
 
 	DeviceExtension->SerialPortNumber = IoGetConfigurationInformation()->SerialCount++;
-	if (pComPortNumber == NULL)
-		DeviceExtension->ComPort = DeviceExtension->SerialPortNumber + 1;
-	else
+	if (pComPortNumber != NULL)
 		DeviceExtension->ComPort = *pComPortNumber;
+	else if (!SerialGetPortNameNumber(Pdo, &DeviceExtension->ComPort))
+		DeviceExtension->ComPort = DeviceExtension->SerialPortNumber + 1;
 	DeviceExtension->Pdo = Pdo;
 	DeviceExtension->PnpState = dsStopped;
 	DeviceExtension->UartType = UartType;
