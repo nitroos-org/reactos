@@ -174,6 +174,9 @@ PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
             {
                 ProbeForWrite(Initial, sizeof(*Initial), sizeof(ULONG));
                 Wow64CopyContext(Initial, &Request->Context, Flags);
+                /* Windows reads the sanitized flags back: no NT, no IOPL */
+                if (Flags & (WOW64_CONTEXT_CONTROL & ~WOW64_CONTEXT_i386))
+                    Initial->EFlags = (Initial->EFlags & WOW64_EFLAGS_USER_SANITIZE) | 0x202;
             }
             else Request->Context = *Initial;
         }

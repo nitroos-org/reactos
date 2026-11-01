@@ -17,6 +17,9 @@
 #ifdef _M_IX86
 #define NTC_SEGMENT_BITS (0xFFFF)
 #define NTC_EFLAGS_BITS  (0x3C0CD5)
+/* A WoW64 thread never runs with VIF or VIP set (checked on Windows 10 22H2) */
+#define NTC_WOW64_EFLAGS_BITS (NTC_EFLAGS_BITS & ~0x180000)
+static ULONG NtcEflagsBits = NTC_EFLAGS_BITS;
 #endif
 
 void continuePoint(void);
@@ -118,8 +121,8 @@ void check(CONTEXT * pContext)
        (continueContext.SegCs & NTC_SEGMENT_BITS),
        "SegCs: 0x%lx != 0x%lx\n", pContext->SegCs, continueContext.SegCs);
 
-    ok((pContext->EFlags & NTC_EFLAGS_BITS) ==
-       (continueContext.EFlags & NTC_EFLAGS_BITS),
+    ok((pContext->EFlags & NtcEflagsBits) ==
+       (continueContext.EFlags & NtcEflagsBits),
        "EFlags: 0x%lx != 0x%lx\n", pContext->EFlags, continueContext.EFlags);
 
     ok((pContext->SegSs & NTC_SEGMENT_BITS) ==
@@ -178,6 +181,12 @@ void check(CONTEXT * pContext)
 
 START_TEST(NtContinue)
 {
+#ifdef _M_IX86
+    BOOL IsWow64 = FALSE;
+    IsWow64Process(GetCurrentProcess(), &IsWow64);
+    if (IsWow64)
+        NtcEflagsBits = NTC_WOW64_EFLAGS_BITS;
+#endif
     initrand();
 
     RtlFillMemory(&continueContext, sizeof(continueContext), 0xBBBBBBBB);

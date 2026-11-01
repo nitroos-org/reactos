@@ -50,6 +50,14 @@ static __inline VOID Wow64LegacyToFloat(XMM_SAVE_AREA32 *Fx,
     }
 }
 
+/* The EFlags a guest thread may hold: everything IRETQ and the guest can use except NT (its
+ * return to the guest raises #GP when NT is set, and the thread then faults forever) and IOPL.
+ * RF, VM, VIF and VIP stay in the saved state, as a Windows context reads them back; they do not
+ * show in the flags a running guest thread sees. */
+#define WOW64_EFLAGS_USER_SANITIZE 0x003f0dd7
+/* The flags of a guest that runs (what the native kernel loads for a compatibility-mode context) */
+#define WOW64_EFLAGS_RUNNING_SANITIZE 0x00240fd7
+
 static __inline VOID Wow64CpuToContext(WOW64_CONTEXT *To, const WOW64_CPU_STATE *From)
 {
     RtlZeroMemory(To, sizeof(*To));
@@ -76,7 +84,7 @@ static __inline VOID Wow64ContextToCpu(WOW64_CPU_STATE *To, const WOW64_CONTEXT 
     else if (Flags & 8)
         Wow64LegacyToFloat((XMM_SAVE_AREA32 *)To->ExtendedRegisters, &From->FloatSave);
     *(ULONG *)(To->ExtendedRegisters + 24) &= 0xffbf;
-    To->EFlags = (To->EFlags & 0x003f4dd7) | 0x202;
+    To->EFlags = (To->EFlags & WOW64_EFLAGS_USER_SANITIZE) | 0x202;
 }
 
 static __inline VOID Wow64NativeToContext(WOW64_CONTEXT *To, const CONTEXT *From)
@@ -110,7 +118,7 @@ static __inline VOID Wow64ContextToNative(CONTEXT *To, const WOW64_CONTEXT *From
     {
         To->ContextFlags |= CONTEXT_CONTROL | CONTEXT_INTEGER;
         To->Rbp = From->Ebp; To->Rsp = From->Esp; To->Rip = From->Eip;
-        To->EFlags = From->EFlags; To->SegCs = 0x23; To->SegSs = 0x2b;
+        To->EFlags = From->EFlags & WOW64_EFLAGS_RUNNING_SANITIZE; To->SegCs = 0x23; To->SegSs = 0x2b;
     }
     if (Flags & 4)
     {
