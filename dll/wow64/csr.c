@@ -867,6 +867,20 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
             Data[1] = HandleToUlong(UserMessage.Data.GetThreadConsoleDesktopRequest.ConsoleDesktop);
         return Status;
     }
+    case CSR_CREATE_API_NUMBER(USERSRV_SERVERDLL_INDEX, UserpExitWindowsEx):
+    {
+        /* ExitWindowsEx, logoff, shutdown, reboot: three ULONGs in the guest as natively (no pointers).
+         * The failure statuses carry meaning: STATUS_CANT_WAIT asks the guest library to run the
+         * request again on a thread of its own, and the server stores LastError for the others. */
+        WOW64_USER_EXIT_REACTOS *Guest = (PVOID)Data;
+        USER_API_MESSAGE UserMessage = {0};
+        if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
+        UserMessage.Data.ExitReactOSRequest.Flags = Guest->Flags;
+        Status = CsrClientCallServer((PCSR_API_MESSAGE)&UserMessage, NULL, Api, sizeof(USER_EXIT_REACTOS));
+        Guest->LastError = UserMessage.Data.ExitReactOSRequest.LastError;
+        Guest->Success = UserMessage.Data.ExitReactOSRequest.Success;
+        return Status;
+    }
     case CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepWriteConsole):
     {
         WOW64_CONSOLE_WRITE *From = (PVOID)Data;
