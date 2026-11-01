@@ -52,7 +52,10 @@ Wow64CpuReturn:
     mov qword ptr [rsp + 64], HEX(2b)
     mov eax, [r11 + 8]
     mov [rsp + 56], rax
+    /* A running guest sees only the flags Windows lets it see: no NT (an IRETQ with
+     * NT set faults), IOPL, RF, VM, VIF or VIP. AC and ID stay. */
     mov eax, [r11 + 16]
+    and eax, HEX(240fd7)
     mov [rsp + 48], rax
     mov qword ptr [rsp + 40], HEX(23)
     mov eax, [r11 + 12]

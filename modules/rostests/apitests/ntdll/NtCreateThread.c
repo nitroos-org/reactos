@@ -123,6 +123,16 @@ TestThreadProc(IN PVOID StartContext)
     NtTerminateThread(NtCurrentThread(), STATUS_SUCCESS);
 }
 
+static
+VOID
+WaitForTestThread(HANDLE ThreadHandle)
+{
+    /* A thread that never runs to its end must not hang the whole test run */
+    DWORD Wait = WaitForSingleObject(ThreadHandle, 30000);
+    ok_eq_ulong(Wait, WAIT_OBJECT_0);
+    CloseHandle(ThreadHandle);
+}
+
 START_TEST(NtCreateThread)
 {
     NTSTATUS Status;
@@ -173,8 +183,7 @@ START_TEST(NtCreateThread)
     ok_eq_hex(Status, STATUS_SUCCESS);
 
     NtResumeThread(ThreadHandle, NULL);
-    WaitForSingleObject(ThreadHandle, INFINITE);
-    CloseHandle(ThreadHandle);
+    WaitForTestThread(ThreadHandle);
 
     ok_eq_bool(TestThreadFunctionCalled, TRUE);
     TestThreadFunctionCalled = FALSE;
@@ -311,9 +320,33 @@ START_TEST(NtCreateThread)
                             TRUE);
     ok_eq_hex(Status, STATUS_SUCCESS);
     NtResumeThread(ThreadHandle, NULL);
-    WaitForSingleObject(ThreadHandle, INFINITE);
-    CloseHandle(ThreadHandle);
+    WaitForTestThread(ThreadHandle);
     ok_eq_hex(TestThreadStartupContext.EFlags, 0x202);
+
+#if defined(_M_AMD64) || defined(_M_IX86)
+    /* The NT flag (and IOPL) never reach a user thread on amd64 and under WoW64: a thread started
+       with NT set faulted on its return to user mode forever. Native i386 keeps NT: not run there. */
+    if (IsWow64 || sizeof(PVOID) == 8)
+    {
+        Context.EFlags = 0x4000 | 0x3000 | 0x202;
+        TestThreadStartupContext.EFlags = 0xCCCCCCCC;
+        TestThreadFunctionCalled = FALSE;
+        Status = NtCreateThread(&ThreadHandle,
+                                THREAD_ALL_ACCESS,
+                                NULL,
+                                NtCurrentProcess(),
+                                &ClientId,
+                                &Context,
+                                &InitialTeb,
+                                TRUE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        NtResumeThread(ThreadHandle, NULL);
+        WaitForTestThread(ThreadHandle);
+        ok_eq_bool(TestThreadFunctionCalled, TRUE);
+        TestThreadFunctionCalled = FALSE;
+        ok_eq_hex(TestThreadStartupContext.EFlags & (0x4000 | 0x3000), 0);
+    }
+#endif
 #endif
 
 #if !defined(_M_IX86) // FIXME: This crashes on x86
