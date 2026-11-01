@@ -120,6 +120,7 @@ list(APPEND SOURCE
     GetIconInfoEx.c
     CreateDesktopEx.c
     DesktopHeapLeak.c
+    DesktopCloseUserObjects.c
     ShutdownBlockReason.c
     PointerDeviceFunctions.c
     wsprintf.c)

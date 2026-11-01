@@ -1750,7 +1750,10 @@ IntHideDesktop(PDESKTOP Desktop)
 {
     PWND DesktopWnd;
 
-    DesktopWnd = IntGetWindowObject(Desktop->DesktopWindow);
+    /* No reference: IntGetWindowObject took one that was never released, so the window
+       of every desktop switched away from stayed allocated (with its USER handle) after
+       the desktop was deleted, and the input desktop window gained a lock per switch */
+    DesktopWnd = UserGetWindowObject(Desktop->DesktopWindow);
     if (! DesktopWnd)
     {
         return ERROR_INVALID_WINDOW_HANDLE;
