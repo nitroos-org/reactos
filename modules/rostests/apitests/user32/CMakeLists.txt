@@ -31,6 +31,7 @@ list(APPEND SOURCE
     EnumDisplaySettings.c
     FrameChangedClient.c
     FrameMetrics.c
+    FramelessCaptionDrag.c
     GetClassInfo.c
     GetDCEx.c
     GetIconInfo.c
