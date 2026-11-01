@@ -68,6 +68,7 @@ list(APPEND SOURCE
     MenuItemData.c
     MenuUI.c
     MessageStateAnalyzer.c
+    MessageWakeBoost.c
     MsgWaitForMultipleObjectsEx.c
     NCRButtonDown.c
     NcPaintActive.c

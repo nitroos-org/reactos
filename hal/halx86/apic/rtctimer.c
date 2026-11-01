@@ -31,6 +31,14 @@ static ULONG HalpRunningFraction;
 static BOOLEAN HalpSetClockRate;
 static UCHAR HalpNextClockRate;
 
+/* The other processors charge run time and decrement the quantum once per clock
+   tick (KeMaximumIncrement) in KeUpdateRunTime, as the kernel does on this one in
+   KeUpdateSystemTime. The clock IPI is therefore sent only on the interrupts that
+   complete a tick: at a raised clock rate (timeBeginPeriod) every interrupt was
+   charged as a full tick, about 16 times the elapsed time at 1 ms. This follows
+   the kernel tick offset (KiTickOffset) with the same increments. */
+static LONG HalpClockIpiTickOffset;
+
 /* The RTC raises its next periodic interrupt only after register C was read, so
    periods that end while an interrupt is still pending are lost (interrupts
    disabled for longer than a period, or a hypervisor that does not run the
@@ -193,6 +201,7 @@ HalpInitializeClock(VOID)
 
     /* Notify the kernel about the maximum and minimum increment */
     KeSetTimeIncrement(HalpMaximumTimeIncrement, HalpMinimumTimeIncrement);
+    HalpClockIpiTickOffset = (LONG)HalpMaximumTimeIncrement;
 
     /* Enable the timer interrupt */
     HalEnableSystemInterrupt(APIC_CLOCK_VECTOR, CLOCK_LEVEL, Latched);
@@ -383,8 +392,15 @@ HalpClockInterruptHandler(IN PKTRAP_FRAME TrapFrame)
         HalpSetClockRate = FALSE;
     }
 
-    /* Send the clock IPI to all other CPUs */
-    HalpBroadcastClockIpi(CLOCK_IPI_VECTOR);
+    /* Send the clock IPI to all other CPUs when this interrupt completes a
+       clock tick (several ticks when it reports lost periods) */
+    HalpClockIpiTickOffset -= (LONG)LastIncrement;
+    if (HalpClockIpiTickOffset <= 0)
+    {
+        HalpClockIpiTickOffset += (LONG)HalpMaximumTimeIncrement *
+            (LONG)(1 + (ULONG)(-HalpClockIpiTickOffset) / HalpMaximumTimeIncrement);
+        HalpBroadcastClockIpi(CLOCK_IPI_VECTOR);
+    }
 
     /* Update the system time -- on x86 the kernel will exit this trap  */
     KeUpdateSystemTime(TrapFrame, LastIncrement, Irql);
