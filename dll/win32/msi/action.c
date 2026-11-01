@@ -2149,6 +2149,30 @@ BOOL msi_is_global_assembly( MSICOMPONENT *comp )
     return comp->assembly && !comp->assembly->application;
 }
 
+static BOOL is_admin_install( MSIPACKAGE *package )
+{
+    WCHAR *action = msi_dup_property( package->db, L"ACTION" );
+    BOOL ret = (action && !wcscmp( action, L"ADMIN" ));
+    free( action );
+    return ret;
+}
+
+/* An administrative image mirrors the SOURCE tree of the package: the directories are named by the
+ * source part of the Directory table's DefaultDir ("target:source", "." collapses into the parent, so a
+ * product directory like INSTALLLOCATION "LIBREO~1|LibreOffice:." is the image root itself, not a
+ * subdirectory), and the files by their long names, or by the short ones with SHORTFILENAMES. */
+static BOOL admin_use_short_names( MSIPACKAGE *package )
+{
+    WCHAR *sfn;
+    BOOL ret;
+
+    if (!is_admin_install( package )) return FALSE;
+    sfn = msi_dup_property( package->db, L"SHORTFILENAMES" );
+    ret = sfn && sfn[0];
+    free( sfn );
+    return ret;
+}
+
 static void set_target_path( MSIPACKAGE *package, MSIFILE *file )
 {
     free( file->TargetPath );
@@ -2162,7 +2186,8 @@ static void set_target_path( MSIPACKAGE *package, MSIFILE *file )
     else
     {
         const WCHAR *dir = msi_get_target_folder( package, file->Component->Directory );
-        file->TargetPath = msi_build_directory_name( 2, dir, file->FileName );
+        const WCHAR *name = admin_use_short_names( package ) ? file->ShortName : file->FileName;
+        file->TargetPath = msi_build_directory_name( 2, dir, name );
     }
 
     TRACE("file %s resolves to %s\n", debugstr_w(file->File), debugstr_w(file->TargetPath));
@@ -2284,14 +2309,6 @@ static WCHAR *get_install_location( MSIPACKAGE *package )
     return path;
 }
 
-static BOOL is_admin_install( MSIPACKAGE *package )
-{
-    WCHAR *action = msi_dup_property( package->db, L"ACTION" );
-    BOOL ret = (action && !wcscmp( action, L"ADMIN" ));
-    free( action );
-    return ret;
-}
-
 void msi_resolve_target_folder( MSIPACKAGE *package, const WCHAR *name, BOOL load_prop )
 {
     FolderList *fl;
@@ -2313,13 +2330,18 @@ void msi_resolve_target_folder( MSIPACKAGE *package, const WCHAR *name, BOOL loa
     }
     else if (!load_prop || !(path = msi_dup_property( package->db, folder->Directory )))
     {
+        const WCHAR *dirname = folder->TargetDefault;
+
+        if (is_admin_install( package ))
+            dirname = admin_use_short_names( package ) ? folder->SourceShortPath : folder->SourceLongPath;
+
         if (folder->Parent && wcscmp( folder->Directory, folder->Parent ))
         {
             parent = msi_get_loaded_folder( package, folder->Parent );
-            path = msi_build_directory_name( 3, parent->ResolvedTarget, folder->TargetDefault, NULL );
+            path = msi_build_directory_name( 3, parent->ResolvedTarget, dirname, NULL );
         }
         else
-            path = msi_build_directory_name( 2, folder->TargetDefault, NULL );
+            path = msi_build_directory_name( 2, dirname, NULL );
     }
 
     normalized_path = msi_normalize_path( path );
