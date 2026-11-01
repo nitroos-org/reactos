@@ -370,6 +370,15 @@ KiDispatchException(IN PEXCEPTION_RECORD ExceptionRecord,
 
             /* Decrement RIP by one */
             Context.Rip--;
+
+            /* The exception address of an int3 is the int3 itself (as on i386
+               and Windows); the trap frame, which a debugger reads, keeps the
+               address after it. Debug services keep the address after the int3. */
+            if ((ExceptionRecord->NumberParameters == 3) &&
+                (ExceptionRecord->ExceptionInformation[0] == BREAKPOINT_BREAK))
+            {
+                ExceptionRecord->ExceptionAddress = (PVOID)Context.Rip;
+            }
             break;
 
         /* Internal exception */

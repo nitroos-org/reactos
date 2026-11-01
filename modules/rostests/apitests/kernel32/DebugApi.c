@@ -258,11 +258,9 @@ static void TestCatch(const WCHAR *FileName)
             {
                 Breakpoints++;
                 ok(Event.u.Exception.dwFirstChance, "breakpoint not first chance\n");
-                /* Windows reports the address of the INT 3 and the thread continues after it. The amd64 ReactOS
-                 * kernel reports the address after it (KiBreakpointTrap), also to a WoW64 debugger. */
+                /* The exception address is the INT 3, the thread context is already after it */
                 if (GetPc(Event.dwThreadId, &Pc, "breakpoint"))
                 {
-                    todo_if(is_reactos() && Pc == Address)
                     ok(Pc == Address + 1, "breakpoint at %p, pc %p\n", Record->ExceptionAddress, (PVOID)Pc);
                 }
                 /* The initial thread runs guest code by now */
@@ -391,7 +389,6 @@ static void TestAttach(const WCHAR *FileName)
                 if (GetPc(Event.dwThreadId, &Pc, "break-in"))
                 {
                     ULONG_PTR Address = (ULONG_PTR)Event.u.Exception.ExceptionRecord.ExceptionAddress;
-                    todo_if(is_reactos() && Pc == Address)
                     ok(Pc == Address + 1, "break-in at %p, pc %p\n", (PVOID)Address, (PVOID)Pc);
                 }
             }

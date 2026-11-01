@@ -91,6 +91,7 @@ DbgkpSendSystemDll32Message(VOID)
     PDBGKM_LOAD_DLL LoadDll = &ApiMessage.LoadDll;
     PCUNICODE_STRING FileName;
     PIMAGE_NT_HEADERS NtHeader = NULL;
+    ULONG SymbolOffset = 0, SymbolCount = 0;
     PVOID Base;
     OBJECT_ATTRIBUTES ObjectAttributes;
     IO_STATUS_BLOCK IoStatusBlock;
@@ -104,6 +105,11 @@ DbgkpSendSystemDll32Message(VOID)
     {
         NtHeader = RtlImageNtHeader(Base);
         if (NtHeader && NtHeader->FileHeader.Machine != IMAGE_FILE_MACHINE_I386) NtHeader = NULL;
+        if (NtHeader)
+        {
+            SymbolOffset = NtHeader->FileHeader.PointerToSymbolTable;
+            SymbolCount = NtHeader->FileHeader.NumberOfSymbols;
+        }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -114,8 +120,8 @@ DbgkpSendSystemDll32Message(VOID)
 
     RtlZeroMemory(&ApiMessage, sizeof(ApiMessage));
     LoadDll->BaseOfDll = Base;
-    LoadDll->DebugInfoFileOffset = NtHeader->FileHeader.PointerToSymbolTable;
-    LoadDll->DebugInfoSize = NtHeader->FileHeader.NumberOfSymbols;
+    LoadDll->DebugInfoFileOffset = SymbolOffset;
+    LoadDll->DebugInfoSize = SymbolCount;
     /* No name, as Windows gives a 64-bit debugger */
     LoadDll->NamePointer = NULL;
 
