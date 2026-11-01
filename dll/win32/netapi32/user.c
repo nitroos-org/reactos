@@ -2202,6 +2202,30 @@ SetUserInfo(SAM_HANDLE UserHandle,
         goto done;
     }
 
+    /* ChangeUserDacl() only edited the copy of the DACL: store it, or UF_PASSWD_CANT_CHANGE is never persisted */
+    if (Dacl != NULL)
+    {
+        SECURITY_DESCRIPTOR SecurityDescriptor;
+
+        Status = RtlCreateSecurityDescriptor(&SecurityDescriptor,
+                                             SECURITY_DESCRIPTOR_REVISION);
+        if (NT_SUCCESS(Status))
+            Status = RtlSetDaclSecurityDescriptor(&SecurityDescriptor,
+                                                  TRUE,
+                                                  Dacl,
+                                                  FALSE);
+        if (NT_SUCCESS(Status))
+            Status = SamSetSecurityObject(UserHandle,
+                                          DACL_SECURITY_INFORMATION,
+                                          &SecurityDescriptor);
+        if (!NT_SUCCESS(Status))
+        {
+            ERR("Storing the user DACL failed (Status %08lx)\n", Status);
+            ApiStatus = NetpNtStatusToApiStatus(Status);
+            goto done;
+        }
+    }
+
 done:
     if (Dacl != NULL)
         HeapFree(GetProcessHeap(), 0, Dacl);
