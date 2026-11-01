@@ -4305,6 +4305,101 @@ co_IntSnapWindow(PWND Wnd, UINT Edge)
         UserDerefObjectCo(Wnd);
 }
 
+/*
+ * Win+Arrow window arrangement for the foreground window.
+ *
+ * Called from the thread that owns the window (WM_ASYNC_WINARROWSNAP, queued by co_UserProcessHotKeys), so the
+ * keyboard input thread never waits for the application and the shortcut works whether or not the application
+ * passes keys to DefWindowProc.
+ *   Win+Left/Right   snap to that half; Left on the left half (Right on the right half) moves to the other half,
+ *                    the opposite key restores the window
+ *   Win+Up           maximize (restore when minimized)
+ *   Win+Down         restore a maximized or snapped window, otherwise minimize
+ *   Win+Shift+Up     maximize vertically, keeping the width
+ */
+VOID FASTCALL
+co_IntWinArrowSnap(PWND Wnd, UINT vk, BOOL fShift)
+{
+    USER_REFERENCE_ENTRY ref;
+    HWND hwnd;
+    BOOL allowSnap;
+    UINT snapped, style;
+
+    if (!g_bWindowSnapEnabled)
+        return;
+
+    allowSnap = IntIsSnapAllowedForWindow(Wnd);
+    /* Allow the minimize action if it has a minimize button, even if the window cannot be snapped (e.g. Calc.exe) */
+    if (!allowSnap && (Wnd->style & (WS_MINIMIZEBOX | WS_THICKFRAME)) == WS_MINIMIZEBOX)
+        allowSnap = (vk == VK_DOWN && !fShift);
+    if (!allowSnap)
+        return;
+
+    hwnd = UserHMGetHandle(Wnd);
+    UserRefObjectCo(Wnd, &ref);
+
+    snapped = IntGetWindowSnapEdge(Wnd);
+    style = Wnd->style;
+
+    if (vk == VK_DOWN)
+    {
+        if (style & WS_MAXIMIZE)
+            co_IntSendMessage(hwnd, WM_SYSCOMMAND, SC_RESTORE, MAKELONG(0, 1));
+        else if (snapped)
+            co_IntUnsnapWindow(Wnd);
+        else if (!(style & WS_MINIMIZE))
+            co_IntSendMessage(hwnd, WM_SYSCOMMAND, SC_MINIMIZE, MAKELONG(0, 1));
+    }
+    else if (vk == VK_UP && fShift)
+    {
+        /* Vertical maximize: normal windows only (a snapped one already has the full height) */
+        if (!(style & (WS_MAXIMIZE | WS_MINIMIZE)) && !snapped && (style & WS_MAXIMIZEBOX))
+        {
+            RECT work;
+            UserSystemParametersInfo(SPI_GETWORKAREA, 0, &work, 0); /* FIXME: MultiMon of PWND */
+            co_WinPosSetWindowPos(Wnd, HWND_TOP,
+                                  Wnd->rcWindow.left, work.top,
+                                  Wnd->rcWindow.right - Wnd->rcWindow.left, work.bottom - work.top, 0);
+        }
+    }
+    else if (vk == VK_UP)
+    {
+        if (style & WS_MINIMIZE)
+            co_IntSendMessage(hwnd, WM_SYSCOMMAND, SC_RESTORE, MAKELONG(0, 1));
+        else if (style & WS_MAXIMIZEBOX)
+            co_IntSendMessage(hwnd, WM_SYSCOMMAND, SC_MAXIMIZE, MAKELONG(0, 1));
+    }
+    else if ((vk == VK_LEFT || vk == VK_RIGHT) && !fShift && !(style & WS_MINIMIZE))
+    {
+        /* Shift+Left/Right moves the window to the next monitor: there is only one monitor, nothing to do */
+        UINT edge = (vk == VK_LEFT) ? HTLEFT : HTRIGHT;
+        UINT otherEdge = (edge == HTLEFT) ? HTRIGHT : HTLEFT;
+
+        if (style & WS_MAXIMIZE)
+        {
+            /* SC_RESTORE + Snap causes the window to visually move twice, place it manually in the snap position */
+            RECT normalRect = Wnd->InternalPos.NormalRect;
+            co_IntCalculateSnapPosition(Wnd, edge, &Wnd->InternalPos.NormalRect); /* Calculate edge position */
+            IntSetSnapEdge(Wnd, edge); /* Tell everyone the edge we are snapped to */
+            co_IntSendMessage(hwnd, WM_SYSCOMMAND, SC_RESTORE, MAKELONG(0, 1));
+            IntSetSnapInfo(Wnd, edge, &normalRect); /* Reset the real place to unsnap to */
+            snapped = HTNOWHERE; /* Force snap */
+        }
+        else if (snapped == edge)
+        {
+            /* Already snapped to this edge, snap to the opposite side (left half -> right half -> restored) */
+            edge = otherEdge;
+        }
+
+        if (snapped == otherEdge)
+            co_IntUnsnapWindow(Wnd);
+        else
+            co_IntSnapWindow(Wnd, edge);
+    }
+
+    UserDerefObjectCo(Wnd);
+}
+
 VOID FASTCALL
 IntSetSnapEdge(PWND Wnd, UINT Edge)
 {

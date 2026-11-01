@@ -1030,71 +1030,7 @@ IntDefWindowProc(
                co_IntSendMessage(UserHMGetHandle(Wnd), WM_CONTEXTMENU, (WPARAM)UserHMGetHandle(Wnd), MAKELPARAM(-1, -1));
             }
          }
-         if (g_bWindowSnapEnabled && (IS_KEY_DOWN(gafAsyncKeyState, VK_LWIN) || IS_KEY_DOWN(gafAsyncKeyState, VK_RWIN)))
-         {
-            HWND hwndTop = UserGetForegroundWindow();
-            PWND topWnd = UserGetWindowObject(hwndTop);
-            BOOL allowSnap;
-
-            // MS Doc: foreground window can be NULL, e.g. when window is losing activation
-            if (!topWnd)
-               return 0;
-
-            allowSnap = IntIsSnapAllowedForWindow(topWnd);
-            /* Allow the minimize action if it has a minimize button, even if the window cannot be snapped (e.g. Calc.exe) */
-            if (!allowSnap && (topWnd->style & (WS_MINIMIZEBOX|WS_THICKFRAME)) == WS_MINIMIZEBOX)
-                allowSnap = wParam == VK_DOWN;
-
-            if (allowSnap)
-            {
-               UINT snapped = IntGetWindowSnapEdge(topWnd);
-
-               if (wParam == VK_DOWN)
-               {
-                   if (topWnd->style & WS_MAXIMIZE)
-                       co_IntSendMessage(hwndTop, WM_SYSCOMMAND, SC_RESTORE, MAKELONG(0, 1));
-                   else if (snapped)
-                       co_IntUnsnapWindow(topWnd);
-                   else
-                       co_IntSendMessage(hwndTop, WM_SYSCOMMAND, SC_MINIMIZE, MAKELONG(0, 1));
-               }
-               else if (wParam == VK_UP)
-               {
-                   if (topWnd->style & WS_MINIMIZE)
-                       co_IntSendMessage(hwndTop, WM_SYSCOMMAND, SC_RESTORE, MAKELONG(0, 1));
-                   else
-                       co_IntSendMessage(hwndTop, WM_SYSCOMMAND, SC_MAXIMIZE, MAKELONG(0, 1));
-               }
-               else if (wParam == VK_LEFT || wParam == VK_RIGHT)
-               {
-                  UINT edge = wParam == VK_LEFT ? HTLEFT : HTRIGHT;
-                  UINT otherEdge = edge == HTLEFT ? HTRIGHT : HTLEFT;
-
-                  if (topWnd->style & WS_MAXIMIZE)
-                  {
-                     /* SC_RESTORE + Snap causes the window to visually move twice, place it manually in the snap position */
-                     RECT normalRect = topWnd->InternalPos.NormalRect;
-                     co_IntCalculateSnapPosition(topWnd, edge, &topWnd->InternalPos.NormalRect); /* Calculate edge position */
-                     IntSetSnapEdge(topWnd, edge); /* Tell everyone the edge we are snapped to */
-                     co_IntSendMessage(hwndTop, WM_SYSCOMMAND, SC_RESTORE, MAKELONG(0, 1));
-                     IntSetSnapInfo(topWnd, edge, &normalRect); /* Reset the real place to unsnap to */
-                     snapped = HTNOWHERE; /* Force snap */
-                  }
-#if 0 /* Windows 8 does this but is it a good feature? */
-                  else if (snapped == edge)
-                  {
-                     /* Already snapped to this edge, snap to the opposite side */
-                     edge = otherEdge;
-                  }
-#endif
-
-                  if (snapped == otherEdge)
-                     co_IntUnsnapWindow(topWnd);
-                  else
-                     co_IntSnapWindow(topWnd, edge);
-               }
-            }
-         }
+         /* Win+Arrow window arrangement is done by the Win+Arrow hotkeys (hotkey.c, co_IntWinArrowSnap) */
          break;
 
       case WM_SYSKEYDOWN:

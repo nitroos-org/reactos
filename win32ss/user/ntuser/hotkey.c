@@ -37,6 +37,7 @@ DBG_DEFAULT_CHANNEL(UserHotkey);
 
 PHOT_KEY gphkFirst = NULL;
 UINT gfsModOnlyCandidate;
+static WORD gwSnapKeyDown = 0; /* Win+Arrow key whose press was consumed and whose release is pending */
 
 /* FUNCTIONS *****************************************************************/
 
@@ -232,6 +233,12 @@ co_UserProcessHotKeys(WORD wVk, BOOL bIsDown)
         {
             /* Regular key up -- no hotkey, but reset mod-only candidates */
             gfsModOnlyCandidate = 0;
+            /* The release of a consumed Win+Arrow press is consumed too, as its press was */
+            if (wVk == gwSnapKeyDown)
+            {
+                gwSnapKeyDown = 0;
+                return TRUE;
+            }
             return FALSE;
         }
     }
@@ -268,12 +275,28 @@ co_UserProcessHotKeys(WORD wVk, BOOL bIsDown)
         if (pHotKey->id == IDHK_SNAP_LEFT ||
             pHotKey->id == IDHK_SNAP_RIGHT ||
             pHotKey->id == IDHK_SNAP_UP ||
-            pHotKey->id == IDHK_SNAP_DOWN)
+            pHotKey->id == IDHK_SNAP_DOWN ||
+            pHotKey->id == IDHK_SNAP_VMAX)
         {
-            HWND topWnd = UserGetForegroundWindow();
-            if (topWnd)
+            HWND topWnd;
+
+            /* With window snapping off the key is an ordinary key for the application */
+            if (!g_bWindowSnapEnabled)
+                return FALSE;
+
+            /* The key is consumed here, so applications that handle keys themselves and applications that pass
+               them to DefWindowProc both get the same single arrangement. Typematic repeats do nothing (they would
+               cycle the window through its positions). */
+            if (gwSnapKeyDown != wVk)
             {
-                UserPostMessage(topWnd, WM_KEYDOWN, wVk, 0);
+                gwSnapKeyDown = wVk;
+                topWnd = UserGetForegroundWindow();
+                if (topWnd)
+                {
+                    /* Handled in the thread of the window: a hung application must not stall the input thread */
+                    co_IntSendMessageNoWait(topWnd, WM_ASYNC_WINARROWSNAP, wVk,
+                                            (LPARAM)(pHotKey->id == IDHK_SNAP_VMAX));
+                }
             }
             return TRUE;
         }

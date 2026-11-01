@@ -932,6 +932,10 @@ static LRESULT handle_internal_message( PWND pWnd, UINT msg, WPARAM wparam, LPAR
        case WM_ASYNC_PRINTWINDOW:
           /* Sent by PrintWindow; wParam is the request id */
           return IntHandlePrintWindowRequest(pWnd, (ULONG)wparam);
+       case WM_ASYNC_WINARROWSNAP:
+          /* Win+Arrow, queued by the hotkey code: runs in the thread of the foreground window */
+          co_IntWinArrowSnap(pWnd, (UINT)wparam, (BOOL)lparam);
+          return 0;
     }
     return 0;
 }

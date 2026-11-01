@@ -79,6 +79,7 @@ VOID UserGetWindowBorders(DWORD,DWORD,SIZE*,BOOL);
 UINT FASTCALL IntGetWindowSnapEdge(PWND Wnd);
 VOID FASTCALL co_IntCalculateSnapPosition(PWND Wnd, UINT Edge, OUT RECT *Pos);
 VOID FASTCALL co_IntSnapWindow(PWND Wnd, UINT Edge);
+VOID FASTCALL co_IntWinArrowSnap(PWND Wnd, UINT vk, BOOL fShift);
 VOID FASTCALL IntSetSnapEdge(PWND Wnd, UINT Edge);
 VOID FASTCALL IntSetSnapInfo(PWND Wnd, UINT Edge, IN const RECT *Pos OPTIONAL);
 #define GetSnapSetting(gspvmember) (IsSnapEnabled() ? (gspv.gspvmember) : 0)
