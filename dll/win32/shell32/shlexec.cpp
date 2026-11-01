@@ -751,6 +751,68 @@ again:
 }
 
 /*************************************************************************
+ *    SHELL_RunAsNeedsPrompt [Internal]
+ *
+ * ReactOS has no UAC: no token is split, and an administrator's token is
+ * already the full one, as on Windows with UAC off (EnableLUA = 0). Measured
+ * there (Windows 10 22H2), "runas" never prompts: ShellExecuteEx starts the
+ * target itself with the caller's token and returns TRUE with a valid
+ * hProcess, for an elevated caller and for a filtered, medium-integrity one
+ * alike, with or without SEE_MASK_FLAG_NO_UI.
+ *
+ * Starting the target with the caller's token cannot elevate anything, so an
+ * elevated caller and a caller that forbids UI get exactly that. A caller
+ * that is not elevated and allows UI still gets the Run As dialog, the only
+ * way to run the target with another account's token, and only with that
+ * account's credentials.
+ */
+static BOOL SHELL_IsProcessElevated(VOID)
+{
+    HANDLE hToken;
+    TOKEN_ELEVATION Elevation;
+    DWORD cbRet;
+    BOOL bElevated = FALSE, bKnown = FALSE;
+
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
+    {
+        if (GetTokenInformation(hToken, TokenElevation, &Elevation, sizeof(Elevation), &cbRet))
+        {
+            bElevated = (Elevation.TokenIsElevated != 0);
+            bKnown = TRUE;
+        }
+        CloseHandle(hToken);
+    }
+    if (!bKnown)
+        bElevated = IsUserAnAdmin(); /* No TokenElevation: an enabled Administrators group */
+    return bElevated;
+}
+
+static BOOL SHELL_RunAsNeedsPrompt(_In_ const SHELLEXECUTEINFOW *psei)
+{
+    if (psei->fMask & SEE_MASK_FLAG_NO_UI)
+        return FALSE;
+    return !SHELL_IsProcessElevated();
+}
+
+/*
+ * SHELL_execute's working copy of the SHELLEXECUTEINFOW, with what
+ * SHELL_ExecuteW reports beside its return value. Every execfunc call gets
+ * &sei of this as its psei (SHELL_ExecuteW is only ever called through
+ * SHELL_execute), so SHELL_ExecuteW reaches the flags through psei.
+ *
+ * bRunAsCancelled: the user cancelled the Run As dialog. It is carried apart
+ * from the return value, whose codes below 32 include plain CreateProcess
+ * errors, and apart from the last error, which the paths in between neither
+ * set nor preserve.
+ */
+struct SHELL_EXECUTE_STATE
+{
+    SHELLEXECUTEINFOW sei; /* Must stay first */
+    BOOL bRunAsCancelled;
+};
+C_ASSERT(FIELD_OFFSET(SHELL_EXECUTE_STATE, sei) == 0);
+
+/*************************************************************************
  *    SHELL_ExecuteW [Internal]
  *
  */
@@ -818,14 +880,18 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
     }
 
     BOOL createdProcess;
-    if (psei->lpVerb && !StrCmpIW(L"runas", psei->lpVerb))
+    if (psei->lpVerb && !StrCmpIW(L"runas", psei->lpVerb) && SHELL_RunAsNeedsPrompt(psei))
     {
         HRESULT hr = PromptAndRunProcessAs(psei->hwnd, (LPWSTR)lpCmd, dwCreationFlags,
                                                  env, lpDirectory, &startup, &info);
         createdProcess = hr == S_OK;
         if (hr == S_FALSE)
         {
-            retval = 33; // Pretend cancel is success.
+            /* Cancelled: ShellExecuteEx fails with ERROR_CANCELLED, like a refused elevation */
+            CONTAINING_RECORD(const_cast<LPSHELLEXECUTEINFOW>(psei), SHELL_EXECUTE_STATE, sei)->bRunAsCancelled = TRUE;
+            retval = SE_ERR_ACCESSDENIED;
+            lasterror = ERROR_CANCELLED;
+            SetLastError(ERROR_CANCELLED);
             goto done;
         }
     }
@@ -2267,6 +2333,14 @@ static void do_error_dialog(UINT_PTR retval, HWND hwnd, PCWSTR filename)
     SetLastError(error_code); // Restore
 }
 
+/* The Run As dialog was cancelled (SHELL_EXECUTE_STATE.bRunAsCancelled): fail quietly */
+static BOOL SHELL_ExecuteCancelled(LPSHELLEXECUTEINFOW sei)
+{
+    sei->hInstApp = (HINSTANCE)UlongToHandle(SE_ERR_ACCESSDENIED);
+    SetLastError(ERROR_CANCELLED);
+    return FALSE;
+}
+
 static UINT_PTR ExecuteFailed(UINT_PTR retval, SHELLEXECUTEINFOW &sei, LPCWSTR lpFile, BOOL AllowOpenWith = TRUE)
 {
     if (retval <= 32 && !(sei.fMask & SEE_MASK_FLAG_NO_UI))
@@ -2312,7 +2386,8 @@ static BOOL SHELL_execute(LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc)
 
     /* make a local copy of the LPSHELLEXECUTEINFO structure and work with this from now on */
     sei->hProcess = NULL;
-    SHELLEXECUTEINFOW sei_tmp = *sei;
+    SHELL_EXECUTE_STATE state = { *sei, FALSE };
+    SHELLEXECUTEINFOW &sei_tmp = state.sei;
 
     TRACE("mask=0x%08x hwnd=%p verb=%s file=%s parm=%s dir=%s show=0x%08x class=%s\n",
           sei_tmp.fMask, sei_tmp.hwnd, debugstr_w(sei_tmp.lpVerb),
@@ -2483,6 +2558,8 @@ static BOOL SHELL_execute(LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc)
             sei->hProcess = sei_tmp.hProcess;
             return TRUE;
         }
+        if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED))
+            return SHELL_ExecuteCancelled(sei);
         UINT err = HRESULT_FACILITY(hr) == FACILITY_WIN32 ? HRESULT_CODE(hr) : GetLastError();
         SetLastError(err ? err : ERROR_ACCESS_DENIED);
         return ExecuteFailed(retval, *sei, NULL, FALSE) > 32;
@@ -2503,6 +2580,8 @@ static BOOL SHELL_execute(LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc)
     if (sei_tmp.fMask & SEE_MASK_CLASSALL)
     {
         retval = SHELL_execute_class(wszApplicationName, &sei_tmp, sei, execfunc);
+        if (state.bRunAsCancelled)
+            return SHELL_ExecuteCancelled(sei);
         if (retval <= 32 && !(sei_tmp.fMask & SEE_MASK_FLAG_NO_UI))
         {
             OPENASINFO Info;
@@ -2644,6 +2723,9 @@ static BOOL SHELL_execute(LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc)
         retval = execfunc(wcmd, NULL, FALSE, &sei_tmp, sei);
         if (retval > 32)
             return TRUE;
+        /* The Run As dialog was cancelled: do not ask again through the association */
+        if (state.bRunAsCancelled)
+            return SHELL_ExecuteCancelled(sei);
     }
 
     /* Else, try to find the executable */
@@ -2695,6 +2777,8 @@ static BOOL SHELL_execute(LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc)
 
     TRACE("retval %lu\n", retval);
 
+    if (state.bRunAsCancelled)
+        return SHELL_ExecuteCancelled(sei);
     if (retval <= 32)
         retval = ExecuteFailed(retval, *sei, lpFile);
 
