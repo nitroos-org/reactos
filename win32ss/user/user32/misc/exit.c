@@ -201,6 +201,11 @@ ExitWindowsEx(UINT uFlags,
 
 /*
  * @implemented
+ *
+ * Measured on Windows 10 22H2: FALSE with ERROR_INVALID_HANDLE for a window that is not valid
+ * for the caller (invalid or destroyed handle, a window of the calling process, a window of
+ * another session); TRUE for a window of another process, and the last error is then left
+ * alone.
  */
 BOOL
 WINAPI
@@ -213,9 +218,10 @@ EndTask(HWND hWnd,
 
     UNREFERENCED_PARAMETER(fShutDown);
 
-    // EndTaskRequest->LastError = ERROR_SUCCESS;
+    EndTaskRequest->LastError = ERROR_SUCCESS;
     EndTaskRequest->WndHandle = hWnd;
     EndTaskRequest->Force = fForce;
+    EndTaskRequest->Success = FALSE;
 
     CsrClientCallServer((PCSR_API_MESSAGE)&ApiMessage,
                         NULL,
@@ -227,10 +233,14 @@ EndTask(HWND hWnd,
         return FALSE;
     }
 
-    if (EndTaskRequest->LastError != ERROR_SUCCESS)
-        UserSetLastError(EndTaskRequest->LastError);
+    if (!EndTaskRequest->Success)
+    {
+        UserSetLastError(EndTaskRequest->LastError != ERROR_SUCCESS ?
+                         EndTaskRequest->LastError : ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
 
-    return EndTaskRequest->Success;
+    return TRUE;
 }
 
 /* EOF */
