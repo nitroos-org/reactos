@@ -6,13 +6,13 @@
     Author                = 'ReactOS-Nitro'
     CompanyName           = 'ReactOS-Nitro'
     Copyright             = 'ReactOS-Nitro contributors. GNU GPL v2 or later.'
-    Description           = 'TCP/IP cmdlets for PowerShell 7 on ReactOS-Nitro: a clean-room script module over iphlpapi with the cmdlet names, parameters and output shapes of the Windows NetTCPIP module (read side: Get-NetIPAddress, Get-NetIPInterface, Get-NetRoute, Get-NetTCPConnection, Get-NetUDPEndpoint, Get-NetIPConfiguration, Test-NetConnection).'
+    Description           = 'TCP/IP cmdlets for PowerShell 7 on ReactOS-Nitro: a clean-room script module over iphlpapi with the cmdlet names, parameters and output shapes of the Windows NetTCPIP module (Get-NetIPAddress, Get-NetIPInterface, Get-NetRoute, Get-NetTCPConnection, Get-NetUDPEndpoint, Get-NetIPConfiguration, Test-NetConnection, and the write side New-NetIPAddress, Remove-NetIPAddress, Set-NetIPInterface -Dhcp).'
     PowerShellVersion     = '5.1'
     CompatiblePSEditions  = @('Desktop', 'Core')
     FormatsToProcess      = @('NetTCPIP.format.ps1xml')
     FunctionsToExport     = @(
         'Get-NetIPAddress', 'Get-NetIPConfiguration', 'Get-NetIPInterface', 'Get-NetRoute', 'Get-NetTCPConnection',
-        'Get-NetUDPEndpoint', 'Test-NetConnection')
+        'Get-NetUDPEndpoint', 'New-NetIPAddress', 'Remove-NetIPAddress', 'Set-NetIPInterface', 'Test-NetConnection')
     CmdletsToExport       = @()
     VariablesToExport     = @()
     AliasesToExport       = @('gip', 'TNC')

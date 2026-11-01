@@ -197,6 +197,14 @@ namespace Nitro.Net
 
         public static string MachineName { get { return Environment.MachineName; } }
 
+        // the adapter GUID text ("{...}", the name of its Tcpip\Parameters\Interfaces key) of an interface index, or null
+        public static string AdapterGuid(uint ifIndex)
+        {
+            foreach (Aa a in ReadAdapters())
+                if (a.H.IfIndex == ifIndex || a.H.Ipv6IfIndex == ifIndex || IndexOf(a) == ifIndex) return a.Guid;
+            return null;
+        }
+
         // ---- helpers
         static string SockaddrToString(IntPtr sa)
         {
@@ -905,6 +913,98 @@ namespace Nitro.Net
             return res;
         }
     }
+    // ------------------------------------------------------------------------------------------------ configuration
+    // The write side (New-/Remove-NetIPAddress, Set-NetIPInterface, Set-DnsClientServerAddress). The network stack of this system
+    // holds ONE IPv4 address per interface, whose NTE context is the interface index (AddIPAddress/DeleteIPAddress). Persistent
+    // settings are the Tcpip\Parameters\Interfaces\{guid} registry values that the stack and the DHCP client read at bind time.
+    public static class Config
+    {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct AdapterIndexMap { public uint Index; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string Name; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct ForwardRow
+        {
+            public uint Dest, Mask, Policy, NextHop, IfIndex, Type, Proto, Age, NextHopAS, Metric1, Metric2, Metric3, Metric4, Metric5;
+        }
+
+        [DllImport("iphlpapi.dll")] static extern uint AddIPAddress(uint address, uint mask, uint ifIndex, out uint nteContext, out uint nteInstance);
+        [DllImport("iphlpapi.dll")] static extern uint DeleteIPAddress(uint nteContext);
+        [DllImport("iphlpapi.dll")] static extern uint IpRenewAddress(ref AdapterIndexMap map);
+        [DllImport("iphlpapi.dll")] static extern uint IpReleaseAddress(ref AdapterIndexMap map);
+        [DllImport("iphlpapi.dll")] static extern uint CreateIpForwardEntry(ref ForwardRow row);
+        [DllImport("iphlpapi.dll")] static extern uint DeleteIpForwardEntry(ref ForwardRow row);
+        [DllImport("dnsapi.dll")] static extern bool DnsFlushResolverCache();
+
+        static uint ToNet(string text)
+        {
+            IPAddress ip;
+            if (!IPAddress.TryParse(text, out ip) || ip.AddressFamily != AddressFamily.InterNetwork) throw new ArgumentException(text);
+            return BitConverter.ToUInt32(ip.GetAddressBytes(), 0);
+        }
+
+        public static uint MaskOf(int prefix)
+        {
+            if (prefix <= 0) return 0;
+            uint host = prefix >= 32 ? 0xFFFFFFFFu : (uint)(0xFFFFFFFFu << (32 - prefix));
+            return (uint)IPAddress.HostToNetworkOrder((int)host);
+        }
+
+        // Win32 error codes (0 = success)
+        public static uint AddIPv4(uint ifIndex, string ip, int prefix)
+        {
+            uint ctx, inst;
+            return AddIPAddress(ToNet(ip), MaskOf(prefix), ifIndex, out ctx, out inst);
+        }
+
+        public static uint DeleteIPv4(uint ifIndex) { return DeleteIPAddress(ifIndex); }
+
+        public static uint Renew(uint ifIndex)
+        {
+            AdapterIndexMap m = new AdapterIndexMap(); m.Index = ifIndex; m.Name = "";
+            return IpRenewAddress(ref m);
+        }
+
+        public static uint Release(uint ifIndex)
+        {
+            AdapterIndexMap m = new AdapterIndexMap(); m.Index = ifIndex; m.Name = "";
+            return IpReleaseAddress(ref m);
+        }
+
+        static ForwardRow DefaultRoute(uint ifIndex, string gateway, uint metric)
+        {
+            ForwardRow r = new ForwardRow();
+            r.Dest = 0; r.Mask = 0; r.NextHop = ToNet(gateway); r.IfIndex = ifIndex;
+            r.Type = 4; r.Proto = 3; r.Metric1 = metric; r.Metric2 = r.Metric3 = r.Metric4 = r.Metric5 = 0xFFFFFFFFu;
+            return r;
+        }
+
+        public static uint AddDefaultRoute(uint ifIndex, string gateway, uint metric)
+        {
+            ForwardRow r = DefaultRoute(ifIndex, gateway, metric);
+            return CreateIpForwardEntry(ref r);
+        }
+
+        public static uint RemoveDefaultRoute(uint ifIndex, string gateway)
+        {
+            ForwardRow r = DefaultRoute(ifIndex, gateway, 0);
+            return DeleteIpForwardEntry(ref r);
+        }
+
+        public static void FlushDnsCache() { try { DnsFlushResolverCache(); } catch (Exception) { } }
+
+        // HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{guid} of an interface index (null when it has none)
+        public static RegistryKey InterfaceKey(uint ifIndex, bool write)
+        {
+            string g = Native.AdapterGuid(ifIndex);
+            if (g == null) return null;
+            return Registry.LocalMachine.OpenSubKey("SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\" + g, write);
+        }
+
+        // 32 -> 255.255.255.255, 24 -> 255.255.255.0
+        public static string MaskText(int prefix) { return new IPAddress(BitConverter.GetBytes(MaskOf(prefix))).ToString(); }
+    }
+
     // ------------------------------------------------------------------------------------------------ queries
     // The filtering the CDXML cmdlets get from their CIM query: per property the values are ORed, properties are ANDed,
     // strings are wildcard (LIKE) matches. Errors are returned, not thrown, and follow the measured Windows texts.
@@ -1038,6 +1138,21 @@ namespace Nitro.Net
             string msg = "No matching " + cls + " objects found by CIM query for instances of the ROOT/StandardCimv2/" + cls +
                 " class on the  CIM server: " + wql + ". Verify query parameters and retry.";
             return new ErrorRecord(Cim(msg, id, ErrorCategory.ObjectNotFound), id, ErrorCategory.ObjectNotFound, cls);
+        }
+
+        // "Windows System Error <code>" as the CDXML cmdlets report a failing method: a CimException with the method's text
+        public static ErrorRecord Win32(int code, string message, object target, ErrorCategory cat)
+        {
+            return Cimx("Windows System Error " + code.ToString(CultureInfo.InvariantCulture), message, target, cat);
+        }
+
+        // an error with a given id (for example "MI RESULT 4") carried by a CimException
+        public static ErrorRecord Cimx(string id, string message, object target, ErrorCategory cat)
+        {
+            Exception e;
+            try { e = (Exception)Activator.CreateInstance(Type.GetType("Microsoft.Management.Infrastructure.CimException, Microsoft.Management.Infrastructure"), message); }
+            catch (Exception) { e = new InvalidOperationException(message); }
+            return new ErrorRecord(e, id, cat, target);
         }
 
         public static ErrorRecord InvalidStore(string value)

@@ -80,3 +80,89 @@ function Resolve-DnsName {
         }
     }
 }
+
+# Set-DnsClientServerAddress: the DNS servers of an interface live in the NameServer value of its
+# Tcpip\Parameters\Interfaces\{guid} registry key (what the network control panel also writes and what iphlpapi reads back);
+# -ResetServerAddresses removes the value, which hands the interface back to the servers its DHCP lease carries.
+function Set-DnsClientServerAddress {
+    [CmdletBinding(DefaultParameterSetName = 'ByAlias', SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
+    [OutputType('Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_DNSClientServerAddress')]
+    param(
+        [Parameter(ParameterSetName = 'ByAlias', Mandatory = $true, Position = 0)][ValidateNotNull()][string[]]$InterfaceAlias,
+        [Parameter(ParameterSetName = 'ByName', Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)][ValidateNotNull()][uint32[]]$InterfaceIndex,
+        [Parameter(ParameterSetName = 'InputObject (cdxml)', Mandatory = $true, ValueFromPipeline = $true)]
+        [PSTypeName('Microsoft.Management.Infrastructure.CimInstance#MSFT_DNSClientServerAddress')][ValidateNotNull()][object[]]$InputObject,
+        [Alias('Addresses')][string[]]$ServerAddresses,
+        [switch]$Validate,
+        [Alias('ResetAddresses')][switch]$ResetServerAddresses,
+        [Alias('Session')][object[]]$CimSession,
+        [int]$ThrottleLimit,
+        [switch]$AsJob,
+        [switch]$PassThru
+    )
+    process {
+        $class = 'MSFT_DNSClientServerAddress'
+        if ($AsJob) { $PSCmdlet.WriteError([Nitro.Net.Errors]::Win32(50, "The -AsJob parameter is not supported by this implementation.`n", $class, 'NotImplemented')); return }
+        $rows = @()
+        if ($PSCmdlet.ParameterSetName -eq 'InputObject (cdxml)') { $rows = @($InputObject) }
+        else {
+            $q = [Nitro.Net.Query]::new()
+            if ($PSBoundParameters.ContainsKey('InterfaceIndex')) { $q.Add('InterfaceIndex', $InterfaceIndex) }
+            if ($PSBoundParameters.ContainsKey('InterfaceAlias')) { $q.Add('InterfaceAlias', $InterfaceAlias) }
+            $errors = [System.Collections.Generic.List[System.Management.Automation.ErrorRecord]]::new()
+            $found = $q.Run([Nitro.Net.Native]::DnsServers(), $class, $errors)
+            foreach ($d in $found) { $rows += [Nitro.Net.CimBuilder]::Create($class, $d) }
+            foreach ($e in $errors) { $PSCmdlet.WriteError($e) }
+        }
+        $addresses = @()
+        $bad = $null
+        if ($PSBoundParameters.ContainsKey('ServerAddresses')) {
+            foreach ($a in $ServerAddresses) {
+                $ip = $null
+                if (-not [System.Net.IPAddress]::TryParse($a, [ref]$ip)) { $bad = $a }
+                $addresses += $a
+            }
+        }
+        foreach ($row in $rows) {
+            $ifx = [uint32]$row.InterfaceIndex
+            $fam = [int]$row.AddressFamily
+            if ($ResetServerAddresses -and $PSBoundParameters.ContainsKey('ServerAddresses')) {
+                $tgt = "MSFT_DNSClientServerAddress (Name = `"$ifx`", CreationClassName = `"`", SystemCreationClassName = `"`", SystemName = `"$fam`")"
+                $PSCmdlet.WriteError([Nitro.Net.Errors]::Cimx('MI RESULT 4', "One or more parameter values passed to the method were invalid.`n", $tgt, 'InvalidArgument'))
+                continue
+            }
+            if (-not $ResetServerAddresses -and -not $PSBoundParameters.ContainsKey('ServerAddresses')) { continue }
+            $text = "Microsoft DNS Client settings will be changed as requested.`nThis will affect name resolutions on the adapter `"$($row.InterfaceAlias)`".`n"
+            if (-not $PSCmdlet.ShouldProcess($text, $text, 'Confirm')) { continue }
+            if ($fam -ne 2) {
+                $PSCmdlet.WriteError([Nitro.Net.Errors]::Win32(50, "The request is not supported. This network stack has no IPv6.`n", $class, 'NotImplemented'))
+                continue
+            }
+            $key = [Nitro.Net.Config]::InterfaceKey($ifx, $true)
+            if ($null -eq $key) { $PSCmdlet.WriteError([Nitro.Net.Errors]::Win32(87, "Invalid parameter InterfaceIndex $ifx`n", $class, 'InvalidArgument')); continue }
+            try {
+                if ($ResetServerAddresses) {
+                    if ($null -ne $key.GetValue('NameServer', $null)) { $key.DeleteValue('NameServer') }
+                } else {
+                    $v4 = @(); $v6 = @()
+                    foreach ($a in $addresses) {
+                        $ip = $null
+                        if (-not [System.Net.IPAddress]::TryParse($a, [ref]$ip)) { $PSCmdlet.WriteError([Nitro.Net.Errors]::Win32(87, "Invalid parameter ServerAddresses $a`n", $class, 'InvalidArgument')); $v4 = $null; break }
+                        if ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { $v4 += $ip.ToString() } else { $v6 += $a }
+                    }
+                    if ($null -eq $v4) { continue }
+                    # the IPv6 servers belong to the IPv6 row, which this network stack does not have
+                    if ($v6.Count -gt 0) { $PSCmdlet.WriteError([Nitro.Net.Errors]::Win32(50, "The request is not supported. This network stack has no IPv6: $($v6 -join ', ') was not set.`n", $class, 'NotImplemented')) }
+                    if ($v4.Count -eq 0) { if ($null -ne $key.GetValue('NameServer', $null)) { $key.DeleteValue('NameServer') } }
+                    else { $key.SetValue('NameServer', ($v4 -join ','), [Microsoft.Win32.RegistryValueKind]::String) }
+                }
+            } finally { $key.Dispose() }
+            [Nitro.Net.Config]::FlushDnsCache()
+            if ($PassThru) {
+                $q2 = [Nitro.Net.Query]::new(); $q2.Add('InterfaceIndex', @($ifx)); $q2.Add('AddressFamily', @($fam))
+                $e2 = [System.Collections.Generic.List[System.Management.Automation.ErrorRecord]]::new()
+                foreach ($d in $q2.Run([Nitro.Net.Native]::DnsServers(), $class, $e2)) { [Nitro.Net.CimBuilder]::Create($class, $d) }
+            }
+        }
+    }
+}

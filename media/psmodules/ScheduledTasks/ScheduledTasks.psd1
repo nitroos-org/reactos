@@ -10,9 +10,9 @@
     PowerShellVersion     = '5.1'
     CompatiblePSEditions  = @('Desktop', 'Core')
     FormatsToProcess      = @('ScheduledTasks.format.ps1xml')
-    FunctionsToExport     = @('Disable-ScheduledTask', 'Enable-ScheduledTask', 'Get-ScheduledTask', 'Get-ScheduledTaskInfo', 'New-ScheduledTask',
+    FunctionsToExport     = @('Disable-ScheduledTask', 'Enable-ScheduledTask', 'Export-ScheduledTask', 'Get-ScheduledTask', 'Get-ScheduledTaskInfo', 'New-ScheduledTask',
                               'New-ScheduledTaskAction', 'New-ScheduledTaskPrincipal', 'New-ScheduledTaskSettingsSet', 'New-ScheduledTaskTrigger',
-                              'Register-ScheduledTask', 'Start-ScheduledTask', 'Stop-ScheduledTask', 'Unregister-ScheduledTask')
+                              'Register-ScheduledTask', 'Set-ScheduledTask', 'Start-ScheduledTask', 'Stop-ScheduledTask', 'Unregister-ScheduledTask')
     CmdletsToExport       = @()
     VariablesToExport     = @()
     AliasesToExport       = @()

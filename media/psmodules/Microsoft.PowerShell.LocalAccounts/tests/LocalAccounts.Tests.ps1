@@ -353,3 +353,77 @@ Describe 'account round trip (nitro only: creates, changes and removes accounts)
         $ev[0].FullyQualifiedErrorId | Should -Be 'GroupNotFound,Microsoft.PowerShell.Commands.RemoveLocalGroupCommand'
     }
 }
+
+# ======================================================================================== write cmdlets vs net.exe
+# The same write cmdlets, checked with the native tools (net user, net localgroup) instead of only the Get- cmdlets.
+# Changes accounts: LACC_ROUNDTRIP=1 only (never on a reference machine).
+# net.exe of this system exits 0 even when the account is missing, so success is read from its text: `net user` prints
+# "User name <n>" for a known account and "The user name could not be found."; `net localgroup` prints "Alias name <n>" and
+# "Status: 0", or "Status: 2220" for an unknown group.
+function NetOut {
+    param([string[]]$Arguments)
+    $o = (& net.exe @Arguments 2>&1) -join "`n"
+    [pscustomobject]@{ Text = $o; Found = ($o -match '(?m)^(User name|Alias name)\s+\S') -and ($o -notmatch 'could not be found|Status: 22\d\d') }
+}
+
+Describe 'write cmdlets change the SAM (net user / net localgroup cross-check)' {
+    BeforeAll {
+        $script:nu = 'nl' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $script:nu2 = $script:nu + 'r'
+        $script:ng = 'ng' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $script:ng2 = $script:ng + 'r'
+    }
+    AfterAll {
+        foreach ($n in $script:nu, $script:nu2) { Remove-LocalUser -Name $n -ErrorAction SilentlyContinue }
+        foreach ($n in $script:ng, $script:ng2) { Remove-LocalGroup -Name $n -ErrorAction SilentlyContinue }
+    }
+    It 'New-LocalUser: net user shows the account, its full name, comment and that it is active' -Skip:$skipRoundTrip {
+        $null = New-LocalUser -Name $script:nu -Password (ConvertTo-SecureString 'Nitro-Pass-123!' -AsPlainText -Force) -FullName 'Nitro Lane' -Description 'lane user'
+        $r = NetOut 'user', $script:nu
+        $r.Found | Should -BeTrue
+        $r.Text | Should -Match "User name\s+$($script:nu)"
+        $r.Text | Should -Match 'Full Name\s+Nitro Lane'
+        $r.Text | Should -Match 'Comment\s+lane user'
+        $r.Text | Should -Match 'Account active\s+Yes'
+        (NetOut 'user').Text | Should -Match $script:nu
+    }
+    It 'Set-LocalUser / Disable-LocalUser / Enable-LocalUser: net user follows' -Skip:$skipRoundTrip {
+        Set-LocalUser -Name $script:nu -Description 'changed text' -FullName 'Changed Name'
+        $r = NetOut 'user', $script:nu
+        $r.Text | Should -Match 'Comment\s+changed text'
+        $r.Text | Should -Match 'Full Name\s+Changed Name'
+        Disable-LocalUser -Name $script:nu
+        (NetOut 'user', $script:nu).Text | Should -Match 'Account active\s+No'
+        Enable-LocalUser -Name $script:nu
+        (NetOut 'user', $script:nu).Text | Should -Match 'Account active\s+Yes'
+    }
+    It 'Rename-LocalUser: the old name is gone for net user, the new one answers' -Skip:$skipRoundTrip {
+        Rename-LocalUser -Name $script:nu -NewName $script:nu2
+        (NetOut 'user', $script:nu).Found | Should -BeFalse
+        (NetOut 'user', $script:nu2).Found | Should -BeTrue
+        Rename-LocalUser -Name $script:nu2 -NewName $script:nu
+    }
+    It 'New-/Rename-LocalGroup and Add-/Remove-LocalGroupMember: net localgroup lists the group and its members' -Skip:$skipRoundTrip {
+        $null = New-LocalGroup -Name $script:ng -Description 'lane group'
+        $r = NetOut 'localgroup', $script:ng
+        $r.Found | Should -BeTrue
+        $r.Text | Should -Match "Alias name\s+$($script:ng)"
+        $r.Text | Should -Match 'Comment\s+lane group'
+        Add-LocalGroupMember -Group $script:ng -Member $script:nu
+        (NetOut 'localgroup', $script:ng).Text | Should -Match "(?m)^$($script:nu)\s*$"
+        Remove-LocalGroupMember -Group $script:ng -Member $script:nu
+        (NetOut 'localgroup', $script:ng).Text | Should -Not -Match $script:nu
+        Rename-LocalGroup -Name $script:ng -NewName $script:ng2
+        (NetOut 'localgroup', $script:ng).Found | Should -BeFalse
+        (NetOut 'localgroup', $script:ng2).Found | Should -BeTrue
+        Set-LocalGroup -Name $script:ng2 -Description 'group text'
+        (NetOut 'localgroup', $script:ng2).Text | Should -Match 'Comment\s+group text'
+    }
+    It 'Remove-LocalGroup and Remove-LocalUser: net localgroup and net user no longer know them' -Skip:$skipRoundTrip {
+        Remove-LocalGroup -Name $script:ng2
+        (NetOut 'localgroup', $script:ng2).Found | Should -BeFalse
+        Remove-LocalUser -Name $script:nu
+        (NetOut 'user', $script:nu).Found | Should -BeFalse
+        (NetOut 'user').Text | Should -Not -Match $script:nu
+    }
+}
