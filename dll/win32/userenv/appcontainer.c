@@ -203,6 +203,17 @@ DeriveAppContainerSidFromAppContainerName(
  * A second create of the name fails with HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) and leaves the result alone;
  * delete removes all of it and succeeds also for a name that does not exist. ReactOS has no AppContainer tokens,
  * so access lists are written as Windows does but nothing checks them.
+ *
+ * NAMES. The moniker, the Storage key and the folder carry the name in lower case. Windows takes a name as it comes:
+ * create builds %LOCALAPPDATA%\Packages\<name> as a Win32 path, so "/" and "\" separate folders, "." and ".." are
+ * dots of the path (".." is the folder above Packages, which then holds the AC folder), and one trailing dot of a
+ * folder is dropped. delete builds the same path in the literal \\?\ form instead, so it rejects "/", "." and ".."
+ * (ERROR_INVALID_NAME) and only removes the folder that has exactly that spelling. ReactOS does the same, with one
+ * rule above all: it only ever creates or removes folders strictly below the canonical Packages folder (see
+ * ResolveProfileRoot and DeleteProfileFolder). A name that leads out of Packages, which on Windows makes folders
+ * outside of it, gets its registration and an S_OK here, but no folders. Windows leaves the root folder of a create
+ * that failed behind; ReactOS rolls such a create back. Delete of a name with a trailing dot succeeds on both without
+ * removing the folder, which has another spelling.
  */
 
 /* Windows Vista and later; userenv imports it from advapi32_vista */
@@ -264,48 +275,75 @@ GetRegistrationFunctions(
     return S_OK;
 }
 
+/* The characters that no Windows file name has: control characters and * ? " < > | */
+static
+BOOL
+IsInvalidNameChar(
+    _In_ WCHAR Char)
+{
+    return Char < L' ' || Char == L'*' || Char == L'?' || Char == L'"' || Char == L'<' || Char == L'>' || Char == L'|';
+}
+
 /*
- * The name of a profile becomes a folder name under Packages, and delete removes that folder with everything in it,
- * so a name must not leave Packages. Windows rejects: no name or more than 64 characters (E_INVALIDARG), the
- * characters * ? " < > | and control characters (ERROR_INVALID_NAME), a colon (ERROR_DIRECTORY) and a backslash
- * (ERROR_PATH_NOT_FOUND). It accepts the others, among them a slash (which then makes nested folders) and "..",
- * where the profile folder is the folder that holds Packages. ReactOS also rejects the slash, "." and "..", and
- * names that end in a dot or a space (the folder name would be another one), with ERROR_INVALID_NAME.
+ * Length of a name, 0 for no name or one of more than 64 characters. Windows answers E_INVALIDARG to both, in
+ * create, delete and derive alike.
+ */
+static
+SIZE_T
+GetProfileNameLength(
+    _In_opt_ PCWSTR Name)
+{
+    SIZE_T Length;
+
+    if (!Name)
+        return 0;
+    for (Length = 0; Length <= APPCONTAINER_NAME_MAX && Name[Length]; Length++)
+        ;
+    return Length > APPCONTAINER_NAME_MAX ? 0 : Length;
+}
+
+/*
+ * The checks of create that do not depend on the folders, measured on Windows 10 22H2: no name or more than 64
+ * characters is E_INVALIDARG; a control character or one of * ? " < > | is ERROR_INVALID_NAME; a colon is
+ * ERROR_DIRECTORY when it is the only one and neither first nor last (a stream name of the folder), else
+ * ERROR_INVALID_NAME. Everything else is a name, among it "/", "\", "." and ".." (see ResolveProfileRoot).
  */
 static
 HRESULT
 ValidateProfileName(
-    _In_opt_ PCWSTR Name)
+    _In_opt_ PCWSTR Name,
+    _Out_ PSIZE_T NameLength)
 {
-    SIZE_T Length, i;
-    BOOL OnlyDots = TRUE;
+    SIZE_T Length = GetProfileNameLength(Name), i, Colons = 0, FirstColon = 0;
 
-    if (!Name)
+    *NameLength = Length;
+    if (Length == 0)
         return E_INVALIDARG;
-    for (Length = 0; Length <= APPCONTAINER_NAME_MAX && Name[Length]; Length++)
-        ;
-    if (Length == 0 || Length > APPCONTAINER_NAME_MAX)
-        return E_INVALIDARG;
-
     for (i = 0; i < Length; i++)
     {
-        WCHAR Char = Name[i];
-
-        if (Char < L' ' || Char == L'*' || Char == L'?' || Char == L'"' || Char == L'<' || Char == L'>' ||
-            Char == L'|' || Char == L'/')
-        {
+        if (IsInvalidNameChar(Name[i]))
             return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
-        }
-        if (Char == L':')
-            return HRESULT_FROM_WIN32(ERROR_DIRECTORY);
-        if (Char == L'\\')
-            return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
-        if (Char != L'.')
-            OnlyDots = FALSE;
+        if (Name[i] == L':' && Colons++ == 0)
+            FirstColon = i;
     }
-    if (OnlyDots || Name[Length - 1] == L'.' || Name[Length - 1] == L' ')
-        return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
-    return S_OK;
+    if (Colons == 1 && FirstColon > 0 && FirstColon < Length - 1)
+        return HRESULT_FROM_WIN32(ERROR_DIRECTORY);
+    return Colons ? HRESULT_FROM_WIN32(ERROR_INVALID_NAME) : S_OK;
+}
+
+/* The name in lower case, which is how Windows keeps it in the moniker, the Storage key and the folder name */
+static
+VOID
+LowerProfileName(
+    _In_reads_(Length) PCWSTR Name,
+    _In_ SIZE_T Length,
+    _Out_writes_(APPCONTAINER_NAME_MAX + 1) PWSTR Lower)
+{
+    SIZE_T i;
+
+    for (i = 0; i < Length; i++)
+        Lower[i] = RtlDowncaseUnicodeChar(Name[i]);
+    Lower[Length] = UNICODE_NULL;
 }
 
 /* %LOCALAPPDATA%\Packages */
@@ -342,49 +380,140 @@ GetPackagesDirectory(
     return StringCchCatW(Path, PROFILE_PATH_MAX, L"\\Packages");
 }
 
+/* The canonical Packages folder, without a trailing backslash */
+static
+HRESULT
+GetCanonicalPackagesDirectory(
+    _Out_writes_(PROFILE_PATH_MAX) PWSTR Path)
+{
+    WCHAR Packages[PROFILE_PATH_MAX];
+    DWORD Length;
+    HRESULT hr = GetPackagesDirectory(Packages);
+
+    if (FAILED(hr))
+        return hr;
+    Length = GetFullPathNameW(Packages, PROFILE_PATH_MAX, Path, NULL);
+    if (!Length || Length >= PROFILE_PATH_MAX)
+        return HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE);
+    while (Length > 3 && Path[Length - 1] == L'\\')
+        Path[--Length] = UNICODE_NULL;
+    return S_OK;
+}
+
 /* Whether Path, once made canonical, is a folder strictly below the canonical Packages folder */
 static
 BOOL
 IsBelowPackages(
     _In_ PCWSTR Path)
 {
-    WCHAR Packages[PROFILE_PATH_MAX], FullPackages[PROFILE_PATH_MAX], FullPath[PROFILE_PATH_MAX];
+    WCHAR FullPackages[PROFILE_PATH_MAX], FullPath[PROFILE_PATH_MAX];
     DWORD PackagesLength, PathLength;
 
-    if (FAILED(GetPackagesDirectory(Packages)))
+    if (FAILED(GetCanonicalPackagesDirectory(FullPackages)))
         return FALSE;
-    PackagesLength = GetFullPathNameW(Packages, PROFILE_PATH_MAX, FullPackages, NULL);
+    PackagesLength = (DWORD)wcslen(FullPackages);
     PathLength = GetFullPathNameW(Path, PROFILE_PATH_MAX, FullPath, NULL);
-    if (!PackagesLength || PackagesLength >= PROFILE_PATH_MAX || !PathLength || PathLength >= PROFILE_PATH_MAX)
+    if (!PackagesLength || !PathLength || PathLength >= PROFILE_PATH_MAX)
         return FALSE;
-    while (PackagesLength > 0 && FullPackages[PackagesLength - 1] == L'\\')
-        FullPackages[--PackagesLength] = UNICODE_NULL;
     return PathLength > PackagesLength + 1 &&
            !_wcsnicmp(FullPath, FullPackages, PackagesLength) &&
            FullPath[PackagesLength] == L'\\' &&
            FullPath[PackagesLength + 1] != UNICODE_NULL;
 }
 
-/* %LOCALAPPDATA%\Packages\<name>, for a name that is valid and stays below Packages */
+typedef enum _PROFILE_PLACE
+{
+    PlaceBelowPackages,     /* the folder of the profile is a folder strictly below Packages */
+    PlacePackages,          /* it is Packages itself, where the AC folder is the one strictly below */
+    PlaceOutside            /* it is somewhere else: no folders are made */
+} PROFILE_PLACE;
+
+/*
+ * Where the folder of a profile is, as create finds it on Windows: the name (lower case) is appended to Packages as
+ * a Win32 path. "/" and "\" end a folder, empty folders and "." are skipped, ".." goes up. One trailing dot of a
+ * folder is dropped; a folder that then still ends in a dot or a space is not found (ERROR_PATH_NOT_FOUND).
+ * This is only arithmetic on a string: nothing is opened, and the result says whether it is safe to create below it.
+ */
 static
 HRESULT
-GetProfileDirectory(
-    _In_ PCWSTR Name,
-    _Out_writes_(PROFILE_PATH_MAX) PWSTR Path)
+ResolveProfileRoot(
+    _In_ PCWSTR Lower,
+    _Out_writes_(PROFILE_PATH_MAX) PWSTR Root,
+    _Out_ PROFILE_PLACE *Place)
 {
-    HRESULT hr = ValidateProfileName(Name);
+    WCHAR Packages[PROFILE_PATH_MAX];
+    PCWSTR Start = Lower;
+    SIZE_T Length, RootLength, PackagesLength;
+    HRESULT hr;
 
-    if (SUCCEEDED(hr))
-        hr = GetPackagesDirectory(Path);
+    hr = GetCanonicalPackagesDirectory(Packages);
     if (FAILED(hr))
         return hr;
-    if (FAILED(StringCchCatW(Path, PROFILE_PATH_MAX - 40, L"\\")) ||
-        FAILED(StringCchCatW(Path, PROFILE_PATH_MAX - 40, Name)))
+    /* the part of the path that ".." cannot leave: "X:\" or "\\server\share\" */
+    if (Packages[0] && Packages[1] == L':' && Packages[2] == L'\\')
+        RootLength = 3;
+    else if (Packages[0] == L'\\' && Packages[1] == L'\\')
     {
-        return HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE);
+        PCWSTR Slash = wcschr(Packages + 2, L'\\');
+
+        Slash = Slash ? wcschr(Slash + 1, L'\\') : NULL;
+        if (!Slash)
+            return HRESULT_FROM_WIN32(ERROR_BAD_PATHNAME);
+        RootLength = (SIZE_T)(Slash - Packages) + 1;
     }
-    if (!IsBelowPackages(Path))
-        return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    else
+        return HRESULT_FROM_WIN32(ERROR_BAD_PATHNAME);
+
+    PackagesLength = Length = wcslen(Packages);
+    RtlCopyMemory(Root, Packages, (Length + 1) * sizeof(WCHAR));
+
+    for (;;)
+    {
+        SIZE_T Size = 0;
+
+        while (Start[Size] && Start[Size] != L'/' && Start[Size] != L'\\')
+            Size++;
+        if (Size == 0 || (Size == 1 && Start[0] == L'.'))
+        {
+            /* nothing */
+        }
+        else if (Size == 2 && Start[0] == L'.' && Start[1] == L'.')
+        {
+            while (Length > RootLength && Root[Length - 1] != L'\\')
+                Length--;
+            /* Length is behind the backslash now, or at the root */
+            if (Length > RootLength)
+                Length--;
+            Root[Length] = UNICODE_NULL;
+        }
+        else
+        {
+            SIZE_T Kept = Size;
+
+            if (Start[Kept - 1] == L'.')
+                Kept--;
+            if (Kept == 0 || Start[Kept - 1] == L'.' || Start[Kept - 1] == L' ')
+                return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
+            /* room for \AC\INetCookies below it */
+            if (Length + 1 + Kept + 24 >= PROFILE_PATH_MAX)
+                return HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE);
+            if (Length > RootLength || Root[Length - 1] != L'\\')
+                Root[Length++] = L'\\';
+            RtlCopyMemory(Root + Length, Start, Kept * sizeof(WCHAR));
+            Length += Kept;
+            Root[Length] = UNICODE_NULL;
+        }
+        if (!Start[Size])
+            break;
+        Start += Size + 1;
+    }
+
+    if (Length == PackagesLength && !_wcsnicmp(Root, Packages, Length))
+        *Place = PlacePackages;
+    else if (Length > PackagesLength && !_wcsnicmp(Root, Packages, PackagesLength) && Root[PackagesLength] == L'\\')
+        *Place = PlaceBelowPackages;
+    else
+        *Place = PlaceOutside;
     return S_OK;
 }
 
@@ -440,23 +569,34 @@ Done:
     LocalFree(Descriptor);
 }
 
+/* Makes a folder; Created tells whether it is new (it is not when it exists already) */
 static
 BOOL
 CreateProfileDirectory(
     _In_ PCWSTR Path,
-    _In_ DWORD Attributes)
+    _In_ DWORD Attributes,
+    _Out_ PBOOL Created)
 {
-    if (!CreateDirectoryW(Path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+    *Created = FALSE;
+    if (CreateDirectoryW(Path, NULL))
+        *Created = TRUE;
+    else if (GetLastError() != ERROR_ALREADY_EXISTS)
         return FALSE;
     if (Attributes)
         SetFileAttributesW(Path, Attributes | FILE_ATTRIBUTE_DIRECTORY);
     return TRUE;
 }
 
+/*
+ * Makes the folders of a profile under Root, which ResolveProfileRoot found. Only folders strictly below Packages
+ * are made: the AC folder of Packages itself, or Root and its AC folder, and nothing at all for a root outside of
+ * Packages. A failure removes what this call made (Windows leaves the root folder of a failed create behind).
+ */
 static
 HRESULT
 CreateProfileFolders(
-    _In_ PCWSTR Name,
+    _In_ PCWSTR Root,
+    _In_ PROFILE_PLACE Place,
     _In_ PSID Sid)
 {
     static const struct
@@ -470,32 +610,63 @@ CreateProfileFolders(
         { L"INetHistory", FILE_ATTRIBUTE_NOT_CONTENT_INDEXED | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM },
         { L"Temp", 0 }
     };
-    WCHAR Packages[PROFILE_PATH_MAX], Root[PROFILE_PATH_MAX], Container[PROFILE_PATH_MAX], Path[PROFILE_PATH_MAX];
+    WCHAR Packages[PROFILE_PATH_MAX], Container[PROFILE_PATH_MAX], Path[RTL_NUMBER_OF(Subfolders) + 2][PROFILE_PATH_MAX];
+    ULONG Made = 0, i;
+    BOOL Created;
     HRESULT hr;
-    ULONG i;
+
+    if (Place == PlaceOutside)
+        return S_OK;
 
     hr = GetPackagesDirectory(Packages);
-    if (SUCCEEDED(hr))
-        hr = GetProfileDirectory(Name, Root);
     if (FAILED(hr))
         return hr;
-
-    if (!CreateProfileDirectory(Packages, 0) || !CreateProfileDirectory(Root, 0))
+    if (!CreateProfileDirectory(Packages, 0, &Created))
         return HRESULT_FROM_WIN32(GetLastError());
+
+    if (Place == PlaceBelowPackages)
+    {
+        if (!CreateProfileDirectory(Root, 0, &Created))
+            return HRESULT_FROM_WIN32(GetLastError());
+        if (Created)
+            StringCchCopyW(Path[Made++], PROFILE_PATH_MAX, Root);
+    }
 
     StringCchPrintfW(Container, PROFILE_PATH_MAX, L"%ls\\AC", Root);
-    if (!CreateProfileDirectory(Container, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED))
-        return HRESULT_FROM_WIN32(GetLastError());
+    if (!IsBelowPackages(Container))
+        return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    if (!CreateProfileDirectory(Container, FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, &Created))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto Failure;
+    }
+    if (Created)
+        StringCchCopyW(Path[Made++], PROFILE_PATH_MAX, Container);
     GrantAppContainerAccess(SE_FILE_OBJECT, Container, Sid, FILE_ALL_ACCESS,
                             OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | ACE_FLAG_CRITICAL);
 
     for (i = 0; i < RTL_NUMBER_OF(Subfolders); i++)
     {
-        StringCchPrintfW(Path, PROFILE_PATH_MAX, L"%ls\\%ls", Container, Subfolders[i].Name);
-        if (!CreateProfileDirectory(Path, Subfolders[i].Attributes))
-            return HRESULT_FROM_WIN32(GetLastError());
+        WCHAR Sub[PROFILE_PATH_MAX];
+
+        StringCchPrintfW(Sub, PROFILE_PATH_MAX, L"%ls\\%ls", Container, Subfolders[i].Name);
+        if (!CreateProfileDirectory(Sub, Subfolders[i].Attributes, &Created))
+        {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            goto Failure;
+        }
+        if (Created)
+            StringCchCopyW(Path[Made++], PROFILE_PATH_MAX, Sub);
     }
     return S_OK;
+
+Failure:
+    while (Made--)
+    {
+        SetFileAttributesW(Path[Made], FILE_ATTRIBUTE_NORMAL);
+        RemoveDirectoryW(Path[Made]);
+    }
+    return hr;
 }
 
 /* The empty subkey Children of the mapping key of the SID, which Windows creates with the profile */
@@ -595,6 +766,32 @@ DeleteFolderTree(
     RemoveDirectoryW(Path);
 }
 
+/*
+ * A name with a backslash makes the Storage key a nested one (Storage\a\b); Windows keeps the keys of the folders
+ * in front when the profile is deleted, but a create that fails leaves nothing. Returns the path of the topmost key
+ * such a create would make, empty when there is none because the name has no backslash or the key is there already.
+ */
+static
+VOID
+GetNewStorageTopKey(
+    _In_ PCWSTR Name,
+    _Out_writes_(APPCONTAINER_NAME_MAX + 256) PWSTR Path)
+{
+    PCWSTR Backslash = wcschr(Name, L'\\');
+    HKEY Key;
+
+    Path[0] = UNICODE_NULL;
+    if (!Backslash)
+        return;
+    StringCchCopyW(Path, APPCONTAINER_NAME_MAX + 256, APPCONTAINER_STORAGE L"\\");
+    StringCchCatNW(Path, APPCONTAINER_NAME_MAX + 256, Name, (SIZE_T)(Backslash - Name));
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, Path, 0, KEY_READ, &Key) == ERROR_SUCCESS)
+    {
+        RegCloseKey(Key);
+        Path[0] = UNICODE_NULL;
+    }
+}
+
 static
 VOID
 DeleteProfileStorage(
@@ -605,6 +802,72 @@ DeleteProfileStorage(
     StringCchPrintfW(Path, RTL_NUMBER_OF(Path), APPCONTAINER_STORAGE L"\\%ls", Name);
     RegDeleteTreeW(HKEY_CURRENT_USER, Path);
     RegDeleteKeyW(HKEY_CURRENT_USER, Path);
+}
+
+/*
+ * The folder step of delete, as Windows does it: the path is Packages\<name> in the literal form. In that form "/"
+ * and the other characters that no file name has are invalid (ERROR_INVALID_NAME), and so is an empty folder name
+ * between two backslashes. The folders are then looked up one by one: the first one that is not there ends the delete
+ * with success (nothing to remove), as does a name with a colon (it names a stream) and a folder that ends in a dot
+ * or a space (no folder has such a name). Only when the parent exists is a "." or ".." an invalid name. If every
+ * folder is there, the last one goes with everything in it. Because the path has no "." or ".." folder, no empty
+ * one and no "/", it cannot lead out of Packages; DeleteFolderTree checks that once more on the canonical path.
+ */
+static
+HRESULT
+DeleteProfileFolder(
+    _In_ PCWSTR Lower,
+    _In_ SIZE_T Length)
+{
+    WCHAR Path[PROFILE_PATH_MAX];
+    SIZE_T i, Start = 0;
+    BOOL Colon = FALSE;
+    HRESULT hr;
+
+    for (i = 0; i < Length; i++)
+    {
+        if (IsInvalidNameChar(Lower[i]) || Lower[i] == L'/')
+            return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+        if (Lower[i] == L':')
+            Colon = TRUE;
+    }
+    /* an empty folder name is only fine behind the last backslash */
+    for (i = 0; i <= Length; i++)
+    {
+        if ((i == Length || Lower[i] == L'\\') && i == Start && !(i == Length && Start > 0))
+            return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+        if (i == Length || Lower[i] == L'\\')
+            Start = i + 1;
+    }
+    if (Colon)
+        return S_OK;
+
+    hr = GetPackagesDirectory(Path);
+    if (FAILED(hr))
+        return hr;
+    for (Start = 0; Start < Length;)
+    {
+        SIZE_T Size = 0;
+
+        while (Start + Size < Length && Lower[Start + Size] != L'\\')
+            Size++;
+        if (Size)
+        {
+            if ((Size == 1 && Lower[Start] == L'.') || (Size == 2 && Lower[Start] == L'.' && Lower[Start + 1] == L'.'))
+                return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+            if (Lower[Start + Size - 1] == L'.' || Lower[Start + Size - 1] == L' ')
+                return S_OK;
+            if (wcslen(Path) + 1 + Size >= PROFILE_PATH_MAX)
+                return HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE);
+            StringCchCatW(Path, PROFILE_PATH_MAX, L"\\");
+            StringCchCatNW(Path, PROFILE_PATH_MAX, Lower + Start, Size);
+            if (GetFileAttributesW(Path) == INVALID_FILE_ATTRIBUTES)
+                return S_OK;
+        }
+        Start += Size + 1;
+    }
+    DeleteFolderTree(Path, 0);
+    return S_OK;
 }
 
 /*
@@ -623,13 +886,15 @@ CreateAppContainerProfile(
     PFN_REGISTER_SID Register;
     PFN_UNREGISTER_SID Unregister;
     PSID Sid = NULL;
+    WCHAR Lower[APPCONTAINER_NAME_MAX + 1], Root[PROFILE_PATH_MAX], NewTopKey[APPCONTAINER_NAME_MAX + 256];
+    PROFILE_PLACE Place;
     SIZE_T Length;
     HRESULT hr;
     DWORD i;
 
     if (!ppSidAppContainerSid)
         return E_INVALIDARG;
-    hr = ValidateProfileName(pszAppContainerName);
+    hr = ValidateProfileName(pszAppContainerName, &Length);
     if (FAILED(hr))
         return hr;
     if (dwCapabilityCount && !pCapabilities)
@@ -655,30 +920,36 @@ CreateAppContainerProfile(
             return E_INVALIDARG;
     }
 
+    Length = GetProfileNameLength(pszAppContainerName);
+    LowerProfileName(pszAppContainerName, Length, Lower);
+    /* A name Windows cannot make a folder for (ERROR_PATH_NOT_FOUND) fails before anything is registered */
+    hr = ResolveProfileRoot(Lower, Root, &Place);
+    if (FAILED(hr))
+        return hr;
+
     hr = DeriveAppContainerSidFromAppContainerName(pszAppContainerName, &Sid);
     if (FAILED(hr))
         return hr;
     hr = GetRegistrationFunctions(&Register, &Unregister, NULL, NULL);
     if (FAILED(hr))
         goto Failure;
+    GetNewStorageTopKey(Lower, NewTopKey);
 
     /* ERROR_ALREADY_EXISTS comes from here, before anything else is touched */
-    hr = Register(Sid, pszAppContainerName, pszDisplayName ? pszDisplayName : L"");
+    hr = Register(Sid, Lower, pszDisplayName ? pszDisplayName : L"");
     if (FAILED(hr))
         goto Failure;
 
     hr = CreateMappingChildren(Sid);
     if (SUCCEEDED(hr))
-        hr = CreateProfileStorage(pszAppContainerName, Sid);
+        hr = CreateProfileStorage(Lower, Sid);
     if (SUCCEEDED(hr))
-        hr = CreateProfileFolders(pszAppContainerName, Sid);
+        hr = CreateProfileFolders(Root, Place, Sid);
     if (FAILED(hr))
     {
-        WCHAR Root[PROFILE_PATH_MAX];
-
-        DeleteProfileStorage(pszAppContainerName);
-        if (SUCCEEDED(GetProfileDirectory(pszAppContainerName, Root)))
-            DeleteFolderTree(Root, 0);
+        DeleteProfileStorage(Lower);
+        if (NewTopKey[0])
+            RegDeleteTreeW(HKEY_CURRENT_USER, NewTopKey);
         Unregister(Sid);
         goto Failure;
     }
@@ -693,6 +964,9 @@ Failure:
 
 /*
  * @implemented
+ *
+ * Unlike create, delete does not check the characters of the name: the registration goes first, then the folder
+ * (see DeleteProfileFolder), and what the folder step answers is the result, with the registration gone either way.
  */
 HRESULT
 WINAPI
@@ -700,13 +974,14 @@ DeleteAppContainerProfile(
     _In_ PCWSTR pszAppContainerName)
 {
     PFN_UNREGISTER_SID Unregister;
-    WCHAR Root[PROFILE_PATH_MAX];
+    WCHAR Lower[APPCONTAINER_NAME_MAX + 1];
+    SIZE_T Length = GetProfileNameLength(pszAppContainerName);
     PSID Sid;
-    HRESULT hr;
+    HRESULT hr, hrFolder;
 
-    hr = ValidateProfileName(pszAppContainerName);
-    if (FAILED(hr))
-        return hr;
+    if (Length == 0)
+        return E_INVALIDARG;
+    LowerProfileName(pszAppContainerName, Length, Lower);
 
     hr = DeriveAppContainerSidFromAppContainerName(pszAppContainerName, &Sid);
     if (FAILED(hr))
@@ -721,10 +996,9 @@ DeleteAppContainerProfile(
     }
     FreeSid(Sid);
 
-    DeleteProfileStorage(pszAppContainerName);
-    if (SUCCEEDED(GetProfileDirectory(pszAppContainerName, Root)))
-        DeleteFolderTree(Root, 0);
-    return hr;
+    DeleteProfileStorage(Lower);
+    hrFolder = DeleteProfileFolder(Lower, Length);
+    return SUCCEEDED(hr) ? hrFolder : hr;
 }
 
 /*
@@ -769,12 +1043,18 @@ GetAppContainerFolderPath(
     if (FAILED(hr))
         return hr;
 
-    hr = GetProfileDirectory(Moniker, Root);
+    /* Windows answers the moniker as it was stored, joined to Packages without any canonicalization; this only builds
+       a string, no folder is opened */
+    hr = GetPackagesDirectory(Root);
+    if (SUCCEEDED(hr) && (FAILED(StringCchCatW(Root, PROFILE_PATH_MAX, L"\\")) ||
+                          FAILED(StringCchCatW(Root, PROFILE_PATH_MAX, Moniker)) ||
+                          FAILED(StringCchCatW(Root, PROFILE_PATH_MAX, L"\\AC"))))
+    {
+        hr = HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE);
+    }
     Free(Moniker);
     if (FAILED(hr))
         return hr;
-    if (FAILED(StringCchCatW(Root, PROFILE_PATH_MAX, L"\\AC")))
-        return HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE);
 
     /* The caller frees the path with CoTaskMemFree */
     Ole32 = LoadLibraryW(L"ole32.dll");
