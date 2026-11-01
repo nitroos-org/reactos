@@ -54,4 +54,14 @@ if(ARCH STREQUAL "amd64")
             NitroStorageNative.cs)
         add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/Storage/${_stor_file} DESTINATION ${_PSM_DST}/Storage/2.0.0.0 FOR all)
     endforeach()
+
+    # ScheduledTasks (Get-/Register-/Unregister-/Start-/Stop-/Enable-/Disable-ScheduledTask, Get-ScheduledTaskInfo, New-ScheduledTask*):
+    # a plain script over the Schedule.Service COM object, nothing is compiled.
+    foreach(_st_file
+            ScheduledTasks.psd1
+            ScheduledTasks.psm1
+            ScheduledTasks.Types.psm1
+            ScheduledTasks.format.ps1xml)
+        add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/ScheduledTasks/${_st_file} DESTINATION ${_PSM_DST}/ScheduledTasks/1.0.0.0 FOR all)
+    endforeach()
 endif()

@@ -119,6 +119,8 @@ Signature = "$Windows NT$"
 97 = system32\WindowsPowerShell\v1.0\Modules\DnsClient\1.0.0.0
 98 = system32\WindowsPowerShell\v1.0\Modules\Storage
 99 = system32\WindowsPowerShell\v1.0\Modules\Storage\2.0.0.0
+100 = system32\WindowsPowerShell\v1.0\Modules\ScheduledTasks
+101 = system32\WindowsPowerShell\v1.0\Modules\ScheduledTasks\1.0.0.0
 
 .InfEnd
 
