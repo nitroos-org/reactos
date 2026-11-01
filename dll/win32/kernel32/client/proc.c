@@ -5371,7 +5371,8 @@ VdmShortCircuit:
 
     if (PseudoConsole)
     {
-        DWORD Message[3] = {1, lpProcessInformation->dwProcessId, 0};
+        /* nitro private frame for conhost: WORD 0x4e50, process id as two WORDs */
+        WORD Message[3] = {0x4e50, LOWORD(lpProcessInformation->dwProcessId), HIWORD(lpProcessInformation->dwProcessId)};
         DWORD Written;
         WriteFile(PseudoConsole->Signal, Message, sizeof(Message), &Written, NULL);
     }

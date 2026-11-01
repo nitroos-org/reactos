@@ -151,10 +151,12 @@ HRESULT WINAPI
 ResizePseudoConsole(PVOID Handle, COORD Size)
 {
     PBASE_PSEUDOCONSOLE Console = Handle;
-    DWORD Message[3], Written;
+    WORD Message[3];
+    DWORD Written;
 
     if (!Console || Console->Magic != BASE_PSEUDOCONSOLE_MAGIC || Size.X <= 0 || Size.Y <= 0)
         return E_INVALIDARG;
+    /* Windows' pseudoconsole signal frame: WORD type (8 = resize), WORD columns, WORD rows */
     Message[0] = 8;
     Message[1] = Size.X;
     Message[2] = Size.Y;

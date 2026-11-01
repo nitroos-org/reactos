@@ -23,6 +23,71 @@ static RESIZE_PTY ResizePty;
 static CLOSE_PTY ClosePty;
 static INITIALIZE_LIST InitializeList;
 static UPDATE_ATTRIBUTE UpdateAttribute;
+/* Mirrors the private layout kernel32 keeps behind an HPCON. */
+typedef struct _FAKE_PTY
+{
+    ULONG Magic;
+    HANDLE Process;
+    HANDLE Signal;
+    HANDLE Console;
+    HANDLE Input;
+    HANDLE Output;
+    DWORD ProcessId;
+} FAKE_PTY;
+
+#define FAKE_PTY_MAGIC 0x43545052
+static WCHAR TestPath[MAX_PATH];
+
+static VOID
+ConsoleSay(PCSTR Text)
+{
+    DWORD Written;
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), Text, lstrlenA(Text), &Written, NULL);
+}
+
+static BOOL WINAPI
+HelperCtrlHandler(DWORD Event)
+{
+    if (Event != CTRL_C_EVENT) return FALSE;
+    ConsoleSay("GOTCTRLC\r\n");
+    ExitProcess(0);
+    return TRUE;
+}
+
+/* Runs inside the pseudoconsole: report the window size, or wait for Ctrl+C. */
+static VOID
+RunConsoleHelper(PCSTR Mode)
+{
+    CONSOLE_SCREEN_BUFFER_INFO Info;
+    CHAR Text[64];
+
+    if (!strcmp(Mode, "helper-size"))
+    {
+        if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &Info))
+            StringCchPrintfA(Text, sizeof(Text), "SIZE=%dx%d\r\n",
+                             Info.srWindow.Right - Info.srWindow.Left + 1,
+                             Info.srWindow.Bottom - Info.srWindow.Top + 1);
+        else
+            StringCchPrintfA(Text, sizeof(Text), "SIZE=error%lu\r\n", GetLastError());
+        ConsoleSay(Text);
+    }
+    else
+    {
+        SetConsoleCtrlHandler(HelperCtrlHandler, TRUE);
+        ConsoleSay("READYCTRL\r\n");
+        Sleep(30000);
+    }
+}
+
+static VOID
+TypeCommand(HANDLE Input, PCSTR Mode)
+{
+    CHAR Text[MAX_PATH * 2];
+    DWORD Written;
+
+    StringCchPrintfA(Text, sizeof(Text), "\"%ls\" ConPty %s\r", TestPath, Mode);
+    WriteFile(Input, Text, lstrlenA(Text), &Written, NULL);
+}
 
 static BOOL
 WaitForText(HANDLE Output, PCSTR Expected, DWORD Timeout)
@@ -49,6 +114,9 @@ WaitForText(HANDLE Output, PCSTR Expected, DWORD Timeout)
         }
         Sleep(10);
     }
+    for (Count = 0; Count < Used; ++Count)
+        if ((UCHAR)Text[Count] < 0x20 || (UCHAR)Text[Count] > 0x7e) Text[Count] = '.';
+    trace("Waiting for '%s', received %lu bytes, tail: %s\n", Expected, Used, Text + (Used > 700 ? Used - 700 : 0));
     return FALSE;
 }
 
@@ -109,10 +177,29 @@ CheckSession(BOOL Interactive)
             Created = WriteFile(InputWrite, "echo world\r", 11, &Written, NULL);
             ok(Created && Written == 11, "Input pipe write failed: %lu\n", GetLastError());
             ok(WaitForText(OutputRead, "world", 10000), "No interactive output\n");
+            TypeCommand(InputWrite, "helper-size");
+            ok(WaitForText(OutputRead, "SIZE=80x25", 10000), "Initial window size is not 80x25\n");
             Size.X = 100;
             Size.Y = 30;
             Status = ResizePty(PseudoConsole, Size);
             ok(Status == S_OK, "ResizePseudoConsole failed: %08lx\n", Status);
+            Sleep(500);
+            TypeCommand(InputWrite, "helper-size");
+            ok(WaitForText(OutputRead, "SIZE=100x30", 10000), "Window size did not change to 100x30\n");
+            /* sshd drives conhost through the signal pipe directly: WORD 8, WORD columns, WORD rows.
+               (Sizes stay within the display: the window cannot exceed the monitor.) */
+            {
+                WORD Frame[3] = {8, 90, 28};
+                ok(WriteFile(((FAKE_PTY *)PseudoConsole)->Signal, Frame, sizeof(Frame), &Written, NULL) &&
+                   Written == sizeof(Frame), "Raw resize frame write failed\n");
+            }
+            Sleep(500);
+            TypeCommand(InputWrite, "helper-size");
+            ok(WaitForText(OutputRead, "SIZE=90x28", 10000), "Raw WORD resize frame (sshd protocol) not applied\n");
+            TypeCommand(InputWrite, "helper-ctrlc");
+            ok(WaitForText(OutputRead, "READYCTRL", 10000), "Ctrl+C helper did not start\n");
+            WriteFile(InputWrite, "\003", 1, &Written, NULL);
+            ok(WaitForText(OutputRead, "GOTCTRLC", 10000), "Ctrl+C typed into the pseudoconsole did not reach the client\n");
             ClosePty(PseudoConsole);
             PseudoConsole = NULL;
             ok(WaitForSingleObject(Process.hProcess, 5000) == WAIT_OBJECT_0,
@@ -135,19 +222,6 @@ Cleanup:
     if (OutputWrite) CloseHandle(OutputWrite);
 }
 
-/* Mirrors the private layout kernel32 keeps behind an HPCON. */
-typedef struct _FAKE_PTY
-{
-    ULONG Magic;
-    HANDLE Process;
-    HANDLE Signal;
-    HANDLE Console;
-    HANDLE Input;
-    HANDLE Output;
-    DWORD ProcessId;
-} FAKE_PTY;
-
-#define FAKE_PTY_MAGIC 0x43545052
 
 static BOOL
 SpawnWithPty(PVOID Pty, PCWSTR CommandLine, BOOL InheritHandles, PPROCESS_INFORMATION Process)
@@ -389,12 +463,18 @@ START_TEST(ConPty)
             RunHelperPid();
             return;
         }
+        if (argc >= 3 && (!strcmp(argv[2], "helper-size") || !strcmp(argv[2], "helper-ctrlc")))
+        {
+            RunConsoleHelper(argv[2]);
+            return;
+        }
         if (argc >= 3 && !strcmp(argv[2], "helper-sleep"))
         {
             Sleep(30000);
             return;
         }
         GetModuleFileNameW(NULL, ExePath, _countof(ExePath));
+        lstrcpyW(TestPath, ExePath);
         CheckSession(FALSE);
         CheckSession(TRUE);
         CheckForgedRequests();
