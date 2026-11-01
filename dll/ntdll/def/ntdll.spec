@@ -739,6 +739,7 @@
 @ stdcall RtlCopyString(ptr ptr)
 @ stdcall RtlCopyUnicodeString(ptr ptr)
 @ stdcall -version=0x601+ RtlCrc32(ptr long long)
+@ stdcall -version=0x601+ RtlCrc64(ptr long int64)
 @ stdcall RtlCreateAcl(ptr long long)
 @ stdcall RtlCreateActivationContext(long ptr long ptr ptr ptr)
 @ stdcall RtlCreateAndSetSD(ptr long ptr ptr ptr)
@@ -860,6 +861,7 @@
 @ stdcall -arch=win32 -ret64 RtlExtendedIntegerMultiply(double long)
 @ stdcall -arch=win32 -ret64 RtlExtendedLargeIntegerDivide(double long ptr)
 @ stdcall -arch=win32 -ret64 RtlExtendedMagicDivide(double double long)
+@ stdcall -version=0x601+ RtlExtractBitMap(ptr ptr long long)
 @ stdcall RtlFillMemory(ptr long long)
 @ stdcall -arch=i386,arm RtlFillMemoryUlong(ptr long long)
 @ stdcall -arch=i386 -version=0x601+ RtlFillMemoryUlonglong(ptr long int64) RtlpFillMemoryUlonglong32
@@ -937,6 +939,7 @@
 @ stdcall -arch=x86_64 RtlGrowFunctionTable(ptr long)
 @ stdcall RtlGetGroupSecurityDescriptor(ptr ptr ptr)
 @ stub -version=0x600+ RtlGetIntegerAtom
+@ stdcall -version=0x601+ RtlGetInterruptTimePrecise(ptr)
 @ stdcall RtlGetLastNtStatus()
 @ stdcall RtlGetLastWin32Error()
 @ stdcall RtlGetLengthWithoutLastFullDosOrNtPathElement(long ptr ptr)
@@ -956,6 +959,7 @@
 @ stdcall RtlGetSecurityDescriptorRMControl(ptr ptr)
 @ stdcall RtlGetSetBootStatusData(ptr long long ptr long long)
 @ stdcall -version=0x601+ RtlGetSuiteMask()
+@ stdcall -version=0x601+ RtlGetSystemTimePrecise()
 @ stdcall -stub -version=0x600+ RtlGetSystemPreferredUILanguages(long ptr ptr ptr ptr)
 @ stdcall RtlGetThreadErrorMode()
 @ stdcall -stub -version=0x600+ RtlGetThreadLangIdByIndex(long long ptr ptr)

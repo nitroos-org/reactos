@@ -41,6 +41,9 @@ add_dependencies(ntdll_crt_test_lib psdk)
 list(APPEND SOURCE
     CrtSecure.c
     RtlBitmapRanges.c
+    RtlCrc64.c
+    RtlExtractBitMap.c
+    RtlGetPreciseTime.c
     RtlFlsValue.c
     RtlUtf8String.c
     RtlWin10Helpers.c
