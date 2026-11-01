@@ -48,34 +48,107 @@ enum
 
 
 /*
+ * Expands the destination mask against a source file name the way cmd.exe on Windows does and stores the
+ * result in pszOut. Returns FALSE when it does not fit.
+ *
+ *   '?'  copies the next source character, or nothing at a '.' or at the end of the source name;
+ *   '*'  copies the source up to the last occurrence of the mask character that follows it (the whole rest
+ *        of the name when there is none), so "*.bak" keeps "a.b" of "a.b.txt";
+ *   '.'  is copied and the source position moves behind the next '.' of the source;
+ *   any other character is copied and consumes one source character, but never a '.'.
+ */
+static BOOL
+RenExpandMask(
+    IN PCWSTR pszSrc,
+    IN PCWSTR pszMask,
+    OUT PWSTR pszOut,
+    IN SIZE_T cchOut)
+{
+    SIZE_T cch = 0;
+    PCWSTR p = pszSrc, q = pszMask, pEnd;
+
+#define REN_PUT(c) \
+    do { if (cch + 1 >= cchOut) return FALSE; pszOut[cch++] = (c); } while (0)
+
+    while (*q)
+    {
+        if (*q == L'*')
+        {
+            q++;
+            pEnd = p + wcslen(p);
+            if (*q && *q != L'*' && *q != L'?')
+            {
+                PCWSTR pFound = NULL, s;
+
+                for (s = p; *s; s++)
+                {
+                    if (towupper(*s) == towupper(*q))
+                        pFound = s;
+                }
+                if (pFound)
+                    pEnd = pFound;
+            }
+            while (p < pEnd)
+                REN_PUT(*p++);
+        }
+        else if (*q == L'?')
+        {
+            q++;
+            if (*p && *p != L'.')
+                REN_PUT(*p++);
+        }
+        else if (*q == L'.')
+        {
+            q++;
+            REN_PUT(L'.');
+            p = wcschr(p, L'.');
+            p = p ? p + 1 : pszSrc + wcslen(pszSrc);
+        }
+        else
+        {
+            REN_PUT(*q++);
+            if (*p && *p != L'.')
+                p++;
+        }
+    }
+    pszOut[cch] = 0;
+#undef REN_PUT
+    return TRUE;
+}
+
+/* "The syntax of the command is incorrect." */
+static INT
+RenSyntaxError(DWORD dwFlags)
+{
+    if (!(dwFlags & REN_ERROR))
+        ConErrResPuts(STRING_SYNTAX_COMMAND_INCORRECT);
+    nErrorLevel = 1;
+    return 1;
+}
+
+/*
  *  file rename internal command.
  */
 INT cmd_rename (LPTSTR param)
 {
     LPTSTR *arg = NULL;
     INT args = 0;
-    INT nSlash = 0;
     INT nEvalArgs = 0; /* number of evaluated arguments */
     DWORD dwFlags = 0;
     DWORD dwFiles = 0; /* number of renamed files */
     INT i;
 
     LPTSTR srcPattern = NULL; /* Source Argument*/
-    TCHAR srcPath[MAX_PATH]; /*Source Path Directories*/
-    LPTSTR srcFILE = NULL;  /*Contains the files name(s)*/
+    LPTSTR dstPattern = NULL; /* Destination Argument: a bare name or mask */
+    TCHAR srcSpec[MAX_PATH];  /* Source Argument without a trailing backslash */
+    TCHAR srcDir[MAX_PATH];   /* Directory part of the source, with its trailing backslash, or empty */
+    LPTSTR srcFILE;           /* File name part of the source (may have wildcards) */
     TCHAR srcFinal[MAX_PATH];
-
-    LPTSTR dstPattern = NULL; /*Destiny Argument*/
-    TCHAR dstPath[MAX_PATH]; /*Source Path Directories*/
-    LPTSTR dstFILE = NULL; /*Contains the files name(s)*/
-
-    TCHAR dstLast[MAX_PATH]; /*It saves the File name after unmasked with wildcards*/
-    TCHAR dstFinal[MAX_PATH]; /*It saves the Final destiny Path*/
+    TCHAR dstLast[MAX_PATH];  /* The new name, with the mask applied */
+    TCHAR dstFinal[MAX_PATH]; /* The new name behind the directory of the source */
+    SIZE_T cchSpec;
 
     BOOL bDstWildcard = FALSE;
-    BOOL bPath = FALSE;
-
-    LPTSTR p,q,r;
 
     HANDLE hFile;
     WIN32_FIND_DATA f;
@@ -93,8 +166,7 @@ INT cmd_rename (LPTSTR param)
 
     if (args < 2)
     {
-        if (!(dwFlags & REN_ERROR))
-            error_req_param_missing();
+        RenSyntaxError(dwFlags);
         freep(arg);
         return 1;
     }
@@ -145,90 +217,69 @@ INT cmd_rename (LPTSTR param)
     /* there are only options on the command line --> error!!! */
     if (args < nEvalArgs + 2)
     {
-        if (!(dwFlags & REN_ERROR))
-            error_req_param_missing();
+        RenSyntaxError(dwFlags);
         freep(arg);
         return 1;
     }
 
-    /* Get destination pattern and source pattern*/
+    /* The last two arguments that are not options are the source and the destination */
     for (i = 0; i < args; i++)
     {
         if (*arg[i] == _T('/'))//We have find an Option.Jump it.
             continue;
-        dstPattern = arg[i]; //we save the Last argument as dstPattern
-        srcPattern = arg[i-1];
+        srcPattern = dstPattern;
+        dstPattern = arg[i];
     }
 
-    if (_tcschr(srcPattern, _T('\\')))  //Checking if the Source (srcPattern) is a Path to the file
+    /* As on Windows the destination is only a new name, never a path: the file stays in its directory */
+    if (_tcspbrk(dstPattern, _T("\\:")))
     {
-        bPath= TRUE;
-
-        //Splitting srcPath and srcFile.
-
-        srcFILE = _tcschr(srcPattern, _T('\\'));
-        nSlash++;
-        while(_tcschr(srcFILE, _T('\\')))
-        {
-            srcFILE++;
-            if (*srcFILE==_T('\\')) nSlash++ ;
-            if (!_tcschr(srcFILE, _T('\\'))) break;
-        }
-        _tcsncpy(srcPath,srcPattern,_tcslen(srcPattern)-_tcslen(srcFILE));
-
-        if (_tcschr(dstPattern, _T('\\'))) //Checking if the Destiny (dstPattern)is also a Path.And splitting dstPattern in dstPath and srcPath.
-        {
-            dstFILE = _tcschr(dstPattern, _T('\\'));
-            nSlash=0;
-            while(_tcschr(dstFILE, _T('\\')))
-            {
-                dstFILE++;
-                if (*dstFILE==_T('\\')) nSlash++ ;
-                if (!_tcschr(dstFILE, _T('\\'))) break;
-            }
-            _tcsncpy(dstPath,dstPattern,_tcslen(dstPattern)-_tcslen(dstFILE));
-
-            if ((_tcslen(dstPath)!=_tcslen(srcPath))||(_tcsncmp(srcPath,dstPath,_tcslen(srcPath))!=0)) //If it has a Path,then MUST be equal than srcPath
-            {
-                error_syntax(dstPath);
-                freep(arg);
-                return 1;
-            }
-        }
-        else
-        { //If Destiny hasnt a Path,then (MSDN says) srcPath is its Path.
-            _tcscpy(dstPath,srcPath);
-            dstFILE=dstPattern;
-        }
+        RenSyntaxError(dwFlags);
+        freep(arg);
+        return 1;
     }
 
-    if (!_tcschr(srcPattern, _T('\\'))) //If srcPattern isn't a Path but a name:
+    /* "ren dir\ new" renames the directory */
+    cchSpec = _tcslen(srcPattern);
+    if (cchSpec >= ARRAYSIZE(srcSpec))
     {
-        srcFILE=srcPattern;
-        if (_tcschr(dstPattern, _T('\\')))
-        {
-            error_syntax(dstPattern);
-            freep(arg);
-            return 1;
-        }
-        else
-        {
-            dstFILE=dstPattern;
-        }
+        if (!(dwFlags & REN_ERROR))
+            ErrorMessage(ERROR_FILENAME_EXCED_RANGE, NULL);
+        nErrorLevel = 1;
+        freep(arg);
+        return 1;
     }
+    StringCchCopy(srcSpec, ARRAYSIZE(srcSpec), srcPattern);
+    while (cchSpec > 1 && srcSpec[cchSpec - 1] == _T('\\') && srcSpec[cchSpec - 2] != _T(':'))
+        srcSpec[--cchSpec] = 0;
 
-    //Checking Wildcards.
-    if (_tcschr(dstFILE, _T('*')) || _tcschr(dstFILE, _T('?')))
+    /* Split the source in its directory part ("C:\dir\", "dir\", "C:" or nothing) and its file name (mask) */
+    srcFILE = _tcsrchr(srcSpec, _T('\\'));
+    if (srcFILE)
+        srcFILE++;
+    else if (srcSpec[0] && srcSpec[1] == _T(':'))
+        srcFILE = srcSpec + 2;
+    else
+        srcFILE = srcSpec;
+    /* the directory part is always NUL-terminated */
+    StringCchCopyN(srcDir, ARRAYSIZE(srcDir), srcSpec, srcFILE - srcSpec);
+
+    /* Checking Wildcards. */
+    if (_tcspbrk(dstPattern, _T("*?")))
         bDstWildcard = TRUE;
 
-    TRACE("\n\nSourcePattern: %s SourcePath: %s SourceFile: %s", debugstr_aw(srcPattern),debugstr_aw(srcPath),debugstr_aw(srcFILE));
-    TRACE("\n\nDestinationPattern: %s Destination Path:%s Destination File: %s\n", debugstr_aw(dstPattern),debugstr_aw(dstPath),debugstr_aw(dstFILE));
+    TRACE("\n\nSourcePattern: %s SourcePath: %s SourceFile: %s", debugstr_aw(srcPattern),debugstr_aw(srcDir),debugstr_aw(srcFILE));
+    TRACE("\n\nDestinationPattern: %s\n", debugstr_aw(dstPattern));
 
-    hFile = FindFirstFile(srcPattern, &f);
+    hFile = FindFirstFile(srcSpec, &f);
 
     if (hFile == INVALID_HANDLE_VALUE)
     {
-        if (!(dwFlags & REN_ERROR)) error_file_not_found();
+        if (!(dwFlags & REN_ERROR))
+            ErrorMessage(GetLastError(), NULL);
+        nErrorLevel = 1;
+        freep(arg);
+        return 1;
     }
     do
     {
@@ -249,54 +300,15 @@ INT cmd_rename (LPTSTR param)
         }
 
         TRACE("Found source name: %s\n", debugstr_aw(f.cFileName));
-        /* So here we have splitted the dstFILE and we have find a f.cFileName(thanks to srcPattern)
-         * Now we have to use the mask (dstFILE) (which can have Wildcards) with f.cFileName to find destination file name(dstLast) */
-        p = f.cFileName;
-        q = dstFILE;
-        r = dstLast;
-        while(*q != 0)
+        /* Apply the mask (dstPattern, which can have wildcards) to the found name to get the new name */
+        if (!RenExpandMask(f.cFileName, dstPattern, dstLast, ARRAYSIZE(dstLast)) ||
+            FAILED(StringCchPrintf(srcFinal, ARRAYSIZE(srcFinal), _T("%s%s"), srcDir, f.cFileName)) ||
+            FAILED(StringCchPrintf(dstFinal, ARRAYSIZE(dstFinal), _T("%s%s"), srcDir, dstLast)))
         {
-            if (*q == '*')
-            {
-                q++;
-                while (*p != 0 && *p != *q)
-                {
-                    *r = *p;
-                    p++;
-                    r++;
-                }
-            }
-            else if (*q == '?')
-            {
-                q++;
-                if (*p != 0)
-                {
-                    *r = *p;
-                    p++;
-                    r++;
-                }
-            }
-            else
-            {
-                *r = *q;
-                if (*p != 0) p++;
-                q++;
-                r++;
-            }
-        }
-        *r = 0;
-        //Well we have splitted the Paths,so now we have to paste them again(if needed),thanks bPath.
-        if (bPath != FALSE)
-        {
-            _tcscpy(srcFinal,srcPath);
-            _tcscat(srcFinal,f.cFileName);
-            _tcscpy(dstFinal,dstPath);
-            _tcscat(dstFinal,dstLast);
-        }
-        else
-        {
-            _tcscpy(srcFinal,f.cFileName);
-            _tcscpy(dstFinal,dstLast);
+            if (!(dwFlags & REN_ERROR))
+                ErrorMessage(ERROR_FILENAME_EXCED_RANGE, NULL);
+            nErrorLevel = 1;
+            continue;
         }
 
         TRACE("DestinationPath: %s\n", debugstr_aw(dstFinal));
@@ -314,7 +326,8 @@ INT cmd_rename (LPTSTR param)
             else
             {
                 if (!(dwFlags & REN_ERROR))
-                    ConErrResPrintf(STRING_REN_ERROR, GetLastError());
+                    ErrorMessage(GetLastError(), NULL);
+                nErrorLevel = 1;
             }
         }
     }
@@ -332,7 +345,7 @@ INT cmd_rename (LPTSTR param)
     }
 
     freep(arg);
-    return 0;
+    return nErrorLevel;
 }
 
 #endif
