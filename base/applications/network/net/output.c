@@ -7,6 +7,8 @@
 
 #include "net.h"
 
+#define MSG_OPTION_UNKNOWN  3506
+
 static
 VOID
 PrintErrMessageStringV(
@@ -100,6 +102,25 @@ PrintCommandSyntax(
         PrintHelpMessageHint(dwMessage);
 
     return 1;
+}
+
+
+/* "The option /NAME is unknown." and the syntax of the command; returns the exit code 1 */
+INT
+PrintUnknownOption(
+    DWORD dwSyntaxMessage,
+    PCWSTR pszOption)
+{
+    WCHAR szOption[64];
+    PWSTR pColon;
+
+    StringCchCopyW(szOption, ARRAYSIZE(szOption), pszOption);
+    pColon = wcschr(szOption, L':');
+    if (pColon)
+        *pColon = UNICODE_NULL;
+    _wcsupr(szOption);
+
+    return PrintCommandSyntax(dwSyntaxMessage, MSG_OPTION_UNKNOWN, szOption);
 }
 
 

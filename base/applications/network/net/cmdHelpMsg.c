@@ -11,6 +11,16 @@
 
 #include <stdlib.h>
 
+/* "<number> is not a valid Windows network message number." with the hint for 3871, exit code 2 */
+static
+INT
+PrintInvalidMessageNumber(
+    PCWSTR pszNumber)
+{
+    return PrintCommandError(3871, pszNumber);
+}
+
+
 INT cmdHelpMsg(INT argc, WCHAR **argv)
 {
     INT i;
@@ -22,12 +32,7 @@ INT cmdHelpMsg(INT argc, WCHAR **argv)
                           L"***", NULL};
 
     if (argc < 3)
-    {
-        PrintMessageString(4381);
-        ConPuts(StdOut, L"\n");
-        PrintNetMessage(MSG_HELPMSG_SYNTAX);
-        return 1;
-    }
+        return PrintCommandSyntax(MSG_HELPMSG_SYNTAX, 0, NULL);
 
     for (i = 2; i < argc; i++)
     {
@@ -43,12 +48,7 @@ INT cmdHelpMsg(INT argc, WCHAR **argv)
 
     errNum = wcstol(argv[2], &endptr, 10);
     if (*endptr != 0)
-    {
-        PrintMessageString(4381);
-        ConPuts(StdOut, L"\n");
-        PrintNetMessage(MSG_HELPMSG_SYNTAX);
-        return 1;
-    }
+        return PrintCommandSyntax(MSG_HELPMSG_SYNTAX, 0, NULL);
 
     if (errNum >= MIN_LANMAN_MESSAGE_ID && errNum <= MAX_LANMAN_MESSAGE_ID)
     {
@@ -67,7 +67,7 @@ INT cmdHelpMsg(INT argc, WCHAR **argv)
         }
         else
         {
-            PrintErrorMessage(3871);
+            return PrintInvalidMessageNumber(argv[2]);
         }
     }
     else
@@ -88,7 +88,7 @@ INT cmdHelpMsg(INT argc, WCHAR **argv)
         }
         else
         {
-            PrintErrorMessage(3871);
+            return PrintInvalidMessageNumber(argv[2]);
         }
     }
 

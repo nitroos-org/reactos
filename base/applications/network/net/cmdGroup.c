@@ -171,6 +171,22 @@ cmdGroup(
     GROUP_INFO_1002 Info1002;
     NET_API_STATUS Status;
 
+    /*
+     * Global groups exist only on a domain controller. Windows refuses every other form of
+     * the command, whatever the arguments, with message 3515 and the exit code 2.
+     */
+    if (!(argc == 3 && _wcsicmp(argv[2], L"/help") == 0))
+    {
+        NT_PRODUCT_TYPE ProductType = NtProductWinNt;
+
+        RtlGetNtProductType(&ProductType);
+        if (ProductType != NtProductLanManNt)
+        {
+            PrintErrorMessage(3515);
+            return 2;
+        }
+    }
+
     if (argc == 2)
     {
         Status = EnumerateGroups();

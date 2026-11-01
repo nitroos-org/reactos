@@ -1144,6 +1144,39 @@ done:
 }
 
 
+/* The switches NET USER knows; Windows names any other one in "The option ... is unknown." */
+static
+BOOL
+IsKnownOption(PCWSTR pszOption)
+{
+    static const PCWSTR pszSwitches[] =
+    {
+        L"/help", L"/add", L"/delete", L"/domain", L"/random"
+    };
+    static const PCWSTR pszValueSwitches[] =
+    {
+        L"/active:", L"/comment:", L"/countrycode:", L"/expires:", L"/fullname:", L"/homedir:",
+        L"/passwordchg:", L"/passwordreq:", L"/profilepath:", L"/scriptpath:", L"/times:",
+        L"/usercomment:", L"/workstations:"
+    };
+    UINT i;
+
+    for (i = 0; i < ARRAYSIZE(pszSwitches); i++)
+    {
+        if (_wcsicmp(pszOption, pszSwitches[i]) == 0)
+            return TRUE;
+    }
+
+    for (i = 0; i < ARRAYSIZE(pszValueSwitches); i++)
+    {
+        if (_wcsnicmp(pszOption, pszValueSwitches[i], wcslen(pszValueSwitches[i])) == 0)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+
 INT
 cmdUser(
     INT argc,
@@ -1151,6 +1184,7 @@ cmdUser(
 {
     INT i, j;
     INT result = 0;
+    INT nExit = 0;
     BOOL bAdd = FALSE;
     BOOL bDelete = FALSE;
 #if 0
@@ -1213,19 +1247,21 @@ cmdUser(
             GenerateRandomPassword(&lpPassword,
                                    &bPasswordAllocated);
         }
+        else if (argv[j][0] == L'/' && !IsKnownOption(argv[j]))
+        {
+            return PrintUnknownOption(MSG_USER_SYNTAX, argv[j]);
+        }
     }
 
     if (lpUserName == NULL && lpPassword == NULL)
     {
         Status = EnumerateUsers();
-        PrintMessageString(TranslateAppMessage(Status));
-        return 0;
+        return PrintCommandStatus(Status);
     }
     else if (lpUserName != NULL && lpPassword == NULL && argc == 3)
     {
         Status = DisplayUser(lpUserName);
-        PrintMessageString(TranslateAppMessage(Status));
-        return 0;
+        return PrintCommandStatus(Status);
     }
 
     if (bAdd && bDelete)
@@ -1250,8 +1286,7 @@ cmdUser(
                                 (LPBYTE*)&pUserInfo);
         if (Status != NERR_Success)
         {
-            PrintMessageString(TranslateAppMessage(Status));
-            result = 1;
+            nExit = PrintCommandStatus(Status);
             goto done;
         }
     }
@@ -1442,7 +1477,7 @@ cmdUser(
                             lpUserName);
     }
 
-    PrintMessageString(TranslateAppMessage(Status));
+    nExit = PrintCommandStatus(Status);
 
     if (Status == NERR_Success &&
         lpPassword != NULL &&
@@ -1471,7 +1506,7 @@ done:
         PrintNetMessage(MSG_USER_SYNTAX);
     }
 
-    return result;
+    return (result != 0) ? result : nExit;
 }
 
 /* EOF */

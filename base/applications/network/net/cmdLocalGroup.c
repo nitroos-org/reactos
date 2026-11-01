@@ -46,28 +46,34 @@ EnumerateLocalGroups(VOID)
 
     NetApiBufferFree(pServer);
 
-    Status = NetLocalGroupEnum(NULL,
-                               0,
-                               (LPBYTE*)&pBuffer,
-                               MAX_PREFERRED_LENGTH,
-                               &dwRead,
-                               &dwTotal,
-                               &ResumeHandle);
-    if (Status != NERR_Success)
-        return Status;
-
-    qsort(pBuffer,
-          dwRead,
-          sizeof(PLOCALGROUP_INFO_0),
-          CompareInfo);
-
-    for (i = 0; i < dwRead; i++)
+    /* The enumeration may hand out the aliases in several rounds, each ending with ERROR_MORE_DATA */
+    do
     {
-        if (pBuffer[i].lgrpi0_name)
-            ConPrintf(StdOut, L"*%s\n", pBuffer[i].lgrpi0_name);
-    }
+        Status = NetLocalGroupEnum(NULL,
+                                   0,
+                                   (LPBYTE*)&pBuffer,
+                                   MAX_PREFERRED_LENGTH,
+                                   &dwRead,
+                                   &dwTotal,
+                                   &ResumeHandle);
+        if ((Status != NERR_Success) && (Status != ERROR_MORE_DATA))
+            return Status;
 
-    NetApiBufferFree(pBuffer);
+        qsort(pBuffer,
+              dwRead,
+              sizeof(PLOCALGROUP_INFO_0),
+              CompareInfo);
+
+        for (i = 0; i < dwRead; i++)
+        {
+            if (pBuffer[i].lgrpi0_name)
+                ConPrintf(StdOut, L"*%s\n", pBuffer[i].lgrpi0_name);
+        }
+
+        NetApiBufferFree(pBuffer);
+        pBuffer = NULL;
+    }
+    while (Status == ERROR_MORE_DATA);
 
     return NERR_Success;
 }
@@ -168,6 +174,16 @@ done:
 }
 
 
+/* A missing group is reported by Windows as "no such local group" (1376), not as the group error 2220 */
+static
+DWORD
+MapLocalGroupStatus(
+    DWORD dwStatus)
+{
+    return (dwStatus == NERR_GroupNotFound) ? ERROR_NO_SUCH_ALIAS : dwStatus;
+}
+
+
 INT
 cmdLocalGroup(
     INT argc,
@@ -175,6 +191,7 @@ cmdLocalGroup(
 {
     INT i, j;
     INT result = 0;
+    INT nExit = 0;
     ULONG dwMemberCount = 0;
     BOOL bAdd = FALSE;
     BOOL bDelete = FALSE;
@@ -192,14 +209,12 @@ cmdLocalGroup(
     if (argc == 2)
     {
         Status = EnumerateLocalGroups();
-        ConPrintf(StdOut, L"Status: %lu\n", Status);
-        return 0;
+        return PrintCommandStatus(MapLocalGroupStatus(Status));
     }
-    else if (argc == 3)
+    else if (argc == 3 && argv[2][0] != L'/')
     {
         Status = DisplayLocalGroup(argv[2]);
-        ConPrintf(StdOut, L"Status: %lu\n", Status);
-        return 0;
+        return PrintCommandStatus(MapLocalGroupStatus(Status));
     }
 
     i = 2;
@@ -216,8 +231,6 @@ cmdLocalGroup(
 
         dwMemberCount++;
     }
-
-    ConPrintf(StdOut, L"Member count: %lu\n", dwMemberCount);
 
     if (dwMemberCount > 0)
     {
@@ -269,9 +282,9 @@ cmdLocalGroup(
         }
         else
         {
-            PrintErrorMessage(3506/*, argv[i]*/);
-            result = 1;
-            goto done;
+            if (lpMembers != NULL)
+                RtlFreeHeap(RtlGetProcessHeap(), 0, lpMembers);
+            return PrintUnknownOption(MSG_LOCALGROUP_SYNTAX, argv[i]);
         }
     }
 
@@ -314,7 +327,7 @@ cmdLocalGroup(
                                           1002,
                                           (LPBYTE)&Info1002,
                                           NULL);
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            nExit = PrintCommandStatus(MapLocalGroupStatus(Status));
         }
         else if (bAdd && !bDelete)
         {
@@ -333,14 +346,14 @@ cmdLocalGroup(
                                       (lpComment == NULL) ? 0 : 1,
                                       (lpComment == NULL) ? (LPBYTE)&Info0 : (LPBYTE)&Info1,
                                       NULL);
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            nExit = PrintCommandStatus(MapLocalGroupStatus(Status));
         }
         else if (!bAdd && bDelete && lpComment == NULL)
         {
             /* Delete the group */
             Status = NetLocalGroupDel(NULL,
                                       lpGroupName);
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            nExit = PrintCommandStatus(MapLocalGroupStatus(Status));
         }
         else
         {
@@ -357,7 +370,7 @@ cmdLocalGroup(
                                              3,
                                              (LPBYTE)lpMembers,
                                              dwMemberCount);
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            nExit = PrintCommandStatus(MapLocalGroupStatus(Status));
         }
         else if (!bAdd && bDelete && lpComment == NULL)
         {
@@ -367,7 +380,7 @@ cmdLocalGroup(
                                              3,
                                              (LPBYTE)lpMembers,
                                              dwMemberCount);
-            ConPrintf(StdOut, L"Status: %lu\n", Status);
+            nExit = PrintCommandStatus(MapLocalGroupStatus(Status));
         }
         else
         {
@@ -386,7 +399,7 @@ done:
         PrintNetMessage(MSG_LOCALGROUP_SYNTAX);
     }
 
-    return result;
+    return (result != 0) ? result : nExit;
 }
 
 /* EOF */

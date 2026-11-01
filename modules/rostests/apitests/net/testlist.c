@@ -7,10 +7,12 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_NetExit(void);
 extern void func_NetShare(void);
 
 const struct test winetest_testlist[] =
 {
+    { "NetExit", func_NetExit },
     { "NetShare", func_NetShare },
 
     { 0, 0 }

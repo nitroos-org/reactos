@@ -72,10 +72,13 @@ done:
     if (hManager != NULL)
         CloseServiceHandle(hManager);
 
+    if (dwError == ERROR_SERVICE_DOES_NOT_EXIST)
+        dwError = NERR_BadServiceName;
+
     if (dwError != ERROR_SUCCESS)
     {
-        /* FIXME: Print proper error message */
-        ConPrintf(StdErr, L"Error: %lu\n", dwError);
+        PrintErrorMessage(dwError);
+        nError = 2;
     }
 
     return nError;

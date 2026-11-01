@@ -67,19 +67,8 @@ static
 VOID
 PrintError(DWORD Status)
 {
-    WCHAR szStatusBuffer[16];
-    LPWSTR Buffer;
-
-    _swprintf(szStatusBuffer, L"%lu", Status);
-    PrintMessageStringV(3502, szStatusBuffer);
-
-    if (FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-                       FORMAT_MESSAGE_IGNORE_INSERTS, NULL,
-                       Status, LANG_USER_DEFAULT, (LPWSTR)&Buffer, 0, NULL))
-    {
-        ConPrintf(StdErr, L"\n%s", Buffer);
-        LocalFree(Buffer);
-    }
+    /* "System error N has occurred." and its text, or the message of a NET error, on standard error */
+    PrintErrorMessage(Status);
 }
 
 static
@@ -109,6 +98,18 @@ cmdUse(
     }
     else if (argc == 3)
     {
+        /* A remote name alone makes a connection without a local device */
+        if (argv[2][0] == L'\\' && argv[2][1] == L'\\' && wcslen(argv[2]) >= 4)
+        {
+            NETRESOURCE lpNet = { 0 };
+
+            lpNet.dwType = RESOURCETYPE_DISK;
+            lpNet.lpRemoteName = argv[2];
+            lpNet.lpComment = L"";
+            Status = WNetUseConnection(NULL, &lpNet, NULL, NULL, 0, NULL, NULL, NULL);
+            return PrintCommandStatus(Status);
+        }
+
         if (!ValidateDeviceName(argv[2]))
         {
             PrintMessageStringV(3952, L"DeviceName");
@@ -154,9 +155,12 @@ cmdUse(
 
         Status = WNetCancelConnection2(argv[Delete], CONNECT_UPDATE_PROFILE, FALSE);
         if (Status != NO_ERROR)
+        {
             PrintError(Status);
+            return 2;
+        }
 
-        return Status;
+        return 0;
     }
     else
     {
@@ -226,8 +230,11 @@ cmdUse(
         if (argv[2][0] == L'*' && Status == NO_ERROR && OutFlags == CONNECT_LOCALDRIVE)
             PrintMessageStringV(3919, argv[3], Access);
         else if (Status != NO_ERROR)
+        {
             PrintError(Status);
+            return 2;
+        }
 
-        return Status;
+        return 0;
     }
 }
