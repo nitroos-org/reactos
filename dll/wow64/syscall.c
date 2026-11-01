@@ -1737,6 +1737,50 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
                           P(3), a[4], a[5], P(6));
     case W64_NtCancelTimer: return NtCancelTimer(H(0), P(1));
     case W64_NtQueryTimer: return NtQueryTimer(H(0), a[1], P(2), a[3], P(4));
+    case W64_NtCreateTimer2:
+        /* Object attributes are refused by the service; translated anyway so it sees what the caller passed */
+        PROBE(0);
+        ATTR(2); Status = NtCreateTimer2(&Cleanup->Handle, P(1), OA(2), a[3], a[4]); RETURN_HANDLE();
+    case W64_NtSetTimer2:
+        /* LARGE_INTEGERs and T2_SET_PARAMETERS (ULONG, ULONG, LONGLONG) have the same layout in both ABIs */
+        return NtSetTimer2(H(0), P(1), P(2), P(3));
+    case W64_NtCancelTimer2: return NtCancelTimer2(H(0), P(1));
+    case W64_NtSetTimerEx:
+    {
+        /* TIMER_SET_COALESCABLE_TIMER_INFO holds pointers: 32 bytes here, 48 natively. Windows' WOW64
+         * accepts a 32-bit length of at least the structure (measured: +8 succeeds, -1 is a length
+         * mismatch); other classes and short lengths go through for the service to refuse. */
+        struct
+        {
+            LARGE_INTEGER DueTime;
+            ULONG TimerApcRoutine, TimerContext, WakeContext, Period, TolerableDelay, PreviousState;
+        } Info32;
+        TIMER_SET_COALESCABLE_TIMER_INFO Info;
+
+        C_ASSERT(sizeof(Info32) == 32);
+        if (a[1] != TimerSetCoalescableTimer || a[3] < sizeof(Info32))
+            return NtSetTimerEx(H(0), a[1], P(2), a[3]);
+        _SEH2_TRY
+        {
+            RtlCopyMemory(&Info32, P(2), sizeof(Info32));
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+        Info.DueTime = Info32.DueTime;
+        /* The APC routine is encoded as for NtSetTimer */
+        Info.TimerApcRoutine = Info32.TimerApcRoutine ?
+            (PTIMER_APC_ROUTINE)(ULONG_PTR)(-((LONG64)Info32.TimerApcRoutine << 2)) : NULL;
+        Info.TimerContext = ULongToPtr(Info32.TimerContext);
+        /* The kernel does not use the wake context (no wake timers); its 32-bit layout differs */
+        Info.WakeContext = NULL;
+        Info.Period = Info32.Period;
+        Info.TolerableDelay = Info32.TolerableDelay;
+        Info.PreviousState = ULongToPtr(Info32.PreviousState);
+        return NtSetTimerEx(H(0), TimerSetCoalescableTimer, &Info, sizeof(Info));
+    }
     case W64_NtCreateIoCompletion:
         PROBE(0);
         ATTR(2); Status = NtCreateIoCompletion(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
