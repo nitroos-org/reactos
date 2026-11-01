@@ -168,7 +168,9 @@ static VOID StateChangeTo32(WOW64_DBGUI_WAIT_STATE_CHANGE *To, const DBGUI_WAIT_
             To->NewState = DbgSingleStepStateChange;
         }
         Record32->ExceptionFlags = Record->ExceptionFlags;
-        Record32->ExceptionRecord = Narrow32(Record->ExceptionRecord);
+        /* A nested record is a pointer into the debuggee that the 32-bit debugger could not
+         * follow from here; Windows reports none to it */
+        Record32->ExceptionRecord = 0;
         Record32->ExceptionAddress = PtrToUlong(Record->ExceptionAddress);
         Count = min(Record->NumberParameters, EXCEPTION_MAXIMUM_PARAMETERS);
         Record32->NumberParameters = Count;
@@ -223,7 +225,10 @@ NTSTATUS Wow64WaitForDebugEvent(const ULONG *a)
         if (Status != STATUS_SUCCESS) return Status;
         if (!NativeOnlyEvent(&Native, &Continue)) break;
         CloseEventHandles(&Native);
-        NtDebugContinue(HANDLE32(a[0]), &Native.AppClientId, Continue);
+        Status = NtDebugContinue(HANDLE32(a[0]), &Native.AppClientId, Continue);
+        /* STATUS_INVALID_PARAMETER: the event is gone (the debuggee ended), waiting on is safe.
+         * Any other failure leaves the thread stuck on its event: do not wait for the next one */
+        if (!NT_SUCCESS(Status) && Status != STATUS_INVALID_PARAMETER) return Status;
         if (TimeoutPointer && Deadline.QuadPart) Timeout = Deadline;
     }
     StateChangeTo32(&Guest, &Native);
