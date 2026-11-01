@@ -2619,12 +2619,14 @@ static DWORD read_line( struct request *request, char *buffer, DWORD *len )
     return ERROR_SUCCESS;
 }
 
-#define MAX_REPLY_LEN   1460
+/* Windows accepts far longer header lines than one TCP segment. The Chrome updater CUP2 reply carries an
+ * ML-DSA-44 signature (about 4.9 KB of hex) in a single X-Cup-Server-Proof line; truncating it makes the
+ * response untrusted. */
+#define MAX_REPLY_LEN   (64 * 1024)
 #define INITIAL_HEADER_BUFFER_LEN  512
 
-static DWORD read_reply( struct request *request )
+static DWORD read_reply_buf( struct request *request, char *buffer )
 {
-    char buffer[MAX_REPLY_LEN];
     DWORD ret, buflen, len, offset, crlf_len = 2; /* lstrlenW(crlf) */
     char *status_code, *status_text;
     WCHAR *versionW, *status_textW, *raw_headers;
@@ -2736,6 +2738,17 @@ static DWORD read_reply( struct request *request )
     }
 
     TRACE("raw headers: %s\n", debugstr_w(raw_headers));
+    return ret;
+}
+
+static DWORD read_reply( struct request *request )
+{
+    char *buffer;
+    DWORD ret;
+
+    if (!(buffer = malloc( MAX_REPLY_LEN ))) return ERROR_OUTOFMEMORY;
+    ret = read_reply_buf( request, buffer );
+    free( buffer );
     return ret;
 }
 

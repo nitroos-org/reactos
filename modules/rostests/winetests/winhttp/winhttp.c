@@ -2359,6 +2359,8 @@ static int server_receive_request(int c, char *buffer, size_t buffer_size)
     return r;
 }
 
+#define LONG_HEADER_LEN 5000
+
 static DWORD CALLBACK server_thread(LPVOID param)
 {
     struct server_info *si = param;
@@ -2431,6 +2433,16 @@ static DWORD CALLBACK server_thread(LPVOID param)
         if (strstr(buffer, "/no_headers"))
         {
             send(c, page1, sizeof page1 - 1, 0);
+        }
+        if (strstr(buffer, "GET /long_header"))
+        {
+            char hdr[LONG_HEADER_LEN + 64];
+            int n = sprintf(hdr, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Long: ");
+            memset(hdr + n, 'A', LONG_HEADER_LEN);
+            n += LONG_HEADER_LEN;
+            n += sprintf(hdr + n, "\r\nX-After: ok\r\n\r\n");
+            send(c, hdr, n, 0);
+            continue;
         }
         if (strstr(buffer, "GET /no_content"))
         {
@@ -3159,6 +3171,43 @@ static void test_no_headers(int port)
         ok(!ret, "expected failure\n");
         ok(error == ERROR_WINHTTP_INVALID_SERVER_RESPONSE, "got %lu\n", error);
     }
+
+    WinHttpCloseHandle(req);
+    WinHttpCloseHandle(con);
+    WinHttpCloseHandle(ses);
+}
+
+static void test_long_header(int port)
+{
+    static WCHAR buffer[LONG_HEADER_LEN + 16];
+    HINTERNET ses, con, req;
+    DWORD len, i;
+    BOOL ret;
+
+    ses = WinHttpOpen(L"winetest", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
+    ok(ses != NULL, "failed to open session %lu\n", GetLastError());
+    con = WinHttpConnect(ses, L"localhost", port, 0);
+    ok(con != NULL, "failed to open a connection %lu\n", GetLastError());
+    req = WinHttpOpenRequest(con, NULL, L"/long_header", NULL, NULL, NULL, 0);
+    ok(req != NULL, "failed to open a request %lu\n", GetLastError());
+
+    ret = WinHttpSendRequest(req, NULL, 0, NULL, 0, 0, 0);
+    ok(ret, "failed to send request %lu\n", GetLastError());
+    ret = WinHttpReceiveResponse(req, NULL);
+    ok(ret, "failed to receive response %lu\n", GetLastError());
+
+    len = sizeof(buffer);
+    memset(buffer, 0, sizeof(buffer));
+    ret = WinHttpQueryHeaders(req, WINHTTP_QUERY_CUSTOM, L"X-Long", buffer, &len, WINHTTP_NO_HEADER_INDEX);
+    ok(ret, "got error %lu\n", GetLastError());
+    ok(len == LONG_HEADER_LEN * sizeof(WCHAR), "got length %lu\n", len);
+    for (i = 0; i < LONG_HEADER_LEN && buffer[i] == 'A'; i++) {}
+    ok(i == LONG_HEADER_LEN, "long header value mangled at %lu\n", i);
+
+    len = sizeof(buffer);
+    ret = WinHttpQueryHeaders(req, WINHTTP_QUERY_CUSTOM, L"X-After", buffer, &len, WINHTTP_NO_HEADER_INDEX);
+    ok(ret, "got error %lu\n", GetLastError());
+    ok(!wcscmp(buffer, L"ok"), "got %s\n", debugstr_w(buffer));
 
     WinHttpCloseHandle(req);
     WinHttpCloseHandle(con);
@@ -6314,6 +6363,7 @@ START_TEST (winhttp)
     test_basic_request(si.port, L"PUT", L"/test");
     test_chunked_request(si.port);
     test_no_headers(si.port);
+    test_long_header(si.port);
     test_no_content(si.port);
     test_head_request(si.port);
     test_not_modified(si.port);
