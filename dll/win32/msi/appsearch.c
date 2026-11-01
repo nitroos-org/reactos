@@ -36,6 +36,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(msi);
 
 struct signature
 {
+    DWORD    value_len; /* length of the value found when it has embedded NULs (REG_MULTI_SZ), else 0 */
     LPCWSTR  Name;     /* NOT owned by this structure */
     LPWSTR   File;
     DWORD    MinVersionMS;
@@ -294,7 +295,7 @@ done:
     return ERROR_SUCCESS;
 }
 
-static void convert_reg_value( DWORD regType, const BYTE *value, DWORD sz, WCHAR **appValue )
+static void convert_reg_value( DWORD regType, const BYTE *value, DWORD sz, WCHAR **appValue, DWORD *len )
 {
     LPWSTR ptr;
     DWORD i;
@@ -335,6 +336,33 @@ static void convert_reg_value( DWORD regType, const BYTE *value, DWORD sz, WCHAR
             for (i = 0; i < sz; i++, ptr += 2)
                 swprintf(ptr, 3, L"%02X", value[i]);
             break;
+        case REG_MULTI_SZ:
+        {
+            /* "[~]one[~]two[~]": each string is preceded by a NUL character (a Windows 10 probe and
+             * the test give "\0one\0two\0"), so the property holds NUL characters */
+            const WCHAR *p = (const WCHAR *)value, *end = p + sz / sizeof(WCHAR);
+            DWORD total = 1;
+
+            while (p < end && *p)
+            {
+                total += wcslen( p ) + 1;
+                p += wcslen( p ) + 1;
+            }
+            if (total == 1) total = 2; /* no strings: an empty value */
+            *appValue = calloc( total + 1, sizeof(WCHAR) );
+            if (!*appValue) break;
+            ptr = *appValue;
+            p = (const WCHAR *)value;
+            *ptr++ = 0;
+            while (p < end && *p)
+            {
+                wcscpy( ptr, p );
+                ptr += wcslen( p ) + 1;
+                p += wcslen( p ) + 1;
+            }
+            *len = total - 1;
+            break;
+        }
         default:
             WARN( "unimplemented for values of type %lu\n", regType );
             *appValue = NULL;
@@ -353,6 +381,7 @@ static UINT search_reg( MSIPACKAGE *package, WCHAR **appValue, struct signature 
     DWORD sz = 0, regType;
     LPBYTE value = NULL;
     MSIRECORD *row;
+    BOOL quoted = FALSE;
     UINT rc;
 
     TRACE("%s\n", debugstr_w(sig->Name));
@@ -440,7 +469,10 @@ static UINT search_reg( MSIPACKAGE *package, WCHAR **appValue, struct signature 
 
     if ((regType == REG_SZ || regType == REG_EXPAND_SZ) &&
         (ptr = wcschr((LPWSTR)value, '"')) && (end = wcschr(++ptr, '"')))
+    {
         *end = '\0';
+        quoted = TRUE;
+    }
     else
         ptr = (LPWSTR)value;
 
@@ -451,9 +483,15 @@ static UINT search_reg( MSIPACKAGE *package, WCHAR **appValue, struct signature 
         break;
     case msidbLocatorTypeFileName:
         *appValue = search_file( package, ptr, sig );
+        /* an unquoted command line: the file name ends at the first space ("path -option") */
+        if (!*appValue && !quoted && (regType == REG_SZ || regType == REG_EXPAND_SZ) && (end = wcschr( ptr, ' ' )))
+        {
+            *end = 0;
+            *appValue = search_file( package, ptr, sig );
+        }
         break;
     case msidbLocatorTypeRawValue:
-        convert_reg_value( regType, value, sz, appValue );
+        convert_reg_value( regType, value, sz, appValue, &sig->value_len );
         break;
     default:
         FIXME("unimplemented for type %d (key path %s, value %s)\n",
@@ -1103,7 +1141,7 @@ static UINT ITERATE_AppSearch(MSIRECORD *row, LPVOID param)
     r = search_sig_name( package, sigName, &sig, &value );
     if (value)
     {
-        r = msi_set_property( package->db, propName, value, -1 );
+        r = msi_set_property( package->db, propName, value, sig.value_len ? sig.value_len : -1 );
         if (r == ERROR_SUCCESS && !wcscmp( propName, L"SourceDir" ))
             msi_reset_source_folders( package );
 
@@ -1136,7 +1174,7 @@ UINT ACTION_AppSearch(MSIPACKAGE *package)
 
     r = MSI_OpenQuery( package->db, &view, L"SELECT * FROM `AppSearch`" );
     if (r != ERROR_SUCCESS)
-        return ERROR_SUCCESS;
+        return ERROR_FUNCTION_NOT_CALLED; /* nothing to do: Windows reports the action with return value 0 */
 
     r = MSI_IterateRecords( view, NULL, ITERATE_AppSearch, package );
     msiobj_release( &view->hdr );
