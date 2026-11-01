@@ -242,6 +242,99 @@ BasepIsGpFaultErrorBoxDisabled(VOID)
            (RtlGetThreadErrorMode() & RTL_SEM_NOGPFAULTERRORBOX);
 }
 
+/*
+ * The crash reporter normally decides whether a dialog is shown (see
+ * CanShowUi in drwtsn32). When it did not answer, the classic hard error box
+ * is the fallback, which must follow the same rules: no box when error
+ * reporting is told not to show its UI, nor on a window station without a
+ * display. DontShowUI is read from the machine key and its policy key, in the
+ * 64-bit view also for a 32-bit program, like drwtsn32 does.
+ */
+#define BASEP_WER_KEY           L"\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting"
+#define BASEP_WER_POLICY_KEY    L"\\Registry\\Machine\\SOFTWARE\\Policies\\Microsoft\\Windows\\Windows Error Reporting"
+#define BASEP_UOI_FLAGS         1
+#define BASEP_WSF_VISIBLE       1
+
+typedef struct _BASEP_USEROBJECTFLAGS
+{
+    BOOL fInherit;
+    BOOL fReserved;
+    DWORD dwFlags;
+} BASEP_USEROBJECTFLAGS;
+
+static
+BOOLEAN
+BasepIsDontShowUiSet(
+    _In_ PCWSTR KeyName)
+{
+    static UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"DontShowUI");
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PVOID)Buffer;
+    HANDLE KeyHandle;
+    ULONG Length;
+    NTSTATUS Status;
+    BOOLEAN Set = FALSE;
+
+    RtlInitUnicodeString(&Name, KeyName);
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenKey(&KeyHandle, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    Status = NtQueryValueKey(KeyHandle, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
+    if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+        Set = (*(PULONG)Info->Data != 0);
+    NtClose(KeyHandle);
+    return Set;
+}
+
+/* TRUE when it cannot be said (no user32): the box stays as it always was */
+static
+BOOLEAN
+BasepIsWindowStationVisible(VOID)
+{
+    HMODULE User32 = GetModuleHandleW(L"user32.dll");
+    HANDLE (WINAPI *GetWinSta)(VOID);
+    BOOL (WINAPI *GetObjectInfo)(HANDLE, int, PVOID, DWORD, PDWORD);
+    BASEP_USEROBJECTFLAGS Flags;
+    HANDLE WinSta;
+
+    if (!User32)
+        return TRUE;
+    GetWinSta = (PVOID)GetProcAddress(User32, "GetProcessWindowStation");
+    GetObjectInfo = (PVOID)GetProcAddress(User32, "GetUserObjectInformationW");
+    if (!GetWinSta || !GetObjectInfo)
+        return TRUE;
+
+    WinSta = GetWinSta();
+    return WinSta &&
+           GetObjectInfo(WinSta, BASEP_UOI_FLAGS, &Flags, sizeof(Flags), NULL) &&
+           (Flags.dwFlags & BASEP_WSF_VISIBLE);
+}
+
+static
+BOOLEAN
+BasepCanShowCrashBox(VOID)
+{
+    BOOLEAN CanShow = TRUE;
+
+    /* A damaged process may fault here; then the box is shown as before */
+    _SEH2_TRY
+    {
+        CanShow = !BasepIsDontShowUiSet(BASEP_WER_POLICY_KEY) &&
+                  !BasepIsDontShowUiSet(BASEP_WER_KEY) &&
+                  BasepIsWindowStationVisible();
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        CanShow = TRUE;
+    }
+    _SEH2_END;
+    return CanShow;
+}
+
 /* Exit codes of "drwtsn32 -u -ui"; any other code keeps the classic hard error box */
 #define CRASH_REPORTER_CLOSE    0x00C105ED
 #define CRASH_REPORTER_DEBUG    0x00DEB06D
@@ -501,6 +594,10 @@ BasepReportFatalException(
     {
         return;
     }
+
+    /* The reporter did not answer: the box follows its rules */
+    if (!BasepCanShowCrashBox())
+        return;
 
     ErrorParameters[0] = (ULONG_PTR)ExceptionRecord->ExceptionCode;
     ErrorParameters[1] = (ULONG_PTR)ExceptionRecord->ExceptionAddress;
@@ -878,6 +975,12 @@ UnhandledExceptionFilter(IN PEXCEPTION_POINTERS ExceptionInfo)
     {
         Status = STATUS_SUCCESS;
         ErrorResponse = ResponseCancel;
+    }
+    else if (ShowUi && !BasepCanShowCrashBox())
+    {
+        /* The reporter did not answer, and the box is not wanted: end the process */
+        Status = STATUS_SUCCESS;
+        ErrorResponse = ResponseOk;
     }
     else if (ShowUi)
     {
