@@ -45,7 +45,8 @@ MYPAL gpal =
 /*
  * A 32-bit process under WoW64 has no GDI handle table in its own PEB (Windows 10 also leaves
  * PEB32.GdiSharedHandleTable NULL). The table is mapped through the 64-bit PEB and keeps the amd64
- * entry layout, 24 bytes per entry. The 64-bit TEB lies two pages below the 32-bit one.
+ * entry layout, 24 bytes per entry. The 64-bit TEB lies two pages below the 32-bit one
+ * (TEB.WowTebOffset says so when set).
  */
 typedef struct _ENTRY64
 {
@@ -93,7 +94,13 @@ GdiQueryTable64(
 
     if (IsWow64Process(GetCurrentProcess(), &bWow64) && bWow64)
     {
-        pTeb64 = (PUCHAR)NtCurrentTeb() - TEB64_BIAS;
+        /* Windows 10 and nitro store the (negative) distance to the 64-bit TEB in the TEB32; older
+           systems leave 0 or 1, then the fixed bias applies (the Self check below guards it) */
+        LONG lOffset = PS_TEB32_WOW_TEB_OFFSET(NtCurrentTeb());
+        if (lOffset < -0x1000 && lOffset >= -0x10000)
+            pTeb64 = (PUCHAR)NtCurrentTeb() + lOffset;
+        else
+            pTeb64 = (PUCHAR)NtCurrentTeb() - TEB64_BIAS;
         ullPeb64 = *(PULONG64)(pTeb64 + TEB64_PEB);
         if (*(PULONG64)(pTeb64 + TEB64_SELF) == (ULONG_PTR)pTeb64 &&
             ullPeb64 != 0 && (ullPeb64 >> 32) == 0)

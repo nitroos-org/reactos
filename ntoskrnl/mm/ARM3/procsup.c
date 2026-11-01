@@ -985,6 +985,15 @@ MmCreateTeb(IN PEPROCESS Process,
 #endif
         Teb->NtTib.Self = (PNT_TIB)Teb;
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+        /* A WOW64 thread has its TEB32 in the pages right after this TEB: Windows 10 stores the
+           distance here, and the negative distance in the TEB32 (set by wow64.dll) */
+        if (Process->Wow64Process)
+        {
+            PS_TEB_WOW_TEB_OFFSET(Teb) = (LONG)ROUND_TO_PAGES(sizeof(TEB));
+        }
+#endif
+
         //
         // Identify this as an OS/2 V3.0 ("Cruiser") TIB
         //
