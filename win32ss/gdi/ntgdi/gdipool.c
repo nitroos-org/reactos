@@ -179,6 +179,12 @@ GdiPoolAllocate(
     /* Find and set a single bit */
     ulIndex = RtlFindClearBitsAndSet(&pSection->bitmap, 1, 0);
     ASSERT(ulIndex != MAXULONG);
+    if (ulIndex == MAXULONG)
+    {
+        /* The bitmap and the allocation count disagree, do not hand out an address outside the section */
+        pvAlloc = NULL;
+        goto done;
+    }
 
     /* Calculate the allocation address */
     cjOffset = ulIndex * pPool->cjAllocSize;
@@ -200,6 +206,9 @@ GdiPoolAllocate(
                                          PAGE_READWRITE);
         if (!NT_SUCCESS(status))
         {
+            /* Give the slot back. Leaving the bit set would leak the slot for good and make the
+               bitmap disagree with cAllocCount, so that the section looks free while it is full. */
+            RtlClearBit(&pSection->bitmap, ulIndex);
             pvAlloc = NULL;
             goto done;
         }

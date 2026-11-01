@@ -23,6 +23,7 @@ list(APPEND SOURCE
     CreateRectRgn.c
     D3DKMTCreateDCFromMemory.c
     D3DKMTWow64Thunks.c
+    DcAttrPool.c
     DPtoLP.c
     EngAcquireSemaphore.c
     EngCreateSemaphore.c
