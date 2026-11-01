@@ -2015,8 +2015,16 @@ NtQueryInformationProcess(
             /* Collect the handle values into a kernel buffer first: the enum
              * callback runs in a critical region with a table entry locked, so
              * it must not touch user memory. */
+            /* The count above is only a hint: other threads of the process
+             * create handles while we enumerate, and the walk may see a few
+             * entries more than the counter. Leave room for them (and never
+             * promise more than the caller's buffer can hold), so that a
+             * concurrent handle does not turn into a spurious failure. */
+            Snap.Capacity = HandleCount + 1024;
+            if (Snap.Capacity > ProcessInformationLength / sizeof(ULONG))
+                Snap.Capacity = ProcessInformationLength / sizeof(ULONG);
             Snap.Buffer = ExAllocatePoolWithTag(PagedPool,
-                                                HandleCount * sizeof(ULONG),
+                                                Snap.Capacity * sizeof(ULONG),
                                                 'tHsP');
             if (!Snap.Buffer)
             {
@@ -2024,7 +2032,6 @@ NtQueryInformationProcess(
                 ObDereferenceObject(Process);
                 break;
             }
-            Snap.Capacity = HandleCount;
             Snap.Count = 0;
 
             ObjectTable = ObReferenceProcessHandleTable(Process);
@@ -2039,7 +2046,7 @@ NtQueryInformationProcess(
 
             if (Snap.Count > Snap.Capacity)
             {
-                /* Raced with handle creation and overflowed: ask for more. */
+                /* More handles than the caller's buffer holds: ask for more. */
                 Length = Snap.Count * sizeof(ULONG);
                 Status = STATUS_INFO_LENGTH_MISMATCH;
             }
