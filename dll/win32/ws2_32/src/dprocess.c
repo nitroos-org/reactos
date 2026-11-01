@@ -300,6 +300,20 @@ WsProcDelete(IN PWSPROCESS Process)
         Process->NamespaceCatalog = NULL;
     }
 
+    /* Close the catalog change events; WsProcInitialize creates them again
+     * on the next WSAStartup, so leaving them open leaks two events for every
+     * WSAStartup/WSACleanup cycle that drops the last reference */
+    if (Process->ProtocolCatalogEvent)
+    {
+        CloseHandle(Process->ProtocolCatalogEvent);
+        Process->ProtocolCatalogEvent = NULL;
+    }
+    if (Process->NamespaceCatalogEvent)
+    {
+        CloseHandle(Process->NamespaceCatalogEvent);
+        Process->NamespaceCatalogEvent = NULL;
+    }
+
     /* Delete the thread lock */
     DeleteCriticalSection(&Process->ThreadLock);
 
