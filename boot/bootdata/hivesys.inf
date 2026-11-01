@@ -1699,6 +1699,8 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","PATHEXT",0x
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","TEMP",0x00020002,"%SystemRoot%\TEMP"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","TMP",0x00020002,"%SystemRoot%\TEMP"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","windir",0x00020002,"%SystemRoot%"
+; PowerShell 7 builds its module search path from this value (it appends the Windows PowerShell module directories only when the machine value exists)
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","PSModulePath",0x00020002,"%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\system32\WindowsPowerShell\v1.0\Modules"
 ; wgpu (Rust egui/eframe apps) defaults to Direct3D 12 on Windows. There is no d3d12.dll in the image, and the
 ; Wine/vkd3d HLSL compiler cannot build the DX12 shaders wgpu generates (SM 5.1 resource arrays), so a DX12-only wgpu app
 ; (DeckCraft) exits with "Failed to create surface". The software OpenGL driver (Mesa llvmpipe) renders wgpu apps;
