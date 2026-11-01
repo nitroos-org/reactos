@@ -382,9 +382,49 @@ static VOID DebugRecordSizes(INT HookId, INT Code, ULONG *Native, ULONG *Guest)
         HookRecordSizes(HookId, Code, Native, Guest);
         break;
     case WH_CBT:
-        if (Code == HCBT_MOVESIZE || Code == HCBT_ACTIVATE || Code == HCBT_CLICKSKIPPED)
+        if (Code == HCBT_MOVESIZE || Code == HCBT_ACTIVATE || Code == HCBT_CLICKSKIPPED || Code == HCBT_CREATEWND)
             HookRecordSizes(HookId, Code, Native, Guest);
         break;
+    }
+}
+
+/* The record of a CALLWNDPROC(RET) debug call is the CWPSTRUCT or CWPRETSTRUCT and the data the lParam of its
+ * message points to; Native is the debug call's buffer, whose lParamSize is the size of all that. Returns the size
+ * of the i386 record, or -1 if there is none that can be converted. */
+static LONG DebugCwpGuestSize(const HOOKPROC_CALLBACK_ARGUMENTS *Native, const DEBUGHOOKINFO *Info)
+{
+    BOOL Ret = Native->wParam == WH_CALLWNDPROCRET;
+    ULONG Base = Ret ? sizeof(CWPRETSTRUCT) : sizeof(CWPSTRUCT), GuestBase = Ret ? sizeof(CWPR32) : sizeof(CWP32);
+    const CWPSTRUCT *Cwp = Ret ? (const CWPSTRUCT *)&((const CWPRETSTRUCT *)(Info + 1))->lParam : (const CWPSTRUCT *)(Info + 1);
+    ULONG Extra;
+    LONG Size;
+    if (Native->lParamSize < Base) return -1;
+    Extra = Native->lParamSize - Base;
+    if (!Extra) return GuestBase;
+    if (Cwp->message == WM_CREATE || Cwp->message == WM_NCCREATE)
+        return Extra == sizeof(CREATESTRUCTW) ? GuestBase + sizeof(CREATE32) : -1;
+    Size = PayloadSize(Cwp->message, Cwp->wParam, Extra);
+    if (Size < 0) return -1;
+    return GuestBase + Size;
+}
+
+/* A CWPSTRUCT as the i386 CWP32, the data its lParam points to (NativePayload bytes at Input) as the GuestPayload
+ * bytes at Output */
+static VOID PackCwp(const CWPSTRUCT *Native, const VOID *Input, CWP32 *Guest, PVOID Output, ULONG NativePayload, LONG GuestPayload)
+{
+    Guest->lParam = Native->lParam; Guest->wParam = Native->wParam;
+    Guest->message = Native->message; Guest->hwnd = HandleToUlong(Native->hwnd);
+    if (GuestPayload)
+    {
+        if (Native->message == WM_CREATE || Native->message == WM_NCCREATE)
+        {
+            const CREATESTRUCTW *Create = Input;
+            /* Original guest strings/pointers are retained by the kernel. */
+            if ((ULONG_PTR)Create->lpszName > MAXULONG || (ULONG_PTR)Create->lpszClass > MAXULONG)
+                RtlRaiseStatus(STATUS_NOT_SUPPORTED);
+            CreateNativeTo32(Output, Input);
+        }
+        else PackPayload(Output, Input, Native->message, Native->wParam, NativePayload);
     }
 }
 
@@ -413,7 +453,22 @@ static VOID PackHook(HOOK32 *To, const HOOKPROC_CALLBACK_ARGUMENTS *From, LONG S
         if (Size)
         {
             GuestInfo->lParam = sizeof(*To) + sizeof(*GuestInfo);
-            PackRecord((INT)From->wParam, NativeInfo->code, GuestInfo + 1, NativeInfo + 1);
+            if (From->wParam == WH_CALLWNDPROC)
+            {
+                const CWPSTRUCT *Cwp = (const CWPSTRUCT *)(NativeInfo + 1);
+                CWP32 *GuestCwp = (CWP32 *)(GuestInfo + 1);
+                PackCwp(Cwp, Cwp + 1, GuestCwp, GuestCwp + 1, From->lParamSize - sizeof(CWPSTRUCT), Size - sizeof(CWP32));
+            }
+            else if (From->wParam == WH_CALLWNDPROCRET)
+            {
+                const CWPRETSTRUCT *Cwpr = (const CWPRETSTRUCT *)(NativeInfo + 1);
+                CWPR32 *GuestCwpr = (CWPR32 *)(GuestInfo + 1);
+                GuestCwpr->Result = (LONG)Cwpr->lResult;
+                PackCwp((const CWPSTRUCT *)&Cwpr->lParam, Cwpr + 1, &GuestCwpr->Cwp, GuestCwpr + 1,
+                        From->lParamSize - sizeof(CWPRETSTRUCT), Size - sizeof(CWPR32));
+            }
+            else
+                PackRecord((INT)From->wParam, NativeInfo->code, GuestInfo + 1, NativeInfo + 1);
         }
         else GuestInfo->lParam = (ULONG)NativeInfo->lParam;
         return;
@@ -444,20 +499,7 @@ static VOID PackHook(HOOK32 *To, const HOOKPROC_CALLBACK_ARGUMENTS *From, LONG S
         ((CWPRCALL32 *)To)->Cwp.Result = ((const CWPR_Struct *)From)->cwprs.lResult;
         Output = &((CWPRCALL32 *)To)->Extra;
     }
-    Guest->lParam = Native->lParam; Guest->wParam = Native->wParam;
-    Guest->message = Native->message; Guest->hwnd = HandleToUlong(Native->hwnd);
-    if (Size)
-    {
-        if (Native->message == WM_CREATE || Native->message == WM_NCCREATE)
-        {
-            const CREATESTRUCTW *Create = Input;
-            /* Original guest strings/pointers are retained by the kernel. */
-            if ((ULONG_PTR)Create->lpszName > MAXULONG || (ULONG_PTR)Create->lpszClass > MAXULONG)
-                RtlRaiseStatus(STATUS_NOT_SUPPORTED);
-            CreateNativeTo32(Output, Input);
-        }
-        else PackPayload(Output, Input, Native->message, Native->wParam, From->lParamSize);
-    }
+    PackCwp(Native, Input, Guest, Output, From->lParamSize, Size);
 }
 
 static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
@@ -489,6 +531,12 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
                 const DEBUGHOOKINFO *Info = (const DEBUGHOOKINFO *)(Native + 1);
                 if (Length < sizeof(*Native) + sizeof(*Info) || (ULONG_PTR)Native->lParam != sizeof(*Native)) break;
                 DebugRecordSizes((INT)Native->wParam, Info->code, &NativeRecord, &GuestRecord);
+                if ((Native->wParam == WH_CALLWNDPROC || Native->wParam == WH_CALLWNDPROCRET) && Native->lParamSize)
+                {
+                    LONG Record = DebugCwpGuestSize(Native, Info);
+                    if (Record < 0) break;
+                    NativeRecord = Native->lParamSize; GuestRecord = Record;
+                }
                 /* No record: the lParam of the hook was a plain value or not passed on */
                 if (Native->lParamSize && Native->lParamSize != NativeRecord) break;
                 if (Length != sizeof(*Native) + sizeof(*Info) + Native->lParamSize) break;

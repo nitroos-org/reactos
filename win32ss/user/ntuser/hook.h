@@ -46,6 +46,7 @@ LRESULT APIENTRY co_EVENT_CallEvents(DWORD, HWND, UINT_PTR, LONG_PTR);
 PHOOK FASTCALL IntGetHookObject(HHOOK);
 PHOOK FASTCALL IntGetNextHook(PHOOK Hook);
 PHOOK FASTCALL IntGetNextHookToCall(PHOOK Hook);
+BOOL FASTCALL co_HOOK_DebugBlocks(PTHREADINFO pti, struct _DESKTOP *pdo, PHOOK Hook, INT HookId, INT Code, WPARAM wParam, LPARAM lParam);
 LRESULT APIENTRY UserCallNextHookEx( PHOOK pHook, int Code, WPARAM wParam, LPARAM lParam, BOOL Ansi);
 BOOL FASTCALL IntUnhookWindowsHook(int,HOOKPROC);
 BOOLEAN IntRemoveHook(PVOID Object);

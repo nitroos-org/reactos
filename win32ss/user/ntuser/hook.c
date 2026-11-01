@@ -383,15 +383,43 @@ co_CallHook( INT HookId,
     return Result;
 }
 
+BOOL
+FASTCALL
+co_HOOK_DebugBlocks(PTHREADINFO pti,
+                    PDESKTOP pdo,
+                    PHOOK Hook,
+                    INT HookId,
+                    INT Code,
+                    WPARAM wParam,
+                    LPARAM lParam);
+
+/*
+ * Calls the hook reached through CallNextHookEx. lParam is what the hook gets: a kernel copy of the record or a plain
+ * value. The WH_DEBUG hooks see this call as they see the first one of a chain; if they block it *pBlocked is set
+ * and the hook is not called, the caller goes on with the hook after it.
+ */
 static
 LRESULT
 APIENTRY
 co_HOOK_CallHookNext( PHOOK Hook,
                       INT Code,
                       WPARAM wParam,
-                      LPARAM lParam)
+                      LPARAM lParam,
+                      PBOOL pBlocked)
 {
     TRACE("Calling Next HOOK %d\n", Hook->HookId);
+
+    if (pBlocked)
+    {
+        PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+
+        if (pti && pti->rpdesk && pti->rpdesk->pDeskInfo &&
+            co_HOOK_DebugBlocks(pti, pti->rpdesk, Hook, Hook->HookId, Code, wParam, lParam))
+        {
+            *pBlocked = TRUE;
+            return 0;
+        }
+    }
 
     return co_IntCallHookProc( Hook->HookId,
                                Code,
@@ -535,7 +563,7 @@ co_IntCallDebugHook(PHOOK Hook,
     }
 
     if (HooklParam) Debug.lParam = (LPARAM)HooklParam;
-    lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&Debug);
+    lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&Debug, NULL);
     if (HooklParam) ExFreePoolWithTag(HooklParam, TAG_HOOK);
 
     return lResult;
@@ -548,7 +576,8 @@ co_UserCallNextHookEx(PHOOK Hook,
                     int Code,
                     WPARAM wParam,
                     LPARAM lParam,
-                    BOOL Ansi)
+                    BOOL Ansi,
+                    PBOOL pBlocked)
 {
     LRESULT lResult = 0;
     BOOL BadChk = FALSE;
@@ -601,7 +630,7 @@ co_UserCallNextHookEx(PHOOK Hook,
 
         if (!BadChk)
         {
-            lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&Mouse);
+            lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&Mouse, pBlocked);
         }
 
         return lResult;
@@ -643,7 +672,7 @@ co_UserCallNextHookEx(PHOOK Hook,
 
             if (!BadChk)
             {
-                lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&Mouse);
+                lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&Mouse, pBlocked);
             }
             break;
         }
@@ -681,7 +710,7 @@ co_UserCallNextHookEx(PHOOK Hook,
 
             if (!BadChk)
             {
-                lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&Keyboard);
+                lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&Keyboard, pBlocked);
             }
             break;
         }
@@ -721,7 +750,7 @@ co_UserCallNextHookEx(PHOOK Hook,
 
             if (!BadChk)
             {
-                lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&Msg);
+                lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&Msg, pBlocked);
 
                 /* SECURITY (ASTRA-hook-nexthook-uaf): this reads Hook after the
                  * user-mode callback, which may have unhooked it. Safe because
@@ -819,7 +848,7 @@ co_UserCallNextHookEx(PHOOK Hook,
                     /* The next call handles the structures. */
                     if (!BadChk && Hook->Proc)
                     {
-                       lResult = co_HOOK_CallHookNext(Hook, Code, wParam, lParam);
+                       lResult = co_HOOK_CallHookNext(Hook, Code, wParam, lParam, pBlocked);
                     }
                     break;
                 }
@@ -859,7 +888,7 @@ co_UserCallNextHookEx(PHOOK Hook,
 
                     if (!BadChk)
                     {
-                        lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&rt);
+                        lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&rt, pBlocked);
                     }
                     break;
                 }
@@ -898,7 +927,7 @@ co_UserCallNextHookEx(PHOOK Hook,
 
                     if (!BadChk)
                     {
-                        lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&CbAs);
+                        lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)&CbAs, pBlocked);
                     }
                     break;
                 }
@@ -906,7 +935,7 @@ co_UserCallNextHookEx(PHOOK Hook,
                 /* The rest just use default. */
                 default:
                     TRACE("HOOK HCBT_ %d\n",Code);
-                    lResult = co_HOOK_CallHookNext(Hook, Code, wParam, lParam);
+                    lResult = co_HOOK_CallHookNext(Hook, Code, wParam, lParam, pBlocked);
                     break;
             }
             break;
@@ -946,7 +975,7 @@ co_UserCallNextHookEx(PHOOK Hook,
 
             if (!BadChk)
             {
-                lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)(lParam ? &EventMsg : NULL));
+                lResult = co_HOOK_CallHookNext(Hook, Code, wParam, (LPARAM)(lParam ? &EventMsg : NULL), pBlocked);
 
                 if (lParam)
                 {
@@ -985,7 +1014,7 @@ co_UserCallNextHookEx(PHOOK Hook,
         case WH_FOREGROUNDIDLE:
         case WH_KEYBOARD:
         case WH_SHELL:
-            lResult = co_HOOK_CallHookNext(Hook, Code, wParam, lParam);
+            lResult = co_HOOK_CallHookNext(Hook, Code, wParam, lParam, pBlocked);
             break;
 
         default:
@@ -1214,7 +1243,6 @@ IntRemoveHook(PVOID Object)
  * Windows does not call them for the low-level and journal hooks, nor for themselves. The record lParam points to
  * (and the plain lParams) is marshaled by co_IntCallHookProc.
  */
-static
 BOOL
 FASTCALL
 co_HOOK_DebugBlocks(PTHREADINFO pti,
@@ -1326,6 +1354,8 @@ co_HOOK_CallHooks( INT HookId,
      */
     if ( Local )
     {
+       PHOOK NextToTry;
+
        pLastHead = &pti->aphkStart[HOOKID_TO_INDEX(HookId)];
        if (IsListEmpty(pLastHead))
        {
@@ -1336,69 +1366,87 @@ co_HOOK_CallHooks( INT HookId,
        Hook = CONTAINING_RECORD(pLastHead->Flink, HOOK, Chain);
        ObReferenceObject(pti->pEThread);
        IntReferenceThreadInfo(pti);
-       UserRefObjectCo(Hook, &Ref);
 
        ClientInfo = pti->pClientInfo;
        SaveHook = pti->sphkCurrent;
-       /* Note: Setting pti->sphkCurrent will also lock the next hook to this
-        *       hook ID. So, the CallNextHookEx will only call to that hook ID
-        *       chain anyway. For Thread Hooks....
-        */
 
-       /* Load it for the next call. */
-       pti->sphkCurrent = Hook;
-       Hook->phkNext = IntGetNextHook(Hook);
-       /* SECURITY (ASTRA-hook-nexthook-uaf): keep both this hook and its cached
-        * successor alive across the user-mode callback. The hook proc may call
-        * CallNextHookEx (which reads sphkCurrent and its phkNext snapshot) and
-        * may unhook this hook or the next one; the references guarantee neither
-        * pointer is dangling when the walk inspects it. */
-       NextHook = Hook->phkNext;
-       if (NextHook)
-          UserRefObjectCo(NextHook, &RefNext);
-       if (ClientInfo)
+       for (;;)
        {
-          _SEH2_TRY
+          BOOL Blocked = FALSE;
+
+          UserRefObjectCo(Hook, &Ref);
+
+          /* Note: Setting pti->sphkCurrent will also lock the next hook to this
+           *       hook ID. So, the CallNextHookEx will only call to that hook ID
+           *       chain anyway. For Thread Hooks....
+           */
+
+          /* Load it for the next call. */
+          pti->sphkCurrent = Hook;
+          Hook->phkNext = IntGetNextHook(Hook);
+          /* SECURITY (ASTRA-hook-nexthook-uaf): keep both this hook and its cached
+           * successor alive across the user-mode callback. The hook proc may call
+           * CallNextHookEx (which reads sphkCurrent and its phkNext snapshot) and
+           * may unhook this hook or the next one; the references guarantee neither
+           * pointer is dangling when the walk inspects it. */
+          NextHook = Hook->phkNext;
+          if (NextHook)
+             UserRefObjectCo(NextHook, &RefNext);
+          if (ClientInfo)
           {
-             ClientInfo->phkCurrent = Hook;
+             _SEH2_TRY
+             {
+                ClientInfo->phkCurrent = Hook;
+             }
+             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+             {
+                ClientInfo = NULL; // Don't bother next run.
+             }
+             _SEH2_END;
           }
-          _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+          if (co_HOOK_DebugBlocks(pti, pdo, Hook, HookId, Code, wParam, lParam))
           {
-             ClientInfo = NULL; // Don't bother next run.
+             /* A debug hook keeps this hook from running: the next hook of the chain is tried, and debugged */
+             Blocked = TRUE;
+             Result = 0;
           }
-          _SEH2_END;
+          else
+             Result = co_IntCallHookProc( HookId,
+                                          Code,
+                                          wParam,
+                                          lParam,
+                                          Hook->Proc,
+                                          Hook->ihmod,
+                                          Hook->offPfn,
+                                          Hook->Ansi,
+                                         &Hook->ModuleName);
+          if (ClientInfo)
+          {
+             _SEH2_TRY
+             {
+                ClientInfo->phkCurrent = SaveHook;
+             }
+             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+             {
+                 /* Do nothing */
+                 (void)0;
+             }
+             _SEH2_END;
+          }
+          pti->sphkCurrent = SaveHook;
+          /* The user lock is held from here to the next hook: the releases below cannot free NextToTry */
+          NextToTry = Blocked ? IntGetNextHookToCall(Hook) : NULL;
+          Hook->phkNext = NULL;
+          /* Release in reverse order of acquisition (UserDerefObjectCo is LIFO). */
+          if (NextHook)
+             UserDerefObjectCo(NextHook);
+          UserDerefObjectCo(Hook);
+
+          if (!Blocked || !NextToTry)
+             break;
+          Hook = NextToTry;
        }
-       if (co_HOOK_DebugBlocks(pti, pdo, Hook, HookId, Code, wParam, lParam))
-          Result = 0;
-       else
-          Result = co_IntCallHookProc( HookId,
-                                       Code,
-                                       wParam,
-                                       lParam,
-                                       Hook->Proc,
-                                       Hook->ihmod,
-                                       Hook->offPfn,
-                                       Hook->Ansi,
-                                      &Hook->ModuleName);
-       if (ClientInfo)
-       {
-          _SEH2_TRY
-          {
-             ClientInfo->phkCurrent = SaveHook;
-          }
-          _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-          {
-              /* Do nothing */
-              (void)0;
-          }
-          _SEH2_END;
-       }
-       pti->sphkCurrent = SaveHook;
-       Hook->phkNext = NULL;
-       /* Release in reverse order of acquisition (UserDerefObjectCo is LIFO). */
-       if (NextHook)
-          UserDerefObjectCo(NextHook);
-       UserDerefObjectCo(Hook);
+
        IntDereferenceThreadInfo(pti);
        ObDereferenceObject(pti->pEThread);
     }
@@ -1603,10 +1651,12 @@ NtUserCallNextHookEx( int Code,
     }
     _SEH2_END;
 
-    /* Now in List run down. */
-    if (ClientInfo && NextObj)
+    /* Now in List run down. A hook the debug hooks block is skipped: the one after it is tried, and debugged */
+    while (ClientInfo && NextObj)
     {
        USER_REFERENCE_ENTRY Ref, RefNext;
+       BOOL Blocked = FALSE;
+       PHOOK Following;
 
        /* Snapshot the hook after NextObj, and keep BOTH NextObj and that
         * successor alive across the user-mode callback. co_UserCallNextHookEx
@@ -1619,12 +1669,34 @@ NtUserCallNextHookEx( int Code,
        if (NextNext)
           UserRefObjectCo(NextNext, &RefNext);
 
-       lResult = co_UserCallNextHookEx( NextObj, Code, wParam, lParam, NextObj->Ansi);
+       lResult = co_UserCallNextHookEx( NextObj, Code, wParam, lParam, NextObj->Ansi, &Blocked);
+
+       /* Under the user lock until the references are released: Following cannot be freed meanwhile */
+       Following = Blocked ? IntGetNextHookToCall(NextObj) : NULL;
 
        /* Release in reverse order of acquisition (UserDerefObjectCo is LIFO). */
        if (NextNext)
           UserDerefObjectCo(NextNext);
        UserDerefObjectCo(NextObj);
+
+       if (!Blocked)
+          break;
+
+       lResult = 0;
+       NextObj = Following;
+       if (NextObj)
+       {
+          pti->sphkCurrent = NextObj;
+          _SEH2_TRY
+          {
+             ClientInfo->phkCurrent = NextObj;
+          }
+          _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+          {
+             ClientInfo = NULL;
+          }
+          _SEH2_END;
+       }
     }
 
     /* SECURITY (ASTRA-hook-nexthook-uaf): restore sphkCurrent / phkCurrent so

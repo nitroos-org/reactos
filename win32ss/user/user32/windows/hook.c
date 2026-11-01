@@ -767,9 +767,30 @@ User32CallHookProcFromKernel(PVOID Arguments, ULONG ArgumentLength)
       /* wParam: the hook that is about to run, lParam: its DEBUGHOOKINFO. When a record came with it,
        * the lParam in that is the record's offset from the header */
       DEBUGHOOKINFO DebugInfo = *(PDEBUGHOOKINFO)((PCHAR) Common + Common->lParam);
+      CBT_CREATEWNDW DebugCbtCreate;
 
       if (Common->lParamSize)
+      {
          DebugInfo.lParam = (LPARAM)((PCHAR) Common + DebugInfo.lParam);
+         /* The records of CALLWNDPROC(RET) and CBT_CREATEWND carry what they point to behind them */
+         if (Common->wParam == WH_CALLWNDPROC && Common->lParamSize > sizeof(CWPSTRUCT))
+         {
+            pCWP = (CWPSTRUCT *)DebugInfo.lParam;
+            pCWP->lParam = (LPARAM)(pCWP + 1);
+         }
+         else if (Common->wParam == WH_CALLWNDPROCRET && Common->lParamSize > sizeof(CWPRETSTRUCT))
+         {
+            pCWPR = (CWPRETSTRUCT *)DebugInfo.lParam;
+            pCWPR->lParam = (LPARAM)(pCWPR + 1);
+         }
+         else if (Common->wParam == WH_CBT && DebugInfo.code == HCBT_CREATEWND)
+         {
+            CbtCreatewndExtra = (PHOOKPROC_CBT_CREATEWND_EXTRA_ARGUMENTS)DebugInfo.lParam;
+            DebugCbtCreate.lpcs = (LPCREATESTRUCTW)&CbtCreatewndExtra->Cs;
+            DebugCbtCreate.hwndInsertAfter = CbtCreatewndExtra->WndInsertAfter;
+            DebugInfo.lParam = (LPARAM)&DebugCbtCreate;
+         }
+      }
       _SEH2_TRY
       {
          Result = Proc(Common->Code, Common->wParam, (LPARAM) &DebugInfo);

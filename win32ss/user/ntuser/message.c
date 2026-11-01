@@ -3247,56 +3247,88 @@ NtUserMessageCall( HWND hWnd,
             }
             _SEH2_END;
 
-            if (!ClientInfo || !NextObj)
-            {
-                UserDerefObjectCo(Hook);
-                break;
-            }
-
-            NextObj->phkNext = IntGetNextHook(NextObj);
-            UserRefObjectCo(NextObj, &NextRef);
-
-            if ( Hook->HookId == WH_CALLWNDPROC)
+            /* The hooks after this one run in turn: each is the current hook while its procedure runs, and the
+             * WH_DEBUG hooks see each, as for the first. A hook they block is skipped for the one after it. */
+            while (ClientInfo && NextObj)
             {
                 CWPSTRUCT CWP;
-                CWP.hwnd    = hWnd;
-                CWP.message = Msg;
-                CWP.wParam  = wParam;
-                CWP.lParam  = lParam;
-                TRACE("WH_CALLWNDPROC: Hook %p NextHook %p\n", Hook, NextObj);
-
-                lResult = co_IntCallHookProc( Hook->HookId,
-                                              HC_ACTION,
-                                              ((ClientInfo->CI_flags & CI_CURTHPRHOOK) ? 1 : 0),
-                                              (LPARAM)&CWP,
-                                              Hook->Proc,
-                                              Hook->ihmod,
-                                              Hook->offPfn,
-                                              Hook->Ansi,
-                                              &Hook->ModuleName);
-            }
-            else
-            {
                 CWPRETSTRUCT CWPR;
-                CWPR.hwnd    = hWnd;
-                CWPR.message = Msg;
-                CWPR.wParam  = wParam;
-                CWPR.lParam  = lParam;
-                CWPR.lResult = ClientInfo->dwHookData;
+                WPARAM CurThread = (ClientInfo->CI_flags & CI_CURTHPRHOOK) ? 1 : 0;
+                PHOOK Following = NULL;
+                BOOL Blocked;
 
-                lResult = co_IntCallHookProc( Hook->HookId,
-                                              HC_ACTION,
-                                              ((ClientInfo->CI_flags & CI_CURTHPRHOOK) ? 1 : 0),
-                                              (LPARAM)&CWPR,
-                                              Hook->Proc,
-                                              Hook->ihmod,
-                                              Hook->offPfn,
-                                              Hook->Ansi,
-                                              &Hook->ModuleName);
+                NextObj->phkNext = IntGetNextHook(NextObj);
+                UserRefObjectCo(NextObj, &NextRef);
+
+                pti->sphkCurrent = NextObj;
+                _SEH2_TRY
+                {
+                    ClientInfo->phkCurrent = NextObj;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    ClientInfo = NULL;
+                }
+                _SEH2_END;
+
+                if (Hook->HookId == WH_CALLWNDPROC)
+                {
+                    CWP.hwnd    = hWnd;
+                    CWP.message = Msg;
+                    CWP.wParam  = wParam;
+                    CWP.lParam  = lParam;
+                    TRACE("WH_CALLWNDPROC: Hook %p NextHook %p\n", Hook, NextObj);
+                }
+                else
+                {
+                    CWPR.hwnd    = hWnd;
+                    CWPR.message = Msg;
+                    CWPR.wParam  = wParam;
+                    CWPR.lParam  = lParam;
+                    CWPR.lResult = ClientInfo ? ClientInfo->dwHookData : 0;
+                }
+
+                Blocked = pti->rpdesk && pti->rpdesk->pDeskInfo &&
+                          co_HOOK_DebugBlocks(pti, pti->rpdesk, NextObj, NextObj->HookId, HC_ACTION, CurThread,
+                                              Hook->HookId == WH_CALLWNDPROC ? (LPARAM)&CWP : (LPARAM)&CWPR);
+                if (Blocked)
+                    lResult = 0;
+                else
+                    lResult = co_IntCallHookProc( NextObj->HookId,
+                                                  HC_ACTION,
+                                                  CurThread,
+                                                  Hook->HookId == WH_CALLWNDPROC ? (LPARAM)&CWP : (LPARAM)&CWPR,
+                                                  NextObj->Proc,
+                                                  NextObj->ihmod,
+                                                  NextObj->offPfn,
+                                                  NextObj->Ansi,
+                                                  &NextObj->ModuleName);
+
+                /* Under the user lock until the release: Following cannot be freed meanwhile */
+                if (Blocked)
+                    Following = IntGetNextHookToCall(NextObj);
+
+                /* Release in reverse order of acquisition (UserDerefObjectCo is LIFO). */
+                UserDerefObjectCo(NextObj);
+                NextObj = Following;
+                if (!Blocked)
+                    break;
             }
 
-            /* Release in reverse order of acquisition (UserDerefObjectCo is LIFO). */
-            UserDerefObjectCo(NextObj);
+            /* This hook is the current one again, as the procedure that called us expects */
+            pti->sphkCurrent = Hook;
+            if (ClientInfo)
+            {
+                _SEH2_TRY
+                {
+                    ClientInfo->phkCurrent = Hook;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    (void)0;
+                }
+                _SEH2_END;
+            }
             UserDerefObjectCo(Hook);
         }
         break;
