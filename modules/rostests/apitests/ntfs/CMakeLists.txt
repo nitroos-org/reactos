@@ -4,6 +4,7 @@ list(APPEND SOURCE
     delete.c
     inherit.c
     notify.c
+    recreuse.c
     relopen.c
     reparse.c
     special.c
