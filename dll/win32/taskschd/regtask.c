@@ -416,9 +416,11 @@ static HRESULT WINAPI regtask_get_NextRunTime(IRegisteredTask *iface, DATE *date
     if (FAILED(hr)) return hr;
     if (!count || !times || !SystemTimeToVariantTime(&times[0], date))
     {
+        /* what Windows 10 returns, measured over every task of a stock install, for a task with no next time:
+           none, or only triggers that have no time (boot, logon, idle, event, session state change) */
         *date = 0;
         MIDL_user_free(times);
-        return SCHED_S_TASK_NO_VALID_TRIGGERS;
+        return SCHED_S_TASK_NOT_SCHEDULED;
     }
     MIDL_user_free(times);
     return S_OK;
