@@ -76,11 +76,18 @@ struct registered_if
     RPC_SERVER_INTERFACE If; /* interface registered with the RPC runtime */
 };
 
-/* get the pipe endpoint specified of the specified apartment */
+/* get the pipe endpoint of the process that owns the specified apartment */
 static inline void get_rpc_endpoint(LPWSTR endpoint, const OXID *oxid)
 {
     /* FIXME: should get endpoint from rpcss */
+#ifdef __REACTOS__
+    /* One endpoint per process, as on Windows: calls are dispatched by IPID, not by endpoint, and the
+     * RPC runtime never removes an endpoint, so one per apartment (oxid = pid << 32 | tid) left a pipe
+     * and an event behind for every thread that had exported an object */
+    wsprintfW(endpoint, L"\\pipe\\OLE_%08lx", (ULONG)(*oxid >> 32));
+#else
     wsprintfW(endpoint, L"\\pipe\\OLE_%016I64x", *oxid);
+#endif
 }
 
 typedef struct

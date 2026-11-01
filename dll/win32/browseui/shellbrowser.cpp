@@ -3880,6 +3880,14 @@ LRESULT CShellBrowser::OnDestroy(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &
         fCurrentDirectoryPIDL = NULL;
         ::DestroyWindow(fStatusBar);
         DestroyMenu(fCurrentMenuBar);
+
+        /* The window icons were made from the system image list for this window only */
+        HICON hIconSmall = (HICON)SendMessage(WM_SETICON, ICON_SMALL, 0);
+        HICON hIconLarge = (HICON)SendMessage(WM_SETICON, ICON_BIG, 0);
+        if (hIconSmall)
+            DestroyIcon(hIconSmall);
+        if (hIconLarge)
+            DestroyIcon(hIconLarge);
     }
     PostQuitMessage(0);
     return 0;

@@ -129,6 +129,7 @@ private:
     // message handlers
     LRESULT OnNotify(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
     LRESULT OnCommand(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
+    LRESULT OnDestroy(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled);
     LRESULT OnCustomDraw(LPNMCUSTOMDRAW pnmcd);
 
     // Helper functions
@@ -142,6 +143,7 @@ private:
 BEGIN_MSG_MAP(CBaseBarSite)
     MESSAGE_HANDLER(WM_NOTIFY, OnNotify)
     MESSAGE_HANDLER(WM_COMMAND, OnCommand)
+    MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
 END_MSG_MAP()
 
 BEGIN_COM_MAP(CBaseBarSite)
@@ -165,6 +167,8 @@ CBaseBarSite::CBaseBarSite() : fVertical(TRUE)
 {
     fCurrentActiveBar = NULL;
     fNextBandID = 1;
+    toolbarWnd = NULL;
+    toolImageList = NULL;
 }
 
 CBaseBarSite::~CBaseBarSite()
@@ -678,6 +682,20 @@ LRESULT CBaseBarSite::OnNotify(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bH
     {
     }
     bHandled = FALSE; /* forward notification to parent */
+    return 0;
+}
+
+LRESULT CBaseBarSite::OnDestroy(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled)
+{
+    /* A toolbar does not own the image list it is given: free the close button's one with the site window */
+    if (toolImageList)
+    {
+        if (toolbarWnd)
+            ::SendMessageW(toolbarWnd, TB_SETIMAGELIST, 0, 0);
+        ImageList_Destroy(toolImageList);
+        toolImageList = NULL;
+    }
+    bHandled = FALSE;
     return 0;
 }
 

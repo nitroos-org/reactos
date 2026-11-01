@@ -5,6 +5,7 @@ include_directories(
 list(APPEND SOURCE
     ACListISF.cpp
     BandSite.cpp
+    FolderWindowResources.c
     IACLCustomMRU.cpp
     IACLHistory.cpp
     IAutoComplete.cpp
