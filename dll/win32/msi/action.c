@@ -8067,7 +8067,7 @@ StandardActions[] =
     { L"RegisterExtensionInfo", IDS_DESC_REGISTEREXTENSIONINFO, 0, ACTION_RegisterExtensionInfo, L"UnregisterExtensionInfo" },
     { L"RegisterFonts", IDS_DESC_REGISTERFONTS, IDS_TEMP_REGISTERFONTS, ACTION_RegisterFonts, L"UnregisterFonts" },
     { L"RegisterMIMEInfo", IDS_DESC_REGISTERMIMEINFO, IDS_TEMP_REGISTERMIMEINFO, ACTION_RegisterMIMEInfo, L"UnregisterMIMEInfo" },
-    { L"RegisterProduct", IDS_DESC_REGISTERPRODUCT, 0, ACTION_RegisterProduct, NULL },
+    { L"RegisterProduct", IDS_DESC_REGISTERPRODUCT, 0, ACTION_RegisterProduct, L"UnpublishProduct" },
     { L"RegisterProgIdInfo", IDS_DESC_REGISTERPROGIDINFO, IDS_TEMP_REGISTERPROGIDINFO, ACTION_RegisterProgIdInfo, L"UnregisterProgIdInfo" },
     { L"RegisterTypeLibraries", IDS_DESC_REGISTERTYPELIBRARIES, IDS_TEMP_REGISTERTYPELIBRARIES, ACTION_RegisterTypeLibraries, L"UnregisterTypeLibraries" },
     { L"RegisterUser", IDS_DESC_REGISTERUSER, 0, ACTION_RegisterUser, NULL },
@@ -8133,8 +8133,15 @@ static UINT ACTION_HandleStandardAction(MSIPACKAGE *package, LPCWSTR action)
 
                 if (StandardActions[i].action_rollback && !package->need_rollback)
                 {
-                    TRACE("scheduling rollback action\n");
-                    msi_schedule_action( package, SCRIPT_ROLLBACK, StandardActions[i].action_rollback );
+                    /* a failed install of a registered product (maintenance) keeps its registration */
+                    if (!wcscmp( StandardActions[i].action_rollback, L"UnpublishProduct" ) &&
+                        msi_get_property_int( package->db, L"ProductToBeRegistered", 0 ))
+                        TRACE("product already registered, not scheduling its rollback\n");
+                    else
+                    {
+                        TRACE("scheduling rollback action\n");
+                        msi_schedule_action( package, SCRIPT_ROLLBACK, StandardActions[i].action_rollback );
+                    }
                 }
             }
             else
@@ -8329,12 +8336,17 @@ UINT MSI_InstallPackage( MSIPACKAGE *package, LPCWSTR szPackagePath,
     /* finish up running custom actions */
     ACTION_FinishCustomActions(package);
 
-    if (package->need_rollback && !(reinstall = msi_dup_property( package->db, L"REINSTALL" )))
+    if (package->need_rollback)
     {
-        WARN("installation failed, running rollback script\n");
-        execute_script( package, SCRIPT_ROLLBACK );
+        if (!(reinstall = msi_dup_property( package->db, L"REINSTALL" )))
+        {
+            WARN("installation failed, running rollback script\n");
+            execute_script( package, SCRIPT_ROLLBACK );
+        }
+        free( reinstall );
+        msi_rollback_finish( package, TRUE );
     }
-    free( reinstall );
+    else msi_rollback_finish( package, FALSE );
     free( action );
 
     if (rc == ERROR_SUCCESS && package->need_reboot_at_end)

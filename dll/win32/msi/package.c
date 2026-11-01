@@ -284,6 +284,7 @@ static void free_package_structures( MSIPACKAGE *package )
         free( info );
     }
 
+    msi_rollback_finish( package, FALSE );
     for (i = 0; i < SCRIPT_MAX; i++)
         msi_free_action_script( package, i );
 
@@ -1000,6 +1001,7 @@ static MSIPACKAGE *alloc_package( void )
         list_init( &package->files );
         list_init( &package->filepatches );
         list_init( &package->tempfiles );
+        list_init( &package->rollback_files );
         list_init( &package->folders );
         list_init( &package->subscriptions );
         list_init( &package->appids );

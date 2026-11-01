@@ -85,13 +85,141 @@ BOOL msi_delete_file( MSIPACKAGE *package, const WCHAR *filename )
     return ret;
 }
 
+/* Undo log for a failed install: files and directories the install script created or replaced.
+   Entries are appended as the install script does the work and replayed in reverse order
+   when the install fails (msi_rollback_finish).  The standard actions with an inverse are
+   rolled back by the ROLLBACK script, this covers what has none (InstallFiles, CreateFolders). */
+enum rollback_type { ROLLBACK_FILE_CREATED, ROLLBACK_FILE_REPLACED, ROLLBACK_DIR_CREATED };
+
+struct rollback_entry
+{
+    struct list entry;
+    enum rollback_type type;
+    WCHAR *path;
+    WCHAR *backup;
+};
+
+static BOOL rollback_is_recording( MSIPACKAGE *package )
+{
+    return package->script == SCRIPT_INSTALL && !package->need_rollback &&
+           !msi_get_property_int( package->db, L"RollbackDisabled", 0 );
+}
+
+static void rollback_add( MSIPACKAGE *package, enum rollback_type type, const WCHAR *path, WCHAR *backup )
+{
+    struct rollback_entry *e;
+
+    if (!(e = calloc( 1, sizeof(*e) ))) return;
+    e->type = type;
+    e->path = wcsdup( path );
+    e->backup = backup;
+    if (!e->path)
+    {
+        free( e->backup );
+        free( e );
+        return;
+    }
+    list_add_tail( &package->rollback_files, &e->entry );
+}
+
+/* Call before a file of the install script is written: remember it as created, or keep a
+   copy of the file that is about to be replaced. */
+void msi_rollback_record_file( MSIPACKAGE *package, const WCHAR *path )
+{
+    WCHAR *dir, *p, *backup;
+    DWORD attrs;
+
+    if (!rollback_is_recording( package )) return;
+
+    attrs = msi_get_file_attributes( package, path );
+    if (attrs == INVALID_FILE_ATTRIBUTES)
+    {
+        rollback_add( package, ROLLBACK_FILE_CREATED, path, NULL );
+        return;
+    }
+    if (attrs & FILE_ATTRIBUTE_DIRECTORY) return;
+
+    if (!(dir = wcsdup( path ))) return;
+    if ((p = wcsrchr( dir, '\\' ))) *p = 0;
+    if ((backup = malloc( (wcslen( dir ) + 16) * sizeof(WCHAR) )))
+    {
+        if (msi_get_temp_file_name( package, dir, L"rbf", backup ) &&
+            msi_copy_file( package, path, backup, FALSE ))
+        {
+            TRACE("backed up %s to %s\n", debugstr_w(path), debugstr_w(backup));
+            rollback_add( package, ROLLBACK_FILE_REPLACED, path, backup );
+            backup = NULL;
+        }
+        else
+        {
+            WARN("no backup of %s (%lu)\n", debugstr_w(path), GetLastError());
+            if (backup[0]) msi_delete_file( package, backup );
+        }
+        free( backup );
+    }
+    free( dir );
+}
+
 static BOOL create_directory( MSIPACKAGE *package, const WCHAR *path )
 {
     BOOL ret;
     msi_disable_fs_redirection( package );
     ret = CreateDirectoryW( path, NULL );
     msi_revert_fs_redirection( package );
+    if (ret && rollback_is_recording( package )) rollback_add( package, ROLLBACK_DIR_CREATED, path, NULL );
     return ret;
+}
+
+/* The install is over: undo the log (failed install) or drop the backups (success). */
+void msi_rollback_finish( MSIPACKAGE *package, BOOL undo )
+{
+    struct list *item, *cursor;
+
+    /* newest first: files before the directories they were created in */
+    for (item = list_tail( &package->rollback_files ); item; item = cursor)
+    {
+        struct rollback_entry *e = LIST_ENTRY( item, struct rollback_entry, entry );
+
+        cursor = list_prev( &package->rollback_files, item );
+        list_remove( &e->entry );
+
+        switch (e->type)
+        {
+        case ROLLBACK_FILE_CREATED:
+            if (undo)
+            {
+                TRACE("rollback: deleting %s\n", debugstr_w(e->path));
+                msi_set_file_attributes( package, e->path, FILE_ATTRIBUTE_NORMAL );
+                if (!msi_delete_file( package, e->path ) && GetLastError() != ERROR_FILE_NOT_FOUND)
+                    WARN("failed to delete %s (%lu)\n", debugstr_w(e->path), GetLastError());
+            }
+            break;
+        case ROLLBACK_FILE_REPLACED:
+            if (undo)
+            {
+                TRACE("rollback: restoring %s\n", debugstr_w(e->path));
+                msi_set_file_attributes( package, e->path, FILE_ATTRIBUTE_NORMAL );
+                if (!msi_move_file( package, e->backup, e->path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED ))
+                    WARN("failed to restore %s (%lu)\n", debugstr_w(e->path), GetLastError());
+            }
+            else
+            {
+                msi_set_file_attributes( package, e->backup, FILE_ATTRIBUTE_NORMAL );
+                msi_delete_file( package, e->backup );
+            }
+            break;
+        case ROLLBACK_DIR_CREATED:
+            if (undo)
+            {
+                TRACE("rollback: removing directory %s\n", debugstr_w(e->path));
+                msi_remove_directory( package, e->path ); /* fails if something else lives there */
+            }
+            break;
+        }
+        free( e->path );
+        free( e->backup );
+        free( e );
+    }
 }
 
 BOOL msi_remove_directory( MSIPACKAGE *package, const WCHAR *path )
@@ -522,6 +650,7 @@ static BOOL installfiles_cb(MSIPACKAGE *package, LPCWSTR filename, DWORD action,
             create_folder( package, file->Component->Directory );
         }
         *path = wcsdup( file->TargetPath );
+        msi_rollback_record_file( package, file->TargetPath );
         *attrs = file->Attributes;
         *(MSIFILE **)user = file;
     }
@@ -630,6 +759,7 @@ UINT ACTION_InstallFiles(MSIPACKAGE *package)
             {
                 create_folder(package, file->Component->Directory);
             }
+            if (!is_global_assembly) msi_rollback_record_file( package, file->TargetPath );
             rc = copy_install_file(package, file, source);
             if (rc != ERROR_SUCCESS)
             {
