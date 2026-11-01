@@ -31,8 +31,8 @@ static ULONGLONG CreateWithId(PCWSTR Path)
 START_TEST(NtfsRecordReuse)
 {
     WCHAR Path[MAX_PATH], A[MAX_PATH], C[MAX_PATH], D[MAX_PATH];
-    ULONGLONG Prev = 0, Id, IdA, IdC, IdD;
-    ULONG i, Same = 0, Tries = 0;
+    ULONGLONG Prev = 0, Id, IdA = 0, IdC = 0, IdD = 0;
+    ULONG i, Same = 0, Tries = 0, Attempt;
 
     if (!NtInit("NtfsRecordReuse"))
         return;
@@ -41,6 +41,7 @@ START_TEST(NtfsRecordReuse)
         NtPath(Path, i & 1 ? L"odd.tmp" : L"even.tmp");
         Id = CreateWithId(Path);
         ok(Id != 0, "Creating %ls failed: %lu\n", Path, GetLastError());
+        ok(Id == 0 || Id >> 48 != 0, "File %ls has sequence number 0 (file ID 0x%I64x)\n", Path, Id);
         ok(DeleteFileW(Path), "Deleting %ls failed: %lu\n", Path, GetLastError());
         if (Prev && Id)
         {
@@ -64,15 +65,118 @@ START_TEST(NtfsRecordReuse)
     NtPath(A, L"a.tmp");
     NtPath(C, L"c.tmp");
     NtPath(D, L"d.tmp");
-    IdA = CreateWithId(A);
-    IdC = CreateWithId(C);
-    ok(DeleteFileW(A), "Deleting %ls failed: %lu\n", A, GetLastError());
-    IdD = CreateWithId(D);
-    ok(IdA && IdC && IdD, "Creating the files failed\n");
-    ok(RECORD(IdD) == RECORD(IdA) || RECORD(IdD) < RECORD(IdC),
-       "The new file got record %I64u, not the freed lower %I64u (kept: %I64u)\n", RECORD(IdD), RECORD(IdA), RECORD(IdC));
-    DeleteFileW(C);
-    DeleteFileW(D);
+    /*
+     * A is the lowest free record when it is created (the loop above freed it), C is created after it,
+     * and A is deleted: D must get exactly A's record, with the next sequence number.  Another process
+     * creating or deleting a file in these few microseconds could take or lower it, so the sequence
+     * is tried up to three times; a driver that does not reuse the lowest free record fails all three.
+     */
+    for (Attempt = 0; Attempt < 3; Attempt++)
+    {
+        IdA = CreateWithId(A);
+        IdC = CreateWithId(C);
+        ok(DeleteFileW(A), "Deleting %ls failed: %lu\n", A, GetLastError());
+        IdD = CreateWithId(D);
+        ok(IdA && IdC && IdD, "Creating the files failed\n");
+        DeleteFileW(C);
+        DeleteFileW(D);
+        if (RECORD(IdD) == RECORD(IdA))
+            break;
+        trace("Attempt %lu: the new file got record %I64u, not the freed %I64u (kept: %I64u)\n",
+              Attempt, RECORD(IdD), RECORD(IdA), RECORD(IdC));
+    }
+    ok(RECORD(IdD) == RECORD(IdA),
+       "The new file got record %I64u, not the freed lowest %I64u (kept: %I64u)\n", RECORD(IdD), RECORD(IdA), RECORD(IdC));
+    ok(RECORD(IdD) != RECORD(IdA) || IdD >> 48 != IdA >> 48,
+       "Record %I64u reused with the same sequence number %I64u\n", RECORD(IdD), IdD >> 48);
+    ok(IdD >> 48 != 0, "The reused record has sequence number 0 (file ID 0x%I64x)\n", IdD);
+    NtCleanup();
+}
+
+#define STRESS_ITER 1500
+#define STRESS_THREADS 2
+
+typedef struct
+{
+    WCHAR Path[MAX_PATH];
+    ULONGLONG Ids[STRESS_ITER];
+    ULONG Failed;
+    ULONG ZeroSeq;
+} STRESS;
+
+static DWORD WINAPI StressThread(PVOID Param)
+{
+    STRESS *S = Param;
+    ULONG i;
+
+    for (i = 0; i < STRESS_ITER; i++)
+    {
+        S->Ids[i] = CreateWithId(S->Path);
+        if (!S->Ids[i] || !DeleteFileW(S->Path))
+            S->Failed++;
+        else if (!(S->Ids[i] >> 48))
+            S->ZeroSeq++;
+    }
+    return 0;
+}
+
+/*
+ * Two threads create and delete a file each, in a loop.  A freed record is the next one allocated,
+ * so the working set is a handful of records; a driver that does not reuse freed records (or loses
+ * the update that makes the allocator start at the lowest free one, when a delete races with a
+ * create) walks on through the MFT instead.  A lost update only misses one reuse until the next
+ * delete, and the race window is a few instructions, so this does not fail reliably on that
+ * alone; it fails reliably when reuse is broken under concurrency.  The bound allows for other
+ * processes creating files meanwhile.
+ */
+START_TEST(NtfsRecordReuseThreads)
+{
+    static STRESS Stress[STRESS_THREADS];
+    HANDLE Threads[STRESS_THREADS];
+    ULONGLONG Seen[STRESS_THREADS * STRESS_ITER];
+    ULONG t, i, j, Distinct = 0, Failed = 0, ZeroSeq = 0, N = 0;
+    WCHAR Name[32];
+
+    if (!NtInit("NtfsRecordReuseThreads"))
+        return;
+    for (t = 0; t < STRESS_THREADS; t++)
+    {
+        _snwprintf(Name, 31, L"thread%lu.tmp", t);
+        NtPath(Stress[t].Path, Name);
+    }
+    for (t = 0; t < STRESS_THREADS; t++)
+    {
+        Threads[t] = CreateThread(NULL, 0, StressThread, &Stress[t], 0, NULL);
+        ok(Threads[t] != NULL, "CreateThread failed: %lu\n", GetLastError());
+    }
+    for (t = 0; t < STRESS_THREADS; t++)
+    {
+        if (!Threads[t])
+            continue;
+        WaitForSingleObject(Threads[t], INFINITE);
+        CloseHandle(Threads[t]);
+    }
+    for (t = 0; t < STRESS_THREADS; t++)
+    {
+        Failed += Stress[t].Failed;
+        ZeroSeq += Stress[t].ZeroSeq;
+        for (i = 0; i < STRESS_ITER; i++)
+        {
+            ULONGLONG Rec = RECORD(Stress[t].Ids[i]);
+            if (!Rec)
+                continue;
+            for (j = 0; j < N && Seen[j] != Rec; j++)
+                ;
+            if (j == N)
+                Seen[N++] = Rec;
+        }
+    }
+    Distinct = N;
+    ok(Failed == 0, "%lu create or delete operations failed\n", Failed);
+    ok(ZeroSeq == 0, "%lu files got sequence number 0\n", ZeroSeq);
+    trace("%lu distinct records in %d create/delete cycles\n", Distinct, STRESS_THREADS * STRESS_ITER);
+    ok(Distinct <= 16, "%lu distinct records for %d create/delete cycles of %d files: freed records are not reused\n",
+       Distinct, STRESS_THREADS * STRESS_ITER, STRESS_THREADS);
     NtCleanup();
 }
 

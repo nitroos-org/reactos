@@ -23,6 +23,7 @@ extern void func_NtfsNotifyScale(void);
 extern void func_NtfsOpenById(void);
 extern void func_NtfsPagingFile(void);
 extern void func_NtfsRecordReuse(void);
+extern void func_NtfsRecordReuseThreads(void);
 extern void func_NtfsRelativeOpen(void);
 extern void func_NtfsRelativeOpenJunctionAcl(void);
 extern void func_NtfsRename(void);
@@ -54,6 +55,7 @@ const struct test winetest_testlist[] =
     { "NtfsOpenById", func_NtfsOpenById },
     { "NtfsPagingFile", func_NtfsPagingFile },
     { "NtfsRecordReuse", func_NtfsRecordReuse },
+    { "NtfsRecordReuseThreads", func_NtfsRecordReuseThreads },
     { "NtfsRelativeOpen", func_NtfsRelativeOpen },
     { "NtfsRelativeOpenJunctionAcl", func_NtfsRelativeOpenJunctionAcl },
     { "NtfsRename", func_NtfsRename },

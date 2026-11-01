@@ -935,6 +935,21 @@ free_m:
 	return false;
 }
 
+/*
+ * End of the free run after a just-allocated record, at most MFT_RECORD_RESERVE records long, which
+ * becomes the tail reserve for $MFT's own metadata records (see ntfs_mft_record_alloc()).
+ *
+ * The allocator hands out the lowest free record (ntfs_mft_record_free() lowers mft_data_pos), so
+ * the run is no longer necessarily at the tail of the MFT: it is set up behind whichever record was
+ * just allocated, also in the low area where freed records are reused.  That is harmless: the
+ * reserve is at most MFT_RECORD_RESERVE (4) records, they stay free in the bitmap, only user
+ * allocations skip them (mft_bitmap_alloc_free_rec()), and $MFT's metadata allocations still
+ * consume them first.  Cost: after an allocation next to a free run the next user creates may
+ * take a record just above the run instead of inside it.  A new reserve is only set up once the
+ * previous one is used up, so at most one run of 4 records is held back at any time.  Not
+ * tightened (e.g. restricted to the tail) because the tail is not distinguishable without a
+ * second search and the effect is bounded.
+ */
 static s64 mft_reserve_end(const u8 *buf, s64 buf_start, s64 buf_end,
 			   s64 start, s64 pass_end, s64 initialized_mft_records)
 {
@@ -2516,7 +2531,14 @@ mft_rec_already_initialized:
 	 * this mft record is not referenced from anywhere yet and the fact
 	 * that it is allocated in the mft bitmap means that no-one will try to
 	 * allocate it either.
+	 *
+	 * The next-allocation hint is updated here, still under mftbmp_lock: ntfs_mft_record_free()
+	 * lowers it under that lock without taking mrec_lock, so a store made after the unlock could
+	 * overwrite the lowering of a concurrent free and that record would not be reused.  (If the
+	 * mapping of the record below fails, the undo path lowers the hint again under the lock.)
 	 */
+	if (!base_ni)
+		vol->mft_data_pos = bit + 1;
 	if (!base_ni || base_ni->mft_no != FILE_MFT)
 		up_write(&vol->mftbmp_lock);
 	/*
@@ -2580,6 +2602,11 @@ mft_rec_already_initialized:
 			folio_put(folio);
 			goto undo_mftbmp_alloc;
 		}
+		/*
+		 * A record freed by ntfs_mft_record_free() has a nonzero number, so is a freshly
+		 * formatted one; a free record with 0 (written by another implementation) keeps the 1
+		 * ntfs_mft_record_layout() set: a user record never has sequence number 0.
+		 */
 		if (seq_no)
 			m->sequence_number = seq_no;
 		if (usn && le16_to_cpu(usn) != 0xffff)
@@ -2675,8 +2702,6 @@ mft_rec_already_initialized:
 		(*ni)->folio = folio;
 		(*ni)->folio_ofs = ofs;
 		atomic_inc(&(*ni)->count);
-		/* Update the default mft allocation position. */
-		vol->mft_data_pos = bit + 1;
 	}
 	if (!base_ni || base_ni->mft_no != FILE_MFT)
 		mutex_unlock(&mft_ni->mrec_lock);
@@ -2711,6 +2736,9 @@ undo_mftbmp_alloc_nolock:
 	if ((from_reserve || reserve_created) &&
 	    vol->mft_record_reserve_pos == bit + 1)
 		vol->mft_record_reserve_pos = bit;
+	/* The bit is free again: the hint (set to bit + 1 once the allocation was complete) must not skip it. */
+	if (!base_ni && !forced_reserved_record && bit < vol->mft_data_pos)
+		vol->mft_data_pos = bit;
 	if (!base_ni || base_ni->mft_no != FILE_MFT)
 		up_write(&vol->mftbmp_lock);
 err_out:
@@ -2781,10 +2809,21 @@ int ntfs_mft_record_free(struct ntfs_volume *vol, struct ntfs_inode *ni)
 		ni_mrec->flags &= ~MFT_RECORD_IN_USE;
 	}
 
-	/* Increment the sequence number, skipping zero, if it is not zero. */
+	/*
+	 * Increment the sequence number.  A freed record is reused at once, and a stale reference
+	 * (an FCB parked with the old file's file ID, or a by-ID open) is told from the new file by
+	 * its sequence number, where 0 means "any": so the number of a user record is never 0 after
+	 * the free, as on NTFS for Windows.  A record on disk with sequence number 0 gets 1, and so
+	 * does the wrap of 0xffff.  Records below FIRST_NORMAL_MFT_RECORD (system and reserved) keep
+	 * their old rule: 0 stays 0.
+	 */
 	old_seq_no = ni_mrec->sequence_number;
 	seq_no = le16_to_cpu(old_seq_no);
-	if (seq_no == 0xffff)
+	if (mft_no >= FIRST_NORMAL_MFT_RECORD) {
+		seq_no++;
+		if (!seq_no)
+			seq_no = 1;
+	} else if (seq_no == 0xffff)
 		seq_no = 1;
 	else if (seq_no)
 		seq_no++;
