@@ -59,6 +59,8 @@ extern PDESKTOP gpdeskInputDesktop;
 extern PCLS DesktopWindowClass;
 extern HDC ScreenDeviceContext;
 extern PTHREADINFO gptiForeground;
+VOID FASTCALL IntSetForegroundProcess(PTHREADINFO ptiNew);
+VOID FASTCALL IntForegroundProcessExit(PEPROCESS Process);
 extern PTHREADINFO gptiDesktopThread;
 extern PKEVENT gpDesktopThreadStartedEvent;
 extern PKEVENT gpDesktopSwitchEvent;
