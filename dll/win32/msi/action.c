@@ -3288,6 +3288,7 @@ static UINT ACTION_InstallValidate(MSIPACKAGE *package)
         total += file->FileSize;
 
     msi_ui_progress( package, 0, total, 0, 0 );
+    package->install_validated = 1;
 
     LIST_FOR_EACH_ENTRY( feature, &package->features, MSIFEATURE, entry )
     {

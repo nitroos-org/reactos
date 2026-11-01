@@ -4000,6 +4000,11 @@ static void test_appsearch(void)
     DWORD size;
     HKEY hkey;
     const char reg_expand_value[] = "%systemroot%\\system32\\notepad.exe";
+    char notepad_path[MAX_PATH];
+
+    /* the system directory is not necessarily c:\windows\system32 */
+    GetSystemDirectoryA( notepad_path, MAX_PATH );
+    strcat( notepad_path, "\\notepad.exe" );
 
     hdb = create_package_db();
     ok ( hdb, "failed to create package database\n" );
@@ -4033,8 +4038,7 @@ static void test_appsearch(void)
     }
     ok( r == ERROR_SUCCESS, "Could not create key: %d.\n", r );
 
-    r = RegSetValueExA(hkey, NULL, 0, REG_SZ, (const BYTE *)"c:\\windows\\system32\\notepad.exe",
-                       sizeof("c:\\windows\\system32\\notepad.exe"));
+    r = RegSetValueExA(hkey, NULL, 0, REG_SZ, (const BYTE *)notepad_path, strlen(notepad_path) + 1);
     ok( r == ERROR_SUCCESS, "Could not set key value: %d.\n", r);
     RegCloseKey(hkey);
     add_reglocator_entry( hdb, "NewSignature4", 2, "Software\\Winetest_msi", "", msidbLocatorTypeFileName );
@@ -4042,8 +4046,7 @@ static void test_appsearch(void)
     r = RegCreateKeyExA(HKEY_LOCAL_MACHINE, "Software\\Winetest_msi", 0, NULL, 0, KEY_ALL_ACCESS|KEY_WOW64_64KEY,
                         NULL, &hkey, NULL);
     ok( r == ERROR_SUCCESS, "Could not create key: %d.\n", r );
-    r = RegSetValueExA(hkey, NULL, 0, REG_SZ, (const BYTE *)"c:\\windows\\system32\\notepad.exe",
-                       sizeof("c:\\windows\\system32\\notepad.exe"));
+    r = RegSetValueExA(hkey, NULL, 0, REG_SZ, (const BYTE *)notepad_path, strlen(notepad_path) + 1);
     ok( r == ERROR_SUCCESS, "Could not set key value: %d.\n", r);
     RegCloseKey(hkey);
     add_reglocator_entry( hdb, "NewSignature5", 2, "Software\\Winetest_msi", "",

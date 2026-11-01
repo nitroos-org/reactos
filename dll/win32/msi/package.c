@@ -1067,7 +1067,7 @@ void msi_adjust_privilege_properties( MSIPACKAGE *package )
     msi_set_property( package->db, L"MsiTrueAdminUser", L"1", -1 );
 }
 
-MSIPACKAGE *MSI_CreatePackage( MSIDATABASE *db )
+static MSIPACKAGE *create_package( MSIDATABASE *db, BOOL load_suminfo )
 {
     MSIPACKAGE *package;
     WCHAR uilevel[11];
@@ -1100,11 +1100,14 @@ MSIPACKAGE *MSI_CreatePackage( MSIDATABASE *db )
         len = swprintf( uilevel, ARRAY_SIZE(uilevel), L"%u", gUILevel & INSTALLUILEVEL_MASK );
         msi_set_property( package->db, L"UILevel", uilevel, len );
 
-        r = msi_load_suminfo_properties( package );
-        if (r != ERROR_SUCCESS)
+        if (load_suminfo)
         {
-            msiobj_release( &package->hdr );
-            return NULL;
+            r = msi_load_suminfo_properties( package );
+            if (r != ERROR_SUCCESS)
+            {
+                msiobj_release( &package->hdr );
+                return NULL;
+            }
         }
 
         if (package->WordCount & msidbSumInfoSourceTypeAdminImage)
@@ -1114,6 +1117,11 @@ MSIPACKAGE *MSI_CreatePackage( MSIDATABASE *db )
         package->script = SCRIPT_NONE;
     }
     return package;
+}
+
+MSIPACKAGE *MSI_CreatePackage( MSIDATABASE *db )
+{
+    return create_package( db, TRUE );
 }
 
 UINT msi_download_file( LPCWSTR szUrl, LPWSTR filename )
@@ -1866,6 +1874,41 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
     return ERROR_SUCCESS;
 }
 
+/* MsiOpenPackage("") gives a package on an empty database, kept in a temporary file that goes
+   with the package */
+static UINT msi_open_empty_package( MSIHANDLE *phPackage )
+{
+    WCHAR dir[MAX_PATH], file[MAX_PATH];
+    MSIDATABASE *db;
+    MSIPACKAGE *package;
+    UINT r = ERROR_SUCCESS;
+
+    if (!GetTempPathW( ARRAY_SIZE(dir), dir ) || !GetTempFileNameW( dir, L"msi", 0, file ))
+        return GetLastError();
+
+    r = MSI_OpenDatabaseW( file, MSIDBOPEN_CREATE, &db );
+    if (r != ERROR_SUCCESS)
+    {
+        DeleteFileW( file );
+        return r;
+    }
+    package = create_package( db, FALSE ); /* an empty database has no summary information */
+    if (!package)
+    {
+        msiobj_release( &db->hdr );
+        DeleteFileW( file );
+        return ERROR_INSTALL_PACKAGE_INVALID;
+    }
+    package->localfile = wcsdup( file );
+    package->delete_on_close = TRUE;
+    msi_set_property( package->db, L"DATABASE", db->path, -1 );
+    msiobj_release( &db->hdr );
+
+    if (!(*phPackage = alloc_msihandle( &package->hdr ))) r = ERROR_NOT_ENOUGH_MEMORY;
+    msiobj_release( &package->hdr );
+    return r;
+}
+
 UINT WINAPI MsiOpenPackageExW( const WCHAR *szPackage, DWORD dwOptions, MSIHANDLE *phPackage )
 {
     MSIPACKAGE *package = NULL;
@@ -1877,10 +1920,7 @@ UINT WINAPI MsiOpenPackageExW( const WCHAR *szPackage, DWORD dwOptions, MSIHANDL
         return ERROR_INVALID_PARAMETER;
 
     if ( !*szPackage )
-    {
-        FIXME("Should create an empty database and package\n");
-        return ERROR_FUNCTION_FAILED;
-    }
+        return msi_open_empty_package( phPackage );
 
     if( dwOptions )
         FIXME( "dwOptions %#lx not supported\n", dwOptions );

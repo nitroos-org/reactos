@@ -488,6 +488,7 @@ typedef struct tagMSIPACKAGE
     unsigned char need_reboot_at_end : 1;
     unsigned char need_reboot_now : 1;
     unsigned char need_rollback : 1;
+    unsigned char install_validated : 1;
     unsigned char rpc_server_started : 1;
 #ifdef __REACTOS__
     unsigned char warned_32bit_custom_action : 1;

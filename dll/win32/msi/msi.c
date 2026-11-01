@@ -478,7 +478,13 @@ UINT WINAPI MsiApplyMultiplePatchesW(LPCWSTR szPatchPackages,
         len = end - beg;
         while (len && beg[len - 1] == ' ') len--;
 
-        if (!len) return ERROR_INVALID_NAME;
+        if (!len)
+        {
+            /* an empty entry is a path that does not exist, one of spaces is a package that
+               cannot be opened, both only on a fixed drive (winetest test_MsiApplyMultiplePatches) */
+            if (GetDriveTypeW( NULL ) != DRIVE_FIXED) return ERROR_INVALID_NAME;
+            return (end == szPatchPackages || end[-1] != ' ') ? ERROR_PATH_NOT_FOUND : ERROR_PATCH_PACKAGE_OPEN_FAILED;
+        }
 
         patch = malloc((len + 1) * sizeof(WCHAR));
         if (!patch)
@@ -487,6 +493,12 @@ UINT WINAPI MsiApplyMultiplePatchesW(LPCWSTR szPatchPackages,
         memcpy(patch, beg, len * sizeof(WCHAR));
         patch[len] = '\0';
 
+        if (!UrlIsW( patch, URLIS_URL ) && GetFileAttributesW( patch ) == INVALID_FILE_ATTRIBUTES &&
+            ((r = GetLastError()) == ERROR_FILE_NOT_FOUND || r == ERROR_PATH_NOT_FOUND))
+        {
+            free(patch);
+            return r;
+        }
         r = MSI_ApplyPatchW(patch, szProductCode, szPropertiesList);
         free(patch);
 
@@ -1970,7 +1982,8 @@ UINT WINAPI MsiEnumComponentCostsW( MSIHANDLE handle, const WCHAR *component, DW
     MSIPACKAGE *package;
     MSIFILE *file;
     STATSTG stat = {0};
-    WCHAR path[MAX_PATH];
+    WCHAR path[MAX_PATH], *costing;
+    WIN32_FILE_ATTRIBUTE_DATA info;
 
     TRACE( "%lu, %s, %lu, %d, %p, %p, %p, %p\n", handle, debugstr_w(component), index, state, drive, buflen, cost,
            temp );
@@ -2004,7 +2017,14 @@ UINT WINAPI MsiEnumComponentCostsW( MSIHANDLE handle, const WCHAR *component, DW
         return r;
     }
 
-    if (!msi_get_property_int( package->db, L"CostingComplete", 0 ))
+    if (!(costing = msi_dup_property( package->db, L"CostingComplete" )))
+    {
+        /* CostInitialize has not been run */
+        msiobj_release( &package->hdr );
+        return ERROR_INVALID_HANDLE_STATE;
+    }
+    free( costing );
+    if (!msi_get_property_int( package->db, L"CostingComplete", 0 ) || !package->install_validated)
     {
         msiobj_release( &package->hdr );
         return ERROR_FUNCTION_NOT_CALLED;
@@ -2047,6 +2067,9 @@ UINT WINAPI MsiEnumComponentCostsW( MSIHANDLE handle, const WCHAR *component, DW
     }
     else if (IStorage_Stat( package->db->storage, &stat, STATFLAG_NONAME ) == S_OK)
     {
+        /* the storage does not know its size, the file does */
+        if (!stat.cbSize.QuadPart && package->db->path && GetFileAttributesExW( package->db->path, GetFileExInfoStandard, &info ))
+            stat.cbSize.QuadPart = ((ULONGLONG)info.nFileSizeHigh << 32) | info.nFileSizeLow;
         *temp = cost_from_size( stat.cbSize.QuadPart );
         *buflen = set_drive( drive, path[0] );
         r = ERROR_SUCCESS;
