@@ -19,6 +19,7 @@ extern void func_DpiFunctions(void);
 extern void func_DpiProcess(void);
 extern void func_DrawIconEx(void);
 extern void func_DrawText(void);
+extern void func_EditChildUserObjects(void);
 extern void func_EditInk(void);
 extern void func_desktop(void);
 extern void func_DesktopHeapNonInteractive(void);
@@ -142,6 +143,7 @@ const struct test winetest_testlist[] =
     { "DpiProcess", func_DpiProcess },
     { "DrawIconEx", func_DrawIconEx },
     { "DrawText", func_DrawText },
+    { "EditChildUserObjects", func_EditChildUserObjects },
     { "EditInk", func_EditInk },
     { "desktop", func_desktop },
     { "DesktopHeapNonInteractive", func_DesktopHeapNonInteractive },

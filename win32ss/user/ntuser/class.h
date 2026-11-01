@@ -58,6 +58,7 @@ IntCheckProcessDesktopClasses(IN PDESKTOP Desktop,
                               IN BOOL FreeOnFailure);
 
 ULONG_PTR FASTCALL UserGetCPD(PVOID,GETCPD,ULONG_PTR);
+PCALLPROCDATA FASTCALL UserSearchForCallProc(PCALLPROCDATA,WNDPROC,GETCPD);
 
 _Must_inspect_result_
 NTSTATUS

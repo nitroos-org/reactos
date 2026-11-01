@@ -20,6 +20,7 @@ list(APPEND SOURCE
     DpiFunctions.c
     DrawIconEx.c
     DrawText.c
+    EditChildUserObjects.c
     EditInk.c
     desktop.c
     DesktopHeapNonInteractive.c
