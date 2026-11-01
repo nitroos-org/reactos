@@ -1,6 +1,6 @@
 include_directories(${REACTOS_SOURCE_DIR}/sdk/include/reactos/subsys)
 spec2def(wow64.dll wow64.spec ADD_IMPORTLIB)
-add_library(wow64 MODULE init.c thread.c process.c syscall.c ioctl.c csr.c lpc.c exception.c environment.c redirection.c ${CMAKE_CURRENT_BINARY_DIR}/wow64.def)
+add_library(wow64 MODULE init.c thread.c process.c syscall.c ioctl.c scsi.c csr.c lpc.c exception.c environment.c redirection.c ${CMAKE_CURRENT_BINARY_DIR}/wow64.def)
 set_module_type(wow64 win32dll ENTRYPOINT 0)
 target_link_libraries(wow64 libcntpr ${PSEH_LIB})
 add_importlibs(wow64 wow64cpu wow64win ntdll)

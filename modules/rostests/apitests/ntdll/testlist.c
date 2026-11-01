@@ -96,6 +96,7 @@ extern void func_NtFlushVirtualMemory(void);
 extern void func_NtEaFile(void);
 extern void func_VolumeControlCodes(void);
 extern void func_IoctlAllowlist(void);
+extern void func_ScsiPassThrough(void);
 extern void func_NtQueryInformationFile(void);
 extern void func_NtQueryInformationProcess(void);
 extern void func_NtQueryInformationThread(void);
@@ -322,6 +323,7 @@ const struct test winetest_testlist[] =
     { "NtEaFile",                       func_NtEaFile },
     { "VolumeControlCodes",             func_VolumeControlCodes },
     { "IoctlAllowlist",                 func_IoctlAllowlist },
+    { "ScsiPassThrough",                func_ScsiPassThrough },
     { "NtQueryInformationFile",         func_NtQueryInformationFile },
     { "NtQueryInformationProcess",      func_NtQueryInformationProcess },
     { "NtQueryInformationThread",       func_NtQueryInformationThread },

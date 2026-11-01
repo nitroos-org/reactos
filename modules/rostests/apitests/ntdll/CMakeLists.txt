@@ -112,6 +112,7 @@ list(APPEND SOURCE
     NtEaFile.c
     VolumeControlCodes.c
     IoctlAllowlist.c
+    ScsiPassThrough.c
     NtQueryInformationFile.c
     NtQueryInformationProcess.c
     NtQueryInformationThread.c

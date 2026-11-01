@@ -674,8 +674,8 @@ static void TestAddedCodes(void)
     /* A code with pointers that is left out stays refused in a 32-bit process, and only there */
     IsWow64Process(GetCurrentProcess(), &Wow64);
     RtlZeroMemory(&Iosb, sizeof(Iosb));
-    Status = NtDeviceIoControlFile(Null, NULL, NULL, NULL, &Iosb, IOCTL_SCSI_PASS_THROUGH_DIRECT, NULL, 0, NULL, 0);
-    trace("IOCL IOCTL_SCSI_PASS_THROUGH_DIRECT (left out) status is %s\n",
+    Status = NtDeviceIoControlFile(Null, NULL, NULL, NULL, &Iosb, IOCTL_SCSI_PASS_THROUGH_EX, NULL, 0, NULL, 0);
+    trace("IOCL IOCTL_SCSI_PASS_THROUGH_EX (left out) status is %s\n",
           Status == STATUS_NOT_SUPPORTED ? "refused" : "passed on");
     if (Wow64)
         ok_hex(Status, STATUS_NOT_SUPPORTED);
