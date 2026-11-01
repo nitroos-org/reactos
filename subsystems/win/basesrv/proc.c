@@ -165,7 +165,8 @@ CSR_API(BaseSrvCreateProcess)
                               NULL,
                               CreateProcessRequest->HandleListPresent,
                               CreateProcessRequest->ConsoleHandleList,
-                              CreateProcessRequest->ConsoleHandleCount);
+                              CreateProcessRequest->ConsoleHandleCount,
+                              CreateProcessRequest->PseudoConsoleProcessId);
     if (Status == STATUS_THREAD_IS_TERMINATING)
     {
         DPRINT1("Thread already dead\n");

@@ -427,7 +427,7 @@ CsrCreateProcess(IN HANDLE hProcess,
                  IN PCLIENT_ID DebugCid)
 {
     return CsrCreateProcessWithHandleList(hProcess, hThread, ClientId, NtSession,
-                                         Flags, DebugCid, FALSE, NULL, 0);
+                                         Flags, DebugCid, FALSE, NULL, 0, NULL);
 }
 
 NTSTATUS
@@ -440,7 +440,8 @@ CsrCreateProcessWithHandleList(IN HANDLE hProcess,
                               IN PCLIENT_ID DebugCid,
                               IN BOOLEAN HandleListPresent,
                               IN PHANDLE HandleList,
-                              IN ULONG HandleCount)
+                              IN ULONG HandleCount,
+                              IN HANDLE PseudoConsoleProcessId)
 {
     PCSR_THREAD CurrentThread = CsrGetClientThread();
     CLIENT_ID CurrentCid;
@@ -634,11 +635,13 @@ CsrCreateProcessWithHandleList(IN HANDLE hProcess,
     /* The capture buffer belongs to this request, never to the parent process.
      * Concurrent process creations therefore cannot replace each other's list. */
     CsrProcess->HandleListPresent = HandleListPresent;
+    CsrProcess->PseudoConsoleProcessId = PseudoConsoleProcessId;
     CsrProcess->InheritHandleList = HandleList;
     CsrProcess->InheritHandleCount = HandleCount;
     CsrProcess->InheritStatus = STATUS_SUCCESS;
     CsrInsertProcess(CurrentProcess, CsrProcess);
     Status = CsrProcess->InheritStatus;
+    CsrProcess->PseudoConsoleProcessId = NULL;
     CsrProcess->InheritHandleList = NULL;
     CsrProcess->InheritHandleCount = 0;
 

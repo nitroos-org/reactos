@@ -360,6 +360,60 @@ ConSrvNewProcess(PCSR_PROCESS SourceProcess,
 
     RtlInitializeCriticalSection(&TargetProcessData->HandleTableLock);
 
+    if (TargetProcess->PseudoConsoleProcessId)
+    {
+        PLIST_ENTRY Entry;
+        PCSR_PROCESS CreatingProcess = SourceProcess;
+        PCSR_PROCESS CandidateSource = NULL;
+
+        for (Entry = TargetProcess->ListLink.Flink;
+             Entry != &TargetProcess->ListLink;
+             Entry = Entry->Flink)
+        {
+            PCSR_PROCESS Candidate = CONTAINING_RECORD(Entry, CSR_PROCESS, ListLink);
+            if (Candidate->ClientId.UniqueProcess == TargetProcess->PseudoConsoleProcessId)
+            {
+                PROCESS_BASIC_INFORMATION ProcessInfo;
+                PCONSOLE_PROCESS_DATA CandidateData;
+                PCONSRV_CONSOLE CandidateConsole;
+
+                if (!CreatingProcess ||
+                    !CreatingProcess->NtSession ||
+                    !Candidate->NtSession ||
+                    CreatingProcess->NtSession->SessionId != Candidate->NtSession->SessionId ||
+                    !NT_SUCCESS(NtQueryInformationProcess(Candidate->ProcessHandle,
+                                                          ProcessBasicInformation,
+                                                          &ProcessInfo,
+                                                          sizeof(ProcessInfo),
+                                                          NULL)) ||
+                    ProcessInfo.UniqueProcessId !=
+                        (ULONG_PTR)Candidate->ClientId.UniqueProcess ||
+                    ProcessInfo.InheritedFromUniqueProcessId !=
+                        (ULONG_PTR)CreatingProcess->ClientId.UniqueProcess)
+                {
+                    break;
+                }
+
+                CandidateData = ConsoleGetPerProcessData(Candidate);
+                if (!ConSrvValidateConsole(&CandidateConsole,
+                                           CandidateData->ConsoleHandle,
+                                           CONSOLE_RUNNING, TRUE))
+                {
+                    break;
+                }
+                LeaveCriticalSection(&CandidateConsole->Lock);
+                CandidateSource = Candidate;
+                break;
+            }
+        }
+        if (!CandidateSource)
+        {
+            TargetProcess->InheritStatus = STATUS_INVALID_HANDLE;
+            return STATUS_INVALID_HANDLE;
+        }
+        SourceProcess = CandidateSource;
+    }
+
     /* Do nothing if the source process is NULL */
     if (!SourceProcess) return STATUS_SUCCESS;
 
@@ -398,13 +452,17 @@ ConSrvNewProcess(PCSR_PROCESS SourceProcess,
             /* Unlock the parent's console */
             LeaveCriticalSection(&SourceConsole->Lock);
         }
+        else if (TargetProcess->PseudoConsoleProcessId)
+        {
+            Status = STATUS_INVALID_HANDLE;
+        }
         else if (TargetProcess->HandleListPresent && TargetProcess->InheritHandleCount)
         {
             Status = STATUS_INVALID_PARAMETER;
         }
     }
 
-    if (TargetProcess->HandleListPresent)
+    if (TargetProcess->HandleListPresent || TargetProcess->PseudoConsoleProcessId)
         TargetProcess->InheritStatus = Status;
     return Status;
 }

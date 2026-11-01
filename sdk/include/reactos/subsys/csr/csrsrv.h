@@ -61,6 +61,7 @@ typedef struct _CSR_PROCESS
     ULONG InheritHandleCount;
     PHANDLE InheritHandleList; /* Valid only during CsrInsertProcess. */
     NTSTATUS InheritStatus;
+    HANDLE PseudoConsoleProcessId;
     PVOID ServerData[ANYSIZE_ARRAY];    // One structure per CSR server.
 } CSR_PROCESS, *PCSR_PROCESS;
 
@@ -301,7 +302,8 @@ CsrCreateProcessWithHandleList(IN HANDLE hProcess,
                  IN PCLIENT_ID DebugCid,
                  IN BOOLEAN HandleListPresent,
                  IN PHANDLE HandleList,
-                 IN ULONG HandleCount);
+                 IN ULONG HandleCount,
+                 IN HANDLE PseudoConsoleProcessId);
 
 NTSTATUS
 NTAPI
