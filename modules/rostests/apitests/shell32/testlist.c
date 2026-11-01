@@ -58,6 +58,7 @@ extern void func_ShellExec_RunDLL(void);
 extern void func_ShellExecCmdLine(void);
 extern void func_ShellExecuteEx(void);
 extern void func_ShellExecuteExLnk(void);
+extern void func_ShellExecuteRunAs(void);
 extern void func_ShellExecuteLinkDir(void);
 extern void func_ShellExecuteW(void);
 extern void func_ShellFolder(void);
@@ -142,6 +143,7 @@ const struct test winetest_testlist[] =
     //{ "ShellExecCmdLine", func_ShellExecCmdLine }, Broke on Windows
     { "ShellExecuteEx", func_ShellExecuteEx }, // Mostly broken on Windows, only simple tests enabled
     { "ShellExecuteExLnk", func_ShellExecuteExLnk },
+    { "ShellExecuteRunAs", func_ShellExecuteRunAs },
     //{ "ShellExecuteW", func_ShellExecuteW }, Broke on Windows
     { "ShellExecuteLinkDir", func_ShellExecuteLinkDir },
     { "ShellFolder", func_ShellFolder },
