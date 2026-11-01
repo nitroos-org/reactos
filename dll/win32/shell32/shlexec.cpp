@@ -2354,6 +2354,16 @@ static UINT_PTR ExecuteFailed(UINT_PTR retval, SHELLEXECUTEINFOW &sei, LPCWSTR l
     return retval;
 }
 
+/* Windows reports a missing association (no such verb, no such class) with ERROR_NO_ASSOCIATION and a
+ * file that cannot be found with ERROR_FILE_NOT_FOUND, even when the lookup left ERROR_PATH_NOT_FOUND */
+static VOID SHELL_SetFailureError(UINT_PTR retval)
+{
+    if (retval == SE_ERR_NOASSOC)
+        SetLastError(ERROR_NO_ASSOCIATION);
+    else if (retval == SE_ERR_FNF)
+        SetLastError(ERROR_FILE_NOT_FOUND);
+}
+
 static WCHAR *expand_environment( const WCHAR *str )
 {
     CHeapPtr<WCHAR, CLocalAllocator> buf;
@@ -2597,6 +2607,11 @@ static BOOL SHELL_execute(LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc)
             DBG_UNREFERENCED_LOCAL_VARIABLE(Info);
             do_error_dialog(retval, sei_tmp.hwnd, wszApplicationName);
         }
+        if (retval <= 32)
+        {
+            sei->hInstApp = (HINSTANCE)UlongToHandle(retval);
+            SHELL_SetFailureError(retval);
+        }
         return retval > 32;
     }
 
@@ -2780,7 +2795,10 @@ static BOOL SHELL_execute(LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc)
     if (state.bRunAsCancelled)
         return SHELL_ExecuteCancelled(sei);
     if (retval <= 32)
+    {
         retval = ExecuteFailed(retval, *sei, lpFile);
+        SHELL_SetFailureError(retval);
+    }
 
     sei->hInstApp = (HINSTANCE)(retval > 32 ? 33 : retval);
     return retval > 32;
