@@ -87,29 +87,24 @@ static HRESULT WINAPI TaskFolder_QueryInterface(ITaskFolder *iface, REFIID riid,
 
 static HRESULT WINAPI TaskFolder_GetTypeInfoCount(ITaskFolder *iface, UINT *count)
 {
-    FIXME("%p,%p: stub\n", iface, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI TaskFolder_GetTypeInfo(ITaskFolder *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    FIXME("%p,%u,%lu,%p: stub\n", iface, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_ITaskFolder, index, lcid, info);
 }
 
 static HRESULT WINAPI TaskFolder_GetIDsOfNames(ITaskFolder *iface, REFIID riid, LPOLESTR *names,
                                                 UINT count, LCID lcid, DISPID *dispid)
 {
-    FIXME("%p,%s,%p,%u,%lu,%p: stub\n", iface, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_ITaskFolder, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI TaskFolder_Invoke(ITaskFolder *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                          DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    FIXME("%p,%ld,%s,%04lx,%04x,%p,%p,%p,%p: stub\n", iface, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_ITaskFolder, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI TaskFolder_get_Name(ITaskFolder *iface, BSTR *name)
@@ -175,7 +170,9 @@ static HRESULT WINAPI TaskFolder_GetFolders(ITaskFolder *iface, LONG flags, ITas
 
 static inline BOOL is_variant_null(const VARIANT *var)
 {
+    /* an omitted optional argument of a late-bound call is VT_ERROR/DISP_E_PARAMNOTFOUND */
     return V_VT(var) == VT_EMPTY || V_VT(var) == VT_NULL ||
+          (V_VT(var) == VT_ERROR && V_ERROR(var) == DISP_E_PARAMNOTFOUND) ||
           (V_VT(var) == VT_BSTR && (V_BSTR(var) == NULL || !*V_BSTR(var)));
 }
 
