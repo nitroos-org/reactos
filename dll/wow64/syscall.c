@@ -2593,6 +2593,9 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         if (NT_SUCCESS(Status)) { U(0) = Minimum; U(1) = Maximum; U(2) = Actual; }
         return Status;
     }
+    case W64_NtSetTimerResolution:
+        /* timeBeginPeriod; the current resolution is a ULONG in both ABIs */
+        return NtSetTimerResolution(a[0], (BOOLEAN)a[1], P(2));
     case W64_NtQuerySystemInformation:
         if (a[0] == SystemBasicInformation)
         {
