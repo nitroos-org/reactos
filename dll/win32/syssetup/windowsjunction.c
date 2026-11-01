@@ -3,9 +3,10 @@
  * LICENSE:     GPL-2.0-or-later
  * PURPOSE:     Directory junction \Windows -> system directory on NTFS installs
  *
- * Many installers and scripts hard-code C:\Windows\... Setup keeps SystemRoot where the
- * user installed the system (\ReactOS by default) and makes \Windows a mount-point reparse
- * point to it, as "mklink /J C:\Windows C:\ReactOS" would.  Nothing existing is touched: if
+ * Many installers and scripts hard-code C:\Windows\... New installs go to \Windows (the
+ * default), where this is a no-op. When the user chose another directory (e.g. \ReactOS),
+ * setup keeps SystemRoot there and makes \Windows a mount-point reparse point to it, as
+ * "mklink /J C:\Windows C:\ReactOS" would.  Nothing existing is touched: if
  * \Windows is already there (another Windows on the same volume, or a previous run of this
  * step) it is left alone.  Volumes without reparse points (FAT) are skipped.
  */

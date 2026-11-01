@@ -990,6 +990,40 @@ IsValidInstallDirectory(
     return TRUE;
 }
 
+/**
+ * @brief
+ * Check whether the installation directory computed by InitDestinationPaths()
+ * (pSetupData->DestinationPath) already exists on the target volume, as a
+ * directory or as anything else. A new installation must never be made into
+ * it: it can be another operating system, e.g. a Windows in \Windows.
+ * Anything but "not found" (e.g. access denied) counts as existing.
+ **/
+BOOLEAN
+NTAPI
+IsInstallDirectoryInUse(
+    _In_ PUSETUP_DATA pSetupData)
+{
+    NTSTATUS Status;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    FILE_BASIC_INFORMATION BasicInfo;
+
+    if (!pSetupData->DestinationPath.Buffer || !pSetupData->DestinationPath.Length)
+        return FALSE;
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &pSetupData->DestinationPath,
+                               OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               NULL);
+    Status = NtQueryAttributesFile(&ObjectAttributes, &BasicInfo);
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_OBJECT_PATH_NOT_FOUND)
+        return FALSE;
+
+    DPRINT1("Installation directory '%wZ' already exists (Status 0x%08lx)\n",
+            &pSetupData->DestinationPath, Status);
+    return TRUE;
+}
+
 
 NTSTATUS
 NTAPI

@@ -10,6 +10,7 @@
 #include <apitest.h>
 #include <windef.h>
 #include <winbase.h>
+#include <winreg.h>
 #define COBJMACROS
 #include <objbase.h>
 #include <initguid.h>
@@ -1251,8 +1252,12 @@ static void free_life(struct life_ctx *ctx)
 static BOOL running_on_reactos(void)
 {
     WCHAR root[MAX_PATH];
+    HKEY key;
     if (GetEnvironmentVariableW(L"MI_TEST_STRICT_CLOSE", root, ARRAYSIZE(root))) return TRUE;
-    return GetEnvironmentVariableW(L"SystemRoot", root, ARRAYSIZE(root)) && wcsstr(root, L"ReactOS") != NULL;
+    /* Not the system directory's name: new installs go to \Windows */
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ReactOS", 0, KEY_READ, &key) != ERROR_SUCCESS) return FALSE;
+    RegCloseKey(key);
+    return TRUE;
 }
 
 static void test_callback_lifetime(MI_Application *app)

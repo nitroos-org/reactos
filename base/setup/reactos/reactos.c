@@ -2059,6 +2059,19 @@ PrepareAndDoCopyThread(
         goto Quit;
     }
 
+    /* A new installation never goes into an existing directory (e.g. a Windows in \Windows):
+     * stop before anything is copied, nothing is overwritten. */
+    if (!pSetupData->RepairUpdateFlag && IsInstallDirectoryInUse(&pSetupData->USetupData))
+    {
+        Success = FALSE;
+        DisplayMessage(hWndParent, MB_ICONERROR, NULL,
+                       L"The installation directory %s already exists on the selected partition. "
+                       L"It may hold another Windows or ReactOS installation, and Setup will not overwrite it.\n\n"
+                       L"Run Setup again and choose another directory, or format the partition.",
+                       pSetupData->USetupData.InstallationDirectory);
+        goto Quit;
+    }
+
 
     /*
      * Preparation of the list of files to be copied

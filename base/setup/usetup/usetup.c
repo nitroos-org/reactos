@@ -71,6 +71,9 @@ static WCHAR DefaultKBLayout[20];   // Copy of string inside KeyboardList
 
 static BOOLEAN RepairUpdateFlag = FALSE;
 
+/* The installation directory was refused because it exists: ask the user, even in unattended mode */
+static BOOLEAN InstallDirInUse = FALSE;
+
 /* Global partition list on the system */
 static PPARTLIST PartitionList = NULL;
 
@@ -2923,7 +2926,7 @@ InstallDirectoryPage(PINPUT_RECORD Ir)
      * of an invalid path, or we are in regular setup), display the UI and allow
      * the user to specify a new installation path.
      */
-    if (RepairUpdateFlag || IsUnattendedSetup)
+    if (RepairUpdateFlag || (IsUnattendedSetup && !InstallDirInUse))
     {
         /* Check for the validity of the installation directory and pop up
          * an error if it is not the case. Then the user can fix it. */
@@ -3076,6 +3079,23 @@ InitInstallDir:
     if (RtlPrefixUnicodeString(&USetupData.SourcePath, &USetupData.DestinationPath, TRUE))
     {
         MUIDisplayError(ERROR_SOURCE_DIR, Ir, POPUP_WAIT_ENTER);
+        return INSTALL_DIRECTORY_PAGE;
+    }
+
+    /*
+     * A new installation never goes into an existing directory: it can be another
+     * system, e.g. a Windows in \Windows on this partition. Nothing is overwritten;
+     * the user chooses another directory (an unattended setup stops here and asks).
+     */
+    if (!RepairUpdateFlag && IsInstallDirectoryInUse(&USetupData))
+    {
+        InstallDirInUse = TRUE;
+        PopupError("The installation directory already exists on the\n"
+                   "selected partition. It may hold another Windows or\n"
+                   "ReactOS installation. Setup will not overwrite it.\n"
+                   "Press ENTER and choose another directory.",
+                   MUIGetString(STRING_CONTINUE),
+                   Ir, POPUP_WAIT_ENTER);
         return INSTALL_DIRECTORY_PAGE;
     }
 
