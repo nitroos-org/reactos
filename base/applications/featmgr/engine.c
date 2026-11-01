@@ -9,6 +9,7 @@
 #include <shlwapi.h>
 #include <shlobj.h>
 #include <strsafe.h>
+#include <tlhelp32.h>
 
 /* Persisted feature state lives here (DISM /Get-Features-like, queryable). */
 static const WCHAR STATE_KEY[] =
@@ -1107,6 +1108,70 @@ static void NotifyEnvironmentChanged(void)
                         SMTO_ABORTIFHUNG | SMTO_NORMAL, 3000, &res);
 }
 
+/* ---- progress and cancel (GUI worker plumbing; see featmgr.h) ------------------
+ * The CLI never calls FmOpBegin: no sink and no cancel event, so RunAndWait waits exactly as before. */
+
+static FM_PROGRESS_FN g_ProgFn;
+static void          *g_ProgCtx;
+static HANDLE         g_hCancelEvt;          /* manual-reset, created by the first FmOpBegin */
+static volatile LONG  g_Cancel;
+static volatile LONG  g_MayMsi;
+static BOOL           g_NoCancel;            /* cleanup after a cancel must itself run to the end */
+static BOOL           g_MsiFinished;         /* a cancel let a Windows Installer package run to its end (see RunAndWait) */
+
+void FmOpBegin(FM_PROGRESS_FN fn, void *ctx)
+{
+    g_ProgFn = fn;
+    g_ProgCtx = ctx;
+    InterlockedExchange(&g_Cancel, 0);
+    InterlockedExchange(&g_MayMsi, 0);
+    if (!g_hCancelEvt) g_hCancelEvt = CreateEventW(NULL, TRUE, FALSE, NULL);
+    else ResetEvent(g_hCancelEvt);
+}
+
+void FmOpEnd(void) { g_ProgFn = NULL; g_ProgCtx = NULL; }
+
+void FmOpCancel(void)
+{
+    InterlockedExchange(&g_Cancel, 1);
+    if (g_hCancelEvt) SetEvent(g_hCancelEvt);
+}
+
+BOOL   FmOpCancelled(void) { return g_Cancel != 0 && !g_NoCancel; }
+HANDLE FmOpCancelHandle(void) { return g_NoCancel ? NULL : g_hCancelEvt; }
+BOOL   FmOpMayBeMsi(void) { return g_MayMsi != 0; }
+
+void FmOpStep(LPCWSTR fmt, ...)
+{
+    WCHAR t[512];
+    va_list ap;
+    FM_PROGRESS_FN fn = g_ProgFn;
+    if (!fn) return;
+    va_start(ap, fmt);
+    _vsnwprintf(t, ARRAYSIZE(t) - 1, fmt, ap);
+    va_end(ap);
+    t[ARRAYSIZE(t) - 1] = L'\0';
+    fn(FM_PROG_STEP, t, g_ProgCtx);
+}
+
+/* The newest non-blank line of a chunk of child output, for the status line. */
+static void ReportOutputLine(LPCWSTR text)
+{
+    WCHAR line[256];
+    size_t n = wcslen(text), b, len;
+    FM_PROGRESS_FN fn = g_ProgFn;
+
+    if (!fn) return;
+    while (n && (text[n - 1] == L'\n' || text[n - 1] == L'\r' || text[n - 1] == L' ' || text[n - 1] == L'\t')) n--;
+    if (!n) return;
+    for (b = n; b && text[b - 1] != L'\n'; b--) ;
+    len = n - b;
+    if (len >= ARRAYSIZE(line)) { b = n - (ARRAYSIZE(line) - 1); len = ARRAYSIZE(line) - 1; }
+    memcpy(line, text + b, len * sizeof(WCHAR));
+    line[len] = L'\0';
+    fn(FM_PROG_OUTPUT, line, g_ProgCtx);
+}
+
 /* ---- captured child output ------------------------------------------------
  * Installer / Scoop output is captured to a temp file (the child gets NUL as stdin, so it can
  * never block on a prompt), streamed to the log while it runs, and its tail is kept so a
@@ -1172,6 +1237,7 @@ static void EmitOutput(const char *b, DWORD n, FILE *log)
     if (t[0])
     {
         TailAppend(t);
+        ReportOutputLine(t);
         if (log) { fputws(t, log); fflush(log); }
     }
     HeapFree(GetProcessHeap(), 0, t);
@@ -1212,8 +1278,50 @@ static void DrainOutput(HANDLE hr, DWORD *pos, char *carry, DWORD *ncarry, DWORD
     }
 }
 
+/* Is a Windows Installer package running in the child's job (or is the command msiexec itself)?
+ * Killing msiexec part-way leaves a half-installed product that nothing rolls back, so cancel lets
+ * it finish and the caller removes it again. */
+static BOOL MsiInstalling(LPCWSTR cmdline, HANDLE job)
+{
+    PROCESSENTRY32W pe;
+    HANDLE snap;
+    BOOL found = FALSE, more;
+
+    if (wcsstr(cmdline, L"msiexec")) return TRUE;
+    if (!job) return FALSE;
+    snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return FALSE;
+    pe.dwSize = sizeof(pe);
+    for (more = Process32FirstW(snap, &pe); more && !found; more = Process32NextW(snap, &pe))
+    {
+        if (!_wcsicmp(pe.szExeFile, L"msiexec.exe"))
+        {
+            HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pe.th32ProcessID);
+            BOOL in = FALSE;
+            if (h)
+            {
+                if (IsProcessInJob(h, job, &in) && in) found = TRUE;
+                CloseHandle(h);
+            }
+        }
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+/* End the child: its whole job (installer, msiexec, script children) when it was put in one,
+ * else just the process (exact handle). Waits until it is gone so its files are released. */
+static void KillChild(HANDLE job, HANDLE proc)
+{
+    if (!job || !TerminateJobObject(job, 1))
+        TerminateProcess(proc, 1);
+    WaitForSingleObject(proc, 15000);
+}
+
 /* Run a command line, wait, return its exit code in *code. A run that exceeds the
- * timeout is terminated (exact process handle) and reported as ERROR_TIMEOUT. */
+ * timeout is terminated (exact process handle) and reported as ERROR_TIMEOUT. While the GUI has
+ * armed cancel (FmOpBegin) the wait also watches the cancel event: FmOpCancel ends the child at
+ * once and the result is HRESULT_FROM_WIN32(ERROR_CANCELLED). */
 static HRESULT RunAndWait(LPCWSTR cmdline, DWORD timeoutMs, DWORD *code, FILE *log)
 {
     STARTUPINFOW si;
@@ -1221,6 +1329,8 @@ static HRESULT RunAndWait(LPCWSTR cmdline, DWORD timeoutMs, DWORD *code, FILE *l
     SECURITY_ATTRIBUTES sa;
     WCHAR cl[2048], tmpDir[MAX_PATH], tmpFile[MAX_PATH];
     HANDLE hOut = INVALID_HANDLE_VALUE, hIn = INVALID_HANDLE_VALUE, hRd = INVALID_HANDLE_VALUE;
+    HANDLE job = NULL, wh[2];
+    DWORD nwh;
     char carry[8192];
     DWORD ncarry = 0, pos = 0, w, flags = 0, start = GetTickCount(), elapsed;
     HRESULT hr = S_OK;
@@ -1228,6 +1338,13 @@ static HRESULT RunAndWait(LPCWSTR cmdline, DWORD timeoutMs, DWORD *code, FILE *l
 
     *code = (DWORD)-1;
     g_Tail[0] = L'\0';
+    if (FmOpCancelled())
+    {
+        SetLastMsg(L"The operation was cancelled.");
+        return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    }
+    if (wcsstr(cmdline, L"msiexec")) InterlockedExchange(&g_MayMsi, 1);
+    g_MsiFinished = FALSE;
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
     StringCchCopyW(cl, ARRAYSIZE(cl), cmdline);   /* CreateProcessW may modify its buffer */
@@ -1251,6 +1368,9 @@ static HRESULT RunAndWait(LPCWSTR cmdline, DWORD timeoutMs, DWORD *code, FILE *l
         si.hStdInput = hIn; si.hStdOutput = hOut; si.hStdError = hOut;
         if (!GetConsoleWindow()) flags |= CREATE_NO_WINDOW;   /* GUI caller: no console pops up */
     }
+    /* a cancelable run starts suspended and joins a job first, so cancel reaches the children too */
+    if (FmOpCancelHandle() && (job = CreateJobObjectW(NULL, NULL)) != NULL)
+        flags |= CREATE_SUSPENDED;
     ok = CreateProcessW(NULL, cl, NULL, NULL, si.dwFlags & STARTF_USESTDHANDLES ? TRUE : FALSE, flags,
                         NULL, NULL, &si, &pi);
     if (!ok)
@@ -1261,14 +1381,61 @@ static HRESULT RunAndWait(LPCWSTR cmdline, DWORD timeoutMs, DWORD *code, FILE *l
         hr = HRESULT_FROM_WIN32(e);
         goto out;
     }
+    if (job)
+    {
+        if (!AssignProcessToJobObject(job, pi.hProcess)) { CloseHandle(job); job = NULL; }
+        ResumeThread(pi.hThread);
+    }
     CloseHandle(pi.hThread);
+    wh[0] = pi.hProcess;
+    wh[1] = FmOpCancelHandle();
+    nwh = wh[1] ? 2 : 1;
     for (;;)
     {
         elapsed = GetTickCount() - start;
         if (elapsed >= timeoutMs) { w = WAIT_TIMEOUT; break; }
-        w = WaitForSingleObject(pi.hProcess, hRd != INVALID_HANDLE_VALUE ? 500 : timeoutMs - elapsed);
+        w = WaitForMultipleObjects(nwh, wh, FALSE, hRd != INVALID_HANDLE_VALUE ? 500 : timeoutMs - elapsed);
         if (hRd != INVALID_HANDLE_VALUE) DrainOutput(hRd, &pos, carry, &ncarry, sizeof(carry), FALSE, log);
         if (w != WAIT_TIMEOUT) break;
+    }
+    if (nwh == 2 && w == WAIT_OBJECT_0 + 1)
+    {
+        if (MsiInstalling(cl, job))
+        {
+            /* A Windows Installer package cannot be rolled back from outside (msiexec runs the install in its own
+             * process and has no cancel hook): killing it leaves a half-installed product. Let it finish (bounded);
+             * the caller then removes the finished product again. */
+            DWORD t0 = GetTickCount();
+            LOGF(log, L"  cancelled: a Windows Installer package is installing; letting it finish, then removing it\n");
+            FmOpStep(L"Cancelling: letting the Windows Installer package finish, then removing it");
+            do
+            {
+                w = WaitForSingleObject(pi.hProcess, 500);
+                if (hRd != INVALID_HANDLE_VALUE) DrainOutput(hRd, &pos, carry, &ncarry, sizeof(carry), FALSE, log);
+            } while (w == WAIT_TIMEOUT && GetTickCount() - t0 < 5u * 60u * 1000u);
+            if (w == WAIT_TIMEOUT)
+            {
+                LOGF(log, L"  the installer did not finish in 5 minutes; terminating it\n");
+                KillChild(job, pi.hProcess);
+            }
+            else
+                g_MsiFinished = TRUE;
+            if (hRd != INVALID_HANDLE_VALUE) DrainOutput(hRd, &pos, carry, &ncarry, sizeof(carry), TRUE, log);
+            CloseHandle(pi.hProcess);
+            SetLastMsg(g_MsiFinished ? L"The operation was cancelled. The Windows Installer package was allowed to finish and is removed again."
+                                     : L"The operation was cancelled; the Windows Installer package did not finish in time and was stopped, so files can remain.");
+            hr = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+            goto out;
+        }
+        LOGF(log, L"  cancelled; terminating pid %lu%s\n", pi.dwProcessId, job ? L" and its children" : L"");
+        KillChild(job, pi.hProcess);
+        if (hRd != INVALID_HANDLE_VALUE) DrainOutput(hRd, &pos, carry, &ncarry, sizeof(carry), TRUE, log);
+        CloseHandle(pi.hProcess);
+        SetLastMsg(L"The running installer or script was stopped at once.%s",
+                   g_MayMsi ? L" An installer stopped part-way is not rolled back: files it had already copied can remain; "
+                              L"installing again repairs them." : L"");
+        hr = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+        goto out;
     }
     if (hRd != INVALID_HANDLE_VALUE) DrainOutput(hRd, &pos, carry, &ncarry, sizeof(carry), TRUE, log);
     if (w == WAIT_TIMEOUT)
@@ -1276,7 +1443,7 @@ static HRESULT RunAndWait(LPCWSTR cmdline, DWORD timeoutMs, DWORD *code, FILE *l
         LOGF(log, L"  ERROR: command still running after %lu s; terminating pid %lu\n",
              timeoutMs / 1000, pi.dwProcessId);
         SetLastMsg(L"The command was still running after %lu s and was terminated.\n%s", timeoutMs / 1000, g_Tail);
-        TerminateProcess(pi.hProcess, 1);
+        KillChild(job, pi.hProcess);
         CloseHandle(pi.hProcess);
         hr = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
         goto out;
@@ -1285,6 +1452,7 @@ static HRESULT RunAndWait(LPCWSTR cmdline, DWORD timeoutMs, DWORD *code, FILE *l
     CloseHandle(pi.hProcess);
     LOGF(log, L"  exit code: %lu\n", *code);
 out:
+    if (job) CloseHandle(job);
     if (hOut != INVALID_HANDLE_VALUE) CloseHandle(hOut);
     if (hRd != INVALID_HANDLE_VALUE) CloseHandle(hRd);
     if (hIn != INVALID_HANDLE_VALUE) CloseHandle(hIn);
@@ -1472,6 +1640,59 @@ static HRESULT CheckSoftwareDiskSpace(const FM_FEATURE *f, FILE *log, BOOL faile
     return HRESULT_FROM_WIN32(ERROR_DISK_FULL);
 }
 
+/* Name the step for the status line: what is downloaded (the manifest's [Source] Artifact and
+ * SizeBytes, when it has them) and what runs. */
+static void ReportInstallStep(const FM_FEATURE *f, LPCWSTR inst)
+{
+    WCHAR url[300], sz[40];
+    ULONGLONG n = 0;
+    PWSTR end;
+
+    GetPrivateProfileStringW(L"Source", L"Artifact", L"", url, ARRAYSIZE(url), f->ManifestPath);
+    GetPrivateProfileStringW(L"Source", L"SizeBytes", L"", sz, ARRAYSIZE(sz), f->ManifestPath);
+    if (sz[0]) { n = _wcstoui64(sz, &end, 10); if (*end) n = 0; }
+    if (wcsstr(inst, L"msiexec"))
+        FmOpStep(L"Running the installer package for %s (no download needed)", f->Name);
+    else if (!_wcsicmp(f->Provider, L"rapps"))
+    {
+        InterlockedExchange(&g_MayMsi, 1);            /* rapps runs the downloaded installer, usually an MSI */
+        if (url[0] && n)
+            FmOpStep(L"Downloading and installing %s (%I64u MB) from %s", f->Name, (n + (1u << 20) - 1) >> 20, url);
+        else if (url[0])
+            FmOpStep(L"Downloading and installing %s from %s", f->Name, url);
+        else
+            FmOpStep(L"Downloading and installing %s", f->Name);
+    }
+    else if (!_wcsicmp(f->Provider, L"scoop"))
+        FmOpStep(L"Installing %s with Scoop", f->Name);
+    else if (url[0])
+        FmOpStep(L"Installing %s (downloads %s)", f->Name, url);
+    else
+        FmOpStep(L"Running the installer for %s", f->Name);
+}
+
+/* The Scoop root holds nothing yet (missing or empty): a cancelled install can then be removed
+ * completely, without touching a Scoop the user already had. */
+static BOOL ScoopRootIsFresh(void)
+{
+    WCHAR root[MAX_PATH], pat[MAX_PATH + 4];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    BOOL fresh = TRUE;
+
+    if (!FmScoopRoot(root, MAX_PATH)) return FALSE;
+    if (GetFileAttributesW(root) == INVALID_FILE_ATTRIBUTES) return TRUE;
+    if (FAILED(StringCchPrintfW(pat, ARRAYSIZE(pat), L"%s\\*", root))) return FALSE;
+    h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return TRUE;
+    do
+    {
+        if (wcscmp(fd.cFileName, L".") && wcscmp(fd.cFileName, L"..")) { fresh = FALSE; break; }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return fresh;
+}
+
 /* Download + install. Returns S_OK only if the installer exited 0; on success the
  * uninstall command line is recorded in the state key. */
 static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
@@ -1479,6 +1700,7 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
     WCHAR inst[2048], uninst[2048];
     DWORD code;
     HRESULT hr;
+    BOOL scoopFresh;
 
     hr = BuildSoftwareCommands(f, inst, uninst, ARRAYSIZE(inst), log);
     if (FAILED(hr)) return hr;
@@ -1497,7 +1719,36 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
     LOGF(log, L"  software install via '%s' provider\n", f->Provider);
     if (!_wcsicmp(f->Provider, L"scoop"))
         FmScoopPrepareEnv();
+    ReportInstallStep(f, inst);
+    scoopFresh = !_wcsicmp(f->Id, L"scoop") && ScoopRootIsFresh();
     hr = RunAndWait(inst, SW_RUN_TIMEOUT_MS, &code, log);
+    if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED) && scoopFresh && uninst[0])
+    {
+        /* a half-written C:\scoop would make the next install refuse ("exists and is not empty"):
+         * remove it with the feature's own uninstall script, which must run to the end */
+        DWORD ucode;
+        WCHAR why[256];
+        LOGF(log, L"  cancelled: removing the partial Scoop install\n");
+        FmOpStep(L"Cancelled: removing the partly installed Scoop");
+        StringCchCopyW(why, ARRAYSIZE(why), g_LastMsg);
+        g_NoCancel = TRUE;
+        RunAndWait(uninst, 10u * 60u * 1000u, &ucode, log);
+        g_NoCancel = FALSE;
+        SetLastMsg(L"%s", why);
+    }
+    if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED) && g_MsiFinished && uninst[0])
+    {
+        /* the package ran to its end under cancel: take the finished product out again */
+        DWORD ucode;
+        WCHAR why[256];
+        LOGF(log, L"  cancelled: removing the package that finished\n");
+        FmOpStep(L"Cancelled: removing the Windows Installer package again");
+        StringCchCopyW(why, ARRAYSIZE(why), g_LastMsg);
+        g_NoCancel = TRUE;
+        RunAndWait(uninst, 10u * 60u * 1000u, &ucode, log);
+        g_NoCancel = FALSE;
+        SetLastMsg(L"%s", why);
+    }
     if (FAILED(hr)) return hr;
     if (code != 0)
     {
@@ -1543,6 +1794,7 @@ static HRESULT SoftwareUninstall(const FM_FEATURE *f, HKEY state, FILE *log)
     cmd[ARRAYSIZE(cmd) - 1] = L'\0';
     if (f && !_wcsicmp(f->Provider, L"scoop"))
         FmScoopPrepareEnv();
+    FmOpStep(L"Running the uninstaller for %s", f ? f->Name : L"the feature");
     hr = RunAndWait(cmd, SW_RUN_TIMEOUT_MS, &code, log);
     if (FAILED(hr)) return hr;
     NotifyEnvironmentChanged();
@@ -2096,6 +2348,7 @@ static HRESULT RunScoop(LPCWSTR args, FILE *log)
         return E_INVALIDARG;
     }
     FmScoopPrepareEnv();
+    FmOpStep(L"Running: scoop %s", args);
     hr = RunAndWait(cmd, SW_RUN_TIMEOUT_MS, &code, log);
     if (FAILED(hr)) return hr;
     if (code != 0)

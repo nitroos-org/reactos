@@ -187,6 +187,22 @@ int    FmGetDependentsIn(const FM_FEATURE *arr, int n, LPCWSTR id, LPWSTR buf, D
  * (see FmEnable: [Rapps] Entry=). */
 BOOL   FmStageRappsEntry(LPCWSTR entryFile, LPCWSTR pkg, FILE *log);
 
+/* Progress and cancel for a long operation (the GUI's worker thread; the CLI never calls these, so
+ * it behaves as before). FmOpBegin runs on the UI thread before the worker starts: it clears a
+ * previous cancel and installs the progress sink. The sink is called ON THE WORKER THREAD: it must
+ * only copy the text and post a message. FM_PROG_STEP names the current step; FM_PROG_OUTPUT is the
+ * newest line the child (installer, script, Scoop) printed. FmOpCancel (any thread) terminates the
+ * running child process tree and makes the operation return HRESULT_FROM_WIN32(ERROR_CANCELLED). */
+typedef enum { FM_PROG_STEP, FM_PROG_OUTPUT } FM_PROG_KIND;
+typedef void (*FM_PROGRESS_FN)(FM_PROG_KIND kind, LPCWSTR text, void *ctx);
+void   FmOpBegin(FM_PROGRESS_FN fn, void *ctx);
+void   FmOpEnd(void);
+void   FmOpCancel(void);
+BOOL   FmOpCancelled(void);
+HANDLE FmOpCancelHandle(void);          /* manual-reset event set by FmOpCancel; NULL when not armed */
+BOOL   FmOpMayBeMsi(void);              /* the running child is, or may start, a Windows Installer package */
+void   FmOpStep(LPCWSTR fmt, ...);      /* report a step (no-op without a sink) */
+
 /* Utility: tier/state to display string. */
 LPCWSTR FmTierStr(FM_TIER t);
 LPCWSTR FmStateStr(FM_STATE s);

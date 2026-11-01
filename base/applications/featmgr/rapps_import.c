@@ -244,13 +244,20 @@ static BOOL FetchRappsDatabase(FILE *log)
         LOGF(log, L"error: cannot start rapps.exe (%lu)\n", GetLastError());
         return FALSE;
     }
-    wr = WaitForSingleObject(pi.hProcess, FM_DBFETCH_TIMEOUT_MS);
+    FmOpStep(L"Downloading the RAPPS catalog");
+    {
+        HANDLE wh[2];
+        wh[0] = pi.hProcess;
+        wh[1] = FmOpCancelHandle();          /* NULL for the CLI: plain wait */
+        wr = WaitForMultipleObjects(wh[1] ? 2 : 1, wh, FALSE, FM_DBFETCH_TIMEOUT_MS);
+    }
     if (wr == WAIT_OBJECT_0)
         GetExitCodeProcess(pi.hProcess, &code);
     else
     {
-        LOGF(log, L"error: catalog download timed out\n");
+        LOGF(log, wr == WAIT_OBJECT_0 + 1 ? L"cancelled: catalog download stopped\n" : L"error: catalog download timed out\n");
         TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 15000);
     }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
@@ -307,6 +314,8 @@ int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
     /* default location only: an explicit directory is the caller's to populate */
     if (!(srcDir && srcDir[0]) && !HasRappsEntries(src))
         FetchRappsDatabase(log);
+    if (FmOpCancelled()) { FmSetLastMessage(L"The operation was cancelled."); return -1; }   /* before anything is rewritten */
+    FmOpStep(L"Converting the RAPPS entries into Software-tab entries");
     if (!FmGetSoftwareCatalogDir(outDir, MAX_PATH)) return -1;
     SHCreateDirectoryExW(NULL, outDir, NULL);
 
@@ -338,6 +347,12 @@ int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
         FM_OUTBUF o = { NULL, 0, 0, FALSE };
         int catId;
 
+        if (FmOpCancelled())
+        {
+            FindClose(h);
+            FmSetLastMessage(L"The import was cancelled after %d entries; run it again to finish.", written);
+            return -1;
+        }
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         StringCchCopyW(pkg, MAX_PATH, fd.cFileName);
         PathRemoveExtensionW(pkg);

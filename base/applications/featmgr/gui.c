@@ -36,12 +36,17 @@
 #define IDC_ADDBUCKET  1019
 #define IDC_SEARCH     1020
 #define IDC_SRCHLABEL  1021
+#define IDC_OPCANCEL   1022  /* "Cancel operation": shown while a background op runs */
+#define IDC_PROGRESS   1023  /* marquee bar: shown while a background op runs */
 #define IDT_SEARCH     1     /* debounce timer: filter the list shortly after the last keystroke */
+#define IDT_ELAPSED    2     /* once a second while busy: refresh the elapsed time in the status text */
 
 /* A long software-tier install (download + run installer) must not run on the UI
  * thread or the dialog freezes. The op runs on a worker thread that posts this
  * message back with the heap OPCTX result when it finishes. */
 #define WM_APP_OPDONE  (WM_APP + 1)
+/* The engine reports progress ON THE WORKER THREAD; the sink only stores the text and posts this. */
+#define WM_APP_PROGRESS (WM_APP + 2)
 
 static HWND g_hTab, g_hList, g_hDesc, g_hInstr;
 static HWND g_hInstall, g_hEnable, g_hDisable, g_hUninstall, g_hImport, g_hImportSc;
@@ -61,6 +66,14 @@ static BOOL g_reverting = FALSE;   /* re-entrancy guard for check-state reverts 
 static HWND g_hwndMain = NULL;     /* top-level window, for the worker thread's PostMessage */
 static HANDLE g_opThread = NULL;   /* in-flight background op, NULL when idle */
 static BOOL g_busy = FALSE;        /* a background op is running; the UI is locked */
+static HWND g_hProgress, g_hOpCancel;
+static BOOL g_cancelling = FALSE;       /* Cancel was requested; waiting for the worker to stop its child */
+static BOOL g_closeAfterOp = FALSE;     /* the window was closed while busy: close once the op has stopped */
+static DWORD g_opStartTick;
+static CRITICAL_SECTION g_progCs;       /* guards g_stepText / g_detailText / g_progPending (worker -> UI) */
+static WCHAR g_stepText[512];           /* current step: "Downloading <url> (n MB), then running its installer" */
+static WCHAR g_detailText[256];         /* newest line the child printed */
+static BOOL g_progPending = FALSE;      /* a WM_APP_PROGRESS is already queued (coalesce) */
 
 /* Windows "Windows Features" instruction banner (OS tier). */
 static const WCHAR szOsInstr[] =
@@ -320,6 +333,17 @@ typedef enum { ACT_INSTALL, ACT_ENABLE, ACT_DISABLE, ACT_UNINSTALL, ACT_UPDATE }
 #define OP_IMPORT 100   /* OPCTX.op value for the "Import from RAPPS" action */
 #define OP_IMPORT_SCOOP 101
 #define OP_ADD_BUCKET 102
+#define OP_COMMIT_OS 103   /* OK / Apply on the OS tab: the checked rows, applied on the worker */
+
+/* One OS-tab row, copied on the UI thread so the worker never touches the ListView or g_arr. */
+typedef struct _OSROW
+{
+    WCHAR id[FM_MAX_ID];
+    WCHAR name[FM_MAX_NAME];
+    BOOL  checked;
+    BOOL  payload;       /* PayloadAvailable */
+    BOOL  wasEnabled;    /* state when the rows were copied */
+} OSROW;
 
 
 /* Work item handed to the background thread. Carries its own copies of the id /
@@ -332,10 +356,82 @@ typedef struct _OPCTX
     HRESULT hr;
     int     importWritten;
     int     importSkipped;
+    OSROW  *rows;                /* OP_COMMIT_OS */
+    int     nrows;
+    BOOL    closeAfter;
+    int     failed;
+    BOOL    cancelled;
+    WCHAR   summary[1024];
 } OPCTX;
 
-/* Lock / unlock every button while a background op runs. The caption bar close
- * box stays, but WM_CLOSE is ignored while busy (see WndProc). */
+static void LayoutProgressRow(HWND hwnd);
+
+static void FreeOp(OPCTX *c)
+{
+    if (c->rows) HeapFree(GetProcessHeap(), 0, c->rows);
+    HeapFree(GetProcessHeap(), 0, c);
+}
+
+/* The status text of a running op, in the description box: the current step, then the child's
+ * newest output line and the time elapsed. UI thread only. */
+static WCHAR g_lastStatus[1024];
+
+/* Keep one status line on one line of the description box: cut it with "..." past n characters. */
+static void Clip(LPWSTR t, size_t n)
+{
+    if (wcslen(t) > n)
+    {
+        t[n - 3] = L'.'; t[n - 2] = L'.'; t[n - 1] = L'.'; t[n] = L'\0';
+    }
+}
+
+static void ShowStatus(void)
+{
+    WCHAR step[512], detail[256], l1[512], l2[512], text[1100];
+    DWORD s = (GetTickCount() - g_opStartTick) / 1000;
+
+    EnterCriticalSection(&g_progCs);
+    StringCchCopyW(step, ARRAYSIZE(step), g_stepText);
+    StringCchCopyW(detail, ARRAYSIZE(detail), g_detailText);
+    LeaveCriticalSection(&g_progCs);
+    if (g_cancelling)
+        StringCchCopyW(l1, ARRAYSIZE(l1), L"Cancelling: stopping the running installer or script...");
+    else
+        StringCchCopyW(l1, ARRAYSIZE(l1), step[0] ? step : L"Working... a download or install can take a while.");
+    Clip(l1, 120);
+    StringCchPrintfW(l2, ARRAYSIZE(l2), L"[%lu:%02lu]  %s", s / 60, s % 60, detail);
+    Clip(l2, 120);
+    StringCchPrintfW(text, ARRAYSIZE(text), L"%s\r\n%s", l1, l2);
+    if (wcscmp(text, g_lastStatus))
+    {
+        StringCchCopyW(g_lastStatus, ARRAYSIZE(g_lastStatus), text);
+        SetWindowTextW(g_hDesc, text);
+    }
+}
+
+/* The engine's progress sink: called ON THE WORKER THREAD. Stores the text and posts one
+ * WM_APP_PROGRESS (coalesced), never touches a window directly. */
+static void ProgressSink(FM_PROG_KIND kind, LPCWSTR text, void *ctx)
+{
+    BOOL post;
+    (void)ctx;
+    EnterCriticalSection(&g_progCs);
+    if (kind == FM_PROG_STEP)
+    {
+        StringCchCopyW(g_stepText, ARRAYSIZE(g_stepText), text);
+        g_detailText[0] = L'\0';
+    }
+    else
+        StringCchCopyW(g_detailText, ARRAYSIZE(g_detailText), text);
+    post = !g_progPending;
+    g_progPending = TRUE;
+    LeaveCriticalSection(&g_progCs);
+    if (post && g_hwndMain)
+        PostMessageW(g_hwndMain, WM_APP_PROGRESS, 0, 0);
+}
+
+/* Lock / unlock every button while a background op runs; show the progress bar and the Cancel
+ * button instead. The caption bar close box stays live: WM_CLOSE asks whether to cancel the op. */
 static void SetBusy(HWND hwnd, BOOL busy)
 {
     g_busy = busy;
@@ -355,10 +451,105 @@ static void SetBusy(HWND hwnd, BOOL busy)
     EnableWindow(g_hCancel, !busy);
     EnableWindow(g_hApply, !busy);
     EnableWindow(g_hTab, !busy);
+    EnableWindow(g_hOpCancel, busy);
     if (busy)
-        SetWindowTextW(g_hDesc,
-            L"Working... a download or install can take a while. Please wait.");
-    (void)hwnd;
+    {
+        g_cancelling = FALSE;
+        g_lastStatus[0] = L'\0';
+        g_opStartTick = GetTickCount();
+        EnterCriticalSection(&g_progCs);
+        g_stepText[0] = g_detailText[0] = L'\0';
+        LeaveCriticalSection(&g_progCs);
+        SetTimer(hwnd, IDT_ELAPSED, 1000, NULL);
+    }
+    else
+        KillTimer(hwnd, IDT_ELAPSED);
+    ShowWindow(g_hProgress, busy ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hOpCancel, busy ? SW_SHOW : SW_HIDE);
+    SendMessageW(g_hProgress, PBM_SETMARQUEE, busy, 30);
+    LayoutProgressRow(hwnd);
+    if (busy)
+    {
+        /* the focused verb button was just disabled: put the focus on the list, so the keyboard stays usable
+         * (Alt+O reaches Cancel operation; with the focus ON that button its own mnemonic is not delivered) */
+        SetFocus(g_hList);
+        ShowStatus();
+    }
+}
+
+/* Stop the running op: the engine ends the child process tree by its own handle and the op
+ * returns ERROR_CANCELLED; the worker then posts WM_APP_OPDONE as usual. */
+static void BeginCancel(void)
+{
+    g_cancelling = TRUE;
+    EnableWindow(g_hOpCancel, FALSE);
+    FmOpCancel();
+    ShowStatus();
+}
+
+/* Apply the checkbox selection (worker thread). Enables happen first; disables run in repeated
+ * passes so that a dependent unchecked in the same batch is turned off before the feature it
+ * depends on (the engine refuses an in-use disable). Fills c->failed / c->summary; c->cancelled
+ * when Cancel stopped it (what was already applied stays applied, the list is reloaded after). */
+static void ApplyOsRows(OPCTX *c)
+{
+    int i, done = 0, failed = 0, pass;
+    WCHAR line[256];
+    HRESULT hr;
+
+    c->summary[0] = L'\0';
+
+    /* Pass 1: enable everything newly checked (install-on-check for NotInstalled). */
+    for (i = 0; i < c->nrows; i++)
+    {
+        const OSROW *r = &c->rows[i];
+        if (!r->checked || r->wasEnabled) continue;
+        if (!r->payload) { failed++; continue; }
+        if (FmOpCancelled()) { c->cancelled = TRUE; goto out; }
+        FmOpStep(L"Turning on %s", r->name);
+        hr = FmEnable(r->id, NULL);
+        if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) { c->cancelled = TRUE; goto out; }
+        if (SUCCEEDED(hr)) done++;
+        else failed++;
+    }
+
+    /* Passes 2..N: disable everything newly unchecked, retrying blocked ones so
+     * dependents (also unchecked) clear first. Stop when a pass makes no change. */
+    for (pass = 0; pass < c->nrows + 1; pass++)
+    {
+        int progress = 0;
+        for (i = 0; i < c->nrows; i++)
+        {
+            const OSROW *r = &c->rows[i];
+            if (r->checked) continue;
+            if (FmGetState(r->id) != FM_STATE_ENABLED) continue;  /* already off */
+            if (FmOpCancelled()) { c->cancelled = TRUE; goto out; }
+            FmOpStep(L"Turning off %s", r->name);
+            hr = FmDisable(r->id, NULL);
+            if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) { c->cancelled = TRUE; goto out; }
+            if (SUCCEEDED(hr) || hr == HRESULT_FROM_WIN32(ERROR_SUCCESS_REBOOT_REQUIRED))
+            {
+                done++; progress++;
+            }
+        }
+        if (!progress) break;
+    }
+
+    /* Anything still enabled but unchecked, or unchecked+enabled that refused. */
+    for (i = 0; i < c->nrows; i++)
+    {
+        const OSROW *r = &c->rows[i];
+        if (r->checked) continue;
+        if (FmGetState(r->id) == FM_STATE_ENABLED)
+        {
+            failed++;
+            StringCchPrintfW(line, ARRAYSIZE(line), L"\r\n  %s could not be turned off.", r->name);
+            StringCchCatW(c->summary, ARRAYSIZE(c->summary), line);
+        }
+    }
+out:
+    c->failed = failed;
+    (void)done;
 }
 
 /* Runs on the worker thread: performs the (possibly slow) engine op, then posts
@@ -374,11 +565,14 @@ static DWORD WINAPI OpThreadProc(LPVOID param)
         case ACT_UNINSTALL: c->hr = FmUninstall(c->id, NULL); break;
         case ACT_UPDATE:    c->hr = FmUpdate(c->id, NULL); break;
         case OP_ADD_BUCKET: c->hr = FmScoopAddBucket(c->name, NULL, 0, NULL); break;
+        case OP_COMMIT_OS:  ApplyOsRows(c); c->hr = S_OK; break;
         case OP_IMPORT:
+            FmOpStep(L"Importing the RAPPS catalog");
             c->importWritten = FmImportRapps(NULL, 0, &c->importSkipped, NULL);
             c->hr = (c->importWritten < 0) ? E_FAIL : S_OK;
             break;
         case OP_IMPORT_SCOOP:
+            FmOpStep(L"Importing the Scoop buckets");
             FmSetLastMessage(L"");
             c->importWritten = FmImportScoop(NULL, NULL, 0, 0, &c->importSkipped, NULL);
             c->hr = (c->importWritten < 0) ? E_FAIL : S_OK;
@@ -388,14 +582,16 @@ static DWORD WINAPI OpThreadProc(LPVOID param)
     if (g_hwndMain)
         PostMessageW(g_hwndMain, WM_APP_OPDONE, 0, (LPARAM)c);
     else
-        HeapFree(GetProcessHeap(), 0, c);
+        FreeOp(c);
     return 0;
 }
 
 /* Start one op on the worker thread (UI stays responsive). Takes ownership of c. */
 static void StartOp(HWND hwnd, OPCTX *c)
 {
-    if (g_busy) { HeapFree(GetProcessHeap(), 0, c); return; }
+    if (g_busy) { FreeOp(c); return; }
+    g_closeAfterOp = FALSE;
+    FmOpBegin(ProgressSink, NULL);      /* arm cancel + progress before the worker exists */
     SetBusy(hwnd, TRUE);
     g_opThread = CreateThread(NULL, 0, OpThreadProc, c, 0, NULL);
     if (!g_opThread)
@@ -545,10 +741,52 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
     UINT icon = MB_ICONINFORMATION;
     LPCWSTR caption = L"Optional Features";
 
+    BOOL cancelled;
+
     if (g_opThread) { CloseHandle(g_opThread); g_opThread = NULL; }
+    cancelled = c->cancelled || (FAILED(c->hr) && (c->hr == HRESULT_FROM_WIN32(ERROR_CANCELLED) || FmOpCancelled()));
+    FmOpEnd();
+    g_cancelling = FALSE;
     SetBusy(hwnd, FALSE);
 
-    if (c->op == OP_IMPORT)
+    if (g_closeAfterOp)
+    {
+        /* the window was closed while the op ran and the user chose to cancel and close */
+        FreeOp(c);
+        DestroyWindow(hwnd);
+        return;
+    }
+
+    if (cancelled)
+    {
+        /* the engine says what it did (stopped the child at once; or let a Windows Installer package finish
+         * and removed it again, because a package killed part-way is not rolled back) */
+        WCHAR why[1024];
+        FmGetLastMessage(why, ARRAYSIZE(why));
+        StringCchPrintfW(msg, ARRAYSIZE(msg),
+            L"%s\n\nNothing was recorded as installed or removed by the step that was stopped; the list shows "
+            L"the current state. Run the action again to retry.",
+            why[0] ? why : L"The operation was cancelled.");
+        icon = MB_ICONWARNING;
+        if (c->op == OP_COMMIT_OS)
+            StringCchCatW(msg, ARRAYSIZE(msg), L"\n\nChanges that finished before Cancel stay applied.");
+    }
+    else if (c->op == OP_COMMIT_OS)
+    {
+        caption = L"Windows Features";
+        if (c->failed)
+        {
+            StringCchPrintfW(msg, ARRAYSIZE(msg),
+                L"Some features could not be changed. Base components cannot be turned "
+                L"off, deferred payloads cannot be turned on, and a feature in use by "
+                L"another enabled feature stays on.%s", c->summary);
+            icon = MB_ICONWARNING;
+            c->closeAfter = FALSE;   /* keep the dialog open so the user sees the corrected state */
+        }
+        else
+            StringCchCopyW(msg, ARRAYSIZE(msg), L"ReactOS has applied the requested changes.");
+    }
+    else if (c->op == OP_IMPORT)
     {
         caption = L"Import from RAPPS";
         if (SUCCEEDED(c->hr))
@@ -641,9 +879,15 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
         }
     }
 
-    HeapFree(GetProcessHeap(), 0, c);
-    FillList();   /* reloads state + re-enables the per-row verbs */
-    MessageBoxW(hwnd, msg, caption, MB_OK | icon);
+    if (cancelled && c->op == OP_COMMIT_OS) caption = L"Windows Features";
+    {
+        BOOL closeAfter = c->closeAfter && !cancelled;
+        FreeOp(c);
+        FillList();   /* reloads state + re-enables the per-row verbs */
+        SetFocus(g_hList);
+        MessageBoxW(hwnd, msg, caption, MB_OK | icon);
+        if (closeAfter) DestroyWindow(hwnd);
+    }
 }
 
 /* --- OS tier: commit the checkbox selection, Windows "Windows Features" style --- */
@@ -667,107 +911,47 @@ static BOOL OsHasPendingChanges(void)
     return FALSE;
 }
 
-/* Apply the checkbox selection. Enables happen first; disables run in repeated
- * passes so that a dependent unchecked in the same batch is turned off before
- * the feature it depends on (the engine refuses an in-use disable). Returns the
- * number of still-failed operations and fills summary. */
-static int ApplyOsChanges(HWND hwnd, LPWSTR summary, DWORD cch)
-{
-    int row, n = ListView_GetItemCount(g_hList);
-    int done = 0, failed = 0, pass;
-    LVITEMW it;
-    WCHAR line[256];
-
-    if (summary && cch) summary[0] = L'\0';
-
-    /* Pass 1: enable everything newly checked (install-on-check for NotInstalled). */
-    for (row = 0; row < n; row++)
-    {
-        FM_FEATURE *f;
-        if (!ListView_GetCheckState(g_hList, row)) continue;
-        ZeroMemory(&it, sizeof(it)); it.mask = LVIF_PARAM; it.iItem = row;
-        if (!ListView_GetItem(g_hList, &it) || (int)it.lParam >= g_count) continue;
-        f = &g_arr[it.lParam];
-        if (f->State == FM_STATE_ENABLED) continue;
-        if (!f->PayloadAvailable) { failed++; continue; }
-        if (SUCCEEDED(FmEnable(f->Id, NULL))) done++;
-        else failed++;
-    }
-
-    /* Passes 2..N: disable everything newly unchecked, retrying blocked ones so
-     * dependents (also unchecked) clear first. Stop when a pass makes no change. */
-    for (pass = 0; pass < n + 1; pass++)
-    {
-        int progress = 0;
-        for (row = 0; row < n; row++)
-        {
-            FM_FEATURE *f;
-            HRESULT hr;
-            if (ListView_GetCheckState(g_hList, row)) continue;
-            ZeroMemory(&it, sizeof(it)); it.mask = LVIF_PARAM; it.iItem = row;
-            if (!ListView_GetItem(g_hList, &it) || (int)it.lParam >= g_count) continue;
-            f = &g_arr[it.lParam];
-            if (FmGetState(f->Id) != FM_STATE_ENABLED) continue;  /* already off */
-            hr = FmDisable(f->Id, NULL);
-            if (SUCCEEDED(hr) || hr == HRESULT_FROM_WIN32(ERROR_SUCCESS_REBOOT_REQUIRED))
-            {
-                done++; progress++;
-            }
-        }
-        if (!progress) break;
-    }
-
-    /* Anything still enabled but unchecked, or unchecked+enabled that refused. */
-    for (row = 0; row < n; row++)
-    {
-        FM_FEATURE *f;
-        if (ListView_GetCheckState(g_hList, row)) continue;
-        ZeroMemory(&it, sizeof(it)); it.mask = LVIF_PARAM; it.iItem = row;
-        if (!ListView_GetItem(g_hList, &it) || (int)it.lParam >= g_count) continue;
-        f = &g_arr[it.lParam];
-        if (FmGetState(f->Id) == FM_STATE_ENABLED)
-        {
-            failed++;
-            if (summary)
-            {
-                StringCchPrintfW(line, ARRAYSIZE(line), L"\r\n  %s could not be turned off.", f->Name);
-                StringCchCatW(summary, cch, line);
-            }
-        }
-    }
-
-    UNREFERENCED_PARAMETER(hwnd);
-    return failed;
-}
-
+/* OK / Apply: copy the rows on the UI thread, apply them on the worker (a feature's files, registry and
+ * services can take a while, and nothing here may stall the message loop). */
 static void CommitOs(HWND hwnd, BOOL closeAfter)
 {
-    WCHAR summary[1024];
-    int failed;
+    int row, n, k = 0;
+    OPCTX *c;
+    OSROW *rows;
+    LVITEMW it;
 
     if (!OsHasPendingChanges())
     {
         if (closeAfter) DestroyWindow(hwnd);
         return;
     }
-
-    failed = ApplyOsChanges(hwnd, summary, ARRAYSIZE(summary));
-    FillList();
-
-    if (failed)
+    n = ListView_GetItemCount(g_hList);
+    c = (OPCTX *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*c));
+    rows = (OSROW *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (n ? n : 1) * sizeof(OSROW));
+    if (!c || !rows)
     {
-        WCHAR msg[1280];
-        StringCchPrintfW(msg, ARRAYSIZE(msg),
-            L"Some features could not be changed. Base components cannot be turned "
-            L"off, deferred payloads cannot be turned on, and a feature in use by "
-            L"another enabled feature stays on.%s", summary);
-        MessageBoxW(hwnd, msg, L"Windows Features", MB_OK | MB_ICONWARNING);
-        return;   /* keep the dialog open so the user sees the corrected state */
+        if (c) HeapFree(GetProcessHeap(), 0, c);
+        if (rows) HeapFree(GetProcessHeap(), 0, rows);
+        return;
     }
-
-    MessageBoxW(hwnd, L"ReactOS has applied the requested changes.",
-                L"Windows Features", MB_OK | MB_ICONINFORMATION);
-    if (closeAfter) DestroyWindow(hwnd);
+    for (row = 0; row < n; row++)
+    {
+        const FM_FEATURE *f;
+        ZeroMemory(&it, sizeof(it)); it.mask = LVIF_PARAM; it.iItem = row;
+        if (!ListView_GetItem(g_hList, &it) || (int)it.lParam >= g_count) continue;
+        f = &g_arr[it.lParam];
+        StringCchCopyW(rows[k].id, ARRAYSIZE(rows[k].id), f->Id);
+        StringCchCopyW(rows[k].name, ARRAYSIZE(rows[k].name), f->Name);
+        rows[k].checked = ListView_GetCheckState(g_hList, row);
+        rows[k].payload = f->PayloadAvailable;
+        rows[k].wasEnabled = (f->State == FM_STATE_ENABLED);
+        k++;
+    }
+    c->op = OP_COMMIT_OS;
+    c->rows = rows;
+    c->nrows = k;
+    c->closeAfter = closeAfter;
+    StartOp(hwnd, c);
 }
 
 /* Reject check-state changes the engine would refuse outright, so the dialog
@@ -796,6 +980,21 @@ static void OnOsCheck(int row, BOOL nowChecked)
         g_reverting = FALSE;
         SetWindowTextW(g_hDesc, msg);
     }
+}
+
+/* The description box and the busy row under it. While busy the box's bottom 22 px become the
+ * progress bar and the Cancel operation button; the rest of the window does not move (a full
+ * LayoutButtons per op would repaint the whole tab area and leave the Search box half drawn). */
+static void LayoutProgressRow(HWND hwnd)
+{
+    RECT rc;
+    int rowH = 22, cw = 132, descH = 62, bh = 26, y, descY;
+    GetClientRect(hwnd, &rc);
+    y = rc.bottom - bh - 12;
+    descY = y - 8 - descH;
+    MoveWindow(g_hDesc, 12, descY, rc.right - 24, g_busy ? descH - rowH - 2 : descH, TRUE);
+    MoveWindow(g_hProgress, 12, descY + descH - rowH, rc.right - 24 - cw - 6, rowH, TRUE);
+    MoveWindow(g_hOpCancel, rc.right - 12 - cw, descY + descH - rowH, cw, rowH, TRUE);
 }
 
 /* Position the per-tab button rows. The OS tier reads like "Windows Features"
@@ -828,11 +1027,12 @@ static void LayoutButtons(HWND hwnd)
 
     /* the main controls follow the client size (the window is wider than M1: ten verbs + a search box) */
     {
+        /* the desc box keeps its place; while busy its bottom 22 px become the progress row */
         int descH = 62, tabY = 64, descY = y - 8 - descH, tabH = descY - 8 - tabY;
         MoveWindow(g_hInstr, 12, 30, rc.right - 24, 30, TRUE);
         MoveWindow(g_hTab, 12, tabY, rc.right - 24, tabH, TRUE);
         MoveWindow(g_hList, 18, tabY + 30, rc.right - 36, tabH - 38, TRUE);
-        MoveWindow(g_hDesc, 12, descY, rc.right - 24, descH, TRUE);
+        LayoutProgressRow(hwnd);
         MoveWindow(g_hSrchLabel, 262, tabY + 5, 46, 18, TRUE);
         MoveWindow(g_hSearch, 310, tabY + 1, 170, 22, TRUE);
         MoveWindow(g_hSource, rc.right - 12 - 222, tabY + 1, 222, 200, TRUE);
@@ -922,6 +1122,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 L"Select a feature to see its description.",
                 WS_CHILD | WS_VISIBLE, 12, 372, 716, 62, hwnd, (HMENU)(INT_PTR)IDC_DESC, NULL, NULL);
 
+            /* shown only while a background op runs: marquee bar + Cancel operation */
+            g_hProgress = CreateWindowExW(0, PROGRESS_CLASSW, L"",
+                WS_CHILD | PBS_MARQUEE, 12, 400, 560, 22, hwnd, (HMENU)(INT_PTR)IDC_PROGRESS, NULL, NULL);
+            g_hOpCancel = CreateWindowExW(0, L"BUTTON", L"Cancel &operation",
+                WS_CHILD | WS_TABSTOP, 0, 0, 132, 22, hwnd, (HMENU)(INT_PTR)IDC_OPCANCEL, NULL, NULL);
+
             /* OS-tier commit row (Windows "Windows Features" style). */
             g_hOK = CreateWindowExW(0, L"BUTTON", L"OK",
                 WS_CHILD | WS_TABSTOP | BS_DEFPUSHBUTTON, 0, 0, 90, 26, hwnd,
@@ -979,6 +1185,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 WS_CHILD | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
                 498, 65, 222, 200, hwnd, (HMENU)(INT_PTR)IDC_SOURCE, NULL, NULL);
             SetWindowPos(g_hSource, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            /* the tab repaints over its siblings below it when an op disables and re-enables it: keep the
+             * labels and the search box above it too (they vanished after every op) */
+            SetWindowPos(g_hSrcLabel, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            SetWindowPos(g_hSrchLabel, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            SetWindowPos(g_hSearch, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
 
             {
                 HWND c;
@@ -1028,6 +1239,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
 
         case WM_COMMAND:
+            if (LOWORD(wp) == IDC_OPCANCEL)
+            {
+                if (g_busy && !g_cancelling &&
+                    MessageBoxW(hwnd, FmOpMayBeMsi() ?
+                        L"Cancel the running operation?\n\nA download is stopped at once. A Windows Installer package "
+                        L"that is already installing cannot be rolled back, so it is allowed to finish and is then "
+                        L"removed again; this can take a little while." :
+                        L"Cancel the running operation?\n\nThe running installer or script is stopped at once.",
+                        L"Optional Features", MB_YESNO | MB_ICONQUESTION) == IDYES && g_busy)
+                    BeginCancel();
+                return 0;
+            }
             if (g_busy) return 0;   /* a background op is running; ignore new commands */
             switch (LOWORD(wp))
             {
@@ -1063,7 +1286,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case WM_APP_OPDONE:
             OnOpDone(hwnd, (OPCTX *)lp);
             return 0;
+        case WM_APP_PROGRESS:
+            EnterCriticalSection(&g_progCs);
+            g_progPending = FALSE;
+            LeaveCriticalSection(&g_progCs);
+            if (g_busy) ShowStatus();
+            return 0;
         case WM_TIMER:
+            if (wp == IDT_ELAPSED)
+            {
+                if (g_busy) ShowStatus();
+                return 0;
+            }
             if (wp == IDT_SEARCH)
             {
                 KillTimer(hwnd, IDT_SEARCH);
@@ -1072,11 +1306,30 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             return 0;
         case WM_CLOSE:
-            if (g_busy) return 0;   /* do not tear down while a worker op is in flight */
+            if (g_busy)
+            {
+                /* never tear down under a running worker, and never ignore the user: ask, then stop the op
+                 * (the child process tree is ended) and close when the worker has reported back */
+                if (g_cancelling)
+                {
+                    g_closeAfterOp = TRUE;      /* already stopping: close as soon as it has */
+                    return 0;
+                }
+                if (MessageBoxW(hwnd, L"An operation is running: cancel it and close?", L"Optional Features",
+                                MB_YESNO | MB_ICONQUESTION) != IDYES)
+                    return 0;
+                if (g_busy)
+                {
+                    g_closeAfterOp = TRUE;
+                    BeginCancel();
+                    return 0;
+                }
+            }
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
             KillTimer(hwnd, IDT_SEARCH);
+            KillTimer(hwnd, IDT_ELAPSED);
             if (g_arr) { FmFree(g_arr); g_arr = NULL; }
             if (g_opThread) { CloseHandle(g_opThread); g_opThread = NULL; }
             if (g_hFont && g_hFont != GetStockObject(DEFAULT_GUI_FONT))
@@ -1142,8 +1395,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
     }
 
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES | ICC_STANDARD_CLASSES;
+    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES | ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS;
     InitCommonControlsEx(&icc);
+    InitializeCriticalSection(&g_progCs);
 
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize = sizeof(wc);
