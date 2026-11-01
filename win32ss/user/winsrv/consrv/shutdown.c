@@ -21,11 +21,23 @@ NotifyConsoleProcessForShutdown(IN PCSR_PROCESS CsrProcess,
                                 IN PCONSOLE_PROCESS_DATA ProcessData,
                                 IN ULONG Flags)
 {
+    ULONG CtrlEvent;
+
     DPRINT1("ConsoleClientShutdown(0x%p, 0x%x) - Console process [0x%x, 0x%x]\n",
              CsrProcess, Flags, CsrProcess->ClientId.UniqueProcess, CsrProcess->ClientId.UniqueThread);
 
-    /* Send a log-off event. In reality this should be way more complex */
-    ConSrvConsoleCtrlEventTimeout(CTRL_LOGOFF_EVENT, ProcessData,
+    /*
+     * A system shutdown sends CTRL_SHUTDOWN_EVENT, a logoff CTRL_LOGOFF_EVENT.
+     * A process of the system or of another logon context is a service: it is
+     * not ended for a handler that took the event (see console.c). A logoff
+     * does not get here for such a process (see ConsoleClientShutdown).
+     */
+    CtrlEvent = (Flags & EWX_SHUTDOWN) ? CTRL_SHUTDOWN_EVENT : CTRL_LOGOFF_EVENT;
+
+    if (CsrProcess->ShutdownFlags & (CsrShutdownSystem | CsrShutdownOther))
+        CtrlEvent |= 0x80000000UL; /* CTRL_EVENT_SERVICE_FLAG */
+
+    ConSrvConsoleCtrlEventTimeout(CtrlEvent, ProcessData,
                                   ShutdownSettings.WaitToKillAppTimeout);
 }
 
