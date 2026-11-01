@@ -1,0 +1,244 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Default views of the NetTCPIP objects of ReactOS-Nitro: column names, widths and alignment as measured on Windows 10. -->
+<Configuration>
+  <ViewDefinitions>
+    <View><Name>DefaultView</Name><ViewSelectedBy>
+      <TypeName>Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_NetIPAddress</TypeName>
+    </ViewSelectedBy><ListControl><ListEntries><ListEntry><ListItems>
+      <ListItem><PropertyName>IPAddress</PropertyName></ListItem>
+      <ListItem><PropertyName>InterfaceIndex</PropertyName></ListItem>
+      <ListItem><PropertyName>InterfaceAlias</PropertyName></ListItem>
+      <ListItem><PropertyName>AddressFamily</PropertyName></ListItem>
+      <ListItem><PropertyName>Type</PropertyName></ListItem>
+      <ListItem><PropertyName>PrefixLength</PropertyName></ListItem>
+      <ListItem><PropertyName>PrefixOrigin</PropertyName></ListItem>
+      <ListItem><PropertyName>SuffixOrigin</PropertyName></ListItem>
+      <ListItem><PropertyName>AddressState</PropertyName></ListItem>
+      <ListItem><Label>ValidLifetime</Label><ScriptBlock>if ($_.ValidLifetime -eq [TimeSpan]::MaxValue) { 'Infinite ([TimeSpan]::MaxValue)' } else { $_.ValidLifetime }</ScriptBlock></ListItem>
+      <ListItem><Label>PreferredLifetime</Label><ScriptBlock>if ($_.PreferredLifetime -eq [TimeSpan]::MaxValue) { 'Infinite ([TimeSpan]::MaxValue)' } else { $_.PreferredLifetime }</ScriptBlock></ListItem>
+      <ListItem><PropertyName>SkipAsSource</PropertyName></ListItem>
+      <ListItem><Label>PolicyStore</Label><PropertyName>Store</PropertyName></ListItem>
+    </ListItems></ListEntry></ListEntries></ListControl></View>
+    <View><Name>TableView</Name><ViewSelectedBy>
+      <TypeName>Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_NetIPAddress</TypeName>
+    </ViewSelectedBy><TableControl><TableHeaders>
+      <TableColumnHeader><Label>ifIndex</Label><Width>7</Width></TableColumnHeader>
+      <TableColumnHeader><Width>47</Width></TableColumnHeader>
+      <TableColumnHeader><Width>12</Width></TableColumnHeader>
+      <TableColumnHeader><Width>12</Width></TableColumnHeader>
+      <TableColumnHeader><Width>12</Width></TableColumnHeader>
+      <TableColumnHeader><Width>12</Width></TableColumnHeader>
+      <TableColumnHeader><Label>PolicyStore</Label><Width>11</Width></TableColumnHeader>
+    </TableHeaders><TableRowEntries><TableRowEntry><TableColumnItems>
+      <TableColumnItem><PropertyName>InterfaceIndex</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>IPAddress</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>PrefixLength</PropertyName><Alignment>Right</Alignment></TableColumnItem>
+      <TableColumnItem><PropertyName>PrefixOrigin</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>SuffixOrigin</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>AddressState</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>Store</PropertyName></TableColumnItem>
+    </TableColumnItems></TableRowEntry></TableRowEntries></TableControl></View>
+    <View><Name>DefaultView</Name><ViewSelectedBy>
+      <TypeName>Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_NetIPInterface</TypeName>
+    </ViewSelectedBy><TableControl><TableHeaders>
+      <TableColumnHeader><Label>ifIndex</Label><Width>7</Width></TableColumnHeader>
+      <TableColumnHeader><Width>31</Width></TableColumnHeader>
+      <TableColumnHeader><Width>13</Width></TableColumnHeader>
+      <TableColumnHeader><Label>NlMtu(Bytes)</Label><Width>12</Width></TableColumnHeader>
+      <TableColumnHeader><Width>15</Width></TableColumnHeader>
+      <TableColumnHeader><Width>8</Width></TableColumnHeader>
+      <TableColumnHeader><Width>15</Width></TableColumnHeader>
+      <TableColumnHeader><Label>PolicyStore</Label><Width>11</Width></TableColumnHeader>
+    </TableHeaders><TableRowEntries><TableRowEntry><TableColumnItems>
+      <TableColumnItem><PropertyName>InterfaceIndex</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>InterfaceAlias</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>AddressFamily</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>NlMtu</PropertyName><Alignment>Right</Alignment></TableColumnItem>
+      <TableColumnItem><PropertyName>InterfaceMetric</PropertyName><Alignment>Right</Alignment></TableColumnItem>
+      <TableColumnItem><PropertyName>Dhcp</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>ConnectionState</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>Store</PropertyName></TableColumnItem>
+    </TableColumnItems></TableRowEntry></TableRowEntries></TableControl></View>
+    <View><Name>ListView</Name><ViewSelectedBy>
+      <TypeName>Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_NetIPInterface</TypeName>
+    </ViewSelectedBy><ListControl><ListEntries><ListEntry><ListItems>
+      <ListItem><PropertyName>InterfaceIndex</PropertyName></ListItem>
+      <ListItem><PropertyName>InterfaceAlias</PropertyName></ListItem>
+      <ListItem><PropertyName>CompartmentId</PropertyName></ListItem>
+      <ListItem><PropertyName>AddressFamily</PropertyName></ListItem>
+      <ListItem><PropertyName>Forwarding</PropertyName></ListItem>
+      <ListItem><PropertyName>ClampMss</PropertyName></ListItem>
+      <ListItem><PropertyName>Advertising</PropertyName></ListItem>
+      <ListItem><Label>NlMtu(Bytes)</Label><PropertyName>NlMtu</PropertyName></ListItem>
+      <ListItem><PropertyName>AutomaticMetric</PropertyName></ListItem>
+      <ListItem><PropertyName>InterfaceMetric</PropertyName></ListItem>
+      <ListItem><PropertyName>NeighborDiscoverySupported</PropertyName></ListItem>
+      <ListItem><PropertyName>NeighborUnreachabilityDetection</PropertyName></ListItem>
+      <ListItem><Label>BaseReachableTime(ms)</Label><PropertyName>BaseReachableTime</PropertyName></ListItem>
+      <ListItem><Label>ReachableTime(ms)</Label><PropertyName>ReachableTime</PropertyName></ListItem>
+      <ListItem><Label>RetransmitTime(ms)</Label><PropertyName>RetransmitTime</PropertyName></ListItem>
+      <ListItem><PropertyName>DadTransmits</PropertyName></ListItem>
+      <ListItem><Label>DadRetransmitTime(ms)</Label><PropertyName>DadRetransmitTime</PropertyName></ListItem>
+      <ListItem><PropertyName>RouterDiscovery</PropertyName></ListItem>
+      <ListItem><PropertyName>ManagedAddressConfiguration</PropertyName></ListItem>
+      <ListItem><PropertyName>OtherStatefulConfiguration</PropertyName></ListItem>
+      <ListItem><PropertyName>WeakHostSend</PropertyName></ListItem>
+      <ListItem><PropertyName>WeakHostReceive</PropertyName></ListItem>
+      <ListItem><PropertyName>IgnoreDefaultRoutes</PropertyName></ListItem>
+      <ListItem><Label>AdvertisedRouterLifetime</Label><ScriptBlock>if ($_.AdvertisedRouterLifetime -eq [TimeSpan]::MaxValue) { 'Infinite ([TimeSpan]::MaxValue)' } else { $_.AdvertisedRouterLifetime }</ScriptBlock></ListItem>
+      <ListItem><PropertyName>AdvertiseDefaultRoute</PropertyName></ListItem>
+      <ListItem><PropertyName>CurrentHopLimit</PropertyName></ListItem>
+      <ListItem><PropertyName>ForceArpNdWolPattern</PropertyName></ListItem>
+      <ListItem><PropertyName>DirectedMacWolPattern</PropertyName></ListItem>
+      <ListItem><PropertyName>EcnMarking</PropertyName></ListItem>
+      <ListItem><PropertyName>Dhcp</PropertyName></ListItem>
+      <ListItem><PropertyName>ConnectionState</PropertyName></ListItem>
+      <ListItem><Label>PolicyStore</Label><PropertyName>Store</PropertyName></ListItem>
+    </ListItems></ListEntry></ListEntries></ListControl></View>
+    <View><Name>DefaultView</Name><ViewSelectedBy>
+      <TypeName>Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_NetRoute</TypeName>
+    </ViewSelectedBy><TableControl><TableHeaders>
+      <TableColumnHeader><Label>ifIndex</Label><Width>7</Width></TableColumnHeader>
+      <TableColumnHeader><Width>46</Width></TableColumnHeader>
+      <TableColumnHeader><Width>40</Width></TableColumnHeader>
+      <TableColumnHeader><Width>11</Width></TableColumnHeader>
+      <TableColumnHeader><Label>ifMetric</Label><Width>8</Width></TableColumnHeader>
+      <TableColumnHeader><Label>PolicyStore</Label><Width>11</Width></TableColumnHeader>
+    </TableHeaders><TableRowEntries><TableRowEntry><TableColumnItems>
+      <TableColumnItem><PropertyName>InterfaceIndex</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>DestinationPrefix</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>NextHop</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>RouteMetric</PropertyName><Alignment>Right</Alignment></TableColumnItem>
+      <TableColumnItem><PropertyName>InterfaceMetric</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>Store</PropertyName></TableColumnItem>
+    </TableColumnItems></TableRowEntry></TableRowEntries></TableControl></View>
+    <View><Name>ListView</Name><ViewSelectedBy>
+      <TypeName>Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_NetRoute</TypeName>
+    </ViewSelectedBy><ListControl><ListEntries><ListEntry><ListItems>
+      <ListItem><PropertyName>DestinationPrefix</PropertyName></ListItem>
+      <ListItem><PropertyName>InterfaceIndex</PropertyName></ListItem>
+      <ListItem><PropertyName>InterfaceAlias</PropertyName></ListItem>
+      <ListItem><PropertyName>CompartmentId</PropertyName></ListItem>
+      <ListItem><PropertyName>AddressFamily</PropertyName></ListItem>
+      <ListItem><PropertyName>NextHop</PropertyName></ListItem>
+      <ListItem><PropertyName>Publish</PropertyName></ListItem>
+      <ListItem><PropertyName>State</PropertyName></ListItem>
+      <ListItem><PropertyName>RouteMetric</PropertyName></ListItem>
+      <ListItem><PropertyName>InterfaceMetric</PropertyName></ListItem>
+      <ListItem><PropertyName>Protocol</PropertyName></ListItem>
+      <ListItem><Label>ValidLifetime</Label><ScriptBlock>if ($_.ValidLifetime -eq [TimeSpan]::MaxValue) { 'Infinite ([TimeSpan]::MaxValue)' } else { $_.ValidLifetime }</ScriptBlock></ListItem>
+      <ListItem><Label>PreferredLifetime</Label><ScriptBlock>if ($_.PreferredLifetime -eq [TimeSpan]::MaxValue) { 'Infinite ([TimeSpan]::MaxValue)' } else { $_.PreferredLifetime }</ScriptBlock></ListItem>
+      <ListItem><Label>PolicyStore</Label><PropertyName>Store</PropertyName></ListItem>
+    </ListItems></ListEntry></ListEntries></ListControl></View>
+    <View><Name>DefaultView</Name><ViewSelectedBy>
+      <TypeName>Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_NetTCPConnection</TypeName>
+    </ViewSelectedBy><TableControl><TableHeaders>
+      <TableColumnHeader><Width>35</Width></TableColumnHeader>
+      <TableColumnHeader><Width>9</Width></TableColumnHeader>
+      <TableColumnHeader><Width>35</Width></TableColumnHeader>
+      <TableColumnHeader><Width>10</Width></TableColumnHeader>
+      <TableColumnHeader><Width>11</Width></TableColumnHeader>
+      <TableColumnHeader><Width>14</Width></TableColumnHeader>
+      <TableColumnHeader><Width>14</Width></TableColumnHeader>
+    </TableHeaders><TableRowEntries><TableRowEntry><TableColumnItems>
+      <TableColumnItem><PropertyName>LocalAddress</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>LocalPort</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>RemoteAddress</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>RemotePort</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>State</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>AppliedSetting</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>OwningProcess</PropertyName></TableColumnItem>
+    </TableColumnItems></TableRowEntry></TableRowEntries></TableControl></View>
+    <View><Name>ListView</Name><ViewSelectedBy>
+      <TypeName>Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_NetTCPConnection</TypeName>
+    </ViewSelectedBy><ListControl><ListEntries><ListEntry><ListItems>
+      <ListItem><PropertyName>LocalAddress</PropertyName></ListItem>
+      <ListItem><PropertyName>LocalPort</PropertyName></ListItem>
+      <ListItem><PropertyName>RemoteAddress</PropertyName></ListItem>
+      <ListItem><PropertyName>RemotePort</PropertyName></ListItem>
+      <ListItem><PropertyName>State</PropertyName></ListItem>
+      <ListItem><PropertyName>AppliedSetting</PropertyName></ListItem>
+      <ListItem><PropertyName>OwningProcess</PropertyName></ListItem>
+      <ListItem><Label>CreationTime</Label><ScriptBlock>if ($_.CreationTime) { $_.CreationTime.ToString() }</ScriptBlock></ListItem>
+      <ListItem><PropertyName>OffloadState</PropertyName></ListItem>
+    </ListItems></ListEntry></ListEntries></ListControl></View>
+    <View><Name>DefaultView</Name><ViewSelectedBy>
+      <TypeName>Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_NetUDPEndpoint</TypeName>
+    </ViewSelectedBy><TableControl><TableHeaders>
+      <TableColumnHeader><Width>40</Width></TableColumnHeader>
+      <TableColumnHeader><Width>15</Width></TableColumnHeader>
+    </TableHeaders><TableRowEntries><TableRowEntry><TableColumnItems>
+      <TableColumnItem><PropertyName>LocalAddress</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>LocalPort</PropertyName></TableColumnItem>
+    </TableColumnItems></TableRowEntry></TableRowEntries></TableControl></View>
+    <View><Name>ListView</Name><ViewSelectedBy>
+      <TypeName>Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_NetUDPEndpoint</TypeName>
+    </ViewSelectedBy><ListControl><ListEntries><ListEntry><ListItems>
+      <ListItem><PropertyName>LocalAddress</PropertyName></ListItem>
+      <ListItem><PropertyName>LocalPort</PropertyName></ListItem>
+      <ListItem><PropertyName>OwningProcess</PropertyName></ListItem>
+      <ListItem><Label>CreationTime</Label><ScriptBlock>if ($_.CreationTime) { $_.CreationTime.ToString() }</ScriptBlock></ListItem>
+    </ListItems></ListEntry></ListEntries></ListControl></View>
+    <View><Name>NetIPConfiguration</Name><ViewSelectedBy>
+      <TypeName>NetIPConfiguration</TypeName>
+    </ViewSelectedBy><ListControl><ListEntries><ListEntry><ListItems>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed</ScriptBlock></ItemSelectionCondition><PropertyName>ComputerName</PropertyName></ListItem>
+      <ListItem><PropertyName>InterfaceAlias</PropertyName></ListItem>
+      <ListItem><PropertyName>InterfaceIndex</PropertyName></ListItem>
+      <ListItem><PropertyName>InterfaceDescription</PropertyName></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed</ScriptBlock></ItemSelectionCondition><Label>NetCompartment.CompartmentId</Label><ScriptBlock>$_.NetCompartment.CompartmentId</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed</ScriptBlock></ItemSelectionCondition><Label>NetCompartment.CompartmentDescription</Label><ScriptBlock>$_.NetCompartment.CompartmentDescription</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed</ScriptBlock></ItemSelectionCondition><Label>NetAdapter.LinkLayerAddress</Label><ScriptBlock>$_.NetAdapter.LinkLayerAddress</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed</ScriptBlock></ItemSelectionCondition><Label>NetAdapter.Status</Label><ScriptBlock>$_.NetAdapter.Status</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.NetProfile -ne $null</ScriptBlock></ItemSelectionCondition><Label>NetProfile.Name</Label><ScriptBlock>$_.NetProfile.Name</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed -and $_.NetProfile -ne $null</ScriptBlock></ItemSelectionCondition><Label>NetProfile.NetworkCategory</Label><ScriptBlock>$_.NetProfile.NetworkCategory</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed -and $_.NetProfile -ne $null</ScriptBlock></ItemSelectionCondition><Label>NetProfile.IPv6Connectivity</Label><ScriptBlock>$_.NetProfile.IPv6Connectivity</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed -and $_.NetProfile -ne $null</ScriptBlock></ItemSelectionCondition><Label>NetProfile.IPv4Connectivity</Label><ScriptBlock>$_.NetProfile.IPv4Connectivity</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>@($_.IPv6Address).Count -gt 0</ScriptBlock></ItemSelectionCondition><Label>IPv6Address</Label><ScriptBlock>$_.IPv6Address.IPAddress -join ', '</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>@($_.IPv6TemporaryAddress).Count -gt 0</ScriptBlock></ItemSelectionCondition><Label>IPv6TemporaryAddress</Label><ScriptBlock>$_.IPv6TemporaryAddress.IPAddress -join ', '</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed -and @($_.IPv6LinkLocalAddress).Count -gt 0</ScriptBlock></ItemSelectionCondition><Label>IPv6LinkLocalAddress</Label><ScriptBlock>$_.IPv6LinkLocalAddress.IPAddress -join ', '</ScriptBlock></ListItem>
+      <ListItem><Label>IPv4Address</Label><ScriptBlock>$_.IPv4Address.IPAddress -join ', '</ScriptBlock></ListItem>
+      <ListItem><Label>IPv6DefaultGateway</Label><ScriptBlock>$_.IPv6DefaultGateway.NextHop -join ', '</ScriptBlock></ListItem>
+      <ListItem><Label>IPv4DefaultGateway</Label><ScriptBlock>$_.IPv4DefaultGateway.NextHop -join ', '</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed -and $_.NetIPv6Interface -ne $null</ScriptBlock></ItemSelectionCondition><Label>NetIPv6Interface.NlMTU</Label><ScriptBlock>$_.NetIPv6Interface.NlMtu</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed -and $_.NetIPv4Interface -ne $null</ScriptBlock></ItemSelectionCondition><Label>NetIPv4Interface.NlMTU</Label><ScriptBlock>$_.NetIPv4Interface.NlMtu</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed -and $_.NetIPv6Interface -ne $null</ScriptBlock></ItemSelectionCondition><Label>NetIPv6Interface.DHCP</Label><ScriptBlock>$_.NetIPv6Interface.Dhcp</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed -and $_.NetIPv4Interface -ne $null</ScriptBlock></ItemSelectionCondition><Label>NetIPv4Interface.DHCP</Label><ScriptBlock>$_.NetIPv4Interface.Dhcp</ScriptBlock></ListItem>
+      <ListItem><Label>DNSServer</Label><ScriptBlock>$_.DNSServer.ServerAddresses -join ', '</ScriptBlock></ListItem>
+    </ListItems></ListEntry></ListEntries></ListControl></View>
+    <View><Name>DefaultView</Name><ViewSelectedBy>
+      <TypeName>TestNetConnectionResult</TypeName>
+    </ViewSelectedBy><ListControl><ListEntries><ListEntry><ListItems>
+      <ListItem><PropertyName>ComputerName</PropertyName></ListItem>
+      <ListItem><PropertyName>RemoteAddress</PropertyName></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.RemotePort -gt 0</ScriptBlock></ItemSelectionCondition><Label>RemotePort</Label><PropertyName>RemotePort</PropertyName></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed</ScriptBlock></ItemSelectionCondition><Label>NameResolutionResults</Label><ScriptBlock>$_.ResolvedAddresses -join ', '</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed -and $_.RemotePort -gt 0</ScriptBlock></ItemSelectionCondition><Label>MatchingIPsecRules</Label><PropertyName>MatchingIPsecRules</PropertyName></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed -and $_.RemotePort -gt 0</ScriptBlock></ItemSelectionCondition><Label>NetworkIsolationContext</Label><PropertyName>NetworkIsolationContext</PropertyName></ListItem>
+      <ListItem><PropertyName>InterfaceAlias</PropertyName></ListItem>
+      <ListItem><Label>SourceAddress</Label><ScriptBlock>$_.SourceAddress.IPAddress</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.Detailed</ScriptBlock></ItemSelectionCondition><Label>NetRoute (NextHop)</Label><ScriptBlock>$_.NetRoute.NextHop</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>($_.RemotePort -eq 0) -or $_.PingSucceeded -or ($_.PingReplyDetails -ne $null)</ScriptBlock></ItemSelectionCondition><Label>PingSucceeded</Label><PropertyName>PingSucceeded</PropertyName></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.PingReplyDetails -ne $null</ScriptBlock></ItemSelectionCondition><Label>PingReplyDetails (RTT)</Label><ScriptBlock>"$($_.PingReplyDetails.RoundtripTime) ms"</ScriptBlock></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.RemotePort -gt 0</ScriptBlock></ItemSelectionCondition><Label>TcpTestSucceeded</Label><PropertyName>TcpTestSucceeded</PropertyName></ListItem>
+      <ListItem><ItemSelectionCondition><ScriptBlock>$_.TraceRoute -ne $null</ScriptBlock></ItemSelectionCondition><PropertyName>TraceRoute</PropertyName></ListItem>
+    </ListItems></ListEntry></ListEntries></ListControl></View>
+    <View><Name>TableView</Name><ViewSelectedBy>
+      <TypeName>TestNetConnectionResult</TypeName>
+    </ViewSelectedBy><TableControl><TableHeaders>
+      <TableColumnHeader><Width>15</Width></TableColumnHeader>
+      <TableColumnHeader><Width>10</Width></TableColumnHeader>
+      <TableColumnHeader><Width>30</Width></TableColumnHeader>
+      <TableColumnHeader><Width>20</Width></TableColumnHeader>
+      <TableColumnHeader><Label>PingReplyDetails (RTT)</Label><Width>25</Width></TableColumnHeader>
+      <TableColumnHeader><Width>35</Width></TableColumnHeader>
+    </TableHeaders><TableRowEntries><TableRowEntry><TableColumnItems>
+      <TableColumnItem><PropertyName>ComputerName</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>RemotePort</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>RemoteAddress</PropertyName></TableColumnItem>
+      <TableColumnItem><PropertyName>PingSucceeded</PropertyName></TableColumnItem>
+      <TableColumnItem><ScriptBlock>if ($_.PingReplyDetails) { "$($_.PingReplyDetails.RoundtripTime) ms" }</ScriptBlock></TableColumnItem>
+      <TableColumnItem><PropertyName>TcpTestSucceeded</PropertyName></TableColumnItem>
+    </TableColumnItems></TableRowEntry></TableRowEntries></TableControl></View>
+  </ViewDefinitions>
+</Configuration>

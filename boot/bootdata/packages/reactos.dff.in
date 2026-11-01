@@ -111,6 +111,12 @@ Signature = "$Windows NT$"
 89 = system32\WindowsPowerShell\v1.0\Modules
 90 = system32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.LocalAccounts
 91 = system32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.LocalAccounts\1.0.0.0
+92 = system32\WindowsPowerShell\v1.0\Modules\NetAdapter
+93 = system32\WindowsPowerShell\v1.0\Modules\NetAdapter\2.0.0.0
+94 = system32\WindowsPowerShell\v1.0\Modules\NetTCPIP
+95 = system32\WindowsPowerShell\v1.0\Modules\NetTCPIP\1.0.0.0
+96 = system32\WindowsPowerShell\v1.0\Modules\DnsClient
+97 = system32\WindowsPowerShell\v1.0\Modules\DnsClient\1.0.0.0
 
 .InfEnd
 
