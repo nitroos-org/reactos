@@ -14,6 +14,12 @@
 #include <winioctl.h>
 #include <ntddstor.h>
 #include <ntddscsi.h>
+/* winioctl.h also defines these serial constants (same values); ntddser.h redefines them */
+#undef IOCTL_SERIAL_LSRMST_INSERT
+#undef SERIAL_LSRMST_LSR_DATA
+#undef SERIAL_LSRMST_LSR_NODATA
+#undef SERIAL_LSRMST_MST
+#undef SERIAL_LSRMST_ESCAPE
 #include <ntddser.h>
 #include <ntddkbd.h>
 #include <ntddmou.h>
