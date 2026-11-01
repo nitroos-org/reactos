@@ -113,6 +113,7 @@ list(APPEND SOURCE
     client/power.c
     client/privnamespace.c
     client/proc.c
+    client/pseudoconsole.c
     client/procinfo.c
     client/procansi.c
     client/pss.c

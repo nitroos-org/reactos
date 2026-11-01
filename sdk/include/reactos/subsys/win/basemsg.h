@@ -101,6 +101,7 @@ typedef struct _BASE_CREATE_PROCESS
     BOOLEAN HandleListPresent;
     ULONG ConsoleHandleCount;
     PHANDLE ConsoleHandleList;
+    HANDLE PseudoConsoleProcessId;
 } BASE_CREATE_PROCESS, *PBASE_CREATE_PROCESS;
 
 typedef struct _BASE_CREATE_THREAD

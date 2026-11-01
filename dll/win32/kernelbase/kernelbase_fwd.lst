@@ -40,6 +40,7 @@
 @ ClearCommBreak
 @ ClearCommError
 @ CloseHandle
+@ ClosePseudoConsole
 @ CloseThreadpool -version=0x600+
 @ CloseThreadpoolCleanupGroup -version=0x600+
 @ CloseThreadpoolCleanupGroupMembers -version=0x600+
@@ -84,6 +85,7 @@
 @ CreateProcessInternalA
 @ CreateProcessInternalW
 @ CreateProcessW
+@ CreatePseudoConsole
 @ CreateRemoteThread
 @ CreateRemoteThreadEx -version=0x601+
 @ CreateSymbolicLinkW -version=0x600+
@@ -586,6 +588,7 @@
 @ RemoveVectoredExceptionHandler
 @ ReplaceFileW
 @ ResetWriteWatch
+@ ResizePseudoConsole
 @ ResolveLocaleName -version=0x601+
 @ RestoreLastError
 @ ResumeThread

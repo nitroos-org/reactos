@@ -35,6 +35,7 @@ list(APPEND SOURCE
     ConsoleDisplayMode.c
     ConsoleViewFollow.c
     ConsoleVirtualTerminal.c
+    ConPty.c
     ConsoleWriteLatency.c
     CopyFile2.c
     CopyFile2Identity.c

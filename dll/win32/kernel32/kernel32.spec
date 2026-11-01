@@ -72,6 +72,7 @@
 @ stdcall ClearCommError(long ptr ptr)
 @ stdcall CloseConsoleHandle(long)
 @ stdcall CloseHandle(long)
+@ stdcall ClosePseudoConsole(ptr)
 @ stdcall ClosePackageInfo(ptr)
 @ stdcall -version=0x600+ ClosePrivateNamespace(ptr long)
 @ stdcall CloseProfileUserMapping()
@@ -164,6 +165,7 @@
 @ stdcall CreateProcessInternalA(ptr str str ptr ptr long long ptr str ptr ptr long)
 @ stdcall CreateProcessInternalW(ptr wstr wstr ptr ptr long long ptr wstr ptr ptr long)
 @ stdcall CreateProcessW(wstr wstr ptr ptr long long ptr wstr ptr ptr)
+@ stdcall CreatePseudoConsole(long ptr ptr long ptr)
 @ stdcall CreateRemoteThread(long ptr long ptr long long ptr)
 @ stdcall -version=0x601+ CreateRemoteThreadEx(ptr ptr long ptr ptr long ptr ptr)
 @ stdcall CreateSemaphoreA(ptr long long str)
@@ -1050,6 +1052,7 @@
 @ stdcall RequestWakeupLatency(long)
 @ stdcall ResolveDelayLoadedAPI(ptr ptr ptr ptr ptr long) ntdll.LdrResolveDelayLoadedAPI
 @ stdcall ResetEvent(long)
+@ stdcall ResizePseudoConsole(ptr long)
 @ stdcall ResetWriteWatch(ptr long)
 @ stdcall -version=0x601+ ResolveLocaleName(wstr ptr long)
 @ stdcall RestoreLastError(long) ntdll.RtlRestoreLastWin32Error

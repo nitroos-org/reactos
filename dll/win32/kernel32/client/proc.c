@@ -11,6 +11,7 @@
 /* INCLUDES ****************************************************************/
 
 #include <k32.h>
+#include "pseudoconsole.h"
 #ifdef SYSWOW64_GUEST
 #include <reactos/wow64process.h>
 #endif
@@ -578,7 +579,8 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
                           IN BOOL InheritHandles,
                           IN ULONG ImageSubsystem,
                           IN PVOID AppCompatData,
-                          IN ULONG AppCompatDataSize)
+                          IN ULONG AppCompatDataSize,
+                          IN PBASE_PSEUDOCONSOLE PseudoConsole)
 {
     WCHAR FullPath[MAX_PATH + 5];
     PWCHAR Remaining, DllPathString, ScanChar;
@@ -827,6 +829,14 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
                 ProcessParameters->StandardError = Peb->ProcessParameters->StandardError;
             }
         }
+    }
+
+    if (PseudoConsole)
+    {
+        ProcessParameters->ConsoleHandle = PseudoConsole->Console;
+        ProcessParameters->StandardInput = PseudoConsole->Input;
+        ProcessParameters->StandardOutput = PseudoConsole->Output;
+        ProcessParameters->StandardError = PseudoConsole->Output;
     }
 
     /* Also set the Console Flag */
@@ -2580,6 +2590,9 @@ BasepCheckProcThreadAttribute(
         case PROC_THREAD_ATTRIBUTE_HANDLE_LIST:
             return (Size && !(Size % sizeof(HANDLE))) ? ERROR_SUCCESS : ERROR_BAD_LENGTH;
 
+        case PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE:
+            return (Size == sizeof(HANDLE)) ? ERROR_SUCCESS : ERROR_BAD_LENGTH;
+
         case PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR:
             return (Size == sizeof(PROCESSOR_NUMBER)) ? ERROR_SUCCESS : ERROR_BAD_LENGTH;
 
@@ -2727,11 +2740,13 @@ NTSTATUS
 BasepReadProcThreadAttributes(
     _In_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList,
     _Out_ PPROC_THREAD_ATTRIBUTE_ENTRY *HandleList,
-    _Out_ PPROC_THREAD_ATTRIBUTE_ENTRY *JobList)
+    _Out_ PPROC_THREAD_ATTRIBUTE_ENTRY *JobList,
+    _Out_ PPROC_THREAD_ATTRIBUTE_ENTRY *PseudoConsole)
 {
     DWORD i;
     *HandleList = NULL;
     *JobList = NULL;
+    *PseudoConsole = NULL;
     if (AttributeList->LastAttribute > AttributeList->AttributeCount ||
         AttributeList->AttributeCount > PROC_THREAD_ATTRIBUTE_NUMBER)
         return STATUS_INVALID_PARAMETER;
@@ -2753,6 +2768,14 @@ BasepReadProcThreadAttributes(
             if (*JobList || !Entry->Size || Entry->Size % sizeof(HANDLE))
                 return STATUS_INVALID_PARAMETER;
             *JobList = Entry;
+            continue;
+        }
+
+        if (Entry->Attribute == PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE)
+        {
+            if (*PseudoConsole || Entry->Size != sizeof(HANDLE))
+                return STATUS_INVALID_PARAMETER;
+            *PseudoConsole = Entry;
             continue;
         }
 
@@ -2868,6 +2891,8 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     STARTUPINFOW StartupInfo;
     PPROC_THREAD_ATTRIBUTE_ENTRY HandleListAttribute = NULL;
     PPROC_THREAD_ATTRIBUTE_ENTRY JobListAttribute = NULL;
+    PPROC_THREAD_ATTRIBUTE_ENTRY PseudoConsoleAttribute = NULL;
+    PBASE_PSEUDOCONSOLE PseudoConsole = NULL;
     PHANDLE KernelHandleList = NULL, ConsoleHandleList = NULL;
     SIZE_T KernelHandleCount = 0, ConsoleHandleCount = 0;
     ROS_PS_ATTRIBUTE_LIST NativeAttributes;
@@ -2955,7 +2980,8 @@ CreateProcessInternalW(IN HANDLE hUserToken,
         {
             Status = BasepReadProcThreadAttributes(((LPSTARTUPINFOEXW)lpStartupInfo)->lpAttributeList,
                                                    &HandleListAttribute,
-                                                   &JobListAttribute);
+                                                   &JobListAttribute,
+                                                   &PseudoConsoleAttribute);
             if (!NT_SUCCESS(Status))
             {
                 BaseSetLastNTError(Status);
@@ -2963,6 +2989,26 @@ CreateProcessInternalW(IN HANDLE hUserToken,
             }
         }
         dwCreationFlags &= ~EXTENDED_STARTUPINFO_PRESENT;
+    }
+    if (PseudoConsoleAttribute)
+    {
+        _SEH2_TRY
+        {
+            PseudoConsole = (PBASE_PSEUDOCONSOLE)PseudoConsoleAttribute->Value;
+            if (PseudoConsole->Magic != BASE_PSEUDOCONSOLE_MAGIC ||
+                WaitForSingleObject(PseudoConsole->Process, 0) != WAIT_TIMEOUT)
+                PseudoConsole = NULL;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            PseudoConsole = NULL;
+        }
+        _SEH2_END;
+        if (!PseudoConsole)
+        {
+            SetLastError(ERROR_INVALID_HANDLE);
+            return FALSE;
+        }
     }
     if (HandleListAttribute && !bInheritHandles)
     {
@@ -3199,6 +3245,9 @@ CreateProcessInternalW(IN HANDLE hUserToken,
 
     /* Make a copy of the caller's startup info since we'll modify it */
     StartupInfo = *lpStartupInfo;
+
+    if (PseudoConsole)
+        StartupInfo.dwFlags &= ~STARTF_USESTDHANDLES;
 
     /* Check if private data is being sent on the same channel as std handles */
     if ((StartupInfo.dwFlags & STARTF_USESTDHANDLES) &&
@@ -4937,7 +4986,8 @@ StartScan:
                                        bInheritHandles,
                                        IsWowApp ? IMAGE_SUBSYSTEM_WINDOWS_GUI: 0,
                                        AppCompatData,
-                                       AppCompatDataSize);
+                                       AppCompatDataSize,
+                                       PseudoConsole);
     if (!Result)
     {
         /* The remote process would have an undefined state, so fail the call */
@@ -4950,7 +5000,7 @@ StartScan:
     VdmString.Buffer = NULL;
 
     /* Non-VDM console applications usually inherit handles unless specified */
-    if (!(VdmBinaryType) &&
+    if (!PseudoConsole && !(VdmBinaryType) &&
         !(bInheritHandles) &&
         !(StartupInfo.dwFlags & STARTF_USESTDHANDLES) &&
         !(dwCreationFlags & (CREATE_NO_WINDOW |
@@ -5164,10 +5214,11 @@ StartScan:
 
     /* Pass the same captured selection to the console server. An explicit
      * empty console selection is different from legacy console inheritance. */
-    CreateProcessMsg->HandleListPresent = (KernelHandleList != NULL);
-    CreateProcessMsg->ConsoleHandleCount = (ULONG)ConsoleHandleCount;
+    CreateProcessMsg->PseudoConsoleProcessId = PseudoConsole ? ULongToHandle(PseudoConsole->ProcessId) : NULL;
+    CreateProcessMsg->HandleListPresent = (KernelHandleList != NULL) || (PseudoConsole != NULL);
+    CreateProcessMsg->ConsoleHandleCount = PseudoConsole ? 0 : (ULONG)ConsoleHandleCount;
     CreateProcessMsg->ConsoleHandleList = NULL;
-    if (ConsoleHandleCount)
+    if (ConsoleHandleCount && !PseudoConsole)
     {
         ASSERT(CaptureBuffer == NULL);
         CaptureBuffer = CsrAllocateCaptureBuffer(1, ConsoleHandleCount * sizeof(HANDLE));
@@ -5317,6 +5368,13 @@ VdmShortCircuit:
     lpProcessInformation->hThread = ThreadHandle;
     lpProcessInformation->dwProcessId = HandleToUlong(ClientId.UniqueProcess);
     lpProcessInformation->dwThreadId = HandleToUlong(ClientId.UniqueThread);
+
+    if (PseudoConsole)
+    {
+        DWORD Message[3] = {1, lpProcessInformation->dwProcessId, 0};
+        DWORD Written;
+        WriteFile(PseudoConsole->Signal, Message, sizeof(Message), &Written, NULL);
+    }
 
     /* NULL these out here so we know to treat this as a success scenario */
     ProcessHandle = NULL;

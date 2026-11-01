@@ -2205,6 +2205,11 @@ CON_API(SrvGetConsoleProcessList,
 CON_API(SrvGenerateConsoleCtrlEvent,
         CONSOLE_GENERATECTRLEVENT, GenerateCtrlEventRequest)
 {
+    if (GenerateCtrlEventRequest->CtrlEvent != CTRL_C_EVENT &&
+        GenerateCtrlEventRequest->CtrlEvent != CTRL_BREAK_EVENT)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
     return ConSrvConsoleProcessCtrlEvent(Console,
                                          GenerateCtrlEventRequest->ProcessGroupId,
                                          GenerateCtrlEventRequest->CtrlEvent);
