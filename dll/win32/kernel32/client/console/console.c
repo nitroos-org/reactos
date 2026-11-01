@@ -226,6 +226,39 @@ ConsoleControlDispatcher(IN LPVOID lpThreadParameter)
     return STATUS_SUCCESS;
 }
 
+#ifdef _M_IX86
+/*
+ * The console server starts a control event thread with CreateRemoteThread, so
+ * natively it begins in BaseThreadStartup, which registers the thread with CSR
+ * and runs the routine under the unhandled exception filter: a handler that
+ * faults ends the process with the exception code, after the filter ran.
+ * A WoW64 process is served by the native console server, which cannot enter
+ * the guest's BaseThreadStartup (WoW64 enters the registered routine directly,
+ * on a new guest stack). Register a routine that does what BaseThreadStartup
+ * does for the dispatcher; under WoW64 only, so that native threads are
+ * unchanged.
+ */
+static DWORD
+WINAPI
+ConsoleControlGuestThread(IN LPVOID lpThreadParameter)
+{
+    BaseThreadStartup(ConsoleControlDispatcher, lpThreadParameter);
+    UNREACHABLE;
+}
+#endif
+
+/* The control routine registered with the console server */
+LPTHREAD_START_ROUTINE
+ConsoleGetCtrlRoutine(VOID)
+{
+#ifdef _M_IX86
+    /* Set by WoW64 for a guest thread (the pointer of its system call gate), NULL natively */
+    if (NtCurrentTeb()->WOW32Reserved)
+        return ConsoleControlGuestThread;
+#endif
+    return ConsoleControlDispatcher;
+}
+
 VOID
 InitializeCtrlHandling(VOID)
 {
@@ -1455,7 +1488,7 @@ AllocConsole(VOID)
                               CurDirLength,
                               AppName,
                               AppNameLength,
-                              ConsoleControlDispatcher,
+                              ConsoleGetCtrlRoutine(),
                               PropDialogHandler,
                               &ConsoleStartInfo);
     if (Success)
@@ -2740,7 +2773,7 @@ AttachConsole(DWORD dwProcessId)
                      &ConsoleStartInfo);
 
     Success = IntAttachConsole(dwProcessId,
-                               ConsoleControlDispatcher,
+                               ConsoleGetCtrlRoutine(),
                                PropDialogHandler,
                                &ConsoleStartInfo);
     if (Success)

@@ -29,6 +29,9 @@ DWORD
 WINAPI
 ConsoleControlDispatcher(IN LPVOID lpThreadParameter);
 
+LPTHREAD_START_ROUTINE
+ConsoleGetCtrlRoutine(VOID);
+
 DWORD
 WINAPI
 PropDialogHandler(IN LPVOID lpThreadParameter);
