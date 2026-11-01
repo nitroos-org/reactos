@@ -117,6 +117,8 @@ Signature = "$Windows NT$"
 95 = system32\WindowsPowerShell\v1.0\Modules\NetTCPIP\1.0.0.0
 96 = system32\WindowsPowerShell\v1.0\Modules\DnsClient
 97 = system32\WindowsPowerShell\v1.0\Modules\DnsClient\1.0.0.0
+98 = system32\WindowsPowerShell\v1.0\Modules\Storage
+99 = system32\WindowsPowerShell\v1.0\Modules\Storage\2.0.0.0
 
 .InfEnd
 
