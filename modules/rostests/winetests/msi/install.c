@@ -1719,6 +1719,87 @@ static const msi_table adm_tables[] =
     ADD_TABLE(adm_admin_exec_seq),
 };
 
+/* An administrative image is laid out with the SOURCE names of the Directory table ("target:source"; "."
+ * collapses into the parent), not the target names. The standard folders are ordinary rows. */
+static const CHAR al_directory_dat[] = "Directory\tDirectory_Parent\tDefaultDir\n"
+                                       "s72\tS72\tl255\n"
+                                       "Directory\tDirectory\n"
+                                       "TARGETDIR\t\tSourceDir\n"
+                                       "ProgramFilesFolder\tTARGETDIR\t.\n"
+                                       "ALINST\tProgramFilesFolder\tALINST~1|AlLongInstName:.\n"
+                                       "ALSUB\tALINST\tALSUBT~1|AlSubTargetLong:ALSUBS~1|AlSubSourceLong\n"
+                                       "ALPFS\tTARGETDIR\tALPFS~1|AlPfs Target Long:ALSRC~1|Al Src Long Dir\n"
+                                       "SystemFolder\tTARGETDIR\t.\n"
+                                       "ALSYS\tSystemFolder\tALSYS~1|Al Sys Sub Long\n"
+                                       "ALSAME\tTARGETDIR\tALSAME~1|Al Same Long Name\n";
+
+static const CHAR al_component_dat[] = "Component\tComponentId\tDirectory_\tAttributes\tCondition\tKeyPath\n"
+                                       "s72\tS38\ts72\ti2\tS255\tS72\n"
+                                       "Component\tComponent\n"
+                                       "ca\t{11111111-0000-0000-0000-00000000000A}\tALINST\t0\t\tfa\n"
+                                       "cb\t{11111111-0000-0000-0000-00000000000B}\tALSUB\t0\t\tfb\n"
+                                       "cc\t{11111111-0000-0000-0000-00000000000C}\tALPFS\t0\t\tfc\n"
+                                       "cd\t{11111111-0000-0000-0000-00000000000D}\tSystemFolder\t0\t\tfd\n"
+                                       "ce\t{11111111-0000-0000-0000-00000000000E}\tALSYS\t0\t\tfe\n"
+                                       "cf\t{11111111-0000-0000-0000-00000000000F}\tALSAME\t0\t\tff\n"
+                                       "cg\t{11111111-0000-0000-0000-000000000010}\tTARGETDIR\t0\t\tfg\n";
+
+static const CHAR al_feature_dat[] = "Feature\tFeature_Parent\tTitle\tDescription\tDisplay\tLevel\tDirectory_\tAttributes\n"
+                                     "s38\tS38\tL64\tL255\tI2\ti2\tS72\ti2\n"
+                                     "Feature\tFeature\n"
+                                     "feature\t\tFeature\tFeature\t2\t1\tTARGETDIR\t0\n";
+
+static const CHAR al_feature_comp_dat[] = "Feature_\tComponent_\n"
+                                          "s38\ts72\n"
+                                          "FeatureComponents\tFeature_\tComponent_\n"
+                                          "feature\tca\n"
+                                          "feature\tcb\n"
+                                          "feature\tcc\n"
+                                          "feature\tcd\n"
+                                          "feature\tce\n"
+                                          "feature\tcf\n"
+                                          "feature\tcg\n";
+
+static const CHAR al_file_dat[] = "File\tComponent_\tFileName\tFileSize\tVersion\tLanguage\tAttributes\tSequence\n"
+                                  "s72\ts72\tl255\ti4\tS72\tS20\tI2\ti2\n"
+                                  "File\tFile\n"
+                                  "fa\tca\tALA~1.TXT|ala.txt\t500\t\t\t0\t1\n"
+                                  "fb\tcb\tALB~1.TXT|alb.txt\t500\t\t\t0\t2\n"
+                                  "fc\tcc\tALC~1.TXT|alc.txt\t500\t\t\t0\t3\n"
+                                  "fd\tcd\tALD~1.TXT|ald.txt\t500\t\t\t0\t4\n"
+                                  "fe\tce\tALE~1.TXT|ale.txt\t500\t\t\t0\t5\n"
+                                  "ff\tcf\tALF~1.TXT|alf.txt\t500\t\t\t0\t6\n"
+                                  "fg\tcg\tALG~1.TXT|alg.txt\t500\t\t\t0\t7\n";
+
+static const CHAR al_media_dat[] = "DiskId\tLastSequence\tDiskPrompt\tCabinet\tVolumeLabel\tSource\n"
+                                   "i2\ti4\tL64\tS255\tS32\tS72\n"
+                                   "Media\tDiskId\n"
+                                   "1\t7\t\t\t\t\n";
+
+static const CHAR al_admin_exec_seq_dat[] = "Action\tCondition\tSequence\n"
+                                            "s72\tS255\tI2\n"
+                                            "AdminExecuteSequence\tAction\n"
+                                            "CostInitialize\t\t800\n"
+                                            "FileCost\t\t900\n"
+                                            "CostFinalize\t\t1000\n"
+                                            "InstallValidate\t\t1400\n"
+                                            "InstallInitialize\t\t1500\n"
+                                            "InstallAdminPackage\t\t3900\n"
+                                            "InstallFiles\t\t4000\n"
+                                            "InstallFinalize\t\t6600\n";
+
+static const msi_table al_tables[] =
+{
+    ADD_TABLE(al_directory),
+    ADD_TABLE(al_component),
+    ADD_TABLE(al_feature),
+    ADD_TABLE(al_feature_comp),
+    ADD_TABLE(al_file),
+    ADD_TABLE(al_media),
+    ADD_TABLE(property),
+    ADD_TABLE(al_admin_exec_seq),
+};
+
 static const msi_table amp_tables[] =
 {
     ADD_TABLE(amp_component),
@@ -3884,6 +3965,104 @@ error:
     DeleteFileA(msifile);
     DeleteFileA("msitest\\augustus");
     RemoveDirectoryA("msitest");
+}
+
+/* a file or directory of the administrative image (a path relative to the image root); removes it */
+static BOOL delete_image(const char *image, const char *rel, BOOL is_file)
+{
+    char path[MAX_PATH];
+
+    sprintf(path, "%s\\%s", image, rel);
+    return is_file ? DeleteFileA(path) : RemoveDirectoryA(path);
+}
+
+static void test_admin_layout(void)
+{
+    static const struct { const char *rel; BOOL is_file; } expected[2][12] =
+    {
+        {   /* long names, source side */
+            { "ala.txt", TRUE }, { "ald.txt", TRUE }, { "alg.txt", TRUE },
+            { "AlSubSourceLong\\alb.txt", TRUE }, { "AlSubSourceLong", FALSE },
+            { "Al Src Long Dir\\alc.txt", TRUE }, { "Al Src Long Dir", FALSE },
+            { "Al Sys Sub Long\\ale.txt", TRUE }, { "Al Sys Sub Long", FALSE },
+            { "Al Same Long Name\\alf.txt", TRUE }, { "Al Same Long Name", FALSE },
+        },
+        {   /* SHORTFILENAMES=1: short names of directories and files */
+            { "ALA~1.TXT", TRUE }, { "ALD~1.TXT", TRUE }, { "ALG~1.TXT", TRUE },
+            { "ALSUBS~1\\ALB~1.TXT", TRUE }, { "ALSUBS~1", FALSE },
+            { "ALSRC~1\\ALC~1.TXT", TRUE }, { "ALSRC~1", FALSE },
+            { "ALSYS~1\\ALE~1.TXT", TRUE }, { "ALSYS~1", FALSE },
+            { "ALSAME~1\\ALF~1.TXT", TRUE }, { "ALSAME~1", FALSE },
+        }
+    };
+    static const char *target_names[] =
+    {
+        "AlLongInstName", "AlLongInstName\\AlSubTargetLong", "AlPfs Target Long", "AlSubTargetLong",
+    };
+    char image[MAX_PATH], props[2 * MAX_PATH];
+    UINT r;
+    int pass, i;
+
+    CreateDirectoryA("AlSubSourceLong", NULL);
+    CreateDirectoryA("Al Src Long Dir", NULL);
+    CreateDirectoryA("Al Sys Sub Long", NULL);
+    CreateDirectoryA("Al Same Long Name", NULL);
+    create_file("ala.txt", 500);
+    create_file("ald.txt", 500);
+    create_file("alg.txt", 500);
+    create_file("AlSubSourceLong\\alb.txt", 500);
+    create_file("Al Src Long Dir\\alc.txt", 500);
+    create_file("Al Sys Sub Long\\ale.txt", 500);
+    create_file("Al Same Long Name\\alf.txt", 500);
+
+    create_database(msifile, al_tables, ARRAY_SIZE(al_tables));
+
+    sprintf(image, "%s\\admimage", CURR_DIR);
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
+
+    for (pass = 0; pass < 2; pass++)
+    {
+        CreateDirectoryA(image, NULL);
+        sprintf(props, "ACTION=ADMIN TARGETDIR=\"%s\"%s", image, pass ? " SHORTFILENAMES=1" : "");
+        r = MsiInstallProductA(msifile, props);
+        if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+        {
+            skip("Not enough rights to perform tests\n");
+            goto error;
+        }
+        ok(r == ERROR_SUCCESS, "pass %d: Expected ERROR_SUCCESS, got %u\n", pass, r);
+
+        /* the product directory ("target:.") and the standard folders ("."): the image root itself */
+        for (i = 0; i < ARRAY_SIZE(expected[pass]) && expected[pass][i].rel; i++)
+            ok(delete_image(image, expected[pass][i].rel, expected[pass][i].is_file),
+               "pass %d: %s not in the image (error %lu)\n", pass, expected[pass][i].rel, GetLastError());
+
+        /* the target names are never used */
+        for (i = 0; i < ARRAY_SIZE(target_names); i++)
+        {
+            char path[MAX_PATH];
+            sprintf(path, "%s\\%s", image, target_names[i]);
+            ok(GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES, "pass %d: directory %s created\n", pass, target_names[i]);
+        }
+
+        /* the copy of the package */
+        ok(delete_image(image, "msitest.msi", TRUE), "pass %d: package not copied\n", pass);
+        RemoveDirectoryA(image);
+    }
+
+error:
+    DeleteFileA(msifile);
+    DeleteFileA("ala.txt");
+    DeleteFileA("ald.txt");
+    DeleteFileA("alg.txt");
+    DeleteFileA("AlSubSourceLong\\alb.txt");
+    DeleteFileA("Al Src Long Dir\\alc.txt");
+    DeleteFileA("Al Sys Sub Long\\ale.txt");
+    DeleteFileA("Al Same Long Name\\alf.txt");
+    RemoveDirectoryA("AlSubSourceLong");
+    RemoveDirectoryA("Al Src Long Dir");
+    RemoveDirectoryA("Al Sys Sub Long");
+    RemoveDirectoryA("Al Same Long Name");
 }
 
 static void set_admin_property_stream(LPCSTR file)
@@ -6350,6 +6529,7 @@ START_TEST(install)
     test_transformprop();
     test_currentworkingdir();
     test_admin();
+    test_admin_layout();
     test_adminprops();
     test_missingcab();
     test_sourcefolder();
