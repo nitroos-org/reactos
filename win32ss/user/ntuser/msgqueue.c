@@ -520,7 +520,16 @@ MsqWakeQueue(PTHREADINFO pti, DWORD MessageBits, BOOL KeyEvent)
    if (MessageBits & QS_RAWINPUT)    pti->nCntsQBits[QSRosRawInput]++;
 
    if (KeyEvent)
-      KeSetEvent(pti->pEventQueueServer, IO_NO_INCREMENT, FALSE);
+   {
+      /* Input wakes the thread with the same priority increment the input
+         class drivers use when they complete the request: keyboard or mouse. */
+      KPRIORITY Increment = IO_NO_INCREMENT;
+      if (MessageBits & QS_KEY)
+         Increment = IO_KEYBOARD_INCREMENT;
+      else if (MessageBits & QS_MOUSE)
+         Increment = IO_MOUSE_INCREMENT;
+      KeSetEvent(pti->pEventQueueServer, Increment, FALSE);
+   }
 }
 
 /* A count that is already zero stays zero, so an extra clear cannot wrap it and leave the bit set for good */

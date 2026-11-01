@@ -376,6 +376,9 @@ ExitProcessCallback(PEPROCESS Process)
     /* Leave the job we were restricted by, if any */
     IntJobDisconnectProcess(ppiCurrent);
 
+    /* Drop the foreground scheduling reference if this process held it */
+    IntForegroundProcessExit(Process);
+
     /* Remove it from the list */
     pppi = &gppiList;
     while (*pppi != NULL && *pppi != ppiCurrent)

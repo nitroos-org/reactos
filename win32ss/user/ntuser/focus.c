@@ -18,6 +18,56 @@ ULONG guSFWLockCount = 0; // Rule #8, No menus are active. So should be zero.
 PTHREADINFO ptiLastInput = NULL;
 HWND ghwndOldFullscreen = NULL;
 
+/* The process that currently runs with the foreground scheduling mode (referenced) */
+static PEPROCESS gpepForegroundProcess = NULL;
+
+/*
+ * Foreground priority class: the process that owns the foreground window runs with
+ * PsProcessPriorityForeground (longer quantum, foreground wake boost, Win32PrioritySeparation),
+ * the previous one goes back to background. NULL ptiNew clears it (process exit).
+ * Processes that own no interactive windows of their own are skipped: the system process, and
+ * CSRSS, which owns the console windows (CONSRV switches the console's client processes itself
+ * when the console window gains or loses focus).
+ */
+VOID FASTCALL
+IntSetForegroundProcess(PTHREADINFO ptiNew)
+{
+    PEPROCESS NewProcess = NULL, OldProcess;
+
+    if (ptiNew && ptiNew->ppi &&
+        !(ptiNew->TIF_flags & (TIF_INCLEANUP | TIF_SYSTEMTHREAD)) &&
+        !(ptiNew->ppi->W32PF_flags & W32PF_TERMINATED))
+    {
+        NewProcess = ptiNew->ppi->peProcess;
+        if (NewProcess == gpepCSRSS || NewProcess == PsInitialSystemProcess)
+            NewProcess = NULL;
+    }
+
+    if (NewProcess == gpepForegroundProcess)
+        return;
+
+    OldProcess = gpepForegroundProcess;
+    gpepForegroundProcess = NewProcess;
+
+    if (OldProcess)
+    {
+        PsSetProcessPriorityByClass(OldProcess, PsProcessPriorityBackground);
+        ObDereferenceObject(OldProcess);
+    }
+    if (NewProcess)
+    {
+        ObReferenceObject(NewProcess);
+        PsSetProcessPriorityByClass(NewProcess, PsProcessPriorityForeground);
+    }
+}
+
+VOID FASTCALL
+IntForegroundProcessExit(PEPROCESS Process)
+{
+    if (Process == gpepForegroundProcess)
+        IntSetForegroundProcess(NULL);
+}
+
 /*
  * Check locking of a process or one or more menus are active.
  */
@@ -796,6 +846,7 @@ co_IntSetForegroundMessageQueue(
       ptiChg = Wnd->head.pti;
       IntSetFocusMessageQueue(Wnd->head.pti->MessageQueue);
       gptiForeground = Wnd->head.pti;
+      IntSetForegroundProcess(gptiForeground);
       //ERR("Set Foreground pti 0x%p Q 0x%p hWnd 0x%p\n", Wnd->head.pti, Wnd->head.pti->MessageQueue, UserHMGetHandle(Wnd));
    }
    else
@@ -803,6 +854,7 @@ co_IntSetForegroundMessageQueue(
       ptiChg = NULL;
       IntSetFocusMessageQueue(NULL);
       gptiForeground = NULL;
+      IntSetForegroundProcess(NULL);
       //ERR("Set Foreground pti 0x0 Q 0x0 hWnd 0x0\n");
    }
 
