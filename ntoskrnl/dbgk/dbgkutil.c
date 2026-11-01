@@ -82,6 +82,71 @@ DbgkpResumeProcess(VOID)
     KeThawAllThreads();
 }
 
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+static
+VOID
+DbgkpSendSystemDll32Message(VOID)
+{
+    DBGKM_MSG ApiMessage;
+    PDBGKM_LOAD_DLL LoadDll = &ApiMessage.LoadDll;
+    PCUNICODE_STRING FileName;
+    PIMAGE_NT_HEADERS NtHeader = NULL;
+    PVOID Base;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    NTSTATUS Status;
+
+    Base = PspGetSystemDll32(&FileName);
+    if (!Base) return;
+
+    /* The process has the view only where its preferred base was free */
+    _SEH2_TRY
+    {
+        NtHeader = RtlImageNtHeader(Base);
+        if (NtHeader && NtHeader->FileHeader.Machine != IMAGE_FILE_MACHINE_I386) NtHeader = NULL;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        NtHeader = NULL;
+    }
+    _SEH2_END;
+    if (!NtHeader) return;
+
+    RtlZeroMemory(&ApiMessage, sizeof(ApiMessage));
+    LoadDll->BaseOfDll = Base;
+    LoadDll->DebugInfoFileOffset = NtHeader->FileHeader.PointerToSymbolTable;
+    LoadDll->DebugInfoSize = NtHeader->FileHeader.NumberOfSymbols;
+    /* No name, as Windows gives a 64-bit debugger */
+    LoadDll->NamePointer = NULL;
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               (PUNICODE_STRING)FileName,
+                               OBJ_CASE_INSENSITIVE |
+                               OBJ_KERNEL_HANDLE |
+                               OBJ_FORCE_ACCESS_CHECK,
+                               NULL,
+                               NULL);
+    Status = ZwOpenFile(&LoadDll->FileHandle,
+                        GENERIC_READ | SYNCHRONIZE,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_DELETE |
+                        FILE_SHARE_READ |
+                        FILE_SHARE_WRITE,
+                        FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(Status)) LoadDll->FileHandle = NULL;
+
+    ApiMessage.h.u1.Length = sizeof(DBGKM_MSG) << 16 |
+                             (8 + sizeof(DBGKM_LOAD_DLL));
+    ApiMessage.h.u2.ZeroInit = 0;
+    ApiMessage.h.u2.s2.Type = LPC_DEBUG_EVENT;
+    ApiMessage.ApiNumber = DbgKmLoadDllApi;
+    DbgkpSendApiMessage(&ApiMessage, TRUE);
+
+    if (LoadDll->FileHandle) ObCloseHandle(LoadDll->FileHandle, KernelMode);
+}
+#endif
+
 VOID
 NTAPI
 DbgkCreateThread(IN PETHREAD Thread,
@@ -196,10 +261,14 @@ DbgkCreateThread(IN PETHREAD Thread,
         NtHeader = RtlImageNtHeader(Process->SectionBaseAddress);
         if (NtHeader)
         {
-            /* Fill out data from the header */
+            /* Fill out data from the header: the entry point at the preferred
+             * base, as Windows reports it. ImageBase has another offset and size
+             * in a PE32 header (a WoW64 image) than in a PE32+ one. */
+            ULONG_PTR ImageBase = NtHeader->OptionalHeader.ImageBase;
+            if (NtHeader->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+                ImageBase = ((PIMAGE_NT_HEADERS32)NtHeader)->OptionalHeader.ImageBase;
             CreateProcess->InitialThread.StartAddress =
-                (PVOID)((ULONG_PTR)NtHeader->OptionalHeader.ImageBase +
-                        NtHeader->OptionalHeader.AddressOfEntryPoint);
+                (PVOID)(ImageBase + NtHeader->OptionalHeader.AddressOfEntryPoint);
             CreateProcess->DebugInfoFileOffset = NtHeader->FileHeader.
                                                  PointerToSymbolTable;
             CreateProcess->DebugInfoSize = NtHeader->FileHeader.
@@ -280,6 +349,11 @@ DbgkCreateThread(IN PETHREAD Thread,
             /* Close the handle */
             ObCloseHandle(LoadDll->FileHandle, KernelMode);
         }
+
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+        /* A WoW64 process also has the i386 ntdll, mapped by the kernel: report it next, as Windows does */
+        if (Process->Wow64Process) DbgkpSendSystemDll32Message();
+#endif
     }
     else
     {

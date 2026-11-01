@@ -192,6 +192,12 @@ NTAPI
 PspMapSystemDll32(
     IN PEPROCESS Process
 );
+
+PVOID
+NTAPI
+PspGetSystemDll32(
+    OUT PCUNICODE_STRING *FileName
+);
 #endif
 
 VOID

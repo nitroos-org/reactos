@@ -452,6 +452,142 @@ DbgkpWakeTarget(IN PDEBUG_EVENT DebugEvent)
     }
 }
 
+/* Queues the load message of the image at Base (a fake one: the debugger attached later) */
+static
+VOID
+DbgkpPostFakeModuleMessage(IN PEPROCESS Process,
+                           IN PETHREAD Thread,
+                           IN PDEBUG_OBJECT DebugObject,
+                           IN PVOID Base)
+{
+    DBGKM_MSG ApiMessage;
+    PDBGKM_LOAD_DLL LoadDll = &ApiMessage.LoadDll;
+    PIMAGE_NT_HEADERS NtHeader;
+    UNICODE_STRING ModuleName;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    NTSTATUS Status;
+
+    /* Setup the API Message */
+    RtlZeroMemory(&ApiMessage, sizeof(DBGKM_MSG));
+    ApiMessage.ApiNumber = DbgKmLoadDllApi;
+
+    /* Set base and clear the name */
+    LoadDll->BaseOfDll = Base;
+    LoadDll->NamePointer = NULL;
+
+    /* Get the NT Headers (FileHeader has the same layout in PE32 and PE32+) */
+    NtHeader = RtlImageNtHeader(LoadDll->BaseOfDll);
+    if (NtHeader)
+    {
+        /* Save debug data */
+        LoadDll->DebugInfoFileOffset = NtHeader->FileHeader.
+                                       PointerToSymbolTable;
+        LoadDll->DebugInfoSize = NtHeader->FileHeader.NumberOfSymbols;
+    }
+
+    /* Get the name of the DLL */
+    Status = MmGetFileNameForAddress(NtHeader, &ModuleName);
+    if (NT_SUCCESS(Status))
+    {
+        /* Setup the object attributes */
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   &ModuleName,
+                                   OBJ_FORCE_ACCESS_CHECK |
+                                   OBJ_KERNEL_HANDLE |
+                                   OBJ_CASE_INSENSITIVE,
+                                   NULL,
+                                   NULL);
+
+        /* Open the file to get a handle to it */
+        Status = ZwOpenFile(&LoadDll->FileHandle,
+                            GENERIC_READ | SYNCHRONIZE,
+                            &ObjectAttributes,
+                            &IoStatusBlock,
+                            FILE_SHARE_READ |
+                            FILE_SHARE_WRITE |
+                            FILE_SHARE_DELETE,
+                            FILE_SYNCHRONOUS_IO_NONALERT);
+        if (!NT_SUCCESS(Status)) LoadDll->FileHandle = NULL;
+
+        /* Free the name now */
+        RtlFreeUnicodeString(&ModuleName);
+    }
+
+    /* Send the fake module load message */
+    Status = DbgkpQueueMessage(Process,
+                               Thread,
+                               &ApiMessage,
+                               DEBUG_EVENT_NOWAIT,
+                               DebugObject);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Message send failed, close the file handle if we had one */
+        if (LoadDll->FileHandle) ObCloseHandle(LoadDll->FileHandle,
+                                               KernelMode);
+    }
+}
+
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+/* The i386 loader data of a WoW64 process (the beginning of PEB_LDR_DATA and LDR_DATA_TABLE_ENTRY) */
+typedef struct _DBGK_PEB_LDR_DATA32
+{
+    ULONG Length;
+    BOOLEAN Initialized;
+    ULONG SsHandle;
+    LIST_ENTRY32 InLoadOrderModuleList;
+} DBGK_PEB_LDR_DATA32;
+
+typedef struct _DBGK_LDR_DATA_TABLE_ENTRY32
+{
+    LIST_ENTRY32 InLoadOrderLinks;
+    LIST_ENTRY32 InMemoryOrderLinks;
+    LIST_ENTRY32 InInitializationOrderLinks;
+    ULONG DllBase;
+} DBGK_LDR_DATA_TABLE_ENTRY32;
+
+C_ASSERT(FIELD_OFFSET(DBGK_PEB_LDR_DATA32, InLoadOrderModuleList) == 0x0C);
+C_ASSERT(FIELD_OFFSET(DBGK_LDR_DATA_TABLE_ENTRY32, DllBase) == 0x18);
+
+/* The i386 modules of a WoW64 process, after the native ones, as Windows reports them */
+static
+VOID
+DbgkpPostFakeModuleMessages32(IN PEPROCESS Process,
+                              IN PETHREAD Thread,
+                              IN PDEBUG_OBJECT DebugObject)
+{
+    PEB32 *Peb32 = Process->Wow64Process->Peb;
+    DBGK_PEB_LDR_DATA32 *LdrData;
+    DBGK_LDR_DATA_TABLE_ENTRY32 *LdrEntry;
+    ULONG ListHead, NextEntry, i;
+
+    _SEH2_TRY
+    {
+        ProbeForRead(Peb32, sizeof(*Peb32), 1);
+        LdrData = (PVOID)(ULONG_PTR)Peb32->Ldr;
+        if (!LdrData) _SEH2_LEAVE;
+        ProbeForRead(LdrData, sizeof(*LdrData), 1);
+        ListHead = PtrToUlong(&LdrData->InLoadOrderModuleList);
+        NextEntry = LdrData->InLoadOrderModuleList.Flink;
+
+        /* Skip the first entry (the executable), as for the native list */
+        for (i = 0; NextEntry != ListHead && i < 500; i++)
+        {
+            LdrEntry = (PVOID)(ULONG_PTR)NextEntry;
+            ProbeForRead(LdrEntry, sizeof(*LdrEntry), 1);
+            if (i) DbgkpPostFakeModuleMessage(Process, Thread, DebugObject,
+                                              (PVOID)(ULONG_PTR)LdrEntry->DllBase);
+            NextEntry = LdrEntry->InLoadOrderLinks.Flink;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        NOTHING;
+    }
+    _SEH2_END;
+}
+#endif
+
 NTSTATUS
 NTAPI
 DbgkpPostFakeModuleMessages(IN PEPROCESS Process,
@@ -462,14 +598,7 @@ DbgkpPostFakeModuleMessages(IN PEPROCESS Process,
     PPEB_LDR_DATA LdrData;
     PLDR_DATA_TABLE_ENTRY LdrEntry;
     PLIST_ENTRY ListHead, NextEntry;
-    DBGKM_MSG ApiMessage;
-    PDBGKM_LOAD_DLL LoadDll = &ApiMessage.LoadDll;
     ULONG i;
-    PIMAGE_NT_HEADERS NtHeader;
-    UNICODE_STRING ModuleName;
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    IO_STATUS_BLOCK IoStatusBlock;
-    NTSTATUS Status;
     UNICODE_STRING FullDllName;
     PAGED_CODE();
     DBGKTRACE(DBGK_PROCESS_DEBUG, "Process: %p Thread: %p DebugObject: %p\n",
@@ -509,70 +638,14 @@ DbgkpPostFakeModuleMessages(IN PEPROCESS Process,
                                          InLoadOrderLinks);
             ProbeForRead(LdrEntry, sizeof(*LdrEntry), 1);
 
-            /* Setup the API Message */
-            RtlZeroMemory(&ApiMessage, sizeof(DBGKM_MSG));
-            ApiMessage.ApiNumber = DbgKmLoadDllApi;
-
-            /* Set base and clear the name */
-            LoadDll->BaseOfDll = LdrEntry->DllBase;
-            LoadDll->NamePointer = NULL;
-
-            /* Get the NT Headers */
-            NtHeader = RtlImageNtHeader(LoadDll->BaseOfDll);
-            if (NtHeader)
-            {
-                /* Save debug data */
-                LoadDll->DebugInfoFileOffset = NtHeader->FileHeader.
-                                               PointerToSymbolTable;
-                LoadDll->DebugInfoSize = NtHeader->FileHeader.NumberOfSymbols;
-            }
-
             /* Trace */
             FullDllName = LdrEntry->FullDllName;
             ProbeForRead(FullDllName.Buffer, FullDllName.MaximumLength, 1);
             DBGKTRACE(DBGK_PROCESS_DEBUG, "Name: %wZ. Base: %p\n",
                       &FullDllName, LdrEntry->DllBase);
 
-            /* Get the name of the DLL */
-            Status = MmGetFileNameForAddress(NtHeader, &ModuleName);
-            if (NT_SUCCESS(Status))
-            {
-                /* Setup the object attributes */
-                InitializeObjectAttributes(&ObjectAttributes,
-                                           &ModuleName,
-                                           OBJ_FORCE_ACCESS_CHECK |
-                                           OBJ_KERNEL_HANDLE |
-                                           OBJ_CASE_INSENSITIVE,
-                                           NULL,
-                                           NULL);
-
-                /* Open the file to get a handle to it */
-                Status = ZwOpenFile(&LoadDll->FileHandle,
-                                    GENERIC_READ | SYNCHRONIZE,
-                                    &ObjectAttributes,
-                                    &IoStatusBlock,
-                                    FILE_SHARE_READ |
-                                    FILE_SHARE_WRITE |
-                                    FILE_SHARE_DELETE,
-                                    FILE_SYNCHRONOUS_IO_NONALERT);
-                if (!NT_SUCCESS(Status)) LoadDll->FileHandle = NULL;
-
-                /* Free the name now */
-                RtlFreeUnicodeString(&ModuleName);
-            }
-
             /* Send the fake module load message */
-            Status = DbgkpQueueMessage(Process,
-                                       Thread,
-                                       &ApiMessage,
-                                       DEBUG_EVENT_NOWAIT,
-                                       DebugObject);
-            if (!NT_SUCCESS(Status))
-            {
-                /* Message send failed, close the file handle if we had one */
-                if (LoadDll->FileHandle) ObCloseHandle(LoadDll->FileHandle,
-                                                       KernelMode);
-            }
+            DbgkpPostFakeModuleMessage(Process, Thread, DebugObject, LdrEntry->DllBase);
 
             /* Go to the next module */
             NextEntry = NextEntry->Flink;
@@ -584,6 +657,10 @@ DbgkpPostFakeModuleMessages(IN PEPROCESS Process,
         NOTHING;
     }
     _SEH2_END;
+
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (Process->Wow64Process) DbgkpPostFakeModuleMessages32(Process, Thread, DebugObject);
+#endif
 
     /* Return success */
     return STATUS_SUCCESS;
@@ -979,6 +1056,23 @@ DbgkpMarkProcessPeb(IN PEPROCESS Process)
 
         /* Set the IsBeingDebugged member of the PEB */
         Process->Peb->BeingDebugged = (Process->DebugPort) ? TRUE: FALSE;
+
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+        /* And of the PEB32 the 32-bit code of a WoW64 process reads: the
+         * DbgUiRemoteBreakin of a 32-bit debugger breaks in only when it is set */
+        if (Process->Wow64Process)
+        {
+            _SEH2_TRY
+            {
+                ((PEB32 *)Process->Wow64Process->Peb)->BeingDebugged = Process->Peb->BeingDebugged;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                NOTHING;
+            }
+            _SEH2_END;
+        }
+#endif
 
         /* Release lock */
         ExReleaseFastMutex(&DbgkpProcessDebugPortMutex);

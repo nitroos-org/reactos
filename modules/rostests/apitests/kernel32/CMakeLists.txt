@@ -49,6 +49,7 @@ list(APPEND SOURCE
     CreateWaitableTimerEx.c
     DefaultDllDirectories.c
     ThreadImpersonationToken.c
+    DebugApi.c
     DebugTrapInterrupts.c
     ActCtxResDirBound.c
     DefaultActCtx.c

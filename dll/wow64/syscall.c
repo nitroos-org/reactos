@@ -1325,6 +1325,15 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtTerminateProcess: return NtTerminateProcess(H(0), a[1]);
     case W64_NtTerminateThread: return NtTerminateThread(H(0), a[1]);
     case W64_NtQueryDebugFilterState: return NtQueryDebugFilterState(a[0], a[1]);
+    /* User-mode debugging: debug.c converts the client ID and the wait state change */
+    case W64_NtCreateDebugObject:
+        PROBE(0); ATTR(2); Status = NtCreateDebugObject(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
+    case W64_NtDebugActiveProcess: return NtDebugActiveProcess(H(0), H(1));
+    case W64_NtRemoveProcessDebug: return NtRemoveProcessDebug(H(0), H(1));
+    case W64_NtDebugContinue: return Wow64DebugContinue(a);
+    case W64_NtWaitForDebugEvent: return Wow64WaitForDebugEvent(a);
+    case W64_NtSetInformationDebugObject: /* the one class is a ULONG, ReturnLength too */
+        return NtSetInformationDebugObject(H(0), a[1], P(2), a[3], P(4));
     case W64_NtQueryPerformanceCounter: return NtQueryPerformanceCounter(P(0), P(1));
     case W64_NtAllocateLocallyUniqueId: return NtAllocateLocallyUniqueId(P(0));
     case W64_NtQuerySystemTime: return NtQuerySystemTime(P(0));
@@ -1425,8 +1434,15 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         Base = PTR32(U(2)); Size = U(6);
         Cleanup->Process = H(1);
         Cleanup->Mapped = TRUE;
-        Status = NtMapViewOfSection(H(0), H(1), &Base, Wow64ZeroBits(a[3]),
-                                    a[4], P(5), &Size, a[7], a[8], a[9]);
+        {
+            /* The kernel names an image view to a debugger by &TEB->NtTib.ArbitraryUserPointer of
+             * the native TEB: give it the name the 32-bit loader put in TEB32, as Windows does */
+            PVOID SavedName = NtCurrentTeb()->NtTib.ArbitraryUserPointer;
+            NtCurrentTeb()->NtTib.ArbitraryUserPointer = PTR32(WOW64_TEB32(NtCurrentTeb())->NtTib.ArbitraryUserPointer);
+            Status = NtMapViewOfSection(H(0), H(1), &Base, Wow64ZeroBits(a[3]),
+                                        a[4], P(5), &Size, a[7], a[8], a[9]);
+            NtCurrentTeb()->NtTib.ArbitraryUserPointer = SavedName;
+        }
         if (NT_SUCCESS(Status))
         {
             Cleanup->Base = Base;
@@ -3072,7 +3088,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         switch (Number)
         {
         case W64_NtQueryInformationJobObject: case W64_NtQueryInformationPort:
-        case W64_NtSetInformationKey: case W64_NtSetInformationDebugObject: Length = a[1]; break;
+        case W64_NtSetInformationKey: Length = a[1]; break;
         default: Length = 0; break;
         }
         UNSUPPORTED(SERVICE, Length);
