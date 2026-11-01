@@ -92,6 +92,48 @@ RtlCrc32(
     return ~Crc;
 }
 
+/*
+ * The CRC-64 of the buffer, continuing the CRC in InitialCrc (0 to start): reflected, polynomial 0xAD93D23594C93659
+ * (0x9A6C9329AC4BC9B5 reflected), the register starts as the complement of InitialCrc and the result is the
+ * complement of the register, the same convention as RtlCrc32 (this is CRC-64/NVME; "123456789" gives
+ * 0xAE8B14860A799888). An empty buffer returns InitialCrc.
+ */
+ULONGLONG
+NTAPI
+RtlCrc64(
+    _In_reads_bytes_(Size) const VOID *Buffer,
+    _In_ SIZE_T Size,
+    _In_ ULONGLONG InitialCrc)
+{
+    static ULONGLONG Table[256];
+    static LONG TableReady;
+    const UCHAR *Bytes = Buffer;
+    ULONGLONG Crc = ~InitialCrc;
+
+    if (!TableReady)
+    {
+        ULONG i, j;
+
+        for (i = 0; i < 256; i++)
+        {
+            ULONGLONG Value = i;
+
+            for (j = 0; j < 8; j++)
+                Value = (Value & 1) ? ((Value >> 1) ^ 0x9A6C9329AC4BC9B5ULL) : (Value >> 1);
+            Table[i] = Value;
+        }
+        InterlockedExchange(&TableReady, 1);
+    }
+
+    while (Size != 0)
+    {
+        Crc = Table[(Crc ^ *Bytes++) & 0xFF] ^ (Crc >> 8);
+        Size--;
+    }
+
+    return ~Crc;
+}
+
 BOOLEAN
 NTAPI
 RtlIsCurrentProcess(

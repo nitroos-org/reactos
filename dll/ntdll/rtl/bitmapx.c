@@ -165,3 +165,45 @@ RtlCopyBitMap(
         Done += InThisWord;
     }
 }
+
+/*
+ * Copies NumberOfBits bits of Source, from StartingIndex on, to the start of Destination. Measured on Windows 10
+ * 22H2: the count is cut to what the destination holds and to what the source has after StartingIndex, so a destination
+ * that is too small gets the bits that fit and is not overrun; the bits of the destination after the copied ones are
+ * not touched (the rest of the last word too). Nothing is returned.
+ */
+VOID
+NTAPI
+RtlExtractBitMap(
+    _In_ PRTL_BITMAP Source,
+    _In_ PRTL_BITMAP Destination,
+    _In_ ULONG StartingIndex,
+    _In_ ULONG NumberOfBits)
+{
+    ULONG Count = NumberOfBits;
+    ULONG Done = 0;
+
+    if (StartingIndex >= Source->SizeOfBitMap)
+        return;
+    Count = min(Count, Source->SizeOfBitMap - StartingIndex);
+    Count = min(Count, Destination->SizeOfBitMap);
+
+    while (Done < Count)
+    {
+        ULONG InThisWord = min(Count - Done, BITS_PER_ULONG);
+        ULONG Position = StartingIndex + Done;
+        ULONG Bit = Position % BITS_PER_ULONG;
+        ULONG Value = Source->Buffer[Position / BITS_PER_ULONG] >> Bit;
+        ULONG Mask = (InThisWord == BITS_PER_ULONG) ? 0xFFFFFFFF : ((1UL << InThisWord) - 1);
+        PULONG Target = Destination->Buffer + (Done / BITS_PER_ULONG);
+
+        /* The bits that the first source word has left may not be enough: take the rest from the next one */
+        if (Bit != 0 && InThisWord > BITS_PER_ULONG - Bit)
+            Value |= Source->Buffer[Position / BITS_PER_ULONG + 1] << (BITS_PER_ULONG - Bit);
+
+        /* Done is always a multiple of the word size here, the destination starts at a word boundary */
+        Target[0] = (Target[0] & ~Mask) | (Value & Mask);
+
+        Done += InThisWord;
+    }
+}
