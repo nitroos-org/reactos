@@ -37,6 +37,12 @@ static const IID * const typeinfo_iids[] =
 {
     &IID_IRepetitionPattern,
     &IID_IDailyTrigger,
+    &IID_IWeeklyTrigger,
+    &IID_IMonthlyTrigger,
+    &IID_IMonthlyDOWTrigger,
+    &IID_IIdleTrigger,
+    &IID_IEventTrigger,
+    &IID_ISessionStateChangeTrigger,
     &IID_IRegistrationTrigger,
     &IID_ILogonTrigger,
     &IID_IBootTrigger,
