@@ -77,6 +77,45 @@ AreLegacyFunctionsSupported(VOID)
     return WSAGetLastError() != WSAEOPNOTSUPP;
 }
 
+/* A WSAStartup/WSACleanup pair that drops the last reference tears down and
+ * rebuilds the per-process Winsock state; that must not leave handles behind.
+ * (Services such as Dnscache do this once per lookup.) */
+static
+void
+TestStartupCleanupHandles(void)
+{
+    WSADATA WsaData;
+    DWORD Before = 0, After = 0;
+    int i, Cycles = 0;
+
+    if (IsWinsockInitialized())
+    {
+        skip("Winsock is initialized, cannot cycle it\n");
+        return;
+    }
+
+    /* One warm-up cycle loads the providers and the helper DLLs */
+    if (WSAStartup(MAKEWORD(2, 2), &WsaData) != 0)
+    {
+        skip("WSAStartup failed\n");
+        return;
+    }
+    WSACleanup();
+
+    ok(GetProcessHandleCount(GetCurrentProcess(), &Before), "GetProcessHandleCount failed %lu\n", GetLastError());
+    for (i = 0; i < 50; i++)
+    {
+        if (WSAStartup(MAKEWORD(2, 2), &WsaData) != 0)
+            break;
+        WSACleanup();
+        Cycles++;
+    }
+    ok(GetProcessHandleCount(GetCurrentProcess(), &After), "GetProcessHandleCount failed %lu\n", GetLastError());
+    ok_dec(Cycles, 50);
+    ok(After <= Before + 3, "%d WSAStartup/WSACleanup cycles: handle count %lu -> %lu\n", Cycles, Before, After);
+    ok(!IsWinsockInitialized(), "Winsock still initialized after cleanup\n");
+}
+
 START_TEST(WSAStartup)
 {
     BOOLEAN Okay;
@@ -298,4 +337,6 @@ START_TEST(WSAStartup)
     }
 
     FreeGuarded(WsaData);
+
+    TestStartupCleanupHandles();
 }
