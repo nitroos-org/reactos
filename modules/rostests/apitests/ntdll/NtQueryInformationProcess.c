@@ -1332,6 +1332,104 @@ Test_ProcessCommandLineInformation(void)
 }
 /* END ProcessCommandLineInformation test */
 
+static
+DWORD
+WINAPI
+HandleTableChurnThread(
+    _In_ PVOID Context)
+{
+    volatile LONG *Stop = Context;
+    HANDLE Handles[24] = { NULL };
+    ULONG i = 0, k = 0;
+
+    while (!*Stop)
+    {
+        i = (i + 7) % RTL_NUMBER_OF(Handles);
+        if (Handles[i])
+        {
+            CloseHandle(Handles[i]);
+            Handles[i] = NULL;
+        }
+        else if ((k++ & 1) == 0)
+        {
+            Handles[i] = CreateEventW(NULL, TRUE, FALSE, NULL);
+        }
+        else
+        {
+            Handles[i] = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 4096, NULL);
+        }
+    }
+    for (i = 0; i < RTL_NUMBER_OF(Handles); i++)
+    {
+        if (Handles[i])
+            CloseHandle(Handles[i]);
+    }
+    return 0;
+}
+
+/*
+ * The Chromium sandbox calls this on itself, sized as GetProcessHandleCount() + 1000 handles, and
+ * terminates the process (exit 0x1b62) when it fails. The snapshot must not fail
+ * while other threads create and close handles.
+ */
+static
+void
+Test_ProcessHandleTableRace(void)
+{
+    volatile LONG Stop = 0;
+    HANDLE Threads[3];
+    ULONG Queries = 0, Failed = 0, i, Start;
+    NTSTATUS Status, FirstBad = STATUS_SUCCESS;
+    PULONG Buffer;
+    DWORD Count;
+
+    Status = NtQueryInformationProcess(NtCurrentProcess(), (PROCESSINFOCLASS)58, NULL, 0, NULL);
+    if (Status == STATUS_INVALID_INFO_CLASS || Status == STATUS_NOT_IMPLEMENTED)
+    {
+        skip("ProcessHandleTable is not supported\n");
+        return;
+    }
+
+    for (i = 0; i < RTL_NUMBER_OF(Threads); i++)
+        Threads[i] = CreateThread(NULL, 0, HandleTableChurnThread, (PVOID)&Stop, 0, NULL);
+
+    Start = GetTickCount();
+    while (GetTickCount() - Start < 3000)
+    {
+        ULONG Length = 0;
+
+        if (!GetProcessHandleCount(GetCurrentProcess(), &Count))
+            break;
+        Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, (Count + 1000) * sizeof(ULONG));
+        if (!Buffer)
+            break;
+        Status = NtQueryInformationProcess(NtCurrentProcess(),
+                                           (PROCESSINFOCLASS)58,
+                                           Buffer,
+                                           (Count + 1000) * sizeof(ULONG),
+                                           &Length);
+        Queries++;
+        if (!NT_SUCCESS(Status))
+        {
+            if (Failed++ == 0)
+                FirstBad = Status;
+        }
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+    }
+
+    Stop = 1;
+    for (i = 0; i < RTL_NUMBER_OF(Threads); i++)
+    {
+        if (Threads[i])
+        {
+            WaitForSingleObject(Threads[i], INFINITE);
+            CloseHandle(Threads[i]);
+        }
+    }
+    ok(Queries > 0, "no query ran\n");
+    ok(Failed == 0, "%lu of %lu ProcessHandleTable queries failed, first status 0x%08lx\n", Failed, Queries, FirstBad);
+}
+
 START_TEST(NtQueryInformationProcess)
 {
     NTSTATUS Status;
@@ -1351,4 +1449,5 @@ START_TEST(NtQueryInformationProcess)
     Test_ProcQueryAlignmentProbe();
     Test_ProcessVmCounters();
     Test_ProcessCommandLineInformation();
+    Test_ProcessHandleTableRace();
 }
