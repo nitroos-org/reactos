@@ -30,6 +30,7 @@ extern void func_EnumDisplayDevices(void);
 extern void func_EnumDisplaySettings(void);
 extern void func_FrameChangedClient(void);
 extern void func_FrameMetrics(void);
+extern void func_FramelessCaptionDrag(void);
 extern void func_GetClassInfo(void);
 extern void func_GetDCEx(void);
 extern void func_GetIconInfo(void);
@@ -150,6 +151,7 @@ const struct test winetest_testlist[] =
     { "EnumDisplaySettings", func_EnumDisplaySettings },
     { "FrameChangedClient", func_FrameChangedClient },
     { "FrameMetrics", func_FrameMetrics },
+    { "FramelessCaptionDrag", func_FramelessCaptionDrag },
     { "GetClassInfo", func_GetClassInfo },
     { "GetDCEx", func_GetDCEx },
     { "GetIconInfo", func_GetIconInfo },
