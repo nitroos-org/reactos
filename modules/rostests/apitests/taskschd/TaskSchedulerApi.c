@@ -376,7 +376,7 @@ static void test_enable_disable(IRegisteredTask *task)
     if (running) IRunningTask_Release(running);
     date = 1;
     hr = IRegisteredTask_get_NextRunTime(task, &date);
-    ok(hr == SCHED_S_TASK_NO_VALID_TRIGGERS && date == 0, "NextRunTime of a disabled task: 0x%lx %f\n", hr, date);
+    ok(hr == SCHED_S_TASK_NOT_SCHEDULED && date == 0, "NextRunTime of a disabled task: 0x%lx %f\n", hr, date);
 
     hr = IRegisteredTask_put_Enabled(task, VARIANT_TRUE);
     ok(hr == S_OK, "put_Enabled(TRUE) failed: 0x%lx\n", hr);

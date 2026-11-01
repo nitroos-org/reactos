@@ -170,6 +170,139 @@ static void test_usage_errors(void)
     EXPECT_HAS(out, "ERROR:");
 }
 
+/* the layout between two tags removed, so that a piece of XML is found whatever the indentation */
+static void squash_xml(char *text)
+{
+    char *src = text, *dst = text;
+
+    while (*src)
+    {
+        if (src > text && src[-1] == '>' && (*src == ' ' || *src == '\n'))
+        {
+            char *p = src;
+
+            while (*p == ' ' || *p == '\n') p++;
+            if (*p == '<')
+            {
+                src = p;
+                continue;
+            }
+        }
+        *dst++ = *src++;
+    }
+    *dst = 0;
+}
+
+/* /create /sc weekly and monthly with /mo /d /m: the schedule they make, stored and listed */
+static void test_calendar_schedules(void)
+{
+    static const WCHAR *const names[] =
+    {
+        L"ReactOS ApiTest Sch\\Weekly", L"ReactOS ApiTest Sch\\WeeklyDefault", L"ReactOS ApiTest Sch\\MonthDay",
+        L"ReactOS ApiTest Sch\\MonthWeek", L"ReactOS ApiTest Sch\\MonthLast", L"ReactOS ApiTest Sch\\MonthLastDay",
+        L"ReactOS ApiTest Sch\\MonthEvery",
+    };
+    char out[16384];
+    DWORD rc;
+    unsigned int i;
+
+    rc = schtasks(out, sizeof(out), L"/create /tn \"%s\" /tr \"cmd.exe /c exit\" /sc weekly /mo 2 /d MON,THU /st 09:30 "
+                  L"/sd 03/05/2031 /f", names[0]);
+    EXPECT_RC(rc, 0, out);
+    EXPECT_HAS(out, "SUCCESS: The scheduled task \"ReactOS ApiTest Sch\\Weekly\" has successfully been created.");
+    rc = schtasks(out, sizeof(out), L"/query /xml /tn \"%s\"", names[0]);
+    EXPECT_RC(rc, 0, out);
+    squash_xml(out);
+    EXPECT_HAS(out, "<StartBoundary>2031-03-05T09:30:00</StartBoundary>");
+    EXPECT_HAS(out, "<ScheduleByWeek>");
+    EXPECT_HAS(out, "<DaysOfWeek><Monday/><Thursday/></DaysOfWeek>"
+                    "<WeeksInterval>2</WeeksInterval></ScheduleByWeek>");
+    rc = schtasks(out, sizeof(out), L"/query /v /fo LIST /tn \"%s\"", names[0]);
+    EXPECT_RC(rc, 0, out);
+    EXPECT_HAS(out, "\nSchedule Type:                        Weekly\n");
+    EXPECT_HAS(out, "\nDays:                                 Every 2 week(s) on: MONDAY, THURSDAY\n");
+    EXPECT_HAS(out, "\nNext Run Time:                        3/6/2031 9:30:00 AM\n");
+
+    rc = schtasks(out, sizeof(out), L"/create /tn \"%s\" /tr \"cmd.exe /c exit\" /sc weekly /st 04:15 /sd 03/05/2031 /f",
+                  names[1]);
+    EXPECT_RC(rc, 0, out);
+    rc = schtasks(out, sizeof(out), L"/query /xml /tn \"%s\"", names[1]);
+    squash_xml(out);
+    EXPECT_HAS(out, "<DaysOfWeek><Monday/></DaysOfWeek><WeeksInterval>1</WeeksInterval>");
+    rc = schtasks(out, sizeof(out), L"/query /fo LIST /tn \"%s\"", names[1]);
+    EXPECT_HAS(out, "\nNext Run Time: 3/10/2031 4:15:00 AM\n");
+
+    rc = schtasks(out, sizeof(out), L"/create /tn \"%s\" /tr \"cmd.exe /c exit\" /sc monthly /d 15 /m JAN,JUL /st 08:00 "
+                  L"/sd 03/05/2031 /f", names[2]);
+    EXPECT_RC(rc, 0, out);
+    rc = schtasks(out, sizeof(out), L"/query /xml /tn \"%s\"", names[2]);
+    squash_xml(out);
+    EXPECT_HAS(out, "<ScheduleByMonth><DaysOfMonth><Day>15</Day></DaysOfMonth><Months><January/><July/></Months>"
+                    "</ScheduleByMonth>");
+    rc = schtasks(out, sizeof(out), L"/query /v /fo LIST /tn \"%s\"", names[2]);
+    EXPECT_HAS(out, "\nSchedule Type:                        Monthly\n");
+    EXPECT_HAS(out, "\nDays:                                 15\n");
+    EXPECT_HAS(out, "\nMonths:                               JANUARY, JULY\n");
+    EXPECT_HAS(out, "\nNext Run Time:                        7/15/2031 8:00:00 AM\n");
+
+    rc = schtasks(out, sizeof(out), L"/create /tn \"%s\" /tr \"cmd.exe /c exit\" /sc monthly /mo second /d TUE /st 08:00 "
+                  L"/sd 03/05/2031 /f", names[3]);
+    EXPECT_RC(rc, 0, out);
+    rc = schtasks(out, sizeof(out), L"/query /xml /tn \"%s\"", names[3]);
+    squash_xml(out);
+    EXPECT_HAS(out, "<ScheduleByMonthDayOfWeek><Weeks><Week>2</Week></Weeks><DaysOfWeek><Tuesday/></DaysOfWeek>"
+                    "<Months><January/><February/><March/><April/><May/><June/><July/><August/><September/>"
+                    "<October/><November/><December/></Months></ScheduleByMonthDayOfWeek>");
+    rc = schtasks(out, sizeof(out), L"/query /fo LIST /tn \"%s\"", names[3]);
+    EXPECT_HAS(out, "\nNext Run Time: 3/11/2031 8:00:00 AM\n");
+
+    rc = schtasks(out, sizeof(out), L"/create /tn \"%s\" /tr \"cmd.exe /c exit\" /sc monthly /mo last /d FRI /m FEB /st 08:00 "
+                  L"/sd 03/05/2031 /f", names[4]);
+    EXPECT_RC(rc, 0, out);
+    rc = schtasks(out, sizeof(out), L"/query /xml /tn \"%s\"", names[4]);
+    squash_xml(out);
+    EXPECT_HAS(out, "<Weeks><Week>Last</Week></Weeks><DaysOfWeek><Friday/></DaysOfWeek><Months><February/></Months>");
+    rc = schtasks(out, sizeof(out), L"/query /fo LIST /tn \"%s\"", names[4]);
+    EXPECT_HAS(out, "\nNext Run Time: 2/27/2032 8:00:00 AM\n");
+
+    rc = schtasks(out, sizeof(out), L"/create /tn \"%s\" /tr \"cmd.exe /c exit\" /sc monthly /mo lastday /m FEB /st 08:00 "
+                  L"/sd 03/05/2031 /f", names[5]);
+    EXPECT_RC(rc, 0, out);
+    rc = schtasks(out, sizeof(out), L"/query /xml /tn \"%s\"", names[5]);
+    squash_xml(out);
+    EXPECT_HAS(out, "<DaysOfMonth><Day>Last</Day></DaysOfMonth><Months><February/></Months>");
+    rc = schtasks(out, sizeof(out), L"/query /fo LIST /tn \"%s\"", names[5]);
+    EXPECT_HAS(out, "\nNext Run Time: 2/29/2032 8:00:00 AM\n");
+
+    rc = schtasks(out, sizeof(out), L"/create /tn \"%s\" /tr \"cmd.exe /c exit\" /sc monthly /mo 3 /st 04:00 /sd 02/10/2031 /f",
+                  names[6]);
+    EXPECT_RC(rc, 0, out);
+    rc = schtasks(out, sizeof(out), L"/query /xml /tn \"%s\"", names[6]);
+    squash_xml(out);
+    EXPECT_HAS(out, "<DaysOfMonth><Day>1</Day></DaysOfMonth><Months><February/><May/><August/><November/></Months>");
+
+    /* the schedules the service would not run are refused, and so are the values that make no schedule */
+    rc = schtasks(out, sizeof(out), L"/create /tn \"ReactOS ApiTest Sch\\Bad\" /tr cmd.exe /sc onidle /i 10 /f");
+    EXPECT_RC(rc, 1, out);
+    EXPECT_HAS(out, "ERROR:");
+    rc = schtasks(out, sizeof(out), L"/create /tn \"ReactOS ApiTest Sch\\Bad\" /tr cmd.exe /sc weekly /d XYZ /f");
+    EXPECT_RC(rc, 1, out);
+    rc = schtasks(out, sizeof(out), L"/create /tn \"ReactOS ApiTest Sch\\Bad\" /tr cmd.exe /sc weekly /mo 60 /f");
+    EXPECT_RC(rc, 1, out);
+    rc = schtasks(out, sizeof(out), L"/create /tn \"ReactOS ApiTest Sch\\Bad\" /tr cmd.exe /sc monthly /mo second /f");
+    EXPECT_RC(rc, 1, out);
+    rc = schtasks(out, sizeof(out), L"/create /tn \"ReactOS ApiTest Sch\\Bad\" /tr cmd.exe /sc monthly /d 32 /f");
+    EXPECT_RC(rc, 1, out);
+    rc = schtasks(out, sizeof(out), L"/query /tn \"ReactOS ApiTest Sch\\Bad\"");
+    EXPECT_RC(rc, 1, out);
+
+    for (i = 0; i < ARRAYSIZE(names); i++)
+    {
+        rc = schtasks(out, sizeof(out), L"/delete /tn \"%s\" /f", names[i]);
+        EXPECT_RC(rc, 0, out);
+    }
+}
+
 START_TEST(Schtasks)
 {
     WCHAR marker[MAX_PATH], st[16], xml_path[MAX_PATH], xml_text[2048];
@@ -195,6 +328,8 @@ START_TEST(Schtasks)
     schtasks(out, sizeof(out), L"/delete /tn \"" TASK2 L"\" /f");
     schtasks(out, sizeof(out), L"/delete /tn \"" TASK3 L"\" /f");
     schtasks(out, sizeof(out), L"/delete /tn \"" TASK_XML L"\" /f");
+
+    test_calendar_schedules();
 
     /* /create /sc once: a task a day away, whose action writes a marker */
     _snwprintf(marker, ARRAYSIZE(marker), L"%s\\sch-one.txt", marker_dir);
