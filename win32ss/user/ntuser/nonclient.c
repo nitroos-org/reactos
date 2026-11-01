@@ -709,7 +709,9 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
 
    MsqSetStateWindow(pti, MSQ_STATE_MOVESIZE, NULL);
 
-   co_IntSendMessage( UserHMGetHandle(pwnd), WM_EXITSIZEMOVE, 0, 0 );
+   /* what the hook decided (another rectangle, or to cancel) is applied first: the oracle sends WM_EXITSIZEMOVE after it */
+   if (!hookChanged && !hookCancel)
+      co_IntSendMessage( UserHMGetHandle(pwnd), WM_EXITSIZEMOVE, 0, 0 );
    //// wine mdi hack
    co_IntSendMessage( UserHMGetHandle(pwnd), WM_SETVISIBLE, !!(pwnd->style & WS_MINIMIZE), 0L);
    ////
@@ -766,6 +768,9 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
          }
       }
    }
+
+   if (hookChanged || hookCancel)
+      co_IntSendMessage( UserHMGetHandle(pwnd), WM_EXITSIZEMOVE, 0, 0 );
 
    if (IntIsWindow(UserHMGetHandle(pwnd)))
    {
