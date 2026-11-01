@@ -420,6 +420,7 @@ typedef struct tagMSIPACKAGE
     struct list files;
     struct list filepatches;
     struct list tempfiles;
+    struct list rollback_files;
     struct list folders;
     struct list binaries;
     struct list cabinet_streams;
@@ -487,6 +488,7 @@ typedef struct tagMSIPACKAGE
     unsigned char need_reboot_at_end : 1;
     unsigned char need_reboot_now : 1;
     unsigned char need_rollback : 1;
+    unsigned char install_validated : 1;
     unsigned char rpc_server_started : 1;
 #ifdef __REACTOS__
     unsigned char warned_32bit_custom_action : 1;
@@ -1150,6 +1152,8 @@ extern BOOL msi_find_next_file( MSIPACKAGE *, HANDLE, WIN32_FIND_DATAW * );
 extern BOOL msi_move_file( MSIPACKAGE *, const WCHAR *, const WCHAR *, DWORD );
 extern DWORD msi_get_file_version_info( MSIPACKAGE *, const WCHAR *, DWORD, BYTE * );
 extern BOOL msi_create_full_path( MSIPACKAGE *, const WCHAR * );
+extern void msi_rollback_record_file( MSIPACKAGE *, const WCHAR * );
+extern void msi_rollback_finish( MSIPACKAGE *, BOOL );
 extern DWORD msi_get_disk_file_size( MSIPACKAGE *, const WCHAR * );
 extern VS_FIXEDFILEINFO *msi_get_disk_file_version( MSIPACKAGE *, const WCHAR * );
 extern UINT msi_get_filehash( MSIPACKAGE *, const WCHAR *, MSIFILEHASHINFO * );

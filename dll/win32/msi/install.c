@@ -368,7 +368,9 @@ WCHAR *msi_resolve_source_folder( MSIPACKAGE *package, const WCHAR *name, MSIFOL
 
     TRACE("working to resolve %s\n", debugstr_w(name));
 
-    if (!wcscmp( name, L"SourceDir" )) name = L"TARGETDIR";
+    if (!wcscmp( name, L"SourceDir" ) ||
+        ((package->WordCount & msidbSumInfoSourceTypeCompressed) && !wcsicmp( name, L"SourceDir" )))
+        name = L"TARGETDIR";
     if (!(f = msi_get_loaded_folder( package, name ))) return NULL;
 
     /* special resolving for root dir */

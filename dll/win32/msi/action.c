@@ -3288,6 +3288,7 @@ static UINT ACTION_InstallValidate(MSIPACKAGE *package)
         total += file->FileSize;
 
     msi_ui_progress( package, 0, total, 0, 0 );
+    package->install_validated = 1;
 
     LIST_FOR_EACH_ENTRY( feature, &package->features, MSIFEATURE, entry )
     {
@@ -7472,19 +7473,48 @@ static UINT ITERATE_RemoveEnvironmentString( MSIRECORD *rec, LPVOID param )
         goto done;
 
     len_new_value = size / sizeof(WCHAR) - 1;
-    p = q = new_value;
-    for (;;)
+    if (value && !(flags & ENV_MOD_MASK) && wcscmp( new_value, value ))
     {
-        while (*q && *q != ';') q++;
-        len = q - p;
-        if (value && len == len_value && !memcmp( value, p, len * sizeof(WCHAR) ))
+        /* A plain value is only removed while the variable still has exactly that value:
+           another row (or the user) has added to it, and those parts are taken out by
+           their own rows (action.c winetest, MSITESTVAR17 and 18). */
+        TRACE("value of %s changed, not removing\n", debugstr_w(name));
+        goto done;
+    }
+    if (value && len_value && (flags & ENV_MOD_PREFIX) && !wcsncmp( new_value, value, len_value ) &&
+        (!new_value[len_value] || new_value[len_value] == ';'))
+    {
+        /* the string was added in front, it may contain separators itself */
+        q = new_value + len_value;
+        if (*q == ';') q++;
+        memmove( new_value, q, (len_new_value - (q - new_value) + 1) * sizeof(WCHAR) );
+    }
+    else if (value && len_value && (flags & ENV_MOD_APPEND) && len_new_value > len_value &&
+             new_value[len_new_value - len_value - 1] == ';' &&
+             !wcscmp( new_value + len_new_value - len_value, value ))
+    {
+        new_value[len_new_value - len_value - 1] = 0;
+    }
+    else if (value && !(flags & ENV_MOD_MASK))
+    {
+        new_value[0] = 0; /* the whole value is ours */
+    }
+    else
+    {
+        p = q = new_value;
+        for (;;)
         {
-            if (*q == ';') q++;
-            memmove( p, q, (len_new_value - (q - new_value) + 1) * sizeof(WCHAR) );
-            break;
+            while (*q && *q != ';') q++;
+            len = q - p;
+            if (value && len == len_value && !memcmp( value, p, len * sizeof(WCHAR) ))
+            {
+                if (*q == ';') q++;
+                memmove( p, q, (len_new_value - (q - new_value) + 1) * sizeof(WCHAR) );
+                break;
+            }
+            if (!*q) break;
+            p = ++q;
         }
-        if (!*q) break;
-        p = ++q;
     }
 
     if (!new_value[0] || !value)
@@ -8067,7 +8097,7 @@ StandardActions[] =
     { L"RegisterExtensionInfo", IDS_DESC_REGISTEREXTENSIONINFO, 0, ACTION_RegisterExtensionInfo, L"UnregisterExtensionInfo" },
     { L"RegisterFonts", IDS_DESC_REGISTERFONTS, IDS_TEMP_REGISTERFONTS, ACTION_RegisterFonts, L"UnregisterFonts" },
     { L"RegisterMIMEInfo", IDS_DESC_REGISTERMIMEINFO, IDS_TEMP_REGISTERMIMEINFO, ACTION_RegisterMIMEInfo, L"UnregisterMIMEInfo" },
-    { L"RegisterProduct", IDS_DESC_REGISTERPRODUCT, 0, ACTION_RegisterProduct, NULL },
+    { L"RegisterProduct", IDS_DESC_REGISTERPRODUCT, 0, ACTION_RegisterProduct, L"UnpublishProduct" },
     { L"RegisterProgIdInfo", IDS_DESC_REGISTERPROGIDINFO, IDS_TEMP_REGISTERPROGIDINFO, ACTION_RegisterProgIdInfo, L"UnregisterProgIdInfo" },
     { L"RegisterTypeLibraries", IDS_DESC_REGISTERTYPELIBRARIES, IDS_TEMP_REGISTERTYPELIBRARIES, ACTION_RegisterTypeLibraries, L"UnregisterTypeLibraries" },
     { L"RegisterUser", IDS_DESC_REGISTERUSER, 0, ACTION_RegisterUser, NULL },
@@ -8133,8 +8163,15 @@ static UINT ACTION_HandleStandardAction(MSIPACKAGE *package, LPCWSTR action)
 
                 if (StandardActions[i].action_rollback && !package->need_rollback)
                 {
-                    TRACE("scheduling rollback action\n");
-                    msi_schedule_action( package, SCRIPT_ROLLBACK, StandardActions[i].action_rollback );
+                    /* a failed install of a registered product (maintenance) keeps its registration */
+                    if (!wcscmp( StandardActions[i].action_rollback, L"UnpublishProduct" ) &&
+                        msi_get_property_int( package->db, L"ProductToBeRegistered", 0 ))
+                        TRACE("product already registered, not scheduling its rollback\n");
+                    else
+                    {
+                        TRACE("scheduling rollback action\n");
+                        msi_schedule_action( package, SCRIPT_ROLLBACK, StandardActions[i].action_rollback );
+                    }
                 }
             }
             else
@@ -8329,12 +8366,17 @@ UINT MSI_InstallPackage( MSIPACKAGE *package, LPCWSTR szPackagePath,
     /* finish up running custom actions */
     ACTION_FinishCustomActions(package);
 
-    if (package->need_rollback && !(reinstall = msi_dup_property( package->db, L"REINSTALL" )))
+    if (package->need_rollback)
     {
-        WARN("installation failed, running rollback script\n");
-        execute_script( package, SCRIPT_ROLLBACK );
+        if (!(reinstall = msi_dup_property( package->db, L"REINSTALL" )))
+        {
+            WARN("installation failed, running rollback script\n");
+            execute_script( package, SCRIPT_ROLLBACK );
+        }
+        free( reinstall );
+        msi_rollback_finish( package, TRUE );
     }
-    free( reinstall );
+    else msi_rollback_finish( package, FALSE );
     free( action );
 
     if (rc == ERROR_SUCCESS && package->need_reboot_at_end)

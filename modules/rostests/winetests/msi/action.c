@@ -2194,6 +2194,55 @@ static const msi_table ed_tables[] =
     ADD_TABLE(property)
 };
 
+static const char rb_registry_dat[] =
+    "Registry\tRoot\tKey\tName\tValue\tComponent_\n"
+    "s72\ti2\tl255\tL255\tL0\ts72\n"
+    "Registry\tRegistry\n"
+    "rbreg0\t2\tSOFTWARE\\msitest_rollback\tsz\tstring\tOne\n"
+    "rbreg1\t2\tSOFTWARE\\msitest_rollback\\subkey\t+\t\tOne\n";
+
+static const char rb_environment_dat[] =
+    "Environment\tName\tValue\tComponent_\n"
+    "s72\tl255\tL255\ts72\n"
+    "Environment\tEnvironment\n"
+    "RbVar1\t=-MSITESTRBVAR\t1\tOne\n";
+
+/* the registry, product registration and shortcut-free actions run before InstallFiles, which
+ * fails on the second file: its source file does not exist */
+static const char rb_install_exec_seq_dat[] =
+    "Action\tCondition\tSequence\n"
+    "s72\tS255\tI2\n"
+    "InstallExecuteSequence\tAction\n"
+    "CostFinalize\t\t1000\n"
+    "CostInitialize\t\t800\n"
+    "FileCost\t\t900\n"
+    "InstallValidate\t\t1400\n"
+    "InstallInitialize\t\t1500\n"
+    "ProcessComponents\t\t1600\n"
+    "CreateFolders\t\t3600\n"
+    "WriteRegistryValues\t\t3700\n"
+    "WriteEnvironmentStrings\t\t3800\n"
+    "RegisterProduct\t\t3900\n"
+    "PublishFeatures\t\t3950\n"
+    "InstallFiles\t\t4000\n"
+    "InstallFinalize\t\t6600\n"
+    "LaunchConditions\t\t100\n";
+
+static const msi_table rb_tables[] =
+{
+    ADD_TABLE(ed_component),
+    ADD_TABLE(cf_directory),
+    ADD_TABLE(cf_feature),
+    ADD_TABLE(cf_feature_comp),
+    ADD_TABLE(cf_file),
+    ADD_TABLE(cf_create_folders),
+    ADD_TABLE(rb_registry),
+    ADD_TABLE(rb_environment),
+    ADD_TABLE(rb_install_exec_seq),
+    ADD_TABLE(media),
+    ADD_TABLE(property)
+};
+
 static const msi_table sss_tables[] =
 {
     ADD_TABLE(component),
@@ -5361,6 +5410,124 @@ error:
     delete_pf("msitest", FALSE);
 }
 
+extern char PROG_FILES_DIR[MAX_PATH]; /* install.c */
+
+static BOOL pf_file_has(const char *rel, const char *data)
+{
+    char path[MAX_PATH], buf[16] = {0};
+    DWORD size = 0;
+    HANDLE file;
+
+    strcpy(path, PROG_FILES_DIR);
+    strcat(path, "\\");
+    strcat(path, rel);
+    file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    ReadFile(file, buf, sizeof(buf) - 1, &size, NULL);
+    CloseHandle(file);
+    return size >= strlen(data) && !memcmp(buf, data, strlen(data)); /* create_pf_data pads the file */
+}
+
+/* A failed install is rolled back: what it created or replaced is restored, the product is not
+ * registered.  InstallFiles fails on the second file, after the registry, the environment, the
+ * product registration and the folders were done. */
+static void test_rollback_failed_install(void)
+{
+    const char prodcode[] = "{7DF88A48-996F-4EC8-A022-BF956F9B2CBB}";
+    const char uninst[] = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{7DF88A48-996F-4EC8-A022-BF956F9B2CBB}";
+    INSTALLSTATE state;
+    HKEY key;
+    LONG res;
+    UINT r;
+
+    if (!is_process_elevated())
+    {
+        skip("process is limited\n");
+        return;
+    }
+
+    CreateDirectoryA("msitest", NULL);
+    CreateDirectoryA("msitest\\first", NULL);
+    create_file("msitest\\first\\one.txt", 1000);
+    /* msitest\two.txt is missing */
+    create_database(msifile, rb_tables, ARRAY_SIZE(rb_tables));
+
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
+
+    r = MsiInstallProductA(msifile, NULL);
+    if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+    {
+        skip("Not enough rights to perform tests\n");
+        goto error;
+    }
+    ok(r == ERROR_INSTALL_FAILURE, "Expected ERROR_INSTALL_FAILURE, got %u\n", r);
+
+    ok(!pf_exists("msitest\\first\\one.txt"), "file installed\n");
+    ok(!pf_exists("msitest\\two.txt"), "file installed\n");
+    ok(!pf_exists("msitest\\first"), "directory created\n");
+    ok(!pf_exists("msitest\\second"), "directory created\n");
+    ok(!pf_exists("msitest\\third"), "directory created\n");
+    ok(!pf_exists("msitest"), "directory created\n");
+
+    /* the package is a 32-bit one: its registry values go to the 32-bit view */
+    res = RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\msitest_rollback", 0, KEY_READ | KEY_WOW64_32KEY, &key);
+    if (!res)
+    {
+        /* the undo of the registry writes removes the values; the empty keys the install
+         * created stay (Windows removes them too) */
+        res = RegQueryValueExA(key, "sz", NULL, NULL, NULL, NULL);
+        ok(res == ERROR_FILE_NOT_FOUND, "registry value left behind, got %ld\n", res);
+        RegCloseKey(key);
+    }
+
+    res = RegOpenKeyA(HKEY_CURRENT_USER, "Environment", &key);
+    ok(!res, "got %ld\n", res);
+    res = RegQueryValueExA(key, "MSITESTRBVAR", NULL, NULL, NULL, NULL);
+    ok(res == ERROR_FILE_NOT_FOUND, "environment variable left behind, got %ld\n", res);
+    RegDeleteValueA(key, "MSITESTRBVAR");
+    RegCloseKey(key);
+
+    res = RegOpenKeyExA(HKEY_LOCAL_MACHINE, uninst, 0, KEY_READ | KEY_WOW64_32KEY, &key);
+    ok(res == ERROR_FILE_NOT_FOUND, "uninstall entry left behind, got %ld\n", res);
+    if (!res) RegCloseKey(key);
+
+    state = MsiQueryProductStateA(prodcode);
+    ok(state == INSTALLSTATE_UNKNOWN, "product registered, state %d\n", state);
+    state = MsiQueryFeatureStateA(prodcode, "One");
+    ok(state == INSTALLSTATE_UNKNOWN, "feature registered, state %d\n", state);
+
+    /* a file and the directories that were there before are kept, with their contents */
+    create_pf("msitest", FALSE);
+    create_pf("msitest\\first", FALSE);
+    create_pf_data("msitest\\first\\one.txt", "orig", TRUE);
+
+    r = MsiInstallProductA(msifile, NULL);
+    ok(r == ERROR_INSTALL_FAILURE, "Expected ERROR_INSTALL_FAILURE, got %u\n", r);
+
+    ok(pf_exists("msitest\\first\\one.txt"), "file removed\n");
+    ok(pf_file_has("msitest\\first\\one.txt", "orig"), "file contents not restored\n");
+    ok(!pf_exists("msitest\\two.txt"), "file installed\n");
+    ok(pf_exists("msitest\\first"), "directory removed\n");
+    ok(!pf_exists("msitest\\second"), "directory created\n");
+    ok(pf_exists("msitest"), "directory removed\n");
+    state = MsiQueryProductStateA(prodcode);
+    ok(state == INSTALLSTATE_UNKNOWN, "product registered, state %d\n", state);
+
+error:
+    DeleteFileA("msitest\\first\\one.txt");
+    RemoveDirectoryA("msitest\\first");
+    RemoveDirectoryA("msitest");
+    DeleteFileA(msifile);
+    delete_pf("msitest\\first\\one.txt", TRUE);
+    delete_pf("msitest\\two.txt", TRUE);
+    delete_pf("msitest\\first", FALSE);
+    delete_pf("msitest\\second", FALSE);
+    delete_pf("msitest\\third", FALSE);
+    delete_pf("msitest", FALSE);
+    RegDeleteKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\msitest_rollback\\subkey", KEY_WOW64_32KEY, 0);
+    RegDeleteKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\msitest_rollback", KEY_WOW64_32KEY, 0);
+}
+
 static void test_start_stop_services(void)
 {
     UINT r;
@@ -6839,6 +7006,7 @@ START_TEST(action)
     test_envvar();
     test_create_remove_folder();
     test_remove_empty_directory_partial_install();
+    test_rollback_failed_install();
     test_start_stop_services();
     test_delete_services();
     test_install_services();
