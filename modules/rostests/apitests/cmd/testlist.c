@@ -14,6 +14,7 @@ extern void func_mkdir(void);
 extern void func_pipe(void);
 extern void func_ftype(void);
 extern void func_pushd(void);
+extern void func_ren(void);
 extern void func_search(void);
 extern void func_start(void);
 
@@ -32,6 +33,7 @@ const struct test winetest_testlist[] =
     { "pipe", func_pipe },
     { "ftype", func_ftype },
     { "pushd", func_pushd },
+    { "ren", func_ren },
     { "search", func_search },
     { "start", func_start },
     { 0, 0 }
