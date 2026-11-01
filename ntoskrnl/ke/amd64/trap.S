@@ -1005,6 +1005,9 @@ PUBLIC KiSystemCallEntry64
 
     mov byte ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_PreviousIrql], PASSIVE_LEVEL
 
+    /* Mark the frame as a system call (CONTEXT_SERVICE_ACTIVE) */
+    mov byte ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_ExceptionActive], 1
+
     /* Store user stack pointer in the trap frame */
     mov rax, gs:[PcUserRsp]
     mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rsp], rax

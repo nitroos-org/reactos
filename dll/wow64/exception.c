@@ -134,7 +134,8 @@ NTSTATUS Wow64GetSetContextThread(HANDLE Thread, WOW64_CONTEXT *Guest, BOOLEAN S
     }
     Status = NtQueryInformationThread(Thread, ThreadWow64Context, &Local, sizeof(Local), NULL);
     if (!NT_SUCCESS(Status)) return Status;
-    Local.ContextFlags = Flags;
+    /* The kernel answered CONTEXT_EXCEPTION_REQUEST in the flags it returned: keep them and add the xstate flag */
+    Local.ContextFlags |= Flags & WOW64_XSTATE_FLAG;
     _SEH2_TRY { *Guest = Local; }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     { _SEH2_YIELD(return _SEH2_GetExceptionCode()); }

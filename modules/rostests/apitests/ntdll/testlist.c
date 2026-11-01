@@ -52,6 +52,7 @@ extern void func_NtAllocateVirtualMemory(void);
 extern void func_NtApphelpCacheControl(void);
 extern void func_NtCompareTokens(void);
 extern void func_NtConnectPortTerminate(void);
+extern void func_ContextExceptionRequest(void);
 extern void func_NtContinue(void);
 extern void func_RtlBitmapRanges(void);
 extern void func_RtlFlsValue(void);
@@ -280,6 +281,7 @@ const struct test winetest_testlist[] =
     { "NtApphelpCacheControl",          func_NtApphelpCacheControl },
     { "NtCompareTokens",                func_NtCompareTokens },
     { "NtConnectPortTerminate",         func_NtConnectPortTerminate },
+    { "ContextExceptionRequest",       func_ContextExceptionRequest },
     { "NtContinue",                     func_NtContinue },
     { "RtlBitmapRanges",                func_RtlBitmapRanges },
     { "RtlFlsValue",                    func_RtlFlsValue },

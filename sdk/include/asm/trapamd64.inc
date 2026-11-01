@@ -197,6 +197,13 @@ kernel_mode_entry:
         mov [rbp + KTRAP_FRAME_PreviousIrql], al
 //    endif
 
+    /* Interrupts are not exceptions, anything else is (CONTEXT_EXCEPTION_ACTIVE) */
+    if (Flags AND TF_IRQL)
+        mov byte ptr [rbp + KTRAP_FRAME_ExceptionActive], 0
+    else
+        mov byte ptr [rbp + KTRAP_FRAME_ExceptionActive], 2
+    endif
+
     if (Flags AND TF_DEBUG)
         /* Save debug registers */
         mov rax, dr0

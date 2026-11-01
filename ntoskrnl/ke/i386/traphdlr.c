@@ -1856,8 +1856,8 @@ KiSystemServiceHandler(IN PKTRAP_FRAME TrapFrame,
     /* Chain trap frames */
     TrapFrame->Edx = (ULONG_PTR)Thread->TrapFrame;
 
-    /* No error code */
-    TrapFrame->ErrCode = 0;
+    /* No error code, mark the frame as a system call (see CONTEXT_SERVICE_ACTIVE) */
+    TrapFrame->ErrCode = KI_ERRCODE_SYSTEM_SERVICE;
 
     /* Save previous mode */
     TrapFrame->PreviousPreviousMode = Thread->PreviousMode;

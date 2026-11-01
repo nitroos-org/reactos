@@ -133,6 +133,12 @@ MACRO(KiEnterTrap, Flags)
     /* Save eax for system calls, for use by the C handler */
     mov [esp + KTRAP_FRAME_EAX], eax
 
+    /* No error code was pushed: do not leave the marker of an earlier system call in the frame
+     * (CONTEXT_SERVICE_ACTIVE, see KI_ERRCODE_SYSTEM_SERVICE) */
+    if (Flags AND (KI_PUSH_FAKE_ERROR_CODE OR KI_SOFTWARE_TRAP))
+        mov dword ptr [esp + KTRAP_FRAME_ERROR_CODE], 0
+    endif
+
     /* Does the caller want nonvolatiles only? */
     if (NOT (Flags AND KI_NONVOLATILES_ONLY))
         /* Otherwise, save the volatiles as well */

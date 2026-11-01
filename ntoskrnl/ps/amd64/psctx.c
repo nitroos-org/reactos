@@ -29,6 +29,7 @@ PspGetOrSetContextKernelRoutine(
     PGET_SET_CTX_CONTEXT GetSetContext;
     PKTHREAD Thread;
     PKTRAP_FRAME TrapFrame = NULL;
+    ULONG Flags, Active = 0;
 
     PAGED_CODE();
 
@@ -50,6 +51,16 @@ PspGetOrSetContextKernelRoutine(
         TrapFrame = KeGetTrapFrame(KeGetCurrentThread());
     }
 
+    /* The exception reporting bits are not register groups: strip them for the conversion */
+    Flags = GetSetContext->Context.ContextFlags;
+    GetSetContext->Context.ContextFlags = Flags & ~PS_CONTEXT_EXCEPTION_FLAGS;
+
+    /* Which kind of kernel entry is the thread in (system call or exception) */
+    if (TrapFrame->ExceptionActive == 1)
+        Active = PS_CONTEXT_SERVICE_ACTIVE;
+    else if (TrapFrame->ExceptionActive == 2)
+        Active = PS_CONTEXT_EXCEPTION_ACTIVE;
+
     /* Check if it's a set or get */
     if (Apc->SystemArgument1 != 0)
     {
@@ -64,6 +75,9 @@ PspGetOrSetContextKernelRoutine(
     {
         /* Get the nonvolatiles from the stack */
         KiGetTrapContext(TrapFrame, &GetSetContext->Context);
+
+        /* Report the entry kind to a caller that asked for it */
+        GetSetContext->Context.ContextFlags = PS_CONTEXT_FLAGS_REPORT(Flags, Active);
 
         if (GetSetContext->XState)
             KiGetXStateContext(GetSetContext->XState);
@@ -84,6 +98,7 @@ typedef struct
     KEVENT Event;
     NTSTATUS Status;
     BOOLEAN Set;
+    BOOLEAN Report;     /* the caller passed CONTEXT_EXCEPTION_REQUEST */
     WOW64_CONTEXT Context, Original;
     CONTEXT Native;
 } WOW64_CONTEXT_REQUEST;
@@ -106,7 +121,7 @@ PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
     WOW64_CONTEXT *Original = &Request->Original;
     WOW64_CPU_STATE *Cpu;
     PTEB Teb = PsGetCurrentThread()->Tcb.Teb;
-    ULONG Flags = Request->Context.ContextFlags;
+    ULONG Flags = Request->Context.ContextFlags, Active = 0;
 
     *Original = Request->Context;
     UNREFERENCED_PARAMETER(Routine);
@@ -121,6 +136,12 @@ PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
         RtlZeroMemory(Native, sizeof(*Native));
         Native->ContextFlags = CONTEXT_ALL;
         KiGetTrapContext(Trap, Native);
+        /* The state of the entry decides. Only the thread's 32-bit code, interrupted, is "no kernel entry":
+         * the service thunk, the 64-bit code of the process and a thread that has not run yet are not. */
+        if (Trap->ExceptionActive == 1)
+            Active = PS_CONTEXT_SERVICE_ACTIVE;
+        else if (Trap->ExceptionActive == 2 || Trap->SegCs != (KGDT64_R3_CMCODE | RPL_MASK))
+            Active = PS_CONTEXT_EXCEPTION_ACTIVE;
         if (Trap->SegCs == (KGDT64_R3_CMCODE | RPL_MASK))
         {
             if (Request->Set)
@@ -183,6 +204,8 @@ PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
             Request->Context = *Original;
         }
         Request->Context.ContextFlags = Flags;
+        if (!Request->Set && Request->Report)
+            Request->Context.ContextFlags |= PS_CONTEXT_EXCEPTION_REQUEST | PS_CONTEXT_EXCEPTION_REPORTING | Active;
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -214,7 +237,10 @@ PspWow64ContextThread(HANDLE Handle, PVOID Buffer, ULONG Length, BOOLEAN Set,
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     { _SEH2_YIELD(return _SEH2_GetExceptionCode()); }
     _SEH2_END;
-    Flags = Request.Context.ContextFlags;
+    /* CONTEXT_EXCEPTION_REQUEST and friends are reporting bits, not register groups */
+    Request.Report = (Request.Context.ContextFlags & PS_CONTEXT_EXCEPTION_REQUEST) != 0;
+    Flags = Request.Context.ContextFlags & ~PS_CONTEXT_EXCEPTION_FLAGS;
+    Request.Context.ContextFlags = Flags;
     if (!(Flags & WOW64_CONTEXT_i386) || (Flags & ~WOW64_CONTEXT_ALL))
         return STATUS_INVALID_PARAMETER;
     Status = ObReferenceObjectByHandle(Handle, Set ? THREAD_SET_CONTEXT : THREAD_GET_CONTEXT,

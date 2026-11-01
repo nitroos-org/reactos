@@ -73,6 +73,7 @@ list(APPEND SOURCE
     NtApphelpCacheControl.c
     NtCompareTokens.c
     NtConnectPortTerminate.c
+    ContextExceptionRequest.c
     NtContinue.c
     Wow64Continue.c
     Wow64ServiceArguments.c
