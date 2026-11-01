@@ -15,6 +15,12 @@ set_module_type(optfeatures win32gui UNICODE)
 add_importlibs(optfeatures advapi32 shlwapi shell32 comctl32 user32 gdi32 msvcrt kernel32 ntdll)
 add_cd_file(TARGET optfeatures DESTINATION reactos/system32 FOR all)
 
+# --- optionalfeatures.exe: the Windows name; launches optfeatures.exe (no Control Panel icon, appwiz.cpl hosts it) ---
+add_executable(optionalfeatures optionalfeatures.c optionalfeatures.rc)
+set_module_type(optionalfeatures win32gui UNICODE)
+add_importlibs(optionalfeatures shell32 user32 msvcrt kernel32)
+add_cd_file(TARGET optionalfeatures DESTINATION reactos/system32 FOR all)
+
 # --- ship the feature catalog + proof-feature payload into the image ---
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/gl-sw-pack.ini
             DESTINATION reactos/Featmgr/Catalog FOR all)

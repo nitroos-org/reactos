@@ -97,6 +97,8 @@
 #define IDS_APPWIZ_TITLE         105
 #define IDS_APPWIZ_TEXT1         106
 #define IDS_APPWIZ_TEXT2         107
+/* Own string-table block (no other language defines it), so LoadString falls back to en-US */
+#define IDS_APPWIZ_FEATURES      1040
 
 /* Strings */
 #define IDS_SEARCH_TEXT          110

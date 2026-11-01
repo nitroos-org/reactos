@@ -6,7 +6,7 @@
  *              or off" look: a checkbox list committed with OK/Apply/Cancel.
  *              Software tier uses a "Programs and Features" look (list with
  *              Install / Change / Uninstall verbs). Both are reachable from
- *              Control Panel (see dll/cpl/optionalfeatures + the appwiz hook).
+ *              Control Panel (the appwiz.cpl applet, optionalfeatures.exe, and the task link in Programs and Features).
  * COPYRIGHT:   Copyright 2026 Tomas Srnka
  */
 

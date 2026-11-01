@@ -915,6 +915,16 @@ CAppInfoDisplay::OnLink(ENLINK *Link)
             RichEdit->SendMessageW(EM_SETSEL, Link->chrg.cpMin, Link->chrg.cpMax);
             RichEdit->SendMessageW(EM_GETSELTEXT, 0, (LPARAM)pLink);
 
+            /* The Programs and Features task link is not a URL: a left click just runs it */
+            CStringW szTask(MAKEINTRESOURCEW(IDS_APPWIZ_FEATURES));
+            if (Link->msg == WM_LBUTTONUP && !szTask.IsEmpty() && szTask == pLink)
+            {
+                HeapFree(GetProcessHeap(), 0, pLink);
+                pLink = NULL;
+                ShellExecuteW(m_hWnd, L"open", L"optionalfeatures.exe", NULL, NULL, SW_SHOWNORMAL);
+                return;
+            }
+
             ShowPopupMenuEx(m_hWnd, m_hWnd, IDR_LINKMENU, -1);
         }
         break;
@@ -1008,6 +1018,16 @@ CAppInfoDisplay::SetWelcomeText(bool bAppwiz)
 
         szText.LoadStringW(IDS_APPWIZ_TEXT2);
         RichEdit->InsertText(szText, 0);
+
+        /* Task link, as in the Windows Programs and Features left pane: opens the feature manager */
+        szText.LoadStringW(IDS_APPWIZ_FEATURES);
+        if (!szText.IsEmpty())
+        {
+            RichEdit->InsertText(L"\n\n", 0);
+            SIZE_T Start = RichEdit->GetTextLen();
+            RichEdit->InsertText(szText, 0);
+            RichEdit->SetRangeFormatting(Start, Start + szText.GetLength(), CFM_LINK);
+        }
     }
 }
 

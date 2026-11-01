@@ -184,6 +184,11 @@ END
 
 STRINGTABLE
 BEGIN
+    IDS_APPWIZ_FEATURES "Turn Windows features on or off"
+END
+
+STRINGTABLE
+BEGIN
     IDS_SEARCH_TEXT "Search…"
     IDS_APPS_COUNT "Applications count: %d"
     IDS_APPS_SELECT_COUNT "; Selected: %d"

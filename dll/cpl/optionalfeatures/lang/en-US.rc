@@ -1,8 +1,0 @@
-LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
-
-STRINGTABLE
-BEGIN
-    IDS_CPLNAME "Turn Windows features on or off"
-    IDS_CPLDESCRIPTION "Turn optional ReactOS features and add-on software on or off."
-    IDS_LAUNCHFAILED "Could not start the Optional Features manager (optfeatures.exe)."
-END

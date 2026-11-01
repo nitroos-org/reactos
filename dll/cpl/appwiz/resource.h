@@ -21,8 +21,9 @@
 /* Strings */
 #define IDS_CPLSYSTEMNAME			1001
 #define IDS_CPLSYSTEMDESCRIPTION	2001
-#define IDS_FEATURESNAME			1002
-#define IDS_FEATURESDESCRIPTION		2002
+/* Own string-table block (no other language defines it), so LoadString falls back to en-US */
+#define IDS_FEATURESNAME			1040
+#define IDS_FEATURESDESCRIPTION		1041
 #define IDS_CREATE_SHORTCUT         2021
 #define IDS_ERROR_NOT_FOUND         2022
 #define IDS_NEW_INTERNET_SHORTCUT   2023

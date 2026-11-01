@@ -37,7 +37,9 @@ static LONG start_params(const WCHAR *params, HWND hwnd_parent)
 
 /* Applets exposed by this .cpl: the classic software list, plus the Windows-
  * native "Turn Windows features on or off" entry that hosts the two-tier
- * optional-feature manager (optfeatures.exe, base/applications/featmgr). */
+ * optional-feature manager (optfeatures.exe, base/applications/featmgr).
+ * This is the ONLY Control Panel item for the feature manager; optionalfeatures.exe
+ * and the Programs and Features task link reach it without a second icon. */
 #define APPWIZ_APPLET_PROGRAMS  0
 #define APPWIZ_APPLET_FEATURES  1
 #define APPWIZ_APPLET_COUNT     2

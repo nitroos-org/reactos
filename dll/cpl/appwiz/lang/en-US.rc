@@ -69,10 +69,14 @@ STRINGTABLE
 BEGIN
     IDS_CPLSYSTEMNAME "Add/Remove Programs"
     IDS_CPLSYSTEMDESCRIPTION "Sets up programs and creates shortcuts."
-    IDS_FEATURESNAME "Turn Windows features on or off"
-    IDS_FEATURESDESCRIPTION "Turn optional ReactOS features and add-on software on or off."
     IDS_CREATE_SHORTCUT "Create Shortcut"
     IDS_ERROR_NOT_FOUND "The file %s was not found."
+END
+
+STRINGTABLE
+BEGIN
+    IDS_FEATURESNAME "Turn Windows features on or off"
+    IDS_FEATURESDESCRIPTION "Turn optional ReactOS features and add-on software on or off."
 END
 
 STRINGTABLE
