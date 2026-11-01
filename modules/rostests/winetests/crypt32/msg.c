@@ -4521,6 +4521,409 @@ static void test_cms_malformed(void)
     }
 }
 
+/* ---- CryptoAPI keys, streamed messages and the size guards ---- */
+
+#include "msg_fixtures2.h"
+
+#ifndef NTE_BAD_TYPE
+#define NTE_BAD_TYPE ((HRESULT)0x8009000A)
+#endif
+#ifndef NTE_BAD_ALGID
+#define NTE_BAD_ALGID ((HRESULT)0x80090008)
+#endif
+#ifndef NTE_BAD_DATA
+#define NTE_BAD_DATA ((HRESULT)0x80090005)
+#endif
+
+/* Decrypts messages with a CryptoAPI exchange key that is not exportable (imported with flags 0) and with one
+ * that is, in a PROV_RSA_FULL and a PROV_RSA_AES provider. Windows (22H2, measured) decrypts messages with a
+ * 3DES, RC2 or RC4 content cipher and a PKCS #1 v1.5 wrapped key with all four keys, and fails everything else
+ * with NTE_BAD_TYPE: the AES ones, and the OAEP wrapped ones whatever the content cipher. We decrypt them
+ * all but OAEP with a hash other than SHA-1 (NTE_BAD_ALGID): the key is unwrapped with CryptDecrypt (PKCS #1
+ * v1.5 or CRYPT_OAEP) and never exported, so no provider has to know the content cipher. */
+static void test_cms_capi_keys(void)
+{
+    static const struct { const char *name; const char *provider; DWORD type; } provs[] =
+    {
+        { "RSA_FULL", MS_ENHANCED_PROV_A, PROV_RSA_FULL },
+        { "RSA_AES", MS_ENH_RSA_AES_PROV_A, PROV_RSA_AES },
+    };
+    static const struct { const char *name; const BYTE *data; DWORD len; int windows; } msgs[] =
+    {
+        /* windows: 1 works, 0 fails with NTE_BAD_TYPE; 2: fails with NTE_BAD_TYPE there, with NTE_BAD_ALGID here */
+#define M(n, w) { #n, cms_msg_##n, sizeof(cms_msg_##n), w }
+        M(3des, 1), M(rc2_40, 1), M(rc4, 1), M(aes128, 0), M(aes256, 0), M(ski, 0),
+        M(oaep_sha1, 0), M(oaep_3des, 0), M(oaep_rc2_40, 0), M(oaep_3des_sha256, 2),
+#undef M
+    };
+    DWORD p, e, m, c;
+
+    for (p = 0; p < ARRAY_SIZE(provs); p++)
+        for (e = 0; e < 2; e++)
+        {
+            HCRYPTPROV prov;
+            HCRYPTKEY key;
+
+            if (!CryptAcquireContextA(&prov, NULL, provs[p].provider, provs[p].type, CRYPT_VERIFYCONTEXT))
+            {
+                skip("%s: no provider: %08lx\n", provs[p].name, GetLastError());
+                continue;
+            }
+            if (!CryptImportKey(prov, cms_key_a_capi, sizeof(cms_key_a_capi), 0, e ? CRYPT_EXPORTABLE : 0, &key))
+            {
+                skip("%s: cannot import the key: %08lx\n", provs[p].name, GetLastError());
+                CryptReleaseContext(prov, 0);
+                continue;
+            }
+            for (m = 0; m < ARRAY_SIZE(msgs); m++)
+                for (c = 0; c < 2; c++)
+                {
+                    HCRYPTMSG msg = cms_open(msgs[m].data, msgs[m].len);
+                    DWORD err, len = 0;
+                    BYTE *content;
+                    BOOL ret;
+
+                    ok(!!msg, "%s: CryptMsgUpdate failed: %08lx\n", msgs[m].name, GetLastError());
+                    if (!msg) continue;
+                    if (c)
+                    {
+                        CMSG_CTRL_DECRYPT_PARA para = { sizeof(para), prov, AT_KEYEXCHANGE, 0 };
+
+                        SetLastError(0xdeadbeef);
+                        ret = CryptMsgControl(msg, 0, CMSG_CTRL_DECRYPT, &para);
+                    }
+                    else
+                    {
+                        CMSG_CTRL_KEY_TRANS_DECRYPT_PARA para = { sizeof(para) };
+                        CMSG_CMS_RECIPIENT_INFO *recipient = cms_param(msg, CMSG_CMS_RECIPIENT_INFO_PARAM, 0, NULL);
+
+                        ok(!!recipient, "%s: no recipient: %08lx\n", msgs[m].name, GetLastError());
+                        if (!recipient) { CryptMsgClose(msg); continue; }
+                        para.hCryptProv = prov;
+                        para.dwKeySpec = AT_KEYEXCHANGE;
+                        para.pKeyTrans = recipient->pKeyTrans;
+                        SetLastError(0xdeadbeef);
+                        ret = CryptMsgControl(msg, 0, CMSG_CTRL_KEY_TRANS_DECRYPT, &para);
+                        HeapFree(GetProcessHeap(), 0, recipient);
+                    }
+                    err = ret ? 0 : GetLastError();
+                    if (!err)
+                    {
+                        content = cms_param(msg, CMSG_CONTENT_PARAM, 0, &len);
+                        ok(content && len == sizeof(cms_plain) - 1 && !memcmp(content, cms_plain, len),
+                           "%s %s exportable %lu: wrong content\n", provs[p].name, msgs[m].name, e);
+                        HeapFree(GetProcessHeap(), 0, content);
+                    }
+                    if (msgs[m].windows == 1)
+                        ok(!err, "%s %s exportable %lu control %lu: got %08lx\n", provs[p].name, msgs[m].name, e, c, err);
+                    else if (!msgs[m].windows)
+                        ok(!err || err == NTE_BAD_TYPE, "%s %s exportable %lu control %lu: got %08lx\n",
+                           provs[p].name, msgs[m].name, e, c, err);
+                    else
+                        ok(err == NTE_BAD_TYPE || err == NTE_BAD_ALGID, "%s %s exportable %lu control %lu: got %08lx\n",
+                           provs[p].name, msgs[m].name, e, c, err);
+#ifdef __REACTOS__
+                    /* what we do beyond Windows: AES and SHA-1 OAEP decrypt with a CryptoAPI key */
+                    if (!msgs[m].windows)
+                        ok(!err, "%s %s exportable %lu control %lu: got %08lx\n", provs[p].name, msgs[m].name, e, c, err);
+                    else if (msgs[m].windows == 2)
+                        ok(err == NTE_BAD_ALGID, "%s %s: expected NTE_BAD_ALGID, got %08lx\n", provs[p].name, msgs[m].name, err);
+#endif
+                    CryptMsgClose(msg);
+                }
+            CryptDestroyKey(key);
+            CryptReleaseContext(prov, 0);
+        }
+}
+
+/* what a streamed message sends to the callback */
+struct cms_stream
+{
+    DWORD count;
+    struct { DWORD len; BOOL final; DWORD first; } cb[16];     /* first: the first byte of the piece */
+    BYTE *all;
+    DWORD all_len;
+};
+
+static BOOL WINAPI cms_stream_output(const void *arg, BYTE *pb, DWORD cb, BOOL final)
+{
+    struct cms_stream *s = (struct cms_stream *)arg;
+
+    if (s->count < ARRAY_SIZE(s->cb))
+    {
+        s->cb[s->count].len = cb;
+        s->cb[s->count].final = final;
+        s->cb[s->count].first = cb ? pb[0] : 0xffff;
+    }
+    s->count++;
+    s->all = s->all ? HeapReAlloc(GetProcessHeap(), 0, s->all, s->all_len + cb + 1) : HeapAlloc(GetProcessHeap(), 0, cb + 1);
+    memcpy(s->all + s->all_len, pb, cb);
+    s->all_len += cb;
+    return TRUE;
+}
+
+/* a DER (or BER, "indefinite") header at p: returns its size, the content length, or -1 for indefinite */
+static DWORD cms_tlv(const BYTE *p, DWORD avail, BYTE *tag, LONGLONG *len)
+{
+    DWORD i, n;
+
+    if (avail < 2) return 0;
+    *tag = p[0];
+    if (p[1] == 0x80) { *len = -1; return 2; }
+    if (p[1] < 0x80) { *len = p[1]; return 2; }
+    n = p[1] & 0x7f;
+    if (n > 4 || avail < 2 + n) return 0;
+    *len = 0;
+    for (i = 0; i < n; i++) *len = (*len << 8) | p[2 + i];
+    return 2 + n;
+}
+
+static const BYTE cms_stream_plain[] =
+    "0123456789abcdefghij0123456789abcdefghij0123456789abcdefghij0123456789abcdefghij0123456789abcdefghij";
+
+static void cms_check_bytes(HCRYPTMSG msg, const BYTE *expected, DWORD expected_len, const char *name)
+{
+    DWORD len = 0;
+    BYTE *content = cms_param(msg, CMSG_CONTENT_PARAM, 0, &len);
+
+    ok(!!content, "%s: CMSG_CONTENT_PARAM failed: %08lx\n", name, GetLastError());
+    if (!content) return;
+    ok(len == expected_len && !memcmp(content, expected, len), "%s: wrong content, %lu bytes\n", name, len);
+    HeapFree(GetProcessHeap(), 0, content);
+}
+
+/* Windows 10 22H2, measured: a streamed message sends its header (up to the opening of the encrypted content) with
+ * the first update, final = FALSE. The encrypted content comes with the final update. Definite length (cbContent
+ * set): the ciphertext in one piece, final = TRUE. Indefinite length (cbContent -1): the OCTET STRING header
+ * (none if the content is empty), the ciphertext, two end-of-contents, three end-of-contents with final = TRUE. */
+static void cms_stream_encode(const char *name, const char *alg, DWORD cb_content, const DWORD *chunks, DWORD n_chunks,
+                              DWORD block /* the cipher's block size */, BOOL use_ncrypt)
+{
+    PCCERT_CONTEXT cert = CertCreateCertificateContext(X509_ASN_ENCODING, cms_cert_a, sizeof(cms_cert_a));
+    cms_enveloped_encode_info info;
+    PCERT_INFO cert_info = cert->pCertInfo;
+    struct cms_stream s = { 0 };
+    CMSG_STREAM_INFO stream = { cb_content, cms_stream_output, &s };
+    DWORD i, off = 0, total = 0, ct_len, hdr, expected_cbs, err, size;
+    BOOL indefinite = cb_content == 0xffffffff, ret;
+    HCRYPTMSG msg;
+    LONGLONG len;
+    BYTE tag;
+
+    for (i = 0; i < n_chunks; i++) total += chunks[i];
+    ct_len = block == 1 ? total : total ? (total / block + 1) * block : 0;
+    memset(&info, 0, sizeof(info));
+    info.cbSize = sizeof(info);
+    info.ContentEncryptionAlgorithm.pszObjId = (char *)alg;
+    info.cRecipients = 1;
+    info.rgpRecipientCert = &cert_info;
+    SetLastError(0xdeadbeef);
+    msg = CryptMsgOpenToEncode(PKCS_7_ASN_ENCODING | X509_ASN_ENCODING, 0, CMSG_ENVELOPED, &info, NULL, &stream);
+    ok(!!msg, "%s: CryptMsgOpenToEncode failed: %08lx\n", name, GetLastError());
+    if (!msg) goto done;
+    ok(!s.count, "%s: %lu pieces before the first update\n", name, s.count);
+    for (i = 0; i < n_chunks; i++)
+    {
+        BOOL final = i == n_chunks - 1;
+
+        SetLastError(0xdeadbeef);
+        ret = CryptMsgUpdate(msg, cms_stream_plain + off, chunks[i], final);
+        ok(ret, "%s: CryptMsgUpdate failed: %08lx\n", name, GetLastError());
+        if (!final) ok(s.count == 1 && !s.cb[0].final, "%s: update %lu: %lu pieces\n", name, i, s.count);
+        off += chunks[i];
+    }
+    SetLastError(0xdeadbeef);
+    ret = CryptMsgGetParam(msg, CMSG_BARE_CONTENT_PARAM, 0, NULL, &size);
+    ok(!ret && GetLastError() == E_INVALIDARG, "%s: expected E_INVALIDARG, got %08lx\n", name, GetLastError());
+    SetLastError(0xdeadbeef);
+    ret = CryptMsgGetParam(msg, CMSG_CONTENT_PARAM, 0, NULL, &size);
+    ok(!ret && GetLastError() == E_INVALIDARG, "%s: expected E_INVALIDARG, got %08lx\n", name, GetLastError());
+    SetLastError(0xdeadbeef);
+    ret = CryptMsgUpdate(msg, cms_stream_plain, 1, TRUE);
+    ok(!ret && GetLastError() == CRYPT_E_MSG_ERROR, "%s: expected CRYPT_E_MSG_ERROR, got %08lx\n", name, GetLastError());
+    CryptMsgClose(msg);
+
+    /* the pieces */
+    expected_cbs = indefinite ? (ct_len ? 5 : 3) : 2;
+    ok(s.count == expected_cbs, "%s: expected %lu pieces, got %lu\n", name, expected_cbs, s.count);
+    if (s.count != expected_cbs) goto done;
+    for (i = 0; i < s.count; i++)
+        ok(s.cb[i].final == (i == s.count - 1), "%s: piece %lu: final %d\n", name, i, s.cb[i].final);
+    ok(s.cb[0].first == 0x30, "%s: the message does not start with a SEQUENCE\n", name);
+    if (indefinite)
+    {
+        DWORD k = ct_len ? 3 : 1;
+
+        ok(s.all[1] == 0x80, "%s: outer length is not indefinite\n", name);
+        if (ct_len)
+        {
+            hdr = cms_tlv(s.all + s.cb[0].len, s.cb[1].len, &tag, &len);
+            ok(hdr == s.cb[1].len && tag == 4 && len == ct_len, "%s: wrong OCTET STRING header\n", name);
+            ok(s.cb[2].len == ct_len, "%s: ciphertext piece is %lu bytes, expected %lu\n", name, s.cb[2].len, ct_len);
+        }
+        ok(s.cb[k].len == 4 && s.cb[k + 1].len == 6, "%s: wrong end pieces %lu, %lu\n", name, s.cb[k].len, s.cb[k + 1].len);
+        for (i = s.all_len - 10; i < s.all_len; i++)
+            ok(!s.all[i], "%s: end-of-contents byte %lu is %02x\n", name, i, s.all[i]);
+    }
+    else
+    {
+        /* one definite SEQUENCE around everything, and the ciphertext piece */
+        hdr = cms_tlv(s.all, s.all_len, &tag, &len);
+        ok(hdr && len == s.all_len - hdr, "%s: outer length %I64d for %lu bytes\n", name, len, s.all_len - hdr);
+        ok(s.cb[1].len == ct_len, "%s: ciphertext piece is %lu bytes, expected %lu\n", name, s.cb[1].len, ct_len);
+    }
+
+    /* the non-streamed reader takes it and decrypts the plaintext */
+    msg = cms_open(s.all, s.all_len);
+    ok(!!msg, "%s: CryptMsgUpdate of the streamed message failed: %08lx\n", name, GetLastError());
+    if (msg)
+    {
+        if (!use_ncrypt && !cms_keys.have_capi) skip("%s: no CryptoAPI key\n", name);
+        else if (use_ncrypt && !cms_keys.have_ncrypt) skip("%s: no NCrypt key\n", name);
+        else
+        {
+            err = cms_decrypt(msg, 0, use_ncrypt);
+            ok(!err, "%s: decrypt failed: %08lx\n", name, err);
+            if (!err) cms_check_bytes(msg, cms_stream_plain, total, name);
+        }
+        CryptMsgClose(msg);
+    }
+done:
+    HeapFree(GetProcessHeap(), 0, s.all);
+    CertFreeCertificateContext(cert);
+}
+
+static void test_cms_stream_encode(void)
+{
+    static const DWORD three[] = { 30, 30, 40 }, one[] = { 100 }, none[] = { 0 }, odd[] = { 1, 7, 8, 16, 3 };
+    static const char des3[] = "1.2.840.113549.3.7", aes256[] = "2.16.840.1.101.3.4.1.42", rc4[] = "1.2.840.113549.3.4";
+
+    cms_stream_encode("3des definite", des3, 100, three, 3, 8, FALSE);
+    cms_stream_encode("3des definite, one update", des3, 100, one, 1, 8, FALSE);
+    cms_stream_encode("3des indefinite", des3, 0xffffffff, three, 3, 8, FALSE);
+    cms_stream_encode("3des indefinite, odd chunks", des3, 0xffffffff, odd, 5, 8, FALSE);
+    cms_stream_encode("aes256 definite", aes256, 100, three, 3, 16, TRUE);
+    cms_stream_encode("aes256 indefinite", aes256, 0xffffffff, three, 3, 16, TRUE);
+    cms_stream_encode("aes256 indefinite, empty", aes256, 0xffffffff, none, 1, 16, TRUE);
+    cms_stream_encode("aes256 definite, empty", aes256, 0, none, 1, 16, TRUE);
+    cms_stream_encode("rc4 indefinite", rc4, 0xffffffff, three, 3, 1, FALSE);
+}
+
+/* the callback of a streamed decode: nothing while the message is read, the plaintext when it is decrypted */
+static void test_cms_stream_decode(void)
+{
+    static const struct { const char *name; const BYTE *data; DWORD len; int key; } tests[] =
+    {
+        { "3des", cms_msg_3des, sizeof(cms_msg_3des), 0 },
+        { "aes256", cms_msg_aes256, sizeof(cms_msg_aes256), 1 },
+        { "ber_indefinite", cms_msg_ber_indefinite, sizeof(cms_msg_ber_indefinite), 1 },
+    };
+    DWORD i, pos;
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        struct cms_stream s = { 0 };
+        CMSG_STREAM_INFO stream = { 0xffffffff, cms_stream_output, &s };
+        HCRYPTMSG msg;
+        DWORD err, count;
+        BOOL ret;
+
+        if ((tests[i].key && !cms_keys.have_ncrypt) || (!tests[i].key && !cms_keys.have_capi))
+        {
+            skip("%s: no key\n", tests[i].name);
+            continue;
+        }
+        msg = CryptMsgOpenToDecode(PKCS_7_ASN_ENCODING | X509_ASN_ENCODING, 0, 0, 0, NULL, &stream);
+        ok(!!msg, "%s: CryptMsgOpenToDecode failed: %08lx\n", tests[i].name, GetLastError());
+        if (!msg) continue;
+        for (pos = 0; pos < tests[i].len; pos += 50)
+        {
+            DWORD n = min(50, tests[i].len - pos);
+
+            SetLastError(0xdeadbeef);
+            ret = CryptMsgUpdate(msg, tests[i].data + pos, n, pos + n == tests[i].len);
+            ok(ret, "%s: CryptMsgUpdate failed: %08lx\n", tests[i].name, GetLastError());
+        }
+        ok(!s.count, "%s: %lu pieces before the decryption\n", tests[i].name, s.count);
+        ok(cms_dword_param(msg, CMSG_TYPE_PARAM, 0) == CMSG_ENVELOPED, "%s: wrong type\n", tests[i].name);
+        err = cms_decrypt(msg, 0, tests[i].key);
+        ok(!err, "%s: decrypt failed: %08lx\n", tests[i].name, err);
+        count = s.count;
+        ok(count == 1, "%s: expected one piece after the decryption, got %lu\n", tests[i].name, count);
+        if (count == 1)
+        {
+            ok(s.cb[0].final, "%s: the piece is not final\n", tests[i].name);
+            ok(s.all_len == sizeof(cms_plain) - 1 && !memcmp(s.all, cms_plain, s.all_len), "%s: wrong plaintext, %lu bytes\n",
+               tests[i].name, s.all_len);
+        }
+        CryptMsgClose(msg);
+        HeapFree(GetProcessHeap(), 0, s.all);
+    }
+}
+
+#ifdef __REACTOS__
+/* Sizes that cannot be buffered or padded inside a DWORD are refused before the data is read: the pointer
+ * in these calls is good for a few bytes only. Not run against Windows, whose answer to this was not measured
+ * and might well be to read the memory. */
+static void test_cms_size_guards(void)
+{
+    PCCERT_CONTEXT cert = CertCreateCertificateContext(X509_ASN_ENCODING, cms_cert_a, sizeof(cms_cert_a));
+    cms_enveloped_encode_info info;
+    PCERT_INFO cert_info = cert->pCertInfo;
+    struct cms_stream s = { 0 };
+    CMSG_STREAM_INFO stream = { 0xffffffff, cms_stream_output, &s };
+    HCRYPTMSG msg;
+    BOOL ret;
+
+    memset(&info, 0, sizeof(info));
+    info.cbSize = sizeof(info);
+    info.ContentEncryptionAlgorithm.pszObjId = (char *)"1.2.840.113549.3.7";
+    info.cRecipients = 1;
+    info.rgpRecipientCert = &cert_info;
+
+    /* not streamed: the final update of too much data */
+    msg = CryptMsgOpenToEncode(PKCS_7_ASN_ENCODING | X509_ASN_ENCODING, 0, CMSG_ENVELOPED, &info, NULL, NULL);
+    ok(!!msg, "CryptMsgOpenToEncode failed: %08lx\n", GetLastError());
+    if (msg)
+    {
+        SetLastError(0xdeadbeef);
+        ret = CryptMsgUpdate(msg, cms_stream_plain, 0xfffffff0, TRUE);
+        ok(!ret && GetLastError() == ERROR_OUTOFMEMORY, "expected ERROR_OUTOFMEMORY, got %d, %08lx\n", ret, GetLastError());
+        CryptMsgClose(msg);
+    }
+
+    /* streamed, indefinite: the sum of the updates would not fit */
+    msg = CryptMsgOpenToEncode(PKCS_7_ASN_ENCODING | X509_ASN_ENCODING, 0, CMSG_ENVELOPED, &info, NULL, &stream);
+    ok(!!msg, "CryptMsgOpenToEncode failed: %08lx\n", GetLastError());
+    if (msg)
+    {
+        SetLastError(0xdeadbeef);
+        ret = CryptMsgUpdate(msg, cms_stream_plain, 10, FALSE);
+        ok(ret, "CryptMsgUpdate failed: %08lx\n", GetLastError());
+        SetLastError(0xdeadbeef);
+        ret = CryptMsgUpdate(msg, cms_stream_plain, 0xfffffff0, FALSE);
+        ok(!ret && GetLastError() == ERROR_OUTOFMEMORY, "expected ERROR_OUTOFMEMORY, got %d, %08lx\n", ret, GetLastError());
+        CryptMsgClose(msg);
+    }
+
+    /* streamed, definite: the declared size and its padding would not fit the lengths of the header */
+    stream.cbContent = 0xfffffff0;
+    s.count = 0;
+    msg = CryptMsgOpenToEncode(PKCS_7_ASN_ENCODING | X509_ASN_ENCODING, 0, CMSG_ENVELOPED, &info, NULL, &stream);
+    ok(!!msg, "CryptMsgOpenToEncode failed: %08lx\n", GetLastError());
+    if (msg)
+    {
+        SetLastError(0xdeadbeef);
+        ret = CryptMsgUpdate(msg, cms_stream_plain, 10, FALSE);
+        ok(!ret && GetLastError() == ERROR_OUTOFMEMORY, "expected ERROR_OUTOFMEMORY, got %d, %08lx\n", ret, GetLastError());
+        ok(!s.count, "%lu pieces sent\n", s.count);
+        CryptMsgClose(msg);
+    }
+    HeapFree(GetProcessHeap(), 0, s.all);
+    CertFreeCertificateContext(cert);
+}
+#endif
+
 static void test_enveloped_cms(void)
 {
     cms_load_keys();
@@ -4533,6 +4936,12 @@ static void test_enveloped_cms(void)
     test_cms_encode();
     test_cms_inner_type();
     test_cms_rc2_key();
+    test_cms_capi_keys();
+    test_cms_stream_encode();
+    test_cms_stream_decode();
+#ifdef __REACTOS__
+    test_cms_size_guards();
+#endif
     cms_free_keys();
     test_cms_rc2_params();
     test_cms_oid_info();
