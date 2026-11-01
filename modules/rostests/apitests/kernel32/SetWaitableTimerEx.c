@@ -98,6 +98,42 @@ START_TEST(SetWaitableTimerEx)
     ok(s_ApcArg == (LPVOID)0x1234, "s_ApcArg = %p\n", s_ApcArg);
     CloseHandle(hTimer);
 
+    /*
+     * A tolerable delay lets the timer expire up to that much later (Windows 10, 2 ms due time with
+     * 1000 ms tolerance: 0.36-0.56 s), never earlier
+     */
+    hTimer = CreateWaitableTimerW(NULL, FALSE, NULL);
+    ok(hTimer != NULL, "CreateWaitableTimerW failed with %lu\n", GetLastError());
+    if (hTimer)
+    {
+        DWORD Start, Elapsed;
+
+        Start = GetTickCount();
+        Due.QuadPart = -20000;
+        Ok = pSetWaitableTimerEx(hTimer, &Due, 0, NULL, NULL, NULL, 1000);
+        ok(Ok == TRUE, "Ok = %d, GetLastError() = %lu\n", Ok, GetLastError());
+        Ret = WaitForSingleObject(hTimer, 5000);
+        Elapsed = GetTickCount() - Start;
+        ok(Ret == WAIT_OBJECT_0, "Ret = %lu\n", Ret);
+        ok(Elapsed <= 1000 + 100, "Elapsed = %lu ms\n", Elapsed);
+
+        /* A negative period is invalid */
+        SetLastError(0xdeadbeef);
+        Ok = pSetWaitableTimerEx(hTimer, &Due, -1, NULL, NULL, NULL, 30);
+        ok(Ok == FALSE, "Ok = %d\n", Ok);
+        ok(GetLastError() == ERROR_INVALID_PARAMETER, "GetLastError() = %lu\n", GetLastError());
+
+        /* A resume (wake) timer is not supported: set, with ERROR_NOT_SUPPORTED */
+        SetLastError(0xdeadbeef);
+        Due.QuadPart = -10000;
+        Ok = SetWaitableTimer(hTimer, &Due, 0, NULL, NULL, TRUE);
+        ok(Ok == TRUE, "Ok = %d\n", Ok);
+        ok(GetLastError() == ERROR_NOT_SUPPORTED, "GetLastError() = %lu\n", GetLastError());
+        Ret = WaitForSingleObject(hTimer, 5000);
+        ok(Ret == WAIT_OBJECT_0, "Ret = %lu\n", Ret);
+        CloseHandle(hTimer);
+    }
+
     /* A bad handle */
     SetLastError(0xdeadbeef);
     Ok = pSetWaitableTimerEx((HANDLE)(ULONG_PTR)0x1234, &Due, 0, NULL, NULL, NULL, 0);
