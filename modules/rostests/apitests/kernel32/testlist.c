@@ -135,6 +135,7 @@ extern void func_CrashDialog(void);
 extern void func_LocaleNameToLCID(void);
 extern void func_LocaleTable(void);
 extern void func_LocalTimeZone(void);
+extern void func_SetTimeZoneInformation(void);
 extern void func_lstrcpynW(void);
 extern void func_lstrlen(void);
 extern void func_MailslotRead(void);
@@ -343,6 +344,7 @@ const struct test winetest_testlist[] =
     { "LocaleNameToLCID",            func_LocaleNameToLCID },
     { "LocaleTable",                 func_LocaleTable },
     { "LocalTimeZone",               func_LocalTimeZone },
+    { "SetTimeZoneInformation",     func_SetTimeZoneInformation },
     { "lstrcpynW",                   func_lstrcpynW },
     { "lstrlen",                     func_lstrlen },
     { "MailslotRead",                func_MailslotRead },

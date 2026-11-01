@@ -132,6 +132,7 @@ list(APPEND SOURCE
     LocaleNameToLCID.c
     LocaleTable.c
     LocalTimeZone.c
+    SetTimeZoneInformation.c
     lstrcpynW.c
     lstrlen.c
     Mailslot.c

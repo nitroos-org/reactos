@@ -3059,11 +3059,18 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             return NtQuerySystemInformation(a[0], P(1), a[2], P(3));
         default: UNSUPPORTED(CLASS, a[0]);
         }
+    case W64_NtSetSystemInformation:
+        switch (a[0])
+        {
+        case SystemCurrentTimeZoneInformation: /* RTL_TIME_ZONE_INFORMATION (172 bytes), no pointers, same layout; the kernel checks SeTimeZonePrivilege. */
+        case SystemTimeAdjustmentInformation: /* SYSTEM_SET_TIME_ADJUST_INFORMATION { ULONG, BOOLEAN } is 8 bytes in both ABIs; the kernel checks SeSystemtimePrivilege and the length. */
+            return NtSetSystemInformation(a[0], P(1), a[2]);
+        default: UNSUPPORTED(CLASS, a[0]);
+        }
     default:
         /* Name the information class of the class-based services as well */
         switch (Number)
         {
-        case W64_NtSetSystemInformation: Length = a[0]; break;
         case W64_NtQueryInformationJobObject: case W64_NtQueryInformationPort:
         case W64_NtSetInformationKey: case W64_NtSetInformationDebugObject: Length = a[1]; break;
         default: Length = 0; break;
