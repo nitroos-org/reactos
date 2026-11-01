@@ -1361,6 +1361,20 @@ static HANDLE CtrlEventWake;
 static ULONG CtrlEventCount;
 static NTSTATUS CtrlEventStatus = STATUS_UNSUCCESSFUL;
 
+/*
+ * Events that end the process: the console server waits for the handler
+ * thread, and terminates the process when a handler took the event (the
+ * thread's exit code is non-zero) or when the handler does not finish in time.
+ * Windows ends the process with STATUS_CONTROL_C_EXIT in both cases.
+ */
+static BOOLEAN
+ConSrvIsTerminatingCtrlEvent(IN ULONG CtrlEvent)
+{
+    return (CtrlEvent == CTRL_CLOSE_EVENT ||
+            CtrlEvent == CTRL_LOGOFF_EVENT ||
+            CtrlEvent == CTRL_SHUTDOWN_EVENT);
+}
+
 static NTSTATUS
 ConSrvSendCtrlEvent(IN HANDLE ProcessHandle,
                     IN LPTHREAD_START_ROUTINE CtrlRoutine,
@@ -1383,6 +1397,19 @@ ConSrvSendCtrlEvent(IN HANDLE ProcessHandle,
                 Status = RtlGetLastNtStatus();
                 DPRINT1("Failed thread creation, Status = 0x%08lx\n", Status);
             }
+            else if (ConSrvIsTerminatingCtrlEvent(CtrlEvent))
+            {
+                DWORD ExitCode = 0;
+                BOOLEAN Terminate = FALSE;
+
+                if (WaitForSingleObject(Thread, Timeout) != WAIT_OBJECT_0)
+                    Terminate = TRUE; /* The handler did not return in time */
+                else if (GetExitCodeThread(Thread, &ExitCode) && ExitCode != 0)
+                    Terminate = TRUE; /* A handler handled the event */
+
+                if (Terminate)
+                    NtTerminateProcess(ProcessHandle, STATUS_CONTROL_C_EXIT);
+            }
             else
             {
                 WaitForSingleObject(Thread, Timeout);
@@ -1402,6 +1429,22 @@ ConSrvSendCtrlEvent(IN HANDLE ProcessHandle,
     _SEH2_END;
 
     return Status;
+}
+
+/* Delivers one terminating event, waiting for its handler without holding up the queue */
+static DWORD WINAPI
+ConSrvCtrlWaiterThread(IN LPVOID Parameter)
+{
+    PCONSRV_CTRL_EVENT Event = Parameter;
+    NTSTATUS Status;
+
+    Status = ConSrvSendCtrlEvent(Event->ProcessHandle, Event->CtrlRoutine, Event->CtrlEvent,
+                                 ShutdownSettings.HungAppTimeout);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("CONSRV: Control event %lu delivery failed, Status = 0x%08lx\n", Event->CtrlEvent, Status);
+    NtClose(Event->ProcessHandle);
+    ConsoleFreeHeap(Event);
+    return 0;
 }
 
 static ULONG NTAPI
@@ -1430,6 +1473,21 @@ ConSrvCtrlEventThread(IN PVOID Parameter)
             RtlLeaveCriticalSection(&CtrlEventLock);
 
             Event = CONTAINING_RECORD(Entry, CONSRV_CTRL_EVENT, ListEntry);
+
+            if (ConSrvIsTerminatingCtrlEvent(Event->CtrlEvent))
+            {
+                /* The waiter thread owns the event from here on */
+                HANDLE Waiter = CreateThread(NULL, 0, ConSrvCtrlWaiterThread, Event, 0, NULL);
+                if (Waiter)
+                {
+                    CloseHandle(Waiter);
+                    continue;
+                }
+                DPRINT1("CONSRV: Cannot create the control event waiter thread, delivering inline\n");
+                ConSrvCtrlWaiterThread(Event);
+                continue;
+            }
+
             Status = ConSrvSendCtrlEvent(Event->ProcessHandle, Event->CtrlRoutine, Event->CtrlEvent, 0);
             /* Delivery is asynchronous; a failed handler-thread creation cannot be returned to the caller, so record it */
             if (!NT_SUCCESS(Status))

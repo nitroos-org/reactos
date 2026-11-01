@@ -1576,9 +1576,10 @@ OnClose(PGUI_CONSOLE_DATA GuiData)
     // TODO: Prompt for termination ? (Warn the user about possible apps running in this console)
 
     /*
-     * FIXME: Windows will wait up to 5 seconds for the thread to exit.
-     * We shouldn't wait here, though, since the console lock is entered.
-     * A copy of the thread list probably needs to be made.
+     * The events are queued and delivered by a worker, since the console lock
+     * is entered here: it waits up to HungAppTimeout (5 seconds) for each
+     * handler and terminates the process if the handler took the event or
+     * did not return in time, as Windows does.
      */
     ConSrvConsoleProcessCtrlEvent(Console, 0, CTRL_CLOSE_EVENT);
 
