@@ -636,6 +636,103 @@ Test_PageFaultCounters(void)
     CloseHandle(File);
 }
 
+static
+DWORD
+WINAPI
+HandleChurnThread(
+    _In_ PVOID Context)
+{
+    volatile LONG *Stop = Context;
+    HANDLE Handles[16] = { NULL };
+    ULONG i = 0;
+
+    while (!*Stop)
+    {
+        i = (i + 5) % RTL_NUMBER_OF(Handles);
+        if (Handles[i])
+        {
+            CloseHandle(Handles[i]);
+            Handles[i] = NULL;
+        }
+        else
+        {
+            Handles[i] = CreateEventW(NULL, TRUE, FALSE, NULL);
+        }
+    }
+    for (i = 0; i < RTL_NUMBER_OF(Handles); i++)
+    {
+        if (Handles[i])
+            CloseHandle(Handles[i]);
+    }
+    return 0;
+}
+
+static
+void
+Test_HandleInformationCount(
+    _In_ ULONG InfoClass,
+    _In_ ULONG HeaderSize,
+    _In_ ULONG EntrySize)
+{
+    volatile LONG Stop = 0;
+    HANDLE Threads[4];
+    PVOID Buffer = NULL;
+    ULONG Size = 0x40000, Length, Queries = 0, Bad = 0, Failed = 0, i;
+    ULONG Start = GetTickCount();
+    NTSTATUS Status;
+
+    for (i = 0; i < RTL_NUMBER_OF(Threads); i++)
+        Threads[i] = CreateThread(NULL, 0, HandleChurnThread, (PVOID)&Stop, 0, NULL);
+
+    while (GetTickCount() - Start < 3000)
+    {
+        ULONG Tries = 0;
+
+        do
+        {
+            Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
+            if (!Buffer)
+                break;
+            Length = 0;
+            Status = NtQuerySystemInformation(InfoClass, Buffer, Size, &Length);
+            if (Status == STATUS_INFO_LENGTH_MISMATCH)
+            {
+                RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+                Buffer = NULL;
+                Size = (Length > Size ? Length : Size) + 0x10000;
+            }
+        } while (Status == STATUS_INFO_LENGTH_MISMATCH && ++Tries < 20);
+
+        if (!Buffer)
+            break;
+        Queries++;
+        if (!NT_SUCCESS(Status))
+        {
+            Failed++;
+        }
+        else if (*(PULONG)Buffer > (Length - HeaderSize) / EntrySize)
+        {
+            /* NumberOfHandles claims entries past the ones the kernel wrote */
+            Bad++;
+        }
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+        Buffer = NULL;
+    }
+
+    Stop = 1;
+    for (i = 0; i < RTL_NUMBER_OF(Threads); i++)
+    {
+        if (Threads[i])
+        {
+            WaitForSingleObject(Threads[i], INFINITE);
+            CloseHandle(Threads[i]);
+        }
+    }
+    ok(Queries > 0, "class %lu: no query completed\n", InfoClass);
+    ok(Failed == 0, "class %lu: %lu of %lu queries failed\n", InfoClass, Failed, Queries);
+    ok(Bad == 0, "class %lu: NumberOfHandles exceeded the returned entries in %lu of %lu queries\n", InfoClass, Bad, Queries);
+}
+
 START_TEST(NtQuerySystemInformation)
 {
     NTSTATUS Status;
@@ -652,4 +749,10 @@ START_TEST(NtQuerySystemInformation)
     Test_ProcessImageNames();
     Test_FaultReleasesProcessLock();
     Test_PageFaultCounters();
+    Test_HandleInformationCount(SystemHandleInformation,
+                                FIELD_OFFSET(SYSTEM_HANDLE_INFORMATION, Handles),
+                                sizeof(SYSTEM_HANDLE_TABLE_ENTRY_INFO));
+    Test_HandleInformationCount(SystemExtendedHandleInformation,
+                                FIELD_OFFSET(SYSTEM_HANDLE_INFORMATION_EX, Handles),
+                                sizeof(SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX));
 }

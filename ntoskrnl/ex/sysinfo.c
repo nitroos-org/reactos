@@ -1549,6 +1549,10 @@ QSI_DEF(SystemHandleInformation)
         }
     }
 
+    /* Entries whose lock failed (handle closed meanwhile) were counted but never filled: report the filled count only,
+       so callers walking NumberOfHandles do not read stale data past the written entries */
+    HandleInformation->NumberOfHandles = Index;
+
     /* Release the lock */
     ExReleasePushLockShared(&HandleTableListLock);
 
@@ -2861,6 +2865,10 @@ QSI_DEF(SystemExtendedHandleInformation)
             Handle.Index++;
         }
     }
+
+    /* Entries whose lock failed (handle closed meanwhile) were counted but never filled: report the filled count only,
+       so callers walking NumberOfHandles do not read stale data past the written entries */
+    HandleInformation->NumberOfHandles = Index;
 
     /* Release the lock */
     ExReleasePushLockShared(&HandleTableListLock);
