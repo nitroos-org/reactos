@@ -61,6 +61,28 @@ target_compile_definitions(iohelper_drv PRIVATE KMT_STANDALONE_DRIVER)
 add_rostests_file(TARGET iohelper_drv)
 
 #
+# IoIs32bitProcess
+#
+list(APPEND IOIS32BITPROCESS_DRV_SOURCE
+    ../kmtest_drv/kmtest_standalone.c
+    IoIs32bitProcess_drv.c)
+
+add_library(iois32bitprocess_drv MODULE ${IOIS32BITPROCESS_DRV_SOURCE})
+set_module_type(iois32bitprocess_drv kernelmodedriver)
+target_link_libraries(iois32bitprocess_drv kmtest_printf ${PSEH_LIB})
+add_importlibs(iois32bitprocess_drv ntoskrnl hal)
+target_compile_definitions(iois32bitprocess_drv PRIVATE KMT_STANDALONE_DRIVER)
+add_rostests_file(TARGET iois32bitprocess_drv)
+
+# The client kmtest.exe runs as a WoW64 process: the i386 build of it, installed next to the 64-bit
+# kmtest.exe as iois32bitprocess_client32.exe
+add_executable(iois32bitprocess_client IoIs32bitProcess_client.c)
+set_module_type(iois32bitprocess_client win32cui)
+add_importlibs(iois32bitprocess_client msvcrt kernel32 ntdll)
+target_compile_definitions(iois32bitprocess_client PRIVATE NTDDI_VERSION=NTDDI_WS03SP1)
+add_rostests_file(TARGET iois32bitprocess_client)
+
+#
 # IoReadWrite
 #
 list(APPEND IOREADWRITE_DRV_SOURCE
