@@ -17,6 +17,12 @@
 #include <strsafe.h>
 
 #define WINDOWS 8
+/* Windows caches objects for the first few windows, then flattens out. Measured on Windows 10 22H2 over 50
+ * windows: GDI flat with transients up to +9, USER drifting by +4/+5. The leak this test is about is 8 GDI and
+ * 2 USER objects per window, i.e. +64 and +16 over WINDOWS windows, far above these bounds. */
+#define WARMUP_WINDOWS 4
+#define MAX_GDI_DRIFT 8
+#define MAX_USER_DRIFT 6
 
 static DWORD g_HostPid;
 static HWND g_Known[64];
@@ -55,6 +61,22 @@ static BOOL CALLBACK FindNewProc(HWND hwnd, LPARAM lParam)
     return FALSE;
 }
 
+/* Closes a folder window; posts WM_CLOSE again once if the window is still there after 5 s */
+static BOOL CloseFolderWindow(HWND hwnd)
+{
+    int attempt, i;
+
+    for (attempt = 0; attempt < 2; attempt++)
+    {
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        for (i = 0; i < 50 && IsWindow(hwnd); i++)
+            Sleep(100);
+        if (!IsWindow(hwnd))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /* Opens a folder window with a verb and closes it again; returns the process that hosted it, 0 on failure */
 static DWORD OpenAndCloseFolder(PCWSTR pszVerb, PCWSTR pszDir)
 {
@@ -80,11 +102,7 @@ static DWORD OpenAndCloseFolder(PCWSTR pszVerb, PCWSTR pszDir)
     GetWindowThreadProcessId(hwnd, &pid);
 
     Sleep(1500);
-    PostMessageW(hwnd, WM_CLOSE, 0, 0);
-    for (i = 0; i < 150 && IsWindow(hwnd); i++)
-        Sleep(100);
-    Sleep(1500);
-    return IsWindow(hwnd) ? 0 : pid;
+    return CloseFolderWindow(hwnd) ? pid : 0;
 }
 
 static void TestFolderWindows(PCWSTR pszVerb, PCWSTR pszDir)
@@ -93,7 +111,7 @@ static void TestFolderWindows(PCWSTR pszVerb, PCWSTR pszDir)
     HANDLE hHost;
     int i, failed = 0;
 
-    /* The first window loads the shell extensions and makes the shared image lists */
+    /* The first windows load the shell extensions and make the shared image lists */
     g_HostPid = OpenAndCloseFolder(pszVerb, pszDir);
     if (!g_HostPid)
     {
@@ -119,6 +137,9 @@ static void TestFolderWindows(PCWSTR pszVerb, PCWSTR pszDir)
         return;
     }
 
+    for (i = 1; i < WARMUP_WINDOWS; i++)
+        OpenAndCloseFolder(pszVerb, pszDir);
+
     gdi0 = GetGuiResources(hHost, GR_GDIOBJECTS);
     user0 = GetGuiResources(hHost, GR_USEROBJECTS);
     for (i = 0; i < WINDOWS; i++)
@@ -132,9 +153,9 @@ static void TestFolderWindows(PCWSTR pszVerb, PCWSTR pszDir)
 
     ok(failed == 0, "%ls: %d of %d folder windows did not open and close in process %lu\n",
        pszVerb, failed, WINDOWS, g_HostPid);
-    ok((LONG)(gdi1 - gdi0) <= 4, "%ls: %d folder windows changed the shell's GDI object count from %lu to %lu\n",
+    ok((LONG)(gdi1 - gdi0) <= MAX_GDI_DRIFT, "%ls: %d folder windows changed the shell's GDI object count from %lu to %lu\n",
        pszVerb, WINDOWS, gdi0, gdi1);
-    ok((LONG)(user1 - user0) <= 2, "%ls: %d folder windows changed the shell's USER object count from %lu to %lu\n",
+    ok((LONG)(user1 - user0) <= MAX_USER_DRIFT, "%ls: %d folder windows changed the shell's USER object count from %lu to %lu\n",
        pszVerb, WINDOWS, user0, user1);
 }
 
