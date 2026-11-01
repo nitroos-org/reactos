@@ -10,6 +10,39 @@
 #include <tcpioctl.h>
 #include <drivers/afd/shared.h>
 
+/* Control codes winioctl.h and ntifs.h hide behind the Windows version or the kernel headers */
+#ifndef FSCTL_DUPLICATE_EXTENTS_TO_FILE
+#define FSCTL_DUPLICATE_EXTENTS_TO_FILE CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 209, METHOD_BUFFERED, FILE_WRITE_DATA)
+#endif
+#ifndef FSCTL_MARK_HANDLE
+#define FSCTL_MARK_HANDLE CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 63, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#endif
+
+/* Native layouts of the file system control buffers that hold a handle (MOVE_FILE_DATA, DUPLICATE_EXTENTS_DATA
+ * and MARK_HANDLE_INFO). Declared here because winioctl.h and ntifs.h hide them behind the Windows version. */
+typedef struct
+{
+    HANDLE FileHandle;
+    LARGE_INTEGER StartingVcn;
+    LARGE_INTEGER StartingLcn;
+    ULONG ClusterCount;
+} WOW64_MOVE_FILE_DATA;
+
+typedef struct
+{
+    HANDLE FileHandle;
+    LARGE_INTEGER SourceFileOffset;
+    LARGE_INTEGER TargetFileOffset;
+    LARGE_INTEGER ByteCount;
+} WOW64_DUPLICATE_EXTENTS_DATA;
+
+typedef struct
+{
+    ULONG UsnSourceInfo;
+    HANDLE VolumeHandle;
+    ULONG HandleInfo;
+} WOW64_MARK_HANDLE_INFO;
+
 enum
 {
 #define WOW64_SYSCALL(Name, Source, Target, SourceSlots, TargetSlots, Flags) W64_##Name = Source,
@@ -2135,13 +2168,28 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             break;
         }
         default:
-            UNSUPPORTED(IOCTL, a[5]);
+            /* Codes whose buffers are pointer-free and the same in both ABIs (ioctl.c) */
+            if (!Wow64IsPlainIoctl(a[5]))
+                UNSUPPORTED(IOCTL, a[5]);
+            break;
         }
         ProbeOutput(a[4], sizeof(WOW64_IOSB));
         return NtDeviceIoControlFile(H(0), H(1), Routine, P(3), Iosb,
                                       a[5], Input, InputLength, P(8), a[9]);
     }
     case W64_NtFsControlFile:
+    {
+        PIO_APC_ROUTINE Routine = a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL;
+        PVOID Input = P(6);
+        ULONG InputLength = a[7];
+        union
+        {
+            WOW64_MOVE_FILE_DATA Move;
+            WOW64_DUPLICATE_EXTENTS_DATA Extents;
+            WOW64_MARK_HANDLE_INFO Mark;
+        } Wide;
+        const ULONG *Guest = Input;
+#define GuestQuad(Low) ((LONGLONG)((Low)[0] | ((ULONGLONG)(Low)[1] << 32)))
         /* These pipe operations carry opaque bytes or fixed-width records.
          * Keep the guest IOSB alive through pending listen/transceive requests. */
         switch (a[5])
@@ -2157,12 +2205,54 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         case FSCTL_GET_REPARSE_POINT:
         case FSCTL_SET_REPARSE_POINT:
         case FSCTL_DELETE_REPARSE_POINT:
-            return NtFsControlFile(H(0), H(1),
-                       a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL,
-                       P(3), (PVOID)(0x8000000000000000ULL | a[4]),
-                       a[5], P(6), a[7], P(8), a[9]);
-        default: UNSUPPORTED(FSCTL, a[5]);
+            break;
+        /* A volume handle in a 32-bit slot: widen it. The 32-bit layout is {handle, padding to 8 for the
+         * LARGE_INTEGERs, ...} (32 bytes); a packed layout (GCC without 8-byte alignment) is 28 bytes. */
+        case FSCTL_MOVE_FILE:
+        case FSCTL_DUPLICATE_EXTENTS_TO_FILE:
+        {
+            ULONG Skew;
+            if (InputLength >= 32) Skew = 0;
+            else if (InputLength >= 28) Skew = 1;
+            else return STATUS_BUFFER_TOO_SMALL;
+            RtlZeroMemory(&Wide, sizeof(Wide));
+            if (a[5] == FSCTL_MOVE_FILE)
+            {
+                Wide.Move.FileHandle = HANDLE32(Guest[0]);
+                Wide.Move.StartingVcn.QuadPart = GuestQuad(&Guest[2 - Skew]);
+                Wide.Move.StartingLcn.QuadPart = GuestQuad(&Guest[4 - Skew]);
+                Wide.Move.ClusterCount = Guest[6 - Skew];
+                Input = &Wide.Move; InputLength = sizeof(Wide.Move);
+            }
+            else
+            {
+                Wide.Extents.FileHandle = HANDLE32(Guest[0]);
+                Wide.Extents.SourceFileOffset.QuadPart = GuestQuad(&Guest[2 - Skew]);
+                Wide.Extents.TargetFileOffset.QuadPart = GuestQuad(&Guest[4 - Skew]);
+                Wide.Extents.ByteCount.QuadPart = GuestQuad(&Guest[6 - Skew]);
+                Input = &Wide.Extents; InputLength = sizeof(Wide.Extents);
+            }
+            break;
         }
+        /* MARK_HANDLE_INFO32 {UsnSourceInfo, VolumeHandle, HandleInfo} */
+        case FSCTL_MARK_HANDLE:
+            if (InputLength < 3 * sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
+            RtlZeroMemory(&Wide, sizeof(Wide));
+            Wide.Mark.UsnSourceInfo = Guest[0];
+            Wide.Mark.VolumeHandle = HANDLE32(Guest[1]);
+            Wide.Mark.HandleInfo = Guest[2];
+            Input = &Wide.Mark; InputLength = sizeof(Wide.Mark);
+            break;
+        default:
+            /* Codes whose buffers are pointer-free and the same in both ABIs (ioctl.c) */
+            if (!Wow64IsPlainFsctl(a[5]))
+                UNSUPPORTED(FSCTL, a[5]);
+            break;
+        }
+#undef GuestQuad
+        return NtFsControlFile(H(0), H(1), Routine, P(3), (PVOID)(0x8000000000000000ULL | a[4]),
+                               a[5], Input, InputLength, P(8), a[9]);
+    }
     case W64_NtQueryAttributesFile:
         FILEATTR(0); return NtQueryAttributesFile(OA(0), P(1));
     case W64_NtQueryFullAttributesFile:
