@@ -9,6 +9,9 @@
 #include "precomp.h"
 #include <strsafe.h>
 
+#define NDEBUG
+#include <debug.h>
+
 typedef enum _RappsConsent {
     NOT_ASKED,
     APPROVED,
@@ -21,8 +24,13 @@ typedef struct _ADDON_INSTALL_DATA
     PCWSTR AddonPath;
     PCWSTR CreateProcessFormatString;
     PCWSTR RappsId;
+    DWORD Flags;
 } ADDON_INSTALL_DATA, *PADDON_INSTALL_DATA;
 typedef const ADDON_INSTALL_DATA* PCADDON_INSTALL_DATA;
+
+/* The installer file stays on disk after a successful install (the optional feature manager reuses it)
+ * and a failure is only logged: setup shows no message box and goes on with the next addon. */
+#define ADDON_KEEP_FILE_QUIET   0x1
 
 /* TODO: Move this out of code and into an .inf or something. */
 static const ADDON_INSTALL_DATA Addons[] = {
@@ -33,8 +41,14 @@ static const ADDON_INSTALL_DATA Addons[] = {
     /* No RappsId: the Applications Manager package is the x86 build. Without the
      * local file, the Internet Browser offers the download on first use. */
     {L"Wine Gecko", L"%SystemRoot%\\wine_gecko-2.40-x86_64.msi", L"msiexec.exe /i \"%s\" /qn /norestart", NULL},
+    /* PowerShell 7: the image carries the official MSI (staged at build time) in the feature manager's payload
+     * folder. The feature manager installs it silently, local-first, with the properties of its catalog entry
+     * (powershell-7.txt), and records the install so that it shows as installed and can be repaired or removed.
+     * The format string has no %s: the path is only the "is the MSI in this image" test. */
+    {L"PowerShell 7", L"%SystemRoot%\\Featmgr\\Payload\\powershell-7\\PowerShell-x64.msi",
+     L"featmgr.exe /enable powershell-7", NULL, ADDON_KEEP_FILE_QUIET},
 #endif
-    {NULL, NULL, NULL}
+    {NULL, NULL, NULL, NULL, 0}
 };
 
 HRESULT
@@ -108,7 +122,8 @@ InstallAddon(
     if (SUCCEEDED(hr))
     {
         /* We successfully installed the addon locally! Try removing it from disk and finish. */
-        DeleteFileW(ExpandedAddonPath);
+        if (!(pInstallData->Flags & ADDON_KEEP_FILE_QUIET))
+            DeleteFileW(ExpandedAddonPath);
         goto done;
     }
 
@@ -140,6 +155,13 @@ rapps_install:
     hr = RunCommandAndWait(Command);
 
 done:
+    if ((pInstallData->Flags & ADDON_KEEP_FILE_QUIET) && FAILED(hr))
+    {
+        /* Log it and let setup continue: nothing here may block or fail the installation. */
+        DPRINT1("Addon '%S' failed: 0x%08lx\n", pInstallData->Title, hr);
+        LogItem(NULL, L"An optional component could not be installed; setup continues");
+        hr = S_OK;
+    }
     /* We don't set an error in pNotify because the user chose to cancel rapps install.
      * Showing an error may make the user think the installation of the operating system failed. */
     if (!SUCCEEDED(hr) && hr != HRESULT_FROM_WIN32(ERROR_CANCELLED))

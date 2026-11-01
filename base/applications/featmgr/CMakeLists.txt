@@ -41,14 +41,49 @@ if(ARCH STREQUAL "amd64")
                 DESTINATION reactos/Featmgr/Catalog FOR all)
 endif()
 
-# --- PowerShell 7 (LTS): software-tier entry (amd64 only; the x86 pwsh does not start yet, PS7-x86-pwsh-mscoree) ---
-# Manifest + RAPPS-format entry only. The official MSI is downloaded from the PowerShell GitHub release at
-# install time (SHA-256 checked) and is never bundled.
+# --- PowerShell 7 (LTS): software-tier entry + preinstall (amd64 only; the x86 pwsh does not start yet, PS7-x86-pwsh-mscoree) ---
+# The manifest + RAPPS-format entry always ship. The official MSI (MIT) is NOT in git: stage-powershell7.sh downloads it
+# at configure time from the pinned release URL and checks the pinned SHA-256 (POWERSHELL7_MSI=<file> for an offline
+# host). When it is staged, the install image (bootcd / regtest, not the live CD) carries it, with the licence and
+# ThirdPartyNotices.txt, in the feature manager's payload folder, and syssetup installs it silently during the GUI
+# phase (dll/win32/syssetup/addons.c, through "featmgr /enable powershell-7", local-first). When staging fails
+# (no network, no file) or -DFEATMGR_PS7_PREINSTALL=OFF, the image has no MSI, setup skips the step, and the
+# Optional Features entry downloads the MSI at install time, as before.
 if(ARCH STREQUAL "amd64")
     add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/powershell-7.ini
                 DESTINATION reactos/Featmgr/Catalog FOR all)
     add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/powershell-7.txt
                 DESTINATION reactos/Featmgr/Catalog FOR all)
+
+    option(FEATMGR_PS7_PREINSTALL "amd64: bundle the PowerShell 7 MSI in the image and install it during setup (downloaded at configure)" ON)
+    set(_ps7_dir ${CMAKE_CURRENT_SOURCE_DIR}/payload/powershell-7)
+    set(_ps7_msi ${_ps7_dir}/PowerShell-x64.msi)
+    set(_ps7_status "disabled by -DFEATMGR_PS7_PREINSTALL=OFF")
+    if(FEATMGR_PS7_PREINSTALL)
+        message(STATUS "PowerShell 7: staging the x64 MSI ...")
+        execute_process(
+            COMMAND bash ${_ps7_dir}/stage-powershell7.sh
+            RESULT_VARIABLE _ps7_rc
+            OUTPUT_VARIABLE _ps7_out
+            ERROR_VARIABLE _ps7_out)
+        string(STRIP "${_ps7_out}" _ps7_out)
+        if(_ps7_rc EQUAL 0 AND EXISTS ${_ps7_msi})
+            message(STATUS "PowerShell 7: ${_ps7_out}")
+            set(_ps7_status "MSI bundled, installed during setup")
+            # the staged file has one fixed name (cab entries cannot be renamed): syssetup tests for it; the version lives in the catalog entry
+            add_cd_file(FILE ${_ps7_msi}
+                        DESTINATION reactos/Featmgr/Payload/powershell-7 FOR bootcd regtest)
+            add_cd_file(FILE ${_ps7_dir}/LICENSE.txt
+                        DESTINATION reactos/Featmgr/Payload/powershell-7 FOR bootcd regtest)
+            add_cd_file(FILE ${_ps7_dir}/ThirdPartyNotices.txt
+                        DESTINATION reactos/Featmgr/Payload/powershell-7 FOR bootcd regtest)
+        else()
+            message(WARNING "PowerShell 7: could not stage the x64 MSI (rc=${_ps7_rc}); the image gets no preinstall, "
+                            "the Optional Features entry downloads it instead. Output:\n${_ps7_out}")
+            set(_ps7_status "not bundled (staging failed)")
+        endif()
+    endif()
+    set_property(GLOBAL APPEND PROPERTY MESA3D_STATUS_LINES "PowerShell 7 amd64: ${_ps7_status}")
 endif()
 
 # --- Microsoft .NET Framework 4.8: software-tier entry (i386 and amd64) ---

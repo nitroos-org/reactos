@@ -1297,7 +1297,7 @@ out:
  * install time so disable stays data-driven (same as the OS tier's undo lists). */
 static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR uninst, DWORD cch, FILE *log)
 {
-    WCHAR pkg[128], name[128], rapps[MAX_PATH], ucmd[1024];
+    WCHAR pkg[128], name[128], rapps[MAX_PATH], ucmd[1024], local[128], lpath[MAX_PATH], lentry[MAX_PATH];
 
     inst[0] = uninst[0] = L'\0';
     if (!_wcsicmp(f->Provider, L"command"))
@@ -1387,6 +1387,30 @@ static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR un
     }
     if (!RappsExePath(rapps, MAX_PATH)) return E_FAIL;
     StringCchPrintfW(inst, cch, L"\"%s\" /install /S \"%s\"", rapps, pkg);
+    /* [Rapps] LocalInstaller= : file name of an MSI in the feature's payload dir (the image puts it there). When it
+     * exists the install is local-first: msiexec on that file with the entry's MsiProperties, no download, so it
+     * works offline. When it is absent rapps downloads the package as usual. */
+    GetPrivateProfileStringW(L"Rapps", L"LocalInstaller", L"", local, ARRAYSIZE(local), f->ManifestPath);
+    if (local[0] && !wcspbrk(local, L"\\/\"\r\n") && RappsEntryPath(f, lentry, MAX_PATH))
+    {
+        WCHAR props[1024];
+        FmGetPayloadDir(f->Id, lpath, MAX_PATH);
+        if (SUCCEEDED(StringCchCatW(lpath, MAX_PATH, L"\\")) && SUCCEEDED(StringCchCatW(lpath, MAX_PATH, local))
+            && GetFileAttributesW(lpath) != INVALID_FILE_ATTRIBUTES)
+        {
+            GetPrivateProfileStringW(L"Section", L"MsiProperties", L"", props, ARRAYSIZE(props), lentry);
+            if (!wcspbrk(props, L"\"\r\n") &&
+                SUCCEEDED(StringCchPrintfW(inst, cch, L"msiexec.exe /i \"%s\" /qn /norestart %s", lpath, props)))
+            {
+                LOGF(log, L"  local installer %s\n", lpath);
+                /* the same package removes it: no registry lookup and no rapps, which would try to update its
+                 * online database first and stop at an error box on a machine without network */
+                if (SUCCEEDED(StringCchPrintfW(uninst, cch, L"msiexec.exe /x \"%s\" /qn /norestart", lpath)))
+                    return S_OK;
+            }
+            StringCchPrintfW(inst, cch, L"\"%s\" /install /S \"%s\"", rapps, pkg);
+        }
+    }
     /* [Rapps] UninstallCmd= : the command line that removes the app, for an installer whose registered uninstall
      * command is not silent (rapps /uninstall starts that one as it is, and the maintenance dialog would wait for
      * a click). UninstallCmd.amd64 / UninstallCmd.x86 (the architecture of this build, as in the RAPPS entry's
@@ -1502,8 +1526,9 @@ static HRESULT SoftwareUninstall(const FM_FEATURE *f, HKEY state, FILE *log)
         || type != REG_SZ || !cmd[0])
     {
         cmd[0] = L'\0';
-        /* installed outside featmgr (scoop CLI): no recorded line, derive it from the manifest */
-        if (f && !_wcsicmp(f->Provider, L"scoop"))
+        /* installed outside featmgr (scoop CLI; setup for an image-bundled rapps entry): no recorded line,
+         * derive it from the manifest */
+        if (f && (!_wcsicmp(f->Provider, L"scoop") || !_wcsicmp(f->Provider, L"rapps")))
         {
             WCHAR inst[2048];
             hr = BuildSoftwareCommands(f, inst, cmd, ARRAYSIZE(cmd), log);
