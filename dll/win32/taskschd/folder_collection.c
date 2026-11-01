@@ -101,29 +101,24 @@ static HRESULT WINAPI folders_QueryInterface(ITaskFolderCollection *iface, REFII
 
 static HRESULT WINAPI folders_GetTypeInfoCount(ITaskFolderCollection *iface, UINT *count)
 {
-    FIXME("%p,%p: stub\n", iface, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI folders_GetTypeInfo(ITaskFolderCollection *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    FIXME("%p,%u,%lu,%p: stub\n", iface, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_ITaskFolderCollection, index, lcid, info);
 }
 
 static HRESULT WINAPI folders_GetIDsOfNames(ITaskFolderCollection *iface, REFIID riid, LPOLESTR *names,
                                                 UINT count, LCID lcid, DISPID *dispid)
 {
-    FIXME("%p,%s,%p,%u,%lu,%p: stub\n", iface, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_ITaskFolderCollection, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI folders_Invoke(ITaskFolderCollection *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                          DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    FIXME("%p,%ld,%s,%04lx,%04x,%p,%p,%p,%p: stub\n", iface, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_ITaskFolderCollection, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI folders_get_Count(ITaskFolderCollection *iface, LONG *count)
@@ -164,8 +159,19 @@ static LONG get_var_int(const VARIANT *var)
         return V_UINT(var);
 
     default:
-        FIXME("unsupported variant type %d\n", V_VT(var));
-        return 0;
+    {
+        /* late-bound clients pass VT_R8, VT_BSTR, VT_BYREF, ... */
+        VARIANT tmp;
+        LONG val = 0;
+
+        VariantInit(&tmp);
+        if (SUCCEEDED(VariantChangeType(&tmp, (VARIANT *)var, 0, VT_I4)))
+            val = V_I4(&tmp);
+        else
+            FIXME("unsupported variant type %d\n", V_VT(var));
+        VariantClear(&tmp);
+        return val;
+    }
     }
 }
 

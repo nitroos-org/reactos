@@ -100,33 +100,24 @@ static ULONG WINAPI RepetitionPattern_Release(IRepetitionPattern *iface)
 
 static HRESULT WINAPI RepetitionPattern_GetTypeInfoCount(IRepetitionPattern *iface, UINT *count)
 {
-    RepetitionPattern *This = impl_from_IRepetitionPattern(iface);
-    FIXME("(%p)->(%p)\n", This, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI RepetitionPattern_GetTypeInfo(IRepetitionPattern *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    RepetitionPattern *This = impl_from_IRepetitionPattern(iface);
-    FIXME("(%p)->(%u %lu %p)\n", This, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_IRepetitionPattern, index, lcid, info);
 }
 
 static HRESULT WINAPI RepetitionPattern_GetIDsOfNames(IRepetitionPattern *iface, REFIID riid, LPOLESTR *names,
                                                        UINT count, LCID lcid, DISPID *dispid)
 {
-    RepetitionPattern *This = impl_from_IRepetitionPattern(iface);
-    FIXME("(%p)->(%s %p %u %lu %p)\n", This, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_IRepetitionPattern, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI RepetitionPattern_Invoke(IRepetitionPattern *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                                 DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    RepetitionPattern *This = impl_from_IRepetitionPattern(iface);
-    FIXME("(%p)->(%ld %s %lx %x %p %p %p %p)\n", This, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_IRepetitionPattern, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI RepetitionPattern_get_Interval(IRepetitionPattern *iface, BSTR *interval)
@@ -353,33 +344,24 @@ static ULONG WINAPI DailyTrigger_Release(IDailyTrigger *iface)
 
 static HRESULT WINAPI DailyTrigger_GetTypeInfoCount(IDailyTrigger *iface, UINT *count)
 {
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-    FIXME("(%p)->(%p)\n", This, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI DailyTrigger_GetTypeInfo(IDailyTrigger *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-    FIXME("(%p)->(%u %lu %p)\n", This, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_IDailyTrigger, index, lcid, info);
 }
 
 static HRESULT WINAPI DailyTrigger_GetIDsOfNames(IDailyTrigger *iface, REFIID riid, LPOLESTR *names,
                                             UINT count, LCID lcid, DISPID *dispid)
 {
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-    FIXME("(%p)->(%s %p %u %lu %p)\n", This, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_IDailyTrigger, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI DailyTrigger_Invoke(IDailyTrigger *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                      DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    DailyTrigger *This = impl_from_IDailyTrigger(iface);
-    FIXME("(%p)->(%ld %s %lx %x %p %p %p %p)\n", This, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_IDailyTrigger, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI DailyTrigger_get_Type(IDailyTrigger *iface, TASK_TRIGGER_TYPE2 *type)
@@ -679,33 +661,24 @@ static ULONG WINAPI RegistrationTrigger_Release(IRegistrationTrigger *iface)
 
 static HRESULT WINAPI RegistrationTrigger_GetTypeInfoCount(IRegistrationTrigger *iface, UINT *count)
 {
-    RegistrationTrigger *This = impl_from_IRegistrationTrigger(iface);
-    FIXME("(%p)->(%p)\n", This, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI RegistrationTrigger_GetTypeInfo(IRegistrationTrigger *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    RegistrationTrigger *This = impl_from_IRegistrationTrigger(iface);
-    FIXME("(%p)->(%u %lu %p)\n", This, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_IRegistrationTrigger, index, lcid, info);
 }
 
 static HRESULT WINAPI RegistrationTrigger_GetIDsOfNames(IRegistrationTrigger *iface, REFIID riid, LPOLESTR *names,
                                             UINT count, LCID lcid, DISPID *dispid)
 {
-    RegistrationTrigger *This = impl_from_IRegistrationTrigger(iface);
-    FIXME("(%p)->(%s %p %u %lu %p)\n", This, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_IRegistrationTrigger, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI RegistrationTrigger_Invoke(IRegistrationTrigger *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                      DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    RegistrationTrigger *This = impl_from_IRegistrationTrigger(iface);
-    FIXME("(%p)->(%ld %s %lx %x %p %p %p %p)\n", This, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_IRegistrationTrigger, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI RegistrationTrigger_get_Type(IRegistrationTrigger *iface, TASK_TRIGGER_TYPE2 *type)
@@ -947,33 +920,24 @@ static ULONG WINAPI LogonTrigger_Release(ILogonTrigger *iface)
 
 static HRESULT WINAPI LogonTrigger_GetTypeInfoCount(ILogonTrigger *iface, UINT *count)
 {
-    LogonTrigger *This = impl_from_ILogonTrigger(iface);
-    FIXME("(%p)->(%p)\n", This, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI LogonTrigger_GetTypeInfo(ILogonTrigger *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    LogonTrigger *This = impl_from_ILogonTrigger(iface);
-    FIXME("(%p)->(%u %lu %p)\n", This, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_ILogonTrigger, index, lcid, info);
 }
 
 static HRESULT WINAPI LogonTrigger_GetIDsOfNames(ILogonTrigger *iface, REFIID riid, LPOLESTR *names,
                                         UINT count, LCID lcid, DISPID *dispid)
 {
-    LogonTrigger *This = impl_from_ILogonTrigger(iface);
-    FIXME("(%p)->(%s %p %u %lu %p)\n", This, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_ILogonTrigger, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI LogonTrigger_Invoke(ILogonTrigger *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                  DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    LogonTrigger *This = impl_from_ILogonTrigger(iface);
-    FIXME("(%p)->(%ld %s %lx %x %p %p %p %p)\n", This, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_ILogonTrigger, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI LogonTrigger_get_Type(ILogonTrigger *iface, TASK_TRIGGER_TYPE2 *type)
@@ -1314,33 +1278,24 @@ static ULONG WINAPI BootTrigger_Release(IBootTrigger *iface)
 
 static HRESULT WINAPI BootTrigger_GetTypeInfoCount(IBootTrigger *iface, UINT *count)
 {
-    BootTrigger *This = impl_from_IBootTrigger(iface);
-    FIXME("(%p)->(%p)\n", This, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI BootTrigger_GetTypeInfo(IBootTrigger *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    BootTrigger *This = impl_from_IBootTrigger(iface);
-    FIXME("(%p)->(%u %lu %p)\n", This, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_IBootTrigger, index, lcid, info);
 }
 
 static HRESULT WINAPI BootTrigger_GetIDsOfNames(IBootTrigger *iface, REFIID riid, LPOLESTR *names,
                                         UINT count, LCID lcid, DISPID *dispid)
 {
-    BootTrigger *This = impl_from_IBootTrigger(iface);
-    FIXME("(%p)->(%s %p %u %lu %p)\n", This, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_IBootTrigger, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI BootTrigger_Invoke(IBootTrigger *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                  DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    BootTrigger *This = impl_from_IBootTrigger(iface);
-    FIXME("(%p)->(%ld %s %lx %x %p %p %p %p)\n", This, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_IBootTrigger, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI BootTrigger_get_Type(IBootTrigger *iface, TASK_TRIGGER_TYPE2 *type)
@@ -1651,33 +1606,24 @@ static ULONG WINAPI TimeTrigger_Release(ITimeTrigger *iface)
 
 static HRESULT WINAPI TimeTrigger_GetTypeInfoCount(ITimeTrigger *iface, UINT *count)
 {
-    TimeTrigger *This = impl_from_ITimeTrigger(iface);
-    FIXME("(%p)->(%p)\n", This, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI TimeTrigger_GetTypeInfo(ITimeTrigger *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    TimeTrigger *This = impl_from_ITimeTrigger(iface);
-    FIXME("(%p)->(%u %lu %p)\n", This, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_ITimeTrigger, index, lcid, info);
 }
 
 static HRESULT WINAPI TimeTrigger_GetIDsOfNames(ITimeTrigger *iface, REFIID riid, LPOLESTR *names,
                                         UINT count, LCID lcid, DISPID *dispid)
 {
-    TimeTrigger *This = impl_from_ITimeTrigger(iface);
-    FIXME("(%p)->(%s %p %u %lu %p)\n", This, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_ITimeTrigger, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI TimeTrigger_Invoke(ITimeTrigger *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                  DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    TimeTrigger *This = impl_from_ITimeTrigger(iface);
-    FIXME("(%p)->(%ld %s %lx %x %p %p %p %p)\n", This, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_ITimeTrigger, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI TimeTrigger_get_Type(ITimeTrigger *iface, TASK_TRIGGER_TYPE2 *type)
@@ -1977,33 +1923,24 @@ static ULONG WINAPI TriggerCollection_Release(ITriggerCollection *iface)
 
 static HRESULT WINAPI TriggerCollection_GetTypeInfoCount(ITriggerCollection *iface, UINT *count)
 {
-    trigger_collection *This = impl_from_ITriggerCollection(iface);
-    FIXME("(%p)->(%p)\n", This, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI TriggerCollection_GetTypeInfo(ITriggerCollection *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    trigger_collection *This = impl_from_ITriggerCollection(iface);
-    FIXME("(%p)->(%u %lu %p)\n", This, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_ITriggerCollection, index, lcid, info);
 }
 
 static HRESULT WINAPI TriggerCollection_GetIDsOfNames(ITriggerCollection *iface, REFIID riid, LPOLESTR *names,
                                                    UINT count, LCID lcid, DISPID *dispid)
 {
-    trigger_collection *This = impl_from_ITriggerCollection(iface);
-    FIXME("(%p)->(%s %p %u %lu %p)\n", This, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_ITriggerCollection, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI TriggerCollection_Invoke(ITriggerCollection *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                                DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    trigger_collection *This = impl_from_ITriggerCollection(iface);
-    FIXME("(%p)->(%ld %s %lx %x %p %p %p %p)\n", This, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_ITriggerCollection, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI TriggerCollection_get_Count(ITriggerCollection *iface, LONG *count)
@@ -2034,8 +1971,21 @@ static HRESULT WINAPI TriggerCollection_get_Item(ITriggerCollection *iface, LONG
 static HRESULT WINAPI TriggerCollection_get__NewEnum(ITriggerCollection *iface, IUnknown **penum)
 {
     trigger_collection *This = impl_from_ITriggerCollection(iface);
-    FIXME("(%p)->(%p)\n", This, penum);
-    return E_NOTIMPL;
+    IDispatch **items;
+    LONG i;
+
+    TRACE("(%p)->(%p)\n", This, penum);
+
+    if (!penum) return E_POINTER;
+
+    items = calloc(This->count ? This->count : 1, sizeof(*items));
+    if (!items) return E_OUTOFMEMORY;
+    for (i = 0; i < This->count; i++)
+    {
+        ITrigger_AddRef(This->triggers[i]);
+        items[i] = (IDispatch *)This->triggers[i];
+    }
+    return taskschd_create_enum(items, This->count, penum);
 }
 
 static HRESULT WINAPI TriggerCollection_Create(ITriggerCollection *iface, TASK_TRIGGER_TYPE2 type, ITrigger **trigger)
@@ -2194,29 +2144,24 @@ static HRESULT WINAPI RegistrationInfo_QueryInterface(IRegistrationInfo *iface, 
 
 static HRESULT WINAPI RegistrationInfo_GetTypeInfoCount(IRegistrationInfo *iface, UINT *count)
 {
-    FIXME("%p,%p: stub\n", iface, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI RegistrationInfo_GetTypeInfo(IRegistrationInfo *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    FIXME("%p,%u,%lu,%p: stub\n", iface, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_IRegistrationInfo, index, lcid, info);
 }
 
 static HRESULT WINAPI RegistrationInfo_GetIDsOfNames(IRegistrationInfo *iface, REFIID riid, LPOLESTR *names,
                                                    UINT count, LCID lcid, DISPID *dispid)
 {
-    FIXME("%p,%s,%p,%u,%lu,%p: stub\n", iface, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_IRegistrationInfo, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI RegistrationInfo_Invoke(IRegistrationInfo *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                             DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    FIXME("%p,%ld,%s,%04lx,%04x,%p,%p,%p,%p: stub\n", iface, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_IRegistrationInfo, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI RegistrationInfo_get_Description(IRegistrationInfo *iface, BSTR *description)
@@ -2556,29 +2501,24 @@ static ULONG WINAPI IdleSettings_Release(IIdleSettings *iface)
 
 static HRESULT WINAPI IdleSettings_GetTypeInfoCount(IIdleSettings *iface, UINT *count)
 {
-    FIXME("%p,%p: stub\n", iface, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI IdleSettings_GetTypeInfo(IIdleSettings *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    FIXME("%p,%u,%lu,%p: stub\n", iface, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_IIdleSettings, index, lcid, info);
 }
 
 static HRESULT WINAPI IdleSettings_GetIDsOfNames(IIdleSettings *iface, REFIID riid, LPOLESTR *names,
                                                  UINT count, LCID lcid, DISPID *dispid)
 {
-    FIXME("%p,%s,%p,%u,%lu,%p: stub\n", iface, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_IIdleSettings, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI IdleSettings_Invoke(IIdleSettings *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                           DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    FIXME("%p,%ld,%s,%04lx,%04x,%p,%p,%p,%p: stub\n", iface, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_IIdleSettings, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI IdleSettings_get_IdleDuration(IIdleSettings *iface, BSTR *delay)
@@ -2765,29 +2705,24 @@ static HRESULT WINAPI TaskSettings_QueryInterface(ITaskSettings *iface, REFIID r
 
 static HRESULT WINAPI TaskSettings_GetTypeInfoCount(ITaskSettings *iface, UINT *count)
 {
-    FIXME("%p,%p: stub\n", iface, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI TaskSettings_GetTypeInfo(ITaskSettings *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    FIXME("%p,%u,%lu,%p: stub\n", iface, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_ITaskSettings, index, lcid, info);
 }
 
 static HRESULT WINAPI TaskSettings_GetIDsOfNames(ITaskSettings *iface, REFIID riid, LPOLESTR *names,
                                                  UINT count, LCID lcid, DISPID *dispid)
 {
-    FIXME("%p,%s,%p,%u,%lu,%p: stub\n", iface, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_ITaskSettings, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI TaskSettings_Invoke(ITaskSettings *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                           DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    FIXME("%p,%ld,%s,%04lx,%04x,%p,%p,%p,%p: stub\n", iface, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_ITaskSettings, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI TaskSettings_get_AllowDemandStart(ITaskSettings *iface, VARIANT_BOOL *allow)
@@ -3425,29 +3360,24 @@ static HRESULT WINAPI Principal_QueryInterface(IPrincipal *iface, REFIID riid, v
 
 static HRESULT WINAPI Principal_GetTypeInfoCount(IPrincipal *iface, UINT *count)
 {
-    FIXME("%p,%p: stub\n", iface, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI Principal_GetTypeInfo(IPrincipal *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    FIXME("%p,%u,%lu,%p: stub\n", iface, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_IPrincipal, index, lcid, info);
 }
 
 static HRESULT WINAPI Principal_GetIDsOfNames(IPrincipal *iface, REFIID riid, LPOLESTR *names,
                                               UINT count, LCID lcid, DISPID *dispid)
 {
-    FIXME("%p,%s,%p,%u,%lu,%p: stub\n", iface, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_IPrincipal, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI Principal_Invoke(IPrincipal *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                        DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    FIXME("%p,%ld,%s,%04lx,%04x,%p,%p,%p,%p: stub\n", iface, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_IPrincipal, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI Principal_get_Id(IPrincipal *iface, BSTR *id)
@@ -3664,29 +3594,24 @@ static HRESULT WINAPI ExecAction_QueryInterface(IExecAction *iface, REFIID riid,
 
 static HRESULT WINAPI ExecAction_GetTypeInfoCount(IExecAction *iface, UINT *count)
 {
-    FIXME("%p,%p: stub\n", iface, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI ExecAction_GetTypeInfo(IExecAction *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    FIXME("%p,%u,%lu,%p: stub\n", iface, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_IExecAction, index, lcid, info);
 }
 
 static HRESULT WINAPI ExecAction_GetIDsOfNames(IExecAction *iface, REFIID riid, LPOLESTR *names,
                                                UINT count, LCID lcid, DISPID *dispid)
 {
-    FIXME("%p,%s,%p,%u,%lu,%p: stub\n", iface, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_IExecAction, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI ExecAction_Invoke(IExecAction *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                         DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    FIXME("%p,%ld,%s,%04lx,%04x,%p,%p,%p,%p: stub\n", iface, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_IExecAction, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI ExecAction_get_Id(IExecAction *iface, BSTR *id)
@@ -3913,29 +3838,24 @@ static HRESULT WINAPI Actions_QueryInterface(IActionCollection *iface, REFIID ri
 
 static HRESULT WINAPI Actions_GetTypeInfoCount(IActionCollection *iface, UINT *count)
 {
-    FIXME("%p,%p: stub\n", iface, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI Actions_GetTypeInfo(IActionCollection *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    FIXME("%p,%u,%lu,%p: stub\n", iface, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_IActionCollection, index, lcid, info);
 }
 
 static HRESULT WINAPI Actions_GetIDsOfNames(IActionCollection *iface, REFIID riid, LPOLESTR *names,
                                             UINT count, LCID lcid, DISPID *dispid)
 {
-    FIXME("%p,%s,%p,%u,%lu,%p: stub\n", iface, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_IActionCollection, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI Actions_Invoke(IActionCollection *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                      DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    FIXME("%p,%ld,%s,%04lx,%04x,%p,%p,%p,%p: stub\n", iface, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_IActionCollection, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI Actions_get_Count(IActionCollection *iface, LONG *count)
@@ -3965,8 +3885,22 @@ static HRESULT WINAPI Actions_get_Item(IActionCollection *iface, LONG index, IAc
 
 static HRESULT WINAPI Actions_get__NewEnum(IActionCollection *iface, IUnknown **penum)
 {
-    FIXME("%p,%p: stub\n", iface, penum);
-    return E_NOTIMPL;
+    Actions *actions = impl_from_IActionCollection(iface);
+    IDispatch **items;
+    LONG i;
+
+    TRACE("%p,%p\n", iface, penum);
+
+    if (!penum) return E_POINTER;
+
+    items = calloc(actions->count ? actions->count : 1, sizeof(*items));
+    if (!items) return E_OUTOFMEMORY;
+    for (i = 0; i < actions->count; i++)
+    {
+        IAction_AddRef(actions->actions[i]);
+        items[i] = (IDispatch *)actions->actions[i];
+    }
+    return taskschd_create_enum(items, actions->count, penum);
 }
 
 static HRESULT WINAPI Actions_get_XmlText(IActionCollection *iface, BSTR *xml)
@@ -4178,29 +4112,24 @@ static HRESULT WINAPI TaskDefinition_QueryInterface(ITaskDefinition *iface, REFI
 
 static HRESULT WINAPI TaskDefinition_GetTypeInfoCount(ITaskDefinition *iface, UINT *count)
 {
-    FIXME("%p,%p: stub\n", iface, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI TaskDefinition_GetTypeInfo(ITaskDefinition *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    FIXME("%p,%u,%lu,%p: stub\n", iface, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_ITaskDefinition, index, lcid, info);
 }
 
 static HRESULT WINAPI TaskDefinition_GetIDsOfNames(ITaskDefinition *iface, REFIID riid, LPOLESTR *names,
                                                    UINT count, LCID lcid, DISPID *dispid)
 {
-    FIXME("%p,%s,%p,%u,%lu,%p: stub\n", iface, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_ITaskDefinition, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI TaskDefinition_Invoke(ITaskDefinition *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                             DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    FIXME("%p,%ld,%s,%04lx,%04x,%p,%p,%p,%p: stub\n", iface, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_ITaskDefinition, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI TaskDefinition_get_RegistrationInfo(ITaskDefinition *iface, IRegistrationInfo **info)
@@ -6627,29 +6556,24 @@ static HRESULT WINAPI TaskService_QueryInterface(ITaskService *iface, REFIID rii
 
 static HRESULT WINAPI TaskService_GetTypeInfoCount(ITaskService *iface, UINT *count)
 {
-    FIXME("%p,%p: stub\n", iface, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI TaskService_GetTypeInfo(ITaskService *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    FIXME("%p,%u,%lu,%p: stub\n", iface, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_ITaskService, index, lcid, info);
 }
 
 static HRESULT WINAPI TaskService_GetIDsOfNames(ITaskService *iface, REFIID riid, LPOLESTR *names,
                                                 UINT count, LCID lcid, DISPID *dispid)
 {
-    FIXME("%p,%s,%p,%u,%lu,%p: stub\n", iface, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_ITaskService, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI TaskService_Invoke(ITaskService *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                          DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    FIXME("%p,%ld,%s,%04lx,%04x,%p,%p,%p,%p: stub\n", iface, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_ITaskService, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI TaskService_GetFolder(ITaskService *iface, BSTR path, ITaskFolder **folder)
@@ -6686,7 +6610,9 @@ static HRESULT WINAPI TaskService_NewTask(ITaskService *iface, DWORD flags, ITas
 
 static inline BOOL is_variant_null(const VARIANT *var)
 {
+    /* an omitted optional argument of a late-bound call is VT_ERROR/DISP_E_PARAMNOTFOUND */
     return V_VT(var) == VT_EMPTY || V_VT(var) == VT_NULL ||
+          (V_VT(var) == VT_ERROR && V_ERROR(var) == DISP_E_PARAMNOTFOUND) ||
           (V_VT(var) == VT_BSTR && (V_BSTR(var) == NULL || !*V_BSTR(var)));
 }
 

@@ -29,4 +29,12 @@ HRESULT RegisteredTaskCollection_create(const WCHAR *path, IRegisteredTaskCollec
 
 WCHAR *get_full_path(const WCHAR *parent, const WCHAR *path);
 
+HRESULT taskschd_GetTypeInfoCount(UINT *count);
+HRESULT taskschd_GetTypeInfo(REFIID iid, UINT index, LCID lcid, ITypeInfo **info);
+HRESULT taskschd_GetIDsOfNames(REFIID iid, REFIID riid, LPOLESTR *names, UINT count, LCID lcid, DISPID *dispid);
+HRESULT taskschd_Invoke(REFIID iid, void *obj, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
+                        DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr);
+
+HRESULT taskschd_create_enum(IDispatch **items, ULONG count, IUnknown **obj);
+
 #endif /* __WINE_TASKSCHD_PRIVATE_H__ */

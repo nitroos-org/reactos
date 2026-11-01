@@ -89,29 +89,24 @@ static HRESULT WINAPI regtask_QueryInterface(IRegisteredTask *iface, REFIID riid
 
 static HRESULT WINAPI regtask_GetTypeInfoCount(IRegisteredTask *iface, UINT *count)
 {
-    FIXME("%p,%p: stub\n", iface, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI regtask_GetTypeInfo(IRegisteredTask *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    FIXME("%p,%u,%lu,%p: stub\n", iface, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_IRegisteredTask, index, lcid, info);
 }
 
 static HRESULT WINAPI regtask_GetIDsOfNames(IRegisteredTask *iface, REFIID riid, LPOLESTR *names,
                                             UINT count, LCID lcid, DISPID *dispid)
 {
-    FIXME("%p,%s,%p,%u,%lu,%p: stub\n", iface, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_IRegisteredTask, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI regtask_Invoke(IRegisteredTask *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                      DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    FIXME("%p,%ld,%s,%04lx,%04x,%p,%p,%p,%p: stub\n", iface, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_IRegisteredTask, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI regtask_get_Name(IRegisteredTask *iface, BSTR *name)
@@ -260,30 +255,25 @@ static ULONG WINAPI running_tasks_Release(IRunningTaskCollection *iface)
 
 static HRESULT WINAPI running_tasks_GetTypeInfoCount(IRunningTaskCollection *iface, UINT *count)
 {
-    FIXME("%p,%p: stub\n", iface, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI running_tasks_GetTypeInfo(IRunningTaskCollection *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    FIXME("%p,%u,%lu,%p: stub\n", iface, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_IRunningTaskCollection, index, lcid, info);
 }
 
 static HRESULT WINAPI running_tasks_GetIDsOfNames(IRunningTaskCollection *iface, REFIID riid, LPOLESTR *names,
                                                   UINT count, LCID lcid, DISPID *dispid)
 {
-    FIXME("%p,%s,%p,%u,%lu,%p: stub\n", iface, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_IRunningTaskCollection, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI running_tasks_Invoke(IRunningTaskCollection *iface, DISPID dispid, REFIID riid, LCID lcid,
                                            WORD flags, DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo,
                                            UINT *argerr)
 {
-    FIXME("%p,%ld,%s,%04lx,%04x,%p,%p,%p,%p: stub\n", iface, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_IRunningTaskCollection, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI running_tasks_get_Count(IRunningTaskCollection *iface, LONG *count)
@@ -672,29 +662,24 @@ static HRESULT WINAPI regtasks_QueryInterface(IRegisteredTaskCollection *iface, 
 
 static HRESULT WINAPI regtasks_GetTypeInfoCount(IRegisteredTaskCollection *iface, UINT *count)
 {
-    FIXME("%p,%p: stub\n", iface, count);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfoCount(count);
 }
 
 static HRESULT WINAPI regtasks_GetTypeInfo(IRegisteredTaskCollection *iface, UINT index, LCID lcid, ITypeInfo **info)
 {
-    FIXME("%p,%u,%lu,%p: stub\n", iface, index, lcid, info);
-    return E_NOTIMPL;
+    return taskschd_GetTypeInfo(&IID_IRegisteredTaskCollection, index, lcid, info);
 }
 
 static HRESULT WINAPI regtasks_GetIDsOfNames(IRegisteredTaskCollection *iface, REFIID riid, LPOLESTR *names,
                                                 UINT count, LCID lcid, DISPID *dispid)
 {
-    FIXME("%p,%s,%p,%u,%lu,%p: stub\n", iface, debugstr_guid(riid), names, count, lcid, dispid);
-    return E_NOTIMPL;
+    return taskschd_GetIDsOfNames(&IID_IRegisteredTaskCollection, riid, names, count, lcid, dispid);
 }
 
 static HRESULT WINAPI regtasks_Invoke(IRegisteredTaskCollection *iface, DISPID dispid, REFIID riid, LCID lcid, WORD flags,
                                          DISPPARAMS *params, VARIANT *result, EXCEPINFO *excepinfo, UINT *argerr)
 {
-    FIXME("%p,%ld,%s,%04lx,%04x,%p,%p,%p,%p: stub\n", iface, dispid, debugstr_guid(riid), lcid, flags,
-          params, result, excepinfo, argerr);
-    return E_NOTIMPL;
+    return taskschd_Invoke(&IID_IRegisteredTaskCollection, iface, dispid, riid, lcid, flags, params, result, excepinfo, argerr);
 }
 
 static HRESULT WINAPI regtasks_get_Count(IRegisteredTaskCollection *iface, LONG *count)
@@ -744,7 +729,7 @@ static HRESULT WINAPI regtasks_get_Item(IRegisteredTaskCollection *iface, VARIAN
     if (FAILED(hr))
         return hr;
 
-    start_index = V_UI4(&index);
+    start_index = V_UI4(&converted_index);
     if (start_index == 0)
     {
         VariantClear(&converted_index);
@@ -787,8 +772,38 @@ static HRESULT WINAPI regtasks_get_Item(IRegisteredTaskCollection *iface, VARIAN
 
 static HRESULT WINAPI regtasks_get__NewEnum(IRegisteredTaskCollection *iface, IUnknown **penum)
 {
-    FIXME("%p,%p: stub\n", iface, penum);
-    return E_NOTIMPL;
+    IDispatch **items;
+    LONG count, i;
+    HRESULT hr;
+
+    TRACE("%p,%p\n", iface, penum);
+
+    if (!penum) return E_POINTER;
+
+    hr = regtasks_get_Count(iface, &count);
+    if (FAILED(hr)) return hr;
+
+    items = calloc(count ? count : 1, sizeof(*items));
+    if (!items) return E_OUTOFMEMORY;
+
+    for (i = 0; i < count; i++)
+    {
+        IRegisteredTask *task;
+        VARIANT index;
+
+        V_VT(&index) = VT_I4;
+        V_I4(&index) = i + 1;
+        hr = regtasks_get_Item(iface, index, &task);
+        if (FAILED(hr)) break;
+        items[i] = (IDispatch *)task;
+    }
+    if (i < count)
+    {
+        while (i--) IDispatch_Release(items[i]);
+        free(items);
+        return hr;
+    }
+    return taskschd_create_enum(items, count, penum);
 }
 
 static const IRegisteredTaskCollectionVtbl RegisteredTaskCollection_vtbl =
