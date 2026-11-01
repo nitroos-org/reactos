@@ -309,4 +309,8 @@
     SVC_(CancelSynchronousIoFile, 3)
     SVC_(CompareObjects, 2)
     SVC_(FlushBuffersFileEx, 5)
+    SVC_(SetTimerEx, 4)
+    SVC_(CreateTimer2, 5)
+    SVC_(SetTimer2, 4)
+    SVC_(CancelTimer2, 2)
 #endif

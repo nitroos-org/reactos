@@ -341,6 +341,9 @@ CreateWaitableTimerW(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
 #ifndef CREATE_WAITABLE_TIMER_MANUAL_RESET
 #define CREATE_WAITABLE_TIMER_MANUAL_RESET 0x00000001
 #endif
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 
 /*
  * @implemented
@@ -352,10 +355,43 @@ CreateWaitableTimerExW(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
                        IN DWORD dwFlags,
                        IN DWORD dwDesiredAccess)
 {
-    /* High resolution timers are not supported, callers fall back when the flag is rejected */
-    if (dwFlags & ~CREATE_WAITABLE_TIMER_MANUAL_RESET)
+    if (dwFlags & ~(CREATE_WAITABLE_TIMER_MANUAL_RESET | CREATE_WAITABLE_TIMER_HIGH_RESOLUTION))
     {
         SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    if (dwFlags & CREATE_WAITABLE_TIMER_HIGH_RESOLUTION)
+    {
+        /*
+         * A Windows 10 (1803+) timer from NtCreateTimer2. Such timers have no name, security
+         * descriptor or inheritance: the service refuses any object attributes, so security
+         * attributes or a name (even an empty one) fail with ERROR_INVALID_PARAMETER, as on
+         * Windows 10.
+         */
+        NTSTATUS Status;
+        HANDLE Handle;
+        UNICODE_STRING ObjectName;
+        OBJECT_ATTRIBUTES LocalAttributes;
+        POBJECT_ATTRIBUTES ObjectAttributes;
+
+        if (lpTimerName) RtlInitUnicodeString(&ObjectName, lpTimerName);
+        ObjectAttributes = BaseFormatObjectAttributes(&LocalAttributes,
+                                                      lpTimerAttributes,
+                                                      lpTimerName ? &ObjectName : NULL);
+        Status = NtCreateTimer2(&Handle,
+                                NULL,
+                                ObjectAttributes,
+                                TIMER2_ATTRIBUTE_HIGH_RESOLUTION |
+                                ((dwFlags & CREATE_WAITABLE_TIMER_MANUAL_RESET) ?
+                                 TIMER2_ATTRIBUTE_NOTIFICATION : 0),
+                                dwDesiredAccess);
+        if (NT_SUCCESS(Status))
+        {
+            SetLastError(ERROR_SUCCESS);
+            return Handle;
+        }
+        BaseSetLastNTError(Status);
         return NULL;
     }
 
@@ -392,6 +428,13 @@ SetWaitableTimer(IN HANDLE hTimer,
 {
     NTSTATUS Status;
 
+    /* No due time: ERROR_INVALID_PARAMETER, as Windows 10 (no fault) */
+    if (!pDueTime)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     /* Set the timer */
     Status = NtSetTimer(hTimer,
                         (PLARGE_INTEGER)pDueTime,
@@ -400,7 +443,12 @@ SetWaitableTimer(IN HANDLE hTimer,
                         (BOOLEAN)fResume,
                         lPeriod,
                         NULL);
-    if (NT_SUCCESS(Status)) return TRUE;
+    if (NT_SUCCESS(Status))
+    {
+        /* Resume (wake) timers are not supported: the timer is set, ERROR_NOT_SUPPORTED as Windows */
+        if (Status == STATUS_TIMER_RESUME_IGNORED) SetLastError(ERROR_NOT_SUPPORTED);
+        return TRUE;
+    }
 
     /* If we got here, then we failed */
     BaseSetLastNTError(Status);
@@ -420,13 +468,33 @@ SetWaitableTimerEx(IN HANDLE hTimer,
                    IN PREASON_CONTEXT WakeContext OPTIONAL,
                    IN ULONG TolerableDelay)
 {
-    /* Timer coalescing and wake contexts are not supported, so they are ignored */
-    return SetWaitableTimer(hTimer,
-                            pDueTime,
-                            lPeriod,
-                            pfnCompletionRoutine,
-                            lpArgToCompletionRoutine,
-                            FALSE);
+    TIMER_SET_COALESCABLE_TIMER_INFO Info;
+    NTSTATUS Status;
+
+    /*
+     * The kernel coalesces the expiry within TolerableDelay (and refuses one on a high resolution
+     * timer, as Windows does); a negative period is invalid. The wake context is passed on but
+     * not used: wake timers are not supported.
+     */
+    /* No due time: ERROR_INVALID_PARAMETER, as Windows 10 (no fault) */
+    if (!pDueTime)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    Info.DueTime = *pDueTime;
+    Info.TimerApcRoutine = (PTIMER_APC_ROUTINE)pfnCompletionRoutine;
+    Info.TimerContext = lpArgToCompletionRoutine;
+    Info.WakeContext = (struct _COUNTED_REASON_CONTEXT *)WakeContext;
+    Info.Period = lPeriod;
+    Info.TolerableDelay = TolerableDelay;
+    Info.PreviousState = NULL;
+    Status = NtSetTimerEx(hTimer, TimerSetCoalescableTimer, &Info, sizeof(Info));
+    if (NT_SUCCESS(Status)) return TRUE;
+
+    BaseSetLastNTError(Status);
+    return FALSE;
 }
 
 /*

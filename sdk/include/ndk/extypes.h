@@ -901,6 +901,49 @@ typedef struct _TIMER_BASIC_INFORMATION
 } TIMER_BASIC_INFORMATION, *PTIMER_BASIC_INFORMATION;
 
 //
+// NtSetTimerEx (Windows 7)
+//
+#ifdef NTOS_MODE_USER
+typedef enum _TIMER_SET_INFORMATION_CLASS
+{
+    TimerSetCoalescableTimer,
+    MaxTimerInfoClass
+} TIMER_SET_INFORMATION_CLASS;
+#endif
+
+#if defined(NTOS_MODE_USER) || (NTDDI_VERSION < NTDDI_WIN7)
+typedef struct _TIMER_SET_COALESCABLE_TIMER_INFO
+{
+    LARGE_INTEGER DueTime;
+    PTIMER_APC_ROUTINE TimerApcRoutine;
+    PVOID TimerContext;
+    struct _COUNTED_REASON_CONTEXT *WakeContext;
+    ULONG Period;
+    ULONG TolerableDelay;
+    PBOOLEAN PreviousState;
+} TIMER_SET_COALESCABLE_TIMER_INFO, *PTIMER_SET_COALESCABLE_TIMER_INFO;
+#endif
+
+//
+// NtCreateTimer2 attributes (Windows 10; the values of the EX_TIMER_* flags)
+//
+#define TIMER2_ATTRIBUTE_HIGH_RESOLUTION    0x00000004
+#define TIMER2_ATTRIBUTE_NO_WAKE            0x00000008
+#define TIMER2_ATTRIBUTE_NOTIFICATION       0x80000000
+
+//
+// NtSetTimer2 / NtCancelTimer2 parameters (Windows 10)
+//
+typedef struct _T2_SET_PARAMETERS_V0
+{
+    ULONG Version;
+    ULONG Reserved;
+    LONGLONG NoWakeTolerance;
+} T2_SET_PARAMETERS, *PT2_SET_PARAMETERS;
+
+typedef PVOID PT2_CANCEL_PARAMETERS;
+
+//
 // Information Structures for NtQuerySemaphore
 //
 typedef struct _SEMAPHORE_BASIC_INFORMATION

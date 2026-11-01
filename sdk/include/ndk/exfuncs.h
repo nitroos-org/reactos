@@ -581,6 +581,45 @@ NtSetTimer(
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
+NtSetTimerEx(
+    _In_ HANDLE TimerHandle,
+    _In_ TIMER_SET_INFORMATION_CLASS TimerSetInformationClass,
+    _Inout_updates_bytes_opt_(TimerSetInformationLength) PVOID TimerSetInformation,
+    _In_ ULONG TimerSetInformationLength
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCreateTimer2(
+    _Out_ PHANDLE TimerHandle,
+    _In_opt_ PVOID Reserved,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ ULONG Attributes,
+    _In_ ACCESS_MASK DesiredAccess
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtSetTimer2(
+    _In_ HANDLE TimerHandle,
+    _In_ PLARGE_INTEGER DueTime,
+    _In_opt_ PLARGE_INTEGER Period,
+    _In_opt_ PT2_SET_PARAMETERS Parameters
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCancelTimer2(
+    _In_ HANDLE TimerHandle,
+    _In_opt_ PT2_CANCEL_PARAMETERS Parameters
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
 NtSetUuidSeed(
     _In_ PUCHAR UuidSeed
 );
@@ -1019,6 +1058,47 @@ ZwSetTimer(
     _Out_opt_ PBOOLEAN PreviousState
 );
 #endif
+
+#if defined(NTOS_MODE_USER) || (NTDDI_VERSION < NTDDI_WIN7)
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwSetTimerEx(
+    _In_ HANDLE TimerHandle,
+    _In_ TIMER_SET_INFORMATION_CLASS TimerSetInformationClass,
+    _Inout_updates_bytes_opt_(TimerSetInformationLength) PVOID TimerSetInformation,
+    _In_ ULONG TimerSetInformationLength
+);
+#endif
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwCreateTimer2(
+    _Out_ PHANDLE TimerHandle,
+    _In_opt_ PVOID Reserved,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ ULONG Attributes,
+    _In_ ACCESS_MASK DesiredAccess
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwSetTimer2(
+    _In_ HANDLE TimerHandle,
+    _In_ PLARGE_INTEGER DueTime,
+    _In_opt_ PLARGE_INTEGER Period,
+    _In_opt_ PT2_SET_PARAMETERS Parameters
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwCancelTimer2(
+    _In_ HANDLE TimerHandle,
+    _In_opt_ PT2_CANCEL_PARAMETERS Parameters
+);
 
 NTSYSAPI
 NTSTATUS

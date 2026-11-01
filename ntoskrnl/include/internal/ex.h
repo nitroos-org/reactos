@@ -129,7 +129,20 @@ typedef struct _ETIMER
     BOOLEAN ApcAssociated;
     BOOLEAN WakeTimer;
     LIST_ENTRY WakeTimerListEntry;
+    /* NtCreateTimer2 timers (object type IRTimer) and high resolution */
+    UCHAR Flags;
+    UCHAR HighResState;
+    KTIMER HighResPreTimer;
+    KDPC HighResPreDpc;
 } ETIMER, *PETIMER;
+
+/* ETIMER Flags */
+#define ETIMER_HIGH_RESOLUTION  0x01
+
+/* ETIMER HighResState: a high resolution timer needs the fast clock only near its due time */
+#define ETIMER_HR_IDLE          0
+#define ETIMER_HR_FAR           1
+#define ETIMER_HR_NEAR          2
 
 typedef struct
 {
