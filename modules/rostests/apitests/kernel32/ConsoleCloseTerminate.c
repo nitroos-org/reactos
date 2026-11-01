@@ -21,6 +21,17 @@
  * Each case runs in a child on a console of its own. The child signals a named
  * event just before it posts WM_CLOSE to its console window; this process times
  * the child's exit from that signal.
+ *
+ * A handler that faults runs in the control thread the console server started in
+ * the process. That thread is started like any other thread: the exception goes
+ * to the unhandled exception filter, which runs, and then the process ends with
+ * the exception code, at once (kernel32's BaseThreadStartup; under WoW64 the
+ * thread is a guest thread entered through the same code). Measured on Windows
+ * 10 22H2, a 32-bit and a 64-bit process alike: STATUS_ACCESS_VIOLATION 2 ms
+ * after the window message, the filter run on the handler's thread 1 ms after the
+ * handler started, whether the filter returns EXECUTE_HANDLER or CONTINUE_SEARCH,
+ * and with no filter and the error box off. The exit code is the exception's,
+ * not STATUS_CONTROL_C_EXIT.
  */
 #define FAST_MAX_MS         2000
 #define TIMEOUT_MIN_MS      4500
@@ -30,8 +41,21 @@
 
 static WCHAR FileName[MAX_PATH];
 static DWORD HandlerMode;
+static HANDLE FilterEvent;
 
-enum { MODE_TRUE, MODE_FALSE, MODE_SLEEP, MODE_HANG };
+enum { MODE_TRUE, MODE_FALSE, MODE_SLEEP, MODE_HANG, MODE_FAULT, MODE_FAULT_SEARCH, MODE_FAULT_NOFILTER };
+
+/* Unhandled exception filter of the fault cases: tells the parent that it ran */
+static
+LONG
+WINAPI
+FaultFilter(
+    _In_ PEXCEPTION_POINTERS ExceptionInfo)
+{
+    if (FilterEvent)
+        SetEvent(FilterEvent);
+    return (HandlerMode == MODE_FAULT) ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH;
+}
 
 static
 BOOL
@@ -53,6 +77,11 @@ CloseHandler(
             /* longer than the child timeout, and then returning FALSE would exit the process by itself */
             Sleep(10 * CHILD_TIMEOUT_MS);
             return TRUE;
+        case MODE_FAULT:
+        case MODE_FAULT_SEARCH:
+        case MODE_FAULT_NOFILTER:
+            *(volatile int *)NULL = 1;
+            return TRUE;
         default:
             return FALSE;
     }
@@ -68,10 +97,22 @@ CloseChild(
 {
     HWND Window = GetConsoleWindow();
     HANDLE Event = OpenEventW(EVENT_MODIFY_STATE, FALSE, EventName);
+    WCHAR FilterName[80];
 
     if (!Window || !Event)
         ExitProcess(1);
     HandlerMode = Mode;
+    if (Mode >= MODE_FAULT)
+    {
+        StringCbPrintfW(FilterName, sizeof(FilterName), L"%ls_filter", EventName);
+        FilterEvent = OpenEventW(EVENT_MODIFY_STATE, FALSE, FilterName);
+        if (!FilterEvent)
+            ExitProcess(5);
+        /* No error box for the cases that reach the default filter */
+        SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
+        if (Mode != MODE_FAULT_NOFILTER)
+            SetUnhandledExceptionFilter(FaultFilter);
+    }
     SetConsoleCtrlHandler(CloseHandler, TRUE);
     if (AltF4)
     {
@@ -103,10 +144,14 @@ RunCase(
     _In_ PCSTR Mode,
     _In_ BOOL AltF4,
     _In_ DWORD MinMs,
-    _In_ DWORD MaxMs)
+    _In_ DWORD MaxMs,
+    _In_ DWORD ExpectedExit,
+    _In_ BOOL ExpectFilter)
 {
     WCHAR CommandLine[MAX_PATH + 100];
     WCHAR EventName[64];
+    WCHAR FilterName[80];
+    HANDLE Filter = NULL;
     STARTUPINFOW StartupInfo;
     PROCESS_INFORMATION ProcessInfo;
     HANDLE Event;
@@ -118,6 +163,14 @@ RunCase(
     ok(Event != NULL, "CreateEventW failed with %lu\n", GetLastError());
     if (!Event)
         return;
+    StringCbPrintfW(FilterName, sizeof(FilterName), L"%ls_filter", EventName);
+    Filter = CreateEventW(NULL, TRUE, FALSE, FilterName);
+    ok(Filter != NULL, "CreateEventW failed with %lu\n", GetLastError());
+    if (!Filter)
+    {
+        CloseHandle(Event);
+        return;
+    }
 
     StringCbPrintfW(CommandLine, sizeof(CommandLine), L"\"%ls\" ConsoleCloseTerminate %hs %d %ls",
                     FileName, Mode, AltF4, EventName);
@@ -127,6 +180,7 @@ RunCase(
                         NULL, NULL, &StartupInfo, &ProcessInfo))
     {
         skip("CreateProcessW failed with %lu\n", GetLastError());
+        CloseHandle(Filter);
         CloseHandle(Event);
         return;
     }
@@ -162,13 +216,17 @@ RunCase(
     }
 
     GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode);
-    ok(ExitCode == STATUS_CONTROL_C_EXIT, "%ls: exit code 0x%lx, expected 0x%lx\n",
-       Name, ExitCode, (DWORD)STATUS_CONTROL_C_EXIT);
+    ok(ExitCode == ExpectedExit, "%ls: exit code 0x%lx, expected 0x%lx\n",
+       Name, ExitCode, ExpectedExit);
+    Wait = WaitForSingleObject(Filter, 0);
+    ok((Wait == WAIT_OBJECT_0) == ExpectFilter, "%ls: the unhandled exception filter %s, expected %s\n",
+       Name, (Wait == WAIT_OBJECT_0) ? "ran" : "did not run", ExpectFilter ? "to run" : "not to run");
     ok(ElapsedMs >= MinMs && ElapsedMs <= MaxMs, "%ls: the process ended %lu ms after the close, expected %lu to %lu ms\n",
        Name, ElapsedMs, MinMs, MaxMs);
 
 Done:
     CloseHandle(ProcessInfo.hProcess);
+    CloseHandle(Filter);
     CloseHandle(Event);
 }
 
@@ -191,17 +249,27 @@ START_TEST(ConsoleCloseTerminate)
             Mode = MODE_SLEEP;
         else if (!strcmp(argv[2], "hang"))
             Mode = MODE_HANG;
+        else if (!strcmp(argv[2], "fault"))
+            Mode = MODE_FAULT;
+        else if (!strcmp(argv[2], "faultsearch"))
+            Mode = MODE_FAULT_SEARCH;
+        else if (!strcmp(argv[2], "faultnofilter"))
+            Mode = MODE_FAULT_NOFILTER;
         MultiByteToWideChar(CP_ACP, 0, argv[4], -1, EventName, _countof(EventName));
         CloseChild(Mode, atoi(argv[3]), EventName);
     }
 
     /* A handler that takes the event, and the default handler, end the process at once */
-    RunCase(L"true", "true", FALSE, 0, FAST_MAX_MS);
-    RunCase(L"false", "false", FALSE, 0, FAST_MAX_MS);
+    RunCase(L"true", "true", FALSE, 0, FAST_MAX_MS, STATUS_CONTROL_C_EXIT, FALSE);
+    RunCase(L"false", "false", FALSE, 0, FAST_MAX_MS, STATUS_CONTROL_C_EXIT, FALSE);
     /* A handler that returns ends it when it returns */
-    RunCase(L"sleep", "sleep", FALSE, SLEEP_MS - 200, SLEEP_MS + FAST_MAX_MS);
+    RunCase(L"sleep", "sleep", FALSE, SLEEP_MS - 200, SLEEP_MS + FAST_MAX_MS, STATUS_CONTROL_C_EXIT, FALSE);
     /* A handler still running after the timeout does not keep the process alive */
-    RunCase(L"hang", "hang", FALSE, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS);
+    RunCase(L"hang", "hang", FALSE, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS, STATUS_CONTROL_C_EXIT, FALSE);
     /* Alt+F4 closes the window like WM_CLOSE */
-    RunCase(L"altf4", "true", TRUE, 0, FAST_MAX_MS);
+    RunCase(L"altf4", "true", TRUE, 0, FAST_MAX_MS, STATUS_CONTROL_C_EXIT, FALSE);
+    /* A handler that faults: the filter runs, then the process ends with the exception code at once */
+    RunCase(L"fault", "fault", FALSE, 0, FAST_MAX_MS, STATUS_ACCESS_VIOLATION, TRUE);
+    RunCase(L"faultsearch", "faultsearch", FALSE, 0, FAST_MAX_MS, STATUS_ACCESS_VIOLATION, TRUE);
+    RunCase(L"faultnofilter", "faultnofilter", FALSE, 0, FAST_MAX_MS, STATUS_ACCESS_VIOLATION, FALSE);
 }
