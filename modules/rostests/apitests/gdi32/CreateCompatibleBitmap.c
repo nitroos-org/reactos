@@ -6,6 +6,7 @@
  * win32k keeps going when it cannot allocate the user mode DC_ATTR of a new DC (the GDI handle table
  * entry then has a NULL pUser and the kernel uses its own copy). gdi32 must cope with that.
  * kbswitch.exe died in CreateCompatibleBitmap dereferencing that NULL pointer.
+ * A 32-bit process under WoW64 never gets such a DC: CreateCompatibleDC fails instead, as on Windows.
  */
 
 #include "precomp.h"
@@ -60,6 +61,7 @@ Test_Basic(void)
 typedef struct
 {
     BOOL bFound;
+    BOOL bDcFailed;
     BOOL bBitmap;
     BOOL bSetBrushOrg;
     BOOL bGetBrushOrg;
@@ -83,6 +85,10 @@ Test_NoDcAttr(void)
     ULONG cReserved = 0, i;
     NOATTR_RESULT res = { 0 };
     HDC hdcNoAttr = NULL;
+    BOOL bWow64 = FALSE;
+
+    if (!IsWow64Process(GetCurrentProcess(), &bWow64))
+        bWow64 = FALSE;
 
     apvReserved = HeapAlloc(GetProcessHeap(), 0, MAX_RESERVATIONS * sizeof(PVOID));
     ahdc = HeapAlloc(GetProcessHeap(), 0, MAX_DCS * sizeof(HDC));
@@ -105,7 +111,10 @@ Test_NoDcAttr(void)
     {
         HDC hdc = CreateCompatibleDC(NULL);
         if (!hdc)
+        {
+            res.bDcFailed = TRUE;
             break;
+        }
         ahdc[res.cDCs++] = hdc;
         if (GdiGetHandleUserData(hdc) == NULL)
         {
@@ -167,6 +176,15 @@ cleanup:
         HeapFree(GetProcessHeap(), 0, ahdc);
     if (apvReserved)
         HeapFree(GetProcessHeap(), 0, apvReserved);
+
+    if (!res.bFound && bWow64 && cReserved > 0 && cReserved < MAX_RESERVATIONS)
+    {
+        /* The DC_ATTR of a WoW64 process must lie below 4 GB. When win32k cannot allocate one, it does
+           not hand out the DC (Windows 10 behaves the same way), so the calls below cannot be reached. */
+        trace("WoW64: %lu DCs, CreateCompatibleDC failed %d, %lu reservations\n", res.cDCs, res.bDcFailed, cReserved);
+        ok(res.bDcFailed, "CreateCompatibleDC did not fail with the address space full (%lu DCs)\n", res.cDCs);
+        return;
+    }
 
     if (!res.bFound)
     {
