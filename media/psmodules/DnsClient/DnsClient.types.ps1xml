@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Alias members of the DnsRecord objects, as the Windows module defines them. -->
+<Types>
+  <Type><Name>Microsoft.DnsClient.Commands.DnsRecord_A</Name><Members>
+    <AliasProperty><Name>Address</Name><ReferencedMemberName>IP4Address</ReferencedMemberName></AliasProperty>
+    <AliasProperty><Name>IPAddress</Name><ReferencedMemberName>IP4Address</ReferencedMemberName></AliasProperty>
+    <AliasProperty><Name>QueryType</Name><ReferencedMemberName>Type</ReferencedMemberName></AliasProperty>
+  </Members></Type>
+  <Type><Name>Microsoft.DnsClient.Commands.DnsRecord_AAAA</Name><Members>
+    <AliasProperty><Name>Address</Name><ReferencedMemberName>IP6Address</ReferencedMemberName></AliasProperty>
+    <AliasProperty><Name>IPAddress</Name><ReferencedMemberName>IP6Address</ReferencedMemberName></AliasProperty>
+    <AliasProperty><Name>QueryType</Name><ReferencedMemberName>Type</ReferencedMemberName></AliasProperty>
+  </Members></Type>
+  <Type><Name>Microsoft.DnsClient.Commands.DnsRecord_PTR</Name><Members>
+    <AliasProperty><Name>QueryType</Name><ReferencedMemberName>Type</ReferencedMemberName></AliasProperty>
+    <AliasProperty><Name>Server</Name><ReferencedMemberName>NameHost</ReferencedMemberName></AliasProperty>
+  </Members></Type>
+  <Type><Name>Microsoft.DnsClient.Commands.DnsRecord_MX</Name><Members>
+    <AliasProperty><Name>QueryType</Name><ReferencedMemberName>Type</ReferencedMemberName></AliasProperty>
+    <AliasProperty><Name>Exchange</Name><ReferencedMemberName>NameExchange</ReferencedMemberName></AliasProperty>
+  </Members></Type>
+  <Type><Name>Microsoft.DnsClient.Commands.DnsRecord_SOA</Name><Members>
+    <AliasProperty><Name>QueryType</Name><ReferencedMemberName>Type</ReferencedMemberName></AliasProperty>
+    <AliasProperty><Name>Administrator</Name><ReferencedMemberName>NameAdministrator</ReferencedMemberName></AliasProperty>
+  </Members></Type>
+  <Type><Name>Microsoft.DnsClient.Commands.DnsRecord_TXT</Name><Members>
+    <AliasProperty><Name>QueryType</Name><ReferencedMemberName>Type</ReferencedMemberName></AliasProperty>
+    <AliasProperty><Name>Text</Name><ReferencedMemberName>Strings</ReferencedMemberName></AliasProperty>
+  </Members></Type>
+  <Type><Name>Microsoft.DnsClient.Commands.DnsRecord_SRV</Name><Members>
+    <AliasProperty><Name>QueryType</Name><ReferencedMemberName>Type</ReferencedMemberName></AliasProperty>
+    <AliasProperty><Name>Target</Name><ReferencedMemberName>NameTarget</ReferencedMemberName></AliasProperty>
+  </Members></Type>
+</Types>
