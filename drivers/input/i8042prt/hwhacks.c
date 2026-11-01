@@ -252,6 +252,7 @@ i8042InitializeHwHacks(
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("IoWMIOpenBlock failed: 0x%08lx\n", Status);
+        ObDereferenceObject(DataBlockObject);
         return;
     }
 
@@ -259,6 +260,7 @@ i8042InitializeHwHacks(
     if (AllData == NULL)
     {
         DPRINT1("Failed to allocate %lu bytes for SMBIOS tables\n", BufferSize);
+        ObDereferenceObject(DataBlockObject);
         return;
     }
 
@@ -268,8 +270,12 @@ i8042InitializeHwHacks(
     {
         DPRINT1("IoWMIOpenBlock failed: 0x%08lx\n", Status);
         ExFreePoolWithTag(AllData, 'BTMS');
+        ObDereferenceObject(DataBlockObject);
         return;
     }
+
+    /* Drop the reference IoWMIOpenBlock gave us */
+    ObDereferenceObject(DataBlockObject);
 
     /* FIXME: This function should be removed once the mssmbios driver is implemented */
     /* Store SMBios data in registry */

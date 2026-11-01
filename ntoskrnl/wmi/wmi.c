@@ -157,6 +157,11 @@ IoWMIOpenBlock(
         return Status;
     }
 
+    /* The caller gets the object pointer, which carries its own reference
+       (released with ObDereferenceObject). The kernel handle only served to
+       validate the access, so close it; otherwise every call leaves a handle
+       open in the System process. */
+    ZwClose(GuidObjectHandle);
 
     return STATUS_SUCCESS;
 }

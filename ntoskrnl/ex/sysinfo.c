@@ -276,6 +276,7 @@ ExpGetRawSMBiosTable(
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("IoWMIOpenBlock failed: 0x%08lx\n", Status);
+        ObDereferenceObject(DataBlockObject);
         return Status;
     }
 
@@ -283,6 +284,7 @@ ExpGetRawSMBiosTable(
     if (AllData == NULL)
     {
         DPRINT1("Failed to allocate %lu bytes for SMBIOS tables\n", WMIBufSize);
+        ObDereferenceObject(DataBlockObject);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -292,8 +294,12 @@ ExpGetRawSMBiosTable(
     {
         DPRINT1("IoWMIOpenBlock failed: 0x%08lx\n", Status);
         ExFreePoolWithTag(AllData, 'itfS');
+        ObDereferenceObject(DataBlockObject);
         return Status;
     }
+
+    /* Drop the reference IoWMIOpenBlock gave us */
+    ObDereferenceObject(DataBlockObject);
 
     Status = STATUS_SUCCESS;
     *OutSize = AllData->FixedInstanceSize;
