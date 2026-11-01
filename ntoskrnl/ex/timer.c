@@ -238,7 +238,15 @@ ExpHighResPreDpcRoutine(IN PKDPC Dpc,
     KeAcquireSpinLockAtDpcLevel(&Timer->Lock);
     if ((Timer->HighResState == ETIMER_HR_FAR) && !Timer->HighResPreTimer.Header.Inserted)
     {
-        Update = ExpHighResSetNear(Timer);
+        /*
+         * The main timer may already have expired (both DPCs late, e.g. a stalled DPC queue or a
+         * paused VM) and its DPC run while the state was still FAR: then no DPC follows to undo
+         * a NEAR state, so only go near while the main timer is still pending.
+         */
+        if (Timer->Period || Timer->KeTimer.Header.Inserted)
+            Update = ExpHighResSetNear(Timer);
+        else
+            ExpHighResSetIdle(Timer);
     }
     KeReleaseSpinLockFromDpcLevel(&Timer->Lock);
 
@@ -300,6 +308,29 @@ ExpReferenceTimerByHandle(IN HANDLE TimerHandle,
 }
 
 /*
+ * A relative due time is turned into an interrupt time by subtracting it from the current one;
+ * near MINLONGLONG that overflows and the timer would expire at once. Windows 10 accepts any
+ * value and such a timer never expires (measured with MINLONGLONG and -MAXLONGLONG), so the
+ * magnitude is limited to what still fits, less a margin (~30 hours) for the interrupt time
+ * that passes before the kernel timer is inserted. Absolute times do not overflow.
+ */
+#define EXP_DUE_TIME_MARGIN     0x10000000000LL
+
+static
+LARGE_INTEGER
+ExpClampDueTime(IN LARGE_INTEGER DueTime)
+{
+    LONGLONG Limit;
+
+    if (DueTime.QuadPart < 0)
+    {
+        Limit = MAXLONGLONG - (LONGLONG)KeQueryInterruptTime() - EXP_DUE_TIME_MARGIN;
+        if (DueTime.QuadPart < -Limit) DueTime.QuadPart = -Limit;
+    }
+    return DueTime;
+}
+
+/*
  * SetWaitableTimerEx / NtSetTimerEx tolerable delay: the timer may expire up to TolerableDelay ms
  * late. With a delay of at least twice a grid step, a relative due time is moved up to the next
  * multiple of that step of the interrupt time, so timers with a tolerance expire together (as
@@ -317,6 +348,9 @@ ExpCoalesceDueTime(IN LARGE_INTEGER DueTime,
 
     if (DueTime.QuadPart >= 0) return DueTime;
 
+    /* Now + |DueTime| stays at least EXP_DUE_TIME_MARGIN below MAXLONGLONG: rounding up by at
+     * most one step (<= 1 s) cannot overflow, nor can the difference converted back */
+    DueTime = ExpClampDueTime(DueTime);
     for (i = 0; i < RTL_NUMBER_OF(GridMs); i++)
     {
         if (TolerableDelay / 2 >= GridMs[i])
@@ -450,8 +484,11 @@ ExpTimerDpcRoutine(IN PKDPC Dpc,
     /* Lock the Timer */
     KeAcquireSpinLockAtDpcLevel(&Timer->Lock);
 
-    /* A one-shot high resolution timer that expired (and was not set again) is done */
-    if ((Timer->HighResState == ETIMER_HR_NEAR) && !Timer->Period &&
+    /*
+     * A one-shot high resolution timer that expired (and was not set again) is done; also when
+     * its pre-timer has not marked it near yet (FAR: the pre-timer is cancelled)
+     */
+    if ((Timer->HighResState != ETIMER_HR_IDLE) && !Timer->Period &&
         !Timer->KeTimer.Header.Inserted)
     {
         ExpHighResSetIdle(Timer);
@@ -653,6 +690,9 @@ ExpSetTimer(IN PETIMER Timer,
     PETHREAD Thread = PsGetCurrentThread();
     PETHREAD TimerThread;
     ULONG DerefsToDo = 0;
+
+    /* A relative due time too large to convert never expires */
+    TimerDueTime = ExpClampDueTime(TimerDueTime);
 
     /* Lock the Timer */
     KeAcquireSpinLock(&Timer->Lock, &OldIrql);
@@ -1346,8 +1386,8 @@ NtSetTimerEx(IN HANDLE TimerHandle,
 /*
  * Windows 10 timer set, for NtCreateTimer2 timers only (a Timer is STATUS_OBJECT_TYPE_MISMATCH).
  * Measured on Windows 10 22H2: Parameters->Version other than 0 is STATUS_INVALID_PARAMETER_3;
- * Reserved and NoWakeTolerance are not checked. DueTime as NtSetTimer (0 or a past absolute
- * time: signaled at once). Period is in 100 ns units: NULL or 0 is a one-shot timer, anything
+ * Reserved and NoWakeTolerance are not checked; Parameters may be NULL, DueTime may not.
+ * DueTime as NtSetTimer (0 or a past absolute time: signaled at once). Period is in 100 ns units: NULL or 0 is a one-shot timer, anything
  * else (also negative) is a periodic timer of at least 0.5 ms. Here periods are kept in whole
  * milliseconds (KTIMER): rounded to the nearest, at least 1 ms.
  */
@@ -1356,7 +1396,7 @@ NTAPI
 NtSetTimer2(IN HANDLE TimerHandle,
             IN PLARGE_INTEGER DueTime,
             IN PLARGE_INTEGER Period OPTIONAL,
-            IN PT2_SET_PARAMETERS Parameters)
+            IN PT2_SET_PARAMETERS Parameters OPTIONAL)
 {
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     LARGE_INTEGER TimerDueTime, TimerPeriod;
@@ -1366,21 +1406,25 @@ NtSetTimer2(IN HANDLE TimerHandle,
     NTSTATUS Status;
     PAGED_CODE();
 
+    /* Measured: no due time is STATUS_INVALID_PARAMETER_2; no parameters are the defaults */
+    if (!DueTime) return STATUS_INVALID_PARAMETER_2;
+
     TimerPeriod.QuadPart = 0;
+    RtlZeroMemory(&SetParameters, sizeof(SetParameters));
     _SEH2_TRY
     {
         if (PreviousMode != KernelMode)
         {
             TimerDueTime = ProbeForReadLargeInteger(DueTime);
             if (Period) TimerPeriod = ProbeForReadLargeInteger(Period);
-            ProbeForRead(Parameters, sizeof(SetParameters), sizeof(ULONG));
+            if (Parameters) ProbeForRead(Parameters, sizeof(SetParameters), sizeof(ULONG));
         }
         else
         {
             TimerDueTime = *DueTime;
             if (Period) TimerPeriod = *Period;
         }
-        RtlCopyMemory(&SetParameters, Parameters, sizeof(SetParameters));
+        if (Parameters) RtlCopyMemory(&SetParameters, Parameters, sizeof(SetParameters));
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {

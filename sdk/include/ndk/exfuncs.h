@@ -606,7 +606,7 @@ NtSetTimer2(
     _In_ HANDLE TimerHandle,
     _In_ PLARGE_INTEGER DueTime,
     _In_opt_ PLARGE_INTEGER Period,
-    _In_ PT2_SET_PARAMETERS Parameters
+    _In_opt_ PT2_SET_PARAMETERS Parameters
 );
 
 NTSYSCALLAPI
@@ -1089,7 +1089,7 @@ ZwSetTimer2(
     _In_ HANDLE TimerHandle,
     _In_ PLARGE_INTEGER DueTime,
     _In_opt_ PLARGE_INTEGER Period,
-    _In_ PT2_SET_PARAMETERS Parameters
+    _In_opt_ PT2_SET_PARAMETERS Parameters
 );
 
 NTSYSAPI
