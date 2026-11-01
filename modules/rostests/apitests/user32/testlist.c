@@ -28,6 +28,7 @@ extern void func_ConsoleClipText(void);
 extern void func_EmptyClipboard(void);
 extern void func_EnumDisplayDevices(void);
 extern void func_EnumDisplaySettings(void);
+extern void func_ExitWindowsEx(void);
 extern void func_FrameChangedClient(void);
 extern void func_FrameMetrics(void);
 extern void func_FramelessCaptionDrag(void);
@@ -149,6 +150,7 @@ const struct test winetest_testlist[] =
     { "EmptyClipboard", func_EmptyClipboard },
     { "EnumDisplayDevices", func_EnumDisplayDevices },
     { "EnumDisplaySettings", func_EnumDisplaySettings },
+    { "ExitWindowsEx", func_ExitWindowsEx },
     { "FrameChangedClient", func_FrameChangedClient },
     { "FrameMetrics", func_FrameMetrics },
     { "FramelessCaptionDrag", func_FramelessCaptionDrag },

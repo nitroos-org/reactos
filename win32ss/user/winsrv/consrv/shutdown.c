@@ -14,6 +14,10 @@
 #define NDEBUG
 #include <debug.h>
 
+/* A reboot and a power-off are shutdowns, as Windows sends CTRL_SHUTDOWN_EVENT for them too.
+ * USERSRV adds EWX_SHUTDOWN to both before the processes are notified; do not depend on it. */
+#define EWX_SHUTDOWN_MASK   (EWX_SHUTDOWN | EWX_REBOOT | EWX_POWEROFF)
+
 /* FUNCTIONS ******************************************************************/
 
 static void
@@ -27,12 +31,12 @@ NotifyConsoleProcessForShutdown(IN PCSR_PROCESS CsrProcess,
              CsrProcess, Flags, CsrProcess->ClientId.UniqueProcess, CsrProcess->ClientId.UniqueThread);
 
     /*
-     * A system shutdown sends CTRL_SHUTDOWN_EVENT, a logoff CTRL_LOGOFF_EVENT.
+     * A shutdown, reboot or power-off sends CTRL_SHUTDOWN_EVENT, a logoff CTRL_LOGOFF_EVENT.
      * A process of the system or of another logon context is a service: it is
      * not ended for a handler that took the event (see console.c). A logoff
      * does not get here for such a process (see ConsoleClientShutdown).
      */
-    CtrlEvent = (Flags & EWX_SHUTDOWN) ? CTRL_SHUTDOWN_EVENT : CTRL_LOGOFF_EVENT;
+    CtrlEvent = (Flags & EWX_SHUTDOWN_MASK) ? CTRL_SHUTDOWN_EVENT : CTRL_LOGOFF_EVENT;
 
     if (CsrProcess->ShutdownFlags & (CsrShutdownSystem | CsrShutdownOther))
         CtrlEvent |= 0x80000000UL; /* CTRL_EVENT_SERVICE_FLAG */
@@ -88,7 +92,7 @@ ConsoleClientShutdown(IN PCSR_PROCESS CsrProcess,
     PCONSOLE_PROCESS_DATA ProcessData = ConsoleGetPerProcessData(CsrProcess);
 
     /* Do not kill system processes when a user is logging off */
-    if ((Flags & EWX_SHUTDOWN) == EWX_LOGOFF &&
+    if ((Flags & EWX_SHUTDOWN_MASK) == EWX_LOGOFF &&
         (CsrProcess->ShutdownFlags & (CsrShutdownSystem | CsrShutdownOther)))
     {
         DPRINT("Do not kill a system process in a logoff request!\n");

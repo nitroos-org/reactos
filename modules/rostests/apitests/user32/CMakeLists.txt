@@ -29,6 +29,7 @@ list(APPEND SOURCE
     EmptyClipboard.c
     EnumDisplayDevices.c
     EnumDisplaySettings.c
+    ExitWindowsEx.c
     FrameChangedClient.c
     FrameMetrics.c
     FramelessCaptionDrag.c
