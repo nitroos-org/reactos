@@ -42,6 +42,74 @@ MYPAL gpal =
     }
 };
 
+/*
+ * A 32-bit process under WoW64 has no GDI handle table in its own PEB (Windows 10 also leaves
+ * PEB32.GdiSharedHandleTable NULL). The table is mapped through the 64-bit PEB and keeps the amd64
+ * entry layout, 24 bytes per entry. The 64-bit TEB lies two pages below the 32-bit one.
+ */
+typedef struct _ENTRY64
+{
+    ULONG64 pobj;
+    ULONG ulObj;
+    USHORT FullUnique;
+    UCHAR Objt;
+    UCHAR Flags;
+    ULONG64 pUser;
+} ENTRY64, *PENTRY64;
+
+C_ASSERT(sizeof(ENTRY64) == 24);
+C_ASSERT(FIELD_OFFSET(ENTRY64, pUser) == 16);
+
+/* One entry, read in either layout */
+typedef struct _ENTRY_VIEW
+{
+    LONG64 pobj;
+    USHORT FullUnique;
+    UCHAR Objt;
+    UCHAR Flags;
+    ULONG64 pUser;
+} ENTRY_VIEW;
+
+#ifndef _WIN64
+/* amd64 TEB and PEB, which a 32-bit build of the NDK does not declare */
+#define TEB64_BIAS          0x2000
+#define TEB64_SELF          0x30
+#define TEB64_PEB           0x60
+#define PEB64_GDI_TABLE     0xF8
+
+static
+PENTRY64
+GdiQueryTable64(
+    VOID)
+{
+    static LONG lInit;
+    static PENTRY64 pTable64;
+    BOOL bWow64 = FALSE;
+    PUCHAR pTeb64;
+    ULONG64 ullPeb64, ullTable64;
+
+    if (lInit)
+        return pTable64;
+
+    if (IsWow64Process(GetCurrentProcess(), &bWow64) && bWow64)
+    {
+        pTeb64 = (PUCHAR)NtCurrentTeb() - TEB64_BIAS;
+        ullPeb64 = *(PULONG64)(pTeb64 + TEB64_PEB);
+        if (*(PULONG64)(pTeb64 + TEB64_SELF) == (ULONG_PTR)pTeb64 &&
+            ullPeb64 != 0 && (ullPeb64 >> 32) == 0)
+        {
+            ullTable64 = *(PULONG64)((PUCHAR)(ULONG_PTR)ullPeb64 + PEB64_GDI_TABLE);
+            if ((ullTable64 >> 32) == 0)
+                pTable64 = (PENTRY64)(ULONG_PTR)ullTable64;
+        }
+    }
+
+    lInit = 1;
+    return pTable64;
+}
+#endif
+
+/* The table in the native layout of this process, NULL for a 32-bit process under WoW64 */
 PENTRY
 GdiQueryTable(
     VOID)
@@ -51,22 +119,58 @@ GdiQueryTable(
     return pPeb->GdiSharedHandleTable;
 }
 
+static
+BOOL
+GdiReadEntry(
+    _In_ HGDIOBJ hobj,
+    _Out_ ENTRY_VIEW *pView)
+{
+    USHORT Index = (ULONG_PTR)hobj & 0xFFFF;
+    PENTRY pentHmgr;
+
+#ifndef _WIN64
+    PENTRY64 pentHmgr64 = GdiQueryTable64();
+    if (pentHmgr64)
+    {
+        PENTRY64 pentry64 = &pentHmgr64[Index];
+        pView->pobj = (LONG64)pentry64->pobj;
+        pView->FullUnique = pentry64->FullUnique;
+        pView->Objt = pentry64->Objt;
+        pView->Flags = pentry64->Flags;
+        pView->pUser = pentry64->pUser;
+        return TRUE;
+    }
+#endif
+
+    pentHmgr = GdiQueryTable();
+    if (!pentHmgr)
+        return FALSE;
+
+    pView->pobj = (LONG_PTR)pentHmgr[Index].einfo.pobj;
+    pView->FullUnique = pentHmgr[Index].FullUnique;
+    pView->Objt = pentHmgr[Index].Objt;
+    pView->Flags = pentHmgr[Index].Flags;
+    pView->pUser = (ULONG_PTR)pentHmgr[Index].pUser;
+    return TRUE;
+}
+
+static
+BOOL
+GdiIsEntryValid(
+    _In_ HGDIOBJ hobj,
+    _In_ const ENTRY_VIEW *pView)
+{
+    return (pView->pobj < 0) &&
+           (pView->FullUnique == (USHORT)((ULONG_PTR)hobj >> 16));
+}
+
 BOOL
 GdiIsHandleValid(
     _In_ HGDIOBJ hobj)
 {
-    PENTRY pentHmgr = GdiQueryTable();
-    USHORT Index = (ULONG_PTR)hobj & 0xFFFF;
-    PENTRY pentry = &pentHmgr[Index];
+    ENTRY_VIEW View;
 
-    if ((pentry->einfo.pobj == NULL) ||
-        ((LONG_PTR)pentry->einfo.pobj > 0) ||
-        (pentry->FullUnique != (USHORT)((ULONG_PTR)hobj >> 16)))
-    {
-        return FALSE;
-    }
-
-    return TRUE;
+    return GdiReadEntry(hobj, &View) && GdiIsEntryValid(hobj, &View);
 }
 
 BOOL
@@ -74,15 +178,11 @@ GdiIsHandleValidEx(
     _In_ HGDIOBJ hobj,
     _In_ GDILOOBJTYPE ObjectType)
 {
-    PENTRY pentHmgr = GdiQueryTable();
-    USHORT Index = (ULONG_PTR)hobj & 0xFFFF;
-    PENTRY pentry = &pentHmgr[Index];
+    ENTRY_VIEW View;
 
-    if ((pentry->einfo.pobj == NULL) ||
-        ((LONG_PTR)pentry->einfo.pobj > 0) ||
-        (pentry->FullUnique != (USHORT)((ULONG_PTR)hobj >> 16)) ||
-        (pentry->Objt != (UCHAR)(ObjectType >> 16)) ||
-        (pentry->Flags != (UCHAR)(ObjectType >> 24)))
+    if (!GdiReadEntry(hobj, &View) || !GdiIsEntryValid(hobj, &View) ||
+        (View.Objt != (UCHAR)(ObjectType >> 16)) ||
+        (View.Flags != (UCHAR)(ObjectType >> 24)))
     {
         return FALSE;
     }
@@ -94,16 +194,15 @@ PVOID
 GdiGetHandleUserData(
     _In_ HGDIOBJ hobj)
 {
-    PENTRY pentHmgr = GdiQueryTable();
-    USHORT Index = (ULONG_PTR)hobj;
-    PENTRY pentry = &pentHmgr[Index];
+    ENTRY_VIEW View;
 
-    if (!GdiIsHandleValid(hobj))
+    if (!GdiReadEntry(hobj, &View) || !GdiIsEntryValid(hobj, &View))
     {
         return NULL;
     }
 
-    return pentry->pUser;
+    /* A WoW64 process gets its user mode attributes below 4 GB */
+    return (PVOID)(ULONG_PTR)View.pUser;
 }
 
 VOID
