@@ -832,14 +832,101 @@ CSR_API(SrvExitWindowsEx)
     return Status;
 }
 
+/*
+ * Whether the process that owns the window may be ended on behalf of the caller. A window that
+ * is invalid, is owned by csrss, or lives in another session is refused like an invalid handle
+ * (Windows 10: FALSE, ERROR_INVALID_HANDLE). A window of the caller's own process is not
+ * refused, and neither is a window of a process of a higher integrity level: measured, a Low
+ * caller can end the window of a High process.
+ */
+static BOOL
+EndTaskIsTargetValid(
+    IN PCSR_THREAD CsrThread,
+    IN HWND hWnd,
+    OUT PDWORD ProcessId)
+{
+    ULONG_PTR TargetPid;
+    HANDLE hTarget;
+    PROCESS_SESSION_INFORMATION TargetSession, CallerSession;
+    NTSTATUS Status;
+
+    TargetPid = NtUserQueryWindow(hWnd, QUERY_WINDOW_UNIQUE_PROCESS_ID);
+    if (TargetPid == 0 ||
+        TargetPid == HandleToUlong(NtCurrentTeb()->ClientId.UniqueProcess))
+    {
+        return FALSE;
+    }
+
+    *ProcessId = (DWORD)TargetPid;
+    hTarget = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, *ProcessId);
+    if (!hTarget)
+        return FALSE;
+
+    Status = NtQueryInformationProcess(hTarget,
+                                       ProcessSessionInformation,
+                                       &TargetSession,
+                                       sizeof(TargetSession),
+                                       NULL);
+    CloseHandle(hTarget);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    Status = NtQueryInformationProcess(CsrThread->Process->ProcessHandle,
+                                       ProcessSessionInformation,
+                                       &CallerSession,
+                                       sizeof(CallerSession),
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    return TargetSession.SessionId == CallerSession.SessionId;
+}
+
+/*
+ * With fForce the process of the window is ended at once, without WM_CLOSE (Windows 10: TRUE,
+ * exit code 0, 0 ms, whatever the window does). The caller must be allowed to terminate it,
+ * which is checked by opening the process while impersonating the caller.
+ */
+static BOOL
+EndTaskTerminate(
+    IN PCSR_THREAD CsrThread,
+    IN DWORD ProcessId,
+    OUT PDWORD LastError)
+{
+    HANDLE hTarget;
+    BOOL Ret = FALSE;
+
+    if (!CsrImpersonateClient(CsrThread))
+    {
+        *LastError = ERROR_ACCESS_DENIED;
+        return FALSE;
+    }
+    hTarget = OpenProcess(PROCESS_TERMINATE, FALSE, ProcessId);
+    *LastError = hTarget ? ERROR_SUCCESS : GetLastError();
+    CsrRevertToSelf();
+
+    if (hTarget)
+    {
+        Ret = TerminateProcess(hTarget, 0);
+        if (!Ret)
+            *LastError = GetLastError();
+        CloseHandle(hTarget);
+    }
+    return Ret;
+}
+
 /* API_NUMBER: UserpEndTask */
 CSR_API(SrvEndTask)
 {
     PUSER_END_TASK EndTaskRequest = &((PUSER_API_MESSAGE)ApiMessage)->Data.EndTaskRequest;
+    PCSR_THREAD CsrThread = CsrGetClientThread();
+    HWND hWnd = EndTaskRequest->WndHandle;
+    GUITHREADINFO GuiInfo;
+    DWORD ProcessId;
     NTSTATUS Status;
 
-    // FIXME: This is HACK-plemented!!
-    DPRINT1("SrvEndTask is HACKPLEMENTED!!\n");
+    EndTaskRequest->Success   = FALSE;
+    EndTaskRequest->LastError = ERROR_INVALID_HANDLE;
 
     Status = NtUserSetInformationThread(NtCurrentThread(),
                                         UserThreadUseActiveDesktop,
@@ -851,27 +938,37 @@ CSR_API(SrvEndTask)
         return Status;
     }
 
-    SendMessageW(EndTaskRequest->WndHandle, WM_CLOSE, 0, 0);
-    // PostMessageW(EndTaskRequest->WndHandle, WM_CLOSE, 0, 0);
+    /* Windows 10: a thread that has not made any user32 call yet (it is not a GUI thread) gets
+     * FALSE and ERROR_INVALID_HANDLE, whatever the window. */
+    GuiInfo.cbSize = sizeof(GuiInfo);
+    if (!GetGUIThreadInfo(HandleToUlong(CsrThread->ClientId.UniqueThread), &GuiInfo))
+        goto Quit;
 
-    if (IsWindow(EndTaskRequest->WndHandle))
+    if (!EndTaskIsTargetValid(CsrThread, hWnd, &ProcessId))
+        goto Quit;
+
+    if (EndTaskRequest->Force)
     {
-        if (EndTaskRequest->Force)
-        {
-            EndTaskRequest->Success   = DestroyWindow(EndTaskRequest->WndHandle);
-            EndTaskRequest->LastError = GetLastError();
-        }
-        else
-        {
-            EndTaskRequest->Success = FALSE;
-        }
+        DWORD LastError;
+
+        EndTaskRequest->Success   = EndTaskTerminate(CsrThread, ProcessId, &LastError);
+        EndTaskRequest->LastError = LastError;
     }
     else
     {
+        /* Ask the window to close and wait, like Windows, until it is gone (a window that
+         * ignores WM_CLOSE keeps the call waiting) or the caller has ended. */
+        SendMessageW(hWnd, WM_CLOSE, 0, 0);
+        while (IsWindow(hWnd))
+        {
+            if (WaitForSingleObject(CsrThread->Process->ProcessHandle, 50) == WAIT_OBJECT_0)
+                goto Quit;
+        }
         EndTaskRequest->Success   = TRUE;
         EndTaskRequest->LastError = ERROR_SUCCESS;
     }
 
+Quit:
     NtUserSetInformationThread(NtCurrentThread(), UserThreadRestoreDesktop, NULL, 0);
 
     return STATUS_SUCCESS;
