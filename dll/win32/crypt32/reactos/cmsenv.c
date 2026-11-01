@@ -243,6 +243,14 @@ static BOOL der_algid(span seq, char **oid, CRYPT_DATA_BLOB *params)
 /* DER writing                                                                                */
 /* ------------------------------------------------------------------------------------------ */
 
+/* n * size bytes (at least one), failing with ERROR_OUTOFMEMORY if that does not fit */
+static void *alloc_array(DWORD n, DWORD size)
+{
+    if (size && n > CMS_MAX_CONTENT / size) { SetLastError(ERROR_OUTOFMEMORY); return NULL; }
+    size *= n;
+    return CryptMemAlloc(size ? size : 1);
+}
+
 struct wbuf { BYTE *p; DWORD n, cap; BOOL err; };
 
 static void w_free(struct wbuf *b)
@@ -518,6 +526,8 @@ static BOOL cipher_run(const struct cms_cipher *c, const BYTE *key, DWORD keylen
     default: key_ok = keylen == c->keylen;
     }
     if (!key_ok) { SetLastError(STATUS_INVALID_PARAMETER_E); return FALSE; }
+    /* the padded size, and the DWORD the result length goes through, must not wrap */
+    if (inlen > CMS_MAX_CONTENT) { SetLastError(ERROR_OUTOFMEMORY); return FALSE; }
     if (c->kind == P12_CIPHER_RC4)
     {
         /* the key is followed by the salt of the algorithm parameters */
@@ -690,6 +700,17 @@ static BOOL build_oaep(const CMS_RSAES_OAEP_PARAMETERS *p, struct wbuf *out)
 /* RSA key transport                                                                          */
 /* ------------------------------------------------------------------------------------------ */
 
+HMODULE CMSEnv_LoadNcrypt(void)
+{
+    static const WCHAR name[] = L"\\ncrypt.dll";
+    WCHAR path[MAX_PATH + ARRAY_SIZE(name)];
+    UINT n = GetSystemDirectoryW(path, MAX_PATH);
+
+    if (!n || n >= MAX_PATH) { SetLastError(ERROR_PATH_NOT_FOUND); return NULL; }
+    memcpy(path + n, name, sizeof(name));
+    return LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+}
+
 typedef LONG (WINAPI *PFN_NCryptDecrypt)(ULONG_PTR key, BYTE *in, DWORD inlen, void *pad, BYTE *out, DWORD outlen,
                                          DWORD *res, DWORD flags);
 
@@ -703,7 +724,7 @@ static BOOL ncrypt_unwrap(ULONG_PTR key, const BYTE *enc, DWORD enc_len, BOOL oa
     DWORD res = 0;
     LONG status;
 
-    if (!(mod = LoadLibraryW(L"ncrypt.dll"))) return FALSE;
+    if (!(mod = CMSEnv_LoadNcrypt())) return FALSE;
     if (!(decrypt = (PFN_NCryptDecrypt)GetProcAddress(mod, "NCryptDecrypt")))
     {
         FreeLibrary(mod);
@@ -741,56 +762,36 @@ static BOOL ncrypt_unwrap(ULONG_PTR key, const BYTE *enc, DWORD enc_len, BOOL oa
     return TRUE;
 }
 
-/* CryptoAPI key: import the wrapped key as a SIMPLEBLOB of the content cipher and read it back */
-static BOOL capi_unwrap(HCRYPTPROV prov, DWORD keyspec, const BYTE *enc, DWORD enc_len, ALG_ID content_alg,
+/* CryptoAPI key: the exchange key decrypts the wrapped content key itself (CryptDecrypt takes the block
+ * little endian; CRYPT_OAEP for RSAES-OAEP with SHA-1). The content key is not exported or imported
+ * through the provider, so it works for non-exportable keys, for providers that do not know the content
+ * cipher, and for OAEP. */
+static BOOL capi_unwrap(HCRYPTPROV prov, DWORD keyspec, const BYTE *enc, DWORD enc_len, BOOL oaep,
                         BYTE **cek, DWORD *cek_len)
 {
-    HCRYPTKEY xkey, ckey;
-    BYTE *blob, *out;
-    DWORD size = sizeof(BLOBHEADER) + sizeof(ALG_ID) + enc_len, i, outlen = 0, err;
-    BLOBHEADER *h;
+    HCRYPTKEY xkey;
+    BYTE *buf;
+    DWORD i, len = enc_len, err;
+    BOOL ok;
 
     if (!CryptGetUserKey(prov, keyspec ? keyspec : AT_KEYEXCHANGE, &xkey)) return FALSE;
-    if (!(blob = CryptMemAlloc(size))) { CryptDestroyKey(xkey); SetLastError(ERROR_OUTOFMEMORY); return FALSE; }
-    h = (BLOBHEADER *)blob;
-    h->bType = SIMPLEBLOB;
-    h->bVersion = CUR_BLOB_VERSION;
-    h->reserved = 0;
-    h->aiKeyAlg = content_alg;
-    *(ALG_ID *)(blob + sizeof(BLOBHEADER)) = CALG_RSA_KEYX;
-    for (i = 0; i < enc_len; i++) blob[size - 1 - i] = enc[i];
-    if (!CryptImportKey(prov, blob, size, xkey, CRYPT_EXPORTABLE, &ckey))
-    {
-        err = GetLastError();
-        CryptMemFree(blob);
-        CryptDestroyKey(xkey);
-        SetLastError(err);
-        return FALSE;
-    }
-    CryptMemFree(blob);
+    if (!(buf = CryptMemAlloc(enc_len))) { CryptDestroyKey(xkey); SetLastError(ERROR_OUTOFMEMORY); return FALSE; }
+    for (i = 0; i < enc_len; i++) buf[enc_len - 1 - i] = enc[i];
+    SetLastError(0);
+    ok = CryptDecrypt(xkey, 0, TRUE, oaep ? CRYPT_OAEP : 0, buf, &len);
+    err = GetLastError();
     CryptDestroyKey(xkey);
-    if (!CryptExportKey(ckey, 0, PLAINTEXTKEYBLOB, 0, NULL, &outlen) || !(out = CryptMemAlloc(outlen)))
+    if (ok && (!len || len > enc_len)) { ok = FALSE; err = NTE_BAD_DATA; }
+    if (!ok)
     {
-        err = GetLastError();
-        CryptDestroyKey(ckey);
-        SetLastError(err ? err : ERROR_OUTOFMEMORY);
-        return FALSE;
-    }
-    if (!CryptExportKey(ckey, 0, PLAINTEXTKEYBLOB, 0, out, &outlen) || outlen < sizeof(BLOBHEADER) + sizeof(DWORD) ||
-        *(DWORD *)(out + sizeof(BLOBHEADER)) > outlen - sizeof(BLOBHEADER) - sizeof(DWORD))
-    {
-        err = GetLastError();
-        SecureZeroMemory(out, outlen);
-        CryptMemFree(out);
-        CryptDestroyKey(ckey);
+        SecureZeroMemory(buf, enc_len);
+        CryptMemFree(buf);
         SetLastError(err ? err : NTE_BAD_DATA);
         return FALSE;
     }
-    CryptDestroyKey(ckey);
-    *cek_len = *(DWORD *)(out + sizeof(BLOBHEADER));
-    memmove(out, out + sizeof(BLOBHEADER) + sizeof(DWORD), *cek_len);
-    SecureZeroMemory(out + *cek_len, outlen - *cek_len);       /* no key residue behind the moved key */
-    *cek = out;
+    SecureZeroMemory(buf + len, enc_len - len);        /* no key residue behind the key */
+    *cek = buf;
+    *cek_len = len;
     return TRUE;
 }
 
@@ -831,14 +832,14 @@ BOOL CMSEnv_Decrypt(const struct cms_env *env, const struct cms_recip *recip,
 
     if (keyspec == CERT_NCRYPT_KEY_SPEC)
         ret = ncrypt_unwrap(key, enc, enc_len, is_oaep, &oaep, &cek, &cek_len);
-    else if (is_oaep)
+    else if (is_oaep && (wcscmp(oaep.hash, L"SHA1") || oaep.label_len))
     {
-        /* a CryptoAPI provider cannot hand out the key unwrapped by OAEP: only an NCrypt key can do OAEP */
+        /* a CryptoAPI provider does OAEP with SHA-1 and an empty label only */
         SetLastError(NTE_BAD_ALGID);
         ret = FALSE;
     }
     else
-        ret = capi_unwrap((HCRYPTPROV)key, keyspec, enc, enc_len, cipher.capi_alg, &cek, &cek_len);
+        ret = capi_unwrap((HCRYPTPROV)key, keyspec, enc, enc_len, is_oaep, &cek, &cek_len);
     if (!ret) return FALSE;
     ret = cipher_run(&cipher, cek, cek_len, FALSE, content, content_len, out, out_len);
     SecureZeroMemory(cek, cek_len);
@@ -1060,7 +1061,7 @@ BOOL CMSEnv_Decode(const BYTE *pb, DWORD cb, struct cms_env **out)
             if (*arr) { SetLastError(CRYPT_E_ASN1_CORRUPT); goto done; }
             for (n = 0, el = set; el.n; n++) if (!der_read(&el, NULL, NULL, NULL)) goto done;
             if (!n) continue;
-            if (!(*arr = CryptMemAlloc(n * sizeof(**arr)))) { SetLastError(ERROR_OUTOFMEMORY); goto done; }
+            if (!(*arr = alloc_array(n, sizeof(**arr)))) { SetLastError(ERROR_OUTOFMEMORY); goto done; }
             for (el = set; el.n;)
             {
                 if (!der_read(&el, &tag, NULL, &whole)) goto done;
@@ -1076,7 +1077,7 @@ BOOL CMSEnv_Decode(const BYTE *pb, DWORD cb, struct cms_env **out)
     if (n > CMS_MAX_RECIPIENTS) { SetLastError(CRYPT_E_ASN1_LARGE); goto done; }
     if (n)
     {
-        if (!(env->recip = CryptMemAlloc(n * sizeof(*env->recip))) || !(env->ktri_index = CryptMemAlloc(n * sizeof(DWORD))))
+        if (!(env->recip = alloc_array(n, sizeof(*env->recip))) || !(env->ktri_index = alloc_array(n, sizeof(DWORD))))
         { SetLastError(ERROR_OUTOFMEMORY); goto done; }
         memset(env->recip, 0, n * sizeof(*env->recip));
     }
@@ -1471,7 +1472,7 @@ struct cms_enc *CMSEnv_EncNew(const char *content_type, const char *content_alg,
         strcpy(e->content_type, content_type);
     }
     if (!enc_setup_cipher(e, content_alg, alg_params, aux)) goto fail;
-    if (n_recip && !(e->recip = CryptMemAlloc(n_recip * sizeof(*e->recip)))) { SetLastError(ERROR_OUTOFMEMORY); goto fail; }
+    if (n_recip && !(e->recip = alloc_array(n_recip, sizeof(*e->recip)))) { SetLastError(ERROR_OUTOFMEMORY); goto fail; }
     if (n_recip) memset(e->recip, 0, n_recip * sizeof(*e->recip));
     for (i = 0; i < n_recip; i++)
     {
@@ -1489,7 +1490,7 @@ struct cms_enc *CMSEnv_EncNew(const char *content_type, const char *content_alg,
         CRYPT_DATA_BLOB *sorted;
         DWORD n = n_cert > n_crl ? n_cert : n_crl;
 
-        if (!(sorted = CryptMemAlloc(n * sizeof(*sorted)))) { SetLastError(ERROR_OUTOFMEMORY); goto fail; }
+        if (!(sorted = alloc_array(n, sizeof(*sorted)))) { SetLastError(ERROR_OUTOFMEMORY); goto fail; }
         if (n_cert)
         {
             for (i = 0; i < n_cert; i++) { sorted[i].cbData = certs[i].cbData; sorted[i].pbData = certs[i].pbData; }
@@ -1599,4 +1600,131 @@ BOOL CMSEnv_EncGetBare(const struct cms_enc *e, void *pv, DWORD *pcb)
 done:
     w_free(&out); w_free(&body); w_free(&set);
     return ret;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* streamed encoding                                                                          */
+/* ------------------------------------------------------------------------------------------ */
+
+#define STREAM_MAX_LEN 0xfffffff0u
+
+static ULONGLONG hdr_size(ULONGLONG len)
+{
+    return 1 + (len < 0x80 ? 1 : len < 0x100 ? 2 : len < 0x10000 ? 3 : len < 0x1000000 ? 4 : 5);
+}
+
+/* the length of the encoded value's content octets, given the length of the whole encoded value */
+static ULONGLONG inner_len(ULONGLONG total)
+{
+    ULONGLONG h;
+
+    for (h = 2; h <= 6 && h < total; h++) if (hdr_size(total - h) == h) return total - h;
+    return total;
+}
+
+static BOOL stream_emit(cms_emit_fn emit, void *ctx, const BYTE *pb, DWORD cb, BOOL final)
+{
+    static const BYTE none = 0;
+
+    return !emit || emit(ctx, cb ? pb : &none, cb, final);
+}
+
+/* the header up to the opening of the encrypted content: with a definite length every enclosing length is
+ * known from the declared content size, with an indefinite length every enclosing element is open ended */
+BOOL CMSEnv_EncStreamStart(struct cms_enc *e, BOOL indefinite, DWORD cb_content, cms_emit_fn emit, void *ctx)
+{
+    struct wbuf pre = { 0 }, set = { 0 }, env_oid = { 0 }, ct_oid = { 0 }, out = { 0 };
+    ULONGLONG L = 0, eci_len, body_len, a0_len, ci_len;
+    BOOL ret = FALSE;
+
+    w_uint(&pre, e->version);
+    if (e->orig) w_add(&pre, e->orig, e->orig_len);
+    {
+        DWORD i;
+
+        for (i = 0; i < e->n_recip; i++) w_add(&set, e->recip[i].pbData, e->recip[i].cbData);
+    }
+    w_wrap(&pre, 0x31, &set);
+    if (!oid_to_der(szOID_RSA_envelopedData, &env_oid) ||
+        !oid_to_der(e->content_type ? e->content_type : szOID_RSA_data, &ct_oid))
+    {
+        SetLastError(E_INVALIDARG);
+        goto done;
+    }
+    if (pre.err || env_oid.err || ct_oid.err) { SetLastError(ERROR_OUTOFMEMORY); goto done; }
+    if (indefinite)
+    {
+        static const BYTE open_seq[] = { 0x30, 0x80 }, open_ctx[] = { 0xa0, 0x80 };
+
+        w_add(&out, open_seq, 2);
+        w_add(&out, env_oid.p, env_oid.n);
+        w_add(&out, open_ctx, 2);
+        w_add(&out, open_seq, 2);
+        w_add(&out, pre.p, pre.n);
+        w_add(&out, open_seq, 2);
+        w_add(&out, ct_oid.p, ct_oid.n);
+        w_add(&out, e->alg_der, e->alg_der_len);
+        w_add(&out, open_ctx, 2);
+    }
+    else
+    {
+        ULONGLONG n = cb_content;
+
+        if (e->encoded_input && n) n = inner_len(n);
+        if (n) L = (e->cipher.ivlen ? (n / e->cipher.ivlen + 1) * e->cipher.ivlen : n);
+        eci_len = ct_oid.n + (ULONGLONG)e->alg_der_len + hdr_size(L) + L;
+        body_len = pre.n + hdr_size(eci_len) + eci_len + (e->attrs ? e->attrs_len : 0);
+        a0_len = hdr_size(body_len) + body_len;
+        ci_len = env_oid.n + hdr_size(a0_len) + a0_len;
+        if (ci_len > STREAM_MAX_LEN) { SetLastError(ERROR_OUTOFMEMORY); goto done; }
+        w_header(&out, 0x30, (DWORD)ci_len);
+        w_add(&out, env_oid.p, env_oid.n);
+        w_header(&out, 0xa0, (DWORD)a0_len);
+        w_header(&out, 0x30, (DWORD)body_len);
+        w_add(&out, pre.p, pre.n);
+        w_header(&out, 0x30, (DWORD)eci_len);
+        w_add(&out, ct_oid.p, ct_oid.n);
+        w_add(&out, e->alg_der, e->alg_der_len);
+        w_header(&out, 0x80, (DWORD)L);
+    }
+    if (out.err) { SetLastError(ERROR_OUTOFMEMORY); goto done; }
+    ret = stream_emit(emit, ctx, out.p, out.n, FALSE);
+done:
+    w_free(&pre); w_free(&env_oid); w_free(&ct_oid); w_free(&out);
+    return ret;
+}
+
+/* encrypts everything the application streamed in and sends the rest of the message. No data at all
+ * gives an empty encrypted content, without a padding block. */
+BOOL CMSEnv_EncStreamFinish(struct cms_enc *e, BOOL indefinite, const BYTE *data, DWORD len,
+                            cms_emit_fn emit, void *ctx)
+{
+    static const BYTE eoc[6] = { 0 };
+    const BYTE *ct = NULL;
+    DWORD ct_len = 0;
+
+    if (len)
+    {
+        if (!CMSEnv_EncContent(e, data, len)) return FALSE;
+        ct = e->ct;
+        ct_len = e->ct_len;
+    }
+    if (!indefinite)
+    {
+        if (!stream_emit(emit, ctx, ct, ct_len, !e->attrs)) return FALSE;
+        return !e->attrs || stream_emit(emit, ctx, e->attrs, e->attrs_len, TRUE);
+    }
+    if (ct_len)
+    {
+        struct wbuf h = { 0 };
+        BOOL ok;
+
+        w_header(&h, 0x04, ct_len);
+        ok = !h.err && stream_emit(emit, ctx, h.p, h.n, FALSE);
+        w_free(&h);
+        if (!ok || !stream_emit(emit, ctx, ct, ct_len, FALSE)) return FALSE;
+    }
+    if (!stream_emit(emit, ctx, eoc, 4, FALSE)) return FALSE;
+    if (e->attrs && !stream_emit(emit, ctx, e->attrs, e->attrs_len, FALSE)) return FALSE;
+    return stream_emit(emit, ctx, eoc, 6, TRUE);
 }
