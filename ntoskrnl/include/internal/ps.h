@@ -126,6 +126,30 @@
 #define PSP_JOB_MAX_NESTING     32
 
 //
+// Context flags that report the kind of kernel entry a thread is in (Windows 7+).
+// A get with CONTEXT_EXCEPTION_REQUEST returns CONTEXT_EXCEPTION_REPORTING plus
+// CONTEXT_SERVICE_ACTIVE (system call) or CONTEXT_EXCEPTION_ACTIVE (exception
+// dispatch / not yet started). They are never part of a register group, so they
+// are removed before the context is converted and ignored by a set.
+//
+#define PS_CONTEXT_EXCEPTION_ACTIVE     0x08000000
+#define PS_CONTEXT_SERVICE_ACTIVE       0x10000000
+#define PS_CONTEXT_EXCEPTION_REQUEST    0x40000000
+#define PS_CONTEXT_EXCEPTION_REPORTING  0x80000000
+#define PS_CONTEXT_EXCEPTION_FLAGS \
+    (PS_CONTEXT_EXCEPTION_ACTIVE | PS_CONTEXT_SERVICE_ACTIVE | \
+     PS_CONTEXT_EXCEPTION_REQUEST | PS_CONTEXT_EXCEPTION_REPORTING)
+
+//
+// ContextFlags of a get: the caller's flags without the exception bits, and when it asked
+// for them the report (Active is 0, PS_CONTEXT_SERVICE_ACTIVE or PS_CONTEXT_EXCEPTION_ACTIVE).
+//
+#define PS_CONTEXT_FLAGS_REPORT(Flags, Active) \
+    (((Flags) & ~PS_CONTEXT_EXCEPTION_FLAGS) | \
+     (((Flags) & PS_CONTEXT_EXCEPTION_REQUEST) ? \
+      (PS_CONTEXT_EXCEPTION_REQUEST | PS_CONTEXT_EXCEPTION_REPORTING | (Active)) : 0))
+
+//
 // Thread "Set/Get Context" Context Structure
 //
 typedef struct _GET_SET_CTX_CONTEXT

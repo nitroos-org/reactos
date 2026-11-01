@@ -804,6 +804,10 @@ KiDispatchException(IN PEXCEPTION_RECORD ExceptionRecord,
     /* Increase number of Exception Dispatches */
     KeGetCurrentPrcb()->KeExceptionDispatchCount++;
 
+    /* From here the thread is inside an exception, which a debugger sees as CONTEXT_EXCEPTION_ACTIVE */
+    if (PreviousMode == UserMode)
+        TrapFrame->ErrCode = KI_ERRCODE_EXCEPTION;
+
     /* Set the context flags */
     Context.ContextFlags = CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS;
 

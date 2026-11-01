@@ -53,6 +53,7 @@ PspGetOrSetContextKernelRoutine(IN PKAPC Apc,
     PETHREAD Thread;
     KPROCESSOR_MODE Mode;
     PKTRAP_FRAME TrapFrame = NULL;
+    ULONG Flags, Active = 0;
     PAGED_CODE();
 
     /* Get the Context Structure */
@@ -72,6 +73,18 @@ PspGetOrSetContextKernelRoutine(IN PKAPC Apc,
         TrapFrame = KeGetTrapFrame(&Thread->Tcb);
     }
 
+    /* The exception reporting bits are not register groups: strip them for the conversion */
+    Flags = Context->ContextFlags;
+    Context->ContextFlags = Flags & ~PS_CONTEXT_EXCEPTION_FLAGS;
+
+    /* Which kind of kernel entry is the thread in? The entry code marks the error code of
+     * a system call frame, and the initial frame of a thread that has not run yet. */
+    if (TrapFrame->ErrCode == KI_ERRCODE_SYSTEM_SERVICE)
+        Active = PS_CONTEXT_SERVICE_ACTIVE;
+    else if (TrapFrame->ErrCode == KI_ERRCODE_INITIAL_THREAD ||
+             TrapFrame->ErrCode == KI_ERRCODE_EXCEPTION)
+        Active = PS_CONTEXT_EXCEPTION_ACTIVE;
+
     /* Check if it's a set or get */
     if (Apc->SystemArgument1)
     {
@@ -82,6 +95,9 @@ PspGetOrSetContextKernelRoutine(IN PKAPC Apc,
     {
         /* Get the Context */
         PspGetContext(TrapFrame, NULL, Context);
+
+        /* Report the entry kind to a caller that asked for it */
+        Context->ContextFlags = PS_CONTEXT_FLAGS_REPORT(Flags, Active);
     }
 
     /* Notify the Native API that we are done */

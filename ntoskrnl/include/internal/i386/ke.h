@@ -106,6 +106,16 @@ KeGetTrapFramePc(PKTRAP_FRAME TrapFrame)
     return TrapFrame->Eip;
 }
 
+/*
+ * Trap frame ErrCode markers. Every kernel entry writes ErrCode, so a thread that is interrupted
+ * or faults replaces the marker of an earlier system call. Used to answer a
+ * CONTEXT_EXCEPTION_REQUEST (service active / exception active). Real error codes and
+ * interrupt vectors are far below these values.
+ */
+#define KI_ERRCODE_SYSTEM_SERVICE   0xFFFFFFFF
+#define KI_ERRCODE_INITIAL_THREAD   0xFFFFFFFE
+#define KI_ERRCODE_EXCEPTION        0xFFFFFFFD
+
 FORCEINLINE
 PKTRAP_FRAME
 KiGetLinkedTrapFrame(PKTRAP_FRAME TrapFrame)
