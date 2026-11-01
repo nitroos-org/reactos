@@ -121,6 +121,14 @@ CreatePseudoConsole(COORD Size, HANDLE Input, HANDLE Output, DWORD Flags, PVOID 
     }
     if (!ReadFile(ReadyRead, Ready, sizeof(Ready), &Read, NULL) || Read != sizeof(Ready))
         goto Failure;
+#ifndef _WIN64
+    /* Host handle values are 64-bit; a 32-bit caller cannot represent a wider one */
+    if ((Ready[0] | Ready[1] | Ready[2]) >> 32)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        goto Failure;
+    }
+#endif
     Console->Console = (HANDLE)(ULONG_PTR)Ready[0];
     Console->Input = (HANDLE)(ULONG_PTR)Ready[1];
     Console->Output = (HANDLE)(ULONG_PTR)Ready[2];

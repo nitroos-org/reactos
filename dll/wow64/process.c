@@ -26,6 +26,21 @@ typedef struct
     PROC_THREAD_ATTRIBUTE_ENTRY32 Attributes[ANYSIZE_ARRAY];
 } PROC_THREAD_ATTRIBUTE_LIST32;
 
+/* The guest kernel32 HPCON (dll/win32/kernel32/client/pseudoconsole.h) and its
+ * native counterpart: handles are 32 bits wide in the guest */
+#define BASE_PSEUDOCONSOLE_MAGIC 0x43545052
+typedef struct
+{
+    ULONG Magic, Process, Signal, Console, Input, Output, ProcessId;
+} BASE_PSEUDOCONSOLE32;
+
+typedef struct
+{
+    ULONG Magic;
+    HANDLE Process, Signal, Console, Input, Output;
+    DWORD ProcessId;
+} BASE_PSEUDOCONSOLE_NATIVE;
+
 /* More attributes than the guest kernel32 can have put in a list are refused;
  * handle lists have the native limit */
 #define WOW64_MAX_ATTRIBUTES 32
@@ -98,7 +113,7 @@ static NTSTATUS CaptureHandles(UPDATE_ATTRIBUTE Update, LPPROC_THREAD_ATTRIBUTE_
  * handle values widen into *Handles and *Jobs, the small values (no pointers)
  * are copied into storage after the native list, which is one allocation (*List). */
 static NTSTATUS CaptureAttributeList(PVOID Module, ULONG Address, LPPROC_THREAD_ATTRIBUTE_LIST *List, HANDLE **Handles,
-                                     HANDLE **Jobs, BOOLEAN *Reported)
+                                     HANDLE **Jobs, BASE_PSEUDOCONSOLE_NATIVE *PseudoConsole, BOOLEAN *Reported)
 {
     PROC_THREAD_ATTRIBUTE_LIST32 *From = PTR32(Address);
     ANSI_STRING InitializeName = RTL_CONSTANT_STRING("InitializeProcThreadAttributeList");
@@ -143,6 +158,25 @@ static NTSTATUS CaptureAttributeList(PVOID Module, ULONG Address, LPPROC_THREAD_
             Status = CaptureHandles(Update, *List, &Entry, Jobs);
             if (!NT_SUCCESS(Status)) return Status;
         }
+        else if (Entry.Attribute == PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE)
+        {
+            /* The value is the guest HPCON itself, a pointer to its kernel32 state.
+             * The native creator reads a native-width copy of it: the host
+             * process, signal pipe and console handles widen like any other handle. */
+            const BASE_PSEUDOCONSOLE32 *Guest = PTR32(Entry.Value);
+            if (PseudoConsole->Magic || Entry.Size != sizeof(ULONG) ||
+                !GuestRange(Entry.Value, sizeof(*Guest)) || Guest->Magic != BASE_PSEUDOCONSOLE_MAGIC)
+                return STATUS_INVALID_PARAMETER;
+            PseudoConsole->Magic = Guest->Magic;
+            PseudoConsole->Process = HANDLE32(Guest->Process);
+            PseudoConsole->Signal = HANDLE32(Guest->Signal);
+            PseudoConsole->Console = HANDLE32(Guest->Console);
+            PseudoConsole->Input = HANDLE32(Guest->Input);
+            PseudoConsole->Output = HANDLE32(Guest->Output);
+            PseudoConsole->ProcessId = Guest->ProcessId;
+            if (!Update(*List, 0, Entry.Attribute, PseudoConsole, sizeof(HANDLE), NULL, NULL))
+                return STATUS_INVALID_PARAMETER;
+        }
         else if (Entry.Attribute == PROC_THREAD_ATTRIBUTE_IDEAL_PROCESSOR ||
                  Entry.Attribute == PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY ||
                  Entry.Attribute == PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY ||
@@ -172,6 +206,7 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer, BOOLEAN *Reported)
     STARTUPINFOEXW Startup = {{sizeof(Startup.StartupInfo)}};
     LPPROC_THREAD_ATTRIBUTE_LIST AttributeList = NULL;
     HANDLE *ListHandles = NULL, *ListJobs = NULL;
+    BASE_PSEUDOCONSOLE_NATIVE PseudoConsole = {0};
     SECURITY_ATTRIBUTES ProcessSecurity, ThreadSecurity, *Ps, *Ts;
     SECURITY_DESCRIPTOR ProcessSd, ThreadSd;
     PROCESS_INFORMATION Info = {0};
@@ -270,7 +305,7 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer, BOOLEAN *Reported)
         {
             Startup.StartupInfo.cb = sizeof(Startup);
             Status = CaptureAttributeList(Module, Request.AttributeList, &AttributeList, &ListHandles, &ListJobs,
-                                          Reported);
+                                          &PseudoConsole, Reported);
             if (!NT_SUCCESS(Status)) _SEH2_LEAVE;
             Startup.lpAttributeList = AttributeList;
         }
