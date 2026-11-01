@@ -1617,6 +1617,9 @@ InstallReactOS(VOID)
 
     InitializeDefaultUserLocale();
 
+    /* C:\Windows -> system directory on NTFS (not fatal: only hard-coded paths depend on it) */
+    InitializeWindowsJunction();
+
     if (GetWindowsDirectoryW(szBuffer, ARRAYSIZE(szBuffer)))
     {
         HKEY hKey;

@@ -4,6 +4,11 @@
 static UNICODE_STRING DosRoot, ObjectRoot;
 static WCHAR DosRootBuffer[MAX_PATH + 4];
 static PVOID ObjectRootBuffer;
+/* \Windows on the system volume, when it is a junction to the system directory (setup makes
+ * one on NTFS installs): C:\Windows\System32 is the same directory as C:\ReactOS\System32
+ * and is redirected the same way. */
+static UNICODE_STRING DosAlias, ObjectAlias;
+static WCHAR DosAliasBuffer[MAX_PATH + 4], ObjectAliasBuffer[MAX_PATH + 4];
 
 static NTSTATUS ObjectName(HANDLE Handle, PVOID *Buffer)
 {
@@ -27,6 +32,55 @@ static NTSTATUS ObjectName(HANDLE Handle, PVOID *Buffer)
     }
 }
 
+/* Enables the \Windows aliases only if \Windows resolves to the system directory itself:
+ * a different directory of that name (another Windows on this volume) is not ours to redirect. */
+static VOID InitializeWindowsAlias(VOID)
+{
+    static const WCHAR Windows[] = L"\\Windows";
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Io;
+    UNICODE_STRING Alias, Resolved, ObjectTail, SystemTail;
+    PVOID Buffer = NULL;
+    HANDLE Directory;
+    PCWSTR Root = SharedUserData->NtSystemRoot;
+    ULONG Tail, RootChars = ObjectRoot.Length / sizeof(WCHAR);
+    WCHAR Drive[3] = {SharedUserData->NtSystemRoot[0], L':', UNICODE_NULL};
+    BOOLEAN Same;
+
+    if (Root[0] == UNICODE_NULL || Root[1] != L':' || Root[2] != L'\\') return;
+    Tail = (ULONG)wcslen(Root) - 2;
+    if (RootChars <= Tail) return;
+    ObjectTail.Buffer = ObjectRoot.Buffer + RootChars - Tail;
+    ObjectTail.Length = ObjectTail.MaximumLength = (USHORT)(Tail * sizeof(WCHAR));
+    RtlInitUnicodeString(&SystemTail, Root + 2);
+    if (!RtlEqualUnicodeString(&ObjectTail, &SystemTail, TRUE)) return;
+    RootChars -= Tail;
+    if (RootChars + RTL_NUMBER_OF(Windows) > RTL_NUMBER_OF(ObjectAliasBuffer)) return;
+
+    RtlInitEmptyUnicodeString(&Alias, DosAliasBuffer, sizeof(DosAliasBuffer));
+    RtlAppendUnicodeToString(&Alias, L"\\??\\");
+    RtlAppendUnicodeToString(&Alias, Drive);
+    RtlAppendUnicodeToString(&Alias, Windows);
+    InitializeObjectAttributes(&Attributes, &Alias, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenFile(&Directory, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &Attributes, &Io,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT)))
+        return;
+    Same = NT_SUCCESS(ObjectName(Directory, &Buffer));
+    NtClose(Directory);
+    if (!Same) return;
+    Resolved = ((OBJECT_NAME_INFORMATION *)Buffer)->Name;
+    Same = RtlEqualUnicodeString(&Resolved, &ObjectRoot, TRUE);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+    if (!Same) return;
+
+    DosAlias = Alias;
+    RtlInitEmptyUnicodeString(&ObjectAlias, ObjectAliasBuffer, sizeof(ObjectAliasBuffer));
+    ObjectAlias.Length = (USHORT)(RootChars * sizeof(WCHAR));
+    RtlCopyMemory(ObjectAliasBuffer, ObjectRoot.Buffer, ObjectAlias.Length);
+    RtlAppendUnicodeToString(&ObjectAlias, Windows);
+}
+
 NTSTATUS Wow64InitializeRedirection(VOID)
 {
     OBJECT_ATTRIBUTES Attributes;
@@ -44,6 +98,7 @@ NTSTATUS Wow64InitializeRedirection(VOID)
     Status = ObjectName(Directory, &ObjectRootBuffer);
     NtClose(Directory);
     if (NT_SUCCESS(Status)) ObjectRoot = ((OBJECT_NAME_INFORMATION *)ObjectRootBuffer)->Name;
+    if (NT_SUCCESS(Status)) InitializeWindowsAlias();
     return Status;
 }
 
@@ -139,6 +194,8 @@ NTSTATUS Wow64RedirectFile(OBJECT_ATTRIBUTES *Attributes, UNICODE_STRING *Name, 
     if (Prefix(&Path, &DosRoot)) RootLength = DosRoot.Length;
     else if (Prefix(&Path, &ObjectRoot)) RootLength = ObjectRoot.Length;
     else if (Prefix(&Path, &SystemRoot)) RootLength = SystemRoot.Length;
+    else if (DosAlias.Length && Prefix(&Path, &DosAlias)) RootLength = DosAlias.Length;
+    else if (ObjectAlias.Length && Prefix(&Path, &ObjectAlias)) RootLength = ObjectAlias.Length;
     else return STATUS_SUCCESS;
     if (Path.Length <= RootLength) return STATUS_SUCCESS;
     Offset = RootLength + sizeof(WCHAR);

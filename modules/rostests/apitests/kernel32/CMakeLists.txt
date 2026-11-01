@@ -196,6 +196,7 @@ list(APPEND SOURCE
     WerRegisterMemoryFile.c
     WerRuntimeExceptionModule.c
     WideCharToMultiByte.c
+    WindowsDirJunction.c
     Wow64Process.c
     Wow64Run.c
     Wow64SystemDlls.c

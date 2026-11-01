@@ -11,6 +11,7 @@ list(APPEND SOURCE
     programfiles.c
     proppage.c
     security.c
+    windowsjunction.c
     wizard.c
     precomp.h
     ${CMAKE_CURRENT_BINARY_DIR}/syssetup_stubs.c)

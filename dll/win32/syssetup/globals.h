@@ -122,3 +122,6 @@ GetSetupInfPath(PWSTR szPath, UINT cchMax);
 /* EOF */
 
 BOOL InitializeProgramFilesDir(VOID);
+
+/* windowsjunction.c */
+BOOL InitializeWindowsJunction(VOID);

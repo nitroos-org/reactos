@@ -187,6 +187,7 @@ extern void func_ThreadHandleLeak(void);
 extern void func_ThreadInformation(void);
 extern void func_TunnelCache(void);
 extern void func_VolumeMountPoint(void);
+extern void func_WindowsDirJunction(void);
 extern void func_TzSetPrivilege(void);
 extern void func_UEFIFirmware(void);
 extern void func_UnattendedCrash(void);
@@ -408,6 +409,7 @@ const struct test winetest_testlist[] =
     { "WerRegisterMemoryFile",      func_WerRegisterMemoryFile },
     { "WerRuntimeExceptionModule",   func_WerRuntimeExceptionModule },
     { "WideCharToMultiByte",         func_WideCharToMultiByte },
+    { "WindowsDirJunction",          func_WindowsDirJunction },
     { "ReadProcessMemory",           func_ReadProcessMemory },
     { "WriteProcessMemory",          func_WriteProcessMemory },
     { "XState",                      func_XState },
