@@ -399,6 +399,13 @@ HRESULT STDMETHODCALLTYPE CBaseBarSite::SetDeskBarSite(IUnknown *punkSite)
         TBBUTTON closeBtn;
         HBITMAP hBmp;
 
+        /* The site window and its close button image list are made once: a second call would leak them */
+        if (m_hWnd || toolImageList)
+        {
+            TRACE("Site already set\n");
+            return S_OK;
+        }
+
         hResult = punkSite->QueryInterface(IID_PPV_ARG(IOleWindow, &oleWindow));
         if (FAILED_UNEXPECTEDLY(hResult))
             return hResult;
@@ -407,7 +414,10 @@ HRESULT STDMETHODCALLTYPE CBaseBarSite::SetDeskBarSite(IUnknown *punkSite)
             return hResult;
         hResult = oleWindow->GetWindow(&ownerWindow);
         if (FAILED_UNEXPECTEDLY(hResult))
+        {
+            fDeskBarSite = NULL;
             return hResult;
+        }
 
         DWORD dwStyle =  WS_VISIBLE | WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_BORDER |
              RBS_VARHEIGHT | RBS_REGISTERDROP | RBS_AUTOSIZE | RBS_VERTICALGRIPPER | RBS_DBLCLKTOGGLE |
@@ -418,6 +428,11 @@ HRESULT STDMETHODCALLTYPE CBaseBarSite::SetDeskBarSite(IUnknown *punkSite)
         /* Create site window */
         HWND tmp = CreateWindowW(REBARCLASSNAMEW, NULL, dwStyle, 0, 0, 0, 0, ownerWindow, NULL,
                     _AtlBaseModule.GetModuleInstance(), NULL);
+        if (!tmp)
+        {
+            fDeskBarSite = NULL;
+            return E_FAIL;
+        }
 
         /* Give window management to ATL */
         SubclassWindow(tmp);
@@ -437,6 +452,22 @@ HRESULT STDMETHODCALLTYPE CBaseBarSite::SetDeskBarSite(IUnknown *punkSite)
         hBmp = (HBITMAP)LoadImage(_AtlBaseModule.GetModuleInstance(),
             MAKEINTRESOURCE(IDB_BANDBUTTONS), IMAGE_BITMAP, 0, 0,
             LR_LOADTRANSPARENT);
+
+        if (!toolbarWnd || !toolImageList || !hBmp)
+        {
+            /* Destroying the site window frees the image list and the toolbar (OnDestroy) */
+            if (hBmp)
+                DeleteObject(hBmp);
+            DestroyWindow();
+            if (toolImageList)
+            {
+                ImageList_Destroy(toolImageList);
+                toolImageList = NULL;
+            }
+            toolbarWnd = NULL;
+            fDeskBarSite = NULL;
+            return E_FAIL;
+        }
 
         ImageList_AddMasked(toolImageList, hBmp, RGB(192, 192, 192));
         DeleteObject(hBmp);
