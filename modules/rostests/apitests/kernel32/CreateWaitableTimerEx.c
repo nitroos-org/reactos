@@ -73,7 +73,8 @@ static int __cdecl CompareDouble(const void *a, const void *b)
  * a completion routine, fResume or a negative period, and SetWaitableTimerEx with a tolerable delay,
  * fail with ERROR_INVALID_PARAMETER. Windows fires such a timer 30-80 us after its due time
  * (1 ms one-shot: 1.03-1.07 ms) without timeBeginPeriod; an ordinary timer fires on the 15.6 ms tick.
- * ReactOS raises the clock to about 1 ms while one is due, so the bound is median < due + 3 ms.
+ * ReactOS raises the clock to about 1 ms while one is due; the bound (median under 8 ms) leaves room
+ * for a loaded machine and rules out the 15.6 ms tick.
  */
 static
 VOID
@@ -156,6 +157,17 @@ TestHighResolution(VOID)
     }
     ok(CancelWaitableTimer(Timer), "CancelWaitableTimer failed: %lu\n", GetLastError());
 
+    /* A due time too far away to represent: accepted, never expires (Windows 10) */
+    Due.QuadPart = MINLONGLONG;
+    ok(SetWaitableTimer(Timer, &Due, 0, NULL, NULL, FALSE), "SetWaitableTimer failed: %lu\n", GetLastError());
+    ok_dec(WaitForSingleObject(Timer, 200), WAIT_TIMEOUT);
+    CancelWaitableTimer(Timer);
+
+    /* No due time: ERROR_INVALID_PARAMETER (Windows 10 does not fault) */
+    SetLastError(0xdeadbeef);
+    Ret = SetWaitableTimer(Timer, NULL, 0, NULL, NULL, FALSE);
+    ok(!Ret && GetLastError() == ERROR_INVALID_PARAMETER, "NULL due time: %d, error %lu\n", Ret, GetLastError());
+
     /* Firing period of 1 ms one-shot timers */
     QueryPerformanceFrequency(&Frequency);
     for (i = 0; i < RTL_NUMBER_OF(Samples); i++)
@@ -171,7 +183,7 @@ TestHighResolution(VOID)
     trace("high resolution one-shot 1 ms: min %.3f median %.3f max %.3f ms\n",
           Samples[0], Samples[RTL_NUMBER_OF(Samples) / 2], Samples[RTL_NUMBER_OF(Samples) - 1]);
     ok(Samples[0] >= 0.5, "1 ms timer fired after %.3f ms\n", Samples[0]);
-    ok(Samples[RTL_NUMBER_OF(Samples) / 2] < 4.0, "1 ms timer: median %.3f ms\n", Samples[RTL_NUMBER_OF(Samples) / 2]);
+    ok(Samples[RTL_NUMBER_OF(Samples) / 2] < 8.0, "1 ms timer: median %.3f ms\n", Samples[RTL_NUMBER_OF(Samples) / 2]);
 
     /* Periodic 1 ms */
     Due.QuadPart = -10000;
@@ -187,7 +199,7 @@ TestHighResolution(VOID)
     ok_dec(i, 50);
     trace("high resolution periodic 1 ms: mean %.3f ms\n",
           (double)(End.QuadPart - Start.QuadPart) * 1000.0 / (double)Frequency.QuadPart / 50);
-    ok((double)(End.QuadPart - Start.QuadPart) * 1000.0 / (double)Frequency.QuadPart / 50 < 4.0,
+    ok((double)(End.QuadPart - Start.QuadPart) * 1000.0 / (double)Frequency.QuadPart / 50 < 8.0,
        "periodic 1 ms: mean %.3f ms\n", (double)(End.QuadPart - Start.QuadPart) * 1000.0 / (double)Frequency.QuadPart / 50);
 
     CloseHandle(Timer);

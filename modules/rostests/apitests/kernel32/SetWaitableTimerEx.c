@@ -117,7 +117,22 @@ START_TEST(SetWaitableTimerEx)
         ok(Ret == WAIT_OBJECT_0, "Ret = %lu\n", Ret);
         ok(Elapsed <= 1000 + 100, "Elapsed = %lu ms\n", Elapsed);
 
+        /* A due time too far away to represent, with a tolerance: accepted, never expires */
+        Due.QuadPart = MINLONGLONG;
+        Ok = pSetWaitableTimerEx(hTimer, &Due, 0, NULL, NULL, NULL, 1000);
+        ok(Ok == TRUE, "Ok = %d, GetLastError() = %lu\n", Ok, GetLastError());
+        Ret = WaitForSingleObject(hTimer, 200);
+        ok(Ret == WAIT_TIMEOUT, "Ret = %lu\n", Ret);
+        CancelWaitableTimer(hTimer);
+
+        /* No due time: ERROR_INVALID_PARAMETER (Windows 10 does not fault) */
+        SetLastError(0xdeadbeef);
+        Ok = pSetWaitableTimerEx(hTimer, NULL, 0, NULL, NULL, NULL, 0);
+        ok(Ok == FALSE, "Ok = %d\n", Ok);
+        ok(GetLastError() == ERROR_INVALID_PARAMETER, "GetLastError() = %lu\n", GetLastError());
+
         /* A negative period is invalid */
+        Due.QuadPart = -20000;
         SetLastError(0xdeadbeef);
         Ok = pSetWaitableTimerEx(hTimer, &Due, -1, NULL, NULL, NULL, 30);
         ok(Ok == FALSE, "Ok = %d\n", Ok);

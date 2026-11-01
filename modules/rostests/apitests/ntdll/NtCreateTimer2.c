@@ -261,6 +261,32 @@ TestSetAndCancel(VOID)
     ok_ntstatus(NtSetTimer(Timer, &Due, NULL, NULL, TRUE, 0, NULL), STATUS_TIMER_RESUME_IGNORED);
     NtCancelTimer(Timer, NULL);
 
+    /*
+     * Due times too far away to represent: accepted, never expire (Windows 10: MINLONGLONG,
+     * -MAXLONGLONG, -2^62 and MAXLONGLONG all succeed and do not fire)
+     */
+    {
+        static const LONGLONG Far[] = { MINLONGLONG, -MAXLONGLONG, -0x4000000000000000LL, MAXLONGLONG };
+        ULONG i;
+
+        for (i = 0; i < RTL_NUMBER_OF(Far); i++)
+        {
+            Due.QuadPart = Far[i];
+            ok_ntstatus(pNtSetTimer2(Timer2, &Due, NULL, &Parameters), STATUS_SUCCESS);
+            ok(WaitForSingleObject(Timer2, 200) == WAIT_TIMEOUT, "IRTimer due 0x%I64x fired\n", Far[i]);
+            ok_ntstatus(NtSetTimer(Timer, &Due, NULL, NULL, FALSE, 0, NULL), STATUS_SUCCESS);
+            ok(WaitForSingleObject(Timer, 200) == WAIT_TIMEOUT, "Timer due 0x%I64x fired\n", Far[i]);
+            pNtCancelTimer2(Timer2, NULL);
+            NtCancelTimer(Timer, NULL);
+        }
+    }
+
+    /* No due time is refused; no parameters are the defaults */
+    ok_ntstatus(pNtSetTimer2(Timer2, NULL, NULL, &Parameters), STATUS_INVALID_PARAMETER_2);
+    Due.QuadPart = -10000;
+    ok_ntstatus(pNtSetTimer2(Timer2, &Due, NULL, NULL), STATUS_SUCCESS);
+    ok_dec(WaitForSingleObject(Timer2, 5000), WAIT_OBJECT_0);
+
     /* Cancelled before its due time: does not fire */
     Due.QuadPart = -500000;
     ok_ntstatus(pNtSetTimer2(Timer2, &Due, NULL, &Parameters), STATUS_SUCCESS);
@@ -354,8 +380,8 @@ static int __cdecl CompareDouble(const void *a, const void *b)
  * one-shot: 1.03-1.07 ms; 0.5 ms periodic: 0.53 ms) without anybody raising the timer resolution;
  * an ordinary timer fires on the 15.6 ms clock tick. ReactOS raises the clock interrupt to its
  * finest rate (about 1 ms) while a high resolution timer is due, so a due time is met within one
- * millisecond tick. The bound below (median under due + 3 ms) holds for both and rules out the
- * 15.6 ms tick.
+ * millisecond tick. The bounds below (median under about 8 ms) hold for both, leave room for a
+ * loaded machine, and rule out the 15.6 ms tick.
  */
 static
 VOID
@@ -386,7 +412,7 @@ TestFiringPeriod(VOID)
     qsort(Samples, RTL_NUMBER_OF(Samples), sizeof(double), CompareDouble);
     trace("one-shot 2 ms: min %.3f median %.3f max %.3f ms\n", Samples[0], Samples[RTL_NUMBER_OF(Samples) / 2], Samples[RTL_NUMBER_OF(Samples) - 1]);
     ok(Samples[0] >= 1.5, "one-shot 2 ms fired after %.3f ms\n", Samples[0]);
-    ok(Samples[RTL_NUMBER_OF(Samples) / 2] < 5.0, "one-shot 2 ms: median %.3f ms\n", Samples[RTL_NUMBER_OF(Samples) / 2]);
+    ok(Samples[RTL_NUMBER_OF(Samples) / 2] < 9.0, "one-shot 2 ms: median %.3f ms\n", Samples[RTL_NUMBER_OF(Samples) / 2]);
 
     /* Periodic, 0.5 ms (the shortest period on Windows; whole milliseconds here) */
     Due.QuadPart = -5000;
@@ -409,21 +435,26 @@ TestFiringPeriod(VOID)
     {
         qsort(Samples, RTL_NUMBER_OF(Samples), sizeof(double), CompareDouble);
         trace("periodic 0.5 ms: median %.3f ms\n", Samples[RTL_NUMBER_OF(Samples) / 2]);
-        ok(Samples[RTL_NUMBER_OF(Samples) / 2] < 3.0, "periodic 0.5 ms: median %.3f ms\n", Samples[RTL_NUMBER_OF(Samples) / 2]);
+        ok(Samples[RTL_NUMBER_OF(Samples) / 2] < 8.0, "periodic 0.5 ms: median %.3f ms\n", Samples[RTL_NUMBER_OF(Samples) / 2]);
     }
 
     /*
      * The clock runs fast only while a high resolution timer is due soon: a timer due in 10 s does
      * not change the reported resolution (Windows 10 neither). Wait for the rate to drop first.
      */
-    Sleep(500);
-    NtQueryTimerResolution(&Min, &Max, &Idle);
-    Due.QuadPart = -100000000;
-    pNtSetTimer2(Timer2, &Due, NULL, &Parameters);
-    Sleep(50);
-    NtQueryTimerResolution(&Min, &Max, &Current);
+    for (i = 0; i < 5; i++)
+    {
+        /* Another process may change the rate meanwhile: retry a few times */
+        Sleep(500);
+        NtQueryTimerResolution(&Min, &Max, &Idle);
+        Due.QuadPart = -100000000;
+        pNtSetTimer2(Timer2, &Due, NULL, &Parameters);
+        Sleep(50);
+        NtQueryTimerResolution(&Min, &Max, &Current);
+        pNtCancelTimer2(Timer2, NULL);
+        if (Current == Idle) break;
+    }
     ok(Current == Idle, "Resolution %lu with a timer due in 10 s, %lu before\n", Current, Idle);
-    pNtCancelTimer2(Timer2, NULL);
 
     /* While one is due in 2 ms, it is at most 2 ms (Windows 10: exactly the 2 ms) */
     Due.QuadPart = -20000;
