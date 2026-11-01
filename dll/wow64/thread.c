@@ -17,6 +17,24 @@ VOID Wow64AbortThread(HANDLE Thread, HANDLE Process, NTSTATUS Status)
     NtClose(Thread);
 }
 
+/* A new thread starts with reset debug registers and floating point state, whatever the
+ * creating CONTEXT holds (a CONTEXT given to NtCreateThread can name both groups: Windows ignores
+ * their values; measured on Windows 10 22H2, x64: Dr0-Dr7 zero, x87 control word 0x27f, MXCSR
+ * 0x1f80). The group flags stay as given, so that the startup NtContinue loads the reset values. */
+static VOID Wow64ResetInitialState(WOW64_CONTEXT *Context)
+{
+    /* The flags read back as Windows does: no NT, no IOPL (Windows 10 22H2: 0x202 for kernel32's) */
+    Context->EFlags = (Context->EFlags & WOW64_EFLAGS_USER_SANITIZE) | 0x202;
+    Context->Dr0 = Context->Dr1 = Context->Dr2 = Context->Dr3 = 0;
+    Context->Dr6 = Context->Dr7 = 0;
+    RtlZeroMemory(&Context->FloatSave, sizeof(Context->FloatSave));
+    Context->FloatSave.ControlWord = 0x27f;
+    Context->FloatSave.TagWord = 0xffff;
+    RtlZeroMemory(Context->ExtendedRegisters, sizeof(Context->ExtendedRegisters));
+    *(USHORT *)Context->ExtendedRegisters = 0x27f;
+    *(ULONG *)(Context->ExtendedRegisters + 24) = 0x1f80;
+}
+
 NTSTATUS Wow64CreateThread(HANDLE *Handle, ACCESS_MASK Access,
                            OBJECT_ATTRIBUTES *Attributes, HANDLE Process,
                            CLIENT_ID *Id, const WOW64_CONTEXT *Context,
@@ -37,6 +55,7 @@ NTSTATUS Wow64CreateThread(HANDLE *Handle, ACCESS_MASK Access,
 
     if ((Captured.ContextFlags & WOW64_CONTEXT_FULL) != WOW64_CONTEXT_FULL)
         return STATUS_INVALID_PARAMETER;
+    Wow64ResetInitialState(&Captured);
     Status = NtQueryInformationProcess(Process, ProcessWow64Information,
                                        &Peb32, sizeof(Peb32), NULL);
     if (!NT_SUCCESS(Status)) return Status;
