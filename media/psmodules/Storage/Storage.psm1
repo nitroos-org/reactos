@@ -1,4 +1,4 @@
-# Storage for ReactOS-Nitro: a clean-room PowerShell 7 script module (read side). Same module, cmdlet and parameter names and the
+# Storage for ReactOS-Nitro: a clean-room PowerShell 7 script module (read side, plus Set-Volume -NewFileSystemLabel). Same module, cmdlet and parameter names and the
 # same object shape as the Windows Storage module: the output objects carry the
 # Microsoft.Management.Infrastructure.CimInstance#ROOT/Microsoft/Windows/Storage/MSFT_* type names and the properties in the order
 # Windows reports them. The data comes from kernel32 and the disk IOCTLs through Nitro.Storage.Native (NitroStorageNative.cs).
@@ -252,4 +252,89 @@ function Get-PhysicalDisk {
     }
 }
 
-Export-ModuleMember -Function 'Get-Disk', 'Get-Partition', 'Get-PhysicalDisk', 'Get-Volume'
+
+# Set-Volume: -NewFileSystemLabel through SetVolumeLabel (the volume is found as Get-Volume finds it; a not-found value is the same
+# CmdletizationQuery_NotFound error). Windows returns nothing. -DedupMode is not available: this system has no deduplication.
+function Set-Volume {
+    [CmdletBinding(DefaultParameterSetName = 'ByDriveLetterSetLabel')]
+    param(
+        [Parameter(ParameterSetName = 'ByObjectSetDedup', Mandatory = $true, ValueFromPipeline = $true)]
+        [Parameter(ParameterSetName = 'ByObjectSetLabel', Mandatory = $true, ValueFromPipeline = $true)]
+        [ValidateNotNullOrEmpty()][ValidateNotNull()][object[]]$InputObject,
+
+        [Parameter(ParameterSetName = 'ByDriveLetterSetLabel')]
+        [Parameter(ParameterSetName = 'ByLabelSetLabel')]
+        [Parameter(ParameterSetName = 'ByPathSetLabel')]
+        [Parameter(ParameterSetName = 'ByUniqueIdSetLabel')]
+        [Parameter(ParameterSetName = 'ByObjectSetLabel')]
+        [Alias('NewFriendlyName')][string]$NewFileSystemLabel,
+
+        [Parameter(ParameterSetName = 'ByUniqueIdSetDedup', Mandatory = $true, ValueFromPipeline = $true)]
+        [Parameter(ParameterSetName = 'ByUniqueIdSetLabel', Mandatory = $true, ValueFromPipeline = $true)]
+        [string]$UniqueId,
+
+        [Parameter(ParameterSetName = 'ByPathSetDedup', Mandatory = $true, ValueFromPipeline = $true)]
+        [Parameter(ParameterSetName = 'ByPathSetLabel', Mandatory = $true, ValueFromPipeline = $true)]
+        [string]$Path,
+
+        [Parameter(ParameterSetName = 'ByLabelSetDedup', Mandatory = $true, ValueFromPipeline = $true)]
+        [Parameter(ParameterSetName = 'ByLabelSetLabel', Mandatory = $true, ValueFromPipeline = $true)]
+        [Alias('FriendlyName')][string]$FileSystemLabel,
+
+        [Parameter(ParameterSetName = 'ByDriveLetterSetDedup', Mandatory = $true, ValueFromPipeline = $true)]
+        [Parameter(ParameterSetName = 'ByDriveLetterSetLabel', Mandatory = $true, ValueFromPipeline = $true)]
+        [char]$DriveLetter,
+
+        [Parameter(ParameterSetName = 'ByDriveLetterSetDedup')]
+        [Parameter(ParameterSetName = 'ByLabelSetDedup')]
+        [Parameter(ParameterSetName = 'ByPathSetDedup')]
+        [Parameter(ParameterSetName = 'ByUniqueIdSetDedup')]
+        [Parameter(ParameterSetName = 'ByObjectSetDedup')]
+        [Microsoft.PowerShell.Cmdletization.GeneratedTypes.SetVolume.DedupMode]$DedupMode,
+
+        [Alias('Session')][object[]]$CimSession,
+        [int]$ThrottleLimit,
+        [switch]$AsJob
+    )
+    process {
+        if (Test-StorageAsJob $PSCmdlet $AsJob) { return }
+        $set = $PSCmdlet.ParameterSetName
+        $all = [Nitro.Storage.Native]::Volumes()
+        $errors = [System.Collections.Generic.List[System.Management.Automation.ErrorRecord]]::new()
+        $targets = @()
+        if ($set -like 'ByObject*') {
+            foreach ($o in $InputObject) {
+                $hit = @($all | Where-Object { $_['UniqueId'] -eq [string]$o.UniqueId -or $_['Path'] -eq [string]$o.Path })
+                if ($hit.Count -eq 0) { $errors.Add([Nitro.Storage.Errors]::NotFoundValue('MSFT_Volume', 'UniqueId', [string]$o.UniqueId, [string]$o.UniqueId)) }
+                $targets += $hit
+            }
+        } else {
+            $q = [Nitro.Storage.Query]::new()
+            if ($set -like 'ByDriveLetter*') { $q.Add('DriveLetter', @($DriveLetter), $false) }
+            elseif ($set -like 'ByLabel*') { $q.Add('FileSystemLabel', @($FileSystemLabel), $true) }
+            elseif ($set -like 'ByPath*') { $q.Add('Path', @($Path), $false) }
+            elseif ($set -like 'ByUniqueId*') { $q.Add('UniqueId', @($UniqueId), $false) }
+            $targets = @($q.Run($all, 'MSFT_Volume', $true, $errors))
+        }
+        Write-StorageErrors $PSCmdlet $errors
+        if ($set -like '*SetDedup') {
+            if ($PSBoundParameters.ContainsKey('DedupMode') -and $targets.Count -gt 0) {
+                $e = [System.Management.Automation.ErrorRecord]::new([System.NotSupportedException]::new('Data deduplication is not available on this system.'), 'DedupNotSupported', 'NotImplemented', $DedupMode)
+                $PSCmdlet.WriteError($e)
+            }
+            return
+        }
+        if (-not $PSBoundParameters.ContainsKey('NewFileSystemLabel')) { return }
+        foreach ($v in $targets) {
+            $rc = [Nitro.Storage.Native]::SetLabel([string]$v['Path'], $v['DriveLetter'], $NewFileSystemLabel)
+            if ($rc -ne 0) {
+                $msg = [System.ComponentModel.Win32Exception]::new($rc).Message
+                $ex = try { [Microsoft.Management.Infrastructure.CimException]::new($msg) } catch { [System.InvalidOperationException]::new($msg) }
+                $cat = switch ($rc) { 5 { 'PermissionDenied' } 2 { 'ObjectNotFound' } 3 { 'ObjectNotFound' } 87 { 'InvalidArgument' } 123 { 'InvalidArgument' } default { 'NotSpecified' } }
+                $PSCmdlet.WriteError([System.Management.Automation.ErrorRecord]::new($ex, "Windows System Error $rc", $cat, 'MSFT_Volume'))
+            }
+        }
+    }
+}
+
+Export-ModuleMember -Function 'Get-Disk', 'Get-Partition', 'Get-PhysicalDisk', 'Get-Volume', 'Set-Volume'

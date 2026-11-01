@@ -634,3 +634,216 @@ Describe 'schtasks.exe sees the tasks of the module' {
         Remove-TestTasks
     }
 }
+
+# ======================================================================================== Set-/Export-ScheduledTask
+# Surface and error rows were measured read-only on the Windows 10 reference machine (parameter sets, positions, mandatory flags,
+# the HRESULT errors of Export-ScheduledTask, the binding errors of Set-ScheduledTask). The round trip rows need the nitro guest.
+function PI($cmd, $param, $set) { (Get-Command $cmd).Parameters[$param].ParameterSets[$set] }
+
+Describe 'Set-ScheduledTask and Export-ScheduledTask surface' {
+    It 'exports both commands from ScheduledTasks as functions' {
+        foreach ($n in 'Set-ScheduledTask', 'Export-ScheduledTask') { (Get-Command $n).Source | Should -Be 'ScheduledTasks'; (Get-Command $n).CommandType | Should -Be 'Function' }
+    }
+    It 'Set-ScheduledTask has the sets User (default), Principal and Object' {
+        $c = Get-Command Set-ScheduledTask
+        $c.DefaultParameterSet | Should -Be 'User'
+        @($c.ParameterSets.Name | Sort-Object) | Should -Be @('Object', 'Principal', 'User')
+        $c.OutputType.Name | Should -Contain 'Microsoft.Management.Infrastructure.CimInstance#MSFT_ScheduledTask'
+    }
+    It 'Set-ScheduledTask positions and mandatory flags match Windows: <Param> in <Set>' -TestCases @(
+        @{ Param = 'TaskName'; Set = 'User'; Pos = 0; Mand = $true }, @{ Param = 'TaskPath'; Set = 'User'; Pos = 1; Mand = $false },
+        @{ Param = 'Action'; Set = 'User'; Pos = 2; Mand = $false }, @{ Param = 'Trigger'; Set = 'User'; Pos = 3; Mand = $false },
+        @{ Param = 'Settings'; Set = 'User'; Pos = 4; Mand = $false }, @{ Param = 'User'; Set = 'User'; Pos = 5; Mand = $false },
+        @{ Param = 'Password'; Set = 'User'; Pos = 6; Mand = $false }, @{ Param = 'TaskName'; Set = 'Principal'; Pos = 0; Mand = $true },
+        @{ Param = 'Principal'; Set = 'Principal'; Pos = 5; Mand = $false }, @{ Param = 'Action'; Set = 'Principal'; Pos = 2; Mand = $false },
+        @{ Param = 'InputObject'; Set = 'Object'; Pos = 0; Mand = $true }, @{ Param = 'Password'; Set = 'Object'; Pos = 1; Mand = $false },
+        @{ Param = 'User'; Set = 'Object'; Pos = 2; Mand = $false }) {
+        param($Param, $Set, $Pos, $Mand)
+        $i = PI Set-ScheduledTask $Param $Set
+        $i.Position | Should -Be $Pos
+        $i.IsMandatory | Should -Be $Mand
+    }
+    It 'Set-ScheduledTask: InputObject comes from the pipeline, Principal exists only in its own set, AsJob and CimSession are accepted' {
+        (PI Set-ScheduledTask InputObject Object).ValueFromPipeline | Should -BeTrue
+        (Get-Command Set-ScheduledTask).Parameters['Principal'].ParameterSets.Keys | Should -Be @('Principal')
+        (Get-Command Set-ScheduledTask).Parameters['Action'].ParameterType.FullName | Should -BeIn @('System.Object[]', 'Microsoft.Management.Infrastructure.CimInstance[]')
+        (Get-Command Set-ScheduledTask).Parameters.Keys | Should -Contain 'AsJob'
+        (Get-Command Set-ScheduledTask).Parameters['CimSession'].Aliases | Should -Contain 'Session'
+        (Get-Command Set-ScheduledTask).Parameters.Keys | Should -Not -Contain 'WhatIf'
+    }
+    It 'Export-ScheduledTask has the sets Name (TaskName 0, TaskPath 1, none mandatory) and Object (InputObject 0, mandatory, pipeline); outputs a string' {
+        $c = Get-Command Export-ScheduledTask
+        @($c.ParameterSets.Name | Sort-Object) | Should -Be @('Name', 'Object')
+        (PI Export-ScheduledTask TaskName Name).Position | Should -Be 0
+        (PI Export-ScheduledTask TaskName Name).IsMandatory | Should -BeFalse
+        (PI Export-ScheduledTask TaskPath Name).Position | Should -Be 1
+        (PI Export-ScheduledTask InputObject Object).IsMandatory | Should -BeTrue
+        (PI Export-ScheduledTask InputObject Object).ValueFromPipeline | Should -BeTrue
+        $c.OutputType.Type.FullName | Should -Contain 'System.String'
+    }
+    It 'Set-ScheduledTask without a name is a missing-mandatory-parameter error' {
+        $e = @(Err { Set-ScheduledTask })
+        $e[0].FullyQualifiedErrorId | Should -Be 'MissingMandatoryParameter,Set-ScheduledTask'
+        $e[0].Exception.Message | Should -Match 'missing mandatory parameters: TaskName'
+    }
+    It 'Set-ScheduledTask -User with -Principal is an ambiguous parameter set' {
+        $e = @(Err { Set-ScheduledTask -TaskName x -User a -Principal (New-ScheduledTaskPrincipal -UserId a) })
+        $e[0].FullyQualifiedErrorId | Should -Be 'AmbiguousParameterSet,Set-ScheduledTask'
+    }
+    It 'Export-ScheduledTask with no name, or only a path, is HRESULT 0x80070057 (CimException, InvalidArgument)' {
+        foreach ($sb in { Export-ScheduledTask }, { Export-ScheduledTask -TaskPath '\nosuch-nitro\' }) {
+            $e = @(Err $sb)
+            $e.Count | Should -Be 1
+            $e[0].FullyQualifiedErrorId | Should -Be 'HRESULT 0x80070057,Export-ScheduledTask'
+            [string]$e[0].CategoryInfo.Category | Should -Be 'InvalidArgument'
+            $e[0].Exception.GetType().FullName | Should -Be 'Microsoft.Management.Infrastructure.CimException'
+            $e[0].TargetObject | Should -Be 'PS_ScheduledTask'
+            $e[0].Exception.Message.Trim() | Should -Be 'The parameter is incorrect.'
+        }
+    }
+    It 'Export-ScheduledTask of an unknown task or folder is HRESULT 0x80070002; a wildcard name is not expanded' {
+        foreach ($sb in { Export-ScheduledTask -TaskName nosuchtask-nitro }, { Export-ScheduledTask -TaskName nosuchtask-nitro -TaskPath '\nosuch-nitro\' }, { Export-ScheduledTask -TaskName 'nosuch*' }) {
+            $e = @(Err $sb)
+            $e.Count | Should -Be 1
+            $e[0].FullyQualifiedErrorId | Should -Be 'HRESULT 0x80070002,Export-ScheduledTask'
+            [string]$e[0].CategoryInfo.Category | Should -Be 'ObjectNotFound'
+            $e[0].Exception.Message.Trim() | Should -Be 'The system cannot find the file specified.'
+        }
+    }
+}
+
+Describe 'Set-ScheduledTask and Export-ScheduledTask round trip' {
+    AfterAll { Remove-TestTasks }
+    It 'Set-ScheduledTask -Action replaces the action; Get-ScheduledTask and schtasks /query /xml show it; the rest of the task is kept' -Skip:$skipRt {
+        $n = New-TestName
+        $null = Register-ScheduledTask -TaskName $n -Action (New-ScheduledTaskAction -Execute cmd.exe -Argument '/c echo one') -Description 'first desc'
+        $before = Get-ScheduledTask -TaskName $n
+        $r = Set-ScheduledTask -TaskName $n -Action (New-ScheduledTaskAction -Execute cmd.exe -Argument '/c echo two')
+        $r.psobject.TypeNames[0] | Should -Be "$NS/MSFT_ScheduledTask"
+        $r.TaskName | Should -Be $n
+        $t = Get-ScheduledTask -TaskName $n
+        @($t.Actions).Count | Should -Be 1
+        $t.Actions[0].Arguments | Should -Be '/c echo two'
+        $t.Description | Should -Be 'first desc'
+        $t.Author | Should -Be $before.Author
+        $t.Date | Should -Be $before.Date
+        ((& schtasks.exe /query /tn $n /xml) -join "`n") | Should -Match '<Arguments>/c echo two</Arguments>'
+    }
+    It 'Set-ScheduledTask -Trigger / -Settings / -User / -Principal change just that part (checked in the stored XML)' -Skip:$skipRt {
+        $n = New-TestName
+        $null = Register-ScheduledTask -TaskName $n -Action (New-ScheduledTaskAction -Execute cmd.exe -Argument '/c exit 0')
+        $null = Set-ScheduledTask -TaskName $n -Trigger (New-ScheduledTaskTrigger -Daily -At '2031-05-06 03:30:00' -DaysInterval 3)
+        $t = Get-ScheduledTask -TaskName $n
+        @($t.Triggers).Count | Should -Be 1
+        $t.Triggers[0].PSObject.TypeNames[0] | Should -Be "$NS/MSFT_TaskDailyTrigger"
+        $t.Triggers[0].DaysInterval | Should -Be 3
+        $t.Actions[0].Arguments | Should -Be '/c exit 0'
+        $null = Set-ScheduledTask -TaskName $n -Settings (New-ScheduledTaskSettingsSet -Hidden -Priority 5 -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2))
+        $t = Get-ScheduledTask -TaskName $n
+        $t.Settings.Hidden | Should -BeTrue
+        $t.Settings.Priority | Should -Be 5
+        $t.Settings.DisallowStartIfOnBatteries | Should -BeFalse
+        $t.Settings.ExecutionTimeLimit | Should -Be 'PT2H'
+        @($t.Triggers).Count | Should -Be 1
+        $null = Set-ScheduledTask -TaskName $n -User SYSTEM
+        $t = Get-ScheduledTask -TaskName $n
+        $t.Principal.UserId | Should -Be 'SYSTEM'
+        [string]$t.Principal.LogonType | Should -Be 'ServiceAccount'
+        $null = Set-ScheduledTask -TaskName $n -Principal (New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -RunLevel Highest -LogonType ServiceAccount)
+        $t = Get-ScheduledTask -TaskName $n
+        [string]$t.Principal.RunLevel | Should -Be 'Highest'
+        $x = (& schtasks.exe /query /tn $n /xml) -join "`n"
+        $x | Should -Match '<RunLevel>HighestAvailable</RunLevel>'
+        $x | Should -Match '<Hidden>true</Hidden>'
+        $x | Should -Match '<DaysInterval>3</DaysInterval>'
+    }
+    It 'Set-ScheduledTask -InputObject writes the whole edited definition back (also by pipeline)' -Skip:$skipRt {
+        $n = New-TestName
+        $null = Register-ScheduledTask -TaskName $n -Action (New-ScheduledTaskAction -Execute cmd.exe -Argument '/c echo one') -Description 'before'
+        $t = Get-ScheduledTask -TaskName $n
+        $t.Description = 'after'
+        $t.Actions[0].Arguments = '/c echo three'
+        $r = $t | Set-ScheduledTask
+        $r.Description | Should -Be 'after'
+        $g = Get-ScheduledTask -TaskName $n
+        $g.Description | Should -Be 'after'
+        $g.Actions[0].Arguments | Should -Be '/c echo three'
+        $g.Settings.Enabled | Should -BeTrue
+    }
+    It 'Set-ScheduledTask keeps what the module cannot write: a weekly trigger made by schtasks.exe survives -Action, -Settings and -User' -Skip:$skipRt {
+        $n = New-TestName
+        $null = & schtasks.exe /create /tn $n /tr 'cmd /c exit 0' /sc weekly /d MON /st 03:00 /f
+        $LASTEXITCODE | Should -Be 0
+        $null = Set-ScheduledTask -TaskName $n -Action (New-ScheduledTaskAction -Execute cmd.exe -Argument '/c exit 7')
+        $null = Set-ScheduledTask -TaskName $n -Settings (New-ScheduledTaskSettingsSet -Hidden)
+        $null = Set-ScheduledTask -TaskName $n -User SYSTEM
+        $x = (& schtasks.exe /query /tn $n /xml) -join "`n"
+        $x | Should -Match '<ScheduleByWeek>'
+        $x | Should -Match '<Monday\s*/>'
+        $x | Should -Match '<Arguments>/c exit 7</Arguments>'
+        $x | Should -Match '<Hidden>true</Hidden>'
+        $x | Should -Match '<UserId>(NT AUTHORITY\\)?SYSTEM</UserId>'
+        $t = Get-ScheduledTask -TaskName $n
+        @($t.Triggers).Count | Should -Be 1
+        $t.Triggers[0].PSObject.TypeNames[0] | Should -Be "$NS/MSFT_TaskWeeklyTrigger"
+        [int]$t.Triggers[0].DaysOfWeek | Should -Be 2
+        # the object set writes the definition from the object, which cannot carry a weekly trigger back: refused, nothing changes
+        $e = @(Err { $t | Set-ScheduledTask })
+        $e[0].FullyQualifiedErrorId | Should -Be 'TriggerTypeNotSupported,Set-ScheduledTask'
+        ((& schtasks.exe /query /tn $n /xml) -join "`n") | Should -Match '<ScheduleByWeek>'
+    }
+    It 'Set-ScheduledTask of an unknown task is HRESULT 0x80070002 and registers nothing' -Skip:$skipRt {
+        $e = @(Err { Set-ScheduledTask -TaskName nosuchtask-nitro -Action (New-ScheduledTaskAction -Execute cmd.exe) })
+        $e[0].FullyQualifiedErrorId | Should -Be 'HRESULT 0x80070002,Set-ScheduledTask'
+        @(Ok { Get-ScheduledTask -TaskName nosuchtask-nitro }).Count | Should -Be 0
+    }
+    It 'Set-ScheduledTask keeps the Enabled state set by Disable-/Enable-ScheduledTask' -Skip:$skipRt {
+        $n = New-TestName
+        $null = Register-ScheduledTask -TaskName $n -Action (New-ScheduledTaskAction -Execute cmd.exe)
+        $null = Disable-ScheduledTask -TaskName $n
+        $t = Get-ScheduledTask -TaskName $n
+        $t.Settings.Enabled = $false
+        $null = $t | Set-ScheduledTask
+        [string](Get-ScheduledTask -TaskName $n).State | Should -Be 'Disabled'
+        $null = Enable-ScheduledTask -TaskName $n
+        [string](Get-ScheduledTask -TaskName $n).State | Should -Be 'Ready'
+    }
+    It 'Export-ScheduledTask -TaskName is the stored definition: the text schtasks /query /xml prints' -Skip:$skipRt {
+        $n = New-TestName
+        $null = Register-ScheduledTask -TaskName $n -Action (New-ScheduledTaskAction -Execute cmd.exe -Argument '/c exit 0') -Description 'to export'
+        $x = Export-ScheduledTask -TaskName $n
+        $x | Should -BeOfType [string]
+        @($x).Count | Should -Be 1
+        $x | Should -Match '<Description>to export</Description>'
+        $q = ((& schtasks.exe /query /tn $n /xml) -join "`n").Trim()
+        ($x -replace "`r`n", "`n").Trim() | Should -Be ($q -replace "`r`n", "`n")
+        (Export-ScheduledTask -TaskName $n -TaskPath '\') | Should -Be $x
+        $e = @(Err { Export-ScheduledTask -TaskName $n -TaskPath '\\' })
+        $e[0].FullyQualifiedErrorId | Should -Be 'HRESULT 0x8007007B,Export-ScheduledTask'
+    }
+    It 'Export-ScheduledTask -InputObject writes the object as indented UTF-16 task XML (also by pipeline) that Register-ScheduledTask -Xml accepts' -Skip:$skipRt {
+        $n = New-TestName; $n2 = New-TestName
+        $null = Register-ScheduledTask -TaskName $n -Action (New-ScheduledTaskAction -Execute cmd.exe -Argument '/c exit 0') -Description 'object export' `
+            -Trigger (New-ScheduledTaskTrigger -Daily -At '2031-05-06 03:30:00')
+        $t = Get-ScheduledTask -TaskName $n
+        $x = Export-ScheduledTask -InputObject $t
+        $x | Should -Be ($t | Export-ScheduledTask)
+        $x.StartsWith("<?xml version=`"1.0`" encoding=`"UTF-16`"?>`r`n<Task version=`"1.3`" xmlns=`"http://schemas.microsoft.com/windows/2004/02/mit/task`">`r`n  <RegistrationInfo>") | Should -BeTrue
+        $x | Should -Match '<URI>\\NitroPester-[0-9a-f]{8}</URI>\r\n    <SecurityDescriptor></SecurityDescriptor>\r\n  </RegistrationInfo>'
+        $x | Should -Match '<Triggers>\r\n    <CalendarTrigger>'
+        $x | Should -Not -Match '<Actions Context='
+        $x.EndsWith('</Task>') | Should -BeTrue
+        $x | Should -Match '<Command>cmd.exe</Command>\r\n      <Arguments>/c exit 0</Arguments>'
+        $null = Register-ScheduledTask -TaskName $n2 -Xml $x
+        $c = Get-ScheduledTask -TaskName $n2
+        $c.Actions[0].Arguments | Should -Be '/c exit 0'
+        $c.Description | Should -Be 'object export'
+        @($c.Triggers).Count | Should -Be 1
+    }
+    It 'Export-ScheduledTask -InputObject of a Win8-level task writes version 1.4 and of a Vista/Win7 task 1.3 (measured)' {
+        $s = New-ScheduledTaskSettingsSet -Compatibility Win8
+        ([xml](Export-ScheduledTask -InputObject (New-ScheduledTask -Action (New-ScheduledTaskAction -Execute cmd.exe) -Settings $s -Principal (New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount)))).Task.version | Should -Be '1.4'
+        $s = New-ScheduledTaskSettingsSet -Compatibility Vista
+        ([xml](Export-ScheduledTask -InputObject (New-ScheduledTask -Action (New-ScheduledTaskAction -Execute cmd.exe) -Settings $s -Principal (New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount)))).Task.version | Should -Be '1.3'
+    }
+}

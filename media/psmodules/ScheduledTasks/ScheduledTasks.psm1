@@ -506,21 +506,37 @@ function Add-TSOptional {
 
 # The task XML of Actions/Triggers/Principal/Settings objects (Windows-shaped objects, built by this module or read back)
 function ConvertTo-TSTaskXml {
-    param($Actions, $Triggers, $Principal, $Settings, [string]$Description, [string]$Author, [string]$Uri, [string]$Source, [string]$Documentation)
+    param($Actions, $Triggers, $Principal, $Settings, [string]$Description, [string]$Author, [string]$Uri, [string]$Source, [string]$Documentation,
+        [string]$Date, [string]$Version, [string]$SecurityDescriptor, [switch]$Export)
     if ($null -eq $Settings) { $Settings = New-TSDefaultSettings }
     $doc = [System.Xml.XmlDocument]::new()
     $null = $doc.AppendChild($doc.CreateXmlDeclaration('1.0', 'UTF-16', $null))
     $ver = switch ([int]$Settings.Compatibility) { 1 { '1.1' } 2 { '1.2' } 3 { '1.3' } 4 { '1.4' } default { '1.2' } }
+    # Export-ScheduledTask of a task object: Windows writes 1.3 for the Vista and Win7 levels and 1.4 for Win8 (measured)
+    if ($Export) { $ver = if ([int]$Settings.Compatibility -ge 4) { '1.4' } else { '1.3' } }
     $task = Add-TSElement $doc $doc 'Task'
     $task.SetAttribute('version', $ver)
 
     $ri = Add-TSElement $doc $task 'RegistrationInfo'
-    Add-TSOptional $doc $ri 'Author' $Author
-    Add-TSOptional $doc $ri 'Date' ([datetime]::Now.ToString("yyyy-MM-dd'T'HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture))
-    Add-TSOptional $doc $ri 'Description' $Description
-    Add-TSOptional $doc $ri 'Source' $Source
-    Add-TSOptional $doc $ri 'Documentation' $Documentation
-    Add-TSOptional $doc $ri 'URI' $Uri
+    if ($Export) {
+        # the order Export-ScheduledTask uses for an object (measured on 75 tasks): Source, Author, Version, Description, URI, SecurityDescriptor
+        Add-TSOptional $doc $ri 'Source' $Source
+        Add-TSOptional $doc $ri 'Date' $Date
+        Add-TSOptional $doc $ri 'Author' $Author
+        Add-TSOptional $doc $ri 'Version' $Version
+        Add-TSOptional $doc $ri 'Description' $Description
+        Add-TSOptional $doc $ri 'Documentation' $Documentation
+        Add-TSOptional $doc $ri 'URI' $Uri
+        $sd = Add-TSElement $doc $ri 'SecurityDescriptor' $SecurityDescriptor
+        $sd.IsEmpty = $false    # Windows writes <SecurityDescriptor></SecurityDescriptor>
+    } else {
+        Add-TSOptional $doc $ri 'Author' $Author
+        Add-TSOptional $doc $ri 'Date' $(if ($Date) { $Date } else { [datetime]::Now.ToString("yyyy-MM-dd'T'HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture) })
+        Add-TSOptional $doc $ri 'Description' $Description
+        Add-TSOptional $doc $ri 'Source' $Source
+        Add-TSOptional $doc $ri 'Documentation' $Documentation
+        Add-TSOptional $doc $ri 'URI' $Uri
+    }
 
     $trigList = @(@($Triggers) | Where-Object { $null -ne $_ })
     $actList = @(@($Actions) | Where-Object { $null -ne $_ })
@@ -599,6 +615,10 @@ function ConvertTo-TSTaskXml {
     $null = Add-TSElement $doc $s 'Enabled' ([bool]$Settings.Enabled)
     $null = Add-TSElement $doc $s 'Hidden' ([bool]$Settings.Hidden)
     $null = Add-TSElement $doc $s 'RunOnlyIfIdle' ([bool]$Settings.RunOnlyIfIdle)
+    if ($Export) {
+        $null = Add-TSElement $doc $s 'DisallowStartOnRemoteAppSession' ([bool]$Settings.DisallowStartOnRemoteAppSession)
+        $null = Add-TSElement $doc $s 'UseUnifiedSchedulingEngine' ([bool]$Settings.UseUnifiedSchedulingEngine)
+    }
     $null = Add-TSElement $doc $s 'WakeToRun' ([bool]$Settings.WakeToRun)
     Add-TSOptional $doc $s 'ExecutionTimeLimit' $Settings.ExecutionTimeLimit
     $null = Add-TSElement $doc $s 'Priority' ([int]$Settings.Priority)
@@ -614,11 +634,13 @@ function ConvertTo-TSTaskXml {
         Add-TSOptional $doc $n 'Name' $net.Name
         Add-TSOptional $doc $n 'Id' $net.Id
     }
-    $null = Add-TSElement $doc $s 'DisallowStartOnRemoteAppSession' ([bool]$Settings.DisallowStartOnRemoteAppSession)
-    $null = Add-TSElement $doc $s 'UseUnifiedSchedulingEngine' ([bool]$Settings.UseUnifiedSchedulingEngine)
+    if (-not $Export) {
+        $null = Add-TSElement $doc $s 'DisallowStartOnRemoteAppSession' ([bool]$Settings.DisallowStartOnRemoteAppSession)
+        $null = Add-TSElement $doc $s 'UseUnifiedSchedulingEngine' ([bool]$Settings.UseUnifiedSchedulingEngine)
+    }
 
     $as = Add-TSElement $doc $task 'Actions'
-    $as.SetAttribute('Context', $pid_)
+    if (-not $Export) { $as.SetAttribute('Context', $pid_) }
     foreach ($a in $actList) {
         if ($null -ne ($a.PSObject.Properties['Execute'])) {
             $e = Add-TSElement $doc $as 'Exec'
@@ -632,6 +654,16 @@ function ConvertTo-TSTaskXml {
             $null = Add-TSElement $doc $e 'ClassId' $a.ClassId
             Add-TSOptional $doc $e 'Data' $a.Data
         }
+    }
+    if ($Export) {
+        # the text Windows hands out: indented two spaces, CRLF line ends, UTF-16 declaration, no trailing newline
+        $sw = [System.IO.StringWriter]::new()
+        $ws = [System.Xml.XmlWriterSettings]::new()
+        $ws.Indent = $true; $ws.IndentChars = '  '; $ws.NewLineChars = "`r`n"; $ws.NewLineHandling = 'Replace'; $ws.OmitXmlDeclaration = $true
+        $xw = [System.Xml.XmlWriter]::Create($sw, $ws)
+        $doc.DocumentElement.WriteTo($xw)
+        $xw.Flush(); $xw.Close()
+        return '<?xml version="1.0" encoding="UTF-16"?>' + "`r`n" + $sw.ToString()
     }
     $doc.OuterXml
 }
@@ -1263,6 +1295,169 @@ function Register-ScheduledTask {
         $dropped = @(Get-TSDroppedItems $xml ([string]$com.Xml))
         if ($dropped.Count -gt 0) { $PSCmdlet.WriteWarning("The task service did not keep these parts of the definition: $($dropped -join ', ').") }
         ConvertTo-TSTaskObject $com $folder
+    }
+}
+
+# The XML of the definition a task object describes (Export-ScheduledTask -InputObject)
+function ConvertTo-TSExportXml {
+    param($Task)
+    ConvertTo-TSTaskXml -Actions $Task.Actions -Triggers $Task.Triggers -Principal $Task.Principal -Settings $Task.Settings `
+        -Description $Task.Description -Author $Task.Author -Uri $Task.URI -Source $Task.Source -Documentation $Task.Documentation `
+        -Date $Task.Date -Version $Task.Version -SecurityDescriptor $Task.SecurityDescriptor -Export
+}
+
+function Export-ScheduledTask {
+    [CmdletBinding(DefaultParameterSetName = 'Name')]
+    [OutputType([string])]
+    param(
+        [Parameter(ParameterSetName = 'Name', Position = 0)]
+        [ValidateNotNullOrEmpty()][string]$TaskName,
+
+        [Parameter(ParameterSetName = 'Name', Position = 1)]
+        [ValidateNotNullOrEmpty()][string]$TaskPath,
+
+        [Parameter(ParameterSetName = 'Object', Mandatory = $true, Position = 0, ValueFromPipeline = $true)]
+        [PSTypeName('Microsoft.Management.Infrastructure.CimInstance#MSFT_ScheduledTask')][ValidateNotNullOrEmpty()][object]$InputObject,
+
+        [Alias('Session')][object[]]$CimSession,
+        [int]$ThrottleLimit,
+        [switch]$AsJob
+    )
+    process {
+        if (Test-TSAsJob $PSCmdlet $AsJob) { return }
+        if ($PSCmdlet.ParameterSetName -eq 'Object') {
+            # a task object is written out from its properties, not from the stored definition (Windows does the same: the two texts differ)
+            try { ConvertTo-TSExportXml $InputObject } catch { $PSCmdlet.WriteError((New-TSHresultError ([int]0x80070057) 'The parameter is incorrect.')) }
+            return
+        }
+        # no name (a path alone included) is an invalid argument on Windows; a name is exact, wildcards are not expanded
+        if (-not $PSBoundParameters.ContainsKey('TaskName')) { $PSCmdlet.WriteError((New-TSHresultError ([int]0x80070057) 'The parameter is incorrect.')); return }
+        $path = if ($PSBoundParameters.ContainsKey('TaskPath')) { $TaskPath } else { '\' }
+        if ($path -match '\\\\') { $PSCmdlet.WriteError((New-TSHresultError ([int]0x8007007B) 'The filename, directory name, or volume label syntax is incorrect.')); return }
+        $com = Get-TSTask $PSCmdlet $TaskName $path
+        if ($null -eq $com) { return }
+        [string]$com.Xml
+    }
+}
+
+# Set-ScheduledTask: the task's stored definition with the parts the caller names replaced (or, for -InputObject, the whole
+# definition the object describes), written back with TASK_UPDATE. Returns the task as it reads after the update.
+function Set-ScheduledTask {
+    [CmdletBinding(DefaultParameterSetName = 'User')]
+    [OutputType('Microsoft.Management.Infrastructure.CimInstance#MSFT_ScheduledTask')]
+    param(
+        [Parameter(ParameterSetName = 'User', Mandatory = $true, Position = 0)]
+        [Parameter(ParameterSetName = 'Principal', Mandatory = $true, Position = 0)]
+        [ValidateNotNullOrEmpty()][string]$TaskName,
+
+        [Parameter(ParameterSetName = 'User', Position = 1)]
+        [Parameter(ParameterSetName = 'Principal', Position = 1)]
+        [ValidateNotNullOrEmpty()][string]$TaskPath,
+
+        [Parameter(ParameterSetName = 'User', Position = 2)]
+        [Parameter(ParameterSetName = 'Principal', Position = 2)]
+        [ValidateNotNullOrEmpty()][object[]]$Action,
+
+        [Parameter(ParameterSetName = 'User', Position = 3)]
+        [Parameter(ParameterSetName = 'Principal', Position = 3)]
+        [ValidateNotNullOrEmpty()][object[]]$Trigger,
+
+        [Parameter(ParameterSetName = 'User', Position = 4)]
+        [Parameter(ParameterSetName = 'Principal', Position = 4)]
+        [ValidateNotNullOrEmpty()][object]$Settings,
+
+        [Parameter(ParameterSetName = 'User', Position = 5)]
+        [Parameter(ParameterSetName = 'Object', Position = 2)]
+        [ValidateNotNullOrEmpty()][string]$User,
+
+        [Parameter(ParameterSetName = 'User', Position = 6)]
+        [Parameter(ParameterSetName = 'Object', Position = 1)]
+        [ValidateNotNullOrEmpty()][string]$Password,
+
+        [Parameter(ParameterSetName = 'Principal', Position = 5)]
+        [ValidateNotNullOrEmpty()][object]$Principal,
+
+        [Parameter(ParameterSetName = 'Object', Mandatory = $true, Position = 0, ValueFromPipeline = $true)]
+        [PSTypeName('Microsoft.Management.Infrastructure.CimInstance#MSFT_ScheduledTask')][ValidateNotNullOrEmpty()][object]$InputObject,
+
+        [Alias('Session')][object[]]$CimSession,
+        [int]$ThrottleLimit,
+        [switch]$AsJob
+    )
+    process {
+        if (Test-TSAsJob $PSCmdlet $AsJob) { return }
+        $set = $PSCmdlet.ParameterSetName
+        if ($set -eq 'Object') { $name = [string]$InputObject.TaskName; $path = [string]$InputObject.TaskPath }
+        else { $name = $TaskName; $path = if ($PSBoundParameters.ContainsKey('TaskPath')) { $TaskPath } else { '\' } }
+        $com = Get-TSTask $PSCmdlet $name $path
+        if ($null -eq $com) { return }
+        $folder = Format-TSTaskPath $path
+        $cur = ConvertFrom-TSTaskXml ([string]$com.Xml)
+
+        $uid = $null; $pw = $null
+        if ($PSBoundParameters.ContainsKey('Password')) { $pw = $Password }
+        $pr = $cur.Principal
+        if ($set -eq 'Object') {
+            $pr = $InputObject.Principal
+            foreach ($t in @(@($InputObject.Triggers) | Where-Object { $null -ne $_ })) {
+                $k = Get-TSTriggerKind $t
+                if ($k -notin 'Time', 'Daily', 'Boot', 'Logon', 'Registration') { Stop-TSUnsupported $PSCmdlet "A trigger of kind '$k'" }
+            }
+        } elseif ($PSBoundParameters.ContainsKey('Principal')) { $pr = $Principal }
+        if ($PSBoundParameters.ContainsKey('Trigger')) {
+            foreach ($t in @(@($Trigger) | Where-Object { $null -ne $_ })) {
+                $k = Get-TSTriggerKind $t
+                if ($k -notin 'Time', 'Daily', 'Boot', 'Logon', 'Registration') { Stop-TSUnsupported $PSCmdlet "A trigger of kind '$k'" }
+            }
+        }
+        if ($PSBoundParameters.ContainsKey('User')) {
+            # -User replaces the principal's account: with a password the task runs whether or not the user is logged on
+            $lt = if ($pw) { 1 } elseif ($User -in $script:ServiceAccounts) { 5 } else { 3 }
+            $pr = New-TSPrincipal $pr.RunLevel (TSEnum 'LogonTypeEnum' $lt) $pr.ProcessTokenSidType $null $null $pr.Id $User $pr.RequiredPrivilege
+        }
+        $lt = [int]$pr.LogonType
+        if ($pr.GroupId) { $uid = $pr.GroupId } elseif ($pr.UserId) { $uid = $pr.UserId }
+
+        if ($set -eq 'Object') {
+            # the object is the new definition
+            $xml = ConvertTo-TSTaskXml -Actions $InputObject.Actions -Triggers $InputObject.Triggers -Principal $pr -Settings $InputObject.Settings `
+                -Description $InputObject.Description -Author $InputObject.Author -Source $InputObject.Source -Documentation $InputObject.Documentation -Date $cur.Date -Uri $null
+        } else {
+            # the stored definition with only the named parts replaced: whatever else it holds (trigger kinds this module cannot write,
+            # settings it does not model) stays as the task service has it
+            $stored = [System.Xml.XmlDocument]::new()
+            $stored.LoadXml([string]$com.Xml)
+            $gen = [System.Xml.XmlDocument]::new()
+            $gen.LoadXml((ConvertTo-TSTaskXml -Actions $(if ($PSBoundParameters.ContainsKey('Action')) { $Action } else { $cur.Actions }) `
+                -Triggers $(if ($PSBoundParameters.ContainsKey('Trigger')) { $Trigger } else { @() }) -Principal $pr `
+                -Settings $(if ($PSBoundParameters.ContainsKey('Settings')) { $Settings } else { $null }) -Description $cur.Description -Author $cur.Author -Uri $null))
+            $root = $stored.DocumentElement
+            $splice = {
+                param([string]$Name)
+                $n = $gen.DocumentElement.ChildNodes | Where-Object { $_.LocalName -eq $Name } | Select-Object -First 1
+                $o = $root.ChildNodes | Where-Object { $_.LocalName -eq $Name } | Select-Object -First 1
+                if ($null -eq $n) { if ($null -ne $o) { $null = $root.RemoveChild($o) }; return }
+                $imp = $stored.ImportNode($n, $true)
+                if ($null -ne $o) { $null = $root.ReplaceChild($imp, $o) } else { $null = $root.AppendChild($imp) }
+            }
+            if ($PSBoundParameters.ContainsKey('Action')) { & $splice 'Actions' }
+            if ($PSBoundParameters.ContainsKey('Trigger')) { & $splice 'Triggers' }
+            if ($PSBoundParameters.ContainsKey('Settings')) {
+                & $splice 'Settings'
+                $root.SetAttribute('version', $gen.DocumentElement.GetAttribute('version'))
+            }
+            if ($PSBoundParameters.ContainsKey('Principal') -or $PSBoundParameters.ContainsKey('User')) { & $splice 'Principals' }
+            $xml = $stored.OuterXml
+        }
+        try {
+            $new = (Get-TSService).GetFolder('\').RegisterTask((Format-TSFolder $path).TrimEnd('\') + '\' + $name, $xml, 4, $uid, $pw, $lt, $null)
+        } catch {
+            Write-TSComError $PSCmdlet $_
+            return
+        }
+        $dropped = @(Get-TSDroppedItems $xml ([string]$new.Xml))
+        if ($dropped.Count -gt 0) { $PSCmdlet.WriteWarning("The task service did not keep these parts of the definition: $($dropped -join ', ').") }
+        ConvertTo-TSTaskObject $new $folder
     }
 }
 

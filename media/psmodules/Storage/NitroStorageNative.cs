@@ -488,6 +488,16 @@ namespace Nitro.Storage
             return res;
         }
 
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool SetVolumeLabelW(string root, string label);
+
+        // SetVolumeLabel on a volume (by its drive letter when it has one, else its volume GUID path); returns the Win32 error, 0 = done
+        public static int SetLabel(string volumePath, object driveLetter, string label)
+        {
+            char c = driveLetter is char ? (char)driveLetter : '\0';
+            string root = c != '\0' ? c + ":\\" : volumePath;
+            return SetVolumeLabelW(root, label) ? 0 : Marshal.GetLastWin32Error();
+        }
+
         // the volume that holds a file path (GetVolumePathName), as a volume GUID path
         public static string VolumeOfFile(string file)
         {
@@ -861,4 +871,10 @@ namespace Nitro.Storage
             return Math.Round(size, 2, MidpointRounding.ToEven).ToString(CultureInfo.InvariantCulture) + " " + (i < units.Length ? units[i] : "");
         }
     }
+}
+
+// The enum type Set-Volume binds -DedupMode to, in the namespace the Windows module generates it in.
+namespace Microsoft.PowerShell.Cmdletization.GeneratedTypes.SetVolume
+{
+    public enum DedupMode : uint { Disabled = 0, GeneralPurpose = 1, HyperV = 2, Backup = 3, NotAvailable = 4 }
 }

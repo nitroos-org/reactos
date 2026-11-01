@@ -578,3 +578,322 @@ Describe 'Get-NetAdapterStatistics' {
 }
 
 # the listener and sockets die with the test process
+
+# ======================================================================================== write side
+# New-NetIPAddress, Remove-NetIPAddress, Set-NetIPInterface (NetTCPIP) and Set-DnsClientServerAddress (DnsClient).
+# 'surface' and 'validation' rows are read-only (-WhatIf, rejected input) and also run on the Windows oracle against the real
+# modules (NNET_ORACLE=1). 'round trip' rows change the guest's network configuration, check the result with the Get- cmdlets AND
+# with ipconfig / netsh / route print / the registry, restore DHCP at the end, and are skipped on the oracle and when
+# NNET_NOROUNDTRIP=1.
+$script:SkipRt = $script:Oracle -or ($env:NNET_NOROUNDTRIP -eq '1')
+
+# -WhatIf text goes to the host, not to a stream: run the command in a child pwsh and read its output
+function Invoke-Child([string]$Code) {
+    $pw = Join-Path $PSHOME 'pwsh.exe'
+    @(& $pw -NoLogo -NoProfile -NonInteractive -Command $Code 2>&1 | ForEach-Object { "$_".TrimEnd() })
+}
+function Cmeta($name) { [System.Management.Automation.CommandMetadata]::new((Get-Command $name)) }
+function Pinfo($cmd, $param) { (Get-Command $cmd).Parameters[$param] }
+function PSetInfo($cmd, $param, $set) { (Pinfo $cmd $param).ParameterSets[$set] }
+
+Describe 'write cmdlets: surface (Windows parameter model)' {
+    It 'exports <Name> from <Module>' -TestCases @(
+        @{ Name = 'New-NetIPAddress'; Module = 'NetTCPIP' }, @{ Name = 'Remove-NetIPAddress'; Module = 'NetTCPIP' },
+        @{ Name = 'Set-NetIPInterface'; Module = 'NetTCPIP' }, @{ Name = 'Set-DnsClientServerAddress'; Module = 'DnsClient' }) {
+        param($Name, $Module)
+        (Get-Command $Name).Source | Should -Be $Module
+    }
+    It 'has the default sets and ShouldProcess levels of Windows: <Name>' -TestCases @(
+        @{ Name = 'New-NetIPAddress'; Set = 'ByInterfaceAlias'; Impact = 'Medium' }, @{ Name = 'Remove-NetIPAddress'; Set = 'Query (cdxml)'; Impact = 'High' },
+        @{ Name = 'Set-NetIPInterface'; Set = 'ByName'; Impact = 'Medium' }, @{ Name = 'Set-DnsClientServerAddress'; Set = 'ByAlias'; Impact = 'Low' }) {
+        param($Name, $Set, $Impact)
+        (Get-Command $Name).DefaultParameterSet | Should -Be $Set
+        (Cmeta $Name).SupportsShouldProcess | Should -BeTrue
+        [string](Cmeta $Name).ConfirmImpact | Should -Be $Impact
+    }
+    It 'New-NetIPAddress: mandatory IPAddress (position 0, alias LocalAddress) and interface parameters per set' {
+        (PSetInfo New-NetIPAddress IPAddress ByInterfaceAlias).IsMandatory | Should -BeTrue
+        (PSetInfo New-NetIPAddress IPAddress ByInterfaceAlias).Position | Should -Be 0
+        (PSetInfo New-NetIPAddress IPAddress ByInterfaceIndex).IsMandatory | Should -BeTrue
+        (Pinfo New-NetIPAddress IPAddress).Aliases | Should -Contain 'LocalAddress'
+        (PSetInfo New-NetIPAddress InterfaceAlias ByInterfaceAlias).IsMandatory | Should -BeTrue
+        (Pinfo New-NetIPAddress InterfaceAlias).Aliases | Should -Contain 'ifAlias'
+        (Pinfo New-NetIPAddress InterfaceAlias).ParameterSets.Keys | Should -Not -Contain 'ByInterfaceIndex'
+        (PSetInfo New-NetIPAddress InterfaceIndex ByInterfaceIndex).IsMandatory | Should -BeTrue
+        (Pinfo New-NetIPAddress InterfaceIndex).Aliases | Should -Contain 'ifIndex'
+        (Pinfo New-NetIPAddress InterfaceIndex).ParameterType.FullName | Should -Be 'System.UInt32'
+    }
+    It 'New-NetIPAddress: parameter types' {
+        (Pinfo New-NetIPAddress PrefixLength).ParameterType.FullName | Should -Be 'System.Byte'
+        (Pinfo New-NetIPAddress DefaultGateway).ParameterType.FullName | Should -Be 'System.String'
+        (Pinfo New-NetIPAddress SkipAsSource).ParameterType.FullName | Should -Be 'System.Boolean'
+        (Pinfo New-NetIPAddress ValidLifetime).ParameterType.FullName | Should -Be 'System.TimeSpan'
+        (Pinfo New-NetIPAddress PreferredLifetime).ParameterType.FullName | Should -Be 'System.TimeSpan'
+        (Pinfo New-NetIPAddress PolicyStore).ParameterType.FullName | Should -Be 'System.String'
+        (Pinfo New-NetIPAddress AddressFamily).ParameterType.FullName | Should -Be 'Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetIPAddress.AddressFamily'
+        (Pinfo New-NetIPAddress Type).ParameterType.FullName | Should -Be 'Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetIPAddress.Type'
+    }
+    It 'Remove-NetIPAddress: Query and InputObject sets, array filters, PassThru' {
+        $c = Get-Command Remove-NetIPAddress
+        @($c.ParameterSets.Name | Sort-Object) | Should -Be @('InputObject (cdxml)', 'Query (cdxml)')
+        (PSetInfo Remove-NetIPAddress IPAddress 'Query (cdxml)').Position | Should -Be 0
+        (Pinfo Remove-NetIPAddress IPAddress).ParameterType.FullName | Should -Be 'System.String[]'
+        (Pinfo Remove-NetIPAddress InterfaceIndex).ParameterType.FullName | Should -Be 'System.UInt32[]'
+        (Pinfo Remove-NetIPAddress PrefixLength).ParameterType.FullName | Should -Be 'System.Byte[]'
+        (PSetInfo Remove-NetIPAddress InputObject 'InputObject (cdxml)').IsMandatory | Should -BeTrue
+        (PSetInfo Remove-NetIPAddress InputObject 'InputObject (cdxml)').ValueFromPipeline | Should -BeTrue
+        (Pinfo Remove-NetIPAddress InputObject).ParameterType.FullName | Should -BeIn @('System.Object[]', 'Microsoft.Management.Infrastructure.CimInstance[]')
+        $c.Parameters.Keys | Should -Contain 'PassThru'
+        $c.Parameters.Keys | Should -Contain 'DefaultGateway'
+    }
+    It 'Set-NetIPInterface: ByName and InputObject sets, the Dhcp enum, PassThru' {
+        $c = Get-Command Set-NetIPInterface
+        @($c.ParameterSets.Name | Sort-Object) | Should -Be @('ByName', 'InputObject (cdxml)')
+        (PSetInfo Set-NetIPInterface InterfaceAlias ByName).Position | Should -Be 0
+        (Pinfo Set-NetIPInterface InterfaceAlias).ParameterType.FullName | Should -Be 'System.String[]'
+        (Pinfo Set-NetIPInterface Dhcp).ParameterType.FullName | Should -Be 'Microsoft.PowerShell.Cmdletization.GeneratedTypes.NetIPInterface.Dhcp'
+        @([enum]::GetNames((Pinfo Set-NetIPInterface Dhcp).ParameterType)) | Should -Be @('Disabled', 'Enabled')
+        (Pinfo Set-NetIPInterface InterfaceMetric).ParameterType.FullName | Should -Be 'System.UInt32'
+        (Pinfo Set-NetIPInterface BaseReachableTimeMs).Aliases | Should -Contain 'BaseReachableTime'
+        $c.Parameters.Keys | Should -Contain 'PassThru'
+        (PSetInfo Set-NetIPInterface InputObject 'InputObject (cdxml)').IsMandatory | Should -BeTrue
+    }
+    It 'Set-DnsClientServerAddress: ByAlias, ByName and InputObject sets with the Windows aliases' {
+        $c = Get-Command Set-DnsClientServerAddress
+        @($c.ParameterSets.Name | Sort-Object) | Should -Be @('ByAlias', 'ByName', 'InputObject (cdxml)')
+        (PSetInfo Set-DnsClientServerAddress InterfaceAlias ByAlias).IsMandatory | Should -BeTrue
+        (PSetInfo Set-DnsClientServerAddress InterfaceAlias ByAlias).Position | Should -Be 0
+        (PSetInfo Set-DnsClientServerAddress InterfaceIndex ByName).IsMandatory | Should -BeTrue
+        (PSetInfo Set-DnsClientServerAddress InterfaceIndex ByName).ValueFromPipeline | Should -BeTrue
+        (Pinfo Set-DnsClientServerAddress ServerAddresses).Aliases | Should -Contain 'Addresses'
+        (Pinfo Set-DnsClientServerAddress ResetServerAddresses).Aliases | Should -Contain 'ResetAddresses'
+        (Pinfo Set-DnsClientServerAddress ServerAddresses).ParameterType.FullName | Should -Be 'System.String[]'
+        (Pinfo Set-DnsClientServerAddress Validate).ParameterType.FullName | Should -Be 'System.Management.Automation.SwitchParameter'
+        $c.Parameters.Keys | Should -Contain 'PassThru'
+    }
+}
+
+Describe 'write cmdlets: validation and -WhatIf (read-only, Windows texts)' {
+    BeforeAll {
+        $script:wi = [uint32]$script:Adapter.ifIndex
+        $script:wa = $script:Adapter.Name
+        $script:v4 = @(Get-NetIPAddress -InterfaceIndex $script:wi -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -ne '0.0.0.0' } | Select-Object -First 1)
+    }
+    It 'New-NetIPAddress without an interface is a missing-mandatory-parameter error' {
+        $e = @(Err { New-NetIPAddress -IPAddress 192.0.2.77 -PrefixLength 24 -WhatIf })
+        $e[0].FullyQualifiedErrorId | Should -Be 'MissingMandatoryParameter,New-NetIPAddress'
+        $e[0].Exception.Message | Should -Match 'missing mandatory parameters: InterfaceAlias'
+    }
+    It 'New-NetIPAddress rejects a bad address and an unknown interface with Windows System Error 87' {
+        $e = @(Err { New-NetIPAddress -IPAddress notanip -InterfaceAlias $script:wa -WhatIf })
+        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 87,New-NetIPAddress'
+        [string]$e[0].CategoryInfo.Category | Should -Be 'InvalidArgument'
+        $e[0].Exception.Message.Trim() | Should -Be 'Invalid parameter IPv4Address notanip'
+        $e[0].Exception.GetType().FullName | Should -Be 'Microsoft.Management.Infrastructure.CimException'
+        $e[0].TargetObject | Should -Be 'MSFT_NetIPAddress'
+        $e = @(Err { New-NetIPAddress -IPAddress 192.0.2.77 -PrefixLength 24 -InterfaceAlias nosuchif -WhatIf })
+        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 87,New-NetIPAddress'
+        $e[0].Exception.Message.Trim() | Should -Be 'Invalid parameter InterfaceAlias nosuchif'
+    }
+    It 'Remove-NetIPAddress reports an unknown address like Get-NetIPAddress does' {
+        $e = @(Err { Remove-NetIPAddress -IPAddress 192.0.2.99 -Confirm:$false -WhatIf })
+        $e[0].FullyQualifiedErrorId | Should -Be 'CmdletizationQuery_NotFound_IPAddress,Remove-NetIPAddress'
+        [string]$e[0].CategoryInfo.Category | Should -Be 'ObjectNotFound'
+        $e[0].TargetObject | Should -Be '192.0.2.99'
+        $e[0].Exception.Message | Should -Be "No MSFT_NetIPAddress objects found with property 'IPAddress' equal to '192.0.2.99'.  Verify the value of the property and retry."
+        $e = @(Err { Remove-NetIPAddress -IPAddress 192.0.2.99 -InterfaceAlias $script:wa -Confirm:$false -WhatIf })
+        $e[0].FullyQualifiedErrorId | Should -Be 'CmdletizationQuery_NotFound,Remove-NetIPAddress'
+        $e[0].Exception.Message | Should -Match '^No matching MSFT_NetIPAddress objects found by CIM query'
+    }
+    It 'Set-NetIPInterface reports an unknown alias and a bad enum value' {
+        $e = @(Err { Set-NetIPInterface -InterfaceAlias nosuchif -Dhcp Disabled -WhatIf })
+        $e[0].FullyQualifiedErrorId | Should -Be 'CmdletizationQuery_NotFound_InterfaceAlias,Set-NetIPInterface'
+        $e[0].TargetObject | Should -Be 'nosuchif'
+        $e = @(Err { Set-NetIPInterface -InterfaceAlias $script:wa -Dhcp Maybe -WhatIf })
+        $e[0].FullyQualifiedErrorId | Should -Be 'ParameterArgumentTransformationError,Set-NetIPInterface'
+        [string]$e[0].CategoryInfo.Category | Should -Be 'InvalidData'
+    }
+    It 'Set-DnsClientServerAddress reports an unknown alias, and -ServerAddresses with -ResetServerAddresses' {
+        $e = @(Err { Set-DnsClientServerAddress -InterfaceAlias nosuchif -ServerAddresses 192.0.2.1 -WhatIf })
+        $e[0].FullyQualifiedErrorId | Should -Be 'CmdletizationQuery_NotFound_InterfaceAlias,Set-DnsClientServerAddress'
+        $e = @(Err { Set-DnsClientServerAddress -InterfaceAlias $script:wa -ServerAddresses 192.0.2.1 -ResetServerAddresses -WhatIf })
+        $e.Count | Should -BeGreaterThan 0
+        $e[0].FullyQualifiedErrorId | Should -Be 'MI RESULT 4,Set-DnsClientServerAddress'
+        [string]$e[0].CategoryInfo.Category | Should -Be 'InvalidArgument'
+        $e[0].Exception.Message.Trim() | Should -Be 'One or more parameter values passed to the method were invalid.'
+        $e[0].TargetObject | Should -Match '^MSFT_DNSClientServerAddress \(Name = "\d+", CreationClassName = "", SystemCreationClassName = "", SystemName = "(2|23)"\)$'
+    }
+    It 'Set-DnsClientServerAddress with neither parameter does nothing and writes nothing' {
+        @(Err { Set-DnsClientServerAddress -InterfaceAlias $script:wa -WhatIf }).Count | Should -Be 0
+    }
+    It 'New-NetIPAddress -WhatIf names the address once per store' {
+        $o = Invoke-Child "New-NetIPAddress -IPAddress 192.0.2.77 -PrefixLength 24 -InterfaceIndex $($script:wi) -WhatIf"
+        $o.Count | Should -Be 2
+        $o[0] | Should -Be "What if: Performing operation `"New`" on Target `"NetIPAddress -IPv4Address 192.0.2.77 -InterfaceIndex $($script:wi) -Store Active`""
+        $o[1] | Should -Be "What if: Performing operation `"New`" on Target `"NetIPAddress -IPv4Address 192.0.2.77 -InterfaceIndex $($script:wi) -Store Persistent`""
+    }
+    It 'New-NetIPAddress -DefaultGateway -WhatIf adds the default route per store' {
+        $o = Invoke-Child "New-NetIPAddress -IPAddress 192.0.2.77 -PrefixLength 24 -DefaultGateway 192.0.2.1 -InterfaceAlias '$($script:wa)' -WhatIf"
+        $o.Count | Should -Be 4
+        $o[0] | Should -Match 'Store Active"$'
+        $o[1] | Should -Be "What if: Performing operation `"New`" on Target `"NetRoute -DestinationPrefix 0.0.0.0/0 -InterfaceIndex $($script:wi) -NextHop 192.0.2.1 -Store Active`""
+        $o[2] | Should -Match 'Store Persistent"$'
+        $o[3] | Should -Be "What if: Performing operation `"New`" on Target `"NetRoute -DestinationPrefix 0.0.0.0/0 -InterfaceIndex $($script:wi) -NextHop 192.0.2.1 -Store Persistent`""
+    }
+    It 'Remove-NetIPAddress -WhatIf names the ActiveStore address (by address and by pipeline)' -Skip:(-not $script:v4) {
+        $ip = $script:v4[0].IPAddress
+        $want = "What if: Performing operation `"Remove`" on Target `"NetIPAddress -IPv4Address $ip -InterfaceIndex $($script:wi) -Store Active`""
+        (Invoke-Child "Remove-NetIPAddress -IPAddress $ip -Confirm:`$false -WhatIf") | Should -Be @($want)
+        (Invoke-Child "Get-NetIPAddress -IPAddress $ip | Remove-NetIPAddress -Confirm:`$false -WhatIf") | Should -Be @($want)
+    }
+    It 'Set-NetIPInterface -WhatIf names the interface once per store' {
+        $o = Invoke-Child "Set-NetIPInterface -InterfaceAlias '$($script:wa)' -AddressFamily IPv4 -Dhcp Enabled -WhatIf"
+        $o.Count | Should -Be 2
+        $o[0] | Should -Be "What if: Performing operation `"Set`" on Target `"NetIPInterface -InterfaceIndex $($script:wi) -AddressFamily IPv4 -Store Active`""
+        $o[1] | Should -Be "What if: Performing operation `"Set`" on Target `"NetIPInterface -InterfaceIndex $($script:wi) -AddressFamily IPv4 -Store Persistent`""
+    }
+    It 'Set-DnsClientServerAddress -WhatIf prints the Windows DNS Client text with the adapter name' {
+        $o = (Invoke-Child "Set-DnsClientServerAddress -InterfaceAlias '$($script:wa)' -ServerAddresses 192.0.2.1 -WhatIf") -join "`n"
+        $o | Should -Match ([regex]::Escape("What if: Microsoft DNS Client settings will be changed as requested.`nThis will affect name resolutions on the adapter `"$($script:wa)`"."))
+    }
+}
+
+Describe 'write cmdlets: round trip on the guest (state read back with the Get- cmdlets and with native tools)' {
+    BeforeAll {
+        if (-not $script:SkipRt) {
+            $script:ix = [uint32](Get-NetIPInterface -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike 'Loop*' } | Select-Object -First 1).InterfaceIndex
+            $script:guid = [Nitro.Net.Native]::AdapterGuid($script:ix)
+            $script:regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($script:guid)"
+            $script:ipcfg = { (& ipconfig.exe /all) -join "`n" }
+            $script:origNs = (Get-ItemProperty $script:regPath -ErrorAction SilentlyContinue).NameServer
+        }
+    }
+    AfterAll {
+        if (-not $script:SkipRt) {
+            Remove-NetIPAddress -InterfaceIndex $script:ix -Confirm:$false -ErrorAction SilentlyContinue
+            Remove-NetIPAddress -PolicyStore PersistentStore -InterfaceIndex $script:ix -Confirm:$false -ErrorAction SilentlyContinue
+            Set-DnsClientServerAddress -InterfaceIndex $script:ix -ResetServerAddresses
+            Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -Dhcp Enabled
+        }
+    }
+    It 'Set-NetIPInterface -Dhcp Disabled: Get-NetIPInterface, the registry and ipconfig agree, the DHCP address is gone' -Skip:$script:SkipRt {
+        $r = Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -Dhcp Disabled -PassThru
+        @($r).Count | Should -Be 1
+        [string]$r.Dhcp | Should -Be 'Disabled'
+        [string](Get-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4).Dhcp | Should -Be 'Disabled'
+        (Get-ItemProperty $script:regPath).EnableDHCP | Should -Be 0
+        (& $script:ipcfg) | Should -Match 'DHCP Enabled\. [. ]+: No'
+        @(Get-NetIPAddress -InterfaceIndex $script:ix -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object IPAddress -ne '0.0.0.0').Count | Should -Be 0
+    }
+    It 'New-NetIPAddress -DefaultGateway: Get-NetIPAddress, Get-NetRoute, ipconfig and route print show the address' -Skip:$script:SkipRt {
+        $o = @(New-NetIPAddress -IPAddress 10.0.2.99 -PrefixLength 24 -DefaultGateway 10.0.2.2 -InterfaceIndex $script:ix)
+        $o.Count | Should -Be 2
+        [string]$o[0].Store | Should -Be 'ActiveStore'
+        [string]$o[1].Store | Should -Be 'PersistentStore'
+        $o[0].psobject.TypeNames[0] | Should -Be 'Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_NetIPAddress'
+        $o[0].IPAddress | Should -Be '10.0.2.99'
+        $a = Get-NetIPAddress -IPAddress 10.0.2.99
+        $a.InterfaceIndex | Should -Be $script:ix
+        $a.PrefixLength | Should -Be 24
+        [string]$a.PrefixOrigin | Should -Be 'Manual'
+        [string]$a.AddressFamily | Should -Be 'IPv4'
+        $cfg = & $script:ipcfg
+        $cfg | Should -Match 'IPv4 Address\. [. ]+: 10\.0\.2\.99'
+        $cfg | Should -Match 'Subnet Mask [. ]+: 255\.255\.255\.0'
+        $cfg | Should -Match 'Default Gateway [. ]+: 10\.0\.2\.2'
+        $gw = @(Get-NetRoute -DestinationPrefix 0.0.0.0/0 -InterfaceIndex $script:ix)
+        $gw.Count | Should -Be 1
+        $gw[0].NextHop | Should -Be '10.0.2.2'
+        ((& route.exe print) -join "`n") | Should -Match '0\.0\.0\.0\s+0\.0\.0\.0\s+10\.0\.2\.2\s+10\.0\.2\.99'
+        $reg = Get-ItemProperty $script:regPath
+        @($reg.IPAddress) | Should -Be @('10.0.2.99')
+        @($reg.SubnetMask) | Should -Be @('255.255.255.0')
+        @($reg.DefaultGateway) | Should -Be @('10.0.2.2')
+    }
+    It 'New-NetIPAddress refuses a duplicate, a second IPv4 address, IPv6 and a DHCP interface with Windows errors' -Skip:$script:SkipRt {
+        $e = @(Err { New-NetIPAddress -IPAddress 10.0.2.99 -PrefixLength 24 -InterfaceIndex $script:ix })
+        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 5010,New-NetIPAddress'
+        $e[0].Exception.Message | Should -Match '^Instance MSFT_NetIPAddress already exists'
+        [string]$e[0].CategoryInfo.Category | Should -Be 'ResourceExists'
+        $e = @(Err { New-NetIPAddress -IPAddress 10.0.2.98 -PrefixLength 24 -InterfaceIndex $script:ix })
+        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 5010,New-NetIPAddress'
+        (Get-NetIPAddress -InterfaceIndex $script:ix -AddressFamily IPv4).IPAddress | Should -Be '10.0.2.99'
+        $e = @(Err { New-NetIPAddress -IPAddress 2001:db8::5 -PrefixLength 64 -InterfaceIndex $script:ix })
+        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 50,New-NetIPAddress'
+        $e = @(Err { New-NetIPAddress -IPAddress 10.0.2.97 -PrefixLength 40 -InterfaceIndex $script:ix })
+        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 87,New-NetIPAddress'
+        $e[0].Exception.Message.Trim() | Should -Be 'Invalid parameter PrefixLength 40'
+        $e = @(Err { New-NetIPAddress -IPAddress 10.0.2.97 -PrefixLength 24 -InterfaceIndex $script:ix -PolicyStore Nonsense })
+        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 87,New-NetIPAddress'
+    }
+    It 'Set-DnsClientServerAddress: Get-DnsClientServerAddress, the registry, ipconfig and netsh show the servers; -PassThru returns the row' -Skip:$script:SkipRt {
+        $r = @(Set-DnsClientServerAddress -InterfaceIndex $script:ix -ServerAddresses 192.0.2.53, 192.0.2.54 -PassThru)
+        $r.Count | Should -Be 1
+        @($r[0].ServerAddresses) | Should -Be @('192.0.2.53', '192.0.2.54')
+        $r[0].psobject.TypeNames[0] | Should -Be 'Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_DNSClientServerAddress'
+        $g = Get-DnsClientServerAddress -InterfaceIndex $script:ix -AddressFamily IPv4
+        @($g.ServerAddresses) | Should -Be @('192.0.2.53', '192.0.2.54')
+        (Get-ItemProperty $script:regPath).NameServer | Should -Be '192.0.2.53,192.0.2.54'
+        (& $script:ipcfg) | Should -Match 'DNS Servers [. ]+: 192\.0\.2\.53\s+192\.0\.2\.54'
+        ((& netsh.exe interface ip show dns) -join "`n") | Should -Match '192\.0\.2\.53\s+192\.0\.2\.54'
+        Set-DnsClientServerAddress -InterfaceAlias $g.InterfaceAlias -ServerAddresses 192.0.2.55
+        @((Get-DnsClientServerAddress -InterfaceIndex $script:ix -AddressFamily IPv4).ServerAddresses) | Should -Be @('192.0.2.55')
+    }
+    It 'Set-DnsClientServerAddress -ResetServerAddresses removes the static list; a bad address and IPv6 are refused' -Skip:$script:SkipRt {
+        $e = @(Err { Set-DnsClientServerAddress -InterfaceIndex $script:ix -ServerAddresses notanip })
+        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 87,Set-DnsClientServerAddress'
+        @((Get-DnsClientServerAddress -InterfaceIndex $script:ix -AddressFamily IPv4).ServerAddresses) | Should -Be @('192.0.2.55')
+        Set-DnsClientServerAddress -InterfaceIndex $script:ix -ResetServerAddresses
+        @((Get-DnsClientServerAddress -InterfaceIndex $script:ix -AddressFamily IPv4).ServerAddresses).Count | Should -Be 0
+        (Get-ItemProperty $script:regPath).PSObject.Properties.Name | Should -Not -Contain 'NameServer'
+        (& $script:ipcfg) | Should -Not -Match '192\.0\.2\.5'
+    }
+    It 'Set-DnsClientServerAddress writes the IPv4 servers and reports the IPv6 one it cannot set' -Skip:$script:SkipRt {
+        $e = @(Err { Set-DnsClientServerAddress -InterfaceIndex $script:ix -ServerAddresses 192.0.2.60, 2001:db8::53 })
+        $e.Count | Should -Be 1
+        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 50,Set-DnsClientServerAddress'
+        @((Get-DnsClientServerAddress -InterfaceIndex $script:ix -AddressFamily IPv4).ServerAddresses) | Should -Be @('192.0.2.60')
+        Set-DnsClientServerAddress -InterfaceIndex $script:ix -ResetServerAddresses
+    }
+    It 'Remove-NetIPAddress -PassThru removes the address and its default route; Get-, ipconfig, route print and the registry agree' -Skip:$script:SkipRt {
+        $r = @(Remove-NetIPAddress -IPAddress 10.0.2.99 -Confirm:$false -PassThru)
+        $r.Count | Should -Be 1
+        $r[0].IPAddress | Should -Be '10.0.2.99'
+        @(Get-NetIPAddress -IPAddress 10.0.2.99 -ErrorAction SilentlyContinue).Count | Should -Be 0
+        @(Get-NetRoute -DestinationPrefix 0.0.0.0/0 -InterfaceIndex $script:ix -ErrorAction SilentlyContinue).Count | Should -Be 0
+        (& $script:ipcfg) | Should -Not -Match '10\.0\.2\.99'
+        ((& route.exe print) -join "`n") | Should -Not -Match '10\.0\.2\.99'
+        @((Get-ItemProperty $script:regPath).IPAddress) | Should -Be @('0.0.0.0')
+        $e = @(Err { Remove-NetIPAddress -IPAddress 10.0.2.99 -Confirm:$false })
+        $e[0].FullyQualifiedErrorId | Should -Be 'CmdletizationQuery_NotFound_IPAddress,Remove-NetIPAddress'
+    }
+    It 'PersistentStore only: New-NetIPAddress writes the registry and Remove-NetIPAddress -PolicyStore PersistentStore clears it' -Skip:$script:SkipRt {
+        $o = @(New-NetIPAddress -IPAddress 10.0.2.77 -PrefixLength 16 -InterfaceIndex $script:ix -PolicyStore PersistentStore)
+        $o.Count | Should -Be 1
+        [string]$o[0].Store | Should -Be 'PersistentStore'
+        @((Get-ItemProperty $script:regPath).IPAddress) | Should -Be @('10.0.2.77')
+        @((Get-ItemProperty $script:regPath).SubnetMask) | Should -Be @('255.255.0.0')
+        @(Get-NetIPAddress -IPAddress 10.0.2.77 -ErrorAction SilentlyContinue).Count | Should -Be 0
+        Remove-NetIPAddress -IPAddress 10.0.2.77 -PolicyStore PersistentStore -Confirm:$false
+        @((Get-ItemProperty $script:regPath).IPAddress) | Should -Be @('0.0.0.0')
+    }
+    It 'Set-NetIPInterface refuses what the stack cannot set' -Skip:$script:SkipRt {
+        $e = @(Err { Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -Forwarding Enabled -Confirm:$false })
+        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 50,Set-NetIPInterface'
+        $e[0].Exception.Message | Should -Match 'Forwarding'
+    }
+    It 'Set-NetIPInterface -Dhcp Enabled restores the lease: Get-, ipconfig and the registry agree' -Skip:$script:SkipRt {
+        $r = Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -Dhcp Enabled -PassThru
+        [string]$r.Dhcp | Should -Be 'Enabled'
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ($sw.Elapsed.TotalSeconds -lt 60 -and -not (Get-NetIPAddress -InterfaceIndex $script:ix -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -ne '0.0.0.0' })) { Start-Sleep -Seconds 1 }
+        $a = Get-NetIPAddress -InterfaceIndex $script:ix -AddressFamily IPv4
+        $a.IPAddress | Should -Not -Be '0.0.0.0'
+        [string]$a.PrefixOrigin | Should -Be 'Dhcp'
+        [string](Get-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4).Dhcp | Should -Be 'Enabled'
+        (Get-ItemProperty $script:regPath).EnableDHCP | Should -Be 1
+        $cfg = & $script:ipcfg
+        $cfg | Should -Match 'DHCP Enabled\. [. ]+: Yes'
+        $cfg | Should -Match ('IPv4 Address\. [. ]+: ' + [regex]::Escape($a.IPAddress))
+    }
+}

@@ -6,11 +6,11 @@
     Author                = 'ReactOS-Nitro'
     CompanyName           = 'ReactOS-Nitro'
     Copyright             = 'ReactOS-Nitro contributors. GNU GPL v2 or later.'
-    Description           = 'Storage cmdlets for PowerShell 7 on ReactOS-Nitro: a clean-room script module over the kernel32 volume calls and the disk IOCTLs with the cmdlet names, parameters and output shapes of the Windows Storage module (read side only).'
+    Description           = 'Storage cmdlets for PowerShell 7 on ReactOS-Nitro: a clean-room script module over the kernel32 volume calls and the disk IOCTLs with the cmdlet names, parameters and output shapes of the Windows Storage module (Get-Volume, Get-Disk, Get-Partition, Get-PhysicalDisk, Set-Volume -NewFileSystemLabel).'
     PowerShellVersion     = '5.1'
     CompatiblePSEditions  = @('Desktop', 'Core')
     FormatsToProcess      = @('Storage.format.ps1xml')
-    FunctionsToExport     = @('Get-Disk', 'Get-Partition', 'Get-PhysicalDisk', 'Get-Volume')
+    FunctionsToExport     = @('Get-Disk', 'Get-Partition', 'Get-PhysicalDisk', 'Get-Volume', 'Set-Volume')
     CmdletsToExport       = @()
     VariablesToExport     = @()
     AliasesToExport       = @()

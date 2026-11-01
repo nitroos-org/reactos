@@ -406,3 +406,119 @@ Describe 'errors' {
         [string]$e[0].TargetObject | Should -Be ':'
     }
 }
+
+# ======================================================================================== Set-Volume
+# Surface and binding-error rows are read-only and also run on the Windows oracle against the real module (STOR_ORACLE=1).
+# The round trip changes the label of C: through every selector, checks it with Get-Volume AND `vol`, and restores it; it is
+# skipped on the oracle and when STOR_NOROUNDTRIP=1.
+$script:SkipVolRt = $script:Oracle -or ($env:STOR_NOROUNDTRIP -eq '1')
+function SvSet($param, $set) { (Get-Command Set-Volume).Parameters[$param].ParameterSets[$set] }
+
+Describe 'Set-Volume surface (Windows parameter model)' {
+    It 'is a Storage function with the default set ByDriveLetterSetLabel and no ShouldProcess' {
+        (Get-Command Set-Volume).Source | Should -Be 'Storage'
+        (Get-Command Set-Volume).DefaultParameterSet | Should -Be 'ByDriveLetterSetLabel'
+        (Get-Command Set-Volume).Parameters.Keys | Should -Not -Contain 'WhatIf'
+        (Get-Command Set-Volume).Parameters.Keys | Should -Not -Contain 'PassThru'
+    }
+    It 'has the ten Windows parameter sets' {
+        @((Get-Command Set-Volume).ParameterSets.Name | Sort-Object) | Should -Be @(
+            'ByDriveLetterSetDedup', 'ByDriveLetterSetLabel', 'ByLabelSetDedup', 'ByLabelSetLabel', 'ByObjectSetDedup', 'ByObjectSetLabel',
+            'ByPathSetDedup', 'ByPathSetLabel', 'ByUniqueIdSetDedup', 'ByUniqueIdSetLabel')
+    }
+    It 'selectors are mandatory and take the pipeline: <Param>' -TestCases @(
+        @{ Param = 'DriveLetter'; Set = 'ByDriveLetterSetLabel'; Type = 'System.Char' }, @{ Param = 'FileSystemLabel'; Set = 'ByLabelSetLabel'; Type = 'System.String' },
+        @{ Param = 'Path'; Set = 'ByPathSetLabel'; Type = 'System.String' }, @{ Param = 'UniqueId'; Set = 'ByUniqueIdSetLabel'; Type = 'System.String' },
+        @{ Param = 'InputObject'; Set = 'ByObjectSetLabel'; Type = 'System.Object[]' }) {
+        param($Param, $Set, $Type)
+        (SvSet $Param $Set).IsMandatory | Should -BeTrue
+        (SvSet $Param $Set).ValueFromPipeline | Should -BeTrue
+        (Get-Command Set-Volume).Parameters[$Param].ParameterType.FullName | Should -BeIn @($Type, 'Microsoft.Management.Infrastructure.CimInstance[]')
+    }
+    It 'NewFileSystemLabel is a string with the alias NewFriendlyName in the label sets only' {
+        $p = (Get-Command Set-Volume).Parameters['NewFileSystemLabel']
+        $p.ParameterType.FullName | Should -Be 'System.String'
+        $p.Aliases | Should -Contain 'NewFriendlyName'
+        $p.ParameterSets.Keys | Should -Not -Contain 'ByDriveLetterSetDedup'
+        $p.ParameterSets.Keys | Should -Contain 'ByObjectSetLabel'
+        (Get-Command Set-Volume).Parameters['FileSystemLabel'].Aliases | Should -Contain 'FriendlyName'
+    }
+    It 'DedupMode is the SetVolume enum Disabled/GeneralPurpose/HyperV/Backup/NotAvailable (uint)' {
+        $t = (Get-Command Set-Volume).Parameters['DedupMode'].ParameterType
+        $t.FullName | Should -Be 'Microsoft.PowerShell.Cmdletization.GeneratedTypes.SetVolume.DedupMode'
+        [enum]::GetUnderlyingType($t).FullName | Should -Be 'System.UInt32'
+        @([enum]::GetNames($t)) | Should -Be @('Disabled', 'GeneralPurpose', 'HyperV', 'Backup', 'NotAvailable')
+        [int][enum]::Parse($t, 'NotAvailable') | Should -Be 4
+    }
+    It 'no arguments, or only a label, is a missing-mandatory-parameter error for DriveLetter' {
+        foreach ($sb in { Set-Volume }, { Set-Volume -NewFileSystemLabel x }) {
+            $e = @(Err $sb)
+            $e[0].FullyQualifiedErrorId | Should -Be 'MissingMandatoryParameter,Set-Volume'
+            $e[0].Exception.Message | Should -Match 'missing mandatory parameters: DriveLetter'
+        }
+    }
+    It 'two selectors are an ambiguous parameter set' {
+        $e = @(Err { Set-Volume -DriveLetter C -Path 'C:\' -NewFileSystemLabel x })
+        $e[0].FullyQualifiedErrorId | Should -Be 'AmbiguousParameterSet,Set-Volume'
+        [string]$e[0].CategoryInfo.Category | Should -Be 'InvalidArgument'
+    }
+}
+
+Describe 'Set-Volume round trip on C: (Get-Volume and vol agree)' {
+    BeforeAll {
+        if (-not $script:SkipVolRt) {
+            $script:origLabel = [string](Get-Volume -DriveLetter C).FileSystemLabel
+            $script:vol = { ((& cmd.exe /c vol C:) -join "`n") }
+        }
+    }
+    AfterAll { if (-not $script:SkipVolRt) { Set-Volume -DriveLetter C -NewFileSystemLabel $script:origLabel } }
+    It 'sets the label by drive letter and returns nothing' -Skip:$script:SkipVolRt {
+        $o = @(Set-Volume -DriveLetter C -NewFileSystemLabel 'NITRO1')
+        $o.Count | Should -Be 0
+        (Get-Volume -DriveLetter C).FileSystemLabel | Should -Be 'NITRO1'
+        (& $script:vol) | Should -Match 'Volume in drive C is NITRO1'
+    }
+    It 'finds the volume by label (wildcards), by path, by UniqueId and by pipeline object' -Skip:$script:SkipVolRt {
+        Set-Volume -FileSystemLabel 'NITRO*' -NewFileSystemLabel 'NITRO2'
+        (& $script:vol) | Should -Match 'Volume in drive C is NITRO2'
+        $v = Get-Volume -DriveLetter C
+        Set-Volume -Path $v.Path -NewFileSystemLabel 'NITRO3'
+        (& $script:vol) | Should -Match 'Volume in drive C is NITRO3'
+        Set-Volume -UniqueId $v.UniqueId -NewFileSystemLabel 'NITRO4'
+        (Get-Volume -DriveLetter C).FileSystemLabel | Should -Be 'NITRO4'
+        Get-Volume -DriveLetter C | Set-Volume -NewFileSystemLabel 'NITRO5'
+        (& $script:vol) | Should -Match 'Volume in drive C is NITRO5'
+        Set-Volume -DriveLetter c -NewFriendlyName 'NITRO6'
+        (Get-Volume -DriveLetter C).FileSystemLabel | Should -Be 'NITRO6'
+    }
+    It 'takes a label with a space and an empty label clears it' -Skip:$script:SkipVolRt {
+        Set-Volume -DriveLetter C -NewFileSystemLabel 'My Disk'
+        (Get-Volume -DriveLetter C).FileSystemLabel | Should -Be 'My Disk'
+        (& $script:vol) | Should -Match 'Volume in drive C is My Disk'
+        Set-Volume -DriveLetter C -NewFileSystemLabel ''
+        [string](Get-Volume -DriveLetter C).FileSystemLabel | Should -Be ''
+        (& $script:vol) | Should -Match 'Volume in drive C has no label'
+    }
+    It 'a too long label is a Windows System Error and changes nothing' -Skip:$script:SkipVolRt {
+        Set-Volume -DriveLetter C -NewFileSystemLabel 'KEEP'
+        $e = @(Err { Set-Volume -DriveLetter C -NewFileSystemLabel ('x' * 40) })
+        $e.Count | Should -Be 1
+        $e[0].FullyQualifiedErrorId | Should -Match '^Windows System Error \d+,Set-Volume$'
+        (Get-Volume -DriveLetter C).FileSystemLabel | Should -Be 'KEEP'
+    }
+    It 'an unknown drive letter is CmdletizationQuery_NotFound_DriveLetter; a CD-ROM without media is a device error' -Skip:$script:SkipVolRt {
+        $e = @(Err { Set-Volume -DriveLetter Z -NewFileSystemLabel x })
+        $e[0].FullyQualifiedErrorId | Should -Be 'CmdletizationQuery_NotFound_DriveLetter,Set-Volume'
+        [string]$e[0].CategoryInfo.Category | Should -Be 'ObjectNotFound'
+        $e[0].Exception.Message | Should -Be "No MSFT_Volume objects found with property 'DriveLetter' equal to 'Z'.  Verify the value of the property and retry."
+        $cd = @(Get-Volume | Where-Object { [string]$_.DriveType -eq 'CD-ROM' -and $_.DriveLetter })
+        if ($cd.Count) {
+            $e = @(Err { Set-Volume -DriveLetter $cd[0].DriveLetter -NewFileSystemLabel x })
+            $e[0].FullyQualifiedErrorId | Should -Match '^Windows System Error \d+,Set-Volume$'
+        }
+    }
+    It '-DedupMode is refused: this system has no deduplication' -Skip:$script:SkipVolRt {
+        $e = @(Err { Set-Volume -DriveLetter C -DedupMode Disabled })
+        $e[0].FullyQualifiedErrorId | Should -Be 'DedupNotSupported,Set-Volume'
+    }
+}
