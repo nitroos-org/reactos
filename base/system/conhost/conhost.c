@@ -305,6 +305,8 @@ HostSequence(HOST *Host, CHAR Final, BOOL Ss3)
     if (Key) HostKey(Host, Key, 0, 0);
 }
 
+static BOOL HostCtrlC(HOST *Host);
+
 static VOID
 HostInput(HOST *Host, BYTE Byte)
 {
@@ -358,6 +360,7 @@ HostInput(HOST *Host, BYTE Byte)
     else
     {
         Character = Byte;
+        if (Byte == 3 && HostCtrlC(Host)) return;
         if (Byte >= 1 && Byte <= 26 && Byte != '\r' && Byte != '\t')
         {
             Modifiers |= LEFT_CTRL_PRESSED;
@@ -375,6 +378,27 @@ HostInput(HOST *Host, BYTE Byte)
     else if (Byte == '\t') Key = VK_TAB;
     else if (Byte == 0x1b) Key = VK_ESCAPE;
     HostKey(Host, Key, Character, Modifiers);
+}
+
+#define HOST_SIGNAL_RESIZE 8
+#define HOST_SIGNAL_CLIENT 0x4e50 /* nitro private: argument = client process id */
+
+static BOOL WINAPI
+HostCtrlHandler(DWORD Event)
+{
+    /* Ctrl+C generated for the clients must not end the host itself. */
+    return Event == CTRL_C_EVENT;
+}
+
+/* Ctrl+C typed on the terminal: with processed input the console does not
+ * queue a key, it raises CTRL_C_EVENT for the attached processes. */
+static BOOL
+HostCtrlC(HOST *Host)
+{
+    DWORD Mode;
+    if (!GetConsoleMode(Host->ConsoleIn, &Mode) || !(Mode & ENABLE_PROCESSED_INPUT))
+        return FALSE;
+    return GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0);
 }
 
 static VOID
@@ -404,13 +428,15 @@ int wmain(int argc, WCHAR **argv)
     ULONGLONG Ready[3];
     HANDLE ReadyPipe = NULL;
     WCHAR *Command;
-    DWORD Available, Read, Written, Message[3], Pids[256], Count;
+    DWORD Available, Read, Written, Pids[256], Count;
+    WORD Message[3];
     BYTE Bytes[256];
     int Index;
 
     ZeroMemory(&Host, sizeof(Host));
     Host.Width = 80;
     Host.Height = 25;
+    SetConsoleCtrlHandler(HostCtrlHandler, TRUE);
     Host.PipeIn = GetStdHandle(STD_INPUT_HANDLE);
     Host.PipeOut = GetStdHandle(STD_OUTPUT_HANDLE);
     for (Index = 1; Index < argc; ++Index)
@@ -473,11 +499,13 @@ int wmain(int argc, WCHAR **argv)
             {
                 if (!ReadFile(Host.Signal, Message, sizeof(Message), &Read, NULL) ||
                     Read != sizeof(Message)) break;
-                if (Message[0] == 8 && Message[1] <= 32767 && Message[2] <= 32767)
+                /* Frames are three WORDs: type, then two WORD arguments (the Windows
+                 * pseudoconsole signal protocol that sshd also speaks). */
+                if (Message[0] == HOST_SIGNAL_RESIZE && Message[1] <= 32767 && Message[2] <= 32767)
                     HostResize(&Host, (SHORT)Message[1], (SHORT)Message[2]);
-                else if (Message[0] == 1 && !Host.Client)
+                else if (Message[0] == HOST_SIGNAL_CLIENT && !Host.Client)
                 {
-                    Host.Client = OpenProcess(SYNCHRONIZE, FALSE, Message[1]);
+                    Host.Client = OpenProcess(SYNCHRONIZE, FALSE, Message[1] | ((DWORD)Message[2] << 16));
                     Host.SawClient = TRUE;
                 }
                 Available -= sizeof(Message);

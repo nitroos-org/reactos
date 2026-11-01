@@ -44,8 +44,12 @@ CreatePseudoConsole(COORD Size, HANDLE Input, HANDLE Output, DWORD Flags, PVOID 
     Console = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Console));
     if (!Console) return E_OUTOFMEMORY;
 
+    /* The parent-side ends must not be inherited by other children of the caller
+       (a leaked signal write end keeps conhost from ever seeing EOF). */
     if (!CreatePipe(&SignalRead, &Console->Signal, &Security, 0) ||
+        !SetHandleInformation(Console->Signal, HANDLE_FLAG_INHERIT, 0) ||
         !CreatePipe(&ReadyRead, &ReadyWrite, &Security, 0) ||
+        !SetHandleInformation(ReadyRead, HANDLE_FLAG_INHERIT, 0) ||
         !DuplicateHandle(GetCurrentProcess(), Input, GetCurrentProcess(), &ChildInput,
                          0, TRUE, DUPLICATE_SAME_ACCESS) ||
         !DuplicateHandle(GetCurrentProcess(), Output, GetCurrentProcess(), &ChildOutput,
@@ -147,10 +151,12 @@ HRESULT WINAPI
 ResizePseudoConsole(PVOID Handle, COORD Size)
 {
     PBASE_PSEUDOCONSOLE Console = Handle;
-    DWORD Message[3], Written;
+    WORD Message[3];
+    DWORD Written;
 
     if (!Console || Console->Magic != BASE_PSEUDOCONSOLE_MAGIC || Size.X <= 0 || Size.Y <= 0)
         return E_INVALIDARG;
+    /* Windows' pseudoconsole signal frame: WORD type (8 = resize), WORD columns, WORD rows */
     Message[0] = 8;
     Message[1] = Size.X;
     Message[2] = Size.Y;
