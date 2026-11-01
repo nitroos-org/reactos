@@ -159,13 +159,23 @@ static DWORD WINAPI UnsupportedConsoleCallback(PVOID Parameter)
     return ERROR_NOT_SUPPORTED;
 }
 
-/* The native routine registered with the server for a guest control routine.
- * A guest that registers none gets no control events, as natively. */
-static LPTHREAD_START_ROUTINE RegisterCtrlRoutine(ULONG Routine)
+/* The native routine registered with the server for a guest control routine. The previous
+ * guest routine is returned in *Previous, for RestoreCtrlRoutine when the registering
+ * request fails. A guest that registers none gets no control events, as natively (the
+ * server records NULL); the routine stays set for events already queued for it. */
+static LPTHREAD_START_ROUTINE RegisterCtrlRoutine(ULONG Routine, LONG *Previous)
 {
+    *Previous = (LONG)Routine;
     if (!Routine) return NULL;
-    InterlockedExchange(&GuestCtrlRoutine, (LONG)Routine);
+    *Previous = InterlockedExchange(&GuestCtrlRoutine, (LONG)Routine);
     return ConsoleControl;
+}
+
+/* The request that registered Routine failed: the server kept its earlier registration,
+ * so the guest routine is the earlier one again, unless a newer registration replaced it. */
+static VOID RestoreCtrlRoutine(ULONG Routine, LONG Previous)
+{
+    if (Routine) InterlockedCompareExchange(&GuestCtrlRoutine, Previous, (LONG)Routine);
 }
 
 /* The console server delivers control events with CreateRemoteThread, whose initial context
@@ -237,12 +247,15 @@ static NTSTATUS Connect(ULONG *a, BOOLEAN *Reported)
     {
         WOW64_CONSOLE_CONNECT *From = PTR32(a[2]);
         CONSRV_API_CONNECTINFO To = {0};
+        LONG PrevCtrl;
+        ULONG GuestCtrl;
         ULONG NativeLength = sizeof(To);
         if (*Length != sizeof(*From)) return STATUS_INFO_LENGTH_MISMATCH;
         ConsoleStartToNative(&To.ConsoleStartInfo, &From->ConsoleStartInfo);
         To.IsConsoleApp = From->IsConsoleApp;
         To.IsWindowVisible = From->IsWindowVisible;
-        To.CtrlRoutine = RegisterCtrlRoutine(From->CtrlRoutine);
+        GuestCtrl = *(volatile ULONG *)&From->CtrlRoutine;
+        To.CtrlRoutine = RegisterCtrlRoutine(GuestCtrl, &PrevCtrl);
         To.PropRoutine = To.ImeRoutine = UnsupportedConsoleCallback;
         To.TitleLength = From->TitleLength;
         To.DesktopLength = From->DesktopLength;
@@ -257,6 +270,7 @@ static NTSTATUS Connect(ULONG *a, BOOLEAN *Reported)
         {
             ConsoleStartToGuest(&From->ConsoleStartInfo, &To.ConsoleStartInfo);
         }
+        else RestoreCtrlRoutine(GuestCtrl, PrevCtrl);
     }
     else return Wow64Unsupported(WOW64_SERVICE_CSR, WOW64_UNSUPPORTED_CSR_SERVER, a[1], Reported);
     if (a[4]) *(BOOLEAN *)PTR32(a[4]) = InServer;
@@ -788,6 +802,8 @@ static NTSTATUS AllocConsole32(WOW64_CONSOLE_ALLOCCONSOLE *Guest)
     ULONG TitleLength = Guest->TitleLength, DesktopLength = Guest->DesktopLength;
     ULONG AppNameLength = Guest->AppNameLength, CurDirLength = Guest->CurDirLength;
     ULONG64 Total = (ULONG64)TitleLength + DesktopLength + AppNameLength + CurDirLength;
+    ULONG GuestCtrl = Guest->CtrlRoutine;
+    LONG PrevCtrl;
     NTSTATUS Status;
 
     if (Total > WOW64_MAX_INFO_BUFFER) return STATUS_NO_MEMORY;
@@ -810,11 +826,12 @@ static NTSTATUS AllocConsole32(WOW64_CONSOLE_ALLOCCONSOLE *Guest)
     CsrCaptureMessageBuffer(Capture, CurDir, CurDirLength, (PVOID *)&Alloc->CurDir);
     Alloc->AppNameLength = AppNameLength;
     CsrCaptureMessageBuffer(Capture, AppName, AppNameLength, (PVOID *)&Alloc->AppName);
-    Alloc->CtrlRoutine = RegisterCtrlRoutine(Guest->CtrlRoutine);
+    Alloc->CtrlRoutine = RegisterCtrlRoutine(GuestCtrl, &PrevCtrl);
     Alloc->PropRoutine = UnsupportedConsoleCallback;
     Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, Capture,
                                  CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepAlloc), sizeof(*Alloc));
     if (NT_SUCCESS(Status)) ConsoleStartToGuest(GuestStart, Alloc->ConsoleStartInfo);
+    else RestoreCtrlRoutine(GuestCtrl, PrevCtrl);
     CsrFreeCaptureBuffer(Capture);
     return Status;
 }
@@ -1068,6 +1085,8 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
         CONSOLE_START_INFO NativeStart = {0};
         PCSR_CAPTURE_BUFFER Capture;
         ULONG StartInfo;
+        LONG PrevCtrl;
+        ULONG GuestCtrl;
         if (a[3] != sizeof(*Guest)) return STATUS_INFO_LENGTH_MISMATCH;
         /* The guest start info lives in the guest's capture buffer; the reply is written there.
          * Read its address once: the range check and every use see the same pointer. */
@@ -1085,12 +1104,14 @@ static NTSTATUS Call(ULONG *a, BOOLEAN *Reported)
         Capture = CsrAllocateCaptureBuffer(1, sizeof(NativeStart));
         if (!Capture) return STATUS_NO_MEMORY;
         Attach->ProcessId = Guest->ProcessId; /* ATTACH_PARENT_PROCESS (-1) stays -1 */
-        Attach->CtrlRoutine = RegisterCtrlRoutine(Guest->CtrlRoutine);
+        GuestCtrl = *(volatile ULONG *)&Guest->CtrlRoutine;
+        Attach->CtrlRoutine = RegisterCtrlRoutine(GuestCtrl, &PrevCtrl);
         Attach->PropRoutine = UnsupportedConsoleCallback;
         CsrCaptureMessageBuffer(Capture, &NativeStart, sizeof(NativeStart), (PVOID *)&Attach->ConsoleStartInfo);
         Status = CsrClientCallServer((PCSR_API_MESSAGE)&Message, Capture, Api, sizeof(*Attach));
         /* The server filled the captured copy (handles and init events) */
         if (NT_SUCCESS(Status)) ConsoleStartToGuest(GuestStart, Attach->ConsoleStartInfo);
+        else RestoreCtrlRoutine(GuestCtrl, PrevCtrl);
         CsrFreeCaptureBuffer(Capture);
         return Status;
     }

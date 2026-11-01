@@ -347,12 +347,15 @@ static NTSTATUS CsrGuestThread(ULONG Routine, ULONG Parameter, WOW64_CONTEXT *Gu
     Wow64InitializeTeb(WOW64_TEB32(Teb), Teb, Teb, &Stack);
     NtSetInformationThread(NtCurrentThread(), ThreadQuerySetWin32StartAddress,
                            &StartAddress, sizeof(StartAddress));
-    /* The return address, the parameter, then RtlExitUserThread's own frame */
-    Frame = (ULONG *)((ULONG_PTR)Stack.StackBase - 4 * sizeof(ULONG));
+    /* The return address, the parameter, then RtlExitUserThread's own frame. The routine
+     * is entered as after a call: the stack pointer 4 below a 16-byte boundary, so that the
+     * parameter, the first stack slot above the return address, is aligned. */
+    Frame = (ULONG *)(((ULONG_PTR)Stack.StackBase & ~(ULONG_PTR)15) - 5 * sizeof(ULONG));
     Frame[0] = PtrToUlong(Wow64ExitThread32);
     Frame[1] = Parameter;
     Frame[2] = 0;
     Frame[3] = 0;
+    Frame[4] = 0;
     RtlZeroMemory(GuestContext, sizeof(*GuestContext));
     GuestContext->ContextFlags = WOW64_CONTEXT_FULL | WOW64_CONTEXT_EXTENDED_REGISTERS;
     GuestContext->Eip = Routine;
