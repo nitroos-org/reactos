@@ -77,12 +77,12 @@ static bool ReadLocalDumpSettings(const std::wstring& ProcessName, LocalDumpSett
 {
     HKEY hKey, hAppKey;
 
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, LOCALDUMPS_KEY, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, LOCALDUMPS_KEY, 0, KEY_READ | WER_REG_VIEW, &hKey) != ERROR_SUCCESS)
         return false;
 
     ReadSettingsFromKey(hKey, Settings);
     if (!ProcessName.empty() &&
-        RegOpenKeyExW(hKey, ProcessName.c_str(), 0, KEY_READ, &hAppKey) == ERROR_SUCCESS)
+        RegOpenKeyExW(hKey, ProcessName.c_str(), 0, KEY_READ | WER_REG_VIEW, &hAppKey) == ERROR_SUCCESS)
     {
         ReadSettingsFromKey(hAppKey, Settings);
         RegCloseKey(hAppKey);

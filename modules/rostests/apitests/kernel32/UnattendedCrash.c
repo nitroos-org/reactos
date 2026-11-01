@@ -14,6 +14,13 @@
  * interactive (a service, or a session without a desktop). Windows reports the
  * crash without asking anyone and ends the process with the exception code.
  * The crash reporter must not wait for a dialog that no one can see.
+ *
+ * On a visible desktop that nobody answers, the same holds when Windows Error
+ * Reporting is told not to show its UI (DontShowUI in the 64-bit view of the
+ * machine key). This runs for ReactOS only: it changes a machine setting,
+ * which a reference system must not get. A 32-bit build of this test on a
+ * 64-bit system checks that the crash of a WoW64 process is reported the same
+ * way as a native one.
  */
 
 /* The report may take a while on a loaded machine, but never this long */
@@ -24,6 +31,8 @@
 /* The child could not load uhexit_dll.dll: no crash, and the wrong exit code */
 #define NO_DLL_EXIT_CODE                0x0BADD11
 #define RETURNED_EXIT_CODE              0x5EE
+
+#define WER_KEY         L"SOFTWARE\\Microsoft\\Windows\\Windows Error Reporting"
 
 typedef VOID (WINAPI *FN_RaiseFailFastException)(PEXCEPTION_RECORD, PCONTEXT, DWORD);
 
@@ -191,11 +200,69 @@ static VOID TestContext(CONTEXT_INFO *Context)
     TestCrash("throw", CPP_EXCEPTION_CODE, Context);
 }
 
+/* A machine setting for the reporter: set it for the contexts that need it and put it back */
+static BOOL IsReactOS(VOID)
+{
+    HKEY hKey;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ReactOS", 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return FALSE;
+    RegCloseKey(hKey);
+    return TRUE;
+}
+
+typedef struct _SAVED_DONTSHOWUI
+{
+    BOOL Had;
+    DWORD Value;
+} SAVED_DONTSHOWUI;
+
+/* The reporter reads the 64-bit view; for a 32-bit program on a 64-bit system too */
+static BOOL SetDontShowUI(SAVED_DONTSHOWUI *Saved)
+{
+    HKEY hKey;
+    DWORD Type, Size = sizeof(Saved->Value), One = 1;
+    LONG Error;
+
+    Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, WER_KEY, 0, NULL, 0, KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY,
+                            NULL, &hKey, NULL);
+    if (Error != ERROR_SUCCESS)
+    {
+        skip("Cannot open the Windows Error Reporting key: %ld\n", Error);
+        return FALSE;
+    }
+    Saved->Had = (RegQueryValueExW(hKey, L"DontShowUI", NULL, &Type, (PBYTE)&Saved->Value, &Size) == ERROR_SUCCESS &&
+                  Type == REG_DWORD);
+    Error = RegSetValueExW(hKey, L"DontShowUI", 0, REG_DWORD, (PBYTE)&One, sizeof(One));
+    RegCloseKey(hKey);
+    if (Error != ERROR_SUCCESS)
+    {
+        skip("Cannot set DontShowUI: %ld\n", Error);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static VOID RestoreDontShowUI(const SAVED_DONTSHOWUI *Saved)
+{
+    HKEY hKey;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, WER_KEY, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, &hKey) != ERROR_SUCCESS)
+        return;
+    if (Saved->Had)
+        RegSetValueExW(hKey, L"DontShowUI", 0, REG_DWORD, (const BYTE *)&Saved->Value, sizeof(Saved->Value));
+    else
+        RegDeleteValueW(hKey, L"DontShowUI");
+    RegCloseKey(hKey);
+}
+
 START_TEST(UnattendedCrash)
 {
     PCHAR *Argv;
     int Argc;
     CONTEXT_INFO Context;
+    SAVED_DONTSHOWUI SavedDontShowUI;
+    BOOL IsWow64 = FALSE;
 
     Argc = winetest_get_mainargs(&Argv);
     if (Argc >= 3)
@@ -206,6 +273,9 @@ START_TEST(UnattendedCrash)
 
     ok(SearchPathW(NULL, L"uhexit_dll.dll", NULL, 0, NULL, NULL) != 0,
        "uhexit_dll.dll not found: %lu\n", GetLastError());
+
+    IsWow64Process(GetCurrentProcess(), &IsWow64);
+    trace("Running as a %s program\n", IsWow64 ? "WoW64" : "native");
 
     /* Started from a service or over ssh, the child shares this window station */
     if (!IsInteractive(GetProcessWindowStation()))
@@ -222,5 +292,17 @@ START_TEST(UnattendedCrash)
     {
         TestContext(&Context);
         DestroyPrivateContext(&Context);
+    }
+
+    /* A visible desktop that nobody answers: DontShowUI ends the crashed program too */
+    if (IsInteractive(GetProcessWindowStation()) && IsReactOS())
+    {
+        ZeroMemory(&Context, sizeof(Context));
+        Context.Name = IsWow64 ? "dontshowui, WoW64" : "dontshowui";
+        if (SetDontShowUI(&SavedDontShowUI))
+        {
+            TestContext(&Context);
+            RestoreDontShowUI(&SavedDontShowUI);
+        }
     }
 }

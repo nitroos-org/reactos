@@ -53,6 +53,15 @@ public:
 
 #define NEWLINE "\r\n"
 
+/*
+ * The error reporting settings (DontShowUI, LocalDumps) are in the 64-bit
+ * registry view. On a 64-bit system a 32-bit program is reported by the 32-bit
+ * drwtsn32 in SysWOW64 (Windows does the same with its 32-bit WerFault), which
+ * reads the settings there too, so that one setting serves both kinds of
+ * program. Without a 64-bit system the flag has no effect.
+ */
+#define WER_REG_VIEW KEY_WOW64_64KEY
+
 /* main.cpp */
 void xfprintf(FILE* stream, const char *fmt, ...);
 void PrintBugreport(FILE* output, DumpData& data);

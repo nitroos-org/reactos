@@ -54,7 +54,7 @@ static bool IsUiDisabled()
     {
         HKEY hKey;
         DWORD Type, Value = 0, Size = sizeof(Value);
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Keys[n], 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Keys[n], 0, KEY_QUERY_VALUE | WER_REG_VIEW, &hKey) != ERROR_SUCCESS)
             continue;
         LONG Error = RegQueryValueExW(hKey, L"DontShowUI", NULL, &Type, (LPBYTE)&Value, &Size);
         RegCloseKey(hKey);

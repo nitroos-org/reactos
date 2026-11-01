@@ -154,6 +154,11 @@ SysWOW64/msiexec.exe
 # class on WoW64 needs the 32-bit host.
 SysWOW64/dllhost.exe
 
+# Crash reporter: kernel32 starts %SystemRoot%\System32\drwtsn32.exe for an unhandled exception, which a
+# 32-bit program resolves to SysWOW64. Without it every crash of a 32-bit program shows the classic error
+# box and never ends on a desktop nobody watches.
+SysWOW64/drwtsn32.exe
+
 # Both guest common-control activation contexts share the wide guest DLL.
 winsxs/x86_microsoft.windows.common-controls_6595b64144ccf1df_5.82.2600.2982_none_deadbeef/comctl32.dll
 winsxs/x86_microsoft.windows.common-controls_6595b64144ccf1df_6.0.2600.2982_none_deadbeef/comctl32.dll
