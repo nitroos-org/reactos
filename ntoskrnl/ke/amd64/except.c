@@ -854,3 +854,54 @@ KiXmmExceptionHandler(
 
     return ExceptionCode;
 }
+
+NTSTATUS
+NTAPI
+KiFloatingErrorHandler(
+    IN PKTRAP_FRAME TrapFrame,
+    OUT PULONG64 DataOffset)
+{
+    DECLSPEC_ALIGN(16) XMM_SAVE_AREA32 FxArea;
+    ULONG Mask, Error;
+
+    *DataOffset = 0;
+
+    /* The pending x87 error is still live in the FPU: read it, then clear it
+     * (FXSAVE and FNCLEX never raise #MF), otherwise it would fire again at
+     * the next waiting x87 instruction after the exception is handled. */
+    _fxsave(&FxArea);
+    __asm__ __volatile__("fnclex" : : : "memory");
+
+    /* A kernel mode trap only happens for a delayed error; it is dropped */
+    if (!(TrapFrame->SegCs & 3))
+        return STATUS_SUCCESS;
+
+    /* Exceptions that are unmasked in the control word and pending in the status word */
+    Mask = FxArea.ControlWord & (FSW_INVALID_OPERATION | FSW_DENORMAL | FSW_ZERO_DIVIDE |
+                                 FSW_OVERFLOW | FSW_UNDERFLOW | FSW_PRECISION);
+    Error = FxArea.StatusWord & ~Mask;
+
+    if (Error & FSW_INVALID_OPERATION)
+    {
+        /* On x86 a stack fault is reported as an invalid operation with the SF bit */
+        if (Error & FSW_STACK_FAULT)
+        {
+            *DataOffset = FxArea.DataOffset;
+            return STATUS_FLOAT_STACK_CHECK;
+        }
+        return STATUS_FLOAT_INVALID_OPERATION;
+    }
+    if (Error & FSW_ZERO_DIVIDE)
+        return STATUS_FLOAT_DIVIDE_BY_ZERO;
+    if (Error & FSW_DENORMAL)
+        return STATUS_FLOAT_INVALID_OPERATION;
+    if (Error & FSW_OVERFLOW)
+        return STATUS_FLOAT_OVERFLOW;
+    if (Error & FSW_UNDERFLOW)
+        return STATUS_FLOAT_UNDERFLOW;
+    if (Error & FSW_PRECISION)
+        return STATUS_FLOAT_INEXACT_RESULT;
+
+    /* Nothing is pending that software has to handle (spurious or already cleared) */
+    return STATUS_SUCCESS;
+}

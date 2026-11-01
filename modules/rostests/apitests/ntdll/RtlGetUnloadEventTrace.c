@@ -54,8 +54,8 @@ static void Test_Dump()
  * RtlGetUnloadEventTraceEx reports the element size, element count and the trace
  * array base. The element size it reports MUST equal sizeof(RTL_UNLOAD_EVENT_TRACE)
  * so that a cross-process consumer using the same (Windows-accurate) struct accepts
- * the data instead of rejecting it as too small. The array base must match the plain
- * RtlGetUnloadEventTrace() pointer.
+ * the data instead of rejecting it as too small. The array is reached through one
+ * pointer indirection and is not the legacy RtlGetUnloadEventTrace() array.
  */
 static void Test_Ex()
 {
@@ -87,11 +87,19 @@ static void Test_Ex()
     }
     if (ElementCount)
     {
-        ok(*ElementCount == RTL_UNLOAD_EVENT_TRACE_NUMBER,
-           "ElementCount %lu != %u\n", *ElementCount, RTL_UNLOAD_EVENT_TRACE_NUMBER);
+        /* Windows 10 reports 64 elements here, the legacy array has 16 */
+        ok(*ElementCount == 64, "ElementCount %lu != 64\n", *ElementCount);
     }
-    ok(EventTrace == RtlGetUnloadEventTrace(),
-       "EventTrace %p != RtlGetUnloadEventTrace() %p\n", EventTrace, RtlGetUnloadEventTrace());
+    /* EventTrace is the address of a pointer to the array (one more
+     * indirection than RtlGetUnloadEventTrace), not the legacy array itself. */
+    if (EventTrace)
+    {
+        PVOID Array = *(PVOID *)EventTrace;
+        ok(Array != NULL, "Array pointer not set\n");
+        ok(EventTrace != RtlGetUnloadEventTrace() && Array != RtlGetUnloadEventTrace(),
+           "EventTrace %p / %p must differ from RtlGetUnloadEventTrace() %p\n",
+           EventTrace, Array, RtlGetUnloadEventTrace());
+    }
 }
 
 #define TESTDLL "GetUName.dLl"
