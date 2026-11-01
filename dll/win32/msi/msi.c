@@ -2968,8 +2968,10 @@ static UINT query_feature_state( const WCHAR *product, const WCHAR *squashed, co
         if (!path) missing = TRUE;
         else if (lstrlenW( path ) > 2 &&
                  path[0] >= '0' && path[0] <= '9' &&
-                 path[1] >= '0' && path[1] <= '9')
+                 path[1] >= '0' && path[1] <= '9' && path[2] != ':')
         {
+            /* a source path is "NN" and a backslash; "NN:" starts the key path of a component whose
+               key path is a registry value, which is installed locally */
             source = TRUE;
         }
         free( path );

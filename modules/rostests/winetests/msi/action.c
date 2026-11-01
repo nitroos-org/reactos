@@ -2153,6 +2153,47 @@ static const msi_table cf_tables[] =
     ADD_TABLE(property)
 };
 
+static const char ed_component_dat[] =
+    "Component\tComponentId\tDirectory_\tAttributes\tCondition\tKeyPath\n"
+    "s72\tS38\ts72\ti2\tS255\tS72\n"
+    "Component\tComponent\n"
+    "One\t{F8CD42AC-9C38-48FE-8664-B35FD121012A}\tFIRSTDIR\t0\t\tone.txt\n"
+    "Two\t{DE2DB02E-2DDF-4E34-8CF6-DCA13E29DF52}\tMSITESTDIR\t0\t\ttwo.txt\n";
+
+static const char ed_install_exec_seq_dat[] =
+    "Action\tCondition\tSequence\n"
+    "s72\tS255\tI2\n"
+    "InstallExecuteSequence\tAction\n"
+    "CostFinalize\t\t1000\n"
+    "ValidateProductID\t\t700\n"
+    "CostInitialize\t\t800\n"
+    "FileCost\t\t900\n"
+    "RemoveFiles\t\t3500\n"
+    "RemoveFolders\t\t3800\n"
+    "InstallFiles\t\t4000\n"
+    "RegisterUser\t\t6000\n"
+    "RegisterProduct\t\t6100\n"
+    "PublishFeatures\t\t6300\n"
+    "PublishProduct\t\t6400\n"
+    "InstallFinalize\t\t6600\n"
+    "InstallInitialize\t\t1500\n"
+    "ProcessComponents\t\t1600\n"
+    "UnpublishFeatures\t\t1800\n"
+    "InstallValidate\t\t1400\n"
+    "LaunchConditions\t\t100\n";
+
+static const msi_table ed_tables[] =
+{
+    ADD_TABLE(ed_component),
+    ADD_TABLE(cf_directory),
+    ADD_TABLE(cf_feature),
+    ADD_TABLE(cf_feature_comp),
+    ADD_TABLE(cf_file),
+    ADD_TABLE(ed_install_exec_seq),
+    ADD_TABLE(media),
+    ADD_TABLE(property)
+};
+
 static const msi_table sss_tables[] =
 {
     ADD_TABLE(component),
@@ -5224,6 +5265,102 @@ error:
     DeleteFileA(msifile);
 }
 
+/* An installed product whose other feature was never installed: after the removal of everything
+ * installed, the directory of the product is empty and gets removed, although a component of the
+ * feature that was not installed names it as its directory. */
+static void test_remove_empty_directory_partial_install(void)
+{
+    const char prodcode[] = "{7DF88A48-996F-4EC8-A022-BF956F9B2CBB}";
+    INSTALLSTATE state;
+    UINT r;
+
+    if (!is_process_elevated())
+    {
+        skip("process is limited\n");
+        return;
+    }
+
+    CreateDirectoryA("msitest", NULL);
+    CreateDirectoryA("msitest\\first", NULL);
+    create_file("msitest\\first\\one.txt", 1000);
+    create_file("msitest\\two.txt", 1000);
+    create_database(msifile, ed_tables, ARRAY_SIZE(ed_tables));
+
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
+
+    r = MsiInstallProductA(msifile, "ADDLOCAL=One");
+    if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+    {
+        skip("Not enough rights to perform tests\n");
+        goto error;
+    }
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+
+    ok(pf_exists("msitest\\first\\one.txt"), "file not installed\n");
+    ok(!pf_exists("msitest\\two.txt"), "file installed\n");
+
+    state = MsiQueryFeatureStateA(prodcode, "One");
+    ok(state == INSTALLSTATE_LOCAL, "feature One: expected LOCAL, got %d\n", state);
+    state = MsiQueryFeatureStateA(prodcode, "Two");
+    ok(state == INSTALLSTATE_ABSENT, "feature Two: expected ABSENT, got %d\n", state);
+
+    /* only the installed feature is removed: its directory and the parent directory, which a
+     * component of the feature that was never installed names, must not stay */
+    r = MsiInstallProductA(msifile, "REMOVE=ALL");
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+
+    ok(!pf_exists("msitest\\first\\one.txt"), "file not removed\n");
+    ok(!pf_exists("msitest\\first"), "directory not removed\n");
+    ok(!pf_exists("msitest"), "directory not removed\n");
+
+    r = MsiInstallProductA(msifile, "ADDLOCAL=One");
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+
+    ok(pf_exists("msitest\\first\\one.txt"), "file not installed\n");
+
+    /* maintenance: add the other feature, the first one stays, then remove it again */
+    r = MsiInstallProductA(msifile, "ADDLOCAL=Two");
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+
+    ok(pf_exists("msitest\\first\\one.txt"), "file removed\n");
+    ok(pf_exists("msitest\\two.txt"), "file not installed\n");
+
+    state = MsiQueryFeatureStateA(prodcode, "One");
+    ok(state == INSTALLSTATE_LOCAL, "feature One: expected LOCAL, got %d\n", state);
+    state = MsiQueryFeatureStateA(prodcode, "Two");
+    ok(state == INSTALLSTATE_LOCAL, "feature Two: expected LOCAL, got %d\n", state);
+
+    r = MsiInstallProductA(msifile, "REMOVE=Two");
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+
+    ok(pf_exists("msitest\\first\\one.txt"), "file removed\n");
+    ok(!pf_exists("msitest\\two.txt"), "file not removed\n");
+    ok(pf_exists("msitest"), "directory removed\n");
+
+    state = MsiQueryFeatureStateA(prodcode, "One");
+    ok(state == INSTALLSTATE_LOCAL, "feature One: expected LOCAL, got %d\n", state);
+    state = MsiQueryFeatureStateA(prodcode, "Two");
+    ok(state == INSTALLSTATE_ABSENT, "feature Two: expected ABSENT, got %d\n", state);
+
+    r = MsiInstallProductA(msifile, "REMOVE=ALL");
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+
+    ok(!pf_exists("msitest\\first\\one.txt"), "file not removed\n");
+    ok(!pf_exists("msitest\\first"), "directory not removed\n");
+    ok(!pf_exists("msitest"), "directory not removed\n");
+
+error:
+    DeleteFileA("msitest\\first\\one.txt");
+    DeleteFileA("msitest\\two.txt");
+    RemoveDirectoryA("msitest\\first");
+    RemoveDirectoryA("msitest");
+    DeleteFileA(msifile);
+    delete_pf("msitest\\first\\one.txt", TRUE);
+    delete_pf("msitest\\two.txt", TRUE);
+    delete_pf("msitest\\first", FALSE);
+    delete_pf("msitest", FALSE);
+}
+
 static void test_start_stop_services(void)
 {
     UINT r;
@@ -6701,6 +6838,7 @@ START_TEST(action)
     test_write_registry_values();
     test_envvar();
     test_create_remove_folder();
+    test_remove_empty_directory_partial_install();
     test_start_stop_services();
     test_delete_services();
     test_install_services();

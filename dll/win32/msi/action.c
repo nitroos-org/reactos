@@ -4311,29 +4311,43 @@ static UINT publish_upgrade_code(MSIPACKAGE *package)
 static BOOL check_publish(MSIPACKAGE *package)
 {
     MSIFEATURE *feature;
+    BOOL removed = FALSE, stays = FALSE;
 
     LIST_FOR_EACH_ENTRY(feature, &package->features, MSIFEATURE, entry)
     {
         feature->Action = msi_get_feature_action( package, feature );
         if (feature->Action == INSTALLSTATE_LOCAL || feature->Action == INSTALLSTATE_SOURCE)
             return TRUE;
+
+        if (feature->Installed == INSTALLSTATE_ABSENT) continue;
+        if (feature->Action == INSTALLSTATE_ABSENT) removed = TRUE;
+        else stays = TRUE;
     }
 
-    return FALSE;
+    /* a maintenance removal of some features of an installed product, the others stay: the removed
+       ones are published as absent (unnamed features get no action and stay as they are) */
+    return removed && stays;
 }
 
 static BOOL check_unpublish(MSIPACKAGE *package)
 {
     MSIFEATURE *feature;
+    BOOL removed = FALSE;
 
     LIST_FOR_EACH_ENTRY(feature, &package->features, MSIFEATURE, entry)
     {
         feature->Action = msi_get_feature_action( package, feature );
-        if (feature->Action != INSTALLSTATE_ABSENT)
-            return FALSE;
+        if (feature->Action == INSTALLSTATE_ABSENT)
+        {
+            removed = TRUE;
+            continue;
+        }
+        /* a feature that was never installed has nothing to unpublish */
+        if (feature->Action == INSTALLSTATE_UNKNOWN && feature->Installed == INSTALLSTATE_ABSENT) continue;
+        return FALSE;
     }
 
-    return TRUE;
+    return removed || list_empty( &package->features );
 }
 
 static UINT publish_patches( MSIPACKAGE *package )

@@ -1775,6 +1775,16 @@ static void test_MsiQueryFeatureState(void)
     ok(state == INSTALLSTATE_LOCAL, "Expected INSTALLSTATE_LOCAL, got %d\n", state);
     ok(error == ERROR_SUCCESS, "expected ERROR_SUCCESS, got %lu\n", error);
 
+    /* the key path of a component whose key path is a registry value is "02:\\key\\name": local, not source */
+    res = RegSetValueExA(compkey, prod_squashed, 0, REG_SZ, (const BYTE *)"02:\\Software\\winetest\\value", 27);
+    ok(res == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %ld\n", res);
+
+    SetLastError(0xdeadbeef);
+    state = MsiQueryFeatureStateA(prodcode, "feature");
+    error = GetLastError();
+    ok(state == INSTALLSTATE_LOCAL, "Expected INSTALLSTATE_LOCAL, got %d\n", state);
+    ok(error == ERROR_SUCCESS, "expected ERROR_SUCCESS, got %lu\n", error);
+
     RegDeleteValueA(compkey, prod_squashed);
     RegDeleteValueA(compkey2, prod_squashed);
     RegDeleteKeyExA(compkey, "", access & KEY_WOW64_64KEY, 0);

@@ -1562,6 +1562,10 @@ static BOOL is_protected_folder( MSIPACKAGE *package, MSIFOLDER *folder )
         BOOL same;
 
         if (!wcsicmp( folder->Directory, system_folder_names[i] )) return TRUE;
+        /* TARGETDIR is the root of the tree, but for an installed product it is resolved to the
+           InstallLocation, which is the product's own directory (INSTALLLOCATION): it must not
+           protect that one. The drive root check above covers the real root. */
+        if (!wcsicmp( system_folder_names[i], L"TARGETDIR" ) || !wcsicmp( system_folder_names[i], L"ROOTDRIVE" )) continue;
         if (!(path = msi_dup_property( package->db, system_folder_names[i] ))) continue;
         same = same_folder_path( path, folder->ResolvedTarget );
         free( path );
@@ -1570,7 +1574,9 @@ static BOOL is_protected_folder( MSIPACKAGE *package, MSIFOLDER *folder )
     return FALSE;
 }
 
-/* a folder that a component that stays installed, or is being installed, lives in */
+/* a folder that a component that stays installed, or is being installed, lives in. A component
+ * that gets no action and was never installed (it belongs to a feature that was not installed,
+ * e.g. ADDLOCAL named other features) does not keep its directory. */
 static BOOL is_folder_in_use( MSIPACKAGE *package, MSIFOLDER *folder )
 {
     MSICOMPONENT *comp;
@@ -1578,7 +1584,18 @@ static BOOL is_folder_in_use( MSIPACKAGE *package, MSIFOLDER *folder )
     LIST_FOR_EACH_ENTRY( comp, &package->components, MSICOMPONENT, entry )
     {
         if (!comp->Directory || wcscmp( comp->Directory, folder->Directory )) continue;
-        if (msi_get_component_action( package, comp ) != INSTALLSTATE_ABSENT) return TRUE;
+
+        switch (msi_get_component_action( package, comp ))
+        {
+        case INSTALLSTATE_ABSENT:
+            break;
+        case INSTALLSTATE_LOCAL:
+        case INSTALLSTATE_SOURCE:
+            return TRUE;
+        default:
+            if (comp->Installed == INSTALLSTATE_LOCAL || comp->Installed == INSTALLSTATE_SOURCE) return TRUE;
+            break;
+        }
     }
     return FALSE;
 }
