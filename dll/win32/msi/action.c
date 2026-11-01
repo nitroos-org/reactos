@@ -7472,19 +7472,48 @@ static UINT ITERATE_RemoveEnvironmentString( MSIRECORD *rec, LPVOID param )
         goto done;
 
     len_new_value = size / sizeof(WCHAR) - 1;
-    p = q = new_value;
-    for (;;)
+    if (value && !(flags & ENV_MOD_MASK) && wcscmp( new_value, value ))
     {
-        while (*q && *q != ';') q++;
-        len = q - p;
-        if (value && len == len_value && !memcmp( value, p, len * sizeof(WCHAR) ))
+        /* A plain value is only removed while the variable still has exactly that value:
+           another row (or the user) has added to it, and those parts are taken out by
+           their own rows (action.c winetest, MSITESTVAR17 and 18). */
+        TRACE("value of %s changed, not removing\n", debugstr_w(name));
+        goto done;
+    }
+    if (value && len_value && (flags & ENV_MOD_PREFIX) && !wcsncmp( new_value, value, len_value ) &&
+        (!new_value[len_value] || new_value[len_value] == ';'))
+    {
+        /* the string was added in front, it may contain separators itself */
+        q = new_value + len_value;
+        if (*q == ';') q++;
+        memmove( new_value, q, (len_new_value - (q - new_value) + 1) * sizeof(WCHAR) );
+    }
+    else if (value && len_value && (flags & ENV_MOD_APPEND) && len_new_value > len_value &&
+             new_value[len_new_value - len_value - 1] == ';' &&
+             !wcscmp( new_value + len_new_value - len_value, value ))
+    {
+        new_value[len_new_value - len_value - 1] = 0;
+    }
+    else if (value && !(flags & ENV_MOD_MASK))
+    {
+        new_value[0] = 0; /* the whole value is ours */
+    }
+    else
+    {
+        p = q = new_value;
+        for (;;)
         {
-            if (*q == ';') q++;
-            memmove( p, q, (len_new_value - (q - new_value) + 1) * sizeof(WCHAR) );
-            break;
+            while (*q && *q != ';') q++;
+            len = q - p;
+            if (value && len == len_value && !memcmp( value, p, len * sizeof(WCHAR) ))
+            {
+                if (*q == ';') q++;
+                memmove( p, q, (len_new_value - (q - new_value) + 1) * sizeof(WCHAR) );
+                break;
+            }
+            if (!*q) break;
+            p = ++q;
         }
-        if (!*q) break;
-        p = ++q;
     }
 
     if (!new_value[0] || !value)
