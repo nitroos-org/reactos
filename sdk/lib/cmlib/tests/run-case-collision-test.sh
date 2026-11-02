@@ -19,7 +19,7 @@ CC=${CC:-cc}
     "$HERE/CaseCollision.c" \
     "$CMLIB"/hiveinit.c "$CMLIB"/hivecell.c "$CMLIB"/hivesum.c "$CMLIB"/hivebin.c \
     "$CMLIB"/hivewrt.c "$CMLIB"/cmindex.c "$CMLIB"/cmname.c "$CMLIB"/cmkeydel.c \
-    "$CMLIB"/cminit.c "$CMLIB"/cmvalue.c "$CMLIB"/cmcheck.c "$CMLIB"/cmheal.c \
+    "$CMLIB"/cminit.c "$CMLIB"/cmvalue.c "$CMLIB"/cmse.c "$CMLIB"/cmcheck.c "$CMLIB"/cmheal.c \
     -o "$OUT"
 
 echo "built: $OUT"

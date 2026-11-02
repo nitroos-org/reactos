@@ -297,6 +297,28 @@ typedef struct _CM_KEY_SECURITY_CACHE_ENTRY *PCM_KEY_SECURITY_CACHE_ENTRY;
 typedef struct _CM_KEY_CONTROL_BLOCK *PCM_KEY_CONTROL_BLOCK;
 typedef struct _CM_CELL_REMAP_BLOCK *PCM_CELL_REMAP_BLOCK;
 
+//
+// Key Security Cache: one entry per 'sk' cell of a hive, on the hash list of
+// the hive that its descriptor hashes to (CMHIVE::SecurityHash). The entry does
+// not hold a copy of the descriptor: it is compared in place, in the 'sk' cell.
+//
+typedef struct _CM_KEY_SECURITY_CACHE
+{
+    HCELL_INDEX Cell;
+    ULONG ConvKey;
+    LIST_ENTRY List;
+    ULONG DescriptorLength;
+} CM_KEY_SECURITY_CACHE, *PCM_KEY_SECURITY_CACHE;
+
+//
+// Key Security Cache Entry
+//
+typedef struct _CM_KEY_SECURITY_CACHE_ENTRY
+{
+    HCELL_INDEX Cell;
+    PCM_KEY_SECURITY_CACHE CachedSecurity;
+} CM_KEY_SECURITY_CACHE_ENTRY, *PCM_KEY_SECURITY_CACHE_ENTRY;
+
 // See ntoskrnl/include/internal/cm.h
 #define CMP_SECURITY_HASH_LISTS     64
 
@@ -666,6 +688,7 @@ typedef struct _CMP_CASE_REPAIR_STATS
     ULONG Hashes;   /* hash leaf entries given the hash of the current case table */
     ULONG Sorted;   /* subkey indexes sorted again */
     ULONG Skipped;  /* subkey indexes out of order that could not be sorted */
+    ULONG SecurityReset;    /* keys whose bad Security was reset to HCELL_NIL (not a case repair) */
 } CMP_CASE_REPAIR_STATS, *PCMP_CASE_REPAIR_STATS;
 
 VOID
@@ -920,6 +943,86 @@ NTAPI
 CmpFreeSecurityDescriptor(
     IN PHHIVE Hive,
     IN HCELL_INDEX Cell
+);
+
+/*
+ * 'sk' cell primitives (cmse.c). Every cell index and length read from a hive
+ * is checked here against the bin that holds the cell: a hive file is not
+ * trusted.
+ */
+PCM_KEY_SECURITY
+NTAPI
+CmpGetCheckedSecurityCell(
+    IN PHHIVE Hive,
+    IN HCELL_INDEX Cell,
+    OUT PULONG CellSize OPTIONAL
+);
+
+BOOLEAN
+NTAPI
+CmpValidateSecurityCell(
+    IN PHHIVE Hive,
+    IN HCELL_INDEX Cell
+);
+
+BOOLEAN
+NTAPI
+CmpFindMatchingDescriptorCell(
+    IN PCMHIVE CmHive,
+    IN PVOID Descriptor,
+    IN ULONG DescriptorLength,
+    IN HSTORAGE_TYPE Type,
+    OUT PHCELL_INDEX SecurityCell
+);
+
+NTSTATUS
+NTAPI
+CmpInsertSecurityDescriptor(
+    IN PCMHIVE CmHive,
+    IN PVOID Descriptor,
+    IN ULONG DescriptorLength,
+    IN HSTORAGE_TYPE Type,
+    OUT PHCELL_INDEX SecurityCell
+);
+
+BOOLEAN
+NTAPI
+CmpReleaseSecurityCell(
+    IN PHHIVE Hive,
+    IN HCELL_INDEX SecurityCell
+);
+
+BOOLEAN
+NTAPI
+CmpMarkSecurityCellDirty(
+    IN PHHIVE Hive,
+    IN HCELL_INDEX SecurityCell
+);
+
+BOOLEAN
+NTAPI
+CmpAddSecurityCellToCache(
+    IN PCMHIVE CmHive,
+    IN HCELL_INDEX SecurityCell
+);
+
+VOID
+NTAPI
+CmpRemoveFromSecurityCache(
+    IN PHHIVE Hive,
+    IN HCELL_INDEX SecurityCell
+);
+
+BOOLEAN
+NTAPI
+CmpBuildSecurityCache(
+    IN PCMHIVE CmHive
+);
+
+VOID
+NTAPI
+CmpFreeSecurityCache(
+    IN PCMHIVE CmHive
 );
 
 /******************************************************************************/

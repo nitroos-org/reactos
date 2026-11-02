@@ -2097,6 +2097,45 @@ CmpReleaseHiveCellLock(
     KeLeaveCriticalRegion();
 }
 
+/*
+ * The hive's security lock: the reference counts of the 'sk' cells, their ring
+ * and the security cache (cmlib/cmse.c). Like the cell lock, the owner may
+ * already hold it.
+ */
+BOOLEAN
+NTAPI
+CmpAcquireHiveSecurityLock(
+    _In_ PHHIVE Hive)
+{
+    PCMHIVE CmHive = CONTAINING_RECORD(Hive, CMHIVE, Hive);
+
+    if (CmHive->HiveSecurityLockOwner == KeGetCurrentThread())
+        return FALSE;
+
+    KeEnterCriticalRegion();
+    ExAcquirePushLockExclusive(&CmHive->SecurityLock);
+    ASSERT(CmHive->HiveSecurityLockOwner == NULL);
+    CmHive->HiveSecurityLockOwner = KeGetCurrentThread();
+    return TRUE;
+}
+
+VOID
+NTAPI
+CmpReleaseHiveSecurityLock(
+    _In_ PHHIVE Hive,
+    _In_ BOOLEAN Acquired)
+{
+    PCMHIVE CmHive = CONTAINING_RECORD(Hive, CMHIVE, Hive);
+
+    if (!Acquired)
+        return;
+
+    ASSERT(CmHive->HiveSecurityLockOwner == KeGetCurrentThread());
+    CmHive->HiveSecurityLockOwner = NULL;
+    ExReleasePushLockExclusive(&CmHive->SecurityLock);
+    KeLeaveCriticalRegion();
+}
+
 BOOLEAN
 NTAPI
 CmpTestHiveFlusherLockShared(IN PCMHIVE Hive)

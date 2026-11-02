@@ -186,27 +186,6 @@ typedef struct _CM_NAME_HASH_TABLE_ENTRY
 } CM_NAME_HASH_TABLE_ENTRY, *PCM_NAME_HASH_TABLE_ENTRY;
 
 //
-// Key Security Cache
-//
-typedef struct _CM_KEY_SECURITY_CACHE
-{
-    HCELL_INDEX Cell;
-    ULONG ConvKey;
-    LIST_ENTRY List;
-    ULONG DescriptorLength;
-    SECURITY_DESCRIPTOR_RELATIVE Descriptor;
-} CM_KEY_SECURITY_CACHE, *PCM_KEY_SECURITY_CACHE;
-
-//
-// Key Security Cache Entry
-//
-typedef struct _CM_KEY_SECURITY_CACHE_ENTRY
-{
-    HCELL_INDEX Cell;
-    PCM_KEY_SECURITY_CACHE CachedSecurity;
-} CM_KEY_SECURITY_CACHE_ENTRY, *PCM_KEY_SECURITY_CACHE_ENTRY;
-
-//
 // Cached Child List
 //
 typedef struct _CACHED_CHILD_LIST
@@ -951,6 +930,19 @@ CmpAcquireHiveCellLock(
 VOID
 NTAPI
 CmpReleaseHiveCellLock(
+    _In_ PHHIVE Hive,
+    _In_ BOOLEAN Acquired
+);
+
+BOOLEAN
+NTAPI
+CmpAcquireHiveSecurityLock(
+    _In_ PHHIVE Hive
+);
+
+VOID
+NTAPI
+CmpReleaseHiveSecurityLock(
     _In_ PHHIVE Hive,
     _In_ BOOLEAN Acquired
 );
