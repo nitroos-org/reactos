@@ -157,7 +157,14 @@ NTSTATUS Wow64Continue(const WOW64_CONTEXT *Context, BOOLEAN TestAlert)
     WOW64_CONTEXT Merged;
     const WOW64_CONTEXT *Caller = Context;
     ULONG Flags = Context->ContextFlags, Groups = Flags & 0x3f;
-    if ((Flags & WOW64_CONTEXT_i386) == 0 || (Flags & ~(WOW64_CONTEXT_ALL | WOW64_XSTATE_FLAG)))
+    /* A context taken from an exception dispatch carries the kernel's exception
+     * state bits (CONTEXT_EXCEPTION_ACTIVE/SERVICE_ACTIVE/REQUEST/REPORTING).
+     * Code that resumes after catching (the CLR, SEH unwinders) passes the
+     * context back unchanged; NtContinue accepts and ignores these bits. */
+    if ((Flags & WOW64_CONTEXT_i386) == 0 ||
+        (Flags & ~(WOW64_CONTEXT_ALL | WOW64_XSTATE_FLAG | WOW64_CONTEXT_EXCEPTION_ACTIVE |
+                   WOW64_CONTEXT_SERVICE_ACTIVE | WOW64_CONTEXT_EXCEPTION_REQUEST |
+                   WOW64_CONTEXT_EXCEPTION_REPORTING)))
         return STATUS_NOT_SUPPORTED;
     if ((Flags & WOW64_CONTEXT_FULL) != WOW64_CONTEXT_FULL)
     {

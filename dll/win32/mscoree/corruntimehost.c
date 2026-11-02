@@ -1236,6 +1236,14 @@ DWORD WINAPI GetTokenForVTableEntry(HINSTANCE hinst, BYTE **ppVTEntry)
 
     TRACE("%p,%p\n", hinst, ppVTEntry);
 
+    /* With the Microsoft CLR installed the vtable fixups are owned by clr.dll,
+     * not by the Wine/Mono fixup list below: ask the real mscoreei. */
+    {
+        DWORD (WINAPI *fp)(HINSTANCE, BYTE **) = mscoree_real_export("GetTokenForVTableEntry");
+        if (fp)
+            return fp(hinst, ppVTEntry);
+    }
+
     rva = (BYTE*)ppVTEntry - (BYTE*)hinst;
 
     EnterCriticalSection(&fixup_list_cs);
@@ -1554,6 +1562,17 @@ BOOL WINAPI _CorDllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     HRESULT hr;
 
     TRACE("(%p, %ld, %p)\n", hinstDLL, fdwReason, lpvReserved);
+
+    /* A mixed-mode (IJW) assembly loaded through LoadLibrary reaches us as its
+     * DLL entry point.  With the Microsoft CLR installed the real mscoreei owns
+     * the vtable fixups (clr.dll later reads them back through
+     * GetTokenForVTableEntry), so hand the call over instead of installing the
+     * Wine/Mono fixup thunks.  This is what Microsoft's mscoree does. */
+    {
+        BOOL (WINAPI *fp)(HINSTANCE, DWORD, LPVOID) = mscoree_real_export("_CorDllMain");
+        if (fp)
+            return fp(hinstDLL, fdwReason, lpvReserved);
+    }
 
     hr = assembly_from_hmodule(&assembly, hinstDLL);
     if (SUCCEEDED(hr))
