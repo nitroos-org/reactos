@@ -7,11 +7,12 @@ list(APPEND SOURCE
     file.c
     job.c
     qmgr.c
+    ranges.c
     testlist.c)
 
 add_executable(qmgr_winetest ${SOURCE})
 set_module_type(qmgr_winetest win32cui)
-add_importlibs(qmgr_winetest ole32 shlwapi user32 msvcrt kernel32)
+add_importlibs(qmgr_winetest ole32 ws2_32 shlwapi user32 msvcrt kernel32)
 target_link_libraries(qmgr_winetest uuid)
 
 if(MSVC)

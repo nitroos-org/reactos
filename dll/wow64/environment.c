@@ -79,3 +79,52 @@ NTSTATUS Wow64CreateEnvironment(PVOID *Environment)
     }
     return Status;
 }
+
+/* A guest process that starts a native (64-bit) child hands over the environment it inherited. That is
+ * the guest's view (PROCESSOR_ARCHITECTURE=x86, ProgramFiles and CommonProgramFiles under "Program Files
+ * (x86)"), which the child would take for its own: Click-to-Run, for one, then picks the 32-bit common
+ * files folder for a 64-bit installation. Translate the guest's view back to the native one.
+ * The *W6432 and (x86) variables stay, as in any native process. */
+NTSTATUS Wow64CreateNativeChildEnvironment(PCWSTR Guest, PVOID *Environment)
+{
+    static const struct { PCWSTR Name, Native; } Map[] = {
+        {L"PROCESSOR_ARCHITECTURE", L"PROCESSOR_ARCHITEW6432"},
+        {L"ProgramFiles", L"ProgramW6432"},
+        {L"CommonProgramFiles", L"CommonProgramW6432"},
+    };
+    WCHAR Value[MAX_PATH];
+    PCWSTR End = Guest;
+    PVOID Block;
+    SIZE_T Size;
+    ULONG i;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    while (*End) End += wcslen(End) + 1;
+    Size = (End + 1 - Guest) * sizeof(WCHAR);
+    /* RtlSetEnvironmentVariable grows a block of the process heap */
+    Block = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
+    if (!Block) return STATUS_NO_MEMORY;
+    RtlCopyMemory(Block, Guest, Size);
+
+    for (i = 0; i < RTL_NUMBER_OF(Map); ++i)
+    {
+        UNICODE_STRING Key;
+        if (!GetVariable(Block, Map[i].Native, Value, sizeof(Value))) continue;
+        Status = SetVariable(&Block, Map[i].Name, Value);
+        if (!NT_SUCCESS(Status)) break;
+        if (i == 0)
+        {
+            /* Only the guest's view carries the native architecture under this name */
+            RtlInitUnicodeString(&Key, Map[i].Native);
+            Status = RtlSetEnvironmentVariable(&Block, &Key, NULL);
+            if (!NT_SUCCESS(Status)) break;
+        }
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Block);
+        return Status;
+    }
+    *Environment = Block;
+    return STATUS_SUCCESS;
+}

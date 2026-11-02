@@ -95,6 +95,7 @@ typedef struct
 } WOW64_SYSTEM_BASIC_INFORMATION;
 
 NTSTATUS Wow64CreateEnvironment(PVOID *Environment);
+NTSTATUS Wow64CreateNativeChildEnvironment(PCWSTR Guest, PVOID *Environment);
 NTSTATUS Wow64CreateProcess(PVOID Request, BOOLEAN *Reported);
 
 VOID Wow64InitializeTeb(TEB32 *, const TEB *, PTEB, const INITIAL_TEB *);

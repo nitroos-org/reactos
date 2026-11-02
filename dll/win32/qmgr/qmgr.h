@@ -79,6 +79,9 @@ typedef struct
     struct list entryFromJob;
     BackgroundCopyJobImpl *owner;
     DWORD read_size;
+    /* AddFileWithRanges: the parts of the remote file to fetch, written at their own offsets */
+    DWORD range_count;
+    BG_FILE_RANGE *ranges;
 } BackgroundCopyFileImpl;
 
 /* Background copy manager vtbl and related data */
@@ -108,6 +111,7 @@ HRESULT enum_copy_job_create(BackgroundCopyManagerImpl *qmgr,
 HRESULT BackgroundCopyFileConstructor(BackgroundCopyJobImpl *owner,
                                       LPCWSTR remoteName, LPCWSTR localName,
                                       BackgroundCopyFileImpl **file);
+HRESULT BackgroundCopyFileSetRanges(BackgroundCopyFileImpl *file, DWORD count, const BG_FILE_RANGE *ranges);
 HRESULT EnumBackgroundCopyFilesConstructor(BackgroundCopyJobImpl*, IEnumBackgroundCopyFiles**);
 DWORD WINAPI fileTransfer(void *param);
 void processJob(BackgroundCopyJobImpl *job);

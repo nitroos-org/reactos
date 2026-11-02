@@ -7,7 +7,7 @@ function(add_wow64_apitest library)
     set(testlist "#define STANDALONE\n#include <apitest.h>\n")
     # LsaLogonSession and NetUserChangePassword are in LogonUser.c, which brings their helpers
     foreach(test ${ARGN})
-        if(NOT test MATCHES "^(RegWow64(Unicode|Views|Matrix|LongName|SharedLongName|Volatile|SharedCreate|Aliases)|Wow64ProgramFiles|Wow64EnvironmentBlock|Wow64Thread(Lifetime|ExitProcess)|StackOverflowThread|StackDeepRecursion|LsaLogonSession|NetUserChangePassword)$")
+        if(NOT test MATCHES "^(RegWow64(Unicode|Views|Matrix|LongName|SharedLongName|Volatile|SharedCreate|Aliases)|Wow64ProgramFiles|Wow64EnvironmentBlock|Wow64ChildEnvironment|Wow64Thread(Lifetime|ExitProcess)|StackOverflowThread|StackDeepRecursion|LsaLogonSession|NetUserChangePassword)$")
             list(APPEND sources ../${library}/${test}.c)
         endif()
         string(APPEND testlist "extern void func_${test}(void);\n")
@@ -30,7 +30,7 @@ add_wow64_apitest(kernel32
     Wow64ReviewThreads Wow64RemoteThread Wow64CreateThreadAccess
     Wow64ThreadApc Wow64ThreadLifetime Wow64ThreadExitProcess Wow64Threads QueueUserAPC
     GetCurrentDirectory GetEnvironmentVariable GetDriveType GetCPInfo
-    IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock Wow64SystemDlls DynamicTls HandleList JobObject JobList
+    IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock Wow64ChildEnvironment Wow64SystemDlls DynamicTls HandleList JobObject JobList
     Wow64Console FindFirstStream ProcThreadMitigation RegisterWait QueueUserWorkItem ResolveDelayLoadedAPI InterlockedPushListSListEx
     ConsoleCsrRequests ConsoleVirtualTerminal ConsoleCP ConsoleBufferSwitch ConsoleCreateRace ConsoleOrphanChild ConsoleViewFollow
     ConsoleWriteLatency SetConsoleWindowInfo WerRegisterMemoryFile
