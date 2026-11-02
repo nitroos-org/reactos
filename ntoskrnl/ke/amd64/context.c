@@ -322,6 +322,15 @@ KeTrapFrameToContext(IN PKTRAP_FRAME TrapFrame,
             Context->SegEs = TrapFrame->SegEs;
             Context->SegFs = TrapFrame->SegFs;
             Context->SegGs = TrapFrame->SegGs;
+
+            /* DS and ES are not used in 64-bit mode and the processor does not
+               save them on a trap, so whatever user mode loaded into them is
+               not part of its context: Windows always reports the data selector */
+            if (TrapFrame->SegCs == (KGDT64_R3_CODE | RPL_MASK))
+            {
+                Context->SegDs = KGDT64_R3_DATA | RPL_MASK;
+                Context->SegEs = KGDT64_R3_DATA | RPL_MASK;
+            }
         }
     }
 
