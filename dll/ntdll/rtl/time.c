@@ -8,6 +8,7 @@
 /* INCLUDES *******************************************************************/
 
 #include <ntdll.h>
+#include <reactos/rosqpc.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -24,6 +25,12 @@ RtlQueryPerformanceCounter(
 {
     NTSTATUS Status;
 
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* From the TSC in user mode, as the kernel computes it, when it allows */
+    if (RosQpcQueryBypass(PerformanceCounter))
+        return TRUE;
+#endif
+
     Status = NtQueryPerformanceCounter(PerformanceCounter, NULL);
     return NT_SUCCESS(Status);
 }
@@ -38,6 +45,15 @@ RtlQueryPerformanceFrequency(
 {
     LARGE_INTEGER Counter, Frequency;
     NTSTATUS Status;
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* The HAL publishes the frequency when the counter is the TSC */
+    if (SharedUserData->QpcFrequency)
+    {
+        PerformanceFrequency->QuadPart = (LONGLONG)SharedUserData->QpcFrequency;
+        return TRUE;
+    }
+#endif
 
     /* The frequency is optional for the system call, not here */
     Status = NtQueryPerformanceCounter(&Counter, &Frequency);
@@ -144,7 +160,7 @@ RtlpQueryPrecise(
         RtlpPreciseFrequency = Frequency.QuadPart;
     }
 
-    if (!NT_SUCCESS(NtQueryPerformanceCounter(&Counter, NULL)))
+    if (!RtlQueryPerformanceCounter(&Counter))
         goto NoCounter;
     Last = RtlpReadPreciseBase(System);
 
