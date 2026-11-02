@@ -621,6 +621,20 @@ KiIsPrivilegedInstruction(PUCHAR Ip, BOOLEAN Wow64)
 
     switch (Ip[0])
     {
+        /* Port I/O. Without an I/O permission bitmap every access from user
+           mode faults, which Windows reports as a privileged instruction. */
+        case 0x6C: // INSB
+        case 0x6D: // INSW / INSD
+        case 0x6E: // OUTSB
+        case 0x6F: // OUTSW / OUTSD
+        case 0xE4: // IN AL, imm8
+        case 0xE5: // IN eAX, imm8
+        case 0xE6: // OUT imm8, AL
+        case 0xE7: // OUT imm8, eAX
+        case 0xEC: // IN AL, DX
+        case 0xED: // IN eAX, DX
+        case 0xEE: // OUT DX, AL
+        case 0xEF: // OUT DX, eAX
         case 0xF4: // HLT
         case 0xFA: // CLI
         case 0xFB: // STI
@@ -721,7 +735,7 @@ NTSTATUS
 KiGeneralProtectionFaultUserMode(
     _In_ PKTRAP_FRAME TrapFrame)
 {
-    BOOLEAN Wow64 = TrapFrame->SegCs == KGDT64_R3_CMCODE;
+    BOOLEAN Wow64 = TrapFrame->SegCs == (KGDT64_R3_CMCODE | RPL_MASK);
     PUCHAR InstructionPointer;
     NTSTATUS Status;
 
