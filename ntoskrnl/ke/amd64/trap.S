@@ -224,6 +224,10 @@ FUNC KiDebugTrapOrFault
     sti
 
 KiDebugTrapOrFaultKMode:
+    /* Single stepping ends with the step, as on Windows and i386 (KiTrap01Handler): the
+       exception reports EFLAGS without TF and a debugger that wants another step sets it again */
+    and dword ptr [rbp + KTRAP_FRAME_EFlags], NOT EFLAGS_TF_MASK
+
     /* Dispatch the exception */
     DispatchException STATUS_SINGLE_STEP, 0, 0, 0, 0
 
