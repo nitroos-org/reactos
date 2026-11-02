@@ -2321,8 +2321,9 @@ void msi_resolve_target_folder( MSIPACKAGE *package, const WCHAR *name, BOOL loa
 
     if (!wcscmp( folder->Directory, L"TARGETDIR" )) /* special resolving for target root dir */
     {
-        if (!(path = get_install_location( package )) &&
-            (!load_prop || !(path = msi_dup_property( package->db, L"TARGETDIR" ))))
+        /* an administrative image goes where TARGETDIR says, whatever the product has registered */
+        path = is_admin_install( package ) ? NULL : get_install_location( package );
+        if (!path && (!load_prop || !(path = msi_dup_property( package->db, L"TARGETDIR" ))))
         {
             path = msi_dup_property( package->db, L"ROOTDRIVE" );
         }
@@ -7683,7 +7684,7 @@ static UINT ACTION_DisableRollback( MSIPACKAGE *package )
     return ERROR_SUCCESS;
 }
 
-static UINT admin_remove_cabinet_streams( MSIPACKAGE *package )
+static UINT admin_remove_cabinet_streams( MSIDATABASE *db )
 {
     WCHAR decoded[MAX_STREAM_NAME_LEN + 1];
     IEnumSTATSTG *iter = NULL;
@@ -7692,7 +7693,7 @@ static UINT admin_remove_cabinet_streams( MSIPACKAGE *package )
     UINT r = ERROR_SUCCESS;
     HRESULT hr;
 
-    hr = IStorage_EnumElements( package->db->storage, 0, NULL, 0, &iter );
+    hr = IStorage_EnumElements( db->storage, 0, NULL, 0, &iter );
     if (FAILED( hr )) return ERROR_FUNCTION_FAILED;
 
     for (;;)
@@ -7710,7 +7711,7 @@ static UINT admin_remove_cabinet_streams( MSIPACKAGE *package )
         decode_streamname( stat.pwcsName, decoded );
         TRACE( "removing cabinet stream %s\n", debugstr_w(decoded) );
 
-        hr = IStorage_DestroyElement( package->db->storage, stat.pwcsName );
+        hr = IStorage_DestroyElement( db->storage, stat.pwcsName );
         if (FAILED( hr )) WARN( "failed to remove stream %08lx\n", hr );
         CoTaskMemFree( stat.pwcsName );
     }
@@ -7719,17 +7720,20 @@ static UINT admin_remove_cabinet_streams( MSIPACKAGE *package )
     return r;
 }
 
-static UINT admin_update_package_info( MSIPACKAGE *package )
+/* The image is an uncompressed source (the cabinets are gone); Windows also records in the
+   word count that the image uses short names when it was made with SHORTFILENAMES. */
+static UINT admin_update_package_info( MSIDATABASE *db, BOOL short_names )
 {
     MSISUMMARYINFO *info = NULL;
     UINT r, type;
     int flags;
 
-    if ((r = msi_get_suminfo( package->db->storage, 0, &info ))) return r;
+    if ((r = msi_get_suminfo( db->storage, 0, &info ))) return r;
     if ((r = msi_suminfo_get_prop( info, PID_WORDCOUNT, &type, &flags, NULL, NULL, NULL ))) goto done;
 
     flags &= ~msidbSumInfoSourceTypeCompressed;
     flags |= msidbSumInfoSourceTypeAdminImage;
+    if (short_names) flags |= msidbSumInfoSourceTypeSFN;
 
     if ((r = msi_suminfo_set_prop( info, PID_WORDCOUNT, type, flags, NULL, NULL ))) goto done;
     if ((r = msi_suminfo_persist( info ))) goto done;
@@ -7801,19 +7805,19 @@ static UINT admin_create_dest_file( MSIPACKAGE *package, WCHAR **ret_filename )
     return ERROR_SUCCESS;
 }
 
-static UINT admin_copy_package( MSIPACKAGE *package, const WCHAR *filename )
+static UINT admin_copy_package( MSIDATABASE *db, const WCHAR *filename )
 {
     UINT r = ERROR_FUNCTION_FAILED;
     IStorage *storage = NULL;
     HRESULT hr;
 
-    hr = IStorage_Commit( package->db->storage, 0 );
+    hr = IStorage_Commit( db->storage, 0 );
     if (FAILED( hr )) return ERROR_FUNCTION_FAILED;
 
     hr = StgCreateDocfile( filename, STGM_CREATE|STGM_TRANSACTED|STGM_WRITE|STGM_SHARE_EXCLUSIVE, 0, &storage );
     if (FAILED( hr )) return ERROR_FUNCTION_FAILED;
 
-    hr = IStorage_CopyTo( package->db->storage, 0, NULL, NULL, storage );
+    hr = IStorage_CopyTo( db->storage, 0, NULL, NULL, storage );
     if (FAILED( hr )) goto done;
 
     hr = IStorage_Commit( storage, 0 );
@@ -7826,20 +7830,28 @@ done:
     return r;
 }
 
+/* An administrative image copies the package it was made from, and never looks at the
+   installed state of the product: the copy is edited as a plain database, not opened as a
+   package (that would resolve to the cached package of an installed product and edit it). */
 static UINT ACTION_InstallAdminPackage( MSIPACKAGE *package )
 {
     WCHAR temppath[MAX_PATH], tempfile[MAX_PATH], *filename = NULL;
-    MSIPACKAGE *admin = NULL;
+    const WCHAR *source = package->localfile;
+    MSIDATABASE *admin = NULL;
     UINT r = ERROR_FUNCTION_FAILED;
 
     TRACE("%p\n", package);
 
+    if (package->PackagePath && GetFileAttributesW( package->PackagePath ) != INVALID_FILE_ATTRIBUTES)
+        source = package->PackagePath;
+
     GetTempPathW( ARRAY_SIZE(temppath), temppath );
     if (!msi_get_temp_file_name( package, temppath, L"msi", tempfile )) return ERROR_FUNCTION_FAILED;
-    if (!msi_copy_file( package, package->localfile, tempfile, FALSE )) goto done;
-    if ((r = MSI_OpenPackageW( tempfile, 0, &admin ))) goto done;
+    if (!msi_copy_file( package, source, tempfile, FALSE )) goto done;
+    SetFileAttributesW( tempfile, FILE_ATTRIBUTE_NORMAL );
+    if ((r = MSI_OpenDatabaseW( tempfile, MSIDBOPEN_TRANSACT, &admin ))) goto done;
     if ((r = admin_remove_cabinet_streams( admin ))) goto done;
-    if ((r = admin_update_package_info( admin ))) goto done;
+    if ((r = admin_update_package_info( admin, admin_use_short_names( package ) ))) goto done;
     if ((r = admin_create_dest_file( package, &filename ))) goto done;
     if ((r = admin_copy_package( admin, filename ))) goto done;
 
