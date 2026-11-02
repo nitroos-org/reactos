@@ -1412,6 +1412,9 @@ void set_variant( VARTYPE type, LONGLONG val, void *val_ptr, VARIANT *ret )
         V_UI4( ret ) = val;
         break;
     case VT_NULL:
+        /* a NULL value must not leave stale bytes in the payload: callers that read V_BSTR() of a
+         * property without checking V_VT first (btop4win does) then see NULL, not stack garbage */
+        V_I8( ret ) = 0;
         break;
     case VT_R4:
         V_R4( ret ) = *(FLOAT *)&val;
