@@ -16,13 +16,13 @@
 28 stub GetPrivateContextsPerfCounters
 29 stdcall GetProcessExecutableHeap()
 30 stub GetStartupFlags
-31 stub GetTargetForVTableEntry
+31 stdcall GetTargetForVTableEntry(ptr ptr)
 32 stdcall GetTokenForVTableEntry(ptr ptr)
 33 stub LogHelp_LogAssert
 34 stub LogHelp_NoGuiOnAssert
 35 stub LogHelp_TerminateOnAssert
 36 stub OpenCtrs
-37 stub SetTargetForVTableEntry
+37 stdcall SetTargetForVTableEntry(ptr ptr ptr)
 
 @ stub CallFunctionShim
 @ stdcall CLRCreateInstance(ptr ptr ptr)

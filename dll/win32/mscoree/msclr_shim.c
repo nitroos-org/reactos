@@ -174,6 +174,27 @@ HRESULT WINAPI MSCOREE_Ordinal24(void *arg1, void **arg2)
     return fn(arg1, arg2);
 }
 
+/* Native vtable-fixup slots of mixed-mode (C++/CLI, IJW) assemblies.  The
+ * CLR calls these mscoree exports (ordinals 31 and 37) when it patches the
+ * vtable fixups of such an assembly it loaded through LoadLibrary.  Microsoft's
+ * mscoree.dll (4.0.31106) implements them as plain slot accessors:
+ *   Get: return *ppVTEntry          (ret 8)
+ *   Set: *ppVTEntry = pTarget       (ret 0xC)
+ * Leaving them as stubs raised EXCEPTION_WINE_STUB inside the CLR, which
+ * surfaced as System.Runtime.InteropServices.SEHException (E_FAIL) in managed
+ * code that loads an IJW assembly, e.g. KROS ALFA plus startup. */
+BYTE * WINAPI GetTargetForVTableEntry(HINSTANCE hinst, BYTE **ppVTEntry)
+{
+    TRACE("(%p, %p)\n", hinst, ppVTEntry);
+    return *ppVTEntry;
+}
+
+void WINAPI SetTargetForVTableEntry(HINSTANCE hinst, BYTE **ppVTEntry, BYTE *pTarget)
+{
+    TRACE("(%p, %p, %p)\n", hinst, ppVTEntry, pTarget);
+    *ppVTEntry = pTarget;
+}
+
 /* Exports that Microsoft clr.dll delay-imports from mscoree.dll by name and
  * that Microsoft's mscoree implements by forwarding to mscoreei.dll. */
 HANDLE WINAPI GetProcessExecutableHeap(void)
