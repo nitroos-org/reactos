@@ -273,10 +273,41 @@ call :rc0 "P1 install of a PATH-changing feature rc0"
 type %O%\ip.txt >> %LOG%
 reg query HKCU\Environment /v Path | find "fmtpath-test" >nul
 call :rc0 "P2 the installer changed the user PATH"
-find "is installed. Open a new terminal window to use it" %O%\ip.txt >nul
-call :rc0 "P3 the hint is printed (cmd flavour: parent is cmd.exe)"
+find "is installed. Open a new terminal, or run this in the current one" %O%\ip.txt >nul
+call :rc0 "P3 the hint is printed (parent is cmd.exe; refreshenv ships)"
+find "refreshenv" %O%\ip.txt >nul
+call :rc0 "P3a ...and names refreshenv"
 find "Environment]::GetEnvironmentVariable" %O%\ip.txt >nul
 call :rc1 "P4 the cmd flavour carries no PowerShell command"
+rem --- refreshenv: bring THIS cmd window (and a pwsh started from it) up to date
+call :ex %SystemRoot%\system32\refreshenv.cmd 1 "P7 refreshenv.cmd ships in system32"
+call :ex %SystemRoot%\system32\refreshenv.ps1 1 "P7b refreshenv.ps1 ships in system32"
+%FM% /print-path > %O%\pp.txt 2>&1
+call :rc0 "P8 featmgr /print-path rc0"
+find "C:\fmtpath-test;" %O%\pp.txt >nul
+call :rc0 "P8a the new user PATH entry is in it"
+find "C:\fmtpath-test2" %O%\pp.txt >nul
+call :rc0 "P8b ...with the variable expanded"
+find /i "system32" %O%\pp.txt >nul
+call :rc0 "P8c ...and the system PATH is still there"
+%FM% /print-path /cmd > %O%\ppc.txt 2>&1
+find "PATH=C:" %O%\ppc.txt >nul
+call :rc0 "P8e /cmd line carries the path"
+find "set " %O%\ppc.txt >nul
+call :rc0 "P8d /cmd prints a batch set line"
+echo %PATH% | find "fmtpath-test2" >nul
+call :rc1 "P9 this window still has the old PATH (as on Windows)"
+if exist "%ProgramFiles%\PowerShell\7\pwsh.exe" (
+  "%ProgramFiles%\PowerShell\7\pwsh.exe" -NoProfile -Command "if ($env:Path -like '*fmtpath-test2*') { exit 1 } else { exit 0 }"
+  call :rc0 "P10 a pwsh started from this window has the old PATH too"
+  "%ProgramFiles%\PowerShell\7\pwsh.exe" -NoProfile -Command "refreshenv; if ($env:Path -like '*C:\fmtpath-test2*' -and $env:Path -like '*system32*') { exit 0 } else { exit 1 }"
+  call :rc0 "P11 refreshenv in pwsh (the .ps1 wins over the .cmd) brings its PATH up to date"
+)
+call refreshenv
+echo %PATH% | find "C:\fmtpath-test2" >nul
+call :rc0 "P9a refreshenv.cmd: the PATH of this window has the new entry"
+echo %PATH% | find /i "system32" >nul
+call :rc0 "P9b ...and keeps the system entries"
 %FM% /uninstall fmt-swpath >> %LOG% 2>&1
 call :rc0 "P5 uninstall PATH-changing feature"
 reg query HKCU\Environment /v Path >nul 2>&1

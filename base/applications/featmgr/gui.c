@@ -860,8 +860,10 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
             else
                 StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' %s.", c->name, done[act]);
             if ((act == ACT_INSTALL || act == ACT_ENABLE) && FmTakePathChange(pathName, ARRAYSIZE(pathName)))
-                StringCchCatW(msg, ARRAYSIZE(msg),
+                StringCchCatW(msg, ARRAYSIZE(msg), FmRefreshEnvAvailable() ?
                     L"\n\nIt changed the PATH. Terminal windows that are already open keep the old one: "
+                    L"open a new terminal, or type  refreshenv  in an open one."
+                    : L"\n\nIt changed the PATH. Terminal windows that are already open keep the old one: "
                     L"open a new terminal (or sign out and in) to use it.");
         }
         else if (hr == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED) &&
