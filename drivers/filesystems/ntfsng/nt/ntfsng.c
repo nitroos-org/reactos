@@ -111,6 +111,12 @@ VOID NgReleaseCore(PNG_VCB Vcb)
 {
     if (Vcb->CoreDepth == 1 && Vcb->Core)
         ngc_icache_trim(Vcb->Core);
+    NgReleaseCoreNoTrim(Vcb);
+}
+
+/* Releases CoreLock without the inode cache trim (whose evictions may free clusters, which drains DataIoGate). */
+VOID NgReleaseCoreNoTrim(PNG_VCB Vcb)
+{
     if (--Vcb->CoreDepth == 0)
     {
 #if DBG
@@ -145,6 +151,8 @@ VOID NgReleaseCoreShared(PNG_VCB Vcb, NG_SHARED_HOLD *Hold)
 VOID NgPrintLockStats(PNG_VCB Vcb)
 {
     ULONG i;
+    DPRINT1("ntfsng: paging writes: %lu with the transfer outside CoreLock, %lu under it, %lu written again\n",
+            Vcb->DioWrites, Vcb->DioFallbacks, Vcb->DioRedone);
     for (i = 0; i < NG_LOCK_CATEGORIES; i++)
     {
         NG_LOCK_STAT *S = &Vcb->LockStats.Stat[i];
@@ -228,6 +236,7 @@ PNG_FCB NgAllocateFcb(PNG_VCB Vcb)
     Fcb->Header.PagingIoResource = &Fcb->PagingIoResource;
     ExInitializeResourceLite(&Fcb->MainResource);
     ExInitializeResourceLite(&Fcb->PagingIoResource);
+    ExInitializeResourceLite(&Fcb->PagingWriteLock);
     FsRtlInitializeFileLock(&Fcb->FileLock, NULL, NULL);
     KeInitializeSpinLock(&Fcb->RunLock);
     InitializeListHead(&Fcb->CcbList);
@@ -400,6 +409,7 @@ VOID NgDereferenceFcb(PNG_FCB Fcb)
         ExFreePoolWithTag(Fcb->DelPath.Buffer, TAG_NTFSNG);
     ExDeleteResourceLite(&Fcb->MainResource);
     ExDeleteResourceLite(&Fcb->PagingIoResource);
+    ExDeleteResourceLite(&Fcb->PagingWriteLock);
     InterlockedDecrement(&NgGlobal.FcbLive);
     ExFreePoolWithTag(Fcb, TAG_NTFSNG);
 }

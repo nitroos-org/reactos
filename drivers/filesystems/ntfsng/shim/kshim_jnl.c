@@ -394,6 +394,24 @@ int kshim_jnl_capture(struct block_device *b, u64 off, const u8 *buf, size_t len
 	return 0;
 }
 
+/* True when the overlay holds any sector of [off, off+len): a write there must go through kshim_dev_rw. */
+int kshim_jnl_holds(struct block_device *b, u64 off, u64 len)
+{
+	struct kshim_jnl *j = b->jnl;
+	if (!j || !j->npages || !len)
+		return 0;
+	for (u64 s = off / KJ_SECT * KJ_SECT; s < off + len; s += KJ_SECT) {
+		struct kj_ent *e = kj_find(j, s / KJ_PAGE);
+		if (!e) {
+			s = (s / KJ_PAGE + 1) * KJ_PAGE - KJ_SECT;	/* next page */
+			continue;
+		}
+		if (e->mask & (1u << ((s % KJ_PAGE) / KJ_SECT)))
+			return 1;
+	}
+	return 0;
+}
+
 /* to_overlay 0: copy held sectors over a buffer read from the device; 1: update held sectors from a direct write. */
 void kshim_jnl_patch(struct block_device *b, int to_overlay, u64 off, u8 *buf, size_t len)
 {

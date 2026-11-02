@@ -16,11 +16,56 @@ int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int le
 #define NG_VACB_SIZE (256 * 1024)
 
 /*
- * Lock order: FCB MainResource -> FCB PagingIoResource -> Vcb->CoreLock -> core mutexes.
- * CoreLock is never held across a Cc or Mm call or while touching unlocked user memory, and
- * paging I/O takes only CoreLock, so Cc's lazy writer and Mm's writers cannot deadlock with a
- * user thread that holds FCB resources while it waits inside Cc.
+ * Lock order: FCB MainResource -> FCB PagingIoResource -> Vcb->CoreLock -> core mutexes, and
+ * FCB MainResource -> FCB PagingWriteLock -> Vcb->CoreLock -> Vcb->DataIoGate.
+ * CoreLock is never held across a Cc or Mm call or while touching unlocked user memory.  Paging writes
+ * take PagingWriteLock (the lazy writer comes with PagingIoResource shared), then PagingIoResource only
+ * by a try that never waits, then CoreLock; nobody holding PagingWriteLock waits for PagingIoResource or
+ * MainResource, and nobody holding CoreLock waits for PagingWriteLock, so Cc's lazy writer and Mm's
+ * writers cannot deadlock with a user thread that holds FCB resources while it waits inside Cc.
+ * DataIoGate: see NgPagingWrite.
  */
+
+/* At mount, before the core exists. */
+VOID NgInitDataIo(PNG_VCB Vcb)
+{
+    ExInitializeResourceLite(&Vcb->DataIoGate);
+    KeInitializeEvent(&Vcb->DioIdle, NotificationEvent, TRUE);
+    ExInitializeNPagedLookasideList(&Vcb->DioBounce, NULL, NULL, 0, NG_DIO_BOUNCE, TAG_NTFSNG, 0);
+}
+
+/*
+ * Waits until no paging write is in its unlocked device transfer (CoreLock held).  Called by the core
+ * before it frees clusters, before it marks the medium gone or stops writing, before a resize and at
+ * unmount (kshim_dio_drain).  A transfer acquires DataIoGate shared only under CoreLock, so none can
+ * start while this waits, and it needs nothing a CoreLock holder has to finish.
+ */
+VOID NgDrainDataIoCallback(PVOID Context)
+{
+    PNG_VCB Vcb = Context;
+    ASSERT(ExIsResourceAcquiredExclusiveLite(&Vcb->CoreLock));
+    ASSERT(!ExIsResourceAcquiredSharedLite(&Vcb->DataIoGate));
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&Vcb->DataIoGate, TRUE);
+    ExReleaseResourceLite(&Vcb->DataIoGate);
+    KeLeaveCriticalRegion();
+}
+
+/*
+ * Dismount: returns with CoreLock held once no unlocked paging write is between its start and its end
+ * (they pin core nodes).  Vcb->Dismounted is set already, so none starts once this holds CoreLock.
+ */
+VOID NgWaitDataIoIdle(PNG_VCB Vcb)
+{
+    for (;;)
+    {
+        NgAcquireCore(Vcb);
+        if (Vcb->DioActive == 0)
+            return;
+        NgReleaseCore(Vcb);
+        KeWaitForSingleObject(&Vcb->DioIdle, Executive, KernelMode, FALSE, NULL);
+    }
+}
 
 BOOLEAN NTAPI NgAcquireForLazyWrite(PVOID Context, BOOLEAN Wait)
 {
@@ -324,13 +369,55 @@ BOOLEAN NgDropIfDiscardable(PNG_VCB Vcb, PIRP Irp, PNTSTATUS Status)
     return TRUE;
 }
 
-/* Paging write from the lazy writer or Mm: no FCB resources here, only CoreLock. */
+/*
+ * The device part of an unlocked paging write (no CoreLock): each run through a bounce buffer, as the
+ * core's own data writes go (ngc_dev_write), with the same device request (ngos_dev_write).
+ */
+static int NgDioTransfer(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Buffer, PUCHAR Bounce)
+{
+    ULONG r, Done;
+    for (r = 0; r < Dio->nruns; r++)
+    {
+        for (Done = 0; Done < Dio->run[r].len; )
+        {
+            ULONG n = min(Dio->run[r].len - Done, NG_DIO_BOUNCE);
+            RtlCopyMemory(Bounce, Buffer + Dio->run[r].boff + Done, n);
+            if (ngos_dev_write(Vcb->StorageDevice, Dio->run[r].dev + Done, Bounce, n))
+                return -1;
+            Done += n;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Paging write from the lazy writer or Mm.  It holds the FCB's PagingWriteLock exclusive (one data write
+ * of the stream at a time: no zero fill or initialized-size change of another write overlaps it) and,
+ * if a try gets it, its PagingIoResource shared (no size change meanwhile; the lazy writer holds it
+ * already).  With both, a write of allocated clusters that needs no metadata change other than raising
+ * the initialized size runs its device transfer without CoreLock (ngc_dio_begin/end, core/ngcore.c):
+ *
+ *   CoreLock:   checks, ngc_dio_begin (maps the clusters, pins the node), DioActive++, DataIoGate shared
+ *   no lock:    the transfer
+ *   CoreLock:   ngc_dio_end (raises the initialized size, updates the core page cache), DioActive--
+ *
+ * so a create, cleanup or query of another file does not wait behind the disk.  Everything else is
+ * written under CoreLock as before.  Invariants for the unlocked part: DataIoGate is held shared exactly
+ * across the transfer and is acquired under CoreLock; every cluster free, medium change, direct write
+ * hand-over, resize and unmount waits for it under CoreLock first (NgDrainDataIoCallback), so the clusters
+ * written are the stream's and the device is this mount's until the transfer ends; a dismount also waits
+ * for DioActive to reach 0 (NgWaitDataIoIdle).
+ */
 static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offset, ULONG Length)
 {
     LONGLONG FileSize = Fcb->Header.FileSize.QuadPart;
     PVOID Buffer;
+    PUCHAR Bounce = NULL;
     ULONG Clipped;
+    BOOLEAN PagingShared, Unlocked = FALSE, Drop = FALSE;
+    struct ngc_dio Dio;
     long Done = 0;
+    int IoErr;
 
     Irp->IoStatus.Information = Length;
     if (Fcb->Deleted || Offset >= FileSize)
@@ -342,27 +429,80 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
         Irp->IoStatus.Information = 0;
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+    ExAcquireResourceExclusiveLite(&Fcb->PagingWriteLock, TRUE);
+    PagingShared = ExAcquireResourceSharedLite(Fcb->Header.PagingIoResource, FALSE);
+    if (PagingShared && !Vcb->WriteThrough)
+        Bounce = ExAllocateFromNPagedLookasideList(&Vcb->DioBounce);
     NgAcquireCore(Vcb);
     /* Deleted under CoreLock: a page writer that raced with the last cleanup's delete drops its data. */
     if (Fcb->Deleted)
     {
         NgReleaseCore(Vcb);
-        return STATUS_SUCCESS;
+        Done = 0;
+        goto out;
     }
     /* RawWritten is published under CoreLock: a writer that passed NgDropIfDiscardable before it is dropped here. */
     if (Vcb->RawWritten)
     {
         NgReleaseCore(Vcb);
-        return NgDropPagingWrite(Vcb, Fcb, Irp, Length);
+        Drop = TRUE;
+        goto out;
     }
     Done = NgEnsureNode(Fcb);
-    if (!Done)
+    if (!Done && Bounce && Vcb->CoreDepth == 1 && !Vcb->Dismounted && !Vcb->WriteThrough)
+    {
+        Done = ngc_dio_begin(Vcb->Core, Fcb->Node, Offset, Clipped, Length, &Dio);
+        if (!Done)
+            Unlocked = TRUE;
+        else if (Done == -NGC_EAGAIN)
+            Done = 0;
+    }
+    if (Unlocked)
+    {
+        /* The trim before the gate: its evictions may free clusters, which drains the gate. */
+        ngc_icache_trim(Vcb->Core);
+        if (Vcb->DioActive++ == 0)
+            KeClearEvent(&Vcb->DioIdle);
+        ExAcquireResourceSharedLite(&Vcb->DataIoGate, TRUE);
+        NgReleaseCoreNoTrim(Vcb);
+
+        IoErr = NgDioTransfer(Vcb, &Dio, Buffer, Bounce);
+
+        ExReleaseResourceLite(&Vcb->DataIoGate);
+        NgAcquireCore(Vcb);
+        Done = ngc_dio_end(Vcb->Core, &Dio, Buffer, IoErr);
+        if (--Vcb->DioActive == 0)
+            KeSetEvent(&Vcb->DioIdle, IO_NO_INCREMENT, FALSE);
+        if (Done >= 0)
+            Vcb->DioWrites++;
+        else if (Done == -NGC_EAGAIN)
+        {
+            /* The mapping changed under the transfer: write it again under the lock (also drops it if the
+             * file went away meanwhile). */
+            Vcb->DioRedone++;
+            Done = Fcb->Deleted ? 0 : NgEnsureNode(Fcb);
+            if (!Done && !Fcb->Deleted)
+                Done = ngc_write(Vcb->Core, Fcb->Node, Offset, Clipped, Buffer);
+        }
+    }
+    else if (!Done)
+    {
+        Vcb->DioFallbacks++;
         Done = ngc_write(Vcb->Core, Fcb->Node, Offset, Clipped, Buffer);
+    }
     if (Done >= 0)
         NgAfterChange(Vcb);
     if (Fcb->OpenHandles == 0)
         NgParkNode(Fcb);
     NgReleaseCore(Vcb);
+out:
+    if (Bounce)
+        ExFreeToNPagedLookasideList(&Vcb->DioBounce, Bounce);
+    if (PagingShared)
+        ExReleaseResourceLite(Fcb->Header.PagingIoResource);
+    ExReleaseResourceLite(&Fcb->PagingWriteLock);
+    if (Drop)
+        return NgDropPagingWrite(Vcb, Fcb, Irp, Length);
     if (Done < 0)
     {
         DPRINT1("ntfsng: paging write of %I64x at %I64d len %lu failed %ld (size %I64d, handles %ld, deleted %u)\n",
@@ -412,6 +552,9 @@ static NTSTATUS NgWriteDevice(PNG_VCB Vcb, PFILE_OBJECT Holder, LONGLONG Offset,
             Status = STATUS_FILE_INVALID;
             break;
         }
+        /* Before the first direct write: no paging write of the mount may land after it (NgPagingWrite). */
+        if (Done == 0 && !Vcb->RawWritten)
+            NgDrainDataIoCallback(Vcb);
         Err = NgDevWriteDurable(Vcb->StorageDevice, (unsigned long long)Offset + Done, Bounce, n);
         /*
          * The hand-over, in the hold of the first chunk's device write: no core I/O lands between the
@@ -744,6 +887,8 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     else
     {
+        /* PagingWriteLock: its zero fill below the start must not overlap a paging write's unlocked transfer. */
+        ExAcquireResourceExclusiveLite(&Fcb->PagingWriteLock, TRUE);
         NgAcquireCore(Vcb);
         Err = NgEnsureNode(Fcb);
         Done = Err ? Err : ngc_write(Vcb->Core, Fcb->Node, Offset.QuadPart, Length, Buffer);
@@ -754,6 +899,7 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 Done = -NGC_EIO;
         }
         NgReleaseCore(Vcb);
+        ExReleaseResourceLite(&Fcb->PagingWriteLock);
         if (Done < 0)
         {
             DPRINT1("ntfsng: write of %I64x at %I64d len %lu failed %ld\n", Fcb->MftNo, Offset.QuadPart, Length, Done);
@@ -934,6 +1080,8 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         NgFlushVolume(Vcb);
         Vcb->WriteThrough = TRUE;
         NgAcquireCore(Vcb);
+        /* Paging writes in their unlocked transfer reach the device before the sync's flush. */
+        NgDrainDataIoCallback(Vcb);
         ngc_sync(Vcb->Core);
         ngc_volinfo(Vcb->Core, &Vcb->Info);
         ngc_jnl_report(Vcb->Core);

@@ -99,6 +99,7 @@ int kshim_jnl_degraded(struct block_device *b);
 int kshim_jnl_capture(struct block_device *b, u64 off, const u8 *buf, size_t len);
 int kshim_jnl_degrade(struct block_device *b);
 void kshim_jnl_patch(struct block_device *b, int to_overlay, u64 off, u8 *buf, size_t len);
+int kshim_jnl_holds(struct block_device *b, u64 off, u64 len);
 
 /* Positive increments of a watched counter (the core's free-cluster count) are counted. */
 int kshim_watch_add(atomic64_t *v);

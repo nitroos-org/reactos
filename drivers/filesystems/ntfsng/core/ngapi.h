@@ -172,6 +172,35 @@ int ngc_short_name(ngc_node *n, unsigned long long parent_mref, unsigned short *
 int ngc_add_short_name(ngc_vol *v, ngc_node *dir, ngc_node *n, const unsigned short *lname, unsigned int llen,
 		const unsigned short *sname, unsigned int slen);
 long ngc_write(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, const void *buf);
+/*
+ * A data write in three steps, so the device transfer runs without the volume lock (paging writes):
+ * ngc_dio_begin (locked) checks the write needs no metadata change other than raising the initialized
+ * size, maps its clusters and pins the node; the caller writes each run to the device (unlocked:
+ * dev = device offset, len = bytes, boff = offset in the caller's buffer; the last run is rounded up
+ * to a whole sector, so the buffer must hold @cap >= that many bytes); ngc_dio_end (locked) checks
+ * the mapping still holds, raises the initialized size, updates the page cache and unpins.
+ * ngc_dio_begin returns 0 (pinned: ngc_dio_end must follow), -NGC_EAGAIN (use ngc_write instead,
+ * nothing changed) or another error.  ngc_dio_end returns the bytes written, -NGC_EAGAIN (the mapping
+ * changed under the transfer: write again with ngc_write) or another error.
+ */
+#define NGC_DIO_RUNS 16
+struct ngc_dio_run {
+	unsigned long long dev;
+	unsigned int len;
+	unsigned int boff;
+};
+struct ngc_dio {
+	ngc_node *n;
+	unsigned long long off;
+	unsigned int len;                /* clipped to the stream size */
+	unsigned int cap;
+	unsigned int nruns;
+	struct ngc_dio_run run[NGC_DIO_RUNS];
+};
+int ngc_dio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, unsigned int cap, struct ngc_dio *d);
+long ngc_dio_end(ngc_vol *v, struct ngc_dio *d, const void *buf, int io_err);
+/* Registers the glue's drain (see kshim_drain in kshim_vfs.h); NULL unregisters. */
+void ngc_set_dio_drain(ngc_vol *v, void (*fn)(void *ctx), void *ctx);
 int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize);
 int ngc_set_info(ngc_vol *v, ngc_node *n, const long long times[4], unsigned int attrs, unsigned int attrs_mask);
 int ngc_create(ngc_vol *v, ngc_node *dir, const unsigned short *name, unsigned int len, int is_dir, ngc_node **out);
