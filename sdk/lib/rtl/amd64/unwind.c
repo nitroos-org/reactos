@@ -1080,6 +1080,9 @@ RtlpUnwindInternal(
 
     /* Copy the context */
     UnwindContext = *ContextRecord;
+    /* The extended state (CONTEXT_XSTATE, 0x40) stays with the context of the exception: a copy has no
+       CONTEXT_EX behind it */
+    UnwindContext.ContextFlags &= ~0x40;
 
     /* Set up the constant fields of the dispatcher context */
     DispatcherContext.ContextRecord =
