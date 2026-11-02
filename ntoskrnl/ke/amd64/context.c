@@ -18,6 +18,15 @@
  * A WoW64 thread (compatibility-mode code) was filtered by wow64 and keeps EFLAGS_USER_SANITIZE. */
 #define EFLAGS_USER_LONG_SANITIZE 0x210FD5
 
+/* A breakpoint address from a user context: nothing above the highest user address */
+static __inline ULONG64
+KiSanitizeDrAddress(ULONG64 Address, KPROCESSOR_MODE PreviousMode)
+{
+    if (PreviousMode != KernelMode && Address > (ULONG64)MmHighestUserAddress)
+        return 0;
+    return Address;
+}
+
 /* FUNCTIONS *****************************************************************/
 /* Always compiled on amd64 and exported from ntoskrnl so the shared trap-exit
  * macro can reach one definition from both ntoskrnl and the HAL. It is a no-op
@@ -185,24 +194,29 @@ KeContextToTrapFrame(IN PCONTEXT Context,
     /* Handle debug registers */
     if (ContextFlags & CONTEXT_DEBUG_REGISTERS)
     {
-        /* Copy the debug registers */
-        TrapFrame->Dr0 = Context->Dr0;
-        TrapFrame->Dr1 = Context->Dr1;
-        TrapFrame->Dr2 = Context->Dr2;
-        TrapFrame->Dr3 = Context->Dr3;
-        TrapFrame->Dr6 = Context->Dr6;
-        TrapFrame->Dr7 = Context->Dr7;
+        /* As Windows x64 (SANITIZE_DRADDR, SANITIZE_DR7; Windows 10 22H2 reads back the same):
+         * a user context cannot place a breakpoint above the highest user address (the address
+         * is cleared, the call succeeds), DR7 keeps only the local enables, LE/GE and the
+         * conditions (DR7_LEGAL: no global enables, no general detect, nothing in bits 63:32),
+         * and DR6 is status the processor sets. All of it is caller-controlled. */
+        TrapFrame->Dr0 = KiSanitizeDrAddress(Context->Dr0, PreviousMode);
+        TrapFrame->Dr1 = KiSanitizeDrAddress(Context->Dr1, PreviousMode);
+        TrapFrame->Dr2 = KiSanitizeDrAddress(Context->Dr2, PreviousMode);
+        TrapFrame->Dr3 = KiSanitizeDrAddress(Context->Dr3, PreviousMode);
+        TrapFrame->Dr6 = 0;
+        TrapFrame->Dr7 = Context->Dr7 & DR7_LEGAL;
 
+        /* The frame is the current thread's (every user-mode request runs in the target thread).
+         * Its breakpoints are loaded on the way to user mode only while one is enabled (trap
+         * exit, trapamd64.inc); a thread that never enables one keeps the kernel's registers. */
         if (PreviousMode != KernelMode)
         {
-            if (TrapFrame->Dr0 > (ULONG64)MmHighestUserAddress)
-                TrapFrame->Dr0 = 0;
-            if (TrapFrame->Dr1 > (ULONG64)MmHighestUserAddress)
-                TrapFrame->Dr1 = 0;
-            if (TrapFrame->Dr2 > (ULONG64)MmHighestUserAddress)
-                TrapFrame->Dr2 = 0;
-            if (TrapFrame->Dr3 > (ULONG64)MmHighestUserAddress)
-                TrapFrame->Dr3 = 0;
+            PKTHREAD Thread = KeGetCurrentThread();
+
+            if (TrapFrame->Dr7 & DR7_ACTIVE)
+                Thread->Header.DebugActive |= DEBUG_ACTIVE_DR7;
+            else
+                Thread->Header.DebugActive &= ~DEBUG_ACTIVE_DR7;
         }
     }
 
@@ -354,13 +368,27 @@ KeTrapFrameToContext(IN PKTRAP_FRAME TrapFrame,
     /* Handle debug registers */
     if (ContextFlags & CONTEXT_DEBUG_REGISTERS)
     {
-        /* Copy the debug registers */
-        Context->Dr0 = TrapFrame->Dr0;
-        Context->Dr1 = TrapFrame->Dr1;
-        Context->Dr2 = TrapFrame->Dr2;
-        Context->Dr3 = TrapFrame->Dr3;
-        Context->Dr6 = TrapFrame->Dr6;
-        Context->Dr7 = TrapFrame->Dr7;
+        /* A user frame holds the thread's breakpoints only while one is enabled: the trap entry
+         * saves them then and writes DR7 = 0 otherwise. Without one, the thread has no debug
+         * state and reads zeros, as on Windows x64 */
+        if ((TrapFrame->SegCs & MODE_MASK) == KernelMode || (TrapFrame->Dr7 & DR7_ACTIVE))
+        {
+            Context->Dr0 = TrapFrame->Dr0;
+            Context->Dr1 = TrapFrame->Dr1;
+            Context->Dr2 = TrapFrame->Dr2;
+            Context->Dr3 = TrapFrame->Dr3;
+            Context->Dr6 = TrapFrame->Dr6;
+            Context->Dr7 = TrapFrame->Dr7;
+        }
+        else
+        {
+            Context->Dr0 = 0;
+            Context->Dr1 = 0;
+            Context->Dr2 = 0;
+            Context->Dr3 = 0;
+            Context->Dr6 = 0;
+            Context->Dr7 = 0;
+        }
     }
 
     /* Restore IRQL */

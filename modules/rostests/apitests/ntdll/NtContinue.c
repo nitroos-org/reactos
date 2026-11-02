@@ -392,6 +392,196 @@ static void TestSetThreadContextEFlags(void)
     }
 }
 
+/* Hardware breakpoints set with SetThreadContext (CONTEXT_DEBUG_REGISTERS), x64 and WoW64.
+ * Expected results measured on Windows 10 22H2 (x64 and WOW64). The current thread reads back
+ * the processor's DR6 and DR7, with their reserved bits that read as 1 (DR6 0xffff0ff0, DR7
+ * bit 10): only the status bits of DR6 and the defined bits of DR7 are compared. Under WoW64,
+ * Windows masks DR7 with the i386 mask (no GE) and sets LE in some cases: LE and GE are not
+ * compared there, and a DR7 without an enabled breakpoint is checked on x64 only (WoW64 keeps
+ * the addresses and reads DR7 back as 0x100). */
+#ifdef _M_AMD64
+#define DR7_IGNORED 0x400
+#else
+#define DR7_IGNORED 0x700
+#endif
+static volatile LONG DrHits;
+static volatile ULONG_PTR DrHitDr6;
+static volatile LONG DrTarget;
+static volatile ULONG_PTR DrOtherDr7;
+static volatile LONG DrOtherHits;
+static HANDLE DrGo;
+
+static LONG CALLBACK DrHandler(PEXCEPTION_POINTERS Info)
+{
+    if (Info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP)
+        return EXCEPTION_CONTINUE_SEARCH;
+    InterlockedIncrement(&DrHits);
+    DrHitDr6 = Info->ContextRecord->Dr6;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static BOOL DrSet(HANDLE Thread, ULONG_PTR Dr0, ULONG_PTR Dr1, ULONG_PTR Dr2, ULONG_PTR Dr3,
+                  ULONG_PTR Dr6, ULONG_PTR Dr7)
+{
+    CONTEXT Context;
+    ZeroMemory(&Context, sizeof(Context));
+    Context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    Context.Dr0 = Dr0;
+    Context.Dr1 = Dr1;
+    Context.Dr2 = Dr2;
+    Context.Dr3 = Dr3;
+    Context.Dr6 = Dr6;
+    Context.Dr7 = Dr7;
+    return SetThreadContext(Thread, &Context);
+}
+
+static void DrCheck(int Line, HANDLE Thread, ULONG_PTR Dr0, ULONG_PTR Dr1, ULONG_PTR Dr2, ULONG_PTR Dr3,
+                    ULONG_PTR Dr6, ULONG_PTR Dr7)
+{
+    CONTEXT Context;
+    BOOL Ret;
+    memset(&Context, 0xcc, sizeof(Context));
+    Context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    Ret = GetThreadContext(Thread, &Context);
+    ok(Ret, "line %d: GetThreadContext failed %lu\n", Line, GetLastError());
+    ok(Context.Dr0 == Dr0, "line %d: Dr0 %Ix, expected %Ix\n", Line, (ULONG_PTR)Context.Dr0, Dr0);
+    ok(Context.Dr1 == Dr1, "line %d: Dr1 %Ix, expected %Ix\n", Line, (ULONG_PTR)Context.Dr1, Dr1);
+    ok(Context.Dr2 == Dr2, "line %d: Dr2 %Ix, expected %Ix\n", Line, (ULONG_PTR)Context.Dr2, Dr2);
+    ok(Context.Dr3 == Dr3, "line %d: Dr3 %Ix, expected %Ix\n", Line, (ULONG_PTR)Context.Dr3, Dr3);
+    ok((Context.Dr6 & 0xe00f) == Dr6, "line %d: Dr6 %Ix, expected %Ix\n", Line, (ULONG_PTR)Context.Dr6, Dr6);
+    ok((Context.Dr7 & ~(ULONG_PTR)DR7_IGNORED) == (Dr7 & ~(ULONG_PTR)DR7_IGNORED),
+       "line %d: Dr7 %Ix, expected %Ix\n", Line, (ULONG_PTR)Context.Dr7, Dr7);
+}
+
+static DWORD WINAPI DrOtherThread(PVOID Param)
+{
+    CONTEXT Context;
+    LONG Before = DrHits;
+
+    /* The creator's breakpoint on DrTarget is not this thread's */
+    DrTarget = 10;
+    DrOtherHits = DrHits - Before;
+    ZeroMemory(&Context, sizeof(Context));
+    Context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    GetThreadContext(GetCurrentThread(), &Context);
+    DrOtherDr7 = Context.Dr7;
+    return 0;
+}
+
+static DWORD WINAPI DrWaitingThread(PVOID Param)
+{
+    /* Its breakpoint is set by another thread while it waits */
+    WaitForSingleObject(DrGo, 30000);
+    DrTarget = 20;
+    return 0;
+}
+
+#define DR7_WRITE4_DR0 (0x1 | (0x1 << 16) | (0x3 << 18))
+
+static void TestDebugRegisters(void)
+{
+    HANDLE Self = GetCurrentThread(), Thread;
+    PVOID Handler;
+    ULONG_PTR Target = (ULONG_PTR)&DrTarget;
+    DWORD Wait;
+#ifdef _M_AMD64
+    SYSTEM_BASIC_INFORMATION Basic;
+    ULONG_PTR Highest;
+#endif
+#ifdef _M_IX86
+    BOOL IsWow64 = FALSE;
+    IsWow64Process(GetCurrentProcess(), &IsWow64);
+    if (!IsWow64)
+    {
+        skip("Debug register checks run on x64 and WoW64 only\n");
+        return;
+    }
+#endif
+
+    /* Addresses as given, DR6 cleared, DR7 masked to the local enables, LE/GE and the conditions */
+    ok(DrSet(Self, 0x42424240, 0x12340000, 0x10000, 0x7ffe0000, 0xffffffff, 0xffff03ff), "SetThreadContext failed\n");
+    DrCheck(__LINE__, Self, 0x42424240, 0x12340000, 0x10000, 0x7ffe0000, 0, 0xffff0355);
+
+    /* No global enables, no general detect */
+    ok(DrSet(Self, Target, 0, 0, 0, 0, 0x2000 | 0xaa | 0x1), "SetThreadContext failed\n");
+    DrCheck(__LINE__, Self, Target, 0, 0, 0, 0, 0x1);
+
+#ifdef _M_AMD64
+    /* Without an enabled breakpoint the thread has no debug state */
+    ok(DrSet(Self, 0x1000, 0x2000, 0x3000, 0x4000, 0, 0), "SetThreadContext failed\n");
+    DrCheck(__LINE__, Self, 0, 0, 0, 0, 0, 0);
+    ok(DrSet(Self, 0x1000, 0x2000, 0x3000, 0x4000, 0, 0x400 | 0xaa | 0x2000), "SetThreadContext failed\n");
+    DrCheck(__LINE__, Self, 0, 0, 0, 0, 0, 0);
+
+    /* A breakpoint above the highest user address (0x7ffffffeffff on Windows 10) is not armed:
+     * the address is cleared */
+    if (!NT_SUCCESS(NtQuerySystemInformation(SystemBasicInformation, &Basic, sizeof(Basic), NULL)))
+        Basic.MaximumUserModeAddress = 0x7ffffffeffffULL;
+    Highest = Basic.MaximumUserModeAddress;
+    ok(DrSet(Self, 0xfffff78000000000ULL, Highest + 1, 0x8000000000000000ULL, Highest, 0, 0x55),
+       "SetThreadContext failed\n");
+    DrCheck(__LINE__, Self, 0, 0, 0, Highest, 0, 0x55);
+    ok(DrSet(Self, Highest + 0x1000, 0xffffffffffffffffULL, 0xffff800000000000ULL, Highest & ~(ULONG_PTR)0xfff, 0, 0x55),
+       "SetThreadContext failed\n");
+    DrCheck(__LINE__, Self, 0, 0, 0, Highest & ~(ULONG_PTR)0xfff, 0, 0x55);
+#endif
+
+    /* The breakpoint fires in this thread, also after it was switched out */
+    Handler = AddVectoredExceptionHandler(TRUE, DrHandler);
+    ok(Handler != NULL, "AddVectoredExceptionHandler failed\n");
+    ok(DrSet(Self, Target, 0, 0, 0, 0, DR7_WRITE4_DR0), "SetThreadContext failed\n");
+    DrHits = 0;
+    DrHitDr6 = 0;
+    DrTarget = 1;
+    ok(DrHits == 1, "%ld breakpoint hits, expected 1\n", DrHits);
+    ok((DrHitDr6 & 0xf) == 1, "Dr6 %Ix in the exception, expected B0\n", (ULONG_PTR)DrHitDr6);
+    Sleep(20);
+    SwitchToThread();
+    DrTarget = 2;
+    ok(DrHits == 2, "%ld breakpoint hits after a switch, expected 2\n", DrHits);
+
+    /* Another thread writing the address does not trap */
+    DrOtherDr7 = 0xdead;
+    DrOtherHits = -1;
+    Thread = CreateThread(NULL, 0, DrOtherThread, NULL, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed %lu\n", GetLastError());
+    if (Thread)
+    {
+        ok_eq_ulong(WaitForSingleObject(Thread, 30000), WAIT_OBJECT_0);
+        CloseHandle(Thread);
+    }
+    ok(DrOtherHits == 0, "%ld breakpoint hits in the other thread, expected 0\n", DrOtherHits);
+    ok(DrOtherDr7 == 0, "other thread Dr7 %Ix, expected 0\n", (ULONG_PTR)DrOtherDr7);
+    ok(DrHits == 2, "%ld breakpoint hits, expected 2\n", DrHits);
+
+    /* Cleared: no more hits here */
+    ok(DrSet(Self, 0, 0, 0, 0, 0, 0), "SetThreadContext failed\n");
+    DrTarget = 3;
+    ok(DrHits == 2, "%ld breakpoint hits after clearing, expected 2\n", DrHits);
+
+    /* Set by this thread on a waiting, suspended thread */
+    DrGo = CreateEventW(NULL, TRUE, FALSE, NULL);
+    Thread = CreateThread(NULL, 0, DrWaitingThread, NULL, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed %lu\n", GetLastError());
+    if (Thread)
+    {
+        Sleep(50);
+        ok(SuspendThread(Thread) != (DWORD)-1, "SuspendThread failed %lu\n", GetLastError());
+        ok(DrSet(Thread, Target, 0, 0, 0, 0, DR7_WRITE4_DR0), "SetThreadContext failed %lu\n", GetLastError());
+        DrCheck(__LINE__, Thread, Target, 0, 0, 0, 0, DR7_WRITE4_DR0);
+        ResumeThread(Thread);
+        SetEvent(DrGo);
+        Wait = WaitForSingleObject(Thread, 30000);
+        ok_eq_ulong(Wait, WAIT_OBJECT_0);
+        CloseHandle(Thread);
+        ok(DrHits == 3, "%ld breakpoint hits, expected 3 (one in the waiting thread)\n", DrHits);
+    }
+    CloseHandle(DrGo);
+    DrTarget = 4;
+    ok(DrHits == 3, "%ld breakpoint hits, expected 3\n", DrHits);
+    RemoveVectoredExceptionHandler(Handler);
+}
+
 START_TEST(NtContinue)
 {
     DoNtContinue();
@@ -401,4 +591,5 @@ START_TEST(NtContinue)
     NtcFixedFlags = FALSE;
 #endif
     TestSetThreadContextEFlags();
+    TestDebugRegisters();
 }

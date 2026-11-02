@@ -265,6 +265,11 @@ DispatchToUser:
     /* Set RIP to the User-mode Dispatcher */
     TrapFrame->Rip = (ULONG64)KeUserExceptionDispatcher;
 
+    /* The dispatcher does not run traced, as on Windows: the context on the user stack keeps
+       TF, and NtContinue gives it back to the interrupted code. Otherwise a single-step
+       exception (or a trap with TF set) traps again in KiUserExceptionDispatcher, for ever. */
+    TrapFrame->EFlags &= ~EFLAGS_TF;
+
     _disable();
 
     /* Exit to usermode */

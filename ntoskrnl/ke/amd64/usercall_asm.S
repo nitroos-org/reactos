@@ -107,6 +107,9 @@ KiUserCallbackExit:
     /* Disable interrupts for return */
     cli
 
+    /* Load the user hardware breakpoints from the copy of the caller's trap frame */
+    RestoreUserDebugRegisters rsp, rcx, ecx
+
     /* Prepare user mode return address (rcx) and eflags (r11) for sysret */
     mov rcx, qword ptr KeUserCallbackDispatcher[rip]
     mov r11, EFLAGS_IF_MASK
