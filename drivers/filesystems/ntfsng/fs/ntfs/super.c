@@ -435,6 +435,8 @@ int ntfs_set_volume_flags(struct ntfs_volume *vol, __le16 flags)
 int ntfs_clear_volume_flags(struct ntfs_volume *vol, __le16 flags)
 {
 	flags &= VOLUME_FLAGS_MASK;
+	if (vol->keep_dirty)
+		flags &= ~VOLUME_IS_DIRTY;
 	flags = vol->vol_flags & cpu_to_le16(~le16_to_cpu(flags));
 	return ntfs_write_volume_flags(vol, flags);
 }

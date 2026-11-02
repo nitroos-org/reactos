@@ -355,6 +355,15 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
      * system volume boots read-only there, as a damaged one does.
      */
     Vcb->Damaged = Vcb->Info.damaged || NoFlush || (SectorSize != 512 && !Removable && !NgGlobal.ForceReadOnly) ? TRUE : FALSE;
+    /*
+     * The boot volume that the policy kept read-only although the mount asked for read-write (a dirty
+     * volume whose $LogFile is in use, flags only a checker clears): the registry needs write opens on
+     * it before anything can show the user why, and a bugcheck there (0xC0000218 from the SYSTEM hive,
+     * 0xC000021A from smss) leaves no recoverable state.  It boots read-only like a damaged one, with a notice.
+     */
+    if (Vcb->ReadOnly && !Vcb->Damaged && WhyRo && !Removable && !NgGlobal.ForceReadOnly &&
+        Vpb->RealDevice && (Vpb->RealDevice->Flags & DO_SYSTEM_BOOT_PARTITION))
+        Vcb->Damaged = TRUE;
     if (!Vcb->ReadOnly && !NT_SUCCESS(NgStartFlusher(Vcb)))
     {
         DPRINT1("ntfsng: no flusher thread, mounting read-only\n");
@@ -1437,6 +1446,26 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case FSCTL_MARK_AS_SYSTEM_HIVE:
             /* Advisory: the driver never dismounts a volume with open hives anyway. */
             return STATUS_SUCCESS;
+        case FSCTL_MARK_VOLUME_DIRTY:
+        {
+            /*
+             * As Windows (a check scheduled with chkdsk or chkntfs, fsutil dirty set): a volume handle with
+             * manage-volume access, as for locking (the handle itself may be read-only), on a volume the core may write.
+             */
+            int Err;
+            if (!Fcb || !Fcb->IsVolume)
+                return STATUS_INVALID_PARAMETER;
+            if (!((PNG_CCB)FileObject->FsContext2)->ManageVolume)
+                return STATUS_ACCESS_DENIED;
+            if (Vcb->ReadOnly || Vcb->Damaged)
+                return STATUS_MEDIA_WRITE_PROTECTED;
+            NgAcquireCore(Vcb);
+            Err = ngc_mark_volume_dirty(Vcb->Core);
+            ngc_volinfo(Vcb->Core, &Vcb->Info);
+            NgReleaseCore(Vcb);
+            DPRINT1("ntfsng: volume %08lx marked dirty on request: %d\n", Vcb->Vpb->SerialNumber, Err);
+            return Err ? NgErrnoToStatus(Err) : STATUS_SUCCESS;
+        }
         case FSCTL_IS_VOLUME_DIRTY:
         {
             PULONG Out = Irp->AssociatedIrp.SystemBuffer;

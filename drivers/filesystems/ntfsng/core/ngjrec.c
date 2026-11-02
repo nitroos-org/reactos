@@ -244,6 +244,7 @@ struct vol_pair {
 	u8 *r, *rp, *rm;	/* the rewritten primary (complete, fixed up), the primary and the mirror as read */
 	int primary, mirror;	/* which copies to write */
 	u16 usn_old, usn_new;	/* the primary's number on disk now, and the one r carries */
+	int pok, dirty;		/* the primary checked out as read; the dirty flag was set in the copy used */
 };
 
 static void pair_free(struct vol_pair *p)
@@ -292,6 +293,8 @@ static int pair_read(struct ngj_vol *jv, struct vol_pair *p)
 		return -EINVAL;
 	a += g16(a + 0x14);
 	dirty = (g16(a + 10) & VOL_DIRTY) != 0;
+	p->pok = pok;
+	p->dirty = dirty;
 	p->primary = dirty || !pok;
 	p->mirror = p->primary || !mok || memcmp(p->rp, p->rm, rs);
 	p->usn_new = p->usn_old;
@@ -389,6 +392,36 @@ static int replay_sectors(struct ngj_vol *jv, const struct kj_desc *d, u8 *pg)
 		    (d->blk * KJ_PAGE + (s + 1) * 512 > jv->size || dwrite(jv, d->blk * KJ_PAGE + s * 512, pg + s * 512, 512)))
 			return -EIO;
 	return 0;
+}
+
+/*
+ * A volume whose dirty flag no journal of ours explains (another system's tool or driver set it:
+ * ntfsresize, a check scheduled by chkdsk or FSCTL_MARK_VOLUME_DIRTY, an ntfs-3g session that did not end
+ * cleanly).  The caller has decided it may be cleared (clean $LogFile, no other flags, consistency check
+ * passed on the read-only view); this rewrites $Volume without the flag and its $MFTMirr copy the same, the
+ * primary first.  Nothing is written unless the primary reads and checks out and has the flag set: a torn
+ * primary is not rebuilt for a volume that never ran our journal.  Returns 0 or -errno (-EINVAL: nothing
+ * to clear here).  A crash between the two writes leaves the copies different; the next mount's $MFTMirr
+ * check then keeps the volume read-only until a checker repairs it.
+ */
+int ngj_clear_foreign_dirty(void *osdev, u64 size, unsigned int devsec)
+{
+	struct ngj_vol *jv = kmalloc(sizeof(*jv), GFP_KERNEL);
+	struct vol_pair vp;
+	int err;
+	if (!jv)
+		return -ENOMEM;
+	err = ngj_probe(osdev, size, devsec, jv);
+	if (!err) {
+		err = pair_read(jv, &vp);
+		if (!err && (!vp.pok || !vp.dirty))
+			err = -EINVAL;
+		if (!err)
+			err = pair_write(jv, &vp);
+		pair_free(&vp);
+	}
+	kfree(jv);
+	return err;
 }
 
 /*
