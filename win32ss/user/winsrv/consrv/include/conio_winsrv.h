@@ -210,6 +210,18 @@ NTSTATUS
 ConioProcessInputEvent(PCONSRV_CONSOLE Console,
                        PINPUT_RECORD InputEvent);
 
+/* vtinput.c */
+PINPUT_RECORD
+ConSrvVtInputTranslate(PCONSRV_CONSOLE Console,
+                       PINPUT_RECORD In,
+                       ULONG Count,
+                       PULONG OutCount);
+ULONG
+ConSrvVtInputSourceCount(PCONSRV_CONSOLE Console,
+                         PINPUT_RECORD In,
+                         ULONG Count,
+                         ULONG Written);
+
 /* conoutput.c */
 PCHAR_INFO ConioCoordToPointer(PTEXTMODE_SCREEN_BUFFER Buff, ULONG X, ULONG Y);
 

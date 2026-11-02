@@ -16,6 +16,10 @@
 #define NTOS_MODE_USER
 #include <ndk/ntndk.h>
 
+#ifndef ENABLE_VIRTUAL_TERMINAL_INPUT
+#define ENABLE_VIRTUAL_TERMINAL_INPUT 0x0200
+#endif
+
 typedef struct _HOST
 {
     HANDLE PipeIn, PipeOut, Signal, ConsoleIn, ConsoleOut, Client;
@@ -394,6 +398,78 @@ HostInput(HOST *Host, BYTE Byte)
     HostKey(Host, Key, Character, Modifiers);
 }
 
+/* ENABLE_VIRTUAL_TERMINAL_INPUT: the application reads and parses the VT sequences
+ * itself, so every byte from the terminal is queued as it came, as a character
+ * event. Translating it to key events here would lose what the key events cannot
+ * say (modifier parameters, unknown sequences) and the console would translate
+ * the key events back to sequences. */
+static BOOL
+HostRawMode(HOST *Host)
+{
+    DWORD Mode;
+    return GetConsoleMode(Host->ConsoleIn, &Mode) && (Mode & ENABLE_VIRTUAL_TERMINAL_INPUT);
+}
+
+static VOID
+HostRawCharacter(INPUT_RECORD *Records, DWORD *Used, WCHAR Character)
+{
+    INPUT_RECORD *Down = &Records[(*Used)++], *Up = &Records[(*Used)++];
+    ZeroMemory(Down, sizeof(*Down));
+    Down->EventType = KEY_EVENT;
+    Down->Event.KeyEvent.bKeyDown = TRUE;
+    Down->Event.KeyEvent.wRepeatCount = 1;
+    Down->Event.KeyEvent.uChar.UnicodeChar = Character;
+    *Up = *Down;
+    Up->Event.KeyEvent.bKeyDown = FALSE;
+}
+
+static VOID
+HostRawInput(HOST *Host, const BYTE *Bytes, DWORD Count)
+{
+    INPUT_RECORD Records[2 * (256 + 40)];
+    WCHAR Characters[2];
+    DWORD Index, Used = 0, Written;
+    int Converted;
+
+    /* A sequence that was half read when the application switched the mode */
+    if (Host->Escape)
+    {
+        HostRawCharacter(Records, &Used, L'\x1b');
+        if (Host->Escape >= 2) HostRawCharacter(Records, &Used, Host->Escape == 2 ? L'[' : L'O');
+        for (Index = 0; Index < Host->SequenceLength; ++Index)
+            HostRawCharacter(Records, &Used, (BYTE)Host->Sequence[Index]);
+        Host->Escape = Host->SequenceLength = 0;
+    }
+    for (Index = 0; Index < Count; ++Index)
+    {
+        BYTE Byte = Bytes[Index];
+
+        if (Host->Utf8Length || Byte >= 0x80)
+        {
+            if (!Host->Utf8Length)
+                Host->Utf8Length = Byte >= 0xf0 ? 4 : Byte >= 0xe0 ? 3 : Byte >= 0xc0 ? 2 : 1;
+            Host->Utf8[Host->Utf8Count++] = Byte;
+            if (Host->Utf8Count < Host->Utf8Length) continue;
+            Converted = MultiByteToWideChar(CP_UTF8, 0, (LPCSTR)Host->Utf8,
+                                            Host->Utf8Count, Characters, 2);
+            Host->Utf8Length = Host->Utf8Count = 0;
+            if (Converted < 1 || Converted > 2)
+            {
+                Characters[0] = 0xfffd;
+                Converted = 1;
+            }
+            HostRawCharacter(Records, &Used, Characters[0]);
+            if (Converted == 2) HostRawCharacter(Records, &Used, Characters[1]);
+        }
+        else
+        {
+            if (Byte == 3 && HostCtrlC(Host)) continue;
+            HostRawCharacter(Records, &Used, Byte);
+        }
+    }
+    if (Used) WriteConsoleInputW(Host->ConsoleIn, Records, Used, &Written);
+}
+
 #define HOST_SIGNAL_RESIZE 8
 #define HOST_SIGNAL_CLIENT 0x4e50 /* nitro private: argument = client process id */
 
@@ -532,8 +608,11 @@ int wmain(int argc, WCHAR **argv)
             {
                 DWORD Chunk = Available < sizeof(Bytes) ? Available : sizeof(Bytes);
                 if (!ReadFile(Host.PipeIn, Bytes, Chunk, &Read, NULL) || !Read) break;
-                for (Index = 0; Index < (int)Read; ++Index)
-                    HostInput(&Host, Bytes[Index]);
+                if (HostRawMode(&Host))
+                    HostRawInput(&Host, Bytes, Read);
+                else
+                    for (Index = 0; Index < (int)Read; ++Index)
+                        HostInput(&Host, Bytes[Index]);
                 Available -= Read;
             }
         }

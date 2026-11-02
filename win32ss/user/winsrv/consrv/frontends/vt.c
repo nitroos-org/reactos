@@ -660,6 +660,7 @@ VtSoftReset(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff)
     Buff->Vt.DecGraphics = FALSE;
     Buff->Vt.MarginsSet = FALSE;
     Buff->Vt.SavedCursorValid = FALSE;
+    FrontEnd->Console->InputBuffer.VtCursorKeysApp = FALSE;
     VtSetCursorVisible(FrontEnd, Buff, TRUE);
 }
 
@@ -746,6 +747,9 @@ VtDispatchPrivateMode(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, BOOLEAN 
     {
         switch (Vt->Params[i])
         {
+        case 1:     /* DECCKM: application cursor keys, for ENABLE_VIRTUAL_TERMINAL_INPUT */
+            FrontEnd->Console->InputBuffer.VtCursorKeysApp = Set;
+            break;
         case 25:    /* DECTCEM: cursor visibility */
             VtSetCursorVisible(FrontEnd, Buff, Set);
             break;

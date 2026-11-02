@@ -122,6 +122,9 @@ typedef struct _TEXTMODE_BUFFER_INFO
 } TEXTMODE_BUFFER_INFO, *PTEXTMODE_BUFFER_INFO;
 
 /* Windows 10 output modes (the SDK defines them only for NTDDI_WIN10_RS1) */
+#ifndef ENABLE_VIRTUAL_TERMINAL_INPUT
+#define ENABLE_VIRTUAL_TERMINAL_INPUT       0x0200
+#endif
 #ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
 #define ENABLE_VIRTUAL_TERMINAL_PROCESSING  0x0004
 #endif
@@ -232,6 +235,7 @@ typedef struct _CONSOLE_INPUT_BUFFER
     HANDLE      ActiveEvent;        /* Event set when an input event is added to the queue */
 
     USHORT      Mode;               /* Input buffer modes */
+    BOOLEAN     VtCursorKeysApp;    /* DECCKM (ESC [ ? 1 h) as set by the output; cursor keys are ESC O x with ENABLE_VIRTUAL_TERMINAL_INPUT */
 } CONSOLE_INPUT_BUFFER, *PCONSOLE_INPUT_BUFFER;
 
 
