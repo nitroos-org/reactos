@@ -1,5 +1,6 @@
 
 add_subdirectory(dxtn)
+add_subdirectory(icu)
 add_subdirectory(libjpeg)
 add_subdirectory(libpng)
 add_subdirectory(libtiff)
