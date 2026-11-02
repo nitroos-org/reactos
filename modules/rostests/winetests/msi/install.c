@@ -3976,6 +3976,79 @@ static BOOL delete_image(const char *image, const char *rel, BOOL is_file)
     return is_file ? DeleteFileA(path) : RemoveDirectoryA(path);
 }
 
+/* up4_tables with an administrative sequence that copies the package only */
+static const CHAR ai_admin_exec_seq_dat[] = "Action\tCondition\tSequence\n"
+                                            "s72\tS255\tI2\n"
+                                            "AdminExecuteSequence\tAction\n"
+                                            "CostInitialize\t\t800\n"
+                                            "FileCost\t\t900\n"
+                                            "CostFinalize\t\t1000\n"
+                                            "InstallValidate\t\t1400\n"
+                                            "InstallInitialize\t\t1500\n"
+                                            "InstallAdminPackage\t\t3900\n"
+                                            "InstallFinalize\t\t6600\n";
+
+static const msi_table aip_tables[] =
+{
+    ADD_TABLE(component),
+    ADD_TABLE(directory),
+    ADD_TABLE(feature),
+    ADD_TABLE(feature_comp),
+    ADD_TABLE(file),
+    ADD_TABLE(pp_install_exec_seq),
+    ADD_TABLE(ai_admin_exec_seq),
+    ADD_TABLE(media),
+    ADD_TABLE(property),
+    ADD_TABLE(registry),
+};
+
+/* the source type word count of a package (PID_WORDCOUNT), -1 on failure */
+static int get_package_wordcount(const char *path)
+{
+    MSIHANDLE db, summary;
+    UINT r, type;
+    INT value = -1;
+
+    r = MsiOpenDatabaseA(path, (const char *)MSIDBOPEN_READONLY, &db);
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+    if (r) return -1;
+    r = MsiGetSummaryInformationA(db, NULL, 0, &summary);
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+    if (!r)
+    {
+        r = MsiSummaryInfoGetPropertyA(summary, PID_WORDCOUNT, &type, &value, NULL, NULL, NULL);
+        ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+        MsiCloseHandle(summary);
+    }
+    MsiCloseHandle(db);
+    return value;
+}
+
+static void remove_tree(const char *dir)
+{
+    char pattern[MAX_PATH], path[MAX_PATH];
+    WIN32_FIND_DATAA fd;
+    HANDLE find;
+
+    sprintf(pattern, "%s\\*", dir);
+    if ((find = FindFirstFileA(pattern, &fd)) != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+            sprintf(path, "%s\\%s", dir, fd.cFileName);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) remove_tree(path);
+            else
+            {
+                SetFileAttributesA(path, FILE_ATTRIBUTE_NORMAL);
+                DeleteFileA(path);
+            }
+        } while (FindNextFileA(find, &fd));
+        FindClose(find);
+    }
+    RemoveDirectoryA(dir);
+}
+
 static void test_admin_layout(void)
 {
     static const struct { const char *rel; BOOL is_file; } expected[2][12] =
@@ -3999,9 +4072,9 @@ static void test_admin_layout(void)
     {
         "AlLongInstName", "AlLongInstName\\AlSubTargetLong", "AlPfs Target Long", "AlSubTargetLong",
     };
-    char image[MAX_PATH], props[2 * MAX_PATH];
+    char image[MAX_PATH], props[2 * MAX_PATH], path[MAX_PATH];
     UINT r;
-    int pass, i;
+    int pass, i, wordcount;
 
     CreateDirectoryA("AlSubSourceLong", NULL);
     CreateDirectoryA("Al Src Long Dir", NULL);
@@ -4045,7 +4118,10 @@ static void test_admin_layout(void)
             ok(GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES, "pass %d: directory %s created\n", pass, target_names[i]);
         }
 
-        /* the copy of the package */
+        /* the copy of the package: an uncompressed admin image; SHORTFILENAMES is recorded too */
+        sprintf(path, "%s\\msitest.msi", image);
+        wordcount = get_package_wordcount(path);
+        ok(wordcount == (pass ? 5 : 4), "pass %d: got word count %d\n", pass, wordcount);
         ok(delete_image(image, "msitest.msi", TRUE), "pass %d: package not copied\n", pass);
         RemoveDirectoryA(image);
     }
@@ -4063,6 +4139,106 @@ error:
     RemoveDirectoryA("Al Src Long Dir");
     RemoveDirectoryA("Al Sys Sub Long");
     RemoveDirectoryA("Al Same Long Name");
+}
+
+/* An administrative image of a product that is installed: no error, no change to the installed
+   product or its cached package, and the image is made from the package given. */
+static void test_admin_installed(void)
+{
+    static const char prodcode[] = "{7DF88A48-996F-4EC8-A022-BF956F9B2CBB}";
+    char image[MAX_PATH], location[MAX_PATH], path[MAX_PATH], cached[MAX_PATH], before[1 << 16], after[1 << 16];
+    DWORD size, nbefore, nafter;
+    INSTALLSTATE state;
+    int pass;
+    HANDLE file;
+    BOOL ret;
+    UINT r;
+
+    if (!is_process_elevated())
+    {
+        skip("process is limited\n");
+        return;
+    }
+
+    create_test_files();
+    create_database(msifile, aip_tables, ARRAY_SIZE(aip_tables));
+    sprintf(image, "%s\\admimage2", CURR_DIR);
+
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
+
+    sprintf(location, "%s\\admlocation", CURR_DIR);
+    CreateDirectoryA(location, NULL);
+    sprintf(path, "FULL=1 ALLUSERS=1 ARPINSTALLLOCATION=\"%s\"", location);
+    r = MsiInstallProductA(msifile, path);
+    if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+    {
+        skip("Not enough rights to perform tests\n");
+        goto error;
+    }
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+    state = MsiQueryProductStateA(prodcode);
+    ok(state == INSTALLSTATE_DEFAULT, "got state %d\n", state);
+
+    size = sizeof(path);
+    r = MsiGetProductInfoA(prodcode, INSTALLPROPERTY_INSTALLLOCATIONA, path, &size);
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+    ok(!lstrcmpiA(path, location), "got install location \"%s\"\n", path);
+
+    size = sizeof(cached);
+    r = MsiGetProductInfoA(prodcode, INSTALLPROPERTY_LOCALPACKAGEA, cached, &size);
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+    file = CreateFileA(cached, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    ok(file != INVALID_HANDLE_VALUE, "cannot open %s (%lu)\n", cached, GetLastError());
+    nbefore = 0;
+    ret = ReadFile(file, before, sizeof(before), &nbefore, NULL);
+    ok(ret, "ReadFile failed %lu\n", GetLastError());
+    CloseHandle(file);
+
+    /* twice: the image must not land in the registered InstallLocation, where the second
+       run would find the first one's copy of the package */
+    CreateDirectoryA(image, NULL);
+    for (pass = 0; pass < 2; pass++)
+    {
+        sprintf(path, "ACTION=ADMIN TARGETDIR=\"%s\"", image);
+        r = MsiInstallProductA(msifile, path);
+        ok(r == ERROR_SUCCESS, "pass %d: Expected ERROR_SUCCESS, got %u\n", pass, r);
+        if (pass == 0)
+        {
+            sprintf(path, "%s\\msitest.msi", image);
+            DeleteFileA(path);
+        }
+    }
+
+    sprintf(path, "%s\\msitest.msi", location);
+    ok(GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES, "package copied to the install location\n");
+    sprintf(path, "%s\\msitest.msi", image);
+    ok(GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES, "package not copied\n");
+    ok(get_package_wordcount(path) == 4, "got word count %d\n", get_package_wordcount(path));
+
+    state = MsiQueryProductStateA(prodcode);
+    ok(state == INSTALLSTATE_DEFAULT, "got state %d\n", state);
+
+    file = CreateFileA(cached, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    ok(file != INVALID_HANDLE_VALUE, "cannot open %s (%lu)\n", cached, GetLastError());
+    nafter = 0;
+    ret = ReadFile(file, after, sizeof(after), &nafter, NULL);
+    ok(ret, "ReadFile failed %lu\n", GetLastError());
+    CloseHandle(file);
+    ok(nbefore == nafter && !memcmp(before, after, nbefore), "the cached package was modified\n");
+
+    r = MsiInstallProductA(msifile, "REMOVE=ALL FULL=1");
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+    state = MsiQueryProductStateA(prodcode);
+    ok(state == INSTALLSTATE_UNKNOWN, "got state %d\n", state);
+
+error:
+    remove_tree(image);
+    remove_tree(location);
+    sprintf(path, "%s\\msitest", PROG_FILES_DIR);
+    remove_tree(path);
+    RegDeleteKeyA(HKEY_CURRENT_USER, "SOFTWARE\\Wine\\msitest");
+    delete_test_files();
+    DeleteFileA(msifile);
 }
 
 static void set_admin_property_stream(LPCSTR file)
@@ -6530,6 +6706,7 @@ START_TEST(install)
     test_currentworkingdir();
     test_admin();
     test_admin_layout();
+    test_admin_installed();
     test_adminprops();
     test_missingcab();
     test_sourcefolder();
