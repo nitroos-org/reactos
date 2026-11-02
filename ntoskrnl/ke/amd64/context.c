@@ -256,6 +256,11 @@ KeTrapFrameToContext(IN PKTRAP_FRAME TrapFrame,
             _ReadWriteBarrier();
             RtlCopyMemory(&Context->FltSave, &Floating,
                           FIELD_OFFSET(XMM_SAVE_AREA32, XmmRegisters));
+
+            /* The state of the processor here is the kernel one, its MXCSR is
+               not the one of the interrupted code (the 32-bit context is
+               built from this area) */
+            Context->FltSave.MxCsr = TrapFrame->MxCsr;
         }
 #endif
         Context->MxCsr = TrapFrame->MxCsr;
