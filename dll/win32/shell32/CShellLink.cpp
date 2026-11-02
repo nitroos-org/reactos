@@ -2271,6 +2271,36 @@ CShellLink::Extract(PCWSTR pszFile, UINT nIconIndex, HICON *phiconLarge, HICON *
     return hr;
 }
 
+#ifdef ICON_LINK_WINDOWS_COMPAT
+/*
+ * PathUnExpandEnvStringsW only compares prefixes, and a 32-bit process on a 64-bit system sees
+ * %ProgramFiles% as the "Program Files (x86)" directory. A link written by a 32-bit installer
+ * would then hold %ProgramFiles%\... for a 32-bit program, which a 64-bit reader (the shell)
+ * expands to the wrong directory, so the icon is blank. Name the 32-bit directory explicitly.
+ */
+static BOOL
+ShellLinkUnExpandEnvStrings(
+    _In_  LPCWSTR pszPath,
+    _Out_ LPWSTR  pszBuf,
+    _In_  UINT    cchBuf)
+{
+    static const WCHAR szVar[] = L"%ProgramFiles(x86)%";
+    WCHAR szX86[MAX_PATH];
+    DWORD cch = GetEnvironmentVariableW(L"ProgramFiles(x86)", szX86, _countof(szX86));
+
+    if (cch && cch < _countof(szX86) && !_wcsnicmp(pszPath, szX86, cch) &&
+        (pszPath[cch] == UNICODE_NULL || pszPath[cch] == L'\\'))
+    {
+        if (_countof(szVar) + wcslen(pszPath + cch) > cchBuf)
+            return FALSE;
+        wcscpy(pszBuf, szVar);
+        wcscat(pszBuf, pszPath + cch);
+        return TRUE;
+    }
+    return PathUnExpandEnvStringsW(pszPath, pszBuf, cchBuf);
+}
+#endif
+
 #if 0
 /* Extends the functionality of PathUnExpandEnvStringsW */
 BOOL PathFullyUnExpandEnvStringsW(
@@ -2368,7 +2398,7 @@ HRESULT STDMETHODCALLTYPE CShellLink::SetIconLocation(LPCWSTR pszIconPath, INT i
 #ifdef ICON_LINK_WINDOWS_COMPAT
         /* Try to fully unexpand the icon path */
         // if (PathFullyUnExpandEnvStringsW(pszIconPath, szIconPath, _countof(szIconPath)))
-        BOOL bSuccess = PathUnExpandEnvStringsW(pszIconPath, szIconPath, _countof(szIconPath));
+        BOOL bSuccess = ShellLinkUnExpandEnvStrings(pszIconPath, szIconPath, _countof(szIconPath));
         if (bSuccess && wcscmp(pszIconPath, szIconPath) != 0)
 #else
         /*
