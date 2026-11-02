@@ -12,6 +12,12 @@
 #define NDEBUG
 #include <debug.h>
 
+/* The EFLAGS a 64-bit user thread can be given, as Windows reads them back (Windows 10 22H2):
+ * CF PF AF ZF SF TF IF DF OF, RF and ID. NT, IOPL, VM, AC, VIF, VIP and the reserved bit 1 are
+ * dropped; RF stays in the saved state (the CPU clears it after one instruction in user mode).
+ * A WoW64 thread (compatibility-mode code) was filtered by wow64 and keeps EFLAGS_USER_SANITIZE. */
+#define EFLAGS_USER_LONG_SANITIZE 0x210FD5
+
 /* FUNCTIONS *****************************************************************/
 /* Always compiled on amd64 and exported from ntoskrnl so the shared trap-exit
  * macro can reach one definition from both ntoskrnl and the HAL. It is a no-op
@@ -144,7 +150,10 @@ KeContextToTrapFrame(IN PCONTEXT Context,
             TrapFrame->SegSs = KGDT64_R3_DATA | RPL_MASK;
 
             /* Set valid EFLAGS */
-            TrapFrame->EFlags &= EFLAGS_USER_SANITIZE;
+            if (TrapFrame->SegCs == (KGDT64_R3_CODE | RPL_MASK))
+                TrapFrame->EFlags &= EFLAGS_USER_LONG_SANITIZE;
+            else
+                TrapFrame->EFlags &= EFLAGS_USER_SANITIZE;
             TrapFrame->EFlags |= EFLAGS_INTERRUPT_MASK;
         }
     }

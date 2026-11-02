@@ -9,6 +9,7 @@
 
 #include <setjmp.h>
 #include <time.h>
+#include <intrin.h>
 
 #ifdef _MSC_VER
 #pragma runtime_checks("s", off)
@@ -23,6 +24,20 @@ static ULONG NtcEflagsBits = NTC_EFLAGS_BITS;
 #endif
 
 void continuePoint(void);
+
+#define NTC_EFL_NT      0x4000
+#define NTC_EFL_IOPL    0x3000
+#define NTC_EFL_RF      0x10000
+#define NTC_EFL_VM      0x20000
+#define NTC_EFL_AC      0x40000
+#define NTC_EFL_VIF     0x80000
+#define NTC_EFL_VIP     0x100000
+#define NTC_EFL_ID      0x200000
+
+#ifdef _M_AMD64
+/* Second pass: every flag a context may name and Windows drops or keeps (checked on Windows 10 22H2) */
+static BOOLEAN NtcFixedFlags;
+#endif
 
 static jmp_buf jmpbuf;
 static CONTEXT continueContext;
@@ -137,7 +152,16 @@ void check(CONTEXT * pContext)
     ok_eq_hex(pContext->SegFs, 0x53);
     ok_eq_hex(pContext->SegGs, 0x2B);
     ok_eq_hex(pContext->SegSs, continueContext.SegSs);
-    ok_eq_hex(pContext->EFlags & ~0x1C0000, (continueContext.EFlags & ~0x1C0000) | 0x202);
+    if (NtcFixedFlags)
+    {
+        /* A 64-bit thread never runs with NT, IOPL, VM, AC, VIF or VIP set; ID stays */
+        ok_eq_hex(pContext->EFlags & (NTC_EFL_NT | NTC_EFL_IOPL | NTC_EFL_VM | NTC_EFL_AC |
+                                      NTC_EFL_VIF | NTC_EFL_VIP | NTC_EFL_ID), NTC_EFL_ID);
+    }
+    else
+    {
+        ok_eq_hex(pContext->EFlags & ~0x1C0000, (continueContext.EFlags & ~0x1C0000) | 0x202);
+    }
 
     ok_eq_hex64(pContext->Rax, continueContext.Rax);
     ok_eq_hex64(pContext->Rdx, continueContext.Rdx);
@@ -179,7 +203,7 @@ void check(CONTEXT * pContext)
     longjmp(jmpbuf, 1);
 }
 
-START_TEST(NtContinue)
+static void DoNtContinue(void)
 {
 #ifdef _M_IX86
     BOOL IsWow64 = FALSE;
@@ -250,6 +274,11 @@ START_TEST(NtContinue)
 
         /* Randomize all the allowed flags (determined experimentally with WinDbg) */
         continueContext.EFlags = randULONG64() & 0x3C0CD5;
+        if (NtcFixedFlags)
+        {
+            continueContext.EFlags = 0x202 | NTC_EFL_NT | NTC_EFL_IOPL | NTC_EFL_RF | NTC_EFL_VM |
+                                     NTC_EFL_AC | NTC_EFL_VIF | NTC_EFL_VIP | NTC_EFL_ID;
+        }
 
         /* Randomize the stack pointer as much as possible */
         continueContext.Rsp = (((ULONG_PTR)&bogus)) + (randULONG() & 0xF) * 16;
@@ -265,4 +294,111 @@ START_TEST(NtContinue)
 
     /* Second time */
     return;
+}
+
+typedef struct _TC_ROW
+{
+    ULONG In;           /* EFlags given to SetThreadContext */
+    ULONG Readback;     /* what GetThreadContext reads back */
+    ULONG SeenSet;      /* flags the running thread sees (PUSHF) that must be set */
+    ULONG SeenClear;    /* and that must be clear */
+} TC_ROW;
+
+#ifdef _M_AMD64
+#define TC_DROP (NTC_EFL_NT | NTC_EFL_IOPL | NTC_EFL_VM | NTC_EFL_AC | NTC_EFL_VIF | NTC_EFL_VIP)
+/* Windows 10 22H2, x64: NT, IOPL, VM, AC, VIF and VIP are dropped, RF is kept in the context
+ * (but never seen by the running thread), ID is kept, and the context has no reserved bit 1 */
+static const TC_ROW TcRows[] =
+{
+    { 0x202,                 0x200,    0,          TC_DROP },
+    { 0x202 | NTC_EFL_NT,    0x200,    0,          TC_DROP },
+    { 0x202 | NTC_EFL_IOPL,  0x200,    0,          TC_DROP },
+    { 0x202 | NTC_EFL_RF,    0x10200,  0,          TC_DROP },
+    { 0x202 | NTC_EFL_VM,    0x200,    0,          TC_DROP },
+    { 0x202 | NTC_EFL_AC,    0x200,    0,          TC_DROP },
+    { 0x202 | NTC_EFL_VIF,   0x200,    0,          TC_DROP },
+    { 0x202 | NTC_EFL_VIP,   0x200,    0,          TC_DROP },
+    { 0x202 | NTC_EFL_ID,    0x200200, NTC_EFL_ID, TC_DROP },
+};
+#else
+#define TC_DROP (NTC_EFL_NT | NTC_EFL_IOPL | NTC_EFL_RF | NTC_EFL_VM | NTC_EFL_VIF | NTC_EFL_VIP)
+/* Windows 10 22H2, 32-bit under WoW64: NT and IOPL are dropped; RF, VM, VIF and VIP are read
+ * back but a running thread never sees them; AC and ID stay */
+static const TC_ROW TcRows[] =
+{
+    { 0x202,                 0x202,    0,          TC_DROP },
+    { 0x202 | NTC_EFL_NT,    0x202,    0,          TC_DROP },
+    { 0x202 | NTC_EFL_IOPL,  0x202,    0,          TC_DROP },
+    { 0x202 | NTC_EFL_RF,    0x10202,  0,          TC_DROP },
+    { 0x202 | NTC_EFL_VM,    0x20202,  0,          TC_DROP },
+    { 0x202 | NTC_EFL_AC,    0x40202,  NTC_EFL_AC, TC_DROP },
+    { 0x202 | NTC_EFL_VIF,   0x80202,  0,          TC_DROP },
+    { 0x202 | NTC_EFL_VIP,   0x100202, 0,          TC_DROP },
+    { 0x202 | NTC_EFL_ID,    0x200202, NTC_EFL_ID, TC_DROP },
+};
+#endif
+
+static volatile ULONG TcSeen;
+
+static DWORD WINAPI TcThread(PVOID Param)
+{
+    TcSeen = (ULONG)__readeflags();
+    return 0;
+}
+
+static void TestSetThreadContextEFlags(void)
+{
+    ULONG i;
+#ifdef _M_IX86
+    BOOL IsWow64 = FALSE;
+    IsWow64Process(GetCurrentProcess(), &IsWow64);
+    if (!IsWow64)
+        return;
+#endif
+    for (i = 0; i < ARRAYSIZE(TcRows); i++)
+    {
+        CONTEXT Context;
+        HANDLE Thread = CreateThread(NULL, 0, TcThread, NULL, CREATE_SUSPENDED, NULL);
+        BOOL Ret;
+
+        ok(Thread != NULL, "row %lu: CreateThread failed %lu\n", i, GetLastError());
+        if (!Thread)
+            continue;
+        ZeroMemory(&Context, sizeof(Context));
+        Context.ContextFlags = CONTEXT_CONTROL;
+        Ret = GetThreadContext(Thread, &Context);
+        ok(Ret, "row %lu: GetThreadContext failed %lu\n", i, GetLastError());
+        Context.EFlags = TcRows[i].In;
+        Ret = SetThreadContext(Thread, &Context);
+        ok(Ret, "row %lu: SetThreadContext failed %lu\n", i, GetLastError());
+        ZeroMemory(&Context, sizeof(Context));
+        Context.ContextFlags = CONTEXT_CONTROL;
+        Ret = GetThreadContext(Thread, &Context);
+        ok(Ret, "row %lu: GetThreadContext failed %lu\n", i, GetLastError());
+        ok(Context.EFlags == TcRows[i].Readback,
+           "row %lu: EFlags 0x%lx given, 0x%lx read back, expected 0x%lx\n",
+           i, TcRows[i].In, (ULONG)Context.EFlags, TcRows[i].Readback);
+
+        TcSeen = 0xDEAD0000;
+        ResumeThread(Thread);
+        ok_eq_ulong(WaitForSingleObject(Thread, 30000), WAIT_OBJECT_0);
+        ok((TcSeen & TcRows[i].SeenClear) == 0,
+           "row %lu: running thread saw EFlags 0x%lx, bits 0x%lx must be clear\n",
+           i, TcSeen, TcSeen & TcRows[i].SeenClear);
+        ok((TcSeen & TcRows[i].SeenSet) == TcRows[i].SeenSet,
+           "row %lu: running thread saw EFlags 0x%lx, bits 0x%lx must be set\n",
+           i, TcSeen, TcRows[i].SeenSet);
+        CloseHandle(Thread);
+    }
+}
+
+START_TEST(NtContinue)
+{
+    DoNtContinue();
+#ifdef _M_AMD64
+    NtcFixedFlags = TRUE;
+    DoNtContinue();
+    NtcFixedFlags = FALSE;
+#endif
+    TestSetThreadContextEFlags();
 }

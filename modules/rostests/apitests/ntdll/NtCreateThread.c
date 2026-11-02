@@ -8,6 +8,8 @@
 
 #include "precomp.h"
 
+#include <float.h>
+
 PVOID TestThreadProcPtr;
 CONTEXT TestThreadStartupContext;
 DECLSPEC_ALIGN(16) UCHAR TestThreadStartupStack[PAGE_SIZE];
@@ -131,6 +133,71 @@ WaitForTestThread(HANDLE ThreadHandle)
     DWORD Wait = WaitForSingleObject(ThreadHandle, 30000);
     ok_eq_ulong(Wait, WAIT_OBJECT_0);
     CloseHandle(ThreadHandle);
+}
+
+/* The debug registers and the rounding mode of the creating thread do not reach a new thread
+ * (checked on Windows 10 22H2, x64) */
+static volatile ULONG_PTR NewThreadDr[6];
+static volatile unsigned int NewThreadFpCtrl;
+
+static void NeverCalledBreakTarget(void)
+{
+}
+
+static DWORD WINAPI NewThreadStateProc(PVOID Param)
+{
+    CONTEXT Context;
+
+    ZeroMemory(&Context, sizeof(Context));
+    Context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    GetThreadContext(GetCurrentThread(), &Context);
+    NewThreadDr[0] = Context.Dr0;
+    NewThreadDr[1] = Context.Dr1;
+    NewThreadDr[2] = Context.Dr2;
+    NewThreadDr[3] = Context.Dr3;
+    NewThreadDr[4] = Context.Dr6;
+    NewThreadDr[5] = Context.Dr7;
+    NewThreadFpCtrl = _control87(0, 0);
+    return 0;
+}
+
+static void TestNewThreadResetsState(void)
+{
+    CONTEXT Context;
+    HANDLE Thread;
+    unsigned int OldFp;
+    ULONG i;
+
+    ZeroMemory(&Context, sizeof(Context));
+    Context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    Context.Dr0 = (ULONG_PTR)NeverCalledBreakTarget;
+    Context.Dr7 = 1;
+    SetThreadContext(GetCurrentThread(), &Context);
+    OldFp = _control87(_RC_DOWN, _MCW_RC);
+
+    for (i = 0; i < ARRAYSIZE(NewThreadDr); i++)
+        NewThreadDr[i] = 0xCCCCCCCC;
+    NewThreadFpCtrl = 0xCCCCCCCC;
+    Thread = CreateThread(NULL, 0, NewThreadStateProc, NULL, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed %lu\n", GetLastError());
+    if (Thread)
+    {
+        ok_eq_ulong(WaitForSingleObject(Thread, 30000), WAIT_OBJECT_0);
+        CloseHandle(Thread);
+    }
+
+    _control87(OldFp, _MCW_RC);
+    ZeroMemory(&Context, sizeof(Context));
+    Context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    SetThreadContext(GetCurrentThread(), &Context);
+
+    ok_eq_hex((ULONG)NewThreadDr[0], 0);
+    ok_eq_hex((ULONG)NewThreadDr[1], 0);
+    ok_eq_hex((ULONG)NewThreadDr[2], 0);
+    ok_eq_hex((ULONG)NewThreadDr[3], 0);
+    ok_eq_hex((ULONG)NewThreadDr[4], 0);
+    ok_eq_hex((ULONG)NewThreadDr[5], 0);
+    ok_eq_hex(NewThreadFpCtrl & _MCW_RC, _RC_NEAR);
 }
 
 START_TEST(NtCreateThread)
@@ -375,4 +442,5 @@ START_TEST(NtCreateThread)
                             FALSE);
     ok_eq_hex(Status, (GetNTVersion() >= _WIN32_WINNT_WIN10) ? STATUS_NOT_SUPPORTED : STATUS_SUCCESS);
 #endif
+    TestNewThreadResetsState();
 }
