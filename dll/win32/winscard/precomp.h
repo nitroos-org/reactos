@@ -14,4 +14,7 @@
 
 #include <wine/debug.h>
 
+LONG scard_empty_multistring(BOOL wide, void *buf, DWORD *len);
+LONG scard_no_context(void);
+
 #endif /* !_WINSCARD_PCH_ */
