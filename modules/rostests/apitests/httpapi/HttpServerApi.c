@@ -5,7 +5,7 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * Measured on Windows 10 22H2 (x64 and WOW64). LibreOffice (mergedlo.dll) imports five of them.
- * ReactOS has no http.sys: the functions exist but report ERROR_CALL_NOT_IMPLEMENTED.
+ * ReactOS serves them from an in-process HTTP server (no http.sys), see HttpServerFlow for the request flows.
  */
 
 #include <apitest.h>
@@ -83,8 +83,7 @@ START_TEST(HttpServerApi)
     Ret = pCreateQueue(Version, NULL, NULL, 0, NULL);
     ok(Ret == ERROR_INVALID_PARAMETER, "HttpCreateRequestQueue(NULL) returned %lu\n", Ret);
 
-    /* Windows has http.sys, ReactOS has not */
-    Expected = is_reactos() ? ERROR_CALL_NOT_IMPLEMENTED : ERROR_SUCCESS;
+    Expected = ERROR_SUCCESS;
     pInitialize(Version, HTTP_INITIALIZE_SERVER, NULL);
 
     Ret = pCreateSession(Version, &Session, 0);
