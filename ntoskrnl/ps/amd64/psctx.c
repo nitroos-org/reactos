@@ -320,42 +320,29 @@ PspWow64ContextThread(HANDLE Handle, PVOID Buffer, ULONG Length, BOOLEAN Set,
  * is staged when the process has no i386 ntdll view: wow64.dll then builds the state itself.
  */
 /*
- * The image's entry, from kernel-owned data: where its view was mapped (SectionBaseAddress) and the
- * section's entry at its preferred base (TransferAddress). The PEB is the process's own memory, which
- * a parent can change before the thread runs, and is not used. The headers in the view are user memory
- * too: they are probed, bounded to their first 64 KiB, read once, and taken only if they agree with the
- * section. The result is a 32-bit user address or 0 and is never dereferenced here.
+ * The image's entry in the process's own view, as on Windows (also when the view was placed
+ * away from the preferred base, where the loader relocates the image later): the entry the
+ * section records at its preferred base (TransferAddress) moved by where the view was mapped
+ * (SectionBaseAddress). Both and the preferred base (the section's BasedAddress) are kernel-owned:
+ * no user memory is read, so neither the PEB (its creator can write it before the thread runs)
+ * nor the view's headers (copy-on-write, user-writable) change the result, which is a 32-bit
+ * user address inside the view or 0 and is never dereferenced here.
  */
 static ULONG_PTR
 PspWow64ImageEntry(PEPROCESS Process, const SECTION_IMAGE_INFORMATION *Image)
 {
-    PUCHAR Base = Process->SectionBaseAddress;
-    PIMAGE_NT_HEADERS32 Headers;
-    ULONG_PTR Entry = 0;
-    LONG Offset;
-    ULONG Rva, Preferred;
+    PSECTION Section = Process->SectionObject;
+    PMM_IMAGE_SECTION_OBJECT ImageSection;
+    ULONG_PTR Base = (ULONG_PTR)Process->SectionBaseAddress;
+    ULONG_PTR Preferred, Transfer = (ULONG_PTR)Image->TransferAddress, Entry;
 
-    if (!Base || (ULONG_PTR)Base > MAXULONG || !Image->TransferAddress) return 0;
-    _SEH2_TRY
-    {
-        ProbeForRead(Base, sizeof(IMAGE_DOS_HEADER), 1);
-        Offset = *(volatile LONG *)&((PIMAGE_DOS_HEADER)Base)->e_lfanew;
-        if (Offset > 0 && Offset <= (LONG)(0x10000 - sizeof(IMAGE_NT_HEADERS32)))
-        {
-            Headers = (PIMAGE_NT_HEADERS32)(Base + Offset);
-            ProbeForRead(Headers, sizeof(*Headers), 1);
-            Rva = *(volatile ULONG *)&Headers->OptionalHeader.AddressOfEntryPoint;
-            Preferred = *(volatile ULONG *)&Headers->OptionalHeader.ImageBase;
-            if (Rva && (ULONG_PTR)Preferred + Rva == (ULONG_PTR)Image->TransferAddress)
-                Entry = (ULONG_PTR)Base + Rva;
-        }
-    }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-    {
-        Entry = 0;
-    }
-    _SEH2_END;
-    if (Entry > MAXULONG || Entry > (ULONG_PTR)MmHighestUserAddress) Entry = 0;
+    if (!Section || !Section->u.Flags.Image || !Base || !Transfer) return 0;
+    ImageSection = (PMM_IMAGE_SECTION_OBJECT)Section->Segment;
+    Preferred = (ULONG_PTR)ImageSection->BasedAddress;
+    /* An entry RVA of 0 (or an entry outside the image) is no entry */
+    if (Transfer <= Preferred || Transfer - Preferred >= ImageSection->SizeOfImage) return 0;
+    Entry = Base + (Transfer - Preferred);
+    if (Entry > MAXULONG || Entry > (ULONG_PTR)MmHighestUserAddress) return 0;
     return Entry;
 }
 

@@ -65,9 +65,11 @@ static ULONG RemoteExport32(HANDLE Process, ULONG Base, const char *Name, char *
 }
 
 /* The kernel does not take the main thread's entry from the PEB, which the process's creator can
- * write before the thread runs: a PEB naming a kernel-range image base and an outsized minimum
- * stack commit still give a staged start context with the image's own entry (or none at all) */
-static void TestEditedPeb(const char *Path)
+ * write before the thread runs. The PEB's image base is pointed at memory the test controls: a
+ * forged MZ/PE header whose image base and entry differ from the real image's (Forged), or a
+ * kernel-range address, and the minimum stack commit is set outsized. The staged start context
+ * still has the real entry in EAX, never the forged one. */
+static void TestEditedPeb(const char *Path, BOOL Forged)
 {
     HANDLE File, Section = NULL, Process = NULL, Thread = NULL;
     SECTION_IMAGE_INFORMATION Image;
@@ -76,8 +78,10 @@ static void TestEditedPeb(const char *Path)
     CONTEXT Native = {0};
     WOW64_CONTEXT Context;
     CLIENT_ID Id;
-    PVOID StackBase = NULL, KernelBase = (PVOID)(ULONG_PTR)0xfffff78000000000ULL;
-    SIZE_T Size = 64 * 1024, Huge = ~(SIZE_T)0, Written;
+    struct ForgedHeader { IMAGE_DOS_HEADER Dos; BYTE Pad[0x40]; IMAGE_NT_HEADERS32 Nt; } Header;
+    PVOID StackBase = NULL, FakeBase = (PVOID)(ULONG_PTR)0xfffff78000000000ULL, FakeHeader = NULL;
+    SIZE_T Size = 64 * 1024, FakeSize = 0x1000, Huge = ~(SIZE_T)0, Written;
+    ULONG FakeEntry = 0;
     NTSTATUS Status;
 
     File = CreateFileA(Path, GENERIC_READ | GENERIC_EXECUTE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
@@ -94,7 +98,29 @@ static void TestEditedPeb(const char *Path)
     Status = NtQueryInformationProcess(Process, ProcessBasicInformation, &Basic, sizeof(Basic), NULL);
     ok(NT_SUCCESS(Status), "ProcessBasicInformation: %lx\n", Status);
     if (!NT_SUCCESS(Status)) goto Done;
-    ok(WriteProcessMemory(Process, &Basic.PebBaseAddress->ImageBaseAddress, &KernelBase, sizeof(KernelBase), &Written),
+    if (Forged)
+    {
+        /* A PE32 header in the child's memory (below 2 GiB), with its own base and entry */
+        Status = NtAllocateVirtualMemory(Process, &FakeHeader, 0x7fffffff, &FakeSize,
+                                         MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        ok(NT_SUCCESS(Status), "forged header: %lx\n", Status);
+        if (!NT_SUCCESS(Status)) goto Done;
+        memset(&Header, 0, sizeof(Header));
+        Header.Dos.e_magic = IMAGE_DOS_SIGNATURE;
+        Header.Dos.e_lfanew = FIELD_OFFSET(struct ForgedHeader, Nt);
+        Header.Nt.Signature = IMAGE_NT_SIGNATURE;
+        Header.Nt.FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+        Header.Nt.FileHeader.SizeOfOptionalHeader = sizeof(Header.Nt.OptionalHeader);
+        Header.Nt.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+        Header.Nt.OptionalHeader.ImageBase = (ULONG)(ULONG_PTR)FakeHeader;
+        Header.Nt.OptionalHeader.AddressOfEntryPoint = 0x777;
+        Header.Nt.OptionalHeader.SizeOfImage = 0x1000;
+        FakeEntry = (ULONG)(ULONG_PTR)FakeHeader + 0x777;
+        ok(WriteProcessMemory(Process, FakeHeader, &Header, sizeof(Header), &Written),
+           "cannot write the forged header: %lu\n", GetLastError());
+        FakeBase = FakeHeader;
+    }
+    ok(WriteProcessMemory(Process, &Basic.PebBaseAddress->ImageBaseAddress, &FakeBase, sizeof(FakeBase), &Written),
        "cannot write the PEB image base: %lu\n", GetLastError());
     ok(WriteProcessMemory(Process, &Basic.PebBaseAddress->MinimumStackCommit, &Huge, sizeof(Huge), &Written),
        "cannot write the PEB minimum stack commit: %lu\n", GetLastError());
@@ -118,18 +144,13 @@ static void TestEditedPeb(const char *Path)
 
     memset(&Context, 0x55, sizeof(Context));
     Context.ContextFlags = WOW64_CONTEXT_ALL;
-    if (Wow64GetThreadContext(Thread, &Context))
-    {
-        ok(!Context.Eax || Context.Eax == (ULONG)(ULONG_PTR)Image.TransferAddress,
-           "edited PEB: eax %08lx, image entry %p\n", Context.Eax, Image.TransferAddress);
-        ok(Context.Ebx != 0x55555555 && Context.SegCs == 0x23, "edited PEB: ebx %08lx cs %04lx\n",
-           Context.Ebx, Context.SegCs);
-    }
-    else
-    {
-        /* Not staged at all is also safe */
-        trace("edited PEB: Wow64GetThreadContext failed: %lu\n", GetLastError());
-    }
+    ok(Wow64GetThreadContext(Thread, &Context), "edited PEB: Wow64GetThreadContext: %lu\n", GetLastError());
+    ok(Context.Eax == (ULONG)(ULONG_PTR)Image.TransferAddress,
+       "edited PEB (%s): eax %08lx, image entry %p\n", Forged ? "forged header" : "kernel address",
+       Context.Eax, Image.TransferAddress);
+    ok(!Forged || Context.Eax != FakeEntry, "edited PEB: eax %08lx is the forged header's entry\n", Context.Eax);
+    ok(Context.Ebx != 0x55555555 && Context.SegCs == 0x23, "edited PEB: ebx %08lx cs %04lx\n",
+       Context.Ebx, Context.SegCs);
 Done:
     if (Process) NtTerminateProcess(Process, 0);
     if (Thread)
@@ -139,6 +160,95 @@ Done:
     }
     if (Process) CloseHandle(Process);
     if (Section) CloseHandle(Section);
+}
+
+/* An image whose preferred base is taken when its view is mapped is mapped elsewhere (the guest
+ * loader relocates it later), and the start context still has its real entry: the view's base plus
+ * the entry RVA, not the entry at the preferred base. The preferred base is made unavailable by
+ * moving it over the shared user data page, which every process has before its image is mapped:
+ * a copy of the 32-bit cmd.exe, header ImageBase changed to the top of the 32-bit address space
+ * (the copy never runs). */
+static void TestRelocatedImage(const char *Path)
+{
+    char Copy[MAX_PATH], Dir[MAX_PATH];
+    STARTUPINFOA Startup = { sizeof(Startup) };
+    PROCESS_INFORMATION Child;
+    PROCESS_BASIC_INFORMATION Basic;
+    WOW64_CONTEXT Context;
+    IMAGE_DOS_HEADER Dos;
+    IMAGE_NT_HEADERS32 Nt;
+    ULONG_PTR Peb32 = 0, ViewBase = 0;
+    ULONG Preferred, Size;
+    HANDLE File;
+    PUCHAR Data;
+    DWORD Read, Written;
+    SIZE_T Remote;
+
+    GetTempPathA(sizeof(Dir), Dir);
+    GetTempFileNameA(Dir, "w64", 0, Copy);
+    File = CreateFileA(Path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (File == INVALID_HANDLE_VALUE)
+    {
+        skip("cannot open %s: %lu\n", Path, GetLastError());
+        return;
+    }
+    Size = GetFileSize(File, NULL);
+    Data = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (!Data || !ReadFile(File, Data, Size, &Read, NULL) || Read != Size)
+    {
+        skip("cannot read %s\n", Path);
+        CloseHandle(File);
+        if (Data) HeapFree(GetProcessHeap(), 0, Data);
+        return;
+    }
+    CloseHandle(File);
+    memcpy(&Dos, Data, sizeof(Dos));
+    memcpy(&Nt, Data + Dos.e_lfanew, sizeof(Nt));
+    if (Dos.e_magic != IMAGE_DOS_SIGNATURE || Nt.Signature != IMAGE_NT_SIGNATURE ||
+        Nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC || Nt.OptionalHeader.SizeOfImage <= 0x10000 ||
+        !Nt.OptionalHeader.AddressOfEntryPoint || !Nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size)
+    {
+        skip("%s is not a relocatable PE32 over 64 KiB\n", Path);
+        HeapFree(GetProcessHeap(), 0, Data);
+        return;
+    }
+    /* The highest 64 KiB aligned base whose image ends below 0x7fff0000: it covers 0x7ffe0000 */
+    Preferred = (0x7fff0000 - Nt.OptionalHeader.SizeOfImage) & ~0xffff;
+    ((PIMAGE_NT_HEADERS32)(Data + Dos.e_lfanew))->OptionalHeader.ImageBase = Preferred;
+    File = CreateFileA(Copy, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    ok(File != INVALID_HANDLE_VALUE && WriteFile(File, Data, Size, &Written, NULL) && Written == Size,
+       "cannot write %s: %lu\n", Copy, GetLastError());
+    HeapFree(GetProcessHeap(), 0, Data);
+    if (File == INVALID_HANDLE_VALUE) return;
+    CloseHandle(File);
+
+    if (!CreateProcessA(Copy, NULL, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &Startup, &Child))
+    {
+        skip("cannot start the rebased copy: %lu\n", GetLastError());
+        DeleteFileA(Copy);
+        return;
+    }
+    if (NT_SUCCESS(NtQueryInformationProcess(Child.hProcess, ProcessBasicInformation, &Basic, sizeof(Basic), NULL)))
+        ReadProcessMemory(Child.hProcess, &Basic.PebBaseAddress->ImageBaseAddress, &ViewBase, sizeof(ViewBase), &Remote);
+    NtQueryInformationProcess(Child.hProcess, ProcessWow64Information, &Peb32, sizeof(Peb32), NULL);
+    if (!Peb32 || !ViewBase)
+        skip("no WoW64 child or view base (%p, %p)\n", (PVOID)Peb32, (PVOID)ViewBase);
+    else if (ViewBase == Preferred)
+        skip("the image was mapped at its preferred base %08lx\n", Preferred);
+    else
+    {
+        memset(&Context, 0x55, sizeof(Context));
+        Context.ContextFlags = WOW64_CONTEXT_ALL;
+        ok(Wow64GetThreadContext(Child.hThread, &Context), "relocated: Wow64GetThreadContext: %lu\n", GetLastError());
+        ok(ViewBase < MAXULONG && Context.Eax == (ULONG)ViewBase + Nt.OptionalHeader.AddressOfEntryPoint,
+           "relocated: eax %08lx, view base %p + entry RVA %08lx (preferred base %08lx)\n", Context.Eax,
+           (PVOID)ViewBase, Nt.OptionalHeader.AddressOfEntryPoint, Preferred);
+    }
+    TerminateProcess(Child.hProcess, 0);
+    WaitForSingleObject(Child.hProcess, 10000);
+    CloseHandle(Child.hThread);
+    CloseHandle(Child.hProcess);
+    DeleteFileA(Copy);
 }
 
 static void TestSuspendedMain(void)
@@ -268,7 +378,9 @@ static void TestSuspendedMain(void)
 Done:
     CloseHandle(Child.hThread);
     CloseHandle(Child.hProcess);
-    TestEditedPeb(Path);
+    TestEditedPeb(Path, TRUE);
+    TestEditedPeb(Path, FALSE);
+    TestRelocatedImage(Path);
 }
 #else
 /* A far call into 64-bit code at Code + sizeof(FarCall) */
