@@ -1068,6 +1068,7 @@ RtlpUnwindInternal(
     ULONG_PTR StackLow, StackHigh;
     ULONG64 ImageBase, EstablisherFrame;
     CONTEXT UnwindContext;
+    BOOLEAN Collided;
 
     /* Get the current stack limits */
     RtlpGetStackLimits(&StackLow, &StackHigh);
@@ -1168,6 +1169,8 @@ RtlpUnwindInternal(
              /* Loop all nested handlers */
             do
             {
+                Collided = FALSE;
+
                 /* Check if this is the target frame. This is also needed
                    after a collided unwind, which continues in the frame
                    of the previous unwind. */
@@ -1237,11 +1240,19 @@ RtlpUnwindInternal(
                         (HandlerType == UNW_FLAG_UHANDLER) ? ContextRecord : &UnwindContext;
                     EstablisherFrame = DispatcherContext.EstablisherFrame;
 
-                    /* Set the exception flags to indicate that we collided
-                       with an unwind and continue the handler loop, which
-                       will run any additional handlers from the previous
-                       unwind. */
-                    ExceptionRecord->ExceptionFlags |= EXCEPTION_COLLIDED_UNWIND;
+                    /* Continue the handler loop, which will run any
+                       additional handlers from the previous unwind. Only an
+                       unwind reports the collision to the handler: the flag
+                       is part of EXCEPTION_UNWIND, so during exception
+                       dispatch it would make a handler that starts an unwind
+                       (the CLR does, from its first pass) look like an unwind
+                       to RtlpExecuteHandlerForUnwindHandler, which would then
+                       collide with the dispatch itself. */
+                    if (HandlerType == UNW_FLAG_UHANDLER)
+                    {
+                        ExceptionRecord->ExceptionFlags |= EXCEPTION_COLLIDED_UNWIND;
+                    }
+                    Collided = TRUE;
                     continue;
                 }
 
@@ -1251,7 +1262,7 @@ RtlpUnwindInternal(
                     __debugbreak();
                     RtlRaiseStatus(STATUS_INVALID_DISPOSITION);
                 }
-            } while (ExceptionRecord->ExceptionFlags & EXCEPTION_COLLIDED_UNWIND);
+            } while (Collided);
         }
 
         /* Check, if we have left our stack (8.) */
