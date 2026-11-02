@@ -63,6 +63,8 @@ typedef struct TestLockBytes {
     HRESULT lock_hr;
     ULONG locks_supported;
     ULONG lock_called;
+    ULONGLONG size_limit; /* 0: unlimited; SetSize beyond it fails as on a full medium */
+    ULONG setsize_failed;
 } TestLockBytes;
 
 static inline TestLockBytes *impl_from_ILockBytes(ILockBytes *iface)
@@ -159,6 +161,12 @@ static HRESULT WINAPI TestLockBytes_SetSize(ILockBytes *iface,
     ULARGE_INTEGER cb)
 {
     TestLockBytes *This = impl_from_ILockBytes(iface);
+
+    if (This->size_limit && cb.QuadPart > This->size_limit)
+    {
+        This->setsize_failed++;
+        return STG_E_MEDIUMFULL;
+    }
 
     if (This->buffer_size < cb.QuadPart)
     {
@@ -3872,6 +3880,48 @@ static void test_custom_lockbytes(void)
     DeleteTestLockBytes(lockbytes);
 }
 
+/* A write that outgrows the medium fails once: the chain is not grown block by block into a
+ * SetSize that fails every time (on a full disk each call is a file system round trip, and a
+ * multi-hundred-MB stream, like the Windows Installer database copy, never seemed to return). */
+static void test_medium_full(void)
+{
+    static const WCHAR stmname[] = { 'F','U','L','L',0 };
+    const ULONG big = 4 * 1024 * 1024;
+    TestLockBytes *lockbytes;
+    IStorage *stg;
+    IStream *stm;
+    STATSTG stat;
+    HRESULT hr;
+    ULONG written = 0;
+    BYTE *buf;
+
+    buf = calloc(1, big);
+    ok(buf != NULL, "out of memory\n");
+    if (!buf) return;
+    CreateTestLockBytes(&lockbytes);
+
+    hr = StgCreateDocfileOnILockBytes(&lockbytes->ILockBytes_iface,
+                                      STGM_CREATE|STGM_READWRITE|STGM_SHARE_EXCLUSIVE, 0, &stg);
+    ok(hr == S_OK, "StgCreateDocfileOnILockBytes failed %lx\n", hr);
+    hr = IStorage_CreateStream(stg, stmname, STGM_SHARE_EXCLUSIVE|STGM_READWRITE, 0, 0, &stm);
+    ok(hr == S_OK, "IStorage_CreateStream failed %lx\n", hr);
+
+    lockbytes->size_limit = 64 * 1024;
+    hr = IStream_Write(stm, buf, big, &written);
+    ok(FAILED(hr), "writing past the end of the medium succeeded: %lx\n", hr);
+    ok(lockbytes->setsize_failed < 4, "SetSize was retried %lu times after it failed\n", lockbytes->setsize_failed);
+
+    hr = IStream_Stat(stm, &stat, STATFLAG_NONAME);
+    ok(hr == S_OK, "IStream_Stat failed %lx\n", hr);
+    ok(stat.cbSize.QuadPart < lockbytes->size_limit, "stream size %I64u is past the medium (%I64u)\n",
+       stat.cbSize.QuadPart, lockbytes->size_limit);
+
+    IStream_Release(stm);
+    IStorage_Release(stg);
+    DeleteTestLockBytes(lockbytes);
+    free(buf);
+}
+
 START_TEST(storage32)
 {
     CHAR temp[MAX_PATH];
@@ -3921,4 +3971,5 @@ START_TEST(storage32)
     test_transacted_shared();
     test_overwrite();
     test_custom_lockbytes();
+    test_medium_full();
 }

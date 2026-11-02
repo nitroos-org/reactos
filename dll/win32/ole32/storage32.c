@@ -3795,7 +3795,7 @@ static SmallBlockChainStream* Storage32Impl_BigBlocksToSmallBlocks(
  * This will create a depot block, essentially it is a block initialized
  * to BLOCK_UNUSEDs.
  */
-static void Storage32Impl_AddBlockDepot(StorageImpl* This, ULONG blockIndex, ULONG depotIndex)
+static BOOL Storage32Impl_AddBlockDepot(StorageImpl* This, ULONG blockIndex, ULONG depotIndex)
 {
   BYTE blockBuffer[MAX_BIG_BLOCK_SIZE];
   ULONG rangeLockIndex = RANGELOCK_FIRST / This->bigBlockSize - 1;
@@ -3813,7 +3813,7 @@ static void Storage32Impl_AddBlockDepot(StorageImpl* This, ULONG blockIndex, ULO
     ((ULONG*)blockBuffer)[rangeLockIndex % blocksPerDepot] = BLOCK_END_OF_CHAIN;
   }
 
-  StorageImpl_WriteBigBlock(This, blockIndex, blockBuffer);
+  return StorageImpl_WriteBigBlock(This, blockIndex, blockBuffer);
 }
 
 /******************************************************************************
@@ -4128,6 +4128,9 @@ static void StorageImpl_SetNextBlockInChain(
  *
  * Returns the index of the next free big block.
  * If the big block depot is filled, this method will enlarge it.
+ * Returns BLOCK_END_OF_CHAIN when the storage cannot grow (the medium is full):
+ * the caller must stop adding blocks, or it retries the failing growth for
+ * every block it still wants.
  *
  */
 static ULONG StorageImpl_GetNextFreeBigBlock(
@@ -4166,7 +4169,8 @@ static ULONG StorageImpl_GetNextFreeBigBlock(
         /*
          * Add a block depot.
          */
-        Storage32Impl_AddBlockDepot(This, depotBlockIndexPos, depotIndex);
+        if (!Storage32Impl_AddBlockDepot(This, depotBlockIndexPos, depotIndex))
+          return BLOCK_END_OF_CHAIN;
         This->bigBlockDepotCount++;
         This->bigBlockDepotStart[depotIndex] = depotBlockIndexPos;
 
@@ -4209,7 +4213,8 @@ static ULONG StorageImpl_GetNextFreeBigBlock(
         /*
          * Add a block depot and mark it in the extended block.
          */
-        Storage32Impl_AddBlockDepot(This, depotBlockIndexPos, depotIndex);
+        if (!Storage32Impl_AddBlockDepot(This, depotBlockIndexPos, depotIndex))
+          return BLOCK_END_OF_CHAIN;
         This->bigBlockDepotCount++;
         Storage32Impl_SetExtDepotBlock(This, depotIndex, depotBlockIndexPos);
 
@@ -4260,8 +4265,9 @@ static ULONG StorageImpl_GetNextFreeBigBlock(
 
   ILockBytes_Stat(This->lockBytes, &statstg, STATFLAG_NONAME);
 
-  if (neededSize.QuadPart > statstg.cbSize.QuadPart)
-    ILockBytes_SetSize(This->lockBytes, neededSize);
+  if (neededSize.QuadPart > statstg.cbSize.QuadPart &&
+      FAILED(ILockBytes_SetSize(This->lockBytes, neededSize)))
+    return BLOCK_END_OF_CHAIN;
 
   This->prevFreeBlock = freeBlock;
 
@@ -4496,7 +4502,9 @@ static HRESULT StorageImpl_StreamSetSize(StorageBaseImpl *base, DirRef index,
   }
   else
   {
-    BlockChainStream_SetSize(bigblock, newsize);
+    /* A chain that could not grow must not be recorded with the new size. */
+    if (!BlockChainStream_SetSize(bigblock, newsize))
+      return STG_E_MEDIUMFULL;
   }
 
   /* Set the size in the directory entry. */
@@ -7393,6 +7401,8 @@ static BOOL BlockChainStream_Enlarge(BlockChainStream* This,
   if (blockIndex == BLOCK_END_OF_CHAIN)
   {
     blockIndex = StorageImpl_GetNextFreeBigBlock(This->parentStorage, 1);
+    if (blockIndex == BLOCK_END_OF_CHAIN)
+      return FALSE;
     StorageImpl_SetNextBlockInChain(This->parentStorage,
                                       blockIndex,
                                       BLOCK_END_OF_CHAIN);
@@ -7462,6 +7472,13 @@ static BOOL BlockChainStream_Enlarge(BlockChainStream* This,
     while (oldNumBlocks < newNumBlocks)
     {
       blockIndex = StorageImpl_GetNextFreeBigBlock(This->parentStorage, newNumBlocks - oldNumBlocks);
+      if (blockIndex == BLOCK_END_OF_CHAIN)
+      {
+        /* The medium is full: keep the blocks added so far, as a shorter chain. */
+        This->tailIndex = currentBlock;
+        This->numBlocks = oldNumBlocks;
+        return FALSE;
+      }
 
       StorageImpl_SetNextBlockInChain(
 	This->parentStorage,
@@ -7551,7 +7568,7 @@ BOOL BlockChainStream_SetSize(
   }
   else
   {
-    BlockChainStream_Enlarge(This, newSize);
+    return BlockChainStream_Enlarge(This, newSize);
   }
 
   return TRUE;
