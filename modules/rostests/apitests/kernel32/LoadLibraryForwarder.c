@@ -222,6 +222,15 @@ static const FWEXPORT FwdExports[] =
     { "FwdBadImp",  "ldrfw_badimp.Foo" },                   /* 9: target whose own import is missing by name */
     { "FwdMal",     "ldrmal_tgt.Foo" },                     /* 10: target with a malformed import directory */
     { "FwdMal2",    "ldrmal_gpa.Foo" },                     /* 11: same, for GetProcAddress */
+    { "FwdChain",   "ldrfw_chain.Mid" },                    /* 12: a forwarder to a forwarder to a missing name */
+    { "FwdChainOrd", "ldrfw_chain.MidOrd" },                /* 13: a forwarder to a forwarder to a missing ordinal */
+};
+
+/* ldrfw_chain.dll: the second step of the chained forwarders */
+static const FWEXPORT ChainExports[] =
+{
+    { "Mid",        "ldrfw_tgt.LdrFwNoSuchExport" },        /* 1: target mapped by the nested snap, missing name */
+    { "MidOrd",     "kernel32.#32000" },                    /* 2: loaded target, missing ordinal */
 };
 
 static const FWEXPORT FooExport[] = { { "Foo", NULL } };
@@ -232,10 +241,12 @@ typedef struct _FWCASE
     PCSTR Name;             /* imported name, or NULL for Ordinal */
     WORD Ordinal;
     DWORD LoadError;        /* LoadLibrary; 0 = it loads */
-    LONG HardErrors;        /* NtRaiseHardError calls during one LoadLibrary */
+    LONG HardErrors;        /* NtRaiseHardError calls during one LoadLibrary; HARD_AT_MOST_ONE: 0 or 1 */
     PCWSTR HardName;        /* the entry point the hard error names, NULL = not checked */
     NTSTATUS StartStatus;   /* exit code of an EXE that imports the DLL */
 } FWCASE;
+
+#define HARD_AT_MOST_ONE    (-1)
 
 /*
  * Windows 10 22H2 (x64 and WoW64): the status is that of the step that
@@ -255,10 +266,14 @@ static const FWCASE Cases[] =
     { L"ldrfw_u_baddll.dll", "FwdBadDll", 0, ERROR_MOD_NOT_FOUND,   0, NULL, STATUS_DLL_NOT_FOUND },
     { L"ldrfw_u_nodll.dll",  "FwdNoDll",  0, ERROR_MOD_NOT_FOUND,   0, NULL, STATUS_DLL_NOT_FOUND },
     { L"ldrfw_u_badimp.dll", "FwdBadImp", 0, ERROR_PROC_NOT_FOUND,  1, L"LdrFwNoSuchExport", STATUS_ENTRYPOINT_NOT_FOUND },
+    /* Chains, not measured on Windows: the status of the step that failed, as above, reported at most once */
+    { L"ldrfw_u_chain.dll",  "FwdChain",  0, ERROR_PROC_NOT_FOUND,  HARD_AT_MOST_ONE, NULL, STATUS_ENTRYPOINT_NOT_FOUND },
+    { L"ldrfw_u_chord.dll",  "FwdChainOrd", 0, ERROR_INVALID_ORDINAL, HARD_AT_MOST_ONE, NULL, STATUS_ORDINAL_NOT_FOUND },
 };
 
 /* Every image the test writes; none of them may stay loaded after a failure */
-static const PCWSTR Helpers[] = { L"ldrfw_fwd.dll", L"ldrfw_tgt.dll", L"ldrfw_bad.dll", L"ldrfw_badimp.dll" };
+static const PCWSTR Helpers[] = { L"ldrfw_fwd.dll", L"ldrfw_tgt.dll", L"ldrfw_bad.dll", L"ldrfw_badimp.dll",
+                                  L"ldrfw_chain.dll" };
 
 #define LOAD_TIMEOUT    20000
 #define LOAD_REPEAT     10
@@ -432,7 +447,8 @@ TestDynamic(PCWSTR Dir)
                 Hung = TRUE;
                 break;
             }
-            ok(HardErrorCount - HardErrorsBefore == Cases[i].HardErrors,
+            ok(Cases[i].HardErrors == HARD_AT_MOST_ONE ? (HardErrorCount - HardErrorsBefore <= 1) :
+               (HardErrorCount - HardErrorsBefore == Cases[i].HardErrors),
                "LoadLibraryW(%ls) #%lu raised %ld hard errors (last 0x%lx), expected %ld\n",
                Cases[i].File, n, HardErrorCount - HardErrorsBefore, (ULONG)HardErrorLast, Cases[i].HardErrors);
             if (n == 0 && HardErrorCount != HardErrorsBefore)
@@ -627,18 +643,24 @@ TestStartup(PCWSTR Dir)
     ULONG i;
 
     OldMode = SetErrorMode(SEM_FAILCRITICALERRORS);
-    for (i = 0; i < _countof(Cases); i++)
+    for (i = 0; i < 2 * _countof(Cases); i++)
     {
         CHAR Dll[64];
+        /* First the EXE imports the DLL that imports the forwarder. Then it
+         * imports the forwarded export itself from ldrfw_fwd.dll, as an
+         * application does from a forwarding DLL next to it */
+        const FWCASE *Case = &Cases[i % _countof(Cases)];
+        BOOL Direct = (i >= _countof(Cases));
 
         /* Only the failures: a process that starts may be kept alive for a
          * while by the loader's worker threads on Windows 10 */
-        if (!Cases[i].StartStatus)
+        if (!Case->StartStatus)
             continue;
 
         StringCchPrintfW(ExePath, _countof(ExePath), L"%ls\\ldrfw_exe%lu.exe", Dir, i);
-        WideCharToMultiByte(CP_ACP, 0, Cases[i].File, -1, Dll, sizeof(Dll), NULL, NULL);
-        if (!WriteFwImage(ExePath, FALSE, NULL, Dll, "Foo", 0, NULL, 0))
+        WideCharToMultiByte(CP_ACP, 0, Case->File, -1, Dll, sizeof(Dll), NULL, NULL);
+        if (!(Direct ? WriteFwImage(ExePath, FALSE, NULL, "ldrfw_fwd.dll", Case->Name, Case->Ordinal, NULL, 0) :
+                       WriteFwImage(ExePath, FALSE, NULL, Dll, "Foo", 0, NULL, 0)))
         {
             ok(0, "Cannot write %ls: %lu\n", ExePath, GetLastError());
             continue;
@@ -654,7 +676,8 @@ TestStartup(PCWSTR Dir)
             continue;
         }
         Wait = WaitForSingleObject(Pi.hProcess, LOAD_TIMEOUT);
-        ok(Wait == WAIT_OBJECT_0, "%ls did not end within %lu ms\n", Cases[i].File, (ULONG)LOAD_TIMEOUT);
+        ok(Wait == WAIT_OBJECT_0, "%ls%s did not end within %lu ms\n", Case->File, Direct ? " (direct)" : "",
+           (ULONG)LOAD_TIMEOUT);
         if (Wait != WAIT_OBJECT_0)
         {
             TerminateProcess(Pi.hProcess, 0xdead);
@@ -664,8 +687,8 @@ TestStartup(PCWSTR Dir)
         {
             Code = 0xdeadbeef;
             GetExitCodeProcess(Pi.hProcess, &Code);
-            ok(Code == (DWORD)Cases[i].StartStatus, "EXE importing %ls: exit code 0x%lx, expected 0x%lx\n",
-               Cases[i].File, Code, (DWORD)Cases[i].StartStatus);
+            ok(Code == (DWORD)Case->StartStatus, "EXE importing %s%ls: exit code 0x%lx, expected 0x%lx\n",
+               Direct ? "the forwarder of " : "", Case->File, Code, (DWORD)Case->StartStatus);
         }
         CloseHandle(Pi.hThread);
         CloseHandle(Pi.hProcess);
@@ -785,6 +808,8 @@ START_TEST(LoadLibraryForwarder)
     Written &= WriteFwImage(Path, TRUE, "ldrfw_bad.dll", "ldrfw_nonexistent_dep.dll", "Foo", 0, FooExport, 1);
     StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_badimp.dll", Dir);
     Written &= WriteFwImage(Path, TRUE, "ldrfw_badimp.dll", "kernel32.dll", "LdrFwNoSuchExport", 0, FooExport, 1);
+    StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_chain.dll", Dir);
+    Written &= WriteFwImage(Path, TRUE, "ldrfw_chain.dll", NULL, NULL, 0, ChainExports, _countof(ChainExports));
     StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrmal_tgt.dll", Dir);
     BadImportNameRva = 0x7F000000;
     Written &= WriteFwImage(Path, TRUE, "ldrmal_tgt.dll", "kernel32.dll", "Sleep", 0, FooExport, 1);
@@ -843,6 +868,8 @@ START_TEST(LoadLibraryForwarder)
     StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_bad.dll", Dir);
     DeleteFileW(Path);
     StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_badimp.dll", Dir);
+    DeleteFileW(Path);
+    StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_chain.dll", Dir);
     DeleteFileW(Path);
     StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrmal_tgt.dll", Dir);
     DeleteFileW(Path);

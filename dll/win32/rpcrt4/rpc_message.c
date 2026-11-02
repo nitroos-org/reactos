@@ -1048,8 +1048,18 @@ RPC_STATUS RPCRT4_ServerConnectionAuth(RpcConnection* conn,
             TimeStamp exp;
             ULONG max_token;
 
-            status = RPCRT4_ServerGetRegisteredAuthInfo(
-                auth_data_in->auth_type, &cred, &exp, &max_token);
+            if (!strcmp(rpcrt4_conn_get_name(conn), "ncalrpc"))
+            {
+                /* The transport authenticates the caller (no SSP, as LRPC on
+                 * Windows), so the service need not be registered */
+                SecInvalidateHandle(&cred);
+                memset(&exp, 0, sizeof(exp));
+                max_token = 0;
+                status = RPC_S_OK;
+            }
+            else
+                status = RPCRT4_ServerGetRegisteredAuthInfo(
+                    auth_data_in->auth_type, &cred, &exp, &max_token);
             if (status != RPC_S_OK)
             {
                 ERR("unknown authentication service %u\n", auth_data_in->auth_type);
@@ -1061,7 +1071,8 @@ RPC_STATUS RPCRT4_ServerConnectionAuth(RpcConnection* conn,
                                         max_token, NULL, &conn->AuthInfo);
             if (status != RPC_S_OK)
             {
-                FreeCredentialsHandle(&cred);
+                if (SecIsValidHandle(&cred))
+                    FreeCredentialsHandle(&cred);
                 return status;
             }
 

@@ -1374,6 +1374,8 @@ RPC_STATUS RPCRT4_ServerGetRegisteredAuthInfo(
     {
         if (auth_info->auth_type == auth_type)
         {
+            if (!auth_info->package_name)
+                break;
             sec_status = AcquireCredentialsHandleW((SEC_WCHAR *)auth_info->principal, auth_info->package_name,
                                                    SECPKG_CRED_INBOUND, NULL, NULL, NULL, NULL,
                                                    cred, exp);
@@ -1443,14 +1445,26 @@ RPC_STATUS WINAPI RpcServerRegisterAuthInfoW( RPC_WSTR ServerPrincName, ULONG Au
     TRACE("(%s,%lu,%p,%p)\n", debugstr_w(ServerPrincName), AuthnSvc, GetKeyFn, Arg);
 
     status = find_security_package(AuthnSvc, &packages, &package);
-    if (status != RPC_S_OK)
+    if (status == RPC_S_UNKNOWN_AUTHN_SERVICE &&
+        (AuthnSvc == RPC_C_AUTHN_WINNT || AuthnSvc == RPC_C_AUTHN_GSS_NEGOTIATE ||
+         AuthnSvc == RPC_C_AUTHN_GSS_KERBEROS))
+    {
+        /* Windows always has these packages. Without one here the service is
+         * registered without a package: ncalrpc callers do not need one (the
+         * transport authenticates them), other transports reject the bind */
+        package_name = NULL;
+        max_token = 0;
+    }
+    else if (status != RPC_S_OK)
         return status;
-
-    package_name = wcsdup(package->Name);
-    max_token = package->cbMaxToken;
-    FreeContextBuffer(packages);
-    if (!package_name)
-        return RPC_S_OUT_OF_RESOURCES;
+    else
+    {
+        package_name = wcsdup(package->Name);
+        max_token = package->cbMaxToken;
+        FreeContextBuffer(packages);
+        if (!package_name)
+            return RPC_S_OUT_OF_RESOURCES;
+    }
 
     auth_info = calloc(1, sizeof(*auth_info));
     if (!auth_info) {
