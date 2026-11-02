@@ -4620,6 +4620,14 @@ library ShellObjects
     }
 
     [
+        uuid(3ad05575-8857-4850-9277-11b85bdb8e09)
+    ]
+    coclass FileOperation
+    {
+        interface IFileOperation;
+    }
+
+    [
         uuid(591209c7-767b-42b2-9fba-44ee4615f2c7)
     ]
     coclass ApplicationAssociationRegistration
