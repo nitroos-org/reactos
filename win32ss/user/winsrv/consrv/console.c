@@ -802,6 +802,33 @@ ConSrvInitConsole(OUT PHANDLE NewConsoleHandle,
     }
     DPRINT("Terminal attached\n");
 
+    /*
+     * A window larger than the display can show (the 120x30 default on a small
+     * screen, or settings saved on a larger one) is cut to the largest window
+     * the terminal allows, as on Windows: otherwise the console starts with a
+     * window that SetConsoleWindowInfo itself would refuse to set.
+     */
+    if (GetType(Console->ActiveBuffer) == TEXTMODE_BUFFER)
+    {
+        PTEXTMODE_SCREEN_BUFFER TextBuffer = (PTEXTMODE_SCREEN_BUFFER)Console->ActiveBuffer;
+        COORD LargestWindowSize = {0, 0};
+
+        EnterCriticalSection(&Console->Lock);
+        TermGetLargestConsoleWindowSize(Console, &LargestWindowSize);
+        LargestWindowSize.X = min(LargestWindowSize.X, TextBuffer->ScreenBufferSize.X);
+        LargestWindowSize.Y = min(LargestWindowSize.Y, TextBuffer->ScreenBufferSize.Y);
+        if ((LargestWindowSize.X > 0) && (LargestWindowSize.Y > 0) &&
+            ((TextBuffer->ViewSize.X > LargestWindowSize.X) ||
+             (TextBuffer->ViewSize.Y > LargestWindowSize.Y)))
+        {
+            TextBuffer->ViewSize.X = min(TextBuffer->ViewSize.X, LargestWindowSize.X);
+            TextBuffer->ViewSize.Y = min(TextBuffer->ViewSize.Y, LargestWindowSize.Y);
+            TextBuffer->OldViewSize = TextBuffer->ViewSize;
+            TermResizeTerminal(Console);
+        }
+        LeaveCriticalSection(&Console->Lock);
+    }
+
     /* All went right, so add the console to the list */
 #if 0
     Status = ConDrvInsertConsole((PCONSOLE)Console);
