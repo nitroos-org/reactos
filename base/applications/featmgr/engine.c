@@ -1166,9 +1166,113 @@ BOOL FmTakePathChange(LPWSTR name, DWORD cch)
     return r;
 }
 
-void FmPathHint(LPCWSTR name, BOOL powershell, LPWSTR out, DWORD cch)
+/* ---- refreshenv: bring a running shell's PATH up to date --------------------------------------
+ * A child process cannot change its parent's environment (on Windows either), but a script that the shell
+ * itself runs can: refreshenv.cmd runs inside cmd.exe, refreshenv.ps1 inside pwsh. Both ship in system32
+ * (already on PATH, no profile edits). For PowerShell the .ps1 wins over the .cmd of the same name, so
+ * "refreshenv" works in either shell. refreshenv.cmd asks featmgr /print-path for the value to set. */
+
+BOOL FmRefreshEnvAvailable(void)
 {
-    if (powershell)
+    WCHAR f[MAX_PATH];
+    UINT n = GetSystemDirectoryW(f, MAX_PATH);
+    if (!n || n + 16 >= MAX_PATH) return FALSE;
+    StringCchCatW(f, MAX_PATH, L"\\refreshenv.cmd");
+    return GetFileAttributesW(f) != INVALID_FILE_ATTRIBUTES;
+}
+
+static int PathKeyLen(const WCHAR *s, int n)
+{
+    while (n > 1 && s[n - 1] == L'\\') n--;       /* "C:\bin\" and "C:\bin" are the same entry */
+    return n;
+}
+
+/* Append every entry of the ';'-separated list that the accumulator does not have yet (case-insensitive,
+ * trailing backslash ignored, empty entries dropped). Stops, keeping what fits, when out is full. */
+static void AddPathEntries(WCHAR *acc, DWORD cch, const WCHAR *list)
+{
+    const WCHAR *p = list;
+    while (*p)
+    {
+        const WCHAR *e = wcschr(p, L';'), *a, *b;
+        int n = e ? (int)(e - p) : (int)wcslen(p), kn, found = 0;
+        const WCHAR *tok = p;
+        p = e ? e + 1 : p + n;
+        while (n > 0 && *tok == L' ') { tok++; n--; }
+        while (n > 0 && tok[n - 1] == L' ') n--;
+        if (!n) continue;
+        kn = PathKeyLen(tok, n);
+        for (a = acc; *a && !found; a = b ? b + 1 : a + wcslen(a))
+        {
+            int an;
+            b = wcschr(a, L';');
+            an = b ? (int)(b - a) : (int)wcslen(a);
+            if (an && PathKeyLen(a, an) == kn && !_wcsnicmp(a, tok, kn)) found = 1;
+            if (!b) break;
+        }
+        if (found) continue;
+        {
+            size_t used = wcslen(acc);
+            if (used + (used ? 1 : 0) + (size_t)n + 1 > cch) return;
+            if (used) acc[used++] = L';';
+            memcpy(acc + used, tok, (size_t)n * sizeof(WCHAR));
+            acc[used + n] = L'\0';
+        }
+    }
+}
+
+/* The PATH a process started now would get: the registry system PATH, then the user PATH (expanded),
+ * then whatever the current PATH still has that the registry does not (a session-local addition is kept,
+ * like a refresh that only adds). Returns FALSE when out is too small for even the registry part. */
+BOOL FmRefreshedPath(WCHAR *out, DWORD cch)
+{
+    static const struct { HKEY Root; LPCWSTR Key; } src[] = {
+        { HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment" },
+        { HKEY_CURRENT_USER, L"Environment" } };
+    WCHAR *raw, *exp, *cur;
+    DWORD i, n;
+    BOOL ok = FALSE;
+
+    out[0] = L'\0';
+    raw = HeapAlloc(GetProcessHeap(), 0, 3 * 32768 * sizeof(WCHAR));
+    if (!raw) return FALSE;
+    exp = raw + 32768;
+    cur = exp + 32768;
+    for (i = 0; i < ARRAYSIZE(src); i++)
+    {
+        HKEY k;
+        if (RegOpenKeyExW(src[i].Root, src[i].Key, 0, KEY_READ, &k) != ERROR_SUCCESS) continue;
+        {
+            DWORD type = 0, cb = (32768 - 2) * sizeof(WCHAR);
+            if (RegQueryValueExW(k, L"Path", NULL, &type, (LPBYTE)raw, &cb) == ERROR_SUCCESS
+                && (type == REG_SZ || type == REG_EXPAND_SZ))
+            {
+                raw[cb / sizeof(WCHAR)] = L'\0';
+                if (type == REG_EXPAND_SZ)
+                {
+                    n = ExpandEnvironmentStringsW(raw, exp, 32768);
+                    if (!n || n > 32768) { exp[0] = L'\0'; StringCchCopyW(exp, 32768, raw); }
+                }
+                else StringCchCopyW(exp, 32768, raw);
+                AddPathEntries(out, cch, exp);
+            }
+        }
+        RegCloseKey(k);
+    }
+    n = GetEnvironmentVariableW(L"PATH", cur, 32768);
+    if (n && n < 32768) AddPathEntries(out, cch, cur);
+    ok = out[0] != L'\0';
+    HeapFree(GetProcessHeap(), 0, raw);
+    return ok;
+}
+
+/* shell: FM_SHELL_OTHER / FM_SHELL_CMD / FM_SHELL_POWERSHELL = what ran featmgr. */
+void FmPathHint(LPCWSTR name, int shell, LPWSTR out, DWORD cch)
+{
+    if (shell != FM_SHELL_OTHER && FmRefreshEnvAvailable())
+        StringCchPrintfW(out, cch,
+            L"%s is installed. Open a new terminal, or run this in the current one:\n  refreshenv\n", name);
+    else if (shell == FM_SHELL_POWERSHELL)
         StringCchPrintfW(out, cch,
             L"%s is installed. Open a new terminal to use it, or refresh this one:\n"
             L"  $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + "

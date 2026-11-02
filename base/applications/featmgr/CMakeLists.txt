@@ -9,6 +9,10 @@ set_module_type(featmgr win32cui UNICODE)
 add_importlibs(featmgr advapi32 shlwapi shell32 user32 msvcrt kernel32 ntdll)
 add_cd_file(TARGET featmgr DESTINATION reactos/system32 FOR all)
 
+# --- refreshenv: re-read PATH into the cmd / PowerShell window that is open (a child like featmgr cannot) ---
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/refreshenv.cmd DESTINATION reactos/system32 FOR all)
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/refreshenv.ps1 DESTINATION reactos/system32 FOR all)
+
 # --- GUI applet: "Optional Features" (Turn features on/off) ---
 add_executable(optfeatures gui.c engine.c rapps_import.c scoop.c optfeatures.rc)
 set_module_type(optfeatures win32gui UNICODE)

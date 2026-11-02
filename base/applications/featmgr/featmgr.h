@@ -182,10 +182,18 @@ void   FmSetLastMessage(LPCWSTR fmt, ...);
 
 /* An install changed the registry PATH (machine or user): programs already running, including the shell that
  * started us, keep the old one. FmTakePathChange returns TRUE once after such an install (and clears it);
- * name = the feature that did it. FmPathHint formats the user-facing text: the PowerShell flavour carries a
- * command that refreshes the session, the cmd one says to open a new window. */
+ * name = the feature that did it. FmPathHint formats the user-facing text. When refreshenv ships in
+ * system32 (FmRefreshEnvAvailable) a cmd or PowerShell parent is told to run "refreshenv" (it re-reads PATH
+ * inside that shell); otherwise PowerShell gets a long command and cmd is told to open a new window.
+ * FmRefreshedPath = the PATH a process started now would get (registry machine + user, then what the
+ * current PATH has extra); it is what "featmgr /print-path" prints and refreshenv.cmd applies. */
+#define FM_SHELL_OTHER      0
+#define FM_SHELL_CMD        1
+#define FM_SHELL_POWERSHELL 2
 BOOL   FmTakePathChange(LPWSTR name, DWORD cch);
-void   FmPathHint(LPCWSTR name, BOOL powershell, LPWSTR out, DWORD cch);
+BOOL   FmRefreshEnvAvailable(void);
+BOOL   FmRefreshedPath(WCHAR *out, DWORD cch);
+void   FmPathHint(LPCWSTR name, int shell, LPWSTR out, DWORD cch);
 
 /* Same as FmGetDependents, over an already loaded array (no catalog rescan). */
 int    FmGetDependentsIn(const FM_FEATURE *arr, int n, LPCWSTR id, LPWSTR buf, DWORD cch);

@@ -7,6 +7,7 @@
 
 #include "featmgr.h"
 #include <stdio.h>
+#include <strsafe.h>
 #include <tlhelp32.h>
 
 /* Write a wide string to stdout as UTF-8 so file-based capture is readable. */
@@ -57,7 +58,49 @@ static void Usage(void)
     Out(L"                               any other bucket: explicit consent (its manifests run PowerShell as admin)\n");
     Out(L"  featmgr /update <id>         Scoop app: 'scoop update <app>', then refresh its bucket entries\n");
     Out(L"  featmgr /update /all         'scoop update' (Scoop + buckets), re-import the buckets, 'scoop update *'\n");
+    Out(L"  featmgr /print-path [/cmd]   the PATH a new process would get (registry machine + user PATH);\n");
+    Out(L"                               used by refreshenv, which applies it to the current cmd/pwsh window\n");
     Out(L"  featmgr /help                this text\n");
+}
+
+/* featmgr /print-path [/cmd]: the PATH a new process would get, on one line, in the OEM code page (what
+ * a cmd "for" or a PowerShell native call reads). /cmd prints it as a batch line: set "PATH=..." with % doubled.
+ * refreshenv.cmd runs that line in the calling cmd.exe. */
+static int DoPrintPath(int argc, WCHAR **argv)
+{
+    WCHAR *path = HeapAlloc(GetProcessHeap(), 0, 2 * 32768 * sizeof(WCHAR)), *line;
+    char *oem;
+    BOOL asCmd = argc > 2 && !_wcsicmp(argv[2], L"/cmd");
+    size_t i, k = 0;
+    int n;
+
+    if (!path) return 3;
+    line = path + 32768;
+    if (!FmRefreshedPath(path, 32768)) { HeapFree(GetProcessHeap(), 0, path); return 3; }
+    if (asCmd)
+    {
+        for (i = 0; path[i] && k < 32760; i++)
+        {
+            if (path[i] == L'%') line[k++] = L'%';
+            line[k++] = path[i];
+        }
+        line[k] = L'\0';
+    }
+    else
+        StringCchCopyW(line, 32768, path);
+    oem = HeapAlloc(GetProcessHeap(), 0, 4 * 32768);
+    if (!oem) { HeapFree(GetProcessHeap(), 0, path); return 3; }
+    n = WideCharToMultiByte(CP_OEMCP, 0, line, -1, oem, 4 * 32768, NULL, NULL);
+    if (n > 0)
+    {
+        if (asCmd) fputs("set \"PATH=", stdout);
+        fwrite(oem, 1, n - 1, stdout);
+        fputs(asCmd ? "\"\n" : "\n", stdout);
+        fflush(stdout);
+    }
+    HeapFree(GetProcessHeap(), 0, oem);
+    HeapFree(GetProcessHeap(), 0, path);
+    return n > 0 ? 0 : 3;
 }
 
 static int DoList(int argc, WCHAR **argv)
@@ -253,14 +296,14 @@ static DWORD ParseDisableFlags(int argc, WCHAR **argv, int from)
 
 /* After an install that changed PATH: say so, once, as the last line(s) of the run. The shell that started
  * featmgr keeps its old PATH (as on Windows, where a child cannot change its parent's environment). */
-static BOOL ParentIsPowerShell(void)
+static int ParentShellKind(void)
 {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     PROCESSENTRY32W pe;
     DWORD me = GetCurrentProcessId(), parent = 0;
-    BOOL ps = FALSE;
+    int kind = FM_SHELL_OTHER;
 
-    if (snap == INVALID_HANDLE_VALUE) return FALSE;
+    if (snap == INVALID_HANDLE_VALUE) return FM_SHELL_OTHER;
     pe.dwSize = sizeof(pe);
     if (Process32FirstW(snap, &pe))
     {
@@ -273,20 +316,23 @@ static BOOL ParentIsPowerShell(void)
         {
             if (pe.th32ProcessID == parent)
             {
-                ps = !_wcsicmp(pe.szExeFile, L"pwsh.exe") || !_wcsicmp(pe.szExeFile, L"powershell.exe");
+                if (!_wcsicmp(pe.szExeFile, L"pwsh.exe") || !_wcsicmp(pe.szExeFile, L"powershell.exe"))
+                    kind = FM_SHELL_POWERSHELL;
+                else if (!_wcsicmp(pe.szExeFile, L"cmd.exe"))
+                    kind = FM_SHELL_CMD;
                 break;
             }
         } while (Process32NextW(snap, &pe));
     }
     CloseHandle(snap);
-    return ps;
+    return kind;
 }
 
 static void PrintPathHint(void)
 {
     WCHAR name[128], text[1024];
     if (!FmTakePathChange(name, ARRAYSIZE(name))) return;
-    FmPathHint(name, ParentIsPowerShell(), text, ARRAYSIZE(text));
+    FmPathHint(name, ParentShellKind(), text, ARRAYSIZE(text));
     Out(L"\n%s", text);
 }
 
@@ -303,6 +349,9 @@ int wmain(int argc, WCHAR **argv)
 
     if (!_wcsicmp(cmd, L"/help") || !_wcsicmp(cmd, L"/?") || !_wcsicmp(cmd, L"help"))
     { Usage(); return 0; }
+
+    if (!_wcsicmp(cmd, L"/print-path") || !_wcsicmp(cmd, L"print-path"))
+        return DoPrintPath(argc, argv);
 
     if (!_wcsicmp(cmd, L"/import-rapps") || !_wcsicmp(cmd, L"import-rapps"))
         return DoImportRapps(argc, argv);
