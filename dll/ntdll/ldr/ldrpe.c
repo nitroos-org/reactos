@@ -26,6 +26,14 @@ ULONG LdrpNormalSnap;
  */
 ULONG LdrpImportWalkDepth;
 
+/*
+ * Hard errors LdrpSnapThunk has raised. LdrpFatalHardErrorCount counts them
+ * only while the process starts; a snap that fails because the nested load of
+ * a forwarder target has reported the error already (also for a LoadLibrary)
+ * must not report it again
+ */
+static ULONG LdrpSnapHardErrorCount;
+
 /* FUNCTIONS *****************************************************************/
 
 
@@ -684,6 +692,7 @@ LdrpWalkImportDescriptor(IN LPWSTR DllPath OPTIONAL,
     PIMAGE_BOUND_IMPORT_DESCRIPTOR BoundEntry = NULL;
     PIMAGE_IMPORT_DESCRIPTOR ImportEntry;
     ULONG BoundSize, IatSize;
+    volatile BOOLEAN WalkCounted = FALSE;
 
     DPRINT("LdrpWalkImportDescriptor - BEGIN (%wZ %p '%S')\n", &LdrEntry->BaseDllName, LdrEntry, DllPath);
 
@@ -739,77 +748,93 @@ LdrpWalkImportDescriptor(IN LPWSTR DllPath OPTIONAL,
     RtlActivateActivationContextUnsafeFast(&ActCtx,
                                            LdrEntry->EntryPointActivationContext);
 
-    /* Check if we were redirected */
-    if (!(LdrEntry->Flags & LDRP_REDIRECTED))
+    /*
+     * An exception that escapes the walks below (a malformed image; it is
+     * caught further up, e.g. by LdrpSnapIAT) must neither leave the depth
+     * count raised nor leave the activation context frame (on this stack)
+     * active
+     */
+    _SEH2_TRY
     {
-        /* Get the Bound IAT */
-        BoundEntry = RtlImageDirectoryEntryToData(LdrEntry->DllBase,
-                                                  TRUE,
-                                                  IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT,
-                                                  &BoundSize);
+        /* Check if we were redirected */
+        if (!(LdrEntry->Flags & LDRP_REDIRECTED))
+        {
+            /* Get the Bound IAT */
+            BoundEntry = RtlImageDirectoryEntryToData(LdrEntry->DllBase,
+                                                      TRUE,
+                                                      IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT,
+                                                      &BoundSize);
+        }
+
+        /* Get the regular IAT, for fallback */
+        ImportEntry = RtlImageDirectoryEntryToData(LdrEntry->DllBase,
+                                                   TRUE,
+                                                   IMAGE_DIRECTORY_ENTRY_IMPORT,
+                                                   &IatSize);
+
+        /* Check if we got at least one */
+        if ((BoundEntry) || (ImportEntry))
+        {
+            /* Load and snap the imports; this is where the walks nest */
+            LdrpImportWalkDepth++;
+            WalkCounted = TRUE;
+
+            /* Do we have a Bound IAT */
+            if (BoundEntry)
+            {
+                /* Handle the descriptor */
+                Status = LdrpHandleNewFormatImportDescriptors(DllPath,
+                                                              LdrEntry,
+                                                              BoundEntry);
+            }
+            else
+            {
+                /* Handle the descriptor */
+                Status = LdrpHandleOldFormatImportDescriptors(DllPath,
+                                                              LdrEntry,
+                                                              ImportEntry);
+            }
+
+            /* Check the status of the handlers */
+            if (NT_SUCCESS(Status))
+            {
+                /* Check for Per-DLL Heap Tagging */
+                if (Peb->NtGlobalFlag & FLG_HEAP_ENABLE_TAG_BY_DLL)
+                {
+                    /* FIXME */
+                    DPRINT1("We don't support Per-DLL Heap Tagging yet!\n");
+                }
+
+                /* Check if Page Heap was enabled */
+                if (Peb->NtGlobalFlag & FLG_HEAP_PAGE_ALLOCS)
+                {
+                    /* Initialize target DLL */
+                    AVrfPageHeapDllNotification(LdrEntry);
+                }
+
+                /* Check if Application Verifier was enabled */
+                if (Peb->NtGlobalFlag & FLG_APPLICATION_VERIFIER)
+                {
+                    AVrfDllLoadNotification(LdrEntry);
+                }
+
+                /* Just to be safe */
+                Status = STATUS_SUCCESS;
+            }
+        }
     }
-
-    /* Get the regular IAT, for fallback */
-    ImportEntry = RtlImageDirectoryEntryToData(LdrEntry->DllBase,
-                                               TRUE,
-                                               IMAGE_DIRECTORY_ENTRY_IMPORT,
-                                               &IatSize);
-
-    /* Check if we got at least one */
-    if ((BoundEntry) || (ImportEntry))
+    _SEH2_FINALLY
     {
-        /* Load and snap the imports; this is where the walks nest */
-        LdrpImportWalkDepth++;
-
-        /* Do we have a Bound IAT */
-        if (BoundEntry)
+        if (WalkCounted)
         {
-            /* Handle the descriptor */
-            Status = LdrpHandleNewFormatImportDescriptors(DllPath,
-                                                          LdrEntry,
-                                                          BoundEntry);
-        }
-        else
-        {
-            /* Handle the descriptor */
-            Status = LdrpHandleOldFormatImportDescriptors(DllPath,
-                                                          LdrEntry,
-                                                          ImportEntry);
+            ASSERT(LdrpImportWalkDepth != 0);
+            LdrpImportWalkDepth--;
         }
 
-        ASSERT(LdrpImportWalkDepth != 0);
-        LdrpImportWalkDepth--;
-
-        /* Check the status of the handlers */
-        if (NT_SUCCESS(Status))
-        {
-            /* Check for Per-DLL Heap Tagging */
-            if (Peb->NtGlobalFlag & FLG_HEAP_ENABLE_TAG_BY_DLL)
-            {
-                /* FIXME */
-                DPRINT1("We don't support Per-DLL Heap Tagging yet!\n");
-            }
-
-            /* Check if Page Heap was enabled */
-            if (Peb->NtGlobalFlag & FLG_HEAP_PAGE_ALLOCS)
-            {
-                /* Initialize target DLL */
-                AVrfPageHeapDllNotification(LdrEntry);
-            }
-
-            /* Check if Application Verifier was enabled */
-            if (Peb->NtGlobalFlag & FLG_APPLICATION_VERIFIER)
-            {
-                AVrfDllLoadNotification(LdrEntry);
-            }
-
-            /* Just to be safe */
-            Status = STATUS_SUCCESS;
-        }
+        /* Release the activation context */
+        RtlDeactivateActivationContextUnsafeFast(&ActCtx);
     }
-
-    /* Release the activation context */
-    RtlDeactivateActivationContextUnsafeFast(&ActCtx);
+    _SEH2_END;
 
     DPRINT("LdrpWalkImportDescriptor - END (%wZ %p)\n", &LdrEntry->BaseDllName, LdrEntry);
 
@@ -980,6 +1005,7 @@ LdrpSnapThunk(IN PVOID ExportBase,
     NTSTATUS ForwarderStatus = STATUS_SUCCESS;
     ANSI_STRING ForwarderDll = { 0, 0, NULL };
     ULONG ForwarderHardErrors = LdrpFatalHardErrorCount;
+    ULONG ForwarderSnapErrors = LdrpSnapHardErrorCount;
 
     /* Check if the snap is by ordinal */
     if ((IsOrdinal = IMAGE_SNAP_BY_ORDINAL(OriginalThunk->u1.Ordinal)))
@@ -1095,7 +1121,8 @@ FailurePath:
             else
                 DPRINT1("Failed to snap %Z!%s for %wZ (status 0x%lx)\n", &TempString, ImportName, &SnapTarget, Status);
 
-            if (LdrpFatalHardErrorCount != ForwarderHardErrors)
+            if ((LdrpFatalHardErrorCount != ForwarderHardErrors) ||
+                (LdrpSnapHardErrorCount != ForwarderSnapErrors))
             {
                 /* The load of the forwarder target has reported the error */
             }
@@ -1143,6 +1170,7 @@ FailurePath:
                                  &Response);
 
                 /* Increase the error count */
+                LdrpSnapHardErrorCount++;
                 if (LdrpInLdrInit) LdrpFatalHardErrorCount++;
 
                 /* Free our strings */

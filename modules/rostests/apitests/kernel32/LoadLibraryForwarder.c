@@ -56,6 +56,10 @@ typedef struct _FWEXPORT
     PCSTR Forward;  /* "Dll.Name" / "Dll.#Ordinal", or NULL for code */
 } FWEXPORT;
 
+/* When not 0, the name RVA of the import descriptor (out of the image: the
+ * loader faults when it reads the name of the DLL to import) */
+static DWORD BadImportNameRva;
+
 /* A minimal image. It imports Name (or Ordinal when Name is NULL) from
  * ImportDll unless ImportDll is NULL, and a DLL exports Exports. A DLL has no
  * entry point; an EXE returns 0 at once */
@@ -124,7 +128,7 @@ WriteFwImage(PCWSTR Path, BOOL IsDll, PCSTR DllName, PCSTR ImportDll, PCSTR Name
         Img->Nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress = IMG_SECT_ALIGN + OFF_IMPORTS;
         Img->Nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size = 2 * sizeof(*Imp);
         Imp[0].OriginalFirstThunk = IMG_SECT_ALIGN + OFF_ILT;
-        Imp[0].Name = IMG_SECT_ALIGN + OFF_DLLNAME;
+        Imp[0].Name = BadImportNameRva ? BadImportNameRva : IMG_SECT_ALIGN + OFF_DLLNAME;
         Imp[0].FirstThunk = IMG_SECT_ALIGN + OFF_IAT;
         StringCchCopyA((char *)(Sect + OFF_DLLNAME), 0x40, ImportDll);
         if (Name)
@@ -215,6 +219,9 @@ static const FWEXPORT FwdExports[] =
     { "FwdNewOrd",  "ldrfw_tgt.#4000" },                    /* 6: target mapped by the snap, missing ordinal */
     { "FwdBadDll",  "ldrfw_bad.Foo" },                      /* 7: target whose own import is missing */
     { "FwdNoDll",   "ldrfw_nonexistent.Foo" },              /* 8: target does not exist */
+    { "FwdBadImp",  "ldrfw_badimp.Foo" },                   /* 9: target whose own import is missing by name */
+    { "FwdMal",     "ldrmal_tgt.Foo" },                     /* 10: target with a malformed import directory */
+    { "FwdMal2",    "ldrmal_gpa.Foo" },                     /* 11: same, for GetProcAddress */
 };
 
 static const FWEXPORT FooExport[] = { { "Foo", NULL } };
@@ -226,6 +233,7 @@ typedef struct _FWCASE
     WORD Ordinal;
     DWORD LoadError;        /* LoadLibrary; 0 = it loads */
     LONG HardErrors;        /* NtRaiseHardError calls during one LoadLibrary */
+    PCWSTR HardName;        /* the entry point the hard error names, NULL = not checked */
     NTSTATUS StartStatus;   /* exit code of an EXE that imports the DLL */
 } FWCASE;
 
@@ -238,18 +246,19 @@ typedef struct _FWCASE
  */
 static const FWCASE Cases[] =
 {
-    { L"ldrfw_u_ok.dll",     "FwdOk",     0, 0,                     0, 0 },
-    { L"ldrfw_u_name.dll",   "FwdName",   0, ERROR_PROC_NOT_FOUND,  1, STATUS_ENTRYPOINT_NOT_FOUND },
-    { L"ldrfw_u_ord.dll",    "FwdOrd",    0, ERROR_INVALID_ORDINAL, 0, STATUS_ORDINAL_NOT_FOUND },
-    { L"ldrfw_u_byord.dll",  NULL,        4, ERROR_INVALID_ORDINAL, 0, STATUS_ORDINAL_NOT_FOUND },
-    { L"ldrfw_u_newdll.dll", "FwdNewDll", 0, ERROR_PROC_NOT_FOUND,  1, STATUS_ENTRYPOINT_NOT_FOUND },
-    { L"ldrfw_u_neword.dll", "FwdNewOrd", 0, ERROR_INVALID_ORDINAL, 0, STATUS_ORDINAL_NOT_FOUND },
-    { L"ldrfw_u_baddll.dll", "FwdBadDll", 0, ERROR_MOD_NOT_FOUND,   0, STATUS_DLL_NOT_FOUND },
-    { L"ldrfw_u_nodll.dll",  "FwdNoDll",  0, ERROR_MOD_NOT_FOUND,   0, STATUS_DLL_NOT_FOUND },
+    { L"ldrfw_u_ok.dll",     "FwdOk",     0, 0,                     0, NULL, 0 },
+    { L"ldrfw_u_name.dll",   "FwdName",   0, ERROR_PROC_NOT_FOUND,  1, NULL, STATUS_ENTRYPOINT_NOT_FOUND },
+    { L"ldrfw_u_ord.dll",    "FwdOrd",    0, ERROR_INVALID_ORDINAL, 0, NULL, STATUS_ORDINAL_NOT_FOUND },
+    { L"ldrfw_u_byord.dll",  NULL,        4, ERROR_INVALID_ORDINAL, 0, NULL, STATUS_ORDINAL_NOT_FOUND },
+    { L"ldrfw_u_newdll.dll", "FwdNewDll", 0, ERROR_PROC_NOT_FOUND,  1, NULL, STATUS_ENTRYPOINT_NOT_FOUND },
+    { L"ldrfw_u_neword.dll", "FwdNewOrd", 0, ERROR_INVALID_ORDINAL, 0, NULL, STATUS_ORDINAL_NOT_FOUND },
+    { L"ldrfw_u_baddll.dll", "FwdBadDll", 0, ERROR_MOD_NOT_FOUND,   0, NULL, STATUS_DLL_NOT_FOUND },
+    { L"ldrfw_u_nodll.dll",  "FwdNoDll",  0, ERROR_MOD_NOT_FOUND,   0, NULL, STATUS_DLL_NOT_FOUND },
+    { L"ldrfw_u_badimp.dll", "FwdBadImp", 0, ERROR_PROC_NOT_FOUND,  1, L"LdrFwNoSuchExport", STATUS_ENTRYPOINT_NOT_FOUND },
 };
 
 /* Every image the test writes; none of them may stay loaded after a failure */
-static const PCWSTR Helpers[] = { L"ldrfw_fwd.dll", L"ldrfw_tgt.dll", L"ldrfw_bad.dll" };
+static const PCWSTR Helpers[] = { L"ldrfw_fwd.dll", L"ldrfw_tgt.dll", L"ldrfw_bad.dll", L"ldrfw_badimp.dll" };
 
 #define LOAD_TIMEOUT    20000
 #define LOAD_REPEAT     10
@@ -396,6 +405,8 @@ LoadGuarded(LOADREQ *Req)
 static BOOL Hung;
 static LONG HardErrorCount;
 static NTSTATUS HardErrorLast;
+static WCHAR HardErrorName[64];  /* the entry point of the last missing-export hard error */
+static WCHAR HardErrorDll[64];   /* and its DLL */
 
 static
 VOID
@@ -424,6 +435,11 @@ TestDynamic(PCWSTR Dir)
             ok(HardErrorCount - HardErrorsBefore == Cases[i].HardErrors,
                "LoadLibraryW(%ls) #%lu raised %ld hard errors (last 0x%lx), expected %ld\n",
                Cases[i].File, n, HardErrorCount - HardErrorsBefore, (ULONG)HardErrorLast, Cases[i].HardErrors);
+            if (n == 0 && HardErrorCount != HardErrorsBefore)
+                trace("%ls: hard error 0x%lx for %ls!%ls\n", Cases[i].File, (ULONG)HardErrorLast, HardErrorDll, HardErrorName);
+            if (Cases[i].HardName && HardErrorCount != HardErrorsBefore)
+                ok(!_wcsicmp(HardErrorName, Cases[i].HardName), "LoadLibraryW(%ls) #%lu: the hard error names %ls, expected %ls\n",
+                   Cases[i].File, n, HardErrorName, Cases[i].HardName);
             if (!Cases[i].LoadError)
             {
                 ok(Req.Module != NULL, "LoadLibraryW(%ls) #%lu failed: %lu\n", Cases[i].File, n, Req.Error);
@@ -507,6 +523,95 @@ TestGetProcAddress(PCWSTR Dir)
                     "load-order list", "after GetProcAddress", FALSE);
 }
 
+#ifdef __REACTOS__
+/* Loads Dir\File through LoadGuarded. FALSE on a hang */
+static
+BOOL
+TryLoad(PCWSTR Dir, PCWSTR File, LOADREQ *Req)
+{
+    ZeroMemory(Req, sizeof(*Req));
+    StringCchPrintfW(Req->Path, _countof(Req->Path), L"%ls\\%ls", Dir, File);
+    if (LoadGuarded(Req))
+        return TRUE;
+    ok(0, "LoadLibraryW(%ls) did not return within %lu ms\n", File, (ULONG)LOAD_TIMEOUT);
+    Hung = TRUE;
+    return FALSE;
+}
+
+/* A normal failure after a malformed load: the failed module is unloaded
+ * each time (the sweep of the failed load runs), so the retry fails again */
+static
+VOID
+CheckAfterMalformed(PCWSTR Dir, PCSTR What)
+{
+    static LOADREQ Req; /* static: outlives a stuck thread */
+    static const PCWSTR Canaries[] = { L"ldrfw_u_name.dll", L"ldrfw_u_newdll.dll", L"ldrfw_u_neword.dll",
+                                       L"ldrfw_u_badimp.dll" };
+    ULONG n, i, h;
+
+    for (i = 0; i < _countof(Canaries) && !Hung; i++)
+    {
+        for (n = 0; n < 3 && !Hung; n++)
+        {
+            if (!TryLoad(Dir, Canaries[i], &Req))
+                return;
+            ok(Req.Module == NULL, "after %s: LoadLibraryW(%ls) #%lu succeeded: %p\n",
+               What, Canaries[i], n, Req.Module);
+            if (Req.Module)
+                FreeLibrary(Req.Module);
+            ok(GetModuleHandleW(Canaries[i]) == NULL, "after %s: %ls stays loaded after #%lu\n",
+               What, Canaries[i], n);
+            for (h = 0; h < _countof(Helpers); h++)
+                ok(GetModuleHandleW(Helpers[h]) == NULL, "after %s: %ls stays loaded after %ls #%lu\n",
+                   What, Helpers[h], Canaries[i], n);
+        }
+    }
+}
+
+/*
+ * A forwarder target whose import directory is malformed (the name of its
+ * import is out of the image) makes the loader fault inside the nested import
+ * walk, and the fault is caught further up (LdrpSnapIAT for a LoadLibrary,
+ * LdrpGetProcedureAddress for GetProcAddress). It must not leave the loader
+ * believing an import walk is still running: a failed load afterwards has to
+ * unload what it mapped, and a retry has to fail again instead of finding the
+ * half-snapped image. Each way gets its own malformed target, as the target
+ * stays mapped after the fault (the loader does not unload a module whose
+ * import walk raised, so a retry of the malformed load itself is not checked)
+ */
+static
+VOID
+TestMalformed(PCWSTR Dir)
+{
+    static LOADREQ Req;
+    WCHAR Path[MAX_PATH];
+    HMODULE Fwd;
+    FARPROC Proc;
+
+    /* Through the import walk of a DLL */
+    if (!TryLoad(Dir, L"ldrfw_u_mal.dll", &Req))
+        return;
+    trace("ldrfw_u_mal.dll: %p, error %lu\n", Req.Module, Req.Error);
+    if (Req.Module)
+        FreeLibrary(Req.Module);
+    CheckAfterMalformed(Dir, "the LoadLibrary of a malformed forwarder target");
+
+    /* Through GetProcAddress */
+    StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_fwd.dll", Dir);
+    Fwd = LoadLibraryExW(Path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    ok(Fwd != NULL, "LoadLibraryW(ldrfw_fwd.dll) failed: %lu\n", GetLastError());
+    if (Fwd)
+    {
+        SetLastError(0xdeadbeef);
+        Proc = GetProcAddress(Fwd, "FwdMal2");
+        trace("GetProcAddress(FwdMal2): %p, error %lu\n", Proc, GetLastError());
+        FreeLibrary(Fwd);
+        CheckAfterMalformed(Dir, "the GetProcAddress of a malformed forwarder target");
+    }
+}
+
+#endif /* __REACTOS__ */
+
 /* A process whose static import fails ends with the loader's status. The
  * error mode of this process is inherited by the child, so the system does
  * not show the error */
@@ -584,8 +689,16 @@ HookedRaiseHardError(NTSTATUS ErrorStatus,
                      ULONG ValidResponseOptions,
                      PULONG Response)
 {
-    InterlockedIncrement(&HardErrorCount);
+    HardErrorName[0] = HardErrorDll[0] = 0;
+    if (ErrorStatus == STATUS_ENTRYPOINT_NOT_FOUND && Parameters && (UnicodeStringParameterMask & 3) == 3)
+    {
+        PUNICODE_STRING Entry = (PUNICODE_STRING)Parameters[0], Dll = (PUNICODE_STRING)Parameters[1];
+
+        StringCchCopyNW(HardErrorName, _countof(HardErrorName), Entry->Buffer, Entry->Length / sizeof(WCHAR));
+        StringCchCopyNW(HardErrorDll, _countof(HardErrorDll), Dll->Buffer, Dll->Length / sizeof(WCHAR));
+    }
     HardErrorLast = ErrorStatus;
+    InterlockedIncrement(&HardErrorCount);
     if (Response)
         *Response = 0; /* ResponseReturnToCaller */
     return 0;
@@ -670,6 +783,18 @@ START_TEST(LoadLibraryForwarder)
     Written &= WriteFwImage(Path, TRUE, "ldrfw_tgt.dll", NULL, NULL, 0, FooExport, 1);
     StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_bad.dll", Dir);
     Written &= WriteFwImage(Path, TRUE, "ldrfw_bad.dll", "ldrfw_nonexistent_dep.dll", "Foo", 0, FooExport, 1);
+    StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_badimp.dll", Dir);
+    Written &= WriteFwImage(Path, TRUE, "ldrfw_badimp.dll", "kernel32.dll", "LdrFwNoSuchExport", 0, FooExport, 1);
+    StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrmal_tgt.dll", Dir);
+    BadImportNameRva = 0x7F000000;
+    Written &= WriteFwImage(Path, TRUE, "ldrmal_tgt.dll", "kernel32.dll", "Sleep", 0, FooExport, 1);
+    BadImportNameRva = 0;
+    StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrmal_gpa.dll", Dir);
+    BadImportNameRva = 0x7F000000;
+    Written &= WriteFwImage(Path, TRUE, "ldrmal_gpa.dll", "kernel32.dll", "Sleep", 0, FooExport, 1);
+    BadImportNameRva = 0;
+    StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_u_mal.dll", Dir);
+    Written &= WriteFwImage(Path, TRUE, "ldrfw_u.dll", "ldrfw_fwd.dll", "FwdMal", 0, FooExport, 1);
     for (i = 0; i < _countof(Cases); i++)
     {
         StringCchPrintfW(Path, _countof(Path), L"%ls\\%ls", Dir, Cases[i].File);
@@ -690,7 +815,12 @@ START_TEST(LoadLibraryForwarder)
                 PatchInstall(&ZwPatch, "ZwRaiseHardError");
             else
                 ZwPatch.Active = FALSE;
-            TestDynamic(Dir);
+#ifdef __REACTOS__
+            /* Windows does not survive this image: the load never returns (measured on 10 22H2) */
+            TestMalformed(Dir);
+#endif
+            if (!Hung)
+                TestDynamic(Dir);
             if (!Hung)
                 TestGetProcAddress(Dir);
             PatchRemove(&ZwPatch);
@@ -711,6 +841,14 @@ START_TEST(LoadLibraryForwarder)
     StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_tgt.dll", Dir);
     DeleteFileW(Path);
     StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_bad.dll", Dir);
+    DeleteFileW(Path);
+    StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_badimp.dll", Dir);
+    DeleteFileW(Path);
+    StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrmal_tgt.dll", Dir);
+    DeleteFileW(Path);
+    StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrmal_gpa.dll", Dir);
+    DeleteFileW(Path);
+    StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_u_mal.dll", Dir);
     DeleteFileW(Path);
     for (i = 0; i < _countof(Cases); i++)
     {
