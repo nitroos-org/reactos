@@ -19,7 +19,9 @@ BootLoaderLocation=2
 
 FullName="MyName"
 ;OrgName="MyOrg"
-ComputerName="MYCOMPUTERNAME"
+; "*" (or omitting ComputerName) generates a random name like Windows does:
+; DESKTOP- followed by 7 uppercase letters/digits. Set a fixed name to override.
+ComputerName="*"
 ;AdminPassword="MyPassword"
 
 ; TimeZone is set to GMT as default.
