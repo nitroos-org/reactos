@@ -21,7 +21,6 @@ CmpMarkKeyDirty(IN PHHIVE Hive,
                 IN BOOLEAN CheckNoSubkeys)
 {
     PCM_KEY_NODE CellData;
-    PCM_KEY_SECURITY SecurityData;
     PCELL_DATA ListData, ValueData;
     ULONG i;
 
@@ -59,17 +58,8 @@ CmpMarkKeyDirty(IN PHHIVE Hive,
     /* Check if we have security */
     if (CellData->Security != HCELL_NIL)
     {
-        /* Mark it dirty */
-        HvMarkCellDirty(Hive, CellData->Security, FALSE);
-
-        /* Get the security data and release it */
-        SecurityData = (PCM_KEY_SECURITY)HvGetCell(Hive, CellData->Security);
-        ASSERT(SecurityData);
-        HvReleaseCell(Hive, CellData->Security);
-
-        /* Mark the security links dirty too */
-        HvMarkCellDirty(Hive, SecurityData->Flink, FALSE);
-        HvMarkCellDirty(Hive, SecurityData->Blink, FALSE);
+        /* Mark it dirty, and the security links too (checked: the hive is not trusted) */
+        CmpMarkSecurityCellDirty(Hive, CellData->Security);
     }
 
     // TODO: Handle predefined keys (Flags: KEY_PREDEF_HANDLE)
@@ -133,11 +123,16 @@ CmpFreeKeyBody(IN PHHIVE Hive,
     /* Check if we can delete the child cells */
     if (!(CellData->Flags & KEY_HIVE_EXIT))
     {
-        /* Check if we have a security cell */
+        /*
+         * Check if we have a security cell. It is shared by every key with
+         * the same descriptor: give back this key's reference, and free the
+         * cell only with the last one.
+         * (CmpFreeKeyByCell has normally done this already and cleared it.)
+         */
         if (CellData->Security != HCELL_NIL)
         {
-            /* Free the security cell */
-            HvFreeCell(Hive, CellData->Security);
+            CmpReleaseSecurityCell(Hive, CellData->Security);
+            CellData->Security = HCELL_NIL;
         }
 
         /* Check if we have a class */

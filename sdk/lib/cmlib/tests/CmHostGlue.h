@@ -158,19 +158,18 @@ KeBugCheckEx(ULONG Code, ULONG_PTR P1, ULONG_PTR P2, ULONG_PTR P3, ULONG_PTR P4)
     fprintf(stderr, "unexpected KeBugCheckEx 0x%lx\n", (unsigned long)Code);
     abort();
 }
+static LONG g_PoolOut;          /* CmpAllocate calls not yet freed (cmlib's own pool use) */
 PVOID NTAPI CmpAllocate(SIZE_T Size, BOOLEAN Paged, ULONG Tag)
 {
     (void)Paged; (void)Tag;
+    g_PoolOut++;
     return calloc(1, (size_t)Size);
 }
 VOID NTAPI CmpFree(PVOID Ptr, ULONG Quota)
 {
     (void)Quota;
+    g_PoolOut--;
     free(Ptr);
-}
-VOID NTAPI CmpFreeSecurityDescriptor(PHHIVE Hive, HCELL_INDEX Cell)
-{
-    (void)Hive; (void)Cell;
 }
 
 /* ---- the "file" of a hive: a buffer ---- */

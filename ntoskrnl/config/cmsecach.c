@@ -40,7 +40,8 @@ VOID
 NTAPI
 CmpDestroySecurityCache(IN PCMHIVE Hive)
 {
-    /* FIXME: clean Hive->SecurityHash and/or Hive->SecurityCache */
+    /* Free the entries of Hive->SecurityHash (cmlib/cmse.c) */
+    CmpFreeSecurityCache(Hive);
 
     /* Reset data */
     Hive->SecurityCount = 0;

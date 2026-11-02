@@ -1107,10 +1107,26 @@ CmpValidateKey(
     }
 
     /*
-     * FIXME: Security cell checks have to be implemented here
-     * once we properly and reliably implement security caching
-     * in the kernel.
+     * Validate the security cell. A bad one is not a reason to refuse the hive
+     * or to stop the boot: the key loses its stored descriptor (Security is
+     * reset to HCELL_NIL, the state of every key of a hive that has none) and
+     * the hive loads. This is done with or without FixHive; FixHive only makes
+     * the change persistent. The orphaned cell stays in the ring.
      */
+    if (CellData->u.KeyNode.Security != HCELL_NIL &&
+        !(CellData->u.KeyNode.Flags & KEY_HIVE_EXIT) &&
+        !CmpValidateSecurityCell(Hive, CellData->u.KeyNode.Security))
+    {
+        if (CaseStats->SecurityReset++ == 0)
+        {
+            DPRINT1("Key 0x%x: security cell 0x%x is not valid, reset to none "
+                    "(the first of this hive; the count follows)\n",
+                    CurrentCell, CellData->u.KeyNode.Security);
+        }
+        CellData->u.KeyNode.Security = HCELL_NIL;
+        if (FixHive)
+            HvMarkCellDirty(Hive, CurrentCell, FALSE);
+    }
 
     /* Validate the class */
     CmStatusCode = CmpValidateClass(Hive, CurrentCell, CellData);
@@ -1241,7 +1257,7 @@ CmpValidateRegistryInternal(
     ULONG WorkStateLength;
     LONG StackDepth;
     BOOLEAN AllChildrenChecked;
-    CMP_CASE_REPAIR_STATS CaseStats = {0, 0, 0};
+    CMP_CASE_REPAIR_STATS CaseStats = {0, 0, 0, 0};
 
     PAGED_CODE();
 
@@ -1472,6 +1488,12 @@ RestartValidation:
         DPRINT1("Subkey indexes brought up to date with the Unicode case table: "
                 "%lu hashes, %lu indexes sorted, %lu not sorted\n",
                 CaseStats.Hashes, CaseStats.Sorted, CaseStats.Skipped);
+    }
+
+    if (CaseStats.SecurityReset)
+    {
+        DPRINT1("Hive 0x%p: %lu keys had a security cell that is not valid; reset to none\n",
+                Hive, (unsigned long)CaseStats.SecurityReset);
     }
     return CM_CHECK_REGISTRY_GOOD;
 }
@@ -1789,14 +1811,6 @@ CmCheckRegistry(
     {
         ShouldFixHive = TRUE;
     }
-
-    /*
-     * FIXME: Currently ReactOS does not implement security
-     * caching algorithms so it's pretty pointless to implement
-     * security descriptors validation checks at this moment.
-     * When the time comes to implement these, we would need
-     * to implement security checks here as well.
-     */
 
     /* Call the internal API to do the rest of the work bulk */
     CmStatusCode = CmpValidateRegistryInternal(Hive, Flags, FALSE, ShouldFixHive);

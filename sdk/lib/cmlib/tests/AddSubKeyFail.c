@@ -91,10 +91,6 @@ VOID NTAPI CmpFree(PVOID Ptr, ULONG Quota)
     (void)Quota;
     free(Ptr);
 }
-VOID NTAPI CmpFreeSecurityDescriptor(PHHIVE Hive, HCELL_INDEX Cell)
-{
-    (void)Hive; (void)Cell;
-}
 BOOLEAN CMAPI CmIsSelfHealEnabled(BOOLEAN FixHive)
 {
     (void)FixHive;

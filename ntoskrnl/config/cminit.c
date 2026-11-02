@@ -221,6 +221,13 @@ CmpInitializeHive(
         }
     }
 
+    /*
+     * Fill the security cache from the ring of 'sk' cells. This is after the
+     * check, which has reset any bad Security. It never fails the load: a
+     * cache that is short only means less sharing of descriptors.
+     */
+    CmpBuildSecurityCache(Hive);
+
     /* Reset the loading flag */
     Hive->HiveIsLoading = FALSE;
 
