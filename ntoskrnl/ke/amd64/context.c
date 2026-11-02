@@ -255,8 +255,12 @@ KeTrapFrameToContext(IN PKTRAP_FRAME TrapFrame,
     /* Handle floating point registers */
     if (ContextFlags & CONTEXT_FLOATING_POINT)
     {
-#ifdef BUILD_WOW64_ENABLED
-        if (TrapFrame->SegCs == (KGDT64_R3_CMCODE | RPL_MASK) &&
+        /* The legacy x87/SSE state of user code is not in the trap frame, but it is still in the
+         * processor: the thread has not been switched out since it entered the kernel, and the kernel
+         * does not touch the x87 registers. Every request runs in the target thread (APC or its own
+         * exception), so this covers a 32-bit and a 64-bit thread alike. Without it FltSave stays zero,
+         * and RtlRestoreContext of that context would load a zero control word and MXCSR. */
+        if ((TrapFrame->SegCs & MODE_MASK) != KernelMode &&
             KeGetCurrentThread() && TrapFrame == KeGetTrapFrame(KeGetCurrentThread()))
         {
             DECLSPEC_ALIGN(16) XMM_SAVE_AREA32 Floating;
@@ -271,7 +275,6 @@ KeTrapFrameToContext(IN PKTRAP_FRAME TrapFrame,
                built from this area) */
             Context->FltSave.MxCsr = TrapFrame->MxCsr;
         }
-#endif
         Context->MxCsr = TrapFrame->MxCsr;
         Context->Xmm0 = TrapFrame->Xmm0;
         Context->Xmm1 = TrapFrame->Xmm1;
