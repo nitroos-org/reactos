@@ -84,6 +84,91 @@ x2apic_eoi:
 eoi_done:
 ENDM
 
+/*
+ * User hardware breakpoints, as on Windows x64. The DR0-3/DR6/DR7 a thread sets with a context
+ * live in its base trap frame and are in the processor only while the thread runs in user mode
+ * with KTHREAD.Header.DebugActive & DEBUG_ACTIVE_DR7 (set by KeContextToTrapFrame when a user
+ * context enables a breakpoint). In kernel mode the processor always holds the kernel debugger's
+ * registers (Prcb.ProcessorState.SpecialRegisters.KernelDr*). A thread can only leave the
+ * processor from kernel mode, so another thread or process never runs with its breakpoints and
+ * nothing is needed on a context switch. Threads that never set a breakpoint pay one test.
+ */
+
+/*
+ * SaveUserDebugRegisters - On entry from user mode: save the thread's breakpoints in the trap
+ * frame and load the kernel's, or record that it has none (DR7 = 0, which a context read then
+ * reports as no debug state). Needs the kernel GS. Clobbers rax.
+ */
+MACRO(SaveUserDebugRegisters, Frame)
+    LOCAL NoUserDebugState, UserDebugStateSaved
+
+    mov rax, gs:[PcCurrentThread]
+    test byte ptr [rax + ThDebugActive], DEBUG_ACTIVE_DR7
+    jz NoUserDebugState
+    mov rax, dr0
+    mov [Frame + KTRAP_FRAME_Dr0], rax
+    mov rax, dr1
+    mov [Frame + KTRAP_FRAME_Dr1], rax
+    mov rax, dr2
+    mov [Frame + KTRAP_FRAME_Dr2], rax
+    mov rax, dr3
+    mov [Frame + KTRAP_FRAME_Dr3], rax
+    mov rax, dr6
+    mov [Frame + KTRAP_FRAME_Dr6], rax
+    mov rax, dr7
+    mov [Frame + KTRAP_FRAME_Dr7], rax
+
+    /* Disarm the user breakpoints before the kernel runs, then load the kernel debugger's */
+    xor eax, eax
+    mov dr7, rax
+    mov rax, gs:[PcKernelDr0]
+    mov dr0, rax
+    mov rax, gs:[PcKernelDr1]
+    mov dr1, rax
+    mov rax, gs:[PcKernelDr2]
+    mov dr2, rax
+    mov rax, gs:[PcKernelDr3]
+    mov dr3, rax
+    mov rax, gs:[PcKernelDr7]
+    mov dr7, rax
+    jmp UserDebugStateSaved
+
+NoUserDebugState:
+    mov qword ptr [Frame + KTRAP_FRAME_Dr7], 0
+
+UserDebugStateSaved:
+ENDM
+
+/*
+ * RestoreUserDebugRegisters - On the way back to user mode, with interrupts disabled and the
+ * kernel GS: load the thread's breakpoints from the trap frame if it has any. The addresses were
+ * limited to user space and DR7 to DR7_LEGAL when they were set (KeContextToTrapFrame); DR6 and
+ * DR7 are loaded with 32-bit reads and DR7 masked again, so no frame content can make the
+ * MOV DR fault (bits 63:32 of DR6/DR7) or arm general detect. Clobbers Scratch64/Scratch32.
+ */
+MACRO(RestoreUserDebugRegisters, Frame, Scratch64, Scratch32)
+    LOCAL NoUserDebugRegisters
+
+    mov Scratch64, gs:[PcCurrentThread]
+    test byte ptr [Scratch64 + ThDebugActive], DEBUG_ACTIVE_DR7
+    jz NoUserDebugRegisters
+    mov Scratch64, [Frame + KTRAP_FRAME_Dr0]
+    mov dr0, Scratch64
+    mov Scratch64, [Frame + KTRAP_FRAME_Dr1]
+    mov dr1, Scratch64
+    mov Scratch64, [Frame + KTRAP_FRAME_Dr2]
+    mov dr2, Scratch64
+    mov Scratch64, [Frame + KTRAP_FRAME_Dr3]
+    mov dr3, Scratch64
+    mov Scratch32, dword ptr [Frame + KTRAP_FRAME_Dr6]
+    mov dr6, Scratch64
+    mov Scratch32, dword ptr [Frame + KTRAP_FRAME_Dr7]
+    and Scratch32, DR7_LEGAL
+    mov dr7, Scratch64
+
+NoUserDebugRegisters:
+ENDM
+
 TF_SEGMENTS             = HEX(08)
 TF_DEBUG                = HEX(10)
 TF_IRQL                 = HEX(20)
@@ -187,6 +272,9 @@ MACRO(EnterTrap, Flags)
     /* Load kernel MXCSR */
     ldmxcsr gs:[PcMxCsr]
 
+    /* Save the user hardware breakpoints, load the kernel's */
+    SaveUserDebugRegisters rbp
+
     ASSERT_IRQL_PASSIVE
 
 kernel_mode_entry:
@@ -267,6 +355,9 @@ MACRO(ExitTrap, Flags)
     call KiRestoreWow64Gs
 #endif
     cli
+
+    /* Load the user hardware breakpoints */
+    RestoreUserDebugRegisters rbp, rax, eax
 
     /* Swap gs to user mode */
     swapgs

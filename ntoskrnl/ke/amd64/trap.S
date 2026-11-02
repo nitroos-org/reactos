@@ -1006,10 +1006,6 @@ PUBLIC KiSystemCallEntry64
     mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegGs], gs
     mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegCs], (KGDT64_R3_CODE or RPL_MASK)
     mov word ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_SegSs], (KGDT64_R3_DATA or RPL_MASK)
-    /* Debug registers are maintained in the base trap frame by the context
-     * APIs. Until amd64 loads them into hardware, reading DRs here would
-     * overwrite that user state with the kernel's hardware debug state. */
-
     mov byte ptr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_PreviousIrql], PASSIVE_LEVEL
 
     /* Mark the frame as a system call (CONTEXT_SERVICE_ACTIVE) */
@@ -1027,6 +1023,10 @@ PUBLIC KiSystemCallEntry64
     /* Save MCXSR and set kernel value */
     stmxcsr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_MxCsr]
     ldmxcsr gs:[PcMxCsr]
+
+    /* Save the user hardware breakpoints, load the kernel's */
+    lea rdx, [rsp + MAX_SYSCALL_PARAM_SIZE]
+    SaveUserDebugRegisters rdx
 
     /* Get the current thread and the trap frame */
     mov rax, gs:[PcCurrentThread]
@@ -1106,6 +1106,10 @@ NoUserApcPending:
     mov rcx, gs:[PcCurrentThread]
     mov rdx, [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_TrapFrame]
     mov [rcx + KTHREAD_TrapFrame], rdx
+
+    /* Load the user hardware breakpoints (rcx and rdx are reloaded or zeroed below) */
+    lea rdx, [rsp + MAX_SYSCALL_PARAM_SIZE]
+    RestoreUserDebugRegisters rdx, rcx, ecx
 
     /* Prepare user mode return address (rcx) and eflags (r11) for sysret */
     mov rcx, [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rip]
