@@ -64,9 +64,10 @@ RunConsoleHelper(PCSTR Mode)
     if (!strcmp(Mode, "helper-size"))
     {
         if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &Info))
-            StringCchPrintfA(Text, sizeof(Text), "SIZE=%dx%d\r\n",
+            StringCchPrintfA(Text, sizeof(Text), "SIZE=%dx%d,BUF=%dx%d\r\n",
                              Info.srWindow.Right - Info.srWindow.Left + 1,
-                             Info.srWindow.Bottom - Info.srWindow.Top + 1);
+                             Info.srWindow.Bottom - Info.srWindow.Top + 1,
+                             Info.dwSize.X, Info.dwSize.Y);
         else
             StringCchPrintfA(Text, sizeof(Text), "SIZE=error%lu\r\n", GetLastError());
         ConsoleSay(Text);
@@ -178,7 +179,7 @@ CheckSession(BOOL Interactive)
             ok(Created && Written == 11, "Input pipe write failed: %lu\n", GetLastError());
             ok(WaitForText(OutputRead, "world", 10000), "No interactive output\n");
             TypeCommand(InputWrite, "helper-size");
-            ok(WaitForText(OutputRead, "SIZE=80x25", 10000), "Initial window size is not 80x25\n");
+            ok(WaitForText(OutputRead, "SIZE=80x25,BUF=80x25", 10000), "Initial window size is not 80x25\n");
             Size.X = 100;
             Size.Y = 30;
             Status = ResizePty(PseudoConsole, Size);
@@ -186,8 +187,7 @@ CheckSession(BOOL Interactive)
             Sleep(500);
             TypeCommand(InputWrite, "helper-size");
             ok(WaitForText(OutputRead, "SIZE=100x30", 10000), "Window size did not change to 100x30\n");
-            /* sshd drives conhost through the signal pipe directly: WORD 8, WORD columns, WORD rows.
-               (Sizes stay within the display: the window cannot exceed the monitor.) */
+            /* sshd drives conhost through the signal pipe directly: WORD 8, WORD columns, WORD rows. */
             {
                 WORD Frame[3] = {8, 90, 28};
                 ok(WriteFile(((FAKE_PTY *)PseudoConsole)->Signal, Frame, sizeof(Frame), &Written, NULL) &&
@@ -196,6 +196,16 @@ CheckSession(BOOL Interactive)
             Sleep(500);
             TypeCommand(InputWrite, "helper-size");
             ok(WaitForText(OutputRead, "SIZE=90x28", 10000), "Raw WORD resize frame (sshd protocol) not applied\n");
+            /* A pseudoconsole has no display: its window is not bounded by the monitor
+               (a client terminal of 250x70 does not fit any 800x600 console window). */
+            Size.X = 250;
+            Size.Y = 70;
+            Status = ResizePty(PseudoConsole, Size);
+            ok(Status == S_OK, "ResizePseudoConsole(250x70) failed: %08lx\n", Status);
+            Sleep(500);
+            TypeCommand(InputWrite, "helper-size");
+            ok(WaitForText(OutputRead, "SIZE=250x70,BUF=250x70", 10000),
+               "Window/buffer did not change to 250x70\n");
             TypeCommand(InputWrite, "helper-ctrlc");
             ok(WaitForText(OutputRead, "READYCTRL", 10000), "Ctrl+C helper did not start\n");
             WriteFile(InputWrite, "\003", 1, &Written, NULL);
@@ -442,6 +452,45 @@ CheckCloseWithInheritingChild(PCWSTR ExePath)
     CloseHandle(OutWrite);
 }
 
+/* A pseudoconsole created larger than any monitor-derived console window. */
+static VOID
+CheckLargeCreate(PCWSTR ExePath)
+{
+    HANDLE InRead = NULL, InWrite = NULL, OutRead = NULL, OutWrite = NULL;
+    PROCESS_INFORMATION Child;
+    WCHAR Command[MAX_PATH * 2];
+    COORD Size = {250, 70};
+    PVOID Pty = NULL;
+    HRESULT Status;
+
+    if (!CreatePipe(&InRead, &InWrite, NULL, 0) || !CreatePipe(&OutRead, &OutWrite, NULL, 0))
+    {
+        ok(FALSE, "CreatePipe failed\n");
+        return;
+    }
+    Status = CreatePty(Size, InRead, OutWrite, 0, &Pty);
+    ok(Status == S_OK, "CreatePseudoConsole(250x70) failed: %08lx\n", Status);
+    if (Status == S_OK)
+    {
+        StringCchPrintfW(Command, _countof(Command), L"\"%ls\" ConPty helper-size", ExePath);
+        if (SpawnWithPty(Pty, Command, FALSE, &Child))
+        {
+            ok(WaitForText(OutRead, "SIZE=250x70,BUF=250x70", 10000),
+               "A pseudoconsole created as 250x70 does not report a 250x70 window and buffer\n");
+            WaitForSingleObject(Child.hProcess, 5000);
+            CloseHandle(Child.hThread);
+            CloseHandle(Child.hProcess);
+        }
+        else
+            ok(FALSE, "CreateProcess with the 250x70 pseudoconsole failed: %lu\n", GetLastError());
+        ClosePty(Pty);
+    }
+    CloseHandle(InRead);
+    CloseHandle(InWrite);
+    CloseHandle(OutRead);
+    CloseHandle(OutWrite);
+}
+
 START_TEST(ConPty)
 {
     HMODULE Module = GetModuleHandleW(L"kernel32.dll");
@@ -479,5 +528,6 @@ START_TEST(ConPty)
         CheckSession(TRUE);
         CheckForgedRequests();
         CheckCloseWithInheritingChild(ExePath);
+        CheckLargeCreate(ExePath);
     }
 }
