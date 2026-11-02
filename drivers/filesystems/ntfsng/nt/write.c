@@ -75,6 +75,37 @@ VOID NgWaitDataIoIdle(PNG_VCB Vcb)
     }
 }
 
+/*
+ * The three steps around an unlocked data transfer (paging writes here, paging and non-cached reads in read.c).
+ * The caller holds CoreLock once (CoreDepth 1) and has pinned a core node (ngc_dio_begin / ngc_rdio_begin):
+ *   NgDataIoBegin:        counts the transfer (DioActive), takes DataIoGate shared and releases CoreLock; the
+ *                         inode cache trim comes before the gate (its evictions may free clusters, which drains)
+ *   (the transfer, no CoreLock)
+ *   NgDataIoTransferred:  releases the gate and takes CoreLock again
+ *   (ngc_dio_end / ngc_rdio_end, which unpin the node)
+ *   NgDataIoDone:         the transfer is over (DioActive), still under CoreLock
+ */
+VOID NgDataIoBegin(PNG_VCB Vcb)
+{
+    ngc_icache_trim(Vcb->Core);
+    if (Vcb->DioActive++ == 0)
+        KeClearEvent(&Vcb->DioIdle);
+    ExAcquireResourceSharedLite(&Vcb->DataIoGate, TRUE);
+    NgReleaseCoreNoTrim(Vcb);
+}
+
+VOID NgDataIoTransferred(PNG_VCB Vcb)
+{
+    ExReleaseResourceLite(&Vcb->DataIoGate);
+    NgAcquireCore(Vcb);
+}
+
+VOID NgDataIoDone(PNG_VCB Vcb)
+{
+    if (--Vcb->DioActive == 0)
+        KeSetEvent(&Vcb->DioIdle, IO_NO_INCREMENT, FALSE);
+}
+
 BOOLEAN NTAPI NgAcquireForLazyWrite(PVOID Context, BOOLEAN Wait)
 {
     PNG_FCB Fcb = Context;
@@ -467,20 +498,13 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     }
     if (Unlocked)
     {
-        /* The trim before the gate: its evictions may free clusters, which drains the gate. */
-        ngc_icache_trim(Vcb->Core);
-        if (Vcb->DioActive++ == 0)
-            KeClearEvent(&Vcb->DioIdle);
-        ExAcquireResourceSharedLite(&Vcb->DataIoGate, TRUE);
-        NgReleaseCoreNoTrim(Vcb);
+        NgDataIoBegin(Vcb);
 
         IoErr = NgDioTransfer(Vcb, &Dio, Buffer, Bounce);
 
-        ExReleaseResourceLite(&Vcb->DataIoGate);
-        NgAcquireCore(Vcb);
+        NgDataIoTransferred(Vcb);
         Done = ngc_dio_end(Vcb->Core, &Dio, Buffer, IoErr);
-        if (--Vcb->DioActive == 0)
-            KeSetEvent(&Vcb->DioIdle, IO_NO_INCREMENT, FALSE);
+        NgDataIoDone(Vcb);
         if (Done >= 0)
             Vcb->DioWrites++;
         else if (Done == -NGC_EAGAIN)

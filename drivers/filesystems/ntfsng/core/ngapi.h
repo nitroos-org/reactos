@@ -202,6 +202,19 @@ struct ngc_dio {
 };
 int ngc_dio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, unsigned int cap, struct ngc_dio *d);
 long ngc_dio_end(ngc_vol *v, struct ngc_dio *d, const void *buf, int io_err);
+/*
+ * Paging and non-cached reads the same way (ngc_rdio_begin/end, for streams ngc_read_direct handles): begin
+ * (locked) maps the clusters of [off, off+len) into runs and pins the node; the caller then fills the
+ * buffer without the volume lock: a run with dev == NGC_DIO_ZERO is zeroed (hole, past the initialized size or
+ * EOF), any other is read from the device (dev = device offset, len = bytes, boff = offset in the buffer; runs
+ * are in buffer order and a later run may overwrite the tail of an earlier one); ngc_rdio_end (locked) unpins.
+ * ngc_rdio_begin returns 0 (pinned: ngc_rdio_end must follow) or -NGC_EAGAIN (use ngc_read_direct / ngc_read
+ * instead, nothing changed).  The data is what the stream held when ngc_rdio_begin ran (the clusters cannot be
+ * freed meanwhile: see the drain below).
+ */
+#define NGC_DIO_ZERO (~0ULL)
+int ngc_rdio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, void *buf, struct ngc_dio *d);
+void ngc_rdio_end(ngc_vol *v, struct ngc_dio *d);
 /* Registers the glue's drain (see kshim_drain in kshim_vfs.h); NULL unregisters. */
 void ngc_set_dio_drain(ngc_vol *v, void (*fn)(void *ctx), void *ctx);
 int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize);

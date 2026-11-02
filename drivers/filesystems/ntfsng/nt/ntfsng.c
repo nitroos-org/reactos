@@ -153,6 +153,8 @@ VOID NgPrintLockStats(PNG_VCB Vcb)
     ULONG i;
     DPRINT1("ntfsng: paging writes: %lu with the transfer outside CoreLock, %lu under it, %lu written again\n",
             Vcb->DioWrites, Vcb->DioFallbacks, Vcb->DioRedone);
+    DPRINT1("ntfsng: paging and non-cached reads: %lu with the transfer outside CoreLock, %lu under it\n",
+            Vcb->DioReads, Vcb->DioReadFallbacks);
 #if DBG
     DPRINT1("ntfsng: unlocked paging writes forced to be written again (DioFault): %lu\n", ngc_dio_forced);
 #endif

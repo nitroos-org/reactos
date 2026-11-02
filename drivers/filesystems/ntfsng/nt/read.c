@@ -94,6 +94,28 @@ out:
     return Status;
 }
 
+/* The device part of an unlocked read (no CoreLock): straight into the caller's locked buffer, zeros for the rest. */
+static int NgRdioTransfer(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Buffer)
+{
+    ULONG r;
+    for (r = 0; r < Dio->nruns; r++)
+    {
+        if (Dio->run[r].dev == NGC_DIO_ZERO)
+            RtlZeroMemory(Buffer + Dio->run[r].boff, Dio->run[r].len);
+        else if (ngos_dev_read(Vcb->StorageDevice, Dio->run[r].dev, Buffer + Dio->run[r].boff, Dio->run[r].len))
+            return -1;
+    }
+    return 0;
+}
+
+/*
+ * Paging and non-cached reads of a stream ngc_read_direct handles do their device transfer without CoreLock
+ * (ngc_rdio_begin/end, core/ngcore.c; the steps and invariants are those of the paging write in write.c):
+ * under CoreLock the runs are mapped and the node pinned, the transfer runs with DataIoGate held shared, and
+ * CoreLock is taken again only to unpin.  So a create, cleanup or query of another file, and other readers,
+ * do not wait behind the disk.  Everything else (resident, compressed, unaligned, dirty shim pages, more than
+ * NGC_DIO_RUNS runs, journal-held sectors) takes the locked path below, unchanged.
+ */
 NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -197,10 +219,26 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         /* Straight from the clusters or through the shim page cache; bytes past EOF come back zeroed. */
         NG_SHARED_HOLD Hold;
+        BOOLEAN Unlocked = FALSE;
+        struct ngc_dio Dio;
         NgAcquireCoreShared(Vcb, &Hold);
         Done = NgEnsureNode(Fcb);
-        if (!Done)
+        if (!Done && Vcb->CoreDepth == 1 && !Vcb->Dismounted)
+            Unlocked = ngc_rdio_begin(Vcb->Core, Fcb->Node, Offset.QuadPart, Length, Buffer, &Dio) == 0;
+        if (Unlocked)
         {
+            int IoErr;
+            NgDataIoBegin(Vcb);
+            IoErr = NgRdioTransfer(Vcb, &Dio, Buffer);
+            NgDataIoTransferred(Vcb);
+            ngc_rdio_end(Vcb->Core, &Dio);
+            NgDataIoDone(Vcb);
+            Vcb->DioReads++;
+            Done = IoErr ? -NGC_EIO : (long)Length;
+        }
+        else if (!Done)
+        {
+            Vcb->DioReadFallbacks++;
             Done = ngc_read_direct(Vcb->Core, Fcb->Node, Offset.QuadPart, Length, Buffer);
             if (Done == -NGC_EAGAIN)
                 Done = ngc_read(Fcb->Node, Offset.QuadPart, Length, Buffer, 1);

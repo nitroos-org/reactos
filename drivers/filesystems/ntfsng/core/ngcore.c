@@ -1892,8 +1892,8 @@ int ngc_dio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int 
 		return -EAGAIN;
 	if (off + len > (u64)size)
 		len = (unsigned int)(size - off);
-	if (!NInoNonResident(ni) || NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni) || NInoSparse(ni) ||
-	    (loff_t)off > ni->initialized_size || v->bdev->kshim_gone || v->bdev->kshim_frozen ||
+	if (!ngc_is_data_inode(vi) || !NInoNonResident(ni) || NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni) ||
+	    NInoSparse(ni) || (loff_t)off > ni->initialized_size || v->bdev->kshim_gone || v->bdev->kshim_frozen ||
 	    (v->bdev->jnl && kshim_jnl_failed(v->bdev)))
 		return -EAGAIN;
 	/* As ngc_write: VOLUME_IS_DIRTY is on the medium before the change (here: the initialized size). */
@@ -1962,6 +1962,113 @@ long ngc_dio_end(ngc_vol *v, struct ngc_dio *d, const void *buf, int io_err)
 	iput(vi);
 	d->n = NULL;
 	return ret;
+}
+
+/*
+ * The read side of the same scheme.  No ngc_dio_end-like check is needed: nothing changes on the volume, and
+ * the data returned is what the stream held when the runs were mapped (the read is ordered there).  What keeps
+ * it correct while the volume lock is not held:
+ *  - The clusters read stay allocated until the transfer ends: every cluster free drains the transfers first
+ *    (ntfs_inc_free_clusters -> kshim_dio_drain), so they cannot be reallocated and rewritten under the read,
+ *    and the node is pinned so not even the eviction of an unlinked file frees them.  A truncate meanwhile
+ *    waits at its free, so the reader gets the stream as it was before the truncate.
+ *  - The sectors are data clusters that the journal overlay does not hold (checked here; it cannot start
+ *    holding data sectors without a free), and the stream has no dirty shim page (checked here), as for writes.
+ *  - Zero fills (holes, past the initialized size, past EOF) come from the same snapshot.
+ * Concurrent writes of the same range are not ordered against the read (as on Windows).
+ */
+int ngc_rdio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, void *buf, struct ngc_dio *d)
+{
+	struct inode *vi = (struct inode *)n;
+	struct ntfs_inode *ni = NTFS_I(vi);
+	struct ntfs_volume *vol = ni->vol;
+	unsigned int bs = v->bdev->logical_block_size;
+	u64 end = off + len, data_end, pos = off;
+	struct runlist_element *rl;
+	int err = 0;
+
+	d->n = NULL;
+	d->nruns = 0;
+	if (!len || v->bdev->kshim_gone || !v->bdev->kshim_drain)
+		return -EAGAIN;
+	/* Not the system files ($MFT, $Bitmap, ...): their sectors change through the journal overlay at any commit. */
+	if (!ngc_is_data_inode(vi) || !NInoNonResident(ni) || NInoCompressed(ni) || NInoEncrypted(ni) ||
+	    NInoWofCompressed(ni) || ((uintptr_t)buf & 3) || ((off | len) & (bs - 1)) || kshim_mapping_dirty(vi->i_mapping))
+		return -EAGAIN;
+	data_end = min_t(u64, end, (u64)min_t(loff_t, ni->initialized_size, i_size_read(vi)));
+	mutex_lock(&ni->mrec_lock);
+	down_write(&ni->runlist.lock);
+	err = ntfs_attr_map_whole_runlist(ni);
+	rl = ni->runlist.rl;
+	while (!err && pos < data_end) {
+		s64 vcn = (s64)(pos >> vol->cluster_size_bits);
+		u64 run_end, run_dev_end, cnt, dev, io;
+		struct ngc_dio_run *r = &d->run[d->nruns];
+		while (rl && rl->length && rl->vcn + rl->length <= vcn)
+			rl++;
+		if (!rl || !rl->length || rl->vcn > vcn || rl->lcn == LCN_ENOENT || d->nruns == NGC_DIO_RUNS) {
+			err = -EAGAIN;
+			break;
+		}
+		run_end = (u64)(rl->vcn + rl->length) << vol->cluster_size_bits;
+		cnt = min_t(u64, run_end, data_end) - pos;
+		r->boff = (unsigned int)(pos - off);
+		if (rl->lcn == LCN_HOLE) {
+			r->dev = NGC_DIO_ZERO;
+			r->len = (unsigned int)cnt;
+		} else if (rl->lcn < 0) {
+			err = -EAGAIN;
+			break;
+		} else {
+			run_dev_end = (u64)(rl->lcn + rl->length) << vol->cluster_size_bits;
+			dev = ((u64)rl->lcn << vol->cluster_size_bits) + (pos - ((u64)rl->vcn << vol->cluster_size_bits));
+			/* Whole sectors: a tail past the initialized size is zeroed by the run after it. */
+			io = min_t(u64, (cnt + bs - 1) & ~(u64)(bs - 1), end - pos);
+			if ((dev & (bs - 1)) || dev + io > run_dev_end || dev + io > v->bdev->size || io > 0x7fffffff ||
+			    kshim_jnl_holds(v->bdev, dev, io)) {
+				err = -EAGAIN;
+				break;
+			}
+			r->dev = dev;
+			r->len = (unsigned int)io;
+		}
+		d->nruns++;
+		pos += cnt;
+	}
+	up_write(&ni->runlist.lock);
+	mutex_unlock(&ni->mrec_lock);
+	if (!err && data_end < end) {
+		struct ngc_dio_run *r = &d->run[d->nruns];
+		u64 from = max_t(u64, data_end, off);
+		if (d->nruns == NGC_DIO_RUNS)
+			err = -EAGAIN;
+		else {
+			r->dev = NGC_DIO_ZERO;
+			r->boff = (unsigned int)(from - off);
+			r->len = (unsigned int)(end - from);
+			d->nruns++;
+		}
+	}
+	if (err || !igrab(vi))
+		return -EAGAIN;
+	d->n = n;
+	d->off = off;
+	d->len = len;
+	d->cap = len;
+	return 0;
+}
+
+void ngc_rdio_end(ngc_vol *v, struct ngc_dio *d)
+{
+	unsigned int r;
+
+	/* The transfer's device reads count as reads, as those of ngc_read_direct do (CoreLock is held). */
+	for (r = 0; r < d->nruns; r++)
+		if (d->run[r].dev != NGC_DIO_ZERO)
+			kshim_counter_reads++;
+	iput((struct inode *)d->n);
+	d->n = NULL;
+	(void)v;
 }
 
 void ngc_set_dio_drain(ngc_vol *v, void (*fn)(void *ctx), void *ctx)

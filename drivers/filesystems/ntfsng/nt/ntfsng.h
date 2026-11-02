@@ -93,6 +93,7 @@ typedef struct _NG_VCB
     KEVENT DioIdle;
     NPAGED_LOOKASIDE_LIST DioBounce;    /* NG_DIO_BOUNCE buffers for those transfers */
     ULONG DioWrites, DioFallbacks, DioRedone;
+    ULONG DioReads, DioReadFallbacks;   /* paging and non-cached reads with / without the transfer outside CoreLock */
     FAST_MUTEX FcbListLock;
     LIST_ENTRY FcbList;
     struct _NG_FCB *VolumeFcb;
@@ -329,6 +330,9 @@ NTSTATUS NgDropPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, ULONG Length);
 VOID NgInitDataIo(PNG_VCB Vcb);
 VOID NgDrainDataIoCallback(PVOID Context);
 VOID NgWaitDataIoIdle(PNG_VCB Vcb);
+VOID NgDataIoBegin(PNG_VCB Vcb);
+VOID NgDataIoTransferred(PNG_VCB Vcb);
+VOID NgDataIoDone(PNG_VCB Vcb);
 BOOLEAN NgDropIfDiscardable(PNG_VCB Vcb, PIRP Irp, PNTSTATUS Status);
 BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start);
 
