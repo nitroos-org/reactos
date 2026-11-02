@@ -550,6 +550,38 @@ User32CallClientLoadLibraryFromKernel(PVOID Arguments, ULONG ArgumentLength)
     return ZwCallbackReturn(&bResult, sizeof(HINSTANCE), STATUS_SUCCESS);
 }
 
+/*
+ * TRUE when Proc already lies in the image the hook was installed from, mapped here at the
+ * address the kernel computed it for (Proc == base + offPfn) and under the same path.
+ *
+ * Resolving the module by its path costs the loader a round of file system probes (the SxS
+ * redirection checks) on every call, even when the DLL is mapped in this process. A global hook
+ * that runs in the thread of the process that installed it (WH_KEYBOARD, WH_MOUSE) is called for
+ * every key and mouse event, and every probe is an open that waits its turn at the file system:
+ * with a disk-heavy background job the keyboard waited tens of milliseconds for them.
+ */
+static BOOL
+User32HookProcIsInModule(PHOOKPROC_CALLBACK_ARGUMENTS Common)
+{
+    HMODULE hMod;
+    WCHAR szPath[MAX_PATH];
+    DWORD cch;
+
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)Common->Proc, &hMod))
+        return FALSE;
+
+    if ((ULONG_PTR)hMod + Common->offPfn != (ULONG_PTR)Common->Proc)
+        return FALSE;
+
+    cch = GetModuleFileNameW(hMod, szPath, _countof(szPath));
+    if (!cch || cch >= _countof(szPath))
+        return FALSE;
+
+    return (_wcsicmp(szPath, (LPCWSTR)Common->ModuleName) == 0);
+}
+
 NTSTATUS WINAPI
 User32CallHookProcFromKernel(PVOID Arguments, ULONG ArgumentLength)
 {
@@ -577,7 +609,7 @@ User32CallHookProcFromKernel(PVOID Arguments, ULONG ArgumentLength)
 
   Proc = Common->Proc;
   // HookProc Justin Case module is from another process.
-  if (Common->offPfn && Common->Mod)
+  if (Common->offPfn && Common->Mod && !User32HookProcIsInModule(Common))
   {
      if (!(mod = GetModuleHandleW((LPCWSTR)Common->ModuleName)))
      {
