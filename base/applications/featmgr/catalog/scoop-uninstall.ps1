@@ -42,9 +42,10 @@ if (Test-Path $Root) {
 
 # --- environment: machine + user SCOOP variable and the shims PATH entry
 foreach ($scope in 'Machine', 'User') {
-    if ([Environment]::GetEnvironmentVariable('SCOOP', $scope)) {
-        [Environment]::SetEnvironmentVariable('SCOOP', $null, $scope)
-    }
+    # [NullString]::Value, not $null: PowerShell 7 turns a bare $null into "" here and .NET then stores an
+    # EMPTY variable instead of deleting it (scoop-live U8). Unconditional, so an empty value that an older
+    # uninstall left behind is removed too (deleting an absent variable is a no-op).
+    [Environment]::SetEnvironmentVariable('SCOOP', [NullString]::Value, $scope)
     $p = [Environment]::GetEnvironmentVariable('Path', $scope)
     if ($p) {
         $keep = ($p -split ';') | Where-Object { $_ -and ($_.TrimEnd('\') -ne $shims.TrimEnd('\')) }
