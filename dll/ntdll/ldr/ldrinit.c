@@ -475,7 +475,8 @@ LdrpInitSecurityCookie(PLDR_DATA_TABLE_ENTRY LdrEntry)
         {
             /* Make up a cookie from a bunch of values which may uniquely represent
                current moment of time, environment, etc */
-            NtQueryPerformanceCounter(&Counter, NULL);
+            Counter.QuadPart = 0;
+            RtlQueryPerformanceCounter(&Counter);
 
             NewCookie = Counter.LowPart ^ Counter.HighPart;
             NewCookie ^= (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess;

@@ -276,16 +276,16 @@ BasepTakePreciseAnchor(
      * rounds, so between the counter read before the one and the counter read after the other. A sample over a
      * long time (the thread was preempted) does not say when it was, and the wait goes on for the next tick.
      */
-    NtQueryPerformanceCounter(&Before, NULL);
+    QueryPerformanceCounter(&Before);
     Limit = Before.QuadPart + Frequency / 25;
     First = BasepReadCoarseTime();
     PreviousBefore = Before.QuadPart;
-    NtQueryPerformanceCounter(&After, NULL);
+    QueryPerformanceCounter(&After);
     for (;;)
     {
-        NtQueryPerformanceCounter(&Before, NULL);
+        QueryPerformanceCounter(&Before);
         Current = BasepReadCoarseTime();
-        NtQueryPerformanceCounter(&After, NULL);
+        QueryPerformanceCounter(&After);
 
         if (Current != First)
         {
@@ -325,7 +325,6 @@ GetSystemTimePreciseAsFileTime(OUT PFILETIME lpFileTime)
     LONGLONG First, Last, Time, Lower, Upper, Seen, Old, Fresh, Version = 0;
     LONG State;
     ULONG Attempt;
-    NTSTATUS Status;
 
     for (Attempt = 0;; Attempt++)
     {
@@ -334,7 +333,8 @@ GetSystemTimePreciseAsFileTime(OUT PFILETIME lpFileTime)
         if (State == 0 && Attempt < 8)
         {
             /* The first call of the process: take the anchor, then start again so that the samples come after it */
-            NtQueryPerformanceCounter(&Counter, &Frequency);
+            Frequency.QuadPart = 0;
+            QueryPerformanceFrequency(&Frequency);
             if (Frequency.QuadPart > 0)
             {
                 BasepTakePreciseAnchor(&Anchor, Frequency.QuadPart);
@@ -344,8 +344,9 @@ GetSystemTimePreciseAsFileTime(OUT PFILETIME lpFileTime)
         }
 
         First = BasepReadCoarseTime();
-        Status = NtQueryPerformanceCounter(&Counter, &Frequency);
-        if (!NT_SUCCESS(Status) || Frequency.QuadPart <= 0)
+        /* In user mode when the kernel allows (no system call), as Windows does */
+        Frequency.QuadPart = 0;
+        if (!QueryPerformanceCounter(&Counter) || !QueryPerformanceFrequency(&Frequency) || Frequency.QuadPart <= 0)
         {
             /* No counter: the coarse time is all there is */
             Time = First;
