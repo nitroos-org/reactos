@@ -79,25 +79,18 @@ HRESULT HCR_GetProgIdKeyOfExtension(PCWSTR szExtension, PHKEY phKey, BOOL AllowF
     return HRESULT_FROM_WIN32(err);
 }
 
-/*
- * The ProgId the user picked as the handler of a URL protocol (http, https, ...):
- * HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\<protocol>\UserChoice, "Progid".
- * This is what IApplicationAssociationRegistration::SetAppAsDefault writes, and what Windows consults
- * before the machine wide HKCR\<protocol>\shell\open\command. A choice that does not name an
- * existing class with a shell key (an uninstalled browser) is ignored.
- */
-BOOL HCR_GetUserChoiceOfUrlProtocol(PCWSTR pszProtocol, PWSTR pszProgId, UINT cchProgId)
+/* Reads HKCU\<pszPrefix><pszName>\UserChoice "Progid" and accepts it only if it names an existing class with a shell key */
+static BOOL GetUserChoiceProgId(PCWSTR pszPrefix, PCWSTR pszName, PWSTR pszProgId, UINT cchProgId)
 {
-    static const WCHAR szPrefix[] = L"Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\";
-    WCHAR szKey[ARRAYSIZE(szPrefix) + 64 + 11];
+    WCHAR szKey[MAX_PATH + 96];
     WCHAR szShell[MAX_PATH + 8];
     HKEY hKey;
     LONG err;
 
-    if (!pszProtocol || !*pszProtocol || wcschr(pszProtocol, L'\\') || wcslen(pszProtocol) > 64)
+    if (!pszName || !*pszName || wcschr(pszName, L'\\') || wcslen(pszName) > 64)
         return FALSE;
-    wcscpy(szKey, szPrefix);
-    wcscat(szKey, pszProtocol);
+    wcscpy(szKey, pszPrefix);
+    wcscat(szKey, pszName);
     wcscat(szKey, L"\\UserChoice");
 
     err = GetRegString(HKEY_CURRENT_USER, szKey, L"Progid", pszProgId, cchProgId);
@@ -111,6 +104,32 @@ BOOL HCR_GetUserChoiceOfUrlProtocol(PCWSTR pszProtocol, PWSTR pszProgId, UINT cc
         return FALSE;
     RegCloseKey(hKey);
     return TRUE;
+}
+
+/*
+ * The ProgId the user picked as the handler of a URL protocol (http, https, ...):
+ * HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\<protocol>\UserChoice, "Progid".
+ * This is what IApplicationAssociationRegistration::SetAppAsDefault writes, and what Windows consults
+ * before the machine wide HKCR\<protocol>\shell\open\command. A choice that does not name an
+ * existing class with a shell key (an uninstalled browser) is ignored.
+ */
+BOOL HCR_GetUserChoiceOfUrlProtocol(PCWSTR pszProtocol, PWSTR pszProgId, UINT cchProgId)
+{
+    return GetUserChoiceProgId(L"Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\",
+                               pszProtocol, pszProgId, cchProgId);
+}
+
+/*
+ * The ProgId the user picked as the handler of a file extension (".html", leading dot required):
+ * HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\<.ext>\UserChoice, "ProgId".
+ * Windows consults it before the machine wide default of HKCR\<.ext>.
+ */
+BOOL HCR_GetUserChoiceOfExtension(PCWSTR pszExtension, PWSTR pszProgId, UINT cchProgId)
+{
+    if (!pszExtension || pszExtension[0] != L'.')
+        return FALSE;
+    return GetUserChoiceProgId(L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\",
+                               pszExtension, pszProgId, cchProgId);
 }
 
 BOOL HCR_MapTypeToValueW(LPCWSTR szExtension, LPWSTR szFileType, LONG len, BOOL bPrependDot)

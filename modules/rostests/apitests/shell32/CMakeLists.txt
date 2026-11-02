@@ -28,6 +28,7 @@ list(APPEND SOURCE
     LockServer.cpp
     Int64ToString.cpp
     IApplicationAssociationRegistration.cpp
+    UserChoiceHandlers.cpp
     IDestinationList.cpp
     IFileOperation.cpp
     IQueryAssociations.cpp

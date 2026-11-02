@@ -268,9 +268,25 @@ static HRESULT OpenClassKey(ASSOCF fA, const WCHAR *const pszSource, HKEY *phKey
     // A URL protocol is handled by the ProgId the user chose for it (the browser picked as the default)
     WCHAR szUserChoice[MAX_PATH];
     PCWSTR pszClassSource = pszSource;
-    if (*pszSource != L'.' && *pszSource != L'{' && !(fA & (ASSOCF_NOUSERSETTINGS | ASSOCF_PER_MACHINE_ONLY)) &&
+    if (*pszSource != L'.' && *pszSource != L'{' && !(fA & ASSOCF_PER_MACHINE_ONLY) &&
         RegQueryValueExW(hSourceKey, L"URL Protocol", NULL, NULL, NULL, NULL) == ERROR_SUCCESS &&
         HCR_GetUserChoiceOfUrlProtocol(pszSource, szUserChoice, _countof(szUserChoice)))
+    {
+        HKEY hChosenKey;
+        if (RegOpenKeyExW(cr.hKey, szUserChoice, 0, KEY_READ, &hChosenKey) == ERROR_SUCCESS)
+        {
+            RegCloseKey(hSourceKey);
+            hSourceKey = hChosenKey;
+            pszClassSource = szUserChoice;
+        }
+    }
+
+    // Windows 10 reads the UserChoice even with ASSOCF_NOUSERSETTINGS (measured: .html still resolves to the chosen
+    // browser), so that flag is not looked at; a per machine query does not see a per user choice.
+    // A file extension is handled by the ProgId the user chose for it (FileExts\<.ext>\UserChoice).
+    // The chosen ProgId is used as the class itself, as it replaces the ProgId named by HKCR\<.ext>.
+    if (*pszSource == L'.' && !(fA & ASSOCF_PER_MACHINE_ONLY) &&
+        HCR_GetUserChoiceOfExtension(pszSource, szUserChoice, _countof(szUserChoice)))
     {
         HKEY hChosenKey;
         if (RegOpenKeyExW(cr.hKey, szUserChoice, 0, KEY_READ, &hChosenKey) == ERROR_SUCCESS)
