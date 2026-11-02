@@ -399,6 +399,98 @@ static void TestAccessInformation(HANDLE Token)
     if (User) RtlFreeHeap(RtlGetProcessHeap(), 0, User);
 }
 
+/*
+ * A thread of the caller rewrites the output buffer while the call runs. The kernel must build the answer
+ * on its own side and never take a destination from that memory: every pointer-sized slot of the first
+ * part of the buffer (where the pointers of the answer are) is pointed at a canary block, which must come
+ * out untouched, and the call itself must stay well-behaved.
+ */
+typedef struct _TQ_RACE
+{
+    volatile LONG Stop;
+    PVOID *Slots;
+    ULONG SlotCount;
+    PVOID Target;
+} TQ_RACE;
+
+static DWORD WINAPI RaceThread(PVOID Parameter)
+{
+    TQ_RACE *Race = Parameter;
+    ULONG i;
+
+    while (!Race->Stop)
+    {
+        for (i = 0; i < Race->SlotCount; i++)
+            ((volatile PVOID *)Race->Slots)[i] = Race->Target;
+    }
+    return 0;
+}
+
+static void TestAccessInformationRace(HANDLE Token)
+{
+    ULONG Size = 0, i, Round, Bad = 0;
+    PUCHAR Output, Canary;
+    ULONG CanarySize = 0x10000;
+    TQ_RACE Race;
+    HANDLE Thread;
+    NTSTATUS Status;
+
+    Status = Query(Token, CLS_ACCESSINFO, NULL, 0, &Size);
+    ok_hex(Status, STATUS_BUFFER_TOO_SMALL);
+    if (!Size)
+        return;
+    Output = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Size + 64);
+    Canary = RtlAllocateHeap(RtlGetProcessHeap(), 0, CanarySize);
+    if (!Output || !Canary)
+    {
+        skip("No memory\n");
+        return;
+    }
+    RtlFillMemory(Canary, CanarySize, 0xAA);
+    Race.Stop = 0;
+    Race.Slots = (PVOID *)Output;
+    /* the header and the first hash: where the pointers of the answer are stored */
+    Race.SlotCount = min(Size, 0x400) / sizeof(PVOID);
+    Race.Target = Canary + CanarySize / 2;
+    Thread = CreateThread(NULL, 0, RaceThread, &Race, 0, NULL);
+    if (!Thread)
+    {
+        skip("CreateThread failed\n");
+        return;
+    }
+    for (Round = 0; Round < 3000; Round++)
+    {
+        ULONG Returned = 0;
+
+        Status = Query(Token, CLS_ACCESSINFO, Output, Size, &Returned);
+        if (Status != STATUS_SUCCESS || Returned != Size)
+            Bad++;
+    }
+    Race.Stop = 1;
+    WaitForSingleObject(Thread, INFINITE);
+    CloseHandle(Thread);
+    ok(Bad == 0, "%lu calls failed during the race\n", Bad);
+    for (i = 0; i < CanarySize; i++)
+    {
+        if (Canary[i] != 0xAA)
+        {
+            ok(FALSE, "The kernel wrote into memory a racing thread pointed the answer at (offset %lu)\n", i);
+            break;
+        }
+    }
+    /* the 64 bytes after the answer are not part of it */
+    for (i = Size; i < Size + 64; i++)
+    {
+        if (Output[i] != 0)
+        {
+            ok(FALSE, "The kernel wrote past the answer (offset %lu)\n", i);
+            break;
+        }
+    }
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Output);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Canary);
+}
+
 static void TestPrivilegeCheckAndCompare(HANDLE Primary)
 {
     HANDLE Filtered = NULL, FilteredImp = NULL, Imp;
@@ -652,6 +744,7 @@ START_TEST(NtTokenQueryParity)
     TestSource();
     TestGroupsAndPrivileges(Token);
     TestAccessInformation(Token);
+    TestAccessInformationRace(Token);
     TestPrivilegeCheckAndCompare(Token);
     TestLuaToken(Token);
 

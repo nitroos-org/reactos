@@ -217,32 +217,45 @@ SepIsTokenElevated(
  * Layout (measured on Windows 10 22H2, x64): the header, the SID hash of the
  * user and groups followed by their SID_AND_ATTRIBUTES array and SIDs, the
  * restricted SID hash (and its array and SIDs when there are any), the empty
- * capability SID hash, and the privileges. Every pointer points into the
- * caller's buffer. The SID hashes are filled with all bits set: Windows keeps
- * a bloom filter there that nothing in user mode reads, and a saturated filter
- * is the one that is always safe (a reader falls back to comparing the SIDs).
- * No TSA security attributes exist here, so SecurityAttributes is NULL where
- * Windows points at the process-unique attribute.
+ * capability SID hash, and the privileges. Every pointer in the answer is an
+ * address in the caller's buffer. The SID hashes are filled with all bits set:
+ * Windows keeps a bloom filter there that nothing in user mode reads, and a
+ * saturated filter is the one that is always safe (a reader falls back to
+ * comparing the SIDs). No TSA security attributes exist here, so
+ * SecurityAttributes is NULL where Windows points at the process-unique attribute.
  *
- * With a NULL Buffer only the size is computed.
+ * The answer is built in a pool block and copied to the caller by the caller
+ * of this routine, once: nothing here reads or writes the user buffer, whose
+ * address is only used to compute the pointers stored in the answer (a thread
+ * of the caller can change that memory at any time, so no value is ever read
+ * back from it).
+ *
+ * @param[out] Blob
+ * A pool block of *Required bytes (free it with ExFreePoolWithTag, TAG_TOKEN_DYNAMIC)
+ * when STATUS_SUCCESS is returned, NULL otherwise. With UserBase NULL or a
+ * Length that is too small only the size is computed (STATUS_BUFFER_TOO_SMALL).
  */
 static
 NTSTATUS
 SepBuildTokenAccessInformation(
     _In_ PTOKEN Token,
-    _Out_writes_bytes_opt_(Length) PUCHAR Buffer,
+    _In_opt_ PUCHAR UserBase,
     _In_ ULONG Length,
-    _Out_ PULONG Required)
+    _Out_ PULONG Required,
+    _Outptr_result_maybenull_ PUCHAR *Blob)
 {
     ULONG HeaderSize = ALIGN_UP_BY(sizeof(SEP_TOKEN_ACCESS_INFORMATION), sizeof(PVOID));
     ULONG HashSize = ALIGN_UP_BY(sizeof(SID_AND_ATTRIBUTES_HASH), sizeof(PVOID));
-    ULONG SidsSize, RestrictedSize = 0, PrivilegesSize, Total, Offset, i;
-    PSEP_TOKEN_ACCESS_INFORMATION Info = (PSEP_TOKEN_ACCESS_INFORMATION)Buffer;
+    ULONG SidsSize, RestrictedSize = 0, PrivilegesSize, Total, Offset, i, j;
+    PUCHAR Kernel;
+    PSEP_TOKEN_ACCESS_INFORMATION Info;
     PSID_AND_ATTRIBUTES_HASH Hash;
-    PUCHAR SidEnd;
+    PSID_AND_ATTRIBUTES Array;
+    PVOID SidEnd;
     ULONG Left;
     NTSTATUS Status;
 
+    *Blob = NULL;
     SidsSize = Token->UserAndGroupCount * sizeof(SID_AND_ATTRIBUTES) +
                RtlLengthSidAndAttributes(Token->UserAndGroupCount, Token->UserAndGroups);
     SidsSize = ALIGN_UP_BY(SidsSize, sizeof(PVOID));
@@ -256,10 +269,16 @@ SepBuildTokenAccessInformation(
 
     Total = HeaderSize + HashSize + SidsSize + HashSize + RestrictedSize + HashSize + PrivilegesSize;
     *Required = Total;
-    if (Buffer == NULL || Length < Total)
+    if (UserBase == NULL || Length < Total)
         return STATUS_BUFFER_TOO_SMALL;
 
-    RtlZeroMemory(Buffer, Total);
+    Kernel = ExAllocatePoolWithTag(PagedPool, Total, TAG_TOKEN_DYNAMIC);
+    if (Kernel == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(Kernel, Total);
+
+    /* Kernel + Offset is where a piece is built, UserBase + Offset is the address the caller will see it at */
+    Info = (PSEP_TOKEN_ACCESS_INFORMATION)Kernel;
     Info->AuthenticationId = Token->AuthenticationId;
     Info->TokenType = Token->TokenType;
     Info->ImpersonationLevel = Token->ImpersonationLevel;
@@ -270,56 +289,68 @@ SepBuildTokenAccessInformation(
 
     /* The user and groups */
     Offset = HeaderSize;
-    Hash = (PSID_AND_ATTRIBUTES_HASH)(Buffer + Offset);
-    Info->SidHash = Hash;
+    Hash = (PSID_AND_ATTRIBUTES_HASH)(Kernel + Offset);
+    Info->SidHash = (PSID_AND_ATTRIBUTES_HASH)(UserBase + Offset);
     Offset += HashSize;
     Hash->SidCount = Token->UserAndGroupCount;
-    Hash->SidAttr = (PSID_AND_ATTRIBUTES)(Buffer + Offset);
+    Hash->SidAttr = (PSID_AND_ATTRIBUTES)(UserBase + Offset);
     for (i = 0; i < SID_HASH_SIZE; i++)
         Hash->Hash[i] = ~(SID_HASH_ENTRY)0;
+    Array = (PSID_AND_ATTRIBUTES)(Kernel + Offset);
     Status = RtlCopySidAndAttributesArray(Token->UserAndGroupCount,
                                           Token->UserAndGroups,
                                           SidsSize - Token->UserAndGroupCount * sizeof(SID_AND_ATTRIBUTES),
-                                          Hash->SidAttr,
-                                          (PSID)&Hash->SidAttr[Token->UserAndGroupCount],
-                                          (PVOID *)&SidEnd,
+                                          Array,
+                                          (PSID)&Array[Token->UserAndGroupCount],
+                                          &SidEnd,
                                           &Left);
     if (!NT_SUCCESS(Status))
-        return Status;
+        goto Fail;
+    /* the SID pointers the copy stored are kernel addresses: make them the caller's */
+    for (j = 0; j < Token->UserAndGroupCount; j++)
+        Array[j].Sid = (PSID)(UserBase + ((PUCHAR)Array[j].Sid - Kernel));
     Offset += SidsSize;
 
     /* The restricted SIDs; the hash exists even when there are none */
-    Hash = (PSID_AND_ATTRIBUTES_HASH)(Buffer + Offset);
-    Info->RestrictedSidHash = Hash;
+    Hash = (PSID_AND_ATTRIBUTES_HASH)(Kernel + Offset);
+    Info->RestrictedSidHash = (PSID_AND_ATTRIBUTES_HASH)(UserBase + Offset);
     Offset += HashSize;
     Hash->SidCount = Token->RestrictedSidCount;
     for (i = 0; i < SID_HASH_SIZE; i++)
         Hash->Hash[i] = (Token->RestrictedSidCount > 0) ? ~(SID_HASH_ENTRY)0 : 0;
     if (Token->RestrictedSidCount > 0)
     {
-        Hash->SidAttr = (PSID_AND_ATTRIBUTES)(Buffer + Offset);
+        Hash->SidAttr = (PSID_AND_ATTRIBUTES)(UserBase + Offset);
+        Array = (PSID_AND_ATTRIBUTES)(Kernel + Offset);
         Status = RtlCopySidAndAttributesArray(Token->RestrictedSidCount,
                                               Token->RestrictedSids,
                                               RestrictedSize - Token->RestrictedSidCount * sizeof(SID_AND_ATTRIBUTES),
-                                              Hash->SidAttr,
-                                              (PSID)&Hash->SidAttr[Token->RestrictedSidCount],
-                                              (PVOID *)&SidEnd,
+                                              Array,
+                                              (PSID)&Array[Token->RestrictedSidCount],
+                                              &SidEnd,
                                               &Left);
         if (!NT_SUCCESS(Status))
-            return Status;
+            goto Fail;
+        for (j = 0; j < Token->RestrictedSidCount; j++)
+            Array[j].Sid = (PSID)(UserBase + ((PUCHAR)Array[j].Sid - Kernel));
         Offset += RestrictedSize;
     }
 
     /* No capabilities without an AppContainer */
-    Info->CapabilitiesHash = (PSID_AND_ATTRIBUTES_HASH)(Buffer + Offset);
+    Info->CapabilitiesHash = (PSID_AND_ATTRIBUTES_HASH)(UserBase + Offset);
     Offset += HashSize;
 
-    Info->Privileges = (PTOKEN_PRIVILEGES)(Buffer + Offset);
-    Info->Privileges->PrivilegeCount = Token->PrivilegeCount;
-    RtlCopyMemory(Info->Privileges->Privileges,
+    Info->Privileges = (PTOKEN_PRIVILEGES)(UserBase + Offset);
+    ((PTOKEN_PRIVILEGES)(Kernel + Offset))->PrivilegeCount = Token->PrivilegeCount;
+    RtlCopyMemory(((PTOKEN_PRIVILEGES)(Kernel + Offset))->Privileges,
                   Token->Privileges,
                   Token->PrivilegeCount * sizeof(LUID_AND_ATTRIBUTES));
+    *Blob = Kernel;
     return STATUS_SUCCESS;
+
+Fail:
+    ExFreePoolWithTag(Kernel, TAG_TOKEN_DYNAMIC);
+    return Status;
 }
 
 /* PUBLIC FUNCTIONS *****************************************************************/
@@ -1611,21 +1642,36 @@ NtQueryInformationToken(
             {
                 DPRINT("NtQueryInformationToken(TokenAccessInformation)\n");
 
-                _SEH2_TRY
                 {
-                    /* The buffer is only touched when it fits */
+                    PUCHAR Blob;
+
+                    /* Built in pool; the user buffer was probed for write over its whole length by the class check */
                     Status = SepBuildTokenAccessInformation(Token,
                                                             (PUCHAR)TokenInformation,
                                                             TokenInformationLength,
-                                                            &RequiredLength);
-                    if (Status == STATUS_BUFFER_TOO_SMALL || NT_SUCCESS(Status))
-                        *ReturnLength = RequiredLength;
+                                                            &RequiredLength,
+                                                            &Blob);
+                    _SEH2_TRY
+                    {
+                        if (NT_SUCCESS(Status))
+                        {
+                            RtlCopyMemory(TokenInformation, Blob, RequiredLength);
+                            *ReturnLength = RequiredLength;
+                        }
+                        else if (Status == STATUS_BUFFER_TOO_SMALL)
+                        {
+                            *ReturnLength = RequiredLength;
+                        }
+                    }
+                    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        Status = _SEH2_GetExceptionCode();
+                    }
+                    _SEH2_END;
+
+                    if (Blob)
+                        ExFreePoolWithTag(Blob, TAG_TOKEN_DYNAMIC);
                 }
-                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-                {
-                    Status = _SEH2_GetExceptionCode();
-                }
-                _SEH2_END;
 
                 break;
             }
