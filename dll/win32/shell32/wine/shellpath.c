@@ -3405,6 +3405,7 @@ static HRESULT _SHGetAllUsersProfilePath(DWORD dwFlags, BYTE folder,
     return hr;
 }
 
+#ifndef __REACTOS__
 static HRESULT _SHOpenProfilesKey(PHKEY pKey)
 {
     LONG lRet;
@@ -3414,11 +3415,24 @@ static HRESULT _SHOpenProfilesKey(PHKEY pKey)
      KEY_ALL_ACCESS, NULL, pKey, &disp);
     return HRESULT_FROM_WIN32(lRet);
 }
+#else
+/* Windows only reads ProfileList from the shell, and a standard user may not write HKLM, so
+ * the key is opened for reading and never created. Setup and the default hives provide it.
+ * If it cannot be opened, *pKey is NULL and the callers use their built-in defaults.
+ */
+static HRESULT _SHOpenProfilesKey(PHKEY pKey)
+{
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList", 0,
+     KEY_READ, pKey) != ERROR_SUCCESS)
+        *pKey = NULL;
+    return S_OK;
+}
+#endif
 
 /* Reads the value named szValueName from the key profilesKey (assumed to be
  * opened by _SHOpenProfilesKey) into szValue, which is assumed to be MAX_PATH
  * WCHARs in length.  If it doesn't exist, returns szDefault (and saves
- * szDefault to the registry).
+ * szDefault to the registry; ReactOS does not save it, see below).
  */
 static HRESULT _SHGetProfilesValue(HKEY profilesKey, LPCWSTR szValueName,
  LPWSTR szValue, LPCWSTR szDefault)
@@ -3429,8 +3443,14 @@ static HRESULT _SHGetProfilesValue(HKEY profilesKey, LPCWSTR szValueName,
 
     TRACE("%p,%s,%p,%s\n", profilesKey, debugstr_w(szValueName), szValue,
      debugstr_w(szDefault));
+#ifdef __REACTOS__
+    /* The key is opened for reading only and may be missing (NULL) */
+    lRet = profilesKey ? RegQueryValueExW(profilesKey, szValueName, NULL, &type,
+     (LPBYTE)szValue, &dwPathLen) : ERROR_INVALID_HANDLE;
+#else
     lRet = RegQueryValueExW(profilesKey, szValueName, NULL, &type,
      (LPBYTE)szValue, &dwPathLen);
+#endif
     if (!lRet && (type == REG_SZ || type == REG_EXPAND_SZ) && dwPathLen
      && *szValue)
     {
@@ -3440,8 +3460,14 @@ static HRESULT _SHGetProfilesValue(HKEY profilesKey, LPCWSTR szValueName,
     }
     else
     {
-        /* Missing or invalid value, set a default */
+        /* Missing or invalid value, use the default */
         lstrcpynW(szValue, szDefault, MAX_PATH);
+#ifdef __REACTOS__
+        /* Windows does not write ProfileList from the shell, and a standard user could not */
+        TRACE("Using default for missing value %s: %s\n", debugstr_w(szValueName),
+                                                          debugstr_w(szValue));
+        hr = S_OK;
+#else
         TRACE("Setting missing value %s to %s\n", debugstr_w(szValueName),
                                                   debugstr_w(szValue));
         lRet = RegSetValueExW(profilesKey, szValueName, 0, REG_EXPAND_SZ,
@@ -3451,6 +3477,7 @@ static HRESULT _SHGetProfilesValue(HKEY profilesKey, LPCWSTR szValueName,
             hr = HRESULT_FROM_WIN32(lRet);
         else
             hr = S_OK;
+#endif
     }
     TRACE("returning 0x%08lx (output value is %s)\n", hr, debugstr_w(szValue));
     return hr;

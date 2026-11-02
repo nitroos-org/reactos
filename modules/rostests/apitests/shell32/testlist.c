@@ -44,6 +44,7 @@ extern void func_PathIsTemporary(void);
 extern void func_PathMakeUniqueName(void);
 extern void func_PathProcessCommand(void);
 extern void func_PathResolve(void);
+extern void func_ProfileListAccess(void);
 extern void func_PIDL(void);
 extern void func_RealShellExecuteEx(void);
 extern void func_RegenerateUserEnvironment(void);
@@ -132,6 +133,7 @@ const struct test winetest_testlist[] =
     { "PathMakeUniqueName", func_PathMakeUniqueName },
     { "PathProcessCommand", func_PathProcessCommand },
     { "PathResolve", func_PathResolve },
+    { "ProfileListAccess", func_ProfileListAccess },
     { "PIDL", func_PIDL },
     { "RealShellExecuteEx", func_RealShellExecuteEx },
     { "RegenerateUserEnvironment", func_RegenerateUserEnvironment },

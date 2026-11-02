@@ -42,6 +42,7 @@ list(APPEND SOURCE
     PathMakeUniqueName.cpp
     PathProcessCommand.cpp
     PathResolve.cpp
+    ProfileListAccess.cpp
     RealShellExecuteEx.cpp
     RegenerateUserEnvironment.cpp
     SHAppBarMessage.cpp
