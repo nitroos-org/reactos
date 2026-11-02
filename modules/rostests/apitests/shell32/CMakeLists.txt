@@ -27,6 +27,7 @@ list(APPEND SOURCE
     GUIDFromString.cpp
     LockServer.cpp
     Int64ToString.cpp
+    ApplicationActivationManager.cpp
     IApplicationAssociationRegistration.cpp
     UserChoiceHandlers.cpp
     IDestinationList.cpp
