@@ -27,11 +27,12 @@ int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int le
  *
  * The lazy writer's order differs: Cc takes PagingIoResource shared (NgAcquireForLazyWrite) before it calls in,
  * and the write then takes PagingWriteLock, so it holds PagingIoResource(shared) -> PagingWriteLock, the reverse of
- * the line above.  That is safe only under this rule: nobody blocks on PagingIoResource EXCLUSIVE (NgSetFileSize,
- * the only taker) while holding PagingWriteLock.  Its callers (the cached branch of NgWrite, set-information,
- * create's overwrite and supersede) hold MainResource and no PagingWriteLock, and a paging write only ever tries
- * PagingIoResource, never waits for it.  Keep it so: a path that waits for PagingIoResource exclusive with
- * PagingWriteLock held would deadlock against a lazy write of the same stream.
+ * the line above.  That is safe only under this rule: nobody blocks on PagingIoResource EXCLUSIVE while holding
+ * PagingWriteLock.  The takers are NgSetFileSize (its callers: the cached branch of NgWrite, set-information,
+ * create's overwrite and supersede; they hold MainResource and no PagingWriteLock) and NgWaitStreamWrites
+ * (read.c, a non-cached read; it holds nothing).  A paging write only ever tries PagingIoResource, never waits
+ * for it.  Keep it so: a path that waits for PagingIoResource exclusive with PagingWriteLock held would deadlock
+ * against a lazy write of the same stream.
  */
 
 /* At mount, before the core exists. */
