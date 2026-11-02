@@ -864,6 +864,14 @@ KiXmmExceptionHandler(
     {
         /* Should not happen */
         ASSERT(FALSE);
+        ExceptionCode = STATUS_FLOAT_INVALID_OPERATION;
+    }
+
+    /* A 32-bit thread gets the one code of the i386 SIMD exception, the cause
+       is in the MXCSR value that is passed as the second parameter */
+    if (TrapFrame->SegCs == (KGDT64_R3_CMCODE | RPL_MASK))
+    {
+        ExceptionCode = STATUS_FLOAT_MULTIPLE_TRAPS;
     }
 
     return ExceptionCode;

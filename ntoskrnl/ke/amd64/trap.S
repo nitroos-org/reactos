@@ -643,10 +643,10 @@ FUNC KiXmmException
     test eax, eax
     jge KiXmmExit
 
-    /* Dispatch the exception */
-    DispatchException eax, 2, 0, [rbp+KTRAP_FRAME_MxCsr], 0
-
-    // FIXME: STATUS_FLOAT_MULTIPLE_TRAPS / STATUS_FLOAT_MULTIPLE_FAULTS
+    /* Dispatch the exception. The second parameter is the 32 bit MXCSR value
+       (r10 is moved to itself by the macro, eax holds the status) */
+    mov r10d, dword ptr [rbp+KTRAP_FRAME_MxCsr]
+    DispatchException eax, 2, 0, r10, 0
 
 KiXmmExit:
     /* Return */
