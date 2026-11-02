@@ -98,7 +98,7 @@ HostPaint(HOST *Host)
     COORD BufferSize, BufferOrigin = {0, 0};
     SMALL_RECT Region;
     CHAR *Line;
-    DWORD Index, Row, Column, Length, Used;
+    DWORD Index, Row, Column, Length, Used, BandRows;
     BOOL Changed = FALSE;
     WORD Attribute;
     CHAR Utf8[8];
@@ -115,8 +115,22 @@ HostPaint(HOST *Host)
     if (Region.Right >= Info.dwSize.X) Region.Right = Info.dwSize.X - 1;
     if (Region.Bottom >= Info.dwSize.Y) Region.Bottom = Info.dwSize.Y - 1;
     ZeroMemory(Host->Current, (SIZE_T)Host->Width * Host->Height * sizeof(*Host->Current));
-    if (!ReadConsoleOutputW(Host->ConsoleOut, Host->Current, BufferSize,
-                            BufferOrigin, &Region)) return FALSE;
+    /* One ReadConsoleOutput request carries at most 64 KiB of cells (CSR capture
+     * buffer), as on Windows; a 250x70 terminal is 70000 bytes. Read in bands of rows. */
+    BandRows = 32768 / ((DWORD)Host->Width * sizeof(CHAR_INFO));
+    if (!BandRows) BandRows = 1;
+    for (Row = 0; Row < (DWORD)Host->Height; Row += BandRows)
+    {
+        SMALL_RECT Band = Region;
+        COORD BandSize = BufferSize;
+
+        Band.Top = (SHORT)(Region.Top + Row);
+        if (Band.Top > Region.Bottom) break;
+        BandSize.Y = (SHORT)min(BandRows, (DWORD)Host->Height - Row);
+        Band.Bottom = (SHORT)min(Band.Top + BandSize.Y - 1, Region.Bottom);
+        if (!ReadConsoleOutputW(Host->ConsoleOut, Host->Current + (SIZE_T)Row * Host->Width,
+                                BandSize, BufferOrigin, &Band)) return FALSE;
+    }
 
     Line = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)Host->Width * 64 + 128);
     if (!Line) return FALSE;
