@@ -285,6 +285,31 @@ static ULONG WINAPI BackgroundCopyJob_Release(IBackgroundCopyJob4 *iface)
 
 /*** IBackgroundCopyJob methods ***/
 
+static HRESULT add_file(BackgroundCopyJobImpl *job, const WCHAR *remote, const WCHAR *local,
+                        DWORD range_count, const BG_FILE_RANGE *ranges)
+{
+    BackgroundCopyFileImpl *file;
+    HRESULT hr;
+
+    /* We should return E_INVALIDARG in these cases. */
+    FIXME("Check for valid filenames and supported protocols\n");
+
+    hr = BackgroundCopyFileConstructor(job, remote, local, &file);
+    if (hr != S_OK) return hr;
+
+    if (range_count && FAILED(hr = BackgroundCopyFileSetRanges(file, range_count, ranges)))
+    {
+        IBackgroundCopyFile2_Release(&file->IBackgroundCopyFile2_iface);
+        return hr;
+    }
+
+    /* Add a reference to the file to file list */
+    list_add_head(&job->files, &file->entryFromJob);
+    job->jobProgress.BytesTotal = BG_SIZE_UNKNOWN;
+    ++job->jobProgress.FilesTotal;
+    return S_OK;
+}
+
 static HRESULT WINAPI BackgroundCopyJob_AddFileSet(IBackgroundCopyJob4 *iface, ULONG cFileCount, BG_FILE_INFO *pFileSet)
 {
     BackgroundCopyJobImpl *job = impl_from_IBackgroundCopyJob4(iface);
@@ -297,18 +322,8 @@ static HRESULT WINAPI BackgroundCopyJob_AddFileSet(IBackgroundCopyJob4 *iface, U
 
     for (i = 0; i < cFileCount; ++i)
     {
-        BackgroundCopyFileImpl *file;
-
-        /* We should return E_INVALIDARG in these cases. */
-        FIXME("Check for valid filenames and supported protocols\n");
-
-        hr = BackgroundCopyFileConstructor(job, pFileSet[i].RemoteName, pFileSet[i].LocalName, &file);
+        hr = add_file(job, pFileSet[i].RemoteName, pFileSet[i].LocalName, 0, NULL);
         if (hr != S_OK) break;
-
-        /* Add a reference to the file to file list */
-        list_add_head(&job->files, &file->entryFromJob);
-        job->jobProgress.BytesTotal = BG_SIZE_UNKNOWN;
-        ++job->jobProgress.FilesTotal;
     }
 
     LeaveCriticalSection(&job->cs);
@@ -858,8 +873,21 @@ static HRESULT WINAPI BackgroundCopyJob_AddFileWithRanges(
     DWORD RangeCount,
     BG_FILE_RANGE Ranges[])
 {
-    FIXME("%p, %s, %s, %lu, %p: stub\n", iface, debugstr_w(RemoteUrl), debugstr_w(LocalName), RangeCount, Ranges);
-    return S_OK;
+    BackgroundCopyJobImpl *job = impl_from_IBackgroundCopyJob4(iface);
+    HRESULT hr;
+
+    TRACE("%p, %s, %s, %lu, %p.\n", iface, debugstr_w(RemoteUrl), debugstr_w(LocalName), RangeCount, Ranges);
+
+    if (!RemoteUrl || !LocalName || !RangeCount || !Ranges) return E_INVALIDARG;
+
+    EnterCriticalSection(&job->cs);
+    if (is_job_done(job) || job->type != BG_JOB_TYPE_DOWNLOAD)
+        hr = BG_E_INVALID_STATE;
+    else
+        hr = add_file(job, RemoteUrl, LocalName, RangeCount, Ranges);
+    LeaveCriticalSection(&job->cs);
+
+    return hr;
 }
 
 static HRESULT WINAPI BackgroundCopyJob_SetFileACLFlags(IBackgroundCopyJob4 *iface, DWORD flags)

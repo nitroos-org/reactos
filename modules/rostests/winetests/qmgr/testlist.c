@@ -8,6 +8,7 @@ extern void func_enum_jobs(void);
 extern void func_file(void);
 extern void func_job(void);
 extern void func_qmgr(void);
+extern void func_ranges(void);
 
 const struct test winetest_testlist[] =
 {
@@ -16,5 +17,6 @@ const struct test winetest_testlist[] =
     { "file", func_file },
     { "job", func_job },
     { "qmgr", func_qmgr },
+    { "ranges", func_ranges },
     { 0, 0 }
 };
