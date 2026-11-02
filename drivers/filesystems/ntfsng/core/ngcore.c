@@ -60,6 +60,7 @@ struct ngc_vol {
 	atomic64_t *watched;            /* the core's free-cluster count, watched for frees */
 	unsigned long frees_seen;       /* its increments at the last commit */
 	int damaged;                    /* the mount-time check found damage: read-only */
+	int checked;                    /* the mount-time consistency check ran to its verdict */
 	char why[160];
 	int failed;                     /* a consistency point was abandoned for good: every later one fails */
 	int label_read;                 /* label holds $VOLUME_NAME as on disk */
@@ -88,6 +89,7 @@ static const char *ngc_mount_check(struct ngc_vol *v, struct ntfs_volume *vol, s
 		return NULL;
 	}
 	err = ngc_fsck(vol, b, r);
+	v->checked = !err || r->fatal;
 	if (err && !r->fatal) {
 		printk(KERN_ERR "CHECK: not run (%d)\n", err);
 	} else {
@@ -317,6 +319,14 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 		kfree(v->jv);
 		v->jv = NULL;
 	}
+	/* A foreign dirty flag the check pass cleared for (see foreign below): off the disk before the core reads it. */
+	if (pass == NGC_PASS_WRITE && jrec == NGJ_NONE && !jerr0) {
+		int e = ngj_clear_foreign_dirty(osdev, size, sector_size);
+		if (e && e != -EINVAL)
+			printk(KERN_ERR "could not clear the dirty flag (%d); the volume stays read-only\n", e);
+		else if (!e)
+			printk(KERN_WARNING "dirty flag cleared (set by another system, checked above)\n");
+	}
 	fc->fs_type = kshim_fs_type;
 	fc->sb_flags = SB_RDONLY;
 	fc->purpose = FS_CONTEXT_FOR_MOUNT;
@@ -347,6 +357,20 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 		/* Our journal clears the dirty flag in the write pass: in the check pass it only marks an unclean shutdown. */
 		int ours = jrec == NGJ_CLEAN, dirty = !!(vol->vol_flags & VOLUME_IS_DIRTY);
 		int need_write = ours && (v->jv->replayed || v->jv->torn || v->jv->pair_pending || dirty);
+		/*
+		 * A dirty flag with no journal of ours behind it (ntfsresize, a check another system scheduled,
+		 * FSCTL_MARK_VOLUME_DIRTY, an ntfs-3g session that ended badly): what Windows' autochk settles
+		 * before the volume is written.  It cannot run here, the SYSTEM hive is written long before
+		 * smss starts it.  So the flag goes only after the same evidence a clean volume needs: no other
+		 * flag that forces read-only, a $LogFile that is empty or marked clean (a log another system left
+		 * in use is not ours to replay), and a consistency check that ran and found nothing, whatever the
+		 * MountCheck policy says for other volumes.  The write pass then clears the flag before the core
+		 * reads the volume.
+		 */
+		int foreign = jrec == NGJ_NONE && dirty && !jerr0 &&
+			      !(vol->vol_flags & VOLUME_MUST_MOUNT_RO_MASK & ~VOLUME_IS_DIRTY);
+		if (foreign)
+			need_write = 1;
 		/* The core's own remount checks run in ntfs_reconfigure; these add what it skips. */
 		if (jrec == NGJ_REPAIR)
 			*why_ro = "the journal says the volume needs repair (core errors, or metadata written in place without it)";
@@ -354,13 +378,23 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 			*why_ro = "the journal could not be read (device error, a damaged $LogFile record, or no memory)";
 		else if (NVolErrors(vol))
 			*why_ro = "the core found errors at mount (MFTMirr, $LogFile or hibernation)";
-		else if ((vol->vol_flags & VOLUME_MUST_MOUNT_RO_MASK & ~(ours && pass == NGC_PASS_CHECK ? VOLUME_IS_DIRTY : 0)))
-			*why_ro = dirty ? "volume is marked dirty" :
+		else if ((vol->vol_flags & VOLUME_MUST_MOUNT_RO_MASK & ~((ours || foreign) && pass == NGC_PASS_CHECK ? VOLUME_IS_DIRTY : 0)))
+			*why_ro = !(vol->vol_flags & VOLUME_MUST_MOUNT_RO_MASK & ~VOLUME_IS_DIRTY) ? "volume is marked dirty" :
+				dirty ? "volume is marked dirty and has flags that only a checker clears (chkdsk/upgrade/resize)" :
 				"volume has flags that force read-only (chkdsk/upgrade/resize)";
 		else if (!ngc_logfile_clean(vol))
-			*why_ro = "$LogFile was not shut down cleanly";
+			*why_ro = dirty ? "volume is marked dirty and its $LogFile was not shut down cleanly (needs chkdsk)" :
+				"$LogFile was not shut down cleanly";
+		else if (foreign && !ngc_check_policy)
+			*why_ro = "volume is marked dirty and the mount-time check is disabled (MountCheck=2)";
 		else if (pass == NGC_PASS_CHECK)
 			*why_ro = ngc_mount_check(v, vol, b, need_write || dirty);
+		if (!*why_ro && foreign && pass == NGC_PASS_CHECK) {
+			if (!v->checked)
+				*why_ro = "volume is marked dirty and the mount-time check could not run";
+			else
+				printk(KERN_WARNING "dirty flag without a journal of ours: $LogFile clean, consistency check passed, the write pass clears the flag\n");
+		}
 		/*
 		 * The journal demands a repair, or cannot say whether one is needed: read-only for good, as a
 		 * volume the check found damaged, so a system volume still boots (read-only, with a notice).
@@ -487,7 +521,7 @@ void ngc_umount(ngc_vol *v, int discard)
 	/* put_super frees the volume: read its error state first. It clears the dirty flag of a
 	 * read-write volume without errors; a read-only volume keeps the flag it had. */
 	errors = NVolErrors(NTFS_SB(sb)) || v->failed;
-	clean = !errors && (!sb_rdonly(sb) || !(NTFS_SB(sb)->vol_flags & VOLUME_IS_DIRTY));
+	clean = !errors && !NTFS_SB(sb)->keep_dirty && (!sb_rdonly(sb) || !(NTFS_SB(sb)->vol_flags & VOLUME_IS_DIRTY));
 	wr_failed = v->bdev->kshim_wr_failed;
 	if (sb->s_op->put_super)
 		sb->s_op->put_super(sb);
@@ -1547,6 +1581,29 @@ int ngc_mark_dirty(ngc_vol *v)
 }
 
 /*
+ * FSCTL_MARK_VOLUME_DIRTY: the flag goes on disk and stays (no quiet flusher pass or unmount clears it) until
+ * the next mount's check has run, as a check scheduled with chkdsk or chkntfs.
+ */
+int ngc_mark_volume_dirty(ngc_vol *v)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	int err;
+	if (sb_rdonly(v->sb))
+		return -EROFS;
+	vol->keep_dirty = true;
+	if (vol->vol_flags & VOLUME_IS_DIRTY)
+		return 0;
+	err = ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
+	if (!err)
+		err = write_inode_now(vol->vol_ino, 1);
+	if (!err)
+		err = ngc_commit(v);
+	if (err)
+		vol->keep_dirty = false;
+	return err;
+}
+
+/*
  * The flusher: writes back every dirty mapping and inode, then (when nothing is left and the
  * core saw no error) clears VOLUME_IS_DIRTY, so the flag on disk means "unsynced changes".
  */
@@ -1604,7 +1661,7 @@ int ngc_dirty(ngc_vol *v)
 	if (sb_rdonly(v->sb))
 		return 0;
 	/* Also errors not yet marked on disk, and a clean volume whose header is still to be retired. */
-	return kshim_sb_dirty(v->sb) || (vol->vol_flags & VOLUME_IS_DIRTY) || kshim_jnl_pending(v->bdev) ||
+	return kshim_sb_dirty(v->sb) || ((vol->vol_flags & VOLUME_IS_DIRTY) && !vol->keep_dirty) || kshim_jnl_pending(v->bdev) ||
 	       (NVolErrors(vol) && !(vol->vol_flags & VOLUME_IS_DIRTY)) || kshim_jnl_retire_pending(v->bdev) ||
 	       kshim_jnl_errors_pending(v->bdev);
 }

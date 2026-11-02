@@ -117,6 +117,8 @@ int ngc_is_rw(ngc_vol *v);
 /* True when the core stopped writing for good: changes not committed yet are lost. */
 int ngc_failed(ngc_vol *v);
 int ngc_mark_dirty(ngc_vol *v);
+/* The volume stays dirty on disk until a mount-time check clears it (FSCTL_MARK_VOLUME_DIRTY); -EROFS on a read-only volume. */
+int ngc_mark_volume_dirty(ngc_vol *v);
 int ngc_sync(ngc_vol *v);
 int ngc_commit_now(ngc_vol *v);
 int ngc_changed(ngc_vol *v);

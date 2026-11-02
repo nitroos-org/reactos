@@ -157,6 +157,8 @@ struct ntfs_volume {
 	unsigned int *lcn_empty_bits_per_page;
 	struct work_struct precalc_work;
 	loff_t preallocated_size;
+	/* The volume was marked dirty on request (FSCTL_MARK_VOLUME_DIRTY): only a mount-time check clears the flag. */
+	bool keep_dirty;
 };
 
 /*

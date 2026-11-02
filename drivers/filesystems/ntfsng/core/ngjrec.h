@@ -24,5 +24,6 @@ struct ngj_vol {
 
 int ngj_probe(void *osdev, u64 size, unsigned int devsec, struct ngj_vol *jv);
 int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq);
+int ngj_clear_foreign_dirty(void *osdev, u64 size, unsigned int devsec);
 
 #endif
