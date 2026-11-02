@@ -153,6 +153,11 @@ VOID NgPrintLockStats(PNG_VCB Vcb)
     ULONG i;
     DPRINT1("ntfsng: paging writes: %lu with the transfer outside CoreLock, %lu under it, %lu written again\n",
             Vcb->DioWrites, Vcb->DioFallbacks, Vcb->DioRedone);
+    DPRINT1("ntfsng: paging and non-cached reads: %lu with the transfer outside CoreLock, %lu under it\n",
+            Vcb->DioReads, Vcb->DioReadFallbacks);
+#if DBG
+    DPRINT1("ntfsng: unlocked paging writes forced to be written again (DioFault): %lu\n", ngc_dio_forced);
+#endif
     for (i = 0; i < NG_LOCK_CATEGORIES; i++)
     {
         NG_LOCK_STAT *S = &Vcb->LockStats.Stat[i];
@@ -832,6 +837,15 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         Target = i + (ULONG)((ULONGLONG)Now.QuadPart / 10000 % i);
         ngc_set_journal_fault(Target);
         DPRINT1("ntfsng: JournalFault: the system stops in the middle of commit %lu\n", Target);
+    }
+#endif
+#if DBG
+    i = NgReadDword(RegistryPath, L"DioFault");
+    if (i)
+    {
+        /* Test only: every DioFault'th unlocked paging write is reported as changed under the transfer and written again. */
+        ngc_set_dio_fault(i);
+        DPRINT1("ntfsng: DioFault: every %lu'th unlocked paging write is forced to be written again\n", i);
     }
 #endif
     DPRINT1("ntfsng: service key %wZ, PermissiveOpen=%lu%s\n", RegistryPath, NgGlobal.PermissiveOpen,

@@ -24,6 +24,15 @@ int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int le
  * MainResource, and nobody holding CoreLock waits for PagingWriteLock, so Cc's lazy writer and Mm's
  * writers cannot deadlock with a user thread that holds FCB resources while it waits inside Cc.
  * DataIoGate: see NgPagingWrite.
+ *
+ * The lazy writer's order differs: Cc takes PagingIoResource shared (NgAcquireForLazyWrite) before it calls in,
+ * and the write then takes PagingWriteLock, so it holds PagingIoResource(shared) -> PagingWriteLock, the reverse of
+ * the line above.  That is safe only under this rule: nobody blocks on PagingIoResource EXCLUSIVE while holding
+ * PagingWriteLock.  The takers are NgSetFileSize (its callers: the cached branch of NgWrite, set-information,
+ * create's overwrite and supersede; they hold MainResource and no PagingWriteLock) and NgWaitStreamWrites
+ * (read.c, a non-cached read; it holds nothing).  A paging write only ever tries PagingIoResource, never waits
+ * for it.  Keep it so: a path that waits for PagingIoResource exclusive with PagingWriteLock held would deadlock
+ * against a lazy write of the same stream.
  */
 
 /* At mount, before the core exists. */
@@ -65,6 +74,37 @@ VOID NgWaitDataIoIdle(PNG_VCB Vcb)
         NgReleaseCore(Vcb);
         KeWaitForSingleObject(&Vcb->DioIdle, Executive, KernelMode, FALSE, NULL);
     }
+}
+
+/*
+ * The three steps around an unlocked data transfer (paging writes here, paging and non-cached reads in read.c).
+ * The caller holds CoreLock once (CoreDepth 1) and has pinned a core node (ngc_dio_begin / ngc_rdio_begin):
+ *   NgDataIoBegin:        counts the transfer (DioActive), takes DataIoGate shared and releases CoreLock; the
+ *                         inode cache trim comes before the gate (its evictions may free clusters, which drains)
+ *   (the transfer, no CoreLock)
+ *   NgDataIoTransferred:  releases the gate and takes CoreLock again
+ *   (ngc_dio_end / ngc_rdio_end, which unpin the node)
+ *   NgDataIoDone:         the transfer is over (DioActive), still under CoreLock
+ */
+VOID NgDataIoBegin(PNG_VCB Vcb)
+{
+    ngc_icache_trim(Vcb->Core);
+    if (Vcb->DioActive++ == 0)
+        KeClearEvent(&Vcb->DioIdle);
+    ExAcquireResourceSharedLite(&Vcb->DataIoGate, TRUE);
+    NgReleaseCoreNoTrim(Vcb);
+}
+
+VOID NgDataIoTransferred(PNG_VCB Vcb)
+{
+    ExReleaseResourceLite(&Vcb->DataIoGate);
+    NgAcquireCore(Vcb);
+}
+
+VOID NgDataIoDone(PNG_VCB Vcb)
+{
+    if (--Vcb->DioActive == 0)
+        KeSetEvent(&Vcb->DioIdle, IO_NO_INCREMENT, FALSE);
 }
 
 BOOLEAN NTAPI NgAcquireForLazyWrite(PVOID Context, BOOLEAN Wait)
@@ -459,20 +499,13 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     }
     if (Unlocked)
     {
-        /* The trim before the gate: its evictions may free clusters, which drains the gate. */
-        ngc_icache_trim(Vcb->Core);
-        if (Vcb->DioActive++ == 0)
-            KeClearEvent(&Vcb->DioIdle);
-        ExAcquireResourceSharedLite(&Vcb->DataIoGate, TRUE);
-        NgReleaseCoreNoTrim(Vcb);
+        NgDataIoBegin(Vcb);
 
         IoErr = NgDioTransfer(Vcb, &Dio, Buffer, Bounce);
 
-        ExReleaseResourceLite(&Vcb->DataIoGate);
-        NgAcquireCore(Vcb);
+        NgDataIoTransferred(Vcb);
         Done = ngc_dio_end(Vcb->Core, &Dio, Buffer, IoErr);
-        if (--Vcb->DioActive == 0)
-            KeSetEvent(&Vcb->DioIdle, IO_NO_INCREMENT, FALSE);
+        NgDataIoDone(Vcb);
         if (Done >= 0)
             Vcb->DioWrites++;
         else if (Done == -NGC_EAGAIN)
