@@ -749,10 +749,14 @@ LdrpWalkImportDescriptor(IN LPWSTR DllPath OPTIONAL,
                                            LdrEntry->EntryPointActivationContext);
 
     /*
-     * An exception that escapes the walks below (a malformed image; it is
-     * caught further up, e.g. by LdrpSnapIAT) must neither leave the depth
-     * count raised nor leave the activation context frame (on this stack)
-     * active
+     * An exception in the walks below (a malformed image: the import
+     * directory is image data) fails this walk with its status, so that the
+     * caller takes its normal failure path: LdrpLoadDll and
+     * LdrpLoadImportModule list the module for the sweep of the failed load,
+     * which unmaps it. Letting it escape would skip that, and the module
+     * would stay mapped and listed with its imports unsnapped (a later load
+     * would find it and succeed). Either way the depth count and the
+     * activation context frame (on this stack) are restored below
      */
     _SEH2_TRY
     {
@@ -823,18 +827,28 @@ LdrpWalkImportDescriptor(IN LPWSTR DllPath OPTIONAL,
             }
         }
     }
-    _SEH2_FINALLY
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
-        if (WalkCounted)
-        {
-            ASSERT(LdrpImportWalkDepth != 0);
-            LdrpImportWalkDepth--;
-        }
+        /* The walk fails with the status of the exception */
+        Status = _SEH2_GetExceptionCode();
+        if (NT_SUCCESS(Status)) Status = STATUS_UNSUCCESSFUL;
 
-        /* Release the activation context */
-        RtlDeactivateActivationContextUnsafeFast(&ActCtx);
+        DbgPrintEx(DPFLTR_LDR_ID,
+                   DPFLTR_ERROR_LEVEL,
+                   "LDR: Exception 0x%08lx walking the import descriptors of %wZ\n",
+                   Status,
+                   &LdrEntry->BaseDllName);
     }
     _SEH2_END;
+
+    if (WalkCounted)
+    {
+        ASSERT(LdrpImportWalkDepth != 0);
+        LdrpImportWalkDepth--;
+    }
+
+    /* Release the activation context */
+    RtlDeactivateActivationContextUnsafeFast(&ActCtx);
 
     DPRINT("LdrpWalkImportDescriptor - END (%wZ %p)\n", &LdrEntry->BaseDllName, LdrEntry);
 
@@ -1095,24 +1109,34 @@ FailurePath:
         if (Static)
         {
             UNICODE_STRING SnapTarget;
-            PLDR_DATA_TABLE_ENTRY LdrEntry;
+            PLDR_DATA_TABLE_ENTRY SnapEntry;
             ULONG ReportOrdinal;
             LPSTR ReportName;
+            BOOLEAN FreeDllName;
 
             /* What was the module we were searching in */
             RtlInitAnsiString(&TempString, DllName ? DllName : "Unknown");
 
-            /* What was the module we were searching for */
-            if (LdrpCheckForLoadedDllHandle(ImportBase, &LdrEntry))
-                SnapTarget = LdrEntry->BaseDllName;
+            /* What was the module we were searching for (the one being snapped) */
+            if (LdrpCheckForLoadedDllHandle(ImportBase, &SnapEntry))
+            {
+                SnapTarget = SnapEntry->BaseDllName;
+            }
             else
+            {
+                SnapEntry = NULL;
                 RtlInitUnicodeString(&SnapTarget, L"Unknown");
+            }
 
-            /* What was not found: the export of the forwarder target when
-             * the forwarder failed there, else the import itself */
+            /*
+             * What was not found. Windows names what the module being
+             * snapped imports, also when a forwarder failed further on (not
+             * the name the forwarder points to). A missing ordinal of a
+             * forwarder target is named by that ordinal (an import by name
+             * has no ordinal of its own)
+             */
             ReportOrdinal = (ForwarderStatus == STATUS_ORDINAL_NOT_FOUND) ? ForwardOrdinal : OriginalOrdinal;
-            ReportName = (ForwarderStatus == STATUS_ENTRYPOINT_NOT_FOUND && ForwardName) ?
-                         ForwardName->Buffer : ImportName;
+            ReportName = ImportName ? ImportName : (ForwardName ? ForwardName->Buffer : NULL);
             if (!ReportName) ReportName = "Unknown";
 
             /* Inform the debug log */
@@ -1135,8 +1159,21 @@ FailurePath:
                  * LoadLibrary. Windows does not report a missing ordinal of
                  * a forwarder target then (only while the process starts)
                  */
-                /* These are critical errors. Setup a string for the DLL name */
-                RtlAnsiStringToUnicodeString(&HardErrorDllName, &TempString, TRUE);
+                /*
+                 * These are critical errors. The DLL operand is, as on
+                 * Windows, the full path of the module being snapped (not
+                 * the DLL the import is from)
+                 */
+                if (SnapEntry)
+                {
+                    HardErrorDllName = SnapEntry->FullDllName;
+                    FreeDllName = FALSE;
+                }
+                else
+                {
+                    FreeDllName = NT_SUCCESS(RtlAnsiStringToUnicodeString(&HardErrorDllName, &TempString, TRUE));
+                    if (!FreeDllName) RtlInitUnicodeString(&HardErrorDllName, L"Unknown");
+                }
 
                 /* Set it as the parameter */
                 HardErrorParameters[1] = (ULONG_PTR)&HardErrorDllName;
@@ -1152,9 +1189,12 @@ FailurePath:
                 {
                     /* We don't, use the entrypoint. Set up a string for it */
                     RtlInitAnsiString(&TempString, ReportName);
-                    RtlAnsiStringToUnicodeString(&HardErrorEntryPointName,
-                                                 &TempString,
-                                                 TRUE);
+                    if (!NT_SUCCESS(RtlAnsiStringToUnicodeString(&HardErrorEntryPointName,
+                                                                 &TempString,
+                                                                 TRUE)))
+                    {
+                        RtlInitEmptyUnicodeString(&HardErrorEntryPointName, NULL, 0);
+                    }
 
                     /* Set it as the parameter */
                     HardErrorParameters[0] = (ULONG_PTR)&HardErrorEntryPointName;
@@ -1174,7 +1214,7 @@ FailurePath:
                 if (LdrpInLdrInit) LdrpFatalHardErrorCount++;
 
                 /* Free our strings */
-                RtlFreeUnicodeString(&HardErrorDllName);
+                if (FreeDllName) RtlFreeUnicodeString(&HardErrorDllName);
                 if (Mask == 3) RtlFreeUnicodeString(&HardErrorEntryPointName);
             }
             else if ((Status == STATUS_DLL_NOT_FOUND) && LdrpInLdrInit)
