@@ -48,7 +48,7 @@ NTSTATUS Wow64Allocate(SIZE_T Size, PVOID *Base)
 static NTSTATUS CreateGuestStack(INITIAL_TEB *Stack)
 {
     SECTION_IMAGE_INFORMATION Image;
-    SIZE_T Reserve, Commit, Size = 0;
+    SIZE_T Reserve, Commit, MinimumCommit, Size = 0;
     PVOID Base = NULL, Limit;
     BOOLEAN Guard = FALSE;
     ULONG OldProtect;
@@ -61,8 +61,11 @@ static NTSTATUS CreateGuestStack(INITIAL_TEB *Stack)
     /* PE32 sizes are 32-bit, so the rounding below cannot wrap */
     Reserve = max(256 * 1024, (ULONG)Image.MaximumStackSize);
     Commit = ROUND_TO_PAGES((ULONG)Image.CommittedStackSize);
-    if (Commit < NtCurrentPeb()->MinimumStackCommit)
-        Commit = ROUND_TO_PAGES(NtCurrentPeb()->MinimumStackCommit);
+    /* MinimumStackCommit is in the PEB, which the process's creator can write: read it once and let
+     * it raise the commit only up to the reserve the image asks for, as the kernel's staging does */
+    MinimumCommit = NtCurrentPeb()->MinimumStackCommit;
+    if (MinimumCommit > Reserve) MinimumCommit = Reserve;
+    if (Commit < MinimumCommit) Commit = ROUND_TO_PAGES(MinimumCommit);
     Reserve = ALIGN_UP_BY(Reserve, 64 * 1024);
     if (Commit >= Reserve) Reserve = ALIGN_UP_BY(Commit, 1024 * 1024);
     Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, Wow64ZeroBits(0),
