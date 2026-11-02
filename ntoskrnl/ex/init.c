@@ -1349,6 +1349,42 @@ VOID
 NTAPI
 MmFreeLoaderBlock(IN PLOADER_PARAMETER_BLOCK LoaderBlock);
 
+/*
+ * HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Kernel, DisableUserQpc
+ * (REG_DWORD, ReactOS): 1 makes user mode call NtQueryPerformanceCounter
+ * instead of reading the TSC itself (the counter and its frequency stay as
+ * they are), so that the system call path can be tested and used on its own.
+ * The HAL decides before the registry exists (it runs when all processors
+ * have started), so the kernel withdraws the bypass here, before any user
+ * mode code runs.
+ */
+static
+CODE_SEG("INIT")
+VOID
+ExpApplyUserQpcPolicy(VOID)
+{
+    RTL_QUERY_REGISTRY_TABLE QueryTable[2];
+    ULONG Disable = 0;
+
+    RtlZeroMemory(QueryTable, sizeof(QueryTable));
+    QueryTable[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
+    QueryTable[0].Name = L"DisableUserQpc";
+    QueryTable[0].EntryContext = &Disable;
+    RtlQueryRegistryValues(RTL_REGISTRY_CONTROL,
+                           L"Session Manager\\Kernel",
+                           QueryTable,
+                           NULL,
+                           NULL);
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+    if (Disable)
+    {
+        SharedUserData->QpcBypassEnabled = 0;
+        DPRINT1("QPC: user mode bypass disabled by DisableUserQpc\n");
+    }
+#endif
+}
+
 CODE_SEG("INIT")
 VOID
 NTAPI
@@ -1786,6 +1822,9 @@ Phase1InitializationDiscard(IN PVOID Context)
 
     /* Initialize the Registry */
     if (!CmInitSystem1()) KeBugCheck(CONFIG_INITIALIZATION_FAILED);
+
+    /* The user-mode performance counter policy, from the registry */
+    ExpApplyUserQpcPolicy();
 
     /* Initialize Prefetcher */
     CcPfInitializePrefetcher();

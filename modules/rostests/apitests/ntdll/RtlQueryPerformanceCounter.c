@@ -12,9 +12,38 @@ typedef BOOL (NTAPI *FN_RtlQueryPerformance)(PLARGE_INTEGER);
 typedef BOOL (NTAPI *FN_RtlQueryUnbiasedInterruptTime)(PULONGLONG);
 
 /* The QPC fields of ReactOS's shared user data (Windows has them elsewhere) */
-#define ROS_SHARED_DATA          ((ULONG_PTR)0x7FFE0000)
-#define ROS_QPC_FREQUENCY_OFFSET 0x6c0
-#define ROS_QPC_BYPASS_OFFSET    0x6d8
+#define ROS_QPC_FREQUENCY (*(volatile ULONGLONG *)((ULONG_PTR)USER_SHARED_DATA + FIELD_OFFSET(KUSER_SHARED_DATA, QpcFrequency)))
+#define ROS_QPC_BYPASS    (*(volatile UCHAR *)((ULONG_PTR)USER_SHARED_DATA + FIELD_OFFSET(KUSER_SHARED_DATA, QpcBypassEnabled)))
+
+/* Which path QueryPerformanceCounter takes, for the messages (ReactOS only) */
+static const char *PathName(void)
+{
+    static char Name[64];
+    UCHAR Flags;
+
+    if (!is_reactos())
+        return "Windows";
+    Flags = ROS_QPC_BYPASS;
+    if (Flags & 1)
+        sprintf(Name, "user-mode TSC, flags 0x%02x", Flags);
+    else
+        sprintf(Name, "system call (bypass off, flags 0x%02x)", Flags);
+    return Name;
+}
+
+/* The Session Manager\Kernel DisableUserQpc value that makes the kernel withdraw the bypass */
+static BOOL QueryDisableUserQpc(void)
+{
+    RTL_QUERY_REGISTRY_TABLE Table[2];
+    ULONG Disable = 0;
+
+    RtlZeroMemory(Table, sizeof(Table));
+    Table[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
+    Table[0].Name = L"DisableUserQpc";
+    Table[0].EntryContext = &Disable;
+    RtlQueryRegistryValues(RTL_REGISTRY_CONTROL, L"Session Manager\\Kernel", Table, NULL, NULL);
+    return Disable != 0;
+}
 
 #define MONOTONIC_THREADS 8
 #define MONOTONIC_SAMPLES 2000000
@@ -88,10 +117,10 @@ static void TestMonotonic(void)
     for (i = 0; i < Count; i++)
         CloseHandle(Threads[i]);
 
-    ok(MonotonicBackwards == 0, "The counter went back %ld times over %lu processors (by up to %I64d)\n",
-       MonotonicBackwards, Count, MonotonicWorst);
-    trace("%lu processors, %lu samples each, counter went back %ld times\n",
-          Count, (ULONG)MONOTONIC_SAMPLES, MonotonicBackwards);
+    ok(MonotonicBackwards == 0, "[%s] The counter went back %ld times over %lu processors (by up to %I64d)\n",
+       PathName(), MonotonicBackwards, Count, MonotonicWorst);
+    trace("[%s] %lu processors, %lu samples each, counter went back %ld times\n",
+          PathName(), Count, (ULONG)MONOTONIC_SAMPLES, MonotonicBackwards);
 }
 
 /* The counter from user mode and from the system call is one counter */
@@ -104,8 +133,8 @@ static void TestConsistency(void)
     QueryPerformanceFrequency(&Frequency);
     Status = NtQueryPerformanceCounter(&Kernel, &KernelFrequency);
     ok_ntstatus(Status, STATUS_SUCCESS);
-    ok(KernelFrequency.QuadPart == Frequency.QuadPart, "System call frequency %I64d, user mode %I64d\n",
-       KernelFrequency.QuadPart, Frequency.QuadPart);
+    ok(KernelFrequency.QuadPart == Frequency.QuadPart, "[%s] System call frequency %I64d, user mode %I64d\n",
+       PathName(), KernelFrequency.QuadPart, Frequency.QuadPart);
 
     for (Sample = 0; Sample < CONSISTENCY_SAMPLES; Sample++)
     {
@@ -119,7 +148,10 @@ static void TestConsistency(void)
             OutOfOrder++;
         }
     }
-    ok(OutOfOrder == 0, "System call counter outside the user mode reads around it %lu times\n", OutOfOrder);
+    /* Strict: user mode and the HAL read the TSC with the same fence (RDTSCP, or
+       MFENCE/LFENCE), so the system call read between two others cannot be outside them */
+    ok(OutOfOrder == 0, "[%s] System call counter outside the user mode reads around it %lu times\n",
+       PathName(), OutOfOrder);
 }
 
 static void TestFrequency(void)
@@ -139,9 +171,12 @@ static void TestFrequency(void)
 
     /* The TSC HAL publishes its frequency, 10 MHz when the TSC is faster; the
        user-mode counter is only enabled with it */
-    Shared = *(volatile ULONGLONG *)(ROS_SHARED_DATA + ROS_QPC_FREQUENCY_OFFSET);
-    Bypass = *(volatile UCHAR *)(ROS_SHARED_DATA + ROS_QPC_BYPASS_OFFSET);
+    Shared = ROS_QPC_FREQUENCY;
+    Bypass = ROS_QPC_BYPASS;
+    trace("QueryPerformanceCounter path: %s; DisableUserQpc %d\n", PathName(), QueryDisableUserQpc());
     trace("Frequency %I64d, shared %I64u, bypass flags 0x%02x\n", Frequency.QuadPart, Shared, Bypass);
+    if (QueryDisableUserQpc())
+        ok((Bypass & 1) == 0, "DisableUserQpc is set but the bypass is on (flags 0x%02x)\n", Bypass);
     if (Shared)
         ok((ULONGLONG)Frequency.QuadPart == Shared, "Frequency %I64d, shared %I64u\n", Frequency.QuadPart, Shared);
     if (Bypass & 1)

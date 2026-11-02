@@ -74,9 +74,31 @@ C_ASSERT(FIELD_OFFSET(KUSER_SHARED_DATA, QpcBypassEnabled) == 0x6d8);
 C_ASSERT(FIELD_OFFSET(KUSER_SHARED_DATA, QpcShift) == 0x6d9);
 
 /*
+ * The TSC read in order, as the QPC_BYPASS flags say: RDTSCP, else a fence
+ * and RDTSC. The HAL (KeQueryPerformanceCounter) and user mode read it the
+ * same way, so a value read by the one after another read by the other
+ * (a system call between two user-mode reads) is not smaller.
+ */
+FORCEINLINE
+ULONG64
+RosQpcReadTsc(
+    _In_ UCHAR Flags)
+{
+    if (Flags & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP)
+        return RosQpcReadTscp();
+
+    if (Flags & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_MFENCE)
+        _mm_mfence();
+    if (Flags & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_LFENCE)
+        _mm_lfence();
+    return __rdtsc();
+}
+
+/*
  * The counter without a system call, when the kernel enabled it: the HAL
  * publishes the fields once, before it sets QpcBypassEnabled, and they do
- * not change afterwards. Returns FALSE when the system call is needed.
+ * not change afterwards. Returns FALSE when the system call is needed (the
+ * counter is the same TSC either way: this only decides how fast it is read).
  */
 FORCEINLINE
 BOOLEAN
@@ -91,18 +113,7 @@ RosQpcQueryBypass(
         return FALSE;
     _ReadWriteBarrier();
 
-    if (Flags & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP)
-    {
-        Tsc = RosQpcReadTscp();
-    }
-    else
-    {
-        if (Flags & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_MFENCE)
-            _mm_mfence();
-        if (Flags & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_LFENCE)
-            _mm_lfence();
-        Tsc = __rdtsc();
-    }
+    Tsc = RosQpcReadTsc(Flags);
 
     PerformanceCounter->QuadPart = RosQpcFromTsc(Tsc,
                                                  SharedUserData->QpcMultiplier,
