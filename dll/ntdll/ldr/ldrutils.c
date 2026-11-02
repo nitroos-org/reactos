@@ -2728,6 +2728,28 @@ LdrpLoadDll(IN BOOLEAN Redirected,
                     /* Cancel the load */
                     LdrpClearLoadInProgress();
 
+                    if (LdrpImportWalkDepth)
+                    {
+                        /*
+                         * This load is nested in an import walk (it is the
+                         * target of a forwarder). LdrUnloadDll would also
+                         * unmap the modules the outer load has mapped and
+                         * not referenced yet, while they are in use. Give
+                         * back the reference only: this module stays in the
+                         * lists with a load count of 0 and the outer load,
+                         * which fails too, unmaps it with its own modules.
+                         */
+                        if (ShowSnaps)
+                        {
+                            DbgPrint("LDR: Releasing %wZ (nested load) due to "
+                                     "error %x walking import descriptors\n",
+                                     DllName,
+                                     Status);
+                        }
+                        LdrpDereferenceNestedLoad(LdrEntry);
+                        _SEH2_LEAVE;
+                    }
+
                     /* Unload the DLL */
                     if (ShowSnaps)
                     {
@@ -2825,6 +2847,39 @@ LdrpLoadDll(IN BOOLEAN Redirected,
 
     /* Return status */
     return Status;
+}
+
+/*
+ * Give back a reference that LdrpLoadDll took while an import walk was in
+ * progress (the target of a forwarder), without the unload sweep of
+ * LdrUnloadDll. A module whose load count drops to 0 stays mapped and listed;
+ * it is not initialized, and the cleanup of the failed outer load (or the
+ * next LdrUnloadDll) unmaps it.
+ */
+VOID
+NTAPI
+LdrpDereferenceNestedLoad(IN PLDR_DATA_TABLE_ENTRY LdrEntry)
+{
+    PLIST_ENTRY ListHead, Entry;
+
+    /* A pinned module keeps its count */
+    if (LdrEntry->LoadCount == 0xFFFF) return;
+
+    ASSERT(LdrEntry->LoadCount != 0);
+    if (LdrEntry->LoadCount) LdrEntry->LoadCount--;
+
+    /* LdrpLoadDll referenced the imports of a DLL too */
+    if (!(LdrEntry->Flags & LDRP_IMAGE_DLL)) return;
+    LdrpUpdateLoadCount2(LdrEntry, LDRP_UPDATE_DEREFCOUNT);
+
+    /* Clear the marks of that walk, as LdrUnloadDll does */
+    ListHead = &NtCurrentPeb()->Ldr->InInitializationOrderModuleList;
+    for (Entry = ListHead->Flink; Entry != ListHead; Entry = Entry->Flink)
+    {
+        CONTAINING_RECORD(Entry,
+                          LDR_DATA_TABLE_ENTRY,
+                          InInitializationOrderLinks)->Flags &= ~LDRP_UNLOAD_IN_PROGRESS;
+    }
 }
 
 ULONG

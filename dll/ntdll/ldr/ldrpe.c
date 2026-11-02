@@ -18,6 +18,14 @@
 PLDR_MANIFEST_PROBER_ROUTINE LdrpManifestProberRoutine;
 ULONG LdrpNormalSnap;
 
+/*
+ * Number of import walks in progress (they nest: a walk maps the imports of
+ * an import). While it is not 0, the loader has mapped modules whose load
+ * count is still 0 and that are in use, so nothing may run the unload sweep
+ * of LdrUnloadDll, which unmaps every module with a load count of 0.
+ */
+ULONG LdrpImportWalkDepth;
+
 /* FUNCTIONS *****************************************************************/
 
 
@@ -750,6 +758,9 @@ LdrpWalkImportDescriptor(IN LPWSTR DllPath OPTIONAL,
     /* Check if we got at least one */
     if ((BoundEntry) || (ImportEntry))
     {
+        /* Load and snap the imports; this is where the walks nest */
+        LdrpImportWalkDepth++;
+
         /* Do we have a Bound IAT */
         if (BoundEntry)
         {
@@ -765,6 +776,9 @@ LdrpWalkImportDescriptor(IN LPWSTR DllPath OPTIONAL,
                                                           LdrEntry,
                                                           ImportEntry);
         }
+
+        ASSERT(LdrpImportWalkDepth != 0);
+        LdrpImportWalkDepth--;
 
         /* Check the status of the handlers */
         if (NT_SUCCESS(Status))
@@ -949,7 +963,7 @@ LdrpSnapThunk(IN PVOID ExportBase,
     PIMAGE_IMPORT_BY_NAME AddressOfData;
     PULONG NameTable;
     PUSHORT OrdinalTable;
-    LPSTR ImportName = NULL, DotPosition;
+    LPSTR ImportName = NULL, DotPosition, Forwarder;
     USHORT Hint;
     NTSTATUS Status;
     ULONG_PTR HardErrorParameters[3];
@@ -960,9 +974,12 @@ LdrpSnapThunk(IN PVOID ExportBase,
     PULONG AddressOfFunctions;
     UNICODE_STRING TempUString;
     ANSI_STRING ForwarderName;
-    PANSI_STRING ForwardName;
+    PANSI_STRING ForwardName = NULL;
     PVOID ForwarderHandle = NULL;
-    ULONG ForwardOrdinal;
+    ULONG ForwardOrdinal = 0;
+    NTSTATUS ForwarderStatus = STATUS_SUCCESS;
+    ANSI_STRING ForwarderDll = { 0, 0, NULL };
+    ULONG ForwarderHardErrors = LdrpFatalHardErrorCount;
 
     /* Check if the snap is by ordinal */
     if ((IsOrdinal = IMAGE_SNAP_BY_ORDINAL(OriginalThunk->u1.Ordinal)))
@@ -1012,11 +1029,40 @@ LdrpSnapThunk(IN PVOID ExportBase,
     if ((ULONG)Ordinal >= ExportDirectory->NumberOfFunctions)
     {
 FailurePath:
-        /* Check if we loeaded a forwarder DLL */
+        /*
+         * The status. When a forwarder could not be resolved, it is the
+         * status of that step, as on Windows: STATUS_DLL_NOT_FOUND when the
+         * target DLL (or one of its imports) is missing, the not-found status
+         * of the target's export (by name or by ordinal) otherwise
+         */
+        if (!NT_SUCCESS(ForwarderStatus))
+            Status = ForwarderStatus;
+        else
+            Status = IsOrdinal ? STATUS_ORDINAL_NOT_FOUND : STATUS_ENTRYPOINT_NOT_FOUND;
+
+        /* Check if we loaded a forwarder DLL */
         if (ForwarderHandle != NULL)
         {
-            /* Unload the forwarder DLL */
-            LdrUnloadDll(ForwarderHandle);
+            PLDR_DATA_TABLE_ENTRY ForwarderEntry;
+
+            if (!LdrpImportWalkDepth)
+            {
+                /* Not inside an import walk (GetProcAddress): unload it */
+                LdrUnloadDll(ForwarderHandle);
+            }
+            else if (LdrpCheckForLoadedDllHandle(ForwarderHandle, &ForwarderEntry))
+            {
+                /*
+                 * We are snapping the imports of a module that is being
+                 * loaded. LdrUnloadDll would unmap every module whose load
+                 * count is still 0, which includes the module we are reading
+                 * the exports of (and the forwarder string) and the other
+                 * imports of the load in progress. Only give back the
+                 * reference; the failed load cleans up what it mapped.
+                 */
+                LdrpDereferenceNestedLoad(ForwarderEntry);
+            }
+            ForwarderHandle = NULL;
         }
 
         /* Is this a static snap? */
@@ -1024,6 +1070,8 @@ FailurePath:
         {
             UNICODE_STRING SnapTarget;
             PLDR_DATA_TABLE_ENTRY LdrEntry;
+            ULONG ReportOrdinal;
+            LPSTR ReportName;
 
             /* What was the module we were searching in */
             RtlInitAnsiString(&TempString, DllName ? DllName : "Unknown");
@@ -1034,77 +1082,112 @@ FailurePath:
             else
                 RtlInitUnicodeString(&SnapTarget, L"Unknown");
 
+            /* What was not found: the export of the forwarder target when
+             * the forwarder failed there, else the import itself */
+            ReportOrdinal = (ForwarderStatus == STATUS_ORDINAL_NOT_FOUND) ? ForwardOrdinal : OriginalOrdinal;
+            ReportName = (ForwarderStatus == STATUS_ENTRYPOINT_NOT_FOUND && ForwardName) ?
+                         ForwardName->Buffer : ImportName;
+            if (!ReportName) ReportName = "Unknown";
+
             /* Inform the debug log */
             if (IsOrdinal)
-                DPRINT1("Failed to snap ordinal %Z!0x%x for %wZ\n", &TempString, OriginalOrdinal, &SnapTarget);
+                DPRINT1("Failed to snap ordinal %Z!0x%x for %wZ (status 0x%lx)\n", &TempString, OriginalOrdinal, &SnapTarget, Status);
             else
-                DPRINT1("Failed to snap %Z!%s for %wZ\n", &TempString, ImportName, &SnapTarget);
+                DPRINT1("Failed to snap %Z!%s for %wZ (status 0x%lx)\n", &TempString, ImportName, &SnapTarget, Status);
 
-            /* These are critical errors. Setup a string for the DLL name */
-            RtlAnsiStringToUnicodeString(&HardErrorDllName, &TempString, TRUE);
-
-            /* Set it as the parameter */
-            HardErrorParameters[1] = (ULONG_PTR)&HardErrorDllName;
-            Mask = 2;
-
-            /* Check if we have an ordinal */
-            if (IsOrdinal)
+            if (LdrpFatalHardErrorCount != ForwarderHardErrors)
             {
-                /* Then set the ordinal as the 1st parameter */
-                HardErrorParameters[0] = OriginalOrdinal;
+                /* The load of the forwarder target has reported the error */
             }
-            else
+            else if ((Status == STATUS_ENTRYPOINT_NOT_FOUND) ||
+                     ((Status == STATUS_ORDINAL_NOT_FOUND) &&
+                      ((ForwarderStatus != STATUS_ORDINAL_NOT_FOUND) || LdrpInLdrInit)))
             {
-                /* We don't, use the entrypoint. Set up a string for it */
-                RtlInitAnsiString(&TempString, ImportName);
-                RtlAnsiStringToUnicodeString(&HardErrorEntryPointName,
-                                             &TempString,
-                                             TRUE);
+                /*
+                 * A missing export is reported to the system, also for a
+                 * LoadLibrary. Windows does not report a missing ordinal of
+                 * a forwarder target then (only while the process starts)
+                 */
+                /* These are critical errors. Setup a string for the DLL name */
+                RtlAnsiStringToUnicodeString(&HardErrorDllName, &TempString, TRUE);
 
                 /* Set it as the parameter */
-                HardErrorParameters[0] = (ULONG_PTR)&HardErrorEntryPointName;
-                Mask = 3;
+                HardErrorParameters[1] = (ULONG_PTR)&HardErrorDllName;
+                Mask = 2;
+
+                /* Check if we have an ordinal */
+                if (Status == STATUS_ORDINAL_NOT_FOUND)
+                {
+                    /* Then set the ordinal as the 1st parameter */
+                    HardErrorParameters[0] = ReportOrdinal;
+                }
+                else
+                {
+                    /* We don't, use the entrypoint. Set up a string for it */
+                    RtlInitAnsiString(&TempString, ReportName);
+                    RtlAnsiStringToUnicodeString(&HardErrorEntryPointName,
+                                                 &TempString,
+                                                 TRUE);
+
+                    /* Set it as the parameter */
+                    HardErrorParameters[0] = (ULONG_PTR)&HardErrorEntryPointName;
+                    Mask = 3;
+                }
+
+                /* Raise the error */
+                NtRaiseHardError(Status,
+                                 2,
+                                 Mask,
+                                 HardErrorParameters,
+                                 OptionOk,
+                                 &Response);
+
+                /* Increase the error count */
+                if (LdrpInLdrInit) LdrpFatalHardErrorCount++;
+
+                /* Free our strings */
+                RtlFreeUnicodeString(&HardErrorDllName);
+                if (Mask == 3) RtlFreeUnicodeString(&HardErrorEntryPointName);
             }
-
-            /* Raise the error */
-            NtRaiseHardError(IsOrdinal ? STATUS_ORDINAL_NOT_FOUND :
-                                         STATUS_ENTRYPOINT_NOT_FOUND,
-                             2,
-                             Mask,
-                             HardErrorParameters,
-                             OptionOk,
-                             &Response);
-
-            /* Increase the error count */
-            if (LdrpInLdrInit) LdrpFatalHardErrorCount++;
-
-            /* Free our string */
-            RtlFreeUnicodeString(&HardErrorDllName);
-            if (!IsOrdinal)
+            else if ((Status == STATUS_DLL_NOT_FOUND) && LdrpInLdrInit)
             {
-                /* Free our second string. Return entrypoint error */
-                RtlFreeUnicodeString(&HardErrorEntryPointName);
-                RtlRaiseStatus(STATUS_ENTRYPOINT_NOT_FOUND);
+                /*
+                 * The target DLL of a forwarder is missing while the process
+                 * starts, and the nested load did not report it (a missing
+                 * import of the target is reported where it is mapped).
+                 * Report it like a missing static import. A load later
+                 * (LoadLibrary) reports nothing, as for a missing import DLL
+                 */
+                if (NT_SUCCESS(RtlAnsiStringToUnicodeString(&HardErrorDllName, &ForwarderDll, TRUE)))
+                {
+                    RtlInitUnicodeString(&TempUString, LdrpDefaultPath.Buffer);
+                    HardErrorParameters[0] = (ULONG_PTR)&HardErrorDllName;
+                    HardErrorParameters[1] = (ULONG_PTR)&TempUString;
+                    NtRaiseHardError(STATUS_DLL_NOT_FOUND,
+                                     2,
+                                     3,
+                                     HardErrorParameters,
+                                     OptionOk,
+                                     &Response);
+                    LdrpFatalHardErrorCount++;
+                    RtlFreeUnicodeString(&HardErrorDllName);
+                }
             }
 
-            /* Return ordinal error */
-            RtlRaiseStatus(STATUS_ORDINAL_NOT_FOUND);
+            /* Fail the snap */
+            RtlRaiseStatus(Status);
         }
         else
         {
             /* Inform the debug log */
             if (IsOrdinal)
-                DPRINT("Non-fatal: Failed to snap ordinal 0x%x\n", OriginalOrdinal);
+                DPRINT("Non-fatal: Failed to snap ordinal 0x%x (status 0x%lx)\n", OriginalOrdinal, Status);
             else
-                DPRINT("Non-fatal: Failed to snap %s\n", ImportName);
+                DPRINT("Non-fatal: Failed to snap %s (status 0x%lx)\n", ImportName, Status);
         }
 
         /* Set this as a bad DLL */
         Thunk->u1.Function = (ULONG_PTR)0xffbadd11;
-
-        /* Return the right error code */
-        Status = IsOrdinal ? STATUS_ORDINAL_NOT_FOUND :
-                             STATUS_ENTRYPOINT_NOT_FOUND;
     }
     else
     {
@@ -1120,17 +1203,21 @@ FailurePath:
         if ((Thunk->u1.Function > (ULONG_PTR)ExportDirectory) &&
             (Thunk->u1.Function < ((ULONG_PTR)ExportDirectory + ExportSize)))
         {
-            /* Get the Import and Forwarder Names */
-            ImportName = (LPSTR)Thunk->u1.Function;
+            /*
+             * Get the forwarder string ("Dll.Name" or "Dll.#Ordinal"). Keep
+             * ImportName, the name that was imported, for the failure path
+             */
+            Forwarder = (LPSTR)Thunk->u1.Function;
 
-            DotPosition = strchr(ImportName, '.');
+            DotPosition = strchr(Forwarder, '.');
             ASSERT(DotPosition != NULL);
             if (!DotPosition)
                 goto FailurePath;
 
-            ForwarderName.Buffer = ImportName;
-            ForwarderName.Length = (USHORT)(DotPosition - ImportName);
+            ForwarderName.Buffer = Forwarder;
+            ForwarderName.Length = (USHORT)(DotPosition - Forwarder);
             ForwarderName.MaximumLength = ForwarderName.Length;
+            ForwarderDll = ForwarderName;
             Status = RtlAnsiStringToUnicodeString(&TempUString,
                                                   &ForwarderName,
                                                   TRUE);
@@ -1167,6 +1254,13 @@ FailurePath:
                                      FALSE);
 
                 RtlFreeUnicodeString(&TempUString);
+
+                /*
+                 * A target that cannot be loaded fails an import with its
+                 * status (STATUS_DLL_NOT_FOUND, ...). GetProcAddress reports
+                 * a missing procedure instead, as on Windows
+                 */
+                if (!NT_SUCCESS(Status) && Static) ForwarderStatus = Status;
             }
 
             /* If the load or conversion failed, use the failure path */
@@ -1174,7 +1268,7 @@ FailurePath:
 
             /* Now set up a name for the actual forwarder dll */
             RtlInitAnsiString(&ForwarderName,
-                              ImportName + ForwarderName.Length + sizeof(CHAR));
+                              Forwarder + ForwarderName.Length + sizeof(CHAR));
 
             /* Check if it's an ordinal forward */
             if ((ForwarderName.Length > 1) && (*ForwarderName.Buffer == '#'))
@@ -1203,8 +1297,12 @@ FailurePath:
                                              ForwardOrdinal,
                                              (PVOID*)&Thunk->u1.Function,
                                              FALSE);
-            /* If this fails, then error out */
-            if (!NT_SUCCESS(Status)) goto FailurePath;
+            /* If this fails, then error out with the status of the target */
+            if (!NT_SUCCESS(Status))
+            {
+                ForwarderStatus = Status;
+                goto FailurePath;
+            }
         }
         else
         {
