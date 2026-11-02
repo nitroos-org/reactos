@@ -289,6 +289,7 @@ dll/win32/vssapi              # Synced to WineStaging-4.18
 dll/win32/wevtapi             # Synced to Wine-10.0
 dll/win32/wbemdisp            # Synced to WineStaging-4.18
 dll/win32/wbemprox            # Synced to WineStaging-4.18
+dll/win32/webservices         # Synced to Wine-10.0 (with its winetest and sdk/include/psdk/webservices.h)
 dll/win32/wer                 # Forked at Wine-11.19 (the report functions check their arguments the way Windows does, a lock covers the submissions); later Wine versions are merged by hand
 dll/win32/wevtapi             # Forked at Wine-11.19 (the classic logs are channels, the rest fails cleanly)
 dll/win32/windows.data.pdf     # ReactOS original (no Wine source): export surface of the Windows 10 DLL, every renderer entry point fails with E_NOTIMPL

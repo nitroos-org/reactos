@@ -39,6 +39,9 @@ SysWOW64/ncrypt.dll
 # prntvpt ticket conversion loads msxml3 (listed below) and imports winspool.drv.
 @0x600 SysWOW64/prntvpt.dll
 @0x600 SysWOW64/windows.data.pdf.dll
+# Microsoft 365 Apps: the Office Deployment Tool setup.exe (32-bit) and the Click-to-Run client delay-load
+# webservices.dll (WWS XML reader) and stop with 0xC06D007E when it is missing.
+SysWOW64/webservices.dll
 # DirectWrite and its user32 forwarder (Firefox renders text with it)
 SysWOW64/dwrite.dll
 SysWOW64/user32_vista.dll
