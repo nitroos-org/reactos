@@ -7,6 +7,7 @@
 
 #include "featmgr.h"
 #include <stdio.h>
+#include <tlhelp32.h>
 
 /* Write a wide string to stdout as UTF-8 so file-based capture is readable. */
 static void Out(LPCWSTR fmt, ...)
@@ -250,6 +251,45 @@ static DWORD ParseDisableFlags(int argc, WCHAR **argv, int from)
     return fl;
 }
 
+/* After an install that changed PATH: say so, once, as the last line(s) of the run. The shell that started
+ * featmgr keeps its old PATH (as on Windows, where a child cannot change its parent's environment). */
+static BOOL ParentIsPowerShell(void)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32W pe;
+    DWORD me = GetCurrentProcessId(), parent = 0;
+    BOOL ps = FALSE;
+
+    if (snap == INVALID_HANDLE_VALUE) return FALSE;
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe))
+    {
+        do { if (pe.th32ProcessID == me) { parent = pe.th32ParentProcessID; break; } }
+        while (Process32NextW(snap, &pe));
+    }
+    if (parent && Process32FirstW(snap, &pe))
+    {
+        do
+        {
+            if (pe.th32ProcessID == parent)
+            {
+                ps = !_wcsicmp(pe.szExeFile, L"pwsh.exe") || !_wcsicmp(pe.szExeFile, L"powershell.exe");
+                break;
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return ps;
+}
+
+static void PrintPathHint(void)
+{
+    WCHAR name[128], text[1024];
+    if (!FmTakePathChange(name, ARRAYSIZE(name))) return;
+    FmPathHint(name, ParentIsPowerShell(), text, ARRAYSIZE(text));
+    Out(L"\n%s", text);
+}
+
 int wmain(int argc, WCHAR **argv)
 {
     LPCWSTR cmd;
@@ -301,6 +341,7 @@ int wmain(int argc, WCHAR **argv)
         || !_wcsicmp(cmd, L"enable") || !_wcsicmp(cmd, L"install"))
     {
         hr = FmEnable(argv[2], stdout);
+        if (SUCCEEDED(hr)) PrintPathHint();
         return SUCCEEDED(hr) ? 0 : 3;
     }
 
