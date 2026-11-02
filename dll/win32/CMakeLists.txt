@@ -313,6 +313,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(wevtapi)
     add_subdirectory(windows.data.pdf)
     add_subdirectory(windows.system.profile.platformdiagnosticsandusagedatasettings)
+    add_subdirectory(windows.ui)
 endif()
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
