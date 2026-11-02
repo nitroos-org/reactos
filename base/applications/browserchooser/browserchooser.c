@@ -34,6 +34,7 @@ typedef struct _BROWSER_ENTRY
     WCHAR szKey[128];   /* StartMenuInternet subkey name, e.g. "IEXPLORE.EXE" */
     WCHAR szName[256];  /* display name, e.g. "Internet Explorer" */
     WCHAR szExe[MAX_PATH]; /* fully expanded path to the browser executable */
+    BOOL bUser;         /* registered under HKCU (a per-user install such as Chrome's), not HKLM */
 } BROWSER_ENTRY, *PBROWSER_ENTRY;
 
 static HINSTANCE g_hInstance;
@@ -271,17 +272,16 @@ ReadClientCommand(HKEY hClients, LPCWSTR pszKeyName, LPWSTR pszExe, size_t cchEx
     return IsSafeExePath(pszExe);
 }
 
+/* The StartMenuInternet clients of one hive. A client of the user does not hide a machine one of the same name. */
 static void
-EnumBrowsers(void)
+EnumBrowsersIn(HKEY hRoot, BOOL bUser)
 {
     HKEY hClients;
     DWORD dwIndex = 0;
     WCHAR szSubKey[128];
     DWORD cchSubKey;
 
-    g_BrowserCount = 0;
-
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szStartMenuInternet, 0, KEY_READ, &hClients) != ERROR_SUCCESS)
+    if (RegOpenKeyExW(hRoot, szStartMenuInternet, 0, KEY_READ, &hClients) != ERROR_SUCCESS)
         return;
 
     for (;;)
@@ -289,6 +289,8 @@ EnumBrowsers(void)
         HKEY hBrowser;
         WCHAR szName[256];
         PBROWSER_ENTRY pEntry;
+        int i;
+        BOOL bDup = FALSE;
 
         cchSubKey = ARRAYSIZE(szSubKey);
         if (RegEnumKeyExW(hClients, dwIndex, szSubKey, &cchSubKey, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
@@ -298,6 +300,14 @@ EnumBrowsers(void)
         if (g_BrowserCount >= MAX_BROWSERS)
             break;
 
+        for (i = 0; i < g_BrowserCount; i++)
+        {
+            if (!StrCmpIW(g_Browsers[i].szKey, szSubKey))
+                bDup = TRUE;
+        }
+        if (bDup)
+            continue;
+
         pEntry = &g_Browsers[g_BrowserCount];
         ZeroMemory(pEntry, sizeof(*pEntry));
 
@@ -305,6 +315,7 @@ EnumBrowsers(void)
             continue;
 
         StringCchCopyW(pEntry->szKey, ARRAYSIZE(pEntry->szKey), szSubKey);
+        pEntry->bUser = bUser;
 
         /* Friendly name: default value of the client key, fall back to subkey name. */
         szName[0] = L'\0';
@@ -321,6 +332,14 @@ EnumBrowsers(void)
     }
 
     RegCloseKey(hClients);
+}
+
+static void
+EnumBrowsers(void)
+{
+    g_BrowserCount = 0;
+    EnumBrowsersIn(HKEY_LOCAL_MACHINE, FALSE);
+    EnumBrowsersIn(HKEY_CURRENT_USER, TRUE);
 }
 
 static BOOL
@@ -432,9 +451,10 @@ WriteProtocolHandler(LPCWSTR pszProto, LPCWSTR pszExe, LPCWSTR pszProgId)
     SetStringValue(HKEY_LOCAL_MACHINE, szSub, NULL, szCmd);
 }
 
-/* The name a browser is listed under in RegisteredApplications: the value that points at its Capabilities key. */
+/* The name a browser is listed under in RegisteredApplications (of the user for a per-user client, else of the
+ * machine): the value that points at its Capabilities key. */
 static BOOL
-FindRegisteredAppName(LPCWSTR pszKey, LPWSTR pszOut, size_t cchOut)
+FindRegisteredAppName(LPCWSTR pszKey, BOOL bUser, LPWSTR pszOut, size_t cchOut)
 {
     WCHAR szWant[320];
     HKEY hKey;
@@ -443,7 +463,7 @@ FindRegisteredAppName(LPCWSTR pszKey, LPWSTR pszOut, size_t cchOut)
 
     StringCchPrintfW(szWant, ARRAYSIZE(szWant), L"%s\\%s\\Capabilities", szStartMenuInternet, pszKey);
     /* the values are relative to HKLM and may or may not carry the "SOFTWARE\\" casing of ours */
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szRegisteredApps, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+    if (RegOpenKeyExW(bUser ? HKEY_CURRENT_USER : HKEY_LOCAL_MACHINE, szRegisteredApps, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
         return FALSE;
 
     for (i = 0; !bFound; i++)
@@ -544,6 +564,31 @@ SetUserChoice(LPCWSTR pszRegisteredApp)
 }
 
 /*
+ * A browser installed for the user alone (its client key is under HKCU, e.g. Chrome from scoop or its own
+ * installer) is made the user's default the way Windows' Settings app does it: only the UserChoice of the
+ * web associations, through the browser's own Capabilities and ProgIds. Nothing of the machine is touched.
+ */
+static BOOL
+SetUserDefaultBrowser(LPCWSTR pszKey, LPCWSTR pszName)
+{
+    WCHAR szRegApp[256];
+    BOOL bOk;
+
+    LogLine(L"SetUserDefaultBrowser key=%s name=%s", pszKey, pszName);
+    if (!FindRegisteredAppName(pszKey, TRUE, szRegApp, ARRAYSIZE(szRegApp)))
+    {
+        LogLine(L"SetUserDefaultBrowser: %s is not in the RegisteredApplications of the user", pszKey);
+        return FALSE;
+    }
+
+    g_WriteError = ERROR_SUCCESS;
+    bOk = SetUserChoice(szRegApp);
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_FLUSH, NULL, NULL);
+    LogLine(bOk ? L"SetUserDefaultBrowser done for %s" : L"SetUserDefaultBrowser: failed for %s", pszKey);
+    return bOk;
+}
+
+/*
  * Make <pszKey> the system default browser:
  *  - StartMenuInternet default value
  *  - http/https/ftp protocol handlers (HKLM\Software\Classes)
@@ -633,7 +678,7 @@ SetDefaultBrowser(LPCWSTR pszKey, LPCWSTR pszName, LPCWSTR pszExe)
     }
 
     /* 6. RegisteredApplications entry (the browser's own, else ours) */
-    if (!FindRegisteredAppName(pszKey, szRegApp, ARRAYSIZE(szRegApp)))
+    if (!FindRegisteredAppName(pszKey, FALSE, szRegApp, ARRAYSIZE(szRegApp)))
     {
         StringCchCopyW(szRegApp, ARRAYSIZE(szRegApp), pszName);
         StringCchPrintfW(szData, ARRAYSIZE(szData), L"%s\\%s\\Capabilities",
@@ -1027,11 +1072,55 @@ OnOk(HWND hDlg)
 
     if (data >= 0 && data < g_BrowserCount)
     {
-        if (SetDefaultBrowser(g_Browsers[data].szKey,
-                              g_Browsers[data].szName,
-                              g_Browsers[data].szExe))
+        if (g_Browsers[data].bUser ? SetUserDefaultBrowser(g_Browsers[data].szKey, g_Browsers[data].szName) :
+            SetDefaultBrowser(g_Browsers[data].szKey, g_Browsers[data].szName, g_Browsers[data].szExe))
             EndDialog(hDlg, IDOK);
     }
+}
+
+/* The chooser window carries this property, so a second start can find the first one. */
+static const WCHAR szChooserProp[] = L"NitroBrowserChooser";
+
+static BOOL CALLBACK
+FindChooserProc(HWND hWnd, LPARAM lParam)
+{
+    if (GetPropW(hWnd, szChooserProp))
+    {
+        *(HWND *)lParam = hWnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/*
+ * One chooser at a time, as with the Settings app: browsers may ask for the "Default apps" page more
+ * than once for one click of "Make default" (Chrome does). The later start brings the first window
+ * forward and ends.
+ */
+static BOOL
+ActivateRunningChooser(HANDLE *phMutex)
+{
+    HWND hWnd = NULL;
+    int i;
+
+    *phMutex = CreateMutexW(NULL, FALSE, L"Local\\NitroBrowserChooser");
+    if (!*phMutex || GetLastError() != ERROR_ALREADY_EXISTS)
+        return FALSE;
+
+    /* the first one may not have created its window yet */
+    for (i = 0; i < 30 && !hWnd; i++)
+    {
+        EnumWindows(FindChooserProc, (LPARAM)&hWnd);
+        if (!hWnd)
+            Sleep(100);
+    }
+    if (hWnd)
+    {
+        LogLine(L"A browser chooser is already open, bringing it forward");
+        ShowWindow(hWnd, IsIconic(hWnd) ? SW_RESTORE : SW_SHOW);
+        SetForegroundWindow(hWnd);
+    }
+    return hWnd != NULL;
 }
 
 static INT_PTR CALLBACK
@@ -1041,6 +1130,7 @@ DlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         case WM_INITDIALOG:
             g_hDlg = hDlg;
+            SetPropW(hDlg, szChooserProp, (HANDLE)1);
             PopulateList(hDlg);
             return TRUE;
 
@@ -1096,7 +1186,7 @@ DlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
  * provisioning scripts):
  *   bchooser.exe /set <key or name>            set that StartMenuInternet client as default
  *   bchooser.exe /installfirefox               install Firefox via RAPPS + set default
- *   bchooser.exe /settings <ms-settings:defaultapps[?registeredAppUser=name]>   the "Default apps" page
+ *   bchooser.exe /settings [ms-settings:defaultapps[?registeredAppUser=name]]   the "Default apps" page
  *                                              (what ms-settings: opens): the chooser, that browser selected
  *   bchooser.exe /firstlogon                   the RunOnce launch: show the chooser, except
  *                                              under unattended setup (no dialog, rc 0)
@@ -1152,6 +1242,8 @@ RunAutomation(int argc, LPWSTR *argv)
         {
             if (!StrCmpIW(g_Browsers[i].szKey, argv[1]) || !StrCmpIW(g_Browsers[i].szName, argv[1]))
             {
+                if (g_Browsers[i].bUser)
+                    return SetUserDefaultBrowser(g_Browsers[i].szKey, g_Browsers[i].szName) ? 0 : 1;
                 return SetDefaultBrowser(g_Browsers[i].szKey,
                                          g_Browsers[i].szName,
                                          g_Browsers[i].szExe) ? 0 : 1;
@@ -1166,7 +1258,7 @@ RunAutomation(int argc, LPWSTR *argv)
         /* The "Default apps" page of the Windows settings app: ms-settings:defaultapps[?registeredAppUser=<name>]
          * (what browsers open for "Make default"). Show the chooser with that browser selected. Other pages
          * have nothing to show. */
-        LPCWSTR pszUri = argc > 1 ? argv[1] : L"";
+        LPCWSTR pszUri = argc > 1 ? argv[1] : L"ms-settings:defaultapps"; /* bare /settings: the same page */
         LPCWSTR pszName;
 
         if (StrCmpNIW(pszUri, L"ms-settings:defaultapps", 23))
@@ -1209,6 +1301,7 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCm
     int argc = 0;
     LPWSTR *argv;
     int ret = 0;
+    HANDLE hMutex = NULL;
 
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
@@ -1237,8 +1330,16 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCm
     if (argv)
         LocalFree(argv);
 
+    if (ActivateRunningChooser(&hMutex))
+    {
+        CloseHandle(hMutex);
+        return 0;
+    }
+
     DialogBoxW(hInstance, MAKEINTRESOURCEW(IDD_CHOOSER), NULL, DlgProc);
 
+    if (hMutex)
+        CloseHandle(hMutex);
     LogLine(L"Browser chooser exiting");
     return 0;
 }

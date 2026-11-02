@@ -28,6 +28,7 @@ extern void func_GUIDFromString(void);
 extern void func_ILCreateFromPath(void);
 extern void func_ILIsEqual(void);
 extern void func_Int64ToString(void);
+extern void func_ApplicationActivationManager(void);
 extern void func_IApplicationAssociationRegistration(void);
 extern void func_UserChoiceHandlers(void);
 extern void func_IFileOperation(void);
@@ -115,6 +116,7 @@ const struct test winetest_testlist[] =
     { "ILCreateFromPath", func_ILCreateFromPath },
     { "ILIsEqual", func_ILIsEqual },
     { "Int64ToString", func_Int64ToString },
+    { "ApplicationActivationManager", func_ApplicationActivationManager },
     { "IApplicationAssociationRegistration", func_IApplicationAssociationRegistration },
     { "UserChoiceHandlers", func_UserChoiceHandlers },
     { "IFileOperation", func_IFileOperation },

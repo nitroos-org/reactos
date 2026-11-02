@@ -79,6 +79,8 @@ list(APPEND SOURCE
     systray.cpp
     CApplicationAssociationRegistration.cpp
     CApplicationAssociationRegistration.h
+    CApplicationActivationManager.cpp
+    CApplicationActivationManager.h
     CFileOperation.cpp
     CFileOperation.h
     CDestinationList.cpp

@@ -227,16 +227,27 @@ static HRESULT ReadDefault(LPCWSTR pszQuery, ASSOCIATIONTYPE type, ASSOCIATIONLE
     return ReadMachineDefault(type, pszQuery, level == AL_EFFECTIVE, strOut);
 }
 
-// The capabilities key of a registered application (HKLM only).
+// The capabilities key of a registered application: RegisteredApplications of the user (a per-user
+// install such as Chrome's, or Firefox's own) first, then the ones of the machine.
 static HRESULT OpenCapabilities(LPCWSTR pszApp, HKEY *phKey)
 {
+    static const HKEY s_Roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
     CStringW strPath;
     *phKey = NULL;
-    if (!*pszApp || !ReadString(HKEY_LOCAL_MACHINE, s_szRegisteredApps, pszApp, strPath))
+    if (!*pszApp)
         return ASSOC_ERR_NOT_REGISTERED;
 
-    LONG lError = RegOpenKeyExW(HKEY_LOCAL_MACHINE, strPath, 0, KEY_READ, phKey);
-    return lError == ERROR_SUCCESS ? S_OK : HRESULT_FROM_WIN32(lError);
+    for (UINT i = 0; i < _countof(s_Roots); ++i)
+    {
+        if (!ReadString(s_Roots[i], s_szRegisteredApps, pszApp, strPath))
+            continue;
+        LONG lError = RegOpenKeyExW(s_Roots[i], strPath, 0, KEY_READ, phKey);
+        if (lError == ERROR_SUCCESS)
+            return S_OK;
+        if (s_Roots[i] == HKEY_LOCAL_MACHINE)
+            return HRESULT_FROM_WIN32(lError);
+    }
+    return ASSOC_ERR_NOT_REGISTERED;
 }
 
 // The progid (or client name) an application declares for a protocol, extension, MIME type or client type.

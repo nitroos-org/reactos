@@ -32,6 +32,7 @@
 #define CLASSB      L"RosAarTest.ClassB"
 #define CLASSC      L"RosAarTest.ClassC"
 #define MACHINECMD  L"C:\\rosaartest\\a.exe %1"
+#define USERAPP     L"RosAarTestUserApp"
 
 #define CLASSES     L"SOFTWARE\\Classes\\"
 #define USERASSOC   L"Software\\Microsoft\\Windows\\Shell\\Associations"
@@ -175,6 +176,8 @@ static void Cleanup(void)
     DelKey(HKLM, L"SOFTWARE\\Clients\\" CLIENTTYPE);
     DelKey(HKLM, L"SOFTWARE\\" APP);
     DelValue(HKLM, L"SOFTWARE\\RegisteredApplications", APP);
+    DelKey(HKCU, L"Software\\" USERAPP);
+    DelValue(HKCU, L"Software\\RegisteredApplications", USERAPP);
     ClearUserChoice(AT_URLPROTOCOL, PROTO);
     ClearUserChoice(AT_URLPROTOCOL, PROTO_EXP);
     ClearUserChoice(AT_FILEEXTENSION, EXT);
@@ -649,6 +652,39 @@ static void TestIsDefaultAll(IApplicationAssociationRegistration *pAAR)
     CheckIsDefaultAll(__LINE__, pAAR, APP, AL_USER, HR_NOASSOC, FALSE);
 }
 
+// An application of the user alone (a per-user install: Chrome's, Firefox's own) is registered under HKCU
+static void TestUserRegisteredApp(IApplicationAssociationRegistration *pAAR)
+{
+    HRESULT hr;
+    BOOL fDefault = 123;
+
+    SetStr(HKLM, CLASSES PROTO, L"URL Protocol", L"");
+    SetStr(HKLM, CLASSES PROTO L"\\shell\\open\\command", NULL, MACHINECMD);
+    SetStr(HKCU, L"Software\\RegisteredApplications", USERAPP, L"Software\\" USERAPP L"\\Capabilities");
+    SetStr(HKCU, L"Software\\" USERAPP L"\\Capabilities\\URLAssociations", PROTO, HANDLER);
+
+    hr = pAAR->QueryAppIsDefault(PROTO, AT_URLPROTOCOL, AL_USER, USERAPP, &fDefault);
+    ok(hr == HR_NOASSOC, "got 0x%lx\n", hr);
+    ok(fDefault == FALSE, "got %d\n", fDefault);
+
+    hr = pAAR->SetAppAsDefault(USERAPP, PROTO, AT_URLPROTOCOL);
+    ok(hr == S_OK, "got 0x%lx\n", hr);
+    CheckQuery(__LINE__, pAAR, PROTO, AT_URLPROTOCOL, AL_USER, S_OK, HANDLER);
+    fDefault = FALSE;
+    hr = pAAR->QueryAppIsDefault(PROTO, AT_URLPROTOCOL, AL_EFFECTIVE, USERAPP, &fDefault);
+    ok(hr == S_OK, "got 0x%lx\n", hr);
+    ok(fDefault == TRUE, "got %d\n", fDefault);
+
+    // not what the application declares
+    hr = pAAR->SetAppAsDefault(USERAPP, L"rosaartestother", AT_URLPROTOCOL);
+    ok(hr == E_INVALIDARG, "got 0x%lx\n", hr);
+
+    // gone from HKCU: not registered
+    DelValue(HKCU, L"Software\\RegisteredApplications", USERAPP);
+    hr = pAAR->SetAppAsDefault(USERAPP, PROTO, AT_URLPROTOCOL);
+    ok(hr == HR_NOTREG, "got 0x%lx\n", hr);
+}
+
 static void TestSet(IApplicationAssociationRegistration *pAAR)
 {
     HRESULT hr;
@@ -866,6 +902,8 @@ static BOOL FixturesFree(void)
         if (ValueExists(HKLM, L"SOFTWARE\\RegisteredApplications", s_Apps[i]))
             return FALSE;
     }
+    if (KeyExists(HKCU, L"Software\\" USERAPP) || ValueExists(HKCU, L"Software\\RegisteredApplications", USERAPP))
+        return FALSE;
     return !KeyExists(HKCU, L"Software\\Classes\\" EXT);
 }
 
@@ -919,6 +957,9 @@ START_TEST(IApplicationAssociationRegistration)
     pAAR->ClearUserAssociations();
     Cleanup();
     TestSet(pAAR);
+    pAAR->ClearUserAssociations();
+    Cleanup();
+    TestUserRegisteredApp(pAAR);
     pAAR->ClearUserAssociations();
     Cleanup();
     TestClear(pAAR);
