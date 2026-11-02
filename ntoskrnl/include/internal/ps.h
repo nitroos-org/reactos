@@ -222,6 +222,12 @@ NTAPI
 PspGetSystemDll32(
     OUT PCUNICODE_STRING *FileName
 );
+
+PVOID
+NTAPI
+PspGetWow64ProcessStart(
+    IN PEPROCESS Process
+);
 #endif
 
 VOID
@@ -661,4 +667,5 @@ extern ULONG_PTR PsNtosImageBase;
 
 #if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
 NTSTATUS NTAPI PspWow64ContextThread(HANDLE, PVOID, ULONG, BOOLEAN, KPROCESSOR_MODE);
+VOID NTAPI PspWow64StageMainThread(VOID);
 #endif

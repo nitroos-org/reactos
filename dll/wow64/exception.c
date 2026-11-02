@@ -284,9 +284,13 @@ VOID NTAPI Wow64PrepareForApc(PVOID Arg1, PVOID Arg2, PVOID Arg3, PCONTEXT Nativ
     WOW64_APC_FRAME Apc;
     TEB32 *Teb32 = WOW64_TEB32(NtCurrentTeb());
 
-    /* Encoded guest APCs cannot execute on a native-only helper. Returning
-     * drops this APC; ntdll resumes its interrupted native context. */
-    if (!Previous) return;
+    /* Encoded guest APCs cannot execute on a native-only helper, nor on a main
+     * thread whose CPU area the kernel staged and that has not entered the guest
+     * yet (NativeStack is set when Wow64CpuRun first runs it), nor before the
+     * guest dispatcher is known. Returning drops this APC; ntdll resumes its
+     * interrupted native context. (The native loader reaches no alertable point
+     * before wow64.dll takes the thread over, so this guards, it is not a path.) */
+    if (!Previous || !Previous->NativeStack || !Wow64ApcDispatcher) return;
     /* Context APCs must not update either frame while its saved registers
      * are being cloned or ownership is being transferred to/from it. */
     Apc.PreviousTransition = InterlockedExchange(&Previous->InTransition, 1);

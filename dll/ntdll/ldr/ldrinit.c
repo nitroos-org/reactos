@@ -3684,48 +3684,63 @@ LdrpInit(PCONTEXT Context,
 /* EOF */
 
 #if defined(_M_IX86) && defined(SYSWOW64_GUEST)
-/* Entered only by the native WoW64 loader, with an initialized PEB32/TEB32. */
+VOID NTAPI RtlpUserThreadStart(PVOID Routine, PVOID Parameter);
+ULONG NTAPI RtlpCallThreadStart(PVOID Routine, PVOID Parameter);
+
+/* Entered only by the native WoW64 loader, with an initialized PEB32/TEB32.
+ * The main thread's StartContext is the one the kernel staged when the thread
+ * was created (and a debugger may have changed since): RtlUserThreadStart with
+ * the image's entry in EAX, which the loader replaces for an IL-only .NET image,
+ * and the PEB32 in EBX. Without one, the process starts here. */
 VOID NTAPI LdrInitializeWow64(PVOID NtdllBase, PCONTEXT StartContext)
 {
-    static ANSI_STRING FilterName = RTL_CONSTANT_STRING("UnhandledExceptionFilter");
-    static ANSI_STRING ExitThreadName = RTL_CONSTANT_STRING("ExitThread");
-    LONG (WINAPI *Filter)(PEXCEPTION_POINTERS) = NULL;
-    VOID (WINAPI *ExitThreadRoutine)(ULONG) = NULL;
-    ULONG (NTAPI *Entry)(VOID);
-    PIMAGE_NT_HEADERS Header;
-    PVOID Kernel32;
     CONTEXT Context;
     if (StartContext) Context = *StartContext;
     else RtlCaptureContext(&Context);
     LdrpInit(&Context, NtdllBase, NULL);
     if (StartContext) NtContinue(&Context, TRUE);
-    /* The loader's entry for the image, which the IL-only start of a .NET
-     * image without an entry point replaced with mscoree!_CorExeMain */
-    if (LdrpImageEntry && LdrpImageEntry->EntryPoint)
+    RtlpUserThreadStart(NULL, NtCurrentPeb());
+}
+
+/* RtlUserThreadStart (dispatch.S) with its EAX and EBX: Routine(Parameter) ends
+ * the thread with its result. A NULL Routine is the image's entry: the loader's,
+ * which the IL-only start of a .NET image without an entry point replaced with
+ * mscoree!_CorExeMain, or the header's. */
+VOID NTAPI RtlpUserThreadStart(PVOID Routine, PVOID Parameter)
+{
+    static ANSI_STRING FilterName = RTL_CONSTANT_STRING("UnhandledExceptionFilter");
+    static ANSI_STRING ExitThreadName = RTL_CONSTANT_STRING("ExitThread");
+    LONG (WINAPI *Filter)(PEXCEPTION_POINTERS) = NULL;
+    VOID (WINAPI *ExitThreadRoutine)(ULONG) = NULL;
+    PIMAGE_NT_HEADERS Header;
+    PVOID Kernel32;
+    if (!Routine)
     {
-        Entry = LdrpImageEntry->EntryPoint;
-    }
-    else
-    {
-        Header = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
-        Entry = (PVOID)((ULONG_PTR)NtCurrentPeb()->ImageBaseAddress +
-                        Header->OptionalHeader.AddressOfEntryPoint);
+        if (LdrpImageEntry && LdrpImageEntry->EntryPoint)
+        {
+            Routine = LdrpImageEntry->EntryPoint;
+        }
+        else
+        {
+            Header = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
+            Routine = (PVOID)((ULONG_PTR)NtCurrentPeb()->ImageBaseAddress +
+                              Header->OptionalHeader.AddressOfEntryPoint);
+        }
     }
 
-    /* Start the main thread as kernel32's BaseProcessStartup does on i386.
-     * An exception that no frame of the image handles must reach
-     * UnhandledExceptionFilter, which reports it, instead of a second-chance
-     * dispatch that ends the process silently. The entry's return value ends
-     * the thread; an unhandled exception ends the process at once, without
-     * DLL detach, as on Windows. An image that does not use kernel32 keeps
-     * the plain call. */
+    /* As kernel32's BaseThreadInitThunk on Windows: an exception that no frame
+     * of the routine handles must reach UnhandledExceptionFilter, which reports
+     * it, instead of a second-chance dispatch that ends the process silently.
+     * The routine's result ends the thread; an unhandled exception ends the
+     * process at once, without DLL detach, as on Windows. Without kernel32 the
+     * thread ends through RtlExitUserThread. */
     if (NT_SUCCESS(LdrGetDllHandle(NULL, NULL, &Kernel32String, &Kernel32)) &&
         NT_SUCCESS(LdrGetProcedureAddress(Kernel32, &FilterName, 0, (PVOID *)&Filter)) &&
         NT_SUCCESS(LdrGetProcedureAddress(Kernel32, &ExitThreadName, 0, (PVOID *)&ExitThreadRoutine)))
     {
         _SEH2_TRY
         {
-            ExitThreadRoutine(Entry());
+            ExitThreadRoutine(RtlpCallThreadStart(Routine, Parameter));
         }
         _SEH2_EXCEPT(Filter(_SEH2_GetExceptionInformation()))
         {
@@ -3733,6 +3748,6 @@ VOID NTAPI LdrInitializeWow64(PVOID NtdllBase, PCONTEXT StartContext)
         }
         _SEH2_END;
     }
-    NtTerminateProcess(NtCurrentProcess(), Entry());
+    RtlExitUserThread(RtlpCallThreadStart(Routine, Parameter));
 }
 #endif

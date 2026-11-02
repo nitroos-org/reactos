@@ -49,6 +49,11 @@ Wow64CpuReturn:
     /* IRET in ring 3 switches only user selectors and restores the 32-bit
      * stack. Kernel transitions occur inside the native ntdll calls. */
     mov rsp, [r11]
+    /* The guest runs with the TEB in R12, its CPU area in R13 and the native stack in R14,
+     * as on Windows: 64-bit code a guest enters with a far transfer uses R14 as its stack */
+    mov r12, gs:[HEX(30)]
+    mov r13, r11
+    mov r14, rsp
     mov qword ptr [rsp + 64], HEX(2b)
     mov eax, [r11 + 8]
     mov [rsp + 56], rax

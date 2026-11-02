@@ -15,6 +15,8 @@ typedef struct _WOW64_PROCESS
 {
     /* User address of the PEB32; immutable once published on the process. */
     PVOID Peb;
+    /* The i386 ntdll view PspMapSystemDll32 mapped at its preferred base, or NULL */
+    PVOID Ntdll32;
 } WOW64_PROCESS, *PWOW64_PROCESS;
 
 typedef struct _KPROFILE_SOURCE_OBJECT
