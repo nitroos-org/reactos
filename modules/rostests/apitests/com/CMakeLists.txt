@@ -15,6 +15,7 @@ list(APPEND SOURCE
     shdocvw.c
     shell32.c
     windows_storage.c
+    winrt_packagemanager.c
     winrt_profile.c
     zipfldr.c)
 
