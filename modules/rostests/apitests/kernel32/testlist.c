@@ -214,6 +214,7 @@ extern void func_SetFileInformationByHandle(void);
 extern void func_Wow64Environment(void);
 extern void func_Wow64ProgramFiles(void);
 extern void func_Wow64EnvironmentBlock(void);
+extern void func_Wow64ChildEnvironment(void);
 
 const struct test winetest_testlist[] =
 {
@@ -221,6 +222,7 @@ const struct test winetest_testlist[] =
     { "Wow64Environment", func_Wow64Environment },
     { "Wow64ProgramFiles", func_Wow64ProgramFiles },
     { "Wow64EnvironmentBlock", func_Wow64EnvironmentBlock },
+    { "Wow64ChildEnvironment", func_Wow64ChildEnvironment },
     { "Wow64ThreadApc", func_Wow64ThreadApc },
     { "Wow64ThreadLifetime", func_Wow64ThreadLifetime },
     { "Wow64ThreadExitProcess", func_Wow64ThreadExitProcess },

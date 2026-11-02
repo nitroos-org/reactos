@@ -311,3 +311,137 @@ START_TEST(Wow64EnvironmentBlock)
     }
     FreeLibrary(Module);
 }
+
+/* Run "cmd.exe /c set" in a child that inherits the environment and return what it prints. */
+static BOOL RunSet(PCWSTR Application, PSTR Output, DWORD Size)
+{
+    SECURITY_ATTRIBUTES Security = {sizeof(Security), NULL, TRUE};
+    STARTUPINFOW Startup = {sizeof(Startup)};
+    PROCESS_INFORMATION Info;
+    WCHAR CommandLine[MAX_PATH + 32];
+    HANDLE Read, Write;
+    DWORD Total = 0, Bytes;
+
+    if (!CreatePipe(&Read, &Write, &Security, 0)) return FALSE;
+    SetHandleInformation(Read, HANDLE_FLAG_INHERIT, 0);
+    Startup.dwFlags = STARTF_USESTDHANDLES;
+    Startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    Startup.hStdOutput = Write;
+    Startup.hStdError = Write;
+    _snwprintf(CommandLine, _countof(CommandLine), L"\"%ls\" /c set", Application);
+    if (!CreateProcessW(Application, CommandLine, NULL, NULL, TRUE, 0, NULL, NULL, &Startup, &Info))
+    {
+        skip("cannot start %S: %lu\n", Application, GetLastError());
+        CloseHandle(Read);
+        CloseHandle(Write);
+        return FALSE;
+    }
+    CloseHandle(Write);
+    while (Total < Size - 1 && ReadFile(Read, Output + Total, Size - 1 - Total, &Bytes, NULL) && Bytes)
+        Total += Bytes;
+    Output[Total] = 0;
+    WaitForSingleObject(Info.hProcess, 60000);
+    CloseHandle(Info.hProcess);
+    CloseHandle(Info.hThread);
+    CloseHandle(Read);
+    return Total != 0;
+}
+
+static BOOL FindVariable(PCSTR Output, PCSTR Name, PSTR Value, DWORD Size)
+{
+    SIZE_T Length = strlen(Name);
+    PCSTR Line = Output, End;
+
+    Value[0] = 0;
+
+    while (*Line)
+    {
+        End = strpbrk(Line, "\r\n");
+        if (!_strnicmp(Line, Name, Length) && Line[Length] == '=')
+        {
+            SIZE_T Count = (End ? End : Line + strlen(Line)) - (Line + Length + 1);
+            if (Count >= Size) Count = Size - 1;
+            memcpy(Value, Line + Length + 1, Count);
+            Value[Count] = 0;
+            return TRUE;
+        }
+        if (!End) break;
+        Line = End + strspn(End, "\r\n");
+    }
+    return FALSE;
+}
+
+static VOID GetOwn(PCSTR Name, PSTR Value, DWORD Size)
+{
+    Value[0] = 0;
+    GetEnvironmentVariableA(Name, Value, Size);
+}
+
+/* A process starts a child of the other bitness: the child gets the environment of its own kind, and not what
+ * its parent sees. A 64-bit child of a 32-bit process takes %CommonProgramFiles% for its own common files
+ * folder (Office Click-to-Run). */
+START_TEST(Wow64ChildEnvironment)
+{
+    static CHAR Output[65536];
+    CHAR Value[MAX_PATH], Own[MAX_PATH];
+    WCHAR Path[MAX_PATH];
+    SYSTEM_INFO Native;
+    BOOL Wow64 = FALSE;
+    UINT Length;
+
+    GetNativeSystemInfo(&Native);
+    IsWow64Process(GetCurrentProcess(), &Wow64);
+    if (Native.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_AMD64)
+    {
+        skip("Two environments need a 64-bit installation\n");
+        return;
+    }
+    Length = GetWindowsDirectoryW(Path, _countof(Path));
+    ok(Length != 0 && Length + 20 < _countof(Path), "GetWindowsDirectory: %lu\n", GetLastError());
+    if (!Length || Length + 20 >= _countof(Path)) return;
+    wcscat(Path, Wow64 ? L"\\Sysnative\\cmd.exe" : L"\\System32\\cmd.exe");
+
+    /* the 64-bit child */
+    if (RunSet(Path, Output, sizeof(Output)))
+    {
+        ok(FindVariable(Output, "PROCESSOR_ARCHITECTURE", Value, sizeof(Value)) && !_stricmp(Value, "AMD64"),
+           "64-bit child: PROCESSOR_ARCHITECTURE %s\n", Value);
+        if (FindVariable(Output, "PROCESSOR_ARCHITEW6432", Value, sizeof(Value)))
+            trace("64-bit child: PROCESSOR_ARCHITEW6432 = %s\n", Value);
+        else
+            trace("64-bit child: PROCESSOR_ARCHITEW6432 is not set\n");
+        GetOwn("ProgramW6432", Own, sizeof(Own));
+        ok(Own[0], "ProgramW6432 is missing in the parent\n");
+        ok(FindVariable(Output, "ProgramFiles", Value, sizeof(Value)) && !_stricmp(Value, Own),
+           "64-bit child: ProgramFiles %s, expected %s\n", Value, Own);
+        ok(FindVariable(Output, "ProgramW6432", Value, sizeof(Value)) && !_stricmp(Value, Own),
+           "64-bit child: ProgramW6432 %s, expected %s\n", Value, Own);
+        GetOwn("CommonProgramW6432", Own, sizeof(Own));
+        ok(Own[0], "CommonProgramW6432 is missing in the parent\n");
+        ok(FindVariable(Output, "CommonProgramFiles", Value, sizeof(Value)) && !_stricmp(Value, Own),
+           "64-bit child: CommonProgramFiles %s, expected %s\n", Value, Own);
+        ok(FindVariable(Output, "CommonProgramW6432", Value, sizeof(Value)) && !_stricmp(Value, Own),
+           "64-bit child: CommonProgramW6432 %s, expected %s\n", Value, Own);
+        ok(FindVariable(Output, "ProgramFiles(x86)", Value, sizeof(Value)) &&
+           strstr(Value, "(x86)"), "64-bit child: ProgramFiles(x86) %s\n", Value);
+    }
+
+    if (!Wow64) return;
+
+    /* the 32-bit child: the guest's view */
+    GetWindowsDirectoryW(Path, _countof(Path));
+    wcscat(Path, L"\\SysWOW64\\cmd.exe");
+    if (RunSet(Path, Output, sizeof(Output)))
+    {
+        ok(FindVariable(Output, "PROCESSOR_ARCHITECTURE", Value, sizeof(Value)) && !_stricmp(Value, "x86"),
+           "32-bit child: PROCESSOR_ARCHITECTURE %s\n", Value);
+        ok(FindVariable(Output, "PROCESSOR_ARCHITEW6432", Value, sizeof(Value)) && !_stricmp(Value, "AMD64"),
+           "32-bit child: PROCESSOR_ARCHITEW6432 %s\n", Value);
+        GetOwn("ProgramFiles", Own, sizeof(Own));
+        ok(FindVariable(Output, "ProgramFiles", Value, sizeof(Value)) && !_stricmp(Value, Own),
+           "32-bit child: ProgramFiles %s, expected %s\n", Value, Own);
+        GetOwn("CommonProgramFiles", Own, sizeof(Own));
+        ok(FindVariable(Output, "CommonProgramFiles", Value, sizeof(Value)) && !_stricmp(Value, Own),
+           "32-bit child: CommonProgramFiles %s, expected %s\n", Value, Own);
+    }
+}

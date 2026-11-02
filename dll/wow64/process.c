@@ -195,6 +195,36 @@ static NTSTATUS CaptureAttributeList(PVOID Module, ULONG Address, LPPROC_THREAD_
     return STATUS_SUCCESS;
 }
 
+/* The machine of an image: only a 64-bit image starts a native process, the others a guest */
+static BOOLEAN
+IsNativeImage(UNICODE_STRING *Name)
+{
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Io;
+    IMAGE_DOS_HEADER Dos;
+    struct { ULONG Signature; USHORT Machine; } Nt;
+    LARGE_INTEGER Offset;
+    HANDLE File;
+    BOOLEAN Native = FALSE;
+
+    InitializeObjectAttributes(&Attributes, Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenFile(&File, FILE_READ_DATA | SYNCHRONIZE, &Attributes, &Io,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE)))
+        return FALSE;
+    Offset.QuadPart = 0;
+    if (NT_SUCCESS(NtReadFile(File, NULL, NULL, NULL, &Io, &Dos, sizeof(Dos), &Offset, NULL)) &&
+        Io.Information == sizeof(Dos) && Dos.e_magic == IMAGE_DOS_SIGNATURE && Dos.e_lfanew > 0)
+    {
+        Offset.QuadPart = Dos.e_lfanew;
+        Native = NT_SUCCESS(NtReadFile(File, NULL, NULL, NULL, &Io, &Nt, sizeof(Nt), &Offset, NULL)) &&
+                 Io.Information == sizeof(Nt) && Nt.Signature == IMAGE_NT_SIGNATURE &&
+                 Nt.Machine == IMAGE_FILE_MACHINE_AMD64;
+    }
+    NtClose(File);
+    return Native;
+}
+
 NTSTATUS Wow64CreateProcess(PVOID Buffer, BOOLEAN *Reported)
 {
     WOW64_CREATE_PROCESS *Out = Buffer, Request = *Out;
@@ -215,6 +245,7 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer, BOOLEAN *Reported)
     OBJECT_ATTRIBUTES Attributes;
     PVOID Redirected = NULL, Module;
     PWSTR Application = NULL;
+    PVOID ChildEnvironment = NULL, Inherited;
     WCHAR ModulePath[MAX_PATH];
     ANSI_STRING Export = RTL_CONSTANT_STRING("CreateProcessInternalW");
     CREATE_PROCESS Create;
@@ -310,6 +341,12 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer, BOOLEAN *Reported)
             Startup.lpAttributeList = AttributeList;
         }
 
+        /* The environment the guest inherited is its own view of the machine; a native child gets the native one */
+        Inherited = Request.Environment ? PTR32(Request.Environment) : Parent.Environment;
+        if (!Request.Environment && Parent.Environment && IsNativeImage(&Name) &&
+            NT_SUCCESS(Wow64CreateNativeChildEnvironment(Parent.Environment, &ChildEnvironment)))
+            Inherited = ChildEnvironment;
+
         Cpu->ProcessParameters = &Parent;
         /* A debugged child is attached by the native creator to the debug object of the native
          * TEB (DbgUiConnectToDbg): that is the guest's own object, in TEB32, which the guest's
@@ -318,7 +355,7 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer, BOOLEAN *Reported)
             NtCurrentTeb()->DbgSsReserved[1] = HANDLE32(WOW64_TEB32(NtCurrentTeb())->DbgSsReserved[1]);
         Created = Create(HANDLE32(Request.Token), Application, PTR32(Request.CommandLine), Ps, Ts,
                          Request.InheritHandles, Request.CreationFlags | CREATE_SUSPENDED,
-                         Request.Environment ? PTR32(Request.Environment) : Parent.Environment,
+                         Inherited,
                          Request.CurrentDirectory ? PTR32(Request.CurrentDirectory) : Parent.CurrentDirectory.DosPath.Buffer,
                          &Startup.StartupInfo, &Info, Request.NewToken ? &NewToken : NULL);
         /* The object the creator made (or kept) is the guest's from now on, also when it failed */
@@ -356,6 +393,7 @@ NTSTATUS Wow64CreateProcess(PVOID Buffer, BOOLEAN *Reported)
     if (ListHandles) RtlFreeHeap(RtlGetProcessHeap(), 0, ListHandles);
     if (ListJobs) RtlFreeHeap(RtlGetProcessHeap(), 0, ListJobs);
     if (Application) RtlFreeHeap(RtlGetProcessHeap(), 0, Application);
+    if (ChildEnvironment) RtlFreeHeap(RtlGetProcessHeap(), 0, ChildEnvironment);
     if (Redirected) RtlFreeHeap(RtlGetProcessHeap(), 0, Redirected);
     RtlFreeUnicodeString(&Path);
     return Status;
