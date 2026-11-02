@@ -472,11 +472,13 @@ FindNextFileW(IN HANDLE hFindFile,
                 FindFileData->NextDirInfo.DirInfo = NULL;
             }
 
-            if ((FindFileData->SearchOp != FindExSearchLimitToDirectories) ||
-                (DirInfo.FullDirInfo->FileAttributes & FILE_ATTRIBUTE_DIRECTORY))
-            {
-                FoundFile = DirInfo;
-            }
+            /*
+             * FindExSearchLimitToDirectories is only advisory: a file system
+             * that cannot filter by directory (NTFS, FAT) ignores it and the
+             * caller gets the files too (Windows, Wine). Dropping them here
+             * made Qt6 find no plugin in its platforms directory.
+             */
+            FoundFile = DirInfo;
         } while ( FoundFile.DirInfo == NULL && (FindFileData->NextDirInfo.DirInfo || FindFileData->HasMoreData) );
 
         if (FoundFile.DirInfo != NULL)

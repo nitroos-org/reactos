@@ -1,0 +1,5 @@
+add_library(shared_ro_dll MODULE shared_ro_dll.c)
+set_module_type(shared_ro_dll win32dll ENTRYPOINT DllMain 12 IMAGEBASE default)
+add_importlibs(shared_ro_dll kernel32 ntdll)
+add_dependencies(shared_ro_dll psdk)
+add_rostests_file(TARGET shared_ro_dll)

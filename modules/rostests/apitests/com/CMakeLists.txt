@@ -16,6 +16,7 @@ list(APPEND SOURCE
     shell32.c
     windows_storage.c
     winrt_profile.c
+    winrt_ui.c
     zipfldr.c)
 
 list(APPEND PCH_SKIP_SOURCE

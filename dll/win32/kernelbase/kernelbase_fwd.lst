@@ -378,6 +378,7 @@
 @ GetTempPathW
 @ GetThreadContext
 @ GetThreadErrorMode -version=0x600+
+@ GetThreadDescription -version=0x601+
 @ GetThreadGroupAffinity -version=0x601+
 @ GetThreadIOPendingFlag
 @ GetThreadId
@@ -657,7 +658,7 @@
 @ SetSystemTime
 @ SetSystemTimeAdjustment
 @ SetThreadContext
-@ SetThreadDescription -version=0xA00+
+@ SetThreadDescription -version=0x601+
 @ SetThreadErrorMode -version=0x600+
 @ SetThreadGroupAffinity -version=0x601+
 @ SetThreadIdealProcessor

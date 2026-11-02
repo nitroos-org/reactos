@@ -143,6 +143,40 @@ test_Ansi(void)
         FindClose(Find);
 }
 
+/*
+ * FindExSearchLimitToDirectories is advisory: a file system that cannot filter (NTFS, FAT) ignores it and every
+ * entry comes back, files included. Qt6 lists its plugin directories with it and then filters by attribute itself.
+ */
+static void
+test_LimitToDirectories(void)
+{
+    static const FINDEX_INFO_LEVELS Levels[] = { FindExInfoStandard, FindExInfoBasic };
+    WCHAR Pattern[MAX_PATH];
+    WIN32_FIND_DATAW Data;
+    HANDLE Find;
+    int Count, Files, l;
+
+    StringCbPrintfW(Pattern, sizeof(Pattern), L"%s\\*", TestDir);
+    for (l = 0; l < _countof(Levels); l++)
+    {
+        Count = Files = 0;
+        Find = FindFirstFileExW(Pattern, Levels[l], &Data, FindExSearchLimitToDirectories, NULL, FIND_FIRST_EX_LARGE_FETCH);
+        ok(Find != INVALID_HANDLE_VALUE, "level %d: FindFirstFileExW failed, error %lu\n", Levels[l], GetLastError());
+        if (Find == INVALID_HANDLE_VALUE)
+            continue;
+        do
+        {
+            Count++;
+            if (!(Data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                Files++;
+        } while (FindNextFileW(Find, &Data));
+        ok(GetLastError() == ERROR_NO_MORE_FILES, "level %d: error %lu after the last entry\n", Levels[l], GetLastError());
+        FindClose(Find);
+        ok(Count == 4, "level %d: found %d entries, expected 4 (., .., two files)\n", Levels[l], Count);
+        ok(Files == 2, "level %d: found %d files, expected 2\n", Levels[l], Files);
+    }
+}
+
 START_TEST(FindFirstFileEx)
 {
     WCHAR File[MAX_PATH];
@@ -172,6 +206,7 @@ START_TEST(FindFirstFileEx)
 
     test_Flags();
     test_SameEntries();
+    test_LimitToDirectories();
     test_Ansi();
 
     StringCbPrintfW(File, sizeof(File), L"%s\\a long file name.txt", TestDir);
