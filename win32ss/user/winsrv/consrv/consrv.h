@@ -47,6 +47,15 @@ typedef struct _CONSOLE_PROCESS_DATA
     BOOLEAN ConsoleApp;     // TRUE if it is a CUI app, FALSE otherwise.
 
     /*
+     * Creation lineage kept by the server. Serial numbers are handed out
+     * once and never recycled (unlike process IDs), so they bind a process
+     * to the process that really created it: Serial identifies this process,
+     * CreatorSerial the process whose CreateProcess call made it (0: unknown).
+     */
+    ULONGLONG Serial;
+    ULONGLONG CreatorSerial;
+
+    /*
      * Console of the parent that this process is going to join. It is
      * referenced from the creation of the process (ConSrvNewProcess) until
      * the process connects (ConSrvConnect) and holds its own reference.

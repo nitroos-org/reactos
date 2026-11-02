@@ -320,6 +320,9 @@ PCHAR ConsoleServerApiNameTable[ConsolepMaxApiNumber - CONSRV_FIRST_API_NUMBER] 
 
 /* FUNCTIONS ******************************************************************/
 
+/* Never reused, unlike process IDs; 0 means "no serial" */
+static volatile LONGLONG ConSrvProcessSerial = 0;
+
 NTSTATUS
 NTAPI
 ConSrvNewProcess(PCSR_PROCESS SourceProcess,
@@ -351,6 +354,10 @@ ConSrvNewProcess(PCSR_PROCESS SourceProcess,
     TargetProcessData->ConsoleHandle = NULL;
     TargetProcessData->ConsoleApp = FALSE;
 
+    /* Record who created this process: the parent PID the kernel reports can be recycled */
+    TargetProcessData->Serial = (ULONGLONG)_InterlockedIncrement64(&ConSrvProcessSerial);
+    TargetProcessData->CreatorSerial = SourceProcess ? ConsoleGetPerProcessData(SourceProcess)->Serial : 0;
+
     /*
      * The handles table gets initialized either when inheriting from
      * another console process, or when creating a new console.
@@ -377,24 +384,30 @@ ConSrvNewProcess(PCSR_PROCESS SourceProcess,
                 PCONSOLE_PROCESS_DATA CandidateData;
                 PCONSRV_CONSOLE CandidateConsole;
 
+                /*
+                 * The host must be a process the caller itself created, in the
+                 * caller's session. The creation record is kept here and cannot
+                 * be forged; the parent PID in the process information is only
+                 * a number and names a different process once PIDs recycle.
+                 */
+                CandidateData = ConsoleGetPerProcessData(Candidate);
                 if (!CreatingProcess ||
                     !CreatingProcess->NtSession ||
                     !Candidate->NtSession ||
                     CreatingProcess->NtSession->SessionId != Candidate->NtSession->SessionId ||
+                    !ConsoleGetPerProcessData(CreatingProcess)->Serial ||
+                    CandidateData->CreatorSerial != ConsoleGetPerProcessData(CreatingProcess)->Serial ||
                     !NT_SUCCESS(NtQueryInformationProcess(Candidate->ProcessHandle,
                                                           ProcessBasicInformation,
                                                           &ProcessInfo,
                                                           sizeof(ProcessInfo),
                                                           NULL)) ||
                     ProcessInfo.UniqueProcessId !=
-                        (ULONG_PTR)Candidate->ClientId.UniqueProcess ||
-                    ProcessInfo.InheritedFromUniqueProcessId !=
-                        (ULONG_PTR)CreatingProcess->ClientId.UniqueProcess)
+                        (ULONG_PTR)Candidate->ClientId.UniqueProcess)
                 {
                     break;
                 }
 
-                CandidateData = ConsoleGetPerProcessData(Candidate);
                 if (!ConSrvValidateConsole(&CandidateConsole,
                                            CandidateData->ConsoleHandle,
                                            CONSOLE_RUNNING, TRUE))

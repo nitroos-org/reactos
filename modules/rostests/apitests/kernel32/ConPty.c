@@ -249,14 +249,14 @@ SpawnWithPty(PVOID Pty, PCWSTR CommandLine, BOOL InheritHandles, PPROCESS_INFORM
     return Created;
 }
 
-static VOID
-ExpectForgedRejected(DWORD ProcessId, PCSTR Name)
+/* Spawns a child naming ProcessId as pseudoconsole host. Returns TRUE if it was created. */
+static BOOL
+TryForged(DWORD ProcessId, PDWORD ErrorCode)
 {
     FAKE_PTY Fake;
     PROCESS_INFORMATION Process;
     HANDLE Self = NULL;
     BOOL Created;
-    DWORD Error;
 
     ZeroMemory(&Fake, sizeof(Fake));
     DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(), &Self,
@@ -270,19 +270,26 @@ ExpectForgedRejected(DWORD ProcessId, PCSTR Name)
 
     SetLastError(0xdeadbeef);
     Created = SpawnWithPty(&Fake, L"cmd.exe /c exit", FALSE, &Process);
-    Error = GetLastError();
-    ok(!Created, "%s: CreateProcess with a forged pseudoconsole host succeeded\n", Name);
+    *ErrorCode = GetLastError();
     if (Created)
     {
         TerminateProcess(Process.hProcess, 1);
         CloseHandle(Process.hThread);
         CloseHandle(Process.hProcess);
     }
-    else
-    {
-        ok(Error == ERROR_INVALID_HANDLE, "%s: error %lu, expected ERROR_INVALID_HANDLE\n", Name, Error);
-    }
     if (Self) CloseHandle(Self);
+    return Created;
+}
+
+static VOID
+ExpectForgedRejected(DWORD ProcessId, PCSTR Name)
+{
+    DWORD Error;
+    BOOL Created = TryForged(ProcessId, &Error);
+
+    ok(!Created, "%s: CreateProcess with a forged pseudoconsole host succeeded\n", Name);
+    if (!Created)
+        ok(Error == ERROR_INVALID_HANDLE, "%s: error %lu, expected ERROR_INVALID_HANDLE\n", Name, Error);
 }
 
 static BOOL
@@ -361,6 +368,133 @@ Done:
     if (OutWrite) CloseHandle(OutWrite);
 }
 
+/*
+ * Process IDs are recycled. A process whose parent has exited still reports the
+ * parent's old ID, which can later belong to an unrelated new process. Build
+ * exactly that: A starts P (which has a console) and exits; the test then starts
+ * processes until one gets A's ID, and that process names P as its pseudoconsole
+ * host. P was not created by it, so the attach must still be refused.
+ */
+static VOID
+RunHelperMid(VOID)
+{
+    STARTUPINFOW Startup = {sizeof(Startup)};
+    PROCESS_INFORMATION Process;
+    WCHAR Command[MAX_PATH * 2];
+    CHAR Line[64];
+    DWORD Written;
+
+    StringCchPrintfW(Command, _countof(Command), L"\"%ls\" ConPty helper-sleep", TestPath);
+    if (!CreateProcessW(NULL, Command, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL,
+                        &Startup, &Process))
+        return;
+    StringCchPrintfA(Line, sizeof(Line), "MID %lu %lu\n", GetCurrentProcessId(), Process.dwProcessId);
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), Line, lstrlenA(Line), &Written, NULL);
+    CloseHandle(Process.hThread);
+    CloseHandle(Process.hProcess);
+}
+
+static VOID
+RunHelperRecycled(DWORD OldParentId, DWORD HostId)
+{
+    CHAR Line[64];
+    DWORD Written, Error;
+
+    if (GetCurrentProcessId() != OldParentId)
+        StringCchCopyA(Line, sizeof(Line), "SKIP\n");
+    else
+        StringCchPrintfA(Line, sizeof(Line), "%s %lu\n",
+                         TryForged(HostId, &Error) ? "ACCEPTED" : "REJECTED", Error);
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), Line, lstrlenA(Line), &Written, NULL);
+}
+
+/* Starts "ConPty Mode Arg1 Arg2" with stdout on a pipe and returns its first line. */
+static BOOL
+RunHelperForLine(PCWSTR ExePath, PCWSTR Arguments, PSTR Line, DWORD Size, PDWORD ProcessId)
+{
+    SECURITY_ATTRIBUTES Inherit = {sizeof(Inherit), NULL, TRUE};
+    STARTUPINFOW Startup = {0};
+    PROCESS_INFORMATION Process;
+    WCHAR Command[MAX_PATH * 2];
+    HANDLE OutRead = NULL, OutWrite = NULL;
+    BOOL Result = FALSE;
+
+    Line[0] = 0;
+    if (!CreatePipe(&OutRead, &OutWrite, &Inherit, 0)) return FALSE;
+    SetHandleInformation(OutRead, HANDLE_FLAG_INHERIT, 0);
+    Startup.cb = sizeof(Startup);
+    Startup.dwFlags = STARTF_USESTDHANDLES;
+    Startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    Startup.hStdOutput = OutWrite;
+    Startup.hStdError = OutWrite;
+    StringCchPrintfW(Command, _countof(Command), L"\"%ls\" ConPty %ls", ExePath, Arguments);
+    if (CreateProcessW(NULL, Command, NULL, NULL, TRUE, 0, NULL, NULL, &Startup, &Process))
+    {
+        CloseHandle(OutWrite);
+        OutWrite = NULL;
+        Result = ReadLineTimeout(OutRead, Line, Size, 30000);
+        if (WaitForSingleObject(Process.hProcess, 20000) == WAIT_TIMEOUT)
+            TerminateProcess(Process.hProcess, 1);
+        if (ProcessId) *ProcessId = Process.dwProcessId;
+        CloseHandle(Process.hThread);
+        CloseHandle(Process.hProcess);
+    }
+    if (OutWrite) CloseHandle(OutWrite);
+    CloseHandle(OutRead);
+    return Result;
+}
+
+#define MAX_RECYCLE_TRIES 300
+#define MAX_RECYCLE_MS    15000
+
+static VOID
+CheckForgedRecycledParent(PCWSTR ExePath)
+{
+    CHAR Line[64];
+    WCHAR Arguments[64];
+    DWORD OldParentId = 0, HostId = 0, Pid, Try;
+    HANDLE Host;
+    BOOL Reached = FALSE;
+    DWORD Start;
+
+    if (!RunHelperForLine(ExePath, L"helper-mid", Line, sizeof(Line), NULL) ||
+        sscanf(Line, "MID %lu %lu", &OldParentId, &HostId) != 2)
+    {
+        ok(FALSE, "Helper did not report its child: '%s'\n", Line);
+        return;
+    }
+    StringCchPrintfW(Arguments, _countof(Arguments), L"helper-recycled %lu %lu", OldParentId, HostId);
+    /*
+     * Best effort: nothing lets a test pick its own process ID, so churn short-lived
+     * helpers (bounded by count and time) hoping the old ID is reissued. IDs come
+     * round again only after the ID table has used up its fresh entries, which often
+     * takes longer than this; then the check is reported as skipped, not passed.
+     */
+    Start = GetTickCount();
+    for (Try = 0; Try < MAX_RECYCLE_TRIES && !Reached && GetTickCount() - Start < MAX_RECYCLE_MS; ++Try)
+    {
+        if (!RunHelperForLine(ExePath, Arguments, Line, sizeof(Line), &Pid))
+        {
+            ok(FALSE, "Recycled-ID helper reported nothing\n");
+            break;
+        }
+        if (!strncmp(Line, "SKIP", 4)) continue;
+        Reached = TRUE;
+        ok(!strncmp(Line, "REJECTED", 8),
+           "recycled parent ID: CreateProcess naming a process the caller did not create succeeded: '%s'\n", Line);
+        if (sscanf(Line, "REJECTED %lu", &Pid) == 1)
+            ok(Pid == ERROR_INVALID_HANDLE, "recycled parent ID: error %lu, expected ERROR_INVALID_HANDLE\n", Pid);
+    }
+    if (!Reached)
+        skip("The old parent ID was not reused within %lu processes\n", Try);
+    Host = OpenProcess(PROCESS_TERMINATE, FALSE, HostId);
+    if (Host)
+    {
+        TerminateProcess(Host, 1);
+        CloseHandle(Host);
+    }
+}
+
 static VOID
 RunHelperPid(VOID)
 {
@@ -391,6 +525,7 @@ CheckForgedRequests(VOID)
         ExpectForgedRejected((DWORD)Info.InheritedFromUniqueProcessId, "the caller's parent");
     GetModuleFileNameW(NULL, ExePath, _countof(ExePath));
     CheckForgedOtherProcess(ExePath);
+    CheckForgedRecycledParent(ExePath);
 }
 
 /* A later child created with bInheritHandles=TRUE must not receive the
@@ -466,6 +601,17 @@ START_TEST(ConPty)
         if (argc >= 3 && (!strcmp(argv[2], "helper-size") || !strcmp(argv[2], "helper-ctrlc")))
         {
             RunConsoleHelper(argv[2]);
+            return;
+        }
+        if (argc >= 3 && !strcmp(argv[2], "helper-mid"))
+        {
+            GetModuleFileNameW(NULL, TestPath, _countof(TestPath));
+            RunHelperMid();
+            return;
+        }
+        if (argc >= 5 && !strcmp(argv[2], "helper-recycled"))
+        {
+            RunHelperRecycled(strtoul(argv[3], NULL, 10), strtoul(argv[4], NULL, 10));
             return;
         }
         if (argc >= 3 && !strcmp(argv[2], "helper-sleep"))
