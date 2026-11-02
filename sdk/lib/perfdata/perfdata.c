@@ -26,6 +26,7 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#define WIN32_NO_STATUS /* the NDK headers bring in the NTSTATUS values */
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -44,6 +45,8 @@
 
 #include "pdh.h"
 #include "pdhmsg.h"
+#include <ndk/umtypes.h>
+#include <ndk/extypes.h>
 #include "winperf.h"
 
 #include "perfdata.h"
@@ -556,31 +559,21 @@ static BOOL ensure_net( BOOL force )
     return TRUE;
 }
 
-/* SYSTEM_THREAD_INFORMATION entries follow the IO counters of a SYSTEM_PROCESS_INFORMATION record */
-#ifdef _WIN64
-#define PDH_THREADS_OFFSET   0x100
-#define PDH_THREAD_SIZE      0x50
-#define PDH_THREAD_STATE_OFF 0x44
-#else
-#define PDH_THREADS_OFFSET   0xB8
-#define PDH_THREAD_SIZE      0x40
-#define PDH_THREAD_STATE_OFF 0x34
-#endif
 #define PDH_THREAD_STATE_READY          1
 #define PDH_THREAD_STATE_DEFERREDREADY  7
 
-/* threads that are ready to run but not running: the value of System\\Processor Queue Length */
+/* threads that are ready to run but not running: the value of System\Processor Queue Length.
+ * The SYSTEM_THREAD_INFORMATION entries follow the SYSTEM_PROCESS_INFORMATION record. */
 static DWORD count_ready_threads( const struct pdh_process *p, const BYTE *buf, ULONG len )
 {
-    const BYTE *thr = (const BYTE *)p + PDH_THREADS_OFFSET;
+    const SYSTEM_PROCESS_INFORMATION *spi = (const SYSTEM_PROCESS_INFORMATION *)p;
+    const SYSTEM_THREAD_INFORMATION *thr = (const SYSTEM_THREAD_INFORMATION *)(spi + 1);
     DWORD i, ready = 0;
 
-    for (i = 0; i < p->NumberOfThreads; i++, thr += PDH_THREAD_SIZE)
+    for (i = 0; i < spi->NumberOfThreads; i++, thr++)
     {
-        ULONG state;
-        if (thr + PDH_THREAD_SIZE > buf + len) break;
-        state = *(const ULONG *)(thr + PDH_THREAD_STATE_OFF);
-        if (state == PDH_THREAD_STATE_READY || state == PDH_THREAD_STATE_DEFERREDREADY) ready++;
+        if ((const BYTE *)(thr + 1) > buf + len) break;
+        if (thr->ThreadState == PDH_THREAD_STATE_READY || thr->ThreadState == PDH_THREAD_STATE_DEFERREDREADY) ready++;
     }
     return ready;
 }

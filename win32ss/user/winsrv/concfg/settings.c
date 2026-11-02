@@ -402,7 +402,7 @@ do {                                                                            
     SetConsoleSetting(L"InsertMode", REG_DWORD, sizeof(DWORD), &Storage, TRUE);
 
     Storage = MAKELONG(ConsoleInfo->ScreenBufferSize.X, ConsoleInfo->ScreenBufferSize.Y);
-    SetConsoleSetting(L"ScreenBufferSize", REG_DWORD, sizeof(DWORD), &Storage, MAKELONG(80, 300));
+    SetConsoleSetting(L"ScreenBufferSize", REG_DWORD, sizeof(DWORD), &Storage, MAKELONG(120, 9001));
 
     Storage = ConsoleInfo->FullScreen;
     SetConsoleSetting(L"FullScreen", REG_DWORD, sizeof(DWORD), &Storage, FALSE);
@@ -418,7 +418,7 @@ do {                                                                            
     }
 
     Storage = MAKELONG(ConsoleInfo->WindowSize.X, ConsoleInfo->WindowSize.Y);
-    SetConsoleSetting(L"WindowSize", REG_DWORD, sizeof(DWORD), &Storage, MAKELONG(80, 25));
+    SetConsoleSetting(L"WindowSize", REG_DWORD, sizeof(DWORD), &Storage, MAKELONG(120, 30));
 
     SetConsoleSetting(L"CursorSize", REG_DWORD, sizeof(DWORD), &ConsoleInfo->CursorSize, CSR_DEFAULT_CURSOR_SIZE);
 
@@ -467,10 +467,11 @@ ConCfgInitDefaultSettings(
     // ConsoleInfo->InputBufferSize = 0;
 
     // Rule: ScreenBufferSize >= WindowSize
-    ConsoleInfo->ScreenBufferSize.X = 80;
-    ConsoleInfo->ScreenBufferSize.Y = 300;
-    ConsoleInfo->WindowSize.X = 80;
-    ConsoleInfo->WindowSize.Y = 25;
+    // Windows 10 conhost defaults: 120x30 window on a 120x9001 screen buffer.
+    ConsoleInfo->ScreenBufferSize.X = 120;
+    ConsoleInfo->ScreenBufferSize.Y = 9001;
+    ConsoleInfo->WindowSize.X = 120;
+    ConsoleInfo->WindowSize.Y = 30;
 
     ConsoleInfo->FullScreen   = FALSE;
     ConsoleInfo->AutoPosition = TRUE;
