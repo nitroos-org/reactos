@@ -49,6 +49,7 @@ list(APPEND SOURCE
     SHBindToFolderIDListParent.cpp
     SHChangeNotify.cpp
     SHCreateDataObject.cpp
+    SHCreateSessionKey.cpp
     SHCreateFileDataObject.cpp
     SHCreateFileExtractIconW.cpp
     SHEmptyRecycleBin.cpp

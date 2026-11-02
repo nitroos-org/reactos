@@ -51,6 +51,7 @@ extern void func_RegenerateUserEnvironment(void);
 extern void func_SHAppBarMessage(void);
 extern void func_SHChangeNotify(void);
 extern void func_SHCreateDataObject(void);
+extern void func_SHCreateSessionKey(void);
 extern void func_SHCreateFileDataObject(void);
 extern void func_SHCreateFileExtractIconW(void);
 extern void func_SHDefExtractIcon(void);
@@ -140,6 +141,7 @@ const struct test winetest_testlist[] =
     { "SHAppBarMessage", func_SHAppBarMessage },
     { "SHChangeNotify", func_SHChangeNotify },
     { "SHCreateDataObject", func_SHCreateDataObject },
+    { "SHCreateSessionKey", func_SHCreateSessionKey },
     { "SHCreateFileDataObject", func_SHCreateFileDataObject },
     { "SHCreateFileExtractIconW", func_SHCreateFileExtractIconW },
     { "SHDefExtractIcon", func_SHDefExtractIcon },
