@@ -29,6 +29,7 @@ list(APPEND SOURCE
     Int64ToString.cpp
     IApplicationAssociationRegistration.cpp
     IDestinationList.cpp
+    IFileOperation.cpp
     IQueryAssociations.cpp
     IShellFolderViewCB.cpp
     ItemIDList.cpp
