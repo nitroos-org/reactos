@@ -256,6 +256,11 @@ KeTrapFrameToContext(IN PKTRAP_FRAME TrapFrame,
             _ReadWriteBarrier();
             RtlCopyMemory(&Context->FltSave, &Floating,
                           FIELD_OFFSET(XMM_SAVE_AREA32, XmmRegisters));
+
+            /* The state of the processor here is the kernel one, its MXCSR is
+               not the one of the interrupted code (the 32-bit context is
+               built from this area) */
+            Context->FltSave.MxCsr = TrapFrame->MxCsr;
         }
 #endif
         Context->MxCsr = TrapFrame->MxCsr;
@@ -322,6 +327,15 @@ KeTrapFrameToContext(IN PKTRAP_FRAME TrapFrame,
             Context->SegEs = TrapFrame->SegEs;
             Context->SegFs = TrapFrame->SegFs;
             Context->SegGs = TrapFrame->SegGs;
+
+            /* DS and ES are not used in 64-bit mode and the processor does not
+               save them on a trap, so whatever user mode loaded into them is
+               not part of its context: Windows always reports the data selector */
+            if (TrapFrame->SegCs == (KGDT64_R3_CODE | RPL_MASK))
+            {
+                Context->SegDs = KGDT64_R3_DATA | RPL_MASK;
+                Context->SegEs = KGDT64_R3_DATA | RPL_MASK;
+            }
         }
     }
 

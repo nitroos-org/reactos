@@ -139,6 +139,11 @@ KeInitializeProcess(IN OUT PKPROCESS Process,
     Process->AutoAlignment = Enable;
 #if defined(_M_IX86)
     Process->IopmOffset = KiComputeIopmOffset(IO_ACCESS_MAP_NONE);
+#elif defined(_M_AMD64)
+    /* No I/O permission bitmap. An offset of 0 would make the TSS itself the
+       bitmap, and user mode could access every port whose bit is clear there.
+       Point past the TSS limit, so every port access from user mode faults. */
+    Process->IopmOffset = sizeof(KTSS64);
 #endif
 
     /* Initialize the lists */

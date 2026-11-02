@@ -374,7 +374,7 @@ KiDispatchException(IN PEXCEPTION_RECORD ExceptionRecord,
             /* The exception address of an int3 is the int3 itself (as on i386
                and Windows); the trap frame, which a debugger reads, keeps the
                address after it. Debug services keep the address after the int3. */
-            if ((ExceptionRecord->NumberParameters == 3) &&
+            if ((ExceptionRecord->NumberParameters >= 1) &&
                 (ExceptionRecord->ExceptionInformation[0] == BREAKPOINT_BREAK))
             {
                 ExceptionRecord->ExceptionAddress = (PVOID)Context.Rip;
@@ -621,6 +621,20 @@ KiIsPrivilegedInstruction(PUCHAR Ip, BOOLEAN Wow64)
 
     switch (Ip[0])
     {
+        /* Port I/O. Without an I/O permission bitmap every access from user
+           mode faults, which Windows reports as a privileged instruction. */
+        case 0x6C: // INSB
+        case 0x6D: // INSW / INSD
+        case 0x6E: // OUTSB
+        case 0x6F: // OUTSW / OUTSD
+        case 0xE4: // IN AL, imm8
+        case 0xE5: // IN eAX, imm8
+        case 0xE6: // OUT imm8, AL
+        case 0xE7: // OUT imm8, eAX
+        case 0xEC: // IN AL, DX
+        case 0xED: // IN eAX, DX
+        case 0xEE: // OUT DX, AL
+        case 0xEF: // OUT DX, eAX
         case 0xF4: // HLT
         case 0xFA: // CLI
         case 0xFB: // STI
@@ -721,7 +735,7 @@ NTSTATUS
 KiGeneralProtectionFaultUserMode(
     _In_ PKTRAP_FRAME TrapFrame)
 {
-    BOOLEAN Wow64 = TrapFrame->SegCs == KGDT64_R3_CMCODE;
+    BOOLEAN Wow64 = TrapFrame->SegCs == (KGDT64_R3_CMCODE | RPL_MASK);
     PUCHAR InstructionPointer;
     NTSTATUS Status;
 
@@ -850,6 +864,14 @@ KiXmmExceptionHandler(
     {
         /* Should not happen */
         ASSERT(FALSE);
+        ExceptionCode = STATUS_FLOAT_INVALID_OPERATION;
+    }
+
+    /* A 32-bit thread gets the one code of the i386 SIMD exception, the cause
+       is in the MXCSR value that is passed as the second parameter */
+    if (TrapFrame->SegCs == (KGDT64_R3_CMCODE | RPL_MASK))
+    {
+        ExceptionCode = STATUS_FLOAT_MULTIPLE_TRAPS;
     }
 
     return ExceptionCode;

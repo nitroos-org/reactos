@@ -274,8 +274,8 @@ FUNC KiBreakpointTrap
     sti
 
 KiBreakpointTrapKMode:
-    /* Dispatch the exception */
-    DispatchException STATUS_BREAKPOINT, 3, BREAKPOINT_BREAK, 0, 0
+    /* Dispatch the exception. Like Windows x64, int3 has one parameter */
+    DispatchException STATUS_BREAKPOINT, 1, BREAKPOINT_BREAK, 0, 0
 
     /* Return */
     ExitTrap TF_SAVE_ALL
@@ -643,10 +643,10 @@ FUNC KiXmmException
     test eax, eax
     jge KiXmmExit
 
-    /* Dispatch the exception */
-    DispatchException eax, 2, 0, [rbp+KTRAP_FRAME_MxCsr], 0
-
-    // FIXME: STATUS_FLOAT_MULTIPLE_TRAPS / STATUS_FLOAT_MULTIPLE_FAULTS
+    /* Dispatch the exception. The second parameter is the 32 bit MXCSR value
+       (r10 is moved to itself by the macro, eax holds the status) */
+    mov r10d, dword ptr [rbp+KTRAP_FRAME_MxCsr]
+    DispatchException eax, 2, 0, r10, 0
 
 KiXmmExit:
     /* Return */
@@ -725,10 +725,17 @@ FUNC KiDebugServiceTrap
     /* Enable interrupts for user-mode */
     sti
 
+    /* User mode: like Windows x64, only the service number is a parameter. The
+       buffer and length registers stay in the record for the kernel debugger
+       (they are not copied to user mode, the parameter count is 1) */
+    DispatchException STATUS_BREAKPOINT, 1, [rbp+KTRAP_FRAME_Rax], [rbp+KTRAP_FRAME_Rcx], [rbp+KTRAP_FRAME_Rdx]
+    jmp KiDebugServiceExit
+
 KiDebugServiceTrapKMode:
     /* Dispatch the exception (Params = service, buffer, legth) */
     DispatchException STATUS_BREAKPOINT, 3, [rbp+KTRAP_FRAME_Rax], [rbp+KTRAP_FRAME_Rcx], [rbp+KTRAP_FRAME_Rdx]
 
+KiDebugServiceExit:
     /* Return */
     ExitTrap TF_SAVE_ALL
 ENDFUNC
