@@ -75,6 +75,7 @@ extern void func_NcPaintActive(void);
 extern void func_NcPaintClient(void);
 extern void func_NcPaintRgn(void);
 extern void func_NextDlgItem(void);
+extern void func_PaintDesktopSwitch(void);
 extern void func_PrintWindow(void);
 extern void func_PrivateExtractIcons(void);
 extern void func_ProcessConnectTerminate(void);
@@ -203,6 +204,7 @@ const struct test winetest_testlist[] =
     { "NcPaintClient", func_NcPaintClient },
     { "NcPaintRgn", func_NcPaintRgn },
     { "NextDlgItem", func_NextDlgItem },
+    { "PaintDesktopSwitch", func_PaintDesktopSwitch },
     { "PrintWindow", func_PrintWindow },
     { "PrivateExtractIcons", func_PrivateExtractIcons },
     { "ProcessConnectTerminate", func_ProcessConnectTerminate },

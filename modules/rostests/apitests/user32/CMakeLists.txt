@@ -76,6 +76,7 @@ list(APPEND SOURCE
     NcPaintClient.c
     NcPaintRgn.c
     NextDlgItem.c
+    PaintDesktopSwitch.c
     PrivateExtractIcons.c
     ProcessConnectTerminate.c
     RawInput.c
