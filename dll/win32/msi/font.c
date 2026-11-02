@@ -22,6 +22,7 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winerror.h"
+#include "winuser.h"
 #include "winreg.h"
 #include "wine/debug.h"
 #include "msipriv.h"
@@ -261,6 +262,10 @@ static UINT ITERATE_RegisterFonts(MSIRECORD *row, LPVOID param)
     RegCloseKey(hkey1);
     RegCloseKey(hkey2);
 
+    /* As on Windows, make the font usable now: the registry alone is read at the next boot. */
+    if (AddFontResourceW( file->TargetPath ))
+        package->fonts_changed = TRUE;
+
     /* the UI chunk */
     uirow = MSI_CreateRecord( 1 );
     uipath = wcsdup( file->TargetPath );
@@ -274,6 +279,15 @@ static UINT ITERATE_RegisterFonts(MSIRECORD *row, LPVOID param)
     /* FIXME: call msi_ui_progress? */
 
     return ERROR_SUCCESS;
+}
+
+static void broadcast_font_change( MSIPACKAGE *package )
+{
+    DWORD_PTR result;
+
+    if (!package->fonts_changed) return;
+    package->fonts_changed = FALSE;
+    SendMessageTimeoutW( HWND_BROADCAST, WM_FONTCHANGE, 0, 0, SMTO_ABORTIFHUNG, 1000, &result );
 }
 
 UINT ACTION_RegisterFonts(MSIPACKAGE *package)
@@ -290,6 +304,7 @@ UINT ACTION_RegisterFonts(MSIPACKAGE *package)
 
     rc = MSI_IterateRecords(view, NULL, ITERATE_RegisterFonts, package);
     msiobj_release(&view->hdr);
+    broadcast_font_change( package );
     return rc;
 }
 
@@ -342,6 +357,9 @@ static UINT ITERATE_UnregisterFonts( MSIRECORD *row, LPVOID param )
     RegCloseKey( hkey1 );
     RegCloseKey( hkey2 );
 
+    if (RemoveFontResourceW( file->TargetPath ))
+        package->fonts_changed = TRUE;
+
     /* the UI chunk */
     uirow = MSI_CreateRecord( 1 );
     uipath = wcsdup( file->TargetPath );
@@ -371,5 +389,6 @@ UINT ACTION_UnregisterFonts( MSIPACKAGE *package )
 
     r = MSI_IterateRecords( view, NULL, ITERATE_UnregisterFonts, package );
     msiobj_release( &view->hdr );
+    broadcast_font_change( package );
     return r;
 }
