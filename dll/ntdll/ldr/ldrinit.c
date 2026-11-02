@@ -2455,7 +2455,7 @@ LdrpInitializeProcessCompat(PVOID pProcessActctx, PVOID* pOldShimData)
 
                 /* Store the selected version, and bail out. */
                 pShimData->dwRosProcessCompatVersion = KnownCompatGuids[cur].Version;
-                DPRINT1("LdrpInitializeProcessCompat: Found guid for winver 0x%x in manifest from %wZ\n",
+                DPRINT("LdrpInitializeProcessCompat: Found guid for winver 0x%x in manifest from %wZ\n",
                         KnownCompatGuids[cur].Version,
                         &(NtCurrentPeb()->ProcessParameters->ImagePathName));
                 return;

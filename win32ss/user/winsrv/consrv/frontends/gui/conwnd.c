@@ -484,6 +484,34 @@ ResizeConWnd(PGUI_CONSOLE_DATA GuiData, PCONWND_GEOMETRY Geo)
     // to: InvalidateRect(GuiData->hWindow, NULL, TRUE);
 }
 
+/*
+ * The framebuffer covers the view (and one more cell for a partial one), not the whole
+ * screen buffer: the default 120x9001 buffer would be a 540 MB bitmap committed in CSRSS
+ * for every console window. Painting composes only the part of the view that is dirty
+ * (see GuiPaintTextModeBuffer), at view coordinates. Window thread only.
+ */
+static VOID
+GuiSetFrameSize(PGUI_CONSOLE_DATA GuiData, HDC hDC, PCONWND_GEOMETRY Geo)
+{
+    int Width  = (int)(Geo->ViewSize.X + 1) * (int)Geo->WidthUnit;
+    int Height = (int)(Geo->ViewSize.Y + 1) * (int)Geo->HeightUnit;
+    HBITMAP hnew, hold;
+
+    if (GuiData->hBitmap && GuiData->FrameWidth == Width && GuiData->FrameHeight == Height)
+        return;
+
+    hnew = CreateFrameBufferBitmap(hDC, Width, Height);
+    if (!hnew) return;
+    hold = SelectObject(GuiData->hMemDC, hnew);
+    if (GuiData->hBitmap)
+    {
+        if (hold == GuiData->hBitmap) DeleteObject(GuiData->hBitmap);
+    }
+    GuiData->hBitmap = hnew;
+    GuiData->FrameWidth  = Width;
+    GuiData->FrameHeight = Height;
+}
+
 /* Rebuild the framebuffer for the active buffer and resize the window to it. Window thread only. */
 static VOID
 GuiResizeFrame(PGUI_CONSOLE_DATA GuiData)
@@ -491,7 +519,6 @@ GuiResizeFrame(PGUI_CONSOLE_DATA GuiData)
     PCONSRV_CONSOLE Console = GuiData->Console;
     CONWND_GEOMETRY Geo;
     HDC hDC;
-    HBITMAP hnew, hold;
 
     /* Do nothing if the window is hidden */
     if (!GuiData->IsWindowVisible) return;
@@ -506,16 +533,9 @@ GuiResizeFrame(PGUI_CONSOLE_DATA GuiData)
     LeaveCriticalSection(&Console->Lock);
 
     /* Recreate the framebuffer */
-    hDC  = GetDC(GuiData->hWindow);
-    hnew = CreateFrameBufferBitmap(hDC, Geo.ScreenBufferSize.X * Geo.WidthUnit,
-                                        Geo.ScreenBufferSize.Y * Geo.HeightUnit);
+    hDC = GetDC(GuiData->hWindow);
+    GuiSetFrameSize(GuiData, hDC, &Geo);
     ReleaseDC(GuiData->hWindow, hDC);
-    hold = SelectObject(GuiData->hMemDC, hnew);
-    if (GuiData->hBitmap)
-    {
-        if (hold == GuiData->hBitmap) DeleteObject(GuiData->hBitmap);
-    }
-    GuiData->hBitmap = hnew;
 
     /* Resize the window to the user's values */
     GuiData->WindowSizeLock = TRUE;
@@ -1123,6 +1143,11 @@ OnPaint(PGUI_CONSOLE_DATA GuiData)
 
         if (ActiveBuffer)
         {
+            /* The view may have been resized (by the user, or by a request not processed yet) */
+            CONWND_GEOMETRY Geo;
+            GetConWndGeometry(GuiData, ActiveBuffer, &Geo);
+            GuiSetFrameSize(GuiData, ps.hdc, &Geo);
+
             /* Compose the current screen-buffer on-memory */
             if (GetType(ActiveBuffer) == TEXTMODE_BUFFER)
             {

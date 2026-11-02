@@ -118,7 +118,10 @@ GuiPasteToGraphicsBuffer(PGRAPHICS_SCREEN_BUFFER Buffer,
     UNIMPLEMENTED;
 }
 
-/* Compose the framebuffer. The console must be locked. */
+/*
+ * Compose the framebuffer. The console must be locked.
+ * The framebuffer holds the view only; rcFramebuffer is returned in view coordinates (rcView).
+ */
 BOOL
 GuiPaintGraphicsBuffer(PGRAPHICS_SCREEN_BUFFER Buffer,
                        PGUI_CONSOLE_DATA GuiData,
@@ -145,9 +148,9 @@ GuiPaintGraphicsBuffer(PGRAPHICS_SCREEN_BUFFER Buffer,
      * in bottom-up or top-down mode.
      */
     SetDIBitsToDevice(GuiData->hMemDC,
-                      /* Coordinates / size of the repainted rectangle, in the framebuffer's frame */
-                      rcFramebuffer->left,
-                      rcFramebuffer->top,
+                      /* Coordinates / size of the repainted rectangle, in the framebuffer's frame (the view) */
+                      rcView->left,
+                      rcView->top,
                       rcFramebuffer->right  - rcFramebuffer->left,
                       rcFramebuffer->bottom - rcFramebuffer->top,
                       /* Coordinates / size of the corresponding image portion, in the graphics screen-buffer's frame */
@@ -161,6 +164,9 @@ GuiPaintGraphicsBuffer(PGRAPHICS_SCREEN_BUFFER Buffer,
 
     /* Release the mutex */
     NtReleaseMutant(Buffer->Mutex, NULL);
+
+    /* What goes to the screen is the same rectangle of the view */
+    *rcFramebuffer = *rcView;
 
     return TRUE;
 }

@@ -339,7 +339,9 @@ GuiPaintCaret(
     ULONG TopLine,
     ULONG BottomLine,
     ULONG LeftColumn,
-    ULONG RightColumn)
+    ULONG RightColumn,
+    LONG OriginX,
+    LONG OriginY)
 {
     PCONSRV_CONSOLE Console = (PCONSRV_CONSOLE)Buffer->Header.Console;
 
@@ -369,8 +371,8 @@ GuiPaintCaret(
             {
                 /* The caret is on the leading byte */
                 PatBlt(GuiData->hMemDC,
-                       CursorX * GuiData->CharWidth,
-                       CursorY * GuiData->CharHeight + (GuiData->CharHeight - CursorHeight),
+                       (LONG)(CursorX * GuiData->CharWidth) - OriginX,
+                       (LONG)(CursorY * GuiData->CharHeight + (GuiData->CharHeight - CursorHeight)) - OriginY,
                        GuiData->CharWidth * 2,
                        CursorHeight,
                        PATCOPY);
@@ -379,8 +381,8 @@ GuiPaintCaret(
             {
                 /* The caret is on the trailing byte */
                 PatBlt(GuiData->hMemDC,
-                       (CursorX - 1) * GuiData->CharWidth,
-                       CursorY * GuiData->CharHeight + (GuiData->CharHeight - CursorHeight),
+                       (LONG)((CursorX - 1) * GuiData->CharWidth) - OriginX,
+                       (LONG)(CursorY * GuiData->CharHeight + (GuiData->CharHeight - CursorHeight)) - OriginY,
                        GuiData->CharWidth * 2,
                        CursorHeight,
                        PATCOPY);
@@ -388,8 +390,8 @@ GuiPaintCaret(
             else
             {
                 PatBlt(GuiData->hMemDC,
-                       CursorX * GuiData->CharWidth,
-                       CursorY * GuiData->CharHeight + (GuiData->CharHeight - CursorHeight),
+                       (LONG)(CursorX * GuiData->CharWidth) - OriginX,
+                       (LONG)(CursorY * GuiData->CharHeight + (GuiData->CharHeight - CursorHeight)) - OriginY,
                        GuiData->CharWidth,
                        CursorHeight,
                        PATCOPY);
@@ -401,7 +403,11 @@ GuiPaintCaret(
     }
 }
 
-/* Compose the framebuffer. The console must be locked. */
+/*
+ * Compose the framebuffer. The console must be locked.
+ * The framebuffer holds the view only: the cells are drawn at their position in the view
+ * and rcFramebuffer, the part to send to the screen, is in view coordinates (rcView).
+ */
 BOOL
 GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
                        PGUI_CONSOLE_DATA GuiData,
@@ -416,6 +422,7 @@ GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
     WORD LastAttribute, Attribute;
     HFONT OldFont, NewFont;
     BOOLEAN IsUnderline;
+    LONG OriginX, OriginY;
 
     // ASSERT(Console == GuiData->Console);
 
@@ -429,6 +436,10 @@ GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
                       Buffer->ViewOrigin.X * GuiData->CharWidth  + rcView->left,
                       Buffer->ViewOrigin.Y * GuiData->CharHeight + rcView->bottom,
                       Buffer->ViewOrigin.X * GuiData->CharWidth  + rcView->right);
+
+    /* Where the view starts, in the buffer's pixels */
+    OriginX = Buffer->ViewOrigin.X * GuiData->CharWidth;
+    OriginY = Buffer->ViewOrigin.Y * GuiData->CharHeight;
 
     LeftColumn  = rcFramebuffer->left  / GuiData->CharWidth;
     RightColumn = rcFramebuffer->right / GuiData->CharWidth;
@@ -476,8 +487,8 @@ GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
                     continue;
 
                 TextOutW(GuiData->hMemDC,
-                         Char * GuiData->CharWidth,
-                         Line * GuiData->CharHeight,
+                         (LONG)(Char * GuiData->CharWidth) - OriginX,
+                         (LONG)(Line * GuiData->CharHeight) - OriginY,
                          &From->Char.UnicodeChar, 1);
             }
         }
@@ -500,8 +511,8 @@ GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
                 if (From->Attributes != LastAttribute || (Char - Start == sizeof(LineBuffer) / sizeof(WCHAR)))
                 {
                     TextOutW(GuiData->hMemDC,
-                             Start * GuiData->CharWidth,
-                             Line  * GuiData->CharHeight,
+                             (LONG)(Start * GuiData->CharWidth) - OriginX,
+                             (LONG)(Line  * GuiData->CharHeight) - OriginY,
                              LineBuffer,
                              Char - Start);
                     Start = Char;
@@ -528,8 +539,8 @@ GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
             }
 
             TextOutW(GuiData->hMemDC,
-                     Start * GuiData->CharWidth,
-                     Line  * GuiData->CharHeight,
+                     (LONG)(Start * GuiData->CharWidth) - OriginX,
+                     (LONG)(Line  * GuiData->CharHeight) - OriginY,
                      LineBuffer,
                      RightColumn - Start + 1);
         }
@@ -539,7 +550,10 @@ GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
     SelectObject(GuiData->hMemDC, OldFont);
 
     /* Draw the caret */
-    GuiPaintCaret(Buffer, GuiData, TopLine, BottomLine, LeftColumn, RightColumn);
+    GuiPaintCaret(Buffer, GuiData, TopLine, BottomLine, LeftColumn, RightColumn, OriginX, OriginY);
+
+    /* What goes to the screen is the same rectangle of the view */
+    *rcFramebuffer = *rcView;
 
     return TRUE;
 }
