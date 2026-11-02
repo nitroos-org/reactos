@@ -836,7 +836,8 @@ typedef struct _KUSER_SHARED_DATA
     // When QpcBypassEnabled has SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED, the
     // counter is ((TSC * QpcMultiplier / 2^64) + QpcBias) >> QpcShift, the
     // TSC taken as the other QPC_BYPASS flags say (QpcMultiplier 0: the TSC
-    // as it is); otherwise NtQueryPerformanceCounter gives it.
+    // as it is); otherwise NtQueryPerformanceCounter gives it, from the same
+    // TSC (the flag chooses the speed of the read, not its safety).
     //
     ULONGLONG QpcFrequency;                                 // 0x6c0
     volatile ULONGLONG QpcBias;                             // 0x6c8

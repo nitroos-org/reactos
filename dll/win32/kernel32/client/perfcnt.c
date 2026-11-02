@@ -27,7 +27,8 @@ QueryPerformanceCounter(OUT PLARGE_INTEGER lpPerformanceCount)
     NTSTATUS Status;
 
 #if defined(_M_IX86) || defined(_M_AMD64)
-    /* From the TSC in user mode, as the kernel computes it, when it allows */
+    /* The kernel's own TSC read and scaling, without the system call when the
+       kernel enabled that (a speed choice: the counter is the same either way) */
     if (RosQpcQueryBypass(lpPerformanceCount))
         return TRUE;
 #endif

@@ -89,6 +89,11 @@ static BOOLEAN HalpKvmTscStable;
 static ULONG64 HalpQpcMultiplier;
 static LARGE_INTEGER HalpQpcFrequency;
 
+/* How KeQueryPerformanceCounter orders its TSC read: the QPC_BYPASS fence
+   flags (RDTSCP, MFENCE, LFENCE) that user mode uses, which depend on the CPU
+   only; no fence (0) until HalpPublishPerformanceCounter has chosen them */
+static volatile UCHAR HalpQpcReadFlags;
+
 /* Checking that the TSCs of the processors are in step */
 #define TSC_WARP_LOOPS 20000
 #define TSC_WARP_MINIMUM_LOOPS 2000
@@ -407,6 +412,10 @@ HalpGetKvmClockFrequency(VOID)
     CHAR Shift;
     ULONG64 Frequency;
 
+    /* Not stable until this read says so: a failed read must not keep the
+       answer of an earlier one */
+    HalpKvmTscStable = FALSE;
+
     /* An old KVM leaves the highest leaf 0 and has the features leaf (Linux
        reads it without looking at the highest leaf); otherwise a highest leaf
        below the features leaf, as the signature leaf alone, means it is not
@@ -699,8 +708,8 @@ KeQueryPerformanceCounter(
         *PerformanceFrequency = HalpQpcFrequency.QuadPart ? HalpQpcFrequency : HalpCpuClockFrequency;
     }
 
-    /* The TSC, scaled as user mode scales it (rosqpc.h) */
-    Result.QuadPart = RosQpcFromTsc(__rdtsc(), HalpQpcMultiplier, 0, 0);
+    /* The TSC, read in order and scaled as user mode does (rosqpc.h) */
+    Result.QuadPart = RosQpcFromTsc(RosQpcReadTsc(HalpQpcReadFlags), HalpQpcMultiplier, 0, 0);
     return Result;
 }
 
@@ -763,11 +772,18 @@ HalpTscWarpWorker(
     \brief Lets user mode read the performance counter without a system call.
 
     Called when all processors run. The counter fields of the shared user
-    data are published in any case. User mode reads the TSC of the processor
-    it runs on, so the bypass is enabled only when that gives one counter for
-    all of them: the TSC must be invariant (CPUID 0x80000007 EDX bit 8, or
-    the stable bit of KVM's paravirtual clock) and no processor's TSC may be
-    seen behind another's. Otherwise the system call gives the counter.
+    data are published in any case. The bypass flag only lets user mode read
+    the TSC itself instead of asking the kernel; the counter is the TSC either
+    way (KeQueryPerformanceCounter is a raw TSC read), so this decides how
+    fast it is read, not whether it can go back. User mode reads the TSC of
+    the processor it runs on, which is worth doing only when that is one
+    counter for all of them: the TSC must look invariant (CPUID 0x80000007 EDX
+    bit 8, or the stable bit of KVM's paravirtual clock) and no processor's TSC
+    may be seen behind another's. Otherwise the system call is kept, which
+    does not make the counter safer: a TSC that changes under the guest (a
+    migration to a host with another TSC, a host TSC change) can still make it
+    jump either way. The fence flags are chosen in any case (see
+    HalpQpcReadFlags) so that both reads are ordered alike.
 */
 VOID
 NTAPI
@@ -775,8 +791,8 @@ HalpPublishPerformanceCounter(VOID)
 {
     INT CpuInfo[4];
     ULONG MaximumExtended, Processors;
-    BOOLEAN Invariant = FALSE, Rdtscp = FALSE, Amd;
-    UCHAR Flags;
+    BOOLEAN Invariant = FALSE, Rdtscp = FALSE, Amd, Sse2;
+    UCHAR Flags, ReadFlags;
 
     if (!HalpQpcFrequency.QuadPart)
         return;
@@ -786,8 +802,12 @@ HalpPublishPerformanceCounter(VOID)
     SharedUserData->QpcShift = 0;
     SharedUserData->QpcFrequency = (ULONGLONG)HalpQpcFrequency.QuadPart;
 
+    /* AMD and Hygon (AMD-derived) order RDTSC with MFENCE, others with LFENCE */
     __cpuid(CpuInfo, 0);
-    Amd = (CpuInfo[1] == 0x68747541); /* "Auth"enticAMD */
+    Amd = (CpuInfo[1] == 0x68747541) ||  /* "Auth"enticAMD */
+          (CpuInfo[1] == 0x6f677948);    /* "Hygo"nGenuine */
+    __cpuid(CpuInfo, 1);
+    Sse2 = (CpuInfo[3] & (1 << 26)) != 0;
     __cpuid(CpuInfo, 0x80000000);
     MaximumExtended = (ULONG)CpuInfo[0];
     if (MaximumExtended >= 0x80000001)
@@ -800,6 +820,18 @@ HalpPublishPerformanceCounter(VOID)
         __cpuid(CpuInfo, 0x80000007);
         Invariant = (CpuInfo[3] & (1 << 8)) != 0;
     }
+
+    /* The TSC read in order, as Windows does: RDTSCP, else a fence first
+       (the fences are SSE2). KeQueryPerformanceCounter reads it the same way
+       whether or not user mode may */
+    ReadFlags = 0;
+    if (Rdtscp)
+        ReadFlags = SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP;
+    else if (Sse2)
+        ReadFlags = Amd ? SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_MFENCE :
+                          SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_LFENCE;
+    HalpQpcReadFlags = ReadFlags;
+
     if (!Invariant)
     {
         /* Reads the stable bit, on this processor */
@@ -808,7 +840,7 @@ HalpPublishPerformanceCounter(VOID)
     }
     if (!Invariant)
     {
-        DPRINT1("QPC: TSC not invariant, user mode uses the system call\n");
+        DPRINT1("QPC: TSC does not look invariant, user mode uses the (slower) system call\n");
         return;
     }
 
@@ -824,20 +856,13 @@ HalpPublishPerformanceCounter(VOID)
         KeIpiGenericCall(HalpTscWarpWorker, 0);
         if (HalpTscWarps)
         {
-            DPRINT1("QPC: TSCs of the %lu processors out of step (%ld times), user mode uses the system call\n",
+            DPRINT1("QPC: TSCs of the %lu processors out of step (%ld times), user mode uses the (slower) system call\n",
                     Processors, HalpTscWarps);
             return;
         }
     }
 
-    /* The TSC read in order, as Windows does: RDTSCP, else a fence first */
-    Flags = SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED;
-    if (Rdtscp)
-        Flags |= SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP;
-    else if (Amd)
-        Flags |= SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_MFENCE;
-    else
-        Flags |= SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_LFENCE;
+    Flags = SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED | ReadFlags;
 
     _ReadWriteBarrier();
     SharedUserData->QpcBypassEnabled = Flags;
