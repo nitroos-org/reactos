@@ -279,6 +279,14 @@ static const WCHAR *g_LocalNames[] =
 #define LOCAL_LOADED(n) (1 << (2 * (n)))
 #define LOCAL_FROM_APP(n) (1 << (2 * (n) + 1))
 
+/* Windows 7 loads a copy next to the executable for a name that is not one of its own contracts; Windows 10 and
+   ReactOS never load such a copy for a name the schema resolves */
+static BOOL
+LoadsAppLocalContracts(void)
+{
+    return !is_reactos() && GetNTVersion() == 0x0601;
+}
+
 /* The module is the test fixture (localdll), recognised by its marker export: neither the path form nor the location
    of the directory (it can be under the Windows directory, %SystemRoot%\\TEMP) decides */
 static BOOL
@@ -375,9 +383,9 @@ ExtractLocalDll(const WCHAR *Path, BOOL Exclusive)
 
 /*
  * A DLL in the application directory with the name of a contract: Windows 10 ignores it for every contract. Windows 7
- * ignores it for its own contracts and loads it for any other name, which is not a contract there. ReactOS exports at
- * the Windows 7 level and loads such a copy as Windows 7 does (applications that deploy the Universal CRT next to
- * themselves keep it); without a copy, the name resolves as on Windows 10.
+ * ignores it for its own contracts and loads it for any other name, which is not a contract there. ReactOS resolves
+ * every name of its table as Windows 10 does, whatever is next to the executable (applications that deploy the
+ * Universal CRT next to themselves run with the system ucrtbase, as on Windows 10).
  */
 static void
 test_app_local(void)
@@ -401,9 +409,9 @@ test_app_local(void)
         ok(ExtractLocalDll(Dll[n], FALSE), "%ls not written: %lu\n", Dll[n], GetLastError());
     }
 
-    /* Both names load; only the second comes from the application directory, and not on Windows 10 */
+    /* Both names load; only on Windows 7 does the second come from the application directory */
     Expected = CHILD_RAN | LOCAL_LOADED(0) | LOCAL_LOADED(1);
-    if (is_reactos() || GetNTVersion() == 0x0601)
+    if (LoadsAppLocalContracts())
         Expected |= LOCAL_FROM_APP(1);
 
     Code = StartChild(Exe, L"local");
@@ -412,7 +420,7 @@ test_app_local(void)
     /* A directory with the name of a contract is not a copy */
     ok(DeleteFileW(Dll[1]), "DeleteFileW failed with %lu\n", GetLastError());
     ok(CreateDirectoryW(Dll[1], NULL), "CreateDirectoryW failed with %lu\n", GetLastError());
-    if (GetNTVersion() != 0x0601 || is_reactos())
+    if (!LoadsAppLocalContracts())
     {
         Code = StartChild(Exe, L"local");
         ok(Code == (CHILD_RAN | LOCAL_LOADED(0) | LOCAL_LOADED(1)), "directory: child exit code 0x%lx\n", Code);
@@ -420,7 +428,7 @@ test_app_local(void)
     RemoveDirectoryW(Dll[1]);
 
     /* A copy that appears after the first load does not change the module of the name */
-    if (GetNTVersion() != 0x0601 || is_reactos())
+    if (!LoadsAppLocalContracts())
     {
         Code = StartChild(Exe, L"late");
         ok(Code == (CHILD_RAN | LATE_FIRST_LOAD | LATE_SAME_MODULE | LATE_SAME_HANDLE), "late copy: child exit code 0x%lx\n",
@@ -438,7 +446,7 @@ ExpectedWithLocalCopy(void)
 {
     DWORD Expected = CHILD_RAN | LOCAL_LOADED(0) | LOCAL_LOADED(1);
 
-    if (is_reactos() || GetNTVersion() == 0x0601)
+    if (LoadsAppLocalContracts())
         Expected |= LOCAL_FROM_APP(1);
     return Expected;
 }
@@ -518,7 +526,7 @@ SetDenied(const WCHAR *Path, ACCESS_MASK DenyMask)
 
 /*
  * The directory of the executable cannot be listed, but its files can be opened: the copy of a contract next to the
- * executable is still found where Windows 7 finds it.
+ * executable is still found where Windows 7 finds it, and still ignored where Windows 10 ignores it.
  */
 static void
 test_app_local_unlisted(void)
@@ -659,8 +667,8 @@ RunRetryChild(BOOL MakeAbsent, const char *Token)
 }
 
 /*
- * As above, and the attributes of the copy cannot be read either, so the loader cannot tell whether the copy is
- * there. That must not send the name to the system host: the DLL search decides, as on Windows 7.
+ * As above, and the attributes of the copy cannot be read either. Windows 7 then leaves the name to the DLL search;
+ * Windows 10 and ReactOS load the system host whatever the state of the copy.
  */
 static void
 test_app_local_unreadable(void)
@@ -707,7 +715,7 @@ test_app_local_unreadable(void)
         Code = StartChild(Exe, L"local");
         trace("unreadable copy: child exit code 0x%lx\n", Code);
         ok((Code & CHILD_MARK_MASK) == CHILD_RAN, "child did not run to the end: 0x%lx\n", Code);
-        if (is_reactos() || GetNTVersion() == 0x0601)
+        if (LoadsAppLocalContracts())
             ok(!(Code & LOCAL_LOADED(1)) || (Code & LOCAL_FROM_APP(1)), "the system host was used: 0x%lx\n", Code);
         else
             ok((Code & (LOCAL_LOADED(1) | LOCAL_FROM_APP(1))) == LOCAL_LOADED(1), "child exit code 0x%lx\n", Code);
@@ -723,7 +731,7 @@ test_app_local_unreadable(void)
         /* The undecided name is asked again once the copy can be read (the child makes it readable) */
         StringCchPrintfW(Mode, _countof(Mode), L"retry %ls", Token);
         Code = StartChild(Exe, Mode);
-        if (is_reactos() || GetNTVersion() == 0x0601)
+        if (LoadsAppLocalContracts())
             ok(Code == (CHILD_RAN | RETRY_SECOND_LOADED | RETRY_SECOND_LOCAL), "retry: child exit code 0x%lx\n", Code);
         else
             ok(Code == (CHILD_RAN | RETRY_FIRST_LOADED | RETRY_SECOND_LOADED), "retry: child exit code 0x%lx\n", Code);
@@ -732,9 +740,7 @@ test_app_local_unreadable(void)
         ok(SetDenied(Dll, FILE_READ_ATTRIBUTES), "SetFileSecurityW failed with %lu\n", GetLastError());
         StringCchPrintfW(Mode, _countof(Mode), L"retry-absent %ls", Token);
         Code = StartChild(Exe, Mode);
-        if (is_reactos())
-            ok(Code == (CHILD_RAN | RETRY_SECOND_LOADED), "retry-absent: child exit code 0x%lx\n", Code);
-        else if (GetNTVersion() == 0x0601)
+        if (LoadsAppLocalContracts())
             ok(Code == CHILD_RAN, "retry-absent: child exit code 0x%lx\n", Code);
         else
             ok(Code == (CHILD_RAN | RETRY_FIRST_LOADED | RETRY_SECOND_LOADED), "retry-absent: child exit code 0x%lx\n",
