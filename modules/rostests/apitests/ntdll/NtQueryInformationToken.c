@@ -1365,6 +1365,8 @@ QueryTokenHasRestrictionsTests(
 {
     NTSTATUS Status;
     ULONG Length, Value;
+    ULONG FlagStorage;
+    PBOOLEAN Flag = (PBOOLEAN)&FlagStorage;
     HANDLE FilteredToken;
     PSID WorldSid;
     SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
@@ -1374,26 +1376,29 @@ QueryTokenHasRestrictionsTests(
         BYTE Buffer[sizeof(TOKEN_GROUPS) + sizeof(SID_AND_ATTRIBUTES)];
     } SidToRestrict;
 
-    /* Too small buffers report the required length (a ULONG) */
+    /*
+     * The result is a single byte on Windows 10 (measured on 22H2): too small buffers report
+     * one byte, a larger buffer is accepted and only its first byte is written.
+     */
     Length = 0;
     Status = NtQueryInformationToken(Token, TokenHasRestrictions, NULL, 0, &Length);
     ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
-    ok_dec(Length, (ULONG)sizeof(ULONG));
+    ok_dec(Length, (ULONG)sizeof(BOOLEAN));
 
     Length = 0;
-    Value = 0xdeadbeef;
-    Status = NtQueryInformationToken(Token, TokenHasRestrictions, &Value, sizeof(Value) - 1, &Length);
+    *Flag = 0xCC;
+    Status = NtQueryInformationToken(Token, TokenHasRestrictions, Flag, 0, &Length);
     ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
-    ok_dec(Length, (ULONG)sizeof(ULONG));
-    ok_hex(Value, 0xdeadbeef);
+    ok_dec(Length, (ULONG)sizeof(BOOLEAN));
+    ok_hex(*Flag, 0xCC);
 
     /* The current token is not restricted */
     Length = 0;
     Value = 0xdeadbeef;
     Status = NtQueryInformationToken(Token, TokenHasRestrictions, &Value, sizeof(Value), &Length);
     ok_ntstatus(Status, STATUS_SUCCESS);
-    ok_dec(Length, (ULONG)sizeof(ULONG));
-    ok_hex(Value, 0);
+    ok_dec(Length, (ULONG)sizeof(BOOLEAN));
+    ok_hex(Value, 0xdeadbe00);
 
     /* A token with a restricting SID is restricted */
     Status = RtlAllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID,
@@ -1414,13 +1419,13 @@ QueryTokenHasRestrictionsTests(
         Value = 0xdeadbeef;
         Status = NtQueryInformationToken(FilteredToken, TokenHasRestrictions, &Value, sizeof(Value), &Length);
         ok_ntstatus(Status, STATUS_SUCCESS);
-        ok_dec(Length, (ULONG)sizeof(ULONG));
-        ok_hex(Value, 1);
+        ok_dec(Length, (ULONG)sizeof(BOOLEAN));
+        ok_hex(Value, 0xdeadbe01);
 
         Length = 0;
-        Status = NtQueryInformationToken(FilteredToken, TokenHasRestrictions, &Value, sizeof(Value) - 1, &Length);
+        Status = NtQueryInformationToken(FilteredToken, TokenHasRestrictions, Flag, 0, &Length);
         ok_ntstatus(Status, STATUS_BUFFER_TOO_SMALL);
-        ok_dec(Length, (ULONG)sizeof(ULONG));
+        ok_dec(Length, (ULONG)sizeof(BOOLEAN));
 
         NtClose(FilteredToken);
     }

@@ -37,34 +37,34 @@ static const INFORMATION_CLASS_INFO SeTokenInformationClass[] = {
     IQS_SAME(TOKEN_SOURCE, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenType */
     IQS_SAME(TOKEN_TYPE, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
-    /* TokenImpersonationLevel */
-    IQS_SAME(SECURITY_IMPERSONATION_LEVEL, ULONG, ICIF_QUERY),
+    /* TokenImpersonationLevel: Windows accepts a larger buffer */
+    IQS_SAME(SECURITY_IMPERSONATION_LEVEL, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenStatistics */
     IQS_SAME(TOKEN_STATISTICS, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenRestrictedSids */
     IQS_SAME(TOKEN_GROUPS, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
-    /* TokenSessionId */
-    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_SET),
+    /* TokenSessionId: Windows accepts a larger buffer for the query */
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE | ICIF_SET),
     /* TokenGroupsAndPrivileges */
     IQS_SAME(TOKEN_GROUPS_AND_PRIVILEGES, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenSessionReference */
     IQS_SAME(ULONG, ULONG, ICIF_SET),
     /* TokenSandBoxInert */
-    IQS_SAME(ULONG, ULONG, ICIF_QUERY),
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenAuditPolicy */
     IQS_SAME(TOKEN_AUDIT_POLICY_INFORMATION, ULONG, ICIF_SET | ICIF_SET_SIZE_VARIABLE),
     /* TokenOrigin */
-    IQS_SAME(TOKEN_ORIGIN, ULONG, ICIF_QUERY | ICIF_SET),
+    IQS_SAME(TOKEN_ORIGIN, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE | ICIF_SET),
     /* TokenElevationType */
     IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenLinkedToken: Windows insists on the exact size of a handle */
     IQS_SAME(HANDLE, ULONG, ICIF_QUERY),
     /* TokenElevation: Windows insists on the exact size, unlike TokenElevationType */
     IQS_SAME(TOKEN_ELEVATION, ULONG, ICIF_QUERY),
-    /* TokenHasRestrictions */
-    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
-    /* TokenAccessInformation */
-    IQS_NONE,
+    /* TokenHasRestrictions: a BOOLEAN on Windows (one byte is written) */
+    IQS_SAME(BOOLEAN, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    /* TokenAccessInformation: variable size, measured on Windows 10 22H2 */
+    IQS_NO_TYPE_LENGTH(ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenVirtualizationAllowed */
     IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenVirtualizationEnabled */
@@ -79,7 +79,60 @@ static const INFORMATION_CLASS_INFO SeTokenInformationClass[] = {
     IQS_SAME(TOKEN_GROUPS, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenIsAppContainer */
     IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    /* TokenCapabilities: TOKEN_GROUPS, none without an AppContainer */
+    IQS_NO_TYPE_LENGTH(ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    /* TokenAppContainerSid: TOKEN_APPCONTAINER_INFORMATION, a SID pointer */
+    IQS_SAME(PVOID, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    /* TokenAppContainerNumber */
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    /* TokenUserClaimAttributes ... TokenSecurityAttributes (33..39): not implemented */
+    IQS_NONE, IQS_NONE, IQS_NONE, IQS_NONE, IQS_NONE, IQS_NONE, IQS_NONE,
+    /* TokenIsRestricted */
+    IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
+    /* TokenProcessTrustLevel: TOKEN_PROCESS_TRUST_LEVEL, a SID pointer */
+    IQS_SAME(PVOID, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
 };
+
+/* Information classes the DDK headers of this tree do not name (Windows 10 values) */
+#define SepTokenCapabilities        30
+#define SepTokenAppContainerSid     31
+#define SepTokenAppContainerNumber  32
+#define SepTokenIsRestricted        40
+#define SepTokenProcessTrustLevel   41
+
+C_ASSERT(TokenAccessInformation == 22);
+C_ASSERT(TokenIsAppContainer == 29);
+C_ASSERT(SepTokenIsRestricted == TokenIsRestricted);
+
+/*
+ * The TOKEN_ACCESS_INFORMATION of Windows 10. The DDK header of this tree stops
+ * after Flags (the Vista layout); the buffer NtQueryInformationToken fills is
+ * this one: a SID hash, a restricted SID hash, the privileges, the logon
+ * session, the token type and level, the mandatory policy and flags, then the
+ * AppContainer package SID and number, the capability SID hash, the trust
+ * level SID and the security attributes, followed by the data they point to.
+ */
+typedef struct _SEP_TOKEN_ACCESS_INFORMATION
+{
+    PSID_AND_ATTRIBUTES_HASH SidHash;
+    PSID_AND_ATTRIBUTES_HASH RestrictedSidHash;
+    PTOKEN_PRIVILEGES Privileges;
+    LUID AuthenticationId;
+    TOKEN_TYPE TokenType;
+    SECURITY_IMPERSONATION_LEVEL ImpersonationLevel;
+    TOKEN_MANDATORY_POLICY MandatoryPolicy;
+    ULONG Flags;
+    ULONG AppContainerNumber;
+    PSID PackageSid;
+    PSID_AND_ATTRIBUTES_HASH CapabilitiesHash;
+    PSID TrustLevelSid;
+    PVOID SecurityAttributes;
+} SEP_TOKEN_ACCESS_INFORMATION, *PSEP_TOKEN_ACCESS_INFORMATION;
+
+/* The TokenFlags Windows 10 reports in TOKEN_ACCESS_INFORMATION.Flags (measured: the privilege summary bits stay out; TOKEN_WRITE_RESTRICTED shares its value with this kernel's TOKEN_HAS_ADMIN_GROUP and is not reported) */
+#define SEP_ACCESS_INFORMATION_FLAGS \
+    (TOKEN_IS_RESTRICTED | TOKEN_SANDBOX_INERT | TOKEN_VIRTUALIZE_ALLOWED | \
+     TOKEN_VIRTUALIZE_ENABLED | TOKEN_IS_FILTERED | TOKEN_UIACCESS | TOKEN_NOT_LOW)
 
 /* TOKEN_ELEVATION_TYPE values (the enum is declared in user-mode headers only) */
 #define SEP_ELEVATION_TYPE_DEFAULT  1 /* TokenElevationTypeDefault */
@@ -155,6 +208,118 @@ SepIsTokenElevated(
     }
 
     return FALSE;
+}
+
+/**
+ * @brief
+ * Builds the TokenAccessInformation answer. The caller holds the token lock.
+ *
+ * Layout (measured on Windows 10 22H2, x64): the header, the SID hash of the
+ * user and groups followed by their SID_AND_ATTRIBUTES array and SIDs, the
+ * restricted SID hash (and its array and SIDs when there are any), the empty
+ * capability SID hash, and the privileges. Every pointer points into the
+ * caller's buffer. The SID hashes are filled with all bits set: Windows keeps
+ * a bloom filter there that nothing in user mode reads, and a saturated filter
+ * is the one that is always safe (a reader falls back to comparing the SIDs).
+ * No TSA security attributes exist here, so SecurityAttributes is NULL where
+ * Windows points at the process-unique attribute.
+ *
+ * With a NULL Buffer only the size is computed.
+ */
+static
+NTSTATUS
+SepBuildTokenAccessInformation(
+    _In_ PTOKEN Token,
+    _Out_writes_bytes_opt_(Length) PUCHAR Buffer,
+    _In_ ULONG Length,
+    _Out_ PULONG Required)
+{
+    ULONG HeaderSize = ALIGN_UP_BY(sizeof(SEP_TOKEN_ACCESS_INFORMATION), sizeof(PVOID));
+    ULONG HashSize = ALIGN_UP_BY(sizeof(SID_AND_ATTRIBUTES_HASH), sizeof(PVOID));
+    ULONG SidsSize, RestrictedSize = 0, PrivilegesSize, Total, Offset, i;
+    PSEP_TOKEN_ACCESS_INFORMATION Info = (PSEP_TOKEN_ACCESS_INFORMATION)Buffer;
+    PSID_AND_ATTRIBUTES_HASH Hash;
+    PUCHAR SidEnd;
+    ULONG Left;
+    NTSTATUS Status;
+
+    SidsSize = Token->UserAndGroupCount * sizeof(SID_AND_ATTRIBUTES) +
+               RtlLengthSidAndAttributes(Token->UserAndGroupCount, Token->UserAndGroups);
+    SidsSize = ALIGN_UP_BY(SidsSize, sizeof(PVOID));
+    if (Token->RestrictedSidCount > 0)
+    {
+        RestrictedSize = Token->RestrictedSidCount * sizeof(SID_AND_ATTRIBUTES) +
+                         RtlLengthSidAndAttributes(Token->RestrictedSidCount, Token->RestrictedSids);
+        RestrictedSize = ALIGN_UP_BY(RestrictedSize, sizeof(PVOID));
+    }
+    PrivilegesSize = ALIGN_UP_BY(FIELD_OFFSET(TOKEN_PRIVILEGES, Privileges[Token->PrivilegeCount]), sizeof(PVOID));
+
+    Total = HeaderSize + HashSize + SidsSize + HashSize + RestrictedSize + HashSize + PrivilegesSize;
+    *Required = Total;
+    if (Buffer == NULL || Length < Total)
+        return STATUS_BUFFER_TOO_SMALL;
+
+    RtlZeroMemory(Buffer, Total);
+    Info->AuthenticationId = Token->AuthenticationId;
+    Info->TokenType = Token->TokenType;
+    Info->ImpersonationLevel = Token->ImpersonationLevel;
+    Info->MandatoryPolicy.Policy = SEP_MANDATORY_POLICY_DEFAULT;
+    Info->Flags = Token->TokenFlags & SEP_ACCESS_INFORMATION_FLAGS;
+    if (Token->IntegrityLevel > SECURITY_MANDATORY_LOW_RID)
+        Info->Flags |= TOKEN_NOT_LOW;
+
+    /* The user and groups */
+    Offset = HeaderSize;
+    Hash = (PSID_AND_ATTRIBUTES_HASH)(Buffer + Offset);
+    Info->SidHash = Hash;
+    Offset += HashSize;
+    Hash->SidCount = Token->UserAndGroupCount;
+    Hash->SidAttr = (PSID_AND_ATTRIBUTES)(Buffer + Offset);
+    for (i = 0; i < SID_HASH_SIZE; i++)
+        Hash->Hash[i] = ~(SID_HASH_ENTRY)0;
+    Status = RtlCopySidAndAttributesArray(Token->UserAndGroupCount,
+                                          Token->UserAndGroups,
+                                          SidsSize - Token->UserAndGroupCount * sizeof(SID_AND_ATTRIBUTES),
+                                          Hash->SidAttr,
+                                          (PSID)&Hash->SidAttr[Token->UserAndGroupCount],
+                                          (PVOID *)&SidEnd,
+                                          &Left);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Offset += SidsSize;
+
+    /* The restricted SIDs; the hash exists even when there are none */
+    Hash = (PSID_AND_ATTRIBUTES_HASH)(Buffer + Offset);
+    Info->RestrictedSidHash = Hash;
+    Offset += HashSize;
+    Hash->SidCount = Token->RestrictedSidCount;
+    for (i = 0; i < SID_HASH_SIZE; i++)
+        Hash->Hash[i] = (Token->RestrictedSidCount > 0) ? ~(SID_HASH_ENTRY)0 : 0;
+    if (Token->RestrictedSidCount > 0)
+    {
+        Hash->SidAttr = (PSID_AND_ATTRIBUTES)(Buffer + Offset);
+        Status = RtlCopySidAndAttributesArray(Token->RestrictedSidCount,
+                                              Token->RestrictedSids,
+                                              RestrictedSize - Token->RestrictedSidCount * sizeof(SID_AND_ATTRIBUTES),
+                                              Hash->SidAttr,
+                                              (PSID)&Hash->SidAttr[Token->RestrictedSidCount],
+                                              (PVOID *)&SidEnd,
+                                              &Left);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        Offset += RestrictedSize;
+    }
+
+    /* No capabilities without an AppContainer */
+    Info->CapabilitiesHash = (PSID_AND_ATTRIBUTES_HASH)(Buffer + Offset);
+    Offset += HashSize;
+
+    Info->Privileges = (PTOKEN_PRIVILEGES)(Buffer + Offset);
+    Info->Privileges->PrivilegeCount = Token->PrivilegeCount;
+    RtlCopyMemory(Info->Privileges->Privileges,
+                  Token->Privileges,
+                  Token->PrivilegeCount * sizeof(LUID_AND_ATTRIBUTES));
+    return STATUS_SUCCESS;
 }
 
 /* PUBLIC FUNCTIONS *****************************************************************/
@@ -1185,11 +1350,16 @@ NtQueryInformationToken(
                 DPRINT("NtQueryInformationToken(TokenSandBoxInert)\n");
 
                 IsTokenSandBoxInert = SeTokenIsInert(Token);
+                RequiredLength = sizeof(ULONG);
                 _SEH2_TRY
                 {
-                    /* Buffer size was already verified, no need to check here again */
-                    *(PULONG)TokenInformation = IsTokenSandBoxInert;
-                    *ReturnLength = sizeof(ULONG);
+                    /* A larger buffer is fine; a smaller one has failed the class check already, or is NULL */
+                    if (TokenInformationLength >= RequiredLength)
+                        *(PULONG)TokenInformation = IsTokenSandBoxInert;
+                    else
+                        Status = STATUS_BUFFER_TOO_SMALL;
+
+                    *ReturnLength = RequiredLength;
                 }
                 _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
                 {
@@ -1206,13 +1376,17 @@ NtQueryInformationToken(
 
                 DPRINT("NtQueryInformationToken(TokenSessionId)\n");
 
+                RequiredLength = sizeof(ULONG);
                 Status = SeQuerySessionIdToken(Token, &SessionId);
                 if (NT_SUCCESS(Status))
                 {
                     _SEH2_TRY
                     {
-                        /* Buffer size was already verified, no need to check here again */
-                        *(PULONG)TokenInformation = SessionId;
+                        if (TokenInformationLength >= RequiredLength)
+                            *(PULONG)TokenInformation = SessionId;
+                        else
+                            Status = STATUS_BUFFER_TOO_SMALL;
+
                         *ReturnLength = RequiredLength;
                     }
                     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
@@ -1314,17 +1488,19 @@ NtQueryInformationToken(
 
             case TokenHasRestrictions:
             {
-                ULONG HasRestrictions;
+                BOOLEAN HasRestrictions;
 
                 DPRINT("NtQueryInformationToken(TokenHasRestrictions)\n");
-                RequiredLength = sizeof(ULONG);
-                HasRestrictions = (Token->RestrictedSidCount > 0) ? TRUE : FALSE;
+                RequiredLength = sizeof(BOOLEAN);
+
+                /* Every token NtFilterToken made reports it, restricting SIDs or not (measured on Windows 10) */
+                HasRestrictions = ((Token->TokenFlags & TOKEN_IS_FILTERED) || Token->RestrictedSidCount > 0) ? TRUE : FALSE;
 
                 _SEH2_TRY
                 {
                     if (TokenInformationLength >= RequiredLength)
                     {
-                        *(PULONG)TokenInformation = HasRestrictions;
+                        *(PBOOLEAN)TokenInformation = HasRestrictions;
                     }
                     else
                     {
@@ -1421,6 +1597,90 @@ NtQueryInformationToken(
                     {
                         Status = STATUS_BUFFER_TOO_SMALL;
                     }
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+
+                break;
+            }
+
+            case TokenAccessInformation:
+            {
+                DPRINT("NtQueryInformationToken(TokenAccessInformation)\n");
+
+                _SEH2_TRY
+                {
+                    /* The buffer is only touched when it fits */
+                    Status = SepBuildTokenAccessInformation(Token,
+                                                            (PUCHAR)TokenInformation,
+                                                            TokenInformationLength,
+                                                            &RequiredLength);
+                    if (Status == STATUS_BUFFER_TOO_SMALL || NT_SUCCESS(Status))
+                        *ReturnLength = RequiredLength;
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+
+                break;
+            }
+
+            /* No AppContainers here: no capabilities (a TOKEN_GROUPS with no group), no AppContainer SID or number */
+            case SepTokenCapabilities:
+            case SepTokenAppContainerSid:
+            case SepTokenAppContainerNumber:
+            case SepTokenIsRestricted:
+            case SepTokenProcessTrustLevel:
+            {
+                DPRINT("NtQueryInformationToken(%d)\n", TokenInformationClass);
+
+                switch (TokenInformationClass)
+                {
+                    case SepTokenCapabilities:
+                        RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups);
+                        break;
+                    case SepTokenAppContainerSid:
+                    case SepTokenProcessTrustLevel:
+                        RequiredLength = sizeof(PVOID);
+                        break;
+                    default:
+                        RequiredLength = sizeof(ULONG);
+                        break;
+                }
+
+                _SEH2_TRY
+                {
+                    if (TokenInformationLength >= RequiredLength)
+                    {
+                        switch (TokenInformationClass)
+                        {
+                            /* Windows writes the group count only */
+                            case SepTokenCapabilities:
+                                ((PTOKEN_GROUPS)TokenInformation)->GroupCount = 0;
+                                break;
+                            case SepTokenAppContainerSid:
+                            case SepTokenProcessTrustLevel:
+                                *(PVOID *)TokenInformation = NULL;
+                                break;
+                            case SepTokenIsRestricted:
+                                *(PULONG)TokenInformation = !!(Token->TokenFlags & TOKEN_IS_RESTRICTED);
+                                break;
+                            default:
+                                *(PULONG)TokenInformation = 0;
+                                break;
+                        }
+                    }
+                    else
+                    {
+                        Status = STATUS_BUFFER_TOO_SMALL;
+                    }
+
+                    *ReturnLength = RequiredLength;
                 }
                 _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
                 {

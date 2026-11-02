@@ -59,6 +59,7 @@ list(APPEND SOURCE
     TokenElevation.c
     TokenIntegrity.c
     TokenLogonSid.c
+    TokenQueryParity.c
     ServiceArgs.c
     ServiceControllerQuery.c
     ServiceEnv.c

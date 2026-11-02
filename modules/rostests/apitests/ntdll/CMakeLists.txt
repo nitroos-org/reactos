@@ -143,6 +143,7 @@ list(APPEND SOURCE
     NtSetInformationThread.c
     NtSetInformationToken.c
     NtTokenPseudoHandles.c
+    NtTokenQueryParity.c
     NtSetLdtEntries.c
     NtSetValueKey.c
     NtSetVolumeInformationFile.c

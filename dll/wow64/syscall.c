@@ -755,6 +755,212 @@ static NTSTATUS TokenDefaultDacl32(HANDLE Token, ULONG Buffer, ULONG Length, ULO
     return STATUS_SUCCESS;
 }
 
+/* A token class the 64-bit service answers in native form: query it into Cleanup->Buffer, growing if the
+ * token changed between the size query and the data query. The token is checked before the guest buffer. */
+static NTSTATUS TokenQueryNative(HANDLE Token, TOKEN_INFORMATION_CLASS Class, ULONG ReturnLength,
+                                 WOW64_CLEANUP *Cleanup, PVOID *Native)
+{
+    ULONG Bytes = 0, Try;
+    NTSTATUS Status;
+
+    if (!ReturnLength || !GuestSpan(ReturnLength, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+    Status = NtQueryInformationToken(Token, Class, NULL, 0, &Bytes);
+    for (Try = 0; Try < 4 && Status == STATUS_BUFFER_TOO_SMALL; ++Try)
+    {
+        if (Cleanup->Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, Cleanup->Buffer);
+        Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Bytes);
+        if (!Cleanup->Buffer) return STATUS_NO_MEMORY;
+        Status = NtQueryInformationToken(Token, Class, Cleanup->Buffer, Bytes, &Bytes);
+    }
+    if (NT_SUCCESS(Status)) *Native = Cleanup->Buffer;
+    return Status;
+}
+
+/* The guest's length bookkeeping of a variable-size token result: the length goes out first, then the
+ * buffer is checked */
+static NTSTATUS TokenResult32(ULONG Buffer, ULONG Length, ULONG ReturnLength, ULONG Needed)
+{
+    *(ULONG UNALIGNED *)PTR32(ReturnLength) = Needed;
+    if (Length < Needed) return STATUS_BUFFER_TOO_SMALL;
+    if (!Buffer || !GuestSpan(Buffer, Needed)) return STATUS_ACCESS_VIOLATION;
+    return STATUS_SUCCESS;
+}
+
+/* Bytes of Count 32-bit SID_AND_ATTRIBUTES entries and their SIDs, each SID padded to 4 bytes (the
+ * layout of Windows WOW64: 13 groups take 104 + 208 bytes) */
+static ULONG SidArray32Bytes(PSID_AND_ATTRIBUTES Native, ULONG Count)
+{
+    ULONG Bytes = Count * 8, i;
+    for (i = 0; i < Count; ++i) Bytes += (RtlLengthSid(Native[i].Sid) + 3) & ~3UL;
+    return Bytes;
+}
+
+/* Writes the array at Offset in the guest buffer at address Buffer; returns the offset after it */
+static ULONG SidArray32Write(ULONG Buffer, ULONG Offset, PSID_AND_ATTRIBUTES Native, ULONG Count)
+{
+    UCHAR *Guest = PTR32(Buffer);
+    ULONG Sids = Offset + Count * 8, Length, i;
+
+    for (i = 0; i < Count; ++i)
+    {
+        Length = RtlLengthSid(Native[i].Sid);
+        *(ULONG UNALIGNED *)(Guest + Offset + 8 * i) = Buffer + Sids;
+        *(ULONG UNALIGNED *)(Guest + Offset + 8 * i + 4) = Native[i].Attributes;
+        RtlCopyMemory(Guest + Sids, Native[i].Sid, Length);
+        Sids += (Length + 3) & ~3UL;
+    }
+    return Sids;
+}
+
+/* TokenGroupsAndPrivileges: nine ULONGs and a LUID, then the user and groups, the restricted SIDs and the
+ * privileges (Windows WOW64 layout, measured). Windows under-reports the length of a successful result and
+ * reports the 64-bit size for a short buffer; this reports the real 32-bit size both times. */
+static NTSTATUS TokenGroupsAndPrivileges32(HANDLE Token, ULONG Buffer, ULONG Length, ULONG ReturnLength,
+                                           WOW64_CLEANUP *Cleanup)
+{
+    PTOKEN_GROUPS_AND_PRIVILEGES Native;
+    ULONG SidLength, RestrictedLength, PrivilegesLength, Needed, Offset, *Out;
+    NTSTATUS Status;
+
+    Status = TokenQueryNative(Token, TokenGroupsAndPrivileges, ReturnLength, Cleanup, (PVOID *)&Native);
+    if (!NT_SUCCESS(Status)) return Status;
+    SidLength = SidArray32Bytes(Native->Sids, Native->SidCount);
+    RestrictedLength = Native->RestrictedSidCount ? SidArray32Bytes(Native->RestrictedSids, Native->RestrictedSidCount) : 0;
+    PrivilegesLength = Native->PrivilegeCount * sizeof(LUID_AND_ATTRIBUTES);
+    Needed = 11 * sizeof(ULONG) + SidLength + RestrictedLength + PrivilegesLength;
+    Status = TokenResult32(Buffer, Length, ReturnLength, Needed);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    RtlZeroMemory(PTR32(Buffer), Needed);
+    Out = PTR32(Buffer);
+    Offset = 11 * sizeof(ULONG);
+    ((ULONG UNALIGNED *)Out)[0] = Native->SidCount;
+    ((ULONG UNALIGNED *)Out)[1] = SidLength;
+    ((ULONG UNALIGNED *)Out)[2] = Native->SidCount ? Buffer + Offset : 0;
+    SidArray32Write(Buffer, Offset, Native->Sids, Native->SidCount);
+    Offset += SidLength;
+    ((ULONG UNALIGNED *)Out)[3] = Native->RestrictedSidCount;
+    ((ULONG UNALIGNED *)Out)[4] = RestrictedLength;
+    if (Native->RestrictedSidCount)
+    {
+        ((ULONG UNALIGNED *)Out)[5] = Buffer + Offset;
+        SidArray32Write(Buffer, Offset, Native->RestrictedSids, Native->RestrictedSidCount);
+        Offset += RestrictedLength;
+    }
+    ((ULONG UNALIGNED *)Out)[6] = Native->PrivilegeCount;
+    ((ULONG UNALIGNED *)Out)[7] = PrivilegesLength;
+    if (Native->PrivilegeCount)
+    {
+        ((ULONG UNALIGNED *)Out)[8] = Buffer + Offset;
+        RtlCopyMemory((UCHAR *)Out + Offset, Native->Privileges, PrivilegesLength);
+    }
+    ((ULONG UNALIGNED *)Out)[9] = Native->AuthenticationId.LowPart;
+    ((ULONG UNALIGNED *)Out)[10] = Native->AuthenticationId.HighPart;
+    return STATUS_SUCCESS;
+}
+
+/* The native TOKEN_ACCESS_INFORMATION of Windows 10 (the kernel's own copy of the layout); the 32-bit one
+ * has 4-byte pointers, a 14 ULONG header and 136-byte SID hashes */
+typedef struct
+{
+    PSID_AND_ATTRIBUTES_HASH SidHash;
+    PSID_AND_ATTRIBUTES_HASH RestrictedSidHash;
+    PTOKEN_PRIVILEGES Privileges;
+    LUID AuthenticationId;
+    ULONG TokenType;
+    ULONG ImpersonationLevel;
+    ULONG MandatoryPolicy;
+    ULONG Flags;
+    ULONG AppContainerNumber;
+    PSID PackageSid;
+    PSID_AND_ATTRIBUTES_HASH CapabilitiesHash;
+    PSID TrustLevelSid;
+    PVOID SecurityAttributes;
+} NATIVE_TOKEN_ACCESS_INFORMATION;
+
+#define ACCESS_INFO32_HEADER (14 * sizeof(ULONG))
+#define SID_HASH32_BYTES ((2 + SID_HASH_SIZE) * sizeof(ULONG))
+
+/* TokenAccessInformation: header, SID hash with its SIDs, restricted SID hash (with SIDs when there are any),
+ * capability hash, privileges. A 32-bit result of the same token has the length Windows reports (1068 bytes for
+ * 13 groups and 24 privileges). */
+static NTSTATUS TokenAccessInformation32(HANDLE Token, ULONG Buffer, ULONG Length, ULONG ReturnLength,
+                                         WOW64_CLEANUP *Cleanup)
+{
+    NATIVE_TOKEN_ACCESS_INFORMATION *Native;
+    ULONG SidLength, RestrictedLength = 0, PrivilegesLength, Needed, Offset, i;
+    UCHAR *Guest;
+    NTSTATUS Status;
+
+    Status = TokenQueryNative(Token, TokenAccessInformation, ReturnLength, Cleanup, (PVOID *)&Native);
+    if (!NT_SUCCESS(Status)) return Status;
+    SidLength = SidArray32Bytes(Native->SidHash->SidAttr, Native->SidHash->SidCount);
+    if (Native->RestrictedSidHash->SidCount)
+        RestrictedLength = SidArray32Bytes(Native->RestrictedSidHash->SidAttr, Native->RestrictedSidHash->SidCount);
+    PrivilegesLength = FIELD_OFFSET(TOKEN_PRIVILEGES, Privileges) + Native->Privileges->PrivilegeCount * sizeof(LUID_AND_ATTRIBUTES);
+    Needed = ACCESS_INFO32_HEADER + 3 * SID_HASH32_BYTES + SidLength + RestrictedLength + PrivilegesLength;
+    Status = TokenResult32(Buffer, Length, ReturnLength, Needed);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    Guest = PTR32(Buffer);
+    RtlZeroMemory(Guest, Needed);
+#define OUT32(Index) (((ULONG UNALIGNED *)Guest)[Index])
+    OUT32(3) = Native->AuthenticationId.LowPart;
+    OUT32(4) = Native->AuthenticationId.HighPart;
+    OUT32(5) = Native->TokenType;
+    OUT32(6) = Native->ImpersonationLevel;
+    OUT32(7) = Native->MandatoryPolicy;
+    OUT32(8) = Native->Flags;
+    OUT32(9) = Native->AppContainerNumber;
+
+    Offset = ACCESS_INFO32_HEADER;
+    OUT32(0) = Buffer + Offset;
+    ((ULONG UNALIGNED *)(Guest + Offset))[0] = Native->SidHash->SidCount;
+    ((ULONG UNALIGNED *)(Guest + Offset))[1] = Buffer + Offset + SID_HASH32_BYTES;
+    for (i = 0; i < SID_HASH_SIZE; ++i) ((ULONG UNALIGNED *)(Guest + Offset))[2 + i] = (ULONG)Native->SidHash->Hash[i];
+    Offset += SID_HASH32_BYTES;
+    SidArray32Write(Buffer, Offset, Native->SidHash->SidAttr, Native->SidHash->SidCount);
+    Offset += SidLength;
+
+    OUT32(1) = Buffer + Offset;
+    ((ULONG UNALIGNED *)(Guest + Offset))[0] = Native->RestrictedSidHash->SidCount;
+    for (i = 0; i < SID_HASH_SIZE; ++i)
+        ((ULONG UNALIGNED *)(Guest + Offset))[2 + i] = (ULONG)Native->RestrictedSidHash->Hash[i];
+    if (Native->RestrictedSidHash->SidCount)
+    {
+        ((ULONG UNALIGNED *)(Guest + Offset))[1] = Buffer + Offset + SID_HASH32_BYTES;
+        SidArray32Write(Buffer, Offset + SID_HASH32_BYTES, Native->RestrictedSidHash->SidAttr, Native->RestrictedSidHash->SidCount);
+    }
+    Offset += SID_HASH32_BYTES + RestrictedLength;
+
+    OUT32(11) = Buffer + Offset;
+    Offset += SID_HASH32_BYTES;
+
+    OUT32(2) = Buffer + Offset;
+    ((ULONG UNALIGNED *)(Guest + Offset))[0] = Native->Privileges->PrivilegeCount;
+    RtlCopyMemory(Guest + Offset + sizeof(ULONG), Native->Privileges->Privileges,
+                  Native->Privileges->PrivilegeCount * sizeof(LUID_AND_ATTRIBUTES));
+#undef OUT32
+    return STATUS_SUCCESS;
+}
+
+/* A class whose result is one native pointer (a SID pointer that is NULL without an AppContainer or a
+ * protected process): 4 bytes in the guest */
+static NTSTATUS TokenPointer32(HANDLE Token, TOKEN_INFORMATION_CLASS Class, ULONG Buffer, ULONG Length, ULONG ReturnLength)
+{
+    PVOID Native = NULL;
+    ULONG Bytes = 0;
+    NTSTATUS Status;
+
+    if (!ReturnLength || !GuestSpan(ReturnLength, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+    Status = NtQueryInformationToken(Token, Class, &Native, sizeof(Native), &Bytes);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = TokenResult32(Buffer, Length, ReturnLength, sizeof(ULONG));
+    if (!NT_SUCCESS(Status)) return Status;
+    *(ULONG UNALIGNED *)PTR32(Buffer) = (ULONG)(ULONG_PTR)Native;
+    return STATUS_SUCCESS;
+}
+
 /* A 32-bit TOKEN_GROUPS argument in the native layout. The SIDs stay in guest memory,
  * where the kernel captures them as caller data; Count was read and range-checked once. */
 static PTOKEN_GROUPS GroupsFrom32(ULONG Guest, ULONG Count, PUCHAR *Next)
@@ -2422,6 +2628,11 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         return FilterToken32(a, Cleanup);
     case W64_NtImpersonateAnonymousToken:
         return NtImpersonateAnonymousToken(H(0));
+    case W64_NtPrivilegeCheck:
+        /* PRIVILEGE_SET has no pointer and 4-byte fields (a LUID_AND_ATTRIBUTES is 12 bytes in both ABIs) */
+        return NtPrivilegeCheck(H(0), P(1), P(2));
+    case W64_NtCompareTokens:
+        return NtCompareTokens(H(0), H(1), P(2));
     case W64_NtQueryInformationToken:
         /* TOKEN_MANDATORY_LABEL has the layout of TOKEN_USER: a SID_AND_ATTRIBUTES and the SID */
         if (a[1] == TokenUser || a[1] == TokenOwner || a[1] == TokenPrimaryGroup || a[1] == TokenIntegrityLevel)
@@ -2443,6 +2654,8 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         switch (a[1])
         {
         case TokenType: case TokenImpersonationLevel: case TokenStatistics:
+        case TokenSource: case TokenSandBoxInert: case TokenOrigin:
+        case 32: /* TokenAppContainerNumber */ case 40: /* TokenIsRestricted */
         case TokenPrivileges: case TokenSessionId: case TokenElevationType:
         case TokenElevation: case TokenIsAppContainer: case TokenHasRestrictions:
         case TokenVirtualizationAllowed: case TokenVirtualizationEnabled:
@@ -2465,7 +2678,14 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             return STATUS_SUCCESS;
         }
         case TokenGroups: case TokenRestrictedSids: case TokenLogonSid:
+        case 30: /* TokenCapabilities */
             return TokenGroups32(H(0), a[1], a[2], a[3], a[4], Cleanup);
+        case TokenGroupsAndPrivileges:
+            return TokenGroupsAndPrivileges32(H(0), a[2], a[3], a[4], Cleanup);
+        case TokenAccessInformation:
+            return TokenAccessInformation32(H(0), a[2], a[3], a[4], Cleanup);
+        case 31: /* TokenAppContainerSid */ case 41: /* TokenProcessTrustLevel */
+            return TokenPointer32(H(0), a[1], a[2], a[3], a[4]);
         case TokenDefaultDacl:
             return TokenDefaultDacl32(H(0), a[2], a[3], a[4], Cleanup);
         default: UNSUPPORTED(CLASS, a[1]);
