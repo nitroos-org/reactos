@@ -725,10 +725,17 @@ FUNC KiDebugServiceTrap
     /* Enable interrupts for user-mode */
     sti
 
+    /* User mode: like Windows x64, only the service number is a parameter. The
+       buffer and length registers stay in the record for the kernel debugger
+       (they are not copied to user mode, the parameter count is 1) */
+    DispatchException STATUS_BREAKPOINT, 1, [rbp+KTRAP_FRAME_Rax], [rbp+KTRAP_FRAME_Rcx], [rbp+KTRAP_FRAME_Rdx]
+    jmp KiDebugServiceExit
+
 KiDebugServiceTrapKMode:
     /* Dispatch the exception (Params = service, buffer, legth) */
     DispatchException STATUS_BREAKPOINT, 3, [rbp+KTRAP_FRAME_Rax], [rbp+KTRAP_FRAME_Rcx], [rbp+KTRAP_FRAME_Rdx]
 
+KiDebugServiceExit:
     /* Return */
     ExitTrap TF_SAVE_ALL
 ENDFUNC
