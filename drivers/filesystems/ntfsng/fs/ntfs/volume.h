@@ -246,6 +246,9 @@ static inline void ntfs_inc_free_clusters(struct ntfs_volume *vol, s64 nr)
 {
 	if (!NVolFreeClusterKnown(vol))
 		wait_event(vol->free_waitq, NVolFreeClusterKnown(vol));
+	/* ntfsng: every free passes here; data writes in flight to these clusters land before anyone can reuse them. */
+	if (nr > 0)
+		kshim_dio_drain(vol->sb->s_bdev);
 	atomic64_add(nr, &vol->free_clusters);
 }
 

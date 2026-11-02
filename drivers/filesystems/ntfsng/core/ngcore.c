@@ -470,6 +470,9 @@ void ngc_umount(ngc_vol *v, int discard)
 	struct super_block *sb = v->sb;
 	unsigned long wr_failed;
 	int errors, clean;
+	/* The glue waited for its unlocked writes to end (ngc_dio_end) before the teardown; none starts now. */
+	kshim_dio_drain(v->bdev);
+	v->bdev->kshim_drain = NULL;
 	if (discard) {
 		/* Pending journal pages are dropped and the core sees a read-only volume: put_super writes nothing. */
 		kshim_jnl_deactivate(v->bdev);
@@ -1384,6 +1387,7 @@ void ngc_icache_trim(ngc_vol *v)
 /* The medium was replaced: no device I/O of this volume may happen any more (caller holds the volume lock). */
 void ngc_medium_gone(ngc_vol *v)
 {
+	kshim_dio_drain(v->bdev);
 	v->bdev->kshim_gone = 1;
 	v->sb->s_flags |= SB_RDONLY;
 }
@@ -1394,6 +1398,7 @@ void ngc_medium_gone(ngc_vol *v)
  */
 void ngc_stop_writes(ngc_vol *v)
 {
+	kshim_dio_drain(v->bdev);
 	v->bdev->kshim_frozen = 1;
 	v->sb->s_flags |= SB_RDONLY;
 }
@@ -1790,6 +1795,143 @@ static long ngc_write_impl(ngc_vol *v, ngc_node *n, unsigned long long off, unsi
 		return err;
 	kshim_mapping_update(vi->i_mapping, off, buf, len);
 	return len;
+}
+
+/*
+ * Data writes whose device transfer runs without the volume lock (ngapi.h, ngc_dio_*; the NT glue uses
+ * them for paging writes, nt/write.c).  What keeps the unlocked transfer correct:
+ *  - The clusters stay the stream's until it ends.  Every cluster free waits for the transfers in flight
+ *    first (ntfs_inc_free_clusters -> kshim_dio_drain), and the node is pinned, so not even the eviction
+ *    of an unlinked file frees them under it.  ngc_dio_end maps the range again and refuses to publish a
+ *    write whose mapping changed (the caller then writes again through ngc_write).
+ *  - Nothing else writes those sectors meanwhile: they are data clusters, not held in the journal overlay
+ *    (checked here), and the stream's page cache has no dirty page whose writeback could land on them
+ *    (checked here).  The glue orders the stream's data writes one at a time (the FCB's paging-write lock)
+ *    and keeps size changes out (its paging I/O resource), so no zero fill or truncation overlaps.
+ *  - The device stays the volume's: unmount, a medium change, the lock holder's direct writes and a
+ *    resize drain the transfers first (ngc_umount, ngc_medium_gone, ngc_stop_writes, ngc_extend/shrink).
+ *  - The initialized size moves only in ngc_dio_end, after the data reached the device, and only up, so
+ *    no reader sees bytes below it that were not written; a write that would need a zero fill (it starts
+ *    past the initialized size) is not taken.
+ * Streams this does not cover (resident, compressed, sparse, encrypted), unmapped clusters and writes of
+ * more than NGC_DIO_RUNS runs go through ngc_write under the lock as before.
+ */
+static int ngc_dio_map(struct ngc_vol *v, struct ntfs_inode *ni, u64 off, u32 len, u32 cap, struct ngc_dio *d)
+{
+	struct ntfs_volume *vol = ni->vol;
+	u64 bs = v->bdev->logical_block_size, pos = off, end = off + len;
+	struct runlist_element *rl;
+	int err;
+
+	d->nruns = 0;
+	mutex_lock(&ni->mrec_lock);
+	down_write(&ni->runlist.lock);
+	err = ntfs_attr_map_whole_runlist(ni);
+	rl = ni->runlist.rl;
+	while (!err && pos < end) {
+		s64 vcn = (s64)(pos >> vol->cluster_size_bits);
+		u64 run_end, run_dev_end, n, dev, io;
+		while (rl && rl->length && rl->vcn + rl->length <= vcn)
+			rl++;
+		if (!rl || !rl->length || rl->vcn > vcn || rl->lcn < 0 || d->nruns == NGC_DIO_RUNS) {
+			err = -EAGAIN;
+			break;
+		}
+		run_end = (u64)(rl->vcn + rl->length) << vol->cluster_size_bits;
+		run_dev_end = (u64)(rl->lcn + rl->length) << vol->cluster_size_bits;
+		n = min_t(u64, run_end, end) - pos;
+		dev = ((u64)rl->lcn << vol->cluster_size_bits) + (pos - ((u64)rl->vcn << vol->cluster_size_bits));
+		/* Whole sectors: a tail short of one is padded from the caller's buffer, inside this cluster. */
+		io = (n + bs - 1) & ~(bs - 1);
+		if ((dev & (bs - 1)) || ((pos - off) & (bs - 1)) || dev + io > run_dev_end || dev + io > v->bdev->size ||
+		    pos - off + io > cap || io > 0x7fffffff || kshim_jnl_holds(v->bdev, dev, io)) {
+			err = -EAGAIN;
+			break;
+		}
+		d->run[d->nruns].dev = dev;
+		d->run[d->nruns].len = (unsigned int)io;
+		d->run[d->nruns].boff = (unsigned int)(pos - off);
+		d->nruns++;
+		pos += n;
+	}
+	up_write(&ni->runlist.lock);
+	mutex_unlock(&ni->mrec_lock);
+	return err;
+}
+
+int ngc_dio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, unsigned int cap, struct ngc_dio *d)
+{
+	struct inode *vi = (struct inode *)n;
+	struct ntfs_inode *ni = NTFS_I(vi);
+	loff_t size = i_size_read(vi);
+	int err;
+
+	d->n = NULL;
+	if (sb_rdonly(v->sb) || !len || (loff_t)off >= size || !v->bdev->kshim_drain)
+		return -EAGAIN;
+	if (off + len > (u64)size)
+		len = (unsigned int)(size - off);
+	if (!NInoNonResident(ni) || NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni) || NInoSparse(ni) ||
+	    (loff_t)off > ni->initialized_size || v->bdev->kshim_gone || v->bdev->kshim_frozen ||
+	    (v->bdev->jnl && kshim_jnl_failed(v->bdev)))
+		return -EAGAIN;
+	/* As ngc_write: VOLUME_IS_DIRTY is on the medium before the change (here: the initialized size). */
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	if (sb_rdonly(v->sb) || kshim_mapping_dirty(vi->i_mapping) || ngc_dio_map(v, ni, off, len, cap, d))
+		return -EAGAIN;
+	if (!igrab(vi))
+		return -EAGAIN;
+	d->n = n;
+	d->off = off;
+	d->len = len;
+	d->cap = cap;
+	return 0;
+}
+
+long ngc_dio_end(ngc_vol *v, struct ngc_dio *d, const void *buf, int io_err)
+{
+	struct inode *vi = (struct inode *)d->n;
+	struct ntfs_inode *ni = NTFS_I(vi);
+	struct ngc_dio now;
+	u64 end = d->off + d->len;
+	long ret = d->len;
+
+	if (io_err) {
+		v->bdev->kshim_wr_failed++;
+		ret = -EIO;
+	} else if (sb_rdonly(v->sb)) {
+		ret = -EROFS;
+	} else if (i_size_read(vi) < (loff_t)end || ngc_dio_map(v, ni, d->off, d->len, d->cap, &now) ||
+		   now.nruns != d->nruns || memcmp(now.run, d->run, d->nruns * sizeof(d->run[0]))) {
+		printk(KERN_ERR "ngc: ino %llu: mapping of %llu+%u changed under an unlocked write: written again\n",
+		       (unsigned long long)ni->mft_no, d->off, d->len);
+		ret = -EAGAIN;
+	} else {
+		if ((loff_t)end > ni->initialized_size) {
+			/* Again: a quiet flusher pass may have cleared VOLUME_IS_DIRTY during the transfer. */
+			int err = ngc_mark_dirty(v);
+			if (!err) {
+				mutex_lock(&ni->mrec_lock);
+				err = ntfs_attr_set_initialized_size(ni, end);
+				mutex_unlock(&ni->mrec_lock);
+			}
+			if (err)
+				ret = err;
+		}
+		if (ret >= 0)
+			kshim_mapping_update(vi->i_mapping, d->off, buf, d->len);
+	}
+	iput(vi);
+	d->n = NULL;
+	return ret;
+}
+
+void ngc_set_dio_drain(ngc_vol *v, void (*fn)(void *ctx), void *ctx)
+{
+	v->bdev->kshim_drain_ctx = ctx;
+	v->bdev->kshim_drain = fn;
 }
 
 /* EOF change through the core (resident resize, conversion to non-resident, expand, shrink). */
@@ -2570,11 +2712,13 @@ out:
 
 int ngc_extend(ngc_vol *v, unsigned long long sectors, unsigned long long dev_size)
 {
+	kshim_dio_drain(v->bdev);
 	return ngc_extend_impl(v, sectors, dev_size);
 }
 
 int ngc_shrink(ngc_vol *v, unsigned long long sectors)
 {
+	kshim_dio_drain(v->bdev);
 	return ngc_shrink_impl(v, sectors);
 }
 

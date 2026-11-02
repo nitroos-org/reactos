@@ -147,6 +147,7 @@ static NTSTATUS NgOpenVolume(PNG_VCB Vcb, PFILE_OBJECT FileObject, PIO_STACK_LOC
             ExReleaseFastMutex(&Vcb->FcbListLock);
             ExDeleteResourceLite(&Fcb->MainResource);
             ExDeleteResourceLite(&Fcb->PagingIoResource);
+            ExDeleteResourceLite(&Fcb->PagingWriteLock);
             ExFreePoolWithTag(Fcb, TAG_NTFSNG);
             ExAcquireFastMutex(&Vcb->FcbListLock);
             Fcb = Vcb->VolumeFcb;

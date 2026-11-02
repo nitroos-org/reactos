@@ -304,6 +304,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ExInitializeResourceLite(&Vcb->CoreLock);
     ExInitializeResourceLite(&Vcb->CreateGate);
     ExInitializeResourceLite(&Vcb->NotifyPathLock);
+    NgInitDataIo(Vcb);
     ExInitializeFastMutex(&Vcb->FcbListLock);
     InitializeListHead(&Vcb->FcbList);
     InitializeListHead(&Vcb->DirNotifyList);
@@ -325,6 +326,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         ngc_volinfo(Vcb->Core, &Vcb->Info);
         Vcb->ClusterSize = Vcb->Info.cluster_size;   /* immutable for a mounted volume */
         Vcb->MajorVersion = Vcb->Info.major;
+        ngc_set_dio_drain(Vcb->Core, NgDrainDataIoCallback, Vcb);
     }
     NgReleaseCore(Vcb);
     if (Err)
@@ -335,6 +337,8 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         ExDeleteResourceLite(&Vcb->CoreLock);
         ExDeleteResourceLite(&Vcb->CreateGate);
         ExDeleteResourceLite(&Vcb->NotifyPathLock);
+        ExDeleteResourceLite(&Vcb->DataIoGate);
+        ExDeleteNPagedLookasideList(&Vcb->DioBounce);
         IoDeleteDevice(Vdo);
         return STATUS_UNRECOGNIZED_VOLUME;
     }
@@ -653,7 +657,8 @@ static NTSTATUS NgDismountMount(PNG_VCB Vcb, BOOLEAN Removal, PBOOLEAN Dropped)
         Vcb->Flusher = NULL;
     }
 
-    NgAcquireCore(Vcb);
+    /* Paging writes in their unlocked transfer pin core nodes: they end before the core goes (CoreLock held on return). */
+    NgWaitDataIoIdle(Vcb);
     for (i = 0; i < Count; i++)
     {
         List[i]->Deleted = TRUE;

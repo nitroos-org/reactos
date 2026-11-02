@@ -80,6 +80,19 @@ typedef struct _NG_VCB
     PVPB Vpb;
     ngc_vol *Core;
     ERESOURCE CoreLock;             /* serialises every call into the fs/ntfs core */
+    /*
+     * Paging writes run their data transfer without CoreLock (write.c, NgPagingWrite).  DataIoGate is held
+     * shared by each such transfer, acquired under CoreLock and released before CoreLock is taken again;
+     * it is taken exclusive only under CoreLock, to wait for the transfers in flight (NgDrainDataIoCallback: before
+     * clusters are freed and before the device stops being this mount's).  DioActive counts the unlocked
+     * writes from their start to their end under CoreLock (they pin a core node); DioIdle is set while it
+     * is 0, and a dismount waits for it before it frees the core.  Both change under CoreLock only.
+     */
+    ERESOURCE DataIoGate;
+    LONG DioActive;
+    KEVENT DioIdle;
+    NPAGED_LOOKASIDE_LIST DioBounce;    /* NG_DIO_BOUNCE buffers for those transfers */
+    ULONG DioWrites, DioFallbacks, DioRedone;
     FAST_MUTEX FcbListLock;
     LIST_ENTRY FcbList;
     struct _NG_FCB *VolumeFcb;
@@ -146,6 +159,7 @@ typedef struct _NG_FCB
     LONGLONG LogicalVdl;            /* valid data length as SetFileValidData sees it (writes raise it) */
     ERESOURCE MainResource;
     ERESOURCE PagingIoResource;
+    ERESOURCE PagingWriteLock;      /* exclusive around every paging and non-cached data write of the stream (write.c) */
     LIST_ENTRY VcbLinks;
     PNG_VCB Vcb;
     LONG RefCount;                  /* file objects not yet closed */
@@ -258,6 +272,7 @@ NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp);
 NTSTATUS NgErrnoToStatus(int Err);
 VOID NgAcquireCore(PNG_VCB Vcb);
 VOID NgReleaseCore(PNG_VCB Vcb);
+VOID NgReleaseCoreNoTrim(PNG_VCB Vcb);
 typedef struct _NG_SHARED_HOLD
 {
     ULONGLONG Since;
@@ -310,6 +325,10 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize);
 int NgFlushVolume(PNG_VCB Vcb);
 VOID NgFlushStream(PNG_FCB Fcb, PIO_STATUS_BLOCK Iosb);
 NTSTATUS NgDropPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, ULONG Length);
+#define NG_DIO_BOUNCE (64 * 1024)
+VOID NgInitDataIo(PNG_VCB Vcb);
+VOID NgDrainDataIoCallback(PVOID Context);
+VOID NgWaitDataIoIdle(PNG_VCB Vcb);
 BOOLEAN NgDropIfDiscardable(PNG_VCB Vcb, PIRP Irp, PNTSTATUS Status);
 BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start);
 
