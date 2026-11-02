@@ -805,6 +805,100 @@ Quit:
     return Status;
 }
 
+/* The headers declare the flag for NT 6 and newer only; NtFilterToken takes it whatever this kernel is built for */
+#ifndef LUA_TOKEN
+#define LUA_TOKEN 0x4
+#endif
+
+/**
+ * @brief
+ * Turns a filtered token into a LUA token (NtFilterToken with LUA_TOKEN), the
+ * way Windows 10 does it. Measured on Windows 10 22H2 with an elevated
+ * administrator's token, CreateRestrictedToken(LUA_TOKEN):
+ *
+ * - makes the Administrators group and the "Local account and member of
+ *   Administrators group" SID (S-1-5-114) deny-only: the attributes become
+ *   exactly SE_GROUP_USE_FOR_DENY_ONLY, so the mandatory and owner bits go
+ *   as well. All other groups, the user, the primary group and the default
+ *   DACL stay as they were.
+ * - makes the token's owner the user when Administrators was the owner.
+ * - deletes every privilege except SeShutdownPrivilege, SeChangeNotifyPrivilege,
+ *   SeUndockPrivilege, SeIncreaseWorkingSetPrivilege and SeTimeZonePrivilege
+ *   (with DISABLE_MAX_PRIVILEGE as well only SeChangeNotifyPrivilege remains).
+ * - keeps the integrity level and adds no restricting SIDs (so IsTokenRestricted
+ *   stays FALSE), and TokenElevation reads 0 for it.
+ *
+ * Other administrative groups (Backup Operators, Domain Admins and so on) are
+ * not measured and are left alone. The caller holds no lock on the new token,
+ * which nobody else can see yet.
+ */
+static
+VOID
+SepMakeTokenLua(
+    _Inout_ PTOKEN AccessToken)
+{
+    static const ULONG KeptPrivileges[] =
+    {
+        SE_SHUTDOWN_PRIVILEGE,
+        SE_CHANGE_NOTIFY_PRIVILEGE,
+        SE_UNDOCK_PRIVILEGE,
+        SE_INC_WORKING_SET_PRIVILEGE,
+        SE_TIME_ZONE_PRIVILEGE,
+    };
+    /* S-1-5-114, SECURITY_LOCAL_ACCOUNT_AND_ADMIN_RID */
+    static const struct
+    {
+        UCHAR Revision;
+        UCHAR SubAuthorityCount;
+        UCHAR IdentifierAuthority[6];
+        ULONG SubAuthority[1];
+    } LocalAccountAndAdminSid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { 114 } };
+    ULONG i, j;
+
+    for (i = 1; i < AccessToken->UserAndGroupCount; i++)
+    {
+        PSID_AND_ATTRIBUTES Group = &AccessToken->UserAndGroups[i];
+        BOOLEAN IsAdmins = RtlEqualSid(Group->Sid, SeAliasAdminsSid);
+
+        if (!IsAdmins && !RtlEqualSid(Group->Sid, (PSID)&LocalAccountAndAdminSid))
+            continue;
+
+        if (IsAdmins)
+            AccessToken->TokenFlags &= ~TOKEN_HAS_ADMIN_GROUP;
+
+        if (AccessToken->DefaultOwnerIndex == i)
+            AccessToken->DefaultOwnerIndex = 0;
+
+        Group->Attributes = SE_GROUP_USE_FOR_DENY_ONLY;
+    }
+
+    for (i = 0; i < AccessToken->PrivilegeCount; i++)
+    {
+        BOOLEAN Keep = FALSE;
+
+        if (AccessToken->Privileges[i].Luid.HighPart == 0)
+        {
+            for (j = 0; j < RTL_NUMBER_OF(KeptPrivileges); j++)
+            {
+                if (AccessToken->Privileges[i].Luid.LowPart == KeptPrivileges[j])
+                {
+                    Keep = TRUE;
+                    break;
+                }
+            }
+        }
+
+        if (!Keep)
+        {
+            /* Same sequence as the deletion in SepPerformTokenFiltering */
+            AccessToken->Privileges[i].Attributes &= ~SE_PRIVILEGE_ENABLED;
+            SepUpdateSinglePrivilegeFlagToken(AccessToken, i);
+            SepRemovePrivilegeToken(AccessToken, i);
+            i--;
+        }
+    }
+}
+
 /**
  * @brief
  * Private helper function responsible for creating a restricted access
@@ -1000,6 +1094,9 @@ SepPerformTokenFiltering(
     /* Copy the mutable fields */
     AccessToken->SessionId = Token->SessionId;
     AccessToken->TokenFlags = Token->TokenFlags & ~TOKEN_SESSION_NOT_REFERENCED;
+
+    /* Every token NtFilterToken makes is a filtered one, restricting SIDs or not (TokenHasRestrictions reports it) */
+    AccessToken->TokenFlags |= TOKEN_IS_FILTERED;
 
     /* A filtered token runs at the same level; its object gets the default label of that level */
     AccessToken->IntegrityLevel = Token->IntegrityLevel;
@@ -1409,6 +1506,12 @@ SepPerformTokenFiltering(
                 continue;
             }
         }
+    }
+
+    /* A LUA token loses its administrative groups and privileges on top of the requested filtering */
+    if (PrivilegeFlags & LUA_TOKEN)
+    {
+        SepMakeTokenLua(AccessToken);
     }
 
     /* We've finally filtered the token, return it to the caller */
