@@ -180,6 +180,13 @@ BOOL   FmWriteManifest(LPCWSTR path, const FM_OUTBUF *o);
 void   FmGetLastMessage(LPWSTR buf, DWORD cch);
 void   FmSetLastMessage(LPCWSTR fmt, ...);
 
+/* An install changed the registry PATH (machine or user): programs already running, including the shell that
+ * started us, keep the old one. FmTakePathChange returns TRUE once after such an install (and clears it);
+ * name = the feature that did it. FmPathHint formats the user-facing text: the PowerShell flavour carries a
+ * command that refreshes the session, the cmd one says to open a new window. */
+BOOL   FmTakePathChange(LPWSTR name, DWORD cch);
+void   FmPathHint(LPCWSTR name, BOOL powershell, LPWSTR out, DWORD cch);
+
 /* Same as FmGetDependents, over an already loaded array (no catalog rescan). */
 int    FmGetDependentsIn(const FM_FEATURE *arr, int n, LPCWSTR id, LPWSTR buf, DWORD cch);
 

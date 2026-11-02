@@ -793,6 +793,7 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
         }
         else
             StringCchCopyW(msg, ARRAYSIZE(msg), L"ReactOS has applied the requested changes.");
+        FmTakePathChange(NULL, 0);      /* the system-features summary has no PATH hint: drop a stale flag */
     }
     else if (c->op == OP_IMPORT)
     {
@@ -845,6 +846,7 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
     {
         ACTION act = (ACTION)c->op;
         HRESULT hr = c->hr;
+        WCHAR pathName[128];
         if (hr == HRESULT_FROM_WIN32(ERROR_SUCCESS_REBOOT_REQUIRED))
             StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' was turned off, but some components "
                              L"are removed at the next reboot. It stays listed until then.", c->name);
@@ -857,6 +859,10 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
                 StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' is now at version %s.", c->name, nf.InstalledVersion);
             else
                 StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' %s.", c->name, done[act]);
+            if ((act == ACT_INSTALL || act == ACT_ENABLE) && FmTakePathChange(pathName, ARRAYSIZE(pathName)))
+                StringCchCatW(msg, ARRAYSIZE(msg),
+                    L"\n\nIt changed the PATH. Terminal windows that are already open keep the old one: "
+                    L"open a new terminal (or sign out and in) to use it.");
         }
         else if (hr == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED) &&
                  (act == ACT_DISABLE || act == ACT_UNINSTALL))

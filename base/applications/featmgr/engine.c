@@ -1108,6 +1108,76 @@ static void NotifyEnvironmentChanged(void)
                         SMTO_ABORTIFHUNG | SMTO_NORMAL, 3000, &res);
 }
 
+/* ---- PATH change tracking (for the "open a new terminal" hint) ------------------------------------
+ * The installer runs in a child process, so the shell that started featmgr keeps the PATH it had (the
+ * same on Windows). Compare the registry PATH (machine + user, unexpanded) before and after the install;
+ * when it changed, remember which feature did it so the CLI and the GUI can tell the user. */
+static WCHAR g_PathChangedName[128];
+static BOOL  g_PathChanged;
+
+#define PATHSNAP_CCH 16384
+
+static void ReadRegistryPaths(WCHAR *out, DWORD cch)
+{
+    static const struct { HKEY Root; LPCWSTR Key; } src[] = {
+        { HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment" },
+        { HKEY_CURRENT_USER, L"Environment" } };
+    DWORD i, used = 0;
+    out[0] = L'\0';
+    for (i = 0; i < ARRAYSIZE(src); i++)
+    {
+        HKEY k;
+        if (RegOpenKeyExW(src[i].Root, src[i].Key, 0, KEY_READ, &k) == ERROR_SUCCESS)
+        {
+            DWORD type, cb = (cch - used - 2) * sizeof(WCHAR);
+            if (RegQueryValueExW(k, L"Path", NULL, &type, (LPBYTE)(out + used), &cb) == ERROR_SUCCESS
+                && (type == REG_SZ || type == REG_EXPAND_SZ))
+            {
+                DWORD n = cb / sizeof(WCHAR);
+                out[used + n] = L'\0';
+                used += (DWORD)wcslen(out + used);     /* the stored size may or may not include the NUL */
+            }
+            RegCloseKey(k);
+        }
+        if (used + 2 >= cch) break;
+        out[used++] = L'\n';     /* machine and user entries stay distinguishable */
+        out[used] = L'\0';
+    }
+}
+
+static void NotePathChange(const FM_FEATURE *f, const WCHAR *before)
+{
+    WCHAR *after = HeapAlloc(GetProcessHeap(), 0, PATHSNAP_CCH * sizeof(WCHAR));
+    if (!after) return;
+    ReadRegistryPaths(after, PATHSNAP_CCH);
+    if (wcscmp(before, after))
+    {
+        g_PathChanged = TRUE;
+        StringCchCopyW(g_PathChangedName, ARRAYSIZE(g_PathChangedName), f->Name[0] ? f->Name : f->Id);
+    }
+    HeapFree(GetProcessHeap(), 0, after);
+}
+
+BOOL FmTakePathChange(LPWSTR name, DWORD cch)
+{
+    BOOL r = g_PathChanged;
+    if (name && cch) StringCchCopyW(name, cch, g_PathChangedName);
+    g_PathChanged = FALSE;
+    return r;
+}
+
+void FmPathHint(LPCWSTR name, BOOL powershell, LPWSTR out, DWORD cch)
+{
+    if (powershell)
+        StringCchPrintfW(out, cch,
+            L"%s is installed. Open a new terminal to use it, or refresh this one:\n"
+            L"  $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + "
+            L"[Environment]::GetEnvironmentVariable('Path','User')\n", name);
+    else
+        StringCchPrintfW(out, cch,
+            L"%s is installed. Open a new terminal window to use it: this one keeps the PATH it started with.\n", name);
+}
+
 /* ---- progress and cancel (GUI worker plumbing; see featmgr.h) ------------------
  * The CLI never calls FmOpBegin: no sink and no cancel event, so RunAndWait waits exactly as before. */
 
@@ -1701,6 +1771,7 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
     DWORD code;
     HRESULT hr;
     BOOL scoopFresh;
+    WCHAR *pathBefore = NULL;
 
     hr = BuildSoftwareCommands(f, inst, uninst, ARRAYSIZE(inst), log);
     if (FAILED(hr)) return hr;
@@ -1721,6 +1792,8 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
         FmScoopPrepareEnv();
     ReportInstallStep(f, inst);
     scoopFresh = !_wcsicmp(f->Id, L"scoop") && ScoopRootIsFresh();
+    pathBefore = HeapAlloc(GetProcessHeap(), 0, PATHSNAP_CCH * sizeof(WCHAR));
+    if (pathBefore) ReadRegistryPaths(pathBefore, PATHSNAP_CCH);
     hr = RunAndWait(inst, SW_RUN_TIMEOUT_MS, &code, log);
     if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED) && scoopFresh && uninst[0])
     {
@@ -1749,9 +1822,10 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
         g_NoCancel = FALSE;
         SetLastMsg(L"%s", why);
     }
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) { if (pathBefore) HeapFree(GetProcessHeap(), 0, pathBefore); return hr; }
     if (code != 0)
     {
+        if (pathBefore) HeapFree(GetProcessHeap(), 0, pathBefore);
         LOGF(log, L"error: installer for '%s' failed (exit code %lu)\n", f->Id, code);
         if (!_wcsicmp(f->Provider, L"rapps") && FAILED(CheckSoftwareDiskSpace(f, log, TRUE)))
             return HRESULT_FROM_WIN32(ERROR_DISK_FULL);
@@ -1762,6 +1836,11 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
     SetStateSz(state, L"Provider", f->Provider);
     SetStateSz(state, L"Uninstall", uninst);
     NotifyEnvironmentChanged();
+    if (pathBefore)
+    {
+        NotePathChange(f, pathBefore);
+        HeapFree(GetProcessHeap(), 0, pathBefore);
+    }
     return S_OK;
 }
 

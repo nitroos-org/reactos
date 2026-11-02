@@ -230,6 +230,8 @@ copy /y %FX%\fmt-swstuck-uninst.cmd %R%\Payload\fmt-swstuck\ >nul
 call :st fmt-sw NotInstalled "77 sw initial"
 %FM% /install fmt-sw > %O%\i.txt 2>&1
 call :rc0 "78 install runs the installer (rc0)"
+find "Open a new terminal" %O%\i.txt >nul
+call :rc1 "P0 an install that leaves PATH alone prints no 'open a new terminal' hint"
 %FM% /query fmt-sw > %O%\q.txt 2>&1
 find "InstalledVersion: 1.0" %O%\q.txt >nul
 call :rc0 "V5 software tier (command provider): InstalledVersion recorded at install"
@@ -260,6 +262,27 @@ call :rc0 "89 uninstall (uninstaller + forget)"
 call :st fmt-sw NotInstalled "90 sw NotInstalled after uninstall"
 reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmt-sw >nul 2>&1
 call :rc1 "91 sw state record deleted"
+
+rem --- C. PATH-changing install: featmgr says the shell that ran it keeps the old PATH (parent here is cmd.exe)
+mkdir %R%\Payload\fmt-swpath 2>nul
+copy /y %FX%\fmt-swpath.ini %R%\Catalog\ >nul
+copy /y %FX%\fmt-swpath-setup.cmd %R%\Payload\fmt-swpath\ >nul
+copy /y %FX%\fmt-swpath-uninst.cmd %R%\Payload\fmt-swpath\ >nul
+%FM% /install fmt-swpath > %O%\ip.txt 2>&1
+call :rc0 "P1 install of a PATH-changing feature rc0"
+type %O%\ip.txt >> %LOG%
+reg query HKCU\Environment /v Path | find "fmtpath-test" >nul
+call :rc0 "P2 the installer changed the user PATH"
+find "is installed. Open a new terminal window to use it" %O%\ip.txt >nul
+call :rc0 "P3 the hint is printed (cmd flavour: parent is cmd.exe)"
+find "Environment]::GetEnvironmentVariable" %O%\ip.txt >nul
+call :rc1 "P4 the cmd flavour carries no PowerShell command"
+%FM% /uninstall fmt-swpath >> %LOG% 2>&1
+call :rc0 "P5 uninstall PATH-changing feature"
+reg query HKCU\Environment /v Path >nul 2>&1
+call :rc1 "P6 uninstaller removed the user PATH value"
+del /q %R%\Catalog\fmt-swpath.ini %R%\Payload\fmt-swpath\fmt-swpath-setup.cmd %R%\Payload\fmt-swpath\fmt-swpath-uninst.cmd 2>nul
+rmdir %R%\Payload\fmt-swpath 2>nul
 call :ex %R%\fmt-sw.installed 0 "92 sw side-effect file gone"
 rem failing installer: feature stays NotInstalled, no record left behind
 %FM% /install fmt-swbad > %O%\i.txt 2>&1
