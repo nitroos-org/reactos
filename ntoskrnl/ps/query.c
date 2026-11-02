@@ -2791,7 +2791,7 @@ NtSetInformationProcess(
             Process->PriorityClass = PriorityClass.PriorityClass;
 
             /* Set process priority mode (foreground or background) */
-            PsSetProcessPriorityByClass(Process,
+            PspApplyProcessPriorityMode(Process,
                                         PriorityClass.Foreground ?
                                         PsProcessPriorityForeground :
                                         PsProcessPriorityBackground);
@@ -2821,11 +2821,19 @@ NtSetInformationProcess(
             }
             _SEH2_END;
 
-            /* Set process priority mode (foreground or background) */
-            PsSetProcessPriorityByClass(Process,
-                                        Foreground.Foreground ?
-                                        PsProcessPriorityForeground :
-                                        PsProcessPriorityBackground);
+            /*
+             * Set process priority mode (foreground or background). The process that
+             * owns the foreground window stays in the foreground mode whatever CSRSS
+             * asks: the console of a console program that is in front with its own
+             * window loses the focus, and that must not take the window's quantum away.
+             */
+            if (Foreground.Foreground || !PspIsForegroundWindowProcess(Process))
+            {
+                PspApplyProcessPriorityMode(Process,
+                                            Foreground.Foreground ?
+                                            PsProcessPriorityForeground :
+                                            PsProcessPriorityBackground);
+            }
             Status = STATUS_SUCCESS;
             break;
 

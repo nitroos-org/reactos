@@ -57,6 +57,7 @@ list(APPEND SOURCE
     IsServerSideWindow.c
     IsWindowArranged.c
     KbdLayout.c
+    ForegroundQuantumShare.c
     keybd_event.c
     MouseHookTransport.c
     MouseWheel.c

@@ -28,6 +28,14 @@ ULONG PsRawPrioritySeparation;
 ULONG PsPrioritySeparation;
 CHAR PspForegroundQuantum[3];
 
+/*
+ * The process that owns the foreground window, as the window manager reports it through
+ * PsSetProcessPriorityByClass. Not referenced: win32k holds a reference on it until it
+ * reports another process (or none) here. Other requests for the foreground or background
+ * class (CSRSS: new process, console focus changes) do not change it.
+ */
+PEPROCESS volatile PspForegroundWindowProcess;
+
 /* Fixed quantum table */
 CHAR PspFixedQuantums[6] =
 {
@@ -1379,23 +1387,54 @@ PsSetProcessWindowStation(PEPROCESS Process,
     Process->Win32WindowStation = WindowStation;
 }
 
+/* Apply the quantum and base priority of a process priority mode to a process */
+VOID
+NTAPI
+PspApplyProcessPriorityMode(IN PEPROCESS Process,
+                            IN PSPROCESSPRIORITYMODE Mode)
+{
+    UCHAR Quantum;
+    ULONG Priority;
+    PSTRACE(PS_PROCESS_DEBUG, "Process: %p Mode: %lx\n", Process, Mode);
+
+    /* Compute quantum and priority */
+    Priority = PspComputeQuantumAndPriority(Process, Mode, &Quantum);
+
+    /* Set them */
+    KeSetPriorityAndQuantumProcess(&Process->Pcb, Priority, Quantum);
+}
+
+BOOLEAN
+NTAPI
+PspIsForegroundWindowProcess(IN PEPROCESS Process)
+{
+    return PspForegroundWindowProcess == Process;
+}
+
 /*
  * @implemented
+ *
+ * The window manager's entry point: the process that owns the foreground window
+ * runs with the foreground quantum, the one it replaces goes back to background.
  */
 VOID
 NTAPI
 PsSetProcessPriorityByClass(IN PEPROCESS Process,
                             IN PSPROCESSPRIORITYMODE Type)
 {
-    UCHAR Quantum;
-    ULONG Priority;
     PSTRACE(PS_PROCESS_DEBUG, "Process: %p Type: %lx\n", Process, Type);
 
-    /* Compute quantum and priority */
-    Priority = PspComputeQuantumAndPriority(Process, Type, &Quantum);
+    /* Remember which process owns the foreground window */
+    if (Type == PsProcessPriorityForeground)
+    {
+        InterlockedExchangePointer((PVOID volatile *)&PspForegroundWindowProcess, Process);
+    }
+    else
+    {
+        InterlockedCompareExchangePointer((PVOID volatile *)&PspForegroundWindowProcess, NULL, Process);
+    }
 
-    /* Set them */
-    KeSetPriorityAndQuantumProcess(&Process->Pcb, Priority, Quantum);
+    PspApplyProcessPriorityMode(Process, Type);
 }
 
 /*
