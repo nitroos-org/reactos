@@ -499,30 +499,47 @@ ReadOwnProgId(LPCWSTR pszKey, LPCWSTR pszGroup, LPCWSTR pszName, LPWSTR pszProgI
 }
 
 /*
- * Record the choice for the current user the way Windows' Default Programs does:
- * IApplicationAssociationRegistration::SetAppAsDefaultAll writes the UserChoice of every
- * association the application's Capabilities declare. The shell (ShellExecute, AssocQueryString)
- * and the browsers' own "am I the default" checks read it back.
+ * Record the choice for the current user the way Windows' Default Programs does, through
+ * IApplicationAssociationRegistration::SetAppAsDefault: the UserChoice of the web associations
+ * (http, https, ftp, .htm, .html). The shell (ShellExecute, AssocQueryString) and the browsers' own
+ * "am I the default" checks read it back. Not SetAppAsDefaultAll: the Capabilities of a browser also
+ * list mailto:, .pdf, .svg and image types, which choosing a web browser must not take over.
+ * ftp is only recorded when the browser declares it; the others must succeed.
  */
 static BOOL
 SetUserChoice(LPCWSTR pszRegisteredApp)
 {
+    static const struct { LPCWSTR pszName; ASSOCIATIONTYPE type; BOOL bRequired; } s_Assoc[] =
+    {
+        { L"http",  AT_URLPROTOCOL,   TRUE },
+        { L"https", AT_URLPROTOCOL,   TRUE },
+        { L"ftp",   AT_URLPROTOCOL,   FALSE },
+        { L".htm",  AT_FILEEXTENSION, TRUE },
+        { L".html", AT_FILEEXTENSION, TRUE },
+    };
     IApplicationAssociationRegistration *pAAR = NULL;
-    HRESULT hr;
+    HRESULT hr, hrAll = S_OK;
     BOOL bInit;
+    UINT i;
 
     bInit = SUCCEEDED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED));
     hr = CoCreateInstance(&CLSID_ApplicationAssociationRegistration, NULL, CLSCTX_INPROC_SERVER,
                           &IID_IApplicationAssociationRegistration, (void **)&pAAR);
     if (SUCCEEDED(hr))
     {
-        hr = pAAR->lpVtbl->SetAppAsDefaultAll(pAAR, pszRegisteredApp);
+        for (i = 0; i < ARRAYSIZE(s_Assoc); i++)
+        {
+            hr = pAAR->lpVtbl->SetAppAsDefault(pAAR, pszRegisteredApp, s_Assoc[i].pszName, s_Assoc[i].type);
+            LogLine(L"SetUserChoice: SetAppAsDefault(%s, %s) = 0x%08lx", pszRegisteredApp, s_Assoc[i].pszName, hr);
+            if (FAILED(hr) && s_Assoc[i].bRequired && SUCCEEDED(hrAll))
+                hrAll = hr;
+        }
         pAAR->lpVtbl->Release(pAAR);
+        hr = hrAll;
     }
     if (bInit)
         CoUninitialize();
 
-    LogLine(L"SetUserChoice: SetAppAsDefaultAll(%s) = 0x%08lx", pszRegisteredApp, hr);
     return SUCCEEDED(hr);
 }
 
@@ -667,6 +684,63 @@ EnsureFirefoxClient(LPCWSTR pszExe)
     return g_WriteError == ERROR_SUCCESS;
 }
 
+/* The StartMenuInternet client Firefox's own installer registers ("Firefox-<install hash>" with Capabilities and
+ * the FirefoxURL-/FirefoxHTML- ProgIds), as opposed to the "FIREFOX.EXE" entry EnsureFirefoxClient writes. The
+ * default has to be recorded against this one: Firefox's "am I the default browser" check compares the user's
+ * choice with its own ProgIds. */
+static BOOL
+FindOwnFirefoxClient(LPWSTR pszKey, size_t cchKey, LPWSTR pszName, size_t cchName)
+{
+    HKEY hClients, hKey;
+    DWORD i;
+    BOOL bFound = FALSE;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szStartMenuInternet, 0, KEY_READ, &hClients) != ERROR_SUCCESS)
+        return FALSE;
+
+    for (i = 0; !bFound; i++)
+    {
+        WCHAR szSubKey[256], szCap[320];
+        DWORD cchSubKey = ARRAYSIZE(szSubKey);
+
+        if (RegEnumKeyExW(hClients, i, szSubKey, &cchSubKey, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        if (StrCmpNIW(szSubKey, L"Firefox-", 8))
+            continue;
+        StringCchPrintfW(szCap, ARRAYSIZE(szCap), L"%s\\Capabilities", szSubKey);
+        if (RegOpenKeyExW(hClients, szCap, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+            continue;
+        RegCloseKey(hKey);
+
+        StringCchCopyW(pszKey, cchKey, szSubKey);
+        if (RegOpenKeyExW(hClients, szSubKey, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+        {
+            if (!ReadRegString(hKey, NULL, pszName, (DWORD)cchName) || !pszName[0])
+                StringCchCopyW(pszName, cchName, L"Mozilla Firefox");
+            RegCloseKey(hKey);
+        }
+        else
+        {
+            StringCchCopyW(pszName, cchName, L"Mozilla Firefox");
+        }
+        bFound = TRUE;
+    }
+    RegCloseKey(hClients);
+    return bFound;
+}
+
+/* Make the installed Firefox the default: through the client Firefox registered itself, else through a
+ * client entry written for it. */
+static BOOL
+AdoptFirefox(LPCWSTR pszExe)
+{
+    WCHAR szKey[256], szName[256];
+
+    if (FindOwnFirefoxClient(szKey, ARRAYSIZE(szKey), szName, ARRAYSIZE(szName)))
+        return SetDefaultBrowser(szKey, szName, pszExe);
+    return EnsureFirefoxClient(pszExe) && SetDefaultBrowser(L"FIREFOX.EXE", L"Mozilla Firefox", pszExe);
+}
+
 /* ------------------------------------------------------------------ */
 /* Network readiness                                                   */
 /* ------------------------------------------------------------------ */
@@ -794,8 +868,7 @@ InstallFirefox(void)
     if (FindFirefoxExe(szFfExe, ARRAYSIZE(szFfExe)))
     {
         LogLine(L"InstallFirefox: firefox already present at %s; adopting as default", szFfExe);
-        return EnsureFirefoxClient(szFfExe) &&
-               SetDefaultBrowser(L"FIREFOX.EXE", L"Mozilla Firefox", szFfExe);
+        return AdoptFirefox(szFfExe);
     }
 
     if (!WaitForNetwork(NET_WAIT_TIMEOUT_MS))
@@ -833,8 +906,7 @@ InstallFirefox(void)
     if (FindFirefoxExe(szFfExe, ARRAYSIZE(szFfExe)))
     {
         LogLine(L"InstallFirefox: firefox present at %s", szFfExe);
-        return EnsureFirefoxClient(szFfExe) &&
-               SetDefaultBrowser(L"FIREFOX.EXE", L"Mozilla Firefox", szFfExe);
+        return AdoptFirefox(szFfExe);
     }
 
     LogLine(L"InstallFirefox: firefox.exe not found after install");
