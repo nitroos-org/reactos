@@ -80,6 +80,48 @@ RunConsoleHelper(PCSTR Mode)
     }
 }
 
+#ifndef ENABLE_VIRTUAL_TERMINAL_INPUT
+#define ENABLE_VIRTUAL_TERMINAL_INPUT 0x0200
+#endif
+
+/* What the terminal sends in CheckVtInput, and the characters the application must read:
+ * ESC [ A, Ctrl+Right (a modifier the key events of the host cannot carry), an unknown
+ * sequence, Alt+x, F5, Ctrl+A, e-acute in UTF-8, F1, q. */
+#define VT_INPUT_BYTES  "\x1b[A" "\x1b[1;5C" "\x1b[99z" "\x1b" "x" "\x1b[15~" "\x01" "\xc3\xa9" "\x1b" "OP" "q"
+#define VT_INPUT_CHARS  27
+#define VT_INPUT_HEX    "001B005B0041" "001B005B0031003B00350043" "001B005B00390039007A" "001B0078" \
+                        "001B005B00310035007E" "0001" "00E9" "001B004F0050" "0071"
+
+/* Runs inside the pseudoconsole: ENABLE_VIRTUAL_TERMINAL_INPUT, then report what arrives. */
+static VOID
+RunVtInputHelper(VOID)
+{
+    HANDLE Input = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, OPEN_EXISTING, 0, NULL);
+    WCHAR Chars[VT_INPUT_CHARS + 1];
+    CHAR Text[16 + 4 * VT_INPUT_CHARS];
+    DWORD Count = 0, Read, Used;
+
+    if (Input == INVALID_HANDLE_VALUE || !SetConsoleMode(Input, ENABLE_VIRTUAL_TERMINAL_INPUT))
+    {
+        ConsoleSay("VTIN=error\r\n");
+        return;
+    }
+    ConsoleSay("READYVT\r\n");
+    while (Count < VT_INPUT_CHARS)
+    {
+        Read = 0;
+        if (!ReadConsoleW(Input, Chars + Count, VT_INPUT_CHARS - Count, &Read, NULL) || !Read) break;
+        Count += Read;
+    }
+    StringCchCopyA(Text, sizeof(Text), "VTIN=");
+    Used = lstrlenA(Text);
+    for (Read = 0; Read < Count; ++Read, Used += 4)
+        StringCchPrintfA(Text + Used, sizeof(Text) - Used, "%04X", Chars[Read]);
+    StringCchCatA(Text, sizeof(Text), "\r\n");
+    ConsoleSay(Text);
+}
+
 static VOID
 TypeCommand(HANDLE Input, PCSTR Mode)
 {
@@ -206,6 +248,15 @@ CheckSession(BOOL Interactive)
             TypeCommand(InputWrite, "helper-size");
             ok(WaitForText(OutputRead, "SIZE=250x70,BUF=250x70", 10000),
                "Window/buffer did not change to 250x70\n");
+            /* ENABLE_VIRTUAL_TERMINAL_INPUT: the application gets the bytes the terminal sent,
+               not key events that the console would translate back (losing the modifier,
+               the unknown sequence and the UTF-8 character). */
+            TypeCommand(InputWrite, "helper-vtinput");
+            ok(WaitForText(OutputRead, "READYVT", 10000), "VT input helper did not start\n");
+            ok(WriteFile(InputWrite, VT_INPUT_BYTES, sizeof(VT_INPUT_BYTES) - 1, &Written, NULL) &&
+               Written == sizeof(VT_INPUT_BYTES) - 1, "Input pipe write failed: %lu\n", GetLastError());
+            ok(WaitForText(OutputRead, "VTIN=" VT_INPUT_HEX, 10000),
+               "ENABLE_VIRTUAL_TERMINAL_INPUT did not deliver the sequences unchanged\n");
             TypeCommand(InputWrite, "helper-ctrlc");
             ok(WaitForText(OutputRead, "READYCTRL", 10000), "Ctrl+C helper did not start\n");
             WriteFile(InputWrite, "\003", 1, &Written, NULL);
@@ -650,6 +701,11 @@ START_TEST(ConPty)
         if (argc >= 3 && (!strcmp(argv[2], "helper-size") || !strcmp(argv[2], "helper-ctrlc")))
         {
             RunConsoleHelper(argv[2]);
+            return;
+        }
+        if (argc >= 3 && !strcmp(argv[2], "helper-vtinput"))
+        {
+            RunVtInputHelper();
             return;
         }
         if (argc >= 3 && !strcmp(argv[2], "helper-mid"))
