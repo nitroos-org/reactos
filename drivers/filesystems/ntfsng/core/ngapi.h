@@ -125,6 +125,9 @@ int ngc_dirty(ngc_vol *v);
 void ngc_jnl_report(ngc_vol *v);
 #if DBG
 void ngc_set_journal_fault(unsigned long commit_no);
+/* Test only: report every every'th unlocked write (ngc_dio_end) as "mapping changed", to run the glue's write-again path; 0 = off. */
+void ngc_set_dio_fault(unsigned long every);
+extern unsigned long ngc_dio_forced;
 #endif
 typedef int (*ngc_run_t)(void *ctx, unsigned long long vcn, long long lcn, unsigned long long len);
 int ngc_runs(ngc_vol *v, ngc_node *n, ngc_run_t fn, void *ctx);

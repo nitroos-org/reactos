@@ -1816,6 +1816,27 @@ static long ngc_write_impl(ngc_vol *v, ngc_node *n, unsigned long long off, unsi
  * Streams this does not cover (resident, compressed, sparse, encrypted), unmapped clusters and writes of
  * more than NGC_DIO_RUNS runs go through ngc_write under the lock as before.
  */
+#if DBG
+/* Test only: every ngc_dio_fault_every'th unlocked write that passed the checks of ngc_dio_end is reported as changed. */
+static unsigned long ngc_dio_fault_every, ngc_dio_fault_seen;
+unsigned long ngc_dio_forced;
+
+void ngc_set_dio_fault(unsigned long every)
+{
+	ngc_dio_fault_every = every;
+}
+
+static int ngc_dio_forced_mismatch(void)
+{
+	if (!ngc_dio_fault_every || ++ngc_dio_fault_seen % ngc_dio_fault_every)
+		return 0;
+	ngc_dio_forced++;
+	return 1;
+}
+#else
+#define ngc_dio_forced_mismatch() 0
+#endif
+
 static int ngc_dio_map(struct ngc_vol *v, struct ntfs_inode *ni, u64 off, u32 len, u32 cap, struct ngc_dio *d)
 {
 	struct ntfs_volume *vol = ni->vol;
@@ -1897,15 +1918,30 @@ long ngc_dio_end(ngc_vol *v, struct ngc_dio *d, const void *buf, int io_err)
 	struct ngc_dio now;
 	u64 end = d->off + d->len;
 	long ret = d->len;
+	unsigned int r;
 
+	/* The transfer's device requests count as writes, as those of ngc_write do (CoreLock is held). */
+	for (r = 0; r < d->nruns; r++) {
+		kshim_counter_writes++;
+		kshim_counter_write_bytes += d->run[r].len;
+	}
 	if (io_err) {
 		v->bdev->kshim_wr_failed++;
 		ret = -EIO;
 	} else if (sb_rdonly(v->sb)) {
 		ret = -EROFS;
-	} else if (i_size_read(vi) < (loff_t)end || ngc_dio_map(v, ni, d->off, d->len, d->cap, &now) ||
-		   now.nruns != d->nruns || memcmp(now.run, d->run, d->nruns * sizeof(d->run[0]))) {
-		printk(KERN_ERR "ngc: ino %llu: mapping of %llu+%u changed under an unlocked write: written again\n",
+	} else if (i_size_read(vi) < (loff_t)end || (loff_t)d->off > ni->initialized_size ||
+		   ngc_dio_map(v, ni, d->off, d->len, d->cap, &now) ||
+		   now.nruns != d->nruns || memcmp(now.run, d->run, d->nruns * sizeof(d->run[0])) ||
+		   ngc_dio_forced_mismatch()) {
+		/*
+		 * The stream changed under the transfer.  Not an error (the caller writes it again through
+		 * ngc_write), so a warning: error-level messages feed kshim_errseq_check on this thread.
+		 * "off > initialized size" cannot happen while the glue keeps size changes out (PagingIoResource);
+		 * it is checked anyway, so a shrink and regrow in the window can never publish a transfer that
+		 * left stale clusters in the gap below it.
+		 */
+		printk(KERN_WARNING "ngc: ino %llu: mapping of %llu+%u changed under an unlocked write: written again\n",
 		       (unsigned long long)ni->mft_no, d->off, d->len);
 		ret = -EAGAIN;
 	} else {
