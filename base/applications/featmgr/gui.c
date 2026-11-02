@@ -311,7 +311,15 @@ static void UpdateButtons(void)
     }
     else
     {
-        SetWindowTextW(g_hDesc, ListView_GetItemCount(g_hList) ? L"Select a feature to see its description." :
+        BOOL scoopListed = FALSE;
+        int k;
+        for (k = 0; k < g_count; k++)
+            if (!_wcsicmp(g_arr[k].Id, L"scoop")) { scoopListed = TRUE; break; }
+        SetWindowTextW(g_hDesc, ListView_GetItemCount(g_hList) ?
+            ((g_tier == FM_TIER_SOFTWARE && scoopListed) ?
+                L"Select a feature to see its description.\r\nTip: install Scoop from the Scoop entry here (this system has no UAC split token, "
+                L"so Scoop's own one-liner refuses to run as administrator), or run: iex \"&& {$(irm get.scoop.sh)} -RunAsAdmin\"" :
+                L"Select a feature to see its description.") :
             (g_tier == FM_TIER_SOFTWARE ?
                 L"No software-tier entries in the catalog yet." :
                 L"No OS features in the catalog."));

@@ -75,3 +75,25 @@ may contain complementary, yet non-official, information.
 
 This document was originally written by Jason Filby (jasonfilby@yahoo.com)
 and is now occasionally updated by various contributors.
+
+
+9. Installing Scoop
+-------------------
+
+Scoop (https://scoop.sh) is a command-line installer for Windows apps and
+developer tools. It needs PowerShell 7 and an NTFS volume (amd64 only).
+
+This system has no UAC split token: every session runs as a full
+administrator. Scoop's own installer refuses to run that way, so its
+documented one-liner:
+
+    irm get.scoop.sh | iex
+
+stops with "Running the installer as administrator is disabled by default".
+Use one of these instead:
+
+  - Optional Features (featmgr), Software tab, Scoop entry. This is the
+    recommended way; it passes -RunAsAdmin for you.
+  - In PowerShell 7, pass -RunAsAdmin to the installer yourself:
+
+    iex "& {$(irm get.scoop.sh)} -RunAsAdmin"
