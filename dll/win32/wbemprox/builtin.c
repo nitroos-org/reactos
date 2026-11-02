@@ -56,6 +56,7 @@
 #include "wine/asm.h"
 #include "wine/debug.h"
 #include "wbemprox_private.h"
+#include <reactos/buildno.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(wbemprox);
 
@@ -5734,10 +5735,12 @@ static enum fill_status fill_environment( struct table *table, const struct expr
 /* Win32_QuickFixEngineering: the installed updates of the servicing stack. Windows lists the
  * packages of HKLM\...\Component Based Servicing\Packages that are installed (CurrentState 0x70),
  * with the KB number, the release type and the support URL read from the package manifest in
- * %SystemRoot%\servicing\Packages. A system without servicing packages has no entries. */
+ * %SystemRoot%\servicing\Packages. A system without servicing packages has no entries.
+ * A nitro release build (NITRO_IS_RELEASE, see sdk/include/reactos/version.cmake) adds one entry of its
+ * own, NITRO-<NITRO_VERSION>; dev builds add none. Never a Microsoft KB number. */
 struct qfe_entry
 {
-    char kb[16];
+    char kb[160]; /* KB<digits>, or NITRO-<NITRO_VERSION> (at most 128 characters) */
     WCHAR *caption;
     WCHAR *description;
     WCHAR *installedby;
@@ -5813,6 +5816,48 @@ static void free_qfe_entry( struct qfe_entry *e )
     heap_free( e->installedby );
     heap_free( e->installedon );
 }
+
+#if NITRO_IS_RELEASE
+/* the system install date (HKLM\Software\Microsoft\Windows NT\CurrentVersion\InstallDate, seconds since 1970) as M/d/yyyy */
+static WCHAR *get_nitro_installedon(void)
+{
+    static const WCHAR keyW[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion";
+    HKEY key;
+    DWORD type = 0, size = sizeof(DWORD), secs = 0;
+    ULONGLONG t;
+    LONG ret;
+
+    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, keyW, 0, KEY_READ | KEY_WOW64_64KEY, &key )) return NULL;
+    ret = RegQueryValueExW( key, L"InstallDate", NULL, &type, (BYTE *)&secs, &size );
+    RegCloseKey( key );
+    if (ret || type != REG_DWORD || !secs) return NULL;
+    t = ((ULONGLONG)secs + 11644473600ULL) * 10000000ULL;
+    return get_qfe_installedon( (DWORD)(t >> 32), (DWORD)t );
+}
+
+static void add_nitro_release_entry( struct qfe_entry **list, UINT *count, UINT *alloc )
+{
+    struct qfe_entry e, *tmp;
+
+    memset( &e, 0, sizeof(e) );
+    strcpy( e.kb, "NITRO-" NITRO_VERSION_STR );
+    e.description = heap_strdupW( L"Update" ); /* exactly: Get-HotFix.Tests.ps1 keys on it */
+    e.caption = utf8_to_wcs( NITRO_RELEASE_URL_STR, strlen( NITRO_RELEASE_URL_STR ) ); /* empty without a URL base */
+    e.installedon = get_nitro_installedon();
+    if (*count == *alloc)
+    {
+        UINT new_alloc = *alloc ? *alloc * 2 : 16;
+        if (!(tmp = heap_realloc( *list, new_alloc * sizeof(**list) )))
+        {
+            free_qfe_entry( &e );
+            return;
+        }
+        *list = tmp;
+        *alloc = new_alloc;
+    }
+    (*list)[(*count)++] = e;
+}
+#endif
 
 static BOOL qfe_seen( const struct qfe_entry *list, UINT count, const char *kb )
 {
@@ -5942,6 +5987,10 @@ static enum fill_status fill_quickfixengineering( struct table *table, const str
         }
         RegCloseKey( root );
     }
+
+#if NITRO_IS_RELEASE
+    add_nitro_release_entry( &list, &count, &alloc );
+#endif
 
     csname = get_computername();
     for (i = 0; i < count; i++)
