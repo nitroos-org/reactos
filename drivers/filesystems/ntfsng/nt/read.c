@@ -109,6 +109,23 @@ static int NgRdioTransfer(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Buffer)
 }
 
 /*
+ * A non-cached read comes after the data writes of its stream that are in flight.  CcFlushCache above does not
+ * wait for a VACB another thread is flushing (the lazy writer clears its dirty mark first), and the unlocked
+ * transfer of such a write no longer holds CoreLock, which used to make the reader wait; so a read could return
+ * the clusters before that write reached them or raised the initialized size (zeros, seen by pwchk).  A lazy writer holds
+ * PagingIoResource shared from before it marks the view clean until its write is done: taking it exclusive waits
+ * for that; a paging or non-cached write holds PagingWriteLock exclusive throughout, up to ngc_dio_end.  Both are
+ * taken one after the other and dropped at once, with nothing else held (MainResource was released after the flush).
+ */
+static VOID NgWaitStreamWrites(PNG_FCB Fcb)
+{
+    ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
+    ExReleaseResourceLite(Fcb->Header.PagingIoResource);
+    ExAcquireResourceSharedLite(&Fcb->PagingWriteLock, TRUE);
+    ExReleaseResourceLite(&Fcb->PagingWriteLock);
+}
+
+/*
  * Paging and non-cached reads of a stream ngc_read_direct handles do their device transfer without CoreLock
  * (ngc_rdio_begin/end, core/ngcore.c; the steps and invariants are those of the paging write in write.c):
  * under CoreLock the runs are mapped and the node pinned, the transfer runs with DataIoGate held shared, and
@@ -215,6 +232,8 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         CcFlushCache(&Fcb->SectionObjectPointers, &Offset, Length, &Iosb);
         ExReleaseResourceLite(Fcb->Header.Resource);
     }
+    if (NonCached && !Paging)
+        NgWaitStreamWrites(Fcb);
     if (Paging || NonCached)
     {
         /* Straight from the clusters or through the shim page cache; bytes past EOF come back zeroed. */
