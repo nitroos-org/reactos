@@ -133,6 +133,7 @@ extern void func_LoadLibraryErrorMode(void);
 extern void func_LoadLibraryExW(void);
 extern void func_LoadLibraryILOnly(void);
 extern void func_LoadLibraryMachine(void);
+extern void func_LoadLibraryForwarder(void);
 extern void func_LoadLibraryMissingImport(void);
 extern void func_LocalDumps(void);
 extern void func_CrashDialog(void);
@@ -348,6 +349,7 @@ const struct test winetest_testlist[] =
     { "LoadLibraryExW",              func_LoadLibraryExW },
     { "LoadLibraryILOnly",            func_LoadLibraryILOnly },
     { "LoadLibraryMachine",          func_LoadLibraryMachine },
+    { "LoadLibraryForwarder",         func_LoadLibraryForwarder },
     { "LoadLibraryMissingImport",     func_LoadLibraryMissingImport },
     { "LocalDumps",                  func_LocalDumps },
     { "CrashDialog",                 func_CrashDialog },

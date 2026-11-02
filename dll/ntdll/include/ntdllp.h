@@ -61,6 +61,7 @@ extern ULONG LdrpActiveUnloadCount;
 extern BOOLEAN LdrpShutdownInProgress;
 extern UNICODE_STRING LdrpKnownDllPath;
 extern PLDR_DATA_TABLE_ENTRY LdrpGetModuleHandleCache, LdrpLoadedDllHandleCache;
+extern ULONG LdrpImportWalkDepth;
 extern BOOLEAN RtlpPageHeapEnabled;
 extern ULONG RtlpDphGlobalFlags;
 extern BOOLEAN g_ShimsEnabled;
@@ -152,6 +153,9 @@ LdrpUpdateLoadCount2(IN PLDR_DATA_TABLE_ENTRY LdrEntry,
 
 ULONG NTAPI
 LdrpClearLoadInProgress(VOID);
+
+VOID NTAPI
+LdrpDereferenceNestedLoad(IN PLDR_DATA_TABLE_ENTRY LdrEntry);
 
 NTSTATUS
 NTAPI

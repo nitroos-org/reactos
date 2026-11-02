@@ -129,6 +129,7 @@ list(APPEND SOURCE
     LoadLibraryExW.c
     LoadLibraryILOnly.c
     LoadLibraryMachine.c
+    LoadLibraryForwarder.c
     LoadLibraryMissingImport.c
     LocalDumps.c
     CrashDialog.c
