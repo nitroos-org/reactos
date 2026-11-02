@@ -938,9 +938,16 @@ LdrpSetProtection(PVOID ViewBase,
     /* Go through all sections */
     for (i = 0; i < NtHeaders->FileHeader.NumberOfSections; i++)
     {
-        /* Check for read-only non-zero section */
+        /*
+         * Check for read-only non-zero section. A read-only *shared* section
+         * (IMAGE_SCN_MEM_SHARED without IMAGE_SCN_MEM_WRITE, as Qt6Core emits
+         * for .qtmimed) is not mapped copy-on-write, so its protection cannot
+         * be raised (STATUS_SECTION_PROTECTION), and a read-only section holds
+         * no fixups anyway: leave it alone, or the relocation of the whole
+         * image fails.
+         */
         if ((Section->SizeOfRawData) &&
-            !(Section->Characteristics & IMAGE_SCN_MEM_WRITE))
+            !(Section->Characteristics & (IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_SHARED)))
         {
             /* Check if we are setting or restoring protection */
             if (Restore)

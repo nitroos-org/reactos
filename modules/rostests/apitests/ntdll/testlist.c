@@ -37,6 +37,7 @@ extern void func_CrtSecure(void);
 extern void func_LdrEnumResources(void);
 extern void func_LdrFindResource_U(void);
 extern void func_LdrLoadDll(void);
+extern void func_LdrSharedReadOnlySection(void);
 extern void func_LdrShutdownThread(void);
 extern void func_load_notifications(void);
 extern void func_LpcCallbackRequest(void);
@@ -268,6 +269,7 @@ const struct test winetest_testlist[] =
     { "LdrEnumResources",               func_LdrEnumResources },
     { "LdrFindResource_U",              func_LdrFindResource_U },
     { "LdrLoadDll",                     func_LdrLoadDll },
+    { "LdrSharedReadOnlySection",      func_LdrSharedReadOnlySection },
     { "LdrShutdownThread",              func_LdrShutdownThread },
     { "load_notifications",             func_load_notifications },
     { "LpcCallbackRequest",             func_LpcCallbackRequest },
