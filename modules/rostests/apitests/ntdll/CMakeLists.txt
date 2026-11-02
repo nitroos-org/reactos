@@ -46,6 +46,7 @@ list(APPEND SOURCE
     RtlGetPreciseTime.c
     RtlFlsValue.c
     RtlUtf8String.c
+    NtQueryWnfStateData.c
     RtlWin10Helpers.c
     ZeroBits.c
     CommitCharge.c
