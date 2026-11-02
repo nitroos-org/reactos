@@ -3291,6 +3291,44 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             return STATUS_SUCCESS;
         }
+        case SystemFileCacheInformation:
+        {
+            /* The cache sizes are SIZE_T: 36 bytes in the 32-bit form (GetPerformanceInfo and Task Manager
+             * ask for it), 64 with the 8-byte fields and the padding after PageFaultCount natively. */
+            typedef struct
+            {
+                ULONG CurrentSize, PeakSize, PageFaultCount, MinimumWorkingSet, MaximumWorkingSet;
+                ULONG CurrentSizeIncludingTransitionInPages, PeakSizeIncludingTransitionInPages;
+                ULONG TransitionRePurposeCount, Flags;
+            } WOW64_SYSTEM_FILECACHE_INFORMATION;
+            SYSTEM_FILECACHE_INFORMATION From;
+            WOW64_SYSTEM_FILECACHE_INFORMATION *To = P(1);
+            C_ASSERT(sizeof(WOW64_SYSTEM_FILECACHE_INFORMATION) == 36);
+            if (NativeSystemInformation) UNSUPPORTED(CLASS, a[0]);
+            if (a[2] < sizeof(*To))
+            {
+                if (a[3]) { PROBE(3); U(3) = sizeof(*To); }
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            if (!GuestSpan(a[1], sizeof(*To)) || (a[3] && !GuestSpan(a[3], sizeof(ULONG))))
+                return STATUS_ACCESS_VIOLATION;
+            PROBE(1);
+            if (a[3]) PROBE(3);
+            Status = NtQuerySystemInformation(a[0], &From, sizeof(From), NULL);
+            if (!NT_SUCCESS(Status)) return Status;
+            ProbeOutput(a[1], sizeof(*To));
+            To->CurrentSize = (ULONG)From.CurrentSize;
+            To->PeakSize = (ULONG)From.PeakSize;
+            To->PageFaultCount = From.PageFaultCount;
+            To->MinimumWorkingSet = (ULONG)From.MinimumWorkingSet;
+            To->MaximumWorkingSet = (ULONG)From.MaximumWorkingSet;
+            To->CurrentSizeIncludingTransitionInPages = (ULONG)From.CurrentSizeIncludingTransitionInPages;
+            To->PeakSizeIncludingTransitionInPages = (ULONG)From.PeakSizeIncludingTransitionInPages;
+            To->TransitionRePurposeCount = From.TransitionRePurposeCount;
+            To->Flags = From.Flags;
+            if (a[3]) U(3) = sizeof(*To);
+            return STATUS_SUCCESS;
+        }
         case SystemCurrentTimeZoneInformation: /* RTL_TIME_ZONE_INFORMATION has no pointers. */
         case SystemTimeOfDayInformation:
         case SystemPerformanceInformation: /* LARGE_INTEGER/ULONG counters, no pointers, same layout. */
