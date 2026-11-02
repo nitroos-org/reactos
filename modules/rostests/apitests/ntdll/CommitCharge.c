@@ -457,35 +457,62 @@ VOID
 TestReporting(VOID)
 {
     MEMORYSTATUSEX MemoryStatus = { sizeof(MemoryStatus) };
-    ULONG_PTR CommitLimit, LimitAfter, Committed, PagingFile;
+    ULONG_PTR CommitLimit, LimitAfter, Before, After, PagingFile, PagingAfter;
+    ULONGLONG AvailLow, AvailHigh;
     QUOTA_LIMITS QuotaLimits;
     BOOL InJob = FALSE;
     NTSTATUS Status;
 
-    Committed = QuerySystemCommit(&CommitLimit);
+    Before = QuerySystemCommit(&CommitLimit);
     PagingFile = QueryPagingFilePages();
-    trace("commit %Iu pages of %Iu, paging files %Iu pages, physical %lu pages, RAM part %Iu%%\n",
-          Committed, CommitLimit, PagingFile, PhysicalPages,
-          PhysicalPages ? ((CommitLimit - PagingFile) * 100) / PhysicalPages : 0);
+    trace("commit %Iu pages of %Iu, paging files %Iu pages, physical %lu pages\n",
+          Before, CommitLimit, PagingFile, PhysicalPages);
 
-    ok(Committed <= CommitLimit, "committed %Iu above the limit %Iu\n", Committed, CommitLimit);
-    /* RAM plus paging files at most; ReactOS counts paging files only for memory it can page out */
-    ok(CommitLimit <= PhysicalPages + PagingFile, "limit %Iu above physical memory %lu plus paging files %Iu\n",
-       CommitLimit, PhysicalPages, PagingFile);
-    if (!is_reactos())
-        ok(CommitLimit >= PagingFile, "limit %Iu below the paging files %Iu\n", CommitLimit, PagingFile);
+    ok(Before <= CommitLimit, "committed %Iu above the limit %Iu\n", Before, CommitLimit);
 
-    ok(GlobalMemoryStatusEx(&MemoryStatus), "GlobalMemoryStatusEx failed with %lu\n", GetLastError());
+    /*
+     * As on Windows (measured on Windows 10: 2423623 = 2095943 pages of RAM + one 327680 page paging file) the
+     * limit is physical memory plus the size of every paging file. Applications derive the paging file size
+     * from it: GlobalMemoryStatusEx ullTotalPageFile - ullTotalPhys. No paging file: the limit is RAM.
+     */
     QuerySystemCommit(&LimitAfter);
+    PagingAfter = QueryPagingFilePages();
+    if ((LimitAfter != CommitLimit) || (PagingAfter != PagingFile))
+        skip("a paging file grew or shrank in between\n");
+    else
+        ok(CommitLimit == PhysicalPages + PagingFile, "limit %Iu, physical memory %lu plus paging files %Iu pages\n",
+           CommitLimit, PhysicalPages, PagingFile);
+
+    Before = QuerySystemCommit(NULL);
+    ok(GlobalMemoryStatusEx(&MemoryStatus), "GlobalMemoryStatusEx failed with %lu\n", GetLastError());
+    After = QuerySystemCommit(&LimitAfter);
+    PagingAfter = QueryPagingFilePages();
     Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessQuotaLimits, &QuotaLimits, sizeof(QuotaLimits), NULL);
     ok_ntstatus(Status, STATUS_SUCCESS);
     if (!IsProcessInJob(GetCurrentProcess(), NULL, &InJob))
         InJob = TRUE;
-    if (!NT_SUCCESS(Status) || (QuotaLimits.PagefileLimit != (SIZE_T)-1) || InJob || (LimitAfter != CommitLimit))
+    if (!NT_SUCCESS(Status) || (QuotaLimits.PagefileLimit != (SIZE_T)-1) || InJob ||
+        (LimitAfter != CommitLimit) || (PagingAfter != PagingFile))
+    {
         skip("process commit quota, a job, or a paging file growth in between\n");
+    }
     else
+    {
         ok(MemoryStatus.ullTotalPageFile == (ULONGLONG)CommitLimit * PageSize,
            "ullTotalPageFile %I64u, commit limit %Iu pages\n", MemoryStatus.ullTotalPageFile, CommitLimit);
+        ok(MemoryStatus.ullTotalPageFile - MemoryStatus.ullTotalPhys == (ULONGLONG)PagingFile * PageSize,
+           "ullTotalPageFile %I64u minus ullTotalPhys %I64u, paging files %Iu pages\n",
+           MemoryStatus.ullTotalPageFile, MemoryStatus.ullTotalPhys, PagingFile);
+
+        /* Available is limit less charge: the charge moved by at most the other activity in between */
+        AvailLow = (ULONGLONG)(CommitLimit - max(Before, After)) * PageSize;
+        AvailHigh = (ULONGLONG)(CommitLimit - min(Before, After)) * PageSize;
+        AvailLow = (AvailLow > MB_PAGES(2) * PageSize) ? AvailLow - MB_PAGES(2) * PageSize : 0;
+        AvailHigh += MB_PAGES(2) * PageSize;
+        ok((MemoryStatus.ullAvailPageFile >= AvailLow) && (MemoryStatus.ullAvailPageFile <= AvailHigh),
+           "ullAvailPageFile %I64u, limit less charge is %I64u to %I64u\n",
+           MemoryStatus.ullAvailPageFile, AvailLow, AvailHigh);
+    }
     ok(MemoryStatus.ullAvailPageFile <= MemoryStatus.ullTotalPageFile,
        "ullAvailPageFile %I64u above ullTotalPageFile %I64u\n", MemoryStatus.ullAvailPageFile, MemoryStatus.ullTotalPageFile);
 }
@@ -493,55 +520,74 @@ TestReporting(VOID)
 /* ReactOS only from here: these depend on the paging file policy of the test system */
 
 /*
- * ARM3 private memory cannot be paged out on ReactOS (no working set trimming,
- * no modified page writer for it): RAM is all that backs it, whatever the
- * paging files hold. A private commitment beyond RAM must fail at the
- * allocation, as it does on Windows without a paging file, and not later in
- * a page fault that cannot fail (bugcheck 0x7A for a page table page when the
- * pages run out). The range is never touched, so the test uses no memory.
+ * Commitment is limited by the reported commit limit, RAM plus the paging files: a request that does not fit
+ * fails at the allocation with STATUS_COMMITMENT_LIMIT, a request within it succeeds, also when it is more
+ * than RAM. The ranges are never touched, so the test uses no memory.
+ *
+ * Known gap: ARM3 private memory and paging file backed sections cannot be paged out on ReactOS (no working
+ * set trimming, no modified page writer for them), so RAM less a resident headroom is all that backs them.
+ * ReactOS commits less than it reports, and fails requests that Windows accepts (a request beyond what RAM
+ * holds is todo). Committing more would move the failure from the allocation to a page fault, which cannot
+ * fail (bugcheck 0x7A for a page table page when the pages run out).
  */
 static
 VOID
-TestPrivateCommitBeyondRam(VOID)
+CommitRange(
+    _In_ SIZE_T Pages,
+    _In_ BOOLEAN Expected,
+    _In_ BOOLEAN Todo)
 {
+    LARGE_INTEGER MaximumSize;
     PVOID Base = NULL;
-    SIZE_T Size;
-    ULONG_PTR CommitLimit;
+    HANDLE Section;
+    SIZE_T Size = Pages * PageSize;
     NTSTATUS Status;
 
-    QuerySystemCommit(&CommitLimit);
-    trace("commit limit %Iu pages, physical %lu pages, paging files %Iu pages\n",
-          CommitLimit, PhysicalPages, QueryPagingFilePages());
-    ok(CommitLimit <= (ULONG_PTR)PhysicalPages + QueryPagingFilePages(),
-       "commit limit %Iu above RAM plus paging files\n", CommitLimit);
-
-    Size = ((SIZE_T)PhysicalPages + MB_PAGES(64)) * PageSize;
 #ifndef _WIN64
     if (Size >= 1536 * 1024 * 1024)
     {
-        skip("RAM does not fit in the user address space\n");
-        return;
+        skip("%Iu MB do not fit in the user address space\n", Size / (1024 * 1024));
     }
+    else
 #endif
-    Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, 0, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    ok_ntstatus(Status, STATUS_COMMITMENT_LIMIT);
-    if (NT_SUCCESS(Status))
     {
-        Size = 0;
-        NtFreeVirtualMemory(NtCurrentProcess(), &Base, &Size, MEM_RELEASE);
-    }
-
-    /* The same for a paging file backed section, which ARM3 cannot page out either */
-    {
-        LARGE_INTEGER MaximumSize;
-        HANDLE Section;
-
-        MaximumSize.QuadPart = ((LONGLONG)PhysicalPages + MB_PAGES(64)) * PageSize;
-        Status = NtCreateSection(&Section, SECTION_ALL_ACCESS, NULL, &MaximumSize, PAGE_READWRITE, SEC_COMMIT, NULL);
-        ok_ntstatus(Status, STATUS_COMMITMENT_LIMIT);
+        Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, 0, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        todo_if((Todo) && is_reactos())
+            ok_ntstatus(Status, Expected ? STATUS_SUCCESS : STATUS_COMMITMENT_LIMIT);
         if (NT_SUCCESS(Status))
-            NtClose(Section);
+        {
+            Size = 0;
+            NtFreeVirtualMemory(NtCurrentProcess(), &Base, &Size, MEM_RELEASE);
+        }
     }
+
+    /* The same for a paging file backed section */
+    MaximumSize.QuadPart = (LONGLONG)Pages * PageSize;
+    Status = NtCreateSection(&Section, SECTION_ALL_ACCESS, NULL, &MaximumSize, PAGE_READWRITE, SEC_COMMIT, NULL);
+    todo_if((Todo) && is_reactos())
+        ok_ntstatus(Status, Expected ? STATUS_SUCCESS : STATUS_COMMITMENT_LIMIT);
+    if (NT_SUCCESS(Status))
+        NtClose(Section);
+}
+
+static
+VOID
+TestCommitBeyondRam(VOID)
+{
+    ULONG_PTR CommitLimit, Committed;
+
+    Committed = QuerySystemCommit(&CommitLimit);
+    trace("commit %Iu of %Iu pages, physical %lu pages, paging files %Iu pages\n",
+          Committed, CommitLimit, PhysicalPages, QueryPagingFilePages());
+
+    /* More than is left below the limit fails */
+    CommitRange(CommitLimit - Committed + MB_PAGES(64), FALSE, FALSE);
+
+    /* Inside the limit, with a little to spare: Windows commits it, also when it is more than RAM */
+    if (PhysicalPages < MB_PAGES(1024))
+        skip("%lu pages of RAM: the gap between the limit and what ReactOS backs is small\n", PhysicalPages);
+    else
+        CommitRange(CommitLimit - Committed - MB_PAGES(64), TRUE, TRUE);
 }
 
 static
@@ -582,7 +628,7 @@ TestGrowthAndExhaustion(VOID)
 {
     static HANDLE Sections[4096];
     LARGE_INTEGER MaximumSize;
-    ULONG_PTR CommitLimit, Committed, LimitStart, System, PagingStart;
+    ULONG_PTR CommitLimit, Committed, LimitStart, System, PagingStart, PagingNow;
     PVOID Base = NULL;
     SIZE_T RegionSize, Chunk;
     ULONG Count = 0, i;
@@ -599,30 +645,21 @@ TestGrowthAndExhaustion(VOID)
     PagingStart = QueryPagingFilePages();
 
     /*
-     * More than the headroom. Paging file backed sections are ARM3 memory,
-     * which cannot be paged out: the paging files count in the limit only
-     * up to the pageable (legacy Mm copy-on-write) commitment, so RAM binds
-     * and the section fails without growing anything. Were paging files
-     * the binding part, they would grow to make room.
+     * More than is left below the limit. On Windows a system managed paging file grows to make room, so the
+     * section succeeds and the limit and the paging file grow by what it needed. On ReactOS RAM binds, not
+     * the paging files (see above): growing them cannot make room for memory that cannot be paged out, so
+     * the section fails and nothing grows.
      */
     Committed = QuerySystemCommit(&CommitLimit);
     MaximumSize.QuadPart = (LONGLONG)(CommitLimit - Committed + MB_PAGES(64)) * PageSize;
     Status = NtCreateSection(&Sections[Count], SECTION_ALL_ACCESS, NULL, &MaximumSize, PAGE_READWRITE, SEC_COMMIT, NULL);
-    if (CommitLimit < (ULONG_PTR)PhysicalPages + PagingStart)
-    {
-        ok_ntstatus(Status, STATUS_COMMITMENT_LIMIT);
-        QuerySystemCommit(&CommitLimit);
-        ok(CommitLimit <= LimitStart + MB_PAGES(1), "commit limit moved from %Iu to %Iu pages\n", LimitStart, CommitLimit);
-        ok(QueryPagingFilePages() == PagingStart, "paging files changed from %Iu to %Iu pages\n",
-           PagingStart, QueryPagingFilePages());
-    }
-    else
+    QuerySystemCommit(&CommitLimit);
+    PagingNow = QueryPagingFilePages();
+    todo_if(is_reactos())
     {
         ok_ntstatus(Status, STATUS_SUCCESS);
-        QuerySystemCommit(&CommitLimit);
         ok(CommitLimit >= LimitStart + MB_PAGES(64), "commit limit grew from %Iu to %Iu pages\n", LimitStart, CommitLimit);
-        ok(QueryPagingFilePages() >= PagingStart + MB_PAGES(64), "paging files grew from %Iu to %Iu pages\n",
-           PagingStart, QueryPagingFilePages());
+        ok(PagingNow >= PagingStart + MB_PAGES(64), "paging files grew from %Iu to %Iu pages\n", PagingStart, PagingNow);
     }
     if (NT_SUCCESS(Status))
         Count++;
@@ -644,7 +681,9 @@ TestGrowthAndExhaustion(VOID)
     Committed = QuerySystemCommit(&CommitLimit);
     trace("filled: %lu sections, commit %Iu of %Iu pages, paging files %Iu pages (from %Iu)\n",
           Count, Committed, CommitLimit, QueryPagingFilePages(), PagingStart);
-    ok(CommitLimit - Committed < MB_PAGES(64), "%Iu pages left below the limit\n", CommitLimit - Committed);
+    /* Windows fills the limit; ReactOS stops at what RAM can back, below the reported limit (known gap) */
+    todo_if(is_reactos())
+        ok(CommitLimit - Committed < MB_PAGES(64), "%Iu pages left below the limit\n", CommitLimit - Committed);
 
     /* Committing what is committed needs nothing, even now */
     RegionSize = 16 * 1024 * 1024;
@@ -749,7 +788,7 @@ START_TEST(CommitCharge)
     if (is_reactos())
     {
         TestHugeCommit();
-        TestPrivateCommitBeyondRam();
+        TestCommitBeyondRam();
 
         /*
          * Over-commit and growth need the test system's fixture: one

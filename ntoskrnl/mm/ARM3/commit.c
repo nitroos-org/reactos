@@ -91,8 +91,9 @@ MiGetCommitCeiling(
 /*
  * The commit limit: RAM less the resident headroom, plus the paging file
  * space that pageable commitment can use. User commitment is charged against
- * it (less the kernel reserve), and it is what the system reports. Kernel
- * charges may also use the headroom.
+ * it (less the kernel reserve). Kernel charges may also use the headroom.
+ * The system reports MiGetReportedCommitLimit() instead (RAM plus paging
+ * files, as Windows does).
  */
 SIZE_T
 NTAPI
