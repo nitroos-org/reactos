@@ -232,6 +232,19 @@ PspGetWow64ProcessStart(
 
 VOID
 NTAPI
+PspApplyProcessPriorityMode(
+    IN PEPROCESS Process,
+    IN PSPROCESSPRIORITYMODE Mode
+);
+
+BOOLEAN
+NTAPI
+PspIsForegroundWindowProcess(
+    IN PEPROCESS Process
+);
+
+VOID
+NTAPI
 PsChangeQuantumTable(
     IN BOOLEAN Immediate,
     IN ULONG PrioritySeparation
