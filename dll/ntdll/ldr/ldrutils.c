@@ -155,106 +155,41 @@ LdrpUpdateLoadCount3(IN PLDR_DATA_TABLE_ENTRY LdrEntry,
         LdrEntry->Flags |= LDRP_UNLOAD_IN_PROGRESS;
     }
 
-    /* Go through all bound DLLs and dereference them */
-    ImportNameUnic = &NtCurrentTeb()->StaticUnicodeString;
-
-    /* Try to get the new import entry */
-    FirstEntry = RtlImageDirectoryEntryToData(LdrEntry->DllBase,
-                                              TRUE,
-                                              IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT,
-                                              &ImportSize);
-
-    if (FirstEntry)
+    /*
+     * The import directory is image data: a malformed one (a name out of
+     * the image, as LdrpWalkImportDescriptor may have failed on) must not
+     * raise out of here, past the activation context frame on this stack.
+     * The walk for the reference and the one for the dereference stop at
+     * the same place
+     */
+    _SEH2_TRY
     {
-        /* Set entry flags if refing/derefing */
-        if (Flags == LDRP_UPDATE_REFCOUNT)
-            LdrEntry->Flags |= LDRP_LOAD_IN_PROGRESS;
-        else if (Flags == LDRP_UPDATE_DEREFCOUNT)
-            LdrEntry->Flags |= LDRP_UNLOAD_IN_PROGRESS;
+        /* Go through all bound DLLs and dereference them */
+        ImportNameUnic = &NtCurrentTeb()->StaticUnicodeString;
 
-        BoundEntry = FirstEntry;
-        while (BoundEntry->OffsetModuleName)
+        /* Try to get the new import entry */
+        FirstEntry = RtlImageDirectoryEntryToData(LdrEntry->DllBase,
+                                                  TRUE,
+                                                  IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT,
+                                                  &ImportSize);
+
+        if (FirstEntry)
         {
-            /* Get pointer to the current import name */
-            ImportName = (LPSTR)FirstEntry + BoundEntry->OffsetModuleName;
+            /* Set entry flags if refing/derefing */
+            if (Flags == LDRP_UPDATE_REFCOUNT)
+                LdrEntry->Flags |= LDRP_LOAD_IN_PROGRESS;
+            else if (Flags == LDRP_UPDATE_DEREFCOUNT)
+                LdrEntry->Flags |= LDRP_UNLOAD_IN_PROGRESS;
 
-            RtlInitAnsiString(&ImportNameAnsi, ImportName);
-            Status = RtlAnsiStringToUnicodeString(ImportNameUnic, &ImportNameAnsi, FALSE);
-
-            if (NT_SUCCESS(Status))
+            BoundEntry = FirstEntry;
+            while (BoundEntry->OffsetModuleName)
             {
-                RedirectedDll = FALSE;
-                RedirectedImportName = ImportNameUnic;
-
-                /* Check if the SxS Assemblies specify another file */
-                Status = LdrpApplyFileNameRedirection(
-                    ImportNameUnic, &LdrApiDefaultExtension, UpdateString, NULL, &RedirectedImportName,
-                    &RedirectedDll);
-
-                /* Check success */
-                if (NT_SUCCESS(Status) && RedirectedDll)
-                {
-                    if (ShowSnaps)
-                    {
-                        DPRINT1("LDR: %Z got redirected to %wZ\n", &ImportNameAnsi, RedirectedImportName);
-                    }
-                }
-
-                if (NT_SUCCESS(Status))
-                {
-                    if (LdrpCheckForLoadedDll(NULL,
-                                              RedirectedImportName,
-                                              TRUE,
-                                              RedirectedDll,
-                                              &Entry))
-                    {
-                        if (Entry->LoadCount != 0xFFFF)
-                        {
-                            /* Perform the required action */
-                            switch (Flags)
-                            {
-                            case LDRP_UPDATE_REFCOUNT:
-                                Entry->LoadCount++;
-                                break;
-                            case LDRP_UPDATE_DEREFCOUNT:
-                                Entry->LoadCount--;
-                                break;
-                            case LDRP_UPDATE_PIN:
-                                Entry->LoadCount = 0xFFFF;
-                                break;
-                            }
-
-                            /* Show snaps */
-                            if (ShowSnaps)
-                            {
-                                DPRINT1("LDR: Flags %lu  %wZ (%lx)\n", Flags, RedirectedImportName, Entry->LoadCount);
-                            }
-                        }
-
-                        /* Recurse into this entry */
-                        LdrpUpdateLoadCount3(Entry, Flags, UpdateString);
-                    }
-                    else if (RedirectedDll)
-                    {
-                        DPRINT1("LDR: LdrpCheckForLoadedDll failed for redirected dll %wZ\n", RedirectedImportName);
-                    }
-                }
-                else
-                {
-                    /* Unrecoverable SxS failure */
-                    DPRINT1("LDR: LdrpApplyFileNameRedirection failed with status %x for dll %wZ\n", Status, ImportNameUnic);
-                }
-
-            }
-
-            /* Go through forwarders */
-            NewImportForwarder = (PIMAGE_BOUND_FORWARDER_REF)(BoundEntry + 1);
-            for (i = 0; i < BoundEntry->NumberOfModuleForwarderRefs; i++)
-            {
-                ImportName = (LPSTR)FirstEntry + NewImportForwarder->OffsetModuleName;
+                /* Get pointer to the current import name */
+                ImportName = (LPSTR)FirstEntry + BoundEntry->OffsetModuleName;
 
                 RtlInitAnsiString(&ImportNameAnsi, ImportName);
                 Status = RtlAnsiStringToUnicodeString(ImportNameUnic, &ImportNameAnsi, FALSE);
+
                 if (NT_SUCCESS(Status))
                 {
                     RedirectedDll = FALSE;
@@ -310,119 +245,200 @@ LdrpUpdateLoadCount3(IN PLDR_DATA_TABLE_ENTRY LdrEntry,
                         }
                         else if (RedirectedDll)
                         {
-                            DPRINT1("LDR: LdrpCheckForLoadedDll failed with status %x for redirected dll %wZ\n", Status, RedirectedImportName);
+                            DPRINT1("LDR: LdrpCheckForLoadedDll failed for redirected dll %wZ\n", RedirectedImportName);
                         }
                     }
                     else
                     {
                         /* Unrecoverable SxS failure */
-                        DPRINT1("LDR: LdrpApplyFileNameRedirection failed  with status %x for dll %wZ\n", Status, ImportNameUnic);
+                        DPRINT1("LDR: LdrpApplyFileNameRedirection failed with status %x for dll %wZ\n", Status, ImportNameUnic);
                     }
 
                 }
 
-                NewImportForwarder++;
-            }
-
-            BoundEntry = (PIMAGE_BOUND_IMPORT_DESCRIPTOR)NewImportForwarder;
-        }
-
-        /* We're done */
-        goto done;
-    }
-
-    /* Check oldstyle import descriptor */
-    ImportEntry = (PIMAGE_IMPORT_DESCRIPTOR)RtlImageDirectoryEntryToData(LdrEntry->DllBase,
-                                                                         TRUE,
-                                                                         IMAGE_DIRECTORY_ENTRY_IMPORT,
-                                                                         &ImportSize);
-    if (ImportEntry)
-    {
-        /* There is old one, so go through its entries */
-        while (ImportEntry->Name && ImportEntry->FirstThunk)
-        {
-            FirstThunk = (PIMAGE_THUNK_DATA)((ULONG_PTR)LdrEntry->DllBase + ImportEntry->FirstThunk);
-
-            /* Skip this entry if needed */
-            if (!FirstThunk->u1.Function)
-            {
-                ImportEntry++;
-                continue;
-            }
-
-            ImportName = (PSZ)((ULONG_PTR)LdrEntry->DllBase + ImportEntry->Name);
-
-            RtlInitAnsiString(&ImportNameAnsi, ImportName);
-            Status = RtlAnsiStringToUnicodeString(ImportNameUnic, &ImportNameAnsi, FALSE);
-            if (NT_SUCCESS(Status))
-            {
-                RedirectedDll = FALSE;
-                RedirectedImportName = ImportNameUnic;
-
-                /* Check if the SxS Assemblies specify another file */
-                Status = LdrpApplyFileNameRedirection(
-                    ImportNameUnic, &LdrApiDefaultExtension, UpdateString, NULL, &RedirectedImportName, &RedirectedDll);
-
-                /* Check success */
-                if (NT_SUCCESS(Status) && RedirectedDll)
+                /* Go through forwarders */
+                NewImportForwarder = (PIMAGE_BOUND_FORWARDER_REF)(BoundEntry + 1);
+                for (i = 0; i < BoundEntry->NumberOfModuleForwarderRefs; i++)
                 {
-                    if (ShowSnaps)
-                    {
-                        DPRINT1("LDR: %Z got redirected to %wZ\n", &ImportNameAnsi, RedirectedImportName);
-                    }
-                }
+                    ImportName = (LPSTR)FirstEntry + NewImportForwarder->OffsetModuleName;
 
-                if (NT_SUCCESS(Status))
-                {
-                    if (LdrpCheckForLoadedDll(NULL,
-                                              RedirectedImportName,
-                                              TRUE,
-                                              RedirectedDll,
-                                              &Entry))
+                    RtlInitAnsiString(&ImportNameAnsi, ImportName);
+                    Status = RtlAnsiStringToUnicodeString(ImportNameUnic, &ImportNameAnsi, FALSE);
+                    if (NT_SUCCESS(Status))
                     {
-                        if (Entry->LoadCount != 0xFFFF)
+                        RedirectedDll = FALSE;
+                        RedirectedImportName = ImportNameUnic;
+
+                        /* Check if the SxS Assemblies specify another file */
+                        Status = LdrpApplyFileNameRedirection(
+                            ImportNameUnic, &LdrApiDefaultExtension, UpdateString, NULL, &RedirectedImportName,
+                            &RedirectedDll);
+
+                        /* Check success */
+                        if (NT_SUCCESS(Status) && RedirectedDll)
                         {
-                            /* Perform the required action */
-                            switch (Flags)
-                            {
-                            case LDRP_UPDATE_REFCOUNT:
-                                Entry->LoadCount++;
-                                break;
-                            case LDRP_UPDATE_DEREFCOUNT:
-                                Entry->LoadCount--;
-                                break;
-                            case LDRP_UPDATE_PIN:
-                                Entry->LoadCount = 0xFFFF;
-                                break;
-                            }
-
-                            /* Show snaps */
                             if (ShowSnaps)
                             {
-                                DPRINT1("LDR: Flags %lu  %wZ (%lx)\n", Flags, RedirectedImportName, Entry->LoadCount);
+                                DPRINT1("LDR: %Z got redirected to %wZ\n", &ImportNameAnsi, RedirectedImportName);
                             }
                         }
 
-                        /* Recurse */
-                        LdrpUpdateLoadCount3(Entry, Flags, UpdateString);
-                    }
-                    else if (RedirectedDll)
-                    {
-                        DPRINT1("LDR: LdrpCheckForLoadedDll failed for redirected dll %wZ\n", RedirectedImportName);
+                        if (NT_SUCCESS(Status))
+                        {
+                            if (LdrpCheckForLoadedDll(NULL,
+                                                      RedirectedImportName,
+                                                      TRUE,
+                                                      RedirectedDll,
+                                                      &Entry))
+                            {
+                                if (Entry->LoadCount != 0xFFFF)
+                                {
+                                    /* Perform the required action */
+                                    switch (Flags)
+                                    {
+                                    case LDRP_UPDATE_REFCOUNT:
+                                        Entry->LoadCount++;
+                                        break;
+                                    case LDRP_UPDATE_DEREFCOUNT:
+                                        Entry->LoadCount--;
+                                        break;
+                                    case LDRP_UPDATE_PIN:
+                                        Entry->LoadCount = 0xFFFF;
+                                        break;
+                                    }
+
+                                    /* Show snaps */
+                                    if (ShowSnaps)
+                                    {
+                                        DPRINT1("LDR: Flags %lu  %wZ (%lx)\n", Flags, RedirectedImportName, Entry->LoadCount);
+                                    }
+                                }
+
+                                /* Recurse into this entry */
+                                LdrpUpdateLoadCount3(Entry, Flags, UpdateString);
+                            }
+                            else if (RedirectedDll)
+                            {
+                                DPRINT1("LDR: LdrpCheckForLoadedDll failed with status %x for redirected dll %wZ\n", Status, RedirectedImportName);
+                            }
+                        }
+                        else
+                        {
+                            /* Unrecoverable SxS failure */
+                            DPRINT1("LDR: LdrpApplyFileNameRedirection failed  with status %x for dll %wZ\n", Status, ImportNameUnic);
+                        }
+
                     }
 
+                    NewImportForwarder++;
                 }
-                else
-                {
-                    /* Unrecoverable SxS failure */
-                    DPRINT1("LDR: LdrpApplyFileNameRedirection failed for dll %wZ\n", ImportNameUnic);
-                }
+
+                BoundEntry = (PIMAGE_BOUND_IMPORT_DESCRIPTOR)NewImportForwarder;
             }
 
-            /* Go to the next entry */
-            ImportEntry++;
+            /* We're done */
+            _SEH2_LEAVE;
+        }
+
+        /* Check oldstyle import descriptor */
+        ImportEntry = (PIMAGE_IMPORT_DESCRIPTOR)RtlImageDirectoryEntryToData(LdrEntry->DllBase,
+                                                                             TRUE,
+                                                                             IMAGE_DIRECTORY_ENTRY_IMPORT,
+                                                                             &ImportSize);
+        if (ImportEntry)
+        {
+            /* There is old one, so go through its entries */
+            while (ImportEntry->Name && ImportEntry->FirstThunk)
+            {
+                FirstThunk = (PIMAGE_THUNK_DATA)((ULONG_PTR)LdrEntry->DllBase + ImportEntry->FirstThunk);
+
+                /* Skip this entry if needed */
+                if (!FirstThunk->u1.Function)
+                {
+                    ImportEntry++;
+                    continue;
+                }
+
+                ImportName = (PSZ)((ULONG_PTR)LdrEntry->DllBase + ImportEntry->Name);
+
+                RtlInitAnsiString(&ImportNameAnsi, ImportName);
+                Status = RtlAnsiStringToUnicodeString(ImportNameUnic, &ImportNameAnsi, FALSE);
+                if (NT_SUCCESS(Status))
+                {
+                    RedirectedDll = FALSE;
+                    RedirectedImportName = ImportNameUnic;
+
+                    /* Check if the SxS Assemblies specify another file */
+                    Status = LdrpApplyFileNameRedirection(
+                        ImportNameUnic, &LdrApiDefaultExtension, UpdateString, NULL, &RedirectedImportName, &RedirectedDll);
+
+                    /* Check success */
+                    if (NT_SUCCESS(Status) && RedirectedDll)
+                    {
+                        if (ShowSnaps)
+                        {
+                            DPRINT1("LDR: %Z got redirected to %wZ\n", &ImportNameAnsi, RedirectedImportName);
+                        }
+                    }
+
+                    if (NT_SUCCESS(Status))
+                    {
+                        if (LdrpCheckForLoadedDll(NULL,
+                                                  RedirectedImportName,
+                                                  TRUE,
+                                                  RedirectedDll,
+                                                  &Entry))
+                        {
+                            if (Entry->LoadCount != 0xFFFF)
+                            {
+                                /* Perform the required action */
+                                switch (Flags)
+                                {
+                                case LDRP_UPDATE_REFCOUNT:
+                                    Entry->LoadCount++;
+                                    break;
+                                case LDRP_UPDATE_DEREFCOUNT:
+                                    Entry->LoadCount--;
+                                    break;
+                                case LDRP_UPDATE_PIN:
+                                    Entry->LoadCount = 0xFFFF;
+                                    break;
+                                }
+
+                                /* Show snaps */
+                                if (ShowSnaps)
+                                {
+                                    DPRINT1("LDR: Flags %lu  %wZ (%lx)\n", Flags, RedirectedImportName, Entry->LoadCount);
+                                }
+                            }
+
+                            /* Recurse */
+                            LdrpUpdateLoadCount3(Entry, Flags, UpdateString);
+                        }
+                        else if (RedirectedDll)
+                        {
+                            DPRINT1("LDR: LdrpCheckForLoadedDll failed for redirected dll %wZ\n", RedirectedImportName);
+                        }
+
+                    }
+                    else
+                    {
+                        /* Unrecoverable SxS failure */
+                        DPRINT1("LDR: LdrpApplyFileNameRedirection failed for dll %wZ\n", ImportNameUnic);
+                    }
+                }
+
+                /* Go to the next entry */
+                ImportEntry++;
+            }
         }
     }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        DPRINT1("LDR: Exception 0x%lx updating the load count of the imports of %wZ\n",
+                _SEH2_GetExceptionCode(), &LdrEntry->BaseDllName);
+    }
+    _SEH2_END;
 
 done:
     /* Release the context */
