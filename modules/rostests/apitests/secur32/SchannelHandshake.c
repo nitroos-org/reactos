@@ -563,6 +563,80 @@ static BOOL HttpGet(CONNECTION *Conn, PCSTR Host, char *Reply, ULONG ReplySize)
     return FALSE;
 }
 
+/*
+ * RFC 5929 channel bindings, which .NET Framework asks for on every SslStream connection (TransportContext):
+ * the application data is "tls-server-end-point:" plus the hash of the server certificate (the hash of its signature
+ * algorithm, SHA-256 for MD5, SHA-1 and others), or "tls-unique:" plus the 12 byte Finished of a TLS 1.2 handshake.
+ * Layout and hash selection as measured on Windows 10 22H2 (oracle-bindprobe-win10-19045.txt of the SSPI ticket).
+ */
+static void CheckBindingsLayout(PCSTR Host, PCSTR Name, const SecPkgContext_Bindings *Bind, PCSTR Prefix, ULONG DataSize,
+                                const BYTE *Data)
+{
+    ULONG PrefixSize = (ULONG)strlen(Prefix);
+    const BYTE *App;
+
+    ok(Bind->Bindings != NULL, "%s: %s: no bindings\n", Host, Name);
+    if (!Bind->Bindings)
+        return;
+    ok(Bind->BindingsLength == sizeof(*Bind->Bindings) + PrefixSize + DataSize, "%s: %s: length %lu\n", Host, Name,
+       Bind->BindingsLength);
+    ok(!Bind->Bindings->dwInitiatorAddrType && !Bind->Bindings->cbInitiatorLength && !Bind->Bindings->dwInitiatorOffset,
+       "%s: %s: initiator %lu/%lu/%lu\n", Host, Name, Bind->Bindings->dwInitiatorAddrType, Bind->Bindings->cbInitiatorLength,
+       Bind->Bindings->dwInitiatorOffset);
+    ok(!Bind->Bindings->dwAcceptorAddrType && !Bind->Bindings->cbAcceptorLength && !Bind->Bindings->dwAcceptorOffset,
+       "%s: %s: acceptor %lu/%lu/%lu\n", Host, Name, Bind->Bindings->dwAcceptorAddrType, Bind->Bindings->cbAcceptorLength,
+       Bind->Bindings->dwAcceptorOffset);
+    ok(Bind->Bindings->cbApplicationDataLength == PrefixSize + DataSize, "%s: %s: application data %lu\n", Host, Name,
+       Bind->Bindings->cbApplicationDataLength);
+    ok(Bind->Bindings->dwApplicationDataOffset == sizeof(*Bind->Bindings), "%s: %s: application data offset %lu\n", Host,
+       Name, Bind->Bindings->dwApplicationDataOffset);
+    if (Bind->BindingsLength >= sizeof(*Bind->Bindings) + PrefixSize + DataSize)
+    {
+        App = (const BYTE *)(Bind->Bindings + 1);
+        ok(!memcmp(App, Prefix, PrefixSize), "%s: %s: prefix\n", Host, Name);
+        if (Data)
+            ok(!memcmp(App + PrefixSize, Data, DataSize), "%s: %s: data differs\n", Host, Name);
+    }
+}
+
+static void CheckBindings(CONNECTION *Conn, PCSTR Host, PCCERT_CONTEXT Remote, DWORD Protocol)
+{
+    SecPkgContext_Bindings Bind;
+    SECURITY_STATUS Status;
+    PCSTR SigOid = Remote->pCertInfo->SignatureAlgorithm.pszObjId;
+    ALG_ID Alg = CALG_SHA_256;
+    BYTE Hash[64];
+    ULONG HashSize = sizeof(Hash);
+
+    if (SigOid && (!strcmp(SigOid, "1.2.840.113549.1.1.12") || !strcmp(SigOid, "1.2.840.10045.4.3.3")))
+        Alg = CALG_SHA_384;
+    else if (SigOid && (!strcmp(SigOid, "1.2.840.113549.1.1.13") || !strcmp(SigOid, "1.2.840.10045.4.3.4")))
+        Alg = CALG_SHA_512;
+
+    memset(&Bind, 0xcc, sizeof(Bind));
+    Status = QueryContextAttributesW(&Conn->Ctx, SECPKG_ATTR_ENDPOINT_BINDINGS, &Bind);
+    ok(Status == SEC_E_OK, "%s: ENDPOINT_BINDINGS returned 0x%08lx\n", Host, Status);
+    if (Status == SEC_E_OK)
+    {
+        ok(CryptHashCertificate(0, Alg, 0, Remote->pbCertEncoded, Remote->cbCertEncoded, Hash, &HashSize),
+           "%s: cannot hash the certificate\n", Host);
+        trace("%s: certificate signature %s, endpoint binding hash %lu bytes\n", Host, SigOid, HashSize);
+        CheckBindingsLayout(Host, "ENDPOINT_BINDINGS", &Bind, "tls-server-end-point:", HashSize, Hash);
+        FreeContextBuffer(Bind.Bindings);
+    }
+
+    if (Protocol != SP_PROT_TLS1_2_CLIENT)
+        return;
+    memset(&Bind, 0xcc, sizeof(Bind));
+    Status = QueryContextAttributesW(&Conn->Ctx, SECPKG_ATTR_UNIQUE_BINDINGS, &Bind);
+    ok(Status == SEC_E_OK, "%s: UNIQUE_BINDINGS returned 0x%08lx\n", Host, Status);
+    if (Status == SEC_E_OK)
+    {
+        CheckBindingsLayout(Host, "UNIQUE_BINDINGS", &Bind, "tls-unique:", 12, NULL);
+        FreeContextBuffer(Bind.Bindings);
+    }
+}
+
 static void CheckEstablished(CONNECTION *Conn, PCSTR Host, PCWSTR Target)
 {
     SecPkgContext_ConnectionInfo Info;
@@ -571,6 +645,7 @@ static void CheckEstablished(CONNECTION *Conn, PCSTR Host, PCWSTR Target)
     SECURITY_STATUS Status;
     char Reply[64];
 
+    memset(&Info, 0, sizeof(Info));
     Status = QueryContextAttributesW(&Conn->Ctx, SECPKG_ATTR_CONNECTION_INFO, &Info);
     ok(Status == SEC_E_OK, "%s: CONNECTION_INFO returned 0x%08lx\n", Host, Status);
     if (Status == SEC_E_OK)
@@ -643,6 +718,7 @@ static void CheckEstablished(CONNECTION *Conn, PCSTR Host, PCWSTR Target)
             ok(PolicyStatus.dwError == 0, "%s: SSL policy error 0x%lx\n", Host, PolicyStatus.dwError);
             CertFreeCertificateChain(Chain);
         }
+        CheckBindings(Conn, Host, Remote, Info.dwProtocol);
         CertFreeCertificateContext(Remote);
     }
 

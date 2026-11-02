@@ -1238,6 +1238,82 @@ SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextA(
     return ret;
 }
 
+/* RFC 5929 channel bindings (SECPKG_ATTR_UNIQUE_BINDINGS / SECPKG_ATTR_ENDPOINT_BINDINGS). The output is a
+ * SecPkgContext_Bindings whose SEC_CHANNEL_BINDINGS (allocated here, released with FreeContextBuffer) carries
+ * "<prefix>:<data>" as application data and no initiator or acceptor address, the layout Windows 10 returns. */
+static ALG_ID schan_endpoint_hash_alg(const CERT_INFO *info)
+{
+    static const struct { const char *oid; ALG_ID hash; } algs[] =
+    {
+        { "1.2.840.113549.1.1.12", CALG_SHA_384 }, /* sha384RSA */
+        { "1.2.840.113549.1.1.13", CALG_SHA_512 }, /* sha512RSA */
+        { "1.2.840.10045.4.3.3",   CALG_SHA_384 }, /* sha384ECDSA */
+        { "1.2.840.10045.4.3.4",   CALG_SHA_512 }, /* sha512ECDSA */
+    };
+    unsigned int i;
+
+    /* The hash of the signature algorithm of the certificate, SHA-256 for MD5, SHA-1 and any other */
+    for (i = 0; info->SignatureAlgorithm.pszObjId && i < sizeof(algs) / sizeof(*algs); i++)
+        if (!strcmp(info->SignatureAlgorithm.pszObjId, algs[i].oid))
+            return algs[i].hash;
+    return CALG_SHA_256;
+}
+
+static SECURITY_STATUS schan_make_bindings(const char *prefix, const BYTE *data, DWORD data_size,
+        SecPkgContext_Bindings *bindings)
+{
+    SEC_CHANNEL_BINDINGS *cb;
+    DWORD prefix_size = strlen(prefix), size = sizeof(*cb) + prefix_size + data_size;
+
+    cb = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
+    if (!cb) return SEC_E_INSUFFICIENT_MEMORY;
+    cb->cbApplicationDataLength = prefix_size + data_size;
+    cb->dwApplicationDataOffset = sizeof(*cb);
+    memcpy(cb + 1, prefix, prefix_size);
+    memcpy((BYTE *)(cb + 1) + prefix_size, data, data_size);
+    bindings->BindingsLength = size;
+    bindings->Bindings = cb;
+    return SEC_E_OK;
+}
+
+static SECURITY_STATUS schan_ensure_remote_cert(struct schan_context *ctx)
+{
+    HCERTSTORE cert_store;
+    SECURITY_STATUS status;
+
+    if (ctx->cert) return SEC_E_OK;
+
+    cert_store = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, CERT_STORE_CREATE_NEW_FLAG, NULL);
+    if (!cert_store) return GetLastError();
+
+    status = schan_imp_get_session_peer_certificate(ctx->session, cert_store, &ctx->cert);
+    CertCloseStore(cert_store, 0);
+    return status;
+}
+
+static SECURITY_STATUS schan_get_bindings(struct schan_context *ctx, ULONG attribute, SecPkgContext_Bindings *bindings)
+{
+    BYTE data[64];
+    DWORD size = sizeof(data);
+    SECURITY_STATUS status;
+
+    if (!bindings) return SEC_E_INTERNAL_ERROR;
+
+    if (attribute == SECPKG_ATTR_UNIQUE_BINDINGS)
+    {
+        status = schan_imp_get_unique_binding(ctx->session, data, &size);
+        if (status != SEC_E_OK) return status;
+        return schan_make_bindings("tls-unique:", data, size, bindings);
+    }
+
+    status = schan_ensure_remote_cert(ctx);
+    if (status != SEC_E_OK) return status;
+    if (!CryptHashCertificate(0, schan_endpoint_hash_alg(ctx->cert->pCertInfo), 0, ctx->cert->pbCertEncoded,
+                              ctx->cert->cbCertEncoded, data, &size))
+        return SEC_E_INTERNAL_ERROR;
+    return schan_make_bindings("tls-server-end-point:", data, size, bindings);
+}
+
 static
 SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesW(
         PCtxtHandle context_handle, ULONG attribute, PVOID buffer)
@@ -1280,19 +1356,9 @@ SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesW(
         {
             PCCERT_CONTEXT *cert = buffer;
 
-            if (!ctx->cert) {
-                HCERTSTORE cert_store;
-                SECURITY_STATUS status;
-
-                cert_store = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, CERT_STORE_CREATE_NEW_FLAG, NULL);
-                if(!cert_store)
-                    return GetLastError();
-
-                status = schan_imp_get_session_peer_certificate(ctx->session, cert_store, &ctx->cert);
-                CertCloseStore(cert_store, 0);
-                if(status != SEC_E_OK)
-                    return status;
-            }
+            SECURITY_STATUS status = schan_ensure_remote_cert(ctx);
+            if (status != SEC_E_OK)
+                return status;
 
             *cert = CertDuplicateCertificateContext(ctx->cert);
             return SEC_E_OK;
@@ -1302,6 +1368,10 @@ SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesW(
             SecPkgContext_ConnectionInfo *info = buffer;
             return schan_imp_get_connection_info(ctx->session, info);
         }
+        case SECPKG_ATTR_UNIQUE_BINDINGS:
+        case SECPKG_ATTR_ENDPOINT_BINDINGS:
+            if (!ctx) return SEC_E_INVALID_HANDLE;
+            return schan_get_bindings(ctx, attribute, buffer);
         case SECPKG_ATTR_APPLICATION_PROTOCOL:
         {
             SecPkgContext_ApplicationProtocol *protocol = buffer;
@@ -1335,6 +1405,9 @@ SECURITY_STATUS SEC_ENTRY schan_QueryContextAttributesA(
         case SECPKG_ATTR_REMOTE_CERT_CONTEXT:
             return schan_QueryContextAttributesW(context_handle, attribute, buffer);
         case SECPKG_ATTR_CONNECTION_INFO:
+            return schan_QueryContextAttributesW(context_handle, attribute, buffer);
+        case SECPKG_ATTR_UNIQUE_BINDINGS:
+        case SECPKG_ATTR_ENDPOINT_BINDINGS:
             return schan_QueryContextAttributesW(context_handle, attribute, buffer);
         case SECPKG_ATTR_APPLICATION_PROTOCOL:
             return schan_QueryContextAttributesW(context_handle, attribute, buffer);

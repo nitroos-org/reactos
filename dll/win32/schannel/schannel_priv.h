@@ -106,6 +106,8 @@ extern SECURITY_STATUS schan_imp_get_connection_info(schan_imp_session session,
                                                      SecPkgContext_ConnectionInfo *info) DECLSPEC_HIDDEN;
 extern SECURITY_STATUS schan_imp_get_session_peer_certificate(schan_imp_session session, HCERTSTORE,
                                                               PCCERT_CONTEXT *cert) DECLSPEC_HIDDEN;
+extern SECURITY_STATUS schan_imp_get_unique_binding(schan_imp_session session, BYTE *data,
+                                                    DWORD *size) DECLSPEC_HIDDEN;
 extern SECURITY_STATUS schan_imp_send(schan_imp_session session, const void *buffer,
                                       SIZE_T *length) DECLSPEC_HIDDEN;
 extern SECURITY_STATUS schan_imp_recv(schan_imp_session session, void *buffer,
