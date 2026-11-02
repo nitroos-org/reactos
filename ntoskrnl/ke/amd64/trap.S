@@ -274,8 +274,8 @@ FUNC KiBreakpointTrap
     sti
 
 KiBreakpointTrapKMode:
-    /* Dispatch the exception */
-    DispatchException STATUS_BREAKPOINT, 3, BREAKPOINT_BREAK, 0, 0
+    /* Dispatch the exception. Like Windows x64, int3 has one parameter */
+    DispatchException STATUS_BREAKPOINT, 1, BREAKPOINT_BREAK, 0, 0
 
     /* Return */
     ExitTrap TF_SAVE_ALL
