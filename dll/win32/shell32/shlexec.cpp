@@ -1248,8 +1248,12 @@ static UINT SHELL_FindExecutable(LPCWSTR lpPath, LPCWSTR lpFile, LPCWSTR lpVerb,
             }
         }
 
-        /* Check registry */
-        if (RegQueryValueW(HKEY_CLASSES_ROOT, extension, classname,
+        /* Check registry: the ProgId the user chose for the extension wins over the machine wide default */
+        if (HCR_GetUserChoiceOfExtension(extension, classname, ARRAY_SIZE(classname)))
+        {
+            TRACE("File type (UserChoice): %s\n", debugstr_w(classname));
+        }
+        else if (RegQueryValueW(HKEY_CLASSES_ROOT, extension, classname,
                            &classnamelen) == ERROR_SUCCESS)
         {
             classnamelen /= sizeof(WCHAR);
