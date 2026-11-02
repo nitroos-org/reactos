@@ -326,7 +326,8 @@ static VOID InitializeLayerCode(PVOID Gate)
         Wow64LayerCode.Range[i].Start = (ULONG_PTR)Base;
         Wow64LayerCode.Range[i].End = (ULONG_PTR)Base + Headers->OptionalHeader.SizeOfImage;
     }
-    /* The gate page's far jump lands in 64-bit code on the same page */
+    /* The gate page's far jump lands in 64-bit code on the same page (Wow64CpuInitialize allocates
+     * the gate with NtAllocateVirtualMemory, so Gate is page-aligned and the page is the whole gate) */
     Wow64LayerCode.Range[i].Start = (ULONG_PTR)Gate;
     Wow64LayerCode.Range[i].End = (ULONG_PTR)Gate + PAGE_SIZE;
 }
@@ -417,7 +418,10 @@ VOID NTAPI Wow64LdrpInitialize(PCONTEXT Context, BOOLEAN ProcessStartup)
     {
         LARGE_INTEGER Delay;
         ULONG Routine, Parameter;
-        /* Staged on a first thread that is not the one the native loader initialized the process on */
+        /* The kernel stages the first thread of the process (psctx.c), which is normally the one the
+         * native loader initializes it on. Should another thread have done that, this one is a
+         * native helper or a wow64.dll-created guest thread: it must not keep a CPU area nobody
+         * entered, or it would look like a running guest thread (APC dispatch, context requests). */
         if (Staged)
         {
             Teb->TlsSlots[WOW64_TLS_CPU] = NULL;
@@ -564,9 +568,8 @@ ThreadReady:
          * Windows. InTransition is 1 in both, so no request sees the copy half done. */
         State.InTransition = 1;
         *Staged = State;
-        Wow64CpuRun(Staged);
     }
-    Wow64CpuRun(&State);
+    Wow64CpuRun(Staged ? Staged : &State);
 Failed:
     DbgPrint("WoW64: initialization failed: %08lx\n", Status);
     NtTerminateProcess(NtCurrentProcess(), Status);

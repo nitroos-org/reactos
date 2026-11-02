@@ -114,7 +114,9 @@ PspWow64ContextRundown(PKAPC Apc)
 /* While InTransition is set, a thread in 64-bit mode is between the guest and its saved state
  * only inside the WoW64 layer's own code (wow64.h, WOW64_LAYER_CODE). A guest that entered
  * other 64-bit code with a far transfer is not: its saved state is the 32-bit context, as on
- * Windows. A thread without the table is treated as in transition. */
+ * Windows. A thread without the table is treated as in transition. Known gap: a guest whose
+ * 64-bit code calls native ntdll (inside the table) still gets STATUS_RETRY there, where
+ * Windows reports the stale 32-bit context. */
 static BOOLEAN
 PspWow64InLayerCode(const WOW64_CPU_STATE *Cpu, ULONG64 Rip)
 {
@@ -146,6 +148,14 @@ PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
     UNREFERENCED_PARAMETER(NormalContext);
     UNREFERENCED_PARAMETER(Argument1);
     UNREFERENCED_PARAMETER(Argument2);
+    /* An exiting thread frees its stacks, where its CPU area is, and its TEB (PspExitThread)
+     * before it stops taking APCs: once it is terminating, it has no 32-bit context to give */
+    if (PsGetCurrentThread()->Terminated)
+    {
+        Request->Status = STATUS_THREAD_IS_TERMINATING;
+        KeSetEvent(&Request->Event, IO_NO_INCREMENT, FALSE);
+        return;
+    }
     Request->Status = STATUS_SUCCESS;
     _SEH2_TRY
     {
@@ -302,13 +312,53 @@ PspWow64ContextThread(HANDLE Handle, PVOID Buffer, ULONG Length, BOOLEAN Set,
 /*
  * A WoW64 process's main thread has its 32-bit state from creation, as on Windows: the guest
  * stack in TEB32 and, in the CPU area at the top of the native stack (TlsSlots[WOW64_TLS_CPU],
- * the new native stack base), the start context. That context enters ntdll32's
- * LdrWow64ProcessStart once the guest loader has run, with the image's entry in EAX and the
- * PEB32 in EBX; Get/SetThreadContext read and change it until wow64.dll takes it over
+ * the new native stack base), the start context. That context enters ntdll32!RtlUserThreadStart
+ * once the guest loader has run, with the image's entry in EAX and the PEB32 in EBX, the values
+ * Windows 10 reports (oracle probe); Get/SetThreadContext read and change it until wow64.dll takes it over
  * (init.c, Wow64LdrpInitialize). The thread stages it itself, in PspUserThreadStartup before
  * any APC reaches it, so a context request or a suspension never sees it half done. Nothing
  * is staged when the process has no i386 ntdll view: wow64.dll then builds the state itself.
  */
+/*
+ * The image's entry, from kernel-owned data: where its view was mapped (SectionBaseAddress) and the
+ * section's entry at its preferred base (TransferAddress). The PEB is the process's own memory, which
+ * a parent can change before the thread runs, and is not used. The headers in the view are user memory
+ * too: they are probed, bounded to their first 64 KiB, read once, and taken only if they agree with the
+ * section. The result is a 32-bit user address or 0 and is never dereferenced here.
+ */
+static ULONG_PTR
+PspWow64ImageEntry(PEPROCESS Process, const SECTION_IMAGE_INFORMATION *Image)
+{
+    PUCHAR Base = Process->SectionBaseAddress;
+    PIMAGE_NT_HEADERS32 Headers;
+    ULONG_PTR Entry = 0;
+    LONG Offset;
+    ULONG Rva, Preferred;
+
+    if (!Base || (ULONG_PTR)Base > MAXULONG || !Image->TransferAddress) return 0;
+    _SEH2_TRY
+    {
+        ProbeForRead(Base, sizeof(IMAGE_DOS_HEADER), 1);
+        Offset = *(volatile LONG *)&((PIMAGE_DOS_HEADER)Base)->e_lfanew;
+        if (Offset > 0 && Offset <= (LONG)(0x10000 - sizeof(IMAGE_NT_HEADERS32)))
+        {
+            Headers = (PIMAGE_NT_HEADERS32)(Base + Offset);
+            ProbeForRead(Headers, sizeof(*Headers), 1);
+            Rva = *(volatile ULONG *)&Headers->OptionalHeader.AddressOfEntryPoint;
+            Preferred = *(volatile ULONG *)&Headers->OptionalHeader.ImageBase;
+            if (Rva && (ULONG_PTR)Preferred + Rva == (ULONG_PTR)Image->TransferAddress)
+                Entry = (ULONG_PTR)Base + Rva;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Entry = 0;
+    }
+    _SEH2_END;
+    if (Entry > MAXULONG || Entry > (ULONG_PTR)MmHighestUserAddress) Entry = 0;
+    return Entry;
+}
+
 VOID
 NTAPI
 PspWow64StageMainThread(VOID)
@@ -319,8 +369,7 @@ PspWow64StageMainThread(VOID)
     PTEB Teb = Thread->Tcb.Teb;
     TEB32 *Teb32;
     SECTION_IMAGE_INFORMATION Image;
-    PIMAGE_NT_HEADERS Header;
-    SIZE_T Reserve, Commit, Size = 0;
+    SIZE_T Reserve, Commit, MinimumCommit, Size = 0;
     PVOID Base = NULL, Limit, Page, Start;
     ULONG_PTR ZeroBits, Entry = 0, StackBase;
     ULONG OldProtect;
@@ -347,25 +396,22 @@ PspWow64StageMainThread(VOID)
     ZeroBits = (Image.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) ? 0xfffeffff : 0x7ffeffff;
     Reserve = max(256 * 1024, (ULONG)Image.MaximumStackSize);
     Commit = ROUND_TO_PAGES((ULONG)Image.CommittedStackSize);
+    /* MinimumStackCommit is in the PEB, which the process (or its parent) can write: read it once
+     * and let it raise the commit only up to the reserve the image asks for */
     _SEH2_TRY
     {
-        if (Commit < Process->Peb->MinimumStackCommit)
-            Commit = ROUND_TO_PAGES(Process->Peb->MinimumStackCommit);
-        /* The entry of the image, which the guest loader replaces for an IL-only .NET image */
-        Header = RtlImageNtHeader(Process->Peb->ImageBaseAddress);
-        if (Header && Header->FileHeader.Machine == IMAGE_FILE_MACHINE_I386 &&
-            Header->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC &&
-            ((PIMAGE_NT_HEADERS32)Header)->OptionalHeader.AddressOfEntryPoint)
-        {
-            Entry = (ULONG_PTR)Process->Peb->ImageBaseAddress +
-                    ((PIMAGE_NT_HEADERS32)Header)->OptionalHeader.AddressOfEntryPoint;
-        }
+        ProbeForRead(Process->Peb, sizeof(PEB), sizeof(ULONG_PTR));
+        MinimumCommit = *(volatile SIZE_T *)&Process->Peb->MinimumStackCommit;
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         _SEH2_YIELD(return);
     }
     _SEH2_END;
+    if (MinimumCommit > Reserve) MinimumCommit = Reserve;
+    if (Commit < MinimumCommit) Commit = ROUND_TO_PAGES(MinimumCommit);
+    /* The entry, which the guest loader replaces for an IL-only .NET image */
+    Entry = PspWow64ImageEntry(Process, &Image);
     Reserve = ALIGN_UP_BY(Reserve, 64 * 1024);
     if (Commit >= Reserve) Reserve = ALIGN_UP_BY(Commit, 1024 * 1024);
     Status = ZwAllocateVirtualMemory(NtCurrentProcess(), &Base, ZeroBits, &Reserve,

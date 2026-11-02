@@ -11,6 +11,7 @@
 #include "precomp.h"
 #include <ndk/psfuncs.h>
 #include <ndk/rtlfuncs.h>
+#include <ndk/mmfuncs.h>
 #include <reactos/wow64.h>
 
 #ifndef CONTEXT_EXCEPTION_REQUEST
@@ -21,6 +22,125 @@
 #endif
 
 #ifdef _WIN64
+/* kernel32's Wow64Get/SetThreadContext, which the headers of this build do not declare */
+static BOOL (WINAPI *pWow64GetThreadContext)(HANDLE, PWOW64_CONTEXT);
+static BOOL (WINAPI *pWow64SetThreadContext)(HANDLE, const WOW64_CONTEXT *);
+#define Wow64GetThreadContext pWow64GetThreadContext
+#define Wow64SetThreadContext pWow64SetThreadContext
+
+/* The address of an export of the PE32 image mapped at Base in Process, 0 if none */
+static ULONG RemoteExport32(HANDLE Process, ULONG Base, const char *Name, char *Module, SIZE_T ModuleSize)
+{
+    IMAGE_DOS_HEADER Dos;
+    IMAGE_NT_HEADERS32 Nt;
+    IMAGE_EXPORT_DIRECTORY Exports;
+    ULONG i, NameRva, FunctionRva;
+    USHORT Ordinal;
+    char Text[64];
+    SIZE_T Read;
+    PUCHAR Image = (PUCHAR)(ULONG_PTR)Base;
+
+    if (!ReadProcessMemory(Process, Image, &Dos, sizeof(Dos), &Read) ||
+        !ReadProcessMemory(Process, Image + Dos.e_lfanew, &Nt, sizeof(Nt), &Read) ||
+        Nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC ||
+        !Nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress ||
+        !ReadProcessMemory(Process, Image + Nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress,
+                           &Exports, sizeof(Exports), &Read))
+        return 0;
+    memset(Module, 0, ModuleSize);
+    ReadProcessMemory(Process, Image + Exports.Name, Module, ModuleSize - 1, &Read);
+    for (i = 0; i < Exports.NumberOfNames; ++i)
+    {
+        memset(Text, 0, sizeof(Text));
+        if (!ReadProcessMemory(Process, Image + Exports.AddressOfNames + i * sizeof(ULONG), &NameRva, sizeof(NameRva), &Read) ||
+            !ReadProcessMemory(Process, Image + NameRva, Text, sizeof(Text) - 1, &Read))
+            return 0;
+        if (strcmp(Text, Name)) continue;
+        if (!ReadProcessMemory(Process, Image + Exports.AddressOfNameOrdinals + i * sizeof(USHORT), &Ordinal, sizeof(Ordinal), &Read) ||
+            !ReadProcessMemory(Process, Image + Exports.AddressOfFunctions + Ordinal * sizeof(ULONG), &FunctionRva, sizeof(FunctionRva), &Read))
+            return 0;
+        return Base + FunctionRva;
+    }
+    return 0;
+}
+
+/* The kernel does not take the main thread's entry from the PEB, which the process's creator can
+ * write before the thread runs: a PEB naming a kernel-range image base and an outsized minimum
+ * stack commit still give a staged start context with the image's own entry (or none at all) */
+static void TestEditedPeb(const char *Path)
+{
+    HANDLE File, Section = NULL, Process = NULL, Thread = NULL;
+    SECTION_IMAGE_INFORMATION Image;
+    PROCESS_BASIC_INFORMATION Basic;
+    INITIAL_TEB Stack = {0};
+    CONTEXT Native = {0};
+    WOW64_CONTEXT Context;
+    CLIENT_ID Id;
+    PVOID StackBase = NULL, KernelBase = (PVOID)(ULONG_PTR)0xfffff78000000000ULL;
+    SIZE_T Size = 64 * 1024, Huge = ~(SIZE_T)0, Written;
+    NTSTATUS Status;
+
+    File = CreateFileA(Path, GENERIC_READ | GENERIC_EXECUTE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "cannot open %s: %lu\n", Path, GetLastError());
+    if (File == INVALID_HANDLE_VALUE) return;
+    Status = NtCreateSection(&Section, SECTION_ALL_ACCESS, NULL, NULL, PAGE_EXECUTE, SEC_IMAGE, File);
+    CloseHandle(File);
+    ok(NT_SUCCESS(Status), "NtCreateSection: %lx\n", Status);
+    if (!NT_SUCCESS(Status)) return;
+    NtQuerySection(Section, SectionImageInformation, &Image, sizeof(Image), NULL);
+    Status = NtCreateProcessEx(&Process, PROCESS_ALL_ACCESS, NULL, NtCurrentProcess(), 0, Section, NULL, NULL, FALSE);
+    ok(NT_SUCCESS(Status), "NtCreateProcessEx: %lx\n", Status);
+    if (!NT_SUCCESS(Status)) goto Done;
+    Status = NtQueryInformationProcess(Process, ProcessBasicInformation, &Basic, sizeof(Basic), NULL);
+    ok(NT_SUCCESS(Status), "ProcessBasicInformation: %lx\n", Status);
+    if (!NT_SUCCESS(Status)) goto Done;
+    ok(WriteProcessMemory(Process, &Basic.PebBaseAddress->ImageBaseAddress, &KernelBase, sizeof(KernelBase), &Written),
+       "cannot write the PEB image base: %lu\n", GetLastError());
+    ok(WriteProcessMemory(Process, &Basic.PebBaseAddress->MinimumStackCommit, &Huge, sizeof(Huge), &Written),
+       "cannot write the PEB minimum stack commit: %lu\n", GetLastError());
+
+    /* The first thread, created suspended; it never runs user code */
+    Status = NtAllocateVirtualMemory(Process, &StackBase, 0, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    ok(NT_SUCCESS(Status), "stack: %lx\n", Status);
+    if (!NT_SUCCESS(Status)) goto Done;
+    Stack.AllocatedStackBase = Stack.StackLimit = StackBase;
+    Stack.StackBase = (PUCHAR)StackBase + Size;
+    Native.ContextFlags = CONTEXT_FULL;
+    Native.Rsp = (ULONG_PTR)Stack.StackBase - 0x28;
+    Native.Rip = (ULONG_PTR)Image.TransferAddress;
+    Native.SegCs = 0x33;
+    Native.SegSs = Native.SegDs = Native.SegEs = Native.SegGs = 0x2b;
+    Native.SegFs = 0x53;
+    Native.EFlags = 0x200;
+    Status = NtCreateThread(&Thread, THREAD_ALL_ACCESS, NULL, Process, &Id, &Native, &Stack, TRUE);
+    ok(NT_SUCCESS(Status), "NtCreateThread: %lx\n", Status);
+    if (!NT_SUCCESS(Status)) goto Done;
+
+    memset(&Context, 0x55, sizeof(Context));
+    Context.ContextFlags = WOW64_CONTEXT_ALL;
+    if (Wow64GetThreadContext(Thread, &Context))
+    {
+        ok(!Context.Eax || Context.Eax == (ULONG)(ULONG_PTR)Image.TransferAddress,
+           "edited PEB: eax %08lx, image entry %p\n", Context.Eax, Image.TransferAddress);
+        ok(Context.Ebx != 0x55555555 && Context.SegCs == 0x23, "edited PEB: ebx %08lx cs %04lx\n",
+           Context.Ebx, Context.SegCs);
+    }
+    else
+    {
+        /* Not staged at all is also safe */
+        trace("edited PEB: Wow64GetThreadContext failed: %lu\n", GetLastError());
+    }
+Done:
+    if (Process) NtTerminateProcess(Process, 0);
+    if (Thread)
+    {
+        WaitForSingleObject(Thread, 10000);
+        CloseHandle(Thread);
+    }
+    if (Process) CloseHandle(Process);
+    if (Section) CloseHandle(Section);
+}
+
 static void TestSuspendedMain(void)
 {
     char Path[MAX_PATH], Command[] = "cmd.exe /c exit 7";
@@ -76,6 +196,18 @@ static void TestSuspendedMain(void)
     ok((WORD)Context.FloatSave.ControlWord == 0x27f, "control word %08lx\n", Context.FloatSave.ControlWord);
     ok(*(WORD *)Context.ExtendedRegisters == 0x27f, "SSE control word %04x\n", *(WORD *)Context.ExtendedRegisters);
     ok(*(DWORD *)(Context.ExtendedRegisters + 24) == 0x1f80, "mxcsr %08lx\n", *(DWORD *)(Context.ExtendedRegisters + 24));
+    /* EIP is the guest ntdll's RtlUserThreadStart, as on Windows */
+    {
+        MEMORY_BASIC_INFORMATION Region;
+        char Module[16];
+        ULONG Expected = 0;
+        if (Ok && VirtualQueryEx(Child.hProcess, (PVOID)(ULONG_PTR)Context.Eip, &Region, sizeof(Region)))
+            Expected = RemoteExport32(Child.hProcess, (ULONG)(ULONG_PTR)Region.AllocationBase,
+                                      "RtlUserThreadStart", Module, sizeof(Module));
+        ok(Expected && Context.Eip == Expected && !_stricmp(Module, "ntdll.dll"),
+           "eip %08lx, ntdll32!RtlUserThreadStart %08lx (module %s)\n", Context.Eip, Expected,
+           Expected ? Module : "?");
+    }
 
     /* Its stack is the guest stack the TEB32 names; the CPU area tops the native stack */
     if (NT_SUCCESS(NtQueryInformationThread(Child.hThread, ThreadBasicInformation, &Basic, sizeof(Basic), NULL)))
@@ -136,6 +268,7 @@ static void TestSuspendedMain(void)
 Done:
     CloseHandle(Child.hThread);
     CloseHandle(Child.hProcess);
+    TestEditedPeb(Path);
 }
 #else
 /* A far call into 64-bit code at Code + sizeof(FarCall) */
@@ -237,6 +370,14 @@ static void TestFarTransfer(void)
 START_TEST(Wow64StartContext)
 {
 #ifdef _WIN64
+    HMODULE Kernel32 = GetModuleHandleA("kernel32.dll");
+    pWow64GetThreadContext = (PVOID)GetProcAddress(Kernel32, "Wow64GetThreadContext");
+    pWow64SetThreadContext = (PVOID)GetProcAddress(Kernel32, "Wow64SetThreadContext");
+    if (!pWow64GetThreadContext || !pWow64SetThreadContext)
+    {
+        skip("no Wow64Get/SetThreadContext\n");
+        return;
+    }
     TestSuspendedMain();
 #else
     TestFarTransfer();

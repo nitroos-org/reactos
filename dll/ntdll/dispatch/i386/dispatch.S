@@ -49,15 +49,33 @@ _RtlWow64CreateProcess@4:
     call dword ptr fs:[HEX(c0)]
     ret 4
 
-/* The start context the kernel stages for a WoW64 process's main thread
- * enters here once the loader has run, with the image's entry in EAX
- * (ldrinit.c, LdrInitializeWow64). It does not return. */
-EXTERN _LdrpWow64StartProcess@4:PROC
+/* RtlUserThreadStart: a thread entered here runs the routine in EAX with the
+ * parameter in EBX and does not return (ldrinit.c, RtlpUserThreadStart). The
+ * start context the kernel stages for a WoW64 process's main thread enters it
+ * once the guest loader has run, with the image's entry and the PEB32, as on
+ * Windows. LdrWow64ProcessStart names the same code: the kernel stages a start
+ * context only with an ntdll that exports both (psmgr.c). */
+EXTERN _RtlpUserThreadStart@8:PROC
+PUBLIC _RtlUserThreadStart@0
 PUBLIC _LdrWow64ProcessStart@0
+_RtlUserThreadStart@0:
 _LdrWow64ProcessStart@0:
+    push ebx
     push eax
-    call _LdrpWow64StartProcess@4
+    call _RtlpUserThreadStart@8
     int 3
+
+/* ULONG RtlpCallThreadStart(Routine, Parameter): Routine(Parameter) whatever
+ * its convention (a thread routine pops its parameter, an image entry does not) */
+PUBLIC _RtlpCallThreadStart@8
+_RtlpCallThreadStart@8:
+    push ebp
+    mov ebp, esp
+    push dword ptr [ebp + 12]
+    call dword ptr [ebp + 8]
+    mov esp, ebp
+    pop ebp
+    ret 8
 #endif
 
 PUBLIC _LdrInitializeThunk@16

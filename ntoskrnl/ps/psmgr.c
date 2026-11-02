@@ -50,7 +50,7 @@ UNICODE_STRING PsNtDllPathName =
 static PVOID PspSystemDllSection32;
 static volatile LONG PspSystemDllRetry32;
 static PVOID PspSystemDllBase32;
-/* LdrWow64ProcessStart in it, where a WoW64 main thread's start context enters (psctx.c) */
+/* Its RtlUserThreadStart, where a WoW64 main thread's start context enters (psctx.c) */
 static ULONG PspSystemDll32StartRva;
 static UNICODE_STRING PsNtDll32PathName =
     RTL_CONSTANT_STRING(L"\\SystemRoot\\SysWOW64\\ntdll.dll");
@@ -290,8 +290,11 @@ PspLocateSystemDll32(VOID)
         NtHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC &&
         NtHeaders->OptionalHeader.ImageBase == (ULONG_PTR)Base)
     {
-        PVOID Start = RtlFindExportedRoutineByName(Base, "LdrWow64ProcessStart");
-        if (Start) PspSystemDll32StartRva = (ULONG)((ULONG_PTR)Start - (ULONG_PTR)Base);
+        /* Only an ntdll32 whose RtlUserThreadStart takes a staged start context: it also exports
+         * that code as LdrWow64ProcessStart (in an older one RtlUserThreadStart is a stub) */
+        PVOID Start = RtlFindExportedRoutineByName(Base, "RtlUserThreadStart");
+        if (Start && Start == RtlFindExportedRoutineByName(Base, "LdrWow64ProcessStart"))
+            PspSystemDll32StartRva = (ULONG)((ULONG_PTR)Start - (ULONG_PTR)Base);
         /* Publish the base before the section: readers test the section */
         PspSystemDllBase32 = Base;
         InterlockedExchangePointer(&PspSystemDllSection32, Section);
@@ -360,8 +363,8 @@ PspMapSystemDll32(IN PEPROCESS Process)
     }
 }
 
-/* Where the start context of the process's main thread enters the guest, NULL when the process
- * has no i386 ntdll view or the view has no LdrWow64ProcessStart */
+/* Where the start context of the process's main thread enters the guest (ntdll32!RtlUserThreadStart),
+ * NULL when the process has no i386 ntdll view or that ntdll cannot take a staged start context */
 PVOID
 NTAPI
 PspGetWow64ProcessStart(IN PEPROCESS Process)
