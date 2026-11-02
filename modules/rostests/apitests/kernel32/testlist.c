@@ -39,6 +39,7 @@ extern void func_ConsoleCtrlHandler(void);
 extern void func_ConsoleDisplayMode(void);
 extern void func_ConsoleViewFollow(void);
 extern void func_ConsoleVirtualTerminal(void);
+extern void func_ConsoleVirtualTerminalInput(void);
 extern void func_ConPty(void);
 extern void func_ConsoleWriteLatency(void);
 extern void func_CopyFile2(void);
@@ -253,6 +254,7 @@ const struct test winetest_testlist[] =
     { "ConsoleDisplayMode",          func_ConsoleDisplayMode },
     { "ConsoleViewFollow",           func_ConsoleViewFollow },
     { "ConsoleVirtualTerminal",      func_ConsoleVirtualTerminal },
+    { "ConsoleVirtualTerminalInput", func_ConsoleVirtualTerminalInput },
     { "ConPty",                       func_ConPty },
     { "ConsoleWriteLatency",         func_ConsoleWriteLatency },
     { "CopyFile2",                   func_CopyFile2 },

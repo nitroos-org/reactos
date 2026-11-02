@@ -177,6 +177,39 @@ ConioAddInputEvents(PCONSRV_CONSOLE Console,
     NumEventsToWrite = PreprocessInput(Console, InputRecords, NumEventsToWrite);
     if (NumEventsToWrite == 0) return STATUS_SUCCESS;
 
+    /* ENABLE_VIRTUAL_TERMINAL_INPUT: the keys enter the queue as VT sequences */
+    if (Console->InputBuffer.Mode & ENABLE_VIRTUAL_TERMINAL_INPUT)
+    {
+        ULONG SourceCount = NumEventsToWrite;
+        ULONG TranslatedCount;
+        PINPUT_RECORD Translated = ConSrvVtInputTranslate(Console, InputRecords,
+                                                          SourceCount, &TranslatedCount);
+
+        if (Translated != InputRecords || TranslatedCount != SourceCount)
+        {
+            ULONG Written = 0;
+
+            if (TranslatedCount != 0)
+            {
+                Status = ConDrvWriteConsoleInput((PCONSOLE)Console,
+                                                 &Console->InputBuffer,
+                                                 AppendToEnd,
+                                                 Translated,
+                                                 TranslatedCount,
+                                                 &Written);
+                if (Status == STATUS_SUCCESS) PostprocessInput(Console);
+            }
+            /* The caller counts the events it passed, not those that the sequences made */
+            if (NumEventsWritten)
+            {
+                *NumEventsWritten = (Written == TranslatedCount) ? SourceCount :
+                    ConSrvVtInputSourceCount(Console, InputRecords, SourceCount, Written);
+            }
+            if (Translated != InputRecords) ConsoleFreeHeap(Translated);
+            return Status;
+        }
+    }
+
     // Status = ConDrvAddInputEvents(Console,
                                   // InputRecords,
                                   // NumEventsToWrite,
