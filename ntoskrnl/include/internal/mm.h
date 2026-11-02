@@ -973,6 +973,10 @@ MiGetCommitLimit(VOID);
 
 SIZE_T
 NTAPI
+MiGetReportedCommitLimit(VOID);
+
+SIZE_T
+NTAPI
 MiGetPageableCommittedPages(VOID);
 
 /* The System process and processes marked critical: their commitment and faults keep a reserve */

@@ -350,6 +350,33 @@ MmFreeSwapPage(SWAPENTRY Entry)
 }
 
 /*
+ * The commit limit as Windows reports it: physical memory plus the size of
+ * every paging file (the header page included, so that it is the sum of the
+ * TotalSize values of SystemPageFileInformation). Applications compute with
+ * it: GlobalMemoryStatusEx().ullTotalPageFile minus ullTotalPhys is the paging
+ * file size (btop), and it is never below physical memory. This is the
+ * reporting figure only; what commitment may actually charge is the lower
+ * MiGetCommitLimit().
+ */
+SIZE_T
+NTAPI
+MiGetReportedCommitLimit(VOID)
+{
+    SIZE_T Limit = MmNumberOfPhysicalPages;
+    ULONG i;
+
+    KeAcquireGuardedMutex(&MmPageFileCreationLock);
+    for (i = 0; i < MAX_PAGING_FILES; i++)
+    {
+        if (MmPagingFile[i] != NULL)
+            Limit += MmPagingFile[i]->Size;
+    }
+    KeReleaseGuardedMutex(&MmPageFileCreationLock);
+
+    return Limit;
+}
+
+/*
  * Fill SYSTEM_PAGEFILE_INFORMATION entries for SystemPageFileInformation. As
  * on Windows there is one entry per paging file, each followed by its
  * NUL-terminated NT name (\??\C:\pagefile.sys); the sizes are in pages.
