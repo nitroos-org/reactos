@@ -1846,6 +1846,23 @@ typedef struct _SYSTEM_MEMORY_LIST_INFORMATION
 #define VARIABLE_ATTRIBUTE_TIME_BASED_AUTHENTICATED_WRITE_ACCESS    0x00000020
 #define VARIABLE_ATTRIBUTE_APPEND_WRITE                             0x00000040
 
+//
+// Windows Notification Facility (partial, see ntoskrnl/ex/wnf.c)
+//
+typedef struct _WNF_STATE_NAME
+{
+    ULONG Data[2];
+} WNF_STATE_NAME, *PWNF_STATE_NAME;
+typedef const WNF_STATE_NAME *PCWNF_STATE_NAME;
+
+typedef struct _WNF_TYPE_ID
+{
+    GUID TypeId;
+} WNF_TYPE_ID, *PWNF_TYPE_ID;
+typedef const WNF_TYPE_ID *PCWNF_TYPE_ID;
+
+typedef ULONG WNF_CHANGE_STAMP, *PWNF_CHANGE_STAMP;
+
 #ifdef __cplusplus
 }; // extern "C"
 #endif

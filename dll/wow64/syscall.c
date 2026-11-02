@@ -2502,6 +2502,10 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         Status = NtFlushBuffersFileEx(H(0), a[1], P(2), a[3], IoBegin(a[4], &Io));
         IoEnd(a[4], &Io);
         return Status;
+    case W64_NtQueryWnfStateData:
+        /* Every argument is a pointer to the same layout in both ABIs (state name, type id, change stamp and
+         * buffer size are plain integers or GUIDs) and the kernel probes them: nothing to translate. */
+        return NtQueryWnfStateData(P(0), P(1), P(2), P(3), P(4), P(5));
     case W64_NtQueryEaFile:
         /* Extended attribute lists are flat records: the same bytes in both ABIs */
         Status = NtQueryEaFile(H(0), IoBegin(a[1], &Io), P(2), a[3], (BOOLEAN)a[4], P(5), a[6], P(7), (BOOLEAN)a[8]);

@@ -95,6 +95,7 @@ list(APPEND SOURCE
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/timer.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/uuid.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/win32k.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/wnf.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/work.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/xipdisp.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/zone.c

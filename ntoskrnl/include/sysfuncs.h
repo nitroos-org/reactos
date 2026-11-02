@@ -313,4 +313,5 @@
     SVC_(CreateTimer2, 5)
     SVC_(SetTimer2, 4)
     SVC_(CancelTimer2, 2)
+    SVC_(QueryWnfStateData, 6)
 #endif

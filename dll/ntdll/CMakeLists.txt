@@ -70,7 +70,8 @@ list(APPEND SOURCE
     rtl/crt_s.c
     rtl/strcpy_s.c
     rtl/utf8.c
-    rtl/win10.c)
+    rtl/win10.c
+    rtl/wnf.c)
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
     list(APPEND SOURCE rtl/placeholder.c rtl/sysinfoex.c rtl/xcontext.c)
