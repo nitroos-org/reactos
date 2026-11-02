@@ -4757,7 +4757,75 @@ static WCHAR *filetime_to_datetime( const FILETIME *ft )
     return ret;
 }
 
-static void get_process_extra( DWORD pid, struct process_extra *x )
+/* One NtQuerySystemInformation(SystemProcessInformation) snapshot of all processes. Unlike OpenProcess() it
+ * needs no access to the target, so a standard user gets the times and memory counters of SYSTEM processes
+ * too (the WMI provider on Windows runs with its own privileges and reports them to every caller). */
+static void *get_process_snapshot(void)
+{
+    ULONG size = 0x10000, needed = 0;
+    NTSTATUS status;
+    BYTE *buf;
+    int tries;
+
+    for (tries = 0; tries < 8; tries++)
+    {
+        if (!(buf = heap_alloc( size ))) return NULL;
+        status = NtQuerySystemInformation( SystemProcessInformation, buf, size, &needed );
+        if (!status) return buf;
+        heap_free( buf );
+        if (status != STATUS_INFO_LENGTH_MISMATCH) return NULL;
+        size = max( size * 2, needed + 0x4000 );
+    }
+    return NULL;
+}
+
+static const SYSTEM_PROCESS_INFORMATION *find_process_snapshot( const void *snapshot, DWORD pid )
+{
+    const BYTE *ptr = snapshot;
+    const SYSTEM_PROCESS_INFORMATION *spi;
+
+    if (!ptr) return NULL;
+    for (;;)
+    {
+        spi = (const SYSTEM_PROCESS_INFORMATION *)ptr;
+        if ((DWORD)(ULONG_PTR)spi->UniqueProcessId == pid) return spi;
+        if (!spi->NextEntryOffset) return NULL;
+        ptr += spi->NextEntryOffset;
+    }
+}
+
+static void get_process_extra_from_snapshot( const SYSTEM_PROCESS_INFORMATION *spi, struct process_extra *x )
+{
+    FILETIME create;
+
+    x->kernel = spi->KernelTime.QuadPart;
+    x->user = spi->UserTime.QuadPart;
+    create.dwLowDateTime = spi->CreationTime.u.LowPart;
+    create.dwHighDateTime = spi->CreationTime.u.HighPart;
+    x->creation = filetime_to_datetime( &create );
+    x->page_faults = spi->vmCounters.PageFaultCount;
+    x->ws = spi->vmCounters.WorkingSetSize;
+    x->peak_ws = (UINT32)(spi->vmCounters.PeakWorkingSetSize / 1024);
+    x->pagefile = (UINT32)(spi->vmCounters.PagefileUsage / 1024);
+    x->peak_pagefile = (UINT32)(spi->vmCounters.PeakPagefileUsage / 1024);
+    x->paged = (UINT32)(spi->vmCounters.QuotaPagedPoolUsage / 1024);
+    x->nonpaged = (UINT32)(spi->vmCounters.QuotaNonPagedPoolUsage / 1024);
+    x->peak_paged = (UINT32)(spi->vmCounters.QuotaPeakPagedPoolUsage / 1024);
+    x->peak_nonpaged = (UINT32)(spi->vmCounters.QuotaPeakNonPagedPoolUsage / 1024);
+    x->private_bytes = spi->vmCounters.PagefileUsage;
+    x->virt = spi->vmCounters.VirtualSize;
+    x->peak_virt = spi->vmCounters.PeakVirtualSize;
+    x->reads = spi->ioCounters.ReadOperationCount;
+    x->writes = spi->ioCounters.WriteOperationCount;
+    x->others = spi->ioCounters.OtherOperationCount;
+    x->read_bytes = spi->ioCounters.ReadTransferCount;
+    x->write_bytes = spi->ioCounters.WriteTransferCount;
+    x->other_bytes = spi->ioCounters.OtherTransferCount;
+    x->handles = spi->HandleCount;
+    if (spi->dwBasePriority) x->priority = spi->dwBasePriority;
+}
+
+static void get_process_extra( DWORD pid, struct process_extra *x, const void *snapshot )
 {
     HANDLE process;
     FILETIME create, exit, kernel, user;
@@ -4771,7 +4839,13 @@ static void get_process_extra( DWORD pid, struct process_extra *x )
     x->priority = 8;
     ProcessIdToSessionId( pid, &x->session );
     if (!(process = OpenProcess( PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid )) &&
-        !(process = OpenProcess( PROCESS_QUERY_INFORMATION, FALSE, pid ))) return;
+        !(process = OpenProcess( PROCESS_QUERY_INFORMATION, FALSE, pid )))
+    {
+        /* not openable by this user (SYSTEM processes for a standard user): use the system-wide snapshot */
+        const SYSTEM_PROCESS_INFORMATION *spi = find_process_snapshot( snapshot, pid );
+        if (spi) get_process_extra_from_snapshot( spi, x );
+        return;
+    }
     if (GetProcessTimes( process, &create, &exit, &kernel, &user ))
     {
         x->kernel = ((UINT64)kernel.dwHighDateTime << 32) | kernel.dwLowDateTime;
@@ -4845,11 +4919,13 @@ static enum fill_status fill_process( struct table *table, const struct expr *co
     struct process_extra x;
     PROCESSENTRY32W entry;
     HANDLE snap;
+    void *snapshot;
     enum fill_status status = FILL_STATUS_FAILED;
     UINT row = 0, offset = 0;
 
     snap = CreateToolhelp32Snapshot( TH32CS_SNAPPROCESS, 0 );
     if (snap == INVALID_HANDLE_VALUE) return FILL_STATUS_FAILED;
+    snapshot = get_process_snapshot();
 
     entry.dwSize = sizeof(entry);
     if (!Process32FirstW( snap, &entry )) goto done;
@@ -4864,7 +4940,7 @@ static enum fill_status fill_process( struct table *table, const struct expr *co
         }
 
         rec = (struct record_process *)(table->data + offset);
-        get_process_extra( entry.th32ProcessID, &x );
+        get_process_extra( entry.th32ProcessID, &x, snapshot );
         rec->caption        = heap_strdupW( entry.szExeFile );
         rec->commandline    = get_cmdline( entry.th32ProcessID );
         rec->description    = heap_strdupW( entry.szExeFile );
@@ -4932,6 +5008,7 @@ static enum fill_status fill_process( struct table *table, const struct expr *co
     table->num_rows = row;
 
 done:
+    heap_free( snapshot );
     CloseHandle( snap );
     return status;
 }

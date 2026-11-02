@@ -132,6 +132,134 @@ test_IcmpSendEcho(void)
     IcmpCloseHandle(hIcmp);
 }
 
+/* Is the Administrators group enabled (not deny-only) in the effective token of this thread? */
+static
+BOOL
+AdminsEnabled(PSID AdminsSid)
+{
+    HANDLE hToken;
+    BYTE Buffer[4096];
+    PTOKEN_GROUPS Groups = (PTOKEN_GROUPS)Buffer;
+    DWORD Length, i;
+    BOOL Ret = TRUE; /* unknown: assume the worst for the test */
+
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &hToken) &&
+        !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
+        return Ret;
+    if (GetTokenInformation(hToken, TokenGroups, Buffer, sizeof(Buffer), &Length))
+    {
+        Ret = FALSE;
+        for (i = 0; i < Groups->GroupCount; i++)
+        {
+            if (EqualSid(Groups->Groups[i].Sid, AdminsSid))
+            {
+                Ret = (Groups->Groups[i].Attributes & SE_GROUP_ENABLED) &&
+                      !(Groups->Groups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY);
+                break;
+            }
+        }
+    }
+    CloseHandle(hToken);
+    return Ret;
+}
+
+/* Run a standard user's view: impersonate a copy of our token whose Administrators group is
+ * deny-only and that has no privileges. If we already run as a standard user, no change is needed. */
+static
+BOOL
+EnterStandardUser(BOOL *Impersonating)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    SID_AND_ATTRIBUTES Admins;
+    PSID AdminsSid = NULL;
+    HANDLE hToken = NULL, hRestricted = NULL, hImpersonation = NULL;
+    BOOL IsAdmin = FALSE, Ret = FALSE;
+
+    *Impersonating = FALSE;
+    if (!AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                  DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &AdminsSid))
+        return FALSE;
+
+    IsAdmin = AdminsEnabled(AdminsSid);
+    if (!IsAdmin)
+    {
+        Ret = TRUE; /* already a standard user */
+        goto Quit;
+    }
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &hToken))
+        goto Quit;
+    Admins.Sid = AdminsSid;
+    Admins.Attributes = 0;
+    if (!CreateRestrictedToken(hToken, DISABLE_MAX_PRIVILEGE, 1, &Admins, 0, NULL, 0, NULL, &hRestricted))
+        goto Quit;
+    if (!DuplicateTokenEx(hRestricted, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation,
+                          TokenImpersonation, &hImpersonation))
+        goto Quit;
+    if (!SetThreadToken(NULL, hImpersonation))
+        goto Quit;
+    *Impersonating = TRUE;
+    Ret = TRUE;
+
+Quit:
+    if (hImpersonation) CloseHandle(hImpersonation);
+    if (hRestricted) CloseHandle(hRestricted);
+    if (hToken) CloseHandle(hToken);
+    FreeSid(AdminsSid);
+    return Ret;
+}
+
+/* Windows lets a standard user ping: IcmpCreateFile opens \Device\Ip with GENERIC_EXECUTE and the
+ * device grants Everyone read, write and execute. */
+static
+void
+test_IcmpStandardUser(void)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID AdminsSid = NULL;
+    BOOL Impersonating, IsAdmin = TRUE;
+    HANDLE hIcmp;
+    char SendData[32] = "standard user";
+    UCHAR ReplyBuffer[sizeof(ICMP_ECHO_REPLY) + sizeof(SendData) + 8];
+    PICMP_ECHO_REPLY Reply = (PICMP_ECHO_REPLY)ReplyBuffer;
+    DWORD Replies;
+
+    if (!EnterStandardUser(&Impersonating))
+    {
+        skip("Could not create a standard user token: %lu\n", GetLastError());
+        return;
+    }
+
+    if (AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                 DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &AdminsSid))
+    {
+        IsAdmin = AdminsEnabled(AdminsSid);
+        FreeSid(AdminsSid);
+    }
+    ok(!IsAdmin, "The test thread must not act as an administrator\n");
+
+    if (!IsAdmin)
+    {
+        SetLastError(0xDEADBEEF);
+        hIcmp = IcmpCreateFile();
+        ok(hIcmp != INVALID_HANDLE_VALUE, "IcmpCreateFile failed for a standard user: %lu\n", GetLastError());
+        if (hIcmp != INVALID_HANDLE_VALUE)
+        {
+            SetLastError(0xDEADBEEF);
+            Replies = IcmpSendEcho(hIcmp, htonl(INADDR_LOOPBACK), SendData, sizeof(SendData),
+                                   NULL, ReplyBuffer, sizeof(ReplyBuffer), 3000);
+            ok(Replies == 1, "IcmpSendEcho returned %lu replies for a standard user (error %lu)\n",
+               Replies, GetLastError());
+            if (Replies == 1)
+                ok(Reply->Status == IP_SUCCESS, "Reply status %lu\n", Reply->Status);
+            IcmpCloseHandle(hIcmp);
+        }
+    }
+
+    if (Impersonating)
+        SetThreadToken(NULL, NULL);
+}
+
 #define CONCURRENT_DATA_SIZE 16
 #define CONCURRENT_REPLIES 4
 
@@ -568,6 +696,7 @@ START_TEST(icmp)
     test_Icmp6CreateFile();
     test_IcmpCloseHandle();
     test_IcmpSendEcho();
+    test_IcmpStandardUser();
     test_IcmpSendEchoConcurrent();
     test_IcmpSendEcho2();
     test_IcmpSendEcho2Ex();

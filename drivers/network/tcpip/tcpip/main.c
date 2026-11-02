@@ -642,7 +642,7 @@ TiDispatch(
 
 static
 NTSTATUS TiCreateSecurityDescriptor(
-    _In_ BOOLEAN AllowEveryone,
+    _In_ ACCESS_MASK WorldAccess,
     _Out_ PSECURITY_DESCRIPTOR *SecurityDescriptor)
 {
     NTSTATUS Status;
@@ -716,14 +716,14 @@ NTSTATUS TiCreateSecurityDescriptor(
         goto Quit;
     }
 
-    if (AllowEveryone)
+    if (WorldAccess != 0)
     {
         /* Everyone may open the device and use sockets (create/bind/connect/
          * send/recv), as on Windows. Privileged control requests are checked
          * separately against TiControlSD. */
         Status = RtlAddAccessAllowedAce(Dacl,
                                         ACL_REVISION,
-                                        FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+                                        WorldAccess,
                                         SeExports->SeWorldSid);
         if (!NT_SUCCESS(Status))
         {
@@ -813,14 +813,15 @@ Quit:
 
 static
 NTSTATUS TiSetupTcpDeviceSD(
-    _In_ PDEVICE_OBJECT DeviceObject)
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ ACCESS_MASK WorldAccess)
 {
     NTSTATUS Status;
     PSECURITY_DESCRIPTOR Sd;
     SECURITY_INFORMATION Info = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
 
     /* Obtain a security descriptor */
-    Status = TiCreateSecurityDescriptor(TRUE, &Sd);
+    Status = TiCreateSecurityDescriptor(WorldAccess, &Sd);
     if (!NT_SUCCESS(Status))
     {
         TI_DbgPrint(MIN_TRACE, ("Failed to create a security descriptor for the device object\n"));
@@ -847,7 +848,7 @@ NTSTATUS TiSecurityStartup(
     NTSTATUS Status;
 
     /* Reference SD for privileged control requests */
-    Status = TiCreateSecurityDescriptor(FALSE, &TiControlSD);
+    Status = TiCreateSecurityDescriptor(0, &TiControlSD);
     if (!NT_SUCCESS(Status))
     {
         TI_DbgPrint(MIN_TRACE, ("Failed to create the control security descriptor\n"));
@@ -855,14 +856,18 @@ NTSTATUS TiSecurityStartup(
     }
 
     /* Set security data for the TCP and IP device objects */
-    Status = TiSetupTcpDeviceSD(TCPDeviceObject);
+    Status = TiSetupTcpDeviceSD(TCPDeviceObject, FILE_GENERIC_READ | FILE_GENERIC_WRITE);
     if (!NT_SUCCESS(Status))
     {
         TI_DbgPrint(MIN_TRACE, ("Failed to set security data for TCP device object\n"));
         return Status;
     }
 
-    Status = TiSetupTcpDeviceSD(IPDeviceObject);
+    /* Windows grants Everyone read, write AND execute on the IP device (Device\Ip)
+     * (0x1201bf): IcmpCreateFile() opens it with GENERIC_EXECUTE, which is how a
+     * standard user can ping. */
+    Status = TiSetupTcpDeviceSD(IPDeviceObject,
+                                FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE);
     if (!NT_SUCCESS(Status))
     {
         TI_DbgPrint(MIN_TRACE, ("Failed to set security data for IP device object\n"));
