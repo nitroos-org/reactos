@@ -9,6 +9,7 @@
 /* INCLUDES *******************************************************************/
 
 #include <k32.h>
+#include <reactos/rosqpc.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -24,6 +25,12 @@ QueryPerformanceCounter(OUT PLARGE_INTEGER lpPerformanceCount)
 {
     LARGE_INTEGER Frequency;
     NTSTATUS Status;
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* From the TSC in user mode, as the kernel computes it, when it allows */
+    if (RosQpcQueryBypass(lpPerformanceCount))
+        return TRUE;
+#endif
 
     Status = NtQueryPerformanceCounter(lpPerformanceCount, &Frequency);
     if (Frequency.QuadPart == 0) Status = STATUS_NOT_IMPLEMENTED;
@@ -46,6 +53,15 @@ QueryPerformanceFrequency(OUT PLARGE_INTEGER lpFrequency)
 {
     LARGE_INTEGER Count;
     NTSTATUS Status;
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* The HAL publishes the frequency when the counter is the TSC */
+    if (SharedUserData->QpcFrequency)
+    {
+        lpFrequency->QuadPart = (LONGLONG)SharedUserData->QpcFrequency;
+        return TRUE;
+    }
+#endif
 
     Status = NtQueryPerformanceCounter(&Count, lpFrequency);
     if (lpFrequency->QuadPart == 0) Status = STATUS_NOT_IMPLEMENTED;

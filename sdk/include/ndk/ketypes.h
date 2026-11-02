@@ -826,9 +826,46 @@ typedef struct _KUSER_SHARED_DATA
 #endif // NTDDI_VERSION >= NTDDI_WIN11_NI
 
 #if (NTDDI_VERSION < NTDDI_WIN7) && defined(__REACTOS__)
-    XSTATE_CONFIGURATION XState;
+    XSTATE_CONFIGURATION XState;                            // 0x378
+
+    //
+    // ReactOS: the user-mode performance counter. Windows 8 and later have
+    // QpcFrequency, QpcBias, QpcBypassEnabled and QpcShift at 0x300, 0x3b8
+    // and 0x3c6, where this layout has other fields and the XState. The same
+    // offsets on x86 and x64, so 32-bit code under WoW64 reads them as well.
+    // When QpcBypassEnabled has SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED, the
+    // counter is ((TSC * QpcMultiplier / 2^64) + QpcBias) >> QpcShift, the
+    // TSC taken as the other QPC_BYPASS flags say (QpcMultiplier 0: the TSC
+    // as it is); otherwise NtQueryPerformanceCounter gives it.
+    //
+    ULONGLONG QpcFrequency;                                 // 0x6c0
+    volatile ULONGLONG QpcBias;                             // 0x6c8
+    ULONGLONG QpcMultiplier;                                // 0x6d0
+    union
+    {
+        USHORT QpcData;                                     // 0x6d8
+        struct
+        {
+            volatile UCHAR QpcBypassEnabled;                // 0x6d8
+            UCHAR QpcShift;                                 // 0x6d9
+        };
+    };
+    USHORT QpcPad[3];                                       // 0x6da
 #endif
 } KUSER_SHARED_DATA, *PKUSER_SHARED_DATA;
+
+//
+// QpcBypassEnabled flags
+//
+#ifndef SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED
+#define SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED          0x01
+#define SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_HV_PAGE      0x02
+#define SHARED_GLOBAL_FLAGS_QPC_BYPASS_DISABLE_32BIT    0x04
+#define SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_MFENCE       0x10
+#define SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_LFENCE       0x20
+#define SHARED_GLOBAL_FLAGS_QPC_BYPASS_A73_ERRATA       0x40
+#define SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP       0x80
+#endif
 
 //
 // VDM Structures

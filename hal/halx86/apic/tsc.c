@@ -11,6 +11,7 @@
 #include <hal.h>
 #include "tsc.h"
 #include "apicp.h"
+#include <reactos/rosqpc.h>
 #define NDEBUG
 #include <debug.h>
 
@@ -73,6 +74,29 @@ static volatile PVCLOCK_VCPU_TIME_INFO DECLSPEC_ALIGN(32) HalpKvmClock;
 
 /* Hypervisor timing leaf (VMware, and KVM when configured): TSC kHz in EAX */
 #define HV_CPUID_TIMING_OFFSET 0x10
+
+/* KVM: the stable bit of the paravirtual clock may be relied on (CPUID), and
+   is set (flags of the clock structure) while all virtual processors run
+   with the same TSC offset on a host whose own TSC is synchronized and
+   constant, which is what an invariant TSC promises */
+#define KVM_FEATURE_CLOCKSOURCE_STABLE_BIT 0x1000000
+#define PVCLOCK_TSC_STABLE_BIT 0x01
+static BOOLEAN HalpKvmTscStable;
+
+/* The performance counter: the TSC scaled to ROS_QPC_FREQUENCY when it is
+   faster (the multiplier is 2^64 * ROS_QPC_FREQUENCY / TSC frequency), the
+   TSC itself otherwise (multiplier 0). Set once the frequency is known */
+static ULONG64 HalpQpcMultiplier;
+static LARGE_INTEGER HalpQpcFrequency;
+
+/* Checking that the TSCs of the processors are in step */
+#define TSC_WARP_LOOPS 20000
+#define TSC_WARP_MINIMUM_LOOPS 2000
+static volatile LONG HalpTscWarpLock;
+static volatile ULONG64 HalpTscWarpLast;
+static volatile LONG HalpTscWarps;
+static ULONG HalpTscWarpLoops;
+static BOOLEAN HalpTscWarpRdtscp;
 
 /* PRIVATE FUNCTIONS *********************************************************/
 
@@ -416,7 +440,11 @@ HalpGetKvmClockFrequency(VOID)
         Shift = HalpKvmClock.TscShift;
         _ReadWriteBarrier();
         if (!(Version & 1) && (Version == HalpKvmClock.Version) && Mul)
+        {
+            HalpKvmTscStable = (CpuInfo[0] & KVM_FEATURE_CLOCKSOURCE_STABLE_BIT) &&
+                               (HalpKvmClock.Flags & PVCLOCK_TSC_STABLE_BIT);
             break;
+        }
         Mul = 0;
     }
     __writemsr(Msr, 0);
@@ -544,6 +572,41 @@ HalpCalibrateTscWithRtc(VOID)
 
 }
 
+/*
+    The performance counter runs at 10 MHz, as on Windows 10, when the TSC is
+    faster: the multiplier is floor(2^64 * 10^7 / frequency), found bit by bit
+    (the remainder stays below the frequency, so below 2^40).
+*/
+static
+VOID
+HalpSetQpcScale(VOID)
+{
+    ULONG64 Frequency = (ULONG64)HalpCpuClockFrequency.QuadPart;
+    ULONG64 Remainder = ROS_QPC_FREQUENCY, Multiplier = 0;
+    ULONG Bit;
+
+    if (Frequency <= ROS_QPC_FREQUENCY)
+    {
+        HalpQpcFrequency = HalpCpuClockFrequency;
+        return;
+    }
+
+    for (Bit = 0; Bit < 64; Bit++)
+    {
+        Remainder <<= 1;
+        Multiplier <<= 1;
+        if (Remainder >= Frequency)
+        {
+            Remainder -= Frequency;
+            Multiplier |= 1;
+        }
+    }
+
+    HalpQpcMultiplier = Multiplier;
+    _ReadWriteBarrier();
+    HalpQpcFrequency.QuadPart = ROS_QPC_FREQUENCY;
+}
+
 VOID
 NTAPI
 HalpInitializeTsc(VOID)
@@ -585,6 +648,7 @@ HalpInitializeTsc(VOID)
         HalpTscCalibrated = TRUE;
         DPRINT1("TSC frequency %I64u Hz (hypervisor %I64u Hz, using %s)\n",
                 HalpCpuClockFrequency.QuadPart, Frequency, Source);
+        HalpSetQpcScale();
         return;
     }
 
@@ -601,6 +665,7 @@ HalpInitializeTsc(VOID)
     }
     DPRINT1("TSC frequency %I64u Hz (RTC %I64u Hz, power management timer %s)\n",
             HalpCpuClockFrequency.QuadPart, RtcFrequency, HalpTscCalibrated ? "agrees" : "failed");
+    HalpSetQpcScale();
 }
 
 CODE_SEG("INIT")
@@ -630,12 +695,12 @@ KeQueryPerformanceCounter(
     /* Does the caller want the frequency? */
     if (PerformanceFrequency)
     {
-        /* Return tsc frequency */
-        *PerformanceFrequency = HalpCpuClockFrequency;
+        /* The counter frequency once it is set, the TSC frequency before */
+        *PerformanceFrequency = HalpQpcFrequency.QuadPart ? HalpQpcFrequency : HalpCpuClockFrequency;
     }
 
-    /* Return the current value */
-    Result.QuadPart = __rdtsc();
+    /* The TSC, scaled as user mode scales it (rosqpc.h) */
+    Result.QuadPart = RosQpcFromTsc(__rdtsc(), HalpQpcMultiplier, 0, 0);
     return Result;
 }
 
@@ -653,6 +718,131 @@ KeStallExecutionProcessor(ULONG MicroSeconds)
 
     /* Loop until time is elapsed */
     while (__rdtsc() < EndTime);
+}
+
+/* All processors at once: each reads the TSC under a lock after the last
+   value another one read there; a smaller value is a TSC behind another */
+static
+ULONG_PTR
+NTAPI
+HalpTscWarpWorker(
+    _In_ ULONG_PTR Context)
+{
+    ULONG64 Previous, Now;
+    ULONG Loop;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    for (Loop = 0; Loop < HalpTscWarpLoops; Loop++)
+    {
+        while (InterlockedCompareExchange(&HalpTscWarpLock, 1, 0) != 0)
+            YieldProcessor();
+
+        Previous = HalpTscWarpLast;
+        if (HalpTscWarpRdtscp)
+        {
+            Now = RosQpcReadTscp();
+        }
+        else
+        {
+            _mm_mfence();
+            _mm_lfence();
+            Now = __rdtsc();
+        }
+        HalpTscWarpLast = Now;
+        InterlockedExchange(&HalpTscWarpLock, 0);
+
+        if (Now < Previous)
+            InterlockedIncrement(&HalpTscWarps);
+    }
+
+    return 0;
+}
+
+/*!
+    \brief Lets user mode read the performance counter without a system call.
+
+    Called when all processors run. The counter fields of the shared user
+    data are published in any case. User mode reads the TSC of the processor
+    it runs on, so the bypass is enabled only when that gives one counter for
+    all of them: the TSC must be invariant (CPUID 0x80000007 EDX bit 8, or
+    the stable bit of KVM's paravirtual clock) and no processor's TSC may be
+    seen behind another's. Otherwise the system call gives the counter.
+*/
+VOID
+NTAPI
+HalpPublishPerformanceCounter(VOID)
+{
+    INT CpuInfo[4];
+    ULONG MaximumExtended, Processors;
+    BOOLEAN Invariant = FALSE, Rdtscp = FALSE, Amd;
+    UCHAR Flags;
+
+    if (!HalpQpcFrequency.QuadPart)
+        return;
+
+    SharedUserData->QpcMultiplier = HalpQpcMultiplier;
+    SharedUserData->QpcBias = 0;
+    SharedUserData->QpcShift = 0;
+    SharedUserData->QpcFrequency = (ULONGLONG)HalpQpcFrequency.QuadPart;
+
+    __cpuid(CpuInfo, 0);
+    Amd = (CpuInfo[1] == 0x68747541); /* "Auth"enticAMD */
+    __cpuid(CpuInfo, 0x80000000);
+    MaximumExtended = (ULONG)CpuInfo[0];
+    if (MaximumExtended >= 0x80000001)
+    {
+        __cpuid(CpuInfo, 0x80000001);
+        Rdtscp = (CpuInfo[3] & (1 << 27)) != 0;
+    }
+    if (MaximumExtended >= 0x80000007)
+    {
+        __cpuid(CpuInfo, 0x80000007);
+        Invariant = (CpuInfo[3] & (1 << 8)) != 0;
+    }
+    if (!Invariant)
+    {
+        /* Reads the stable bit, on this processor */
+        HalpGetKvmClockFrequency();
+        Invariant = HalpKvmTscStable;
+    }
+    if (!Invariant)
+    {
+        DPRINT1("QPC: TSC not invariant, user mode uses the system call\n");
+        return;
+    }
+
+    Processors = (ULONG)KeNumberProcessors;
+    if (Processors > 1)
+    {
+        HalpTscWarpLoops = TSC_WARP_LOOPS / Processors;
+        if (HalpTscWarpLoops < TSC_WARP_MINIMUM_LOOPS)
+            HalpTscWarpLoops = TSC_WARP_MINIMUM_LOOPS;
+        HalpTscWarpRdtscp = Rdtscp;
+        HalpTscWarpLast = 0;
+        HalpTscWarps = 0;
+        KeIpiGenericCall(HalpTscWarpWorker, 0);
+        if (HalpTscWarps)
+        {
+            DPRINT1("QPC: TSCs of the %lu processors out of step (%ld times), user mode uses the system call\n",
+                    Processors, HalpTscWarps);
+            return;
+        }
+    }
+
+    /* The TSC read in order, as Windows does: RDTSCP, else a fence first */
+    Flags = SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED;
+    if (Rdtscp)
+        Flags |= SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP;
+    else if (Amd)
+        Flags |= SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_MFENCE;
+    else
+        Flags |= SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_LFENCE;
+
+    _ReadWriteBarrier();
+    SharedUserData->QpcBypassEnabled = Flags;
+    DPRINT1("QPC: %I64u Hz in user mode (flags 0x%02x, %lu processors)\n",
+            SharedUserData->QpcFrequency, Flags, Processors);
 }
 
 VOID

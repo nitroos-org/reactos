@@ -8,6 +8,7 @@
 /* INCLUDES ******************************************************************/
 
 #include <hal.h>
+#include "tsc.h"
 #define NDEBUG
 #include <debug.h>
 
@@ -34,7 +35,8 @@ BOOLEAN
 NTAPI
 HalAllProcessorsStarted(VOID)
 {
-    /* Do nothing */
+    /* The performance counter in user mode needs the TSCs of all of them */
+    HalpPublishPerformanceCounter();
     return TRUE;
 }
 

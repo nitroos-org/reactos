@@ -11,6 +11,7 @@ void __cdecl TscCalibrationISR(void);
 extern LARGE_INTEGER HalpCpuClockFrequency;
 extern BOOLEAN HalpTscCalibrated;
 VOID NTAPI HalpInitializeTsc(void);
+VOID NTAPI HalpPublishPerformanceCounter(VOID);
 
 #ifdef _M_AMD64
 #define KiGetIdtEntry(Pcr, Vector) &((Pcr)->IdtBase[Vector])
