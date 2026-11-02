@@ -108,6 +108,7 @@ extern void func_GetNumaProcessorNodeEx(void);
 extern void func_GetSystemCpuSetInformation(void);
 extern void func_GetOverlappedResultEx(void);
 extern void func_GetQueuedCompletionStatusEx(void);
+extern void func_GetSystemFileCacheSize(void);
 extern void func_GetSystemTimePrecise(void);
 extern void func_GetThreadUILanguage(void);
 extern void func_DiskPerformance(void);
@@ -324,6 +325,7 @@ const struct test winetest_testlist[] =
     { "GetNumaProcessorNodeEx",      func_GetNumaProcessorNodeEx },
     { "GetOverlappedResultEx",       func_GetOverlappedResultEx },
     { "GetQueuedCompletionStatusEx", func_GetQueuedCompletionStatusEx },
+    { "GetSystemFileCacheSize",      func_GetSystemFileCacheSize },
     { "GetSystemTimePrecise",        func_GetSystemTimePrecise },
     { "GetThreadUILanguage",         func_GetThreadUILanguage },
     { "DiskPerformance",             func_DiskPerformance },

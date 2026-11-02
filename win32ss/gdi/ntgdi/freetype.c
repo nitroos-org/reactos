@@ -457,6 +457,7 @@ SharedMem_Create(PBYTE Buffer, ULONG BufferSize, BOOL IsMapping)
         Ptr->BufferSize = BufferSize;
         Ptr->RefCount = 1;
         Ptr->IsMapping = IsMapping;
+        Ptr->FileHandle = NULL;
         DPRINT("Creating SharedMem for %p (%i, %p)\n", Buffer, IsMapping, Ptr);
     }
     return Ptr;
@@ -520,6 +521,9 @@ static void SharedMem_Release(PSHARED_MEM Ptr)
             MmUnmapViewInSystemSpace(Ptr->Buffer);
         else
             ExFreePoolWithTag(Ptr->Buffer, TAG_FONT);
+        /* The font file is free to be replaced or deleted from now on */
+        if (Ptr->FileHandle)
+            ZwClose(Ptr->FileHandle);
         ExFreePoolWithTag(Ptr, TAG_FONT);
     }
 }
@@ -2187,12 +2191,16 @@ IntGdiAddFontResourceSingle(
         RtlFreeUnicodeString(&PathName);
         return 0;
     }
-    ZwClose(FileHandle);
 
+    /* The handle stays open as long as the font is loaded (SharedMem owns it). It was opened
+     * without FILE_SHARE_WRITE and FILE_SHARE_DELETE, so, as on Windows, the file of a loaded
+     * font cannot be overwritten or deleted (installers then schedule the replacement for the
+     * next boot) while the font data is mapped here. */
     Status = MmMapViewInSystemSpace(SectionObject, &Buffer, &ViewSize);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("Could not map file: %wZ\n", &PathName);
+        ZwClose(FileHandle);
         ObDereferenceObject(SectionObject);
         ObDereferenceObject(FileObject);
         RtlFreeUnicodeString(&PathName);
@@ -2202,6 +2210,14 @@ IntGdiAddFontResourceSingle(
     RtlZeroMemory(&LoadFont, sizeof(LoadFont));
     LoadFont.pFileName          = &PathName;
     LoadFont.Memory             = SharedMem_Create(Buffer, ViewSize, TRUE);
+    if (LoadFont.Memory)
+    {
+        LoadFont.Memory->FileHandle = FileHandle;
+    }
+    else
+    {
+        ZwClose(FileHandle);
+    }
     LoadFont.Characteristics    = Characteristics;
     LoadFont.LoadId             = (ULONG)InterlockedIncrement(&g_FontLoadIdCounter);
     RtlInitUnicodeString(&LoadFont.RegValueName, NULL);

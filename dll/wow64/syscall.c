@@ -3015,6 +3015,42 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             return STATUS_SUCCESS;
         }
+        case SystemFileCacheInformation:
+        case SystemFileCacheInformationEx:
+        {
+            /* SYSTEM_FILECACHE_INFORMATION with 32-bit SIZE_T fields: nine ULONGs, 36 bytes.
+             * Sizes that do not fit are saturated, as the Windows WoW64 layer shows it
+             * (MaximumWorkingSet 0xffffffff measured on Windows 10). */
+            typedef struct { ULONG CurrentSize, PeakSize, PageFaultCount, MinimumWorkingSet, MaximumWorkingSet,
+                             CurrentSizeIncludingTransitionInPages, PeakSizeIncludingTransitionInPages,
+                             TransitionRePurposeCount, Flags; } WOW64_SFCI;
+            SYSTEM_FILECACHE_INFORMATION From;
+            WOW64_SFCI *To = P(1);
+            C_ASSERT(sizeof(WOW64_SFCI) == 36);
+#define SAT32(v) ((ULONG)min((ULONGLONG)(v), (ULONGLONG)0xffffffff))
+            if (a[3]) PROBE(3);
+            if (a[2] < sizeof(*To))
+            {
+                if (a[3]) U(3) = sizeof(*To);
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            if (!GuestSpan(a[1], sizeof(*To))) return STATUS_ACCESS_VIOLATION;
+            ProbeOutput(a[1], sizeof(*To));
+            Status = NtQuerySystemInformation(a[0], &From, sizeof(From), NULL);
+            if (!NT_SUCCESS(Status)) return Status;
+            To->CurrentSize = SAT32(From.CurrentSize);
+            To->PeakSize = SAT32(From.PeakSize);
+            To->PageFaultCount = From.PageFaultCount;
+            To->MinimumWorkingSet = SAT32(From.MinimumWorkingSet);
+            To->MaximumWorkingSet = SAT32(From.MaximumWorkingSet);
+            To->CurrentSizeIncludingTransitionInPages = SAT32(From.CurrentSizeIncludingTransitionInPages);
+            To->PeakSizeIncludingTransitionInPages = SAT32(From.PeakSizeIncludingTransitionInPages);
+            To->TransitionRePurposeCount = From.TransitionRePurposeCount;
+            To->Flags = From.Flags;
+#undef SAT32
+            if (a[3]) U(3) = sizeof(*To);
+            return STATUS_SUCCESS;
+        }
         case SystemPageFileInformation:
         {
             /* One entry per paging file, each followed by its NT name. The 32-bit

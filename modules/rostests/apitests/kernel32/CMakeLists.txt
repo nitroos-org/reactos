@@ -104,6 +104,7 @@ list(APPEND SOURCE
     GetSystemCpuSetInformation.c
     GetOverlappedResultEx.c
     GetQueuedCompletionStatusEx.c
+    GetSystemFileCacheSize.c
     GetSystemTimePrecise.c
     GetThreadUILanguage.c
     DiskPerformance.c

@@ -487,6 +487,7 @@ typedef struct tagMSIPACKAGE
     unsigned char commit_action_running : 1;
     unsigned char rollback_action_running : 1;
     unsigned char need_reboot_at_end : 1;
+    unsigned char fonts_changed : 1;
     unsigned char need_reboot_now : 1;
     unsigned char need_rollback : 1;
     unsigned char user_cancelled : 1;

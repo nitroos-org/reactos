@@ -1596,10 +1596,13 @@ QSI_DEF(SystemVdmBopInformation)
 }
 
 /* Class 21 - File Cache Information */
-QSI_DEF(SystemFileCacheInformation)
+static
+NTSTATUS
+ExpQueryFileCacheInformation(
+    _Out_ SYSTEM_FILECACHE_INFORMATION *Sci,
+    _In_ ULONG Size,
+    _Out_ PULONG ReqSize)
 {
-    SYSTEM_FILECACHE_INFORMATION *Sci = (SYSTEM_FILECACHE_INFORMATION *) Buffer;
-
     *ReqSize = sizeof(SYSTEM_FILECACHE_INFORMATION);
 
     if (Size < *ReqSize)
@@ -1616,10 +1619,28 @@ QSI_DEF(SystemFileCacheInformation)
     Sci->CurrentSizeIncludingTransitionInPages = MiMemoryConsumers[MC_USER].PagesUsed; /* FIXME: Should be */
     /* system working set and standby pages. */
     Sci->PageFaultCount = 0; /* FIXME */
-    Sci->MinimumWorkingSet = 0; /* FIXME */
-    Sci->MaximumWorkingSet = 0; /* FIXME */
+    /* The cache working set limits are in pages. Windows reports a 1 MB minimum and
+     * (on 64-bit) a 16 TB maximum with no hard limit flags (measured on Windows 10). */
+    Sci->MinimumWorkingSet = (1024 * 1024) / PAGE_SIZE;
+#ifdef _WIN64
+    Sci->MaximumWorkingSet = (SIZE_T)1 << 32;
+#else
+    Sci->MaximumWorkingSet = 0xFFFFF;
+#endif
+    Sci->Flags = 0;
 
     return STATUS_SUCCESS;
+}
+
+QSI_DEF(SystemFileCacheInformation)
+{
+    return ExpQueryFileCacheInformation((SYSTEM_FILECACHE_INFORMATION *)Buffer, Size, ReqSize);
+}
+
+/* Class 81 - File Cache Information Ex (same layout; used by GetSystemFileCacheSize) */
+QSI_DEF(SystemFileCacheInformationEx)
+{
+    return ExpQueryFileCacheInformation((SYSTEM_FILECACHE_INFORMATION *)Buffer, Size, ReqSize);
 }
 
 SSI_DEF(SystemFileCacheInformation)
@@ -3365,6 +3386,7 @@ CallQS[] =
 
     // Vista and later
     SI_QX(SystemModuleInformationEx),
+    SI_QX(SystemFileCacheInformationEx),
     SI_QX(SystemProcessorIdleCycleTimeInformation),
     SI_QX(SystemBootEnvironmentInformation),
     SI_QX(SystemProcessorBrandString),

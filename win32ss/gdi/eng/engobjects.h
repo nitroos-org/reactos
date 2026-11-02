@@ -120,6 +120,7 @@ typedef struct _SHARED_MEM {
   ULONG         BufferSize;
   BOOL          IsMapping;
   LONG          RefCount;
+  HANDLE        FileHandle; /* font file kept open (no write/delete sharing) while its view is in use */
 } SHARED_MEM, *PSHARED_MEM;
 
 typedef struct _SHARED_FACE_CACHE {

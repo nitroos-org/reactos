@@ -995,7 +995,7 @@ GetSystemFirmwareTable(
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -1003,8 +1003,42 @@ GetSystemFileCacheSize(OUT PSIZE_T lpMinimumFileCacheSize,
                        OUT PSIZE_T lpMaximumFileCacheSize,
                        OUT PDWORD lpFlags)
 {
-    STUB;
-    return FALSE;
+    SYSTEM_FILECACHE_INFORMATION Info;
+    NTSTATUS Status;
+
+    /* The kernel reports the limits in pages. As on Windows, a limit that does not
+     * fit in a SIZE_T in bytes fails with ERROR_ARITHMETIC_OVERFLOW. */
+    Status = NtQuerySystemInformation(SystemFileCacheInformationEx,
+                                      &Info,
+                                      sizeof(Info),
+                                      NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    if ((Info.MinimumWorkingSet > (MAXULONG_PTR >> PAGE_SHIFT)) ||
+        (Info.MaximumWorkingSet > (MAXULONG_PTR >> PAGE_SHIFT)))
+    {
+        SetLastError(ERROR_ARITHMETIC_OVERFLOW);
+        return FALSE;
+    }
+
+    _SEH2_TRY
+    {
+        *lpMinimumFileCacheSize = Info.MinimumWorkingSet << PAGE_SHIFT;
+        *lpMaximumFileCacheSize = Info.MaximumWorkingSet << PAGE_SHIFT;
+        *lpFlags = Info.Flags;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        SetLastError(ERROR_NOACCESS);
+        _SEH2_YIELD(return FALSE);
+    }
+    _SEH2_END;
+
+    return TRUE;
 }
 
 /*
