@@ -1186,6 +1186,18 @@ GuiGetLargestConsoleWindowSize(IN OUT PFRONTEND This,
     if (!pSize) return;
 
     /*
+     * A console without a visible window (CREATE_NO_WINDOW, as the headless
+     * host of a pseudoconsole) has no monitor to fit on: do not derive a limit
+     * from the display or the font, the caller (ConDrv) still bounds the window
+     * by the screen buffer size. Visible consoles keep the monitor-derived limit.
+     */
+    if (!GuiData->IsWindowVisible)
+    {
+        pSize->X = pSize->Y = 0x7FFF;
+        return;
+    }
+
+    /*
      * Retrieve the monitor that is mostly covered by the current console window;
      * default to primary monitor otherwise.
      */
