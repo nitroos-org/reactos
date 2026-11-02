@@ -1116,7 +1116,11 @@ WriteDefaultLogonData(LPWSTR Domain)
 }
 
 
-/* lpBuffer will be filled with a 15-char string (plus the null terminator) */
+/*
+ * lpBuffer will be filled with a 15-char string (plus the null terminator):
+ * "DESKTOP-" followed by 7 random uppercase letters/digits, the same shape
+ * Windows 10 setup generates when no computer name is given.
+ */
 static void
 GenerateComputerName(LPWSTR lpBuffer)
 {
@@ -1124,7 +1128,7 @@ GenerateComputerName(LPWSTR lpBuffer)
     static const unsigned cChars = sizeof(Chars) / sizeof(WCHAR) - 1;
     unsigned i;
 
-    wcscpy(lpBuffer, L"REACTOS-");
+    wcscpy(lpBuffer, L"DESKTOP-");
 
     srand(GetTickCount());
 
@@ -1178,8 +1182,10 @@ ComputerPageDlgProc(HWND hwndDlg,
             SetFocus(GetDlgItem(hwndDlg, IDC_COMPUTERNAME));
             if (pSetupData->UnattendSetup)
             {
-                /* "*" means use random name (we have already generated it above) */
-                if (pSetupData->ComputerName[0] == L'*' && !pSetupData->ComputerName[1])
+                /* "*" or no ComputerName at all means use a random name
+                 * (we have already generated it above), as Windows does */
+                if (!pSetupData->ComputerName[0] ||
+                    (pSetupData->ComputerName[0] == L'*' && !pSetupData->ComputerName[1]))
                     wcscpy(pSetupData->ComputerName, ComputerName);
                 else
                     SetDlgItemTextW(hwndDlg, IDC_COMPUTERNAME, pSetupData->ComputerName);
