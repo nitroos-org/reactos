@@ -52,6 +52,7 @@ list(APPEND SOURCE
     RegQueryValueExW.c
     RegKeyNameCase.c
     RegRenameKey.c
+    RegSecurity.c
     RegGetValue.c
     RtlEncryptMemory.c
     SaferIdentifyLevel.c
