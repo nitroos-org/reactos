@@ -146,41 +146,28 @@ HRESULT
 WINAPI
 SHCreateSessionKey(REGSAM samDesired, PHKEY phKey)
 {
-    HRESULT hr = S_OK;
-    static WCHAR wszSessionKey[256];
+    /* Windows keeps this per-session scratch key in the user's hive, HKCU\...\Explorer\SessionInfo\<session id>,
+     * and it is volatile. (Measured on Windows 10 22H2: HKCU has SessionInfo\1 for the interactive session and
+     * HKLM has no SessionInfo key.) Writing HKLM here would need administrator rights. */
+    static const WCHAR szFormat[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SessionInfo\\%u";
+    WCHAR wszSessionKey[ARRAYSIZE(szFormat) + 10];
+    DWORD dwSession;
     LONG Error;
 
-    if (!wszSessionKey[0]) // FIXME: Critical Section
+    *phKey = NULL;
+
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &dwSession))
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    _swprintf(wszSessionKey, szFormat, dwSession);
+
+    Error = RegCreateKeyExW(HKEY_CURRENT_USER, wszSessionKey, 0, NULL,
+                            REG_OPTION_VOLATILE, samDesired, NULL, phKey, NULL);
+    if (Error != ERROR_SUCCESS)
     {
-        HANDLE hToken;
-
-        if (OpenProcessToken(GetCurrentProcess(), TOKEN_READ, &hToken))
-        {
-            TOKEN_STATISTICS Stats;
-            DWORD ReturnLength;
-
-            if (GetTokenInformation(hToken, TokenStatistics, &Stats, sizeof(Stats), &ReturnLength))
-            {
-                _swprintf(wszSessionKey,
-                         L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SessionInfo\\%08x%08x",
-                         Stats.AuthenticationId.HighPart, Stats.AuthenticationId.LowPart);
-            }
-            else
-                hr = HRESULT_FROM_WIN32(GetLastError());
-
-            CloseHandle(hToken);
-        }
-        else
-            hr = HRESULT_FROM_WIN32(GetLastError());
+        *phKey = NULL;
+        return HRESULT_FROM_WIN32(Error);
     }
 
-    if(SUCCEEDED(hr))
-    {
-        Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, wszSessionKey, 0, NULL,
-                                REG_OPTION_VOLATILE, samDesired, NULL, phKey, NULL);
-        if (Error != ERROR_SUCCESS)
-            hr = HRESULT_FROM_WIN32(Error);
-    }
-
-    return hr;
+    return S_OK;
 }

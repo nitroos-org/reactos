@@ -44,12 +44,14 @@ extern void func_PathIsTemporary(void);
 extern void func_PathMakeUniqueName(void);
 extern void func_PathProcessCommand(void);
 extern void func_PathResolve(void);
+extern void func_ProfileListAccess(void);
 extern void func_PIDL(void);
 extern void func_RealShellExecuteEx(void);
 extern void func_RegenerateUserEnvironment(void);
 extern void func_SHAppBarMessage(void);
 extern void func_SHChangeNotify(void);
 extern void func_SHCreateDataObject(void);
+extern void func_SHCreateSessionKey(void);
 extern void func_SHCreateFileDataObject(void);
 extern void func_SHCreateFileExtractIconW(void);
 extern void func_SHDefExtractIcon(void);
@@ -132,12 +134,14 @@ const struct test winetest_testlist[] =
     { "PathMakeUniqueName", func_PathMakeUniqueName },
     { "PathProcessCommand", func_PathProcessCommand },
     { "PathResolve", func_PathResolve },
+    { "ProfileListAccess", func_ProfileListAccess },
     { "PIDL", func_PIDL },
     { "RealShellExecuteEx", func_RealShellExecuteEx },
     { "RegenerateUserEnvironment", func_RegenerateUserEnvironment },
     { "SHAppBarMessage", func_SHAppBarMessage },
     { "SHChangeNotify", func_SHChangeNotify },
     { "SHCreateDataObject", func_SHCreateDataObject },
+    { "SHCreateSessionKey", func_SHCreateSessionKey },
     { "SHCreateFileDataObject", func_SHCreateFileDataObject },
     { "SHCreateFileExtractIconW", func_SHCreateFileExtractIconW },
     { "SHDefExtractIcon", func_SHDefExtractIcon },

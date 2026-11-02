@@ -42,12 +42,14 @@ list(APPEND SOURCE
     PathMakeUniqueName.cpp
     PathProcessCommand.cpp
     PathResolve.cpp
+    ProfileListAccess.cpp
     RealShellExecuteEx.cpp
     RegenerateUserEnvironment.cpp
     SHAppBarMessage.cpp
     SHBindToFolderIDListParent.cpp
     SHChangeNotify.cpp
     SHCreateDataObject.cpp
+    SHCreateSessionKey.cpp
     SHCreateFileDataObject.cpp
     SHCreateFileExtractIconW.cpp
     SHEmptyRecycleBin.cpp
