@@ -35,8 +35,7 @@ SCardConnectA(SCARDCONTEXT hContext,
               LPSCARDHANDLE phCard,
               LPDWORD pdwActiveProtocol)
 {
-  UNIMPLEMENTED;
-  return SCARD_F_UNKNOWN_ERROR;
+  return scard_no_context();
 }
 
 /*
@@ -51,8 +50,7 @@ SCardConnectW(SCARDCONTEXT hContext,
               LPSCARDHANDLE phCard,
               LPDWORD pdwActiveProtocol)
 {
-  UNIMPLEMENTED;
-  return SCARD_F_UNKNOWN_ERROR;
+  return scard_no_context();
 }
 
 /*
@@ -176,8 +174,9 @@ WINAPI
 SCardFreeMemory(SCARDCONTEXT hContext,
                 LPCVOID pvMem)
 {
-  UNIMPLEMENTED;
-  return SCARD_F_UNKNOWN_ERROR;
+  /* Only the reader lists are allocated for the caller (SCARD_AUTOALLOCATE) */
+  if (pvMem) HeapFree(GetProcessHeap(), 0, (PVOID)pvMem);
+  return SCARD_S_SUCCESS;
 }
 
 /*
@@ -260,8 +259,7 @@ SCardGetStatusChangeA(SCARDCONTEXT hContext,
                       LPSCARD_READERSTATEA rgReaderState,
                       DWORD cReaders)
 {
-  UNIMPLEMENTED;
-  return SCARD_F_UNKNOWN_ERROR;
+  return scard_no_context();
 }
 
 /*
@@ -274,8 +272,7 @@ SCardGetStatusChangeW(SCARDCONTEXT hContext,
                       LPSCARD_READERSTATEW rgReaderState,
                       DWORD cReaders)
 {
-  UNIMPLEMENTED;
-  return SCARD_F_UNKNOWN_ERROR;
+  return scard_no_context();
 }
 
 /*
@@ -417,8 +414,7 @@ SCardListReaderGroupsA(SCARDCONTEXT hContext,
                        LPSTR mszGroups,
                        LPDWORD pcchGroups)
 {
-  UNIMPLEMENTED;
-  return SCARD_F_UNKNOWN_ERROR;
+  return scard_empty_multistring(FALSE, mszGroups, pcchGroups);
 }
 
 /*
@@ -430,8 +426,7 @@ SCardListReaderGroupsW(SCARDCONTEXT hContext,
                        LPWSTR mszGroups,
                        LPDWORD pcchGroups)
 {
-  UNIMPLEMENTED;
-  return SCARD_F_UNKNOWN_ERROR;
+  return scard_empty_multistring(TRUE, mszGroups, pcchGroups);
 }
 
 /*

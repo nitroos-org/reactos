@@ -1,5 +1,5 @@
 
-spec2def(winscard.dll winscard.spec)
+spec2def(winscard.dll winscard.spec ADD_IMPORTLIB)
 
 list(APPEND SOURCE
     winscard.c

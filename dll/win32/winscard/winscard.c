@@ -23,6 +23,10 @@
 #include "winscard.h"
 #include "winternl.h"
 
+#ifndef SCARD_AUTOALLOCATE
+#define SCARD_AUTOALLOCATE ((DWORD)-1)
+#endif
+
 WINE_DEFAULT_DEBUG_CHANNEL(winscard);
 
 static HANDLE g_startedEvent = NULL;
@@ -50,6 +54,44 @@ BOOL WINAPI DllMain (HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     }
 
     return TRUE;
+}
+
+/* There is no Smart Card service (SCardSvr) and no reader. Every call answers the
+ * way winscard.dll does on Windows when the service is not running (measured on
+ * Windows 10 22H2): no context can be established, the context and card handles
+ * are invalid, and the reader lists are empty and successful. */
+LONG scard_empty_multistring(BOOL wide, void *buf, DWORD *len)
+{
+    SIZE_T size = wide ? sizeof(WCHAR) : sizeof(CHAR);
+
+    if (!len) return SCARD_E_INVALID_PARAMETER;
+    if (!buf)
+    {
+        *len = 1;
+        return SCARD_S_SUCCESS;
+    }
+    if (*len == SCARD_AUTOALLOCATE)
+    {
+        void *mem = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
+
+        if (!mem) return SCARD_E_NO_MEMORY;
+        *(void **)buf = mem;
+        *len = 1;
+        return SCARD_S_SUCCESS;
+    }
+    if (*len < 1)
+    {
+        *len = 1;
+        return SCARD_E_INSUFFICIENT_BUFFER;
+    }
+    memset(buf, 0, size);
+    *len = 1;
+    return SCARD_S_SUCCESS;
+}
+
+LONG scard_no_context(void)
+{
+    return ERROR_INVALID_HANDLE;
 }
 
 HANDLE WINAPI SCardAccessStartedEvent(void)
@@ -84,16 +126,17 @@ LONG WINAPI SCardAddReaderToGroupW(SCARDCONTEXT context, LPCWSTR reader, LPCWSTR
 LONG WINAPI SCardEstablishContext(DWORD dwScope, LPCVOID pvReserved1,
     LPCVOID pvReserved2, LPSCARDCONTEXT phContext)
 {
-    FIXME("(%x,%p,%p,%p) stub\n", dwScope, pvReserved1, pvReserved2, phContext);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return SCARD_F_INTERNAL_ERROR;
+    TRACE("(%x,%p,%p,%p)\n", dwScope, pvReserved1, pvReserved2, phContext);
+    if (!phContext) return SCARD_E_INVALID_PARAMETER;
+    if (dwScope > SCARD_SCOPE_SYSTEM) return SCARD_E_INVALID_VALUE;
+    /* No SCardSvr: the Resource Manager is not available */
+    return SCARD_E_NO_SERVICE;
 }
 
 LONG WINAPI SCardIsValidContext(SCARDCONTEXT context)
 {
-    FIXME("(%lx) stub\n", context);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return SCARD_F_INTERNAL_ERROR;
+    TRACE("(%lx)\n", context);
+    return scard_no_context();
 }
 
 LONG WINAPI SCardListCardsA(SCARDCONTEXT hContext, LPCBYTE pbAtr, LPCGUID rgguidInterfaces, DWORD cguidInterfaceCount, LPSTR mszCards, LPDWORD pcchCards)
@@ -105,9 +148,8 @@ LONG WINAPI SCardListCardsA(SCARDCONTEXT hContext, LPCBYTE pbAtr, LPCGUID rgguid
 
 LONG WINAPI SCardReleaseContext(SCARDCONTEXT context)
 {
-    FIXME("(%lx) stub\n", context);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return SCARD_F_INTERNAL_ERROR;
+    TRACE("(%lx)\n", context);
+    return scard_no_context();
 }
 
 LONG WINAPI SCardStatusA(SCARDHANDLE context, LPSTR szReaderName, LPDWORD pcchReaderLen, LPDWORD pdwState, LPDWORD pdwProtocol, LPBYTE pbAtr, LPDWORD pcbAtrLen)
@@ -131,19 +173,18 @@ void WINAPI SCardReleaseStartedEvent(void)
 
 LONG WINAPI SCardListReadersA(SCARDCONTEXT context, const CHAR *groups, CHAR *readers, DWORD *buflen)
 {
-    FIXME("(%lx, %s, %p, %p) stub\n", context, debugstr_a(groups), readers, buflen);
-    return SCARD_E_NO_READERS_AVAILABLE;
+    TRACE("(%lx, %s, %p, %p)\n", context, debugstr_a(groups), readers, buflen);
+    return scard_empty_multistring(FALSE, readers, buflen);
 }
 
 LONG WINAPI SCardListReadersW(SCARDCONTEXT context, const WCHAR *groups, WCHAR *readers, DWORD *buflen)
 {
-    FIXME("(%lx, %s, %p, %p) stub\n", context, debugstr_w(groups), readers, buflen);
-    return SCARD_E_NO_READERS_AVAILABLE;
+    TRACE("(%lx, %s, %p, %p)\n", context, debugstr_w(groups), readers, buflen);
+    return scard_empty_multistring(TRUE, readers, buflen);
 }
 
 LONG WINAPI SCardCancel(SCARDCONTEXT context)
 {
-    FIXME("(%lx) stub\n", context);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return SCARD_F_INTERNAL_ERROR;
+    TRACE("(%lx)\n", context);
+    return scard_no_context();
 }
