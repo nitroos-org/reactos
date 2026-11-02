@@ -297,9 +297,12 @@ static HRESULT WINAPI FileLockBytesImpl_SetSize(ILockBytes* iface, ULARGE_INTEGE
     TRACE("new size %lu\n", newSize.LowPart);
 
     newpos.QuadPart = newSize.QuadPart;
-    if (SetFilePointerEx(This->hfile, newpos, NULL, FILE_BEGIN))
+    if (!SetFilePointerEx(This->hfile, newpos, NULL, FILE_BEGIN) || !SetEndOfFile(This->hfile))
     {
-        SetEndOfFile(This->hfile);
+        /* The storage code stops growing on a failure; a full disk must not look like success */
+        DWORD err = GetLastError();
+
+        hr = (err == ERROR_DISK_FULL || err == ERROR_HANDLE_DISK_FULL) ? STG_E_MEDIUMFULL : STG_E_WRITEFAULT;
     }
 
     return hr;
