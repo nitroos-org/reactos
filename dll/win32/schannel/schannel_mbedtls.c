@@ -939,6 +939,24 @@ SECURITY_STATUS schan_imp_get_session_peer_certificate(schan_imp_session session
     return schan_add_peer_chain(mbedtls_ssl_get_peer_cert(&s->ssl), store, ret);
 }
 
+/* tls-unique (RFC 5929): the first Finished message of the handshake, which for a client that did not resume
+ * a session is the one it sent. size is the room on input and the length on output. */
+SECURITY_STATUS schan_imp_get_unique_binding(schan_imp_session session, BYTE *data, DWORD *size)
+{
+    MBEDTLS_SESSION *s = (MBEDTLS_SESSION *)session;
+
+    TRACE("MBEDTLS schan_imp_get_unique_binding %p.\n", session);
+
+    if (s->ssl.state != MBEDTLS_SSL_HANDSHAKE_OVER)
+        return SEC_E_INVALID_HANDLE;
+    if (!s->ssl.verify_data_len || s->ssl.verify_data_len > *size)
+        return SEC_E_INTERNAL_ERROR;
+
+    memcpy(data, s->ssl.own_verify_data, s->ssl.verify_data_len);
+    *size = s->ssl.verify_data_len;
+    return SEC_E_OK;
+}
+
 SECURITY_STATUS schan_imp_send(schan_imp_session session, const void *buffer,
                                SIZE_T *length)
 {
