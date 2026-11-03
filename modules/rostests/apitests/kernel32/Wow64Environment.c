@@ -47,6 +47,30 @@ static BOOL PutFile(PCWSTR Path, CHAR Value)
 }
 
 
+static VOID CheckGuestMachines(VOID)
+{
+    /* Windows 10 22H2 x64: S_OK, supported only for x86 (0x14c). Native i386 has no WoW64: assumed all unsupported */
+    typedef HRESULT (WINAPI *PGUEST)(USHORT, BOOL *);
+    static const USHORT machines[] = {0x14c, 0x8664, 0xaa64, 0x1c4};
+    PGUEST pGuest = (PGUEST)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64GuestMachineSupported");
+    SYSTEM_INFO Native;
+    BOOL Amd64Host, Supported;
+    ULONG i;
+    HRESULT Result;
+
+    ok(pGuest != NULL, "IsWow64GuestMachineSupported missing\n");
+    if (!pGuest) return;
+    GetNativeSystemInfo(&Native);
+    Amd64Host = Native.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64;
+    for (i = 0; i < _countof(machines); ++i)
+    {
+        Supported = 0x55;
+        Result = pGuest(machines[i], &Supported);
+        ok(Result == S_OK, "machine 0x%x: hr 0x%lx\n", machines[i], Result);
+        ok(Supported == (Amd64Host && machines[i] == 0x14c), "machine 0x%x: supported %d\n", machines[i], Supported);
+    }
+}
+
 static VOID CheckEnvironment(BOOL Wow64)
 {
     WCHAR Arch[32], Native[32], Program[MAX_PATH], Program32[MAX_PATH], Program64[MAX_PATH];
@@ -148,9 +172,14 @@ START_TEST(Wow64Environment)
         ok(Queried == Wow64, "pseudo/real handle disagreement\n");
         CloseHandle(Process);
     }
+    /* Windows 10 22H2 accepts a NULL handle in 32 and 64-bit processes: TRUE, and "not a WoW64 process" */
     Queried = 0x55;
-    ok(!IsWow64Process(NULL, &Queried), "invalid handle accepted\n");
-    ok(GetLastError() == ERROR_INVALID_HANDLE && Queried == 0x55, "failed query changed result\n");
+    ok(IsWow64Process(NULL, &Queried), "NULL handle rejected: %lu\n", GetLastError());
+    ok(Queried == FALSE, "NULL handle reads as WoW64: %d\n", Queried);
+    Queried = 0x55;
+    ok(IsWow64Process(INVALID_HANDLE_VALUE, &Queried), "pseudo handle rejected: %lu\n", GetLastError());
+    ok(Queried == Wow64, "pseudo handle disagrees: %d\n", Queried);
+    CheckGuestMachines();
     CheckEnvironment(Wow64);
     CheckSharedDirectories(Wow64);
     GetSystemInfo(&Info);
