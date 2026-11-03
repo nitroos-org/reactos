@@ -2404,6 +2404,7 @@ static void CreateNameServerListEnumNamesFunc( PWCHAR Interface, PWCHAR Server, 
      if (Context->uSizeAvailable >= Context->uSizeRequired)
      {
          pNext = (IP_ADDR_STRING*)(((char*)Context->pLastAddr) + sizeof(IP_ADDR_STRING));
+         ZeroMemory(pNext, sizeof(IP_ADDR_STRING));
          WideCharToMultiByte(CP_ACP, 0, Server, -1, pNext->IpAddress.String, 16, NULL, NULL);
          pNext->IpAddress.String[15] = '\0';
          Context->pLastAddr->Next = pNext;
@@ -2427,8 +2428,8 @@ static void CreateNameServerListEnumNamesFunc( PWCHAR Interface, PWCHAR Server, 
  */
 DWORD WINAPI GetPerAdapterInfo(ULONG IfIndex, PIP_PER_ADAPTER_INFO pPerAdapterInfo, PULONG pOutBufLen)
 {
-  HKEY hkey;
-  DWORD dwSize = 0;
+  HKEY hkey = NULL;
+  DWORD dwSize, dwValue;
   const char *ifName;
   NAME_SERVER_LIST_CONTEXT Context;
   WCHAR keyname[200] = L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\";
@@ -2436,50 +2437,49 @@ DWORD WINAPI GetPerAdapterInfo(ULONG IfIndex, PIP_PER_ADAPTER_INFO pPerAdapterIn
   if (!pOutBufLen)
     return ERROR_INVALID_PARAMETER;
 
-  if (!pPerAdapterInfo || *pOutBufLen < sizeof(IP_PER_ADAPTER_INFO))
-  {
-    *pOutBufLen = sizeof(IP_PER_ADAPTER_INFO);
-    return ERROR_BUFFER_OVERFLOW;
-  }
-
+  /* Windows validates the index before looking at the buffer */
   ifName = getInterfaceNameByIndex(IfIndex);
   if (!ifName)
-    return ERROR_INVALID_PARAMETER;
+    return ERROR_NO_DATA;
 
   MultiByteToWideChar(CP_ACP, 0, ifName, -1, &keyname[62], sizeof(keyname)/sizeof(WCHAR) - 63);
   HeapFree(GetProcessHeap(), 0, (LPVOID)ifName);
 
+  /* An adapter without a per-interface key (the loopback) is still valid: Windows answers it
+   * like an adapter without settings (no DNS servers) instead of failing. */
   if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyname, 0, KEY_READ, &hkey) != ERROR_SUCCESS)
-  {
-    return ERROR_NOT_SUPPORTED;
-  }
-  Context.NumServers = 0;
-  Context.uSizeAvailable = *pOutBufLen;
-  Context.uSizeRequired = sizeof(IP_PER_ADAPTER_INFO);
-  Context.pData = pPerAdapterInfo;
+    hkey = NULL;
 
-  if (*pOutBufLen >= sizeof(IP_PER_ADAPTER_INFO))
+  /* Windows asks for room for one IP_ADDR_STRING behind the structure, even without DNS servers */
+  Context.NumServers = 0;
+  Context.uSizeAvailable = pPerAdapterInfo ? *pOutBufLen : 0;
+  Context.uSizeRequired = sizeof(IP_PER_ADAPTER_INFO) + sizeof(IP_ADDR_STRING);
+  Context.pData = pPerAdapterInfo;
+  Context.pLastAddr = NULL;
+
+  if (Context.uSizeAvailable >= Context.uSizeRequired)
     ZeroMemory(pPerAdapterInfo, sizeof(IP_PER_ADAPTER_INFO));
 
-  EnumNameServers(hkey, &keyname[62], &Context, CreateNameServerListEnumNamesFunc);
+  if (hkey)
+    EnumNameServers(hkey, &keyname[62], &Context, CreateNameServerListEnumNamesFunc);
 
   if (Context.uSizeRequired > Context.uSizeAvailable)
   {
     *pOutBufLen = Context.uSizeRequired;
-    RegCloseKey(hkey);
+    if (hkey)
+      RegCloseKey(hkey);
     return ERROR_BUFFER_OVERFLOW;
   }
 
-  if(RegQueryValueExW(hkey, L"NameServer", NULL, NULL, NULL, &dwSize) == ERROR_SUCCESS)
-  {
-    pPerAdapterInfo->AutoconfigActive = FALSE;
-  }
-  else
-  {
-    pPerAdapterInfo->AutoconfigActive = TRUE;
-  }
+  /* Windows (measured): automatic private addressing enabled unless configured off, not active */
+  pPerAdapterInfo->AutoconfigEnabled = TRUE;
+  pPerAdapterInfo->AutoconfigActive = FALSE;
+  dwSize = sizeof(dwValue);
+  if (hkey && RegQueryValueExW(hkey, L"IPAutoconfigurationEnabled", NULL, NULL, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS)
+    pPerAdapterInfo->AutoconfigEnabled = dwValue != 0;
 
-  RegCloseKey(hkey);
+  if (hkey)
+    RegCloseKey(hkey);
   return NOERROR;
 }
 
