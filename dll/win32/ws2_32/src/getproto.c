@@ -94,9 +94,13 @@ GetProtoOpenNetworkDatabase(PCHAR Name)
     strncat(ExpandedPath, Name, MAX_PATH);
 
     /* Return a handle to the file */
+    /*
+     * The database is only read, and every thread that asks for a protocol opens it: sharing it is
+     * what lets two getprotobyname calls run at once (the second one failed to open it and gave up).
+     */
     ret = CreateFile(ExpandedPath,
                       FILE_READ_ACCESS,
-                      0,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                       NULL,
                       OPEN_EXISTING,
                       FILE_ATTRIBUTE_NORMAL,
