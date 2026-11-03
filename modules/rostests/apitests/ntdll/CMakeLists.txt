@@ -59,6 +59,7 @@ list(APPEND SOURCE
     ApiSetQueryApiSetPresence.c
     LdrEnumResources.c
     LdrFindResource_U.c
+    LdrGetDllHandleEx.c
     LdrLoadDll.c
     LdrSharedReadOnlySection.c
     LdrShutdownThread.c
