@@ -2436,7 +2436,10 @@ static const WCHAR *Wow64ExtraDlls[] =
     L"dxdiagn.dll", L"fontext.dll", L"hlink.dll", L"hnetcfg.dll", L"ieproxy.dll",
     L"inetcomm.dll", L"inseng.dll", L"itss.dll", L"mmcshext.dll", L"mstask.dll",
     L"msxml6.dll", L"objsel.dll", L"pstorec.dll", L"sendmail.dll", L"sti.dll",
-    L"stobject.dll"
+    L"stobject.dll",
+    /* BITS proxy/stub: the interface and proxy CLSID registrations of the 32-bit view, so a
+     * 32-bit BITS client can marshal to the 64-bit service (CLSID itself: hivesft_amd64.inf) */
+    L"qmgrprxy.dll"
 };
 
 static DWORD

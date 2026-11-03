@@ -46,7 +46,7 @@ static BYTE expected_byte(ULONG64 offset)
 
 static void serve(SOCKET s)
 {
-    char request[2048], head[256];
+    char request[2048] = "", head[256];
     ULONG64 first = 0, last = DATA_SIZE - 1;
     BOOL ranged = FALSE, is_head;
     int len = 0, n, sent;
