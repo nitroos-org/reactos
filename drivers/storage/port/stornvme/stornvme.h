@@ -33,11 +33,10 @@
 #define NVME_DSM_RANGES_PER_SLOT    (NVME_SLOT_DMA_BYTES / sizeof(NVME_DSM_RANGE))
 
 /*
- * Largest transfer. A slot's PRP list could map 512 KB, but the HAL builds at most 48
- * scatter/gather elements per request and never calls back when a buffer needs more,
- * which hangs the request. 128 KB needs at most 33 elements.
+ * Largest transfer: what one slot's PRP list maps (PRP1 holds the first page, the list
+ * the other 128 of an unaligned buffer). The controller's MDTS lowers it.
  */
-#define NVME_MAX_TRANSFER_BYTES     (128 * 1024)
+#define NVME_MAX_TRANSFER_BYTES     (512 * 1024)
 C_ASSERT(NVME_MAX_TRANSFER_BYTES <= NVME_PRP_ENTRIES_PER_SLOT * NVME_PAGE_SIZE);
 
 #define NVME_MAX_NAMESPACES         8
