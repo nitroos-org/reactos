@@ -125,6 +125,7 @@ Signature = "$Windows NT$"
 103 = Rapps\Overlay
 104 = Globalization
 105 = Globalization\ICU
+106 = system32\WinMetadata
 
 .InfEnd
 

@@ -304,6 +304,8 @@ macro(dir_to_num dir var)
         set(${var} 104)
     elseif(${dir} STREQUAL reactos/Globalization/ICU)
         set(${var} 105)
+    elseif(${dir} STREQUAL reactos/system32/WinMetadata)
+        set(${var} 106)
 
     else()
         message(FATAL_ERROR "Wrong destination: ${dir}")
