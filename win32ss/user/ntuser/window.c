@@ -2056,7 +2056,8 @@ PWND FASTCALL IntCreateWindow(CREATESTRUCTW* Cs,
          object of the process quota for the life of the process. */
       CallProc = UserSearchForCallProc(Class->pclsBase->spcpdFirst,
                                        pWnd->lpfnWndProc,
-                                       pWnd->Unicode ? UserGetCPDA2U : UserGetCPDU2A);
+                                       pWnd->Unicode ? UserGetCPDA2U : UserGetCPDU2A,
+                                       pWnd->head.rpdesk);
       if (!CallProc)
       {
          CallProc = CreateCallProc(pWnd->head.rpdesk, pWnd->lpfnWndProc, pWnd->Unicode , pWnd->head.pti->ppi);
