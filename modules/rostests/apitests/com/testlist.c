@@ -9,6 +9,7 @@ extern void func_explorerframe(void);
 extern void func_ieframe(void);
 extern void func_interfaces(void);
 extern void func_netcfgx(void);
+extern void func_netprofm(void);
 extern void func_netshell(void);
 extern void func_ole32(void);
 extern void func_prnfldr(void);
@@ -29,6 +30,7 @@ const struct test winetest_testlist[] =
     { "ieframe", func_ieframe },
     { "interfaces", func_interfaces },
     { "netcfgx", func_netcfgx },
+    { "netprofm", func_netprofm },
     { "netshell", func_netshell },
     { "ole32", func_ole32 },
     { "prnfldr", func_prnfldr },
