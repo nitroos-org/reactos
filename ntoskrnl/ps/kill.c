@@ -869,7 +869,12 @@ PspExitThread(IN NTSTATUS ExitStatus)
            would write its last error into the freed TEB */
         KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
         Thread->Tcb.Teb = NULL;
+#ifdef _M_IX86
+        /* also the GDT entry of the TEB selector (fs:), as the context switch does */
+        KiSetTebBase(KeGetPcr(), NULL);
+#else
         KeGetPcr()->NtTib.Self = NULL;
+#endif
         KeLowerIrql(OldIrql);
     }
 
