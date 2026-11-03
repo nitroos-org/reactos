@@ -49,3 +49,15 @@ HKLM,"SOFTWARE\Clients\StartMenuInternet\IEXPLORE.EXE\shell\open\command","",0x0
 ; 32-bit regsvr32 of SysWOW64\qmgrprxy.dll at setup (dll/win32/syssetup/wizard.c).
 HKLM,"SOFTWARE\Classes\Wow6432Node\CLSID\{4991D34B-80A1-4291-83B6-3328366B9097}",,0x00000000,"Background Intelligent Transfer Control Class 1.0"
 HKLM,"SOFTWARE\Classes\Wow6432Node\CLSID\{4991D34B-80A1-4291-83B6-3328366B9097}","AppID",0x00000000,"{69AD4AEE-51BE-439B-A92C-86AE490E8B30}"
+
+; The 32-bit view of the smart card database of hivesft.inf (HKLM\SOFTWARE\Microsoft\Cryptography\Calais is redirected, not
+; shared, as on Windows; the card module paths are SysWOW64).
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Cryptography\Calais\Cache",,0x00010001,0x00000000
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Cryptography\Calais\Current",,0x00000010
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Cryptography\Calais\Readers",,0x00000010
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Cryptography\Calais\SmartCards\Identity Device (Microsoft Generic Profile)","80000001",0x00000000,"C:\Windows\SysWOW64\msclmd.dll"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Cryptography\Calais\SmartCards\Identity Device (Microsoft Generic Profile)","Crypto Provider",0x00000000,"Microsoft Base Smart Card Crypto Provider"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Cryptography\Calais\SmartCards\Identity Device (Microsoft Generic Profile)","Smart Card Key Storage Provider",0x00000000,"Microsoft Smart Card Key Storage Provider"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Cryptography\Calais\SmartCards\Identity Device (NIST SP 800-73 [PIV])","80000001",0x00000000,"C:\Windows\SysWOW64\msclmd.dll"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Cryptography\Calais\SmartCards\Identity Device (NIST SP 800-73 [PIV])","Crypto Provider",0x00000000,"Microsoft Base Smart Card Crypto Provider"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Cryptography\Calais\SmartCards\Identity Device (NIST SP 800-73 [PIV])","Smart Card Key Storage Provider",0x00000000,"Microsoft Smart Card Key Storage Provider"
