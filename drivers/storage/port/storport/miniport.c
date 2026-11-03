@@ -51,6 +51,10 @@ InitializeConfiguration(
     PortConfig->AtdiskPrimaryClaimed = ConfigInfo->AtDiskPrimaryAddressClaimed;
     PortConfig->AtdiskSecondaryClaimed = ConfigInfo->AtDiskSecondaryAddressClaimed;
     PortConfig->Dma32BitAddresses = TRUE;
+#ifdef _WIN64
+    /* Physical memory can be above 4 GB; a miniport that can reach it says so */
+    PortConfig->Dma64BitAddresses = SCSI_DMA64_SYSTEM_SUPPORTED;
+#endif
     PortConfig->DemandMode = FALSE;
     PortConfig->MapBuffers = InitData->MapBuffers;
 

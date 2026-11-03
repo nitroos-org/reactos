@@ -1,0 +1,9 @@
+; NVM Express storport miniport (boot start: setup and the first boot find NVMe disks)
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\stornvme","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\stornvme","Group",0x00000000,"SCSI Miniport"
+HKLM,"SYSTEM\CurrentControlSet\Services\stornvme","ImagePath",0x00020000,"system32\drivers\stornvme.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\stornvme","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\stornvme","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\stornvme\Parameters","BusType",0x00010001,0x00000011
+HKLM,"SYSTEM\CurrentControlSet\Services\stornvme\Parameters\PnpInterface","5",0x00010001,0x00000001
