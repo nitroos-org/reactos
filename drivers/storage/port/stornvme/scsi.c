@@ -629,15 +629,36 @@ NvmeModeSelect(
     while (Offset + 2 <= ListLength)
     {
         UCHAR Page = Data[Offset] & 0x3F;
-        ULONG PageLength = Data[Offset + 1] + 2;
+        BOOLEAN SubPageFormat = (Data[Offset] & 0x40) != 0;   /* SPF */
+        ULONG PageLength;
+
+        /* page_0 format: 2-byte header; sub_page format: 4-byte header, 2-byte length */
+        if (SubPageFormat)
+        {
+            if (Offset + 4 > ListLength)
+                break;
+            PageLength = GetBe16(&Data[Offset + 2]) + 4;
+        }
+        else
+        {
+            PageLength = Data[Offset + 1] + 2;
+        }
 
         if (Offset + PageLength > ListLength)
             break;
 
-        if (Page == NVME_MODE_PAGE_CACHING && PageLength >= 3)
+        /* The caching page has only the page_0 format */
+        if (Page == NVME_MODE_PAGE_CACHING && !SubPageFormat && PageLength >= 3)
             NewWce = (Data[Offset + 2] & 0x04) ? 1 : 0;
 
         Offset += PageLength;
+    }
+
+    /* SP: save the setting, which needs Save in Set Features (ONCS bit 4) */
+    if ((Srb->Cdb[1] & 0x01) && !(Ext->Oncs & 0x10))
+    {
+        NvmeFailSrb(Ext, Srb, NVME_SENSE_ILLEGAL_REQUEST, NVME_ASC_SAVING_NOT_SUPPORTED, 0);
+        return;
     }
 
     if (NewWce < 0 || (BOOLEAN)NewWce == Ext->WriteCacheEnabled)
@@ -657,7 +678,7 @@ NvmeModeSelect(
         NVME_COMMAND Cmd = {0};
 
         Cmd.Opcode = NVME_ADMIN_SET_FEATURES;
-        Cmd.Cdw10 = NVME_FEAT_VOLATILE_WC;
+        Cmd.Cdw10 = NVME_FEAT_VOLATILE_WC | ((Srb->Cdb[1] & 0x01) ? 0x80000000UL /* SV */ : 0);
         Cmd.Cdw11 = (ULONG)NewWce;
         if (!NvmeSubmitSrbCommand(Ext, &Ext->AdminQueue, &Cmd, Srb, SlotKindSetWce, (ULONG)NewWce, FALSE))
             NvmeCompleteSrb(Ext, Srb, 0xFF);
@@ -725,15 +746,12 @@ NvmeReadWrite(
         return;
     }
 
-    /* The buffer decides how much moves; a shorter buffer is an underrun of whole blocks */
+    /* A buffer too short for the blocks the CDB names is an error, not a shorter transfer:
+       moving less than asked for and reporting success would lose data silently */
     if (((ULONGLONG)Blocks << Ns->BlockShift) > Srb->DataTransferLength)
     {
-        Blocks = Srb->DataTransferLength >> Ns->BlockShift;
-        if (Blocks == 0)
-        {
-            NvmeFailSrb(Ext, Srb, NVME_SENSE_ILLEGAL_REQUEST, NVME_ASC_INVALID_CDB, 0);
-            return;
-        }
+        NvmeFailSrb(Ext, Srb, NVME_SENSE_ILLEGAL_REQUEST, NVME_ASC_INVALID_CDB, 0);
+        return;
     }
     Srb->DataTransferLength = Blocks << Ns->BlockShift;
 
@@ -747,6 +765,11 @@ NvmeReadWrite(
     Cmd.Nsid = Ns->Nsid;
     Cmd.Cdw10 = (ULONG)Lba;
     Cmd.Cdw11 = (ULONG)(Lba >> 32);
+    /* After a shutdown notification nothing would write the cache back again: a write
+       that re-enabled the controller goes through to the medium */
+    if (Write && Ext->ShutdownSeen && Ext->WriteCacheEnabled)
+        Fua = TRUE;
+
     Cmd.Cdw12 = (Blocks - 1) | (Fua ? NVME_RW_FUA : 0);
 
     if (!NvmeSubmitSrbCommand(Ext, &Ext->IoQueue, &Cmd, Srb, SlotKindSrb, 0, TRUE))

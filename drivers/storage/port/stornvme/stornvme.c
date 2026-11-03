@@ -18,6 +18,8 @@
  *   sends an NVMe Abort for an expired command, and resets the controller when the abort
  *   does not help; outstanding requests then complete with SRB_STATUS_BUS_RESET or
  *   SRB_STATUS_TIMEOUT and the class driver retries them.
+ * - Resets, re-enabling after a shutdown and the shutdown itself run as a state machine
+ *   driven by the watchdog (see CONTROLLER below): nothing waits at raised IRQL.
  */
 
 #include "stornvme.h"
@@ -132,7 +134,10 @@ NvmeAllocateSlot(
         Index = (USHORT)((Queue->NextSlot + i) % Queue->SlotCount);
         if (!Queue->Slots[Index].Busy)
         {
+            UCHAR Gen = Queue->Slots[Index].Gen;
+
             RtlZeroMemory(&Queue->Slots[Index], sizeof(NVME_SLOT));
+            Queue->Slots[Index].Gen = (UCHAR)(Gen + 1);
             Queue->Slots[Index].Busy = TRUE;
             Queue->NextSlot = (USHORT)((Index + 1) % Queue->SlotCount);
             Queue->Outstanding++;
@@ -326,9 +331,9 @@ NvmeSubmitSrbCommand(
     Queue->Slots[Slot].Srb = Srb;
     Queue->Slots[Slot].Kind = (UCHAR)Kind;
     Queue->Slots[Slot].Context = Context;
-    Queue->Slots[Slot].Deadline = Ext->Tick + Timeout + 1;
+    Queue->Slots[Slot].Deadline = Ext->NowMs + (Timeout + 1) * 1000;
 
-    Command->CommandId = (USHORT)Slot;
+    Command->CommandId = NVME_CID(Slot, Queue->Slots[Slot].Gen);
     NvmeRingSubmission(Ext, Queue, Command);
     return TRUE;
 }
@@ -356,6 +361,11 @@ NvmeFailSlot(
         Ext->PollDone = TRUE;
         Ext->PollStatus = (USHORT)(NVME_SC_ABORT_SQ_DELETED << 1);
     }
+    else if (Slot.Kind == SlotKindInternal)
+    {
+        Ext->InternalDone = TRUE;
+        Ext->InternalStatus = (USHORT)(NVME_SC_ABORT_SQ_DELETED << 1);
+    }
 }
 
 static
@@ -368,16 +378,18 @@ NvmeCompleteSlot(
     _In_ ULONG Dw0)
 {
     NVME_SLOT Slot;
+    USHORT Index = NVME_CID_SLOT(CommandId);
 
-    if (CommandId >= Queue->SlotCount || !Queue->Slots[CommandId].Busy)
+    if (Index >= Queue->SlotCount || !Queue->Slots[Index].Busy ||
+        Queue->Slots[Index].Gen != NVME_CID_GEN(CommandId))
     {
-        NvmeLog("queue %u: completion for idle command %u (status 0x%x)\n",
+        NvmeLog("queue %u: completion for idle command 0x%x (status 0x%x)\n",
                 Queue->Qid, CommandId, Status);
         return;
     }
 
-    Slot = Queue->Slots[CommandId];
-    NvmeFreeSlot(Queue, CommandId);
+    Slot = Queue->Slots[Index];
+    NvmeFreeSlot(Queue, Index);
 
     switch (Slot.Kind)
     {
@@ -399,6 +411,12 @@ NvmeCompleteSlot(
             Ext->PollDone = TRUE;
             Ext->PollStatus = Status;
             Ext->PollDw0 = Dw0;
+            break;
+
+        case SlotKindInternal:
+            Ext->InternalDone = TRUE;
+            Ext->InternalStatus = Status;
+            Ext->InternalDw0 = Dw0;
             break;
     }
 }
@@ -446,9 +464,9 @@ NvmeProcessCompletions(
 }
 
 /*
- * Runs one command synchronously by polling its completion queue. Used before the
- * interrupt is live, during a reset, and for the shutdown flush; the caller holds the
- * interrupt lock when the controller is live.
+ * Runs one command synchronously by polling its completion queue. HwFindAdapter only:
+ * PASSIVE_LEVEL, before the interrupt is connected. Everything later goes through the
+ * state machine, which never waits.
  */
 BOOLEAN
 NvmeSubmitSync(
@@ -473,7 +491,7 @@ NvmeSubmitSync(
     Ext->PollStatus = 0;
     Ext->PollDw0 = 0;
 
-    Command->CommandId = (USHORT)Slot;
+    Command->CommandId = NVME_CID(Slot, Queue->Slots[Slot].Gen);
     NvmeRingSubmission(Ext, Queue, Command);
 
     /* Poll in 10 us steps */
@@ -499,104 +517,6 @@ NvmeSubmitSync(
 
     return (NVME_CQE_SC(Ext->PollStatus) == NVME_SC_SUCCESS &&
             NVME_CQE_SCT(Ext->PollStatus) == NVME_SCT_GENERIC);
-}
-
-/* CONTROLLER *****************************************************************/
-
-static
-BOOLEAN
-NvmeWaitReady(
-    _In_ PNVME_EXTENSION Ext,
-    _In_ BOOLEAN Ready)
-{
-    ULONG Waited;
-    ULONG Csts;
-
-    for (Waited = 0; Waited <= Ext->ReadyTimeoutMs; Waited++)
-    {
-        Csts = NvmeRead32(Ext, NVME_REG_CSTS);
-        if (Csts == MAXULONG)
-        {
-            NvmeLog("controller gone (CSTS reads all ones)\n");
-            return FALSE;
-        }
-
-        if (Ready && (Csts & NVME_CSTS_CFS))
-        {
-            NvmeLog("controller fatal status while enabling (CSTS 0x%lx)\n", Csts);
-            return FALSE;
-        }
-
-        if (((Csts & NVME_CSTS_RDY) != 0) == Ready)
-            return TRUE;
-
-        StorPortStallExecution(1000);
-    }
-
-    NvmeLog("timeout waiting for CSTS.RDY=%u (CSTS 0x%lx)\n", Ready, NvmeRead32(Ext, NVME_REG_CSTS));
-    return FALSE;
-}
-
-static
-BOOLEAN
-NvmeDisableController(
-    _In_ PNVME_EXTENSION Ext)
-{
-    ULONG Cc = NvmeRead32(Ext, NVME_REG_CC);
-
-    if (Cc & NVME_CC_EN)
-    {
-        NvmeWrite32(Ext, NVME_REG_CC, Cc & ~NVME_CC_EN);
-    }
-    else if (!(NvmeRead32(Ext, NVME_REG_CSTS) & NVME_CSTS_RDY))
-    {
-        return TRUE;
-    }
-
-    return NvmeWaitReady(Ext, FALSE);
-}
-
-static
-BOOLEAN
-NvmeIdentifyController(
-    _In_ PNVME_EXTENSION Ext)
-{
-    PNVME_IDENTIFY_CONTROLLER Id = (PNVME_IDENTIFY_CONTROLLER)Ext->IdentifyBuffer;
-    NVME_COMMAND Cmd = {0};
-
-    Cmd.Opcode = NVME_ADMIN_IDENTIFY;
-    Cmd.Prp1 = Ext->IdentifyPa.QuadPart;
-    Cmd.Cdw10 = NVME_CNS_CONTROLLER;
-
-    RtlZeroMemory(Id, sizeof(*Id));
-    if (!NvmeSubmitSync(Ext, &Ext->AdminQueue, &Cmd, Ext->ReadyTimeoutMs, NULL, NULL))
-    {
-        NvmeLog("Identify Controller failed\n");
-        return FALSE;
-    }
-
-    Ext->Vid = Id->Vid;
-    Ext->Oncs = Id->Oncs;
-    Ext->Oacs = Id->Oacs;
-    Ext->Vwc = Id->Vwc;
-    Ext->Mdts = Id->Mdts;
-    Ext->Nn = Id->Nn;
-    Ext->Ver = Id->Ver;
-    Ext->Rtd3e = Id->Rtd3e;
-    NvmeCopyString(Ext->Sn, Id->Sn, sizeof(Ext->Sn));
-    NvmeCopyString(Ext->Mn, Id->Mn, sizeof(Ext->Mn));
-    NvmeCopyString(Ext->Fr, Id->Fr, sizeof(Ext->Fr));
-
-    /* MDTS is in units of the minimum memory page size; 0 means no limit */
-    Ext->MaxTransferBytes = NVME_MAX_TRANSFER_BYTES;
-    if (Ext->Mdts != 0 && Ext->Mdts < 20)
-    {
-        ULONGLONG Limit = (ULONGLONG)NVME_PAGE_SIZE << (NVME_CAP_MPSMIN(Ext->Cap) + Ext->Mdts);
-        if (Limit < Ext->MaxTransferBytes)
-            Ext->MaxTransferBytes = (ULONG)Limit;
-    }
-
-    return TRUE;
 }
 
 static
@@ -699,134 +619,65 @@ NvmeScanNamespaces(
     }
 }
 
+/* The state machine and the dispatcher call each other */
+VOID NvmeStartMachine(_In_ PNVME_EXTENSION Ext, _In_ BOOLEAN Shutdown);
+VOID NvmeDispatch(_In_ PNVME_EXTENSION Ext, _In_ PSCSI_REQUEST_BLOCK Srb);
+
+/* CONTROLLER *****************************************************************/
+
 /*
- * Brings the controller from any state to running with the admin and the I/O queue
- * pair created and the namespaces identified. Polls; the interrupt stays masked.
+ * Nothing below waits at raised IRQL. Bringing the controller up or down takes CAP.TO or
+ * RTD3E, seconds, so it runs as a state machine: every step only reads or writes registers
+ * or submits one admin command, and the watchdog drives it (every 10 ms while it runs)
+ * with the interrupt lock held. HwFindAdapter drives the same machine synchronously at
+ * PASSIVE_LEVEL before the interrupt is connected.
+ *
+ * Requests that come while the controller is not live are parked and dispatched when it
+ * is live again (failed if it cannot come back). Outstanding commands are handed back to
+ * storport only once CC.EN=0 and CSTS.RDY=0 confirm the controller has stopped; if it does
+ * not stop within CAP.TO, bus mastering is turned off in its PCI command register first,
+ * so it cannot write into buffers that went back.
  */
+
 static
-BOOLEAN
-NvmeInitializeController(
+VOID
+NvmeAppendDeferred(
     _In_ PNVME_EXTENSION Ext,
-    _In_ BOOLEAN Identify)
+    _In_ PSCSI_REQUEST_BLOCK Srb)
 {
-    PNVME_QUEUE Admin = &Ext->AdminQueue;
-    PNVME_QUEUE Io = &Ext->IoQueue;
-    NVME_COMMAND Cmd;
-    ULONG Cc;
-    ULONG Dw0;
-
-    Ext->Ready = FALSE;
-    Ext->ShutDown = FALSE;
-
-    if (!NvmeDisableController(Ext))
-        return FALSE;
-
-    /* No interrupt until the queues are live */
-    NvmeWrite32(Ext, NVME_REG_INTMS, 1);
-
-    NvmeResetQueueState(Admin);
-    NvmeResetQueueState(Io);
-
-    NvmeWrite32(Ext, NVME_REG_AQA, ((ULONG)(Admin->Depth - 1) << 16) | (Admin->Depth - 1));
-    NvmeWrite64(Ext, NVME_REG_ASQ, Admin->SqPa.QuadPart);
-    NvmeWrite64(Ext, NVME_REG_ACQ, Admin->CqPa.QuadPart);
-
-    Cc = NVME_CC_CSS_NVM | NVME_CC_MPS(0) | NVME_CC_AMS_RR |
-         NVME_CC_IOSQES(6) | NVME_CC_IOCQES(4) | NVME_CC_EN;
-    NvmeWrite32(Ext, NVME_REG_CC, Cc);
-
-    if (!NvmeWaitReady(Ext, TRUE))
-        return FALSE;
-
-    if (Identify && !NvmeIdentifyController(Ext))
-        return FALSE;
-
-    /* One I/O submission and one completion queue (0's based) */
-    RtlZeroMemory(&Cmd, sizeof(Cmd));
-    Cmd.Opcode = NVME_ADMIN_SET_FEATURES;
-    Cmd.Cdw10 = NVME_FEAT_NUM_QUEUES;
-    Cmd.Cdw11 = 0;
-    if (!NvmeSubmitSync(Ext, Admin, &Cmd, Ext->ReadyTimeoutMs, NULL, NULL))
-    {
-        NvmeLog("Set Features (Number of Queues) failed\n");
-        return FALSE;
-    }
-
-    /* Current state of the volatile write cache */
-    if (Ext->Vwc & NVME_VWC_PRESENT)
-    {
-        RtlZeroMemory(&Cmd, sizeof(Cmd));
-        Cmd.Opcode = NVME_ADMIN_GET_FEATURES;
-        Cmd.Cdw10 = NVME_FEAT_VOLATILE_WC;
-        if (NvmeSubmitSync(Ext, Admin, &Cmd, Ext->ReadyTimeoutMs, NULL, &Dw0))
-            Ext->WriteCacheEnabled = (Dw0 & 1) ? TRUE : FALSE;
-        else
-            Ext->WriteCacheEnabled = TRUE;
-    }
+    ((PNVME_SRB_EXTENSION)Srb->SrbExtension)->Next = NULL;
+    if (Ext->DeferredTail)
+        ((PNVME_SRB_EXTENSION)Ext->DeferredTail->SrbExtension)->Next = Srb;
     else
-    {
-        Ext->WriteCacheEnabled = FALSE;
-    }
-
-    RtlZeroMemory(&Cmd, sizeof(Cmd));
-    Cmd.Opcode = NVME_ADMIN_CREATE_CQ;
-    Cmd.Prp1 = Io->CqPa.QuadPart;
-    Cmd.Cdw10 = ((ULONG)(Io->Depth - 1) << 16) | Io->Qid;
-    Cmd.Cdw11 = (0UL << 16) | 0x2 /* IEN */ | 0x1 /* PC */;
-    if (!NvmeSubmitSync(Ext, Admin, &Cmd, Ext->ReadyTimeoutMs, NULL, NULL))
-    {
-        NvmeLog("Create I/O Completion Queue failed\n");
-        return FALSE;
-    }
-
-    RtlZeroMemory(&Cmd, sizeof(Cmd));
-    Cmd.Opcode = NVME_ADMIN_CREATE_SQ;
-    Cmd.Prp1 = Io->SqPa.QuadPart;
-    Cmd.Cdw10 = ((ULONG)(Io->Depth - 1) << 16) | Io->Qid;
-    Cmd.Cdw11 = ((ULONG)Io->Qid << 16) | 0x1 /* PC */;
-    if (!NvmeSubmitSync(Ext, Admin, &Cmd, Ext->ReadyTimeoutMs, NULL, NULL))
-    {
-        NvmeLog("Create I/O Submission Queue failed\n");
-        return FALSE;
-    }
-
-    if (Identify)
-        NvmeScanNamespaces(Ext);
-
-    Ext->Failed = FALSE;
-    return TRUE;
+        Ext->DeferredHead = Srb;
+    Ext->DeferredTail = Srb;
 }
 
-/* Makes the queues live: the ISR may run from here on */
 static
 VOID
-NvmeGoLive(
-    _In_ PNVME_EXTENSION Ext)
+NvmeCompleteChain(
+    _In_ PNVME_EXTENSION Ext,
+    _In_opt_ PSCSI_REQUEST_BLOCK Srb,
+    _In_ UCHAR SrbStatus)
 {
-    Ext->Ready = TRUE;
-    NvmeWrite32(Ext, NVME_REG_INTMC, 1);
+    while (Srb)
+    {
+        PSCSI_REQUEST_BLOCK Next = ((PNVME_SRB_EXTENSION)Srb->SrbExtension)->Next;
+        Srb->DataTransferLength = 0;
+        NvmeCompleteSrb(Ext, Srb, SrbStatus);
+        Srb = Next;
+    }
 }
 
-/*
- * Resets the controller and fails every outstanding command back to storport.
- * Called with the interrupt lock held.
- */
+/* Fails every outstanding command back to storport. Only once the controller has stopped
+   (or cannot reach memory any more). */
 static
 VOID
-NvmeResetController(
+NvmeReleaseOutstanding(
     _In_ PNVME_EXTENSION Ext,
     _In_ UCHAR SrbStatus)
 {
     USHORT i;
-
-    Ext->Resets++;
-    NvmeLog("resetting the controller (reset %lu)\n", Ext->Resets);
-
-    Ext->Ready = FALSE;
-    NvmeWrite32(Ext, NVME_REG_INTMS, 1);
-
-    /* Stop the controller before the buffers go back: it must not DMA into them later */
-    NvmeDisableController(Ext);
 
     for (i = 0; i < Ext->IoQueue.SlotCount; i++)
     {
@@ -839,97 +690,631 @@ NvmeResetController(
         if (Ext->AdminQueue.Slots[i].Busy)
             NvmeFailSlot(Ext, &Ext->AdminQueue, i, SrbStatus);
     }
+}
 
-    if (NvmeInitializeController(Ext, FALSE))
+/* Turns bus mastering off (or back on) in the PCI command register. Not at DIRQL. */
+static
+VOID
+NvmeSetBusMaster(
+    _In_ PNVME_EXTENSION Ext,
+    _In_ BOOLEAN Enable)
+{
+    UCHAR Config[8];
+    USHORT Command;
+
+    if (StorPortGetBusData(Ext, PCIConfiguration, Ext->SystemIoBusNumber, Ext->SlotNumber,
+                           Config, sizeof(Config)) < sizeof(Config))
     {
-        NvmeGoLive(Ext);
+        NvmeLog("cannot read the PCI command register\n");
+        return;
     }
+
+    Command = (USHORT)(Config[4] | (Config[5] << 8));
+    if (Enable)
+        Command |= 0x0004;
     else
+        Command &= ~0x0004;
+
+    StorPortSetBusDataByOffset(Ext, PCIConfiguration, Ext->SystemIoBusNumber, Ext->SlotNumber,
+                               &Command, 4, sizeof(Command));
+    NvmeLog("bus mastering %s\n", Enable ? "back on" : "turned off: the controller did not stop");
+}
+
+static
+VOID
+NvmeParseIdentifyController(
+    _In_ PNVME_EXTENSION Ext)
+{
+    PNVME_IDENTIFY_CONTROLLER Id = (PNVME_IDENTIFY_CONTROLLER)Ext->IdentifyBuffer;
+
+    Ext->Vid = Id->Vid;
+    Ext->Oncs = Id->Oncs;
+    Ext->Oacs = Id->Oacs;
+    Ext->Vwc = Id->Vwc;
+    Ext->Mdts = Id->Mdts;
+    Ext->Nn = Id->Nn;
+    Ext->Ver = Id->Ver;
+    Ext->Rtd3e = Id->Rtd3e;
+    NvmeCopyString(Ext->Sn, Id->Sn, sizeof(Ext->Sn));
+    NvmeCopyString(Ext->Mn, Id->Mn, sizeof(Ext->Mn));
+    NvmeCopyString(Ext->Fr, Id->Fr, sizeof(Ext->Fr));
+
+    /* MDTS is in units of the minimum memory page size; 0 means no limit */
+    Ext->MaxTransferBytes = NVME_MAX_TRANSFER_BYTES;
+    if (Ext->Mdts != 0 && Ext->Mdts < 20)
     {
-        NvmeLog("controller did not come back after the reset\n");
-        Ext->Failed = TRUE;
+        ULONGLONG Limit = (ULONGLONG)NVME_PAGE_SIZE << (NVME_CAP_MPSMIN(Ext->Cap) + Ext->Mdts);
+        if (Limit < Ext->MaxTransferBytes)
+            Ext->MaxTransferBytes = (ULONG)Limit;
     }
 }
 
 /*
- * Normal shutdown notification (CC.SHN), after everything outstanding has finished.
- * Called with the interrupt lock held. The next request re-enables the controller.
+ * The machine's admin (or flush) command: submitted on the first call, then polled.
+ * Returns FALSE while it runs; then TRUE, with *Ok telling whether it succeeded.
  */
+static
 BOOLEAN
-NvmeShutdownController(
-    _In_ PNVME_EXTENSION Ext)
+NvmeStepCommand(
+    _In_ PNVME_EXTENSION Ext,
+    _In_ PNVME_QUEUE Queue,
+    _In_ PNVME_COMMAND Command,
+    _In_ ULONG TimeoutMs,
+    _Out_ PBOOLEAN Ok)
 {
-    ULONG Waited;
-    ULONG Limit;
-    ULONG Cc;
+    LONG Slot;
 
-    if (!Ext->Ready)
-        return FALSE;
+    *Ok = FALSE;
 
-    /* Let outstanding commands finish, up to 5 s */
-    for (Waited = 0; Waited < 500000 && (Ext->IoQueue.Outstanding || Ext->AdminQueue.Outstanding); Waited++)
+    if (!Ext->StepIssued)
     {
-        NvmeProcessCompletions(Ext, &Ext->AdminQueue);
-        NvmeProcessCompletions(Ext, &Ext->IoQueue);
-        StorPortStallExecution(10);
-    }
-
-    if (Ext->IoQueue.Outstanding || Ext->AdminQueue.Outstanding)
-    {
-        NvmeLog("shutdown with %u commands still outstanding\n",
-                Ext->IoQueue.Outstanding + Ext->AdminQueue.Outstanding);
-        return FALSE;
-    }
-
-    Ext->Ready = FALSE;
-    NvmeWrite32(Ext, NVME_REG_INTMS, 1);
-
-    Cc = NvmeRead32(Ext, NVME_REG_CC);
-    Cc = (Cc & ~NVME_CC_SHN_MASK) | NVME_CC_SHN_NORMAL;
-    NvmeWrite32(Ext, NVME_REG_CC, Cc);
-
-    /* RTD3E (microseconds) says how long the controller may take; wait 1..10 s */
-    Limit = Ext->Rtd3e / 1000;
-    if (Limit < 1000)
-        Limit = 1000;
-    if (Limit > 10000)
-        Limit = 10000;
-
-    for (Waited = 0; Waited < Limit; Waited++)
-    {
-        if ((NvmeRead32(Ext, NVME_REG_CSTS) & NVME_CSTS_SHST_MASK) == NVME_CSTS_SHST_COMPLETE)
-            break;
-        StorPortStallExecution(1000);
-    }
-
-    Ext->ShutDown = TRUE;
-    NvmeLog("shutdown notification %s after %lu ms (flushes %lu, interrupts %lu, polled ticks %lu, timeouts %lu, resets %lu)\n",
-            (Waited < Limit) ? "complete" : "timed out", Waited, Ext->Flushes,
-            Ext->Interrupts, Ext->PolledTicks, Ext->Timeouts, Ext->Resets);
-    return TRUE;
-}
-
-/* Re-enables a controller that was shut down. Called with the interrupt lock held. */
-BOOLEAN
-NvmeEnsureReady(
-    _In_ PNVME_EXTENSION Ext)
-{
-    if (Ext->Ready)
-        return TRUE;
-
-    if (Ext->ShutDown && !Ext->Failed)
-    {
-        NvmeLog("request after shutdown, re-enabling the controller\n");
-        if (NvmeInitializeController(Ext, FALSE))
-        {
-            NvmeGoLive(Ext);
+        Slot = NvmeAllocateSlot(Queue);
+        if (Slot < 0)
             return TRUE;
-        }
 
-        Ext->Failed = TRUE;
+        Queue->Slots[Slot].Kind = SlotKindInternal;
+        Queue->Slots[Slot].Deadline = Ext->NowMs + TimeoutMs;
+        Ext->InternalDone = FALSE;
+        Ext->InternalStatus = 0;
+        Ext->InternalDw0 = 0;
+        Ext->StepIssued = TRUE;
+        Ext->StepDeadline = Ext->NowMs + TimeoutMs;
+
+        Command->CommandId = NVME_CID(Slot, Queue->Slots[Slot].Gen);
+        NvmeRingSubmission(Ext, Queue, Command);
+        return FALSE;
+    }
+
+    /* The interrupt may be masked: look at the queue ourselves */
+    NvmeProcessCompletions(Ext, Queue);
+
+    if (Ext->InternalDone)
+    {
+        Ext->StepIssued = FALSE;
+        *Ok = (NVME_CQE_SC(Ext->InternalStatus) == NVME_SC_SUCCESS &&
+               NVME_CQE_SCT(Ext->InternalStatus) == NVME_SCT_GENERIC);
+        return TRUE;
+    }
+
+    if ((LONG)(Ext->NowMs - Ext->StepDeadline) >= 0)
+    {
+        /* The slot stays busy until the next disable releases it */
+        NvmeLog("queue %u: command 0x%02x timed out\n", Queue->Qid, Command->Opcode);
+        Ext->StepIssued = FALSE;
+        return TRUE;
     }
 
     return FALSE;
+}
+
+/* Called with the interrupt lock held when the controller is live again */
+static
+VOID
+NvmeMachineLive(
+    _In_ PNVME_EXTENSION Ext)
+{
+    PSCSI_REQUEST_BLOCK Srb, Next;
+
+    Ext->State = NvmeStateLive;
+    Ext->Attempts = 0;
+
+    /* HwInitialize opens the interrupt the first time */
+    if (Ext->InFindAdapter)
+        return;
+
+    Ext->Ready = TRUE;
+    NvmeWrite32(Ext, NVME_REG_INTMC, 1);
+
+    Srb = Ext->ResetWaiters;
+    Ext->ResetWaiters = NULL;
+    NvmeCompleteChain(Ext, Srb, SRB_STATUS_SUCCESS);
+
+    Srb = Ext->DeferredHead;
+    Ext->DeferredHead = Ext->DeferredTail = NULL;
+    while (Srb && Ext->State == NvmeStateLive)
+    {
+        Next = ((PNVME_SRB_EXTENSION)Srb->SrbExtension)->Next;
+        NvmeDispatch(Ext, Srb);
+        Srb = Next;
+    }
+
+    /* A shutdown request in the chain started the machine again: park the rest */
+    while (Srb)
+    {
+        Next = ((PNVME_SRB_EXTENSION)Srb->SrbExtension)->Next;
+        NvmeAppendDeferred(Ext, Srb);
+        Srb = Next;
+    }
+}
+
+/* The controller cannot be brought up: everything waiting fails */
+static
+VOID
+NvmeMachineGiveUp(
+    _In_ PNVME_EXTENSION Ext)
+{
+    PSCSI_REQUEST_BLOCK Srb;
+
+    NvmeLog("controller failed (reset %lu)\n", Ext->Resets);
+    Ext->State = NvmeStateFailed;
+    Ext->Ready = FALSE;
+    NvmeWrite32(Ext, NVME_REG_INTMS, 1);
+
+    Srb = Ext->ResetWaiters;
+    Ext->ResetWaiters = NULL;
+    NvmeCompleteChain(Ext, Srb, SRB_STATUS_ERROR);
+
+    Srb = Ext->DeferredHead;
+    Ext->DeferredHead = Ext->DeferredTail = NULL;
+    NvmeCompleteChain(Ext, Srb, SRB_STATUS_ERROR);
+
+    if (Ext->ShutdownSrb)
+    {
+        NvmeCompleteSrb(Ext, Ext->ShutdownSrb, SRB_STATUS_ERROR);
+        Ext->ShutdownSrb = NULL;
+    }
+}
+
+/* A step failed after the controller was disabled once: start over, a few times */
+static
+VOID
+NvmeMachineRetry(
+    _In_ PNVME_EXTENSION Ext)
+{
+    if (++Ext->Attempts >= NVME_MACHINE_ATTEMPTS)
+    {
+        NvmeWrite32(Ext, NVME_REG_CC, NvmeRead32(Ext, NVME_REG_CC) & ~NVME_CC_EN);
+        NvmeMachineGiveUp(Ext);
+        return;
+    }
+
+    Ext->StepIssued = FALSE;
+    Ext->Step = StepDisable;
+}
+
+/* The shutdown steps are done: report the request, wake the controller if work waits */
+static
+VOID
+NvmeMachineShutdownDone(
+    _In_ PNVME_EXTENSION Ext)
+{
+    PSCSI_REQUEST_BLOCK Srb, Next, Keep = NULL, KeepTail = NULL;
+
+    Ext->State = NvmeStateShutdown;
+    Ext->ShutdownSeen = TRUE;
+
+    NvmeLog("shutdown notification %s (flushes %lu, interrupts %lu, polled ticks %lu, timeouts %lu, resets %lu)\n",
+            Ext->ShutdownOk ? "complete" : "FAILED", Ext->Flushes,
+            Ext->Interrupts, Ext->PolledTicks, Ext->Timeouts, Ext->Resets);
+
+    if (Ext->ShutdownSrb)
+    {
+        NvmeCompleteSrb(Ext, Ext->ShutdownSrb, Ext->ShutdownOk ? SRB_STATUS_SUCCESS : SRB_STATUS_ERROR);
+        Ext->ShutdownSrb = NULL;
+    }
+
+    /* Shutdown and flush requests that waited have nothing left to do */
+    Srb = Ext->DeferredHead;
+    Ext->DeferredHead = Ext->DeferredTail = NULL;
+    while (Srb)
+    {
+        Next = ((PNVME_SRB_EXTENSION)Srb->SrbExtension)->Next;
+        if ((Srb->Function == SRB_FUNCTION_SHUTDOWN || Srb->Function == SRB_FUNCTION_FLUSH) && Ext->ShutdownOk)
+        {
+            NvmeCompleteSrb(Ext, Srb, SRB_STATUS_SUCCESS);
+        }
+        else
+        {
+            ((PNVME_SRB_EXTENSION)Srb->SrbExtension)->Next = NULL;
+            if (KeepTail)
+                ((PNVME_SRB_EXTENSION)KeepTail->SrbExtension)->Next = Srb;
+            else
+                Keep = Srb;
+            KeepTail = Srb;
+        }
+        Srb = Next;
+    }
+    Ext->DeferredHead = Keep;
+    Ext->DeferredTail = KeepTail;
+
+    if (Ext->DeferredHead)
+        NvmeStartMachine(Ext, FALSE);
+}
+
+/*
+ * Starts the machine: a reset (or re-enable) when Shutdown is FALSE, the shutdown steps
+ * otherwise. Called with the interrupt lock held.
+ */
+VOID
+NvmeStartMachine(
+    _In_ PNVME_EXTENSION Ext,
+    _In_ BOOLEAN Shutdown)
+{
+    if (Ext->State == NvmeStateStopped)
+        return;
+
+    if (Ext->State == NvmeStateMachine)
+    {
+        /* A reset is already under way; a reset beats a shutdown */
+        if (!Ext->GoalShutdown || Shutdown)
+            return;
+
+        if (Ext->ShutdownSrb)
+        {
+            NvmeCompleteSrb(Ext, Ext->ShutdownSrb, SRB_STATUS_ERROR);
+            Ext->ShutdownSrb = NULL;
+        }
+    }
+
+    Ext->State = NvmeStateMachine;
+    Ext->GoalShutdown = Shutdown;
+    Ext->StepIssued = FALSE;
+    Ext->NeedBusMasterOff = FALSE;
+
+    if (Shutdown)
+    {
+        Ext->ShutdownOk = TRUE;
+        Ext->FlushIndex = 0;
+        Ext->StepDeadline = Ext->NowMs + NVME_DRAIN_TIMEOUT_MS;
+        Ext->Step = StepDrain;
+    }
+    else
+    {
+        Ext->Resets++;
+        NvmeLog("resetting the controller (reset %lu)\n", Ext->Resets);
+        Ext->Ready = FALSE;
+        NvmeWrite32(Ext, NVME_REG_INTMS, 1);
+        Ext->Step = StepDisable;
+    }
+}
+
+/*
+ * Advances the machine as far as it can without waiting. Called with the interrupt lock
+ * held (by the watchdog), or by HwFindAdapter before the interrupt is connected.
+ */
+static
+VOID
+NvmeMachineStep(
+    _In_ PNVME_EXTENSION Ext)
+{
+    PNVME_QUEUE Admin = &Ext->AdminQueue;
+    PNVME_QUEUE Io = &Ext->IoQueue;
+    NVME_COMMAND Cmd;
+    BOOLEAN Ok;
+    ULONG Csts, Cc, Limit;
+
+    while (Ext->State == NvmeStateMachine)
+    {
+        RtlZeroMemory(&Cmd, sizeof(Cmd));
+
+        switch (Ext->Step)
+        {
+            case StepDisable:
+                Cc = NvmeRead32(Ext, NVME_REG_CC);
+                if (Cc & NVME_CC_EN)
+                    NvmeWrite32(Ext, NVME_REG_CC, Cc & ~(NVME_CC_EN | NVME_CC_SHN_MASK));
+                Ext->StepDeadline = Ext->NowMs + Ext->ReadyTimeoutMs;
+                Ext->Step = StepWaitDisabled;
+                continue;
+
+            case StepWaitDisabled:
+                Csts = NvmeRead32(Ext, NVME_REG_CSTS);
+                if (Csts != MAXULONG && !(Csts & NVME_CSTS_RDY))
+                {
+                    /* Stopped: what it held goes back, the class driver retries */
+                    NvmeReleaseOutstanding(Ext, SRB_STATUS_BUS_RESET);
+                    Ext->Step = StepEnable;
+                    continue;
+                }
+
+                if (Csts == MAXULONG || (LONG)(Ext->NowMs - Ext->StepDeadline) >= 0)
+                {
+                    NvmeLog("controller did not stop (CSTS 0x%lx)\n", Csts);
+                    Ext->NeedBusMasterOff = TRUE;
+                    Ext->Step = StepWaitBusMaster;
+                }
+                return;
+
+            case StepWaitBusMaster:
+                if (!Ext->BusMasterOff)
+                    return;
+
+                /* It cannot reach memory any more, but neither can it be used */
+                NvmeReleaseOutstanding(Ext, SRB_STATUS_BUS_RESET);
+                NvmeMachineGiveUp(Ext);
+                return;
+
+            case StepEnable:
+                NvmeResetQueueState(Admin);
+                NvmeResetQueueState(Io);
+                NvmeWrite32(Ext, NVME_REG_AQA, ((ULONG)(Admin->Depth - 1) << 16) | (Admin->Depth - 1));
+                NvmeWrite64(Ext, NVME_REG_ASQ, Admin->SqPa.QuadPart);
+                NvmeWrite64(Ext, NVME_REG_ACQ, Admin->CqPa.QuadPart);
+                NvmeWrite32(Ext, NVME_REG_CC, NVME_CC_CSS_NVM | NVME_CC_MPS(0) | NVME_CC_AMS_RR |
+                                              NVME_CC_IOSQES(6) | NVME_CC_IOCQES(4) | NVME_CC_EN);
+                Ext->StepDeadline = Ext->NowMs + Ext->ReadyTimeoutMs;
+                Ext->Step = StepWaitEnabled;
+                continue;
+
+            case StepWaitEnabled:
+                Csts = NvmeRead32(Ext, NVME_REG_CSTS);
+                if (Csts == MAXULONG || (Csts & NVME_CSTS_CFS))
+                {
+                    NvmeLog("controller fatal status while enabling (CSTS 0x%lx)\n", Csts);
+                    NvmeMachineRetry(Ext);
+                    continue;
+                }
+                if (Csts & NVME_CSTS_RDY)
+                {
+                    Ext->Step = Ext->Identify ? StepIdentify : StepNumQueues;
+                    continue;
+                }
+                if ((LONG)(Ext->NowMs - Ext->StepDeadline) >= 0)
+                {
+                    NvmeLog("timeout waiting for CSTS.RDY=1 (CSTS 0x%lx)\n", Csts);
+                    NvmeMachineRetry(Ext);
+                    continue;
+                }
+                return;
+
+            case StepIdentify:
+                Cmd.Opcode = NVME_ADMIN_IDENTIFY;
+                Cmd.Prp1 = Ext->IdentifyPa.QuadPart;
+                Cmd.Cdw10 = NVME_CNS_CONTROLLER;
+                if (!Ext->StepIssued)
+                    RtlZeroMemory(Ext->IdentifyBuffer, NVME_PAGE_SIZE);
+                if (!NvmeStepCommand(Ext, Admin, &Cmd, Ext->ReadyTimeoutMs, &Ok))
+                    return;
+                if (!Ok)
+                {
+                    NvmeLog("Identify Controller failed\n");
+                    NvmeMachineRetry(Ext);
+                    continue;
+                }
+                NvmeParseIdentifyController(Ext);
+                Ext->Step = StepNumQueues;
+                continue;
+
+            case StepNumQueues:
+                /* One I/O submission and one completion queue (0's based) */
+                Cmd.Opcode = NVME_ADMIN_SET_FEATURES;
+                Cmd.Cdw10 = NVME_FEAT_NUM_QUEUES;
+                if (!NvmeStepCommand(Ext, Admin, &Cmd, Ext->ReadyTimeoutMs, &Ok))
+                    return;
+                if (!Ok)
+                {
+                    NvmeLog("Set Features (Number of Queues) failed\n");
+                    NvmeMachineRetry(Ext);
+                    continue;
+                }
+                Ext->Step = StepGetVwc;
+                continue;
+
+            case StepGetVwc:
+                /* Current state of the volatile write cache (a reset restores the default) */
+                if (!(Ext->Vwc & NVME_VWC_PRESENT))
+                {
+                    Ext->WriteCacheEnabled = FALSE;
+                    Ext->Step = StepCreateCq;
+                    continue;
+                }
+                Cmd.Opcode = NVME_ADMIN_GET_FEATURES;
+                Cmd.Cdw10 = NVME_FEAT_VOLATILE_WC;
+                if (!NvmeStepCommand(Ext, Admin, &Cmd, Ext->ReadyTimeoutMs, &Ok))
+                    return;
+                Ext->WriteCacheEnabled = Ok ? ((Ext->InternalDw0 & 1) ? TRUE : FALSE) : TRUE;
+                Ext->Step = StepCreateCq;
+                continue;
+
+            case StepCreateCq:
+                Cmd.Opcode = NVME_ADMIN_CREATE_CQ;
+                Cmd.Prp1 = Io->CqPa.QuadPart;
+                Cmd.Cdw10 = ((ULONG)(Io->Depth - 1) << 16) | Io->Qid;
+                Cmd.Cdw11 = (0UL << 16) | 0x2 /* IEN */ | 0x1 /* PC */;
+                if (!NvmeStepCommand(Ext, Admin, &Cmd, Ext->ReadyTimeoutMs, &Ok))
+                    return;
+                if (!Ok)
+                {
+                    NvmeLog("Create I/O Completion Queue failed\n");
+                    NvmeMachineRetry(Ext);
+                    continue;
+                }
+                Ext->Step = StepCreateSq;
+                continue;
+
+            case StepCreateSq:
+                Cmd.Opcode = NVME_ADMIN_CREATE_SQ;
+                Cmd.Prp1 = Io->SqPa.QuadPart;
+                Cmd.Cdw10 = ((ULONG)(Io->Depth - 1) << 16) | Io->Qid;
+                Cmd.Cdw11 = ((ULONG)Io->Qid << 16) | 0x1 /* PC */;
+                if (!NvmeStepCommand(Ext, Admin, &Cmd, Ext->ReadyTimeoutMs, &Ok))
+                    return;
+                if (!Ok)
+                {
+                    NvmeLog("Create I/O Submission Queue failed\n");
+                    NvmeMachineRetry(Ext);
+                    continue;
+                }
+                NvmeMachineLive(Ext);
+                return;
+
+            case StepDrain:
+                /* Commands already submitted finish first (the ISR still runs) */
+                NvmeProcessCompletions(Ext, Admin);
+                NvmeProcessCompletions(Ext, Io);
+                if (Io->Outstanding == 0 && Admin->Outstanding == 0)
+                {
+                    Ext->Step = StepFlush;
+                    continue;
+                }
+                if ((LONG)(Ext->NowMs - Ext->StepDeadline) >= 0)
+                {
+                    NvmeLog("shutdown with %u commands still outstanding\n", Io->Outstanding + Admin->Outstanding);
+                    Ext->ShutdownOk = FALSE;
+                    Ext->Step = StepFlush;
+                    continue;
+                }
+                return;
+
+            case StepFlush:
+                /* Write back the volatile cache of every namespace */
+                if (!(Ext->Vwc & NVME_VWC_PRESENT) || Ext->FlushIndex >= Ext->NamespaceCount)
+                {
+                    Ext->Step = StepShutdownNotify;
+                    continue;
+                }
+                Cmd.Opcode = NVME_CMD_FLUSH;
+                Cmd.Nsid = Ext->Namespaces[Ext->FlushIndex].Nsid;
+                if (!Ext->StepIssued)
+                    Ext->Flushes++;
+                if (!NvmeStepCommand(Ext, Io, &Cmd, NVME_FLUSH_TIMEOUT_MS, &Ok))
+                    return;
+                if (!Ok)
+                {
+                    NvmeLog("shutdown flush of namespace %lu failed\n", Cmd.Nsid);
+                    Ext->ShutdownOk = FALSE;
+                }
+                Ext->FlushIndex++;
+                continue;
+
+            case StepShutdownNotify:
+                Ext->Ready = FALSE;
+                NvmeWrite32(Ext, NVME_REG_INTMS, 1);
+                Cc = NvmeRead32(Ext, NVME_REG_CC);
+                NvmeWrite32(Ext, NVME_REG_CC, (Cc & ~NVME_CC_SHN_MASK) | NVME_CC_SHN_NORMAL);
+
+                /* RTD3E (microseconds) says how long the controller may take; wait 1..10 s */
+                Limit = Ext->Rtd3e / 1000;
+                Limit = max(Limit, 1000);
+                Limit = min(Limit, 10000);
+                Ext->StepDeadline = Ext->NowMs + Limit;
+                Ext->Step = StepWaitShutdown;
+                continue;
+
+            case StepWaitShutdown:
+                if ((NvmeRead32(Ext, NVME_REG_CSTS) & NVME_CSTS_SHST_MASK) == NVME_CSTS_SHST_COMPLETE)
+                {
+                    NvmeMachineShutdownDone(Ext);
+                    return;
+                }
+                if ((LONG)(Ext->NowMs - Ext->StepDeadline) >= 0)
+                {
+                    NvmeLog("shutdown notification timed out\n");
+                    Ext->ShutdownOk = FALSE;
+                    NvmeMachineShutdownDone(Ext);
+                }
+                return;
+        }
+    }
+}
+
+/*
+ * HwFindAdapter: brings the controller up with the same machine, polling at PASSIVE_LEVEL
+ * (no interrupt is connected yet), then identifies the namespaces.
+ */
+static
+BOOLEAN
+NvmeBringUpSync(
+    _In_ PNVME_EXTENSION Ext)
+{
+    ULONG Waited;
+    ULONG Limit = 4 * Ext->ReadyTimeoutMs * NVME_MACHINE_ATTEMPTS + 10000;
+
+    Ext->InFindAdapter = TRUE;
+    Ext->Identify = TRUE;
+    Ext->State = NvmeStateMachine;
+    Ext->GoalShutdown = FALSE;
+    Ext->StepIssued = FALSE;
+    Ext->Step = StepDisable;
+    NvmeWrite32(Ext, NVME_REG_INTMS, 1);
+
+    for (Waited = 0; Waited < Limit && Ext->State == NvmeStateMachine; Waited++)
+    {
+        NvmeMachineStep(Ext);
+        if (Ext->NeedBusMasterOff)
+        {
+            Ext->NeedBusMasterOff = FALSE;
+            NvmeSetBusMaster(Ext, FALSE);
+            Ext->BusMasterOff = TRUE;
+            continue;
+        }
+        if (Ext->State != NvmeStateMachine)
+            break;
+        StorPortStallExecution(1000);
+        Ext->NowMs++;
+    }
+
+    Ext->InFindAdapter = FALSE;
+    Ext->Identify = FALSE;
+
+    if (Ext->State != NvmeStateLive)
+        return FALSE;
+
+    NvmeScanNamespaces(Ext);
+    return TRUE;
+}
+
+/* Hands a request to the controller. Called with the interrupt lock held, the state live. */
+VOID
+NvmeDispatch(
+    _In_ PNVME_EXTENSION Ext,
+    _In_ PSCSI_REQUEST_BLOCK Srb)
+{
+    switch (Srb->Function)
+    {
+        case SRB_FUNCTION_EXECUTE_SCSI:
+            NvmeScsiExecute(Ext, Srb);
+            break;
+
+        case SRB_FUNCTION_FLUSH:
+            NvmeScsiFlush(Ext, Srb);
+            break;
+
+        case SRB_FUNCTION_SHUTDOWN:
+            /* Drain, write back the cache, CC.SHN; the machine completes the request */
+            Ext->ShutdownSrb = Srb;
+            NvmeStartMachine(Ext, TRUE);
+            break;
+
+        case SRB_FUNCTION_RESET_BUS:
+        case SRB_FUNCTION_RESET_DEVICE:
+        case SRB_FUNCTION_RESET_LOGICAL_UNIT:
+            /* Completed when the controller is back */
+            ((PNVME_SRB_EXTENSION)Srb->SrbExtension)->Next = Ext->ResetWaiters;
+            Ext->ResetWaiters = Srb;
+            NvmeStartMachine(Ext, FALSE);
+            break;
+
+        case SRB_FUNCTION_ABORT_COMMAND:
+        case SRB_FUNCTION_PNP:
+        case SRB_FUNCTION_POWER:
+            NvmeCompleteSrb(Ext, Srb, SRB_STATUS_SUCCESS);
+            break;
+
+        default:
+            NvmeCompleteSrb(Ext, Srb, SRB_STATUS_INVALID_REQUEST);
+            break;
+    }
 }
 
 /* WATCHDOG *******************************************************************/
@@ -943,13 +1328,23 @@ NvmeHwTimer(
     PNVME_EXTENSION Ext = (PNVME_EXTENSION)DeviceExtension;
     STOR_LOCK_HANDLE LockHandle;
     BOOLEAN NeedReset = FALSE;
+    BOOLEAN BusMasterOff;
+    ULONG Period;
     USHORT i;
 
     NvmeLock(Ext, &LockHandle);
 
-    Ext->Tick++;
+    /* ScsiStopAdapter cancelled the timer; a tick that was already queued ends here */
+    if (Ext->State == NvmeStateStopped)
+    {
+        Ext->TimerRunning = FALSE;
+        NvmeUnlock(Ext, &LockHandle);
+        return;
+    }
 
-    if (Ext->Ready)
+    Ext->NowMs += Ext->TimerPeriodUs / 1000;
+
+    if (Ext->State == NvmeStateLive && Ext->Ready)
     {
         /* A lost or late interrupt costs at most one period */
         if (NvmeProcessCompletions(Ext, &Ext->AdminQueue) |
@@ -963,7 +1358,7 @@ NvmeHwTimer(
         {
             PNVME_SLOT Slot = &Ext->IoQueue.Slots[i];
 
-            if (!Slot->Busy || Slot->Kind == SlotKindPoll || (LONG)(Ext->Tick - Slot->Deadline) < 0)
+            if (!Slot->Busy || Slot->Kind == SlotKindPoll || (LONG)(Ext->NowMs - Slot->Deadline) < 0)
                 continue;
 
             if (!Slot->AbortSent)
@@ -975,7 +1370,7 @@ NvmeHwTimer(
                 NvmeLog("I/O command %u timed out, aborting\n", i);
                 Slot->TimedOut = TRUE;
                 Slot->AbortSent = TRUE;
-                Slot->Deadline = Ext->Tick + NVME_ABORT_GRACE_S;
+                Slot->Deadline = Ext->NowMs + NVME_ABORT_GRACE_S * 1000;
 
                 AbortSlot = NvmeAllocateSlot(&Ext->AdminQueue);
                 if (AbortSlot < 0)
@@ -985,11 +1380,12 @@ NvmeHwTimer(
                 }
 
                 Ext->AdminQueue.Slots[AbortSlot].Kind = SlotKindAbort;
-                Ext->AdminQueue.Slots[AbortSlot].Deadline = Ext->Tick + NVME_ABORT_GRACE_S;
+                Ext->AdminQueue.Slots[AbortSlot].Deadline = Ext->NowMs + NVME_ABORT_GRACE_S * 1000;
 
+                /* The command identifier carries the slot's generation */
                 Cmd.Opcode = NVME_ADMIN_ABORT;
-                Cmd.Cdw10 = ((ULONG)i << 16) | Ext->IoQueue.Qid;
-                Cmd.CommandId = (USHORT)AbortSlot;
+                Cmd.Cdw10 = ((ULONG)NVME_CID(i, Slot->Gen) << 16) | Ext->IoQueue.Qid;
+                Cmd.CommandId = NVME_CID(AbortSlot, Ext->AdminQueue.Slots[AbortSlot].Gen);
                 NvmeRingSubmission(Ext, &Ext->AdminQueue, &Cmd);
             }
             else
@@ -1004,7 +1400,7 @@ NvmeHwTimer(
         {
             PNVME_SLOT Slot = &Ext->AdminQueue.Slots[i];
 
-            if (Slot->Busy && Slot->Kind != SlotKindPoll && (LONG)(Ext->Tick - Slot->Deadline) >= 0)
+            if (Slot->Busy && Slot->Kind != SlotKindPoll && (LONG)(Ext->NowMs - Slot->Deadline) >= 0)
             {
                 NvmeLog("admin command %u timed out\n", i);
                 Slot->TimedOut = TRUE;
@@ -1013,12 +1409,30 @@ NvmeHwTimer(
         }
 
         if (NeedReset)
-            NvmeResetController(Ext, SRB_STATUS_BUS_RESET);
+            NvmeStartMachine(Ext, FALSE);
     }
+
+    if (Ext->State == NvmeStateMachine)
+        NvmeMachineStep(Ext);
+
+    BusMasterOff = Ext->NeedBusMasterOff;
+    Ext->NeedBusMasterOff = FALSE;
+
+    Period = (Ext->State == NvmeStateMachine) ? NVME_MACHINE_PERIOD_US : NVME_TIMER_PERIOD_US;
+    Ext->TimerPeriodUs = Period;
 
     NvmeUnlock(Ext, &LockHandle);
 
-    StorPortNotification(RequestTimerCall, Ext, NvmeHwTimer, NVME_TIMER_PERIOD_US);
+    /* PCI configuration space is not written at DIRQL */
+    if (BusMasterOff)
+    {
+        NvmeSetBusMaster(Ext, FALSE);
+        NvmeLock(Ext, &LockHandle);
+        Ext->BusMasterOff = TRUE;
+        NvmeUnlock(Ext, &LockHandle);
+    }
+
+    StorPortNotification(RequestTimerCall, Ext, NvmeHwTimer, Period);
 }
 
 /* MINIPORT ENTRY POINTS ******************************************************/
@@ -1056,67 +1470,41 @@ NvmeHwStartIo(
 
     NvmeLock(Ext, &LockHandle);
 
-    switch (Srb->Function)
+    switch (Ext->State)
     {
-        case SRB_FUNCTION_EXECUTE_SCSI:
-            if (!NvmeEnsureReady(Ext))
+        case NvmeStateLive:
+            NvmeDispatch(Ext, Srb);
+            break;
+
+        case NvmeStateFailed:
+            if (Srb->Function == SRB_FUNCTION_EXECUTE_SCSI)
             {
                 NvmeScsiSetSense(Srb, 0x04 /* HARDWARE ERROR */, 0x44, 0x00);
                 NvmeCompleteSrb(Ext, Srb, 0xFF);
-                break;
             }
-            NvmeScsiExecute(Ext, Srb);
-            break;
-
-        case SRB_FUNCTION_FLUSH:
-            if (!NvmeEnsureReady(Ext))
+            else
             {
                 NvmeCompleteSrb(Ext, Srb, SRB_STATUS_ERROR);
+            }
+            break;
+
+        case NvmeStateShutdown:
+            /* Already shut down: nothing to write back */
+            if (Srb->Function == SRB_FUNCTION_SHUTDOWN)
+            {
+                NvmeCompleteSrb(Ext, Srb, SRB_STATUS_SUCCESS);
                 break;
             }
-            NvmeScsiFlush(Ext, Srb);
-            break;
 
-        case SRB_FUNCTION_SHUTDOWN:
-        {
-            BOOLEAN Ok = TRUE;
-
-            if (NvmeEnsureReady(Ext))
-            {
-                /* Write back the volatile cache, then tell the controller it is going down */
-                if ((Ext->Vwc & NVME_VWC_PRESENT) && Srb->Lun < Ext->NamespaceCount)
-                {
-                    NVME_COMMAND Cmd = {0};
-
-                    Cmd.Opcode = NVME_CMD_FLUSH;
-                    Cmd.Nsid = Ext->Namespaces[Srb->Lun].Nsid;
-                    Ext->Flushes++;
-                    Ok = NvmeSubmitSync(Ext, &Ext->IoQueue, &Cmd, 30000, NULL, NULL);
-                }
-
-                if (Ok)
-                    NvmeShutdownController(Ext);
-            }
-
-            NvmeCompleteSrb(Ext, Srb, Ok ? SRB_STATUS_SUCCESS : SRB_STATUS_ERROR);
-            break;
-        }
-
-        case SRB_FUNCTION_RESET_BUS:
-        case SRB_FUNCTION_RESET_DEVICE:
-        case SRB_FUNCTION_RESET_LOGICAL_UNIT:
-            NvmeResetController(Ext, SRB_STATUS_BUS_RESET);
-            NvmeCompleteSrb(Ext, Srb, Ext->Failed ? SRB_STATUS_ERROR : SRB_STATUS_SUCCESS);
-            break;
-
-        case SRB_FUNCTION_ABORT_COMMAND:
-        case SRB_FUNCTION_PNP:
-        case SRB_FUNCTION_POWER:
-            NvmeCompleteSrb(Ext, Srb, SRB_STATUS_SUCCESS);
+            /* Anything else wakes the controller up; it waits until then */
+            NvmeLog("request after shutdown, re-enabling the controller\n");
+            NvmeAppendDeferred(Ext, Srb);
+            NvmeStartMachine(Ext, FALSE);
             break;
 
         default:
-            NvmeCompleteSrb(Ext, Srb, SRB_STATUS_INVALID_REQUEST);
+            /* Resetting, shutting down, or stopped: dispatched when the controller is live */
+            NvmeAppendDeferred(Ext, Srb);
             break;
     }
 
@@ -1133,14 +1521,19 @@ NvmeHwResetBus(
 {
     PNVME_EXTENSION Ext = (PNVME_EXTENSION)DeviceExtension;
     STOR_LOCK_HANDLE LockHandle;
+    BOOLEAN Result;
 
     UNREFERENCED_PARAMETER(PathId);
 
+    /* The state machine stops the controller, hands back what it held and brings it up */
     NvmeLock(Ext, &LockHandle);
-    NvmeResetController(Ext, SRB_STATUS_BUS_RESET);
+    if (Ext->State == NvmeStateFailed)
+        Ext->Attempts = 0;
+    NvmeStartMachine(Ext, FALSE);
+    Result = (Ext->State == NvmeStateMachine);
     NvmeUnlock(Ext, &LockHandle);
 
-    return !Ext->Failed;
+    return Result;
 }
 
 static
@@ -1153,6 +1546,9 @@ NvmeHwAdapterControl(
 {
     PNVME_EXTENSION Ext = (PNVME_EXTENSION)DeviceExtension;
     STOR_LOCK_HANDLE LockHandle;
+    PSCSI_REQUEST_BLOCK Srb;
+    ULONG Waited;
+    BOOLEAN Stopped;
 
     switch (ControlType)
     {
@@ -1170,17 +1566,69 @@ NvmeHwAdapterControl(
         }
 
         case ScsiStopAdapter:
+            /* No more ticks, no more interrupts, controller disabled */
             NvmeLock(Ext, &LockHandle);
-            NvmeShutdownController(Ext);
+            Ext->State = NvmeStateStopped;
+            Ext->Ready = FALSE;
+            NvmeWrite32(Ext, NVME_REG_INTMS, 1);
+            NvmeWrite32(Ext, NVME_REG_CC, NvmeRead32(Ext, NVME_REG_CC) & ~(NVME_CC_EN | NVME_CC_SHN_MASK));
+            NvmeUnlock(Ext, &LockHandle);
+
+            StorPortNotification(RequestTimerCall, Ext, NvmeHwTimer, 0);
+
+            /* A short, bounded wait outside the lock; past it bus mastering goes off */
+            Stopped = FALSE;
+            for (Waited = 0; Waited < NVME_STOP_WAIT_US; Waited += 100)
+            {
+                ULONG Csts = NvmeRead32(Ext, NVME_REG_CSTS);
+                if (Csts != MAXULONG && !(Csts & NVME_CSTS_RDY))
+                {
+                    Stopped = TRUE;
+                    break;
+                }
+                StorPortStallExecution(100);
+            }
+            if (!Stopped && !Ext->BusMasterOff)
+            {
+                NvmeSetBusMaster(Ext, FALSE);
+                Ext->BusMasterOff = TRUE;
+            }
+
+            /* Nothing can reach memory now: everything goes back to storport */
+            NvmeLock(Ext, &LockHandle);
+            NvmeReleaseOutstanding(Ext, SRB_STATUS_BUS_RESET);
+            Srb = Ext->DeferredHead;
+            Ext->DeferredHead = Ext->DeferredTail = NULL;
+            NvmeCompleteChain(Ext, Srb, SRB_STATUS_BUS_RESET);
+            Srb = Ext->ResetWaiters;
+            Ext->ResetWaiters = NULL;
+            NvmeCompleteChain(Ext, Srb, SRB_STATUS_ERROR);
+            if (Ext->ShutdownSrb)
+            {
+                NvmeCompleteSrb(Ext, Ext->ShutdownSrb, SRB_STATUS_ERROR);
+                Ext->ShutdownSrb = NULL;
+            }
             NvmeUnlock(Ext, &LockHandle);
             return ScsiAdapterControlSuccess;
 
         case ScsiRestartAdapter:
+            if (Ext->BusMasterOff)
+            {
+                NvmeSetBusMaster(Ext, TRUE);
+                Ext->BusMasterOff = FALSE;
+            }
+
+            /* Requests wait until the machine has the controller up */
             NvmeLock(Ext, &LockHandle);
-            if (!Ext->Ready && NvmeInitializeController(Ext, FALSE))
-                NvmeGoLive(Ext);
+            Ext->State = NvmeStateFailed;
+            Ext->Attempts = 0;
+            NvmeStartMachine(Ext, FALSE);
+            Ext->TimerPeriodUs = NVME_MACHINE_PERIOD_US;
+            Ext->TimerRunning = TRUE;
             NvmeUnlock(Ext, &LockHandle);
-            return Ext->Ready ? ScsiAdapterControlSuccess : ScsiAdapterControlUnsuccessful;
+
+            StorPortNotification(RequestTimerCall, Ext, NvmeHwTimer, NVME_MACHINE_PERIOD_US);
+            return ScsiAdapterControlSuccess;
 
         default:
             return ScsiAdapterControlUnsuccessful;
@@ -1195,12 +1643,14 @@ NvmeHwInitialize(
 {
     PNVME_EXTENSION Ext = (PNVME_EXTENSION)DeviceExtension;
 
-    /* FindAdapter did the polled bring-up; only open the interrupt and start the watchdog */
-    NvmeGoLive(Ext);
+    /* FindAdapter brought the controller up; only open the interrupt and start the watchdog */
+    Ext->Ready = TRUE;
+    NvmeWrite32(Ext, NVME_REG_INTMC, 1);
 
     if (!Ext->TimerRunning)
     {
         Ext->TimerRunning = TRUE;
+        Ext->TimerPeriodUs = NVME_TIMER_PERIOD_US;
         StorPortNotification(RequestTimerCall, Ext, NvmeHwTimer, NVME_TIMER_PERIOD_US);
     }
 
@@ -1282,6 +1732,9 @@ NvmeHwFindAdapter(
         NvmeLog("register BAR too small\n");
         return SP_RETURN_NOT_FOUND;
     }
+
+    Ext->SystemIoBusNumber = ConfigInfo->SystemIoBusNumber;
+    Ext->SlotNumber = ConfigInfo->SlotNumber;
 
     Ext->ReadyTimeoutMs = NVME_CAP_TO(Ext->Cap) * 500;
     if (Ext->ReadyTimeoutMs < 2000)
@@ -1383,10 +1836,10 @@ NvmeHwFindAdapter(
     Ext->IoQueue.CqDoorbell = (PULONG)(Ext->Registers + NVME_REG_DOORBELL + (2 * NVME_IO_QUEUE_ID + 1) * Ext->DoorbellStride);
 
     /* Polled bring-up now: no interrupt is connected yet */
-    if (!NvmeInitializeController(Ext, TRUE))
+    if (!NvmeBringUpSync(Ext))
     {
         NvmeLog("controller initialization failed\n");
-        NvmeDisableController(Ext);
+        NvmeWrite32(Ext, NVME_REG_CC, NvmeRead32(Ext, NVME_REG_CC) & ~NVME_CC_EN);
         return SP_RETURN_ERROR;
     }
 
