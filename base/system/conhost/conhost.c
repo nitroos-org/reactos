@@ -36,8 +36,20 @@ typedef struct _HOST
 static BOOL
 HostWrite(HOST *Host, const CHAR *Text, DWORD Length)
 {
-    DWORD Written;
-    return WriteFile(Host->PipeOut, Text, Length, &Written, NULL) && Written == Length;
+    DWORD Written, Available;
+
+    /* A caller such as node-pty hands over named-pipe server ends and only connects
+     * the client ends afterwards. Until then a write fails with ERROR_PIPE_LISTENING;
+     * the Windows host waits for the terminal, so do the same (unless the owner is gone). */
+    for (;;)
+    {
+        if (WriteFile(Host->PipeOut, Text, Length, &Written, NULL))
+            return Written == Length;
+        if (GetLastError() != ERROR_PIPE_LISTENING) return FALSE;
+        if (Host->Signal && !PeekNamedPipe(Host->Signal, NULL, 0, NULL, &Available, NULL))
+            return FALSE;
+        Sleep(10);
+    }
 }
 
 static SHORT

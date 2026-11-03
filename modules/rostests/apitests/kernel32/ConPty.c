@@ -680,7 +680,7 @@ CheckLargeCreate(PCWSTR ExePath)
 /* node-pty (VS Code, conpty.cc): overlapped-capable named pipes, flags RESIZE_QUIRK|WIN32_INPUT_MODE
  * (|INHERIT_CURSOR), NULL standard handles in STARTUPINFOEX, CreateProcessW without inheritance. */
 static VOID
-CheckNodePtSequence(DWORD Flags)
+CheckNodePtSequence(DWORD Flags, BOOL LateConnect)
 {
     static const DWORD Sizes[][2] = {{80, 24}, {120, 30}};
     HANDLE PipeIn, PipeOut, ClientIn = INVALID_HANDLE_VALUE, ClientOut = INVALID_HANDLE_VALUE;
@@ -702,15 +702,29 @@ CheckNodePtSequence(DWORD Flags)
     ok(PipeIn != INVALID_HANDLE_VALUE && PipeOut != INVALID_HANDLE_VALUE,
        "CreateNamedPipe failed: %lu\n", GetLastError());
     if (PipeIn == INVALID_HANDLE_VALUE || PipeOut == INVALID_HANDLE_VALUE) goto Cleanup;
-    ClientIn = CreateFileW(InName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
-    ClientOut = CreateFileW(OutName, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
-    ok(ClientIn != INVALID_HANDLE_VALUE && ClientOut != INVALID_HANDLE_VALUE,
-       "Opening the pipe client ends failed: %lu\n", GetLastError());
-    if (ClientIn == INVALID_HANDLE_VALUE || ClientOut == INVALID_HANDLE_VALUE) goto Cleanup;
+    if (!LateConnect)
+    {
+        ClientIn = CreateFileW(InName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        ClientOut = CreateFileW(OutName, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+        ok(ClientIn != INVALID_HANDLE_VALUE && ClientOut != INVALID_HANDLE_VALUE,
+           "Opening the pipe client ends failed: %lu\n", GetLastError());
+        if (ClientIn == INVALID_HANDLE_VALUE || ClientOut == INVALID_HANDLE_VALUE) goto Cleanup;
+    }
 
     Status = CreatePty(Size, PipeIn, PipeOut, Flags, &Pty);
     ok(Status == S_OK, "CreatePseudoConsole(flags %lx) failed: %08lx\n", Flags, Status);
     if (Status != S_OK) goto Cleanup;
+    if (LateConnect)
+    {
+        /* node-pty opens the client ends only after the pseudoconsole exists; the host
+         * must wait for the terminal instead of failing on the listening pipe. */
+        Sleep(500);
+        ClientIn = CreateFileW(InName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        ClientOut = CreateFileW(OutName, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+        ok(ClientIn != INVALID_HANDLE_VALUE && ClientOut != INVALID_HANDLE_VALUE,
+           "Opening the pipe client ends late failed: %lu\n", GetLastError());
+        if (ClientIn == INVALID_HANDLE_VALUE || ClientOut == INVALID_HANDLE_VALUE) goto Cleanup;
+    }
     CloseHandle(PipeIn);
     PipeIn = INVALID_HANDLE_VALUE;
     CloseHandle(PipeOut);
@@ -815,8 +829,9 @@ START_TEST(ConPty)
         CheckForgedRequests();
         CheckCloseWithInheritingChild(ExePath);
         CheckLargeCreate(ExePath);
-        CheckNodePtSequence(0x6);   /* RESIZE_QUIRK | WIN32_INPUT_MODE */
-        CheckNodePtSequence(0x7);   /* ... | INHERIT_CURSOR */
-        CheckNodePtSequence(0x8);   /* PASSTHROUGH (Windows 11) */
+        CheckNodePtSequence(0x6, FALSE);   /* RESIZE_QUIRK | WIN32_INPUT_MODE */
+        CheckNodePtSequence(0x7, FALSE);   /* ... | INHERIT_CURSOR */
+        CheckNodePtSequence(0x8, FALSE);   /* PASSTHROUGH (Windows 11) */
+        CheckNodePtSequence(0x6, TRUE);    /* client ends connected after CreatePseudoConsole */
     }
 }
