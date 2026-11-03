@@ -29,6 +29,8 @@
 #define WIN32_NO_STATUS
 #define _INC_WINDOWS
 #define COBJMACROS
+/* HRESULT_FROM_WIN32(RegDeleteKey...) must call the function once (the macro would repeat the call) */
+#define INLINE_HRESULT_FROM_WIN32 1
 
 #undef _WIN32_WINNT
 #define _WIN32_WINNT _WIN32_WINNT_WS03
@@ -2922,6 +2924,44 @@ static int csidl_from_id( const KNOWNFOLDERID *id )
 }
 
 #ifdef __REACTOS__
+#ifndef KFDF_NO_REDIRECT_UI
+#define KFDF_NO_REDIRECT_UI 0x40 /* KF_DEFINITION_FLAGS of Windows 10 */
+#endif
+/* The known folders of Windows 10: definitions, as enumerated by IKnownFolderManager on the oracle */
+struct kf_def
+{
+    GUID id;
+    KF_CATEGORY category;
+    const WCHAR *name;
+    GUID parent;
+    const WCHAR *relpath;
+    const WCHAR *parsing;
+    DWORD attributes;
+    DWORD flags;            /* KF_DEFINITION_FLAGS */
+    GUID ftid;
+    const WCHAR *security;
+    const WCHAR *stream_type;
+    const WCHAR *init_handler;
+    BOOL noreg;             /* Windows has no FolderDescriptions key for it */
+};
+
+static const struct kf_def known_folder_defs[] =
+{
+#include "knownfolder_table.h"
+};
+
+static const struct kf_def *kf_find_def( const KNOWNFOLDERID *id )
+{
+    UINT i;
+    for (i = 0; i < ARRAY_SIZE(known_folder_defs); i++)
+        if (IsEqualGUID( &known_folder_defs[i].id, id )) return &known_folder_defs[i];
+    return NULL;
+}
+
+static HRESULT kf_get_path_by_definition( const KNOWNFOLDERID *id, DWORD flags, WCHAR **ret_path );
+#endif
+
+#ifdef __REACTOS__
 INT SHGetSpecialFolderID(_In_ LPCWSTR pszName)
 {
     UINT csidl;
@@ -4625,6 +4665,10 @@ HRESULT WINAPI SHGetSpecialFolderLocation(
     return hr;
 }
 
+#ifdef __REACTOS__
+static HRESULT get_known_folder_registry_path(REFKNOWNFOLDERID rfid, LPWSTR lpStringGuid, LPWSTR *lpPath);
+#endif
+
 /*************************************************************************
  * SHGetKnownFolderPath           [SHELL32.@]
  */
@@ -4655,14 +4699,37 @@ HRESULT WINAPI SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD flags, HANDLE t
         flags &= ~KF_FLAG_DONT_VERIFY;
 #endif
 
-    if (folder < 0)
-        return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
-
 #ifdef __REACTOS__
+    /* As on Windows: a folder known by its definition only (no CSIDL, or one the CSIDL code does not give out,
+     * such as the libraries or the game tasks) has the path of its definition: parent and relative path */
+    if (folder < 0)
+    {
+        if (!kf_find_def( rfid ))
+        {
+            WCHAR *regpath = NULL;
+            HKEY key;
+            /* a folder registered by an application */
+            if (FAILED(get_known_folder_registry_path( rfid, NULL, &regpath )) ||
+                RegOpenKeyExW( HKEY_LOCAL_MACHINE, regpath, 0, KEY_READ, &key ))
+            {
+                free( regpath );
+                return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
+            }
+            RegCloseKey( key );
+            free( regpath );
+        }
+        return kf_get_path_by_definition( rfid, flags, ret_path );
+    }
+
     /* As on Windows: a virtual folder (Computer, Control Panel, Printers, Network...) has no path;
      * the path of the table (a parsing name below the system folder for some) is not given out */
     if (CSIDL_Data[folder].category == KF_CATEGORY_VIRTUAL)
         return E_FAIL;
+    if (CSIDL_Data[folder].type == CSIDL_Type_Disallowed && kf_find_def( rfid ))
+        return kf_get_path_by_definition( rfid, flags, ret_path );
+#else
+    if (folder < 0)
+        return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
 #endif
 
 #ifndef __REACTOS__
@@ -4813,6 +4880,301 @@ static HRESULT get_known_folder_dword(const WCHAR *registryPath, const WCHAR *va
     return HRESULT_FROM_WIN32(RegGetValueW(HKEY_LOCAL_MACHINE, registryPath, value, RRF_RT_DWORD, &dwType, out, &dwSize));
 }
 
+#ifdef __REACTOS__
+static LONG kf_generation; /* changes with every registration, unregistration and redirection */
+
+#define KF_REG_FOLDERDESCRIPTIONS L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FolderDescriptions"
+#define KF_REG_USERSHELLFOLDERS L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders"
+
+static WCHAR *kf_dup_wstr(const WCHAR *s)
+{
+    WCHAR *r;
+    if (!s) return NULL;
+    r = CoTaskMemAlloc((lstrlenW(s) + 1) * sizeof(WCHAR));
+    if (r) lstrcpyW(r, s);
+    return r;
+}
+
+/* a string value, unexpanded, in CoTaskMem; NULL when absent */
+static WCHAR *kf_reg_wstr(HKEY key, const WCHAR *value)
+{
+    DWORD size = 0;
+    WCHAR *r;
+    if (RegGetValueW(key, NULL, value, RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND, NULL, NULL, &size))
+        return NULL;
+    r = CoTaskMemAlloc(size + sizeof(WCHAR));
+    if (!r) return NULL;
+    if (RegGetValueW(key, NULL, value, RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND, NULL, r, &size))
+    {
+        CoTaskMemFree(r);
+        return NULL;
+    }
+    r[size / sizeof(WCHAR)] = 0;
+    return r;
+}
+
+/* a string value of a subkey, with its environment strings expanded; NULL when absent */
+static WCHAR *kf_reg_wstr_expanded(HKEY root, const WCHAR *subkey, const WCHAR *value)
+{
+    HKEY key;
+    DWORD type, size = 0, len;
+    WCHAR *r = NULL, *x;
+
+    if (RegOpenKeyExW(root, subkey, 0, KEY_READ, &key)) return NULL;
+    if (!RegQueryValueExW(key, value, NULL, &type, NULL, &size) && (type == REG_SZ || type == REG_EXPAND_SZ) &&
+        (r = CoTaskMemAlloc(size + sizeof(WCHAR))))
+    {
+        if (RegQueryValueExW(key, value, NULL, &type, (BYTE *)r, &size))
+        {
+            CoTaskMemFree(r);
+            r = NULL;
+        }
+        else
+        {
+            r[size / sizeof(WCHAR)] = 0;
+            if (type == REG_EXPAND_SZ && (len = ExpandEnvironmentStringsW(r, NULL, 0)) &&
+                (x = CoTaskMemAlloc(len * sizeof(WCHAR))))
+            {
+                ExpandEnvironmentStringsW(r, x, len);
+                CoTaskMemFree(r);
+                r = x;
+            }
+        }
+    }
+    RegCloseKey(key);
+    return r;
+}
+
+static BOOL kf_reg_dword(HKEY key, const WCHAR *value, DWORD *out)
+{
+    DWORD size = sizeof(DWORD);
+    return !RegGetValueW(key, NULL, value, RRF_RT_DWORD, NULL, out, &size);
+}
+
+static void kf_free_definition(KNOWNFOLDER_DEFINITION *kfd)
+{
+    CoTaskMemFree(kfd->pszName);
+    CoTaskMemFree(kfd->pszDescription);
+    CoTaskMemFree(kfd->pszRelativePath);
+    CoTaskMemFree(kfd->pszParsingName);
+    CoTaskMemFree(kfd->pszTooltip);
+    CoTaskMemFree(kfd->pszLocalizedName);
+    CoTaskMemFree(kfd->pszIcon);
+    CoTaskMemFree(kfd->pszSecurity);
+    ZeroMemory(kfd, sizeof(*kfd));
+}
+
+static const struct { const WCHAR *name; DWORD flag; } kf_flag_values[] =
+{
+    { L"LocalRedirectOnly",   KFDF_LOCAL_REDIRECT_ONLY },
+    { L"Roamable",            KFDF_ROAMABLE },
+    { L"PreCreate",           KFDF_PRECREATE },
+    { L"Stream",              KFDF_STREAM },
+    { L"PublishExpandedPath", KFDF_PUBLISHEXPANDEDPATH },
+};
+
+/* The definition of a known folder: its FolderDescriptions key (a registered or modified folder),
+ * else the table of Windows 10. The strings are in CoTaskMem. */
+static HRESULT kf_read_definition(const KNOWNFOLDERID *id, KNOWNFOLDER_DEFINITION *kfd)
+{
+    WCHAR *regpath = NULL, *s;
+    HKEY key;
+    HRESULT hr;
+    DWORD dw, i;
+    const struct kf_def *def;
+
+    ZeroMemory(kfd, sizeof(*kfd));
+    hr = get_known_folder_registry_path(id, NULL, &regpath);
+    if (FAILED(hr)) return hr;
+    if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, regpath, 0, KEY_READ, &key))
+    {
+        free(regpath);
+        if (!kf_reg_dword(key, L"Category", &dw) || !(kfd->pszName = kf_reg_wstr(key, L"Name")))
+        {
+            RegCloseKey(key);
+            kf_free_definition(kfd);
+            return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+        }
+        kfd->category = dw;
+        if ((s = kf_reg_wstr(key, L"ParentFolder")))
+        {
+            if (FAILED(IIDFromString(s, &kfd->fidParent))) ZeroMemory(&kfd->fidParent, sizeof(GUID));
+            CoTaskMemFree(s);
+        }
+        else if ((def = kf_find_def(id)))
+            kfd->fidParent = def->parent; /* as Windows: the profile folder is the parent of its folders without a ParentFolder value */
+        if (kf_reg_dword(key, L"Attributes", &dw)) kfd->dwAttributes = dw;
+        kfd->pszRelativePath = kf_reg_wstr(key, L"RelativePath");
+        kfd->pszParsingName = kf_reg_wstr(key, L"ParsingName");
+        kfd->pszSecurity = kf_reg_wstr(key, L"Security");
+        if ((s = kf_reg_wstr(key, L"FolderTypeID")))
+        {
+            if (FAILED(IIDFromString(s, &kfd->ftidType))) ZeroMemory(&kfd->ftidType, sizeof(GUID));
+            CoTaskMemFree(s);
+        }
+        for (i = 0; i < ARRAY_SIZE(kf_flag_values); i++)
+            if (kf_reg_dword(key, kf_flag_values[i].name, &dw) && dw)
+                kfd->kfdFlags |= kf_flag_values[i].flag;
+        if (kf_reg_dword(key, L"DefinitionFlags", &dw)) kfd->kfdFlags |= dw;
+        RegCloseKey(key);
+        return S_OK;
+    }
+    free(regpath);
+
+    def = kf_find_def(id);
+    if (!def) return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    kfd->category = def->category;
+    kfd->pszName = kf_dup_wstr(def->name);
+    kfd->fidParent = def->parent;
+    kfd->pszRelativePath = kf_dup_wstr(def->relpath);
+    kfd->pszParsingName = kf_dup_wstr(def->parsing);
+    kfd->pszSecurity = kf_dup_wstr(def->security);
+    kfd->dwAttributes = def->attributes;
+    kfd->kfdFlags = def->flags;
+    kfd->ftidType = def->ftid;
+    return S_OK;
+}
+
+/* As on Windows: only the per-user and the common folders can be redirected, but not the local
+ * application data folders (oracle, IKnownFolder::GetRedirectionCapabilities of all 139 folders) */
+static KF_REDIRECTION_CAPABILITIES kf_redirection_caps(const KNOWNFOLDERID *id)
+{
+    KNOWNFOLDER_DEFINITION kfd;
+    KF_REDIRECTION_CAPABILITIES caps = 0;
+
+    if (FAILED(kf_read_definition(id, &kfd))) return 0;
+    if ((kfd.category == KF_CATEGORY_PERUSER || kfd.category == KF_CATEGORY_COMMON) &&
+        !IsEqualGUID(id, &FOLDERID_LocalAppData) && !IsEqualGUID(id, &FOLDERID_LocalAppDataLow))
+        caps = KF_REDIRECTION_CAPABILITIES_REDIRECTABLE;
+    kf_free_definition(&kfd);
+    return caps;
+}
+
+static HRESULT kf_path_from_definition(const KNOWNFOLDERID *id, DWORD flags, int depth, WCHAR **ret);
+
+/* the path of a parent folder: the folders with a CSIDL by their own code, others by their definition */
+static HRESULT kf_parent_path(const KNOWNFOLDERID *id, DWORD flags, int depth, WCHAR **ret)
+{
+    int csidl = csidl_from_id(id);
+
+    if (csidl >= 0 && CSIDL_Data[csidl].type != CSIDL_Type_Disallowed && CSIDL_Data[csidl].category != KF_CATEGORY_VIRTUAL)
+        return SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY | (flags & KF_FLAG_DEFAULT_PATH), NULL, ret);
+    return kf_path_from_definition(id, flags, depth, ret);
+}
+
+/* The path of a folder from its definition: the redirection, else the path of the parent
+ * (\ the relative path). Used for the folders that have no CSIDL and the registered ones. */
+static HRESULT kf_path_from_definition(const KNOWNFOLDERID *id, DWORD flags, int depth, WCHAR **ret)
+{
+    KNOWNFOLDER_DEFINITION kfd;
+    WCHAR sGuid[39], *parent = NULL, *path = NULL;
+    HRESULT hr;
+
+    *ret = NULL;
+    if (depth > 8) return E_FAIL;
+    hr = kf_read_definition(id, &kfd);
+    if (FAILED(hr)) return hr;
+    if (kfd.category == KF_CATEGORY_VIRTUAL)
+    {
+        kf_free_definition(&kfd);
+        return E_FAIL;
+    }
+
+    if (!(flags & KF_FLAG_DEFAULT_PATH) &&
+        (kfd.category == KF_CATEGORY_PERUSER || kfd.category == KF_CATEGORY_COMMON))
+    {
+        HKEY root = kfd.category == KF_CATEGORY_COMMON ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER;
+
+        StringFromGUID2(id, sGuid, ARRAY_SIZE(sGuid));
+        path = kf_reg_wstr_expanded(root, KF_REG_USERSHELLFOLDERS, sGuid);
+        if (path)
+        {
+            *ret = path;
+            kf_free_definition(&kfd);
+            return S_OK;
+        }
+    }
+
+    if (!IsEqualGUID(&kfd.fidParent, &GUID_NULL))
+    {
+        hr = kf_parent_path(&kfd.fidParent, flags, depth + 1, &parent);
+        if (FAILED(hr)) goto done;
+    }
+
+    if (!parent && (!kfd.pszRelativePath || !*kfd.pszRelativePath))
+    {
+        /* the per-user data folders of the system that are fixed, without a relative path in their definition:
+         * as on Windows (oracle SHGetKnownFolderPath with KF_FLAG_DEFAULT_PATH) below the roaming application data */
+        static const struct { GUID id; const WCHAR *path; } fixed[] =
+        {
+            { {0x915221fb,0x9efe,0x4bda,{0x8f,0xd7,0xf7,0x8d,0xca,0x77,0x4f,0x87}}, L"Microsoft\\Credentials" },        /* CredentialManager */
+            { {0xb88f4daa,0xe7bd,0x49a9,{0xb7,0x4d,0x02,0x88,0x5a,0x5d,0xc7,0x65}}, L"Microsoft\\Crypto" },             /* CryptoKeys */
+            { {0x10c07cd0,0xef91,0x4567,{0xb8,0x50,0x44,0x8b,0x77,0xcb,0x37,0xf9}}, L"Microsoft\\Protect" },            /* DpapiKeys */
+            { {0x54eed2e0,0xe7ca,0x4fdb,{0x91,0x48,0x0f,0x42,0x47,0x29,0x1c,0xfa}}, L"Microsoft\\SystemCertificates" }, /* SystemCertificates */
+        };
+        UINT i;
+
+        for (i = 0; i < ARRAY_SIZE(fixed); i++)
+            if (IsEqualGUID(id, &fixed[i].id))
+            {
+                hr = kf_parent_path(&FOLDERID_RoamingAppData, flags, depth + 1, &parent);
+                if (FAILED(hr)) goto done;
+                kfd.pszRelativePath = kf_dup_wstr(fixed[i].path);
+                break;
+            }
+    }
+
+    if (kfd.pszRelativePath && *kfd.pszRelativePath)
+    {
+        path = CoTaskMemAlloc(((parent ? lstrlenW(parent) + 1 : 0) + lstrlenW(kfd.pszRelativePath) + 1) * sizeof(WCHAR));
+        if (!path) { hr = E_OUTOFMEMORY; goto done; }
+        path[0] = 0;
+        if (parent)
+        {
+            lstrcpyW(path, parent);
+            lstrcatW(path, L"\\");
+        }
+        lstrcatW(path, kfd.pszRelativePath);
+    }
+    else if (parent)
+    {
+        path = parent;
+        parent = NULL;
+    }
+    else
+    {
+        hr = HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+        goto done;
+    }
+    *ret = path;
+    hr = S_OK;
+done:
+    CoTaskMemFree(parent);
+    kf_free_definition(&kfd);
+    return hr;
+}
+
+static HRESULT kf_get_path_by_definition(const KNOWNFOLDERID *id, DWORD flags, WCHAR **ret_path)
+{
+    HRESULT hr = kf_path_from_definition(id, flags, 0, ret_path);
+
+    if (FAILED(hr)) return hr;
+    if (flags & KF_FLAG_CREATE)
+        SHCreateDirectoryExW(NULL, *ret_path, NULL);
+    else if (!(flags & KF_FLAG_DONT_VERIFY))
+    {
+        DWORD attr = GetFileAttributesW(*ret_path);
+        if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            hr = HRESULT_FROM_WIN32(attr == INVALID_FILE_ATTRIBUTES ? GetLastError() : ERROR_FILE_NOT_FOUND);
+            CoTaskMemFree(*ret_path);
+            *ret_path = NULL;
+        }
+    }
+    return hr;
+}
+#endif
+
 /*
  * Internal function to get place where folder redirection information are stored.
  *
@@ -4877,9 +5239,19 @@ static HRESULT redirect_known_folder(
     hr = get_known_folder_registry_path(rfid, NULL, &lpRegistryPath);
 
     if(SUCCEEDED(hr))
+#ifdef __REACTOS__
+        hr = get_known_folder_path_by_id(rfid, lpRegistryPath, KF_FLAG_DONT_VERIFY, &lpSrcPath);
+#else
         hr = get_known_folder_path_by_id(rfid, lpRegistryPath, 0, &lpSrcPath);
+#endif
 
     free(lpRegistryPath);
+
+#ifdef __REACTOS__
+    /* As on Windows: the current location need not exist, it is only needed to copy its contents */
+    if(FAILED(hr) && !(flags & KF_REDIRECT_COPY_CONTENTS))
+        hr = S_OK;
+#endif
 
     /* get path to redirection storage */
     if(SUCCEEDED(hr))
@@ -4942,6 +5314,9 @@ static HRESULT redirect_known_folder(
     }
 
     CoTaskMemFree(lpSrcPath);
+#ifdef __REACTOS__
+    InterlockedIncrement(&kf_generation);
+#endif
 
     return hr;
 }
@@ -4953,6 +5328,10 @@ struct knownfolder
     LONG refs;
     KNOWNFOLDERID id;
     LPWSTR registryPath;
+#ifdef __REACTOS__
+    WCHAR *cached_path;  /* the last path found for flags 0, valid until a redirection or (un)registration */
+    LONG cached_generation;
+#endif
 };
 
 static inline struct knownfolder *impl_from_IKnownFolder( IKnownFolder *iface )
@@ -4976,6 +5355,9 @@ static ULONG WINAPI knownfolder_Release(
     {
         TRACE("destroying %p\n", knownfolder);
         free( knownfolder->registryPath );
+#ifdef __REACTOS__
+        CoTaskMemFree( knownfolder->cached_path );
+#endif
         free( knownfolder );
     }
     return refs;
@@ -5063,6 +5445,20 @@ static HRESULT WINAPI knownfolder_GetCategory(
 
     TRACE("%p, %p\n", knownfolder, pCategory);
 
+#ifdef __REACTOS__
+    {
+        KNOWNFOLDER_DEFINITION kfd;
+
+        /* a folder of the table has a category also without its registry key */
+        hr = kf_read_definition(&knownfolder->id, &kfd);
+        if (SUCCEEDED(hr))
+        {
+            *pCategory = kfd.category;
+            kf_free_definition(&kfd);
+        }
+        return hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) ? E_FAIL : hr;
+    }
+#endif
     /* we cannot get a category for a folder which is not registered */
     if(!knownfolder->registryPath)
         hr = E_FAIL;
@@ -5084,6 +5480,7 @@ static HRESULT WINAPI knownfolder_GetShellItem(
     return SHGetKnownFolderItem(&knownfolder->id, flags, NULL, riid, ppv);
 }
 
+#ifndef __REACTOS__ /* the paths are resolved by kf_path_from_definition */
 static HRESULT get_known_folder_path(
     LPWSTR sFolderId,
     LPWSTR registryPath,
@@ -5175,6 +5572,39 @@ static HRESULT get_known_folder_path(
     return hr;
 }
 
+#endif
+
+#ifdef __REACTOS__
+static HRESULT get_known_folder_path_by_id(
+    REFKNOWNFOLDERID folderId,
+    LPWSTR lpRegistryPath,
+    DWORD dwFlags,
+    LPWSTR *ppszPath)
+{
+    HRESULT hr;
+    DWORD dwAttributes;
+
+    TRACE("(%s, %s, 0x%08lx, %p)\n", debugstr_guid(folderId), debugstr_w(lpRegistryPath), dwFlags, ppszPath);
+
+    /* the folders with a CSIDL by the shell code (redirections of the shell folders included), the others
+     * (registered by an application, or known by their definition) by their definition */
+    hr = SHGetKnownFolderPath( folderId, dwFlags, NULL, ppszPath );
+    if (FAILED(hr)) return hr;
+
+    /* check if known folder really exists */
+    if (dwFlags & (KF_FLAG_DONT_VERIFY | KF_FLAG_CREATE)) return hr;
+    dwAttributes = GetFileAttributesW(*ppszPath);
+    if(dwAttributes == INVALID_FILE_ATTRIBUTES || !(dwAttributes & FILE_ATTRIBUTE_DIRECTORY) )
+    {
+        TRACE("directory %s not found\n", debugstr_w(*ppszPath));
+        hr = HRESULT_FROM_WIN32(dwAttributes == INVALID_FILE_ATTRIBUTES ? GetLastError() : ERROR_FILE_NOT_FOUND);
+        CoTaskMemFree(*ppszPath);
+        *ppszPath = NULL;
+    }
+
+    return hr;
+}
+#else
 static HRESULT get_known_folder_path_by_id(
     REFKNOWNFOLDERID folderId,
     LPWSTR lpRegistryPath,
@@ -5214,15 +5644,39 @@ static HRESULT get_known_folder_path_by_id(
     return hr;
 }
 
+#endif
+
 static HRESULT WINAPI knownfolder_GetPath(
     IKnownFolder *iface,
     DWORD dwFlags,
     LPWSTR *ppszPath)
 {
     struct knownfolder *knownfolder = impl_from_IKnownFolder( iface );
+#ifdef __REACTOS__
+    HRESULT hr;
+#endif
     TRACE("(%p, 0x%08lx, %p)\n", knownfolder, dwFlags, ppszPath);
 
+#ifdef __REACTOS__
+    if (!ppszPath) return E_INVALIDARG;
+    /* As on Windows: the presence of the folder is not checked again for a path that was found,
+     * until the folder is redirected or registered again (Wine test_knownFolders) */
+    if (!dwFlags && knownfolder->cached_path && knownfolder->cached_generation == kf_generation)
+    {
+        *ppszPath = kf_dup_wstr( knownfolder->cached_path );
+        return *ppszPath ? S_OK : E_OUTOFMEMORY;
+    }
+    hr = get_known_folder_path_by_id(&knownfolder->id, knownfolder->registryPath, dwFlags, ppszPath);
+    if (SUCCEEDED(hr) && !dwFlags)
+    {
+        CoTaskMemFree( knownfolder->cached_path );
+        knownfolder->cached_path = kf_dup_wstr( *ppszPath );
+        knownfolder->cached_generation = kf_generation;
+    }
+    return hr;
+#else
     return get_known_folder_path_by_id(&knownfolder->id, knownfolder->registryPath, dwFlags, ppszPath);
+#endif
 }
 
 static HRESULT WINAPI knownfolder_SetPath(
@@ -5235,6 +5689,11 @@ static HRESULT WINAPI knownfolder_SetPath(
 
     TRACE("(%p, 0x%08lx, %s)\n", knownfolder, dwFlags, debugstr_w(pszPath));
 
+#ifdef __REACTOS__
+    /* As on Windows: a folder that cannot be redirected (Windows, System, Profile, the virtual folders) is invalid */
+    if (!(kf_redirection_caps(&knownfolder->id) & KF_REDIRECTION_CAPABILITIES_REDIRECTABLE))
+        return E_INVALIDARG;
+#endif
     /* check if the known folder is registered */
     if(!knownfolder->registryPath)
         hr = E_FAIL;
@@ -5259,18 +5718,44 @@ static HRESULT WINAPI knownfolder_GetFolderType(
     IKnownFolder *iface,
     FOLDERTYPEID *pftid)
 {
+#ifdef __REACTOS__
+    struct knownfolder *knownfolder = impl_from_IKnownFolder( iface );
+    KNOWNFOLDER_DEFINITION kfd;
+    HRESULT hr;
+
+    TRACE("%p\n", pftid);
+
+    if (!pftid) return E_INVALIDARG;
+    hr = kf_read_definition(&knownfolder->id, &kfd);
+    if (FAILED(hr)) return hr;
+    /* As on Windows: E_FAIL for a folder without a folder type */
+    hr = IsEqualGUID(&kfd.ftidType, &GUID_NULL) ? E_FAIL : S_OK;
+    if (hr == S_OK) *pftid = kfd.ftidType;
+    kf_free_definition(&kfd);
+    return hr;
+#else
     FIXME("%p\n", pftid);
     return E_NOTIMPL;
+#endif
 }
 
 static HRESULT WINAPI knownfolder_GetRedirectionCapabilities(
     IKnownFolder *iface,
     KF_REDIRECTION_CAPABILITIES *pCapabilities)
 {
+#ifdef __REACTOS__
+    struct knownfolder *knownfolder = impl_from_IKnownFolder( iface );
+
+    TRACE("%p\n", pCapabilities);
+    if(!pCapabilities) return E_INVALIDARG;
+    *pCapabilities = kf_redirection_caps(&knownfolder->id);
+    return S_OK;
+#else
     FIXME("%p stub\n", pCapabilities);
     if(!pCapabilities) return E_INVALIDARG;
     *pCapabilities = KF_REDIRECTION_CAPABILITIES_DENY_ALL;
     return S_OK;
+#endif
 }
 
 static HRESULT WINAPI knownfolder_GetFolderDefinition(
@@ -5278,13 +5763,19 @@ static HRESULT WINAPI knownfolder_GetFolderDefinition(
     KNOWNFOLDER_DEFINITION *pKFD)
 {
     struct knownfolder *knownfolder = impl_from_IKnownFolder( iface );
+#ifndef __REACTOS__
     HRESULT hr;
     DWORD dwSize;
     WCHAR parentGuid[39];
+#endif
     TRACE("(%p, %p)\n", knownfolder, pKFD);
 
     if(!pKFD) return E_INVALIDARG;
 
+#ifdef __REACTOS__
+    /* the key of the folder, else its definition in the table of Windows 10 */
+    return kf_read_definition(&knownfolder->id, pKFD);
+#else
     ZeroMemory(pKFD, sizeof(*pKFD));
 
     /* required fields */
@@ -5314,6 +5805,7 @@ static HRESULT WINAPI knownfolder_GetFolderDefinition(
     get_known_folder_wstr(knownfolder->registryPath, L"ParsingName", &pKFD->pszParsingName);
 
     return S_OK;
+#endif
 }
 
 static const struct IKnownFolderVtbl knownfolder_vtbl =
@@ -5343,6 +5835,10 @@ static HRESULT knownfolder_create( struct knownfolder **knownfolder )
     kf->refs = 1;
     memset( &kf->id, 0, sizeof(kf->id) );
     kf->registryPath = NULL;
+#ifdef __REACTOS__
+    kf->cached_path = NULL;
+    kf->cached_generation = 0;
+#endif
 
     *knownfolder = kf;
 
@@ -5436,7 +5932,17 @@ static HRESULT WINAPI foldermanager_FolderIdToCsidl(
     TRACE("%s, %p\n", debugstr_guid(rfid), pnCsidl);
 
     csidl = csidl_from_id( rfid );
+#ifdef __REACTOS__
+    /* As on Windows: the CSIDLs end at CSIDL_CDBURN_AREA; the slots after it of the table are
+     * known folders without a CSIDL (oracle: E_INVALIDARG and -1 for all of them) */
+    if (csidl == -1 || csidl > CSIDL_CDBURN_AREA)
+    {
+        *pnCsidl = -1;
+        return E_INVALIDARG;
+    }
+#else
     if (csidl == -1) return E_INVALIDARG;
+#endif
     *pnCsidl = csidl;
     return S_OK;
 }
@@ -5464,6 +5970,9 @@ static BOOL is_knownfolder( struct foldermanager *fm, const KNOWNFOLDERID *id )
     HKEY hKey;
 
     /* TODO: move all entries from "CSIDL_Data" static array to registry known folder descriptions */
+#ifdef __REACTOS__
+    if (kf_find_def( id )) return TRUE;
+#endif
     for (i = 0; i < fm->num_ids; i++)
         if (IsEqualGUID( &fm->ids[i], id )) return TRUE;
 
@@ -5532,6 +6041,16 @@ static HRESULT WINAPI foldermanager_GetFolderByName(
 
         hr = get_known_folder_wstr( path, L"Name", &name );
         free( path );
+#ifdef __REACTOS__
+        if (FAILED( hr ))
+        {
+            /* a folder of the table that has no key (as on Windows) */
+            const struct kf_def *def = kf_find_def( &fm->ids[i] );
+            if (!def) continue;
+            name = kf_dup_wstr( def->name );
+            hr = name ? S_OK : E_OUTOFMEMORY;
+        }
+#endif
         if (FAILED( hr )) return hr;
 
         found = !wcsicmp( pszCanonicalName, name );
@@ -5561,7 +6080,8 @@ static HRESULT WINAPI foldermanager_GetFolderByName(
     return hr;
 }
 
-static HRESULT register_folder(const KNOWNFOLDERID *rfid, const KNOWNFOLDER_DEFINITION *pKFD)
+static HRESULT register_folder_ex(const KNOWNFOLDERID *rfid, const KNOWNFOLDER_DEFINITION *pKFD,
+                                  const WCHAR *stream_type, const WCHAR *init_handler)
 {
     HRESULT hr;
     HKEY hKey = NULL;
@@ -5599,6 +6119,36 @@ static HRESULT register_folder(const KNOWNFOLDERID *rfid, const KNOWNFOLDER_DEFI
         if(SUCCEEDED(hr) && pKFD->category != KF_CATEGORY_VIRTUAL && pKFD->pszRelativePath)
             hr = HRESULT_FROM_WIN32(RegSetValueExW(hKey, L"RelativePath", 0, REG_SZ, (LPBYTE)pKFD->pszRelativePath, (lstrlenW(pKFD->pszRelativePath)+1)*sizeof(WCHAR) ));
 
+#ifdef __REACTOS__
+        /* the other values of a definition, as Windows has them in its FolderDescriptions keys */
+        if(SUCCEEDED(hr) && pKFD->pszSecurity)
+            hr = HRESULT_FROM_WIN32(RegSetValueExW(hKey, L"Security", 0, REG_SZ, (LPBYTE)pKFD->pszSecurity, (lstrlenW(pKFD->pszSecurity)+1)*sizeof(WCHAR) ));
+
+        if(SUCCEEDED(hr) && !IsEqualGUID(&pKFD->ftidType, &GUID_NULL))
+        {
+            WCHAR sType[39];
+            StringFromGUID2(&pKFD->ftidType, sType, ARRAY_SIZE(sType));
+            hr = HRESULT_FROM_WIN32(RegSetValueExW(hKey, L"FolderTypeID", 0, REG_SZ, (LPBYTE)sType, sizeof(sType)));
+        }
+
+        if(SUCCEEDED(hr))
+        {
+            DWORD one = 1, defflags = pKFD->kfdFlags & KFDF_NO_REDIRECT_UI, i;
+
+            for (i = 0; i < ARRAY_SIZE(kf_flag_values) && SUCCEEDED(hr); i++)
+                if (pKFD->kfdFlags & kf_flag_values[i].flag)
+                    hr = HRESULT_FROM_WIN32(RegSetValueExW(hKey, kf_flag_values[i].name, 0, REG_DWORD, (LPBYTE)&one, sizeof(one)));
+            if (SUCCEEDED(hr) && defflags)
+                hr = HRESULT_FROM_WIN32(RegSetValueExW(hKey, L"DefinitionFlags", 0, REG_DWORD, (LPBYTE)&defflags, sizeof(defflags)));
+        }
+
+        if(SUCCEEDED(hr) && stream_type)
+            hr = HRESULT_FROM_WIN32(RegSetValueExW(hKey, L"StreamResourceType", 0, REG_SZ, (LPBYTE)stream_type, (lstrlenW(stream_type)+1)*sizeof(WCHAR) ));
+
+        if(SUCCEEDED(hr) && init_handler)
+            hr = HRESULT_FROM_WIN32(RegSetValueExW(hKey, L"InitFolderHandler", 0, REG_SZ, (LPBYTE)init_handler, (lstrlenW(init_handler)+1)*sizeof(WCHAR) ));
+#endif
+
         RegCloseKey(hKey);
 
         if(FAILED(hr))
@@ -5606,7 +6156,15 @@ static HRESULT register_folder(const KNOWNFOLDERID *rfid, const KNOWNFOLDER_DEFI
     }
 
     free(registryPath);
+#ifdef __REACTOS__
+    InterlockedIncrement(&kf_generation);
+#endif
     return hr;
+}
+
+static HRESULT register_folder(const KNOWNFOLDERID *rfid, const KNOWNFOLDER_DEFINITION *pKFD)
+{
+    return register_folder_ex(rfid, pKFD, NULL, NULL);
 }
 
 static HRESULT WINAPI foldermanager_RegisterFolder(
@@ -5632,6 +6190,9 @@ static HRESULT WINAPI foldermanager_UnregisterFolder(
         hr = HRESULT_FROM_WIN32(SHDeleteKeyW(HKEY_LOCAL_MACHINE, registryPath));
 
     free(registryPath);
+#ifdef __REACTOS__
+    InterlockedIncrement(&kf_generation);
+#endif
     return hr;
 }
 
@@ -5696,6 +6257,19 @@ static HRESULT foldermanager_create( void **ppv )
     fm->refs = 1;
     fm->num_ids = 0;
 
+#ifdef __REACTOS__
+    /* the 139 known folders of Windows 10, in its order */
+    fm->num_ids = ARRAY_SIZE(known_folder_defs);
+    fm->ids = malloc( fm->num_ids * sizeof(KNOWNFOLDERID) );
+    if (!fm->ids)
+    {
+        free( fm );
+        return E_OUTOFMEMORY;
+    }
+    for (i = 0; i < fm->num_ids; i++)
+        fm->ids[i] = known_folder_defs[i].id;
+    (void)j;
+#else
     for (i = 0; i < ARRAY_SIZE(CSIDL_Data); i++)
     {
         if (!IsEqualGUID( CSIDL_Data[i].id, &GUID_NULL )) fm->num_ids++;
@@ -5714,6 +6288,7 @@ static HRESULT foldermanager_create( void **ppv )
             j++;
         }
     }
+#endif
     TRACE("found %u known folders\n", fm->num_ids);
     *ppv = &fm->IKnownFolderManager_iface;
 
@@ -5853,6 +6428,63 @@ HRESULT WINAPI SHGetKnownFolderItem(REFKNOWNFOLDERID rfid, KNOWN_FOLDER_FLAG fla
 
 static void register_system_knownfolders(void)
 {
+#ifdef __REACTOS__
+    UINT i;
+
+    for (i = 0; i < ARRAY_SIZE(known_folder_defs); ++i)
+    {
+        const struct kf_def *def = &known_folder_defs[i];
+        KNOWNFOLDER_DEFINITION kfd;
+
+        if (def->noreg) continue;
+        ZeroMemory(&kfd, sizeof(kfd));
+        kfd.category         = def->category;
+        kfd.pszName          = (WCHAR *)def->name;
+        /* as Windows: no ParentFolder value for the folders of the profile folder (kf_read_definition restores it),
+         * except for the ones of Windows 10 that have it */
+        kfd.fidParent        = def->parent;
+        if (IsEqualGUID(&def->parent, &FOLDERID_Profile))
+        {
+            static const GUID explicit_profile_parent[] =
+            {
+                {0x2f8b40c2,0x83ed,0x48ee,{0xb3,0x83,0xa1,0xf1,0x57,0xec,0x6f,0x9a}}, /* Recorded Calls */
+                {0x31c0dd25,0x9439,0x4f12,{0xbf,0x41,0x7f,0xf4,0xed,0xa3,0x87,0x22}}, /* 3D Objects */
+                {0x7ad67899,0x66af,0x43ba,{0x91,0x56,0x6a,0xad,0x42,0xe6,0xc5,0x96}}, /* AppMods */
+                {0xa52bba46,0xe9e1,0x435f,{0xb3,0xd9,0x28,0xda,0xa6,0x48,0xc0,0xf6}}, /* OneDrive */
+            };
+            UINT j;
+
+            for (j = 0; j < ARRAY_SIZE(explicit_profile_parent); j++)
+                if (IsEqualGUID(&def->id, &explicit_profile_parent[j])) break;
+            if (j == ARRAY_SIZE(explicit_profile_parent))
+                kfd.fidParent = GUID_NULL;
+        }
+        kfd.pszRelativePath  = (WCHAR *)def->relpath;
+        kfd.pszParsingName   = (WCHAR *)def->parsing;
+        kfd.pszSecurity      = (WCHAR *)def->security;
+        kfd.dwAttributes     = def->attributes;
+        kfd.kfdFlags         = def->flags;
+        kfd.ftidType         = def->ftid;
+        register_folder_ex(&def->id, &kfd, def->stream_type, def->init_handler);
+    }
+    /* the one definition of Windows 10 with an explicit "PreCreate" of 0 */
+    {
+        static const GUID this_pc_desktop = {0x754ac886,0xdf64,0x4cba,{0x86,0xb5,0xf7,0xfb,0xf4,0xfb,0xce,0xf5}};
+        WCHAR *regpath = NULL;
+        DWORD zero = 0;
+        HKEY key;
+
+        if (SUCCEEDED(get_known_folder_registry_path(&this_pc_desktop, NULL, &regpath)))
+        {
+            if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, regpath, 0, KEY_SET_VALUE, &key))
+            {
+                RegSetValueExW(key, L"PreCreate", 0, REG_DWORD, (BYTE *)&zero, sizeof(zero));
+                RegCloseKey(key);
+            }
+            free(regpath);
+        }
+    }
+#else
     int i;
 
     for (i = 0; i < ARRAY_SIZE(CSIDL_Data); ++i)
@@ -5879,6 +6511,7 @@ static void register_system_knownfolders(void)
             register_folder(folder->id, &kfd);
         }
     }
+#endif
 }
 
 HRESULT SHELL_RegisterShellFolders(void)
@@ -5912,9 +6545,27 @@ HRESULT WINAPI SHSetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD flags, HANDLE t
     TRACE("%s, 0x%08lx, %p, %s\n", debugstr_guid(rfid), flags, token, debugstr_w(path));
 
     if (folder < 0)
-        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    {
+        WCHAR *regpath = NULL;
+        HKEY key;
+        HRESULT hr;
+
+        /* a folder registered by an application, or known by its definition only: redirected */
+        if (!path || FAILED(get_known_folder_registry_path(rfid, NULL, &regpath)))
+            return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, regpath, 0, KEY_READ, &key))
+        {
+            free(regpath);
+            return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+        }
+        RegCloseKey(key);
+        free(regpath);
+        hr = redirect_known_folder(rfid, NULL, 0, path, 0, NULL, NULL);
+        return hr;
+    }
 
     /* Folder redirection is not implemented: SHSetFolderPathW fails */
+    InterlockedIncrement(&kf_generation);
     return SHSetFolderPathW(folder, token, 0, path);
 }
 #endif
