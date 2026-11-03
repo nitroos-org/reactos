@@ -22,6 +22,12 @@
    can be found in /usr/share/common-licenses/GPL-3 file.
 */
 
+/* ReactOS: derived from dosfstools (fsck.fat), https://github.com/dosfstools/dosfstools
+ * Synced to release 4.2 (697f7692c951173c1b732901e13f72bd3182d575) plus later upstream
+ * fixes up to commit 289a48b9cb5b3c589391d28aa2515c325c932c7a.
+ * License: GPL-3.0-or-later (see COPYING in this directory). The ReactOS adaptation
+ * (NT I/O, fmifs output, no exit/stdio) is marked __REACTOS__ or lives in rosglue.h. */
+
 /* FAT32, VFAT, Atari format support, and various fixes additions May 1998
  * by Roman Hodek <Roman.Hodek@informatik.uni-erlangen.de> */
 
@@ -78,6 +84,13 @@ typedef unsigned __int64 __u64;
 #define VFAT_LN_ATTR (ATTR_RO | ATTR_HIDDEN | ATTR_SYS | ATTR_VOLUME)
 
 #define FAT_STATE_DIRTY 0x01
+#define FAT_NEED_SURFACE_TEST 0x02
+
+#define FAT16_FLAG_HARDDISK_ERROR 0x4000
+#define FAT16_FLAG_CLEAN_SHUTDOWN 0x8000
+
+#define FAT32_FLAG_HARDDISK_ERROR 0x4000000
+#define FAT32_FLAG_CLEAN_SHUTDOWN 0x8000000
 
 #ifdef __REACTOS__
 #include <pshpack1.h>
@@ -112,7 +125,7 @@ struct boot_sector {
     uint8_t reserved2[12];	/* Unused */
 
     uint8_t drive_number;	/* Logical Drive Number */
-    uint8_t reserved3;		/* Unused */
+    uint8_t boot_flags;		/* bit 0: dirty, bit 1: need surface test */
 
     uint8_t extended_sig;	/* Extended Signature (0x29) */
     uint32_t serial;		/* Serial number */
@@ -141,7 +154,7 @@ struct boot_sector_16 {
     uint32_t total_sect;	/* number of sectors (if sectors == 0) */
 
     uint8_t drive_number;	/* Logical Drive Number */
-    uint8_t reserved2;		/* Unused */
+    uint8_t boot_flags;		/* bit 0: dirty, bit 1: need surface test */
 
     uint8_t extended_sig;	/* Extended Signature (0x29) */
     uint32_t serial;		/* Serial number */
@@ -160,12 +173,12 @@ struct info_sector {
     uint32_t next_cluster;	/* Most recently allocated cluster. */
     uint8_t reserved2[12];
     uint32_t boot_sign;
-};
+} __attribute__ ((packed));
 
 typedef struct {
     uint8_t name[MSDOS_NAME];	/* name including extension */
     uint8_t attr;		/* attribute bits */
-    uint8_t lcase;		/* Case for base and extension */
+    uint8_t ntbyte;		/* Case for base and extension, encryption flags and padding size */
     uint8_t ctime_ms;		/* Creation time, milliseconds */
     uint16_t ctime;		/* Creation time */
     uint16_t cdate;		/* Creation date */
@@ -197,7 +210,7 @@ typedef struct {
 typedef struct {
     int nfats;
     off_t fat_start;
-    off_t fat_size;		/* unit is bytes */
+    unsigned int fat_size;	/* unit is bytes */
     unsigned int fat_bits;	/* size of a FAT entry */
     unsigned int eff_fat_bits;	/* # of used bits in a FAT entry */
     uint32_t root_cluster;	/* 0 for old-style root dir */
@@ -211,12 +224,14 @@ typedef struct {
     off_t backupboot_start;	/* 0 if not present */
     unsigned char *fat;
     DOS_FILE **cluster_owner;
-    char *label;
+    uint32_t serial;
+    char label[11];
 } DOS_FS;
 
 #ifndef __REACTOS__
-extern int interactive, rw, list, verbose, test, write_immed;
-extern int atari_format;
+extern int rw, list, verbose, test, no_spaces_in_sfns;
+extern long fat_table;
+extern int only_uppercase_label;
 extern unsigned n_files;
 extern void *mem_queue;
 #endif
@@ -233,8 +248,5 @@ extern void *mem_queue;
 
 /* return -16 as a number with fs->fat_bits bits */
 #define FAT_EXTD(fs)	(((1 << fs->eff_fat_bits)-1) & ~0xf)
-
-/* marker for files with no 8.3 name */
-#define FAT_NO_83NAME 32
 
 #endif

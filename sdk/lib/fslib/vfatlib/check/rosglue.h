@@ -40,6 +40,16 @@ extern PVOID FsCheckMemQueue;
 
 #define atari_format FALSE
 
+/* The ReactOS checker has no command line: the fsck.fat options that have no
+ * fmifs counterpart are fixed (no -F table selection, no -S, no -U). */
+#define no_spaces_in_sfns     0
+#define fat_table             0
+#define only_uppercase_label  0
+
+/* No stdio: all text goes through VfatPrint() to the fmifs callback */
+#define fprintf(stream, ...)  VfatPrint(__VA_ARGS__)
+#define puts(s)               VfatPrint("%s\n", (s))
+
 #define n_files   FsCheckTotalFiles
 #define mem_queue FsCheckMemQueue
 
