@@ -621,7 +621,19 @@ IopCheckResourceDescriptor(
 
     /* The HAL builds its .Raw and .Translated lists entry for entry */
     if (HalTranslatedList && HalTranslatedList->Count == ResourceList->Count)
+    {
         TranslatedFull = &HalTranslatedList->List[0];
+    }
+    else if (HalTranslatedList)
+    {
+        static BOOLEAN WarnedCount = FALSE;
+        if (!WarnedCount)
+        {
+            WarnedCount = TRUE;
+            DPRINT1("HAL .Translated list has %lu full descriptors, .Raw %lu; its processor vectors are compared as IRQs\n",
+                    HalTranslatedList->Count, ResourceList->Count);
+        }
+    }
 
     FullDescriptor = &ResourceList->List[0];
     for (i = 0; i < ResourceList->Count; i++)
@@ -637,7 +649,14 @@ IopCheckResourceDescriptor(
             if (TranslatedFull->InterfaceType != InterfaceType ||
                 TranslatedResList->Count != ResList->Count)
             {
+                static BOOLEAN Warned = FALSE;
+
                 /* Not the HAL's pair after all: compare everything */
+                if (!Warned)
+                {
+                    Warned = TRUE;
+                    DPRINT1("HAL .Raw and .Translated resource lists differ in shape; its processor vectors are compared as IRQs\n");
+                }
                 TranslatedResList = NULL;
                 TranslatedFull = NULL;
             }
@@ -1671,6 +1690,15 @@ IopDetectResourceConflict(
               ExFreePoolWithTag(KeyNameInformation, TAG_IO);
 
               HalTranslated = HalRaw ? IopQueryHalTranslatedList(ChildKey3, KeyValueInformation->DataLength) : NULL;
+              if (HalRaw && !HalTranslated)
+              {
+                  static BOOLEAN Warned = FALSE;
+                  if (!Warned)
+                  {
+                      Warned = TRUE;
+                      DPRINT1("HAL .Translated resource list missing or not the size of .Raw; its processor vectors are compared as IRQs\n");
+                  }
+              }
 
               if (IopCheckForResourceConflict(ResourceList,
                                               (PCM_RESOURCE_LIST)KeyValueInformation->Data,
