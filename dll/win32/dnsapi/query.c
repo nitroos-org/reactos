@@ -859,7 +859,7 @@ Query_Main(LPCWSTR Name,
                 StringCchCatA(HostWithDomainName, TempLen, network_info->DomainName);
             }
             RtlFreeHeap(RtlGetProcessHeap(), 0, network_info);
-            *QueryResultSet = (PDNS_RECORD)RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(DNS_RECORD));
+            *QueryResultSet = (PDNS_RECORD)RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_RECORD));
 
             if (NULL == *QueryResultSet)
             {
@@ -952,7 +952,7 @@ Query_Main(LPCWSTR Name,
                     RtlFreeHeap(RtlGetProcessHeap(), 0, CurrentName);
 
                 RtlFreeHeap(RtlGetProcessHeap(), 0, AnsiName);
-                *QueryResultSet = (PDNS_RECORD)RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(DNS_RECORD));
+                *QueryResultSet = (PDNS_RECORD)RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DNS_RECORD));
 
                 if (NULL == *QueryResultSet)
                 {
