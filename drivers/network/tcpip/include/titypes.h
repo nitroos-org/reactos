@@ -137,6 +137,7 @@ typedef struct _ADDRESS_FILE {
     HANDLE ProcessId;                     /* Creator process ID */
     PVOID SubProcessTag;                  /* Creator process tag */
     LARGE_INTEGER CreationTime;           /* Time of creation */
+    PVOID FwImage;                        /* Creator image path for the inbound filter (nitrofw.c) */
 
     /* The following members are used to control event notification */
 

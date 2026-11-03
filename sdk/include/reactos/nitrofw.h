@@ -211,13 +211,23 @@ typedef struct _NITROFW_POLICY
     ULONG Reserved2[2];     /* sizeof(NITROFW_POLICY) == 72 */
 } NITROFW_POLICY, *PNITROFW_POLICY;
 
+/*
+ * NITROFW_STATUS.KernelState. The first release ships the filter compiled in but NOT enforcing: the kernel
+ * only drops packets when HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters NitroFwEnforce
+ * (REG_DWORD) is 1 when a policy arrives (opt-in), the policy has NITROFW_POLICY_ENFORCE and an active
+ * profile is enabled. NitroFwDisable=1 there, or the boot option /NOFIREWALL, removes the device and the
+ * filter entirely at driver load (kill switch).
+ */
+#define NITROFW_KSTATE_OPTIN      0x00000001   /* NitroFwEnforce opt-in was set at the last push */
+#define NITROFW_KSTATE_ENFORCING  0x00000002   /* packets are being dropped per the installed policy */
+
 typedef struct _NITROFW_STATUS
 {
     ULONGLONG Generation;       /* of the installed policy, 0 = none */
     ULONG Flags;                /* NITROFW_POLICY_* of the installed policy */
     ULONG RuleCount;
     ULONG ActiveProfiles;
-    ULONG Reserved;
+    ULONG KernelState;          /* NITROFW_KSTATE_*: what the kernel does with the installed policy */
     ULONGLONG DroppedInbound;
     ULONGLONG DroppedOutbound;
     ULONGLONG PassedInbound;

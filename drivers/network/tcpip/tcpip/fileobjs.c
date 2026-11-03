@@ -13,6 +13,7 @@
 /* FIXME: including pstypes.h without ntifs fails */
 #include <ntifs.h>
 #include <ndk/pstypes.h>
+#include <nitrofwk.h>
 
 /* Uncomment for logging of connections and address files every 10 seconds */
 //#define LOG_OBJECTS
@@ -367,6 +368,9 @@ VOID AddrFileFree(
   RemoveEntryList(&AddrFile->ListEntry);
   TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
 
+  /* Off the list: the inbound filter can no longer find (and reference) the image */
+  NitroFwReleaseImage(AddrFile->FwImage);
+
   /* FIXME: Kill TCP connections on this address file object */
 
   /* Return pending requests with error */
@@ -631,6 +635,9 @@ NTSTATUS FileOpenAddress(
 
   /* Return address file object */
   Request->Handle.AddressHandle = AddrFile;
+
+  /* Creator image for program rules of the inbound filter (NULL when the filter is off) */
+  AddrFile->FwImage = NitroFwCaptureImage();
 
   /* Add address file to global list */
   ExInterlockedInsertTailList(
