@@ -57,6 +57,7 @@ list(APPEND SOURCE
     ActCtxResDirBound.c
     DefaultActCtx.c
     DiscardVirtualMemory.c
+    DeleteFilePosix.c
     DeleteTimerQueueEx.c
     DeriveCapabilitySidsFromName.c
     CallbackCompletion.c

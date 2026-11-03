@@ -61,6 +61,7 @@ extern void func_DebugTrapInterrupts(void);
 extern void func_ActCtxResDirBound(void);
 extern void func_DefaultActCtx(void);
 extern void func_DiscardVirtualMemory(void);
+extern void func_DeleteFilePosix(void);
 extern void func_DeleteTimerQueueEx(void);
 extern void func_DeriveCapabilitySidsFromName(void);
 extern void func_CallbackCompletion(void);
@@ -282,6 +283,7 @@ const struct test winetest_testlist[] =
     { "ActCtxResDirBound",          func_ActCtxResDirBound },
     { "DefaultActCtx",               func_DefaultActCtx },
     { "DiscardVirtualMemory", func_DiscardVirtualMemory },
+    { "DeleteFilePosix",             func_DeleteFilePosix },
     { "DeleteTimerQueueEx",          func_DeleteTimerQueueEx },
     { "DeriveCapabilitySidsFromName", func_DeriveCapabilitySidsFromName },
     { "CallbackCompletion", func_CallbackCompletion },
