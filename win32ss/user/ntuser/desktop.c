@@ -3540,11 +3540,49 @@ IntMapDesktopView(IN PDESKTOP pdesk)
     HeapMapping->UserMapping = UserBase;
     HeapMapping->Limit = ViewSize;
     HeapMapping->Count = 1;
+    HeapMapping->pdesk = pdesk;
     *PrevLink = HeapMapping;
 
     ObReferenceObject(pdesk);
 
     return STATUS_SUCCESS;
+}
+
+/*
+ * Drops the desktop heap views a terminating process still has.
+ * Every open desktop handle counts as a use of the view (IntDesktopObjectOpen).
+ * The handles a process did not close are closed by the object manager after
+ * the process callout, when the PROCESSINFO is gone and IntDesktopObjectClose
+ * cannot find the view any more: without this, the reference each view holds
+ * on its desktop would keep the desktop, its heap and its window station alive
+ * forever (a sandbox broker exiting with its alternate desktop open).
+ */
+VOID
+IntFreeProcessDesktopViews(
+    _In_ PEPROCESS Process,
+    _In_ PPROCESSINFO ppi)
+{
+    PW32HEAP_USER_MAPPING HeapMapping, Next;
+
+    /* Skip the first entry: it is the global user heap mapping */
+    HeapMapping = ppi->HeapMappings.Next;
+    ppi->HeapMappings.Next = NULL;
+
+    while (HeapMapping != NULL)
+    {
+        Next = HeapMapping->Next;
+
+        TRACE("ppi 0x%p releases heap view of desktop 0x%p, %lu uses left\n",
+              ppi, HeapMapping->pdesk, HeapMapping->Count);
+
+        if (Process == PsGetCurrentProcess())
+            MmUnmapViewOfSection(Process, HeapMapping->UserMapping);
+
+        ObDereferenceObject(HeapMapping->pdesk);
+        UserHeapFree(HeapMapping);
+
+        HeapMapping = Next;
+    }
 }
 
 BOOL
