@@ -402,6 +402,7 @@ BEGIN_OBJECT_MAP(ObjectMap)
     OBJECT_ENTRY(CLSID_EnumerableObjectCollection, CObjectCollection)
     OBJECT_ENTRY(CLSID_UserNotification, CUserNotification)
     OBJECT_ENTRY(CLSID_UserEventTimer, CUserEventTimer)
+    OBJECT_ENTRY(CLSID_KnownFolderManager, CKnownFolderManager)
 END_OBJECT_MAP()
 
 CShell32Module  gModule;

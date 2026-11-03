@@ -394,10 +394,12 @@ static NTSTATUS
 CheckVolume(
     IN PCWSTR VolumePath,
     IN LONG TimeOut,
-    IN BOOLEAN CheckOnlyIfDirty)
+    IN BOOLEAN CheckOnlyIfDirty,
+    IN BOOLEAN Quiet)
 {
     NTSTATUS Status;
     BOOLEAN Success;
+    BOOLEAN Announced = FALSE;
     PCWSTR DisplayName;
     UNICODE_STRING VolumePathU;
     ULONG Count;
@@ -422,7 +424,15 @@ CheckVolume(
     }
 
     DPRINT1("AUTOCHK: Checking %wZ\n", &VolumePathU);
-    PrintString("Verifying the file system on %S\r\n", DisplayName);
+    /*
+     * With "*" (every volume, only the dirty ones) say nothing about a volume
+     * that needs no check, or that has no file system we can check (RAW, CD...).
+     */
+    if (!Quiet)
+    {
+        PrintString("Verifying the file system on %S\r\n", DisplayName);
+        Announced = TRUE;
+    }
 
     /* Get the file system */
     Status = GetFileSystem(&VolumePathU,
@@ -431,11 +441,13 @@ CheckVolume(
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("GetFileSystem() failed, Status 0x%08lx\n", Status);
-        PrintString("  Unable to detect the file system of volume %S\r\n", DisplayName);
+        if (!Quiet)
+            PrintString("  Unable to detect the file system of volume %S\r\n", DisplayName);
         goto Quit;
     }
 
-    PrintString("  The file system type is %S.\r\n\r\n", FileSystem);
+    if (!Quiet)
+        PrintString("  The file system type is %S.\r\n\r\n", FileSystem);
 
     /* Find a suitable file system provider */
     for (Count = 0; Count < RTL_NUMBER_OF(FileSystems); ++Count)
@@ -446,7 +458,8 @@ CheckVolume(
     if (Count >= RTL_NUMBER_OF(FileSystems))
     {
         DPRINT1("File system %S not supported\n", FileSystem);
-        PrintString("  Unable to verify the volume. The %S file system is not supported.\r\n", FileSystem);
+        if (!Quiet)
+            PrintString("  Unable to verify the volume. The %S file system is not supported.\r\n", FileSystem);
         Status = STATUS_DLL_NOT_FOUND;
         goto Quit;
     }
@@ -456,7 +469,7 @@ CheckVolume(
     Success = FileSystems[Count].ChkdskFunc(&VolumePathU,
                                             ChkdskCallback,
                                             FALSE, // FixErrors
-                                            TRUE,  // Verbose
+                                            FALSE, // Verbose (no per-file listing: it dominates the time on a big volume)
                                             TRUE,  // CheckOnlyIfDirty
                                             FALSE, // ScanDrive
                                             NULL,
@@ -468,6 +481,13 @@ CheckVolume(
     /* Perform the check either when the volume is dirty or a check is forced */
     if (Success && ((Status == STATUS_DISK_CORRUPT_ERROR) || !CheckOnlyIfDirty))
     {
+        if (!Announced)
+        {
+            PrintString("Verifying the file system on %S\r\n", DisplayName);
+            PrintString("  The file system type is %S.\r\n\r\n", FileSystem);
+            Announced = TRUE;
+        }
+
         /* Let the user decide whether to repair */
         if (Status == STATUS_DISK_CORRUPT_ERROR)
         {
@@ -486,7 +506,7 @@ CheckVolume(
             Success = FileSystems[Count].ChkdskFunc(&VolumePathU,
                                                     ChkdskCallback,
                                                     TRUE,  // FixErrors
-                                                    TRUE,  // Verbose
+                                                    FALSE, // Verbose (no per-file listing: it dominates the time on a big volume)
                                                     CheckOnlyIfDirty,
                                                     FALSE, // ScanDrive
                                                     NULL,
@@ -502,7 +522,8 @@ CheckVolume(
     }
 
 Quit:
-    PrintString("\r\n\r\n");
+    if (Announced)
+        PrintString("\r\n\r\n");
     return Status;
 }
 
@@ -726,7 +747,7 @@ _main(
                 (DeviceMap.Query.DriveType[i] == DOSDEVICE_DRIVE_FIXED))
             {
                 _swprintf(VolumePath, L"\\??\\%c:", L'A' + i);
-                CheckVolume(VolumePath, TimeOut, CheckOnlyIfDirty);
+                CheckVolume(VolumePath, TimeOut, CheckOnlyIfDirty, CheckOnlyIfDirty);
             }
         }
     }
@@ -744,14 +765,14 @@ _main(
             if ((DeviceMap.Query.DriveMap & (1 << i)) &&
                 (DeviceMap.Query.DriveType[i] == DOSDEVICE_DRIVE_FIXED))
             {
-                CheckVolume(VolumePath, TimeOut, CheckOnlyIfDirty);
+                CheckVolume(VolumePath, TimeOut, CheckOnlyIfDirty, FALSE);
             }
         }
         else
         {
             /* Just perform the check on the specified volume */
             // TODO: Check volume type using NtQueryVolumeInformationFile(FileFsDeviceInformation)
-            CheckVolume(VolumePath, TimeOut, CheckOnlyIfDirty);
+            CheckVolume(VolumePath, TimeOut, CheckOnlyIfDirty, FALSE);
         }
     }
 

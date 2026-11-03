@@ -20,8 +20,33 @@
    can be found in /usr/share/common-licenses/GPL-3 file.
 */
 
+/* ReactOS: derived from dosfstools (fsck.fat), https://github.com/dosfstools/dosfstools
+ * Synced to release 4.2 (697f7692c951173c1b732901e13f72bd3182d575) plus later upstream
+ * fixes up to commit 289a48b9cb5b3c589391d28aa2515c325c932c7a.
+ * License: GPL-3.0-or-later (see COPYING in this directory). The ReactOS adaptation
+ * (NT I/O, fmifs output, no exit/stdio) is marked __REACTOS__ or lives in rosglue.h. */
+
 #ifndef _COMMON_H
 #define _COMMON_H
+
+#include <sys/types.h>
+
+#include <limits.h>
+#include <stdint.h>
+
+#ifndef OFF_MAX
+	#define OFF_MAX (off_t)((1ULL << (sizeof(off_t) * CHAR_BIT - 1)) - 1)
+#endif
+
+#ifndef __REACTOS__
+extern int interactive;
+extern int write_immed;
+extern int atari_format;	/* Use Atari variation of MS-DOS FS format */
+#endif
+
+/* program_name used for printing messages; no name will be printed when it is
+ * left as NULL */
+extern const char *program_name;
 
 #ifndef __REACTOS__
 void die(const char *msg, ...)
@@ -76,9 +101,57 @@ int min(int a, int b);
 
 /* Returns the smaller integer value of a and b. */
 
-char get_key(const char *valid, const char *prompt);
+int xasprintf(char **strp, const char *fmt, ...)
+    __attribute((format(printf, 2, 3)));
 
-/* Displays PROMPT and waits for user input. Only characters in VALID are
-   accepted. Terminates the program on EOF. Returns the character. */
+/* Runs asprintf() and terminates the program if it fails. */
+
+int get_choice(int noninteractive_result, const char *noninteractive_msg,
+	       int choices, ...);
+
+/*
+ * Display a numbered list of choices and accept user input to select one. If
+ * interactive is false, it will instead print noninteractive_msg and return
+ * noninteractive_result. The number of options must be given in choices and
+ * must be more than one and less than ten.
+ *
+ * The variable arguments are choices times <int val, const char *desc>, where
+ * val is the value that is returned when the user selects this option and desc
+ * is the string describing this option.
+ */
+
+char *get_line(const char *prompt, char *dest, size_t length);
+
+#ifdef __REACTOS__
+char get_key(const char *valid, const char *prompt);
+#endif
+
+/*
+ * Display prompt and read a line, placing it in dest with at most length-1
+ * characters plus a null byte. This behaves like printing a prompt and fgets()
+ * afterwards with the addition of temporarily enabling canonical input mode
+ * with echo if needed.
+ */
+
+#ifndef __REACTOS__
+void check_atari(void);
+
+/*
+ * ++roman: On m68k Linux, check if this is an Atari; if yes, turn on Atari
+ * variant of MS-DOS filesystem by default.
+ */
+
+uint32_t generate_volume_id(void);
+
+/*
+ * Generate a 32 bit volume ID
+ */
+#endif
+
+int validate_volume_label(char *doslabel);
+
+/*
+ * Validate volume label
+ */
 
 #endif

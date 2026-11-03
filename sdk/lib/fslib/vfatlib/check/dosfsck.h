@@ -5,6 +5,7 @@
 #define off_t __int64
 
 #include "check/common.h"
+#include "check/charconv.h"
 #include "check/fsck.fat.h"
 #include "check/io.h"
 #include "check/boot.h"

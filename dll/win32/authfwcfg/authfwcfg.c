@@ -218,7 +218,7 @@ static BOOL ParseProtocol(PCWSTR s, LONG *proto, WCHAR *icmp, SIZE_T cch)
         if (ok && comma) ok = ParseIcmpPart(comma + 1, &c, &ca);
         free(copy);
         if (!ok) return FALSE;
-        *proto = (s[4] == L'4') ? 1 : 58;
+        *proto = (s[5] == L'4') ? 1 : 58;
         { WCHAR a[8], b[8]; if (ta) wcscpy(a, L"*"); else _swprintf(a, L"%u", t); if (ca) wcscpy(b, L"*"); else _swprintf(b, L"%u", c);
           _swprintf(icmp, L"%s:%s", a, b); (void)cch; }
         return TRUE;

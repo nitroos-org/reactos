@@ -411,9 +411,11 @@ VfatChkdsk(
     {
         if (!(FsCheckFlags & FSCHECK_READ_WRITE) && !(FsCheckFlags & FSCHECK_INTERACTIVE))
         {
+            /* Dirty: tell autochk that a check is needed. This is not a failure of the
+             * query, so succeed as NtfsChkdsk does (autochk repairs only on success). */
             fs_close(FALSE);
             *ExitStatus = (ULONG)STATUS_DISK_CORRUPT_ERROR;
-            return FALSE;
+            return TRUE;
         }
     }
 
@@ -422,8 +424,10 @@ VfatChkdsk(
     if (verify)
         VfatPrint("Starting check/repair pass.\n");
 
-    while (read_fat(&fs), scan_root(&fs))
+    while (read_fat(&fs, 2), scan_root(&fs))
         qfree(&FsCheckMemQueue);
+
+    check_label(&fs);
 
     if (ScanDrive)
         fix_bad(&fs);
@@ -433,6 +437,8 @@ VfatChkdsk(
     else
         reclaim_free(&fs);
 
+    check_dirty_bits(&fs);
+
     free_clusters = update_free(&fs);
     file_unused();
     qfree(&FsCheckMemQueue);
@@ -440,11 +446,14 @@ VfatChkdsk(
     {
         FsCheckTotalFiles = 0;
         VfatPrint("Starting verification pass.\n");
-        read_fat(&fs);
+        read_fat(&fs, 2);
         scan_root(&fs);
+        check_label(&fs);
         reclaim_free(&fs);
+        check_dirty_bits(&fs);
         qfree(&FsCheckMemQueue);
     }
+    release_fat(&fs);
 
     if (fs_changed())
     {

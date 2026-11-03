@@ -39,7 +39,9 @@
  * ============================================================================
  *  MATCHING SEMANTICS the filter implements (mirrors Windows Defender Firewall's documented behaviour)
  * ============================================================================
- *  1. Loopback (127.0.0.0/8, ::1) always passes.
+ *  1. Loopback always passes: packets that arrive on the loopback interface. The address is not looked at:
+ *     a 127.0.0.0/8 source or destination on any other interface is not loopback and is filtered like
+ *     any other packet.
  *  2. If NITROFW_POLICY_ENFORCE is clear in Policy.Flags, nothing is filtered (the service clears it when
  *     the registry kill switch says so). Counters may still run.
  *  3. A packet is evaluated against the profiles in Policy.ActiveProfiles. Profile[i] covers profile
@@ -54,6 +56,14 @@
  *     local addresses, remote addresses, ICMP type/code, interface types, and (inbound TCP/UDP) the
  *     image path of the process that owns the local endpoint, matching AppPath case-insensitively.
  *     An empty list means "any". Port lists apply to TCP and UDP only; ICMP entries to protocol 1/58.
+ *     A rule with ICMP entries must have Protocol 1 (ICMPv4) or 58 (ICMPv6); the kernel rejects the policy
+ *     otherwise (with Protocol ANY the entries would match every non-ICMP packet).
+ *     Interface types: until a filter can resolve the type of the receiving interface, EVERY interface
+ *     counts as LAN. IfTypes must be non-zero and use only NITROFW_IFTYPE_* bits (else the policy is
+ *     rejected). A rule whose IfTypes includes NITROFW_IFTYPE_LAN applies. A rule without the LAN bit
+ *     (Wireless and/or RemoteAccess only) is skipped if it is an Allow rule, but still applies if it is a
+ *     Block rule: it fails closed instead of being silently ignored, so such a Block rule also blocks
+ *     LAN traffic.
  *  7. Outbound rules are carried for completeness; a filter that only implements the inbound path ignores
  *     rules with Direction == NITROFW_DIR_OUT and reports NITROFW_FEATURE_OUTBOUND clear in GET_VERSION.
  *  8. Service-name conditions (ServiceNameOffset) are advisory: a filter that cannot resolve the
@@ -211,14 +221,28 @@ typedef struct _NITROFW_POLICY
     ULONG Reserved2[2];     /* sizeof(NITROFW_POLICY) == 72 */
 } NITROFW_POLICY, *PNITROFW_POLICY;
 
+/*
+ * NITROFW_STATUS.KernelState. The first release ships the filter compiled in but NOT enforcing: the kernel
+ * only drops packets when HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters NitroFwEnforce
+ * (REG_DWORD) is 1 when a policy arrives (opt-in), the policy has NITROFW_POLICY_ENFORCE and an active
+ * profile is enabled. NitroFwDisable=1 there, or the boot option /NOFIREWALL, removes the device and the
+ * filter entirely at driver load (kill switch).
+ */
+#define NITROFW_KSTATE_OPTIN      0x00000001   /* NitroFwEnforce opt-in was set at the last push */
+#define NITROFW_KSTATE_ENFORCING  0x00000002   /* packets are being dropped per the installed policy */
+
 typedef struct _NITROFW_STATUS
 {
     ULONGLONG Generation;       /* of the installed policy, 0 = none */
     ULONG Flags;                /* NITROFW_POLICY_* of the installed policy */
     ULONG RuleCount;
     ULONG ActiveProfiles;
-    ULONG Reserved;
+    ULONG KernelState;          /* NITROFW_KSTATE_*: what the kernel does with the installed policy */
     ULONGLONG DroppedInbound;
     ULONGLONG DroppedOutbound;
     ULONGLONG PassedInbound;
+    ULONGLONG ImagesCaptured;   /* test counter: program-image resolutions attempted (0 while not enforcing a
+                                   policy with program rules). Optional: the kernel fills it only if the
+                                   output buffer is at least sizeof(NITROFW_STATUS), else the V1 size. */
 } NITROFW_STATUS, *PNITROFW_STATUS;
+#define NITROFW_STATUS_V1_SIZE  FIELD_OFFSET(NITROFW_STATUS, ImagesCaptured)

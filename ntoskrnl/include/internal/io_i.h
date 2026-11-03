@@ -121,6 +121,10 @@ UCHAR IopSetOperationLength[] =
     sizeof(FILE_VALID_DATA_LENGTH_INFORMATION),
     sizeof(FILE_NAME_INFORMATION), /* FileShortNameInformation: a ULONG length and the name, 8 bytes on both x86 and x64 */
     sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION),
+    0, 0, 0, 0, 0, 0, 0, 0,     /* 42-49 */
+    0, 0, 0, 0, 0, 0, 0, 0,     /* 50-57 */
+    0, 0, 0, 0, 0, 0,           /* 58-63 */
+    sizeof(ULONG),              /* 64 FileDispositionInformationEx: FILE_DISPOSITION_INFORMATION_EX (ULONG Flags), Windows 10 */
 };
 
 ACCESS_MASK IopQueryOperationAccess[] =
@@ -217,11 +221,16 @@ ACCESS_MASK IopSetOperationAccess[] =
     FILE_WRITE_DATA,
     DELETE,
     0,
+    0, 0, 0, 0, 0, 0, 0, 0,     /* 42-49 */
+    0, 0, 0, 0, 0, 0, 0, 0,     /* 50-57 */
+    0, 0, 0, 0, 0, 0,           /* 58-63 */
+    DELETE,                     /* 64 FileDispositionInformationEx */
 };
 
 C_ASSERT(RTL_NUMBER_OF(IopQueryOperationAccess) == RTL_NUMBER_OF(IopQueryOperationLength));
 C_ASSERT(RTL_NUMBER_OF(IopQueryOperationLength) == 60);
 C_ASSERT(RTL_NUMBER_OF(IopSetOperationAccess) == RTL_NUMBER_OF(IopSetOperationLength));
+C_ASSERT(RTL_NUMBER_OF(IopSetOperationLength) == 65);   /* indexed by FILE_INFORMATION_CLASS up to FileDispositionInformationEx (64) */
 
 //
 // Volume Information Classes

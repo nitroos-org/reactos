@@ -28,6 +28,7 @@ list(APPEND SOURCE
     tcpip/info.c
     tcpip/lock.c
     tcpip/main.c
+    tcpip/nitrofw.c
     tcpip/ninfo.c
     tcpip/proto.c
     tcpip/tinfo.c

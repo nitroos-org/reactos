@@ -87,6 +87,7 @@ list(APPEND SOURCE
     CDestinationList.h
     CUserEventTimer.cpp
     CUserEventTimer.h
+    CKnownFolderManager.h
     CUserNotification.cpp
     CDefaultContextMenu.cpp
     COpenWithMenu.cpp

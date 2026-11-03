@@ -20,21 +20,27 @@
    can be found in /usr/share/common-licenses/GPL-3 file.
 */
 
+/* ReactOS: derived from dosfstools (fsck.fat), https://github.com/dosfstools/dosfstools
+ * Synced to release 4.2 (697f7692c951173c1b732901e13f72bd3182d575) plus later upstream
+ * fixes up to commit 289a48b9cb5b3c589391d28aa2515c325c932c7a.
+ * License: GPL-3.0-or-later (see COPYING in this directory). The ReactOS adaptation
+ * (NT I/O, fmifs output, no exit/stdio) is marked __REACTOS__ or lives in rosglue.h. */
+
 #ifndef _CHECK_H
 #define _CHECK_H
 
-off_t alloc_rootdir_entry(DOS_FS * fs, DIR_ENT * de, const char *pattern, int gen_name);
-
-/* Allocate a free slot in the root directory for a new file. If gen_name is
-   true, the file name is constructed after 'pattern', which must include a %d
-   type format for printf and expand to exactly 11 characters. The name
-   actually used is written into the 'de' structure, the rest of *de is cleared.
-   The offset returned is to where in the filesystem the entry belongs. */
+void check_dirty_bits(DOS_FS * fs);
 
 int scan_root(DOS_FS * fs);
 
 /* Scans the root directory and recurses into all subdirectories. See check.c
    for all the details. Returns a non-zero integer if the filesystem has to
    be checked again. */
+
+
+void check_label(DOS_FS * fs);
+
+/* Checks the volume label from the root directory entry that is valid and
+ * matches the label stored in boot sector. */
 
 #endif

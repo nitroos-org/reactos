@@ -20,13 +20,24 @@
    can be found in /usr/share/common-licenses/GPL-3 file.
 */
 
+/* ReactOS: derived from dosfstools (fsck.fat), https://github.com/dosfstools/dosfstools
+ * Synced to release 4.2 (697f7692c951173c1b732901e13f72bd3182d575) plus later upstream
+ * fixes up to commit 289a48b9cb5b3c589391d28aa2515c325c932c7a.
+ * License: GPL-3.0-or-later (see COPYING in this directory). The ReactOS adaptation
+ * (NT I/O, fmifs output, no exit/stdio) is marked __REACTOS__ or lives in rosglue.h. */
+
 #ifndef _FAT_H
 #define _FAT_H
 
-void read_fat(DOS_FS * fs);
+void read_fat(DOS_FS * fs, int mode);
 
 /* Loads the FAT of the filesystem described by FS. Initializes the FAT,
    replaces broken FATs and rejects invalid cluster entries. */
+
+void release_fat(DOS_FS * fs);
+
+/* Release the FAT of the filesystem described by FS and free allocated memory.
+   Call it after finish work with FAT. */
 
 void get_fat(FAT_ENTRY * entry, void *fat, uint32_t cluster, DOS_FS * fs);
 
@@ -61,7 +72,7 @@ void set_owner(DOS_FS * fs, uint32_t cluster, DOS_FILE * owner);
 
 DOS_FILE *get_owner(DOS_FS * fs, uint32_t cluster);
 
-/* Returns the owner of the repective cluster or NULL if the cluster has no
+/* Returns the owner of the respective cluster or NULL if the cluster has no
    owner. */
 
 void fix_bad(DOS_FS * fs);

@@ -16,6 +16,7 @@
 
 #include <dispatch.h>
 #include <fileobjs.h>
+#include <nitrofwk.h>
 
 PDEVICE_OBJECT TCPDeviceObject   = NULL;
 PDEVICE_OBJECT UDPDeviceObject   = NULL;
@@ -888,7 +889,11 @@ VOID NTAPI TiUnload(
 {
 #if DBG
   KIRQL OldIrql;
+#endif
 
+    NitroFwUnload();
+
+#if DBG
     TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
     if (!IsListEmpty(&AddressFileListHead)) {
         TI_DbgPrint(MIN_TRACE, ("[TCPIP, TiUnload] Called. Open address file objects exists.\n"));
@@ -1122,6 +1127,9 @@ DriverEntry(
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = TiDispatch;
 
     DriverObject->DriverUnload = TiUnload;
+
+    /* NitroOS inbound filter (\\Device\\NitroFw); never fails the driver */
+    NitroFwInitialize(DriverObject);
 
     AddrChangeInitialize();
 

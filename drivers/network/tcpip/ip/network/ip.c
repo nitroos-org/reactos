@@ -12,6 +12,7 @@
 
 #define __LWIP_INET_H__
 #include "lwip/netifapi.h"
+#include <nitrofwk.h>
 
 
 LIST_ENTRY InterfaceListHead;
@@ -168,6 +169,10 @@ VOID IPDispatchProtocol(
         TI_DbgPrint(MIN_TRACE, ("Unrecognized datagram discarded.\n"));
         return;
     }
+
+    /* NitroOS inbound filter: the one place every complete received datagram passes */
+    if (!NITROFW_INBOUND_OK(Interface, IPPacket, Protocol))
+        return;
 
     NBResetNeighborTimeout(&SrcAddress);
 

@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     check/boot.c
+    check/charconv.c
     check/check.c
     check/common.c
     check/fat.c

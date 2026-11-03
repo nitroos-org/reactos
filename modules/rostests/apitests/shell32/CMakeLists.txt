@@ -9,6 +9,7 @@ list(APPEND SOURCE
     CFontsFolder.cpp
     CheckEscapes.cpp
     CIDLData.cpp
+    CKnownFolderManager.cpp
     CMyComputer.cpp
     CommandLineToArgvW.cpp
     CShellDesktop.cpp
