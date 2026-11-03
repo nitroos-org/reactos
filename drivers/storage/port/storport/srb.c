@@ -178,6 +178,14 @@ PortHandRequestToMiniport(
     PSCSI_REQUEST_BLOCK Srb = RequestReference->Srb;
     ULONG Generation;
 
+    /*
+     * An SRB storport completed after a restart is in use again. Not before this point: until
+     * now the packet may sit on the flow-control waiting lists, and a late completion of the
+     * old command must still be recognised (and ignored) rather than claim the new packet.
+     * From here on the packet is scheduled and counted, and HwBuildIo may complete it.
+     */
+    PortForgetSweptSrb(FdoExtension, Srb);
+
     /* BuildIo may complete the request itself, and then says so */
     if (HwInitData->HwBuildIo && !HwInitData->HwBuildIo(MiniportExtension, Srb))
         return;
@@ -225,10 +233,27 @@ PortDebugDeferredStartDpc(
     UNREFERENCED_PARAMETER(SystemArgument1);
     UNREFERENCED_PARAMETER(SystemArgument2);
 
-    DPRINT1("storport: fault knob: held back Srb %p goes to the miniport now (restarts %lu)\n",
-            RequestReference->Srb, FdoExtension->AdapterRestarts);
+    if (FdoExtension->DebugDeferStopping)
+    {
+        /* The adapter is going away (PortStopTimeouts waits for us): never reached the
+           miniport, so storport completes it */
+        DPRINT1("storport: fault knob: held back Srb %p aborted, the adapter stops\n", RequestReference->Srb);
+        if (PortClaimRequestCompletion(RequestReference))
+        {
+            RequestReference->Srb->SrbStatus = SRB_STATUS_ABORTED;
+            InterlockedPushEntrySList(&FdoExtension->CompletionList, &RequestReference->CompletionEntry);
+            KeInsertQueueDpc(&FdoExtension->Device->Dpc, NULL, NULL);
+        }
+    }
+    else
+    {
+        DPRINT1("storport: fault knob: held back Srb %p goes to the miniport now (restarts %lu)\n",
+                RequestReference->Srb, FdoExtension->AdapterRestarts);
+        PortHandRequestToMiniport(FdoExtension, RequestReference);
+    }
+
+    /* Last: PortStopTimeouts may free the adapter once this drops to zero */
     InterlockedDecrement(&FdoExtension->DebugDeferredPending);
-    PortHandRequestToMiniport(FdoExtension, RequestReference);
 }
 #endif
 
@@ -787,9 +812,6 @@ PortPdoScsi(
             }
             RequestReference = (PQUEUED_REQUEST_REFERENCE)Srb->OriginalRequest;
 
-            /* An SRB storport completed after a restart is in use again */
-            PortForgetSweptSrb(FdoExtension, Srb);
-
             /* Assign a tag to the SRB if it supports tagging */
             StorpAssignTagToSrb(PdoExtension, Srb);
 
@@ -837,9 +859,6 @@ PortPdoScsi(
                 break;
             }
             RequestReference = (PQUEUED_REQUEST_REFERENCE)Srb->OriginalRequest;
-
-            /* An SRB storport completed after a restart is in use again */
-            PortForgetSweptSrb(FdoExtension, Srb);
 
             /*
              * Call the non-flow-controlled scheduling function (it does nothing but the model is
