@@ -256,26 +256,6 @@ IopFindInterruptResource(
         }
     }
 
-    /*
-     * A shared, level-triggered line pinned to one IRQ is the line the device is wired to
-     * (a PCI device's INTx, offered as the alternative to its message interrupt): there is
-     * no other IRQ to pick. A device that has the same line in its boot configuration gets
-     * it without this search, and the final conflict check ignores conflicts, so do not
-     * fail here either. (On QEMU's pc machine the HAL's own resource report lists the
-     * line driver-exclusive, and the search above takes that for a conflict.)
-     */
-    if (IoDesc->ShareDisposition == CmResourceShareShared &&
-        !(IoDesc->Flags & CM_RESOURCE_INTERRUPT_LATCHED) &&
-        IoDesc->u.Interrupt.MinimumVector == IoDesc->u.Interrupt.MaximumVector)
-    {
-        Vector = IoDesc->u.Interrupt.MinimumVector;
-        CmDesc->u.Interrupt.Vector = Vector;
-        CmDesc->u.Interrupt.Level = Vector;
-        CmDesc->u.Interrupt.Affinity = (KAFFINITY)-1;
-        DPRINT1("Using the wired shared IRQ 0x%x despite a reported conflict\n", Vector);
-        return TRUE;
-    }
-
     DPRINT1("Failed to satisfy interrupt requirement with IRQ 0x%x-0x%x\n",
             IoDesc->u.Interrupt.MinimumVector,
             IoDesc->u.Interrupt.MaximumVector);
@@ -642,6 +622,7 @@ IopCheckResourceDescriptor(
     for (i = 0; i < ResourceList->Count; i++)
     {
         PCM_PARTIAL_RESOURCE_LIST ResList = &FullDescriptor->PartialResourceList;
+        INTERFACE_TYPE InterfaceType = FullDescriptor->InterfaceType;
         FullDescriptor = CmiGetNextResourceDescriptor(FullDescriptor);
 
         for (ii = 0; ii < ResList->Count; ii++)
@@ -649,6 +630,17 @@ IopCheckResourceDescriptor(
             /* Partial resource descriptors can be of variable size (CmResourceTypeDeviceSpecific),
                but only one is allowed and it must be the last one in the list! */
             PCM_PARTIAL_RESOURCE_DESCRIPTOR ResDesc2 = &ResList->PartialDescriptors[ii];
+
+            /*
+             * An interrupt the HAL reports for the Internal interface is a processor vector
+             * it keeps for itself (its raw "vector" is the IDT index: exceptions, APC/DPC,
+             * IPI, profile...), not a line of any bus. Compared as a bus IRQ, IDT entries
+             * 0x00-0x2F made every IRQ 0-15 conflict, so a device without a boot
+             * configuration (a PCI device offered its INTx line as the alternative to its
+             * message interrupt) could not be given any line.
+             */
+            if (ResDesc2->Type == CmResourceTypeInterrupt && InterfaceType == Internal)
+                continue;
 
             /* We don't care about shared resources */
             if (ResDesc->ShareDisposition == CmResourceShareShared &&
@@ -1310,7 +1302,12 @@ IopAssignDeviceResources(
        goto ByeBye;
    }
 
-   /* IopFixupResourceListWithRequirements should NEVER give us a conflicting list */
+   /*
+    * IopFixupResourceListWithRequirements should NEVER give us a conflicting list.
+    * Note this check cannot fire: with Silent = FALSE IopCheckResourceDescriptor only logs
+    * a conflict and reports none (see the end of that function), so a boot configuration
+    * that overlaps another device's resources is taken as it is.
+    */
    ASSERT(IopDetectResourceConflict(DeviceNode->ResourceList, FALSE, NULL) != STATUS_CONFLICTING_ADDRESSES);
 
 Finish:
