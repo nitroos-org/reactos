@@ -746,6 +746,14 @@ NvmeReadWrite(
         return;
     }
 
+    /* The data moves the way the buffer was locked for: a READ with only SRB_FLAGS_DATA_OUT
+       would have the controller write into pages locked for reading */
+    if (!(Srb->SrbFlags & (Write ? SRB_FLAGS_DATA_OUT : SRB_FLAGS_DATA_IN)))
+    {
+        NvmeFailSrb(Ext, Srb, NVME_SENSE_ILLEGAL_REQUEST, NVME_ASC_INVALID_CDB, 0);
+        return;
+    }
+
     /* A buffer too short for the blocks the CDB names is an error, not a shorter transfer:
        moving less than asked for and reporting success would lose data silently */
     if (((ULONGLONG)Blocks << Ns->BlockShift) > Srb->DataTransferLength)
