@@ -835,10 +835,13 @@ StorPortExtendedFunction(
             /* This API uses microseconds, KTIMER operate on 100 nanoseconds, multiply by 10
                to get the correct timer due time */
             MultiplyResult = RtlULongLongMult(TimerValue, 10ull, (PULONGLONG)&TimerDueTime.QuadPart);
-            if (!NT_SUCCESS(MultiplyResult)) {
+            if (!NT_SUCCESS(MultiplyResult) || TimerDueTime.QuadPart < 0) {
                 Status = STOR_STATUS_INVALID_PARAMETER;
                 break;
             }
+
+            /* Negative: relative to now. A positive due time is an absolute date */
+            TimerDueTime.QuadPart = -TimerDueTime.QuadPart;
 
             /* Initialize the DPC, context and set timer accordingly */
             TimerEntry->HwDeviceExtension = HwDeviceExtension;
@@ -1155,11 +1158,13 @@ StorPortGetUncachedExtension(
         return DeviceExtension->UncachedExtensionVirtualBase;
 
     // FIXME: Set DMA stuff here?
+    RtlZeroMemory(&DeviceDescription, sizeof(DeviceDescription));
     DeviceDescription.Version = DEVICE_DESCRIPTION_VERSION;
     DeviceDescription.Master = ConfigInfo->Master;
     DeviceDescription.ScatterGather = ConfigInfo->ScatterGather;
     DeviceDescription.DemandMode = ConfigInfo->DemandMode;
     DeviceDescription.Dma32BitAddresses = ConfigInfo->Dma32BitAddresses;
+    DeviceDescription.Dma64BitAddresses = (ConfigInfo->Dma64BitAddresses & SCSI_DMA64_MINIPORT_SUPPORTED) ? TRUE : FALSE;
     DeviceDescription.BusNumber = ConfigInfo->SystemIoBusNumber;
     DeviceDescription.DmaChannel = ConfigInfo->DmaChannel;
     DeviceDescription.InterfaceType = ConfigInfo->AdapterInterfaceType;
@@ -1526,6 +1531,9 @@ StorPortNotification(
                 if (!NT_SUCCESS(MultiplyResult)) {
                     break;
                 }
+
+                /* Negative: relative to now. A positive due time is an absolute date */
+                TimerDueTime.QuadPart = -TimerDueTime.QuadPart;
 
                 FdoExtension->TimerCallback = TimerRoutine;
                 KeSetTimer(&FdoExtension->Timer, TimerDueTime, &FdoExtension->TimerDpc);

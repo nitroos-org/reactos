@@ -291,7 +291,9 @@ typedef struct _FDO_DEVICE_EXTENSION
      * used but Eric didn't put them here. Need review.
      */
     PHW_INITIALIZATION_DATA HwInitData;
-    
+
+    /* Reported in the adapter and device descriptors: the miniport's Parameters\BusType */
+    STORAGE_BUS_TYPE BusType;
 } FDO_DEVICE_EXTENSION, *PFDO_DEVICE_EXTENSION;
 
 
@@ -537,6 +539,10 @@ TimerCallbackDpcRoutine(
     PVOID SystemArgument1,
     PVOID SystemArgument2
 );
+
+STORAGE_BUS_TYPE
+PortGetMiniportBusType(
+    _In_ PDRIVER_OBJECT DriverObject);
 
 PCSTR
 GetDeviceType(

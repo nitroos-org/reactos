@@ -8,6 +8,7 @@
 /* INCLUDES *******************************************************************/
 
 #include "precomp.h"
+#include <sptilib.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -125,7 +126,7 @@ FdoDeviceControlQueryProperty(
         AdapterDescriptor->AdapterScansDown = Miniport->PortConfig.AdapterScansDown;
         AdapterDescriptor->CommandQueueing = TRUE; /* Storport requirement */
         AdapterDescriptor->AcceleratedTransfer = TRUE;
-        AdapterDescriptor->BusType = BusTypeSata; /* FIXME: ＲＥＡＤ　ＦＲＯＭ　ＲＥＧＩＳＴＲＹ */
+        AdapterDescriptor->BusType = FdoExtension->BusType;
         AdapterDescriptor->BusMajorVersion = 2;
         AdapterDescriptor->BusMinorVersion = 0;
 
@@ -265,7 +266,7 @@ PdoDeviceControlQueryProperty(
                     .DeviceTypeModifier = InquiryData->DeviceTypeModifier,
                     .RemovableMedia = InquiryData->RemovableMedia,
                     .CommandQueueing = InquiryData->CommandQueue,
-                    .BusType = BusTypeSata, /* FIXME: USE FDO BUS TYPE FROM REGISTRY */
+                    .BusType = PdoExtension->FdoExtension->BusType,
                 };
 
                 /* Arbitrary data offsets, set them cascading */
@@ -391,6 +392,22 @@ PortPdoDeviceControl(
 
         case IOCTL_SCSI_GET_ADDRESS:
             return PdoDeviceControlScsiGetAddress(DeviceObject->DeviceExtension, Irp);
+
+        case IOCTL_SCSI_PASS_THROUGH:
+        case IOCTL_SCSI_PASS_THROUGH_DIRECT:
+        {
+            PPDO_DEVICE_EXTENSION PdoExtension = DeviceObject->DeviceExtension;
+            PPORT_CONFIGURATION_INFORMATION PortConfig = &PdoExtension->FdoExtension->Miniport.PortConfig;
+
+            /* The library builds the SRB and sends it to this PDO; it leaves completion to us */
+            Status = SptiHandleScsiPassthru(DeviceObject,
+                                            Irp,
+                                            PortConfig->MaximumTransferLength,
+                                            PortConfig->NumberOfPhysicalBreaks);
+            Irp->IoStatus.Status = Status;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return Status;
+        }
 
         default:
             // DbgBreakPoint();

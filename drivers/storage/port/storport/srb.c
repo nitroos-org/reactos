@@ -286,6 +286,30 @@ PortPdoSrbAllocatePrivateContexts(
 }
 
 
+/**
+ * @brief Returns where in the MDL the SRB transfer starts: its data buffer when that lies
+ * inside the MDL (a split request), else the start of the MDL.
+ */
+static
+PVOID
+StorpGetTransferVa(
+    _In_ PMDL Mdl,
+    _In_ PSCSI_REQUEST_BLOCK Srb)
+{
+    ULONG_PTR Start = (ULONG_PTR)MmGetMdlVirtualAddress(Mdl);
+    ULONG_PTR Buffer = (ULONG_PTR)Srb->DataBuffer;
+
+    if (Buffer >= Start &&
+        Buffer - Start <= MmGetMdlByteCount(Mdl) &&
+        Srb->DataTransferLength <= MmGetMdlByteCount(Mdl) - (Buffer - Start))
+    {
+        return Srb->DataBuffer;
+    }
+
+    return (PVOID)Start;
+}
+
+
 NTSTATUS
 PortPdoIssueRequest(
     _In_ PPDO_DEVICE_EXTENSION PdoExtension,
@@ -349,7 +373,8 @@ PortPdoIssueRequest(
             GetScatterGatherList(FdoExtension->DmaAdapter,
                                  FdoExtension->Device,
                                  RequestReference->Irp->MdlAddress,
-                                 MmGetMdlVirtualAddress(RequestReference->Irp->MdlAddress),
+                                 StorpGetTransferVa(RequestReference->Irp->MdlAddress,
+                                                    RequestReference->Srb),
                                  RequestReference->Srb->DataTransferLength,
                                  PortPdoAfterBuildingScatterGatherList,
                                  (PVOID)RequestReference,
