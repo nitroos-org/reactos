@@ -52,18 +52,58 @@ CreatePnpInstallEventSecurity(
 /* FUNCTIONS *****************************************************************/
 
 /*
+ * The install pipe of a process in the user's session: SYSTEM and
+ * Administrators as before, and read access for that user only (the default
+ * DACL of the service's token does not let a standard user open it).
+ */
+static PSECURITY_DESCRIPTOR
+CreateUserPipeSecurity(
+    _In_ HANDLE hToken)
+{
+    BYTE Buffer[256];
+    PTOKEN_USER User = (PTOKEN_USER)Buffer;
+    DWORD Size;
+    LPWSTR SidString = NULL;
+    WCHAR Sddl[160];
+    PSECURITY_DESCRIPTOR Sd = NULL;
+
+    if (!GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &Size) ||
+        !ConvertSidToStringSidW(User->User.Sid, &SidString))
+    {
+        DPRINT1("Cannot get the user of the token, error %lu\n", GetLastError());
+        return NULL;
+    }
+
+    if (_snwprintf(Sddl, _countof(Sddl), L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;%s)", SidString) > 0)
+    {
+        Sddl[_countof(Sddl) - 1] = UNICODE_NULL;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(Sddl, SDDL_REVISION_1, &Sd, NULL))
+        {
+            DPRINT1("ConvertStringSecurityDescriptorToSecurityDescriptorW failed, error %lu\n", GetLastError());
+            Sd = NULL;
+        }
+    }
+
+    LocalFree(SidString);
+    return Sd;
+}
+
+
+/*
  * Starts one install process for DeviceInstance and waits for it. With
  * hToken == NULL the process is drvinst.exe in the service's own context
  * (SYSTEM), with no UI, as DrvInst.exe on Windows: it does the driver search
  * and every registry and file write of the install. Otherwise it is the
  * newdev.dll wizard (ClientSideInstall) in the user's session, as that user.
- * Both read the device from the same pipe and signal the event on success.
+ * Both read the device and the UI mode (NEWDEV_UI_*) from the same pipe and
+ * signal the event on success.
  */
 static BOOL
 RunInstallProcess(
     _In_ PCWSTR DeviceInstance,
     _In_opt_ HANDLE hToken,
-    _In_ BOOL ShowWizard)
+    _In_ DWORD UiMode,
+    _Out_opt_ PDWORD ExitCode)
 {
     BOOL DeviceInstalled = FALSE;
     DWORD BytesWritten;
@@ -77,6 +117,8 @@ RunInstallProcess(
     UUID RandomUuid;
     SECURITY_ATTRIBUTES EventAttrs;
     PSECURITY_DESCRIPTOR EventSd;
+    SECURITY_ATTRIBUTES PipeAttrs;
+    PSECURITY_DESCRIPTOR PipeSd = NULL;
 
     /* The following lengths are constant (see below), they cannot overflow */
     WCHAR CommandLine[116];
@@ -120,7 +162,18 @@ RunInstallProcess(
     /* Create the named pipe */
     wcscpy(PipeName, L"\\\\.\\pipe\\PNP_Device_Install_Pipe_0.");
     wcscat(PipeName, UuidString);
-    hPipe = CreateNamedPipeW(PipeName, PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE, 1, 512, 512, 0, NULL);
+    if (hToken)
+    {
+        PipeSd = CreateUserPipeSecurity(hToken);
+        if (!PipeSd)
+            goto cleanup;
+        PipeAttrs.nLength = sizeof(PipeAttrs);
+        PipeAttrs.lpSecurityDescriptor = PipeSd;
+        PipeAttrs.bInheritHandle = FALSE;
+    }
+    hPipe = CreateNamedPipeW(PipeName, PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE, 1, 512, 512, 0, PipeSd ? &PipeAttrs : NULL);
+    if (PipeSd)
+        LocalFree(PipeSd);
     if (hPipe == INVALID_HANDLE_VALUE)
     {
         DPRINT1("CreateNamedPipeW failed with error %u\n", GetLastError());
@@ -178,9 +231,9 @@ RunInstallProcess(
     WriteFile(hPipe, InstallEventName, Value, &BytesWritten, NULL);
 
     /* I couldn't figure out what the following value means under WinXP. It's usually 0 in my tests, but was also 5 once.
-       Therefore the following line is entirely ReactOS-specific. We use the value here to pass the ShowWizard variable.
+       Therefore the following line is entirely ReactOS-specific. We use the value here to pass the UI mode.
        drvinst.exe never shows UI; for it the value says whether the wizard follows if it finds no driver. */
-    WriteFile(hPipe, &ShowWizard, sizeof(ShowWizard), &BytesWritten, NULL);
+    WriteFile(hPipe, &UiMode, sizeof(UiMode), &BytesWritten, NULL);
 
     Value = (wcslen(DeviceInstance) + 1) * sizeof(WCHAR);
     WriteFile(hPipe, &Value, sizeof(Value), &BytesWritten, NULL);
@@ -191,6 +244,8 @@ RunInstallProcess(
 
     /* If the event got signalled, this is success */
     DeviceInstalled = WaitForSingleObject(hInstallEvent, 0) == WAIT_OBJECT_0;
+    if (ExitCode && !GetExitCodeProcess(ProcessInfo.hProcess, ExitCode))
+        *ExitCode = ERROR_SUCCESS;
 
 cleanup:
     if (hInstallEvent)
@@ -218,6 +273,8 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
     BOOL DeviceInstalled;
     DWORD BytesWritten;
     DWORD Value;
+    DWORD UiMode;
+    DWORD ExitCode = ERROR_SUCCESS;
     HKEY DeviceKey;
 
     DPRINT("InstallDevice(%S, %d)\n", DeviceInstance, ShowWizard);
@@ -261,20 +318,26 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
 
     DPRINT1("Installing: %S\n", DeviceInstance);
 
-    /* The wizard is only possible in an interactive user's session */
-    ShowWizard = ShowWizard && (hUserToken != NULL);
+    /* UI is only possible in an interactive user's session */
+    UiMode = (ShowWizard && hUserToken != NULL) ? NEWDEV_UI_WIZARD : NEWDEV_UI_HIDDEN;
 
     /* As on Windows: the install itself (driver search in the system INF
        directory, class installers, registry and file writes) runs here in the
        service context, as SYSTEM, for administrators and standard users alike. */
-    DeviceInstalled = RunInstallProcess(DeviceInstance, NULL, ShowWizard);
+    DeviceInstalled = RunInstallProcess(DeviceInstance, NULL, UiMode, &ExitCode);
 
-    /* No driver found: the wizard lets the user point to one, in the user's
-       session and as the user. newdev.dll allows that to administrators only. */
-    if (!DeviceInstalled && ShowWizard)
+    if (DeviceInstalled)
     {
+        /* The UI of the install stays in the user's session: the restart page */
+        if (ExitCode == ERROR_SUCCESS_REBOOT_REQUIRED && UiMode != NEWDEV_UI_HIDDEN)
+            RunInstallProcess(DeviceInstance, hUserToken, NEWDEV_UI_RESTART_PAGE, NULL);
+    }
+    else if (UiMode == NEWDEV_UI_WIZARD)
+    {
+        /* No driver found: the wizard lets the user point to one, in the user's
+           session and as the user. newdev.dll allows that to administrators only. */
         DPRINT1("No driver installed for '%ws', starting the wizard\n", DeviceInstance);
-        DeviceInstalled = RunInstallProcess(DeviceInstance, hUserToken, TRUE);
+        DeviceInstalled = RunInstallProcess(DeviceInstance, hUserToken, NEWDEV_UI_WIZARD, NULL);
     }
 
     if (!DeviceInstalled)

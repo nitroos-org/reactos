@@ -172,8 +172,8 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nSh
 {
     HANDLE hPipe, hEvent;
     PWSTR EventName = NULL, DeviceInstance = NULL;
-    BOOL ShowWizard, Installed = FALSE;
-    DWORD Error = ERROR_SUCCESS;
+    BOOL Installed = FALSE, NeedRestart = FALSE;
+    DWORD UiMode, Error = ERROR_SUCCESS;
     CHAR Time[32];
 
     UNREFERENCED_PARAMETER(hInstance);
@@ -189,7 +189,7 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nSh
         return GetLastError();
 
     EventName = ReadPipeString(hPipe, MAX_EVENT_NAME_BYTES);
-    if (!EventName || !ReadPipe(hPipe, &ShowWizard, sizeof(ShowWizard)))
+    if (!EventName || !ReadPipe(hPipe, &UiMode, sizeof(UiMode)))
     {
         Error = ERROR_INVALID_DATA;
         goto Quit;
@@ -220,10 +220,17 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nSh
         if (Error == ERROR_SUCCESS)
             Error = ERROR_NO_DRIVER_SELECTED;
     }
+    else
+    {
+        /* DevInstallW without UI reports a needed restart this way */
+        NeedRestart = (GetLastError() == ERROR_SUCCESS_REBOOT_REQUIRED);
+    }
 
     LogTime(Time, sizeof(Time), FALSE);
     LogPrint("     ndv: {Install Device - exit(0x%08lx)} %s", Installed ? 0 : Error, Time);
-    if (!Installed && ShowWizard)
+    if (NeedRestart)
+        LogPrint("     ndv: The device needs a restart to finish the install.");
+    if (!Installed && UiMode == NEWDEV_UI_WIZARD)
         LogPrint("     ndv: No driver installed here; the wizard runs in the user's session.");
 
     if (Installed)
@@ -256,5 +263,8 @@ Quit:
         HeapFree(GetProcessHeap(), 0, EventName);
     if (DeviceInstance)
         HeapFree(GetProcessHeap(), 0, DeviceInstance);
-    return Installed ? ERROR_SUCCESS : Error;
+    /* The Plug and Play service shows the restart page in the user's session */
+    if (Installed)
+        return NeedRestart ? ERROR_SUCCESS_REBOOT_REQUIRED : ERROR_SUCCESS;
+    return Error;
 }
