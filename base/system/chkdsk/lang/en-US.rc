@@ -12,7 +12,7 @@ Usage: %s [drive:] [-F] [-V] [-R] [-C]\n\n\
 \n"
 
     IDS_PERCENT_COMPL "%d percent completed.\r"
-    IDS_FILE_SYSTEM "The type of file system is %s for volume %s.\n"
+    IDS_FILE_SYSTEM "The type of the file system is %s.\n"
     IDS_ABOUT "\n\
 Chkdskx v1.0.1 by Mark Russinovich\n\
 Systems Internals - http://www.sysinternals.com\n\
@@ -29,4 +29,8 @@ BEGIN
     IDS_NO_QUERY_VOL "Could not query volume. Error code: "
     IDS_VOLUME_IN_USE_PROC "Chkdsk cannot run because the volume is in use by another process.\n\n"
     IDS_RUN_AGAIN "It may be possible to fix this by running chkdsk again.\n\n"
+    IDS_CANNOT_LOCK "Cannot lock current drive.\n\n"
+    IDS_SCHEDULE_PROMPT "Chkdsk cannot run because the volume is in use by another\nprocess.  Would you like to schedule this volume to be\nchecked the next time the system restarts? (Y/N) "
+    IDS_SCHEDULED "\nThis volume will be checked the next time the system restarts.\n"
+    IDS_SCHEDULE_FAILED "\nThe check could not be scheduled.\n"
 END

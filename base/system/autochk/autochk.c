@@ -19,6 +19,8 @@
 #include <ntddkbd.h>
 
 #define NTOS_MODE_USER
+#include <ndk/cmfuncs.h>
+#include <winreg.h>
 #include <ndk/exfuncs.h>
 #include <ndk/iofuncs.h>
 #include <ndk/obfuncs.h>
@@ -377,7 +379,8 @@ ChkdskCallback(
 
     case DONE:
         Status = (PBOOLEAN)Argument;
-        if (*Status == FALSE)
+        /* Errors NtfsChkdsk found and could not fix are already described in its text. */
+        if (*Status == FALSE && Modifier != NTFSCHK_STATUS_ERRORS)
         {
             PrintString("The file system check was unable to complete successfully.\r\n\r\n");
             // Error = TRUE;
@@ -501,6 +504,70 @@ CheckVolume(
 Quit:
     PrintString("\r\n\r\n");
     return Status;
+}
+
+
+/*
+ * A check scheduled with "chkdsk X: /f" is the BootExecute entry "autocheck autochk /r \??\X:" (chkdsk adds it and
+ * marks the volume dirty).  Once the volume was checked the entry goes, as on Windows.
+ */
+static VOID
+RemoveScheduledCheck(
+    IN PCWSTR VolumePath)
+{
+    static const WCHAR Prefix[] = L"autocheck autochk /r ";
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager");
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"BootExecute");
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Key;
+    ULONG Size = 0, Result;
+    PKEY_VALUE_PARTIAL_INFORMATION Info;
+    PWCHAR Src, Dst, Buffer, End;
+    WCHAR Entry[64];
+    NTSTATUS Status;
+
+    if (wcslen(VolumePath) + RTL_NUMBER_OF(Prefix) > RTL_NUMBER_OF(Entry))
+        return;
+    wcscpy(Entry, Prefix);
+    wcscat(Entry, VolumePath);
+
+    InitializeObjectAttributes(&Attributes, &KeyName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenKey(&Key, KEY_QUERY_VALUE | KEY_SET_VALUE, &Attributes)))
+        return;
+    Status = NtQueryValueKey(Key, &ValueName, KeyValuePartialInformation, NULL, 0, &Size);
+    if (Size == 0 || (Status != STATUS_BUFFER_TOO_SMALL && Status != STATUS_BUFFER_OVERFLOW))
+        goto Quit;
+    Info = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Size + sizeof(WCHAR));
+    if (!Info)
+        goto Quit;
+    Status = NtQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, Size, &Result);
+    if (NT_SUCCESS(Status) && Info->Type == REG_MULTI_SZ)
+    {
+        Buffer = (PWCHAR)Info->Data;
+        End = Buffer + Info->DataLength / sizeof(WCHAR);
+        Src = Dst = Buffer;
+        while (Src < End && *Src)
+        {
+            SIZE_T Len = wcslen(Src) + 1;
+            if (_wcsicmp(Src, Entry) != 0)
+            {
+                if (Dst != Src)
+                    RtlMoveMemory(Dst, Src, Len * sizeof(WCHAR));
+                Dst += Len;
+            }
+            Src += Len;
+        }
+        if (Dst != Src)
+        {
+            *Dst++ = UNICODE_NULL;
+            if (Dst == Buffer + 1)
+                *Dst++ = UNICODE_NULL;
+            NtSetValueKey(Key, &ValueName, 0, REG_MULTI_SZ, Buffer, (ULONG)((PUCHAR)Dst - (PUCHAR)Buffer));
+        }
+    }
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Info);
+Quit:
+    NtClose(Key);
 }
 
 static VOID
@@ -687,6 +754,10 @@ _main(
             CheckVolume(VolumePath, TimeOut, CheckOnlyIfDirty);
         }
     }
+
+    /* A check scheduled for this volume (chkdsk X: /f) is done now. */
+    if (!CheckAllVolumes && VolumePath[0])
+        RemoveScheduledCheck(VolumePath);
 
     /* Close the keyboard */
     if (KeyboardHandle)

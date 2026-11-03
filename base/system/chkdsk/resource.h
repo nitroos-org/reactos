@@ -15,5 +15,9 @@
 #define IDS_NO_QUERY_VOL        205
 #define IDS_VOLUME_IN_USE_PROC  206
 #define IDS_RUN_AGAIN           207
+#define IDS_CANNOT_LOCK         208
+#define IDS_SCHEDULE_PROMPT     209
+#define IDS_SCHEDULED           210
+#define IDS_SCHEDULE_FAILED     211
 
 /* EOF */

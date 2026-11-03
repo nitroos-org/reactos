@@ -8,6 +8,7 @@
 #include "ntfsng.h"
 #include "../shim/include/ngos.h"
 #include <ntstrsafe.h>
+#include <reactos/ntfsng_check.h>
 
 #ifndef FSCTL_SHRINK_VOLUME
 /* Vista and later; the kernel-mode headers expose them only for NTDDI_VISTA builds. */
@@ -1416,6 +1417,97 @@ static NTSTATUS NgGetVolumeBitmap(PNG_VCB Vcb, PIRP Irp, PIO_STACK_LOCATION Stac
     return Status;
 }
 
+/*
+ * FSCTL_NG_CHECK (sdk/include/reactos/ntfsng_check.h): the mount-time consistency check on the mounted volume, from
+ * chkdsk and autochk.  A volume handle with manage-volume access.  The core runs it under the volume lock, so it works
+ * on the system volume; with NG_CHECK_FIX it frees leaks when nothing is damaged and otherwise makes the volume
+ * read-only (nothing destructive is ever repaired).
+ */
+static NTSTATUS NgCheckVolume(PNG_VCB Vcb, PNG_FCB Fcb, PFILE_OBJECT FileObject, PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    PNG_CHECK_RESULT Out = Irp->AssociatedIrp.SystemBuffer;
+    PNG_CHECK_REQUEST In = Irp->AssociatedIrp.SystemBuffer;
+    ULONG InLen = Stack->Parameters.FileSystemControl.InputBufferLength;
+    ULONG OutLen = Stack->Parameters.FileSystemControl.OutputBufferLength;
+    ULONG Flags, Version;
+    struct ngc_check *C;
+    NTSTATUS Status = STATUS_SUCCESS;
+    int Err;
+
+    if (!Fcb || !Fcb->IsVolume)
+        return STATUS_INVALID_PARAMETER;
+    if (!((PNG_CCB)FileObject->FsContext2)->ManageVolume)
+        return STATUS_ACCESS_DENIED;
+    if (!In || InLen < sizeof(NG_CHECK_REQUEST) || OutLen < sizeof(NG_CHECK_RESULT))
+        return STATUS_BUFFER_TOO_SMALL;
+    Version = In->Version;
+    Flags = In->Flags;
+    if (Version != NG_CHECK_VERSION || (Flags & ~(NG_CHECK_FIX | NG_CHECK_QUERY)))
+        return STATUS_INVALID_PARAMETER;
+    C = ExAllocatePoolWithTag(PagedPool, sizeof(*C), TAG_NTFSNG);
+    if (!C)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    NgAcquireCore(Vcb);
+    if (!Vcb->Core)
+    {
+        NgReleaseCore(Vcb);
+        ExFreePoolWithTag(C, TAG_NTFSNG);
+        return STATUS_VOLUME_DISMOUNTED;
+    }
+    Err = ngc_check(Vcb->Core, Flags, C);
+    ngc_volinfo(Vcb->Core, &Vcb->Info);
+    if (!Err && (C->flags & NGC_CHK_NOW_READONLY))
+    {
+        Vcb->ReadOnly = TRUE;
+        Vcb->Damaged = TRUE;
+    }
+    NgReleaseCore(Vcb);
+    if (Err)
+        Status = NgErrnoToStatus(Err);
+    else
+    {
+        RtlZeroMemory(Out, sizeof(*Out));
+        Out->Version = NG_CHECK_VERSION;
+        Out->Flags = C->flags;
+        Out->ClusterSize = C->cluster_size;
+        Out->Fatal = C->fatal;
+        Out->Leaks = C->leaks;
+        Out->LeakedRecords = C->leaked_records;
+        Out->FixedRecords = C->fixed_records;
+        Out->DirsSkipped = C->dirs_skipped;
+        Out->ClustersSkipped = C->clusters_skipped;
+        Out->Ms = C->ms;
+        Out->RepairErrors = C->repair_errors;
+        Out->JournalReplayed = C->replayed;
+        Out->PassMs[0] = C->pass_ms[0];
+        Out->PassMs[1] = C->pass_ms[1];
+        Out->PassMs[2] = C->pass_ms[2];
+        Out->Records = C->records;
+        Out->InUse = C->inuse;
+        Out->Dirs = C->dirs;
+        Out->IndexEntries = C->ientries;
+        Out->Clusters = C->clusters;
+        Out->LeakedClusters = C->leaked_clusters;
+        Out->FixedClusters = C->fixed_clusters;
+        Out->TotalClusters = C->total_clusters;
+        Out->FreeClusters = C->free_clusters;
+        Out->ExtRecords = C->ext_records;
+        Out->Reparse = C->reparse;
+        Out->SysClusters = C->sys_clusters;
+        Out->LogClusters = C->log_clusters;
+        Out->IndexClusters = C->index_clusters;
+        RtlCopyMemory(Out->Why, C->why, sizeof(Out->Why));
+        Out->Why[sizeof(Out->Why) - 1] = 0;
+        Irp->IoStatus.Information = sizeof(*Out);
+        if (C->flags & NGC_CHK_NOW_READONLY)
+            NgReportDamage(Vcb, C->why, TRUE);
+        DPRINT1("ntfsng: volume %08lx check%s: flags %x, %lu errors, %lu leaks\n", Vcb->Vpb->SerialNumber,
+                (Flags & NG_CHECK_FIX) ? " with repair" : "", C->flags, C->fatal, C->leaks);
+    }
+    ExFreePoolWithTag(C, TAG_NTFSNG);
+    return Status;
+}
+
 static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -1554,6 +1646,8 @@ static NTSTATUS NgUserFsRequest(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             if (!Fcb || !Fcb->IsVolume)
                 return STATUS_INVALID_PARAMETER;
             return NgGetNtfsVolumeData(Vcb, Irp, Stack);
+        case FSCTL_NG_CHECK:
+            return NgCheckVolume(Vcb, Fcb, FileObject, Irp, Stack);
         case FSCTL_GET_VOLUME_BITMAP:
             if (!Fcb || !Fcb->IsVolume)
                 return STATUS_INVALID_PARAMETER;

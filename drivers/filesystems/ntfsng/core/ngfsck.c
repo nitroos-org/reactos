@@ -20,6 +20,7 @@
 #include "ntfs/inode.h"
 #include "ntfs/mft.h"
 #include "ntfs/runlist.h"
+#include "ntfs/bitmap.h"
 #include "ngfsck.h"
 #include <ngos.h>
 
@@ -41,6 +42,8 @@ struct ngf {
 	u16 *seq;		/* per record: sequence number, 0 = not in use */
 	u8 *isdir;
 	u8 *ok;			/* records pass 1 validated: the only ones pass 2 parses */
+	u8 *leakrec;		/* with fix: records marked in $MFT:$BITMAP that are not in use */
+	bool mft_whole;		/* every record of $MFT was checked (the record count is the $MFT size) */
 	u64 nrec;
 	u8 *rec;		/* one record */
 	u8 *chunk;		/* records being walked */
@@ -170,6 +173,12 @@ static void ngf_runs(struct ngf *f, u64 mft_no, struct attr_record *a)
 			continue;
 		}
 		f->r->clusters += r->length;
+		if (mft_no == FILE_LogFile)
+			f->r->log_clusters += r->length;
+		else if (mft_no < 24)
+			f->r->sys_clusters += r->length;
+		else if (a->type == AT_INDEX_ALLOCATION)
+			f->r->index_clusters += r->length;
 		if (!f->ref)
 			continue;
 		/* One finding of each kind per run; every cluster of the run is still marked referenced. */
@@ -207,6 +216,8 @@ static bool ngf_record(struct ngf *f, u64 mft_no, struct mft_record *m)
 			ngf_fatal(f, "record %llu: attribute at %u has length %u", mft_no, ofs, alen);
 			return false;
 		}
+		if (a->type == AT_REPARSE_POINT)
+			f->r->reparse++;
 		if (a->non_resident) {
 			if (alen < 64 || le16_to_cpu(a->data.non_resident.mapping_pairs_offset) >= alen) {
 				ngf_fatal(f, "record %llu: non-resident attribute at %u is truncated", mft_no, ofs);
@@ -384,7 +395,70 @@ static void ngf_dir(struct ngf *f, u64 dir, struct mft_record *m)
 	}
 }
 
+/*
+ * Repairs that cannot cause a double allocation, after a check that found no damage: clusters marked used in
+ * $Bitmap that no record references are freed, and records marked in $MFT:$BITMAP that are not in use are freed.
+ * Both only ever make something allocatable that nothing refers to.  The caller holds the volume lock, so no
+ * allocation runs between the check and the repair.  Cluster leaks are repaired only when every record of $MFT
+ * was read (a record that was not could own clusters) and the cluster map was checked.
+ */
+static void ngf_repair(struct ngf *f)
+{
+	struct ntfs_volume *vol = f->vol;
+	struct ngc_fsck_res *r = f->r;
+	u64 i, c, run = 0, first = 0, nc = (u64)vol->nr_clusters;
+	if (r->fatal || !r->leaks)
+		return;
+	if (f->leakrec && r->leaked_records) {
+		down_write(&vol->mftbmp_lock);
+		for (i = 24; i < f->nrec; i++) {
+			if (!tbit(f->leakrec, i))
+				continue;
+			if (ntfs_bitmap_clear_bit(vol->mftbmp_ino, (s64)i)) {
+				r->repair_errors++;
+				break;
+			}
+			ntfs_inc_free_mft_records(vol, 1);
+			if ((s64)i < vol->mft_data_pos)
+				vol->mft_data_pos = (s64)i;
+			r->fixed_records++;
+			printk(KERN_WARNING "CHECK (repair): record %llu freed in $MFT:$BITMAP\n", i);
+		}
+		up_write(&vol->mftbmp_lock);
+	}
+	if (!r->leaked_clusters)
+		return;
+	if (!f->ref || !f->mft_whole) {
+		r->repair_refused = 1;
+		return;
+	}
+	down_write(&vol->lcnbmp_lock);
+	for (c = 0; c <= nc; c++) {
+		if (c < nc && tbit(f->lcnbmp, c) && !tbit(f->ref, c)) {
+			if (!run++)
+				first = c;
+			continue;
+		}
+		if (run) {
+			if (ntfs_bitmap_clear_run(vol->lcnbmp_ino, (s64)first, (s64)run)) {
+				r->repair_errors++;
+				break;
+			}
+			ntfs_inc_free_clusters(vol, (s64)run);
+			r->fixed_clusters += run;
+			printk(KERN_WARNING "CHECK (repair): clusters %llu+%llu freed in $Bitmap\n", first, run);
+			run = 0;
+		}
+	}
+	up_write(&vol->lcnbmp_lock);
+}
+
 int ngc_fsck(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_res *r)
+{
+	return ngc_fsck_ex(vol, b, r, 0);
+}
+
+int ngc_fsck_ex(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_res *r, int fix)
 {
 	struct ngf f = { .vol = vol, .b = b, .r = r };
 	u64 mftsize = 0, lcnsize = 0, i, cbytes;
@@ -425,16 +499,21 @@ int ngc_fsck(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_re
 		err = -EFBIG;
 		goto out;
 	}
+	f.mft_whole = f.nrec == mftsize / rs;
 	f.seq = kvmalloc((size_t)f.nrec * sizeof(u16), GFP_KERNEL);
 	f.isdir = kvmalloc((size_t)(f.nrec + 7) / 8, GFP_KERNEL);
 	f.ok = kvmalloc((size_t)(f.nrec + 7) / 8, GFP_KERNEL);
-	if (!f.seq || !f.isdir || !f.ok) {
+	if (fix)
+		f.leakrec = kvmalloc((size_t)(f.nrec + 7) / 8, GFP_KERNEL);
+	if (!f.seq || !f.isdir || !f.ok || (fix && !f.leakrec)) {
 		err = -ENOMEM;
 		goto out;
 	}
 	memset(f.seq, 0, (size_t)f.nrec * sizeof(u16));
 	memset(f.isdir, 0, (size_t)(f.nrec + 7) / 8);
 	memset(f.ok, 0, (size_t)(f.nrec + 7) / 8);
+	if (f.leakrec)
+		memset(f.leakrec, 0, (size_t)(f.nrec + 7) / 8);
 	cbytes = ((u64)vol->nr_clusters + 7) / 8;
 	if (cbytes <= NGF_MAX_CBMP && lcnsize >= cbytes) {
 		f.ref = kvmalloc((size_t)cbytes, GFP_KERNEL);
@@ -453,6 +532,9 @@ int ngc_fsck(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_re
 	}
 	/* Pass 0: sequence numbers of in-use records.  Pass 1: records, then directory indexes. */
 	for (pass = 0; pass < 3 && !err; pass++) {
+		long long ps0, ps1;
+		long pn0, pn1;
+		ngos_time(&ps0, &pn0);
 		for (i = 0; i < f.nrec; i += NGF_CHUNK / rs) {
 			u64 n = min_t(u64, NGF_CHUNK / rs, f.nrec - i), k;
 			/* Passes 0 and 2 need only chunks with records marked in use; pass 1 reads everything. */
@@ -500,8 +582,12 @@ int ngc_fsck(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_re
 						/* Neither FILE nor zeros (a torn "BAAD" record, garbage) is damage; a free FILE record a leak. */
 						if (no >= 24 && !ntfs_is_file_record(m->magic) && *(u32 *)m)
 							ngf_fatal(&f, "record %llu: marked in $MFT:$BITMAP but unreadable", no);
-						else if (no >= 24)
+						else if (no >= 24) {
 							ngf_leak(&f, "record %llu: marked in $MFT:$BITMAP but not in use", no);
+							r->leaked_records++;
+							if (f.leakrec)
+								sbit(f.leakrec, no);
+						}
 						continue;
 					}
 					r->inuse++;
@@ -509,6 +595,7 @@ int ngc_fsck(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_re
 						sbit(f.ok, no);
 					if (MREF_LE(m->base_mft_record)) {
 						u64 base = MREF_LE(m->base_mft_record);
+						r->ext_records++;
 						if (base >= f.nrec || !f.seq[base])
 							ngf_fatal(&f, "record %llu: extension of free record %llu", no, base);
 					}
@@ -522,6 +609,8 @@ int ngc_fsck(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_re
 			if (r->fatal > 1000)
 				break;
 		}
+		ngos_time(&ps1, &pn1);
+		r->pass_ms[pass] = (unsigned int)((ps1 - ps0) * 1000 + (pn1 - pn0) / 1000000);
 	}
 	/* Clusters marked used that no record references: leaks. */
 	if (!err && f.ref) {
@@ -541,6 +630,8 @@ int ngc_fsck(struct ntfs_volume *vol, struct block_device *b, struct ngc_fsck_re
 			ngf_leak(&f, "clusters %llu+%llu used in $Bitmap, referenced by no record", first, run);
 		}
 	}
+	if (!err && fix)
+		ngf_repair(&f);
 out:
 	ngos_time(&s1, &n1);
 	r->ms = (unsigned int)((s1 - s0) * 1000 + (n1 - n0) / 1000000);
@@ -548,6 +639,7 @@ out:
 	kvfree(f.seq);
 	kvfree(f.isdir);
 	kvfree(f.ok);
+	kvfree(f.leakrec);
 	kvfree(f.mftbmp);
 	kvfree(f.lcnbmp);
 	kfree(f.ib);
