@@ -400,6 +400,15 @@ PortFdoStartMiniport(
     if (DeviceExtension->DebugDropRequestEvery != 0)
         DPRINT1("storport: fault knob on: every %lu-th read/write is dropped\n",
                 DeviceExtension->DebugDropRequestEvery);
+    DeviceExtension->DebugDeferStartEvery =
+        PortGetMiniportParameter(DeviceExtension->Device->DriverObject, L"DebugDeferStartEvery", 0);
+    DeviceExtension->DebugDeferStartSeconds =
+        PortGetMiniportParameter(DeviceExtension->Device->DriverObject, L"DebugDeferStartSeconds", 25);
+    DeviceExtension->DebugLateCompletion =
+        PortGetMiniportParameter(DeviceExtension->Device->DriverObject, L"DebugLateCompletion", 0);
+    if (DeviceExtension->DebugDeferStartEvery != 0)
+        DPRINT1("storport: fault knob on: every %lu-th read/write reaches the miniport %lu s late\n",
+                DeviceExtension->DebugDeferStartEvery, DeviceExtension->DebugDeferStartSeconds);
 #endif
     PortStartTimeouts(DeviceExtension);
 

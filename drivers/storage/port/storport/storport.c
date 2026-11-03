@@ -1427,37 +1427,39 @@ StorPortNotification(
         case RequestComplete:
             DPRINT("RequestComplete\n");
             Srb = (PSCSI_REQUEST_BLOCK)va_arg(ap, PSCSI_REQUEST_BLOCK);
-            DPRINT("Complete Notify - (%d:%d:%d) ReqRef %p Srb %p Irp %p Tag %x\n",
-                    Srb->PathId, Srb->TargetId, Srb->Lun,
-                    Srb->OriginalRequest, Srb,
-                    ((PQUEUED_REQUEST_REFERENCE)Srb->OriginalRequest)->Irp,
-                    Srb->QueueTag);
-            // if (Srb->OriginalRequest != NULL)
-            // {
-            //     // DPRINT1("Need to complete the IRP!\n");
-            //     PortCompleteRequest(HwDeviceExtension, Srb);
-            // }
-            NT_ASSERT(Srb->OriginalRequest);
-            RequestReference = (PQUEUED_REQUEST_REFERENCE)Srb->OriginalRequest;
+            DPRINT("Complete Notify - (%d:%d:%d) Srb %p Tag %x\n",
+                    Srb->PathId, Srb->TargetId, Srb->Lun, Srb, Srb->QueueTag);
 
-            /* Storport completed it itself after restarting the adapter */
-            if (!PortClaimRequestCompletion(RequestReference))
+            /*
+             * Storport may have completed this SRB itself after restarting the adapter; its
+             * packet is gone then and Srb->OriginalRequest is the IRP. That is recognised from
+             * the SRB alone. The restart waits for calls counted here before it frees packets.
+             */
+            InterlockedIncrement(&FdoExtension->CompletionsInFlight);
+            if (PortIsSweptSrb(FdoExtension, Srb))
             {
-                DPRINT1("Late completion of Srb %p ignored\n", Srb);
-                break;
+                DPRINT1("Late completion of Srb %p (completed by storport after a restart) ignored\n", Srb);
             }
-            // if (RequestReference->SpecialRequestId) {
-            //     /* FIXME: DELETE AFTER DEBUG */
-            //     DPRINT1("STORPORT SPECIAL REQUEST %d Queuing for completion\n", RequestReference->SpecialRequestId);
-            // }
+            else
+            {
+                NT_ASSERT(Srb->OriginalRequest);
+                RequestReference = (PQUEUED_REQUEST_REFERENCE)Srb->OriginalRequest;
 
-            /* Queue for completion */
-            InterlockedPushEntrySList(&FdoExtension->CompletionList,
-                                      &RequestReference->CompletionEntry);
+                if (!PortClaimRequestCompletion(RequestReference))
+                {
+                    DPRINT1("Late completion of Srb %p ignored\n", Srb);
+                }
+                else
+                {
+                    /* Queue for completion */
+                    InterlockedPushEntrySList(&FdoExtension->CompletionList,
+                                              &RequestReference->CompletionEntry);
 
-            /* Insert DPC for delayed completion */
-            KeInsertQueueDpc(&FdoExtension->Device->Dpc, NULL, NULL);
-
+                    /* Insert DPC for delayed completion */
+                    KeInsertQueueDpc(&FdoExtension->Device->Dpc, NULL, NULL);
+                }
+            }
+            InterlockedDecrement(&FdoExtension->CompletionsInFlight);
             break;
 
         case GetExtendedFunctionTable:
