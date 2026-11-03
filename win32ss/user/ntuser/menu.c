@@ -614,9 +614,19 @@ IntRemoveMenuItem( PMENU pMenu, UINT nPos, UINT wFlags, BOOL bRecurse )
     /* Remove item */
 
     FreeMenuText(pMenu,item);
-    if (bRecurse && item->spSubMenu)
+    if (item->spSubMenu)
     {
-       IntDestroyMenuObject(item->spSubMenu, bRecurse);
+       PMENU SubMenu = item->spSubMenu;
+       item->spSubMenu = NULL;
+
+       /* The item locked its submenu when it was set: release it, as
+          IntDestroyMenu does. A submenu that is still locked cannot be
+          destroyed and stayed forever (with the PROCESSINFO of its owner).
+          RemoveMenu keeps the submenu, DeleteMenu destroys it. */
+       if (!IntReleaseMenuObject(SubMenu) && bRecurse)
+       {
+          IntDestroyMenuObject(SubMenu, bRecurse);
+       }
     }
     ////// Use cAlloced with inc's of 8's....
     if (--pMenu->cItems == 0)
@@ -819,6 +829,9 @@ IntCloneMenuItems(PMENU Destination, PMENU Source)
       NewMenuItem->fState = MenuItem->fState;
       NewMenuItem->wID = MenuItem->wID;
       NewMenuItem->spSubMenu = MenuItem->spSubMenu;
+      /* Every item locks its submenu (released by IntDestroyMenu / IntRemoveMenuItem) */
+      if (NewMenuItem->spSubMenu)
+         UserReferenceObject(NewMenuItem->spSubMenu);
       NewMenuItem->hbmpChecked = MenuItem->hbmpChecked;
       NewMenuItem->hbmpUnchecked = MenuItem->hbmpUnchecked;
       NewMenuItem->dwItemData = MenuItem->dwItemData;
