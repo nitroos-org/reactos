@@ -2437,6 +2437,10 @@ static const WCHAR *Wow64ExtraDlls[] =
     L"inetcomm.dll", L"inseng.dll", L"itss.dll", L"mmcshext.dll", L"mstask.dll",
     L"msxml6.dll", L"objsel.dll", L"pstorec.dll", L"sendmail.dll", L"sti.dll",
     L"stobject.dll",
+    /* CLSID_ExplorerBrowser and the namespace tree control: the Vista-style Open/Save dialog
+     * (IFileDialog) creates the ExplorerBrowser for its folder tree and file list, and without the
+     * registration a 32-bit dialog is blank (REGDB_E_CLASSNOTREG). Registers after the core set (shell32, ole32), which it loads */
+    L"explorerframe.dll",
     /* BITS proxy/stub: the interface and proxy CLSID registrations of the 32-bit view, so a
      * 32-bit BITS client can marshal to the 64-bit service (CLSID itself: hivesft_amd64.inf) */
     L"qmgrprxy.dll"
