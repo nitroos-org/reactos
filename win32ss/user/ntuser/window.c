@@ -1353,8 +1353,9 @@ co_UserSetParent(HWND hWndChild, HWND hWndNewParent)
    if (WndParent->head.rpdesk != Wnd->head.rpdesk)
    {
       ERR("UserSetParent: parent %p is on another desktop than %p\n", hWndNewParent, hWndChild);
-      // TODO(oracle): verify error code (ERROR_ACCESS_DENIED is a guess, not measured on Windows)
-      EngSetLastError(ERROR_ACCESS_DENIED);
+      /* Windows 10 22H2 (oracle, 2026-11-03): SetParent returns NULL with ERROR_INVALID_PARAMETER,
+         from a thread on either desktop, and the parent is left unchanged */
+      EngSetLastError(ERROR_INVALID_PARAMETER);
       return NULL;
    }
 
