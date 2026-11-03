@@ -76,6 +76,11 @@ VOID MsafdAddrChangeSelectionChanged(PSOCKET_INFORMATION Socket);
 BOOLEAN MsafdAddrChangeTakePending(PSOCKET_INFORMATION Socket);
 INT MsafdQueryAddressList(PSOCKET_INFORMATION Socket, LPVOID lpvOutBuffer, DWORD cbOutBuffer, LPDWORD pcbRet);
 
+/* misc/transmit.c */
+VOID MsafdTransmitInit(VOID);
+VOID MsafdTransmitExit(VOID);
+VOID MsafdTransmitSocketClosing(PSOCKET_INFORMATION Socket);
+
 
 typedef struct _SOCKET_CONTEXT {
 	SOCK_SHARED_INFO SharedData;
@@ -458,6 +463,27 @@ WSPConnectEx(
     IN DWORD dwSendDataLength,
     OUT LPDWORD lpdwBytesSent,
     IN OUT LPOVERLAPPED lpOverlapped);
+
+BOOL
+WSPAPI
+WSPTransmitFile(
+    IN SOCKET hSocket,
+    IN HANDLE hFile,
+    IN DWORD nNumberOfBytesToWrite,
+    IN DWORD nNumberOfBytesPerSend,
+    IN OUT LPOVERLAPPED lpOverlapped,
+    IN LPTRANSMIT_FILE_BUFFERS lpTransmitBuffers,
+    IN DWORD dwFlags);
+
+BOOL
+WSPAPI
+WSPTransmitPackets(
+    IN SOCKET hSocket,
+    IN LPTRANSMIT_PACKETS_ELEMENT lpPacketArray,
+    IN DWORD nElementCount,
+    IN DWORD nSendSize,
+    IN OUT LPOVERLAPPED lpOverlapped,
+    IN DWORD dwFlags);
 
 BOOL
 WSPAPI

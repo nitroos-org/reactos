@@ -45,6 +45,7 @@ list(APPEND SOURCE
     shutdownrecv.c
     sotimeout.c
     socketscale.c
+    stringtoaddress.c
     udpbindretry.c
     udpcancel.c
     udpconnectname.c
@@ -52,6 +53,7 @@ list(APPEND SOURCE
     udprecv.c
     udpzerolen.c
     timewait.c
+    transmitfile.c
     WSAAsync.c
     WSAEnumNameSpaceProviders.c
     WSAIoctl.c
