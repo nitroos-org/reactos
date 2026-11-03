@@ -51,8 +51,19 @@ CreatePnpInstallEventSecurity(
 
 /* FUNCTIONS *****************************************************************/
 
+/*
+ * Starts one install process for DeviceInstance and waits for it. With
+ * hToken == NULL the process is drvinst.exe in the service's own context
+ * (SYSTEM), with no UI, as DrvInst.exe on Windows: it does the driver search
+ * and every registry and file write of the install. Otherwise it is the
+ * newdev.dll wizard (ClientSideInstall) in the user's session, as that user.
+ * Both read the device from the same pipe and signal the event on success.
+ */
 static BOOL
-InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
+RunInstallProcess(
+    _In_ PCWSTR DeviceInstance,
+    _In_opt_ HANDLE hToken,
+    _In_ BOOL ShowWizard)
 {
     BOOL DeviceInstalled = FALSE;
     DWORD BytesWritten;
@@ -64,7 +75,6 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
     PROCESS_INFORMATION ProcessInfo;
     STARTUPINFOW StartupInfo;
     UUID RandomUuid;
-    HKEY DeviceKey;
     SECURITY_ATTRIBUTES EventAttrs;
     PSECURITY_DESCRIPTOR EventSd;
 
@@ -74,48 +84,7 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
     WCHAR PipeName[74];
     WCHAR UuidString[39];
 
-    DPRINT("InstallDevice(%S, %d)\n", DeviceInstance, ShowWizard);
-
     ZeroMemory(&ProcessInfo, sizeof(ProcessInfo));
-
-    if (RegOpenKeyExW(hEnumKey,
-                      DeviceInstance,
-                      0,
-                      KEY_QUERY_VALUE,
-                      &DeviceKey) == ERROR_SUCCESS)
-    {
-        if (RegQueryValueExW(DeviceKey,
-                             L"Class",
-                             NULL,
-                             NULL,
-                             NULL,
-                             NULL) == ERROR_SUCCESS)
-        {
-            DPRINT("No need to install: %S\n", DeviceInstance);
-            RegCloseKey(DeviceKey);
-            return TRUE;
-        }
-
-        BytesWritten = sizeof(DWORD);
-        if (RegQueryValueExW(DeviceKey,
-                             L"ConfigFlags",
-                             NULL,
-                             NULL,
-                             (PBYTE)&Value,
-                             &BytesWritten) == ERROR_SUCCESS)
-        {
-            if (Value & CONFIGFLAG_FAILEDINSTALL)
-            {
-                DPRINT("No need to install: %S\n", DeviceInstance);
-                RegCloseKey(DeviceKey);
-                return TRUE;
-            }
-        }
-
-        RegCloseKey(DeviceKey);
-    }
-
-    DPRINT1("Installing: %S\n", DeviceInstance);
 
     /* Create a random UUID for the named pipe & event*/
     UuidCreate(&RandomUuid);
@@ -158,23 +127,23 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
         goto cleanup;
     }
 
-    /* Launch rundll32 to call ClientSideInstallW */
-    wcscpy(CommandLine, L"rundll32.exe newdev.dll,ClientSideInstall ");
-    wcscat(CommandLine, PipeName);
-
     ZeroMemory(&StartupInfo, sizeof(StartupInfo));
     StartupInfo.cb = sizeof(StartupInfo);
 
-    if (hUserToken)
+    if (hToken)
     {
+        /* Launch rundll32 to call ClientSideInstallW */
+        wcscpy(CommandLine, L"rundll32.exe newdev.dll,ClientSideInstall ");
+        wcscat(CommandLine, PipeName);
+
         /* newdev has to run under the environment of the current user */
-        if (!CreateEnvironmentBlock(&Environment, hUserToken, FALSE))
+        if (!CreateEnvironmentBlock(&Environment, hToken, FALSE))
         {
             DPRINT1("CreateEnvironmentBlock failed with error %d\n", GetLastError());
             goto cleanup;
         }
 
-        if (!CreateProcessAsUserW(hUserToken, NULL, CommandLine, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT, Environment, NULL, &StartupInfo, &ProcessInfo))
+        if (!CreateProcessAsUserW(hToken, NULL, CommandLine, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT, Environment, NULL, &StartupInfo, &ProcessInfo))
         {
             DPRINT1("CreateProcessAsUserW failed with error %u\n", GetLastError());
             goto cleanup;
@@ -182,11 +151,9 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
     }
     else
     {
-        /* FIXME: This is probably not correct, I guess newdev should never be run with SYSTEM privileges.
-
-           Still, we currently do that in 2nd stage setup and probably Console mode as well, so allow it here.
-           (ShowWizard is only set to FALSE for these two modes) */
-        ASSERT(!ShowWizard);
+        /* The service-side installer runs as SYSTEM and never shows UI */
+        wcscpy(CommandLine, L"drvinst.exe ");
+        wcscat(CommandLine, PipeName);
 
         if (!CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
         {
@@ -211,14 +178,15 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
     WriteFile(hPipe, InstallEventName, Value, &BytesWritten, NULL);
 
     /* I couldn't figure out what the following value means under WinXP. It's usually 0 in my tests, but was also 5 once.
-       Therefore the following line is entirely ReactOS-specific. We use the value here to pass the ShowWizard variable. */
+       Therefore the following line is entirely ReactOS-specific. We use the value here to pass the ShowWizard variable.
+       drvinst.exe never shows UI; for it the value says whether the wizard follows if it finds no driver. */
     WriteFile(hPipe, &ShowWizard, sizeof(ShowWizard), &BytesWritten, NULL);
 
     Value = (wcslen(DeviceInstance) + 1) * sizeof(WCHAR);
     WriteFile(hPipe, &Value, sizeof(Value), &BytesWritten, NULL);
     WriteFile(hPipe, DeviceInstance, Value, &BytesWritten, NULL);
 
-    /* Wait for newdev.dll to finish processing */
+    /* Wait for the install process to finish */
     WaitForSingleObject(ProcessInfo.hProcess, INFINITE);
 
     /* If the event got signalled, this is success */
@@ -239,6 +207,75 @@ cleanup:
 
     if (ProcessInfo.hThread)
         CloseHandle(ProcessInfo.hThread);
+
+    return DeviceInstalled;
+}
+
+
+static BOOL
+InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
+{
+    BOOL DeviceInstalled;
+    DWORD BytesWritten;
+    DWORD Value;
+    HKEY DeviceKey;
+
+    DPRINT("InstallDevice(%S, %d)\n", DeviceInstance, ShowWizard);
+
+    if (RegOpenKeyExW(hEnumKey,
+                      DeviceInstance,
+                      0,
+                      KEY_QUERY_VALUE,
+                      &DeviceKey) == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW(DeviceKey,
+                             L"Class",
+                             NULL,
+                             NULL,
+                             NULL,
+                             NULL) == ERROR_SUCCESS)
+        {
+            DPRINT("No need to install: %S\n", DeviceInstance);
+            RegCloseKey(DeviceKey);
+            return TRUE;
+        }
+
+        BytesWritten = sizeof(DWORD);
+        if (RegQueryValueExW(DeviceKey,
+                             L"ConfigFlags",
+                             NULL,
+                             NULL,
+                             (PBYTE)&Value,
+                             &BytesWritten) == ERROR_SUCCESS)
+        {
+            if (Value & CONFIGFLAG_FAILEDINSTALL)
+            {
+                DPRINT("No need to install: %S\n", DeviceInstance);
+                RegCloseKey(DeviceKey);
+                return TRUE;
+            }
+        }
+
+        RegCloseKey(DeviceKey);
+    }
+
+    DPRINT1("Installing: %S\n", DeviceInstance);
+
+    /* The wizard is only possible in an interactive user's session */
+    ShowWizard = ShowWizard && (hUserToken != NULL);
+
+    /* As on Windows: the install itself (driver search in the system INF
+       directory, class installers, registry and file writes) runs here in the
+       service context, as SYSTEM, for administrators and standard users alike. */
+    DeviceInstalled = RunInstallProcess(DeviceInstance, NULL, ShowWizard);
+
+    /* No driver found: the wizard lets the user point to one, in the user's
+       session and as the user. newdev.dll allows that to administrators only. */
+    if (!DeviceInstalled && ShowWizard)
+    {
+        DPRINT1("No driver installed for '%ws', starting the wizard\n", DeviceInstance);
+        DeviceInstalled = RunInstallProcess(DeviceInstance, hUserToken, TRUE);
+    }
 
     if (!DeviceInstalled)
     {
