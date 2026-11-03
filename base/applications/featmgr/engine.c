@@ -1933,6 +1933,12 @@ static BOOL ScoopRootIsFresh(void)
     return fresh;
 }
 
+/* the components whose install or removal changes the desktop / Start menu / default browser (shelldefaults.c) */
+static BOOL ShellDefaultsId(LPCWSTR id)
+{
+    return !_wcsicmp(id, L"powershell-7") || !_wcsicmp(id, L"firefox");
+}
+
 /* Download + install. Returns S_OK only if the installer exited 0; on success the
  * uninstall command line is recorded in the state key. */
 static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
@@ -2047,6 +2053,8 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
         NotePathChange(f, pathBefore);
         HeapFree(GetProcessHeap(), 0, pathBefore);
     }
+    if (comp && ShellDefaultsId(f->Id))         /* PowerShell 7 / Firefox: desktop, Start menu, default browser (shelldefaults.c) */
+        FmShellDefaults(!_wcsicmp(f->Id, L"firefox") ? FM_SHELL_ADOPT_BROWSER : 0, log);
     return S_OK;
 }
 
@@ -2090,6 +2098,8 @@ static HRESULT SoftwareUninstall(const FM_FEATURE *f, HKEY state, FILE *log)
         SetLastMsg(L"The uninstaller for '%s' failed (exit code %lu).\n\n%s", f ? f->Id : L"?", code, g_Tail);
         return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
     }
+    if (f && !_wcsicmp(f->Provider, L"component") && ShellDefaultsId(f->Id))   /* back to Command Prompt / Internet Explorer when pwsh / Firefox is gone */
+        FmShellDefaults(!_wcsicmp(f->Id, L"firefox") ? FM_SHELL_FORGET_BROWSER : 0, log);
     return S_OK;
 }
 

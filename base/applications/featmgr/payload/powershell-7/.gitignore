@@ -1,3 +1,0 @@
-# the staged MSI (see stage-powershell7.sh); not in git
-*.msi
-.stage-powershell7.*

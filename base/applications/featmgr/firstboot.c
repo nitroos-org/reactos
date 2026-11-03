@@ -2,7 +2,7 @@
  * PROJECT:     ReactOS-Nitro Optional Features / Addon Manager
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     optfeatures /firstboot: after logon, once the network is up, install the default components (the
- *              Default=1 entries of components.ini, .NET Framework 4.8 first) with the "Installing additional
+ *              Default=1 entries of components.ini, in file order: PowerShell 7, Firefox, .NET Framework 4.8) with the "Installing additional
  *              components" window. Started by a HKLM Run entry. It runs to completion once and records the result;
  *              it never blocks logon (it is its own process), waits quietly and without a window while there is no
  *              network, and comes back at the next logon. Switch it off: HKLM\SOFTWARE\ReactOS\Nitro\Featmgr
@@ -174,6 +174,7 @@ int FmFirstBootMain(HINSTANCE hInst, LPCWSTR cmd)
     if (!n)
     {
         FmLogLine(log, L"first boot: every default component is already installed, no window");
+        FmShellDefaults(0, NULL);                                        /* e.g. pwsh installed by hand: desktop matches */
         SetDw(L"Done", 1);
         SetSz(L"Result", L"AlreadyInstalled");
         Stamp(L"CompletedUtc");
