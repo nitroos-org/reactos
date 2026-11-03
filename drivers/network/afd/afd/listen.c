@@ -247,6 +247,23 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
         goto end;
     }
 
+    /* The transport files the accepted connection under the listener's binding,
+     * which has no concrete address when the listener is bound to the wildcard:
+     * report the address of the interface the peer is reached through */
+    if (Buffer->Address.TAAddressCount == 1 &&
+        Buffer->Address.Address[0].AddressType == TDI_ADDRESS_TYPE_IP &&
+        RemoteAddress->TAAddressCount == 1 &&
+        RemoteAddress->Address[0].AddressType == TDI_ADDRESS_TYPE_IP)
+    {
+        PTDI_ADDRESS_IP LocalIp = (PTDI_ADDRESS_IP)Buffer->Address.Address[0].Address;
+        PTDI_ADDRESS_IP RemoteIp = (PTDI_ADDRESS_IP)RemoteAddress->Address[0].Address;
+        ULONG Source;
+
+        if (LocalIp->in_addr == 0 && RemoteIp->in_addr != 0 &&
+            NT_SUCCESS(AfdQueryRouteSourceOn(Qelt->Object.Object, RemoteIp->in_addr, &Source)))
+            LocalIp->in_addr = Source;
+    }
+
     /* Each address area holds a sockaddr (the address type and the address) and
      * ends in a USHORT with its length; an area too small for that gets nothing */
     BufferPtr += AcceptInfo->ReceiveDataLength;

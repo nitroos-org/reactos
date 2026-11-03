@@ -4,6 +4,7 @@
 
 extern void func_abortiveclose(void);
 extern void func_accept(void);
+extern void func_acceptname(void);
 extern void func_backlog(void);
 extern void func_backlog_listen(void);
 extern void func_backlog_open(void);
@@ -73,6 +74,7 @@ const struct test winetest_testlist[] =
 {
     { "abortiveclose", func_abortiveclose },
     { "accept", func_accept },
+    { "acceptname", func_acceptname },
     { "backlog", func_backlog },
     { "backlog_listen", func_backlog_listen },
     { "backlog_open", func_backlog_open },

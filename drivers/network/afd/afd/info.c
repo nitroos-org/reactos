@@ -310,9 +310,10 @@ AfdQueryTransportBuffer(PFILE_OBJECT Object, LONG QueryType, PVOID Buffer, ULONG
 }
 
 /* The address of the interface a datagram from this socket to Destination (a
- * network-order IPv4 address) leaves from; fails when there is no route */
+ * network-order IPv4 address) leaves from, asked of any object of the transport;
+ * fails when there is no route */
 NTSTATUS
-AfdQueryRouteSource(PAFD_FCB FCB, ULONG Destination, PULONG Source)
+AfdQueryRouteSourceOn(PFILE_OBJECT Object, ULONG Destination, PULONG Source)
 {
     PTA_IP_ADDRESS Query;
     NTSTATUS Status;
@@ -327,7 +328,7 @@ AfdQueryRouteSource(PAFD_FCB FCB, ULONG Destination, PULONG Source)
     Query->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
     Query->Address[0].Address[0].in_addr = Destination;
 
-    Status = AfdQueryTransportBuffer(FCB->AddressFile.Object,
+    Status = AfdQueryTransportBuffer(Object,
                                      TDI_QUERY_ROS_SOURCE_ADDRESS,
                                      Query,
                                      sizeof(TA_IP_ADDRESS));
@@ -338,11 +339,20 @@ AfdQueryRouteSource(PAFD_FCB FCB, ULONG Destination, PULONG Source)
     return Status;
 }
 
-/* The local name of a connected datagram socket: a socket bound to the wildcard
- * address reports the address of the interface its datagrams to the peer leave
- * from, as Windows does. Called with the state lock held; completes the IRP. */
+NTSTATUS
+AfdQueryRouteSource(PAFD_FCB FCB, ULONG Destination, PULONG Source)
+{
+    return AfdQueryRouteSourceOn(FCB->AddressFile.Object, Destination, Source);
+}
+
+/* The local name of a connected socket whose transport object only knows the
+ * wildcard address (a connected datagram socket, or the end of an accepted TCP
+ * connection, which the transport files under the listener's binding): a socket
+ * bound to the wildcard address reports the address of the interface its traffic
+ * to the peer leaves from, as Windows does. QueryObject is the transport object to ask.
+ * Called with the state lock held; completes the IRP. */
 static NTSTATUS
-AfdGetConnectedDatagramName(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp)
+AfdGetConnectedName(PAFD_FCB FCB, PFILE_OBJECT QueryObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
     const ULONG InfoSize = FIELD_OFFSET(TDI_ADDRESS_INFO, Address.Address[0].Address) +
                            sizeof(TDI_ADDRESS_IP);
@@ -359,7 +369,7 @@ AfdGetConnectedDatagramName(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp)
         return UnlockAndMaybeComplete(FCB, STATUS_INSUFFICIENT_RESOURCES, Irp, 0);
     RtlZeroMemory(Info, 64);
 
-    Status = AfdQueryTransportBuffer(FCB->AddressFile.Object,
+    Status = AfdQueryTransportBuffer(QueryObject,
                                      TDI_QUERY_ADDRESS_INFO,
                                      Info,
                                      InfoSize);
@@ -371,7 +381,7 @@ AfdGetConnectedDatagramName(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp)
         if (Local->in_addr == 0 && Remote->in_addr != 0)
         {
             /* Without a route the socket stays on the wildcard address */
-            if (NT_SUCCESS(AfdQueryRouteSource(FCB, Remote->in_addr, &Source)))
+            if (NT_SUCCESS(AfdQueryRouteSourceOn(QueryObject, Remote->in_addr, &Source)))
                 Local->in_addr = Source;
         }
 
@@ -414,7 +424,19 @@ AfdGetSockName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         FCB->RemoteAddress->TAAddressCount == 1 &&
         FCB->RemoteAddress->Address[0].AddressType == TDI_ADDRESS_TYPE_IP &&
         FCB->RemoteAddress->Address[0].AddressLength >= TDI_ADDRESS_LENGTH_IP ) {
-        return AfdGetConnectedDatagramName( FCB, Irp, IrpSp );
+        return AfdGetConnectedName( FCB, FCB->AddressFile.Object, Irp, IrpSp );
+    }
+
+    /* An accepted TCP connection: the transport reports the listener's binding
+     * for it, the wildcard address when the listener has no concrete one */
+    if( !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) &&
+        FCB->SharedData.State == SOCKET_STATE_CONNECTED &&
+        FCB->Connection.Object &&
+        FCB->RemoteAddress &&
+        FCB->RemoteAddress->TAAddressCount == 1 &&
+        FCB->RemoteAddress->Address[0].AddressType == TDI_ADDRESS_TYPE_IP &&
+        FCB->RemoteAddress->Address[0].AddressLength >= TDI_ADDRESS_LENGTH_IP ) {
+        return AfdGetConnectedName( FCB, FCB->Connection.Object, Irp, IrpSp );
     }
 
     Mdl = IoAllocateMdl( Irp->UserBuffer,
