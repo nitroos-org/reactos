@@ -288,7 +288,7 @@
 @ stdcall RoFailFastWithErrorContext(long)
 @ stub RoFailFastWithErrorContextInternal
 @ stub RoFailFastWithErrorContextInternal2
-@ stub RoFreeParameterizedTypeExtra
+@ stdcall RoFreeParameterizedTypeExtra(ptr)
 @ stub RoGetActivatableClassRegistration
 @ stdcall RoGetActivationFactory(ptr ptr ptr)
 @ stdcall RoGetAgileReference(long ptr ptr ptr)
@@ -303,7 +303,7 @@
 @ stdcall RoOriginateError(long ptr)
 @ stdcall RoOriginateErrorW(long long ptr)
 @ stdcall RoOriginateLanguageException(long ptr ptr)
-@ stub RoParameterizedTypeExtraGetTypeSignature
+@ stdcall RoParameterizedTypeExtraGetTypeSignature(ptr)
 @ stdcall RoRegisterActivationFactories(ptr ptr long ptr)
 @ stdcall RoRegisterForApartmentShutdown(ptr ptr ptr)
 @ stub RoReportCapabilityCheckFailure

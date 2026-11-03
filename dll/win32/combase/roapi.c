@@ -17,6 +17,9 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 #define COBJMACROS
+#include <stdio.h>
+#include <stdlib.h>
+
 #include "objbase.h"
 #include "initguid.h"
 #include "roapi.h"
@@ -202,7 +205,398 @@ done:
 
 /***********************************************************************
  *      RoGetParameterizedTypeInstanceIID (combase.@)
+ *
+ * The IID of an instance of a parameterized interface or delegate (IIterable<Package>): the
+ * name-based (version 5) UUID of its type signature, "pinterface({faa585ea-...};rc(...;{...}))",
+ * in the Windows Runtime namespace 11f47ad5-7b73-42c0-abae-878b1e16adee. The caller's locator
+ * tells what each named type is. The .NET Framework calls this for every generic Windows Runtime
+ * interface it uses (a foreach over IIterable<T>).
  */
+#ifdef __REACTOS__
+typedef struct
+{
+    ULONG Unknown[6];
+    ULONG State[5];
+    ULONG Count[2];
+    UCHAR Buffer[64];
+} ROAPI_SHA_CTX;
+
+VOID WINAPI A_SHAInit(ROAPI_SHA_CTX *ctx);
+VOID WINAPI A_SHAUpdate(ROAPI_SHA_CTX *ctx, const unsigned char *buffer, UINT size);
+VOID WINAPI A_SHAFinal(ROAPI_SHA_CTX *ctx, PULONG result);
+
+struct param_iid_extra
+{
+    char *signature;
+};
+
+struct signature_builder
+{
+    IRoSimpleMetaDataBuilder IRoSimpleMetaDataBuilder_iface;
+    const IRoMetaDataLocator *locator;
+    char *buffer;
+    size_t length;
+    size_t allocated;
+    UINT32 arg_count;       /* type arguments that the parameterized type just located takes */
+    BOOL located;
+    UINT depth;
+    HRESULT hr;
+};
+
+static HRESULT append(struct signature_builder *b, const char *str)
+{
+    size_t len = strlen(str);
+
+    if (b->length + len + 1 > b->allocated)
+    {
+        size_t allocated = max(b->allocated * 2, b->length + len + 64);
+        char *buffer = realloc(b->buffer, allocated);
+
+        if (!buffer) return E_OUTOFMEMORY;
+        b->buffer = buffer;
+        b->allocated = allocated;
+    }
+    memcpy(b->buffer + b->length, str, len + 1);
+    b->length += len;
+    return S_OK;
+}
+
+static HRESULT append_name(struct signature_builder *b, const WCHAR *name)
+{
+    char *str;
+    int len;
+    HRESULT hr;
+
+    if (!name) return E_INVALIDARG;
+    len = WideCharToMultiByte(CP_UTF8, 0, name, -1, NULL, 0, NULL, NULL);
+    if (!len || !(str = malloc(len))) return E_OUTOFMEMORY;
+    WideCharToMultiByte(CP_UTF8, 0, name, -1, str, len, NULL, NULL);
+    hr = append(b, str);
+    free(str);
+    return hr;
+}
+
+static HRESULT append_guid(struct signature_builder *b, const GUID *guid)
+{
+    char str[40];
+
+    sprintf(str, "{%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}", (unsigned long)guid->Data1, guid->Data2,
+            guid->Data3, guid->Data4[0], guid->Data4[1], guid->Data4[2], guid->Data4[3], guid->Data4[4],
+            guid->Data4[5], guid->Data4[6], guid->Data4[7]);
+    return append(b, str);
+}
+
+static const struct
+{
+    const WCHAR *name;
+    const char *signature;
+}
+basic_types[] =
+{
+    { L"UInt8", "u1" }, { L"Int8", "i1" }, { L"Int16", "i2" }, { L"UInt16", "u2" }, { L"Int32", "i4" },
+    { L"UInt32", "u4" }, { L"Int64", "i8" }, { L"UInt64", "u8" }, { L"Single", "f4" }, { L"Double", "f8" },
+    { L"Boolean", "b1" }, { L"Char16", "c2" }, { L"String", "string" }, { L"Guid", "g16" },
+    { L"Object", "cinterface(IInspectable)" },
+};
+
+static HRESULT append_type(struct signature_builder *b, UINT32 count, const WCHAR **names, UINT32 *pos);
+
+static HRESULT append_args(struct signature_builder *b, UINT32 count, const WCHAR **names, UINT32 *pos, UINT32 args)
+{
+    HRESULT hr = S_OK;
+
+    while (args-- && SUCCEEDED(hr))
+    {
+        if (FAILED(hr = append(b, ";"))) break;
+        hr = append_type(b, count, names, pos);
+    }
+    if (SUCCEEDED(hr)) hr = append(b, ")");
+    return hr;
+}
+
+/* one type from names[*pos]: a parameterized one takes the types after it as its arguments */
+static HRESULT append_type(struct signature_builder *b, UINT32 count, const WCHAR **names, UINT32 *pos)
+{
+    const WCHAR *name;
+    UINT32 i, args;
+    HRESULT hr;
+
+    if (*pos >= count) return E_INVALIDARG;
+    name = names[(*pos)++];
+    if (!name || !*name) return E_INVALIDARG;
+    for (i = 0; i < ARRAY_SIZE(basic_types); i++)
+        if (!wcscmp(name, basic_types[i].name)) return append(b, basic_types[i].signature);
+
+    if (++b->depth > 64) return E_INVALIDARG;
+    b->located = FALSE;
+    b->arg_count = 0;
+    b->hr = S_OK;
+    hr = IRoMetaDataLocator_Locate((IRoMetaDataLocator *)b->locator, name, &b->IRoSimpleMetaDataBuilder_iface);
+    if (SUCCEEDED(hr)) hr = b->hr;
+    if (SUCCEEDED(hr) && !b->located)
+    {
+        WARN("locator gave nothing for %s\n", debugstr_w(name));
+        hr = E_UNEXPECTED;
+    }
+    args = b->arg_count;
+    /* a parameterized interface or delegate wrote "pinterface({piid}": its arguments follow */
+    if (SUCCEEDED(hr) && args) hr = append_args(b, count, names, pos, args);
+    b->depth--;
+    return hr;
+}
+
+static inline struct signature_builder *impl_from_IRoSimpleMetaDataBuilder(IRoSimpleMetaDataBuilder *iface)
+{
+    return CONTAINING_RECORD(iface, struct signature_builder, IRoSimpleMetaDataBuilder_iface);
+}
+
+/* the builder is called once per Locate: a second call is a locator error */
+static BOOL begin_set(struct signature_builder *b)
+{
+    if (b->located)
+    {
+        b->hr = E_UNEXPECTED;
+        return FALSE;
+    }
+    b->located = TRUE;
+    return TRUE;
+}
+
+static HRESULT set_result(struct signature_builder *b, HRESULT hr)
+{
+    if (FAILED(hr)) b->hr = hr;
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE builder_SetWinRtInterface(IRoSimpleMetaDataBuilder *iface, GUID iid)
+{
+    struct signature_builder *b = impl_from_IRoSimpleMetaDataBuilder(iface);
+
+    if (!begin_set(b)) return E_UNEXPECTED;
+    return set_result(b, append_guid(b, &iid));
+}
+
+static HRESULT STDMETHODCALLTYPE builder_SetDelegate(IRoSimpleMetaDataBuilder *iface, GUID iid)
+{
+    struct signature_builder *b = impl_from_IRoSimpleMetaDataBuilder(iface);
+    HRESULT hr;
+
+    if (!begin_set(b)) return E_UNEXPECTED;
+    if (SUCCEEDED(hr = append(b, "delegate(")) && SUCCEEDED(hr = append_guid(b, &iid))) hr = append(b, ")");
+    return set_result(b, hr);
+}
+
+/* "rc(name;{iid})" or "ig(name;{iid})" */
+static HRESULT set_simple_default(IRoSimpleMetaDataBuilder *iface, const char *kind, const WCHAR *name,
+                                  const GUID *iid)
+{
+    struct signature_builder *b = impl_from_IRoSimpleMetaDataBuilder(iface);
+    HRESULT hr;
+
+    if (!begin_set(b)) return E_UNEXPECTED;
+    if (!iid) return set_result(b, E_INVALIDARG);
+    if (SUCCEEDED(hr = append(b, kind)) && SUCCEEDED(hr = append_name(b, name)) && SUCCEEDED(hr = append(b, ";")) &&
+        SUCCEEDED(hr = append_guid(b, iid)))
+        hr = append(b, ")");
+    return set_result(b, hr);
+}
+
+/* "rc(name;pinterface(...))" or "ig(name;pinterface(...))": the default interface is parameterized */
+static HRESULT set_parameterized_default(IRoSimpleMetaDataBuilder *iface, const char *kind, const WCHAR *name,
+                                         UINT32 count, const WCHAR **names)
+{
+    struct signature_builder *b = impl_from_IRoSimpleMetaDataBuilder(iface);
+    UINT32 pos = 0;
+    HRESULT hr;
+
+    if (!begin_set(b)) return E_UNEXPECTED;
+    if (!count || !names) return set_result(b, E_INVALIDARG);
+    if (SUCCEEDED(hr = append(b, kind)) && SUCCEEDED(hr = append_name(b, name)) && SUCCEEDED(hr = append(b, ";")))
+    {
+        hr = append_type(b, count, names, &pos);
+        b->located = TRUE;
+        b->arg_count = 0;
+        if (SUCCEEDED(hr) && pos != count) hr = E_INVALIDARG;
+        if (SUCCEEDED(hr)) hr = append(b, ")");
+    }
+    return set_result(b, hr);
+}
+
+static HRESULT STDMETHODCALLTYPE builder_SetInterfaceGroupSimpleDefault(IRoSimpleMetaDataBuilder *iface,
+        const WCHAR *name, const WCHAR *default_name, const GUID *default_iid)
+{
+    return set_simple_default(iface, "ig(", name, default_iid);
+}
+
+static HRESULT STDMETHODCALLTYPE builder_SetInterfaceGroupParameterizedDefault(IRoSimpleMetaDataBuilder *iface,
+        const WCHAR *name, UINT32 count, const WCHAR **names)
+{
+    return set_parameterized_default(iface, "ig(", name, count, names);
+}
+
+static HRESULT STDMETHODCALLTYPE builder_SetRuntimeClassSimpleDefault(IRoSimpleMetaDataBuilder *iface,
+        const WCHAR *name, const WCHAR *default_name, const GUID *default_iid)
+{
+    return set_simple_default(iface, "rc(", name, default_iid);
+}
+
+static HRESULT STDMETHODCALLTYPE builder_SetRuntimeClassParameterizedDefault(IRoSimpleMetaDataBuilder *iface,
+        const WCHAR *name, UINT32 count, const WCHAR **names)
+{
+    return set_parameterized_default(iface, "rc(", name, count, names);
+}
+
+static HRESULT STDMETHODCALLTYPE builder_SetStruct(IRoSimpleMetaDataBuilder *iface, const WCHAR *name,
+        UINT32 field_count, const WCHAR **field_names)
+{
+    struct signature_builder *b = impl_from_IRoSimpleMetaDataBuilder(iface);
+    UINT32 i, pos;
+    HRESULT hr;
+
+    if (!begin_set(b)) return E_UNEXPECTED;
+    if (field_count && !field_names) return set_result(b, E_INVALIDARG);
+    if (FAILED(hr = append(b, "struct(")) || FAILED(hr = append_name(b, name))) return set_result(b, hr);
+    for (i = 0; i < field_count && SUCCEEDED(hr); i++)
+    {
+        if (FAILED(hr = append(b, ";"))) break;
+        pos = 0;
+        hr = append_type(b, 1, &field_names[i], &pos);
+        b->located = TRUE;
+        b->arg_count = 0;
+    }
+    if (SUCCEEDED(hr)) hr = append(b, ")");
+    return set_result(b, hr);
+}
+
+static HRESULT STDMETHODCALLTYPE builder_SetEnum(IRoSimpleMetaDataBuilder *iface, const WCHAR *name,
+        const WCHAR *base_type)
+{
+    struct signature_builder *b = impl_from_IRoSimpleMetaDataBuilder(iface);
+    HRESULT hr;
+
+    if (!begin_set(b)) return E_UNEXPECTED;
+    if (SUCCEEDED(hr = append(b, "enum(")) && SUCCEEDED(hr = append_name(b, name)))
+        hr = append(b, base_type && !wcscmp(base_type, L"UInt32") ? ";u4)" : ";i4)");
+    return set_result(b, hr);
+}
+
+/* "pinterface({piid}" for both: append_type writes the arguments and the ")" */
+static HRESULT set_parameterized(IRoSimpleMetaDataBuilder *iface, const GUID *piid, UINT32 arg_count)
+{
+    struct signature_builder *b = impl_from_IRoSimpleMetaDataBuilder(iface);
+    HRESULT hr;
+
+    if (!begin_set(b)) return E_UNEXPECTED;
+    if (!arg_count) return set_result(b, E_INVALIDARG);
+    if (SUCCEEDED(hr = append(b, "pinterface(")) && SUCCEEDED(hr = append_guid(b, piid)))
+        b->arg_count = arg_count;
+    return set_result(b, hr);
+}
+
+static HRESULT STDMETHODCALLTYPE builder_SetParameterizedInterface(IRoSimpleMetaDataBuilder *iface, GUID piid,
+        UINT32 arg_count)
+{
+    return set_parameterized(iface, &piid, arg_count);
+}
+
+static HRESULT STDMETHODCALLTYPE builder_SetParameterizedDelegate(IRoSimpleMetaDataBuilder *iface, GUID piid,
+        UINT32 arg_count)
+{
+    return set_parameterized(iface, &piid, arg_count);
+}
+
+static const IRoSimpleMetaDataBuilderVtbl signature_builder_vtbl =
+{
+    builder_SetWinRtInterface,
+    builder_SetDelegate,
+    builder_SetInterfaceGroupSimpleDefault,
+    builder_SetInterfaceGroupParameterizedDefault,
+    builder_SetRuntimeClassSimpleDefault,
+    builder_SetRuntimeClassParameterizedDefault,
+    builder_SetStruct,
+    builder_SetEnum,
+    builder_SetParameterizedInterface,
+    builder_SetParameterizedDelegate,
+};
+
+HRESULT WINAPI RoGetParameterizedTypeInstanceIID(UINT32 name_element_count, const WCHAR **name_elements,
+                                                 const IRoMetaDataLocator *meta_data_locator, GUID *iid,
+                                                 ROPARAMIIDHANDLE *hiid)
+{
+    static const BYTE winrt_namespace[16] =
+        { 0x11, 0xf4, 0x7a, 0xd5, 0x7b, 0x73, 0x42, 0xc0, 0xab, 0xae, 0x87, 0x8b, 0x1e, 0x16, 0xad, 0xee };
+    struct signature_builder b = { { &signature_builder_vtbl } };
+    struct param_iid_extra *extra;
+    ROAPI_SHA_CTX sha;
+    ULONG digest[5];
+    BYTE *hash = (BYTE *)digest;
+    UINT32 pos = 0;
+    HRESULT hr;
+
+    TRACE("%u %p %p %p %p\n", name_element_count, name_elements, meta_data_locator, iid, hiid);
+
+    if (hiid) *hiid = NULL;
+    if (!iid) return E_INVALIDARG;
+    memset(iid, 0, sizeof(*iid));
+    if (!name_element_count || !name_elements || !meta_data_locator) return E_INVALIDARG;
+
+    b.locator = meta_data_locator;
+    hr = append_type(&b, name_element_count, name_elements, &pos);
+    /* the first element has to be the parameterized type itself, and every element is used */
+    if (SUCCEEDED(hr) && (pos != name_element_count || strncmp(b.buffer, "pinterface(", 11))) hr = E_INVALIDARG;
+    if (FAILED(hr))
+    {
+        free(b.buffer);
+        return hr;
+    }
+    TRACE("signature %s\n", debugstr_a(b.buffer));
+
+    A_SHAInit(&sha);
+    A_SHAUpdate(&sha, winrt_namespace, sizeof(winrt_namespace));
+    A_SHAUpdate(&sha, (const unsigned char *)b.buffer, (UINT)b.length);
+    A_SHAFinal(&sha, digest);
+
+    iid->Data1 = (ULONG)hash[0] << 24 | (ULONG)hash[1] << 16 | (ULONG)hash[2] << 8 | hash[3];
+    iid->Data2 = (USHORT)(hash[4] << 8 | hash[5]);
+    iid->Data3 = (USHORT)(((hash[6] & 0x0f) | 0x50) << 8 | hash[7]);
+    iid->Data4[0] = (hash[8] & 0x3f) | 0x80;
+    memcpy(iid->Data4 + 1, hash + 9, 7);
+
+    if (hiid && (extra = malloc(sizeof(*extra))))
+    {
+        extra->signature = b.buffer;
+        *hiid = extra;
+        return S_OK;
+    }
+    free(b.buffer);
+    return S_OK;
+}
+
+/***********************************************************************
+ *      RoFreeParameterizedTypeExtra (combase.@)
+ */
+void WINAPI RoFreeParameterizedTypeExtra(ROPARAMIIDHANDLE handle)
+{
+    struct param_iid_extra *extra = handle;
+
+    TRACE("%p\n", handle);
+    if (!extra || extra == INVALID_HANDLE_VALUE) return;
+    free(extra->signature);
+    free(extra);
+}
+
+/***********************************************************************
+ *      RoParameterizedTypeExtraGetTypeSignature (combase.@)
+ */
+const char * WINAPI RoParameterizedTypeExtraGetTypeSignature(ROPARAMIIDHANDLE handle)
+{
+    struct param_iid_extra *extra = handle;
+
+    TRACE("%p\n", handle);
+    if (!extra || extra == INVALID_HANDLE_VALUE) return NULL;
+    return extra->signature;
+}
+#else
 HRESULT WINAPI RoGetParameterizedTypeInstanceIID(UINT32 name_element_count, const WCHAR **name_elements,
                                                  const IRoMetaDataLocator *meta_data_locator, GUID *iid,
                                                  ROPARAMIIDHANDLE *hiid)
@@ -212,6 +606,7 @@ HRESULT WINAPI RoGetParameterizedTypeInstanceIID(UINT32 name_element_count, cons
     if (hiid) *hiid = INVALID_HANDLE_VALUE;
     return E_NOTIMPL;
 }
+#endif
 
 /***********************************************************************
  *      RoActivateInstance (combase.@)

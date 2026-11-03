@@ -25,6 +25,7 @@
 
 #include "initguid.h"
 #include "roapi.h"
+#include "roparameterizediid.h"
 
 #include "wine/test.h"
 
@@ -537,6 +538,130 @@ static void test_RoGetAgileReference(void)
     }
 }
 
+/* RoGetParameterizedTypeInstanceIID with a locator that knows a few types. The IIDs are the ones of
+   the Windows SDK headers (windows.foundation.collections.h and windows.applicationmodel.h). */
+struct test_locator
+{
+    IRoMetaDataLocator IRoMetaDataLocator_iface;
+    UINT calls;
+};
+
+static const GUID test_iid_IPackage = {0x163c792f, 0xbd75, 0x413c, {0xbf, 0x23, 0xb1, 0xfe, 0x7b, 0x95, 0xd8, 0x25}};
+
+static const struct
+{
+    const WCHAR *name;
+    GUID piid;
+    UINT32 args;
+}
+test_generics[] =
+{
+    { L"Windows.Foundation.Collections.IIterable`1", {0xfaa585ea, 0x6214, 0x4217, {0xaf, 0xda, 0x7f, 0x46, 0xde, 0x58, 0x69, 0xb3}}, 1 },
+    { L"Windows.Foundation.Collections.IIterator`1", {0x6a79e863, 0x4300, 0x459a, {0x99, 0x66, 0xcb, 0xb6, 0x60, 0x96, 0x3e, 0xe1}}, 1 },
+    { L"Windows.Foundation.Collections.IMap`2", {0x3c2925fe, 0x8519, 0x45c1, {0xaa, 0x79, 0x19, 0x7b, 0x67, 0x18, 0xc1, 0xc1}}, 2 },
+    { L"Windows.Foundation.Collections.IKeyValuePair`2", {0x02b51929, 0xc1c4, 0x4a7e, {0x89, 0x40, 0x03, 0x12, 0xb5, 0xc1, 0x85, 0x00}}, 2 },
+    { L"Windows.Foundation.IReference`1", {0x61c17706, 0x2d65, 0x11e0, {0x9a, 0xe8, 0xd4, 0x85, 0x64, 0x01, 0x54, 0x72}}, 1 },
+};
+
+static HRESULT STDMETHODCALLTYPE test_locator_Locate(IRoMetaDataLocator *iface, const WCHAR *name,
+                                                     IRoSimpleMetaDataBuilder *builder)
+{
+    struct test_locator *locator = CONTAINING_RECORD(iface, struct test_locator, IRoMetaDataLocator_iface);
+    UINT i;
+
+    locator->calls++;
+    for (i = 0; i < ARRAY_SIZE(test_generics); i++)
+        if (!wcscmp(name, test_generics[i].name))
+            return IRoSimpleMetaDataBuilder_SetParameterizedInterface(builder, test_generics[i].piid, test_generics[i].args);
+    if (!wcscmp(name, L"Windows.ApplicationModel.Package"))
+        return IRoSimpleMetaDataBuilder_SetRuntimeClassSimpleDefault(builder, name, L"Windows.ApplicationModel.IPackage",
+                                                                    &test_iid_IPackage);
+    return E_FAIL;
+}
+
+static const IRoMetaDataLocatorVtbl test_locator_vtbl = { test_locator_Locate };
+
+static void test_RoGetParameterizedTypeInstanceIID(void)
+{
+    static const WCHAR *iterable_package[] = { L"Windows.Foundation.Collections.IIterable`1", L"Windows.ApplicationModel.Package" };
+    static const WCHAR *iterator_package[] = { L"Windows.Foundation.Collections.IIterator`1", L"Windows.ApplicationModel.Package" };
+    static const WCHAR *iterable_string[] = { L"Windows.Foundation.Collections.IIterable`1", L"String" };
+    static const WCHAR *map_string_object[] = { L"Windows.Foundation.Collections.IMap`2", L"String", L"Object" };
+    static const WCHAR *iterable_pair[] = { L"Windows.Foundation.Collections.IIterable`1",
+                                            L"Windows.Foundation.Collections.IKeyValuePair`2", L"String", L"Object" };
+    static const WCHAR *reference_int[] = { L"Windows.Foundation.IReference`1", L"Int32" };
+    static const WCHAR *unknown[] = { L"Windows.Foundation.Collections.IIterable`1", L"Nitro.Unknown" };
+    static const WCHAR *not_generic[] = { L"Windows.ApplicationModel.Package" };
+    static const struct
+    {
+        UINT32 count;
+        const WCHAR **names;
+        GUID iid;
+    }
+    tests[] =
+    {
+        { 2, iterable_package, {0x69ad6aa7, 0x0c49, 0x5f27, {0xa5, 0xeb, 0xef, 0x4d, 0x59, 0x46, 0x7b, 0x6d}} },
+        { 2, iterator_package, {0x0217f069, 0x025c, 0x5ee6, {0xa8, 0x7f, 0xe7, 0x82, 0xe3, 0xb6, 0x23, 0xae}} },
+        { 2, iterable_string, {0xe2fcc7c1, 0x3bfc, 0x5a0b, {0xb2, 0xb0, 0x72, 0xe7, 0x69, 0xd1, 0xcb, 0x7e}} },
+        { 3, map_string_object, {0x1b0d3570, 0x0877, 0x5ec2, {0x8a, 0x2c, 0x3b, 0x95, 0x39, 0x50, 0x6a, 0xca}} },
+        { 4, iterable_pair, {0xfe2f3d47, 0x5d47, 0x5499, {0x83, 0x74, 0x43, 0x0c, 0x7c, 0xda, 0x02, 0x04}} },
+        { 2, reference_int, {0x548cefbd, 0xbc8a, 0x5fa0, {0x8d, 0xf2, 0x95, 0x74, 0x40, 0xfc, 0x8b, 0xf4}} },
+    };
+    static const char package_signature[] = "pinterface({faa585ea-6214-4217-afda-7f46de5869b3};"
+        "rc(Windows.ApplicationModel.Package;{163c792f-bd75-413c-bf23-b1fe7b95d825}))";
+    HRESULT (WINAPI *pRoGetParameterizedTypeInstanceIID)(UINT32, const WCHAR **, const IRoMetaDataLocator *, GUID *, ROPARAMIIDHANDLE *);
+    void (WINAPI *pRoFreeParameterizedTypeExtra)(ROPARAMIIDHANDLE);
+    const char *(WINAPI *pRoParameterizedTypeExtraGetTypeSignature)(ROPARAMIIDHANDLE);
+    struct test_locator locator = { { &test_locator_vtbl } };
+    HMODULE combase = GetModuleHandleW(L"combase.dll");
+    ROPARAMIIDHANDLE extra;
+    const char *signature;
+    HRESULT hr;
+    GUID iid;
+    UINT i;
+
+    pRoGetParameterizedTypeInstanceIID = (void *)GetProcAddress(combase, "RoGetParameterizedTypeInstanceIID");
+    pRoFreeParameterizedTypeExtra = (void *)GetProcAddress(combase, "RoFreeParameterizedTypeExtra");
+    pRoParameterizedTypeExtraGetTypeSignature = (void *)GetProcAddress(combase, "RoParameterizedTypeExtraGetTypeSignature");
+    if (!pRoGetParameterizedTypeInstanceIID)
+    {
+        win_skip("RoGetParameterizedTypeInstanceIID is not available\n");
+        return;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        memset(&iid, 0xcc, sizeof(iid));
+        hr = pRoGetParameterizedTypeInstanceIID(tests[i].count, tests[i].names, &locator.IRoMetaDataLocator_iface, &iid, NULL);
+        ok(hr == S_OK, "%u: got %#lx\n", i, hr);
+        ok(IsEqualGUID(&iid, &tests[i].iid), "%u: got %s\n", i, wine_dbgstr_guid(&iid));
+    }
+
+    extra = NULL;
+    hr = pRoGetParameterizedTypeInstanceIID(2, iterable_package, &locator.IRoMetaDataLocator_iface, &iid, &extra);
+    ok(hr == S_OK, "got %#lx\n", hr);
+    ok(extra != NULL, "no handle\n");
+    if (extra && pRoParameterizedTypeExtraGetTypeSignature && pRoFreeParameterizedTypeExtra)
+    {
+        signature = pRoParameterizedTypeExtraGetTypeSignature(extra);
+        ok(signature && !strcmp(signature, package_signature), "got %s\n", wine_dbgstr_a(signature));
+        pRoFreeParameterizedTypeExtra(extra);
+    }
+
+    /* the locator does not know the type */
+    hr = pRoGetParameterizedTypeInstanceIID(2, unknown, &locator.IRoMetaDataLocator_iface, &iid, NULL);
+    ok(FAILED(hr), "unknown type: got %#lx\n", hr);
+    /* not a parameterized type, or names left over */
+    hr = pRoGetParameterizedTypeInstanceIID(1, not_generic, &locator.IRoMetaDataLocator_iface, &iid, NULL);
+    ok(FAILED(hr), "not generic: got %#lx\n", hr);
+    hr = pRoGetParameterizedTypeInstanceIID(3, iterable_package, &locator.IRoMetaDataLocator_iface, &iid, NULL);
+    ok(FAILED(hr), "extra name: got %#lx\n", hr);
+    hr = pRoGetParameterizedTypeInstanceIID(0, iterable_package, &locator.IRoMetaDataLocator_iface, &iid, NULL);
+    ok(hr == E_INVALIDARG, "no names: got %#lx\n", hr);
+    hr = pRoGetParameterizedTypeInstanceIID(2, iterable_package, &locator.IRoMetaDataLocator_iface, NULL, NULL);
+    ok(hr == E_INVALIDARG, "no iid: got %#lx\n", hr);
+}
+
 START_TEST(roapi)
 {
     BOOL ret;
@@ -546,6 +671,7 @@ START_TEST(roapi)
     test_implicit_mta();
     test_ActivationFactories();
     test_RoGetAgileReference();
+    test_RoGetParameterizedTypeInstanceIID();
 
     SetLastError(0xdeadbeef);
     ret = DeleteFileW(L"wine.combase.test.dll");
