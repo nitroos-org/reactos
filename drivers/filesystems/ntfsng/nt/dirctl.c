@@ -292,6 +292,9 @@ static NTSTATUS NgQueryDirectory(PIRP Irp, PIO_STACK_LOCATION Stack, PNG_VCB Vcb
         Ccb->PatternIsStar = TRUE;
     }
 
+    /* A directory removed with POSIX semantics while this handle stayed open has no entries to list. */
+    if (Fcb->Deleted && (!Ccb->Enumerated || Restart))
+        return STATUS_NO_MORE_FILES;
     if (!Ccb->Enumerated || Restart)
     {
         NG_SNAP Snap;
