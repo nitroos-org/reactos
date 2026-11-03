@@ -257,6 +257,13 @@ InterpretCommand(
                     dwArgIndex++;
                     g_pInvokeContext = pTempContext;
                     dwError = pCommand->pfnCmdHandler(g_pszMachine, argv, dwArgIndex, dwArgCount, 0, NULL, bDone);
+                    if (dwError == ERROR_NETSH_OK)
+                    {
+                        /* successful change: "Ok." is only printed outside of scripts */
+                        if (g_lScriptDepth == 0)
+                            ConPuts(StdOut, L"Ok.\n");
+                        dwError = ERROR_SUCCESS;
+                    }
                     if (dwError != ERROR_SUCCESS)
                     {
                         if (dwError == ERROR_SHOW_USAGE || dwError == ERROR_INVALID_SYNTAX)
@@ -444,6 +451,12 @@ ReportError(
         case ERROR_SUPPRESS_OUTPUT:
             return ERROR_SUCCESS;
 
+        case ERROR_NETSH_FAILED_OUTPUT:
+            /* the handler printed the message itself; a blank line follows outside of scripts */
+            if (g_lScriptDepth == 0)
+                ConPuts(StdOut, L"\n");
+            return dwError;
+
         case ERROR_SCRIPT_FAILED:
             if (g_lScriptDepth == 0)
                 ConPuts(StdOut, L"\n");
@@ -584,6 +597,10 @@ InterpretInteractive(VOID)
 
     g_bInteractive = TRUE;
 
+    /* a context given with -c is connected when the prompt starts */
+    if ((pCurrentContext != pRootContext) && pCurrentContext->pfnConnectFn)
+        pCurrentContext->pfnConnectFn(g_pszMachine);
+
     for (;;)
     {
         /* Shown just before the input where the user places commands */
@@ -595,6 +612,14 @@ InterpretInteractive(VOID)
         /* Get input from the user. End of input leaves the program. */
         if (fgetws(input_line, MAX_STRING_SIZE, stdin) == NULL)
             break;
+
+        {
+            LPWSTR pc;
+            for (pc = input_line; *pc != 0 && iswspace(*pc); pc++)
+                ;
+            if (*pc == L'#')
+                continue;   /* comment line */
+        }
 
         dwArgCount = SplitLine(input_line, args_vector);
         if (InterpretTokens(args_vector, dwArgCount, &bDone) != ERROR_SUCCESS)

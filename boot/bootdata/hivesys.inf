@@ -2358,6 +2358,42 @@ HKLM,"SYSTEM\CurrentControlSet\Services\wuauserv","Start",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\wuauserv","Type",0x00010001,0x00000020
 HKLM,"SYSTEM\CurrentControlSet\Services\wuauserv\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\wuauserv.dll"
 
+; Windows Defender Firewall service (NitroOS basic firewall: rule store + kernel filter feeder)
+HKLM,"SYSTEM\CurrentControlSet\Services\mpssvc","DisplayName",0x00000000,"Windows Defender Firewall"
+HKLM,"SYSTEM\CurrentControlSet\Services\mpssvc","Description",0x00000000,"Windows Defender Firewall helps protect your computer by preventing unauthorized users from gaining access to your computer through the Internet or a network."
+HKLM,"SYSTEM\CurrentControlSet\Services\mpssvc","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\mpssvc","ImagePath",0x00020000,"%SystemRoot%\system32\svchost.exe -k LocalServiceNoNetworkFirewall"
+HKLM,"SYSTEM\CurrentControlSet\Services\mpssvc","ObjectName",0x00000000,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\mpssvc","Start",0x00010001,0x00000002
+HKLM,"SYSTEM\CurrentControlSet\Services\mpssvc","Type",0x00010001,0x00000020
+HKLM,"SYSTEM\CurrentControlSet\Services\mpssvc\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\mpssvc.dll"
+HKLM,"SYSTEM\CurrentControlSet\Services\mpssvc\Parameters","ServiceDllUnloadOnStop",0x00010001,0x00000001
+
+; Firewall policy: the same layout and defaults as Windows 10 (rules in FirewallRules, one key per profile)
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\DomainProfile","EnableFirewall",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\DomainProfile","DisableNotifications",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\DomainProfile\Logging","LogDroppedPackets",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\DomainProfile\Logging","LogFilePath",0x00020000,"%systemroot%\system32\LogFiles\Firewall\pfirewall.log"
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\DomainProfile\Logging","LogFileSize",0x00010001,0x00001000
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\DomainProfile\Logging","LogSuccessfulConnections",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile","EnableFirewall",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile","DisableNotifications",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile\Logging","LogDroppedPackets",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile\Logging","LogFilePath",0x00020000,"%systemroot%\system32\LogFiles\Firewall\pfirewall.log"
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile\Logging","LogFileSize",0x00010001,0x00001000
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile\Logging","LogSuccessfulConnections",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\PublicProfile","EnableFirewall",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\PublicProfile","DisableNotifications",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\PublicProfile\Logging","LogDroppedPackets",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\PublicProfile\Logging","LogFilePath",0x00020000,"%systemroot%\system32\LogFiles\Firewall\pfirewall.log"
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\PublicProfile\Logging","LogFileSize",0x00010001,0x00001000
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\PublicProfile\Logging","LogSuccessfulConnections",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy","DisableStatefulFTP",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy","DisableStatefulPPTP",0x00010001,0x00000000
+; NitroOS default rule set (two rules; not the Microsoft default set)
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules","NitroOS-CoreNet-DHCP-In",0x00000000,"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=17|LPort=68|RPort=67|Name=NitroOS Core Networking - Dynamic Host Configuration Protocol (DHCP-In)|Desc=Allows DHCP (Dynamic Host Configuration Protocol) messages for stateful auto-configuration.|EmbedCtxt=NitroOS Core Networking|"
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules","NitroOS-CoreNet-ICMP4-DU-In",0x00000000,"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=1|ICMP4=3:*|Name=NitroOS Core Networking - Destination Unreachable (ICMPv4-In)|Desc=Destination Unreachable error messages are sent from any node that a packet traveled through and was unable to be forwarded at the IP layer.|EmbedCtxt=NitroOS Core Networking|"
+
 ; DCOMLAUNCH Service
 HKLM,"SYSTEM\CurrentControlSet\Services\DcomLaunch","DisplayName",0x00000000,%DCOMLAUNCH_SERVICE%
 HKLM,"SYSTEM\CurrentControlSet\Services\DcomLaunch","Description",0x00000000,%DCOMLAUNCH_SERVICE_DESCRIPTION%
