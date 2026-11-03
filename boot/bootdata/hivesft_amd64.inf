@@ -50,6 +50,11 @@ HKLM,"SOFTWARE\Clients\StartMenuInternet\IEXPLORE.EXE\shell\open\command","",0x0
 HKLM,"SOFTWARE\Classes\Wow6432Node\CLSID\{4991D34B-80A1-4291-83B6-3328366B9097}",,0x00000000,"Background Intelligent Transfer Control Class 1.0"
 HKLM,"SOFTWARE\Classes\Wow6432Node\CLSID\{4991D34B-80A1-4291-83B6-3328366B9097}","AppID",0x00000000,"{69AD4AEE-51BE-439B-A92C-86AE490E8B30}"
 
+; The 32-bit view of the Network List Manager class of hivecls.inf (netprofm.dll resolves to the i386 build in SysWOW64).
+HKLM,"SOFTWARE\Classes\Wow6432Node\CLSID\{DCB00C01-570F-4A9B-8D69-199FDBA5723B}",,0x00000000,"Network List Manager"
+HKLM,"SOFTWARE\Classes\Wow6432Node\CLSID\{DCB00C01-570F-4A9B-8D69-199FDBA5723B}\InprocServer32",,0x00020000,"%SystemRoot%\system32\netprofm.dll"
+HKLM,"SOFTWARE\Classes\Wow6432Node\CLSID\{DCB00C01-570F-4A9B-8D69-199FDBA5723B}\InprocServer32","ThreadingModel",0x00000000,"Both"
+
 ; The 32-bit view of the smart card database of hivesft.inf (HKLM\SOFTWARE\Microsoft\Cryptography\Calais is redirected, not
 ; shared, as on Windows; the card module paths are SysWOW64).
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\Cryptography\Calais\Cache",,0x00010001,0x00000000

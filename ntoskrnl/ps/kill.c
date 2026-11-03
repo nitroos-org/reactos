@@ -485,6 +485,7 @@ PspExitThread(IN NTSTATUS ExitStatus)
     PLIST_ENTRY FirstEntry, CurrentEntry;
     PKAPC Apc;
     PTOKEN PrimaryToken;
+    KIRQL OldIrql;
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
     BOOLEAN FreeNativeStack = TRUE;
 #endif
@@ -861,7 +862,20 @@ PspExitThread(IN NTSTATUS ExitStatus)
 #endif
         /* Decommit the TEB */
         MmDeleteTeb(CurrentProcess, Teb);
+
+        /* NtCurrentTeb() reads the TEB pointer of the PCR, which the context
+           switch loaded from the thread: clear both, or kernel code that runs
+           later in this thread (object deletion from ObKillProcess, for one)
+           would write its last error into the freed TEB */
+        KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
         Thread->Tcb.Teb = NULL;
+#ifdef _M_IX86
+        /* also the GDT entry of the TEB selector (fs:), as the context switch does */
+        KiSetTebBase(KeGetPcr(), NULL);
+#else
+        KeGetPcr()->NtTib.Self = NULL;
+#endif
+        KeLowerIrql(OldIrql);
     }
 
     /* Free LPC Data */

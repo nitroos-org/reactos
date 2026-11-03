@@ -1072,7 +1072,7 @@ NtUserGetImeInfoEx(
 {
     IMEINFOEX ImeInfoEx;
     BOOL ret = FALSE;
-    PWINSTATION_OBJECT pWinSta;
+    PWINSTATION_OBJECT pWinSta = NULL;
 
     UserEnterShared();
 
@@ -1113,6 +1113,8 @@ NtUserGetImeInfoEx(
     _SEH2_END;
 
 Quit:
+    if (pWinSta)
+        ObDereferenceObject(pWinSta);
     UserLeave();
     return ret;
 }
@@ -1235,6 +1237,8 @@ NtUserSetImeInfoEx(_In_ const IMEINFOEX *pImeInfoEx)
 
     pWinSta = IntGetProcessWindowStation(NULL);
     ret = UserSetImeInfoEx(pWinSta, &ImeInfoEx);
+    if (pWinSta)
+        ObDereferenceObject(pWinSta);
 
 Quit:
     UserLeave();

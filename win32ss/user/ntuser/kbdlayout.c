@@ -561,7 +561,8 @@ IntReorderKeyboardLayouts(
 {
     PKL pOldKL = gspklBaseLayout;
 
-    if ((pWinSta->Flags & WSS_NOIO) || pNewKL == pOldKL)
+    /* A process without a window station cannot reorder */
+    if (!pWinSta || (pWinSta->Flags & WSS_NOIO) || pNewKL == pOldKL)
         return;
 
     pNewKL->pklPrev->pklNext = pNewKL->pklNext;
@@ -583,12 +584,17 @@ NTAPI
 UserSetDefaultInputLang(HKL hKl)
 {
     PKL pKl;
+    PWINSTATION_OBJECT pWinSta;
 
     pKl = UserHklToKbl(hKl);
     if (!pKl)
         return FALSE;
 
-    IntReorderKeyboardLayouts(IntGetProcessWindowStation(NULL), pKl);
+    pWinSta = IntGetProcessWindowStation(NULL);
+    if (!pWinSta)
+        return FALSE;
+    IntReorderKeyboardLayouts(pWinSta, pKl);
+    ObDereferenceObject(pWinSta);
     return TRUE;
 }
 
@@ -796,7 +802,16 @@ co_IntActivateKeyboardLayout(
     }
 
     if (uFlags & KLF_REORDER)
+    {
+        /* Reordering needs the window station of the process (a plain
+           activation does not): fail like an access to a missing one */
+        if (!pWinSta)
+        {
+            EngSetLastError(ERROR_ACCESS_DENIED);
+            return NULL;
+        }
         IntReorderKeyboardLayouts(pWinSta, pKL);
+    }
 
     return co_UserActivateKeyboardLayout(pKL, uFlags, pWnd);
 }
@@ -894,7 +909,17 @@ co_IntLoadKeyboardLayoutEx(
 
     UNREFERENCED_PARAMETER(hSafeFile);
 
-    if (hNewKL == NULL || (pWinSta->Flags & WSS_NOIO))
+    if (hNewKL == NULL)
+        return NULL;
+
+    /* No window station in the process: nothing to load into */
+    if (!pWinSta)
+    {
+        EngSetLastError(ERROR_ACCESS_DENIED);
+        return NULL;
+    }
+
+    if (pWinSta->Flags & WSS_NOIO)
         return NULL;
 
     /* If hOldKL is specified, unload it and load new layput as default */
@@ -1040,7 +1065,7 @@ NtUserGetKeyboardLayoutList(
     HKL *pHklBuff)
 {
     UINT ret = 0;
-    PWINSTATION_OBJECT pWinSta;
+    PWINSTATION_OBJECT pWinSta = NULL;
 
     if (!pHklBuff)
         nBuff = 0;
@@ -1078,6 +1103,8 @@ NtUserGetKeyboardLayoutList(
     _SEH2_END;
 
 Quit:
+    if (pWinSta)
+        ObDereferenceObject(pWinSta);
     UserLeave();
     return ret;
 }
@@ -1211,6 +1238,8 @@ NtUserLoadKeyboardLayoutEx(
                                         Flags);
     if (hSafeFile)
         ZwClose(hSafeFile);
+    if (pWinSta)
+        ObDereferenceObject(pWinSta);
 
     UserLeave();
     return hRetKL;
@@ -1236,6 +1265,8 @@ NtUserActivateKeyboardLayout(
 
     pWinSta = IntGetProcessWindowStation(NULL);
     hOldKL = co_IntActivateKeyboardLayout(pWinSta, hKL, Flags, NULL);
+    if (pWinSta)
+        ObDereferenceObject(pWinSta);
     UserLeave();
 
     return hOldKL;
@@ -1258,6 +1289,8 @@ NtUserUnloadKeyboardLayout(
 
     pWinSta = IntGetProcessWindowStation(NULL);
     ret = IntUnloadKeyboardLayout(pWinSta, hKl);
+    if (pWinSta)
+        ObDereferenceObject(pWinSta);
 
     UserLeave();
     return ret;

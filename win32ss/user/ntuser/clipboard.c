@@ -564,7 +564,11 @@ UserClipboardFreeWindow(PWND pWindow)
         IntClipboardForgetWindow(pWinStaOwn, pWindow);
 
     /* The thread's own window station may hold the window too (a window of another
-       window station can be passed to OpenClipboard) */
+       window station can be passed to OpenClipboard). An exiting process that drops
+       the last reference to a desktop has none any more (and no TEB for the error). */
+    if (UserGetProcessWindowStation() == NULL)
+        return;
+
     pWinStaObj = IntGetWinStaForCbAccess();
     if (!pWinStaObj)
         return;
