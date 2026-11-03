@@ -256,6 +256,26 @@ IopFindInterruptResource(
         }
     }
 
+    /*
+     * A shared, level-triggered line pinned to one IRQ is the line the device is wired to
+     * (a PCI device's INTx, offered as the alternative to its message interrupt): there is
+     * no other IRQ to pick. A device that has the same line in its boot configuration gets
+     * it without this search, and the final conflict check ignores conflicts, so do not
+     * fail here either. (On QEMU's pc machine the HAL's own resource report lists the
+     * line driver-exclusive, and the search above takes that for a conflict.)
+     */
+    if (IoDesc->ShareDisposition == CmResourceShareShared &&
+        !(IoDesc->Flags & CM_RESOURCE_INTERRUPT_LATCHED) &&
+        IoDesc->u.Interrupt.MinimumVector == IoDesc->u.Interrupt.MaximumVector)
+    {
+        Vector = IoDesc->u.Interrupt.MinimumVector;
+        CmDesc->u.Interrupt.Vector = Vector;
+        CmDesc->u.Interrupt.Level = Vector;
+        CmDesc->u.Interrupt.Affinity = (KAFFINITY)-1;
+        DPRINT1("Using the wired shared IRQ 0x%x despite a reported conflict\n", Vector);
+        return TRUE;
+    }
+
     DPRINT1("Failed to satisfy interrupt requirement with IRQ 0x%x-0x%x\n",
             IoDesc->u.Interrupt.MinimumVector,
             IoDesc->u.Interrupt.MaximumVector);
