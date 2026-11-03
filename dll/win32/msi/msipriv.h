@@ -644,6 +644,7 @@ typedef struct tagMSIFILE
     BOOL IsCompressed;
     MSIFILEHASHINFO hash;
     UINT disk_id;
+    BOOL ui_reported;
 } MSIFILE;
 
 typedef struct tagMSIFILEPATCH

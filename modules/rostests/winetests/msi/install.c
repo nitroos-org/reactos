@@ -457,6 +457,18 @@ static const CHAR rofc_media_dat[] = "DiskId\tLastSequence\tDiskPrompt\tCabinet\
                                      "Media\tDiskId\n"
                                      "1\t1\t\ttest1.cab\tDISK1\t\n";
 
+static const CHAR cp_file_dat[] = "File\tComponent_\tFileName\tFileSize\tVersion\tLanguage\tAttributes\tSequence\n"
+                                  "s72\ts72\tl255\ti4\tS72\tS20\tI2\ti2\n"
+                                  "File\tFile\n"
+                                  "maximus\tmaximus\tmaximus\t500\t\t\t16384\t1\n"
+                                  "augustus\taugustus\taugustus\t5000\t\t\t16384\t2\n"
+                                  "caesar\tcaesar\tcaesar\t50000\t\t\t16384\t3";
+
+static const CHAR cp_media_dat[] = "DiskId\tLastSequence\tDiskPrompt\tCabinet\tVolumeLabel\tSource\n"
+                                   "i2\ti4\tL64\tS255\tS32\tS72\n"
+                                   "Media\tDiskId\n"
+                                   "1\t3\t\ttest1.cab\tDISK1\t\n";
+
 static const CHAR sdp_install_exec_seq_dat[] = "Action\tCondition\tSequence\n"
                                                "s72\tS255\tI2\n"
                                                "InstallExecuteSequence\tAction\n"
@@ -1653,6 +1665,18 @@ static const msi_table rofc_tables[] =
     ADD_TABLE(rofc_file),
     ADD_TABLE(install_exec_seq),
     ADD_TABLE(rofc_media),
+    ADD_TABLE(property),
+};
+
+static const msi_table cp_tables[] =
+{
+    ADD_TABLE(cc_component),
+    ADD_TABLE(directory),
+    ADD_TABLE(cc_feature),
+    ADD_TABLE(cc_feature_comp),
+    ADD_TABLE(cp_file),
+    ADD_TABLE(install_exec_seq),
+    ADD_TABLE(cp_media),
     ADD_TABLE(property),
 };
 
@@ -3514,6 +3538,114 @@ error:
     /* Delete the files in the temp (current) folder */
     delete_cab_files();
     DeleteFileA("msitest\\maximus");
+    RemoveDirectoryA("msitest");
+    DeleteFileA(msifile);
+}
+
+struct cab_progress
+{
+    int actiondata[3];  /* ACTIONDATA messages seen per file */
+    int bad_order;      /* ACTIONDATA sent after a later file was already installed */
+    int ticks;          /* sum of the progress increments */
+    int count;
+};
+
+static const char *cp_names[] = {"maximus", "augustus", "caesar"};
+
+static INT CALLBACK cabprogress_callback(void *context, UINT type, MSIHANDLE record)
+{
+    struct cab_progress *data = context;
+    char name[100], path[MAX_PATH];
+    DWORD len = sizeof(name);
+    int i, j, installed;
+
+    if (type == INSTALLMESSAGE_PROGRESS)
+    {
+        if (MsiRecordGetInteger(record, 1) == 2) data->ticks += MsiRecordGetInteger(record, 2);
+        trace("PROGRESS %d %d %d %d\n", MsiRecordGetInteger(record, 1), MsiRecordGetInteger(record, 2),
+              MsiRecordGetInteger(record, 3), MsiRecordGetInteger(record, 4));
+    }
+    else if (type == INSTALLMESSAGE_ACTIONDATA)
+    {
+        name[0] = 0;
+        MsiRecordGetStringA(record, 1, name, &len);
+        data->count++;
+        for (i = 0; i < ARRAY_SIZE(cp_names); i++)
+            if (!strcmp(name, cp_names[i])) break;
+        if (i < ARRAY_SIZE(cp_names))
+        {
+            data->actiondata[i]++;
+            /* a file is reported before its successors in the cabinet are extracted */
+            for (j = i + 1; j < ARRAY_SIZE(cp_names); j++)
+            {
+                lstrcpyA(path, PROG_FILES_DIR);
+                lstrcatA(path, "\\msitest\\");
+                lstrcatA(path, cp_names[j]);
+                if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) data->bad_order++;
+            }
+        }
+        for (j = 0, installed = 0; j < ARRAY_SIZE(cp_names); j++)
+        {
+            lstrcpyA(path, PROG_FILES_DIR);
+            lstrcatA(path, "\\msitest\\");
+            lstrcatA(path, cp_names[j]);
+            if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) installed++;
+        }
+        trace("ACTIONDATA %s (files on disk: %d)\n", name, installed);
+    }
+    return 0;
+}
+
+static void test_cabinet_progress(void)
+{
+    struct cab_progress data = {{0}};
+    UINT r;
+    int i;
+
+    if (!is_process_elevated())
+    {
+        skip("process is limited\n");
+        return;
+    }
+
+    CreateDirectoryA("msitest", NULL);
+    create_file("maximus", 500);
+    create_file("augustus", 5000);
+    create_file("caesar", 50000);
+    create_cab_file("test1.cab", MEDIA_SIZE, "maximus\0augustus\0caesar\0");
+    DeleteFileA("maximus");
+    DeleteFileA("augustus");
+    DeleteFileA("caesar");
+
+    create_database(msifile, cp_tables, ARRAY_SIZE(cp_tables));
+
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
+    MsiSetExternalUIRecord(cabprogress_callback, INSTALLLOGMODE_PROGRESS | INSTALLLOGMODE_ACTIONDATA,
+                           &data, NULL);
+
+    r = MsiInstallProductA(msifile, NULL);
+    MsiSetExternalUIRecord(NULL, 0, NULL, NULL);
+    if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+    {
+        skip("Not enough rights to perform tests\n");
+        goto error;
+    }
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+
+    /* progress is reported once per file, while the cabinet is being extracted */
+    for (i = 0; i < ARRAY_SIZE(cp_names); i++)
+        ok(data.actiondata[i] == 1, "%s: expected 1 ACTIONDATA message, got %d\n", cp_names[i], data.actiondata[i]);
+    ok(!data.bad_order, "%d files were extracted before the ACTIONDATA of an earlier one\n", data.bad_order);
+    ok(data.ticks >= 500 + 5000 + 50000, "got %d progress ticks\n", data.ticks);
+    trace("total file ticks %d, ACTIONDATA messages %d\n", data.ticks, data.count);
+
+    ok(delete_pf("msitest\\maximus", TRUE), "File not installed\n");
+    ok(delete_pf("msitest\\augustus", TRUE), "File not installed\n");
+    ok(delete_pf("msitest\\caesar", TRUE), "File not installed\n");
+    ok(delete_pf("msitest", FALSE), "Directory not created\n");
+
+error:
+    delete_cab_files();
     RemoveDirectoryA("msitest");
     DeleteFileA(msifile);
 }
@@ -6700,6 +6832,7 @@ START_TEST(install)
     test_uiLevelFlags();
     test_readonlyfile();
     test_readonlyfile_cab();
+    test_cabinet_progress();
     test_setdirproperty();
     test_cabisextracted();
     test_transformprop();
