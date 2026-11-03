@@ -524,4 +524,22 @@ cpp_quote("#endif")
   void test_handle(ctx_handle_t ctx_handle);
 
   void test_I_RpcBindingInqLocalClientPID([in] unsigned int protseq, [in] handle_t binding);
+
+  /* [in] reference parameters whose memory layout differs from the wire layout
+     (16 bit enums on the wire): the server stub allocates the top level block for the bogus
+     struct, conformant varying array and bogus array, and uses the request buffer
+     in place for the simple struct and conformant array. */
+cpp_quote("#ifndef SKIP_TYPE_DECLS")
+  typedef enum { IPE_A, IPE_B, IPE_C } ipe_t;
+  typedef struct { ipe_t e; int x; } ipb_t;
+  typedef struct { int a; int b; } ips_t;
+cpp_quote("#endif")
+
+  int inparam_bogus_struct([in] ipb_t *s);
+  int inparam_inout_bogus_struct([in, out] ipb_t *s);
+  int inparam_cvarray([in] int n, [in] int l, [in, size_is(n), length_is(l)] int *a);
+  int inparam_bogus_array([in] int n, [in, size_is(n)] ipe_t *a);
+  int inparam_struct([in] ips_t *s);
+  int inparam_carray([in] int n, [in, size_is(n)] int *a);
+  unsigned int get_inparam_frees(void);
 }

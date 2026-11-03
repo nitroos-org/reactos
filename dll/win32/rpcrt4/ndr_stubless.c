@@ -1139,6 +1139,38 @@ LONG_PTR WINAPI ndr_stubless_client_call( unsigned int index, void **args, void 
 }
 #endif  /* __i386__ */
 
+/* Returns TRUE if the top level block of an [in] or [in, out] reference
+ * parameter was allocated by the server stub (NdrAllocate) and must be freed
+ * after the call.
+ *
+ * The server argument area is zero initialised, so the unmarshallers of
+ * FC_BOGUS_STRUCT, FC_CVARRAY and FC_BOGUS_ARRAY always allocate the block
+ * (the memory layout differs from the wire layout, so the request buffer is
+ * never used in place). All other types (FC_STRUCT, FC_CARRAY, strings, ...)
+ * may point straight into the request buffer and are left alone, as are
+ * context handles and user marshalled types. As a second guard a pointer inside
+ * the request buffer is never freed. If this guess is ever wrong the result is
+ * a skipped free, not an extra one. Nothing is read from the block. */
+static BOOL stub_owns_in_block(const MIDL_STUB_MESSAGE *pStubMsg, PARAM_ATTRIBUTES attr,
+                               const unsigned char *pTypeFormat, const void *block)
+{
+    if (!attr.IsIn || !attr.IsSimpleRef || attr.IsBasetype || attr.IsByValue || !block)
+        return FALSE;
+
+    switch (*pTypeFormat)
+    {
+    case FC_BOGUS_STRUCT:
+    case FC_CVARRAY:
+    case FC_BOGUS_ARRAY:
+        break;
+    default:
+        return FALSE;
+    }
+
+    return (const unsigned char *)block < pStubMsg->BufferStart ||
+           (const unsigned char *)block >= pStubMsg->BufferEnd;
+}
+
 static LONG_PTR *stub_do_args(MIDL_STUB_MESSAGE *pStubMsg,
                               PFORMAT_STRING pFormat, enum stubless_phase phase,
                               unsigned short number_of_params)
@@ -1178,6 +1210,12 @@ static LONG_PTR *stub_do_args(MIDL_STUB_MESSAGE *pStubMsg,
                      (!params[i].attr.MustFree || params[i].attr.IsSimpleRef))
             {
                 if (*pTypeFormat != FC_BIND_CONTEXT) pStubMsg->pfnFree(*(void **)pArg);
+            }
+            else if (stub_owns_in_block(pStubMsg, params[i].attr, pTypeFormat, *(void **)pArg))
+            {
+                /* top level block of an [in] / [in, out] reference parameter, the nested
+                 * pointers were already freed in the MUSTFREE phase */
+                pStubMsg->pfnFree(*(void **)pArg);
             }
             break;
         case STUBLESS_INITOUT:
