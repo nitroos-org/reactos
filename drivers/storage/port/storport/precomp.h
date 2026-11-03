@@ -225,6 +225,14 @@ typedef struct _STARVED_REQUEST_QUEUE
     LIST_ENTRY ListHead;
 } STARVED_REQUEST_QUEUE, *PSTARVED_REQUEST_QUEUE;
 
+/* An SRB storport completed after a restart (timeout.c) */
+#define STORP_SWEPT_SRBS    256
+typedef struct _STORP_SWEPT_SRB
+{
+    PVOID Srb;
+    ULONG Restart;
+} STORP_SWEPT_SRB, *PSTORP_SWEPT_SRB;
+
 typedef struct _FDO_DEVICE_EXTENSION
 {
     EXTENSION_TYPE ExtensionType;
@@ -291,7 +299,56 @@ typedef struct _FDO_DEVICE_EXTENSION
      * used but Eric didn't put them here. Need review.
      */
     PHW_INITIALIZATION_DATA HwInitData;
-    
+
+    /* Reported in the adapter and device descriptors: the miniport's Parameters\BusType */
+    STORAGE_BUS_TYPE BusType;
+
+    /* Map registers the DMA adapter holds per transfer, when they limit it; else 0 */
+    ULONG NumberOfMapRegisters;
+
+    /* Request timeouts (timeout.c): requests handed to the miniport, under TimeoutLock */
+    KSPIN_LOCK TimeoutLock;
+    LIST_ENTRY IssuedRequestsListHead;
+    ULONG ResetGeneration;
+    KTIMER TimeoutTimer;
+    KDPC TimeoutDpc;
+    PIO_WORKITEM TimeoutWorkItem;
+    LONG TimeoutWorkQueued;
+    ULONG BusResets;
+    ULONG AdapterRestarts;
+    BOOLEAN AdapterControlSupported[ScsiAdapterControlMax];
+
+    /* HwStartIo calls in progress, per parity of the ResetGeneration they were armed in: a
+       restart waits for the old generation's to return before it stops the adapter */
+    LONG StartIoActive[2];
+
+    /* StorPortNotification(RequestComplete) calls in progress (they may run at DIRQL) */
+    LONG CompletionsInFlight;
+
+    /* SRBs storport completed itself after a restart; a late miniport completion of one is
+       recognised here without looking at Srb->OriginalRequest (the IRP by then). Written
+       under TimeoutLock, read without it */
+    STORP_SWEPT_SRB SweptSrbs[STORP_SWEPT_SRBS];
+    LONG SweptSrbCount;
+
+#if DBG
+    /* Fault knob for the timeout path: the miniport's Parameters\DebugDropRequestEvery.
+       Every Nth read or write is taken (armed) but never handed to HwStartIo. Checked builds only */
+    ULONG DebugDropRequestEvery;
+    LONG DebugDropCounter;
+    /* Parameters\DebugDeferStartEvery: every Nth read or write waits DebugDeferStartSeconds
+       after its scatter/gather list was built before it reaches the miniport (a callback the
+       HAL holds back), so a restart can happen while it is pending */
+    ULONG DebugDeferStartEvery;
+    ULONG DebugDeferStartSeconds;
+    LONG DebugDeferCounter;
+    LONG DebugDeferredPending;
+    BOOLEAN DebugDeferStopping;
+    /* Parameters\DebugLateCompletion: completes every swept SRB once more through
+       StorPortNotification(RequestComplete) after its packet is freed, as a miniport that
+       let go of it late would */
+    ULONG DebugLateCompletion;
+#endif
 } FDO_DEVICE_EXTENSION, *PFDO_DEVICE_EXTENSION;
 
 
@@ -308,6 +365,9 @@ typedef struct _PDO_DEVICE_EXTENSION
     ULONG Target;
     ULONG Lun;
     PINQUIRYDATA InquiryBuffer;
+
+    /* VPD page 0x80 product serial number, NUL terminated, or NULL */
+    PCHAR SerialNumber;
 
     LONG IsClaimed;
 
@@ -344,7 +404,23 @@ typedef struct _QUEUED_REQUEST_REFERENCE
     PIRP Irp;
     PSTOR_SCATTER_GATHER_LIST ScatterGatherList;
     PVOID MappedSystemVa;
-    ULONG TimeoutCounter; // FIXME: Implement timeout with a heap
+
+    /* Srb->DataBuffer as the class driver passed it, when storport mapped the buffer */
+    PVOID OriginalDataBuffer;
+    BOOLEAN DataBufferMapped;
+
+    /* Timeout tracking (timeout.c). Seconds left, while on the adapter's issued list */
+    ULONG TimeoutCounter;
+    LIST_ENTRY TimeoutEntry;
+    ULONG Generation;
+    BOOLEAN OnTimeoutList;
+    BOOLEAN ResetSent;
+    /* Armed and handed to HwStartIo: only such a request is the miniport's to lose */
+    BOOLEAN WithMiniport;
+    /* Completed by storport after a restart */
+    BOOLEAN Swept;
+    /* Set by whoever completes the request first: the miniport, or storport after a restart */
+    LONG Completed;
     /*
      * Indicates if the current request is outstanding. Some requests are for HBA, and shouldn't be
      * affected by outstanding requests flow controlling.
@@ -357,6 +433,12 @@ typedef struct _QUEUED_REQUEST_REFERENCE
 
     /* This packet and its SRB extension came from the reserve, not from pool */
     BOOLEAN FromReserve;
+
+#if DBG
+    /* DebugDeferStartEvery: the held back start */
+    KTIMER DebugDeferTimer;
+    KDPC DebugDeferDpc;
+#endif
 
     /* FIXME: This is solely for debugging and should be removed */
     BOOLEAN DumpSpecialRequest;
@@ -538,6 +620,16 @@ TimerCallbackDpcRoutine(
     PVOID SystemArgument2
 );
 
+STORAGE_BUS_TYPE
+PortGetMiniportBusType(
+    _In_ PDRIVER_OBJECT DriverObject);
+
+ULONG
+PortGetMiniportParameter(
+    _In_ PDRIVER_OBJECT DriverObject,
+    _In_ PCWSTR Name,
+    _In_ ULONG Default);
+
 PCSTR
 GetDeviceType(
     _In_ PINQUIRYDATA InquiryData);
@@ -569,6 +661,10 @@ PortPdoPnp(
 
 /* srb.c */
 
+BOOLEAN
+StorpIsReadWriteCdb(
+    _In_ UCHAR OperationCode);
+
 VOID
 StorpSrbFreeRequestReference(
     _In_ PSCSI_REQUEST_BLOCK Srb);
@@ -598,6 +694,53 @@ PortCompletionDpc(
     _In_ PVOID SystemArgument1,
     _In_ PVOID SystemArgument2);
 
+
+/* timeout.c */
+
+VOID
+PortInitializeTimeouts(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
+
+VOID
+PortStartTimeouts(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
+
+VOID
+PortStopTimeouts(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
+
+ULONG
+PortTimeoutArmRequest(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PQUEUED_REQUEST_REFERENCE RequestReference);
+
+VOID
+PortTimeoutStartIoReturned(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ ULONG Generation);
+
+BOOLEAN
+PortIsSweptSrb(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PSCSI_REQUEST_BLOCK Srb);
+
+VOID
+PortForgetSweptSrb(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PSCSI_REQUEST_BLOCK Srb);
+
+VOID
+PortTimeoutDisarmRequest(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PQUEUED_REQUEST_REFERENCE RequestReference);
+
+BOOLEAN
+PortClaimRequestCompletion(
+    _In_ PQUEUED_REQUEST_REFERENCE RequestReference);
+
+VOID
+PortQueryAdapterControlTypes(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
 
 /* storport.c */
 
