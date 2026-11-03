@@ -605,3 +605,6 @@ SysWOW64/kernel.appcore.dll
 
 # Microsoft 365 Apps: Repoman of the Click-to-Run client delay-loads the Restart Manager before it stages files.
 SysWOW64/rstrtmgr.dll
+
+# Microsoft 365 Apps: the Click-to-Run InspectorOfficeGadget.exe (a 32-bit AnyCPU run on WoW64) lists and removes provisioned AppX packages through the DISM API.
+SysWOW64/dismapi.dll
