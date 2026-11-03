@@ -8,6 +8,7 @@ list(APPEND SOURCE
     GetIfTableConcurrent.c
     GetInterfaceName.c
     GetNetworkParams.c
+    GetPerAdapterInfo.c
     GetOwnerModuleFromTcpEntry.c
     GetOwnerModuleFromUdpEntry.c
     ArpNeighbor.c
