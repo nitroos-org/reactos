@@ -11,6 +11,7 @@ extern void func_GetExtendedUdpTable(void);
 extern void func_GetIfTableConcurrent(void);
 extern void func_GetInterfaceName(void);
 extern void func_GetNetworkParams(void);
+extern void func_GetPerAdapterInfo(void);
 extern void func_GetOwnerModuleFromTcpEntry(void);
 extern void func_GetOwnerModuleFromUdpEntry(void);
 extern void func_icmp(void);
@@ -36,6 +37,7 @@ const struct test winetest_testlist[] =
     { "GetIfTableConcurrent",       func_GetIfTableConcurrent },
     { "GetInterfaceName",           func_GetInterfaceName },
     { "GetNetworkParams",           func_GetNetworkParams },
+    { "GetPerAdapterInfo",         func_GetPerAdapterInfo },
     { "GetOwnerModuleFromTcpEntry", func_GetOwnerModuleFromTcpEntry },
     { "GetOwnerModuleFromUdpEntry", func_GetOwnerModuleFromUdpEntry },
     { "icmp",                       func_icmp },

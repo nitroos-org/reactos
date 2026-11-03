@@ -478,9 +478,21 @@ static void sax_characters(void *ctx, const xmlChar *ch, int len)
     xmlSAX2Characters(ctxt, ch, len);
 }
 
+/* libxml2 reports an undeclared namespace prefix (as a warning for elements, as an error for attributes)
+   and keeps the document; msxml rejects it: "Reference to undeclared namespace prefix" (0xc00ce01d). */
+static void check_ns_error(void *ctx)
+{
+    xmlParserCtxtPtr pctx = ctx;
+
+    if (pctx && pctx->errNo == XML_NS_ERR_UNDEFINED_NAMESPACE)
+        pctx->wellFormed = 0;
+}
+
 static void LIBXML2_LOG_CALLBACK sax_error(void* ctx, char const* msg, ...)
 {
     va_list ap;
+
+    check_ns_error(ctx);
     va_start(ap, msg);
     LIBXML2_CALLBACK_ERR(doparse, msg, ap);
     va_end(ap);
@@ -489,6 +501,8 @@ static void LIBXML2_LOG_CALLBACK sax_error(void* ctx, char const* msg, ...)
 static void LIBXML2_LOG_CALLBACK sax_warning(void* ctx, char const* msg, ...)
 {
     va_list ap;
+
+    check_ns_error(ctx);
     va_start(ap, msg);
     LIBXML2_CALLBACK_WARN(doparse, msg, ap);
     va_end(ap);

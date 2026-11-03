@@ -2,6 +2,7 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 
 STRINGTABLE
 BEGIN
+    IDS_INTERFACE_BANNER "In future versions of Windows, Microsoft might remove the Netsh functionality\nfor TCP/IP.\n\nMicrosoft recommends that you transition to Windows PowerShell if you currently\nuse netsh to configure and manage TCP/IP.\n\nType Get-Command -Module NetTCPIP at the Windows PowerShell prompt to view\na list of commands to manage TCP/IP.\n\nVisit https://go.microsoft.com/fwlink/?LinkId=217627 for additional information\nabout PowerShell commands for TCP/IP.\n"
     IDS_HLP_INTERFACE_SHOW "Displays information.\n"
     IDS_HLP_INTERFACE_SHOW_INTERFACE "Displays interfaces.\n"
     IDS_HLP_INTERFACE_SHOW_INTERFACE_EX "\nUsage:\n"

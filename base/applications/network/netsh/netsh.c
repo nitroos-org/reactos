@@ -20,29 +20,35 @@ HMODULE g_hModule = NULL;
 
 DWORD
 RunScript(
-    _In_ LPCWSTR filename,
-    _In_ BOOL bExec)
+    _In_ LPCWSTR filename)
 {
     WCHAR tmp_string[MAX_STRING_SIZE];
     FILE *script;
     DWORD dwError = ERROR_SUCCESS;
+    BOOL bSavedCommandLine;
 
     /* Open the file for processing */
     script = _wfopen(filename, L"r");
     if (script == NULL)
     {
-        ConResPrintf(StdOut, bExec ? IDS_OPEN_FAILED_EXEC : IDS_OPEN_FAILED, filename);
-        if (g_dwExitError == ERROR_SUCCESS)
-            g_dwExitError = ERROR_FILE_NOT_FOUND;
-        return ERROR_FILE_NOT_FOUND;
+        dwError = ERROR_FILE_NOT_FOUND;
+        PrintError(g_hModule, IDS_OPEN_FAILED, filename);
+        PrintError(NULL, dwError);
+        return dwError;
     }
 
-    /* Read and process the script */
+    /* Read and process the script. A failing line does not stop the script, but
+     * the script as a whole reports the failure. */
+    bSavedCommandLine = g_bCommandLine;
+    g_bCommandLine = FALSE;
+    InterlockedIncrement(&g_lScriptDepth);
     while (fgetws(tmp_string, MAX_STRING_SIZE, script) != NULL)
     {
-        /* a failing line does not stop the script; the exit code records it */
-        InterpretLine(tmp_string);
+        if (InterpretLine(tmp_string) != ERROR_SUCCESS)
+            dwError = ERROR_SCRIPT_FAILED;
     }
+    InterlockedDecrement(&g_lScriptDepth);
+    g_bCommandLine = bSavedCommandLine;
 
     /* Close the file */
     fclose(script);
@@ -51,12 +57,10 @@ RunScript(
 }
 
 
-static
 LPWSTR
-MergeStringsQuoted(
+MergeStrings(
     _In_ LPWSTR pszStringArray[],
-    _In_ UINT nCount,
-    _In_ BOOL bQuote)
+    _In_ UINT nCount)
 {
     LPWSTR pszOutString = NULL;
     size_t nLength;
@@ -67,7 +71,7 @@ MergeStringsQuoted(
 
     nLength = 0;
     for (i = 0; i < nCount; i++)
-        nLength += wcslen(pszStringArray[i]) + 2;   /* room for a pair of quotes */
+        nLength += wcslen(pszStringArray[i]);
 
     if (nLength > 0)
         nLength += nCount; /* Space characters and terminating zero */
@@ -78,46 +82,12 @@ MergeStringsQuoted(
 
     for (i = 0; i < nCount; i++)
     {
-        LPWSTR pszArg = pszStringArray[i];
-
         if (i != 0)
             wcscat(pszOutString, L" ");
-
-        /* The C runtime removed the quotes of the command line: put them back around values with blanks,
-           as in tag="value with blanks", so that the line parser keeps them together. */
-        if (bQuote && wcspbrk(pszArg, L" \t") != NULL && wcschr(pszArg, L'\"') == NULL)
-        {
-            LPWSTR pszEq = wcschr(pszArg, L'=');
-            if (pszEq != NULL && pszEq < wcspbrk(pszArg, L" \t"))
-            {
-                wcsncat(pszOutString, pszArg, pszEq - pszArg + 1);
-                wcscat(pszOutString, L"\"");
-                wcscat(pszOutString, pszEq + 1);
-                wcscat(pszOutString, L"\"");
-            }
-            else
-            {
-                wcscat(pszOutString, L"\"");
-                wcscat(pszOutString, pszArg);
-                wcscat(pszOutString, L"\"");
-            }
-        }
-        else
-        {
-            wcscat(pszOutString, pszArg);
-        }
+        wcscat(pszOutString, pszStringArray[i]);
     }
 
     return pszOutString;
-}
-
-
-LPWSTR
-MergeStrings(
-    _In_ LPWSTR pszStringArray[],
-    _In_ UINT nCount)
-{
-    return MergeStringsQuoted(pszStringArray, nCount, FALSE);
 }
 
 
@@ -159,9 +129,11 @@ wmain(
             (_wcsicmp(argv[index], L"/?") == 0) ||
             (_wcsicmp(argv[index], L"?") == 0))
         {
-            /* Help option: usage, then the commands of the root context; Windows exits with 1 */
+            /* Help option */
             ConResPuts(StdOut, IDS_APP_USAGE);
+            InterlockedIncrement(&g_lScriptDepth);  /* no blank line after this list */
             PrintContextHelp(pRootContext);
+            InterlockedDecrement(&g_lScriptDepth);
             dwError = ERROR_INVALID_SYNTAX;
             goto done;
         }
@@ -248,7 +220,7 @@ wmain(
             }
             else if (pszCommand == NULL)
             {
-                pszCommand = MergeStringsQuoted((LPWSTR*)&argv[index], argc - index, TRUE);
+                pszCommand = MergeStrings((LPWSTR*)&argv[index], argc - index);
                 if (pszCommand == NULL)
                 {
                     dwError = ERROR_NOT_ENOUGH_MEMORY;
@@ -264,7 +236,7 @@ wmain(
     /* Run the alias file */
     if (pszAliasFileName != NULL)
     {
-        dwError = RunScript(pszAliasFileName, FALSE);
+        dwError = RunScript(pszAliasFileName);
         if (dwError != ERROR_SUCCESS)
             goto done;
     }
@@ -280,16 +252,17 @@ wmain(
     /* Run a script, the command line instruction or the interactive interpeter */
     if (pszScriptFileName != NULL)
     {
-        dwError = RunScript(pszScriptFileName, FALSE);
+        dwError = RunScript(pszScriptFileName);
     }
     else if (pszCommand != NULL)
     {
-        g_bNoSwitch = TRUE;
+        g_bCommandLine = TRUE;
         dwError = InterpretLine(pszCommand);
+        g_bCommandLine = FALSE;
     }
     else
     {
-        InterpretInteractive();
+        dwError = InterpretInteractive();
     }
 
 done:
@@ -304,8 +277,6 @@ done:
     UnloadHelpers();
     DestroyAliases();
 
-    if (g_dwExitError != ERROR_SUCCESS)
-        dwError = g_dwExitError;
     return (dwError == ERROR_SUCCESS) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
@@ -455,13 +426,24 @@ MatchTagsInCmdLine(
                 (_wcsnicmp(ppwcArguments[i], pttTags[j].pwszTag, dwTagLength) == 0))
             {
                 DPRINT("Found tag %S\n", pttTags[j].pwszTag);
-                pttTags[j].bPresent = TRUE;
+                /* An empty value counts as not given */
+                pttTags[j].bPresent = (pszEqual[1] != UNICODE_NULL);
                 pdwTagType[i - dwCurrentIndex] = j;
 
                 /* Remove the tag name from the argument */
                 wcscpy(ppwcArguments[i], pszEqual + 1);
                 break;
             }
+        }
+
+        if (j == dwTagCount)
+        {
+            /* Not one of the tags of this command */
+            WCHAR szTag[64];
+            wcsncpy(szTag, ppwcArguments[i], min(dwTagLength, _countof(szTag) - 1));
+            szTag[min(dwTagLength, _countof(szTag) - 1)] = UNICODE_NULL;
+            PrintError(NULL, ERROR_INVALID_OPTION_TAG, szTag);
+            return ERROR_INVALID_SYNTAX;
         }
     }
 
@@ -604,7 +586,13 @@ PreprocessCommand(
     if ((ppwcArguments == NULL) || (pttTags == NULL) || (pdwTagType == NULL))
         return ERROR_INVALID_PARAMETER;
 
-    if (((dwArgCount - dwCurrentIndex) < dwMinArgs) || ((dwArgCount - dwCurrentIndex) > dwMaxArgs))
+    if ((dwArgCount - dwCurrentIndex) < dwMinArgs)
+    {
+        PrintError(NULL, ERROR_MISSING_OPTION);
+        return ERROR_INVALID_SYNTAX;
+    }
+
+    if ((dwArgCount - dwCurrentIndex) > dwMaxArgs)
         return ERROR_INVALID_SYNTAX;
 
     for (i = 0; i < dwTagCount; i++)
@@ -631,7 +619,10 @@ PreprocessCommand(
     for (i = 0; i < dwTagCount; i++)
     {
         if ((pttTags[i].dwRequired & NS_REQ_PRESENT) && (pttTags[i].bPresent == FALSE))
+        {
+            PrintError(NULL, ERROR_MISSING_OPTION);
             return ERROR_INVALID_SYNTAX;
+        }
     }
 
     return 0;
@@ -651,21 +642,22 @@ PrintError(
 
     if (hModule)
     {
-        Length = ConResMsgPrintfExV(StdErr, hModule, 0, dwErrId,
+        Length = ConResMsgPrintfExV(StdOut, hModule, 0, dwErrId,
                                     LANG_USER_DEFAULT, &ap);
     }
     else
     {
         if ((dwErrId > NETSH_ERROR_BASE) && (dwErrId < NETSH_ERROR_END))
         {
-            Length = ConResMsgPrintfExV(StdErr, g_hModule, 0, dwErrId,
+            Length = ConResMsgPrintfExV(StdOut, g_hModule, 0, dwErrId,
                                         LANG_USER_DEFAULT, &ap);
         }
         else
         {
-            Length = ConMsgPrintfV(StdErr, FORMAT_MESSAGE_FROM_SYSTEM,
+            Length = ConMsgPrintfV(StdOut, FORMAT_MESSAGE_FROM_SYSTEM,
                                    NULL, dwErrId,
                                    LANG_USER_DEFAULT, &ap);
+            ConPuts(StdOut, L"\n");
         }
     }
 

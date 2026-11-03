@@ -1,7 +1,31 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * kshim_jnl.c - the shim's metadata block journal (see kshim_jnl.h).  Callers hold the NT glue's
- * volume lock, so the overlay needs no lock of its own.
+ * volume lock (CoreLock, always taken exclusive), so the overlay needs no lock of its own.
+ *
+ * Unlocked commit (kshim_jnl_seal / kshim_jnl_io / kshim_jnl_reap).  A commit used to write its journal
+ * pages, header, in-place copy and the flushes (82% of its time) with the volume lock held.  Now:
+ *   1. SEAL, under the volume lock: the overlay moves to the "sealed" hash and a new, empty one takes the
+ *      writes that follow.  Nothing is written to the device.
+ *   2. IO, without the volume lock, by the thread that sealed: the unchanged commit sequence runs on the
+ *      sealed pages.  Nobody else touches the sealed entries meanwhile (see below), nobody else writes the
+ *      journal area or the header page (every other writer of them first waits for the I/O to end).
+ *   3. REAP, under the volume lock, at once or by whoever needs the sealed overlay gone: a finished
+ *      transaction is freed (its pages are in place), a failed one is merged back into the live overlay.
+ * Rules, all under the volume lock unless said otherwise:
+ *   - One sealed transaction at a time.  Seal, the old synchronous commit, retire, degrade, strict mode and
+ *     deactivate first wait for the I/O of the sealed one to end (kj_settle).  The I/O needs no lock, so
+ *     waiting for it with the volume lock held cannot deadlock.
+ *   - Reads (kshim_jnl_patch to the caller's buffer) apply the sealed entries, then the live ones: the live
+ *     overlay is newer.  A sealed entry stays until reaped, i.e. also after its pages went in place, so a
+ *     device read made before the in-place pass is still patched to the committed value.
+ *   - A write of a sector the sealed overlay holds goes to the live overlay (a partial sector starts from
+ *     the sealed copy, never from the device, which may not have it yet).  Sealed entries are never
+ *     changed while their I/O runs: a direct (file data) write over a sealed sector waits for the I/O first.
+ *   - The next transaction cannot be sealed before the previous one is in place, so on the medium the
+ *     in-place passes keep their order and a journal slot is never overwritten while it is still needed.
+ *   - The caller's "aux" value (the free-cluster count) at the seal becomes aux_done when the transaction
+ *     is complete: an allocation that follows a free needs aux_done to have caught up with it.
  */
 #include <kshim.h>
 #include <kshim_jnl.h>
@@ -39,11 +63,31 @@ struct kshim_jnl {
 	u16 vol_usn;			/* its update sequence number on disk (after the last in-place pass) */
 	u8 *hdrpage;
 	unsigned long commits, committed_pages, max_tx, fallbacks, dropped, replay_pages;
+	/*
+	 * The sealed overlay: the transaction whose journal I/O runs without the volume lock.  Sealing (under
+	 * the lock) moves the overlay here and starts an empty one; reads look at the live overlay, then at this
+	 * one, then at the device.  See "Unlocked commit" below for the rules.
+	 */
+	struct kj_ent *shash[KJ_BUCKETS];
+	unsigned long snpages;
+	int sstate;			/* KJ_S_NONE, KJ_S_RUNNING (I/O in flight), KJ_S_DONE (finished, not yet released) */
+	int serr;			/* result of the I/O of the sealed transaction */
+	struct kj_ent **sv, **stmp;	/* its entries, sorted by the I/O; allocated at the seal */
+	unsigned long ssort_n;
+	u16 susn_new;
+	u64 saux;			/* the caller's value at the seal (see aux_done) */
+	u64 aux_done;			/* the caller's value at the last commit that is complete (all changes before it are committed) */
+	struct ngos_ev idle;		/* signalled while no I/O is in flight */
+	unsigned long unlocked_commits, io_us;
 };
+
+enum { KJ_S_NONE = 0, KJ_S_RUNNING = 1, KJ_S_DONE = 2 };
 
 static u32 kj_crc_table[256];
 #if DBG
 unsigned long kshim_jnl_fault;
+unsigned long kshim_jnl_fault_stage;	/* where in the commit the fault stops it: 0 half way through the in-place pass, 1 before the COMMITTED header, 2 after it, 3 after the in-place pass */
+unsigned long kshim_jnl_stall_ms;	/* the journal I/O of a sealed transaction sleeps this long between its phases */
 #endif
 
 u32 kj_crc32(u32 crc, const void *p, size_t n)
@@ -121,6 +165,8 @@ static int kj_read_vol_usn(struct block_device *b, u64 off, u16 *usn, u8 *buf)
 }
 
 static struct kj_ent *kj_find(struct kshim_jnl *j, u64 blk);
+static void kj_wait_io(struct kshim_jnl *j);
+static void kj_settle(struct kshim_jnl *j);
 
 /* $Volume's number once the overlay is in place: from the overlay when it holds the record's first sector. */
 static u16 kj_vol_usn_after(struct kshim_jnl *j)
@@ -177,6 +223,8 @@ int kshim_jnl_degraded(struct block_device *b)
 void kshim_jnl_strict(struct block_device *b, int on)
 {
 	if (b->jnl) {
+		if (on)
+			kj_settle(b->jnl);
 		b->jnl->strict = on;
 		b->jnl->refused = 0;
 		if (!on)
@@ -188,7 +236,7 @@ void kshim_jnl_strict(struct block_device *b, int on)
 int kshim_jnl_retire_pending(struct block_device *b)
 {
 	struct kshim_jnl *j = b->jnl;
-	return j && !j->readonly && !j->retired && !j->npages && !j->degraded && !j->errors && !j->failed;
+	return j && !j->readonly && !j->retired && !j->npages && !j->snpages && !j->degraded && !j->errors && !j->failed;
 }
 
 static int kj_in_area(struct kshim_jnl *j, u64 off, size_t len)
@@ -207,6 +255,104 @@ static struct kj_ent *kj_find(struct kshim_jnl *j, u64 blk)
 		if (e->blk == blk)
 			return e;
 	return NULL;
+}
+
+static struct kj_ent *kj_find_s(struct kshim_jnl *j, u64 blk)
+{
+	if (!j->snpages)
+		return NULL;
+	for (struct kj_ent *e = j->shash[blk % KJ_BUCKETS]; e; e = e->next)
+		if (e->blk == blk)
+			return e;
+	return NULL;
+}
+
+static void kj_wait_io(struct kshim_jnl *j)
+{
+	while (__atomic_load_n(&j->sstate, __ATOMIC_ACQUIRE) == KJ_S_RUNNING)
+		ngos_ev_wait(&j->idle);
+}
+
+static void kj_free_sealed(struct kshim_jnl *j)
+{
+	for (int i = 0; i < KJ_BUCKETS; i++) {
+		struct kj_ent *e = j->shash[i], *n;
+		for (; e; e = n) {
+			n = e->next;
+			kfree(e->data);
+			kfree(e);
+		}
+		j->shash[i] = NULL;
+	}
+	j->snpages = 0;
+}
+
+/* A transaction that failed before it was in place: its sectors go back to the live overlay (the live copy is newer). */
+static void kj_merge_back(struct kshim_jnl *j)
+{
+	for (int i = 0; i < KJ_BUCKETS; i++) {
+		struct kj_ent *e = j->shash[i], *n;
+		for (; e; e = n) {
+			struct kj_ent *c = kj_find(j, e->blk);
+			n = e->next;
+			if (!c) {
+				e->next = j->hash[e->blk % KJ_BUCKETS];
+				j->hash[e->blk % KJ_BUCKETS] = e;
+				j->npages++;
+				continue;
+			}
+			for (int s = 0; s < 8; s++)
+				if ((e->mask & (1u << s)) && !(c->mask & (1u << s))) {
+					memcpy(c->data + s * KJ_SECT, e->data + s * KJ_SECT, KJ_SECT);
+					c->mask |= 1u << s;
+				}
+			kfree(e->data);
+			kfree(e);
+		}
+		j->shash[i] = NULL;
+	}
+	j->snpages = 0;
+}
+
+/* Under the volume lock, the I/O is not running: a finished sealed transaction is released. */
+static void kj_reap(struct kshim_jnl *j)
+{
+	if (j->sstate != KJ_S_DONE)
+		return;
+	if (!j->serr) {
+		j->commits++;
+		j->committed_pages += j->snpages;
+		if (j->snpages > j->max_tx)
+			j->max_tx = j->snpages;
+		j->aux_done = j->saux;
+		kj_free_sealed(j);
+	} else {
+		kj_merge_back(j);
+	}
+	__atomic_store_n(&j->sstate, KJ_S_NONE, __ATOMIC_RELEASE);
+}
+
+static void kj_settle(struct kshim_jnl *j)
+{
+	kj_wait_io(j);
+	kj_reap(j);
+}
+
+/* Any sector of [off, off+len) held by the entries of @hash. */
+static int kj_holds_h(struct kj_ent **hash, u64 off, u64 len)
+{
+	for (u64 s = off / KJ_SECT * KJ_SECT; s < off + len; s += KJ_SECT) {
+		struct kj_ent *e;
+		for (e = hash[(s / KJ_PAGE) % KJ_BUCKETS]; e && e->blk != s / KJ_PAGE; e = e->next)
+			;
+		if (!e) {
+			s = (s / KJ_PAGE + 1) * KJ_PAGE - KJ_SECT;	/* next page */
+			continue;
+		}
+		if (e->mask & (1u << ((s % KJ_PAGE) / KJ_SECT)))
+			return 1;
+	}
+	return 0;
 }
 
 static void kj_drop_all(struct kshim_jnl *j)
@@ -265,7 +411,10 @@ int kshim_jnl_retire(struct block_device *b)
 {
 	struct kshim_jnl *j = b->jnl;
 	u64 dev;
-	if (!j || j->readonly || j->retired || j->npages || j->degraded || j->errors || j->failed)
+	if (!j || j->readonly)
+		return 0;
+	kj_settle(j);
+	if (j->retired || j->npages || j->snpages || j->degraded || j->errors || j->failed)
 		return 0;
 	memset(j->hdrpage, 0xff, KJ_PAGE);
 	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || kj_dev_write(b, dev, j->hdrpage, KJ_PAGE) ||
@@ -296,6 +445,7 @@ int kshim_jnl_activate(struct block_device *b, const struct kj_ext *ext, int nex
 		return -ENOMEM;
 	}
 	memcpy(j->ext, ext, next * sizeof(*ext));
+	ngos_ev_init(&j->idle, 0, 1);
 	j->next = next;
 	j->lf_pages = lf_pages;
 	j->serial = serial;
@@ -331,6 +481,8 @@ void kshim_jnl_deactivate(struct block_device *b)
 	struct kshim_jnl *j = b->jnl;
 	if (!j)
 		return;
+	kj_settle(j);
+	kj_free_sealed(j);
 	kj_drop_all(j);
 	b->jnl = NULL;
 	kfree(j->ext);
@@ -338,9 +490,42 @@ void kshim_jnl_deactivate(struct block_device *b)
 	kfree(j);
 }
 
+/* Pages of the live overlay: what the next commit would write. */
 unsigned long kshim_jnl_pending(struct block_device *b)
 {
 	return b->jnl ? b->jnl->npages : 0;
+}
+
+/* Live and sealed pages: changes that are not in place yet. */
+unsigned long kshim_jnl_unsettled(struct block_device *b)
+{
+	return b->jnl ? b->jnl->npages + b->jnl->snpages : 0;
+}
+
+/* Waits until no journal I/O is in flight and releases a finished sealed transaction. */
+void kshim_jnl_settle(struct block_device *b)
+{
+	if (b->jnl)
+		kj_settle(b->jnl);
+}
+
+/* Waits for the journal I/O in flight to end, without releasing anything (the medium goes away, the writes stop). */
+void kshim_jnl_quiesce(struct block_device *b)
+{
+	if (b->jnl)
+		kj_wait_io(b->jnl);
+}
+
+/* The caller's value at the last complete commit (see kshim_jnl_commit's @aux). */
+u64 kshim_jnl_aux_done(struct block_device *b)
+{
+	return b->jnl ? b->jnl->aux_done : 0;
+}
+
+void kshim_jnl_set_aux(struct block_device *b, u64 aux)
+{
+	if (b->jnl)
+		b->jnl->aux_done = aux;
 }
 
 /* Holds a metadata write in the overlay; -ENOMEM means the caller writes in place. */
@@ -379,11 +564,20 @@ int kshim_jnl_capture(struct block_device *b, u64 off, const u8 *buf, size_t len
 			j->hash[blk % KJ_BUCKETS] = e;
 			j->npages++;
 		}
-		/* A partial sector not held yet starts from the device copy; bits change only after that. */
-		for (size_t s = in / KJ_SECT * KJ_SECT; s < in + n; s += KJ_SECT)
-			if (!(e->mask & (1u << (s / KJ_SECT))) && (s < in || s + KJ_SECT > in + n) &&
-			    kj_dev_read(b, blk * KJ_PAGE + s, e->data + s, KJ_SECT))
+		/*
+		 * A partial sector not held yet starts from the sealed copy (the device may not have it yet),
+		 * else from the device copy; bits change only after that.
+		 */
+		for (size_t s = in / KJ_SECT * KJ_SECT; s < in + n; s += KJ_SECT) {
+			struct kj_ent *se;
+			if ((e->mask & (1u << (s / KJ_SECT))) || (s >= in && s + KJ_SECT <= in + n))
+				continue;
+			se = kj_find_s(j, blk);
+			if (se && (se->mask & (1u << (s / KJ_SECT))))
+				memcpy(e->data + s, se->data + s, KJ_SECT);
+			else if (kj_dev_read(b, blk * KJ_PAGE + s, e->data + s, KJ_SECT))
 				return -EIO;
+		}
 		memcpy(e->data + in, buf, n);
 		for (size_t s = in / KJ_SECT * KJ_SECT; s < in + n; s += KJ_SECT)
 			e->mask |= 1u << (s / KJ_SECT);
@@ -398,31 +592,30 @@ int kshim_jnl_capture(struct block_device *b, u64 off, const u8 *buf, size_t len
 int kshim_jnl_holds(struct block_device *b, u64 off, u64 len)
 {
 	struct kshim_jnl *j = b->jnl;
-	if (!j || !j->npages || !len)
+	if (!j || (!j->npages && !j->snpages) || !len)
 		return 0;
-	for (u64 s = off / KJ_SECT * KJ_SECT; s < off + len; s += KJ_SECT) {
-		struct kj_ent *e = kj_find(j, s / KJ_PAGE);
-		if (!e) {
-			s = (s / KJ_PAGE + 1) * KJ_PAGE - KJ_SECT;	/* next page */
-			continue;
-		}
-		if (e->mask & (1u << ((s % KJ_PAGE) / KJ_SECT)))
-			return 1;
-	}
-	return 0;
+	return (j->npages && kj_holds_h(j->hash, off, len)) || (j->snpages && kj_holds_h(j->shash, off, len));
 }
 
 /* to_overlay 0: copy held sectors over a buffer read from the device; 1: update held sectors from a direct write. */
 void kshim_jnl_patch(struct block_device *b, int to_overlay, u64 off, u8 *buf, size_t len)
 {
 	struct kshim_jnl *j = b->jnl;
-	if (!j || !j->npages)
+	if (!j || (!j->npages && !j->snpages))
 		return;
+	/* A sealed entry is read by the journal I/O until it ends: a write over one of its sectors waits for that. */
+	if (to_overlay && j->snpages && __atomic_load_n(&j->sstate, __ATOMIC_ACQUIRE) == KJ_S_RUNNING &&
+	    kj_holds_h(j->shash, off, len))
+		kj_wait_io(j);
 	while (len) {
 		u64 blk = off / KJ_PAGE;
 		size_t in = off % KJ_PAGE, n = min_t(size_t, len, KJ_PAGE - in);
-		struct kj_ent *e = kj_find(j, blk);
-		if (e) {
+		/* Sealed first, then the live overlay, which is newer. */
+		struct kj_ent *es[2] = { kj_find_s(j, blk), j->npages ? kj_find(j, blk) : NULL };
+		for (int k = 0; k < 2; k++) {
+			struct kj_ent *e = es[k];
+			if (!e)
+				continue;
 			for (size_t s = in / KJ_SECT * KJ_SECT; s < in + n; s += KJ_SECT) {
 				size_t a, z;
 				if (!(e->mask & (1u << (s / KJ_SECT))))
@@ -539,19 +732,161 @@ static void kj_sort(struct kj_ent **v, struct kj_ent **tmp, unsigned long n)
 	memcpy(v, tmp, n * sizeof(*v));
 }
 
-int kshim_jnl_commit(struct block_device *b)
+/* DBG: stops the system here when JournalFault asks for this stage of this commit (kshim_jnl_fault_stage). */
+#if DBG
+static void kj_fault_at(struct block_device *b, struct kshim_jnl *j, unsigned long stage, struct kj_ent **v,
+		unsigned long n)
+{
+	if (!kshim_jnl_fault || j->commits + 1 < kshim_jnl_fault || n < 2 || kshim_jnl_fault_stage != stage)
+		return;
+	if (stage == 0)
+		kj_apply(b, v, n / 2);
+	else if (stage == 3)
+		kj_apply(b, v, n);
+	kj_dev_flush(b);
+	printk(KERN_ERR "journal: fault injected in commit %lu seq %llu stage %lu: %lu of %lu pages in place\n",
+	       j->commits + 1, (unsigned long long)j->seq, stage, stage == 0 ? n / 2 : stage == 3 ? n : 0, n);
+	ngos_bugcheck("journal fault injection", __FILE__, __LINE__);
+}
+static void kj_stall(void)
+{
+	if (kshim_jnl_stall_ms)
+		ngos_sleep_ms((unsigned int)kshim_jnl_stall_ms);
+}
+#else
+#define kj_fault_at(b, j, stage, v, n) do { } while (0)
+#define kj_stall() do { } while (0)
+#endif
+
+/*
+ * The journal sequence of one transaction of @n pages (@v, sorted by block): descriptor and data slots, flush,
+ * COMMITTED header, flush, in place, flush, ACTIVE header.  Runs with the volume lock (synchronous commit) or
+ * without it (kshim_jnl_io); it touches only @v, the journal area, the header page and the volume number, which
+ * nobody else touches meanwhile.  0, or an error: before the COMMITTED header nothing was changed on the
+ * medium that matters (the caller keeps the pages); after it j->failed is set when the in-place pass fails.
+ */
+static int kj_run_tx(struct block_device *b, struct kshim_jnl *j, struct kj_ent **v, unsigned long n,
+		unsigned long ndesc, u16 usn_new)
+{
+	struct kj_desc *d;
+	u32 crc = 0;
+	int err = 0;
+	d = kmalloc(KJ_PAGE, GFP_NOFS);
+	if (!d)
+		return -ENOMEM;
+	{
+		/* Descriptor and data slots, adjacent slots in one transfer. */
+		struct kj_batch w = { b, kmalloc(KJ_BATCH, GFP_NOFS), 0, 0, 0 };
+		for (unsigned long p = 0; p < ndesc && !w.err; p++) {
+			u64 dev;
+			memset(d, 0, KJ_PAGE);
+			for (unsigned long q = 0; q < KJ_DESC_PER_PAGE && p * KJ_DESC_PER_PAGE + q < n; q++) {
+				struct kj_ent *e = v[p * KJ_DESC_PER_PAGE + q];
+				d[q].blk = e->blk;
+				d[q].mask = e->mask;
+				d[q].crc = kj_crc32(0, e->data, KJ_PAGE);
+			}
+			crc = kj_crc32(crc, d, KJ_PAGE);
+			if (kj_page_dev(j->ext, j->next, kj_slot_page(p), &dev))
+				w.err = -EIO;
+			else
+				kj_batch_add(&w, dev, d, KJ_PAGE);
+		}
+		for (unsigned long i = 0; i < n && !w.err; i++) {
+			u64 dev;
+			crc = kj_crc32(crc, v[i]->data, KJ_PAGE);
+			if (kj_page_dev(j->ext, j->next, kj_slot_page(ndesc + i), &dev))
+				w.err = -EIO;
+			else
+				kj_batch_add(&w, dev, v[i]->data, KJ_PAGE);
+		}
+		kj_batch_flush(&w);
+		kfree(w.buf);
+		err = w.err;
+	}
+	/*
+	 * The file data written in place since the last commit and the slots just written must be on
+	 * the medium before the record that makes replay install the metadata pointing at them: a
+	 * volatile write cache may otherwise keep the header and lose them.
+	 */
+	if (!err && kj_dev_flush(b))
+		err = -EIO;
+	if (err)
+		goto out;
+	kj_stall();
+	kj_fault_at(b, j, 1, v, n);
+	j->seq++;
+	if (ndesc + n > j->hwm)
+		j->hwm = ndesc + n;
+	err = kj_hdr_write(b, j, KJ_ST_COMMITTED, (u32)n, (u32)ndesc, crc, 1, usn_new);
+	if (err)
+		goto out;
+	kj_stall();
+	kj_fault_at(b, j, 2, v, n);
+	if (kshim_jnl_fault && kshim_jnl_fault_stage == 0 && j->commits + 1 >= kshim_jnl_fault && n >= 2) {
+		kj_apply(b, v, n / 2);
+		kj_dev_flush(b);
+		printk(KERN_ERR "journal: fault injected in commit %lu seq %llu: %lu of %lu pages in place\n",
+		       j->commits + 1, (unsigned long long)j->seq, n / 2, n);
+		ngos_bugcheck("journal fault injection", __FILE__, __LINE__);
+	}
+#if DBG
+	if (j->apply_fault && n >= 2) {
+		j->apply_fault = 0;
+		kj_apply(b, v, n / 2);
+		kj_dev_flush(b);
+		printk(KERN_ERR "journal: in-place write failure injected in seq %llu: %lu of %lu pages in place\n",
+		       (unsigned long long)j->seq, n / 2, n);
+		err = -EIO;
+	} else
+#endif
+	{
+		err = kj_apply(b, v, n);
+	}
+	if (!err && kj_dev_flush(b))
+		err = -EIO;
+	if (err) {
+		/*
+		 * Part of a committed transaction may be in place.  Its COMMITTED header is on the medium,
+		 * and its replay at the next mount puts the whole transaction in place: no further write
+		 * may reach the device until then (a later commit would overwrite its slots, and a header
+		 * saying UNJOURNALED would throw the replay away).
+		 */
+		j->failed = 1;
+		printk(KERN_ERR "journal: the in-place pass of seq %llu failed: no further writes until the next "
+		       "mount, which replays it\n", (unsigned long long)j->seq);
+		goto out;
+	}
+	kj_fault_at(b, j, 3, v, n);
+	j->vol_usn = usn_new;
+	err = kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 0, j->vol_usn);
+out:
+	kfree(d);
+	return err;
+}
+
+/*
+ * The synchronous commit, under the volume lock for all of it.  @aux: the caller's value (the free-cluster count)
+ * that every change made before this call is covered by when it returns without an error.
+ */
+int kshim_jnl_commit(struct block_device *b, u64 aux)
 {
 	struct kshim_jnl *j = b->jnl;
 	struct kj_ent **v = NULL, **tmp = NULL;
-	struct kj_desc *d = NULL;
 	unsigned long n, k = 0, ndesc;
-	u32 crc = 0;
 	int err = 0;
 	u16 usn_new;
 	if (j && j->failed)
 		return -EIO;
-	if (!j || (!j->npages && !j->degraded))
+	if (j)
+		kj_settle(j);	/* a sealed transaction's I/O finishes first; a failed one is back in the live overlay */
+	if (j && j->failed)
+		return -EIO;
+	if (!j || (!j->npages && !j->degraded)) {
+		if (j)
+			j->aux_done = aux;
 		return 0;	/* nothing written: the caller flushes the device itself */
+	}
 	n = j->npages;
 	usn_new = kj_vol_usn_after(j);
 	ndesc = (n + KJ_DESC_PER_PAGE - 1) / KJ_DESC_PER_PAGE;
@@ -615,92 +950,7 @@ int kshim_jnl_commit(struct block_device *b)
 		}
 		goto done;
 	}
-	d = kmalloc(KJ_PAGE, GFP_NOFS);
-	if (!d) {
-		err = -ENOMEM;
-		goto out;
-	}
-	{
-		/* Descriptor and data slots, adjacent slots in one transfer. */
-		struct kj_batch w = { b, kmalloc(KJ_BATCH, GFP_NOFS), 0, 0, 0 };
-		for (unsigned long p = 0; p < ndesc && !w.err; p++) {
-			u64 dev;
-			memset(d, 0, KJ_PAGE);
-			for (unsigned long q = 0; q < KJ_DESC_PER_PAGE && p * KJ_DESC_PER_PAGE + q < n; q++) {
-				struct kj_ent *e = v[p * KJ_DESC_PER_PAGE + q];
-				d[q].blk = e->blk;
-				d[q].mask = e->mask;
-				d[q].crc = kj_crc32(0, e->data, KJ_PAGE);
-			}
-			crc = kj_crc32(crc, d, KJ_PAGE);
-			if (kj_page_dev(j->ext, j->next, kj_slot_page(p), &dev))
-				w.err = -EIO;
-			else
-				kj_batch_add(&w, dev, d, KJ_PAGE);
-		}
-		for (unsigned long i = 0; i < n && !w.err; i++) {
-			u64 dev;
-			crc = kj_crc32(crc, v[i]->data, KJ_PAGE);
-			if (kj_page_dev(j->ext, j->next, kj_slot_page(ndesc + i), &dev))
-				w.err = -EIO;
-			else
-				kj_batch_add(&w, dev, v[i]->data, KJ_PAGE);
-		}
-		kj_batch_flush(&w);
-		kfree(w.buf);
-		err = w.err;
-	}
-	/*
-	 * The file data written in place since the last commit and the slots just written must be on
-	 * the medium before the record that makes replay install the metadata pointing at them: a
-	 * volatile write cache may otherwise keep the header and lose them.
-	 */
-	if (!err && kj_dev_flush(b))
-		err = -EIO;
-	if (err)
-		goto out;
-	j->seq++;
-	if (ndesc + n > j->hwm)
-		j->hwm = ndesc + n;
-	err = kj_hdr_write(b, j, KJ_ST_COMMITTED, (u32)n, (u32)ndesc, crc, 1, usn_new);
-	if (err)
-		goto out;
-	if (kshim_jnl_fault && j->commits + 1 >= kshim_jnl_fault && n >= 2) {
-		kj_apply(b, v, n / 2);
-		kj_dev_flush(b);
-		printk(KERN_ERR "journal: fault injected in commit %lu seq %llu: %lu of %lu pages in place\n",
-		       j->commits + 1, (unsigned long long)j->seq, n / 2, n);
-		ngos_bugcheck("journal fault injection", __FILE__, __LINE__);
-	}
-#if DBG
-	if (j->apply_fault && n >= 2) {
-		j->apply_fault = 0;
-		kj_apply(b, v, n / 2);
-		kj_dev_flush(b);
-		printk(KERN_ERR "journal: in-place write failure injected in seq %llu: %lu of %lu pages in place\n",
-		       (unsigned long long)j->seq, n / 2, n);
-		err = -EIO;
-	} else
-#endif
-	{
-		err = kj_apply(b, v, n);
-	}
-	if (!err && kj_dev_flush(b))
-		err = -EIO;
-	if (err) {
-		/*
-		 * Part of a committed transaction may be in place.  Its COMMITTED header is on the medium,
-		 * and its replay at the next mount puts the whole transaction in place: no further write
-		 * may reach the device until then (a later commit would overwrite its slots, and a header
-		 * saying UNJOURNALED would throw the replay away).
-		 */
-		j->failed = 1;
-		printk(KERN_ERR "journal: the in-place pass of seq %llu failed: no further writes until the next "
-		       "mount, which replays it\n", (unsigned long long)j->seq);
-		goto out;
-	}
-	j->vol_usn = usn_new;
-	err = kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 0, j->vol_usn);
+	err = kj_run_tx(b, j, v, n, ndesc, usn_new);
 done:
 	if (!err) {
 		j->commits++;
@@ -708,14 +958,120 @@ done:
 		if (n > j->max_tx)
 			j->max_tx = n;
 		kj_drop_all(j);
+		j->aux_done = aux;
 	}
 out:
 	if (err)
 		printk(KERN_ERR "journal: commit of %lu pages failed %d\n", n, err);
-	kfree(d);
 	kfree(v);
 	kfree(tmp);
 	return err ? err : 1;
+}
+
+/*
+ * Seals the live overlay for an unlocked commit (under the volume lock).  1: sealed, kshim_jnl_io must follow (without
+ * the lock, by this thread) and then kshim_jnl_reap; 0: nothing pending (everything before this call is committed,
+ * aux_done is @aux); -EBUSY: the I/O of an earlier sealed transaction is in flight, wait for it (kshim_jnl_wait) and ask
+ * again; -ENOSYS: not possible now (degraded, resize running, no memory, does not fit in the journal): use
+ * kshim_jnl_commit.
+ */
+int kshim_jnl_seal(struct block_device *b, u64 aux)
+{
+	struct kshim_jnl *j = b->jnl;
+	struct kj_ent **v, **tmp;
+	unsigned long n, k = 0;
+	if (!j)
+		return 0;
+	if (j->failed)
+		return -EIO;
+	if (j->readonly)
+		return 0;
+	if (j->sstate == KJ_S_RUNNING)
+		return -EBUSY;
+	kj_reap(j);
+	if (j->failed)
+		return -EIO;
+	if (!j->npages && !j->degraded) {
+		j->aux_done = aux;
+		return 0;
+	}
+	n = j->npages;
+	if (j->degraded || j->strict || (n + (n + KJ_DESC_PER_PAGE - 1) / KJ_DESC_PER_PAGE) > j->capacity)
+		return -ENOSYS;
+	v = kmalloc_array(n, sizeof(*v), GFP_NOFS);
+	tmp = kmalloc_array(n, sizeof(*v), GFP_NOFS);
+	if (!v || !tmp) {
+		kfree(v);
+		kfree(tmp);
+		return -ENOSYS;
+	}
+	j->susn_new = kj_vol_usn_after(j);	/* what $Volume's number is once this transaction is in place (before the overlay moves) */
+	for (int i = 0; i < KJ_BUCKETS; i++) {
+		j->shash[i] = j->hash[i];
+		for (struct kj_ent *e = j->hash[i]; e; e = e->next)
+			v[k++] = e;
+		j->hash[i] = NULL;
+	}
+	j->snpages = n;
+	j->npages = 0;
+	j->sv = v;
+	j->stmp = tmp;
+	j->saux = aux;
+	j->serr = 0;
+	j->unlocked_commits++;
+	ngos_ev_clear(&j->idle);
+	__atomic_store_n(&j->sstate, KJ_S_RUNNING, __ATOMIC_RELEASE);
+	return 1;
+}
+
+/* A sealed transaction's I/O is in flight (under the volume lock: nobody else can start one meanwhile). */
+int kshim_jnl_busy(struct block_device *b)
+{
+	return b->jnl && __atomic_load_n(&b->jnl->sstate, __ATOMIC_ACQUIRE) == KJ_S_RUNNING;
+}
+
+/* Waits (without the volume lock, or with: the I/O needs none) until no journal I/O is in flight. */
+void kshim_jnl_wait(struct block_device *b)
+{
+	if (b->jnl)
+		kj_wait_io(b->jnl);
+}
+
+/*
+ * The journal I/O of the sealed transaction.  NO volume lock: the caller sealed it under the lock, released the lock and
+ * returns to it afterwards, and the device, the journal and this struct stay valid meanwhile (the glue counts the
+ * thread as an unlocked I/O, so no dismount frees them).  Returns the result; the transaction stays sealed (readable)
+ * until kshim_jnl_reap.
+ */
+int kshim_jnl_io(struct block_device *b)
+{
+	struct kshim_jnl *j = b->jnl;
+	unsigned long n = j->snpages, ndesc = (n + KJ_DESC_PER_PAGE - 1) / KJ_DESC_PER_PAGE;
+	unsigned long long t0 = ngos_ticks();
+	int err;
+	kj_sort(j->sv, j->stmp, n);
+	err = kj_run_tx(b, j, j->sv, n, ndesc, j->susn_new);
+	if (err)
+		printk(KERN_ERR "journal: commit of %lu pages failed %d\n", n, err);
+	kfree(j->sv);
+	kfree(j->stmp);
+	j->sv = j->stmp = NULL;
+	j->serr = err;
+#if DBG
+	j->io_us += (unsigned long)((ngos_ticks() - t0) / 2000);	/* ticks are TSC: ~2 GHz, only an estimate */
+#else
+	(void)t0;
+#endif
+	__atomic_store_n(&j->sstate, KJ_S_DONE, __ATOMIC_RELEASE);
+	ngos_ev_set(&j->idle);	/* the last access to j by this thread */
+	return err;
+}
+
+/* Under the volume lock, after kshim_jnl_io (or when anyone else needs the sealed overlay gone): releases a finished transaction. */
+void kshim_jnl_reap(struct block_device *b)
+{
+	if (b->jnl)
+		kj_reap(b->jnl);
 }
 
 void kshim_jnl_report(struct block_device *b)
@@ -723,9 +1079,12 @@ void kshim_jnl_report(struct block_device *b)
 	struct kshim_jnl *j = b->jnl;
 	if (!j)
 		return;
-	printk(KERN_WARNING "journal: %lu commits, %lu pages, largest %lu, %lu in-place fallbacks, %lu dropped, seq %llu, pending %lu\n",
+	printk(KERN_WARNING "journal: %lu commits, %lu pages, largest %lu, %lu in-place fallbacks, %lu dropped, seq %llu, pending %lu, %lu unlocked commits\n",
 	       j->commits, j->committed_pages, j->max_tx, j->fallbacks, j->dropped, (unsigned long long)j->seq,
-	       j->npages);
+	       j->npages + j->snpages, j->unlocked_commits);
+#if DBG
+	printk(KERN_WARNING "journal: unlocked journal I/O about %lu ms in total\n", j->io_us / 1000);
+#endif
 }
 
 /* ------------------------------------------------------------ watched counters */
@@ -778,7 +1137,9 @@ void kshim_jnl_mark_errors(struct block_device *b)
 	 * what the next mount needs.  Reached from shared (read) holders too: one writer at a time,
 	 * and tried again (ngc_dirty) until the header is on the medium.
 	 */
-	if (j->failed || j->errors_durable || __atomic_exchange_n(&j->errors_writing, 1, __ATOMIC_SEQ_CST))
+	/* Not while the journal I/O of a sealed transaction owns the header page: its headers carry the mark, the flusher tries again. */
+	if (j->failed || j->errors_durable || __atomic_load_n(&j->sstate, __ATOMIC_ACQUIRE) == KJ_S_RUNNING ||
+	    __atomic_exchange_n(&j->errors_writing, 1, __ATOMIC_SEQ_CST))
 		return;
 	if (!kj_hdr_write(b, j, KJ_ST_ERRORS, 0, 0, 0, 1, j->vol_usn))
 		j->errors_durable = 1;
@@ -837,6 +1198,8 @@ int kshim_jnl_ro_page(struct block_device *b, u64 blk, u8 mask, const u8 *data)
 int kshim_jnl_degrade(struct block_device *b)
 {
 	struct kshim_jnl *j = b->jnl;
+	if (j)
+		kj_settle(j);
 	if (j && j->failed)
 		return -EIO;
 	if (!j || j->degraded)

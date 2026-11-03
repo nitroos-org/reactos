@@ -30,11 +30,7 @@ PCONTEXT_STACK_ENTRY pContextStackHead = NULL;
 PCONTEXT_STACK_ENTRY pContextStackTail = NULL;
 
 PWSTR g_pszMachine = NULL;
-BOOL g_bOnline = TRUE;
-BOOL g_bInteractive = FALSE;
-BOOL g_bNoSwitch = FALSE;
-BOOL g_bScriptMode = FALSE;
-DWORD g_dwExitError = ERROR_SUCCESS;
+BOOL g_bOnline = TRUE; 
 
 /* FUNCTIONS ******************************************************************/
 
@@ -132,6 +128,7 @@ AddContextCommand(
     wcscpy((LPWSTR)pEntry->pwszCmdToken, pwszCmdToken);
 
     pEntry->pfnCmdHandler = pfnCmdHandler;
+    pEntry->hModule = NULL;
     pEntry->dwShortCmdHelpToken = dwShortCmdHelpToken;
     pEntry->dwCmdHlpToken = dwCmdHlpToken;
     pEntry->dwFlags = dwFlags;
@@ -494,7 +491,6 @@ UpCommand(
     if (pCurrentContext != pRootContext)
         pCurrentContext = pCurrentContext->pParentContext;
 
-    ConPuts(StdOut, L"\n");
     return ERROR_SUCCESS;
 }
 
@@ -546,7 +542,7 @@ DumpCommand(
 {
     DPRINT("DumpCommand()\n");
 
-    return DumpContext(pCurrentContext,
+    return DumpContext(g_pInvokeContext ? g_pInvokeContext : pCurrentContext,
                        pwszMachine,
                        ppwcArguments,
                        dwArgCount,
@@ -570,12 +566,23 @@ ExecCommand(
     if (dwArgCount - dwCurrentIndex != 1)
         return ERROR_SHOW_USAGE;
 
-    {
-        DWORD dwScript = RunScript(argv[dwCurrentIndex], TRUE);
-        if (dwScript != ERROR_FILE_NOT_FOUND)
-            ConPuts(StdOut, L"\n");
-    }
-    return ERROR_SUCCESS;
+    return (RunScript(argv[dwCurrentIndex]) == ERROR_SUCCESS) ? ERROR_SUCCESS : ERROR_SCRIPT_FAILED;
+}
+
+
+DWORD
+WINAPI
+HelpCommand(
+    _In_ LPCWSTR pwszMachine,
+    _In_ LPWSTR *argv,
+    _In_ DWORD dwCurrentIndex,
+    _In_ DWORD dwArgCount,
+    _In_ DWORD dwFlags,
+    _In_ LPCVOID pvData,
+    _Out_ BOOL *pbDone)
+{
+    PrintContextHelp(g_pInvokeContext ? g_pInvokeContext : pCurrentContext);
+    return ERROR_SUPPRESS_OUTPUT;
 }
 
 
@@ -594,7 +601,6 @@ ExitCommand(
         CommitContext(pRootContext, NETSH_FLUSH);
 
     *pbDone = TRUE;
-    ConPuts(StdOut, L"\n");
     return ERROR_SUCCESS;
 }
 
@@ -685,7 +691,6 @@ PopdCommand(
 
     HeapFree(GetProcessHeap(), 0, pEntry);
 
-    ConPuts(StdOut, L"\n");
     return ERROR_SUCCESS;
 }
 
@@ -722,7 +727,6 @@ PushdCommand(
         pContextStackHead = pEntry;
     }
 
-    ConPuts(StdOut, L"\n");
     return ERROR_SUCCESS;
 }
 
@@ -831,22 +835,22 @@ CreateRootContext(VOID)
 
     pRootContext->hModule = g_hModule;
 
-    AddContextCommand(pRootContext, L"..",      UpCommand,      IDS_HLP_UP,      IDS_HLP_UP_EX, 0, NULL);
-    AddContextCommand(pRootContext, L"?",       NULL,           IDS_HLP_HELP,    IDS_HLP_HELP_EX, 0, NULL);
-    AddContextCommand(pRootContext, L"abort",   AbortCommand,   IDS_HLP_ABORT,   IDS_HLP_ABORT_EX, 0, NULL);
-    AddContextCommand(pRootContext, L"alias",   AliasCommand,   IDS_HLP_ALIAS,   IDS_HLP_ALIAS_EX, 0, NULL);
-    AddContextCommand(pRootContext, L"bye",     ExitCommand,    IDS_HLP_EXIT,    IDS_HLP_EXIT_EX, 0, NULL);
-    AddContextCommand(pRootContext, L"commit",  CommitCommand,  IDS_HLP_COMMIT,  IDS_HLP_COMMIT_EX, 0, NULL);
+    AddContextCommand(pRootContext, L"..",      UpCommand,      IDS_HLP_UP,      IDS_HLP_UP_EX, CMD_FLAG_INTERACTIVE, NULL);
+    AddContextCommand(pRootContext, L"?",       HelpCommand,           IDS_HLP_HELP,    IDS_HLP_HELP_EX, 0, NULL);
+    AddContextCommand(pRootContext, L"abort",   AbortCommand,   IDS_HLP_ABORT,   IDS_HLP_ABORT_EX, CMD_FLAG_INTERACTIVE, NULL);
+    AddContextCommand(pRootContext, L"alias",   AliasCommand,   IDS_HLP_ALIAS,   IDS_HLP_ALIAS_EX, CMD_FLAG_INTERACTIVE, NULL);
+    AddContextCommand(pRootContext, L"bye",     ExitCommand,    IDS_HLP_EXIT,    IDS_HLP_EXIT_EX, CMD_FLAG_INTERACTIVE, NULL);
+    AddContextCommand(pRootContext, L"commit",  CommitCommand,  IDS_HLP_COMMIT,  IDS_HLP_COMMIT_EX, CMD_FLAG_INTERACTIVE, NULL);
     AddContextCommand(pRootContext, L"dump",    DumpCommand,    IDS_HLP_DUMP,    IDS_HLP_DUMP_EX, 0, NULL);
     AddContextCommand(pRootContext, L"exec",    ExecCommand,    IDS_HLP_EXEC,    IDS_HLP_EXEC_EX, 0, NULL);
-    AddContextCommand(pRootContext, L"exit",    ExitCommand,    IDS_HLP_EXIT,    IDS_HLP_EXIT_EX, 0, NULL);
-    AddContextCommand(pRootContext, L"help",    NULL,           IDS_HLP_HELP,    IDS_HLP_HELP_EX, 0, NULL);
-    AddContextCommand(pRootContext, L"offline", OfflineCommand, IDS_HLP_OFFLINE, IDS_HLP_OFFLINE_EX, 0, NULL);
-    AddContextCommand(pRootContext, L"online",  OnlineCommand,  IDS_HLP_ONLINE,  IDS_HLP_ONLINE_EX, 0, NULL);
-    AddContextCommand(pRootContext, L"popd",    PopdCommand,    IDS_HLP_POPD,    IDS_HLP_POPD_EX, 0, NULL);
-    AddContextCommand(pRootContext, L"pushd",   PushdCommand,   IDS_HLP_PUSHD,   IDS_HLP_PUSHD_EX, 0, NULL);
-    AddContextCommand(pRootContext, L"quit",    ExitCommand,    IDS_HLP_EXIT,    IDS_HLP_EXIT_EX, 0, NULL);
-    AddContextCommand(pRootContext, L"unalias", UnaliasCommand, IDS_HLP_UNALIAS, IDS_HLP_UNALIAS_EX, 0, NULL);
+    AddContextCommand(pRootContext, L"exit",    ExitCommand,    IDS_HLP_EXIT,    IDS_HLP_EXIT_EX, CMD_FLAG_INTERACTIVE, NULL);
+    AddContextCommand(pRootContext, L"help",    HelpCommand,           IDS_HLP_HELP,    IDS_HLP_HELP_EX, 0, NULL);
+    AddContextCommand(pRootContext, L"offline", OfflineCommand, IDS_HLP_OFFLINE, IDS_HLP_OFFLINE_EX, CMD_FLAG_INTERACTIVE, NULL);
+    AddContextCommand(pRootContext, L"online",  OnlineCommand,  IDS_HLP_ONLINE,  IDS_HLP_ONLINE_EX, CMD_FLAG_INTERACTIVE, NULL);
+    AddContextCommand(pRootContext, L"popd",    PopdCommand,    IDS_HLP_POPD,    IDS_HLP_POPD_EX, CMD_FLAG_INTERACTIVE, NULL);
+    AddContextCommand(pRootContext, L"pushd",   PushdCommand,   IDS_HLP_PUSHD,   IDS_HLP_PUSHD_EX, CMD_FLAG_INTERACTIVE, NULL);
+    AddContextCommand(pRootContext, L"quit",    ExitCommand,    IDS_HLP_EXIT,    IDS_HLP_EXIT_EX, CMD_FLAG_INTERACTIVE, NULL);
+    AddContextCommand(pRootContext, L"unalias", UnaliasCommand, IDS_HLP_UNALIAS, IDS_HLP_UNALIAS_EX, CMD_FLAG_INTERACTIVE, NULL);
 
     pGroup = AddCommandGroup(pRootContext, L"add", IDS_HLP_GROUP_ADD, 0, NULL);
     if (pGroup)
@@ -978,6 +982,17 @@ RegisterContext(
         if ((pHelper != NULL) && (pHelper->pDllEntry != NULL))
         {
             pContext->hModule = pHelper->pDllEntry->hModule;
+        }
+
+        /* Every context has the generic ?, help and dump commands */
+        {
+            PCOMMAND_ENTRY pDef;
+            pDef = AddContextCommand(pContext, L"?", HelpCommand, IDS_HLP_HELP, IDS_HLP_HELP_EX, 0, NULL);
+            if (pDef) pDef->hModule = g_hModule;
+            pDef = AddContextCommand(pContext, L"help", HelpCommand, IDS_HLP_HELP, IDS_HLP_HELP_EX, 0, NULL);
+            if (pDef) pDef->hModule = g_hModule;
+            pDef = AddContextCommand(pContext, L"dump", DumpCommand, IDS_HLP_DUMP, IDS_HLP_DUMP_CTX_EX, 0, NULL);
+            if (pDef) pDef->hModule = g_hModule;
         }
 
         for (i = 0; i < pChildContext->ulNumTopCmds; i++)

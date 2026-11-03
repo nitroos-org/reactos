@@ -16,6 +16,9 @@
 #define IDS_THIS_COMMANDS        103
 #define IDS_CONTEXT_COMMANDS     104
 #define IDS_ALIAS_NOT_FOUND      105
+#define IDS_INHERITED_COMMANDS   106
+#define IDS_CHANGE_CONTEXT       107
+#define IDS_SYSTEM_ERROR_TAIL    108
 
 #define IDS_HELP_HEADER          200
 #define IDS_HELP_FOOTER          201
@@ -47,6 +50,7 @@
 #define IDS_HLP_ALIAS_EX         323
 #define IDS_HLP_UNALIAS          324
 #define IDS_HLP_UNALIAS_EX       325
+#define IDS_HLP_DUMP_CTX_EX      326
 
 #define IDS_HLP_ADD_HELPER       340
 #define IDS_HLP_ADD_HELPER_EX    341

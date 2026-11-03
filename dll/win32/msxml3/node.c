@@ -926,6 +926,108 @@ BSTR EnsureCorrectEOL(BSTR sInput)
     return sNew;
 }
 
+struct ns_fixups
+{
+    struct ns_fixup
+    {
+        xmlNodePtr node;
+        xmlNsPtr ns;
+    } *entries;
+    size_t count;
+    size_t size;
+};
+
+/* Is ns->prefix bound by a declaration on 'node' or one of its ancestors up to 'top' (the root of the output)? */
+static BOOL ns_declared_in_output(xmlNodePtr node, xmlNodePtr top, const xmlNs *ns)
+{
+    for (; node; node = node->parent)
+    {
+        xmlNsPtr def;
+
+        if (node->type == XML_ELEMENT_NODE)
+        {
+            for (def = node->nsDef; def; def = def->next)
+                if (xmlStrEqual(def->prefix, ns->prefix)) return TRUE;
+        }
+        if (node == top) break;
+    }
+    return FALSE;
+}
+
+static void ns_fixup_add(struct ns_fixups *fixups, xmlNodePtr node, xmlNodePtr top, const xmlNs *ns)
+{
+    xmlNsPtr decl;
+
+    if (!ns || !ns->href || xmlStrEqual(ns->href, XML_XML_NAMESPACE)) return;
+    if (ns_declared_in_output(node, top, ns)) return;
+
+    if (fixups->count == fixups->size)
+    {
+        size_t size = fixups->size ? fixups->size * 2 : 8;
+        struct ns_fixup *entries = realloc(fixups->entries, size * sizeof(*entries));
+        if (!entries) return;
+        fixups->entries = entries;
+        fixups->size = size;
+    }
+
+    if (!(decl = xmlNewNs(NULL, ns->href, ns->prefix))) return;
+    decl->next = node->nsDef;
+    node->nsDef = decl;
+    fixups->entries[fixups->count].node = node;
+    fixups->entries[fixups->count].ns = decl;
+    fixups->count++;
+}
+
+/* Like msxml, make the serialized subtree namespace-well-formed on its own: an element or attribute in the
+   subtree whose namespace is declared only on an ancestor outside the subtree gets a temporary declaration,
+   e.g. the child <p:b/> of <a xmlns:p="urn:p"> is serialized as <p:b xmlns:p="urn:p"/>. */
+static void ns_fixups_apply(struct ns_fixups *fixups, xmlNodePtr top)
+{
+    xmlNodePtr node = top;
+
+    memset(fixups, 0, sizeof(*fixups));
+    if (top->type != XML_ELEMENT_NODE && top->type != XML_DOCUMENT_FRAG_NODE) return;
+
+    while (node)
+    {
+        if (node->type == XML_ELEMENT_NODE)
+        {
+            xmlAttrPtr attr;
+
+            ns_fixup_add(fixups, node, top, node->ns);
+            for (attr = node->properties; attr; attr = attr->next)
+                if (attr->ns && attr->ns->prefix) ns_fixup_add(fixups, node, top, attr->ns);
+
+            if (node->children)
+            {
+                node = node->children;
+                continue;
+            }
+        }
+        else if (node == top && node->children)
+        {
+            node = node->children;
+            continue;
+        }
+
+        while (node != top && !node->next) node = node->parent;
+        if (node == top) break;
+        node = node->next;
+    }
+}
+
+static void ns_fixups_revert(struct ns_fixups *fixups)
+{
+    while (fixups->count)
+    {
+        struct ns_fixup *entry = &fixups->entries[--fixups->count];
+
+        entry->node->nsDef = entry->ns->next;
+        xmlFreeNs(entry->ns);
+    }
+    free(fixups->entries);
+}
+
 /*
  * We are trying to replicate the same behaviour as msxml by converting
  * line endings to \r\n and using indents as \t. The problem is that msxml
@@ -935,6 +1037,7 @@ BSTR EnsureCorrectEOL(BSTR sInput)
  */
 HRESULT node_get_xml(xmlnode *This, BOOL ensure_eol, BSTR *ret)
 {
+    struct ns_fixups fixups;
     xmlBufferPtr xml_buf;
     xmlNodePtr xmldecl;
     int size;
@@ -949,8 +1052,10 @@ HRESULT node_get_xml(xmlnode *This, BOOL ensure_eol, BSTR *ret)
         return E_OUTOFMEMORY;
 
     xmldecl = xmldoc_unlink_xmldecl( This->node->doc );
+    ns_fixups_apply(&fixups, This->node);
 
     size = xmlNodeDump(xml_buf, This->node->doc, This->node, 0, 1);
+    ns_fixups_revert(&fixups);
     if(size > 0) {
         const xmlChar *buf_content;
         BSTR content;
