@@ -164,7 +164,7 @@ static int write_coclass( const type_t *class, const typelib_t *typelib )
     {
         const struct uuid *typelib_uuid = get_attrp( typelib->attrs, ATTR_UUID );
         put_str( indent, "TypeLib = s '%s'\n", format_uuid( typelib_uuid ));
-        if (!(major && minor))
+        if (!(major || minor))
             get_version( typelib->attrs, &major, &minor );
     }
     if (major || minor) put_str( indent, "Version = s '%u.%u'\n", major, minor );
