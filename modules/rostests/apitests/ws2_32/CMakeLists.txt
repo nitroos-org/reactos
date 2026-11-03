@@ -3,6 +3,7 @@ list(APPEND SOURCE
     abortiveclose.c
     accept.c
     acceptname.c
+    loopbackalias.c
     addresschange.c
     asyncselect.c
     backlog.c

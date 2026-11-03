@@ -469,7 +469,9 @@ LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp)
     /* Only a plain SYN that ip4_input delivers on this interface (to its address, from a unicast
        source), above the old receive sequences (this TIME-WAIT's and an older record's), ends a
        TIME-WAIT */
-    if (Flags != TCP_SYN || !netif_is_up(inp) || !ip4_addr_eq(&Dest, netif_ip4_addr(inp)) ||
+    if (Flags != TCP_SYN || !netif_is_up(inp) ||
+        (!ip4_addr_eq(&Dest, netif_ip4_addr(inp)) &&
+         !(ip4_addr_isloopback(&Dest) && ip4_addr_isloopback(netif_ip4_addr(inp)))) ||
         ip4_addr_isbroadcast(&Src, inp) || ip4_addr_ismulticast(&Src) ||
         !TCP_SEQ_GT(SeqNo, pcb->rcv_nxt) || (Reopen && !TCP_SEQ_GT(SeqNo, Reopen->RcvNxt)))
     {

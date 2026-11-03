@@ -57,7 +57,9 @@ CheckSocketNames(const char *What, SOCKET Accepted, SOCKET Client, ULONG Target,
     Length = sizeof(Name);
     ok(getpeername(Client, (struct sockaddr *)&Name, &Length) == 0, "%s: client getpeername failed\n", What);
     CheckName(What, "client peer", (struct sockaddr *)&Name, Length, Target, ListenPort);
-    ok(ClientName.sin_addr.s_addr == Target, "%s: client local address %s\n", What, inet_ntoa(ClientName.sin_addr));
+    /* Any 127.x.y.z target is reached from 127.0.0.1 itself (recorded on Windows 10 22H2) */
+    ok(ClientName.sin_addr.s_addr == ((Target & 0xFF) == 127 ? htonl(INADDR_LOOPBACK) : Target),
+       "%s: client local address %s\n", What, inet_ntoa(ClientName.sin_addr));
 }
 
 static
@@ -193,6 +195,21 @@ TestAccepted(ULONG Target, ULONG BindAddress)
                     CheckName(What, "GetAcceptExSockaddrs remote", Remote, RemoteLength,
                               ClientName.sin_addr.s_addr, ClientName.sin_port);
                 }
+                /* Before SO_UPDATE_ACCEPT_CONTEXT the socket has no names (Windows 10 22H2) */
+                {
+                    struct sockaddr_in Name;
+                    int NameLength = sizeof(Name);
+
+                    ok(getsockname(Accepted, (struct sockaddr *)&Name, &NameLength) == SOCKET_ERROR,
+                       "%s: getsockname before the update succeeded\n", What);
+                    ok(WSAGetLastError() == WSAEINVAL, "%s: getsockname before the update: %d\n",
+                       What, WSAGetLastError());
+                    NameLength = sizeof(Name);
+                    ok(getpeername(Accepted, (struct sockaddr *)&Name, &NameLength) == SOCKET_ERROR,
+                       "%s: getpeername before the update succeeded\n", What);
+                    ok(WSAGetLastError() == WSAENOTCONN, "%s: getpeername before the update: %d\n",
+                       What, WSAGetLastError());
+                }
                 ok(setsockopt(Accepted, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char *)&Listener, sizeof(Listener)) == 0,
                    "%s: SO_UPDATE_ACCEPT_CONTEXT failed %d\n", What, WSAGetLastError());
                 CheckSocketNames(What, Accepted, Client, Target, Port);
@@ -267,6 +284,11 @@ START_TEST(acceptname)
 
     /* a listener bound to a concrete address keeps it */
     TestAccepted(htonl(INADDR_LOOPBACK), htonl(INADDR_LOOPBACK));
+
+    /* the whole 127.0.0.0/8 is loopback: the connection reports the alias it was made to */
+    TestAccepted(inet_addr("127.0.0.2"), htonl(INADDR_ANY));
+    TestAccepted(inet_addr("127.1.2.3"), htonl(INADDR_ANY));
+    TestAccepted(inet_addr("127.0.0.2"), inet_addr("127.0.0.2"));
 
     WSACleanup();
 }
