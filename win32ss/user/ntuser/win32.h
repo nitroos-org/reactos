@@ -212,6 +212,7 @@ typedef struct _W32HEAP_USER_MAPPING
     PVOID UserMapping;
     ULONG_PTR Limit;
     ULONG Count;
+    struct _DESKTOP* pdesk; /* Referenced desktop of a desktop heap mapping, NULL for the global heap */
 } W32HEAP_USER_MAPPING, *PW32HEAP_USER_MAPPING;
 
 
