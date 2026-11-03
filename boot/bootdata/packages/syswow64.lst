@@ -44,6 +44,8 @@ SysWOW64/ncrypt.dll
 SysWOW64/webservices.dll
 # ... and activates Windows.Management.Deployment.PackageManager (registered for 32-bit in hivesft_amd64.inf).
 SysWOW64/appxdeploymentclient.dll
+# Qt 6.8 (32-bit) activates Windows.UI.ViewManagement.UISettings for its platform theme (registered for 32-bit in hivesft_amd64.inf).
+SysWOW64/windows.ui.dll
 # DirectWrite and its user32 forwarder (Firefox renders text with it)
 SysWOW64/dwrite.dll
 SysWOW64/user32_vista.dll

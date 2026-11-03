@@ -21,6 +21,12 @@ HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.M
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager","Threading",0x00010001,0
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager","TrustLevel",0x00010001,1
 
+; The 32-bit view of the UISettings WinRT class (Qt 6.8 builds its Windows platform theme from it): SysWOW64\Windows.UI.dll.
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings","DllPath",0x00020000,"%SystemRoot%\SysWOW64\Windows.UI.dll"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings","Threading",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings","TrustLevel",0x00010001,0
+
 ; Web browser registrations name the 64-bit Internet Explorer through %ProgramW6432%. hivesft.inf and hivecls.inf use
 ; %ProgramFiles%, which a 32-bit process expands to "Program Files (x86)", where this system has no iexplore.exe:
 ; ShellExecute of a URL or .html from a 32-bit program (an OAuth login that opens the system browser, such as KROS
