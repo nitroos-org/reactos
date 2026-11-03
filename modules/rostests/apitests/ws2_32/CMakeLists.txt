@@ -14,6 +14,7 @@ list(APPEND SOURCE
     connecterror.c
     connectstate.c
     GetAddrInfoEx.c
+    gaiconcurrent.c
     getaddrinfo.c
     GetHostNameW.c
     gethostname.c
