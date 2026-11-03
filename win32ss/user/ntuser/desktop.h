@@ -119,6 +119,9 @@ IntGetDesktopWindow (VOID);
 PWND FASTCALL
 UserGetDesktopWindow(VOID);
 
+PWND FASTCALL
+UserGetThreadDesktopWindow(VOID);
+
 HWND FASTCALL
 IntGetCurrentThreadDesktopWindow(VOID);
 
