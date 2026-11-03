@@ -883,6 +883,14 @@ static BOOL installfiles_cb(MSIPACKAGE *package, LPCWSTR filename, DWORD action,
         if (file->state != msifs_missing && file->state != msifs_overwrite)
             return FALSE;
 
+        /* Report progress as each file of a (possibly huge) cabinet is extracted,
+         * not only before the cabinet is opened, so the bar advances meanwhile. */
+        if (!file->ui_reported)
+        {
+            file_update_ui( package, file, L"InstallFiles" );
+            file->ui_reported = TRUE;
+        }
+
         if (!msi_is_global_assembly( file->Component ))
         {
             create_folder( package, file->Component->Directory );
@@ -942,11 +950,14 @@ UINT ACTION_InstallFiles(MSIPACKAGE *package)
     schedule_install_files(package);
     mi = calloc(1, sizeof(MSIMEDIAINFO));
 
+    LIST_FOR_EACH_ENTRY( file, &package->files, MSIFILE, entry ) file->ui_reported = FALSE;
+
     LIST_FOR_EACH_ENTRY( file, &package->files, MSIFILE, entry )
     {
         BOOL is_global_assembly = msi_is_global_assembly( file->Component );
 
-        file_update_ui( package, file, L"InstallFiles" );
+        if (!file->ui_reported) file_update_ui( package, file, L"InstallFiles" );
+        file->ui_reported = TRUE;
 
         rc = msi_load_media_info( package, file->Sequence, mi );
         if (rc != ERROR_SUCCESS)
