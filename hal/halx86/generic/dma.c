@@ -157,8 +157,12 @@ static DMA_OPERATIONS HalpDmaOperations = {
 
 #define MAX_MAP_REGISTERS 256
 
-/* Most elements HalpScatterGatherAdapterControl builds for one transfer */
-#define MAX_SG_ELEMENTS 0x30
+/* Most map registers a PCI scatter/gather bus master that needs them (a
+   32-bit device on a system with memory above 4 GB) holds per transfer:
+   they come out of the shared master adapter's MAX_MAP_REGISTERS. Its
+   driver learns the limit from IoGetDmaAdapter and splits longer transfers;
+   a longer request fails with STATUS_INSUFFICIENT_RESOURCES */
+#define MAX_SG_MASTER_MAP_REGISTERS 0x30
 
 #define TAG_DMA ' AMD'
 
@@ -777,14 +781,13 @@ HalGetAdapter(IN PDEVICE_DESCRIPTION DeviceDescription,
     {
         MapRegisters = 0;
 
-        /* One map register per page the longest transfer can span, and
-           no more than the elements one scatter/gather list can hold, as
-           every page above the device's limit is an element of its own */
+        /* One map register per page the longest transfer can span, up to
+           this device's share of the master adapter's map registers */
         if ((DeviceDescription->Master) &&
             (DeviceDescription->InterfaceType == PCIBus) &&
             HalpDmaMasterNeedsMapRegisters(DeviceDescription))
         {
-            MapRegisters = min(BYTES_TO_PAGES(MaximumLength) + 1, MAX_SG_ELEMENTS);
+            MapRegisters = min(BYTES_TO_PAGES(MaximumLength) + 1, MAX_SG_MASTER_MAP_REGISTERS);
             UseSgMaster = TRUE;
         }
     }
@@ -1079,93 +1082,83 @@ typedef struct _SCATTER_GATHER_CONTEXT {
 	ULONG MapRegisterCount;
 	BOOLEAN WriteToDevice;
 	WAIT_CONTEXT_BLOCK Wcb;
+	/* Room of the list that follows this context in the same buffer */
+	ULONG MaximumElements;
+	PSCATTER_GATHER_LIST ScatterGatherList;
 } SCATTER_GATHER_CONTEXT, *PSCATTER_GATHER_CONTEXT;
+
+/*
+ * The scatter/gather list is built in the buffer that holds the context,
+ * right after it: HalCalculateScatterGatherListSize sizes it for one
+ * element per page the transfer spans (IoMapTransfer never returns an
+ * element that crosses into a page it was not asked for, so that is the
+ * most a transfer can need), and HalpScatterGatherAdapterControl then
+ * neither allocates nor runs out of room. Before, the list was capped at
+ * 48 elements and allocated in the adapter control routine: a transfer of
+ * more than 48 discontiguous pages (a 512 KB storport request) failed
+ * there, and the driver's execution routine was never called, so the
+ * request hung forever.
+ */
+#define SG_CONTEXT_SIZE ALIGN_UP_BY(sizeof(SCATTER_GATHER_CONTEXT), sizeof(ULONGLONG))
 
 IO_ALLOCATION_ACTION
 NTAPI
 HalpScatterGatherAdapterControl(IN PDEVICE_OBJECT DeviceObject,
                                 IN PIRP Irp,
-								IN PVOID MapRegisterBase,
-								IN PVOID Context)
+                                IN PVOID MapRegisterBase,
+                                IN PVOID Context)
 {
-	PSCATTER_GATHER_CONTEXT AdapterControlContext = Context;
-	PADAPTER_OBJECT AdapterObject = AdapterControlContext->AdapterObject;
-	PSCATTER_GATHER_LIST ScatterGatherList;
-	PSCATTER_GATHER_ELEMENT TempElements;
-	ULONG ElementCount = 0, RemainingLength = AdapterControlContext->Length;
-	PUCHAR CurrentVa = AdapterControlContext->CurrentVa;
-    // RemainingLength / PAGE_SIZE + 1 for the remainder of our division
-    // + 1 for a safety cushion gives a good safe value. Using the
-    // min function with MAX_SG_ELEMENTS keeps us from getting too large.
-    ULONG Est_SG_Elements = min(RemainingLength / PAGE_SIZE + 2, MAX_SG_ELEMENTS);
+    PSCATTER_GATHER_CONTEXT AdapterControlContext = Context;
+    PADAPTER_OBJECT AdapterObject = AdapterControlContext->AdapterObject;
+    PSCATTER_GATHER_LIST ScatterGatherList = AdapterControlContext->ScatterGatherList;
+    PSCATTER_GATHER_ELEMENT Element;
+    ULONG ElementCount = 0, RemainingLength = AdapterControlContext->Length;
+    PUCHAR CurrentVa = AdapterControlContext->CurrentVa;
 
-	/* Store the map register base for later in HalPutScatterGatherList */
-	AdapterControlContext->MapRegisterBase = MapRegisterBase;
+    /* Store the map register base for later in HalPutScatterGatherList */
+    AdapterControlContext->MapRegisterBase = MapRegisterBase;
 
-    // FIXME: HACK Allocate TempElements from pool to minimize stack usage.
-    // A more efficient algorithm should be found to avoid allocations during S/G I/O operations.
-    TempElements = ExAllocatePoolUninitialized(NonPagedPool,
-                                               sizeof(*TempElements) * Est_SG_Elements,
-                                               TAG_DMA);
-    if (!TempElements)
-	{
-		DPRINT1("Scatter/gather list construction failed!\n");
-		return DeallocateObject;
-	}
+    while (RemainingLength > 0 && ElementCount < AdapterControlContext->MaximumElements)
+    {
+        Element = &ScatterGatherList->Elements[ElementCount];
+        Element->Length = RemainingLength;
+        Element->Reserved = 0;
+        Element->Address = IoMapTransfer(AdapterObject,
+                                         AdapterControlContext->Mdl,
+                                         MapRegisterBase,
+                                         CurrentVa + (AdapterControlContext->Length - RemainingLength),
+                                         &Element->Length,
+                                         AdapterControlContext->WriteToDevice);
+        if (Element->Length == 0)
+            break;
 
-	while (RemainingLength > 0 && ElementCount < MAX_SG_ELEMENTS)
-	{
-	    TempElements[ElementCount].Length = RemainingLength;
-		TempElements[ElementCount].Reserved = 0;
-	    TempElements[ElementCount].Address = IoMapTransfer(AdapterObject,
-		                                                   AdapterControlContext->Mdl,
-														   MapRegisterBase,
-														   CurrentVa + (AdapterControlContext->Length - RemainingLength),
-														   &TempElements[ElementCount].Length,
-														   AdapterControlContext->WriteToDevice);
-		if (TempElements[ElementCount].Length == 0)
-			break;
+        DPRINT("Allocated one S/G element: 0x%I64x with length: 0x%x\n",
+               Element->Address.QuadPart, Element->Length);
 
-		DPRINT("Allocated one S/G element: 0x%I64u with length: 0x%x\n",
-		        TempElements[ElementCount].Address.QuadPart,
-				TempElements[ElementCount].Length);
+        ASSERT(Element->Length <= RemainingLength);
+        RemainingLength -= Element->Length;
+        ElementCount++;
+    }
 
-		ASSERT(TempElements[ElementCount].Length <= RemainingLength);
-		RemainingLength -= TempElements[ElementCount].Length;
-		ElementCount++;
-	}
+    /* The list has room for one element per page of the transfer */
+    if (RemainingLength > 0)
+    {
+        DPRINT1("Scatter/gather list construction failed: 0x%lx bytes left after %lu elements\n",
+                RemainingLength, ElementCount);
+        ASSERT(RemainingLength == 0);
+    }
 
-    DPRINT("Est_SG_Elements %d\n", Est_SG_Elements);
-    DPRINT("ElementCount is %d\n", ElementCount);
+    ScatterGatherList->NumberOfElements = ElementCount;
+    ScatterGatherList->Reserved = (ULONG_PTR)AdapterControlContext;
 
-	if (RemainingLength > 0)
-	{
-		DPRINT1("Scatter/gather list construction failed!\n");
-        ExFreePoolWithTag(TempElements, TAG_DMA);
-		return DeallocateObject;
-	}
+    DPRINT("Initiating S/G DMA with %lu element(s)\n", ElementCount);
 
-	ScatterGatherList = ExAllocatePoolWithTag(NonPagedPool,
-	                                          sizeof(SCATTER_GATHER_LIST) + sizeof(SCATTER_GATHER_ELEMENT) * ElementCount,
-											  TAG_DMA);
-	ASSERT(ScatterGatherList);
+    AdapterControlContext->AdapterListControlRoutine(DeviceObject,
+                                                     Irp,
+                                                     ScatterGatherList,
+                                                     AdapterControlContext->AdapterListControlContext);
 
-	ScatterGatherList->NumberOfElements = ElementCount;
-	ScatterGatherList->Reserved = (ULONG_PTR)AdapterControlContext;
-	RtlCopyMemory(ScatterGatherList->Elements,
-	              TempElements,
-				  sizeof(SCATTER_GATHER_ELEMENT) * ElementCount);
-
-    ExFreePoolWithTag(TempElements, TAG_DMA);
-
-	DPRINT("Initiating S/G DMA with %d element(s)\n", ElementCount);
-
-	AdapterControlContext->AdapterListControlRoutine(DeviceObject,
-	                                                 Irp,
-													 ScatterGatherList,
-													 AdapterControlContext->AdapterListControlContext);
-
-	return DeallocateObjectKeepRegisters;
+    return DeallocateObjectKeepRegisters;
 }
 
 /**
@@ -1257,10 +1250,7 @@ HalpScatterGatherAdapterControl(IN PDEVICE_OBJECT DeviceObject,
 	                   AdapterControlContext->MapRegisterBase,
 					   AdapterControlContext->MapRegisterCount);
 
-
-	ExFreePoolWithTag(ScatterGather, TAG_DMA);
-
-    /* If this is our buffer, release it */
+    /* The list lives in the context's buffer; if this is our buffer, release it */
     if (!AdapterControlContext->UsingUserBuffer)
         ExFreePoolWithTag(AdapterControlContext, TAG_DMA);
 
@@ -1280,10 +1270,11 @@ HalCalculateScatterGatherListSize(
     ULONG NumberOfMapRegisters;
     ULONG SgSize;
 
-    UNIMPLEMENTED_ONCE;
-
+    /* One map register, and at most one list element, per page spanned */
     NumberOfMapRegisters = ADDRESS_AND_SIZE_TO_SPAN_PAGES(CurrentVa, Length);
-    SgSize = sizeof(SCATTER_GATHER_CONTEXT);
+    SgSize = SG_CONTEXT_SIZE +
+             FIELD_OFFSET(SCATTER_GATHER_LIST, Elements) +
+             NumberOfMapRegisters * sizeof(SCATTER_GATHER_ELEMENT);
 
     *ScatterGatherListSize = SgSize;
     if (pNumberOfMapRegisters) *pNumberOfMapRegisters = NumberOfMapRegisters;
@@ -1352,6 +1343,15 @@ HalBuildScatterGatherList(
                                                &NumberOfMapRegisters);
     if (!NT_SUCCESS(Status)) return Status;
 
+    /* More map registers than the adapter may hold can never be granted */
+    if ((AdapterObject->NeedsMapRegisters) &&
+        (NumberOfMapRegisters > AdapterObject->MapRegistersPerChannel))
+    {
+        DPRINT1("S/G transfer of 0x%lx bytes needs %lu map registers, adapter %p has %lu\n",
+                Length, NumberOfMapRegisters, AdapterObject, AdapterObject->MapRegistersPerChannel);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
     if (ScatterGatherBuffer)
     {
         /* Checking if user buffer is enough */
@@ -1384,6 +1384,9 @@ HalBuildScatterGatherList(
         ScatterGatherContext->AdapterListControlRoutine = ExecutionRoutine;
         ScatterGatherContext->AdapterListControlContext = Context;
         ScatterGatherContext->WriteToDevice = WriteToDevice;
+        ScatterGatherContext->MaximumElements = NumberOfMapRegisters;
+        ScatterGatherContext->ScatterGatherList =
+            (PSCATTER_GATHER_LIST)((PUCHAR)ScatterGatherBuffer + SG_CONTEXT_SIZE);
 
         ScatterGatherContext->Wcb.DeviceObject = DeviceObject;
         ScatterGatherContext->Wcb.DeviceContext = (PVOID)ScatterGatherContext;

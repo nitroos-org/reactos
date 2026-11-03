@@ -1587,16 +1587,21 @@ MmMakeSegmentResident(
             LARGE_INTEGER FileOffset;
             FileOffset.QuadPart = Segment->Image.FileOffset + ChunkOffset;
 
-            /* Clamp to VDL */
+            /* Clamp to VDL: nothing past it is read from the file, the
+               pages there stay zero. A range starting exactly at the VDL
+               has nothing valid in it; one that ends past it is read up to
+               the end of the page holding the VDL, so the read stays whole
+               pages (sector aligned) for the file system */
             if (ValidDataLength && ((FileOffset.QuadPart + ReadLength) > ValidDataLength->QuadPart))
             {
-                if (FileOffset.QuadPart > ValidDataLength->QuadPart)
+                if (FileOffset.QuadPart >= ValidDataLength->QuadPart)
                 {
                     /* Great, nothing to read. */
                     goto AssignPagesToSegment;
                 }
 
-                Mdl->Size = (FileOffset.QuadPart + ReadLength) - ValidDataLength->QuadPart;
+                Mdl->ByteCount = (ULONG)ROUND_TO_PAGES(ValidDataLength->QuadPart - FileOffset.QuadPart);
+                ASSERT(Mdl->ByteCount <= ReadLength);
             }
 
             KEVENT Event;
