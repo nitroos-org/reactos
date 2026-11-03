@@ -269,11 +269,13 @@ DefWndHandleSetCursor(PWND pWnd, WPARAM wParam, LPARAM lParam)
          if (Msg == WM_LBUTTONDOWN)
          {
             // Find a pop up window to bring active.
-            pwndPopUP = co_IntFindChildWindowToOwner(UserGetDesktopWindow(), pWnd);
+            /* The popups owned by pWnd are top-level windows of pWnd's own desktop */
+            PWND pwndDesk = co_GetDesktopWindow(pWnd);
+            pwndPopUP = pwndDesk ? co_IntFindChildWindowToOwner(pwndDesk, pWnd) : NULL;
             if (pwndPopUP)
             {
                // Not a child pop up from desktop.
-               if ( pwndPopUP != UserGetDesktopWindow()->spwndChild )
+               if ( pwndPopUP != pwndDesk->spwndChild )
                {
                   // Get original active window.
                   PWND pwndOrigActive = gpqForeground->spwndActive;
@@ -1160,7 +1162,7 @@ IntDefWindowProc(
              if (LOWORD(lParam) < HTLEFT || LOWORD(lParam) > HTBOTTOMRIGHT)
              {
                  PWND parent = Wnd->spwndParent;//IntGetParent( Wnd );
-                 if (parent != UserGetDesktopWindow() &&
+                 if (!UserIsDesktopWindow(parent) &&
                      co_IntSendMessage( UserHMGetHandle(parent), WM_SETCURSOR, wParam, lParam))
                     return TRUE;
              }
