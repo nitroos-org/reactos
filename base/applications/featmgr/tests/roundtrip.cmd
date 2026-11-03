@@ -853,6 +853,87 @@ find "Version:      1.0.2500" %O%\q.txt >nul
 call :rc0 "P11 /query of one entry out of 4000+"
 rd /s /q %PERF% 2>nul
 
+rem ===== NitroOS default for VS Code (SCOOP-vscode-default-conpty-dll-false): after featmgr installs or updates
+rem vscode it adds "terminal.integrated.windowsUseConptyDll": false to scoop's persisted settings.json, only when
+rem that key is absent. TODO CONSOLE-condrv-device: remove together with scoopdefaults.c.
+set FEATMGR_SCOOP_ROOT=%FSROOT%
+set FEATMGR_SCOOP_RUNNER=%FSROOT%\shims\scoop.cmd
+set VSU=%FSROOT%\persist\vscode\data\user-data\User
+set VSJ=%VSU%\settings.json
+%FM% /import-scoop vscfx /dir:%FX%\scoop-vscode /trust > %O%\imp.txt 2>&1
+call :rc0 "VS0 import of the vscode test bucket"
+rd /s /q %FSROOT%\persist 2>nul
+%FM% /install vscode > %O%\i.txt 2>&1
+call :rc0 "VS1 install vscode (no settings.json yet)"
+type %O%\i.txt >> %LOG%
+call :ex %VSJ% 1 "VS2 settings.json created under persist\vscode\data\user-data\User"
+find ": false" %VSJ% >nul
+call :rc0 "VS3 ...with the key false"
+find "CONSOLE-condrv-device" %VSJ% >nul
+call :rc0 "VS4 ...and the TODO note (a comment)"
+call :vsc true
+fc /b %FX%\vscode-settings\true.json %VSJ% >nul
+call :rc0 "VS5 an existing true: file byte for byte as it was (no false added)"
+fc /b %FX%\vscode-settings\false.json %VSJ% >nul
+call :rc1 "VS6 (self-check) fc /b reports a difference between two different files"
+call :vsc false
+fc /b %FX%\vscode-settings\false.json %VSJ% >nul
+call :rc0 "VS7 an existing false: file untouched"
+call :vsc tricky
+fc /b %FX%\vscode-settings\tricky.expected.json %VSJ% >nul
+call :rc0 "VS8 a commented-out or nested key does not count; slashes and a brace inside a string are not comments or braces; top-level key added after a new comma"
+call :vsc comments
+fc /b %FX%\vscode-settings\comments.expected.json %VSJ% >nul
+call :rc0 "VS9 leading, member-trailing, block and trailing comments kept; comma added after the last member"
+call :vsc trailing-comma
+fc /b %FX%\vscode-settings\trailing-comma.expected.json %VSJ% >nul
+call :rc0 "VS10 trailing comma, CRLF kept"
+call :vsc oneline
+fc /b %FX%\vscode-settings\oneline.expected.json %VSJ% >nul
+call :rc0 "VS11 one-line object: member spliced in on the same line"
+call :vsc emptyobj
+fc /b %FX%\vscode-settings\emptyobj.expected.json %VSJ% >nul
+call :rc0 "VS12 empty object"
+call :vsc empty
+fc /b %FX%\vscode-settings\empty.expected.json %VSJ% >nul
+call :rc0 "VS13 empty file: object written"
+call :vsc commentonly
+fc /b %FX%\vscode-settings\commentonly.expected.json %VSJ% >nul
+call :rc0 "VS14 comment-only file: comment kept, object added"
+call :vsc bom
+fc /b %FX%\vscode-settings\bom.expected.json %VSJ% >nul
+call :rc0 "VS15 UTF-8 BOM kept, CRLF kept"
+call :vsc broken
+fc /b %FX%\vscode-settings\broken.json %VSJ% >nul
+call :rc0 "VS16 malformed file left untouched"
+call :vsc array
+fc /b %FX%\vscode-settings\array.json %VSJ% >nul
+call :rc0 "VS17 non-object file left untouched"
+rem the hook runs after an update as well
+copy /y %FX%\vscode-settings\comments.json %VSJ% >nul
+%FM% /update vscode > %O%\i.txt 2>&1
+type %O%\i.txt >> %LOG%
+find ": false" %VSJ% >nul
+call :rc0 "VS18 /update vscode adds the key when absent"
+copy /y %FX%\vscode-settings\true.json %VSJ% >nul
+%FM% /update /all >> %LOG% 2>&1
+fc /b %FX%\vscode-settings\true.json %VSJ% >nul
+call :rc0 "VS19 /update /all keeps the user's true"
+copy /y %FX%\vscode-settings\comments.json %VSJ% >nul
+%FM% /update /all >> %LOG% 2>&1
+find ": false" %VSJ% >nul
+call :rc0 "VS20 /update /all adds the key when absent"
+rem vscode-insiders has its own persist dir; other apps get nothing
+%FM% /install vscode-insiders >> %LOG% 2>&1
+find ": false" %FSROOT%\persist\vscode-insiders\data\user-data\User\settings.json >nul
+call :rc0 "VS21 vscode-insiders gets the default in its own persist dir"
+%FM% /install fmsc-plain >> %LOG% 2>&1
+call :ex %FSROOT%\persist\fmsc-plain 0 "VS22 other Scoop apps get no persist data from featmgr"
+%FM% /uninstall fmsc-plain >> %LOG% 2>&1
+%FM% /uninstall vscode-insiders >> %LOG% 2>&1
+%FM% /uninstall vscode >> %LOG% 2>&1
+rd /s /q %FSROOT%\persist 2>nul
+
 rem the install of a feature that is available only with scoop present
 set FEATMGR_SCOOP_ROOT=
 set FEATMGR_SCOOP_RUNNER=
@@ -939,4 +1020,13 @@ goto :eof
 :fail
 echo FAIL %~1 -- %~2>> %LOG%
 set /a FAILS=%FAILS%+1
+goto :eof
+
+:vsc
+rem :vsc <fixture>: put vscode-settings\<fixture>.json in place as scoop's persisted settings.json, then a fresh
+rem featmgr install of vscode through the stub
+%FM% /uninstall vscode >nul 2>&1
+mkdir %VSU% 2>nul
+copy /y %FX%\vscode-settings\%1.json %VSJ% >nul
+%FM% /install vscode >> %LOG% 2>&1
 goto :eof

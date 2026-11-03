@@ -1,0 +1,2 @@
+# byte-exact fixtures (CRLF / BOM cases are compared with fc /b)
+* -text

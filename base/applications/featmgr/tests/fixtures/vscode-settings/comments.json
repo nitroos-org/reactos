@@ -1,0 +1,8 @@
+// my settings
+{
+    /* font */
+    "editor.fontSize": 14, // big
+    "files.exclude": { "a": true, "b": [1, 2] },
+    "window.zoomLevel": 1
+    // trailing note
+}

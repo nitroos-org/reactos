@@ -1937,6 +1937,10 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
                    f->Provider, f->Id, code, g_Tail);
         return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
     }
+    if (!_wcsicmp(f->Provider, L"scoop"))
+        FmScoopAppDefaults(f->App, log);        /* NitroOS default for VS Code (scoopdefaults.c) */
+    else if (!_wcsicmp(f->Id, L"scoop"))
+        FmScoopAppDefaultsSeed(log);            /* ...ready before a later plain "scoop install" */
     SetStateSz(state, L"Provider", f->Provider);
     SetStateSz(state, L"Uninstall", uninst);
     NotifyEnvironmentChanged();
@@ -2582,6 +2586,7 @@ static HRESULT FmUpdateInner(LPCWSTR id, FILE *log)
         LOGF(log, L"update FAILED (0x%08lx)\n", hr);
         return hr;
     }
+    FmScoopAppDefaults(f.App, log);             /* NitroOS default for VS Code (scoopdefaults.c) */
     /* "scoop update" may have pulled the bucket: read its manifests again */
     if (f.Bucket[0] && FmScoopReimport(f.Bucket, log) < 0)
         LOGF(log, L"  note: the catalog entries of bucket '%s' were not refreshed\n", f.Bucket);
@@ -2619,7 +2624,11 @@ HRESULT FmUpdateAll(FILE *log)
         LOGF(log, L"catalog refreshed from the updated buckets (%d entries)\n", n < 0 ? 0 : n);
         LOGF(log, L"updating all installed Scoop apps\n");
         hr = RunScoop(L"update *", log);
-        if (SUCCEEDED(hr)) LOGF(log, L"all Scoop apps are up to date.\n");
+        if (SUCCEEDED(hr))
+        {
+            FmScoopAppDefaultsAll(log);                     /* NitroOS defaults (scoopdefaults.c) */
+            LOGF(log, L"all Scoop apps are up to date.\n");
+        }
     }
     if (FAILED(hr)) LOGF(log, L"update FAILED (0x%08lx)\n", hr);
     g_OpDepth--;
