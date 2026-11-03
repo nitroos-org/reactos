@@ -583,12 +583,16 @@ NTAPI
 UserSetDefaultInputLang(HKL hKl)
 {
     PKL pKl;
+    PWINSTATION_OBJECT pWinSta;
 
     pKl = UserHklToKbl(hKl);
     if (!pKl)
         return FALSE;
 
-    IntReorderKeyboardLayouts(IntGetProcessWindowStation(NULL), pKl);
+    pWinSta = IntGetProcessWindowStation(NULL);
+    IntReorderKeyboardLayouts(pWinSta, pKl);
+    if (pWinSta)
+        ObDereferenceObject(pWinSta);
     return TRUE;
 }
 
@@ -1040,7 +1044,7 @@ NtUserGetKeyboardLayoutList(
     HKL *pHklBuff)
 {
     UINT ret = 0;
-    PWINSTATION_OBJECT pWinSta;
+    PWINSTATION_OBJECT pWinSta = NULL;
 
     if (!pHklBuff)
         nBuff = 0;
@@ -1078,6 +1082,8 @@ NtUserGetKeyboardLayoutList(
     _SEH2_END;
 
 Quit:
+    if (pWinSta)
+        ObDereferenceObject(pWinSta);
     UserLeave();
     return ret;
 }
@@ -1211,6 +1217,8 @@ NtUserLoadKeyboardLayoutEx(
                                         Flags);
     if (hSafeFile)
         ZwClose(hSafeFile);
+    if (pWinSta)
+        ObDereferenceObject(pWinSta);
 
     UserLeave();
     return hRetKL;
@@ -1236,6 +1244,8 @@ NtUserActivateKeyboardLayout(
 
     pWinSta = IntGetProcessWindowStation(NULL);
     hOldKL = co_IntActivateKeyboardLayout(pWinSta, hKL, Flags, NULL);
+    if (pWinSta)
+        ObDereferenceObject(pWinSta);
     UserLeave();
 
     return hOldKL;
@@ -1258,6 +1268,8 @@ NtUserUnloadKeyboardLayout(
 
     pWinSta = IntGetProcessWindowStation(NULL);
     ret = IntUnloadKeyboardLayout(pWinSta, hKl);
+    if (pWinSta)
+        ObDereferenceObject(pWinSta);
 
     UserLeave();
     return ret;
