@@ -37,4 +37,8 @@ BEGIN
     IDS_NO_QUERY_VOL "Não foi possível consultar o volume. Código de erro: "
     IDS_VOLUME_IN_USE_PROC "Chkdsk não pode ser executado porque o volume está em uso por outro processo.\n\n"
     IDS_RUN_AGAIN "Pode ser possível corrigir isto executando o chkdsk novamente.\n\n"
+    IDS_CANNOT_LOCK "Cannot lock current drive.\n\n"
+    IDS_SCHEDULE_PROMPT "Chkdsk cannot run because the volume is in use by another process.  Would you like to schedule this volume to be checked the next time the system restarts? (Y/N) "
+    IDS_SCHEDULED "\nThis volume will be checked the next time the system restarts.\n"
+    IDS_SCHEDULE_FAILED "\nThe check could not be scheduled.\n"
 END

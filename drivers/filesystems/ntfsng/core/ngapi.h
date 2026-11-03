@@ -249,4 +249,37 @@ void ngc_write_stats(unsigned long *writes, unsigned long long *bytes, unsigned 
 /* Prints shim memory accounting (live allocations by call site, cache pages, inodes). */
 void ngc_debug_dump(void);
 
+/*
+ * ngc_check: the consistency check of ngfsck.c on the mounted volume (under the caller's volume lock), as FSCTL_NG_CHECK.
+ * The dirty mappings are written back first, so the device (with the journal overlay) is what the check reads.
+ * NGC_CHECK_FIX: when the check finds no damage, leaked clusters and records are freed, the volume is committed
+ * and VOLUME_IS_DIRTY is cleared; when it finds damage the volume is made read-only (and stays dirty): nothing
+ * else is ever repaired.  NGC_CHECK_QUERY: only the state flags, no check.
+ */
+#define NGC_CHECK_FIX 1
+#define NGC_CHECK_QUERY 2
+/* out: state before the check */
+#define NGC_CHK_READONLY 0x01		/* mounted read-only */
+#define NGC_CHK_DAMAGED 0x02		/* read-only because damage was found */
+#define NGC_CHK_DIRTY 0x04		/* VOLUME_IS_DIRTY on disk */
+#define NGC_CHK_NEEDS_CHECK 0x08	/* dirty for a reason a check settles (kept dirty, read-only, damaged, errors), not a change in flight */
+/* out: what the check did */
+#define NGC_CHK_RAN 0x10		/* the check ran to its verdict */
+#define NGC_CHK_REPAIRED 0x20		/* leaks were freed */
+#define NGC_CHK_DIRTY_CLEARED 0x40	/* VOLUME_IS_DIRTY was cleared */
+#define NGC_CHK_NOW_READONLY 0x80	/* damage found with NGC_CHECK_FIX: the volume was made read-only */
+#define NGC_CHK_REFUSED 0x100		/* a repair was asked for and not done (damage, read-only, or cluster map not checked) */
+struct ngc_check {
+	unsigned long long records, inuse, dirs, ientries, clusters, leaked_clusters, fixed_clusters;
+	unsigned int fatal, leaks, leaked_records, fixed_records, dirs_skipped, clusters_skipped, ms, repair_errors;
+	unsigned int flags;
+	unsigned int cluster_size;
+	unsigned int replayed;		/* pages the journal replayed at this mount */
+	unsigned int pass_ms[3];
+	unsigned long long total_clusters, free_clusters;
+	unsigned long long ext_records, reparse, sys_clusters, log_clusters, index_clusters;
+	char why[128];
+};
+int ngc_check(ngc_vol *v, unsigned int flags, struct ngc_check *out);
+
 #endif

@@ -4110,3 +4110,121 @@ int ngc_readdir_full(ngc_vol *v, ngc_node *dirn, ngc_dirent_t fn, void *arg)
 	ngos_prof(NGP_READDIR, t0, 0);
 	return r;
 }
+
+/* FSCTL_NG_CHECK (see ngapi.h): the volume lock is held. */
+int ngc_check(ngc_vol *v, unsigned int flags, struct ngc_check *out)
+{
+	struct ntfs_volume *vol = NTFS_SB(v->sb);
+	struct ngc_fsck_res *r;
+	int err = 0, rw = !sb_rdonly(v->sb), fix = !!(flags & NGC_CHECK_FIX);
+	memset(out, 0, sizeof(*out));
+	if (!rw)
+		out->flags |= NGC_CHK_READONLY;
+	if (v->damaged)
+		out->flags |= NGC_CHK_DAMAGED;
+	if (vol->vol_flags & VOLUME_IS_DIRTY)
+		out->flags |= NGC_CHK_DIRTY;
+	if (((vol->vol_flags & VOLUME_IS_DIRTY) && (vol->keep_dirty || !rw)) || v->damaged || NVolErrors(vol))
+		out->flags |= NGC_CHK_NEEDS_CHECK;
+	out->cluster_size = vol->cluster_size;
+	if (flags & NGC_CHECK_QUERY)
+		return 0;
+	if (rw) {
+		if (v->failed || kshim_jnl_failed(v->bdev))
+			return -EIO;
+		err = ngc_commit_prep(v);
+		if (err)
+			return err;
+		kshim_jnl_settle(v->bdev);
+	}
+	r = kzalloc(sizeof(*r), GFP_KERNEL);
+	if (!r)
+		return -ENOMEM;
+	err = ngc_fsck_ex(vol, v->bdev, r, fix && rw && !v->damaged && !NVolErrors(vol));
+	out->records = r->records;
+	out->inuse = r->inuse;
+	out->dirs = r->dirs;
+	out->ientries = r->ientries;
+	out->clusters = r->clusters;
+	out->leaked_clusters = r->leaked_clusters;
+	out->fixed_clusters = r->fixed_clusters;
+	out->fatal = r->fatal;
+	out->leaks = r->leaks;
+	out->leaked_records = r->leaked_records;
+	out->fixed_records = r->fixed_records;
+	out->dirs_skipped = r->dirs_skipped;
+	out->clusters_skipped = r->clusters_skipped;
+	out->ms = r->ms;
+	out->repair_errors = r->repair_errors;
+	out->ext_records = r->ext_records;
+	out->reparse = r->reparse;
+	out->sys_clusters = r->sys_clusters;
+	out->log_clusters = r->log_clusters;
+	out->index_clusters = r->index_clusters;
+	out->replayed = v->jv ? v->jv->replayed : 0;
+	memcpy(out->pass_ms, r->pass_ms, sizeof(out->pass_ms));
+	strscpy(out->why, r->why, sizeof(out->why));
+	if (err && !r->fatal) {
+		kfree(r);
+		return err;
+	}
+	out->flags |= NGC_CHK_RAN;
+	printk(KERN_WARNING "CHECK (requested%s): %s: %llu records (%llu in use), %llu index entries, %u leaks (%llu clusters, %u records), "
+	       "%u errors, %u ms\n", fix ? ", with repair" : "", r->fatal ? "DAMAGED" : "consistent", r->records, r->inuse,
+	       r->ientries, r->leaks, r->leaked_clusters, r->leaked_records, r->fatal, r->ms);
+	if (fix) {
+		if (r->fatal || !rw || v->damaged || NVolErrors(vol) || r->repair_refused || r->repair_errors) {
+			out->flags |= NGC_CHK_REFUSED;
+			if (rw && (r->fatal || r->repair_errors) && !v->damaged) {
+				/*
+				 * Damage on a volume that is writable: it stays dirty on disk (a later mount checks it again) and
+				 * becomes read-only, as a volume the mount-time check found damaged.
+				 */
+				int e = 0;
+				vol->keep_dirty = true;
+				if (!(vol->vol_flags & VOLUME_IS_DIRTY)) {
+					e = ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
+					if (!e)
+						e = write_inode_now(vol->vol_ino, 1);
+				}
+				if (!e)
+					e = ngc_commit(v);
+				if (e)
+					printk(KERN_ERR "CHECK: could not keep the damaged volume dirty (%d)\n", e);
+				v->damaged = 1;
+				snprintf(v->why, sizeof(v->why), "a requested consistency check found %u errors, first: %s", r->fatal, r->why);
+				v->sb->s_flags |= SB_RDONLY;
+				out->flags |= NGC_CHK_NOW_READONLY | NGC_CHK_DAMAGED | NGC_CHK_READONLY;
+			}
+		} else {
+			int e = 0;
+			if (r->fixed_clusters || r->fixed_records) {
+				e = ngc_commit(v);
+				if (!e)
+					out->flags |= NGC_CHK_REPAIRED;
+			}
+			/* Nothing wrong that is left: a flag a check was scheduled with (FSCTL_MARK_VOLUME_DIRTY) goes. */
+			if (!e) {
+				vol->keep_dirty = false;
+				e = ngc_sync_impl(v);
+				if (!e && !(vol->vol_flags & VOLUME_IS_DIRTY) && (out->flags & NGC_CHK_DIRTY))
+					out->flags |= NGC_CHK_DIRTY_CLEARED;
+			}
+			if (e) {
+				out->flags |= NGC_CHK_REFUSED;
+				out->repair_errors++;
+			}
+		}
+	}
+	if (rw && !(vol->vol_flags & VOLUME_IS_DIRTY))
+		out->flags &= ~NGC_CHK_DIRTY;
+	if (vol->vol_flags & VOLUME_IS_DIRTY)
+		out->flags |= NGC_CHK_DIRTY;
+	{
+		s64 fc = atomic64_read(&vol->free_clusters);
+		out->total_clusters = vol->nr_clusters;
+		out->free_clusters = fc > 0 ? fc : 0;
+	}
+	kfree(r);
+	return 0;
+}

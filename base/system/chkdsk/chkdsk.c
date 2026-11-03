@@ -46,6 +46,8 @@
 #include <windef.h>
 #include <winbase.h>
 #include <wincon.h>
+#include <winreg.h>
+#include <winioctl.h>
 
 #include <conutils.h>
 
@@ -58,12 +60,17 @@
 /* FMIFS Public Header */
 #include <fmifs/fmifs.h>
 
+/* NtfsChkdsk's results besides failures (see ntfslib.h) */
+#define NTFSCHK_STATUS_CORRECTED ((NTSTATUS)0x20000A01)
+#define NTFSCHK_STATUS_ERRORS    ((NTSTATUS)0xE0000A03)
+
 #define FMIFS_IMPORT_DLL
 
 //
 // Globals
 //
 BOOL    Error = FALSE;
+BOOL    Corrected = FALSE;
 
 // Switches
 BOOL    FixErrors = FALSE;
@@ -208,6 +215,63 @@ ParseCommandLine(int argc, WCHAR *argv[])
 }
 
 
+
+//----------------------------------------------------------------------
+//
+// ScheduleCheck
+//
+// As Windows, for a volume that cannot be locked (the system volume, or one with open
+// files): ask whether to check it at the next restart.  Yes marks the volume dirty (the
+// NTFS-NG driver keeps the flag until a check has run) and adds "autocheck autochk /r <volume>"
+// to BootExecute, which autochk removes after the check.
+//
+//----------------------------------------------------------------------
+static BOOL
+ScheduleCheck(VOID)
+{
+    WCHAR vol[16], entry[64], *buf, *p;
+    HANDLE h;
+    HKEY key;
+    DWORD type, size = 0, n, cb;
+    BOOL ok = FALSE;
+
+    swprintf(vol, L"\\\\.\\%C:", Drive[0]);
+    h = CreateFileW(vol, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        DeviceIoControl(h, FSCTL_MARK_VOLUME_DIRTY, NULL, 0, NULL, 0, &n, NULL);
+        CloseHandle(h);
+    }
+    swprintf(entry, L"autocheck autochk /r \\??\\%C:", Drive[0]);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager", 0,
+                      KEY_QUERY_VALUE | KEY_SET_VALUE, &key) != ERROR_SUCCESS)
+        return FALSE;
+    if (RegQueryValueExW(key, L"BootExecute", NULL, &type, NULL, &size) != ERROR_SUCCESS || type != REG_MULTI_SZ)
+        size = sizeof(WCHAR);
+    buf = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size + (wcslen(entry) + 2) * sizeof(WCHAR));
+    if (buf)
+    {
+        cb = size;
+        if (RegQueryValueExW(key, L"BootExecute", NULL, &type, (LPBYTE)buf, &cb) != ERROR_SUCCESS || type != REG_MULTI_SZ)
+            buf[0] = buf[1] = 0;
+        for (p = buf; *p; p += wcslen(p) + 1)
+            if (!_wcsicmp(p, entry))
+                break;
+        if (!*p)
+        {
+            /* p is at the final terminator: append the entry and a new terminator */
+            wcscpy(p, entry);
+            p += wcslen(entry) + 1;
+            *p = 0;
+        }
+        ok = RegSetValueExW(key, L"BootExecute", 0, REG_MULTI_SZ, (LPBYTE)buf,
+                            (DWORD)((p + 1 - buf) * sizeof(WCHAR))) == ERROR_SUCCESS;
+        HeapFree(GetProcessHeap(), 0, buf);
+    }
+    RegCloseKey(key);
+    return ok;
+}
+
 //----------------------------------------------------------------------
 //
 // ChkdskCallback
@@ -304,7 +368,17 @@ ChkdskCallback(
 
         case DONE:
             status = (PBOOLEAN)Argument;
-            if (*status == FALSE)
+            if (*status && Modifier == NTFSCHK_STATUS_CORRECTED)
+            {
+                /* Errors were found and fixed: the text is printed, the exit code is 1. */
+                Corrected = TRUE;
+            }
+            else if (*status == FALSE && Modifier == NTFSCHK_STATUS_ERRORS)
+            {
+                /* Errors were found and not fixed: the text is printed, the exit code is 3. */
+                Error = TRUE;
+            }
+            else if (*status == FALSE)
             {
                 ConResPrintf(StdOut, IDS_CHKDSK_FAIL, Modifier);
                 if (Modifier == STATUS_DISK_CORRUPT_ERROR)
@@ -370,7 +444,7 @@ wmain(int argc, WCHAR *argv[])
     /* Initialize the Console Standard Streams */
     ConInitStdStreams();
 
-    ConResPuts(StdOut, IDS_ABOUT);
+    /* Windows' chkdsk prints no banner. */
 
 #ifndef FMIFS_IMPORT_DLL
     //
@@ -442,17 +516,52 @@ wmain(int argc, WCHAR *argv[])
     if (FixErrors)
     {
         swprintf(volumeName, L"\\\\.\\%C:", Drive[0]);
+        /* As Windows: the volume must be lockable (no open files); the lock is only a test, the check
+         * itself runs under the file system's own lock. */
         volumeHandle = CreateFileW(volumeName,
-                                   GENERIC_WRITE,
-                                   0,
+                                   GENERIC_READ | GENERIC_WRITE,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
                                    NULL,
                                    OPEN_EXISTING,
                                    0,
                                    0);
+        if (volumeHandle != INVALID_HANDLE_VALUE)
+        {
+            DWORD ret;
+            if (!DeviceIoControl(volumeHandle, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &ret, NULL))
+            {
+                CloseHandle(volumeHandle);
+                volumeHandle = INVALID_HANDLE_VALUE;
+            }
+            else
+            {
+                DeviceIoControl(volumeHandle, FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0, &ret, NULL);
+            }
+        }
         if (volumeHandle == INVALID_HANDLE_VALUE)
         {
-            ConResPuts(StdErr, IDS_VOLUME_IN_USE_PROC);
-            return -1;
+            /* Windows: cannot lock; offer to check at the next restart (Y/N). */
+            WCHAR answer[16] = L"";
+            ConResPuts(StdOut, IDS_CANNOT_LOCK);
+            ConResPuts(StdOut, IDS_SCHEDULE_PROMPT);
+            fflush(stdout);
+            if (fgetws(answer, ARRAYSIZE(answer), stdin) && (answer[0] == L'Y' || answer[0] == L'y'))
+            {
+                DWORD mode;
+                if (!GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode))
+                    ConPuts(StdOut, L"Y\n");
+                if (ScheduleCheck())
+                    ConResPuts(StdOut, IDS_SCHEDULED);
+                else
+                    ConResPuts(StdErr, IDS_SCHEDULE_FAILED);
+            }
+            else if (answer[0])
+            {
+                DWORD mode;
+                if (!GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode))
+                    ConPuts(StdOut, L"N\n");
+            }
+            return 3;
         }
         CloseHandle(volumeHandle);
 
@@ -476,7 +585,9 @@ wmain(int argc, WCHAR *argv[])
            NULL,
            ChkdskCallback);
 
-    if (Error) return -1;
+    /* As Windows: 0 no errors, 1 errors found and fixed, 3 errors not fixed or the check could not run. */
+    if (Error) return 3;
+    if (Corrected) return 1;
     return 0;
 }
 

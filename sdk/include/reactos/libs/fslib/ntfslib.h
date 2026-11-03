@@ -10,6 +10,15 @@
 
 #include <fmifs/fmifs.h>
 
+/*
+ * NtfsChkdsk's ExitStatus besides NTSTATUS failures (chkdsk.exe turns them into its exit codes 1 and 3):
+ * the check found and fixed errors (success), or found errors it did not fix (failure; the text is printed).
+ * A dirty-only query (CheckOnlyIfDirty without FixErrors) returns TRUE with STATUS_DISK_CORRUPT_ERROR when
+ * the volume needs a check, as autochk expects.
+ */
+#define NTFSCHK_STATUS_CORRECTED ((NTSTATUS)0x20000A01)
+#define NTFSCHK_STATUS_ERRORS    ((NTSTATUS)0xE0000A03)
+
 BOOLEAN
 NTAPI
 NtfsChkdsk(
