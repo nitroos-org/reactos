@@ -748,7 +748,9 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     switch(FCB->SharedData.State)
     {
     case SOCKET_STATE_CONNECTED:
-        Status = STATUS_INVALID_PARAMETER;
+        /* WSAEISCONN, as on Windows. Qt asks a non-blocking socket whether it
+         * is connected by connecting it again and waits for this answer */
+        Status = STATUS_CONNECTION_ACTIVE;
         break;
 
     case SOCKET_STATE_CONNECTING:
@@ -758,7 +760,10 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             Status = STATUS_INVALID_PARAMETER;
             break;
         }
-        return LeaveIrpUntilLater( FCB, Irp, FUNCTION_CONNECT );
+        /* WSAEALREADY: a connect is in progress. It is not queued behind the
+         * first one, which the caller keeps waiting for */
+        Status = STATUS_CONNECTION_IN_USE;
+        break;
 
     case SOCKET_STATE_CREATED:
         if (FCB->LocalAddress)

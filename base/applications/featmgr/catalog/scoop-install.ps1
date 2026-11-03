@@ -91,6 +91,29 @@ try {
     $core = Join-Path $Root 'apps\scoop\current\bin\scoop.ps1'
     $env:SCOOP = $Root
 
+    if ((Test-Path $core) -and -not (Test-Path $shim)) {
+        # The Scoop installer creates its shim last: core without shim is what a failed or cancelled install
+        # leaves behind (a retry used to "adopt" it and stop at "scoop.cmd is missing"). When the root holds
+        # nothing but that (no other app, no persisted data), clear it and install again; anything else in
+        # it is the user's and is not touched.
+        $apps = @(Get-ChildItem -LiteralPath (Join-Path $Root 'apps') -Force -ErrorAction SilentlyContinue)
+        $bkts = @(Get-ChildItem -LiteralPath (Join-Path $Root 'buckets') -Force -ErrorAction SilentlyContinue)
+        $top  = @(Get-ChildItem -LiteralPath $Root -Force -ErrorAction SilentlyContinue)
+        $onlyScoop = (-not ($apps | Where-Object { $_.Name -ne 'scoop' })) -and
+                     (-not ($bkts | Where-Object { $_.Name -ne 'main' })) -and
+                     (-not ($top  | Where-Object { @('apps', 'buckets', 'shims', 'cache') -notcontains $_.Name }))
+        if (-not $onlyScoop) { Die "Scoop in $Root is damaged ($shim is missing) and the folder holds other data; repair or remove it first" }
+        Say "found a half-finished Scoop install in $Root ($shim is missing); removing it and starting over"
+        # junctions (apps\<app>\current) first, without following them
+        Get-ChildItem -LiteralPath (Join-Path $Root 'apps') -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            Get-ChildItem -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } |
+                ForEach-Object { cmd.exe /c rmdir "$($_.FullName)" 2>&1 | Out-Null }
+        }
+        Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path $Root) { Die "cannot remove the half-finished Scoop install in $Root" }
+    }
+
     if (Test-Path $core) {
         Say "Scoop already present in $Root; adopting it"
     } else {
