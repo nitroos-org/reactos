@@ -81,6 +81,7 @@ typedef struct _COMMAND_ENTRY
     DWORD dwCmdHlpToken;
     DWORD dwFlags;
     PNS_OSVERSIONCHECK pfnOsVersionCheck;
+    HMODULE hModule;    /* module of the help strings, NULL = the context's module */
 } COMMAND_ENTRY, *PCOMMAND_ENTRY;
 
 typedef struct _COMMAND_GROUP
@@ -136,6 +137,13 @@ extern PHELPER_ENTRY pHelperListHead;
 extern HMODULE g_hModule;
 extern PWSTR g_pszMachine;
 extern BOOL g_bOnline;
+extern BOOL g_bInteractive;
+extern BOOL g_bCommandLine;
+extern LONG g_lScriptDepth;
+extern PCONTEXT_ENTRY g_pInvokeContext;
+
+/* returned by "exec" when the script reported an error (already printed) */
+#define ERROR_SCRIPT_FAILED 0xE0000001
 
 extern UINT  VersionInfoArchitecture;
 extern UINT  VersionInfoOsProductSuite;
@@ -274,8 +282,29 @@ DWORD
 InterpretLine(
     _In_ LPWSTR pszFileName);
 
-VOID
+DWORD
 InterpretInteractive(VOID);
+
+DWORD
+InterpretTokens(
+    _In_ LPWSTR *argv,
+    _In_ DWORD dwArgCount,
+    _Inout_ PBOOL pbDone);
+
+BOOL
+IsHelpToken(
+    _In_ PCWSTR psz);
+
+DWORD
+WINAPI
+HelpCommand(
+    LPCWSTR pwszMachine,
+    LPWSTR *argv,
+    DWORD dwCurrentIndex,
+    DWORD dwArgCount,
+    DWORD dwFlags,
+    LPCVOID pvData,
+    BOOL *pbDone);
 
 /* netsh.c */
 
