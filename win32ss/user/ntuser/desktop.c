@@ -204,9 +204,22 @@ IntDesktopObjectParse(IN PVOID ParseObject,
  * A process that exits with the last handle to a desktop (a sandboxed child on its
  * alternate desktop) has no Win32 thread any more, it borrows the desktop thread's.
  * It has no Win32 process either (ObKillProcess closes the handles after the process
- * callout): freeing the window's regions needs one (REGION_vCleanup), use CSRSS's.
+ * callout), and a deferred delete runs in a system worker thread: freeing the window
+ * needs one (region ownership and REGION_vCleanup), use CSRSS's.
+ *
+ * KeStackAttachProcess nests: a thread that is already attached (a handle closed from
+ * an attached context) saves its state in ApcState and gets it back at the detach.
+ * Only KeAttachProcess, or any attach from a DPC, is an INVALID_PROCESS_ATTACH_ATTEMPT,
+ * and object deletion never runs at DISPATCH_LEVEL (Ob defers it to a worker).
+ * CSRSS's Win32 process is tested under the USER lock, which its process callout also
+ * takes, so it cannot go away between the test and the free.
+ *
+ * Returns FALSE, without touching the window, if no process with a Win32 process is
+ * available (CSRSS has exited: it is a critical process, so the system is going down).
+ * The caller then leaks the desktop heap with the window in it rather than freeing
+ * memory the window still lives in, or freeing it without the context it needs.
  */
-static VOID
+static BOOLEAN
 IntFreeDesktopWindow(IN PWND pwnd)
 {
     USER_REFERENCE_ENTRY Ref;
@@ -217,6 +230,20 @@ IntFreeDesktopWindow(IN PWND pwnd)
     ASSERT(gptiDesktopThread != NULL);
     ASSERT(pwnd->head.pti == gptiDesktopThread);
     ASSERT(pwnd->spwndChild == NULL);
+    ASSERT(UserIsEnteredExclusive());
+    ASSERT(!KeIsExecutingDpc());
+
+    if (PsGetCurrentProcessWin32Process() == NULL)
+    {
+        if (gpepCSRSS == NULL || PsGetProcessWin32Process(gpepCSRSS) == NULL)
+        {
+            ERR("No Win32 process to free window %p of a deleted desktop in, leaking it\n", pwnd);
+            return FALSE;
+        }
+
+        KeStackAttachProcess(&gpepCSRSS->Pcb, &ApcState);
+        bAttached = TRUE;
+    }
 
     if (PsGetCurrentThreadWin32Thread() == NULL)
     {
@@ -224,21 +251,18 @@ IntFreeDesktopWindow(IN PWND pwnd)
         bBorrowed = TRUE;
     }
 
-    if (PsGetCurrentProcessWin32Process() == NULL && gpepCSRSS)
-    {
-        KeStackAttachProcess(&gpepCSRSS->Pcb, &ApcState);
-        bAttached = TRUE;
-    }
-
     UserRefObjectCo(pwnd, &Ref);
     co_UserFreeWindow(pwnd, gptiDesktopThread->ppi, gptiDesktopThread, FALSE);
     UserDerefObjectCo(pwnd);
 
+    /* Undo in the reverse order: nothing above returns early */
+    if (bBorrowed)
+        PsSetThreadWin32Thread(Thread, NULL, gptiDesktopThread);
+
     if (bAttached)
         KeUnstackDetachProcess(&ApcState);
 
-    if (bBorrowed)
-        PsSetThreadWin32Thread(Thread, NULL, gptiDesktopThread);
+    return TRUE;
 }
 
 /*
@@ -338,6 +362,7 @@ IntDesktopObjectDelete(
 {
     PWIN32_DELETEMETHOD_PARAMETERS DeleteParameters = Parameters;
     PDESKTOP pdesk = (PDESKTOP)DeleteParameters->Object;
+    BOOLEAN bLeakHeap = FALSE;
 
     TRACE("Deleting desktop object 0x%p\n", pdesk);
 
@@ -352,20 +377,25 @@ IntDesktopObjectDelete(
     if (pdesk->pDeskInfo &&
         pdesk->pDeskInfo->spwnd)
     {
-        IntFreeDesktopWindow(pdesk->pDeskInfo->spwnd);
+        if (!IntFreeDesktopWindow(pdesk->pDeskInfo->spwnd))
+            bLeakHeap = TRUE;
     }
 
-    if (pdesk->spwndMessage)
+    if (pdesk->spwndMessage && !bLeakHeap)
     {
-        IntFreeDesktopWindow(pdesk->spwndMessage);
+        if (!IntFreeDesktopWindow(pdesk->spwndMessage))
+            bLeakHeap = TRUE;
     }
 
     /* Remove the desktop from the window station's list of associated desktops */
     RemoveEntryList(&pdesk->ListEntry);
     UserLeave();
 
-    /* Free the heap */
-    IntFreeDesktopHeap(pdesk);
+    /* Free the heap, unless a window still lives in it (see IntFreeDesktopWindow) */
+    if (bLeakHeap)
+        ERR("Leaking the heap of deleted desktop %p, its windows could not be freed\n", pdesk);
+    else
+        IntFreeDesktopHeap(pdesk);
 
     ObDereferenceObject(pdesk->rpwinstaParent);
 
