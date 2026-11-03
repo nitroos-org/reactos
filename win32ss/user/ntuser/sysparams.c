@@ -792,6 +792,7 @@ SpiSetWallpaper(PVOID pvParam, FLONG fl)
         gspv.WallpaperMode == wmFit ||
         gspv.WallpaperMode == wmFill)
     {
+        /* Only the size of the window is used: the same for every desktop window */
         gspv.hbmWallpaper = IntStretchWallpaper(UserGetDesktopWindow(), hbmp);
     }
     else
@@ -813,8 +814,10 @@ SpiNotifyNCMetricsChanged(VOID)
     USER_REFERENCE_ENTRY Ref;
     int i;
 
+    /* The metrics are global: re-layout the windows on the screen (input desktop) */
     pwndDesktop = UserGetDesktopWindow();
-    ASSERT(pwndDesktop);
+    if (!pwndDesktop)
+        return FALSE;
 
     ahwnd = IntWinListChildren(pwndDesktop);
     if(!ahwnd)

@@ -182,6 +182,7 @@ HDC FASTCALL UserGetDesktopDC(ULONG,BOOL,BOOL);
     ((Desktop)->rpwinstaParent->ActiveDesktop == (Desktop))
 
 HWND FASTCALL IntGetMessageWindow(VOID);
+HWND FASTCALL IntGetCurrentThreadMessageWindow(VOID);
 PWND FASTCALL UserGetMessageWindow(VOID);
 
 #if 0
