@@ -1242,8 +1242,13 @@ IntGetPaintMessage(
       ERR("WM_PAINT is in a System Thread!\n");
    }
 
-   StartWnd = UserGetDesktopWindow();
-   PaintWnd = IntFindWindowToRepaint(StartWnd, Thread);
+   /* Search the thread's own desktop, as Windows does, not the input desktop: while another
+      desktop is the input desktop (SwitchDesktop), the windows of this thread are not in its
+      tree, the search found nothing and the count reset below stranded them, still dirty
+      but with no paint count, so they were never painted again (stale pixels on screen
+      once the desktop was back, e.g. where a closed window had been). */
+   StartWnd = (Thread->rpdesk && Thread->rpdesk->pDeskInfo) ? Thread->rpdesk->pDeskInfo->spwnd : NULL;
+   PaintWnd = StartWnd ? IntFindWindowToRepaint(StartWnd, Thread) : NULL;
 
    Message->hwnd = PaintWnd ? UserHMGetHandle(PaintWnd) : NULL;
 
@@ -1253,6 +1258,9 @@ IntGetPaintMessage(
       ERR("WARNING SOMETHING HAS GONE WRONG: Thread marked as containing dirty windows, but no dirty windows found! Counts %u\n",Thread->cPaintsReady);
       /* Hack to stop spamming the debug log ! */
       Thread->cPaintsReady = 0;
+      /* No paint is pending any more: QS_PAINT left set would wake every GetMessage of the thread for nothing */
+      Thread->pcti->fsWakeBits &= ~QS_PAINT;
+      Thread->pcti->fsChangeBits &= ~QS_PAINT;
       return FALSE;
    }
 
