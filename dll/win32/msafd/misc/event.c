@@ -122,6 +122,10 @@ WSPEventSelect(
     Socket->EventObject = hEventObject;
     Socket->NetworkEvents = lNetworkEvents;
 
+    /* FD_ADDRESS_LIST_CHANGE is not AFD's, msafd signals it (see addrchg.c): a change that came
+     * while it was not selected is reported now */
+    MsafdAddrChangeSelectionChanged(Socket);
+
     TRACE("Leaving\n");
 
     return 0;
@@ -236,6 +240,13 @@ WSPEnumNetworkEvents(
     if (EnumReq.PollEvents & AFD_EVENT_GROUP_QOS) {
         lpNetworkEvents->lNetworkEvents |= FD_GROUP_QOS;
         lpNetworkEvents->iErrorCode[FD_GROUP_QOS_BIT] = TranslateNtStatusError(EnumReq.EventStatus[FD_GROUP_QOS_BIT]);
+    }
+
+    /* Not AFD's: signalled by msafd itself, once per change */
+    if ((Socket->NetworkEvents & FD_ADDRESS_LIST_CHANGE) && MsafdAddrChangeTakePending(Socket))
+    {
+        lpNetworkEvents->lNetworkEvents |= FD_ADDRESS_LIST_CHANGE;
+        lpNetworkEvents->iErrorCode[FD_ADDRESS_LIST_CHANGE_BIT] = 0;
     }
 
     TRACE("Leaving\n");

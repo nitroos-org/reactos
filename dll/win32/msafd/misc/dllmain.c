@@ -891,6 +891,9 @@ WSPCloseSocket(IN SOCKET Handle,
     NtClose(Socket->TdiConnectionHandle);
     Socket->TdiConnectionHandle = NULL;
 ok:
+    /* Complete the address list change requests of the socket before it goes */
+    MsafdAddrChangeSocketClosing(Socket);
+
     EnterCriticalSection(&SocketListLock);
     if (SocketListHead == Socket)
     {
@@ -3092,33 +3095,16 @@ WSPIoctl(IN  SOCKET Handle,
 
             break;
         case SIO_ADDRESS_LIST_QUERY:
-            if (IS_INTRESOURCE(lpvOutBuffer) || cbOutBuffer == 0)
-            {
-                cbRet = sizeof(SOCKET_ADDRESS_LIST) + sizeof(Socket->SharedData->WSLocalAddress);
-                Errno = WSAEFAULT;
-                break;
-            }
-            if (cbOutBuffer < sizeof(INT))
-            {
-                Errno = WSAEINVAL;
-                break;
-            }
-
-            cbRet = sizeof(SOCKET_ADDRESS_LIST) + sizeof(Socket->SharedData->WSLocalAddress);
-
-            ((SOCKET_ADDRESS_LIST*)lpvOutBuffer)->iAddressCount = 1;
-
-            if (cbOutBuffer < (sizeof(SOCKET_ADDRESS_LIST) + sizeof(Socket->SharedData->WSLocalAddress)))
-            {
-                Errno = WSAEFAULT;
-                break;
-            }
-
-            ((SOCKET_ADDRESS_LIST*)lpvOutBuffer)->Address[0].iSockaddrLength = sizeof(Socket->SharedData->WSLocalAddress);
-            ((SOCKET_ADDRESS_LIST*)lpvOutBuffer)->Address[0].lpSockaddr = &Socket->SharedData->WSLocalAddress;
-
-            Errno = NO_ERROR;
-            Ret = NO_ERROR;
+            Errno = MsafdQueryAddressList(Socket, lpvOutBuffer, cbOutBuffer, &cbRet);
+            if (Errno == NO_ERROR)
+                Ret = NO_ERROR;
+            break;
+        case SIO_ADDRESS_LIST_CHANGE:
+            /* Completes later (or never): the overlapped tail below does not apply */
+            NeedsCompletion = FALSE;
+            Errno = MsafdAddressListChange(Socket, cbInBuffer, cbOutBuffer, lpOverlapped, lpCompletionRoutine);
+            if (Errno == NO_ERROR)
+                Ret = NO_ERROR;
             break;
         case SIO_UDP_CONNRESET:
         case SIO_UDP_NETRESET:
@@ -5068,6 +5054,7 @@ DllMain(HANDLE hInstDll,
 
         /* Initialize the lock that protects our socket list */
         InitializeCriticalSection(&SocketListLock);
+        MsafdAddrChangeInit();
 
         TRACE("MSAFD.DLL has been loaded\n");
 
@@ -5083,6 +5070,7 @@ DllMain(HANDLE hInstDll,
 
         /* Delete the socket list lock */
         DeleteCriticalSection(&SocketListLock);
+        MsafdAddrChangeExit();
 
         break;
     }

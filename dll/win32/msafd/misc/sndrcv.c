@@ -68,6 +68,9 @@ WSPAsyncSelect(IN  SOCKET Handle,
     Socket->SharedData->AsyncDisabledEvents = 0;
     Socket->SharedData->SequenceNumber++;
 
+    /* A change of the address list that came while it was not selected is reported now */
+    MsafdAddrChangeSelectionChanged(Socket);
+
     /* Return if there are no more Events */
     if ((Socket->SharedData->AsyncEvents & (~Socket->SharedData->AsyncDisabledEvents)) == 0)
     {

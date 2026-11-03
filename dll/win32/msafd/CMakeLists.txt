@@ -5,6 +5,7 @@ include_directories(
 spec2def(msafd.dll msafd.spec)
 
 list(APPEND SOURCE
+    misc/addrchg.c
     misc/dllmain.c
     misc/event.c
     misc/helpers.c
