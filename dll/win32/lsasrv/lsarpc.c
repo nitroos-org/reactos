@@ -1244,6 +1244,13 @@ LsarLookupNames(
         TranslatedSids->Sids[i].DomainIndex = TranslatedSidsEx2.Sids[i].DomainIndex;
     }
 
+    /* The SIDs are not returned to the caller: free them with the array */
+    for (i = 0; i < TranslatedSidsEx2.Entries; i++)
+    {
+        if (TranslatedSidsEx2.Sids[i].Sid != NULL)
+            MIDL_user_free(TranslatedSidsEx2.Sids[i].Sid);
+    }
+
     MIDL_user_free(TranslatedSidsEx2.Sids);
 
     return STATUS_SUCCESS;
@@ -4025,6 +4032,13 @@ LsarLookupNames2(
         TranslatedSids->Sids[i].RelativeId = LsapGetRelativeIdFromSid(TranslatedSidsEx2.Sids[i].Sid);
         TranslatedSids->Sids[i].DomainIndex = TranslatedSidsEx2.Sids[i].DomainIndex;
         TranslatedSids->Sids[i].Flags = TranslatedSidsEx2.Sids[i].Flags;
+    }
+
+    /* The SIDs are not returned to the caller: free them with the array */
+    for (i = 0; i < TranslatedSidsEx2.Entries; i++)
+    {
+        if (TranslatedSidsEx2.Sids[i].Sid != NULL)
+            MIDL_user_free(TranslatedSidsEx2.Sids[i].Sid);
     }
 
     MIDL_user_free(TranslatedSidsEx2.Sids);
