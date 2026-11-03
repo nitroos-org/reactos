@@ -1,142 +1,221 @@
 /*
  * COPYRIGHT:       See COPYING in the top level directory
  * PROJECT:         ReactOS FS utility tool
- * FILE:            base/applications/cmdutils/common.c
+ * FILE:            base/applications/cmdutils/fsutil/common.c
  * PURPOSE:         FSutil common functions
  * PROGRAMMERS:     Pierre Schweitzer <pierre@reactos.org>
  */
 
 #include "fsutil.h"
 
-int FindHandler(int argc,
-                const TCHAR *argv[],
-                HandlerItem * HandlersList,
-                int HandlerListCount,
-                void (*UsageHelper)(const TCHAR *))
+int
+RunGroup(int argc,
+         const TCHAR *argv[],
+         const TCHAR * Listing,
+         HandlerItem * List,
+         int Count)
 {
     int i;
-    int ret;
-    const TCHAR * Command;
 
-    ret = 1;
-    Command = NULL;
-    i = HandlerListCount;
-
-    /* If we have a command, does it match a known one? */
-    if (argc > 1)
+    /* No command, or "help": list the commands */
+    if (argc < 2 || _tcsicmp(argv[1], _T("help")) == 0)
     {
-        /* Browse all the known commands finding the right one */
-        Command = argv[1];
-        for (i = 0; i < HandlerListCount; ++i)
+        _fputts(Listing, stdout);
+        return 0;
+    }
+
+    for (i = 0; i < Count; ++i)
+    {
+        if (_tcsicmp(argv[1], List[i].Command) == 0)
         {
-            if (_tcsicmp(Command, HandlersList[i].Command) == 0)
+            if (List[i].Handler == NULL)
             {
-                ret = HandlersList[i].Handler(argc - 1, &argv[1]);
-                break;
+                return NotImplementedMain(argv[0], argv[1]);
             }
+
+            return List[i].Handler(argc - 1, &argv[1]);
         }
     }
 
-    /* We failed finding someone to handle the caller's needs, print out */
-    if (i == HandlerListCount)
-    {
-        UsageHelper(Command);
-    }
-
-    return ret;
+    _tprintf(_T("%s is an invalid parameter.\n"), argv[1]);
+    _fputts(Listing, stdout);
+    return 1;
 }
 
-HANDLE OpenVolume(const TCHAR * Volume,
-                  BOOLEAN AllowRemote,
-                  BOOLEAN NtfsOnly)
+int
+NotImplementedMain(const TCHAR * Group, const TCHAR * Command)
 {
-    UINT Type;
+    if (Command != NULL)
+    {
+        _ftprintf(stderr, _T("fsutil %s %s is not implemented.\n"), Group, Command);
+    }
+    else
+    {
+        _ftprintf(stderr, _T("fsutil %s is not implemented.\n"), Group);
+    }
+
+    return 1;
+}
+
+static BOOLEAN
+IsMissingDrive(const TCHAR * Arg)
+{
+    if (Arg[0] == 0)
+    {
+        return TRUE;
+    }
+
+    if (Arg[1] == _T(':'))
+    {
+        UINT Type;
+        TCHAR Root[4];
+
+        Root[0] = Arg[0];
+        Root[1] = _T(':');
+        Root[2] = _T('\\');
+        Root[3] = 0;
+        Type = GetDriveType(Root);
+        return (Type == DRIVE_NO_ROOT_DIR || Type == DRIVE_UNKNOWN);
+    }
+
+    return FALSE;
+}
+
+HANDLE
+OpenVolumeArg(const TCHAR * Volume,
+              BOOLEAN Lenient,
+              DWORD Access,
+              const TCHAR * Note,
+              BOOLEAN * NoteShown)
+{
     HANDLE hVolume;
-    TCHAR VolumeID[PATH_MAX];
+    DWORD Error;
+    TCHAR VolumeID[MAX_PATH + 8];
 
-    /* Get volume type */
-    if (!AllowRemote && Volume[1] == L':')
+    if (NoteShown != NULL)
     {
-        Type = GetDriveType(Volume);
-        if (Type == DRIVE_REMOTE)
+        *NoteShown = FALSE;
+    }
+
+    if (Volume[0] == _T('\\') && Volume[1] == _T('\\'))
+    {
+        _sntprintf(VolumeID, RTL_NUMBER_OF(VolumeID), _T("%s"), Volume);
+    }
+    else if (Lenient && Volume[0] != 0 && Volume[1] == _T(':'))
+    {
+        _sntprintf(VolumeID, RTL_NUMBER_OF(VolumeID), _T("\\\\.\\%c:"), Volume[0]);
+    }
+    else
+    {
+        _sntprintf(VolumeID, RTL_NUMBER_OF(VolumeID), _T("\\\\.\\%s"), Volume);
+    }
+    VolumeID[RTL_NUMBER_OF(VolumeID) - 1] = 0;
+
+    /* A network drive is not acceptable (TODO(oracle): not testable on the oracle) */
+    if (Note != NULL && Volume[0] != 0 && Volume[1] == _T(':'))
+    {
+        TCHAR Root[4] = { Volume[0], _T(':'), _T('\\'), 0 };
+
+        if (GetDriveType(Root) == DRIVE_REMOTE)
         {
-            _ftprintf(stderr, _T("FSUTIL needs a local device\n"));
+            _tprintf(_T("%s\n"), Note);
+            if (NoteShown != NULL)
+            {
+                *NoteShown = TRUE;
+            }
+            SetLastError(ERROR_NOT_SUPPORTED);
             return INVALID_HANDLE_VALUE;
         }
     }
 
-    /* Get filesystem type */
-    if (NtfsOnly)
-    {
-        TCHAR FileSystem[MAX_PATH + 1];
-
-        _stprintf(VolumeID, _T("\\\\.\\%s\\"), Volume);
-        if (!GetVolumeInformation(VolumeID, NULL,  0, NULL, NULL, NULL, FileSystem, MAX_PATH + 1))
-        {
-            PrintErrorMessage(GetLastError());
-            return INVALID_HANDLE_VALUE;
-        }
-
-        if (_tcscmp(FileSystem, _T("NTFS")) != 0)
-        {
-            _ftprintf(stderr, _T("FSUTIL needs a NTFS device\n"));
-            return INVALID_HANDLE_VALUE;
-        }
-    }
-
-    /* Create full name */
-    _stprintf(VolumeID, _T("\\\\.\\%s"), Volume);
-
-    /* Open the volume */
-    hVolume = CreateFile(VolumeID, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    hVolume = CreateFile(VolumeID, Access, FILE_SHARE_READ | FILE_SHARE_WRITE,
                          NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hVolume == INVALID_HANDLE_VALUE)
     {
-        PrintErrorMessage(GetLastError());
-        return INVALID_HANDLE_VALUE;
+        Error = GetLastError();
+        /* \\.\Q:\ (trailing backslash) on a missing drive: Windows reports ERROR_FILE_NOT_FOUND,
+         * the path form of the error is not what its fsutil prints */
+        if (Error == ERROR_PATH_NOT_FOUND && IsMissingDrive(Volume))
+        {
+            Error = ERROR_FILE_NOT_FOUND;
+        }
+        PrintErrorMessage(Error);
+        if (Note != NULL && IsMissingDrive(Volume))
+        {
+            _tprintf(_T("%s\n"), Note);
+            if (NoteShown != NULL)
+            {
+                *NoteShown = TRUE;
+            }
+        }
+        SetLastError(Error);
     }
 
     return hVolume;
 }
 
-void PrintDefaultUsage(const TCHAR * Command,
-                       const TCHAR * SubCommand,
-                       HandlerItem * HandlersList,
-                       int HandlerListCount)
-{
-    int i;
-
-    /* If we were given a command, print it's not supported */
-    if (SubCommand != NULL)
-    {
-        _ftprintf(stderr, _T("Unhandled%scommand: %s\n"), Command, SubCommand);
-    }
-
-    /* And dump any available command */
-    _ftprintf(stderr, _T("---- Handled%scommands ----\n\n"), Command);
-    for (i = 0; i < HandlerListCount; ++i)
-    {
-        _ftprintf(stderr, _T("%s\t%s\n"), HandlersList[i].Command, HandlersList[i].Desc);
-    }
-}
-
-int PrintErrorMessage(DWORD Error)
+int
+PrintErrorMessage(DWORD Error)
 {
     TCHAR * String;
 
     /* Try to get textual error */
-    if (FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
-                       NULL, Error, 0, (TCHAR *)&String, 0, NULL) != 0)
+    if (FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                      NULL, Error, 0, (TCHAR *)&String, 0, NULL) != 0)
     {
-        /* And print it */
-        _ftprintf(stderr, _T("Error: %s\n"), String);
+        size_t Len = _tcslen(String);
+
+        /* The message ends with CRLF, we add our own line end */
+        while (Len > 0 && (String[Len - 1] == _T('\r') || String[Len - 1] == _T('\n')))
+        {
+            String[--Len] = 0;
+        }
+
+        _tprintf(_T("Error:  %s\n"), String);
         LocalFree(String);
     }
     else
     {
         /* Otherwise, just print the error number */
-        _ftprintf(stderr, _T("Error: %d\n"), Error);
+        _tprintf(_T("Error:  %lu\n"), Error);
     }
 
     return Error;
+}
+
+void
+FormatNumber(ULONGLONG Value, TCHAR * Buffer)
+{
+    TCHAR Digits[32];
+    int Len, i, Pos;
+
+    _sntprintf(Digits, RTL_NUMBER_OF(Digits), _T("%I64u"), Value);
+    Len = (int)_tcslen(Digits);
+
+    Pos = 0;
+    for (i = 0; i < Len; ++i)
+    {
+        if (i > 0 && ((Len - i) % 3) == 0)
+        {
+            Buffer[Pos++] = _T(',');
+        }
+        Buffer[Pos++] = Digits[i];
+    }
+    Buffer[Pos] = 0;
+}
+
+void
+FormatSize(ULONGLONG Bytes, int Decimals, int Width, TCHAR * Buffer)
+{
+    static const TCHAR * const Units[] = { _T("KB"), _T("MB"), _T("GB"), _T("TB"), _T("PB"), _T("EB") };
+    double Value = (double)Bytes / 1024.0;
+    int Unit = 0;
+
+    while (Value >= 1024.0 && Unit < 5)
+    {
+        Value /= 1024.0;
+        ++Unit;
+    }
+
+    _stprintf(Buffer, _T("%*.*f %s"), Width, Decimals, Value, Units[Unit]);
 }
