@@ -178,6 +178,7 @@ struct ntfs_inode {
  * NI_BeingCreated		ntfs inode is being created.
  * NI_HasEA			ntfs inode has EA attribute.
  * NI_RunlistDirty		runlist need to be updated.
+ * NI_NgAhead			ntfsng allocated clusters beyond the data size ahead of growth (ngcore.c, in memory only).
  */
 enum {
 	NI_Dirty,
@@ -199,6 +200,7 @@ enum {
 	NI_BeingCreated,
 	NI_HasEA,
 	NI_RunlistDirty,
+	NI_NgAhead,
 };
 
 /*
@@ -258,6 +260,7 @@ NINO_FNS(FileNameDirty)
 TAS_NINO_FNS(FileNameDirty)
 NINO_FNS(BeingDeleted)
 NINO_FNS(HasEA)
+NINO_FNS(NgAhead)
 NINO_FNS(RunlistDirty)
 
 /*

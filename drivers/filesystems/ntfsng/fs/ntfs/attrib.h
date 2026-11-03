@@ -112,6 +112,7 @@ int ntfs_non_resident_attr_punch_hole(struct ntfs_inode *ni, s64 start_vcn, s64 
 int __ntfs_attr_truncate_vfs(struct ntfs_inode *ni, const s64 newsize,
 		const s64 i_size);
 int ntfs_attr_expand(struct ntfs_inode *ni, const s64 newsize, const s64 prealloc_size);
+int ntfs_attr_trim_alloc(struct ntfs_inode *ni);
 int ntfs_attr_expand_locked(struct ntfs_inode *ni, const s64 newsize,
 			    const s64 prealloc_size,
 			   struct ntfs_inode *locked_ni);

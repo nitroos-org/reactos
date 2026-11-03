@@ -1897,7 +1897,16 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Last = (Fcb->OpenHandles == 0);
         ExReleaseFastMutex(&Vcb->FcbListLock);
         if (Last)
+        {
+            /* The allocation ahead of the size (ngc_set_size) is given back once nobody has the stream open. */
+            if (Fcb->Grown && !Fcb->Deleted && !NgEnsureNode(Fcb))
+            {
+                Fcb->Grown = FALSE;
+                if (ngc_trim_alloc(Vcb->Core, Fcb->Node))
+                    DPRINT1("ntfsng: trim of the allocation of %I64x failed\n", Fcb->MftNo);
+            }
             NgParkNode(Fcb);
+        }
         NgReleaseCore(Vcb);
     }
     ExReleaseResourceLite(Fcb->Header.Resource);
