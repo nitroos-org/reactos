@@ -17,6 +17,7 @@ extern void func_tcpaccept(void);
 extern void func_outputprobe(void);
 extern void func_connectoptions(void);
 extern void func_acceptstate(void);
+extern void func_acceptname(void);
 
 const struct test winetest_testlist[] =
 {
@@ -36,5 +37,6 @@ const struct test winetest_testlist[] =
     { "outputprobe", func_outputprobe },
     { "connectoptions", func_connectoptions },
     { "acceptstate", func_acceptstate },
+    { "acceptname", func_acceptname },
     { 0, 0 }
 };

@@ -329,6 +329,7 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 	    PIO_STACK_LOCATION IrpSp );
 
 NTSTATUS AfdQueryRouteSource(PAFD_FCB FCB, ULONG Destination, PULONG Source);
+NTSTATUS AfdQueryRouteSourceOn(PFILE_OBJECT Object, ULONG Destination, PULONG Source);
 
 NTSTATUS NTAPI
 AfdGetSockName( PDEVICE_OBJECT DeviceObject, PIRP Irp,

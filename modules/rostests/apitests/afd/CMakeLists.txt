@@ -15,7 +15,8 @@ list(APPEND SOURCE
     tcpsetinfoex.c
     tcpaccept.c
     outputprobe.c
-    acceptstate.c)
+    acceptstate.c
+    acceptname.c)
 
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)
