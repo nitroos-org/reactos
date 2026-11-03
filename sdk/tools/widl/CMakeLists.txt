@@ -19,6 +19,7 @@ list(APPEND SOURCE
     client.c
     expr.c
     hash.c
+    metadata.c
     header.c
     proxy.c
     register.c
