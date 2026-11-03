@@ -225,6 +225,14 @@ typedef struct _STARVED_REQUEST_QUEUE
     LIST_ENTRY ListHead;
 } STARVED_REQUEST_QUEUE, *PSTARVED_REQUEST_QUEUE;
 
+/* An SRB storport completed after a restart (timeout.c) */
+#define STORP_SWEPT_SRBS    256
+typedef struct _STORP_SWEPT_SRB
+{
+    PVOID Srb;
+    ULONG Restart;
+} STORP_SWEPT_SRB, *PSTORP_SWEPT_SRB;
+
 typedef struct _FDO_DEVICE_EXTENSION
 {
     EXTENSION_TYPE ExtensionType;
@@ -310,11 +318,35 @@ typedef struct _FDO_DEVICE_EXTENSION
     ULONG AdapterRestarts;
     BOOLEAN AdapterControlSupported[ScsiAdapterControlMax];
 
+    /* HwStartIo calls in progress, per parity of the ResetGeneration they were armed in: a
+       restart waits for the old generation's to return before it stops the adapter */
+    LONG StartIoActive[2];
+
+    /* StorPortNotification(RequestComplete) calls in progress (they may run at DIRQL) */
+    LONG CompletionsInFlight;
+
+    /* SRBs storport completed itself after a restart; a late miniport completion of one is
+       recognised here without looking at Srb->OriginalRequest (the IRP by then). Written
+       under TimeoutLock, read without it */
+    STORP_SWEPT_SRB SweptSrbs[STORP_SWEPT_SRBS];
+    LONG SweptSrbCount;
+
 #if DBG
     /* Fault knob for the timeout path: the miniport's Parameters\DebugDropRequestEvery.
-       Every Nth read or write is never handed to the miniport. Checked builds only */
+       Every Nth read or write is taken (armed) but never handed to HwStartIo. Checked builds only */
     ULONG DebugDropRequestEvery;
     LONG DebugDropCounter;
+    /* Parameters\DebugDeferStartEvery: every Nth read or write waits DebugDeferStartSeconds
+       after its scatter/gather list was built before it reaches the miniport (a callback the
+       HAL holds back), so a restart can happen while it is pending */
+    ULONG DebugDeferStartEvery;
+    ULONG DebugDeferStartSeconds;
+    LONG DebugDeferCounter;
+    LONG DebugDeferredPending;
+    /* Parameters\DebugLateCompletion: completes every swept SRB once more through
+       StorPortNotification(RequestComplete) after its packet is freed, as a miniport that
+       let go of it late would */
+    ULONG DebugLateCompletion;
 #endif
 } FDO_DEVICE_EXTENSION, *PFDO_DEVICE_EXTENSION;
 
@@ -382,6 +414,10 @@ typedef struct _QUEUED_REQUEST_REFERENCE
     ULONG Generation;
     BOOLEAN OnTimeoutList;
     BOOLEAN ResetSent;
+    /* Armed and handed to HwStartIo: only such a request is the miniport's to lose */
+    BOOLEAN WithMiniport;
+    /* Completed by storport after a restart */
+    BOOLEAN Swept;
     /* Set by whoever completes the request first: the miniport, or storport after a restart */
     LONG Completed;
     /*
@@ -396,6 +432,12 @@ typedef struct _QUEUED_REQUEST_REFERENCE
 
     /* This packet and its SRB extension came from the reserve, not from pool */
     BOOLEAN FromReserve;
+
+#if DBG
+    /* DebugDeferStartEvery: the held back start */
+    KTIMER DebugDeferTimer;
+    KDPC DebugDeferDpc;
+#endif
 
     /* FIXME: This is solely for debugging and should be removed */
     BOOLEAN DumpSpecialRequest;
@@ -666,10 +708,25 @@ VOID
 PortStopTimeouts(
     _In_ PFDO_DEVICE_EXTENSION FdoExtension);
 
-VOID
+ULONG
 PortTimeoutArmRequest(
     _In_ PFDO_DEVICE_EXTENSION FdoExtension,
     _In_ PQUEUED_REQUEST_REFERENCE RequestReference);
+
+VOID
+PortTimeoutStartIoReturned(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ ULONG Generation);
+
+BOOLEAN
+PortIsSweptSrb(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PSCSI_REQUEST_BLOCK Srb);
+
+VOID
+PortForgetSweptSrb(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PSCSI_REQUEST_BLOCK Srb);
 
 VOID
 PortTimeoutDisarmRequest(

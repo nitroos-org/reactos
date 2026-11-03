@@ -163,6 +163,76 @@ StorpAssignTagToSrb(
 }
 
 
+/**
+ * @brief Arms the request's timeout and hands it to the miniport. DISPATCH_LEVEL.
+ * The request is not touched after HwStartIo: the miniport may have completed it.
+ */
+static
+VOID
+PortHandRequestToMiniport(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PQUEUED_REQUEST_REFERENCE RequestReference)
+{
+    PVOID MiniportExtension = &FdoExtension->Miniport.MiniportExtension->HwDeviceExtension;
+    PHW_INITIALIZATION_DATA HwInitData = FdoExtension->HwInitData;
+    PSCSI_REQUEST_BLOCK Srb = RequestReference->Srb;
+    ULONG Generation;
+
+    /* BuildIo may complete the request itself, and then says so */
+    if (HwInitData->HwBuildIo && !HwInitData->HwBuildIo(MiniportExtension, Srb))
+        return;
+
+    /*
+     * From here on the request is the miniport's, and its timeout runs. A restart waits for
+     * this HwStartIo to return before it stops the adapter (PortTimeoutStartIoReturned), so
+     * a request it later completes itself was really handed over before the stop.
+     */
+    Generation = PortTimeoutArmRequest(FdoExtension, RequestReference);
+
+#if DBG
+    /* Fault knob for the timeout path (off unless the miniport's Parameters\DebugDropRequestEvery is set) */
+    if (FdoExtension->DebugDropRequestEvery != 0 &&
+        Srb->Function == SRB_FUNCTION_EXECUTE_SCSI &&
+        StorpIsReadWriteCdb(Srb->Cdb[0]) &&
+        ((ULONG)InterlockedIncrement(&FdoExtension->DebugDropCounter) % FdoExtension->DebugDropRequestEvery) == 0)
+    {
+        DPRINT1("storport: fault knob: Srb %p (cdb %02x) not handed to the miniport\n", Srb, Srb->Cdb[0]);
+        PortTimeoutStartIoReturned(FdoExtension, Generation);
+        return;
+    }
+#endif
+
+    HwInitData->HwStartIo(MiniportExtension, Srb);
+
+    PortTimeoutStartIoReturned(FdoExtension, Generation);
+}
+
+
+#if DBG
+static
+VOID
+NTAPI
+PortDebugDeferredStartDpc(
+    _In_ PKDPC Dpc,
+    _In_opt_ PVOID DeferredContext,
+    _In_opt_ PVOID SystemArgument1,
+    _In_opt_ PVOID SystemArgument2)
+{
+    PQUEUED_REQUEST_REFERENCE RequestReference = (PQUEUED_REQUEST_REFERENCE)DeferredContext;
+    PFDO_DEVICE_EXTENSION FdoExtension = RequestReference->PdoExtension->FdoExtension;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    DPRINT1("storport: fault knob: held back Srb %p goes to the miniport now (restarts %lu)\n",
+            RequestReference->Srb, FdoExtension->AdapterRestarts);
+    InterlockedDecrement(&FdoExtension->DebugDeferredPending);
+    PortHandRequestToMiniport(FdoExtension, RequestReference);
+}
+#endif
+
+
 VOID
 NTAPI
 PortPdoAfterBuildingScatterGatherList(
@@ -172,53 +242,62 @@ PortPdoAfterBuildingScatterGatherList(
     _In_ PVOID Context)
 {
     PFDO_DEVICE_EXTENSION FdoExtension;
-    PVOID MiniportExtension;
-    PHW_INITIALIZATION_DATA HwInitData;
     PQUEUED_REQUEST_REFERENCE RequestReference;
-    BOOLEAN CanStartIo = TRUE;
     KIRQL OldIrql;
+
+    UNREFERENCED_PARAMETER(Irp);
 
     RequestReference = (PQUEUED_REQUEST_REFERENCE)Context;
     FdoExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
-    MiniportExtension = &FdoExtension->Miniport.MiniportExtension->HwDeviceExtension;
-    HwInitData = FdoExtension->HwInitData;
-
-    /* Save our SG List */
-    RequestReference->ScatterGatherList = (PSTOR_SCATTER_GATHER_LIST)ScatterGatherList;
 
     /* BuildIo and StartIo are called on DISPATCH_LEVEL */
     OldIrql = KfRaiseIrql(DISPATCH_LEVEL);
 
+    /*
+     * Only an armed request (PortHandRequestToMiniport) can be completed by storport, and the
+     * miniport has not seen this one, so nothing claims it while the HAL builds its list.
+     * Should that ever change, the claimer completes the request: give the list back rather
+     * than start I/O on it.
+     */
+    if (RequestReference->Completed)
+    {
+        DPRINT1("storport: Srb %p was completed while its scatter/gather list was built\n",
+                RequestReference->Srb);
+        if (ScatterGatherList)
+        {
+            FdoExtension->DmaAdapter->DmaOperations->
+                PutScatterGatherList(FdoExtension->DmaAdapter, ScatterGatherList,
+                                     RequestReference->WriteToDevice);
+        }
+        KeLowerIrql(OldIrql);
+        return;
+    }
+
+    /* Save our SG List */
+    RequestReference->ScatterGatherList = (PSTOR_SCATTER_GATHER_LIST)ScatterGatherList;
+
 #if DBG
-    /* Fault knob for the timeout path (off unless the miniport's Parameters\DebugDropRequestEvery is set) */
-    if (FdoExtension->DebugDropRequestEvery != 0 &&
+    /* Fault knob: hold the start back, as a HAL waiting for map registers would */
+    if (FdoExtension->DebugDeferStartEvery != 0 &&
         RequestReference->Srb->Function == SRB_FUNCTION_EXECUTE_SCSI &&
         StorpIsReadWriteCdb(RequestReference->Srb->Cdb[0]) &&
-        ((ULONG)InterlockedIncrement(&FdoExtension->DebugDropCounter) % FdoExtension->DebugDropRequestEvery) == 0)
+        ((ULONG)InterlockedIncrement(&FdoExtension->DebugDeferCounter) % FdoExtension->DebugDeferStartEvery) == 0)
     {
-        DPRINT1("storport: fault knob: Srb %p (cdb %02x) not handed to the miniport\n",
-                RequestReference->Srb, RequestReference->Srb->Cdb[0]);
+        LARGE_INTEGER DueTime;
+
+        DPRINT1("storport: fault knob: Srb %p (cdb %02x) held back for %lu s\n",
+                RequestReference->Srb, RequestReference->Srb->Cdb[0], FdoExtension->DebugDeferStartSeconds);
+        InterlockedIncrement(&FdoExtension->DebugDeferredPending);
+        KeInitializeTimer(&RequestReference->DebugDeferTimer);
+        KeInitializeDpc(&RequestReference->DebugDeferDpc, PortDebugDeferredStartDpc, RequestReference);
+        DueTime.QuadPart = -10000000LL * FdoExtension->DebugDeferStartSeconds;
+        KeSetTimer(&RequestReference->DebugDeferTimer, DueTime, &RequestReference->DebugDeferDpc);
         KeLowerIrql(OldIrql);
         return;
     }
 #endif
 
-    do {
-        /* Call BuildIo, if one is provided */
-        if (HwInitData->HwBuildIo)
-        {
-            CanStartIo = HwInitData->HwBuildIo(MiniportExtension, RequestReference->Srb);
-        }
-
-        /* If BuildIo says the request processing shall stop here, no more processing is needed */
-        if (!CanStartIo)
-        {
-            break;
-        }
-
-        HwInitData->HwStartIo(MiniportExtension, RequestReference->Srb);
-    }
-    while (0);
+    PortHandRequestToMiniport(FdoExtension, RequestReference);
 
     /* Restore IRQL */
     KeLowerIrql(OldIrql);
@@ -407,8 +486,8 @@ PortPdoIssueRequest(
     //     StorpDumpRequest(RequestReference);
     // }
 
-    /* From here on the request is the miniport's, and its timeout runs */
-    PortTimeoutArmRequest(FdoExtension, RequestReference);
+    /* Its timeout is armed when it reaches the miniport (PortHandRequestToMiniport), not
+       here: until then neither the miniport nor a restart can lose it */
 
     /* Start an DMA if IO subsystem allocated an MDL for us */
     /* FIXME: Does this strategy work? */
@@ -708,6 +787,9 @@ PortPdoScsi(
             }
             RequestReference = (PQUEUED_REQUEST_REFERENCE)Srb->OriginalRequest;
 
+            /* An SRB storport completed after a restart is in use again */
+            PortForgetSweptSrb(FdoExtension, Srb);
+
             /* Assign a tag to the SRB if it supports tagging */
             StorpAssignTagToSrb(PdoExtension, Srb);
 
@@ -755,6 +837,9 @@ PortPdoScsi(
                 break;
             }
             RequestReference = (PQUEUED_REQUEST_REFERENCE)Srb->OriginalRequest;
+
+            /* An SRB storport completed after a restart is in use again */
+            PortForgetSweptSrb(FdoExtension, Srb);
 
             /*
              * Call the non-flow-controlled scheduling function (it does nothing but the model is
@@ -887,6 +972,9 @@ PortCompleteRequest(
     KLOCK_QUEUE_HANDLE LockHandle;
     NTSTATUS IoStatus;
     BOOLEAN FromReserve;
+#if DBG
+    BOOLEAN Swept = RequestReference->Swept;
+#endif
 
     /* Take out our information */
     Srb = RequestReference->Srb;
@@ -986,6 +1074,13 @@ PortCompleteRequest(
         KeReleaseInStackQueuedSpinLock(&LockHandle);
 
     }
+    else
+    {
+        /* Adapter requests (flush, shutdown): no flow control, but the packet goes back and
+           the class driver gets its IRP in Srb->OriginalRequest all the same */
+        StorpSrbFreeRequestReference(Srb);
+        RequestReference = NULL;
+    }
 
     /*
      * Free SRB extension as this request will never go back to miniport again. Must free it before
@@ -1032,6 +1127,19 @@ PortCompleteRequest(
     }
     Irp->IoStatus.Status = IoStatus;
     Irp->IoStatus.Information = Srb->DataTransferLength; /* FIXME: hopefully this is correct */
+
+#if DBG
+    /* Fault knob: the packet is gone and Srb->OriginalRequest is the IRP again; the class
+       driver has not seen the SRB back, so it is not issued again yet */
+    if (Swept && FdoExtension->DebugLateCompletion != 0)
+    {
+        DPRINT1("storport: fault knob: late miniport completion of swept Srb %p (OriginalRequest %p is the IRP)\n",
+                Srb, Srb->OriginalRequest);
+        StorPortNotification(RequestComplete,
+                             &FdoExtension->Miniport.MiniportExtension->HwDeviceExtension,
+                             Srb);
+    }
+#endif
 
     /* We just gave memory back, so let one request that ran out of it through */
     PortRetryStarvedRequest(FdoExtension);
