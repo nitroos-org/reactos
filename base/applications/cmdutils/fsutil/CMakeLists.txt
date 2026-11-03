@@ -1,5 +1,6 @@
 list(APPEND SOURCE
     common.c
+    groups.c
     dirty.c
     fsinfo.c
     fsutil.c

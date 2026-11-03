@@ -1,34 +1,47 @@
 /*
  * COPYRIGHT:       See COPYING in the top level directory
  * PROJECT:         ReactOS FS utility tool
- * FILE:            base/applications/cmdutils/fsinfo.c
+ * FILE:            base/applications/cmdutils/fsutil/fsinfo.c
  * PURPOSE:         FSutil file systems information
  * PROGRAMMERS:     Pierre Schweitzer <pierre@reactos.org>
  */
 
 #include "fsutil.h"
 
-/* Add handlers here for subcommands */
-static HandlerProc DrivesMain;
-static HandlerProc DriveTypeMain;
-static HandlerProc VolumeInfoMain;
-static HandlerProc NtfsInfoMain;
-static HandlerProc StatisticsMain;
-static HandlerItem HandlersList[] =
-{
-    /* Proc, name, help */
-    { DrivesMain, _T("drives"), _T("Enumerates the drives") },
-    { DriveTypeMain, _T("drivetype"), _T("Provides the type of a drive") },
-    { VolumeInfoMain, _T("volumeinfo"), _T("Provides informations about a volume") },
-    { NtfsInfoMain, _T("ntfsinfo"), _T("Displays informations about a NTFS volume") },
-    { StatisticsMain, _T("statistics"), _T("Displays volume statistics") },
-};
+#ifndef FILE_RETURNS_CLEANUP_RESULT_INFO
+#define FILE_RETURNS_CLEANUP_RESULT_INFO    0x00000200
+#endif
+#ifndef FILE_SUPPORTS_POSIX_UNLINK_RENAME
+#define FILE_SUPPORTS_POSIX_UNLINK_RENAME   0x00000400
+#endif
 
-static int
-DrivesMain(int argc, const TCHAR *argv[])
+/* Windows 10 layout of the extended NTFS volume data; older drivers return less */
+typedef struct
+{
+    NTFS_VOLUME_DATA_BUFFER Base;
+    ULONG ByteCount;
+    USHORT MajorVersion;
+    USHORT MinorVersion;
+    ULONG BytesPerPhysicalSector;
+    USHORT LfsMajorVersion;
+    USHORT LfsMinorVersion;
+    ULONG MaxDeviceTrimExtentCount;
+    ULONG MaxDeviceTrimByteCount;
+    ULONG MaxVolumeTrimExtentCount;
+    ULONG MaxVolumeTrimByteCount;
+} NTFS_VOLUME_DATA_WIN10;
+
+int
+FsInfoDrivesMain(int argc, const TCHAR *argv[])
 {
     UINT i;
     DWORD Drives;
+
+    if (argc > 1)
+    {
+        _tprintf(_T("Usage : fsutil fsInfo drives\n"));
+        return 1;
+    }
 
     /* Get the drives bitmap */
     Drives = GetLogicalDrives();
@@ -39,88 +52,109 @@ DrivesMain(int argc, const TCHAR *argv[])
     }
 
     /* And output any found drive */
-    _ftprintf(stdout, _T("Drives:"));
+    _tprintf(_T("\nDrives: "));
     for (i = 0; i < 26; i++)
     {
         if (Drives & (1 << i))
         {
-            _ftprintf(stdout, _T(" %c:\\"), 'A' + i);
+            _tprintf(_T("%c:\\ "), _T('A') + i);
         }
     }
-    _ftprintf(stdout, _T("\n"));
+    _tprintf(_T("\n"));
 
     return 0;
 }
 
-static int
-DriveTypeMain(int argc, const TCHAR *argv[])
+int
+FsInfoDriveTypeMain(int argc, const TCHAR *argv[])
 {
     UINT Type;
+    const TCHAR * Desc;
 
-    /* We need a volume (letter) */
-    if (argc < 2)
+    if (argc != 2)
     {
-        _ftprintf(stderr, _T("Usage: fsutil fsinfo drivetype <volume>\n"));
-        _ftprintf(stderr, _T("\tFor example: fsutil fsinfo drivetype c:\n"));
-        return 1;
+        _tprintf(_T("Usage : fsutil fsInfo driveType <volume pathname>\n"));
+        _tprintf(_T("   Eg : fsutil fsInfo driveType C:\n"));
+        return (argc < 2) ? 0 : 1;
     }
 
-    /* Get its drive type and make it readable */
+    /* Get its drive type and make it readable. Only "Fixed Drive" and "No such Root
+     * Directory" were seen on the oracle, the other texts are TODO(oracle) (Windows docs) */
     Type = GetDriveType(argv[1]);
     switch (Type)
     {
-        case DRIVE_UNKNOWN:
-            _ftprintf(stdout, _T("%s - unknown drive type\n"), argv[1]);
-            break;
-
         case DRIVE_NO_ROOT_DIR:
-            _ftprintf(stdout, _T("%s - not a root directory\n"), argv[1]);
+            Desc = _T("No such Root Directory");
             break;
 
         case DRIVE_REMOVABLE:
-            _ftprintf(stdout, _T("%s - removable drive\n"), argv[1]);
+            Desc = _T("Removable Drive");
             break;
 
         case DRIVE_FIXED:
-            _ftprintf(stdout, _T("%s - fixed drive\n"), argv[1]);
+            Desc = _T("Fixed Drive");
             break;
 
         case DRIVE_REMOTE:
-            _ftprintf(stdout, _T("%s - remote or network drive\n"), argv[1]);
+            Desc = _T("Remote/Network Drive");
             break;
 
         case DRIVE_CDROM:
-            _ftprintf(stdout, _T("%s - CD-ROM drive\n"), argv[1]);
+            Desc = _T("CD-ROM Drive");
             break;
 
         case DRIVE_RAMDISK:
-            _ftprintf(stdout, _T("%s - RAM disk drive\n"), argv[1]);
+            Desc = _T("Ram Disk");
+            break;
+
+        case DRIVE_UNKNOWN:
+        default:
+            Desc = _T("Unknown Drive");
             break;
     }
+
+    _tprintf(_T("%s - %s\n"), argv[1], Desc);
 
     return 0;
 }
 
-static int
-VolumeInfoMain(int argc, const TCHAR *argv[])
+int
+FsInfoVolumeInfoMain(int argc, const TCHAR *argv[])
 {
     DWORD Serial, MaxComponentLen, Flags;
     TCHAR VolumeName[MAX_PATH + 1], FileSystem[MAX_PATH + 1];
+    TCHAR Path[MAX_PATH + 2];
 
-#define HANDLE_FLAG(Flags, Flag, Desc) \
-    if (Flags & Flag)                  \
-        _ftprintf(stdout, Desc)
+#define HANDLE_FLAG(Flag, Desc) \
+    if (Flags & (Flag))         \
+        _tprintf(_T(Desc "\n"))
 
-    /* We need a volume (path) */
-    if (argc < 2)
+    if (argc != 2)
     {
-        _ftprintf(stderr, _T("Usage: fsutil fsinfo volumeinfo <volume_path>\n"));
-        _ftprintf(stderr, _T("\tFor example: fsutil fsinfo volumeinfo c:\\\n"));
+        _tprintf(_T("Usage : fsutil fsInfo volumeInfo <volume pathname>\n"));
+        _tprintf(_T("   Eg : fsutil fsInfo volumeInfo C:\n"));
+        return (argc < 2) ? 0 : 1;
+    }
+
+    /* Windows asks for the root of "<argument>\", so "C:" works, "C:\" does not */
+    if (argv[1][0] == 0)
+    {
+        PrintErrorMessage(ERROR_INVALID_PARAMETER);
         return 1;
     }
 
+    if (argv[1][_tcslen(argv[1]) - 1] == _T('\\'))
+    {
+        /* "<argument>\" would end in two separators */
+        PrintErrorMessage(ERROR_PATH_NOT_FOUND);
+        return 1;
+    }
+
+    _sntprintf(Path, RTL_NUMBER_OF(Path), _T("%s\\"), argv[1]);
+    Path[RTL_NUMBER_OF(Path) - 1] = 0;
+
     /* Gather information */
-    if (!GetVolumeInformation(argv[1], VolumeName,  MAX_PATH + 1, &Serial,
+    if (!GetVolumeInformation(Path, VolumeName, MAX_PATH + 1, &Serial,
                               &MaxComponentLen, &Flags, FileSystem, MAX_PATH + 1))
     {
         PrintErrorMessage(GetLastError());
@@ -128,65 +162,84 @@ VolumeInfoMain(int argc, const TCHAR *argv[])
     }
 
     /* Display general information */
-    _ftprintf(stdout, _T("Volume name: %s\n"), VolumeName);
-    _ftprintf(stdout, _T("Volume serial number: 0x%x\n"), Serial);
-    _ftprintf(stdout, _T("Maximum component length: %u\n"), MaxComponentLen);
-    _ftprintf(stdout, _T("File system name: %s\n"), FileSystem);
+    _tprintf(_T("Volume Name : %s\n"), VolumeName);
+    _tprintf(_T("Volume Serial Number : 0x%x\n"), Serial);
+    _tprintf(_T("Max Component Length : %u\n"), MaxComponentLen);
+    _tprintf(_T("File System Name : %s\n"), FileSystem);
+
+    /* "Is Read Only" is TODO(oracle) (the oracle volume is read-write); thin provisioning
+     * cannot be queried here, so no volume is reported as thin */
+    if (Flags & FILE_READ_ONLY_VOLUME)
+        _tprintf(_T("Is Read Only\n"));
+    else
+        _tprintf(_T("Is ReadWrite\n"));
+    _tprintf(_T("Not Thinly-Provisioned\n"));
 
     /* Display specific flags */
-    HANDLE_FLAG(Flags, FILE_CASE_SENSITIVE_SEARCH, _T("Supports case-sensitive file names\n"));
-    HANDLE_FLAG(Flags, FILE_CASE_PRESERVED_NAMES, _T("Supports preserved case of file names\n"));
-    HANDLE_FLAG(Flags, FILE_UNICODE_ON_DISK, _T("Supports unicode file names\n"));
-    HANDLE_FLAG(Flags, FILE_PERSISTENT_ACLS, _T("Preserves and applies ACLs\n"));
-    HANDLE_FLAG(Flags, FILE_FILE_COMPRESSION, _T("Supports compression per file\n"));
-    HANDLE_FLAG(Flags, FILE_VOLUME_QUOTAS, _T("Supports disk quotas\n"));
-    HANDLE_FLAG(Flags, FILE_SUPPORTS_SPARSE_FILES, _T("Supports sparse files\n"));
-    HANDLE_FLAG(Flags, FILE_SUPPORTS_REPARSE_POINTS, _T("Supports reparse points\n"));
-    HANDLE_FLAG(Flags, FILE_VOLUME_IS_COMPRESSED, _T("Is a compressed volume\n"));
-    HANDLE_FLAG(Flags, FILE_SUPPORTS_OBJECT_IDS, _T("Supports object identifiers\n"));
-    HANDLE_FLAG(Flags, FILE_SUPPORTS_ENCRYPTION, _T("Supports the Encrypted File System (EFS)\n"));
-    HANDLE_FLAG(Flags, FILE_NAMED_STREAMS, _T("Supports named streams\n"));
-    HANDLE_FLAG(Flags, FILE_READ_ONLY_VOLUME, _T("Is a read-only volume\n"));
-    HANDLE_FLAG(Flags, FILE_SEQUENTIAL_WRITE_ONCE, _T("Supports a single sequential write\n"));
-    HANDLE_FLAG(Flags, FILE_SUPPORTS_TRANSACTIONS, _T("Supports transactions\n"));
-    HANDLE_FLAG(Flags, FILE_SUPPORTS_HARD_LINKS, _T("Supports hard links\n"));
-    HANDLE_FLAG(Flags, FILE_SUPPORTS_EXTENDED_ATTRIBUTES, _T("Supports extended attributes\n"));
-    HANDLE_FLAG(Flags, FILE_SUPPORTS_OPEN_BY_FILE_ID, _T("Supports opening files per file identifier\n"));
-    HANDLE_FLAG(Flags, FILE_SUPPORTS_USN_JOURNAL, _T("Supports Update Sequence Number (USN) journals\n"));
-    HANDLE_FLAG(Flags, FILE_DAX_VOLUME, _T("Is a direct access volume\n"));
+    HANDLE_FLAG(FILE_CASE_SENSITIVE_SEARCH, "Supports Case-sensitive filenames");
+    HANDLE_FLAG(FILE_CASE_PRESERVED_NAMES, "Preserves Case of filenames");
+    HANDLE_FLAG(FILE_UNICODE_ON_DISK, "Supports Unicode in filenames");
+    HANDLE_FLAG(FILE_PERSISTENT_ACLS, "Preserves & Enforces ACL's");
+    HANDLE_FLAG(FILE_FILE_COMPRESSION, "Supports file-based Compression");
+    HANDLE_FLAG(FILE_VOLUME_QUOTAS, "Supports Disk Quotas");
+    HANDLE_FLAG(FILE_SUPPORTS_SPARSE_FILES, "Supports Sparse files");
+    HANDLE_FLAG(FILE_SUPPORTS_REPARSE_POINTS, "Supports Reparse Points");
+    HANDLE_FLAG(FILE_RETURNS_CLEANUP_RESULT_INFO, "Returns Handle Close Result Information");
+    HANDLE_FLAG(FILE_SUPPORTS_POSIX_UNLINK_RENAME, "Supports POSIX-style Unlink and Rename");
+    HANDLE_FLAG(FILE_SUPPORTS_OBJECT_IDS, "Supports Object Identifiers");
+    HANDLE_FLAG(FILE_SUPPORTS_ENCRYPTION, "Supports Encrypted File System");
+    HANDLE_FLAG(FILE_NAMED_STREAMS, "Supports Named Streams");
+    HANDLE_FLAG(FILE_SUPPORTS_TRANSACTIONS, "Supports Transactions");
+    HANDLE_FLAG(FILE_SUPPORTS_HARD_LINKS, "Supports Hard Links");
+    HANDLE_FLAG(FILE_SUPPORTS_EXTENDED_ATTRIBUTES, "Supports Extended Attributes");
+    HANDLE_FLAG(FILE_SUPPORTS_OPEN_BY_FILE_ID, "Supports Open By FileID");
+    HANDLE_FLAG(FILE_SUPPORTS_USN_JOURNAL, "Supports USN Journal");
 
-#undef HANDLE_FLAGS
+#undef HANDLE_FLAG
 
     return 0;
 }
 
-static int
-NtfsInfoMain(int argc, const TCHAR *argv[])
+/* Label padded to the value column, then the value */
+#define NTFS_LABEL(Label) _tprintf(_T("%-35s"), _T(Label))
+
+static void
+PrintCount(const TCHAR * Label, ULONGLONG Count, ULONGLONG Bytes)
+{
+    TCHAR Number[40], Size[40];
+
+    FormatNumber(Count, Number);
+    FormatSize(Bytes, 1, 4, Size);
+    _tprintf(_T("%-35s%11s  (%s)\n"), Label, Number, Size);
+}
+
+int
+FsInfoNtfsInfoMain(int argc, const TCHAR *argv[])
 {
     HANDLE Volume;
     DWORD BytesRead;
-    struct
-    {
-        NTFS_VOLUME_DATA_BUFFER;
-        NTFS_EXTENDED_VOLUME_DATA;
-    } Data;
+    NTFS_VOLUME_DATA_WIN10 Data;
+    TCHAR Size[40];
+    ULONGLONG BytesPerCluster, Zone;
+    ULONG Physical, TrimExtDev, TrimBytesDev, TrimExtVol, TrimBytesVol;
+    USHORT LfsMajor, LfsMinor;
 
-    /* We need a volume (letter or GUID) */
-    if (argc < 2)
+    if (argc != 2)
     {
-        _ftprintf(stderr, _T("Usage: fsutil fsinfo ntfsinfo <volume>\n"));
-        _ftprintf(stderr, _T("\tFor example: fsutil fsinfo ntfsinfo c:\n"));
-        return 1;
+        _tprintf(_T("Usage : fsutil fsinfo ntfsInfo <volume pathname>\n"));
+        _tprintf(_T("   Eg : fsutil fsinfo ntfsInfo C:\n"));
+        return (argc < 2) ? 0 : 1;
     }
 
     /* Get a handle for the volume */
-    Volume = OpenVolume(argv[1], FALSE, TRUE);
+    Volume = OpenVolumeArg(argv[1], TRUE, GENERIC_READ, NOTE_LOCAL_NTFS_VOLUME, NULL);
     if (Volume == INVALID_HANDLE_VALUE)
     {
         return 1;
     }
 
     /* And query the NTFS data */
+    ZeroMemory(&Data, sizeof(Data));
     if (DeviceIoControl(Volume, FSCTL_GET_NTFS_VOLUME_DATA, NULL, 0, &Data,
                         sizeof(Data), &BytesRead, NULL) == FALSE)
     {
@@ -198,55 +251,107 @@ NtfsInfoMain(int argc, const TCHAR *argv[])
     /* We no longer need the volume */
     CloseHandle(Volume);
 
+    /* Fields the driver does not report: the sector size, NTFS 3.x implies LFS 2.0, no trim data */
+    BytesPerCluster = Data.Base.BytesPerCluster;
+    Physical = Data.Base.BytesPerSector;
+    LfsMajor = 2;
+    LfsMinor = 0;
+    TrimExtDev = TrimBytesDev = TrimExtVol = TrimBytesVol = 0;
+    if (BytesRead >= FIELD_OFFSET(NTFS_VOLUME_DATA_WIN10, BytesPerPhysicalSector) + sizeof(ULONG) &&
+        Data.ByteCount >= FIELD_OFFSET(NTFS_VOLUME_DATA_WIN10, BytesPerPhysicalSector) - sizeof(NTFS_VOLUME_DATA_BUFFER) + sizeof(ULONG))
+    {
+        Physical = Data.BytesPerPhysicalSector;
+    }
+    if (BytesRead >= sizeof(NTFS_VOLUME_DATA_WIN10))
+    {
+        LfsMajor = Data.LfsMajorVersion;
+        LfsMinor = Data.LfsMinorVersion;
+        TrimExtDev = Data.MaxDeviceTrimExtentCount;
+        TrimBytesDev = Data.MaxDeviceTrimByteCount;
+        TrimExtVol = Data.MaxVolumeTrimExtentCount;
+        TrimBytesVol = Data.MaxVolumeTrimByteCount;
+    }
+
     /* Dump data */
-    _ftprintf(stdout, _T("NTFS volume serial number:\t\t0x%0.16I64x\n"), Data.VolumeSerialNumber.QuadPart);
-    /* Only print version if extended structure was returned */
+    NTFS_LABEL("NTFS Volume Serial Number :");
+    _tprintf(_T("0x%016I64x\n"), Data.Base.VolumeSerialNumber.QuadPart);
     if (BytesRead > sizeof(NTFS_VOLUME_DATA_BUFFER))
     {
-        _ftprintf(stdout, _T("Version:\t\t\t\t%u.%u\n"), Data.MajorVersion, Data.MinorVersion);
+        NTFS_LABEL("NTFS Version      :");
+        _tprintf(_T("%u.%u\n"), Data.MajorVersion, Data.MinorVersion);
+        NTFS_LABEL("LFS Version       :");
+        _tprintf(_T("%u.%u\n"), LfsMajor, LfsMinor);
     }
-    _ftprintf(stdout, _T("Number of sectors:\t\t\t0x%0.16I64x\n"), Data.NumberSectors.QuadPart);
-    _ftprintf(stdout, _T("Total number of clusters:\t\t0x%0.16I64x\n"), Data.TotalClusters.QuadPart);
-    _ftprintf(stdout, _T("Free clusters:\t\t\t\t0x%0.16I64x\n"), Data.FreeClusters.QuadPart);
-    _ftprintf(stdout, _T("Total number of reserved clusters:\t0x%0.16I64x\n"), Data.TotalReserved.QuadPart);
-    _ftprintf(stdout, _T("Bytes per sector:\t\t\t%d\n"), Data.BytesPerSector);
-    _ftprintf(stdout, _T("Bytes per cluster:\t\t\t%d\n"), Data.BytesPerCluster);
-    _ftprintf(stdout, _T("Bytes per file record segment:\t\t%d\n"), Data.BytesPerFileRecordSegment);
-    _ftprintf(stdout, _T("Clusters per file record segment:\t%d\n"), Data.ClustersPerFileRecordSegment);
-    _ftprintf(stdout, _T("MFT valid data length:\t\t\t0x%0.16I64x\n"), Data.MftValidDataLength.QuadPart);
-    _ftprintf(stdout, _T("MFT start LCN:\t\t\t\t0x%0.16I64x\n"), Data.MftStartLcn.QuadPart);
-    _ftprintf(stdout, _T("MFT2 start LCN:\t\t\t\t0x%0.16I64x\n"), Data.Mft2StartLcn.QuadPart);
-    _ftprintf(stdout, _T("MFT zone start:\t\t\t\t0x%0.16I64x\n"), Data.MftZoneStart.QuadPart);
-    _ftprintf(stdout, _T("MFT zone end:\t\t\t\t0x%0.16I64x\n"), Data.MftZoneEnd.QuadPart);
+    PrintCount(_T("Total Sectors     :"), Data.Base.NumberSectors.QuadPart, Data.Base.NumberSectors.QuadPart * Data.Base.BytesPerSector);
+    PrintCount(_T("Total Clusters    :"), Data.Base.TotalClusters.QuadPart, Data.Base.TotalClusters.QuadPart * BytesPerCluster);
+    PrintCount(_T("Free Clusters     :"), Data.Base.FreeClusters.QuadPart, Data.Base.FreeClusters.QuadPart * BytesPerCluster);
+    PrintCount(_T("Total Reserved Clusters :"), Data.Base.TotalReserved.QuadPart, Data.Base.TotalReserved.QuadPart * BytesPerCluster);
+    /* The driver has no storage reserve */
+    PrintCount(_T("Reserved For Storage Reserve :"), 0, 0);
+    NTFS_LABEL("Bytes Per Sector  :");
+    _tprintf(_T("%lu\n"), Data.Base.BytesPerSector);
+    NTFS_LABEL("Bytes Per Physical Sector :");
+    _tprintf(_T("%lu\n"), Physical);
+    NTFS_LABEL("Bytes Per Cluster :");
+    _tprintf(_T("%lu\n"), Data.Base.BytesPerCluster);
+    NTFS_LABEL("Bytes Per FileRecord Segment    :");
+    _tprintf(_T("%lu\n"), Data.Base.BytesPerFileRecordSegment);
+    NTFS_LABEL("Clusters Per FileRecord Segment :");
+    _tprintf(_T("%lu\n"), Data.Base.ClustersPerFileRecordSegment);
+    FormatSize(Data.Base.MftValidDataLength.QuadPart, 2, 0, Size);
+    NTFS_LABEL("Mft Valid Data Length :");
+    _tprintf(_T("%s\n"), Size);
+    NTFS_LABEL("Mft Start Lcn  :");
+    _tprintf(_T("0x%016I64x\n"), Data.Base.MftStartLcn.QuadPart);
+    NTFS_LABEL("Mft2 Start Lcn :");
+    _tprintf(_T("0x%016I64x\n"), Data.Base.Mft2StartLcn.QuadPart);
+    NTFS_LABEL("Mft Zone Start :");
+    _tprintf(_T("0x%016I64x\n"), Data.Base.MftZoneStart.QuadPart);
+    NTFS_LABEL("Mft Zone End   :");
+    _tprintf(_T("0x%016I64x\n"), Data.Base.MftZoneEnd.QuadPart);
+    Zone = (Data.Base.MftZoneEnd.QuadPart - Data.Base.MftZoneStart.QuadPart) * BytesPerCluster;
+    FormatSize(Zone, 2, 0, Size);
+    NTFS_LABEL("MFT Zone Size  :");
+    _tprintf(_T("%s\n"), Size);
+    NTFS_LABEL("Max Device Trim Extent Count :");
+    _tprintf(_T("%lu\n"), TrimExtDev);
+    NTFS_LABEL("Max Device Trim Byte Count :");
+    _tprintf(_T("0x%lx\n"), TrimBytesDev);
+    NTFS_LABEL("Max Volume Trim Extent Count :");
+    _tprintf(_T("%lu\n"), TrimExtVol);
+    NTFS_LABEL("Max Volume Trim Byte Count :");
+    _tprintf(_T("0x%lx\n"), TrimBytesVol);
+    /* Windows also prints "Resource Manager Identifier" (TxF); this NTFS driver has none. */
 
     return 0;
 }
 
-#define DUMP_VALUE(stats, value) fprintf(stdout, "%s: %lu\n", #value, stats->value)
+#define DUMP_VALUE(stats, col, value) printf("%-*s%lu\n", col, #value " :", (unsigned long)stats->value)
 
 static void
 DumpBase(PFILESYSTEM_STATISTICS Base, TCHAR * Name)
 {
     /* Print FS name */
-    _ftprintf(stdout, _T("File system type: %s\n\n"), Name);
+    _tprintf(_T("%-23s%s\n\n"), _T("File System Type :"), Name);
 
     /* And then, dump any base stat */
-    DUMP_VALUE(Base, UserFileReads);
-    DUMP_VALUE(Base, UserFileReadBytes);
-    DUMP_VALUE(Base, UserDiskReads);
-    DUMP_VALUE(Base, UserFileWrites);
-    DUMP_VALUE(Base, UserFileWriteBytes);
-    DUMP_VALUE(Base, UserDiskWrites);
-    DUMP_VALUE(Base, MetaDataReads);
-    DUMP_VALUE(Base, MetaDataReadBytes);
-    DUMP_VALUE(Base, MetaDataDiskReads);
-    DUMP_VALUE(Base, MetaDataWrites);
-    DUMP_VALUE(Base, MetaDataWriteBytes);
-    DUMP_VALUE(Base, MetaDataDiskWrites);
+    DUMP_VALUE(Base, 23, UserFileReads);
+    DUMP_VALUE(Base, 23, UserFileReadBytes);
+    DUMP_VALUE(Base, 23, UserDiskReads);
+    DUMP_VALUE(Base, 23, UserFileWrites);
+    DUMP_VALUE(Base, 23, UserFileWriteBytes);
+    DUMP_VALUE(Base, 23, UserDiskWrites);
+    DUMP_VALUE(Base, 23, MetaDataReads);
+    DUMP_VALUE(Base, 23, MetaDataReadBytes);
+    DUMP_VALUE(Base, 23, MetaDataDiskReads);
+    DUMP_VALUE(Base, 23, MetaDataWrites);
+    DUMP_VALUE(Base, 23, MetaDataWriteBytes);
+    DUMP_VALUE(Base, 23, MetaDataDiskWrites);
 
-    _ftprintf(stdout, _T("\n"));
+    _tprintf(_T("\n"));
 }
 
+/* The FAT and EXFAT value columns were not seen on the oracle (TODO(oracle), same as NTFS) */
 static void
 DumpExFat(PVOID Statistics, PVOID Specific)
 {
@@ -260,15 +365,15 @@ DumpExFat(PVOID Statistics, PVOID Specific)
     DumpBase(Base, _T("EXFAT"));
 
     /* Then, display the EXFAT specific ones */
-    DUMP_VALUE(ExFat, CreateHits);
-    DUMP_VALUE(ExFat, SuccessfulCreates);
-    DUMP_VALUE(ExFat, FailedCreates);
-    DUMP_VALUE(ExFat, NonCachedReads);
-    DUMP_VALUE(ExFat, NonCachedReadBytes);
-    DUMP_VALUE(ExFat, NonCachedWrites);
-    DUMP_VALUE(ExFat, NonCachedWriteBytes);
-    DUMP_VALUE(ExFat, NonCachedDiskReads);
-    DUMP_VALUE(ExFat, NonCachedDiskWrites);
+    DUMP_VALUE(ExFat, 32, CreateHits);
+    DUMP_VALUE(ExFat, 32, SuccessfulCreates);
+    DUMP_VALUE(ExFat, 32, FailedCreates);
+    DUMP_VALUE(ExFat, 32, NonCachedReads);
+    DUMP_VALUE(ExFat, 32, NonCachedReadBytes);
+    DUMP_VALUE(ExFat, 32, NonCachedWrites);
+    DUMP_VALUE(ExFat, 32, NonCachedWriteBytes);
+    DUMP_VALUE(ExFat, 32, NonCachedDiskReads);
+    DUMP_VALUE(ExFat, 32, NonCachedDiskWrites);
 }
 
 static void
@@ -284,17 +389,19 @@ DumpFat(PVOID Statistics, PVOID Specific)
     DumpBase(Base, _T("FAT"));
 
     /* Then, display the FAT specific ones */
-    DUMP_VALUE(Fat, CreateHits);
-    DUMP_VALUE(Fat, SuccessfulCreates);
-    DUMP_VALUE(Fat, FailedCreates);
-    DUMP_VALUE(Fat, NonCachedReads);
-    DUMP_VALUE(Fat, NonCachedReadBytes);
-    DUMP_VALUE(Fat, NonCachedWrites);
-    DUMP_VALUE(Fat, NonCachedWriteBytes);
-    DUMP_VALUE(Fat, NonCachedDiskReads);
-    DUMP_VALUE(Fat, NonCachedDiskWrites);
+    DUMP_VALUE(Fat, 32, CreateHits);
+    DUMP_VALUE(Fat, 32, SuccessfulCreates);
+    DUMP_VALUE(Fat, 32, FailedCreates);
+    DUMP_VALUE(Fat, 32, NonCachedReads);
+    DUMP_VALUE(Fat, 32, NonCachedReadBytes);
+    DUMP_VALUE(Fat, 32, NonCachedWrites);
+    DUMP_VALUE(Fat, 32, NonCachedWriteBytes);
+    DUMP_VALUE(Fat, 32, NonCachedDiskReads);
+    DUMP_VALUE(Fat, 32, NonCachedDiskWrites);
 }
 
+/* Windows prints a few more NTFS counters (LogFileFull, trim statistics...) after these;
+ * the NTFS_STATISTICS structure of this tree does not carry them. */
 static void
 DumpNtfs(PVOID Statistics, PVOID Specific)
 {
@@ -308,32 +415,32 @@ DumpNtfs(PVOID Statistics, PVOID Specific)
     DumpBase(Base, _T("NTFS"));
 
     /* Then, display the NTFS specific ones */
-    DUMP_VALUE(Ntfs, MftReads);
-    DUMP_VALUE(Ntfs, MftReadBytes);
-    DUMP_VALUE(Ntfs, MftWrites);
-    DUMP_VALUE(Ntfs, MftWriteBytes);
-    DUMP_VALUE(Ntfs, Mft2Writes);
-    DUMP_VALUE(Ntfs, Mft2WriteBytes);
-    DUMP_VALUE(Ntfs, RootIndexReads);
-    DUMP_VALUE(Ntfs, RootIndexReadBytes);
-    DUMP_VALUE(Ntfs, RootIndexWrites);
-    DUMP_VALUE(Ntfs, RootIndexWriteBytes);
-    DUMP_VALUE(Ntfs, BitmapReads);
-    DUMP_VALUE(Ntfs, BitmapReadBytes);
-    DUMP_VALUE(Ntfs, BitmapWrites);
-    DUMP_VALUE(Ntfs, BitmapWriteBytes);
-    DUMP_VALUE(Ntfs, MftBitmapReads);
-    DUMP_VALUE(Ntfs, MftBitmapReadBytes);
-    DUMP_VALUE(Ntfs, MftBitmapWrites);
-    DUMP_VALUE(Ntfs, MftBitmapWriteBytes);
-    DUMP_VALUE(Ntfs, UserIndexReads);
-    DUMP_VALUE(Ntfs, UserIndexReadBytes);
-    DUMP_VALUE(Ntfs, UserIndexWrites);
-    DUMP_VALUE(Ntfs, UserIndexWriteBytes);
-    DUMP_VALUE(Ntfs, LogFileReads);
-    DUMP_VALUE(Ntfs, LogFileReadBytes);
-    DUMP_VALUE(Ntfs, LogFileWrites);
-    DUMP_VALUE(Ntfs, LogFileWriteBytes);
+    DUMP_VALUE(Ntfs, 32, MftReads);
+    DUMP_VALUE(Ntfs, 32, MftReadBytes);
+    DUMP_VALUE(Ntfs, 32, MftWrites);
+    DUMP_VALUE(Ntfs, 32, MftWriteBytes);
+    DUMP_VALUE(Ntfs, 32, Mft2Writes);
+    DUMP_VALUE(Ntfs, 32, Mft2WriteBytes);
+    DUMP_VALUE(Ntfs, 32, RootIndexReads);
+    DUMP_VALUE(Ntfs, 32, RootIndexReadBytes);
+    DUMP_VALUE(Ntfs, 32, RootIndexWrites);
+    DUMP_VALUE(Ntfs, 32, RootIndexWriteBytes);
+    DUMP_VALUE(Ntfs, 32, BitmapReads);
+    DUMP_VALUE(Ntfs, 32, BitmapReadBytes);
+    DUMP_VALUE(Ntfs, 32, BitmapWrites);
+    DUMP_VALUE(Ntfs, 32, BitmapWriteBytes);
+    DUMP_VALUE(Ntfs, 32, MftBitmapReads);
+    DUMP_VALUE(Ntfs, 32, MftBitmapReadBytes);
+    DUMP_VALUE(Ntfs, 32, MftBitmapWrites);
+    DUMP_VALUE(Ntfs, 32, MftBitmapWriteBytes);
+    DUMP_VALUE(Ntfs, 32, UserIndexReads);
+    DUMP_VALUE(Ntfs, 32, UserIndexReadBytes);
+    DUMP_VALUE(Ntfs, 32, UserIndexWrites);
+    DUMP_VALUE(Ntfs, 32, UserIndexWriteBytes);
+    DUMP_VALUE(Ntfs, 32, LogFileReads);
+    DUMP_VALUE(Ntfs, 32, LogFileReadBytes);
+    DUMP_VALUE(Ntfs, 32, LogFileWrites);
+    DUMP_VALUE(Ntfs, 32, LogFileWriteBytes);
 }
 
 #define GET_NEXT(stats, length, iter, type) (type)((ULONG_PTR)stats + (length * iter))
@@ -345,14 +452,14 @@ ValidateSizes(ULONG Length, DWORD ProcCount, DWORD BytesRead, DWORD SpecificSize
     /* Check whether we could read our base length for every processor */
     if (Length * ProcCount > BytesRead)
     {
-        _ftprintf(stderr, _T("Only performed a partial read: %lu (expected: %lu)\n"), BytesRead, Length * ProcCount);
+        _tprintf(_T("Only performed a partial read: %lu (expected: %lu)\n"), BytesRead, Length * ProcCount);
         return 1;
     }
 
     /* Check whether this covers a specific entry and a generic entry for every processor */
     if ((sizeof(FILESYSTEM_STATISTICS) + SpecificSize) * ProcCount > BytesRead)
     {
-        _ftprintf(stderr, _T("Only performed a partial read: %lu (expected: %Iu)\n"), BytesRead, (sizeof(FILESYSTEM_STATISTICS) + SpecificSize));
+        _tprintf(_T("Only performed a partial read: %lu (expected: %Iu)\n"), BytesRead, (sizeof(FILESYSTEM_STATISTICS) + SpecificSize));
         return 1;
     }
 
@@ -520,8 +627,8 @@ SumNtfs(PVOID Statistics, PVOID Specific, ULONG Length, DWORD ProcCount, DWORD B
     return 0;
 }
 
-static int
-StatisticsMain(int argc, const TCHAR *argv[])
+int
+FsInfoStatisticsMain(int argc, const TCHAR *argv[])
 {
     HANDLE Volume;
     SYSTEM_INFO SystemInfo;
@@ -532,16 +639,15 @@ StatisticsMain(int argc, const TCHAR *argv[])
     void (*DumpFct[FILESYSTEM_STATISTICS_TYPE_EXFAT + 1])(PVOID, PVOID) = { NULL, DumpNtfs, DumpFat, DumpExFat };
     int (*SumFct[FILESYSTEM_STATISTICS_TYPE_EXFAT + 1])(PVOID, PVOID, ULONG, DWORD, DWORD) = { NULL, SumNtfs, SumFat, SumExFat };
 
-    /* We need a volume (letter or GUID) */
-    if (argc < 2)
+    if (argc != 2)
     {
-        _ftprintf(stderr, _T("Usage: fsutil fsinfo statistics <volume>\n"));
-        _ftprintf(stderr, _T("\tFor example: fsutil fsinfo statistics c:\n"));
-        return 1;
+        _tprintf(_T("Usage : fsutil fsInfo statistics <volume pathname>\n"));
+        _tprintf(_T("   Eg : fsutil fsInfo statistics C:\n"));
+        return (argc < 2) ? 0 : 1;
     }
 
     /* Get a handle for the volume */
-    Volume = OpenVolume(argv[1], FALSE, FALSE);
+    Volume = OpenVolumeArg(argv[1], FALSE, GENERIC_READ, NOTE_LOCAL_ANY_FS, NULL);
     if (Volume == INVALID_HANDLE_VALUE)
     {
         return 1;
@@ -570,7 +676,7 @@ StatisticsMain(int argc, const TCHAR *argv[])
             Statistics = LocalAlloc(LPTR, Length);
             if (Statistics == NULL)
             {
-                _ftprintf(stderr, _T("Failed to allocate memory!\n"));
+                _tprintf(_T("Failed to allocate memory!\n"));
                 CloseHandle(Volume);
                 return 1;
             }
@@ -599,7 +705,7 @@ StatisticsMain(int argc, const TCHAR *argv[])
     /* We only support FAT, EXFAT and NTFS for now */
     if (Statistics->FileSystemType > FILESYSTEM_STATISTICS_TYPE_EXFAT || Statistics->FileSystemType < FILESYSTEM_STATISTICS_TYPE_NTFS)
     {
-        _ftprintf(stderr, _T("Unrecognized file system type: %d\n"), Statistics->FileSystemType);
+        _tprintf(_T("Unrecognized file system type: %d\n"), Statistics->FileSystemType);
         if (Statistics != &Buffer)
         {
             LocalFree(Statistics);
@@ -630,19 +736,4 @@ StatisticsMain(int argc, const TCHAR *argv[])
     }
 
     return 0;
-}
-
-static void
-PrintUsage(const TCHAR * Command)
-{
-    PrintDefaultUsage(_T(" FSINFO "), Command, (HandlerItem *)&HandlersList,
-                      (sizeof(HandlersList) / sizeof(HandlersList[0])));
-}
-
-int
-FsInfoMain(int argc, const TCHAR *argv[])
-{
-    return FindHandler(argc, argv, (HandlerItem *)&HandlersList,
-                       (sizeof(HandlersList) / sizeof(HandlersList[0])),
-                       PrintUsage);
 }
