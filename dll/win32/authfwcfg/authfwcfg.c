@@ -66,15 +66,6 @@ static VOID OutRes(UINT id)
     if (t) { Out(t); HeapFree(GetProcessHeap(), 0, t); }
 }
 
-static VOID OutResFmt(UINT id, PCWSTR a)
-{
-    PWSTR t = ResText(id), buf;
-    if (!t) return;
-    buf = HeapAlloc(GetProcessHeap(), 0, (wcslen(t) + wcslen(a) + 16) * sizeof(WCHAR));
-    if (buf) { _swprintf(buf, t, a); Out(buf); HeapFree(GetProcessHeap(), 0, buf); }
-    HeapFree(GetProcessHeap(), 0, t);
-}
-
 static VOID OutResCount(UINT id, ULONG n)
 {
     PWSTR t = ResText(id), buf;
