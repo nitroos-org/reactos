@@ -26,22 +26,44 @@
 
 static HANDLE hLog = INVALID_HANDLE_VALUE;
 
+/* A device ID is not trusted input: control characters (CR, LF, ...) in it could
+   inject fake sections into setupapi.dev.log */
+static BOOL
+HasControlChars(_In_ PCWSTR String)
+{
+    for (; *String != UNICODE_NULL; String++)
+    {
+        if (*String < L' ' || *String == 0x7f)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static VOID
 LogPrint(_In_ PCSTR Format, ...)
 {
-    CHAR Buffer[1024];
+    CHAR Buffer[1024] = {0};
     DWORD Written;
     va_list Args;
-    int Length;
+    int Length, i;
 
     if (hLog == INVALID_HANDLE_VALUE)
         return;
 
     va_start(Args, Format);
-    Length = _vsnprintf(Buffer, sizeof(Buffer) - 2, Format, Args);
+    Length = _vsnprintf(Buffer, sizeof(Buffer) - 3, Format, Args);
     va_end(Args);
+    /* Negative: truncated, or an encoding failure. Write only the part that was
+       filled in: the buffer started zeroed, so that is the part before the first NUL */
     if (Length < 0)
-        Length = sizeof(Buffer) - 2;
+        Length = (int)strnlen(Buffer, sizeof(Buffer) - 3);
+
+    /* Only printable ASCII reaches the log, whatever the arguments held */
+    for (i = 0; i < Length; i++)
+    {
+        if ((UCHAR)Buffer[i] < ' ' || (UCHAR)Buffer[i] > 0x7e)
+            Buffer[i] = '?';
+    }
     Buffer[Length++] = '\r';
     Buffer[Length++] = '\n';
     WriteFile(hLog, Buffer, Length, &Written, NULL);
@@ -184,7 +206,9 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nSh
     if (_wcsnicmp(lpCmdLine, L"\\\\.\\pipe\\PNP_Device_Install_Pipe_", 33) != 0)
         return ERROR_INVALID_PARAMETER;
 
-    hPipe = CreateFileW(lpCmdLine, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    /* Identification only: a pipe server that is not the service cannot impersonate us */
+    hPipe = CreateFileW(lpCmdLine, GENERIC_READ, 0, NULL, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
     if (hPipe == INVALID_HANDLE_VALUE)
         return GetLastError();
 
@@ -195,7 +219,7 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nSh
         goto Quit;
     }
     DeviceInstance = ReadPipeString(hPipe, MAX_DEVICE_ID_BYTES);
-    if (!DeviceInstance)
+    if (!DeviceInstance || HasControlChars(DeviceInstance))
     {
         Error = ERROR_INVALID_DATA;
         goto Quit;
@@ -243,8 +267,9 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nSh
         }
         else
         {
-            Error = GetLastError();
-            Installed = FALSE;
+            /* The device is installed: that stays a success. The service also takes
+               the exit code as the result, so the user gets no redundant wizard. */
+            LogPrint("     ndv: Cannot open the install event, error %lu; the install itself succeeded.", GetLastError());
         }
     }
 
