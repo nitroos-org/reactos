@@ -2039,6 +2039,20 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
             return HRESULT_FROM_WIN32(ERROR_DISK_FULL);
         SetLastMsg(L"The %s installer for '%s' failed (exit code %lu).\n\n%s",
                    f->Provider, f->Id, code, g_Tail);
+        if (scoopFresh && uninst[0])
+        {
+            /* Scoop's root was empty before this run, so whatever it holds is the failed run's: remove it, or
+             * "Try again" meets a half-written C:\scoop (core without shim) and cannot recover */
+            DWORD ucode;
+            WCHAR why[ARRAYSIZE(g_LastMsg)];
+            LOGF(log, L"  failed: removing the partial Scoop install so that a retry starts clean\n");
+            FmOpStep(L"Removing the partly installed Scoop");
+            StringCchCopyW(why, ARRAYSIZE(why), g_LastMsg);
+            g_NoCancel = TRUE;
+            RunAndWait(uninst, 10u * 60u * 1000u, &ucode, log);
+            g_NoCancel = FALSE;
+            SetLastMsg(L"%s", why);
+        }
         return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
     }
     if (!_wcsicmp(f->Provider, L"scoop"))

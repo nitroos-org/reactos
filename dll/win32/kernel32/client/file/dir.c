@@ -777,6 +777,7 @@ RemoveDirectoryW(IN LPCWSTR lpPathName)
     OBJECT_ATTRIBUTES ObjectAttributes;
     PREPARSE_DATA_BUFFER ReparseDataBuffer;
     FILE_DISPOSITION_INFORMATION FileDispInfo;
+    ULONG FileDispEx;
     FILE_ATTRIBUTE_TAG_INFORMATION FileTagInfo;
 
     /* Get relative name */
@@ -972,13 +973,27 @@ MarkFileForDelete:
     RtlReleaseRelativeName(&RelativeName);
     RtlFreeHeap(RtlGetProcessHeap(), 0, PathUBuffer);
 
-    /* Mark & set */
-    FileDispInfo.DeleteFile = TRUE;
+    /* Mark & set.  Windows 10 removes the directory's name at once (POSIX semantics) whatever handles of
+     * it stay open, e.g. an enumerator that was never disposed (Remove-Item -Recurse leaves one on every
+     * subdirectory until the next GC); the parent is then empty as soon as its children are removed.
+     * A file system that does not know the class gets the classic request. */
+    FileDispEx = 0x1 /* FILE_DISPOSITION_DELETE */ | 0x2 /* FILE_DISPOSITION_POSIX_SEMANTICS */;
     Status = NtSetInformationFile(DirectoryHandle,
                                   &IoStatusBlock,
-                                  &FileDispInfo,
-                                  sizeof(FILE_DISPOSITION_INFORMATION),
-                                  FileDispositionInformation);
+                                  &FileDispEx,
+                                  sizeof(FileDispEx),
+                                  (FILE_INFORMATION_CLASS)64 /* FileDispositionInformationEx */);
+    if (Status == STATUS_INVALID_INFO_CLASS || Status == STATUS_INVALID_PARAMETER ||
+        Status == STATUS_NOT_SUPPORTED || Status == STATUS_NOT_IMPLEMENTED ||
+        Status == STATUS_INVALID_DEVICE_REQUEST)
+    {
+        FileDispInfo.DeleteFile = TRUE;
+        Status = NtSetInformationFile(DirectoryHandle,
+                                      &IoStatusBlock,
+                                      &FileDispInfo,
+                                      sizeof(FILE_DISPOSITION_INFORMATION),
+                                      FileDispositionInformation);
+    }
     NtClose(DirectoryHandle);
 
     if (!NT_SUCCESS(Status))

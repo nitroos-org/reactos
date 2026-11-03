@@ -140,6 +140,8 @@ co_IntShowDesktop(PDESKTOP Desktop, ULONG Width, ULONG Height, BOOL Redraw);
 NTSTATUS FASTCALL
 IntHideDesktop(PDESKTOP Desktop);
 
+VOID IntFreeProcessDesktopViews(_In_ PEPROCESS Process, _In_ PPROCESSINFO ppi);
+
 BOOL IntSetThreadDesktop(IN HDESK hDesktop,
                          IN BOOL FreeOnFailure);
 
