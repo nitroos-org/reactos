@@ -10,6 +10,7 @@ extern void func_CFolderItems(void);
 extern void func_CFontsFolder(void);
 extern void func_CheckEscapes(void);
 extern void func_CIDLData(void);
+extern void func_CKnownFolderManager(void);
 extern void func_CMyComputer(void);
 extern void func_CommandLineToArgvW(void);
 extern void func_CShellDesktop(void);
@@ -100,6 +101,7 @@ const struct test winetest_testlist[] =
     { "CFontsFolder", func_CFontsFolder },
     { "CheckEscapes", func_CheckEscapes },
     { "CIDLData", func_CIDLData },
+    { "CKnownFolderManager", func_CKnownFolderManager },
     { "CMyComputer", func_CMyComputer },
     { "CommandLineToArgvW", func_CommandLineToArgvW },
     { "CShellDesktop", func_CShellDesktop },
