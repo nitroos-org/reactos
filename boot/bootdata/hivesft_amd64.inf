@@ -41,3 +41,11 @@ HKLM,"SOFTWARE\Classes\htafile\shell\open\command","",0x00020000,"""%ProgramW643
 HKLM,"SOFTWARE\Classes\htmlfile\shell\open\command","",0x00020000,"""%ProgramW6432%\Internet Explorer\iexplore.exe"" ""%1"""
 HKLM,"SOFTWARE\Clients\StartMenuInternet\IEXPLORE.EXE\DefaultIcon","",0x00020000,"%ProgramW6432%\Internet Explorer\iexplore.exe,-7"
 HKLM,"SOFTWARE\Clients\StartMenuInternet\IEXPLORE.EXE\shell\open\command","",0x00020000,"%ProgramW6432%\Internet Explorer\iexplore.exe"
+
+; The 32-bit view of the BITS (Background Intelligent Transfer Service) manager class. CLSID and Interface are
+; redirected per view (AppID is shared), so without this a 32-bit client got REGDB_E_CLASSNOTREG from
+; CoCreateInstance(CLSID_BackgroundCopyManager): qmgr.rgs registers the native view only. As on Windows the class is
+; an out-of-process LocalService (AppID {69AD4AEE-...} -> BITS); the interface proxy/stubs are registered by the
+; 32-bit regsvr32 of SysWOW64\qmgrprxy.dll at setup (dll/win32/syssetup/wizard.c).
+HKLM,"SOFTWARE\Classes\Wow6432Node\CLSID\{4991D34B-80A1-4291-83B6-3328366B9097}",,0x00000000,"Background Intelligent Transfer Control Class 1.0"
+HKLM,"SOFTWARE\Classes\Wow6432Node\CLSID\{4991D34B-80A1-4291-83B6-3328366B9097}","AppID",0x00000000,"{69AD4AEE-51BE-439B-A92C-86AE490E8B30}"

@@ -109,6 +109,9 @@ SysWOW64/wshom.ocx
 # Proxy/stubs for IServiceProvider and the other ActiveX interfaces: a 32-bit COM
 # LocalServer/LocalService registers its class objects through IServiceProvider.
 SysWOW64/actxprxy.dll
+# Proxy/stub for the BITS interfaces (IBackgroundCopyManager, Job*, File*, Callback*): a 32-bit BITS client
+# marshals them to the 64-bit BITS service. Windows ships BitsProxy.dll in SysWOW64; the fork's proxy is qmgrprxy.dll.
+SysWOW64/qmgrprxy.dll
 # Task Scheduler 2.0 client (ITaskService) and its XML parser: 32-bit updaters
 # (Google Updater) register their wake tasks through it.
 SysWOW64/taskschd.dll
