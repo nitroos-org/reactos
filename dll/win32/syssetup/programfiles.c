@@ -8,12 +8,36 @@
 #include <debug.h>
 
 #if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+/* Windows 10 x64 keeps the same six values in both registry views: the
+ * ProgramFilesDir / CommonFilesDir pair of the view's own bitness, the (x86)
+ * pair and the W6432 pair. Only the first pair differs between the views. */
+static BOOL
+SetProgramFilesValues(HKEY Key, PCWSTR Program, PCWSTR Common, PCWSTR Program32,
+                      PCWSTR Common32, PCWSTR Program64, PCWSTR Common64)
+{
+    const struct { PCWSTR Name, Data; } Values[] = {
+        {L"ProgramFilesDir", Program}, {L"CommonFilesDir", Common},
+        {L"ProgramFilesDir (x86)", Program32}, {L"CommonFilesDir (x86)", Common32},
+        {L"ProgramW6432Dir", Program64}, {L"CommonW6432Dir", Common64}
+    };
+    ULONG i;
+
+    for (i = 0; i < ARRAYSIZE(Values); ++i)
+    {
+        if (RegSetValueExW(Key, Values[i].Name, 0, REG_SZ, (const BYTE *)Values[i].Data,
+                           (wcslen(Values[i].Data) + 1) * sizeof(WCHAR)))
+            return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOL
 InitializeWow64ProgramFiles(PCWSTR Program, PCWSTR Common)
 {
     WCHAR Program32[MAX_PATH], Common32[MAX_PATH];
     HKEY Key;
     LONG Error;
+    BOOL Result;
     SIZE_T Length = wcslen(Program);
 
     if (Length + 6 >= ARRAYSIZE(Program32) || wcslen(Common) + 6 >= ARRAYSIZE(Common32))
@@ -31,29 +55,24 @@ InitializeWow64ProgramFiles(PCWSTR Program, PCWSTR Common)
             return FALSE;
         wcscat(Common32, L"\\Common Files");
     }
+    /* 64-bit view (the caller already stored its ProgramFilesDir and CommonFilesDir) */
     Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion",
                           0, KEY_SET_VALUE, &Key);
     if (Error) return FALSE;
-    Error = RegSetValueExW(Key, L"ProgramFilesDir (x86)", 0, REG_SZ,
-                           (const BYTE *)Program32, (wcslen(Program32) + 1) * sizeof(WCHAR));
-    if (!Error)
-        Error = RegSetValueExW(Key, L"CommonFilesDir (x86)", 0, REG_SZ,
-                               (const BYTE *)Common32, (wcslen(Common32) + 1) * sizeof(WCHAR));
+    Result = SetProgramFilesValues(Key, Program, Common, Program32, Common32, Program, Common);
     RegCloseKey(Key);
-    if (Error) return FALSE;
+    if (!Result) return FALSE;
     /* Initialize the physical guest view even before registry redirection is
-     * enabled. This also keeps this setup change usable on its own branch. */
+     * enabled. This also keeps this setup change usable on its own branch.
+     * Every value is stored expanded, so shell32 never has to write its
+     * "%SystemDrive%\..." defaults for a 32-bit process. */
     Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE,
         L"SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion",
         0, NULL, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &Key, NULL);
     if (Error) return FALSE;
-    Error = RegSetValueExW(Key, L"ProgramFilesDir", 0, REG_SZ,
-                           (const BYTE *)Program32, (wcslen(Program32) + 1) * sizeof(WCHAR));
-    if (!Error)
-        Error = RegSetValueExW(Key, L"CommonFilesDir", 0, REG_SZ,
-                               (const BYTE *)Common32, (wcslen(Common32) + 1) * sizeof(WCHAR));
+    Result = SetProgramFilesValues(Key, Program32, Common32, Program32, Common32, Program, Common);
     RegCloseKey(Key);
-    if (Error) return FALSE;
+    if (!Result) return FALSE;
     if (!CreateDirectoryW(Program32, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return FALSE;
     if (!CreateDirectoryW(Common32, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return FALSE;
     return TRUE;
