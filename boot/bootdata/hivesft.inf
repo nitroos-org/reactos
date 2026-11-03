@@ -344,6 +344,10 @@ HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Cpls","Console",0x
 ; Cursors Schemes
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Cursors\Schemes","ReactOS Default",0x00020000,""",,,,,,,,,,,,,"""
 
+; Hide the "Internet Browser" desktop icon (CLSID_Internet), as Windows 10 shows no IE icon; same values as livecd.inf
+HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\ClassicStartMenu","{871C5380-42A0-1069-A2EA-08002B30309D}",0x00010001,1
+HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel","{871C5380-42A0-1069-A2EA-08002B30309D}",0x00010001,1
+
 ; Advanced
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced\Folder",,0x00000012
