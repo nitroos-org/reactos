@@ -433,8 +433,8 @@ VOID NgDereferenceFcb(PNG_FCB Fcb)
         Core = TRUE;
     }
     Free = (InterlockedDecrement(&Fcb->RefCount) == 0);
-    if (Free && Fcb->VcbLinks.Flink)
-        RemoveEntryList(&Fcb->VcbLinks);
+    if (Free)
+        NgFcbRemoveLocked(Fcb);
     if (Free && Fcb->IsPagingFile)
         Vcb->PagingFiles--;
     if (Free && Vcb->VolumeFcb == Fcb)
