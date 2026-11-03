@@ -298,10 +298,21 @@ ShowTimeZoneList(HWND hwnd)
 }
 
 
+typedef struct _TIMEZONE_DYNAMIC_INFORMATION
+{
+    TIME_ZONE_INFORMATION Zone;
+    WCHAR TimeZoneKeyName[128];
+    BOOLEAN DynamicDaylightTimeDisabled;
+} TIMEZONE_DYNAMIC_INFORMATION;
+
+typedef BOOL (WINAPI *PFN_SETDYNAMICTIMEZONEINFORMATION)(const TIMEZONE_DYNAMIC_INFORMATION *);
+
 static VOID
 SetLocalTimeZone(HWND hwnd, BOOL bAutoDaylight)
 {
     TIME_ZONE_INFORMATION TimeZoneInformation;
+    TIMEZONE_DYNAMIC_INFORMATION DynamicInformation;
+    PFN_SETDYNAMICTIMEZONEINFORMATION pSetDynamicTimeZoneInformation;
     PTIMEZONE_ENTRY Entry;
 
     Entry = GetSelectedTimeZoneEntry(hwnd);
@@ -341,6 +352,26 @@ SetLocalTimeZone(HWND hwnd, BOOL bAutoDaylight)
         TimeZoneInformation.DaylightBias = 0;
         ZeroMemory(&TimeZoneInformation.StandardDate, sizeof(SYSTEMTIME));
         ZeroMemory(&TimeZoneInformation.DaylightDate, sizeof(SYSTEMTIME));
+    }
+
+    /*
+     * The kernel stores the zone, its key name and the daylight flag in one step
+     * (as Windows 10 does): this page runs as a standard user, who may not write
+     * the key. Where kernel32 has no SetDynamicTimeZoneInformation (NT 5 builds),
+     * the three registry writes remain.
+     */
+    pSetDynamicTimeZoneInformation = (PFN_SETDYNAMICTIMEZONEINFORMATION)
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetDynamicTimeZoneInformation");
+    if (pSetDynamicTimeZoneInformation)
+    {
+        ZeroMemory(&DynamicInformation, sizeof(DynamicInformation));
+        memcpy(&DynamicInformation, &TimeZoneInformation, sizeof(TimeZoneInformation));
+        StringCchCopyW(DynamicInformation.TimeZoneKeyName,
+                       ARRAYSIZE(DynamicInformation.TimeZoneKeyName),
+                       Entry->KeyName);
+        DynamicInformation.DynamicDaylightTimeDisabled = !bAutoDaylight;
+        pSetDynamicTimeZoneInformation(&DynamicInformation);
+        return;
     }
 
     /* Set time zone information */

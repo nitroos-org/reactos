@@ -674,6 +674,268 @@ ExRefreshTimeZoneInformation(IN PLARGE_INTEGER CurrentBootTime)
     return TRUE;
 }
 
+/*
+ * The registry values of the zone, as they stood before a change, so that a
+ * change that fails half way can put them back.
+ */
+typedef struct _EXP_TIME_ZONE_SNAPSHOT
+{
+    RTL_TIME_ZONE_INFORMATION Zone;
+    WCHAR KeyName[RTL_NUMBER_OF(((PRTL_DYNAMIC_TIME_ZONE_INFORMATION)0)->TimeZoneKeyName)];
+    ULONG Disabled;
+    ULONG LegacyDisabled;
+    BOOLEAN HaveZone;
+    BOOLEAN HaveKeyName;
+    BOOLEAN HaveDisabled;
+    BOOLEAN HaveLegacyDisabled;
+} EXP_TIME_ZONE_SNAPSHOT, *PEXP_TIME_ZONE_SNAPSHOT;
+
+static
+NTSTATUS
+ExpOpenTimeZoneKey(
+    _Out_ PHANDLE Key)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\TimeZoneInformation");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+
+    /* A kernel handle, and a kernel-mode request: the caller's rights on the key do not matter */
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    return ZwCreateKey(Key,
+                       KEY_QUERY_VALUE | KEY_SET_VALUE,
+                       &ObjectAttributes,
+                       0,
+                       NULL,
+                       REG_OPTION_NON_VOLATILE,
+                       NULL);
+}
+
+static
+NTSTATUS
+ExpSetTimeZoneValue(
+    _In_ HANDLE Key,
+    _In_ PCWSTR Name,
+    _In_ ULONG Type,
+    _In_ PVOID Data,
+    _In_ ULONG Size)
+{
+    UNICODE_STRING ValueName;
+
+    RtlInitUnicodeString(&ValueName, Name);
+    return ZwSetValueKey(Key, &ValueName, 0, Type, Data, Size);
+}
+
+/* TRUE if the value exists with the type; at most DataSize bytes are copied */
+static
+BOOLEAN
+ExpQueryTimeZoneValue(
+    _In_ HANDLE Key,
+    _In_ PCWSTR Name,
+    _In_ ULONG Type,
+    _Out_writes_bytes_(DataSize) PVOID Data,
+    _In_ ULONG DataSize,
+    _Out_ PULONG ResultLength)
+{
+    UNICODE_STRING ValueName;
+    union
+    {
+        KEY_VALUE_PARTIAL_INFORMATION Info;
+        UCHAR Buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + 256 + sizeof(WCHAR)];
+    } Value;
+    ULONG Length;
+
+    *ResultLength = 0;
+    RtlInitUnicodeString(&ValueName, Name);
+    if (!NT_SUCCESS(ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, &Value, sizeof(Value), &Length)) ||
+        Value.Info.Type != Type ||
+        Value.Info.DataLength > DataSize)
+    {
+        return FALSE;
+    }
+
+    RtlCopyMemory(Data, Value.Info.Data, Value.Info.DataLength);
+    *ResultLength = Value.Info.DataLength;
+    return TRUE;
+}
+
+static
+VOID
+ExpSnapshotTimeZone(
+    _Out_ PEXP_TIME_ZONE_SNAPSHOT Snapshot,
+    _In_ HANDLE Key)
+{
+    ULONG Length;
+
+    RtlZeroMemory(Snapshot, sizeof(*Snapshot));
+    Snapshot->HaveZone = NT_SUCCESS(RtlQueryTimeZoneInformation(&Snapshot->Zone));
+
+    /* The key name must end inside the buffer to be taken back */
+    Snapshot->HaveKeyName = ExpQueryTimeZoneValue(Key,
+                                                  L"TimeZoneKeyName",
+                                                  REG_SZ,
+                                                  Snapshot->KeyName,
+                                                  sizeof(Snapshot->KeyName) - sizeof(WCHAR),
+                                                  &Length);
+    Snapshot->HaveDisabled = ExpQueryTimeZoneValue(Key,
+                                                   L"DynamicDaylightTimeDisabled",
+                                                   REG_DWORD,
+                                                   &Snapshot->Disabled,
+                                                   sizeof(Snapshot->Disabled),
+                                                   &Length);
+    Snapshot->HaveLegacyDisabled = ExpQueryTimeZoneValue(Key,
+                                                         L"DisableAutoDaylightTimeSet",
+                                                         REG_DWORD,
+                                                         &Snapshot->LegacyDisabled,
+                                                         sizeof(Snapshot->LegacyDisabled),
+                                                         &Length);
+}
+
+static
+VOID
+ExpRestoreTimeZone(
+    _In_ PEXP_TIME_ZONE_SNAPSHOT Snapshot,
+    _In_ HANDLE Key)
+{
+    UNICODE_STRING ValueName;
+
+    /* Best effort; the status of the change itself is what the caller learns */
+    if (Snapshot->HaveZone)
+        RtlSetTimeZoneInformation(&Snapshot->Zone);
+
+    if (Snapshot->HaveKeyName)
+    {
+        ExpSetTimeZoneValue(Key,
+                            L"TimeZoneKeyName",
+                            REG_SZ,
+                            Snapshot->KeyName,
+                            (ULONG)(wcslen(Snapshot->KeyName) + 1) * sizeof(WCHAR));
+    }
+    if (Snapshot->HaveDisabled)
+    {
+        ExpSetTimeZoneValue(Key,
+                            L"DynamicDaylightTimeDisabled",
+                            REG_DWORD,
+                            &Snapshot->Disabled,
+                            sizeof(Snapshot->Disabled));
+    }
+    else
+    {
+        RtlInitUnicodeString(&ValueName, L"DynamicDaylightTimeDisabled");
+        ZwDeleteValueKey(Key, &ValueName);
+    }
+    if (Snapshot->HaveLegacyDisabled)
+    {
+        ExpSetTimeZoneValue(Key,
+                            L"DisableAutoDaylightTimeSet",
+                            REG_DWORD,
+                            &Snapshot->LegacyDisabled,
+                            sizeof(Snapshot->LegacyDisabled));
+    }
+}
+
+/*++
+ * Writes the zone to the registry. This is the one writer of
+ * HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation for a change
+ * of the zone: the key belongs to SYSTEM and a standard user may only read it,
+ * so the caller (after the privilege check) never writes it itself.
+ *
+ * The values are those of RtlSetTimeZoneInformation, which empties the key
+ * name. With Dynamic, the key name and DynamicDaylightTimeDisabled follow, as
+ * SystemDynamicTimeZoneInformation does on Windows. The older
+ * DisableAutoDaylightTimeSet is dropped then: the caller has said what it
+ * means by the flag. A failure puts back the values that were there.
+ *
+ * Called with the time refresh lock held.
+ *--*/
+static
+NTSTATUS
+ExpPersistTimeZone(
+    _In_ PRTL_TIME_ZONE_INFORMATION Zone,
+    _In_opt_ PRTL_DYNAMIC_TIME_ZONE_INFORMATION Dynamic)
+{
+    EXP_TIME_ZONE_SNAPSHOT Snapshot;
+    UNICODE_STRING ValueName;
+    ULONG Disabled;
+    HANDLE Key;
+    NTSTATUS Status;
+
+    Status = ExpOpenTimeZoneKey(&Key);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Cannot open the TimeZoneInformation key (Status 0x%08lx)\n", Status);
+        return Status;
+    }
+
+    ExpSnapshotTimeZone(&Snapshot, Key);
+
+    Status = RtlSetTimeZoneInformation(Zone);
+    if (NT_SUCCESS(Status) && Dynamic)
+    {
+        Status = ExpSetTimeZoneValue(Key,
+                                     L"TimeZoneKeyName",
+                                     REG_SZ,
+                                     Dynamic->TimeZoneKeyName,
+                                     (ULONG)(wcslen(Dynamic->TimeZoneKeyName) + 1) * sizeof(WCHAR));
+        if (NT_SUCCESS(Status))
+        {
+            Disabled = Dynamic->DynamicDaylightTimeDisabled ? 1 : 0;
+            Status = ExpSetTimeZoneValue(Key,
+                                         L"DynamicDaylightTimeDisabled",
+                                         REG_DWORD,
+                                         &Disabled,
+                                         sizeof(Disabled));
+        }
+        if (NT_SUCCESS(Status))
+        {
+            RtlInitUnicodeString(&ValueName, L"DisableAutoDaylightTimeSet");
+            ZwDeleteValueKey(Key, &ValueName);
+        }
+    }
+
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Saving the time zone failed (Status 0x%08lx)\n", Status);
+        ExpRestoreTimeZone(&Snapshot, Key);
+    }
+
+    ZwClose(Key);
+    return Status;
+}
+
+/*
+ * Makes a zone current and keeps it across a restart. Zone is a kernel copy
+ * whose names end inside their arrays; so does the key name of Dynamic. UTC
+ * stays as it is; local time follows the new zone. Nothing changes in memory
+ * if the registry cannot be written.
+ */
+static
+NTSTATUS
+ExpApplyTimeZoneInformation(
+    _In_ PRTL_TIME_ZONE_INFORMATION Zone,
+    _In_opt_ PRTL_DYNAMIC_TIME_ZONE_INFORMATION Dynamic)
+{
+    NTSTATUS Status;
+
+    if (!ExpIsValidTimeZone(Zone))
+    {
+        DPRINT1("Invalid time zone transition dates\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ExAcquireTimeRefreshLock(TRUE);
+    Status = ExpPersistTimeZone(Zone, Dynamic);
+    if (NT_SUCCESS(Status))
+    {
+        RtlCopyMemory(&ExpTimeZoneInfo, Zone, sizeof(RTL_TIME_ZONE_INFORMATION));
+        ExpUpdateTimeZoneBias();
+    }
+    ExReleaseTimeRefreshLock();
+
+    if (NT_SUCCESS(Status))
+        PoNotifySystemTimeSet();
+
+    return Status;
+}
+
 NTSTATUS
 ExpSetTimeZoneInformation(PRTL_TIME_ZONE_INFORMATION TimeZoneInformation)
 {
@@ -681,29 +943,32 @@ ExpSetTimeZoneInformation(PRTL_TIME_ZONE_INFORMATION TimeZoneInformation)
 
     DPRINT("ExpSetTimeZoneInformation called\n");
 
-    /* Capture the caller's buffer before taking the lock */
+    /* Capture the caller's buffer before taking the lock; the names end in their arrays */
     RtlCopyMemory(&NewTimeZoneInfo,
                   TimeZoneInformation,
                   sizeof(RTL_TIME_ZONE_INFORMATION));
+    NewTimeZoneInfo.StandardName[RTL_NUMBER_OF(NewTimeZoneInfo.StandardName) - 1] = UNICODE_NULL;
+    NewTimeZoneInfo.DaylightName[RTL_NUMBER_OF(NewTimeZoneInfo.DaylightName) - 1] = UNICODE_NULL;
 
-    if (!ExpIsValidTimeZone(&NewTimeZoneInfo))
-    {
-        DPRINT1("Invalid time zone transition dates\n");
-        return STATUS_INVALID_PARAMETER;
-    }
+    return ExpApplyTimeZoneInformation(&NewTimeZoneInfo, NULL);
+}
 
-    /* UTC stays as it is; local time follows the new zone */
-    ExAcquireTimeRefreshLock(TRUE);
-    RtlCopyMemory(&ExpTimeZoneInfo,
-                  &NewTimeZoneInfo,
-                  sizeof(RTL_TIME_ZONE_INFORMATION));
-    ExpUpdateTimeZoneBias();
-    ExReleaseTimeRefreshLock();
+NTSTATUS
+ExpSetDynamicTimeZoneInformation(PRTL_DYNAMIC_TIME_ZONE_INFORMATION DynamicTimeZoneInformation)
+{
+    RTL_DYNAMIC_TIME_ZONE_INFORMATION NewInfo;
 
-    PoNotifySystemTimeSet();
+    DPRINT("ExpSetDynamicTimeZoneInformation called\n");
 
-    DPRINT("ExpSetTimeZoneInformation done\n");
-    return STATUS_SUCCESS;
+    /* One copy of the caller's buffer, which is all that is looked at after this */
+    RtlCopyMemory(&NewInfo,
+                  DynamicTimeZoneInformation,
+                  sizeof(RTL_DYNAMIC_TIME_ZONE_INFORMATION));
+    NewInfo.TimeZoneInformation.StandardName[RTL_NUMBER_OF(NewInfo.TimeZoneInformation.StandardName) - 1] = UNICODE_NULL;
+    NewInfo.TimeZoneInformation.DaylightName[RTL_NUMBER_OF(NewInfo.TimeZoneInformation.DaylightName) - 1] = UNICODE_NULL;
+    NewInfo.TimeZoneKeyName[RTL_NUMBER_OF(NewInfo.TimeZoneKeyName) - 1] = UNICODE_NULL;
+
+    return ExpApplyTimeZoneInformation(&NewInfo.TimeZoneInformation, &NewInfo);
 }
 
 VOID

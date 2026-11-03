@@ -311,122 +311,109 @@ GetTimeZoneInformation(LPTIME_ZONE_INFORMATION lpTimeZoneInformation)
 }
 
 
-/* SeTimeZonePrivilege must be enabled in the effective token; STATUS_SUCCESS when it cannot be determined */
-static NTSTATUS
-BasepCheckTimeZonePrivilege(VOID)
-{
-    PRIVILEGE_SET PrivilegeSet;
-    HANDLE hToken;
-    BOOLEAN Held = FALSE;
-    NTSTATUS Status;
-
-    Status = NtOpenThreadToken(NtCurrentThread(), TOKEN_QUERY, FALSE, &hToken);
-    if (Status == STATUS_NO_TOKEN)
-        Status = NtOpenProcessToken(NtCurrentProcess(), TOKEN_QUERY, &hToken);
-    if (!NT_SUCCESS(Status))
-        return STATUS_SUCCESS;
-
-    PrivilegeSet.PrivilegeCount = 1;
-    PrivilegeSet.Control = PRIVILEGE_SET_ALL_NECESSARY;
-    PrivilegeSet.Privilege[0].Luid.LowPart = SE_TIME_ZONE_PRIVILEGE;
-    PrivilegeSet.Privilege[0].Luid.HighPart = 0;
-    PrivilegeSet.Privilege[0].Attributes = 0;
-    Status = NtPrivilegeCheck(hToken, &PrivilegeSet, &Held);
-    NtClose(hToken);
-
-    return (NT_SUCCESS(Status) && !Held) ? STATUS_PRIVILEGE_NOT_HELD : STATUS_SUCCESS;
-}
-
-static BOOL TIME_QueryStoredKeyName(_Out_writes_(BufferLength) PWSTR Buffer, _In_ ULONG BufferLength);
+static BOOLEAN TIME_QueryDaylightDisabled(VOID);
 
 /*
- * @implemented
+ * Hands the zone to the kernel. The kernel checks SeTimeZonePrivilege and writes
+ * HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation itself: the key is
+ * the system's, and a standard user who holds the privilege can only read it.
  */
-BOOL
-WINAPI
-SetTimeZoneInformation(CONST TIME_ZONE_INFORMATION *lpTimeZoneInformation)
+static BOOL
+TIME_SetDynamicZone(
+    _In_ CONST TIME_ZONE_INFORMATION *lpTimeZoneInformation,
+    _In_reads_(KeyNameLength) PCWSTR KeyName,
+    _In_ ULONG KeyNameLength,
+    _In_ BOOLEAN DaylightDisabled)
 {
-    RTL_TIME_ZONE_INFORMATION TimeZoneInformation, OldTimeZoneInformation;
-    WCHAR OldKeyName[ARRAYSIZE(((PDYNAMIC_TIME_ZONE_INFORMATION)0)->TimeZoneKeyName)];
-    BOOLEAN HaveOldZone, HaveOldKeyName;
+    RTL_DYNAMIC_TIME_ZONE_INFORMATION Dynamic;
+    PRTL_TIME_ZONE_INFORMATION TimeZoneInformation = &Dynamic.TimeZoneInformation;
     NTSTATUS Status;
 
-    DPRINT("SetTimeZoneInformation()\n");
+    RtlZeroMemory(&Dynamic, sizeof(Dynamic));
 
-    TimeZoneInformation.Bias = lpTimeZoneInformation->Bias;
+    TimeZoneInformation->Bias = lpTimeZoneInformation->Bias;
 
-    wcsncpy(TimeZoneInformation.StandardName,
+    wcsncpy(TimeZoneInformation->StandardName,
             lpTimeZoneInformation->StandardName,
-            ARRAYSIZE(TimeZoneInformation.StandardName));
-    TimeZoneInformation.StandardDate.Year = lpTimeZoneInformation->StandardDate.wYear;
-    TimeZoneInformation.StandardDate.Month = lpTimeZoneInformation->StandardDate.wMonth;
-    TimeZoneInformation.StandardDate.Day = lpTimeZoneInformation->StandardDate.wDay;
-    TimeZoneInformation.StandardDate.Hour = lpTimeZoneInformation->StandardDate.wHour;
-    TimeZoneInformation.StandardDate.Minute = lpTimeZoneInformation->StandardDate.wMinute;
-    TimeZoneInformation.StandardDate.Second = lpTimeZoneInformation->StandardDate.wSecond;
-    TimeZoneInformation.StandardDate.Milliseconds = lpTimeZoneInformation->StandardDate.wMilliseconds;
-    TimeZoneInformation.StandardDate.Weekday = lpTimeZoneInformation->StandardDate.wDayOfWeek;
-    TimeZoneInformation.StandardBias = lpTimeZoneInformation->StandardBias;
+            ARRAYSIZE(TimeZoneInformation->StandardName));
+    TimeZoneInformation->StandardDate.Year = lpTimeZoneInformation->StandardDate.wYear;
+    TimeZoneInformation->StandardDate.Month = lpTimeZoneInformation->StandardDate.wMonth;
+    TimeZoneInformation->StandardDate.Day = lpTimeZoneInformation->StandardDate.wDay;
+    TimeZoneInformation->StandardDate.Hour = lpTimeZoneInformation->StandardDate.wHour;
+    TimeZoneInformation->StandardDate.Minute = lpTimeZoneInformation->StandardDate.wMinute;
+    TimeZoneInformation->StandardDate.Second = lpTimeZoneInformation->StandardDate.wSecond;
+    TimeZoneInformation->StandardDate.Milliseconds = lpTimeZoneInformation->StandardDate.wMilliseconds;
+    TimeZoneInformation->StandardDate.Weekday = lpTimeZoneInformation->StandardDate.wDayOfWeek;
+    TimeZoneInformation->StandardBias = lpTimeZoneInformation->StandardBias;
 
-    wcsncpy(TimeZoneInformation.DaylightName,
+    wcsncpy(TimeZoneInformation->DaylightName,
             lpTimeZoneInformation->DaylightName,
-            ARRAYSIZE(TimeZoneInformation.DaylightName));
-    TimeZoneInformation.DaylightDate.Year = lpTimeZoneInformation->DaylightDate.wYear;
-    TimeZoneInformation.DaylightDate.Month = lpTimeZoneInformation->DaylightDate.wMonth;
-    TimeZoneInformation.DaylightDate.Day = lpTimeZoneInformation->DaylightDate.wDay;
-    TimeZoneInformation.DaylightDate.Hour = lpTimeZoneInformation->DaylightDate.wHour;
-    TimeZoneInformation.DaylightDate.Minute = lpTimeZoneInformation->DaylightDate.wMinute;
-    TimeZoneInformation.DaylightDate.Second = lpTimeZoneInformation->DaylightDate.wSecond;
-    TimeZoneInformation.DaylightDate.Milliseconds = lpTimeZoneInformation->DaylightDate.wMilliseconds;
-    TimeZoneInformation.DaylightDate.Weekday = lpTimeZoneInformation->DaylightDate.wDayOfWeek;
-    TimeZoneInformation.DaylightBias = lpTimeZoneInformation->DaylightBias;
+            ARRAYSIZE(TimeZoneInformation->DaylightName));
+    TimeZoneInformation->DaylightDate.Year = lpTimeZoneInformation->DaylightDate.wYear;
+    TimeZoneInformation->DaylightDate.Month = lpTimeZoneInformation->DaylightDate.wMonth;
+    TimeZoneInformation->DaylightDate.Day = lpTimeZoneInformation->DaylightDate.wDay;
+    TimeZoneInformation->DaylightDate.Hour = lpTimeZoneInformation->DaylightDate.wHour;
+    TimeZoneInformation->DaylightDate.Minute = lpTimeZoneInformation->DaylightDate.wMinute;
+    TimeZoneInformation->DaylightDate.Second = lpTimeZoneInformation->DaylightDate.wSecond;
+    TimeZoneInformation->DaylightDate.Milliseconds = lpTimeZoneInformation->DaylightDate.wMilliseconds;
+    TimeZoneInformation->DaylightDate.Weekday = lpTimeZoneInformation->DaylightDate.wDayOfWeek;
+    TimeZoneInformation->DaylightBias = lpTimeZoneInformation->DaylightBias;
 
-    /* Refuse before the registry is written; the kernel's own check stays authoritative */
-    Status = BasepCheckTimeZonePrivilege();
-    if (!NT_SUCCESS(Status))
-    {
-        BaseSetLastNTError(Status);
-        return FALSE;
-    }
+    if (KeyNameLength > ARRAYSIZE(Dynamic.TimeZoneKeyName))
+        KeyNameLength = ARRAYSIZE(Dynamic.TimeZoneKeyName);
+    RtlCopyMemory(Dynamic.TimeZoneKeyName, KeyName, KeyNameLength * sizeof(WCHAR));
+    Dynamic.DynamicDaylightTimeDisabled = DaylightDisabled;
 
-    /* Values missing from the registry stay zero */
-    RtlZeroMemory(&OldTimeZoneInformation, sizeof(OldTimeZoneInformation));
-    HaveOldZone = NT_SUCCESS(RtlQueryTimeZoneInformation(&OldTimeZoneInformation));
-    HaveOldKeyName = TIME_QueryStoredKeyName(OldKeyName, ARRAYSIZE(OldKeyName));
-
-    Status = RtlSetTimeZoneInformation(&TimeZoneInformation);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("RtlSetTimeZoneInformation() failed (Status %lx)\n", Status);
-        BaseSetLastNTError(Status);
-        return FALSE;
-    }
-
-    Status = NtSetSystemInformation(SystemCurrentTimeZoneInformation,
-                                    (PVOID)&TimeZoneInformation,
-                                    sizeof(RTL_TIME_ZONE_INFORMATION));
+    Status = NtSetSystemInformation(SystemDynamicTimeZoneInformation,
+                                    &Dynamic,
+                                    sizeof(Dynamic));
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("NtSetSystemInformation() failed (Status %lx)\n", Status);
-        if (HaveOldZone)
-        {
-            /* The rollback empties the key name, as every set does: put the old one back */
-            RtlSetTimeZoneInformation(&OldTimeZoneInformation);
-            if (HaveOldKeyName)
-            {
-                RtlWriteRegistryValue(RTL_REGISTRY_CONTROL,
-                                      L"TimeZoneInformation",
-                                      L"TimeZoneKeyName",
-                                      REG_SZ,
-                                      OldKeyName,
-                                      (wcslen(OldKeyName) + 1) * sizeof(WCHAR));
-            }
-        }
         BaseSetLastNTError(Status);
         return FALSE;
     }
 
     return TRUE;
+}
+
+/*
+ * @implemented
+ *
+ * As on Windows 10 the kernel stores the zone, with an empty key name. The
+ * daylight flag stays as it was; the older DisableAutoDaylightTimeSet counts as
+ * set (the kernel drops that value, and the flag takes over its meaning).
+ */
+BOOL
+WINAPI
+SetTimeZoneInformation(CONST TIME_ZONE_INFORMATION *lpTimeZoneInformation)
+{
+    DPRINT("SetTimeZoneInformation()\n");
+
+    return TIME_SetDynamicZone(lpTimeZoneInformation, L"", 1, TIME_QueryDaylightDisabled());
+}
+
+/*
+ * @implemented
+ *
+ * The same, with the key name of the zone and the daylight flag of the caller.
+ */
+BOOL
+WINAPI
+SetDynamicTimeZoneInformation(CONST DYNAMIC_TIME_ZONE_INFORMATION *lpTimeZoneInformation)
+{
+    DPRINT("SetDynamicTimeZoneInformation()\n");
+
+    if (!lpTimeZoneInformation)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    return TIME_SetDynamicZone((CONST TIME_ZONE_INFORMATION *)lpTimeZoneInformation,
+                               lpTimeZoneInformation->TimeZoneKeyName,
+                               ARRAYSIZE(lpTimeZoneInformation->TimeZoneKeyName),
+                               lpTimeZoneInformation->DynamicDaylightTimeDisabled);
 }
 
 /*
@@ -553,27 +540,6 @@ TIME_QueryStringValue(
     return TRUE;
 }
 
-/* Reads the TimeZoneKeyName value of the active time zone; FALSE if there is none */
-static
-BOOL
-TIME_QueryStoredKeyName(
-    _Out_writes_(BufferLength) PWSTR Buffer,
-    _In_ ULONG BufferLength)
-{
-    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\TimeZoneInformation");
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    BOOL Found;
-    HANDLE Key;
-
-    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
-    if (!NT_SUCCESS(NtOpenKey(&Key, KEY_QUERY_VALUE, &ObjectAttributes)))
-        return FALSE;
-
-    Found = TIME_QueryStringValue(Key, L"TimeZoneKeyName", Buffer, BufferLength);
-    NtClose(Key);
-    return Found;
-}
-
 /* Reads a REG_DWORD value; FALSE if absent or not a four-byte REG_DWORD */
 static
 BOOL
@@ -598,6 +564,26 @@ TIME_QueryDwordValue(
 
     *Value = *(PULONG)Info.Partial.Data;
     return TRUE;
+}
+
+/* The zone's automatic adjustment is off: DynamicDaylightTimeDisabled, or the older DisableAutoDaylightTimeSet */
+static
+BOOLEAN
+TIME_QueryDaylightDisabled(VOID)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\TimeZoneInformation");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    ULONG Dynamic = 0, Legacy = 0;
+    HANDLE Key;
+
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenKey(&Key, KEY_QUERY_VALUE, &ObjectAttributes)))
+        return FALSE;
+
+    TIME_QueryDwordValue(Key, L"DynamicDaylightTimeDisabled", &Dynamic);
+    TIME_QueryDwordValue(Key, L"DisableAutoDaylightTimeSet", &Legacy);
+    NtClose(Key);
+    return (Dynamic || Legacy) ? TRUE : FALSE;
 }
 
 /* Whether a Time Zones entry describes the zone in effect: same standard name, biases and transitions */

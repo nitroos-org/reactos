@@ -314,6 +314,15 @@ GetAutoDaylight(VOID)
     DWORD dwType;
     DWORD dwDisabled;
     DWORD dwValueSize;
+    BOOL bDisabled = FALSE;
+    ULONG i;
+    static const PCWSTR ValueNames[] =
+    {
+        /* Vista+, and what a change of the zone through the kernel leaves */
+        L"DynamicDaylightTimeDisabled",
+        /* NT 5, and an old registry */
+        L"DisableAutoDaylightTimeSet"
+    };
 
     lError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                            L"SYSTEM\\CurrentControlSet\\Control\\TimeZoneInformation",
@@ -323,27 +332,27 @@ GetAutoDaylight(VOID)
     if (lError != ERROR_SUCCESS)
         return FALSE;
 
-    // NOTE: On Vista+: REG_DWORD "DynamicDaylightTimeDisabled"
-    dwValueSize = sizeof(dwDisabled);
-    lError = RegQueryValueExW(hKey,
-                              L"DisableAutoDaylightTimeSet",
-                              NULL,
-                              &dwType,
-                              (LPBYTE)&dwDisabled,
-                              &dwValueSize);
+    for (i = 0; i < ARRAYSIZE(ValueNames); i++)
+    {
+        dwValueSize = sizeof(dwDisabled);
+        lError = RegQueryValueExW(hKey,
+                                  ValueNames[i],
+                                  NULL,
+                                  &dwType,
+                                  (LPBYTE)&dwDisabled,
+                                  &dwValueSize);
+
+        /*
+         * A registry value that isn't available means auto-daylight
+         * shouldn't be disabled by it.
+         */
+        if ((lError == ERROR_SUCCESS) && (dwType == REG_DWORD) && (dwValueSize == sizeof(dwDisabled)) && dwDisabled)
+            bDisabled = TRUE;
+    }
 
     RegCloseKey(hKey);
 
-    if ((lError != ERROR_SUCCESS) || (dwType != REG_DWORD) || (dwValueSize != sizeof(dwDisabled)))
-    {
-        /*
-         * The call failed (non zero) because the registry value isn't available,
-         * which means auto-daylight shouldn't be disabled.
-         */
-        dwDisabled = FALSE;
-    }
-
-    return !dwDisabled;
+    return !bDisabled;
 }
 
 VOID

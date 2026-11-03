@@ -195,6 +195,7 @@ extern void func_ThreadTimesTimerResolution(void);
 extern void func_TunnelCache(void);
 extern void func_VolumeMountPoint(void);
 extern void func_WindowsDirJunction(void);
+extern void func_TzPrivilegedWriter(void);
 extern void func_TzSetPrivilege(void);
 extern void func_UEFIFirmware(void);
 extern void func_UnattendedCrash(void);
@@ -414,6 +415,7 @@ const struct test winetest_testlist[] =
     { "ThreadContextObjects",        func_ThreadContextObjects },
     { "TunnelCache",                 func_TunnelCache },
     { "VolumeMountPoint",            func_VolumeMountPoint },
+    { "TzPrivilegedWriter",          func_TzPrivilegedWriter },
     { "TzSetPrivilege",              func_TzSetPrivilege },
     { "UEFIFirmware",                func_UEFIFirmware },
     { "UnattendedCrash",             func_UnattendedCrash },

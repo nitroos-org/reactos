@@ -191,6 +191,7 @@ list(APPEND SOURCE
     ThreadTimesTimerResolution.c
     TunnelCache.c
     VolumeMountPoint.c
+    TzPrivilegedWriter.c
     TzSetPrivilege.c
     UEFIFirmware.c
     UnattendedCrash.c

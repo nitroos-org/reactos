@@ -2243,20 +2243,47 @@ SSI_DEF(SystemCurrentTimeZoneInformation)
 {
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
 
-    /* Check user buffer's size */
+    /*
+     * User mode changes the zone with SystemDynamicTimeZoneInformation; this
+     * class is not available to it, whatever it holds (measured on Windows 10:
+     * STATUS_INVALID_INFO_CLASS, before the length and the privilege).
+     */
+    if (PreviousMode != KernelMode)
+    {
+        return STATUS_INVALID_INFO_CLASS;
+    }
+
+    /* Check the buffer's size */
     if (Size < sizeof(RTL_TIME_ZONE_INFORMATION))
     {
         return STATUS_INFO_LENGTH_MISMATCH;
     }
 
-    /* Changing the time zone needs SeTimeZonePrivilege (NT 6); SeSystemtimePrivilege is not enough */
+    return ExpSetTimeZoneInformation((PRTL_TIME_ZONE_INFORMATION)Buffer);
+}
+
+/* Class 102 - Dynamic Time Zone Information */
+SSI_DEF(SystemDynamicTimeZoneInformation)
+{
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+
+    /* The length is checked before the privilege (Windows 10) */
+    if (Size < sizeof(RTL_DYNAMIC_TIME_ZONE_INFORMATION))
+    {
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    /*
+     * Changing the time zone needs SeTimeZonePrivilege (NT 6); SeSystemtimePrivilege is not enough.
+     * The kernel then writes the registry itself: the caller need not be able to.
+     */
     if (PreviousMode != KernelMode &&
         !SeSinglePrivilegeCheck(SeTimeZonePrivilege, PreviousMode))
     {
         return STATUS_PRIVILEGE_NOT_HELD;
     }
 
-    return ExpSetTimeZoneInformation((PRTL_TIME_ZONE_INFORMATION)Buffer);
+    return ExpSetDynamicTimeZoneInformation((PRTL_DYNAMIC_TIME_ZONE_INFORMATION)Buffer);
 }
 
 static
@@ -3392,6 +3419,7 @@ CallQS[] =
     SI_QX(SystemFileCacheInformationEx),
     SI_QX(SystemProcessorIdleCycleTimeInformation),
     SI_QX(SystemBootEnvironmentInformation),
+    SI_XS(SystemDynamicTimeZoneInformation),
     SI_QX(SystemProcessorBrandString),
 };
 
