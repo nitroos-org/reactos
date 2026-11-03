@@ -4569,6 +4569,43 @@ interface IApplicationActivationManager : IUnknown
                                 [out] DWORD *processid);
 }
 
+typedef [v1_enum] enum _ATTACHMENT_PROMPT
+{
+    ATTACHMENT_PROMPT_NONE = 0,
+    ATTACHMENT_PROMPT_SAVE = 1,
+    ATTACHMENT_PROMPT_EXEC = 2,
+    ATTACHMENT_PROMPT_EXEC_OR_SAVE = 3
+} ATTACHMENT_PROMPT;
+
+typedef [v1_enum] enum _ATTACHMENT_ACTION
+{
+    ATTACHMENT_ACTION_CANCEL = 0,
+    ATTACHMENT_ACTION_SAVE = 1,
+    ATTACHMENT_ACTION_EXEC = 2
+} ATTACHMENT_ACTION;
+
+[
+    uuid(73db1241-1e85-4581-8e4f-a81e1d0f8c57),
+    object,
+    local,
+    pointer_default(unique)
+]
+interface IAttachmentExecute : IUnknown
+{
+    HRESULT SetClientTitle([in, string] LPCWSTR pszTitle);
+    HRESULT SetClientGuid([in] REFGUID guid);
+    HRESULT SetLocalPath([in, string] LPCWSTR pszLocalPath);
+    HRESULT SetFileName([in, string] LPCWSTR pszFileName);
+    HRESULT SetSource([in, string] LPCWSTR pszSource);
+    HRESULT SetReferrer([in, string] LPCWSTR pszReferrer);
+    HRESULT CheckPolicy();
+    HRESULT Prompt([in] HWND hwnd, [in] ATTACHMENT_PROMPT prompt, [out] ATTACHMENT_ACTION *paction);
+    HRESULT Save();
+    HRESULT Execute([in] HWND hwnd, [in, string, unique] LPCWSTR pszVerb, [out] HANDLE *phProcess);
+    HRESULT SaveWithUI([in] HWND hwnd);
+    HRESULT ClearClientState();
+}
+
 /*****************************************************************************
  * ShellObjects typelibrary
  */

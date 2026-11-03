@@ -13,4 +13,29 @@ BEGIN
     IDS_ADD "Add..."
     IDS_ORGANIZE "Organize..."
     IDS_FOLDERSLABEL "Folders"
+    IDS_ATT_TITLE_EXEC "Open File - Security Warning"
+    IDS_ATT_TITLE_SAVE "File Download - Security Warning"
+    IDS_ATT_QUESTION_EXEC "Do you want to run this file?"
+    IDS_ATT_QUESTION_SAVE "Do you want to save this file?"
+    IDS_ATT_RUN "&Run"
+    IDS_ATT_SAVE "&Save"
+END
+
+IDD_ATTACHMENT_PROMPT DIALOGEX 0, 0, 252, 138
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Open File - Security Warning"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    ICON "", IDC_ATT_ICON, 8, 10, 21, 20
+    LTEXT "", IDC_ATT_QUESTION, 38, 10, 206, 10
+    LTEXT "Name:", -1, 38, 28, 36, 10
+    LTEXT "", IDC_ATT_NAME, 78, 28, 166, 10, SS_PATHELLIPSIS
+    LTEXT "Type:", -1, 38, 40, 36, 10
+    LTEXT "", IDC_ATT_TYPE, 78, 40, 166, 10, SS_ENDELLIPSIS
+    LTEXT "From:", -1, 38, 52, 36, 10
+    LTEXT "", IDC_ATT_FROM, 78, 52, 166, 10, SS_ENDELLIPSIS
+    DEFPUSHBUTTON "&Run", IDOK, 132, 68, 54, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 190, 68, 54, 14
+    AUTOCHECKBOX "&Always ask before opening this file", IDC_ATT_ALWAYS, 8, 90, 236, 10
+    LTEXT "While files from the Internet can be useful, this file type can potentially harm your computer. If you do not trust the source, do not run or save this software.", -1, 8, 106, 236, 26
 END

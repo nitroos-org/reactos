@@ -17,11 +17,13 @@
  */
 
 #include "windef.h"
+#include "winuser.h"
 #include "resource.h"
 
 IDR_SHDOCVW WINE_REGISTRY "res/shdocvw_v1.rgs"
 IDR_FAVBAND REGISTRY "res/favband.rgs"
 IDR_EXPLORERBAND REGISTRY "res/explorerband.rgs"
+IDR_ATTACHMENTSERVICES REGISTRY "res/attachmentservices.rgs"
 IDR_TYPELIB TYPELIB "shdocvw_v1.tlb"
 
 LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL

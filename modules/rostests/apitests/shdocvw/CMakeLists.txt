@@ -2,6 +2,7 @@
 include_directories(${REACTOS_SOURCE_DIR}/dll/win32/ieframe)
 
 list(APPEND SOURCE
+    AttachmentExecute.cpp
     DownloadNames.c
     FileDownload.c
     InternetShortcut.c
