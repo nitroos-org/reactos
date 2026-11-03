@@ -4,6 +4,7 @@ list(APPEND SOURCE
     accept.c
     acceptname.c
     addresschange.c
+    asyncselect.c
     backlog.c
     bind.c
     broadcast.c
@@ -11,6 +12,7 @@ list(APPEND SOURCE
     closerace.c
     connectex.c
     connecterror.c
+    connectstate.c
     GetAddrInfoEx.c
     getaddrinfo.c
     GetHostNameW.c
