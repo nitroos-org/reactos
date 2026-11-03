@@ -22,6 +22,8 @@ DWORD CatalogEntryId; /* CatalogEntryId for upcalls */
 LPWPUCOMPLETEOVERLAPPEDREQUEST lpWPUCompleteOverlappedRequest;
 PSOCKET_INFORMATION SocketListHead = NULL;
 CRITICAL_SECTION SocketListLock;
+/* Serialises the state WSPAsyncSelect, its completion routine and the re-enabling of events change */
+CRITICAL_SECTION AsyncSelectLock;
 LIST_ENTRY SockHelpersListHead = { NULL, NULL };
 ULONG SockAsyncThreadRefCount;
 HANDLE SockAsyncHelperAfdHandle;
@@ -4765,16 +4767,13 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
 
     PASYNC_DATA AsyncData = Context;
     PSOCKET_INFORMATION Socket;
-    ULONG x;
+    ULONG x, Pass, Ready, Events[8], Count = 0, i;
+    HWND hWnd;
+    UINT wMsg;
+    BOOLEAN Done;
 
     /* Get the Socket */
     Socket = AsyncData->ParentSocket;
-
-    /* Check if the Sequence  Number Changed behind our back */
-    if (AsyncData->SequenceNumber != Socket->SharedData->SequenceNumber )
-    {
-        return;
-    }
 
     /* Check we were manually called b/c of a failure */
     if (!NT_SUCCESS(IoStatusBlock->Status))
@@ -4783,21 +4782,44 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
         return;
     }
 
+    /*
+     * The events are disabled before their messages are posted, and the check of the sequence number
+     * is made under the same lock as the change of the selection by WSPAsyncSelect and by the
+     * re-enabling of events. A program reads when it gets a message and selects the events again:
+     * with the message first, it could do both before the event was disabled here, the event would
+     * then stay disabled although the selection is new, and the program would wait for a message
+     * about data that is already there.
+     */
+    EnterCriticalSection(&AsyncSelectLock);
+
+    /* Check if the Sequence  Number Changed behind our back */
+    if (AsyncData->SequenceNumber != Socket->SharedData->SequenceNumber )
+    {
+        LeaveCriticalSection(&AsyncSelectLock);
+        return;
+    }
+
+    hWnd = Socket->SharedData->hWnd;
+    wMsg = Socket->SharedData->wMsg;
+    Ready = AsyncData->AsyncSelectInfo.Handles[0].Events;
+
+    /* FD_CONNECT is posted before FD_WRITE, as on Windows (measured on Windows 10: a connect that
+     * completes while the socket is selected for both gives FD_CONNECT, then FD_WRITE). */
+    for (Pass = 0; Pass < 2; Pass++)
     for (x = 1; x; x<<=1)
     {
-        switch (AsyncData->AsyncSelectInfo.Handles[0].Events & x)
+        if ((Pass == 0) != ((x & (AFD_EVENT_CONNECT | AFD_EVENT_CONNECT_FAIL)) != 0))
+            continue;
+
+        switch (Ready & x)
         {
             case AFD_EVENT_RECEIVE:
                 if (0 != (Socket->SharedData->AsyncEvents & FD_READ) &&
                     0 == (Socket->SharedData->AsyncDisabledEvents & FD_READ))
                 {
-                    /* Make the Notification */
-                    (Upcalls.lpWPUPostMessage)(Socket->SharedData->hWnd,
-                                               Socket->SharedData->wMsg,
-                                               Socket->Handle,
-                                               WSAMAKESELECTREPLY(FD_READ, 0));
                     /* Disable this event until the next read(); */
                     Socket->SharedData->AsyncDisabledEvents |= FD_READ;
+                    Events[Count++] = FD_READ;
                 }
             break;
 
@@ -4805,13 +4827,9 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
             if (0 != (Socket->SharedData->AsyncEvents & FD_OOB) &&
                 0 == (Socket->SharedData->AsyncDisabledEvents & FD_OOB))
             {
-                /* Make the Notification */
-                (Upcalls.lpWPUPostMessage)(Socket->SharedData->hWnd,
-                                           Socket->SharedData->wMsg,
-                                           Socket->Handle,
-                                           WSAMAKESELECTREPLY(FD_OOB, 0));
                 /* Disable this event until the next read(); */
                 Socket->SharedData->AsyncDisabledEvents |= FD_OOB;
+                Events[Count++] = FD_OOB;
             }
             break;
 
@@ -4819,13 +4837,9 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
                 if (0 != (Socket->SharedData->AsyncEvents & FD_WRITE) &&
                     0 == (Socket->SharedData->AsyncDisabledEvents & FD_WRITE))
                 {
-                    /* Make the Notification */
-                    (Upcalls.lpWPUPostMessage)(Socket->SharedData->hWnd,
-                                               Socket->SharedData->wMsg,
-                                               Socket->Handle,
-                                               WSAMAKESELECTREPLY(FD_WRITE, 0));
                     /* Disable this event until the next write(); */
                     Socket->SharedData->AsyncDisabledEvents |= FD_WRITE;
+                    Events[Count++] = FD_WRITE;
                 }
                 break;
 
@@ -4835,13 +4849,9 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
                 if (0 != (Socket->SharedData->AsyncEvents & FD_CONNECT) &&
                     0 == (Socket->SharedData->AsyncDisabledEvents & FD_CONNECT))
                 {
-                    /* Make the Notification */
-                    (Upcalls.lpWPUPostMessage)(Socket->SharedData->hWnd,
-                        Socket->SharedData->wMsg,
-                        Socket->Handle,
-                        WSAMAKESELECTREPLY(FD_CONNECT, 0));
                     /* Disable this event forever; */
                     Socket->SharedData->AsyncDisabledEvents |= FD_CONNECT;
+                    Events[Count++] = FD_CONNECT;
                 }
                 break;
 
@@ -4849,13 +4859,9 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
                 if (0 != (Socket->SharedData->AsyncEvents & FD_ACCEPT) &&
                     0 == (Socket->SharedData->AsyncDisabledEvents & FD_ACCEPT))
                 {
-                    /* Make the Notification */
-                    (Upcalls.lpWPUPostMessage)(Socket->SharedData->hWnd,
-                                               Socket->SharedData->wMsg,
-                                               Socket->Handle,
-                                               WSAMAKESELECTREPLY(FD_ACCEPT, 0));
                     /* Disable this event until the next accept(); */
                     Socket->SharedData->AsyncDisabledEvents |= FD_ACCEPT;
+                    Events[Count++] = FD_ACCEPT;
                 }
                 break;
 
@@ -4865,13 +4871,9 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
                 if (0 != (Socket->SharedData->AsyncEvents & FD_CLOSE) &&
                     0 == (Socket->SharedData->AsyncDisabledEvents & FD_CLOSE))
                 {
-                    /* Make the Notification */
-                    (Upcalls.lpWPUPostMessage)(Socket->SharedData->hWnd,
-                                               Socket->SharedData->wMsg,
-                                               Socket->Handle,
-                                               WSAMAKESELECTREPLY(FD_CLOSE, 0));
                     /* Disable this event forever; */
                     Socket->SharedData->AsyncDisabledEvents |= FD_CLOSE;
+                    Events[Count++] = FD_CLOSE;
                 }
                  break;
             /* FIXME: Support QOS */
@@ -4879,10 +4881,21 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
     }
 
     /* Check if there are any events left for us to check */
-    if ((Socket->SharedData->AsyncEvents & (~Socket->SharedData->AsyncDisabledEvents)) == 0 )
+    Done = (Socket->SharedData->AsyncEvents & (~Socket->SharedData->AsyncDisabledEvents)) == 0;
+
+    LeaveCriticalSection(&AsyncSelectLock);
+
+    /* Make the notifications */
+    for (i = 0; i < Count; i++)
     {
-        return;
+        (Upcalls.lpWPUPostMessage)(hWnd,
+                                   wMsg,
+                                   Socket->Handle,
+                                   WSAMAKESELECTREPLY(Events[i], 0));
     }
+
+    if (Done)
+        return;
 
     /* Keep Polling */
     SockProcessAsyncSelect(Socket, AsyncData);
@@ -4985,15 +4998,16 @@ VOID SockProcessQueuedAsyncSelect(PVOID Context, PIO_STATUS_BLOCK IoStatusBlock)
     if (Socket->SharedData->State != SocketClosed)
     {
         /* Check if the Sequence Number changed by now, in which case quit */
-        if (AsyncData->SequenceNumber == Socket->SharedData->SequenceNumber)
+        EnterCriticalSection(&AsyncSelectLock);
+        if (AsyncData->SequenceNumber == Socket->SharedData->SequenceNumber &&
+            (Socket->SharedData->AsyncEvents & (~Socket->SharedData->AsyncDisabledEvents)))
         {
-            /* Do the actual select, if needed */
-            if ((Socket->SharedData->AsyncEvents & (~Socket->SharedData->AsyncDisabledEvents)))
-            {
-                SockProcessAsyncSelect(Socket, AsyncData);
-                FreeContext = FALSE;
-            }
+            /* Do the actual select, with the events as they are now */
+            FreeContext = FALSE;
         }
+        LeaveCriticalSection(&AsyncSelectLock);
+        if (!FreeContext)
+            SockProcessAsyncSelect(Socket, AsyncData);
     }
 
     /* Free the Context */
@@ -5011,9 +5025,12 @@ SockReenableAsyncSelectEvent (IN PSOCKET_INFORMATION Socket,
 {
     PASYNC_DATA AsyncData;
 
+    EnterCriticalSection(&AsyncSelectLock);
+
     /* Make sure the event is actually disabled */
     if (!(Socket->SharedData->AsyncDisabledEvents & Event))
     {
+        LeaveCriticalSection(&AsyncSelectLock);
         return;
     }
 
@@ -5023,15 +5040,17 @@ SockReenableAsyncSelectEvent (IN PSOCKET_INFORMATION Socket,
     /* Return if no more events are being polled */
     if ((Socket->SharedData->AsyncEvents & (~Socket->SharedData->AsyncDisabledEvents)) == 0 )
     {
+        LeaveCriticalSection(&AsyncSelectLock);
         return;
     }
 
     /* Wait on new events */
     AsyncData = HeapAlloc(GetProcessHeap(), 0, sizeof(ASYNC_DATA));
-    if (!AsyncData) return;
-
-    /* Create the Asynch Thread if Needed */
-    SockCreateOrReferenceAsyncThread();
+    if (!AsyncData)
+    {
+        LeaveCriticalSection(&AsyncSelectLock);
+        return;
+    }
 
     /* Increase the sequence number to stop anything else */
     Socket->SharedData->SequenceNumber++;
@@ -5039,6 +5058,11 @@ SockReenableAsyncSelectEvent (IN PSOCKET_INFORMATION Socket,
     /* Set up the Async Data */
     AsyncData->ParentSocket = Socket;
     AsyncData->SequenceNumber = Socket->SharedData->SequenceNumber;
+
+    LeaveCriticalSection(&AsyncSelectLock);
+
+    /* Create the Asynch Thread if Needed */
+    SockCreateOrReferenceAsyncThread();
 
     /* Begin Async Select by using I/O Completion */
     NtSetIoCompletion(SockAsyncCompletionPort,
@@ -5076,6 +5100,7 @@ DllMain(HANDLE hInstDll,
 
         /* Initialize the lock that protects our socket list */
         InitializeCriticalSection(&SocketListLock);
+        InitializeCriticalSection(&AsyncSelectLock);
         MsafdAddrChangeInit();
         MsafdTransmitInit();
 
@@ -5093,6 +5118,7 @@ DllMain(HANDLE hInstDll,
 
         /* Delete the socket list lock */
         DeleteCriticalSection(&SocketListLock);
+        DeleteCriticalSection(&AsyncSelectLock);
         MsafdTransmitExit();
         MsafdAddrChangeExit();
 

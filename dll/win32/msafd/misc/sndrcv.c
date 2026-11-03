@@ -12,6 +12,8 @@
 
 #include <msafd.h>
 
+extern CRITICAL_SECTION AsyncSelectLock;
+
 INT
 WSPAPI
 WSPAsyncSelect(IN  SOCKET Handle,
@@ -62,11 +64,14 @@ WSPAsyncSelect(IN  SOCKET Handle,
     SockGetAsyncSelectHelperAfdHandle();
 
     /* Store Socket Data */
+    EnterCriticalSection(&AsyncSelectLock);
     Socket->SharedData->hWnd = hWnd;
     Socket->SharedData->wMsg = wMsg;
     Socket->SharedData->AsyncEvents = lEvent;
     Socket->SharedData->AsyncDisabledEvents = 0;
     Socket->SharedData->SequenceNumber++;
+    AsyncData->SequenceNumber = Socket->SharedData->SequenceNumber;
+    LeaveCriticalSection(&AsyncSelectLock);
 
     /* A change of the address list that came while it was not selected is reported now */
     MsafdAddrChangeSelectionChanged(Socket);
@@ -80,7 +85,6 @@ WSPAsyncSelect(IN  SOCKET Handle,
 
     /* Set up the Async Data */
     AsyncData->ParentSocket = Socket;
-    AsyncData->SequenceNumber = Socket->SharedData->SequenceNumber;
 
     /* Begin Async Select by using I/O Completion */
     NtSetIoCompletion(SockAsyncCompletionPort,

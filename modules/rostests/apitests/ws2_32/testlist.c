@@ -20,6 +20,7 @@ extern void func_GetAddrInfoEx(void);
 extern void func_getaddrinfo(void);
 extern void func_GetHostNameW(void);
 extern void func_addresschange(void);
+extern void func_asyncselect(void);
 extern void func_gethostname(void);
 extern void func_getnameinfo(void);
 extern void func_getnameinfoserv(void);
@@ -100,6 +101,7 @@ const struct test winetest_testlist[] =
     { "handleinherit", func_handleinherit },
     { "sendwhole", func_sendwhole },
     { "addresschange", func_addresschange },
+    { "asyncselect", func_asyncselect },
     { "tcpnodelay", func_tcpnodelay },
     { "inheritedsocket", func_inheritedsocket },
     { "inheritedsocketchild", func_inheritedsocketchild },
