@@ -56,6 +56,13 @@ static void TestAdapters(void)
             continue;
 
         ok(A->Luid.Value != 0, "adapter %lu: no luid\n", A->IfIndex);
+
+        /* the stack is IPv4: .NET GetIPv4Properties throws NetworkInformationException (WSAEPROTONOSUPPORT)
+         * for an adapter without this flag */
+        ok((A->Flags & IP_ADAPTER_IPV4_ENABLED) != 0, "adapter %lu: Flags 0x%lx lack IP_ADAPTER_IPV4_ENABLED\n",
+           A->IfIndex, A->Flags);
+        ok(A->Ipv6IfIndex == 0 || (A->Flags & IP_ADAPTER_IPV6_ENABLED), "adapter %lu: Ipv6IfIndex %lu but Flags 0x%lx\n",
+           A->IfIndex, A->Ipv6IfIndex, A->Flags);
         ok(A->Luid.Info.IfType == A->IfType, "adapter %lu: luid type %u, adapter type %lu\n", A->IfIndex,
            A->Luid.Info.IfType, A->IfType);
         ok(A->Luid.Info.Reserved == 0, "adapter %lu: luid reserved bits 0x%lx\n", A->IfIndex,
