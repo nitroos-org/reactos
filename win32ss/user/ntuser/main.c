@@ -251,6 +251,10 @@ UserProcessDestroy(PEPROCESS Process)
         ppiCurrent->hdeskStartup = NULL;
     }
 
+    /* Desktop handles the process leaves open are closed after this callout:
+       release the desktop heap views (and desktop references) they hold now */
+    IntFreeProcessDesktopViews(Process, ppiCurrent);
+
     /* Clean up the process icon cache */
     IntCleanupCurIconCache(ppiCurrent);
 

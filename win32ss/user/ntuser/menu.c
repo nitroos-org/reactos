@@ -614,9 +614,19 @@ IntRemoveMenuItem( PMENU pMenu, UINT nPos, UINT wFlags, BOOL bRecurse )
     /* Remove item */
 
     FreeMenuText(pMenu,item);
-    if (bRecurse && item->spSubMenu)
+    if (item->spSubMenu)
     {
-       IntDestroyMenuObject(item->spSubMenu, bRecurse);
+       PMENU SubMenu = item->spSubMenu;
+       item->spSubMenu = NULL;
+
+       /* The item locked its submenu when it was set: release it, as
+          IntDestroyMenu does. A submenu that is still locked cannot be
+          destroyed and stayed forever (with the PROCESSINFO of its owner).
+          RemoveMenu keeps the submenu, DeleteMenu destroys it. */
+       if (!IntReleaseMenuObject(SubMenu) && bRecurse)
+       {
+          IntDestroyMenuObject(SubMenu, bRecurse);
+       }
     }
     ////// Use cAlloced with inc's of 8's....
     if (--pMenu->cItems == 0)
@@ -819,6 +829,9 @@ IntCloneMenuItems(PMENU Destination, PMENU Source)
       NewMenuItem->fState = MenuItem->fState;
       NewMenuItem->wID = MenuItem->wID;
       NewMenuItem->spSubMenu = MenuItem->spSubMenu;
+      /* Every item locks its submenu (released by IntDestroyMenu / IntRemoveMenuItem) */
+      if (NewMenuItem->spSubMenu)
+         UserReferenceObject(NewMenuItem->spSubMenu);
       NewMenuItem->hbmpChecked = MenuItem->hbmpChecked;
       NewMenuItem->hbmpUnchecked = MenuItem->hbmpUnchecked;
       NewMenuItem->dwItemData = MenuItem->dwItemData;
@@ -829,7 +842,14 @@ IntCloneMenuItems(PMENU Destination, PMENU Source)
          NewMenuItem->lpstr.Buffer = DesktopHeapAlloc(Destination->head.rpdesk, MenuItem->lpstr.MaximumLength);
          if (!NewMenuItem->lpstr.Buffer)
          {
-             DesktopHeapFree(Destination->head.rpdesk, NewMenuItem);
+             /* Release the submenu lock taken for this item above. The item is not
+                counted in cItems, so IntDestroyMenu will not release it. (The array
+                is owned by Destination: it is not freed here, NewMenuItem points into it.) */
+             if (NewMenuItem->spSubMenu)
+             {
+                 IntReleaseMenuObject(NewMenuItem->spSubMenu);
+                 NewMenuItem->spSubMenu = NULL;
+             }
              break;
          }
          RtlCopyUnicodeString(&NewMenuItem->lpstr, &MenuItem->lpstr);

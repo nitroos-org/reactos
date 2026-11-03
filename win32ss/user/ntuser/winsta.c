@@ -137,12 +137,21 @@ IntWinStaObjectDelete(
         }
     }
 
+    /* The desktops of the window station reference it, so none is the input desktop
+       any more; make sure nothing keeps a pointer */
+    WinSta->ActiveDesktop = NULL;
+
+    /* This runs when the last reference goes, from ObKillProcess for one: the
+       clipboard and the assignment locks need the USER lock */
+    UserEnterExclusive();
+    if (gpdeskInputDesktop && gpdeskInputDesktop->rpwinstaParent == WinSta)
+        gpdeskInputDesktop = NULL;
     UserEmptyClipboardData(WinSta);
     UserClipboardFreeListeners(WinSta);
+    UserAssignmentUnlock((PVOID*)&WinSta->spklList);
+    UserLeave();
 
     RtlDestroyAtomTable(WinSta->AtomTable);
-
-    UserAssignmentUnlock((PVOID*)&WinSta->spklList);
 
     return STATUS_SUCCESS;
 }
@@ -419,15 +428,20 @@ CheckWinstaAttributeAccess(ACCESS_MASK DesiredAccess)
     return TRUE;
 }
 
+/*
+ * Returns the window station of the current process, referenced (the caller
+ * dereferences it), or NULL.
+ */
 PWINSTATION_OBJECT FASTCALL
 IntGetProcessWindowStation(HWINSTA *phWinSta OPTIONAL)
 {
-    PWINSTATION_OBJECT pWinSta;
+    PWINSTATION_OBJECT pWinSta = NULL;
     PPROCESSINFO ppi = GetW32ProcessInfo();
     HWINSTA hWinSta = ppi->hwinsta;
     if (phWinSta)
         *phWinSta = hWinSta;
-    IntValidateWindowStationHandle(hWinSta, UserMode, 0, &pWinSta, 0);
+    if (!NT_SUCCESS(IntValidateWindowStationHandle(hWinSta, UserMode, 0, &pWinSta, 0)))
+        pWinSta = NULL;
     return pWinSta;
 }
 
