@@ -552,6 +552,13 @@ LdrGetDllHandleEx(
         Locked = TRUE;
     }
 
+    /* A full path of a module that is loaded is answered from the loaded list: no SxS probe, no file access */
+    if (LdrpFindLoadedDllByFullPath(DllName, &LdrEntry))
+    {
+        Status = STATUS_SUCCESS;
+        goto Quickie;
+    }
+
     Status = LdrpApplyFileNameRedirection(
         pRedirectName, &LdrApiDefaultExtension, NULL, &DynamicString, &pRedirectName, &RedirectedDll);
     if (!NT_SUCCESS(Status))

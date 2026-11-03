@@ -167,6 +167,11 @@ NTAPI
 LdrpCheckForLoadedDllHandle(IN PVOID Base,
                             OUT PLDR_DATA_TABLE_ENTRY *LdrEntry);
 
+BOOLEAN
+NTAPI
+LdrpFindLoadedDllByFullPath(IN PUNICODE_STRING DllName,
+                            OUT PLDR_DATA_TABLE_ENTRY *LdrEntry);
+
 BOOLEAN NTAPI
 LdrpCheckForLoadedDll(IN PWSTR DllPath,
                       IN PUNICODE_STRING DllName,

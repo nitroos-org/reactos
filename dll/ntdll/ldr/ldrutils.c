@@ -2142,6 +2142,80 @@ Quickie:
 }
 
 
+/*
+ * Look a module up by its full DOS path in the loaded module list, without touching the file system.
+ * Only an absolute drive or UNC path that names a file with an extension is handled here; everything else
+ * (base names, relative paths, names that need the default extension) is left to the caller's normal path.
+ * The caller owns the loader lock.
+ */
+BOOLEAN
+NTAPI
+LdrpFindLoadedDllByFullPath(IN PUNICODE_STRING DllName,
+                            OUT PLDR_DATA_TABLE_ENTRY *LdrEntry)
+{
+    WCHAR InBuf[MAX_PATH * 2], NameBuf[MAX_PATH * 2];
+    UNICODE_STRING FullDllName;
+    RTL_PATH_TYPE PathType;
+    PLIST_ENTRY ListHead, ListEntry;
+    PLDR_DATA_TABLE_ENTRY CurEntry;
+    PWCHAR p, End, Ext = NULL;
+    ULONG Length;
+
+    if (!DllName->Buffer || DllName->Length < 4 * sizeof(WCHAR) ||
+        DllName->Length >= sizeof(InBuf) - sizeof(UNICODE_NULL))
+    {
+        return FALSE;
+    }
+
+    /* The name is a counted string: the path functions need a terminated copy */
+    RtlCopyMemory(InBuf, DllName->Buffer, DllName->Length);
+    InBuf[DllName->Length / sizeof(WCHAR)] = UNICODE_NULL;
+
+    PathType = RtlDetermineDosPathNameType_U(InBuf);
+    if (PathType != RtlPathTypeDriveAbsolute && PathType != RtlPathTypeUncAbsolute)
+        return FALSE;
+
+    /* The default extension and the trailing period are the caller's business */
+    End = InBuf + DllName->Length / sizeof(WCHAR);
+    for (p = InBuf; p != End; p++)
+    {
+        if (*p == L'\\' || *p == L'/')
+            Ext = NULL;
+        else if (*p == L'.')
+            Ext = p;
+    }
+    if (!Ext || Ext + 1 == End)
+        return FALSE;
+
+    Length = RtlGetFullPathName_U(InBuf,
+                                  sizeof(NameBuf) - sizeof(UNICODE_NULL),
+                                  NameBuf,
+                                  NULL);
+    if (!Length || Length > sizeof(NameBuf) - sizeof(UNICODE_NULL))
+        return FALSE;
+
+    FullDllName.Buffer = NameBuf;
+    FullDllName.Length = (USHORT)Length;
+    FullDllName.MaximumLength = (USHORT)(Length + sizeof(UNICODE_NULL));
+
+    ListHead = &NtCurrentPeb()->Ldr->InLoadOrderModuleList;
+    for (ListEntry = ListHead->Flink; ListEntry != ListHead; ListEntry = ListEntry->Flink)
+    {
+        CurEntry = CONTAINING_RECORD(ListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+
+        /* Skip a module that is being unloaded */
+        if (!CurEntry->InMemoryOrderLinks.Flink) continue;
+
+        if (RtlEqualUnicodeString(&FullDllName, &CurEntry->FullDllName, TRUE))
+        {
+            *LdrEntry = CurEntry;
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
 /* NOTE: This function is b0rked and in the process of being slowly unf*cked */
 BOOLEAN
 NTAPI
@@ -2229,13 +2303,25 @@ lookinhash:
                 /* Setup full dll name string */
                 FullDllName.Buffer = NameBuf;
 
-                /* FIXME: This is from the Windows 2000 loader, not XP/2003, we should call LdrpSearchPath */
-                Length = RtlDosSearchPath_U(DllPath ? DllPath : LdrpDefaultPath.Buffer,
-                                            DllName->Buffer,
-                                            NULL,
-                                            sizeof(NameBuf) - sizeof(UNICODE_NULL),
-                                            FullDllName.Buffer,
-                                            NULL);
+                /* An absolute path names its file already: normalize it without asking the file system, the
+                   loaded list is checked first and a missing file fails at the open below */
+                if (RtlDetermineDosPathNameType_U(DllName->Buffer) != RtlPathTypeRelative)
+                {
+                    Length = RtlGetFullPathName_U(DllName->Buffer,
+                                                  sizeof(NameBuf) - sizeof(UNICODE_NULL),
+                                                  FullDllName.Buffer,
+                                                  NULL);
+                }
+                else
+                {
+                    /* FIXME: This is from the Windows 2000 loader, not XP/2003, we should call LdrpSearchPath */
+                    Length = RtlDosSearchPath_U(DllPath ? DllPath : LdrpDefaultPath.Buffer,
+                                                DllName->Buffer,
+                                                NULL,
+                                                sizeof(NameBuf) - sizeof(UNICODE_NULL),
+                                                FullDllName.Buffer,
+                                                NULL);
+                }
 
                 /* Check if that was successful */
                 if (!(Length) || (Length > (sizeof(NameBuf) - sizeof(UNICODE_NULL))))
@@ -2243,8 +2329,11 @@ lookinhash:
                     if (ShowSnaps)
                     {
                         DPRINT1("LDR: LdrpCheckForLoadedDll - Unable To Locate %wZ: 0x%08x\n",
-                            &DllName, Length);
+                            DllName, Length);
                     }
+
+                    /* There is no full name to compare or to open */
+                    return FALSE;
                 }
 
                 /* Full dll name is found */

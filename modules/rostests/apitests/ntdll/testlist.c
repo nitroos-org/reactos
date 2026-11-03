@@ -36,6 +36,7 @@ extern void func_ApiSetQueryApiSetPresence(void);
 extern void func_CrtSecure(void);
 extern void func_LdrEnumResources(void);
 extern void func_LdrFindResource_U(void);
+extern void func_LdrGetDllHandleEx(void);
 extern void func_LdrLoadDll(void);
 extern void func_LdrSharedReadOnlySection(void);
 extern void func_LdrShutdownThread(void);
@@ -269,6 +270,7 @@ const struct test winetest_testlist[] =
     { "CrtSecure",                      func_CrtSecure },
     { "LdrEnumResources",               func_LdrEnumResources },
     { "LdrFindResource_U",              func_LdrFindResource_U },
+    { "LdrGetDllHandleEx",             func_LdrGetDllHandleEx },
     { "LdrLoadDll",                     func_LdrLoadDll },
     { "LdrSharedReadOnlySection",      func_LdrSharedReadOnlySection },
     { "LdrShutdownThread",              func_LdrShutdownThread },
