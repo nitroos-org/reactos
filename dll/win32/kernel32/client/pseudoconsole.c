@@ -37,8 +37,10 @@ CreatePseudoConsole(COORD Size, HANDLE Input, HANDLE Output, DWORD Flags, PVOID 
     BOOL Created = FALSE, Wow64 = FALSE;
     PVOID OldRedirection = NULL;
 
-    if (!Result || Size.X <= 0 || Size.Y <= 0 || !Input || !Output ||
-        (Flags & ~PSEUDOCONSOLE_INHERIT_CURSOR))
+    /* Windows does not validate Flags: node-pty/xterm.js pass RESIZE_QUIRK (2) and
+       WIN32_INPUT_MODE (4) next to INHERIT_CURSOR (1), and newer hosts add PASSTHROUGH (8).
+       Only INHERIT_CURSOR changes the host start-up here; every other bit is ignored. */
+    if (!Result || Size.X <= 0 || Size.Y <= 0 || !Input || !Output)
         return E_INVALIDARG;
     *Result = NULL;
     Console = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Console));
