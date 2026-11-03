@@ -10,11 +10,13 @@
 
 extern void func_ApartmentEndpoint(void);
 extern void func_RoFailFast(void);
+extern void func_StubReleaseInCall(void);
 
 const struct test winetest_testlist[] =
 {
     { "ApartmentEndpoint", func_ApartmentEndpoint },
     { "RoFailFast", func_RoFailFast },
+    { "StubReleaseInCall", func_StubReleaseInCall },
 
     { 0, 0 }
 };

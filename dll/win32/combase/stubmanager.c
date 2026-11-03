@@ -125,8 +125,14 @@ static void stub_manager_delete_ifstub(struct stub_manager *m, struct ifstub *if
 
     list_remove(&ifstub->entry);
 
+    /* Do not wait for the calls that are running on the interface: the thread that destroys the
+     * stub manager can be the one that dispatches the last of them (the last reference of the
+     * manager is released when that call returns), and it would wait for itself while it holds
+     * the interface registration lock, which blocks every marshal in the process. A running call
+     * holds a reference of the stub manager, so none runs on a stub that is being deleted, and
+     * the RPC runtime frees the interface after the last call completed. */
     if (!m->disconnected)
-        rpc_unregister_interface(&ifstub->iid, TRUE);
+        rpc_unregister_interface(&ifstub->iid, FALSE);
 
     if (ifstub->stubbuffer) IRpcStubBuffer_Release(ifstub->stubbuffer);
     IUnknown_Release(ifstub->iface);
