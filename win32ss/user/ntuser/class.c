@@ -1120,12 +1120,21 @@ IntFreeDesktopCallProcs(IN PDESKTOP Desktop,
         }
     }
 
+    /* An entry in destroy is skipped: for a call procedure that would be one whose
+       handle was freed while a reference was still held, freed (from the heap of its
+       desktop, which holds no desktop reference) only when that reference goes. No
+       code references a call procedure beyond its handle (UserFreeHandle frees it at
+       once, CreateCallProc drops the creation reference), so none exists; the ASSERT
+       catches a change that adds such a reference, it would outlive the desktop heap. */
     for (i = 0; i < gHandleTable->allocated_handles; i++)
     {
         Entry = &gHandleTable->handles[i];
-        if (Entry->type != TYPE_CALLPROC || Entry->pi != pi ||
-            (Entry->flags & HANDLEENTRY_INDESTROY) || Entry->ptr == NULL)
+        if (Entry->type != TYPE_CALLPROC || Entry->pi != pi || Entry->ptr == NULL)
+            continue;
+
+        if (Entry->flags & HANDLEENTRY_INDESTROY)
         {
+            ASSERT(((PCALLPROCDATA)Entry->ptr)->head.rpdesk != Desktop);
             continue;
         }
 
@@ -1155,8 +1164,14 @@ IntCheckProcessDesktopClasses(IN PDESKTOP Desktop,
                            FreeOnFailure,
                            &Ret);
 
-    IntFreeDesktopCallProcs(Desktop, pi);
-    if (!Ret)
+    /* On failure the caller does not switch: the thread stays on Desktop, and the
+       classes that did not move still use its call procedures. Only drop them once
+       the thread really leaves (with FreeOnFailure nothing fails). */
+    if (Ret)
+    {
+        IntFreeDesktopCallProcs(Desktop, pi);
+    }
+    else
     {
         ERR("Failed to move process classes from desktop 0x%p to the shared heap!\n", Desktop);
         EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
