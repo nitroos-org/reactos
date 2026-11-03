@@ -373,7 +373,29 @@ VOID
 PortStopTimeouts(
     _In_ PFDO_DEVICE_EXTENSION FdoExtension)
 {
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+
     KeCancelTimer(&FdoExtension->TimeoutTimer);
+
+    /* The miniport's timers (RequestTimerCall, StorPortRequestTimer) must not fire into an
+       adapter that is going away either */
+    KeCancelTimer(&FdoExtension->Timer);
+    KeAcquireSpinLock(&FdoExtension->TimerListLock, &OldIrql);
+    for (Entry = FdoExtension->TimerListHead.Flink;
+         Entry != &FdoExtension->TimerListHead;
+         Entry = Entry->Flink)
+    {
+        PTIMER_ENTRY TimerEntry = CONTAINING_RECORD(Entry, TIMER_ENTRY, ListEntry);
+        if (KeCancelTimer(&TimerEntry->Timer))
+            InterlockedExchange(&TimerEntry->TimerAlreadySet, 0);
+    }
+    KeReleaseSpinLock(&FdoExtension->TimerListLock, OldIrql);
+
+    KeFlushQueuedDpcs();
+
+    /* A miniport timer routine that was running may have set its timer again */
+    KeCancelTimer(&FdoExtension->Timer);
     KeFlushQueuedDpcs();
 
     /* A queued worker holds the device object, and frees nothing */

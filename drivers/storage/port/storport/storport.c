@@ -821,16 +821,10 @@ StorPortExtendedFunction(
 
             TimerEntry = CONTAINING_RECORD(TimerHandle, TIMER_ENTRY, ListEntry);
 
-            /* Check if timer is already set. If so, don't try to reactivate timer. */
-            IsTimerAlreadySet = InterlockedCompareExchange(&TimerEntry->TimerAlreadySet, 1, 0);
-            if (IsTimerAlreadySet == 1) {
-                Status = STOR_STATUS_BUSY;
-                break;
-            }
-
-            /* If timeout is zero, cancel the timer */
+            /* A timeout of zero cancels a pending timer; a cancelled timer can be set again */
             if (TimerValue == 0ull) {
-                KeCancelTimer(&TimerEntry->Timer);
+                if (KeCancelTimer(&TimerEntry->Timer))
+                    InterlockedExchange(&TimerEntry->TimerAlreadySet, 0);
                 Status = STOR_STATUS_SUCCESS;
                 break;
             }
@@ -840,6 +834,13 @@ StorPortExtendedFunction(
             MultiplyResult = RtlULongLongMult(TimerValue, 10ull, (PULONGLONG)&TimerDueTime.QuadPart);
             if (!NT_SUCCESS(MultiplyResult) || TimerDueTime.QuadPart < 0) {
                 Status = STOR_STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            /* Check if timer is already set. If so, don't try to reactivate timer. */
+            IsTimerAlreadySet = InterlockedCompareExchange(&TimerEntry->TimerAlreadySet, 1, 0);
+            if (IsTimerAlreadySet == 1) {
+                Status = STOR_STATUS_BUSY;
                 break;
             }
 

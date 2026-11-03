@@ -687,7 +687,14 @@ PortSendReportLuns(
             BufferSize |= (((ULONG)ReportLunsData->LunListLength[1]) << (8*2));
             BufferSize |= (((ULONG)ReportLunsData->LunListLength[2]) << (8*1));
             BufferSize |= (((ULONG)ReportLunsData->LunListLength[3]) << (8*0));
+
+            /* The length comes from the device: no more descriptors than units we scan
+               (and no wrap when the header is added) */
+            if (BufferSize > PdoExtension->FdoExtension->Miniport.PortConfig.MaximumNumberOfLogicalUnits * sizeof(LUN_DESCRIPTOR))
+                BufferSize = PdoExtension->FdoExtension->Miniport.PortConfig.MaximumNumberOfLogicalUnits * sizeof(LUN_DESCRIPTOR);
             BufferSize += FIELD_OFFSET(REPORT_LUNS_DATA, LunDescriptor);
+            if (BufferSize < sizeof(REPORT_LUNS_DATA))
+                BufferSize = sizeof(REPORT_LUNS_DATA);
 
             DPRINT1("Data overrun at TargetId %d, %d bytes needed\n",
                    PdoExtension->Target,
@@ -1370,7 +1377,7 @@ PortFdoPnp(
 
         case IRP_MN_REMOVE_DEVICE: /* 0x02 */
             DPRINT1("IRP_MJ_PNP / IRP_MN_REMOVE_DEVICE\n");
-            PortStopTimeouts(DeviceExtension);
+            /* The miniport stops first (it cancels its own timer), then storport's timers go */
             if (DeviceExtension->PnpState == dsStarted &&
                 DeviceExtension->Miniport.InitData != NULL &&
                 DeviceExtension->Miniport.InitData->HwAdapterControl != NULL &&
@@ -1384,6 +1391,7 @@ PortFdoPnp(
                     NULL);
                 KeLowerIrql(OldIrql);
             }
+            PortStopTimeouts(DeviceExtension);
             PortFlushStarvedRequests(DeviceExtension);
             PortFreeRequestReserve(DeviceExtension);
             ExDeleteNPagedLookasideList(&DeviceExtension->RequestReferenceLookaside);

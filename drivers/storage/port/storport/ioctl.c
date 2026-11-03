@@ -403,6 +403,14 @@ PortPdoDeviceControl(
             PPDO_DEVICE_EXTENSION PdoExtension = DeviceObject->DeviceExtension;
             PPORT_CONFIGURATION_INFORMATION PortConfig = &PdoExtension->FdoExtension->Miniport.PortConfig;
 
+            /* A claimed unit takes pass-through only from its class driver, which marks the
+               request it forwards (MinorFunction 1), as scsiport does */
+            if (IoStack->MinorFunction == 0 && PdoExtension->IsClaimed)
+            {
+                Status = STATUS_INVALID_DEVICE_REQUEST;
+                break;
+            }
+
             /* The library builds the SRB and sends it to this PDO; it leaves completion to us */
             Status = SptiHandleScsiPassthru(DeviceObject,
                                             Irp,

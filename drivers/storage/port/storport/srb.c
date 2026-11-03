@@ -433,8 +433,13 @@ PortPdoIssueRequest(
         TransferVa = StorpGetTransferVa(RequestReference->Irp->MdlAddress, RequestReference->Srb);
 
         /* MapBuffers: the miniport reads this buffer through Srb->DataBuffer, which may be a
-           user address of another process: give it the system address of the same bytes */
-        if (StorpNeedsSystemBuffer(FdoExtension, RequestReference->Srb) &&
+           user address of another process: give it the system address of the same bytes.
+           A user address (a direct pass-through) is never handed to a miniport, except for a
+           read or a write, whose data only moves by DMA through the scatter/gather list */
+        if ((StorpNeedsSystemBuffer(FdoExtension, RequestReference->Srb) ||
+             ((ULONG_PTR)RequestReference->Srb->DataBuffer <= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS &&
+              !(RequestReference->Srb->Function == SRB_FUNCTION_EXECUTE_SCSI &&
+                StorpIsReadWriteCdb(RequestReference->Srb->Cdb[0])))) &&
             RequestReference->Srb->DataTransferLength != 0)
         {
             SystemVa = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
