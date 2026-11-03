@@ -71,6 +71,17 @@ typedef struct _NG_PROFILE
 #endif
 extern NG_PROFILE NgProfile;
 
+#if DBG
+/*
+ * Time inside the core during the current CoreLock hold (zeroed when the outermost holder gets the lock, added to by
+ * ngos_prof for the stages that run under it): the commit (writeback, journal write and flushes), the size change
+ * (cluster allocation, run list and MFT record updates, the commit it may start) and the locked write.  At the end
+ * of the hold NgNoteHold files it in a histogram by its main reason (NgPrintLockStats prints them).
+ */
+enum { NG_HT_COMMIT, NG_HT_SET_SIZE, NG_HT_WRITE, NG_HT_WRITEBACK, NG_HT_JNL, NG_HT_COUNT };
+extern ULONGLONG NgHoldTicks[NG_HT_COUNT];
+#endif
+
 /* Volume control block: the device extension of the volume device object. */
 typedef struct _NG_VCB
 {

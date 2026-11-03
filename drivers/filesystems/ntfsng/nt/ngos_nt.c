@@ -30,6 +30,15 @@ void ngos_prof(int id, unsigned long long since, unsigned long long bytes)
     S->Count++;
     S->Ticks += __rdtsc() - since;
     S->Bytes += bytes;
+    /* every one of these stages runs under CoreLock (the device stages do not: unlocked paging transfers) */
+    switch (id)
+    {
+        case NGP_COMMIT: NgHoldTicks[NG_HT_COMMIT] += __rdtsc() - since; break;
+        case NGP_SET_SIZE: NgHoldTicks[NG_HT_SET_SIZE] += __rdtsc() - since; break;
+        case NGP_WRITE: NgHoldTicks[NG_HT_WRITE] += __rdtsc() - since; break;
+        case NGP_WRITEBACK: NgHoldTicks[NG_HT_WRITEBACK] += __rdtsc() - since; break;
+        case NGP_JNL_COMMIT: NgHoldTicks[NG_HT_JNL] += __rdtsc() - since; break;
+    }
 #else
     (void)id; (void)since; (void)bytes;
 #endif

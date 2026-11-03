@@ -51,6 +51,36 @@ static ULONGLONG NgTicksToUs(LONGLONG Ticks)
 #endif
 
 #if DBG
+/* Histogram of CoreLock hold times (log2 of microseconds) by the main reason of the hold, under CoreLock. */
+#define NG_HOLD_BUCKETS 16
+enum { NG_HR_COMMIT, NG_HR_ALLOC, NG_HR_WRITE, NG_HR_OTHER, NG_HR_COUNT };
+static const char *const NgHoldReason[NG_HR_COUNT] = { "commit", "alloc+runlist", "locked write", "other" };
+static ULONG NgHoldHist[NG_HR_COUNT][NG_HOLD_BUCKETS];
+static ULONGLONG NgHoldSumUs[NG_HR_COUNT], NgHoldCompUs[NG_HR_COUNT][NG_HT_COUNT];
+ULONGLONG NgHoldTicks[NG_HT_COUNT];
+
+static VOID NgNoteHold(ULONGLONG Ticks)
+{
+    ULONGLONG Us = NgTicksToUs((LONGLONG)Ticks), C = NgHoldTicks[NG_HT_COMMIT], A, W, O;
+    ULONG Reason = NG_HR_OTHER, B = 0, i;
+    ULONGLONG Best;
+    A = NgHoldTicks[NG_HT_SET_SIZE] > C ? NgHoldTicks[NG_HT_SET_SIZE] - C : 0;
+    W = NgHoldTicks[NG_HT_WRITE] > C ? NgHoldTicks[NG_HT_WRITE] - C : 0;
+    O = Ticks > C + A + W ? Ticks - C - A - W : 0;
+    Best = O;
+    if (C > Best) { Best = C; Reason = NG_HR_COMMIT; }
+    if (A > Best) { Best = A; Reason = NG_HR_ALLOC; }
+    if (W > Best) { Reason = NG_HR_WRITE; }
+    while (B < NG_HOLD_BUCKETS - 1 && (1ULL << B) < Us)
+        B++;
+    NgHoldHist[Reason][B]++;
+    NgHoldSumUs[Reason] += Us;
+    for (i = 0; i < NG_HT_COUNT; i++)
+        NgHoldCompUs[Reason][i] += NgTicksToUs((LONGLONG)NgHoldTicks[i]);
+}
+#endif
+
+#if DBG
 /* The request a CoreLock acquisition serves, from the top-level IRP of the thread. */
 static UCHAR NgLockCategory(VOID)
 {
@@ -96,6 +126,7 @@ VOID NgAcquireCore(PNG_VCB Vcb)
     T1.QuadPart = (LONGLONG)__rdtsc();
     Vcb->CoreCategory = NgLockCategory();
     Vcb->CoreSince = T1;
+    RtlZeroMemory(NgHoldTicks, sizeof(NgHoldTicks));
     Vcb->LockStats.Stat[Vcb->CoreCategory].Acquired++;
     if (Waited)
     {
@@ -123,6 +154,7 @@ VOID NgReleaseCoreNoTrim(PNG_VCB Vcb)
         LARGE_INTEGER T;
         T.QuadPart = (LONGLONG)__rdtsc();
         Vcb->LockStats.Stat[Vcb->CoreCategory].HeldUs += NgTicksToUs(T.QuadPart - Vcb->CoreSince.QuadPart);
+        NgNoteHold((ULONGLONG)(T.QuadPart - Vcb->CoreSince.QuadPart));
 #endif
     }
     ExReleaseResourceLite(&Vcb->CoreLock);
@@ -157,6 +189,25 @@ VOID NgPrintLockStats(PNG_VCB Vcb)
             Vcb->DioReads, Vcb->DioReadFallbacks);
 #if DBG
     DPRINT1("ntfsng: unlocked paging writes forced to be written again (DioFault): %lu\n", ngc_dio_forced);
+#endif
+#if DBG
+    {
+        ULONG r, b;
+        for (r = 0; r < NG_HR_COUNT; r++)
+        {
+            ULONG N = 0;
+            for (b = 0; b < NG_HOLD_BUCKETS; b++)
+                N += NgHoldHist[r][b];
+            if (!N)
+                continue;
+            DPRINT1("ntfsng: holds by reason '%s': %lu holds, %I64u us total (commit %I64u, set-size %I64u, write %I64u, writeback %I64u, journal %I64u us)\n",
+                    NgHoldReason[r], N, NgHoldSumUs[r], NgHoldCompUs[r][NG_HT_COMMIT], NgHoldCompUs[r][NG_HT_SET_SIZE],
+                    NgHoldCompUs[r][NG_HT_WRITE], NgHoldCompUs[r][NG_HT_WRITEBACK], NgHoldCompUs[r][NG_HT_JNL]);
+            for (b = 0; b < NG_HOLD_BUCKETS; b++)
+                if (NgHoldHist[r][b])
+                    DPRINT1("ntfsng: hold %s <= %lu us: %lu\n", NgHoldReason[r], 1UL << b, NgHoldHist[r][b]);
+        }
+    }
 #endif
     for (i = 0; i < NG_LOCK_CATEGORIES; i++)
     {
