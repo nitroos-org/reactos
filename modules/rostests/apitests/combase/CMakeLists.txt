@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     ApartmentEndpoint.c
     RoFailFast.c
+    StubReleaseInCall.c
     testlist.c)
 
 add_executable(combase_apitest ${SOURCE})

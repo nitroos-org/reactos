@@ -602,3 +602,6 @@ SysWOW64/kernel.appcore.dll
 @0x600 SysWOW64/icu.dll
 @0x600 SysWOW64/icuuc.dll
 @0x600 SysWOW64/icuin.dll
+
+# Microsoft 365 Apps: Repoman of the Click-to-Run client delay-loads the Restart Manager before it stages files.
+SysWOW64/rstrtmgr.dll
