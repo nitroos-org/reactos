@@ -658,6 +658,345 @@ static void TestCorruptShared(void)
     CmpFreeSecurityCache(&Cm);
 }
 
+/* ---- the recount of the references (CM_CHECK_REGISTRY_RECOUNT_SECURITY) ---- */
+
+#define RC_FLAGS (CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE | CM_CHECK_REGISTRY_RECOUNT_SECURITY)
+
+static HCELL_INDEX g_RcRoot, g_RcShared, g_RcDeep, g_RcSole, g_RcNone, g_RcS1, g_RcS2;
+
+/*
+ * ROOT, Shared and Shared\Deep name S1 (3 keys); Sole names S2 (1 key); None has
+ * no Security. The stored counts are set to Refs1 and Refs2 and the hive is
+ * written to g_File.
+ */
+static BOOLEAN BuildCounted(ULONG Refs1, ULONG Refs2)
+{
+    static CMHIVE Cm;
+    PHHIVE Hive = &Cm.Hive;
+
+    if (!NewHive(&Cm))
+        return FALSE;
+    g_RcRoot = RootOf(Hive);
+    g_RcS1 = Insert(&Cm, 1, Stable);
+    g_RcS2 = Insert(&Cm, 2, Stable);
+    ((PCM_KEY_NODE)HvGetCell(Hive, g_RcRoot))->Security = g_RcS1;
+    g_RcShared = KeyWith(Hive, g_RcRoot, L"Shared", g_RcS1);
+    g_RcDeep = KeyWith(Hive, g_RcShared, L"Deep", g_RcS1);
+    g_RcSole = KeyWith(Hive, g_RcRoot, L"Sole", g_RcS2);
+    g_RcNone = KeyWith(Hive, g_RcRoot, L"None", HCELL_NIL);
+    Sk(Hive, g_RcS1)->ReferenceCount = Refs1;
+    Sk(Hive, g_RcS2)->ReferenceCount = Refs2;
+    HvMarkCellDirty(Hive, g_RcRoot, FALSE);
+    CHECK(HvWriteHive(Hive), "write");
+    CmpFreeSecurityCache(&Cm);
+    return TRUE;
+}
+
+/* The stored counts of the two cells after the recount, in memory and in the file that a flush leaves */
+static void RecountCase(const char *Name, ULONG Refs1, ULONG Refs2, ULONG Want1, ULONG Want2, BOOLEAN Fix)
+{
+    static CMHIVE Cm;
+    PHHIVE Hive = &Cm.Hive;
+    ULONG Dirty, Changed;
+
+    CHECK(BuildCounted(Refs1, Refs2), "[%s] build", Name);
+    CHECK(NT_SUCCESS(OpenHive(&Cm, HINIT_MEMORY)), "[%s] load", Name);
+    InitCache(&Cm);
+    Dirty = Hive->DirtyCount;
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS | (Fix ? CM_CHECK_REGISTRY_FIX_HIVE : 0))),
+          "[%s] the hive must load", Name);
+    CHECK(Refs(Hive, g_RcS1) == Want1 && Refs(Hive, g_RcS2) == Want2, "[%s] in memory: %lu and %lu, want %lu and %lu", Name,
+          (unsigned long)Refs(Hive, g_RcS1), (unsigned long)Refs(Hive, g_RcS2), (unsigned long)Want1, (unsigned long)Want2);
+    Changed = (Refs1 != Want1 || Refs2 != Want2);
+    CHECK(Fix && Changed ? Hive->DirtyCount > Dirty : Hive->DirtyCount == Dirty, "[%s] dirty %lu -> %lu (fix %d, changed %lu)", Name,
+          (unsigned long)Dirty, (unsigned long)Hive->DirtyCount, (int)Fix, (unsigned long)Changed);
+    CHECK(SecOf(Hive, g_RcRoot) == g_RcS1 && SecOf(Hive, g_RcShared) == g_RcS1 && SecOf(Hive, g_RcDeep) == g_RcS1 &&
+          SecOf(Hive, g_RcSole) == g_RcS2 && SecOf(Hive, g_RcNone) == HCELL_NIL, "[%s] a key lost or gained its Security", Name);
+    CHECK(RingLength(Hive, g_RcS1) == 2, "[%s] ring", Name);
+
+    CHECK(HvSyncHive(Hive), "[%s] flush", Name);
+
+    /* what is on disk: the fix only with FixHive, otherwise the file is left as it was */
+    CHECK(NT_SUCCESS(OpenHive(&Cm, HINIT_MEMORY)), "[%s] reload", Name);
+    CHECK(Refs(Hive, g_RcS1) == (Fix ? Want1 : Refs1) && Refs(Hive, g_RcS2) == (Fix ? Want2 : Refs2),
+          "[%s] on disk: %lu and %lu (fix %d)", Name, (unsigned long)Refs(Hive, g_RcS1), (unsigned long)Refs(Hive, g_RcS2), (int)Fix);
+}
+
+static void TestRecount(void)
+{
+    ULONG Fix;
+    LONG Pool0 = g_PoolOut;
+
+    printf("-- recount of the references\n");
+    for (Fix = 0; Fix <= 1; Fix++)
+    {
+        printf("   %s FixHive\n", Fix ? "with" : "without");
+        RecountCase("exact", 3, 1, 3, 1, Fix);
+        RecountCase("under-count by 1", 2, 1, 3, 1, Fix);
+        RecountCase("under-count, one reference for three keys", 1, 1, 3, 1, Fix);
+        RecountCase("over-count by 1", 4, 1, 3, 1, Fix);
+        RecountCase("over-count, huge", 0x7FFFFFF0, 9, 3, 1, Fix);
+        RecountCase("saturated", MAXULONG, MAXULONG, 3, 1, Fix);
+        RecountCase("S1 under, S2 over", 1, 5, 3, 1, Fix);
+        RecountCase("S1 over, S2 exact", 40, 1, 3, 1, Fix);
+    }
+    CHECK(g_PoolOut == Pool0, "pool %ld", (long)(g_PoolOut - Pool0));
+}
+
+/* The reason for the under-count rule: without it a delete frees a cell that other keys use */
+static void TestRecountDelete(void)
+{
+    static CMHIVE Cm;
+    PHHIVE Hive = &Cm.Hive;
+
+    printf("-- recount: a key delete after the load\n");
+    CHECK(BuildCounted(1, 1), "build");
+    CHECK(NT_SUCCESS(OpenHive(&Cm, HINIT_MEMORY)), "load");
+    InitCache(&Cm);
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS)), "check");
+    CmpBuildSecurityCache(&Cm);
+    CHECK(Refs(Hive, g_RcS1) == 3, "3 keys name S1");
+    CHECK(CmpFreeKeyByCell(Hive, g_RcDeep, TRUE) == STATUS_SUCCESS, "delete Deep");
+    CHECK(Sk(Hive, g_RcS1) != NULL && Refs(Hive, g_RcS1) == 2, "S1 still there for the others: refs %lu", (unsigned long)Refs(Hive, g_RcS1));
+    CHECK(CmpFreeKeyByCell(Hive, g_RcShared, TRUE) == STATUS_SUCCESS, "delete Shared");
+    CHECK(Sk(Hive, g_RcS1) != NULL && Refs(Hive, g_RcS1) == 1, "S1 held by the root: refs %lu", (unsigned long)Refs(Hive, g_RcS1));
+    CHECK(SecOf(Hive, g_RcRoot) == g_RcS1 && RingLength(Hive, g_RcS1) == 2, "root and ring intact");
+    CHECK(CmpFreeKeyByCell(Hive, g_RcSole, TRUE) == STATUS_SUCCESS && Sk(Hive, g_RcS2) == NULL, "S2 goes with its only key");
+    CHECK(RingLength(Hive, g_RcS1) == 1 && Cm.SecurityCount == 1, "ring and cache");
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS)) && Refs(Hive, g_RcS1) == 1, "second check, nothing to recount");
+    CmpFreeSecurityCache(&Cm);
+
+    /* the same hive without the recount: the under-count is what frees the shared cell */
+    CHECK(BuildCounted(1, 1), "build");
+    CHECK(NT_SUCCESS(OpenHive(&Cm, HINIT_MEMORY)), "load");
+    InitCache(&Cm);
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, g_Flags)), "check without the recount");
+    CmpBuildSecurityCache(&Cm);
+    CHECK(CmpFreeKeyByCell(Hive, g_RcDeep, TRUE) == STATUS_SUCCESS, "delete Deep");
+    CHECK(Sk(Hive, g_RcS1) == NULL, "(control) an under-count lets the delete free the cell that Shared and the root name");
+    CmpFreeSecurityCache(&Cm);
+}
+
+/* A hive that has no 'sk' cell at all (every key NIL): untouched */
+static void TestRecountNoCells(void)
+{
+    static CMHIVE Cm;
+    PHHIVE Hive = &Cm.Hive;
+    HCELL_INDEX Root;
+    ULONG Fix, Dirty;
+
+    printf("-- recount: a hive without sk cells\n");
+    for (Fix = 0; Fix <= 1; Fix++)
+    {
+        LONG Pool0 = g_PoolOut;
+
+        CHECK(NewHive(&Cm), "hive");
+        Root = RootOf(Hive);
+        KeyWith(Hive, Root, L"A", HCELL_NIL);
+        KeyWith(Hive, KeyWith(Hive, Root, L"B", HCELL_NIL), L"C", HCELL_NIL);
+        HvMarkCellDirty(Hive, Root, FALSE);
+        CHECK(HvWriteHive(Hive), "write");
+        CHECK(NT_SUCCESS(OpenHive(&Cm, HINIT_MEMORY)), "load");
+        InitCache(&Cm);
+        Dirty = Hive->DirtyCount;
+        CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS | (Fix ? CM_CHECK_REGISTRY_FIX_HIVE : 0))), "check");
+        CHECK(Hive->DirtyCount == Dirty, "nothing was changed (dirty %lu -> %lu)", (unsigned long)Dirty, (unsigned long)Hive->DirtyCount);
+        CHECK(SecOf(Hive, RootOf(Hive)) == HCELL_NIL && SecOf(Hive, Find(Hive, RootOf(Hive), L"A")) == HCELL_NIL, "still NIL");
+        CHECK(g_PoolOut == Pool0, "no allocation left behind: %ld", (long)(g_PoolOut - Pool0));
+    }
+}
+
+/* A cell in the ring that no key names is not counted and not touched */
+static void TestRecountOrphan(void)
+{
+    static CMHIVE Cm;
+    PHHIVE Hive = &Cm.Hive;
+    HCELL_INDEX Orphan;
+
+    printf("-- recount: a cell that no key names\n");
+    CHECK(BuildCounted(3, 1), "build");
+    CHECK(NT_SUCCESS(OpenHive(&Cm, HINIT_MEMORY)), "load");
+    InitCache(&Cm);
+    CmpBuildSecurityCache(&Cm);
+    Orphan = Insert(&Cm, 7, Stable);
+    Sk(Hive, Orphan)->ReferenceCount = 5;
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS)), "check");
+    CHECK(Refs(Hive, Orphan) == 5 && RingLength(Hive, Orphan) == 3, "the orphan is left as it is");
+    CHECK(Refs(Hive, g_RcS1) == 3 && Refs(Hive, g_RcS2) == 1, "the others are right");
+    CmpFreeSecurityCache(&Cm);
+}
+
+/* A reference count of 0 on a named cell is the existing heal (the keys lose the cell), not a recount */
+static void TestRecountZero(void)
+{
+    static CMHIVE Cm;
+    PHHIVE Hive = &Cm.Hive;
+
+    printf("-- recount: a stored count of 0\n");
+    CHECK(BuildCounted(0, 1), "build");
+    CHECK(NT_SUCCESS(OpenHive(&Cm, HINIT_MEMORY)), "load");
+    InitCache(&Cm);
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS)), "loads");
+    CHECK(SecOf(Hive, g_RcRoot) == HCELL_NIL && SecOf(Hive, g_RcShared) == HCELL_NIL && SecOf(Hive, g_RcDeep) == HCELL_NIL,
+          "the three keys that named the zero cell lost it");
+    CHECK(SecOf(Hive, g_RcSole) == g_RcS2 && Refs(Hive, g_RcS2) == 1, "Sole is right");
+    CmpFreeSecurityCache(&Cm);
+}
+
+/* Many cells: the table grows (64 to 16384 slots); each cell is wrong in a different way */
+#define MANY 3000
+static void MakeName(WCHAR *W, ULONG i, ULONG u)
+{
+    ULONG n = 0, d;
+    char Tmp[24];
+
+    W[n++] = L'k';
+    d = 0;
+    do { Tmp[d++] = (char)('0' + i % 10); i /= 10; } while (i);
+    while (d) W[n++] = (WCHAR)Tmp[--d];
+    W[n++] = L'_';
+    W[n++] = (WCHAR)('0' + u);
+    W[n] = 0;
+}
+
+static ULONG ManyActual(ULONG i)
+{
+    return 1 + (i % 3) + (i == 0 ? 1 : 0);   /* the keys, and the root names cell 0 as well */
+}
+
+static void TestRecountMany(void)
+{
+    static CMHIVE Cm;
+    static HCELL_INDEX Cell[MANY];
+    PHHIVE Hive = &Cm.Hive;
+    HCELL_INDEX Root;
+    WCHAR Name[32];
+    ULONG i, u, Actual, Bad = 0;
+    LONG Pool0 = g_PoolOut;
+
+    printf("-- recount: %d cells, the table grows\n", MANY);
+    CHECK(NewHive(&Cm), "hive");
+    Root = RootOf(Hive);
+    for (i = 0; i < MANY; i++)
+    {
+        Cell[i] = Insert(&Cm, 1000 + i, Stable);
+        if (i == 0)
+            ((PCM_KEY_NODE)HvGetCell(Hive, Root))->Security = Cell[0];
+        for (u = 0; u < 1 + (i % 3); u++)
+        {
+            MakeName(Name, i, u);
+            KeyWith(Hive, Root, Name, Cell[i]);
+        }
+        /* stored: one too few (a 1 would be an under-count to 0, the other heal), exact, one too many, very wrong */
+        Actual = ManyActual(i);
+        switch (i % 4)
+        {
+            case 0: Sk(Hive, Cell[i])->ReferenceCount = Actual > 1 ? Actual - 1 : Actual + 1; break;
+            case 1: Sk(Hive, Cell[i])->ReferenceCount = Actual; break;
+            case 2: Sk(Hive, Cell[i])->ReferenceCount = Actual + 1; break;
+            default: Sk(Hive, Cell[i])->ReferenceCount = 100000; break;
+        }
+    }
+    HvMarkCellDirty(Hive, Root, FALSE);
+    CHECK(HvWriteHive(Hive), "write");
+    CmpFreeSecurityCache(&Cm);
+
+    CHECK(NT_SUCCESS(OpenHive(&Cm, HINIT_MEMORY)), "load");
+    InitCache(&Cm);
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS)), "check");
+    for (i = 0; i < MANY; i++)
+    {
+        if (Refs(Hive, Cell[i]) != ManyActual(i))
+        {
+            Bad++;
+            CHECK(0, "cell %lu: %lu, want %lu", (unsigned long)i, (unsigned long)Refs(Hive, Cell[i]), (unsigned long)ManyActual(i));
+        }
+    }
+    CHECK(Bad == 0, "%lu cells wrong", (unsigned long)Bad);
+    CmpFreeSecurityCache(&Cm);
+    CHECK(g_PoolOut == Pool0, "pool %ld", (long)(g_PoolOut - Pool0));
+}
+
+/* No memory for the table: the counts stay as they are, and the load succeeds */
+static void TestRecountNoMemory(void)
+{
+    static CMHIVE Cm;
+    PHHIVE Hive = &Cm.Hive;
+    ULONG n;
+
+    printf("-- recount: no memory for the table\n");
+    for (n = 1; n <= 2; n++)
+    {
+        LONG Pool0 = g_PoolOut;
+
+        CHECK(BuildCounted(1, 5), "build");
+        CHECK(NT_SUCCESS(OpenHive(&Cm, HINIT_MEMORY)), "load");
+        InitCache(&Cm);
+        g_FailAllocIn = n;      /* the work stack of the walk, then the table */
+        CHECK(n == 1 ? !CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS)) : CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS)),
+              "check with the allocation %lu failing", (unsigned long)n);
+        g_FailAllocIn = 0;
+        CHECK(Refs(Hive, g_RcS1) == 1 && Refs(Hive, g_RcS2) == 5, "[%lu] counts left as they were: %lu and %lu", (unsigned long)n,
+              (unsigned long)Refs(Hive, g_RcS1), (unsigned long)Refs(Hive, g_RcS2));
+        CHECK(g_PoolOut == Pool0, "[%lu] pool %ld", (unsigned long)n, (long)(g_PoolOut - Pool0));
+    }
+}
+
+/* A repair that removes a key restarts the walk: the key was counted before it was removed, and must not stay counted */
+static void TestRecountRestart(void)
+{
+    static CMHIVE Cm;
+    PHHIVE Hive = &Cm.Hive;
+    HCELL_INDEX Root, S1, A, B, C;
+    PCM_KEY_NODE N;
+
+    printf("-- recount: a repair restarts the walk\n");
+    CHECK(NewHive(&Cm), "hive");
+    Root = RootOf(Hive);
+    S1 = Insert(&Cm, 1, Stable);
+    ((PCM_KEY_NODE)HvGetCell(Hive, Root))->Security = S1;
+    A = KeyWith(Hive, Root, L"A", S1);
+    B = KeyWith(Hive, Root, L"B", S1);
+    C = KeyWith(Hive, Root, L"C", S1);
+    (void)A;
+    Sk(Hive, S1)->ReferenceCount = 4;           /* the root and A, B and C */
+    /* B is renamed in place to a name that sorts after C: the index is out of order at C */
+    N = (PCM_KEY_NODE)HvGetCell(Hive, B);
+    ((PUCHAR)N->Name)[0] = 'Z';
+    HvMarkCellDirty(Hive, Root, FALSE);
+    CHECK(HvWriteHive(Hive), "write");
+    CmpFreeSecurityCache(&Cm);
+
+    CHECK(NT_SUCCESS(OpenHive(&Cm, HINIT_MEMORY)), "load");
+    InitCache(&Cm);
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS | CM_CHECK_REGISTRY_FIX_HIVE)), "check");
+    CHECK(Find(Hive, Root, L"C") == HCELL_NIL, "(setup) the key that is out of order was removed by the repair");
+    CHECK(((PCM_KEY_NODE)HvGetCell(Hive, Root))->SubKeyCounts[Stable] == 2, "(setup) the other two are still there");
+    CHECK(Refs(Hive, S1) == 3, "the removed key is not counted: refs %lu", (unsigned long)Refs(Hive, S1));
+    (void)C;
+    CmpFreeSecurityCache(&Cm);
+}
+
+/* A hive exit node names a cell and is not counted: raise, but never lower */
+static void TestRecountExitNode(void)
+{
+    static CMHIVE Cm;
+    PHHIVE Hive = &Cm.Hive;
+    HCELL_INDEX Exit;
+
+    printf("-- recount: a key that is not counted (hive exit node)\n");
+    CHECK(BuildCounted(1, 4), "build");
+    CHECK(NT_SUCCESS(OpenHive(&Cm, HINIT_MEMORY)), "load");
+    InitCache(&Cm);
+    Exit = Find(Hive, g_RcRoot, L"None");
+    ((PCM_KEY_NODE)HvGetCell(Hive, Exit))->Flags |= KEY_HIVE_EXIT;
+    ((PCM_KEY_NODE)HvGetCell(Hive, Exit))->Security = g_RcS2;
+    CHECK(CM_CHECK_REGISTRY_SUCCESS(CmCheckRegistry(&Cm, RC_FLAGS)), "check");
+    CHECK(Refs(Hive, g_RcS1) == 3, "S1 was under-counted: raised: %lu", (unsigned long)Refs(Hive, g_RcS1));
+    CHECK(Refs(Hive, g_RcS2) == 4, "S2 is above what was counted, and the count is not complete: left: %lu", (unsigned long)Refs(Hive, g_RcS2));
+    CmpFreeSecurityCache(&Cm);
+}
+
 /* a flat hive (the boot loader's): the same checks, on the image in place */
 static void TestFlat(void)
 {
@@ -692,6 +1031,15 @@ int main(void)
     TestCorrupt(1);
     TestCorruptShared();
     TestFlat();
+    TestRecount();
+    TestRecountDelete();
+    TestRecountNoCells();
+    TestRecountOrphan();
+    TestRecountZero();
+    TestRecountMany();
+    TestRecountNoMemory();
+    TestRecountRestart();
+    TestRecountExitNode();
     printf(g_Errors ? "RESULT: FAIL (%lu)\n" : "RESULT: PASS\n", (unsigned long)g_Errors);
     return g_Errors != 0;
 }

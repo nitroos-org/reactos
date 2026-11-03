@@ -237,6 +237,13 @@ typedef ULONG CM_CHECK_REGISTRY_STATUS;
 #define CM_CHECK_REGISTRY_BOOTLOADER_PURGE_VOLATILES  0x4
 #define CM_CHECK_REGISTRY_VALIDATE_HIVE               0x8
 #define CM_CHECK_REGISTRY_FIX_HIVE                    0x10
+/*
+ * Count the keys that name each 'sk' cell and correct its ReferenceCount (raised
+ * if it is too low, lowered if it is too high). Only for a hive being loaded,
+ * that nobody else can change: on a live hive a key could be created between the
+ * count and the compare. The correction is persistent only with FIX_HIVE.
+ */
+#define CM_CHECK_REGISTRY_RECOUNT_SECURITY            0x20
 
 //
 // Check Registry status codes
@@ -692,6 +699,7 @@ typedef struct _CMP_CASE_REPAIR_STATS
     ULONG Sorted;   /* subkey indexes sorted again */
     ULONG Skipped;  /* subkey indexes out of order that could not be sorted */
     ULONG SecurityReset;    /* keys whose bad Security was reset to HCELL_NIL (not a case repair) */
+    struct _CMP_SK_TALLY *SecurityTally; /* private to cmcheck.c: the recount of the 'sk' references, or NULL */
 } CMP_CASE_REPAIR_STATS, *PCMP_CASE_REPAIR_STATS;
 
 VOID
