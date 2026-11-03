@@ -159,9 +159,12 @@ KeBugCheckEx(ULONG Code, ULONG_PTR P1, ULONG_PTR P2, ULONG_PTR P3, ULONG_PTR P4)
     abort();
 }
 static LONG g_PoolOut;          /* CmpAllocate calls not yet freed (cmlib's own pool use) */
+static ULONG g_FailAllocIn;     /* the CmpAllocate call that fails (1 = the next); 0 = none */
 PVOID NTAPI CmpAllocate(SIZE_T Size, BOOLEAN Paged, ULONG Tag)
 {
     (void)Paged; (void)Tag;
+    if (g_FailAllocIn && --g_FailAllocIn == 0)
+        return NULL;
     g_PoolOut++;
     return calloc(1, (size_t)Size);
 }

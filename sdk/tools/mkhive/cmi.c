@@ -257,8 +257,18 @@ CmiCreateSubKey(
     NewKeyCell->NameLength = CmpCopyName(&RegistryHive->Hive, NewKeyCell->Name, &KeyName);
     if (NewKeyCell->NameLength < KeyName.Length) NewKeyCell->Flags |= KEY_COMP_NAME;
 
-    /* Inherit the security from the parent */
-    if (ParentKeyCellOffset == HCELL_NIL)
+    /*
+     * Inherit the security from the parent. A volatile key is not written to
+     * the hive file, so it must not take a reference on the parent's 'sk' cell:
+     * the count stored in the file would be one too high for each of them
+     * (the CurrentControlSet link of SYSTEM did that). It has no descriptor,
+     * like the volatile keys of a hive that has none.
+     */
+    if (VolatileKey)
+    {
+        /* Security is already HCELL_NIL */
+    }
+    else if (ParentKeyCellOffset == HCELL_NIL)
     {
         // We are in fact creating a root key.
         // This is not handled there, but when we

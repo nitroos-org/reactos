@@ -40,6 +40,212 @@ extern PCMHIVE CmiVolatileHive;
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
+/*
+ * Recount of the references to the 'sk' cells.
+ *
+ * ReferenceCount of an 'sk' cell is the number of key nodes that name it. A
+ * count that is too low is the dangerous one: the last key to go frees a cell
+ * that other keys still use. A count that is too high only keeps a cell that is
+ * no longer needed. At load the walk of the tree counts, per cell, the keys
+ * that name it (a table keyed by the cell index), and when the walk is done the
+ * stored counts are made equal to what was counted. The mkhive SYSTEM hive is
+ * one too high; a hive that lost keys to a repair, or to a crash between the
+ * write of a key and of its 'sk', could be either.
+ *
+ * Hive contents are not trusted: a cell is only counted after
+ * CmpValidateSecurityCell has accepted it, and it is only written through
+ * CmpGetCheckedSecurityCell. Nothing here can fail the load: if the table
+ * cannot be built the counts are left as they are.
+ */
+typedef struct _CMP_SK_TALLY_ENTRY
+{
+    HCELL_INDEX Cell;       /* HCELL_NIL: the slot is free */
+    ULONG Count;
+} CMP_SK_TALLY_ENTRY, *PCMP_SK_TALLY_ENTRY;
+
+typedef struct _CMP_SK_TALLY
+{
+    PCMP_SK_TALLY_ENTRY Table;  /* open addressing, Capacity is a power of two */
+    ULONG Capacity;
+    ULONG Used;
+    BOOLEAN Failed;             /* no memory, or more cells than a table may hold: no recount */
+    BOOLEAN Partial;            /* a key that may name a cell was not counted: raise, never lower */
+} CMP_SK_TALLY, *PCMP_SK_TALLY;
+
+#define CMP_SK_TALLY_FIRST_CAPACITY 64
+#define CMP_SK_TALLY_MAX_CAPACITY   (1UL << 22)
+
+static
+VOID
+CmpSkTallyReset(
+    _Inout_ PCMP_SK_TALLY Tally)
+{
+    if (Tally->Table)
+        CmpFree(Tally->Table, Tally->Capacity * sizeof(CMP_SK_TALLY_ENTRY));
+    RtlZeroMemory(Tally, sizeof(*Tally));
+}
+
+static
+ULONG
+CmpSkTallySlot(
+    _In_ HCELL_INDEX Cell,
+    _In_ ULONG Capacity)
+{
+    ULONG Hash = (Cell >> 3) * 2654435761U;
+
+    Hash ^= Hash >> 15;
+    return Hash & (Capacity - 1);
+}
+
+/* Find the entry of Cell, or the free slot where it goes */
+static
+PCMP_SK_TALLY_ENTRY
+CmpSkTallyFind(
+    _In_ PCMP_SK_TALLY_ENTRY Table,
+    _In_ ULONG Capacity,
+    _In_ HCELL_INDEX Cell)
+{
+    ULONG Slot = CmpSkTallySlot(Cell, Capacity);
+
+    /* The table is at most half full: a free slot is always found */
+    while (Table[Slot].Cell != HCELL_NIL && Table[Slot].Cell != Cell)
+        Slot = (Slot + 1) & (Capacity - 1);
+    return &Table[Slot];
+}
+
+static
+BOOLEAN
+CmpSkTallyGrow(
+    _Inout_ PCMP_SK_TALLY Tally)
+{
+    PCMP_SK_TALLY_ENTRY NewTable, Entry;
+    ULONG NewCapacity, i;
+
+    NewCapacity = Tally->Capacity ? Tally->Capacity * 2 : CMP_SK_TALLY_FIRST_CAPACITY;
+    if (NewCapacity > CMP_SK_TALLY_MAX_CAPACITY)
+        return FALSE;
+    NewTable = CmpAllocate(NewCapacity * sizeof(CMP_SK_TALLY_ENTRY), TRUE, TAG_CM);
+    if (!NewTable)
+        return FALSE;
+    for (i = 0; i < NewCapacity; i++)
+    {
+        NewTable[i].Cell = HCELL_NIL;
+        NewTable[i].Count = 0;
+    }
+    for (i = 0; i < Tally->Capacity; i++)
+    {
+        if (Tally->Table[i].Cell == HCELL_NIL)
+            continue;
+        Entry = CmpSkTallyFind(NewTable, NewCapacity, Tally->Table[i].Cell);
+        *Entry = Tally->Table[i];
+    }
+    if (Tally->Table)
+        CmpFree(Tally->Table, Tally->Capacity * sizeof(CMP_SK_TALLY_ENTRY));
+    Tally->Table = NewTable;
+    Tally->Capacity = NewCapacity;
+    return TRUE;
+}
+
+/* One more key names Cell (a cell CmpValidateSecurityCell accepted) */
+static
+VOID
+CmpSkTallyAdd(
+    _Inout_ PCMP_SK_TALLY Tally,
+    _In_ HCELL_INDEX Cell)
+{
+    PCMP_SK_TALLY_ENTRY Entry;
+
+    if (Tally->Failed)
+        return;
+    if (Tally->Table)
+    {
+        Entry = CmpSkTallyFind(Tally->Table, Tally->Capacity, Cell);
+        if (Entry->Cell == Cell)
+        {
+            if (Entry->Count != MAXULONG)
+                Entry->Count++;
+            return;
+        }
+    }
+
+    /* A new cell: keep the table at most half full */
+    if ((Tally->Used + 1) * 2 > Tally->Capacity && !CmpSkTallyGrow(Tally))
+    {
+        DPRINT1("No room to recount the references of the security cells, left as they are\n");
+        CmpSkTallyReset(Tally);
+        Tally->Failed = TRUE;
+        return;
+    }
+    Entry = CmpSkTallyFind(Tally->Table, Tally->Capacity, Cell);
+    Entry->Cell = Cell;
+    Entry->Count = 1;
+    Tally->Used++;
+}
+
+/*
+ * The walk is complete and found nothing wrong that stops the load: make the
+ * stored counts equal to the counted ones. In memory this is always done; the
+ * cell is marked dirty (so that the fix is written) only with FixHive.
+ * An over-count is lowered only if every key was counted; raising is always
+ * right, since what was counted is a lower bound of the keys that name the cell.
+ */
+static
+VOID
+CmpApplySecurityRecount(
+    _In_ PHHIVE Hive,
+    _In_ PCMP_SK_TALLY Tally,
+    _In_ BOOLEAN FixHive)
+{
+    PCM_KEY_SECURITY Security;
+    ULONG i, Raised = 0, Lowered = 0, Kept = 0;
+
+    if (Tally->Failed || !Tally->Table)
+        return;
+
+    for (i = 0; i < Tally->Capacity; i++)
+    {
+        HCELL_INDEX Cell = Tally->Table[i].Cell;
+        ULONG Actual = Tally->Table[i].Count;
+
+        if (Cell == HCELL_NIL)
+            continue;
+
+        /* Accepted when the key was counted, but never trust the pointer twice */
+        Security = CmpGetCheckedSecurityCell(Hive, Cell, NULL);
+        if (!Security || Security->ReferenceCount == Actual)
+            continue;
+
+        if (Security->ReferenceCount > Actual && Tally->Partial)
+        {
+            Kept++;
+            continue;
+        }
+
+        /* The first of each kind; the totals follow below */
+        if (Security->ReferenceCount < Actual ? Raised == 0 : Lowered == 0)
+        {
+            DPRINT1("Security cell 0x%x: %lu keys name it, ReferenceCount %lu, %s\n",
+                    Cell, (unsigned long)Actual, (unsigned long)Security->ReferenceCount,
+                    Security->ReferenceCount < Actual ? "raised" : "lowered");
+        }
+        if (Security->ReferenceCount < Actual)
+            Raised++;
+        else
+            Lowered++;
+
+        /* Dirty first; if that cannot be done the memory still gets the safe value */
+        if (FixHive)
+            HvMarkCellDirty(Hive, Cell, FALSE);
+        Security->ReferenceCount = Actual;
+    }
+
+    if (Raised || Lowered || Kept)
+    {
+        DPRINT1("Hive 0x%p: security cell reference counts: %lu raised, %lu lowered, %lu too high and left\n",
+                Hive, (unsigned long)Raised, (unsigned long)Lowered, (unsigned long)Kept);
+    }
+}
+
 #if defined(_BLDR_)
 /* A name with a character that the loader cannot upper case, see below */
 static
@@ -1128,6 +1334,19 @@ CmpValidateKey(
             HvMarkCellDirty(Hive, CurrentCell, FALSE);
     }
 
+    /*
+     * A Security that is still set is a valid cell: this key is one of the
+     * keys that name it. A hive exit node is not validated above, so it is
+     * not counted, and the counts are no longer known to be complete.
+     */
+    if (CaseStats->SecurityTally && CellData->u.KeyNode.Security != HCELL_NIL)
+    {
+        if (CellData->u.KeyNode.Flags & KEY_HIVE_EXIT)
+            CaseStats->SecurityTally->Partial = TRUE;
+        else
+            CmpSkTallyAdd(CaseStats->SecurityTally, CellData->u.KeyNode.Security);
+    }
+
     /* Validate the class */
     CmStatusCode = CmpValidateClass(Hive, CurrentCell, CellData);
     if (!CM_CHECK_REGISTRY_SUCCESS(CmStatusCode))
@@ -1243,11 +1462,12 @@ CmpValidateKey(
  */
 static
 CM_CHECK_REGISTRY_STATUS
-CmpValidateRegistryInternal(
+CmpValidateRegistryWalk(
     _In_ PHHIVE Hive,
     _In_ ULONG Flags,
     _In_ BOOLEAN SecurityDefaulted,
-    _In_ BOOLEAN FixHive)
+    _In_ BOOLEAN FixHive,
+    _In_opt_ PCMP_SK_TALLY Tally)
 {
     CM_CHECK_REGISTRY_STATUS CmStatusCode;
     PCMP_REGISTRY_STACK_WORK_STATE WorkState;
@@ -1262,6 +1482,8 @@ CmpValidateRegistryInternal(
     PAGED_CODE();
 
     ASSERT(Hive);
+
+    CaseStats.SecurityTally = Tally;
 
     /*
      * Allocate some memory blocks for the stack
@@ -1291,6 +1513,10 @@ CmpValidateRegistryInternal(
     }
 
 RestartValidation:
+    /* A repair that restarts the walk may have removed keys: count again */
+    if (Tally)
+        CmpSkTallyReset(Tally);
+
     /*
      * Prepare the stack state and start from
      * the root cell. Ensure that the root cell
@@ -1496,6 +1722,27 @@ RestartValidation:
                 Hive, (unsigned long)CaseStats.SecurityReset);
     }
     return CM_CHECK_REGISTRY_GOOD;
+}
+
+/* The walk, then the recount of the 'sk' references if asked for. It never fails the check. */
+static
+CM_CHECK_REGISTRY_STATUS
+CmpValidateRegistryInternal(
+    _In_ PHHIVE Hive,
+    _In_ ULONG Flags,
+    _In_ BOOLEAN SecurityDefaulted,
+    _In_ BOOLEAN FixHive)
+{
+    CM_CHECK_REGISTRY_STATUS CmStatusCode;
+    CMP_SK_TALLY Tally;
+
+    RtlZeroMemory(&Tally, sizeof(Tally));
+    CmStatusCode = CmpValidateRegistryWalk(Hive, Flags, SecurityDefaulted, FixHive,
+                                           (Flags & CM_CHECK_REGISTRY_RECOUNT_SECURITY) ? &Tally : NULL);
+    if (CM_CHECK_REGISTRY_SUCCESS(CmStatusCode) && (Flags & CM_CHECK_REGISTRY_RECOUNT_SECURITY))
+        CmpApplySecurityRecount(Hive, &Tally, FixHive);
+    CmpSkTallyReset(&Tally);
+    return CmStatusCode;
 }
 
 /* PUBLIC FUNCTIONS ***********************************************************/
@@ -1780,7 +2027,8 @@ CmCheckRegistry(
                   CM_CHECK_REGISTRY_PURGE_VOLATILES            |
                   CM_CHECK_REGISTRY_BOOTLOADER_PURGE_VOLATILES |
                   CM_CHECK_REGISTRY_VALIDATE_HIVE              |
-                  CM_CHECK_REGISTRY_FIX_HIVE))
+                  CM_CHECK_REGISTRY_FIX_HIVE                   |
+                  CM_CHECK_REGISTRY_RECOUNT_SECURITY))
     {
         DPRINT1("Invalid flag for registry check given (flag %u)\n", Flags);
         return CM_CHECK_REGISTRY_INVALID_PARAMETER;

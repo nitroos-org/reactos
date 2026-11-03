@@ -210,7 +210,8 @@ CmpInitializeHive(
         (OperationType == HINIT_MAPFILE))
     {
         /* Verify integrity */
-        CM_CHECK_REGISTRY_STATUS CheckStatus = CmCheckRegistry(Hive, CheckFlags);
+        /* Nothing else can change this hive yet: have the 'sk' counts recounted */
+        CM_CHECK_REGISTRY_STATUS CheckStatus = CmCheckRegistry(Hive, CheckFlags | CM_CHECK_REGISTRY_RECOUNT_SECURITY);
         if (!CM_CHECK_REGISTRY_SUCCESS(CheckStatus))
         {
             /* Cleanup allocations and fail */
