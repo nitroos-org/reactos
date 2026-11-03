@@ -203,13 +203,16 @@ IntDesktopObjectParse(IN PVOID ParseObject,
  * so no message is needed: do what the desktop thread would do when it destroys them.
  * A process that exits with the last handle to a desktop (a sandboxed child on its
  * alternate desktop) has no Win32 thread any more, it borrows the desktop thread's.
+ * It has no Win32 process either (ObKillProcess closes the handles after the process
+ * callout): freeing the window's regions needs one (REGION_vCleanup), use CSRSS's.
  */
 static VOID
 IntFreeDesktopWindow(IN PWND pwnd)
 {
     USER_REFERENCE_ENTRY Ref;
     PETHREAD Thread = PsGetCurrentThread();
-    BOOLEAN bBorrowed = FALSE;
+    BOOLEAN bBorrowed = FALSE, bAttached = FALSE;
+    KAPC_STATE ApcState;
 
     ASSERT(gptiDesktopThread != NULL);
     ASSERT(pwnd->head.pti == gptiDesktopThread);
@@ -221,9 +224,18 @@ IntFreeDesktopWindow(IN PWND pwnd)
         bBorrowed = TRUE;
     }
 
+    if (PsGetCurrentProcessWin32Process() == NULL && gpepCSRSS)
+    {
+        KeStackAttachProcess(&gpepCSRSS->Pcb, &ApcState);
+        bAttached = TRUE;
+    }
+
     UserRefObjectCo(pwnd, &Ref);
     co_UserFreeWindow(pwnd, gptiDesktopThread->ppi, gptiDesktopThread, FALSE);
     UserDerefObjectCo(pwnd);
+
+    if (bAttached)
+        KeUnstackDetachProcess(&ApcState);
 
     if (bBorrowed)
         PsSetThreadWin32Thread(Thread, NULL, gptiDesktopThread);
