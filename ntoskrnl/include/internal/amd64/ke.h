@@ -509,6 +509,8 @@ typedef struct _KI_XSTATE_CONTEXT
     PXSAVE_AREA_HEADER UserHeader;  /* The chunk in the caller's CONTEXT_EX */
     ULONG Length;                   /* Bytes of the chunk that are transferred */
     ULONG64 Features;               /* Features 2 and up the chunk has room for */
+    ULONG64 Requested;              /* Features 2 and up the caller asks for (a get reports their mask) */
+    BOOLEAN Overflow;               /* Requested has features the chunk has no room for */
     PXSAVE_AREA_HEADER Chunk;       /* Kernel copy of the chunk */
     PXSAVE_AREA Save;               /* XSAVE area of the standard format, 64 byte aligned */
     PVOID Allocation;

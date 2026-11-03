@@ -467,7 +467,8 @@ KiCaptureXStateContext(
     XSAVE_AREA_HEADER HeaderCopy;
     LONG ChunkOffset, LegacyOffset, AllOffset;
     ULONG ChunkLength, LegacyLength, AllLength;
-    ULONG64 Features;
+    ULONG64 Features, All;
+    ULONG MaxLength;
     NTSTATUS Status;
 
     RtlZeroMemory(XState, sizeof(*XState));
@@ -475,6 +476,9 @@ KiCaptureXStateContext(
     Features = Config->EnabledFeatures & ~XSTATE_MASK_LEGACY;
     if (((KeFeatureBits & KF_XSTATE) == 0) || (Features == 0))
         return STATUS_NOT_SUPPORTED;
+
+    All = Features;
+    MaxLength = KiFitXStateContextFeatures(&All, MAXULONG);
 
     _SEH2_TRY
     {
@@ -500,9 +504,11 @@ KiCaptureXStateContext(
             _SEH2_YIELD(return STATUS_INVALID_PARAMETER);
         }
 
-        /* The chunk follows the CONTEXT_EX and holds at least the header */
+        /* The chunk follows the CONTEXT_EX and holds at least the header. A chunk longer than the one of a context
+           for every enabled feature (InitializeContext) is an invalid parameter, as on Windows */
         if ((ChunkOffset < (LONG)sizeof(CONTEXT_EX)) ||
-            (ChunkLength < sizeof(XSAVE_AREA_HEADER)))
+            (ChunkLength < sizeof(XSAVE_AREA_HEADER)) ||
+            (ChunkLength > MaxLength))
         {
             _SEH2_YIELD(return STATUS_INVALID_PARAMETER);
         }
@@ -524,8 +530,12 @@ KiCaptureXStateContext(
     }
     _SEH2_END;
 
+    /* The features the caller asks for, and those of them the chunk has room for. A get that asks for more than
+       fits still reports what is in use (Mask, CompactionMask) and then fails with STATUS_BUFFER_OVERFLOW */
+    XState->Requested = Features;
     XState->Length = KiFitXStateContextFeatures(&Features, ChunkLength);
     XState->Features = Features;
+    XState->Overflow = (Features != XState->Requested);
     XState->UserHeader = Header;
 
     Status = KiAllocateXStateContext(XState);
@@ -581,20 +591,41 @@ KiPrepareXStateDispatch(
 
     XState->Length = KiFitXStateContextFeatures(&Features, MAXULONG);
     XState->Features = Features;
+    XState->Requested = Features;
     return NT_SUCCESS(KiAllocateXStateContext(XState));
 }
 
 /*!
- *   \brief Copies the captured chunk back to the caller, after KiGetXStateContext
+ *   \brief Copies the result of KiGetXStateContext back to the caller
+ *
+ *   Writes the masks of the header and the data of the features that are in use. The data of a feature in its
+ *   initial configuration is not written: the caller's buffer keeps what it had, as on Windows.
+ *
+ *   \return STATUS_BUFFER_OVERFLOW when the chunk had no room for every feature asked for
  */
 NTSTATUS
 NTAPI
 KiCopyOutXStateContext(
     _In_ PKI_XSTATE_CONTEXT XState)
 {
+    const XSTATE_CONFIGURATION *Config = &SharedUserData->XState;
+    ULONG64 Present = XState->Chunk->Mask & XState->Features;
+    ULONG Feature, Offset;
+
     _SEH2_TRY
     {
-        RtlCopyMemory(XState->UserHeader, XState->Chunk, XState->Length);
+        XState->UserHeader->Mask = XState->Chunk->Mask;
+        XState->UserHeader->CompactionMask = XState->Chunk->CompactionMask;
+
+        for (Feature = 2; Feature < MAXIMUM_XSTATE_FEATURES; Feature++)
+        {
+            if ((Present & (1ULL << Feature)) == 0)
+                continue;
+            Offset = KiGetXStateContextOffset(Config, XState->Requested, Feature);
+            RtlCopyMemory((PUCHAR)XState->UserHeader + Offset,
+                          (PUCHAR)XState->Chunk + Offset,
+                          Config->Features[Feature].Size);
+        }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -602,7 +633,7 @@ KiCopyOutXStateContext(
     }
     _SEH2_END;
 
-    return STATUS_SUCCESS;
+    return XState->Overflow ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
 }
 
 VOID
@@ -636,23 +667,25 @@ KiGetXStateContext(
 
     RtlZeroMemory(XState->Chunk, XState->Length);
     XState->Chunk->CompactionMask = Config->CompactionEnabled ?
-        (XSTATE_COMPACTION_ENABLE_MASK | XState->Features) : 0;
-    if (XState->Features == 0)
+        (XSTATE_COMPACTION_ENABLE_MASK | XState->Requested) : 0;
+    if (XState->Requested == 0)
         return;
 
     /* No context switch while the state is saved */
     KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
     XState->Save->Header.Mask = 0;
-    _xsave64(XState->Save, XState->Features);
+    _xsave64(XState->Save, XState->Requested);
     KeLowerIrql(OldIrql);
 
-    InUse = XState->Save->Header.Mask & XState->Features;
+    /* The mask tells what is in use of everything asked for, the data is kept for what there is room for */
+    InUse = XState->Save->Header.Mask & XState->Requested;
     XState->Chunk->Mask = InUse;
+    InUse &= XState->Features;
     for (Feature = 2; Feature < MAXIMUM_XSTATE_FEATURES; Feature++)
     {
         if ((InUse & (1ULL << Feature)) == 0)
             continue;
-        RtlCopyMemory((PUCHAR)XState->Chunk + KiGetXStateContextOffset(Config, XState->Features, Feature),
+        RtlCopyMemory((PUCHAR)XState->Chunk + KiGetXStateContextOffset(Config, XState->Requested, Feature),
                       (PUCHAR)XState->Save + KiXStateStandardOffsets[Feature],
                       Config->Features[Feature].Size);
     }

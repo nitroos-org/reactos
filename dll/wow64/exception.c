@@ -33,8 +33,7 @@ static BOOLEAN Wow64XStateEnabled(VOID)
 /* Builds a native CONTEXT with CONTEXT_XSTATE, its CONTEXT_EX and the chunk of the guest
  * context in one buffer: what NtGetContextThread, NtSetContextThread and NtContinue take.
  * Buffer is 64 byte aligned and WOW64_XSTATE_BUFFER_OFFSET + WOW64_XSTATE_MAX bytes long.
- * For a set the chunk is a copy of the guest's, for a get it is empty but for its
- * compaction mask. */
+ * The chunk is a copy of the guest's. */
 static NTSTATUS Wow64BuildXStateContext(const WOW64_CONTEXT *Guest, PUCHAR Buffer, BOOLEAN Set,
                                         PUCHAR *OutGuestChunk, PULONG OutLength)
 {
@@ -66,12 +65,9 @@ static NTSTATUS Wow64BuildXStateContext(const WOW64_CONTEXT *Guest, PUCHAR Buffe
         NativeEx->XState.Offset = (LONG)(NativeChunk - (PUCHAR)NativeEx);
         NativeEx->XState.Length = Length;
         NativeEx->All.Length = (ULONG)(NativeChunk + Length - Buffer);
-        if (Set) RtlCopyMemory(NativeChunk, GuestChunk, Length);
-        else
-        {
-            RtlZeroMemory(NativeChunk, Length);
-            ((PXSAVE_AREA_HEADER)NativeChunk)->CompactionMask = ((PXSAVE_AREA_HEADER)GuestChunk)->CompactionMask;
-        }
+        /* A get leaves the data of the features that are in their initial configuration as it is, so it starts
+         * from the guest's chunk as well and the whole chunk goes back */
+        RtlCopyMemory(NativeChunk, GuestChunk, Length);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     { _SEH2_YIELD(return _SEH2_GetExceptionCode()); }
@@ -95,7 +91,8 @@ NTSTATUS Wow64XStateContext(HANDLE Thread, WOW64_CONTEXT *Guest, BOOLEAN Set)
     Status = Wow64BuildXStateContext(Guest, Buffer, Set, &GuestChunk, &Length);
     if (!NT_SUCCESS(Status)) return Status;
     Status = Set ? NtSetContextThread(Thread, (PCONTEXT)Buffer) : NtGetContextThread(Thread, (PCONTEXT)Buffer);
-    if (NT_SUCCESS(Status) && !Set)
+    /* An answer that does not fit (STATUS_BUFFER_OVERFLOW) has the masks of the header written */
+    if ((NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW) && !Set)
     {
         _SEH2_TRY { RtlCopyMemory(GuestChunk, Buffer + WOW64_XSTATE_BUFFER_OFFSET, Length); }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { Status = _SEH2_GetExceptionCode(); }
