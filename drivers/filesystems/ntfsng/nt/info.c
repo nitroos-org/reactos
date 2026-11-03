@@ -680,9 +680,17 @@ VOID NgPosixUnlink(PNG_FCB Fcb)
         if (LastName || (C->ParentMftNo == Fcb->DelParentMftNo &&
                          NgSameName(C->Name, C->NameLength, Fcb->DelName, Fcb->DelNameLength)))
         {
-            NgRetitleCcb(Vcb, C, Used < Spares ? &Spare[Used] : NULL, &NewPath, Vcb->DeletedMftNo, &NewName);
-            Used++;
-            C->Orphaned = TRUE;
+            /* No create gets past a pending delete, so no handle came after the count; should one have, it keeps its
+             * old name and is not marked (the Orphan FCB still refuses a rename or disposition through it). */
+            if (Used < Spares)
+            {
+                NgRetitleCcb(Vcb, C, &Spare[Used++], &NewPath, Vcb->DeletedMftNo, &NewName);
+                C->Orphaned = TRUE;
+            }
+            else
+            {
+                DPRINT1("ntfsng: a handle of %I64x opened after the POSIX delete began keeps its old name\n", Fcb->MftNo);
+            }
         }
     }
     if (LastName)
@@ -1180,6 +1188,8 @@ NTSTATUS NgSetInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
                 return STATUS_FILE_DELETED;     /* Windows 10, after a POSIX delete removed the name */
             ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
             Status = NgSetDisposition(Fcb, FileObject->FsContext2, FileObject, Buffer, FALSE);
+            if (NT_SUCCESS(Status))
+                ((PNG_CCB)FileObject->FsContext2)->PosixDelete = FALSE;   /* the classic class replaces a POSIX request */
             ExReleaseResourceLite(Fcb->Header.Resource);
             return Status;
         case NG_FILE_DISPOSITION_INFORMATION_EX:
