@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     abortiveclose.c
     accept.c
+    addresschange.c
     backlog.c
     bind.c
     broadcast.c

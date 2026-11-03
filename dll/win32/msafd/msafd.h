@@ -57,6 +57,7 @@ typedef struct _SOCKET_INFORMATION {
 	PVOID AsyncData;
 	HANDLE EventObject;
 	LONG NetworkEvents;
+	BOOLEAN AddrChangePending; /* an address list change was signalled for FD_ADDRESS_LIST_CHANGE, not yet enumerated */
 	CRITICAL_SECTION Lock;
 	PVOID SanData;
 	BOOL TrySAN;
@@ -64,6 +65,16 @@ typedef struct _SOCKET_INFORMATION {
 	WSAPROTOCOL_INFOW ProtocolInfo;
 	struct _SOCKET_INFORMATION *NextSocket;
 } SOCKET_INFORMATION, *PSOCKET_INFORMATION;
+
+/* misc/addrchg.c */
+VOID MsafdAddrChangeInit(VOID);
+VOID MsafdAddrChangeExit(VOID);
+INT MsafdAddressListChange(PSOCKET_INFORMATION Socket, DWORD cbInBuffer, DWORD cbOutBuffer,
+                           LPWSAOVERLAPPED lpOverlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+VOID MsafdAddrChangeSocketClosing(PSOCKET_INFORMATION Socket);
+VOID MsafdAddrChangeSelectionChanged(PSOCKET_INFORMATION Socket);
+BOOLEAN MsafdAddrChangeTakePending(PSOCKET_INFORMATION Socket);
+INT MsafdQueryAddressList(PSOCKET_INFORMATION Socket, LPVOID lpvOutBuffer, DWORD cbOutBuffer, LPDWORD pcbRet);
 
 
 typedef struct _SOCKET_CONTEXT {
