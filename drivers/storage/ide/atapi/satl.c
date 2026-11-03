@@ -290,9 +290,10 @@ AtaReqCopySatlBuffer(
 
     if (Length < Srb->DataTransferLength)
     {
-        /* This indicates a residual underrun */
+        /* This indicates a residual underrun: report the bytes returned, as the port drivers do */
         BytesCount = Length;
         Request->SrbStatus = SRB_STATUS_DATA_OVERRUN;
+        Srb->DataTransferLength = Length;
     }
     else
     {
@@ -902,7 +903,7 @@ AtaReqControlModePage(
 
     PageData->PageCode = MODE_PAGE_CONTROL;
     PageData->PageLength =
-        sizeof(PageData) - RTL_SIZEOF_THROUGH_FIELD(MODE_CONTROL_PAGE, PageLength);
+        sizeof(*PageData) - RTL_SIZEOF_THROUGH_FIELD(MODE_CONTROL_PAGE, PageLength);
 
     PageData->QERR = 0;
     PageData->QueueAlgorithmModifier = 1;
@@ -910,7 +911,7 @@ AtaReqControlModePage(
     PageData->BusyTimeoutPeriod[1] = 0xFF;
     PageData->D_SENSE = !!(DevExt->Device.DeviceFlags & DEVICE_DESCRIPTOR_SENSE);
 
-    return sizeof(PageData);
+    return sizeof(*PageData);
 }
 
 static
@@ -925,9 +926,9 @@ AtaReqControlExtensionModePage(
     PageData->SubPageCode = 0x00;
     PageData->PageCode = MODE_PAGE_CONTROL;
     PageData->PageLength[1] =
-        sizeof(PageData) - RTL_SIZEOF_THROUGH_FIELD(MODE_CONTROL_EXTENSION_PAGE, PageLength);
+        sizeof(*PageData) - RTL_SIZEOF_THROUGH_FIELD(MODE_CONTROL_EXTENSION_PAGE, PageLength);
 
-    return sizeof(PageData);
+    return sizeof(*PageData);
 }
 
 static
@@ -940,11 +941,11 @@ AtaReqRwErrorRecoveryModePage(
 
     PageData->PageCode = MODE_PAGE_ERROR_RECOVERY;
     PageData->PageLength =
-        sizeof(PageData) - RTL_SIZEOF_THROUGH_FIELD(MODE_READ_WRITE_RECOVERY_PAGE, PageLength);
+        sizeof(*PageData) - RTL_SIZEOF_THROUGH_FIELD(MODE_READ_WRITE_RECOVERY_PAGE, PageLength);
 
     PageData->AWRE = 1;
 
-    return sizeof(PageData);
+    return sizeof(*PageData);
 }
 
 static
@@ -957,15 +958,16 @@ AtaReqCachingModePage(
 
     PageData->PageCode = MODE_PAGE_CACHING;
     PageData->PageLength =
-        sizeof(PageData) - RTL_SIZEOF_THROUGH_FIELD(MODE_CACHING_PAGE_SPC5, PageLength);
+        sizeof(*PageData) - RTL_SIZEOF_THROUGH_FIELD(MODE_CACHING_PAGE_SPC5, PageLength);
 
     if (AtaDevIsVolatileWriteCacheEnabled(&DevExt->IdentifyDeviceData))
         PageData->WriteCacheEnable = 1;
 
-    if (AtaDevIsReadLookAHeadEnabled(&DevExt->IdentifyDeviceData))
+    /* DRA reports a disabled read look-ahead (SAT-5 10.4.4) */
+    if (!AtaDevIsReadLookAHeadEnabled(&DevExt->IdentifyDeviceData))
         PageData->DisableReadAHead = 1;
 
-    return sizeof(PageData);
+    return sizeof(*PageData);
 }
 
 static
@@ -978,12 +980,12 @@ AtaReqInformationalExceptionsControlModePage(
 
     PageData->PageCode = MODE_PAGE_FAULT_REPORTING;
     PageData->PageLength =
-        sizeof(PageData) - RTL_SIZEOF_THROUGH_FIELD(MODE_INFO_EXCEPTIONS, PageLength);
+        sizeof(*PageData) - RTL_SIZEOF_THROUGH_FIELD(MODE_INFO_EXCEPTIONS, PageLength);
 
     /* Only report informational exception condition on request */
     PageData->ReportMethod = 6;
 
-    return sizeof(PageData);
+    return sizeof(*PageData);
 }
 
 static
@@ -1109,15 +1111,19 @@ AtaReqCompleteModeSense(
 
     ModeDataLength = Buffer - (PUCHAR)DevExt->Device.LocalBuffer;
 
+    /*
+     * The MODE DATA LENGTH field counts the bytes that follow it (SPC-4 7.5.5),
+     * so it excludes only itself, not the medium type byte.
+     */
     if (Is6ByteCommand)
     {
-        ModeDataLength -= RTL_SIZEOF_THROUGH_FIELD(MODE_PARAMETER_HEADER, MediumType);
+        ModeDataLength -= RTL_SIZEOF_THROUGH_FIELD(MODE_PARAMETER_HEADER, ModeDataLength);
 
         ModeHeader.Header6->ModeDataLength = ModeDataLength;
     }
     else
     {
-        ModeDataLength -= RTL_SIZEOF_THROUGH_FIELD(MODE_PARAMETER_HEADER10, MediumType);
+        ModeDataLength -= RTL_SIZEOF_THROUGH_FIELD(MODE_PARAMETER_HEADER10, ModeDataLength);
 
         ModeHeader.Header10->ModeDataLength[0] = (UCHAR)(ModeDataLength >> 8);
         ModeHeader.Header10->ModeDataLength[1] = (UCHAR)ModeDataLength;
@@ -1139,7 +1145,8 @@ AtaReqScsiModeSense(
 {
     PCDB Cdb = (PCDB)Srb->Cdb;
 
-    if (Cdb->MODE_SENSE.Pc == MODE_SENSE_SAVED_VALUES)
+    /* Pc is the 2-bit field, the MODE_SENSE_*_VALUES constants are the CDB byte values */
+    if (Cdb->MODE_SENSE.Pc == (MODE_SENSE_SAVED_VALUES >> 6))
         return AtaReqTerminateInvalidField(Srb);
 
     switch (Cdb->MODE_SENSE.PageCode)
