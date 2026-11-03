@@ -249,10 +249,20 @@ DnsIntCacheAddEntry(
     /* Match the Id with all the entries in the List */
     Entry = (PRESOLVER_CACHE_ENTRY)HeapAlloc(GetProcessHeap(), 0, sizeof(*Entry));
     if (!Entry)
+    {
+        DnsCacheUnlock();
         return;
+    }
 
     Entry->bHostsFileEntry = bHostsFileEntry;
     Entry->Record = DnsRecordSetCopyEx(Record, DnsCharSetUnicode, DnsCharSetUnicode);
+    if (!Entry->Record)
+    {
+        /* An entry without a record would crash the next lookup that walks the list */
+        HeapFree(GetProcessHeap(), 0, Entry);
+        DnsCacheUnlock();
+        return;
+    }
 
     /* Insert it to our List */
     InsertTailList(&DnsCache.RecordList, &Entry->CacheLink);
@@ -289,12 +299,15 @@ DnsIntCacheGetEntries(
         pNewEntry = midl_user_allocate(sizeof(DNS_CACHE_ENTRY));
         if (pNewEntry == NULL)
         {
+            DnsCacheUnlock();
             return ERROR_OUTOFMEMORY;
         }
 
         pNewEntry->pszName = midl_user_allocate((wcslen(CacheEntry->Record->pName) + 1) * sizeof(WCHAR));
         if (pNewEntry->pszName == NULL)
         {
+            midl_user_free(pNewEntry);
+            DnsCacheUnlock();
             return ERROR_OUTOFMEMORY;
         }
 
