@@ -1416,7 +1416,8 @@ WinPosDoOwnedPopups(PWND Window, HWND hWndInsertAfter)
 
       if (hWndInsertAfter != HWND_TOPMOST)
       {
-         DesktopWindow = UserGetDesktopWindow();
+         /* The siblings of the window, on its own desktop */
+         DesktopWindow = co_GetDesktopWindow(Window);
          List = IntWinListChildren(DesktopWindow);
 
          if (List != NULL)
@@ -1485,7 +1486,7 @@ WinPosDoOwnedPopups(PWND Window, HWND hWndInsertAfter)
 
    if (!List)
    {
-      DesktopWindow = UserGetDesktopWindow();
+      DesktopWindow = co_GetDesktopWindow(Window);
       List = IntWinListChildren(DesktopWindow);
    }
 

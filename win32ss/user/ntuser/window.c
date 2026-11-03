@@ -958,6 +958,15 @@ IntLinkWindow(
         return;
     }
 
+    if (WndInsertAfter && WndInsertAfter->spwndParent != Wnd->spwndParent)
+    {
+        /* Siblings have one parent. A window of another desktop in the list would make
+           this window reachable from the wrong desktop window, and it would outlive its
+           own desktop heap. */
+        ERR("Refusing to link window %p after %p of another parent\n", Wnd, WndInsertAfter);
+        WndInsertAfter = NULL;
+    }
+
     WndSetPrev(Wnd, WndInsertAfter);
     if (Wnd->spwndPrev)
     {
