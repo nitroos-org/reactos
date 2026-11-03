@@ -852,13 +852,281 @@ static BOOL link_datatypes(xmlDocPtr schema)
     return TRUE;
 }
 
+/* msxml accepts the .NET-style escapes \uXXXX and \xXX in xs:pattern, inside and outside of character
+ * classes, each one standing for the single character it names (also when that is a regex metacharacter).
+ * libxml2's regexp compiler takes \u only outside of character classes and has no \x, so the schema copy
+ * handed to libxml2 gets every pattern rewritten with the literal characters (metacharacters escaped).
+ *
+ * Code points libxml2 cannot hold literally are mapped as follows:
+ *  - U+0000: NUL ends the C string, it becomes U+0001. Neither can occur in XML text, so no XML instance
+ *    sees a difference.
+ *  - U+D800-U+DFFF: msxml matches UTF-16 code units, libxml2 code points. A surrogate or surrogate range in
+ *    a character class becomes U+10000-U+10FFFF (all and only the characters made of surrogates), the part
+ *    outside of the surrogates is kept. Outside of a class a high + low surrogate pair of escapes becomes
+ *    the one supplementary character, a lone surrogate becomes U+FFFF, which no XML text contains either.
+ *    Not equivalent: a class of high surrogates followed by a class of low surrogates (msxml matches one
+ *    supplementary character with it, libxml2 would need two).
+ * Everything else, U+FFFE and U+FFFF included, is passed on as UTF-8. Other escapes are left alone, so
+ * malformed ones (\u41, \U0041) are still rejected by libxml2 as msxml rejects them. */
+typedef struct
+{
+    xmlChar *buf;
+    int len, cap;
+    BOOL oom;
+} pat_buf;
+
+static void pat_putc(pat_buf *b, unsigned char c)
+{
+    if (b->oom) return;
+    if (b->len + 1 >= b->cap)
+    {
+        int cap = b->cap ? b->cap * 2 : 64;
+        xmlChar *n = xmlRealloc(b->buf, cap);
+        if (!n) { b->oom = TRUE; return; }
+        b->buf = n;
+        b->cap = cap;
+    }
+    b->buf[b->len++] = c;
+}
+
+static void pat_put_cp(pat_buf *b, unsigned int cp)
+{
+    static const char meta[] = "\\|.-^?*+{}()[]";
+    const char *m;
+
+    for (m = meta; *m; m++)
+        if ((unsigned int)*m == cp) { pat_putc(b, '\\'); break; }
+
+    if (cp < 0x80) pat_putc(b, cp);
+    else if (cp < 0x800)
+    {
+        pat_putc(b, 0xc0 | (cp >> 6));
+        pat_putc(b, 0x80 | (cp & 0x3f));
+    }
+    else if (cp < 0x10000)
+    {
+        pat_putc(b, 0xe0 | (cp >> 12));
+        pat_putc(b, 0x80 | ((cp >> 6) & 0x3f));
+        pat_putc(b, 0x80 | (cp & 0x3f));
+    }
+    else
+    {
+        pat_putc(b, 0xf0 | (cp >> 18));
+        pat_putc(b, 0x80 | ((cp >> 12) & 0x3f));
+        pat_putc(b, 0x80 | ((cp >> 6) & 0x3f));
+        pat_putc(b, 0x80 | (cp & 0x3f));
+    }
+}
+
+static int pat_hex(const xmlChar *s, int digits)
+{
+    int i, v = 0;
+
+    for (i = 0; i < digits; i++)
+    {
+        if (s[i] >= '0' && s[i] <= '9') v = v * 16 + s[i] - '0';
+        else if (s[i] >= 'a' && s[i] <= 'f') v = v * 16 + s[i] - 'a' + 10;
+        else if (s[i] >= 'A' && s[i] <= 'F') v = v * 16 + s[i] - 'A' + 10;
+        else return -1;
+    }
+    return v;
+}
+
+/* \uXXXX or \xXX at s: the code point and the length of the escape, else -1 */
+static int pat_escape_cp(const xmlChar *s, int *len)
+{
+    if (s[0] != '\\') return -1;
+    if (s[1] == 'u') { *len = 6; return pat_hex(s + 2, 4); }
+    if (s[1] == 'x') { *len = 4; return pat_hex(s + 2, 2); }
+    return -1;
+}
+
+/* one endpoint of a class range: an escape or a plain character; -1 for [ ] or another escape */
+static int pat_class_endpoint(const xmlChar *s, int *len)
+{
+    int cp = pat_escape_cp(s, len);
+
+    if (cp >= 0) return cp;
+    if (*s == 0 || *s == '\\' || *s == '[' || *s == ']') return -1;
+    *len = 4;
+    cp = xmlGetUTF8Char(s, len);
+    if (cp < 0) *len = 1;
+    return cp;
+}
+
+static void pat_put_class_range(pat_buf *b, unsigned int lo, unsigned int hi)
+{
+    if (lo == 0) lo = 1;
+    if (hi == 0) hi = 1;
+    if (lo <= 0xdfff && hi >= 0xd800)
+    {
+        if (lo < 0xd800)
+        {
+            pat_put_cp(b, lo);
+            if (lo != 0xd7ff) { pat_putc(b, '-'); pat_put_cp(b, 0xd7ff); }
+        }
+        pat_put_cp(b, 0x10000);
+        pat_putc(b, '-');
+        pat_put_cp(b, 0x10ffff);
+        if (hi > 0xdfff)
+        {
+            pat_put_cp(b, 0xe000);
+            if (hi != 0xe000) { pat_putc(b, '-'); pat_put_cp(b, hi); }
+        }
+        return;
+    }
+    pat_put_cp(b, lo);
+    if (hi != lo) { pat_putc(b, '-'); pat_put_cp(b, hi); }
+}
+
+/* returns a new string (xmlFree), or NULL when the pattern has no \u or \x escape to rewrite */
+static xmlChar *rewrite_msxml_pattern(const xmlChar *p)
+{
+    pat_buf b = { NULL, 0, 0, FALSE };
+    const xmlChar *s = p;
+    BOOL changed = FALSE;
+    int depth = 0, cp, cp2, len, len2;
+
+    while (*s)
+    {
+        if (depth == 0)
+        {
+            if ((cp = pat_escape_cp(s, &len)) >= 0)
+            {
+                changed = TRUE;
+                s += len;
+                if (cp >= 0xd800 && cp <= 0xdbff && (cp2 = pat_escape_cp(s, &len2)) >= 0xdc00 && cp2 <= 0xdfff)
+                {
+                    cp = 0x10000 + ((cp - 0xd800) << 10) + (cp2 - 0xdc00);
+                    s += len2;
+                }
+                else if (cp >= 0xd800 && cp <= 0xdfff) cp = 0xffff;
+                else if (cp == 0) cp = 1;
+                pat_put_cp(&b, cp);
+            }
+            else if (*s == '\\' && s[1])
+            {
+                /* any other escape, \p{..} \- \( ... */
+                pat_putc(&b, *s++);
+                pat_putc(&b, *s++);
+            }
+            else if (*s == '[')
+            {
+                depth++;
+                pat_putc(&b, *s++);
+                if (*s == '^') pat_putc(&b, *s++);
+            }
+            else pat_putc(&b, *s++);
+            continue;
+        }
+
+        /* inside a character class */
+        if (*s == ']')
+        {
+            depth--;
+            pat_putc(&b, *s++);
+        }
+        else if (s[0] == '-' && s[1] == '[')
+        {
+            /* subtraction, -[...] */
+            depth++;
+            pat_putc(&b, *s++);
+            pat_putc(&b, *s++);
+            if (*s == '^') pat_putc(&b, *s++);
+        }
+        else if ((cp = pat_class_endpoint(s, &len)) < 0)
+        {
+            /* \p{..} \d ..., a nested [ or a malformed byte: pass on, libxml2 judges it */
+            BOOL prop = s[0] == '\\' && (s[1] == 'p' || s[1] == 'P') && s[2] == '{';
+
+            if (*s == '\\' && s[1]) pat_putc(&b, *s++);
+            pat_putc(&b, *s++);
+            while (prop && *s)
+            {
+                pat_putc(&b, *s);
+                if (*s++ == '}') break;
+            }
+        }
+        else if (s[len] == '-' && s[len + 1] != ']' && s[len + 1] != '[' &&
+                 (cp2 = pat_class_endpoint(s + len + 1, &len2)) >= 0)
+        {
+            changed |= s[0] == '\\' || s[len + 1] == '\\';
+            pat_put_class_range(&b, cp, cp2);
+            s += len + 1 + len2;
+        }
+        else
+        {
+            changed |= s[0] == '\\';
+            pat_put_class_range(&b, cp, cp);
+            s += len;
+        }
+    }
+
+    if (!changed || b.oom)
+    {
+        xmlFree(b.buf);
+        return NULL;
+    }
+    b.buf[b.len] = 0;
+    return b.buf;
+}
+
+typedef struct
+{
+    xmlNodePtr node;
+    xmlChar *orig;
+} pattern_orig;
+
+static BOOL is_xsd_pattern_node(xmlNodePtr node)
+{
+    return node->type == XML_ELEMENT_NODE && node->ns && node->ns->href &&
+           !xmlStrcmp(node->ns->href, BAD_CAST "http://www.w3.org/2001/XMLSchema") &&
+           !xmlStrcmp(node->name, BAD_CAST "pattern");
+}
+
+/* Rewrites the value of every xs:pattern in the schema document for libxml2; the original values are
+ * returned in *orig, to put back once the schema is compiled. */
+static void xsd_rewrite_patterns(xmlNodePtr node, pattern_orig **orig, int *count, int *cap)
+{
+    for (; node; node = node->next)
+    {
+        if (is_xsd_pattern_node(node))
+        {
+            xmlChar *val = xmlGetNoNsProp(node, BAD_CAST "value");
+            xmlChar *new_val = val ? rewrite_msxml_pattern(val) : NULL;
+
+            if (new_val)
+            {
+                if (*count == *cap)
+                {
+                    int new_cap = *cap ? *cap * 2 : 8;
+                    pattern_orig *n = realloc(*orig, new_cap * sizeof(**orig));
+                    if (!n) { xmlFree(new_val); xmlFree(val); continue; }
+                    *orig = n;
+                    *cap = new_cap;
+                }
+                (*orig)[*count].node = node;
+                (*orig)[(*count)++].orig = val;
+                xmlSetProp(node, BAD_CAST "value", new_val);
+                xmlFree(new_val);
+                continue;
+            }
+            xmlFree(val);
+        }
+        if (node->children) xsd_rewrite_patterns(node->children, orig, count, cap);
+    }
+}
+
 static cache_entry* cache_entry_from_xsd_doc(xmlDocPtr doc, xmlChar const* nsURI, MSXML_VERSION v)
 {
     cache_entry* entry = malloc(sizeof(cache_entry));
     xmlSchemaParserCtxtPtr spctx;
     xmlDocPtr new_doc = xmlCopyDoc(doc, 1);
+    pattern_orig *orig = NULL;
+    int i, orig_count = 0, orig_cap = 0;
 
     link_datatypes(new_doc);
+    xsd_rewrite_patterns(new_doc->children, &orig, &orig_count, &orig_cap);
 
     /* TODO: if the nsURI is different from the default xmlns or targetNamespace,
      *       do we need to do something special here? */
@@ -868,6 +1136,8 @@ static cache_entry* cache_entry_from_xsd_doc(xmlDocPtr doc, xmlChar const* nsURI
 
     if ((entry->schema = Schema_parse(spctx)))
     {
+        /* the schema document is exposed to the caller, give it its own pattern values back */
+        for (i = 0; i < orig_count; i++) xmlSetProp(orig[i].node, BAD_CAST "value", orig[i].orig);
         xmldoc_init(entry->schema->doc, v);
         entry->doc = entry->schema->doc;
         xmldoc_add_ref(entry->doc);
@@ -879,6 +1149,8 @@ static cache_entry* cache_entry_from_xsd_doc(xmlDocPtr doc, xmlChar const* nsURI
         free(entry);
         entry = NULL;
     }
+    for (i = 0; i < orig_count; i++) xmlFree(orig[i].orig);
+    free(orig);
     xmlSchemaFreeParserCtxt(spctx);
     return entry;
 }
