@@ -217,6 +217,17 @@ static int DoQuery(LPCWSTR id)
             GetPrivateProfileStringW(L"Source", k[i], L"", v, 512, f.ManifestPath);
             if (v[0]) Out(L"Source.%s: %s\n", k[i], v);
         }
+        if (!_wcsicmp(f.Provider, L"component"))
+        {
+            /* the recipe lives in the component list, not in the manifest */
+            FM_COMPONENT c;
+            if (FmCompLoad(f.Id, &c))
+            {
+                Out(L"Source.Artifact: %s\n", c.Url);
+                Out(L"Source.ArtifactSHA256: %s\n", c.Sha256);
+                if (c.Size) Out(L"Source.SizeBytes: %I64u\n", c.Size);
+            }
+        }
     }
     return 0;
 }

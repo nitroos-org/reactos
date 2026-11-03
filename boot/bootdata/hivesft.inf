@@ -593,6 +593,9 @@ HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\BackupPath",
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\BackupPath","",0x00020000,"%SystemRoot%\system32\ntbackup.exe"
 
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",,0x00000012
+; first-boot installer of the default components (.NET Framework 4.8): runs at logon, installs once the network is up, records its result under
+; HKLM\SOFTWARE\ReactOS\Nitro\Featmgr. Off switch: AutoInstall=0 (DWORD) there, or delete this value.
+HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Run","NitroComponents",0x00020000,"%SystemRoot%\system32\optfeatures.exe /firstboot"
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnceEx",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Setup",,0x00000012

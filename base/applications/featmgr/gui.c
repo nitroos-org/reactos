@@ -423,6 +423,7 @@ static void ProgressSink(FM_PROG_KIND kind, LPCWSTR text, void *ctx)
 {
     BOOL post;
     (void)ctx;
+    if (kind != FM_PROG_STEP && kind != FM_PROG_OUTPUT) return;   /* phase / byte counts are for the components window */
     EnterCriticalSection(&g_progCs);
     if (kind == FM_PROG_STEP)
     {
@@ -1364,6 +1365,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
     INITCOMMONCONTROLSEX icc;
 
     UNREFERENCED_PARAMETER(hPrev);
+
+    /* optfeatures /firstboot: the first-boot component installer (Run value NitroComponents) */
+    if (lpCmd && wcsstr(lpCmd, L"/firstboot"))
+        return FmFirstBootMain(hInst, lpCmd);
+    /* no switch of the classic list: "Turn NitroOS features on or off", the tree of features */
+    if (!(lpCmd && (wcsstr(lpCmd, L"/software") || wcsstr(lpCmd, L"/addbucket") || wcsstr(lpCmd, L"/classic") ||
+                    wcsstr(lpCmd, L"/select:") || wcsstr(lpCmd, L"/search:") || wcsstr(lpCmd, L"/source:"))))
+        return FmFeatTreeMain(hInst, lpCmd, nShow);
 
     /* optfeatures /software [/source:<source>] : open on the Software tab, optionally filtered */
     if (lpCmd && wcsstr(lpCmd, L"/software")) g_startSoftware = TRUE;

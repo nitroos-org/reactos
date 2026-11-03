@@ -55,6 +55,7 @@ typedef struct _FM_FEATURE
     WCHAR   Source[32];          /* software tier display source: "rapps", "command", "scoop/<bucket>"; "" for OS tier */
     WCHAR   App[48];             /* Provider=scoop: [Scoop] App (the Scoop app name) */
     WCHAR   Detect[128];         /* software tier: raw [Install] DetectPath (installed iff the path exists) */
+    WCHAR   Group[48];           /* [Feature] Group: the parent node of the Turn-features-on-or-off tree ("" = by tier) */
     WCHAR   Bucket[24];          /* Provider=scoop: the bucket the entry came from */
     WCHAR   Homepage[160];       /* Provider=scoop: [Scoop] Homepage (truncated) */
     WCHAR   License[48];         /* Provider=scoop: [Scoop] License */
@@ -208,7 +209,13 @@ BOOL   FmStageRappsEntry(LPCWSTR entryFile, LPCWSTR pkg, FILE *log);
  * only copy the text and post a message. FM_PROG_STEP names the current step; FM_PROG_OUTPUT is the
  * newest line the child (installer, script, Scoop) printed. FmOpCancel (any thread) terminates the
  * running child process tree and makes the operation return HRESULT_FROM_WIN32(ERROR_CANCELLED). */
-typedef enum { FM_PROG_STEP, FM_PROG_OUTPUT } FM_PROG_KIND;
+typedef enum { FM_PROG_STEP, FM_PROG_OUTPUT,
+               FM_PROG_PHASE,    /* text = decimal FM_PHASE_*: the stage of the Installing additional components window */
+               FM_PROG_BYTES     /* text = "<done> <total>" decimal bytes of the download in progress (total 0 = unknown) */
+} FM_PROG_KIND;
+#define FM_PHASE_SEARCH   1      /* searching for required files */
+#define FM_PHASE_DOWNLOAD 2      /* downloading required files (includes verifying the checksum) */
+#define FM_PHASE_APPLY    3      /* applying changes (the installer / uninstaller runs) */
 typedef void (*FM_PROGRESS_FN)(FM_PROG_KIND kind, LPCWSTR text, void *ctx);
 void   FmOpBegin(FM_PROGRESS_FN fn, void *ctx);
 void   FmOpEnd(void);
@@ -217,6 +224,58 @@ BOOL   FmOpCancelled(void);
 HANDLE FmOpCancelHandle(void);          /* manual-reset event set by FmOpCancel; NULL when not armed */
 BOOL   FmOpMayBeMsi(void);              /* the running child is, or may start, a Windows Installer package */
 void   FmOpStep(LPCWSTR fmt, ...);      /* report a step (no-op without a sink) */
+void   FmOpPhase(int phase);            /* FM_PHASE_* (no-op without a sink) */
+void   FmOpBytes(ULONGLONG done, ULONGLONG total);   /* download progress (no-op without a sink) */
+/* TRUE once after an install or removal that asked for a restart (installer exit code 3010 / 1641); clears the flag */
+BOOL   FmTakeRebootNeeded(void);
+
+/* ---- component list (components.ini) --------------------------------------------------------------
+ * One data file, %SystemRoot%\Featmgr\Catalog\components.ini (override: FEATMGR_COMPONENTS), one [section] per component:
+ * the download (Url, Sha256, SizeBytes, FileName), how to see that it is installed (DetectReg / DetectFile), how
+ * to install it (Install, %FILE% = the verified download) and remove it (Uninstall[.amd64|.x86]). A catalog
+ * entry with [Install] Provider=component and the same Id installs through it: featmgr downloads the file itself
+ * (wininet), refuses it unless its SHA-256 matches, then runs Install. Default=1 components are what the
+ * first-boot installer (optfeatures /firstboot) installs. Microsoft files are never bundled. */
+typedef struct _FM_COMPONENT
+{
+    WCHAR    Id[FM_MAX_ID];
+    WCHAR    Name[FM_MAX_NAME];
+    WCHAR    Url[512];
+    WCHAR    Sha256[72];
+    WCHAR    FileName[96];
+    WCHAR    DetectReg[320];     /* HKLM\key|value|>=N  (or just key|value: the value exists) */
+    WCHAR    DetectFile[MAX_PATH];
+    WCHAR    Install[1024];
+    WCHAR    Uninstall[1024];    /* the .amd64 / .x86 line of this build, else Uninstall */
+    ULONGLONG Size;
+    BOOL     Default;            /* installed by the first-boot installer */
+    BOOL     ArchOk;             /* Arch= lists this build's architecture */
+} FM_COMPONENT;
+BOOL   FmCompLoad(LPCWSTR id, FM_COMPONENT *c);
+int    FmCompEnum(FM_COMPONENT **outArr);          /* every component of the file; caller frees with FmCompFree */
+void   FmCompFree(FM_COMPONENT *arr);
+BOOL   FmCompDetect(const FM_COMPONENT *c);        /* TRUE: installed (DetectReg or DetectFile holds) */
+/* Download c->Url into %SystemRoot%\Featmgr\Downloads and verify it. A copy already there that matches is reused.
+ * Reports FM_PHASE_DOWNLOAD / FM_PROG_BYTES; honours FmOpCancel (the partial file is deleted). Never returns S_OK for
+ * a file whose SHA-256 differs (the file is deleted). path = the verified file. */
+HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log);
+BOOL   FmNetProbe(LPCWSTR url, DWORD timeoutMs);   /* TRUE: the server answered (the network is up) */
+void   FmCompInstallLine(const FM_COMPONENT *c, LPCWSTR file, LPWSTR out, DWORD cch);   /* Install with %FILE% filled in */
+
+/* ---- GUI pieces shared by optfeatures.exe (progwin.c, featwin.c, firstboot.c) ---- */
+#define FM_JOB_INSTALL 0
+#define FM_JOB_REMOVE  1
+typedef struct _FM_JOB { WCHAR id[FM_MAX_ID]; WCHAR name[FM_MAX_NAME]; int action; } FM_JOB;
+typedef struct _FM_UIRESULT { int ok, failed, cancelled; BOOL reboot; WCHAR firstError[512]; } FM_UIRESULT;
+#define FM_UI_AUTOCLOSE 0x1      /* close by itself a few seconds after a fully successful run (first boot) */
+/* The "Installing additional components" window: runs the jobs one after another on a worker thread, with the
+ * four steps, an overall bar, "Show details" (a row per component and a live log), Cancel and Try again.
+ * Modal over owner (may be NULL). Returns 0 when every job finished, 1 when one failed, 2 when cancelled. */
+int    FmRunJobsUI(HWND owner, const FM_JOB *jobs, int n, DWORD flags, LPCWSTR logFile, FM_UIRESULT *res);
+int    FmFeatTreeMain(HINSTANCE hInst, LPCWSTR cmd, int nShow);    /* "Turn NitroOS features on or off" */
+int    FmFirstBootMain(HINSTANCE hInst, LPCWSTR cmd);              /* optfeatures /firstboot */
+void   FmLogLine(LPCWSTR logFile, LPCWSTR fmt, ...);               /* UTC-stamped line appended to logFile */
+BOOL   FmGetLogDir(LPWSTR buf, DWORD cch);                         /* %SystemRoot%\Featmgr\Logs (created) */
 
 /* Utility: tier/state to display string. */
 LPCWSTR FmTierStr(FM_TIER t);
