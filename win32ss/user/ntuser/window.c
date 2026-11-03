@@ -1353,6 +1353,7 @@ co_UserSetParent(HWND hWndChild, HWND hWndNewParent)
    if (WndParent->head.rpdesk != Wnd->head.rpdesk)
    {
       ERR("UserSetParent: parent %p is on another desktop than %p\n", hWndNewParent, hWndChild);
+      // TODO(oracle): verify error code (ERROR_ACCESS_DENIED is a guess, not measured on Windows)
       EngSetLastError(ERROR_ACCESS_DENIED);
       return NULL;
    }
@@ -3747,12 +3748,22 @@ NtUserSetParent(HWND hWndChild, HWND hWndNewParent)
          hWndNewParent = hWndNewParent ? IntGetMessageWindow() : IntGetDesktopWindow();
       else if (!hWndNewParent)
          hWndNewParent = pdeskChild->DesktopWindow;
+      else if (pdeskChild->spwndMessage)
+         hWndNewParent = UserHMGetHandle(pdeskChild->spwndMessage);
       else
-         hWndNewParent = pdeskChild->spwndMessage ? UserHMGetHandle(pdeskChild->spwndMessage) : NULL;
+      {
+         /* No message window (desktop being destroyed): NULL would mean the desktop
+            window to co_UserSetParent, fail as for a parent that does not exist */
+         ERR("NtUserSetParent: desktop %p of %p has no message window\n", pdeskChild, hWndChild);
+         EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+         Ret = NULL;
+         goto Exit;
+      }
    }
 
    Ret = co_UserSetParent(hWndChild, hWndNewParent);
 
+Exit:
    TRACE("Leave NtUserSetParent, ret=%p\n", Ret);
    UserLeave();
    return Ret;

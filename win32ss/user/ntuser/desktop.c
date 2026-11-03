@@ -1999,11 +1999,16 @@ VOID co_IntShellHookNotify(WPARAM Message, WPARAM wParam, LPARAM lParam)
     PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
     HWND* HwndList;
 
-    /* The shell windows of the desktop the notification is about: the desktop of the
-       window in wParam (created, destroyed, activated...), else the caller's desktop.
-       Only input-device notifications without either go to the input desktop. A shell on
-       the input desktop must not get the windows of other desktops (its taskbar would
-       list them). */
+    /* The shell windows of the desktop the notification is about. A window notification
+       (created, destroyed, activated..., wParam = the window) goes to the desktop of that
+       window. Everything else goes to the caller's desktop, and so does a window
+       notification whose window is already gone: HSHELL_APPCOMMAND comes from
+       DefWindowProc on the thread of a window of that desktop, HSHELL_LANGUAGE from the
+       thread whose keyboard layout changed (wParam is not a window for these two). Only a
+       caller without a desktop (a system thread) falls back to the input desktop. A shell
+       on the input desktop must not get the windows of other desktops (its taskbar would
+       list them). Caller's desktop for the two input notifications: the plausible Windows
+       behaviour (the shell on that desktop owns its windows' app commands), not measured. */
     if (Message != HSHELL_LANGUAGE && Message != HSHELL_APPCOMMAND && wParam)
     {
         PWND pwnd = ValidateHwndNoErr((HWND)wParam);
