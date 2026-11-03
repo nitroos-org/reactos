@@ -249,6 +249,7 @@ BOOL UserSetCursorPosEx( INT x, INT y, DWORD flags, ULONG_PTR dwExtraInfo, BOOL 
     RECTL rcClip;
     POINT pt;
 
+    /* The cursor is on the screen, i.e. the input desktop (only its size is used) */
     if (!(DesktopWindow = UserGetDesktopWindow()))
     {
         return FALSE;
@@ -732,6 +733,7 @@ UserClipCursor(
 
     CurInfo = IntGetSysCursorInfo();
 
+    /* The cursor clip is global: clamp to the screen (input desktop window) */
     DesktopWindow = UserGetDesktopWindow();
 
     if (prcl != NULL && DesktopWindow != NULL)

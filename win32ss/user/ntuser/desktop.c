@@ -61,7 +61,16 @@ DWORD gdwNOIOSectionSize    = 512;
 #endif
 DWORD gdwWinlogonSectionSize = 128;
 
-PDESKTOP gpdeskInputDesktop = NULL;     ///< Currently active desktop.
+/*
+ * Currently active (input) desktop. It holds no object reference: every thread on a
+ * desktop references it, so it is only deleted when nothing runs on it, and the delete
+ * (IntLeaveInputDesktop, under the USER lock) hands input back to "Default" before the
+ * object goes away, so this pointer never dangles. A COPY of it (or of its desktop
+ * window) must not be used after a call that leaves the USER lock: the input desktop can
+ * be switched away from and closed meanwhile. Code that waits uses the thread's own
+ * desktop (referenced by the thread) or re-reads this.
+ */
+PDESKTOP gpdeskInputDesktop = NULL;
 HDC ScreenDeviceContext = NULL;
 PTHREADINFO gptiDesktopThread = NULL;
 HCURSOR gDesktopCursor = NULL;
@@ -1559,6 +1568,14 @@ HWND FASTCALL IntGetDesktopWindow(VOID)
     return pdo->DesktopWindow;
 }
 
+/*
+ * The desktop window of the INPUT desktop (the one on the screen). Only for screen and
+ * hardware-input work (cursor, mouse hit testing in the input path, screen DCs). For
+ * "the desktop window" in the Windows API sense (GetDesktopWindow, NULL parents, top-level
+ * checks) use the calling thread's desktop (UserGetThreadDesktopWindow), the window's own
+ * desktop (co_GetDesktopWindow) or UserIsDesktopWindow. The input desktop holds no
+ * object reference: do not keep the result across a call that can leave the USER lock.
+ */
 PWND FASTCALL UserGetDesktopWindow(VOID)
 {
     PDESKTOP pdo = IntGetActiveDesktop();
@@ -1807,6 +1824,7 @@ UserGetDesktopDC(ULONG DcType, BOOL bAltDc, BOOL ValidatehWnd)
 
     if (DcType == DCTYPE_DIRECT)
     {
+        /* A direct DC of the screen: the input desktop */
         DesktopObject = UserGetDesktopWindow();
         DesktopHDC = (HDC)UserGetWindowDC(DesktopObject);
     }
@@ -1827,7 +1845,10 @@ UserRedrawDesktop(VOID)
     PWND Window = NULL;
     PREGION Rgn;
 
+    /* After a display change: the desktop on the screen (input desktop) */
     Window = UserGetDesktopWindow();
+    if (!Window)
+        return;
     Rgn = IntSysCreateRectpRgnIndirect(&Window->rcWindow);
     if (!Rgn)
         return;
@@ -1922,8 +1943,25 @@ UserBuildShellHookHwndList(PDESKTOP Desktop)
  */
 VOID co_IntShellHookNotify(WPARAM Message, WPARAM wParam, LPARAM lParam)
 {
-    PDESKTOP Desktop = IntGetActiveDesktop();
+    PDESKTOP Desktop = NULL;
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
     HWND* HwndList;
+
+    /* The shell windows of the desktop the notification is about: the desktop of the
+       window in wParam (created, destroyed, activated...), else the caller's desktop.
+       Only input-device notifications without either go to the input desktop. A shell on
+       the input desktop must not get the windows of other desktops (its taskbar would
+       list them). */
+    if (Message != HSHELL_LANGUAGE && Message != HSHELL_APPCOMMAND && wParam)
+    {
+        PWND pwnd = ValidateHwndNoErr((HWND)wParam);
+        if (pwnd)
+            Desktop = pwnd->head.rpdesk;
+    }
+    if (!Desktop && pti)
+        Desktop = pti->rpdesk;
+    if (!Desktop)
+        Desktop = IntGetActiveDesktop();
 
     if (!gpsi->uiShellMsg)
     {
