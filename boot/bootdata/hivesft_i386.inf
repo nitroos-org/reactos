@@ -1,0 +1,8 @@
+[Version]
+Signature = "$Windows NT$"
+
+[AddReg]
+
+; Build lab of the Windows 10 22H2 build the version values report (CurrentBuild 19045 is the update of the 19041
+; servicing branch, whose BuildLabEx stays 19041.1). The value names the architecture, so it is kept per architecture.
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","BuildLabEx",2,"19041.1.x86fre.vb_release.191206-1406"
