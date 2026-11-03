@@ -11,6 +11,7 @@ list(APPEND SOURCE
     closerace.c
     connectex.c
     connecterror.c
+    connectstate.c
     GetAddrInfoEx.c
     getaddrinfo.c
     GetHostNameW.c
