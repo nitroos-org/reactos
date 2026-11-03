@@ -337,7 +337,8 @@ static NTSTATUS NgSetBasic(PNG_FCB Fcb, PFILE_BASIC_INFORMATION B)
     return Err ? NgErrnoToStatus(Err) : STATUS_SUCCESS;
 }
 
-static NTSTATUS NgSetDisposition(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_OBJECT FileObject, PFILE_DISPOSITION_INFORMATION D)
+static NTSTATUS NgSetDisposition(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_OBJECT FileObject, PFILE_DISPOSITION_INFORMATION D,
+                                 BOOLEAN IgnoreReadOnly)
 {
     PNG_VCB Vcb = Fcb->Vcb;
     int Empty = 1;
@@ -350,7 +351,7 @@ static NTSTATUS NgSetDisposition(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_OBJECT FileObje
         return STATUS_SUCCESS;
     }
     NgFillStat(Fcb);
-    if (Fcb->Stat.file_attributes & FILE_ATTRIBUTE_READONLY)
+    if (!IgnoreReadOnly && (Fcb->Stat.file_attributes & FILE_ATTRIBUTE_READONLY))
         return STATUS_CANNOT_DELETE;
     if (Fcb->IsDirectory)
     {
@@ -956,7 +957,7 @@ NTSTATUS NgSetInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (!Fcb || Fcb->IsVolume || !Fcb->HasNode)
         return STATUS_INVALID_PARAMETER;
 
-    switch (Class)
+    switch ((ULONG)Class)   /* an unnamed class (64) is a case below */
     {
         case FileBasicInformation:
             if (Length < sizeof(FILE_BASIC_INFORMATION))
@@ -1014,9 +1015,47 @@ NTSTATUS NgSetInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             if (Length < sizeof(FILE_DISPOSITION_INFORMATION))
                 return STATUS_INVALID_PARAMETER;
             ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
-            Status = NgSetDisposition(Fcb, FileObject->FsContext2, FileObject, Buffer);
+            Status = NgSetDisposition(Fcb, FileObject->FsContext2, FileObject, Buffer, FALSE);
             ExReleaseResourceLite(Fcb->Header.Resource);
             return Status;
+        case NG_FILE_DISPOSITION_INFORMATION_EX:
+        {
+            /*
+             * Windows 10 (DeleteFile and RemoveDirectory use it): with POSIX semantics the name leaves the
+             * directory at once, whatever other handles the file has open (they stay valid but nameless).
+             * Measured on Windows 10 22H2: RemoveDirectory(child) succeeds while a list handle of child is
+             * open, and the parent can then be removed at once; without it the parent is "not empty" until
+             * the stray handle is closed (a .NET directory enumerator that was not disposed does exactly
+             * that to Remove-Item -Recurse).  Done here for directories.  A file keeps the classic
+             * delete-pending semantics: its name goes at the last cleanup, because the data of its other
+             * handles and of the cache still need the inode.
+             */
+            ULONG Flags;
+            FILE_DISPOSITION_INFORMATION Disp;
+            BOOLEAN Now;
+            if (Length < sizeof(ULONG))
+                return STATUS_INVALID_PARAMETER;
+            Flags = *(PULONG)Buffer;
+            if ((Flags & ~NG_DISP_VALID_MASK) || (Flags & NG_DISP_ON_CLOSE))
+                return STATUS_INVALID_PARAMETER;
+            Disp.DeleteFile = (Flags & NG_DISP_DELETE) != 0;
+            Now = Disp.DeleteFile && (Flags & NG_DISP_POSIX_SEMANTICS) && Fcb->IsDirectory;
+            if (Now)
+                ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);   /* as the delete of a cleanup does */
+            ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
+            Status = NgSetDisposition(Fcb, FileObject->FsContext2, FileObject, &Disp,
+                                      (Flags & NG_DISP_IGNORE_READONLY_ATTRIBUTE) != 0);
+            if (Now && NT_SUCCESS(Status) && Fcb->DeletePending && !Fcb->Deleted)
+            {
+                Status = NgDeleteNow(Fcb, TRUE);
+                if (!NT_SUCCESS(Status))
+                    FileObject->DeletePending = FALSE;
+            }
+            ExReleaseResourceLite(Fcb->Header.Resource);
+            if (Now)
+                ExReleaseResourceLite(&Vcb->CreateGate);
+            return Status;
+        }
         case FileRenameInformation:
         case FileLinkInformation:
             /* A rename holds CreateGate exclusive (FastFAT holds the VCB): no create runs, so every
