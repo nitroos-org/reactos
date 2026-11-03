@@ -2443,7 +2443,16 @@ static const WCHAR *Wow64ExtraDlls[] =
     L"explorerframe.dll",
     /* BITS proxy/stub: the interface and proxy CLSID registrations of the 32-bit view, so a
      * 32-bit BITS client can marshal to the 64-bit service (CLSID itself: hivesft_amd64.inf) */
-    L"qmgrprxy.dll"
+    L"qmgrprxy.dll",
+    /* The remaining SysWOW64 COM servers that setup registers for the native view (OleControlDlls
+     * in syssetup.inf). Without them a 32-bit game or client gets REGDB_E_CLASSNOTREG for
+     * DirectDraw/DirectSound/DirectInput/UI Automation/MSHTML/HTML Help/ADSI. mshtml registers
+     * after the core set (urlmon, shdocvw, ieframe); its typelib step fails under WoW64
+     * (TYPE_E_CANTLOADLIBRARY, class keys are written first), hence a logged non-fatal failure.
+     * cryptdlg (DllRegisterServer fails natively too) and wininet (no DllRegisterServer) register
+     * no CLSID and are left out */
+    L"activeds.dll", L"ddraw.dll", L"dinput.dll", L"dinput8.dll", L"dsound.dll",
+    L"hhctrl.ocx", L"mshtml.dll", L"uiautomationcore.dll", L"wuapi.dll"
 };
 
 static DWORD
