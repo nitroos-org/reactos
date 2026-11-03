@@ -306,17 +306,22 @@ HRESULT STDMETHODCALLTYPE CAddressEditBox::Execute(long paramC)
     {
         hr = ParseNow(0);
 
-        /* If the destination path doesn't exist then display an error message */
-        if (hr == HRESULT_FROM_WIN32(ERROR_INVALID_DRIVE) || hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND))
+        if (!m_pidlLastParsed)
         {
+            /* The user cancelled a prompt (an empty drive disk) while parsing: do nothing more */
+            if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED) || hr == E_ABORT)
+                return hr;
+
+            /*
+             * The text is not a shell item (file not found, path not found, invalid name, ...).
+             * As on Windows, treat it as a command line, e.g. "cmd /k echo x" or "notepad C:\x.txt",
+             * and run it with the arguments split off. If that fails too, display an error message.
+             */
             if (ExecuteCommandLine())
                 return S_OK;
 
             return ShowFileNotFoundError(hr);
         }
-
-        if (!m_pidlLastParsed)
-            return E_FAIL;
 
         bParsedForExec = TRUE;
     }
