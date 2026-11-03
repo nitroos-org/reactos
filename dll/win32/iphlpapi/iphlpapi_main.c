@@ -2384,6 +2384,20 @@ DWORD WINAPI GetOwnerModuleFromUdpEntry(PMIB_UDPROW_OWNER_MODULE pUdpEntry, TCPI
     }
 }
 
+/* A DNS server entry as Windows 10 answers it (measured): the address, the host mask and the address
+ * itself as the context. */
+static void FillNameServerEntry(IP_ADDR_STRING *Entry, PWCHAR Server)
+{
+  PCSTR Terminator;
+  struct in_addr Address;
+
+  WideCharToMultiByte(CP_ACP, 0, Server, -1, Entry->IpAddress.String, 16, NULL, NULL);
+  Entry->IpAddress.String[15] = '\0';
+  strcpy(Entry->IpMask.String, "255.255.255.255");
+  if (NT_SUCCESS(RtlIpv4StringToAddressA(Entry->IpAddress.String, TRUE, &Terminator, &Address)))
+    Entry->Context = Address.S_un.S_addr;
+}
+
 static void CreateNameServerListEnumNamesFunc( PWCHAR Interface, PWCHAR Server, PVOID Data)
 {
   IP_ADDR_STRING *pNext;
@@ -2393,8 +2407,7 @@ static void CreateNameServerListEnumNamesFunc( PWCHAR Interface, PWCHAR Server, 
   {
     if (Context->uSizeAvailable >= Context->uSizeRequired)
     {
-      WideCharToMultiByte(CP_ACP, 0, Server, -1, Context->pData->DnsServerList.IpAddress.String, 16, NULL, NULL);
-      Context->pData->DnsServerList.IpAddress.String[15] = '\0';
+      FillNameServerEntry(&Context->pData->DnsServerList, Server);
       Context->pLastAddr = &Context->pData->DnsServerList;
     }
   }
@@ -2405,8 +2418,7 @@ static void CreateNameServerListEnumNamesFunc( PWCHAR Interface, PWCHAR Server, 
      {
          pNext = (IP_ADDR_STRING*)(((char*)Context->pLastAddr) + sizeof(IP_ADDR_STRING));
          ZeroMemory(pNext, sizeof(IP_ADDR_STRING));
-         WideCharToMultiByte(CP_ACP, 0, Server, -1, pNext->IpAddress.String, 16, NULL, NULL);
-         pNext->IpAddress.String[15] = '\0';
+         FillNameServerEntry(pNext, Server);
          Context->pLastAddr->Next = pNext;
          Context->pLastAddr = pNext;
          pNext->Next = NULL;

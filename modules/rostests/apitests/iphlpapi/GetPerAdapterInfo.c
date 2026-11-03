@@ -42,6 +42,21 @@ static void TestIndex(ULONG Index, BOOL IsLoopback)
         ok(Info->AutoconfigEnabled == 1, "index %lu: AutoconfigEnabled %lu\n", Index, Info->AutoconfigEnabled);
         ok(Info->AutoconfigActive == 0, "index %lu: AutoconfigActive %lu\n", Index, Info->AutoconfigActive);
         ok(Info->CurrentDnsServer == NULL, "index %lu: CurrentDnsServer %p\n", Index, Info->CurrentDnsServer);
+        {
+            /* Windows 10 measured: a DNS server entry has the host mask, and its address as the context */
+            IP_ADDR_STRING *Dns;
+            BOOL First = TRUE;
+
+            for (Dns = &Info->DnsServerList; Dns && Dns->IpAddress.String[0]; Dns = Dns->Next)
+            {
+                ok(!strcmp(Dns->IpMask.String, "255.255.255.255"), "index %lu: DNS server %s has mask \"%s\"\n", Index,
+                   Dns->IpAddress.String, Dns->IpMask.String);
+                if (First)
+                    ok(Dns->Context == inet_addr(Dns->IpAddress.String), "index %lu: DNS server %s has context %lu\n", Index,
+                       Dns->IpAddress.String, Dns->Context);
+                First = FALSE;
+            }
+        }
         if (IsLoopback)
         {
             ok(Info->DnsServerList.IpAddress.String[0] == 0, "loopback: DNS server \"%s\"\n",

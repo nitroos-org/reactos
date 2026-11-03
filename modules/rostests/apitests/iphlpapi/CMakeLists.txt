@@ -13,6 +13,7 @@ list(APPEND SOURCE
     GetOwnerModuleFromUdpEntry.c
     ArpNeighbor.c
     icmp.c
+    IfStatistics.c
     IpInterface.c
     IpTables2.c
     NeighborEntry2.c

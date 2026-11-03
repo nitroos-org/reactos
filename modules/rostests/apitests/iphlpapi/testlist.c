@@ -15,6 +15,7 @@ extern void func_GetPerAdapterInfo(void);
 extern void func_GetOwnerModuleFromTcpEntry(void);
 extern void func_GetOwnerModuleFromUdpEntry(void);
 extern void func_icmp(void);
+extern void func_IfStatistics(void);
 extern void func_IpInterface(void);
 extern void func_IpTables2(void);
 extern void func_NeighborEntry2(void);
@@ -41,6 +42,7 @@ const struct test winetest_testlist[] =
     { "GetOwnerModuleFromTcpEntry", func_GetOwnerModuleFromTcpEntry },
     { "GetOwnerModuleFromUdpEntry", func_GetOwnerModuleFromUdpEntry },
     { "icmp",                       func_icmp },
+    { "IfStatistics",               func_IfStatistics },
     { "IpInterface",               func_IpInterface },
     { "IpTables2",                  func_IpTables2 },
     { "NeighborEntry2",             func_NeighborEntry2 },

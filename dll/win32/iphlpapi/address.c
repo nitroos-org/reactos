@@ -275,9 +275,19 @@ QueryFlags(
     CHAR KeyName[256];
     DWORD Type, Size, Data;
 
-    /* every interface carries the IPv4 stack, the only one this tree has; .NET
-     * GetIPv4Properties refuses an interface without this bit */
-    *Flags = IP_ADAPTER_IPV4_ENABLED;
+    /*
+     * Windows 10 22H2 (measured): Ethernet 0x1c5, loopback 0x181 =
+     *  0x001 DDNS_ENABLED          every interface registers its address in DNS unless
+     *                              RegistrationEnabled is 0 (the loopback has no settings: on)
+     *  0x004 DHCP_ENABLED          EnableDHCP
+     *  0x040 NETBIOS_OVER_TCPIP    NOT set: this tree has no NetBT, NetBIOS over TCP/IP is not enabled
+     *  0x080 IPV4_ENABLED          the stack is IPv4, every interface carries it; .NET
+     *                              GetIPv4Properties refuses an interface without this bit
+     *  0x100 IPV6_ENABLED          NOT set: there is no IPv6 stack (Ipv6IfIndex is 0). .NET would build
+     *                              the IPv6 interface properties for the adapter and callers would try
+     *                              IPv6 sockets that cannot work here
+     */
+    *Flags = IP_ADAPTER_IPV4_ENABLED | IP_ADAPTER_DDNS_ENABLED;
 
     snprintf(KeyName, 256,
              "SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\%*s",
@@ -299,10 +309,11 @@ QueryFlags(
             *Flags |= IP_ADAPTER_REGISTER_ADAPTER_SUFFIX;
         }
 
-        Size = 0;
-        if (RegQueryValueExA(InterfaceKey, "NameServer", NULL, &Type, (LPBYTE)&Data, &Size) != ERROR_SUCCESS)
+        Size = sizeof(DWORD);
+        if (RegQueryValueExA(InterfaceKey, "RegistrationEnabled", NULL, &Type, (LPBYTE)&Data, &Size) == ERROR_SUCCESS &&
+            Type == REG_DWORD && Data == 0)
         {
-            *Flags |= IP_ADAPTER_DDNS_ENABLED;
+            *Flags &= ~IP_ADAPTER_DDNS_ENABLED;
         }
 
         RegCloseKey(InterfaceKey);
@@ -619,7 +630,19 @@ GetAdaptersAddresses(
                 CopyMemory(CurrentAA->PhysicalAddress, Entry->if_physaddr, Entry->if_physaddrlen);
                 CurrentAA->PhysicalAddressLength = Entry->if_physaddrlen;
                 QueryFlags(&Entry->if_descr[0], Entry->if_descrlen, &CurrentAA->Flags);
-                CurrentAA->Mtu = Entry->if_mtu;
+                if (Entry->if_type == IF_TYPE_SOFTWARE_LOOPBACK)
+                {
+                    /* Windows 10 (measured): the loopback has no MTU limit (.NET reads -1), 1 Gbit/s */
+                    CurrentAA->Mtu = 0xFFFFFFFF;
+                    ((IP_ADAPTER_ADDRESSES_LH*)CurrentAA)->TransmitLinkSpeed = 1073741824ULL;
+                }
+                else
+                {
+                    CurrentAA->Mtu = Entry->if_mtu;
+                    ((IP_ADAPTER_ADDRESSES_LH*)CurrentAA)->TransmitLinkSpeed = Entry->if_speed;
+                }
+                ((IP_ADAPTER_ADDRESSES_LH*)CurrentAA)->ReceiveLinkSpeed =
+                    ((IP_ADAPTER_ADDRESSES_LH*)CurrentAA)->TransmitLinkSpeed;
                 CurrentAA->IfType = Entry->if_type;
                 if(Entry->if_operstatus >= IF_OPER_STATUS_CONNECTING)
                     CurrentAA->OperStatus = IfOperStatusUp;
@@ -957,6 +980,7 @@ GetAdaptersAddresses(
                         UnicastAddress->DadState = IpDadStatePreferred;
                         UnicastAddress->ValidLifetime = 0xFFFFFFFF;
                         UnicastAddress->PreferredLifetime = 0xFFFFFFFF;
+                        UnicastAddress->OnLinkPrefixLength = (UINT8)CountPrefixBits(AddrEntries[j].iae_mask);
 
                         /* Set the address */
                         //FIXME: ipv4 only (again...)
