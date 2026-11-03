@@ -29,7 +29,8 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(winscard);
 
-static HANDLE g_startedEvent = NULL;
+void scard_init(void);
+void scard_exit(BOOL process_terminating);
 
 const SCARD_IO_REQUEST g_rgSCardT0Pci = { SCARD_PROTOCOL_T0, 8 };
 const SCARD_IO_REQUEST g_rgSCardT1Pci = { SCARD_PROTOCOL_T1, 8 };
@@ -44,12 +45,10 @@ BOOL WINAPI DllMain (HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     {
         case DLL_PROCESS_ATTACH:
             DisableThreadLibraryCalls(hinstDLL);
-            /* FIXME: for now, we act as if the pcsc daemon is always started */
-            g_startedEvent = CreateEventA(NULL,TRUE,TRUE,NULL);
+            scard_init();
             break;
         case DLL_PROCESS_DETACH:
-            if (lpvReserved) break;
-            CloseHandle(g_startedEvent);
+            scard_exit(lpvReserved != NULL);
             break;
     }
 
@@ -94,11 +93,6 @@ LONG scard_no_context(void)
     return ERROR_INVALID_HANDLE;
 }
 
-HANDLE WINAPI SCardAccessStartedEvent(void)
-{
-    return g_startedEvent;
-}
-
 LONG WINAPI SCardAddReaderToGroupA(SCARDCONTEXT context, LPCSTR reader, LPCSTR group)
 {
     LONG retval;
@@ -123,35 +117,6 @@ LONG WINAPI SCardAddReaderToGroupW(SCARDCONTEXT context, LPCWSTR reader, LPCWSTR
     return SCARD_S_SUCCESS;
 }
 
-LONG WINAPI SCardEstablishContext(DWORD dwScope, LPCVOID pvReserved1,
-    LPCVOID pvReserved2, LPSCARDCONTEXT phContext)
-{
-    TRACE("(%x,%p,%p,%p)\n", dwScope, pvReserved1, pvReserved2, phContext);
-    if (!phContext) return SCARD_E_INVALID_PARAMETER;
-    if (dwScope > SCARD_SCOPE_SYSTEM) return SCARD_E_INVALID_VALUE;
-    /* No SCardSvr: the Resource Manager is not available */
-    return SCARD_E_NO_SERVICE;
-}
-
-LONG WINAPI SCardIsValidContext(SCARDCONTEXT context)
-{
-    TRACE("(%lx)\n", context);
-    return scard_no_context();
-}
-
-LONG WINAPI SCardListCardsA(SCARDCONTEXT hContext, LPCBYTE pbAtr, LPCGUID rgguidInterfaces, DWORD cguidInterfaceCount, LPSTR mszCards, LPDWORD pcchCards)
-{
-    FIXME(": stub\n");
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return SCARD_F_INTERNAL_ERROR;
-}
-
-LONG WINAPI SCardReleaseContext(SCARDCONTEXT context)
-{
-    TRACE("(%lx)\n", context);
-    return scard_no_context();
-}
-
 LONG WINAPI SCardStatusA(SCARDHANDLE context, LPSTR szReaderName, LPDWORD pcchReaderLen, LPDWORD pdwState, LPDWORD pdwProtocol, LPBYTE pbAtr, LPDWORD pcbAtrLen)
 {
     FIXME("(%lx) stub\n", context);
@@ -164,27 +129,4 @@ LONG WINAPI SCardStatusW(SCARDHANDLE context, LPWSTR szReaderName, LPDWORD pcchR
     FIXME("(%lx) stub\n", context);
     SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return SCARD_F_INTERNAL_ERROR;
-}
-
-void WINAPI SCardReleaseStartedEvent(void)
-{
-    FIXME("stub\n");
-}
-
-LONG WINAPI SCardListReadersA(SCARDCONTEXT context, const CHAR *groups, CHAR *readers, DWORD *buflen)
-{
-    TRACE("(%lx, %s, %p, %p)\n", context, debugstr_a(groups), readers, buflen);
-    return scard_empty_multistring(FALSE, readers, buflen);
-}
-
-LONG WINAPI SCardListReadersW(SCARDCONTEXT context, const WCHAR *groups, WCHAR *readers, DWORD *buflen)
-{
-    TRACE("(%lx, %s, %p, %p)\n", context, debugstr_w(groups), readers, buflen);
-    return scard_empty_multistring(TRUE, readers, buflen);
-}
-
-LONG WINAPI SCardCancel(SCARDCONTEXT context)
-{
-    TRACE("(%lx)\n", context);
-    return scard_no_context();
 }

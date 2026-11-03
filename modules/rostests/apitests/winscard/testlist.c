@@ -8,10 +8,12 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_Cards(void);
 extern void func_NoService(void);
 
 const struct test winetest_testlist[] =
 {
+    { "Cards", func_Cards },
     { "NoService", func_NoService },
 
     { 0, 0 }

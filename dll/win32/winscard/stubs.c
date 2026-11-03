@@ -28,36 +28,6 @@ SCardBeginTransaction(SCARDHANDLE hCard)
  */
 LONG
 WINAPI
-SCardConnectA(SCARDCONTEXT hContext,
-              LPCSTR szReader,
-              DWORD dwShareMode,
-              DWORD dwPreferredProtocols,
-              LPSCARDHANDLE phCard,
-              LPDWORD pdwActiveProtocol)
-{
-  return scard_no_context();
-}
-
-/*
- * @unimplemented
- */
-LONG
-WINAPI
-SCardConnectW(SCARDCONTEXT hContext,
-              LPCWSTR szReader,
-              DWORD dwShareMode,
-              DWORD dwPreferredProtocols,
-              LPSCARDHANDLE phCard,
-              LPDWORD pdwActiveProtocol)
-{
-  return scard_no_context();
-}
-
-/*
- * @unimplemented
- */
-LONG
-WINAPI
 SCardControl(SCARDHANDLE hCard,
              DWORD dwControlCode,
              LPCVOID lpInBuffer,
@@ -198,88 +168,6 @@ SCardGetAttrib(SCARDHANDLE hCard,
  */
 LONG
 WINAPI
-SCardGetCardTypeProviderNameA(SCARDCONTEXT hContext,
-                              LPCSTR szCardName,
-                              DWORD dwProviderId,
-                              LPSTR szProvider,
-                              LPDWORD pcchProvider)
-{
-  UNIMPLEMENTED;
-  return SCARD_F_UNKNOWN_ERROR;
-}
-
-/*
- * @unimplemented
- */
-LONG
-WINAPI
-SCardGetCardTypeProviderNameW(SCARDCONTEXT hContext,
-                              LPCWSTR szCardName,
-                              DWORD dwProviderId,
-                              LPWSTR szProvider,
-                              LPDWORD pcchProvider)
-{
-  UNIMPLEMENTED;
-  return SCARD_F_UNKNOWN_ERROR;
-}
-
-/*
- * @unimplemented
- */
-LONG
-WINAPI
-SCardGetProviderIdA(SCARDCONTEXT hContext,
-                    LPCSTR szCard,
-                    LPGUID pguidProviderId)
-{
-  UNIMPLEMENTED;
-  return SCARD_F_UNKNOWN_ERROR;
-}
-
-/*
- * @unimplemented
- */
-LONG
-WINAPI
-SCardGetProviderIdW(SCARDCONTEXT hContext,
-                    LPCWSTR szCard,
-                    LPGUID pguidProviderId)
-{
-  UNIMPLEMENTED;
-  return SCARD_F_UNKNOWN_ERROR;
-}
-
-/*
- * @unimplemented
- */
-LONG
-WINAPI
-SCardGetStatusChangeA(SCARDCONTEXT hContext,
-                      DWORD dwTimeout,
-                      LPSCARD_READERSTATEA rgReaderState,
-                      DWORD cReaders)
-{
-  return scard_no_context();
-}
-
-/*
- * @unimplemented
- */
-LONG
-WINAPI
-SCardGetStatusChangeW(SCARDCONTEXT hContext,
-                      DWORD dwTimeout,
-                      LPSCARD_READERSTATEW rgReaderState,
-                      DWORD cReaders)
-{
-  return scard_no_context();
-}
-
-/*
- * @unimplemented
- */
-LONG
-WINAPI
 SCardIntroduceCardTypeA(SCARDCONTEXT hContext,
                         LPCSTR szCardName,
                         LPCGUID pguidPrimaryProvider,
@@ -359,74 +247,6 @@ SCardIntroduceReaderGroupW(SCARDCONTEXT hContext,
 {
   UNIMPLEMENTED;
   return SCARD_F_UNKNOWN_ERROR;
-}
-
-/*
- * @unimplemented
- */
-LONG
-WINAPI
-SCardListCardsW(SCARDCONTEXT hContext,
-                LPCBYTE pbAtr,
-                LPCGUID rgguidInterface,
-                DWORD cguidInterfaceCount,
-                LPWSTR mszCards,
-                LPDWORD pcchCards)
-{
-  UNIMPLEMENTED;
-  return SCARD_F_UNKNOWN_ERROR;
-}
-
-/*
- * @unimplemented
- */
-LONG
-WINAPI
-SCardListInterfacesA(SCARDCONTEXT hContext,
-                     LPCSTR szCard,
-                     LPGUID pguidInterfaces,
-                     LPDWORD pcguidInteraces)
-{
-  UNIMPLEMENTED;
-  return SCARD_F_UNKNOWN_ERROR;
-}
-
-/*
- * @unimplemented
- */
-LONG
-WINAPI
-SCardListInterfacesW(SCARDCONTEXT hContext,
-                     LPCWSTR szCard,
-                     LPGUID pguidInterfaces,
-                     LPDWORD pcguidInteraces)
-{
-  UNIMPLEMENTED;
-  return SCARD_F_UNKNOWN_ERROR;
-}
-
-/*
- * @unimplemented
- */
-LONG
-WINAPI
-SCardListReaderGroupsA(SCARDCONTEXT hContext,
-                       LPSTR mszGroups,
-                       LPDWORD pcchGroups)
-{
-  return scard_empty_multistring(FALSE, mszGroups, pcchGroups);
-}
-
-/*
- * @unimplemented
- */
-LONG
-WINAPI
-SCardListReaderGroupsW(SCARDCONTEXT hContext,
-                       LPWSTR mszGroups,
-                       LPDWORD pcchGroups)
-{
-  return scard_empty_multistring(TRUE, mszGroups, pcchGroups);
 }
 
 /*

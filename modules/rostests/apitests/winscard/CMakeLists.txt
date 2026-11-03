@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    Cards.c
     NoService.c
     testlist.c)
 
