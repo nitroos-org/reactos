@@ -24,6 +24,13 @@ VOID NitroFwNoteUdpSend(USHORT LocalPort, PIP_ADDRESS Remote, USHORT RemotePort,
 #define NITROFW_NOTE_UDP_SEND(LocalPort, Remote, RemotePort, NonUnicast) \
     do { if (NitroFwEnforcing) NitroFwNoteUdpSend((LocalPort), (Remote), (RemotePort), (NonUnicast)); } while (0)
 
-/* Address files: image path of the creating process, captured at creation (program rules) */
-PVOID NitroFwCaptureImage(VOID);
+/* Address files: the image path of the creating process is only needed when a program rule is
+   evaluated. It is resolved lazily, and only while an enforced policy has program rules
+   (NitroFwWantImages): for a socket opened in that state right after it is listed, for sockets that
+   already exist when such a policy is installed from the creator's process id. With enforcement off
+   there is no per-socket work at all. */
+extern volatile LONG NitroFwWantImages;
+VOID NitroFwAddressFileCreated(PADDRESS_FILE AddrFile);
+#define NITROFW_ADDRFILE_CREATED(AddrFile) \
+    do { if (NitroFwWantImages) NitroFwAddressFileCreated(AddrFile); } while (0)
 VOID NitroFwReleaseImage(PVOID Image);

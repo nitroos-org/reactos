@@ -66,6 +66,7 @@ typedef struct _FW_POLICY
     ULONG EnabledProfiles;      /* active AND enabled */
     BOOLEAN BlockAllInbound;
     BOOLEAN DefaultBlockInbound;
+    BOOLEAN HasAppRules;        /* an inbound rule has a program condition */
     ULONG InRuleCount;
     PULONG InRuleOffsets;       /* offsets of the inbound rules in Blob */
     ULONG BlobSize;
@@ -81,6 +82,7 @@ typedef struct _FW_FLOW
 } FW_FLOW, *PFW_FLOW;
 
 volatile LONG NitroFwEnforcing = 0;
+volatile LONG NitroFwWantImages = 0;     /* enforced policy with program rules: address files need their image */
 
 static BOOLEAN FwKilled = TRUE;         /* until NitroFwInitialize decides otherwise */
 static BOOLEAN FwOptIn = FALSE;
@@ -99,6 +101,7 @@ static FW_FLOW FwFlows[FW_FLOW_SETS][FW_FLOW_WAYS];
 
 static LONG64 FwDroppedInbound = 0;
 static LONG64 FwPassedInbound = 0;
+static LONG64 FwImagesCaptured = 0;     /* image resolutions attempted (test counter: stays flat when not enforcing) */
 
 static ULONG FwNow(VOID)
 {
@@ -237,6 +240,7 @@ static VOID FwInstallPolicy(PFW_POLICY NewPolicy)
     Old = FwPolicy;
     FwPolicy = NewPolicy;
     InterlockedExchange((PLONG)&NitroFwEnforcing, FwPolicyEnforced(NewPolicy) ? 1 : 0);
+    InterlockedExchange((PLONG)&NitroFwWantImages, (FwPolicyEnforced(NewPolicy) && NewPolicy->HasAppRules) ? 1 : 0);
     KeReleaseSpinLock(&FwPolicyLock, OldIrql);
 
     if (Old)
@@ -315,6 +319,13 @@ static BOOLEAN FwValidateRule(PUCHAR RulePtr, ULONG RuleSize)
     if (Rule->Protocol > NITROFW_PROTO_ANY)
         return FALSE;
     if ((Rule->ProfileMask & NITROFW_PROFILE_ALL) == 0)
+        return FALSE;
+    /* interface types: at least one, only known bits (see NITROFW_RULE.IfTypes in nitrofw.h) */
+    if (Rule->IfTypes == 0 || (Rule->IfTypes & ~NITROFW_IFTYPE_ALL))
+        return FALSE;
+    /* ICMP type/code entries only make sense on an ICMP rule (1 = ICMPv4, 58 = ICMPv6, which never
+       matches this IPv4-only filter): with Protocol ANY they would match every non-ICMP packet */
+    if (Rule->IcmpCount && Rule->Protocol != 1 && Rule->Protocol != 58)
         return FALSE;
 
     if (!FwCheckList(RuleSize, Rule->LocalPortCount, Rule->LocalPortOffset, sizeof(NITROFW_PORT_RANGE), Spans, &SpanCount) ||
@@ -421,6 +432,7 @@ static NTSTATUS FwCompilePolicy(PFW_POLICY Policy)
             if (Rule->AppPathOffset)
             {
                 PWCHAR s = (PWCHAR)((PUCHAR)Rule + Rule->AppPathOffset);
+                Policy->HasAppRules = TRUE;
                 for (; *s; s++)
                     *s = RtlUpcaseUnicodeChar(*s);
             }
@@ -449,11 +461,17 @@ static NTSTATUS FwCompilePolicy(PFW_POLICY Policy)
  * IOCTLs
  * ---------------------------------------------------------------------------------------------- */
 
+static VOID FwBackfillImages(VOID);
+
 static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
     ULONG InLen = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
     PFW_POLICY Policy;
     NTSTATUS Status;
+    BOOLEAN OptIn;
+    ULONGLONG Generation;
+    ULONG RuleCount, InRuleCount, ActiveProfiles, EnabledProfiles, Flags;
+    LONG Enforcing;
 
     if (InLen < sizeof(NITROFW_POLICY) || InLen > NITROFW_MAX_POLICY_SIZE || !Irp->AssociatedIrp.SystemBuffer)
         return STATUS_INVALID_PARAMETER;
@@ -474,6 +492,9 @@ static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         return Status;
     }
 
+    /* registry access (Zw calls) before the APC_LEVEL mutex is taken */
+    OptIn = FwReadSwitch(L"NitroFwEnforce");
+
     ExAcquireFastMutex(&FwSetMutex);
     if (Policy->Generation <= FwLastGeneration)
     {
@@ -482,13 +503,25 @@ static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         return STATUS_REVISION_MISMATCH;
     }
     FwLastGeneration = Policy->Generation;
-    FwOptIn = FwReadSwitch(L"NitroFwEnforce");
+    FwOptIn = OptIn;
+    /* the policy is owned by FwPolicy from here on (and may be replaced or freed by the next SET/CLEAR
+       as soon as the mutex is gone): everything logged below is copied while still under the mutex */
+    Generation = Policy->Generation;
+    RuleCount = Policy->RuleCount;
+    InRuleCount = Policy->InRuleCount;
+    ActiveProfiles = Policy->ActiveProfiles;
+    EnabledProfiles = Policy->EnabledProfiles;
+    Flags = Policy->Flags;
     FwInstallPolicy(Policy);
+    Enforcing = NitroFwEnforcing;
     ExReleaseFastMutex(&FwSetMutex);
 
+    /* sockets that exist already need their image when program rules are now in force */
+    if (NitroFwWantImages)
+        FwBackfillImages();
+
     DbgPrint("NitroFw: policy %I64u installed, %lu rules (%lu inbound), profiles 0x%lx enabled 0x%lx, flags 0x%lx, opt-in %u, enforcing %ld\n",
-            Policy->Generation, Policy->RuleCount, Policy->InRuleCount, Policy->ActiveProfiles,
-            Policy->EnabledProfiles, Policy->Flags, FwOptIn, NitroFwEnforcing);
+            Generation, RuleCount, InRuleCount, ActiveProfiles, EnabledProfiles, Flags, OptIn, Enforcing);
     return STATUS_SUCCESS;
 }
 
@@ -519,9 +552,10 @@ static NTSTATUS FwDeviceControl(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         {
             PNITROFW_STATUS St = Buf;
             PFW_POLICY Policy;
-            if (OutLen < sizeof(*St) || !Buf)
+            ULONG StSize = OutLen >= sizeof(*St) ? sizeof(*St) : NITROFW_STATUS_V1_SIZE;
+            if (OutLen < NITROFW_STATUS_V1_SIZE || !Buf)
                 return STATUS_BUFFER_TOO_SMALL;
-            RtlZeroMemory(St, sizeof(*St));
+            RtlZeroMemory(St, StSize);
             Policy = FwRefPolicy();
             if (Policy)
             {
@@ -534,7 +568,9 @@ static NTSTATUS FwDeviceControl(PIRP Irp, PIO_STACK_LOCATION IrpSp)
             St->KernelState = (FwOptIn ? NITROFW_KSTATE_OPTIN : 0) | (NitroFwEnforcing ? NITROFW_KSTATE_ENFORCING : 0);
             St->DroppedInbound = (ULONGLONG)InterlockedCompareExchange64(&FwDroppedInbound, 0, 0);
             St->PassedInbound = (ULONGLONG)InterlockedCompareExchange64(&FwPassedInbound, 0, 0);
-            Irp->IoStatus.Information = sizeof(*St);
+            if (StSize >= sizeof(*St))
+                St->ImagesCaptured = (ULONGLONG)InterlockedCompareExchange64(&FwImagesCaptured, 0, 0);
+            Irp->IoStatus.Information = StSize;
             return STATUS_SUCCESS;
         }
 
@@ -602,6 +638,13 @@ static NTSTATUS NTAPI FwDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return Status;
 }
 
+static VOID FwFreeSD(VOID)
+{
+    if (FwSD)
+        ExFreePoolWithTag(FwSD, NITROFW_TAG);
+    FwSD = NULL;
+}
+
 /* D:P(A;;GA;;;SY)(A;;GA;;;BA), owner BA, group SY */
 static NTSTATUS FwCreateSD(VOID)
 {
@@ -666,6 +709,7 @@ NTSTATUS NitroFwInitialize(PDRIVER_OBJECT DriverObject)
     if (!NT_SUCCESS(Status))
     {
         DbgPrint("NitroFw: no security descriptor (0x%lx), filter not available\n", Status);
+        FwFreeSD();
         return Status;
     }
 
@@ -674,6 +718,7 @@ NTSTATUS NitroFwInitialize(PDRIVER_OBJECT DriverObject)
     {
         DbgPrint("NitroFw: IoCreateDevice failed (0x%lx), filter not available\n", Status);
         FwDevice = NULL;
+        FwFreeSD();
         return Status;
     }
     Status = ObSetSecurityObjectByPointer(FwDevice,
@@ -684,6 +729,7 @@ NTSTATUS NitroFwInitialize(PDRIVER_OBJECT DriverObject)
         DbgPrint("NitroFw: cannot secure the device (0x%lx), filter not available\n", Status);
         IoDeleteDevice(FwDevice);
         FwDevice = NULL;
+        FwFreeSD();
         return Status;
     }
     FwSymlink = NT_SUCCESS(IoCreateSymbolicLink(&DosName, &DevName));
@@ -710,17 +756,14 @@ VOID NitroFwUnload(VOID)
     if (FwKilled)
         return;
     InterlockedExchange((PLONG)&NitroFwEnforcing, 0);
+    InterlockedExchange((PLONG)&NitroFwWantImages, 0);
     if (FwSymlink)
         IoDeleteSymbolicLink(&DosName);
     if (FwDevice)
         IoDeleteDevice(FwDevice);
     FwDevice = NULL;
-    if (FwPolicy)
-        FwDerefPolicy(FwPolicy);
-    FwPolicy = NULL;
-    if (FwSD)
-        ExFreePoolWithTag(FwSD, NITROFW_TAG);
-    FwSD = NULL;
+    FwInstallPolicy(NULL);   /* swaps FwPolicy out under FwPolicyLock and drops the reference */
+    FwFreeSD();
     FwKilled = TRUE;
 }
 
@@ -728,36 +771,37 @@ VOID NitroFwUnload(VOID)
  * Process image of an address file's creator
  * ---------------------------------------------------------------------------------------------- */
 
-PVOID NitroFwCaptureImage(VOID)
+static PFW_IMAGE FwMakeSystemImage(VOID)
+{
+    static const WCHAR System[] = L"SYSTEM";
+    const ULONG Chars = RTL_NUMBER_OF(System) - 1;
+    PFW_IMAGE Image;
+
+    Image = ExAllocatePoolWithTag(NonPagedPool, FIELD_OFFSET(FW_IMAGE, Path) + Chars * sizeof(WCHAR), NITROFW_IMG_TAG);
+    if (!Image)
+        return NULL;
+    RtlCopyMemory(Image->Path, System, Chars * sizeof(WCHAR));
+    Image->Length = (USHORT)Chars;
+    Image->RefCount = 1;
+    return Image;
+}
+
+/* Image path of the process behind Process (a handle with PROCESS_QUERY_INFORMATION), upcased NT path */
+static PFW_IMAGE FwImageFromHandle(HANDLE Process)
 {
     PFW_IMAGE Image = NULL;
-    PUNICODE_STRING Name = NULL;
+    PUNICODE_STRING Name;
     ULONG Len = 0, i, Chars;
     NTSTATUS Status;
-    static const WCHAR System[] = L"SYSTEM";
 
-    if (FwKilled || KeGetCurrentIrql() != PASSIVE_LEVEL)
-        return NULL;
-
-    if (PsGetCurrentProcess() == PsInitialSystemProcess)
-    {
-        Chars = RTL_NUMBER_OF(System) - 1;
-        Image = ExAllocatePoolWithTag(NonPagedPool, FIELD_OFFSET(FW_IMAGE, Path) + Chars * sizeof(WCHAR), NITROFW_IMG_TAG);
-        if (!Image)
-            return NULL;
-        RtlCopyMemory(Image->Path, System, Chars * sizeof(WCHAR));
-        Image->Length = (USHORT)Chars;
-        Image->RefCount = 1;
-        return Image;
-    }
-
-    Status = ZwQueryInformationProcess(NtCurrentProcess(), ProcessImageFileName, NULL, 0, &Len);
+    InterlockedIncrement64(&FwImagesCaptured);
+    Status = ZwQueryInformationProcess(Process, ProcessImageFileName, NULL, 0, &Len);
     if (Status != STATUS_INFO_LENGTH_MISMATCH || Len < sizeof(UNICODE_STRING) || Len > 0x10000 + sizeof(UNICODE_STRING))
         return NULL;
     Name = ExAllocatePoolWithTag(PagedPool, Len, NITROFW_IMG_TAG);
     if (!Name)
         return NULL;
-    Status = ZwQueryInformationProcess(NtCurrentProcess(), ProcessImageFileName, Name, Len, &Len);
+    Status = ZwQueryInformationProcess(Process, ProcessImageFileName, Name, Len, &Len);
     if (NT_SUCCESS(Status) && Name->Buffer && Name->Length >= sizeof(WCHAR))
     {
         Chars = Name->Length / sizeof(WCHAR);
@@ -772,6 +816,107 @@ PVOID NitroFwCaptureImage(VOID)
     }
     ExFreePoolWithTag(Name, NITROFW_IMG_TAG);
     return Image;
+}
+
+/* Image of the calling process (PASSIVE_LEVEL, in the creator's context) */
+static PFW_IMAGE FwImageOfCurrent(VOID)
+{
+    if (PsGetCurrentProcess() == PsInitialSystemProcess)
+        return FwMakeSystemImage();
+    return FwImageFromHandle(NtCurrentProcess());
+}
+
+/* Image of the process with the given id, which need not be the caller; NULL if it is gone (PASSIVE_LEVEL) */
+static PFW_IMAGE FwImageOfPid(HANDLE Pid)
+{
+    PEPROCESS Process;
+    HANDLE Handle;
+    PFW_IMAGE Image = NULL;
+
+    if (!NT_SUCCESS(PsLookupProcessByProcessId(Pid, &Process)))
+        return NULL;
+    if (Process == PsInitialSystemProcess)
+        Image = FwMakeSystemImage();
+    else if (NT_SUCCESS(ObOpenObjectByPointer(Process, OBJ_KERNEL_HANDLE, NULL, PROCESS_QUERY_INFORMATION,
+                                              *PsProcessType, KernelMode, &Handle)))
+    {
+        Image = FwImageFromHandle(Handle);
+        ZwClose(Handle);
+    }
+    ObDereferenceObject(Process);
+    return Image;
+}
+
+/* Attach Image (reference transferred) to the address file if it is still on the list and has none;
+   otherwise release it. AddrFile is only compared, never dereferenced, unless found on the list; the
+   creator id and creation time guard against the structure having been freed and reused meanwhile. */
+static VOID FwAttachImage(PADDRESS_FILE AddrFile, HANDLE Pid, LONGLONG Created, PFW_IMAGE Image)
+{
+    KIRQL OldIrql;
+    PLIST_ENTRY Entry;
+
+    if (!Image)
+        return;
+    TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
+    for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead; Entry = Entry->Flink)
+    {
+        if (CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry) == AddrFile)
+        {
+            if (!AddrFile->FwImage && AddrFile->ProcessId == Pid && AddrFile->CreationTime.QuadPart == Created)
+            {
+                AddrFile->FwImage = Image;
+                Image = NULL;
+            }
+            break;
+        }
+    }
+    TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
+    NitroFwReleaseImage(Image);
+}
+
+/* An address file was just put on the global list (NITROFW_ADDRFILE_CREATED: only called while a
+   program rule is in force). Resolution is lazy: when the filter is off or no rule names a program
+   nothing is looked up for the socket. */
+VOID NitroFwAddressFileCreated(PADDRESS_FILE AddrFile)
+{
+    if (FwKilled || KeGetCurrentIrql() != PASSIVE_LEVEL)
+        return;
+    FwAttachImage(AddrFile, AddrFile->ProcessId, AddrFile->CreationTime.QuadPart, FwImageOfCurrent());
+}
+
+/* Called after a policy that has program rules came into force: sockets opened before that (listeners
+   that were already there) have no image yet; resolve it from the creator's process id. PASSIVE_LEVEL. */
+static VOID FwBackfillImages(VOID)
+{
+    for (;;)
+    {
+        KIRQL OldIrql;
+        PLIST_ENTRY Entry;
+        PADDRESS_FILE Todo = NULL;
+        HANDLE Pid = NULL;
+        LONGLONG Created = 0;
+        PFW_IMAGE Image;
+
+        TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
+        for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead; Entry = Entry->Flink)
+        {
+            PADDRESS_FILE A = CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry);
+            if (!A->FwImage && !A->FwImageTried)
+            {
+                A->FwImageTried = TRUE;   /* one attempt per address file, success or not */
+                Todo = A;
+                Pid = A->ProcessId;
+                Created = A->CreationTime.QuadPart;
+                break;
+            }
+        }
+        TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
+        if (!Todo)
+            return;
+
+        Image = FwImageOfPid(Pid);
+        FwAttachImage(Todo, Pid, Created, Image);   /* Todo may be gone by now; it is looked up on the list again */
+    }
 }
 
 VOID NitroFwReleaseImage(PVOID Image)
@@ -882,7 +1027,7 @@ static BOOLEAN FwFlowLookup(USHORT LocalPort, ULONG RemoteAddr, USHORT RemotePor
             if (Set[i].Expiry && (LONG)(Set[i].Expiry - Now) >= 0 &&
                 Set[i].LocalPort == LocalPort && Set[i].RemoteAddr == Ra && Set[i].RemotePort == Rp)
             {
-                if (!pass)
+                if (!pass && RemoteAddr != 0)   /* concrete peers only: 0.0.0.0 must not extend the wildcard entry */
                     Set[i].Expiry = Now + FW_UDP_TIMEOUT;   /* traffic keeps the exchange alive */
                 Hit = TRUE;
                 break;
@@ -954,7 +1099,10 @@ static BOOLEAN FwRuleMatches(PNITROFW_RULE Rule, PFW_PKT Pkt)
 
     if (Rule->Protocol != NITROFW_PROTO_ANY && Rule->Protocol != Pkt->Protocol)
         return FALSE;
-    if (!(Rule->IfTypes & NITROFW_IFTYPE_LAN))
+    /* Interface types cannot be resolved yet: every interface counts as LAN. A rule that includes LAN
+       applies; a rule without it never matches if it Allows, but a Block rule applies anyway (fail
+       closed: a Block restricted to Wireless/RemoteAccess is not silently ignored). */
+    if (!(Rule->IfTypes & NITROFW_IFTYPE_LAN) && Rule->Action == NITROFW_ACTION_ALLOW)
         return FALSE;
 
     if (Rule->LocalPortCount || Rule->RemotePortCount)
@@ -1024,7 +1172,8 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
     ULONG DataLen, i;
     BOOLEAN Allow, AllowRule = FALSE, Decided = FALSE;
 
-    /* loopback always passes */
+    /* loopback passes: by interface only. A 127/8 address on a real interface is not loopback
+       (spoofed or misrouted) and goes through the rules or the default like any other packet. */
     if (Interface == Loopback || IPPacket->Type != IP_ADDRESS_V4)
         return TRUE;
 
@@ -1032,8 +1181,6 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
     Pkt.Protocol = Protocol;
     Pkt.RemoteAddr = FwNtohl(IPPacket->SrcAddr.Address.IPv4Address);
     Pkt.LocalAddr = FwNtohl(IPPacket->DstAddr.Address.IPv4Address);
-    if ((Pkt.RemoteAddr >> 24) == 127 || (Pkt.LocalAddr >> 24) == 127)
-        return TRUE;
     Pkt.Dst = &IPPacket->DstAddr;
 
     /* the reassembled datagram is contiguous: header, then TotalSize - HeaderSize payload bytes */

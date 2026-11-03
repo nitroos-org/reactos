@@ -636,14 +636,16 @@ NTSTATUS FileOpenAddress(
   /* Return address file object */
   Request->Handle.AddressHandle = AddrFile;
 
-  /* Creator image for program rules of the inbound filter (NULL when the filter is off) */
-  AddrFile->FwImage = NitroFwCaptureImage();
-
   /* Add address file to global list */
   ExInterlockedInsertTailList(
     &AddressFileListHead,
     &AddrFile->ListEntry,
     &AddressFileListLock);
+
+  /* Creator image for program rules of the inbound filter: resolved only while an enforced policy has
+     program rules (no work otherwise). Done once the file is listed, so a policy installed
+     concurrently finds it in its backfill pass. */
+  NITROFW_ADDRFILE_CREATED(AddrFile);
 
   TI_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 
