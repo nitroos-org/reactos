@@ -5052,6 +5052,15 @@ int ntfs_attr_expand(struct ntfs_inode *ni, const s64 newsize,
 	return ntfs_attr_expand_locked(ni, newsize, prealloc_size, NULL);
 }
 
+/* Frees the clusters of a non-resident attribute beyond its data size (preallocation); the size is unchanged. */
+int ntfs_attr_trim_alloc(struct ntfs_inode *ni)
+{
+	if (!NInoNonResident(ni) || NInoCompressed(ni) || NInoEncrypted(ni) || ni->data_size <= 0 ||
+	    (ni->mft_no == FILE_MFT && ni->type == AT_DATA))
+		return 0;
+	return ntfs_non_resident_attr_shrink(ni, ni->data_size, NULL);
+}
+
 /*
  * ntfs_attr_truncate_i - resize an ntfs attribute
  * @ni:		open ntfs inode to resize

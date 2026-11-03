@@ -220,6 +220,8 @@ void ngc_rdio_end(ngc_vol *v, struct ngc_dio *d);
 /* Registers the glue's drain (see kshim_drain in kshim_vfs.h); NULL unregisters. */
 void ngc_set_dio_drain(ngc_vol *v, void (*fn)(void *ctx), void *ctx);
 int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize);
+/* Frees the clusters ngc_set_size allocated ahead of the size (the stream's last close); 0 when there are none. */
+int ngc_trim_alloc(ngc_vol *v, ngc_node *n);
 int ngc_set_info(ngc_vol *v, ngc_node *n, const long long times[4], unsigned int attrs, unsigned int attrs_mask);
 int ngc_create(ngc_vol *v, ngc_node *dir, const unsigned short *name, unsigned int len, int is_dir, ngc_node **out);
 int ngc_unlink(ngc_vol *v, ngc_node *dir, const unsigned short *name, unsigned int len, ngc_node *n);

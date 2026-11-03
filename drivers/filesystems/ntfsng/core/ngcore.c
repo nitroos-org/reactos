@@ -112,6 +112,18 @@ static const char *ngc_mount_check(struct ngc_vol *v, struct ntfs_volume *vol, s
 
 /* Largest single core allocation when a stream grows. */
 #define NGC_GROW_STEP (256LL << 20)
+/*
+ * Allocation ahead of the end of file.  A stream that grows in small steps (appends, a cached writer that extends the
+ * file with every write) allocated clusters, rewrote its mapping pairs and (after a free) committed once per step, all
+ * under the volume lock.  From NGC_PREALLOC_MIN bytes on, a step of at most NGC_PREALLOC_STEP bytes allocates up to the
+ * next multiple of NGC_PREALLOC_CHUNK instead, and the steps inside it only move the size.  The slack is not visible to
+ * NT (ngc_stat reports the allocation that follows the size) and is given back at the last close (ngc_trim_alloc).
+ * Only with plenty of free space, so that a nearly full volume keeps its exact out-of-space behaviour.
+ */
+#define NGC_PREALLOC_MIN (1LL << 20)
+#define NGC_PREALLOC_STEP (1LL << 20)
+#define NGC_PREALLOC_CHUNK (4LL << 20)
+#define NGC_PREALLOC_FREE (256LL << 20)
 
 #define NGC_BOUNCE (64 * 1024)
 
@@ -875,6 +887,20 @@ static int ngc_record_is_dir(struct ntfs_inode *ni)
 	return dir;
 }
 
+/* A plain non-resident data stream: the only kind that preallocates (sparse, compressed and encrypted ones have their own rules). */
+static bool ngc_plain_nonresident(struct ntfs_inode *ni)
+{
+	return NInoNonResident(ni) && ni->type == AT_DATA && !NInoSparse(ni) && !NInoCompressed(ni) &&
+	       !NInoEncrypted(ni) && !NInoWofCompressed(ni) && !NInoAttr(ni) && ni->mft_no >= FILE_first_user;
+}
+
+/* The allocation NT sees follows the file size: clusters allocated ahead of it (ngc_prealloc_target) are not shown. */
+static u64 ngc_visible_alloc(struct ntfs_inode *ni, loff_t size)
+{
+	u64 need = round_up((u64)size, ni->vol->cluster_size);
+	return NInoNgAhead(ni) && (u64)ni->allocated_size > need ? need : (u64)ni->allocated_size;
+}
+
 static void ngc_stat_impl(ngc_node *n, struct ngc_stat *st)
 {
 	struct inode *vi = (struct inode *)n, *bvi = vi;
@@ -893,7 +919,7 @@ static void ngc_stat_impl(ngc_node *n, struct ngc_stat *st)
 		if (NInoCompressed(ni) || NInoSparse(ni))
 			st->alloc = ni->itype.compressed.size;
 		else
-			st->alloc = ni->allocated_size;
+			st->alloc = ngc_visible_alloc(ni, st->size);
 	} else {
 		st->alloc = (st->size + 7) & ~7ULL;
 	}
@@ -1004,7 +1030,7 @@ static bool ngc_stat_lite(struct inode *vi, struct ngc_stat *st)
 	read_lock_irqsave(&ni->size_lock, flags);
 	st->size = i_size_read(vi);
 	if (NInoNonResident(ni))
-		st->alloc = (NInoCompressed(ni) || NInoSparse(ni)) ? ni->itype.compressed.size : ni->allocated_size;
+		st->alloc = (NInoCompressed(ni) || NInoSparse(ni)) ? ni->itype.compressed.size : ngc_visible_alloc(ni, st->size);
 	else
 		st->alloc = (st->size + 7) & ~7ULL;
 	read_unlock_irqrestore(&ni->size_lock, flags);
@@ -2134,6 +2160,56 @@ void ngc_set_dio_drain(ngc_vol *v, void (*fn)(void *ctx), void *ctx)
 	v->bdev->kshim_drain = fn;
 }
 
+/* The allocation target of a growth step from @cur to @next bytes, 0 for exactly what @next needs (see NGC_PREALLOC_MIN). */
+static loff_t ngc_prealloc_target(struct ntfs_inode *ni, loff_t cur, loff_t next)
+{
+	struct ntfs_volume *vol = ni->vol;
+	loff_t target;
+
+	if (!ngc_plain_nonresident(ni) || cur < NGC_PREALLOC_MIN || next - cur > NGC_PREALLOC_STEP)
+		return 0;
+	if ((atomic64_read(&vol->free_clusters) - atomic64_read(&vol->dirty_clusters)) << vol->cluster_size_bits < NGC_PREALLOC_FREE)
+		return 0;
+	target = round_up(next, NGC_PREALLOC_CHUNK);
+	return target > ni->allocated_size ? target : 0;
+}
+
+/* True when growing to @newsize needs clusters the stream does not have yet. */
+static bool ngc_grow_allocates(struct ntfs_inode *ni, loff_t newsize)
+{
+	if (!ngc_plain_nonresident(ni))
+		return true;
+	return round_up((u64)newsize, ni->vol->cluster_size) > (u64)ni->allocated_size;
+}
+
+/*
+ * Gives back the clusters allocated ahead of the size (the last close of the stream).  Nothing to do, and no cost,
+ * for a stream that has none.  A failure leaves them: they are an allocation like any other.
+ */
+static int ngc_trim_alloc_impl(ngc_vol *v, ngc_node *n)
+{
+	struct inode *vi = (struct inode *)n;
+	struct ntfs_inode *ni = NTFS_I(vi);
+	int err;
+
+	if (!NInoNgAhead(ni))
+		return 0;
+	if (sb_rdonly(v->sb) || !ngc_plain_nonresident(ni) || (u64)ni->allocated_size <= round_up((u64)i_size_read(vi), ni->vol->cluster_size)) {
+		NInoClearNgAhead(ni);
+		return 0;
+	}
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	mutex_lock(&ni->mrec_lock);
+	err = ntfs_attr_trim_alloc(ni);
+	mutex_unlock(&ni->mrec_lock);
+	if (!err)
+		NInoClearNgAhead(ni);
+	mark_inode_dirty(vi);
+	return err;
+}
+
 /* EOF change through the core (resident resize, conversion to non-resident, expand, shrink). */
 static int ngc_set_size_impl(ngc_vol *v, ngc_node *n, unsigned long long newsize)
 {
@@ -2149,7 +2225,8 @@ static int ngc_set_size_impl(ngc_vol *v, ngc_node *n, unsigned long long newsize
 	if (NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni))
 		return -EOPNOTSUPP;
 	err = ngc_mark_dirty(v);
-	if (!err && (loff_t)newsize > old)
+	/* Growth inside the allocation takes no cluster, so nothing a free could hand out (ngc_before_alloc). */
+	if (!err && (loff_t)newsize > old && ngc_grow_allocates(ni, newsize))
 		err = ngc_before_alloc(v);
 	if (err)
 		return err;
@@ -2162,8 +2239,13 @@ static int ngc_set_size_impl(ngc_vol *v, ngc_node *n, unsigned long long newsize
 		loff_t cur = old;
 		while (!err && cur < (loff_t)newsize) {
 			loff_t next = min_t(loff_t, newsize, cur + NGC_GROW_STEP);
+			loff_t ahead = ngc_prealloc_target(ni, cur, next);
 			mutex_lock(&ni->mrec_lock);
-			err = ntfs_attr_expand(ni, next, 0);
+			err = ntfs_attr_expand(ni, next, ahead);
+			if (err == -ENOSPC && ahead)
+				err = ntfs_attr_expand(ni, next, 0);	/* the exact size may still fit */
+			if (!err && (u64)ni->allocated_size > round_up((u64)next, ni->vol->cluster_size))
+				NInoSetNgAhead(ni);
 			mutex_unlock(&ni->mrec_lock);
 			if (!err)
 				cur = next;
@@ -3768,6 +3850,14 @@ int ngc_set_size(ngc_vol *v, ngc_node *n, unsigned long long newsize)
 {
 	unsigned long long t0 = ngos_ticks();
 	int r = ngc_set_size_impl(v, n, newsize);
+	ngos_prof(NGP_SET_SIZE, t0, 0);
+	return r;
+}
+
+int ngc_trim_alloc(ngc_vol *v, ngc_node *n)
+{
+	unsigned long long t0 = ngos_ticks();
+	int r = ngc_trim_alloc_impl(v, n);
 	ngos_prof(NGP_SET_SIZE, t0, 0);
 	return r;
 }

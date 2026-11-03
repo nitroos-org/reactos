@@ -185,6 +185,7 @@ typedef struct _NG_FCB
     BOOLEAN IsDirectory;
     BOOLEAN IsRoot;
     BOOLEAN Modified;               /* data changed since the last time update (cleanup/flush) */
+    BOOLEAN Grown;                  /* the size grew since the core node was loaded: the last close trims the allocation ahead of it */
     BOOLEAN UserSetWriteTime;       /* LastWriteTime set through FileBasicInformation: keep it */
     BOOLEAN DeletePending;          /* unlink at the last cleanup */
     BOOLEAN Deleted;                /* unlinked: paging writes are dropped */

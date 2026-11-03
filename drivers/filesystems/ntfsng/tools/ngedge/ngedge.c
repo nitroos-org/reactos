@@ -8,7 +8,8 @@
  *
  * usage: ngedge DIR TEST [ARG]
  *   TEST: rename-subtree | rename-cycle | delete-open-stream | dir-async | size-race | cache-mix | parallel
- *         | stream-reuse | replace | junction-dos | read-pattern FILE | all
+ *         | stream-reuse | replace | junction-dos | prealloc | prealloc-space | read-pattern FILE | all
+ *         (prealloc-space measures free space, so it is not part of "all": run it on an otherwise idle volume)
  *   One NGE: line per check, NGE:DONE pass=N fail=M at the end.  A test that hangs leaves the
  *   machine to the harness timeout (the watchdog prints NGE:HANG first when it still can).
  */
@@ -842,6 +843,187 @@ static void t_pool(void)
            "nonpaged pool %lu -> peak %lu pages (%lu MB physical)", before, peak, (ULONG)(ms.dwTotalPhys >> 20));
 }
 
+
+/* ---------------------------------------------------------------- allocation ahead of the file size */
+#define PA_PAT(o) ((UCHAR)((((o) * 7) + 3) & 0xff))
+
+static DWORD cluster_size(void)
+{
+    WCHAR root[4] = { Dir[0], L':', L'\\', 0 };
+    DWORD spc = 0, bps = 0, fc, tc;
+    if (!GetDiskFreeSpaceW(root, &spc, &bps, &fc, &tc) || !spc || !bps)
+        return 4096;
+    return spc * bps;
+}
+
+static BOOL std_info(HANDLE h, LONGLONG *alloc, LONGLONG *eof)
+{
+    FILE_STANDARD_INFORMATION si;
+    IO_STATUS_BLOCK io;
+    if (NtQueryInformationFile(h, &io, &si, sizeof(si), FileStandardInformation) < 0)
+        return FALSE;
+    *alloc = si.AllocationSize.QuadPart;
+    *eof = si.EndOfFile.QuadPart;
+    return TRUE;
+}
+
+/* The allocation size a listing reports for @name in Dir. */
+static BOOL list_alloc(const WCHAR *name, LONGLONG *alloc)
+{
+    UCHAR buf[1024];
+    IO_STATUS_BLOCK io;
+    UNICODE_STRING mask;
+    HANDLE d = CreateFileW(Dir, FILE_LIST_DIRECTORY | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    NTSTATUS st;
+    if (d == INVALID_HANDLE_VALUE)
+        return FALSE;
+    RtlInitUnicodeString(&mask, name);
+    st = NtQueryDirectoryFile(d, NULL, NULL, NULL, &io, buf, sizeof(buf), FileDirectoryInformation, TRUE, &mask, TRUE);
+    CloseHandle(d);
+    if (st < 0)
+        return FALSE;
+    *alloc = ((PFILE_DIRECTORY_INFORMATION)buf)->AllocationSize.QuadPart;
+    return TRUE;
+}
+
+static BOOL append_pattern(HANDLE h, LONGLONG from, LONGLONG to, LONGLONG cl, int *bad_alloc, LONGLONG *first_bad)
+{
+    static UCHAR b[65536];
+    LONGLONG o, a, e;
+    DWORD n, i;
+    for (o = from; o < to; o += sizeof(b))
+    {
+        for (i = 0; i < sizeof(b); i++)
+            b[i] = PA_PAT(o + i);
+        if (!WriteFile(h, b, sizeof(b), &n, NULL) || n != sizeof(b))
+            return FALSE;
+        if (!std_info(h, &a, &e) || e != o + (LONGLONG)sizeof(b) || a != ((e + cl - 1) / cl) * cl)
+        {
+            if (!(*bad_alloc)++)
+                *first_bad = e;
+        }
+    }
+    return TRUE;
+}
+
+static void t_prealloc(void)
+{
+    WCHAR p[MAX_PATH], bait[MAX_PATH];
+    static UCHAR b[65536];
+    HANDLE h;
+    DWORD n, i;
+    LONGLONG cl = cluster_size(), a, e, o, bad_alloc_at = 0, la = 0;
+    LARGE_INTEGER pos;
+    int bad_alloc = 0, bad_zero = 0, bad_pat = 0, ok;
+
+    /* Clusters with other data in them, free again before the file grows: stale bytes must stay hidden. */
+    path(bait, L"pa-bait.bin");
+    path(p, L"pa-grow.bin");
+    h = CreateFileW(bait, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        memset(b, 0xEE, sizeof(b));
+        for (i = 0; i < 16 * 16; i++)
+            WriteFile(h, b, sizeof(b), &n, NULL);
+        CloseHandle(h);
+        DeleteFileW(bait);
+    }
+    h = CreateFileW(p, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        report("prealloc-setup", 0, "error %lu", GetLastError());
+        return;
+    }
+    /* Growth in 64 KB steps: past 1 MB the driver allocates ahead, the allocation size NT sees follows the size. */
+    ok = append_pattern(h, 0, 6 << 20, cl, &bad_alloc, &bad_alloc_at);
+    report("prealloc-append", ok && !bad_alloc, "6 MB in 64 KB appends, %d steps with an allocation size other than the size rounded up (first at EOF %I64d)", bad_alloc, bad_alloc_at);
+    ok = list_alloc(L"pa-grow.bin", &la) && std_info(h, &a, &e);
+    report("prealloc-listing", ok && la == a, "listing says %I64d, the handle %I64d (size %I64d)", la, a, e);
+
+    /* SetEndOfFile past the end, inside what was allocated ahead: the new bytes read as zeros. */
+    pos.QuadPart = (6 << 20) + (512 << 10);
+    ok = SetFilePointerEx(h, pos, NULL, FILE_BEGIN) && SetEndOfFile(h);
+    pos.QuadPart = 6 << 20;
+    SetFilePointerEx(h, pos, NULL, FILE_BEGIN);
+    for (o = 6 << 20; ok && o < (6 << 20) + (512 << 10); o += sizeof(b))
+    {
+        if (!ReadFile(h, b, sizeof(b), &n, NULL) || n != sizeof(b))
+        {
+            ok = FALSE;
+            break;
+        }
+        for (i = 0; i < n; i++)
+            if (b[i])
+                bad_zero++;
+    }
+    report("prealloc-extend-zero", ok && !bad_zero, "%d non-zero bytes in the 512 KB past the old end", bad_zero);
+    ok = std_info(h, &a, &e) && e == (6 << 20) + (512 << 10) && a == ((e + cl - 1) / cl) * cl;
+    report("prealloc-extend-alloc", ok, "alloc %I64d size %I64d", a, e);
+
+    /* Shrink below the allocation, then grow again by appends. */
+    pos.QuadPart = (3 << 20) + 100;
+    ok = SetFilePointerEx(h, pos, NULL, FILE_BEGIN) && SetEndOfFile(h) && std_info(h, &a, &e) && a == ((e + cl - 1) / cl) * cl;
+    report("prealloc-shrink", ok, "alloc %I64d size %I64d", a, e);
+    pos.QuadPart = 3 << 20;
+    SetFilePointerEx(h, pos, NULL, FILE_BEGIN);
+    bad_alloc = 0;
+    /* The 100 bytes past 3 MB stay; rewrite from the 3 MB mark in whole 64 KB blocks. */
+    ok = append_pattern(h, 3 << 20, 5 << 20, cl, &bad_alloc, &bad_alloc_at);
+    report("prealloc-regrow", ok && !bad_alloc, "%d steps with a wrong allocation size", bad_alloc);
+    CloseHandle(h);
+
+    /* Everything written reads back: after the close (which gives the allocation ahead back) and a reopen. */
+    h = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    ok = h != INVALID_HANDLE_VALUE && std_info(h, &a, &e);
+    report("prealloc-close-alloc", ok && e == (5 << 20) && a == ((e + cl - 1) / cl) * cl, "alloc %I64d size %I64d", a, e);
+    for (o = 0; ok && o < e; o += sizeof(b))
+    {
+        if (!ReadFile(h, b, sizeof(b), &n, NULL) || !n)
+            break;
+        for (i = 0; i < n; i++)
+            if (b[i] != PA_PAT(o + i))
+                bad_pat++;
+    }
+    if (h != INVALID_HANDLE_VALUE)
+        CloseHandle(h);
+    report("prealloc-readback", ok && !bad_pat, "%d wrong bytes", bad_pat);
+    DeleteFileW(p);
+}
+
+/* Free space after the close is the file's size plus a little metadata, not the allocation ahead of it (idle volume only). */
+static void t_prealloc_space(void)
+{
+    WCHAR p[MAX_PATH];
+    static UCHAR b[65536];
+    HANDLE h;
+    DWORD n;
+    ULARGE_INTEGER f0, f1, f2, tot, tf;
+    LONGLONG size = (5 << 20) + (256 << 10), o, used, back;
+    WCHAR root[4] = { Dir[0], L':', L'\\', 0 };
+    path(p, L"pa-space.bin");
+    memset(b, 0x5a, sizeof(b));
+    GetDiskFreeSpaceExW(root, &f0, &tot, &tf);
+    h = CreateFileW(p, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        report("prealloc-space-setup", 0, "error %lu", GetLastError());
+        return;
+    }
+    for (o = 0; o < size; o += sizeof(b))
+        WriteFile(h, b, (DWORD)min((LONGLONG)sizeof(b), size - o), &n, NULL);
+    GetDiskFreeSpaceExW(root, &f1, &tot, &tf);
+    CloseHandle(h);
+    GetDiskFreeSpaceExW(root, &f2, &tot, &tf);
+    used = (LONGLONG)(f0.QuadPart - f2.QuadPart);
+    report("prealloc-space-closed", used >= size && used < size + (1 << 20), "after close %I64d bytes used for %I64d of data (while open %I64d)",
+           used, size, (LONGLONG)(f0.QuadPart - f1.QuadPart));
+    DeleteFileW(p);
+    GetDiskFreeSpaceExW(root, &f2, &tot, &tf);
+    back = (LONGLONG)(f2.QuadPart - f0.QuadPart);
+    report("prealloc-space-delete", back > -(1 << 20) && back < (1 << 20), "free space after the delete differs from the start by %I64d", back);
+}
+
 /* ---------------------------------------------------------------- read a file with a known pattern */
 static void t_read_pattern(const char *file)
 {
@@ -898,6 +1080,12 @@ int main(int argc, char **argv)
     RUN("replace", t_replace());
     RUN("junction-dos", t_junction_dos());
     RUN("pool", t_pool());
+    RUN("prealloc", t_prealloc());
+    if (!strcmp(argv[2], "prealloc-space"))
+    {
+        TestName = "prealloc-space";
+        t_prealloc_space();
+    }
     if (!strcmp(argv[2], "read-pattern") && argc > 3)
         t_read_pattern(argv[3]);
     _snprintf(line, sizeof(line), "NGE:DONE pass=%d fail=%d\n", Pass, Fail);

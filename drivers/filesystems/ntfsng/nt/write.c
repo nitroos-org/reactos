@@ -33,6 +33,14 @@ int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int le
  * (read.c, a non-cached read; it holds nothing).  A paging write only ever tries PagingIoResource, never waits
  * for it.  Keep it so: a path that waits for PagingIoResource exclusive with PagingWriteLock held would deadlock
  * against a lazy write of the same stream.
+ *
+ * Allocation ahead of the size (ngc_set_size, core/ngcore.c) adds no lock and no order.  Growth takes clusters
+ * up to the next multiple of 4 MB for a stream that is already 1 MB long and grows by at most 1 MB at a time; the
+ * slack is hidden from NT (ngc_stat) and freed by ngc_trim_alloc at the last cleanup, under MainResource and CoreLock
+ * like any shrink (the cluster free drains DataIoGate; a transfer in flight never waits for MainResource or CoreLock).
+ * Nothing but the stream's own growth uses the slack: reads stop at the size and the initialized size, paging writes
+ * are clipped to the size, and a cluster another stream freed before this one took it is committed first
+ * (ngc_before_alloc, which a growth inside the allocation does not need).
  */
 
 /* At mount, before the core exists. */
@@ -281,6 +289,8 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
         return STATUS_INVALID_PARAMETER;
     if (NewSize == OldSize)
         return STATUS_SUCCESS;
+    if (NewSize > OldSize)
+        Fcb->Grown = TRUE;
     if (NewSize < OldSize)
     {
         Li.QuadPart = NewSize;
