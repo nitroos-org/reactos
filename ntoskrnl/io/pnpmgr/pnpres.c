@@ -611,19 +611,41 @@ BOOLEAN
 IopCheckResourceDescriptor(
     IN PCM_PARTIAL_RESOURCE_DESCRIPTOR ResDesc,
     IN PCM_RESOURCE_LIST ResourceList,
+    IN OPTIONAL PCM_RESOURCE_LIST HalTranslatedList,
     IN BOOLEAN Silent,
     OUT OPTIONAL PCM_PARTIAL_RESOURCE_DESCRIPTOR ConflictingDescriptor)
 {
     ULONG i, ii;
     BOOLEAN Result = FALSE;
-    PCM_FULL_RESOURCE_DESCRIPTOR FullDescriptor;
+    PCM_FULL_RESOURCE_DESCRIPTOR FullDescriptor, TranslatedFull = NULL;
+
+    /* The HAL builds its .Raw and .Translated lists entry for entry */
+    if (HalTranslatedList && HalTranslatedList->Count == ResourceList->Count)
+        TranslatedFull = &HalTranslatedList->List[0];
 
     FullDescriptor = &ResourceList->List[0];
     for (i = 0; i < ResourceList->Count; i++)
     {
         PCM_PARTIAL_RESOURCE_LIST ResList = &FullDescriptor->PartialResourceList;
+        PCM_PARTIAL_RESOURCE_LIST TranslatedResList = NULL;
         INTERFACE_TYPE InterfaceType = FullDescriptor->InterfaceType;
         FullDescriptor = CmiGetNextResourceDescriptor(FullDescriptor);
+
+        if (TranslatedFull)
+        {
+            TranslatedResList = &TranslatedFull->PartialResourceList;
+            if (TranslatedFull->InterfaceType != InterfaceType ||
+                TranslatedResList->Count != ResList->Count)
+            {
+                /* Not the HAL's pair after all: compare everything */
+                TranslatedResList = NULL;
+                TranslatedFull = NULL;
+            }
+            else
+            {
+                TranslatedFull = CmiGetNextResourceDescriptor(TranslatedFull);
+            }
+        }
 
         for (ii = 0; ii < ResList->Count; ii++)
         {
@@ -632,15 +654,26 @@ IopCheckResourceDescriptor(
             PCM_PARTIAL_RESOURCE_DESCRIPTOR ResDesc2 = &ResList->PartialDescriptors[ii];
 
             /*
-             * An interrupt the HAL reports for the Internal interface is a processor vector
-             * it keeps for itself (its raw "vector" is the IDT index: exceptions, APC/DPC,
-             * IPI, profile...), not a line of any bus. Compared as a bus IRQ, IDT entries
+             * The HAL reports the processor vectors below PRIMARY_VECTOR_BASE it keeps for
+             * itself (exceptions, NMI, the reserved range) as Internal-interface interrupts
+             * whose raw "vector" is the IDT index, and whose translated vector is that same
+             * index. They are not lines of any bus: compared as bus IRQs, IDT entries
              * 0x00-0x2F made every IRQ 0-15 conflict, so a device without a boot
              * configuration (a PCI device offered its INTx line as the alternative to its
-             * message interrupt) could not be given any line.
+             * message interrupt) could not be given any line. Only these are skipped: a real
+             * line the HAL owns (clock, cascade, profile, the KD port; reported as Internal
+             * too on an unknown bus type) translates to a vector of its own, and the claims
+             * of drivers (IoReportResourceUsage, also Internal ones) are not the HAL's.
              */
-            if (ResDesc2->Type == CmResourceTypeInterrupt && InterfaceType == Internal)
+            if (TranslatedResList &&
+                ResDesc2->Type == CmResourceTypeInterrupt &&
+                InterfaceType == Internal &&
+                TranslatedResList->PartialDescriptors[ii].Type == CmResourceTypeInterrupt &&
+                ResDesc2->u.Interrupt.Vector < PRIMARY_VECTOR_BASE &&
+                TranslatedResList->PartialDescriptors[ii].u.Interrupt.Vector == ResDesc2->u.Interrupt.Vector)
+            {
                 continue;
+            }
 
             /* We don't care about shared resources */
             if (ResDesc->ShareDisposition == CmResourceShareShared &&
@@ -1348,6 +1381,7 @@ BOOLEAN
 IopCheckForResourceConflict(
    IN PCM_RESOURCE_LIST ResourceList1,
    IN PCM_RESOURCE_LIST ResourceList2,
+   IN OPTIONAL PCM_RESOURCE_LIST HalTranslatedList2,
    IN BOOLEAN Silent,
    OUT OPTIONAL PCM_PARTIAL_RESOURCE_DESCRIPTOR ConflictingDescriptor)
 {
@@ -1369,6 +1403,7 @@ IopCheckForResourceConflict(
 
          Result = IopCheckResourceDescriptor(ResDesc,
                                              ResourceList2,
+                                             HalTranslatedList2,
                                              Silent,
                                              ConflictingDescriptor);
          if (Result) goto ByeBye;
@@ -1378,6 +1413,39 @@ IopCheckForResourceConflict(
 ByeBye:
 
    return Result;
+}
+
+/* The HAL's .Translated list, when it is the same size as its .Raw list (RawLength) */
+static
+PKEY_VALUE_PARTIAL_INFORMATION
+IopQueryHalTranslatedList(
+   IN HANDLE HalDescriptionKey,
+   IN ULONG RawLength)
+{
+   UNICODE_STRING Name = RTL_CONSTANT_STRING(L".Translated");
+   PKEY_VALUE_PARTIAL_INFORMATION Info;
+   ULONG Length = 0;
+   NTSTATUS Status;
+
+   Status = ZwQueryValueKey(HalDescriptionKey, &Name, KeyValuePartialInformation, NULL, 0, &Length);
+   if (Status != STATUS_BUFFER_TOO_SMALL && Status != STATUS_BUFFER_OVERFLOW)
+      return NULL;
+
+   Info = ExAllocatePoolWithTag(PagedPool, Length, TAG_IO);
+   if (!Info)
+      return NULL;
+
+   Status = ZwQueryValueKey(HalDescriptionKey, &Name, KeyValuePartialInformation, Info, Length, &Length);
+   if (!NT_SUCCESS(Status) ||
+       Info->Type != REG_RESOURCE_LIST ||
+       Info->DataLength != RawLength ||
+       Info->DataLength < sizeof(CM_RESOURCE_LIST))
+   {
+      ExFreePoolWithTag(Info, TAG_IO);
+      return NULL;
+   }
+
+   return Info;
 }
 
 NTSTATUS NTAPI
@@ -1393,7 +1461,10 @@ IopDetectResourceConflict(
    PKEY_BASIC_INFORMATION KeyInformation;
    PKEY_VALUE_PARTIAL_INFORMATION KeyValueInformation;
    PKEY_VALUE_BASIC_INFORMATION KeyNameInformation;
+   PKEY_VALUE_PARTIAL_INFORMATION HalTranslated;
    ULONG ChildKeyIndex1 = 0, ChildKeyIndex2, ChildKeyIndex3;
+   UNICODE_STRING HalKeyName = RTL_CONSTANT_STRING(L"Hardware Abstraction Layer");
+   BOOLEAN HalKey, HalRaw;
    NTSTATUS Status;
 
    RtlInitUnicodeString(&KeyName, L"\\Registry\\Machine\\HARDWARE\\RESOURCEMAP");
@@ -1457,6 +1528,7 @@ IopDetectResourceConflict(
       Status = ZwOpenKey(&ChildKey2,
                          KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE,
                          &ObjectAttributes);
+      HalKey = RtlEqualUnicodeString(&KeyName, &HalKeyName, TRUE);
       ExFreePoolWithTag(KeyInformation, TAG_IO);
       if (!NT_SUCCESS(Status))
           goto cleanup;
@@ -1594,18 +1666,27 @@ IopDetectResourceConflict(
                   continue;
               }
 
+              /* The HAL's own report (IoReportHalResourceUsage): .Raw with its .Translated */
+              HalRaw = HalKey && wcscmp(KeyNameInformation->Name, L".Raw") == 0;
               ExFreePoolWithTag(KeyNameInformation, TAG_IO);
+
+              HalTranslated = HalRaw ? IopQueryHalTranslatedList(ChildKey3, KeyValueInformation->DataLength) : NULL;
 
               if (IopCheckForResourceConflict(ResourceList,
                                               (PCM_RESOURCE_LIST)KeyValueInformation->Data,
+                                              HalTranslated ? (PCM_RESOURCE_LIST)HalTranslated->Data : NULL,
                                               Silent,
                                               ConflictingDescriptor))
               {
+                  if (HalTranslated)
+                      ExFreePoolWithTag(HalTranslated, TAG_IO);
                   ExFreePoolWithTag(KeyValueInformation, TAG_IO);
                   Status = STATUS_CONFLICTING_ADDRESSES;
                   goto cleanup;
               }
 
+              if (HalTranslated)
+                  ExFreePoolWithTag(HalTranslated, TAG_IO);
               ExFreePoolWithTag(KeyValueInformation, TAG_IO);
           }
       }
