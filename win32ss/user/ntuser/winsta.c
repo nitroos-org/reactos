@@ -137,12 +137,21 @@ IntWinStaObjectDelete(
         }
     }
 
+    /* The desktops of the window station reference it, so none is the input desktop
+       any more; make sure nothing keeps a pointer */
+    WinSta->ActiveDesktop = NULL;
+
+    /* This runs when the last reference goes, from ObKillProcess for one: the
+       clipboard and the assignment locks need the USER lock */
+    UserEnterExclusive();
+    if (gpdeskInputDesktop && gpdeskInputDesktop->rpwinstaParent == WinSta)
+        gpdeskInputDesktop = NULL;
     UserEmptyClipboardData(WinSta);
     UserClipboardFreeListeners(WinSta);
+    UserAssignmentUnlock((PVOID*)&WinSta->spklList);
+    UserLeave();
 
     RtlDestroyAtomTable(WinSta->AtomTable);
-
-    UserAssignmentUnlock((PVOID*)&WinSta->spklList);
 
     return STATUS_SUCCESS;
 }
