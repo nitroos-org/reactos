@@ -319,10 +319,13 @@ PIE_THREAD_PARAM_BLOCK ParseSharedPacket(HANDLE hData)
             goto cleanup0;
         }
 
-        if (FAILED(psfDesktop->ParseDisplayName(NULL, NULL, strPath, NULL, &params->directoryPIDL, NULL)))
+        /* A path the shell cannot parse keeps the sender's fallback folder (see SHCreateFromDesktop) */
+        LPITEMIDLIST pidlParsed = NULL;
+        if (SUCCEEDED(psfDesktop->ParseDisplayName(NULL, NULL, strPath, NULL, &pidlParsed, NULL)) && pidlParsed)
         {
-            params->directoryPIDL = NULL;
-            goto cleanup0;
+            if (params->directoryPIDL)
+                ILFree(params->directoryPIDL);
+            params->directoryPIDL = pidlParsed;
         }
     }
 
@@ -716,10 +719,19 @@ BOOL WINAPI SHCreateFromDesktop(_In_ PEXPLORER_CMDLINE_PARSE_RESULTS parseResult
         }
     }
 
-    // HACK! This shouldn't happen! SHExplorerParseCmdLine needs fixing.
+    /* A path that does not exist: as on Windows, open the default folder (Documents), or This PC for /select */
     if (!pidl)
     {
-        SHGetFolderLocation(NULL, CSIDL_PERSONAL, NULL, NULL, &pidl);
+        if (parameters->dwFlags & SH_EXPLORER_CMDLINE_FLAG_SELECT)
+        {
+            /* There is no item to select in the folder */
+            parameters->dwFlags &= ~SH_EXPLORER_CMDLINE_FLAG_SELECT;
+            SHGetFolderLocation(NULL, CSIDL_DRIVES, NULL, NULL, &pidl);
+        }
+        else
+        {
+            SHGetFolderLocation(NULL, CSIDL_PERSONAL, NULL, NULL, &pidl);
+        }
     }
 
     parameters->directoryPIDL = pidl;
@@ -773,7 +785,15 @@ BOOL WINAPI SHCreateFromDesktop(_In_ PEXPLORER_CMDLINE_PARSE_RESULTS parseResult
         {
             SHSetInstanceExplorer(thread);
             if (strPath)
-                parameters->directoryPIDL = ILCreateFromPath(strPath);
+            {
+                /* Keep the fallback folder when the path cannot be parsed */
+                LPITEMIDLIST pidlPath = ILCreateFromPath(strPath);
+                if (pidlPath)
+                {
+                    ILFree(parameters->directoryPIDL);
+                    parameters->directoryPIDL = pidlPath;
+                }
+            }
             SHOpenFolderWindow(parameters);
             parameters = NULL;
             thread.Release();
