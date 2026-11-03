@@ -58,10 +58,13 @@ call :rc0 "I10 system PATH has the PowerShell 7 folder"
 if exist "%ALLUSERSPROFILE%\Start Menu\Programs\PowerShell\PowerShell 7 (x64).lnk" (call :pass "I11 Start-menu shortcut present") else (call :fail "I11 Start-menu shortcut present")
 "%PSDIR%\pwsh.exe" -NoProfile -Command "$PSVersionTable.PSVersion.ToString()" > %O%\ver.txt 2>&1
 type %O%\ver.txt >> %LOG%
-find "7.4." %O%\ver.txt >nul
-call :rc0 "I12 pwsh runs and reports 7.4.x"
+find "7.6." %O%\ver.txt >nul
+call :rc0 "I12 pwsh runs and reports 7.6.x"
 reg query "HKLM\SOFTWARE\Microsoft\PowerShell\3" >nul 2>&1
 call :rc1 "I13 no PowerShell\3 key faked"
+if exist "%PUBLIC%\Desktop\PowerShell.lnk" (call :pass "I14 PowerShell shortcut on the desktop") else (call :fail "I14 PowerShell shortcut on the desktop")
+if exist "%ProgramData%\Microsoft\Windows\Start Menu\Programs\PowerShell.lnk" (call :pass "I15 PowerShell shortcut in the Start menu") else (call :fail "I15 PowerShell shortcut in the Start menu")
+if exist "%PUBLIC%\Desktop\Command Prompt.lnk" (call :fail "I16 Command Prompt left the common desktop") else (call :pass "I16 Command Prompt left the common desktop")
 goto :end
 
 :uninst
@@ -72,6 +75,8 @@ call :st powershell-7 NotInstalled "U2 NotInstalled after uninstall"
 if exist "%PSDIR%\pwsh.exe" (call :fail "U3 pwsh.exe removed") else (call :pass "U3 pwsh.exe removed")
 reg query "%ENVKEY%" /v Path | find "PowerShell\7" >nul
 call :rc1 "U4 PowerShell 7 folder gone from the system PATH"
+if exist "%PUBLIC%\Desktop\PowerShell.lnk" (call :fail "U6 PowerShell desktop shortcut removed") else (call :pass "U6 PowerShell desktop shortcut removed")
+if exist "%PUBLIC%\Desktop\Command Prompt.lnk" (call :pass "U7 Command Prompt is back on the desktop") else (call :fail "U7 Command Prompt is back on the desktop")
 if exist "%ALLUSERSPROFILE%\Start Menu\Programs\PowerShell\PowerShell 7 (x64).lnk" (call :fail "U5 Start-menu shortcut removed") else (call :pass "U5 Start-menu shortcut removed")
 goto :end
 

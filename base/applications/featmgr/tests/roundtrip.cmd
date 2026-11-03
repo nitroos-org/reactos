@@ -992,6 +992,80 @@ rmdir %R%\Payload\fmt-swbad 2>nul
 rmdir %R%\Payload\fmt-swstuck 2>nul
 rd /s /q %SW% 2>nul
 
+rem --- shell defaults (shelldefaults.c): the desktop / Start shortcuts follow what is installed. Dummy pwsh.exe / firefox.exe
+rem     files stand in for the programs (the check is "the file exists"); skipped when the real ones are installed.
+set PD=%ProgramFiles%\PowerShell\7
+set FD=%ProgramFiles%\Mozilla Firefox
+set CD=%PUBLIC%\Desktop
+set PM=%ProgramData%\Microsoft\Windows\Start Menu\Programs
+if exist "%FD%\firefox.exe" goto :sd_done
+if exist "%PD%\pwsh.exe" goto :sd_pw
+%FM% /shell-defaults > %O%\sd0.txt 2>&1
+call :rc0 "SD1 /shell-defaults with nothing installed"
+type %O%\sd0.txt >> %LOG%
+call :ex "%CD%\PowerShell.lnk" 0 "SD2 no PowerShell shortcut while pwsh is absent"
+call :ex "%CD%\Firefox.lnk" 0 "SD3 no Firefox shortcut while Firefox is absent"
+call :wslnk 1 "SD4 Command Prompt is under Start/Windows System"
+call :cmdlnk 1 "SD5 a Command Prompt shortcut is on the desktop"
+mkdir "%PD%" 2>nul
+copy /y %SystemRoot%\system32\cmd.exe "%PD%\pwsh.exe" >nul
+mkdir "%FD%" 2>nul
+copy /y %SystemRoot%\system32\cmd.exe "%FD%\firefox.exe" >nul
+%FM% /shell-defaults > %O%\sd1.txt 2>&1
+call :rc0 "SD6 /shell-defaults with pwsh and Firefox present"
+type %O%\sd1.txt >> %LOG%
+call :ex "%CD%\PowerShell.lnk" 1 "SD7 PowerShell shortcut on the desktop"
+call :ex "%PM%\PowerShell.lnk" 1 "SD8 PowerShell shortcut in the Start menu"
+call :cmdlnk 0 "SD9 the Command Prompt shortcut left the desktop"
+call :wslnk 1 "SD10 Command Prompt stays under Start/Windows System"
+call :ex "%CD%\Firefox.lnk" 1 "SD11 Firefox shortcut on the desktop"
+call :ex "%PM%\Firefox.lnk" 1 "SD12 Firefox shortcut in the Start menu"
+call :ex "%FD%\distribution\policies.json" 1 "SD13 Firefox policies.json written"
+find "DontCheckDefaultBrowser" "%FD%\distribution\policies.json" >nul
+call :rc0 "SD14 ...with DontCheckDefaultBrowser"
+call :ielnk 0 "SD15 the Internet Explorer entry left the Start menu"
+%FM% /shell-defaults > %O%\sd2.txt 2>&1
+call :rc0 "SD16 /shell-defaults a second time (idempotent)"
+call :ex "%CD%\PowerShell.lnk" 1 "SD17 still one PowerShell shortcut"
+del /q "%PD%\pwsh.exe" "%FD%\firefox.exe" 2>nul
+%FM% /shell-defaults > %O%\sd3.txt 2>&1
+call :rc0 "SD18 /shell-defaults after pwsh and Firefox are gone"
+type %O%\sd3.txt >> %LOG%
+call :ex "%CD%\PowerShell.lnk" 0 "SD19 PowerShell shortcut removed"
+call :ex "%CD%\Firefox.lnk" 0 "SD20 Firefox shortcut removed"
+call :cmdlnk 1 "SD21 Command Prompt is back on the desktop"
+call :ielnk 1 "SD22 the Internet Explorer entry is back in the Start menu"
+rd /s /q "%FD%" 2>nul
+rd /s /q "%ProgramFiles%\PowerShell" 2>nul
+goto :sd_done
+:sd_pw
+rem the image carries the real pwsh (build-time preinstall): PowerShell is the desktop shell already, Firefox is not installed yet
+%FM% /shell-defaults > %O%\sp0.txt 2>&1
+call :rc0 "SP1 /shell-defaults with the preinstalled pwsh"
+type %O%\sp0.txt >> %LOG%
+call :ex "%CD%\PowerShell.lnk" 1 "SP2 PowerShell shortcut on the desktop"
+call :ex "%PM%\PowerShell.lnk" 1 "SP3 PowerShell shortcut in the Start menu"
+call :cmdlnk 0 "SP4 no Command Prompt shortcut on the desktop"
+call :wslnk 1 "SP5 Command Prompt is under Start/Windows System"
+call :ex "%CD%\Firefox.lnk" 0 "SP6 no Firefox shortcut while Firefox is absent"
+call :ielnk 1 "SP7 the Internet Explorer entry is in the Start menu"
+mkdir "%FD%" 2>nul
+copy /y %SystemRoot%\system32\cmd.exe "%FD%\firefox.exe" >nul
+%FM% /shell-defaults > %O%\sp1.txt 2>&1
+call :rc0 "SP8 /shell-defaults with pwsh and a Firefox stand-in"
+call :ex "%CD%\Firefox.lnk" 1 "SP9 Firefox shortcut on the desktop"
+call :ielnk 0 "SP10 the Internet Explorer entry left the Start menu"
+call :ex "%CD%\PowerShell.lnk" 1 "SP11 PowerShell shortcut stays"
+del /q "%FD%\firefox.exe" 2>nul
+%FM% /shell-defaults > %O%\sp2.txt 2>&1
+call :rc0 "SP12 /shell-defaults after the Firefox stand-in is gone"
+call :ex "%CD%\Firefox.lnk" 0 "SP13 Firefox shortcut removed"
+call :ielnk 1 "SP14 the Internet Explorer entry is back in the Start menu"
+call :ex "%CD%\PowerShell.lnk" 1 "SP15 PowerShell shortcut still on the desktop"
+call :cmdlnk 0 "SP16 still no Command Prompt shortcut on the desktop"
+rd /s /q "%FD%" 2>nul
+:sd_done
+
 rem --- cleanup fixtures
 del /q %R%\Catalog\fmt-base.ini %R%\Catalog\fmt-dep.ini 2>nul
 del /q %R%\Payload\fmt-base\fmt-base.txt %R%\Payload\fmt-dep\fmt-dep.txt 2>nul
@@ -1022,6 +1096,25 @@ echo FAIL %~1 -- %~2>> %LOG%
 set /a FAILS=%FAILS%+1
 goto :eof
 
+:cmdlnk
+rem :cmdlnk <1|0> <name>: is there a Command Prompt shortcut on the common or the user's desktop?
+set GOT=0
+if exist "%CD%\Command Prompt.lnk" set GOT=1
+if exist "%USERPROFILE%\Desktop\Command Prompt.lnk" set GOT=1
+if "%GOT%"=="%1" (echo PASS %~2>> %LOG%) else (call :fail %2 "cmd shortcut=%GOT% want %1")
+goto :eof
+:wslnk
+set GOT=0
+if exist "%PM%\Windows System\Command Prompt.lnk" set GOT=1
+if exist "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Windows System\Command Prompt.lnk" set GOT=1
+if "%GOT%"=="%1" (echo PASS %~2>> %LOG%) else (call :fail %2 "Windows System cmd=%GOT% want %1")
+goto :eof
+:ielnk
+set GOT=0
+if exist "%PM%\Wine Internet Explorer.lnk" set GOT=1
+if exist "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Wine Internet Explorer.lnk" set GOT=1
+if "%GOT%"=="%1" (echo PASS %~2>> %LOG%) else (call :fail %2 "IE entry=%GOT% want %1")
+goto :eof
 :vsc
 rem :vsc <fixture>: put vscode-settings\<fixture>.json in place as scoop's persisted settings.json, then a fresh
 rem featmgr install of vscode through the stub
