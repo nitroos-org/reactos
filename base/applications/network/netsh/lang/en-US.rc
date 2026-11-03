@@ -10,11 +10,11 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 /* Basic application information */
 STRINGTABLE
 BEGIN
-    IDS_APP_USAGE "\nUsage: netsh [-a AliasFile] [-c Context] [-r RemoteMachine] \
-\n             [Command | -f ScriptFile]\n"
-    IDS_OPEN_FAILED      "The file %ls could not be openend.\n"
+    IDS_APP_USAGE "\nUsage: netsh [-a AliasFile] [-c Context] [-r RemoteMachine] [-u [DomainName\\]UserName] [-p Password | *]\n             [Command | -f ScriptFile]\n"
+    IDS_OPEN_FAILED      "Windows cannot open the file named %ls.\n"
+    IDS_OPEN_FAILED_EXEC "Windows cannot open the file named %ls.\nThe system cannot find the file specified.\n\n\n"
     IDS_THIS_COMMANDS    "\nCommands in this context:\n"
-    IDS_CONTEXT_COMMANDS "\nCommands in the %s-context:\n"
+    IDS_CONTEXT_COMMANDS "\nCommands inherited from the %s context:\n"
     IDS_ALIAS_NOT_FOUND  "The following alias was not found: %s.\n"
 END
 

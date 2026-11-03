@@ -25,6 +25,15 @@ typedef enum _INTERPRETER_STATE
 
 /* FUNCTIONS *****************************************************************/
 
+BOOL
+IsHelpToken(
+    _In_opt_ LPCWSTR psz)
+{
+    return psz != NULL &&
+           (_wcsicmp(psz, L"?") == 0 || _wcsicmp(psz, L"help") == 0 ||
+            _wcsicmp(psz, L"/?") == 0 || _wcsicmp(psz, L"-?") == 0);
+}
+
 static
 PCOMMAND_ENTRY
 GetGroupCommand(
@@ -151,8 +160,7 @@ InterpretCommand(
         pCurrentContext = pRootContext;
 
     /* Check for help keywords */
-    if ((dwArgCount == 1) &&
-        ((_wcsicmp(argv[0], L"?") == 0) || (_wcsicmp(argv[0], L"help") == 0)))
+    if ((dwArgCount == 1) && IsHelpToken(argv[0]))
     {
         PrintContextHelp(pCurrentContext);
         return ERROR_SUCCESS;
@@ -210,8 +218,7 @@ InterpretCommand(
                 }
 
                 /* Check for help keywords */
-                if (((dwArgIndex + 1) == (dwArgCount - 1)) &&
-                    ((_wcsicmp(argv[dwArgIndex + 1], L"?") == 0) || (_wcsicmp(argv[dwArgIndex + 1], L"help") == 0)))
+                if (((dwArgIndex + 1) == (dwArgCount - 1)) && IsHelpToken(argv[dwArgIndex + 1]))
                 {
                     PrintCommandHelp(pTempContext, pGroup, pCommand);
                     State = STATE_DONE;
@@ -273,8 +280,7 @@ InterpretCommand(
                 }
 
                 /* Check for help keywords */
-                if (((dwArgIndex + 1) <= (dwArgCount - 1)) &&
-                    ((_wcsicmp(argv[dwArgIndex + 1], L"?") == 0) || (_wcsicmp(argv[dwArgIndex + 1], L"help") == 0)))
+                if (((dwArgIndex + 1) <= (dwArgCount - 1)) && IsHelpToken(argv[dwArgIndex + 1]))
                 {
                     PrintGroupHelp(pTempContext, pGroup->pwszCmdGroupToken, TRUE);
                     State = STATE_DONE;
@@ -323,17 +329,22 @@ InterpretCommand(
 
                 if (dwArgIndex == (dwArgCount - 1))
                 {
+                    if (g_bNoSwitch)
+                    {
+                        PrintContextHelp(pTempSubContext);
+                        State = STATE_DONE;
+                        break;
+                    }
                     DPRINT("Set current context\n");
                     pCurrentContext = pTempSubContext;
-                    if (pCurrentContext->pfnConnectFn)
+                    if (g_bInteractive && pCurrentContext->pfnConnectFn)
                         dwError = pCurrentContext->pfnConnectFn(g_pszMachine);
                     State = STATE_DONE;
                     break;
                 }
 
                 /* Check for help keywords */
-                if (((dwArgIndex + 1) <= (dwArgCount - 1)) &&
-                    ((_wcsicmp(argv[dwArgIndex + 1], L"?") == 0) || (_wcsicmp(argv[dwArgIndex + 1], L"help") == 0)))
+                if (((dwArgIndex + 1) <= (dwArgCount - 1)) && IsHelpToken(argv[dwArgIndex + 1]))
                 {
                     PrintContextHelp(pTempSubContext);
                     State = STATE_DONE;
@@ -431,7 +442,18 @@ InterpretLine(
         }
     }
 
-    return InterpretCommand(args_vector, dwArgCount, &bDone);
+    {
+        DWORD dwError = InterpretCommand(args_vector, dwArgCount, &bDone);
+        if ((dwError != ERROR_SUCCESS) && (dwError != ERROR_SUPPRESS_OUTPUT))
+        {
+            PWSTR pszCommandString = MergeStrings(args_vector, dwArgCount);
+            PrintError(NULL, dwError, pszCommandString);
+            HeapFree(GetProcessHeap(), 0, pszCommandString);
+        }
+        if ((dwError != ERROR_SUCCESS) && (g_dwExitError == ERROR_SUCCESS))
+            g_dwExitError = dwError;
+        return dwError;
+    }
 }
 
 
@@ -461,6 +483,10 @@ InterpretInteractive(VOID)
     LPWSTR ptr, pStartQuote, pEndQuote;
     DWORD dwError = ERROR_SUCCESS;
 
+    g_bInteractive = TRUE;
+    if ((pCurrentContext != pRootContext) && pCurrentContext->pfnConnectFn)
+        pCurrentContext->pfnConnectFn(g_pszMachine);
+
     for (;;)
     {
         dwArgCount = 0;
@@ -473,7 +499,11 @@ InterpretInteractive(VOID)
         ConPuts(StdOut, L">");
 
         /* Get input from the user. */
-        fgetws(input_line, MAX_STRING_SIZE, stdin);
+        if (fgetws(input_line, MAX_STRING_SIZE, stdin) == NULL)
+        {
+            /* EOF on stdin (redirected input ran out): leave like Windows */
+            break;
+        }
 
         ptr = input_line;
         while (*ptr != 0)
@@ -521,8 +551,8 @@ InterpretInteractive(VOID)
             PrintError(NULL, dwError, pszCommandString);
             HeapFree(GetProcessHeap(), 0, pszCommandString);
         }
-        if (dwError != ERROR_SUPPRESS_OUTPUT)
-            ConPuts(StdOut, L"\n");
+        if ((dwError != ERROR_SUCCESS) && (g_dwExitError == ERROR_SUCCESS))
+            g_dwExitError = dwError;
 
         if (bDone)
             break;

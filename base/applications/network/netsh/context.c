@@ -30,7 +30,11 @@ PCONTEXT_STACK_ENTRY pContextStackHead = NULL;
 PCONTEXT_STACK_ENTRY pContextStackTail = NULL;
 
 PWSTR g_pszMachine = NULL;
-BOOL g_bOnline = TRUE; 
+BOOL g_bOnline = TRUE;
+BOOL g_bInteractive = FALSE;
+BOOL g_bNoSwitch = FALSE;
+BOOL g_bScriptMode = FALSE;
+DWORD g_dwExitError = ERROR_SUCCESS;
 
 /* FUNCTIONS ******************************************************************/
 
@@ -490,6 +494,7 @@ UpCommand(
     if (pCurrentContext != pRootContext)
         pCurrentContext = pCurrentContext->pParentContext;
 
+    ConPuts(StdOut, L"\n");
     return ERROR_SUCCESS;
 }
 
@@ -565,7 +570,12 @@ ExecCommand(
     if (dwArgCount - dwCurrentIndex != 1)
         return ERROR_SHOW_USAGE;
 
-    return RunScript(argv[dwCurrentIndex]);
+    {
+        DWORD dwScript = RunScript(argv[dwCurrentIndex], TRUE);
+        if (dwScript != ERROR_FILE_NOT_FOUND)
+            ConPuts(StdOut, L"\n");
+    }
+    return ERROR_SUCCESS;
 }
 
 
@@ -584,6 +594,7 @@ ExitCommand(
         CommitContext(pRootContext, NETSH_FLUSH);
 
     *pbDone = TRUE;
+    ConPuts(StdOut, L"\n");
     return ERROR_SUCCESS;
 }
 
@@ -674,6 +685,7 @@ PopdCommand(
 
     HeapFree(GetProcessHeap(), 0, pEntry);
 
+    ConPuts(StdOut, L"\n");
     return ERROR_SUCCESS;
 }
 
@@ -710,6 +722,7 @@ PushdCommand(
         pContextStackHead = pEntry;
     }
 
+    ConPuts(StdOut, L"\n");
     return ERROR_SUCCESS;
 }
 
@@ -1001,11 +1014,6 @@ RegisterContext(
             }
         }
 
-        if (pContext->pfnConnectFn)
-        {
-            dwError = pContext->pfnConnectFn(g_pszMachine);
-            DPRINT("pfnConnectFn(%S) returned %lu\n", g_pszMachine, dwError);
-        }
     }
 
     return dwError;

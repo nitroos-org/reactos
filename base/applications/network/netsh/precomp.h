@@ -136,6 +136,10 @@ extern PHELPER_ENTRY pHelperListHead;
 extern HMODULE g_hModule;
 extern PWSTR g_pszMachine;
 extern BOOL g_bOnline;
+extern BOOL g_bInteractive;   /* the interactive prompt is running (helper context connect functions are called) */
+extern BOOL g_bNoSwitch;      /* command line: a context name without a command prints that context's help */
+extern BOOL g_bScriptMode;    /* running a script file */
+extern DWORD g_dwExitError;   /* sticky: first non-success result of any command */
 
 extern UINT  VersionInfoArchitecture;
 extern UINT  VersionInfoOsProductSuite;
@@ -274,6 +278,10 @@ DWORD
 InterpretLine(
     _In_ LPWSTR pszFileName);
 
+BOOL
+IsHelpToken(
+    _In_opt_ LPCWSTR psz);
+
 VOID
 InterpretInteractive(VOID);
 
@@ -281,7 +289,8 @@ InterpretInteractive(VOID);
 
 DWORD
 RunScript(
-    _In_ LPCWSTR filename);
+    _In_ LPCWSTR filename,
+    _In_ BOOL bExec);
 
 LPWSTR
 MergeStrings(

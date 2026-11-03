@@ -20,7 +20,8 @@ HMODULE g_hModule = NULL;
 
 DWORD
 RunScript(
-    _In_ LPCWSTR filename)
+    _In_ LPCWSTR filename,
+    _In_ BOOL bExec)
 {
     WCHAR tmp_string[MAX_STRING_SIZE];
     FILE *script;
@@ -30,16 +31,17 @@ RunScript(
     script = _wfopen(filename, L"r");
     if (script == NULL)
     {
-        ConResPrintf(StdErr, IDS_OPEN_FAILED, filename);
+        ConResPrintf(StdOut, bExec ? IDS_OPEN_FAILED_EXEC : IDS_OPEN_FAILED, filename);
+        if (g_dwExitError == ERROR_SUCCESS)
+            g_dwExitError = ERROR_FILE_NOT_FOUND;
         return ERROR_FILE_NOT_FOUND;
     }
 
     /* Read and process the script */
     while (fgetws(tmp_string, MAX_STRING_SIZE, script) != NULL)
     {
-        dwError = InterpretLine(tmp_string);
-        if (dwError != ERROR_SUCCESS)
-            break;
+        /* a failing line does not stop the script; the exit code records it */
+        InterpretLine(tmp_string);
     }
 
     /* Close the file */
@@ -121,9 +123,10 @@ wmain(
             (_wcsicmp(argv[index], L"/?") == 0) ||
             (_wcsicmp(argv[index], L"?") == 0))
         {
-            /* Help option */
+            /* Help option: usage, then the commands of the root context; Windows exits with 1 */
             ConResPuts(StdOut, IDS_APP_USAGE);
-            dwError = ERROR_SUCCESS;
+            PrintContextHelp(pRootContext);
+            dwError = ERROR_INVALID_SYNTAX;
             goto done;
         }
         else if ((_wcsicmp(argv[index], L"-a") == 0) ||
@@ -225,7 +228,7 @@ wmain(
     /* Run the alias file */
     if (pszAliasFileName != NULL)
     {
-        dwError = RunScript(pszAliasFileName);
+        dwError = RunScript(pszAliasFileName, FALSE);
         if (dwError != ERROR_SUCCESS)
             goto done;
     }
@@ -241,10 +244,11 @@ wmain(
     /* Run a script, the command line instruction or the interactive interpeter */
     if (pszScriptFileName != NULL)
     {
-        dwError = RunScript(pszScriptFileName);
+        dwError = RunScript(pszScriptFileName, FALSE);
     }
     else if (pszCommand != NULL)
     {
+        g_bNoSwitch = TRUE;
         dwError = InterpretLine(pszCommand);
     }
     else
@@ -264,6 +268,8 @@ done:
     UnloadHelpers();
     DestroyAliases();
 
+    if (g_dwExitError != ERROR_SUCCESS)
+        dwError = g_dwExitError;
     return (dwError == ERROR_SUCCESS) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 

@@ -12,6 +12,7 @@
 #define IDS_APP_USAGE            100
 #define IDS_APP_PROMPT           101
 #define IDS_OPEN_FAILED          102
+#define IDS_OPEN_FAILED_EXEC     125
 #define IDS_THIS_COMMANDS        103
 #define IDS_CONTEXT_COMMANDS     104
 #define IDS_ALIAS_NOT_FOUND      105
