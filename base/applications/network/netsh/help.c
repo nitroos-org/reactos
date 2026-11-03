@@ -12,9 +12,7 @@
 #define NDEBUG
 #include <debug.h>
 
-#define HUGE_HELP_BUFFER_SIZE  2048
 #define SMALL_HELP_BUFFER_SIZE  160
-#define TINY_HELP_BUFFER_SIZE    80
 
 typedef enum
 {
@@ -27,6 +25,7 @@ typedef struct
 {
     HELP_TYPE Type;
     PWSTR pszCommand;
+    HMODULE hModule;
     DWORD dwHelpId;
     union
     {
@@ -60,49 +59,21 @@ GetContextFullName(
 
 
 static
-VOID
-PrintCurrentContextHeader(
-    _In_ PCONTEXT_ENTRY pContext)
+BOOL
+IsHidden(
+    _In_ DWORD dwFlags,
+    _In_ PNS_OSVERSIONCHECK pfnOsVersionCheck)
 {
-    if (pContext == pCurrentContext)
-    {
-        ConResPrintf(StdOut, IDS_THIS_COMMANDS);
-    }
-    else
-    {
-        WCHAR szBuffer[SMALL_HELP_BUFFER_SIZE];
-        GetContextFullName(pContext, szBuffer, _countof(szBuffer));
-        ConResPrintf(StdOut, IDS_CONTEXT_COMMANDS, szBuffer);
-    }
-}
+    if (!CheckOsVersion(pfnOsVersionCheck))
+        return TRUE;
 
+    if (((dwFlags & CMD_FLAG_LOCAL) && (g_pszMachine != NULL)) ||
+        ((dwFlags & CMD_FLAG_ONLINE) && (g_bOnline == FALSE)) ||
+        ((dwFlags & CMD_FLAG_INTERACTIVE) && (g_bInteractive == FALSE)) ||
+        (dwFlags & CMD_FLAG_HIDDEN))
+        return TRUE;
 
-static
-VOID
-PrintShortGroupCommands(
-    _In_ PCONTEXT_ENTRY pContext,
-    _In_ PCOMMAND_GROUP pGroup)
-{
-    PCOMMAND_ENTRY pCommand;
-    WCHAR szBuffer1[TINY_HELP_BUFFER_SIZE];
-    WCHAR szBuffer2[SMALL_HELP_BUFFER_SIZE];
-
-    for (pCommand = pGroup->pCommandListHead; pCommand != NULL; pCommand = pCommand->pNext)
-    {
-        DPRINT("CheckVersion (Command) %S %S", pGroup->pwszCmdGroupToken, pCommand->pwszCmdToken);
-        if (!CheckOsVersion(pCommand->pfnOsVersionCheck))
-            continue;
-
-        if (((pCommand->dwFlags & CMD_FLAG_LOCAL) && (g_pszMachine != NULL)) ||
-            ((pCommand->dwFlags & CMD_FLAG_ONLINE) && (g_bOnline == FALSE)) ||
-            (pCommand->dwFlags & CMD_FLAG_HIDDEN))
-            continue;
-
-        _swprintf(szBuffer1, L"%s %s", pGroup->pwszCmdGroupToken, pCommand->pwszCmdToken);
-        LoadStringW(pContext->hModule, pCommand->dwShortCmdHelpToken, szBuffer2, _countof(szBuffer2));
-
-        ConPrintf(StdOut, L"%-15s - %s", szBuffer1, szBuffer2);
-    }
+    return FALSE;
 }
 
 
@@ -117,119 +88,85 @@ HelpCompare(
 
 
 static
+BOOL
+IsInheritable(
+    _In_ PCWSTR pszToken)
+{
+    return (_wcsicmp(pszToken, L"?") != 0) &&
+           (_wcsicmp(pszToken, L"help") != 0) &&
+           (_wcsicmp(pszToken, L"dump") != 0) &&
+           (_wcsicmp(pszToken, L"exec") != 0);
+}
+
+
+/* Prints the commands, groups and sub-contexts of one context, sorted by name */
+static
 VOID
-PrintContext(
-    _In_ PCONTEXT_ENTRY pContext)
+PrintContextSection(
+    _In_ PCONTEXT_ENTRY pContext,
+    _In_ BOOL bInherited)
 {
     PCOMMAND_ENTRY pCommand;
     PCOMMAND_GROUP pGroup;
     PCONTEXT_ENTRY pSubContext;
-    PHELP_ENTRY pHelpArray = NULL;
+    PHELP_ENTRY pHelpArray;
     DWORD dwCount = 0, dwIndex;
     WCHAR szBuffer[SMALL_HELP_BUFFER_SIZE];
 
-    DPRINT("PrintContext()\n");
+    if (bInherited)
+    {
+        GetContextFullName(pContext, szBuffer, _countof(szBuffer));
+        ConResPrintf(StdOut, IDS_INHERITED_COMMANDS, szBuffer);
+    }
+    else
+    {
+        ConResPrintf(StdOut, IDS_THIS_COMMANDS);
+    }
 
-    if (pContext != pRootContext)
-        PrintContext(pContext->pParentContext);
-
-    PrintCurrentContextHeader(pContext);
-
-    /* Count short commands */
     for (pCommand = pContext->pCommandListHead; pCommand != NULL; pCommand = pCommand->pNext)
-    {
-        if (!CheckOsVersion(pCommand->pfnOsVersionCheck))
-            continue;
-
-        if (((pCommand->dwFlags & CMD_FLAG_LOCAL) && (g_pszMachine != NULL)) ||
-            ((pCommand->dwFlags & CMD_FLAG_ONLINE) && (g_bOnline == FALSE)) ||
-            (pCommand->dwFlags & CMD_FLAG_HIDDEN))
-            continue;
-
-        dwCount++;
-    }
-
-    /* Count short groups */
+        if (!IsHidden(pCommand->dwFlags, pCommand->pfnOsVersionCheck) &&
+            (!bInherited || IsInheritable(pCommand->pwszCmdToken)))
+            dwCount++;
     for (pGroup = pContext->pGroupListHead; pGroup != NULL; pGroup = pGroup->pNext)
-    {
-        if (!CheckOsVersion(pGroup->pfnOsVersionCheck))
-            continue;
-
-        if (((pGroup->dwFlags & CMD_FLAG_LOCAL) && (g_pszMachine != NULL)) ||
-            ((pGroup->dwFlags & CMD_FLAG_ONLINE) && (g_bOnline == FALSE)) ||
-            (pGroup->dwFlags & CMD_FLAG_HIDDEN))
-            continue;
-
-        dwCount++;
-    }
-
-    /* Count short subcontexts */
+        if (!IsHidden(pGroup->dwFlags, pGroup->pfnOsVersionCheck))
+            dwCount++;
     for (pSubContext = pContext->pSubContextHead; pSubContext != NULL; pSubContext = pSubContext->pNext)
-    {
-        if (!CheckOsVersion(pSubContext->pfnOsVersionCheck))
-            continue;
+        if (!IsHidden(pSubContext->dwFlags, pSubContext->pfnOsVersionCheck))
+            dwCount++;
 
-        if (((pSubContext->dwFlags & CMD_FLAG_LOCAL) && (g_pszMachine != NULL)) ||
-            ((pSubContext->dwFlags & CMD_FLAG_ONLINE) && (g_bOnline == FALSE)) ||
-            (pSubContext->dwFlags & CMD_FLAG_HIDDEN))
-            continue;
-
-        dwCount++;
-    }
+    if (dwCount == 0)
+        return;
 
     pHelpArray = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwCount * sizeof(HELP_ENTRY));
     if (pHelpArray == NULL)
         return;
 
     dwIndex = 0;
-
-    /* Add short commands */
     for (pCommand = pContext->pCommandListHead; pCommand != NULL; pCommand = pCommand->pNext)
     {
-        if (!CheckOsVersion(pCommand->pfnOsVersionCheck))
+        if (IsHidden(pCommand->dwFlags, pCommand->pfnOsVersionCheck) ||
+            (bInherited && !IsInheritable(pCommand->pwszCmdToken)))
             continue;
-
-        if (((pCommand->dwFlags & CMD_FLAG_LOCAL) && (g_pszMachine != NULL)) ||
-            ((pCommand->dwFlags & CMD_FLAG_ONLINE) && (g_bOnline == FALSE)) ||
-            (pCommand->dwFlags & CMD_FLAG_HIDDEN))
-            continue;
-
         pHelpArray[dwIndex].Type = Command;
         pHelpArray[dwIndex].pszCommand = pCommand->pwszCmdToken;
+        pHelpArray[dwIndex].hModule = pCommand->hModule ? pCommand->hModule : pContext->hModule;
         pHelpArray[dwIndex].dwHelpId = pCommand->dwShortCmdHelpToken;
-        pHelpArray[dwIndex].Pointer.pCommand = pCommand;
         dwIndex++;
     }
-
-    /* Add short groups */
     for (pGroup = pContext->pGroupListHead; pGroup != NULL; pGroup = pGroup->pNext)
     {
-        if (!CheckOsVersion(pGroup->pfnOsVersionCheck))
+        if (IsHidden(pGroup->dwFlags, pGroup->pfnOsVersionCheck))
             continue;
-
-        if (((pGroup->dwFlags & CMD_FLAG_LOCAL) && (g_pszMachine != NULL)) ||
-            ((pGroup->dwFlags & CMD_FLAG_ONLINE) && (g_bOnline == FALSE)) ||
-            (pGroup->dwFlags & CMD_FLAG_HIDDEN))
-            continue;
-
         pHelpArray[dwIndex].Type = Group;
         pHelpArray[dwIndex].pszCommand = pGroup->pwszCmdGroupToken;
+        pHelpArray[dwIndex].hModule = pContext->hModule;
         pHelpArray[dwIndex].dwHelpId = pGroup->dwShortCmdHelpToken;
-        pHelpArray[dwIndex].Pointer.pGroup = pGroup;
         dwIndex++;
     }
-
-    /* Count short subcontexts */
     for (pSubContext = pContext->pSubContextHead; pSubContext != NULL; pSubContext = pSubContext->pNext)
     {
-        if (!CheckOsVersion(pSubContext->pfnOsVersionCheck))
+        if (IsHidden(pSubContext->dwFlags, pSubContext->pfnOsVersionCheck))
             continue;
-
-        if (((pSubContext->dwFlags & CMD_FLAG_LOCAL) && (g_pszMachine != NULL)) ||
-            ((pSubContext->dwFlags & CMD_FLAG_ONLINE) && (g_bOnline == FALSE)) ||
-            (pSubContext->dwFlags & CMD_FLAG_HIDDEN))
-            continue;
-
         pHelpArray[dwIndex].Type = SubContext;
         pHelpArray[dwIndex].pszCommand = pSubContext->pszContextName;
         pHelpArray[dwIndex].Pointer.pSubContext = pSubContext;
@@ -240,29 +177,20 @@ PrintContext(
 
     for (dwIndex = 0; dwIndex < dwCount; dwIndex++)
     {
-        switch (pHelpArray[dwIndex].Type)
+        if (pHelpArray[dwIndex].Type == SubContext)
         {
-            case Command:
-                if (LoadStringW(pContext->hModule, pHelpArray[dwIndex].dwHelpId, szBuffer, _countof(szBuffer)) == 0)
-                    szBuffer[0] = UNICODE_NULL;
-                ConPrintf(StdOut, L"%-15s - %s", pHelpArray[dwIndex].pszCommand, szBuffer);
-                break;
-
-            case Group:
-                if (LoadStringW(pContext->hModule, pHelpArray[dwIndex].dwHelpId, szBuffer, _countof(szBuffer)) == 0)
-                    szBuffer[0] = UNICODE_NULL;
-                ConPrintf(StdOut, L"%-15s - %s", pHelpArray[dwIndex].pszCommand, szBuffer);
-                break;
-
-            case SubContext:
-                GetContextFullName(pHelpArray[dwIndex].Pointer.pSubContext, szBuffer, _countof(szBuffer));
-                ConPrintf(StdOut, L"%-15s - Changes to the \"%s\" context.\n", pHelpArray[dwIndex].pszCommand, szBuffer);
-                break;
+            GetContextFullName(pHelpArray[dwIndex].Pointer.pSubContext, szBuffer, _countof(szBuffer));
+            ConResPrintf(StdOut, IDS_CHANGE_CONTEXT, pHelpArray[dwIndex].pszCommand, szBuffer);
+        }
+        else
+        {
+            if (LoadStringW(pHelpArray[dwIndex].hModule, pHelpArray[dwIndex].dwHelpId, szBuffer, _countof(szBuffer)) == 0)
+                szBuffer[0] = UNICODE_NULL;
+            ConPrintf(StdOut, L"%-14s - %s", pHelpArray[dwIndex].pszCommand, szBuffer);
         }
     }
 
-    if (pHelpArray)
-        HeapFree(GetProcessHeap(), 0, pHelpArray);
+    HeapFree(GetProcessHeap(), 0, pHelpArray);
 }
 
 
@@ -289,17 +217,11 @@ PrintSubcontexts(
 
     dwCount = 0;
     for (pSubContext = pContext->pSubContextHead; pSubContext != NULL; pSubContext = pSubContext->pNext)
-    {
-        if (!CheckOsVersion(pSubContext->pfnOsVersionCheck))
-            continue;
+        if (!IsHidden(pSubContext->dwFlags, pSubContext->pfnOsVersionCheck))
+            dwCount++;
 
-        if (((pSubContext->dwFlags & CMD_FLAG_LOCAL) && (g_pszMachine != NULL)) ||
-            ((pSubContext->dwFlags & CMD_FLAG_ONLINE) && (g_bOnline == FALSE)) ||
-            (pSubContext->dwFlags & CMD_FLAG_HIDDEN))
-            continue;
-
-        dwCount++;
-    }
+    if (dwCount == 0)
+        return;
 
     pSubContextArray = HeapAlloc(GetProcessHeap(), 0, dwCount * sizeof(PCONTEXT_ENTRY));
     if (pSubContextArray == NULL)
@@ -307,19 +229,9 @@ PrintSubcontexts(
 
     dwIndex = 0;
     for (pSubContext = pContext->pSubContextHead; pSubContext != NULL; pSubContext = pSubContext->pNext)
-    {
-        if (!CheckOsVersion(pSubContext->pfnOsVersionCheck))
-            continue;
+        if (!IsHidden(pSubContext->dwFlags, pSubContext->pfnOsVersionCheck))
+            pSubContextArray[dwIndex++] = pSubContext;
 
-        if (((pSubContext->dwFlags & CMD_FLAG_LOCAL) && (g_pszMachine != NULL)) ||
-            ((pSubContext->dwFlags & CMD_FLAG_ONLINE) && (g_bOnline == FALSE)) ||
-            (pSubContext->dwFlags & CMD_FLAG_HIDDEN))
-            continue;
-
-        pSubContextArray[dwIndex] = pSubContext;
-        dwIndex++;
-    }
-  
     qsort(pSubContextArray, dwCount, sizeof(PCONTEXT_ENTRY), SubContextCompare);
 
     ConResPrintf(StdOut, IDS_SUBCONTEXT_HEADER);
@@ -342,6 +254,7 @@ PrintCommandHelp(
     LPWSTR pszCommandBuffer;
     DWORD_PTR Args[2];
     DWORD dwLength = 1;
+    HMODULE hModule;
 
     DPRINT("PrintCommandHelp(%p %p %p)\n", pContext, pGroup, pCommand);
 
@@ -369,13 +282,15 @@ PrintCommandHelp(
     Args[0] = (DWORD_PTR)pszCommandBuffer;
     Args[1] = (DWORD_PTR)NULL;
 
+    hModule = pCommand->hModule ? pCommand->hModule : pContext->hModule;
     ConResMsgPrintfExV(StdOut,
-                       pContext->hModule,
+                       hModule,
                        FORMAT_MESSAGE_ARGUMENT_ARRAY,
                        pCommand->dwCmdHlpToken,
                        LANG_USER_DEFAULT,
                        (va_list *)&Args);
-    ConPuts(StdOut, L"\n");
+    if (g_lScriptDepth == 0)
+        ConPuts(StdOut, L"\n");
 
     HeapFree(GetProcessHeap(), 0, pszCommandBuffer);
 }
@@ -388,22 +303,29 @@ PrintGroupHelp(
     _In_ BOOL bRecurse)
 {
     PCOMMAND_GROUP pGroup;
+    PCOMMAND_ENTRY pCommand;
+    WCHAR szBuffer1[SMALL_HELP_BUFFER_SIZE];
+    WCHAR szBuffer2[SMALL_HELP_BUFFER_SIZE];
 
-    if (bRecurse)
-    {
-        if (pContext != pRootContext)
-            PrintGroupHelp(pContext->pParentContext, pszGroupName, bRecurse);
-    }
+    ConResPrintf(StdOut, IDS_HELP_HEADER);
+    ConResPrintf(StdOut, IDS_THIS_COMMANDS);
 
-    pGroup = pContext->pGroupListHead;
-    while (pGroup != NULL)
+    for (pGroup = pContext->pGroupListHead; pGroup != NULL; pGroup = pGroup->pNext)
     {
-        if (_wcsicmp(pszGroupName, pGroup->pwszCmdGroupToken) == 0)
+        if (_wcsicmp(pszGroupName, pGroup->pwszCmdGroupToken) != 0)
+            continue;
+
+        for (pCommand = pGroup->pCommandListHead; pCommand != NULL; pCommand = pCommand->pNext)
         {
-            PrintCurrentContextHeader(pContext);
-            PrintShortGroupCommands(pContext, pGroup);
+            if (IsHidden(pCommand->dwFlags, pCommand->pfnOsVersionCheck))
+                continue;
+
+            _swprintf(szBuffer1, L"%s %s", pGroup->pwszCmdGroupToken, pCommand->pwszCmdToken);
+            if (LoadStringW(pCommand->hModule ? pCommand->hModule : pContext->hModule,
+                            pCommand->dwShortCmdHelpToken, szBuffer2, _countof(szBuffer2)) == 0)
+                szBuffer2[0] = UNICODE_NULL;
+            ConPrintf(StdOut, L"%-14s - %s", szBuffer1, szBuffer2);
         }
-        pGroup = pGroup->pNext;
     }
 }
 
@@ -412,8 +334,24 @@ VOID
 PrintContextHelp(
     _In_ PCONTEXT_ENTRY pContext)
 {
+    PCONTEXT_ENTRY pAncestor[16];
+    DWORD dwDepth = 0, i;
+    PCONTEXT_ENTRY p;
+
     ConResPrintf(StdOut, IDS_HELP_HEADER);
-    PrintContext(pContext);
+
+    /* The commands of the parent contexts are only reachable in the interactive mode */
+    if (g_bInteractive)
+    {
+        for (p = pContext->pParentContext; p != NULL && dwDepth < _countof(pAncestor); p = p->pParentContext)
+            pAncestor[dwDepth++] = p;
+        for (i = dwDepth; i > 0; i--)
+            PrintContextSection(pAncestor[i - 1], TRUE);
+    }
+
+    PrintContextSection(pContext, FALSE);
     PrintSubcontexts(pContext);
     ConResPrintf(StdOut, IDS_HELP_FOOTER);
+    if (g_lScriptDepth == 0)
+        ConPuts(StdOut, L"\n");
 }

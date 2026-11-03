@@ -25,22 +25,30 @@ RunScript(
     WCHAR tmp_string[MAX_STRING_SIZE];
     FILE *script;
     DWORD dwError = ERROR_SUCCESS;
+    BOOL bSavedCommandLine;
 
     /* Open the file for processing */
     script = _wfopen(filename, L"r");
     if (script == NULL)
     {
-        ConResPrintf(StdErr, IDS_OPEN_FAILED, filename);
-        return ERROR_FILE_NOT_FOUND;
+        dwError = ERROR_FILE_NOT_FOUND;
+        PrintError(g_hModule, IDS_OPEN_FAILED, filename);
+        PrintError(NULL, dwError);
+        return dwError;
     }
 
-    /* Read and process the script */
+    /* Read and process the script. A failing line does not stop the script, but
+     * the script as a whole reports the failure. */
+    bSavedCommandLine = g_bCommandLine;
+    g_bCommandLine = FALSE;
+    InterlockedIncrement(&g_lScriptDepth);
     while (fgetws(tmp_string, MAX_STRING_SIZE, script) != NULL)
     {
-        dwError = InterpretLine(tmp_string);
-        if (dwError != ERROR_SUCCESS)
-            break;
+        if (InterpretLine(tmp_string) != ERROR_SUCCESS)
+            dwError = ERROR_SCRIPT_FAILED;
     }
+    InterlockedDecrement(&g_lScriptDepth);
+    g_bCommandLine = bSavedCommandLine;
 
     /* Close the file */
     fclose(script);
@@ -123,7 +131,10 @@ wmain(
         {
             /* Help option */
             ConResPuts(StdOut, IDS_APP_USAGE);
-            dwError = ERROR_SUCCESS;
+            InterlockedIncrement(&g_lScriptDepth);  /* no blank line after this list */
+            PrintContextHelp(pRootContext);
+            InterlockedDecrement(&g_lScriptDepth);
+            dwError = ERROR_INVALID_SYNTAX;
             goto done;
         }
         else if ((_wcsicmp(argv[index], L"-a") == 0) ||
@@ -245,11 +256,13 @@ wmain(
     }
     else if (pszCommand != NULL)
     {
+        g_bCommandLine = TRUE;
         dwError = InterpretLine(pszCommand);
+        g_bCommandLine = FALSE;
     }
     else
     {
-        InterpretInteractive();
+        dwError = InterpretInteractive();
     }
 
 done:
@@ -413,13 +426,24 @@ MatchTagsInCmdLine(
                 (_wcsnicmp(ppwcArguments[i], pttTags[j].pwszTag, dwTagLength) == 0))
             {
                 DPRINT("Found tag %S\n", pttTags[j].pwszTag);
-                pttTags[j].bPresent = TRUE;
+                /* An empty value counts as not given */
+                pttTags[j].bPresent = (pszEqual[1] != UNICODE_NULL);
                 pdwTagType[i - dwCurrentIndex] = j;
 
                 /* Remove the tag name from the argument */
                 wcscpy(ppwcArguments[i], pszEqual + 1);
                 break;
             }
+        }
+
+        if (j == dwTagCount)
+        {
+            /* Not one of the tags of this command */
+            WCHAR szTag[64];
+            wcsncpy(szTag, ppwcArguments[i], min(dwTagLength, _countof(szTag) - 1));
+            szTag[min(dwTagLength, _countof(szTag) - 1)] = UNICODE_NULL;
+            PrintError(NULL, ERROR_INVALID_OPTION_TAG, szTag);
+            return ERROR_INVALID_SYNTAX;
         }
     }
 
@@ -562,7 +586,13 @@ PreprocessCommand(
     if ((ppwcArguments == NULL) || (pttTags == NULL) || (pdwTagType == NULL))
         return ERROR_INVALID_PARAMETER;
 
-    if (((dwArgCount - dwCurrentIndex) < dwMinArgs) || ((dwArgCount - dwCurrentIndex) > dwMaxArgs))
+    if ((dwArgCount - dwCurrentIndex) < dwMinArgs)
+    {
+        PrintError(NULL, ERROR_MISSING_OPTION);
+        return ERROR_INVALID_SYNTAX;
+    }
+
+    if ((dwArgCount - dwCurrentIndex) > dwMaxArgs)
         return ERROR_INVALID_SYNTAX;
 
     for (i = 0; i < dwTagCount; i++)
@@ -589,7 +619,10 @@ PreprocessCommand(
     for (i = 0; i < dwTagCount; i++)
     {
         if ((pttTags[i].dwRequired & NS_REQ_PRESENT) && (pttTags[i].bPresent == FALSE))
+        {
+            PrintError(NULL, ERROR_MISSING_OPTION);
             return ERROR_INVALID_SYNTAX;
+        }
     }
 
     return 0;
@@ -609,21 +642,22 @@ PrintError(
 
     if (hModule)
     {
-        Length = ConResMsgPrintfExV(StdErr, hModule, 0, dwErrId,
+        Length = ConResMsgPrintfExV(StdOut, hModule, 0, dwErrId,
                                     LANG_USER_DEFAULT, &ap);
     }
     else
     {
         if ((dwErrId > NETSH_ERROR_BASE) && (dwErrId < NETSH_ERROR_END))
         {
-            Length = ConResMsgPrintfExV(StdErr, g_hModule, 0, dwErrId,
+            Length = ConResMsgPrintfExV(StdOut, g_hModule, 0, dwErrId,
                                         LANG_USER_DEFAULT, &ap);
         }
         else
         {
-            Length = ConMsgPrintfV(StdErr, FORMAT_MESSAGE_FROM_SYSTEM,
+            Length = ConMsgPrintfV(StdOut, FORMAT_MESSAGE_FROM_SYSTEM,
                                    NULL, dwErrId,
                                    LANG_USER_DEFAULT, &ap);
+            ConPuts(StdOut, L"\n");
         }
     }
 

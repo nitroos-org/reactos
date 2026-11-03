@@ -23,7 +23,26 @@ typedef enum _INTERPRETER_STATE
 } INTERPRETER_STATE;
 
 
+/* GLOBALS *******************************************************************/
+
+BOOL g_bInteractive = FALSE;
+BOOL g_bCommandLine = FALSE;
+LONG g_lScriptDepth = 0;
+PCONTEXT_ENTRY g_pInvokeContext = NULL;
+
+
 /* FUNCTIONS *****************************************************************/
+
+BOOL
+IsHelpToken(
+    _In_ PCWSTR psz)
+{
+    return (_wcsicmp(psz, L"?") == 0) ||
+           (_wcsicmp(psz, L"help") == 0) ||
+           (_wcsicmp(psz, L"/?") == 0) ||
+           (_wcsicmp(psz, L"-?") == 0);
+}
+
 
 static
 PCOMMAND_ENTRY
@@ -142,6 +161,8 @@ InterpretCommand(
     INTERPRETER_STATE State = STATE_ANALYZE;
     DWORD dwArgIndex = 0;
     DWORD dwError = ERROR_SUCCESS;
+    BOOL bDescended = FALSE;
+    BOOL bHandlerSucceeded = FALSE;
 
     /* If no args provided */
     if (dwArgCount == 0)
@@ -150,9 +171,16 @@ InterpretCommand(
     if (pCurrentContext == NULL)
         pCurrentContext = pRootContext;
 
+    /* A leading '=' can not start a command or argument */
+    for (dwArgIndex = 0; dwArgIndex < dwArgCount; dwArgIndex++)
+    {
+        if (argv[dwArgIndex][0] == L'=')
+            return ERROR_CMD_NOT_FOUND;
+    }
+    dwArgIndex = 0;
+
     /* Check for help keywords */
-    if ((dwArgCount == 1) &&
-        ((_wcsicmp(argv[0], L"?") == 0) || (_wcsicmp(argv[0], L"help") == 0)))
+    if ((dwArgCount == 1) && IsHelpToken(argv[0]))
     {
         PrintContextHelp(pCurrentContext);
         return ERROR_SUCCESS;
@@ -165,6 +193,13 @@ InterpretCommand(
         {
             case STATE_ANALYZE:
                 DPRINT("STATE_ANALYZE\n");
+
+                if (IsHelpToken(argv[dwArgIndex]))
+                {
+                    PrintContextHelp(pTempContext);
+                    State = STATE_DONE;
+                    break;
+                }
 
                 pCommand = GetContextCommand(argv[dwArgIndex], pTempContext);
                 if (pCommand != NULL)
@@ -210,8 +245,7 @@ InterpretCommand(
                 }
 
                 /* Check for help keywords */
-                if (((dwArgIndex + 1) == (dwArgCount - 1)) &&
-                    ((_wcsicmp(argv[dwArgIndex + 1], L"?") == 0) || (_wcsicmp(argv[dwArgIndex + 1], L"help") == 0)))
+                if (((dwArgIndex + 1) == (dwArgCount - 1)) && IsHelpToken(argv[dwArgIndex + 1]))
                 {
                     PrintCommandHelp(pTempContext, pGroup, pCommand);
                     State = STATE_DONE;
@@ -221,17 +255,22 @@ InterpretCommand(
                 if (pCommand->pfnCmdHandler != NULL)
                 {
                     dwArgIndex++;
+                    g_pInvokeContext = pTempContext;
                     dwError = pCommand->pfnCmdHandler(g_pszMachine, argv, dwArgIndex, dwArgCount, 0, NULL, bDone);
                     if (dwError != ERROR_SUCCESS)
                     {
-                        if (dwError == ERROR_SHOW_USAGE)
+                        if (dwError == ERROR_SHOW_USAGE || dwError == ERROR_INVALID_SYNTAX)
                         {
+                            if (dwError == ERROR_INVALID_SYNTAX)
+                                PrintError(NULL, ERROR_INVALID_SYNTAX);
                             PrintCommandHelp(pTempContext, pGroup, pCommand);
                             dwError = ERROR_SUPPRESS_OUTPUT;
                         }
                     }
                     else
                     {
+                        bHandlerSucceeded = TRUE;
+
                         /* Execute the commands following a pushd command */
                         if ((_wcsicmp(pCommand->pwszCmdToken, L"pushd") == 0) &&
                             (dwArgIndex < dwArgCount))
@@ -273,8 +312,7 @@ InterpretCommand(
                 }
 
                 /* Check for help keywords */
-                if (((dwArgIndex + 1) <= (dwArgCount - 1)) &&
-                    ((_wcsicmp(argv[dwArgIndex + 1], L"?") == 0) || (_wcsicmp(argv[dwArgIndex + 1], L"help") == 0)))
+                if (((dwArgIndex + 1) <= (dwArgCount - 1)) && IsHelpToken(argv[dwArgIndex + 1]))
                 {
                     PrintGroupHelp(pTempContext, pGroup->pwszCmdGroupToken, TRUE);
                     State = STATE_DONE;
@@ -323,17 +361,24 @@ InterpretCommand(
 
                 if (dwArgIndex == (dwArgCount - 1))
                 {
+                    if (g_bCommandLine && !g_bInteractive)
+                    {
+                        /* "netsh <context>" on the command line shows the context's commands */
+                        PrintContextHelp(pTempSubContext);
+                        State = STATE_DONE;
+                        break;
+                    }
+
                     DPRINT("Set current context\n");
                     pCurrentContext = pTempSubContext;
-                    if (pCurrentContext->pfnConnectFn)
+                    if (g_bInteractive && pCurrentContext->pfnConnectFn)
                         dwError = pCurrentContext->pfnConnectFn(g_pszMachine);
                     State = STATE_DONE;
                     break;
                 }
 
                 /* Check for help keywords */
-                if (((dwArgIndex + 1) <= (dwArgCount - 1)) &&
-                    ((_wcsicmp(argv[dwArgIndex + 1], L"?") == 0) || (_wcsicmp(argv[dwArgIndex + 1], L"help") == 0)))
+                if (((dwArgIndex + 1) <= (dwArgCount - 1)) && IsHelpToken(argv[dwArgIndex + 1]))
                 {
                     PrintContextHelp(pTempSubContext);
                     State = STATE_DONE;
@@ -342,6 +387,7 @@ InterpretCommand(
 
                 DPRINT("Change temorary context\n");
                 pTempContext = pTempSubContext;
+                bDescended = TRUE;
                 State = STATE_ANALYZE;
                 dwArgIndex++;
                 break;
@@ -349,7 +395,9 @@ InterpretCommand(
             case STATE_PARENT_CONTEXT:
                 DPRINT("STATE_PARENT_CONTEXT\n");
 
-                if (pTempContext->pParentContext == NULL)
+                /* Once a sub-context was entered on the command line the command must be found there;
+                 * walking up and restarting at the first argument would loop forever. */
+                if (bDescended || pTempContext->pParentContext == NULL)
                 {
                     dwError = ERROR_CMD_NOT_FOUND;
                     State = STATE_DONE;
@@ -364,33 +412,84 @@ InterpretCommand(
 
             case STATE_DONE:
                 DPRINT("STATE_DONE dwError %ld\n", dwError);
+                if (bHandlerSucceeded && (dwError == ERROR_SUCCESS) && (g_lScriptDepth == 0))
+                    ConPuts(StdOut, L"\n");
                 return dwError;
         }
     }
 
     /* Done */
-    return ERROR_SUCCESS;
+    if (bHandlerSucceeded && (dwError == ERROR_SUCCESS) && (g_lScriptDepth == 0))
+        ConPuts(StdOut, L"\n");
+    return dwError;
 } 
 
 
 /*
- * InterpretScript(char *line):
- * The main function used for when reading commands from scripts.
+ * Prints what the interpreter has to say about an error code and returns the
+ * code that makes the process fail (ERROR_SUCCESS if the error was only a usage message).
  */
+static
 DWORD
-InterpretLine(
-    _In_ LPWSTR pszInputLine)
+ReportError(
+    _In_ DWORD dwError,
+    _In_ LPWSTR *argv,
+    _In_ DWORD dwArgCount)
 {
-    LPWSTR args_vector[MAX_ARGS_COUNT];
+    PWSTR pszCommandString;
+
+    switch (dwError)
+    {
+        case ERROR_SUCCESS:
+        case ERROR_SUPPRESS_OUTPUT:
+            return ERROR_SUCCESS;
+
+        case ERROR_SCRIPT_FAILED:
+            if (g_lScriptDepth == 0)
+                ConPuts(StdOut, L"\n");
+            return dwError;
+
+        case ERROR_CMD_NOT_FOUND:
+            pszCommandString = MergeStrings(argv, dwArgCount);
+            PrintError(NULL, dwError, pszCommandString ? pszCommandString : L"");
+            if (pszCommandString)
+                HeapFree(GetProcessHeap(), 0, pszCommandString);
+            return dwError;
+
+        default:
+            PrintError(NULL, dwError);
+            if (g_lScriptDepth == 0)
+                ConPuts(StdOut, L"\n");
+            return dwError;
+    }
+}
+
+
+DWORD
+InterpretTokens(
+    _In_ LPWSTR *argv,
+    _In_ DWORD dwArgCount,
+    _Inout_ PBOOL pbDone)
+{
+    DWORD dwError = InterpretCommand(argv, dwArgCount, pbDone);
+    return ReportError(dwError, argv, dwArgCount);
+}
+
+
+static
+DWORD
+SplitLine(
+    _In_ LPWSTR pszLine,
+    _Out_writes_(MAX_ARGS_COUNT) LPWSTR *args_vector)
+{
     DWORD dwArgCount = 0, i, len;
     BOOL bWhiteSpace = TRUE;
-    BOOL bDone = FALSE;
     BOOL bInQuotes = FALSE;
     LPWSTR ptr, pStartQuote, pEndQuote;
 
-    memset(args_vector, 0, sizeof(args_vector));
+    memset(args_vector, 0, MAX_ARGS_COUNT * sizeof(LPWSTR));
 
-    ptr = pszInputLine;
+    ptr = pszLine;
     while (*ptr != 0)
     {
         if (*ptr == L'\"')
@@ -431,7 +530,32 @@ InterpretLine(
         }
     }
 
-    return InterpretCommand(args_vector, dwArgCount, &bDone);
+    return dwArgCount;
+}
+
+
+/*
+ * InterpretLine(WCHAR *line):
+ * The main function used for when reading commands from scripts.
+ */
+DWORD
+InterpretLine(
+    _In_ LPWSTR pszInputLine)
+{
+    LPWSTR args_vector[MAX_ARGS_COUNT];
+    DWORD dwArgCount;
+    BOOL bDone = FALSE;
+    LPWSTR p;
+
+    /* Comment lines */
+    for (p = pszInputLine; *p != 0 && iswspace(*p); p++)
+        ;
+    if (*p == L'#')
+        return ERROR_SUCCESS;
+
+    dwArgCount = SplitLine(pszInputLine, args_vector);
+
+    return InterpretTokens(args_vector, dwArgCount, &bDone);
 }
 
 
@@ -449,82 +573,36 @@ PrintPrompt(
 }
 
 
-VOID
+DWORD
 InterpretInteractive(VOID)
 {
+    DWORD dwResult = ERROR_SUCCESS;
     WCHAR input_line[MAX_STRING_SIZE];
     LPWSTR args_vector[MAX_ARGS_COUNT];
-    DWORD dwArgCount = 0, i, len;
-    BOOL bWhiteSpace = TRUE;
+    DWORD dwArgCount;
     BOOL bDone = FALSE;
-    BOOL bInQuotes = FALSE;
-    LPWSTR ptr, pStartQuote, pEndQuote;
-    DWORD dwError = ERROR_SUCCESS;
+
+    g_bInteractive = TRUE;
 
     for (;;)
     {
-        dwArgCount = 0;
-        memset(args_vector, 0, sizeof(args_vector));
-
         /* Shown just before the input where the user places commands */
         if (g_pszMachine)
             ConPrintf(StdOut, L"[%s] ", g_pszMachine);
         PrintPrompt(pCurrentContext);
         ConPuts(StdOut, L">");
 
-        /* Get input from the user. */
-        fgetws(input_line, MAX_STRING_SIZE, stdin);
+        /* Get input from the user. End of input leaves the program. */
+        if (fgetws(input_line, MAX_STRING_SIZE, stdin) == NULL)
+            break;
 
-        ptr = input_line;
-        while (*ptr != 0)
-        {
-            if (*ptr == L'\"')
-                bInQuotes = (bInQuotes) ? FALSE : TRUE;
-
-            if ((iswspace(*ptr) && (bInQuotes == FALSE)) || *ptr == L'\n')
-            {
-                *ptr = UNICODE_NULL;
-                bWhiteSpace = TRUE;
-            }
-            else
-            {
-                if ((bWhiteSpace != FALSE) && (dwArgCount < MAX_ARGS_COUNT))
-                {
-                    args_vector[dwArgCount] = ptr;
-                    dwArgCount++;
-                }
-                bWhiteSpace = FALSE;
-            }
-            ptr++;
-        }
-
-        /* Remove quotation marks */
-        for (i = 0; i < dwArgCount; i++)
-        {
-            pStartQuote = wcschr(args_vector[i], L'\"');
-            if (pStartQuote)
-            {
-                pEndQuote = wcschr(pStartQuote + 1, L'\"');
-                if (pEndQuote)
-                {
-                    len = pEndQuote - pStartQuote;
-                    memmove(pStartQuote, pStartQuote + 1, (len - 1) * sizeof(WCHAR));
-                    *(pEndQuote - 1) = UNICODE_NULL;
-                }
-            }
-        }
-
-        dwError = InterpretCommand(args_vector, dwArgCount, &bDone);
-        if ((dwError != ERROR_SUCCESS) && (dwError != ERROR_SUPPRESS_OUTPUT))
-        {
-            PWSTR pszCommandString = MergeStrings(args_vector, dwArgCount);
-            PrintError(NULL, dwError, pszCommandString);
-            HeapFree(GetProcessHeap(), 0, pszCommandString);
-        }
-        if (dwError != ERROR_SUPPRESS_OUTPUT)
-            ConPuts(StdOut, L"\n");
+        dwArgCount = SplitLine(input_line, args_vector);
+        if (InterpretTokens(args_vector, dwArgCount, &bDone) != ERROR_SUCCESS)
+            dwResult = ERROR_INVALID_FUNCTION;
 
         if (bDone)
             break;
     }
+
+    return dwResult;
 }

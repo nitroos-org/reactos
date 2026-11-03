@@ -1784,6 +1784,16 @@ HKLM,"SYSTEM\CurrentControlSet\Services\BITS","Start",0x00010001,0x00000003
 HKLM,"SYSTEM\CurrentControlSet\Services\BITS","Type",0x00010001,0x00000020
 HKLM,"SYSTEM\CurrentControlSet\Services\BITS\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\qmgr.dll"
 
+; IP Helper (netsh interface portproxy relay)
+HKLM,"SYSTEM\CurrentControlSet\Services\iphlpsvc","DisplayName",0x00000000,"IP Helper"
+HKLM,"SYSTEM\CurrentControlSet\Services\iphlpsvc","Description",0x00000000,"Provides tunnel connectivity using IPv6 transition technologies (6to4, ISATAP, Port Proxy, and Teredo), and IP-HTTPS. If this service is stopped, the computer will not have the enhanced connectivity benefits that these technologies offer."
+HKLM,"SYSTEM\CurrentControlSet\Services\iphlpsvc","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\iphlpsvc","ImagePath",0x00020000,"%SystemRoot%\system32\svchost.exe -k netsvcs"
+HKLM,"SYSTEM\CurrentControlSet\Services\iphlpsvc","ObjectName",0x00000000,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\iphlpsvc","Start",0x00010001,0x00000002
+HKLM,"SYSTEM\CurrentControlSet\Services\iphlpsvc","Type",0x00010001,0x00000020
+HKLM,"SYSTEM\CurrentControlSet\Services\iphlpsvc\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\iphlpsvc.dll"
+
 ; BlueScreen device driver
 HKLM,"SYSTEM\CurrentControlSet\Services\Blue","ErrorControl",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\Blue","Group",0x00000000,"Video Init"

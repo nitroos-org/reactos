@@ -76,6 +76,18 @@ InterfaceDumpFn(
 }
 
 
+static
+DWORD
+WINAPI
+InterfaceConnect(
+    _In_ LPCWSTR pwszMachine)
+{
+    /* shown when the context is entered, as Windows does */
+    PrintMessageFromModule(hDllInstance, IDS_INTERFACE_BANNER);
+    return ERROR_SUCCESS;
+}
+
+
 DWORD
 WINAPI
 InterfaceStart(
@@ -98,6 +110,7 @@ InterfaceStart(
     ContextAttributes.pCmdGroups = InterfaceGroups;
 
     ContextAttributes.pfnDumpFn = InterfaceDumpFn;
+    ContextAttributes.pfnConnectFn = InterfaceConnect;
 
     RegisterContext(&ContextAttributes);
 
