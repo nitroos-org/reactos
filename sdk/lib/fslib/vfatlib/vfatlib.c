@@ -411,9 +411,11 @@ VfatChkdsk(
     {
         if (!(FsCheckFlags & FSCHECK_READ_WRITE) && !(FsCheckFlags & FSCHECK_INTERACTIVE))
         {
+            /* Dirty: tell autochk that a check is needed. This is not a failure of the
+             * query, so succeed as NtfsChkdsk does (autochk repairs only on success). */
             fs_close(FALSE);
             *ExitStatus = (ULONG)STATUS_DISK_CORRUPT_ERROR;
-            return FALSE;
+            return TRUE;
         }
     }
 
