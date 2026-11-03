@@ -61,9 +61,9 @@ START_TEST(Wow64Process)
     ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
     Wow64 = 0x55;
     SetLastError(0xdeadbeef);
-    ok(!IsWow64Process(NULL, &Wow64), "NULL process handle accepted\n");
-    ok(GetLastError() == ERROR_INVALID_HANDLE, "LastError %lu\n", GetLastError());
-    ok(Wow64 == 0x55, "Failed query changed output to %d\n", Wow64);
+    /* Windows 10 22H2 accepts a NULL handle: TRUE, not a WoW64 process (32 and 64-bit callers) */
+    ok(IsWow64Process(NULL, &Wow64), "NULL process handle rejected: %lu\n", GetLastError());
+    ok(Wow64 == FALSE, "NULL process handle reads as WoW64: %d\n", Wow64);
 
     RtlFillMemory(&Info, sizeof(Info), 0x55);
     RtlFillMemory(&NativeInfo, sizeof(NativeInfo), 0xaa);
