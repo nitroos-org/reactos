@@ -3935,6 +3935,110 @@ static int ngc_dir_empty_impl(ngc_vol *v, ngc_node *dirn)
 	return err < 0 ? err : !any;
 }
 
+/* $Extend\$Deleted (see ngapi.h). */
+static const unsigned short ngc_deleted_name[] = { '$', 'D', 'e', 'l', 'e', 't', 'e', 'd' };
+
+int ngc_deleted_dir(ngc_vol *v, int create, ngc_node **out)
+{
+	ngc_node *ext, *d = NULL;
+	int err;
+	*out = NULL;
+	err = ngc_iget(v, FILE_Extend, &ext);
+	if (err)
+		return err;
+	if (!S_ISDIR(((struct inode *)ext)->i_mode)) {
+		ngc_put(ext);
+		return -ENOTDIR;
+	}
+	err = ngc_lookup(v, ext, ngc_deleted_name, ARRAY_SIZE(ngc_deleted_name), &d, NULL, NULL);
+	if (err == -ENOENT && create) {
+		err = ngc_create(v, ext, ngc_deleted_name, ARRAY_SIZE(ngc_deleted_name), 1, &d);
+		if (!err) {
+			void *sd = NULL;
+			unsigned int len = 0;
+			/* FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM; the descriptor of $Extend. */
+			ngc_set_info(v, d, NULL, 0x2 | 0x4, 0x2 | 0x4);
+			if (!ngc_get_security(v, ext, &sd, &len) && sd) {
+				ngc_set_security(v, d, sd, len);
+				ngc_free(sd);
+			}
+		}
+	}
+	ngc_put(ext);
+	if (!err && !S_ISDIR(((struct inode *)d)->i_mode)) {
+		ngc_put(d);
+		err = -ENOTDIR;
+	}
+	if (!err)
+		*out = d;
+	return err;
+}
+
+#define NGC_PURGE_BATCH 64
+struct ngc_purge_ctx {
+	unsigned int n;
+	unsigned short len[NGC_PURGE_BATCH];
+	unsigned short name[NGC_PURGE_BATCH][NTFS_MAX_NAME_LEN];
+};
+
+static int ngc_purge_collect(void *ctx, const unsigned short *name, unsigned int len, unsigned long long ino, unsigned int t)
+{
+	struct ngc_purge_ctx *c = ctx;
+	(void)ino; (void)t;
+	if ((len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.') || len > NTFS_MAX_NAME_LEN)
+		return 0;
+	memcpy(c->name[c->n], name, len * sizeof(*name));
+	c->len[c->n++] = (unsigned short)len;
+	return c->n == NGC_PURGE_BATCH;
+}
+
+int ngc_purge_deleted(ngc_vol *v, unsigned int *count)
+{
+	struct ngc_purge_ctx *c;
+	ngc_node *d, *n;
+	unsigned int i, done = 0, failed;
+	int err;
+	*count = 0;
+	if (sb_rdonly(v->sb))
+		return 0;
+	err = ngc_deleted_dir(v, 0, &d);
+	if (err)
+		return err == -ENOENT ? 0 : err;
+	c = kmalloc(sizeof(*c), GFP_KERNEL);
+	if (!c) {
+		ngc_put(d);
+		return -ENOMEM;
+	}
+	do {
+		c->n = 0;
+		failed = 0;
+		err = ngc_readdir(v, d, ngc_purge_collect, c);
+		if (err < 0)
+			break;
+		err = 0;
+		for (i = 0; i < c->n; i++) {
+			int e = ngc_lookup(v, d, c->name[i], c->len[i], &n, NULL, NULL);
+			if (!e) {
+				e = ngc_unlink(v, d, c->name[i], c->len[i], n);
+				ngc_put(n);	/* the last reference: the record and its clusters are freed */
+			}
+			if (e) {
+				printk(KERN_WARNING "deleted: an entry of $Extend\\$Deleted was not removed (%d)\n", e);
+				failed++;
+				err = e;
+			} else {
+				done++;
+			}
+		}
+	} while (c->n == NGC_PURGE_BATCH && failed < c->n);
+	kfree(c);
+	ngc_put(d);
+	*count = done;
+	if (done)
+		printk(KERN_WARNING "deleted: %u entries left in $Extend\\$Deleted (POSIX deletes still open at a crash) removed\n", done);
+	return err;
+}
+
 /* ------------------------------------------------------------------ time per stage */
 
 int ngc_lookup(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node **out,
