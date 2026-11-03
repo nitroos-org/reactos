@@ -871,7 +871,7 @@ CmpLinkHiveToMaster(IN PUNICODE_STRING LinkName,
     /* Mark the hive as clean */
     RegistryHive->Hive.DirtyFlag = FALSE;
 
-    /* ReactOS Hack: Keep alive */
+    /* ReactOS Hack: Keep alive. The reference is dropped when the hive is unloaded */
     Status = ObReferenceObjectByHandle(KeyHandle,
                                        0,
                                        CmpKeyObjectType,
@@ -879,6 +879,8 @@ CmpLinkHiveToMaster(IN PUNICODE_STRING LinkName,
                                        (PVOID*)&KeyBody,
                                        NULL);
     ASSERT(NT_SUCCESS(Status));
+    if (NT_SUCCESS(Status))
+        RegistryHive->RootKeyBody = KeyBody;
 
     /* Close the extra handle */
     ZwClose(KeyHandle);

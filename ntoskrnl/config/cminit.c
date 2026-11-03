@@ -97,6 +97,7 @@ CmpInitializeHive(
     /* Setup null fields */
     Hive->UnloadEvent = NULL;
     Hive->RootKcb = NULL;
+    Hive->RootKeyBody = NULL;
     Hive->Frozen = FALSE;
     Hive->UnloadWorkItem = NULL;
     Hive->GrowOnlyMode = FALSE;
@@ -266,6 +267,10 @@ CmpDestroyHive(IN PCMHIVE CmHive)
 
     /* Delete the view lock */
     ExFreePoolWithTag(CmHive->ViewLock, TAG_CMHIVE);
+
+    /* Free the duplicated hive file name */
+    if (CmHive->FileFullPath.Buffer)
+        ExFreePoolWithTag(CmHive->FileFullPath.Buffer, TAG_CM);
 
     /* Free the hive storage */
     HvFree(&CmHive->Hive);
