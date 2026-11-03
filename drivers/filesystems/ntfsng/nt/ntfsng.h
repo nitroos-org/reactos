@@ -337,6 +337,16 @@ VOID NgFcbIdle(PNG_FCB Fcb);
 BOOLEAN NgMarkDeletePending(PNG_VCB Vcb, PNG_FCB Fcb, BOOLEAN CheckStreams);
 BOOLEAN NgNodeGone(ngc_node *Node);
 VOID NgSetDeletePending(PNG_FCB Fcb, PNG_CCB Ccb);
+NTSTATUS NgDeleteNow(PNG_FCB Fcb, BOOLEAN KeepOpen);
+
+/* FileDispositionInformationEx (class 64; the class number is not in every DDK header) and its flags. */
+#define NG_FILE_DISPOSITION_INFORMATION_EX  ((FILE_INFORMATION_CLASS)64)
+#define NG_DISP_DELETE                      0x00000001
+#define NG_DISP_POSIX_SEMANTICS             0x00000002
+#define NG_DISP_FORCE_IMAGE_SECTION_CHECK   0x00000004
+#define NG_DISP_ON_CLOSE                    0x00000008
+#define NG_DISP_IGNORE_READONLY_ATTRIBUTE   0x00000010
+#define NG_DISP_VALID_MASK                  0x0000001f
 BOOLEAN NgValidName(PCUNICODE_STRING Name);
 VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action);
 VOID NgLockNotifyPath(PNG_VCB Vcb);
