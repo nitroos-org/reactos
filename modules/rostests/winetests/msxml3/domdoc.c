@@ -14280,6 +14280,152 @@ static DWORD WINAPI new_thread(void *arg)
     return 0;
 }
 
+static BOOL compare_ignore_formatting(const WCHAR *str, const WCHAR *expected)
+{
+    for (;;)
+    {
+        while (*str == '\r' || *str == '\n' || *str == '\t') str++;
+        if (*str != *expected) return FALSE;
+        if (!*str) return TRUE;
+        str++;
+        expected++;
+    }
+}
+
+/* Office Click-to-Run merges AppX manifests by re-parsing node.xml of a child element:
+   tmp.loadXML(ext.xml); package.replaceChild(tmp.documentElement, ext); package.selectSingleNode("//appv:Extensions").
+   The child's xml must declare the namespace it inherits; undeclared prefixes make the document invalid
+   (results measured with msxml3 and msxml6 on Windows 10 22H2). */
+static void test_xml_inherited_namespace(void)
+{
+    static const char manifest[] =
+        "<Package xmlns=\"urn:appx\" xmlns:appv=\"urn:appv\"><Identity/>"
+        "<appv:Extensions><appv:Extension Category=\"c\"><appv:Name>.accdt</appv:Name></appv:Extension></appv:Extensions>"
+        "<appv:UsedKnownFolders/></Package>";
+    static const struct
+    {
+        const char *xml;
+        VARIANT_BOOL valid;
+    } parse_tests[] =
+    {
+        { "<appv:Extensions><appv:Extension/></appv:Extensions>", VARIANT_FALSE },
+        { "<a p:x=\"1\"/>", VARIANT_FALSE },
+        { "<a><p:b/></a>", VARIANT_FALSE },
+        { "<a xmlns:p=\"u\"><p:b p:x=\"1\"/></a>", VARIANT_TRUE },
+        { "<a xmlns:p=\"not a uri\"/>", VARIANT_TRUE },
+    };
+    const GUID *clsids[] = { &CLSID_DOMDocument30, &CLSID_DOMDocument60 };
+    IXMLDOMElement *root, *root2;
+    IXMLDOMNodeList *list;
+    IXMLDOMNode *ext, *ext2, *old;
+    IXMLDOMDocument2 *doc, *doc2;
+    VARIANT_BOOL b;
+    unsigned int i, j;
+    LONG len;
+    BSTR str;
+    HRESULT hr;
+
+    for (i = 0; i < ARRAY_SIZE(clsids); i++)
+    {
+        if (!is_clsid_supported(clsids[i], &IID_IXMLDOMDocument2)) continue;
+        winetest_push_context("%u", i);
+
+        for (j = 0; j < ARRAY_SIZE(parse_tests); j++)
+        {
+            doc = _create_object(clsids[i], "doc", &IID_IXMLDOMDocument2, __LINE__);
+            b = 0xdead;
+            hr = IXMLDOMDocument2_loadXML(doc, _bstr_(parse_tests[j].xml), &b);
+            ok(hr == (parse_tests[j].valid ? S_OK : S_FALSE), "%s: Unexpected hr %#lx.\n", parse_tests[j].xml, hr);
+            ok(b == parse_tests[j].valid, "%s: got %d\n", parse_tests[j].xml, b);
+            root = (void *)0xdeadbeef;
+            hr = IXMLDOMDocument2_get_documentElement(doc, &root);
+            if (parse_tests[j].valid)
+            {
+                ok(hr == S_OK, "%s: Unexpected hr %#lx.\n", parse_tests[j].xml, hr);
+                IXMLDOMElement_Release(root);
+            }
+            else
+            {
+                ok(hr == S_FALSE, "%s: Unexpected hr %#lx.\n", parse_tests[j].xml, hr);
+                ok(!root, "%s: got root %p\n", parse_tests[j].xml, root);
+            }
+            IXMLDOMDocument2_Release(doc);
+        }
+
+        doc = _create_object(clsids[i], "doc", &IID_IXMLDOMDocument2, __LINE__);
+        hr = IXMLDOMDocument2_loadXML(doc, _bstr_(manifest), &b);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IXMLDOMDocument2_setProperty(doc, _bstr_("SelectionLanguage"), _variantbstr_("XPath"));
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IXMLDOMDocument2_setProperty(doc, _bstr_("SelectionNamespaces"),
+                _variantbstr_("xmlns:appx=\"urn:appx\" xmlns:appv=\"urn:appv\""));
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IXMLDOMDocument2_get_documentElement(doc, &root);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        hr = IXMLDOMElement_selectSingleNode(root, _bstr_("//appv:Extensions"), &ext);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IXMLDOMNode_get_xml(ext, &str);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(compare_ignore_formatting(str, L"<appv:Extensions xmlns:appv=\"urn:appv\"><appv:Extension Category=\"c\"><appv:Name>.accdt</appv:Name>"
+                L"</appv:Extension></appv:Extensions>"), "got %s\n", wine_dbgstr_w(str));
+
+        /* the subtree re-parses into the same namespace */
+        doc2 = _create_object(clsids[i], "doc", &IID_IXMLDOMDocument2, __LINE__);
+        hr = IXMLDOMDocument2_loadXML(doc2, str, &b);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(b == VARIANT_TRUE, "got %d\n", b);
+        SysFreeString(str);
+        hr = IXMLDOMDocument2_get_documentElement(doc2, &root2);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IXMLDOMElement_get_namespaceURI(root2, &str);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(!lstrcmpW(str, L"urn:appv"), "got %s\n", wine_dbgstr_w(str));
+        SysFreeString(str);
+
+        /* the source document is unchanged */
+        hr = IXMLDOMElement_get_xml(root, &str);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(compare_ignore_formatting(str, _bstr_(manifest)), "got %s\n", wine_dbgstr_w(str));
+        SysFreeString(str);
+
+        old = NULL;
+        hr = IXMLDOMElement_replaceChild(root, (IXMLDOMNode *)root2, ext, &old);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(old != NULL, "got %p\n", old);
+        if (old) IXMLDOMNode_Release(old);
+        IXMLDOMElement_Release(root2);
+
+        hr = IXMLDOMElement_selectNodes(root, _bstr_("//appv:Extensions"), &list);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        len = 0;
+        hr = IXMLDOMNodeList_get_length(list, &len);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(len == 1, "got %ld\n", len);
+        IXMLDOMNodeList_Release(list);
+
+        hr = IXMLDOMElement_selectSingleNode(root, _bstr_("//appv:Extensions"), &ext2);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(ext2 != ext, "got the replaced node\n");
+        hr = IXMLDOMElement_removeChild(root, ext, NULL);
+        ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+        if (ext2)
+        {
+            hr = IXMLDOMElement_removeChild(root, ext2, NULL);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            IXMLDOMNode_Release(ext2);
+        }
+
+        IXMLDOMNode_Release(ext);
+        IXMLDOMElement_Release(root);
+        IXMLDOMDocument2_Release(doc2);
+        IXMLDOMDocument2_Release(doc);
+        winetest_pop_context();
+    }
+
+    free_bstrs();
+}
+
 START_TEST(domdoc)
 {
     HRESULT hr;
@@ -14311,6 +14457,7 @@ START_TEST(domdoc)
     test_get_lastChild();
     test_removeChild();
     test_replaceChild();
+    test_xml_inherited_namespace();
     test_removeNamedItem();
     test_IXMLDOMDocument2();
     test_whitespace();
