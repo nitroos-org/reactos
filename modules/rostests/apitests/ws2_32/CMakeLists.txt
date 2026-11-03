@@ -4,6 +4,7 @@ list(APPEND SOURCE
     accept.c
     acceptname.c
     addresschange.c
+    asyncselect.c
     backlog.c
     bind.c
     broadcast.c
