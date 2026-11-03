@@ -45,6 +45,13 @@ C_ASSERT(NVME_MAX_TRANSFER_BYTES <= NVME_PRP_ENTRIES_PER_SLOT * NVME_PAGE_SIZE);
 #define NVME_TIMER_PERIOD_US        1000000
 #define NVME_MACHINE_PERIOD_US      10000
 #define NVME_DEFAULT_TIMEOUT_S      10
+/* Srb->TimeOutValue is the caller's (pass-through): longer is clamped, deadlines stay in range */
+#define NVME_MAX_TIMEOUT_S          3600
+/* An admin command of the controller state machine; CAP.TO is about CSTS.RDY, not commands */
+#define NVME_ADMIN_TIMEOUT_MS       5000
+/* HwFindAdapter's polled bring-up, retries and namespace scan included: a controller that
+   does not come up must not hold the boot for minutes */
+#define NVME_BRINGUP_MAX_MS         45000
 #define NVME_ABORT_GRACE_S          5
 #define NVME_DRAIN_TIMEOUT_MS       5000
 #define NVME_FLUSH_TIMEOUT_MS       30000
@@ -126,6 +133,7 @@ typedef enum _NVME_STEP
     StepDisable = 0,
     StepWaitDisabled,
     StepWaitBusMaster,      /* CSTS.RDY never cleared: bus mastering goes off outside the lock */
+    StepWaitBusMasterOn,    /* stopped after bus mastering went off: it goes back on outside the lock */
     StepEnable,
     StepWaitEnabled,
     StepIdentify,
@@ -200,6 +208,11 @@ typedef struct _NVME_EXTENSION
     BOOLEAN Identify;       /* identify the controller on the way up (HwFindAdapter) */
     BOOLEAN ShutdownOk;
     BOOLEAN NeedBusMasterOff;
+    BOOLEAN NeedBusMasterOn;
+    /* The watchdog is writing the PCI command register outside the lock */
+    volatile LONG BusMasterChanging;
+    /* A command of NvmeSubmitSync got no completion */
+    BOOLEAN SyncTimedOut;
     BOOLEAN BusMasterOff;
     ULONG StepDeadline;
     ULONG Attempts;

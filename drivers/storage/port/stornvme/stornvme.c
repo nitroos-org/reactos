@@ -327,6 +327,9 @@ NvmeSubmitSrbCommand(
     }
 
     Timeout = Srb->TimeOutValue ? Srb->TimeOutValue : NVME_DEFAULT_TIMEOUT_S;
+    /* The caller chose it (pass-through): (Timeout + 1) * 1000 must not wrap */
+    if (Timeout > NVME_MAX_TIMEOUT_S)
+        Timeout = NVME_MAX_TIMEOUT_S;
 
     Queue->Slots[Slot].Srb = Srb;
     Queue->Slots[Slot].Kind = (UCHAR)Kind;
@@ -503,6 +506,7 @@ NvmeSubmitSync(
         StorPortStallExecution(10);
     }
 
+    Ext->SyncTimedOut = !Ext->PollDone;
     if (!Ext->PollDone)
     {
         NvmeLog("queue %u: command 0x%02x timed out\n", Queue->Qid, Command->Opcode);
@@ -536,7 +540,7 @@ NvmeIdentifyNamespace(
     Cmd.Cdw10 = NVME_CNS_NAMESPACE;
 
     RtlZeroMemory(Id, sizeof(*Id));
-    if (!NvmeSubmitSync(Ext, &Ext->AdminQueue, &Cmd, Ext->ReadyTimeoutMs, NULL, NULL))
+    if (!NvmeSubmitSync(Ext, &Ext->AdminQueue, &Cmd, NVME_ADMIN_TIMEOUT_MS, NULL, NULL))
         return FALSE;
 
     /* Inactive namespace */
@@ -591,10 +595,16 @@ NvmeScanNamespaces(
         Cmd.Cdw10 = NVME_CNS_ACTIVE_NS_LIST;
 
         RtlZeroMemory(List, NVME_PAGE_SIZE);
-        if (NvmeSubmitSync(Ext, &Ext->AdminQueue, &Cmd, Ext->ReadyTimeoutMs, NULL, NULL))
+        if (NvmeSubmitSync(Ext, &Ext->AdminQueue, &Cmd, NVME_ADMIN_TIMEOUT_MS, NULL, NULL))
         {
             for (i = 0; i < NVME_PAGE_SIZE / sizeof(ULONG) && List[i] != 0 && Count < NVME_MAX_NAMESPACES; i++)
                 Nsids[Count++] = List[i];
+        }
+        else if (Ext->SyncTimedOut)
+        {
+            /* It does not answer: probing namespace by namespace would only wait longer */
+            Ext->NamespaceCount = 0;
+            return;
         }
     }
 
@@ -615,6 +625,10 @@ NvmeScanNamespaces(
             NvmeLog("namespace %lu: %I64u blocks of %lu bytes\n",
                     Namespace->Nsid, Namespace->BlockCount, 1UL << Namespace->BlockShift);
             Ext->NamespaceCount++;
+        }
+        else if (Ext->SyncTimedOut)
+        {
+            break;
         }
     }
 }
@@ -970,6 +984,7 @@ NvmeStartMachine(
     Ext->GoalShutdown = Shutdown;
     Ext->StepIssued = FALSE;
     Ext->NeedBusMasterOff = FALSE;
+    Ext->NeedBusMasterOn = FALSE;
 
     if (Shutdown)
     {
@@ -1023,6 +1038,16 @@ NvmeMachineStep(
                 {
                     /* Stopped: what it held goes back, the class driver retries */
                     NvmeReleaseOutstanding(Ext, SRB_STATUS_BUS_RESET);
+
+                    /* An earlier failure to stop turned bus mastering off; a controller
+                       enabled without it could not reach its queues */
+                    if (Ext->BusMasterOff)
+                    {
+                        Ext->NeedBusMasterOn = TRUE;
+                        Ext->Step = StepWaitBusMasterOn;
+                        return;
+                    }
+
                     Ext->Step = StepEnable;
                     continue;
                 }
@@ -1043,6 +1068,12 @@ NvmeMachineStep(
                 NvmeReleaseOutstanding(Ext, SRB_STATUS_BUS_RESET);
                 NvmeMachineGiveUp(Ext);
                 return;
+
+            case StepWaitBusMasterOn:
+                if (Ext->BusMasterOff)
+                    return;
+                Ext->Step = StepEnable;
+                continue;
 
             case StepEnable:
                 NvmeResetQueueState(Admin);
@@ -1083,7 +1114,7 @@ NvmeMachineStep(
                 Cmd.Cdw10 = NVME_CNS_CONTROLLER;
                 if (!Ext->StepIssued)
                     RtlZeroMemory(Ext->IdentifyBuffer, NVME_PAGE_SIZE);
-                if (!NvmeStepCommand(Ext, Admin, &Cmd, Ext->ReadyTimeoutMs, &Ok))
+                if (!NvmeStepCommand(Ext, Admin, &Cmd, NVME_ADMIN_TIMEOUT_MS, &Ok))
                     return;
                 if (!Ok)
                 {
@@ -1099,7 +1130,7 @@ NvmeMachineStep(
                 /* One I/O submission and one completion queue (0's based) */
                 Cmd.Opcode = NVME_ADMIN_SET_FEATURES;
                 Cmd.Cdw10 = NVME_FEAT_NUM_QUEUES;
-                if (!NvmeStepCommand(Ext, Admin, &Cmd, Ext->ReadyTimeoutMs, &Ok))
+                if (!NvmeStepCommand(Ext, Admin, &Cmd, NVME_ADMIN_TIMEOUT_MS, &Ok))
                     return;
                 if (!Ok)
                 {
@@ -1120,7 +1151,7 @@ NvmeMachineStep(
                 }
                 Cmd.Opcode = NVME_ADMIN_GET_FEATURES;
                 Cmd.Cdw10 = NVME_FEAT_VOLATILE_WC;
-                if (!NvmeStepCommand(Ext, Admin, &Cmd, Ext->ReadyTimeoutMs, &Ok))
+                if (!NvmeStepCommand(Ext, Admin, &Cmd, NVME_ADMIN_TIMEOUT_MS, &Ok))
                     return;
                 Ext->WriteCacheEnabled = Ok ? ((Ext->InternalDw0 & 1) ? TRUE : FALSE) : TRUE;
                 Ext->Step = StepCreateCq;
@@ -1131,7 +1162,7 @@ NvmeMachineStep(
                 Cmd.Prp1 = Io->CqPa.QuadPart;
                 Cmd.Cdw10 = ((ULONG)(Io->Depth - 1) << 16) | Io->Qid;
                 Cmd.Cdw11 = (0UL << 16) | 0x2 /* IEN */ | 0x1 /* PC */;
-                if (!NvmeStepCommand(Ext, Admin, &Cmd, Ext->ReadyTimeoutMs, &Ok))
+                if (!NvmeStepCommand(Ext, Admin, &Cmd, NVME_ADMIN_TIMEOUT_MS, &Ok))
                     return;
                 if (!Ok)
                 {
@@ -1147,7 +1178,7 @@ NvmeMachineStep(
                 Cmd.Prp1 = Io->SqPa.QuadPart;
                 Cmd.Cdw10 = ((ULONG)(Io->Depth - 1) << 16) | Io->Qid;
                 Cmd.Cdw11 = ((ULONG)Io->Qid << 16) | 0x1 /* PC */;
-                if (!NvmeStepCommand(Ext, Admin, &Cmd, Ext->ReadyTimeoutMs, &Ok))
+                if (!NvmeStepCommand(Ext, Admin, &Cmd, NVME_ADMIN_TIMEOUT_MS, &Ok))
                     return;
                 if (!Ok)
                 {
@@ -1240,6 +1271,11 @@ NvmeBringUpSync(
     ULONG Waited;
     ULONG Limit = 4 * Ext->ReadyTimeoutMs * NVME_MACHINE_ATTEMPTS + 10000;
 
+    /* CAP.TO may say 127 s for each of several waits; the boot does not wait that long. The
+       namespace scan after it gives up at its first unanswered command */
+    if (Limit > NVME_BRINGUP_MAX_MS)
+        Limit = NVME_BRINGUP_MAX_MS;
+
     Ext->InFindAdapter = TRUE;
     Ext->Identify = TRUE;
     Ext->State = NvmeStateMachine;
@@ -1258,6 +1294,13 @@ NvmeBringUpSync(
             Ext->BusMasterOff = TRUE;
             continue;
         }
+        if (Ext->NeedBusMasterOn)
+        {
+            Ext->NeedBusMasterOn = FALSE;
+            NvmeSetBusMaster(Ext, TRUE);
+            Ext->BusMasterOff = FALSE;
+            continue;
+        }
         if (Ext->State != NvmeStateMachine)
             break;
         StorPortStallExecution(1000);
@@ -1268,7 +1311,11 @@ NvmeBringUpSync(
     Ext->Identify = FALSE;
 
     if (Ext->State != NvmeStateLive)
+    {
+        if (Ext->State == NvmeStateMachine)
+            NvmeLog("controller not up after %lu ms, giving up\n", Limit);
         return FALSE;
+    }
 
     NvmeScanNamespaces(Ext);
     return TRUE;
@@ -1328,7 +1375,7 @@ NvmeHwTimer(
     PNVME_EXTENSION Ext = (PNVME_EXTENSION)DeviceExtension;
     STOR_LOCK_HANDLE LockHandle;
     BOOLEAN NeedReset = FALSE;
-    BOOLEAN BusMasterOff;
+    BOOLEAN BusMasterOff, BusMasterOn;
     ULONG Period;
     USHORT i;
 
@@ -1417,6 +1464,11 @@ NvmeHwTimer(
 
     BusMasterOff = Ext->NeedBusMasterOff;
     Ext->NeedBusMasterOff = FALSE;
+    BusMasterOn = Ext->NeedBusMasterOn;
+    Ext->NeedBusMasterOn = FALSE;
+    /* ScsiStopAdapter waits for this before it decides about bus mastering itself */
+    if (BusMasterOn)
+        InterlockedExchange((PLONG)&Ext->BusMasterChanging, 1);
 
     Period = (Ext->State == NvmeStateMachine) ? NVME_MACHINE_PERIOD_US : NVME_TIMER_PERIOD_US;
     Ext->TimerPeriodUs = Period;
@@ -1429,6 +1481,15 @@ NvmeHwTimer(
         NvmeSetBusMaster(Ext, FALSE);
         NvmeLock(Ext, &LockHandle);
         Ext->BusMasterOff = TRUE;
+        NvmeUnlock(Ext, &LockHandle);
+    }
+    if (BusMasterOn)
+    {
+        /* The controller stopped: StepWaitBusMasterOn enables it on the next tick */
+        NvmeSetBusMaster(Ext, TRUE);
+        NvmeLock(Ext, &LockHandle);
+        Ext->BusMasterOff = FALSE;
+        InterlockedExchange((PLONG)&Ext->BusMasterChanging, 0);
         NvmeUnlock(Ext, &LockHandle);
     }
 
@@ -1588,6 +1649,11 @@ NvmeHwAdapterControl(
                 }
                 StorPortStallExecution(100);
             }
+
+            /* A watchdog tick may be turning bus mastering back on right now */
+            for (Waited = 0; Ext->BusMasterChanging && Waited < NVME_STOP_WAIT_US; Waited += 10)
+                StorPortStallExecution(10);
+
             if (!Stopped && !Ext->BusMasterOff)
             {
                 NvmeSetBusMaster(Ext, FALSE);
