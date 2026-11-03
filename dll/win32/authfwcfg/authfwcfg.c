@@ -41,6 +41,25 @@ static VOID Out(PCWSTR s)
     }
 }
 
+/* output without the final newline: a failing command is followed by a blank line outside of scripts only */
+static VOID OutStrip(PCWSTR s)
+{
+    SIZE_T n = wcslen(s);
+    WCHAR *copy;
+    if (!n || s[n - 1] != L'\n') { Out(s); return; }
+    copy = HeapAlloc(GetProcessHeap(), 0, n * sizeof(WCHAR));
+    if (!copy) return;
+    memcpy(copy, s, (n - 1) * sizeof(WCHAR)); copy[n - 1] = 0;
+    Out(copy);
+    HeapFree(GetProcessHeap(), 0, copy);
+}
+
+static VOID OutFailRes(UINT id)
+{
+    PWSTR t = ResText(id);
+    if (t) { OutStrip(t); HeapFree(GetProcessHeap(), 0, t); }
+}
+
 static VOID OutRes(UINT id)
 {
     PWSTR t = ResText(id);
@@ -68,6 +87,7 @@ static VOID OutResCount(UINT id, ULONG n)
 /* prefix text + usage block; the help-token form of a usage text is "\nUsage...", the error form has no leading newline */
 static DWORD Fail(UINT pfx, UINT usage, BOOL helpForm)
 {
+    if (!usage) { OutFailRes(pfx); return ERROR_NETSH_FAILED_OUTPUT; }
     OutRes(pfx);
     if (usage)
     {
@@ -76,12 +96,12 @@ static DWORD Fail(UINT pfx, UINT usage, BOOL helpForm)
         {
             PCWSTR u = t;
             if (helpForm && *u == L'\n') u++;
-            Out(u);
-            if (helpForm) Out(L"\n");
+            if (helpForm) Out(u); else OutStrip(u);
+            if (helpForm) { /* the help token form is printed with one more newline by the interpreter: nothing to add */ }
             HeapFree(GetProcessHeap(), 0, t);
         }
     }
-    return ERROR_SUPPRESS_OUTPUT;
+    return ERROR_NETSH_FAILED_OUTPUT;
 }
 
 /* ---------------------------------------------------------------- argument parsing */
@@ -138,16 +158,19 @@ static int ParseParams(LPWSTR *argv, DWORD from, DWORD to, ULONG allowed, BOOL a
 
 static DWORD ReportParseError(int pe, PCWSTR bogus)
 {
-    if (pe == PE_DUP) OutRes(IDS_MSG_DUPNAME);
+    if (pe == PE_DUP) OutFailRes(IDS_MSG_DUPNAME);
     else
     {
         WCHAR name[128]; PCWSTR eq = wcschr(bogus, L'=');
         SIZE_T n = eq ? (SIZE_T)(eq - bogus) : wcslen(bogus);
         if (n > 120) n = 120;
         memcpy(name, bogus, n * sizeof(WCHAR)); name[n] = 0;
-        OutResFmt(IDS_MSG_BOGUSARG, name);
+        { PWSTR t = ResText(IDS_MSG_BOGUSARG), buf;
+          if (t) { buf = HeapAlloc(GetProcessHeap(), 0, (wcslen(t) + 140) * sizeof(WCHAR));
+                   if (buf) { _swprintf(buf, t, name); OutStrip(buf); HeapFree(GetProcessHeap(), 0, buf); }
+                   HeapFree(GetProcessHeap(), 0, t); } }
     }
-    return ERROR_SUPPRESS_OUTPUT;
+    return ERROR_NETSH_FAILED_OUTPUT;
 }
 
 /* ---------------------------------------------------------------- value conversion */
@@ -562,20 +585,19 @@ static DWORD WINAPI AddRule(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD
     pe = ParseParams(argv, cur, cnt, MASK_RULE, FALSE, &p, &bogus);
     if (pe) return ReportParseError(pe, bogus);
     if (!p.has[P_NAME] || !*p.val[P_NAME] || !p.has[P_DIR] || !*p.val[P_DIR] || !p.has[P_ACTION] || !*p.val[P_ACTION])
-    { OutRes(IDS_MSG_ESSENTIAL); return ERROR_SUPPRESS_OUTPUT; }
+    { OutFailRes(IDS_MSG_ESSENTIAL); return ERROR_NETSH_FAILED_OUTPUT; }
     FwRuleInit(&r);
     r.Enabled = TRUE;
     if (!ApplyParams(&r, &p, FALSE, &e, IDS_USG_ADDRULE))
     {
         FwRuleFree(&r);
-        if (e.full) { OutRes(e.pfx); return ERROR_SUPPRESS_OUTPUT; }
+        if (e.full) { OutFailRes(e.pfx); return ERROR_NETSH_FAILED_OUTPUT; }
         return Fail(e.pfx, e.usage, FALSE);
     }
     err = FwStoreAdd(&r);
     FwRuleFree(&r);
     if (err) return err;
-    OutRes(IDS_MSG_OK_ADD);
-    return ERROR_SUCCESS;
+    return ERROR_NETSH_OK;
 }
 
 static DWORD LoadMatches(const FILTER *f, FW_RULESET *all, ULONG **idx, ULONG *n)
@@ -596,22 +618,22 @@ static DWORD WINAPI DeleteRule(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DW
     if (cnt - cur < 1) return Fail(IDS_PFX_NUMARGS, IDS_USG_DELRULE, FALSE);
     pe = ParseParams(argv, cur, cnt, MASK_FILTER, FALSE, &p, &bogus);
     if (pe) return ReportParseError(pe, bogus);
-    if (!p.has[P_NAME]) { OutRes(IDS_MSG_ESSENTIAL); return ERROR_SUPPRESS_OUTPUT; }
+    if (!p.has[P_NAME]) { OutFailRes(IDS_MSG_ESSENTIAL); return ERROR_NETSH_FAILED_OUTPUT; }
     if (!BuildFilter(&f, &p, &e, IDS_USG_DELRULE))
     {
         FwRuleFree(&f.tmpl);
-        if (e.full) { OutRes(e.pfx); return ERROR_SUPPRESS_OUTPUT; }
+        if (e.full) { OutFailRes(e.pfx); return ERROR_NETSH_FAILED_OUTPUT; }
         return Fail(e.pfx, e.usage, FALSE);
     }
     err = LoadMatches(&f, &rs, &idx, &n);
     FwRuleFree(&f.tmpl);
     if (err) return err;
-    if (!n) { OutRes(IDS_MSG_NORULES); FwRuleSetFree(&rs); HeapFree(GetProcessHeap(), 0, idx); return ERROR_SUPPRESS_OUTPUT; }
+    if (!n) { OutFailRes(IDS_MSG_NORULES); FwRuleSetFree(&rs); HeapFree(GetProcessHeap(), 0, idx); return ERROR_NETSH_FAILED_OUTPUT; }
     for (i = 0; i < n; i++) { err = FwStoreDelete(rs.R[idx[i]].Id); if (err) break; }
     FwRuleSetFree(&rs); HeapFree(GetProcessHeap(), 0, idx);
     if (err) return err;
     OutResCount(IDS_MSG_DEL_DELETED, n);
-    return ERROR_SUCCESS;
+    return ERROR_NETSH_OK;
 }
 
 static DWORD WINAPI ShowRuleCmd(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
@@ -622,23 +644,22 @@ static DWORD WINAPI ShowRuleCmd(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, D
     if (pe) return ReportParseError(pe, bogus);
     if (!p.has[P_NAME] && !p.positional)
     {
-        if (p.verbose && cnt - cur == 1) { OutRes(IDS_MSG_NOMEM); return ERROR_SUPPRESS_OUTPUT; }
-        OutRes(IDS_MSG_ESSENTIAL); return ERROR_SUPPRESS_OUTPUT;
+        if (p.verbose && cnt - cur == 1) { OutFailRes(IDS_MSG_NOMEM); return ERROR_NETSH_FAILED_OUTPUT; }
+        OutFailRes(IDS_MSG_ESSENTIAL); return ERROR_NETSH_FAILED_OUTPUT;
     }
     if (!BuildFilter(&f, &p, &e, IDS_USG_SHOWRULE))
     {
         FwRuleFree(&f.tmpl);
-        if (e.full) { OutRes(e.pfx); return ERROR_SUPPRESS_OUTPUT; }
+        if (e.full) { OutFailRes(e.pfx); return ERROR_NETSH_FAILED_OUTPUT; }
         return Fail(e.pfx, e.usage, FALSE);
     }
     err = LoadMatches(&f, &rs, &idx, &n);
     FwRuleFree(&f.tmpl);
     if (err) return err;
-    if (!n) { OutRes(IDS_MSG_NORULES); FwRuleSetFree(&rs); HeapFree(GetProcessHeap(), 0, idx); return ERROR_SUPPRESS_OUTPUT; }
+    if (!n) { OutFailRes(IDS_MSG_NORULES); FwRuleSetFree(&rs); HeapFree(GetProcessHeap(), 0, idx); return ERROR_NETSH_FAILED_OUTPUT; }
     for (i = 0; i < n; i++) ShowRule(&rs.R[idx[i]], p.verbose);
-    OutRes(IDS_MSG_OK_ADD);   /* "Ok.\n\n" */
     FwRuleSetFree(&rs); HeapFree(GetProcessHeap(), 0, idx);
-    return ERROR_SUCCESS;
+    return ERROR_NETSH_OK;
 }
 
 static DWORD WINAPI SetRule(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
@@ -650,17 +671,17 @@ static DWORD WINAPI SetRule(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD
     pe = ParseParams(argv, cur, newPos, MASK_SETSEL, FALSE, &sel, &bogus);
     if (pe) return ReportParseError(pe, bogus);
     pe2 = ParseParams(argv, newPos + 1, cnt, MASK_RULE, FALSE, &nw, &bogus2);
-    if (!sel.has[P_NAME] && !sel.has[P_GROUP]) { OutRes(IDS_MSG_ESSENTIAL); return ERROR_SUPPRESS_OUTPUT; }
+    if (!sel.has[P_NAME] && !sel.has[P_GROUP]) { OutFailRes(IDS_MSG_ESSENTIAL); return ERROR_NETSH_FAILED_OUTPUT; }
     if (!BuildFilter(&f, &sel, &e, IDS_USG_SETRULE))
     {
         FwRuleFree(&f.tmpl);
-        if (e.full) { OutRes(e.pfx); return ERROR_SUPPRESS_OUTPUT; }
+        if (e.full) { OutFailRes(e.pfx); return ERROR_NETSH_FAILED_OUTPUT; }
         return Fail(e.pfx, e.usage, FALSE);
     }
     err = LoadMatches(&f, &rs, &idx, &n);
     FwRuleFree(&f.tmpl);
     if (err) return err;
-    if (!n) { OutRes(IDS_MSG_NORULES); FwRuleSetFree(&rs); HeapFree(GetProcessHeap(), 0, idx); return ERROR_SUPPRESS_OUTPUT; }
+    if (!n) { OutFailRes(IDS_MSG_NORULES); FwRuleSetFree(&rs); HeapFree(GetProcessHeap(), 0, idx); return ERROR_NETSH_FAILED_OUTPUT; }
     if (pe2) { FwRuleSetFree(&rs); HeapFree(GetProcessHeap(), 0, idx); return ReportParseError(pe2, bogus2); }
     /* validate against every matching rule first, then write */
     for (i = 0; i < n; i++)
@@ -672,7 +693,7 @@ static DWORD WINAPI SetRule(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD
         else
         {
             FwRuleFree(&c); FwRuleSetFree(&rs); HeapFree(GetProcessHeap(), 0, idx);
-            if (e.full) { OutRes(e.pfx); return ERROR_SUPPRESS_OUTPUT; }
+            if (e.full) { OutFailRes(e.pfx); return ERROR_NETSH_FAILED_OUTPUT; }
             return Fail(e.pfx, e.usage, FALSE);
         }
     }
@@ -680,7 +701,7 @@ static DWORD WINAPI SetRule(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD
     FwRuleSetFree(&rs); HeapFree(GetProcessHeap(), 0, idx);
     if (err) return err;
     OutResCount(IDS_MSG_SET_UPDATED, n);
-    return ERROR_SUCCESS;
+    return ERROR_NETSH_OK;
 }
 
 /* ---------------------------------------------------------------- profiles */
@@ -745,8 +766,7 @@ static DWORD ShowProfile(ULONG bits, LPWSTR *argv, DWORD cur, DWORD cnt, UINT he
         else return Fail(IDS_PFX_SHOWVALUE, helpId, TRUE);
     }
     for (b = 1; b <= 4; b <<= 1) if (bits & b) ShowProfileBlock(b, sec);
-    OutRes(IDS_MSG_OK_ADD);
-    return ERROR_SUCCESS;
+    return ERROR_NETSH_OK;
 }
 
 #define SHOWFN(fn, bits, id) \
@@ -761,10 +781,10 @@ static DWORD WINAPI ShowCurrent(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, D
 { return ShowProfile(FwCurrentProfiles(), argv, cur, cnt, IDS_HLP_SHOW_CUR); }
 
 static DWORD WINAPI ShowGlobal(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
-{ OutRes(IDS_OUT_SHOW_GLOBAL); return ERROR_SUCCESS; }
+{ OutRes(IDS_OUT_SHOW_GLOBAL); return ERROR_NETSH_OK; }
 
 static DWORD WINAPI ShowStore(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
-{ OutRes(IDS_OUT_SHOW_STORE); return ERROR_SUCCESS; }
+{ OutRes(IDS_OUT_SHOW_STORE); return ERROR_NETSH_OK; }
 
 /* set <profile> state|firewallpolicy|settings|logging ...   (PROVISIONAL: not probed on the reference machine) */
 static BOOL YesNo(PCWSTR s, PCWSTR yes, PCWSTR no, DWORD *v)
@@ -841,7 +861,7 @@ static DWORD SetProfileCmd(ULONG bits, LPWSTR *argv, DWORD cur, DWORD cnt, UINT 
         }
         else if (!_wcsicmp(argv[cur + 1], L"filename"))
         {
-            if (wcspbrk(argv[cur + 2], L"?*\"<>|") || !*argv[cur + 2]) { OutRes(IDS_MSG_UNRECOVERABLE); return ERROR_SUPPRESS_OUTPUT; }
+            if (wcspbrk(argv[cur + 2], L"?*\"<>|") || !*argv[cur + 2]) { OutFailRes(IDS_MSG_UNRECOVERABLE); return ERROR_NETSH_FAILED_OUTPUT; }
             for (b = 1; b <= 4 && !err; b <<= 1) if (bits & b) err = FwProfileSetString(b, L"LogFilePath", argv[cur + 2], TRUE);
         }
         else if (!_wcsicmp(argv[cur + 1], L"maxfilesize"))
@@ -856,8 +876,7 @@ static DWORD SetProfileCmd(ULONG bits, LPWSTR *argv, DWORD cur, DWORD cnt, UINT 
     }
     else return Fail(IDS_PFX_VALUE, helpId, TRUE);
     if (err) return err;
-    OutRes(IDS_MSG_OK_ADD);   /* PROVISIONAL: "Ok.\n\n" like every other successful change */
-    return ERROR_SUCCESS;
+    return ERROR_NETSH_OK;   /* PROVISIONAL: "Ok." like every other successful change */
 }
 
 #define SETFN(fn, bits, id) \
@@ -879,8 +898,7 @@ static DWORD WINAPI ResetCmd(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWOR
     if (cnt - cur != 0) return ERROR_NOT_SUPPORTED;    /* reset export <file> is not implemented */
     err = FwResetAll();
     if (err) return err;
-    OutRes(IDS_MSG_OK_ADD);   /* PROVISIONAL */
-    return ERROR_SUCCESS;
+    return ERROR_NETSH_OK;   /* PROVISIONAL */
 }
 
 /* ---------------------------------------------------------------- tables and registration */
@@ -889,7 +907,6 @@ static CMD_ENTRY g_FwAdd[]    = { { L"rule", AddRule,     IDS_SH_FW_ADD,    IDS_
 static CMD_ENTRY g_FwDelete[] = { { L"rule", DeleteRule,  IDS_SH_FW_DELETE, IDS_HLP_DELRULE,  0, NULL } };
 static CMD_ENTRY g_FwSet[]    = { { L"rule", SetRule,     IDS_SH_FW_SET,    IDS_HLP_SETRULE,  0, NULL } };
 static CMD_ENTRY g_FwShow[]   = { { L"rule", ShowRuleCmd, IDS_SH_FW_SHOW,   IDS_HLP_SHOWRULE, 0, NULL } };
-static CMD_ENTRY g_FwTop[]    = { { L"dump", NotSupported, IDS_SH_FW_DUMP,  IDS_HLP_FWDUMP,   0, NULL } };
 static CMD_GROUP_ENTRY g_FwGroups[] =
 {
     { L"add",    IDS_SH_FW_ADD,    1, 0, g_FwAdd,    NULL },
@@ -919,7 +936,6 @@ static CMD_ENTRY g_AdvShow[] =
 };
 static CMD_ENTRY g_AdvTop[] =
 {
-    { L"dump",   NotSupported, IDS_SH_ADV_DUMP,   IDS_HLP_ADVDUMP, 0, NULL },
     { L"export", NotSupported, IDS_SH_ADV_EXPORT, IDS_HLP_EXPORT,  0, NULL },
     { L"import", NotSupported, IDS_SH_ADV_IMPORT, IDS_HLP_IMPORT,  0, NULL },
     { L"reset",  ResetCmd,     IDS_SH_ADV_RESET,  IDS_HLP_RESET,   0, NULL },
@@ -935,7 +951,6 @@ static CMD_ENTRY g_ConsecAdd[]  = { { L"rule", NotSupported, IDS_SH_CONSEC_ADD, 
 static CMD_ENTRY g_ConsecDel[]  = { { L"rule", NotSupported, IDS_SH_CONSEC_DELETE, 0, 0, NULL } };
 static CMD_ENTRY g_ConsecSet[]  = { { L"rule", NotSupported, IDS_SH_CONSEC_SET,    0, 0, NULL } };
 static CMD_ENTRY g_ConsecShow[] = { { L"rule", NotSupported, IDS_SH_CONSEC_SHOW,   0, 0, NULL } };
-static CMD_ENTRY g_ConsecTop[]  = { { L"dump", NotSupported, IDS_SH_CONSEC_DUMP,   0, 0, NULL } };
 static CMD_GROUP_ENTRY g_ConsecGroups[] =
 {
     { L"add", IDS_SH_CONSEC_ADD, 1, 0, g_ConsecAdd, NULL }, { L"delete", IDS_SH_CONSEC_DELETE, 1, 0, g_ConsecDel, NULL },
@@ -945,7 +960,6 @@ static CMD_ENTRY g_MainAdd[]  = { { L"rule", NotSupported, IDS_SH_MAIN_ADD,    0
 static CMD_ENTRY g_MainDel[]  = { { L"rule", NotSupported, IDS_SH_MAIN_DELETE, 0, 0, NULL } };
 static CMD_ENTRY g_MainSet[]  = { { L"rule", NotSupported, IDS_SH_MAIN_SET,    0, 0, NULL } };
 static CMD_ENTRY g_MainShow[] = { { L"rule", NotSupported, IDS_SH_MAIN_SHOW,   0, 0, NULL } };
-static CMD_ENTRY g_MainTop[]  = { { L"dump", NotSupported, IDS_SH_MAIN_DUMP,   0, 0, NULL } };
 static CMD_GROUP_ENTRY g_MainGroups[] =
 {
     { L"add", IDS_SH_MAIN_ADD, 1, 0, g_MainAdd, NULL }, { L"delete", IDS_SH_MAIN_DELETE, 1, 0, g_MainDel, NULL },
@@ -953,7 +967,6 @@ static CMD_GROUP_ENTRY g_MainGroups[] =
 };
 static CMD_ENTRY g_MonDel[]  = { { L"mmsa", NotSupported, IDS_SH_MON_DELETE, 0, 0, NULL } };
 static CMD_ENTRY g_MonShow[] = { { L"mmsa", NotSupported, IDS_SH_MON_SHOW,   0, 0, NULL } };
-static CMD_ENTRY g_MonTop[]  = { { L"dump", NotSupported, IDS_SH_MON_DUMP,   0, 0, NULL } };
 static CMD_GROUP_ENTRY g_MonGroups[] =
 {
     { L"delete", IDS_SH_MON_DELETE, 1, 0, g_MonDel, NULL }, { L"show", IDS_SH_MON_SHOW, 1, 0, g_MonShow, NULL },
@@ -987,13 +1000,13 @@ static VOID Register(PCWSTR name, const GUID *guid, CMD_ENTRY *top, ULONG ntop, 
 static DWORD WINAPI StartAdv(const GUID *parent, DWORD ver)
 { Register(L"advfirewall", &GUID_ADVFW, g_AdvTop, _countof(g_AdvTop), g_AdvGroups, _countof(g_AdvGroups), NoticeConnect); return ERROR_SUCCESS; }
 static DWORD WINAPI StartFw(const GUID *parent, DWORD ver)
-{ Register(L"firewall", &GUID_FW, g_FwTop, _countof(g_FwTop), g_FwGroups, _countof(g_FwGroups), NULL); return ERROR_SUCCESS; }
+{ Register(L"firewall", &GUID_FW, NULL, 0, g_FwGroups, _countof(g_FwGroups), NULL); return ERROR_SUCCESS; }
 static DWORD WINAPI StartConsec(const GUID *parent, DWORD ver)
-{ Register(L"consec", &GUID_CONSEC, g_ConsecTop, 1, g_ConsecGroups, _countof(g_ConsecGroups), NULL); return ERROR_SUCCESS; }
+{ Register(L"consec", &GUID_CONSEC, NULL, 0, g_ConsecGroups, _countof(g_ConsecGroups), NULL); return ERROR_SUCCESS; }
 static DWORD WINAPI StartMain(const GUID *parent, DWORD ver)
-{ Register(L"mainmode", &GUID_MAIN, g_MainTop, 1, g_MainGroups, _countof(g_MainGroups), NULL); return ERROR_SUCCESS; }
+{ Register(L"mainmode", &GUID_MAIN, NULL, 0, g_MainGroups, _countof(g_MainGroups), NULL); return ERROR_SUCCESS; }
 static DWORD WINAPI StartMon(const GUID *parent, DWORD ver)
-{ Register(L"monitor", &GUID_MON, g_MonTop, 1, g_MonGroups, _countof(g_MonGroups), NULL); return ERROR_SUCCESS; }
+{ Register(L"monitor", &GUID_MON, NULL, 0, g_MonGroups, _countof(g_MonGroups), NULL); return ERROR_SUCCESS; }
 
 DWORD WINAPI InitHelperDll(DWORD dwNetshVersion, PVOID pReserved)
 {

@@ -50,4 +50,8 @@ NsGetIfNameFromFriendlyName(
     _Inout_ PWSTR pszIfName,
     _Inout_ PDWORD pdwIfName);
 
+/* handler return values (netsh core): the handler printed its own failure text / print "Ok." for me */
+#define ERROR_NETSH_FAILED_OUTPUT 0xE0000002
+#define ERROR_NETSH_OK            0xE0000003
+
 #endif /* __NETSH_UNDOC_H__ */
