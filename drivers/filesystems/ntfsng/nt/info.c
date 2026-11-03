@@ -105,6 +105,15 @@ static int NgStreamFill(void *Context, const unsigned short *Name, unsigned int 
     return 0;
 }
 
+/* FileIdInformation (59, Windows 8+) is past the end of this DDK's FILE_INFORMATION_CLASS */
+#define NG_FILE_ID_INFORMATION_CLASS 59
+typedef struct _NG_FILE_ID_INFORMATION
+{
+    ULONGLONG VolumeSerialNumber;
+    UCHAR FileId[16];               /* FILE_ID_128 */
+} NG_FILE_ID_INFORMATION, *PNG_FILE_ID_INFORMATION;
+C_ASSERT(sizeof(NG_FILE_ID_INFORMATION) == 24);
+
 NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -145,7 +154,7 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
 
 #define NEED(t) do { if (Length < sizeof(t)) return STATUS_BUFFER_TOO_SMALL; Used = sizeof(t); } while (0)
-    switch (Stack->Parameters.QueryFile.FileInformationClass)
+    switch ((ULONG)Stack->Parameters.QueryFile.FileInformationClass)
     {
         case FileBasicInformation:
             NEED(FILE_BASIC_INFORMATION);
@@ -159,6 +168,17 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             NEED(FILE_INTERNAL_INFORMATION);
             ((PFILE_INTERNAL_INFORMATION)Buffer)->IndexNumber.QuadPart = Fcb->Stat.mft_ref;
             break;
+        case NG_FILE_ID_INFORMATION_CLASS:
+        {
+            /* As NTFS on Windows: the whole 64-bit volume serial (FileFsVolumeInformation has its low half)
+               and the file reference of FileInternalInformation, zero-extended to 128 bits. */
+            PNG_FILE_ID_INFORMATION I = Buffer;
+            ULONGLONG Ref = Fcb->Stat.mft_ref;
+            NEED(NG_FILE_ID_INFORMATION);
+            I->VolumeSerialNumber = Vcb->Serial;
+            RtlCopyMemory(I->FileId, &Ref, sizeof(Ref));
+            break;
+        }
         case FileEaInformation:
             NEED(FILE_EA_INFORMATION);
             ((PFILE_EA_INFORMATION)Buffer)->EaSize = 0;

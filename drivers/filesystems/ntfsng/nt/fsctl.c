@@ -326,6 +326,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         ngc_volinfo(Vcb->Core, &Vcb->Info);
         Vcb->ClusterSize = Vcb->Info.cluster_size;   /* immutable for a mounted volume */
         Vcb->MajorVersion = Vcb->Info.major;
+        Vcb->Serial = Vcb->Info.serial;
         ngc_set_dio_drain(Vcb->Core, NgDrainDataIoCallback, Vcb);
     }
     NgReleaseCore(Vcb);
