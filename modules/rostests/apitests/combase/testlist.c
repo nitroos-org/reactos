@@ -9,12 +9,14 @@
 #include <apitest.h>
 
 extern void func_ApartmentEndpoint(void);
+extern void func_InprocLoadFailure(void);
 extern void func_RoFailFast(void);
 extern void func_StubReleaseInCall(void);
 
 const struct test winetest_testlist[] =
 {
     { "ApartmentEndpoint", func_ApartmentEndpoint },
+    { "InprocLoadFailure", func_InprocLoadFailure },
     { "RoFailFast", func_RoFailFast },
     { "StubReleaseInCall", func_StubReleaseInCall },
 
