@@ -27,6 +27,7 @@
 
 #include <limits.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +40,9 @@
 #ifdef HAVE_SYS_SYSCTL_H
 # include <sys/sysctl.h>
 #endif
+#ifdef __APPLE__
+# include <mach-o/dyld.h>
+#endif
 
 #ifdef _WIN32
 # include <direct.h>
@@ -47,6 +51,9 @@
 # define mkdir(path,mode) mkdir(path)
 # ifndef S_ISREG
 #  define S_ISREG(mod) (((mod) & _S_IFMT) == _S_IFREG)
+# endif
+# ifndef S_ISDIR
+#  define S_ISDIR(mod) (((mod) & _S_IFMT) == _S_IFDIR)
 # endif
 # ifdef _MSC_VER
 #  define popen _popen
@@ -95,9 +102,11 @@ extern char **environ;
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #endif
 
+enum target_cpu { CPU_i386, CPU_x86_64, CPU_ARM, CPU_ARM64, CPU_ARM64EC };
+
 struct target
 {
-    enum { CPU_i386, CPU_x86_64, CPU_ARM, CPU_ARM64, CPU_ARM64EC } cpu;
+    enum target_cpu cpu;
 
     enum
     {
@@ -108,10 +117,24 @@ struct target
         PLATFORM_FREEBSD,
         PLATFORM_SOLARIS,
         PLATFORM_WINDOWS,
+        PLATFORM_WINDOWS_GNU,
         PLATFORM_MINGW,
-        PLATFORM_CYGWIN
     } platform;
 };
+
+static void fatal_perror( const char *msg, ... ) __attribute__ ((__format__ (__printf__, 1, 2), noreturn));
+static inline void fatal_perror( const char *msg, ... )
+{
+    va_list valist;
+
+    va_start( valist, msg );
+    fprintf( stderr, "error: " );
+    vfprintf( stderr, msg, valist );
+    perror( " " );
+    va_end( valist );
+    exit(1);
+}
+
 
 static inline void *xmalloc( size_t size )
 {
@@ -142,7 +165,7 @@ static inline char *xstrdup( const char *str )
     return strcpy( xmalloc( strlen(str)+1 ), str );
 }
 
-static inline int strendswith( const char *str, const char *end )
+static inline bool strendswith( const char *str, const char *end )
 {
     int l = strlen( str );
     int m = strlen( end );
@@ -169,6 +192,35 @@ static inline char *strmake( const char* fmt, ... )
     }
 }
 
+/* generic array functions */
+
+struct array
+{
+    size_t count;   /* count of array entries */
+    size_t size;    /* size of allocated array */
+    void  *data;
+};
+
+static const struct array empty_array;
+
+static inline void *array_grow( struct array *array, size_t n, size_t elem_size )
+{
+    if (array->count + n > array->size)
+    {
+        array->size = max( array->size * 2, 16 );
+        array->size = max( array->size, array->count + n );
+        array->data = xrealloc( array->data, array->size * elem_size );
+    }
+    array->count += n;
+    return (char *)array->data + (array->count - n) * elem_size;
+}
+
+#define ARRAY_ADD(array,type) ((type *)array_grow( array, 1, sizeof(type) ))
+#define ARRAY_SORT(array,type,cmp) qsort( (array)->data, (array)->count, sizeof(type), cmp )
+#define ARRAY_ENTRY(array,idx,type) ((type *)(array)->data + (idx))
+#define ARRAY_FOR_EACH(cursor,array,type) \
+    for (type *cursor = (array)->data; cursor - (type *)(array)->data < (array)->count; cursor++)
+
 /* string array functions */
 
 struct strarray
@@ -179,6 +231,10 @@ struct strarray
 };
 
 static const struct strarray empty_strarray;
+
+#define STRARRAY_FOR_EACH(cursor,array) \
+    for (const char **__p = (array)->str, *cursor = NULL; \
+         __p - (array)->str < (array)->count && (cursor = *__p, 1); __p++)
 
 static inline void strarray_add( struct strarray *array, const char *str )
 {
@@ -193,29 +249,23 @@ static inline void strarray_add( struct strarray *array, const char *str )
 
 static inline void strarray_addall( struct strarray *array, struct strarray added )
 {
-    unsigned int i;
-
-    for (i = 0; i < added.count; i++) strarray_add( array, added.str[i] );
+    STRARRAY_FOR_EACH( ptr, &added ) strarray_add( array, ptr );
 }
 
-static inline int strarray_exists( const struct strarray *array, const char *str )
+static inline bool strarray_exists( struct strarray array, const char *str )
 {
-    unsigned int i;
-
-    for (i = 0; i < array->count; i++) if (!strcmp( array->str[i], str )) return 1;
-    return 0;
+    STRARRAY_FOR_EACH( ptr, &array ) if (!strcmp( ptr, str )) return true;
+    return false;
 }
 
 static inline void strarray_add_uniq( struct strarray *array, const char *str )
 {
-    if (!strarray_exists( array, str )) strarray_add( array, str );
+    if (!strarray_exists( *array, str )) strarray_add( array, str );
 }
 
 static inline void strarray_addall_uniq( struct strarray *array, struct strarray added )
 {
-    unsigned int i;
-
-    for (i = 0; i < added.count; i++) strarray_add_uniq( array, added.str[i] );
+    STRARRAY_FOR_EACH( ptr, &added ) strarray_add_uniq( array, ptr );
 }
 
 static inline struct strarray strarray_fromstring( const char *str, const char *delim )
@@ -246,7 +296,7 @@ static inline char *strarray_tostring( struct strarray array, const char *sep )
     unsigned int i, len = 1 + (array.count - 1) * strlen(sep);
 
     if (!array.count) return xstrdup("");
-    for (i = 0; i < array.count; i++) len += strlen( array.str[i] );
+    STRARRAY_FOR_EACH( str, &array ) len += strlen( str );
     str = xmalloc( len );
     strcpy( str, array.str[0] );
     for (i = 1; i < array.count; i++)
@@ -262,12 +312,12 @@ static inline void strarray_qsort( struct strarray *array, int (*func)(const cha
     if (array->count) qsort( array->str, array->count, sizeof(*array->str), (void *)func );
 }
 
-static inline const char *strarray_bsearch( const struct strarray *array, const char *str,
+static inline const char *strarray_bsearch( struct strarray array, const char *str,
                                             int (*func)(const char **, const char **) )
 {
     char **res = NULL;
 
-    if (array->count) res = bsearch( &str, array->str, array->count, sizeof(*array->str), (void *)func );
+    if (array.count) res = bsearch( &str, array.str, array.count, sizeof(*array.str), (void *)func );
     return res ? *res : NULL;
 }
 
@@ -279,8 +329,9 @@ static inline void strarray_trace( struct strarray args )
     {
         if (strpbrk( args.str[i], " \t\n\r")) printf( "\"%s\"", args.str[i] );
         else printf( "%s", args.str[i] );
-        putchar( i < args.count - 1 ? ' ' : '\n' );
+        if (i < args.count - 1) putchar( ' ' );
     }
+    putchar( '\n' );
 }
 
 static inline int strarray_spawn( struct strarray args )
@@ -375,29 +426,27 @@ static inline char *build_relative_path( const char *base, const char *from, con
 extern const char *temp_dir;
 extern struct strarray temp_files;
 
-static inline char *make_temp_dir(void)
+static inline char *make_temp_dir( const char *tmpdir )
 {
     unsigned int value = time(NULL) + getpid();
     int count;
     char *name;
-    const char *tmpdir = NULL;
+
+    if (!tmpdir)
+    {
+#ifdef _WIN32
+       tmpdir = getenv("TEMP");
+#else
+       if (!(tmpdir = getenv("TMPDIR"))) tmpdir = "/tmp";
+#endif
+    }
 
     for (count = 0; count < 0x8000; count++)
     {
-        if (tmpdir)
-            name = strmake( "%s/tmp%08x", tmpdir, value );
-        else
-            name = strmake( "tmp%08x", value );
+        name = strmake( "%s/tmp%08x", tmpdir, value );
         if (!mkdir( name, 0700 )) return name;
         value += 7777;
-        if (errno == EACCES && !tmpdir)
-        {
-#if defined(__REACTOS__) && defined(_WIN32)
-            if (!(tmpdir = getenv("TEMP"))) tmpdir = "temp";
-#else
-            if (!(tmpdir = getenv("TMPDIR"))) tmpdir = "/tmp";
-#endif
-        }
+        if (errno != EEXIST) fatal_perror( "cannot create directory in %s", tmpdir );
         free( name );
     }
     fprintf( stderr, "failed to create directory for temp files\n" );
@@ -410,7 +459,7 @@ static inline char *make_temp_file( const char *prefix, const char *suffix )
     int fd, count;
     char *name;
 
-    if (!temp_dir) temp_dir = make_temp_dir();
+    if (!temp_dir) temp_dir = make_temp_dir( NULL );
     if (!suffix) suffix = "";
     if (!prefix) prefix = "tmp";
     else prefix = get_basename_noext( prefix );
@@ -445,9 +494,7 @@ static inline char *make_temp_file( const char *prefix, const char *suffix )
 
 static inline void remove_temp_files(void)
 {
-    unsigned int i;
-
-    for (i = 0; i < temp_files.count; i++) if (temp_files.str[i]) unlink( temp_files.str[i] );
+    STRARRAY_FOR_EACH( file, &temp_files ) if (file) unlink( file );
     if (temp_dir) rmdir( temp_dir );
 }
 
@@ -459,6 +506,29 @@ static inline void init_signals( void (*cleanup)(int) )
 #ifdef SIGHUP
     signal( SIGHUP, cleanup );
 #endif
+}
+
+
+static inline void mkdir_p( const char *dir )
+{
+    char *p, *path;
+
+    if (!dir[0]) return;
+
+    path = xstrdup( dir );
+    for (p = path + 1; (p = strchr( p, '/' )); p++)
+    {
+        *p = 0;
+        if (mkdir( path, 0755 ) == -1 && errno != EEXIST) fatal_perror( "mkdir %s", path );
+        *p = '/';
+    }
+    if (mkdir( path, 0755 ) == -1)
+    {
+        struct stat st;
+        if (errno != EEXIST || stat( path, &st ) || !S_ISDIR( st.st_mode ))
+            fatal_perror( "cannot create %s", path );
+    }
+    free( path );
 }
 
 
@@ -510,7 +580,7 @@ static inline struct target get_default_target(void)
 #elif defined(__sun)
     target.platform = PLATFORM_SOLARIS;
 #elif defined(__CYGWIN__)
-    target.platform = PLATFORM_CYGWIN;
+    target.platform = PLATFORM_MINGW;
 #elif defined(_WIN32)
     target.platform = PLATFORM_MINGW;
 #else
@@ -556,12 +626,25 @@ static inline void set_target_ptr_size( struct target *target, unsigned int size
 }
 
 
+static inline bool is_llvm_pe_target( struct target target )
+{
+    return target.platform == PLATFORM_WINDOWS ||
+           target.platform == PLATFORM_WINDOWS_GNU;
+}
+
+
+static inline bool is_pe_target( struct target target )
+{
+    return (is_llvm_pe_target( target ) || target.platform == PLATFORM_MINGW);
+}
+
+
 static inline int get_cpu_from_name( const char *name )
 {
     static const struct
     {
-        const char *name;
-        int         cpu;
+        const char     *name;
+        enum target_cpu cpu;
     } cpu_names[] =
     {
         { "i386",      CPU_i386 },
@@ -599,10 +682,10 @@ static inline int get_platform_from_name( const char *name )
         { "freebsd",     PLATFORM_FREEBSD },
         { "solaris",     PLATFORM_SOLARIS },
         { "mingw32",     PLATFORM_MINGW },
-        { "windows-gnu", PLATFORM_MINGW },
+        { "windows-gnu", PLATFORM_WINDOWS_GNU },
         { "winnt",       PLATFORM_MINGW },
         { "windows",     PLATFORM_WINDOWS },
-        { "cygwin",      PLATFORM_CYGWIN },
+        { "cygwin",      PLATFORM_MINGW },
     };
     unsigned int i;
 
@@ -613,7 +696,7 @@ static inline int get_platform_from_name( const char *name )
 };
 
 
-static inline const char *get_arch_dir( struct target target )
+static inline const char *get_cpu_name( enum target_cpu cpu )
 {
     static const char *cpu_names[] =
     {
@@ -621,23 +704,18 @@ static inline const char *get_arch_dir( struct target target )
         [CPU_x86_64]  = "x86_64",
         [CPU_ARM]     = "arm",
         [CPU_ARM64]   = "aarch64",
-        [CPU_ARM64EC] = "aarch64",
+        [CPU_ARM64EC] = "arm64ec",
     };
-
-    if (!cpu_names[target.cpu]) return "";
-
-    switch (target.platform)
-    {
-    case PLATFORM_WINDOWS:
-    case PLATFORM_CYGWIN:
-    case PLATFORM_MINGW:
-        return strmake( "/%s-windows", cpu_names[target.cpu] );
-    default:
-        return strmake( "/%s-unix", cpu_names[target.cpu] );
-    }
+    return cpu_names[cpu];
 }
 
-static inline int parse_target( const char *name, struct target *target )
+static inline const char *get_arch_dir( struct target target )
+{
+    const char *cpu_name = get_cpu_name( target.cpu == CPU_ARM64EC ? CPU_ARM64 : target.cpu );
+    return strmake( "/%s-%s", cpu_name, is_pe_target( target ) ? "windows" : "unix" );
+}
+
+static inline bool parse_target( const char *name, struct target *target )
 {
     int res;
     char *p, *spec = xstrdup( name );
@@ -652,7 +730,7 @@ static inline int parse_target( const char *name, struct target *target )
         if ((res = get_cpu_from_name( spec )) == -1)
         {
             free( spec );
-            return 0;
+            return false;
         }
         target->cpu = res;
     }
@@ -664,7 +742,7 @@ static inline int parse_target( const char *name, struct target *target )
     else
     {
         free( spec );
-        return 0;
+        return false;
     }
 
     /* get the OS part */
@@ -682,7 +760,7 @@ static inline int parse_target( const char *name, struct target *target )
     }
 
     free( spec );
-    return 1;
+    return true;
 }
 
 
@@ -715,6 +793,12 @@ static inline char *get_bindir( const char *argv0 )
     size_t path_size = PATH_MAX;
     char *path = xmalloc( path_size );
     if (!sysctl( pathname, ARRAY_SIZE(pathname), path, &path_size, NULL, 0 ))
+        dir = realpath( path, NULL );
+    free( path );
+#elif defined(__APPLE__)
+    uint32_t path_size = PATH_MAX;
+    char *path = xmalloc( path_size );
+    if (!_NSGetExecutablePath( path, &path_size ))
         dir = realpath( path, NULL );
     free( path );
 #endif
@@ -859,7 +943,7 @@ static inline void flush_output_buffer( const char *name )
 struct long_option
 {
     const char *name;
-    int has_arg;
+    bool has_arg;
     int val;
 };
 
