@@ -69,6 +69,7 @@ typedef struct _XCTX_PARAMETERS
     ULONG ContextSize;      /* sizeof(CONTEXT) of the architecture */
     ULONG LegacySize;       /* the legacy chunk without the extended registers */
     ULONG Alignment;        /* of the CONTEXT in the buffer, minus one */
+    ULONG ExLength;         /* what Windows counts for the CONTEXT_EX when it sizes a buffer with extended state */
     ULONG FlagsOffset;
     const XCTX_RANGE *Ranges;
 } XCTX_PARAMETERS;
@@ -76,8 +77,8 @@ typedef struct _XCTX_PARAMETERS
 /* Both architectures are known so that a WOW64 context can be handled by the 64 bit functions */
 static const XCTX_PARAMETERS XctxParameters[] =
 {
-    { 0x100000UL, 0xd8000000UL | 0x100000UL | 0x1fUL | 0x40UL, 0x4d0, 0x4d0, 15, 0x30, XctxRangesAmd64 },
-    { 0x10000UL,  0xd8000000UL | 0x10000UL  | 0x3fUL | 0x40UL, 0x2cc, 0xcc,  3,  0,    XctxRangesI386 },
+    { 0x100000UL, 0xd8000000UL | 0x100000UL | 0x1fUL | 0x40UL, 0x4d0, 0x4d0, 15, 0x20, 0x30, XctxRangesAmd64 },
+    { 0x10000UL,  0xd8000000UL | 0x10000UL  | 0x3fUL | 0x40UL, 0x2cc, 0xcc,  3,  0x18, 0,    XctxRangesI386 },
 };
 
 static
@@ -198,7 +199,11 @@ RtlGetExtendedContextLength2(
             return STATUS_NOT_SUPPORTED;
 
         CompactionMask &= Supported & ~XSTATE_MASK_LEGACY;
-        Length += (XCTX_XSAVE_ALIGNMENT - 1) + RtlpXctxChunkLength(&SharedUserData->XState, CompactionMask);
+        /* The header is aligned to 64 inside of the buffer. Windows counts the CONTEXT_EX the way its structure
+           has it (8 bytes more than the chunks on amd64) and no alignment of the CONTEXT: with the 64 byte
+           alignment of the header that holds the worst case of both */
+        Length = Parameters->ContextSize + Parameters->ExLength + (XCTX_XSAVE_ALIGNMENT - 1) +
+                 RtlpXctxChunkLength(&SharedUserData->XState, CompactionMask);
     }
 
     *ContextLength = (ULONG)Length;
@@ -241,7 +246,7 @@ RtlInitializeExtendedContext2(
     Context = (PUCHAR)(((ULONG_PTR)Buffer + Parameters->Alignment) & ~(ULONG_PTR)Parameters->Alignment);
     Ex = (PXCONTEXT_EX)(Context + Parameters->ContextSize);
 
-    RtlZeroMemory(Context, Parameters->ContextSize + XCTX_EX_SIZE);
+    /* Only the flags and the CONTEXT_EX are written; the rest of the CONTEXT is the caller's, as on Windows */
     *(PULONG)(Context + Parameters->FlagsOffset) = ContextFlags;
 
     Ex->Legacy.Offset = Ex->All.Offset = -(LONG)Parameters->ContextSize;
@@ -255,7 +260,7 @@ RtlInitializeExtendedContext2(
         Ex->XState.Offset = (LONG)((PUCHAR)Header - (PUCHAR)Ex);
         Ex->XState.Length = RtlpXctxChunkLength(Config, CompactionMask & ~XSTATE_MASK_LEGACY);
 
-        RtlZeroMemory(Header, Ex->XState.Length);
+        RtlZeroMemory(Header, sizeof(*Header));
         if (Config->CompactionEnabled)
             Header->CompactionMask = XCTX_COMPACTED | CompactionMask;
 
@@ -310,6 +315,13 @@ RtlLocateExtendedFeature2(
         return NULL;
 
     Bit = 1ULL << FeatureId;
+    if (!(Bit & XStateConfig->EnabledFeatures))
+        return NULL;
+
+    /* The size of an enabled feature is answered even when this context has no room for it */
+    if (Length)
+        *Length = XStateConfig->Features[FeatureId].Size;
+
     if (XStateConfig->CompactionEnabled)
     {
         if (!(Header->CompactionMask & Bit))
@@ -320,8 +332,6 @@ RtlLocateExtendedFeature2(
     }
     else
     {
-        if (!(Bit & XStateConfig->EnabledFeatures))
-            return NULL;
         Offset = XStateConfig->Features[FeatureId].Offset;
         if (Offset < XCTX_XSAVE_LEGACY_SIZE + sizeof(XSAVE_AREA_HEADER))
             return NULL;
@@ -333,8 +343,6 @@ RtlLocateExtendedFeature2(
         Offset + XStateConfig->Features[FeatureId].Size > ContextEx->XState.Length)
         return NULL;
 
-    if (Length)
-        *Length = XStateConfig->Features[FeatureId].Size;
     return (PUCHAR)Header + Offset;
 }
 

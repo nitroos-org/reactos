@@ -385,6 +385,8 @@ static void TestMasks(void)
 #define XSC_COMMITTED   0x4000
 #define XSC_TO_RESERVED 0x7ffffff0
 #define XSC_TO_EDGE     0x7ffffff1
+#define XSC_SAME        1
+#define XSC_OVERFLOW    ((LONG)0x80000005 /* STATUS_BUFFER_OVERFLOW */)
 
 static void TestMalformed(void)
 {
@@ -395,19 +397,21 @@ static void TestMalformed(void)
         BOOL Absolute;
         ULONG Length;           /* replaces XState.Length when not 0 */
         LONG Status;            /* expected from ReactOS, for the get and the set */
+        LONG GetStatus;         /* for the get when it differs (XSC_SAME: it does not). A chunk too short for the
+                                   features asked for answers STATUS_BUFFER_OVERFLOW after the masks are written */
     } Cases[] =
     {
-        { "length 1",           0, FALSE, 1,          (LONG)0xC000000D /* STATUS_INVALID_PARAMETER */ },
-        { "length 63",          0, FALSE, 63,         (LONG)0xC000000D },
-        { "length 64",          0, FALSE, 64,         0 },
-        { "length 64+255",      0, FALSE, 64 + 255,   0 },
-        { "length 0x7fffffff",  0, FALSE, 0x7fffffff, 0 },
-        { "offset 0",           0, TRUE,  0,          (LONG)0xC000000D },
-        { "offset 23",          23, TRUE, 0,          (LONG)0xC000000D },
-        { "offset -0x100",      -0x100, TRUE, 0,      (LONG)0xC000000D },
-        { "offset +8",          8, FALSE, 0,          0 },
-        { "offset reserved",    XSC_TO_RESERVED, TRUE, 0, (LONG)0xC0000005 /* STATUS_ACCESS_VIOLATION */ },
-        { "chunk crosses",      XSC_TO_EDGE, TRUE, 0, (LONG)0xC0000005 },
+        { "length 1",           0, FALSE, 1,          (LONG)0xC000000D /* STATUS_INVALID_PARAMETER */, XSC_SAME },
+        { "length 63",          0, FALSE, 63,         (LONG)0xC000000D, XSC_SAME },
+        { "length 64",          0, FALSE, 64,         0, XSC_OVERFLOW },
+        { "length 64+255",      0, FALSE, 64 + 255,   0, XSC_OVERFLOW },
+        { "length 0x7fffffff",  0, FALSE, 0x7fffffff, (LONG)0xC000000D, XSC_SAME },
+        { "offset 0",           0, TRUE,  0,          (LONG)0xC000000D, XSC_SAME },
+        { "offset 23",          23, TRUE, 0,          (LONG)0xC000000D, XSC_SAME },
+        { "offset -0x100",      -0x100, TRUE, 0,      (LONG)0xC000000D, XSC_SAME },
+        { "offset +8",          8, FALSE, 0,          0, XSC_SAME },
+        { "offset reserved",    XSC_TO_RESERVED, TRUE, 0, (LONG)0xC0000005 /* STATUS_ACCESS_VIOLATION */, XSC_SAME },
+        { "chunk crosses",      XSC_TO_EDGE, TRUE, 0, (LONG)0xC0000005, XSC_SAME },
     };
     PBYTE Region;
     DWORD Length = 0;
@@ -478,7 +482,8 @@ static void TestMalformed(void)
         trace("malformed %-18s: get 0x%08lx set 0x%08lx\n", Cases[i].Name, GetStatus, SetStatus);
         if (is_reactos())
         {
-            ok(GetStatus == Cases[i].Status, "%s: get returned 0x%08lx\n", Cases[i].Name, GetStatus);
+            ok(GetStatus == (Cases[i].GetStatus == XSC_SAME ? Cases[i].Status : Cases[i].GetStatus),
+               "%s: get returned 0x%08lx\n", Cases[i].Name, GetStatus);
             ok(SetStatus == Cases[i].Status, "%s: set returned 0x%08lx\n", Cases[i].Name, SetStatus);
         }
     }

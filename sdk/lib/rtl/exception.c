@@ -142,8 +142,10 @@ RtlCaptureStackBackTrace(IN ULONG FramesToSkip,
     /* Skip a frame for the caller */
     FramesToSkip++;
 
-    /* Don't go past the limit */
-    if ((FramesToCapture + FramesToSkip) >= 128) return 0;
+    /* Don't go past what the local buffer holds: a bigger request gets the frames that fit, as the walk of a
+       stack that is not that deep gives all of them on Windows */
+    if (FramesToSkip >= 127) return 0;
+    if (FramesToCapture >= 128 - FramesToSkip) FramesToCapture = 127 - FramesToSkip;
 
     /* Do the back trace */
     FrameCount = RtlWalkFrameChain(Frames, FramesToCapture + FramesToSkip, 0);
