@@ -419,15 +419,20 @@ CheckWinstaAttributeAccess(ACCESS_MASK DesiredAccess)
     return TRUE;
 }
 
+/*
+ * Returns the window station of the current process, referenced (the caller
+ * dereferences it), or NULL.
+ */
 PWINSTATION_OBJECT FASTCALL
 IntGetProcessWindowStation(HWINSTA *phWinSta OPTIONAL)
 {
-    PWINSTATION_OBJECT pWinSta;
+    PWINSTATION_OBJECT pWinSta = NULL;
     PPROCESSINFO ppi = GetW32ProcessInfo();
     HWINSTA hWinSta = ppi->hwinsta;
     if (phWinSta)
         *phWinSta = hWinSta;
-    IntValidateWindowStationHandle(hWinSta, UserMode, 0, &pWinSta, 0);
+    if (!NT_SUCCESS(IntValidateWindowStationHandle(hWinSta, UserMode, 0, &pWinSta, 0)))
+        pWinSta = NULL;
     return pWinSta;
 }
 
