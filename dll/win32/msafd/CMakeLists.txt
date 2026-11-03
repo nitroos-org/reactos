@@ -11,6 +11,7 @@ list(APPEND SOURCE
     misc/helpers.c
     misc/sndrcv.c
     misc/stubs.c
+    misc/transmit.c
     msafd.h)
 
 add_library(msafd MODULE

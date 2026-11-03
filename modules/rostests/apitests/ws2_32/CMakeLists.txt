@@ -52,6 +52,7 @@ list(APPEND SOURCE
     udprecv.c
     udpzerolen.c
     timewait.c
+    transmitfile.c
     WSAAsync.c
     WSAEnumNameSpaceProviders.c
     WSAIoctl.c

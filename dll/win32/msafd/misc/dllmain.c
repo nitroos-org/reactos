@@ -893,6 +893,8 @@ WSPCloseSocket(IN SOCKET Handle,
 ok:
     /* Complete the address list change requests of the socket before it goes */
     MsafdAddrChangeSocketClosing(Socket);
+    /* and the transmits */
+    MsafdTransmitSocketClosing(Socket);
 
     EnterCriticalSection(&SocketListLock);
     if (SocketListHead == Socket)
@@ -3050,6 +3052,8 @@ WSPIoctl(IN  SOCKET Handle,
                 GUID DisconnectExGUID = WSAID_DISCONNECTEX;
                 GUID GetAcceptExSockaddrsGUID = WSAID_GETACCEPTEXSOCKADDRS;
                 GUID RecvMsgGUID = WSAID_WSARECVMSG;
+                GUID TransmitFileGUID = WSAID_TRANSMITFILE;
+                GUID TransmitPacketsGUID = WSAID_TRANSMITPACKETS;
 
                 if (IsEqualGUID(&AcceptExGUID, lpvInBuffer))
                 {
@@ -3082,6 +3086,20 @@ WSPIoctl(IN  SOCKET Handle,
                 else if (IsEqualGUID(&RecvMsgGUID, lpvInBuffer))
                 {
                     *((PVOID *)lpvOutBuffer) = WSPRecvMsg;
+                    cbRet = sizeof(PVOID);
+                    Errno = NO_ERROR;
+                    Ret = NO_ERROR;
+                }
+                else if (IsEqualGUID(&TransmitFileGUID, lpvInBuffer))
+                {
+                    *((PVOID *)lpvOutBuffer) = WSPTransmitFile;
+                    cbRet = sizeof(PVOID);
+                    Errno = NO_ERROR;
+                    Ret = NO_ERROR;
+                }
+                else if (IsEqualGUID(&TransmitPacketsGUID, lpvInBuffer))
+                {
+                    *((PVOID *)lpvOutBuffer) = WSPTransmitPackets;
                     cbRet = sizeof(PVOID);
                     Errno = NO_ERROR;
                     Ret = NO_ERROR;
@@ -5055,6 +5073,7 @@ DllMain(HANDLE hInstDll,
         /* Initialize the lock that protects our socket list */
         InitializeCriticalSection(&SocketListLock);
         MsafdAddrChangeInit();
+        MsafdTransmitInit();
 
         TRACE("MSAFD.DLL has been loaded\n");
 
@@ -5070,6 +5089,7 @@ DllMain(HANDLE hInstDll,
 
         /* Delete the socket list lock */
         DeleteCriticalSection(&SocketListLock);
+        MsafdTransmitExit();
         MsafdAddrChangeExit();
 
         break;
