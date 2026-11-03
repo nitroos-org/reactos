@@ -842,7 +842,14 @@ IntCloneMenuItems(PMENU Destination, PMENU Source)
          NewMenuItem->lpstr.Buffer = DesktopHeapAlloc(Destination->head.rpdesk, MenuItem->lpstr.MaximumLength);
          if (!NewMenuItem->lpstr.Buffer)
          {
-             DesktopHeapFree(Destination->head.rpdesk, NewMenuItem);
+             /* Release the submenu lock taken for this item above. The item is not
+                counted in cItems, so IntDestroyMenu will not release it. (The array
+                is owned by Destination: it is not freed here, NewMenuItem points into it.) */
+             if (NewMenuItem->spSubMenu)
+             {
+                 IntReleaseMenuObject(NewMenuItem->spSubMenu);
+                 NewMenuItem->spSubMenu = NULL;
+             }
              break;
          }
          RtlCopyUnicodeString(&NewMenuItem->lpstr, &MenuItem->lpstr);
