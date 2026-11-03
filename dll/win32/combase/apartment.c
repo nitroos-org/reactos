@@ -130,9 +130,11 @@ static HRESULT apartment_add_dll(const WCHAR *library_name, struct opendll **ret
     hLibrary = LoadLibraryExW(library_name, 0, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!hLibrary)
     {
-        ERR("couldn't load in-process dll %s\n", debugstr_w(library_name));
-        /* failure: DLL could not be loaded */
-        return E_ACCESSDENIED; /* FIXME: or should this be CO_E_DLLNOTFOUND? */
+        DWORD error = GetLastError();
+
+        ERR("couldn't load in-process dll %s, error %lu\n", debugstr_w(library_name), error);
+        /* failure: DLL could not be loaded; Windows returns the loader error */
+        return HRESULT_FROM_WIN32(error);
     }
 
     /* DllCanUnloadNow is optional */
