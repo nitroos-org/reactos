@@ -237,6 +237,96 @@ static void Test_ClassOnTwoDesktops(void)
     }
 }
 
+/* SetParent across desktops: Windows 10 22H2 fails it with ERROR_INVALID_PARAMETER (both ways, from a
+   thread on either desktop) and leaves the parent alone; HWND_MESSAGE on the own desktop works */
+typedef struct _SETPARENT_HELPER
+{
+    HDESK hDesk;
+    HWND hTop, hChild;
+    HWND hMainTop, hMainChild;
+    HANDLE hReady, hGo;
+} SETPARENT_HELPER;
+
+static void CheckCrossSetParent(const char *Where, HWND hChild, HWND hNewParent, HWND hOldParent)
+{
+    HWND hRet;
+    DWORD Error;
+
+    SetLastError(0xdeadbeef);
+    hRet = SetParent(hChild, hNewParent);
+    Error = GetLastError();
+    ok(hRet == NULL, "%s: SetParent returned %p, expected NULL\n", Where, hRet);
+    ok(Error == ERROR_INVALID_PARAMETER, "%s: error %lu, expected %d\n", Where, Error, ERROR_INVALID_PARAMETER);
+    ok(GetParent(hChild) == hOldParent, "%s: parent changed to %p, expected %p\n", Where, GetParent(hChild), hOldParent);
+}
+
+static DWORD WINAPI SetParentThread(LPVOID Param)
+{
+    SETPARENT_HELPER *h = Param;
+
+    if (!SetThreadDesktop(h->hDesk))
+    {
+        skip("SetThreadDesktop failed (%lu)\n", GetLastError());
+        SetEvent(h->hReady);
+        return 1;
+    }
+    h->hTop = CreateWindowExA(0, g_ClassName, "top", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL, NULL, NULL);
+    h->hChild = CreateWindowExA(0, g_ClassName, "child", WS_CHILD, 0, 0, 10, 10, h->hTop, NULL, NULL, NULL);
+    ok(h->hTop && h->hChild, "CreateWindowEx failed (%lu)\n", GetLastError());
+    SetEvent(h->hReady);
+    WaitForSingleObject(h->hGo, 30000);
+
+    /* From the thread on the other desktop, both directions */
+    CheckCrossSetParent("helper: main child to helper parent", h->hMainChild, h->hTop, h->hMainTop);
+    CheckCrossSetParent("helper: helper child to main parent", h->hChild, h->hMainTop, h->hTop);
+    SetParent(h->hChild, HWND_MESSAGE);
+    ok(GetParent(h->hChild) != h->hTop, "SetParent(HWND_MESSAGE) left the parent\n");
+
+    DestroyWindow(h->hTop);
+    return 0;
+}
+
+static void Test_SetParentCrossDesktop(void)
+{
+    SETPARENT_HELPER h = { 0 };
+    HANDLE hThread;
+    HWND hRet;
+
+    h.hDesk = CreateDesktopA("DesktopOtherThreadApisSP", NULL, NULL, 0, GENERIC_ALL, NULL);
+    if (!h.hDesk)
+    {
+        skip("CreateDesktop failed (%lu)\n", GetLastError());
+        return;
+    }
+    h.hMainTop = CreateWindowExA(0, g_ClassName, "top", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL, NULL, NULL);
+    h.hMainChild = CreateWindowExA(0, g_ClassName, "child", WS_CHILD, 0, 0, 10, 10, h.hMainTop, NULL, NULL, NULL);
+    ok(h.hMainTop && h.hMainChild, "CreateWindowEx failed (%lu)\n", GetLastError());
+    h.hReady = CreateEventA(NULL, TRUE, FALSE, NULL);
+    h.hGo = CreateEventA(NULL, TRUE, FALSE, NULL);
+    hThread = CreateThread(NULL, 0, SetParentThread, &h, 0, NULL);
+    WaitForSingleObject(h.hReady, 30000);
+
+    if (h.hTop && h.hChild)
+    {
+        /* From the main thread, both directions */
+        CheckCrossSetParent("main: main child to helper parent", h.hMainChild, h.hTop, h.hMainTop);
+        CheckCrossSetParent("main: helper child to main parent", h.hChild, h.hMainTop, h.hTop);
+    }
+    SetEvent(h.hGo);
+    ok(WaitForSingleObject(hThread, 30000) == WAIT_OBJECT_0, "thread hung\n");
+
+    /* The own desktop still works, also HWND_MESSAGE */
+    hRet = SetParent(h.hMainChild, HWND_MESSAGE);
+    ok(hRet == h.hMainTop, "SetParent(HWND_MESSAGE) returned %p, expected %p\n", hRet, h.hMainTop);
+    ok(GetParent(h.hMainChild) != h.hMainTop, "SetParent(HWND_MESSAGE) left the parent\n");
+    CloseHandle(hThread);
+    CloseHandle(h.hReady);
+    CloseHandle(h.hGo);
+    DestroyWindow(h.hMainChild);
+    DestroyWindow(h.hMainTop);
+    CloseDesktop(h.hDesk);
+}
+
 START_TEST(DesktopOtherThreadApis)
 {
     WNDCLASSA wc = { 0 };
@@ -252,6 +342,7 @@ START_TEST(DesktopOtherThreadApis)
 
     Test_DesktopApis();
     Test_ClassOnTwoDesktops();
+    Test_SetParentCrossDesktop();
 
     UnregisterClassA(g_ClassName, GetModuleHandleA(NULL));
 }
