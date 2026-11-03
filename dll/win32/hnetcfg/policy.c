@@ -1357,6 +1357,7 @@ FW_RULESET rs; ULONG i; DWORD err = 0; BOOL any = FALSE, all = TRUE;
         { r->Enabled = enable != VARIANT_FALSE; err = FwStoreUpdate( r ); if (err) break; }
     }
     FwRuleSetFree( &rs );
+    (void)any; (void)all;
     return hr_win32( err );
 }
 

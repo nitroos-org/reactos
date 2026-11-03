@@ -111,12 +111,6 @@ typedef struct _PARAMS
 
 enum { PE_OK = 0, PE_DUP, PE_BOGUS };
 
-static VOID FreeParams(PARAMS *p)
-{
-    int i;
-    (void)i;
-    memset(p, 0, sizeof(*p));
-}
 
 /* arguments argv[from..to): "tag=value" pairs, a bare "verbose" (when allowed), a bare first word (show) */
 static int ParseParams(LPWSTR *argv, DWORD from, DWORD to, ULONG allowed, BOOL allowVerbose, PARAMS *p, PCWSTR *bogus)
@@ -436,7 +430,7 @@ static VOID ShowRule(const FW_RULE *r, BOOL verbose)
     Out(L"\n");
     Line(L"Rule Name:", name);
     Out(g_Dashes); Out(L"\n");
-    if (verbose) Line(L"Description:", desc);
+    if (verbose && r->Desc) Line(L"Description:", desc);
     Line(L"Enabled:", r->Enabled ? L"Yes" : L"No");
     Line(L"Direction:", r->Dir == 2 ? L"Out" : L"In");
     if (pm & FWP_DOMAIN) wcscat(prof, L"Domain");
@@ -465,7 +459,8 @@ static VOID ShowRule(const FW_RULE *r, BOOL verbose)
                 }
                 else if (swscanf(v, L"%u.%u.%u.%u", &a, &b, &c, &d) == 4 && !wcschr(v, L'-')) _swprintf(one, L"%s/32", v);
                 else wcscpy(one, v);
-                if (list[0]) wcscat(list, L","); wcscat(list, one);
+                if (list[0]) wcscat(list, L",");
+                wcscat(list, one);
             }
             for (i = 0; i < FwrCount(&raw, k6); i++)
             {
@@ -473,7 +468,13 @@ static VOID ShowRule(const FW_RULE *r, BOOL verbose)
                 if (wcslen(list) > 900) break;
                 /* keywords were already listed for IPv4 */
                 if (!wcschr(v, L':') && !wcschr(v, L'.')) continue;
-                if (list[0]) wcscat(list, L","); wcscat(list, v);
+                if (list[0]) wcscat(list, L",");
+                if (!wcschr(v, L'/') && !wcschr(v, L'-'))
+                {
+                    wcscat(list, v); wcscat(list, L"-"); wcscat(list, v);   /* a single IPv6 address is shown as a range */
+                }
+                else
+                    wcscat(list, v);
             }
             FwrFree(&raw);
             Line(side ? L"RemoteIP:" : L"LocalIP:", list[0] ? list : L"Any");
@@ -501,15 +502,18 @@ static VOID ShowRule(const FW_RULE *r, BOOL verbose)
                 if (col) { wcsncpy(t, tok, col - tok); t[col - tok] = 0; wcscpy(c, col + 1); } else { wcscpy(t, tok); wcscpy(c, L"*"); }
                 if (!wcscmp(t, L"*")) wcscpy(t, L"Any");
                 if (!wcscmp(c, L"*")) wcscpy(c, L"Any");
-                _swprintf(b, L"%s%-8s%s \n", pad, t, c); Out(b);
+                _swprintf(b, L"%s%-8s%-3s \n", pad, t, c); Out(b);
             }
             free(copy);
         }
     }
     else if (r->Protocol == 6 || r->Protocol == 17)
     {
-        Line(L"LocalPort:", r->LPorts ? r->LPorts : L"Any");
-        Line(L"RemotePort:", r->RPorts ? r->RPorts : L"Any");
+        PCWSTR lp = r->LPorts ? r->LPorts : L"Any", rp = r->RPorts ? r->RPorts : L"Any";
+        if (!_wcsicmp(lp, L"IPTLSIn,IPHTTPSIn")) lp = L"IPHTTPS";
+        if (!_wcsicmp(rp, L"IPTLSOut,IPHTTPSOut")) rp = L"IPHTTPS";
+        Line(L"LocalPort:", lp);
+        Line(L"RemotePort:", rp);
     }
     ed = L"No";
     if (r->Edge)
@@ -521,7 +525,12 @@ static VOID ShowRule(const FW_RULE *r, BOOL verbose)
     if (verbose)
     {
         PCWSTR sec = FwrGet(&r->Raw, L"Security", 0);
-        if (r->App) Line(L"Program:", r->App);
+        if (r->App)
+        {
+            WCHAR exp[1024];
+            DWORD n = ExpandEnvironmentStringsW(r->App, exp, _countof(exp));
+            Line(L"Program:", (n && n <= _countof(exp)) ? exp : r->App);
+        }
         if (r->Svc) Line(L"Service:", wcscmp(r->Svc, L"*") ? r->Svc : L"Any");
         {
             WCHAR it[64]; it[0] = 0;
@@ -634,14 +643,13 @@ static DWORD WINAPI ShowRuleCmd(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, D
 
 static DWORD WINAPI SetRule(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
 {
-    PARAMS sel, nw; PCWSTR bogus = NULL; int pe; FILTER f; PERR e; FW_RULESET rs; ULONG *idx, n, i; DWORD err, k, newPos = cnt;
+    PARAMS sel, nw; PCWSTR bogus = NULL; int pe; FILTER f; PERR e; FW_RULESET rs; ULONG *idx, n, i; DWORD err, k, newPos = cnt; int pe2; PCWSTR bogus2 = NULL;
     if (cnt - cur < 1) return Fail(IDS_PFX_NUMARGS, IDS_USG_SETRULE, FALSE);
     for (k = cur; k < cnt; k++) if (!_wcsicmp(argv[k], L"new")) { newPos = k; break; }
     if (newPos == cnt || newPos + 1 >= cnt) return Fail(IDS_PFX_SETNEW, IDS_USG_SETRULE, FALSE);
     pe = ParseParams(argv, cur, newPos, MASK_SETSEL, FALSE, &sel, &bogus);
     if (pe) return ReportParseError(pe, bogus);
-    pe = ParseParams(argv, newPos + 1, cnt, MASK_RULE, FALSE, &nw, &bogus);
-    if (pe) return ReportParseError(pe, bogus);
+    pe2 = ParseParams(argv, newPos + 1, cnt, MASK_RULE, FALSE, &nw, &bogus2);
     if (!sel.has[P_NAME] && !sel.has[P_GROUP]) { OutRes(IDS_MSG_ESSENTIAL); return ERROR_SUPPRESS_OUTPUT; }
     if (!BuildFilter(&f, &sel, &e, IDS_USG_SETRULE))
     {
@@ -653,6 +661,7 @@ static DWORD WINAPI SetRule(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD
     FwRuleFree(&f.tmpl);
     if (err) return err;
     if (!n) { OutRes(IDS_MSG_NORULES); FwRuleSetFree(&rs); HeapFree(GetProcessHeap(), 0, idx); return ERROR_SUPPRESS_OUTPUT; }
+    if (pe2) { FwRuleSetFree(&rs); HeapFree(GetProcessHeap(), 0, idx); return ReportParseError(pe2, bogus2); }
     /* validate against every matching rule first, then write */
     for (i = 0; i < n; i++)
     {
@@ -768,6 +777,10 @@ static BOOL YesNo(PCWSTR s, PCWSTR yes, PCWSTR no, DWORD *v)
 static DWORD SetProfileCmd(ULONG bits, LPWSTR *argv, DWORD cur, DWORD cnt, UINT helpId)
 {
     DWORD left = cnt - cur, v, err = 0; ULONG b;
+    if (left < 1) return Fail(IDS_PFX_NUMARGS, helpId, TRUE);
+    if (_wcsicmp(argv[cur], L"state") && _wcsicmp(argv[cur], L"firewallpolicy") && _wcsicmp(argv[cur], L"settings") &&
+        _wcsicmp(argv[cur], L"logging"))
+        return Fail(IDS_PFX_VALUE, helpId, TRUE);
     if (left < 2) return Fail(IDS_PFX_NUMARGS, helpId, TRUE);
     if (!_wcsicmp(argv[cur], L"state"))
     {

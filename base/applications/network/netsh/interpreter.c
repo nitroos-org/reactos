@@ -367,10 +367,9 @@ InterpretCommand(
                     break;
                 }
 
-                DPRINT("Change temorary context\n");
+                /* not a command of this context: try the commands inherited from the parent contexts */
                 pTempContext = pTempContext->pParentContext;
                 State = STATE_ANALYZE;
-                dwArgIndex = 0;
                 break;
 
             case STATE_DONE:
@@ -380,7 +379,7 @@ InterpretCommand(
     }
 
     /* Done */
-    return ERROR_SUCCESS;
+    return dwError;
 } 
 
 
@@ -400,6 +399,12 @@ InterpretLine(
     LPWSTR ptr, pStartQuote, pEndQuote;
 
     memset(args_vector, 0, sizeof(args_vector));
+
+    /* comment line */
+    ptr = pszInputLine;
+    while (*ptr == L' ' || *ptr == L'\t') ptr++;
+    if (*ptr == L'#')
+        return ERROR_SUCCESS;
 
     ptr = pszInputLine;
     while (*ptr != 0)
@@ -501,9 +506,14 @@ InterpretInteractive(VOID)
         /* Get input from the user. */
         if (fgetws(input_line, MAX_STRING_SIZE, stdin) == NULL)
         {
-            /* EOF on stdin (redirected input ran out): leave like Windows */
+                /* EOF on stdin (redirected input ran out): leave like Windows */
             break;
         }
+
+        ptr = input_line;
+        while (*ptr == L' ' || *ptr == L'\t') ptr++;
+        if (*ptr == L'#')
+            continue;   /* comment line */
 
         ptr = input_line;
         while (*ptr != 0)

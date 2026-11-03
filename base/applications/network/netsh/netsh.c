@@ -51,10 +51,12 @@ RunScript(
 }
 
 
+static
 LPWSTR
-MergeStrings(
+MergeStringsQuoted(
     _In_ LPWSTR pszStringArray[],
-    _In_ UINT nCount)
+    _In_ UINT nCount,
+    _In_ BOOL bQuote)
 {
     LPWSTR pszOutString = NULL;
     size_t nLength;
@@ -65,7 +67,7 @@ MergeStrings(
 
     nLength = 0;
     for (i = 0; i < nCount; i++)
-        nLength += wcslen(pszStringArray[i]);
+        nLength += wcslen(pszStringArray[i]) + 2;   /* room for a pair of quotes */
 
     if (nLength > 0)
         nLength += nCount; /* Space characters and terminating zero */
@@ -76,12 +78,46 @@ MergeStrings(
 
     for (i = 0; i < nCount; i++)
     {
+        LPWSTR pszArg = pszStringArray[i];
+
         if (i != 0)
             wcscat(pszOutString, L" ");
-        wcscat(pszOutString, pszStringArray[i]);
+
+        /* The C runtime removed the quotes of the command line: put them back around values with blanks,
+           as in tag="value with blanks", so that the line parser keeps them together. */
+        if (bQuote && wcspbrk(pszArg, L" \t") != NULL && wcschr(pszArg, L'\"') == NULL)
+        {
+            LPWSTR pszEq = wcschr(pszArg, L'=');
+            if (pszEq != NULL && pszEq < wcspbrk(pszArg, L" \t"))
+            {
+                wcsncat(pszOutString, pszArg, pszEq - pszArg + 1);
+                wcscat(pszOutString, L"\"");
+                wcscat(pszOutString, pszEq + 1);
+                wcscat(pszOutString, L"\"");
+            }
+            else
+            {
+                wcscat(pszOutString, L"\"");
+                wcscat(pszOutString, pszArg);
+                wcscat(pszOutString, L"\"");
+            }
+        }
+        else
+        {
+            wcscat(pszOutString, pszArg);
+        }
     }
 
     return pszOutString;
+}
+
+
+LPWSTR
+MergeStrings(
+    _In_ LPWSTR pszStringArray[],
+    _In_ UINT nCount)
+{
+    return MergeStringsQuoted(pszStringArray, nCount, FALSE);
 }
 
 
@@ -212,7 +248,7 @@ wmain(
             }
             else if (pszCommand == NULL)
             {
-                pszCommand = MergeStrings((LPWSTR*)&argv[index], argc - index);
+                pszCommand = MergeStringsQuoted((LPWSTR*)&argv[index], argc - index, TRUE);
                 if (pszCommand == NULL)
                 {
                     dwError = ERROR_NOT_ENOUGH_MEMORY;

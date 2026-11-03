@@ -61,24 +61,6 @@ GetContextFullName(
 
 static
 VOID
-PrintCurrentContextHeader(
-    _In_ PCONTEXT_ENTRY pContext)
-{
-    if (pContext == pCurrentContext)
-    {
-        ConResPrintf(StdOut, IDS_THIS_COMMANDS);
-    }
-    else
-    {
-        WCHAR szBuffer[SMALL_HELP_BUFFER_SIZE];
-        GetContextFullName(pContext, szBuffer, _countof(szBuffer));
-        ConResPrintf(StdOut, IDS_CONTEXT_COMMANDS, szBuffer);
-    }
-}
-
-
-static
-VOID
 PrintShortGroupCommands(
     _In_ PCONTEXT_ENTRY pContext,
     _In_ PCOMMAND_GROUP pGroup)
@@ -103,6 +85,21 @@ PrintShortGroupCommands(
 
         ConPrintf(StdOut, L"%-14s - %s", szBuffer1, szBuffer2);
     }
+}
+
+
+static
+BOOL
+IsInteractiveOnlyCommand(
+    _In_ PCWSTR pszToken)
+{
+    static const PCWSTR Tokens[] = { L"..", L"abort", L"alias", L"bye", L"commit", L"exit", L"offline", L"online",
+                                     L"popd", L"pushd", L"quit", L"unalias" };
+    UINT i;
+    for (i = 0; i < _countof(Tokens); i++)
+        if (!wcscmp(pszToken, Tokens[i]))
+            return TRUE;
+    return FALSE;
 }
 
 
@@ -153,6 +150,9 @@ PrintContext(
         if (pContext != pTarget && (!wcscmp(pCommand->pwszCmdToken, L"?") || !wcscmp(pCommand->pwszCmdToken, L"help")))
             continue;
 
+        if (pContext == pRootContext && !g_bInteractive && IsInteractiveOnlyCommand(pCommand->pwszCmdToken))
+            continue;
+
         if (((pCommand->dwFlags & CMD_FLAG_LOCAL) && (g_pszMachine != NULL)) ||
             ((pCommand->dwFlags & CMD_FLAG_ONLINE) && (g_bOnline == FALSE)) ||
             (pCommand->dwFlags & CMD_FLAG_HIDDEN))
@@ -190,7 +190,7 @@ PrintContext(
     }
 
     /* "?" and "help" exist in every sub-context */
-    if (pContext == pTarget && pContext != pRootContext)
+    if (pContext == pTarget)
         dwCount += 2;
 
     pHelpArray = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwCount * sizeof(HELP_ENTRY));
@@ -199,7 +199,7 @@ PrintContext(
 
     dwIndex = 0;
 
-    if (pContext == pTarget && pContext != pRootContext)
+    if (pContext == pTarget)
     {
         pHelpArray[dwIndex].Type = Command;
         pHelpArray[dwIndex].pszCommand = L"?";
@@ -220,6 +220,9 @@ PrintContext(
             continue;
 
         if (pContext != pTarget && (!wcscmp(pCommand->pwszCmdToken, L"?") || !wcscmp(pCommand->pwszCmdToken, L"help")))
+            continue;
+
+        if (pContext == pRootContext && !g_bInteractive && IsInteractiveOnlyCommand(pCommand->pwszCmdToken))
             continue;
 
         if (((pCommand->dwFlags & CMD_FLAG_LOCAL) && (g_pszMachine != NULL)) ||

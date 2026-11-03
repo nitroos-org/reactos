@@ -64,7 +64,7 @@ static BOOL FromRawLists(FW_RULE *r, const FWR *raw)
         if (!_wcsicmp(k, L"LPort") || !_wcsicmp(k, L"LPort2_10") || !_wcsicmp(k, L"LPort2_20")) ok = ListAdd(&r->LPorts, v);
         else if (!_wcsicmp(k, L"RPort") || !_wcsicmp(k, L"RPort2_10") || !_wcsicmp(k, L"RPort2_20")) ok = ListAdd(&r->RPorts, v);
         else if (!_wcsicmp(k, L"LA4") || !_wcsicmp(k, L"LA6")) ok = ListAdd(&r->LAddr, v);
-        else if (!_wcsicmp(k, L"RA4") || !_wcsicmp(k, L"RA42") || !_wcsicmp(k, L"RA6") || !_wcsicmp(k, L"RA62"))
+        else if (!_wcsicmp(k, L"RA4") || !_wcsicmp(k, L"RA6"))
         {
             /* keywords are stored once for IPv4 and once for IPv6: show them once */
             if (IsKeyword(v) && r->RAddr)
@@ -201,7 +201,7 @@ static DWORD NormAddr(PCWSTR item, WCHAR *out, SIZE_T cch, BOOL *pV6, ULONG *pKe
 
 DWORD FwCheckAddrs(PCWSTR s)
 {
-    WCHAR *copy, *tok, *ctx = NULL, out[128];
+    WCHAR *copy, *tok, out[128];
     DWORD err = 0;
     if (!s || !*s || !wcscmp(s, L"*") || !_wcsicmp(s, L"any")) return 0;
     copy = HeapAlloc(GetProcessHeap(), 0, (wcslen(s) + 1) * sizeof(WCHAR));
@@ -223,7 +223,7 @@ typedef struct { ULONG key; WCHAR s[64]; } ADDRITEM;
 
 static BOOL AddrToTokens(FWR *raw, PCWSTR list, PCWSTR k4, PCWSTR k6)
 {
-    WCHAR *copy, *tok, *ctx = NULL, out[128];
+    WCHAR *copy, *tok, out[128];
     ADDRITEM *items; ULONG n = 0, i, cap;
     BOOL ok = TRUE;
     if (!list || !*list || !wcscmp(list, L"*") || !_wcsicmp(list, L"any")) return TRUE;
@@ -251,7 +251,7 @@ static BOOL AddrToTokens(FWR *raw, PCWSTR list, PCWSTR k4, PCWSTR k6)
 
 DWORD FwCheckPorts(PCWSTR s)
 {
-    WCHAR *copy, *tok, *ctx = NULL; (void)ctx;
+    WCHAR *copy, *tok;
     DWORD err = 0;
     if (!s || !*s || !wcscmp(s, L"*") || !_wcsicmp(s, L"any")) return 0;
     copy = HeapAlloc(GetProcessHeap(), 0, (wcslen(s) + 1) * sizeof(WCHAR));
@@ -277,7 +277,7 @@ DWORD FwCheckPorts(PCWSTR s)
 
 static BOOL PortsToTokens(FWR *raw, PCWSTR list, PCWSTR kSingle, PCWSTR kRange)
 {
-    WCHAR *copy, *tok, *ctx = NULL; (void)ctx;
+    WCHAR *copy, *tok;
     BOOL ok = TRUE;
     FWR rng, sgl; ULONG i;
     if (!list || !*list || !wcscmp(list, L"*") || !_wcsicmp(list, L"any")) return TRUE;
@@ -297,7 +297,7 @@ static BOOL PortsToTokens(FWR *raw, PCWSTR list, PCWSTR kSingle, PCWSTR kRange)
 BOOL FwRuleToRaw(const FW_RULE *r, FWR *out)
 {
     static const PCWSTR managed[] = { L"Action", L"Active", L"Dir", L"Protocol", L"Profile", L"ICMP4", L"ICMP6",
-        L"LPort", L"LPort2_10", L"LPort2_20", L"RPort", L"RPort2_10", L"RPort2_20", L"LA4", L"LA6", L"RA4", L"RA42", L"RA6", L"RA62",
+        L"LPort", L"LPort2_10", L"LPort2_20", L"RPort", L"RPort2_10", L"RPort2_20", L"LA4", L"LA6", L"RA4", L"RA6",
         L"IFType", L"App", L"Svc", L"Name", L"Desc", L"EmbedCtxt", L"Edge" };
     ULONG i;
     WCHAR num[16];
@@ -318,7 +318,7 @@ BOOL FwRuleToRaw(const FW_RULE *r, FWR *out)
     }
     if (r->Icmp && *r->Icmp && wcscmp(r->Icmp, L"*") && (r->Protocol == 1 || r->Protocol == 58))
     {
-        WCHAR *copy = HeapAlloc(GetProcessHeap(), 0, (wcslen(r->Icmp) + 1) * sizeof(WCHAR)), *tok, *ctx = NULL; (void)ctx;
+        WCHAR *copy = HeapAlloc(GetProcessHeap(), 0, (wcslen(r->Icmp) + 1) * sizeof(WCHAR)), *tok;
         if (!copy) return FALSE;
         wcscpy(copy, r->Icmp);
         for (tok = wcstok(copy, L","); tok; tok = wcstok(NULL, L",")) ok &= FwrAdd(out, r->Protocol == 1 ? L"ICMP4" : L"ICMP6", tok);
@@ -330,7 +330,7 @@ BOOL FwRuleToRaw(const FW_RULE *r, FWR *out)
     ok &= AddrToTokens(out, r->RAddr, L"RA4", L"RA6");
     if (r->IfTypes && *r->IfTypes && _wcsicmp(r->IfTypes, L"All"))
     {
-        WCHAR *copy = HeapAlloc(GetProcessHeap(), 0, (wcslen(r->IfTypes) + 1) * sizeof(WCHAR)), *tok, *ctx = NULL; (void)ctx;
+        WCHAR *copy = HeapAlloc(GetProcessHeap(), 0, (wcslen(r->IfTypes) + 1) * sizeof(WCHAR)), *tok;
         if (!copy) return FALSE;
         wcscpy(copy, r->IfTypes);
         for (tok = wcstok(copy, L","); tok; tok = wcstok(NULL, L",")) ok &= FwrAdd(out, L"IFType", tok);
