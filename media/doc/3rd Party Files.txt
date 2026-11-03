@@ -288,10 +288,10 @@ Used Version: 2.10.0
 License: FTL (https://spdx.org/licenses/FTL.html)
 URL: https://freetype.org/
 
-Title: dosfstools
+Title: dosfstools (fsck.fat sources)
 Path: sdk/lib/fslib/vfatlib/check
-Used Version: 4.1
-License: GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later.html)
+Used Version: 4.2 (latest release, tag v4.2, commit 697f7692c951173c1b732901e13f72bd3182d575) plus the later upstream fsck.fat fixes up to git commit 289a48b9cb5b3c589391d28aa2515c325c932c7a (2023-10-08, no release since 4.2)
+License: GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later.html). This is GPLv3 code inside the GPL-2.0-or-later tree: it is confined to sdk/lib/fslib/vfatlib/check, and the binaries that link vfatlib (autochk, ufat, usetup) are GPLv3 as a whole.
 URL: https://github.com/dosfstools/dosfstools
 
 Title: Microsoft Windows Driver Frameworks (WDF)

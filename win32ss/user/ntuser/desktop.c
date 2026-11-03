@@ -220,6 +220,96 @@ IntFreeDesktopWindow(IN PWND pwnd)
         PsSetThreadWin32Thread(Thread, NULL, gptiDesktopThread);
 }
 
+/*
+ * A desktop that is deleted cannot stay the input desktop: nothing references it
+ * for that (a thread on a desktop references it, so no thread is on it any more).
+ * Give input back to the "Default" desktop of the window station, as when it is
+ * switched to, and clear the pointers if there is none. Called with the USER lock.
+ */
+static VOID
+IntLeaveInputDesktop(IN PDESKTOP pdesk)
+{
+    static const UNICODE_STRING DefaultName = RTL_CONSTANT_STRING(L"Default");
+    PWINSTATION_OBJECT pwinsta = pdesk->rpwinstaParent;
+    PDESKTOP pdeskNew = NULL;
+    PLIST_ENTRY Entry;
+
+    if (pwinsta && pwinsta->ActiveDesktop == pdesk)
+        pwinsta->ActiveDesktop = NULL;
+
+    if (gpdeskInputDesktop != pdesk)
+        return;
+
+    ERR("Deleting the input desktop %p, switching input back to the default desktop\n", pdesk);
+
+    if (pwinsta)
+    {
+        for (Entry = pwinsta->DesktopListHead.Flink;
+             Entry != &pwinsta->DesktopListHead;
+             Entry = Entry->Flink)
+        {
+            PDESKTOP pdeskTry = CONTAINING_RECORD(Entry, DESKTOP, ListEntry);
+            UNICODE_STRING Name;
+
+            if (pdeskTry == pdesk ||
+                (pdeskTry->dwDTFlags & DF_DESTROYED) ||
+                !pdeskTry->pDeskInfo ||
+                !pdeskTry->pDeskInfo->spwnd)
+            {
+                continue;
+            }
+
+            RtlInitUnicodeString(&Name, pdeskTry->pDeskInfo->szDesktopName);
+            if (RtlEqualUnicodeString(&Name, &DefaultName, TRUE))
+            {
+                pdeskNew = pdeskTry;
+                break;
+            }
+        }
+    }
+
+    gpdeskInputDesktop = pdeskNew;
+    if (pwinsta)
+        pwinsta->ActiveDesktop = pdeskNew;
+
+    if (pdeskNew)
+    {
+        /* Show it as NtUserSwitchDesktop does, without the window-position call
+           (it can send messages, and this runs in the context of whoever drops the
+           last reference, often a process that is exiting). Its size is unchanged.
+           The invalidation makes GDI regions, which need the PROCESSINFO of the
+           current process: an exiting process has none any more, use CSRSS's. */
+        PWND pwndDesk = pdeskNew->pDeskInfo->spwnd;
+        BOOLEAN bAttached = FALSE;
+        KAPC_STATE ApcState;
+
+        pwndDesk->style |= WS_VISIBLE;
+
+        if (PsGetCurrentProcessWin32Process() == NULL && gpepCSRSS)
+        {
+            KeStackAttachProcess(&gpepCSRSS->Pcb, &ApcState);
+            bAttached = TRUE;
+        }
+
+        if (PsGetCurrentProcessWin32Process() != NULL)
+        {
+            PREGION Rgn = IntSysCreateRectpRgnIndirect(&pwndDesk->rcWindow);
+            if (Rgn)
+            {
+                IntInvalidateWindows(pwndDesk, Rgn, RDW_FRAME | RDW_ERASE |
+                                     RDW_INVALIDATE | RDW_ALLCHILDREN);
+                REGION_Delete(Rgn);
+            }
+        }
+
+        if (bAttached)
+            KeUnstackDetachProcess(&ApcState);
+
+        if (gpDesktopSwitchEvent)
+            KePulseEvent(gpDesktopSwitchEvent, EVENT_INCREMENT, FALSE);
+    }
+}
+
 NTSTATUS
 NTAPI
 IntDesktopObjectDelete(
@@ -234,6 +324,10 @@ IntDesktopObjectDelete(
     UserEnterExclusive();
     pdesk->dwDTFlags |= DF_DESTROYED;
 
+    /* The input desktop holds no reference: when the last handle of a process that
+       switched to its own desktop goes away, input must not stay on a freed desktop */
+    IntLeaveInputDesktop(pdesk);
+
     if (pdesk->pDeskInfo &&
         pdesk->pDeskInfo->spwnd)
     {
@@ -244,10 +338,10 @@ IntDesktopObjectDelete(
     {
         IntFreeDesktopWindow(pdesk->spwndMessage);
     }
-    UserLeave();
 
     /* Remove the desktop from the window station's list of associated desktops */
     RemoveEntryList(&pdesk->ListEntry);
+    UserLeave();
 
     /* Free the heap */
     IntFreeDesktopHeap(pdesk);
@@ -3540,11 +3634,49 @@ IntMapDesktopView(IN PDESKTOP pdesk)
     HeapMapping->UserMapping = UserBase;
     HeapMapping->Limit = ViewSize;
     HeapMapping->Count = 1;
+    HeapMapping->pdesk = pdesk;
     *PrevLink = HeapMapping;
 
     ObReferenceObject(pdesk);
 
     return STATUS_SUCCESS;
+}
+
+/*
+ * Drops the desktop heap views a terminating process still has.
+ * Every open desktop handle counts as a use of the view (IntDesktopObjectOpen).
+ * The handles a process did not close are closed by the object manager after
+ * the process callout, when the PROCESSINFO is gone and IntDesktopObjectClose
+ * cannot find the view any more: without this, the reference each view holds
+ * on its desktop would keep the desktop, its heap and its window station alive
+ * forever (a sandbox broker exiting with its alternate desktop open).
+ */
+VOID
+IntFreeProcessDesktopViews(
+    _In_ PEPROCESS Process,
+    _In_ PPROCESSINFO ppi)
+{
+    PW32HEAP_USER_MAPPING HeapMapping, Next;
+
+    /* Skip the first entry: it is the global user heap mapping */
+    HeapMapping = ppi->HeapMappings.Next;
+    ppi->HeapMappings.Next = NULL;
+
+    while (HeapMapping != NULL)
+    {
+        Next = HeapMapping->Next;
+
+        TRACE("ppi 0x%p releases heap view of desktop 0x%p, %lu uses left\n",
+              ppi, HeapMapping->pdesk, HeapMapping->Count);
+
+        if (Process == PsGetCurrentProcess())
+            MmUnmapViewOfSection(Process, HeapMapping->UserMapping);
+
+        ObDereferenceObject(HeapMapping->pdesk);
+        UserHeapFree(HeapMapping);
+
+        HeapMapping = Next;
+    }
 }
 
 BOOL

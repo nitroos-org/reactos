@@ -1816,8 +1816,15 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return Status;
 }
 
-/* Unlinks a delete-pending file at its last cleanup (caller holds MainResource exclusive). */
-static VOID NgDeleteOnLastClose(PNG_FCB Fcb)
+/*
+ * Unlinks a delete-pending file or directory (caller holds MainResource exclusive and CreateGate, shared
+ * at least).  Run at the last cleanup of a classic delete, and at once by a POSIX-semantics disposition
+ * (NgSetInformation, FileDispositionInformationEx), where handles that stay open no longer keep the name.
+ * KeepOpen: handles of the FCB are still open, so it stays listed (volume lock and dismount count its
+ * handles) with its node held (the record cannot be reused); its last cleanup unlists it and parks the node.
+ * On failure the delete is dropped (DeletePending cleared) and the status says why.
+ */
+NTSTATUS NgDeleteNow(PNG_FCB Fcb, BOOLEAN KeepOpen)
 {
     PNG_VCB Vcb = Fcb->Vcb;
     ngc_node *Dir;
@@ -1860,7 +1867,8 @@ static VOID NgDeleteOnLastClose(PNG_FCB Fcb)
             if (Gone)
             {
                 Fcb->Deleted = TRUE;
-                NgUnlistFcb(Fcb);
+                if (!KeepOpen)
+                    NgUnlistFcb(Fcb);
             }
             else
             {
@@ -1870,7 +1878,8 @@ static VOID NgDeleteOnLastClose(PNG_FCB Fcb)
                 ngc_stat(Fcb->Node, &Fcb->Stat);   /* the link count dropped */
                 Fcb->DeletePending = FALSE;
             }
-            NgParkNode(Fcb);
+            if (!KeepOpen)
+                NgParkNode(Fcb);
             NgAfterChange(Vcb);
         }
     }
@@ -1888,6 +1897,7 @@ static VOID NgDeleteOnLastClose(PNG_FCB Fcb)
             NgNotify(Vcb, &Fcb->DelPath, Fcb->IsDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
                      FILE_ACTION_REMOVED);
     }
+    return Err ? NgErrnoToStatus(Err) : STATUS_SUCCESS;
 }
 
 /* Records the name a delete will remove: the one this handle was opened by. */
@@ -1993,7 +2003,7 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     if (Delete)
     {
-        NgDeleteOnLastClose(Fcb);
+        NgDeleteNow(Fcb, FALSE);
     }
     else if (Fcb->Modified && Fcb->HasNode)
     {
@@ -2008,6 +2018,8 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         NgAcquireCore(Vcb);
         ExAcquireFastMutex(&Vcb->FcbListLock);
         Last = (Fcb->OpenHandles == 0);
+        if (Last && Fcb->Deleted)
+            NgFcbRemoveLocked(Fcb);     /* removed with POSIX semantics while handles were open (NgDeleteNow KeepOpen) */
         ExReleaseFastMutex(&Vcb->FcbListLock);
         if (Last)
         {

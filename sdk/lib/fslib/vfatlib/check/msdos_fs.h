@@ -17,6 +17,12 @@
    can be found in /usr/share/common-licenses/GPL-3 file.
 */
 
+/* ReactOS: derived from dosfstools (fsck.fat), https://github.com/dosfstools/dosfstools
+ * Synced to release 4.2 (697f7692c951173c1b732901e13f72bd3182d575) plus later upstream
+ * fixes up to commit 289a48b9cb5b3c589391d28aa2515c325c932c7a.
+ * License: GPL-3.0-or-later (see COPYING in this directory). The ReactOS adaptation
+ * (NT I/O, fmifs output, no exit/stdio) is marked __REACTOS__ or lives in rosglue.h. */
+
 #ifndef _MSDOS_FS_H
 #define _MSDOS_FS_H
 
@@ -54,7 +60,7 @@
 struct msdos_dir_entry {
     uint8_t name[MSDOS_NAME];	/* name including extension */
     uint8_t attr;		/* attribute bits */
-    uint8_t lcase;		/* Case for base and extension */
+    uint8_t ntbyte;		/* Case for base and extension, encryption flags and padding size */
     uint8_t ctime_cs;		/* Creation time, centiseconds (0-199) */
     uint16_t ctime;		/* Creation time */
     uint16_t cdate;		/* Creation date */

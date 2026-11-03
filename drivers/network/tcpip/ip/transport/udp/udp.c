@@ -9,6 +9,7 @@
  */
 
 #include "precomp.h"
+#include <nitrofwk.h>
 
 BOOLEAN UDPInitialized = FALSE;
 PORT_SET UDPPorts;
@@ -293,6 +294,9 @@ NTSTATUS UDPSendDatagram(
             LoopNCE = NULL;
         }
     }
+
+    /* the inbound filter lets this peer's replies through */
+    NITROFW_NOTE_UDP_SEND(AddrFile->Port, &RemoteAddress, RemotePort, UDPIsBroadcastAddress(&RemoteAddress));
 
     UnlockObject(AddrFile);
 

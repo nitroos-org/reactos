@@ -3,6 +3,7 @@
    Copyright (C) 1993 Werner Almesberger <werner.almesberger@lrc.di.epfl.ch>
    Copyright (C) 1998 Roman Hodek <Roman.Hodek@informatik.uni-erlangen.de>
    Copyright (C) 2008-2014 Daniel Baumann <mail@daniel-baumann.ch>
+   Copyright (C) 2021 Pali Rohár <pali.rohar@gmail.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -20,6 +21,12 @@
    The complete text of the GNU General Public License
    can be found in /usr/share/common-licenses/GPL-3 file.
 */
+
+/* ReactOS: derived from dosfstools (fsck.fat), https://github.com/dosfstools/dosfstools
+ * Synced to release 4.2 (697f7692c951173c1b732901e13f72bd3182d575) plus later upstream
+ * fixes up to commit 289a48b9cb5b3c589391d28aa2515c325c932c7a.
+ * License: GPL-3.0-or-later (see COPYING in this directory). The ReactOS adaptation
+ * (NT I/O, fmifs output, no exit/stdio) is marked __REACTOS__ or lives in rosglue.h. */
 
 /* FAT32, VFAT, Atari format support, and various fixes additions May 1998
  * by Roman Hodek <Roman.Hodek@informatik.uni-erlangen.de> */
@@ -70,6 +77,31 @@ void get_fat(FAT_ENTRY * entry, void *fat, uint32_t cluster, DOS_FS * fs)
     }
 }
 
+void release_fat(DOS_FS * fs)
+{
+    if (fs->fat)
+	free(fs->fat);
+    if (fs->cluster_owner)
+	free(fs->cluster_owner);
+    fs->fat = NULL;
+    fs->cluster_owner = NULL;
+}
+
+static void fix_first_cluster(DOS_FS * fs, void * first_cluster)
+{
+    struct boot_sector b;
+
+    fs_read(0, sizeof(b), &b);
+
+    printf("Fixing first cluster in FAT.\n");
+    if (fs->fat_bits == 12)
+        *(uint16_t *)first_cluster = htole16((le16toh(*(uint16_t *)first_cluster) & 0xf000) | FAT_EXTD(fs) | b.media);
+    else if (fs->fat_bits == 16)
+        *(uint16_t *)first_cluster = htole16(FAT_EXTD(fs) | b.media);
+    else
+        *(uint32_t *)first_cluster = htole32(FAT_EXTD(fs) | b.media);
+}
+
 /**
  * Build a bookkeeping structure from the partition's FAT table.
  * If the partition has multiple FATs and they don't agree, try to pick a winner,
@@ -77,22 +109,24 @@ void get_fat(FAT_ENTRY * entry, void *fat, uint32_t cluster, DOS_FS * fs)
  * One error that is fixed here is a cluster that links to something out of range.
  *
  * @param[inout]    fs      Information about the filesystem
+ * @param[in]       mode    0 - read-only, 1 - read-write (no repair), 2 - repair
  */
-void read_fat(DOS_FS * fs)
+void read_fat(DOS_FS * fs, int mode)
 {
     int eff_size, alloc_size;
     uint32_t i;
     void *first, *second = NULL;
-    int first_ok, second_ok;
+    int first_ok, second_ok = 0;
+    FAT_ENTRY first_media, second_media;
     uint32_t total_num_clusters;
 
+    if (fat_table > fs->nfats)
+        die("Requested FAT table %ld does not exist.", fat_table);
+    if (fat_table > 2)
+        die("Reading FAT table greater than 2 is not implemented yet.");
+
     /* Clean up from previous pass */
-    if (fs->fat)
-	free(fs->fat);
-    if (fs->cluster_owner)
-	free(fs->cluster_owner);
-    fs->fat = NULL;
-    fs->cluster_owner = NULL;
+    release_fat(fs);
 
     total_num_clusters = fs->data_clusters + 2;
     eff_size = (total_num_clusters * fs->fat_bits + 7) / 8ULL;
@@ -106,45 +140,80 @@ void read_fat(DOS_FS * fs)
 
     first = alloc(alloc_size);
     fs_read(fs->fat_start, eff_size, first);
+    get_fat(&first_media, first, 0, fs);
+    first_ok = (first_media.value & FAT_EXTD(fs)) == FAT_EXTD(fs);
     if (fs->nfats > 1) {
 	second = alloc(alloc_size);
 	fs_read(fs->fat_start + fs->fat_size, eff_size, second);
-    }
-    if (second && memcmp(first, second, eff_size) != 0) {
-	FAT_ENTRY first_media, second_media;
-	get_fat(&first_media, first, 0, fs);
 	get_fat(&second_media, second, 0, fs);
-	first_ok = (first_media.value & FAT_EXTD(fs)) == FAT_EXTD(fs);
 	second_ok = (second_media.value & FAT_EXTD(fs)) == FAT_EXTD(fs);
+    }
+    if (mode != 0 && fat_table == 0) {
+        if (!first_ok && second && !second_ok)
+            die("Both FATs appear to be corrupt. Giving up. Run fsck.fat with non-zero -F option.");
+        if (!first_ok && !second)
+            die("First FAT appears to be corrupt and second FAT does not exist. Giving up. Run fsck.fat with -F 1 option.");
+    }
+    if (mode == 0 && !first_ok && second && second_ok) {
+        /* In read-only mode if first FAT is corrupted and second is OK then use second FAT */
+        void *first_backup = first;
+        first = second;
+        second = first_backup;
+    }
+    if (mode != 0 && fat_table == 0 && second && memcmp(first, second, eff_size) != 0) {
+	if (mode != 2)
+	    die("FATs differ, please run fsck.fat");
 	if (first_ok && !second_ok) {
 	    printf("FATs differ - using first FAT.\n");
 	    fs_write(fs->fat_start + fs->fat_size, eff_size, first);
-	}
-	if (!first_ok && second_ok) {
+	} else if (!first_ok && second_ok) {
 	    printf("FATs differ - using second FAT.\n");
 	    fs_write(fs->fat_start, eff_size, second);
 	    memcpy(first, second, eff_size);
-	}
-	if (first_ok && second_ok) {
-	    if (interactive) {
-		printf("FATs differ but appear to be intact. Use which FAT ?\n"
-		       "1) Use first FAT\n2) Use second FAT\n");
-		if (get_key("12", "?") == '1') {
-		    fs_write(fs->fat_start + fs->fat_size, eff_size, first);
-		} else {
-		    fs_write(fs->fat_start, eff_size, second);
-		    memcpy(first, second, eff_size);
+	} else {
+	    if (first_ok && second_ok)
+		printf("FATs differ but appear to be intact.\n");
+	    else
+		printf("FATs differ and both appear to be corrupt.\n");
+	    if (get_choice(1, "  Using first FAT.",
+			   2,
+			   1, "Use first FAT",
+			   2, "Use second FAT") == 1) {
+		if (!first_ok) {
+		    fix_first_cluster(fs, first);
+		    fs_write(fs->fat_start, (fs->fat_bits + 7) / 8, first);
 		}
-	    } else {
-		printf("FATs differ but appear to be intact. Using first "
-		       "FAT.\n");
 		fs_write(fs->fat_start + fs->fat_size, eff_size, first);
+	    } else {
+		if (!second_ok) {
+		    fix_first_cluster(fs, second);
+		    fs_write(fs->fat_start + fs->fat_size, (fs->fat_bits + 7) / 8, second);
+		}
+		fs_write(fs->fat_start, eff_size, second);
+		memcpy(first, second, eff_size);
 	    }
 	}
-	if (!first_ok && !second_ok) {
-	    printf("Both FATs appear to be corrupt. Giving up.\n");
-	    exit(1);
-	}
+    }
+    if (mode != 0 && fat_table != 0) {
+        if (fat_table == 1) {
+            printf("Using first FAT.\n");
+            if (!first_ok) {
+                fix_first_cluster(fs, first);
+                fs_write(fs->fat_start, (fs->fat_bits + 7) / 8, first);
+            }
+            if (second && memcmp(first, second, eff_size) != 0)
+                fs_write(fs->fat_start + fs->fat_size, eff_size, first);
+        } else if (fat_table == 2) {
+            printf("Using second FAT.\n");
+            if (!second_ok) {
+                fix_first_cluster(fs, second);
+                fs_write(fs->fat_start + fs->fat_size, (fs->fat_bits + 7) / 8, second);
+            }
+            if (memcmp(first, second, eff_size) != 0) {
+                fs_write(fs->fat_start, eff_size, second);
+                memcpy(first, second, eff_size);
+            }
+        }
     }
     if (second) {
 	free(second);
@@ -154,17 +223,27 @@ void read_fat(DOS_FS * fs)
     fs->cluster_owner = alloc(total_num_clusters * sizeof(DOS_FILE *));
     memset(fs->cluster_owner, 0, (total_num_clusters * sizeof(DOS_FILE *)));
 
+    if (mode == 0)
+        return;
+
     /* Truncate any cluster chains that link to something out of range */
     for (i = 2; i < fs->data_clusters + 2; i++) {
 	FAT_ENTRY curEntry;
 	get_fat(&curEntry, fs->fat, i, fs);
 	if (curEntry.value == 1) {
+	    if (mode != 2)
+		die("Cluster %ld out of range (1), please run fsck.fat",
+		    (long)(i - 2));
 	    printf("Cluster %ld out of range (1). Setting to EOF.\n",
 		   (long)(i - 2));
 	    set_fat(fs, i, -1);
 	}
 	if (curEntry.value >= fs->data_clusters + 2 &&
 	    (curEntry.value < FAT_MIN_BAD(fs))) {
+	    if (mode != 2)
+		die("Cluster %ld out of range (%ld > %ld), please run fsck.fat",
+		    (long)(i - 2), (long)curEntry.value,
+		    (long)(fs->data_clusters + 2 - 1));
 	    printf("Cluster %ld out of range (%ld > %ld). Setting to EOF.\n",
 		   (long)(i - 2), (long)curEntry.value,
 		   (long)(fs->data_clusters + 2 - 1));
@@ -288,7 +367,8 @@ uint32_t next_cluster(DOS_FS * fs, uint32_t cluster)
 
 off_t cluster_start(DOS_FS * fs, uint32_t cluster)
 {
-    return fs->data_start + ((off_t)cluster - 2) * (uint64_t)fs->cluster_size;
+    /* TODO: check overflow */
+    return fs->data_start + ((off_t)cluster - 2) * (unsigned long long)fs->cluster_size;
 }
 
 /**
@@ -556,28 +636,19 @@ uint32_t update_free(DOS_FS * fs)
 #endif
 	    printf("Free cluster summary wrong (%ld vs. really %ld)\n",
 		   (long)fs->free_clusters, (long)free);
-	    if (interactive)
-		printf("1) Correct\n2) Don't correct\n");
-	    else
-#ifdef __REACTOS__
-	    if (rw)
-#endif
-		printf("  Auto-correcting.\n");
-#ifndef __REACTOS__
-	    if (!interactive || get_key("12", "?") == '1')
-#else
-	    if ((!interactive && rw) || (interactive && get_key("12", "?") == '1'))
-#endif
+	    if (get_choice(1, "  Auto-correcting.",
+			   2,
+			   1, "Correct",
+			   2, "Don't correct") == 1)
 		do_set = 1;
 	}
     } else {
 	printf("Free cluster summary uninitialized (should be %ld)\n", (long)free);
 	if (rw) {
-	    if (interactive)
-		printf("1) Set it\n2) Leave it uninitialized\n");
-	    else
-		printf("  Auto-setting.\n");
-	    if (!interactive || get_key("12", "?") == '1')
+	    if (get_choice(1, "  Auto-setting.",
+			   2,
+			   1, "Set it",
+			   2, "Leave it uninitialized") == 1)
 		do_set = 1;
 	}
     }

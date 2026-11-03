@@ -118,6 +118,7 @@
 #include "shellmenu/CMergedFolder.h"
 #include "shellmenu/shellmenu.h"
 #include "CUserEventTimer.h"
+#include "CKnownFolderManager.h"
 #include "CUserNotification.h"
 #include "dialogs/folder_options.h"
 #include "shelldesktop/CChangeNotifyServer.h"
