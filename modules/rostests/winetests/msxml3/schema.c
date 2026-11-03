@@ -1443,6 +1443,147 @@ static void test_XDR_datatypes(void)
     free_bstrs();
 }
 
+struct xsd_pattern_value
+{
+    const WCHAR *value;
+    BOOL valid;
+};
+
+static const struct xsd_pattern_test
+{
+    const char *name;
+    const WCHAR *pattern; /* as written in the value attribute, XML escaped */
+    BOOL accepted;
+    struct xsd_pattern_value values[5];
+} xsd_pattern_tests[] =
+{
+    { "u-literal", L"\\u0041", TRUE, { { L"A", TRUE }, { L"a" }, { L"B" }, { L"AA" } } },
+    { "u-range", L"[\\u0041-\\u005A]+", TRUE, { { L"ABC", TRUE }, { L"abc" }, { L"A1" } } },
+    { "u-negated", L"[^\\u0041]+", TRUE, { { L"B", TRUE }, { L"A" }, { L"BA" } } },
+    { "u-outside-class", L"\\u0041+", TRUE, { { L"AAA", TRUE }, { L"A", TRUE }, { L"B" } } },
+    { "u-quantifier", L"\\u0041{2}", TRUE, { { L"AA", TRUE }, { L"A" } } },
+    { "x-escape", L"\\x41", TRUE, { { L"A", TRUE }, { L"x41" } } },
+    { "u-lower-hex", L"[\\u00e9]", TRUE, { { L"\x00e9", TRUE }, { L"e" } } },
+    { "u-upper-hex", L"[\\u00E9]", TRUE, { { L"\x00e9", TRUE }, { L"e" } } },
+    /* the escape is a literal character, even when it spells a metacharacter */
+    { "u-backslash", L"\\u005Cd", TRUE, { { L"\\d", TRUE }, { L"5" } } },
+    { "u-hyphen", L"[a\\u002Dz]", TRUE, { { L"-", TRUE }, { L"a", TRUE }, { L"z", TRUE }, { L"b" } } },
+    { "u-dot", L"\\u002E", TRUE, { { L".", TRUE }, { L"x" } } },
+    { "u-plus", L"a\\u002B", TRUE, { { L"a+", TRUE }, { L"aa" }, { L"a" } } },
+    { "u-lbracket", L"[\\u005B]", TRUE, { { L"[", TRUE }, { L"a" } } },
+    { "u-rbracket", L"[\\u005D]", TRUE, { { L"]", TRUE }, { L"a" } } },
+    { "u-caret", L"[\\u005Eab]", TRUE, { { L"^", TRUE }, { L"a", TRUE }, { L"c" } } },
+    /* U+0000 cannot be in XML text, the pattern is still accepted */
+    { "u-nul-range", L"[^\\u0000-\\u0020]+", TRUE, { { L"abc", TRUE }, { L"a b" } } },
+    { "u-nul-single", L"[\\u0000a]", TRUE, { { L"a", TRUE }, { L"b" } } },
+    { "u-nul-negated", L"[^\\u0000]+", TRUE, { { L"abc", TRUE } } },
+    { "u-noncharacters", L"[^\\uFFFE\\uFFFF]+", TRUE, { { L"a", TRUE } } },
+    /* surrogates are UTF-16 code units: a class that excludes them excludes the supplementary characters */
+    { "u-surrogates", L"[^\\uD800-\\uDFFF]+", TRUE, { { L"a", TRUE }, { L"\xd83d\xde00" } } },
+    /* the two sets of the AppV DeploymentConfiguration schema */
+    { "appv-allowed-set", L"[^&quot;&amp;&lt;&gt;\\u0000-\\u0020\\u007F\\u0080-\\u009F]+", TRUE,
+      { { L"abc", TRUE }, { L"caf\x00e9", TRUE }, { L"a\x0085" L"b" }, { L"a\x007f" L"b" }, { L"a&amp;b" } } },
+    { "appv-no-private-use", L"[^\\uFDD0-\\uFDEF\\uFFF9-\\uFFFF\\p{IsPrivateUse}]+", TRUE,
+      { { L"abc", TRUE }, { L"\xd83d\xde00", TRUE }, { L"\xfdd0" }, { L"\xe000" } } },
+    /* malformed escapes are errors */
+    { "u-short", L"\\u41", FALSE },
+    { "u-not-hex", L"\\uZZZZ", FALSE },
+    { "capital-U", L"\\U0041", FALSE },
+};
+
+static void test_xsd_pattern_escapes(void)
+{
+    static const WCHAR schema_format[] =
+        L"<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" targetNamespace=\"urn:t\" "
+        L"xmlns=\"urn:t\" elementFormDefault=\"qualified\"><xs:element name=\"e\"><xs:simpleType>"
+        L"<xs:restriction base=\"xs:string\"><xs:pattern value=\"%s\"/></xs:restriction>"
+        L"</xs:simpleType></xs:element></xs:schema>";
+    unsigned int i, j;
+
+    for (i = 0; i < ARRAY_SIZE(xsd_pattern_tests); i++)
+    {
+        const struct xsd_pattern_test *test = &xsd_pattern_tests[i];
+        IXMLDOMSchemaCollection *cache;
+        IXMLDOMDocument2 *schema;
+        WCHAR buf[1024];
+        VARIANT_BOOL b;
+        VARIANT v;
+        BSTR str;
+        HRESULT hr;
+
+        schema = create_document_version(60, &IID_IXMLDOMDocument2);
+        cache = create_cache_version(60, &IID_IXMLDOMSchemaCollection);
+        if (!schema || !cache)
+        {
+            if (schema) IXMLDOMDocument2_Release(schema);
+            if (cache) IXMLDOMSchemaCollection_Release(cache);
+            return;
+        }
+
+        wsprintfW(buf, schema_format, test->pattern);
+        str = SysAllocString(buf);
+        hr = IXMLDOMDocument2_loadXML(schema, str, &b);
+        ok(hr == S_OK && b == VARIANT_TRUE, "%s: failed to load the schema, hr %#lx.\n", test->name, hr);
+        SysFreeString(str);
+
+        V_VT(&v) = VT_DISPATCH;
+        V_DISPATCH(&v) = (IDispatch *)schema;
+        str = SysAllocString(L"urn:t");
+        hr = IXMLDOMSchemaCollection_add(cache, str, v);
+        SysFreeString(str);
+        if (!test->accepted)
+        {
+            ok(hr == E_FAIL, "%s: unexpected hr %#lx.\n", test->name, hr);
+        }
+        else
+        {
+            ok(hr == S_OK, "%s: unexpected hr %#lx.\n", test->name, hr);
+            for (j = 0; hr == S_OK && j < ARRAY_SIZE(test->values) && test->values[j].value; j++)
+            {
+                static const WCHAR inst_format[] = L"<e xmlns=\"urn:t\">%s</e>";
+                IXMLDOMDocument2 *doc = create_document_version(60, &IID_IXMLDOMDocument2);
+                IXMLDOMParseError *err = NULL;
+                const WCHAR *value = test->values[j].value;
+                WCHAR *esc = buf + 512;
+                LONG code;
+                VARIANT cv;
+                int k = 0;
+
+                /* escape the markup characters of the value */
+                for (; *value; value++)
+                {
+                    if (*value == '&') { lstrcpyW(esc + k, L"&amp;"); k += 5; }
+                    else if (*value == '<') { lstrcpyW(esc + k, L"&lt;"); k += 4; }
+                    else esc[k++] = *value;
+                }
+                esc[k] = 0;
+                wsprintfW(buf, inst_format, esc);
+                if (!doc) break;
+                str = SysAllocString(buf);
+                hr = IXMLDOMDocument2_loadXML(doc, str, &b);
+                ok(hr == S_OK && b == VARIANT_TRUE, "%s: failed to load the instance %u, hr %#lx.\n", test->name, j, hr);
+                SysFreeString(str);
+
+                V_VT(&cv) = VT_DISPATCH;
+                V_DISPATCH(&cv) = (IDispatch *)cache;
+                hr = IXMLDOMDocument2_putref_schemas(doc, cv);
+                ok(hr == S_OK, "%s: unexpected hr %#lx.\n", test->name, hr);
+                hr = IXMLDOMDocument2_validate(doc, &err);
+                ok(hr == S_OK, "%s: unexpected hr %#lx.\n", test->name, hr);
+                code = -1;
+                hr = IXMLDOMParseError_get_errorCode(err, &code);
+                ok(hr == S_OK || hr == S_FALSE, "%s: unexpected hr %#lx.\n", test->name, hr);
+                ok(test->values[j].valid ? code == 0 : code != 0, "%s: value %u: error code %#lx, expected %s.\n",
+                        test->name, j, code, test->values[j].valid ? "valid" : "invalid");
+                IXMLDOMParseError_Release(err);
+                IXMLDOMDocument2_Release(doc);
+            }
+        }
+        IXMLDOMDocument2_Release(schema);
+        IXMLDOMSchemaCollection_Release(cache);
+    }
+}
+
 static void test_obj_dispex(IUnknown *obj)
 {
     DISPID dispid = DISPID_SAX_XMLREADER_GETFEATURE;
@@ -1546,6 +1687,7 @@ START_TEST(schema)
     test_collection_content();
     test_XDR_schemas();
     test_XDR_datatypes();
+    test_xsd_pattern_escapes();
     test_dispex();
 
     CoUninitialize();
