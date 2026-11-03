@@ -25,6 +25,7 @@
 #include "wine/test.h"
 #include "bits.h"
 #include "bits2_0.h"
+#include "bits3_0.h"
 
 #define DATA_SIZE 100000
 
@@ -226,10 +227,10 @@ static void test_arguments(IBackgroundCopyManager *manager)
     ok(FAILED(hr), "empty range: 0x%08lx\n", hr);
     trace("empty range: 0x%08lx\n", hr);
     hr = IBackgroundCopyJob3_AddFileWithRanges(job3, L"http://localhost/x", L"C:\\ranges.tmp", 2, (BG_FILE_RANGE *)overlap);
-    ok(FAILED(hr), "overlapping ranges: 0x%08lx\n", hr);
+    ok(hr == BG_E_OVERLAPPING_RANGES, "overlapping ranges: 0x%08lx\n", hr);
     trace("overlapping ranges: 0x%08lx\n", hr);
     hr = IBackgroundCopyJob3_AddFileWithRanges(job3, L"http://localhost/x", L"C:\\ranges.tmp", 2, (BG_FILE_RANGE *)overlap_reverse);
-    ok(FAILED(hr), "overlapping ranges, reverse order: 0x%08lx\n", hr);
+    ok(hr == BG_E_OVERLAPPING_RANGES, "overlapping ranges, reverse order: 0x%08lx\n", hr);
     hr = IBackgroundCopyJob3_AddFileWithRanges(job3, L"http://localhost/x", L"C:\\ranges.tmp", 2, (BG_FILE_RANGE *)eof_first);
     ok(FAILED(hr), "range to the end of the file, then another: 0x%08lx\n", hr);
     trace("range to the end of the file, then another: 0x%08lx\n", hr);
@@ -369,14 +370,18 @@ static void test_transfer(IBackgroundCopyManager *manager, WORD port)
         ok(read_local_file(local, &content, &size), "local file unreadable: %lu\n", GetLastError());
         if (content)
         {
-            ok(size == DATA_SIZE, "local file size %lu\n", size);
-            for (i = 0; i < ARRAY_SIZE(ranges) && size == DATA_SIZE; ++i)
+            /* The local file holds the ranges one after the other, in the order given */
+            DWORD pos = 0;
+            ok(size == 500 + 2000 + (DATA_SIZE - 90000), "local file size %lu\n", size);
+            for (i = 0; i < ARRAY_SIZE(ranges) && size >= pos; ++i)
             {
-                ULONG64 end = ranges[i].Length == BG_LENGTH_TO_EOF ? DATA_SIZE : ranges[i].InitialOffset + ranges[i].Length;
-                ULONG64 pos;
-                for (pos = ranges[i].InitialOffset; pos < end; ++pos)
-                    if (content[pos] != expected_byte(pos)) break;
-                ok(pos == end, "range %lu: byte %I64u is %02x, expected %02x\n", i, pos, content[pos], expected_byte(pos));
+                ULONG64 len = ranges[i].Length == BG_LENGTH_TO_EOF ? DATA_SIZE - ranges[i].InitialOffset : ranges[i].Length;
+                ULONG64 k;
+                for (k = 0; k < len && pos + k < size; ++k)
+                    if (content[pos + k] != expected_byte(ranges[i].InitialOffset + k)) break;
+                ok(k == len, "range %lu: byte %I64u is %02x, expected %02x\n", i, k, content[pos + k],
+                   expected_byte(ranges[i].InitialOffset + k));
+                pos += len;
             }
             free(content);
         }
@@ -576,6 +581,242 @@ static void test_callback_during_transfer(IBackgroundCopyManager *manager, WORD 
     IBackgroundCopyJob_Release(job);
 }
 
+/* The local file holds the ranges one after the other in the order given and is as long as they are together
+ * (the AddFileWithRanges documentation); the progress counts are those of the ranges (inferred, not measured on
+ * Windows). The ranges are given out of order here. */
+static void test_size_and_progress(IBackgroundCopyManager *manager, WORD port)
+{
+    static const BG_FILE_RANGE ranges[] = {{50000, 2000}, {1000, 500}};
+    IBackgroundCopyJob *job;
+    IBackgroundCopyJob3 *job3;
+    IEnumBackgroundCopyFiles *files;
+    IBackgroundCopyFile *file;
+    BG_FILE_PROGRESS progress;
+    BG_JOB_PROGRESS job_progress;
+    BG_JOB_STATE state;
+    WCHAR url[100], local[MAX_PATH], dir[MAX_PATH];
+    ULONG fetched = 0;
+    BYTE *content;
+    DWORD size, i;
+    HRESULT hr;
+
+    GetTempPathW(MAX_PATH, dir);
+    GetTempFileNameW(dir, L"rng", 0, local);
+    DeleteFileW(local);
+    swprintf(url, ARRAY_SIZE(url), L"http://127.0.0.1:%u/file.bin", port);
+
+    job3 = create_job(manager, BG_JOB_TYPE_DOWNLOAD, &job);
+    if (!job3) return;
+
+    server_ranges = TRUE;
+    hr = IBackgroundCopyJob3_AddFileWithRanges(job3, url, local, ARRAY_SIZE(ranges), (BG_FILE_RANGE *)ranges);
+    ok(hr == S_OK, "AddFileWithRanges: 0x%08lx\n", hr);
+
+    hr = IBackgroundCopyJob_GetProgress(job, &job_progress);
+    ok(hr == S_OK, "GetProgress: 0x%08lx\n", hr);
+    ok(job_progress.BytesTotal == 2500, "job BytesTotal before the transfer %I64u\n", job_progress.BytesTotal);
+    ok(job_progress.BytesTransferred == 0, "job BytesTransferred before the transfer %I64u\n", job_progress.BytesTransferred);
+
+    hr = IBackgroundCopyJob_Resume(job);
+    ok(hr == S_OK, "Resume: 0x%08lx\n", hr);
+    state = wait_for_job(job, 60);
+    ok(state == BG_JOB_STATE_TRANSFERRED, "job state %d\n", state);
+
+    if (state == BG_JOB_STATE_TRANSFERRED)
+    {
+        hr = IBackgroundCopyJob_GetProgress(job, &job_progress);
+        ok(hr == S_OK, "GetProgress: 0x%08lx\n", hr);
+        ok(job_progress.BytesTotal == 2500, "job BytesTotal %I64u\n", job_progress.BytesTotal);
+        ok(job_progress.BytesTransferred == 2500, "job BytesTransferred %I64u\n", job_progress.BytesTransferred);
+
+        hr = IBackgroundCopyJob_EnumFiles(job, &files);
+        ok(hr == S_OK, "EnumFiles: 0x%08lx\n", hr);
+        hr = IEnumBackgroundCopyFiles_Next(files, 1, &file, &fetched);
+        ok(hr == S_OK && fetched == 1, "Next: 0x%08lx\n", hr);
+        if (hr == S_OK)
+        {
+            hr = IBackgroundCopyFile_GetProgress(file, &progress);
+            ok(hr == S_OK, "file GetProgress: 0x%08lx\n", hr);
+            ok(progress.BytesTotal == 2500, "file BytesTotal %I64u\n", progress.BytesTotal);
+            ok(progress.BytesTransferred == 2500, "file BytesTransferred %I64u\n", progress.BytesTransferred);
+            ok(progress.Completed, "file not completed\n");
+            IBackgroundCopyFile_Release(file);
+        }
+        IEnumBackgroundCopyFiles_Release(files);
+
+        hr = IBackgroundCopyJob_Complete(job);
+        ok(hr == S_OK, "Complete: 0x%08lx\n", hr);
+
+        ok(read_local_file(local, &content, &size), "local file unreadable: %lu\n", GetLastError());
+        if (content)
+        {
+            ok(size == 2500, "local file size %lu, expected the sum of the ranges\n", size);
+            for (i = 0; i < size && i < 2500; ++i)
+            {
+                ULONG64 remote = i < 2000 ? 50000 + i : 1000 + (i - 2000);
+                if (content[i] != expected_byte(remote)) break;
+            }
+            ok(i == min(size, 2500), "local byte %lu is %02x: the ranges follow each other in the order given\n",
+               i, i < size ? content[i] : 0);
+            free(content);
+        }
+    }
+    else IBackgroundCopyJob_Cancel(job);
+
+    DeleteFileW(local);
+    IBackgroundCopyJob3_Release(job3);
+    IBackgroundCopyJob_Release(job);
+}
+
+typedef struct
+{
+    IBackgroundCopyCallback3 IBackgroundCopyCallback3_iface;
+    LONG ref;
+    LONG transferred;
+    LONG count;
+    BG_FILE_RANGE ranges[8];
+    BOOL bad_args;
+} Callback3;
+
+static Callback3 *impl_from_callback3(IBackgroundCopyCallback3 *iface)
+{
+    return CONTAINING_RECORD(iface, Callback3, IBackgroundCopyCallback3_iface);
+}
+
+static HRESULT WINAPI cb3_QueryInterface(IBackgroundCopyCallback3 *iface, REFIID riid, void **obj)
+{
+    if (IsEqualGUID(riid, &IID_IUnknown) || IsEqualGUID(riid, &IID_IBackgroundCopyCallback) ||
+        IsEqualGUID(riid, &IID_IBackgroundCopyCallback2) || IsEqualGUID(riid, &IID_IBackgroundCopyCallback3))
+    {
+        *obj = iface;
+        IBackgroundCopyCallback3_AddRef(iface);
+        return S_OK;
+    }
+    *obj = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI cb3_AddRef(IBackgroundCopyCallback3 *iface)
+{
+    return InterlockedIncrement(&impl_from_callback3(iface)->ref);
+}
+
+static ULONG WINAPI cb3_Release(IBackgroundCopyCallback3 *iface)
+{
+    Callback3 *cb = impl_from_callback3(iface);
+    ULONG ref = InterlockedDecrement(&cb->ref);
+    if (!ref) free(cb);
+    return ref;
+}
+
+static HRESULT WINAPI cb3_JobTransferred(IBackgroundCopyCallback3 *iface, IBackgroundCopyJob *job)
+{
+    InterlockedExchange(&impl_from_callback3(iface)->transferred, 1);
+    return S_OK;
+}
+
+static HRESULT WINAPI cb3_JobError(IBackgroundCopyCallback3 *iface, IBackgroundCopyJob *job, IBackgroundCopyError *error)
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI cb3_JobModification(IBackgroundCopyCallback3 *iface, IBackgroundCopyJob *job, DWORD reserved)
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI cb3_FileTransferred(IBackgroundCopyCallback3 *iface, IBackgroundCopyJob *job, IBackgroundCopyFile *file)
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI cb3_FileRangesTransferred(IBackgroundCopyCallback3 *iface, IBackgroundCopyJob *job,
+                                                IBackgroundCopyFile *file, DWORD count, const BG_FILE_RANGE *ranges)
+{
+    Callback3 *cb = impl_from_callback3(iface);
+    LONG n = cb->count;
+    WCHAR *name = NULL;
+    DWORD i;
+
+    if (!job || !file || !count || !ranges) cb->bad_args = TRUE;
+    else if (IBackgroundCopyFile_GetRemoteName(file, &name) != S_OK || !name) cb->bad_args = TRUE;
+    CoTaskMemFree(name);
+    for (i = 0; i < count && n < ARRAY_SIZE(cb->ranges); ++i) cb->ranges[n++] = ranges[i];
+    InterlockedExchange(&cb->count, n);
+    return S_OK;
+}
+
+static const IBackgroundCopyCallback3Vtbl callback3_vtbl =
+{
+    cb3_QueryInterface, cb3_AddRef, cb3_Release, cb3_JobTransferred, cb3_JobError, cb3_JobModification,
+    cb3_FileTransferred, cb3_FileRangesTransferred
+};
+
+/* IBackgroundCopyCallback3::FileRangesTransferred is sent when a range has arrived, only to a callback that has
+ * the interface, and only with BG_NOTIFY_FILE_RANGES_TRANSFERRED (documented; not measured on Windows) */
+static void run_callback3(IBackgroundCopyManager *manager, WORD port, ULONG flags, LONG expect_calls)
+{
+    static const BG_FILE_RANGE ranges[] = {{1000, 500}, {50000, 2000}, {90000, BG_LENGTH_TO_EOF}};
+    static const BG_FILE_RANGE expected[] = {{1000, 500}, {50000, 2000}, {90000, DATA_SIZE - 90000}};
+    IBackgroundCopyJob *job;
+    IBackgroundCopyJob3 *job3;
+    Callback3 *cb;
+    BG_JOB_STATE state;
+    WCHAR url[100], local[MAX_PATH], dir[MAX_PATH];
+    ULONG got_flags = 0;
+    DWORD i;
+    HRESULT hr;
+
+    GetTempPathW(MAX_PATH, dir);
+    GetTempFileNameW(dir, L"rng", 0, local);
+    DeleteFileW(local);
+    swprintf(url, ARRAY_SIZE(url), L"http://127.0.0.1:%u/file.bin", port);
+
+    job3 = create_job(manager, BG_JOB_TYPE_DOWNLOAD, &job);
+    if (!job3) return;
+
+    cb = calloc(1, sizeof(*cb));
+    cb->IBackgroundCopyCallback3_iface.lpVtbl = &callback3_vtbl;
+    cb->ref = 1;
+
+    server_ranges = TRUE;
+    hr = IBackgroundCopyJob3_AddFileWithRanges(job3, url, local, ARRAY_SIZE(ranges), (BG_FILE_RANGE *)ranges);
+    ok(hr == S_OK, "AddFileWithRanges: 0x%08lx\n", hr);
+    hr = IBackgroundCopyJob_SetNotifyInterface(job, (IUnknown *)&cb->IBackgroundCopyCallback3_iface);
+    ok(hr == S_OK, "SetNotifyInterface: 0x%08lx\n", hr);
+    hr = IBackgroundCopyJob_SetNotifyFlags(job, flags);
+    ok(hr == S_OK, "SetNotifyFlags(0x%lx): 0x%08lx\n", flags, hr);
+    hr = IBackgroundCopyJob_GetNotifyFlags(job, &got_flags);
+    ok(hr == S_OK && got_flags == flags, "GetNotifyFlags: 0x%08lx, 0x%lx\n", hr, got_flags);
+
+    hr = IBackgroundCopyJob_Resume(job);
+    ok(hr == S_OK, "Resume: 0x%08lx\n", hr);
+    state = wait_for_job(job, 60);
+    ok(state == BG_JOB_STATE_TRANSFERRED, "job state %d\n", state);
+    for (i = 0; i < 100 && (flags & BG_NOTIFY_JOB_TRANSFERRED) && !InterlockedCompareExchange(&cb->transferred, 0, 0); ++i)
+        Sleep(50);
+
+    ok(cb->count == expect_calls, "FileRangesTransferred was called %ld times, expected %ld\n", cb->count, expect_calls);
+    ok(!cb->bad_args, "FileRangesTransferred got bad arguments\n");
+    for (i = 0; i < (DWORD)min(cb->count, expect_calls); ++i)
+        ok(cb->ranges[i].InitialOffset == expected[i].InitialOffset && cb->ranges[i].Length == expected[i].Length,
+           "call %lu: range %I64u+%I64u, expected %I64u+%I64u\n", i, cb->ranges[i].InitialOffset, cb->ranges[i].Length,
+           expected[i].InitialOffset, expected[i].Length);
+
+    IBackgroundCopyJob_Cancel(job);
+    IBackgroundCopyJob_SetNotifyInterface(job, NULL);
+    IBackgroundCopyCallback3_Release(&cb->IBackgroundCopyCallback3_iface);
+    DeleteFileW(local);
+    IBackgroundCopyJob3_Release(job3);
+    IBackgroundCopyJob_Release(job);
+}
+
+static void test_callback3(IBackgroundCopyManager *manager, WORD port)
+{
+    run_callback3(manager, port, BG_NOTIFY_JOB_TRANSFERRED | BG_NOTIFY_FILE_RANGES_TRANSFERRED, 3);
+    run_callback3(manager, port, BG_NOTIFY_JOB_TRANSFERRED, 0);
+}
+
 START_TEST(ranges)
 {
     IBackgroundCopyManager *manager = NULL;
@@ -603,6 +844,8 @@ START_TEST(ranges)
         test_transfer(manager, port);
         test_no_range_support(manager, port);
         test_callback_during_transfer(manager, port);
+        test_size_and_progress(manager, port);
+        test_callback3(manager, port);
         stop_server();
     }
     else skip("Cannot start the local HTTP server\n");

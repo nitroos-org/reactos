@@ -260,6 +260,8 @@ static ULONG WINAPI BackgroundCopyJob_Release(IBackgroundCopyJob4 *iface)
     {
         job->cs.DebugInfo->Spare[0] = 0;
         DeleteCriticalSection(&job->cs);
+        if (job->callback3)
+            IBackgroundCopyCallback3_Release(job->callback3);
         if (job->callback)
             IBackgroundCopyCallback2_Release(job->callback);
         free(job->displayName);
@@ -285,6 +287,24 @@ static ULONG WINAPI BackgroundCopyJob_Release(IBackgroundCopyJob4 *iface)
 
 /*** IBackgroundCopyJob methods ***/
 
+/* The size of a job is the sum of the sizes of its files, unknown as long as one of them is */
+void update_job_total(BackgroundCopyJobImpl *job)
+{
+    BackgroundCopyFileImpl *file;
+    ULONG64 total = 0;
+
+    LIST_FOR_EACH_ENTRY(file, &job->files, BackgroundCopyFileImpl, entryFromJob)
+    {
+        if (file->fileProgress.BytesTotal == BG_SIZE_UNKNOWN)
+        {
+            total = BG_SIZE_UNKNOWN;
+            break;
+        }
+        total += file->fileProgress.BytesTotal;
+    }
+    job->jobProgress.BytesTotal = total;
+}
+
 static HRESULT add_file(BackgroundCopyJobImpl *job, const WCHAR *remote, const WCHAR *local,
                         DWORD range_count, const BG_FILE_RANGE *ranges)
 {
@@ -304,9 +324,11 @@ static HRESULT add_file(BackgroundCopyJobImpl *job, const WCHAR *remote, const W
     }
 
     /* Add a reference to the file to file list */
+    EnterCriticalSection(&job->cs);
     list_add_head(&job->files, &file->entryFromJob);
-    job->jobProgress.BytesTotal = BG_SIZE_UNKNOWN;
     ++job->jobProgress.FilesTotal;
+    update_job_total(job);
+    LeaveCriticalSection(&job->cs);
     return S_OK;
 }
 
@@ -631,7 +653,8 @@ static HRESULT WINAPI BackgroundCopyJob_SetNotifyFlags(IBackgroundCopyJob4 *ifac
                                      BG_NOTIFY_JOB_ERROR |
                                      BG_NOTIFY_DISABLE |
                                      BG_NOTIFY_JOB_MODIFICATION |
-                                     BG_NOTIFY_FILE_TRANSFERRED;
+                                     BG_NOTIFY_FILE_TRANSFERRED |
+                                     BG_NOTIFY_FILE_RANGES_TRANSFERRED;
 
     TRACE("%p, %#lx.\n", iface, flags);
 
@@ -663,6 +686,11 @@ static HRESULT WINAPI BackgroundCopyJob_SetNotifyInterface(IBackgroundCopyJob4 *
 
     if (is_job_done(job)) return BG_E_INVALID_STATE;
 
+    if (job->callback3)
+    {
+        IBackgroundCopyCallback3_Release(job->callback3);
+        job->callback3 = NULL;
+    }
     if (job->callback)
     {
         IBackgroundCopyCallback2_Release(job->callback);
@@ -677,6 +705,8 @@ static HRESULT WINAPI BackgroundCopyJob_SetNotifyInterface(IBackgroundCopyJob4 *
             hr = IUnknown_QueryInterface(callback, &IID_IBackgroundCopyCallback, (void**)&job->callback);
         else
             job->callback2 = TRUE;
+        if (SUCCEEDED(hr))
+            IUnknown_QueryInterface(callback, &IID_IBackgroundCopyCallback3, (void **)&job->callback3);
     }
 
     return hr;
@@ -1210,6 +1240,7 @@ HRESULT BackgroundCopyJobConstructor(LPCWSTR displayName, BG_JOB_TYPE type, GUID
     This->notify_flags = BG_NOTIFY_JOB_ERROR | BG_NOTIFY_JOB_TRANSFERRED;
     This->callback = NULL;
     This->callback2 = FALSE;
+    This->callback3 = NULL;
 
     This->error.context = 0;
     This->error.code = S_OK;

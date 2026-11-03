@@ -34,6 +34,19 @@ interface IBackgroundCopyCallback2 : IBackgroundCopyCallback
                             [in] IBackgroundCopyFile *file);
 }
 
+/* BITS 5.0 in the SDK; kept here so that its proxy is built with the others (bits5_0.idl cannot be proxied) */
+[
+    uuid(98c97bd2-e32b-4ad8-a528-95fd8b16bd42),
+    odl
+]
+interface IBackgroundCopyCallback3 : IBackgroundCopyCallback2
+{
+    HRESULT FileRangesTransferred([in] IBackgroundCopyJob *job,
+                                  [in] IBackgroundCopyFile *file,
+                                  [in] DWORD RangeCount,
+                                  [in, size_is(RangeCount)] const BG_FILE_RANGE Ranges[]);
+}
+
 [
     uuid(659cdeae-489e-11d9-a9cd-000d56965251),
     odl
