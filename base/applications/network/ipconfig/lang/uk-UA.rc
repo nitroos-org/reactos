@@ -142,3 +142,23 @@ IP-адреса звільняється чи оновлюється для вс
                                         чи ""Local Area Connection 2""\n"
     IDS_CMDLINEERROR "\nError: unrecongnized or incomplete command line.\n"
 END
+
+STRINGTABLE
+BEGIN
+/* TODO: translate (English text of en-US.rc, copied for the IDs this file lacked) */
+    IDS_DESCRIPTIONFMT       "   Description . . . . . . . . . . . : %hs\n"
+    IDS_LINKLOCALV6          "   Link-local IPv6 Address . . . . . : %hs\n"
+    IDS_IPV6ADDRESS          "   IPv6 Address. . . . . . . . . . . : %hs\n"
+    IDS_TEMPIPV6             "   Temporary IPv6 Address. . . . . . : %hs\n"
+    IDS_AUTOIPV4             "   Autoconfiguration IPv4 Address. . : %hs\n"
+    IDS_DHCPV6IAID           "   DHCPv6 IAID . . . . . . . . . . . : %lu\n"
+    IDS_DHCPV6DUID           "   DHCPv6 Client DUID. . . . . . . . : %hs\n"
+    IDS_NETBIOSEN            "   NetBIOS over Tcpip. . . . . . . . : Enabled\n"
+    IDS_NETBIOSDIS           "   NetBIOS over Tcpip. . . . . . . . : Disabled\n"
+    IDS_COMPARTMENT          "\n==============================================================================\nNetwork Information for Compartment 1 (ACTIVE)\n==============================================================================\n"
+    IDS_DNSREGISTER          "Registration of the DNS resource records for all adapters of this computer has been initiated. Any errors will be reported in the Event Viewer in 15 minutes.\n"
+    IDS_CLASSV4NONE          "There are no DHCPv4 classes defined for %ls.\n"
+    IDS_CLASSV6NONE          "There are no DHCPv6 classes defined for %ls.\n"
+    IDS_CLASSV4LIST          "DHCP Class ID for Adapter ""%ls"":\n\n   DHCP ClassID Name . . . . . . . . : %ls\n   DHCP ClassID Description  . . . . : User class\n\n"
+    IDS_DNSDISPLAYERROR     "Could not display the DNS Resolver Cache.\n"
+END
