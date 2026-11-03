@@ -343,6 +343,7 @@ typedef struct _FDO_DEVICE_EXTENSION
     ULONG DebugDeferStartSeconds;
     LONG DebugDeferCounter;
     LONG DebugDeferredPending;
+    BOOLEAN DebugDeferStopping;
     /* Parameters\DebugLateCompletion: completes every swept SRB once more through
        StorPortNotification(RequestComplete) after its packet is freed, as a miniport that
        let go of it late would */

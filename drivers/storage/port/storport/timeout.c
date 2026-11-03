@@ -254,8 +254,6 @@ PortRestartAdapter(
     ULONG Generation, Swept = 0, Kept = 0, Slot;
     KIRQL OldIrql;
 
-    FdoExtension->AdapterRestarts++;
-
     if (HwInitData->HwAdapterControl == NULL ||
         !FdoExtension->AdapterControlSupported[ScsiStopAdapter] ||
         !FdoExtension->AdapterControlSupported[ScsiRestartAdapter])
@@ -281,6 +279,9 @@ PortRestartAdapter(
         KeReleaseSpinLock(&FdoExtension->TimeoutLock, OldIrql);
         return;
     }
+
+    /* Only real restarts count: swept SRBs age by them */
+    FdoExtension->AdapterRestarts++;
 
     /* Requests armed from here on belong to the restarted adapter */
     KeAcquireSpinLock(&FdoExtension->TimeoutLock, &OldIrql);
@@ -558,6 +559,18 @@ PortStopTimeouts(
     /* A miniport timer routine that was running may have set its timer again */
     KeCancelTimer(&FdoExtension->Timer);
     KeFlushQueuedDpcs();
+
+#if DBG
+    /* Held back starts (DebugDeferStartEvery) fire into this adapter: let them abort and drain */
+    FdoExtension->DebugDeferStopping = TRUE;
+    while (InterlockedCompareExchange(&FdoExtension->DebugDeferredPending, 0, 0) != 0)
+    {
+        LARGE_INTEGER Delay;
+        Delay.QuadPart = -100000LL;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+    KeFlushQueuedDpcs();
+#endif
 
     /* A queued worker holds the device object, and frees nothing */
     while (InterlockedCompareExchange(&FdoExtension->TimeoutWorkQueued, 0, 0) != 0)
