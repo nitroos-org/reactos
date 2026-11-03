@@ -89,6 +89,7 @@ sacdrv.sys   = 1,,,,,,x,4,,,,1,4
 ;uniata.sys   = 1,,,,,,x,4,,,,1,4
 atapi.sys    = 1,,,,,,x,4,,,,1,4
 buslogic.sys = 1,,,,,,x,4,,,,1,4
+stornvme.sys = 1,,,,,,x,4,,,,1,4
 blue.sys     = 1,,,,,,x,4,,,,1,4
 vgafonts.cab = 1,,,,,,,1,,,,1,1
 bootvid.dll  = 1,,,,,,,2,,,,1,2
@@ -167,6 +168,7 @@ PCI\CC_0104 = pciide
 PCI\CC_0105 = pciide
 PCI\CC_0106 = pciide
 ;PCI\CC_0106 = storahci
+PCI\CC_010802 = stornvme
 ;*PNP0600 = uniata
 *PNP0600 = atapi
 USB\CLASS_09 = usbhub
@@ -214,6 +216,7 @@ atapi = atapi.sys
 atapi = atapi.sys
 buslogic = buslogic.sys
 storahci = storahci.sys
+stornvme = stornvme.sys
 disk = disk.sys
 
 [MouseDrivers.Load]
