@@ -1477,6 +1477,26 @@ PWND FASTCALL UserGetDesktopWindow(VOID)
     return UserGetWindowObject(pdo->DesktopWindow);
 }
 
+/*
+ * The desktop window of the desktop the calling thread is attached to. A message sent
+ * with HWND_BROADCAST goes to the windows of the caller's desktop, not to those of the
+ * input desktop. The thread holds a reference to its desktop, so the desktop window and
+ * the desktop heap stay valid while the thread waits for a receiver. The input desktop
+ * can be switched away from and closed (its heap destroyed) while the USER lock is
+ * released during such a wait.
+ */
+PWND FASTCALL UserGetThreadDesktopWindow(VOID)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+
+    if (pti && pti->rpdesk && pti->rpdesk->DesktopWindow &&
+        !(pti->rpdesk->dwDTFlags & DF_DESTROYED))
+    {
+        return UserGetWindowObject(pti->rpdesk->DesktopWindow);
+    }
+    return UserGetDesktopWindow();
+}
+
 HWND FASTCALL IntGetMessageWindow(VOID)
 {
     PDESKTOP pdo = IntGetActiveDesktop();

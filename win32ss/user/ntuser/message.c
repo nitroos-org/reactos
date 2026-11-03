@@ -1518,7 +1518,7 @@ UserPostMessage( HWND Wnd,
 
         if (!is_message_broadcastable(Msg)) return TRUE;
 
-        DesktopWindow = UserGetDesktopWindow();
+        DesktopWindow = UserGetThreadDesktopWindow();
         List = IntWinListChildren(DesktopWindow);
 
         if (List != NULL)
@@ -1827,7 +1827,7 @@ co_IntSendMessageTimeout( HWND hWnd,
 
     if (!is_message_broadcastable(Msg)) return TRUE;
 
-    DesktopWindow = UserGetDesktopWindow();
+    DesktopWindow = UserGetThreadDesktopWindow();
     if (NULL == DesktopWindow)
     {
        EngSetLastError(ERROR_INTERNAL_ERROR);
@@ -2211,7 +2211,7 @@ UserSendNotifyMessage( HWND hWnd,
         PWND DesktopWindow;
         ULONG i;
 
-        DesktopWindow = UserGetDesktopWindow();
+        DesktopWindow = UserGetThreadDesktopWindow();
         List = IntWinListChildren(DesktopWindow);
 
         if (List != NULL)
@@ -3007,7 +3007,7 @@ NtUserMessageCall( HWND hWnd,
                ULONG i;
                UINT fuFlags;
 
-               pwndDesk = UserGetDesktopWindow();
+               pwndDesk = UserGetThreadDesktopWindow();
                List = IntWinListChildren(pwndDesk);
 
                if (parm.flags & BSF_QUERY)

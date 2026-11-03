@@ -1305,7 +1305,10 @@ IntGetLastTopMostWindowNoIME(_In_ PWND pImeWnd)
     PWND pwndNode, pwndOwner, pwndLastTopMost = NULL;
     BOOL bFound;
 
-    pwndNode = UserGetDesktopWindow();
+    /* The windows of the IME window's own desktop, not those of the input desktop:
+       the caller links the IME-like windows after the window found here, and a window
+       must never be linked into the sibling list of another desktop */
+    pwndNode = co_GetDesktopWindow(pImeWnd);
     if (!pwndNode || pwndNode->spwndChild == NULL)
         return NULL;
 

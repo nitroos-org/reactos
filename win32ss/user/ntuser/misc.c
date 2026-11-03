@@ -779,7 +779,11 @@ void
 NTAPI
 UserDbgPreServiceHook(ULONG ulSyscallId, PULONG_PTR pulArguments)
 {
+    /* The check walks the heap mappings of the process, which a sibling thread
+       changes (and frees) under the USER lock when it opens or closes a desktop */
+    UserEnterShared();
     UserDbgAssertThreadInfo(FALSE);
+    UserLeave();
 }
 
 ULONG_PTR
@@ -790,7 +794,9 @@ UserDbgPostServiceHook(ULONG ulSyscallId, ULONG_PTR ulResult)
     /* too bad this fails */
     // ASSERT(gpepCSRSS);
 
+    UserEnterShared();
     UserDbgAssertThreadInfo(TRUE);
+    UserLeave();
 
     return ulResult;
 }
