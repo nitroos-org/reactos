@@ -48,6 +48,7 @@ typedef struct
     ULONG notify_flags;
     IBackgroundCopyCallback2 *callback;
     BOOL callback2; /* IBackgroundCopyCallback2 is supported in addition to IBackgroundCopyCallback */
+    IBackgroundCopyCallback3 *callback3; /* FileRangesTransferred, when the callback supports it */
     /* Protects file list, and progress */
     CRITICAL_SECTION cs;
     struct list entryFromQmgr;
@@ -111,6 +112,8 @@ HRESULT enum_copy_job_create(BackgroundCopyManagerImpl *qmgr,
 HRESULT BackgroundCopyFileConstructor(BackgroundCopyJobImpl *owner,
                                       LPCWSTR remoteName, LPCWSTR localName,
                                       BackgroundCopyFileImpl **file);
+ULONG64 BackgroundCopyFileRangesTotal(const BackgroundCopyFileImpl *file);
+void update_job_total(BackgroundCopyJobImpl *job);
 HRESULT BackgroundCopyFileSetRanges(BackgroundCopyFileImpl *file, DWORD count, const BG_FILE_RANGE *ranges);
 HRESULT EnumBackgroundCopyFilesConstructor(BackgroundCopyJobImpl*, IEnumBackgroundCopyFiles**);
 DWORD WINAPI fileTransfer(void *param);

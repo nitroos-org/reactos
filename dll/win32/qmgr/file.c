@@ -222,7 +222,23 @@ static int compare_ranges(const void *a, const void *b)
     return x->InitialOffset < y->InitialOffset ? -1 : x->InitialOffset > y->InitialOffset;
 }
 
+/* The size of a ranged file is the sum of its ranges, unknown when one of them runs to the end of the file */
+ULONG64 BackgroundCopyFileRangesTotal(const BackgroundCopyFileImpl *file)
+{
+    ULONG64 total = 0;
+    DWORD i;
+
+    for (i = 0; i < file->range_count; ++i)
+    {
+        if (file->ranges[i].Length == BG_LENGTH_TO_EOF) return BG_SIZE_UNKNOWN;
+        total += file->ranges[i].Length;
+    }
+    return total;
+}
+
 /* A range is a non-empty part of the file, the last one may run to the end of it. No two ranges overlap.
+ * The ranges are written to the local file one after the other in the order given (the BITS documentation),
+ * so the local file is as long as the ranges together.
  * Offsets travel in an HTTP header, as signed 64-bit numbers. */
 HRESULT BackgroundCopyFileSetRanges(BackgroundCopyFileImpl *file, DWORD count, const BG_FILE_RANGE *ranges)
 {
@@ -248,7 +264,7 @@ HRESULT BackgroundCopyFileSetRanges(BackgroundCopyFileImpl *file, DWORD count, c
             sorted[i].InitialOffset + sorted[i].Length > sorted[i + 1].InitialOffset)
         {
             free(sorted);
-            return BG_E_INVALID_RANGE;
+            return BG_E_OVERLAPPING_RANGES;
         }
     }
     free(sorted);
@@ -257,6 +273,7 @@ HRESULT BackgroundCopyFileSetRanges(BackgroundCopyFileImpl *file, DWORD count, c
     memcpy(copy, ranges, count * sizeof(*copy));
     file->ranges = copy;
     file->range_count = count;
+    file->fileProgress.BytesTotal = BackgroundCopyFileRangesTotal(file);
     return S_OK;
 }
 
@@ -330,7 +347,10 @@ static void CALLBACK progress_callback_http(HINTERNET handle, DWORD_PTR context,
             WinHttpQueryHeaders(handle, WINHTTP_QUERY_CONTENT_LENGTH|WINHTTP_QUERY_FLAG_NUMBER,
                                 NULL, &len, &size, NULL))
         {
+            EnterCriticalSection(&job->cs);
             file->fileProgress.BytesTotal = len;
+            update_job_total(job);
+            LeaveCriticalSection(&job->cs);
         }
         break;
     }
@@ -447,6 +467,28 @@ static BOOL check_range_response(BackgroundCopyFileImpl *file, HINTERNET req)
     return FALSE;
 }
 
+/* IBackgroundCopyCallback3::FileRangesTransferred, for a callback that has it, after each range */
+static void notify_range_transferred(BackgroundCopyFileImpl *file, const BG_FILE_RANGE *range, ULONG64 length)
+{
+    BackgroundCopyJobImpl *job = file->owner;
+    IBackgroundCopyCallback3 *callback;
+    BG_FILE_RANGE done;
+
+    EnterCriticalSection(&job->cs);
+    callback = (job->notify_flags & BG_NOTIFY_FILE_RANGES_TRANSFERRED) ? job->callback3 : NULL;
+    if (callback) IBackgroundCopyCallback3_AddRef(callback);
+    LeaveCriticalSection(&job->cs);
+    if (!callback) return;
+
+    done.InitialOffset = range->InitialOffset;
+    done.Length = length;
+    TRACE("Calling FileRangesTransferred %I64u+%I64u -->\n", done.InitialOffset, done.Length);
+    IBackgroundCopyCallback3_FileRangesTransferred(callback, (IBackgroundCopyJob *)&job->IBackgroundCopyJob4_iface,
+                                                   (IBackgroundCopyFile *)&file->IBackgroundCopyFile2_iface, 1, &done);
+    TRACE("Called FileRangesTransferred <--\n");
+    IBackgroundCopyCallback3_Release(callback);
+}
+
 static BOOL transfer_file_http(BackgroundCopyFileImpl *file, URL_COMPONENTSW *uc,
                                const WCHAR *tmpfile)
 {
@@ -455,7 +497,6 @@ static BOOL transfer_file_http(BackgroundCopyFileImpl *file, URL_COMPONENTSW *uc
     HINTERNET ses, con = NULL, req = NULL;
     DWORD flags = (uc->nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
     DWORD i, count = file->range_count ? file->range_count : 1;
-    ULONG64 known = 0;
     char *buf = NULL;
     BOOL ret = FALSE;
     DWORD written;
@@ -469,24 +510,10 @@ static BOOL transfer_file_http(BackgroundCopyFileImpl *file, URL_COMPONENTSW *uc
 
     if (!(con = WinHttpConnect(ses, uc->lpszHostName, uc->nPort, 0))) goto done;
 
-    /* The size of a ranged file is the sum of its ranges, when none of them runs to the end of the file */
-    if (file->range_count)
-    {
-        BOOL to_eof = FALSE;
-        for (i = 0; i < count; ++i)
-        {
-            if (file->ranges[i].Length == BG_LENGTH_TO_EOF) to_eof = TRUE;
-            else known += file->ranges[i].Length;
-        }
-        EnterCriticalSection(&job->cs);
-        file->fileProgress.BytesTotal = to_eof ? BG_SIZE_UNKNOWN : known;
-        LeaveCriticalSection(&job->cs);
-    }
-
     for (i = 0; i < count; ++i)
     {
         const BG_FILE_RANGE *range = file->range_count ? &file->ranges[i] : NULL;
-        ULONG64 left = range && range->Length != BG_LENGTH_TO_EOF ? range->Length : ~(ULONG64)0;
+        ULONG64 left = range && range->Length != BG_LENGTH_TO_EOF ? range->Length : ~(ULONG64)0, got = 0;
 
         if (!(req = WinHttpOpenRequest(con, NULL, uc->lpszUrlPath, NULL, NULL, NULL, flags))) goto done;
         if (!set_request_credentials(req, job)) goto done;
@@ -519,8 +546,14 @@ static BOOL transfer_file_http(BackgroundCopyFileImpl *file, URL_COMPONENTSW *uc
                 if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_LENGTH|WINHTTP_QUERY_FLAG_NUMBER,
                                         NULL, &length, &size, NULL))
                 {
+                    DWORD k;
+                    ULONG64 fixed = 0;
+
                     EnterCriticalSection(&job->cs);
-                    file->fileProgress.BytesTotal = known + length;
+                    for (k = 0; k < file->range_count; ++k)
+                        if (file->ranges[k].Length != BG_LENGTH_TO_EOF) fixed += file->ranges[k].Length;
+                    file->fileProgress.BytesTotal = fixed + length;
+                    update_job_total(job);
                     LeaveCriticalSection(&job->cs);
                 }
             }
@@ -530,12 +563,6 @@ static BOOL transfer_file_http(BackgroundCopyFileImpl *file, URL_COMPONENTSW *uc
         {
             handle = CreateFileW(tmpfile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
             if (handle == INVALID_HANDLE_VALUE) goto done;
-        }
-        if (range)
-        {
-            LARGE_INTEGER offset;
-            offset.QuadPart = range->InitialOffset;
-            if (!SetFilePointerEx(handle, offset, NULL, FILE_BEGIN)) goto done;
         }
 
         for (;;)
@@ -549,6 +576,7 @@ static BOOL transfer_file_http(BackgroundCopyFileImpl *file, URL_COMPONENTSW *uc
             if (!file->read_size) break;
             if (!WriteFile(handle, buf, file->read_size, &written, NULL)) goto done;
             if (left != ~(ULONG64)0) left -= file->read_size;
+            got += file->read_size;
 
             EnterCriticalSection(&job->cs);
             file->fileProgress.BytesTransferred += file->read_size;
@@ -557,6 +585,8 @@ static BOOL transfer_file_http(BackgroundCopyFileImpl *file, URL_COMPONENTSW *uc
         }
         /* A short range answer is a transfer that did not finish */
         if (left && left != ~(ULONG64)0) goto done;
+
+        if (range) notify_range_transferred(file, range, left == ~(ULONG64)0 ? got : range->Length);
 
         WinHttpCloseHandle(req);
         req = NULL;
@@ -590,6 +620,7 @@ static DWORD CALLBACK progress_callback_local(LARGE_INTEGER totalSize, LARGE_INT
             ? totalTransferred.QuadPart
             : totalTransferred.QuadPart - file->fileProgress.BytesTransferred);
     file->fileProgress.BytesTotal = totalSize.QuadPart;
+    update_job_total(job);
     file->fileProgress.BytesTransferred = totalTransferred.QuadPart;
     job->jobProgress.BytesTransferred += diff;
     LeaveCriticalSection(&job->cs);
@@ -646,7 +677,8 @@ BOOL processFile(BackgroundCopyFileImpl *file, BackgroundCopyJobImpl *job)
     }
 
     EnterCriticalSection(&job->cs);
-    file->fileProgress.BytesTotal = BG_SIZE_UNKNOWN;
+    file->fileProgress.BytesTotal = file->range_count ? BackgroundCopyFileRangesTotal(file) : BG_SIZE_UNKNOWN;
+    update_job_total(job);
     file->fileProgress.BytesTransferred = 0;
     file->fileProgress.Completed = FALSE;
     LeaveCriticalSection(&job->cs);
