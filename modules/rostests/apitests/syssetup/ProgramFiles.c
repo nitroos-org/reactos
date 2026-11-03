@@ -75,20 +75,23 @@ static BOOL WINAPI MockDirectory(PCWSTR Name, LPSECURITY_ATTRIBUTES Security)
 #define CreateDirectoryW MockDirectory
 #include "../../../../dll/win32/syssetup/programfiles.c"
 
+/* open + 6 values, create + 6 values, 2 directories */
+#define OPTIONAL_OPERATIONS 16
+
 START_TEST(ProgramFiles)
 {
     ULONG i;
     FailNative = TRUE;
     ok(!InitializeProgramFilesDir(), "Native Program Files failure must remain fatal\n");
     FailNative = FALSE;
-    for (i = 0; i <= 8; ++i)
+    for (i = 0; i <= OPTIONAL_OPERATIONS; ++i)
     {
         Optional = FALSE;
         OptionalCalls = Directories = 0;
         FailAt = i;
         ok(InitializeProgramFilesDir(), "Optional operation %lu aborted native setup\n", i);
 #ifdef _M_AMD64
-        ok_eq_ulong(OptionalCalls, i ? i : 8);
+        ok_eq_ulong(OptionalCalls, i ? i : OPTIONAL_OPERATIONS);
 #else
         ok_eq_ulong(OptionalCalls, 0);
 #endif
