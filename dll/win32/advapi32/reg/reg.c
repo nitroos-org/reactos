@@ -2383,10 +2383,10 @@ Quit:
  * NOTES
  *  - Unless RRF_NOEXPAND is specified, REG_EXPAND_SZ values are automatically
  *    expanded and pdwType is set to REG_SZ instead.
- *  - Restrictions are applied after expanding, using RRF_RT_REG_EXPAND_SZ
- *    without RRF_NOEXPAND is thus not allowed.
- *    An exception is the case where RRF_RT_ANY is specified, because then
- *    RRF_NOEXPAND is allowed.
+ *  - Restrictions are applied after expanding: RRF_RT_REG_EXPAND_SZ without
+ *    RRF_NOEXPAND does not match an expanded value (ERROR_UNSUPPORTED_TYPE,
+ *    as Windows 8 and later), but combined with RRF_RT_REG_SZ it is accepted,
+ *    also without a data buffer: the size needed after expansion is returned.
  *  - Strings are always returned terminated (REG_MULTI_SZ with two
  *    terminators); the terminators are counted in pcbData. A string is copied
  *    to pvData only if all of it fits.
@@ -2409,9 +2409,6 @@ RegGetValueW(HKEY hKey,
           pvData, pcbData, pcbData ? *pcbData : 0);
 
     if (pvData && !pcbData)
-        return ERROR_INVALID_PARAMETER;
-    if ((dwFlags & RRF_RT_REG_EXPAND_SZ) && !(dwFlags & RRF_NOEXPAND) &&
-            ((dwFlags & RRF_RT_ANY) != RRF_RT_ANY))
         return ERROR_INVALID_PARAMETER;
 
     if (bSubKey)
@@ -2453,9 +2450,6 @@ RegGetValueA(HKEY hKey,
           pcbData ? *pcbData : 0);
 
     if (pvData && !pcbData)
-        return ERROR_INVALID_PARAMETER;
-    if ((dwFlags & RRF_RT_REG_EXPAND_SZ) && !(dwFlags & RRF_NOEXPAND) &&
-            ((dwFlags & RRF_RT_ANY) != RRF_RT_ANY))
         return ERROR_INVALID_PARAMETER;
 
     if (pszValue)
