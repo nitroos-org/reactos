@@ -677,6 +677,90 @@ CheckLargeCreate(PCWSTR ExePath)
     CloseHandle(OutWrite);
 }
 
+/* node-pty (VS Code, conpty.cc): overlapped-capable named pipes, flags RESIZE_QUIRK|WIN32_INPUT_MODE
+ * (|INHERIT_CURSOR), NULL standard handles in STARTUPINFOEX, CreateProcessW without inheritance. */
+static VOID
+CheckNodePtSequence(DWORD Flags)
+{
+    static const DWORD Sizes[][2] = {{80, 24}, {120, 30}};
+    HANDLE PipeIn, PipeOut, ClientIn = INVALID_HANDLE_VALUE, ClientOut = INVALID_HANDLE_VALUE;
+    STARTUPINFOEXW Startup = {0};
+    PROCESS_INFORMATION Process;
+    SIZE_T AttributeSize = 0;
+    WCHAR InName[64], OutName[64], Command[MAX_PATH];
+    PVOID Pty = NULL;
+    COORD Size = {(SHORT)Sizes[0][0], (SHORT)Sizes[0][1]};
+    HRESULT Status;
+    BOOL Created;
+
+    StringCchPrintfW(InName, _countof(InName), L"\\\\.\\pipe\\conpty-nodepty-in-%lu-%lx", GetCurrentProcessId(), Flags);
+    StringCchPrintfW(OutName, _countof(OutName), L"\\\\.\\pipe\\conpty-nodepty-out-%lu-%lx", GetCurrentProcessId(), Flags);
+    PipeIn = CreateNamedPipeW(InName, PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                              PIPE_TYPE_BYTE | PIPE_WAIT, 1, 4096, 4096, 30000, NULL);
+    PipeOut = CreateNamedPipeW(OutName, PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                               PIPE_TYPE_BYTE | PIPE_WAIT, 1, 4096, 4096, 30000, NULL);
+    ok(PipeIn != INVALID_HANDLE_VALUE && PipeOut != INVALID_HANDLE_VALUE,
+       "CreateNamedPipe failed: %lu\n", GetLastError());
+    if (PipeIn == INVALID_HANDLE_VALUE || PipeOut == INVALID_HANDLE_VALUE) goto Cleanup;
+    ClientIn = CreateFileW(InName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    ClientOut = CreateFileW(OutName, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+    ok(ClientIn != INVALID_HANDLE_VALUE && ClientOut != INVALID_HANDLE_VALUE,
+       "Opening the pipe client ends failed: %lu\n", GetLastError());
+    if (ClientIn == INVALID_HANDLE_VALUE || ClientOut == INVALID_HANDLE_VALUE) goto Cleanup;
+
+    Status = CreatePty(Size, PipeIn, PipeOut, Flags, &Pty);
+    ok(Status == S_OK, "CreatePseudoConsole(flags %lx) failed: %08lx\n", Flags, Status);
+    if (Status != S_OK) goto Cleanup;
+    CloseHandle(PipeIn);
+    PipeIn = INVALID_HANDLE_VALUE;
+    CloseHandle(PipeOut);
+    PipeOut = INVALID_HANDLE_VALUE;
+
+    Startup.StartupInfo.cb = sizeof(Startup);
+    Startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    InitializeList(NULL, 1, 0, &AttributeSize);
+    Startup.lpAttributeList = HeapAlloc(GetProcessHeap(), 0, AttributeSize);
+    if (!Startup.lpAttributeList) goto Cleanup;
+    Created = InitializeList(Startup.lpAttributeList, 1, 0, &AttributeSize) &&
+              UpdateAttribute(Startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                              Pty, sizeof(Pty), NULL, NULL);
+    ok(Created, "Pseudoconsole attribute failed: %lu\n", GetLastError());
+    if (Created)
+    {
+        lstrcpyW(Command, L"cmd.exe");
+        ZeroMemory(&Process, sizeof(Process));
+        Created = CreateProcessW(NULL, Command, NULL, NULL, FALSE,
+                                 EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                                 NULL, NULL, &Startup.StartupInfo, &Process);
+        ok(Created, "CreateProcessW (node-pty style) failed: %lu\n", GetLastError());
+        if (Created)
+        {
+            COORD NewSize = {(SHORT)Sizes[1][0], (SHORT)Sizes[1][1]};
+            DWORD Written;
+            ok(WriteFile(ClientIn, "echo hel^lo\r\n", 13, &Written, NULL) && Written == 13,
+               "Input pipe write failed: %lu\n", GetLastError());
+            ok(WaitForText(ClientOut, "hello", 10000), "No command output through the named pipe\n");
+            Status = ResizePty(Pty, NewSize);
+            ok(Status == S_OK, "ResizePseudoConsole failed: %08lx\n", Status);
+            ok(WriteFile(ClientIn, "exit\r\n", 6, &Written, NULL) && Written == 6,
+               "Input pipe write failed: %lu\n", GetLastError());
+            ok(WaitForSingleObject(Process.hProcess, 5000) == WAIT_OBJECT_0, "Child did not exit\n");
+            CloseHandle(Process.hThread);
+            CloseHandle(Process.hProcess);
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Startup.lpAttributeList);
+    ClosePty(Pty);
+    Pty = NULL;
+
+Cleanup:
+    if (Pty) ClosePty(Pty);
+    if (PipeIn != INVALID_HANDLE_VALUE && PipeIn) CloseHandle(PipeIn);
+    if (PipeOut != INVALID_HANDLE_VALUE && PipeOut) CloseHandle(PipeOut);
+    if (ClientIn != INVALID_HANDLE_VALUE) CloseHandle(ClientIn);
+    if (ClientOut != INVALID_HANDLE_VALUE) CloseHandle(ClientOut);
+}
+
 START_TEST(ConPty)
 {
     HMODULE Module = GetModuleHandleW(L"kernel32.dll");
@@ -731,5 +815,8 @@ START_TEST(ConPty)
         CheckForgedRequests();
         CheckCloseWithInheritingChild(ExePath);
         CheckLargeCreate(ExePath);
+        CheckNodePtSequence(0x6);   /* RESIZE_QUIRK | WIN32_INPUT_MODE */
+        CheckNodePtSequence(0x7);   /* ... | INHERIT_CURSOR */
+        CheckNodePtSequence(0x8);   /* PASSTHROUGH (Windows 11) */
     }
 }
