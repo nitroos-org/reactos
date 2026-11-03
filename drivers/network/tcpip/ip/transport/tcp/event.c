@@ -276,6 +276,11 @@ TCPAcceptEventHandler(void *arg, PTCP_PCB newpcb)
             /* free previously created socket context (we don't use it, we use newpcb) */
             Bucket->AssociatedEndpoint->SocketContext = newpcb;
 
+            /* The connection is filed under the listener binding, which has no concrete
+               address for a wildcard listener: the local address is the one the SYN was
+               sent to (a loopback alias, or one of several addresses of an interface) */
+            Bucket->AssociatedEndpoint->ConnectAddress = newpcb->local_ip.addr;
+
             UnlockObject(Bucket->AssociatedEndpoint);
 
             LibTCPAccept(newpcb, (PTCP_PCB)Connection->SocketContext, Bucket->AssociatedEndpoint);
