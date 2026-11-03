@@ -39,6 +39,7 @@ WINAPI
 DeleteFileW(IN LPCWSTR lpFileName)
 {
     FILE_DISPOSITION_INFORMATION FileDispInfo;
+    ULONG FileDispEx;
     OBJECT_ATTRIBUTES ObjectAttributes;
     IO_STATUS_BLOCK IoStatusBlock;
     UNICODE_STRING NtPathU;
@@ -212,13 +213,29 @@ DeleteFileW(IN LPCWSTR lpFileName)
     RtlReleaseRelativeName(&RelativeName);
     RtlFreeHeap(RtlGetProcessHeap(), 0, PathBuffer);
 
-    /* Ask for the file to be deleted */
-    FileDispInfo.DeleteFile = TRUE;
+    /* Ask for the file to be deleted.  Windows 10 asks for a POSIX delete: the name goes when this handle closes,
+     * even while other handles (opened with FILE_SHARE_DELETE) stay open, so its directory can be removed and the
+     * name created again at once.  It also asks for the image section check, so a file with a mapped view stays
+     * (ERROR_ACCESS_DENIED), and not to ignore the read-only attribute (measured on Windows 10 22H2).  A file
+     * system that does not know the class gets the classic request. */
+    FileDispEx = 0x1 /* FILE_DISPOSITION_DELETE */ | 0x2 /* FILE_DISPOSITION_POSIX_SEMANTICS */ |
+                 0x4 /* FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK */;
     Status = NtSetInformationFile(FileHandle,
                                   &IoStatusBlock,
-                                  &FileDispInfo,
-                                  sizeof(FILE_DISPOSITION_INFORMATION),
-                                  FileDispositionInformation);
+                                  &FileDispEx,
+                                  sizeof(FileDispEx),
+                                  (FILE_INFORMATION_CLASS)64 /* FileDispositionInformationEx */);
+    if (Status == STATUS_INVALID_INFO_CLASS || Status == STATUS_INVALID_PARAMETER ||
+        Status == STATUS_NOT_SUPPORTED || Status == STATUS_NOT_IMPLEMENTED ||
+        Status == STATUS_INVALID_DEVICE_REQUEST)
+    {
+        FileDispInfo.DeleteFile = TRUE;
+        Status = NtSetInformationFile(FileHandle,
+                                      &IoStatusBlock,
+                                      &FileDispInfo,
+                                      sizeof(FILE_DISPOSITION_INFORMATION),
+                                      FileDispositionInformation);
+    }
     NtClose(FileHandle);
     if (!NT_SUCCESS(Status))
     {
