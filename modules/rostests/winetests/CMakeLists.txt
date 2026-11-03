@@ -39,6 +39,7 @@ add_subdirectory(d3dcompiler_43)
 #add_subdirectory(d3dx9_36) #OpenGL 2.0+ Required
 add_subdirectory(dbghelp)
 add_subdirectory(devenum)
+add_subdirectory(dismapi)
 add_subdirectory(dinput)
 add_subdirectory(dinput8)
 add_subdirectory(dnsapi)
