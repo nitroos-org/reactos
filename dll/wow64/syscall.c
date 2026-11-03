@@ -3339,6 +3339,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         switch (a[0])
         {
         case SystemCurrentTimeZoneInformation: /* RTL_TIME_ZONE_INFORMATION (172 bytes), no pointers, same layout; the kernel checks SeTimeZonePrivilege. */
+        case SystemDynamicTimeZoneInformation: /* RTL_DYNAMIC_TIME_ZONE_INFORMATION (432 bytes), no pointers, same layout; the kernel checks the length, then SeTimeZonePrivilege. */
         case SystemTimeAdjustmentInformation: /* SYSTEM_SET_TIME_ADJUST_INFORMATION { ULONG, BOOLEAN } is 8 bytes in both ABIs; the kernel checks SeSystemtimePrivilege and the length. */
             return NtSetSystemInformation(a[0], P(1), a[2]);
         default: UNSUPPORTED(CLASS, a[0]);

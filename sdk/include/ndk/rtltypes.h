@@ -1788,6 +1788,16 @@ typedef struct _RTL_TIME_ZONE_INFORMATION
 } RTL_TIME_ZONE_INFORMATION, *PRTL_TIME_ZONE_INFORMATION;
 
 //
+// Buffer of NtSetSystemInformation(SystemDynamicTimeZoneInformation); 432 bytes as on Windows
+//
+typedef struct _RTL_DYNAMIC_TIME_ZONE_INFORMATION
+{
+    RTL_TIME_ZONE_INFORMATION TimeZoneInformation;
+    WCHAR TimeZoneKeyName[128];
+    BOOLEAN DynamicDaylightTimeDisabled;
+} RTL_DYNAMIC_TIME_ZONE_INFORMATION, *PRTL_DYNAMIC_TIME_ZONE_INFORMATION;
+
+//
 // Hotpatch Header
 //
 typedef struct _RTL_PATCH_HEADER

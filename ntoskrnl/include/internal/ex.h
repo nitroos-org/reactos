@@ -1552,6 +1552,11 @@ ExpSetTimeZoneInformation(
     IN PRTL_TIME_ZONE_INFORMATION TimeZoneInformation
 );
 
+NTSTATUS
+ExpSetDynamicTimeZoneInformation(
+    IN PRTL_DYNAMIC_TIME_ZONE_INFORMATION DynamicTimeZoneInformation
+);
+
 VOID
 ExpQueryTimeZoneInformation(
     OUT PRTL_TIME_ZONE_INFORMATION TimeZoneInformation
