@@ -561,7 +561,8 @@ IntReorderKeyboardLayouts(
 {
     PKL pOldKL = gspklBaseLayout;
 
-    if ((pWinSta->Flags & WSS_NOIO) || pNewKL == pOldKL)
+    /* A process without a window station cannot reorder */
+    if (!pWinSta || (pWinSta->Flags & WSS_NOIO) || pNewKL == pOldKL)
         return;
 
     pNewKL->pklPrev->pklNext = pNewKL->pklNext;
@@ -590,9 +591,10 @@ UserSetDefaultInputLang(HKL hKl)
         return FALSE;
 
     pWinSta = IntGetProcessWindowStation(NULL);
+    if (!pWinSta)
+        return FALSE;
     IntReorderKeyboardLayouts(pWinSta, pKl);
-    if (pWinSta)
-        ObDereferenceObject(pWinSta);
+    ObDereferenceObject(pWinSta);
     return TRUE;
 }
 
@@ -800,7 +802,16 @@ co_IntActivateKeyboardLayout(
     }
 
     if (uFlags & KLF_REORDER)
+    {
+        /* Reordering needs the window station of the process (a plain
+           activation does not): fail like an access to a missing one */
+        if (!pWinSta)
+        {
+            EngSetLastError(ERROR_ACCESS_DENIED);
+            return NULL;
+        }
         IntReorderKeyboardLayouts(pWinSta, pKL);
+    }
 
     return co_UserActivateKeyboardLayout(pKL, uFlags, pWnd);
 }
@@ -898,7 +909,17 @@ co_IntLoadKeyboardLayoutEx(
 
     UNREFERENCED_PARAMETER(hSafeFile);
 
-    if (hNewKL == NULL || (pWinSta->Flags & WSS_NOIO))
+    if (hNewKL == NULL)
+        return NULL;
+
+    /* No window station in the process: nothing to load into */
+    if (!pWinSta)
+    {
+        EngSetLastError(ERROR_ACCESS_DENIED);
+        return NULL;
+    }
+
+    if (pWinSta->Flags & WSS_NOIO)
         return NULL;
 
     /* If hOldKL is specified, unload it and load new layput as default */
