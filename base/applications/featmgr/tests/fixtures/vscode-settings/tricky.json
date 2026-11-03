@@ -1,0 +1,5 @@
+{
+    // "terminal.integrated.windowsUseConptyDll": true,
+    "x": { "terminal.integrated.windowsUseConptyDll": true },
+    "s": "a // not a comment, nor } this"
+}

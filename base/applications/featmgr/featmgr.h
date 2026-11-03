@@ -142,6 +142,10 @@ int    FmCompareVersions(LPCWSTR a, LPCWSTR b);                       /* <0, 0, 
 BOOL   FmScoopInstalledVersion(LPCWSTR app, LPWSTR out, DWORD cch);
 BOOL   FmScoopCommandArgs(LPCWSTR args, LPWSTR out, DWORD cch);       /* "scoop <args>"; args must be pre-validated */
 BOOL   FmScoopValidUrl(LPCWSTR url);
+/* NitroOS per-app defaults (scoopdefaults.c; TODO CONSOLE-condrv-device): after featmgr installed or updated app */
+void   FmScoopAppDefaults(LPCWSTR app, FILE *log);
+void   FmScoopAppDefaultsAll(FILE *log);        /* every app that has a default and is installed */
+void   FmScoopAppDefaultsSeed(FILE *log);       /* every app that has a default, installed or not (see scoopdefaults.c) */
 #define FM_BUCKET_MAX 24
 typedef struct _FM_BUCKET { WCHAR Name[24]; WCHAR Url[160]; BOOL Added; } FM_BUCKET;
 /* Scoop's own list ("scoop bucket known": apps\scoop\current\buckets.json, built-in names when it is absent) */

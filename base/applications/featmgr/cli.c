@@ -58,6 +58,8 @@ static void Usage(void)
     Out(L"                               any other bucket: explicit consent (its manifests run PowerShell as admin)\n");
     Out(L"  featmgr /update <id>         Scoop app: 'scoop update <app>', then refresh its bucket entries\n");
     Out(L"  featmgr /update /all         'scoop update' (Scoop + buckets), re-import the buckets, 'scoop update *'\n");
+    Out(L"                               (NitroOS: after a featmgr install/update of the Scoop apps vscode and vscode-insiders,\n");
+    Out(L"                               terminal.integrated.windowsUseConptyDll=false is added to their settings if absent)\n");
     Out(L"  featmgr /print-path [/cmd]   the PATH a new process would get (registry machine + user PATH);\n");
     Out(L"                               used by refreshenv, which applies it to the current cmd/pwsh window\n");
     Out(L"  featmgr /help                this text\n");

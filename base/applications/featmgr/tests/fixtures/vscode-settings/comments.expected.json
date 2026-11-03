@@ -1,0 +1,10 @@
+// my settings
+{
+    /* font */
+    "editor.fontSize": 14, // big
+    "files.exclude": { "a": true, "b": [1, 2] },
+    "window.zoomLevel": 1,
+    // trailing note
+    // NitroOS default (featmgr): VS Code's conpty.dll path needs \Device\ConDrv, which NitroOS lacks (TODO CONSOLE-condrv-device). Set it to true to use the VS Code default.
+    "terminal.integrated.windowsUseConptyDll": false
+}

@@ -1,0 +1,9 @@
+{
+    "version": "1.0.0",
+    "description": "Test stand-in for Scoop's vscode (NitroOS default settings hook)",
+    "homepage": "https://example.invalid/vscode",
+    "license": "MIT",
+    "url": "https://example.invalid/vscode-1.0.0.zip",
+    "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "bin": "bin\\code.cmd"
+}
