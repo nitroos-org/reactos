@@ -6,6 +6,8 @@
  */
 
 #include "precomp.h"
+#include <ndk/exfuncs.h>
+#include <ndk/extypes.h>
 
 #define LOAD_TIMEOUT 30000
 
@@ -360,4 +362,77 @@ START_TEST(RegLoadKeyBadSecondBin)
         LoadDamagedHive(L"ReactOSTestBadSecondBin", File, TRUE);
     }
     HeapFree(GetProcessHeap(), 0, Buffer);
+}
+
+static LONG GetPagedPoolPages(void)
+{
+    SYSTEM_PERFORMANCE_INFORMATION Info;
+    NTSTATUS Status;
+
+    Status = NtQuerySystemInformation(SystemPerformanceInformation, &Info, sizeof(Info), NULL);
+    ok(Status == STATUS_SUCCESS, "NtQuerySystemInformation returned 0x%08lx\n", Status);
+    return NT_SUCCESS(Status) ? (LONG)Info.PagedPoolPages : 0;
+}
+
+/*
+ * Unloading a hive frees everything the load allocated: the pool use may not
+ * grow with the number of loads. The hive is about 800 KB (200 pages), so a
+ * hive that is not freed on unload leaks about 4000 pages over the rounds.
+ */
+START_TEST(RegLoadKeyUnloadPool)
+{
+    enum { WARMUP = 4, ROUNDS = 20, MAX_GROWTH_PAGES = 250 };
+    WCHAR File[MAX_PATH];
+    PBYTE Buffer;
+    DWORD Size;
+    LONG Error, Before = 0, After;
+    ULONG i;
+    HKEY Key;
+
+    if (!EnablePrivilege(L"SeBackupPrivilege") || !EnablePrivilege(L"SeRestorePrivilege"))
+    {
+        skip("Cannot enable the backup and restore privileges\n");
+        return;
+    }
+    if (!PrepareFile(File, L"unloadpool.hiv"))
+    {
+        skip("GetTempPathW failed\n");
+        return;
+    }
+    Buffer = SaveTestHive(File, &Size, 400);
+    if (!Buffer)
+        return;
+    HeapFree(GetProcessHeap(), 0, Buffer);
+
+    for (i = 0; i < WARMUP + ROUNDS; i++)
+    {
+        if (i == WARMUP)
+            Before = GetPagedPoolPages();
+
+        Error = RegLoadKeyW(HKEY_LOCAL_MACHINE, L"ReactOSTestUnloadPool", File);
+        ok(Error == ERROR_SUCCESS, "RegLoadKeyW failed: %ld\n", Error);
+        if (Error != ERROR_SUCCESS)
+            break;
+
+        /* Touch the hive, and close every handle before the unload */
+        Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"ReactOSTestUnloadPool", 0, KEY_QUERY_VALUE, &Key);
+        ok(Error == ERROR_SUCCESS, "RegOpenKeyExW failed: %ld\n", Error);
+        if (Error == ERROR_SUCCESS)
+            RegCloseKey(Key);
+
+        Error = RegUnLoadKeyW(HKEY_LOCAL_MACHINE, L"ReactOSTestUnloadPool");
+        ok(Error == ERROR_SUCCESS, "RegUnLoadKeyW failed: %ld\n", Error);
+        if (Error != ERROR_SUCCESS)
+            break;
+    }
+    After = GetPagedPoolPages();
+
+    if (i == WARMUP + ROUNDS)
+    {
+        trace("Paged pool pages: %ld before, %ld after %d loads\n", Before, After, ROUNDS);
+        ok(After - Before < MAX_GROWTH_PAGES,
+           "Paged pool grew by %ld pages over %d loads and unloads of a hive\n",
+           After - Before, ROUNDS);
+    }
+    DeleteHiveFiles(File);
 }

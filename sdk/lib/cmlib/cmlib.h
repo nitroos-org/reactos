@@ -394,6 +394,9 @@ typedef struct _CMHIVE
 #if (NTDDI_VERSION < NTDDI_VISTA) && defined(__REACTOS__)
     UNICODE_STRING HiveRootPath;
 #endif
+#ifdef __REACTOS__
+    PVOID RootKeyBody; // Keep-alive reference to the root key, dropped when the hive is unloaded
+#endif
 } CMHIVE, *PCMHIVE;
 
 typedef struct _HV_HIVE_CELL_PAIR

@@ -2586,6 +2586,13 @@ CmUnloadKey(
     /* Release hive lock */
     CmpUnlockRegistry();
 
+    /* Drop the reference that CmpLinkHiveToMaster() keeps on the root key, which frees the key body and the (deleted) KCB */
+    if (CmHive->RootKeyBody)
+    {
+        ObDereferenceObject(CmHive->RootKeyBody);
+        CmHive->RootKeyBody = NULL;
+    }
+
     /* Remove the hive from the hive file list */
     CmpRemoveFromHiveFileList(CmHive);
 
@@ -2608,6 +2615,10 @@ CmUnloadKey(
 
     /* Delete the view lock */
     ExFreePoolWithTag(CmHive->ViewLock, TAG_CMHIVE);
+
+    /* Free the duplicated hive file name */
+    if (CmHive->FileFullPath.Buffer)
+        ExFreePoolWithTag(CmHive->FileFullPath.Buffer, TAG_CM);
 
     /* Free the hive storage */
     HvFree(Hive);

@@ -48,6 +48,7 @@ extern void func_RegFlushKey(void);
 extern void func_RegNotifyChangeKeyValue(void);
 extern void func_RegLoadKeyBadBinSize(void);
 extern void func_RegLoadKeyBadSecondBin(void);
+extern void func_RegLoadKeyUnloadPool(void);
 extern void func_RegLoadKeyZeroBin(void);
 extern void func_RegLoadKeyZeroCell(void);
 extern void func_RegOpenKeyExW(void);
@@ -161,6 +162,7 @@ const struct test winetest_testlist[] =
     { "RegNotifyChangeKeyValue", func_RegNotifyChangeKeyValue },
     { "RegLoadKeyBadBinSize", func_RegLoadKeyBadBinSize },
     { "RegLoadKeyBadSecondBin", func_RegLoadKeyBadSecondBin },
+    { "RegLoadKeyUnloadPool", func_RegLoadKeyUnloadPool },
     { "RegLoadKeyZeroBin", func_RegLoadKeyZeroBin },
     { "RegLoadKeyZeroCell", func_RegLoadKeyZeroCell },
     { "RegQueryInfoKey", func_RegQueryInfoKey },
