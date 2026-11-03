@@ -63,6 +63,7 @@ struct kshim_jnl {
 	u16 vol_usn;			/* its update sequence number on disk (after the last in-place pass) */
 	u8 *hdrpage;
 	unsigned long commits, committed_pages, max_tx, fallbacks, dropped, replay_pages;
+	unsigned long overflows;	/* transactions larger than the journal, written in place under UNJOURNALED */
 	/*
 	 * The sealed overlay: the transaction whose journal I/O runs without the volume lock.  Sealing (under
 	 * the lock) moves the overlay here and starts an empty one; reads look at the live overlay, then at this
@@ -317,7 +318,7 @@ static void kj_merge_back(struct kshim_jnl *j)
 /* Under the volume lock, the I/O is not running: a finished sealed transaction is released. */
 static void kj_reap(struct kshim_jnl *j)
 {
-	if (j->sstate != KJ_S_DONE)
+	if (__atomic_load_n(&j->sstate, __ATOMIC_ACQUIRE) != KJ_S_DONE)
 		return;
 	if (!j->serr) {
 		j->commits++;
@@ -823,13 +824,7 @@ static int kj_run_tx(struct block_device *b, struct kshim_jnl *j, struct kj_ent 
 		goto out;
 	kj_stall();
 	kj_fault_at(b, j, 2, v, n);
-	if (kshim_jnl_fault && kshim_jnl_fault_stage == 0 && j->commits + 1 >= kshim_jnl_fault && n >= 2) {
-		kj_apply(b, v, n / 2);
-		kj_dev_flush(b);
-		printk(KERN_ERR "journal: fault injected in commit %lu seq %llu: %lu of %lu pages in place\n",
-		       j->commits + 1, (unsigned long long)j->seq, n / 2, n);
-		ngos_bugcheck("journal fault injection", __FILE__, __LINE__);
-	}
+	kj_fault_at(b, j, 0, v, n);
 #if DBG
 	if (j->apply_fault && n >= 2) {
 		j->apply_fault = 0;
@@ -933,8 +928,10 @@ int kshim_jnl_commit(struct block_device *b, u64 aux)
 			goto out;
 		}
 		j->fallbacks++;
-		printk(KERN_WARNING "journal: %lu pages do not fit (%llu slots) or degraded=%d: writing in place\n",
-		       n, (unsigned long long)j->capacity, j->degraded);
+		if (!j->degraded)
+			j->overflows++;	/* e.g. one operation that went far past the hard limit (ngc_commit_hard) */
+		printk(KERN_WARNING "journal: %lu pages do not fit (%llu slots) or degraded=%d: writing in place (overflow %lu)\n",
+		       n, (unsigned long long)j->capacity, j->degraded, j->overflows);
 		err = kj_hdr_write(b, j, KJ_ST_UNJOURNALED, 0, 0, 0, 1, j->vol_usn);
 		if (err)
 			goto out;
@@ -986,7 +983,7 @@ int kshim_jnl_seal(struct block_device *b, u64 aux)
 		return -EIO;
 	if (j->readonly)
 		return 0;
-	if (j->sstate == KJ_S_RUNNING)
+	if (__atomic_load_n(&j->sstate, __ATOMIC_ACQUIRE) == KJ_S_RUNNING)
 		return -EBUSY;
 	kj_reap(j);
 	if (j->failed)
@@ -1062,6 +1059,15 @@ int kshim_jnl_io(struct block_device *b)
 #else
 	(void)t0;
 #endif
+	/*
+	 * DONE before the event, and j is still touched after DONE is visible: a waiter that sees DONE may reap at once.
+	 * That is safe only because j (the journal, freed by kshim_jnl_deactivate at the dismount) outlives this thread's
+	 * last access: the caller either holds CoreLock for the whole I/O (NgCommit, not at depth 1 or after a dismount
+	 * began), or counts in DioActive until it has CoreLock back (NgPinUnlocked .. NgDataIoDone), and the dismount waits
+	 * for DioActive 0 under CoreLock before anything is freed.  A caller without that pin must not use kshim_jnl_io.
+	 * The event is not set first: a woken waiter that still saw RUNNING would spin on the signalled event without
+	 * yielding (kj_wait_io), which on one CPU against a lower-priority I/O thread never ends.
+	 */
 	__atomic_store_n(&j->sstate, KJ_S_DONE, __ATOMIC_RELEASE);
 	ngos_ev_set(&j->idle);	/* the last access to j by this thread */
 	return err;
@@ -1079,8 +1085,8 @@ void kshim_jnl_report(struct block_device *b)
 	struct kshim_jnl *j = b->jnl;
 	if (!j)
 		return;
-	printk(KERN_WARNING "journal: %lu commits, %lu pages, largest %lu, %lu in-place fallbacks, %lu dropped, seq %llu, pending %lu, %lu unlocked commits\n",
-	       j->commits, j->committed_pages, j->max_tx, j->fallbacks, j->dropped, (unsigned long long)j->seq,
+	printk(KERN_WARNING "journal: %lu commits, %lu pages, largest %lu, %lu in-place fallbacks (%lu overflowed the journal), %lu dropped, seq %llu, pending %lu, %lu unlocked commits\n",
+	       j->commits, j->committed_pages, j->max_tx, j->fallbacks, j->overflows, j->dropped, (unsigned long long)j->seq,
 	       j->npages + j->snpages, j->unlocked_commits);
 #if DBG
 	printk(KERN_WARNING "journal: unlocked journal I/O about %lu ms in total\n", j->io_us / 1000);
@@ -1133,11 +1139,13 @@ void kshim_jnl_mark_errors(struct block_device *b)
 	if (!__atomic_exchange_n(&j->errors, 1, __ATOMIC_SEQ_CST))
 		printk(KERN_ERR "journal: the core reported errors: the volume stays marked for repair\n");
 	/*
-	 * Not over a COMMITTED header whose transaction could not be applied (failed): its replay is
-	 * what the next mount needs.  Reached from shared (read) holders too: one writer at a time,
-	 * and tried again (ngc_dirty) until the header is on the medium.
+	 * The header with the mark is written here, except: over a COMMITTED header whose transaction could not be
+	 * applied (failed: its replay is what the next mount needs); when the mark is on the medium already; and while
+	 * the journal I/O of a sealed transaction owns the header page (it runs without the volume lock; the headers it
+	 * writes carry the mark once j->errors is set).  Reached from shared (read) holders too: one writer at a time
+	 * (errors_writing).  Until errors_durable is set, kshim_jnl_errors_pending keeps ngc_dirty true, so the flusher
+	 * calls this again.
 	 */
-	/* Not while the journal I/O of a sealed transaction owns the header page: its headers carry the mark, the flusher tries again. */
 	if (j->failed || j->errors_durable || __atomic_load_n(&j->sstate, __ATOMIC_ACQUIRE) == KJ_S_RUNNING ||
 	    __atomic_exchange_n(&j->errors_writing, 1, __ATOMIC_SEQ_CST))
 		return;
