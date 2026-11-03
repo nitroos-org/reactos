@@ -1283,19 +1283,28 @@ static void kshim_inode_init(struct super_block *sb, struct inode *i)
 	init_rwsem(&i->i_rwsem);
 	init_rwsem(&i->i_data.invalidate_lock);
 	INIT_LIST_HEAD(&i->i_data.private_list);
+	i->kshim_prev = NULL;
 	i->kshim_next = sb->kshim_inodes;
+	if (sb->kshim_inodes)
+		sb->kshim_inodes->kshim_prev = i;
 	sb->kshim_inodes = i;
 	kshim_inodes_live++;
 }
 static void kshim_inode_unlist(struct inode *i)
 {
-	struct inode **pp = &i->i_sb->kshim_inodes;
-	while (*pp && *pp != i)
-		pp = &(*pp)->kshim_next;
-	if (*pp) {
-		*pp = i->kshim_next;
-		kshim_inodes_live--;
-	}
+	struct super_block *sb = i->i_sb;
+	/* Not listed (never, or already unlisted): nothing to do.  A walk from the head made each eviction cost
+	 * O(live inodes), as the oldest inodes, evicted first, sit at the tail. */
+	if (!i->kshim_prev && sb->kshim_inodes != i)
+		return;
+	if (i->kshim_prev)
+		i->kshim_prev->kshim_next = i->kshim_next;
+	else
+		sb->kshim_inodes = i->kshim_next;
+	if (i->kshim_next)
+		i->kshim_next->kshim_prev = i->kshim_prev;
+	i->kshim_next = i->kshim_prev = NULL;
+	kshim_inodes_live--;
 }
 struct inode *new_inode(struct super_block *sb)
 {

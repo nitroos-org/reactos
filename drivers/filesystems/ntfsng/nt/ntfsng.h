@@ -23,6 +23,8 @@
 
 #define NG_NODE_VCB 0x4e47
 #define NG_NODE_FCB 0x4e48
+/* Idle FCBs with cached data kept per volume before the oldest is purged (registry "FcbCacheMax" overrides). */
+#define NG_FCB_CACHE_DEFAULT 1024
 
 /*
  * CoreLock statistics per request type: the IRP major function of the top-level IRP, paging
@@ -111,6 +113,11 @@ typedef struct _NG_VCB
      * (thousands of FCBs linger after a create or delete storm).  Both are changed under FcbListLock. */
 #define NG_FCB_HASH 1024
     LIST_ENTRY FcbHash[NG_FCB_HASH];
+    /* FCBs without a handle whose data section still holds cached pages, oldest first (NgFcbIdle; FcbListLock).  Mm keeps
+     * such a section, and with it the file object and the FCB, until the pages go: the idle list is trimmed to
+     * NgGlobal.FcbCacheMax entries by flushing and purging the oldest, which lets the last close free them. */
+    LIST_ENTRY IdleList;
+    LONG IdleCount;
     struct _NG_FCB *VolumeFcb;
     struct ngc_volinfo Info;
     ULONG SectorSize;
@@ -180,6 +187,7 @@ typedef struct _NG_FCB
     ERESOURCE PagingWriteLock;      /* exclusive around every paging and non-cached data write of the stream (write.c) */
     LIST_ENTRY VcbLinks;
     LIST_ENTRY HashLinks;           /* in Vcb->FcbHash[NgFcbBucket(MftNo)] while listed (VcbLinks.Flink is not NULL) */
+    LIST_ENTRY IdleLinks;           /* in Vcb->IdleList while Flink is not NULL (FcbListLock) */
     PNG_VCB Vcb;
     LONG RefCount;                  /* file objects not yet closed */
     LONG OpenHandles;               /* file objects not yet cleaned up */
@@ -275,6 +283,7 @@ typedef struct _NG_GLOBAL
     ULONG MaxStackAtIo;             /* stack depth when the core issues a device read */
     UCHAR MaxStackMajor;
     LONG FcbLive;
+    ULONG FcbCacheMax;              /* idle FCBs with cached data kept per volume; MAXULONG = no trimming ("FcbCacheMax", "NoFcbTrim") */
     LONG Opens;
     ULONG PermissiveOpen;           /* diagnostic: grant write access at open, refuse the modification itself */
     ULONG ForceReadOnly;            /* "ReadOnly" DWORD in the service key: mount every volume read-only */
@@ -324,6 +333,7 @@ VOID NgUnlistFcb(PNG_FCB Fcb);
 BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Retire);
 VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self);
 VOID NgFcbRemoveLocked(PNG_FCB Fcb);
+VOID NgFcbIdle(PNG_FCB Fcb);
 BOOLEAN NgMarkDeletePending(PNG_VCB Vcb, PNG_FCB Fcb, BOOLEAN CheckStreams);
 BOOLEAN NgNodeGone(ngc_node *Node);
 VOID NgSetDeletePending(PNG_FCB Fcb, PNG_CCB Ccb);
