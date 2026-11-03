@@ -80,3 +80,19 @@
 #define IDS_DHCPRENEWERROR       209
 #define IDS_DHCPSETIDERROR       210
 #define IDS_DHCPSETIDSUCCESS     211
+
+#define IDS_DNSDISPLAYERROR      212
+#define IDS_DESCRIPTIONFMT       213
+#define IDS_LINKLOCALV6          214
+#define IDS_IPV6ADDRESS          215
+#define IDS_TEMPIPV6             216
+#define IDS_AUTOIPV4             217
+#define IDS_DHCPV6IAID           218
+#define IDS_DHCPV6DUID           219
+#define IDS_NETBIOSEN            220
+#define IDS_NETBIOSDIS           221
+#define IDS_COMPARTMENT          222
+#define IDS_DNSREGISTER          223
+#define IDS_CLASSV4NONE          224
+#define IDS_CLASSV6NONE          225
+#define IDS_CLASSV4LIST          226
