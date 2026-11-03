@@ -275,7 +275,9 @@ QueryFlags(
     CHAR KeyName[256];
     DWORD Type, Size, Data;
 
-    *Flags = 0;
+    /* every interface carries the IPv4 stack, the only one this tree has; .NET
+     * GetIPv4Properties refuses an interface without this bit */
+    *Flags = IP_ADAPTER_IPV4_ENABLED;
 
     snprintf(KeyName, 256,
              "SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\%*s",
