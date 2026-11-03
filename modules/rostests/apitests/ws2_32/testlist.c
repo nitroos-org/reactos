@@ -48,6 +48,7 @@ extern void func_selecttimeval(void);
 extern void func_shutdownrecv(void);
 extern void func_sotimeout(void);
 extern void func_socketscale(void);
+extern void func_stringtoaddress(void);
 extern void func_udpbindretry(void);
 extern void func_udpcancel(void);
 extern void func_udpconnectname(void);
@@ -116,6 +117,7 @@ const struct test winetest_testlist[] =
     { "shutdownrecv", func_shutdownrecv },
     { "sotimeout", func_sotimeout },
     { "socketscale", func_socketscale },
+    { "stringtoaddress", func_stringtoaddress },
     { "udpbindretry", func_udpbindretry },
     { "udpcancel", func_udpcancel },
     { "udpconnectname", func_udpconnectname },

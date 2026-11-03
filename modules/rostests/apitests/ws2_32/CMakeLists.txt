@@ -45,6 +45,7 @@ list(APPEND SOURCE
     shutdownrecv.c
     sotimeout.c
     socketscale.c
+    stringtoaddress.c
     udpbindretry.c
     udpcancel.c
     udpconnectname.c

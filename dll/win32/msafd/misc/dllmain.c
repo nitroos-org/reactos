@@ -4051,8 +4051,9 @@ WSPStringToAddress(IN LPWSTR AddressString,
             *lpAddressLength = sizeof(*sockaddr);
             memset(lpAddress, 0, sizeof(*sockaddr));
             sockaddr->sin_family = AF_INET;
-            sockaddr->sin_addr.s_addr = inetaddr;
-            sockaddr->sin_port = port;
+            /* The address and the port are in network order, as on Windows */
+            sockaddr->sin_addr.s_addr = htonl((ULONG)inetaddr);
+            sockaddr->sin_port = htons(port);
         }
     }
 
