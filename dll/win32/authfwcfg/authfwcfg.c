@@ -503,9 +503,8 @@ static VOID ShowRule(const FW_RULE *r, BOOL verbose)
     Line(L"Protocol:", proto);
     if (r->Protocol == 1 || r->Protocol == 58)
     {
-        if (r->Icmp && *r->Icmp)
         {
-            WCHAR *copy = _wcsdup(r->Icmp), *tok, b[200];
+            WCHAR *copy = _wcsdup((r->Icmp && *r->Icmp) ? r->Icmp : L"*:*"), *tok, b[200];
             WCHAR pad[40]; int i;
             for (i = 0; i < 38; i++) pad[i] = L' ';
             pad[38] = 0;
