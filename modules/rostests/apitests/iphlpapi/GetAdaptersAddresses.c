@@ -302,6 +302,123 @@ static void TestGateways(void)
     free(Routes);
 }
 
+/* The number of leading one bits of a mask in host order */
+static ULONG PrefixOfMask(ULONG Mask)
+{
+    ULONG Bits = 0;
+
+    while (Bits < 32 && (Mask & (0x80000000UL >> Bits)))
+        Bits++;
+    return Bits;
+}
+
+/* The fields .NET reads: OnLinkPrefixLength gives UnicastIPAddressInformation.IPv4Mask / PrefixLength, Mtu and
+ * the speeds give the interface properties, the flags tell which interface properties exist */
+static void TestPrefixMtuFlags(void)
+{
+    IP_ADAPTER_ADDRESSES_LH *Adapters, *A;
+    IP_ADAPTER_UNICAST_ADDRESS_LH *U;
+    MIB_IPADDRTABLE *Addresses;
+    ULONG Size = 0, i;
+
+    GetIpAddrTable(NULL, &Size, FALSE);
+    Addresses = malloc(Size);
+    if (!Addresses || GetIpAddrTable(Addresses, &Size, FALSE) != NO_ERROR)
+    {
+        free(Addresses);
+        skip("No address table\n");
+        return;
+    }
+
+    Adapters = GetAdapters(GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER);
+    for (A = Adapters; A; A = A->Next)
+    {
+        if (A->Length < sizeof(IP_ADAPTER_ADDRESSES_LH))
+            continue;
+
+        for (U = A->FirstUnicastAddress; U; U = U->Next)
+        {
+            ULONG Address, Expected = 0;
+            BOOL Found = FALSE;
+
+            if (!U->Address.lpSockaddr || U->Address.lpSockaddr->sa_family != AF_INET)
+                continue;
+            Address = ((SOCKADDR_IN *)U->Address.lpSockaddr)->sin_addr.S_un.S_addr;
+
+            for (i = 0; i < Addresses->dwNumEntries; i++)
+            {
+                if (Addresses->table[i].dwAddr == Address && Addresses->table[i].dwIndex == A->IfIndex)
+                {
+                    Found = TRUE;
+                    Expected = PrefixOfMask(ntohl(Addresses->table[i].dwMask));
+                }
+            }
+            if (!Found)
+                continue;
+
+            /* Windows 10: 24 for the Ethernet address of a /24, 8 for 127.0.0.1 (read as 0 by .NET: mask 0.0.0.0) */
+            ok(Expected != 0, "adapter %lu: the address table has no mask for %s\n", A->IfIndex,
+               inet_ntoa(((SOCKADDR_IN *)U->Address.lpSockaddr)->sin_addr));
+            ok(U->OnLinkPrefixLength == Expected, "adapter %lu, %s: OnLinkPrefixLength %u, the mask of GetIpAddrTable has %lu bits\n",
+               A->IfIndex, inet_ntoa(((SOCKADDR_IN *)U->Address.lpSockaddr)->sin_addr), U->OnLinkPrefixLength, Expected);
+            if (Address == htonl(INADDR_LOOPBACK))
+                ok(U->OnLinkPrefixLength == 8, "loopback: OnLinkPrefixLength %u\n", U->OnLinkPrefixLength);
+        }
+
+        if (A->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
+        {
+            /* Windows 10 measured: Flags 0x181 (IPv6 enabled, IPv4 enabled, DDNS), Mtu 4294967295, 1 Gbit/s */
+            ok((A->Flags & IP_ADAPTER_DDNS_ENABLED) != 0, "loopback: Flags 0x%lx lack IP_ADAPTER_DDNS_ENABLED\n", A->Flags);
+            ok(A->Mtu == 0xFFFFFFFFUL, "loopback: Mtu %lu\n", A->Mtu);
+            ok(A->TransmitLinkSpeed == 1073741824ULL, "loopback: TransmitLinkSpeed %I64u\n", (ULONGLONG)A->TransmitLinkSpeed);
+            ok(A->ReceiveLinkSpeed == 1073741824ULL, "loopback: ReceiveLinkSpeed %I64u\n", (ULONGLONG)A->ReceiveLinkSpeed);
+        }
+        else if (A->OperStatus == IfOperStatusUp)
+        {
+            ok(A->Mtu != 0 && A->Mtu != 0xFFFFFFFFUL, "adapter %lu: Mtu %lu\n", A->IfIndex, A->Mtu);
+            ok(A->TransmitLinkSpeed != 0 && A->ReceiveLinkSpeed != 0, "adapter %lu: link speed %I64u / %I64u\n", A->IfIndex,
+               (ULONGLONG)A->TransmitLinkSpeed, (ULONGLONG)A->ReceiveLinkSpeed);
+        }
+    }
+    free(Adapters);
+
+    /* the mask of GetAdaptersInfo agrees with the prefix of the same address */
+    {
+        IP_ADAPTER_INFO *Info = NULL, *I;
+        IP_ADDR_STRING *Ip;
+
+        Size = 0;
+        if (GetAdaptersInfo(NULL, &Size) == ERROR_BUFFER_OVERFLOW && (Info = malloc(Size)) != NULL &&
+            GetAdaptersInfo(Info, &Size) == NO_ERROR)
+        {
+            Adapters = GetAdapters(GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER);
+            for (I = Info; I; I = I->Next)
+            {
+                for (A = Adapters; A && strcmp(A->AdapterName, I->AdapterName); A = A->Next)
+                    ;
+                for (Ip = &I->IpAddressList; A && Ip; Ip = Ip->Next)
+                {
+                    ULONG Mask = inet_addr(Ip->IpMask.String), Addr = inet_addr(Ip->IpAddress.String);
+
+                    if (Mask == INADDR_NONE || Addr == 0)
+                        continue;
+                    for (U = A->FirstUnicastAddress; U; U = U->Next)
+                    {
+                        if (U->Address.lpSockaddr && U->Address.lpSockaddr->sa_family == AF_INET &&
+                            ((SOCKADDR_IN *)U->Address.lpSockaddr)->sin_addr.S_un.S_addr == Addr)
+                            ok(U->OnLinkPrefixLength == PrefixOfMask(ntohl(Mask)),
+                               "%s: OnLinkPrefixLength %u, GetAdaptersInfo mask %s\n", Ip->IpAddress.String,
+                               U->OnLinkPrefixLength, Ip->IpMask.String);
+                    }
+                }
+            }
+            free(Adapters);
+        }
+        free(Info);
+    }
+    free(Addresses);
+}
+
 START_TEST(GetAdaptersAddresses)
 {
     WSADATA Wsa;
@@ -310,5 +427,6 @@ START_TEST(GetAdaptersAddresses)
     TestAdapters();
     TestLoopbackIndex();
     TestGateways();
+    TestPrefixMtuFlags();
     WSACleanup();
 }

@@ -119,7 +119,8 @@ NDIS_STATUS
 GetPacketTypeFromHeaderBuffer(PLAN_ADAPTER Adapter,
                               PVOID HeaderBuffer,
                               ULONG HeaderBufferSize,
-                              PULONG PacketType)
+                              PULONG PacketType,
+                              PBOOLEAN NonUnicast)
 {
     PETH_HEADER EthHeader = HeaderBuffer;
 
@@ -139,6 +140,9 @@ GetPacketTypeFromHeaderBuffer(PLAN_ADAPTER Adapter,
                See RFC 1122, section 2.3.3 for more information */
 
             *PacketType = EthHeader->EType;
+            /* the group bit of the destination: broadcast and multicast frames */
+            if (NonUnicast)
+                *NonUnicast = (EthHeader->DstAddr[0] & BCAST_ETH_MASK) != 0;
             break;
 
         default:
@@ -157,7 +161,8 @@ GetPacketTypeFromHeaderBuffer(PLAN_ADAPTER Adapter,
 NDIS_STATUS
 GetPacketTypeFromNdisPacket(PLAN_ADAPTER Adapter,
                             PNDIS_PACKET NdisPacket,
-                            PULONG PacketType)
+                            PULONG PacketType,
+                            PBOOLEAN NonUnicast)
 {
     PVOID HeaderBuffer;
     ULONG BytesCopied;
@@ -185,7 +190,8 @@ GetPacketTypeFromNdisPacket(PLAN_ADAPTER Adapter,
     Status = GetPacketTypeFromHeaderBuffer(Adapter,
                                            HeaderBuffer,
                                            BytesCopied,
-                                           PacketType);
+                                           PacketType,
+                                           NonUnicast);
 
     ExFreePoolWithTag(HeaderBuffer, HEADER_TAG);
 
@@ -454,12 +460,29 @@ static VOID LanReceiveWorkItem( PVOID Context ) {
     InterlockedDecrement(&Adapter->ReceiveWorkItems);
 }
 
+/* The unicast and the other (broadcast, multicast) frames are counted apart, as MIB-II ifInUcastPkts and
+   ifInNUcastPkts: GetIfEntry and the .NET interface statistics read them */
+static VOID LanCountReceivedFrame(
+    PLAN_ADAPTER Adapter,
+    BOOLEAN NonUnicast) {
+    PIP_INTERFACE Interface = Adapter->Context;
+
+    if (!Interface)
+        return;
+
+    if (NonUnicast)
+        InterlockedIncrement((PLONG)&Interface->Stats.InNUnicast);
+    else
+        InterlockedIncrement((PLONG)&Interface->Stats.InUnicast);
+}
+
 static VOID LanReceivePacket(
     PLAN_ADAPTER Adapter,
     PNDIS_PACKET Packet,
     UINT BytesTransferred,
     BOOLEAN LegacyReceive) {
     ULONG PacketType;
+    BOOLEAN NonUnicast = FALSE;
     IP_PACKET IPPacket;
     PIP_INTERFACE Interface;
 
@@ -486,12 +509,16 @@ static VOID LanReceivePacket(
         /* Determine packet type from media header */
         if (GetPacketTypeFromNdisPacket(Adapter,
                                         IPPacket.NdisPacket,
-                                        &PacketType) != NDIS_STATUS_SUCCESS)
+                                        &PacketType,
+                                        &NonUnicast) != NDIS_STATUS_SUCCESS)
         {
             /* Bad packet */
             IPPacket.Free(&IPPacket);
             return;
         }
+
+        /* A legacy receive was counted by ProtocolReceive or LanSubmitReceiveCopy, which had the header */
+        LanCountReceivedFrame(Adapter, NonUnicast);
 
         /* Data is at the end of the media header */
         IPPacket.Position = Adapter->HeaderSize;
@@ -638,12 +665,13 @@ static VOID LanSubmitReceiveCopy(
     PNDIS_PACKET NdisPacket) {
     PNDIS_PACKET Copy;
     ULONG PacketType;
+    BOOLEAN NonUnicast = FALSE;
     UINT Length, Size;
     PCHAR Data;
 
     NdisQueryPacketLength(NdisPacket, &Length);
     if (Length <= Adapter->HeaderSize ||
-        GetPacketTypeFromNdisPacket(Adapter, NdisPacket, &PacketType) != NDIS_STATUS_SUCCESS)
+        GetPacketTypeFromNdisPacket(Adapter, NdisPacket, &PacketType, &NonUnicast) != NDIS_STATUS_SUCCESS)
         return;
 
     Length -= Adapter->HeaderSize;
@@ -653,6 +681,8 @@ static VOID LanSubmitReceiveCopy(
     GetDataPtr(Copy, 0, &Data, &Size);
     CopyPacketToBuffer(Data, NdisPacket, Adapter->HeaderSize, Length);
     PC(Copy)->PacketType = PacketType;
+
+    LanCountReceivedFrame(Adapter, NonUnicast);
 
     if (!LanSubmitReceiveWork(Adapter, Copy, Length, TRUE, TRUE))
         FreeNdisPacket(Copy);
@@ -715,6 +745,7 @@ NDIS_STATUS NTAPI ProtocolReceive(
  */
 {
     ULONG PacketType;
+    BOOLEAN NonUnicast = FALSE;
     UINT BytesTransferred;
     PCHAR BufferData;
     NDIS_STATUS NdisStatus;
@@ -736,9 +767,12 @@ NDIS_STATUS NTAPI ProtocolReceive(
     NdisStatus = GetPacketTypeFromHeaderBuffer(Adapter,
                                                HeaderBuffer,
                                                HeaderBufferSize,
-                                               &PacketType);
+                                               &PacketType,
+                                               &NonUnicast);
     if (NdisStatus != NDIS_STATUS_SUCCESS)
         return NDIS_STATUS_NOT_ACCEPTED;
+
+    LanCountReceivedFrame(Adapter, NonUnicast);
 
     TI_DbgPrint(DEBUG_DATALINK, ("Adapter: %x (MTU %d)\n",
 				 Adapter, Adapter->MTU));
@@ -1371,8 +1405,13 @@ VOID LANTransmit(
 		   ((PCHAR)LinkAddress)[5] & 0xff));
 	}
 
-    /* Update interface stats */
+    /* Update interface stats: the frames to a broadcast or multicast address are counted apart from the
+       unicast ones, as MIB-II ifOutUcastPkts and ifOutNUcastPkts */
     Interface->Stats.OutBytes += Size;
+    if (!LinkAddress || (((PUCHAR)LinkAddress)[0] & BCAST_ETH_MASK))
+        InterlockedIncrement((PLONG)&Interface->Stats.OutNUnicast);
+    else
+        InterlockedIncrement((PLONG)&Interface->Stats.OutUnicast);
 
 	TcpipAcquireSpinLock( &Adapter->Lock, &OldIrql );
 	TI_DbgPrint(MID_TRACE, ("NdisSend\n"));
