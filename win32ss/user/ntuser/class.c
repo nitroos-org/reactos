@@ -816,6 +816,25 @@ IntMakeCloneBaseClass(IN OUT PCLS Class,
 }
 
 
+static BOOL
+IntMoveClassToSharedHeap(IN OUT PCLS Class,
+                         IN OUT PCLS **ClassLinkPtr);
+
+/* Whether a thread of the process other than the current one is attached to the desktop */
+static BOOL
+IntProcessHasThreadOnDesktop(IN PPROCESSINFO pi,
+                             IN PDESKTOP Desktop)
+{
+    PTHREADINFO ptiCurrent = PsGetCurrentThreadWin32Thread(), pti;
+
+    for (pti = pi->ptiList; pti != NULL; pti = pti->ptiSibling)
+    {
+        if (pti->rpdesk == Desktop && (pti != ptiCurrent || !(pti->TIF_flags & TIF_INCLEANUP)))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 VOID
 IntDereferenceClass(IN OUT PCLS Class,
                     IN PDESKTOPINFO Desktop,
@@ -867,6 +886,22 @@ IntDereferenceClass(IN OUT PCLS Class,
                 BaseClass->pclsBase = NULL;
                 BaseClass->pclsClone = NULL;
                 IntDestroyClass(BaseClass);
+            }
+            else if (BaseClass->rpdeskParent != NULL &&
+                     !IntProcessHasThreadOnDesktop(pi, BaseClass->rpdeskParent))
+            {
+                /* The last window went away after the last thread of the process left
+                   the desktop (a window freed later than its thread exited): no thread
+                   detach will move the class any more, and the process may not even
+                   have the desktop heap mapped (user32 reads the class through it), or
+                   the desktop may be deleted next. Move it to the shared heap now. */
+                PCLS *Link = BaseClass->Global ? &pi->pclsPublicList : &pi->pclsPrivateList;
+
+                while (*Link != NULL && *Link != BaseClass)
+                    Link = &(*Link)->pclsNext;
+
+                if (*Link == BaseClass)
+                    IntMoveClassToSharedHeap(BaseClass, &Link);
             }
         }
         else
