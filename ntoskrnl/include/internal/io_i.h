@@ -68,6 +68,13 @@ UCHAR IopQueryOperationLength[] =
     0,
     sizeof(FILE_NETWORK_PHYSICAL_NAME_INFORMATION),
 #endif
+    /* 42-58 are not passed on yet (STATUS_INVALID_INFO_CLASS, as before) */
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0,
+    /* 59 FileIdInformation: FILE_ID_INFORMATION (ULONGLONG VolumeSerialNumber + FILE_ID_128 FileId), any
+       handle as on Windows; std::filesystem::equivalent reads it (GetFileInformationByHandleEx(FileIdInfo)) */
+    sizeof(ULONGLONG) + 16,
 };
 
 UCHAR IopSetOperationLength[] =
@@ -160,6 +167,10 @@ ACCESS_MASK IopQueryOperationAccess[] =
     0,
     0,
     FILE_READ_ATTRIBUTES,
+    0, 0, 0, 0, 0, 0, 0, 0,     /* 42-58 */
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0,
+    0,                          /* 59 FileIdInformation: no access needed (Windows 10 22H2, measured) */
 };
 
 ACCESS_MASK IopSetOperationAccess[] =
@@ -209,6 +220,7 @@ ACCESS_MASK IopSetOperationAccess[] =
 };
 
 C_ASSERT(RTL_NUMBER_OF(IopQueryOperationAccess) == RTL_NUMBER_OF(IopQueryOperationLength));
+C_ASSERT(RTL_NUMBER_OF(IopQueryOperationLength) == 60);
 C_ASSERT(RTL_NUMBER_OF(IopSetOperationAccess) == RTL_NUMBER_OF(IopSetOperationLength));
 
 //
