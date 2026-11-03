@@ -35,11 +35,12 @@
 extern "C" {
 #endif /* defined(__cplusplus) */
 
-/* Except for specific structs, this header is byte packed */
-#include <pshpack1.h>
-
 #include <shtypes.h>
 #include <shobjidl.h>
+
+/* Except for specific structs, this header is byte packed. shobjidl.h is included before the packing is
+   switched on (as Wine does): its structs, e.g. KNOWNFOLDER_DEFINITION, have the natural layout of the Windows SDK */
+#include <pshpack1.h>
 
 #include <pshpack8.h>
 

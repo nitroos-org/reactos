@@ -18,6 +18,23 @@ static void test_Registration(void)
         ok(!lstrcmpiW(buf, L"Both"), "ThreadingModel is %S\n", buf);
 }
 
+/* The Windows SDK layout: the structure is naturally aligned. Including <shlobj.h> must not byte-pack it:
+   Office AppV reads pszName at offset 8 of the structure shell32 fills in */
+static void test_DefinitionLayout(void)
+{
+#ifdef _WIN64
+    ok_int((int)FIELD_OFFSET(KNOWNFOLDER_DEFINITION, pszName), 8);
+    ok_int((int)FIELD_OFFSET(KNOWNFOLDER_DEFINITION, fidParent), 24);
+    ok_int((int)FIELD_OFFSET(KNOWNFOLDER_DEFINITION, pszRelativePath), 40);
+    ok_int((int)FIELD_OFFSET(KNOWNFOLDER_DEFINITION, dwAttributes), 88);
+    ok_int((int)sizeof(KNOWNFOLDER_DEFINITION), 112);
+#else
+    ok_int((int)FIELD_OFFSET(KNOWNFOLDER_DEFINITION, pszName), 4);
+    ok_int((int)FIELD_OFFSET(KNOWNFOLDER_DEFINITION, fidParent), 12);
+    ok_int((int)sizeof(KNOWNFOLDER_DEFINITION), 76);
+#endif
+}
+
 static void test_Manager(void)
 {
     IKnownFolderManager *mgr = NULL;
@@ -71,6 +88,7 @@ static void test_Manager(void)
             if (folder->GetFolderDefinition(&def) == S_OK)
             {
                 good++;
+                ok(def.pszName && def.pszName[0], "folder %u: no name\n", i);
                 CoTaskMemFree(def.pszName);
                 CoTaskMemFree(def.pszDescription);
                 CoTaskMemFree(def.pszRelativePath);
@@ -100,6 +118,22 @@ static void test_Manager(void)
             ok(!lstrcmpiW(path, windir), "got %S, expected %S\n", path, windir);
             CoTaskMemFree(path);
         }
+        ZeroMemory(&def, sizeof(def));
+        hr = folder ? folder->GetFolderDefinition(&def) : E_FAIL;
+        ok_hex(hr, S_OK);
+        if (hr == S_OK)
+        {
+            ok_int(def.category, KF_CATEGORY_FIXED);
+            ok(def.pszName && !lstrcmpiW(def.pszName, L"Windows"), "name is %S\n", def.pszName ? def.pszName : L"(null)");
+            CoTaskMemFree(def.pszName);
+            CoTaskMemFree(def.pszDescription);
+            CoTaskMemFree(def.pszRelativePath);
+            CoTaskMemFree(def.pszParsingName);
+            CoTaskMemFree(def.pszTooltip);
+            CoTaskMemFree(def.pszLocalizedName);
+            CoTaskMemFree(def.pszIcon);
+            CoTaskMemFree(def.pszSecurity);
+        }
         folder->Release();
     }
 
@@ -112,6 +146,7 @@ START_TEST(CKnownFolderManager)
     ok_hex(hr, S_OK);
 
     test_Registration();
+    test_DefinitionLayout();
     test_Manager();
 
     CoUninitialize();
