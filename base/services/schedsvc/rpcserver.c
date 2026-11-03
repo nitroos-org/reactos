@@ -111,6 +111,55 @@ void __RPC_USER midl_user_free(void __RPC_FAR * ptr)
 }
 
 
+/* AT jobs run commands as SYSTEM, so only LocalSystem and members of Administrators may use the AT
+ * interface (as on Windows). The pipe itself stays open: the check is in every method. */
+static
+DWORD
+CheckAtCaller(VOID)
+{
+    BYTE Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    PTOKEN_USER pUser = (PTOKEN_USER)Buffer;
+    BYTE Admins[SECURITY_MAX_SID_SIZE];
+    DWORD dwSize;
+    HANDLE hToken;
+    BOOL bMember = FALSE, bAllowed = FALSE;
+
+    if (RpcImpersonateClient(NULL) != RPC_S_OK)
+    {
+        WARN("cannot impersonate the caller\n");
+        return ERROR_ACCESS_DENIED;
+    }
+
+    if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &hToken))
+    {
+        if (GetTokenInformation(hToken, TokenUser, pUser, sizeof(Buffer), &dwSize) &&
+            IsWellKnownSid(pUser->User.Sid, WinLocalSystemSid))
+        {
+            bAllowed = TRUE;
+        }
+
+        dwSize = sizeof(Admins);
+        if (!bAllowed &&
+            CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL, Admins, &dwSize) &&
+            CheckTokenMembership(hToken, Admins, &bMember) && bMember)
+        {
+            bAllowed = TRUE;
+        }
+
+        CloseHandle(hToken);
+    }
+    else
+    {
+        WARN("cannot open the caller's token (%lu)\n", GetLastError());
+    }
+
+    /* Always leave the caller's context, whatever the answer */
+    RpcRevertToSelf();
+
+    return bAllowed ? ERROR_SUCCESS : ERROR_ACCESS_DENIED;
+}
+
+
 /* Function 0 */
 NET_API_STATUS
 WINAPI
@@ -121,9 +170,14 @@ NetrJobAdd(
 {
     PJOB pJob;
     DWORD dwJobId;
+    DWORD dwError;
 
     TRACE("NetrJobAdd(%S %p %p)\n",
           ServerName, pAtInfo, pJobId);
+
+    dwError = CheckAtCaller();
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
 
     if (pAtInfo->Command == NULL ||
         !IsValidSchedule(pAtInfo->JobTime, pAtInfo->DaysOfMonth, pAtInfo->DaysOfWeek))
@@ -189,9 +243,14 @@ NetrJobDel(
     PLIST_ENTRY JobEntry, NextEntry;
     PJOB CurrentJob;
     BOOL bFound = FALSE;
+    DWORD dwError;
 
     TRACE("NetrJobDel(%S %lu %lu)\n",
           ServerName, MinJobId, MaxJobId);
+
+    dwError = CheckAtCaller();
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
 
     /* Check the job IDs */
     if (MinJobId > MaxJobId)
@@ -263,6 +322,13 @@ NetrJobEnum(
 
     TRACE("NetrJobEnum(%S %p %lu %p %p)\n",
           ServerName, pEnumContainer, PreferedMaximumLength, pTotalEntries, pResumeHandle);
+
+    dwError = CheckAtCaller();
+    if (dwError != ERROR_SUCCESS)
+    {
+        *pTotalEntries = 0;
+        return dwError;
+    }
 
     if (pEnumContainer == NULL)
     {
@@ -392,7 +458,11 @@ NetrJobGetInfo(
     TRACE("NetrJobGetInfo(%S %lu %p)\n",
           ServerName, JobId, ppAtInfo);
 
-    /* Acquire the job list lock exclusively */
+    dwError = CheckAtCaller();
+    if (dwError != ERROR_SUCCESS)
+        return dwError;
+
+    /* Acquire the job list lock shared */
     RtlAcquireResourceShared(&JobListLock, TRUE);
 
     /* Traverse the job list */

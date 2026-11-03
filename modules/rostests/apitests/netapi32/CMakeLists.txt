@@ -4,6 +4,7 @@ list(APPEND SOURCE
     DsRoleGetPrimaryDomainInformation.c
     NetGetAadJoinInformation.c
     NetLocalGroup.c
+    NetScheduleJob.c
     NetServerGetInfo.c
     NetShare.c
     testlist.c)
