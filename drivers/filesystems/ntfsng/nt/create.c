@@ -47,17 +47,35 @@ static VOID NgFreeCcb(PNG_CCB Ccb)
     ExFreePoolWithTag(Ccb, TAG_NTFSNG);
 }
 
+/* The chain of Vcb->FcbHash that holds the FCBs of MFT record MftNo. */
+static __inline PLIST_ENTRY NgFcbBucket(PNG_VCB Vcb, ULONGLONG MftNo)
+{
+    return &Vcb->FcbHash[(ULONG)((MftNo * 0x9E3779B97F4A7C15ULL) >> 54) & (NG_FCB_HASH - 1)];
+}
+
+/* Takes Fcb off FcbList and its hash chain when it is on them (caller holds FcbListLock). */
+VOID NgFcbRemoveLocked(PNG_FCB Fcb)
+{
+    if (Fcb->VcbLinks.Flink)
+    {
+        RemoveEntryList(&Fcb->VcbLinks);
+        RemoveEntryList(&Fcb->HashLinks);
+        Fcb->VcbLinks.Flink = Fcb->VcbLinks.Blink = NULL;
+        Fcb->HashLinks.Flink = Fcb->HashLinks.Blink = NULL;
+    }
+}
+
 /*
  * Finds the FCB for (MFT record, stream) or inserts Candidate; returns the FCB to use, counted in
  * Opening until the create counts its handle or fails, so a delete of the file's last name sees it.
  */
 static PNG_FCB NgInsertOrFindFcb(PNG_VCB Vcb, PNG_FCB Candidate)
 {
-    PLIST_ENTRY Entry;
+    PLIST_ENTRY Entry, Head = NgFcbBucket(Vcb, Candidate->MftNo);
     ExAcquireFastMutex(&Vcb->FcbListLock);
-    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
     {
-        PNG_FCB Fcb = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+        PNG_FCB Fcb = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
         if (Fcb->MftNo == Candidate->MftNo &&
             RtlEqualUnicodeString(&Fcb->Stream, &Candidate->Stream, TRUE))
         {
@@ -70,6 +88,7 @@ static PNG_FCB NgInsertOrFindFcb(PNG_VCB Vcb, PNG_FCB Candidate)
         }
     }
     InsertTailList(&Vcb->FcbList, &Candidate->VcbLinks);
+    InsertTailList(Head, &Candidate->HashLinks);
     Candidate->Opening++;
     ExReleaseFastMutex(&Vcb->FcbListLock);
     return Candidate;
@@ -225,12 +244,12 @@ static BOOLEAN NgSplitStream(PUNICODE_STRING Last, PUNICODE_STRING Stream)
 /* The FCB of an MFT record's unnamed stream, referenced, or NULL. */
 PNG_FCB NgFindFcb(PNG_VCB Vcb, ULONGLONG MftNo)
 {
-    PLIST_ENTRY Entry;
+    PLIST_ENTRY Entry, Head = NgFcbBucket(Vcb, MftNo);
     PNG_FCB Found = NULL;
     ExAcquireFastMutex(&Vcb->FcbListLock);
-    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
     {
-        PNG_FCB Fcb = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+        PNG_FCB Fcb = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
         if (Fcb->MftNo == MftNo && Fcb->Stream.Length == 0)
         {
             InterlockedIncrement(&Fcb->RefCount);
@@ -245,10 +264,10 @@ PNG_FCB NgFindFcb(PNG_VCB Vcb, ULONGLONG MftNo)
 /* TRUE when a named-stream FCB of record MftNo other than Self has a handle or a create in progress. */
 static BOOLEAN NgStreamsInUseLocked(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self)
 {
-    PLIST_ENTRY Entry;
-    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+    PLIST_ENTRY Entry, Head = NgFcbBucket(Vcb, MftNo);
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
     {
-        PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+        PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
         if (F != Self && F->MftNo == MftNo && F->Stream.Length && (F->OpenHandles || F->Opening))
             return TRUE;
     }
@@ -269,7 +288,7 @@ BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Reti
     PNG_FCB Found[32];
     ULONG Count, i;
     BOOLEAN Busy, More;
-    PLIST_ENTRY Entry;
+    PLIST_ENTRY Entry, Head = NgFcbBucket(Vcb, MftNo);
 
     do
     {
@@ -278,9 +297,9 @@ BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Reti
         More = FALSE;
         ExAcquireFastMutex(&Vcb->FcbListLock);
         Busy = NgStreamsInUseLocked(Vcb, MftNo, Self);
-        for (Entry = Vcb->FcbList.Flink; Retire && !Busy && Entry != &Vcb->FcbList; Entry = Entry->Flink)
+        for (Entry = Head->Flink; Retire && !Busy && Entry != Head; Entry = Entry->Flink)
         {
-            PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+            PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
             if (F == Self || F->MftNo != MftNo || !F->Stream.Length || !F->Node)
                 continue;
             if (Count == RTL_NUMBER_OF(Found))
@@ -324,10 +343,10 @@ BOOLEAN NgMarkDeletePending(PNG_VCB Vcb, PNG_FCB Fcb, BOOLEAN CheckStreams)
 /* TRUE when the unnamed-stream FCB of record MftNo has a delete pending (caller holds FcbListLock). */
 static BOOLEAN NgBaseDeletePendingLocked(PNG_VCB Vcb, ULONGLONG MftNo)
 {
-    PLIST_ENTRY Entry;
-    for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList; Entry = Entry->Flink)
+    PLIST_ENTRY Entry, Head = NgFcbBucket(Vcb, MftNo);
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
     {
-        PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+        PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
         if (F->MftNo == MftNo && !F->Stream.Length && F->DeletePending)
             return TRUE;
     }
@@ -348,22 +367,21 @@ VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self)
 {
     PNG_FCB Found[32];
     ULONG Count, i;
-    PLIST_ENTRY Entry, Next;
+    PLIST_ENTRY Entry, Next, Head = NgFcbBucket(Vcb, MftNo);
 
     do
     {
         /* Marked and unlisted under the lock a create checks Deleted under. */
         Count = 0;
         ExAcquireFastMutex(&Vcb->FcbListLock);
-        for (Entry = Vcb->FcbList.Flink; Entry != &Vcb->FcbList && Count < RTL_NUMBER_OF(Found); Entry = Next)
+        for (Entry = Head->Flink; Entry != Head && Count < RTL_NUMBER_OF(Found); Entry = Next)
         {
-            PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, VcbLinks);
+            PNG_FCB F = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
             Next = Entry->Flink;
             if (F == Self || F->MftNo != MftNo || !F->Stream.Length)
                 continue;
             F->Deleted = TRUE;
-            RemoveEntryList(&F->VcbLinks);
-            F->VcbLinks.Flink = F->VcbLinks.Blink = NULL;
+            NgFcbRemoveLocked(F);
             InterlockedIncrement(&F->RefCount);
             Found[Count++] = F;
         }
@@ -380,11 +398,7 @@ VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self)
 VOID NgUnlistFcb(PNG_FCB Fcb)
 {
     ExAcquireFastMutex(&Fcb->Vcb->FcbListLock);
-    if (Fcb->VcbLinks.Flink)
-    {
-        RemoveEntryList(&Fcb->VcbLinks);
-        Fcb->VcbLinks.Flink = Fcb->VcbLinks.Blink = NULL;
-    }
+    NgFcbRemoveLocked(Fcb);
     ExReleaseFastMutex(&Fcb->Vcb->FcbListLock);
 }
 

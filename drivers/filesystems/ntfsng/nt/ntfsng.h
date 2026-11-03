@@ -107,6 +107,10 @@ typedef struct _NG_VCB
     ULONG DioReads, DioReadFallbacks;   /* paging and non-cached reads with / without the transfer outside CoreLock */
     FAST_MUTEX FcbListLock;
     LIST_ENTRY FcbList;
+    /* The same FCBs by MFT record number (NgFcbBucket): every lookup by record walks one short chain, not the whole list
+     * (thousands of FCBs linger after a create or delete storm).  Both are changed under FcbListLock. */
+#define NG_FCB_HASH 1024
+    LIST_ENTRY FcbHash[NG_FCB_HASH];
     struct _NG_FCB *VolumeFcb;
     struct ngc_volinfo Info;
     ULONG SectorSize;
@@ -175,6 +179,7 @@ typedef struct _NG_FCB
     ERESOURCE PagingIoResource;
     ERESOURCE PagingWriteLock;      /* exclusive around every paging and non-cached data write of the stream (write.c) */
     LIST_ENTRY VcbLinks;
+    LIST_ENTRY HashLinks;           /* in Vcb->FcbHash[NgFcbBucket(MftNo)] while listed (VcbLinks.Flink is not NULL) */
     PNG_VCB Vcb;
     LONG RefCount;                  /* file objects not yet closed */
     LONG OpenHandles;               /* file objects not yet cleaned up */
@@ -318,6 +323,7 @@ PNG_FCB NgFindFcb(PNG_VCB Vcb, ULONGLONG MftNo);
 VOID NgUnlistFcb(PNG_FCB Fcb);
 BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Retire);
 VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self);
+VOID NgFcbRemoveLocked(PNG_FCB Fcb);
 BOOLEAN NgMarkDeletePending(PNG_VCB Vcb, PNG_FCB Fcb, BOOLEAN CheckStreams);
 BOOLEAN NgNodeGone(ngc_node *Node);
 VOID NgSetDeletePending(PNG_FCB Fcb, PNG_CCB Ccb);
