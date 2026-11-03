@@ -395,6 +395,8 @@ RPC_STATUS RpcAssoc_GetClientConnection(RpcAssoc *assoc,
 {
     RpcConnection *NewConnection;
     RPC_STATUS status;
+    BOOL retried = FALSE;
+    ULONG gid;
 
     *Connection = RpcAssoc_GetIdleConnection(assoc, InterfaceId, TransferSyntax, AuthInfo, QOS);
     if (*Connection) {
@@ -403,32 +405,53 @@ RPC_STATUS RpcAssoc_GetClientConnection(RpcAssoc *assoc,
         return RPC_S_OK;
     }
 
-    /* create a new connection */
-    status = RPCRT4_CreateConnection(&NewConnection, FALSE /* is this a server connection? */,
-        assoc->Protseq, assoc->NetworkAddr,
-        assoc->Endpoint, assoc->NetworkOptions,
-        AuthInfo, QOS, CookieAuth);
-    if (status != RPC_S_OK)
-        return status;
-
-    NewConnection->assoc = assoc;
-    status = RPCRT4_OpenClientConnection(NewConnection);
-    if (status != RPC_S_OK)
+    for (;;)
     {
+        /* create a new connection */
+        status = RPCRT4_CreateConnection(&NewConnection, FALSE /* is this a server connection? */,
+            assoc->Protseq, assoc->NetworkAddr,
+            assoc->Endpoint, assoc->NetworkOptions,
+            AuthInfo, QOS, CookieAuth);
+        if (status != RPC_S_OK)
+            return status;
+
+        /* Count the connection before it can fail: releasing it always calls
+         * RpcAssoc_ConnectionReleased(), so a failed connection must not leave the count
+         * negative (the association group id would then never be reset). */
+        NewConnection->assoc = assoc;
+        InterlockedIncrement(&assoc->connection_cnt);
+        status = RPCRT4_OpenClientConnection(NewConnection);
+        if (status != RPC_S_OK)
+        {
+            RPCRT4_ReleaseConnection(NewConnection);
+            return status;
+        }
+
+        gid = assoc->assoc_group_id;
+        status = RpcAssoc_BindConnection(assoc, NewConnection, InterfaceId, TransferSyntax);
+        if (status == RPC_S_OK)
+            break;
+
         RPCRT4_ReleaseConnection(NewConnection);
+
+        /* The association group id was handed out by an earlier server. If the endpoint now belongs
+         * to a different server (a restarted service, or the endpoint name of an exited process
+         * reused by a new one, e.g. OLE_<pid>), that server does not know the group and rejects the
+         * bind. Forget the group and ask for a new one, once. */
+        EnterCriticalSection(&assoc->cs);
+        if (status == RPC_S_CALL_FAILED_DNE && !retried && gid)
+        {
+            TRACE("bind rejected, retrying without association group %#lx\n", gid);
+            assoc->assoc_group_id = 0;
+            retried = TRUE;
+            LeaveCriticalSection(&assoc->cs);
+            continue;
+        }
+        LeaveCriticalSection(&assoc->cs);
         return status;
     }
 
-    status = RpcAssoc_BindConnection(assoc, NewConnection, InterfaceId, TransferSyntax);
-    if (status != RPC_S_OK)
-    {
-        RPCRT4_ReleaseConnection(NewConnection);
-        return status;
-    }
-
-    InterlockedIncrement(&assoc->connection_cnt);
-
-    TRACE("return new connection %p for association %p\n", *Connection, assoc);
+    TRACE("return new connection %p for association %p\n", NewConnection, assoc);
     *Connection = NewConnection;
     if (from_cache) *from_cache = FALSE;
     return RPC_S_OK;

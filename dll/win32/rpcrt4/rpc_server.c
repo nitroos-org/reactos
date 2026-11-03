@@ -193,6 +193,7 @@ static RpcPktHdr *handle_bind_error(RpcConnection *conn, RPC_STATUS error)
     default:
         FIXME("unexpected status value %ld\n", error);
         /* fall through */
+    case RPC_S_NO_CONTEXT_AVAILABLE: /* unknown association group */
     case RPC_S_INVALID_BOUND:
         reject_reason = REJECT_REASON_NOT_SPECIFIED;
         break;
