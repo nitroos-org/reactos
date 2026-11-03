@@ -121,12 +121,28 @@ int ngc_mark_dirty(ngc_vol *v);
 int ngc_mark_volume_dirty(ngc_vol *v);
 int ngc_sync(ngc_vol *v);
 int ngc_commit_now(ngc_vol *v);
+/* Commit with the journal I/O outside the volume lock (the glue's NgCommit; details at ngc_commit_begin in ngcore.c). */
+#define NGC_COMMIT_IO 1
+#define NGC_COMMIT_BUSY (-1000)
+extern int ngc_unlocked_commit;		/* 0: every commit is synchronous (registry NoUnlockedCommit=1) */
+/* The core calls fn(ctx) (under the volume lock, never blocking) when the overlay is past its threshold and a commit is wanted. */
+void ngc_set_commit_kick(ngc_vol *v, void (*fn)(void *ctx), void *ctx);
+int ngc_commit_begin(ngc_vol *v);
+int ngc_commit_io(ngc_vol *v);
+void ngc_commit_end(ngc_vol *v);
+void ngc_commit_wait(ngc_vol *v);
+/* The overlay is past its threshold, or (alloc) a free is not committed and an allocation follows. */
+int ngc_commit_wanted(ngc_vol *v, int alloc);
 int ngc_changed(ngc_vol *v);
 void ngc_icache_trim(ngc_vol *v);
 int ngc_dirty(ngc_vol *v);
 void ngc_jnl_report(ngc_vol *v);
 #if DBG
 void ngc_set_journal_fault(unsigned long commit_no);
+/* Test only: where in the commit JournalFault stops the machine (0 half way through the in-place pass, 1 before the
+ * COMMITTED header, 2 after it, 3 after the in-place pass), and a pause in ms of the unlocked journal I/O between its phases. */
+void ngc_set_journal_fault_stage(unsigned long stage);
+void ngc_set_journal_stall(unsigned long ms);
 /* Test only: report every every'th unlocked write (ngc_dio_end) as "mapping changed", to run the glue's write-again path; 0 = off. */
 void ngc_set_dio_fault(unsigned long every);
 extern unsigned long ngc_dio_forced;

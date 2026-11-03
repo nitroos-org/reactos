@@ -144,6 +144,7 @@ typedef struct _NG_VCB
     BOOLEAN RemovePending;          /* IRP_MN_QUERY_REMOVE_DEVICE granted: no new open until the removal or its cancel (CreateGate) */
     LIST_ENTRY DirNotifyList;
     KEVENT FlusherStop;
+    KEVENT CommitKick;              /* the core asks the flusher to commit now (overlay past its threshold); auto-reset */
     ULONG Syncs;
     ULONG NonCachedViaCache;            /* non-cached writes sent through Cc: a view could not be purged */
     LONG PagingFileReads, PagingFileWrites;
@@ -343,6 +344,8 @@ NTSTATUS NgDropPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, ULONG Length);
 VOID NgInitDataIo(PNG_VCB Vcb);
 VOID NgDrainDataIoCallback(PVOID Context);
 VOID NgWaitDataIoIdle(PNG_VCB Vcb);
+int NgCommit(PNG_VCB Vcb);
+VOID NgCommitKickCallback(PVOID Context);
 VOID NgDataIoBegin(PNG_VCB Vcb);
 VOID NgDataIoTransferred(PNG_VCB Vcb);
 VOID NgDataIoDone(PNG_VCB Vcb);

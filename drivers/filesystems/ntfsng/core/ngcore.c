@@ -6,6 +6,22 @@
  * shim page cache) and hands the NT glue plain C values.  No NTFS format
  * logic lives here: writes go through the core's own attribute, cluster
  * allocation, index and MFT writeback functions, driven as the VFS would.
+ *
+ * Locking (the glue's lock order is in nt/write.c).  Every core operation runs under the glue's volume lock, which
+ * is exclusive for every caller, so the journal overlay, the page cache and the inode cache need none of their own.
+ * Two kinds of device I/O run without that lock, both started by the glue between core operations and both pinning
+ * what they need (ngc_dio_begin / ngc_rdio_begin pin a node; the glue counts a commit in DioActive):
+ *   - file data transfers (ngc_dio_*), which never touch metadata or the overlay;
+ *   - the journal I/O of a commit (ngc_commit_begin / _io / _end).  The overlay is sealed under the lock, and the
+ *     I/O reads only the sealed pages and writes only the journal area, the header page and the pages' places.
+ *     Every other user of those waits for it with the lock held (the I/O needs none): kshim_jnl_settle before the
+ *     synchronous commit, before an allocation that follows a free (ngc_before_alloc), at retire, degrade, strict
+ *     mode (a resize), deactivate, and when the medium goes or writes stop (kshim_jnl_quiesce).
+ *   - A core operation never starts the unlocked commit and never drops the lock: ngc_mark_dirty past the overlay
+ *     threshold only asks the glue (kshim_kick) and commits itself past a hard limit.
+ * Frees: a cluster freed by an uncommitted transaction must not receive data before that transaction is in place.
+ * The free-cluster count is watched; kshim_jnl_aux_done is its value at the last commit that is complete, so a
+ * count that differs means an uncovered free, and an allocation commits (or waits for the commit in flight) first.
  */
 #include <kshim.h>
 #include "ntfs/ntfs.h"
@@ -58,7 +74,7 @@ struct ngc_vol {
 	u8 *bounce;                     /* NGC_BOUNCE bytes of pool: device writes never touch caller memory */
 	struct ngj_vol *jv;             /* raw $LogFile location while the metadata journal is in use */
 	atomic64_t *watched;            /* the core's free-cluster count, watched for frees */
-	unsigned long frees_seen;       /* its increments at the last commit */
+	/* its increments at the last complete commit: kshim_jnl_aux_done (a commit's journal I/O may run without the volume lock) */
 	int damaged;                    /* the mount-time check found damage: read-only */
 	int checked;                    /* the mount-time consistency check ran to its verdict */
 	char why[160];
@@ -462,7 +478,7 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 			printk(KERN_ERR "journal: not active (%d); metadata goes in place\n", jerr);
 		} else if (!kshim_watch_add(&vol->free_clusters)) {
 			v->watched = &vol->free_clusters;
-			v->frees_seen = kshim_watch_count(v->watched);
+			kshim_jnl_set_aux(b, kshim_watch_count(v->watched));
 		}
 	}
 	/*
@@ -519,6 +535,7 @@ void ngc_umount(ngc_vol *v, int discard)
 	/* The glue waited for its unlocked writes to end (ngc_dio_end) before the teardown; none starts now. */
 	kshim_dio_drain(v->bdev);
 	v->bdev->kshim_drain = NULL;
+	v->bdev->kshim_kick = NULL;
 	if (discard) {
 		/* Pending journal pages are dropped and the core sees a read-only volume: put_super writes nothing. */
 		kshim_jnl_deactivate(v->bdev);
@@ -543,7 +560,7 @@ void ngc_umount(ngc_vol *v, int discard)
 	 */
 	if (v->bdev->kshim_wb_err || v->bdev->kshim_wr_failed != wr_failed)
 		errors = 1;
-	if (v->bdev->jnl && !errors && kshim_jnl_commit(v->bdev) >= 0 && clean)
+	if (v->bdev->jnl && !errors && kshim_jnl_commit(v->bdev, 0) >= 0 && clean)
 		kshim_jnl_retire(v->bdev);
 	if (v->watched)
 		kshim_watch_del(v->watched);
@@ -1448,6 +1465,7 @@ void ngc_icache_trim(ngc_vol *v)
 void ngc_medium_gone(ngc_vol *v)
 {
 	kshim_dio_drain(v->bdev);
+	kshim_jnl_quiesce(v->bdev);	/* the journal I/O of an unlocked commit is device I/O too */
 	v->bdev->kshim_gone = 1;
 	v->sb->s_flags |= SB_RDONLY;
 }
@@ -1459,6 +1477,7 @@ void ngc_medium_gone(ngc_vol *v)
 void ngc_stop_writes(ngc_vol *v)
 {
 	kshim_dio_drain(v->bdev);
+	kshim_jnl_quiesce(v->bdev);
 	v->bdev->kshim_frozen = 1;
 	v->sb->s_flags |= SB_RDONLY;
 }
@@ -1502,11 +1521,10 @@ static int ngc_writeback_failed(struct ngc_vol *v, int err)
 }
 
 /*
- * A consistency point: every dirty mapping and inode is written back, then (journal active)
- * the transaction is committed and written in place, or (no journal) the device is flushed.
- * Callers hold the volume lock between core operations, so the state written is whole.
+ * The part of a consistency point before the journal: every dirty mapping and inode is written back (into the live
+ * overlay).  Callers hold the volume lock between core operations, so the state written is whole.
  */
-static int ngc_commit_impl(struct ngc_vol *v)
+static int ngc_commit_prep(struct ngc_vol *v)
 {
 	unsigned long long t0 = ngos_ticks();
 	struct ntfs_volume *vol = NTFS_SB(v->sb);
@@ -1530,21 +1548,37 @@ static int ngc_commit_impl(struct ngc_vol *v)
 	ngos_prof(NGP_WRITEBACK, t0, 0);
 	if (err)
 		return ngc_writeback_failed(v, err);
+	if (v->bdev->jnl && NVolErrors(vol))
+		kshim_jnl_mark_errors(v->bdev);
+	return 0;
+}
+
+/* The free-cluster count that a commit sealed or made now covers (see kshim_jnl_commit). */
+static u64 ngc_aux(struct ngc_vol *v)
+{
+	return v->watched ? kshim_watch_count(v->watched) : 0;
+}
+
+/*
+ * A consistency point: every dirty mapping and inode is written back, then (journal active)
+ * the transaction is committed and written in place, or (no journal) the device is flushed.
+ * Synchronous: the volume lock is held throughout.  The unlocked variant is ngc_commit_begin / io / end.
+ */
+static int ngc_commit_impl(struct ngc_vol *v)
+{
+	unsigned long long t0;
+	int err = ngc_commit_prep(v);
+	if (err)
+		return err;
 	if (!v->bdev->jnl)
 		return blkdev_issue_flush(v->bdev);
-	if (NVolErrors(vol))
-		kshim_jnl_mark_errors(v->bdev);
-	if (!err) {
-		t0 = ngos_ticks();
-		err = kshim_jnl_commit(v->bdev);
-		ngos_prof(NGP_JNL_COMMIT, t0, 0);
-	}
+	t0 = ngos_ticks();
+	err = kshim_jnl_commit(v->bdev, ngc_aux(v));
+	ngos_prof(NGP_JNL_COMMIT, t0, 0);
 	if (!err)
 		err = blkdev_issue_flush(v->bdev);	/* nothing was committed: data writes still reach the medium */
 	if (err > 0)
 		err = 0;
-	if (!err && v->watched)
-		v->frees_seen = kshim_watch_count(v->watched);
 	return err;
 }
 
@@ -1556,10 +1590,101 @@ static int ngc_commit(struct ngc_vol *v)
 	return err;
 }
 
+/*
+ * Unlocked commit, for the NT glue (nt/write.c NgCommit): the journal I/O of a commit (descriptor and data pages, flush,
+ * COMMITTED header, flush, in place, flush, ACTIVE header: most of its time) runs without the volume lock.
+ *   ngc_commit_begin (lock, between core operations): write back, seal the overlay.  Returns NGC_COMMIT_IO: call
+ *       ngc_commit_io without the lock, then ngc_commit_end with it; 0: committed (or nothing to do) already;
+ *       NGC_COMMIT_BUSY: another commit's I/O is running: ngc_commit_wait without the lock, then begin again; <0 error.
+ *   ngc_commit_io: no lock.  The caller keeps the core alive meanwhile (the glue counts it as an unlocked I/O).
+ *   ngc_commit_end (lock): releases the sealed transaction (anyone who needs it gone does that too).
+ * While the I/O runs other threads run core operations; their metadata writes go to a new live overlay, and reads see
+ * the sealed pages too (kshim_jnl.c).  Never from inside a core operation.
+ */
+int ngc_unlocked_commit = 1;
+
+int ngc_commit_begin(ngc_vol *v)
+{
+	unsigned long long t0 = ngos_ticks();
+	struct block_device *b = v->bdev;
+	int err, r;
+	if (!ngc_unlocked_commit)
+		return ngc_commit_now(v);
+	/* As ngc_commit_now. */
+	if (NVolErrors(NTFS_SB(v->sb)))
+		kshim_jnl_mark_errors(b);
+	if (v->failed || kshim_jnl_failed(b))
+		return -EIO;
+	if (sb_rdonly(v->sb))
+		return 0;
+	if (kshim_jnl_busy(b))
+		return NGC_COMMIT_BUSY;
+	err = ngc_commit_prep(v);
+	if (err)
+		return err;
+	if (!b->jnl)
+		err = blkdev_issue_flush(b);
+	else {
+		r = kshim_jnl_seal(b, ngc_aux(v));
+		if (r == 1) {
+			ngos_prof(NGP_COMMIT, t0, 0);
+			return NGC_COMMIT_IO;
+		}
+		if (r == -EBUSY)
+			return NGC_COMMIT_BUSY;
+		if (r == -ENOSYS)
+			r = kshim_jnl_commit(b, ngc_aux(v));	/* degraded, a resize runs, no memory, too large: as before */
+		if (r == 0)
+			err = blkdev_issue_flush(b);	/* nothing was committed: data writes still reach the medium */
+		else
+			err = r > 0 ? 0 : r;
+	}
+	ngos_prof(NGP_COMMIT, t0, 0);
+	return err > 0 ? 0 : err;
+}
+
+int ngc_commit_io(ngc_vol *v)
+{
+	return kshim_jnl_io(v->bdev);
+}
+
+void ngc_commit_end(ngc_vol *v)
+{
+	kshim_jnl_reap(v->bdev);
+}
+
+void ngc_commit_wait(ngc_vol *v)
+{
+	kshim_jnl_wait(v->bdev);
+}
+
 /* Overlay pages that make the next operation commit first: half the journal, at most NGC_JNL_COMMIT_PAGES. */
 static unsigned long ngc_commit_threshold(struct ngc_vol *v)
 {
 	return min_t(unsigned long, NGC_JNL_COMMIT_PAGES, kshim_jnl_capacity(v->bdev) / 2);
+}
+
+/* Free clusters that no complete commit covers yet. */
+static int ngc_frees_pending(struct ngc_vol *v)
+{
+	return v->bdev->jnl && (!v->watched || kshim_watch_count(v->watched) != kshim_jnl_aux_done(v->bdev));
+}
+
+/*
+ * The overlay is past the threshold, or (@alloc) a free is not committed yet and an allocation follows: the glue commits
+ * (ngc_commit_begin) before its next operation of that kind, without the volume lock for the I/O.  Between core operations.
+ */
+int ngc_commit_wanted(ngc_vol *v, int alloc)
+{
+	if (!v->bdev->jnl || sb_rdonly(v->sb) || !ngc_unlocked_commit)
+		return 0;
+	return kshim_jnl_pending(v->bdev) > ngc_commit_threshold(v) || (alloc && ngc_frees_pending(v));
+}
+
+/* Past this many overlay pages a core operation commits at once (with the lock), the threshold commit not having come yet. */
+static unsigned long ngc_commit_hard(struct ngc_vol *v)
+{
+	return min_t(unsigned long, 2 * ngc_commit_threshold(v), kshim_jnl_capacity(v->bdev) / 4 * 3);
 }
 
 /*
@@ -1569,9 +1694,17 @@ static unsigned long ngc_commit_threshold(struct ngc_vol *v)
  */
 static int ngc_before_alloc(struct ngc_vol *v)
 {
-	if (v->bdev->jnl && (!v->watched || kshim_watch_count(v->watched) != v->frees_seen)) {
+	if (ngc_frees_pending(v)) {
 		unsigned long long t0 = ngos_ticks();
-		int err = ngc_commit(v);
+		int err;
+		/*
+		 * A commit whose I/O runs without the lock may cover them: wait for it (it needs no lock).  The glue commits
+		 * before a growth when it can (ngc_commit_wanted), so this is the case that it could not, or a free since.
+		 */
+		kshim_jnl_settle(v->bdev);
+		if (!ngc_frees_pending(v))
+			return 0;
+		err = ngc_commit(v);
 		ngos_prof(NGP_COMMIT_ALLOC, t0, 0);
 		return err;
 	}
@@ -1591,8 +1724,18 @@ int ngc_mark_dirty(ngc_vol *v)
 		return -EROFS;
 	if (vol->vol_flags & VOLUME_IS_DIRTY) {
 		unsigned long long t0;
-		if (kshim_jnl_pending(v->bdev) <= ngc_commit_threshold(v))
+		unsigned long pending = kshim_jnl_pending(v->bdev);
+		if (pending <= ngc_commit_threshold(v))
 			return 0;
+		/*
+		 * The glue commits at its next safe point without the lock for the I/O (ngc_commit_wanted), and its flusher
+		 * is asked to now; the operation goes on, but not too far past the threshold.
+		 */
+		if (ngc_unlocked_commit && pending <= ngc_commit_hard(v)) {
+			if (v->bdev->kshim_kick)
+				v->bdev->kshim_kick(v->bdev->kshim_kick_ctx);
+			return 0;
+		}
 		t0 = ngos_ticks();
 		err = ngc_commit(v);
 		ngos_prof(NGP_COMMIT_FULL, t0, 0);
@@ -1676,7 +1819,7 @@ int ngc_changed(ngc_vol *v)
 {
 	if (sb_rdonly(v->sb))
 		return 0;
-	return kshim_sb_dirty(v->sb) || kshim_jnl_pending(v->bdev);
+	return kshim_sb_dirty(v->sb) || kshim_jnl_unsettled(v->bdev);
 }
 
 int ngc_dirty(ngc_vol *v)
@@ -1687,7 +1830,7 @@ int ngc_dirty(ngc_vol *v)
 	if (sb_rdonly(v->sb))
 		return 0;
 	/* Also errors not yet marked on disk, and a clean volume whose header is still to be retired. */
-	return kshim_sb_dirty(v->sb) || ((vol->vol_flags & VOLUME_IS_DIRTY) && !vol->keep_dirty) || kshim_jnl_pending(v->bdev) ||
+	return kshim_sb_dirty(v->sb) || ((vol->vol_flags & VOLUME_IS_DIRTY) && !vol->keep_dirty) || kshim_jnl_unsettled(v->bdev) ||
 	       (NVolErrors(vol) && !(vol->vol_flags & VOLUME_IS_DIRTY)) || kshim_jnl_retire_pending(v->bdev) ||
 	       kshim_jnl_errors_pending(v->bdev);
 }
@@ -1734,6 +1877,16 @@ int ngc_raw_write(ngc_vol *v, unsigned long long off, const void *buf, unsigned 
 void ngc_set_journal_fault(unsigned long commit_no)
 {
 	kshim_jnl_fault = commit_no;
+}
+
+void ngc_set_journal_fault_stage(unsigned long stage)
+{
+	kshim_jnl_fault_stage = stage;
+}
+
+void ngc_set_journal_stall(unsigned long ms)
+{
+	kshim_jnl_stall_ms = ms;
 }
 #endif
 
@@ -2152,6 +2305,12 @@ void ngc_rdio_end(ngc_vol *v, struct ngc_dio *d)
 	iput((struct inode *)d->n);
 	d->n = NULL;
 	(void)v;
+}
+
+void ngc_set_commit_kick(ngc_vol *v, void (*fn)(void *ctx), void *ctx)
+{
+	v->bdev->kshim_kick_ctx = ctx;
+	v->bdev->kshim_kick = fn;
 }
 
 void ngc_set_dio_drain(ngc_vol *v, void (*fn)(void *ctx), void *ctx)

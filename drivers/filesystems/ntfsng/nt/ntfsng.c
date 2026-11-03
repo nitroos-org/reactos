@@ -891,6 +891,24 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     }
 #endif
 #if DBG
+    i = NgReadDword(RegistryPath, L"JournalFaultStage");
+    if (i)
+        ngc_set_journal_fault_stage(i);
+    i = NgReadDword(RegistryPath, L"JournalStall");
+    if (i)
+    {
+        /* Test only: the unlocked journal I/O of a commit pauses this many ms between its phases. */
+        ngc_set_journal_stall(i);
+        DPRINT1("ntfsng: JournalStall: the journal I/O of a commit pauses %lu ms between its phases\n", i);
+    }
+#endif
+    /* NoUnlockedCommit=1: every commit is synchronous under CoreLock, as before the journal I/O left it (comparison, fallback). */
+    if (NgReadDword(RegistryPath, L"NoUnlockedCommit"))
+    {
+        ngc_unlocked_commit = 0;
+        DPRINT1("ntfsng: NoUnlockedCommit: commits run under CoreLock\n");
+    }
+#if DBG
     i = NgReadDword(RegistryPath, L"DioFault");
     if (i)
     {

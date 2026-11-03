@@ -328,6 +328,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Vcb->MajorVersion = Vcb->Info.major;
         Vcb->Serial = Vcb->Info.serial;
         ngc_set_dio_drain(Vcb->Core, NgDrainDataIoCallback, Vcb);
+        ngc_set_commit_kick(Vcb->Core, NgCommitKickCallback, Vcb);
     }
     NgReleaseCore(Vcb);
     if (Err)

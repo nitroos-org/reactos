@@ -778,7 +778,10 @@ struct block_device { void *osdev; u64 size; unsigned int logical_block_size; st
 	 * its way to the device (nt/write.c, NgDrainDataIoCallback).  Called under the volume lock, before clusters
 	 * are freed and before the device stops being the volume's. */
 	void (*kshim_drain)(void *ctx);
-	void *kshim_drain_ctx; };
+	void *kshim_drain_ctx;
+	/* Set by the NT glue: asks its flusher to commit soon (the journal overlay is past its threshold).  Called under the volume lock; must not block. */
+	void (*kshim_kick)(void *ctx);
+	void *kshim_kick_ctx; };
 /* Waits for the file-data writes in flight outside the volume lock (see kshim_drain). */
 static inline void kshim_dio_drain(struct block_device *b) { if (b && b->kshim_drain) b->kshim_drain(b->kshim_drain_ctx); }
 static inline u64 bdev_nr_bytes(struct block_device *b) { return b->size; }
