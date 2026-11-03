@@ -41,6 +41,12 @@ static const ADDON_INSTALL_DATA Addons[] = {
     /* No RappsId: the Applications Manager package is the x86 build. Without the
      * local file, the Internet Browser offers the download on first use. */
     {L"Wine Gecko", L"%SystemRoot%\\wine_gecko-2.40-x86_64.msi", L"msiexec.exe /i \"%s\" /qn /norestart", NULL},
+    /* PowerShell 7: the image carries the official MSI (staged at build time) in the feature manager's payload
+     * folder. The feature manager installs it silently, local-first, with the properties of its catalog entry
+     * (powershell-7.txt), and records the install so that it shows as installed and can be repaired or removed.
+     * The format string has no %s: the path is only the "is the MSI in this image" test. */
+    {L"PowerShell 7", L"%SystemRoot%\\Featmgr\\Payload\\powershell-7\\PowerShell-x64.msi",
+     L"featmgr.exe /enable powershell-7", NULL, ADDON_KEEP_FILE_QUIET},
 #endif
     {NULL, NULL, NULL, NULL, 0}
 };

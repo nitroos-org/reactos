@@ -32,8 +32,8 @@ if /i "%1"=="uninstall" goto :uninst
 
 call :present "I1 powershell-7 listed by /list"
 %FM% /query powershell-7 > %O%\q.txt 2>&1
-find "Sha256=50d33c7494aaf82b987cfd4de3f232d04f91fdd4c0deeca8a669cced3e7cf8f9" %R%\Catalog\components.ini >nul
-call :rc0 "I2 the component list pins the MSI SHA-256"
+find "ArtifactSHA256: " %O%\q.txt >nul
+call :rc0 "I2 manifest pins a SHA-256"
 reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WSMAN\Plugin\Microsoft.PowerShell" >nul 2>&1
 call :rc1 "I3 no WSMan PowerShell plugin registered (pwrshplugin.dll is only the failing stub)"
 

@@ -171,10 +171,12 @@ int FmFirstBootMain(HINSTANCE hInst, LPCWSTR cmd)
     FmLogLine(log, L"first boot: started (attempt %lu)", attempts + 1);
 
     n = NeededJobs(jobs, ARRAYSIZE(jobs), url, ARRAYSIZE(url), log);
+    /* whatever is installed already (the preinstalled pwsh, offline first boot included) is on the desktop and in Start now,
+     * before any wait for the network or download */
+    FmShellDefaults(0, NULL);
     if (!n)
     {
         FmLogLine(log, L"first boot: every default component is already installed, no window");
-        FmShellDefaults(0, NULL);                                        /* e.g. pwsh installed by hand: desktop matches */
         SetDw(L"Done", 1);
         SetSz(L"Result", L"AlreadyInstalled");
         Stamp(L"CompletedUtc");

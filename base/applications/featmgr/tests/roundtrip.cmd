@@ -998,8 +998,8 @@ set PD=%ProgramFiles%\PowerShell\7
 set FD=%ProgramFiles%\Mozilla Firefox
 set CD=%PUBLIC%\Desktop
 set PM=%ProgramData%\Microsoft\Windows\Start Menu\Programs
-if exist "%PD%\pwsh.exe" goto :sd_done
 if exist "%FD%\firefox.exe" goto :sd_done
+if exist "%PD%\pwsh.exe" goto :sd_pw
 %FM% /shell-defaults > %O%\sd0.txt 2>&1
 call :rc0 "SD1 /shell-defaults with nothing installed"
 type %O%\sd0.txt >> %LOG%
@@ -1037,6 +1037,33 @@ call :cmdlnk 1 "SD21 Command Prompt is back on the desktop"
 call :ielnk 1 "SD22 the Internet Explorer entry is back in the Start menu"
 rd /s /q "%FD%" 2>nul
 rd /s /q "%ProgramFiles%\PowerShell" 2>nul
+goto :sd_done
+:sd_pw
+rem the image carries the real pwsh (build-time preinstall): PowerShell is the desktop shell already, Firefox is not installed yet
+%FM% /shell-defaults > %O%\sp0.txt 2>&1
+call :rc0 "SP1 /shell-defaults with the preinstalled pwsh"
+type %O%\sp0.txt >> %LOG%
+call :ex "%CD%\PowerShell.lnk" 1 "SP2 PowerShell shortcut on the desktop"
+call :ex "%PM%\PowerShell.lnk" 1 "SP3 PowerShell shortcut in the Start menu"
+call :cmdlnk 0 "SP4 no Command Prompt shortcut on the desktop"
+call :wslnk 1 "SP5 Command Prompt is under Start/Windows System"
+call :ex "%CD%\Firefox.lnk" 0 "SP6 no Firefox shortcut while Firefox is absent"
+call :ielnk 1 "SP7 the Internet Explorer entry is in the Start menu"
+mkdir "%FD%" 2>nul
+copy /y %SystemRoot%\system32\cmd.exe "%FD%\firefox.exe" >nul
+%FM% /shell-defaults > %O%\sp1.txt 2>&1
+call :rc0 "SP8 /shell-defaults with pwsh and a Firefox stand-in"
+call :ex "%CD%\Firefox.lnk" 1 "SP9 Firefox shortcut on the desktop"
+call :ielnk 0 "SP10 the Internet Explorer entry left the Start menu"
+call :ex "%CD%\PowerShell.lnk" 1 "SP11 PowerShell shortcut stays"
+del /q "%FD%\firefox.exe" 2>nul
+%FM% /shell-defaults > %O%\sp2.txt 2>&1
+call :rc0 "SP12 /shell-defaults after the Firefox stand-in is gone"
+call :ex "%CD%\Firefox.lnk" 0 "SP13 Firefox shortcut removed"
+call :ielnk 1 "SP14 the Internet Explorer entry is back in the Start menu"
+call :ex "%CD%\PowerShell.lnk" 1 "SP15 PowerShell shortcut still on the desktop"
+call :cmdlnk 0 "SP16 still no Command Prompt shortcut on the desktop"
+rd /s /q "%FD%" 2>nul
 :sd_done
 
 rem --- cleanup fixtures

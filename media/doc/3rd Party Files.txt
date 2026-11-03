@@ -377,3 +377,8 @@ Used Version: git commit 045831e
 License: MIT (https://spdx.org/licenses/MIT.html)
 URL: https://github.com/microsoft/libdxg
 
+Title: PowerShell 7 (LTS), official x64 MSI (amd64 images only, not built from source)
+Path: base/applications/featmgr/payload/powershell-7 (stage-powershell7.sh downloads the MSI at configure time; the licence and ThirdPartyNotices.txt are copied verbatim from the release tag)
+Used Version: 7.6.9
+License: MIT (https://spdx.org/licenses/MIT.html); the third-party components of PowerShell are listed in ThirdPartyNotices.txt
+URL: https://github.com/PowerShell/PowerShell
