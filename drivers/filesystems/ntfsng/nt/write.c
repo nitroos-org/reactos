@@ -41,6 +41,27 @@ int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int le
  * Nothing but the stream's own growth uses the slack: reads stop at the size and the initialized size, paging writes
  * are clipped to the size, and a cluster another stream freed before this one took it is committed first
  * (ngc_before_alloc, which a growth inside the allocation does not need).
+ *
+ * The journal commit (NgCommit, below) runs its journal I/O without CoreLock.  The thread that commits seals the metadata
+ * overlay under CoreLock (after the writeback), drops CoreLock, writes the journal, the COMMITTED header, the pages in
+ * place and the ACTIVE header (with three device flushes), and takes CoreLock again to release the sealed overlay.  New
+ * lock rules, none of them a new lock:
+ *   - NgCommit drops CoreLock only at CoreDepth 1 and not once a dismount began.  It is called between core operations
+ *     (the flusher, FlushFileBuffers and write-through, and NgSetFileSize before a growth), never from inside one.
+ *   - While it is dropped the thread counts in DioActive (not in DataIoGate: a cluster free must not wait for a commit),
+ *     so a dismount, which waits for DioActive 0 under CoreLock, cannot free the core under the I/O.  The flusher is
+ *     stopped before that wait, so it is never inside NgCommit then.
+ *   - The journal I/O takes no lock and needs nothing a CoreLock holder owns, so a CoreLock holder may wait for it
+ *     (kshim_jnl_settle / _wait in the shim, from ngc_before_alloc, the old synchronous commit, retire, a resize, deactivate):
+ *     the I/O ends without CoreLock.  Only one commit's I/O runs at a time; a second committer waits at the glue
+ *     (NGC_COMMIT_BUSY: CoreLock dropped while it waits) and commits afterwards.
+ *   - ngc_before_alloc: a free (the watched free-cluster count) that no complete commit covers makes the allocation wait
+ *     for it: the glue commits before a growth (NgSetFileSize), else the core waits for the commit in flight and commits
+ *     synchronously whatever is still not covered.  A cluster freed by an uncommitted transaction is therefore never
+ *     reused before that transaction is in place.
+ *   - ngc_mark_dirty (inside core operations) no longer commits at the overlay threshold: it kicks the flusher
+ *     (CommitKick) and commits itself only past a hard limit (twice the threshold, at most 3/4 of the journal).
+ * Overlay rules (readers see the live overlay, then the sealed one, then the device) are at the top of shim/kshim_jnl.c.
  */
 
 /* At mount, before the core exists. */
@@ -48,6 +69,7 @@ VOID NgInitDataIo(PNG_VCB Vcb)
 {
     ExInitializeResourceLite(&Vcb->DataIoGate);
     KeInitializeEvent(&Vcb->DioIdle, NotificationEvent, TRUE);
+    KeInitializeEvent(&Vcb->CommitKick, SynchronizationEvent, FALSE);
     ExInitializeNPagedLookasideList(&Vcb->DioBounce, NULL, NULL, 0, NG_DIO_BOUNCE, TAG_NTFSNG, 0);
 }
 
@@ -115,6 +137,64 @@ VOID NgDataIoDone(PNG_VCB Vcb)
         KeSetEvent(&Vcb->DioIdle, IO_NO_INCREMENT, FALSE);
 }
 
+/*
+ * A commit with its journal I/O outside CoreLock (ngc_commit_begin, core/ngcore.c).  CoreLock is held on entry and on
+ * return; the commit is complete when it returns 0.  Between the seal and the end of the I/O, which is most of a commit's
+ * time, other threads take CoreLock and run: their metadata writes go to a new overlay and their reads see the sealed
+ * pages (shim/kshim_jnl.c).  CoreLock is dropped only at depth 1 (nobody up the stack depends on what it protects), not
+ * once a dismount started, and the thread counts as an unlocked I/O (DioActive, not DataIoGate: a cluster free does not
+ * wait for a commit) so that no dismount frees the core under it.  It also waits like that for another commit's I/O, which
+ * needs no lock, so waiting for it with CoreLock held (inside a core operation: ngc_before_alloc) cannot deadlock.
+ * Lock order: whatever the caller holds (FCB resources) -> CoreLock; the I/O takes nothing.
+ */
+/* ngc_set_commit_kick: under CoreLock, must not block. */
+VOID NgCommitKickCallback(PVOID Context)
+{
+    KeSetEvent(&((PNG_VCB)Context)->CommitKick, IO_NO_INCREMENT, FALSE);
+}
+
+static VOID NgPinUnlocked(PNG_VCB Vcb)
+{
+    if (Vcb->DioActive++ == 0)
+        KeClearEvent(&Vcb->DioIdle);
+}
+
+int NgCommit(PNG_VCB Vcb)
+{
+    for (;;)
+    {
+        BOOLEAN Unlock = Vcb->CoreDepth == 1 && !Vcb->Dismounted;
+        int R = ngc_commit_begin(Vcb->Core);
+        if (R == NGC_COMMIT_IO)
+        {
+            if (Unlock)
+            {
+                NgPinUnlocked(Vcb);
+                NgReleaseCoreNoTrim(Vcb);
+                R = ngc_commit_io(Vcb->Core);
+                NgAcquireCore(Vcb);
+                NgDataIoDone(Vcb);
+            }
+            else
+                R = ngc_commit_io(Vcb->Core);
+            ngc_commit_end(Vcb->Core);
+            return R;
+        }
+        if (R != NGC_COMMIT_BUSY)
+            return R;
+        if (Unlock)
+        {
+            NgPinUnlocked(Vcb);
+            NgReleaseCoreNoTrim(Vcb);
+            ngc_commit_wait(Vcb->Core);
+            NgAcquireCore(Vcb);
+            NgDataIoDone(Vcb);
+        }
+        else
+            ngc_commit_wait(Vcb->Core);
+    }
+}
+
 BOOLEAN NTAPI NgAcquireForLazyWrite(PVOID Context, BOOLEAN Wait)
 {
     PNG_FCB Fcb = Context;
@@ -172,7 +252,7 @@ static NTSTATUS NgCommitWriteThrough(PNG_VCB Vcb)
 {
     int Err;
     NgAcquireCore(Vcb);
-    Err = ngc_commit_now(Vcb->Core);
+    Err = NgCommit(Vcb);
     Vcb->Syncs++;
     NgReleaseCore(Vcb);
     if (Err)
@@ -300,6 +380,17 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
     }
     ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
     NgAcquireCore(Vcb);
+    /*
+     * A growth that may allocate waits for the commit of what a free left uncommitted (ngc_before_alloc), and a
+     * metadata overlay past its threshold wants a commit: both here, between core operations, with the journal I/O
+     * outside CoreLock.  The core still checks for itself (a free since: it commits synchronously).
+     */
+    if (NewSize > OldSize && Vcb->Core && ngc_commit_wanted(Vcb->Core, 1))
+    {
+        Err = NgCommit(Vcb);
+        if (Err)
+            DPRINT1("ntfsng: commit before a growth failed %d\n", Err);
+    }
     Err = NgEnsureNode(Fcb);
     if (!Err)
         Err = ngc_set_size(Vcb->Core, Fcb->Node, (unsigned long long)NewSize);
@@ -1053,7 +1144,7 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     NgApplyModified(Fcb);
     NgAcquireCore(Vcb);
-    Err = ngc_commit_now(Vcb->Core);
+    Err = NgCommit(Vcb);
     Vcb->Syncs++;
     NgReleaseCore(Vcb);
     if (Err)
@@ -1146,24 +1237,41 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 /*
  * Linux's flusher stand-in: writes back dirty core metadata every NG_FLUSH_PERIOD_MS.  It runs at the
  * priority of the critical work queue (13), where Windows runs the lazy writer and the NTFS checkpoint:
- * it holds CoreLock while it commits, and at the default 8 it shared the processors round-robin with
- * busy normal-priority threads, so every open, listing and write on the volume waited for their quanta.
+ * it holds CoreLock while it writes back and seals the overlay (the journal I/O of a commit is outside it, NgCommit), and at
+ * the default 8 it shared the processors round-robin with busy normal-priority threads, so every open, listing and
+ * write on the volume waited for their quanta.  It also wakes when the core kicks it (CommitKick).
  */
 static VOID NTAPI NgFlusherThread(PVOID Context)
 {
     PNG_VCB Vcb = Context;
     LARGE_INTEGER Period;
+    PVOID Objects[2];
+    NTSTATUS Wait;
     KeSetBasePriorityThread(KeGetCurrentThread(), NG_FLUSHER_PRIORITY_INCREMENT);
     Period.QuadPart = -10000LL * NG_FLUSH_PERIOD_MS;
+    Objects[0] = &Vcb->FlusherStop;
+    Objects[1] = &Vcb->CommitKick;
     for (;;)
     {
-        if (KeWaitForSingleObject(&Vcb->FlusherStop, Executive, KernelMode, FALSE, &Period) == STATUS_SUCCESS)
+        Wait = KeWaitForMultipleObjects(2, Objects, WaitAny, Executive, KernelMode, FALSE, &Period, NULL);
+        if (Wait == STATUS_WAIT_0)
             break;
         NgAcquireCore(Vcb);
-        if (!Vcb->WrongMedia && !Vcb->RawWritten && ngc_dirty(Vcb->Core))
+        if (Wait == STATUS_WAIT_1)
+        {
+            /* The core asked for a commit (its overlay is past the threshold): the journal I/O runs without CoreLock. */
+            if (!Vcb->WrongMedia && !Vcb->RawWritten && ngc_commit_wanted(Vcb->Core, 0))
+            {
+                int Err = NgCommit(Vcb);
+                Vcb->Syncs++;
+                if (Err)
+                    DPRINT1("ntfsng: requested commit failed %d\n", Err);
+            }
+        }
+        else if (!Vcb->WrongMedia && !Vcb->RawWritten && ngc_dirty(Vcb->Core))
         {
             /* Busy: commit and keep VOLUME_IS_DIRTY.  Quiet for a whole period: also clear the flag. */
-            int Err = ngc_changed(Vcb->Core) ? ngc_commit_now(Vcb->Core) : ngc_sync(Vcb->Core);
+            int Err = ngc_changed(Vcb->Core) ? NgCommit(Vcb) : ngc_sync(Vcb->Core);
             Vcb->Syncs++;
             if (Err)
                 DPRINT1("ntfsng: background sync failed %d\n", Err);

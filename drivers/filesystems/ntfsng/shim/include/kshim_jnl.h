@@ -76,7 +76,26 @@ void kshim_jnl_strict(struct block_device *b, int on);
 int kshim_jnl_refusing(struct block_device *b);
 int kshim_jnl_errors_pending(struct block_device *b);	/* errors known, not yet on the medium */
 void kshim_jnl_deactivate(struct block_device *b);
-int kshim_jnl_commit(struct block_device *b);	/* 1 committed (device flushed), 0 nothing to do, <0 error */
+/*
+ * 1 committed (device flushed), 0 nothing to do, <0 error.  @aux (the caller's free-cluster count): when the call returns
+ * without an error, every change made before it is committed, and kshim_jnl_aux_done returns @aux.
+ */
+int kshim_jnl_commit(struct block_device *b, u64 aux);
+/*
+ * The commit in three steps, the middle one without the volume lock (see the comment at the top of kshim_jnl.c):
+ * kshim_jnl_seal (lock) 1 -> kshim_jnl_io (no lock, same thread) -> kshim_jnl_reap (lock).
+ * seal: 0 nothing pending, -EBUSY another commit's I/O is running (kshim_jnl_wait, then again), -ENOSYS use kshim_jnl_commit.
+ */
+int kshim_jnl_seal(struct block_device *b, u64 aux);
+int kshim_jnl_io(struct block_device *b);
+void kshim_jnl_reap(struct block_device *b);
+int kshim_jnl_busy(struct block_device *b);
+void kshim_jnl_wait(struct block_device *b);
+void kshim_jnl_settle(struct block_device *b);	/* wait for the I/O in flight and release a finished sealed transaction */
+void kshim_jnl_quiesce(struct block_device *b);	/* wait for the I/O in flight */
+unsigned long kshim_jnl_unsettled(struct block_device *b);	/* live + sealed pages */
+u64 kshim_jnl_aux_done(struct block_device *b);
+void kshim_jnl_set_aux(struct block_device *b, u64 aux);
 void kshim_jnl_mark_errors(struct block_device *b);
 unsigned long kshim_jnl_capacity(struct block_device *b);
 int kshim_jnl_ro_page(struct block_device *b, u64 blk, u8 mask, const u8 *data);
@@ -85,8 +104,12 @@ void kshim_jnl_report(struct block_device *b);
 /* Test only: nonzero stops the machine half way through writing that commit in place. */
 #if DBG
 extern unsigned long kshim_jnl_fault;
+/* Test only: where JournalFault stops the commit: 0 half way through the in-place pass, 1 before the COMMITTED header,
+ * 2 right after it, 3 after the in-place pass; and a pause (ms) of the unlocked journal I/O between its phases. */
+extern unsigned long kshim_jnl_fault_stage, kshim_jnl_stall_ms;
 #else
 #define kshim_jnl_fault 0UL   /* fault injection compiled out of release */
+#define kshim_jnl_fault_stage 0UL
 #endif
 /* Test only, for this volume: the in-place pass of its next commit fails half way, as a failing device
  * would (KJ_FAULT_APPLY), or no overlay page can be allocated until the resize ends (KJ_FAULT_CAPTURE). */

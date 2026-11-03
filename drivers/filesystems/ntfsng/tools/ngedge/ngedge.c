@@ -8,7 +8,7 @@
  *
  * usage: ngedge DIR TEST [ARG]
  *   TEST: rename-subtree | rename-cycle | delete-open-stream | dir-async | size-race | cache-mix | parallel
- *         | stream-reuse | replace | junction-dos | prealloc | prealloc-space | read-pattern FILE | all
+ *         | stream-reuse | replace | junction-dos | prealloc | commit-race | prealloc-space | read-pattern FILE | all
  *         (prealloc-space measures free space, so it is not part of "all": run it on an otherwise idle volume)
  *   One NGE: line per check, NGE:DONE pass=N fail=M at the end.  A test that hangs leaves the
  *   machine to the harness timeout (the watchdog prints NGE:HANG first when it still can).
@@ -1024,6 +1024,130 @@ static void t_prealloc_space(void)
     report("prealloc-space-delete", back > -(1 << 20) && back < (1 << 20), "free space after the delete differs from the start by %I64d", back);
 }
 
+
+/* ---------------------------------------------------------------- concurrent commits (the journal I/O runs without the volume lock) */
+/*
+ * Threads that grow files in 64 KB steps (an allocation after the frees of the threads that delete), flush them
+ * (FlushFileBuffers = a commit that must be complete when it returns), rename and delete, and check the content
+ * after each close.  Several commits want to run at once and allocations follow frees: the paths of a second
+ * committer waiting for the first, a growth waiting for the commit that covers a free, readers of metadata that is
+ * being committed.  A file read back wrong, or an error that is not out of space, fails.
+ */
+#define CR_THREADS 6
+static volatile LONG CrBad, CrErr, CrFiles, CrFlush;
+#define CR_PAT(seed, o) ((UCHAR)((((o) * 13) + (seed) * 31 + 7) & 0xff))
+
+static DWORD WINAPI commit_worker(LPVOID arg)
+{
+    DWORD id = (DWORD)(ULONG_PTR)arg, rnd = id * 2654435761u + 12345, n, i, step;
+    static const DWORD sizes[] = { 3000, 70000, 300000, 1500000, 2500000 };
+    UCHAR *buf = HeapAlloc(GetProcessHeap(), 0, 65536);
+    WCHAR f[MAX_PATH], g[MAX_PATH];
+    if (!buf)
+        return 1;
+    while (!Stop)
+    {
+        DWORD total, seed, o;
+        HANDLE h;
+        BOOL ok = TRUE;
+        rnd = rnd * 1103515245u + 12345;
+        total = sizes[(rnd >> 16) % 5];
+        seed = (rnd >> 8) & 0xff;
+        _snwprintf(f, MAX_PATH, L"%s\\cr%lu-%lu.bin", Dir, id, (DWORD)CrFiles % 7);
+        h = CreateFileW(f, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            InterlockedIncrement(&CrErr);
+            Sleep(10);
+            continue;
+        }
+        for (o = 0, step = 0; o < total && ok && !Stop; o += n, step++)
+        {
+            n = min(65536, total - o);
+            for (i = 0; i < n; i++)
+                buf[i] = CR_PAT(seed, o + i);
+            ok = WriteFile(h, buf, n, &n, NULL);
+            if (ok && (step % 5) == (id % 5) && FlushFileBuffers(h))
+                InterlockedIncrement(&CrFlush);
+            else if (!ok)
+                InterlockedIncrement(&CrErr);
+        }
+        if (ok && !Stop)
+        {
+            /* The content, through the same handle and after the close through a new one. */
+            LARGE_INTEGER z = { 0 };
+            SetFilePointerEx(h, z, NULL, FILE_BEGIN);
+            for (o = 0; o < total; o += n)
+            {
+                if (!ReadFile(h, buf, 65536, &n, NULL) || !n)
+                    break;
+                for (i = 0; i < n; i++)
+                    if (buf[i] != CR_PAT(seed, o + i))
+                        InterlockedIncrement(&CrBad);
+            }
+            if (o != total)
+                InterlockedIncrement(&CrBad);
+        }
+        CloseHandle(h);
+        if (ok && !Stop)
+        {
+            h = CreateFileW(f, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+            if (h == INVALID_HANDLE_VALUE)
+                InterlockedIncrement(&CrBad);
+            else
+            {
+                for (o = 0; o < total; o += n)
+                {
+                    if (!ReadFile(h, buf, 65536, &n, NULL) || !n)
+                        break;
+                    for (i = 0; i < n; i++)
+                        if (buf[i] != CR_PAT(seed, o + i))
+                            InterlockedIncrement(&CrBad);
+                }
+                if (o != total)
+                    InterlockedIncrement(&CrBad);
+                CloseHandle(h);
+            }
+        }
+        InterlockedIncrement(&CrFiles);
+        /* Delete (frees clusters the other threads' growth takes next), or rename over a spare name. */
+        if (rnd & 0x400000)
+        {
+            _snwprintf(g, MAX_PATH, L"%s\\cr%lu-r.bin", Dir, id);
+            MoveFileExW(f, g, MOVEFILE_REPLACE_EXISTING);
+        }
+        else
+            DeleteFileW(f);
+    }
+    HeapFree(GetProcessHeap(), 0, buf);
+    return 0;
+}
+
+static void t_commit_race(void)
+{
+    HANDLE t[CR_THREADS];
+    DWORD i, t0;
+    WCHAR f[MAX_PATH];
+    Stop = 0;
+    CrBad = CrErr = CrFiles = CrFlush = 0;
+    for (i = 0; i < CR_THREADS; i++)
+        t[i] = CreateThread(NULL, 0, commit_worker, (LPVOID)(ULONG_PTR)i, 0, NULL);
+    for (t0 = GetTickCount(); GetTickCount() - t0 < 40000;)
+    {
+        Sleep(1000);
+        InterlockedIncrement(&Current);
+    }
+    Stop = 1;
+    i = WaitForMultipleObjects(CR_THREADS, t, TRUE, 180000);
+    report("commit-race", i == WAIT_OBJECT_0 && !CrBad && !CrErr, "%ld files, %ld flushes, %ld wrong files or bytes, %ld errors",
+           (long)CrFiles, (long)CrFlush, (long)CrBad, (long)CrErr);
+    for (i = 0; i < CR_THREADS; i++)
+    {
+        _snwprintf(f, MAX_PATH, L"%s\\cr%lu-r.bin", Dir, i);
+        DeleteFileW(f);
+    }
+}
+
 /* ---------------------------------------------------------------- read a file with a known pattern */
 static void t_read_pattern(const char *file)
 {
@@ -1081,6 +1205,7 @@ int main(int argc, char **argv)
     RUN("junction-dos", t_junction_dos());
     RUN("pool", t_pool());
     RUN("prealloc", t_prealloc());
+    RUN("commit-race", t_commit_race());
     if (!strcmp(argv[2], "prealloc-space"))
     {
         TestName = "prealloc-space";
