@@ -1794,6 +1794,92 @@ HKLM,"SYSTEM\CurrentControlSet\Services\iphlpsvc","Start",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\iphlpsvc","Type",0x00010001,0x00000020
 HKLM,"SYSTEM\CurrentControlSet\Services\iphlpsvc\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\iphlpsvc.dll"
 
+; Smart card services, as on Windows 10 22H2 with no reader attached (measured on the oracle): trigger-start, stopped
+; until a reader arrives. services.exe keeps the TriggerInfo but has no trigger engine yet, so nothing starts them.
+; Smart Card (PC/SC resource manager)
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","Description",0,"Manages access to smart cards read by this computer. If this service is stopped, this computer will be unable to read smart cards. If this service is disabled, any services that explicitly depend on it will fail to start."
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","DisplayName",0,"Smart Card"
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","FailureActions",0x00000001,84,03,00,00,00,00,00,00,00,00,00,00,03,00,00,00,14,00,00,00,01,00,00,00,C0,D4,01,00,01,00,00,00,E0,93,04,00,00,00,00,00,00,00,00,00
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","Group",0,"SmartCardGroup"
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","ImagePath",0x00020000,"%SystemRoot%\system32\svchost.exe -k LocalServiceAndNoImpersonation"
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","ObjectName",0,"NT AUTHORITY\LocalService"
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","RequiredPrivileges",0x00010000,"SeCreateGlobalPrivilege","SeChangeNotifyPrivilege"
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","ServiceSidType",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","Type",0x00010001,0x00000020
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\SCardSvr.dll"
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\Parameters","ServiceDllUnloadOnStop",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\Parameters","ServiceMain",0,"CalaisMain"
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\0","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\0","Action",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\0","GUID",0x00000001,30,52,DD,50,8A,BA,D1,11,BF,5D,00,00,F8,05,F5,30
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\1","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\1","Action",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\1","GUID",0x00000001,61,81,1D,12,6D,86,24,4A,BA,58,90,58,94,0C,0D,47
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\2","Type",0x00010001,0x00000006
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\2","Action",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\2","GUID",0x00000001,67,D1,90,BC,70,94,39,41,A9,BA,BE,0B,BB,F5,B7,4D
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\2","Data0",0x00000001,63,00,36,00,62,00,35,00,32,00,33,00,35,00,61,00,2D,00,65,00,34,00,31,00,33,00,2D,00,34,00,38,00,31,00,64,00,2D,00,39,00,61,00,63,00,38,00,2D,00,33,00,31,00,36,00,38,00,31,00,62,00,31,00,66,00,61,00,61,00,66,00,35,00,00,00
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\2","DataType0",0x00010001,0x00000002
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\3","Type",0x00010001,0x00000006
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\3","Action",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\3","GUID",0x00000001,67,D1,90,BC,70,94,39,41,A9,BA,BE,0B,BB,F5,B7,4D
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\3","Data0",0x00000001,44,00,30,00,39,00,42,00,44,00,45,00,42,00,35,00,2D,00,36,00,31,00,37,00,31,00,2D,00,34,00,41,00,33,00,34,00,2D,00,42,00,46,00,45,00,32,00,2D,00,30,00,36,00,46,00,41,00,38,00,32,00,36,00,35,00,32,00,35,00,36,00,38,00,3A,00,30,00,43,00,43,00,38,00,32,00,38,00,35,00,37,00,2D,00,31,00,45,00,30,00,45,00,2D,00,34,00,36,00,33,00,33,00,2D,00,41,00,36,00,37,00,33,00,2D,00,32,00,35,00,37,00,42,00,41,00,32,00,34,00,45,00,42,00,39,00,41,00,43,00,00,00
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr\TriggerInfo\3","DataType0",0x00010001,0x00000002
+
+; Certificate Propagation
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc","Description",0,"Copies user certificates and root certificates from smart cards into the current user's certificate store, detects when a smart card is inserted into a smart card reader, and, if needed, installs the smart card Plug and Play minidriver."
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc","DisplayName",0,"Certificate Propagation"
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc","FailureActions",0x00000001,84,03,00,00,00,00,00,00,00,00,00,00,03,00,00,00,14,00,00,00,01,00,00,00,C0,D4,01,00,01,00,00,00,E0,93,04,00,00,00,00,00,00,00,00,00
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc","DependOnService",0x00010000,"RpcSs"
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc","ImagePath",0x00020000,"%SystemRoot%\system32\svchost.exe -k netsvcs"
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc","ObjectName",0,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc","RequiredPrivileges",0x00010000,"SeCreateGlobalPrivilege","SeTcbPrivilege","SeChangeNotifyPrivilege","SeImpersonatePrivilege","SeTakeOwnershipPrivilege","SeSecurityPrivilege"
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc","ServiceSidType",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc","Type",0x00010001,0x00000020
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\certprop.dll"
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc\Parameters","ServiceDllUnloadOnStop",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc\Parameters","ServiceMain",0,"CertPropServiceMain"
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc\TriggerInfo\0","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc\TriggerInfo\0","Action",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc\TriggerInfo\0","GUID",0x00000001,30,52,DD,50,8A,BA,D1,11,BF,5D,00,00,F8,05,F5,30
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc\TriggerInfo\1","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc\TriggerInfo\1","Action",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\CertPropSvc\TriggerInfo\1","GUID",0x00000001,61,81,1D,12,6D,86,24,4A,BA,58,90,58,94,0C,0D,47
+
+; Smart Card Device Enumeration Service
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum","Description",0,"Creates software device nodes for all smart card readers accessible to a given session. If this service is disabled, WinRT APIs will not be able to enumerate smart card readers."
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum","DisplayName",0,"Smart Card Device Enumeration Service"
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum","FailureActions",0x00000001,84,03,00,00,00,00,00,00,00,00,00,00,03,00,00,00,14,00,00,00,01,00,00,00,C0,D4,01,00,01,00,00,00,E0,93,04,00,00,00,00,00,00,00,00,00
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum","ImagePath",0x00020000,"%SystemRoot%\system32\svchost.exe -k LocalSystemNetworkRestricted"
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum","ObjectName",0,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum","RequiredPrivileges",0x00010000,"SeCreateGlobalPrivilege","SeTcbPrivilege","SeChangeNotifyPrivilege","SeImpersonatePrivilege","SeTakeOwnershipPrivilege","SeSecurityPrivilege"
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum","ServiceSidType",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum","Type",0x00010001,0x00000020
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\ScDeviceEnum.dll"
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\Parameters","ServiceDllUnloadOnStop",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\Parameters","ServiceMain",0,"ScDeviceEnumServiceMain"
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\0","Type",0x00010001,0x00000014
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\0","Action",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\0","GUID",0x00000001,9F,90,DD,AE,C6,41,1A,40,9E,41,DF,C3,30,06,AF,5D
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\0","Data0",0x00000001,87,66,23,5A,07,D3,E2,44,92,41,E1,C6,C2,7C,EB,28
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\0","DataType0",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\1","Type",0x00010001,0x00000014
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\1","Action",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\1","GUID",0x00000001,DF,B9,21,06,49,32,59,45,98,89,21,F7,6B,5C,80,F3
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\1","Data0",0x00000001,8B,9E,D9,92,80,96,0B,43,9D,EF,9A,AA,F5,79,01,3C
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\1","DataType0",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\2","Type",0x00010001,0x00000006
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\2","Action",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\2","GUID",0x00000001,67,D1,90,BC,70,94,39,41,A9,BA,BE,0B,BB,F5,B7,4D
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\2","Data0",0x00000001,31,00,36,00,39,00,43,00,34,00,35,00,33,00,42,00,2D,00,35,00,39,00,35,00,35,00,2D,00,34,00,36,00,37,00,32,00,2D,00,42,00,45,00,34,00,34,00,2D,00,32,00,31,00,46,00,36,00,31,00,45,00,39,00,45,00,46,00,31,00,38,00,46,00,00,00
+HKLM,"SYSTEM\CurrentControlSet\Services\ScDeviceEnum\TriggerInfo\2","DataType0",0x00010001,0x00000002
+
 ; BlueScreen device driver
 HKLM,"SYSTEM\CurrentControlSet\Services\Blue","ErrorControl",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\Blue","Group",0x00000000,"Video Init"

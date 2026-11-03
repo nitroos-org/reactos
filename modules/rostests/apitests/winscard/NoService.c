@@ -185,7 +185,19 @@ START_TEST(NoService)
                             SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1, &card, &protocol);
         ok(ret == ERROR_INVALID_HANDLE, "SCardConnectW: 0x%08lx\n", ret);
     }
+    else
+    {
+        /* A running service (started by hand: sc start SCardSvr) accepts contexts. Not measured on the
+         * oracle (starting the service is a state change). */
+        ret = pSCardIsValidContext(context);
+        ok(ret == SCARD_S_SUCCESS, "SCardIsValidContext: 0x%08lx\n", ret);
+    }
     test_lists(context, service);
     if (service)
-        pSCardReleaseContext(context);
+    {
+        ret = pSCardReleaseContext(context);
+        ok(ret == SCARD_S_SUCCESS, "SCardReleaseContext: 0x%08lx\n", ret);
+        ret = pSCardIsValidContext(context);
+        ok(ret != SCARD_S_SUCCESS, "SCardIsValidContext after release: 0x%08lx\n", ret);
+    }
 }
