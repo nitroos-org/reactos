@@ -1642,6 +1642,16 @@ HWND FASTCALL IntGetCurrentThreadDesktopWindow(VOID)
     return pdo->DesktopWindow;
 }
 
+/* The message-only window of the calling thread's desktop (HWND_MESSAGE), else of the input desktop */
+HWND FASTCALL IntGetCurrentThreadMessageWindow(VOID)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+
+    if (pti && pti->rpdesk && pti->rpdesk->spwndMessage)
+        return UserHMGetHandle(pti->rpdesk->spwndMessage);
+    return IntGetMessageWindow();
+}
+
 /* PUBLIC FUNCTIONS ***********************************************************/
 
 BOOL FASTCALL

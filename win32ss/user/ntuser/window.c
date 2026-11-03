@@ -3307,7 +3307,8 @@ NtUserFindWindowEx(HWND hwndParent,
    }
    else if(hwndParent == HWND_MESSAGE)
    {
-     hwndParent = IntGetMessageWindow();
+     /* The message-only windows of the caller's desktop */
+     hwndParent = IntGetCurrentThreadMessageWindow();
    }
 
    if(!(Parent = UserGetWindowObject(hwndParent)))
@@ -3397,7 +3398,7 @@ NtUserFindWindowEx(HWND hwndParent,
        {
           PWND MsgWindows;
 
-          if((MsgWindows = UserGetWindowObject(IntGetMessageWindow())))
+          if((MsgWindows = UserGetWindowObject(IntGetCurrentThreadMessageWindow())))
           {
              Ret = IntFindWindow(MsgWindows, ChildAfter, ClassAtom, &WindowName);
           }
