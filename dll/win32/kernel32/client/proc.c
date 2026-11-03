@@ -2079,6 +2079,25 @@ GetProcessHandleCount(IN HANDLE hProcess,
     return FALSE;
 }
 
+static
+USHORT
+BasepNativeMachine(IN USHORT ProcessorArchitecture)
+{
+    switch (ProcessorArchitecture)
+    {
+        case PROCESSOR_ARCHITECTURE_AMD64:
+            return IMAGE_FILE_MACHINE_AMD64;
+        case PROCESSOR_ARCHITECTURE_ARM64:
+            return IMAGE_FILE_MACHINE_ARM64;
+        case PROCESSOR_ARCHITECTURE_ARM:
+            return IMAGE_FILE_MACHINE_ARMNT;
+        case PROCESSOR_ARCHITECTURE_IA64:
+            return IMAGE_FILE_MACHINE_IA64;
+        default:
+            return IMAGE_FILE_MACHINE_I386;
+    }
+}
+
 /*
  * @implemented
  */
@@ -2087,20 +2106,24 @@ WINAPI
 IsWow64Process(IN HANDLE hProcess,
                OUT PBOOL Wow64Process)
 {
-    ULONG_PTR pbi;
+    ULONG_PTR pbi = 0;
     NTSTATUS Status;
 
-    /* Query the kernel */
-    Status = NtQueryInformationProcess(hProcess,
-                                       ProcessWow64Information,
-                                       &pbi,
-                                       sizeof(pbi),
-                                       NULL);
-    if (!NT_SUCCESS(Status))
+    /* A NULL handle is not rejected: it reads as a native process (as Windows does) */
+    if (hProcess)
     {
-        /* Handle error path */
-        BaseSetLastNTError(Status);
-        return FALSE;
+        /* Query the kernel */
+        Status = NtQueryInformationProcess(hProcess,
+                                           ProcessWow64Information,
+                                           &pbi,
+                                           sizeof(pbi),
+                                           NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            /* Handle error path */
+            BaseSetLastNTError(Status);
+            return FALSE;
+        }
     }
 
     /* Enforce this is a BOOL, and return success */
@@ -2148,30 +2171,40 @@ IsWow64Process2(IN HANDLE hProcess,
         return FALSE;
     }
 
-    switch (ProcessorInfo.ProcessorArchitecture)
-    {
-        case PROCESSOR_ARCHITECTURE_AMD64:
-            NativeMachine = IMAGE_FILE_MACHINE_AMD64;
-            break;
-        case PROCESSOR_ARCHITECTURE_ARM64:
-            NativeMachine = IMAGE_FILE_MACHINE_ARM64;
-            break;
-        case PROCESSOR_ARCHITECTURE_ARM:
-            NativeMachine = IMAGE_FILE_MACHINE_ARMNT;
-            break;
-        case PROCESSOR_ARCHITECTURE_IA64:
-            NativeMachine = IMAGE_FILE_MACHINE_IA64;
-            break;
-        default:
-            NativeMachine = IMAGE_FILE_MACHINE_I386;
-            break;
-    }
+    NativeMachine = BasepNativeMachine(ProcessorInfo.ProcessorArchitecture);
 
     /* The only guest ReactOS runs is 32-bit x86 */
     *pProcessMachine = Wow64Information ? IMAGE_FILE_MACHINE_I386 : IMAGE_FILE_MACHINE_UNKNOWN;
     if (pNativeMachine)
         *pNativeMachine = NativeMachine;
     return TRUE;
+}
+
+/*
+ * @implemented
+ */
+HRESULT
+WINAPI
+IsWow64GuestMachineSupported(IN USHORT WowGuestMachine,
+                             OUT BOOL *MachineIsSupported)
+{
+    SYSTEM_PROCESSOR_INFORMATION ProcessorInfo;
+    NTSTATUS Status;
+
+    Status = RtlGetNativeSystemInformation(SystemProcessorInformation,
+                                           &ProcessorInfo,
+                                           sizeof(ProcessorInfo),
+                                           NULL);
+    if (!NT_SUCCESS(Status))
+        return HRESULT_FROM_NT(Status);
+
+    /*
+     * The only guest ReactOS runs is 32-bit x86, on an amd64 host (as IsWow64Process2 reports).
+     * A native i386 system has no WoW64: every machine is unsupported there.
+     */
+    *MachineIsSupported = (WowGuestMachine == IMAGE_FILE_MACHINE_I386 &&
+                           BasepNativeMachine(ProcessorInfo.ProcessorArchitecture) == IMAGE_FILE_MACHINE_AMD64);
+    return S_OK;
 }
 
 /*

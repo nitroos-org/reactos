@@ -461,6 +461,7 @@
 @ IsValidLanguageGroup
 @ IsValidLocale
 @ IsValidLocaleName -version=0x600+
+@ IsWow64GuestMachineSupported -version=0x601+
 @ IsWow64Process
 @ IsWow64Process2 -version=0x601+
 @ K32EmptyWorkingSet -version=0x601+
