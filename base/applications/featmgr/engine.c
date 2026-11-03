@@ -351,6 +351,7 @@ static BOOL LoadManifestEx(LPCWSTR path, FM_FEATURE *f, BOOL fast)
     IniGet(&ini, L"Feature", L"Description", L"", f->Description, FM_MAX_DESC);
     IniGet(&ini, L"Feature", L"Version", L"1.0.0", f->Version, FM_MAX_VER);
     IniGet(&ini, L"Feature", L"Dependencies", L"", f->Dependencies, FM_MAX_DEPS);
+    IniGet(&ini, L"Feature", L"Group", L"", f->Group, ARRAYSIZE(f->Group));
     IniGet(&ini, L"Feature", L"Tier", L"os", tmp, FM_MAX_DESC);
     f->Tier = ParseTier(tmp);
     IniGet(&ini, L"Feature", L"Removable", L"1", tmp, 16);
@@ -479,6 +480,11 @@ static BOOL SoftwareAvailable(const FM_FEATURE *f)
         return InstallerPath(f, p, MAX_PATH) && GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
     if (!_wcsicmp(f->Provider, L"scoop"))
         return FmScoopUsable();
+    if (!_wcsicmp(f->Provider, L"component"))
+    {
+        FM_COMPONENT c;                                 /* downloaded by featmgr itself: needs only its list entry */
+        return FmCompLoad(f->Id, &c) && c.ArchOk && c.Install[0];
+    }
     if (_wcsicmp(f->Provider, L"rapps"))
         return FALSE;                                   /* unknown provider */
     if (!RappsExePath(p, MAX_PATH) || GetFileAttributesW(p) == INVALID_FILE_ATTRIBUTES)
@@ -577,8 +583,17 @@ static void ResolveState(FM_FEATURE *f)
 {
     WCHAR p[MAX_PATH];
     BOOL present;
-    if (f->Tier != FM_TIER_SOFTWARE || !DetectPathFor(f, p, MAX_PATH)) return;
-    present = GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+    if (f->Tier == FM_TIER_SOFTWARE && !_wcsicmp(f->Provider, L"component"))
+    {
+        /* the component list's detect rule decides (an install done outside featmgr is seen too) */
+        FM_COMPONENT c;
+        if (!FmCompLoad(f->Id, &c)) return;
+        if (!c.DetectReg[0] && !c.DetectFile[0]) return;      /* no detect rule: the recorded state stands */
+        present = FmCompDetect(&c);
+    }
+    else if (f->Tier != FM_TIER_SOFTWARE || !DetectPathFor(f, p, MAX_PATH)) return;
+    else
+        present = GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
     if (present && f->State != FM_STATE_ENABLED)
         f->State = FM_STATE_ENABLED;
     else if (!present && f->State == FM_STATE_ENABLED)
@@ -1328,6 +1343,27 @@ void FmOpStep(LPCWSTR fmt, ...)
     fn(FM_PROG_STEP, t, g_ProgCtx);
 }
 
+void FmOpPhase(int phase)
+{
+    WCHAR t[16];
+    FM_PROGRESS_FN fn = g_ProgFn;
+    if (!fn) return;
+    StringCchPrintfW(t, ARRAYSIZE(t), L"%d", phase);
+    fn(FM_PROG_PHASE, t, g_ProgCtx);
+}
+
+void FmOpBytes(ULONGLONG done, ULONGLONG total)
+{
+    WCHAR t[64];
+    FM_PROGRESS_FN fn = g_ProgFn;
+    if (!fn) return;
+    StringCchPrintfW(t, ARRAYSIZE(t), L"%I64u %I64u", done, total);
+    fn(FM_PROG_BYTES, t, g_ProgCtx);
+}
+
+static volatile LONG g_RebootNeeded;
+BOOL FmTakeRebootNeeded(void) { return InterlockedExchange(&g_RebootNeeded, 0) != 0; }
+
 /* The newest non-blank line of a chunk of child output, for the status line. */
 static void ReportOutputLine(LPCWSTR text)
 {
@@ -1715,6 +1751,21 @@ static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR un
         return S_OK;
     }
 
+    if (!_wcsicmp(f->Provider, L"component"))
+    {
+        /* the install line needs the downloaded file: SoftwareInstall builds it after FmCompDownload; the
+         * uninstall line comes from the component list */
+        FM_COMPONENT c;
+        if (!FmCompLoad(f->Id, &c))
+        {
+            LOGF(log, L"error: '%s' is not in the component list\n", f->Id);
+            SetLastMsg(L"'%s' is not in the component list (components.ini).", f->Id);
+            return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+        }
+        StringCchCopyW(inst, cch, L"(component)");
+        if (c.Uninstall[0]) ExpandCmd(f->Id, c.Uninstall, uninst, cch);
+        return S_OK;
+    }
     if (_wcsicmp(f->Provider, L"rapps"))
     {
         LOGF(log, L"error: '%s' has unknown install provider '%s'\n", f->Id, f->Provider);
@@ -1794,10 +1845,19 @@ static HRESULT CheckSoftwareDiskSpace(const FM_FEATURE *f, FILE *log, BOOL faile
     ULONGLONG pkg, need;
     PWSTR end;
 
-    GetPrivateProfileStringW(L"Source", L"SizeBytes", L"", sz, ARRAYSIZE(sz), f->ManifestPath);
-    if (!sz[0]) return S_OK;
-    pkg = _wcstoui64(sz, &end, 10);
-    if (!pkg || *end) return S_OK;
+    if (!_wcsicmp(f->Provider, L"component"))
+    {
+        FM_COMPONENT c;
+        pkg = FmCompLoad(f->Id, &c) ? c.Size : 0;
+        if (!pkg) return S_OK;
+    }
+    else
+    {
+        GetPrivateProfileStringW(L"Source", L"SizeBytes", L"", sz, ARRAYSIZE(sz), f->ManifestPath);
+        if (!sz[0]) return S_OK;
+        pkg = _wcstoui64(sz, &end, 10);
+        if (!pkg || *end) return S_OK;
+    }
     if (pkg > ((ULONGLONG)-1) / SW_DISK_FACTOR) need = (ULONGLONG)-1;
     else need = pkg * SW_DISK_FACTOR;
     if (!GetSystemDirectoryW(sys, MAX_PATH) || sys[1] != L':') return S_OK;
@@ -1822,6 +1882,12 @@ static void ReportInstallStep(const FM_FEATURE *f, LPCWSTR inst)
     ULONGLONG n = 0;
     PWSTR end;
 
+    FmOpPhase(FM_PHASE_APPLY);
+    if (!_wcsicmp(f->Provider, L"component"))
+    {
+        FmOpStep(L"Installing %s", f->Name);
+        return;
+    }
     GetPrivateProfileStringW(L"Source", L"Artifact", L"", url, ARRAYSIZE(url), f->ManifestPath);
     GetPrivateProfileStringW(L"Source", L"SizeBytes", L"", sz, ARRAYSIZE(sz), f->ManifestPath);
     if (sz[0]) { n = _wcstoui64(sz, &end, 10); if (*end) n = 0; }
@@ -1871,14 +1937,34 @@ static BOOL ScoopRootIsFresh(void)
  * uninstall command line is recorded in the state key. */
 static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
 {
-    WCHAR inst[2048], uninst[2048];
+    WCHAR inst[2048], uninst[2048], compFile[MAX_PATH];
     DWORD code;
     HRESULT hr;
     BOOL scoopFresh;
+    BOOL comp = !_wcsicmp(f->Provider, L"component");
     WCHAR *pathBefore = NULL;
 
+    compFile[0] = L'\0';
+    FmOpPhase(FM_PHASE_SEARCH);
     hr = BuildSoftwareCommands(f, inst, uninst, ARRAYSIZE(inst), log);
     if (FAILED(hr)) return hr;
+    if (comp)
+    {
+        /* the component list's own download: progress, SHA-256, cancel; the partial file never stays behind */
+        FM_COMPONENT c;
+        hr = CheckSoftwareDiskSpace(f, log, FALSE);
+        if (FAILED(hr)) return hr;
+        if (!FmCompLoad(f->Id, &c)) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+        hr = FmCompDownload(&c, compFile, ARRAYSIZE(compFile), log);
+        if (FAILED(hr))
+        {
+            WCHAR why[1024];
+            FmGetLastMessage(why, ARRAYSIZE(why));
+            LOGF(log, L"error: %s\n", why);      /* the CLI shows the log; the window shows the last message */
+            return hr;
+        }
+        FmCompInstallLine(&c, compFile, inst, ARRAYSIZE(inst));
+    }
     if (!_wcsicmp(f->Provider, L"rapps"))
     {
         WCHAR entry[MAX_PATH], pkg[128];
@@ -1899,6 +1985,18 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
     pathBefore = HeapAlloc(GetProcessHeap(), 0, PATHSNAP_CCH * sizeof(WCHAR));
     if (pathBefore) ReadRegistryPaths(pathBefore, PATHSNAP_CCH);
     hr = RunAndWait(inst, SW_RUN_TIMEOUT_MS, &code, log);
+    if (comp)
+    {
+        /* success and cancel leave no copy of the download behind; a failed installer keeps the verified file for the retry */
+        if (SUCCEEDED(hr) ? (code == 0 || code == 3010 || code == 1641) : hr == HRESULT_FROM_WIN32(ERROR_CANCELLED))
+            DeleteFileW(compFile);
+        if (SUCCEEDED(hr) && (code == 3010 || code == 1641))
+        {
+            LOGF(log, L"  installer finished, a restart is needed (exit code %lu)\n", code);
+            InterlockedExchange(&g_RebootNeeded, 1);
+            code = 0;
+        }
+    }
     if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED) && scoopFresh && uninst[0])
     {
         /* a half-written C:\scoop would make the next install refuse ("exists and is not empty"):
@@ -1931,7 +2029,7 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
     {
         if (pathBefore) HeapFree(GetProcessHeap(), 0, pathBefore);
         LOGF(log, L"error: installer for '%s' failed (exit code %lu)\n", f->Id, code);
-        if (!_wcsicmp(f->Provider, L"rapps") && FAILED(CheckSoftwareDiskSpace(f, log, TRUE)))
+        if ((!_wcsicmp(f->Provider, L"rapps") || comp) && FAILED(CheckSoftwareDiskSpace(f, log, TRUE)))
             return HRESULT_FROM_WIN32(ERROR_DISK_FULL);
         SetLastMsg(L"The %s installer for '%s' failed (exit code %lu).\n\n%s",
                    f->Provider, f->Id, code, g_Tail);
@@ -1966,7 +2064,7 @@ static HRESULT SoftwareUninstall(const FM_FEATURE *f, HKEY state, FILE *log)
         cmd[0] = L'\0';
         /* installed outside featmgr (scoop CLI; setup for an image-bundled rapps entry): no recorded line,
          * derive it from the manifest */
-        if (f && (!_wcsicmp(f->Provider, L"scoop") || !_wcsicmp(f->Provider, L"rapps")))
+        if (f && (!_wcsicmp(f->Provider, L"scoop") || !_wcsicmp(f->Provider, L"rapps") || !_wcsicmp(f->Provider, L"component")))
         {
             WCHAR inst[2048];
             hr = BuildSoftwareCommands(f, inst, cmd, ARRAYSIZE(cmd), log);
@@ -1981,6 +2079,7 @@ static HRESULT SoftwareUninstall(const FM_FEATURE *f, HKEY state, FILE *log)
     cmd[ARRAYSIZE(cmd) - 1] = L'\0';
     if (f && !_wcsicmp(f->Provider, L"scoop"))
         FmScoopPrepareEnv();
+    FmOpPhase(FM_PHASE_APPLY);
     FmOpStep(L"Running the uninstaller for %s", f ? f->Name : L"the feature");
     hr = RunAndWait(cmd, SW_RUN_TIMEOUT_MS, &code, log);
     if (FAILED(hr)) return hr;

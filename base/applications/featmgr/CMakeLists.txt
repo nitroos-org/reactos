@@ -4,9 +4,9 @@ project(featmgr)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 # --- CLI frontend (automation): featmgr /list /query /enable /disable ---
-add_executable(featmgr cli.c engine.c rapps_import.c scoop.c scoopdefaults.c featmgr.rc)
+add_executable(featmgr cli.c engine.c components.c rapps_import.c scoop.c scoopdefaults.c featmgr.rc)
 set_module_type(featmgr win32cui UNICODE)
-add_importlibs(featmgr advapi32 shlwapi shell32 user32 msvcrt kernel32 ntdll)
+add_importlibs(featmgr advapi32 shlwapi shell32 user32 wininet msvcrt kernel32 ntdll)
 add_cd_file(TARGET featmgr DESTINATION reactos/system32 FOR all)
 
 # --- refreshenv: re-read PATH into the cmd / PowerShell window that is open (a child like featmgr cannot) ---
@@ -14,9 +14,9 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/refreshenv.cmd DESTINATION reactos/
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/refreshenv.ps1 DESTINATION reactos/system32 FOR all)
 
 # --- GUI applet: "Optional Features" (Turn features on/off) ---
-add_executable(optfeatures gui.c engine.c rapps_import.c scoop.c scoopdefaults.c optfeatures.rc)
+add_executable(optfeatures gui.c featwin.c progwin.c firstboot.c engine.c components.c rapps_import.c scoop.c scoopdefaults.c optfeatures.rc)
 set_module_type(optfeatures win32gui UNICODE)
-add_importlibs(optfeatures advapi32 shlwapi shell32 comctl32 user32 gdi32 msvcrt kernel32 ntdll)
+add_importlibs(optfeatures advapi32 shlwapi shell32 comctl32 user32 gdi32 wininet msvcrt kernel32 ntdll)
 add_cd_file(TARGET optfeatures DESTINATION reactos/system32 FOR all)
 
 # --- optionalfeatures.exe: the Windows name; launches optfeatures.exe (no Control Panel icon, appwiz.cpl hosts it) ---
@@ -91,11 +91,17 @@ if(ARCH STREQUAL "amd64")
 endif()
 
 # --- Microsoft .NET Framework 4.8: software-tier entry (i386 and amd64) ---
-# Manifest + RAPPS-format entry only. The official offline installer is downloaded from Microsoft at install time
-# (SHA-256 checked) and is never bundled; the application compatibility database gives it the Windows 7 SP1 answer.
+# The manifest only; its recipe is the [dotnet-framework-4.8] section of Catalog\components.ini (below). The official offline installer
+# is downloaded from Microsoft at install time (SHA-256 checked by featmgr) and is never bundled; the application
+# compatibility database gives it the Windows 7 SP1 answer.
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/dotnet-framework-4.8.ini
             DESTINATION reactos/Featmgr/Catalog FOR all)
-add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/dotnet-framework-4.8.txt
+
+# --- the component list: the one data file for downloaded components (name, URL, SHA-256, size, detect rule, install
+# command) and for the first-boot installer's default set ("optfeatures /firstboot", started by the HKLM Run value
+# NitroComponents in hivesft.inf).
+# (it sits in the Catalog folder: the catalog scan skips an .ini without a [Feature] Id)
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/components.ini
             DESTINATION reactos/Featmgr/Catalog FOR all)
 
 # --- Scoop (SCOOP-FEATMGR-01): software-tier entry + its install/uninstall scripts (amd64 only: it needs

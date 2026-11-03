@@ -92,8 +92,9 @@ documented one-liner:
 stops with "Running the installer as administrator is disabled by default".
 Use one of these instead:
 
-  - Optional Features (featmgr), Software tab, Scoop entry. This is the
-    recommended way; it passes -RunAsAdmin for you.
+  - Turn NitroOS features on or off (Optional Features, featmgr): tick Scoop
+    under Developer tools and click OK. This is the recommended way; it
+    passes -RunAsAdmin for you.
   - In PowerShell 7, pass -RunAsAdmin to the installer yourself:
 
     iex "& {$(irm get.scoop.sh)} -RunAsAdmin"
