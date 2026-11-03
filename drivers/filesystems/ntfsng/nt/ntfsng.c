@@ -902,6 +902,13 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         DPRINT1("ntfsng: JournalStall: the journal I/O of a commit pauses %lu ms between its phases\n", i);
     }
 #endif
+    /* FcbCacheMax=N: idle FCBs with cached file data kept per volume (default NG_FCB_CACHE_DEFAULT); NoFcbTrim=1: no limit
+     * (comparison, fallback: every FCB whose data Mm caches lives until Mm lets the pages go). */
+    NgGlobal.FcbCacheMax = NgReadDword(RegistryPath, L"FcbCacheMax");
+    if (!NgGlobal.FcbCacheMax)
+        NgGlobal.FcbCacheMax = NG_FCB_CACHE_DEFAULT;
+    if (NgReadDword(RegistryPath, L"NoFcbTrim"))
+        NgGlobal.FcbCacheMax = MAXULONG;
     /* NoUnlockedCommit=1: every commit is synchronous under CoreLock, as before the journal I/O left it (comparison, fallback). */
     if (NgReadDword(RegistryPath, L"NoUnlockedCommit"))
     {

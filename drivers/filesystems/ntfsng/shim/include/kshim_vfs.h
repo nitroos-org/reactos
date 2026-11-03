@@ -315,7 +315,7 @@ struct inode {
 	u64 i_version;
 	void *i_private;
 	struct hlist_node i_hash;
-	struct inode *kshim_next;
+	struct inode *kshim_next, *kshim_prev;	/* sb->kshim_inodes, doubly linked: eviction unlinks in O(1) */
 	void *kshim_test_data;
 	struct inode *kshim_hnext;		/* hash chain (sb->kshim_ihash) while hashed */
 	struct inode *kshim_lru_prev, *kshim_lru_next;	/* unused-inode list while kshim_in_lru */

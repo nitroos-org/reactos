@@ -56,6 +56,12 @@ static __inline PLIST_ENTRY NgFcbBucket(PNG_VCB Vcb, ULONGLONG MftNo)
 /* Takes Fcb off FcbList and its hash chain when it is on them (caller holds FcbListLock). */
 VOID NgFcbRemoveLocked(PNG_FCB Fcb)
 {
+    if (Fcb->IdleLinks.Flink)
+    {
+        RemoveEntryList(&Fcb->IdleLinks);
+        Fcb->IdleLinks.Flink = Fcb->IdleLinks.Blink = NULL;
+        Fcb->Vcb->IdleCount--;
+    }
     if (Fcb->VcbLinks.Flink)
     {
         RemoveEntryList(&Fcb->VcbLinks);
@@ -83,6 +89,13 @@ static PNG_FCB NgInsertOrFindFcb(PNG_VCB Vcb, PNG_FCB Candidate)
                 DPRINT1("ntfsng: BUG: deleted FCB %p for %I64x still listed\n", Fcb, Fcb->MftNo);
             InterlockedIncrement(&Fcb->RefCount);
             Fcb->Opening++;
+            /* In use again: not a candidate for the trim until its next last cleanup. */
+            if (Fcb->IdleLinks.Flink)
+            {
+                RemoveEntryList(&Fcb->IdleLinks);
+                Fcb->IdleLinks.Flink = Fcb->IdleLinks.Blink = NULL;
+                Vcb->IdleCount--;
+            }
             ExReleaseFastMutex(&Vcb->FcbListLock);
             return Fcb;
         }
@@ -1657,6 +1670,89 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp);
  * gate shared, so the metadata changes of a last cleanup (a delete, timestamps) never land after a
  * volume lock's flush or during a dismount.
  */
+/*
+ * Mm keeps a file's data section as long as one of its pages is resident: every page holds a reference on the segment,
+ * the segment one on the file object, and the file object (whose close frees the FCB) one on the FCB.  Without a
+ * handle a file whose data was read or written is therefore never closed, and every such file touched since boot
+ * keeps its FCB, file object, CCB and segment.  The FCBs that went idle this way are listed, oldest first;
+ * past NgGlobal.FcbCacheMax of them the oldest are flushed and purged, which lets Mm drop the segment, the file
+ * object get closed and the FCB freed.  The newest stay: a file opened again soon finds its cached pages.
+ * An FCB leaves the list when it is opened again (NgInsertOrFindFcb) or freed (NgFcbRemoveLocked).
+ */
+static VOID NgFcbTrimIdle(PNG_VCB Vcb);
+
+VOID NgFcbIdle(PNG_FCB Fcb)
+{
+    PNG_VCB Vcb = Fcb->Vcb;
+
+    if (Fcb->OpenHandles || !Fcb->HasNode || Fcb->IsDirectory || Fcb->IsVolume ||
+        !Fcb->SectionObjectPointers.DataSectionObject || NgGlobal.FcbCacheMax == MAXULONG)
+        return;
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    if (Fcb->VcbLinks.Flink && !Fcb->OpenHandles && !Fcb->Opening && !Fcb->Deleted && !Fcb->DeletePending &&
+        !Fcb->IsPagingFile)
+    {
+        /* Again at the tail when it was listed already: the list is in order of last use. */
+        if (Fcb->IdleLinks.Flink)
+        {
+            RemoveEntryList(&Fcb->IdleLinks);
+            Vcb->IdleCount--;
+        }
+        InsertTailList(&Vcb->IdleList, &Fcb->IdleLinks);
+        Vcb->IdleCount++;
+    }
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    NgFcbTrimIdle(Vcb);
+}
+
+/* Caller holds a counted reference, drops it here.  Nothing else is held: closing the file object runs NgClose. */
+static VOID NgEvictFcb(PNG_FCB Fcb)
+{
+    PNG_VCB Vcb = Fcb->Vcb;
+
+    /* Only an idle FCB nobody is working on; a writer that comes in meanwhile waits for the main resource. */
+    if (ExAcquireResourceExclusiveLite(&Fcb->MainResource, FALSE))
+    {
+        BOOLEAN Idle;
+        ExAcquireFastMutex(&Vcb->FcbListLock);
+        Idle = !Fcb->OpenHandles && !Fcb->Opening && !Fcb->Deleted && !Fcb->DeletePending && !Fcb->IsPagingFile &&
+               !Vcb->Dismounted && !Vcb->WrongMedia && !Vcb->LockedBy;
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        if (Idle && !Fcb->SectionObjectPointers.SharedCacheMap && Fcb->SectionObjectPointers.DataSectionObject)
+        {
+            IO_STATUS_BLOCK Iosb;
+            NgFlushStream(Fcb, &Iosb);
+            if (NT_SUCCESS(Iosb.Status))
+                NgPurgeFrom(Fcb, 0);
+        }
+        ExReleaseResourceLite(&Fcb->MainResource);
+    }
+    NgDereferenceFcb(Fcb);
+}
+
+static VOID NgFcbTrimIdle(PNG_VCB Vcb)
+{
+    ULONG Round;
+
+    /* A few per call keep a cleanup's latency bounded; one in, one out keeps up in a steady state. */
+    for (Round = 0; Round < 8; Round++)
+    {
+        PNG_FCB Fcb;
+        ExAcquireFastMutex(&Vcb->FcbListLock);
+        if ((ULONG)Vcb->IdleCount <= NgGlobal.FcbCacheMax || IsListEmpty(&Vcb->IdleList))
+        {
+            ExReleaseFastMutex(&Vcb->FcbListLock);
+            return;
+        }
+        Fcb = CONTAINING_RECORD(RemoveHeadList(&Vcb->IdleList), NG_FCB, IdleLinks);
+        Fcb->IdleLinks.Flink = Fcb->IdleLinks.Blink = NULL;
+        Vcb->IdleCount--;
+        InterlockedIncrement(&Fcb->RefCount);   /* under the lock: a close cannot free it meanwhile */
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        NgEvictFcb(Fcb);
+    }
+}
+
 NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PFILE_OBJECT FileObject = IoGetCurrentIrpStackLocation(Irp)->FileObject;
@@ -1683,6 +1779,9 @@ NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp)
      * from its device (a replaced medium, a removal) may write nothing: only the handle's state goes. */
     Status = (Vcb->Dismounted || Vcb->WrongMedia) ? NgCleanupDismounted(Vcb, Irp) : NgCleanupGated(DeviceObject, Irp);
     ExReleaseResourceLite(&Vcb->CreateGate);
+    /* The file object still holds the FCB (its close follows this cleanup). */
+    if (NT_SUCCESS(Status))
+        NgFcbIdle(Fcb);
     return Status;
 }
 
