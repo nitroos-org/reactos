@@ -4570,7 +4570,7 @@ VOID MENU_TrackMouseMenuBar( PWND pWnd, ULONG ht, POINT pt)
     {
         /* map point to parent client coordinates */
         PWND Parent = UserGetAncestor(pWnd, GA_PARENT );
-        if (Parent != UserGetDesktopWindow())
+        if (!UserIsDesktopWindow(Parent)) /* the desktop window of any desktop: screen coordinates */
         {
             IntScreenToClient(Parent, &pt);
         }
