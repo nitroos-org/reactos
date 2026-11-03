@@ -222,6 +222,7 @@ PdoDeviceControlQueryProperty(
                 ULONG VendorIdLength = GetFieldLength(InquiryData->VendorId, 8);
                 ULONG ProductIdLength = GetFieldLength(InquiryData->ProductId, 16);
                 ULONG RevisionLength = GetFieldLength(InquiryData->ProductRevisionLevel, 4);
+                ULONG SerialLength = PdoExtension->SerialNumber ? (ULONG)strlen(PdoExtension->SerialNumber) : 0;
                 ULONG TotalLength;
                 PUCHAR Dest;
 
@@ -234,7 +235,7 @@ PdoDeviceControlQueryProperty(
                                VendorIdLength + 1 +
                                ProductIdLength + 1 +
                                RevisionLength + /* Null byte omitted */
-                               1; /* Null byte for serial number */
+                               SerialLength + 1; /* Serial number and its null byte */
 
                 /* Check buffer length */
                 if (IoStack->Parameters.DeviceIoControl.OutputBufferLength < TotalLength)
@@ -276,8 +277,10 @@ PdoDeviceControlQueryProperty(
                                                     VendorIdLength + 1;
                 DeviceDescriptor->ProductRevisionOffset = DeviceDescriptor->ProductIdOffset +
                                                           ProductIdLength + 1;
-                DeviceDescriptor->SerialNumberOffset = DeviceDescriptor->ProductRevisionOffset +
-                                                       RevisionLength + 1;
+                /* Zero when the unit reports no serial number (VPD page 0x80), as on Windows */
+                DeviceDescriptor->SerialNumberOffset = SerialLength ?
+                                                       DeviceDescriptor->ProductRevisionOffset + RevisionLength + 1 :
+                                                       0;
 
                 /* Fill the arbitrary data */
                 Dest = DeviceDescriptor->RawDeviceProperties;
@@ -294,8 +297,9 @@ PdoDeviceControlQueryProperty(
                 Dest[RevisionLength] = '\0';
                 Dest += RevisionLength + 1;
 
-                /* FIXME: Read serial number when enumerating devices */
-                *Dest = '\0';
+                if (SerialLength)
+                    RtlCopyMemory(Dest, PdoExtension->SerialNumber, SerialLength);
+                Dest[SerialLength] = '\0';
 
                 /* TODO: Verify this doesnt overflow */
                 Irp->IoStatus.Information = TotalLength;

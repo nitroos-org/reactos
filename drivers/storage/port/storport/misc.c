@@ -407,6 +407,43 @@ PortGetMiniportBusType(
     return (STORAGE_BUS_TYPE)Value;
 }
 
+/**
+ * @brief Reads a REG_DWORD from the miniport's service key Parameters subkey.
+ */
+ULONG
+PortGetMiniportParameter(
+    _In_ PDRIVER_OBJECT DriverObject,
+    _In_ PCWSTR Name,
+    _In_ ULONG Default)
+{
+    RTL_QUERY_REGISTRY_TABLE Table[2];
+    WCHAR PathBuffer[160];
+    UNICODE_STRING Path;
+    ULONG Value = Default;
+    NTSTATUS Status;
+
+    RtlZeroMemory(PathBuffer, sizeof(PathBuffer));
+    RtlInitEmptyUnicodeString(&Path, PathBuffer, sizeof(PathBuffer) - sizeof(WCHAR));
+    Status = RtlAppendUnicodeToString(&Path, L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\");
+    if (NT_SUCCESS(Status))
+        Status = RtlAppendUnicodeStringToString(&Path, &DriverObject->DriverExtension->ServiceKeyName);
+    if (NT_SUCCESS(Status))
+        Status = RtlAppendUnicodeToString(&Path, L"\\Parameters");
+    if (!NT_SUCCESS(Status))
+        return Default;
+
+    RtlZeroMemory(Table, sizeof(Table));
+    Table[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
+    Table[0].Name = (PWSTR)Name;
+    Table[0].EntryContext = &Value;
+    Table[0].DefaultType = REG_DWORD;
+    Table[0].DefaultData = &Default;
+    Table[0].DefaultLength = sizeof(Default);
+
+    Status = RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE, Path.Buffer, Table, NULL, NULL);
+    return NT_SUCCESS(Status) ? Value : Default;
+}
+
 // see https://docs.microsoft.com/en-us/windows-hardware/drivers/install/identifiers-for-scsi-devices
 // and https://docs.microsoft.com/en-us/windows-hardware/drivers/install/identifiers-for-ide-devices
 

@@ -189,6 +189,20 @@ PortPdoAfterBuildingScatterGatherList(
     /* BuildIo and StartIo are called on DISPATCH_LEVEL */
     OldIrql = KfRaiseIrql(DISPATCH_LEVEL);
 
+#if DBG
+    /* Fault knob for the timeout path (off unless the miniport's Parameters\DebugDropRequestEvery is set) */
+    if (FdoExtension->DebugDropRequestEvery != 0 &&
+        RequestReference->Srb->Function == SRB_FUNCTION_EXECUTE_SCSI &&
+        StorpIsReadWriteCdb(RequestReference->Srb->Cdb[0]) &&
+        ((ULONG)InterlockedIncrement(&FdoExtension->DebugDropCounter) % FdoExtension->DebugDropRequestEvery) == 0)
+    {
+        DPRINT1("storport: fault knob: Srb %p (cdb %02x) not handed to the miniport\n",
+                RequestReference->Srb, RequestReference->Srb->Cdb[0]);
+        KeLowerIrql(OldIrql);
+        return;
+    }
+#endif
+
     do {
         /* Call BuildIo, if one is provided */
         if (HwInitData->HwBuildIo)
@@ -287,6 +301,57 @@ PortPdoSrbAllocatePrivateContexts(
 
 
 /**
+ * @brief TRUE for the SCSI read and write commands (data moved by DMA, never touched by a
+ * miniport through Srb->DataBuffer).
+ */
+BOOLEAN
+StorpIsReadWriteCdb(
+    _In_ UCHAR OperationCode)
+{
+    switch (OperationCode)
+    {
+        case SCSIOP_READ6:
+        case SCSIOP_WRITE6:
+        case SCSIOP_READ:
+        case SCSIOP_WRITE:
+        case SCSIOP_READ12:
+        case SCSIOP_WRITE12:
+        case SCSIOP_READ16:
+        case SCSIOP_WRITE16:
+        case SCSIOP_WRITE_VERIFY:
+        case SCSIOP_WRITE_VERIFY12:
+        case SCSIOP_WRITE_VERIFY16:
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
+
+/**
+ * @brief Whether the miniport's MapBuffers asks for a system address in Srb->DataBuffer:
+ * STOR_MAP_ALL_BUFFERS and STOR_MAP_NON_READ_WRITE_BUFFERS (Windows treats the first as the
+ * second) map every buffer except those of reads and writes.
+ */
+static
+BOOLEAN
+StorpNeedsSystemBuffer(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PSCSI_REQUEST_BLOCK Srb)
+{
+    switch (FdoExtension->Miniport.PortConfig.MapBuffers)
+    {
+        case STOR_MAP_ALL_BUFFERS:
+        case STOR_MAP_NON_READ_WRITE_BUFFERS:
+            return (Srb->Function != SRB_FUNCTION_EXECUTE_SCSI) ||
+                   !StorpIsReadWriteCdb(Srb->Cdb[0]);
+        default:
+            return FALSE;
+    }
+}
+
+
+/**
  * @brief Returns where in the MDL the SRB transfer starts: its data buffer when that lies
  * inside the MDL (a split request), else the start of the MDL.
  */
@@ -342,10 +407,16 @@ PortPdoIssueRequest(
     //     StorpDumpRequest(RequestReference);
     // }
 
+    /* From here on the request is the miniport's, and its timeout runs */
+    PortTimeoutArmRequest(FdoExtension, RequestReference);
+
     /* Start an DMA if IO subsystem allocated an MDL for us */
     /* FIXME: Does this strategy work? */
     if (RequestReference->Irp->MdlAddress)
     {
+        PVOID TransferVa;
+        PVOID SystemVa;
+
         /*
          * Lock the buffer so that it stays in physical memory.
          * In the two cases avoided here the memory has already been locked
@@ -359,6 +430,32 @@ PortPdoIssueRequest(
             MmProbeAndLockPages(Irp->MdlAddress, KernelMode, IoModifyAccess);
         }
 
+        TransferVa = StorpGetTransferVa(RequestReference->Irp->MdlAddress, RequestReference->Srb);
+
+        /* MapBuffers: the miniport reads this buffer through Srb->DataBuffer, which may be a
+           user address of another process: give it the system address of the same bytes */
+        if (StorpNeedsSystemBuffer(FdoExtension, RequestReference->Srb) &&
+            RequestReference->Srb->DataTransferLength != 0)
+        {
+            SystemVa = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+            if (SystemVa == NULL)
+            {
+                RequestReference->Srb->SrbStatus = SRB_STATUS_INTERNAL_ERROR;
+                RequestReference->Srb->InternalStatus = STATUS_INSUFFICIENT_RESOURCES;
+                if (PortClaimRequestCompletion(RequestReference))
+                {
+                    InterlockedPushEntrySList(&FdoExtension->CompletionList, &RequestReference->CompletionEntry);
+                    KeInsertQueueDpc(&FdoExtension->Device->Dpc, NULL, NULL);
+                }
+                return STATUS_PENDING;
+            }
+
+            RequestReference->OriginalDataBuffer = RequestReference->Srb->DataBuffer;
+            RequestReference->DataBufferMapped = TRUE;
+            RequestReference->Srb->DataBuffer =
+                (PUCHAR)SystemVa + ((PUCHAR)TransferVa - (PUCHAR)MmGetMdlVirtualAddress(Irp->MdlAddress));
+        }
+
         /* Following call requires DISPATCH_LEVEL. */
         OldIrql = KfRaiseIrql(DISPATCH_LEVEL);
 
@@ -369,12 +466,11 @@ PortPdoIssueRequest(
         RequestReference->WriteToDevice =
             TEST_FLAG(RequestReference->Srb->SrbFlags, SRB_FLAGS_DATA_OUT);
 
-        FdoExtension->DmaAdapter->DmaOperations->
+        Status = FdoExtension->DmaAdapter->DmaOperations->
             GetScatterGatherList(FdoExtension->DmaAdapter,
                                  FdoExtension->Device,
                                  RequestReference->Irp->MdlAddress,
-                                 StorpGetTransferVa(RequestReference->Irp->MdlAddress,
-                                                    RequestReference->Srb),
+                                 TransferVa,
                                  RequestReference->Srb->DataTransferLength,
                                  PortPdoAfterBuildingScatterGatherList,
                                  (PVOID)RequestReference,
@@ -382,6 +478,20 @@ PortPdoIssueRequest(
 
         /* Restore IRQL */
         KeLowerIrql(OldIrql);
+
+        /* No list, so the miniport never sees the request: fail it rather than let it hang */
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("GetScatterGatherList(0x%lx bytes) failed, Status 0x%08lx\n",
+                    RequestReference->Srb->DataTransferLength, Status);
+            RequestReference->Srb->SrbStatus = SRB_STATUS_INTERNAL_ERROR;
+            RequestReference->Srb->InternalStatus = Status;
+            if (PortClaimRequestCompletion(RequestReference))
+            {
+                InterlockedPushEntrySList(&FdoExtension->CompletionList, &RequestReference->CompletionEntry);
+                KeInsertQueueDpc(&FdoExtension->Device->Dpc, NULL, NULL);
+            }
+        }
     } else {
         /* Otherwise just start the IO with a NULL scatter gather list */
         PortPdoAfterBuildingScatterGatherList(FdoExtension->Device,
@@ -791,6 +901,16 @@ PortCompleteRequest(
     DPRINT("Completing request: (%d:%d:%d) ReqRef %p Srb %p Irp %p Tag %x\n",
             Srb->PathId, Srb->TargetId, Srb->Lun, RequestReference, Srb, RequestReference->Irp, Srb->QueueTag);
 
+    /* Its timeout no longer runs */
+    PortTimeoutDisarmRequest(FdoExtension, RequestReference);
+
+    /* The class driver gets its own buffer address back */
+    if (RequestReference->DataBufferMapped)
+    {
+        Srb->DataBuffer = RequestReference->OriginalDataBuffer;
+        RequestReference->DataBufferMapped = FALSE;
+    }
+
     /* Return SG list resources back to system */
     if (RequestReference->ScatterGatherList)
     {
@@ -800,16 +920,13 @@ PortCompleteRequest(
                                  RequestReference->WriteToDevice);
         RequestReference->ScatterGatherList = NULL;
 
-        // /* Release pages we locked for DMA, if we actually have locked it */
-        // if (RequestReference->MappedSystemVa != NULL)
-        // {
-        //     MmUnmapLockedPages(RequestReference->MappedSystemVa, RequestReference->Irp->MdlAddress);
-        // }
-        /* Unlock the pages locked for DMA */
-        if (RequestReference->MappedSystemVa)
-        {
-            MmUnlockPages(RequestReference->Irp->MdlAddress);
-        }
+    }
+
+    /* Unlock the pages locked for DMA, also when no list could be built for them */
+    if (RequestReference->MappedSystemVa)
+    {
+        MmUnlockPages(RequestReference->Irp->MdlAddress);
+        RequestReference->MappedSystemVa = NULL;
     }
 
     /* Check if we need to interact with flow control. */
@@ -897,6 +1014,11 @@ PortCompleteRequest(
 
         case SRB_STATUS_BUSY:
             IoStatus = STATUS_DEVICE_BUSY;
+            break;
+
+        case SRB_STATUS_TIMEOUT:
+        case SRB_STATUS_COMMAND_TIMEOUT:
+            IoStatus = STATUS_IO_TIMEOUT;
             break;
 
         default:

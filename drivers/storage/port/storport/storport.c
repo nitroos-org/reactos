@@ -245,6 +245,9 @@ PortAddDevice(
     /* Initialize completion list header */
     InitializeSListHead(&DeviceExtension->CompletionList);
 
+    /* Request timeouts */
+    PortInitializeTimeouts(DeviceExtension);
+
     /* Initialize the request reference lookaside list */
     ExInitializeNPagedLookasideList(&DeviceExtension->RequestReferenceLookaside,
                                     NULL,
@@ -1177,6 +1180,14 @@ StorPortGetUncachedExtension(
         IoGetDmaAdapter(DeviceExtension->PhysicalDevice, &DeviceDescription, &NumberOfMapRegisters);
 
     NT_ASSERT(DeviceExtension->DmaAdapter);
+    /* Fewer map registers than pages of the longest transfer: the HAL capped them (a device
+       that needs map registers), and they limit the transfer length (PortFdoStartMiniport) */
+    DeviceExtension->NumberOfMapRegisters = 0;
+    if (DeviceExtension->DmaAdapter != NULL &&
+        NumberOfMapRegisters < BYTES_TO_PAGES(DeviceDescription.MaximumLength & MAXLONG) + 1)
+    {
+        DeviceExtension->NumberOfMapRegisters = NumberOfMapRegisters;
+    }
 
     /* FIXME: AdapterInterfaceType is exposed here and I think it's convenient to initialize
        HwInitData in FDO extension right here. Needs review. */
@@ -1427,6 +1438,13 @@ StorPortNotification(
             // }
             NT_ASSERT(Srb->OriginalRequest);
             RequestReference = (PQUEUED_REQUEST_REFERENCE)Srb->OriginalRequest;
+
+            /* Storport completed it itself after restarting the adapter */
+            if (!PortClaimRequestCompletion(RequestReference))
+            {
+                DPRINT1("Late completion of Srb %p ignored\n", Srb);
+                break;
+            }
             // if (RequestReference->SpecialRequestId) {
             //     /* FIXME: DELETE AFTER DEBUG */
             //     DPRINT1("STORPORT SPECIAL REQUEST %d Queuing for completion\n", RequestReference->SpecialRequestId);

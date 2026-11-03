@@ -294,6 +294,28 @@ typedef struct _FDO_DEVICE_EXTENSION
 
     /* Reported in the adapter and device descriptors: the miniport's Parameters\BusType */
     STORAGE_BUS_TYPE BusType;
+
+    /* Map registers the DMA adapter holds per transfer, when they limit it; else 0 */
+    ULONG NumberOfMapRegisters;
+
+    /* Request timeouts (timeout.c): requests handed to the miniport, under TimeoutLock */
+    KSPIN_LOCK TimeoutLock;
+    LIST_ENTRY IssuedRequestsListHead;
+    ULONG ResetGeneration;
+    KTIMER TimeoutTimer;
+    KDPC TimeoutDpc;
+    PIO_WORKITEM TimeoutWorkItem;
+    LONG TimeoutWorkQueued;
+    ULONG BusResets;
+    ULONG AdapterRestarts;
+    BOOLEAN AdapterControlSupported[ScsiAdapterControlMax];
+
+#if DBG
+    /* Fault knob for the timeout path: the miniport's Parameters\DebugDropRequestEvery.
+       Every Nth read or write is never handed to the miniport. Checked builds only */
+    ULONG DebugDropRequestEvery;
+    LONG DebugDropCounter;
+#endif
 } FDO_DEVICE_EXTENSION, *PFDO_DEVICE_EXTENSION;
 
 
@@ -310,6 +332,9 @@ typedef struct _PDO_DEVICE_EXTENSION
     ULONG Target;
     ULONG Lun;
     PINQUIRYDATA InquiryBuffer;
+
+    /* VPD page 0x80 product serial number, NUL terminated, or NULL */
+    PCHAR SerialNumber;
 
     LONG IsClaimed;
 
@@ -346,7 +371,19 @@ typedef struct _QUEUED_REQUEST_REFERENCE
     PIRP Irp;
     PSTOR_SCATTER_GATHER_LIST ScatterGatherList;
     PVOID MappedSystemVa;
-    ULONG TimeoutCounter; // FIXME: Implement timeout with a heap
+
+    /* Srb->DataBuffer as the class driver passed it, when storport mapped the buffer */
+    PVOID OriginalDataBuffer;
+    BOOLEAN DataBufferMapped;
+
+    /* Timeout tracking (timeout.c). Seconds left, while on the adapter's issued list */
+    ULONG TimeoutCounter;
+    LIST_ENTRY TimeoutEntry;
+    ULONG Generation;
+    BOOLEAN OnTimeoutList;
+    BOOLEAN ResetSent;
+    /* Set by whoever completes the request first: the miniport, or storport after a restart */
+    LONG Completed;
     /*
      * Indicates if the current request is outstanding. Some requests are for HBA, and shouldn't be
      * affected by outstanding requests flow controlling.
@@ -544,6 +581,12 @@ STORAGE_BUS_TYPE
 PortGetMiniportBusType(
     _In_ PDRIVER_OBJECT DriverObject);
 
+ULONG
+PortGetMiniportParameter(
+    _In_ PDRIVER_OBJECT DriverObject,
+    _In_ PCWSTR Name,
+    _In_ ULONG Default);
+
 PCSTR
 GetDeviceType(
     _In_ PINQUIRYDATA InquiryData);
@@ -575,6 +618,10 @@ PortPdoPnp(
 
 /* srb.c */
 
+BOOLEAN
+StorpIsReadWriteCdb(
+    _In_ UCHAR OperationCode);
+
 VOID
 StorpSrbFreeRequestReference(
     _In_ PSCSI_REQUEST_BLOCK Srb);
@@ -604,6 +651,38 @@ PortCompletionDpc(
     _In_ PVOID SystemArgument1,
     _In_ PVOID SystemArgument2);
 
+
+/* timeout.c */
+
+VOID
+PortInitializeTimeouts(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
+
+VOID
+PortStartTimeouts(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
+
+VOID
+PortStopTimeouts(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
+
+VOID
+PortTimeoutArmRequest(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PQUEUED_REQUEST_REFERENCE RequestReference);
+
+VOID
+PortTimeoutDisarmRequest(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PQUEUED_REQUEST_REFERENCE RequestReference);
+
+BOOLEAN
+PortClaimRequestCompletion(
+    _In_ PQUEUED_REQUEST_REFERENCE RequestReference);
+
+VOID
+PortQueryAdapterControlTypes(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
 
 /* storport.c */
 

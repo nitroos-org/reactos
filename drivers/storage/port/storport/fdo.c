@@ -342,6 +342,26 @@ PortFdoStartMiniport(
         return Status;
     }
 
+    /*
+     * A device that needs map registers (a 32-bit bus master with memory above 4 GB) can only
+     * move as many pages per transfer as the DMA adapter holds map registers: report no more,
+     * so the class driver splits longer transfers instead of having them fail
+     */
+    if (DeviceExtension->NumberOfMapRegisters > 1 &&
+        DeviceExtension->Miniport.PortConfig.MaximumTransferLength != SP_UNINITIALIZED_VALUE &&
+        DeviceExtension->Miniport.PortConfig.MaximumTransferLength >
+            (DeviceExtension->NumberOfMapRegisters - 1) * PAGE_SIZE)
+    {
+        DPRINT1("Maximum transfer length 0x%lx limited to 0x%lx by %lu map registers\n",
+                DeviceExtension->Miniport.PortConfig.MaximumTransferLength,
+                (DeviceExtension->NumberOfMapRegisters - 1) * PAGE_SIZE,
+                DeviceExtension->NumberOfMapRegisters);
+        DeviceExtension->Miniport.PortConfig.MaximumTransferLength =
+            (DeviceExtension->NumberOfMapRegisters - 1) * PAGE_SIZE;
+        if (DeviceExtension->Miniport.PortConfig.NumberOfPhysicalBreaks >= DeviceExtension->NumberOfMapRegisters)
+            DeviceExtension->Miniport.PortConfig.NumberOfPhysicalBreaks = DeviceExtension->NumberOfMapRegisters - 1;
+    }
+
     /* Connect the configured interrupt */
     Status = PortFdoConnectInterrupt(DeviceExtension);
     if (!NT_SUCCESS(Status))
@@ -371,6 +391,17 @@ PortFdoStartMiniport(
             return STATUS_UNSUCCESSFUL;
         }
     }
+
+    /* Which resets the miniport offers, then let request timeouts run */
+    PortQueryAdapterControlTypes(DeviceExtension);
+#if DBG
+    DeviceExtension->DebugDropRequestEvery =
+        PortGetMiniportParameter(DeviceExtension->Device->DriverObject, L"DebugDropRequestEvery", 0);
+    if (DeviceExtension->DebugDropRequestEvery != 0)
+        DPRINT1("storport: fault knob on: every %lu-th read/write is dropped\n",
+                DeviceExtension->DebugDropRequestEvery);
+#endif
+    PortStartTimeouts(DeviceExtension);
 
     return STATUS_SUCCESS;
 }
@@ -920,6 +951,148 @@ PortSendInquiry(
 
 
 
+/**
+ * @brief Sends one INQUIRY for vital product data page Page and waits for it.
+ * Buffer must be nonpaged. Returns the number of bytes the device returned.
+ */
+static
+ULONG
+PortSendVpdInquiry(
+    _In_ PPDO_DEVICE_EXTENSION PdoExtension,
+    _In_ UCHAR Page,
+    _Out_writes_bytes_(Length) PUCHAR Buffer,
+    _In_ UCHAR Length)
+{
+    IO_STATUS_BLOCK IoStatusBlock;
+    PIO_STACK_LOCATION IrpStack;
+    SCSI_REQUEST_BLOCK Srb;
+    SENSE_DATA SenseBuffer;
+    KEVENT Event;
+    NTSTATUS Status;
+    PIRP Irp;
+    PCDB Cdb;
+
+    RtlZeroMemory(Buffer, Length);
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+
+    Irp = IoBuildDeviceIoControlRequest(IOCTL_SCSI_EXECUTE_IN,
+                                        PdoExtension->Device,
+                                        NULL,
+                                        0,
+                                        Buffer,
+                                        Length,
+                                        TRUE,
+                                        &Event,
+                                        &IoStatusBlock);
+    if (Irp == NULL)
+        return 0;
+
+    RtlZeroMemory(&Srb, sizeof(Srb));
+    Srb.Length = sizeof(SCSI_REQUEST_BLOCK);
+    Srb.OriginalRequest = Irp;
+    Srb.PathId = PdoExtension->Bus;
+    Srb.TargetId = PdoExtension->Target;
+    Srb.Lun = PdoExtension->Lun;
+    Srb.Function = SRB_FUNCTION_EXECUTE_SCSI;
+    Srb.SrbFlags = SRB_FLAGS_DATA_IN | SRB_FLAGS_DISABLE_SYNCH_TRANSFER;
+    Srb.TimeOutValue = 4;
+    Srb.CdbLength = 6;
+    Srb.SenseInfoBuffer = &SenseBuffer;
+    Srb.SenseInfoBufferLength = sizeof(SenseBuffer);
+    Srb.DataBuffer = Buffer;
+    Srb.DataTransferLength = Length;
+
+    IrpStack = IoGetNextIrpStackLocation(Irp);
+    IrpStack->Parameters.Scsi.Srb = &Srb;
+
+    Cdb = (PCDB)Srb.Cdb;
+    Cdb->CDB6INQUIRY3.OperationCode = SCSIOP_INQUIRY;
+    Cdb->CDB6INQUIRY3.EnableVitalProductData = 1;
+    Cdb->CDB6INQUIRY3.PageCode = Page;
+    Cdb->CDB6INQUIRY3.AllocationLength = Length;
+
+    Status = IoCallDriver(PdoExtension->Device, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = IoStatusBlock.Status;
+    }
+
+    if (SRB_STATUS(Srb.SrbStatus) != SRB_STATUS_SUCCESS &&
+        SRB_STATUS(Srb.SrbStatus) != SRB_STATUS_DATA_OVERRUN)
+    {
+        return 0;
+    }
+
+    /* Page header: qualifier/type, page code, length (2 bytes, big endian) */
+    if (Srb.DataTransferLength < 4 || Buffer[1] != Page)
+        return 0;
+
+    return min(Srb.DataTransferLength, (ULONG)Length);
+}
+
+
+/**
+ * @brief Reads the unit serial number (VPD page 0x80) if the unit lists the page, for the
+ * device descriptor's SerialNumberOffset.
+ */
+static
+VOID
+PortQuerySerialNumber(
+    _In_ PPDO_DEVICE_EXTENSION PdoExtension)
+{
+    PUCHAR Buffer;
+    ULONG Returned, i, Length;
+    BOOLEAN Listed = FALSE;
+
+    if (PdoExtension->SerialNumber != NULL)
+        return;
+
+    Buffer = ExAllocatePoolWithTag(NonPagedPool, 0xFF, TAG_INQUIRY_DATA);
+    if (Buffer == NULL)
+        return;
+
+    /* Supported pages first: a unit without 0x80 may not answer a request for it gracefully */
+    Returned = PortSendVpdInquiry(PdoExtension, 0x00, Buffer, 0xFF);
+    if (Returned >= 4)
+    {
+        Length = min((ULONG)Buffer[3], Returned - 4);
+        for (i = 0; i < Length; i++)
+        {
+            if (Buffer[4 + i] == 0x80)
+                Listed = TRUE;
+        }
+    }
+
+    if (Listed)
+    {
+        Returned = PortSendVpdInquiry(PdoExtension, 0x80, Buffer, 0xFF);
+        if (Returned > 4)
+        {
+            Length = min((ULONG)Buffer[3], Returned - 4);
+
+            /* The bytes as the unit reports them, up to a NUL */
+            for (i = 0; i < Length && Buffer[4 + i] != 0; i++);
+            Length = i;
+
+            if (Length != 0)
+            {
+                PdoExtension->SerialNumber = ExAllocatePoolWithTag(NonPagedPool, Length + 1, TAG_INQUIRY_DATA);
+                if (PdoExtension->SerialNumber != NULL)
+                {
+                    RtlCopyMemory(PdoExtension->SerialNumber, &Buffer[4], Length);
+                    PdoExtension->SerialNumber[Length] = '\0';
+                    DPRINT1("(%lu:%lu:%lu) serial number '%s'\n", PdoExtension->Bus,
+                            PdoExtension->Target, PdoExtension->Lun, PdoExtension->SerialNumber);
+                }
+            }
+        }
+    }
+
+    ExFreePoolWithTag(Buffer, TAG_INQUIRY_DATA);
+}
+
+
 static
 NTSTATUS
 PortFdoScanBus(
@@ -973,6 +1146,8 @@ PortFdoScanBus(
                     DPRINT("ProductRevisionLevel: %.4s\n", PdoExtension->InquiryBuffer->ProductRevisionLevel);
                     DPRINT("VendorSpecific: %.20s\n", PdoExtension->InquiryBuffer->VendorSpecific);
 
+                    PortQuerySerialNumber(PdoExtension);
+
                     /* The other units REPORT LUNS listed (numbered from 0 up, as single
                        level LUNs are) */
                     for (Lun = 1;
@@ -987,6 +1162,8 @@ PortFdoScanBus(
 
                         if (!NT_SUCCESS(PortSendInquiry(PdoExtension)))
                             PortDeletePdo(PdoExtension);
+                        else
+                            PortQuerySerialNumber(PdoExtension);
                     }
                 }
             }
@@ -1193,6 +1370,20 @@ PortFdoPnp(
 
         case IRP_MN_REMOVE_DEVICE: /* 0x02 */
             DPRINT1("IRP_MJ_PNP / IRP_MN_REMOVE_DEVICE\n");
+            PortStopTimeouts(DeviceExtension);
+            if (DeviceExtension->PnpState == dsStarted &&
+                DeviceExtension->Miniport.InitData != NULL &&
+                DeviceExtension->Miniport.InitData->HwAdapterControl != NULL &&
+                DeviceExtension->AdapterControlSupported[ScsiStopAdapter])
+            {
+                KIRQL OldIrql;
+                KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+                DeviceExtension->Miniport.InitData->HwAdapterControl(
+                    &DeviceExtension->Miniport.MiniportExtension->HwDeviceExtension,
+                    ScsiStopAdapter,
+                    NULL);
+                KeLowerIrql(OldIrql);
+            }
             PortFlushStarvedRequests(DeviceExtension);
             PortFreeRequestReserve(DeviceExtension);
             ExDeleteNPagedLookasideList(&DeviceExtension->RequestReferenceLookaside);
