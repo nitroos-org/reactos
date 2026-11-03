@@ -125,6 +125,7 @@ extern void func_GetIconInfoEx(void);
 extern void func_CreateDesktopEx(void);
 extern void func_DesktopHeapLeak(void);
 extern void func_DesktopCloseUserObjects(void);
+extern void func_DesktopWindowSiblings(void);
 extern void func_ShutdownBlockReason(void);
 extern void func_PointerDeviceFunctions(void);
 extern void func_wsprintfApi(void);
@@ -251,6 +252,7 @@ const struct test winetest_testlist[] =
     { "CreateDesktopEx", func_CreateDesktopEx },
     { "DesktopHeapLeak", func_DesktopHeapLeak },
     { "DesktopCloseUserObjects", func_DesktopCloseUserObjects },
+    { "DesktopWindowSiblings", func_DesktopWindowSiblings },
     { "ShutdownBlockReason", func_ShutdownBlockReason },
     { "PointerDeviceFunctions", func_PointerDeviceFunctions },
     { "WinEventHook", func_WinEventHook },

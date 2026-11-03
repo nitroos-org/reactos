@@ -125,6 +125,7 @@ list(APPEND SOURCE
     CreateDesktopEx.c
     DesktopHeapLeak.c
     DesktopCloseUserObjects.c
+    DesktopWindowSiblings.c
     ShutdownBlockReason.c
     PointerDeviceFunctions.c
     wsprintf.c)
