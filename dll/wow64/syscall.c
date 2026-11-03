@@ -3327,6 +3327,74 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             return STATUS_SUCCESS;
         }
+        case SystemExtendedHandleInformation:
+        {
+            /* The extended handle table. The 32-bit form is measured on Windows 10 22H2 WoW64: an 8-byte header
+             * (ULONG count, ULONG reserved) and 28-byte entries of 32-bit fields. Object is the low 32 bits of the
+             * kernel address, as in class 16. A buffer shorter than the header and one entry is refused with that
+             * length (36) and nothing stored; a longer but too short one receives the header with the full count
+             * and as many whole entries as fit, then STATUS_INFO_LENGTH_MISMATCH with the length of the whole
+             * table. The reserved field is stored as zero (Windows leaves it uninitialised). */
+            typedef struct
+            {
+                ULONG Object, UniqueProcessId, HandleValue, GrantedAccess;
+                USHORT CreatorBackTraceIndex, ObjectTypeIndex;
+                ULONG HandleAttributes, Reserved;
+            } WOW64_SYSTEM_HANDLE_ENTRY_EX;
+            typedef struct
+            {
+                ULONG NumberOfHandles, Reserved;
+                WOW64_SYSTEM_HANDLE_ENTRY_EX Handles[1];
+            } WOW64_SYSTEM_HANDLE_INFORMATION_EX;
+            SYSTEM_HANDLE_INFORMATION_EX *Nh;
+            WOW64_SYSTEM_HANDLE_INFORMATION_EX *Gh;
+            PUCHAR Native = NULL;
+            ULONG NativeSize = 0x40000, Offset, Count, Fit, GuestNeeded, GuestWritten, i, Retries = 0;
+            C_ASSERT(sizeof(WOW64_SYSTEM_HANDLE_ENTRY_EX) == 28);
+            C_ASSERT(sizeof(WOW64_SYSTEM_HANDLE_INFORMATION_EX) == 36);
+            if (NativeSystemInformation) UNSUPPORTED(CLASS, a[0]);
+            if (a[3]) PROBE(3);
+            if (a[2] < sizeof(WOW64_SYSTEM_HANDLE_INFORMATION_EX))
+            {
+                if (a[3]) U(3) = sizeof(WOW64_SYSTEM_HANDLE_INFORMATION_EX);
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            for (;;)
+            {
+                if (Native) RtlFreeHeap(RtlGetProcessHeap(), 0, Native);
+                Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, NativeSize);
+                if (!Native) return STATUS_NO_MEMORY;
+                Status = NtQuerySystemInformation(a[0], Native, NativeSize, &Offset);
+                if (Status != STATUS_INFO_LENGTH_MISMATCH || ++Retries > 16) break;
+                NativeSize = max(NativeSize * 2, Offset + 0x4000);
+            }
+            if (!NT_SUCCESS(Status)) return Status;
+            Nh = (SYSTEM_HANDLE_INFORMATION_EX *)Native;
+            /* The count is the kernel's, but never read past what the native call returned */
+            Count = (ULONG)min(Nh->NumberOfHandles,
+                               (NativeSize - FIELD_OFFSET(SYSTEM_HANDLE_INFORMATION_EX, Handles)) / sizeof(Nh->Handles[0]));
+            GuestNeeded = FIELD_OFFSET(WOW64_SYSTEM_HANDLE_INFORMATION_EX, Handles) + Count * sizeof(WOW64_SYSTEM_HANDLE_ENTRY_EX);
+            Fit = min(Count, (a[2] - FIELD_OFFSET(WOW64_SYSTEM_HANDLE_INFORMATION_EX, Handles)) / sizeof(WOW64_SYSTEM_HANDLE_ENTRY_EX));
+            GuestWritten = FIELD_OFFSET(WOW64_SYSTEM_HANDLE_INFORMATION_EX, Handles) + Fit * sizeof(WOW64_SYSTEM_HANDLE_ENTRY_EX);
+            if (!GuestSpan(a[1], GuestWritten)) return STATUS_ACCESS_VIOLATION;
+            ProbeOutput(a[1], GuestWritten);
+            if (a[3]) U(3) = GuestNeeded;
+            Gh = PTR32(a[1]);
+            Gh->NumberOfHandles = Count;
+            Gh->Reserved = 0;
+            for (i = 0; i < Fit; ++i)
+            {
+                Gh->Handles[i].Object = (ULONG)(ULONG_PTR)Nh->Handles[i].Object;
+                Gh->Handles[i].UniqueProcessId = (ULONG)Nh->Handles[i].UniqueProcessId;
+                Gh->Handles[i].HandleValue = (ULONG)Nh->Handles[i].HandleValue;
+                Gh->Handles[i].GrantedAccess = Nh->Handles[i].GrantedAccess;
+                Gh->Handles[i].CreatorBackTraceIndex = Nh->Handles[i].CreatorBackTraceIndex;
+                Gh->Handles[i].ObjectTypeIndex = Nh->Handles[i].ObjectTypeIndex;
+                Gh->Handles[i].HandleAttributes = Nh->Handles[i].HandleAttributes;
+                Gh->Handles[i].Reserved = 0;
+            }
+            return Fit < Count ? STATUS_INFO_LENGTH_MISMATCH : STATUS_SUCCESS;
+        }
         case SystemCurrentTimeZoneInformation: /* RTL_TIME_ZONE_INFORMATION has no pointers. */
         case SystemTimeOfDayInformation:
         case SystemPerformanceInformation: /* LARGE_INTEGER/ULONG counters, no pointers, same layout. */

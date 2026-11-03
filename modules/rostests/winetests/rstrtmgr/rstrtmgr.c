@@ -497,21 +497,6 @@ static void test_path_forms(void)
     CloseHandle(pi.hProcess);
 }
 
-/* WoW64 callers of ReactOS get STATUS_NOT_SUPPORTED for the class */
-static BOOL handle_info_supported(void)
-{
-    LONG (WINAPI *pNtQuerySystemInformation)(ULONG, PVOID, ULONG, PULONG);
-    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-    ULONG len;
-    char buf[64];
-    LONG status;
-
-    pNtQuerySystemInformation = (void *)GetProcAddress(ntdll, "NtQuerySystemInformation");
-    if (!pNtQuerySystemInformation) return FALSE;
-    status = pNtQuerySystemInformation(64 /* SystemExtendedHandleInformation */, buf, sizeof(buf), &len);
-    return status == 0 || status == (LONG)0xC0000004 /* STATUS_INFO_LENGTH_MISMATCH */;
-}
-
 static void test_open_handle(void)
 {
     WCHAR key[KEYLEN], path[MAX_PATH];
@@ -521,12 +506,6 @@ static void test_open_handle(void)
     DWORD h, reasons, ret;
     HANDLE file;
     BOOL found;
-
-    if (!handle_info_supported())
-    {
-        skip("the open handles of the system cannot be listed\n");
-        return;
-    }
 
     GetTempPathW(MAX_PATH, path);
     lstrcatW(path, L"rmtest.tmp");
