@@ -5730,7 +5730,23 @@ HRESULT WINAPI KnownFolderManager_Constructor( IUnknown *punk, REFIID riid, void
     if (punk)
         return CLASS_E_NOAGGREGATION;
 
+#ifdef __REACTOS__
+    /* As on Windows: honour the requested interface (a class factory passes the caller riid) */
+    {
+        IKnownFolderManager *fm;
+        HRESULT hr;
+
+        *ppv = NULL;
+        hr = foldermanager_create( (void **)&fm );
+        if (FAILED(hr))
+            return hr;
+        hr = IKnownFolderManager_QueryInterface( fm, riid, ppv );
+        IKnownFolderManager_Release( fm );
+        return hr;
+    }
+#else
     return foldermanager_create( ppv );
+#endif
 }
 
 HRESULT WINAPI SHGetKnownFolderIDList(REFKNOWNFOLDERID rfid, DWORD flags, HANDLE token, PIDLIST_ABSOLUTE *pidl)
