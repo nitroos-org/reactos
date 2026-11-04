@@ -96,6 +96,18 @@ HostResize(HOST *Host, SHORT Width, SHORT Height)
         return FALSE;
     }
     SetConsoleWindowInfo(Host->ConsoleOut, TRUE, &Window);
+    {
+        /* A client's own active screen buffer follows the terminal size too */
+        HANDLE Active = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        if (Active != INVALID_HANDLE_VALUE)
+        {
+            SetConsoleWindowInfo(Active, TRUE, &Window);
+            SetConsoleScreenBufferSize(Active, Size);
+            SetConsoleWindowInfo(Active, TRUE, &Window);
+            CloseHandle(Active);
+        }
+    }
     if (Host->Previous) HeapFree(GetProcessHeap(), 0, Host->Previous);
     if (Host->Current) HeapFree(GetProcessHeap(), 0, Host->Current);
     Host->Previous = Previous;
@@ -106,8 +118,33 @@ HostResize(HOST *Host, SHORT Width, SHORT Height)
     return TRUE;
 }
 
+/* A surrogate pair occupies two cells of the console buffer (a UTF-16 unit each); the
+ * terminal needs the pair as one UTF-8 sequence. */
+#define HOST_IS_HIGH_SURROGATE(c)   ((c) >= 0xD800 && (c) <= 0xDBFF)
+#define HOST_IS_LOW_SURROGATE(c)    ((c) >= 0xDC00 && (c) <= 0xDFFF)
+
 static BOOL
-HostPaint(HOST *Host)
+HostCellChanged(HOST *Host, DWORD Row, DWORD Column)
+{
+    DWORD Index = Row * Host->Width + Column;
+
+#define HOST_DIFFERS(i) (Host->Previous[i].Char.UnicodeChar != Host->Current[i].Char.UnicodeChar || \
+                         Host->Previous[i].Attributes != Host->Current[i].Attributes)
+    if (!Host->Painted) return TRUE;
+    if (HOST_DIFFERS(Index)) return TRUE;
+    /* Both halves of a pair are painted together, so a change of either repaints both */
+    if (HOST_IS_HIGH_SURROGATE(Host->Current[Index].Char.UnicodeChar) && Column + 1 < Host->Width &&
+        HOST_IS_LOW_SURROGATE(Host->Current[Index + 1].Char.UnicodeChar))
+        return HOST_DIFFERS(Index + 1);
+    if (HOST_IS_LOW_SURROGATE(Host->Current[Index].Char.UnicodeChar) && Column > 0 &&
+        HOST_IS_HIGH_SURROGATE(Host->Current[Index - 1].Char.UnicodeChar))
+        return HOST_DIFFERS(Index - 1);
+#undef HOST_DIFFERS
+    return FALSE;
+}
+
+static BOOL
+HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
 {
     CONSOLE_SCREEN_BUFFER_INFO Info;
     CONSOLE_CURSOR_INFO CursorInfo;
@@ -120,7 +157,7 @@ HostPaint(HOST *Host)
     CHAR Utf8[8];
     static const BYTE Palette[8] = {0, 4, 2, 6, 1, 5, 3, 7};
 
-    if (!GetConsoleScreenBufferInfo(Host->ConsoleOut, &Info)) return FALSE;
+    if (!GetConsoleScreenBufferInfo(ConsoleOut, &Info)) return FALSE;
     if (!Host->Painted && !HostWrite(Host, "\033[?25l\033[2J", 10)) return FALSE;
     BufferSize.X = Host->Width;
     BufferSize.Y = Host->Height;
@@ -144,7 +181,7 @@ HostPaint(HOST *Host)
         if (Band.Top > Region.Bottom) break;
         BandSize.Y = (SHORT)min(BandRows, (DWORD)Host->Height - Row);
         Band.Bottom = (SHORT)min(Band.Top + BandSize.Y - 1, Region.Bottom);
-        if (!ReadConsoleOutputW(Host->ConsoleOut, Host->Current + (SIZE_T)Row * Host->Width,
+        if (!ReadConsoleOutputW(ConsoleOut, Host->Current + (SIZE_T)Row * Host->Width,
                                 BandSize, BufferOrigin, &Band)) return FALSE;
     }
 
@@ -157,9 +194,7 @@ HostPaint(HOST *Host)
         for (Column = 0; Column < (DWORD)Host->Width; ++Column)
         {
             Index = Row * Host->Width + Column;
-            if (Host->Painted &&
-                Host->Previous[Index].Char.UnicodeChar == Host->Current[Index].Char.UnicodeChar &&
-                Host->Previous[Index].Attributes == Host->Current[Index].Attributes)
+            if (!HostCellChanged(Host, Row, Column))
                 continue;
 
             Changed = TRUE;
@@ -168,9 +203,7 @@ HostPaint(HOST *Host)
             {
                 WCHAR Character;
                 Index = Row * Host->Width + Column;
-                if (Host->Painted &&
-                    Host->Previous[Index].Char.UnicodeChar == Host->Current[Index].Char.UnicodeChar &&
-                    Host->Previous[Index].Attributes == Host->Current[Index].Attributes)
+                if (!HostCellChanged(Host, Row, Column))
                     break;
                 if (Attribute != Host->Current[Index].Attributes)
                 {
@@ -181,8 +214,20 @@ HostPaint(HOST *Host)
                 }
                 Character = Host->Current[Index].Char.UnicodeChar;
                 if (!Character || Character < 32) Character = L' ';
-                Length = WideCharToMultiByte(CP_UTF8, 0, &Character, 1,
-                                             Utf8, sizeof(Utf8), NULL, NULL);
+                if (HOST_IS_HIGH_SURROGATE(Character) && Column + 1 < (DWORD)Host->Width &&
+                    HOST_IS_LOW_SURROGATE(Host->Current[Index + 1].Char.UnicodeChar))
+                {
+                    WCHAR Pair[2];
+
+                    Pair[0] = Character;
+                    Pair[1] = Host->Current[Index + 1].Char.UnicodeChar;
+                    Length = WideCharToMultiByte(CP_UTF8, 0, Pair, 2, Utf8, sizeof(Utf8), NULL, NULL);
+                    if (Length)
+                        ++Column;   /* the low half is part of this character */
+                }
+                else
+                    Length = WideCharToMultiByte(CP_UTF8, 0, &Character, 1,
+                                                 Utf8, sizeof(Utf8), NULL, NULL);
                 if (!Length)
                 {
                     Utf8[0] = ' ';
@@ -204,7 +249,7 @@ HostPaint(HOST *Host)
     CopyMemory(Host->Previous, Host->Current,
                (SIZE_T)Host->Width * Host->Height * sizeof(*Host->Current));
     Host->Painted = TRUE;
-    if (GetConsoleCursorInfo(Host->ConsoleOut, &CursorInfo))
+    if (GetConsoleCursorInfo(ConsoleOut, &CursorInfo))
     {
         CHAR Position[64];
         DWORD Count = 0;
@@ -224,6 +269,23 @@ HostPaint(HOST *Host)
         if (Count && !HostWrite(Host, Position, Count)) return FALSE;
     }
     return TRUE;
+}
+
+/* The terminal shows the ACTIVE screen buffer (CONOUT$ opens it), which is not the one
+ * the host started with once a client calls SetConsoleActiveScreenBuffer (curses
+ * programs such as nano for Windows do, and draw nothing in the original buffer). */
+static BOOL
+HostPaint(HOST *Host)
+{
+    HANDLE Active = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    BOOL Result;
+
+    if (Active == INVALID_HANDLE_VALUE)
+        return HostPaintBuffer(Host, Host->ConsoleOut);
+    Result = HostPaintBuffer(Host, Active);
+    CloseHandle(Active);
+    return Result;
 }
 
 static WORD
@@ -341,8 +403,8 @@ static VOID
 HostInput(HOST *Host, BYTE Byte)
 {
     DWORD Modifiers = 0;
-    WCHAR Character;
-    WORD Key;
+    WCHAR Character, Pair[2];
+    WORD Key, ControlKey = 0;
 
     if (Host->Escape >= 2)
     {
@@ -383,6 +445,15 @@ HostInput(HOST *Host, BYTE Byte)
         Host->Utf8[Host->Utf8Count++] = Byte;
         if (Host->Utf8Count < Host->Utf8Length) return;
         if (MultiByteToWideChar(CP_UTF8, 0, (LPCSTR)Host->Utf8,
+                                Host->Utf8Count, Pair, 2) == 2)
+        {
+            /* A character outside the BMP is two key events, one per UTF-16 unit, as on Windows */
+            Host->Utf8Length = Host->Utf8Count = 0;
+            HostKey(Host, 0, Pair[0], Modifiers);
+            HostKey(Host, 0, Pair[1], Modifiers);
+            return;
+        }
+        if (MultiByteToWideChar(CP_UTF8, 0, (LPCSTR)Host->Utf8,
                                 Host->Utf8Count, &Character, 1) != 1)
             Character = 0xfffd;
         Host->Utf8Length = Host->Utf8Count = 0;
@@ -393,16 +464,18 @@ HostInput(HOST *Host, BYTE Byte)
         if (Byte == 3 && HostCtrlC(Host)) return;
         if (Byte >= 1 && Byte <= 26 && Byte != '\r' && Byte != '\t')
         {
+            /* Ctrl+letter: virtual key of the letter, the character is the control code (Ctrl+O is
+             * 0x0F), as Windows reports it; programs reading key events (curses) use the character */
             Modifiers |= LEFT_CTRL_PRESSED;
-            Character = L'A' + Byte - 1;
+            ControlKey = L'A' + Byte - 1;
         }
     }
     Key = Character >= L'A' && Character <= L'Z' ? Character :
           Character >= L'a' && Character <= L'z' ? Character - L'a' + L'A' :
           Character >= L'0' && Character <= L'9' ? Character :
           Character == L' ' ? VK_SPACE : 0;
-    if (Modifiers & LEFT_CTRL_PRESSED)
-        Key = Character;
+    if (ControlKey)
+        Key = ControlKey;
     if (Byte == '\r' || Byte == '\n') Key = VK_RETURN, Character = L'\r';
     else if (Byte == '\b' || Byte == 0x7f) Key = VK_BACK, Character = L'\b';
     else if (Byte == '\t') Key = VK_TAB;
