@@ -29,13 +29,14 @@
 
 typedef struct _PROG
 {
-    WCHAR key[160];
+    WCHAR key[256];                       /* a registry key name is at most 255 characters */
     WCHAR name[160];
     WCHAR publisher[96];
     WCHAR version[48];
     WCHAR date[24];
     BOOL  user;
     BOOL  wow32;
+    BOOL  view64;                         /* read through KEY_WOW64_64KEY (this is a 32-bit appwiz) */
     BOOL  msi;
     BOOL  canModify;
 } PROG;
@@ -75,24 +76,46 @@ static DWORD QueryDword(HKEY k, LPCWSTR name)
     return v;
 }
 
-static void AddRoot(HKEY root, BOOL user, BOOL wow32)
+/* "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}": the only key name msiexec /x or /i is given */
+static BOOL IsGuidKey(LPCWSTR k)
+{
+    static const WCHAR pat[] = L"{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}";
+    size_t i;
+    if (wcslen(k) != ARRAYSIZE(pat) - 1) return FALSE;
+    for (i = 0; pat[i]; i++)
+    {
+        if (pat[i] == L'x') { if (!((k[i] >= L'0' && k[i] <= L'9') || (k[i] >= L'a' && k[i] <= L'f') || (k[i] >= L'A' && k[i] <= L'F'))) return FALSE; }
+        else if (k[i] != pat[i]) return FALSE;
+    }
+    return TRUE;
+}
+
+static void AddRoot(HKEY root, BOOL user, BOOL wow32, REGSAM view)
 {
     HKEY hk;
-    DWORD i;
-    REGSAM sam = KEY_READ | (wow32 ? KEY_WOW64_32KEY : 0);
+    DWORD i, maxKey = 0;
+    WCHAR *kn;
+    REGSAM sam = KEY_READ | (wow32 ? KEY_WOW64_32KEY : 0) | view;
 
     if (RegOpenKeyExW(root, UNINSTALL_SUBKEY, 0, sam, &hk) != ERROR_SUCCESS) return;
+    /* the enumeration buffer is as long as the longest subkey name: a long name must not end the list */
+    if (RegQueryInfoKeyW(hk, NULL, NULL, NULL, NULL, &maxKey, NULL, NULL, NULL, NULL, NULL, NULL) != ERROR_SUCCESS || maxKey < 255)
+        maxKey = 255;
+    kn = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (maxKey + 1) * sizeof(WCHAR));
+    if (!kn) { RegCloseKey(hk); return; }
     for (i = 0; ; i++)
     {
-        WCHAR kn[160];
-        DWORD cch = ARRAYSIZE(kn);
+        DWORD cch = maxKey + 1;
         HKEY sk;
         PROG p;
         WCHAR d[24], tmp[160];
         int j;
         BOOL dup = FALSE;
+        LONG er = RegEnumKeyExW(hk, i, kn, &cch, NULL, NULL, NULL, NULL);
 
-        if (RegEnumKeyExW(hk, i, kn, &cch, NULL, NULL, NULL, NULL) != ERROR_SUCCESS) break;
+        if (er == ERROR_MORE_DATA) continue;               /* a name longer than the buffer (added since RegQueryInfoKey): skip it */
+        if (er != ERROR_SUCCESS) break;                    /* NO_MORE_ITEMS, or an error that will not go away */
+        if (cch >= ARRAYSIZE(p.key)) continue;
         if (RegOpenKeyExW(hk, kn, 0, sam, &sk) != ERROR_SUCCESS) continue;
         ZeroMemory(&p, sizeof(p));
         StringCchCopyW(p.key, ARRAYSIZE(p.key), kn);
@@ -106,7 +129,7 @@ static void AddRoot(HKEY root, BOOL user, BOOL wow32)
         QueryStr(sk, L"DisplayVersion", p.version, ARRAYSIZE(p.version));
         if (QueryStr(sk, L"InstallDate", d, ARRAYSIZE(d)) && wcslen(d) == 8)
             StringCchPrintfW(p.date, ARRAYSIZE(p.date), L"%.4s-%.2s-%.2s", d, d + 4, d + 6);
-        p.msi = QueryDword(sk, L"WindowsInstaller") != 0;
+        p.msi = QueryDword(sk, L"WindowsInstaller") != 0 && IsGuidKey(kn);     /* msiexec only gets a product code */
         p.canModify = !QueryDword(sk, L"NoModify") && (QueryStr(sk, L"ModifyPath", tmp, ARRAYSIZE(tmp)) || p.msi);
         if (!p.msi && !QueryStr(sk, L"UninstallString", tmp, ARRAYSIZE(tmp)) && !QueryStr(sk, L"QuietUninstallString", tmp, ARRAYSIZE(tmp)))
         {
@@ -116,6 +139,7 @@ static void AddRoot(HKEY root, BOOL user, BOOL wow32)
         RegCloseKey(sk);
         p.user = user;
         p.wow32 = wow32;
+        p.view64 = (view & KEY_WOW64_64KEY) != 0;
         for (j = 0; j < g_nprog; j++)         /* the same program seen through two registry views */
             if (!_wcsicmp(g_prog[j].key, p.key) && !_wcsicmp(g_prog[j].name, p.name)) { dup = TRUE; break; }
         if (dup) continue;
@@ -129,6 +153,7 @@ static void AddRoot(HKEY root, BOOL user, BOOL wow32)
         }
         g_prog[g_nprog++] = p;
     }
+    HeapFree(GetProcessHeap(), 0, kn);
     RegCloseKey(hk);
 }
 
@@ -138,10 +163,14 @@ static void Fill(void)
     LVITEMW it;
 
     g_nprog = 0;
-    AddRoot(HKEY_CURRENT_USER, TRUE, FALSE);
-    AddRoot(HKEY_LOCAL_MACHINE, FALSE, FALSE);
+    AddRoot(HKEY_CURRENT_USER, TRUE, FALSE, 0);
+    AddRoot(HKEY_LOCAL_MACHINE, FALSE, FALSE, 0);
 #ifdef _WIN64
-    AddRoot(HKEY_LOCAL_MACHINE, FALSE, TRUE);
+    AddRoot(HKEY_LOCAL_MACHINE, FALSE, TRUE, 0);
+#else
+    /* a 32-bit appwiz (WoW64) lists the 64-bit programs too: KEY_WOW64_64KEY is ignored on a 32-bit system, where the pass finds
+     * the same keys again and the duplicate check drops them */
+    AddRoot(HKEY_LOCAL_MACHINE, FALSE, FALSE, KEY_WOW64_64KEY);
 #endif
     ListView_DeleteAllItems(g_hList);
     for (i = 0; i < g_nprog; i++)
@@ -209,8 +238,8 @@ static void DoUninstall(BOOL modify)
 {
     int i = Selected();
     HKEY hk;
-    WCHAR cmd[1200], raw[1100], path[300];
-    REGSAM sam = KEY_READ | (i >= 0 && g_prog[i].wow32 ? KEY_WOW64_32KEY : 0);
+    WCHAR cmd[1200], raw[1100], path[320];
+    REGSAM sam = KEY_READ | (i >= 0 && g_prog[i].wow32 ? KEY_WOW64_32KEY : 0) | (i >= 0 && g_prog[i].view64 ? KEY_WOW64_64KEY : 0);
 
     if (i < 0) return;
     if (!modify)

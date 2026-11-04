@@ -1,0 +1,8 @@
+[Section]
+Name = FmGen ShaMix
+Version = 1.0
+Category = 12
+URLDownload = https://example.invalid/shamix.zip
+SHA256 = 0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEF
+SHA1 = 5c37425065c4be5ab8c071102f944080abeebazz
+Installer = Generate
