@@ -298,6 +298,26 @@ RunScrollHelper(BOOL Paced)
     Sleep(500);
 }
 
+#define EARLY_LINES     300
+
+/* Runs inside the pseudoconsole: print EARLY_LINES numbered lines at once, as the first thing the
+ * process does (no pause: a terminal starts its child right after it created the pseudoconsole). */
+static VOID
+RunEarlyHelper(VOID)
+{
+    HANDLE Output = GetStdHandle(STD_OUTPUT_HANDLE);
+    CHAR Text[64];
+    DWORD Index, Written;
+
+    for (Index = 1; Index <= EARLY_LINES; ++Index)
+    {
+        StringCchPrintfA(Text, sizeof(Text), "EARLY%03lu\r\n", Index);
+        WriteFile(Output, Text, lstrlenA(Text), &Written, NULL);
+    }
+    ConsoleSay("EARLYEND\r\n");
+    Sleep(500);
+}
+
 #ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
 #define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
 #endif
@@ -1384,6 +1404,110 @@ Done:
     if (Text) HeapFree(GetProcessHeap(), 0, Text);
 }
 
+/* A child that prints right at its start, before the host looked at the console for the first time
+ * (or after a resize, which makes the host start its picture over), must lose none of its lines:
+ * the terminal keeps in its scrollback only what scrolled off its own screen. Resize: 0 none, 1 the
+ * size changes just before the child starts, 2 just after, 3 many sizes in a row while it prints.
+ * Late: the terminal does not read its output until the child has finished (a terminal that is
+ * still starting up), so the host sits in its first write while the child prints; Late 1 also
+ * resizes once the child runs, 0 does not. */
+static VOID
+CheckEarlyScrollback(PCWSTR ExePath, UINT Resize, BOOL Late)
+{
+    HANDLE InRead = NULL, InWrite = NULL, OutRead = NULL, OutWrite = NULL;
+    PROCESS_INFORMATION Child;
+    WCHAR Command[MAX_PATH * 2];
+    COORD Size = {80, 25}, NewSize = {100, 30};
+    PVOID Pty = NULL;
+    HRESULT Status;
+    CHAR *Text;
+    DWORD Used = 0, Available, Count, Start, Seen = 0, Index, Last = 0, First = 0;
+    const CHAR *Position;
+    BOOL Spawned = FALSE;
+
+    Text = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4 * 1024 * 1024);
+    if (Late) Size.X = 120, Size.Y = 40;
+    if (!Text || !CreatePipe(&InRead, &InWrite, NULL, 0) || !CreatePipe(&OutRead, &OutWrite, NULL, Late ? 64 : 0))
+    {
+        ok(FALSE, "Setup failed\n");
+        goto Done;
+    }
+    Status = CreatePty(Size, InRead, OutWrite, 0, &Pty);
+    ok(Status == S_OK, "CreatePseudoConsole failed: %08lx\n", Status);
+    if (Status != S_OK) goto Done;
+    if (Resize == 1) ResizePty(Pty, NewSize);
+    StringCchPrintfW(Command, _countof(Command), L"\"%ls\" ConPty helper-early", ExePath);
+    if (!SpawnWithPty(Pty, Command, FALSE, &Child))
+    {
+        ok(FALSE, "CreateProcess with the pseudoconsole failed: %lu\n", GetLastError());
+        goto Done;
+    }
+    Spawned = TRUE;
+    if (Resize == 2) ResizePty(Pty, NewSize);
+    if (Resize == 3)
+    {
+        /* a terminal window that settles: a burst of sizes while the child is printing */
+        for (Index = 0; Index < 40; ++Index)
+        {
+            COORD Step = {(SHORT)(90 + (Index & 7) * 3), (SHORT)(26 + (Index & 3))};
+
+            ResizePty(Pty, Step);
+            Sleep(4);
+        }
+    }
+    if (Late) WaitForSingleObject(Child.hProcess, 20000);
+    for (Start = GetTickCount(); GetTickCount() - Start < 60000; Sleep(10))
+    {
+        Available = 0;
+        if (!PeekNamedPipe(OutRead, NULL, 0, NULL, &Available, NULL)) break;
+        if (!Available) continue;
+        if (Available > 4 * 1024 * 1024 - 1 - Used) Available = 4 * 1024 * 1024 - 1 - Used;
+        if (!Available || !ReadFile(OutRead, Text + Used, Available, &Count, NULL)) break;
+        Used += Count;
+        Text[Used] = 0;
+        if (strstr(Text, "EARLYEND")) { Sleep(300); break; }
+    }
+    Available = 0;
+    if (PeekNamedPipe(OutRead, NULL, 0, NULL, &Available, NULL) && Available &&
+        Available < 4 * 1024 * 1024 - 1 - Used && ReadFile(OutRead, Text + Used, Available, &Count, NULL))
+        Used += Count;
+    Text[Used] = 0;
+
+    Position = Text;
+    for (Index = 1; Index <= EARLY_LINES; ++Index)
+    {
+        CHAR Name[16];
+        const CHAR *Found;
+
+        StringCchPrintfA(Name, sizeof(Name), "EARLY%03lu", Index);
+        Found = strstr(Position, Name);
+        if (!Found) continue;
+        if (!First) First = Index;
+        Last = Index;
+        ++Seen;
+        Position = Found + 8;
+    }
+    trace("Resize=%u Late=%d: %lu of %u early lines in order (first %lu, last %lu), %lu bytes\n",
+          Resize, Late, Seen, EARLY_LINES, First, Last, Used);
+    ok(Last == EARLY_LINES, "Resize=%u Late=%d: the last early line did not reach the terminal\n", Resize, Late);
+    ok(First == 1, "Resize=%u Late=%d: the first early line did not reach the terminal (first seen: %lu)\n", Resize, Late, First);
+    ok(Seen == EARLY_LINES, "Resize=%u Late=%d: only %lu of %u early lines reached the terminal in order\n",
+       Resize, Late, Seen, EARLY_LINES);
+    WaitForSingleObject(Child.hProcess, 8000);
+Done:
+    if (Spawned)
+    {
+        CloseHandle(Child.hThread);
+        CloseHandle(Child.hProcess);
+    }
+    if (Pty) ClosePty(Pty);
+    if (InRead) CloseHandle(InRead);
+    if (InWrite) CloseHandle(InWrite);
+    if (OutRead) CloseHandle(OutRead);
+    if (OutWrite) CloseHandle(OutWrite);
+    if (Text) HeapFree(GetProcessHeap(), 0, Text);
+}
+
 /* Read what a helper writes until COLOREND (and a little after, for the final paint). */
 static DWORD
 ReadUntilColorEnd(HANDLE OutRead, CHAR *Text, DWORD Size)
@@ -1694,6 +1818,11 @@ START_TEST(ConPty)
             RunScrollHelper(!strcmp(argv[2], "helper-scroll"));
             return;
         }
+        if (argc >= 3 && !strcmp(argv[2], "helper-early"))
+        {
+            RunEarlyHelper();
+            return;
+        }
         if (argc >= 3 && !strcmp(argv[2], "helper-colors"))
         {
             RunColorsHelper();
@@ -1741,6 +1870,12 @@ START_TEST(ConPty)
         CheckScrollback(ExePath, TRUE, FALSE);
         CheckScrollback(ExePath, FALSE, FALSE);
         CheckScrollback(ExePath, FALSE, TRUE);
+        CheckEarlyScrollback(ExePath, 0, FALSE);
+        CheckEarlyScrollback(ExePath, 1, FALSE);
+        CheckEarlyScrollback(ExePath, 2, FALSE);
+        CheckEarlyScrollback(ExePath, 3, FALSE);
+        CheckEarlyScrollback(ExePath, 0, TRUE);
+        CheckEarlyScrollback(ExePath, 1, TRUE);
         CheckExtendedColors(ExePath, FALSE);
         CheckExtendedColors(ExePath, TRUE);
         CheckNodePtSequence(0x6, FALSE);   /* RESIZE_QUIRK | WIN32_INPUT_MODE */
