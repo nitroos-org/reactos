@@ -18,7 +18,8 @@
  * subnamespaces exist. A 32-bit process on a 64-bit system gets paths through
  * %SystemRoot%\SysNative. Not measured: the order of several files for one namespace (we
  * give the most specific first) and the package graph directories (searched like the
- * Windows directory).
+ * Windows directory). A windowsMetaDataDir of 247 or more characters is E_INVALIDARG; a
+ * package graph directory of that length is ignored (see MAX_DIRECTORY_LENGTH).
  */
 
 #include <stdarg.h>
@@ -36,6 +37,11 @@ WINE_DEFAULT_DEBUG_CHANNEL(wintypes);
 #ifndef RO_E_METADATA_NAME_NOT_FOUND
 #define RO_E_METADATA_NAME_NOT_FOUND ((HRESULT)0x8000000F)
 #endif
+
+/* The longest directory name accepted, in characters. Measured on Windows 10 22H2: a
+ * windowsMetaDataDir of 246 characters is searched (nothing found: RO_E_METADATA_NAME_NOT_FOUND),
+ * one of 247 or more fails with E_INVALIDARG. A package graph directory that long is ignored. */
+#define MAX_DIRECTORY_LENGTH 246
 
 typedef struct
 {
@@ -194,8 +200,8 @@ HRESULT WINAPI RoResolveNamespace(HSTRING name, HSTRING windowsMetaDataDir,
                                   DWORD *subNamespacesCount, HSTRING **subNamespaces)
 {
     WCHAR dir[MAX_PATH];
-    const WCHAR *name_str;
-    UINT32 name_len;
+    const WCHAR *name_str, *dir_str;
+    UINT32 name_len, dir_len;
     BOOL has_null;
     found_file *files = NULL;
     DWORD file_count = 0, i;
@@ -229,7 +235,13 @@ HRESULT WINAPI RoResolveNamespace(HSTRING name, HSTRING windowsMetaDataDir,
     name_str = WindowsGetStringRawBuffer(name, &name_len);
 
     if (!WindowsIsStringEmpty(windowsMetaDataDir))
-        lstrcpynW(dir, WindowsGetStringRawBuffer(windowsMetaDataDir, NULL), ARRAYSIZE(dir));
+    {
+        dir_str = WindowsGetStringRawBuffer(windowsMetaDataDir, &dir_len);
+        if (dir_len > MAX_DIRECTORY_LENGTH)
+            return E_INVALIDARG;
+        memcpy(dir, dir_str, dir_len * sizeof(WCHAR));
+        dir[dir_len] = 0;
+    }
     else
         get_metadata_directory(dir, ARRAYSIZE(dir));
 
@@ -238,7 +250,12 @@ HRESULT WINAPI RoResolveNamespace(HSTRING name, HSTRING windowsMetaDataDir,
     {
         if (WindowsIsStringEmpty(packageGraphDirs[i]))
             continue;
-        lstrcpynW(dir, WindowsGetStringRawBuffer(packageGraphDirs[i], NULL), ARRAYSIZE(dir));
+        dir_str = WindowsGetStringRawBuffer(packageGraphDirs[i], &dir_len);
+        /* Windows ignores a package graph directory that long; never search a cut-off name */
+        if (dir_len > MAX_DIRECTORY_LENGTH)
+            continue;
+        memcpy(dir, dir_str, dir_len * sizeof(WCHAR));
+        dir[dir_len] = 0;
         hr = search_directory(dir, name_str, name_len, &files, &file_count, subNamespaces ? &subs : NULL);
     }
 
