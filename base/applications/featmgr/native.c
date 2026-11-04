@@ -10,6 +10,7 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka
  */
 
+#define COBJMACROS
 #include "featmgr.h"
 #include <shlwapi.h>
 #include <shlobj.h>
@@ -442,27 +443,106 @@ static BOOL IsOrAbove(LPCWSTR dir, LPCWSTR prot)
     return !_wcsnicmp(dir, prot, l) && (prot[l] == L'\0' || prot[l] == L'\\');
 }
 
+/* The canonical form of a drive-letter path, so that one folder has one spelling before it is compared: '/' -> '\', no doubled
+ * separators, no trailing separator, "." / ".." and names ending in a space or a dot refused (Windows strips those, so "App."
+ * would alias "App"), GetFullPathNameW, then GetLongPathNameW on the longest part that exists (8.3 names such as PROGRA~1 become
+ * the long name). FALSE: not a plain "X:\..." path (UNC, device, relative), or a refused name. */
+BOOL FmCanonPath(LPCWSTR in, LPWSTR out, DWORD cch)
+{
+    WCHAR t[MAX_PATH], full[MAX_PATH], head[MAX_PATH], lng[MAX_PATH];
+    size_t n = 0, i, cut;
+    LPCWSTR p;
+    DWORD r;
+
+    if (!in || !(((in[0] | 0x20) >= L'a' && (in[0] | 0x20) <= L'z') && in[1] == L':' && (in[2] == L'\\' || in[2] == L'/')))
+        return FALSE;
+    for (p = in; *p; p++)
+    {
+        WCHAR c = *p == L'/' ? L'\\' : *p;
+        if (c < 32 || wcschr(L"\"*?<>|", c) || (c == L':' && p != in + 1)) return FALSE;
+        if (c == L'\\' && n && t[n - 1] == L'\\') continue;               /* doubled separator */
+        if (n + 1 >= ARRAYSIZE(t)) return FALSE;
+        t[n++] = c;
+    }
+    while (n > 3 && t[n - 1] == L'\\') n--;
+    t[n] = L'\0';
+    for (i = 3; i < n; )
+    {
+        size_t l = wcscspn(t + i, L"\\");
+        if ((l == 1 && t[i] == L'.') || (l == 2 && t[i] == L'.' && t[i + 1] == L'.')) return FALSE;
+        if (l && (t[i + l - 1] == L' ' || t[i + l - 1] == L'.')) return FALSE;
+        i += l + 1;
+    }
+    r = GetFullPathNameW(t, ARRAYSIZE(full), full, NULL);
+    if (!r || r >= ARRAYSIZE(full)) return FALSE;
+    /* the longest existing head gets its long name; the rest does not exist yet and is kept as written */
+    StringCchCopyW(head, ARRAYSIZE(head), full);
+    for (;;)
+    {
+        r = GetLongPathNameW(head, lng, ARRAYSIZE(lng));
+        if (r && r < ARRAYSIZE(lng)) break;
+        cut = wcslen(head);
+        while (cut > 3 && head[cut - 1] != L'\\') cut--;
+        if (cut <= 3) { lng[0] = L'\0'; break; }
+        head[cut - 1] = L'\0';
+    }
+    if (lng[0] && _wcsnicmp(lng, L"\\\\", 2))
+    {
+        size_t hl = wcslen(head);
+        if (FAILED(StringCchPrintfW(out, cch, L"%s%s", lng, full + hl))) return FALSE;
+    }
+    else if (FAILED(StringCchCopyW(out, cch, full))) return FALSE;
+    n = wcslen(out);
+    while (n > 3 && out[n - 1] == L'\\') out[--n] = L'\0';
+    return TRUE;
+}
+
+static BOOL CanonFolder(int csidl, LPCWSTR sub, LPWSTR out)
+{
+    WCHAR p[MAX_PATH];
+    p[0] = L'\0';
+    if (SHGetFolderPathW(NULL, csidl, NULL, 0, p) != S_OK || !p[0]) return FALSE;
+    if (sub && FAILED(StringCchCatW(p, MAX_PATH, sub))) return FALSE;
+    return FmCanonPath(p, out, MAX_PATH);
+}
+
 /* TRUE: dir must not be an install directory (a system or profile folder, an ancestor of one, a drive root, or has "..") */
 BOOL FmBadInstallRoot(LPCWSTR dir)
 {
     static const int csidls[] = { CSIDL_PROGRAM_FILES, CSIDL_PROGRAM_FILESX86, CSIDL_WINDOWS, CSIDL_SYSTEM, CSIDL_PROFILE,
                                   CSIDL_LOCAL_APPDATA, CSIDL_APPDATA, CSIDL_COMMON_APPDATA, CSIDL_PROGRAMS, CSIDL_COMMON_PROGRAMS,
                                   CSIDL_DESKTOPDIRECTORY, CSIDL_COMMON_DESKTOPDIRECTORY, CSIDL_PROGRAM_FILES_COMMON };
-    WCHAR p[MAX_PATH];
+    WCHAR c[MAX_PATH], p[MAX_PATH];
     size_t i;
 
-    if (wcslen(dir) < 4 || dir[1] != L':' || dir[2] != L'\\') return TRUE;
-    if (wcsstr(dir, L"\\..") || wcsstr(dir, L"..\\") || wcsstr(dir, L"\\.\\") || dir[wcslen(dir) - 1] == L'.') return TRUE;
+    if (!FmCanonPath(dir, c, MAX_PATH) || wcslen(c) < 4) return TRUE;
     for (i = 0; i < ARRAYSIZE(csidls); i++)
+        if (CanonFolder(csidls[i], NULL, p) && IsOrAbove(c, p)) return TRUE;
+    if (CanonFolder(CSIDL_LOCAL_APPDATA, L"\\Programs", p) && SamePathNoSlash(c, p)) return TRUE;
+    return FALSE;
+}
+
+/* The install directory of a generated install: canonical (FmCanonPath), strictly BELOW Program Files, Program Files (x86) or
+ * %LOCALAPPDATA%\Programs (the bases of the RAPPS [Generate] Dir rules), and not a protected folder (FmBadInstallRoot).
+ * canon receives the canonical form (MAX_PATH), which is what gets created and recorded. */
+BOOL FmInstallDirOk(LPCWSTR dir, LPWSTR canon)
+{
+    static const struct { int csidl; LPCWSTR sub; } bases[] = {
+        { CSIDL_PROGRAM_FILES, NULL }, { CSIDL_PROGRAM_FILESX86, NULL }, { CSIDL_LOCAL_APPDATA, L"\\Programs" } };
+    WCHAR c[MAX_PATH], b[MAX_PATH];
+    size_t i;
+
+    if (!FmCanonPath(dir, c, MAX_PATH) || FmBadInstallRoot(c)) return FALSE;
+    for (i = 0; i < ARRAYSIZE(bases); i++)
     {
-        p[0] = L'\0';
-        if (SHGetFolderPathW(NULL, csidls[i], NULL, 0, p) == S_OK && IsOrAbove(dir, p)) return TRUE;
-    }
-    if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, p) == S_OK)
-    {
-        WCHAR q[MAX_PATH];
-        StringCchPrintfW(q, MAX_PATH, L"%s\\Programs", p);
-        if (SamePathNoSlash(dir, q)) return TRUE;
+        size_t l;
+        if (!CanonFolder(bases[i].csidl, bases[i].sub, b)) continue;
+        l = wcslen(b);
+        if (!_wcsnicmp(c, b, l) && c[l] == L'\\' && c[l + 1])
+        {
+            if (canon) StringCchCopyW(canon, MAX_PATH, c);
+            return TRUE;
+        }
     }
     return FALSE;
 }
@@ -484,7 +564,50 @@ static BOOL UnderStartMenu(LPCWSTR path)
     return FALSE;
 }
 
-/* "HKCU\Software\Vendor\App" / "HKLM64\SOFTWARE\..." : tree = the key is deleted with everything below it */
+/* TRUE: path is a shortcut (.lnk) whose target lies inside dir: a Start menu entry the install itself made (natgen.c records the
+ * exact path of the shortcut it saved, pointing at the app's main program); another app's shortcut, or a file that is not a
+ * shortcut, is never deleted on the strength of the record alone */
+static BOOL OwnShortcut(LPCWSTR path, LPCWSTR dir, LPWSTR found, DWORD cchFound)
+{
+    IShellLinkW *sl = NULL;
+    IPersistFile *pf = NULL;
+    WCHAR target[MAX_PATH], c[MAX_PATH];
+    size_t n = wcslen(path), l = wcslen(dir);
+    HRESULT hrInit, hr;
+    BOOL ok = FALSE;
+
+    if (found && cchFound) found[0] = L'\0';
+    if (n < 5 || _wcsicmp(path + n - 4, L".lnk")) return FALSE;
+    hrInit = CoInitialize(NULL);
+    hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, (void **)&sl);
+    if (SUCCEEDED(hr)) hr = IShellLinkW_QueryInterface(sl, &IID_IPersistFile, (void **)&pf);
+    if (SUCCEEDED(hr)) hr = IPersistFile_Load(pf, path, STGM_READ);
+    target[0] = L'\0';
+    if (SUCCEEDED(hr)) hr = IShellLinkW_GetPath(sl, target, MAX_PATH, NULL, 0);
+    if (FAILED(hr) || !target[0])
+    {
+        /* no resolved path: the link's raw path as it was saved */
+        target[0] = L'\0';
+        if (sl && pf) hr = IShellLinkW_GetPath(sl, target, MAX_PATH, NULL, SLGP_RAWPATH);
+    }
+    if (found && cchFound) StringCchCopyW(found, cchFound, target);
+    if (SUCCEEDED(hr) && target[0] && FmCanonPath(target, c, MAX_PATH))
+        ok = !_wcsnicmp(c, dir, l) && c[l] == L'\\' && c[l + 1];
+    if (pf) IPersistFile_Release(pf);
+    if (sl) IShellLinkW_Release(sl);
+    if (SUCCEEDED(hrInit)) CoUninitialize();
+    return ok;
+}
+
+/* key is pre or below it ("Software\ReactOS" covers "Software\ReactOS\Nitro", not "Software\ReactOSFoo") */
+static BOOL PrefixKey(LPCWSTR key, LPCWSTR pre)
+{
+    size_t l = wcslen(pre);
+    return !_wcsnicmp(key, pre, l) && (key[l] == L'\0' || key[l] == L'\\');
+}
+
+/* "HKCU\Software\Vendor\App" / "HKLM64\SOFTWARE\..." : tree = the key is deleted with everything below it.
+ * Never: Windows / Classes / Policies / Wow6432Node, the system's Cryptography key, the ReactOS keys (featmgr's own state). */
 BOOL FmGenRegOk(LPCWSTR spec, BOOL tree)
 {
     LPCWSTR sub;
@@ -497,11 +620,19 @@ BOOL FmGenRegOk(LPCWSTR spec, BOOL tree)
     if (*sub != L'\\') return FALSE;
     sub++;
     if (_wcsnicmp(sub, L"Software\\", 9) || wcsstr(sub, L"..") || wcsstr(sub, L"\\\\")) return FALSE;
-    if (!_wcsnicmp(sub, L"Software\\Microsoft\\Windows", 26) || !_wcsnicmp(sub, L"Software\\Classes", 17) ||
-        !_wcsnicmp(sub, L"Software\\Policies", 18) || !_wcsnicmp(sub, L"Software\\Wow6432Node", 22)) return FALSE;
+    if (sub[wcslen(sub) - 1] == L'\\') return FALSE;
     for (p = sub; *p; p++) if (*p == L'\\') depth++;
     depth++;
-    if (sub[wcslen(sub) - 1] == L'\\') return FALSE;
+    /* a per-user ProgID of the app itself ("HKCU\Software\Classes\Autoruns.Logfile.1", as the Sysinternals entries name it):
+     * one key, a dotted name that is not an extension; nothing else under Classes (CLSID, exefile, "*", ...) */
+    if (!_wcsnicmp(sub, L"Software\\Classes\\", 17))
+    {
+        LPCWSTR id = sub + 17;
+        return tree && !_wcsnicmp(spec, L"HKCU", 4) && depth == 3 && id[0] != L'.' && wcschr(id, L'.') && !wcschr(id, L'*');
+    }
+    if (!_wcsnicmp(sub, L"Software\\Microsoft\\Windows", 26) || PrefixKey(sub, L"Software\\Classes") ||
+        PrefixKey(sub, L"Software\\Policies") || PrefixKey(sub, L"Software\\Wow6432Node") ||
+        PrefixKey(sub, L"Software\\Microsoft\\Cryptography") || PrefixKey(sub, L"Software\\ReactOS")) return FALSE;
     return tree ? depth >= 3 : depth >= 2;
 }
 
@@ -518,22 +649,22 @@ static BOOL RelOk(LPCWSTR data)
 static int UninstallGenerated(const UNENT *e, HKEY arp)
 {
     HKEY ent;
-    WCHAR loc[MAX_PATH], win[MAX_PATH];
+    WCHAR loc[MAX_PATH], raw[MAX_PATH];
     DWORD stage, vi, n = 0;
     int rc = 0;
+    BOOL parentEmpty = FALSE;
 
     if (RegOpenKeyExW(arp, GENERATE_ARPSUBKEY, 0, KEY_READ, &ent) != ERROR_SUCCESS) return 1;
-    RegStr(arp, L"InstallLocation", loc, ARRAYSIZE(loc));
-    GetWindowsDirectoryW(win, MAX_PATH);
-    PathRemoveBackslashW(loc);
-    /* the record decides what is deleted: refuse one whose install location is empty, a drive root or the system */
-    if (FmBadInstallRoot(loc) || wcslen(loc) < 4 || !_wcsicmp(loc, win) || StrStrIW(win, loc) == win)
+    RegStr(arp, L"InstallLocation", raw, ARRAYSIZE(raw));
+    /* the record decides what is deleted: its install location must pass the same rule as at install time (canonical, strictly
+     * below Program Files, Program Files (x86) or %LOCALAPPDATA%\Programs, not a protected folder); otherwise nothing is deleted */
+    if (!FmInstallDirOk(raw, loc))
     {
-        wprintf(L"error: the install record names no usable install location ('%s'); nothing was deleted\n", loc);
+        wprintf(L"error: the install record names no usable install location ('%s'); nothing was deleted\n", raw);
         RegCloseKey(ent);
         return 1;
     }
-    for (stage = 0; stage < 2; stage++)
+    for (stage = 0; stage < 3; stage++)
     {
         for (vi = 0; ; vi++)
         {
@@ -548,7 +679,17 @@ static int UninstallGenerated(const UNENT *e, HKEY arp)
             if (rt != REG_SZ || !data[0]) continue;
             data[dsz / sizeof(WCHAR) < ARRAYSIZE(data) ? dsz / sizeof(WCHAR) : ARRAYSIZE(data) - 1] = L'\0';
             op = val[0];
+            if (op == L'd' && !wcscmp(data, L"\\.."))
+            {
+                parentEmpty = TRUE;                 /* DelDirEmpty ".." (the vendor folder): handled last, see below */
+                continue;
+            }
             if (wcsstr(data, L"..\\") || wcsstr(data, L"\\.."))
+                continue;
+            /* stage 0: the absolute (Start menu shortcut) F entries, judged while the files they point at still exist;
+             * stage 1: the other F entries and K; stage 2: d, D, k. Each entry is judged in the stage that acts on it. */
+            if (!((stage == 0 && op == L'F' && data[0] != L'\\') || (stage == 1 && ((op == L'F' && data[0] == L'\\') || op == L'K')) ||
+                  (stage == 2 && (op == L'd' || op == L'D' || op == L'k'))))
                 continue;
             /* the record is data: hold every entry to the confinement rules before it deletes anything */
             if (op == L'K' || op == L'k')
@@ -558,11 +699,21 @@ static int UninstallGenerated(const UNENT *e, HKEY arp)
             else if (op == L'F' || op == L'D' || op == L'd')
             {
                 BOOL ok;
+                WCHAR found[MAX_PATH];
+                found[0] = L'\0';
                 if (data[0] == L'\\') ok = (op == L'd' && !data[1]) || RelOk(data);          /* "\" alone = the root, only if empty */
-                else ok = op != L'D' && UnderStartMenu(data);                                /* a Start menu shortcut and its folder */
+                else if (op == L'F')
+                {
+                    ok = UnderStartMenu(data) && OwnShortcut(data, loc, found, ARRAYSIZE(found));   /* the app's own Start menu shortcut */
+                    if (!ok && UnderStartMenu(data))
+                    {
+                        wprintf(L"refused record entry %s: '%s' is not a shortcut to a file of this install (target '%s')\n", val, data, found);
+                        continue;
+                    }
+                }
+                else ok = op == L'd' && UnderStartMenu(data);                                /* its Start menu folder, if empty */
                 if (!ok) { wprintf(L"refused record entry %s: '%s' is outside the install directory\n", val, data); continue; }
             }
-            if ((stage == 0 && (op == L'F' || op == L'K')) || (stage == 1 && (op == L'd' || op == L'D' || op == L'k')))
             {
                 if (op == L'K' || op == L'k')
                 {
@@ -630,6 +781,20 @@ static int UninstallGenerated(const UNENT *e, HKEY arp)
         }
     }
     RegCloseKey(ent);
+    if (parentEmpty)
+    {
+        /* the parent of the install directory, removed only if empty, and only if it is itself a folder an install could own
+         * (strictly below Program Files / Program Files (x86) / LocalAppData\Programs, not protected, not a link) */
+        WCHAR par[MAX_PATH], cp[MAX_PATH];
+        DWORD a;
+        StringCchCopyW(par, MAX_PATH, loc);
+        PathRemoveFileSpecW(par);
+        a = GetFileAttributesW(par);
+        if (!FmInstallDirOk(par, cp) || (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT)))
+            wprintf(L"refused record entry '\\..': the parent folder '%s' is a protected folder; it was kept\n", par);
+        else if (RemoveDirectoryW(cp))
+            n++;
+    }
     wprintf(L"removed %lu recorded item(s)\n", n);
     UNREFERENCED_PARAMETER(e);
     return rc;
