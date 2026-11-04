@@ -86,6 +86,15 @@ Routine Description:
                           Callbacks,
                           LazyWriteContext );
 
+#ifdef __REACTOS__
+    //
+    //  Deliberately NOT calling CcRosAllowLazyClose here: the lazy cache map close is ntfsng-only.
+    //  With it, a SetEndOfFile shrink on a file whose map is deferred returns wrong data for the
+    //  kept bytes after the reopen (suspected ValidDataLength vs FileSize take-over). See ticket
+    //  releases/2026.11/backlog/CC-lazy-fat-shrink-deferred-map.md
+    //
+#endif
+
 #if (NTDDI_VERSION >= NTDDI_WIN8)
     //
     //  Enable Disk IO Accounting for this file

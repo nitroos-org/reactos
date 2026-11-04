@@ -179,8 +179,9 @@ CcPurgeCacheSection (
     CCTRACE(CC_API_DEBUG, "SectionObjectPointer=%p\n FileOffset=%p Length=%lu UninitializeCacheMaps=%d",
         SectionObjectPointer, FileOffset, Length, UninitializeCacheMaps);
 
-    /* Obtain the shared cache from the section */
-    SharedCacheMap = SectionObjectPointer->SharedCacheMap;
+    /* Obtain the shared cache from the section, referenced: a map nobody has open can otherwise
+     * be deleted by the lazy writer meanwhile */
+    SharedCacheMap = CcRosReferenceSharedCacheMap(SectionObjectPointer);
     if (!SharedCacheMap)
     {
         Success = TRUE;
@@ -204,9 +205,16 @@ CcPurgeCacheSection (
              */
             PrivateCacheMap = CONTAINING_RECORD(SharedCacheMap->PrivateList.Flink, PRIVATE_CACHE_MAP, PrivateLinks);
 
-            /* Unintialize the private cache now */
-            CcUninitializeCacheMap(PrivateCacheMap->FileObject, NULL, NULL);
+            /* Unintialize the private cache now: not deferred, the data is written below */
+            CcRosReleaseFileCache(PrivateCacheMap->FileObject, FALSE, NULL, NULL);
         }
+
+        /*
+         * What was dirty is written before the purge drops it, as it was when the last private map
+         * closed and deleted the shared one (the purge is not told to discard it).  This reference
+         * keeps the map, which is deleted by the dereference below.
+         */
+        CcRosFlushSharedCacheMapNoCallbacks(SharedCacheMap);
     }
 
     StartOffset = FileOffset != NULL ? FileOffset->QuadPart : 0;
@@ -301,6 +309,10 @@ purgeMm:
     if (Success)
         Success = MmPurgeSegment(SectionObjectPointer, FileOffset, Length);
 
+    /* A map that nobody has open and that the purge left clean is deleted by this (in a worker) */
+    if (SharedCacheMap)
+        CcRosDereferenceSharedCacheMap(SharedCacheMap);
+
     return Success;
 }
 
@@ -328,7 +340,8 @@ CcSetFileSizes (
            FileSizes->FileSize.QuadPart,
            FileSizes->ValidDataLength.QuadPart);
 
-    SharedCacheMap = FileObject->SectionObjectPointer->SharedCacheMap;
+    /* Referenced: the file object may hold no private cache map, and then nothing else keeps the map */
+    SharedCacheMap = CcRosReferenceSharedCacheMap(FileObject->SectionObjectPointer);
 
     /*
      * It is valid to call this function on file objects that weren't
@@ -367,6 +380,8 @@ CcSetFileSizes (
         /* Extend our section object; the file system has already set the file size */
         MmExtendSection(SharedCacheMap->Section, &SharedCacheMap->SectionSize, TRUE);
     }
+
+    CcRosDereferenceSharedCacheMap(SharedCacheMap);
 }
 
 /*
@@ -398,14 +413,14 @@ CcUninitializeCacheMap (
     NTSTATUS Status;
     PROS_SHARED_CACHE_MAP SharedCacheMap;
     KIRQL OldIrql;
+    BOOLEAN EventQueued;
 
     CCTRACE(CC_API_DEBUG, "FileObject=%p TruncateSize=%p UninitializeCompleteEvent=%p\n",
         FileObject, TruncateSize, UninitializeCompleteEvent);
 
     if (TruncateSize != NULL &&
-        FileObject->SectionObjectPointer->SharedCacheMap != NULL)
+        (SharedCacheMap = CcRosReferenceSharedCacheMap(FileObject->SectionObjectPointer)) != NULL)
     {
-        SharedCacheMap = FileObject->SectionObjectPointer->SharedCacheMap;
         KeAcquireSpinLock(&SharedCacheMap->CacheMapLock, &OldIrql);
         if (SharedCacheMap->FileSize.QuadPart > TruncateSize->QuadPart)
         {
@@ -418,10 +433,24 @@ CcUninitializeCacheMap (
                             TruncateSize,
                             0,
                             FALSE);
+        CcRosDereferenceSharedCacheMap(SharedCacheMap);
     }
 
-    Status = CcRosReleaseFileCache(FileObject);
-    if (UninitializeCompleteEvent)
+    /*
+     * The last close of a file with dirty cached data does not write it when its file system allows
+     * that (CcRosAllowLazyClose): the lazy writer does, and deletes the shared cache map afterwards
+     * (Windows does the same).  A truncation purged the views past TruncateSize above; one to zero (a
+     * delete) leaves nothing to write, and deletes the map now.  A caller that passes an
+     * UninitializeCompleteEvent waits for the map to go, and gets it deleted at once (it may hold what
+     * the lazy writer needs).  The event is signalled when the map is deleted; at once if this call
+     * did not leave it (others still cache through it).
+     */
+    Status = CcRosReleaseFileCache(FileObject,
+                                   (TruncateSize == NULL || TruncateSize->QuadPart != 0) &&
+                                       UninitializeCompleteEvent == NULL,
+                                   UninitializeCompleteEvent,
+                                   &EventQueued);
+    if (UninitializeCompleteEvent && !EventQueued)
     {
         KeSetEvent(&UninitializeCompleteEvent->Event, IO_NO_INCREMENT, FALSE);
     }
