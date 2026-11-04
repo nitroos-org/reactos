@@ -811,9 +811,19 @@ NtGdiMaskBlt(
     /* Perform the bitblt operation */
     if (bSplit)
     {
+        SURFACE *psurfGlass = NULL;
+
+        /* A copy of a 32 bpp DIB with alpha to a glass window is blended over what is below it (glassblt.c) */
+        if (DCDest->hwndGlass && UsesSource && !psurfMask && rop4 == 0xCCCC && nWidth > 0 && nHeight > 0 &&
+            GlassBlendSource(DCDest, BitmapDest, BitmapSrc, &DestRect, &SourceRect, &psurfGlass))
+        {
+            SourcePoint.x = 0;
+            SourcePoint.y = 0;
+        }
+
         Status = IntEngBitBltAvoidPointer(DCDest,
                                           &BitmapDest->SurfObj,
-                                          BitmapSrc ? &BitmapSrc->SurfObj : NULL,
+                                          psurfGlass ? &psurfGlass->SurfObj : BitmapSrc ? &BitmapSrc->SurfObj : NULL,
                                           psurfMask ? &psurfMask->SurfObj : NULL,
                                           XlateObj,
                                           &DestRect,
@@ -822,6 +832,8 @@ NtGdiMaskBlt(
                                           &DCDest->eboFill.BrushObject,
                                           &DCDest->dclevel.pbrFill->ptOrigin,
                                           rop4);
+        if (psurfGlass)
+            GlassBlendDone(psurfGlass);
     }
     else
     {
@@ -1097,10 +1109,19 @@ GreStretchBltMask(
     if (bSplit)
     {
         POINTL ptlSource = {SourceRect.left, SourceRect.top};
+        SURFACE *psurfGlass = NULL;
+
+        /* A copy of a 32 bpp DIB with alpha to a glass window is blended over what is below it (glassblt.c) */
+        if (DCDest->hwndGlass && UsesSource && !BitmapMask && rop4 == 0xCCCC &&
+            GlassBlendSource(DCDest, BitmapDest, BitmapSrc, &DestRect, &SourceRect, &psurfGlass))
+        {
+            ptlSource.x = 0;
+            ptlSource.y = 0;
+        }
 
         Status = IntEngBitBltAvoidPointer(DCDest,
                                           &BitmapDest->SurfObj,
-                                          BitmapSrc ? &BitmapSrc->SurfObj : NULL,
+                                          psurfGlass ? &psurfGlass->SurfObj : BitmapSrc ? &BitmapSrc->SurfObj : NULL,
                                           BitmapMask ? &BitmapMask->SurfObj : NULL,
                                           XlateObj,
                                           &DestRect,
@@ -1109,6 +1130,8 @@ GreStretchBltMask(
                                           &DCDest->eboFill.BrushObject,
                                           &BrushOrigin,
                                           rop4);
+        if (psurfGlass)
+            GlassBlendDone(psurfGlass);
     }
     else
     {

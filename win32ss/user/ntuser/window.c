@@ -726,6 +726,7 @@ LRESULT co_UserFreeWindow(PWND Window,
       Window->SystemMenu = (HMENU)0;
    }
 
+   GlassBackdropDrop(UserHMGetHandle(Window));
    DceFreeWindowDCE(Window);    /* Always do this to catch orphaned DCs */
 
    IntUnlinkWindow(Window);
