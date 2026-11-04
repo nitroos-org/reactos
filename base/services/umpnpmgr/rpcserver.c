@@ -681,9 +681,50 @@ done:
 }
 
 
-/* Tells whether the caller of an RPC is an administrator (or the system). The kernel checks
- * a privilege on NtPlugPlayControl, but umpnpmgr makes that call as the system, and its
- * endpoint is open to everyone, so the check has to be made here, on the client's token. */
+/* Tells whether a token holds a privilege, enabled or not: cfgmgr32 never enables one */
+static
+BOOL
+TokenHoldsPrivilege(
+    _In_ HANDLE hToken,
+    _In_ LUID Privilege)
+{
+    PTOKEN_PRIVILEGES pPrivileges;
+    DWORD dwSize = 0, i;
+    BOOL bHeld = FALSE;
+
+    if (GetTokenInformation(hToken, TokenPrivileges, NULL, 0, &dwSize) ||
+        GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+        return FALSE;
+
+    pPrivileges = HeapAlloc(GetProcessHeap(), 0, dwSize);
+    if (pPrivileges == NULL)
+        return FALSE;
+
+    if (GetTokenInformation(hToken, TokenPrivileges, pPrivileges, dwSize, &dwSize))
+    {
+        for (i = 0; i < pPrivileges->PrivilegeCount; i++)
+        {
+            if (pPrivileges->Privileges[i].Luid.LowPart == Privilege.LowPart &&
+                pPrivileges->Privileges[i].Luid.HighPart == Privilege.HighPart &&
+                !(pPrivileges->Privileges[i].Attributes & SE_PRIVILEGE_REMOVED))
+            {
+                bHeld = TRUE;
+                break;
+            }
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, pPrivileges);
+    return bHeld;
+}
+
+
+/* Tells whether the caller of an RPC may change device state: the "write" access of the
+ * Plug and Play service on Windows, which Administrators and the system have. A caller that
+ * holds SeLoadDriverPrivilege passes too: it can load any driver already, so this grants it
+ * nothing new. The kernel checks a privilege on NtPlugPlayControl, but umpnpmgr makes that
+ * call as the system, and its endpoint is open to everyone, so the check has to be made
+ * here, on the client's token. Read-only RPCs stay open to every caller, as on Windows. */
 static
 BOOL
 IsCallerAdmin(
@@ -719,6 +760,8 @@ IsCallerAdmin(
             bAdmin = TRUE;
         else if (CheckTokenMembership(hToken, pSystemSid, &bMember) && bMember)
             bAdmin = TRUE;
+        else if (TokenHoldsPrivilege(hToken, LoadDriverPrivilege))
+            bAdmin = TRUE;
         CloseHandle(hToken);
     }
 
@@ -727,7 +770,22 @@ IsCallerAdmin(
 done:
     FreeSid(pSystemSid);
     FreeSid(pAdminSid);
+
+    if (!bAdmin)
+        DPRINT1("PnP state change refused: the caller is not an administrator\n");
+
     return bAdmin;
+}
+
+
+/* Removing or ejecting a device: interactive users may do it (Safely Remove Hardware runs as
+ * the user), as on Windows, and so may callers with the write access above */
+static
+BOOL
+IsCallerAllowedToEject(
+    _In_ handle_t hBinding)
+{
+    return IsCallerInteractive(hBinding) || IsCallerAdmin(hBinding);
 }
 
 
@@ -2238,12 +2296,15 @@ PNP_SetDeviceRegProp(
     LPWSTR lpValueName = NULL;
     HKEY hKey = 0;
 
-    UNREFERENCED_PARAMETER(hBinding);
     UNREFERENCED_PARAMETER(ulFlags);
 
     DPRINT("PNP_SetDeviceRegProp(%p %S %lu %lu %p %lu 0x%08lx)\n",
            hBinding, pDeviceId, ulProperty, ulDataType, Buffer,
            ulLength, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (!IsValidDeviceInstanceID(pDeviceId))
         return CR_INVALID_DEVINST;
@@ -2416,6 +2477,14 @@ PNP_GetClassInstance(
         goto done;
     }
 
+    /* The device has no driver key yet. Creating one changes device state, which takes an
+     * administrator, as on Windows; reading an existing one (above) is open to everyone. */
+    if (!IsCallerAdmin(hBinding))
+    {
+        ret = CR_ACCESS_DENIED;
+        goto done;
+    }
+
     dwError = RegOpenKeyExW(hClassKey,
                             szClassGuid,
                             0,
@@ -2493,11 +2562,14 @@ PNP_CreateKey(
     DWORD dwError;
     CONFIGRET ret = CR_SUCCESS;
 
-    UNREFERENCED_PARAMETER(hBinding);
     UNREFERENCED_PARAMETER(samDesired);
 
     DPRINT("PNP_CreateKey(%p %S 0x%lx 0x%08lx)\n",
            hBinding, pszSubKey, samDesired, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (ulFlags != 0)
         return CR_INVALID_FLAG;
@@ -2672,10 +2744,12 @@ PNP_DeleteClassKey(
 {
     CONFIGRET ret = CR_SUCCESS;
 
-    UNREFERENCED_PARAMETER(hBinding);
-
     DPRINT("PNP_DeleteClassKey(%p %S 0x%08lx)\n",
            hBinding, pszClassGuid, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (ulFlags & CM_DELETE_CLASS_SUBKEYS)
     {
@@ -2862,11 +2936,13 @@ PNP_RegisterDeviceClassAssociation(
     NTSTATUS Status;
     CONFIGRET ret = CR_SUCCESS;
 
-    UNREFERENCED_PARAMETER(hBinding);
-
     DPRINT1("PNP_RegisterDeviceClassAssociation(%p %S %p %S %S %p %p 0x%08lx)\n",
            hBinding, pszDeviceID, InterfaceGuid, pszReference, pszSymLink,
            pulLength, pulTransferLen, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if ((InterfaceGuid == NULL) ||
         (pszSymLink == NULL) ||
@@ -2917,10 +2993,12 @@ PNP_UnregisterDeviceClassAssociation(
     NTSTATUS Status;
     CONFIGRET ret = CR_SUCCESS;
 
-    UNREFERENCED_PARAMETER(hBinding);
-
     DPRINT1("PNP_UnregisterDeviceClassAssociation(%p %S 0x%08lx)\n",
            hBinding, pszInterfaceDevice, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (pszInterfaceDevice == NULL)
         return CR_INVALID_POINTER;
@@ -3087,11 +3165,13 @@ PNP_SetClassRegProp(
     HKEY hPropKey = 0;
     LONG lError;
 
-    UNREFERENCED_PARAMETER(hBinding);
-
     DPRINT("PNP_SetClassRegProp(%p %S %lu %lu %p %lu 0x%08lx)\n",
            hBinding, pszClassGuid, ulProperty, ulDataType,
            Buffer, ulLength, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (ulFlags != 0)
         return CR_INVALID_FLAG;
@@ -3360,6 +3440,10 @@ PNP_CreateDevInst(
 
     DPRINT("PNP_CreateDevInst(%p %S %S %lu 0x%08lx)\n",
            hBinding, pszParentDeviceID, pszDeviceID, ulLength, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (ulFlags & ~CM_CREATE_DEVNODE_BITS)
         return CR_INVALID_FLAG;
@@ -3672,11 +3756,16 @@ PNP_DeviceInstanceAction(
 {
     CONFIGRET ret = CR_SUCCESS;
 
-    UNREFERENCED_PARAMETER(hBinding);
-
     DPRINT("PNP_DeviceInstanceAction(%p %lu 0x%08lx %S %S)\n",
            hBinding, ulMajorAction, ulMinorAction,
            pszDeviceInstance1, pszDeviceInstance2);
+
+    /* Every action changes device state (setup starts an install as the system, enable
+     * starts a device, re-enumeration can add devices and start their installs), and takes
+     * an administrator, as on Windows 10 (CM_Reenumerate_DevNode of the root as a standard
+     * user returns CR_ACCESS_DENIED there, measured). */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     switch (ulMajorAction)
     {
@@ -3686,12 +3775,6 @@ PNP_DeviceInstanceAction(
             break;
 
         case PNP_DEVINST_ENABLE:
-            /* Changing the state of a device takes an administrator */
-            if (!IsCallerAdmin(hBinding))
-            {
-                ret = CR_ACCESS_DENIED;
-                break;
-            }
             ret = EnableDeviceInstance(pszDeviceInstance1);
             break;
 
@@ -3954,10 +4037,12 @@ PNP_AddID(
     DWORD dwNewDeviceIdSize;
     WCHAR * pszDeviceIdList = NULL;
 
-    UNREFERENCED_PARAMETER(hBinding);
-
     DPRINT("PNP_AddID(%p %S %S 0x%08lx)\n",
            hBinding, pszDeviceID, pszID, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (RegOpenKeyExW(hEnumKey,
                       pszDeviceID,
@@ -4056,6 +4141,10 @@ PNP_RegisterDriver(
     DPRINT("PNP_RegisterDriver(%p %S 0x%lx)\n",
            hBinding, pszDeviceID, ulFlags);
 
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
+
     if (ulFlags & ~CM_REGISTER_DEVICE_DRIVER_BITS)
         return CR_INVALID_FLAG;
 
@@ -4086,6 +4175,10 @@ PNP_QueryRemove(
     DPRINT1("PNP_QueryRemove(%p %S %p %p %lu 0x%lx)\n",
             hBinding, pszDeviceID, pVetoType, pszVetoName,
             ulNameLength, ulFlags);
+
+    /* Removing a device takes an interactive user or an administrator */
+    if (!IsCallerAllowedToEject(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (ulFlags & ~CM_REMOVE_BITS)
         return CR_INVALID_FLAG;
@@ -4147,6 +4240,10 @@ PNP_RequestDeviceEject(
     DPRINT1("PNP_RequestDeviceEject(%p %S %p %p %lu 0x%lx)\n",
             hBinding, pszDeviceID, pVetoType, pszVetoName,
             ulNameLength, ulFlags);
+
+    /* Removing a device takes an interactive user or an administrator */
+    if (!IsCallerAllowedToEject(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (ulFlags != 0)
         return CR_INVALID_FLAG;
@@ -4527,6 +4624,10 @@ PNP_AddEmptyLogConf(
     DPRINT("PNP_AddEmptyLogConf(%p %S %lu %p 0x%08lx)\n",
            hBinding, pDeviceID, ulPriority, pulLogConfTag, ulFlags);
 
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
+
     if (pulLogConfTag == NULL)
         return CR_INVALID_POINTER;
 
@@ -4743,6 +4844,10 @@ PNP_FreeLogConf(
 
     DPRINT("PNP_FreeLogConf(%p %S %lu %lu 0x%08lx)\n",
            hBinding, pDeviceID, ulLogConfType, ulLogConfTag, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (ulFlags != 0)
         return CR_INVALID_FLAG;
