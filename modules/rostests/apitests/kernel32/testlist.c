@@ -23,6 +23,10 @@ extern void func_IocpCancelStatus(void);
 extern void func_IocpThreadExit(void);
 extern void func_ApplicationRestart(void);
 extern void func_AppModel(void);
+extern void func_AppPolicy(void);
+extern void func_FileMappingFromApp(void);
+extern void func_ThreadpoolEx(void);
+extern void func_CtrlRoutine(void);
 extern void func_CalendarInfo(void);
 extern void func_ConsoleCP(void);
 extern void func_CopyFile2(void);
@@ -250,6 +254,10 @@ const struct test winetest_testlist[] =
     { "IocpThreadExit",              func_IocpThreadExit },
     { "ApplicationRestart",          func_ApplicationRestart },
     { "AppModel",                    func_AppModel },
+    { "AppPolicy", func_AppPolicy },
+    { "FileMappingFromApp", func_FileMappingFromApp },
+    { "ThreadpoolEx", func_ThreadpoolEx },
+    { "CtrlRoutine", func_CtrlRoutine },
     { "CalendarInfo",                func_CalendarInfo },
     { "ConsoleCP",                   func_ConsoleCP },
     { "CopyFile2",                   func_CopyFile2 },

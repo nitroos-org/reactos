@@ -67,6 +67,10 @@ list(APPEND SOURCE
     IdnTo.c
     NormalizeString.c
     IsWow64Process2.c
+    AppPolicy.c
+    FileMappingFromApp.c
+    ThreadpoolEx.c
+    CtrlRoutine.c
     VirtualAllocExNuma.c
     DeviceIoControl.c
     DllInitParentPrecondition.c

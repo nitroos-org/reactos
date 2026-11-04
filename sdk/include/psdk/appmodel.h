@@ -42,6 +42,26 @@ typedef enum AppPolicyMediaFoundationCodecLoading
     AppPolicyMediaFoundationCodecLoading_All = 0,
 } AppPolicyMediaFoundationCodecLoading;
 
+typedef enum AppPolicyClrCompat
+{
+    AppPolicyClrCompat_Others = 0,
+    AppPolicyClrCompat_ClassicDesktop = 1,
+    AppPolicyClrCompat_Universal = 2,
+    AppPolicyClrCompat_PackagedDesktop = 3
+} AppPolicyClrCompat;
+
+typedef enum AppPolicyCreateFileAccess
+{
+    AppPolicyCreateFileAccess_Full = 0,
+    AppPolicyCreateFileAccess_Limited = 1
+} AppPolicyCreateFileAccess;
+
+typedef enum AppPolicyLifecycleManagement
+{
+    AppPolicyLifecycleManagement_Unmanaged = 0,
+    AppPolicyLifecycleManagement_Managed = 1
+} AppPolicyLifecycleManagement;
+
 typedef struct PACKAGE_VERSION
 {
     union
@@ -147,6 +167,33 @@ WINBASEAPI LONG WINAPI VerifyPackageFamilyName(_In_ PCWSTR packageFamilyName);
 WINBASEAPI LONG WINAPI VerifyPackageId(_In_ const PACKAGE_ID *packageId);
 WINBASEAPI LONG WINAPI VerifyPackageRelativeApplicationId(_In_ PCWSTR packageRelativeApplicationId);
 WINBASEAPI LONG WINAPI VerifyApplicationUserModelId(_In_ PCWSTR applicationUserModelId);
+
+WINBASEAPI
+_Check_return_
+_Success_(return == ERROR_SUCCESS)
+LONG
+WINAPI
+AppPolicyGetClrCompat(
+    _In_ HANDLE processToken,
+    _Out_ AppPolicyClrCompat* policy);
+
+WINBASEAPI
+_Check_return_
+_Success_(return == ERROR_SUCCESS)
+LONG
+WINAPI
+AppPolicyGetCreateFileAccess(
+    _In_ HANDLE processToken,
+    _Out_ AppPolicyCreateFileAccess* policy);
+
+WINBASEAPI
+_Check_return_
+_Success_(return == ERROR_SUCCESS)
+LONG
+WINAPI
+AppPolicyGetLifecycleManagement(
+    _In_ HANDLE processToken,
+    _Out_ AppPolicyLifecycleManagement* policy);
 
 WINBASEAPI
 _Check_return_

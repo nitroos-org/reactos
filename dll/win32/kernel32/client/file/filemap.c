@@ -373,4 +373,152 @@ FlushViewOfFile(IN LPCVOID lpBaseAddress,
     return TRUE;
 }
 
+/* WINDOWS 8 AND 10 FUNCTIONS *************************************************/
+
+BOOL WINAPI GetNumaHighestNodeNumber(OUT PULONG HighestNodeNumber);
+
+#define BASEP_NO_PREFERRED_NODE     0xFFFFFFFF
+
+/* The preferred node must exist (or be NUMA_NO_PREFERRED_NODE): the views have no preference here */
+static
+BOOL
+BasepCheckNumaNode(
+    _In_ ULONG Node)
+{
+    ULONG HighestNode;
+
+    if (Node == BASEP_NO_PREFERRED_NODE)
+        return TRUE;
+
+    if (!GetNumaHighestNodeNumber(&HighestNode))
+        return FALSE;
+
+    if (Node > HighestNode)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+CreateFileMappingNumaW(
+    _In_ HANDLE hFile,
+    _In_opt_ LPSECURITY_ATTRIBUTES lpFileMappingAttributes,
+    _In_ DWORD flProtect,
+    _In_ DWORD dwMaximumSizeHigh,
+    _In_ DWORD dwMaximumSizeLow,
+    _In_opt_ LPCWSTR lpName,
+    _In_ DWORD nndPreferred)
+{
+    if (!BasepCheckNumaNode(nndPreferred))
+        return NULL;
+
+    return CreateFileMappingW(hFile,
+                              lpFileMappingAttributes,
+                              flProtect,
+                              dwMaximumSizeHigh,
+                              dwMaximumSizeLow,
+                              lpName);
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+CreateFileMappingNumaA(
+    _In_ HANDLE hFile,
+    _In_opt_ LPSECURITY_ATTRIBUTES lpFileMappingAttributes,
+    _In_ DWORD flProtect,
+    _In_ DWORD dwMaximumSizeHigh,
+    _In_ DWORD dwMaximumSizeLow,
+    _In_opt_ LPCSTR lpName,
+    _In_ DWORD nndPreferred)
+    ConvertAnsiToUnicodePrologue
+    if (!lpName)
+    {
+        return CreateFileMappingNumaW(hFile, lpFileMappingAttributes, flProtect,
+                                      dwMaximumSizeHigh, dwMaximumSizeLow, NULL, nndPreferred);
+    }
+    ConvertAnsiToUnicodeBody(lpName)
+    if (NT_SUCCESS(Status))
+    {
+        return CreateFileMappingNumaW(hFile, lpFileMappingAttributes, flProtect,
+                                      dwMaximumSizeHigh, dwMaximumSizeLow, UnicodeCache->Buffer, nndPreferred);
+    }
+    ConvertAnsiToUnicodeEpilogue
+
+/*
+ * @implemented
+ */
+LPVOID
+WINAPI
+MapViewOfFileExNuma(
+    _In_ HANDLE hFileMappingObject,
+    _In_ DWORD dwDesiredAccess,
+    _In_ DWORD dwFileOffsetHigh,
+    _In_ DWORD dwFileOffsetLow,
+    _In_ SIZE_T dwNumberOfBytesToMap,
+    _In_opt_ LPVOID lpBaseAddress,
+    _In_ DWORD nndPreferred)
+{
+    if (!BasepCheckNumaNode(nndPreferred))
+        return NULL;
+
+    return MapViewOfFileEx(hFileMappingObject,
+                           dwDesiredAccess,
+                           dwFileOffsetHigh,
+                           dwFileOffsetLow,
+                           dwNumberOfBytesToMap,
+                           lpBaseAddress);
+}
+
+/*
+ * @implemented
+ *
+ * The same as CreateFileMappingW with the size in one 64 bit value. Windows lets a process that is not an app
+ * ask for execute protection here too.
+ */
+HANDLE
+WINAPI
+CreateFileMappingFromApp(
+    _In_ HANDLE hFile,
+    _In_opt_ PSECURITY_ATTRIBUTES SecurityAttributes,
+    _In_ ULONG PageProtection,
+    _In_ ULONG64 MaximumSize,
+    _In_opt_ PCWSTR Name)
+{
+    return CreateFileMappingW(hFile,
+                              SecurityAttributes,
+                              PageProtection,
+                              (DWORD)(MaximumSize >> 32),
+                              (DWORD)MaximumSize,
+                              Name);
+}
+
+/*
+ * @implemented
+ */
+PVOID
+WINAPI
+MapViewOfFileFromApp(
+    _In_ HANDLE hFileMappingObject,
+    _In_ ULONG DesiredAccess,
+    _In_ ULONG64 FileOffset,
+    _In_ SIZE_T NumberOfBytesToMap)
+{
+    return MapViewOfFileEx(hFileMappingObject,
+                           DesiredAccess,
+                           (DWORD)(FileOffset >> 32),
+                           (DWORD)FileOffset,
+                           NumberOfBytesToMap,
+                           NULL);
+}
+
 /* EOF */

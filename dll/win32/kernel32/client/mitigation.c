@@ -249,4 +249,50 @@ SetProcessMitigationPolicy(
     return TRUE;
 }
 
+/*
+ * @implemented
+ *
+ * The CPU/OS pair of this system has no user mode shadow stacks (CET): not available in any environment.
+ */
+BOOL
+WINAPI
+IsUserCetAvailableInEnvironment(
+    _In_ DWORD UserCetEnvironment)
+{
+    return FALSE;
+}
+
+#define BASEP_ENCLAVE_TYPE_SGX        0x00000001
+#define BASEP_ENCLAVE_TYPE_SGX2       0x00000002
+#define BASEP_ENCLAVE_TYPE_VBS        0x00000010
+#define BASEP_ENCLAVE_TYPE_VBS_BASIC  0x00000011
+
+/*
+ * @implemented
+ *
+ * No enclave type is supported: there is neither SGX nor virtualization based security. An unknown type is an
+ * invalid parameter, a known one is ERROR_NOT_SUPPORTED. (Inferred from the API contract; not measured.)
+ */
+BOOL
+WINAPI
+IsEnclaveTypeSupported(
+    _In_ DWORD flEnclaveType)
+{
+    switch (flEnclaveType)
+    {
+        case BASEP_ENCLAVE_TYPE_SGX:
+        case BASEP_ENCLAVE_TYPE_SGX2:
+        case BASEP_ENCLAVE_TYPE_VBS:
+        case BASEP_ENCLAVE_TYPE_VBS_BASIC:
+            SetLastError(ERROR_NOT_SUPPORTED);
+            break;
+
+        default:
+            SetLastError(ERROR_INVALID_PARAMETER);
+            break;
+    }
+
+    return FALSE;
+}
+
 /* EOF */
