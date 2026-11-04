@@ -698,7 +698,10 @@ ConioWriteText(PFRONTEND FrontEnd,
                     /* Delete its trailing byte... */
                     Ptr->Char.UnicodeChar = L' ';
                     if (Attrib)
+                    {
                         Ptr->Attributes = Buff->ScreenDefaultAttrib;
+                        ConioStampExt(Buff, Ptr);
+                    }
                     Ptr->Attributes &= ~COMMON_LVB_SBCSDBCS;
 
                     if (Buff->CursorPosition.X > 0)
@@ -709,7 +712,10 @@ ConioWriteText(PFRONTEND FrontEnd,
 
                 Ptr->Char.UnicodeChar = L' ';
                 if (Attrib)
+                {
                     Ptr->Attributes = Buff->ScreenDefaultAttrib;
+                    ConioStampExt(Buff, Ptr);
+                }
                 Ptr->Attributes &= ~COMMON_LVB_SBCSDBCS;
 
                 UpdateRect.Left  = min(min(UpdateRect.Left , Buff->CursorPosition.X), OldX);
@@ -743,7 +749,10 @@ ConioWriteText(PFRONTEND FrontEnd,
                 {
                     Ptr->Char.UnicodeChar = L' ';
                     if (Attrib)
+                    {
                         Ptr->Attributes = Buff->ScreenDefaultAttrib;
+                        ConioStampExt(Buff, Ptr);
+                    }
                     Ptr->Attributes &= ~COMMON_LVB_SBCSDBCS;
 
                     ++Ptr;
@@ -756,7 +765,10 @@ ConioWriteText(PFRONTEND FrontEnd,
                     {
                         Ptr->Char.UnicodeChar = L' ';
                         if (Attrib)
+                        {
                             Ptr->Attributes = Buff->ScreenDefaultAttrib;
+                            ConioStampExt(Buff, Ptr);
+                        }
                         Ptr->Attributes &= ~COMMON_LVB_SBCSDBCS;
                     }
                 }
@@ -845,7 +857,10 @@ ConioWriteText(PFRONTEND FrontEnd,
                 Ptr = ConioCoordToPointer(Buff, Buff->CursorPosition.X - 1, Buff->CursorPosition.Y);
                 Ptr->Char.UnicodeChar = L' ';
                 if (Attrib)
+                {
                     Ptr->Attributes = Buff->ScreenDefaultAttrib;
+                    ConioStampExt(Buff, Ptr);
+                }
                 Ptr->Attributes &= ~COMMON_LVB_SBCSDBCS;
             }
             Ptr = ConioCoordToPointer(Buff, Buff->CursorPosition.X, Buff->CursorPosition.Y);
@@ -859,7 +874,10 @@ ConioWriteText(PFRONTEND FrontEnd,
             /* Set the leading byte */
             Ptr->Char.UnicodeChar = Char;
             if (Attrib)
+            {
                 Ptr->Attributes = Buff->ScreenDefaultAttrib;
+                ConioStampExt(Buff, Ptr);
+            }
             Ptr->Attributes &= ~COMMON_LVB_SBCSDBCS;
             Ptr->Attributes |= COMMON_LVB_LEADING_BYTE;
 
@@ -868,7 +886,10 @@ ConioWriteText(PFRONTEND FrontEnd,
             Ptr = ConioCoordToPointer(Buff, Buff->CursorPosition.X, Buff->CursorPosition.Y);
             // Ptr->Char.UnicodeChar = Buffer[i]; // L' ';
             if (Attrib)
+            {
                 Ptr->Attributes = Buff->ScreenDefaultAttrib;
+                ConioStampExt(Buff, Ptr);
+            }
             Ptr->Attributes &= ~COMMON_LVB_SBCSDBCS;
             Ptr->Attributes |= COMMON_LVB_TRAILING_BYTE;
 
@@ -878,7 +899,10 @@ ConioWriteText(PFRONTEND FrontEnd,
         {
             Ptr->Char.UnicodeChar = Char;
             if (Attrib)
+            {
                 Ptr->Attributes = Buff->ScreenDefaultAttrib;
+                ConioStampExt(Buff, Ptr);
+            }
             Ptr->Attributes &= ~COMMON_LVB_SBCSDBCS;
         }
 
@@ -901,7 +925,10 @@ ConioWriteText(PFRONTEND FrontEnd,
             {
                 Ptr->Char.UnicodeChar = L' ';
                 if (Attrib)
+                {
                     Ptr->Attributes = Buff->ScreenDefaultAttrib;
+                    ConioStampExt(Buff, Ptr);
+                }
                 Ptr->Attributes &= ~COMMON_LVB_SBCSDBCS;
             }
         }

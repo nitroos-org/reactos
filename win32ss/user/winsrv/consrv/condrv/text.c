@@ -37,6 +37,145 @@ do { \
 /* PRIVATE FUNCTIONS **********************************************************/
 
 /*
+ * Memory a text-mode buffer holds besides its cells (the scrollback rows for a pseudoconsole
+ * host and the extended colors) is bounded: a client chooses when to make the server allocate
+ * it, so each console has a limit and the server has one for all of them.
+ */
+#define CONIO_EXTRA_CONSOLE_MAX     (32 * 1024 * 1024)
+#define CONIO_EXTRA_SERVER_MAX      (256 * 1024 * 1024)
+#define CONIO_EXT_MAX_CELLS         (1024 * 1024)   /* the largest buffer that keeps extended colors */
+
+static volatile LONG ConioExtraServerBytes = 0;
+
+PVOID
+ConioAllocExtra(PTEXTMODE_SCREEN_BUFFER Buff, SIZE_T Size)
+{
+    PCONSOLE Console = Buff->Header.Console;
+    PLIST_ENTRY Entry;
+    SIZE_T Used = 0;
+    PVOID Memory;
+
+    if (Size == 0 || Size > CONIO_EXTRA_CONSOLE_MAX) return NULL;
+
+    /* What all the text-mode buffers of this console hold already */
+    for (Entry = Console->BufferList.Flink; Entry != &Console->BufferList; Entry = Entry->Flink)
+    {
+        PCONSOLE_SCREEN_BUFFER Other = CONTAINING_RECORD(Entry, CONSOLE_SCREEN_BUFFER, ListEntry);
+        if (Other->Header.Type == TEXTMODE_BUFFER)
+            Used += ((PTEXTMODE_SCREEN_BUFFER)Other)->ExtraBytes;
+    }
+    if (Used + Size > CONIO_EXTRA_CONSOLE_MAX) return NULL;
+
+    if ((ULONG)InterlockedExchangeAdd(&ConioExtraServerBytes, (LONG)Size) + Size > CONIO_EXTRA_SERVER_MAX)
+    {
+        InterlockedExchangeAdd(&ConioExtraServerBytes, -(LONG)Size);
+        return NULL;
+    }
+    Memory = ConsoleAllocHeap(HEAP_ZERO_MEMORY, Size);
+    if (!Memory)
+    {
+        InterlockedExchangeAdd(&ConioExtraServerBytes, -(LONG)Size);
+        return NULL;
+    }
+    Buff->ExtraBytes += Size;
+    return Memory;
+}
+
+VOID
+ConioFreeExtra(PTEXTMODE_SCREEN_BUFFER Buff, PVOID Memory, SIZE_T Size)
+{
+    if (!Memory) return;
+    ConsoleFreeHeap(Memory);
+    ASSERT(Buff->ExtraBytes >= Size);
+    Buff->ExtraBytes -= Size;
+    InterlockedExchangeAdd(&ConioExtraServerBytes, -(LONG)Size);
+}
+
+#define CONIO_SCROLL_ROWS_BYTES(Width)  ((SIZE_T)CONSOLE_SCROLLBACK_ROWS * (Width) * sizeof(CHAR_INFO))
+#define CONIO_SCROLL_EXT_BYTES(Width)   ((SIZE_T)CONSOLE_SCROLLBACK_ROWS * (Width) * sizeof(CONSOLE_EXT_CELL))
+
+VOID
+ConioDropScrollback(PTEXTMODE_SCREEN_BUFFER Buff)
+{
+    ConioFreeExtra(Buff, Buff->ScrollRows, CONIO_SCROLL_ROWS_BYTES(Buff->ScrollWidth));
+    ConioFreeExtra(Buff, Buff->ScrollExt, CONIO_SCROLL_EXT_BYTES(Buff->ScrollWidth));
+    Buff->ScrollRows = NULL;
+    Buff->ScrollExt = NULL;
+}
+
+/* The scrollback rows of Width cells, if the limits allow them */
+BOOLEAN
+ConioEnableScrollback(PTEXTMODE_SCREEN_BUFFER Buff, ULONG Width)
+{
+    PCHAR_INFO Rows;
+
+    /* Rows kept for another width are of no use */
+    ConioDropScrollback(Buff);
+    Rows = ConioAllocExtra(Buff, CONIO_SCROLL_ROWS_BYTES(Width));
+    if (!Rows) return FALSE;
+    Buff->ScrollRows = Rows;
+    Buff->ScrollWidth = Width;
+    return TRUE;
+}
+
+/* The extended colors are kept for a buffer of the size they were made for only */
+BOOLEAN
+ConioExtIsUsable(PTEXTMODE_SCREEN_BUFFER Buff)
+{
+    if (!Buff->ExtCells) return FALSE;
+    if (Buff->ExtCount != (ULONG)Buff->ScreenBufferSize.X * Buff->ScreenBufferSize.Y)
+    {
+        ConioFreeExtra(Buff, Buff->ExtCells, (SIZE_T)Buff->ExtCount * sizeof(CONSOLE_EXT_CELL));
+        Buff->ExtCells = NULL;
+        Buff->ExtCount = 0;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* The cell Ptr was just written with the current attribute: it gets the current extended colors */
+VOID
+ConioStampExt(PTEXTMODE_SCREEN_BUFFER Buff, PCHAR_INFO Ptr)
+{
+    PCONSOLE_EXT_CELL Ext;
+    ULONG Fore = Buff->Vt.ExtFore, Back = Buff->Vt.ExtBack;
+
+    /* Colors that do not belong to the attribute any more (it was set by other means) do not count */
+    if (Fore && CONSOLE_EXTCOLOR_SNAP(Fore) != (ULONG)(Buff->ScreenDefaultAttrib & 0x0F)) Fore = 0;
+    if (Back && CONSOLE_EXTCOLOR_SNAP(Back) != (ULONG)((Buff->ScreenDefaultAttrib >> 4) & 0x0F)) Back = 0;
+
+    if (!ConioExtIsUsable(Buff))
+    {
+        ULONG Cells = (ULONG)Buff->ScreenBufferSize.X * Buff->ScreenBufferSize.Y;
+
+        if ((!Fore && !Back) || Cells > CONIO_EXT_MAX_CELLS) return;
+        Buff->ExtCells = ConioAllocExtra(Buff, (SIZE_T)Cells * sizeof(CONSOLE_EXT_CELL));
+        if (!Buff->ExtCells) return;
+        Buff->ExtCount = Cells;
+    }
+    Ext = &Buff->ExtCells[Ptr - Buff->Buffer];
+    Ext->Fore = Fore;
+    Ext->Back = Back;
+}
+
+/* Cells written with a 16-color attribute by a legacy API have no extended colors */
+VOID
+ConioClearExt(PTEXTMODE_SCREEN_BUFFER Buff, PCHAR_INFO Ptr, ULONG Count)
+{
+    if (!Buff->ExtCells || !ConioExtIsUsable(Buff)) return;
+    RtlZeroMemory(&Buff->ExtCells[Ptr - Buff->Buffer], (SIZE_T)Count * sizeof(CONSOLE_EXT_CELL));
+}
+
+/* The cells Src.. moved to Dst..: so did their extended colors */
+VOID
+ConioMoveExt(PTEXTMODE_SCREEN_BUFFER Buff, PCHAR_INFO Dst, PCHAR_INFO Src, ULONG Count)
+{
+    if (!Buff->ExtCells || !ConioExtIsUsable(Buff)) return;
+    RtlMoveMemory(&Buff->ExtCells[Dst - Buff->Buffer], &Buff->ExtCells[Src - Buff->Buffer],
+                  (SIZE_T)Count * sizeof(CONSOLE_EXT_CELL));
+}
+
+/*
  * Keep the top Rows rows of the buffer before they are scrolled off, for a pseudoconsole host
  * that asked for them (ConsolepGetScrollback): the host paints the rows into the scrollback of
  * its terminal, which only receives what scrolls off its own screen. The alternate screen
@@ -46,20 +185,37 @@ VOID
 ConioRecordScrolledRows(PTEXTMODE_SCREEN_BUFFER Buff, ULONG Rows)
 {
     ULONG Row, Width = Buff->ScreenBufferSize.X;
+    BOOLEAN UseExt;
 
     if (!Buff->ScrollRows || Buff->Vt.InAltBuffer) return;
     if (Width != Buff->ScrollWidth)
     {
         /* The buffer was resized under the host: what was kept has another layout */
-        ConsoleFreeHeap(Buff->ScrollRows);
-        Buff->ScrollRows = NULL;
+        ConioDropScrollback(Buff);
         return;
+    }
+    UseExt = ConioExtIsUsable(Buff);
+    if (UseExt && !Buff->ScrollExt)
+    {
+        /* Colors that cannot be kept (the limits) only cost the colors of the rows */
+        Buff->ScrollExt = ConioAllocExtra(Buff, CONIO_SCROLL_EXT_BYTES(Width));
     }
     Rows = min(Rows, (ULONG)Buff->ScreenBufferSize.Y);
     for (Row = 0; Row < Rows; ++Row)
     {
-        RtlCopyMemory(&Buff->ScrollRows[(SIZE_T)((ULONG)Buff->ScrollTotal & (CONSOLE_SCROLLBACK_ROWS - 1)) * Width],
-                      ConioCoordToPointer(Buff, 0, Row), Width * sizeof(CHAR_INFO));
+        ULONG Slot = (ULONG)Buff->ScrollTotal & (CONSOLE_SCROLLBACK_ROWS - 1);
+        PCHAR_INFO Source = ConioCoordToPointer(Buff, 0, Row);
+
+        RtlCopyMemory(&Buff->ScrollRows[(SIZE_T)Slot * Width], Source, Width * sizeof(CHAR_INFO));
+        if (Buff->ScrollExt)
+        {
+            PCONSOLE_EXT_CELL Dest = &Buff->ScrollExt[(SIZE_T)Slot * Width];
+
+            if (UseExt)
+                RtlCopyMemory(Dest, &Buff->ExtCells[Source - Buff->Buffer], Width * sizeof(CONSOLE_EXT_CELL));
+            else
+                RtlZeroMemory(Dest, Width * sizeof(CONSOLE_EXT_CELL));
+        }
         ++Buff->ScrollTotal;
     }
 }
@@ -166,11 +322,14 @@ TEXTMODE_BUFFER_Destroy(IN OUT PCONSOLE_SCREEN_BUFFER Buffer)
     Buffer->Header.Type = SCREEN_BUFFER;
 
     ConsoleFreeHeap(Buff->Buffer);
-    if (Buff->ScrollRows)
-        ConsoleFreeHeap(Buff->ScrollRows);
+    ConioDropScrollback(Buff);
+    ConioFreeExtra(Buff, Buff->ExtCells, (SIZE_T)Buff->ExtCount * sizeof(CONSOLE_EXT_CELL));
+    Buff->ExtCells = NULL;
     /* The main buffer saved while the alternate screen buffer is shown */
     if (Buff->Vt.AltMainBuffer)
         ConsoleFreeHeap(Buff->Vt.AltMainBuffer);
+    ConioFreeExtra(Buff, Buff->Vt.AltMainExt, (SIZE_T)Buff->Vt.AltMainExtCount * sizeof(CONSOLE_EXT_CELL));
+    Buff->Vt.AltMainExt = NULL;
 
     CONSOLE_SCREEN_BUFFER_Destroy(Buffer);
 }
@@ -195,6 +354,8 @@ ClearLineBuffer(PTEXTMODE_SCREEN_BUFFER Buff)
         /* Fill the cell */
         Ptr->Char.UnicodeChar = L' ';
         Ptr->Attributes = Buff->ScreenDefaultAttrib;
+        /* A new line has the current colors, which may be extended ones */
+        ConioStampExt(Buff, Ptr);
     }
 }
 
@@ -319,6 +480,7 @@ ConioCopyRegion(
 #else
         /* RtlMoveMemory() takes into account for the direction of the copy */
         RtlMoveMemory(PtrDst, PtrSrc, Width * sizeof(CHAR_INFO));
+        ConioMoveExt(ScreenBuffer, PtrDst, PtrSrc, Width);
 #endif
     }
 }
@@ -373,6 +535,7 @@ ConioFillRegion(
             {
                 /* We are outside the excluded region, fill the destination */
                 *Ptr = FillChar;
+                ConioClearExt(ScreenBuffer, Ptr, 1);
                 // Ptr->Attributes &= ~COMMON_LVB_SBCSDBCS;
             }
 
@@ -403,6 +566,7 @@ ConioResizeBuffer(PCONSOLE Console,
     WORD CurrentAttribute;
     USHORT CurrentY;
     PCHAR_INFO OldBuffer;
+    PCONSOLE_EXT_CELL NewExt = NULL;
     DWORD i;
     DWORD diff;
 
@@ -495,6 +659,26 @@ ConioResizeBuffer(PCONSOLE Console,
             ++Offset;
         }
     }
+
+    /* The extended colors follow the cells (without room for them the cells have the 16 colors) */
+    if (ConioExtIsUsable(ScreenBuffer) && (ULONG)Size.X * Size.Y <= CONIO_EXT_MAX_CELLS)
+    {
+        NewExt = ConioAllocExtra(ScreenBuffer, (SIZE_T)Size.X * Size.Y * sizeof(CONSOLE_EXT_CELL));
+        if (NewExt)
+        {
+            ULONG Columns = min((ULONG)Size.X, (ULONG)ScreenBuffer->ScreenBufferSize.X);
+
+            for (CurrentY = 0; CurrentY < ScreenBuffer->ScreenBufferSize.Y && CurrentY < Size.Y; CurrentY++)
+            {
+                RtlCopyMemory(&NewExt[(SIZE_T)CurrentY * Size.X],
+                              &ScreenBuffer->ExtCells[ConioCoordToPointer(ScreenBuffer, 0, CurrentY) - OldBuffer],
+                              Columns * sizeof(CONSOLE_EXT_CELL));
+            }
+        }
+    }
+    ConioFreeExtra(ScreenBuffer, ScreenBuffer->ExtCells, (SIZE_T)ScreenBuffer->ExtCount * sizeof(CONSOLE_EXT_CELL));
+    ScreenBuffer->ExtCells = NewExt;
+    ScreenBuffer->ExtCount = NewExt ? (ULONG)Size.X * Size.Y : 0;
 
     (void)InterlockedExchangePointer((PVOID volatile*)&ScreenBuffer->Buffer, Buffer);
     ConsoleFreeHeap(OldBuffer);
@@ -591,6 +775,7 @@ ConDrvChangeScreenBufferAttributes(IN PCONSOLE Console,
     /* These are also the colors that the virtual terminal resets to */
     Buffer->Vt.DefaultAttrib = (NewScreenAttrib & 0xFF);
     Buffer->Vt.Bold = Buffer->Vt.BoldBright = FALSE;
+    Buffer->Vt.ExtFore = Buffer->Vt.ExtBack = 0;
 
     /* Refresh the display if needed */
     if ((PCONSOLE_SCREEN_BUFFER)Buffer == Console->ActiveBuffer)
@@ -728,6 +913,7 @@ ConDrvWriteConsoleOutput(IN PCONSOLE Console,
             }
             // TODO: Sanitize DBCS attributes?
             Ptr->Attributes = CurCharInfo->Attributes;
+            ConioClearExt(Buffer, Ptr, 1);
             ++Ptr;
             ++CurCharInfo;
         }
@@ -792,6 +978,7 @@ ConDrvWriteConsoleOutputVDM(IN PCONSOLE Console,
         {
             ConsoleOutputAnsiToUnicodeChar(Console, &Ptr->Char.UnicodeChar, &CurCharInfo->Char);
             Ptr->Attributes = CurCharInfo->Attributes;
+            ConioClearExt(Buffer, Ptr, 1);
             ++Ptr;
             ++CurCharInfo;
         }
@@ -1182,6 +1369,7 @@ IntWriteConsoleOutputStringAttribute(
 
             Ptr->Attributes &= COMMON_LVB_SBCSDBCS;
             Ptr->Attributes |= (*StringBuffer & ~COMMON_LVB_SBCSDBCS);
+            ConioClearExt(Buffer, Ptr, 1);
 
             ++Ptr;
 
@@ -1383,6 +1571,7 @@ ConDrvFillConsoleOutput(IN PCONSOLE Console,
                 case CODE_ATTRIBUTE:
                     Ptr->Attributes &= COMMON_LVB_SBCSDBCS;
                     Ptr->Attributes |= (Code.Attribute & ~COMMON_LVB_SBCSDBCS);
+                    ConioClearExt(Buffer, Ptr, 1);
                     break;
             }
 
@@ -1472,6 +1661,7 @@ ConDrvSetConsoleTextAttribute(IN PCONSOLE Console,
     Buffer->ScreenDefaultAttrib = (Attributes & ~COMMON_LVB_SBCSDBCS);
     /* The attribute replaces the bold rendition of the virtual terminal */
     Buffer->Vt.Bold = Buffer->Vt.BoldBright = FALSE;
+    Buffer->Vt.ExtFore = Buffer->Vt.ExtBack = 0;
     return STATUS_SUCCESS;
 }
 

@@ -609,19 +609,17 @@ CON_API(SrvGetConsoleScrollback,
         Width <= CONSOLE_SCROLLBACK_MAX_WIDTH &&
         (!Buffer->ScrollRows || Buffer->ScrollWidth != Width))
     {
-        PCHAR_INFO Rows = ConsoleAllocHeap(HEAP_ZERO_MEMORY,
-                                           (SIZE_T)CONSOLE_SCROLLBACK_ROWS * Width * sizeof(CHAR_INFO));
-        if (!Rows)
+        /* The memory a console (and the server) may spend on rows and colors is limited */
+        if (!ConioEnableScrollback(Buffer, Width))
         {
             Status = STATUS_NO_MEMORY;
             goto Quit;
         }
-        if (Buffer->ScrollRows) ConsoleFreeHeap(Buffer->ScrollRows);
-        Buffer->ScrollRows = Rows;
-        Buffer->ScrollWidth = Width;
     }
 
     ScrollbackRequest->Flags = (Buffer->ScrollRows && Buffer->ScrollWidth == Width) ? CONSOLE_SCROLLBACK_ENABLED : 0;
+    if (ConioExtIsUsable(Buffer) || Buffer->ScrollExt)
+        ScrollbackRequest->Flags |= CONSOLE_SCROLLBACK_EXTCOLORS;
     ScrollbackRequest->Width = Width;
     ScrollbackRequest->Total = Buffer->ScrollTotal;
     First = ScrollbackRequest->First;
@@ -639,6 +637,87 @@ CON_API(SrvGetConsoleScrollback,
     }
     ScrollbackRequest->First = First;
     ScrollbackRequest->Count = Count;
+
+Quit:
+    ConSrvReleaseScreenBuffer(Buffer, TRUE);
+    return Status;
+}
+
+/*
+ * API_NUMBER: ConsolepGetExtColors
+ *
+ * The 256-color and 24-bit colors of Count rows of a text-mode buffer (see conmsg.h), for a
+ * headless console host: rows of the screen buffer from row First, or with
+ * CONSOLE_EXTCOLORS_SCROLLBACK rows scrolled off the top from number First on (as the rows of
+ * ConsolepGetScrollback). Count comes back as the rows that have colors: 0 for a buffer that
+ * never received any, and the cells are not touched then.
+ */
+CON_API(SrvGetConsoleExtColors,
+        CONSOLE_EXTCOLORS, ExtColorsRequest)
+{
+    NTSTATUS Status;
+    PTEXTMODE_SCREEN_BUFFER Buffer;
+    ULONG Width, Height, Count = 0;
+    ULONGLONG First = ExtColorsRequest->First;
+
+    if (ExtColorsRequest->Count > CONSOLE_EXTCOLORS_ROWS_MAX ||
+        (ExtColorsRequest->Flags & ~CONSOLE_EXTCOLORS_SCROLLBACK))
+        return STATUS_INVALID_PARAMETER;
+
+    Status = ConSrvGetTextModeBuffer(ProcessData,
+                                     ExtColorsRequest->OutputHandle,
+                                     &Buffer, GENERIC_READ, TRUE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    ASSERT((PCONSOLE)Console == Buffer->Header.Console);
+
+    Width  = Buffer->ScreenBufferSize.X;
+    Height = Buffer->ScreenBufferSize.Y;
+    if (ExtColorsRequest->Count)
+    {
+        /* The colors travel in the capture buffer, validated for the width the caller expects */
+        if (ExtColorsRequest->Width != Width ||
+            (ULONGLONG)ExtColorsRequest->Count * Width > CONSOLE_EXTCOLORS_CELLS_MAX ||
+            !CsrValidateMessageBuffer(ApiMessage,
+                                      (PVOID*)&ExtColorsRequest->Cells,
+                                      ExtColorsRequest->Count * Width,
+                                      sizeof(CONSOLE_EXT_CELL)))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto Quit;
+        }
+    }
+
+    if (ExtColorsRequest->Flags & CONSOLE_EXTCOLORS_SCROLLBACK)
+    {
+        if (Buffer->ScrollRows && Buffer->ScrollExt && Buffer->ScrollWidth == Width)
+        {
+            ULONGLONG Oldest = Buffer->ScrollTotal > CONSOLE_SCROLLBACK_ROWS ? Buffer->ScrollTotal - CONSOLE_SCROLLBACK_ROWS : 0;
+
+            if (First < Oldest) First = Oldest;
+            while (Count < ExtColorsRequest->Count && First + Count < Buffer->ScrollTotal)
+            {
+                RtlCopyMemory(&ExtColorsRequest->Cells[(SIZE_T)Count * Width],
+                              &Buffer->ScrollExt[(SIZE_T)((ULONG)(First + Count) & (CONSOLE_SCROLLBACK_ROWS - 1)) * Width],
+                              Width * sizeof(CONSOLE_EXT_CELL));
+                ++Count;
+            }
+        }
+    }
+    else if (ConioExtIsUsable(Buffer) && First < Height)
+    {
+        while (Count < ExtColorsRequest->Count && First + Count < Height)
+        {
+            RtlCopyMemory(&ExtColorsRequest->Cells[(SIZE_T)Count * Width],
+                          &Buffer->ExtCells[ConioCoordToPointer(Buffer, 0, (ULONG)First + Count) - Buffer->Buffer],
+                          Width * sizeof(CONSOLE_EXT_CELL));
+            ++Count;
+        }
+    }
+    ExtColorsRequest->First = First;
+    ExtColorsRequest->Width = Width;
+    ExtColorsRequest->Count = Count;
 
 Quit:
     ConSrvReleaseScreenBuffer(Buffer, TRUE);
