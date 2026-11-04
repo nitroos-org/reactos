@@ -58,6 +58,10 @@ FatIsCurrentOperationSynchedForDcbTeardown (
 #endif
 #endif
 
+#ifdef __REACTOS__
+NTKERNELAPI VOID NTAPI CcRosAllowLazyClose( _In_ PFILE_OBJECT FileObject );
+#endif
+
 VOID
 FatInitializeCacheMap (
     _In_ PFILE_OBJECT FileObject,
@@ -85,6 +89,14 @@ Routine Description:
                           PinAccess,
                           Callbacks,
                           LazyWriteContext );
+
+#ifdef __REACTOS__
+    //
+    //  The last close may leave the dirty data to the lazy writer: the Fcb lives until this file
+    //  object is closed, and the cache map's reference delays that until the map is deleted
+    //
+    CcRosAllowLazyClose( FileObject );
+#endif
 
 #if (NTDDI_VERSION >= NTDDI_WIN8)
     //

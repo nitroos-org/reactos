@@ -307,6 +307,11 @@ typedef struct _NG_GLOBAL
 
 extern NG_GLOBAL NgGlobal;
 
+/* ntoskrnl (ReactOS): the last close of a file may leave its dirty data to the lazy writer.  Safe here: the
+ * FCB (SectionObjectPointers, lazy write context) lives until the cached file object is closed, which the
+ * cache map's reference delays until the map is deleted. */
+NTKERNELAPI VOID NTAPI CcRosAllowLazyClose(_In_ PFILE_OBJECT FileObject);
+
 /* ntfsng.c */
 ULONG NgReadDword(PUNICODE_STRING KeyPath, PCWSTR Name);
 NTSTATUS NgCleanupDismounted(PNG_VCB Vcb, PIRP Irp);
