@@ -67,16 +67,33 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_CPLSYSTEMNAME "Add/Remove Programs"
-    IDS_CPLSYSTEMDESCRIPTION "Sets up programs and creates shortcuts."
+    IDS_CPLSYSTEMNAME "Programs and Features"
+    IDS_CPLSYSTEMDESCRIPTION "Uninstall or change programs, and turn features on or off."
     IDS_CREATE_SHORTCUT "Create Shortcut"
     IDS_ERROR_NOT_FOUND "The file %s was not found."
 END
 
 STRINGTABLE
 BEGIN
-    IDS_FEATURESNAME "Turn Windows features on or off"
-    IDS_FEATURESDESCRIPTION "Turn optional ReactOS features and add-on software on or off."
+    IDS_FEATURESNAME "Turn NitroOS features on or off"
+    IDS_FEATURESDESCRIPTION "Turn optional NitroOS features and add-on software on or off."
+END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "Programs and Features"
+    IDS_PROG_HEADER "Uninstall or change a program. To install software or turn system features on or off, use ""Turn NitroOS features on or off""."
+    IDS_PROG_COL_NAME "Name"
+    IDS_PROG_COL_PUBLISHER "Publisher"
+    IDS_PROG_COL_VERSION "Version"
+    IDS_PROG_COL_DATE "Installed on"
+    IDS_PROG_UNINSTALL "&Uninstall"
+    IDS_PROG_CHANGE "C&hange"
+    IDS_PROG_REFRESH "&Refresh"
+    IDS_PROG_FEATURES "&Turn NitroOS features on or off"
+    IDS_PROG_CLOSE "&Close"
+    IDS_PROG_CONFIRM "Do you want to uninstall '%s'?"
+    IDS_PROG_STARTFAIL "The program could not be started (error %lu):\n%s"
 END
 
 STRINGTABLE

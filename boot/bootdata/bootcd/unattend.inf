@@ -49,9 +49,10 @@ AutoPartition = 1
 ; 2 - NTFS
 FsType = 2
 
-; Choose if RAPPS can download optional components during setup.
-; yes - Download addons from RAPPS
-; no  - Don't download addons from RAPPS
+; Choose if the feature manager (featmgr) can download optional components during setup.
+; (The setting keeps its old name, RappsDownload, so existing answer files still work.)
+; yes - Download addons with featmgr
+; no  - Don't download addons
 RappsDownload = no
 
 ; Set this option to automatically specify language in 2nd mode setup.

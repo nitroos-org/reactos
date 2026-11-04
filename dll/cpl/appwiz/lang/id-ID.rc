@@ -88,3 +88,22 @@ BEGIN
     IDS_INVALID_NAME "Jalur pintasan yang anda masukkan mengandung karakter yang tidak sah untuk nama berkas atau terlalu panjang."
     IDS_BROWSE_FOR_TARGET "Silakan pilih target dari pintasan di bawah:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "Program dan Fitur"
+    IDS_PROG_HEADER "Copot pemasangan atau ubah program. Untuk memasang perangkat lunak atau mengaktifkan/menonaktifkan fitur sistem, gunakan ""Aktifkan atau nonaktifkan fitur NitroOS""."
+    IDS_PROG_COL_NAME "Nama"
+    IDS_PROG_COL_PUBLISHER "Penerbit"
+    IDS_PROG_COL_VERSION "Versi"
+    IDS_PROG_COL_DATE "Dipasang pada"
+    IDS_PROG_UNINSTALL "&Copot Pemasangan"
+    IDS_PROG_CHANGE "U&bah"
+    IDS_PROG_REFRESH "&Segarkan"
+    IDS_PROG_FEATURES "&Aktifkan atau nonaktifkan fitur NitroOS"
+    IDS_PROG_CLOSE "&Tutup"
+    IDS_PROG_CONFIRM "Apakah Anda ingin mencopot pemasangan '%s'?"
+    IDS_PROG_STARTFAIL "Program tidak dapat dimulai (galat %lu):\n%s"
+    IDS_FEATURESNAME "Aktifkan atau nonaktifkan fitur NitroOS"
+    IDS_FEATURESDESCRIPTION "Aktifkan atau nonaktifkan fitur NitroOS opsional dan perangkat lunak tambahan."
+END

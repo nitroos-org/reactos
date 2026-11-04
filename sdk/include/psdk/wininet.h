@@ -1867,6 +1867,19 @@ InternetSetCookieExW(
 
 #define InternetSetCookieEx WINELIB_NAME_AW(InternetSetCookieEx)
 
+typedef struct _INTERNET_COOKIE2 {
+    PWSTR pwszName;
+    PWSTR pwszValue;
+    PWSTR pwszDomain;
+    PWSTR pwszPath;
+    DWORD dwFlags;
+    FILETIME ftExpires;
+    BOOL fExpiresSet;
+} INTERNET_COOKIE2, *PINTERNET_COOKIE2;
+
+DWORD WINAPI InternetGetCookieEx2(_In_ PCWSTR, _In_opt_ PCWSTR, _In_ DWORD, _Outptr_result_buffer_(*pcCookies) INTERNET_COOKIE2 **, _Out_ PDWORD);
+VOID WINAPI InternetFreeCookies(_In_reads_(dwCookieCount) INTERNET_COOKIE2 *, _In_ DWORD dwCookieCount);
+
 BOOLAPI InternetGetPerSiteCookieDecisionA(_In_ LPCSTR, _Out_ ULONG *);
 BOOLAPI InternetGetPerSiteCookieDecisionW(_In_ LPCWSTR, _Out_ ULONG *);
 #define InternetGetPerSiteCookieDecision WINELIB_NAME_AW(InternetGetPerSiteCookieDecision)

@@ -10,17 +10,27 @@
  * in. That path used to take the file exclusively first, so the thread waited
  * for its own shared hold forever (dmastall, 2026-11-04).
  *
- * The test maps a freshly written file (non-cached writes, so no page of it is
- * resident) into system space and touches one new page per case from a system
- * thread: holding nothing, holding the file's resource shared, and holding it
- * exclusive. Every touch must return the file's data. A thread that does not
- * finish within the timeout is the deadlock; it is left behind (it cannot be
- * unblocked) and the test does not clean up after it.
+ * The test maps a freshly written file into system space, purges the pages of it
+ * that Mm and Cc kept (the fault only takes the page-in path for a page the
+ * segment does not hold: without the purge the pages were there and the test
+ * passed on a kernel without the fix), and touches one page in each of four
+ * 64 KB chunks from a system thread: holding nothing, holding the file's
+ * resource exclusive, and holding it shared (twice). Mm pages a file in by 64 KB, so the first touch
+ * of a chunk brings in the rest of it: every case needs a chunk of its own, or
+ * only the first one takes the page-in path (touching pages 1, 3, 5 and 7 of one
+ * chunk passed on a kernel without the fix). Every touch must return the file's
+ * data. A thread that does not finish within the timeout is the deadlock. The test
+ * then releases the file on behalf of the stuck thread, which lets the fault go on
+ * (it takes the file exclusively, as it did on its own), so the failure is reported
+ * and the test ends in order, with the driver able to unload. Without that the
+ * thread would stay in the driver for good and the run would hang with it.
  */
 
 #include <kmt_test.h>
 
-#define TEST_PAGES      16
+#define CHUNK_PAGES     16
+#define TEST_CHUNKS     4
+#define TEST_PAGES      (TEST_CHUNKS * CHUNK_PAGES)
 #define TEST_TAG        'hFmM'
 #define TOUCH_TIMEOUT   (-20LL * 10 * 1000 * 1000) /* 20 s */
 
@@ -34,6 +44,8 @@ typedef struct _TOUCH_CONTEXT
     HOLD_MODE Hold;
     ULONG Value;
     NTSTATUS Status;
+    ERESOURCE_THREAD ResourceThread;
+    LONG Released; /* the hold was given up, by the thread or by the test on its behalf */
     KEVENT Done;
 } TOUCH_CONTEXT, *PTOUCH_CONTEXT;
 
@@ -52,6 +64,7 @@ TouchThread(PVOID Context)
     PTOUCH_CONTEXT Touch = Context;
 
     KeEnterCriticalRegion();
+    Touch->ResourceThread = ExGetCurrentResourceThread();
     if (Touch->Hold == HoldShared)
         ExAcquireResourceSharedLite(Touch->Resource, TRUE);
     else if (Touch->Hold == HoldExclusive)
@@ -68,7 +81,7 @@ TouchThread(PVOID Context)
     }
     _SEH2_END;
 
-    if (Touch->Hold != HoldNone)
+    if (Touch->Hold != HoldNone && InterlockedCompareExchange(&Touch->Released, 1, 0) == 0)
         ExReleaseResourceLite(Touch->Resource);
     KeLeaveCriticalRegion();
 
@@ -76,10 +89,11 @@ TouchThread(PVOID Context)
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
-/* FALSE when the touching thread is stuck: its context is then leaked on purpose */
+/* FALSE when the touching thread was stuck. *Leaked is set when it still is after the test gave its hold up:
+   its context is then left alone on purpose */
 static
 BOOLEAN
-TouchPage(PUCHAR View, ULONG Page, PERESOURCE Resource, HOLD_MODE Hold, PCSTR What)
+TouchPage(PUCHAR View, ULONG Page, PERESOURCE Resource, HOLD_MODE Hold, PCSTR What, PBOOLEAN Leaked)
 {
     PTOUCH_CONTEXT Touch;
     HANDLE Thread;
@@ -113,7 +127,24 @@ TouchPage(PUCHAR View, ULONG Page, PERESOURCE Resource, HOLD_MODE Hold, PCSTR Wh
     Status = KeWaitForSingleObject(&Touch->Done, Executive, KernelMode, FALSE, &Timeout);
     ok(Status == STATUS_SUCCESS, "%s: the fault on page %lu did not finish in 20 s (the thread waits for its own hold of the file)\n", What, Page);
     if (Status != STATUS_SUCCESS)
+    {
+        /* Give the hold up for the thread: its wait for the file goes on, and the fault ends */
+        if (Hold != HoldNone && InterlockedCompareExchange(&Touch->Released, 1, 0) == 0)
+            ExReleaseResourceForThreadLite(Resource, Touch->ResourceThread);
+        Timeout.QuadPart = TOUCH_TIMEOUT / 2;
+        Status = KeWaitForSingleObject(&Touch->Done, Executive, KernelMode, FALSE, &Timeout);
+        ok(Status == STATUS_SUCCESS, "%s: the fault on page %lu did not finish after the hold was given up\n", What, Page);
+        if (Status != STATUS_SUCCESS)
+        {
+            *Leaked = TRUE;
+            return FALSE;
+        }
+        /* The thread signals before it terminates; give it the moment to leave */
+        Timeout.QuadPart = -100LL * 10 * 1000;
+        KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+        ExFreePoolWithTag(Touch, TEST_TAG);
         return FALSE;
+    }
 
     ok(Touch->Status == STATUS_SUCCESS, "%s: touching page %lu raised %lx\n", What, Page, Touch->Status);
     ok(Touch->Value == PageTag(Page, 1), "%s: page %lu reads %lx, expected %lx\n", What, Page, Touch->Value, PageTag(Page, 1));
@@ -138,17 +169,14 @@ START_TEST(MmFaultFileHeld)
     SIZE_T ViewSize = 0;
     LARGE_INTEGER Offset;
     NTSTATUS Status;
-    ULONG Page, i;
-    BOOLEAN Stuck = FALSE;
+    ULONG Page, Chunk, i;
+    BOOLEAN Stuck = FALSE, Purged;
 
-    Buffer = ExAllocatePoolWithTag(NonPagedPool, TEST_PAGES * PAGE_SIZE, TEST_TAG);
+    Buffer = ExAllocatePoolWithTag(NonPagedPool, CHUNK_PAGES * PAGE_SIZE, TEST_TAG);
     if (skip(Buffer != NULL, "No memory\n"))
         return;
-    for (Page = 0; Page < TEST_PAGES; Page++)
-        for (i = 0; i < PAGE_SIZE / sizeof(ULONG); i++)
-            ((PULONG)(Buffer + Page * PAGE_SIZE))[i] = PageTag(Page, i);
 
-    /* Non-cached writes: no page of the file is resident when the view is touched */
+    /* Non-cached writes */
     InitializeObjectAttributes(&Attributes, &FileName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
     Status = ZwCreateFile(&File, GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE, &Attributes, &IoStatus, NULL,
                           FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_OVERWRITE_IF,
@@ -190,10 +218,16 @@ START_TEST(MmFaultFileHeld)
         goto DerefSection;
     ok(ViewSize >= TEST_PAGES * PAGE_SIZE, "View size %Iu\n", ViewSize);
 
-    /* A non-cached write with the section in place: the file system purges what it covers, so the
-       segment holds no page of the file and every touch below takes the page-in path */
-    Offset.QuadPart = 0;
-    Status = ZwWriteFile(File, NULL, NULL, NULL, &IoStatus, Buffer, TEST_PAGES * PAGE_SIZE, &Offset, NULL);
+    /* Non-cached writes with the section in place */
+    Status = STATUS_SUCCESS;
+    for (Chunk = 0; Chunk < TEST_CHUNKS && NT_SUCCESS(Status); Chunk++)
+    {
+        for (Page = 0; Page < CHUNK_PAGES; Page++)
+            for (i = 0; i < PAGE_SIZE / sizeof(ULONG); i++)
+                ((PULONG)(Buffer + Page * PAGE_SIZE))[i] = PageTag(Chunk * CHUNK_PAGES + Page, i);
+        Offset.QuadPart = (LONGLONG)Chunk * CHUNK_PAGES * PAGE_SIZE;
+        Status = ZwWriteFile(File, NULL, NULL, NULL, &IoStatus, Buffer, CHUNK_PAGES * PAGE_SIZE, &Offset, NULL);
+    }
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (skip(NT_SUCCESS(Status), "Cannot write the file\n"))
     {
@@ -201,15 +235,20 @@ START_TEST(MmFaultFileHeld)
         goto DerefSection;
     }
 
-    /* Each case touches a page nobody touched before, so each one faults the data in */
-    if (!TouchPage(View, 1, FcbHeader->Resource, HoldNone, "No hold") ||
-        !TouchPage(View, 3, FcbHeader->Resource, HoldExclusive, "Exclusive hold") ||
-        !TouchPage(View, 5, FcbHeader->Resource, HoldShared, "Shared hold") ||
-        !TouchPage(View, 7, FcbHeader->Resource, HoldShared, "Shared hold again"))
+    /* The write and the view leave pages of the file in the segment (Cc keeps its own views of the same
+       section), and a fault on one of those never takes the page-in path. Take them out. */
+    Purged = CcPurgeCacheSection(FileObject->SectionObjectPointer, NULL, 0, FALSE);
+    ok(Purged, "CcPurgeCacheSection did not purge the file\n");
+
+    /* Each case touches one page of a chunk nobody touched before, so each one faults a cluster in */
+    if (!TouchPage(View, 0 * CHUNK_PAGES + 1, FcbHeader->Resource, HoldNone, "No hold", &Stuck) ||
+        !TouchPage(View, 1 * CHUNK_PAGES + 1, FcbHeader->Resource, HoldExclusive, "Exclusive hold", &Stuck) ||
+        !TouchPage(View, 2 * CHUNK_PAGES + 1, FcbHeader->Resource, HoldShared, "Shared hold", &Stuck) ||
+        !TouchPage(View, 3 * CHUNK_PAGES + 1, FcbHeader->Resource, HoldShared, "Shared hold again", &Stuck))
     {
-        /* A stuck thread holds the file and a reference to the view: leave everything */
-        Stuck = TRUE;
-        goto Free;
+        /* A thread that is stuck still holds a reference to the view: leave everything */
+        if (Stuck)
+            goto Free;
     }
 
     MmUnmapViewInSystemSpace(View);

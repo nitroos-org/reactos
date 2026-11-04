@@ -784,6 +784,119 @@ BOOL WINAPI InternetGetCookieExW(LPCWSTR lpszUrl, LPCWSTR lpszCookieName,
     return ret;
 }
 
+#ifdef __REACTOS__
+/***********************************************************************
+ *           InternetGetCookieEx2 (WININET.@)
+ *
+ * Win8+ cookie enumeration: every cookie that matches the url (and the name, if given) as
+ * an INTERNET_COOKIE2 array in one allocation, released with InternetFreeCookies.
+ * Returns ERROR_SUCCESS, or ERROR_NO_MORE_ITEMS when there is no matching cookie.
+ */
+DWORD WINAPI InternetGetCookieEx2(const WCHAR *url, const WCHAR *name, DWORD flags,
+        INTERNET_COOKIE2 **ret_cookies, DWORD *ret_count)
+{
+    cookie_set_t cookie_set = {0};
+    cookie_t **match = NULL;
+    INTERNET_COOKIE2 *out;
+    substr_t host, path;
+    SIZE_T i, n = 0, size;
+    WCHAR *str;
+    DWORD res;
+
+    TRACE("(%s, %s, %lx, %p, %p)\n", debugstr_w(url), debugstr_w(name), flags, ret_cookies, ret_count);
+
+    if (!url || !ret_cookies || !ret_count)
+        return ERROR_INVALID_PARAMETER;
+    *ret_cookies = NULL;
+    *ret_count = 0;
+
+    if (flags & ~INTERNET_COOKIE_HTTPONLY)
+        FIXME("flags 0x%08lx not supported\n", flags);
+
+    if (!cookie_parse_url(url, &host, &path))
+        return ERROR_INVALID_PARAMETER;
+
+    EnterCriticalSection(&cookie_cs);
+
+    res = get_cookie(host, path, flags, &cookie_set);
+    if (res == ERROR_SUCCESS && cookie_set.cnt)
+    {
+        match = malloc(cookie_set.cnt * sizeof(*match));
+        if (!match)
+            res = ERROR_NOT_ENOUGH_MEMORY;
+        else
+        {
+            size = 0;
+            for (i = 0; i < cookie_set.cnt; i++)
+            {
+                cookie_t *c = cookie_set.cookies[i];
+                if (name && wcscmp(c->name, name))
+                    continue;
+                match[n++] = c;
+                size += sizeof(INTERNET_COOKIE2) + (lstrlenW(c->name) + lstrlenW(c->data) + 2) * sizeof(WCHAR);
+                size += (lstrlenW(c->container->domain->domain) + 1) * sizeof(WCHAR);
+                size += (c->container->path.len + 1) * sizeof(WCHAR);
+            }
+            if (!n)
+                res = ERROR_NO_MORE_ITEMS;
+            else if (!(out = malloc(size)))
+                res = ERROR_NOT_ENOUGH_MEMORY;
+            else
+            {
+                str = (WCHAR *)(out + n);
+                for (i = 0; i < n; i++)
+                {
+                    cookie_t *c = match[i];
+                    SIZE_T len;
+
+                    out[i].pwszName = str;
+                    len = lstrlenW(c->name) + 1;
+                    memcpy(str, c->name, len * sizeof(WCHAR));
+                    str += len;
+
+                    out[i].pwszValue = str;
+                    len = lstrlenW(c->data) + 1;
+                    memcpy(str, c->data, len * sizeof(WCHAR));
+                    str += len;
+
+                    out[i].pwszDomain = str;
+                    len = lstrlenW(c->container->domain->domain) + 1;
+                    memcpy(str, c->container->domain->domain, len * sizeof(WCHAR));
+                    str += len;
+
+                    out[i].pwszPath = str;
+                    memcpy(str, c->container->path.str, c->container->path.len * sizeof(WCHAR));
+                    str[c->container->path.len] = 0;
+                    str += c->container->path.len + 1;
+
+                    out[i].dwFlags = c->flags;
+                    out[i].ftExpires = c->expiry;
+                    out[i].fExpiresSet = c->expiry.dwLowDateTime || c->expiry.dwHighDateTime;
+                }
+                *ret_cookies = out;
+                *ret_count = (DWORD)n;
+            }
+        }
+    }
+    else if (res == ERROR_SUCCESS)
+        res = ERROR_NO_MORE_ITEMS;
+
+    free(match);
+    free(cookie_set.cookies);
+    LeaveCriticalSection(&cookie_cs);
+    return res;
+}
+
+/***********************************************************************
+ *           InternetFreeCookies (WININET.@)
+ */
+void WINAPI InternetFreeCookies(INTERNET_COOKIE2 *cookies, DWORD count)
+{
+    TRACE("(%p, %lu)\n", cookies, count);
+    free(cookies);
+}
+#endif /* __REACTOS__ */
+
 /***********************************************************************
  *           InternetGetCookieW (WININET.@)
  *

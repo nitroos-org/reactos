@@ -2,7 +2,7 @@
 rem FEATMGMT software tier: PowerShell 7 live proof (amd64 only; needs internet).
 rem   powershell7-live.cmd install     negative checksum test, then install powershell-7 and check it
 rem   powershell7-live.cmd uninstall   uninstall powershell-7 and check everything is gone
-rem Run from a directory holding fixtures\fmt-ps7bad.ini and fixtures\fmt-ps7bad.txt (default: this script's
+rem Run from a directory holding fixtures\fmt-ps7bad.ini (default: this script's
 rem directory). Result: %O%\ps7live.txt, last line PS7LIVE-RESULT: PASS|FAIL n
 setlocal
 set FX=%~dp0fixtures
@@ -39,13 +39,12 @@ call :rc1 "I3 no WSMan PowerShell plugin registered (pwrshplugin.dll is only the
 
 rem --- wrong SHA-256 must be refused after the download: nothing installed, no record
 copy /y %FX%\fmt-ps7bad.ini %R%\Catalog\ >nul
-copy /y %FX%\fmt-ps7bad.txt %R%\ >nul
 %FM% /install fmt-ps7bad > %O%\bad.txt 2>&1
 call :rc1 "I4 install with a wrong SHA-256 fails"
 type %O%\bad.txt >> %LOG%
 if exist "%PSDIR%\pwsh.exe" (call :fail "I5 nothing installed after the checksum failure") else (call :pass "I5 nothing installed after the checksum failure")
 call :st fmt-ps7bad NotInstalled "I6 wrong-hash entry left NotInstalled"
-del /q %R%\Catalog\fmt-ps7bad.ini %R%\fmt-ps7bad.txt 2>nul
+del /q %R%\Catalog\fmt-ps7bad.ini 2>nul
 
 rem --- the real install
 %FM% /install powershell-7 > %O%\install.txt 2>&1

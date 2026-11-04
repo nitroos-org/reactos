@@ -104,6 +104,10 @@ HRESULT WINAPI DwmExtendFrameIntoClientArea(HWND hwnd, const MARGINS* margins)
     }
     glass = margins->cxLeftWidth == -1 && margins->cxRightWidth == -1 &&
             margins->cyTopHeight == -1 && margins->cyBottomHeight == -1;
+    /*
+     * win32k only marks a window of the calling process. The answer for a window of another process is
+     * S_OK all the same, with the window left as it was: what Windows answers for one was not observed.
+     */
     if (pfnSetGlass)
         pfnSetGlass(hwnd, glass);
 

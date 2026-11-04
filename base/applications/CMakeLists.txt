@@ -1,3 +1,5 @@
+option(NITRO_SHIP_RAPPS "Build and ship the upstream ReactOS Applications Manager (rapps.exe, rapps.com); NitroOS uses featmgr instead" OFF)
+
 
 add_subdirectory(atactl)
 add_subdirectory(cacls)
@@ -33,8 +35,12 @@ add_subdirectory(mstsc)
 add_subdirectory(network)
 add_subdirectory(notepad)
 add_subdirectory(osk)
-add_subdirectory(rapps)
-add_subdirectory(rapps_com)
+# NitroOS: the ReactOS Applications Manager (rapps.exe, rapps.com) is replaced by the feature manager (featmgr, optfeatures).
+# The upstream source stays in the tree, to keep merges from upstream small, but it is neither built nor shipped unless asked for.
+if(NITRO_SHIP_RAPPS)
+    add_subdirectory(rapps)
+    add_subdirectory(rapps_com)
+endif()
 add_subdirectory(regedit)
 add_subdirectory(regedt32)
 add_subdirectory(runas)

@@ -267,11 +267,18 @@ HostResize(HOST *Host, SHORT Width, SHORT Height)
     Host->Painted = FALSE;
     Host->ScrollbackSeen = FALSE;
     {
-        ULONGLONG Total, First;
+        ULONGLONG Total = 0, First;
         DWORD Rows;
 
-        /* From now on the server keeps the rows that scroll off the top of this buffer */
-        HostScrollbackCall(Host, Host->ConsoleOut, CONSOLE_SCROLLBACK_ENABLE, 0, 0, NULL, &Total, &First, &Rows);
+        /* From now on the server keeps the rows that scroll off the top of this buffer. The count
+         * at this moment is where the terminal's history starts: a client that prints before the
+         * host paints for the first time (a terminal starts its child as soon as the pseudoconsole
+         * exists) has its first rows in the server's ring, and the first paint hands them over. */
+        if (HostScrollbackCall(Host, Host->ConsoleOut, CONSOLE_SCROLLBACK_ENABLE, 0, 0, NULL, &Total, &First, &Rows))
+        {
+            Host->ScrollbackTotal = Total;
+            Host->ScrollbackSeen = TRUE;
+        }
     }
     return TRUE;
 }
@@ -280,6 +287,11 @@ HostResize(HOST *Host, SHORT Width, SHORT Height)
  * terminal needs the pair as one UTF-8 sequence. */
 #define HOST_IS_HIGH_SURROGATE(c)   ((c) >= 0xD800 && (c) <= 0xDBFF)
 #define HOST_IS_LOW_SURROGATE(c)    ((c) >= 0xDC00 && (c) <= 0xDFFF)
+
+/* A wide character occupies two cells: a leading and a trailing byte. The terminal shows it as one
+ * glyph over two columns, so the pair is diffed and painted as a unit. */
+#define HOST_IS_LEADING(c)          (((c)->Attributes & COMMON_LVB_LEADING_BYTE) != 0)
+#define HOST_IS_TRAILING(c)         (((c)->Attributes & COMMON_LVB_TRAILING_BYTE) != 0)
 
 /* A cell differs from what the terminal shows of it (Ref NULL: nothing is known of the row) */
 #define HOST_DIFFERS(a, b, ea, eb) ((a)->Char.UnicodeChar != (b)->Char.UnicodeChar || (a)->Attributes != (b)->Attributes || \
@@ -297,6 +309,11 @@ HostCellChanged(HOST *Host, const CHAR_INFO *Cells, const CONSOLE_EXT_CELL *Ext,
         return HOST_DIFFERS(&Cells[Column + 1], &Ref[Column + 1], &Ext[Column + 1], &RefExt[Column + 1]);
     if (HOST_IS_LOW_SURROGATE(Cells[Column].Char.UnicodeChar) && Column > 0 &&
         HOST_IS_HIGH_SURROGATE(Cells[Column - 1].Char.UnicodeChar))
+        return HOST_DIFFERS(&Cells[Column - 1], &Ref[Column - 1], &Ext[Column - 1], &RefExt[Column - 1]);
+    /* The same for a wide character */
+    if (HOST_IS_LEADING(&Cells[Column]) && Column + 1 < (DWORD)Host->Width && HOST_IS_TRAILING(&Cells[Column + 1]))
+        return HOST_DIFFERS(&Cells[Column + 1], &Ref[Column + 1], &Ext[Column + 1], &RefExt[Column + 1]);
+    if (HOST_IS_TRAILING(&Cells[Column]) && Column > 0 && HOST_IS_LEADING(&Cells[Column - 1]))
         return HOST_DIFFERS(&Cells[Column - 1], &Ref[Column - 1], &Ext[Column - 1], &RefExt[Column - 1]);
     return FALSE;
 }
@@ -336,11 +353,12 @@ HostPaintRow(HOST *Host, DWORD Row, const CHAR_INFO *Cells, const CONSOLE_EXT_CE
         do
         {
             WCHAR Character;
+            WORD Cell = Cells[Column].Attributes & ~COMMON_LVB_SBCSDBCS;
             if (!HostCellChanged(Host, Cells, Ext, Ref, RefExt, Column))
                 break;
-            if (Attribute != Cells[Column].Attributes || Fore != Ext[Column].Fore || Back != Ext[Column].Back)
+            if (Attribute != Cell || Fore != Ext[Column].Fore || Back != Ext[Column].Back)
             {
-                Attribute = Cells[Column].Attributes;
+                Attribute = Cell;
                 Fore = Ext[Column].Fore;
                 Back = Ext[Column].Back;
                 Used += sprintf(Line + Used, "\033[");
@@ -351,7 +369,21 @@ HostPaintRow(HOST *Host, DWORD Row, const CHAR_INFO *Cells, const CONSOLE_EXT_CE
             }
             Character = Cells[Column].Char.UnicodeChar;
             if (!Character || Character < 32) Character = L' ';
-            if (HOST_IS_HIGH_SURROGATE(Character) && Column + 1 < (DWORD)Host->Width &&
+            if (HOST_IS_LEADING(&Cells[Column]) && Column + 1 < (DWORD)Host->Width &&
+                HOST_IS_TRAILING(&Cells[Column + 1]))
+            {
+                /* One glyph over two columns: the trailing cell is part of it */
+                Length = WideCharToMultiByte(CP_UTF8, 0, &Character, 1, Utf8, sizeof(Utf8), NULL, NULL);
+                if (Length)
+                    ++Column;
+            }
+            else if (HOST_IS_LEADING(&Cells[Column]) || HOST_IS_TRAILING(&Cells[Column]))
+            {
+                /* Half of a wide character: a blank, which also clears what the terminal shows there */
+                Utf8[0] = ' ';
+                Length = 1;
+            }
+            else if (HOST_IS_HIGH_SURROGATE(Character) && Column + 1 < (DWORD)Host->Width &&
                 HOST_IS_LOW_SURROGATE(Cells[Column + 1].Char.UnicodeChar))
             {
                 WCHAR Pair[2];
@@ -384,10 +416,12 @@ HostPaintRow(HOST *Host, DWORD Row, const CHAR_INFO *Cells, const CONSOLE_EXT_CE
 /* Rows scrolled off the top of the console buffer since the last look (Rows of them in History,
  * oldest first) go to the terminal as rows that scroll off its screen, then the screen shows
  * the current frame. Lost: older rows were dropped by the server before the host asked, the
- * terminal's screen then goes to its scrollback as it is. */
+ * terminal's screen then goes to its scrollback as it is. Fresh: nothing is known of the
+ * terminal's screen (first paint, cleared just now), so it is painted whole and no row of it is
+ * pushed away: the history is exactly the rows. */
 static BOOL
 HostPaintScrolled(HOST *Host, const CHAR_INFO *History, const CONSOLE_EXT_CELL *HistoryExt, DWORD Rows, BOOL Lost,
-                  CHAR *Line)
+                  BOOL Fresh, CHAR *Line)
 {
     DWORD Row, Used, Height = (DWORD)Host->Height;
     BOOL Changed = FALSE;
@@ -396,7 +430,7 @@ HostPaintScrolled(HOST *Host, const CHAR_INFO *History, const CONSOLE_EXT_CELL *
                                               : Host->Current + (SIZE_T)((Index) - Rows) * Host->Width)
 #define HOST_FRAME_EXT(Index) ((Index) < Rows ? HistoryExt + (SIZE_T)(Index) * Host->Width \
                                               : Host->CurrentExt + (SIZE_T)((Index) - Rows) * Host->Width)
-    if (Lost)
+    if (Lost && !Fresh)
     {
         /* Not a single row of what the terminal shows is known to be among the new ones */
         Used = sprintf(Line, "\033[0m\033[%lu;1H", Height);
@@ -407,7 +441,7 @@ HostPaintScrolled(HOST *Host, const CHAR_INFO *History, const CONSOLE_EXT_CELL *
     Used = 0;
     for (Row = 0; Row < Height; ++Row)
         Used = HostPaintRow(Host, Row, HOST_FRAME_ROW(Row), HOST_FRAME_EXT(Row),
-                            Lost ? NULL : Host->Previous + (SIZE_T)Row * Host->Width,
+                            (Lost || Fresh) ? NULL : Host->Previous + (SIZE_T)Row * Host->Width,
                             Host->PreviousExt + (SIZE_T)Row * Host->Width, Line, Used, &Changed);
     if (Used && !HostWrite(Host, Line, Used)) return FALSE;
     /* ...and every row that scrolled off pushes the top row into the terminal's scrollback and brings the next in */
@@ -422,6 +456,49 @@ HostPaintScrolled(HOST *Host, const CHAR_INFO *History, const CONSOLE_EXT_CELL *
 #undef HOST_FRAME_ROW
 #undef HOST_FRAME_EXT
     return TRUE;
+}
+
+/* ReadConsoleOutput leaves out the leading and trailing byte flags of wide characters (as Windows
+ * before 8 does); ReadConsoleOutputAttribute has them. Without them the host could not tell the two
+ * cells of a wide character from two characters. The flags of the frame in Host->Current are filled in. */
+static VOID
+HostReadWideFlags(HOST *Host, HANDLE ConsoleOut, const SMALL_RECT *Region, SHORT BufferWidth)
+{
+    WORD *Attributes;
+    DWORD Row, Index, Count, Got, Rows = Region->Bottom - Region->Top + 1, Columns = Region->Right - Region->Left + 1;
+    /* A frame as wide as its buffer is a run of cells: one request for as many as fit */
+    BOOL Whole = !Region->Left && Columns == (DWORD)BufferWidth && Columns == (DWORD)Host->Width;
+    DWORD Run = Whole ? Rows * Columns : Columns, Cells = Whole ? 1 : Rows;
+
+    Attributes = HeapAlloc(GetProcessHeap(), 0, 16384 * sizeof(*Attributes));
+    if (!Attributes) return;
+    for (Row = 0; Row < Cells; ++Row)
+    {
+        for (Index = 0; Index < Run; Index += Got)
+        {
+            CHAR_INFO *Cell = Host->Current + (SIZE_T)Row * Host->Width + Index;
+            COORD Start;
+
+            Count = min(Run - Index, 16384);
+            Got = 0;
+            if (Whole)
+            {
+                Start.X = (SHORT)(Index % Columns);
+                Start.Y = (SHORT)(Region->Top + Index / Columns);
+            }
+            else
+            {
+                Start.X = (SHORT)(Region->Left + Index);
+                Start.Y = (SHORT)(Region->Top + Row);
+            }
+            if (!ReadConsoleOutputAttribute(ConsoleOut, Attributes, Count, Start, &Got) || !Got)
+                break;
+            for (Count = 0; Count < Got; ++Count)
+                Cell[Count].Attributes = (Cell[Count].Attributes & ~COMMON_LVB_SBCSDBCS) |
+                                         (Attributes[Count] & COMMON_LVB_SBCSDBCS);
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Attributes);
 }
 
 static BOOL
@@ -456,6 +533,7 @@ HostReadFrame(HOST *Host, HANDLE ConsoleOut, const CONSOLE_SCREEN_BUFFER_INFO *I
         if (!ReadConsoleOutputW(ConsoleOut, Host->Current + (SIZE_T)Row * Host->Width,
                                 BandSize, BufferOrigin, &Band)) return FALSE;
     }
+    HostReadWideFlags(Host, ConsoleOut, &Region, Info->dwSize.X);
     return TRUE;
 }
 
@@ -494,7 +572,7 @@ HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
         ZeroMemory(Host->CurrentExt, (SIZE_T)Host->Width * Host->Height * sizeof(*Host->CurrentExt));
     if (Keeps)
     {
-        if (Host->Painted && Host->ScrollbackSeen && Total > Host->ScrollbackTotal)
+        if (Host->ScrollbackSeen && Total > Host->ScrollbackTotal)
         {
             ULONGLONG Wanted = Total - Host->ScrollbackTotal;
 
@@ -563,7 +641,7 @@ HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
     }
     if (Rows)
     {
-        BOOL Result = HostPaintScrolled(Host, History, HistoryExt, Rows, Lost, Line);
+        BOOL Result = HostPaintScrolled(Host, History, HistoryExt, Rows, Lost, !Host->Painted, Line);
 
         HeapFree(GetProcessHeap(), 0, History);
         HeapFree(GetProcessHeap(), 0, HistoryExt);
@@ -1025,7 +1103,12 @@ int wmain(int argc, WCHAR **argv)
                 /* Frames are three WORDs: type, then two WORD arguments (the Windows
                  * pseudoconsole signal protocol that sshd also speaks). */
                 if (Message[0] == HOST_SIGNAL_RESIZE && Message[1] <= 32767 && Message[2] <= 32767)
+                {
+                    /* What the client printed so far goes to the terminal before the buffer is
+                     * resized: a new width drops the rows the server kept for the old one. */
+                    HostPaint(&Host);
                     HostResize(&Host, (SHORT)Message[1], (SHORT)Message[2]);
+                }
                 else if (Message[0] == HOST_SIGNAL_CLIENT && !Host.Client)
                 {
                     Host.Client = OpenProcess(SYNCHRONIZE, FALSE, Message[1] | ((DWORD)Message[2] << 16));

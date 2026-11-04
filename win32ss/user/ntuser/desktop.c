@@ -231,7 +231,7 @@ IntFreeDesktopWindow(IN PWND pwnd)
     ASSERT(pwnd->head.pti == gptiDesktopThread);
     ASSERT(pwnd->spwndChild == NULL);
     ASSERT(UserIsEnteredExclusive());
-    ASSERT(!KeIsExecutingDpc());
+    ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL); /* not in a DPC */
 
     if (PsGetCurrentProcessWin32Process() == NULL)
     {

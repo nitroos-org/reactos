@@ -88,3 +88,22 @@ BEGIN
     IDS_INVALID_NAME "The shortcut name you entered either contained characters that are invalid for file names or was too long."
     IDS_BROWSE_FOR_TARGET "Please select the target of the shortcut below:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "Programmi e funzionalità"
+    IDS_PROG_HEADER "Disinstallare o modificare un programma. Per installare software o attivare/disattivare funzionalità di sistema, usare ""Attiva o disattiva funzionalità di NitroOS""."
+    IDS_PROG_COL_NAME "Nome"
+    IDS_PROG_COL_PUBLISHER "Editore"
+    IDS_PROG_COL_VERSION "Versione"
+    IDS_PROG_COL_DATE "Installato il"
+    IDS_PROG_UNINSTALL "&Disinstalla"
+    IDS_PROG_CHANGE "&Modifica"
+    IDS_PROG_REFRESH "Aggi&orna"
+    IDS_PROG_FEATURES "&Attiva o disattiva funzionalità di NitroOS"
+    IDS_PROG_CLOSE "&Chiudi"
+    IDS_PROG_CONFIRM "Disinstallare '%s'?"
+    IDS_PROG_STARTFAIL "Impossibile avviare il programma (errore %lu):\n%s"
+    IDS_FEATURESNAME "Attiva o disattiva funzionalità di NitroOS"
+    IDS_FEATURESDESCRIPTION "Attiva o disattiva le funzionalità facoltative di NitroOS e il software aggiuntivo."
+END

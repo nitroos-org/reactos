@@ -13,6 +13,17 @@
 
 #include "icif.h"
 
+/* The request of ProcessMitigationPolicy (52), as Windows lays it out for the policies of one DWORD */
+typedef struct _PS_MITIGATION_POLICY_REQUEST
+{
+    ULONG Policy;   /* PROCESS_MITIGATION_POLICY */
+    ULONG Flags;
+} PS_MITIGATION_POLICY_REQUEST, *PPS_MITIGATION_POLICY_REQUEST;
+
+/* PROCESS_MITIGATION_POLICY ProcessSystemCallDisablePolicy and its first flag */
+#define PS_MITIGATION_SYSTEM_CALL_DISABLE   4
+#define PS_MITIGATION_DISALLOW_WIN32K       0x1
+
 //
 // Process Information Classes
 //
@@ -380,7 +391,14 @@ static const INFORMATION_CLASS_INFO PsProcessInfoClass[] =
     IQS_NONE, /* ProcessConsoleHostProcess (49) */
     IQS_NONE, /* ProcessWindowInformation (50) */
     IQS_NONE, /* ProcessHandleInformation (51) */
-    IQS_NONE, /* ProcessMitigationPolicy (52) */
+    /* ProcessMitigationPolicy (52): { ULONG Policy; ULONG Flags }. Only ProcessSystemCallDisablePolicy
+     * (the Win32k lockdown) is kept by the kernel; the other policies are answered by kernel32 */
+    IQS_SAME
+    (
+        PS_MITIGATION_POLICY_REQUEST,
+        ULONG,
+        ICIF_QUERY | ICIF_SET
+    ),
     IQS_NONE, /* ProcessDynamicFunctionTableInformation (53) */
     IQS_NONE, /* ProcessHandleCheckingMode (54) */
     IQS_NONE, /* ProcessKeepAliveCount (55) */

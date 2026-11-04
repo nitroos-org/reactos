@@ -123,8 +123,9 @@ LanguagesPageProc(HWND hwndDlg,
                             if (!HasJapanesePackage(hwndDlg))
                             {
                                 /* Install now */
-                                ShellExecuteW(hwndDlg, NULL, L"rapps.exe", L"/INSTALL jpn-package",
-                                              NULL, SW_SHOWNORMAL);
+                                /* the feature manager fetches the RAPPS catalog entry, checks its hash and installs it */
+                                ShellExecuteW(hwndDlg, NULL, L"featmgr.exe", L"/install jpn-package",
+                                              NULL, SW_HIDE);
                             }
                         }
                         else

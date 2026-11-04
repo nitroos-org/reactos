@@ -96,3 +96,22 @@ BEGIN
     IDS_INVALID_NAME "您輸入的捷徑名稱太長，或包含不能在檔案名稱中使用的字元。"
     IDS_BROWSE_FOR_TARGET "Please select the target of the shortcut below:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "程式和功能"
+    IDS_PROG_HEADER "解除安裝或變更程式。如要安裝軟件或開啟/關閉系統功能，請使用 ""開啟或關閉 NitroOS 功能""。"
+    IDS_PROG_COL_NAME "名稱"
+    IDS_PROG_COL_PUBLISHER "發行者"
+    IDS_PROG_COL_VERSION "版本"
+    IDS_PROG_COL_DATE "安裝日期"
+    IDS_PROG_UNINSTALL "解除安裝(&U)"
+    IDS_PROG_CHANGE "變更(&H)"
+    IDS_PROG_REFRESH "重新整理(&R)"
+    IDS_PROG_FEATURES "開啟或關閉 &NitroOS 功能"
+    IDS_PROG_CLOSE "關閉(&C)"
+    IDS_PROG_CONFIRM "確定要解除安裝 '%s' 嗎？"
+    IDS_PROG_STARTFAIL "無法啟動程式（錯誤 %lu）:\n%s"
+    IDS_FEATURESNAME "開啟或關閉 NitroOS 功能"
+    IDS_FEATURESDESCRIPTION "開啟或關閉可選的 NitroOS 功能及附加軟件。"
+END

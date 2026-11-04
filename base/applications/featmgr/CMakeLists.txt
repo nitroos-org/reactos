@@ -4,10 +4,10 @@ project(featmgr)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 # --- CLI frontend (automation): featmgr /list /query /enable /disable ---
-add_executable(featmgr cli.c engine.c components.c shelldefaults.c rapps_import.c scoop.c scoopdefaults.c featmgr.rc)
+add_executable(featmgr cli.c engine.c components.c shelldefaults.c rapps_import.c native.c natgen.c rappsdb.c scoop.c scoopdefaults.c featmgr.rc)
 set_module_type(featmgr win32cui UNICODE)
-target_link_libraries(featmgr uuid)
-add_importlibs(featmgr advapi32 shlwapi shell32 ole32 user32 wininet msvcrt kernel32 ntdll)
+target_link_libraries(featmgr uuid minizip zlib)
+add_importlibs(featmgr advapi32 shlwapi shell32 ole32 user32 wininet crypt32 msvcrt kernel32 ntdll)
 add_cd_file(TARGET featmgr DESTINATION reactos/system32 FOR all)
 
 # --- refreshenv: re-read PATH into the cmd / PowerShell window that is open (a child like featmgr cannot) ---
@@ -15,10 +15,10 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/refreshenv.cmd DESTINATION reactos/
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/refreshenv.ps1 DESTINATION reactos/system32 FOR all)
 
 # --- GUI applet: "Optional Features" (Turn features on/off) ---
-add_executable(optfeatures gui.c featwin.c progwin.c firstboot.c engine.c components.c shelldefaults.c rapps_import.c scoop.c scoopdefaults.c optfeatures.rc)
+add_executable(optfeatures gui.c featwin.c progwin.c firstboot.c engine.c components.c shelldefaults.c rapps_import.c native.c rappsdb.c scoop.c scoopdefaults.c optfeatures.rc)
 set_module_type(optfeatures win32gui UNICODE)
 target_link_libraries(optfeatures uuid)
-add_importlibs(optfeatures advapi32 shlwapi shell32 ole32 comctl32 user32 gdi32 wininet msvcrt kernel32 ntdll)
+add_importlibs(optfeatures advapi32 shlwapi shell32 ole32 comctl32 user32 gdi32 wininet crypt32 msvcrt kernel32 ntdll)
 add_cd_file(TARGET optfeatures DESTINATION reactos/system32 FOR all)
 
 # --- optionalfeatures.exe: the Windows name; launches optfeatures.exe (no Control Panel icon, appwiz.cpl hosts it) ---
@@ -38,29 +38,25 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/payload/gl-sw-pack/glsw-pack.txt
             DESTINATION reactos/Featmgr/Payload/gl-sw-pack FOR all)
 
 # --- Claude Desktop: software-tier entry (amd64 only, Anthropic ships an x64 build) ---
-# Only the manifest and a RAPPS-format entry (not a manifest: the catalog scan reads *.ini) ship in the image. The app itself is downloaded
+# Only the manifest ships in the image (Provider=native: featmgr downloads, checks and unpacks it itself). The app is downloaded
 # from Anthropic's release feed at install time (SHA1-checked) and is never bundled.
 if(ARCH STREQUAL "amd64")
     add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/claude-desktop.ini
                 DESTINATION reactos/Featmgr/Catalog FOR all)
-    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/claude-desktop.txt
-                DESTINATION reactos/Featmgr/Catalog FOR all)
 endif()
 
 # --- PowerShell 7 (LTS) preinstall, and the Firefox entry: software-tier entries (amd64 only; the x86 pwsh does not start yet, PS7-x86-pwsh-mscoree) ---
-# The manifest + RAPPS-format entry always ship. The official MSI (MIT) is NOT in git: stage-powershell7.sh downloads it
+# The manifest always ships (Provider=native). The official MSI (MIT) is NOT in git: stage-powershell7.sh downloads it
 # at configure time from the pinned release URL and checks the pinned SHA-256 (POWERSHELL7_MSI=<file> for an offline
 # host). When it is staged, the install image (bootcd / regtest, not the live CD) carries it, with the licence and
 # ThirdPartyNotices.txt, in the feature manager's payload folder, and syssetup installs it silently during the GUI
-# phase (dll/win32/syssetup/addons.c, through "featmgr /enable powershell-7", local-first). When staging fails
+# phase (dll/win32/syssetup/addons.c, through "featmgr /enable powershell-7", local-first: the MSI's SHA-256 is checked against the manifest). When staging fails
 # (no network, no file) or -DFEATMGR_PS7_PREINSTALL=OFF, the image has no MSI, setup skips the step, and the
 # Optional Features entry downloads the MSI at install time, as before. The [powershell-7] section of Catalog\components.ini
 # only serves first boot (optfeatures /firstboot): the preinstalled pwsh is detected there and never downloaded. Firefox
 # (catalog/firefox.ini + components.ini) is not bundled: it is downloaded from Mozilla at first boot.
 if(ARCH STREQUAL "amd64")
     add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/powershell-7.ini
-                DESTINATION reactos/Featmgr/Catalog FOR all)
-    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/powershell-7.txt
                 DESTINATION reactos/Featmgr/Catalog FOR all)
     add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/firefox.ini
                 DESTINATION reactos/Featmgr/Catalog FOR all)

@@ -24,6 +24,20 @@
 /* Own string-table block (no other language defines it), so LoadString falls back to en-US */
 #define IDS_FEATURESNAME			1040
 #define IDS_FEATURESDESCRIPTION		1041
+/* Programs and Features window (programs.c): own string-table block, other languages fall back to en-US */
+#define IDS_PROG_TITLE				1056
+#define IDS_PROG_HEADER				1057
+#define IDS_PROG_COL_NAME			1058
+#define IDS_PROG_COL_PUBLISHER		1059
+#define IDS_PROG_COL_VERSION		1060
+#define IDS_PROG_COL_DATE			1061
+#define IDS_PROG_UNINSTALL			1062
+#define IDS_PROG_CHANGE				1063
+#define IDS_PROG_REFRESH			1064
+#define IDS_PROG_FEATURES			1065
+#define IDS_PROG_CLOSE				1066
+#define IDS_PROG_CONFIRM			1067
+#define IDS_PROG_STARTFAIL			1068
 #define IDS_CREATE_SHORTCUT         2021
 #define IDS_ERROR_NOT_FOUND         2022
 #define IDS_NEW_INTERNET_SHORTCUT   2023

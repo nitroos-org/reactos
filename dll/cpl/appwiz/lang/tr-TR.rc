@@ -97,3 +97,22 @@ BEGIN
     IDS_INVALID_NAME "Girdiğiniz kısayol adı, ya geçersiz karakterler içeriyor ya dosya adları için geçersiz ya da çok uzun."
     IDS_BROWSE_FOR_TARGET "Lütfen aşağıdaki kısayolun hedefi seçin:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "Programlar ve Özellikler"
+    IDS_PROG_HEADER "Bir programı kaldırın veya değiştirin. Yazılım yüklemek veya sistem özelliklerini açmak ya da kapatmak için ""NitroOS özelliklerini aç veya kapat"" seçeneğini kullanın."
+    IDS_PROG_COL_NAME "Ad"
+    IDS_PROG_COL_PUBLISHER "Yayımcı"
+    IDS_PROG_COL_VERSION "Sürüm"
+    IDS_PROG_COL_DATE "Yüklenme tarihi"
+    IDS_PROG_UNINSTALL "&Kaldır"
+    IDS_PROG_CHANGE "De&ğiştir"
+    IDS_PROG_REFRESH "&Yenile"
+    IDS_PROG_FEATURES "NitroOS &özelliklerini aç veya kapat"
+    IDS_PROG_CLOSE "Ka&pat"
+    IDS_PROG_CONFIRM "'%s' programını kaldırmak istediğinizden emin misiniz?"
+    IDS_PROG_STARTFAIL "Program başlatılamadı (hata %lu):\n%s"
+    IDS_FEATURESNAME "NitroOS özelliklerini aç veya kapat"
+    IDS_FEATURESDESCRIPTION "İsteğe bağlı NitroOS özelliklerini ve ek yazılımları açın veya kapatın."
+END
