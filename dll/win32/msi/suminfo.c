@@ -1262,6 +1262,7 @@ UINT WINAPI MsiCreateTransformSummaryInfoW( MSIHANDLE db, MSIHANDLE db_ref, cons
                                             int validation )
 {
     FIXME( "%lu, %lu, %s, %d, %d\n", db, db_ref, debugstr_w(transform), error, validation );
+    if (!msi_transform_handles_valid( db, db_ref )) return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
     return ERROR_FUNCTION_FAILED;
 }
 
