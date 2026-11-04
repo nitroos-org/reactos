@@ -12,6 +12,13 @@
 extern "C" {
 #endif
 
+/* UI mode umpnpmgr passes on the install pipe to ClientSideInstallW and drvinst.exe
+   (the ReactOS-specific value after the event name) */
+#define NEWDEV_UI_HIDDEN        0   /* install without UI */
+#define NEWDEV_UI_WIZARD        1   /* install, with the wizard if no driver is found */
+#define NEWDEV_UI_RESTART_PAGE  2   /* no install: the device was installed service-side
+                                       and needs a restart; show the wizard's restart page */
+
 BOOL
 WINAPI
 DevInstallW(

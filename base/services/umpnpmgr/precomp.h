@@ -31,8 +31,10 @@
 #include <regstr.h>
 #include <userenv.h>
 #include <shlwapi.h>
+#include <sddl.h>
 #include <winsvc_undoc.h>
 #include <pnp_s.h>
+#include <dll/newdevp.h>
 
 
 #define LOGCONF_NAME_BUFFER_SIZE 32
