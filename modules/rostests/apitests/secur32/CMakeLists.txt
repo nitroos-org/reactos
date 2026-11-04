@@ -7,6 +7,7 @@ list(APPEND SOURCE
     SchannelHandshake.c
     SchannelServerCert.c
     SetCredentialsAttributes.c
+    SspiAuthIdentityExports.c
     QueryContextAttributesEx.c
     testlist.c)
 
