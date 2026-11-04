@@ -58,10 +58,6 @@ FatIsCurrentOperationSynchedForDcbTeardown (
 #endif
 #endif
 
-#ifdef __REACTOS__
-NTKERNELAPI VOID NTAPI CcRosAllowLazyClose( _In_ PFILE_OBJECT FileObject );
-#endif
-
 VOID
 FatInitializeCacheMap (
     _In_ PFILE_OBJECT FileObject,
@@ -92,10 +88,11 @@ Routine Description:
 
 #ifdef __REACTOS__
     //
-    //  The last close may leave the dirty data to the lazy writer: the Fcb lives until this file
-    //  object is closed, and the cache map's reference delays that until the map is deleted
+    //  Deliberately NOT calling CcRosAllowLazyClose here: the lazy cache map close is ntfsng-only.
+    //  With it, a SetEndOfFile shrink on a file whose map is deferred returns wrong data for the
+    //  kept bytes after the reopen (suspected ValidDataLength vs FileSize take-over). See ticket
+    //  releases/2026.11/backlog/CC-lazy-fat-shrink-deferred-map.md
     //
-    CcRosAllowLazyClose( FileObject );
 #endif
 
 #if (NTDDI_VERSION >= NTDDI_WIN8)
