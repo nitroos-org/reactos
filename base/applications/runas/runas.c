@@ -311,8 +311,22 @@ wmain(
                                  &ProcessInfo);
     if (rc == FALSE)
     {
+        DWORD dwError = GetLastError();
+        WCHAR szMessage[512];
+        DWORD dwLength;
+
+        /* TODO(oracle): the exact Windows runas output format was not measured, this is from memory */
         ConResPrintf(StdOut, IDS_RUN_ERROR, pszCommandLine);
-        ConPrintf(StdOut, L"%lu\n", GetLastError());
+        dwLength = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                  NULL, dwError, 0, szMessage, ARRAYSIZE(szMessage), NULL);
+        while (dwLength > 0 && (szMessage[dwLength - 1] == L'\r' || szMessage[dwLength - 1] == L'\n' ||
+                                szMessage[dwLength - 1] == L' '))
+            szMessage[--dwLength] = UNICODE_NULL;
+        if (dwLength > 0)
+            ConPrintf(StdOut, L"%lu: %s\n", dwError, szMessage);
+        else
+            ConPrintf(StdOut, L"%lu\n", dwError);
+        result = 1;
     }
 
 done:
