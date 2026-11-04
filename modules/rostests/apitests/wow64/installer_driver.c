@@ -1,3 +1,10 @@
+/*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     installer_driver
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
 /* Native observer for installer UI and installed-program startup.
  * The capture mode also forwards a helper's stdout/stderr to the harness and
  * serial log, so a stalled installer can be diagnosed without reading its disk. */

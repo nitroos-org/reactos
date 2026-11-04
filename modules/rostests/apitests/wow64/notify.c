@@ -1,3 +1,10 @@
+/*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     notify
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
 /* Opaque NMHDR extensions must survive current-thread CALLWND hooks. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

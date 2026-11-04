@@ -1,3 +1,10 @@
+/*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     NT services used by installer loader and administrator checks
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
 /* NT services used by installer loader and administrator checks. */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>

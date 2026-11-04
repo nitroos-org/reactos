@@ -1,4 +1,11 @@
 /*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     LhHashUpgradeOldCase
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
+/*
  * The characters whose uppercase differs between the l_intl.nls of nitro before
  * commit 6f1f2dbb8bf and the one in the tree: { character, uppercase the old table gave }.
  * 341 entries (git show 6f1f2dbb8bf^1:media/nls/l_intl.nls against the present file).
