@@ -561,6 +561,90 @@ CON_API(SrvReadConsoleOutput,
     return Status;
 }
 
+/*
+ * API_NUMBER: ConsolepGetScrollback
+ *
+ * Rows that scrolled off the top of a text-mode buffer, for a headless console host. With
+ * CONSOLE_SCROLLBACK_ENABLE the buffer starts to keep its last CONSOLE_SCROLLBACK_ROWS rows
+ * scrolled off (rows are numbered, Total counts them). The call returns Count rows from number
+ * First on (rows no longer kept are skipped: First says where the rows start), and tells with
+ * CONSOLE_SCROLLBACK_ENABLED whether this buffer keeps them.
+ */
+CON_API(SrvGetConsoleScrollback,
+        CONSOLE_SCROLLBACK, ScrollbackRequest)
+{
+    NTSTATUS Status;
+    PTEXTMODE_SCREEN_BUFFER Buffer;
+    ULONG Width, Count = 0;
+    ULONGLONG First, Oldest;
+
+    if (ScrollbackRequest->Count > CONSOLE_SCROLLBACK_ROWS ||
+        (ScrollbackRequest->Flags & ~CONSOLE_SCROLLBACK_ENABLE))
+        return STATUS_INVALID_PARAMETER;
+
+    Status = ConSrvGetTextModeBuffer(ProcessData,
+                                     ScrollbackRequest->OutputHandle,
+                                     &Buffer, GENERIC_READ, TRUE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    ASSERT((PCONSOLE)Console == Buffer->Header.Console);
+
+    Width = Buffer->ScreenBufferSize.X;
+    if (ScrollbackRequest->Count)
+    {
+        /* The rows travel in the capture buffer, validated for the width the caller expects */
+        if (ScrollbackRequest->Width != Width ||
+            !CsrValidateMessageBuffer(ApiMessage,
+                                      (PVOID*)&ScrollbackRequest->CharInfo,
+                                      ScrollbackRequest->Count * Width,
+                                      sizeof(CHAR_INFO)))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto Quit;
+        }
+    }
+
+    if ((ScrollbackRequest->Flags & CONSOLE_SCROLLBACK_ENABLE) && !Buffer->Vt.InAltBuffer &&
+        Width <= CONSOLE_SCROLLBACK_MAX_WIDTH &&
+        (!Buffer->ScrollRows || Buffer->ScrollWidth != Width))
+    {
+        PCHAR_INFO Rows = ConsoleAllocHeap(HEAP_ZERO_MEMORY,
+                                           (SIZE_T)CONSOLE_SCROLLBACK_ROWS * Width * sizeof(CHAR_INFO));
+        if (!Rows)
+        {
+            Status = STATUS_NO_MEMORY;
+            goto Quit;
+        }
+        if (Buffer->ScrollRows) ConsoleFreeHeap(Buffer->ScrollRows);
+        Buffer->ScrollRows = Rows;
+        Buffer->ScrollWidth = Width;
+    }
+
+    ScrollbackRequest->Flags = (Buffer->ScrollRows && Buffer->ScrollWidth == Width) ? CONSOLE_SCROLLBACK_ENABLED : 0;
+    ScrollbackRequest->Width = Width;
+    ScrollbackRequest->Total = Buffer->ScrollTotal;
+    First = ScrollbackRequest->First;
+    if (ScrollbackRequest->Flags)
+    {
+        Oldest = Buffer->ScrollTotal > CONSOLE_SCROLLBACK_ROWS ? Buffer->ScrollTotal - CONSOLE_SCROLLBACK_ROWS : 0;
+        if (First < Oldest) First = Oldest;
+        while (Count < ScrollbackRequest->Count && First + Count < Buffer->ScrollTotal)
+        {
+            RtlCopyMemory(&ScrollbackRequest->CharInfo[(SIZE_T)Count * Width],
+                          &Buffer->ScrollRows[(SIZE_T)((ULONG)(First + Count) & (CONSOLE_SCROLLBACK_ROWS - 1)) * Width],
+                          Width * sizeof(CHAR_INFO));
+            ++Count;
+        }
+    }
+    ScrollbackRequest->First = First;
+    ScrollbackRequest->Count = Count;
+
+Quit:
+    ConSrvReleaseScreenBuffer(Buffer, TRUE);
+    return Status;
+}
+
 NTSTATUS NTAPI
 ConDrvWriteConsoleOutput(IN PCONSOLE Console,
                          IN PTEXTMODE_SCREEN_BUFFER Buffer,

@@ -15,6 +15,10 @@
 #include <winuser.h>
 #define NTOS_MODE_USER
 #include <ndk/ntndk.h>
+#include <wingdi.h>
+#include <wincon_undoc.h>
+#include <subsys/csr/csr.h>
+#include <subsys/win/conmsg.h>
 
 #ifndef ENABLE_VIRTUAL_TERMINAL_INPUT
 #define ENABLE_VIRTUAL_TERMINAL_INPUT 0x0200
@@ -26,6 +30,8 @@ typedef struct _HOST
     SHORT Width, Height;
     CHAR_INFO *Previous, *Current;
     BOOL Painted, CursorVisible, SawClient;
+    BOOL ScrollbackSeen;        /* ScrollbackTotal says how many rows had scrolled off at the last look */
+    ULONGLONG ScrollbackTotal;
     COORD Cursor;
     BYTE Utf8[4], Utf8Count, Utf8Length;
     CHAR Sequence[32];
@@ -61,6 +67,54 @@ HostParseDimension(const WCHAR *Text, SHORT DefaultValue)
     if (End == Text || *End || Value <= 0 || Value > 32767)
         return DefaultValue;
     return (SHORT)Value;
+}
+
+/*
+ * The terminal keeps its own scrollback, but only of the rows that scroll off the top of its
+ * screen. The console buffer is as large as the window, so text that scrolls off the top is
+ * gone from it at once, and a client can scroll hundreds of rows between two looks of the host.
+ * The console server therefore keeps the rows that scrolled off the top of the host's buffer
+ * (ConsolepGetScrollback) and the host feeds them to the terminal as lines scrolling off its
+ * screen. Returns FALSE when the buffer keeps no such rows (a screen buffer of the client's own,
+ * which is a full-screen application's screen and has no scrollback, as an alternate screen).
+ */
+static BOOL
+HostScrollbackCall(HOST *Host, HANDLE ConsoleOut, DWORD Flags, ULONGLONG First, DWORD Count,
+                   CHAR_INFO *Cells, ULONGLONG *Total, ULONGLONG *Returned, DWORD *Rows)
+{
+    CONSOLE_API_MESSAGE Message;
+    PCONSOLE_SCROLLBACK Request = &Message.Data.ScrollbackRequest;
+    PCSR_CAPTURE_BUFFER Capture = NULL;
+    SIZE_T Size = (SIZE_T)Count * Host->Width * sizeof(CHAR_INFO);
+    BOOL Enabled;
+
+    RtlZeroMemory(&Message, sizeof(Message));
+    if (Count)
+    {
+        Capture = CsrAllocateCaptureBuffer(1, (ULONG)Size);
+        if (!Capture) return FALSE;
+        CsrAllocateMessagePointer(Capture, (ULONG)Size, (PVOID *)&Request->CharInfo);
+    }
+    Request->ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+    Request->OutputHandle = ConsoleOut;
+    Request->Flags = Flags;
+    Request->First = First;
+    Request->Width = Host->Width;
+    Request->Count = Count;
+    CsrClientCallServer((PCSR_API_MESSAGE)&Message, Capture,
+                        CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepGetScrollback),
+                        sizeof(*Request));
+    Enabled = NT_SUCCESS(Message.Status) && (Request->Flags & CONSOLE_SCROLLBACK_ENABLED);
+    if (Enabled)
+    {
+        *Total = Request->Total;
+        *Returned = Request->First;
+        *Rows = Request->Count;
+        if (Count && Request->Count)
+            CopyMemory(Cells, Request->CharInfo, (SIZE_T)Request->Count * Host->Width * sizeof(CHAR_INFO));
+    }
+    if (Capture) CsrFreeCaptureBuffer(Capture);
+    return Enabled;
 }
 
 static BOOL
@@ -115,6 +169,14 @@ HostResize(HOST *Host, SHORT Width, SHORT Height)
     Host->Width = Width;
     Host->Height = Height;
     Host->Painted = FALSE;
+    Host->ScrollbackSeen = FALSE;
+    {
+        ULONGLONG Total, First;
+        DWORD Rows;
+
+        /* From now on the server keeps the rows that scroll off the top of this buffer */
+        HostScrollbackCall(Host, Host->ConsoleOut, CONSOLE_SCROLLBACK_ENABLE, 0, 0, NULL, &Total, &First, &Rows);
+    }
     return TRUE;
 }
 
@@ -123,50 +185,138 @@ HostResize(HOST *Host, SHORT Width, SHORT Height)
 #define HOST_IS_HIGH_SURROGATE(c)   ((c) >= 0xD800 && (c) <= 0xDBFF)
 #define HOST_IS_LOW_SURROGATE(c)    ((c) >= 0xDC00 && (c) <= 0xDFFF)
 
-static BOOL
-HostCellChanged(HOST *Host, DWORD Row, DWORD Column)
-{
-    DWORD Index = Row * Host->Width + Column;
+/* A cell differs from what the terminal shows of it (Ref NULL: nothing is known of the row) */
+#define HOST_DIFFERS(a, b) ((a)->Char.UnicodeChar != (b)->Char.UnicodeChar || (a)->Attributes != (b)->Attributes)
 
-#define HOST_DIFFERS(i) (Host->Previous[i].Char.UnicodeChar != Host->Current[i].Char.UnicodeChar || \
-                         Host->Previous[i].Attributes != Host->Current[i].Attributes)
-    if (!Host->Painted) return TRUE;
-    if (HOST_DIFFERS(Index)) return TRUE;
+static BOOL
+HostCellChanged(HOST *Host, const CHAR_INFO *Cells, const CHAR_INFO *Ref, DWORD Column)
+{
+    if (!Ref) return TRUE;
+    if (HOST_DIFFERS(&Cells[Column], &Ref[Column])) return TRUE;
     /* Both halves of a pair are painted together, so a change of either repaints both */
-    if (HOST_IS_HIGH_SURROGATE(Host->Current[Index].Char.UnicodeChar) && Column + 1 < Host->Width &&
-        HOST_IS_LOW_SURROGATE(Host->Current[Index + 1].Char.UnicodeChar))
-        return HOST_DIFFERS(Index + 1);
-    if (HOST_IS_LOW_SURROGATE(Host->Current[Index].Char.UnicodeChar) && Column > 0 &&
-        HOST_IS_HIGH_SURROGATE(Host->Current[Index - 1].Char.UnicodeChar))
-        return HOST_DIFFERS(Index - 1);
-#undef HOST_DIFFERS
+    if (HOST_IS_HIGH_SURROGATE(Cells[Column].Char.UnicodeChar) && Column + 1 < (DWORD)Host->Width &&
+        HOST_IS_LOW_SURROGATE(Cells[Column + 1].Char.UnicodeChar))
+        return HOST_DIFFERS(&Cells[Column + 1], &Ref[Column + 1]);
+    if (HOST_IS_LOW_SURROGATE(Cells[Column].Char.UnicodeChar) && Column > 0 &&
+        HOST_IS_HIGH_SURROGATE(Cells[Column - 1].Char.UnicodeChar))
+        return HOST_DIFFERS(&Cells[Column - 1], &Ref[Column - 1]);
     return FALSE;
 }
 
-static BOOL
-HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
+/* The escape sequences that paint the cells of one terminal row that differ from Ref, appended to
+ * Line at Used; the new length is returned. */
+static DWORD
+HostPaintRow(HOST *Host, DWORD Row, const CHAR_INFO *Cells, const CHAR_INFO *Ref, CHAR *Line, DWORD Used,
+             BOOL *Changed)
 {
-    CONSOLE_SCREEN_BUFFER_INFO Info;
-    CONSOLE_CURSOR_INFO CursorInfo;
+    static const BYTE Palette[8] = {0, 4, 2, 6, 1, 5, 3, 7};
+    DWORD Column, Length;
+    WORD Attribute = 0xffff;
+    CHAR Utf8[8];
+
+    for (Column = 0; Column < (DWORD)Host->Width; ++Column)
+    {
+        if (!HostCellChanged(Host, Cells, Ref, Column))
+            continue;
+
+        *Changed = TRUE;
+        Used += sprintf(Line + Used, "\033[%lu;%luH", Row + 1, Column + 1);
+        do
+        {
+            WCHAR Character;
+            if (!HostCellChanged(Host, Cells, Ref, Column))
+                break;
+            if (Attribute != Cells[Column].Attributes)
+            {
+                Attribute = Cells[Column].Attributes;
+                Used += sprintf(Line + Used, "\033[%u;%um",
+                                (UINT)(30 + Palette[Attribute & 7] + ((Attribute & 8) ? 60 : 0)),
+                                (UINT)(40 + Palette[(Attribute >> 4) & 7] + ((Attribute & 128) ? 60 : 0)));
+            }
+            Character = Cells[Column].Char.UnicodeChar;
+            if (!Character || Character < 32) Character = L' ';
+            if (HOST_IS_HIGH_SURROGATE(Character) && Column + 1 < (DWORD)Host->Width &&
+                HOST_IS_LOW_SURROGATE(Cells[Column + 1].Char.UnicodeChar))
+            {
+                WCHAR Pair[2];
+
+                Pair[0] = Character;
+                Pair[1] = Cells[Column + 1].Char.UnicodeChar;
+                Length = WideCharToMultiByte(CP_UTF8, 0, Pair, 2, Utf8, sizeof(Utf8), NULL, NULL);
+                if (Length)
+                    ++Column;   /* the low half is part of this character */
+            }
+            else
+                Length = WideCharToMultiByte(CP_UTF8, 0, &Character, 1,
+                                             Utf8, sizeof(Utf8), NULL, NULL);
+            if (!Length)
+            {
+                Utf8[0] = ' ';
+                Length = 1;
+            }
+            CopyMemory(Line + Used, Utf8, Length);
+            Used += Length;
+            ++Column;
+        } while (Column < (DWORD)Host->Width);
+        --Column;
+    }
+    return Used;
+}
+
+#define HOST_LINE_SIZE(Host)    ((SIZE_T)(Host)->Width * 64 + 256)
+
+/* Rows scrolled off the top of the console buffer since the last look (Rows of them in History,
+ * oldest first) go to the terminal as rows that scroll off its screen, then the screen shows
+ * the current frame. Lost: older rows were dropped by the server before the host asked, the
+ * terminal's screen then goes to its scrollback as it is. */
+static BOOL
+HostPaintScrolled(HOST *Host, const CHAR_INFO *History, DWORD Rows, BOOL Lost, CHAR *Line)
+{
+    DWORD Row, Used, Height = (DWORD)Host->Height;
+    BOOL Changed = FALSE;
+
+#define HOST_FRAME_ROW(Index) ((Index) < Rows ? History + (SIZE_T)(Index) * Host->Width \
+                                              : Host->Current + (SIZE_T)((Index) - Rows) * Host->Width)
+    if (Lost)
+    {
+        /* Not a single row of what the terminal shows is known to be among the new ones */
+        Used = sprintf(Line, "\033[0m\033[%lu;1H", Height);
+        for (Row = 0; Row < Height; ++Row) Line[Used++] = '\n';
+        if (!HostWrite(Host, Line, Used)) return FALSE;
+    }
+    /* The terminal's screen becomes the rows that stay in view until the first one scrolls away... */
+    Used = 0;
+    for (Row = 0; Row < Height; ++Row)
+        Used = HostPaintRow(Host, Row, HOST_FRAME_ROW(Row), Lost ? NULL : Host->Previous + (SIZE_T)Row * Host->Width,
+                            Line, Used, &Changed);
+    if (Used && !HostWrite(Host, Line, Used)) return FALSE;
+    /* ...and every row that scrolled off pushes the top row into the terminal's scrollback and brings the next in */
+    for (Row = 0; Row < Rows; ++Row)
+    {
+        /* The default colours first: a terminal may fill the row that scrolls in with the current background */
+        Used = sprintf(Line, "\033[0m\033[%lu;1H\n", Height);
+        Used = HostPaintRow(Host, Height - 1, HOST_FRAME_ROW(Row + Height), NULL, Line, Used, &Changed);
+        if (!HostWrite(Host, Line, Used)) return FALSE;
+    }
+#undef HOST_FRAME_ROW
+    return TRUE;
+}
+
+static BOOL
+HostReadFrame(HOST *Host, HANDLE ConsoleOut, const CONSOLE_SCREEN_BUFFER_INFO *Info)
+{
     COORD BufferSize, BufferOrigin = {0, 0};
     SMALL_RECT Region;
-    CHAR *Line;
-    DWORD Index, Row, Column, Length, Used, BandRows;
-    BOOL Changed = FALSE;
-    WORD Attribute;
-    CHAR Utf8[8];
-    static const BYTE Palette[8] = {0, 4, 2, 6, 1, 5, 3, 7};
+    DWORD Row, BandRows;
 
-    if (!GetConsoleScreenBufferInfo(ConsoleOut, &Info)) return FALSE;
-    if (!Host->Painted && !HostWrite(Host, "\033[?25l\033[2J", 10)) return FALSE;
     BufferSize.X = Host->Width;
     BufferSize.Y = Host->Height;
-    Region.Left = Info.srWindow.Left;
-    Region.Top = Info.srWindow.Top;
+    Region.Left = Info->srWindow.Left;
+    Region.Top = Info->srWindow.Top;
     Region.Right = Region.Left + Host->Width - 1;
     Region.Bottom = Region.Top + Host->Height - 1;
-    if (Region.Right >= Info.dwSize.X) Region.Right = Info.dwSize.X - 1;
-    if (Region.Bottom >= Info.dwSize.Y) Region.Bottom = Info.dwSize.Y - 1;
+    if (Region.Right >= Info->dwSize.X) Region.Right = Info->dwSize.X - 1;
+    if (Region.Bottom >= Info->dwSize.Y) Region.Bottom = Info->dwSize.Y - 1;
     ZeroMemory(Host->Current, (SIZE_T)Host->Width * Host->Height * sizeof(*Host->Current));
     /* One ReadConsoleOutput request carries at most 64 KiB of cells (CSR capture
      * buffer), as on Windows; a 250x70 terminal is 70000 bytes. Read in bands of rows. */
@@ -184,65 +334,105 @@ HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
         if (!ReadConsoleOutputW(ConsoleOut, Host->Current + (SIZE_T)Row * Host->Width,
                                 BandSize, BufferOrigin, &Band)) return FALSE;
     }
+    return TRUE;
+}
 
-    Line = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)Host->Width * 64 + 128);
-    if (!Line) return FALSE;
-    for (Row = 0; Row < (DWORD)Host->Height; ++Row)
+static BOOL
+HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
+{
+    CONSOLE_SCREEN_BUFFER_INFO Info;
+    CONSOLE_CURSOR_INFO CursorInfo;
+    CHAR_INFO *History = NULL;
+    CHAR *Line;
+    DWORD Row, Rows = 0, Attempt, Chunk, Got;
+    BOOL Changed = FALSE, Keeps, Lost = FALSE;
+    ULONGLONG Total = 0, Again, First = 0;
+
+    if (!GetConsoleScreenBufferInfo(ConsoleOut, &Info)) return FALSE;
+    if (!Host->Painted && !HostWrite(Host, "\033[?25l\033[2J", 10)) return FALSE;
+
+    /* The frame and the count of rows scrolled off must belong together: look again when more
+     * rows scrolled off while the frame was read. */
+    for (Attempt = 0; ; ++Attempt)
     {
-        Used = 0;
-        Attribute = 0xffff;
-        for (Column = 0; Column < (DWORD)Host->Width; ++Column)
+        Keeps = HostScrollbackCall(Host, ConsoleOut, 0, 0, 0, NULL, &Total, &First, &Got);
+        if (!HostReadFrame(Host, ConsoleOut, &Info)) return FALSE;
+        if (!Keeps || Attempt >= 8) break;
+        if (!HostScrollbackCall(Host, ConsoleOut, 0, 0, 0, NULL, &Again, &First, &Got) || Again == Total) break;
+    }
+    if (Keeps)
+    {
+        if (Host->Painted && Host->ScrollbackSeen && Total > Host->ScrollbackTotal)
         {
-            Index = Row * Host->Width + Column;
-            if (!HostCellChanged(Host, Row, Column))
-                continue;
+            ULONGLONG Wanted = Total - Host->ScrollbackTotal;
 
-            Changed = TRUE;
-            Used += sprintf(Line + Used, "\033[%lu;%luH", Row + 1, Column + 1);
-            do
+            /* Rows the server no longer holds come back as a later first row */
+            if (HostScrollbackCall(Host, ConsoleOut, 0, Total - Wanted, 0, NULL, &Again, &First, &Got) && First < Total)
             {
-                WCHAR Character;
-                Index = Row * Host->Width + Column;
-                if (!HostCellChanged(Host, Row, Column))
-                    break;
-                if (Attribute != Host->Current[Index].Attributes)
+                Lost = First != Total - Wanted;
+                Wanted = Total - First;
+                History = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)Wanted * Host->Width * sizeof(*History));
+                if (History)
                 {
-                    Attribute = Host->Current[Index].Attributes;
-                    Used += sprintf(Line + Used, "\033[%u;%um",
-                                    (UINT)(30 + Palette[Attribute & 7] + ((Attribute & 8) ? 60 : 0)),
-                                    (UINT)(40 + Palette[(Attribute >> 4) & 7] + ((Attribute & 128) ? 60 : 0)));
-                }
-                Character = Host->Current[Index].Char.UnicodeChar;
-                if (!Character || Character < 32) Character = L' ';
-                if (HOST_IS_HIGH_SURROGATE(Character) && Column + 1 < (DWORD)Host->Width &&
-                    HOST_IS_LOW_SURROGATE(Host->Current[Index + 1].Char.UnicodeChar))
-                {
-                    WCHAR Pair[2];
+                    Chunk = 32768 / ((DWORD)Host->Width * sizeof(CHAR_INFO));
+                    if (!Chunk) Chunk = 1;
+                    while (Rows < Wanted)
+                    {
+                        ULONGLONG Start;
 
-                    Pair[0] = Character;
-                    Pair[1] = Host->Current[Index + 1].Char.UnicodeChar;
-                    Length = WideCharToMultiByte(CP_UTF8, 0, Pair, 2, Utf8, sizeof(Utf8), NULL, NULL);
-                    if (Length)
-                        ++Column;   /* the low half is part of this character */
+                        if (!HostScrollbackCall(Host, ConsoleOut, 0, First + Rows, (DWORD)min(Chunk, Wanted - Rows),
+                                                History + (SIZE_T)Rows * Host->Width, &Again, &Start, &Got) ||
+                            !Got || Start != First + Rows)
+                            break;
+                        Rows += Got;
+                    }
+                    if (Rows < Wanted)
+                    {
+                        /* The rows could not be read whole: paint the frame in place */
+                        HeapFree(GetProcessHeap(), 0, History);
+                        History = NULL;
+                        Rows = 0;
+                    }
                 }
-                else
-                    Length = WideCharToMultiByte(CP_UTF8, 0, &Character, 1,
-                                                 Utf8, sizeof(Utf8), NULL, NULL);
-                if (!Length)
-                {
-                    Utf8[0] = ' ';
-                    Length = 1;
-                }
-                CopyMemory(Line + Used, Utf8, Length);
-                Used += Length;
-                ++Column;
-            } while (Column < (DWORD)Host->Width);
-            --Column;
+            }
         }
-        if (Used && !HostWrite(Host, Line, Used))
+        Host->ScrollbackTotal = Total;
+        Host->ScrollbackSeen = TRUE;
+    }
+    else
+        Host->ScrollbackSeen = FALSE;
+
+    Line = HeapAlloc(GetProcessHeap(), 0, HOST_LINE_SIZE(Host));
+    if (!Line)
+    {
+        if (History) HeapFree(GetProcessHeap(), 0, History);
+        return FALSE;
+    }
+    if (Rows)
+    {
+        BOOL Result = HostPaintScrolled(Host, History, Rows, Lost, Line);
+
+        HeapFree(GetProcessHeap(), 0, History);
+        if (!Result)
         {
             HeapFree(GetProcessHeap(), 0, Line);
             return FALSE;
+        }
+        Changed = TRUE;
+    }
+    else
+    {
+        for (Row = 0; Row < (DWORD)Host->Height; ++Row)
+        {
+            DWORD Used = HostPaintRow(Host, Row, Host->Current + (SIZE_T)Row * Host->Width,
+                                      Host->Painted ? Host->Previous + (SIZE_T)Row * Host->Width : NULL,
+                                      Line, 0, &Changed);
+
+            if (Used && !HostWrite(Host, Line, Used))
+            {
+                HeapFree(GetProcessHeap(), 0, Line);
+                return FALSE;
+            }
         }
     }
     HeapFree(GetProcessHeap(), 0, Line);
@@ -262,8 +452,8 @@ HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
             Info.dwCursorPosition.Y != Host->Cursor.Y || Count || Changed)
         {
             Count += sprintf(Position + Count, "\033[%u;%uH",
-                             (UINT)(Info.dwCursorPosition.Y - Region.Top + 1),
-                             (UINT)(Info.dwCursorPosition.X - Region.Left + 1));
+                             (UINT)(Info.dwCursorPosition.Y - Info.srWindow.Top + 1),
+                             (UINT)(Info.dwCursorPosition.X - Info.srWindow.Left + 1));
             Host->Cursor = Info.dwCursorPosition;
         }
         if (Count && !HostWrite(Host, Position, Count)) return FALSE;
