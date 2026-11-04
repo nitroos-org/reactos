@@ -193,6 +193,142 @@ Done:
     closesocket(Listener);
 }
 
+/* Every connection of a run that queues megabytes and reads them late: the refill of AFD's buffer must not nest
+ * once per 8K of the queue (a kernel stack overflow, bugcheck 0x7F, on an i386 Debug build) */
+static
+VOID
+TestQueueDrain(
+    _In_ ULONG Rounds,
+    _In_ INT ReadSize)
+{
+    static UCHAR Buffer[65536];
+    ULONG Round;
+
+    for (Round = 0; Round < Rounds; Round++)
+    {
+        SOCKET Listener, Sender, Receiver;
+        SOCKADDR_IN Address;
+        INT Length = sizeof(Address);
+        ULONGLONG SendOffset = 0, ReadOffset = 0, Pushed, Got = 0;
+        BOOLEAN Capped;
+        ULONG Bad = 0, Timeout = 5000;
+
+        Listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        Sender = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        ZeroMemory(&Address, sizeof(Address));
+        Address.sin_family = AF_INET;
+        Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (bind(Listener, (SOCKADDR *)&Address, sizeof(Address)) || listen(Listener, 1) ||
+            getsockname(Listener, (SOCKADDR *)&Address, &Length) ||
+            connect(Sender, (SOCKADDR *)&Address, sizeof(Address)))
+        {
+            ok(0, "queue-drain: setup failed, error %d\n", WSAGetLastError());
+            closesocket(Listener);
+            closesocket(Sender);
+            return;
+        }
+        Receiver = accept(Listener, NULL, NULL);
+        setsockopt(Receiver, SOL_SOCKET, SO_RCVTIMEO, (PCHAR)&Timeout, sizeof(Timeout));
+
+        /* about 2 MB queue up behind the idle receiver, then they are read in small or large pieces */
+        Pushed = PushUntilBlocked(Sender, &SendOffset, &Capped);
+        while (Got < Pushed)
+        {
+            INT Count = recv(Receiver, (PCHAR)Buffer, (INT)min((ULONGLONG)ReadSize, Pushed - Got), 0), i;
+
+            if (Count <= 0)
+                break;
+            for (i = 0; i < Count; i++)
+                if (Buffer[i] != PatternByte(ReadOffset + i))
+                    Bad++;
+            ReadOffset += Count;
+            Got += Count;
+        }
+        ok(Got == Pushed && Bad == 0, "queue-drain %lu (read size %d): read %I64u of %I64u bytes, %lu bad\n",
+           Round, ReadSize, Got, Pushed, Bad);
+        closesocket(Receiver);
+        closesocket(Sender);
+        closesocket(Listener);
+    }
+}
+
+typedef struct { SOCKET Socket; volatile LONG Done; INT Result; } SHUTDOWN_JOB;
+
+static
+DWORD
+WINAPI
+ShutdownThread(LPVOID Context)
+{
+    SHUTDOWN_JOB *Job = Context;
+
+    Job->Result = shutdown(Job->Socket, SD_SEND);
+    InterlockedExchange(&Job->Done, 1);
+    return 0;
+}
+
+/* Windows 10 22H2: shutdown(SD_SEND) returns at once while the sent data waits behind a receiver that does not
+ * read; the end of the stream follows the data */
+static
+VOID
+TestShutdownQueued(
+    _In_ INT SetOnListener)
+{
+    SOCKET Listener, Sender, Receiver;
+    SOCKADDR_IN Address;
+    INT Length = sizeof(Address);
+    ULONGLONG SendOffset = 0, ReadOffset = 0, Pushed, Got;
+    BOOLEAN Capped;
+    ULONG Bad, Waited = 0;
+    SHUTDOWN_JOB Job;
+    HANDLE Thread;
+    CHAR Byte;
+
+    Listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    Sender = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (SetOnListener)
+        setsockopt(Listener, SOL_SOCKET, SO_RCVBUF, (PCHAR)&SetOnListener, sizeof(SetOnListener));
+    ZeroMemory(&Address, sizeof(Address));
+    Address.sin_family = AF_INET;
+    Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(Listener, (SOCKADDR *)&Address, sizeof(Address)) || listen(Listener, 1) ||
+        getsockname(Listener, (SOCKADDR *)&Address, &Length) ||
+        connect(Sender, (SOCKADDR *)&Address, sizeof(Address)))
+    {
+        ok(0, "shutdown: setup failed, error %d\n", WSAGetLastError());
+        closesocket(Listener);
+        closesocket(Sender);
+        return;
+    }
+    Receiver = accept(Listener, NULL, NULL);
+
+    Pushed = PushUntilBlocked(Sender, &SendOffset, &Capped);
+    ok(!Capped && Pushed != 0, "SO_RCVBUF %d: the sender was not stopped (%I64u bytes)\n", SetOnListener, Pushed);
+
+    Job.Socket = Sender;
+    Job.Done = 0;
+    Job.Result = -2;
+    Thread = CreateThread(NULL, 0, ShutdownThread, &Job, 0, NULL);
+    while (!Job.Done && Waited < 5000)
+    {
+        Sleep(50);
+        Waited += 50;
+    }
+    ok(Job.Done, "SO_RCVBUF %d: shutdown(SD_SEND) with %I64u bytes queued did not return in 5 s\n", SetOnListener, Pushed);
+    ok(Job.Result == 0 || !Job.Done, "SO_RCVBUF %d: shutdown returned %d\n", SetOnListener, Job.Result);
+
+    Got = ReadAndVerify(Receiver, Pushed, &ReadOffset, &Bad);
+    ok(Got == Pushed && Bad == 0, "SO_RCVBUF %d: read %I64u of %I64u bytes, %lu bad\n", SetOnListener, Got, Pushed, Bad);
+    ok(recv(Receiver, &Byte, 1, 0) == 0, "SO_RCVBUF %d: no end of stream after the data\n", SetOnListener);
+    if (Thread)
+    {
+        WaitForSingleObject(Thread, 5000);
+        CloseHandle(Thread);
+    }
+    closesocket(Receiver);
+    closesocket(Sender);
+    closesocket(Listener);
+}
+
 START_TEST(rcvwindow)
 {
     WSADATA wsaData;
@@ -208,6 +344,11 @@ START_TEST(rcvwindow)
     TestSize(8192, 8192, 8192 * 8 + 256 * 1024);
     TestSize(65536, 65536, 65536 * 8 + 256 * 1024);
     TestSize(1048576, 1048576, 1048576 * 8 + 256 * 1024);
+    TestQueueDrain(24, 65536);
+    TestQueueDrain(4, 1460);
+    TestShutdownQueued(0);
+    TestShutdownQueued(8192);
+    TestShutdownQueued(1048576);
 
     WSACleanup();
 }
