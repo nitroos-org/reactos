@@ -5361,6 +5361,75 @@ static void test_system_fallback(void)
     IDWriteFactory2_Release(factory);
 }
 
+/* The system fallback has to find a font for the scripts a terminal or an editor draws, whichever primary font
+   it asked for.  Windows has Meiryo/Malgun/Segoe UI Emoji for these, NitroOS maps them to the Noto fonts it ships. */
+static void test_system_fallback_scripts(void)
+{
+    static const struct
+    {
+        const WCHAR text[3];
+        UINT32 length;
+        const char *name;
+    }
+    tests[] =
+    {
+        { { 0x4e2d, 0 },          1, "CJK ideograph U+4E2D" },
+        { { 0x3042, 0 },          1, "Hiragana U+3042" },
+        { { 0x30a2, 0 },          1, "Katakana U+30A2" },
+        { { 0xd55c, 0 },          1, "Hangul U+D55C" },
+        { { 0xff21, 0 },          1, "Fullwidth A U+FF21" },
+        { { 0xd83d, 0xde00, 0 },  2, "Emoji U+1F600" },
+        { { 0x2713, 0 },          1, "Check mark U+2713" },
+        { { 0x2500, 0 },          1, "Box drawing U+2500" },
+    };
+    static const WCHAR *bases[] = { NULL, L"Lucida Console", L"Segoe UI" };
+    IDWriteFontFallback *fallback;
+    IDWriteFactory2 *factory;
+    IDWriteFont *font;
+    UINT32 i, j, length;
+    BOOL exists;
+    float scale;
+    HRESULT hr;
+
+    if (!(factory = create_factory_iid(&IID_IDWriteFactory2)))
+    {
+        win_skip("System font fallback API is not supported.\n");
+        return;
+    }
+
+    hr = IDWriteFactory2_GetSystemFontFallback(factory, &fallback);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    for (j = 0; j < ARRAY_SIZE(bases); ++j)
+    {
+        for (i = 0; i < ARRAY_SIZE(tests); ++i)
+        {
+            font = NULL;
+            length = 0;
+            scale = 0.0f;
+
+            g_source = tests[i].text;
+            hr = IDWriteFontFallback_MapCharacters(fallback, &analysissource, 0, tests[i].length, NULL, bases[j],
+                    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, &length, &font,
+                    &scale);
+            ok(hr == S_OK, "%s, base %s: unexpected hr %#lx.\n", tests[i].name, wine_dbgstr_w(bases[j]), hr);
+            ok(length == tests[i].length, "%s, base %s: unexpected length %u.\n", tests[i].name,
+                    wine_dbgstr_w(bases[j]), length);
+            ok(font != NULL, "%s, base %s: no fallback font.\n", tests[i].name, wine_dbgstr_w(bases[j]));
+            if (!font) continue;
+
+            exists = FALSE;
+            hr = IDWriteFont_HasCharacter(font, tests[i].length == 2 ? 0x1f600 : tests[i].text[0], &exists);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            ok(exists, "%s, base %s: the fallback font lacks the character.\n", tests[i].name, wine_dbgstr_w(bases[j]));
+            IDWriteFont_Release(font);
+        }
+    }
+
+    IDWriteFontFallback_Release(fallback);
+    IDWriteFactory2_Release(factory);
+}
+
 static void test_FontFallbackBuilder(void)
 {
     IDWriteFontFallback *fallback, *fallback2;
@@ -7137,6 +7206,7 @@ START_TEST(layout)
     test_SetWordWrapping();
     test_MapCharacters();
     test_system_fallback();
+    test_system_fallback_scripts();
     test_FontFallbackBuilder();
     test_SetTypography();
     test_SetLastLineWrapping();
