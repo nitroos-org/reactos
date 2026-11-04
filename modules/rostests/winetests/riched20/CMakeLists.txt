@@ -2,6 +2,7 @@
 add_definitions(-DUSE_WINE_TODOS)
 
 list(APPEND SOURCE
+    cjk_ros.c
     editor.c
     richole.c
     testlist.c
