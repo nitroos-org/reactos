@@ -2285,6 +2285,184 @@ MiQueryMemoryBasicInformation(IN HANDLE ProcessHandle,
     return Status;
 }
 
+/*
+ * MemoryRegionInformation (class 3). Values measured on Windows 10 22H2 x64 and WoW64:
+ * - RegionType holds the MEM_PRIVATE / MEM_MAPPED / MEM_IMAGE value of the allocation, and
+ *   0x08000000 for a view of a paging-file section (not the bit layout the SDK header suggests);
+ * - RegionSize and CommitSize describe the whole allocation (the VAD), whatever the address in it;
+ * - PartitionId is 0 and NodePreference is 0xFFFFFFFF;
+ * - a short buffer gets the fields that fit completely, ReturnLength says how many bytes were
+ *   written; the buffer must hold at least up to RegionSize.
+ * TODO: placeholder VADs (feat/mm-placeholders) report no extra bit on Windows 10 22H2 (measured),
+ * so nothing is needed for them; PageSize64K/large pages/AWE/physical views are not measured.
+ */
+#define MI_REGION_TYPE_PAGEFILE 0x08000000
+
+NTSTATUS
+NTAPI
+MiQueryMemoryRegionInformation(IN HANDLE ProcessHandle,
+                               IN PVOID BaseAddress,
+                               OUT PVOID MemoryInformation,
+                               IN SIZE_T MemoryInformationLength,
+                               OUT PSIZE_T ReturnLength)
+{
+    PEPROCESS TargetProcess;
+    NTSTATUS Status = STATUS_SUCCESS;
+    PMMVAD Vad;
+    MEMORY_REGION_INFORMATION Info;
+    KAPC_STATE ApcState;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    SIZE_T Written;
+    ULONG_PTR Start, End;
+
+    if (ProcessHandle == NtCurrentProcess())
+    {
+        TargetProcess = PsGetCurrentProcess();
+    }
+    else
+    {
+        /* PROCESS_QUERY_LIMITED_INFORMATION is enough on Windows */
+        Status = ObReferenceObjectByHandle(ProcessHandle,
+                                           PROCESS_QUERY_INFORMATION,
+                                           PsProcessType,
+                                           PreviousMode,
+                                           (PVOID*)&TargetProcess,
+                                           NULL);
+        if (Status == STATUS_ACCESS_DENIED)
+        {
+            Status = ObReferenceObjectByHandle(ProcessHandle,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+                                               PsProcessType,
+                                               PreviousMode,
+                                               (PVOID*)&TargetProcess,
+                                               NULL);
+        }
+        if (!NT_SUCCESS(Status)) return Status;
+
+        KeStackAttachProcess(&TargetProcess->Pcb, &ApcState);
+    }
+
+    MmLockAddressSpace(&TargetProcess->Vm);
+    if (TargetProcess->VmDeleted)
+    {
+        Status = STATUS_PROCESS_IS_TERMINATING;
+        goto Done;
+    }
+
+    Vad = MiLocateAddress(BaseAddress);
+    if (!Vad)
+    {
+        /* Free memory */
+        Status = STATUS_INVALID_ADDRESS;
+        goto Done;
+    }
+
+    RtlZeroMemory(&Info, sizeof(Info));
+    Info.PartitionId = 0;
+    Info.NodePreference = 0xFFFFFFFF;
+    Start = Vad->StartingVpn << PAGE_SHIFT;
+    End = (Vad->EndingVpn + 1) << PAGE_SHIFT;
+    Info.AllocationBase = (PVOID)Start;
+    Info.AllocationProtect = MmProtectToValue[Vad->u.VadFlags.Protection];
+
+    if (MI_IS_ROSMM_VAD(Vad))
+    {
+        PMEMORY_AREA MemoryArea = (PMEMORY_AREA)Vad;
+        PMM_SECTION_SEGMENT Segment = MemoryArea->SectionData.Segment;
+
+        ASSERT(MemoryArea->Type == MEMORY_AREA_SECTION_VIEW);
+        if (Vad->u.VadFlags.VadType == VadImageMap)
+        {
+            PMMVAD Next = Vad;
+            SIZE_T CommitPages = 0;
+
+            /* Same allocation base as MemoryBasicInformation; Windows reports PAGE_EXECUTE_WRITECOPY */
+            Info.AllocationBase = (PVOID)(Start - Segment->Image.VirtualAddress);
+            Info.AllocationProtect = PAGE_EXECUTE_WRITECOPY;
+            Info.RegionType = MEM_IMAGE;
+
+            /* RosMm maps an image as one VAD per section: the allocation is all of them, from the
+             * headers (at the allocation base) up. */
+            Next = MiLocateAddress(Info.AllocationBase);
+            if (!Next) Next = Vad;
+            End = Start;
+            while (Next && MI_IS_ROSMM_VAD(Next) && (Next->u.VadFlags.VadType == VadImageMap))
+            {
+                PMEMORY_AREA Area = (PMEMORY_AREA)Next;
+
+                if ((Area->SectionData.Segment->FileObject != Segment->FileObject) ||
+                    (((Next->StartingVpn << PAGE_SHIFT) - Area->SectionData.Segment->Image.VirtualAddress) !=
+                     (ULONG_PTR)Info.AllocationBase))
+                {
+                    break;
+                }
+                End = max(End, (Next->EndingVpn + 1) << PAGE_SHIFT);
+                /* Windows only charges the writable sections of an image */
+                if (Area->SectionData.Segment->Image.Characteristics & IMAGE_SCN_MEM_WRITE)
+                    CommitPages += Area->SectionData.CommitCharge;
+                Next = (PMMVAD)MiGetNextNode((PMMADDRESS_NODE)Next);
+            }
+            Info.CommitSize = CommitPages << PAGE_SHIFT;
+        }
+        else
+        {
+            Info.RegionType = Segment->FileObject ? MEM_MAPPED : MI_REGION_TYPE_PAGEFILE;
+            Info.CommitSize = MemoryArea->SectionData.CommitCharge << PAGE_SHIFT;
+        }
+    }
+    else if (Vad->u.VadFlags.PrivateMemory || (Vad->u.VadFlags.VadType == VadRotatePhysical))
+    {
+        Info.RegionType = MEM_PRIVATE;
+        Info.CommitSize = (SIZE_T)Vad->u.VadFlags.CommitCharge << PAGE_SHIFT;
+    }
+    else
+    {
+        PMMVAD_LONG LongVad = (PMMVAD_LONG)Vad;
+
+        Info.RegionType = (Vad->u.VadFlags.VadType == VadImageMap) ? MEM_IMAGE :
+                          (LongVad->ControlArea && LongVad->ControlArea->FilePointer) ? MEM_MAPPED :
+                          MI_REGION_TYPE_PAGEFILE;
+    }
+    Info.RegionSize = End - (ULONG_PTR)Info.AllocationBase;
+
+Done:
+    MmUnlockAddressSpace(&TargetProcess->Vm);
+    if (ProcessHandle != NtCurrentProcess())
+    {
+        KeUnstackDetachProcess(&ApcState);
+        ObDereferenceObject(TargetProcess);
+    }
+    if (!NT_SUCCESS(Status)) return Status;
+
+    /* Whole fields only, from CommitSize on */
+    Written = FIELD_OFFSET(MEMORY_REGION_INFORMATION, CommitSize);
+    if (MemoryInformationLength >= FIELD_OFFSET(MEMORY_REGION_INFORMATION, PartitionId))
+        Written = FIELD_OFFSET(MEMORY_REGION_INFORMATION, PartitionId);
+    if (MemoryInformationLength >= FIELD_OFFSET(MEMORY_REGION_INFORMATION, NodePreference))
+        Written = FIELD_OFFSET(MEMORY_REGION_INFORMATION, NodePreference);
+    if (MemoryInformationLength >= sizeof(Info)) Written = sizeof(Info);
+
+    if (PreviousMode != KernelMode)
+    {
+        _SEH2_TRY
+        {
+            RtlCopyMemory(MemoryInformation, &Info, Written);
+            if (ReturnLength) *ReturnLength = Written;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+    }
+    else
+    {
+        RtlCopyMemory(MemoryInformation, &Info, Written);
+        if (ReturnLength) *ReturnLength = Written;
+    }
+    return Status;
+}
+
 BOOLEAN
 NTAPI
 MiIsEntireRangeCommitted(IN ULONG_PTR StartingAddress,
@@ -4792,6 +4970,13 @@ NtQueryVirtualMemory(IN HANDLE ProcessHandle,
 
     DPRINT("Querying class %d about address: %p\n", MemoryInformationClass, BaseAddress);
 
+    /* MemoryRegionInformation checks its length first (Windows 10), even for a kernel address */
+    if ((MemoryInformationClass == MemoryRegionInformation) &&
+        (MemoryInformationLength < FIELD_OFFSET(MEMORY_REGION_INFORMATION, CommitSize)))
+    {
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
     /* Bail out if the address is invalid */
     if (BaseAddress > MM_HIGHEST_USER_ADDRESS) return STATUS_INVALID_PARAMETER;
 
@@ -4848,8 +5033,16 @@ NtQueryVirtualMemory(IN HANDLE ProcessHandle,
                                               MemoryInformationLength,
                                               ReturnLength);
             break;
+        case MemoryRegionInformation:
+            /* The length was validated before the address, as Windows does */
+            Status = MiQueryMemoryRegionInformation(ProcessHandle,
+                                                    BaseAddress,
+                                                    MemoryInformation,
+                                                    MemoryInformationLength,
+                                                    ReturnLength);
+            break;
+
         case MemoryWorkingSetList:
-        case MemoryBasicVlmInformation:
         default:
             DPRINT1("Unhandled memory information class %d\n", MemoryInformationClass);
             break;
