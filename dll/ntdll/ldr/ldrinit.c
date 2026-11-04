@@ -3400,6 +3400,7 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     {
         ExecuteOptions = MEM_EXECUTE_OPTION_ENABLE | MEM_EXECUTE_OPTION_PERMANENT;
     }
+#ifndef _M_AMD64 /* a native 64-bit process has DEP fixed by the kernel, as on Windows */
     Status = NtSetInformationProcess(NtCurrentProcess(),
                                      ProcessExecuteFlags,
                                      &ExecuteOptions,
@@ -3409,6 +3410,7 @@ LdrpInitializeProcess(IN PCONTEXT Context,
         DPRINT1("LDR: Could not set process execute flags 0x%x; status %x\n",
                 ExecuteOptions, Status);
     }
+#endif
 
     // FIXME: Should be done by Application Compatibility features,
     // by reading the registry, etc...
