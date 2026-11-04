@@ -98,11 +98,14 @@ SetLocalSystemTime(HWND hwnd)
                      (WPARAM)&Time,
                      0);
 
-        /* Broadcast the time change message */
-        SendMessageW(HWND_BROADCAST,
-                     WM_TIMECHANGE,
-                     0,
-                     0);
+        /* Broadcast the time change message; a hung window must not hang the applet */
+        SendMessageTimeoutW(HWND_BROADCAST,
+                            WM_TIMECHANGE,
+                            0,
+                            0,
+                            SMTO_ABORTIFHUNG,
+                            5000,
+                            NULL);
     }
 }
 
