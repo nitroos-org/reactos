@@ -337,6 +337,9 @@ InitializePnPManager(VOID)
     }
     InitializeListHead(&DeviceInstallListHead);
 
+    /* Before the RPC server and the install thread start: both use it */
+    InitializeCriticalSection(&UserTokenLock);
+
     /* Query the SuppressUI registry value and cache it for our whole lifetime */
     GetBooleanRegValue(HKEY_LOCAL_MACHINE,
                        L"System\\CurrentControlSet\\Services\\PlugPlay\\Parameters",

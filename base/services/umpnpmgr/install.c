@@ -37,6 +37,7 @@
 /* GLOBALS ******************************************************************/
 
 HANDLE hUserToken = NULL;
+CRITICAL_SECTION UserTokenLock; /* guards hUserToken: PNP_ReportLogOn writes it, InstallDevice duplicates it */
 HANDLE hInstallEvent = NULL;
 HANDLE hNoPendingInstalls = NULL;
 
@@ -443,13 +444,18 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
 
     DPRINT1("Installing: %S\n", DeviceInstance);
 
-    /* Take the user's token once: PNP_ReportLogOn can close and replace hUserToken on another
-       RPC thread while we install. A stale handle makes the duplicate fail: no user, no UI. */
-    if (ShowWizard && hUserToken != NULL &&
-        !DuplicateHandle(GetCurrentProcess(), hUserToken, GetCurrentProcess(), &hToken, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    /* Take the user's token once: PNP_ReportLogOn replaces and closes hUserToken on another
+       RPC thread, under UserTokenLock, so the duplicate is made under that lock too. */
+    if (ShowWizard)
     {
-        DPRINT1("Cannot duplicate the user token, error %lu\n", GetLastError());
-        hToken = NULL;
+        EnterCriticalSection(&UserTokenLock);
+        if (hUserToken != NULL &&
+            !DuplicateHandle(GetCurrentProcess(), hUserToken, GetCurrentProcess(), &hToken, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        {
+            DPRINT1("Cannot duplicate the user token, error %lu\n", GetLastError());
+            hToken = NULL;
+        }
+        LeaveCriticalSection(&UserTokenLock);
     }
 
     /* UI is only possible in an interactive user's session */

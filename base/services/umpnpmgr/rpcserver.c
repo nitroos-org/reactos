@@ -789,6 +789,60 @@ IsCallerAllowedToEject(
 }
 
 
+/* PNP_ReportLogOn: the token of the reported process becomes the token of every install UI
+ * process (wizard, restart page). Only the logon path may report: the interactive user for
+ * one of its own processes in its own session (userinit reports itself), or the system in
+ * MiniNT mode. A process of another account, the system's included, is refused. */
+static
+BOOL
+CallerMayReportLogOn(
+    _In_ handle_t hBinding,
+    _In_ HANDLE hProcessToken)
+{
+    BYTE CallerUserBuffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    BYTE ProcessUserBuffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    PTOKEN_USER pCallerUser = (PTOKEN_USER)CallerUserBuffer;
+    PTOKEN_USER pProcessUser = (PTOKEN_USER)ProcessUserBuffer;
+    DWORD CallerSession = 0, ProcessSession = 0, dwSize;
+    HANDLE hCallerToken;
+    BOOL bResult = FALSE, bCallerToken = FALSE;
+    RPC_STATUS RpcStatus;
+
+    if (!GetTokenInformation(hProcessToken, TokenUser, pProcessUser, sizeof(ProcessUserBuffer), &dwSize) ||
+        !GetTokenInformation(hProcessToken, TokenSessionId, &ProcessSession, sizeof(ProcessSession), &dwSize))
+        return FALSE;
+
+    RpcStatus = RpcImpersonateClient(hBinding);
+    if (RpcStatus != RPC_S_OK)
+    {
+        DPRINT1("RpcImpersonateClient failed (Status 0x%08lx)\n", RpcStatus);
+        return FALSE;
+    }
+
+    if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, FALSE, &hCallerToken))
+    {
+        bCallerToken = GetTokenInformation(hCallerToken, TokenUser, pCallerUser, sizeof(CallerUserBuffer), &dwSize) &&
+                       GetTokenInformation(hCallerToken, TokenSessionId, &CallerSession, sizeof(CallerSession), &dwSize);
+        CloseHandle(hCallerToken);
+    }
+
+    RpcRevertToSelf();
+
+    if (!bCallerToken)
+        return FALSE;
+
+    if (IsWellKnownSid(pCallerUser->User.Sid, WinLocalSystemSid))
+        bResult = TRUE;
+    else if (EqualSid(pCallerUser->User.Sid, pProcessUser->User.Sid) && CallerSession == ProcessSession)
+        bResult = TRUE;
+
+    if (!bResult)
+        DPRINT1("PNP_ReportLogOn refused: the process is not the caller's own\n");
+
+    return bResult;
+}
+
+
 VOID
 __RPC_USER
 PNP_NOTIFY_HANDLE_rundown(
@@ -890,6 +944,7 @@ PNP_ReportLogOn(
 {
     DWORD ReturnValue = CR_FAILURE;
     HANDLE hProcess = NULL;
+    HANDLE hToken = NULL, hOldToken;
 
     UNREFERENCED_PARAMETER(Admin);
 
@@ -901,7 +956,7 @@ PNP_ReportLogOn(
         goto cleanup;
 
     /* Get the users token */
-    hProcess = OpenProcess(PROCESS_ALL_ACCESS, TRUE, ProcessId);
+    hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, ProcessId);
 
     if (!hProcess)
     {
@@ -909,17 +964,29 @@ PNP_ReportLogOn(
         goto cleanup;
     }
 
-    if (hUserToken)
-    {
-        CloseHandle(hUserToken);
-        hUserToken = NULL;
-    }
-
-    if (!OpenProcessToken(hProcess, TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY, &hUserToken))
+    if (!OpenProcessToken(hProcess, TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY, &hToken))
     {
         DPRINT1("OpenProcessToken failed with error %u\n", GetLastError());
+        hToken = NULL;
         goto cleanup;
     }
+
+    /* The caller may only report itself (or, as the system, the session's user) */
+    if (!CallerMayReportLogOn(hBinding, hToken))
+    {
+        ReturnValue = CR_ACCESS_DENIED;
+        goto cleanup;
+    }
+
+    /* InstallDevice duplicates hUserToken under the same lock */
+    EnterCriticalSection(&UserTokenLock);
+    hOldToken = hUserToken;
+    hUserToken = hToken;
+    LeaveCriticalSection(&UserTokenLock);
+    hToken = NULL;
+
+    if (hOldToken)
+        CloseHandle(hOldToken);
 
     /* Trigger the installer thread */
     if (hInstallEvent)
@@ -928,6 +995,9 @@ PNP_ReportLogOn(
     ReturnValue = CR_SUCCESS;
 
 cleanup:
+    if (hToken)
+        CloseHandle(hToken);
+
     if (hProcess)
         CloseHandle(hProcess);
 
