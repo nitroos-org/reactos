@@ -1513,6 +1513,7 @@ call :ielnk 0 "SD15 the Internet Explorer entry left the Start menu"
 %FM% /shell-defaults > %O%\sd2.txt 2>&1
 call :rc0 "SD16 /shell-defaults a second time (idempotent)"
 call :ex "%CD%\PowerShell.lnk" 1 "SD17 still one PowerShell shortcut"
+call :ffpol
 del /q "%PD%\pwsh.exe" "%FD%\firefox.exe" 2>nul
 %FM% /shell-defaults > %O%\sd3.txt 2>&1
 call :rc0 "SD18 /shell-defaults after pwsh and Firefox are gone"
@@ -1542,6 +1543,7 @@ call :rc0 "SP8 /shell-defaults with pwsh and a Firefox stand-in"
 call :ex "%CD%\Firefox.lnk" 1 "SP9 Firefox shortcut on the desktop"
 call :ielnk 0 "SP10 the Internet Explorer entry left the Start menu"
 call :ex "%CD%\PowerShell.lnk" 1 "SP11 PowerShell shortcut stays"
+call :ffpol
 del /q "%FD%\firefox.exe" 2>nul
 %FM% /shell-defaults > %O%\sp2.txt 2>&1
 call :rc0 "SP12 /shell-defaults after the Firefox stand-in is gone"
@@ -1613,6 +1615,65 @@ echo FAIL %~1 -- %~2>> %LOG%
 set /a FAILS=%FAILS%+1
 goto :eof
 
+:ffpol
+rem Firefox policies.json (shelldefaults.c): the media-engine default, merged into an existing file. %FD% holds a firefox.exe stand-in.
+find "media.wmf.media-engine.enabled" "%FD%\distribution\policies.json" >nul
+call :rc0 "FPa policies.json carries the media-engine Preferences default"
+find "Status" "%FD%\distribution\policies.json" >nul
+call :rc0 "FPb ...as a default (Status), not locked"
+rem an administrator's own policies.json is merged into, never replaced
+echo {"policies":{"DisableTelemetry":true}}> "%FD%\distribution\policies.json"
+%FM% /shell-defaults > %O%\fp4.txt 2>&1
+call :rc0 "FPc /shell-defaults over an existing policies.json"
+type %O%\fp4.txt >> %LOG%
+find "DisableTelemetry" "%FD%\distribution\policies.json" >nul
+call :rc0 "FPd the existing policy is kept"
+find "media.wmf.media-engine.enabled" "%FD%\distribution\policies.json" >nul
+call :rc0 "FPe the media-engine default is merged in"
+find "DontCheckDefaultBrowser" "%FD%\distribution\policies.json" >nul
+call :rc1 "FPf the rest of our policies are not forced on an existing file"
+rem an existing Preferences object and the administrator's own value for the pref
+echo {"policies":{"Preferences":{"media.wmf.media-engine.enabled":{"Value":1,"Status":"locked"},"browser.x":{"Value":1}}}}> "%FD%\distribution\policies.json"
+%FM% /shell-defaults > %O%\fp5.txt 2>&1
+call :rc0 "FPg /shell-defaults with the administrator's own pref value"
+find "locked" "%FD%\distribution\policies.json" >nul
+call :rc0 "FPh the administrator's value is kept"
+find "default" "%FD%\distribution\policies.json" >nul
+call :rc1 "FPi ...and no second entry is added"
+echo {"policies":{"Preferences":{"browser.x":{"Value":1}}}}> "%FD%\distribution\policies.json"
+%FM% /shell-defaults > %O%\fp6.txt 2>&1
+find "browser.x" "%FD%\distribution\policies.json" >nul
+call :rc0 "FPj a Preferences object keeps its other prefs"
+find "media.wmf.media-engine.enabled" "%FD%\distribution\policies.json" >nul
+call :rc0 "FPk ...and gets the media-engine default"
+rem not JSON: left alone byte for byte
+echo this is not json> "%FD%\distribution\policies.json"
+%FM% /shell-defaults > %O%\fp7.txt 2>&1
+call :rc0 "FPl /shell-defaults with an unreadable policies.json does not fail"
+find "this is not json" "%FD%\distribution\policies.json" >nul
+call :rc0 "FPm the file is left alone"
+find "media.wmf" "%FD%\distribution\policies.json" >nul
+call :rc1 "FPn ...nothing merged into it"
+rem a Firefox update leaves the distribution folder (it is not Firefox's own): a repair puts back a removed file with the default
+del /q "%FD%\distribution\policies.json"
+%FM% /shell-defaults > %O%\fp8.txt 2>&1
+find "media.wmf.media-engine.enabled" "%FD%\distribution\policies.json" >nul
+call :rc0 "FPo a removed policies.json comes back with the default"
+rem a 32-bit Firefox in Program Files (x86): a policy file with only the media-engine default
+set F86=%SystemDrive%\Program Files (x86)\Mozilla Firefox
+if exist "%F86%\firefox.exe" goto :ffpol_end
+if not exist "%SystemDrive%\Program Files (x86)" goto :ffpol_end
+mkdir "%F86%" 2>nul
+copy /y %SystemRoot%\system32\cmd.exe "%F86%\firefox.exe" >nul
+%FM% /shell-defaults > %O%\fp9.txt 2>&1
+call :rc0 "FPp /shell-defaults with an x86 Firefox present"
+find "media.wmf.media-engine.enabled" "%F86%\distribution\policies.json" >nul
+call :rc0 "FPq x86 Firefox gets the media-engine default"
+find "DontCheckDefaultBrowser" "%F86%\distribution\policies.json" >nul
+call :rc1 "FPr ...and no default-browser policies"
+rd /s /q "%F86%" 2>nul
+:ffpol_end
+goto :eof
 :cmdlnk
 rem :cmdlnk <1|0> <name>: is there a Command Prompt shortcut on the common or the user's desktop?
 set GOT=0
