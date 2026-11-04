@@ -171,6 +171,7 @@ DllMain(
         case DLL_PROCESS_ATTACH:
             DisableThreadLibraryCalls(hinstDLL);
             hDllInstance = hinstDLL;
+            SeclInitDesktopAccess();
             break;
 
         case DLL_PROCESS_DETACH:

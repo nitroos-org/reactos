@@ -3887,6 +3887,61 @@ GetAnsiEnvironmentSize(
 
 
 /*
+ * The window station and the desktop of the caller as "WinSta\Desktop", if it is a GUI process (user32
+ * is not linked to advapi32). The Secondary Logon service starts the new process there when the caller
+ * names no desktop.
+ */
+static BOOL
+GetCallerDesktopName(
+    _Out_writes_(cchName) LPWSTR pszName,
+    _In_ DWORD cchName)
+{
+    typedef HANDLE (WINAPI *GET_HANDLE)(VOID);
+    typedef HANDLE (WINAPI *GET_THREAD_DESKTOP)(DWORD);
+    typedef BOOL (WINAPI *GET_OBJECT_INFO)(HANDLE, int, PVOID, DWORD, LPDWORD);
+    const int UserObjectName = 2; /* UOI_NAME */
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    BOOL bResult = FALSE;
+    GET_HANDLE pGetProcessWindowStation;
+    GET_THREAD_DESKTOP pGetThreadDesktop;
+    GET_OBJECT_INFO pGetUserObjectInformationW;
+    HANDLE hWinSta, hDesktop;
+    DWORD Length;
+    size_t WinStaLength;
+
+    /* A console program has no user32: loading it gives the process its window station (it stays loaded) */
+    if (hUser32 == NULL)
+    {
+        hUser32 = LoadLibraryW(L"user32.dll");
+        if (hUser32 == NULL)
+            return FALSE;
+    }
+
+    pGetProcessWindowStation = (GET_HANDLE)GetProcAddress(hUser32, "GetProcessWindowStation");
+    pGetThreadDesktop = (GET_THREAD_DESKTOP)GetProcAddress(hUser32, "GetThreadDesktop");
+    pGetUserObjectInformationW = (GET_OBJECT_INFO)GetProcAddress(hUser32, "GetUserObjectInformationW");
+    if (pGetProcessWindowStation && pGetThreadDesktop && pGetUserObjectInformationW)
+    {
+        hWinSta = pGetProcessWindowStation();
+        hDesktop = pGetThreadDesktop(GetCurrentThreadId());
+        if (hWinSta != NULL && hDesktop != NULL &&
+            pGetUserObjectInformationW(hWinSta, UserObjectName, pszName, cchName * sizeof(WCHAR), &Length))
+        {
+            WinStaLength = wcslen(pszName);
+            if (WinStaLength + 2 < cchName)
+            {
+                pszName[WinStaLength++] = L'\\';
+                bResult = pGetUserObjectInformationW(hDesktop, UserObjectName, pszName + WinStaLength,
+                                                     (cchName - (DWORD)WinStaLength) * sizeof(WCHAR), &Length);
+            }
+        }
+    }
+
+    return bResult;
+}
+
+
+/*
  * @unimplemented
  */
 BOOL
@@ -3909,6 +3964,7 @@ CreateProcessWithLogonW(
     SECL_REQUEST Request;
     SECL_RESPONSE Response;
     RPC_STATUS Status;
+    WCHAR szCallerDesktop[2 * MAX_PATH];
 
     TRACE("CreateProcessWithLogonW(%s %s %s 0x%08x %s %s 0x%08x %p %s %p %p)\n", debugstr_w(lpUsername), debugstr_w(lpDomain),
     debugstr_w(lpPassword), dwLogonFlags, debugstr_w(lpApplicationName),
@@ -3948,6 +4004,10 @@ CreateProcessWithLogonW(
     Request.ApplicationName = (LPWSTR)lpApplicationName;
     Request.CommandLine = (LPWSTR)lpCommandLine;
     Request.CurrentDirectory = (LPWSTR)lpCurrentDirectory;
+    Request.Desktop = (lpStartupInfo != NULL) ? lpStartupInfo->lpDesktop : NULL;
+    if ((Request.Desktop == NULL || Request.Desktop[0] == UNICODE_NULL) &&
+        GetCallerDesktopName(szCallerDesktop, RTL_NUMBER_OF(szCallerDesktop)))
+        Request.Desktop = szCallerDesktop;
 
     if (dwCreationFlags & CREATE_UNICODE_ENVIRONMENT)
         Request.dwEnvironmentSize = GetUnicodeEnvironmentSize(lpEnvironment);
@@ -3977,6 +4037,10 @@ CreateProcessWithLogonW(
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
     {
         WARN("Exception: %lx\n", RpcExceptionCode());
+        /* The service did not answer: do not report a started process */
+        Response.dwError = RpcExceptionCode();
+        if (Response.dwError == ERROR_SUCCESS)
+            Response.dwError = ERROR_GEN_FAILURE;
     }
     RpcEndExcept;
 
@@ -3991,13 +4055,23 @@ CreateProcessWithLogonW(
         hBinding = NULL;
     }
 
-    TRACE("Response.hProcess %p\n", Response.hProcess);
-    TRACE("Response.hThread %p\n", Response.hThread);
+    TRACE("Response.hProcess %lx\n", Response.hProcess);
+    TRACE("Response.hThread %lx\n", Response.hThread);
     TRACE("Response.dwProcessId %lu\n", Response.dwProcessId);
     TRACE("Response.dwThreadId %lu\n", Response.dwThreadId);
     TRACE("Response.dwError %lu\n", Response.dwError);
     if (Response.dwError != ERROR_SUCCESS)
+    {
         SetLastError(Response.dwError);
+    }
+    else if (lpProcessInformation != NULL)
+    {
+        /* The service duplicated the handles into this process */
+        lpProcessInformation->hProcess = (HANDLE)(LONG_PTR)(LONG)Response.hProcess;
+        lpProcessInformation->hThread = (HANDLE)(LONG_PTR)(LONG)Response.hThread;
+        lpProcessInformation->dwProcessId = Response.dwProcessId;
+        lpProcessInformation->dwThreadId = Response.dwThreadId;
+    }
 
     TRACE("CreateProcessWithLogonW() done\n");
 
