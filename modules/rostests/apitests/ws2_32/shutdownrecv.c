@@ -9,6 +9,8 @@
  * a packet of the completion port, as a signalled event), with 0 bytes when the peer closes, with
  * STATUS_CONNECTION_RESET when it aborts, and with STATUS_CONNECTION_ABORTED when this side closes
  * (STATUS_CANCELLED after SD_BOTH). A receive issued afterwards fails with WSAESHUTDOWN.
+ * With data queued unread at the shutdown, or arriving with no receive pending, the connection is reset
+ * (TestReset).
  */
 
 #include "ws2_32.h"
@@ -380,6 +382,216 @@ TestSendDirection(void)
     closesocket(Peer);
 }
 
+/* shutdown(SD_RECEIVE|SD_BOTH) with data queued unread, or data arriving with no receive pending: Windows
+ * resets the connection. The socket fails with WSAECONNABORTED, the peer sees WSAECONNRESET (except after
+ * SD_BOTH, where the peer got the end of the stream first and sees WSAECONNABORTED). SO_ERROR stays 0. */
+static
+BOOL
+Readable(SOCKET Socket, BOOL *Writable)
+{
+    fd_set Read, Write;
+    struct timeval Timeout = { 0, 300000 };
+
+    FD_ZERO(&Read);
+    FD_ZERO(&Write);
+    FD_SET(Socket, &Read);
+    FD_SET(Socket, &Write);
+    select(0, &Read, &Write, NULL, &Timeout);
+    if (Writable)
+        *Writable = FD_ISSET(Socket, &Write) != 0;
+    return FD_ISSET(Socket, &Read) != 0;
+}
+
+static
+void
+CheckFails(SOCKET Socket, const char *Label, int Operation, int ExpectedError)
+{
+    char Data[16];
+    int Ret = Operation ? send(Socket, "x", 1, 0) : recv(Socket, Data, sizeof(Data), 0);
+    int Error = WSAGetLastError();
+
+    ok(Ret == SOCKET_ERROR && Error == ExpectedError, "%s %s: %d, error %d, expected %d\n",
+       Label, Operation ? "send" : "recv", Ret, Error, ExpectedError);
+}
+
+static
+void
+TestReset(const char *Label, BOOL Queued, int How, int First)
+{
+    SOCKET Socket, Peer;
+    char Data[16];
+    char Buffer[16];
+    WSABUF Buf = { sizeof(Buffer), Buffer };
+    WSAOVERLAPPED Overlapped;
+    WSANETWORKEVENTS Events;
+    WSAEVENT Event;
+    DWORD Flags = 0;
+    BOOL Writable;
+    int Ret, Error, Value, Len;
+    int PeerError = (!Queued && How == SD_BOTH) ? WSAECONNABORTED : WSAECONNRESET;
+    /* the peer that already got the end of the stream reads it as 0 bytes, not as the abort */
+    BOOL PeerTodo = !Queued && How == SD_BOTH;
+
+    if (!MakePair(SOCK_STREAM, &Socket, &Peer))
+    {
+        skip("%s: socket setup failed: %d\n", Label, WSAGetLastError());
+        return;
+    }
+
+    if (Queued)
+    {
+        ok(send(Peer, "queued", 6, 0) == 6, "%s: send failed: %d\n", Label, WSAGetLastError());
+        Sleep(200);
+    }
+    ok(shutdown(Socket, How) == 0, "%s: shutdown failed: %d\n", Label, WSAGetLastError());
+    if (!Queued)
+    {
+        ok(send(Peer, "later", 5, 0) == 5, "%s: send failed: %d\n", Label, WSAGetLastError());
+        Sleep(300);
+    }
+
+    /* whichever call comes first sees the reset */
+    if (First == 1)
+        CheckFails(Socket, Label, 0, WSAECONNABORTED);
+    if (First == 2)
+        CheckFails(Socket, Label, 1, WSAECONNABORTED);
+
+    /* SO_ERROR reports nothing */
+    Value = -1;
+    Len = sizeof(Value);
+    Ret = getsockopt(Socket, SOL_SOCKET, SO_ERROR, (char *)&Value, &Len);
+    ok(Ret == 0 && Value == 0, "%s: SO_ERROR %d, value %d, error %d\n", Label, Ret, Value, WSAGetLastError());
+
+    CheckFails(Socket, Label, 0, WSAECONNABORTED);
+    CheckFails(Socket, Label, 0, WSAECONNABORTED);
+    CheckFails(Socket, Label, 1, WSAECONNABORTED);
+    CheckFails(Socket, Label, 1, WSAECONNABORTED);
+
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Overlapped.Internal = STATUS_PENDING_;
+    Ret = WSARecv(Socket, &Buf, 1, NULL, &Flags, &Overlapped, NULL);
+    Error = WSAGetLastError();
+    ok(Ret == SOCKET_ERROR && Error == WSAECONNABORTED, "%s: WSARecv %d, error %d\n", Label, Ret, Error);
+    ok(Overlapped.Internal == STATUS_PENDING_, "%s: WSARecv left Internal %08lx\n", Label, (ULONG)Overlapped.Internal);
+
+    ok(Readable(Socket, &Writable), "%s: not readable\n", Label);
+    ok(Writable, "%s: not writable\n", Label);
+
+    Event = WSACreateEvent();
+    WSAEventSelect(Socket, Event, FD_READ | FD_WRITE | FD_CLOSE);
+    Sleep(100);
+    ZeroMemory(&Events, sizeof(Events));
+    ok(WSAEnumNetworkEvents(Socket, Event, &Events) == 0, "%s: WSAEnumNetworkEvents failed: %d\n", Label, WSAGetLastError());
+    ok((Events.lNetworkEvents & FD_CLOSE) != 0, "%s: no FD_CLOSE, events %lx\n", Label, Events.lNetworkEvents);
+    ok(Events.iErrorCode[FD_CLOSE_BIT] == WSAECONNABORTED, "%s: FD_CLOSE error %d\n", Label, Events.iErrorCode[FD_CLOSE_BIT]);
+    WSAEventSelect(Socket, NULL, 0);
+    WSACloseEvent(Event);
+
+    ok(shutdown(Socket, SD_SEND) == 0, "%s: shutdown(SD_SEND) failed: %d\n", Label, WSAGetLastError());
+    ok(shutdown(Socket, SD_RECEIVE) == 0, "%s: second shutdown failed: %d\n", Label, WSAGetLastError());
+
+    /* the peer sees the reset */
+    ok(Readable(Peer, NULL), "%s: the peer is not readable\n", Label);
+    Value = -1;
+    Len = sizeof(Value);
+    Ret = getsockopt(Peer, SOL_SOCKET, SO_ERROR, (char *)&Value, &Len);
+    ok(Ret == 0 && Value == 0, "%s: peer SO_ERROR %d, value %d\n", Label, Ret, Value);
+    Ret = recv(Peer, Data, sizeof(Data), 0);
+    Error = WSAGetLastError();
+    if (!PeerTodo)
+    {
+        ok(Ret == SOCKET_ERROR && Error == PeerError, "%s: peer recv %d, error %d, expected %d\n", Label, Ret, Error, PeerError);
+        CheckFails(Peer, Label, 0, PeerError);
+        CheckFails(Peer, Label, 1, PeerError);
+    }
+    else
+    {
+        /* Windows fails the receive with WSAECONNABORTED; the end of the stream the peer got first is
+         * all that ReactOS reports (the send fails with WSAECONNRESET there, WSAECONNABORTED on Windows) */
+        Ret = send(Peer, "x", 1, 0);
+        Error = WSAGetLastError();
+        ok(Ret == SOCKET_ERROR && (Error == WSAECONNABORTED || Error == WSAECONNRESET), "%s: peer send %d, error %d\n", Label, Ret, Error);
+    }
+
+    ok(closesocket(Socket) == 0, "%s: closesocket failed: %d\n", Label, WSAGetLastError());
+    ok(closesocket(Peer) == 0, "%s: closesocket of the peer failed: %d\n", Label, WSAGetLastError());
+}
+
+/* What does not reset: nothing unread and nothing arriving, SD_SEND with data arriving, the graceful ends */
+static
+void
+TestNoReset(void)
+{
+    SOCKET Socket, Peer;
+    DWORD Timeout = 3000;
+    char Data[16];
+    int Ret, Error;
+
+    /* SD_RECEIVE with nothing queued and nothing arriving: both directions keep working as they do */
+    if (MakePair(SOCK_STREAM, &Socket, &Peer))
+    {
+        setsockopt(Peer, SOL_SOCKET, SO_RCVTIMEO, (char *)&Timeout, sizeof(Timeout));
+        ok(shutdown(Socket, SD_RECEIVE) == 0, "shutdown failed: %d\n", WSAGetLastError());
+        Sleep(300);
+        Ret = recv(Socket, Data, sizeof(Data), 0);
+        Error = WSAGetLastError();
+        ok(Ret == SOCKET_ERROR && Error == WSAESHUTDOWN, "recv after SD_RECEIVE: %d, error %d\n", Ret, Error);
+        ok(send(Socket, "x", 1, 0) == 1, "send after SD_RECEIVE failed: %d\n", WSAGetLastError());
+        ok(recv(Peer, Data, sizeof(Data), 0) == 1, "the peer received nothing: %d\n", WSAGetLastError());
+        ok(!Readable(Peer, NULL), "the peer is readable\n");
+        ok(closesocket(Socket) == 0, "closesocket failed\n");
+        Ret = recv(Peer, Data, sizeof(Data), 0);
+        ok(Ret == 0, "the peer did not see the graceful close: %d, error %d\n", Ret, WSAGetLastError());
+        closesocket(Peer);
+    }
+
+    /* SD_BOTH with nothing queued or arriving: the peer sees the end of the stream, not a reset */
+    if (MakePair(SOCK_STREAM, &Socket, &Peer))
+    {
+        setsockopt(Peer, SOL_SOCKET, SO_RCVTIMEO, (char *)&Timeout, sizeof(Timeout));
+        ok(shutdown(Socket, SD_BOTH) == 0, "shutdown failed: %d\n", WSAGetLastError());
+        Ret = recv(Peer, Data, sizeof(Data), 0);
+        ok(Ret == 0, "the peer did not see the end of the stream: %d, error %d\n", Ret, WSAGetLastError());
+        Ret = recv(Socket, Data, sizeof(Data), 0);
+        Error = WSAGetLastError();
+        ok(Ret == SOCKET_ERROR && Error == WSAESHUTDOWN, "recv after SD_BOTH: %d, error %d\n", Ret, Error);
+        Ret = send(Socket, "x", 1, 0);
+        Error = WSAGetLastError();
+        ok(Ret == SOCKET_ERROR && Error == WSAESHUTDOWN, "send after SD_BOTH: %d, error %d\n", Ret, Error);
+        closesocket(Socket);
+        closesocket(Peer);
+    }
+
+    /* SD_SEND: data that arrives is received, nothing resets */
+    if (MakePair(SOCK_STREAM, &Socket, &Peer))
+    {
+        setsockopt(Socket, SOL_SOCKET, SO_RCVTIMEO, (char *)&Timeout, sizeof(Timeout));
+        ok(shutdown(Socket, SD_SEND) == 0, "shutdown failed: %d\n", WSAGetLastError());
+        ok(send(Peer, "abc", 3, 0) == 3, "send failed: %d\n", WSAGetLastError());
+        Sleep(300);
+        Ret = recv(Socket, Data, sizeof(Data), 0);
+        ok(Ret == 3, "recv after SD_SEND: %d, error %d\n", Ret, WSAGetLastError());
+        closesocket(Socket);
+        closesocket(Peer);
+    }
+
+    /* data received before the shutdown and read: nothing is unread, no reset */
+    if (MakePair(SOCK_STREAM, &Socket, &Peer))
+    {
+        setsockopt(Peer, SOL_SOCKET, SO_RCVTIMEO, (char *)&Timeout, sizeof(Timeout));
+        ok(send(Peer, "abc", 3, 0) == 3, "send failed: %d\n", WSAGetLastError());
+        Sleep(200);
+        Ret = recv(Socket, Data, sizeof(Data), 0);
+        ok(Ret == 3, "recv: %d, error %d\n", Ret, WSAGetLastError());
+        ok(shutdown(Socket, SD_RECEIVE) == 0, "shutdown failed: %d\n", WSAGetLastError());
+        Sleep(300);
+        ok(send(Socket, "x", 1, 0) == 1, "send failed: %d\n", WSAGetLastError());
+        ok(recv(Peer, Data, sizeof(Data), 0) == 1, "the peer received nothing: %d\n", WSAGetLastError());
+        closesocket(Socket);
+        closesocket(Peer);
+    }
+}
+
 START_TEST(shutdownrecv)
 {
     WSADATA WsaData;
@@ -413,6 +625,16 @@ START_TEST(shutdownrecv)
 
     TestDatagram("udp port", 1);
     TestDatagram("udp event", 2);
+
+    TestReset("unread, SD_RECEIVE, getsockopt first", TRUE, SD_RECEIVE, 0);
+    TestReset("unread, SD_RECEIVE, recv first", TRUE, SD_RECEIVE, 1);
+    TestReset("unread, SD_RECEIVE, send first", TRUE, SD_RECEIVE, 2);
+    TestReset("unread, SD_BOTH", TRUE, SD_BOTH, 1);
+    TestReset("arriving, SD_RECEIVE, getsockopt first", FALSE, SD_RECEIVE, 0);
+    TestReset("arriving, SD_RECEIVE, recv first", FALSE, SD_RECEIVE, 1);
+    TestReset("arriving, SD_RECEIVE, send first", FALSE, SD_RECEIVE, 2);
+    TestReset("arriving, SD_BOTH", FALSE, SD_BOTH, 1);
+    TestNoReset();
 
     WSACleanup();
 }

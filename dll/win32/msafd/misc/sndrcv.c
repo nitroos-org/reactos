@@ -441,7 +441,7 @@ WSPRecv(SOCKET Handle,
             ((PIO_STATUS_BLOCK)lpOverlapped)->Information = 0;
         }
         if (lpErrno)
-            *lpErrno = WSAESHUTDOWN;
+            *lpErrno = MsafdConnectionAborted(Socket) ? WSAECONNABORTED : WSAESHUTDOWN;
         return SOCKET_ERROR;
     }
 
@@ -683,7 +683,7 @@ MsafdRecvFrom(SOCKET Handle,
             ((PIO_STATUS_BLOCK)lpOverlapped)->Information = 0;
         }
         if (lpErrno)
-            *lpErrno = WSAESHUTDOWN;
+            *lpErrno = MsafdConnectionAborted(Socket) ? WSAECONNABORTED : WSAESHUTDOWN;
         return SOCKET_ERROR;
     }
 
@@ -1055,9 +1055,10 @@ WSPSend(SOCKET Handle,
     }
     if (Socket->SharedData->SendShutdown)
     {
-        /* After shutdown(SD_SEND) a send fails, as on Windows */
+        /* After shutdown(SD_SEND) a send fails, as on Windows (with WSAECONNABORTED when
+         * shutdown(SD_RECEIVE) reset the connection) */
         if (lpErrno)
-            *lpErrno = WSAESHUTDOWN;
+            *lpErrno = MsafdConnectionAborted(Socket) ? WSAECONNABORTED : WSAESHUTDOWN;
         return SOCKET_ERROR;
     }
 

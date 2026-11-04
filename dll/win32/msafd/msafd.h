@@ -513,6 +513,8 @@ INT TranslateNtStatusError( NTSTATUS Status );
 
 VOID DeleteSocketStructure( SOCKET Handle );
 
+BOOLEAN MsafdConnectionAborted(PSOCKET_INFORMATION Socket);
+
 int GetSocketInformation(
 	PSOCKET_INFORMATION Socket,
 	ULONG				AfdInformationClass,

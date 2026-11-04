@@ -211,6 +211,8 @@ typedef struct _AFD_FCB {
     BOOLEAN AbortingReceives; /* the cleanup of a stream socket is cancelling its receives */
     BOOLEAN ReceiveShutdown; /* shutdown(SD_RECEIVE) left receives pending: they wait for data, the end or a reset */
     BOOLEAN ShutdownBoth; /* ... and it shut the send direction down too (SD_BOTH) */
+    BOOLEAN LocalReceiveShutdown; /* TdiReceiveClosed comes from shutdown(SD_RECEIVE), not from the peer */
+    BOOLEAN ConnectionAborted; /* shutdown(SD_RECEIVE) with unread or arriving data reset the connection, as on Windows */
     ULONG Backlog;
     UINT ConnSeq;
     USHORT DisconnectFlags;
@@ -389,6 +391,7 @@ PVOID LockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp, BOOLEAN Output, KPROCESSO
 VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp );
 VOID AfdAbortPendingReceives( PAFD_FCB FCB );
 VOID AfdCompleteReceiveShutdown( PAFD_FCB FCB );
+VOID AfdAbortConnection( PAFD_FCB FCB );
 PVOID GetLockedData( PIRP Irp, PIO_STACK_LOCATION IrpSp );
 BOOLEAN AfdRequestLengthValid( PIRP Irp, PIO_STACK_LOCATION IrpSp, ULONG MinLength );
 NTSTATUS LeaveIrpUntilLater( PAFD_FCB FCB, PIRP Irp, UINT Function );

@@ -61,12 +61,19 @@ static VOID RefillSocketBuffer( PAFD_FCB FCB )
 
 static VOID HandleReceiveComplete( PAFD_FCB FCB, NTSTATUS Status, ULONG_PTR Information )
 {
+    /* An aborted connection keeps its status; the transport flushing the receive changes nothing */
+    if (FCB->ConnectionAborted)
+        return;
+
     FCB->LastReceiveStatus = Status;
 
     /* We got closed while the receive was in progress */
     if (FCB->TdiReceiveClosed)
     {
-        /* The received data is discarded */
+        /* Data that arrives after shutdown(SD_RECEIVE) with no receive pending resets the connection,
+           as on Windows; after the peer's end or a failure it is discarded */
+        if (FCB->LocalReceiveShutdown && Status == STATUS_SUCCESS && Information != 0)
+            AfdAbortConnection(FCB);
     }
     /* Receive successful */
     else if (Status == STATUS_SUCCESS)
@@ -195,6 +202,7 @@ VOID AfdCompleteReceiveShutdown( PAFD_FCB FCB ) {
     FCB->ShutdownBoth = FALSE;
     if( !FCB->TdiReceiveClosed ) {
         FCB->TdiReceiveClosed = TRUE;
+        FCB->LocalReceiveShutdown = TRUE;
         FCB->LastReceiveStatus = STATUS_SUCCESS;
     }
 
@@ -300,7 +308,7 @@ static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
         FCB->PollStatus[FD_READ_BIT] = STATUS_SUCCESS;
         PollReeval( FCB->DeviceExt, FCB->FileObject );
     }
-    else
+    else if (!FCB->ConnectionAborted)
     {
         FCB->PollState &= ~AFD_EVENT_RECEIVE;
     }
