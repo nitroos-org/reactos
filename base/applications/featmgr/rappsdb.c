@@ -253,7 +253,7 @@ static BOOL EnsureDir(LPCWSTR d)
 }
 
 /* Download (or take from a local file) the catalog cab and make it the current catalog. urlOverride NULL: the official address,
- * or FEATMGR_RAPPS_DB (a cab path or an address) when that variable is set - the tests use it; a local path is copied. */
+ * or FEATMGR_RAPPS_DB (a LOCAL cab path, never an address) when that variable is set - the tests use it. */
 HRESULT FmRappsFetchDb(LPCWSTR urlOverride, FILE *log)
 {
     WCHAR root[MAX_PATH], base[MAX_PATH], cab[MAX_PATH], tmpDir[MAX_PATH], dbDir[MAX_PATH], oldDir[MAX_PATH], env[MAX_PATH * 2];
@@ -264,8 +264,21 @@ HRESULT FmRappsFetchDb(LPCWSTR urlOverride, FILE *log)
 
     if (!url || !url[0])
     {
+        /* FEATMGR_RAPPS_DB: a catalog cab that is already on this disk (the tests use it). Never an address. */
         if (GetEnvironmentVariableW(L"FEATMGR_RAPPS_DB", env, ARRAYSIZE(env)) && env[0]) url = env;
         else url = FM_RAPPS_DB_URL;
+    }
+    /* The catalog carries every download address and hash, so whoever supplies it decides what runs as administrator: it comes
+     * only from the official address over https with the certificate pin, or from a local file. Any other address is refused. */
+    if (!_wcsnicmp(url, L"http:", 5) || !_wcsnicmp(url, L"https:", 6) || !_wcsnicmp(url, L"ftp:", 4) || !_wcsnicmp(url, L"file:", 5))
+    {
+        if (_wcsicmp(url, FM_RAPPS_DB_URL))
+        {
+            FmSetLastMessage(L"Refused: the RAPPS catalog is only downloaded from %s (https, certificate pinned); %s is not accepted. "
+                             L"A local cab file can be given instead.", FM_RAPPS_DB_URL, url);
+            LOGF(log, L"error: catalog address %s refused (only the official address, or a local file)\n", url);
+            return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+        }
     }
     if (!FmGetRootDir(root, MAX_PATH)) return E_FAIL;
     StringCchPrintfW(base, MAX_PATH, L"%s\\RappsDb", root);
@@ -278,7 +291,7 @@ HRESULT FmRappsFetchDb(LPCWSTR urlOverride, FILE *log)
         FmSetLastMessage(L"Cannot create %s (error %lu).", base, GetLastError());
         return HRESULT_FROM_WIN32(GetLastError());
     }
-    local = _wcsnicmp(url, L"https://", 8) && _wcsnicmp(url, L"http://", 7);
+    local = _wcsnicmp(url, L"https://", 8) != 0;
     FmOpStep(L"Downloading the RAPPS catalog from %s", local ? L"a local file" : url);
     if (local)
     {
@@ -290,7 +303,7 @@ HRESULT FmRappsFetchDb(LPCWSTR urlOverride, FILE *log)
         hr = S_OK;
     }
     else
-        hr = FmDownloadFile(url, cab, !_wcsicmp(url, FM_RAPPS_DB_URL), DB_MAX_CAB, log);
+        hr = FmDownloadFile(url, cab, TRUE, DB_MAX_CAB, log);
     if (FAILED(hr)) return hr;
 
     if (FmOpCancelled()) { DeleteFileW(cab); FmSetLastMessage(L"The operation was cancelled."); return HRESULT_FROM_WIN32(ERROR_CANCELLED); }

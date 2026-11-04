@@ -310,6 +310,8 @@ int    FmNativeInstallMain(int argc, WCHAR **argv);    /* featmgr /nat-install <
  * entries (*.txt) extracted into %SystemRoot%\Featmgr\RappsDb\appdb. */
 #define FM_RAPPS_DB_URL L"https://rapps.reactos.org/rappmgr2.cab"
 BOOL   FmGetRappsDbDir(LPWSTR buf, DWORD cch);         /* ...\Featmgr\RappsDb\appdb */
+BOOL   FmBadInstallRoot(LPCWSTR dir);                   /* system / profile folder, ancestor of one, drive root, or "..": never an install directory */
+BOOL   FmGenRegOk(LPCWSTR spec, BOOL tree);             /* a Generate DelReg key: the app's own key under HKCU\Software / HKLM\SOFTWARE */
 BOOL   FmDeleteTree(LPCWSTR dir);                      /* recursive delete; a reparse point is removed, never entered */
 BOOL   FmSafeTreeName(LPWSTR name);                    /* archive entry name check ('/' -> '\\'); FALSE: absolute, drive, stream, ".." */
 BOOL   FmMakeParents(LPCWSTR base, LPCWSTR rel);

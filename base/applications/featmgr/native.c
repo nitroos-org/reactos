@@ -12,6 +12,7 @@
 
 #include "featmgr.h"
 #include <shlwapi.h>
+#include <shlobj.h>
 #include <strsafe.h>
 
 #define LOGF(log, ...) do { if (log) { fwprintf((log), __VA_ARGS__); fflush(log); } } while (0)
@@ -419,6 +420,100 @@ static BOOL KeyHasContent(HKEY root, LPCWSTR sub, REGSAM sam)
     return ns || nv;
 }
 
+/* ---- what a generated install may delete -------------------------------------------------------------------------------
+ * The install record (a registry subkey) and the catalog entry's Del* lists decide what uninstall deletes, so both are held
+ * to the same rules: a relative path stays inside the app's own install directory (no ".", "..", drive, or the root itself),
+ * an absolute path is only a Start menu shortcut, a registry key is the app's own key under HKCU\Software or HKLM\SOFTWARE. */
+
+static BOOL SamePathNoSlash(LPCWSTR a, LPCWSTR b)
+{
+    size_t la = wcslen(a), lb = wcslen(b);
+    while (la && a[la - 1] == L'\\') la--;
+    while (lb && b[lb - 1] == L'\\') lb--;
+    return la == lb && !_wcsnicmp(a, b, la);
+}
+
+/* dir is the same as, or an ancestor of, prot */
+static BOOL IsOrAbove(LPCWSTR dir, LPCWSTR prot)
+{
+    size_t l = wcslen(dir);
+    while (l && dir[l - 1] == L'\\') l--;
+    if (!prot[0] || !l) return FALSE;
+    return !_wcsnicmp(dir, prot, l) && (prot[l] == L'\0' || prot[l] == L'\\');
+}
+
+/* TRUE: dir must not be an install directory (a system or profile folder, an ancestor of one, a drive root, or has "..") */
+BOOL FmBadInstallRoot(LPCWSTR dir)
+{
+    static const int csidls[] = { CSIDL_PROGRAM_FILES, CSIDL_PROGRAM_FILESX86, CSIDL_WINDOWS, CSIDL_SYSTEM, CSIDL_PROFILE,
+                                  CSIDL_LOCAL_APPDATA, CSIDL_APPDATA, CSIDL_COMMON_APPDATA, CSIDL_PROGRAMS, CSIDL_COMMON_PROGRAMS,
+                                  CSIDL_DESKTOPDIRECTORY, CSIDL_COMMON_DESKTOPDIRECTORY, CSIDL_PROGRAM_FILES_COMMON };
+    WCHAR p[MAX_PATH];
+    size_t i;
+
+    if (wcslen(dir) < 4 || dir[1] != L':' || dir[2] != L'\\') return TRUE;
+    if (wcsstr(dir, L"\\..") || wcsstr(dir, L"..\\") || wcsstr(dir, L"\\.\\") || dir[wcslen(dir) - 1] == L'.') return TRUE;
+    for (i = 0; i < ARRAYSIZE(csidls); i++)
+    {
+        p[0] = L'\0';
+        if (SHGetFolderPathW(NULL, csidls[i], NULL, 0, p) == S_OK && IsOrAbove(dir, p)) return TRUE;
+    }
+    if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, p) == S_OK)
+    {
+        WCHAR q[MAX_PATH];
+        StringCchPrintfW(q, MAX_PATH, L"%s\\Programs", p);
+        if (SamePathNoSlash(dir, q)) return TRUE;
+    }
+    return FALSE;
+}
+
+/* TRUE: path is below the Start menu Programs folder (user or all users), not the folder itself */
+static BOOL UnderStartMenu(LPCWSTR path)
+{
+    static const int ids[] = { CSIDL_PROGRAMS, CSIDL_COMMON_PROGRAMS };
+    WCHAR p[MAX_PATH];
+    int i;
+    if (wcsstr(path, L"..")) return FALSE;
+    for (i = 0; i < 2; i++)
+    {
+        size_t l;
+        if (SHGetFolderPathW(NULL, ids[i], NULL, 0, p) != S_OK) continue;
+        l = wcslen(p);
+        if (!_wcsnicmp(path, p, l) && path[l] == L'\\' && path[l + 1]) return TRUE;
+    }
+    return FALSE;
+}
+
+/* "HKCU\Software\Vendor\App" / "HKLM64\SOFTWARE\..." : tree = the key is deleted with everything below it */
+BOOL FmGenRegOk(LPCWSTR spec, BOOL tree)
+{
+    LPCWSTR sub;
+    int depth = 0;
+    LPCWSTR p;
+
+    if (_wcsnicmp(spec, L"HKCU", 4) && _wcsnicmp(spec, L"HKLM", 4)) return FALSE;
+    sub = spec + 4;
+    if ((sub[0] == L'6' && sub[1] == L'4') || (sub[0] == L'3' && sub[1] == L'2')) sub += 2;
+    if (*sub != L'\\') return FALSE;
+    sub++;
+    if (_wcsnicmp(sub, L"Software\\", 9) || wcsstr(sub, L"..") || wcsstr(sub, L"\\\\")) return FALSE;
+    if (!_wcsnicmp(sub, L"Software\\Microsoft\\Windows", 26) || !_wcsnicmp(sub, L"Software\\Classes", 17) ||
+        !_wcsnicmp(sub, L"Software\\Policies", 18) || !_wcsnicmp(sub, L"Software\\Wow6432Node", 22)) return FALSE;
+    for (p = sub; *p; p++) if (*p == L'\\') depth++;
+    depth++;
+    if (sub[wcslen(sub) - 1] == L'\\') return FALSE;
+    return tree ? depth >= 3 : depth >= 2;
+}
+
+/* a relative record path ("\sub\file"): nothing but names below the install directory */
+static BOOL RelOk(LPCWSTR data)
+{
+    WCHAR t[MAX_PATH * 2];
+    if (data[0] != L'\\' || !data[1]) return FALSE;
+    StringCchCopyW(t, ARRAYSIZE(t), data + 1);
+    return FmSafeTreeName(t);
+}
+
 /* Remove what a generated install recorded (its "RApps" subkey: F file, D dir tree, d empty dir, K key tree, k empty key). */
 static int UninstallGenerated(const UNENT *e, HKEY arp)
 {
@@ -432,7 +527,7 @@ static int UninstallGenerated(const UNENT *e, HKEY arp)
     GetWindowsDirectoryW(win, MAX_PATH);
     PathRemoveBackslashW(loc);
     /* the record decides what is deleted: refuse one whose install location is empty, a drive root or the system */
-    if (wcslen(loc) < 4 || !_wcsicmp(loc, win) || StrStrIW(win, loc) == win)
+    if (FmBadInstallRoot(loc) || wcslen(loc) < 4 || !_wcsicmp(loc, win) || StrStrIW(win, loc) == win)
     {
         wprintf(L"error: the install record names no usable install location ('%s'); nothing was deleted\n", loc);
         RegCloseKey(ent);
@@ -455,6 +550,18 @@ static int UninstallGenerated(const UNENT *e, HKEY arp)
             op = val[0];
             if (wcsstr(data, L"..\\") || wcsstr(data, L"\\.."))
                 continue;
+            /* the record is data: hold every entry to the confinement rules before it deletes anything */
+            if (op == L'K' || op == L'k')
+            {
+                if (!FmGenRegOk(data, op == L'K')) { wprintf(L"refused record entry %s: not the app's own registry key\n", val); continue; }
+            }
+            else if (op == L'F' || op == L'D' || op == L'd')
+            {
+                BOOL ok;
+                if (data[0] == L'\\') ok = (op == L'd' && !data[1]) || RelOk(data);          /* "\" alone = the root, only if empty */
+                else ok = op != L'D' && UnderStartMenu(data);                                /* a Start menu shortcut and its folder */
+                if (!ok) { wprintf(L"refused record entry %s: '%s' is outside the install directory\n", val, data); continue; }
+            }
             if ((stage == 0 && (op == L'F' || op == L'K')) || (stage == 1 && (op == L'd' || op == L'D' || op == L'k')))
             {
                 if (op == L'K' || op == L'k')

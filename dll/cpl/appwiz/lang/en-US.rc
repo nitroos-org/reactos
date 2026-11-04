@@ -82,7 +82,7 @@ END
 STRINGTABLE
 BEGIN
     IDS_PROG_TITLE "Programs and Features"
-    IDS_PROG_HEADER "Uninstall or change a program. To install software or turn system features on or off, use ""Turn features on or off""."
+    IDS_PROG_HEADER "Uninstall or change a program. To install software or turn system features on or off, use ""Turn NitroOS features on or off""."
     IDS_PROG_COL_NAME "Name"
     IDS_PROG_COL_PUBLISHER "Publisher"
     IDS_PROG_COL_VERSION "Version"
@@ -90,7 +90,7 @@ BEGIN
     IDS_PROG_UNINSTALL "&Uninstall"
     IDS_PROG_CHANGE "C&hange"
     IDS_PROG_REFRESH "&Refresh"
-    IDS_PROG_FEATURES "&Turn features on or off"
+    IDS_PROG_FEATURES "&Turn NitroOS features on or off"
     IDS_PROG_CLOSE "&Close"
     IDS_PROG_CONFIRM "Do you want to uninstall '%s'?"
     IDS_PROG_STARTFAIL "The program could not be started (error %lu):\n%s"
