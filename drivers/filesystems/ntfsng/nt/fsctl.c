@@ -1011,6 +1011,24 @@ static NTSTATUS NgReparseFsctl(PNG_VCB Vcb, PNG_FCB Fcb, PNG_CCB Ccb, PIRP Irp, 
              Rp->ReparseTag == 0x80000024 || Rp->ReparseTag == 0x80000025 || Rp->ReparseTag == 0x80000026 ||
              Rp->ReparseTag == 0xA000001D /* LX_* */))
             return STATUS_IO_REPARSE_TAG_INVALID;
+        if (Code == FSCTL_SET_REPARSE_POINT && Rp->ReparseTag == IO_REPARSE_TAG_SYMLINK)
+        {
+            ULONG Path = In - FIELD_OFFSET(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer.PathBuffer);
+
+            /* A symbolic link is followed by the I/O manager for every caller: only SeCreateSymbolicLinkPrivilege
+             * creates one, as on Windows (a kernel caller is trusted) */
+            if (Irp->RequestorMode != KernelMode &&
+                !SeSinglePrivilegeCheck(RtlConvertLongToLuid(SE_CREATE_SYMBOLIC_LINK_PRIVILEGE), Irp->RequestorMode))
+                return STATUS_PRIVILEGE_NOT_HELD;
+            /* Both names inside the buffer, whole UTF-16 characters, a substitute name (Windows 10 takes any flags) */
+            if (In < FIELD_OFFSET(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer.PathBuffer) ||
+                (ULONG)Rp->SymbolicLinkReparseBuffer.SubstituteNameOffset + Rp->SymbolicLinkReparseBuffer.SubstituteNameLength > Path ||
+                (ULONG)Rp->SymbolicLinkReparseBuffer.PrintNameOffset + Rp->SymbolicLinkReparseBuffer.PrintNameLength > Path ||
+                ((Rp->SymbolicLinkReparseBuffer.SubstituteNameOffset | Rp->SymbolicLinkReparseBuffer.SubstituteNameLength |
+                  Rp->SymbolicLinkReparseBuffer.PrintNameOffset | Rp->SymbolicLinkReparseBuffer.PrintNameLength) & 1) ||
+                !Rp->SymbolicLinkReparseBuffer.SubstituteNameLength)
+                return STATUS_IO_REPARSE_DATA_INVALID;
+        }
         if (Code == FSCTL_SET_REPARSE_POINT && Rp->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT)
         {
             ULONG Path = In - FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer);

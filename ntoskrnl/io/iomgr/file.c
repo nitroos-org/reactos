@@ -191,6 +191,22 @@ IopDoNameTransmogrify(IN PIRP Irp,
     {
         Irp->IoStatus.Status = STATUS_IO_REPARSE_DATA_INVALID;
     }
+    /* The substitute name has to lie inside the data and has to be an absolute name of the object namespace:
+       it replaces the whole name, a relative one would be resolved against whatever directory the caller named */
+    else if (DataBuffer->ReparseDataLength + REPARSE_DATA_BUFFER_HEADER_SIZE <
+             FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer) ||
+             (ULONG)DataBuffer->MountPointReparseBuffer.SubstituteNameOffset +
+             DataBuffer->MountPointReparseBuffer.SubstituteNameLength >
+             (ULONG)DataBuffer->ReparseDataLength + REPARSE_DATA_BUFFER_HEADER_SIZE -
+             FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer) ||
+             (DataBuffer->MountPointReparseBuffer.SubstituteNameOffset & 1) ||
+             DataBuffer->MountPointReparseBuffer.SubstituteNameLength < sizeof(WCHAR) ||
+             (DataBuffer->MountPointReparseBuffer.SubstituteNameLength & 1) ||
+             *(PWCHAR)((ULONG_PTR)DataBuffer->MountPointReparseBuffer.PathBuffer +
+                       DataBuffer->MountPointReparseBuffer.SubstituteNameOffset) != L'\\')
+    {
+        Irp->IoStatus.Status = STATUS_IO_REPARSE_DATA_INVALID;
+    }
 
     /* Everything went right */
     if (NT_SUCCESS(Irp->IoStatus.Status))
@@ -266,6 +282,266 @@ IopDoNameTransmogrify(IN PIRP Irp,
 
     /* We don't need them anymore - it was allocated by the driver */
     ExFreePool(DataBuffer);
+}
+
+/*
+ * Collapse "." and ".." components of Buf[Floor..Len) (a run of \component units) in place and return the new
+ * length in characters. ".." never climbs above Floor, and an empty result is the root "\".
+ */
+static
+ULONG
+IopRemoveDotsFromPath(IN OUT PWCHAR Buf,
+                      IN ULONG Len,
+                      IN ULONG Floor)
+{
+    ULONG r = Floor, w = Floor, s, e, cl;
+
+    while (r < Len)
+    {
+        s = r + 1;
+        e = s;
+        while (e < Len && Buf[e] != L'\\') e++;
+        cl = e - s;
+
+        if (cl == 1 && Buf[s] == L'.')
+        {
+            /* Current directory: drop it */
+        }
+        else if (cl == 2 && Buf[s] == L'.' && Buf[s + 1] == L'.')
+        {
+            /* Parent directory: drop the last component, if any */
+            while (w > Floor && Buf[w - 1] != L'\\') w--;
+            if (w > Floor) w--;
+        }
+        else if (cl != 0 || e == Len)
+        {
+            /* An empty component survives only as a trailing backslash */
+            if (w != r) RtlMoveMemory(&Buf[w], &Buf[r], (e - r) * sizeof(WCHAR));
+            w += e - r;
+        }
+        r = e;
+    }
+
+    if (w == Floor) Buf[w++] = L'\\';
+    return w;
+}
+
+/*
+ * A file system returned STATUS_REPARSE for an IO_REPARSE_TAG_SYMLINK reparse point: the data is in the
+ * auxiliary buffer and its Reserved field counts the bytes of the file name that follow the link. Absolute
+ * links replace the name by their substitute name; relative links (SYMLINK_FLAG_RELATIVE) resolve against the
+ * directory that holds the link. Either way FileObject->FileName becomes the complete name in the object
+ * namespace and the information becomes IO_REPARSE, so that IopParseDevice hands the new name back to the
+ * object manager. Frees DataBuffer.
+ */
+static
+VOID
+IopDoSymlinkTransmogrify(IN PIRP Irp,
+                         IN PFILE_OBJECT FileObject,
+                         IN PREPARSE_DATA_BUFFER DataBuffer,
+                         IN PUNICODE_STRING CompleteName,
+                         IN PUNICODE_STRING RemainingName,
+                         IN PFILE_OBJECT RelatedFileObject)
+{
+    const ULONG HeaderSize = FIELD_OFFSET(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer.PathBuffer) -
+                             REPARSE_DATA_BUFFER_HEADER_SIZE;
+    PWCHAR Sub, Tail, NewBuffer = NULL, Prefix = NULL;
+    ULONG SubLength, TailLength, PathLength;
+    ULONG PrefixChars = 0, HeadChars = 0, Floor = 0, Sep = 0, Total, NewChars;
+    POBJECT_NAME_INFORMATION RelatedName = NULL;
+    BOOLEAN Relative, Rooted;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    PAGED_CODE();
+
+    ASSERT(Irp->IoStatus.Status == STATUS_REPARSE);
+    ASSERT(DataBuffer->ReparseTag == IO_REPARSE_TAG_SYMLINK);
+
+    /* Validate the data the driver gave us */
+    if (DataBuffer->ReparseDataLength < HeaderSize ||
+        DataBuffer->ReparseDataLength >= MAXIMUM_REPARSE_DATA_BUFFER_SIZE ||
+        DataBuffer->Reserved > FileObject->FileName.Length ||
+        (DataBuffer->Reserved & 1))
+    {
+        Status = STATUS_IO_REPARSE_DATA_INVALID;
+        goto Done;
+    }
+    PathLength = DataBuffer->ReparseDataLength - HeaderSize;
+    SubLength = DataBuffer->SymbolicLinkReparseBuffer.SubstituteNameLength;
+    if (SubLength == 0 || (SubLength & 1) ||
+        (DataBuffer->SymbolicLinkReparseBuffer.SubstituteNameOffset & 1) ||
+        (ULONG)DataBuffer->SymbolicLinkReparseBuffer.SubstituteNameOffset + SubLength > PathLength)
+    {
+        Status = STATUS_IO_REPARSE_DATA_INVALID;
+        goto Done;
+    }
+    Sub = (PWCHAR)((ULONG_PTR)DataBuffer->SymbolicLinkReparseBuffer.PathBuffer +
+                   DataBuffer->SymbolicLinkReparseBuffer.SubstituteNameOffset);
+    TailLength = DataBuffer->Reserved;
+    Tail = (PWCHAR)((ULONG_PTR)FileObject->FileName.Buffer + FileObject->FileName.Length - TailLength);
+    Relative = (DataBuffer->SymbolicLinkReparseBuffer.Flags & SYMLINK_FLAG_RELATIVE) != 0;
+    Rooted = (Sub[0] == L'\\');
+
+    /* An absolute link replaces the whole name, so its substitute has to be an absolute name too
+       (Windows 10 gives ERROR_INVALID_NAME when such a link is opened) */
+    if (!Relative && !Rooted)
+    {
+        Status = STATUS_OBJECT_NAME_INVALID;
+        goto Done;
+    }
+
+    if (Relative)
+    {
+        PWCHAR Head = FileObject->FileName.Buffer;
+
+        if (!Rooted)
+        {
+            /* The directory that holds the link: the name up to the link without its last component */
+            HeadChars = (FileObject->FileName.Length - TailLength) / sizeof(WCHAR);
+            while (HeadChars && Head[HeadChars - 1] != L'\\') HeadChars--;
+        }
+
+        if (!RelatedFileObject)
+        {
+            /* The device part of the complete name is what precedes the remaining name */
+            if (CompleteName->Length < RemainingName->Length ||
+                RemainingName->Length != FileObject->FileName.Length ||
+                RtlCompareMemory((PUCHAR)CompleteName->Buffer + CompleteName->Length - RemainingName->Length,
+                                 FileObject->FileName.Buffer,
+                                 RemainingName->Length) != RemainingName->Length)
+            {
+                Status = STATUS_OBJECT_NAME_NOT_FOUND;
+                goto Done;
+            }
+            Prefix = CompleteName->Buffer;
+            PrefixChars = (CompleteName->Length - RemainingName->Length) / sizeof(WCHAR);
+            Floor = PrefixChars;
+        }
+        else
+        {
+            ULONG Needed, Chars, Seen = 0;
+
+            /* Relative to the related file: its full name is the base (a rooted link cannot be resolved here) */
+            if (Rooted)
+            {
+                Status = STATUS_OBJECT_NAME_NOT_FOUND;
+                goto Done;
+            }
+            RelatedName = ExAllocatePoolWithTag(PagedPool, sizeof(OBJECT_NAME_INFORMATION) + 0x10000, TAG_IO_NAME);
+            if (!RelatedName)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                goto Done;
+            }
+            Status = ObQueryNameString(RelatedFileObject,
+                                       RelatedName,
+                                       sizeof(OBJECT_NAME_INFORMATION) + 0x10000,
+                                       &Needed);
+            if (!NT_SUCCESS(Status) || !RelatedName->Name.Length)
+            {
+                if (NT_SUCCESS(Status)) Status = STATUS_OBJECT_NAME_NOT_FOUND;
+                goto Done;
+            }
+            Prefix = RelatedName->Name.Buffer;
+            PrefixChars = RelatedName->Name.Length / sizeof(WCHAR);
+            while (PrefixChars > 1 && Prefix[PrefixChars - 1] == L'\\') PrefixChars--;
+
+            /* ".." never climbs above \Device\Name */
+            for (Chars = 0; Chars < PrefixChars; Chars++)
+            {
+                if (Prefix[Chars] == L'\\' && ++Seen == 3) break;
+            }
+            Floor = Chars;
+
+            /* A related name has no leading backslash */
+            if (!(HeadChars && Head[0] == L'\\')) Sep = 1;
+        }
+    }
+
+    /* Build the new name: [prefix][\][head]substitute[tail] */
+    Total = (Relative ? PrefixChars + Sep + HeadChars : 0) + SubLength / sizeof(WCHAR) + TailLength / sizeof(WCHAR);
+    if ((Total + 2) * sizeof(WCHAR) >= MAXUSHORT)
+    {
+        Status = STATUS_NAME_TOO_LONG;
+        goto Done;
+    }
+    NewBuffer = ExAllocatePoolWithTag(PagedPool, (Total + 2) * sizeof(WCHAR), TAG_IO_NAME);
+    if (!NewBuffer)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Done;
+    }
+
+    NewChars = 0;
+    if (Relative)
+    {
+        if (PrefixChars) RtlCopyMemory(NewBuffer, Prefix, PrefixChars * sizeof(WCHAR));
+        NewChars = PrefixChars;
+        if (Sep) NewBuffer[NewChars++] = L'\\';
+        if (HeadChars)
+        {
+            RtlCopyMemory(&NewBuffer[NewChars], FileObject->FileName.Buffer, HeadChars * sizeof(WCHAR));
+            NewChars += HeadChars;
+        }
+    }
+    RtlCopyMemory(&NewBuffer[NewChars], Sub, SubLength);
+    NewChars += SubLength / sizeof(WCHAR);
+    if (TailLength)
+    {
+        RtlCopyMemory(&NewBuffer[NewChars], Tail, TailLength);
+        NewChars += TailLength / sizeof(WCHAR);
+    }
+    if (Relative) NewChars = IopRemoveDotsFromPath(NewBuffer, NewChars, Floor);
+
+    /* Replace the file name; don't use TAG_IO_NAME to free the old one, a file system may have re-allocated it */
+    if (FileObject->FileName.Buffer) ExFreePoolWithTag(FileObject->FileName.Buffer, 0);
+    NewBuffer[NewChars] = UNICODE_NULL;
+    FileObject->FileName.Buffer = NewBuffer;
+    FileObject->FileName.Length = (USHORT)(NewChars * sizeof(WCHAR));
+    FileObject->FileName.MaximumLength = (USHORT)((NewChars + 1) * sizeof(WCHAR));
+    NewBuffer = NULL;
+
+Done:
+    if (NewBuffer) ExFreePoolWithTag(NewBuffer, TAG_IO_NAME);
+    if (RelatedName) ExFreePoolWithTag(RelatedName, TAG_IO_NAME);
+    ExFreePool(DataBuffer);
+
+    if (NT_SUCCESS(Status))
+    {
+        /* The name is complete: the object manager parses it from the root again */
+        Irp->IoStatus.Information = IO_REPARSE;
+    }
+    else
+    {
+        Irp->IoStatus.Status = Status;
+    }
+}
+
+/* OBJ_DONT_REPARSE: fail instead of traversing a reparse point (not in every header set) */
+#ifndef OBJ_DONT_REPARSE
+#define OBJ_DONT_REPARSE 0x00001000
+#endif
+
+/* The device belongs to a network file system or a redirector */
+static
+BOOLEAN
+IopIsRemoteDeviceObject(IN PDEVICE_OBJECT DeviceObject)
+{
+    if (DeviceObject->Characteristics & FILE_REMOTE_DEVICE) return TRUE;
+
+    switch (DeviceObject->DeviceType)
+    {
+        case FILE_DEVICE_NETWORK_FILE_SYSTEM:
+        case FILE_DEVICE_NETWORK_REDIRECTOR:
+        case FILE_DEVICE_MULTI_UNC_PROVIDER:
+        case FILE_DEVICE_DFS_FILE_SYSTEM:
+        case FILE_DEVICE_DFS:
+        case FILE_DEVICE_DFS_VOLUME:
+            return TRUE;
+
+        default:
+            return FALSE;
+    }
 }
 
 NTSTATUS
@@ -1038,8 +1314,32 @@ IopParseDevice(IN PVOID ParseObject,
             /* Handle name change if required */
             if (Status == STATUS_REPARSE)
             {
+                /*
+                 * The caller does not want reparse points traversed, or wants to stop at a symbolic link.
+                 * A link a network file system gives us is not followed either: remote to local and
+                 * remote to remote evaluation are off by default on Windows (STATUS_SYMLINK_CLASS_DISABLED)
+                 */
+                if ((Irp->IoStatus.Information == IO_REPARSE_TAG_MOUNT_POINT ||
+                     Irp->IoStatus.Information == IO_REPARSE_TAG_SYMLINK) &&
+                    ((Attributes & OBJ_DONT_REPARSE) ||
+                     (Irp->IoStatus.Information == IO_REPARSE_TAG_SYMLINK &&
+                      ((OpenPacket->Options & IO_STOP_ON_SYMLINK) ||
+                       IopIsRemoteDeviceObject(OriginalDeviceObject) ||
+                       IopIsRemoteDeviceObject(DeviceObject)))))
+                {
+                    if (Attributes & OBJ_DONT_REPARSE)
+                        Irp->IoStatus.Status = STATUS_REPARSE_POINT_ENCOUNTERED;
+                    else if (OpenPacket->Options & IO_STOP_ON_SYMLINK)
+                        Irp->IoStatus.Status = STATUS_STOPPED_ON_SYMLINK;
+                    else
+                        Irp->IoStatus.Status = STATUS_SYMLINK_CLASS_DISABLED;
+
+                    if (Irp->Tail.Overlay.AuxiliaryBuffer)
+                        ExFreePool(Irp->Tail.Overlay.AuxiliaryBuffer);
+                    Irp->Tail.Overlay.AuxiliaryBuffer = NULL;
+                }
                 /* Check this is a mount point */
-                if (Irp->IoStatus.Information == IO_REPARSE_TAG_MOUNT_POINT)
+                else if (Irp->IoStatus.Information == IO_REPARSE_TAG_MOUNT_POINT)
                 {
                     PREPARSE_DATA_BUFFER ReparseData;
 
@@ -1052,6 +1352,23 @@ IopParseDevice(IN PVOID ParseObject,
                     ASSERT(ReparseData->Reserved < MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
 
                     IopDoNameTransmogrify(Irp, FileObject, ReparseData);
+                }
+                else if (Irp->IoStatus.Information == IO_REPARSE_TAG_SYMLINK)
+                {
+                    PREPARSE_DATA_BUFFER ReparseData;
+
+                    /* Reparse point attributes were passed by the driver in the auxiliary buffer */
+                    ASSERT(Irp->Tail.Overlay.AuxiliaryBuffer != NULL);
+                    ReparseData = (PREPARSE_DATA_BUFFER)Irp->Tail.Overlay.AuxiliaryBuffer;
+                    Irp->Tail.Overlay.AuxiliaryBuffer = NULL;
+
+                    ASSERT(ReparseData->ReparseTag == IO_REPARSE_TAG_SYMLINK);
+                    IopDoSymlinkTransmogrify(Irp,
+                                             FileObject,
+                                             ReparseData,
+                                             CompleteName,
+                                             RemainingName,
+                                             OpenPacket->RelatedFileObject);
                 }
             }
 

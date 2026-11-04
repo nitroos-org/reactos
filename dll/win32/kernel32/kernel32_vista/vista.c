@@ -129,6 +129,10 @@ QueryFullProcessImageNameA(
 }
 
 
+#ifndef SE_CREATE_SYMBOLIC_LINK_PRIVILEGE
+#define SE_CREATE_SYMBOLIC_LINK_PRIVILEGE 35L
+#endif
+
 /*
  * @implemented
  */
@@ -152,11 +156,13 @@ CreateSymbolicLinkW(IN LPCWSTR lpSymlinkFileName,
     NTSTATUS Status;
     ULONG dwCreateOptions;
     DWORD dwErr;
+    BOOLEAN bPrivilegeWasEnabled = TRUE, bPrivilegeAdjusted = FALSE, bPrivilegeOnThread = FALSE;
 
     /*
      * SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE (Windows 10 1703+) is accepted. Windows without developer mode
-     * still demands SeCreateSymbolicLinkPrivilege (ERROR_PRIVILEGE_NOT_HELD) even with this flag; ReactOS has no
-     * elevation model and its filesystem drivers do not check that privilege, so the flag is a no-op here.
+     * still demands SeCreateSymbolicLinkPrivilege (ERROR_PRIVILEGE_NOT_HELD) even with this flag. ReactOS has no
+     * developer mode: the file systems (NTFS-NG, Btrfs) require the privilege for every caller, so the flag has
+     * no effect here, as on a Windows system with developer mode off.
      * Like Windows 10 (verified on 22H2), bits other than DIRECTORY and ALLOW_UNPRIVILEGED_CREATE are ignored.
      */
     if(!lpSymlinkFileName || !lpTargetFileName)
@@ -226,6 +232,11 @@ CreateSymbolicLinkW(IN LPCWSTR lpSymlinkFileName,
 
     cbPrintName = wcslen(lpTargetFileName) * sizeof(WCHAR);
     cbReparseData = FIELD_OFFSET(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer.PathBuffer) + TargetFileName.Length + cbPrintName;
+    if (cbReparseData > MAXIMUM_REPARSE_DATA_BUFFER_SIZE)
+    {
+        dwErr = ERROR_FILENAME_EXCED_RANGE;
+        goto Cleanup;
+    }
     pReparseData = RtlAllocateHeap(RtlGetProcessHeap(), 0, cbReparseData);
 
     if(pReparseData == NULL)
@@ -284,6 +295,23 @@ CreateSymbolicLinkW(IN LPCWSTR lpSymlinkFileName,
         goto Cleanup;
     }
 
+    /*
+     * The privilege is held by the account (administrators) but disabled until a program turns it on, so it is
+     * enabled around the request, for the thread if it impersonates and for the process otherwise. Without
+     * the privilege the adjustment fails and the file system refuses the request.
+     */
+    Status = RtlAdjustPrivilege(SE_CREATE_SYMBOLIC_LINK_PRIVILEGE, TRUE, TRUE, &bPrivilegeWasEnabled);
+    if (NT_SUCCESS(Status))
+    {
+        bPrivilegeAdjusted = bPrivilegeOnThread = TRUE;
+    }
+    else if (Status == STATUS_NO_TOKEN)
+    {
+        Status = RtlAdjustPrivilege(SE_CREATE_SYMBOLIC_LINK_PRIVILEGE, TRUE, FALSE, &bPrivilegeWasEnabled);
+        if (NT_SUCCESS(Status))
+            bPrivilegeAdjusted = TRUE;
+    }
+
     Status = NtFsControlFile
     (
         hSymlink,
@@ -297,6 +325,12 @@ CreateSymbolicLinkW(IN LPCWSTR lpSymlinkFileName,
         NULL,
         0
     );
+
+    if (bPrivilegeAdjusted && !bPrivilegeWasEnabled)
+    {
+        BOOLEAN bIgnored;
+        RtlAdjustPrivilege(SE_CREATE_SYMBOLIC_LINK_PRIVILEGE, FALSE, bPrivilegeOnThread, &bIgnored);
+    }
 
     if(!NT_SUCCESS(Status))
     {

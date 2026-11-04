@@ -53,6 +53,7 @@ extern void func_CreateEventMutexEx(void);
 extern void func_CreateFile2(void);
 extern void func_CreateFileDirectory(void);
 extern void func_CreateRemoteThreadEx(void);
+extern void func_CreateSymbolicLink(void);
 extern void func_CreateProcess(void);
 extern void func_CreateProcessILOnly(void);
 extern void func_CreateProcessRace(void);
@@ -167,6 +168,8 @@ extern void func_PreferredUILanguages(void);
 extern void func_PowerRequest(void);
 extern void func_PrefetchVirtualMemory(void);
 extern void func_RelocatedImageProtection(void);
+extern void func_MoveFileReparse(void);
+extern void func_ReparseFollow(void);
 extern void func_PrivMoveFileIdentityW(void);
 extern void func_ProcessAffinity(void);
 extern void func_ProcessorNumber(void);
@@ -289,6 +292,7 @@ const struct test winetest_testlist[] =
     { "CreateFile2",                 func_CreateFile2 },
     { "CreateFileDirectory",         func_CreateFileDirectory },
     { "CreateRemoteThreadEx",        func_CreateRemoteThreadEx },
+    { "CreateSymbolicLink",          func_CreateSymbolicLink },
     { "CreateProcess",               func_CreateProcess },
     { "CreateProcessILOnly",         func_CreateProcessILOnly },
     { "CreateProcessRace",           func_CreateProcessRace },
@@ -403,6 +407,8 @@ const struct test winetest_testlist[] =
     { "PowerRequest",                func_PowerRequest },
     { "PrefetchVirtualMemory",       func_PrefetchVirtualMemory },
     { "RelocatedImageProtection",    func_RelocatedImageProtection },
+    { "MoveFileReparse",             func_MoveFileReparse },
+    { "ReparseFollow",               func_ReparseFollow },
     { "PrivMoveFileIdentityW",       func_PrivMoveFileIdentityW },
     { "ProcessMitigationPolicy",     func_ProcessMitigationPolicy },
     { "PssSnapshot",                 func_PssSnapshot },
