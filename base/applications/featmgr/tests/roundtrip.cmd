@@ -1135,7 +1135,7 @@ type %O%\sd3.txt >> %LOG%
 call :ex "%CD%\PowerShell.lnk" 0 "SD19 PowerShell shortcut removed"
 call :ex "%CD%\Firefox.lnk" 0 "SD20 Firefox shortcut removed"
 call :cmdlnk 1 "SD21 Command Prompt is back on the desktop"
-call :ielnk 1 "SD22 the Internet Explorer entry is back in the Start menu"
+call :ielnk 0 "SD22 no Internet Explorer entry comes back, iexplore opens the default browser as on Windows 11"
 rd /s /q "%FD%" 2>nul
 rd /s /q "%ProgramFiles%\PowerShell" 2>nul
 goto :sd_done
@@ -1149,7 +1149,7 @@ call :ex "%PM%\PowerShell.lnk" 1 "SP3 PowerShell shortcut in the Start menu"
 call :cmdlnk 0 "SP4 no Command Prompt shortcut on the desktop"
 call :wslnk 1 "SP5 Command Prompt is under Start/Windows System"
 call :ex "%CD%\Firefox.lnk" 0 "SP6 no Firefox shortcut while Firefox is absent"
-call :ielnk 1 "SP7 the Internet Explorer entry is in the Start menu"
+call :ielnk 0 "SP7 no Internet Explorer entry in the Start menu, as on Windows 11"
 mkdir "%FD%" 2>nul
 copy /y %SystemRoot%\system32\cmd.exe "%FD%\firefox.exe" >nul
 %FM% /shell-defaults > %O%\sp1.txt 2>&1
@@ -1161,11 +1161,42 @@ del /q "%FD%\firefox.exe" 2>nul
 %FM% /shell-defaults > %O%\sp2.txt 2>&1
 call :rc0 "SP12 /shell-defaults after the Firefox stand-in is gone"
 call :ex "%CD%\Firefox.lnk" 0 "SP13 Firefox shortcut removed"
-call :ielnk 1 "SP14 the Internet Explorer entry is back in the Start menu"
+call :ielnk 0 "SP14 no Internet Explorer entry comes back, iexplore opens the default browser"
 call :ex "%CD%\PowerShell.lnk" 1 "SP15 PowerShell shortcut still on the desktop"
 call :cmdlnk 0 "SP16 still no Command Prompt shortcut on the desktop"
 rd /s /q "%FD%" 2>nul
 :sd_done
+
+rem --- leftover plain Internet Explorer shortcuts are removed once (RemoveIeLinksOnce, flag IeShortcutsRemoved): a plain
+rem     one the user makes afterwards stays, one with arguments is never removed. WScript.Shell makes the shortcuts.
+set IEX=%ProgramFiles%\Internet Explorer\iexplore.exe
+set IEL=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Wine Internet Explorer.lnk
+set IEA=%APPDATA%\Microsoft\Windows\Start Menu\Programs\IE with arguments.lnk
+set IEK=HKCU\SOFTWARE\ReactOS\Nitro\Featmgr
+echo Set l = CreateObject("WScript.Shell").CreateShortcut(WScript.Arguments(0))> %O%\mklnk.vbs
+echo l.TargetPath = WScript.Arguments(1)>> %O%\mklnk.vbs
+echo If WScript.Arguments.Count ^> 2 Then l.Arguments = WScript.Arguments(2)>> %O%\mklnk.vbs
+echo l.Save>> %O%\mklnk.vbs
+%FM% /shell-defaults > %O%\ie0.txt 2>&1
+reg query %IEK% /v IeShortcutsRemoved >nul 2>&1
+call :rc0 "IE1 the per-user IE shortcut flag is set once shell defaults ran"
+cscript //nologo %O%\mklnk.vbs "%IEL%" "%IEX%" >> %LOG% 2>&1
+cscript //nologo %O%\mklnk.vbs "%IEA%" "%IEX%" "https://example.com" >> %LOG% 2>&1
+call :ex "%IEL%" 1 "IE2 a plain IE shortcut made by the user"
+call :ex "%IEA%" 1 "IE3 an IE shortcut with arguments made by the user"
+%FM% /shell-defaults > %O%\ie1.txt 2>&1
+call :ex "%IEL%" 1 "IE4 the user's plain IE shortcut survives the next run, the flag is set"
+reg delete %IEK% /v IeShortcutsRemoved /f >nul 2>&1
+%FM% /shell-defaults > %O%\ie2.txt 2>&1
+type %O%\ie2.txt >> %LOG%
+call :ex "%IEL%" 0 "IE5 with the flag cleared the plain IE shortcut is removed, once"
+call :ex "%IEA%" 1 "IE6 the IE shortcut with arguments is never removed"
+reg query %IEK% /v IeShortcutsRemoved >nul 2>&1
+call :rc0 "IE7 the flag is set again"
+cscript //nologo %O%\mklnk.vbs "%IEL%" "%IEX%" >> %LOG% 2>&1
+%FM% /shell-defaults > %O%\ie3.txt 2>&1
+call :ex "%IEL%" 1 "IE8 a plain IE shortcut re-created afterwards stays"
+del /q "%IEL%" "%IEA%" %O%\mklnk.vbs 2>nul
 
 rem --- cleanup fixtures
 del /q %R%\Catalog\fmt-base.ini %R%\Catalog\fmt-dep.ini 2>nul
