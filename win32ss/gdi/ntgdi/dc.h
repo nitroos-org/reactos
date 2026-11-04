@@ -134,10 +134,18 @@ typedef struct _DC
   ULONG       ulCopyCount;
   PVOID       pSurfInfo;
   POINTL      ptlDoBanding;
+  HWND        hwndGlass;  /* the window of a DC that draws to a glass window (glassblt.c), else NULL */
+  RECTL       rclGlass;   /* that window's rectangle on the screen */
 } DC;
 // typedef struct _DC *PDC;
 
 extern PDC defaultDCstate;
+
+/* glassblt.c */
+VOID NTAPI GlassBackdropInit(VOID);
+VOID NTAPI GlassBackdropDrop(HWND hwnd);
+BOOL NTAPI GlassBlendSource(PDC pdc, struct _SURFACE *psurfDest, struct _SURFACE *psurfSrc, const RECTL *prcDest, const RECTL *prcSrc, struct _SURFACE **ppsurfOut);
+VOID NTAPI GlassBlendDone(struct _SURFACE *psurf);
 
 /* Internal functions *********************************************************/
 
