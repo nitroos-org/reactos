@@ -9,6 +9,7 @@
 /* INCLUDES *******************************************************************/
 
 #include <k32.h>
+#include <ndk/sefuncs.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -2400,10 +2401,11 @@ GetTempPathA(IN DWORD nBufferLength,
  *
  * ripped from wine
  */
+static
 DWORD
-WINAPI
-GetTempPathW(IN DWORD count,
-             OUT LPWSTR path)
+BasepGetTempPath(IN DWORD count,
+                  OUT LPWSTR path,
+                  IN PCWSTR Directory)
 {
     static const WCHAR tmp[]  = { 'T', 'M', 'P', 0 };
     static const WCHAR temp[] = { 'T', 'E', 'M', 'P', 0 };
@@ -2414,7 +2416,15 @@ GetTempPathW(IN DWORD count,
 
     DPRINT("%u,%p\n", count, path);
 
-    if (!(ret = GetEnvironmentVariableW( tmp, tmp_path, MAX_PATH )) &&
+    if (Directory)
+    {
+        ret = wcslen(Directory);
+        if (ret < MAX_PATH)
+            RtlCopyMemory(tmp_path, Directory, (ret + 1) * sizeof(WCHAR));
+        else
+            ret = MAX_PATH + 1;
+    }
+    else if (!(ret = GetEnvironmentVariableW( tmp, tmp_path, MAX_PATH )) &&
         !(ret = GetEnvironmentVariableW( temp, tmp_path, MAX_PATH )) &&
         !(ret = GetEnvironmentVariableW( userprofile, tmp_path, MAX_PATH )) &&
         !(ret = GetWindowsDirectoryW( tmp_path, MAX_PATH )))
@@ -2461,6 +2471,107 @@ GetTempPathW(IN DWORD count,
 
     DPRINT("GetTempPathW returning %u, %S\n", ret, path);
     return ret;
+}
+
+DWORD
+WINAPI
+GetTempPathW(IN DWORD count,
+             OUT LPWSTR path)
+{
+    return BasepGetTempPath(count, path, NULL);
+}
+
+/*
+ * Windows 11 and the later Windows 10 servicing: a process running as LocalSystem gets
+ * %SystemRoot%\SystemTemp\ (a directory only SYSTEM and Administrators can use), everybody else
+ * what GetTempPathW returns. Setup creates SystemTemp; where an older installation lacks it
+ * the SYSTEM process keeps getting the TEMP variable's directory instead of a path it cannot use.
+ */
+static
+BOOL
+BasepIsProcessSystem(VOID)
+{
+    BYTE Buffer[SECURITY_MAX_SID_SIZE + sizeof(TOKEN_USER)];
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID SystemSid;
+    HANDLE Token;
+    ULONG Length;
+    BOOL IsSystem = FALSE;
+
+    if (!NT_SUCCESS(NtOpenProcessToken(NtCurrentProcess(), TOKEN_QUERY, &Token)))
+        return FALSE;
+
+    if (NT_SUCCESS(NtQueryInformationToken(Token, TokenUser, Buffer, sizeof(Buffer), &Length)) &&
+        NT_SUCCESS(RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID,
+                                               0, 0, 0, 0, 0, 0, 0, &SystemSid)))
+    {
+        IsSystem = RtlEqualSid(((PTOKEN_USER)Buffer)->User.Sid, SystemSid);
+        RtlFreeSid(SystemSid);
+    }
+
+    NtClose(Token);
+    return IsSystem;
+}
+
+static
+PCWSTR
+BasepGetSystemTempDirectory(
+    _Out_writes_(MAX_PATH) PWCHAR Buffer)
+{
+    static const WCHAR SystemTemp[] = L"\\SystemTemp";
+    UINT Length;
+    DWORD Attributes;
+
+    if (!BasepIsProcessSystem())
+        return NULL;
+
+    Length = GetSystemWindowsDirectoryW(Buffer, MAX_PATH);
+    if (!Length || Length + _countof(SystemTemp) > MAX_PATH)
+        return NULL;
+
+    RtlCopyMemory(Buffer + Length, SystemTemp, sizeof(SystemTemp));
+    Attributes = GetFileAttributesW(Buffer);
+    if (Attributes == INVALID_FILE_ATTRIBUTES || !(Attributes & FILE_ATTRIBUTE_DIRECTORY))
+        return NULL;
+
+    return Buffer;
+}
+
+/*
+ * @implemented
+ */
+DWORD
+WINAPI
+GetTempPath2W(IN DWORD count,
+              OUT LPWSTR path)
+{
+    WCHAR SystemTemp[MAX_PATH];
+
+    return BasepGetTempPath(count, path, BasepGetSystemTempDirectory(SystemTemp));
+}
+
+/*
+ * @implemented
+ */
+DWORD
+WINAPI
+GetTempPath2A(IN DWORD nBufferLength,
+              OUT LPSTR lpBuffer)
+{
+   WCHAR BufferW[MAX_PATH];
+   DWORD ret;
+
+   ret = GetTempPath2W(MAX_PATH, BufferW);
+
+   if (!ret) return 0;
+
+   if (ret > MAX_PATH)
+   {
+      SetLastError(ERROR_FILENAME_EXCED_RANGE);
+      return 0;
+   }
+
+   return FilenameW2A_FitOrFail(lpBuffer, nBufferLength, BufferW, ret+1);
 }
 
 /*
