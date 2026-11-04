@@ -217,7 +217,8 @@ Applet(HWND hwnd, UINT uMsg, LPARAM wParam, LPARAM lParam)
 
     ret = (LONG)(PropertySheet(&psh) != -1);
     if (ret > 0)
-        SendMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"intl");
+        SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"intl",
+                            SMTO_ABORTIFHUNG, 5000, NULL);
 
     HeapFree(GetProcessHeap(), 0, pGlobalData);
 

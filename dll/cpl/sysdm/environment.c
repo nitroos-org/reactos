@@ -1924,8 +1924,9 @@ EnvironmentDlgProc(HWND hwndDlg,
                 case IDOK:
                     SetAllVars(hwndDlg, IDC_USER_VARIABLE_LIST);
                     SetAllVars(hwndDlg, IDC_SYSTEM_VARIABLE_LIST);
-                    SendMessage(HWND_BROADCAST, WM_WININICHANGE,
-                                0, (LPARAM)_T("Environment"));
+                    SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE,
+                                       0, (LPARAM)_T("Environment"),
+                                       SMTO_ABORTIFHUNG, 5000, NULL);
                     EndDialog(hwndDlg, 0);
                     return TRUE;
 
