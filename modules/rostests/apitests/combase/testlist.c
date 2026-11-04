@@ -8,6 +8,7 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_ActivationFilter(void);
 extern void func_ApartmentEndpoint(void);
 extern void func_InprocLoadFailure(void);
 extern void func_LocalServerStartup(void);
@@ -16,6 +17,7 @@ extern void func_StubReleaseInCall(void);
 
 const struct test winetest_testlist[] =
 {
+    { "ActivationFilter", func_ActivationFilter },
     { "ApartmentEndpoint", func_ApartmentEndpoint },
     { "InprocLoadFailure", func_InprocLoadFailure },
     { "LocalServerStartup", func_LocalServerStartup },
