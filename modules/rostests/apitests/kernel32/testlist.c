@@ -67,6 +67,7 @@ extern void func_ActCtxResDirBound(void);
 extern void func_DefaultActCtx(void);
 extern void func_DiscardVirtualMemory(void);
 extern void func_DeleteFilePosix(void);
+extern void func_OmahaExports(void);
 extern void func_DeleteTimerQueueEx(void);
 extern void func_DeriveCapabilitySidsFromName(void);
 extern void func_CallbackCompletion(void);
@@ -306,6 +307,7 @@ const struct test winetest_testlist[] =
     { "DefaultActCtx",               func_DefaultActCtx },
     { "DiscardVirtualMemory", func_DiscardVirtualMemory },
     { "DeleteFilePosix",             func_DeleteFilePosix },
+    { "OmahaExports",                func_OmahaExports },
     { "DeleteTimerQueueEx",          func_DeleteTimerQueueEx },
     { "DeriveCapabilitySidsFromName", func_DeriveCapabilitySidsFromName },
     { "CallbackCompletion", func_CallbackCompletion },

@@ -1043,3 +1043,23 @@ BasepCheckWinSaferRestrictions(IN HANDLE UserToken,
     /* Return the status */
     return Status;
 }
+
+/*
+ * @implemented
+ *
+ * There is no out-of-box experience on this system: it is always complete.
+ */
+BOOL
+WINAPI
+OOBEComplete(
+    _Out_ PBOOL IsOOBEComplete)
+{
+    if (!IsOOBEComplete)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    *IsOOBEComplete = TRUE;
+    return TRUE;
+}

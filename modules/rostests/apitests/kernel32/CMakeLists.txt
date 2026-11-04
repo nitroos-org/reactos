@@ -60,6 +60,7 @@ list(APPEND SOURCE
     DefaultActCtx.c
     DiscardVirtualMemory.c
     DeleteFilePosix.c
+    OmahaExports.c
     DeleteTimerQueueEx.c
     DeriveCapabilitySidsFromName.c
     CallbackCompletion.c
