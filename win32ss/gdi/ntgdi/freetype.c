@@ -198,6 +198,14 @@ FontLink_Chain_IsPopulated(const FONTLINK_CHAIN *pChain)
 #define EMUBOLD_NEEDED(original, request) \
     (((request) != FW_DONTCARE) && ((request) - (original) >= FW_BOLD - FW_MEDIUM))
 
+/* Simulations a request gets on a face: exactly what the glyph code emboldens / obliques */
+#define EMU_BOLD_FLAG   0x1
+#define EMU_ITALIC_FLAG 0x2
+#define EMU_FLAGS(FontGDI, plf) \
+    ((plf) == NULL ? 0 : \
+     ((EMUBOLD_NEEDED((FontGDI)->OriginalWeight, (plf)->lfWeight) ? EMU_BOLD_FLAG : 0) | \
+      (((plf)->lfItalic && !(FontGDI)->OriginalItalic) ? EMU_ITALIC_FLAG : 0)))
+
 extern const MATRIX gmxWorldToDeviceDefault;
 extern const MATRIX gmxWorldToPageDefault;
 
@@ -1803,9 +1811,7 @@ IntGdiLoadFontsFromMemory(PGDI_LOAD_FONT pLoadFont,
     FontGDI->InstanceId = (ULONG)InterlockedIncrement(&g_FontInstanceIdCounter);
     FontGDI->CharSet = ANSI_CHARSET;
     FontGDI->OriginalItalic = FALSE;
-    FontGDI->RequestItalic = FALSE;
     FontGDI->OriginalWeight = FW_DONTCARE;
-    FontGDI->RequestWeight = FW_NORMAL;
 
     IntLockFreeType();
     pOS2 = (TT_OS2 *)FT_Get_Sfnt_Table(Face, FT_SFNT_OS2);
@@ -2998,10 +3004,36 @@ static BOOL face_has_symbol_charmap(FT_Face ft_face)
     return FALSE;
 }
 
+/*
+ * The style a realization reports: the face's own weight and italic flag, what the request
+ * simulates (bold and italic, decided exactly as the glyph code decides to embolden/oblique),
+ * and the request's underline/strike-out. On Windows these belong to the realization (RFONT),
+ * not to the face: every LOGFONT realized with a face shares its FONTGDI, so nothing
+ * request-specific may be stored there. plf == NULL describes the face itself (enumeration,
+ * font matching).
+ */
+static VOID
+IntFillTMStyle(TEXTMETRICW *TM, PFONTGDI FontGDI, const LOGFONTW *plf)
+{
+    ULONG Emu = EMU_FLAGS(FontGDI, plf);
+
+    /* Measured on Windows 10: a real face reports its own weight (Arial at 500 gives 400, at 800
+     * the Bold face's 700); emulated bold reports FW_BOLD; the style bytes are 0 or 0xFF. */
+    if (Emu & EMU_BOLD_FLAG)
+        TM->tmWeight = FW_BOLD;
+    else if (FontGDI->OriginalWeight != FW_DONTCARE)
+        TM->tmWeight = FontGDI->OriginalWeight;
+    else
+        TM->tmWeight = FW_NORMAL;
+    TM->tmItalic = (FontGDI->OriginalItalic || (Emu & EMU_ITALIC_FLAG)) ? 0xFF : 0;
+    TM->tmUnderlined = (plf && plf->lfUnderline) ? 0xFF : 0;
+    TM->tmStruckOut = (plf && plf->lfStrikeOut) ? 0xFF : 0;
+}
+
 static void FASTCALL
 FillTM(TEXTMETRICW *TM, PFONTGDI FontGDI,
        TT_OS2 *pOS2, TT_HoriHeader *pHori,
-       FT_WinFNT_HeaderRec *pFNT)
+       FT_WinFNT_HeaderRec *pFNT, const LOGFONTW *plf)
 {
     FT_Fixed XScale, YScale;
     int Ascent, Descent;
@@ -3029,10 +3061,7 @@ FillTM(TEXTMETRICW *TM, PFONTGDI FontGDI,
         TM->tmDefaultChar      = pFNT->default_char + pFNT->first_char;
         TM->tmBreakChar        = pFNT->break_char + pFNT->first_char;
         TM->tmPitchAndFamily   = pFNT->pitch_and_family;
-        TM->tmWeight       = FontGDI->RequestWeight;
-        TM->tmItalic       = FontGDI->RequestItalic;
-        TM->tmUnderlined   = FontGDI->RequestUnderline;
-        TM->tmStruckOut    = FontGDI->RequestStrikeOut;
+        IntFillTMStyle(TM, FontGDI, plf);
         TM->tmCharSet      = FontGDI->CharSet;
         return;
     }
@@ -3075,15 +3104,14 @@ FillTM(TEXTMETRICW *TM, PFONTGDI FontGDI,
     /* Correct forumla to get the maxcharwidth from unicode and ansi font */
     TM->tmMaxCharWidth = (FT_MulFix(Face->max_advance_width, XScale) + 32) >> 6;
 
-    if (FontGDI->OriginalWeight != FW_DONTCARE &&
-        FontGDI->OriginalWeight > FontGDI->RequestWeight)
+    /* Emulated bold is one pixel wider (Windows 10: tmAveCharWidth and tmMaxCharWidth + 1) */
+    if (EMU_FLAGS(FontGDI, plf) & EMU_BOLD_FLAG)
     {
-        TM->tmWeight = FontGDI->OriginalWeight;
+        TM->tmAveCharWidth++;
+        TM->tmMaxCharWidth++;
     }
-    else
-    {
-        TM->tmWeight = FontGDI->RequestWeight;
-    }
+
+    IntFillTMStyle(TM, FontGDI, plf);
 
     TM->tmOverhang = 0;
     TM->tmDigitizedAspectX = 96;
@@ -3119,17 +3147,6 @@ FillTM(TEXTMETRICW *TM, PFONTGDI FontGDI,
             TM->tmBreakChar = pOS2->usFirstCharIndex;
         TM->tmDefaultChar = TM->tmBreakChar - 1;
     }
-
-    if (FontGDI->OriginalItalic || FontGDI->RequestItalic)
-    {
-        TM->tmItalic = 0xFF;
-    }
-    else
-    {
-        TM->tmItalic = 0;
-    }
-    TM->tmUnderlined = (FontGDI->RequestUnderline ? 0xFF : 0);
-    TM->tmStruckOut  = (FontGDI->RequestStrikeOut ? 0xFF : 0);
 
     if (!FT_IS_FIXED_WIDTH(Face))
     {
@@ -3304,7 +3321,8 @@ INT FASTCALL
 IntGetOutlineTextMetrics(PFONTGDI FontGDI,
                          UINT Size,
                          OUTLINETEXTMETRICW *Otm,
-                         BOOL bLocked)
+                         BOOL bLocked,
+                         const LOGFONTW *plf)
 {
     TT_OS2 *pOS2;
     TT_HoriHeader *pHori;
@@ -3393,7 +3411,7 @@ IntGetOutlineTextMetrics(PFONTGDI FontGDI,
 
     Otm->otmSize = Cache->OutlineRequiredSize;
 
-    FillTM(&Otm->otmTextMetrics, FontGDI, pOS2, pHori, (Error ? NULL : &WinFNT));
+    FillTM(&Otm->otmTextMetrics, FontGDI, pOS2, pHori, (Error ? NULL : &WinFNT), plf);
 
     if (!pOS2)
         goto skip_os2;
@@ -3401,6 +3419,14 @@ IntGetOutlineTextMetrics(PFONTGDI FontGDI,
     Otm->otmFiller = 0;
     RtlCopyMemory(&Otm->otmPanoseNumber, pOS2->panose, PANOSE_COUNT);
     Otm->otmfsSelection = pOS2->fsSelection;
+    {
+        /* Windows 10 reports the realization's emulated styles here too (not underline/strike-out) */
+        ULONG Emu = EMU_FLAGS(FontGDI, plf);
+        if (Emu & EMU_ITALIC_FLAG)
+            Otm->otmfsSelection = (Otm->otmfsSelection | 0x1) & ~0x40;
+        if (Emu & EMU_BOLD_FLAG)
+            Otm->otmfsSelection = (Otm->otmfsSelection | 0x20) & ~0x40;
+    }
     Otm->otmfsType = pOS2->fsType;
     Otm->otmsCharSlopeRise = pHori->caret_Slope_Rise;
     Otm->otmsCharSlopeRun = pHori->caret_Slope_Run;
@@ -3627,14 +3653,14 @@ FontFamilyFillInfo(PFONTFAMILYINFO Info, LPCWSTR FaceName,
     RtlInitUnicodeString(&NameW, NULL);
     RtlZeroMemory(Info, sizeof(FONTFAMILYINFO));
     ASSERT_FREETYPE_LOCK_HELD();
-    Size = IntGetOutlineTextMetrics(FontGDI, 0, NULL, TRUE);
+    Size = IntGetOutlineTextMetrics(FontGDI, 0, NULL, TRUE, NULL);
     if (!Size)
         return;
     Otm = ExAllocatePoolWithTag(PagedPool, Size, GDITAG_TEXT);
     if (!Otm)
         return;
     ASSERT_FREETYPE_LOCK_HELD();
-    Size = IntGetOutlineTextMetrics(FontGDI, Size, Otm, TRUE);
+    Size = IntGetOutlineTextMetrics(FontGDI, Size, Otm, TRUE, NULL);
     if (!Size)
     {
         ExFreePoolWithTag(Otm, GDITAG_TEXT);
@@ -3645,16 +3671,11 @@ FontFamilyFillInfo(PFONTFAMILYINFO Info, LPCWSTR FaceName,
     TM = &Otm->otmTextMetrics;
 
     /*
-     * Enumeration describes the face itself. The FONTGDI is shared by every LOGFONT realized
-     * with it and FillTM reports the attributes of the last request (RequestWeight and friends),
-     * so after an app realized e.g. "Arial" at weight 600 or italic, the regular face enumerated
-     * as a bold or italic one. Windows enumerates the same entries however the fonts were used
-     * (GDI+ GdipCreateFontFamilyFromName then failed for "Arial": GraphPad Prism 11).
+     * Enumeration describes the face itself (NULL request above): its own weight and italic
+     * flag, never underlined or struck out, however the face was realized before. Windows
+     * enumerates the same entries however the fonts were used (GDI+ GdipCreateFontFamilyFromName
+     * failed for "Arial" in GraphPad Prism 11 when the last request leaked in here).
      */
-    TM->tmWeight = (FontGDI->OriginalWeight != FW_DONTCARE) ? FontGDI->OriginalWeight : FW_NORMAL;
-    TM->tmItalic = FontGDI->OriginalItalic ? 0xFF : 0;
-    TM->tmUnderlined = 0;
-    TM->tmStruckOut = 0;
 
     Lf->lfHeight = TM->tmHeight;
     Lf->lfWidth = TM->tmAveCharWidth;
@@ -4705,7 +4726,8 @@ ftGdiGetGlyphOutline(
     orientation = FT_IS_SCALABLE(ft_face) ? plf->lfOrientation : 0;
 
     ASSERT_FREETYPE_LOCK_NOT_HELD();
-    Size = IntGetOutlineTextMetrics(FontGDI, 0, NULL, FALSE);
+    /* Only the face's metrics are used here (width ratio): no request style */
+    Size = IntGetOutlineTextMetrics(FontGDI, 0, NULL, FALSE, NULL);
     if (!Size)
     {
         TEXTOBJ_UnlockText(TextObj);
@@ -4720,7 +4742,7 @@ ftGdiGetGlyphOutline(
         return GDI_ERROR;
     }
     ASSERT_FREETYPE_LOCK_NOT_HELD();
-    Size = IntGetOutlineTextMetrics(FontGDI, Size, potm, FALSE);
+    Size = IntGetOutlineTextMetrics(FontGDI, Size, potm, FALSE, NULL);
     if (!Size)
     {
         ExFreePoolWithTag(potm, GDITAG_TEXT);
@@ -5690,7 +5712,8 @@ ftGdiGetTextMetricsW(
             }
             if (NT_SUCCESS(Status))
             {
-                FillTM(&ptmwi->TextMetric, FontGDI, pOS2, pHori, (Error ? NULL : &Win));
+                FillTM(&ptmwi->TextMetric, FontGDI, pOS2, pHori, (Error ? NULL : &Win),
+                       &TextObj->logfont.elfEnumLogfontEx.elfLogFont);
                 /* FIXME: Fill Diff member */
             }
         }
@@ -6133,7 +6156,7 @@ FindBestFontFromList(FONTOBJ **FontObj, ULONG *MatchPenalty,
 
         /* get text metrics */
         ASSERT_FREETYPE_LOCK_HELD();
-        OtmSize = IntGetOutlineTextMetrics(FontGDI, 0, NULL, TRUE);
+        OtmSize = IntGetOutlineTextMetrics(FontGDI, 0, NULL, TRUE, NULL);
         if (OtmSize > OldOtmSize)
         {
             if (Otm)
@@ -6148,7 +6171,7 @@ FindBestFontFromList(FONTOBJ **FontObj, ULONG *MatchPenalty,
             IntRequestFontSize(FontGDI, LogFont->lfWidth, LogFont->lfHeight);
 
             ASSERT_FREETYPE_LOCK_HELD();
-            OtmSize = IntGetOutlineTextMetrics(FontGDI, OtmSize, Otm, TRUE);
+            OtmSize = IntGetOutlineTextMetrics(FontGDI, OtmSize, Otm, TRUE, NULL);
             if (!OtmSize)
                 continue;
 
@@ -6433,13 +6456,7 @@ TextIntRealizeFont(HFONT FontHandle, PTEXTOBJ pTextObj)
         TextObj->Font->iUniq = 1; // Now it can be cached.
         IntFontType(FontGdi);
         FontGdi->flType = TextObj->Font->flFontType;
-        FontGdi->RequestUnderline = pLogFont->lfUnderline ? 0xFF : 0;
-        FontGdi->RequestStrikeOut = pLogFont->lfStrikeOut ? 0xFF : 0;
-        FontGdi->RequestItalic = pLogFont->lfItalic ? 0xFF : 0;
-        if (pLogFont->lfWeight != FW_DONTCARE)
-            FontGdi->RequestWeight = pLogFont->lfWeight;
-        else
-            FontGdi->RequestWeight = FW_NORMAL;
+        /* The requested style stays in TextObj->logfont: FillTM reads it from there per realization */
 
         TextObj->fl |= TEXTOBJECT_INIT;
         Status = STATUS_SUCCESS;

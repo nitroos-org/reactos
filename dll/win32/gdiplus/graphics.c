@@ -5987,9 +5987,12 @@ static GpStatus draw_string_callback(struct gdip_format_string_info *info)
     DWORD to_draw_length;
     struct gdip_font_link_section *section;
     GpStatus stat = Ok;
+    REAL line_x;
+    const TEXTMETRICW *font_tm = &info->font_link_info.base_font->otm.otmTextMetrics;
 
     position.X = args->x + info->bounds->X / args->rel_width;
     position.Y = args->y + info->bounds->Y / args->rel_height + args->ascent;
+    line_x = position.X;
 
     LIST_FOR_EACH_ENTRY(section, &info->font_link_info.sections, struct gdip_font_link_section, entry)
     {
@@ -6005,6 +6008,36 @@ static GpStatus draw_string_callback(struct gdip_format_string_info *info)
         i += to_draw_length;
         if (stat != Ok || (i - info->index) >= info->length) break;
     }
+
+#ifdef __REACTOS__
+    /* Like Windows GDI+, an underlined or struck-out font draws its line under the whole line of
+     * text: the glyph runs above are rendered glyph by glyph and carry no font decoration
+     * (WinForms labels with Font(..., FontStyle.Underline) showed no underline). */
+    if (stat == Ok && (font_tm->tmUnderlined || font_tm->tmStruckOut) && position.X > line_x)
+    {
+        OUTLINETEXTMETRICW otm;
+
+        if (GetOutlineTextMetricsW(info->hdc, sizeof(otm), &otm))
+        {
+            REAL height;
+
+            if (font_tm->tmUnderlined)
+            {
+                height = max(otm.otmsUnderscoreSize, 1) / args->rel_height;
+                GdipFillRectangle(info->graphics, (GpBrush*)args->brush, line_x,
+                                  position.Y - otm.otmsUnderscorePosition / args->rel_height - height / 2,
+                                  position.X - line_x, height);
+            }
+            if (font_tm->tmStruckOut)
+            {
+                height = max((INT)otm.otmsStrikeoutSize, 1) / args->rel_height;
+                GdipFillRectangle(info->graphics, (GpBrush*)args->brush, line_x,
+                                  position.Y - otm.otmsStrikeoutPosition / args->rel_height,
+                                  position.X - line_x, height);
+            }
+        }
+    }
+#endif
 
     if (stat == Ok && info->underlined_index_count)
     {
