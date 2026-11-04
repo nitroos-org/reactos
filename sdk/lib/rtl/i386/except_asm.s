@@ -289,12 +289,32 @@ _RtlRaiseException@4:
     test al, al
     jnz DebuggerActive1
 
+    /* A breakpoint exception is dispatched with the address of the int3
+       instruction, like an exception raised by the trap handler. The
+       context of the exception handlers therefore holds the return address
+       minus one. The kernel does the same when it gets the exception
+       (debugger case below), so only this dispatch adjusts it. */
+    mov eax, [ebp+8]
+    cmp dword ptr [eax+EXCEPTION_RECORD_EXCEPTION_CODE], STATUS_BREAKPOINT
+    jne NotBreakpoint1
+    dec dword ptr [esp+CONTEXT_EIP]
+NotBreakpoint1:
+
     /* Dispatch the exception */
     push esp
     push [ebp+8]
     call _RtlDispatchException@8
     test al, al
-    jz RaiseException
+    jnz Handled1
+
+    /* Not handled: the kernel adjusts the breakpoint address itself */
+    mov eax, [ebp+8]
+    cmp dword ptr [eax+EXCEPTION_RECORD_EXCEPTION_CODE], STATUS_BREAKPOINT
+    jne RaiseException
+    inc dword ptr [esp+CONTEXT_EIP]
+    jmp RaiseException
+
+Handled1:
 
     /* Continue, go back to previous context */
     mov ecx, esp
