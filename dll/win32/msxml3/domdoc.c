@@ -120,6 +120,7 @@ struct domdoc
     VARIANT_BOOL resolving;
     domdoc_properties* properties;
     HRESULT error;
+    HRESULT parse_hr; /* error code of the last failed doparse: msxml parser error or E_FAIL */
 
     /* IObjectWithSite */
     IUnknown *site;
@@ -478,6 +479,8 @@ static void sax_characters(void *ctx, const xmlChar *ch, int len)
     xmlSAX2Characters(ctxt, ch, len);
 }
 
+#define XML_E_UNDECLAREDPREFIX_HR ((HRESULT)0xc00ce01d)
+
 /* libxml2 reports an undeclared namespace prefix (as a warning for elements, as an error for attributes)
    and keeps the document; msxml rejects it: "Reference to undeclared namespace prefix" (0xc00ce01d). */
 static void check_ns_error(void *ctx)
@@ -485,7 +488,10 @@ static void check_ns_error(void *ctx)
     xmlParserCtxtPtr pctx = ctx;
 
     if (pctx && pctx->errNo == XML_NS_ERR_UNDEFINED_NAMESPACE)
+    {
         pctx->wellFormed = 0;
+        if (pctx->_private) ((domdoc *)pctx->_private)->parse_hr = XML_E_UNDECLAREDPREFIX_HR;
+    }
 }
 
 static void LIBXML2_LOG_CALLBACK sax_error(void* ctx, char const* msg, ...)
@@ -564,6 +570,7 @@ static xmlDocPtr doparse(domdoc* This, char const* ptr, int len, xmlCharEncoding
     pctx->sax = &sax_handler;
     pctx->_private = This;
     pctx->recovery = 0;
+    This->parse_hr = E_FAIL;
 
     if (encoding != XML_CHAR_ENCODING_NONE)
         xmlSwitchEncoding(pctx, encoding);
@@ -2276,7 +2283,7 @@ static HRESULT WINAPI domdoc_load(
                 }
                 else
                 {
-                    This->error = E_FAIL;
+                    This->error = This->parse_hr;
                     TRACE("failed to parse document\n");
                 }
 
@@ -2326,6 +2333,7 @@ static HRESULT WINAPI domdoc_load(
         if (hr == S_OK)
         {
             hr = This->error = domdoc_load_from_stream(This, stream);
+            if (hr == E_FAIL) This->error = This->parse_hr;
             if (hr == S_OK)
                 *isSuccessful = VARIANT_TRUE;
             ISequentialStream_Release(stream);
@@ -2370,7 +2378,7 @@ static HRESULT WINAPI domdoc_load(
         {
             if (uri)
                 IUri_Release(uri);
-            This->error = E_FAIL;
+            This->error = hr == E_FAIL ? This->parse_hr : E_FAIL;
         }
     }
 
@@ -2501,7 +2509,7 @@ static HRESULT WINAPI domdoc_loadXML(
             xmldoc = doparse(This, (char*)ptr, lstrlenW(ptr)*sizeof(WCHAR), XML_CHAR_ENCODING_UTF16LE);
             if ( !xmldoc )
             {
-                This->error = E_FAIL;
+                This->error = This->parse_hr;
                 TRACE("failed to parse document\n");
             }
             else
