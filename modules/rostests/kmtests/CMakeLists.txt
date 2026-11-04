@@ -127,6 +127,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_mm/MmMapViewAligned.c
     ntos_mm/MmMdl.c
     ntos_mm/MmCommitKernelFail.c
+    ntos_mm/MmFaultFileHeld.c
     ntos_mm/MmOomRetry.c
     ntos_mm/MmReservedMapping.c
     ntos_mm/MmSection.c

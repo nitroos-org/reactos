@@ -90,6 +90,7 @@ KMT_TESTFUNC Test_KeDelayExecution;
 KMT_TESTFUNC Test_KernelType;
 KMT_TESTFUNC Test_MmMdl;
 KMT_TESTFUNC Test_MmCommitKernelFail;
+KMT_TESTFUNC Test_MmFaultFileHeld;
 KMT_TESTFUNC Test_MmOomRetry;
 KMT_TESTFUNC Test_MmSection;
 KMT_TESTFUNC Test_MmSpecialPool;
@@ -228,6 +229,7 @@ const KMT_TEST TestList[] =
     { "-KernelType",                        Test_KernelType },
     { "MmMdl",                              Test_MmMdl },
     { "-MmCommitKernelFail",                Test_MmCommitKernelFail },
+    { "MmFaultFileHeld",                    Test_MmFaultFileHeld },
     { "MmOomRetry",                         Test_MmOomRetry },
     { "MmSection",                          Test_MmSection },
     { "MmSpecialPool",                      Test_MmSpecialPool },
