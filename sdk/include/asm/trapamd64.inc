@@ -118,9 +118,12 @@ MACRO(SaveUserDebugRegisters, Frame)
     mov rax, dr7
     mov [Frame + KTRAP_FRAME_Dr7], rax
 
-    /* Disarm the user breakpoints before the kernel runs, then load the kernel debugger's */
+    /* Disarm the user breakpoints before the kernel runs. DR6 is sticky status the processor
+     * never clears: clear it so stale B0-B3 are not reloaded or seen by the kernel debugger.
+     * Then load the kernel debugger breakpoints. */
     xor eax, eax
     mov dr7, rax
+    mov dr6, rax
     mov rax, gs:[PcKernelDr0]
     mov dr0, rax
     mov rax, gs:[PcKernelDr1]
@@ -142,9 +145,11 @@ ENDM
 /*
  * RestoreUserDebugRegisters - On the way back to user mode, with interrupts disabled and the
  * kernel GS: load the thread's breakpoints from the trap frame if it has any. The addresses were
- * limited to user space and DR7 to DR7_LEGAL when they were set (KeContextToTrapFrame); DR6 and
- * DR7 are loaded with 32-bit reads and DR7 masked again, so no frame content can make the
- * MOV DR fault (bits 63:32 of DR6/DR7) or arm general detect. Clobbers Scratch64/Scratch32.
+ * limited to user space and DR7 to DR7_LEGAL when they were set (KeContextToTrapFrame); DR7 is
+ * loaded with a 32-bit read and masked again, so no frame content can make the MOV DR fault
+ * (bits 63:32) or arm general detect. DR6 is not reloaded from the frame (that is the status of
+ * the last event, already reported): it gets DR6_NO_EVENT, or a stale B0-B3/BS would be ORed
+ * into the next event. Clobbers Scratch64/Scratch32.
  */
 MACRO(RestoreUserDebugRegisters, Frame, Scratch64, Scratch32)
     LOCAL NoUserDebugRegisters
@@ -152,6 +157,10 @@ MACRO(RestoreUserDebugRegisters, Frame, Scratch64, Scratch32)
     mov Scratch64, gs:[PcCurrentThread]
     test byte ptr [Scratch64 + ThDebugActive], DEBUG_ACTIVE_DR7
     jz NoUserDebugRegisters
+
+    /* Disarm the kernel debugger breakpoints while DR0-3 change (as the save macro does) */
+    xor Scratch32, Scratch32
+    mov dr7, Scratch64
     mov Scratch64, [Frame + KTRAP_FRAME_Dr0]
     mov dr0, Scratch64
     mov Scratch64, [Frame + KTRAP_FRAME_Dr1]
@@ -160,7 +169,7 @@ MACRO(RestoreUserDebugRegisters, Frame, Scratch64, Scratch32)
     mov dr2, Scratch64
     mov Scratch64, [Frame + KTRAP_FRAME_Dr3]
     mov dr3, Scratch64
-    mov Scratch32, dword ptr [Frame + KTRAP_FRAME_Dr6]
+    mov Scratch32, DR6_NO_EVENT
     mov dr6, Scratch64
     mov Scratch32, dword ptr [Frame + KTRAP_FRAME_Dr7]
     and Scratch32, DR7_LEGAL
@@ -168,6 +177,10 @@ MACRO(RestoreUserDebugRegisters, Frame, Scratch64, Scratch32)
 
 NoUserDebugRegisters:
 ENDM
+
+/* DR6 with no event: the reserved bits as the processor reports them, no B0-B3/BS/BD status.
+ * (oracle, Windows 10 22H2: after a hit and a step, the next hit reads ffff0ff1) */
+DR6_NO_EVENT = HEX(0FFFF0FF0)
 
 TF_SEGMENTS             = HEX(08)
 TF_DEBUG                = HEX(10)

@@ -25,6 +25,11 @@
  * The text is scanned (strings, // and block comments skipped) and one member is spliced in before
  * the closing brace; everything else stays byte for byte (BOM, comments, indentation, line ends,
  * trailing commas). A file that does not look like one JSON object is left alone.
+ * Default 2: WezTerm ("wezterm", "wezterm-nightly"): its bundled conpty.dll/OpenConsole.exe are renamed to
+ * *.off so it uses the system ConPTY (same ConDrv reason; TODO CONSOLE-condrv-device). Default 3:
+ * Alacritty gets %APPDATA%\alacritty\alacritty.toml (font the image ships, pwsh/cmd) when the user has none;
+ * WezTerm also gets ~\.wezterm.lua (default_prog = pwsh) when the user has no WezTerm config.
+ * Both are in the "Default 2 and 3" section below; they never follow links (reparse-point checks, CREATE_NEW).
  * "scoop install" typed in a shell does not run featmgr. So when featmgr installs Scoop itself it also
  * seeds the persist directory of each app in the table (FmScoopAppDefaultsSeed): Scoop's persist step
  * reuses an existing persist\<app>\data, so a later plain "scoop install extras/vscode" finds the setting
@@ -313,6 +318,234 @@ static void ApplyOne(LPCWSTR root, const APP_DEFAULT *d, FILE *log)
     if (buf) HeapFree(GetProcessHeap(), 0, buf);
 }
 
+/* ---- Default 2 and 3: WezTerm (system ConPTY) and Alacritty (font + shell) -------------------------
+ *
+ * These two change files that are NOT under persist, so a link or junction planted by an unprivileged
+ * user must not redirect them: none of the operations below follows a reparse point. Every directory on
+ * the way is checked for FILE_ATTRIBUTE_REPARSE_POINT first, files are created with CREATE_NEW (plus
+ * FILE_FLAG_OPEN_REPARSE_POINT), and only regular files directly inside an app's version directory are
+ * renamed. (The VS Code path above is older and does not do this: FEATMGR-scoopdefaults-reparse-hardening.)
+ */
+
+#define ATTR_BAD (INVALID_FILE_ATTRIBUTES)
+
+/* TRUE when path exists and is a real directory (not a junction/link). */
+static BOOL IsPlainDir(LPCWSTR path)
+{
+    DWORD a = GetFileAttributesW(path);
+    return a != ATTR_BAD && (a & FILE_ATTRIBUTE_DIRECTORY) && !(a & FILE_ATTRIBUTE_REPARSE_POINT);
+}
+
+/* TRUE when path exists as a regular file (not a directory, not a link). */
+static BOOL IsPlainFile(LPCWSTR path)
+{
+    DWORD a = GetFileAttributesW(path);
+    return a != ATTR_BAD && !(a & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT));
+}
+
+/* Default 2: WezTerm loads the conpty.dll next to wezterm-gui.exe; that one opens \Device\ConDrv\Server,
+ * which NitroOS lacks, so no shell can start ("failed to create psuedo console"). Without the file (and
+ * its OpenConsole.exe) WezTerm uses kernel32's CreatePseudoConsole, which works. WezTerm has no setting
+ * that selects the system ConPTY, so the two files are renamed to <name>.off, in every real version
+ * directory of the app (the "current" junction is skipped: it leads to one of them). A scoop update puts
+ * the files back in the NEW version directory; featmgr re-applies after each update it runs.
+ * TODO(CONSOLE-condrv-device): delete this default together with the VS Code one. */
+static void DisableBundledFile(LPCWSTR verDir, LPCWSTR name, FILE *log)
+{
+    WCHAR src[MAX_PATH], dst[MAX_PATH];
+
+    if (FAILED(StringCchPrintfW(src, MAX_PATH, L"%s\\%s", verDir, name))
+        || FAILED(StringCchPrintfW(dst, MAX_PATH, L"%s.off", src)))
+        return;
+    if (GetFileAttributesW(src) == ATTR_BAD) return;          /* already off, or this build has none */
+    if (!IsPlainFile(src))
+    {
+        LOGF(log, L"  note: %s is not a regular file; left alone\n", src);
+        return;
+    }
+    if (GetFileAttributesW(dst) != ATTR_BAD)
+    {
+        /* a leftover .off from an earlier version of the same directory: replace it only if it is a plain file */
+        if (!IsPlainFile(dst) || !DeleteFileW(dst))
+        {
+            LOGF(log, L"  note: cannot replace %s; %s was not disabled\n", dst, src);
+            return;
+        }
+    }
+    if (MoveFileW(src, dst))
+        LOGF(log, L"  NitroOS default: %s -> %s (WezTerm uses the system ConPTY; TODO CONSOLE-condrv-device)\n", src, dst);
+    else
+        LOGF(log, L"  note: cannot rename %s (error %lu; is WezTerm running?)\n", src, GetLastError());
+}
+
+/* PowerShell 7 path as UTF-8 when pwsh.exe is installed as a regular file (no quote or line break in it). */
+static BOOL PwshUtf8(char *out, int cb)
+{
+    WCHAR pwsh[MAX_PATH];
+    if (!FmPwshPath(pwsh, MAX_PATH) || !IsPlainFile(pwsh) || wcspbrk(pwsh, L"'\"\r\n]")) return FALSE;
+    return WideCharToMultiByte(CP_UTF8, 0, pwsh, -1, out, cb, NULL, NULL) > 0;
+}
+
+/* Create path with CREATE_NEW (never overwrites, never follows a link at the last component) and write text. */
+static BOOL WriteNewFile(LPCWSTR path, const char *text, FILE *log)
+{
+    DWORD w, n = (DWORD)strlen(text);
+    BOOL ok;
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        LOGF(log, L"  note: %s not written (error %lu)\n", path, GetLastError());
+        return FALSE;
+    }
+    ok = WriteFile(h, text, n, &w, NULL) && w == n;
+    CloseHandle(h);
+    if (!ok) { DeleteFileW(path); LOGF(log, L"  note: cannot write %s\n", path); }
+    return ok;
+}
+
+/* WezTerm's default shell is cmd.exe. When the user has no WezTerm config at all (WEZTERM_CONFIG_FILE,
+ * ~\.config\wezterm\wezterm.lua, ~\.wezterm.lua) and pwsh is installed, write ~\.wezterm.lua that starts pwsh. */
+static void WezTermConfig(FILE *log)
+{
+    WCHAR home[MAX_PATH], lua[MAX_PATH], xdg[MAX_PATH], tmp[8];
+    char u8[MAX_PATH * 4], text[1024 + MAX_PATH * 4];
+
+    if (GetEnvironmentVariableW(L"WEZTERM_CONFIG_FILE", tmp, ARRAYSIZE(tmp))) return;
+    if (!GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH) || !home[0]) return;
+    if (FAILED(StringCchPrintfW(lua, MAX_PATH, L"%s\\.wezterm.lua", home))
+        || FAILED(StringCchPrintfW(xdg, MAX_PATH, L"%s\\.config\\wezterm\\wezterm.lua", home)))
+        return;
+    if (GetFileAttributesW(lua) != ATTR_BAD || GetFileAttributesW(xdg) != ATTR_BAD)
+    {
+        LOGF(log, L"  WezTerm config present; left unchanged\n");
+        return;
+    }
+    if (!IsPlainDir(home))
+    {
+        LOGF(log, L"  note: %s is a link; WezTerm shell default not written\n", home);
+        return;
+    }
+    if (!PwshUtf8(u8, sizeof(u8))) return;                              /* no pwsh: WezTerm's cmd default is right */
+    StringCchPrintfA(text, sizeof(text),
+        "-- NitroOS default (featmgr), written because no WezTerm config existed. Replace it freely;\r\n"
+        "-- featmgr never overwrites an existing config.\r\n"
+        "local wezterm = require 'wezterm'\r\n"
+        "local config = wezterm.config_builder()\r\n"
+        "config.default_prog = { [[%s]] }\r\n"
+        "return config\r\n", u8);
+    if (WriteNewFile(lua, text, log))
+        LOGF(log, L"  NitroOS default: %s (WezTerm starts pwsh)\n", lua);
+}
+
+static void HookWezTerm(LPCWSTR root, LPCWSTR app, FILE *log)
+{
+    WCHAR apps[MAX_PATH], appDir[MAX_PATH], pat[MAX_PATH], ver[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+
+    if (FAILED(StringCchPrintfW(apps, MAX_PATH, L"%s\\apps", root))
+        || FAILED(StringCchPrintfW(appDir, MAX_PATH, L"%s\\%s", apps, app))
+        || FAILED(StringCchPrintfW(pat, MAX_PATH, L"%s\\*", appDir)))
+        return;
+    if (GetFileAttributesW(appDir) == ATTR_BAD) return;                /* not installed */
+    if (!IsPlainDir(apps) || !IsPlainDir(appDir))
+    {
+        LOGF(log, L"  note: %s or its parent is a link; WezTerm default not applied\n", appDir);
+        return;
+    }
+    h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do
+    {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            continue;                                                   /* files, and "current" (a junction) */
+        if (FAILED(StringCchPrintfW(ver, MAX_PATH, L"%s\\%s", appDir, fd.cFileName))) continue;
+        DisableBundledFile(ver, L"conpty.dll", log);
+        DisableBundledFile(ver, L"OpenConsole.exe", log);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    WezTermConfig(log);
+}
+
+/* Default 3: Alacritty's default font on Windows is Consolas and its default shell is "powershell";
+ * NitroOS has neither, so it prints "font ... not found" and exits. Write %APPDATA%\alacritty\alacritty.toml
+ * when the user has no config (alacritty.toml or the legacy alacritty.yml) with a font the image ships
+ * and pwsh (PowerShell 7) when installed, else cmd. An existing config is never touched: the file is
+ * created with CREATE_NEW and the pre-checks only decide whether to try. */
+static void HookAlacritty(LPCWSTR root, LPCWSTR app, FILE *log)
+{
+    WCHAR appdata[MAX_PATH], dir[MAX_PATH], toml[MAX_PATH], yml[MAX_PATH], fonts[MAX_PATH], f[MAX_PATH];
+    const char *family = "Courier New";
+    char text[1024 + MAX_PATH * 4], shell[MAX_PATH * 4 + 32];
+    char u8[MAX_PATH * 4];
+    DWORD adAttr;
+
+    (void)root; (void)app;
+    if (!GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH) || !appdata[0]) return;
+    if (FAILED(StringCchPrintfW(dir, MAX_PATH, L"%s\\alacritty", appdata))
+        || FAILED(StringCchPrintfW(toml, MAX_PATH, L"%s\\alacritty.toml", dir))
+        || FAILED(StringCchPrintfW(yml, MAX_PATH, L"%s\\alacritty.yml", dir)))
+        return;
+
+    /* the user's own config, in any form (even a link): leave it */
+    if (GetFileAttributesW(toml) != ATTR_BAD || GetFileAttributesW(yml) != ATTR_BAD)
+    {
+        LOGF(log, L"  %s: Alacritty config present; left unchanged\n", dir);
+        return;
+    }
+    adAttr = GetFileAttributesW(dir);
+    if (adAttr == ATTR_BAD)
+    {
+        if (!IsPlainDir(appdata))
+        {
+            LOGF(log, L"  note: %s is missing or a link; Alacritty default not written\n", appdata);
+            return;
+        }
+        if (!CreateDirectoryW(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        {
+            LOGF(log, L"  note: cannot create %s\n", dir);
+            return;
+        }
+    }
+    if (!IsPlainDir(dir))
+    {
+        LOGF(log, L"  note: %s is not a plain directory; Alacritty default not written\n", dir);
+        return;
+    }
+
+    if (GetEnvironmentVariableW(L"SystemRoot", fonts, MAX_PATH) && fonts[0])
+    {
+        if (SUCCEEDED(StringCchPrintfW(f, MAX_PATH, L"%s\\Fonts\\lucon.ttf", fonts)) && IsPlainFile(f))
+            family = "Lucida Console";
+    }
+    StringCchCopyA(shell, sizeof(shell), "program = \"cmd\"\r\n");
+    if (PwshUtf8(u8, sizeof(u8)))
+        StringCchPrintfA(shell, sizeof(shell), "program = '%s'\r\n", u8);   /* TOML literal string: no escapes */
+
+    StringCchPrintfA(text, sizeof(text),
+        "# NitroOS default (featmgr), written because no config existed. Delete this file or replace it freely;\r\n"
+        "# featmgr never overwrites an existing alacritty.toml.\r\n"
+        "# Alacritty's own defaults (font Consolas, shell powershell) are not on NitroOS.\r\n"
+        "[font]\r\n"
+        "normal = { family = \"%s\" }\r\n"
+        "size = 9.0\r\n"
+        "\r\n"
+        "[terminal.shell]\r\n"
+        "%s", family, shell);
+
+    if (!WriteNewFile(toml, text, log)) return;
+    LOGF(log, L"  NitroOS default: %s (font %S, %S)\n", toml, family, strstr(shell, "pwsh") ? "pwsh" : "cmd");
+}
+
+typedef void (*APP_HOOK)(LPCWSTR root, LPCWSTR app, FILE *log);
+static const struct { const WCHAR *App; APP_HOOK Fn; } g_Hooks[] =
+{
+    { L"wezterm",         HookWezTerm },
+    { L"wezterm-nightly", HookWezTerm },
+    { L"alacritty",       HookAlacritty },
+};
+
 /* After featmgr installed or updated Scoop app `app` (a NULL/unknown app is a no-op). */
 void FmScoopAppDefaults(LPCWSTR app, FILE *log)
 {
@@ -327,12 +560,20 @@ void FmScoopAppDefaults(LPCWSTR app, FILE *log)
         if (GetFileAttributesW(cur) == INVALID_FILE_ATTRIBUTES) continue;   /* not installed */
         ApplyOne(root, &g_Defaults[k], log);
     }
+    for (k = 0; k < ARRAYSIZE(g_Hooks); k++)
+    {
+        if (_wcsicmp(app, g_Hooks[k].App)) continue;
+        StringCchPrintfW(cur, MAX_PATH, L"%s\\apps\\%s\\current", root, app);
+        if (GetFileAttributesW(cur) == INVALID_FILE_ATTRIBUTES) continue;   /* not installed */
+        g_Hooks[k].Fn(root, g_Hooks[k].App, log);
+    }
 }
 
 void FmScoopAppDefaultsAll(FILE *log)
 {
     size_t k;
     for (k = 0; k < ARRAYSIZE(g_Defaults); k++) FmScoopAppDefaults(g_Defaults[k].App, log);
+    for (k = 0; k < ARRAYSIZE(g_Hooks); k++) FmScoopAppDefaults(g_Hooks[k].App, log);
 }
 
 /* After featmgr installed Scoop itself: write the defaults ahead of any plain "scoop install <app>". */
@@ -342,4 +583,7 @@ void FmScoopAppDefaultsSeed(FILE *log)
     size_t k;
     if (!FmScoopRoot(root, MAX_PATH)) return;
     for (k = 0; k < ARRAYSIZE(g_Defaults); k++) ApplyOne(root, &g_Defaults[k], log);
+    /* only the Alacritty config can be written ahead of the app; the WezTerm files do not exist yet */
+    for (k = 0; k < ARRAYSIZE(g_Hooks); k++)
+        if (!_wcsicmp(g_Hooks[k].App, L"alacritty")) g_Hooks[k].Fn(root, g_Hooks[k].App, log);
 }
