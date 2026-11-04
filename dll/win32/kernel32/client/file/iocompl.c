@@ -265,7 +265,9 @@ GetOverlappedResult(IN HANDLE hFile,
         return FALSE;
     }
 
-    /* All done */
+    /* All done. As on Windows 10 (where this is GetOverlappedResultEx on the NTSTATUS of the operation) the
+       last error is the status of a completed operation, i.e. ERROR_SUCCESS: a successful call resets it */
+    SetLastError(ERROR_SUCCESS);
     return TRUE;
 }
 
