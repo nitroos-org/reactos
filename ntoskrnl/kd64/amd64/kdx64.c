@@ -22,7 +22,7 @@ NTAPI
 KdpGetStateChange(IN PDBGKD_MANIPULATE_STATE64 State,
                   IN PCONTEXT Context)
 {
-    PKPRCB Prcb;
+    PKPRCB Prcb, CurrentPrcb = KeGetCurrentPrcb();
     ULONG i;
 
     /* Check for success */
@@ -43,8 +43,22 @@ KdpGetStateChange(IN PDBGKD_MANIPULATE_STATE64 State,
         /* Loop all processors */
         for (i = 0; i < KeNumberProcessors; i++)
         {
-            /* Get the PRCB and update DR7 and DR6 */
+            /* Get the PRCB and update DR0-3, DR7 and DR6. The debugger wrote
+             * DR0-3 into this processor's special registers only (control
+             * space), the others would keep stale values, which
+             * SaveUserDebugRegisters loads on every user mode entry. */
             Prcb = KiProcessorBlock[i];
+            if (Prcb != CurrentPrcb)
+            {
+                Prcb->ProcessorState.SpecialRegisters.KernelDr0 =
+                    CurrentPrcb->ProcessorState.SpecialRegisters.KernelDr0;
+                Prcb->ProcessorState.SpecialRegisters.KernelDr1 =
+                    CurrentPrcb->ProcessorState.SpecialRegisters.KernelDr1;
+                Prcb->ProcessorState.SpecialRegisters.KernelDr2 =
+                    CurrentPrcb->ProcessorState.SpecialRegisters.KernelDr2;
+                Prcb->ProcessorState.SpecialRegisters.KernelDr3 =
+                    CurrentPrcb->ProcessorState.SpecialRegisters.KernelDr3;
+            }
             Prcb->ProcessorState.SpecialRegisters.KernelDr7 =
                 State->u.Continue2.ControlSet.Dr7;
             Prcb->ProcessorState.SpecialRegisters.KernelDr6 = 0;

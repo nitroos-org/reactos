@@ -208,7 +208,9 @@ KeContextToTrapFrame(IN PCONTEXT Context,
 
         /* The frame is the current thread's (every user-mode request runs in the target thread).
          * Its breakpoints are loaded on the way to user mode only while one is enabled (trap
-         * exit, trapamd64.inc); a thread that never enables one keeps the kernel's registers. */
+         * exit, trapamd64.inc); a thread that never enables one keeps the kernel's registers.
+         * Kernel-mode callers (PreviousMode == KernelMode) store the sanitized values in the
+         * frame but do not update DebugActive: they are trusted and do not arm user breakpoints. */
         if (PreviousMode != KernelMode)
         {
             PKTHREAD Thread = KeGetCurrentThread();
