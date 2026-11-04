@@ -119,6 +119,7 @@ extern void func_UpdateLayeredWindow(void);
 extern void func_UserHandleGrantAccess(void);
 extern void func_VirtualKey(void);
 extern void func_WinEventHook(void);
+extern void func_WindowStationLeak(void);
 extern void func_WmPrint(void);
 extern void func_WndProc(void);
 extern void func_Win8User(void);
@@ -262,6 +263,7 @@ const struct test winetest_testlist[] =
     { "ShutdownBlockReason", func_ShutdownBlockReason },
     { "PointerDeviceFunctions", func_PointerDeviceFunctions },
     { "WinEventHook", func_WinEventHook },
+    { "WindowStationLeak", func_WindowStationLeak },
     { "WmPrint", func_WmPrint },
     { "WndProc", func_WndProc },
     { "wsprintfApi", func_wsprintfApi },
