@@ -14426,6 +14426,234 @@ static void test_xml_inherited_namespace(void)
     free_bstrs();
 }
 
+/* Where node.xml declares the namespaces its subtree inherits from outside it. Expected strings measured with
+   msxml3 and msxml6 on Windows 10 22H2: the declaration is NOT hoisted to the root of the subtree, every element
+   that uses a namespace (by its name or by an attribute) declares it itself, and a declaration is not repeated
+   for a descendant, the prefix of which the subtree root or a closer element already declares. */
+static BSTR get_xml_at(IXMLDOMDocument2 *doc, const char *path)
+{
+    IXMLDOMElement *root;
+    IXMLDOMNode *node, *child;
+    BSTR str = NULL;
+    HRESULT hr;
+
+    hr = IXMLDOMDocument2_get_documentElement(doc, &root);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    if (hr != S_OK) return NULL;
+    node = (IXMLDOMNode *)root;
+    while (*path)
+    {
+        long idx = strtol(path, (char **)&path, 10);
+
+        if (*path == '.') path++;
+        child = NULL;
+        {
+            IXMLDOMNodeList *list;
+            hr = IXMLDOMNode_get_childNodes(node, &list);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            hr = IXMLDOMNodeList_get_item(list, idx, &child);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            IXMLDOMNodeList_Release(list);
+        }
+        IXMLDOMNode_Release(node);
+        node = child;
+        if (!node) return NULL;
+    }
+    hr = IXMLDOMNode_get_xml(node, &str);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IXMLDOMNode_Release(node);
+    return str;
+}
+
+struct get_xml_thread_data
+{
+    IXMLDOMNode *node;
+    BSTR expected;
+    int iterations;
+    int bad;
+};
+
+static DWORD WINAPI get_xml_thread(void *arg)
+{
+    struct get_xml_thread_data *data = arg;
+    int i;
+
+    for (i = 0; i < data->iterations; i++)
+    {
+        BSTR str = NULL;
+        HRESULT hr = IXMLDOMNode_get_xml(data->node, &str);
+
+        if (hr != S_OK || !str || !compare_ignore_formatting(str, data->expected)) data->bad++;
+        SysFreeString(str);
+    }
+    return 0;
+}
+
+static void test_xml_inherited_namespace_placement(void)
+{
+    static const struct
+    {
+        const char *xml;
+        const char *path;
+        const WCHAR *expected;
+    } tests[] =
+    {
+        /* siblings using the inherited prefix: each declares it */
+        { "<r xmlns:p=\"urn:p\"><a><p:b/><p:c/></a></r>", "0", L"<a><p:b xmlns:p=\"urn:p\"/><p:c xmlns:p=\"urn:p\"/></a>" },
+        { "<r xmlns:p=\"urn:p\"><a><p:b/><p:c/></a></r>", "0.0", L"<p:b xmlns:p=\"urn:p\"/>" },
+        { "<r xmlns:p=\"urn:p\"><a><p:b/><x><p:c/></x></a></r>", "0",
+                L"<a><p:b xmlns:p=\"urn:p\"/><x><p:c xmlns:p=\"urn:p\"/></x></a>" },
+        { "<r xmlns:p=\"urn:p\" xmlns:q=\"urn:q\"><a id=\"1\"><p:b/><q:c/><p:d/></a></r>", "0",
+                L"<a id=\"1\"><p:b xmlns:p=\"urn:p\"/><q:c xmlns:q=\"urn:q\"/><p:d xmlns:p=\"urn:p\"/></a>" },
+        { "<r xmlns:p=\"urn:p\" xmlns:q=\"urn:q\"><a xmlns:z=\"urn:z\" id=\"1\"><q:c/><p:b/></a></r>", "0",
+                L"<a xmlns:z=\"urn:z\" id=\"1\"><q:c xmlns:q=\"urn:q\"/><p:b xmlns:p=\"urn:p\"/></a>" },
+        { "<r xmlns:p=\"urn:p\"><a>t<p:b>x</p:b><!--c--><p:c/></a></r>", "0",
+                L"<a>t<p:b xmlns:p=\"urn:p\">x</p:b><!--c--><p:c xmlns:p=\"urn:p\"/></a>" },
+        /* the subtree root uses the prefix: declared once on it */
+        { "<r xmlns:p=\"urn:p\"><p:a><p:b/><p:c/></p:a></r>", "0", L"<p:a xmlns:p=\"urn:p\"><p:b/><p:c/></p:a>" },
+        /* default namespace declared on an ancestor */
+        { "<r xmlns=\"urn:d\"><a><b/><c/></a></r>", "0", L"<a xmlns=\"urn:d\"><b/><c/></a>" },
+        { "<r xmlns=\"urn:d\"><a><b/><c/></a></r>", "0.0", L"<b xmlns=\"urn:d\"/>" },
+        { "<r xmlns=\"urn:d\" xmlns:p=\"urn:p\"><p:a><b/><c/></p:a></r>", "0",
+                L"<p:a xmlns:p=\"urn:p\"><b xmlns=\"urn:d\"/><c xmlns=\"urn:d\"/></p:a>" },
+        { "<r xmlns=\"urn:d\"><a xmlns=\"\"><b/><c/></a></r>", "0", L"<a xmlns=\"\"><b/><c/></a>" },
+        { "<r xmlns=\"urn:d\"><a xmlns=\"\"><b/><c/></a></r>", "0.0", L"<b/>" },
+        /* attributes in an inherited namespace */
+        { "<r xmlns:p=\"urn:p\"><a><b p:x=\"1\"/><c p:y=\"2\"/></a></r>", "0",
+                L"<a><b xmlns:p=\"urn:p\" p:x=\"1\"/><c xmlns:p=\"urn:p\" p:y=\"2\"/></a>" },
+        { "<r xmlns:p=\"urn:p\"><a p:x=\"1\"><b/></a></r>", "0", L"<a xmlns:p=\"urn:p\" p:x=\"1\"><b/></a>" },
+        { "<r xmlns:p=\"urn:p\"><p:a p:x=\"1\"><b p:y=\"2\"/></p:a></r>", "0",
+                L"<p:a xmlns:p=\"urn:p\" p:x=\"1\"><b p:y=\"2\"/></p:a>" },
+        /* prefix redeclared deeper */
+        { "<r xmlns:p=\"urn:p\"><a><p:b xmlns:p=\"urn:q\"><p:c/></p:b><p:d/></a></r>", "0",
+                L"<a><p:b xmlns:p=\"urn:q\"><p:c/></p:b><p:d xmlns:p=\"urn:p\"/></a>" },
+        { "<r xmlns:p=\"urn:p\"><a><p:b xmlns:p=\"urn:q\"><p:c/></p:b><p:d/></a></r>", "0.0",
+                L"<p:b xmlns:p=\"urn:q\"><p:c/></p:b>" },
+        { "<r xmlns:p=\"urn:p\"><a><p:b xmlns:p=\"urn:p\"/><p:d/></a></r>", "0",
+                L"<a><p:b xmlns:p=\"urn:p\"/><p:d xmlns:p=\"urn:p\"/></a>" },
+        /* xml:lang needs no declaration, inherited or not */
+        { "<r xml:lang=\"en\"><a xml:lang=\"de\"><b/></a></r>", "0", L"<a xml:lang=\"de\"><b/></a>" },
+        { "<r xml:lang=\"en\"><a><b/></a></r>", "0", L"<a><b/></a>" },
+        { "<r xml:lang=\"en\"><a><b xml:lang=\"fr\"/></a></r>", "0", L"<a><b xml:lang=\"fr\"/></a>" },
+    };
+    static const char *undeclared[] = { "<a><p:b/></a>", "<a p:x=\"1\"/>" };
+    const GUID *clsids[] = { &CLSID_DOMDocument30, &CLSID_DOMDocument60 };
+    IXMLDOMDocument2 *doc;
+    IXMLDOMParseError *err;
+    VARIANT_BOOL b;
+    unsigned int i, j;
+    BSTR str, str2, whole, whole2;
+    HRESULT hr;
+    LONG code;
+
+    for (i = 0; i < ARRAY_SIZE(clsids); i++)
+    {
+        if (!is_clsid_supported(clsids[i], &IID_IXMLDOMDocument2)) continue;
+        winetest_push_context("%u", i);
+
+        for (j = 0; j < ARRAY_SIZE(tests); j++)
+        {
+            doc = _create_object(clsids[i], "doc", &IID_IXMLDOMDocument2, __LINE__);
+            hr = IXMLDOMDocument2_loadXML(doc, _bstr_(tests[j].xml), &b);
+            ok(hr == S_OK, "%s: Unexpected hr %#lx.\n", tests[j].xml, hr);
+
+            str = get_xml_at(doc, tests[j].path);
+            ok(str && compare_ignore_formatting(str, tests[j].expected), "%s [%s]: got %s\n", tests[j].xml,
+                    tests[j].path, wine_dbgstr_w(str));
+            SysFreeString(str);
+            IXMLDOMDocument2_Release(doc);
+        }
+
+        /* a second get_xml gives the same text and the document is not changed by either */
+        doc = _create_object(clsids[i], "doc", &IID_IXMLDOMDocument2, __LINE__);
+        hr = IXMLDOMDocument2_loadXML(doc, _bstr_(tests[0].xml), &b);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IXMLDOMDocument2_get_xml(doc, &whole);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        str = get_xml_at(doc, "0");
+        str2 = get_xml_at(doc, "0");
+        ok(str && str2 && !lstrcmpW(str, str2), "got %s, %s\n", wine_dbgstr_w(str), wine_dbgstr_w(str2));
+        hr = IXMLDOMDocument2_get_xml(doc, &whole2);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(!lstrcmpW(whole, whole2), "got %s, %s\n", wine_dbgstr_w(whole), wine_dbgstr_w(whole2));
+        ok(compare_ignore_formatting(whole2, L"<r xmlns:p=\"urn:p\"><a><p:b/><p:c/></a></r>"), "got %s\n",
+                wine_dbgstr_w(whole2));
+        SysFreeString(str);
+        SysFreeString(str2);
+        SysFreeString(whole);
+        SysFreeString(whole2);
+        IXMLDOMDocument2_Release(doc);
+
+        /* an undeclared prefix is a parse error with the msxml error code */
+        for (j = 0; j < ARRAY_SIZE(undeclared); j++)
+        {
+            doc = _create_object(clsids[i], "doc", &IID_IXMLDOMDocument2, __LINE__);
+            b = 0xdead;
+            hr = IXMLDOMDocument2_loadXML(doc, _bstr_(undeclared[j]), &b);
+            ok(hr == S_FALSE, "%s: Unexpected hr %#lx.\n", undeclared[j], hr);
+            ok(b == VARIANT_FALSE, "%s: got %d\n", undeclared[j], b);
+            hr = IXMLDOMDocument2_get_parseError(doc, &err);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            code = 0;
+            hr = IXMLDOMParseError_get_errorCode(err, &code);
+            ok(hr == S_OK, "%s: Unexpected hr %#lx.\n", undeclared[j], hr);
+            ok(code == (LONG)0xc00ce01d, "%s: got %#lx\n", undeclared[j], code);
+            IXMLDOMParseError_Release(err);
+            IXMLDOMDocument2_Release(doc);
+        }
+
+        winetest_pop_context();
+    }
+
+    /* two threads serializing the same document, with a declaration to add for every element */
+    {
+        static const char xml[] = "<r xmlns:p=\"urn:p\" xmlns=\"urn:d\"><a><p:b p:x=\"1\"/><c/><x><p:c/></x></a></r>";
+        static const WCHAR expected[] = L"<a xmlns=\"urn:d\"><p:b xmlns:p=\"urn:p\" p:x=\"1\"/><c/><x><p:c xmlns:p=\"urn:p\"/></x></a>";
+        struct get_xml_thread_data data[2];
+        IXMLDOMNodeList *list;
+        IXMLDOMNode *node;
+        IXMLDOMDocument *fdoc;
+        IXMLDOMElement *root;
+        HANDLE threads[2];
+
+        if (is_clsid_supported(&CLSID_FreeThreadedDOMDocument, &IID_IXMLDOMDocument))
+        {
+            hr = CoCreateInstance(&CLSID_FreeThreadedDOMDocument, NULL, CLSCTX_INPROC_SERVER, &IID_IXMLDOMDocument, (void **)&fdoc);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            hr = IXMLDOMDocument_loadXML(fdoc, _bstr_(xml), &b);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            hr = IXMLDOMDocument_get_documentElement(fdoc, &root);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            hr = IXMLDOMElement_get_childNodes(root, &list);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            hr = IXMLDOMNodeList_get_item(list, 0, &node);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+            for (j = 0; j < 2; j++)
+            {
+                data[j].node = node;
+                data[j].expected = SysAllocString(expected);
+                data[j].iterations = 500;
+                data[j].bad = 0;
+                threads[j] = CreateThread(NULL, 0, get_xml_thread, &data[j], 0, NULL);
+            }
+            WaitForMultipleObjects(2, threads, TRUE, INFINITE);
+            for (j = 0; j < 2; j++)
+            {
+                ok(!data[j].bad, "thread %u: %d bad results\n", j, data[j].bad);
+                CloseHandle(threads[j]);
+                SysFreeString(data[j].expected);
+            }
+            IXMLDOMNode_Release(node);
+            IXMLDOMNodeList_Release(list);
+            IXMLDOMElement_Release(root);
+            IXMLDOMDocument_Release(fdoc);
+        }
+    }
+
+    free_bstrs();
+}
+
 START_TEST(domdoc)
 {
     HRESULT hr;
@@ -14458,6 +14686,7 @@ START_TEST(domdoc)
     test_removeChild();
     test_replaceChild();
     test_xml_inherited_namespace();
+    test_xml_inherited_namespace_placement();
     test_removeNamedItem();
     test_IXMLDOMDocument2();
     test_whitespace();
