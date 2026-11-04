@@ -1352,7 +1352,15 @@ FontLink_Create(
     SubstituteFontRecurse(&lf);
     DPRINT("lfFaceName: %S\n", lf.lfFaceName);
 
-    if (RtlEqualMemory(plfBase, &lf, sizeof(lf)) || FontLink_Chain_FindLink(pChain, &lf))
+    /* A linked font is chosen by its face name alone. The base font's pitch and family must not
+     * be inherited: GetFontPenalty() charges 15000 (FIXED_PITCH) + 9000 (family) against a
+     * proportional candidate, which is more than the 10000 for a wrong face name, so for a
+     * fixed-pitch base (Notepad's Lucida Console, Courier New) every proportional link such as
+     * Noto Sans SC / Noto Sans KR resolved to some other fixed-pitch font, failed the family
+     * name check in FontLink_PrepareFontInfo() and was dropped from the chain. */
+    lf.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
+
+    if (!_wcsicmp(plfBase->lfFaceName, lf.lfFaceName) || FontLink_Chain_FindLink(pChain, &lf))
         return NULL; // Already exists
 
     pLink = ExAllocatePoolZero(PagedPool, sizeof(FONTLINK), TAG_FONT);
@@ -1364,22 +1372,28 @@ FontLink_Create(
 }
 
 static PFONTLINK_ENTRY
-FontLink_FindEntry(const LOGFONTW *pLogFont)
+FontLink_FindEntryByName(PCWSTR pszFaceName)
 {
     PLIST_ENTRY Entry;
     PFONTLINK_ENTRY pEntry;
-    LOGFONTW lf = *pLogFont;
-
-    SubstituteFontRecurse(&lf);
 
     for (Entry = g_FontLinkEntries.Flink; Entry != &g_FontLinkEntries; Entry = Entry->Flink)
     {
         pEntry = CONTAINING_RECORD(Entry, FONTLINK_ENTRY, ListEntry);
-        if (!_wcsicmp(pEntry->lfFaceName, lf.lfFaceName))
+        if (!_wcsicmp(pEntry->lfFaceName, pszFaceName))
             return pEntry;
     }
 
     return NULL;
+}
+
+static PFONTLINK_ENTRY
+FontLink_FindEntry(const LOGFONTW *pLogFont)
+{
+    LOGFONTW lf = *pLogFont;
+
+    SubstituteFontRecurse(&lf);
+    return FontLink_FindEntryByName(lf.lfFaceName);
 }
 
 static NTSTATUS
@@ -1388,6 +1402,13 @@ FontLink_Chain_FindEntry(
     _Inout_ PLOGFONTW pLF)
 {
     PFONTLINK_ENTRY pEntry = FontLink_FindEntry(pLF);
+    if (!pEntry)
+    {
+        /* A face without a SystemLink entry (Consolas, ...) is linked like the system's default
+         * proportional / fixed-pitch face, so the CJK fonts in the registry chain are used and
+         * not the file names of the stock Windows fonts below, which are not installed here. */
+        pEntry = FontLink_FindEntryByName((pLF->lfPitchAndFamily & FIXED_PITCH) ? L"Courier New" : L"Tahoma");
+    }
     if (!pEntry)
     {
         if (!(pLF->lfPitchAndFamily & FIXED_PITCH))

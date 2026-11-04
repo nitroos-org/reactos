@@ -628,6 +628,19 @@ OpenWithoutReparseSupport:
             return FALSE;
         }
 
+        /* The substitute name has to lie inside the data the file system returned */
+        if (IoStatusBlock.Information < FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer) ||
+            (ULONG)ReparseDataBuffer->MountPointReparseBuffer.SubstituteNameOffset +
+            ReparseDataBuffer->MountPointReparseBuffer.SubstituteNameLength >
+            IoStatusBlock.Information - FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer))
+        {
+            RtlFreeHeap(RtlGetProcessHeap(), 0, ReparseDataBuffer);
+            NtClose(TemplateHandle);
+            NtClose(DirectoryHandle);
+            BaseSetLastNTError(STATUS_IO_REPARSE_DATA_INVALID);
+            return FALSE;
+        }
+
         /* Get volume name */
         SubstituteName = (PWSTR)((ULONG_PTR)ReparseDataBuffer->MountPointReparseBuffer.PathBuffer +
                                  ReparseDataBuffer->MountPointReparseBuffer.SubstituteNameOffset);
@@ -866,8 +879,8 @@ RemoveDirectoryW(IN LPCWSTR lpPathName)
         goto MarkFileForDelete;
     }
 
-    /* Check if that's a mount point */
-    if (FileTagInfo.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT)
+    /* Check if that is a mount point or a symbolic link (a name surrogate: the link itself is deleted) */
+    if (!IsReparseTagNameSurrogate(FileTagInfo.ReparseTag))
     {
         /* It's not */
         NtClose(DirectoryHandle);
@@ -929,6 +942,18 @@ RemoveDirectoryW(IN LPCWSTR lpPathName)
                          MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
                          &BytesReturned,
                          NULL))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, ReparseDataBuffer);
+        goto MarkFileForDelete;
+    }
+
+    /* Only a mount point has the layout read below (a symbolic link has an extra Flags field), and the
+       substitute name has to lie inside the data the file system returned */
+    if (ReparseDataBuffer->ReparseTag != IO_REPARSE_TAG_MOUNT_POINT ||
+        BytesReturned < FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer) ||
+        (ULONG)ReparseDataBuffer->MountPointReparseBuffer.SubstituteNameOffset +
+        ReparseDataBuffer->MountPointReparseBuffer.SubstituteNameLength >
+        BytesReturned - FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer))
     {
         RtlFreeHeap(RtlGetProcessHeap(), 0, ReparseDataBuffer);
         goto MarkFileForDelete;

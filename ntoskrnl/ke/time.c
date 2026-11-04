@@ -379,4 +379,16 @@ KeUpdateRunTime(IN PKTRAP_FRAME TrapFrame,
         Prcb->QuantumEnd = 1;
         HalRequestSoftwareInterrupt(DISPATCH_LEVEL);
     }
+    else if ((Thread != Prcb->IdleThread) && PsPrioritySeparation &&
+             (Thread->Priority < LOW_REALTIME_PRIORITY) &&
+             (Prcb->ReadySummary & PRIORITY_MASK(Thread->Priority)) &&
+             (CONTAINING_RECORD(Thread->ApcState.Process, EPROCESS, Pcb)->
+              Vm.Flags.MemoryPriority != MEMORY_PRIORITY_FOREGROUND))
+    {
+        /* A thread of the foreground process may be waiting behind this
+           background thread: let it have the processor now (see
+           KiForegroundReclaim) */
+        Prcb->QuantumEnd = 1;
+        HalRequestSoftwareInterrupt(DISPATCH_LEVEL);
+    }
 }

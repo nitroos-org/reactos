@@ -19,6 +19,7 @@ list(APPEND SOURCE
     security.c
     service.c
     services.c
+    standardcimv2.c
     table.c
     wbemlocator.c)
 

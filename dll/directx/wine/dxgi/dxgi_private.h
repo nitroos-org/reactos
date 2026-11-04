@@ -185,10 +185,22 @@ struct d3d11_swapchain
     IDXGIOutput *target;
     LONG present_count;
     LONG in_set_fullscreen_state;
+
+    /* Swap chains of CreateSwapChainForComposition have no window of their own: wined3d works on a hidden
+     * window, and a present copies back buffer 0 into the window DirectComposition committed the swap chain
+     * to (none until then), at the offset of its visual. */
+    IWineDXGICompositionSwapChain IWineDXGICompositionSwapChain_iface;
+    HWND composition_window;
+    HWND composition_target;
+    POINT composition_offset;
+    BOOL composition_gdi_flag;
 };
 
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
         struct wined3d_swapchain_desc *desc);
+HWND dxgi_create_composition_window(unsigned int width, unsigned int height);
+void dxgi_destroy_composition_window(HWND window);
+BOOL d3d11_swapchain_set_composition(IDXGISwapChain1 *iface, HWND window, BOOL gdi_flag);
 
 HRESULT d3d12_swapchain_create(IWineDXGIFactory *factory, ID3D12CommandQueue *queue, HWND window,
         const DXGI_SWAP_CHAIN_DESC1 *swapchain_desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fullscreen_desc,

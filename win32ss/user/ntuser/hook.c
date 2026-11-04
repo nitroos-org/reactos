@@ -25,6 +25,18 @@ PPROCESSINFO ppiUahServer;
 
 /* PRIVATE FUNCTIONS *********************************************************/
 
+/* A hook pack belongs to the sent message that carries it until the receiver runs the
+   hook (co_CallHook frees it); a message dropped without being dispatched frees it here */
+VOID
+FASTCALL
+IntFreeHookPack(PVOID Pack)
+{
+    PHOOKPACK pHP = Pack;
+
+    if (pHP->pHookStructs) ExFreePoolWithTag(pHP->pHookStructs, TAG_HOOK);
+    ExFreePoolWithTag(pHP, TAG_HOOK);
+}
+
 /* Calls ClientLoadLibrary in user32 in order to load or unload a module */
 BOOL
 IntLoadHookModule(int iHookID, HHOOK hHook, BOOL Unload)
@@ -327,9 +339,10 @@ co_IntCallLowLevelHook(PHOOK Hook,
                                &uResult);
     if (!NT_SUCCESS(Status))
     {
+       /* Failures come before the message is queued: the pack is still ours. Once queued
+          (also on a timeout, STATUS_TIMEOUT is a success code) the message owns it. */
        ERR("Error Hook Call SendMsg. %d Status: 0x%x\n", Hook->HookId, Status);
-       if (pHP->pHookStructs) ExFreePoolWithTag(pHP->pHookStructs, TAG_HOOK);
-       ExFreePoolWithTag(pHP, TAG_HOOK);
+       IntFreeHookPack(pHP);
     }
     return NT_SUCCESS(Status) ? uResult : 0;
 }
@@ -378,8 +391,7 @@ co_CallHook( INT HookId,
                                 &phk->ModuleName);
     }
     /* The odds so high, no one is waiting for the results. */
-    if (pHP->pHookStructs) ExFreePoolWithTag(pHP->pHookStructs, TAG_HOOK);
-    ExFreePoolWithTag(pHP, TAG_HOOK);
+    IntFreeHookPack(pHP);
     return Result;
 }
 

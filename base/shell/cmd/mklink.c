@@ -222,8 +222,17 @@ cmd_mklink(LPTSTR param)
         }
     }
 
-    ErrorMessage(GetLastError(), _T("MKLINK"));
+    if (LinkType == SYMBOLIC && GetLastError() == ERROR_PRIVILEGE_NOT_HELD)
+    {
+        /* As cmd.exe of Windows: a symbolic link needs SeCreateSymbolicLinkPrivilege */
+        ConErrPuts(_T("You do not have sufficient privilege to perform this operation.\n"));
+    }
+    else
+    {
+        ErrorMessage(GetLastError(), _T("MKLINK"));
+    }
     freep(arg);
+    nErrorLevel = 1;
     return 1;
 }
 

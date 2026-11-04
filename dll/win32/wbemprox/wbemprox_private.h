@@ -41,6 +41,7 @@ enum param_direction
 #define COL_FLAG_DYNAMIC 0x00010000
 #define COL_FLAG_KEY     0x00020000
 #define COL_FLAG_METHOD  0x00040000
+#define COL_FLAG_NULL    0x00080000  /* ReactOS: the property is part of the class and always NULL */
 
 typedef HRESULT (class_method)(IWbemClassObject *, IWbemClassObject *, IWbemClassObject **);
 
@@ -173,6 +174,7 @@ enum wbm_namespace
     WBEMPROX_NAMESPACE_DEFAULT,
     WBEMPROX_NAMESPACE_INTEROP,
     WBEMPROX_NAMESPACE_INTEROP_MS409,
+    WBEMPROX_NAMESPACE_STANDARDCIMV2,
     WBEMPROX_NAMESPACE_LAST
 };
 #endif
@@ -297,12 +299,19 @@ BOOL parse_namespace( const WCHAR *, enum wbm_namespace * ) DECLSPEC_HIDDEN;
 const WCHAR *get_namespace_path( enum wbm_namespace ) DECLSPEC_HIDDEN;
 void init_schema_tables( struct list * ) DECLSPEC_HIDDEN;
 const WCHAR *get_superclass( const WCHAR * ) DECLSPEC_HIDDEN;
+const WCHAR *get_superclass_ns( const WCHAR *, enum wbm_namespace ) DECLSPEC_HIDDEN;
 BOOL is_subclass( const WCHAR *, const WCHAR * ) DECLSPEC_HIDDEN;
+BOOL is_subclass_ns( const WCHAR *, const WCHAR *, enum wbm_namespace ) DECLSPEC_HIDDEN;
 BOOL is_table_visible( const WCHAR *, enum wbm_namespace ) DECLSPEC_HIDDEN;
 BOOL is_namespace_table( const struct table * ) DECLSPEC_HIDDEN;
 BOOL is_class_method( const WCHAR *, const WCHAR * ) DECLSPEC_HIDDEN;
 void get_column_order( const struct table *, UINT * ) DECLSPEC_HIDDEN;
-SAFEARRAY *get_derivation( const WCHAR * ) DECLSPEC_HIDDEN;
+SAFEARRAY *get_derivation( const WCHAR *, enum wbm_namespace ) DECLSPEC_HIDDEN;
+/* standardcimv2.c, with helpers of builtin.c */
+void init_scv2_tables( struct list * ) DECLSPEC_HIDDEN;
+BOOL match_row( const struct table *, UINT, const struct expr *, enum fill_status * ) DECLSPEC_HIDDEN;
+BOOL resize_table( struct table *, UINT, UINT ) DECLSPEC_HIDDEN;
+struct array *new_string_array( UINT, const WCHAR ** ) DECLSPEC_HIDDEN;
 UINT get_synth_qualifiers( const WCHAR *, const WCHAR *, BOOL, const WCHAR **, VARIANT *, UINT ) DECLSPEC_HIDDEN;
 BOOL get_param_info( const WCHAR *, const WCHAR *, int *, UINT * ) DECLSPEC_HIDDEN;
 HRESULT WbemQualifierSet_create_method( const WCHAR *, const WCHAR *, LPVOID * ) DECLSPEC_HIDDEN;
