@@ -186,12 +186,14 @@ MmInsertMemoryArea(
     }
 }
 
+/* A gap of Length bytes with its first byte at or above LowestAddress and its last at or below HighestAddress */
 PVOID NTAPI
-MmFindGapInRange(
+MmFindGapInRangeEx(
     PMMSUPPORT AddressSpace,
     ULONG_PTR Length,
     ULONG_PTR Granularity,
     BOOLEAN TopDown,
+    ULONG_PTR LowestAddress,
     ULONG_PTR HighestAddress)
 {
     PEPROCESS Process;
@@ -218,19 +220,33 @@ MmFindGapInRange(
     }
     else
     {
-        Result = MiFindEmptyAddressRangeInTree(Length,
-                                               Granularity,
-                                               VadRoot,
-                                               &Parent,
-                                               &StartingAddress);
+        Result = MiFindEmptyAddressRangeInTreeEx(Length,
+                                                 LowestAddress,
+                                                 Granularity,
+                                                 VadRoot,
+                                                 &Parent,
+                                                 &StartingAddress);
     }
 
-    if (Result == TableFoundNode || StartingAddress > HighestAddress - (Length - 1))
+    /* Length - 1 <= HighestAddress was checked above; repeated so that the subtraction can never wrap */
+    if (Result == TableFoundNode || Length - 1 > HighestAddress ||
+        StartingAddress > HighestAddress - (Length - 1) || StartingAddress < LowestAddress)
     {
         return NULL;
     }
 
     return (PVOID)StartingAddress;
+}
+
+PVOID NTAPI
+MmFindGapInRange(
+    PMMSUPPORT AddressSpace,
+    ULONG_PTR Length,
+    ULONG_PTR Granularity,
+    BOOLEAN TopDown,
+    ULONG_PTR HighestAddress)
+{
+    return MmFindGapInRangeEx(AddressSpace, Length, Granularity, TopDown, 0, HighestAddress);
 }
 
 PVOID NTAPI

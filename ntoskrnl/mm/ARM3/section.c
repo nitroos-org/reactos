@@ -832,6 +832,47 @@ MiRemoveMappedView(IN PEPROCESS CurrentProcess,
     MiCheckControlArea(ControlArea, OldIrql);
 }
 
+/*
+ * Put a free placeholder over the pages of a view that was just unmapped. The address space
+ * of Process is locked, so nothing could take the range in between.
+ */
+static
+VOID
+MiPreservePlaceholder(
+    _In_ PEPROCESS Process,
+    _In_ PMMVAD_LONG Placeholder,
+    _In_ ULONG_PTR StartingAddress,
+    _In_ ULONG_PTR EndingAddress)
+{
+    PETHREAD CurrentThread = PsGetCurrentThread();
+    BOOLEAN Attached = FALSE;
+    KAPC_STATE ApcState;
+    NTSTATUS Status;
+
+    if (PsGetCurrentProcess() != Process)
+    {
+        KeStackAttachProcess(&Process->Pcb, &ApcState);
+        Attached = TRUE;
+    }
+
+    MiLockProcessWorkingSetUnsafe(Process, CurrentThread);
+    Status = MiInsertPlaceholderVad(Process, Placeholder, StartingAddress, EndingAddress);
+    MiUnlockProcessWorkingSetUnsafe(Process, CurrentThread);
+    ASSERT(NT_SUCCESS(Status));
+    if (NT_SUCCESS(Status))
+    {
+        Process->VirtualSize += EndingAddress - StartingAddress + 1;
+    }
+    else
+    {
+        ExFreePoolWithTag(Placeholder, 'SdaV');
+        PsReturnProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
+    }
+
+    if (Attached) KeUnstackDetachProcess(&ApcState);
+}
+
+/* Flags: MEM_PRESERVE_PLACEHOLDER turns a view that replaced a placeholder back into one */
 static
 NTSTATUS
 MiUnmapViewOfSection(IN PEPROCESS Process,
@@ -844,12 +885,29 @@ MiUnmapViewOfSection(IN PEPROCESS Process,
     PVOID DbgBase = NULL;
     SIZE_T RegionSize;
     NTSTATUS Status;
+    PMMVAD_LONG Placeholder = NULL;
+    ULONG_PTR StartingAddress, EndingAddress;
     PETHREAD CurrentThread = PsGetCurrentThread();
     PEPROCESS CurrentProcess = PsGetCurrentProcess();
     PAGED_CODE();
 
-    /* Check if we need to lock the address space */
-    if (!Flags) MmLockAddressSpace(&Process->Vm);
+    /* The placeholder that will stay is allocated before any lock */
+    if (Flags & MEM_PRESERVE_PLACEHOLDER)
+    {
+        Placeholder = ExAllocatePoolWithTag(NonPagedPool, sizeof(MMVAD_LONG), 'SdaV');
+        if (!Placeholder) return STATUS_INSUFFICIENT_RESOURCES;
+        Status = PsChargeProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
+        if (!NT_SUCCESS(Status))
+        {
+            ExFreePoolWithTag(Placeholder, 'SdaV');
+            return Status;
+        }
+        MiInitializePlaceholderVad(Placeholder);
+    }
+
+    /* Lock the address space. It is always taken here now (the old Flags meant "the caller holds it"):
+       no caller may hold the address space lock of Process when it calls this */
+    MmLockAddressSpace(&Process->Vm);
 
     /* Find the VAD for the address and make sure it's a section VAD */
     Vad = MiLocateVad(&Process->VadRoot, BaseAddress);
@@ -857,9 +915,18 @@ MiUnmapViewOfSection(IN PEPROCESS Process,
     {
         /* Couldn't find it, or invalid VAD, fail */
         DPRINT1("No VAD or invalid VAD\n");
-        if (!Flags) MmUnlockAddressSpace(&Process->Vm);
-        return STATUS_NOT_MAPPED_VIEW;
+        Status = STATUS_NOT_MAPPED_VIEW;
+        goto FailUnlocked;
     }
+
+    /* Only a view that took the place of a placeholder can give it back */
+    if (Placeholder && !MI_IS_FROM_PLACEHOLDER_VAD(Vad))
+    {
+        Status = STATUS_CONFLICTING_ADDRESSES;
+        goto FailUnlocked;
+    }
+    StartingAddress = Vad->StartingVpn << PAGE_SHIFT;
+    EndingAddress = (Vad->EndingVpn << PAGE_SHIFT) | (PAGE_SIZE - 1);
 
     /* Check for RosMm memory area */
     if (MI_IS_MEMORY_AREA_VAD(Vad))
@@ -867,8 +934,12 @@ MiUnmapViewOfSection(IN PEPROCESS Process,
         /* Call Mm API */
         ASSERT(MI_IS_ROSMM_VAD(Vad));
         Status = MiRosUnmapViewOfSection(Process, (PMEMORY_AREA)Vad, BaseAddress, Process->ProcessExiting);
-        if (!Flags) MmUnlockAddressSpace(&Process->Vm);
-        return Status;
+        if (NT_SUCCESS(Status) && Placeholder)
+        {
+            MiPreservePlaceholder(Process, Placeholder, StartingAddress, EndingAddress);
+            Placeholder = NULL;
+        }
+        goto FailUnlocked;
     }
 
     /* Check if we should attach to the process */
@@ -884,7 +955,7 @@ MiUnmapViewOfSection(IN PEPROCESS Process,
     {
         /* Fail the call */
         DPRINT1("Process died!\n");
-        if (!Flags) MmUnlockAddressSpace(&Process->Vm);
+        MmUnlockAddressSpace(&Process->Vm);
         Status = STATUS_PROCESS_IS_TERMINATING;
         goto Quickie;
     }
@@ -913,7 +984,7 @@ MiUnmapViewOfSection(IN PEPROCESS Process,
         {
             /* We failed */
             DPRINT1("Trying to unmap protected VAD!\n");
-            if (!Flags) MmUnlockAddressSpace(&Process->Vm);
+            MmUnlockAddressSpace(&Process->Vm);
             goto Quickie;
         }
     }
@@ -934,7 +1005,13 @@ MiUnmapViewOfSection(IN PEPROCESS Process,
 
     /* Update performance counter and release the lock */
     Process->VirtualSize -= RegionSize;
-    if (!Flags) MmUnlockAddressSpace(&Process->Vm);
+    if (Placeholder)
+    {
+        /* We are attached: the placeholder goes in under the same address space lock */
+        MiPreservePlaceholder(Process, Placeholder, StartingAddress, EndingAddress);
+        Placeholder = NULL;
+    }
+    MmUnlockAddressSpace(&Process->Vm);
 
     /* Destroy the VAD and return success */
     ExFreePool(Vad);
@@ -942,9 +1019,55 @@ MiUnmapViewOfSection(IN PEPROCESS Process,
 
     /* Failure and success case -- send debugger message, detach, and return */
 Quickie:
+    if (Placeholder)
+    {
+        ExFreePoolWithTag(Placeholder, 'SdaV');
+        PsReturnProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
+    }
     if (DbgBase) DbgkUnMapViewOfSection(DbgBase);
     if (Attached) KeUnstackDetachProcess(&ApcState);
     return Status;
+
+FailUnlocked:
+    MmUnlockAddressSpace(&Process->Vm);
+    if (Placeholder)
+    {
+        ExFreePoolWithTag(Placeholder, 'SdaV');
+        PsReturnProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
+    }
+    return Status;
+}
+
+/*
+ * MEM_REPLACE_PLACEHOLDER: the error a replacement of the pages from StartingAddress, Size bytes,
+ * gets, as Windows (and Wine's tests) have it: no VAD at the address, or a VAD that is not a free
+ * placeholder, is STATUS_INVALID_PARAMETER; one of another range STATUS_CONFLICTING_ADDRESSES.
+ * The caller holds the address space lock of Process and is attached to it.
+ */
+NTSTATUS
+NTAPI
+MiCheckPlaceholderForReplace(
+    _In_ PEPROCESS Process,
+    _In_ ULONG_PTR StartingAddress,
+    _In_ SIZE_T Size,
+    _Out_opt_ PMMVAD *Placeholder)
+{
+    PMMVAD Vad;
+
+    if (!StartingAddress || !Size || (StartingAddress & (PAGE_SIZE - 1)))
+        return STATUS_INVALID_PARAMETER;
+
+    Vad = MiLocateVad(&Process->VadRoot, (PVOID)StartingAddress);
+    if (!Vad) return STATUS_INVALID_PARAMETER;
+    if ((Vad->StartingVpn != (StartingAddress >> PAGE_SHIFT)) ||
+        (Vad->EndingVpn != ((StartingAddress + Size - 1) >> PAGE_SHIFT)))
+    {
+        return STATUS_CONFLICTING_ADDRESSES;
+    }
+    if (!MI_IS_PLACEHOLDER_VAD(Vad) || MI_IS_MEMORY_AREA_VAD(Vad)) return STATUS_INVALID_PARAMETER;
+
+    if (Placeholder) *Placeholder = Vad;
+    return STATUS_SUCCESS;
 }
 
 static
@@ -1187,6 +1310,7 @@ MiMapViewOfDataSection(
     _In_range_(ViewShare, ViewUnmap) SECTION_INHERIT InheritDisposition,
     _In_ ULONG ProtectionMask,
     _In_ SIZE_T CommitSize,
+    _In_ ULONG_PTR LowestAddress,
     _In_ ULONG_PTR HighestAddress,
     _In_ ULONG AllocationType)
 {
@@ -1203,8 +1327,12 @@ MiMapViewOfDataSection(
     PMMPTE PointerPte, LastPte;
     MMPTE TempPte;
     ULONG Granularity = MM_VIRTMEM_GRANULARITY;
+    BOOLEAN Replace = (AllocationType & MEM_REPLACE_PLACEHOLDER) != 0;
 
     DPRINT("Mapping ARM3 data section\n");
+
+    /* A view that replaces a placeholder is mapped on pages, at the placeholder's address */
+    if (Replace) Granularity = PAGE_SIZE;
 
     /* Check for invalid inherit disposition */
     ASSERT((InheritDisposition >= ViewShare) && (InheritDisposition <= ViewUnmap));
@@ -1229,7 +1357,23 @@ MiMapViewOfDataSection(
     if (!NT_SUCCESS(Status)) return Status;
 
     /* Check if the caller specified the view size */
-    if (!(*ViewSize))
+    if (Replace)
+    {
+        /* Page granular: the offset is a page offset, and the view what the placeholder takes */
+        ASSERT((SectionOffset->LowPart & (PAGE_SIZE - 1)) == 0);
+        if (!(*ViewSize))
+        {
+            LONGLONG ViewSizeLL;
+            if (!NT_SUCCESS(RtlLongLongSub(Section->SizeOfSection.QuadPart, SectionOffset->QuadPart, &ViewSizeLL))
+                || !NT_SUCCESS(RtlLongLongToSIZET(ViewSizeLL, ViewSize))
+                || (*ViewSize > MAXLONG_PTR))
+            {
+                MiDereferenceControlArea(ControlArea);
+                return STATUS_INVALID_VIEW_SIZE;
+            }
+        }
+    }
+    else if (!(*ViewSize))
     {
         LONGLONG ViewSizeLL;
 
@@ -1261,7 +1405,7 @@ MiMapViewOfDataSection(
     }
 
     /* We must be dealing with a 64KB aligned offset. This is a Windows ASSERT */
-    ASSERT((SectionOffset->LowPart & ((ULONG)_64K - 1)) == 0);
+    ASSERT(Replace || ((SectionOffset->LowPart & ((ULONG)_64K - 1)) == 0));
 
     /* Windows ASSERTs for this flag */
     ASSERT(ControlArea->u.Flags.GlobalOnlyPerSession == 0);
@@ -1301,6 +1445,22 @@ MiMapViewOfDataSection(
 
     /* Calculate how many pages the region spans */
     ViewSizeInPages = BYTES_TO_PAGES(*ViewSize);
+
+    /* The placeholder must be there and be exactly this big (MiInsertVadEx checks it again atomically) */
+    if (Replace)
+    {
+        MmLockAddressSpace(&Process->Vm);
+        Status = MiCheckPlaceholderForReplace(Process,
+                                              (ULONG_PTR)*BaseAddress,
+                                              ViewSizeInPages * PAGE_SIZE,
+                                              NULL);
+        MmUnlockAddressSpace(&Process->Vm);
+        if (!NT_SUCCESS(Status))
+        {
+            MiDereferenceControlArea(ControlArea);
+            return Status;
+        }
+    }
 
     /*
      * Any page of a copy-on-write view can become private: charge the whole
@@ -1447,12 +1607,14 @@ MiMapViewOfDataSection(
     }
 
     /* Insert the VAD */
-    Status = MiInsertVadEx((PMMVAD)Vad,
-                           &StartAddress,
-                           ViewSizeInPages * PAGE_SIZE,
-                           HighestAddress,
-                           Granularity,
-                           AllocationType);
+    Status = MiInsertVadEx2((PMMVAD)Vad,
+                            &StartAddress,
+                            ViewSizeInPages * PAGE_SIZE,
+                            StartAddress ? 0 : LowestAddress,
+                            HighestAddress,
+                            Granularity,
+                            AllocationType,
+                            TRUE);
     if (!NT_SUCCESS(Status))
     {
         /* The committed prototype PTEs stay committed: the segment keeps their charge */
@@ -2721,7 +2883,9 @@ MmMapViewOfArm3Section(
     _Inout_ PSIZE_T ViewSize,
     _In_range_(ViewShare, ViewUnmap) SECTION_INHERIT InheritDisposition,
     _In_ ULONG AllocationType,
-    _In_ ULONG Protect)
+    _In_ ULONG Protect,
+    _In_ ULONG_PTR LowestAddress,
+    _In_ ULONG_PTR HighestBound)
 {
     KAPC_STATE ApcState;
     BOOLEAN Attached = FALSE;
@@ -2736,6 +2900,8 @@ MmMapViewOfArm3Section(
 
     if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress))
         return MI_PARAM_STATUS(4);
+    if (HighestBound && (HighestBound < HighestAddress))
+        HighestAddress = HighestBound;
 
     /* Check for invalid inherit disposition */
     // Let MiMapViewOfDataSection() check InheritDisposition value.
@@ -2842,6 +3008,7 @@ MmMapViewOfArm3Section(
 #ifdef _M_IX86
         if (AllocationType & MEM_DOS_LIM) Granularity = PAGE_SIZE;
 #endif
+        if (AllocationType & MEM_REPLACE_PLACEHOLDER) Granularity = PAGE_SIZE;
         StartAddress = ALIGN_DOWN_BY((ULONG_PTR)*BaseAddress, Granularity);
         if (StartAddress > HighestAddress ||
             *ViewSize > HighestAddress ||
@@ -2866,6 +3033,7 @@ MmMapViewOfArm3Section(
                                     InheritDisposition,
                                     ProtectionMask,
                                     CommitSize,
+                                    LowestAddress,
                                     HighestAddress,
                                     AllocationType);
 
@@ -3486,9 +3654,14 @@ NtOpenSection(OUT PHANDLE SectionHandle,
     return Status;
 }
 
+/*
+ * NtMapViewOfSection and NtMapViewOfSectionEx. Ex only: MEM_REPLACE_PLACEHOLDER maps the view
+ * into a free placeholder of exactly its size; the address and the offset then only have to be
+ * on a page.
+ */
+static
 NTSTATUS
-NTAPI
-NtMapViewOfSection(
+MiMapViewOfSectionCommon(
     _In_ HANDLE SectionHandle,
     _In_ HANDLE ProcessHandle,
     _Outptr_result_bytebuffer_(*ViewSize) _Pre_valid_ PVOID *BaseAddress,
@@ -3498,7 +3671,10 @@ NtMapViewOfSection(
     _Inout_ PSIZE_T ViewSize,
     _In_range_(ViewShare, ViewUnmap) SECTION_INHERIT InheritDisposition,
     _In_ ULONG AllocationType,
-    _In_ ULONG Win32Protect)
+    _In_ ULONG Win32Protect,
+    _In_ BOOLEAN IsEx,
+    _In_ ULONG_PTR LowestAddress,
+    _In_ ULONG_PTR HighestBound)
 {
     PVOID SafeBaseAddress;
     LARGE_INTEGER SafeSectionOffset;
@@ -3509,6 +3685,7 @@ NtMapViewOfSection(
     ACCESS_MASK DesiredAccess;
     ULONG ProtectionMask;
     ULONG_PTR HighestAddress;
+    ULONG_PTR Granularity = MM_VIRTMEM_GRANULARITY;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
 #if defined(_M_IX86) || defined(_M_AMD64)
     static const ULONG ValidAllocationType = (MEM_TOP_DOWN | MEM_LARGE_PAGES |
@@ -3526,10 +3703,22 @@ NtMapViewOfSection(
     }
 
     /* Allow only valid allocation types */
-    if (AllocationType & ~ValidAllocationType)
+    if (AllocationType & ~(ValidAllocationType | (IsEx ? MEM_REPLACE_PLACEHOLDER : 0)))
     {
         DPRINT1("Invalid allocation type\n");
         return MI_PARAM_STATUS(9);
+    }
+
+#ifdef _WIN64
+    /* AT_ROUND_TO_PAGE (MEM_DOS_LIM) is for 32-bit processes on a 32-bit system only (Wine's tests) */
+    if (IsEx && (AllocationType & MEM_DOS_LIM)) return STATUS_INVALID_PARAMETER;
+#endif
+
+    /* A placeholder is replaced on pages, at its own address (AT_ROUND_TO_PAGE has no meaning there) */
+    if (AllocationType & MEM_REPLACE_PLACEHOLDER)
+    {
+        if (AllocationType & (MEM_RESERVE | MEM_LARGE_PAGES | MEM_TOP_DOWN | MEM_DOS_LIM)) return STATUS_INVALID_PARAMETER;
+        Granularity = PAGE_SIZE;
     }
 
     /* Convert the protection mask, and validate it */
@@ -3638,7 +3827,7 @@ NtMapViewOfSection(
     else if (!(AllocationType & MEM_DOS_LIM))
     {
         /* Check for non-allocation-granularity-aligned BaseAddress */
-        if (SafeBaseAddress != ALIGN_DOWN_POINTER_BY(SafeBaseAddress, MM_VIRTMEM_GRANULARITY))
+        if (SafeBaseAddress != ALIGN_DOWN_POINTER_BY(SafeBaseAddress, Granularity))
         {
             DPRINT("BaseAddress is not at 64-kilobyte address boundary.\n");
             ObDereferenceObject(Section);
@@ -3647,7 +3836,7 @@ NtMapViewOfSection(
         }
 
         /* Do the same for the section offset */
-        if (SafeSectionOffset.LowPart != ALIGN_DOWN_BY(SafeSectionOffset.LowPart, MM_VIRTMEM_GRANULARITY))
+        if (SafeSectionOffset.LowPart != ALIGN_DOWN_BY(SafeSectionOffset.LowPart, Granularity))
         {
             DPRINT("SectionOffset is not at 64-kilobyte address boundary.\n");
             ObDereferenceObject(Section);
@@ -3657,7 +3846,7 @@ NtMapViewOfSection(
     }
 
     /* Now do the actual mapping */
-    Status = MmMapViewOfSection(Section,
+    Status = MiMapViewOfSection(Section,
                                 Process,
                                 &SafeBaseAddress,
                                 ZeroBits,
@@ -3666,7 +3855,9 @@ NtMapViewOfSection(
                                 &SafeViewSize,
                                 InheritDisposition,
                                 AllocationType,
-                                Win32Protect);
+                                Win32Protect,
+                                LowestAddress,
+                                HighestBound);
 
     /* Return data only on success */
     if (NT_SUCCESS(Status))
@@ -3700,6 +3891,177 @@ NtMapViewOfSection(
 
     /* Dereference all objects and return status */
     ObDereferenceObject(Section);
+    ObDereferenceObject(Process);
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+NtMapViewOfSection(
+    _In_ HANDLE SectionHandle,
+    _In_ HANDLE ProcessHandle,
+    _Outptr_result_bytebuffer_(*ViewSize) _Pre_valid_ PVOID *BaseAddress,
+    _In_ ULONG_PTR ZeroBits,
+    _In_ SIZE_T CommitSize,
+    _Inout_opt_ PLARGE_INTEGER SectionOffset,
+    _Inout_ PSIZE_T ViewSize,
+    _In_range_(ViewShare, ViewUnmap) SECTION_INHERIT InheritDisposition,
+    _In_ ULONG AllocationType,
+    _In_ ULONG Win32Protect)
+{
+    return MiMapViewOfSectionCommon(SectionHandle,
+                                    ProcessHandle,
+                                    BaseAddress,
+                                    ZeroBits,
+                                    CommitSize,
+                                    SectionOffset,
+                                    ViewSize,
+                                    InheritDisposition,
+                                    AllocationType,
+                                    Win32Protect,
+                                    FALSE,
+                                    0,
+                                    0);
+}
+
+/*
+ * The extended parameters: a MEM_ADDRESS_REQUIREMENTS without an alignment (STATUS_INVALID_PARAMETER
+ * with one, Windows 10 22H2); its lowest and highest addresses bound an automatic placement exactly.
+ */
+NTSTATUS
+NTAPI
+NtMapViewOfSectionEx(
+    _In_ HANDLE SectionHandle,
+    _In_ HANDLE ProcessHandle,
+    _Inout_ PVOID *BaseAddress,
+    _Inout_opt_ PLARGE_INTEGER SectionOffset,
+    _Inout_ PSIZE_T ViewSize,
+    _In_ ULONG AllocationType,
+    _In_ ULONG PageProtection,
+    _Inout_updates_opt_(ExtendedParameterCount) PMEM_EXTENDED_PARAMETER ExtendedParameters,
+    _In_ ULONG ExtendedParameterCount)
+{
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    ULONG_PTR LowestAddress, HighestAddress, Alignment, ZeroBits = 0;
+    /* ZeroBits stays 0: the requirement's bounds go down as they are */
+    PVOID SafeBaseAddress;
+    NTSTATUS Status;
+
+    Status = MiCaptureExtendedParameters(ExtendedParameters,
+                                         ExtendedParameterCount,
+                                         PreviousMode,
+                                         &LowestAddress,
+                                         &HighestAddress,
+                                         &Alignment);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (Alignment) return STATUS_INVALID_PARAMETER;
+
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode) ProbeForWritePointer(BaseAddress);
+        SafeBaseAddress = *BaseAddress;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    if (SafeBaseAddress && (LowestAddress || HighestAddress)) return STATUS_INVALID_PARAMETER;
+
+    /* A view that cannot fit between the bounds fails before anything is looked up */
+    if (HighestAddress)
+    {
+        SIZE_T RequestedSize = 0;
+        _SEH2_TRY
+        {
+            if (PreviousMode != KernelMode) ProbeForWriteSize_t(ViewSize);
+            RequestedSize = *ViewSize;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+        if (RequestedSize && (ROUND_TO_PAGES(RequestedSize) == 0 ||
+                              ROUND_TO_PAGES(RequestedSize) - 1 > HighestAddress - LowestAddress))
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+
+#ifndef _WIN64
+    /* A 32-bit system: a view that starts in user space and runs past it conflicts; one that starts
+       above it is an invalid parameter, as NtMapViewOfSection has it (Wine's tests) */
+    if ((ULONG_PTR)SafeBaseAddress <= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS)
+    {
+        SIZE_T SafeViewSize = 0;
+        _SEH2_TRY
+        {
+            if (PreviousMode != KernelMode) ProbeForWriteSize_t(ViewSize);
+            SafeViewSize = *ViewSize;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+        if (SafeBaseAddress && SafeViewSize &&
+            (SafeViewSize - 1 > (ULONG_PTR)MM_HIGHEST_USER_ADDRESS - (ULONG_PTR)SafeBaseAddress))
+        {
+            return STATUS_CONFLICTING_ADDRESSES;
+        }
+    }
+#endif
+
+
+    Status = MiMapViewOfSectionCommon(SectionHandle,
+                                      ProcessHandle,
+                                      BaseAddress,
+                                      ZeroBits,
+                                      0,
+                                      SectionOffset,
+                                      ViewSize,
+                                      ViewUnmap,
+                                      AllocationType,
+                                      PageProtection,
+                                      TRUE,
+                                      LowestAddress,
+                                      HighestAddress);
+    if ((Status >= STATUS_INVALID_PARAMETER_1) && (Status <= STATUS_INVALID_PARAMETER_12))
+        Status = STATUS_INVALID_PARAMETER;
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+NtUnmapViewOfSectionEx(
+    _In_ HANDLE ProcessHandle,
+    _In_opt_ PVOID BaseAddress,
+    _In_ ULONG Flags)
+{
+    PEPROCESS Process;
+    NTSTATUS Status;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+
+    /* The flags are checked before the process handle and the address are looked at (Windows 10 22H2) */
+    if (Flags & ~(MEM_UNMAP_WITH_TRANSIENT_BOOST | MEM_PRESERVE_PLACEHOLDER))
+        return STATUS_INVALID_PARAMETER;
+
+    if ((PreviousMode == UserMode) && (BaseAddress > MM_HIGHEST_USER_ADDRESS))
+        return STATUS_NOT_MAPPED_VIEW;
+
+    Status = ObReferenceObjectByHandle(ProcessHandle,
+                                       PROCESS_VM_OPERATION,
+                                       PsProcessType,
+                                       PreviousMode,
+                                       (PVOID*)&Process,
+                                       NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    /* The transient boost is a scheduling hint: there is nothing to boost here */
+    Status = MiUnmapViewOfSection(Process, BaseAddress, Flags & MEM_PRESERVE_PLACEHOLDER);
+
     ObDereferenceObject(Process);
     return Status;
 }
