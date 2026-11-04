@@ -123,9 +123,14 @@ void __RPC_USER midl_user_free(void __RPC_FAR * ptr)
 }
 
 
+NTSTATUS NTAPI SamrCloseHandle(IN OUT SAMPR_HANDLE *SamHandle);
+
 void __RPC_USER SAMPR_HANDLE_rundown(SAMPR_HANDLE hHandle)
 {
-    FIXME("SAMPR_HANDLE_rundown(%p)\n", hHandle);
+    /* The client went away holding the handle: close it like SamrCloseHandle does */
+    TRACE("SAMPR_HANDLE_rundown(%p)\n", hHandle);
+
+    SamrCloseHandle(&hHandle);
 }
 
 
