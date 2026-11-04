@@ -263,6 +263,51 @@ HalpGetAdapterMaximumPhysicalAddress(IN PADAPTER_OBJECT AdapterObject)
 }
 
 #ifndef _MINIHAL_
+
+#if DBG
+/*
+ * Test knob, checked builds only: Services\HalDmaFault\FailMask, read whenever HalGetAdapter runs.
+ *  1: the work item that grows the map buffers fails (as if no contiguous memory were left)
+ *  2: no work item can be allocated for a request that has to wait for more map registers
+ *  4: HalGetAdapter does not grow the map registers up front for its device
+ * Without the knob the master adapter's map registers always suffice for any one request (HalGetAdapter
+ * makes sure of it), so a request can only wait for another one to finish.
+ */
+#define HAL_DMA_FAULT_GROW_FAILS     1
+#define HAL_DMA_FAULT_NO_WORK_ITEM   2
+#define HAL_DMA_FAULT_NO_PREGROW     4
+static volatile LONG HalpDmaFaultMask;
+
+static
+VOID
+HalpDmaReadFaultMask(VOID)
+{
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\HalDmaFault");
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"FailMask");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PVOID)Buffer;
+    ULONG Length, Mask = 0;
+    HANDLE Key;
+
+    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    if (NT_SUCCESS(ZwOpenKey(&Key, KEY_READ, &ObjectAttributes)))
+    {
+        if (NT_SUCCESS(ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length)) &&
+            Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+        {
+            Mask = *(PULONG)Info->Data;
+        }
+        ZwClose(Key);
+    }
+    InterlockedExchange(&HalpDmaFaultMask, (LONG)Mask);
+}
+#define HalpDmaFault(Bit) ((HalpDmaFaultMask & (Bit)) != 0)
+#else
+#define HalpDmaReadFaultMask() ((void)0)
+#define HalpDmaFault(Bit) FALSE
+#endif
+
 /**
  * @name HalpGrowMapBuffers
  *
@@ -734,6 +779,8 @@ HalGetAdapter(IN PDEVICE_DESCRIPTION DeviceDescription,
     /* Validate parameters in device description */
     if (DeviceDescription->Version > DEVICE_DESCRIPTION_VERSION2) return NULL;
 
+    HalpDmaReadFaultMask();
+
     /*
      * See if we're going to use ISA/EISA DMA adapter. These adapters are
      * special since they're reused.
@@ -826,6 +873,7 @@ HalGetAdapter(IN PDEVICE_DESCRIPTION DeviceDescription,
            need, so a lone request never waits for a grow that can fail */
         if (!(HalpSgMasterAdapter) ||
             ((HalpSgMasterAdapter->NumberOfMapRegisters < MapRegisters) &&
+             !HalpDmaFault(HAL_DMA_FAULT_NO_PREGROW) &&
              !HalpGrowMapBuffers(HalpSgMasterAdapter,
                                  (MapRegisters - HalpSgMasterAdapter->NumberOfMapRegisters) << PAGE_SHIFT)))
         {
@@ -1530,7 +1578,8 @@ HalpGrowMapBufferWorker(IN PVOID DeferredContext)
      * registers than needed as an optimization.
      */
     KeWaitForSingleObject(&HalpDmaLock, Executive, KernelMode, FALSE, NULL);
-    Succeeded = HalpGrowMapBuffers(WorkItem->AdapterObject->MasterAdapter,
+    Succeeded = !HalpDmaFault(HAL_DMA_FAULT_GROW_FAILS) &&
+                HalpGrowMapBuffers(WorkItem->AdapterObject->MasterAdapter,
                                    WorkItem->NumberOfMapRegisters << PAGE_SHIFT);
     KeSetEvent(&HalpDmaLock, 0, 0);
 
@@ -1655,7 +1704,8 @@ HalAllocateAdapterChannel(IN PADAPTER_OBJECT AdapterObject,
         {
             InsertTailList(&MasterAdapter->AdapterQueue, &AdapterObject->AdapterQueue);
 
-            WorkItem = ExAllocatePoolWithTag(NonPagedPool,
+            WorkItem = HalpDmaFault(HAL_DMA_FAULT_NO_WORK_ITEM) ? NULL :
+                       ExAllocatePoolWithTag(NonPagedPool,
                                              sizeof(GROW_WORK_ITEM),
                                              TAG_DMA);
             if (WorkItem)
