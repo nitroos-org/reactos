@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    ActivationFilter.c
     ApartmentEndpoint.c
     InprocLoadFailure.c
     LocalServerStartup.c
