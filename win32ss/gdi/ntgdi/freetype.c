@@ -7474,11 +7474,23 @@ IntExtTextOutW(
 
     if (lprc && (fuOptions & (ETO_CLIPPED | ETO_OPAQUE)))
     {
+        /* Nothing is drawn outside the 28-bit coordinate space, and clamping
+           to it keeps the offset and the extents below from overflowing for a
+           rectangle reaching INT_MAX (DrawText, WinForms TextRenderer) */
         IntLPtoDP(dc, (POINT*)lprc, 2);
-        lprc->left   += dc->ptlDCOrig.x;
-        lprc->top    += dc->ptlDCOrig.y;
-        lprc->right  += dc->ptlDCOrig.x;
-        lprc->bottom += dc->ptlDCOrig.y;
+        lprc->left   = INTERNAL_lClampCoord((LONGLONG)lprc->left + dc->ptlDCOrig.x);
+        lprc->top    = INTERNAL_lClampCoord((LONGLONG)lprc->top + dc->ptlDCOrig.y);
+        lprc->right  = INTERNAL_lClampCoord((LONGLONG)lprc->right + dc->ptlDCOrig.x);
+        lprc->bottom = INTERNAL_lClampCoord((LONGLONG)lprc->bottom + dc->ptlDCOrig.y);
+
+        /* Clipped to an empty rectangle (e.g. one entirely beyond the coordinate
+           space, clamped to its edge), the text draws nothing */
+        if ((fuOptions & ETO_CLIPPED) && !(pdcattr->flTextAlign & TA_UPDATECP) &&
+            (lprc->left == lprc->right || lprc->top == lprc->bottom))
+        {
+            bResult = TRUE;
+            goto Cleanup;
+        }
     }
 
     if (lprc && (fuOptions & ETO_OPAQUE))

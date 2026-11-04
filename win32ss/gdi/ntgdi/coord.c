@@ -415,12 +415,16 @@ NtGdiTransformPoints(
 
     switch (iMode)
     {
+        /* A coordinate that overflows is saturated; the call still succeeds
+           (on Windows too, LPtoDP succeeds then) */
         case GdiDpToLp:
-            ret = INTERNAL_APPLY_MATRIX(DC_pmxDeviceToWorld(pdc), Points, Count);
+            INTERNAL_APPLY_MATRIX(DC_pmxDeviceToWorld(pdc), Points, Count);
+            ret = TRUE;
             break;
 
         case GdiLpToDp:
-            ret = INTERNAL_APPLY_MATRIX(DC_pmxWorldToDevice(pdc), Points, Count);
+            INTERNAL_APPLY_MATRIX(DC_pmxWorldToDevice(pdc), Points, Count);
+            ret = TRUE;
             break;
 
         case 2: // Not supported yet. Need testing.

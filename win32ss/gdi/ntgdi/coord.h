@@ -5,13 +5,126 @@
 #define MAX_COORD (INT_MAX / 16)
 
 /*
+ * Converts a FLOATOBJ to a LONG, truncating like FLOATOBJ_bConvertToLong, but a
+ * value outside the LONG range gives LONG_MIN or LONG_MAX (never undefined
+ * behaviour). Returns FALSE when the value had to be saturated.
+ */
+static
+inline
+BOOLEAN
+INTERNAL_FLOATOBJ_bToLongSat(FLOATOBJ *pf, PLONG pl)
+{
+#if defined(_M_IX86)
+    if (FLOATOBJ_bConvertToLong(pf, pl))
+        return TRUE;
+    *pl = (((EFLOAT_S*)pf)->lMant < 0) ? LONG_MIN : LONG_MAX;
+    return FALSE;
+#else
+    FLOAT f = *pf;
+
+    if (f >= 2147483648.0f)
+    {
+        *pl = LONG_MAX;
+        return FALSE;
+    }
+    if (f < -2147483648.0f)
+    {
+        *pl = LONG_MIN;
+        return FALSE;
+    }
+    if (f != f)
+    {
+        /* NaN */
+        *pl = 0;
+        return FALSE;
+    }
+    *pl = (LONG)f;
+    return TRUE;
+#endif
+}
+
+/* TRUE if the FLOATOBJ holds an integer that fits a LONG; it is returned in *pl */
+static
+inline
+BOOLEAN
+INTERNAL_FLOATOBJ_bIsExactLong(FLOATOBJ *pf, PLONG pl)
+{
+#if defined(_M_IX86)
+    return FLOATOBJ_IsLong(pf) && FLOATOBJ_bConvertToLong(pf, pl);
+#else
+    return INTERNAL_FLOATOBJ_bToLongSat(pf, pl) && ((FLOAT)*pl == *pf);
+#endif
+}
+
+/* a + b, saturated to the LONG range; clears *pbOk when it saturates */
+static
+inline
+LONG
+INTERNAL_lAddSat(LONG a, LONG b, BOOLEAN *pbOk)
+{
+    LONGLONG ll = (LONGLONG)a + b;
+
+    if (ll > LONG_MAX)
+    {
+        *pbOk = FALSE;
+        return LONG_MAX;
+    }
+    if (ll < LONG_MIN)
+    {
+        *pbOk = FALSE;
+        return LONG_MIN;
+    }
+    return (LONG)ll;
+}
+
+/* Clamps a value to the device coordinate space [MIN_COORD, MAX_COORD] */
+static
+inline
+LONG
+INTERNAL_lClampCoord(LONGLONG ll)
+{
+    if (ll > MAX_COORD)
+        return MAX_COORD;
+    if (ll < MIN_COORD)
+        return MIN_COORD;
+    return (LONG)ll;
+}
+
+/*
  * Applies matrix (which is made of FLOATOBJs) to the points array, which are made of integers.
+ *
+ * A transform without scaling (identity, or an integer offset such as a window
+ * or viewport origin) is exact, as on Windows: coordinates up to INT_MAX pass the
+ * identity unchanged. (A FLOAT holds 24 bits, so on amd64 they used to be
+ * rounded, and INT_MAX became 2^31, which does not fit a LONG.) A result outside
+ * the LONG range is saturated and the function returns FALSE; every point is
+ * transformed either way.
  */
 static
 inline
 BOOLEAN
 INTERNAL_APPLY_MATRIX(PMATRIX matrix, LPPOINT points, UINT count)
 {
+    BOOLEAN bResult = TRUE;
+    LONG lDx, lDy;
+
+    if ((matrix->flAccel & (XFORM_SCALE | XFORM_UNITY)) == (XFORM_SCALE | XFORM_UNITY))
+    {
+        if (matrix->flAccel & XFORM_NO_TRANSLATION)
+            return TRUE;
+
+        if (INTERNAL_FLOATOBJ_bIsExactLong(&matrix->efDx, &lDx) &&
+            INTERNAL_FLOATOBJ_bIsExactLong(&matrix->efDy, &lDy))
+        {
+            while (count--)
+            {
+                points[count].x = INTERNAL_lAddSat(points[count].x, lDx, &bResult);
+                points[count].y = INTERNAL_lAddSat(points[count].y, lDy, &bResult);
+            }
+            return bResult;
+        }
+    }
+
     while (count--)
     {
         FLOATOBJ x, y;
@@ -33,12 +146,12 @@ INTERNAL_APPLY_MATRIX(PMATRIX matrix, LPPOINT points, UINT count)
         FLOATOBJ_Add(&y, &tmp);
         FLOATOBJ_Add(&y, &matrix->efDy);
 
-        if (!FLOATOBJ_bConvertToLong(&x, &points[count].x))
-            return FALSE;
-        if (!FLOATOBJ_bConvertToLong(&y, &points[count].y))
-            return FALSE;
+        if (!INTERNAL_FLOATOBJ_bToLongSat(&x, &points[count].x))
+            bResult = FALSE;
+        if (!INTERNAL_FLOATOBJ_bToLongSat(&y, &points[count].y))
+            bResult = FALSE;
     }
-    return TRUE;
+    return bResult;
 }
 
 static

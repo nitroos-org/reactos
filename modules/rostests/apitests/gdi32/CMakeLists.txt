@@ -7,6 +7,7 @@ list(APPEND SOURCE
     AddFontResourceEx.c
     BeginPath.c
     BitBltPointer.c
+    ClipExtremeCoords.c
     CombineRgn.c
     CombineTransform.c
     CreateBitmap.c
