@@ -80,6 +80,71 @@ RunConsoleHelper(PCSTR Mode)
     }
 }
 
+/* Runs inside the pseudoconsole: a character outside the BMP (a surrogate pair in the console
+ * buffer) must reach the terminal as one UTF-8 sequence, not as two replacement characters. */
+static VOID
+RunEmojiHelper(VOID)
+{
+    static const WCHAR Text[] = { 'E', 'M', ':', 0xD83D, 0xDE00, ':', 'E', 'N', 'D', '\r', '\n' };
+    DWORD Written;
+
+    WriteConsoleW(GetStdHandle(STD_OUTPUT_HANDLE), Text, _countof(Text), &Written, NULL);
+    Sleep(1500);
+}
+
+/* Runs inside the pseudoconsole: report the key events (down only) of Ctrl+O and of a character
+ * outside the BMP typed in the terminal: virtual key / character / control key state. */
+static VOID
+RunKeysHelper(VOID)
+{
+    HANDLE Input = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               NULL, OPEN_EXISTING, 0, NULL);
+    CHAR Text[128];
+    INPUT_RECORD Record;
+    DWORD Count = 0, Read, Used;
+
+    if (Input == INVALID_HANDLE_VALUE || !SetConsoleMode(Input, 0))
+    {
+        ConsoleSay("KEYS=error\r\n");
+        return;
+    }
+    ConsoleSay("READYKEYS\r\n");
+    StringCchCopyA(Text, sizeof(Text), "KEYS=");
+    Used = lstrlenA(Text);
+    while (Count < 3)
+    {
+        if (!ReadConsoleInputW(Input, &Record, 1, &Read) || !Read) break;
+        if (Record.EventType != KEY_EVENT || !Record.Event.KeyEvent.bKeyDown) continue;
+        StringCchPrintfA(Text + Used, sizeof(Text) - Used, "%04X/%04X/%04lX;",
+                         Record.Event.KeyEvent.wVirtualKeyCode, Record.Event.KeyEvent.uChar.UnicodeChar,
+                         Record.Event.KeyEvent.dwControlKeyState & ~(DWORD)ENHANCED_KEY);
+        Used = lstrlenA(Text);
+        ++Count;
+    }
+    StringCchCatA(Text, sizeof(Text), "\r\n");
+    ConsoleSay(Text);
+}
+
+/* Runs inside the pseudoconsole: draw in a screen buffer of its own and make it the active one
+ * (curses programs such as nano for Windows do); the terminal must show that buffer. */
+static VOID
+RunAltBufferHelper(VOID)
+{
+    static const CHAR Text[] = "ALTBUFTEXT";
+    HANDLE Buffer = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                              NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
+    COORD Origin = {5, 3};
+    DWORD Written;
+
+    if (Buffer == INVALID_HANDLE_VALUE || !SetConsoleActiveScreenBuffer(Buffer))
+    {
+        ConsoleSay("ALTBUF=error\r\n");
+        return;
+    }
+    WriteConsoleOutputCharacterA(Buffer, Text, lstrlenA(Text), Origin, &Written);
+    Sleep(3000);
+}
+
 #ifndef ENABLE_VIRTUAL_TERMINAL_INPUT
 #define ENABLE_VIRTUAL_TERMINAL_INPUT 0x0200
 #endif
@@ -677,6 +742,88 @@ CheckLargeCreate(PCWSTR ExePath)
     CloseHandle(OutWrite);
 }
 
+/* What a terminal receives for a helper's console output: wait for Expected (a byte string). */
+static VOID
+CheckHelperOutput(PCWSTR ExePath, PCSTR Mode, PCSTR Expected, PCSTR Message)
+{
+    HANDLE InRead = NULL, InWrite = NULL, OutRead = NULL, OutWrite = NULL;
+    PROCESS_INFORMATION Child;
+    WCHAR Command[MAX_PATH * 2];
+    COORD Size = {80, 25};
+    PVOID Pty = NULL;
+    HRESULT Status;
+
+    if (!CreatePipe(&InRead, &InWrite, NULL, 0) || !CreatePipe(&OutRead, &OutWrite, NULL, 0))
+    {
+        ok(FALSE, "CreatePipe failed\n");
+        return;
+    }
+    Status = CreatePty(Size, InRead, OutWrite, 0, &Pty);
+    ok(Status == S_OK, "CreatePseudoConsole failed: %08lx\n", Status);
+    if (Status == S_OK)
+    {
+        StringCchPrintfW(Command, _countof(Command), L"\"%ls\" ConPty %hs", ExePath, Mode);
+        if (SpawnWithPty(Pty, Command, FALSE, &Child))
+        {
+            ok(WaitForText(OutRead, Expected, 10000), "%s\n", Message);
+            WaitForSingleObject(Child.hProcess, 8000);
+            CloseHandle(Child.hThread);
+            CloseHandle(Child.hProcess);
+        }
+        else
+            ok(FALSE, "CreateProcess with the pseudoconsole failed: %lu\n", GetLastError());
+        ClosePty(Pty);
+    }
+    CloseHandle(InRead);
+    CloseHandle(InWrite);
+    CloseHandle(OutRead);
+    CloseHandle(OutWrite);
+}
+
+/* Bytes typed in the terminal become key events as Windows reports them: Ctrl+O is VK 'O' with
+ * LEFT_CTRL_PRESSED and the character 0x0F, U+1F600 (UTF-8 F0 9F 98 80) is two events, one per
+ * UTF-16 unit. */
+static VOID
+CheckKeyTranslation(PCWSTR ExePath)
+{
+    HANDLE InRead = NULL, InWrite = NULL, OutRead = NULL, OutWrite = NULL;
+    PROCESS_INFORMATION Child;
+    WCHAR Command[MAX_PATH * 2];
+    COORD Size = {80, 25};
+    PVOID Pty = NULL;
+    HRESULT Status;
+    DWORD Written;
+
+    if (!CreatePipe(&InRead, &InWrite, NULL, 0) || !CreatePipe(&OutRead, &OutWrite, NULL, 0))
+    {
+        ok(FALSE, "CreatePipe failed\n");
+        return;
+    }
+    Status = CreatePty(Size, InRead, OutWrite, 0, &Pty);
+    ok(Status == S_OK, "CreatePseudoConsole failed: %08lx\n", Status);
+    if (Status == S_OK)
+    {
+        StringCchPrintfW(Command, _countof(Command), L"\"%ls\" ConPty helper-keys", ExePath);
+        if (SpawnWithPty(Pty, Command, FALSE, &Child))
+        {
+            ok(WaitForText(OutRead, "READYKEYS", 10000), "Key helper did not start\n");
+            ok(WriteFile(InWrite, "\x0f\xf0\x9f\x98\x80", 5, &Written, NULL) && Written == 5, "Input write failed\n");
+            ok(WaitForText(OutRead, "KEYS=004F/000F/0008;0000/D83D/0000;0000/DE00/0000;", 10000),
+               "Ctrl+O or a character outside the BMP did not arrive as Windows key events\n");
+            WaitForSingleObject(Child.hProcess, 3000);
+            CloseHandle(Child.hThread);
+            CloseHandle(Child.hProcess);
+        }
+        else
+            ok(FALSE, "CreateProcess with the pseudoconsole failed: %lu\n", GetLastError());
+        ClosePty(Pty);
+    }
+    CloseHandle(InRead);
+    CloseHandle(InWrite);
+    CloseHandle(OutRead);
+    CloseHandle(OutWrite);
+}
+
 /* node-pty (VS Code, conpty.cc): overlapped-capable named pipes, flags RESIZE_QUIRK|WIN32_INPUT_MODE
  * (|INHERIT_CURSOR), NULL standard handles in STARTUPINFOEX, CreateProcessW without inheritance. */
 static VOID
@@ -801,6 +948,21 @@ START_TEST(ConPty)
             RunConsoleHelper(argv[2]);
             return;
         }
+        if (argc >= 3 && !strcmp(argv[2], "helper-keys"))
+        {
+            RunKeysHelper();
+            return;
+        }
+        if (argc >= 3 && !strcmp(argv[2], "helper-emoji"))
+        {
+            RunEmojiHelper();
+            return;
+        }
+        if (argc >= 3 && !strcmp(argv[2], "helper-altbuf"))
+        {
+            RunAltBufferHelper();
+            return;
+        }
         if (argc >= 3 && !strcmp(argv[2], "helper-vtinput"))
         {
             RunVtInputHelper();
@@ -829,6 +991,11 @@ START_TEST(ConPty)
         CheckForgedRequests();
         CheckCloseWithInheritingChild(ExePath);
         CheckLargeCreate(ExePath);
+        CheckHelperOutput(ExePath, "helper-emoji", "EM:\xF0\x9F\x98\x80:END",
+                          "A character outside the BMP (U+1F600) did not reach the terminal as one UTF-8 sequence");
+        CheckKeyTranslation(ExePath);
+        CheckHelperOutput(ExePath, "helper-altbuf", "ALTBUFTEXT",
+                          "Text drawn in the client's active screen buffer did not reach the terminal");
         CheckNodePtSequence(0x6, FALSE);   /* RESIZE_QUIRK | WIN32_INPUT_MODE */
         CheckNodePtSequence(0x7, FALSE);   /* ... | INHERIT_CURSOR */
         CheckNodePtSequence(0x8, FALSE);   /* PASSTHROUGH (Windows 11) */
