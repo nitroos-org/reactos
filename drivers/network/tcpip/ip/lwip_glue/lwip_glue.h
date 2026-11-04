@@ -96,6 +96,8 @@ struct lwip_callback_msg
 };
 
 NTSTATUS    LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PUCHAR RecvBuffer, UINT RecvLen, UINT *Received);
+VOID        LibTCPReturnReceiveCredit(PCONNECTION_ENDPOINT Connection);
+NTSTATUS    LibTCPSetReceiveWindow(PCONNECTION_ENDPOINT Connection, ULONG Size);
 
 /* External TCP event handlers */
 extern void TCPConnectEventHandler(void *arg, const err_t err);
