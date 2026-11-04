@@ -229,6 +229,8 @@ typedef struct _AFD_FCB {
     ULONG_PTR SendDeferredBytes;
     PIRP AcceptIrp;
     AFD_DATA_WINDOW Send, Recv;
+    /* SO_RCVBUF, the largest receive window the transport may offer (0: the transport default) */
+    ULONG RecvHint;
     KMUTEX Mutex;
     KEVENT InFlightIdle;
     PKEVENT EventSelect;
@@ -414,6 +416,8 @@ IO_COMPLETION_ROUTINE AcceptExReceiveComplete;
 IO_COMPLETION_ROUTINE ReceiveComplete;
 
 IO_COMPLETION_ROUTINE PacketSocketRecvComplete;
+
+NTSTATUS AfdApplyReceiveHint(PAFD_FCB FCB);
 
 NTSTATUS NTAPI
 AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp, BOOLEAN Short);

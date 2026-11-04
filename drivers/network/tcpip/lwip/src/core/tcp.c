@@ -997,7 +997,7 @@ tcp_recved(struct tcp_pcb *pcb, u16_t len)
    * watermark is TCP_WND/4), then send an explicit update now.
    * Otherwise wait for a packet to be sent in the normal course of
    * events (or more window to be available later) */
-  if (wnd_inflation >= TCP_WND_UPDATE_THRESHOLD) {
+  if (wnd_inflation >= LWIP_MIN(TCP_WND_UPDATE_THRESHOLD, pcb->rcv_wnd_max / 2)) {
     tcp_ack_now(pcb);
     tcp_output(pcb);
   }
@@ -1897,6 +1897,7 @@ tcp_alloc(u8_t prio)
     /* Start with a window that does not need scaling. When window scaling is
        enabled and used, the window is enlarged when both sides agree on scaling. */
     pcb->rcv_wnd = pcb->rcv_ann_wnd = TCPWND_MIN16(TCP_WND);
+    pcb->rcv_wnd_max = TCP_WND_DEFAULT;
     pcb->ttl = TCP_TTL;
     /* As initial send MSS, we use TCP_MSS but limit it to 536.
        The send MSS is updated when an MSS option is received. */
