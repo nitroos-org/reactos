@@ -75,4 +75,5 @@ BEGIN
     IDS_IMPERSONATE_PRIVILEGE "Annehmen der Clientidentität nach Authentifizierung"
     IDS_CREATE_GLOBAL_PRIVILEGE "Erstellen globaler Objekte"
     IDS_TIME_ZONE_PRIVILEGE "Ändern der Zeitzone"
+    IDS_CREATE_SYMBOLIC_LINK_PRIVILEGE "Create symbolic links"
 END

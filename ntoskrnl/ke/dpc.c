@@ -479,6 +479,15 @@ KiQuantumEnd(VOID)
         KeSetEvent(&Prcb->DpcEvent, 0, 0);
     }
 
+    /* The clock tick asked for a foreground reclaim without ending the
+       quantum: a background thread has been running since the last tick while
+       a foreground thread of its priority waits. This may put a thread on
+       standby, which is switched to below */
+    if (Thread->Quantum > 0)
+    {
+        KiForegroundReclaim(Prcb);
+    }
+
     /* Raise to synchronization level and lock the PRCB and thread */
     KeRaiseIrqlToSynchLevel();
     KiAcquireThreadLock(Thread);

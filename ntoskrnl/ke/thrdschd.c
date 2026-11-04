@@ -1144,6 +1144,75 @@ KiSetPriorityThread(IN PKTHREAD Thread,
     }
 }
 
+/*
+ * The foreground boost of a thread that spins: a thread of the foreground
+ * process that waits in the ready queue behind a background thread of its own
+ * priority is raised by the priority separation, once the background thread has
+ * had one clock tick. The boost decays at the end of the thread's next quantum
+ * (the priority decrement), so the foreground thread then runs a full quantum
+ * and the background thread gets the processor again for a tick in between.
+ * Called at DISPATCH_LEVEL on the processor whose running thread is the
+ * background thread.
+ */
+VOID
+FASTCALL
+KiForegroundReclaim(
+    _In_ PKPRCB Prcb)
+{
+    KIRQL OldIrql;
+    PKTHREAD Current, Candidate = NULL, Thread;
+    PLIST_ENTRY ListHead, Entry;
+    KPRIORITY Priority, NewPriority;
+
+    OldIrql = KiAcquireDispatcherLock();
+    Current = Prcb->CurrentThread;
+    Priority = Current->Priority;
+    if ((Priority < LOW_REALTIME_PRIORITY) &&
+        (Current != Prcb->IdleThread) && PsPrioritySeparation)
+    {
+        KiAcquirePrcbLock(Prcb);
+        ListHead = &Prcb->DispatcherReadyListHead[Priority];
+        for (Entry = ListHead->Flink; Entry != ListHead; Entry = Entry->Flink)
+        {
+            Thread = CONTAINING_RECORD(Entry, KTHREAD, WaitListEntry);
+            if ((Thread->Priority == Priority) && !Thread->PriorityDecrement &&
+                !Thread->DisableBoost &&
+                (Thread->BasePriority < (LOW_REALTIME_PRIORITY - 2)) &&
+                (CONTAINING_RECORD(Thread->ApcState.Process, EPROCESS, Pcb)->
+                 Vm.Flags.MemoryPriority == MEMORY_PRIORITY_FOREGROUND))
+            {
+                Candidate = Thread;
+                break;
+            }
+        }
+        KiReleasePrcbLock(Prcb);
+    }
+
+    if (Candidate)
+    {
+        /* The dispatcher lock keeps the thread from terminating; the state
+           is checked again under the thread lock */
+        KiAcquireThreadLock(Candidate);
+        if ((Candidate->State == Ready) && (Candidate->Priority == Priority) &&
+            !Candidate->PriorityDecrement &&
+            (Candidate->NextProcessor == Prcb->Number))
+        {
+            NewPriority = Priority + (KPRIORITY)PsPrioritySeparation;
+            if (NewPriority >= LOW_REALTIME_PRIORITY)
+                NewPriority = LOW_REALTIME_PRIORITY - 1;
+            if (NewPriority > Priority)
+            {
+                Candidate->PriorityDecrement = (SCHAR)(NewPriority -
+                                                       Candidate->BasePriority);
+                KiSetPriorityThread(Candidate, NewPriority);
+            }
+        }
+        KiReleaseThreadLock(Candidate);
+    }
+
+    KiReleaseDispatcherLock(OldIrql);
+}
+
 #ifdef CONFIG_SMP
 static
 VOID

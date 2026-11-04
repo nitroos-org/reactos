@@ -381,10 +381,99 @@ static void STDMETHODCALLTYPE dxgi_factory_UnregisterOcclusionStatus(IWineDXGIFa
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWineDXGIFactory *iface,
         IUnknown *device, const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
-    FIXME("iface %p, device %p, desc %p, output %p, swapchain %p stub!\n",
+    IWineDXGISwapChainFactory *swapchain_factory;
+    ID3D12CommandQueue *command_queue;
+    DXGI_SWAP_CHAIN_DESC1 composition_desc;
+    BOOL gdi_flag = FALSE;
+    HWND window;
+    HRESULT hr;
+
+    TRACE("iface %p, device %p, desc %p, output %p, swapchain %p.\n",
             iface, device, desc, output, swapchain);
 
-    return E_NOTIMPL;
+    if (!device || !desc || !swapchain)
+    {
+        WARN("Invalid pointer.\n");
+        return DXGI_ERROR_INVALID_CALL;
+    }
+    *swapchain = NULL;
+
+    if (desc->Stereo)
+    {
+        FIXME("Stereo swapchains are not supported.\n");
+        return DXGI_ERROR_UNSUPPORTED;
+    }
+
+    /* no window to take a size from, the flip model and stretching only */
+    if (!desc->Width || !desc->Height || desc->Scaling != DXGI_SCALING_STRETCH
+            || (desc->SwapEffect != DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL && desc->SwapEffect != DXGI_SWAP_EFFECT_FLIP_DISCARD))
+    {
+        WARN("Invalid composition swap chain desc: size %ux%u, scaling %#x, swap effect %#x.\n",
+                desc->Width, desc->Height, desc->Scaling, desc->SwapEffect);
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    if (!dxgi_validate_swapchain_desc(desc))
+        return DXGI_ERROR_INVALID_CALL;
+
+    if (output)
+        FIXME("Ignoring output %p.\n", output);
+
+    if (SUCCEEDED(IUnknown_QueryInterface(device, &IID_ID3D12CommandQueue, (void **)&command_queue)))
+    {
+        ID3D12CommandQueue_Release(command_queue);
+        FIXME("Composition swap chains for Direct3D 12 are not implemented.\n");
+        return E_NOTIMPL;
+    }
+
+    if (FAILED(IUnknown_QueryInterface(device, &IID_IWineDXGISwapChainFactory, (void **)&swapchain_factory)))
+    {
+        FIXME("Composition swap chains for device %p are not implemented.\n", device);
+        return E_NOTIMPL;
+    }
+
+    /* the back buffers are copied to the composition target with GDI */
+    composition_desc = *desc;
+    if (composition_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM
+            && !(composition_desc.Flags & DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE))
+    {
+        composition_desc.Flags |= DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
+        gdi_flag = TRUE;
+    }
+    if (composition_desc.AlphaMode != DXGI_ALPHA_MODE_UNSPECIFIED && composition_desc.AlphaMode != DXGI_ALPHA_MODE_IGNORE)
+    {
+        WARN("Showing alpha mode %#x as opaque.\n", composition_desc.AlphaMode);
+        composition_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    }
+
+    if (!(window = dxgi_create_composition_window(desc->Width, desc->Height)))
+    {
+        IWineDXGISwapChainFactory_Release(swapchain_factory);
+        return E_FAIL;
+    }
+
+    hr = IWineDXGISwapChainFactory_create_swapchain(swapchain_factory,
+            (IDXGIFactory *)iface, window, &composition_desc, NULL, NULL, swapchain);
+    IWineDXGISwapChainFactory_Release(swapchain_factory);
+    if (FAILED(hr))
+    {
+        WARN("Failed to create composition swap chain, hr %#lx.\n", hr);
+        dxgi_destroy_composition_window(window);
+        *swapchain = NULL;
+        return hr;
+    }
+
+    if (!d3d11_swapchain_set_composition(*swapchain, window, gdi_flag))
+    {
+        ERR("Swap chain %p is not a d3d11 swap chain.\n", *swapchain);
+        IDXGISwapChain1_Release(*swapchain);
+        *swapchain = NULL;
+        dxgi_destroy_composition_window(window);
+        return E_FAIL;
+    }
+
+    TRACE("Created composition swap chain %p.\n", *swapchain);
+    return S_OK;
 }
 
 static UINT STDMETHODCALLTYPE dxgi_factory_GetCreationFlags(IWineDXGIFactory *iface)

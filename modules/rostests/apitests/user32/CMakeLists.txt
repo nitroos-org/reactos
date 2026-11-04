@@ -120,6 +120,7 @@ list(APPEND SOURCE
     VirtualKey.c
     Win8User.c
     WinEventHook.c
+    WindowStationLeak.c
     WmPrint.c
     WndProc.c
     PhysicalCoords.c

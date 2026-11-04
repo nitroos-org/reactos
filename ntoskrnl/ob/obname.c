@@ -604,9 +604,11 @@ ObpLookupObjectName(IN HANDLE RootHandle OPTIONAL,
                     /* Reparsed too many times */
                     ObDereferenceObject(RootDirectory);
 
-                    /* Return the object and normalized status */
+                    /* Return the object and normalized status. The parse routine of a file
+                       is a file system following reparse points: a chain that does not end is
+                       a reparse point that cannot be resolved. */
                     *FoundObject = Object;
-                    if (!Object) Status = STATUS_OBJECT_NAME_NOT_FOUND;
+                    if (!Object) Status = STATUS_REPARSE_POINT_NOT_RESOLVED;
                     return Status;
                 }
             }
@@ -1026,12 +1028,20 @@ ReparseObject:
                     if (MaxReparse == 0)
                     {
                         Object = NULL;
+
+                        /* Too many levels of file system reparse points (a loop of symbolic
+                           links, as an example) cannot be resolved; keep the Ob links as they were */
+                        if ((Status == STATUS_REPARSE) && (ParseRoutine != ObpParseSymbolicLink))
+                        {
+                            Status = STATUS_REPARSE_POINT_NOT_RESOLVED;
+                        }
                         break;
                     }
 
                     /* Start over from root if we got sent back there */
                     if ((Status == STATUS_REPARSE_OBJECT) ||
-                        (ObjectName->Buffer[0] == OBJ_NAME_PATH_SEPARATOR))
+                        (ObjectName->Length && ObjectName->Buffer &&
+                         ObjectName->Buffer[0] == OBJ_NAME_PATH_SEPARATOR))
                     {
                         /* Check if we got a root directory */
                         if (RootHandle)
@@ -1076,6 +1086,22 @@ ReparseObject:
                         Object = NULL;
                         Status = STATUS_OBJECT_NAME_NOT_FOUND;
                         Reparse = FALSE;
+                    }
+                    else if (!ObjectName->Length || !ObjectName->Buffer)
+                    {
+                        /* The parse routine left no name to resolve below the directory */
+                        Object = NULL;
+                        Status = STATUS_OBJECT_NAME_NOT_FOUND;
+                        Reparse = FALSE;
+                    }
+                    else
+                    {
+                        /*
+                         * The name is relative to the directory we are in. The parse routine has
+                         * replaced the name (and may have freed or reallocated its buffer), so the
+                         * copy made before the parse is stale: read the name again.
+                         */
+                        LocalName = *ObjectName;
                     }
                 }
                 else if (!NT_SUCCESS(Status))
