@@ -3375,6 +3375,32 @@ HRESULT WINAPI CoRegisterSurrogate(ISurrogate *surrogate)
 }
 
 /***********************************************************************
+ *           CoRegisterActivationFilter  (combase.@)
+ *
+ * Registers the process's IActivationFilter (Microsoft Office registers one while it starts).
+ * Only the registration is implemented: the filter is held for the life of the process and is
+ * not asked about activations yet (the semantics of its HandleActivation call were not measured
+ * on Windows). Not measured either: the result of a second registration and of a NULL filter.
+ */
+static IUnknown *activation_filter;
+
+HRESULT WINAPI CoRegisterActivationFilter(IUnknown *filter)
+{
+    TRACE("%p\n", filter);
+
+    if (!filter)
+        return E_INVALIDARG;
+
+    IUnknown_AddRef(filter);
+    if (InterlockedCompareExchangePointer((void **)&activation_filter, filter, NULL))
+    {
+        IUnknown_Release(filter);
+        return CO_E_ALREADYINITIALIZED;
+    }
+    return S_OK;
+}
+
+/***********************************************************************
  *           CoRegisterSurrogateEx  (combase.@)
  */
 HRESULT WINAPI CoRegisterSurrogateEx(REFGUID guid, void *reserved)

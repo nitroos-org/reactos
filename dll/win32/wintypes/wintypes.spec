@@ -5,7 +5,7 @@
 @ stub RoCreatePropertySetSerializer
 @ stub RoGetBufferMarshaler
 @ stub RoGetMetaDataFile
-@ stub RoIsApiContractMajorVersionPresent
-@ stub RoIsApiContractPresent
+@ stdcall RoIsApiContractMajorVersionPresent(wstr long ptr)
+@ stdcall RoIsApiContractPresent(wstr long long ptr)
 @ stub RoParseTypeName
 @ stdcall RoResolveNamespace(ptr ptr long ptr ptr ptr ptr ptr)
