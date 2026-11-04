@@ -6,6 +6,11 @@ Signature = "$Windows NT$"
 ; Build lab of the Windows 10 22H2 build the version values report (see hivesft_i386.inf).
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","BuildLabEx",2,"19041.1.amd64fre.vb_release.191206-1406"
 
+; The 32-bit view of the HideDesktopIcons values of hivesft.inf for CLSID_Internet: shell32 in SysWOW64 reads
+; Wow6432Node, and uses the value to leave the Internet item out of the Desktop folder enumeration (32-bit file dialogs).
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\ClassicStartMenu","{871C5380-42A0-1069-A2EA-08002B30309D}",0x00010001,1
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel","{871C5380-42A0-1069-A2EA-08002B30309D}",0x00010001,1
+
 ; The 32-bit view of the Mesa3D OpenGL driver registration of hivesft.inf. HKLM\SOFTWARE is redirected to
 ; SOFTWARE\Wow6432Node for 32-bit processes and neither key is shared, so without these the opengl32 of SysWOW64
 ; finds no driver and gives 32-bit programs the built-in OpenGL 1.1. libgallium_wgl.dll resolves to the i386
