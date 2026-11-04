@@ -228,8 +228,9 @@ MmFindGapInRangeEx(
                                                  &StartingAddress);
     }
 
-    if (Result == TableFoundNode || StartingAddress > HighestAddress - (Length - 1) ||
-        StartingAddress < LowestAddress)
+    /* Length - 1 <= HighestAddress was checked above; repeated so that the subtraction can never wrap */
+    if (Result == TableFoundNode || Length - 1 > HighestAddress ||
+        StartingAddress > HighestAddress - (Length - 1) || StartingAddress < LowestAddress)
     {
         return NULL;
     }
