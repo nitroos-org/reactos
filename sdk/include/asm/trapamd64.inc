@@ -118,9 +118,12 @@ MACRO(SaveUserDebugRegisters, Frame)
     mov rax, dr7
     mov [Frame + KTRAP_FRAME_Dr7], rax
 
-    /* Disarm the user breakpoints before the kernel runs, then load the kernel debugger's */
+    /* Disarm the user breakpoints before the kernel runs. DR6 is sticky status the processor
+     * never clears: clear it so stale B0-B3 are not reloaded or seen by the kernel debugger.
+     * Then load the kernel debugger breakpoints. */
     xor eax, eax
     mov dr7, rax
+    mov dr6, rax
     mov rax, gs:[PcKernelDr0]
     mov dr0, rax
     mov rax, gs:[PcKernelDr1]
@@ -152,6 +155,10 @@ MACRO(RestoreUserDebugRegisters, Frame, Scratch64, Scratch32)
     mov Scratch64, gs:[PcCurrentThread]
     test byte ptr [Scratch64 + ThDebugActive], DEBUG_ACTIVE_DR7
     jz NoUserDebugRegisters
+
+    /* Disarm the kernel debugger breakpoints while DR0-3 change (as the save macro does) */
+    xor Scratch32, Scratch32
+    mov dr7, Scratch64
     mov Scratch64, [Frame + KTRAP_FRAME_Dr0]
     mov dr0, Scratch64
     mov Scratch64, [Frame + KTRAP_FRAME_Dr1]
