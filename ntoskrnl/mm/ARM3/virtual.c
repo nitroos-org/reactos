@@ -4877,7 +4877,9 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
                         IN ULONG_PTR LowestAddress,
                         IN ULONG_PTR HighestRequired,
                         IN ULONG_PTR Alignment,
-                        IN BOOLEAN IsEx)
+                        IN BOOLEAN IsEx,
+                        IN PVOID CapturedBase,
+                        IN SIZE_T CapturedSize)
 {
     PEPROCESS Process;
     PMMVAD Vad = NULL, FoundVad;
@@ -5026,9 +5028,17 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
             ProbeForWriteSize_t(URegionSize);
         }
 
-        /* Capture their values */
-        PBaseAddress = *UBaseAddress;
-        PRegionSize = *URegionSize;
+        /* Capture their values; the Ex service checked its own capture, which must be the one used */
+        if (IsEx)
+        {
+            PBaseAddress = CapturedBase;
+            PRegionSize = CapturedSize;
+        }
+        else
+        {
+            PBaseAddress = *UBaseAddress;
+            PRegionSize = *URegionSize;
+        }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -5198,6 +5208,8 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
 
         /* What was charged for a replacement that did not happen goes back */
         MiReturnCommit(CommitPages);
+
+        /* On success the exit path writes StartingAddress and PRegionSize back to the caller */
         goto FailPathNoLock;
     }
 
@@ -5301,8 +5313,9 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
                                 PRegionSize,
                                 StartingAddress ? 0 : LowestAddress,
                                 HighestAddress,
-                                max(Alignment, MM_VIRTMEM_GRANULARITY),
-                                AllocationType & ~MEM_REPLACE_PLACEHOLDER);
+                                StartingAddress ? MM_VIRTMEM_GRANULARITY : max(Alignment, MM_VIRTMEM_GRANULARITY),
+                                AllocationType & ~MEM_REPLACE_PLACEHOLDER,
+                                !IsEx);
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("Failed to insert the VAD!\n");
@@ -5808,7 +5821,9 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
                                    0,
                                    0,
                                    0,
-                                   FALSE);
+                                   FALSE,
+                                   NULL,
+                                   0);
 }
 
 /*
@@ -6019,7 +6034,9 @@ NtAllocateVirtualMemoryEx(
                                      LowestAddress,
                                      HighestAddress,
                                      Alignment,
-                                     TRUE);
+                                     TRUE,
+                                     BaseAddress,
+                                     RegionSize);
     return MiExStatus(Status);
 }
 
@@ -6546,6 +6563,15 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
             (Vad->u.VadFlags.VadType == VadRotatePhysical))
         {
             DPRINT1("Trying to decommit from invalid VAD\n");
+            Status = STATUS_MEMORY_NOT_ALLOCATED;
+            goto FailPath;
+        }
+
+        //
+        // A free placeholder has nothing to decommit (Windows 10 22H2: STATUS_MEMORY_NOT_ALLOCATED)
+        //
+        if (MI_IS_PLACEHOLDER_VAD(Vad))
+        {
             Status = STATUS_MEMORY_NOT_ALLOCATED;
             goto FailPath;
         }

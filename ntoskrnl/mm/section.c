@@ -185,7 +185,9 @@ MmMapViewOfArm3Section(
     _Inout_ PSIZE_T ViewSize,
     _In_range_(ViewShare, ViewUnmap) SECTION_INHERIT InheritDisposition,
     _In_ ULONG AllocationType,
-    _In_ ULONG Protect);
+    _In_ ULONG Protect,
+    _In_ ULONG_PTR LowestAddress,
+    _In_ ULONG_PTR HighestBound);
 
 //
 // PeFmtCreateSection depends on the following:
@@ -4654,7 +4656,7 @@ NtQuerySection(
  * @implemented
  */
 NTSTATUS NTAPI
-MmMapViewOfSection(
+MiMapViewOfSection(
     _In_ PVOID SectionObject,
     _In_ PEPROCESS Process,
     _Outptr_result_bytebuffer_(*ViewSize) _Pre_opt_valid_ PVOID *BaseAddress,
@@ -4664,7 +4666,9 @@ MmMapViewOfSection(
     _Inout_ PSIZE_T ViewSize,
     _In_range_(ViewShare, ViewUnmap) SECTION_INHERIT InheritDisposition,
     _In_ ULONG AllocationType,
-    _In_ ULONG Protect)
+    _In_ ULONG Protect,
+    _In_ ULONG_PTR LowestAddress,
+    _In_ ULONG_PTR HighestBound)
 {
     PSECTION Section;
     PMMSUPPORT AddressSpace;
@@ -4678,6 +4682,8 @@ MmMapViewOfSection(
 
     if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress))
         return MI_PARAM_STATUS(4);
+    if (HighestBound && (HighestBound < HighestAddress))
+        HighestAddress = HighestBound;
 
     if (MiIsRosSectionObject(SectionObject) == FALSE)
     {
@@ -4692,7 +4698,9 @@ MmMapViewOfSection(
                                       ViewSize,
                                       InheritDisposition,
                                       AllocationType,
-                                      Protect);
+                                      Protect,
+                                      LowestAddress,
+                                      HighestBound);
     }
 
     ASSERT(Process);
@@ -4995,7 +5003,7 @@ MmMapViewOfSection(
             goto Exit;
         }
 
-        if (ZeroBits)
+        if (ZeroBits || LowestAddress || HighestBound)
         {
             if (*BaseAddress)
             {
@@ -5008,10 +5016,11 @@ MmMapViewOfSection(
             }
             else
             {
-                *BaseAddress = MmFindGapInRange(AddressSpace, *ViewSize,
-                                               MM_VIRTMEM_GRANULARITY,
-                                               BooleanFlagOn(AllocationType, MEM_TOP_DOWN),
-                                               HighestAddress);
+                *BaseAddress = MmFindGapInRangeEx(AddressSpace, *ViewSize,
+                                                 MM_VIRTMEM_GRANULARITY,
+                                                 BooleanFlagOn(AllocationType, MEM_TOP_DOWN),
+                                                 LowestAddress,
+                                                 HighestAddress);
                 if (!*BaseAddress)
                 {
                     Status = STATUS_NO_MEMORY;
@@ -5104,6 +5113,24 @@ Exit:
     }
 
     return Status;
+}
+
+NTSTATUS
+NTAPI
+MmMapViewOfSection(
+    _In_ PVOID SectionObject,
+    _In_ PEPROCESS Process,
+    _Outptr_result_bytebuffer_(*ViewSize) _Pre_opt_valid_ PVOID *BaseAddress,
+    _In_ ULONG_PTR ZeroBits,
+    _In_ SIZE_T CommitSize,
+    _Inout_opt_ PLARGE_INTEGER SectionOffset,
+    _Inout_ PSIZE_T ViewSize,
+    _In_range_(ViewShare, ViewUnmap) SECTION_INHERIT InheritDisposition,
+    _In_ ULONG AllocationType,
+    _In_ ULONG Protect)
+{
+    return MiMapViewOfSection(SectionObject, Process, BaseAddress, ZeroBits, CommitSize, SectionOffset,
+                              ViewSize, InheritDisposition, AllocationType, Protect, 0, 0);
 }
 
 /*

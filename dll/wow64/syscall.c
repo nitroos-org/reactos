@@ -1221,7 +1221,8 @@ static NTSTATUS ExtendedParameters32(ULONG Address, ULONG Count, BOOLEAN Placeme
                                      ULONG *NativeCount)
 {
     const struct { ULONG64 Type; ULONG64 Value; } *From = PTR32(Address);
-    const struct { ULONG Lowest, Highest, Alignment; } *Requirements32;
+    struct { ULONG Lowest, Highest, Alignment; } Requirements32;
+    const VOID *Guest;
     BOOLEAN HaveRequirements = FALSE;
     ULONG i;
 
@@ -1230,26 +1231,31 @@ static NTSTATUS ExtendedParameters32(ULONG Address, ULONG Count, BOOLEAN Placeme
     if (Count >= WOW64_MAX_EXTENDED_PARAMETERS) return STATUS_INVALID_PARAMETER;
     for (i = 0; i < Count; i++)
     {
+        struct { ULONG64 Type; ULONG64 Value; } Record;
+        /* One read of each guest record as well */
+        RtlCopyMemory(&Record, &From[i], sizeof(Record));
         RtlZeroMemory(&Params[i], sizeof(Params[i]));
-        Params[i].Type = From[i].Type & 0xFF;
-        Params[i].Reserved = From[i].Type >> 8;
-        Params[i].ULong64 = From[i].Value;
+        Params[i].Type = Record.Type & 0xFF;
+        Params[i].Reserved = Record.Type >> 8;
+        Params[i].ULong64 = Record.Value;
         switch (Params[i].Type)
         {
         case MemExtendedParameterAddressRequirements:
             if (HaveRequirements) return STATUS_INVALID_PARAMETER;
             HaveRequirements = TRUE;
-            Requirements32 = PTR32((ULONG)From[i].Value);
-            if (!Requirements32) return STATUS_ACCESS_VIOLATION;
-            Requirements->LowestStartingAddress = PTR32(Requirements32->Lowest);
-            Requirements->HighestEndingAddress = PTR32(Requirements32->Highest);
-            Requirements->Alignment = Requirements32->Alignment;
+            /* One copy of the guest's 12 bytes: what is checked is what is converted */
+            Guest = PTR32((ULONG)Record.Value);
+            if (!Guest) return STATUS_ACCESS_VIOLATION;
+            RtlCopyMemory(&Requirements32, Guest, sizeof(Requirements32));
             /* Addresses beyond the 32-bit user space are not valid for this process */
-            if (Requirements32->Highest > Wow64HighestUserAddress ||
-                Requirements32->Lowest > Wow64HighestUserAddress)
+            if (Requirements32.Highest > Wow64HighestUserAddress ||
+                Requirements32.Lowest > Wow64HighestUserAddress)
             {
                 return STATUS_INVALID_PARAMETER;
             }
+            Requirements->LowestStartingAddress = PTR32(Requirements32.Lowest);
+            Requirements->HighestEndingAddress = PTR32(Requirements32.Highest);
+            Requirements->Alignment = Requirements32.Alignment;
             /* A 32-bit process has no addresses above its highest one */
             if (!Requirements->HighestEndingAddress && Placement)
                 Requirements->HighestEndingAddress = ULongToPtr(Wow64HighestUserAddress);
@@ -1257,7 +1263,7 @@ static NTSTATUS ExtendedParameters32(ULONG Address, ULONG Count, BOOLEAN Placeme
             break;
         case MemExtendedParameterPartitionHandle:
         case MemExtendedParameterUserPhysicalHandle:
-            Params[i].Handle = HANDLE32((ULONG)From[i].Value);
+            Params[i].Handle = HANDLE32((ULONG)Record.Value);
             break;
         default:
             break;
@@ -1665,6 +1671,15 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         }
         return Status;
     }
+    case W64_NtLockVirtualMemory:
+    case W64_NtUnlockVirtualMemory:
+        /* VirtualLock/VirtualUnlock: the base and size come back rounded to pages, like NtProtectVirtualMemory's */
+        PROBE(1); PROBE(2);
+        Base = PTR32(U(1)); Size = U(2);
+        Status = (Number == W64_NtLockVirtualMemory) ? NtLockVirtualMemory(H(0), &Base, &Size, a[3])
+                                                     : NtUnlockVirtualMemory(H(0), &Base, &Size, a[3]);
+        if (NT_SUCCESS(Status)) { U(1) = PtrToUlong(Base); U(2) = Size; }
+        return Status;
     case W64_NtFreeVirtualMemory:
         PROBE(1); PROBE(2);
         Base = PTR32(U(1)); Size = U(2);
@@ -1752,7 +1767,9 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         }
         if (NT_SUCCESS(Status))
         {
-            Cleanup->Base = Base;
+            /* A view that replaced a placeholder is not undone on a bad output: unmapping it would
+             * free the caller's range instead of giving the placeholder back */
+            if (!(a[5] & MEM_REPLACE_PLACEHOLDER)) Cleanup->Base = Base;
             U(2) = PtrToUlong(Base); U(4) = Size;
             Cleanup->Base = NULL;
         }

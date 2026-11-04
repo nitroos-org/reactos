@@ -240,15 +240,6 @@ MiInsertVad(IN PMMVAD Vad,
     MiInsertNode(VadRoot, (PVOID)Vad, Parent, Result);
 }
 
-static
-TABLE_SEARCH_RESULT
-MiFindEmptyAddressRangeInTreeEx(IN SIZE_T Length,
-                                IN ULONG_PTR LowestAddress,
-                                IN ULONG_PTR Alignment,
-                                IN PMM_AVL_TABLE Table,
-                                OUT PMMADDRESS_NODE *PreviousVad,
-                                OUT PULONG_PTR Base);
-
 /* A free placeholder that covers exactly the pages from StartingAddress to EndingAddress */
 static
 BOOLEAN
@@ -278,7 +269,8 @@ MiInsertVadEx2(
     _In_ ULONG_PTR LowestAddress,
     _In_ ULONG_PTR HighestAddress,
     _In_ ULONG_PTR Alignment,
-    _In_ ULONG AllocationType)
+    _In_ ULONG AllocationType,
+    _In_ BOOLEAN AllowLowFixedAddress)
 {
     ULONG_PTR StartingAddress = 0, EndingAddress;
     PEPROCESS CurrentProcess;
@@ -368,6 +360,18 @@ MiInsertVadEx2(
     {
         /* Calculate the starting and ending address */
         StartingAddress = ALIGN_DOWN_BY(*BaseAddress, Alignment);
+
+        /*
+         * Nothing goes below the lowest user address, the NULL page included, except for the
+         * legacy callers that reserve the VDM's first megabyte from address 1 (kernel32's
+         * CreateProcessInternalW and ntvdm on x86)
+         */
+        if (!AllowLowFixedAddress && (StartingAddress < (ULONG_PTR)MM_LOWEST_USER_ADDRESS))
+        {
+            /* Windows 10 22H2: NtAllocateVirtualMemoryEx at 0x1000 is STATUS_CONFLICTING_ADDRESSES */
+            KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
+            return STATUS_CONFLICTING_ADDRESSES;
+        }
 
         /* A section can supply a fixed SEC_BASED address even when its caller
          * requested automatic placement. Enforce the final range here too,
@@ -497,7 +501,7 @@ MiInsertVadEx(
     _In_ ULONG_PTR Alignment,
     _In_ ULONG AllocationType)
 {
-    return MiInsertVadEx2(Vad, BaseAddress, ViewSize, 0, HighestAddress, Alignment, AllocationType);
+    return MiInsertVadEx2(Vad, BaseAddress, ViewSize, 0, HighestAddress, Alignment, AllocationType, TRUE);
 }
 
 /* A free placeholder: private, reserved, no access; it takes no commit charge */
@@ -655,8 +659,8 @@ MiGetNextNode(IN PMMADDRESS_NODE Node)
     return NULL;
 }
 
-static
 TABLE_SEARCH_RESULT
+NTAPI
 MiFindEmptyAddressRangeInTreeEx(IN SIZE_T Length,
                                 IN ULONG_PTR LowestAddress,
                                 IN ULONG_PTR Alignment,

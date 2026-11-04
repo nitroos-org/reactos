@@ -1309,6 +1309,7 @@ MiMapViewOfDataSection(
     _In_range_(ViewShare, ViewUnmap) SECTION_INHERIT InheritDisposition,
     _In_ ULONG ProtectionMask,
     _In_ SIZE_T CommitSize,
+    _In_ ULONG_PTR LowestAddress,
     _In_ ULONG_PTR HighestAddress,
     _In_ ULONG AllocationType)
 {
@@ -1605,12 +1606,14 @@ MiMapViewOfDataSection(
     }
 
     /* Insert the VAD */
-    Status = MiInsertVadEx((PMMVAD)Vad,
-                           &StartAddress,
-                           ViewSizeInPages * PAGE_SIZE,
-                           HighestAddress,
-                           Granularity,
-                           AllocationType);
+    Status = MiInsertVadEx2((PMMVAD)Vad,
+                            &StartAddress,
+                            ViewSizeInPages * PAGE_SIZE,
+                            StartAddress ? 0 : LowestAddress,
+                            HighestAddress,
+                            Granularity,
+                            AllocationType,
+                            TRUE);
     if (!NT_SUCCESS(Status))
     {
         /* The committed prototype PTEs stay committed: the segment keeps their charge */
@@ -2879,7 +2882,9 @@ MmMapViewOfArm3Section(
     _Inout_ PSIZE_T ViewSize,
     _In_range_(ViewShare, ViewUnmap) SECTION_INHERIT InheritDisposition,
     _In_ ULONG AllocationType,
-    _In_ ULONG Protect)
+    _In_ ULONG Protect,
+    _In_ ULONG_PTR LowestAddress,
+    _In_ ULONG_PTR HighestBound)
 {
     KAPC_STATE ApcState;
     BOOLEAN Attached = FALSE;
@@ -2894,6 +2899,8 @@ MmMapViewOfArm3Section(
 
     if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress))
         return MI_PARAM_STATUS(4);
+    if (HighestBound && (HighestBound < HighestAddress))
+        HighestAddress = HighestBound;
 
     /* Check for invalid inherit disposition */
     // Let MiMapViewOfDataSection() check InheritDisposition value.
@@ -3025,6 +3032,7 @@ MmMapViewOfArm3Section(
                                     InheritDisposition,
                                     ProtectionMask,
                                     CommitSize,
+                                    LowestAddress,
                                     HighestAddress,
                                     AllocationType);
 
@@ -3663,7 +3671,9 @@ MiMapViewOfSectionCommon(
     _In_range_(ViewShare, ViewUnmap) SECTION_INHERIT InheritDisposition,
     _In_ ULONG AllocationType,
     _In_ ULONG Win32Protect,
-    _In_ BOOLEAN IsEx)
+    _In_ BOOLEAN IsEx,
+    _In_ ULONG_PTR LowestAddress,
+    _In_ ULONG_PTR HighestBound)
 {
     PVOID SafeBaseAddress;
     LARGE_INTEGER SafeSectionOffset;
@@ -3703,10 +3713,10 @@ MiMapViewOfSectionCommon(
     if (IsEx && (AllocationType & MEM_DOS_LIM)) return STATUS_INVALID_PARAMETER;
 #endif
 
-    /* A placeholder is replaced on pages */
+    /* A placeholder is replaced on pages, at its own address (AT_ROUND_TO_PAGE has no meaning there) */
     if (AllocationType & MEM_REPLACE_PLACEHOLDER)
     {
-        if (AllocationType & (MEM_RESERVE | MEM_LARGE_PAGES | MEM_TOP_DOWN)) return STATUS_INVALID_PARAMETER;
+        if (AllocationType & (MEM_RESERVE | MEM_LARGE_PAGES | MEM_TOP_DOWN | MEM_DOS_LIM)) return STATUS_INVALID_PARAMETER;
         Granularity = PAGE_SIZE;
     }
 
@@ -3835,7 +3845,7 @@ MiMapViewOfSectionCommon(
     }
 
     /* Now do the actual mapping */
-    Status = MmMapViewOfSection(Section,
+    Status = MiMapViewOfSection(Section,
                                 Process,
                                 &SafeBaseAddress,
                                 ZeroBits,
@@ -3844,7 +3854,9 @@ MiMapViewOfSectionCommon(
                                 &SafeViewSize,
                                 InheritDisposition,
                                 AllocationType,
-                                Win32Protect);
+                                Win32Protect,
+                                LowestAddress,
+                                HighestBound);
 
     /* Return data only on success */
     if (NT_SUCCESS(Status))
@@ -3906,13 +3918,14 @@ NtMapViewOfSection(
                                     InheritDisposition,
                                     AllocationType,
                                     Win32Protect,
-                                    FALSE);
+                                    FALSE,
+                                    0,
+                                    0);
 }
 
 /*
  * The extended parameters: a MEM_ADDRESS_REQUIREMENTS without an alignment (STATUS_INVALID_PARAMETER
- * with one); its highest address bounds the placement, as the largest zero-bits mask below it does.
- * The lowest address is checked but does not move the placement.
+ * with one, Windows 10 22H2); its lowest and highest addresses bound an automatic placement exactly.
  */
 NTSTATUS
 NTAPI
@@ -3929,6 +3942,7 @@ NtMapViewOfSectionEx(
 {
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     ULONG_PTR LowestAddress, HighestAddress, Alignment, ZeroBits = 0;
+    /* ZeroBits stays 0: the requirement's bounds go down as they are */
     PVOID SafeBaseAddress;
     NTSTATUS Status;
 
@@ -3978,29 +3992,6 @@ NtMapViewOfSectionEx(
     }
 #endif
 
-    if (HighestAddress)
-    {
-#ifdef _WIN64
-        /* A mask: the largest 2^n - 1 that does not go above the highest address */
-        ULONG_PTR Mask = HighestAddress;
-        Mask |= Mask >> 1; Mask |= Mask >> 2; Mask |= Mask >> 4;
-        Mask |= Mask >> 8; Mask |= Mask >> 16; Mask |= Mask >> 32;
-        if (Mask != HighestAddress) Mask >>= 1;
-        if (Mask < 0xFFFFFFFF)
-        {
-            /* Below 4 GB a number of zero bits says the same */
-            for (ZeroBits = 1; ZeroBits <= 21 && (MAXULONG >> ZeroBits) > Mask; ZeroBits++);
-            if (ZeroBits > 21) return STATUS_INVALID_PARAMETER;
-        }
-        else
-        {
-            ZeroBits = Mask;
-        }
-#else
-        for (ZeroBits = 0; ZeroBits <= 21 && (MAXULONG >> ZeroBits) > HighestAddress; ZeroBits++);
-        if (ZeroBits > 21) return STATUS_INVALID_PARAMETER;
-#endif
-    }
 
     Status = MiMapViewOfSectionCommon(SectionHandle,
                                       ProcessHandle,
@@ -4012,7 +4003,9 @@ NtMapViewOfSectionEx(
                                       ViewUnmap,
                                       AllocationType,
                                       PageProtection,
-                                      TRUE);
+                                      TRUE,
+                                      LowestAddress,
+                                      HighestAddress);
     if ((Status >= STATUS_INVALID_PARAMETER_1) && (Status <= STATUS_INVALID_PARAMETER_12))
         Status = STATUS_INVALID_PARAMETER;
     return Status;
