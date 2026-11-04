@@ -205,6 +205,18 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_QueryInterface(IDXGISwapChain4 
         return S_OK;
     }
 
+    if (IsEqualGUID(riid, &IID_IWineDXGICompositionSwapChain))
+    {
+        struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
+
+        if (swapchain->composition_window)
+        {
+            IUnknown_AddRef(iface);
+            *object = &swapchain->IWineDXGICompositionSwapChain_iface;
+            return S_OK;
+        }
+    }
+
     WARN("%s not implemented, returning E_NOINTERFACE\n", debugstr_guid(riid));
 
     *object = NULL;
@@ -233,7 +245,10 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
 
     if (!refcount)
     {
+        /* the structure goes away with the last wined3d reference: take what is needed afterwards first */
         IWineDXGIDevice *device = swapchain->device;
+        HWND composition_window = swapchain->composition_window;
+
         if (swapchain->target)
         {
             WARN("Releasing fullscreen swapchain.\n");
@@ -242,6 +257,8 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
         IWineDXGIFactory_Release(swapchain->factory);
         wined3d_swapchain_decref(swapchain->wined3d_swapchain);
         IWineDXGIDevice_Release(device);
+        if (composition_window)
+            dxgi_destroy_composition_window(composition_window);
     }
 
     return refcount;
@@ -301,6 +318,45 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDevice(IDXGISwapChain4 *ifac
 
 /* IDXGISwapChain1 methods */
 
+/* Show back buffer 0 of a composition swap chain in the window it is committed to. The buffers are not
+ * flipped: the caller draws into buffer 0 again for the next frame, as it reads back what it presented. */
+static void d3d11_swapchain_composition_show(struct d3d11_swapchain *swapchain)
+{
+    struct wined3d_swapchain_desc wined3d_desc;
+    struct wined3d_texture *texture;
+    HWND window;
+    POINT offset;
+    HDC src, dst;
+
+    wined3d_mutex_lock();
+    window = swapchain->composition_target;
+    offset = swapchain->composition_offset;
+    if (!window || !IsWindow(window))
+    {
+        wined3d_mutex_unlock();
+        return;
+    }
+    wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &wined3d_desc);
+    texture = wined3d_swapchain_get_back_buffer(swapchain->wined3d_swapchain, 0);
+    if (!(wined3d_desc.flags & WINED3D_SWAPCHAIN_GDI_COMPATIBLE) || FAILED(wined3d_texture_get_dc(texture, 0, &src)))
+    {
+        static BOOL once;
+
+        wined3d_mutex_unlock();
+        if (!once++)
+            FIXME("Cannot show composition swap chain %p (format %#x).\n", swapchain, wined3d_desc.backbuffer_format);
+        return;
+    }
+    if ((dst = GetDC(window)))
+    {
+        BitBlt(dst, offset.x, offset.y, wined3d_desc.backbuffer_width, wined3d_desc.backbuffer_height,
+                src, 0, 0, SRCCOPY);
+        ReleaseDC(window, dst);
+    }
+    wined3d_texture_release_dc(texture, 0, src);
+    wined3d_mutex_unlock();
+}
+
 static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         unsigned int sync_interval, unsigned int flags)
 {
@@ -310,6 +366,15 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
     {
         WARN("Invalid sync interval %u.\n", sync_interval);
         return DXGI_ERROR_INVALID_CALL;
+    }
+
+    if (swapchain->composition_window)
+    {
+        if (flags & DXGI_PRESENT_TEST)
+            return S_OK;
+        d3d11_swapchain_composition_show(swapchain);
+        InterlockedIncrement(&swapchain->present_count);
+        return S_OK;
     }
 
     if (IsIconic(d3d11_swapchain_get_hwnd(swapchain)))
@@ -502,10 +567,12 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDesc(IDXGISwapChain4 *iface,
             wined3d_desc.multisample_type, wined3d_desc.multisample_quality);
     desc->BufferUsage = dxgi_usage_from_wined3d_bind_flags(wined3d_desc.backbuffer_bind_flags);
     desc->BufferCount = wined3d_desc.backbuffer_count;
-    desc->OutputWindow = wined3d_desc.device_window;
+    desc->OutputWindow = swapchain->composition_window ? NULL : wined3d_desc.device_window;
     desc->Windowed = wined3d_desc.windowed;
     desc->SwapEffect = dxgi_swap_effect_from_wined3d(wined3d_desc.swap_effect);
     desc->Flags = dxgi_swapchain_flags_from_wined3d(wined3d_desc.flags);
+    if (swapchain->composition_gdi_flag)
+        desc->Flags &= ~DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
 
     return S_OK;
 }
@@ -528,6 +595,12 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers(IDXGISwapChain4 *
 
     if (flags)
         FIXME("Ignoring flags %#x.\n", flags);
+
+    if (swapchain->composition_window && (!width || !height))
+    {
+        WARN("Composition swap chain %p has no window to take the size of.\n", swapchain);
+        return E_INVALIDARG;
+    }
 
     wined3d_mutex_lock();
     wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &wined3d_desc);
@@ -640,6 +713,8 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDesc1(IDXGISwapChain4 *iface
     desc->SwapEffect = dxgi_swap_effect_from_wined3d(wined3d_desc.swap_effect);
     desc->AlphaMode = DXGI_ALPHA_MODE_IGNORE;
     desc->Flags = dxgi_swapchain_flags_from_wined3d(wined3d_desc.flags);
+    if (swapchain->composition_gdi_flag)
+        desc->Flags &= ~DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
 
     return S_OK;
 }
@@ -682,6 +757,13 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetHwnd(IDXGISwapChain4 *iface,
     if (!hwnd)
     {
         WARN("Invalid pointer.\n");
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    if (swapchain->composition_window)
+    {
+        WARN("Composition swap chain %p has no window.\n", swapchain);
+        *hwnd = NULL;
         return DXGI_ERROR_INVALID_CALL;
     }
 
@@ -986,6 +1068,165 @@ static HRESULT d3d11_swapchain_create_d3d11_textures(struct d3d11_swapchain *swa
 
     IWineDXGIDeviceParent_Release(dxgi_device_parent);
     return hr;
+}
+
+static inline struct d3d11_swapchain *d3d11_swapchain_from_IWineDXGICompositionSwapChain(
+        IWineDXGICompositionSwapChain *iface)
+{
+    return CONTAINING_RECORD(iface, struct d3d11_swapchain, IWineDXGICompositionSwapChain_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_composition_swapchain_QueryInterface(IWineDXGICompositionSwapChain *iface,
+        REFIID riid, void **object)
+{
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IWineDXGICompositionSwapChain(iface);
+
+    return d3d11_swapchain_QueryInterface(&swapchain->IDXGISwapChain4_iface, riid, object);
+}
+
+static ULONG STDMETHODCALLTYPE d3d11_composition_swapchain_AddRef(IWineDXGICompositionSwapChain *iface)
+{
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IWineDXGICompositionSwapChain(iface);
+
+    return d3d11_swapchain_AddRef(&swapchain->IDXGISwapChain4_iface);
+}
+
+static ULONG STDMETHODCALLTYPE d3d11_composition_swapchain_Release(IWineDXGICompositionSwapChain *iface)
+{
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IWineDXGICompositionSwapChain(iface);
+
+    return d3d11_swapchain_Release(&swapchain->IDXGISwapChain4_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_composition_swapchain_set_composition_target(
+        IWineDXGICompositionSwapChain *iface, HWND window, const POINT *offset)
+{
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IWineDXGICompositionSwapChain(iface);
+    BOOL show;
+
+    TRACE("iface %p, window %p, offset %s.\n", iface, window, offset ? wine_dbgstr_point(offset) : "(null)");
+
+    wined3d_mutex_lock();
+    swapchain->composition_target = window;
+    swapchain->composition_offset.x = offset ? offset->x : 0;
+    swapchain->composition_offset.y = offset ? offset->y : 0;
+    show = window && swapchain->present_count;
+    wined3d_mutex_unlock();
+
+    /* what was presented before the commit becomes visible with it */
+    if (show)
+        d3d11_swapchain_composition_show(swapchain);
+    return S_OK;
+}
+
+static const struct IWineDXGICompositionSwapChainVtbl d3d11_composition_swapchain_vtbl =
+{
+    d3d11_composition_swapchain_QueryInterface,
+    d3d11_composition_swapchain_AddRef,
+    d3d11_composition_swapchain_Release,
+    d3d11_composition_swapchain_set_composition_target,
+};
+
+static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    if (message == WM_DESTROY)
+        PostQuitMessage(0);
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+struct composition_window_data
+{
+    unsigned int width, height;
+    HMODULE module;
+    HANDLE event;
+    HWND window;
+};
+
+/* A window is destroyed by the thread that created it. The last reference to a swap chain can be dropped by
+ * any thread, which may never pump messages, so every composition window has a thread of its own that does
+ * nothing but own the window and pump its messages until the window is closed. */
+static DWORD WINAPI dxgi_composition_window_thread(void *param)
+{
+    static const WCHAR class_name[] = L"WineDXGICompositionWindow";
+    struct composition_window_data *data = param;
+    HMODULE module = data->module;
+    HINSTANCE instance = module;
+    HWND window;
+    MSG msg;
+
+    window = CreateWindowExW(WS_EX_TOOLWINDOW, class_name, L"", WS_POPUP, 0, 0, data->width, data->height,
+            NULL, NULL, instance, NULL);
+    data->window = window;
+    SetEvent(data->event); /* data belongs to the creator from here on */
+
+    if (window)
+    {
+        while (GetMessageW(&msg, NULL, 0, 0) > 0)
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    FreeLibraryAndExitThread(module, 0);
+}
+
+HWND dxgi_create_composition_window(unsigned int width, unsigned int height)
+{
+    static const WCHAR class_name[] = L"WineDXGICompositionWindow";
+    struct composition_window_data data = {width, height};
+    WNDCLASSEXW wc = {sizeof(wc)};
+    HANDLE thread;
+
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (const WCHAR *)dxgi_composition_window_proc,
+            &data.module))
+        return NULL;
+
+    wc.lpfnWndProc = dxgi_composition_window_proc;
+    wc.hInstance = data.module;
+    wc.lpszClassName = class_name;
+    if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+    {
+        ERR("Failed to register the composition window class, error %lu.\n", GetLastError());
+        FreeLibrary(data.module);
+        return NULL;
+    }
+
+    if (!(data.event = CreateEventW(NULL, FALSE, FALSE, NULL)))
+    {
+        FreeLibrary(data.module);
+        return NULL;
+    }
+    /* the thread holds the reference to the module that GetModuleHandleExW took */
+    if (!(thread = CreateThread(NULL, 0, dxgi_composition_window_thread, &data, 0, NULL)))
+    {
+        ERR("Failed to create the composition window thread, error %lu.\n", GetLastError());
+        CloseHandle(data.event);
+        FreeLibrary(data.module);
+        return NULL;
+    }
+    CloseHandle(thread);
+    WaitForSingleObject(data.event, INFINITE);
+    CloseHandle(data.event);
+    return data.window;
+}
+
+/* Callable from any thread: the thread that owns the window destroys it. */
+void dxgi_destroy_composition_window(HWND window)
+{
+    PostMessageW(window, WM_CLOSE, 0, 0);
+}
+
+BOOL d3d11_swapchain_set_composition(IDXGISwapChain1 *iface, HWND window, BOOL gdi_flag)
+{
+    struct d3d11_swapchain *swapchain;
+
+    if (!iface || iface->lpVtbl != (const IDXGISwapChain1Vtbl *)&d3d11_swapchain_vtbl)
+        return FALSE;
+    swapchain = d3d11_swapchain_from_IDXGISwapChain4((IDXGISwapChain4 *)iface);
+    swapchain->IWineDXGICompositionSwapChain_iface.lpVtbl = &d3d11_composition_swapchain_vtbl;
+    swapchain->composition_window = window;
+    swapchain->composition_gdi_flag = gdi_flag;
+    return TRUE;
 }
 
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
