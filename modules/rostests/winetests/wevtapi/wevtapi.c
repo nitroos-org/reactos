@@ -24,6 +24,8 @@
 #include "wine/test.h"
 #include "evtx_sample.h"
 
+static const WCHAR help_prefix[] = L"https://go.microsoft.com/fwlink/events.asp?CoName=";
+
 static void test_EvtGetChannelConfigProperty(void)
 {
     HKEY key;
@@ -414,6 +416,14 @@ static void test_publishers(void)
     ok(ret, "EvtGetPublisherMetadataProperty error %lu\n", GetLastError());
     ok(data.var.Type == EvtVarTypeString && wcslen(data.var.StringVal) > 4, "got %lu\n", data.var.Type);
 
+    /* the link of the help comes from the version resource of the file of messages */
+    memset(&data, 0, sizeof(data));
+    ret = EvtGetPublisherMetadataProperty(meta, EvtPublisherMetadataHelpLink, 0, sizeof(data), &data.var, &size);
+    ok(ret, "EvtGetPublisherMetadataProperty error %lu\n", GetLastError());
+    ok(data.var.Type == EvtVarTypeString && !wcsncmp(data.var.StringVal, help_prefix, ARRAY_SIZE(help_prefix) - 1) &&
+       wcsstr(data.var.StringVal, L"&ProdName=") && wcsstr(data.var.StringVal, L"&ProdVer=") && wcsstr(data.var.StringVal, L"&FileName=") &&
+       wcsstr(data.var.StringVal, L"&FileVer="), "got %lu %s\n", data.var.Type, data.var.Type == EvtVarTypeString ? wine_dbgstr_w(data.var.StringVal) : "");
+
     ret = EvtGetPublisherMetadataProperty(meta, EvtPublisherMetadataChannelReferences, 0, sizeof(data), &data.var, &size);
     ok(ret, "EvtGetPublisherMetadataProperty error %lu\n", GetLastError());
     ok(data.var.Type == EvtVarTypeEvtHandle, "got %lu\n", data.var.Type);
@@ -435,6 +445,7 @@ static void test_publishers(void)
     ok(!ret && GetLastError() == ERROR_INVALID_PARAMETER, "got %d, %lu\n", ret, GetLastError());
     EvtClose(meta);
 }
+
 
 static void test_backwards_read(void)
 {
