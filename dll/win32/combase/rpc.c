@@ -679,44 +679,67 @@ static HRESULT rpc_get_local_class_object_once(REFCLSID rclsid, REFIID riid, voi
     IStream *stream = NULL;
     ULARGE_INTEGER newpos;
     LARGE_INTEGER seekto;
-    int tries = 0;
+    HANDLE process = 0;
+    DWORD begin = GetTickCount(), interval = 10, launch_ticks = 0;
+    BOOL launched = FALSE, timed_out = FALSE;
     ULONG length;
     HRESULT hr;
-    static const int MAXTRIES = 30; /* 30 seconds */
+    static const DWORD MAXWAIT = 30000; /* 30 seconds */
 
     TRACE("clsid %s, riid %s\n", debugstr_guid(rclsid), debugstr_guid(riid));
 
-    while (tries++ < MAXTRIES)
+    for (;;)
     {
         DWORD index, start_ticks;
-        HANDLE process = 0;
 
         if (SUCCEEDED(hr = rpcss_get_class_object(rclsid, &objref)))
             break;
 
-        if (tries == 1)
+        if (!launched)
         {
             if ((hr = create_local_service(rclsid)) && (hr = create_server(rclsid, &process)) &&
                 (hr = create_surrogate_server(rclsid, &process)) )
                 return hr;
+            launched = TRUE;
+            launch_ticks = GetTickCount();
         }
 
-        /* Wait for one second, even if messages arrive. */
+        if (GetTickCount() - begin >= MAXWAIT)
+        {
+            timed_out = TRUE;
+            break;
+        }
+
+        /* A server that was just started registers its class within a few hundred milliseconds, and a client
+         * that has asked for it must not sit out a fixed second after that (the handoff of Edge Update waited
+         * for its update service this way, and lost the install lock to the update worker that the service
+         * started in the meantime). Ask rpcss again after a short pause, pumping messages, that grows to
+         * 100 ms. A server process that ends within the first second of the wait has failed to start. */
         start_ticks = GetTickCount();
         do
         {
-            if (SUCCEEDED(CoWaitForMultipleHandles(0, 1000, (process != 0), &process, &index)) && process && !index)
+            if (SUCCEEDED(CoWaitForMultipleHandles(0, interval, (process != 0), &process, &index)) && process && !index)
             {
                 WARN("Server for %s failed to start.\n", debugstr_guid(rclsid));
                 CloseHandle(process);
                 return E_NOINTERFACE;
             }
-        } while (GetTickCount() - start_ticks < 1000);
+            if (GetTickCount() - start_ticks < interval)
+                Sleep(1);
+        } while (GetTickCount() - start_ticks < interval);
 
-        if (process) CloseHandle(process);
+        if (process && GetTickCount() - launch_ticks >= 1000)
+        {
+            CloseHandle(process);
+            process = 0;
+        }
+        if (interval < 100)
+            interval = min(interval * 2, 100);
     }
 
-    if (!objref || tries >= MAXTRIES)
+    if (process) CloseHandle(process);
+
+    if (!objref || timed_out)
         return E_NOINTERFACE;
 
     if (SUCCEEDED(hr = CreateStreamOnHGlobal(0, TRUE, &stream)))

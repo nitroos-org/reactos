@@ -27,6 +27,7 @@
 @ stdcall CcPurgeCacheSection(ptr ptr long long)
 @ stdcall CcRemapBcb(ptr)
 @ stdcall CcRepinBcb(ptr)
+@ stdcall CcRosAllowLazyClose(ptr)
 @ stdcall CcScheduleReadAhead(ptr ptr long)
 @ stdcall CcSetAdditionalCacheAttributes(ptr long long)
 @ stdcall CcSetBcbOwnerPointer(ptr ptr)

@@ -187,13 +187,7 @@ static NTSTATUS SatisfySuperAccept(PAFD_FCB FCB, PIRP Irp, PAFD_TDI_OBJECT_QELT 
     PFILE_OBJECT NewFileObject = (PFILE_OBJECT)Irp->Tail.Overlay.DriverContext[2];
     PAFD_SUPER_ACCEPT_INFO AcceptInfo = (PAFD_SUPER_ACCEPT_INFO)Irp->Tail.Overlay.DriverContext[0]; /* LockRequest stores the request in index 0 */
     PAFD_FCB FCB2 = NewFileObject->FsContext;
-    NTSTATUS Status;
-
-    /* The accepted socket keeps the listener's SO_RCVBUF unless it has its own */
-    if (!FCB2->RecvHint)
-        FCB2->RecvHint = FCB->RecvHint;
-
-    Status = SatisfyAccept(NULL, Irp, NewFileObject, Qelt, TRUE);
+    NTSTATUS Status = SatisfyAccept(NULL, Irp, NewFileObject, Qelt, TRUE);
 
     /* The accept socket may be closed meanwhile; keep it referenced while FCB2 is used */
     Irp->Tail.Overlay.DriverContext[2] = NULL;
@@ -942,9 +936,6 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             }
 
             NewFcb->SharedData.State = SOCKET_STATE_CONNECTING;
-            /* The accepted socket keeps the listener's SO_RCVBUF unless it has its own */
-            if( !NewFcb->RecvHint )
-                NewFcb->RecvHint = FCB->RecvHint;
             SocketStateUnlock( NewFcb );
 
             RemoveEntryList( PendingConn );

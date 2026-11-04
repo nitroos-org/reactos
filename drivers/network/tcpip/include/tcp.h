@@ -178,6 +178,8 @@ NTSTATUS TCPTranslateError( const INT8 err );
 
 UINT TCPAllocatePort( const UINT HintPort );
 
+BOOLEAN TCPReservePort( const UINT Port );
+
 UINT TCPAllocateEphemeralPort( PPORT_IN_USE_ROUTINE InUse );
 
 VOID TCPFreePort( const UINT Port );
@@ -196,8 +198,6 @@ NTSTATUS TCPShutdown(
 BOOLEAN TCPRemoveIRP( PCONNECTION_ENDPOINT Connection, PIRP Irp );
 
 NTSTATUS TCPSetNoDelay(PCONNECTION_ENDPOINT Connection, BOOLEAN Set);
-
-NTSTATUS TCPSetReceiveWindow(PCONNECTION_ENDPOINT Connection, ULONG Size);
 
 NTSTATUS TCPSetKeepAlive(PCONNECTION_ENDPOINT Connection, BOOLEAN Set);
 

@@ -10,7 +10,8 @@ add_library(dcomp MODULE
     ${CMAKE_CURRENT_BINARY_DIR}/dcomp.def)
 
 set_module_type(dcomp win32dll)
-target_link_libraries(dcomp wine wine_dll_canunload)
-add_importlibs(dcomp advapi32 msvcrt kernel32 ntdll)
+target_link_libraries(dcomp wine wine_dll_canunload uuid dxguid)
+add_importlibs(dcomp user32 advapi32 msvcrt kernel32 ntdll)
+add_dependencies(dcomp wineheaders d3d_idl_headers)
 add_cd_file(TARGET dcomp DESTINATION reactos/system32 FOR all)
 set_wine_module_FIXME(dcomp) # CORE-5743: No ARRAY_SIZE macro

@@ -2090,7 +2090,7 @@ SmpProcessFileRenames(VOID)
             RegEntry->Name.Buffer++;
         }
 
-        /* Open the file for delete access */
+        /* Open the file for delete access. A junction or symbolic link is opened itself (not its target) */
         InitializeObjectAttributes(&ObjectAttributes,
                                    &RegEntry->Name,
                                    OBJ_CASE_INSENSITIVE,
@@ -2101,7 +2101,7 @@ SmpProcessFileRenames(VOID)
                             &ObjectAttributes,
                             &IoStatusBlock,
                             FILE_SHARE_READ | FILE_SHARE_WRITE,
-                            FILE_SYNCHRONOUS_IO_NONALERT);
+                            FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT);
         if (!NT_SUCCESS(Status)) goto Quickie;
 
         /* Check if it's a rename or just a delete */
@@ -2157,17 +2157,23 @@ SmpProcessFileRenames(VOID)
                                           Length,
                                           InformationClass);
 
-            /* Check if we seem to have failed because the file was readonly */
+            /*
+             * Check if we seem to have failed because the target was readonly.
+             * A replace over a readonly file is refused with STATUS_ACCESS_DENIED
+             * by NTFS; STATUS_OBJECT_NAME_COLLISION is kept for drivers
+             * that report an existing target that way.
+             */
             if (!NT_SUCCESS(Status) &&
                 (InformationClass == FileRenameInformation) &&
-                (Status == STATUS_OBJECT_NAME_COLLISION) &&
+                ((Status == STATUS_OBJECT_NAME_COLLISION) ||
+                 (Status == STATUS_ACCESS_DENIED)) &&
                 Buffer->ReplaceIfExists)
             {
                 /* Open the file for write attribute access this time... */
                 DPRINT("\nSMSS: '%wZ' => '%wZ' failed - Status == %x, Possible readonly target\n",
                         &RegEntry->Name,
                         &RegEntry->Value,
-                        STATUS_OBJECT_NAME_COLLISION);
+                        Status);
                 FileString.Length = RegEntry->Value.Length - sizeof(WCHAR);
                 FileString.MaximumLength = RegEntry->Value.MaximumLength - sizeof(WCHAR);
                 FileString.Buffer = FileName;
@@ -2181,7 +2187,7 @@ SmpProcessFileRenames(VOID)
                                     &ObjectAttributes,
                                     &IoStatusBlock,
                                     FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                    FILE_SYNCHRONOUS_IO_NONALERT);
+                                    FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT);
                 if (!NT_SUCCESS(Status))
                 {
                     /* That didn't work, so bail out */

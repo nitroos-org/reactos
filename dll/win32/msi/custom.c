@@ -545,6 +545,9 @@ UINT CDECL __wine_msi_call_dll_function(DWORD client_pid, const GUID *guid)
         return r;
 
     hPackage = alloc_msi_remote_handle( remote_package );
+#ifdef __REACTOS__
+    if (hPackage) msi_in_custom_action_process = TRUE;
+#endif
     if (!hPackage)
     {
         ERR( "failed to create handle for %#lx\n", remote_package );

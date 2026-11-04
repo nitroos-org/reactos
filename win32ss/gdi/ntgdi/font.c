@@ -975,6 +975,7 @@ NtGdiGetOutlineTextMetricsInternalW(
   HFONT hFont = 0;
   ULONG Size;
   OUTLINETEXTMETRICW *potm;
+  LOGFONTW lf;
   NTSTATUS Status = STATUS_SUCCESS;
 
   dc = DC_LockDc(hDC);
@@ -999,8 +1000,10 @@ NtGdiGetOutlineTextMetricsInternalW(
      return 0;
   }
   TextIntUpdateSize(TextObj, FontGDI, TRUE);
+  /* This realization's request: its style is reported, not the last one realized with the face */
+  lf = TextObj->logfont.elfEnumLogfontEx.elfLogFont;
   TEXTOBJ_UnlockText(TextObj);
-  Size = IntGetOutlineTextMetrics(FontGDI, 0, NULL, FALSE);
+  Size = IntGetOutlineTextMetrics(FontGDI, 0, NULL, FALSE, &lf);
   if (!otm) return Size;
   if (Size > Data)
   {
@@ -1014,7 +1017,7 @@ NtGdiGetOutlineTextMetricsInternalW(
       return 0;
   }
   RtlZeroMemory(potm, Size);
-  IntGetOutlineTextMetrics(FontGDI, Size, potm, FALSE);
+  IntGetOutlineTextMetrics(FontGDI, Size, potm, FALSE, &lf);
 
   _SEH2_TRY
   {

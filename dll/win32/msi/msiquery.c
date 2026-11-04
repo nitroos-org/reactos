@@ -762,6 +762,13 @@ UINT WINAPI MsiViewModify( MSIHANDLE hView, MSIMODIFY eModifyMode, MSIHANDLE hRe
     return r;
 }
 
+/* the error of a view is reported once; a call that gets a buffer consumes it */
+static void msi_view_clear_error( MSIQUERY *query )
+{
+    query->view->error = MSIDBERROR_NOERROR;
+    query->view->error_column = NULL;
+}
+
 MSIDBERROR WINAPI MsiViewGetErrorW( MSIHANDLE handle, WCHAR *buffer, DWORD *buflen )
 {
     MSIQUERY *query;
@@ -779,7 +786,7 @@ MSIDBERROR WINAPI MsiViewGetErrorW( MSIHANDLE handle, WCHAR *buffer, DWORD *bufl
         MSIHANDLE remote;
 
         if (!(remote = msi_get_remote(handle)))
-            return MSIDBERROR_INVALIDARG;
+            return msi_in_custom_action_process ? MSIDBERROR_FUNCTIONERROR : MSIDBERROR_INVALIDARG;
 
         if (!*buflen)
             return MSIDBERROR_FUNCTIONERROR;
@@ -808,6 +815,7 @@ MSIDBERROR WINAPI MsiViewGetErrorW( MSIHANDLE handle, WCHAR *buffer, DWORD *bufl
 
     if (msi_strncpyW(column, -1, buffer, buflen) == ERROR_MORE_DATA)
         r = MSIDBERROR_MOREDATA;
+    if (buffer) msi_view_clear_error( query );
 
     msiobj_release( &query->hdr );
     return r;
@@ -830,7 +838,7 @@ MSIDBERROR WINAPI MsiViewGetErrorA( MSIHANDLE handle, char *buffer, DWORD *bufle
         MSIHANDLE remote;
 
         if (!(remote = msi_get_remote(handle)))
-            return MSIDBERROR_INVALIDARG;
+            return msi_in_custom_action_process ? MSIDBERROR_FUNCTIONERROR : MSIDBERROR_INVALIDARG;
 
         if (!*buflen)
             return MSIDBERROR_FUNCTIONERROR;
@@ -859,6 +867,7 @@ MSIDBERROR WINAPI MsiViewGetErrorA( MSIHANDLE handle, char *buffer, DWORD *bufle
 
     if (msi_strncpyWtoA(column, -1, buffer, buflen, FALSE) == ERROR_MORE_DATA)
         r = MSIDBERROR_MOREDATA;
+    if (buffer) msi_view_clear_error( query );
 
     msiobj_release( &query->hdr );
     return r;
@@ -941,18 +950,32 @@ UINT WINAPI MsiDatabaseApplyTransformA( MSIHANDLE hdb, const char *transform, in
     return ret;
 }
 
+/* a database handle of a custom action (a remote handle) cannot be used to generate a transform */
+BOOL msi_transform_handles_valid( MSIHANDLE hdb, MSIHANDLE hdbref )
+{
+    MSIDATABASE *db, *ref;
+    BOOL ret = FALSE;
+
+    db = msihandle2msiinfo( hdb, MSIHANDLETYPE_DATABASE );
+    ref = msihandle2msiinfo( hdbref, MSIHANDLETYPE_DATABASE );
+    if (db && ref) ret = TRUE;
+    if (db) msiobj_release( &db->hdr );
+    if (ref) msiobj_release( &ref->hdr );
+    return ret;
+}
+
 UINT WINAPI MsiDatabaseGenerateTransformA( MSIHANDLE hdb, MSIHANDLE hdbref, const char *szTransformFile,
                                            int iReserved1, int iReserved2 )
 {
     FIXME( "%lu, %lu, %s, %d, %d\n", hdb, hdbref, debugstr_a(szTransformFile), iReserved1, iReserved2 );
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    return msi_transform_handles_valid( hdb, hdbref ) ? ERROR_CALL_NOT_IMPLEMENTED : ERROR_INVALID_HANDLE;
 }
 
 UINT WINAPI MsiDatabaseGenerateTransformW( MSIHANDLE hdb, MSIHANDLE hdbref, const WCHAR *szTransformFile,
                                            int iReserved1, int iReserved2 )
 {
     FIXME( "%lu, %lu, %s, %d, %d\n", hdb, hdbref, debugstr_w(szTransformFile), iReserved1, iReserved2 );
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    return msi_transform_handles_valid( hdb, hdbref ) ? ERROR_CALL_NOT_IMPLEMENTED : ERROR_INVALID_HANDLE;
 }
 
 UINT WINAPI MsiDatabaseCommit( MSIHANDLE hdb )
@@ -1236,17 +1259,25 @@ UINT __cdecl s_remote_ViewGetColumnInfo(MSIHANDLE view, MSICOLINFO info, struct 
 
 MSIDBERROR __cdecl s_remote_ViewGetError(MSIHANDLE view, LPWSTR *column)
 {
-    WCHAR empty[1];
-    DWORD size = 1;
-    UINT r;
+    MSIQUERY *query;
+    const WCHAR *error_column;
+    MSIDBERROR r;
 
-    r = MsiViewGetErrorW(view, empty, &size);
-    if (r == MSIDBERROR_MOREDATA)
+    if (!(query = msihandle2msiinfo( view, MSIHANDLETYPE_VIEW )))
+        return MSIDBERROR_INVALIDARG;
+
+    if ((r = query->view->error)) error_column = query->view->error_column;
+    else error_column = L"";
+
+    /* one call hands over the error and consumes it, the caller sizes its own buffer */
+    if (!(*column = midl_user_allocate( (lstrlenW( error_column ) + 1) * sizeof(WCHAR) )))
     {
-        if (!(*column = midl_user_allocate(++size * sizeof(WCHAR))))
-            return MSIDBERROR_FUNCTIONERROR;
-        r = MsiViewGetErrorW(view, *column, &size);
+        msiobj_release( &query->hdr );
+        return MSIDBERROR_FUNCTIONERROR;
     }
+    lstrcpyW( *column, error_column );
+    msi_view_clear_error( query );
+    msiobj_release( &query->hdr );
     return r;
 }
 

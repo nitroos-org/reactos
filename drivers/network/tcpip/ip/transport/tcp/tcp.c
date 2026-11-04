@@ -571,9 +571,6 @@ NTSTATUS TCPReceiveData
         ExFreeToNPagedLookasideList(&TdiBucketLookasideList, Bucket);
 
         (*BytesReceived) = Received;
-
-        /* What was read makes room in the receive window */
-        LibTCPReturnReceiveCredit(Connection);
     }
 
     return Status;
@@ -663,6 +660,11 @@ UINT TCPAllocatePort(const UINT HintPort)
 UINT TCPAllocateEphemeralPort(PPORT_IN_USE_ROUTINE InUse)
 {
     return AllocatePortFromRangeUnless(&TCPPorts, TCP_EPHEMERAL_FIRST, TCP_EPHEMERAL_LAST, InUse);
+}
+
+BOOLEAN TCPReservePort(const UINT Port)
+{
+    return ReservePort(&TCPPorts, Port);
 }
 
 VOID TCPFreePort(const UINT Port)
@@ -767,17 +769,6 @@ TCPSetNoDelay(
     LibTCPSetNoDelay(Connection->SocketContext, Set);
     UnlockObject(Connection);
     return STATUS_SUCCESS;
-}
-
-NTSTATUS
-TCPSetReceiveWindow(
-    PCONNECTION_ENDPOINT Connection,
-    ULONG Size)
-{
-    if (!Connection)
-        return STATUS_UNSUCCESSFUL;
-
-    return LibTCPSetReceiveWindow(Connection, Size);
 }
 
 NTSTATUS
