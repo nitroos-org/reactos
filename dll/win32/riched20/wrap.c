@@ -91,6 +91,23 @@ static HRESULT shape_run( ME_Context *c, ME_Run *run )
         get_run_glyph_buffers( run );
     }
 
+#ifdef __REACTOS__
+    /* The run is drawn with ETO_GLYPH_INDEX from the selected font only. A character that font has no
+     * glyph for (CJK in Courier New) shapes to glyph 0 and draws as nothing. Fail the shaping then: the
+     * paragraph is measured and drawn as plain text, which goes through GDI font linking. */
+    if (SUCCEEDED(hr) && !run->script_analysis.fNoGlyphIndex)
+    {
+        for (i = 0; i < run->num_glyphs; i++)
+        {
+            if (!run->glyphs[i])
+            {
+                hr = USP_E_SCRIPT_NOT_IN_FONT;
+                break;
+            }
+        }
+    }
+#endif
+
     if (SUCCEEDED(hr))
         hr = ScriptPlace( c->hDC, &run->style->script_cache, run->glyphs, run->num_glyphs, run->vis_attrs,
                           &run->script_analysis, run->advances, run->offsets, NULL );
