@@ -117,6 +117,7 @@ extern void func_NtQuerySystemProcessorPerformance(void);
 extern void func_NtQuerySystemProcessInformationTail(void);
 extern void func_NtQueryValueKey(void);
 extern void func_NtQueryVirtualMemory(void);
+extern void func_NtQueryVirtualMemoryRegion(void);
 extern void func_NtQueryVolumeInformationFile(void);
 extern void func_NtRaiseHardErrorMode(void);
 extern void func_NtReadFile(void);
@@ -361,6 +362,7 @@ const struct test winetest_testlist[] =
     { "NtQuerySystemProcessInformationTail", func_NtQuerySystemProcessInformationTail },
     { "NtQueryValueKey",                func_NtQueryValueKey },
     { "NtQueryVirtualMemory",           func_NtQueryVirtualMemory },
+    { "NtQueryVirtualMemoryRegion",     func_NtQueryVirtualMemoryRegion },
     { "NtQueryVolumeInformationFile",   func_NtQueryVolumeInformationFile },
     { "NtRaiseHardErrorMode",           func_NtRaiseHardErrorMode },
     { "NtReadFile",                     func_NtReadFile },

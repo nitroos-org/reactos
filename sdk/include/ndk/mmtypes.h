@@ -183,9 +183,24 @@ typedef enum _MEMORY_INFORMATION_CLASS
     MemoryBasicInformation,
     MemoryWorkingSetList,
     MemorySectionName,
-    MemoryBasicVlmInformation,
+    MemoryRegionInformation,
     MemoryWorkingSetExList
 } MEMORY_INFORMATION_CLASS;
+
+//
+// MemoryRegionInformation (Windows 10 layout). RegionType is the MEM_PRIVATE/MEM_MAPPED/MEM_IMAGE value of
+// the allocation, 0x08000000 for a view of a paging-file section (measured on Windows 10 22H2)
+//
+typedef struct _MEMORY_REGION_INFORMATION
+{
+    PVOID AllocationBase;
+    ULONG AllocationProtect;
+    ULONG RegionType;
+    SIZE_T RegionSize;
+    SIZE_T CommitSize;
+    ULONG_PTR PartitionId;
+    ULONG_PTR NodePreference;
+} MEMORY_REGION_INFORMATION, *PMEMORY_REGION_INFORMATION;
 
 //
 // Section Information Clasess for NtQuerySection
