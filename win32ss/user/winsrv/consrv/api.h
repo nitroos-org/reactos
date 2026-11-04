@@ -182,6 +182,9 @@ CSR_API(SrvSetHandleInformation);
 CSR_API(SrvCloseHandle);
 CSR_API(SrvVerifyConsoleIoHandle);
 
+/* conoutput.c */
+CSR_API(SrvGetConsoleScrollback);
+
 /* history.c */
 CSR_API(SrvGetConsoleCommandHistory);
 CSR_API(SrvGetConsoleCommandHistoryLength);
