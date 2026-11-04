@@ -1001,6 +1001,7 @@ NtCreateThread(OUT PHANDLE ThreadHandle,
                IN BOOLEAN CreateSuspended)
 {
     INITIAL_TEB SafeInitialTeb;
+    NTSTATUS Status;
     PAGED_CODE();
     PSTRACE(PS_THREAD_DEBUG,
             "ProcessHandle: %p Context: %p\n", ProcessHandle, ThreadContext);
@@ -1050,21 +1051,37 @@ NtCreateThread(OUT PHANDLE ThreadHandle,
         ((SafeInitialTeb.PreviousStackBase != NULL) ||
          (SafeInitialTeb.PreviousStackLimit != NULL)))
     {
-        return STATUS_NOT_SUPPORTED;
+        Status = STATUS_NOT_SUPPORTED;
+        goto Failed;
     }
 
     /* Call the shared function */
-    return PspCreateThread(ThreadHandle,
-                           DesiredAccess,
-                           ObjectAttributes,
-                           ProcessHandle,
-                           NULL,
-                           ClientId,
-                           ThreadContext,
-                           &SafeInitialTeb,
-                           CreateSuspended,
-                           NULL,
-                           NULL);
+    Status = PspCreateThread(ThreadHandle,
+                             DesiredAccess,
+                             ObjectAttributes,
+                             ProcessHandle,
+                             NULL,
+                             ClientId,
+                             ThreadContext,
+                             &SafeInitialTeb,
+                             CreateSuspended,
+                             NULL,
+                             NULL);
+    if (NT_SUCCESS(Status)) return Status;
+
+Failed:
+    /* The handle pointer was probed above (and a thread that failed after its
+     * handle was returned has had the handle closed), so Windows' NULL goes in */
+    _SEH2_TRY
+    {
+        *ThreadHandle = NULL;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        /* The variable went away meanwhile; keep the failure status */
+    }
+    _SEH2_END;
+    return Status;
 }
 
 /*
