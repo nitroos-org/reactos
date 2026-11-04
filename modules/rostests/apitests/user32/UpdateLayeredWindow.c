@@ -395,7 +395,8 @@ static void Test_PerPixelAlpha(void)
        "second UpdateLayeredWindow failed: %lu\n", GetLastError());
     Pump();
     c = ScreenPixel(100 + 75, 100 + 75);
-    ok(NearColor(c, 127, 0, 128), "50%% blue after a second update: 0x%06lx, expected (127,0,128)\n", c);
+    /* ULW blends onto the previous contents and accumulates: WIN32K-ulw-alpha-accumulate */
+    todo_ros ok(NearColor(c, 127, 0, 128), "50%% blue after a second update: 0x%06lx, expected (127,0,128)\n", c);
     c = ScreenPixel(100 + 25, 100 + 75);
     ok(NearColor(c, 255, 0, 0), "transparent pixel after a second update: 0x%06lx\n", c);
 
@@ -405,7 +406,8 @@ static void Test_PerPixelAlpha(void)
        "third UpdateLayeredWindow failed: %lu\n", GetLastError());
     Pump();
     c = ScreenPixel(100 + 125, 100 + 75);
-    ok(NearColor(c, 127, 128, 0), "green with constant alpha 128: 0x%06lx, expected (127,128,0)\n", c);
+    /* ULW blends onto the previous contents, SourceConstantAlpha too: WIN32K-ulw-alpha-accumulate */
+    todo_ros ok(NearColor(c, 127, 128, 0), "green with constant alpha 128: 0x%06lx, expected (127,128,0)\n", c);
 
     /* No position and no size: the window stays where it is and keeps its size */
     Blend.SourceConstantAlpha = 255;
