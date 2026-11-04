@@ -136,6 +136,8 @@ typedef struct _NG_VCB
     ULONGLONG BootSectors;          /* boot sector's sector count, compared again at verify */
     PFILE_OBJECT ShrinkOwner;       /* FSCTL_SHRINK_VOLUME: the handle with a prepared request (CoreLock), or NULL */
     ULONGLONG ShrinkSectors;        /* the volume size that request asked for, in sectors without the boot copy */
+    ULONGLONG DeletedMftNo;         /* $Extend\$Deleted once looked up or created (CoreLock), 0 before */
+    LONG OrphanSeq;                 /* makes the names of POSIX-deleted files in $Deleted unique */
     LIST_ENTRY GlobalLinks;         /* NgGlobal.VcbList */
     PKTHREAD Flusher;               /* writes back core metadata every NG_FLUSH_PERIOD_MS */
     PNOTIFY_SYNC NotifySync;        /* directory change notification (FsRtl) */
@@ -204,6 +206,10 @@ typedef struct _NG_FCB
     BOOLEAN UserSetWriteTime;       /* LastWriteTime set through FileBasicInformation: keep it */
     BOOLEAN DeletePending;          /* unlink at the last cleanup */
     BOOLEAN Deleted;                /* unlinked: paging writes are dropped */
+    BOOLEAN Orphan;                 /* POSIX delete (FileDispositionInformationEx) of the last name while other handles
+                                       stay open: the name moved to $Extend\$Deleted, data and cache stay for those
+                                       handles, DeletePending stays set; the last cleanup removes it there and frees the
+                                       file, a mount removes what a crash left there (ngc_purge_deleted) */
     ULONGLONG DelParentMftNo;       /* the name the delete removes (from the handle that asked) */
     USHORT DelNameLength;           /* in WCHARs */
     WCHAR DelName[256];
@@ -252,6 +258,12 @@ typedef struct _NG_CCB
     WCHAR Name[256];
     LIST_ENTRY FcbLinks;            /* NG_FCB.CcbList */
     BOOLEAN DeleteOnClose;
+    BOOLEAN OpenedDeleteOnClose;    /* opened with FILE_DELETE_ON_CLOSE: FILE_DISPOSITION_ON_CLOSE may change DeleteOnClose */
+    BOOLEAN PosixOnClose;           /* FILE_DISPOSITION_ON_CLOSE | FILE_DISPOSITION_POSIX_SEMANTICS: DeleteOnClose is a POSIX delete */
+    BOOLEAN PosixDelete;            /* FileDispositionInformationEx DELETE | POSIX_SEMANTICS through this handle: at its cleanup,
+                                       a delete still pending removes the name at once, whatever handles stay open */
+    BOOLEAN Orphaned;               /* the name this handle was opened by was removed by a POSIX delete while it stayed open:
+                                       Path names the file in $Extend\$Deleted; a rename or disposition is refused */
     BOOLEAN AppendOnly;             /* opened with FILE_APPEND_DATA but not FILE_WRITE_DATA */
     PNG_DIRENT *Entries;            /* directory snapshot taken at the first query */
     PNG_ARENA Arena;                /* storage of the snapshot's entries */
@@ -343,6 +355,7 @@ BOOLEAN NgMarkDeletePending(PNG_VCB Vcb, PNG_FCB Fcb, BOOLEAN CheckStreams);
 BOOLEAN NgNodeGone(ngc_node *Node);
 VOID NgSetDeletePending(PNG_FCB Fcb, PNG_CCB Ccb);
 NTSTATUS NgDeleteNow(PNG_FCB Fcb, BOOLEAN KeepOpen);
+VOID NgPosixUnlink(PNG_FCB Fcb);
 
 /* FileDispositionInformationEx (class 64; the class number is not in every DDK header) and its flags. */
 #define NG_FILE_DISPOSITION_INFORMATION_EX  ((FILE_INFORMATION_CLASS)64)

@@ -786,6 +786,8 @@ static NTSTATUS NgRelatedNode(PNG_VCB Vcb, PNG_FCB Fcb, ngc_node **Out)
         *Out = ngc_root(Vcb->Core);
         return STATUS_SUCCESS;
     }
+    if (Fcb->Orphan)
+        return STATUS_DELETE_PENDING;   /* a directory a POSIX delete removed: nothing new inside (Windows 10) */
     if (Fcb->Deleted || !Fcb->HasNode || ngc_iget(Vcb->Core, Fcb->MftNo, Out))
         return STATUS_FILE_DELETED;
     ngc_stat(*Out, &St);
@@ -1189,9 +1191,10 @@ walked:
             Status = STATUS_OBJECT_NAME_INVALID;
         else if (WantDir && (FileAttributes & FILE_ATTRIBUTE_TEMPORARY))
             Status = STATUS_INVALID_PARAMETER;
-        else if ((PSt.mft_ref & 0xffffffffffffULL) < NG_FIRST_USER_FILE &&
-                 (PSt.mft_ref & 0xffffffffffffULL) != 5)
-            Status = STATUS_ACCESS_DENIED;   /* no new entries inside the metadata directories */
+        else if (((PSt.mft_ref & 0xffffffffffffULL) < NG_FIRST_USER_FILE &&
+                  (PSt.mft_ref & 0xffffffffffffULL) != 5) ||
+                 (Vcb->DeletedMftNo && (PSt.mft_ref & 0xffffffffffffULL) == Vcb->DeletedMftNo))
+            Status = STATUS_ACCESS_DENIED;   /* no new entries inside the metadata directories and $Extend\$Deleted */
         else if (!NT_SUCCESS(Status = NgReadSecurity(Vcb, Parent, &ParentSd)))
             ;
         else if (Check && !NT_SUCCESS(Status = NgCheckCreateAccess(As, ParentSd, WantDir)))
@@ -1415,7 +1418,7 @@ walked:
         Ccb->NameLength = (USHORT)RealLen;
         RtlCopyMemory(Ccb->Name, Real, RealLen * sizeof(WCHAR));
     }
-    Ccb->DeleteOnClose = (Options & FILE_DELETE_ON_CLOSE) != 0;
+    Ccb->DeleteOnClose = Ccb->OpenedDeleteOnClose = (Options & FILE_DELETE_ON_CLOSE) != 0;
     Ccb->AppendOnly = (Effective & FILE_APPEND_DATA) && !(Effective & FILE_WRITE_DATA);
     Ccb->Granted = Effective;
     Fcb->Node = Node;
@@ -1840,11 +1843,12 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 /*
  * Unlinks a delete-pending file or directory (caller holds MainResource exclusive and CreateGate, shared
- * at least).  Run at the last cleanup of a classic delete, and at once by a POSIX-semantics disposition
- * (NgSetInformation, FileDispositionInformationEx), where handles that stay open no longer keep the name.
+ * at least) at its last cleanup: the name the delete was asked for, or, after a POSIX delete moved the
+ * file to $Extend\$Deleted while other handles stayed open (NgPosixUnlink), that name.
  * KeepOpen: handles of the FCB are still open, so it stays listed (volume lock and dismount count its
  * handles) with its node held (the record cannot be reused); its last cleanup unlists it and parks the node.
- * On failure the delete is dropped (DeletePending cleared) and the status says why.
+ * On failure the delete is dropped (DeletePending cleared, except for a file in $Deleted, which the next
+ * mount removes) and the status says why.
  */
 NTSTATUS NgDeleteNow(PNG_FCB Fcb, BOOLEAN KeepOpen)
 {
@@ -1884,7 +1888,7 @@ NTSTATUS NgDeleteNow(PNG_FCB Fcb, BOOLEAN KeepOpen)
         ngc_put(Dir);
         if (!Err)
         {
-            if (!Fcb->Stream.Length && !Fcb->IsDirectory)
+            if (!Fcb->Stream.Length && !Fcb->IsDirectory && !Fcb->Orphan)
                 NgTunnelAdd(Vcb, Fcb->DelParentMftNo, Fcb->DelName, Fcb->DelNameLength, Fcb->Stat.crtime);
             if (Gone)
             {
@@ -1899,6 +1903,7 @@ NTSTATUS NgDeleteNow(PNG_FCB Fcb, BOOLEAN KeepOpen)
                  * the removal notification below and freed with the FCB. */
                 ngc_stat(Fcb->Node, &Fcb->Stat);   /* the link count dropped */
                 Fcb->DeletePending = FALSE;
+                Fcb->Orphan = FALSE;
             }
             if (!KeepOpen)
                 NgParkNode(Fcb);
@@ -1909,7 +1914,9 @@ NTSTATUS NgDeleteNow(PNG_FCB Fcb, BOOLEAN KeepOpen)
     if (Err)
     {
         DPRINT1("ntfsng: delete of %I64x at last close failed %d\n", Fcb->MftNo, Err);
-        Fcb->DeletePending = FALSE;
+        /* A file a POSIX delete moved to $Extend\$Deleted stays there, for the next mount to remove. */
+        if (!Fcb->Orphan)
+            Fcb->DeletePending = FALSE;
     }
     else if (Fcb->DelPath.Buffer)
     {
@@ -1947,20 +1954,35 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PNG_FCB Fcb = FileObject->FsContext;
     PNG_CCB Ccb = FileObject->FsContext2;
     PNG_VCB Vcb = DeviceObject->DeviceExtension;
-    BOOLEAN Last, Delete;
+    BOOLEAN Last, Delete, Posix = FALSE;
 
     if (Fcb->IsDirectory && Vcb->NotifySync && Ccb)
         FsRtlNotifyCleanup(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb);
     if (!Fcb->IsDirectory && !Fcb->IsVolume)
         FsRtlFastUnlockAll(&Fcb->FileLock, FileObject, IoGetRequestorProcess(Irp), NULL);
     ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
-    if (Ccb && Ccb->DeleteOnClose && !Fcb->IsRoot && !Fcb->IsVolume && Ccb->NameLength)
+    /*
+     * FILE_DELETE_ON_CLOSE is a classic delete, or a POSIX one after FILE_DISPOSITION_ON_CLOSE | POSIX; without it, a
+     * POSIX disposition set through this handle applies (Windows 10: on a handle opened with FILE_DELETE_ON_CLOSE, a
+     * POSIX disposition without FILE_DISPOSITION_ON_CLOSE still leaves a classic delete at its cleanup).
+     */
+    if (Ccb && Ccb->DeleteOnClose && !Fcb->IsRoot && !Fcb->IsVolume && Ccb->NameLength && !Ccb->Orphaned && !Fcb->Orphan)
+    {
         NgSetDeletePending(Fcb, Ccb);
+        Posix = Ccb->PosixOnClose;
+    }
+    else if (Ccb && Ccb->PosixDelete && !Ccb->DeleteOnClose)
+    {
+        Posix = TRUE;
+    }
     ExAcquireFastMutex(&Vcb->FcbListLock);
     IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
     Last = (--Fcb->OpenHandles == 0);
     ExReleaseFastMutex(&Vcb->FcbListLock);
     Delete = Last && Fcb->DeletePending && !Fcb->Deleted;
+    /* Other handles stay open: the POSIX delete removes the name now (info.c); the last cleanup frees the file. */
+    if (!Last && Posix && Fcb->DeletePending && !Fcb->Deleted && !Fcb->Orphan)
+        NgPosixUnlink(Fcb);
     if (Delete && !Fcb->IsDirectory && Fcb->SectionObjectPointers.ImageSectionObject &&
         !MmFlushImageSection(&Fcb->SectionObjectPointers, MmFlushForDelete))
     {
@@ -2023,6 +2045,9 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             CcUninitializeCacheMap(FileObject, NULL, NULL);
         }
     }
+    /* A file in $Extend\$Deleted stays delete pending, whatever kept it there (the next mount removes it). */
+    if (Fcb->Orphan)
+        Fcb->DeletePending = TRUE;
     if (Delete)
     {
         NgDeleteNow(Fcb, FALSE);
@@ -2031,7 +2056,7 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         /* NTFS updates the last write time when a modified handle is cleaned up. */
         NgApplyModified(Fcb);
-        if (Ccb)
+        if (Ccb && !Ccb->Orphaned)
             NgNotify(Vcb, &Ccb->Path, FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
     }
     /* Mm may keep this FCB alive long after the last handle: park the core inode (see NgEnsureNode). */

@@ -1,40 +1,29 @@
 /*
  * COPYRIGHT:       See COPYING in the top level directory
  * PROJECT:         ReactOS FS utility tool
- * FILE:            base/applications/cmdutils/dirty.c
+ * FILE:            base/applications/cmdutils/fsutil/dirty.c
  * PURPOSE:         FSutil dirty bit handling
  * PROGRAMMERS:     Pierre Schweitzer <pierre@reactos.org>
  */
 
 #include "fsutil.h"
-#include <winioctl.h>
 
-/* Add handlers here for subcommands */
-static HandlerProc QueryMain;
-static HandlerProc SetMain;
-static HandlerItem HandlersList[] =
-{
-    /* Proc, name, help */
-    { QueryMain, _T("query"), _T("Show the dirty bit") },
-    { SetMain, _T("set"), _T("Set the dirty bit") },
-};
-
-static int
-QueryMain(int argc, const TCHAR *argv[])
+int
+DirtyQueryMain(int argc, const TCHAR *argv[])
 {
     HANDLE Volume;
     ULONG VolumeStatus, BytesRead;
 
-    /* We need a volume (letter or GUID) */
-    if (argc < 2)
+    /* We need exactly one volume: no argument is a plain usage, too many is a failure */
+    if (argc != 2)
     {
-        _ftprintf(stderr, _T("Usage: fsutil dirty query <volume>\n"));
-        _ftprintf(stderr, _T("\tFor example: fsutil dirty query c:\n"));
-        return 1;
+        _tprintf(_T("Usage : fsutil dirty query <volume pathname>\n"));
+        _tprintf(_T("   Eg : fsutil dirty query  C:\n"));
+        return (argc < 2) ? 0 : 1;
     }
 
     /* Get a handle for the volume */
-    Volume = OpenVolume(argv[1], FALSE, FALSE);
+    Volume = OpenVolumeArg(argv[1], FALSE, GENERIC_READ, NOTE_LOCAL_VOLUME, NULL);
     if (Volume == INVALID_HANDLE_VALUE)
     {
         return 1;
@@ -52,27 +41,26 @@ QueryMain(int argc, const TCHAR *argv[])
     CloseHandle(Volume);
 
     /* Print the status */
-    _ftprintf(stdout, _T("The %s volume is %s\n"), argv[1], ((VolumeStatus & VOLUME_IS_DIRTY) ? _T("dirty") : _T("clean")));
+    _tprintf(_T("Volume - %s is %s\n"), argv[1], ((VolumeStatus & VOLUME_IS_DIRTY) ? _T("Dirty") : _T("NOT Dirty")));
 
     return 0;
 }
 
-static int
-SetMain(int argc, const TCHAR *argv[])
+int
+DirtySetMain(int argc, const TCHAR *argv[])
 {
     HANDLE Volume;
     DWORD BytesRead;
 
-    /* We need a volume (letter or GUID) */
-    if (argc < 2)
+    if (argc != 2)
     {
-        _ftprintf(stderr, _T("Usage: fsutil dirty set <volume>\n"));
-        _ftprintf(stderr, _T("\tFor example: fsutil dirty set c:\n"));
-        return 1;
+        _tprintf(_T("Usage : fsutil dirty set <volume pathname>\n"));
+        _tprintf(_T("   Eg : fsutil dirty set C:\n"));
+        return (argc < 2) ? 0 : 1;
     }
 
     /* Get a handle for the volume */
-    Volume = OpenVolume(argv[1], FALSE, FALSE);
+    Volume = OpenVolumeArg(argv[1], FALSE, GENERIC_READ, NOTE_LOCAL_VOLUME, NULL);
     if (Volume == INVALID_HANDLE_VALUE)
     {
         return 1;
@@ -88,23 +76,8 @@ SetMain(int argc, const TCHAR *argv[])
 
     CloseHandle(Volume);
 
-    /* Print the status */
-    _ftprintf(stdout, _T("The %s volume is now marked as dirty\n"), argv[1]);
+    /* Print the status (TODO(oracle): the success text is not probed, state-changing) */
+    _tprintf(_T("Volume - %s is now marked dirty\n"), argv[1]);
 
     return 0;
-}
-
-static void
-PrintUsage(const TCHAR * Command)
-{
-    PrintDefaultUsage(_T(" DIRTY "), Command, (HandlerItem *)&HandlersList,
-                      (sizeof(HandlersList) / sizeof(HandlersList[0])));
-}
-
-int
-DirtyMain(int argc, const TCHAR *argv[])
-{
-    return FindHandler(argc, argv, (HandlerItem *)&HandlersList,
-                       (sizeof(HandlersList) / sizeof(HandlersList[0])),
-                       PrintUsage);
 }

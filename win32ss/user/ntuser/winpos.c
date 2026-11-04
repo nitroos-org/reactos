@@ -70,7 +70,8 @@ static void dump_winpos_flags(UINT flags)
 BOOL FASTCALL
 IntGetClientOrigin(PWND Window OPTIONAL, LPPOINT Point)
 {
-   Window = Window ? Window : UserGetDesktopWindow();
+   /* NULL: a desktop window; every desktop window has its client origin at 0,0 */
+   Window = Window ? Window : UserGetThreadDesktopWindow();
    if (Window == NULL)
    {
       Point->x = Point->y = 0;
@@ -436,7 +437,8 @@ co_WinPosActivateOtherWindow(PWND Wnd)
    }
 
    // Find any window to bring to top. Works Okay for wine since it does not see X11 windows.
-   WndTo = UserGetDesktopWindow();
+   /* Among the top-level windows of Wnd's own desktop, not of the input desktop */
+   WndTo = co_GetDesktopWindow(Wnd);
    if ((WndTo == NULL) || (WndTo->spwndChild == NULL))
    {
       //ERR("WinPosActivateOtherWindow No window!\n");
@@ -1786,7 +1788,8 @@ ForceNCPaintErase(PWND Wnd, HRGN hRgn, PREGION pRgn)
 static VOID FASTCALL IntImeWindowPosChanged(VOID)
 {
     HWND *phwnd;
-    PWND pwndNode, pwndDesktop = UserGetDesktopWindow();
+    /* The IME windows of the current thread are on the thread's desktop */
+    PWND pwndNode, pwndDesktop = UserGetThreadDesktopWindow();
     PWINDOWLIST pWL;
     USER_REFERENCE_ENTRY Ref;
 
@@ -1942,7 +1945,7 @@ co_WinPosSetWindowPosEx(
 
    Ancestor = UserGetAncestor(Window, GA_PARENT);
    if ( (WinPos.flags & (SWP_NOZORDER | SWP_HIDEWINDOW | SWP_SHOWWINDOW)) != SWP_NOZORDER &&
-         Ancestor && UserHMGetHandle(Ancestor) == IntGetDesktopWindow() )
+         UserIsDesktopWindow(Ancestor) ) /* top-level on its own desktop */
    {
       /* SWP_NOOWNERZORDER leaves the relation between a window and its owned popups alone */
       if (!(WinPos.flags & SWP_NOOWNERZORDER))
@@ -2417,6 +2420,7 @@ co_WinPosSetWindowPosEx(
             if (!(Window->state & WNDS_BEINGACTIVATED)) // Inside SAW?
             {
                // A window on a desktop that is not the input desktop is only activated in its own queue.
+               /* (the input desktop is meant here: foreground is per input desktop) */
                if (IntGetActiveDesktop() && Window->head.rpdesk != IntGetActiveDesktop())
                   co_IntSetActiveWindow(Window, FALSE, TRUE, FALSE);
                else
@@ -2877,7 +2881,10 @@ void IntForceMinimizeWindow(PWND pWnd)
     pRgn = hRgn ? REGION_LockRgn(hRgn) : NULL;
     if (pRgn)
     {
-        co_UserRedrawWindow(UserGetDesktopWindow(), NULL, pRgn, RDW_ALLCHILDREN | RDW_ERASE | RDW_INVALIDATE);
+        /* What was under the window on its own desktop */
+        PWND pwndDesktop = co_GetDesktopWindow(pWnd);
+        if (pwndDesktop)
+            co_UserRedrawWindow(pwndDesktop, NULL, pRgn, RDW_ALLCHILDREN | RDW_ERASE | RDW_INVALIDATE);
         REGION_UnlockRgn(pRgn);
     }
     if (hRgn)
@@ -3288,7 +3295,8 @@ co_WinPosWindowFromPoint(
 
    if( ScopeWin == NULL )
    {
-       ScopeWin = UserGetDesktopWindow();
+       /* The calling thread's desktop (it processes a mouse message of its own queue) */
+       ScopeWin = UserGetThreadDesktopWindow();
        if(ScopeWin == NULL)
            return NULL;
    }
@@ -4186,7 +4194,8 @@ NtUserWindowFromPoint(LONG X, LONG Y)
    TRACE("Enter NtUserWindowFromPoint\n");
    UserEnterExclusive();
 
-   if ((DesktopWindow = UserGetWindowObject(IntGetDesktopWindow())))
+   /* WindowFromPoint looks at the windows of the calling thread's desktop */
+   if ((DesktopWindow = UserGetThreadDesktopWindow()))
    {
       //PTHREADINFO pti;
 

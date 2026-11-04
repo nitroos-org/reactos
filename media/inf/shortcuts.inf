@@ -7,6 +7,7 @@ DesktopShortcuts=0,
 ProgramShortcuts=2,
 AdminToolsShortcuts=47,
 AccessoriesShortcuts=2, %ACCESSORIES%
+WinSystemShortcuts=2, %WINSYSTEM%
 SystemToolsShortcuts=2, %ACCESSORIES%\%SYSTOOLS%
 AccessibilityShortcuts=2, %ACCESSORIES%\%ACCESSIBILITY%
 EntertainmentShortcuts=2, %ACCESSORIES%\%ENTERTAINMENT%
@@ -34,9 +35,11 @@ QuickLaunchShortcuts=26, Microsoft\Internet Explorer\Quick Launch
 [CommunicationsShortcuts]
 %SystemRoot%\system32\mstsc.exe, %MSTSC_TITLE%, %MSTSC_DESC%, 0, %HOMEDRIVE%%HOMEPATH%
 
+[WinSystemShortcuts]
+%SystemRoot%\system32\cmd.exe, %CMD_TITLE%, %CMD_DESC%, 0, %HOMEDRIVE%%HOMEPATH%
+
 [AccessoriesShortcuts]
 %SystemRoot%\system32\calc.exe, %CALC_TITLE%, %CALC_DESC%, 0, %HOMEDRIVE%%HOMEPATH%
-%SystemRoot%\system32\cmd.exe, %CMD_TITLE%, %CMD_DESC%, 0, %HOMEDRIVE%%HOMEPATH%
 %SystemRoot%\system32\notepad.exe, %NOTEPAD_TITLE%, %NOTEPAD_DESC%, 0, %HOMEDRIVE%%HOMEPATH%
 %SystemRoot%\system32\wordpad.exe, %WORDPAD_TITLE%, %WORDPAD_DESC%, 0, %HOMEDRIVE%%HOMEPATH%
 %SystemRoot%\system32\mspaint.exe, %MSPAINT_TITLE%, %MSPAINT_DESC%, 0, %HOMEDRIVE%%HOMEPATH%
@@ -73,6 +76,7 @@ QuickLaunchShortcuts=26, Microsoft\Internet Explorer\Quick Launch
 
 [Strings]
 ACCESSORIES=Accessories
+WINSYSTEM=Windows System
 SYSTOOLS=System Tools
 ACCESSIBILITY=Accessibility
 ENTERTAINMENT=Entertainment

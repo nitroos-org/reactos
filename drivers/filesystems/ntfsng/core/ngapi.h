@@ -245,6 +245,14 @@ int ngc_rename(ngc_vol *v, ngc_node *odir, const unsigned short *oname, unsigned
 		ngc_node *ndir, const unsigned short *nname, unsigned int nlen, ngc_node *target);
 int ngc_link(ngc_vol *v, ngc_node *n, ngc_node *ndir, const unsigned short *nname, unsigned int nlen);
 int ngc_dir_empty(ngc_vol *v, ngc_node *dir);
+/*
+ * $Extend\$Deleted, where a POSIX-semantics delete (FileDispositionInformationEx) moves a file whose last name goes
+ * while other handles keep it open, as Windows 10 NTFS does; created (hidden, system, with $Extend's descriptor)
+ * when @create and missing.  ngc_purge_deleted removes every entry left there (a crash before the last close, or
+ * another system's session) at mount, before anything is opened; @count gets the number removed.
+ */
+int ngc_deleted_dir(ngc_vol *v, int create, ngc_node **out);
+int ngc_purge_deleted(ngc_vol *v, unsigned int *count);
 void ngc_write_stats(unsigned long *writes, unsigned long long *bytes, unsigned long *syncs, unsigned long *dirties);
 /* Prints shim memory accounting (live allocations by call site, cache pages, inodes). */
 void ngc_debug_dump(void);

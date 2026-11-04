@@ -42,6 +42,9 @@ static void Usage(void)
     Out(L"                               runs the app's uninstaller; /force = proceed if it fails\n");
     Out(L"  featmgr /install <id>        alias for /enable (software tier: download + run installer)\n");
     Out(L"  featmgr /uninstall <id> [/force]  disable, then forget the record (-> NotInstalled)\n");
+    Out(L"  featmgr /shell-defaults [/browser]\n");
+    Out(L"                               make the desktop / Start shortcuts match what is installed (PowerShell 7 and\n");
+    Out(L"                               Firefox, else Command Prompt and Internet Explorer); /browser = Firefox default\n");
     Out(L"  featmgr /import-rapps [<appdb-dir>] [/clean] [/anyarch]\n");
     Out(L"                               convert the RAPPS database (default %%LOCALAPPDATA%%\\RApps\\appdb)\n");
     Out(L"                               into Tier=software catalog entries (Catalog\\Software)\n");
@@ -362,6 +365,13 @@ int wmain(int argc, WCHAR **argv)
 
     if (!_wcsicmp(cmd, L"/help") || !_wcsicmp(cmd, L"/?") || !_wcsicmp(cmd, L"help"))
     { Usage(); return 0; }
+
+    if (!_wcsicmp(cmd, L"/shell-defaults"))
+    {
+        /* repair: shortcuts and Firefox policies match what is installed; /browser also makes Firefox the default */
+        FmShellDefaults(argc > 2 && !_wcsicmp(argv[2], L"/browser") ? FM_SHELL_ADOPT_BROWSER : 0, stdout);
+        return 0;
+    }
 
     if (!_wcsicmp(cmd, L"/print-path") || !_wcsicmp(cmd, L"print-path"))
         return DoPrintPath(argc, argv);

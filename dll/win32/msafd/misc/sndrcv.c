@@ -12,6 +12,61 @@
 
 #include <msafd.h>
 
+extern CRITICAL_SECTION AsyncSelectLock;
+
+/*
+ * Has the connect of this socket completed already? AFD keeps the connect event of a poll set from then
+ * on, and a poll that does not wait says so. The state in the shared data is no help: it changes in the
+ * completion routine of the connect, which a program that does not wait alertably never runs.
+ */
+static
+BOOLEAN
+MsafdConnectCompleted(IN PSOCKET_INFORMATION Socket)
+{
+    AFD_POLL_INFO PollInfo;
+    IO_STATUS_BLOCK IoStatusBlock;
+    HANDLE SockEvent;
+    NTSTATUS Status;
+    BOOLEAN Completed = FALSE;
+
+    if (Socket->SharedData->State == SocketConnected)
+        return TRUE;
+    if (Socket->SharedData->State == SocketClosed || (Socket->SharedData->ServiceFlags1 & XP1_CONNECTIONLESS))
+        return FALSE;
+
+    Status = NtCreateEvent(&SockEvent, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    RtlZeroMemory(&PollInfo, sizeof(PollInfo));
+    PollInfo.Timeout.QuadPart = 0;
+    PollInfo.HandleCount = 1;
+    PollInfo.Exclusive = FALSE;
+    PollInfo.Handles[0].Handle = Socket->Handle;
+    PollInfo.Handles[0].Events = AFD_EVENT_CONNECT;
+
+    Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
+                                   SockEvent,
+                                   NULL,
+                                   NULL,
+                                   &IoStatusBlock,
+                                   IOCTL_AFD_SELECT,
+                                   &PollInfo,
+                                   sizeof(PollInfo),
+                                   &PollInfo,
+                                   sizeof(PollInfo));
+    if (Status == STATUS_PENDING)
+    {
+        MsafdWaitForAlert(SockEvent);
+        Status = IoStatusBlock.Status;
+    }
+    if (NT_SUCCESS(Status) && PollInfo.HandleCount != 0 && (PollInfo.Handles[0].Events & AFD_EVENT_CONNECT))
+        Completed = TRUE;
+
+    NtClose(SockEvent);
+    return Completed;
+}
+
 INT
 WSPAPI
 WSPAsyncSelect(IN  SOCKET Handle,
@@ -23,6 +78,7 @@ WSPAsyncSelect(IN  SOCKET Handle,
     PSOCKET_INFORMATION Socket = NULL;
     PASYNC_DATA                 AsyncData;
     BOOLEAN                     BlockMode;
+    BOOLEAN                     ConnectOver;
 
     /* Get the Socket Structure associated to this Socket */
     Socket = GetSocketStructure(Handle);
@@ -61,12 +117,25 @@ WSPAsyncSelect(IN  SOCKET Handle,
     /* Open a Handle to AFD's Async Helper */
     SockGetAsyncSelectHelperAfdHandle();
 
+    /* A poll that waits for nothing, so it is made before the lock is taken */
+    ConnectOver = (lEvent & FD_CONNECT) && MsafdConnectCompleted(Socket);
+
     /* Store Socket Data */
+    EnterCriticalSection(&AsyncSelectLock);
     Socket->SharedData->hWnd = hWnd;
     Socket->SharedData->wMsg = wMsg;
     Socket->SharedData->AsyncEvents = lEvent;
     Socket->SharedData->AsyncDisabledEvents = 0;
+    /*
+     * FD_CONNECT reports a connect that completes while the socket is selected. AFD keeps answering
+     * "connected" to a poll for it, so a socket whose connect is over already (it finished before this
+     * call, or the socket was accepted) must not have it: Windows posts FD_WRITE only (measured).
+     */
+    if (ConnectOver)
+        Socket->SharedData->AsyncDisabledEvents |= FD_CONNECT;
     Socket->SharedData->SequenceNumber++;
+    AsyncData->SequenceNumber = Socket->SharedData->SequenceNumber;
+    LeaveCriticalSection(&AsyncSelectLock);
 
     /* A change of the address list that came while it was not selected is reported now */
     MsafdAddrChangeSelectionChanged(Socket);
@@ -80,7 +149,6 @@ WSPAsyncSelect(IN  SOCKET Handle,
 
     /* Set up the Async Data */
     AsyncData->ParentSocket = Socket;
-    AsyncData->SequenceNumber = Socket->SharedData->SequenceNumber;
 
     /* Begin Async Select by using I/O Completion */
     NtSetIoCompletion(SockAsyncCompletionPort,

@@ -9,7 +9,8 @@ list(APPEND SOURCE
     pdo.c
     srb.c
     storport.c
-    stubs.c)
+    stubs.c
+    timeout.c)
 
 list(APPEND PCH_SKIP_SOURCE
     guid.c)

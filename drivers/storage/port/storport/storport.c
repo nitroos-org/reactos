@@ -245,6 +245,9 @@ PortAddDevice(
     /* Initialize completion list header */
     InitializeSListHead(&DeviceExtension->CompletionList);
 
+    /* Request timeouts */
+    PortInitializeTimeouts(DeviceExtension);
+
     /* Initialize the request reference lookaside list */
     ExInitializeNPagedLookasideList(&DeviceExtension->RequestReferenceLookaside,
                                     NULL,
@@ -818,16 +821,10 @@ StorPortExtendedFunction(
 
             TimerEntry = CONTAINING_RECORD(TimerHandle, TIMER_ENTRY, ListEntry);
 
-            /* Check if timer is already set. If so, don't try to reactivate timer. */
-            IsTimerAlreadySet = InterlockedCompareExchange(&TimerEntry->TimerAlreadySet, 1, 0);
-            if (IsTimerAlreadySet == 1) {
-                Status = STOR_STATUS_BUSY;
-                break;
-            }
-
-            /* If timeout is zero, cancel the timer */
+            /* A timeout of zero cancels a pending timer; a cancelled timer can be set again */
             if (TimerValue == 0ull) {
-                KeCancelTimer(&TimerEntry->Timer);
+                if (KeCancelTimer(&TimerEntry->Timer))
+                    InterlockedExchange(&TimerEntry->TimerAlreadySet, 0);
                 Status = STOR_STATUS_SUCCESS;
                 break;
             }
@@ -835,10 +832,20 @@ StorPortExtendedFunction(
             /* This API uses microseconds, KTIMER operate on 100 nanoseconds, multiply by 10
                to get the correct timer due time */
             MultiplyResult = RtlULongLongMult(TimerValue, 10ull, (PULONGLONG)&TimerDueTime.QuadPart);
-            if (!NT_SUCCESS(MultiplyResult)) {
+            if (!NT_SUCCESS(MultiplyResult) || TimerDueTime.QuadPart < 0) {
                 Status = STOR_STATUS_INVALID_PARAMETER;
                 break;
             }
+
+            /* Check if timer is already set. If so, don't try to reactivate timer. */
+            IsTimerAlreadySet = InterlockedCompareExchange(&TimerEntry->TimerAlreadySet, 1, 0);
+            if (IsTimerAlreadySet == 1) {
+                Status = STOR_STATUS_BUSY;
+                break;
+            }
+
+            /* Negative: relative to now. A positive due time is an absolute date */
+            TimerDueTime.QuadPart = -TimerDueTime.QuadPart;
 
             /* Initialize the DPC, context and set timer accordingly */
             TimerEntry->HwDeviceExtension = HwDeviceExtension;
@@ -1155,11 +1162,13 @@ StorPortGetUncachedExtension(
         return DeviceExtension->UncachedExtensionVirtualBase;
 
     // FIXME: Set DMA stuff here?
+    RtlZeroMemory(&DeviceDescription, sizeof(DeviceDescription));
     DeviceDescription.Version = DEVICE_DESCRIPTION_VERSION;
     DeviceDescription.Master = ConfigInfo->Master;
     DeviceDescription.ScatterGather = ConfigInfo->ScatterGather;
     DeviceDescription.DemandMode = ConfigInfo->DemandMode;
     DeviceDescription.Dma32BitAddresses = ConfigInfo->Dma32BitAddresses;
+    DeviceDescription.Dma64BitAddresses = (ConfigInfo->Dma64BitAddresses & SCSI_DMA64_MINIPORT_SUPPORTED) ? TRUE : FALSE;
     DeviceDescription.BusNumber = ConfigInfo->SystemIoBusNumber;
     DeviceDescription.DmaChannel = ConfigInfo->DmaChannel;
     DeviceDescription.InterfaceType = ConfigInfo->AdapterInterfaceType;
@@ -1172,6 +1181,14 @@ StorPortGetUncachedExtension(
         IoGetDmaAdapter(DeviceExtension->PhysicalDevice, &DeviceDescription, &NumberOfMapRegisters);
 
     NT_ASSERT(DeviceExtension->DmaAdapter);
+    /* Fewer map registers than pages of the longest transfer: the HAL capped them (a device
+       that needs map registers), and they limit the transfer length (PortFdoStartMiniport) */
+    DeviceExtension->NumberOfMapRegisters = 0;
+    if (DeviceExtension->DmaAdapter != NULL &&
+        NumberOfMapRegisters < BYTES_TO_PAGES(DeviceDescription.MaximumLength & MAXLONG) + 1)
+    {
+        DeviceExtension->NumberOfMapRegisters = NumberOfMapRegisters;
+    }
 
     /* FIXME: AdapterInterfaceType is exposed here and I think it's convenient to initialize
        HwInitData in FDO extension right here. Needs review. */
@@ -1410,30 +1427,39 @@ StorPortNotification(
         case RequestComplete:
             DPRINT("RequestComplete\n");
             Srb = (PSCSI_REQUEST_BLOCK)va_arg(ap, PSCSI_REQUEST_BLOCK);
-            DPRINT("Complete Notify - (%d:%d:%d) ReqRef %p Srb %p Irp %p Tag %x\n",
-                    Srb->PathId, Srb->TargetId, Srb->Lun,
-                    Srb->OriginalRequest, Srb,
-                    ((PQUEUED_REQUEST_REFERENCE)Srb->OriginalRequest)->Irp,
-                    Srb->QueueTag);
-            // if (Srb->OriginalRequest != NULL)
-            // {
-            //     // DPRINT1("Need to complete the IRP!\n");
-            //     PortCompleteRequest(HwDeviceExtension, Srb);
-            // }
-            NT_ASSERT(Srb->OriginalRequest);
-            RequestReference = (PQUEUED_REQUEST_REFERENCE)Srb->OriginalRequest;
-            // if (RequestReference->SpecialRequestId) {
-            //     /* FIXME: DELETE AFTER DEBUG */
-            //     DPRINT1("STORPORT SPECIAL REQUEST %d Queuing for completion\n", RequestReference->SpecialRequestId);
-            // }
+            DPRINT("Complete Notify - (%d:%d:%d) Srb %p Tag %x\n",
+                    Srb->PathId, Srb->TargetId, Srb->Lun, Srb, Srb->QueueTag);
 
-            /* Queue for completion */
-            InterlockedPushEntrySList(&FdoExtension->CompletionList,
-                                      &RequestReference->CompletionEntry);
+            /*
+             * Storport may have completed this SRB itself after restarting the adapter; its
+             * packet is gone then and Srb->OriginalRequest is the IRP. That is recognised from
+             * the SRB alone. The restart waits for calls counted here before it frees packets.
+             */
+            InterlockedIncrement(&FdoExtension->CompletionsInFlight);
+            if (PortIsSweptSrb(FdoExtension, Srb))
+            {
+                DPRINT1("Late completion of Srb %p (completed by storport after a restart) ignored\n", Srb);
+            }
+            else
+            {
+                NT_ASSERT(Srb->OriginalRequest);
+                RequestReference = (PQUEUED_REQUEST_REFERENCE)Srb->OriginalRequest;
 
-            /* Insert DPC for delayed completion */
-            KeInsertQueueDpc(&FdoExtension->Device->Dpc, NULL, NULL);
+                if (!PortClaimRequestCompletion(RequestReference))
+                {
+                    DPRINT1("Late completion of Srb %p ignored\n", Srb);
+                }
+                else
+                {
+                    /* Queue for completion */
+                    InterlockedPushEntrySList(&FdoExtension->CompletionList,
+                                              &RequestReference->CompletionEntry);
 
+                    /* Insert DPC for delayed completion */
+                    KeInsertQueueDpc(&FdoExtension->Device->Dpc, NULL, NULL);
+                }
+            }
+            InterlockedDecrement(&FdoExtension->CompletionsInFlight);
             break;
 
         case GetExtendedFunctionTable:
@@ -1526,6 +1552,9 @@ StorPortNotification(
                 if (!NT_SUCCESS(MultiplyResult)) {
                     break;
                 }
+
+                /* Negative: relative to now. A positive due time is an absolute date */
+                TimerDueTime.QuadPart = -TimerDueTime.QuadPart;
 
                 FdoExtension->TimerCallback = TimerRoutine;
                 KeSetTimer(&FdoExtension->Timer, TimerDueTime, &FdoExtension->TimerDpc);

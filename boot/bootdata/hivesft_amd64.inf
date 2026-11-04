@@ -3,6 +3,9 @@ Signature = "$Windows NT$"
 
 [AddReg]
 
+; Build lab of the Windows 10 22H2 build the version values report (see hivesft_i386.inf).
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","BuildLabEx",2,"19041.1.amd64fre.vb_release.191206-1406"
+
 ; The 32-bit view of the Mesa3D OpenGL driver registration of hivesft.inf. HKLM\SOFTWARE is redirected to
 ; SOFTWARE\Wow6432Node for 32-bit processes and neither key is shared, so without these the opengl32 of SysWOW64
 ; finds no driver and gives 32-bit programs the built-in OpenGL 1.1. libgallium_wgl.dll resolves to the i386
@@ -49,6 +52,11 @@ HKLM,"SOFTWARE\Clients\StartMenuInternet\IEXPLORE.EXE\shell\open\command","",0x0
 ; 32-bit regsvr32 of SysWOW64\qmgrprxy.dll at setup (dll/win32/syssetup/wizard.c).
 HKLM,"SOFTWARE\Classes\Wow6432Node\CLSID\{4991D34B-80A1-4291-83B6-3328366B9097}",,0x00000000,"Background Intelligent Transfer Control Class 1.0"
 HKLM,"SOFTWARE\Classes\Wow6432Node\CLSID\{4991D34B-80A1-4291-83B6-3328366B9097}","AppID",0x00000000,"{69AD4AEE-51BE-439B-A92C-86AE490E8B30}"
+
+; The 32-bit view of the Network List Manager class of hivecls.inf (netprofm.dll resolves to the i386 build in SysWOW64).
+HKLM,"SOFTWARE\Classes\Wow6432Node\CLSID\{DCB00C01-570F-4A9B-8D69-199FDBA5723B}",,0x00000000,"Network List Manager"
+HKLM,"SOFTWARE\Classes\Wow6432Node\CLSID\{DCB00C01-570F-4A9B-8D69-199FDBA5723B}\InprocServer32",,0x00020000,"%SystemRoot%\system32\netprofm.dll"
+HKLM,"SOFTWARE\Classes\Wow6432Node\CLSID\{DCB00C01-570F-4A9B-8D69-199FDBA5723B}\InprocServer32","ThreadingModel",0x00000000,"Both"
 
 ; The 32-bit view of the smart card database of hivesft.inf (HKLM\SOFTWARE\Microsoft\Cryptography\Calais is redirected, not
 ; shared, as on Windows; the card module paths are SysWOW64).

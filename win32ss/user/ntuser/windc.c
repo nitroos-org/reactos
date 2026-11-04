@@ -947,13 +947,22 @@ IntWindowFromDC(HDC hDc)
          if (Dce->DCXFlags & DCX_INDESTROY)
             Ret = NULL;
          else
+         {
             /* GetDC(NULL) returns the cached, windowless screen DC (hwndCurrent == NULL).
              * On Windows that DC belongs to the desktop window, so WindowFromDC() returns
              * it. Report the desktop window here too: ANGLE (Chromium/Electron) validates
              * an HDC native-display via WindowFromDC() and rejects it when NULL, which was
              * failing EGL/GL display bring-up under the compositor. Window DCs are
              * unaffected; memory DCs are not in this list and still yield NULL. */
-            Ret = Dce->hwndCurrent ? Dce->hwndCurrent : IntGetDesktopWindow();
+            /* (GetDesktopWindow() of the caller: the desktop window of its own desktop) */
+            if (Dce->hwndCurrent)
+               Ret = Dce->hwndCurrent;
+            else
+            {
+               PWND pwndDesk = UserGetThreadDesktopWindow();
+               Ret = pwndDesk ? UserHMGetHandle(pwndDesk) : NULL;
+            }
+         }
          break;
       }
   }

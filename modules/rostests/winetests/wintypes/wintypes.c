@@ -226,6 +226,88 @@ static void test_own_directory(void)
     WindowsDeleteString(hdir);
 }
 
+/* The metadata directory with "\." appended until the name has the wanted length (an odd length) */
+static void long_directory(WCHAR *dir, UINT len)
+{
+    UINT n;
+
+    n = GetWindowsDirectoryW(dir, MAX_PATH);
+    lstrcpyW(dir + n, L"\\System32\\WinMetadata");
+    for (n = lstrlenW(dir); n + 2 <= len; n += 2)
+    {
+        dir[n] = L'\\';
+        dir[n + 1] = L'.';
+    }
+    dir[n] = 0;
+}
+
+/* Measured on Windows 10 22H2 (x64 and x86): a windowsMetaDataDir of up to 233 characters is
+ * searched and found, up to 246 searched without a result (the file name does not fit MAX_PATH),
+ * from 247 on E_INVALIDARG; a package graph directory that long is ignored. */
+static void test_long_directory(void)
+{
+    static const UINT lengths[] = { 99, 233, 245, 247, 259, 1001 };
+    WCHAR dir[1100];
+    HSTRING name = str(L"Windows.Foundation"), hdir, *files;
+    DWORD nfiles;
+    HRESULT hr;
+    UINT i;
+
+    for (i = 0; i < ARRAYSIZE(lengths); i++)
+    {
+        HRESULT expect = lengths[i] <= 233 ? S_OK : lengths[i] <= 246 ? RO_E_METADATA_NAME_NOT_FOUND : E_INVALIDARG;
+
+        long_directory(dir, lengths[i]);
+        if (lstrlenW(dir) != lengths[i])
+        {
+            skip("cannot make a directory name of %u characters from %s\n", lengths[i], wine_dbgstr_w(dir));
+            continue;
+        }
+        hdir = str(dir);
+        files = NULL;
+        nfiles = 0xdeadbeef;
+        hr = pRoResolveNamespace(name, hdir, 0, NULL, &nfiles, &files, NULL, NULL);
+        ok(hr == expect, "dir length %u: got %#lx, expected %#lx\n", lengths[i], hr, expect);
+        if (hr == S_OK)
+        {
+            ok(nfiles == 1, "dir length %u: got %lu files\n", lengths[i], nfiles);
+            if (nfiles == 1)
+            {
+                UINT32 len;
+                const WCHAR *path = WindowsGetStringRawBuffer(files[0], &len);
+                ok(len == lengths[i] + 25, "dir length %u: path %s\n", lengths[i], wine_dbgstr_w(path));
+            }
+            free_list(files, nfiles);
+        }
+        else
+        {
+            ok(!nfiles && !files, "dir length %u: %lu files, %p\n", lengths[i], nfiles, files);
+        }
+        WindowsDeleteString(hdir);
+
+        /* as a package graph directory it is searched, or ignored when too long: never cut off */
+        hdir = str(dir);
+        files = NULL;
+        nfiles = 0xdeadbeef;
+        hr = pRoResolveNamespace(name, NULL, 1, &hdir, &nfiles, &files, NULL, NULL);
+        ok(hr == S_OK, "graph length %u: got %#lx\n", lengths[i], hr);
+        if (hr == S_OK)
+        {
+            DWORD j;
+
+            for (j = 0; j < nfiles; j++)
+            {
+                UINT32 len;
+                const WCHAR *path = WindowsGetStringRawBuffer(files[j], &len);
+                ok(len < MAX_PATH, "graph length %u: path %s\n", lengths[i], wine_dbgstr_w(path));
+            }
+            free_list(files, nfiles);
+        }
+        WindowsDeleteString(hdir);
+    }
+    WindowsDeleteString(name);
+}
+
 START_TEST(wintypes)
 {
     HMODULE module = LoadLibraryW(L"wintypes.dll");
@@ -239,4 +321,5 @@ START_TEST(wintypes)
     test_arguments();
     test_default_directory();
     test_own_directory();
+    test_long_directory();
 }

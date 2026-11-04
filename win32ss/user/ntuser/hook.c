@@ -1222,9 +1222,11 @@ IntRemoveHook(PVOID Object)
     }
     else // Global
     {
-        IntFreeHook(Hook);
+        /* A global hook is in the list of the desktop it was set on (SetWindowsHookEx
+           links it into ptiHook->rpdesk), not necessarily the input desktop */
+        pdo = Hook->rpdesk;
 
-        pdo = IntGetActiveDesktop();
+        IntFreeHook(Hook);
 
         if (pdo &&
              pdo->pDeskInfo &&

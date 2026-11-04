@@ -728,7 +728,9 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
                     }
 
                     // Update all the windows after the move or size, including this window.
-                    UpdateThreadWindows(UserGetDesktopWindow()->spwndChild, pti, hrgnOrig);
+                    /* The top-level windows of the moved window's own desktop */
+                    if (co_GetDesktopWindow(pwnd))
+                       UpdateThreadWindows(co_GetDesktopWindow(pwnd)->spwndChild, pti, hrgnOrig);
 
                     if (hrgnOrig) GreDeleteObject(hrgnOrig);
                     if (hrgnNew) GreDeleteObject(hrgnNew);

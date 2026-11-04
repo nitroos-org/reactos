@@ -333,6 +333,27 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Vcb->Serial = Vcb->Info.serial;
         ngc_set_dio_drain(Vcb->Core, NgDrainDataIoCallback, Vcb);
         ngc_set_commit_kick(Vcb->Core, NgCommitKickCallback, Vcb);
+        if (!Vcb->Info.read_only)
+        {
+            /* Files a POSIX delete moved to $Extend\$Deleted and a crash (or another system) left there go before
+             * anything is opened, as on Windows (info.c, NgPosixUnlink). */
+            unsigned int Purged = 0;
+            ngc_node *DelDir;
+            int PErr = ngc_purge_deleted(Vcb->Core, &Purged);
+            if (PErr)
+                DPRINT1("ntfsng: removing what is left in $Extend\\$Deleted failed %d (%u removed)\n", PErr, Purged);
+            else if (Purged)
+                DPRINT1("ntfsng: %u files left in $Extend\\$Deleted removed\n", Purged);
+            if (Purged && ngc_commit_now(Vcb->Core))
+                DPRINT1("ntfsng: commit after the $Deleted cleanup failed\n");
+            if (!ngc_deleted_dir(Vcb->Core, 0, &DelDir))
+            {
+                struct ngc_stat DSt;
+                ngc_stat(DelDir, &DSt);
+                Vcb->DeletedMftNo = DSt.mft_ref & 0xffffffffffffULL;
+                ngc_put(DelDir);
+            }
+        }
     }
     NgReleaseCore(Vcb);
     if (Err)

@@ -1316,10 +1316,16 @@ co_UserSetParent(HWND hWndChild, HWND hWndNewParent)
       return NULL;
    }
 
-   if (hWndChild == IntGetDesktopWindow())
+   if (UserIsDesktopWindow(ValidateHwndNoErr(hWndChild)))
    {
       ERR("UserSetParent Access Denied!\n");
       EngSetLastError(ERROR_ACCESS_DENIED);
+      return NULL;
+   }
+
+   if (!(Wnd = UserGetWindowObject(hWndChild)))
+   {
+      ERR("UserSetParent Bad Child!\n");
       return NULL;
    }
 
@@ -1333,15 +1339,23 @@ co_UserSetParent(HWND hWndChild, HWND hWndNewParent)
    }
    else
    {
-      if (!(WndParent = UserGetWindowObject(IntGetDesktopWindow())))
+      /* NULL = the desktop window of the child's own desktop, not of the input desktop */
+      if (!(WndParent = co_GetDesktopWindow(Wnd)))
       {
+         EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
          return NULL;
       }
    }
 
-   if (!(Wnd = UserGetWindowObject(hWndChild)))
+   /* A window and its parent live in the heap of the same desktop: a parent on another
+      desktop would link the window into that desktop's window lists, which outlive or
+      are outlived by the window's own desktop heap (see IntLinkWindow) */
+   if (WndParent->head.rpdesk != Wnd->head.rpdesk)
    {
-      ERR("UserSetParent Bad Child!\n");
+      ERR("UserSetParent: parent %p is on another desktop than %p\n", hWndNewParent, hWndChild);
+      /* Windows 10 22H2 (oracle, 2026-11-03): SetParent returns NULL with ERROR_INVALID_PARAMETER,
+         from a thread on either desktop, and the parent is left unchanged */
+      EngSetLastError(ERROR_INVALID_PARAMETER);
       return NULL;
    }
 
@@ -1548,7 +1562,12 @@ NtUserBuildHwndList(
 
       if(!hwndParent)
       {
-         if(hDesktop == NULL && !(Desktop = IntGetActiveDesktop()))
+         /* EnumWindows / EnumDesktopWindows(NULL): the desktop of the calling thread
+            (Windows: "the current desktop"), not the input desktop */
+         PTHREADINFO ptiCur = PsGetCurrentThreadWin32Thread();
+
+         if(hDesktop == NULL &&
+            !(Desktop = (ptiCur && ptiCur->rpdesk) ? ptiCur->rpdesk : IntGetActiveDesktop()))
          {
             Status = STATUS_INVALID_HANDLE;
             goto Quit;
@@ -1652,7 +1671,9 @@ NtUserBuildHwndList(
      // Do not use Thread link list due to co_UserFreeWindow!!!
      // Current = W32Thread->WindowListHead.Flink;
      // Fixes Api:CreateWindowEx tests!!!
-      List = IntWinListChildren(UserGetDesktopWindow());
+      /* The top-level windows of that thread are on the thread's desktop */
+      Window = W32Thread->rpdesk ? IntGetThreadDesktopWindow(W32Thread) : UserGetDesktopWindow();
+      List = Window ? IntWinListChildren(Window) : NULL;
       if (List)
       {
          int i;
@@ -2056,7 +2077,8 @@ PWND FASTCALL IntCreateWindow(CREATESTRUCTW* Cs,
          object of the process quota for the life of the process. */
       CallProc = UserSearchForCallProc(Class->pclsBase->spcpdFirst,
                                        pWnd->lpfnWndProc,
-                                       pWnd->Unicode ? UserGetCPDA2U : UserGetCPDU2A);
+                                       pWnd->Unicode ? UserGetCPDA2U : UserGetCPDU2A,
+                                       pWnd->head.rpdesk);
       if (!CallProc)
       {
          CallProc = CreateCallProc(pWnd->head.rpdesk, pWnd->lpfnWndProc, pWnd->Unicode , pWnd->head.pti->ppi);
@@ -3287,7 +3309,8 @@ NtUserFindWindowEx(HWND hwndParent,
    }
    else if(hwndParent == HWND_MESSAGE)
    {
-     hwndParent = IntGetMessageWindow();
+     /* The message-only windows of the caller's desktop */
+     hwndParent = IntGetCurrentThreadMessageWindow();
    }
 
    if(!(Parent = UserGetWindowObject(hwndParent)))
@@ -3377,7 +3400,7 @@ NtUserFindWindowEx(HWND hwndParent,
        {
           PWND MsgWindows;
 
-          if((MsgWindows = UserGetWindowObject(IntGetMessageWindow())))
+          if((MsgWindows = UserGetWindowObject(IntGetCurrentThreadMessageWindow())))
           {
              Ret = IntFindWindow(MsgWindows, ChildAfter, ClassAtom, &WindowName);
           }
@@ -3715,17 +3738,33 @@ NtUserSetParent(HWND hWndChild, HWND hWndNewParent)
    /*
       Check Parent first from user space, set it here.
     */
-   if (!hWndNewParent)
+   /* NULL and HWND_MESSAGE mean the desktop / message window of the child's own desktop
+      (the input desktop may be another one: the child would be linked into its lists) */
+   if (!hWndNewParent || hWndNewParent == HWND_MESSAGE)
    {
-      hWndNewParent = IntGetDesktopWindow();
-   }
-   else if (hWndNewParent == HWND_MESSAGE)
-   {
-      hWndNewParent = IntGetMessageWindow();
+      PWND pwndChild = ValidateHwndNoErr(hWndChild);
+      PDESKTOP pdeskChild = pwndChild ? pwndChild->head.rpdesk : NULL;
+
+      if (!pdeskChild)
+         hWndNewParent = hWndNewParent ? IntGetMessageWindow() : IntGetDesktopWindow();
+      else if (!hWndNewParent)
+         hWndNewParent = pdeskChild->DesktopWindow;
+      else if (pdeskChild->spwndMessage)
+         hWndNewParent = UserHMGetHandle(pdeskChild->spwndMessage);
+      else
+      {
+         /* No message window (desktop being destroyed): NULL would mean the desktop
+            window to co_UserSetParent, fail as for a parent that does not exist */
+         ERR("NtUserSetParent: desktop %p of %p has no message window\n", pdeskChild, hWndChild);
+         EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+         Ret = NULL;
+         goto Exit;
+      }
    }
 
    Ret = co_UserSetParent(hWndChild, hWndNewParent);
 
+Exit:
    TRACE("Leave NtUserSetParent, ret=%p\n", Ret);
    UserLeave();
    return Ret;
@@ -4089,7 +4128,8 @@ co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULO
 
          case GWLP_HWNDPARENT: // LONG_PTR
             Parent = Window->spwndParent;
-            if (Parent && (UserHMGetHandle(Parent) == IntGetDesktopWindow()))
+            /* A top-level window (child of the desktop window of ITS desktop): set the owner */
+            if (UserIsDesktopWindow(Parent))
                OldValue = (LONG_PTR)IntSetOwner(UserHMGetHandle(Window), (HWND)NewValue);
             else
                OldValue = (LONG_PTR)co_UserSetParent(UserHMGetHandle(Window), (HWND)NewValue);
@@ -4146,7 +4186,7 @@ NtUserSetWindowLong(HWND hWnd, DWORD Index, LONG NewValue, BOOL Ansi)
 
    UserEnterExclusive();
 
-   if (hWnd == IntGetDesktopWindow())
+   if (UserIsDesktopWindow(ValidateHwndNoErr(hWnd)))
    {
       EngSetLastError(STATUS_ACCESS_DENIED);
       UserLeave();
@@ -4168,7 +4208,7 @@ NtUserSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi)
 
     UserEnterExclusive();
 
-    if (hWnd == IntGetDesktopWindow())
+    if (UserIsDesktopWindow(ValidateHwndNoErr(hWnd)))
     {
         EngSetLastError(STATUS_ACCESS_DENIED);
         UserLeave();
@@ -4190,7 +4230,7 @@ NtUserAlterWindowStyle(HWND hWnd, DWORD Index, LONG NewValue)
 
    UserEnterExclusive();
 
-   if (hWnd == IntGetDesktopWindow())
+   if (UserIsDesktopWindow(ValidateHwndNoErr(hWnd)))
    {
       EngSetLastError(STATUS_ACCESS_DENIED);
       UserLeave();
@@ -4224,7 +4264,7 @@ NtUserSetWindowWord(HWND hWnd, INT Index, WORD NewValue)
    TRACE("Enter NtUserSetWindowWord\n");
    UserEnterExclusive();
 
-   if (hWnd == IntGetDesktopWindow())
+   if (UserIsDesktopWindow(ValidateHwndNoErr(hWnd)))
    {
       EngSetLastError(STATUS_ACCESS_DENIED);
       goto Exit; // Return 0

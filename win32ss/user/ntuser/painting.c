@@ -924,7 +924,10 @@ co_UserRedrawWindow(
 
    if (Window == NULL)
    {
-      Window = UserGetDesktopWindow();
+      /* The desktop window of the calling thread's desktop */
+      Window = UserGetThreadDesktopWindow();
+      if (Window == NULL)
+         return FALSE;
    }
 
    /*
@@ -951,7 +954,7 @@ co_UserRedrawWindow(
              IntGdiCombineRgn(TmpRgn, UpdateRgn, NULL, RGN_COPY);
           }
 
-          if (Window != UserGetDesktopWindow())
+          if (!UserIsDesktopWindow(Window))
           {
              REGION_bOffsetRgn(TmpRgn, Window->rcClient.left, Window->rcClient.top);
           }
@@ -961,7 +964,7 @@ co_UserRedrawWindow(
          if (UpdateRect != NULL)
          {
             bRgnAllocated = TRUE;
-            if (Window == UserGetDesktopWindow())
+            if (UserIsDesktopWindow(Window))
             {
                TmpRgn = IntSysCreateRectpRgnIndirect(UpdateRect);
             }
@@ -1468,7 +1471,7 @@ IntPrintWindowRender(
         /* Take what is on the screen for the visible part */
         pwndRoot = UserGetAncestor(pwnd, GA_ROOT);
         if (!(pwnd->state2 & WNDS2_INDESTROY) &&
-            pwnd->head.rpdesk == gpdeskInputDesktop &&
+            pwnd->head.rpdesk == gpdeskInputDesktop && /* only the input desktop is on the screen */
             pwndRoot && !(pwndRoot->ExStyle & WS_EX_LAYERED))
         {
             rc = (nFlags & PW_CLIENTONLY) ? pwnd->rcClient : pwnd->rcWindow;
@@ -2404,7 +2407,8 @@ NtUserRedrawWindow(
    TRACE("Enter NtUserRedrawWindow\n");
    UserEnterExclusive();
 
-   if (!(Wnd = UserGetWindowObject(hWnd ? hWnd : IntGetDesktopWindow())))
+   /* RedrawWindow(NULL): the desktop window of the calling thread's desktop */
+   if (!(Wnd = hWnd ? UserGetWindowObject(hWnd) : UserGetThreadDesktopWindow()))
    {
       goto Exit; // Return FALSE
    }
@@ -2742,10 +2746,13 @@ UserRealizePalette(HDC hdc)
       hWnd = IntWindowFromDC(hdc);
       if (hWnd) // Send broadcast if dc is associated with a window.
       {  // FYI: Thread locked in CallOneParam.
-         hWndDesktop = IntGetDesktopWindow();
-         if ( hWndDesktop != hWnd )
+         /* The desktop window of that window's own desktop */
+         PWND pwndDC = ValidateHwndNoErr(hWnd);
+         PWND pwndDesk = pwndDC ? co_GetDesktopWindow(pwndDC) : NULL;
+         hWndDesktop = pwndDesk ? UserHMGetHandle(pwndDesk) : NULL;
+         if ( hWndDesktop && hWndDesktop != hWnd )
          {
-            PWND pWnd = UserGetWindowObject(hWndDesktop);
+            PWND pWnd = pwndDesk;
             ERR("RealizePalette Desktop.\n");
             hdc = UserGetWindowDC(pWnd);
             IntPaintDesktop(hdc);

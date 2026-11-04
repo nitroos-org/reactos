@@ -266,6 +266,13 @@ HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log)
 BOOL   FmNetProbe(LPCWSTR url, DWORD timeoutMs);   /* TRUE: the server answered (the network is up) */
 void   FmCompInstallLine(const FM_COMPONENT *c, LPCWSTR file, LPWSTR out, DWORD cch);   /* Install with %FILE% filled in */
 
+/* ---- NitroOS shell defaults (shelldefaults.c) ---- */
+#define FM_SHELL_ADOPT_BROWSER  0x1   /* Firefox is installed: make it the default browser (machine + current user) */
+#define FM_SHELL_FORGET_BROWSER 0x2   /* Firefox is gone: the default browser goes back to Internet Explorer */
+/* Make the desktop / Start shortcuts, the Firefox policies and (flags) the default browser match what is installed:
+ * PowerShell 7 and Firefox when they are there, Command Prompt and the Internet Explorer entry otherwise. Idempotent. */
+void   FmShellDefaults(DWORD flags, FILE *log);
+
 /* ---- GUI pieces shared by optfeatures.exe (progwin.c, featwin.c, firstboot.c) ---- */
 #define FM_JOB_INSTALL 0
 #define FM_JOB_REMOVE  1

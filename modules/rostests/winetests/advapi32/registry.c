@@ -992,6 +992,29 @@ static void test_get_value(void)
     /* before win8: ERROR_INVALID_PARAMETER, win8: ERROR_UNSUPPORTED_TYPE */
     ok(ret == ERROR_INVALID_PARAMETER || ret == ERROR_UNSUPPORTED_TYPE, "ret=%ld\n", ret);
 
+    /* Query REG_EXPAND_SZ using RRF_RT_REG_SZ|RRF_RT_REG_EXPAND_SZ and no buffer (ok, size after expansion) */
+    type = 0xdeadbeef; size = 0;
+    ret = pRegGetValueA(hkey_main, NULL, "TP2_EXP_SZ", RRF_RT_REG_SZ|RRF_RT_REG_EXPAND_SZ, &type, NULL, &size);
+    ok(ret == ERROR_SUCCESS, "ret=%ld\n", ret);
+    ok(size == strlen(expanded2)+2,
+       "strlen(expanded2)=%d, size=%ld\n", lstrlenA(expanded2), size);
+    ok(type == REG_SZ, "type=%ld\n", type);
+
+    /* Same with a buffer (ok, expands) */
+    buf[0] = 0; type = 0xdeadbeef; size = sizeof(buf);
+    ret = pRegGetValueA(hkey_main, NULL, "TP2_EXP_SZ", RRF_RT_REG_SZ|RRF_RT_REG_EXPAND_SZ, &type, buf, &size);
+    ok(ret == ERROR_SUCCESS, "ret=%ld\n", ret);
+    ok(size == strlen(expanded2)+1, "strlen(expanded2)=%d, size=%ld\n", lstrlenA(expanded2), size);
+    ok(type == REG_SZ, "type=%ld\n", type);
+    ok(!strcmp(expanded2, buf), "expanded2=\"%s\" buf=\"%s\"\n", expanded2, buf);
+
+    /* Same, Unicode and no buffer: the size is in bytes and includes the terminator */
+    type = 0xdeadbeef; size = 0;
+    ret = pRegGetValueW(hkey_main, NULL, L"TP2_EXP_SZ", RRF_RT_REG_SZ|RRF_RT_REG_EXPAND_SZ, &type, NULL, &size);
+    ok(ret == ERROR_SUCCESS, "ret=%ld\n", ret);
+    ok(size == (strlen(expanded2)+1) * sizeof(WCHAR), "strlen(expanded2)=%d, size=%ld\n", lstrlenA(expanded2), size);
+    ok(type == REG_SZ, "type=%ld\n", type);
+
     /* Query REG_EXPAND_SZ using RRF_RT_ANY */
     buf[0] = 0; type = 0xdeadbeef; size = sizeof(buf);
     ret = pRegGetValueA(hkey_main, NULL, "TP1_EXP_SZ", RRF_RT_ANY, &type, buf, &size);

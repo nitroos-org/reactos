@@ -29,12 +29,19 @@ static VOID NgBasic(PNG_FCB Fcb, PFILE_BASIC_INFORMATION B)
     B->FileAttributes = NgFileAttributes(Fcb, &Fcb->Stat);
 }
 
-static VOID NgStandard(PNG_FCB Fcb, PFILE_STANDARD_INFORMATION S)
+/*
+ * As NTFS on Windows 10 (measured on 22H2): a pending delete of a file takes its name out of the link count (a file
+ * with one name whose delete is pending, or whose name a POSIX delete moved to $Extend\$Deleted, has 0; a named
+ * stream's pending delete does not count), and a handle whose name a POSIX delete removed reports the delete
+ * pending even when the file lives on under another name.
+ */
+static VOID NgStandard(PNG_FCB Fcb, PNG_CCB Ccb, PFILE_STANDARD_INFORMATION S)
 {
+    ULONG Links = Fcb->Stat.nlink ? Fcb->Stat.nlink : 1;
     S->AllocationSize.QuadPart = Fcb->IsDirectory ? 0 : Fcb->Stat.alloc;
     S->EndOfFile.QuadPart = Fcb->IsDirectory ? 0 : Fcb->Stat.size;
-    S->NumberOfLinks = Fcb->Stat.nlink ? Fcb->Stat.nlink : 1;
-    S->DeletePending = Fcb->DeletePending;
+    S->NumberOfLinks = Fcb->DeletePending && !Fcb->Stream.Length ? Links - 1 : Links;   /* not for a named stream */
+    S->DeletePending = Fcb->DeletePending || (Ccb && Ccb->Orphaned);
     S->Directory = Fcb->IsDirectory;
 }
 
@@ -162,7 +169,7 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             break;
         case FileStandardInformation:
             NEED(FILE_STANDARD_INFORMATION);
-            NgStandard(Fcb, Buffer);
+            NgStandard(Fcb, Ccb, Buffer);
             break;
         case FileInternalInformation:
             NEED(FILE_INTERNAL_INFORMATION);
@@ -268,7 +275,7 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             if (Length < FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation.FileName))
                 return STATUS_BUFFER_TOO_SMALL;
             NgBasic(Fcb, &A->BasicInformation);
-            NgStandard(Fcb, &A->StandardInformation);
+            NgStandard(Fcb, Ccb, &A->StandardInformation);
             A->InternalInformation.IndexNumber.QuadPart = Fcb->Stat.mft_ref;
             A->EaInformation.EaSize = 0;
             A->PositionInformation.CurrentByteOffset = FileObject->CurrentByteOffset;
@@ -550,6 +557,163 @@ static VOID NgRetitleCcb(PNG_VCB Vcb, PNG_CCB C, NG_RETITLE *R, PCUNICODE_STRING
     RtlCopyMemory(C->Name, NewName->Buffer, NewName->Length);
 }
 
+/* $Extend\$Deleted, looked up or created, its record number kept (CoreLock held). */
+static int NgDeletedDirLocked(PNG_VCB Vcb, ngc_node **Out)
+{
+    struct ngc_stat St;
+    int Err = ngc_deleted_dir(Vcb->Core, 1, Out);
+    if (!Err)
+    {
+        ngc_stat(*Out, &St);
+        Vcb->DeletedMftNo = St.mft_ref & 0xffffffffffffULL;
+    }
+    return Err;
+}
+
+/*
+ * The POSIX delete (FileDispositionInformationEx) at the cleanup of the handle that asked for it, with other handles
+ * of the file still open (caller holds the main resource exclusive and CreateGate shared).  As NTFS on Windows 10:
+ * - the pending name is the file's last one: it moves to $Extend\$Deleted, named by the file reference and a
+ *   sequence number ("\$Extend\$Deleted\00050000000080362B701F0C" is what Windows 10 22H2 names the handles of such
+ *   a file).  The record, its data and the cache stay for the open handles; the FCB stays delete pending (Orphan),
+ *   and its last cleanup deletes the $Deleted name the classic way, which frees record and clusters.  A crash
+ *   before that leaves an ordinary file in $Deleted, which the next mount removes (ngc_purge_deleted), as Windows
+ *   does; the metadata journal makes the move itself atomic.
+ * - another name is left (a hard link): the name is removed; the file lives on, no longer delete pending.
+ * The handles opened by the removed name are Orphaned: they name the file in $Deleted, and a rename or a
+ * disposition through them fails.  On a failure the classic pending delete stays.
+ */
+VOID NgPosixUnlink(PNG_FCB Fcb)
+{
+    static const WCHAR Hex[] = L"0123456789ABCDEF";
+    static const WCHAR DeletedDir[] = L"\\$Extend\\$Deleted\\";
+    PNG_VCB Vcb = Fcb->Vcb;
+    ngc_node *Dir = NULL, *DelDir = NULL;
+    WCHAR Name[24], PathBuf[RTL_NUMBER_OF(DeletedDir) - 1 + RTL_NUMBER_OF(Name)];
+    UNICODE_STRING NewName, NewPath;
+    NG_RETITLE *Spare = NULL;
+    ULONG Spares = 0, Used = 0, i, Seq;
+    ULONGLONG Ref = Fcb->Stat.mft_ref;
+    BOOLEAN LastName = FALSE;
+    PLIST_ENTRY Entry;
+    int Err;
+
+    if (Fcb->Orphan || Fcb->Deleted || !Fcb->DeletePending || Fcb->Stream.Length || Fcb->IsRoot || Fcb->IsVolume ||
+        Vcb->ReadOnly || !Fcb->HasNode)
+        return;
+    Seq = (ULONG)InterlockedIncrement(&Vcb->OrphanSeq);
+    for (i = 0; i < 16; i++)
+        Name[i] = Hex[(Ref >> (60 - 4 * i)) & 0xf];
+    for (i = 0; i < 8; i++)
+        Name[16 + i] = Hex[(Seq >> (28 - 4 * i)) & 0xf];
+    RtlInitEmptyUnicodeString(&NewName, Name, sizeof(Name));
+    NewName.Length = sizeof(Name);
+    RtlCopyMemory(PathBuf, DeletedDir, sizeof(DeletedDir) - sizeof(WCHAR));
+    RtlCopyMemory(PathBuf + RTL_NUMBER_OF(DeletedDir) - 1, Name, sizeof(Name));
+    RtlInitEmptyUnicodeString(&NewPath, PathBuf, sizeof(PathBuf));
+    NewPath.Length = sizeof(PathBuf);
+
+    /* The handles' new names are allocated first: the move done on disk is not undone. */
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    for (Entry = Fcb->CcbList.Flink; Entry != &Fcb->CcbList; Entry = Entry->Flink)
+        Spares++;
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    if (Spares)
+    {
+        Spare = ExAllocatePoolWithTag(PagedPool, Spares * sizeof(NG_RETITLE), TAG_NTFSNG);
+        if (!Spare)
+            return;
+        RtlZeroMemory(Spare, Spares * sizeof(NG_RETITLE));
+        for (i = 0; i < Spares; i++)
+        {
+            Spare[i].Buffer = ExAllocatePoolWithTag(PagedPool, NewPath.Length + sizeof(WCHAR), TAG_NTFSNG);
+            Spare[i].Old = ExAllocatePoolWithTag(PagedPool, 2 * sizeof(PVOID), TAG_NTFSNG);
+            if (!Spare[i].Buffer || !Spare[i].Old)
+            {
+                NgFreeRetitles(Spare, Spares);
+                return;
+            }
+        }
+    }
+
+    NgAcquireCore(Vcb);
+    Err = NgEnsureNode(Fcb);
+    if (!Err)
+        Err = ngc_iget(Vcb->Core, Fcb->DelParentMftNo, &Dir);
+    if (!Err)
+    {
+        LastName = Fcb->IsDirectory || ngc_links(Fcb->Node) <= 1;
+        if (!LastName)
+            Err = ngc_unlink(Vcb->Core, Dir, Fcb->DelName, Fcb->DelNameLength, Fcb->Node);
+        else if (Fcb->IsDirectory && ngc_dir_empty(Vcb->Core, Fcb->Node) != 1)
+            Err = -NGC_ENOTEMPTY;   /* the last cleanup decides */
+        else if (!(Err = NgDeletedDirLocked(Vcb, &DelDir)))
+            Err = ngc_rename(Vcb->Core, Dir, Fcb->DelName, Fcb->DelNameLength, Fcb->Node, DelDir, Name,
+                             RTL_NUMBER_OF(Name), NULL);
+        if (!Err)
+        {
+            if (!Fcb->IsDirectory)
+                NgTunnelAdd(Vcb, Fcb->DelParentMftNo, Fcb->DelName, Fcb->DelNameLength, Fcb->Stat.crtime);
+            ngc_stat(Fcb->Node, &Fcb->Stat);
+            NgAfterChange(Vcb);
+        }
+        ngc_put(Dir);
+    }
+    if (DelDir)
+        ngc_put(DelDir);
+    NgReleaseCore(Vcb);
+    if (Err)
+    {
+        DPRINT1("ntfsng: POSIX delete of %I64x failed %d, the delete stays pending until the last close\n", Fcb->MftNo, Err);
+        NgFreeRetitles(Spare, Spares);
+        return;
+    }
+    if (Fcb->DelPath.Buffer)
+        NgNotify(Vcb, &Fcb->DelPath, Fcb->IsDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
+                 FILE_ACTION_REMOVED);
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    for (Entry = Fcb->CcbList.Flink; Entry != &Fcb->CcbList; Entry = Entry->Flink)
+    {
+        PNG_CCB C = CONTAINING_RECORD(Entry, NG_CCB, FcbLinks);
+        if (C->Orphaned)
+            continue;
+        if (LastName || (C->ParentMftNo == Fcb->DelParentMftNo &&
+                         NgSameName(C->Name, C->NameLength, Fcb->DelName, Fcb->DelNameLength)))
+        {
+            /* No create gets past a pending delete, so no handle came after the count; should one have, it keeps its
+             * old name and is not marked (the Orphan FCB still refuses a rename or disposition through it). */
+            if (Used < Spares)
+            {
+                NgRetitleCcb(Vcb, C, &Spare[Used++], &NewPath, Vcb->DeletedMftNo, &NewName);
+                C->Orphaned = TRUE;
+            }
+            else
+            {
+                DPRINT1("ntfsng: a handle of %I64x opened after the POSIX delete began keeps its old name\n", Fcb->MftNo);
+            }
+        }
+    }
+    if (LastName)
+    {
+        /* The last cleanup deletes the $Deleted name (NgDeleteNow); nobody watches that directory. */
+        Fcb->Orphan = TRUE;
+        Fcb->DelParentMftNo = Vcb->DeletedMftNo;
+        Fcb->DelNameLength = RTL_NUMBER_OF(Name);
+        RtlCopyMemory(Fcb->DelName, Name, sizeof(Name));
+    }
+    else
+    {
+        Fcb->DeletePending = FALSE;
+    }
+    if (Fcb->DelPath.Buffer)
+    {
+        ExFreePoolWithTag(Fcb->DelPath.Buffer, TAG_NTFSNG);
+        RtlZeroMemory(&Fcb->DelPath, sizeof(Fcb->DelPath));
+    }
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    NgFreeRetitles(Spare, Spares);
+}
+
 static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stack, PFILE_RENAME_INFORMATION R,
                                ULONG Length, BOOLEAN IsLink, BOOLEAN Check)
 {
@@ -577,6 +741,8 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         return STATUS_INVALID_PARAMETER;
     if (Fcb->MftNo < 16 || Ccb->ParentMftNo == 11)
         return STATUS_ACCESS_DENIED;   /* metadata files and $Extend children are never renamed or linked */
+    if (Fcb->Orphan || Ccb->Orphaned)
+        return STATUS_ACCESS_DENIED;   /* its name went with a POSIX delete (Windows 10: STATUS_ACCESS_DENIED) */
     if (IsLink && Fcb->IsDirectory)
         return STATUS_FILE_IS_A_DIRECTORY;
     n = R->FileNameLength / sizeof(WCHAR);
@@ -593,6 +759,8 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         if (!Tf || !Tc || !Tf->IsDirectory || Tf->Vcb != Vcb)
             return STATUS_INVALID_PARAMETER;
         NewDirMftNo = Tf->MftNo;
+        if (Tf->Orphan)
+            return STATUS_DELETE_PENDING;
     }
     else
     {
@@ -600,6 +768,8 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
             return STATUS_INVALID_PARAMETER;
         NewDirMftNo = Ccb->ParentMftNo;
     }
+    if (Vcb->DeletedMftNo && NewDirMftNo == Vcb->DeletedMftNo)
+        return STATUS_ACCESS_DENIED;   /* $Extend\$Deleted holds only the files POSIX deletes put there */
     /* The new name, from the target directory handle's current name (FcbListLock: a rename of that
      * directory through another handle changes it). */
     RealT = ExAllocatePoolWithTag(PagedPool, 256 * sizeof(WCHAR), TAG_NTFSNG);
@@ -1014,46 +1184,61 @@ NTSTATUS NgSetInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case FileDispositionInformation:
             if (Length < sizeof(FILE_DISPOSITION_INFORMATION))
                 return STATUS_INVALID_PARAMETER;
+            if (Fcb->Orphan || ((PNG_CCB)FileObject->FsContext2)->Orphaned)
+                return STATUS_FILE_DELETED;     /* Windows 10, after a POSIX delete removed the name */
             ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
             Status = NgSetDisposition(Fcb, FileObject->FsContext2, FileObject, Buffer, FALSE);
+            if (NT_SUCCESS(Status))
+                ((PNG_CCB)FileObject->FsContext2)->PosixDelete = FALSE;   /* the classic class replaces a POSIX request */
             ExReleaseResourceLite(Fcb->Header.Resource);
             return Status;
         case NG_FILE_DISPOSITION_INFORMATION_EX:
         {
             /*
-             * Windows 10 (DeleteFile and RemoveDirectory use it): with POSIX semantics the name leaves the
-             * directory at once, whatever other handles the file has open (they stay valid but nameless).
-             * Measured on Windows 10 22H2: RemoveDirectory(child) succeeds while a list handle of child is
-             * open, and the parent can then be removed at once; without it the parent is "not empty" until
-             * the stray handle is closed (a .NET directory enumerator that was not disposed does exactly
-             * that to Remove-Item -Recurse).  Done here for directories.  A file keeps the classic
-             * delete-pending semantics: its name goes at the last cleanup, because the data of its other
-             * handles and of the cache still need the inode.
+             * Windows 10 (DeleteFile and RemoveDirectory use it).  Measured on Windows 10 22H2 NTFS:
+             * - DELETE | POSIX_SEMANTICS marks the delete pending as the classic class does; at the cleanup of this
+             *   handle a delete still pending removes the name at once, whatever other handles (opened with
+             *   FILE_SHARE_DELETE) stay open: the directory can then be removed and the name created again, the
+             *   other handles keep reading and writing the nameless file until the last one closes
+             *   (NgPosixUnlink).  Until this handle's cleanup the name stays (delete pending).
+             * - POSIX skips the user-mapped data section check, FORCE_IMAGE_SECTION_CHECK makes it (ReactOS's
+             *   MmFlushImageSection checks image sections only, which both do: a mapped image cannot be deleted).
+             * - FILE_DISPOSITION_ON_CLOSE sets or clears the FILE_DELETE_ON_CLOSE of this handle (POSIX: a POSIX
+             *   delete at its cleanup), only on a handle opened with it: STATUS_NOT_SUPPORTED otherwise.
+             * - Unknown flags: STATUS_NOT_SUPPORTED.  After a POSIX delete removed the name: STATUS_FILE_DELETED.
+             * A named stream has no POSIX delete: its delete stays pending until its last handle closes.
              */
+            PNG_CCB Ccb = FileObject->FsContext2;
             ULONG Flags;
             FILE_DISPOSITION_INFORMATION Disp;
-            BOOLEAN Now;
             if (Length < sizeof(ULONG))
                 return STATUS_INVALID_PARAMETER;
             Flags = *(PULONG)Buffer;
-            if ((Flags & ~NG_DISP_VALID_MASK) || (Flags & NG_DISP_ON_CLOSE))
-                return STATUS_INVALID_PARAMETER;
-            Disp.DeleteFile = (Flags & NG_DISP_DELETE) != 0;
-            Now = Disp.DeleteFile && (Flags & NG_DISP_POSIX_SEMANTICS) && Fcb->IsDirectory;
-            if (Now)
-                ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);   /* as the delete of a cleanup does */
+            if (Flags & ~NG_DISP_VALID_MASK)
+                return STATUS_NOT_SUPPORTED;
+            if (Fcb->Orphan || Ccb->Orphaned)
+                return STATUS_FILE_DELETED;
             ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
-            Status = NgSetDisposition(Fcb, FileObject->FsContext2, FileObject, &Disp,
-                                      (Flags & NG_DISP_IGNORE_READONLY_ATTRIBUTE) != 0);
-            if (Now && NT_SUCCESS(Status) && Fcb->DeletePending && !Fcb->Deleted)
+            if (Flags & NG_DISP_ON_CLOSE)
             {
-                Status = NgDeleteNow(Fcb, TRUE);
-                if (!NT_SUCCESS(Status))
-                    FileObject->DeletePending = FALSE;
+                if (!Ccb->OpenedDeleteOnClose)
+                {
+                    Status = STATUS_NOT_SUPPORTED;
+                }
+                else
+                {
+                    Ccb->DeleteOnClose = (Flags & NG_DISP_DELETE) != 0;
+                    Ccb->PosixOnClose = (Flags & NG_DISP_DELETE) && (Flags & NG_DISP_POSIX_SEMANTICS);
+                    Status = STATUS_SUCCESS;
+                }
+                ExReleaseResourceLite(Fcb->Header.Resource);
+                return Status;
             }
+            Disp.DeleteFile = (Flags & NG_DISP_DELETE) != 0;
+            Status = NgSetDisposition(Fcb, Ccb, FileObject, &Disp, (Flags & NG_DISP_IGNORE_READONLY_ATTRIBUTE) != 0);
+            if (NT_SUCCESS(Status))
+                Ccb->PosixDelete = Disp.DeleteFile && (Flags & NG_DISP_POSIX_SEMANTICS) && !Fcb->Stream.Length;
             ExReleaseResourceLite(Fcb->Header.Resource);
-            if (Now)
-                ExReleaseResourceLite(&Vcb->CreateGate);
             return Status;
         }
         case FileRenameInformation:
