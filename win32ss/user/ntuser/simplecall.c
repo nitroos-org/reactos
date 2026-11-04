@@ -909,7 +909,8 @@ NtUserCallHwndParam(
 
             UserEnterExclusive();
             pWnd = UserGetWindowObject(hWnd);
-            if (pWnd)
+            /* Only a window of the calling process: the property changes how its pixels are drawn */
+            if (pWnd && pWnd->head.pti->ppi == PsGetCurrentProcessWin32Process())
             {
                 if (Param)
                     ret = UserSetProp(pWnd, gpsi->atomFrostedWindowProp, (HANDLE)1, TRUE);

@@ -595,6 +595,101 @@ TestBeep(VOID)
 }
 
 /*
+ * A request whose API number no server serves (a server index nobody loaded, or a number that is not
+ * in the table of a loaded server) is answered with an error. An unanswered request leaves the
+ * calling thread in NtRequestWaitReplyPort for good, which is what a client newer than its server
+ * would get for a request the server does not know. Each request is sent from a thread of its own and
+ * waited for with a limit, so a server that drops it fails the test instead of hanging it.
+ */
+#define BADAPI_WAIT_MS 8000
+
+typedef struct
+{
+    CHAR Header[sizeof(PVOID) == 8 ? 40 : 24]; /* PORT_MESSAGE */
+    PVOID CaptureData;
+    ULONG ApiNumber;
+    LONG Status;
+    ULONG Reserved;
+    ULONGLONG Data[32];
+} BADAPI_MESSAGE;
+
+typedef struct
+{
+    LONG (NTAPI *Call)(PVOID, PVOID, ULONG, ULONG);
+    ULONG ApiNumber;
+    LONG Status;
+    BADAPI_MESSAGE Message;
+} BADAPI_CALL;
+
+static
+DWORD
+WINAPI
+BadApiThread(
+    _In_ PVOID Parameter)
+{
+    BADAPI_CALL *Call = Parameter;
+
+    Call->Status = Call->Call(&Call->Message, NULL, Call->ApiNumber, sizeof(ULONG));
+    return 0;
+}
+
+static
+VOID
+TestBadApiNumbers(VOID)
+{
+    static const struct
+    {
+        ULONG ApiNumber;
+        PCSTR Name;
+    } Cases[] =
+    {
+        { (3 << 16) | 0,        "server 3, API 0" },
+        { (7 << 16) | 0,        "server 7, beyond the servers" },
+        { (0 << 16) | 0x1000,   "CSRSRV, beyond its table" },
+        { (1 << 16) | 0x1000,   "BASESRV, beyond its table" },
+        { (2 << 16) | 0x7FFF,   "console server, beyond its table" },
+    };
+    PVOID pCall = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "CsrClientCallServer");
+    BADAPI_CALL *Call;
+    HANDLE hThread;
+    DWORD Wait;
+    ULONG Index;
+    BOOL IsWow64 = FALSE;
+
+    IsWow64Process(GetCurrentProcess(), &IsWow64);
+    if (!is_reactos() || IsWow64 || !pCall)
+    {
+        skip("The raw requests with a bad API number are for the native ReactOS server\n");
+        return;
+    }
+
+    for (Index = 0; Index < _countof(Cases); ++Index)
+    {
+        /* The block is not freed after a timeout: the thread is still in the call */
+        Call = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Call));
+        Call->Call = pCall;
+        Call->ApiNumber = Cases[Index].ApiNumber;
+        Call->Status = 0x7FFFFFFF;
+        hThread = CreateThread(NULL, 0, BadApiThread, Call, 0, NULL);
+        ok(hThread != NULL, "CreateThread failed with %lu\n", GetLastError());
+        if (!hThread)
+            continue;
+        Wait = WaitForSingleObject(hThread, BADAPI_WAIT_MS);
+        ok(Wait == WAIT_OBJECT_0, "%s: the request was not answered\n", Cases[Index].Name);
+        if (Wait == WAIT_OBJECT_0)
+        {
+            ok(Call->Status == (LONG)0xC00000AF /* STATUS_ILLEGAL_FUNCTION */,
+               "%s: returned %08lx\n", Cases[Index].Name, Call->Status);
+            HeapFree(GetProcessHeap(), 0, Call);
+        }
+        CloseHandle(hThread);
+    }
+
+    /* the console server still works after the requests that were refused */
+    ok(GetConsoleCP() != 0, "GetConsoleCP failed with %lu\n", GetLastError());
+}
+
+/*
  * The private requests of NitroOS with which a console host reads what the buffer cannot give
  * through the Windows API: the rows that scrolled off (ConsolepGetScrollback) and the 256-color
  * and 24-bit colors of the cells (ConsolepGetExtColors). A client can send any request of the
@@ -948,6 +1043,7 @@ RunChild(VOID)
     TestAliasesAndHistory();
     TestWindowRequests();
     TestBeep();
+    TestBadApiNumbers();
     TestExtColorsRequests();
 
     ok(CloseHandle(hOut), "CloseHandle(screen buffer) failed with %lu\n", GetLastError());
