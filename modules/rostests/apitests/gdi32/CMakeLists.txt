@@ -34,6 +34,7 @@ list(APPEND SOURCE
     ExcludeClipRect.c
     ExtCreatePen.c
     ExtCreateRegion.c
+    FontLinkCJK.c
     FontRequestState.c
     FrameRgn.c
     GdiConvertBitmap.c

@@ -1227,12 +1227,12 @@ static HRESULT get_system_propval( const struct view *view, UINT table_index, UI
 #ifdef __REACTOS__
     if (!wcsicmp( name, L"__SUPERCLASS" ) || !wcsicmp( name, L"__DYNASTY" ))
     {
-        const WCHAR *class = view->table[table_index]->name, *super = get_superclass( class ), *top = class;
+        const WCHAR *class = view->table[table_index]->name, *super = get_superclass_ns( class, view->ns ), *top = class;
         UINT depth = 0;
 
         if (!wcsicmp( name, L"__DYNASTY" ))
         {
-            while ((super = get_superclass( top )) && depth++ < 32) top = super;
+            while ((super = get_superclass_ns( top, view->ns )) && depth++ < 32) top = super;
             super = top;
         }
         if (ret)
@@ -1252,7 +1252,7 @@ static HRESULT get_system_propval( const struct view *view, UINT table_index, UI
         if (ret)
         {
             V_VT( ret ) = VT_BSTR | VT_ARRAY;
-            if (!(V_ARRAY( ret ) = get_derivation( view->table[table_index]->name ))) V_VT( ret ) = VT_NULL;
+            if (!(V_ARRAY( ret ) = get_derivation( view->table[table_index]->name, view->ns ))) V_VT( ret ) = VT_NULL;
         }
         if (type) *type = CIM_STRING | CIM_FLAG_ARRAY;
         return S_OK;
@@ -1555,9 +1555,9 @@ HRESULT get_propval( const struct view *view, UINT index, const WCHAR *name, VAR
     hr = get_column_index( table, name, &column );
     if (hr != S_OK || is_method( table, column )) return WBEM_E_NOT_FOUND;
 #ifdef __REACTOS__
-    if (!view->result_count && !view->cond)
+    if ((table->columns[column].type & COL_FLAG_NULL) || (!view->result_count && !view->cond))
     {
-        /* class object of a table without rows: the property exists, its value is NULL */
+        /* class object of a table without rows, or a property that is always NULL: the property exists, its value is NULL */
         if (type) *type = table->columns[column].type & COL_TYPE_MASK;
         if (flavor) *flavor = 0;
         if (ret) V_VT( ret ) = VT_NULL;

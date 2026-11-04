@@ -1216,6 +1216,12 @@ KiQuantumEnd(
     VOID
 );
 
+VOID
+FASTCALL
+KiForegroundReclaim(
+    _In_ PKPRCB Prcb
+);
+
 DECLSPEC_NORETURN
 VOID
 KiIdleLoop(

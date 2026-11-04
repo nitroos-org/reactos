@@ -308,6 +308,12 @@ ElfpInitNewFile(
     EVENTLOGEOF EofRec;
     ULONG InitialSize;
 
+    /*
+     * A log that is started again (cleared) holds no record, and the offsets of
+     * the records that it held do not stand for the numbers that come next.
+     */
+    LogFile->OffsetInfoNext = 0;
+
     /* Initialize the event log header */
     RtlZeroMemory(&LogFile->Header, sizeof(EVENTLOGHEADER));
 

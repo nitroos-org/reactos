@@ -892,6 +892,15 @@ MsqDestroyMessage(PUSER_MESSAGE Message)
    }
    RemoveEntryList(&Message->ListEntry);
    Message->pti = NULL;
+
+   /* A win event that was not delivered (its window was destroyed, its thread exits):
+      the message still owns the event pack */
+   if (Message->dwQEvent == POSTEVENT_NWE && Message->ExtraInfo)
+   {
+      ExFreePoolWithTag((PVOID)Message->ExtraInfo, TAG_HOOK);
+      Message->ExtraInfo = 0;
+   }
+
    ExFreeToPagedLookasideList(pgMessageLookasideList, Message);
    PostMsgCount--;
 }
@@ -923,6 +932,14 @@ VOID FASTCALL
 FreeUserMessage(PUSER_SENT_MESSAGE Message)
 {
    Message->pkCompletionEvent = NULL;
+
+   /* A hook call that was never dispatched (timed out and withdrawn, receiver or sender
+      died): nobody else frees its hook pack */
+   if (Message->HookMessage == MSQ_ISHOOK && Message->Msg.lParam)
+   {
+      IntFreeHookPack((PVOID)Message->Msg.lParam);
+      Message->Msg.lParam = 0;
+   }
 
    /* Remove it from the list */
    RemoveEntryList(&Message->ListEntry);
@@ -1046,10 +1063,14 @@ co_MsqDispatchOneSentMessage(
 
    if (Message->HookMessage == MSQ_ISHOOK)
    {  // Direct Hook Call processor
+      LPARAM HookPack = Message->Msg.lParam;
+
+      /* co_CallHook frees the hook pack: the message does not own it any more */
+      Message->Msg.lParam = 0;
       Result = co_CallHook( Message->Msg.message,           // HookId
                             HandleToLong(Message->Msg.hwnd), // Code
                             Message->Msg.wParam,
-                            Message->Msg.lParam);
+                            HookPack);
    }
    else if(Message->HookMessage == MSQ_INJECTMODULE)
    {
@@ -1320,7 +1341,9 @@ co_MsqSendMessage(PTHREADINFO ptirec,
    if (pti->TIF_flags & TIF_INCLEANUP || ptirec->TIF_flags & TIF_INCLEANUP)
    {
        // Unless we are dying and need to tell our parents.
-       if (pti->TIF_flags & TIF_INCLEANUP && !(ptirec->TIF_flags & TIF_INCLEANUP))
+       // Not a hook call: the caller frees its hook pack when this fails.
+       if (pti->TIF_flags & TIF_INCLEANUP && !(ptirec->TIF_flags & TIF_INCLEANUP) &&
+           HookMessage != MSQ_ISHOOK)
        {
            // Parent notify is the big one. Fire and forget!
            TRACE("Send message from dying thread %u\n", Msg);
@@ -2464,6 +2487,11 @@ MsqPeekMessage(IN PTHREADINFO pti,
    {
       CurrentMessage = CONTAINING_RECORD(ListHead, USER_MESSAGE, ListEntry);
       ListHead = ListHead->Flink;
+
+      /* Internal events (win events, async activation) are for the event dispatch only,
+         never an application message: its ExtraInfo can be a kernel pointer */
+      if (!dwQEvent && CurrentMessage->dwQEvent)
+         continue;
 /*
  MSDN:
  1: any window that belongs to the current thread, and any messages on the current thread's message queue whose hwnd value is NULL.
@@ -2485,6 +2513,9 @@ MsqPeekMessage(IN PTHREADINFO pti,
          {
              if (CurrentMessage->pti != NULL)
              {
+                /* The event dispatch takes over (and frees) the win event pack */
+                if (CurrentMessage->dwQEvent == POSTEVENT_NWE)
+                   CurrentMessage->ExtraInfo = 0;
                 MsqDestroyMessage(CurrentMessage);
              }
              ClearMsgBitsMask(pti, QS_Flags);
@@ -2678,13 +2709,7 @@ MsqCleanupThreadMsgs(PTHREADINFO pti)
       CurrentEntry = pti->PostedMessagesListHead.Flink;
       CurrentMessage = CONTAINING_RECORD(CurrentEntry, USER_MESSAGE, ListEntry);
       ERR("Thread Cleanup Post Messages %p\n",CurrentMessage);
-      if (CurrentMessage->dwQEvent)
-      {
-         if (CurrentMessage->dwQEvent == POSTEVENT_NWE)
-         {
-            ExFreePoolWithTag( (PVOID)CurrentMessage->ExtraInfo, TAG_HOOK);
-         }
-      }
+      /* MsqDestroyMessage frees a win event pack */
       MsqDestroyMessage(CurrentMessage);
    }
 

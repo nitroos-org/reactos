@@ -1,4 +1,11 @@
 /*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     proto
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
+/*
  * PROJECT:     ReactOS test infrastructure
  * PURPOSE:     rosdev: wire format. A message is one text line "VERB key=value ...\n" with
  *              percent-encoded values, optionally followed by len=N raw body bytes.

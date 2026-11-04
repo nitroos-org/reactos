@@ -2357,6 +2357,7 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
    UserRefObjectCo(Window, &Ref);
    UserDereferenceObject(Window);
    ObDereferenceObject(WinSta);
+   WinSta = NULL;
 
    /* NCCREATE, WM_NCCALCSIZE and Hooks need the original values */
    Cs->lpszName = (LPCWSTR) WindowName;
@@ -2672,6 +2673,9 @@ cleanup:
        else if (Class)
            IntDereferenceClass(Class, pti->pDeskInfo, pti->ppi);
    }
+
+   /* Still referenced when the window was not created */
+   if (WinSta) ObDereferenceObject(WinSta);
 
    if (pCsw) ExFreePoolWithTag(pCsw, TAG_HOOK);
    if (pCbtCreate) ExFreePoolWithTag(pCbtCreate, TAG_HOOK);

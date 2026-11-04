@@ -1,3 +1,10 @@
+/*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     stack_recreate
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
 /* ReactOS bootstrap-layout regression: extra child RuntimeData must not
  * occupy the parent stack range. This is not an ASLR placement contract. */
 #define WIN32_LEAN_AND_MEAN

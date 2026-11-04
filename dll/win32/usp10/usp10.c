@@ -486,7 +486,7 @@ const scriptData scriptInformation[] = {
      MS_MAKE_TAG('k','a','n','a'), L"SimSun"},
     {{Script_Hangul, 0, 0, 0, 0, 0, 0, { 0,0,0,0,0,0,0,0,0,0,0}},
      {LANG_KOREAN, 0, 1, 0, 1, DEFAULT_CHARSET, 0, 0, 0, 0, 0, 0, 1, 0, 0},
-     MS_MAKE_TAG('h','a','n','g'), L""},
+     MS_MAKE_TAG('h','a','n','g'), L"Malgun Gothic"},
     {{Script_Yi, 0, 0, 0, 0, 0, 0, { 0,0,0,0,0,0,0,0,0,0,0}},
      {LANG_ENGLISH, 0, 0, 0, 0, DEFAULT_CHARSET, 0, 0, 0, 0, 0, 0, 1, 0, 0},
      MS_MAKE_TAG('y','i',' ',' '), L"Microsoft Yi Baiti"},

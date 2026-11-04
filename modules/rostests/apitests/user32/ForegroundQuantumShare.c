@@ -208,7 +208,9 @@ START_TEST(ForegroundQuantumShare)
     ok(Parent + Child > MEASURE_MS * 0.8, "only %.0f ms of CPU in %d ms on one processor\n", Parent + Child, MEASURE_MS);
     Share = 100.0 * Parent / (Parent + Child);
     trace("foreground process %.0f ms, background process %.0f ms, foreground share %.1f%%\n", Parent, Child, Share);
-    /* 3:1 is 75 percent; Windows 10 measured 73 */
-    ok(Share > 65.0, "foreground share %.1f%%, expected about 75%%\n", Share);
-    ok(Share < 90.0, "foreground share %.1f%%: the background process is starved\n", Share);
+    /* The foreground quantum alone is 3:1, 75 percent. Windows 10 gives the background process about 5 percent of
+       the wall clock against a busy foreground process (foreground slices of about a quantum, background slices
+       under one clock tick): the 73 of an earlier probe was a GetProcessTimes artefact. */
+    ok(Share > 65.0, "foreground share %.1f%%, expected 75%% or more\n", Share);
+    ok(Share < 97.0, "foreground share %.1f%%: the background process is starved (Windows leaves it about 5%%)\n", Share);
 }
