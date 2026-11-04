@@ -63,6 +63,7 @@ list(APPEND SOURCE
     CallbackCompletion.c
     GetAppContainerNamedObjectPath.c
     CompareObjectHandles.c
+    PrivateNamespaceSecurity.c
     CancelSynchronousIo.c
     IdnTo.c
     NormalizeString.c
