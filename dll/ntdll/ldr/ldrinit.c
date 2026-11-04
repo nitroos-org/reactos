@@ -3725,39 +3725,35 @@ ULONG NTAPI RtlpCallThreadStart(PVOID Routine, PVOID Parameter);
 VOID NTAPI LdrInitializeWow64(PVOID NtdllBase, PCONTEXT StartContext)
 {
     CONTEXT Context;
+    PVOID Entry;
     if (StartContext) Context = *StartContext;
     else RtlCaptureContext(&Context);
     LdrpInit(&Context, NtdllBase, NULL);
     if (StartContext) NtContinue(&Context, TRUE);
-    RtlpUserThreadStart(NULL, NtCurrentPeb());
+    /* The image's entry: the loader's, which the IL-only start of a .NET image without an entry
+     * point replaced with mscoree!_CorExeMain, or the header's */
+    if (LdrpImageEntry && LdrpImageEntry->EntryPoint)
+    {
+        Entry = LdrpImageEntry->EntryPoint;
+    }
+    else
+    {
+        PIMAGE_NT_HEADERS Header = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
+        Entry = (PVOID)((ULONG_PTR)NtCurrentPeb()->ImageBaseAddress +
+                        Header->OptionalHeader.AddressOfEntryPoint);
+    }
+    RtlpUserThreadStart(Entry, NtCurrentPeb());
 }
 #endif
 
 /* RtlUserThreadStart (dispatch.S) with its EAX and EBX: Routine(Parameter) ends
  * the thread with its result, through kernel32's thread start (BasepThreadInitThunk, Windows BaseThreadInitThunk)
  * (it reports an exception that no frame of the routine handles and ends the
- * thread or the process). A NULL Routine is the image's entry (the WoW64 loader's
- * start): the loader's, which the IL-only start of a .NET image without an entry
- * point replaced with mscoree!_CorExeMain, or the header's. Without kernel32 the
+ * thread or the process). A NULL Routine faults, as on Windows. Without kernel32 the
  * routine runs here and its result ends the thread. */
 VOID NTAPI RtlpUserThreadStart(PVOID Routine, PVOID Parameter)
 {
     PBASE_THREAD_INIT_THUNK Thunk;
-    PIMAGE_NT_HEADERS Header;
-
-    if (!Routine)
-    {
-        if (LdrpImageEntry && LdrpImageEntry->EntryPoint)
-        {
-            Routine = LdrpImageEntry->EntryPoint;
-        }
-        else
-        {
-            Header = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
-            Routine = (PVOID)((ULONG_PTR)NtCurrentPeb()->ImageBaseAddress +
-                              Header->OptionalHeader.AddressOfEntryPoint);
-        }
-    }
 
     Thunk = RtlpGetThreadInitThunk();
     if (Thunk) Thunk(0, Routine, Parameter);
