@@ -13,6 +13,17 @@ typedef BOOL (WINAPI *FN_SetProcessMitigationPolicy)(int, PVOID, SIZE_T);
 static FN_GetProcessMitigationPolicy pGetProcessMitigationPolicy;
 static FN_SetProcessMitigationPolicy pSetProcessMitigationPolicy;
 
+#ifndef PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY
+#define PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY 0x00020007
+#endif
+#ifndef EXTENDED_STARTUPINFO_PRESENT
+#define EXTENDED_STARTUPINFO_PRESENT 0x00080000
+#endif
+#ifndef SM_CXSCREEN
+#define SM_CXSCREEN 0
+#endif
+#define PolicySystemCall        4
+#define Win32kDisableAlwaysOn   (1ULL << 28)
 #define PolicyDEP               0
 #define PolicyMitigationOptions 5
 #define PolicyCount             17
@@ -466,6 +477,118 @@ test_SetResults(void)
     }
 }
 
+/* Child: has made a Win32k call, and then asks for the Win32k lockdown. Windows 10 refuses with ERROR_WRITE_PROTECT, asking
+ * for what is already so (no lockdown) is accepted, and the policy stays off. The exit code tells which step went wrong. */
+static void
+RunGuiRequest(void)
+{
+    typedef int (WINAPI *FN_GetSystemMetrics)(int);
+    FN_GetSystemMetrics pGetSystemMetrics;
+    HMODULE hUser32 = LoadLibraryW(L"user32.dll");
+    ULONG Flags = 1, Result = 0xdeadbeef;
+    BOOL Ret;
+
+    pGetSystemMetrics = hUser32 ? (FN_GetSystemMetrics)GetProcAddress(hUser32, "GetSystemMetrics") : NULL;
+    if (!pGetSystemMetrics)
+        ExitProcess(100);
+    pGetSystemMetrics(SM_CXSCREEN);
+
+    SetLastError(0xdeadbeef);
+    Ret = pSetProcessMitigationPolicy(PolicySystemCall, &Flags, sizeof(Flags));
+    if (Ret || GetLastError() != ERROR_WRITE_PROTECT)
+        ExitProcess(101);
+    if (!pGetProcessMitigationPolicy(GetCurrentProcess(), PolicySystemCall, &Result, sizeof(Result)) || Result != 0)
+        ExitProcess(102);
+    Flags = 0;
+    if (!pSetProcessMitigationPolicy(PolicySystemCall, &Flags, sizeof(Flags)))
+        ExitProcess(103);
+    ExitProcess(0);
+}
+
+/* The Win32k lockdown: the mask of what a sandbox can ask for at creation, the refusal after a Win32k call, and the policy
+ * of a child created with the creation mitigation. Windows 10 gives the mask 0x3333333333333303 and ERROR_WRITE_PROTECT. */
+static void
+test_Win32kLockdown(void)
+{
+    typedef BOOL (WINAPI *FN_Initialize)(LPPROC_THREAD_ATTRIBUTE_LIST, DWORD, DWORD, PSIZE_T);
+    typedef BOOL (WINAPI *FN_Update)(LPPROC_THREAD_ATTRIBUTE_LIST, DWORD, DWORD_PTR, PVOID, SIZE_T, PVOID, PSIZE_T);
+    typedef VOID (WINAPI *FN_Delete)(LPPROC_THREAD_ATTRIBUTE_LIST);
+    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    FN_Initialize pInitialize = (FN_Initialize)GetProcAddress(hKernel32, "InitializeProcThreadAttributeList");
+    FN_Update pUpdate = (FN_Update)GetProcAddress(hKernel32, "UpdateProcThreadAttribute");
+    FN_Delete pDelete = (FN_Delete)GetProcAddress(hKernel32, "DeleteProcThreadAttributeList");
+    ULONGLONG Mask[2] = { 0, 0 };
+    ULONG Flags;
+    DWORD ExitCode;
+    int Attribute;
+
+    /* The mask: bits 28 and 29 (the Win32k field) are among the ones a process can be created with */
+    ok(pGetProcessMitigationPolicy(GetCurrentProcess(), PolicyMitigationOptions, Mask, sizeof(Mask)),
+       "Get options mask failed with %lu\n", GetLastError());
+    ok((Mask[0] & (3ULL << 28)) == (3ULL << 28), "The mask %016I64x does not offer the Win32k lockdown\n", Mask[0]);
+
+    /* Nothing asked for, nothing set */
+    Flags = 0xdeadbeef;
+    ok(pGetProcessMitigationPolicy(GetCurrentProcess(), PolicySystemCall, &Flags, sizeof(Flags)), "Get failed with %lu\n", GetLastError());
+    ok(Flags == 0, "The lockdown is %08lx\n", Flags);
+
+    ExitCode = RunChild(L"gui");
+    ok(ExitCode == 0 || ExitCode == 0xdeadbeef, "The request after a Win32k call went wrong at step %lu\n", ExitCode);
+
+    if (!pInitialize || !pUpdate || !pDelete)
+    {
+        skip("No process attribute lists\n");
+        return;
+    }
+
+    /* A child created with and without the creation mitigation, looked at before it runs */
+    for (Attribute = 0; Attribute < 2; Attribute++)
+    {
+        SIZE_T ListSize = 0;
+        LPPROC_THREAD_ATTRIBUTE_LIST List;
+        STARTUPINFOEXW StartupInfo;
+        PROCESS_INFORMATION ProcessInfo;
+        DWORD64 Policy = Win32kDisableAlwaysOn;
+        WCHAR FileName[MAX_PATH], CommandLine[MAX_PATH + 64];
+        BOOL Ret;
+
+        pInitialize(NULL, 1, 0, &ListSize);
+        List = HeapAlloc(GetProcessHeap(), 0, ListSize);
+        ok(List != NULL, "No memory\n");
+        if (!List)
+            return;
+        ok(pInitialize(List, 1, 0, &ListSize), "InitializeProcThreadAttributeList failed with %lu\n", GetLastError());
+        if (Attribute)
+            ok(pUpdate(List, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, &Policy, sizeof(Policy), NULL, NULL),
+               "UpdateProcThreadAttribute failed with %lu\n", GetLastError());
+
+        GetModuleFileNameW(NULL, FileName, _countof(FileName));
+        StringCbPrintfW(CommandLine, sizeof(CommandLine), L"\"%ls\" ProcessMitigationPolicy child 1 0", FileName);
+        RtlZeroMemory(&StartupInfo, sizeof(StartupInfo));
+        StartupInfo.StartupInfo.cb = sizeof(StartupInfo);
+        StartupInfo.lpAttributeList = Attribute ? List : NULL;
+        Ret = CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, CREATE_SUSPENDED | (Attribute ? EXTENDED_STARTUPINFO_PRESENT : 0),
+                             NULL, NULL, &StartupInfo.StartupInfo, &ProcessInfo);
+        ok(Ret, "CreateProcess failed with %lu\n", GetLastError());
+        if (Ret)
+        {
+            Flags = 0xdeadbeef;
+            Ret = pGetProcessMitigationPolicy(ProcessInfo.hProcess, PolicySystemCall, &Flags, sizeof(Flags));
+            /* The policy of another process is read on ReactOS; what Windows 10 gives was not measured */
+            if (is_reactos())
+            {
+                ok(Ret, "Get of the child failed with %lu\n", GetLastError());
+                ok(Flags == (Attribute ? 1UL : 0UL), "Child %d: the lockdown is %08lx\n", Attribute, Flags);
+            }
+            TerminateProcess(ProcessInfo.hProcess, 0);
+            CloseHandle(ProcessInfo.hThread);
+            CloseHandle(ProcessInfo.hProcess);
+        }
+        pDelete(List);
+        HeapFree(GetProcessHeap(), 0, List);
+    }
+}
+
 START_TEST(ProcessMitigationPolicy)
 {
     HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
@@ -485,6 +608,11 @@ START_TEST(ProcessMitigationPolicy)
         return;
 
     argc = winetest_get_mainargs(&argv);
+    if (argc >= 4 && !strcmp(argv[2], "child") && !strcmp(argv[3], "gui"))
+    {
+        RunGuiRequest();
+        return;
+    }
     if (argc >= 5 && !strcmp(argv[2], "child"))
     {
         RunRequest(atoi(argv[3]), strtoul(argv[4], NULL, 16));
@@ -496,4 +624,5 @@ START_TEST(ProcessMitigationPolicy)
     test_Handles();
     test_SetLengths();
     test_SetResults();
+    test_Win32kLockdown();
 }
