@@ -74,6 +74,7 @@ list(APPEND SOURCE
     SetNamedSecurityInfoInherit.c
     SddlRights.c
     ServiceProcess.c
+    PerfProvider.c
     ServiceStructLayout.c
     ServiceTriggerPrivileges.c
     SecurityAccessMask.c
