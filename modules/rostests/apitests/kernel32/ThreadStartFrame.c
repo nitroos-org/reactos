@@ -62,6 +62,7 @@ CheckStack(const TSF_RESULT *Result, PCSTR What)
        What, Result->Frames[Result->Count - 1], ModuleOf(Result->Frames[Result->Count - 1]));
 
     ok(Start != NULL, "%s: ntdll does not export RtlUserThreadStart\n", What);
+    /* Windows and ReactOS both export the thread start as BaseThreadInitThunk */
     ok(Thunk != NULL, "%s: kernel32 does not export BaseThreadInitThunk\n", What);
 
     for (i = 0; Thunk && i < Result->Count; i++)
@@ -69,7 +70,8 @@ CheckStack(const TSF_RESULT *Result, PCSTR What)
         if ((PUCHAR)Result->Frames[i] > Thunk && (PUCHAR)Result->Frames[i] < Thunk + 0x400)
             FoundThunk = TRUE;
     }
-    ok(FoundThunk, "%s: no frame in BaseThreadInitThunk %p\n", What, Thunk);
+    if (Thunk)
+        ok(FoundThunk, "%s: no frame in BaseThreadInitThunk %p\n", What, Thunk);
 
     /* BaseThreadInitThunk is called from ntdll, the start routine from kernel32 */
     for (i = 1; Thunk && i < Result->Count; i++)
@@ -83,6 +85,36 @@ CheckStack(const TSF_RESULT *Result, PCSTR What)
     }
 }
 
+static
+VOID
+TestNullRoutine(VOID)
+{
+    WCHAR Path[MAX_PATH];
+    WCHAR CommandLine[MAX_PATH + 32];
+    STARTUPINFOW Si = { sizeof(Si) };
+    PROCESS_INFORMATION Pi;
+    DWORD Exit = 0;
+
+    GetModuleFileNameW(NULL, Path, ARRAYSIZE(Path));
+    StringCchPrintfW(CommandLine, ARRAYSIZE(CommandLine), L"\"%s\" ThreadStartFrame", Path);
+    SetEnvironmentVariableW(L"TSF_NULL_ROUTINE_CHILD", L"1");
+    if (!CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &Si, &Pi))
+    {
+        skip("cannot start the child: %lu\n", GetLastError());
+        SetEnvironmentVariableW(L"TSF_NULL_ROUTINE_CHILD", NULL);
+        return;
+    }
+    SetEnvironmentVariableW(L"TSF_NULL_ROUTINE_CHILD", NULL);
+    ok_dec(WaitForSingleObject(Pi.hProcess, 30000), WAIT_OBJECT_0);
+    GetExitCodeProcess(Pi.hProcess, &Exit);
+    /* an unhandled access violation at address 0 in the new thread ends the process, as on Windows */
+    ok(Exit == STATUS_ACCESS_VIOLATION, "child exit code %lx\n", Exit);
+    if (Exit == STILL_ACTIVE)
+        TerminateProcess(Pi.hProcess, 0);
+    CloseHandle(Pi.hThread);
+    CloseHandle(Pi.hProcess);
+}
+
 START_TEST(ThreadStartFrame)
 {
     TSF_RESULT Result;
@@ -90,6 +122,16 @@ START_TEST(ThreadStartFrame)
     DWORD Exit, Id;
     PVOID Win32Start = NULL;
     NTSTATUS Status;
+
+    if (GetEnvironmentVariableW(L"TSF_NULL_ROUTINE_CHILD", NULL, 0))
+    {
+        /* Child: a thread without a start routine; the process must not survive it */
+        HANDLE Null = CreateThread(NULL, 0, NULL, NULL, 0, &Id);
+
+        if (Null)
+            WaitForSingleObject(Null, 20000);
+        ExitProcess(0x77);
+    }
 
     /* A new thread */
     memset(&Result, 0, sizeof(Result));
@@ -111,4 +153,6 @@ START_TEST(ThreadStartFrame)
     memset(&Result, 0, sizeof(Result));
     Result.Count = RtlCaptureStackBackTrace(0, TSF_MAX_FRAMES, Result.Frames, NULL);
     CheckStack(&Result, "main thread");
+
+    TestNullRoutine();
 }

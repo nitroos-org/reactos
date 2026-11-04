@@ -170,6 +170,10 @@ START_TEST(acceptname)
     else
         skip("no interface address to connect through\n");
     TestAcceptedName(htonl(INADDR_LOOPBACK), htonl(INADDR_LOOPBACK));
+    /* the whole 127.0.0.0/8 is loopback */
+    TestAcceptedName(inet_addr("127.0.0.2"), htonl(INADDR_ANY));
+    TestAcceptedName(inet_addr("127.1.2.3"), htonl(INADDR_ANY));
+    TestAcceptedName(inet_addr("127.0.0.2"), inet_addr("127.0.0.2"));
 
     WSACleanup();
 }

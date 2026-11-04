@@ -23,6 +23,8 @@
 
 #include <precomp.h>
 
+extern BOOL SHELL32_IsShellFolderNamespaceItemHidden(LPCWSTR SubKey, REFCLSID Clsid);
+
 WINE_DEFAULT_DEBUG_CHANNEL (shell);
 
 static HRESULT CRegItemContextMenu_CreateInstance(PCIDLIST_ABSOLUTE pidlFolder, HWND hwnd, UINT cidl,
@@ -258,6 +260,15 @@ HRESULT CRegFolderEnum::Initialize(const REGFOLDERINFO *pInfo, IShellFolder *pSF
     SFGAOF query = SHELL_CreateFolderEnumItemAttributeQuery(m_SHCTF, TRUE);
     for (size_t i = 0; i < GetRequiredItemsCount(); ++i)
     {
+        // The Internet (IE) item is a legacy desktop icon that Windows 10 does not enumerate at all.
+        // Honour HideDesktopIcons here so it is also absent from file dialogs and the Explorer tree.
+        if (pInfo->PidlType == PT_DESKTOP_REGITEM && IsEqualGUID(GetAt(i).clsid, CLSID_Internet))
+        {
+            const BOOL NewStart = SHELL_GetSetting(SSF_STARTPANELON, fStartPanelOn);
+            if (SHELL32_IsShellFolderNamespaceItemHidden(NewStart ? L"HideDesktopIcons\\NewStartPanel" :
+                                                         L"HideDesktopIcons\\ClassicStartMenu", CLSID_Internet))
+                continue;
+        }
         LPITEMIDLIST pidl = CreateItem(i);
         if (pidl && SHELL_IncludeItemInFolderEnum(pSF, pidl, query, m_SHCTF))
             AddToEnumList(pidl);

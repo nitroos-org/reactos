@@ -221,6 +221,9 @@ extern void func_Wow64Environment(void);
 extern void func_Wow64ProgramFiles(void);
 extern void func_Wow64EnvironmentBlock(void);
 extern void func_Wow64ChildEnvironment(void);
+extern void func_ReadFile(void);
+extern void func_SetSearchPathMode(void);
+extern void func_WriteFile(void);
 
 const struct test winetest_testlist[] =
 {
@@ -441,5 +444,8 @@ const struct test winetest_testlist[] =
     { "XState",                      func_XState },
     { "XStateContext",               func_XStateContext },
     { "SetFileInformationByHandle",  func_SetFileInformationByHandle },
+    { "ReadFile",                    func_ReadFile },
+    { "SetSearchPathMode",           func_SetSearchPathMode },
+    { "WriteFile",                   func_WriteFile },
     { 0, 0 }
 };
