@@ -485,6 +485,61 @@ call :rc0 "107b ...and says it resolved the name to rapps-testapp"
 call :st rapps-testapp NotInstalled "107c failed install leaves NotInstalled"
 rd /s /q %SW% 2>nul
 
+rem ===== the RAPPS catalog is only fetched from the official https address (pinned) or a local file =====
+rd /s /q %R%\RappsDb 2>nul
+set FEATMGR_RAPPS_DB=http://10.0.2.2:1/rappmgr2.cab
+%FM% /update-catalog > %O%\cat1.txt 2>&1
+call :rc1 "C1 catalog override over plain http refused"
+find "Refused" %O%\cat1.txt >nul
+call :rc0 "C2 ...with the reason"
+set FEATMGR_RAPPS_DB=https://example.invalid/rappmgr2.cab
+%FM% /update-catalog > %O%\cat2.txt 2>&1
+call :rc1 "C3 catalog override with another https address refused (no pin bypass)"
+find "Refused" %O%\cat2.txt >nul
+call :rc0 "C4 ...with the reason"
+set FEATMGR_RAPPS_DB=%O%\no-such-catalog.cab
+%FM% /update-catalog > %O%\cat3.txt 2>&1
+call :rc1 "C5 a local override that does not exist fails"
+set FEATMGR_RAPPS_DB=
+call :ex %R%\RappsDb\appdb 0 "C6 a refused catalog left nothing behind"
+
+rem ===== Generate installs: what an install record may delete, and where an install may go =====
+copy /y %FX%\fmt-gen-*.ini %R%\Catalog\ >nul
+set GZ=%FX%\fmgen.zip
+set LP=%LOCALAPPDATA%\Programs
+set ARPK=HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\FmGen Ok
+%FM% /nat-install fmt-gen-ok %GZ% > %O%\g1.txt 2>&1
+call :rc0 "G1 a normal Generate install works (zip unpacked, files moved)"
+call :ex "%LP%\FmGenOk\app.exe" 1 "G2 the file is in its own folder"
+echo x> "%LP%\FmGenOk\canary.txt"
+echo x> C:\fmgen-outside.txt
+reg add "%ARPK%\RApps" /v D90 /t REG_SZ /d "\." /f >nul
+reg add "%ARPK%\RApps" /v D91 /t REG_SZ /d "\..\.." /f >nul
+reg add "%ARPK%\RApps" /v F92 /t REG_SZ /d "C:\fmgen-outside.txt" /f >nul
+reg add "%ARPK%\RApps" /v K93 /t REG_SZ /d "HKCU\Software" /f >nul
+%FM% /nat-uninstall "FmGen Ok" "FmGen Ok" "-" > %O%\g2.txt 2>&1
+type %O%\g2.txt >> %LOG%
+call :ex "%LP%\FmGenOk\canary.txt" 1 "G3 a tampered record entry '.' or '..' did not delete the install folder"
+call :ex C:\fmgen-outside.txt 1 "G4 a record entry outside the install folder and the Start menu was not deleted"
+find "refused record entry" %O%\g2.txt >nul
+call :rc0 "G5 the refused entries are reported"
+call :ex "%LP%\FmGenOk\app.exe" 0 "G6 the recorded file was removed"
+reg query HKCU\Software >nul 2>&1
+call :rc0 "G7 HKCU\Software is still there"
+del /q "%LP%\FmGenOk\canary.txt" C:\fmgen-outside.txt 2>nul
+rd /s /q "%LP%\FmGenOk" 2>nul
+reg delete "%ARPK%" /f >nul 2>&1
+for %%V in (dirbang dirpf dirdots deldot deldots delreg) do call :genbad %%V
+del /q %R%\Catalog\fmt-gen-*.ini 2>nul
+goto :gen_done
+:genbad
+%FM% /nat-install fmt-gen-%1 %GZ% > %O%\gbad-%1.txt 2>&1
+call :rc1 "G8 fmt-gen-%1 refused"
+goto :eof
+:gen_done
+call :ex "%LP%\app.exe" 0 "G9 Dir=! put nothing in the base folder"
+call :ex "%LP%\FmGenDot" 0 "G10 DelDir=. created no install folder"
+
 rem ===== SCOOP (SCOOP-FEATMGR-01): bucket import, Provider=scoop install/uninstall/state =====
 rem Offline: the bucket is a fixture directory and "scoop" is a stub (fixtures\scoop-stub.cmd) in a fake
 rem root (FEATMGR_SCOOP_ROOT). The real thing is tests\scoop-live.cmd. FMT_FAT=1 = run on a FAT volume.

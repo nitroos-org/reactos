@@ -691,7 +691,8 @@ HRESULT FmDownloadFile(LPCWSTR url, LPCWSTR dest, BOOL pinned, ULONGLONG maxByte
     ULONGLONG done = 0, total = 0;
     HRESULT hr = E_FAIL;
 
-    if (_wcsnicmp(url, L"https://", 8) && (pinned || _wcsnicmp(url, L"http://", 7)))
+    (void)pinned;      /* the catalog carries every download address and hash: never over plain http, pinned or not */
+    if (_wcsnicmp(url, L"https://", 8))
     {
         FmSetLastMessage(L"Refusing to download from %s: not an https address.", url);
         return E_INVALIDARG;

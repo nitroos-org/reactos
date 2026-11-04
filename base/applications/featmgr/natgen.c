@@ -177,15 +177,37 @@ static BOOL InstallFiles(LPCWSTR srcBase, LPCWSTR spec, LPCWSTR dstDir)
     return ok;
 }
 
-static void AddFromDb(LPCWSTR key, WCHAR type, LPCWSTR prefix)
+/* the entry's Del* lists become record entries; each must stay inside the app's own directory / registry key (native.c) */
+static void AddFromDb(LPCWSTR key, WCHAR type, LPCWSTR prefix, BOOL checkOnly)
 {
-    WCHAR list[1024], *tok, *ctx = NULL, item[MAX_PATH];
+    WCHAR list[1024], *tok, *ctx = NULL, item[MAX_PATH], chk[MAX_PATH];
     Rk(L"Generate", key, list, ARRAYSIZE(list));
-    for (tok = wcstok_s(list, L"|", &ctx); tok; tok = wcstok_s(NULL, L"|", &ctx))
+    for (tok = wcstok_s(list, L"|", &ctx); tok && !g_err; tok = wcstok_s(NULL, L"|", &ctx))
     {
+        BOOL ok;
+        if (type == L'K' || type == L'k')
+            ok = FmGenRegOk(tok, type == L'K');
+        else
+        {
+            StringCchCopyW(chk, MAX_PATH, tok);
+            ok = FmSafeTreeName(chk);                  /* not "." or "..", no drive, not absolute, not empty */
+        }
+        if (!ok)
+        {
+            wprintf(L"error: the entry's %s item '%s' is outside the app's own folder or registry key\n", key, tok);
+            Fail(L"unsafe cleanup entry", ERROR_BAD_PATHNAME);
+            return;
+        }
+        if (checkOnly) continue;
         StringCchPrintfW(item, MAX_PATH, L"%s%s", prefix, tok);
         AddEntry(type, item);
     }
+}
+
+/* a [Generate] Files item: names and wildcards below the unpacked archive, nothing that climbs out of it */
+static BOOL SpecOk(LPCWSTR spec)
+{
+    return spec[0] && spec[0] != L'\\' && !wcsstr(spec, L"..") && !wcschr(spec, L':');
 }
 
 static void SetArp(HKEY arp, LPCWSTR name, LPCWSTR value)
@@ -256,6 +278,21 @@ static int GenInstall(LPCWSTR archive)
     if (!files[0]) StringCchCopyW(files, ARRAYSIZE(files), L"*.exe|*.*");
     Rk(L"Rapps", L"Scope", scope, ARRAYSIZE(scope));
     if (!_wcsicmp(scope, L"Machine")) perUser = FALSE;
+    /* check the cleanup lists before anything is created or moved: a bad entry must leave nothing behind */
+    AddFromDb(L"DelReg", L'K', L"", TRUE);
+    AddFromDb(L"DelRegEmpty", L'k', L"", TRUE);
+    AddFromDb(L"DelFile", L'F', L"", TRUE);
+    AddFromDb(L"DelDir", L'D', L"", TRUE);
+    AddFromDb(L"DelDirEmpty", L'd', L"", TRUE);
+    if (g_err) return g_err;
+    {
+        WCHAR fl[512], *ft, *fc = NULL;
+        Rk(L"Generate", L"Files", fl, ARRAYSIZE(fl));
+        if (!fl[0]) StringCchCopyW(fl, ARRAYSIZE(fl), L"*.exe|*.*");
+        for (ft = wcstok_s(fl, L"|", &fc); ft; ft = wcstok_s(NULL, L"|", &fc))
+            if (!SpecOk(ft)) return Fail(L"a [Generate] Files item climbs out of the archive", ERROR_BAD_PATHNAME), g_err;
+    }
+
     if (perUser)
     {
         if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base))) return Fail(L"no profile folder", GetLastError()), g_err;
@@ -278,7 +315,8 @@ static int GenInstall(LPCWSTR archive)
         StringCchCopyW(g_installDir, MAX_PATH, base);
     PathRemoveBackslashW(g_installDir);
     g_installLen = wcslen(g_installDir);
-    if (g_installLen < 8) return Fail(L"the install directory is too short to be safe", ERROR_BAD_PATHNAME), g_err;
+    if (g_installLen < 8 || FmBadInstallRoot(g_installDir))
+        return Fail(L"the install directory is a system or profile folder (or an ancestor of one); it must be a folder of its own", ERROR_BAD_PATHNAME), g_err;
     if (IsReparse(g_installDir)) return Fail(L"the install directory is a link", ERROR_ACCESS_DENIED), g_err;
     if (SHCreateDirectoryExW(NULL, g_installDir, NULL) != ERROR_SUCCESS && GetFileAttributesW(g_installDir) == INVALID_FILE_ATTRIBUTES)
         return Fail(L"cannot create the install directory", GetLastError()), g_err;
@@ -307,15 +345,19 @@ static int GenInstall(LPCWSTR archive)
     if ((r = ExtractArchive(archive, tempDir)) != 0) { Fail(L"cannot unpack the download", r); goto out; }
 
     for (tok = wcstok_s(files, L"|", &ctx); tok && !g_err; tok = wcstok_s(NULL, L"|", &ctx))
+    {
+        if (!SpecOk(tok)) { Fail(L"a [Generate] Files item climbs out of the archive", ERROR_BAD_PATHNAME); break; }
         InstallFiles(tempDir, tok, g_installDir);
+    }
     if (g_err) goto out;
     if (!g_mainApp[0]) { Fail(L"the archive held none of the files the entry installs", ERROR_FILE_NOT_FOUND); goto out; }
 
-    AddFromDb(L"DelReg", L'K', L"");
-    AddFromDb(L"DelRegEmpty", L'k', L"");
-    AddFromDb(L"DelFile", L'F', L"\\");
-    AddFromDb(L"DelDir", L'D', L"\\");
-    AddFromDb(L"DelDirEmpty", L'd', L"\\");
+    AddFromDb(L"DelReg", L'K', L"", FALSE);
+    AddFromDb(L"DelRegEmpty", L'k', L"", FALSE);
+    AddFromDb(L"DelFile", L'F', L"\\", FALSE);
+    AddFromDb(L"DelDir", L'D', L"\\", FALSE);
+    AddFromDb(L"DelDirEmpty", L'd', L"\\", FALSE);
+    if (g_err) goto out;
     AddEntry(L'd', L"\\");
 
     if (!FmFeatmgrExePath(fm, MAX_PATH)) StringCchCopyW(fm, MAX_PATH, L"featmgr.exe");
@@ -381,9 +423,12 @@ static int ExeInZip(LPCWSTR archive)
     DWORD code = 1, r;
     int type;
 
-    if (!GetTempPathW(MAX_PATH, tmpBase)) return 1;
-    StringCchPrintfW(dir, MAX_PATH, L"%s~featmgr-%lu", tmpBase, GetCurrentProcessId());
-    FmDeleteTree(dir);
+    /* an unpredictable name inside the feature manager's own folder (writable by administrators only), not the user's %TEMP% */
+    if (!FmGetRootDir(tmpBase, MAX_PATH)) return 1;
+    StringCchCatW(tmpBase, MAX_PATH, L"\\Temp");
+    CreateDirectoryW(tmpBase, NULL);
+    if (!GetTempFileNameW(tmpBase, L"fmz", 0, dir)) return Fail(L"cannot name a temporary directory", GetLastError()), g_err;
+    DeleteFileW(dir);                           /* GetTempFileName made a file; the name is what we wanted */
     if (!CreateDirectoryW(dir, NULL)) return Fail(L"cannot create a temporary directory", GetLastError()), g_err;
     if ((r = ExtractArchive(archive, dir)) != 0) { Fail(L"cannot unpack the download", r); goto out; }
     Rk(L"ExeInZip", L"Exe", exeName, ARRAYSIZE(exeName));
