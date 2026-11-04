@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     ApartmentEndpoint.c
     InprocLoadFailure.c
+    LocalServerStartup.c
     RoFailFast.c
     StubReleaseInCall.c
     testlist.c)
