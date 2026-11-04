@@ -236,10 +236,12 @@ KdpTrap(IN PKTRAP_FRAME TrapFrame,
         }
 
         /*
-         * If the PC was not updated, we'll increment it ourselves so execution
-         * continues past the breakpoint.
+         * If the request was handled and the PC was not updated, we will
+         * increment it ourselves so execution continues past the breakpoint.
+         * A request that is not handled (invalid debug service) is passed on
+         * as an exception, with the context untouched.
          */
-        if (ProgramCounter == KeGetContextPc(ContextRecord))
+        if (Handled && (ProgramCounter == KeGetContextPc(ContextRecord)))
         {
             /* Update it */
             KeSetContextPc(ContextRecord,
