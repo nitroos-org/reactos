@@ -977,6 +977,8 @@ static void test_evtx_robustness(void)
     trace("%lu cut copies and %lu changed copies read\n", Cuts, Rounds + 600);
 }
 
+void test_functional(void);
+
 START_TEST(wevtapi)
 {
     hWevtapi = LoadLibraryW(L"wevtapi.dll");
@@ -1021,6 +1023,7 @@ START_TEST(wevtapi)
     test_bookmark();
     test_extended_status();
     test_evtx_robustness();
+    test_functional();
 
     FreeLibrary(hWevtapi);
 }

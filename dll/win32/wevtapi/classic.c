@@ -20,6 +20,7 @@
 
 #include "wevtapi_private.h"
 #include "sddl.h"
+#include "winver.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(wevtapi);
@@ -285,13 +286,48 @@ void classic_pub_free(struct classic_pub *pub)
     free(pub->event_file);
     free(pub->category_file);
     free(pub->parameter_file);
+    free(pub->resource_file);
+    manifest_free(pub->manifest);
     free(pub);
+}
+
+/* The GUID of the text "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}" */
+static BOOL parse_guid(const WCHAR *text, GUID *guid)
+{
+    static const int lens[] = { 8, 4, 4, 4, 12 };
+    ULONGLONG parts[5];
+    int i, n;
+
+    if (*text++ != '{') return FALSE;
+    for (i = 0; i < 5; i++)
+    {
+        parts[i] = 0;
+        for (n = 0; n < lens[i]; n++, text++)
+        {
+            WCHAR c = *text;
+
+            if (c >= '0' && c <= '9') c -= '0';
+            else if (c >= 'a' && c <= 'f') c = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') c = c - 'A' + 10;
+            else return FALSE;
+            parts[i] = parts[i] * 16 + c;
+        }
+        if (*text++ != (i < 4 ? '-' : '}')) return FALSE;
+    }
+    guid->Data1 = (DWORD)parts[0];
+    guid->Data2 = (WORD)parts[1];
+    guid->Data3 = (WORD)parts[2];
+    guid->Data4[0] = (BYTE)(parts[3] >> 8);
+    guid->Data4[1] = (BYTE)parts[3];
+    for (i = 0; i < 6; i++) guid->Data4[2 + i] = (BYTE)(parts[4] >> (8 * (5 - i)));
+    return TRUE;
 }
 
 /* The publisher of an installed manifest that has the name: its files and the channels that it references */
 static BOOL fill_registered_publisher(struct classic_pub *pub, const WCHAR *name)
 {
     HKEY root, key, refs, ref;
+    WCHAR found_guid[64] = L"";
     DWORD i;
     BOOL found = FALSE;
 
@@ -307,7 +343,7 @@ static BOOL fill_registered_publisher(struct classic_pub *pub, const WCHAR *name
         if (status) break;
         if (RegOpenKeyExW(root, guid, 0, KEY_READ, &key)) continue;
         value = reg_string(key, NULL);
-        if (value && !_wcsicmp(value, name)) found = TRUE;
+        if (value && !_wcsicmp(value, name)) { found = TRUE; wcscpy(found_guid, guid); }
         free(value);
         if (found) break;
         RegCloseKey(key);
@@ -317,6 +353,16 @@ static BOOL fill_registered_publisher(struct classic_pub *pub, const WCHAR *name
 
     pub->event_file = reg_string(key, L"MessageFileName");
     pub->parameter_file = reg_string(key, L"ParameterFileName");
+    pub->resource_file = reg_string(key, L"ResourceFileName");
+    pub->has_guid = parse_guid(found_guid, &pub->guid);
+    if (pub->has_guid && pub->resource_file && pub->resource_file[0])
+    {
+        WCHAR *path = classic_expand(pub->resource_file);
+
+        /* a resource that cannot be read leaves a publisher with no events, as the file may be there later */
+        if (path) manifest_open(path, &pub->guid, &pub->manifest);
+        free(path);
+    }
     if (!RegOpenKeyExW(key, L"ChannelReferences", 0, KEY_READ, &refs))
     {
         for (i = 0; i < 1024; i++)
@@ -1319,6 +1365,65 @@ DWORD classic_format(const struct classic_pub *pub, const struct classic_event *
 
 /* Properties of a publisher, an element of its arrays and an event */
 
+/* One string of the version resource, in the language of the file, or NULL */
+static const WCHAR *version_string(const void *block, const WORD *lang, const WCHAR *name)
+{
+    WCHAR path[64];
+    UINT len;
+    void *value;
+
+    _snwprintf(path, ARRAY_SIZE(path), L"\\StringFileInfo\\%04x%04x\\%ls", lang[0], lang[1], name);
+    if (VerQueryValueW(block, path, &value, &len) && len && ((WCHAR *)value)[0]) return value;
+    return NULL;
+}
+
+/*
+ * Windows derives the help link of a source from the version resource of its (first) message file:
+ * company, product, product version and the name and version of the file, which it puts into a link of the
+ * events page of Microsoft. Nothing is derived from a file without a version resource.
+ */
+static WCHAR *help_link(const struct classic_pub *pub)
+{
+    static const WCHAR fmt[] = L"https://go.microsoft.com/fwlink/events.asp?CoName=%ls&ProdName=%ls&ProdVer=%u.%u.%u.%u&FileName=%ls&FileVer=%u.%u.%u.%u";
+    WCHAR *list, *file, *end, *result = NULL;
+    const WCHAR *company, *product, *name;
+    VS_FIXEDFILEINFO *fixed;
+    DWORD handle, size;
+    WORD defaults[2] = { 0x0409, 0x04b0 };
+    const WORD *lang = defaults;
+    void *block = NULL;
+    UINT len;
+    void *value;
+    SIZE_T chars;
+
+    if (!pub->event_file || !pub->event_file[0] || !(list = classic_expand(pub->event_file))) return NULL;
+    file = list;
+    while (*file == ' ') file++;
+    if ((end = wcschr(file, ';'))) *end = 0;
+    if (!*file) goto done;
+    if (!(size = GetFileVersionInfoSizeW(file, &handle)) || !(block = malloc(size))) goto done;
+    if (!GetFileVersionInfoW(file, 0, size, block)) goto done;
+    if (!VerQueryValueW(block, L"\\", (void **)&fixed, &len) || len < sizeof(*fixed) || fixed->dwSignature != 0xfeef04bd) goto done;
+    if (VerQueryValueW(block, L"\\VarFileInfo\\Translation", &value, &len) && len >= 4) lang = value;
+    company = version_string(block, lang, L"CompanyName");
+    product = version_string(block, lang, L"ProductName");
+    if (!company) company = L"";
+    if (!product) product = L"";
+    name = wcsrchr(file, '\\');
+    name = name ? name + 1 : file;
+    chars = ARRAY_SIZE(fmt) + wcslen(company) + wcslen(product) + wcslen(name) + 80;
+    if (!(result = malloc(chars * sizeof(WCHAR)))) goto done;
+    _snwprintf(result, chars, fmt, company, product,
+               HIWORD(fixed->dwProductVersionMS), LOWORD(fixed->dwProductVersionMS), HIWORD(fixed->dwProductVersionLS), LOWORD(fixed->dwProductVersionLS),
+               name,
+               HIWORD(fixed->dwFileVersionMS), LOWORD(fixed->dwFileVersionMS), HIWORD(fixed->dwFileVersionLS), LOWORD(fixed->dwFileVersionLS));
+    result[chars - 1] = 0;
+done:
+    free(block);
+    free(list);
+    return result;
+}
+
 DWORD classic_pub_property(const struct classic_pub *pub, DWORD id, DWORD size, void *buffer, DWORD *used)
 {
     struct vpack p;
@@ -1334,7 +1439,8 @@ DWORD classic_pub_property(const struct classic_pub *pub, DWORD id, DWORD size, 
 
         if (guid && v)
         {
-            memset(guid, 0, sizeof(*guid));
+            if (pub->has_guid) *guid = pub->guid;
+            else memset(guid, 0, sizeof(*guid));
             v->UInt64Val = 0;
             v->GuidVal = guid;
             v->Type = EvtVarTypeGuid;
@@ -1342,8 +1448,20 @@ DWORD classic_pub_property(const struct classic_pub *pub, DWORD id, DWORD size, 
         break;
     }
     case EvtPublisherMetadataResourceFilePath:
+        if (pub->resource_file && pub->resource_file[0] && (file = classic_expand(pub->resource_file)))
+        {
+            vp_string(&p, 0, file);
+            free(file);
+        }
+        else vp_null(&p, 0);
+        break;
     case EvtPublisherMetadataHelpLink:
-        vp_null(&p, 0);
+        if ((file = help_link(pub)))
+        {
+            vp_string(&p, 0, file);
+            free(file);
+        }
+        else vp_null(&p, 0);
         break;
     case EvtPublisherMetadataParameterFilePath:
     case EvtPublisherMetadataMessageFilePath:
@@ -1356,7 +1474,7 @@ DWORD classic_pub_property(const struct classic_pub *pub, DWORD id, DWORD size, 
         else vp_null(&p, 0);
         break;
     case EvtPublisherMetadataPublisherMessageID:
-        vp_u64(&p, 0, EvtVarTypeUInt32, 0xffffffff);
+        vp_u64(&p, 0, EvtVarTypeUInt32, pub->manifest ? pub->manifest->message : 0xffffffff);
         break;
     default:
         return ERROR_INVALID_PARAMETER;
@@ -1390,6 +1508,108 @@ DWORD classic_array_property(const WCHAR *item, DWORD index, DWORD id, DWORD siz
         break;
     default:
         return ERROR_INVALID_PARAMETER;
+    }
+    return vp_finish(&p, used);
+}
+
+/* The elements of the levels, tasks, opcodes and keywords of a manifest publisher */
+DWORD classic_manifest_array_size(const struct manifest *m, DWORD kind)
+{
+    switch (kind)
+    {
+    case MAN_LEVELS: return m->level_count;
+    case MAN_TASKS: return m->task_count;
+    case MAN_OPCODES: return m->opcode_count;
+    case MAN_KEYWORDS: return m->keyword_count;
+    default: return 0;
+    }
+}
+
+DWORD classic_manifest_array_property(const struct manifest *m, DWORD kind, DWORD index, DWORD id, DWORD size, void *buffer, DWORD *used)
+{
+    const struct man_named *item = NULL;
+    const WCHAR *name;
+    struct vpack p;
+    DWORD first;
+
+    vp_init(&p, buffer, size, 1);
+    switch (kind)
+    {
+    case MAN_LEVELS: first = EvtPublisherMetadataLevelName; item = index < m->level_count ? &m->levels[index] : NULL; break;
+    case MAN_TASKS: first = EvtPublisherMetadataTaskName; item = index < m->task_count ? &m->tasks[index].named : NULL; break;
+    case MAN_OPCODES: first = EvtPublisherMetadataOpcodeName; item = index < m->opcode_count ? &m->opcodes[index] : NULL; break;
+    case MAN_KEYWORDS: first = EvtPublisherMetadataKeywordName; item = index < m->keyword_count ? &m->keywords[index] : NULL; break;
+    default: return ERROR_INVALID_PARAMETER;
+    }
+    /* the properties of a kind are its name, its value and its message, and a task has an event guid in between */
+    if (kind == MAN_TASKS ? id < first || id > EvtPublisherMetadataTaskMessageID : id < first || id > first + 2)
+        return ERROR_INVALID_PARAMETER;
+    if (!item) return ERROR_NO_MORE_ITEMS;
+    if (id == first)
+    {
+        name = item->name ? item->name : L"";
+        vp_string(&p, 0, name);
+    }
+    else if (kind == MAN_TASKS && id == EvtPublisherMetadataTaskEventGuid)
+        vp_guid(&p, 0, &m->tasks[index].guid);
+    else if (id == first + (kind == MAN_TASKS ? 3 : 2))
+        vp_u64(&p, 0, EvtVarTypeUInt32, item->message);
+    else
+        vp_u64(&p, 0, kind == MAN_KEYWORDS ? EvtVarTypeUInt64 : EvtVarTypeUInt32, item->value);
+    return vp_finish(&p, used);
+}
+
+/* The channel references of a manifest publisher: the name is the one that the registry gives, the rest comes from the channel table */
+DWORD classic_manifest_channel_property(const struct manifest *m, const WCHAR *name, DWORD index, DWORD id, DWORD size, void *buffer, DWORD *used)
+{
+    const struct man_channel *c = NULL;
+    struct vpack p;
+    DWORD i;
+
+    for (i = 0; m && i < m->channel_count; i++)
+        if (m->channels[i].name && !_wcsicmp(m->channels[i].name, name)) { c = &m->channels[i]; break; }
+    if (!c) return classic_array_property(name, index, id, size, buffer, used);
+    vp_init(&p, buffer, size, 1);
+    switch (id)
+    {
+    case EvtPublisherMetadataChannelReferencePath: vp_string(&p, 0, name); break;
+    case EvtPublisherMetadataChannelReferenceIndex: vp_u64(&p, 0, EvtVarTypeUInt32, index); break;
+    case EvtPublisherMetadataChannelReferenceID: vp_u64(&p, 0, EvtVarTypeUInt32, c->id); break;
+    case EvtPublisherMetadataChannelReferenceFlags: vp_u64(&p, 0, EvtVarTypeUInt32, c->flags); break;
+    case EvtPublisherMetadataChannelReferenceMessageID: vp_u64(&p, 0, EvtVarTypeUInt32, c->message); break;
+    default: return ERROR_INVALID_PARAMETER;
+    }
+    return vp_finish(&p, used);
+}
+
+DWORD classic_manifest_event_property(const struct manifest *m, DWORD index, DWORD id, DWORD size, void *buffer, DWORD *used)
+{
+    const struct man_event *ev;
+    struct vpack p;
+    WCHAR *xml;
+
+    if (index >= m->event_count) return ERROR_INVALID_PARAMETER;
+    ev = &m->events[index];
+    vp_init(&p, buffer, size, 1);
+    switch (id)
+    {
+    case EventMetadataEventID: vp_u64(&p, 0, EvtVarTypeUInt32, ev->id); break;
+    case EventMetadataEventVersion: vp_u64(&p, 0, EvtVarTypeUInt32, ev->version); break;
+    case EventMetadataEventChannel: vp_u64(&p, 0, EvtVarTypeUInt32, ev->channel); break;
+    case EventMetadataEventLevel: vp_u64(&p, 0, EvtVarTypeUInt32, ev->level); break;
+    case EventMetadataEventOpcode: vp_u64(&p, 0, EvtVarTypeUInt32, ev->opcode); break;
+    case EventMetadataEventTask: vp_u64(&p, 0, EvtVarTypeUInt32, ev->task); break;
+    case EventMetadataEventKeyword: vp_u64(&p, 0, EvtVarTypeUInt64, ev->keywords); break;
+    case EventMetadataEventMessageID: vp_u64(&p, 0, EvtVarTypeUInt32, ev->message); break;
+    case EventMetadataEventTemplate:
+        if (ev->template_offset != 0xffffffff && (xml = manifest_template_xml(m, ev->template_offset)))
+        {
+            vp_string(&p, 0, xml);
+            free(xml);
+        }
+        else vp_null(&p, 0);
+        break;
+    default: return ERROR_INVALID_PARAMETER;
     }
     return vp_finish(&p, used);
 }
@@ -1706,6 +1926,67 @@ DWORD classic_log_property(const WCHAR *channel, DWORD id, DWORD size, void *buf
     return vp_finish(&p, used);
 }
 
+/* The same for an .evtx file: its times, size and attributes, and the number of events in it and the first of them */
+DWORD classic_file_log_property(const WCHAR *path, DWORD id, DWORD size, void *buffer, DWORD *used)
+{
+    struct vpack p;
+    WIN32_FILE_ATTRIBUTE_DATA attr;
+    ULONGLONG time = 0, count = 0, oldest = 0;
+
+    if (id >= EvtLogPropertyIdEND) return ERROR_INVALID_PARAMETER;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &attr)) return GetLastError();
+    if (id == EvtLogNumberOfLogRecords || id == EvtLogOldestRecordNumber)
+    {
+        struct evtx_file *file;
+        struct evtx_event *event;
+        DWORD error;
+
+        if ((error = evtx_open(path, FALSE, &file))) return error;
+        for (;;)
+        {
+            error = evtx_next(file, &event);
+            if (error == ERROR_NO_MORE_ITEMS) break;
+            if (error == ERROR_OUTOFMEMORY) { evtx_close(file); return error; }
+            if (error) continue;
+            if (!count || event->record_id < oldest) oldest = event->record_id;
+            count++;
+            evtx_event_free(event);
+        }
+        evtx_close(file);
+    }
+
+    vp_init(&p, buffer, size, 1);
+    switch (id)
+    {
+    case EvtLogCreationTime:
+    case EvtLogLastAccessTime:
+    case EvtLogLastWriteTime:
+    {
+        const FILETIME *ft = id == EvtLogCreationTime ? &attr.ftCreationTime : id == EvtLogLastAccessTime ? &attr.ftLastAccessTime : &attr.ftLastWriteTime;
+
+        time = ((ULONGLONG)ft->dwHighDateTime << 32) | ft->dwLowDateTime;
+        vp_u64(&p, 0, EvtVarTypeFileTime, time);
+        break;
+    }
+    case EvtLogFileSize:
+        vp_u64(&p, 0, EvtVarTypeUInt64, ((ULONGLONG)attr.nFileSizeHigh << 32) | attr.nFileSizeLow);
+        break;
+    case EvtLogAttributes:
+        vp_u64(&p, 0, EvtVarTypeUInt32, attr.dwFileAttributes);
+        break;
+    case EvtLogNumberOfLogRecords:
+        vp_u64(&p, 0, EvtVarTypeUInt64, count);
+        break;
+    case EvtLogOldestRecordNumber:
+        vp_u64(&p, 0, EvtVarTypeUInt64, oldest);
+        break;
+    case EvtLogFull:
+        vp_u64(&p, 0, EvtVarTypeBoolean, FALSE);
+        break;
+    }
+    return vp_finish(&p, used);
+}
+
 /* Queries */
 
 struct rule
@@ -1733,6 +2014,8 @@ struct stream
     struct evtx_event *next_evtx;   /* the next event of the file that passes */
     ULONGLONG next_key;             /* when the next event was generated, FILETIME units */
     DWORD soft_error;               /* an error to report that does not end the reading */
+    DWORD seek_to;                  /* a record to read first, after the log was opened again to follow it */
+    BOOL channel_missing;           /* nothing to read: a channel of a manifest has no records */
 };
 
 struct classic_query
@@ -1740,6 +2023,8 @@ struct classic_query
     struct stream *streams;
     DWORD count;
     BOOL reverse;
+    BOOL follow;                    /* a subscription: a log that has ended is looked at again later */
+    ULONGLONG cursor;               /* the number of events that were handed out, which is the position of the next one */
 };
 
 static void stream_close(struct stream *s)
@@ -1798,6 +2083,7 @@ static DWORD stream_open(struct stream *s, BOOL reverse)
         if (classic_registered_channel(s->channel))
         {
             s->eof = TRUE;
+            s->channel_missing = TRUE;
             return ERROR_SUCCESS;
         }
     }
@@ -1806,6 +2092,58 @@ static DWORD stream_open(struct stream *s, BOOL reverse)
     s->cap = 64 * 1024;
     if (!(s->buf = malloc(s->cap))) return ERROR_OUTOFMEMORY;
     return ERROR_SUCCESS;
+}
+
+/* A name of a log or a channel as it is registered, which is what the events say the log is called */
+static WCHAR *canonical_channel(const WCHAR *name)
+{
+    HKEY root;
+    DWORD i;
+
+    if (!is_bad_name(name) && !RegOpenKeyExW(HKEY_LOCAL_MACHINE, eventlog_key, 0, KEY_READ, &root))
+    {
+        for (i = 0;; i++)
+        {
+            WCHAR log[256];
+            DWORD size = ARRAY_SIZE(log);
+            LSTATUS status = RegEnumKeyExW(root, i, log, &size, NULL, NULL, NULL, NULL);
+
+            if (status == ERROR_NO_MORE_ITEMS || (status && status != ERROR_MORE_DATA)) break;
+            if (!status && !_wcsicmp(log, name))
+            {
+                RegCloseKey(root);
+                return dup_string(log);
+            }
+        }
+        RegCloseKey(root);
+    }
+    if (!is_bad_name(name))
+    {
+        WCHAR path[ARRAY_SIZE(winevt_key) + 16];
+        WCHAR key_name[256];
+        DWORD i, size;
+        HKEY channels;
+
+        _snwprintf(path, ARRAY_SIZE(path), L"%ls\\Channels", winevt_key);
+        if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, &channels))
+        {
+            for (i = 0;; i++)
+            {
+                LSTATUS status;
+
+                size = ARRAY_SIZE(key_name);
+                status = RegEnumKeyExW(channels, i, key_name, &size, NULL, NULL, NULL, NULL);
+                if (status == ERROR_NO_MORE_ITEMS || (status && status != ERROR_MORE_DATA)) break;
+                if (!status && !_wcsicmp(key_name, name))
+                {
+                    RegCloseKey(channels);
+                    return dup_string(key_name);
+                }
+            }
+            RegCloseKey(channels);
+        }
+    }
+    return dup_string(name);
 }
 
 DWORD classic_query_open(const struct classic_select *selects, DWORD count, BOOL reverse, struct classic_query **ret)
@@ -1837,7 +2175,11 @@ DWORD classic_query_open(const struct classic_select *selects, DWORD count, BOOL
         if (!s)
         {
             s = &query->streams[query->count];
-            if (!(s->channel = dup_string(selects[i].channel))) { error = ERROR_OUTOFMEMORY; goto fail; }
+            if (!(s->channel = selects[i].file ? dup_string(selects[i].channel) : canonical_channel(selects[i].channel)))
+            {
+                error = ERROR_OUTOFMEMORY;
+                goto fail;
+            }
             s->file = selects[i].file;
             query->count++;
         }
@@ -1868,6 +2210,7 @@ DWORD classic_query_rewind(struct classic_query *query, ULONGLONG skip)
 {
     DWORD i, error = ERROR_SUCCESS;
 
+    query->cursor = 0;
     for (i = 0; i < query->count; i++)
     {
         struct stream *s = &query->streams[i];
@@ -1898,6 +2241,7 @@ DWORD classic_query_rewind(struct classic_query *query, ULONGLONG skip)
         s->eof = FALSE;
         s->error = 0;
         s->have_last = FALSE;
+        s->seek_to = 0;
         if ((error = stream_open(s, query->reverse))) return error;
     }
     while (skip--)
@@ -2013,10 +2357,29 @@ static void stream_advance(struct classic_query *query, struct stream *s)
         if (s->pos >= s->len)
         {
             s->pos = s->len = 0;
-            if (!ReadEventLogW(s->log, EVENTLOG_SEQUENTIAL_READ | (query->reverse ? EVENTLOG_BACKWARDS_READ : EVENTLOG_FORWARDS_READ),
-                               0, s->buf, s->cap, &read, &needed))
+            DWORD flags = EVENTLOG_SEQUENTIAL_READ | (query->reverse ? EVENTLOG_BACKWARDS_READ : EVENTLOG_FORWARDS_READ), first = 0;
+
+            if (s->seek_to)
+            {
+                flags = EVENTLOG_SEEK_READ | EVENTLOG_FORWARDS_READ;
+                first = s->seek_to;
+            }
+            if (!ReadEventLogW(s->log, flags, first, s->buf, s->cap, &read, &needed))
             {
                 DWORD error = GetLastError();
+
+                if (s->seek_to && error == ERROR_INVALID_PARAMETER)
+                {
+                    /* no such record yet; if the log has gone on without it, read from the start and skip what was seen */
+                    DWORD oldest = 0, count = 0;
+
+                    GetOldestEventLogRecord(s->log, &oldest);
+                    GetNumberOfEventLogRecords(s->log, &count);
+                    if (count && oldest > s->seek_to) { s->seek_to = 0; continue; }
+                    s->seek_to = 0;
+                    s->eof = TRUE;
+                    return;
+                }
 
                 if (error == ERROR_INSUFFICIENT_BUFFER && needed > s->cap && needed <= MAX_LOG_BUFFER)
                 {
@@ -2035,6 +2398,7 @@ static void stream_advance(struct classic_query *query, struct stream *s)
                 return;
             }
             if (!read) { s->eof = TRUE; return; }
+            s->seek_to = 0;
             s->len = min(read, s->cap);
         }
 
@@ -2050,6 +2414,8 @@ static void stream_advance(struct classic_query *query, struct stream *s)
         /* the records of a log come in the order of their numbers; a reader that goes round again has ended */
         if (s->have_last && (query->reverse ? rec->RecordNumber >= s->last_number : rec->RecordNumber <= s->last_number))
         {
+            /* a subscription reads on from where it was, and skips what it has seen */
+            if (query->follow && !query->reverse) continue;
             s->eof = TRUE;
             return;
         }
@@ -2092,7 +2458,148 @@ BOOL classic_query_next(struct classic_query *query, struct qevent *event, const
     best->next_evtx = NULL;
     *channel = best->channel;
     *error = ERROR_SUCCESS;
+    query->cursor++;
     return TRUE;
+}
+
+/* The record number of the event: of a classic log, or of an .evtx file */
+static ULONGLONG qevent_record(const struct qevent *event)
+{
+    return event->rec ? event->rec->RecordNumber : event->evtx->record_id;
+}
+
+static void qevent_free(struct qevent *event)
+{
+    free(event->rec);
+    evtx_event_free(event->evtx);
+    event->rec = NULL;
+    event->evtx = NULL;
+}
+
+/* Where a seek goes: the position of the event in the results, which is the number of events before it */
+DWORD classic_query_seek(struct classic_query *query, DWORD origin, LONGLONG position, const WCHAR *mark_channel,
+                         ULONGLONG mark_record)
+{
+    LONGLONG target, found = -1;
+    const WCHAR *channel;
+    struct qevent event;
+    DWORD error;
+
+    switch (origin)
+    {
+    case 1: /* first */
+        target = position;
+        break;
+    case 2: /* last */
+    case 4: /* bookmark */
+    {
+        LONGLONG n = 0;
+
+        if ((error = classic_query_rewind(query, 0))) return error;
+        for (;;)
+        {
+            DWORD e;
+
+            if (!classic_query_next(query, &event, &channel, &e))
+            {
+                if (e == ERROR_NO_MORE_ITEMS) break;
+                if (e == ERROR_OUTOFMEMORY) return e;
+                continue;
+            }
+            if (origin == 4 && found < 0 && qevent_record(&event) == mark_record && (!mark_channel || !_wcsicmp(channel, mark_channel)))
+                found = n;
+            qevent_free(&event);
+            n++;
+            if (origin == 4 && found >= 0) break;
+        }
+        if (origin == 2)
+        {
+            if (position > 0) return ERROR_INVALID_PARAMETER;
+            target = n - 1 + position;
+        }
+        else
+        {
+            if (found < 0) return ERROR_EVT_QUERY_RESULT_INVALID_POSITION;
+            target = found + position;
+        }
+        break;
+    }
+    case 3: /* current */
+        target = (LONGLONG)query->cursor + position;
+        break;
+    default:
+        return ERROR_INVALID_PARAMETER;
+    }
+    if (target < 0) return ERROR_INVALID_PARAMETER;
+    return classic_query_rewind(query, target);
+}
+
+/*
+ * A subscription is a query that goes on: it starts at the newest record, at the oldest, or behind a bookmark, and
+ * whatever the logs get later is what it reads next.
+ */
+DWORD classic_query_follow(struct classic_query *query, DWORD origin, const struct classic_mark *marks, DWORD mark_count)
+{
+    DWORD i, j;
+
+    query->follow = TRUE;
+    for (i = 0; i < query->count; i++)
+    {
+        struct stream *s = &query->streams[i];
+        DWORD latest = 0, oldest = 0, count = 0;
+        BOOL marked = FALSE;
+        HANDLE log;
+
+        if (s->file) return ERROR_INVALID_PARAMETER;
+        if (s->channel_missing || origin == CLASSIC_FOLLOW_OLDEST) continue;
+        if (origin == CLASSIC_FOLLOW_BOOKMARK)
+            for (j = 0; j < mark_count; j++)
+                if (!_wcsicmp(marks[j].channel, s->channel)) { latest = (DWORD)marks[j].record_id; marked = TRUE; break; }
+        if (!marked)
+        {
+            if (!(log = OpenEventLogW(NULL, s->channel))) return GetLastError();
+            GetNumberOfEventLogRecords(log, &count);
+            GetOldestEventLogRecord(log, &oldest);
+            CloseEventLog(log);
+            latest = count ? oldest + count - 1 : 0;
+        }
+        if (s->log) CloseEventLog(s->log);
+        s->log = NULL;
+        free(s->buf);
+        s->buf = NULL;
+        s->cap = s->len = s->pos = 0;
+        s->have_last = TRUE;
+        s->last_number = latest;
+        s->eof = TRUE;
+    }
+    return ERROR_SUCCESS;
+}
+
+/* Looks at the logs again that had ended. TRUE when an event can be handed out. */
+BOOL classic_query_poll(struct classic_query *query)
+{
+    BOOL pending = FALSE;
+    DWORD i;
+
+    for (i = 0; i < query->count; i++)
+    {
+        struct stream *s = &query->streams[i];
+
+        if (s->file) continue;
+        if (!s->next && s->eof && !s->error && !s->channel_missing)
+        {
+            if (s->log) CloseEventLog(s->log);
+            s->log = NULL;
+            if (!(s->log = OpenEventLogW(NULL, s->channel))) continue;
+            if (!s->buf && !(s->buf = malloc(s->cap ? s->cap : (s->cap = 64 * 1024)))) continue;
+            s->pos = s->len = 0;
+            s->seek_to = s->have_last ? s->last_number + 1 : 0;
+            s->eof = FALSE;
+        }
+        stream_advance(query, s);
+        if (s->next) pending = TRUE;
+    }
+    return pending;
 }
 
 DWORD classic_query_names(const struct classic_query *query, DWORD size, void *buffer, DWORD *used)
