@@ -472,6 +472,15 @@ test_SetResults(void)
         if (ExitCode == 0xdeadbeef)
             return;
 
+        /*
+         * kernel32_apitest.exe has made a Win32k call by the time it runs the request on ReactOS (it takes the refusal
+         * of the lockdown that Windows gives such a process); win32klock_child.exe, which makes none, is the
+         * accepted case, in test_Win32kLockdown.
+         */
+        if (is_reactos() && SetResults[i].Policy == PolicySystemCall && (SetResults[i].Flags & 1) &&
+            SetResults[i].Error == 0 && ExitCode == ERROR_WRITE_PROTECT)
+            continue;
+
         ok(ExitCode == SetResults[i].Error, "Policy %d, flags %08lx: error %lu, expected %lu\n",
            SetResults[i].Policy, SetResults[i].Flags, ExitCode, SetResults[i].Error);
     }
@@ -534,6 +543,31 @@ test_Win32kLockdown(void)
 
     ExitCode = RunChild(L"gui");
     ok(ExitCode == 0 || ExitCode == 0xdeadbeef, "The request after a Win32k call went wrong at step %lu\n", ExitCode);
+
+    /* A process that has made no Win32k call is taken (Windows 10); it reads back as locked down on ReactOS */
+    {
+        WCHAR FileName[MAX_PATH], *Slash;
+        STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
+        PROCESS_INFORMATION ProcessInfo;
+
+        GetModuleFileNameW(NULL, FileName, _countof(FileName));
+        Slash = wcsrchr(FileName, L'\\');
+        if (Slash && SUCCEEDED(StringCbCopyW(Slash + 1, sizeof(FileName) - (Slash + 1 - FileName) * sizeof(WCHAR), L"win32klock_child.exe")) &&
+            CreateProcessW(FileName, NULL, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
+        {
+            WaitForSingleObject(ProcessInfo.hProcess, 60000);
+            GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode);
+            CloseHandle(ProcessInfo.hThread);
+            CloseHandle(ProcessInfo.hProcess);
+            ok((ExitCode & 0xffff) == 0, "A process without Win32k calls was refused with %lu\n", ExitCode & 0xffff);
+            if (is_reactos())
+                ok((ExitCode >> 16) == 1, "The lockdown reads back as %lu\n", ExitCode >> 16);
+        }
+        else
+        {
+            skip("win32klock_child.exe could not be started\n");
+        }
+    }
 
     if (!pInitialize || !pUpdate || !pDelete)
     {
