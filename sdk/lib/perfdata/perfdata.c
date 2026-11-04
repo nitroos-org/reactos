@@ -216,6 +216,7 @@ struct pdh_process
 #define PDH_SYSINFO_TIMEOFDAY     3
 #define PDH_SYSINFO_PERFORMANCE   2
 #define PDH_SYSINFO_PROCESS       5
+#define PDH_SYSINFO_PAGEFILE      18
 #define PDH_SYSINFO_CPU_PERF      8
 #define PDH_CPU_RECORD_MIN        44
 #define PDH_CPU_RECORD_MAX        48
@@ -267,6 +268,23 @@ struct net_info
     MIB_IFROW row;
 };
 static struct { DWORD gen; DWORD count; struct net_info *net; } snap_net;
+
+/* one entry of SystemPageFileInformation; the sizes are in pages */
+struct pdh_pagefile
+{
+    ULONG NextEntryOffset;
+    ULONG TotalSize;
+    ULONG TotalInUse;
+    ULONG PeakUsage;
+    struct { USHORT Length; USHORT MaximumLength; PWSTR Buffer; } FileName;
+};
+
+struct page_info
+{
+    WCHAR name[260];
+    ULONG total, inuse, peak;
+};
+static struct { DWORD gen; DWORD count; struct page_info *page; } snap_page;
 
 static struct
 {
@@ -655,6 +673,79 @@ static BOOL ensure_proc( BOOL force )
     return TRUE;
 }
 
+static BOOL ensure_page( BOOL force )
+{
+    ULONG size = 0x1000, ret = 0, n = 0;
+    LONG status;
+    BYTE *buf = NULL;
+    const struct pdh_pagefile *pf;
+
+    if (!force && snap_page.gen == cur_gen) return TRUE;
+    free( snap_page.page );
+    snap_page.page = NULL;
+    snap_page.count = 0;
+    snap_page.gen = cur_gen;
+
+    for (;;)
+    {
+        free( buf );
+        if (!(buf = malloc( size ))) return FALSE;
+        status = query_sysinfo( PDH_SYSINFO_PAGEFILE, buf, size, &ret );
+        if (status != (LONG)0xC0000004 /* STATUS_INFO_LENGTH_MISMATCH */) break;
+        size = max( ret, size ) + 0x1000;
+    }
+    if (status < 0 || !ret)   /* no paging file: success and no entry, as on Windows */
+    {
+        free( buf );
+        return status >= 0;
+    }
+
+    for (pf = (const struct pdh_pagefile *)buf; ; pf = (const struct pdh_pagefile *)((const BYTE *)pf + pf->NextEntryOffset))
+    {
+        if ((const BYTE *)(pf + 1) > buf + ret) break;
+        n++;
+        if (!pf->NextEntryOffset) break;
+    }
+    if (n && (snap_page.page = calloc( n, sizeof(*snap_page.page) )))
+    {
+        for (pf = (const struct pdh_pagefile *)buf; snap_page.count < n; pf = (const struct pdh_pagefile *)((const BYTE *)pf + pf->NextEntryOffset))
+        {
+            struct page_info *pi = &snap_page.page[snap_page.count++];
+            DWORD len = min( pf->FileName.Length / sizeof(WCHAR), ARRAY_SIZE(pi->name) - 1 );
+
+            if (pf->FileName.Buffer) memcpy( pi->name, pf->FileName.Buffer, len * sizeof(WCHAR) );
+            pi->name[len] = 0;
+            pi->total = pf->TotalSize;
+            pi->inuse = pf->TotalInUse;
+            pi->peak = pf->PeakUsage;
+            if (!pf->NextEntryOffset) break;
+        }
+    }
+    free( buf );
+    return TRUE;
+}
+
+/* % Usage and % Usage Peak are raw fractions of the size of the paging file; _Total adds them up. */
+static void fetch_page( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *second, LONG *status )
+{
+    DWORD i;
+    BOOL total = !wcsicmp( inst, L"_Total" ), found = FALSE;
+
+    *first = *second = 0;
+    if (!ensure_page( FALSE )) { *status = PDH_CSTATUS_INVALID_DATA; return; }
+    for (i = 0; i < snap_page.count; i++)
+    {
+        const struct page_info *pi = &snap_page.page[i];
+
+        if (!total && wcsicmp( pi->name, inst )) continue;
+        found = TRUE;
+        *first += (id == CID_PAGINGFILE_USAGE) ? pi->inuse : pi->peak;
+        *second += pi->total;
+    }
+    if (!found && !total) *status = PDH_CSTATUS_NO_INSTANCE;
+    else if (!found) *second = 0;
+}
+
 /* ---- name tables ---- */
 
 static const struct perf_object_def *sorted_objects[ARRAY_SIZE(objects)];
@@ -854,6 +945,14 @@ LONG perf_get_instances( const struct perf_object_def *obj, WCHAR ***names, DWOR
         n = snap_proc.count + 1;
         if (!(list = calloc( n, sizeof(*list) ))) { ret = PDH_MEMORY_ALLOCATION_FAILURE; break; }
         for (i = 0; i + 1 < n; i++) list[i] = wcsdup( snap_proc.name[i] );
+        list[n - 1] = wcsdup( L"_Total" );
+        break;
+
+    case INST_PAGE:
+        ensure_page( TRUE );
+        n = snap_page.count + 1;
+        if (!(list = calloc( n, sizeof(*list) ))) { ret = PDH_MEMORY_ALLOCATION_FAILURE; break; }
+        for (i = 0; i + 1 < n; i++) list[i] = wcsdup( snap_page.page[i].name );
         list[n - 1] = wcsdup( L"_Total" );
         break;
 
@@ -1162,7 +1261,8 @@ LONG perf_fetch( const struct perf_object_def *obj, const struct perf_counter_de
     *first = *second = 0;
     if (obj->kind != INST_NONE)
     {
-        if (!inst || wcschr( inst, '*' ) || wcschr( inst, '?' )) return PDH_CSTATUS_NO_INSTANCE;
+        /* a paging file is named \??\C:\pagefile.sys: its question marks are part of the name */
+        if (!inst || wcschr( inst, '*' ) || (obj->kind != INST_PAGE && wcschr( inst, '?' ))) return PDH_CSTATUS_NO_INSTANCE;
         lstrcpynW( key, inst, ARRAY_SIZE(key) - 16 );
         if (instance_index && instance_index != ~0u)
         {
@@ -1184,6 +1284,7 @@ LONG perf_fetch( const struct perf_object_def *obj, const struct perf_counter_de
     case INST_DISK: fetch_disk( ctr->id, key, first, second, &status ); break;
     case INST_NET:  fetch_net( ctr->id, key, first, second, &status ); break;
     case INST_PROC: fetch_proc( ctr->id, key, first, second, &status ); break;
+    case INST_PAGE: fetch_page( ctr->id, key, first, second, &status ); break;
     }
     LeaveCriticalSection( &perf_cs );
     return status;
@@ -1204,6 +1305,7 @@ static const WCHAR *object_help_text( const struct perf_object_def *obj )
     {
     case 2:   return L"Counters for the system as a whole: file operations, context switches, system calls, processes and threads.";
     case 4:   return L"Counters for physical and virtual memory: available and committed memory, paging activity and pool sizes.";
+    case 700: return L"Counters for each paging file: how much of its space is in use, and the peak.";
     case 230: return L"Counters for each running process: processor time, memory use, threads, handles and identifiers.";
     case 234: return L"Counters for each physical disk drive: transfer rates, throughput, queue length and busy time.";
     case 238: return L"Counters for each processor: how its time is divided between user mode, kernel mode, interrupts and idle.";
