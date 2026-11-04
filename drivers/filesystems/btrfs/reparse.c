@@ -88,6 +88,16 @@ NTSTATUS get_reparse_point(PFILE_OBJECT FileObject, void* buffer, DWORD buflen, 
                 goto end;
             }
 
+            /* The name is in the buffer twice and its lengths and the data length are USHORTs: a target that
+             * does not fit cannot be described, and must not be cut short and then converted in full */
+            if (stringlen > (MAXUSHORT - (offsetof(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer.PathBuffer) -
+                                          offsetof(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer))) / 2) {
+                WARN("symlink target too long (%lu bytes as UTF-16)\n", stringlen);
+                ExFreePool(data);
+                Status = STATUS_INVALID_PARAMETER;
+                goto end;
+            }
+
             subnamelen = (uint16_t)stringlen;
             printnamelen = (uint16_t)stringlen;
 
@@ -445,6 +455,14 @@ NTSTATUS set_reparse_point(PIRP Irp) {
     if (Irp->RequestorMode == UserMode && !(ccb->access & (FILE_WRITE_ATTRIBUTES | FILE_WRITE_DATA))) {
         WARN("insufficient privileges\n");
         return STATUS_ACCESS_DENIED;
+    }
+
+    // A symbolic link is followed by the I/O manager for every caller: only SeCreateSymbolicLinkPrivilege
+    // creates one, as on Windows (a kernel caller is trusted)
+    if (Irp->RequestorMode != KernelMode && buflen >= sizeof(ULONG) && rdb->ReparseTag == IO_REPARSE_TAG_SYMLINK &&
+        !SeSinglePrivilegeCheck(RtlConvertLongToLuid(SE_CREATE_SYMBOLIC_LINK_PRIVILEGE), Irp->RequestorMode)) {
+        WARN("SeCreateSymbolicLinkPrivilege not held\n");
+        return STATUS_PRIVILEGE_NOT_HELD;
     }
 
     fileref = ccb->fileref;

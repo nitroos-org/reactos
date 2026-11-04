@@ -3534,6 +3534,15 @@ static NTSTATUS get_reparse_block(fcb* fcb, uint8_t** data) {
                 return Status;
             }
 
+            /* The name is in the buffer twice and its lengths and the data length are USHORTs: a target that
+             * does not fit cannot be described, and must not be cut short and then converted in full */
+            if (stringlen > (MAXUSHORT - (offsetof(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer.PathBuffer) -
+                                          offsetof(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer))) / 2) {
+                WARN("symlink target too long (%lu bytes as UTF-16)\n", stringlen);
+                ExFreePool(*data);
+                return STATUS_INVALID_PARAMETER;
+            }
+
             subnamelen = printnamelen = (USHORT)stringlen;
 
             reqlen = offsetof(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer.PathBuffer) + subnamelen + printnamelen;
@@ -3557,7 +3566,7 @@ static NTSTATUS get_reparse_block(fcb* fcb, uint8_t** data) {
             rdb->SymbolicLinkReparseBuffer.Flags = SYMLINK_FLAG_RELATIVE;
 
             Status = utf8_to_utf16(&rdb->SymbolicLinkReparseBuffer.PathBuffer[rdb->SymbolicLinkReparseBuffer.SubstituteNameOffset / sizeof(WCHAR)],
-                                    stringlen, &stringlen, (char*)*data, size);
+                                    stringlen, &stringlen, (char*)*data, bytes_read);
 
             if (!NT_SUCCESS(Status)) {
                 ERR("utf8_to_utf16 2 returned %08lx\n", Status);
