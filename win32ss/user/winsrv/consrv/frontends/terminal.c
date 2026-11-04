@@ -482,6 +482,7 @@ ConioNextLine(PTEXTMODE_SCREEN_BUFFER Buff, PSMALL_RECT UpdateRect, PUINT Scroll
     /* If we hit bottom, slide the viewable screen */
     if (++Buff->CursorPosition.Y == Buff->ScreenBufferSize.Y)
     {
+        ConioRecordScrolledRows(Buff, 1);
         Buff->CursorPosition.Y--;
         if (++Buff->VirtualY == Buff->ScreenBufferSize.Y)
         {

@@ -210,6 +210,7 @@ static VOID
 VtScrollBuffer(PTEXTMODE_SCREEN_BUFFER Buff, LONG Lines, WORD Attrib)
 {
     if (Lines <= 0) return;
+    ConioRecordScrolledRows(Buff, Lines);
     if (Lines >= Buff->ScreenBufferSize.Y)
     {
         VtFillRows(Buff, 0, Buff->ScreenBufferSize.Y - 1, Attrib);
