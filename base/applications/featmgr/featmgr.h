@@ -258,6 +258,7 @@ typedef struct _FM_COMPONENT
     ULONGLONG Size;
     BOOL     Default;            /* installed by the first-boot installer */
     BOOL     ArchOk;             /* Arch= lists this build's architecture */
+    ULONGLONG MaxSize;           /* > 0: the download is aborted once it is larger (hosted packs: the pinned size) */
 } FM_COMPONENT;
 BOOL   FmCompLoad(LPCWSTR id, FM_COMPONENT *c);
 int    FmCompEnum(FM_COMPONENT **outArr);          /* every component of the file; caller frees with FmCompFree */

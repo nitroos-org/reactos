@@ -525,6 +525,27 @@ static BOOL HostedPack(const FM_FEATURE *f)
     return any;
 }
 
+/* The pinned SHA-256 of a [Download] file (FALSE: the file has no [Download] line). */
+static BOOL DownloadShaFor(LPCWSTR manifest, LPCWSTR name, WCHAR sha[72])
+{
+    WCHAR *sect, *line;
+    size_t l = wcslen(name);
+    BOOL found = FALSE;
+    if (!(sect = ReadSection(manifest, L"Download"))) return FALSE;
+    for (line = sect; *line && !found; line += wcslen(line) + 1)
+    {
+        WCHAR *eq = wcschr(line, L'='), *bar;
+        if (!eq || line[0] == L';') continue;
+        if (_wcsnicmp(eq + 1, name, l) || eq[1 + l] != L'|') continue;
+        bar = wcschr(eq + 1 + l + 1, L'|');
+        if (bar) *bar = L'\0';
+        StringCchCopyW(sha, 72, eq + 1 + l + 1);
+        found = TRUE;
+    }
+    HeapFree(GetProcessHeap(), 0, sect);
+    return found;
+}
+
 /* The base address of hosted payloads (no trailing '/'): the registry setting, else the manifest's default. */
 static BOOL HostedBaseUrl(LPCWSTR manifest, LPWSTR out, DWORD cch)
 {
@@ -660,6 +681,8 @@ static void ResolveBuiltIn(FM_FEATURE *f)
     f->Removable = FALSE;
 }
 
+static BOOL PendingRebootActive(HKEY state);
+
 /* InstallDate / PendingReboot from the persisted record. */
 static void ReadStateExtras(FM_FEATURE *f)
 {
@@ -690,6 +713,12 @@ static void ReadStateExtras(FM_FEATURE *f)
         if (!_wcsicmp(v, L"Yes")) f->PendingReboot = TRUE;
     }
     RegCloseKey(k);
+    if (f->PendingReboot && OpenStateKey(f->Id, FALSE, KEY_READ | KEY_WRITE, &k) == ERROR_SUCCESS)
+    {
+        /* the reboot may have happened: the record is stale once the pending files / services are gone */
+        f->PendingReboot = PendingRebootActive(k);
+        RegCloseKey(k);
+    }
 }
 
 /* ---- installed-state detection (software tier) ---------------------------- */
@@ -914,7 +943,7 @@ static HKEY HiveFromName(LPCWSTR s)
  * <dest>.fmbak first and recorded in "Backups" as "dest|bak", so disable can
  * put the original back instead of just deleting it. */
 static HRESULT ApplyPayloadFile(LPCWSTR payloadDir, LPCWSTR srcRel, LPCWSTR destRaw,
-                                HKEY state, FILE *log)
+                                LPCWSTR wantSha, HKEY state, FILE *log)
 {
     WCHAR src[MAX_PATH], dest[MAX_PATH], destDir[MAX_PATH], bak[MAX_PATH + 8], rec[2 * MAX_PATH + 16];
     StringCchPrintfW(src, MAX_PATH, L"%s\\%s", payloadDir, srcRel);
@@ -944,6 +973,17 @@ static HRESULT ApplyPayloadFile(LPCWSTR payloadDir, LPCWSTR srcRel, LPCWSTR dest
     {
         LOGF(log, L"  ERROR: CopyFile failed (%lu)\n", GetLastError());
         return HRESULT_FROM_WIN32(GetLastError());
+    }
+    if (wantSha)
+    {
+        /* hosted pack: check what actually landed at the destination against the pinned hash */
+        WCHAR got[72];
+        if (!FmFileSha256(dest, got) || _wcsicmp(got, wantSha))
+        {
+            LOGF(log, L"  ERROR: %s does not match its pinned SHA-256 after the copy (expected %s)\n", dest, wantSha);
+            SetLastMsg(L"An installed file of this pack does not match its pinned SHA-256 checksum; the change was undone.");
+            return HRESULT_FROM_WIN32(ERROR_CRC);
+        }
     }
     return S_OK;
 }
@@ -2469,13 +2509,20 @@ static HRESULT CheckFsRequirement(const FM_FEATURE *f, FILE *log)
     return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
 }
 
+/* [A-Za-z0-9._-] only (not iswalnum: that depends on the locale and accepts non-ASCII letters) */
+static BOOL AsciiNameChar(WCHAR c)
+{
+    return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') ||
+           c == L'.' || c == L'-' || c == L'_';
+}
+
 /* A [Download] file name: a plain file name (it becomes part of the URL and of a path). */
 static BOOL HostedNameOk(LPCWSTR n)
 {
     LPCWSTR q;
     if (!n[0] || n[0] == L'.' || wcslen(n) > 80) return FALSE;
     for (q = n; *q; q++)
-        if (!(iswalnum(*q) || *q == L'.' || *q == L'-' || *q == L'_')) return FALSE;
+        if (!AsciiNameChar(*q)) return FALSE;
     return TRUE;
 }
 
@@ -2493,7 +2540,7 @@ static BOOL HostedPathOk(LPCWSTR p)
             if (!*q) return TRUE;
             seg = q + 1;
         }
-        else if (!(iswalnum(*q) || *q == L'.' || *q == L'-' || *q == L'_'))
+        else if (!AsciiNameChar(*q))
             return FALSE;
     }
 }
@@ -2523,6 +2570,26 @@ static HRESULT StageHostedPayload(const FM_FEATURE *f, WCHAR **fetched, FILE *lo
         usable = FALSE;
     }
     if (!FmGetPayloadDir(f->Id, payloadDir, MAX_PATH)) { HeapFree(GetProcessHeap(), 0, sect); return E_FAIL; }
+
+    /* every [Payload] source of a hosted pack must have a pinned hash: fail closed before anything is fetched */
+    {
+        WCHAR *pay = ReadSection(f->ManifestPath, L"Payload"), *q, want[72];
+        for (q = pay; q && *q && SUCCEEDED(hr); q += wcslen(q) + 1)
+        {
+            WCHAR *eq = wcschr(q, L'='), *bar;
+            if (!eq || q[0] == L';' || !(bar = wcschr(eq + 1, L'|'))) continue;
+            *bar = L'\0';
+            if (!DownloadShaFor(f->ManifestPath, eq + 1, want))
+            {
+                LOGF(log, L"error: [Payload] file %s of hosted pack '%s' has no [Download] hash\n", eq + 1, f->Id);
+                SetLastMsg(L"The catalog entry of '%s' lists a file without a pinned checksum, so nothing is downloaded.", f->Id);
+                hr = E_INVALIDARG;
+            }
+            *bar = L'|';
+        }
+        if (pay) HeapFree(GetProcessHeap(), 0, pay);
+        if (FAILED(hr)) { HeapFree(GetProcessHeap(), 0, sect); return hr; }
+    }
 
     /* room for the download, the installed copy and the moved-aside originals */
     for (line = sect; *line; line += wcslen(line) + 1)
@@ -2598,6 +2665,7 @@ static HRESULT StageHostedPayload(const FM_FEATURE *f, WCHAR **fetched, FILE *lo
         StringCchCopyW(c.Sha256, ARRAYSIZE(c.Sha256), sha);
         StringCchPrintfW(c.FileName, ARRAYSIZE(c.FileName), L"%s.%s", f->Id, name);
         c.Size = size ? _wcstoui64(size, NULL, 10) : 0;
+        c.MaxSize = c.Size;                            /* pinned: a longer answer is aborted as soon as it passes this */
         c.ArchOk = TRUE;
         LOGF(log, L"  download: %s\n", c.Url);
         hr = FmCompDownload(&c, dl, ARRAYSIZE(dl), log);
@@ -2664,8 +2732,9 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
     FM_FEATURE f;
     HKEY state = NULL;
     WCHAR payloadDir[MAX_PATH], now[32];
-    WCHAR *sect, *p, *fetched = NULL;
+    WCHAR *sect, *p, *fetched = NULL, want[72];
     HRESULT hr = S_OK;
+    BOOL hosted;
 
     if (!FmFindFeature(id, &f))
     {
@@ -2786,7 +2855,8 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
     RegDeleteValueW(state, L"Backups");
     RegDeleteValueW(state, L"Services");
 
-    /* payload files */
+    /* payload files (a hosted pack: each one checked against its pinned hash where it lands) */
+    hosted = HostedPack(&f);
     FmOpPhase(FM_PHASE_APPLY);
     FmOpStep(L"Installing %s", f.Name);
     FmGetPayloadDir(id, payloadDir, MAX_PATH);
@@ -2800,7 +2870,15 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
             sep = wcschr(eq + 1, L'|');
             if (!sep) continue;
             *sep = L'\0';
-            hr = ApplyPayloadFile(payloadDir, eq + 1, sep + 1, state, log);
+            if (hosted && !DownloadShaFor(f.ManifestPath, eq + 1, want))
+            {
+                LOGF(log, L"error: [Payload] file %s of hosted pack '%s' has no [Download] hash; nothing installed\n", eq + 1, id);
+                SetLastMsg(L"The catalog entry of '%s' lists a file without a pinned checksum, so it is not installed.", id);
+                *sep = L'|';
+                hr = E_INVALIDARG;
+                goto done;
+            }
+            hr = ApplyPayloadFile(payloadDir, eq + 1, sep + 1, hosted ? want : NULL, state, log);
             *sep = L'|';
             if (FAILED(hr)) goto done;
         }
@@ -2848,6 +2926,17 @@ done:
     return hr;
 }
 
+/* Is dest one of the "dest|bak" records of the Backups list? */
+static BOOL HasBackup(const WCHAR *baks, LPCWSTR dest)
+{
+    const WCHAR *p;
+    size_t l = wcslen(dest);
+    if (!baks) return FALSE;
+    for (p = baks; *p; p += wcslen(p) + 1)
+        if (!_wcsnicmp(p, dest, l) && p[l] == L'|') return TRUE;
+    return FALSE;
+}
+
 /* Undo everything recorded in the state key: registry, placed files, then
  * restore any backed-up originals. Used by disable and by enable rollback. */
 static void RevertState(HKEY state, FILE *log)
@@ -2867,6 +2956,7 @@ static void RevertState(HKEY state, FILE *log)
     }
 
     /* delete installed files */
+    baks = MultiSzRead(state, L"Backups");
     files = MultiSzRead(state, L"Files");
     if (files)
     {
@@ -2876,18 +2966,39 @@ static void RevertState(HKEY state, FILE *log)
             if (!DeleteFileW(p) && GetLastError() != ERROR_FILE_NOT_FOUND)
             {
                 DWORD e = GetLastError();
-                WCHAR aside[MAX_PATH + 8];
-                LPCWSTR gone = p;
-                /* in use (a loaded DLL): move it out of the way first, so a backed-up original can go back at once
-                 * (a reboot-delete of the name itself would also delete the restored original) */
-                StringCchPrintfW(aside, ARRAYSIZE(aside), L"%s.fmdel", p);
-                DeleteFileW(aside);
-                if (MoveFileExW(p, aside, MOVEFILE_REPLACE_EXISTING))
-                    gone = aside;
-                if (MoveFileExW(gone, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
+                WCHAR aside[MAX_PATH + 16];
+                BOOL moved = FALSE, backedUp = HasBackup(baks, p);
+                int n;
+                /* in use (a loaded DLL): rename it to a free aside name and delete THAT at reboot, so a backed-up
+                 * original can go back under the real name at once. A reboot-delete is never queued for the real
+                 * name of a file that has a backup: the restored original would be deleted with it. */
+                for (n = 0; n < 10 && !moved; n++)
                 {
-                    LOGF(log, L"  note: %s is in use (%lu); will be deleted at reboot\n", gone, e);
-                    MultiSzAppend(state, L"PendingFiles", gone);
+                    if (n) StringCchPrintfW(aside, ARRAYSIZE(aside), L"%s.fmdel%d", p, n);
+                    else StringCchPrintfW(aside, ARRAYSIZE(aside), L"%s.fmdel", p);
+                    if (GetFileAttributesW(aside) != INVALID_FILE_ATTRIBUTES && !DeleteFileW(aside))
+                        continue;                                   /* an older aside copy, itself still in use */
+                    moved = MoveFileExW(p, aside, 0);
+                }
+                if (moved)
+                {
+                    if (MoveFileExW(aside, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
+                    {
+                        LOGF(log, L"  note: %s is in use (%lu); moved to %s, which is deleted at reboot\n", p, e, aside);
+                        MultiSzAppend(state, L"PendingFiles", aside);
+                    }
+                    else
+                        LOGF(log, L"  warn: %s moved to %s but its reboot-delete failed (%lu)\n", p, aside, GetLastError());
+                }
+                else if (backedUp)
+                {
+                    /* the restore below replaces it at reboot (MOVEFILE_DELAY_UNTIL_REBOOT | REPLACE_EXISTING) */
+                    LOGF(log, L"  note: %s is in use (%lu) and cannot be moved aside; the original replaces it at reboot\n", p, e);
+                }
+                else if (MoveFileExW(p, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
+                {
+                    LOGF(log, L"  note: %s is in use (%lu); will be deleted at reboot\n", p, e);
+                    MultiSzAppend(state, L"PendingFiles", p);
                 }
                 else
                     LOGF(log, L"  warn: delete failed (%lu), reboot-delete failed (%lu)\n", e, GetLastError());
@@ -2905,7 +3016,6 @@ static void RevertState(HKEY state, FILE *log)
     }
 
     /* put back files that enable moved aside ("dest|bak") */
-    baks = MultiSzRead(state, L"Backups");
     if (baks)
     {
         for (p = baks; *p; p += wcslen(p) + 1)
@@ -2916,7 +3026,18 @@ static void RevertState(HKEY state, FILE *log)
             LOGF(log, L"  restore file: %s <- %s\n", p, sep + 1);
             DeleteFileW(p);
             if (!MoveFileW(sep + 1, p))
-                LOGF(log, L"  warn: restore failed (%lu)\n", GetLastError());
+            {
+                DWORD e = GetLastError();
+                if (GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES &&
+                    MoveFileExW(sep + 1, p, MOVEFILE_DELAY_UNTIL_REBOOT | MOVEFILE_REPLACE_EXISTING))
+                {
+                    /* the pack's file is still in place and in use: the original takes its name at the next boot */
+                    LOGF(log, L"  note: restore of %s is deferred to the next reboot (%lu)\n", p, e);
+                    MultiSzAppend(state, L"PendingFiles", sep + 1);
+                }
+                else
+                    LOGF(log, L"  warn: restore failed (%lu)\n", e);
+            }
             *sep = L'|';
         }
         HeapFree(GetProcessHeap(), 0, baks);

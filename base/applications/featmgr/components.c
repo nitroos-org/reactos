@@ -453,6 +453,13 @@ HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log)
             total = _wcstoui64(len, NULL, 10);
         if (!total) total = c->Size;
     }
+    if (c->MaxSize && total > c->MaxSize)
+    {
+        FmSetLastMessage(L"The server announced %I64u bytes for %s, more than its pinned size of %I64u bytes, so it was not downloaded.",
+                         total, c->Name, c->MaxSize);
+        hr = HRESULT_FROM_WIN32(ERROR_CRC);
+        goto fail;
+    }
     FmOpBytes(0, total);
 
     out = CreateFileW(part, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -495,6 +502,15 @@ HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log)
         }
         stalls = 0;
         if (!nread) break;
+        if (c->MaxSize && done + nread > c->MaxSize)
+        {
+            /* longer than the pinned size: it cannot match its checksum, so stop before it fills the disk */
+            LOGF(log, L"  ERROR: %s is longer than its pinned size of %I64u bytes; download aborted\n", c->Url, c->MaxSize);
+            FmSetLastMessage(L"The file downloaded for %s is larger than its pinned size (%I64u bytes), so the download was stopped "
+                             L"and nothing was installed.", c->Name, c->MaxSize);
+            hr = HRESULT_FROM_WIN32(ERROR_CRC);
+            goto fail;
+        }
         if (!WriteFile(out, buf, nread, &nwritten, NULL) || nwritten != nread)
         {
             err = GetLastError();
