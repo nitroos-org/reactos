@@ -179,6 +179,83 @@ static void test_wshshell(void)
     hr = IWshShortcut_get_IconLocation(shcut, NULL);
     ok(hr == E_POINTER, "Unexpected hr %#lx.\n", hr);
 
+    /* TargetPath, Description, FullName read-back; checked against Windows 10 */
+    {
+        WCHAR windir[MAX_PATH], expect[MAX_PATH], input[MAX_PATH + 16];
+        BSTR value;
+        int n;
+
+        GetWindowsDirectoryW(windir, ARRAY_SIZE(windir));
+        lstrcpyW(expect, windir);
+        lstrcatW(expect, L"\\notepad.exe");
+
+        /* forward slashes become backslashes */
+        lstrcpyW(input, windir);
+        lstrcatW(input, L"/notepad.exe");
+        str = SysAllocString(input);
+        hr = IWshShortcut_put_TargetPath(shcut, str);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        SysFreeString(str);
+        value = NULL;
+        hr = IWshShortcut_get_TargetPath(shcut, &value);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(value && !lstrcmpiW(value, expect), "got %s, expected %s\n", wine_dbgstr_w(value), wine_dbgstr_w(expect));
+        SysFreeString(value);
+
+        /* environment variables are expanded */
+        str = SysAllocString(L"%windir%\\notepad.exe");
+        hr = IWshShortcut_put_TargetPath(shcut, str);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        SysFreeString(str);
+        value = NULL;
+        hr = IWshShortcut_get_TargetPath(shcut, &value);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(value && !lstrcmpiW(value, expect), "got %s, expected %s\n", wine_dbgstr_w(value), wine_dbgstr_w(expect));
+        SysFreeString(value);
+
+        /* the target is not checked for existence */
+        str = SysAllocString(L"C:\\nonexistent dir\\zz.exe");
+        hr = IWshShortcut_put_TargetPath(shcut, str);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        SysFreeString(str);
+        value = NULL;
+        hr = IWshShortcut_get_TargetPath(shcut, &value);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(value && !lstrcmpW(value, L"C:\\nonexistent dir\\zz.exe"), "got %s\n", wine_dbgstr_w(value));
+        SysFreeString(value);
+
+        /* a quoted command line is refused */
+        str = SysAllocString(L"\"C:\\Program Files\\x y\\a.exe\" -q");
+        hr = IWshShortcut_put_TargetPath(shcut, str);
+        ok(FAILED(hr), "Unexpected hr %#lx.\n", hr);
+        SysFreeString(str);
+
+        str = SysAllocString(L"a description");
+        hr = IWshShortcut_put_Description(shcut, str);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        SysFreeString(str);
+        value = NULL;
+        hr = IWshShortcut_get_Description(shcut, &value);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(value && !lstrcmpW(value, L"a description"), "got %s\n", wine_dbgstr_w(value));
+        SysFreeString(value);
+
+        value = NULL;
+        hr = IWshShortcut_get_FullName(shcut, &value);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        n = value ? lstrlenW(value) : 0;
+        ok(n > 9 && !lstrcmpiW(value + n - 9, L"\\file.lnk") && value[1] == ':',
+           "got %s\n", wine_dbgstr_w(value));
+        SysFreeString(value);
+
+        /* an empty link has no icon path, and the separator has no blank */
+        value = NULL;
+        hr = IWshShortcut_get_IconLocation(shcut, &value);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(value && !lstrcmpW(value, L",0"), "got %s\n", wine_dbgstr_w(value));
+        SysFreeString(value);
+    }
+
     IWshShortcut_Release(shcut);
     IDispatch_Release(shortcut);
 
