@@ -351,6 +351,13 @@ IopCompleteIrp(IN PIRP Irp,
 
             IopDoNameTransmogrify(Irp, FileObject, ReparseData);
         }
+        else if ((Irp->IoStatus.Status == STATUS_REPARSE) &&
+                 (Irp->IoStatus.Information == IO_REPARSE_TAG_SYMLINK))
+        {
+            /* Symbolic links are resolved by IopParseDevice, when the driver completed the create synchronously */
+            ExFreePool((PVOID)*SystemArgument2);
+            Irp->IoStatus.Status = STATUS_IO_REPARSE_TAG_NOT_HANDLED;
+        }
     }
 
     /* Handle Buffered case first */
@@ -1938,7 +1945,8 @@ IofCompleteRequest(IN PIRP Irp,
         if (Irp->IoStatus.Information > IO_REMOUNT)
         {
             /* If that's a reparse tag we understand, save the buffer from deletion */
-            if (Irp->IoStatus.Information == IO_REPARSE_TAG_MOUNT_POINT)
+            if (Irp->IoStatus.Information == IO_REPARSE_TAG_MOUNT_POINT ||
+                Irp->IoStatus.Information == IO_REPARSE_TAG_SYMLINK)
             {
                 ASSERT(Irp->Tail.Overlay.AuxiliaryBuffer != NULL);
                 DataBuffer = (PREPARSE_DATA_BUFFER)Irp->Tail.Overlay.AuxiliaryBuffer;
@@ -2026,7 +2034,8 @@ IofCompleteRequest(IN PIRP Irp,
     {
         /* Restore the saved reparse buffer for the caller */
         if (Irp->IoStatus.Status == STATUS_REPARSE &&
-            Irp->IoStatus.Information == IO_REPARSE_TAG_MOUNT_POINT)
+            (Irp->IoStatus.Information == IO_REPARSE_TAG_MOUNT_POINT ||
+             Irp->IoStatus.Information == IO_REPARSE_TAG_SYMLINK))
         {
             Irp->Tail.Overlay.AuxiliaryBuffer = (PCHAR)DataBuffer;
         }
