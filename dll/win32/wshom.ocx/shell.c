@@ -943,8 +943,22 @@ static HRESULT WINAPI WshShortcut_Invoke(IWshShortcut *iface, DISPID dispIdMembe
 static HRESULT WINAPI WshShortcut_get_FullName(IWshShortcut *iface, BSTR *name)
 {
     WshShortcut *This = impl_from_IWshShortcut(iface);
-    FIXME("(%p)->(%p): stub\n", This, name);
-    return E_NOTIMPL;
+    WCHAR full[MAX_PATH];
+    DWORD len;
+
+    TRACE("(%p)->(%p)\n", This, name);
+
+    if (!name)
+        return E_POINTER;
+
+    *name = NULL;
+
+    len = GetFullPathNameW(This->path_link, ARRAY_SIZE(full), full, NULL);
+    if (!len || len >= ARRAY_SIZE(full))
+        *name = SysAllocString(This->path_link);
+    else
+        *name = SysAllocString(full);
+    return *name ? S_OK : E_OUTOFMEMORY;
 }
 
 static HRESULT WINAPI WshShortcut_get_Arguments(IWshShortcut *iface, BSTR *Arguments)
@@ -980,8 +994,22 @@ static HRESULT WINAPI WshShortcut_put_Arguments(IWshShortcut *iface, BSTR Argume
 static HRESULT WINAPI WshShortcut_get_Description(IWshShortcut *iface, BSTR *Description)
 {
     WshShortcut *This = impl_from_IWshShortcut(iface);
-    FIXME("(%p)->(%p): stub\n", This, Description);
-    return E_NOTIMPL;
+    WCHAR buffW[INFOTIPSIZE];
+    HRESULT hr;
+
+    TRACE("(%p)->(%p)\n", This, Description);
+
+    if (!Description)
+        return E_POINTER;
+
+    *Description = NULL;
+
+    hr = IShellLinkW_GetDescription(This->link, buffW, ARRAY_SIZE(buffW));
+    if (FAILED(hr))
+        return hr;
+
+    *Description = SysAllocString(buffW);
+    return *Description ? S_OK : E_OUTOFMEMORY;
 }
 
 static HRESULT WINAPI WshShortcut_put_Description(IWshShortcut *iface, BSTR Description)
@@ -994,8 +1022,30 @@ static HRESULT WINAPI WshShortcut_put_Description(IWshShortcut *iface, BSTR Desc
 static HRESULT WINAPI WshShortcut_get_Hotkey(IWshShortcut *iface, BSTR *Hotkey)
 {
     WshShortcut *This = impl_from_IWshShortcut(iface);
-    FIXME("(%p)->(%p): stub\n", This, Hotkey);
-    return E_NOTIMPL;
+    WORD key = 0;
+    HRESULT hr;
+
+    TRACE("(%p)->(%p)\n", This, Hotkey);
+
+    if (!Hotkey)
+        return E_POINTER;
+
+    *Hotkey = NULL;
+
+    hr = IShellLinkW_GetHotkey(This->link, &key);
+    if (FAILED(hr))
+        return hr;
+
+    /* Windows 10 returns an empty string for a link without hotkey. The text form of a real key
+       combination has not been measured yet. */
+    if (key)
+    {
+        FIXME("(%p)->(%p): hotkey %#x not supported\n", This, Hotkey, key);
+        return E_NOTIMPL;
+    }
+
+    *Hotkey = SysAllocString(L"");
+    return *Hotkey ? S_OK : E_OUTOFMEMORY;
 }
 
 static HRESULT WINAPI WshShortcut_put_Hotkey(IWshShortcut *iface, BSTR Hotkey)
@@ -1020,7 +1070,7 @@ static HRESULT WINAPI WshShortcut_get_IconLocation(IWshShortcut *iface, BSTR *Ic
     hr = IShellLinkW_GetIconLocation(This->link, buffW, ARRAY_SIZE(buffW), &icon);
     if (FAILED(hr)) return hr;
 
-    swprintf(pathW, ARRAY_SIZE(pathW), L"%s, %d", buffW, icon);
+    swprintf(pathW, ARRAY_SIZE(pathW), L"%s,%d", buffW, icon);
     *IconPath = SysAllocString(pathW);
     if (!*IconPath) return E_OUTOFMEMORY;
 
@@ -1069,15 +1119,63 @@ static HRESULT WINAPI WshShortcut_put_RelativePath(IWshShortcut *iface, BSTR rhs
 static HRESULT WINAPI WshShortcut_get_TargetPath(IWshShortcut *iface, BSTR *Path)
 {
     WshShortcut *This = impl_from_IWshShortcut(iface);
-    FIXME("(%p)->(%p): stub\n", This, Path);
-    return E_NOTIMPL;
+    WCHAR buffW[MAX_PATH];
+    HRESULT hr;
+
+    TRACE("(%p)->(%p)\n", This, Path);
+
+    if (!Path)
+        return E_POINTER;
+
+    *Path = NULL;
+
+    buffW[0] = 0;
+    hr = IShellLinkW_GetPath(This->link, buffW, ARRAY_SIZE(buffW), NULL, 0);
+    if (FAILED(hr))
+        return hr;
+
+    *Path = SysAllocString(buffW);
+    return *Path ? S_OK : E_OUTOFMEMORY;
 }
 
 static HRESULT WINAPI WshShortcut_put_TargetPath(IWshShortcut *iface, BSTR Path)
 {
     WshShortcut *This = impl_from_IWshShortcut(iface);
+    WCHAR expanded[MAX_PATH], found[MAX_PATH], full[MAX_PATH];
+    const WCHAR *path = expanded;
+    DWORD len;
+
     TRACE("(%p)->(%s)\n", This, debugstr_w(Path));
-    return IShellLinkW_SetPath(This->link, Path);
+
+    if (!Path)
+        return E_POINTER;
+
+    /* Windows 10 keeps the expanded, canonical path: %VAR% references are expanded, '/' becomes a
+       backslash, "." and ".." are resolved, a bare file name is searched for along PATH, and a quoted
+       command line is refused. */
+    len = ExpandEnvironmentStringsW(Path, expanded, ARRAY_SIZE(expanded));
+    if (!len || len > ARRAY_SIZE(expanded))
+        return HRESULT_FROM_WIN32(len ? ERROR_FILENAME_EXCED_RANGE : GetLastError());
+
+    if (!*path)
+        return IShellLinkW_SetPath(This->link, path);
+
+    if (wcschr(path, '"'))
+        return E_INVALIDARG;
+
+    if (!wcspbrk(path, L"\\/:"))
+    {
+        /* on a too small buffer SearchPathW returns the needed size and leaves the buffer alone */
+        len = SearchPathW(NULL, path, NULL, ARRAY_SIZE(found), found, NULL);
+        if (len && len < ARRAY_SIZE(found))
+            path = found;
+    }
+
+    len = GetFullPathNameW(path, ARRAY_SIZE(full), full, NULL);
+    if (len && len < ARRAY_SIZE(full))
+        path = full;
+
+    return IShellLinkW_SetPath(This->link, path);
 }
 
 static HRESULT WINAPI WshShortcut_get_WindowStyle(IWshShortcut *iface, int *ShowCmd)
@@ -1123,8 +1221,20 @@ static HRESULT WINAPI WshShortcut_put_WorkingDirectory(IWshShortcut *iface, BSTR
 static HRESULT WINAPI WshShortcut_Load(IWshShortcut *iface, BSTR PathLink)
 {
     WshShortcut *This = impl_from_IWshShortcut(iface);
-    FIXME("(%p)->(%s): stub\n", This, debugstr_w(PathLink));
-    return E_NOTIMPL;
+    IPersistFile *file;
+    HRESULT hr;
+
+    TRACE("(%p)->(%s)\n", This, debugstr_w(PathLink));
+
+    if (!PathLink)
+        return E_POINTER;
+
+    hr = IShellLinkW_QueryInterface(This->link, &IID_IPersistFile, (void **)&file);
+    if (FAILED(hr))
+        return hr;
+    hr = IPersistFile_Load(file, PathLink, STGM_READ);
+    IPersistFile_Release(file);
+    return hr;
 }
 
 static HRESULT WINAPI WshShortcut_Save(IWshShortcut *iface)
@@ -1196,6 +1306,18 @@ static HRESULT WshShortcut_Create(const WCHAR *path, IDispatch **shortcut)
         IShellLinkW_Release(object->link);
         free(object);
         return E_OUTOFMEMORY;
+    }
+
+    /* An already existing link file is opened, so its properties can be read and modified. */
+    if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+    {
+        IPersistFile *file;
+
+        if (SUCCEEDED(IShellLinkW_QueryInterface(object->link, &IID_IPersistFile, (void **)&file)))
+        {
+            IPersistFile_Load(file, path, STGM_READ);
+            IPersistFile_Release(file);
+        }
     }
 
     init_classinfo(&IID_IWshShortcut, (IUnknown *)&object->IWshShortcut_iface, &object->classinfo);
