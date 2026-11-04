@@ -14,6 +14,7 @@
 #include <winnls.h>
 #include <pdh.h>
 #include <pdhmsg.h>
+#include <reactos/buildno.h>
 
 #include "usage.h"
 

@@ -5,13 +5,15 @@
  *
  * Counter values, time stamps, the computer name and the spinner steps differ from run to run
  * and are masked; everything else (quoting, separators, line ends, messages, exit codes) is
- * compared with the capture of the Windows 10 22H2 reference.
+ * compared with the capture of the Windows 10 22H2 reference. The banner line of -? is the one
+ * intentional difference: it names NitroOS and the version of the tree.
  */
 
 #include "precomp.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <reactos/buildno.h>
 
 #define PAD "Exiting, please wait...                         \r\n"
 #define DONE PAD "The command completed successfully.\r\n\r\r"
@@ -24,7 +26,7 @@
 
 static const char s_Usage[] =
     "\r\n"
-    "Microsoft r TypePerf.exe (10.0.19041.1741)\r\n"
+    "NitroOS TypePerf.exe (" KERNEL_VERSION_STR ")\r\n"
     "\r\n"
     "Typeperf writes performance data to the command window or to a log file. To\r\n"
     "stop Typeperf, press CTRL+C.\r\n"
