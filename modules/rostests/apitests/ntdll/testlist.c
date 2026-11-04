@@ -60,6 +60,7 @@ extern void func_RtlBitmapRanges(void);
 extern void func_RtlFlsValue(void);
 extern void func_RtlUtf8String(void);
 extern void func_RtlWin10Helpers(void);
+extern void func_RtlConvertDeviceFamilyInfo(void);
 extern void func_Wow64Continue(void);
 extern void func_Wow64ServiceArguments(void);
 extern void func_NtCreateDirectoryObject(void);
@@ -305,6 +306,7 @@ const struct test winetest_testlist[] =
     { "RtlFlsValue",                    func_RtlFlsValue },
     { "RtlUtf8String",                  func_RtlUtf8String },
     { "RtlWin10Helpers",                func_RtlWin10Helpers },
+    { "RtlConvertDeviceFamilyInfo",     func_RtlConvertDeviceFamilyInfo },
     { "Wow64Continue",                  func_Wow64Continue },
     { "Wow64ServiceArguments",          func_Wow64ServiceArguments },
     { "NtCreateDirectoryObject",        func_NtCreateDirectoryObject },
