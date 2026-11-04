@@ -459,10 +459,16 @@ FindNextFileW(IN HANDLE hFindFile,
                                         ? NextDirInfo.BothDirInfo->FileName
                                         : NextDirInfo.FullDirInfo->FileName);
 
-                /* Be paranoid and make sure that the next entry is completely there */
+                /*
+                 * Be paranoid and make sure that the next entry is completely there.
+                 * An entry whose name ends on the last byte of the buffer is complete
+                 * (a file system that fills the buffer completely returns one): the
+                 * test must not be "<=", which dropped that entry for good, as the
+                 * next query continues behind it ("rmdir /s" left that file behind).
+                 */
                 if (BufferEnd < (ULONG_PTR)NextDirInfo.DirInfo ||
                     BufferEnd < (ULONG_PTR)&NextDirInfo.FullDirInfo->FileNameLength + sizeof(NextDirInfo.FullDirInfo->FileNameLength) ||
-                    BufferEnd <= (ULONG_PTR)((ULONG_PTR)pFileName + NextDirInfo.FullDirInfo->FileNameLength))
+                    BufferEnd < (ULONG_PTR)((ULONG_PTR)pFileName + NextDirInfo.FullDirInfo->FileNameLength))
                 {
                     FindFileData->NextDirInfo.DirInfo = NULL;
                 }

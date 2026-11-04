@@ -85,6 +85,7 @@ extern void func_FindActCtxSectionStringW(void);
 extern void func_FindFiles(void);
 extern void func_FindFirstFileEx(void);
 extern void func_FindFirstStream(void);
+extern void func_FindNextBoundary(void);
 extern void func_FindNLSStringEx(void);
 extern void func_FindStringOrdinal(void);
 extern void func_FlushProcessWriteBuffers(void);
@@ -307,6 +308,7 @@ const struct test winetest_testlist[] =
     { "FindFiles",                   func_FindFiles },
     { "FindFirstFileEx",             func_FindFirstFileEx },
     { "FindFirstStream",             func_FindFirstStream },
+    { "FindNextBoundary",            func_FindNextBoundary },
     { "FindNLSStringEx",             func_FindNLSStringEx },
     { "FindStringOrdinal",           func_FindStringOrdinal },
     { "FlushProcessWriteBuffers",     func_FlushProcessWriteBuffers },
