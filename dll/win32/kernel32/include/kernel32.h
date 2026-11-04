@@ -243,6 +243,33 @@ BasepProbeForDllManifest(
     OUT PVOID *ActCtx
 );
 
+/* The thread start: ntdll!RtlUserThreadStart calls it, it calls the thread's routine. Windows' name
+ * for it, BaseThreadInitThunk, stays an unimplemented stub export (see kernel32.spec) */
+DECLSPEC_NORETURN
+VOID
+WINAPI
+BasepThreadInitThunk(
+    _In_ DWORD Unknown,
+    _In_ LPTHREAD_START_ROUTINE lpStartAddress,
+    _In_ LPVOID lpParameter);
+
+/* ntdll!RtlUserThreadStart: where every thread of kernel32 starts (x86: routine in EAX, parameter in EBX) */
+VOID
+NTAPI
+RtlUserThreadStart(VOID);
+
+#ifdef _M_IX86
+/* lpStartAddress(lpParameter) whatever its calling convention (a thread routine pops its parameter,
+ * the entry of an image does not); thread.S */
+DWORD
+WINAPI
+BasepCallThreadStart(
+    _In_ LPTHREAD_START_ROUTINE lpStartAddress,
+    _In_ LPVOID lpParameter);
+#else
+#define BasepCallThreadStart(Start, Parameter) (Start)(Parameter)
+#endif
+
 DECLSPEC_NORETURN
 VOID
 WINAPI

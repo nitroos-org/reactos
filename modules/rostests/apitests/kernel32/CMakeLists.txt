@@ -190,6 +190,7 @@ list(APPEND SOURCE
     ThreadFairness.c
     ThreadHandleLeak.c
     ThreadInformation.c
+    ThreadStartFrame.c
     ThreadTimesTimerResolution.c
     TunnelCache.c
     VolumeMountPoint.c

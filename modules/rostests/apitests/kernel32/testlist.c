@@ -193,6 +193,7 @@ extern void func_ThreadContextObjects(void);
 extern void func_ThreadFairness(void);
 extern void func_ThreadHandleLeak(void);
 extern void func_ThreadInformation(void);
+extern void func_ThreadStartFrame(void);
 extern void func_ThreadTimesTimerResolution(void);
 extern void func_TunnelCache(void);
 extern void func_VolumeMountPoint(void);
@@ -415,6 +416,7 @@ const struct test winetest_testlist[] =
     { "ThreadFairness",              func_ThreadFairness },
     { "ThreadHandleLeak",            func_ThreadHandleLeak },
     { "ThreadInformation",           func_ThreadInformation },
+    { "ThreadStartFrame",            func_ThreadStartFrame },
     { "ThreadTimesTimerResolution",  func_ThreadTimesTimerResolution },
     { "ThreadContextObjects",        func_ThreadContextObjects },
     { "TunnelCache",                 func_TunnelCache },
