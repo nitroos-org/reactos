@@ -662,6 +662,11 @@ UINT TCPAllocateEphemeralPort(PPORT_IN_USE_ROUTINE InUse)
     return AllocatePortFromRangeUnless(&TCPPorts, TCP_EPHEMERAL_FIRST, TCP_EPHEMERAL_LAST, InUse);
 }
 
+BOOLEAN TCPReservePort(const UINT Port)
+{
+    return ReservePort(&TCPPorts, Port);
+}
+
 VOID TCPFreePort(const UINT Port)
 {
     DeallocatePort(&TCPPorts, Port);
