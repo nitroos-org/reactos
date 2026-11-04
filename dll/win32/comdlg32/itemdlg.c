@@ -815,6 +815,10 @@ static HRESULT on_default_action(FileDialogImpl *This)
         UINT size_used;
         file_count = COMDLG32_SplitFileNames(tmp_files, len, &files, &size_used);
         CoTaskMemFree(tmp_files);
+#ifdef __REACTOS__
+        /* Windows accepts forward slashes in a typed path and uses backslashes */
+        if(file_count) COMDLG32_FixTypedSlashes(files, size_used);
+#endif
     }
 #ifdef __REACTOS__
     /* an empty name box or a single name is handled as Windows does; several names go on below */
