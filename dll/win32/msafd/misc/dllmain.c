@@ -2744,6 +2744,41 @@ WSPGetSockName(IN SOCKET Handle,
     if( !NT_SUCCESS(Status) )
         return SOCKET_ERROR;
 
+    /* A stream socket this process never bound or connected is not named yet, even when
+     * AFD already holds a connection for it: AcceptEx connects its socket, which only
+     * SO_UPDATE_ACCEPT_CONTEXT turns into a named one. Windows fails with WSAEINVAL. */
+    if (Socket->SharedData->State == SocketOpen &&
+        Socket->SharedData->SocketType == SOCK_STREAM)
+    {
+        SOCK_SHARED_INFO AfdData;
+
+        Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
+                                       SockEvent,
+                                       NULL,
+                                       NULL,
+                                       &IOSB,
+                                       IOCTL_AFD_GET_CONTEXT,
+                                       NULL,
+                                       0,
+                                       &AfdData,
+                                       sizeof(AfdData));
+        if (Status == STATUS_PENDING)
+        {
+            MsafdWaitForAlert(SockEvent);
+            Status = IOSB.Status;
+        }
+
+        if (NT_SUCCESS(Status) && AfdData.State == SocketConnected)
+        {
+            NtClose(SockEvent);
+            if (lpErrno) *lpErrno = WSAEINVAL;
+            return SOCKET_ERROR;
+        }
+
+        /* The event is reused: a synchronous completion left it signalled */
+        NtResetEvent(SockEvent, NULL);
+    }
+
     /* Allocate a buffer for the address */
     TdiAddressSize =
         sizeof(TRANSPORT_ADDRESS) + Socket->SharedData->SizeOfLocalAddress;

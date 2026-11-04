@@ -422,6 +422,9 @@ ip4_input_accept(struct netif *netif)
 #if LWIP_NETIF_LOOPBACK && !LWIP_HAVE_LOOPIF
         || (ip4_addr_get_u32(ip4_current_dest_addr()) == PP_HTONL(IPADDR_LOOPBACK))
 #endif /* LWIP_NETIF_LOOPBACK && !LWIP_HAVE_LOOPIF */
+        /* NitroOS: the loopback interface answers for the whole 127.0.0.0/8, as on Windows */
+        || (ip4_addr_isloopback(ip4_current_dest_addr()) &&
+            ip4_addr_isloopback(netif_ip4_addr(netif)))
        ) {
       LWIP_DEBUGF(IP_DEBUG, ("ip4_input: packet accepted on interface %c%c\n",
                              netif->name[0], netif->name[1]));
