@@ -348,12 +348,41 @@ IntWinListOwnedPopups(PWND Window)
     return List;
 }
 
+/* The top-level window above pWnd. NULL when that window was destroyed: a window of another thread
+   (another process, with SetParent) outlives a parent that its thread destroyed, until its own thread
+   reaps it; a destroyed window can be neither activated nor focused. */
 PWND FASTCALL
 IntGetNonChildAncestor(PWND pWnd)
 {
    while(pWnd && (pWnd->style & (WS_CHILD | WS_POPUP)) == WS_CHILD)
       pWnd = pWnd->spwndParent;
+   if (pWnd && (pWnd->state & WNDS_DESTROYED))
+      return NULL;
    return pWnd;
+}
+
+/* The parent chain of Wnd does not lead to a desktop window: an ancestor of another thread was destroyed
+   while Wnd stayed alive. co_UserFreeWindow only sends such a child WM_ASYNC_DESTROYWINDOW (from a dying
+   thread: queued), so it keeps its destroyed parent until its own thread processes that message or exits.
+   Windows keeps it the same way (GetParent still returns the destroyed parent) and refuses SetParent,
+   SetWindowPos and child creation on it (user32 winetest win.c test_thread_exit_destroy). The destroyed
+   parent has no parent, class or visible style any more. */
+BOOL FASTCALL
+IntIsWindowOrphaned(PWND Wnd)
+{
+   PWND pwnd;
+
+   if (!Wnd)
+      return FALSE;
+   for (pwnd = Wnd->spwndParent; pwnd; pwnd = pwnd->spwndParent)
+   {
+      if (pwnd->state & WNDS_DESTROYED)
+         return TRUE;
+      if (pwnd->fnid == FNID_DESKTOP || pwnd->fnid == FNID_MESSAGEWND)
+         return FALSE;
+   }
+   /* the chain ended without a desktop window (only a desktop or message window has no parent) */
+   return Wnd->spwndParent != NULL;
 }
 
 BOOL FASTCALL
@@ -620,6 +649,25 @@ LRESULT co_UserFreeWindow(PWND Window,
             {
                /* send WM_DESTROY messages to windows not belonging to the same thread */
                co_IntSendMessage( UserHMGetHandle(Child), WM_ASYNC_DESTROYWINDOW, 0, 0 );
+
+               /* Still there: its thread did not run the message (this thread is dying, the message
+                  waits in the other thread's queue until it next looks at its messages, or that thread
+                  dies too). The child keeps this window as its parent, as on Windows; Windows also hides
+                  it and it loses the focus of its thread (oracle 2026-11-04: style without WS_VISIBLE,
+                  GetFocus() NULL, the capture stays). */
+               if (IntIsWindow(*ChildHandle) && Child->spwndParent == Window &&
+                   !(Child->state2 & WNDS2_INDESTROY))
+               {
+                  PUSER_MESSAGE_QUEUE ChildQueue = Child->head.pti->MessageQueue;
+
+                  if (Child->style & WS_VISIBLE)
+                     IntSetStyle(Child, 0, WS_VISIBLE);
+                  if (ChildQueue && ChildQueue->spwndFocus &&
+                      (ChildQueue->spwndFocus == Child || IntIsChildWindow(Child, ChildQueue->spwndFocus)))
+                  {
+                     ChildQueue->spwndFocus = NULL;
+                  }
+               }
             }
             else
                co_UserFreeWindow(Child, ProcessData, ThreadData, SendMessages);
@@ -1263,7 +1311,9 @@ co_IntSetParent(PWND Wnd, PWND WndNewParent)
    /* top-level, attach the two threads */
    if ((Wnd->style & (WS_CHILD|WS_POPUP)) == WS_CHILD)
    {
-      if ( Wnd->spwndParent != co_GetDesktopWindow(Wnd))
+      /* the old parent, not the new one (Wnd->spwndParent already is the new one): a window moved
+         from a parent of another thread to the desktop was never detached */
+      if ( WndOldParent != co_GetDesktopWindow(Wnd))
       {
          if (WndOldParent && (Wnd->head.pti != WndOldParent->head.pti))
          {
@@ -1352,6 +1402,15 @@ co_UserSetParent(HWND hWndChild, HWND hWndNewParent)
       ERR("UserSetParent: parent %p is on another desktop than %p\n", hWndNewParent, hWndChild);
       /* Windows 10 22H2 (oracle, 2026-11-03): SetParent returns NULL with ERROR_INVALID_PARAMETER,
          from a thread on either desktop, and the parent is left unchanged */
+      EngSetLastError(ERROR_INVALID_PARAMETER);
+      return NULL;
+   }
+
+   /* A window whose parent of another thread (process) was destroyed cannot be adopted, and cannot
+      adopt: Windows fails with ERROR_INVALID_PARAMETER (user32 winetest win.c test_thread_exit_destroy) */
+   if (IntIsWindowOrphaned(Wnd) || IntIsWindowOrphaned(WndParent))
+   {
+      ERR("UserSetParent: %p or %p is below a destroyed window\n", hWndChild, hWndNewParent);
       EngSetLastError(ERROR_INVALID_PARAMETER);
       return NULL;
    }
@@ -2391,6 +2450,16 @@ co_UserCreateWindowEx(CREATESTRUCTW* Cs,
     else if (hWndOwner && !OwnerWindow)
     {
         ERR("Got invalid owner window handle for %wZ\n", ClassName);
+        ParentWindow = NULL;
+        goto cleanup;
+    }
+
+    /* No children below a window whose parent of another thread was destroyed: Windows fails with
+       ERROR_INVALID_PARAMETER (user32 winetest win.c test_thread_exit_destroy) */
+    if (ParentWindow && IntIsWindowOrphaned(ParentWindow))
+    {
+        ERR("Parent window of %wZ is below a destroyed window\n", ClassName);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
         ParentWindow = NULL;
         goto cleanup;
     }

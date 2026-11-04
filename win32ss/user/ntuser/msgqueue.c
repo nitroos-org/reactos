@@ -2033,7 +2033,9 @@ BOOL co_IntProcessMouseMessage(MSG* msg, BOOL* RemoveMessages, BOOL* NotForUs, L
             PWND pwndTop = pwndMsg;
             pwndTop = IntGetNonChildAncestor(pwndTop);
 
-            TRACE("Mouse pti %p pwndMsg pti %p pwndTop pti %p\n",MessageQueue->ptiMouse,pwndMsg->head.pti,pwndTop->head.pti);
+            /* NULL when the top-level window was destroyed (a child of another process that outlived
+               its parent, with the capture) */
+            TRACE("Mouse pti %p pwndMsg pti %p pwndTop pti %p\n",MessageQueue->ptiMouse,pwndMsg->head.pti,pwndTop ? pwndTop->head.pti : NULL);
 
             if (pwndTop && pwndTop != pwndDesktop)
             {
