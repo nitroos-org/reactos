@@ -344,6 +344,7 @@ typedef struct _ROS_PS_ATTRIBUTE_LIST
 #define PSF_SWAP_ALLOWED_BIT                    0x2000000
 #define PSF_CREATE_FAILED_BIT                   0x4000000
 #define PSF_DEFAULT_IO_PRIORITY_BIT             0x8000000
+#define PSF_DISALLOW_WIN32K_BIT                 0x10000000
 
 //
 // Vista Process Flags
