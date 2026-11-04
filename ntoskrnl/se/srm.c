@@ -1698,8 +1698,8 @@ SeGetLogonIdDeviceMap(
     /* Release the database lock */
     KeReleaseGuardedMutex(&SepRmDbLock);
 
-    /* We're done with the session */
-    SepRmDereferenceLogonSession(&CurrentSession->LogonId);
+    /* We're done with the session. Use the caller's LUID: the session can be deleted any time now */
+    SepRmDereferenceLogonSession(LogonId);
 
     return Status;
 }
