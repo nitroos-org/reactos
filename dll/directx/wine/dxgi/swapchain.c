@@ -245,7 +245,10 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
 
     if (!refcount)
     {
+        /* the structure goes away with the last wined3d reference: take what is needed afterwards first */
         IWineDXGIDevice *device = swapchain->device;
+        HWND composition_window = swapchain->composition_window;
+
         if (swapchain->target)
         {
             WARN("Releasing fullscreen swapchain.\n");
@@ -254,14 +257,8 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
         IWineDXGIFactory_Release(swapchain->factory);
         wined3d_swapchain_decref(swapchain->wined3d_swapchain);
         IWineDXGIDevice_Release(device);
-        if (swapchain->composition_window)
-        {
-            /* a window can only be destroyed by its thread: ask that one if this is another */
-            if (GetWindowThreadProcessId(swapchain->composition_window, NULL) == GetCurrentThreadId())
-                DestroyWindow(swapchain->composition_window);
-            else
-                PostMessageW(swapchain->composition_window, WM_CLOSE, 0, 0);
-        }
+        if (composition_window)
+            dxgi_destroy_composition_window(composition_window);
     }
 
     return refcount;
@@ -1132,26 +1129,91 @@ static const struct IWineDXGICompositionSwapChainVtbl d3d11_composition_swapchai
 
 static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
+    if (message == WM_DESTROY)
+        PostQuitMessage(0);
     return DefWindowProcW(window, message, wparam, lparam);
+}
+
+struct composition_window_data
+{
+    unsigned int width, height;
+    HMODULE module;
+    HANDLE event;
+    HWND window;
+};
+
+/* A window is destroyed by the thread that created it. The last reference to a swap chain can be dropped by
+ * any thread, which may never pump messages, so every composition window has a thread of its own that does
+ * nothing but own the window and pump its messages until the window is closed. */
+static DWORD WINAPI dxgi_composition_window_thread(void *param)
+{
+    static const WCHAR class_name[] = L"WineDXGICompositionWindow";
+    struct composition_window_data *data = param;
+    HMODULE module = data->module;
+    HINSTANCE instance = module;
+    HWND window;
+    MSG msg;
+
+    window = CreateWindowExW(WS_EX_TOOLWINDOW, class_name, L"", WS_POPUP, 0, 0, data->width, data->height,
+            NULL, NULL, instance, NULL);
+    data->window = window;
+    SetEvent(data->event); /* data belongs to the creator from here on */
+
+    if (window)
+    {
+        while (GetMessageW(&msg, NULL, 0, 0) > 0)
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    FreeLibraryAndExitThread(module, 0);
 }
 
 HWND dxgi_create_composition_window(unsigned int width, unsigned int height)
 {
     static const WCHAR class_name[] = L"WineDXGICompositionWindow";
-    HINSTANCE instance = GetModuleHandleW(L"dxgi.dll");
+    struct composition_window_data data = {width, height};
     WNDCLASSEXW wc = {sizeof(wc)};
+    HANDLE thread;
+
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (const WCHAR *)dxgi_composition_window_proc,
+            &data.module))
+        return NULL;
 
     wc.lpfnWndProc = dxgi_composition_window_proc;
-    wc.hInstance = instance;
+    wc.hInstance = data.module;
     wc.lpszClassName = class_name;
     if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
     {
         ERR("Failed to register the composition window class, error %lu.\n", GetLastError());
+        FreeLibrary(data.module);
         return NULL;
     }
 
-    return CreateWindowExW(WS_EX_TOOLWINDOW, class_name, L"", WS_POPUP, 0, 0, width, height,
-            NULL, NULL, instance, NULL);
+    if (!(data.event = CreateEventW(NULL, FALSE, FALSE, NULL)))
+    {
+        FreeLibrary(data.module);
+        return NULL;
+    }
+    /* the thread holds the reference to the module that GetModuleHandleExW took */
+    if (!(thread = CreateThread(NULL, 0, dxgi_composition_window_thread, &data, 0, NULL)))
+    {
+        ERR("Failed to create the composition window thread, error %lu.\n", GetLastError());
+        CloseHandle(data.event);
+        FreeLibrary(data.module);
+        return NULL;
+    }
+    CloseHandle(thread);
+    WaitForSingleObject(data.event, INFINITE);
+    CloseHandle(data.event);
+    return data.window;
+}
+
+/* Callable from any thread: the thread that owns the window destroys it. */
+void dxgi_destroy_composition_window(HWND window)
+{
+    PostMessageW(window, WM_CLOSE, 0, 0);
 }
 
 BOOL d3d11_swapchain_set_composition(IDXGISwapChain1 *iface, HWND window, BOOL gdi_flag)

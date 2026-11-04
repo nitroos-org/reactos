@@ -58,9 +58,12 @@ static CRITICAL_SECTION dcomp_cs = { &dcomp_cs_debug, -1, 0, 0, 0, 0 };
 /* every live target of the process, to refuse a second one on the same window and layer */
 static struct list dcomp_targets = LIST_INIT(dcomp_targets);
 
+struct dcomp_target;
+
 struct dcomp_binding
 {
     IWineDXGICompositionSwapChain *swapchain;
+    struct dcomp_target *target;
     HWND window;
     POINT offset;
 };
@@ -132,6 +135,9 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_QueryInterface(IDCompositionVisual
 {
     TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
 
+    if (!out)
+        return E_POINTER;
+
     if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IDCompositionVisual))
     {
         IDCompositionVisual_AddRef(iface);
@@ -198,6 +204,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetX(IDCompositionVisual *if
 
     TRACE("iface %p, offset %.8e.\n", iface, offset);
 
+    if (!isfinite(offset))
+        return E_INVALIDARG;
     EnterCriticalSection(&dcomp_cs);
     visual->offset_x = offset;
     LeaveCriticalSection(&dcomp_cs);
@@ -216,6 +224,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetY(IDCompositionVisual *if
 
     TRACE("iface %p, offset %.8e.\n", iface, offset);
 
+    if (!isfinite(offset))
+        return E_INVALIDARG;
     EnterCriticalSection(&dcomp_cs);
     visual->offset_y = offset;
     LeaveCriticalSection(&dcomp_cs);
@@ -429,6 +439,9 @@ static HRESULT STDMETHODCALLTYPE dcomp_target_QueryInterface(IDCompositionTarget
 {
     TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
 
+    if (!out)
+        return E_POINTER;
+
     if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IDCompositionTarget))
     {
         IDCompositionTarget_AddRef(iface);
@@ -439,6 +452,29 @@ static HRESULT STDMETHODCALLTYPE dcomp_target_QueryInterface(IDCompositionTarget
     WARN("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
     *out = NULL;
     return E_NOINTERFACE;
+}
+
+/* A released target no longer shows its tree, as on Windows: the swap chains committed through it stop
+ * painting into its window. The caller holds dcomp_cs. */
+static void dcomp_device_unbind_target(struct dcomp_device *device, struct dcomp_target *target)
+{
+    SIZE_T i, kept = 0;
+
+    for (i = 0; i < device->bound_count; ++i)
+    {
+        struct dcomp_binding *binding = &device->bound[i];
+
+        if (binding->target == target)
+        {
+            IWineDXGICompositionSwapChain_set_composition_target(binding->swapchain, NULL, NULL);
+            IWineDXGICompositionSwapChain_Release(binding->swapchain);
+        }
+        else
+        {
+            device->bound[kept++] = *binding;
+        }
+    }
+    device->bound_count = kept;
 }
 
 static ULONG STDMETHODCALLTYPE dcomp_target_AddRef(IDCompositionTarget *iface)
@@ -462,6 +498,7 @@ static ULONG STDMETHODCALLTYPE dcomp_target_Release(IDCompositionTarget *iface)
     {
         EnterCriticalSection(&dcomp_cs);
         list_remove(&target->entry);
+        dcomp_device_unbind_target(target->device, target);
         if ((root = target->root))
             root->is_root = FALSE;
         LeaveCriticalSection(&dcomp_cs);
@@ -522,6 +559,9 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_QueryInterface(IDCompositionDevice
 {
     TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
 
+    if (!out)
+        return E_POINTER;
+
     if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IDCompositionDevice))
     {
         IDCompositionDevice_AddRef(iface);
@@ -579,7 +619,18 @@ struct dcomp_bindings
     HRESULT hr;
 };
 
-static void dcomp_collect(struct dcomp_bindings *b, struct dcomp_visual *visual, HWND window, float x, float y)
+/* offsets are sums of finite floats: keep them where a conversion to LONG is defined */
+static LONG dcomp_round_offset(float v)
+{
+    if (!(v > -1.0e9f))
+        return -1000000000;
+    if (v > 1.0e9f)
+        return 1000000000;
+    return (LONG)floorf(v + 0.5f);
+}
+
+static void dcomp_collect(struct dcomp_bindings *b, struct dcomp_visual *visual, struct dcomp_target *target,
+        float x, float y)
 {
     IWineDXGICompositionSwapChain *swapchain;
     SIZE_T i;
@@ -604,9 +655,10 @@ static void dcomp_collect(struct dcomp_bindings *b, struct dcomp_visual *visual,
             b->size = size;
         }
         b->items[b->count].swapchain = swapchain;
-        b->items[b->count].window = window;
-        b->items[b->count].offset.x = (LONG)floorf(x + 0.5f);
-        b->items[b->count].offset.y = (LONG)floorf(y + 0.5f);
+        b->items[b->count].target = target;
+        b->items[b->count].window = target->window;
+        b->items[b->count].offset.x = dcomp_round_offset(x);
+        b->items[b->count].offset.y = dcomp_round_offset(y);
         ++b->count;
     }
     else if (visual->content)
@@ -615,7 +667,7 @@ static void dcomp_collect(struct dcomp_bindings *b, struct dcomp_visual *visual,
     }
 
     for (i = 0; i < visual->child_count; ++i)
-        dcomp_collect(b, visual->children[i], window, x, y);
+        dcomp_collect(b, visual->children[i], target, x, y);
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_device_Commit(IDCompositionDevice *iface)
@@ -632,7 +684,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_Commit(IDCompositionDevice *iface)
     LIST_FOR_EACH_ENTRY(target, &dcomp_targets, struct dcomp_target, entry)
     {
         if (target->device == device && target->root)
-            dcomp_collect(&b, target->root, target->window, 0.0f, 0.0f);
+            dcomp_collect(&b, target->root, target, 0.0f, 0.0f);
     }
     if (FAILED(b.hr))
     {
@@ -710,6 +762,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTargetForHwnd(IDCompositionD
     target->refcount = 1;
     target->window = window;
     target->topmost = !!topmost;
+    target->device = device;
 
     EnterCriticalSection(&dcomp_cs);
     LIST_FOR_EACH_ENTRY(other, &dcomp_targets, struct dcomp_target, entry)
@@ -721,11 +774,10 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTargetForHwnd(IDCompositionD
             return DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED;
         }
     }
+    IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
     list_add_tail(&dcomp_targets, &target->entry);
     LeaveCriticalSection(&dcomp_cs);
 
-    target->device = device;
-    IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
     *out = &target->IDCompositionTarget_iface;
     return S_OK;
 }
@@ -757,6 +809,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSurface(IDCompositionDevice 
 {
     FIXME("iface %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p stub!\n",
             iface, width, height, format, alpha_mode, surface);
+    if (surface)
+        *surface = NULL;
     return E_NOTIMPL;
 }
 
@@ -765,6 +819,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateVirtualSurface(IDComposition
 {
     FIXME("iface %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p stub!\n",
             iface, width, height, format, alpha_mode, surface);
+    if (surface)
+        *surface = NULL;
     return E_NOTIMPL;
 }
 
@@ -772,6 +828,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSurfaceFromHandle(IDComposit
         IUnknown **surface)
 {
     FIXME("iface %p, handle %p, surface %p stub!\n", iface, handle, surface);
+    if (surface)
+        *surface = NULL;
     return E_NOTIMPL;
 }
 
@@ -779,6 +837,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSurfaceFromHwnd(IDCompositio
         IUnknown **surface)
 {
     FIXME("iface %p, window %p, surface %p stub!\n", iface, window, surface);
+    if (surface)
+        *surface = NULL;
     return E_NOTIMPL;
 }
 
@@ -786,6 +846,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSurfaceFromHwnd(IDCompositio
 static HRESULT STDMETHODCALLTYPE dcomp_device_##name(IDCompositionDevice *iface, IUnknown **object) \
 { \
     FIXME("iface %p, object %p stub!\n", iface, object); \
+    if (object) \
+        *object = NULL; \
     return E_NOTIMPL; \
 }
 
@@ -806,6 +868,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTransformGroup(IDComposition
         UINT count, IUnknown **group)
 {
     FIXME("iface %p, transforms %p, count %u, group %p stub!\n", iface, transforms, count, group);
+    if (group)
+        *group = NULL;
     return E_NOTIMPL;
 }
 
@@ -813,6 +877,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTransform3DGroup(IDCompositi
         UINT count, IUnknown **group)
 {
     FIXME("iface %p, transforms %p, count %u, group %p stub!\n", iface, transforms, count, group);
+    if (group)
+        *group = NULL;
     return E_NOTIMPL;
 }
 
