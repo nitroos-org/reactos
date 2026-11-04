@@ -53,6 +53,7 @@ list(APPEND SOURCE
     HookChainUnhookUaf.c
     HookFamilies.c
     HungWindow.c
+    WmCancelModeLastError.c
     InitializeLpkHooks.c
     IsDialogMessage.c
     IsServerSideWindow.c

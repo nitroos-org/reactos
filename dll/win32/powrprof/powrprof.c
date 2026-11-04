@@ -1469,3 +1469,54 @@ DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     }
     return TRUE;
 }
+
+/* Effective power mode notifications (Windows 10 1809+). The mode never changes here, so a registration
+   is only a handle and the callback is never called. */
+#define EFFECTIVE_POWER_MODE_V1 1
+#define EFFECTIVE_POWER_MODE_V2 2
+#define POWRPROF_E_INVALIDARG ((HRESULT)0x80070057)
+
+typedef VOID (CALLBACK *POWRPROF_EFFECTIVE_POWER_MODE_CALLBACK)(ULONG Mode, VOID *Context);
+
+typedef struct _EFFECTIVE_POWER_MODE_REGISTRATION
+{
+    ULONG Version;
+    POWRPROF_EFFECTIVE_POWER_MODE_CALLBACK Callback;
+    VOID *Context;
+} EFFECTIVE_POWER_MODE_REGISTRATION;
+
+HRESULT
+WINAPI
+PowerRegisterForEffectivePowerModeNotifications(
+    ULONG Version,
+    POWRPROF_EFFECTIVE_POWER_MODE_CALLBACK Callback,
+    VOID *Context,
+    VOID **RegistrationHandle)
+{
+    EFFECTIVE_POWER_MODE_REGISTRATION *Registration;
+
+    if (Version != EFFECTIVE_POWER_MODE_V1 && Version != EFFECTIVE_POWER_MODE_V2)
+        return POWRPROF_E_INVALIDARG;
+    if (!Callback || !RegistrationHandle)
+        return POWRPROF_E_INVALIDARG;
+
+    Registration = HeapAlloc(GetProcessHeap(), 0, sizeof(*Registration));
+    if (!Registration)
+        return HRESULT_FROM_WIN32(ERROR_OUTOFMEMORY);
+    Registration->Version = Version;
+    Registration->Callback = Callback;
+    Registration->Context = Context;
+    *RegistrationHandle = Registration;
+    return S_OK;
+}
+
+HRESULT
+WINAPI
+PowerUnregisterFromEffectivePowerModeNotifications(
+    VOID *RegistrationHandle)
+{
+    if (!RegistrationHandle)
+        return POWRPROF_E_INVALIDARG;
+    HeapFree(GetProcessHeap(), 0, RegistrationHandle);
+    return S_OK;
+}

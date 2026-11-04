@@ -52,6 +52,7 @@ extern void func_Handle32(void);
 extern void func_HookChainUnhookUaf(void);
 extern void func_HookFamilies(void);
 extern void func_HungWindow(void);
+extern void func_WmCancelModeLastError(void);
 extern void func_InitializeLpkHooks(void);
 extern void func_IsDialogMessage(void);
 extern void func_IsServerSideWindow(void);
@@ -184,6 +185,7 @@ const struct test winetest_testlist[] =
     { "HookChainUnhookUaf", func_HookChainUnhookUaf },
     { "HookFamilies", func_HookFamilies },
     { "HungWindow", func_HungWindow },
+    { "WmCancelModeLastError", func_WmCancelModeLastError },
     { "InitializeLpkHooks", func_InitializeLpkHooks },
     { "IsDialogMessage", func_IsDialogMessage },
     { "IsServerSideWindow", func_IsServerSideWindow },

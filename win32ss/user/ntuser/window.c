@@ -4085,7 +4085,11 @@ co_IntSetWindowLongPtr(HWND hWnd, DWORD Index, LONG_PTR NewValue, BOOL Ansi, ULO
             {
                if ((NewValue & (WS_CHILD | WS_POPUP)) == WS_CHILD)
                {
+                  /* IDMenu is 0 for a window without a menu: the lookup would set ERROR_INVALID_MENU_HANDLE
+                     and SetWindowLong(GWL_STYLE, WS_CHILD..) must not change the last error */
+                  ULONG Error = EngGetLastError();
                   PMENU pMenu = UserGetMenuObject(UlongToHandle(Window->IDMenu));
+                  EngSetLastError(Error);
                   Window->state &= ~WNDS_HASMENU;
                   if (pMenu)
                   {

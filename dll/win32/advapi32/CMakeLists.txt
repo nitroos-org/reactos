@@ -22,6 +22,7 @@ list(APPEND SOURCE
     misc/hwprofiles.c
     misc/logon.c
     misc/msi.c
+    misc/perf.c
     misc/shutdown.c
     misc/sysfunc.c
     misc/unicode.c

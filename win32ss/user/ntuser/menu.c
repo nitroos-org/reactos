@@ -2737,7 +2737,11 @@ PWND MENU_IsMenuActive(VOID)
 void MENU_EndMenu( PWND pwnd )
 {
     PMENU menu = NULL;
+    /* No menu may be open: the lookup of a NULL or stale handle sets ERROR_INVALID_MENU_HANDLE, and
+       DefWindowProc(WM_CANCELMODE) (so EnableWindow(.., FALSE)) must not change the last error */
+    ULONG Error = EngGetLastError();
     menu = UserGetMenuObject(top_popup_hmenu);
+    EngSetLastError(Error);
     if ( menu && ( UserHMGetHandle(pwnd) == menu->hWnd || pwnd == menu->spwndNotify ) )
     {
        if (fInsideMenuLoop && top_popup)
