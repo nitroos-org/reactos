@@ -28,6 +28,21 @@ BOOLEAN UserPdeFault = FALSE;
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
+/*
+ * Number of pages a user-mode stack guard region covers. On Windows x64 a
+ * stack is created with three guard pages below its committed part, and a hit
+ * on one of them commits that page and re-arms the three pages below it, so
+ * code that probes its frame in 8 KB steps (dav1d, Firefox) does not skip the
+ * guard. Windows x86 is not measured and keeps one page, and so does the
+ * stack of a WoW64 guest thread, whose exception and callback code in wow64.dll
+ * and wow64win.dll counts on a single guard page.
+ */
+#ifdef _M_AMD64
+#define MI_USER_STACK_GUARD_PAGES 3
+#else
+#define MI_USER_STACK_GUARD_PAGES 1
+#endif
+
 static
 NTSTATUS
 NTAPI
@@ -38,6 +53,9 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     PTEB Teb = CurrentThread->Tcb.Teb;
     PVOID StackBase, DeallocationStack, NextStackAddress;
     SIZE_T GuaranteedSize, StackSize, RegionSize;
+    PVOID GuardAddress, LowestGuard;
+    ULONG GuardCount, GuardPages;
+    ULONG_PTR CurrentLimit;
     NTSTATUS Status;
 #if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
     PTEB32 GuestTeb = NULL;
@@ -88,6 +106,26 @@ MiCheckForUserStackOverflow(IN PVOID Address,
         DPRINT1("Faulting address outside of stack bounds. Address=%p, StackBase=%p, DeallocationStack=%p\n",
                 Address, StackBase, DeallocationStack);
         return STATUS_GUARD_PAGE_VIOLATION;
+    }
+
+    /*
+     * A guard page above the current stack limit is left over from a guard
+     * region that a deeper hit already passed (the region is several pages
+     * and the stack can be probed out of order). Hardware cleared its guard
+     * on this hit and the page is committed and in use: the stack has grown
+     * past it, so leave the limit and the pages below alone. The limit is
+     * user-writable and only compared here; a forged one can skip the
+     * growth below but never makes the code commit outside the stack.
+     */
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (GuestTeb) CurrentLimit = (ULONG_PTR)UlongToPtr(GuestTeb->NtTib.StackLimit);
+    else
+#endif
+        CurrentLimit = (ULONG_PTR)Teb->NtTib.StackLimit;
+    if ((ULONG_PTR)PAGE_ALIGN(Address) >= (ULONG_PTR)PAGE_ALIGN(CurrentLimit))
+    {
+        DPRINT("Guard page %p is above the stack limit %p\n", Address, (PVOID)CurrentLimit);
+        return STATUS_PAGE_FAULT_GUARD_PAGE;
     }
 
     /*
@@ -164,6 +202,35 @@ MiCheckForUserStackOverflow(IN PVOID Address,
                                      PAGE_READWRITE | PAGE_GUARD);
     if ((NT_SUCCESS(Status) || (Status == STATUS_ALREADY_COMMITTED)))
     {
+        /*
+         * Arm the rest of the guard region below the first guard page. The
+         * pages that must stay free for the guarantee and the last page are
+         * not guarded, so a stack overflow is still raised from the same
+         * place as with one guard page. The first page is armed already, and
+         * if arming the others fails the stack just has a shorter region.
+         */
+        LowestGuard = (PVOID)((ULONG_PTR)PAGE_ALIGN(DeallocationStack) +
+                              2 * PAGE_SIZE + GuaranteedSize);
+        GuardPages = MI_USER_STACK_GUARD_PAGES;
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+        /* The guest exception and callback code assumes the single guard page of a 32-bit stack */
+        if (GuestTeb) GuardPages = 1;
+#endif
+        for (GuardCount = 1; GuardCount < GuardPages; GuardCount++)
+        {
+            GuardAddress = (PVOID)((ULONG_PTR)NextStackAddress - GuardCount * PAGE_SIZE);
+            if (GuardAddress < LowestGuard) break;
+
+            RegionSize = PAGE_SIZE;
+            Status = ZwAllocateVirtualMemory(NtCurrentProcess(),
+                                             &GuardAddress,
+                                             0,
+                                             &RegionSize,
+                                             MEM_COMMIT,
+                                             PAGE_READWRITE | PAGE_GUARD);
+            if (!NT_SUCCESS(Status) && (Status != STATUS_ALREADY_COMMITTED)) break;
+        }
+
         /* We did it! */
         DPRINT("Guard page handled successfully for %p\n", Address);
         return STATUS_PAGE_FAULT_GUARD_PAGE;

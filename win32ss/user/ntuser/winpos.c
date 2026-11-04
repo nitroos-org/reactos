@@ -2045,6 +2045,9 @@ co_WinPosSetWindowPosEx(
    Window->rcClient = NewClientRect;
 
    /* erase parent when hiding or resizing child */
+   if (WinPos.flags & (SWP_HIDEWINDOW | SWP_SHOWWINDOW))
+      GlassBackdropDrop(UserHMGetHandle(Window));
+
    if (WinPos.flags & SWP_HIDEWINDOW)
    {
       /* Clear the update region */
