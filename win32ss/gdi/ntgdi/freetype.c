@@ -3644,6 +3644,18 @@ FontFamilyFillInfo(PFONTFAMILYINFO Info, LPCWSTR FaceName,
     Lf = &Info->EnumLogFontEx.elfLogFont;
     TM = &Otm->otmTextMetrics;
 
+    /*
+     * Enumeration describes the face itself. The FONTGDI is shared by every LOGFONT realized
+     * with it and FillTM reports the attributes of the last request (RequestWeight and friends),
+     * so after an app realized e.g. "Arial" at weight 600 or italic, the regular face enumerated
+     * as a bold or italic one. Windows enumerates the same entries however the fonts were used
+     * (GDI+ GdipCreateFontFamilyFromName then failed for "Arial": GraphPad Prism 11).
+     */
+    TM->tmWeight = (FontGDI->OriginalWeight != FW_DONTCARE) ? FontGDI->OriginalWeight : FW_NORMAL;
+    TM->tmItalic = FontGDI->OriginalItalic ? 0xFF : 0;
+    TM->tmUnderlined = 0;
+    TM->tmStruckOut = 0;
+
     Lf->lfHeight = TM->tmHeight;
     Lf->lfWidth = TM->tmAveCharWidth;
     Lf->lfWeight = TM->tmWeight;
