@@ -1,0 +1,7 @@
+; RAPPS-format entry without any checksum: the importer must not offer it (nothing unverified is installed)
+[Section]
+Name = No Hash App
+Version = 1.0
+Category = 5
+URLDownload = https://example.invalid/nohash.exe
+SizeBytes = 100

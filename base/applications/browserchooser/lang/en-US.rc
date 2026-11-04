@@ -17,7 +17,7 @@ END
 STRINGTABLE
 BEGIN
     IDS_APPTITLE        "Choose Your Web Browser"
-    IDS_INSTALLFIREFOX  "Install Mozilla Firefox (ESR)"
-    IDS_INSTALLING      "Installing Mozilla Firefox through the Application Manager. This may take a few minutes, please wait..."
-    IDS_INSTALLFAILED   "Mozilla Firefox could not be installed. Please check your network connection and try again later from the Application Manager."
+    IDS_INSTALLFIREFOX  "Install Mozilla Firefox"
+    IDS_INSTALLING      "Installing Mozilla Firefox through Optional Features. This may take a few minutes, please wait..."
+    IDS_INSTALLFAILED   "Mozilla Firefox could not be installed. Please check your network connection and try again later from Optional Features (Software tab)."
 END

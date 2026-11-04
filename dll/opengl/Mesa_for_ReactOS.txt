@@ -5,4 +5,4 @@ based on Mesa 2.6 and not intended to be synchronized with recent versions.
 See CORE-7499 for details.
 
 If you look for a modern software OpenGL implemenation, a Mesa package with
-the Gallium LLVMpipe driver is available on RAPPS.
+the Gallium LLVMpipe driver is available from Optional Features (featmgr).
