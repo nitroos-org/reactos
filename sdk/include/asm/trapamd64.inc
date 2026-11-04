@@ -145,9 +145,11 @@ ENDM
 /*
  * RestoreUserDebugRegisters - On the way back to user mode, with interrupts disabled and the
  * kernel GS: load the thread's breakpoints from the trap frame if it has any. The addresses were
- * limited to user space and DR7 to DR7_LEGAL when they were set (KeContextToTrapFrame); DR6 and
- * DR7 are loaded with 32-bit reads and DR7 masked again, so no frame content can make the
- * MOV DR fault (bits 63:32 of DR6/DR7) or arm general detect. Clobbers Scratch64/Scratch32.
+ * limited to user space and DR7 to DR7_LEGAL when they were set (KeContextToTrapFrame); DR7 is
+ * loaded with a 32-bit read and masked again, so no frame content can make the MOV DR fault
+ * (bits 63:32) or arm general detect. DR6 is not reloaded from the frame (that is the status of
+ * the last event, already reported): it gets DR6_NO_EVENT, or a stale B0-B3/BS would be ORed
+ * into the next event. Clobbers Scratch64/Scratch32.
  */
 MACRO(RestoreUserDebugRegisters, Frame, Scratch64, Scratch32)
     LOCAL NoUserDebugRegisters
@@ -167,7 +169,7 @@ MACRO(RestoreUserDebugRegisters, Frame, Scratch64, Scratch32)
     mov dr2, Scratch64
     mov Scratch64, [Frame + KTRAP_FRAME_Dr3]
     mov dr3, Scratch64
-    mov Scratch32, dword ptr [Frame + KTRAP_FRAME_Dr6]
+    mov Scratch32, DR6_NO_EVENT
     mov dr6, Scratch64
     mov Scratch32, dword ptr [Frame + KTRAP_FRAME_Dr7]
     and Scratch32, DR7_LEGAL
@@ -175,6 +177,10 @@ MACRO(RestoreUserDebugRegisters, Frame, Scratch64, Scratch32)
 
 NoUserDebugRegisters:
 ENDM
+
+/* DR6 with no event: the reserved bits as the processor reports them, no B0-B3/BS/BD status.
+ * (oracle, Windows 10 22H2: after a hit and a step, the next hit reads ffff0ff1) */
+DR6_NO_EVENT = HEX(0FFFF0FF0)
 
 TF_SEGMENTS             = HEX(08)
 TF_DEBUG                = HEX(10)
