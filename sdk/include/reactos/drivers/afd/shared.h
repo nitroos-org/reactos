@@ -247,6 +247,8 @@ typedef struct _AFD_TDI_HANDLE_DATA
 #define AFD_INFO_RECEIVE_CONTENT_SIZE   0x11L
 /* ReactOS: the NTSTATUS of a failed non-blocking connect, for SO_ERROR; 0 if none is recorded */
 #define AFD_INFO_CONNECT_ERROR          0x12L
+/* ReactOS: nonzero once AFD has aborted the connection (shutdown(SD_RECEIVE) with unread or arriving data) */
+#define AFD_INFO_CONNECTION_ABORTED     0x13L
 
 /* AFD Share Flags */
 #define AFD_SHARE_UNIQUE		0x0L
