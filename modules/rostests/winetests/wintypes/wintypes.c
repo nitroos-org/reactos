@@ -1,5 +1,5 @@
 /*
- * Unit test suite for RoResolveNamespace (wintypes.dll)
+ * Unit test suite for RoResolveNamespace and the API contract functions (wintypes.dll)
  *
  * Copyright 2026 the reactos-nitro authors
  *
@@ -43,6 +43,8 @@
 #endif
 
 static HRESULT (WINAPI *pRoResolveNamespace)(HSTRING, HSTRING, DWORD, const HSTRING *, DWORD *, HSTRING **, DWORD *, HSTRING **);
+static HRESULT (WINAPI *pRoIsApiContractPresent)(const WCHAR *, UINT16, UINT16, BOOL *);
+static HRESULT (WINAPI *pRoIsApiContractMajorVersionPresent)(const WCHAR *, UINT16, BOOL *);
 
 static HSTRING str(const WCHAR *s)
 {
@@ -308,11 +310,91 @@ static void test_long_directory(void)
     WindowsDeleteString(name);
 }
 
+/* RoIsApiContractPresent and RoIsApiContractMajorVersionPresent, measured on Windows 10 22H2 (x64 and
+ * x86 identical, 2026-11-04): the contracts of that release, matched case-insensitively and as a whole;
+ * every major version up to the highest one is present (also 0) for any minor version, the highest
+ * one for minor version 0 only; an unknown contract is not present with S_OK; an empty name is
+ * E_INVALIDARG. Microsoft Word calls RoIsApiContractMajorVersionPresent while it starts. */
+static void check_contract(const WCHAR *name, UINT16 major, UINT16 minor, BOOL expected)
+{
+    BOOL present = 0x55;
+    HRESULT hr = pRoIsApiContractPresent(name, major, minor, &present);
+
+    ok(hr == S_OK, "%s %u.%u: hr = %#lx\n", wine_dbgstr_w(name), major, minor, hr);
+    ok(present == expected, "%s %u.%u: present = %ld, expected %d\n", wine_dbgstr_w(name), major, minor, (long)present, expected);
+    if (!minor)
+    {
+        present = 0x55;
+        hr = pRoIsApiContractMajorVersionPresent(name, major, &present);
+        ok(hr == S_OK, "%s %u: hr = %#lx\n", wine_dbgstr_w(name), major, hr);
+        ok(present == expected, "%s %u: present = %ld, expected %d\n", wine_dbgstr_w(name), major, (long)present, expected);
+    }
+}
+
+static void test_api_contract(void)
+{
+    static const WCHAR universal[] = L"Windows.Foundation.UniversalApiContract";
+    static const WCHAR foundation[] = L"Windows.Foundation.FoundationContract";
+    static const WCHAR store[] = L"Windows.Services.Store.StoreContract";
+    BOOL present;
+    HRESULT hr;
+    UINT16 i;
+
+    if (!pRoIsApiContractPresent || !pRoIsApiContractMajorVersionPresent)
+    {
+        win_skip("RoIsApiContractPresent is not available\n");
+        return;
+    }
+
+    for (i = 0; i <= 10; i++)
+        check_contract(universal, i, 0, TRUE);
+    for (i = 11; i <= 16; i++)
+        check_contract(universal, i, 0, FALSE);
+    check_contract(universal, 65535, 65535, FALSE);
+    check_contract(universal, 10, 1, FALSE);
+
+    check_contract(foundation, 3, 0, TRUE);
+    check_contract(foundation, 3, 1, TRUE);
+    check_contract(foundation, 4, 0, TRUE);
+    check_contract(foundation, 4, 1, FALSE);
+    check_contract(foundation, 5, 0, FALSE);
+
+    check_contract(store, 4, 0, TRUE);
+    check_contract(store, 6, 0, FALSE);
+    check_contract(L"Windows.Graphics.Printing3D.Printing3DContract", 4, 0, TRUE);
+    check_contract(L"Windows.Gaming.XboxLive.StorageApiContract", 1, 0, TRUE);
+
+    /* case is ignored */
+    check_contract(L"windows.foundation.universalapicontract", 10, 0, TRUE);
+    check_contract(L"WINDOWS.FOUNDATION.FOUNDATIONCONTRACT", 4, 0, TRUE);
+
+    /* the whole name counts */
+    check_contract(L"Windows.Foundation.UniversalApiContract ", 1, 0, FALSE);
+    check_contract(L"Windows.Foundation.Nothing", 1, 0, FALSE);
+    check_contract(L"UniversalApiContract", 1, 0, FALSE);
+    check_contract(L"Windows.Foundation.Metadata.ApiContractAttribute", 0, 0, FALSE);
+    /* a phone contract is not part of Windows 10 for the desktop */
+    check_contract(L"Windows.Phone.PhoneContract", 0, 0, FALSE);
+    check_contract(L"Windows.Phone.PhoneContract", 1, 0, FALSE);
+
+    present = 0x55;
+    hr = pRoIsApiContractPresent(L"", 1, 0, &present);
+    ok(hr == E_INVALIDARG, "empty name: hr = %#lx\n", hr);
+    ok(present == FALSE, "empty name: present = %ld\n", (long)present);
+    present = 0x55;
+    hr = pRoIsApiContractMajorVersionPresent(L"", 1, &present);
+    ok(hr == E_INVALIDARG, "empty name: hr = %#lx\n", hr);
+    ok(present == FALSE, "empty name: present = %ld\n", (long)present);
+}
+
 START_TEST(wintypes)
 {
     HMODULE module = LoadLibraryW(L"wintypes.dll");
 
     pRoResolveNamespace = (void *)GetProcAddress(module, "RoResolveNamespace");
+    pRoIsApiContractPresent = (void *)GetProcAddress(module, "RoIsApiContractPresent");
+    pRoIsApiContractMajorVersionPresent = (void *)GetProcAddress(module, "RoIsApiContractMajorVersionPresent");
+    test_api_contract();
     if (!pRoResolveNamespace)
     {
         win_skip("RoResolveNamespace is not available\n");

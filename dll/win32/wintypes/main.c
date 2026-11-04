@@ -302,6 +302,133 @@ HRESULT WINAPI RoResolveNamespace(HSTRING name, HSTRING windowsMetaDataDir,
     return S_OK;
 }
 
+/* The API contracts of Windows 10 22H2 (build 19045, x64 and x86): the highest major version of
+ * every contract the WinMetadata files of that release define, measured by calling
+ * RoIsApiContractMajorVersionPresent for 1 to 40 on each. Every contract has minor version 0. */
+static const struct
+{
+    const WCHAR *name;
+    UINT16 major;
+} api_contracts[] =
+{
+    { L"Windows.AI.MachineLearning.MachineLearningContract", 3 },
+    { L"Windows.AI.MachineLearning.Preview.MachineLearningPreviewContract", 2 },
+    { L"Windows.ApplicationModel.Activation.ActivatedEventsContract", 1 },
+    { L"Windows.ApplicationModel.Activation.ActivationCameraSettingsContract", 1 },
+    { L"Windows.ApplicationModel.Activation.ContactActivatedEventsContract", 1 },
+    { L"Windows.ApplicationModel.Activation.WebUISearchActivatedEventsContract", 1 },
+    { L"Windows.ApplicationModel.Background.BackgroundAlarmApplicationContract", 1 },
+    { L"Windows.ApplicationModel.Calls.Background.CallsBackgroundContract", 2 },
+    { L"Windows.ApplicationModel.Calls.CallsPhoneContract", 5 },
+    { L"Windows.ApplicationModel.Calls.CallsVoipContract", 4 },
+    { L"Windows.ApplicationModel.Calls.LockScreenCallContract", 1 },
+    { L"Windows.ApplicationModel.CommunicationBlocking.CommunicationBlockingContract", 2 },
+    { L"Windows.ApplicationModel.FullTrustAppContract", 1 },
+    { L"Windows.ApplicationModel.Preview.InkWorkspace.PreviewInkWorkspaceContract", 1 },
+    { L"Windows.ApplicationModel.Preview.Notes.PreviewNotesContract", 2 },
+    { L"Windows.ApplicationModel.Resources.Management.ResourceIndexerContract", 2 },
+    { L"Windows.ApplicationModel.Search.Core.SearchCoreContract", 1 },
+    { L"Windows.ApplicationModel.Search.SearchContract", 1 },
+    { L"Windows.ApplicationModel.SocialInfo.SocialInfoContract", 2 },
+    { L"Windows.ApplicationModel.StartupTaskContract", 3 },
+    { L"Windows.ApplicationModel.Wallet.WalletContract", 1 },
+    { L"Windows.Devices.Custom.CustomDeviceContract", 1 },
+    { L"Windows.Devices.DevicesLowLevelContract", 3 },
+    { L"Windows.Devices.Portable.PortableDeviceContract", 1 },
+    { L"Windows.Devices.Printers.Extensions.ExtensionsContract", 2 },
+    { L"Windows.Devices.Printers.PrintersContract", 1 },
+    { L"Windows.Devices.Scanners.ScannerDeviceContract", 1 },
+    { L"Windows.Devices.SmartCards.SmartCardBackgroundTriggerContract", 3 },
+    { L"Windows.Devices.SmartCards.SmartCardEmulatorContract", 6 },
+    { L"Windows.Devices.Sms.LegacySmsApiContract", 1 },
+    { L"Windows.Foundation.FoundationContract", 4 },
+    { L"Windows.Foundation.UniversalApiContract", 10 },
+    { L"Windows.Gaming.Input.GamingInputPreviewContract", 1 },
+    { L"Windows.Gaming.Preview.GamesEnumerationContract", 2 },
+    { L"Windows.Gaming.UI.GameChatOverlayContract", 1 },
+    { L"Windows.Gaming.UI.GamingUIProviderContract", 1 },
+    { L"Windows.Gaming.XboxLive.StorageApiContract", 1 },
+    { L"Windows.Globalization.GlobalizationJapanesePhoneticAnalyzerContract", 1 },
+    { L"Windows.Graphics.Printing3D.Printing3DContract", 4 },
+    { L"Windows.Management.Deployment.Preview.DeploymentPreviewContract", 1 },
+    { L"Windows.Management.Workplace.WorkplaceSettingsContract", 1 },
+    { L"Windows.Media.AppBroadcasting.AppBroadcastingContract", 1 },
+    { L"Windows.Media.AppRecording.AppRecordingContract", 1 },
+    { L"Windows.Media.Capture.AppBroadcastContract", 2 },
+    { L"Windows.Media.Capture.AppCaptureContract", 4 },
+    { L"Windows.Media.Capture.AppCaptureMetadataContract", 1 },
+    { L"Windows.Media.Capture.CameraCaptureUIContract", 1 },
+    { L"Windows.Media.Capture.GameBarContract", 1 },
+    { L"Windows.Media.Devices.CallControlContract", 1 },
+    { L"Windows.Media.MediaControlContract", 1 },
+    { L"Windows.Media.Playlists.PlaylistsContract", 1 },
+    { L"Windows.Media.Protection.ProtectionRenewalContract", 1 },
+    { L"Windows.Networking.Connectivity.WwanContract", 2 },
+    { L"Windows.Networking.NetworkOperators.LegacyNetworkOperatorsContract", 1 },
+    { L"Windows.Networking.Sockets.ControlChannelTriggerContract", 3 },
+    { L"Windows.Networking.XboxLive.XboxLiveSecureSocketsContract", 1 },
+    { L"Windows.Perception.Automation.Core.PerceptionAutomationCoreContract", 1 },
+    { L"Windows.Security.EnterpriseData.EnterpriseDataContract", 5 },
+    { L"Windows.Security.ExchangeActiveSyncProvisioning.EasContract", 1 },
+    { L"Windows.Security.Isolation.IsolatedWindowsEnvironmentContract", 2 },
+    { L"Windows.Services.Maps.GuidanceContract", 3 },
+    { L"Windows.Services.Maps.LocalSearchContract", 4 },
+    { L"Windows.Services.Store.StoreContract", 4 },
+    { L"Windows.Services.TargetedContent.TargetedContentContract", 1 },
+    { L"Windows.Storage.Provider.CloudFilesContract", 4 },
+    { L"Windows.System.Profile.ProfileHardwareTokenContract", 1 },
+    { L"Windows.System.Profile.ProfileRetailInfoContract", 1 },
+    { L"Windows.System.Profile.ProfileSharedModeContract", 2 },
+    { L"Windows.System.Profile.SystemManufacturers.SystemManufacturersContract", 3 },
+    { L"Windows.System.SystemManagementContract", 7 },
+    { L"Windows.System.UserProfile.UserProfileContract", 2 },
+    { L"Windows.System.UserProfile.UserProfileLockScreenContract", 1 },
+    { L"Windows.UI.ApplicationSettings.ApplicationsSettingsContract", 1 },
+    { L"Windows.UI.Core.AnimationMetrics.AnimationMetricsContract", 1 },
+    { L"Windows.UI.Core.CoreWindowDialogsContract", 1 },
+    { L"Windows.UI.Shell.SecurityAppManagerContract", 1 },
+    { L"Windows.UI.ViewManagement.ViewManagementViewScalingContract", 1 },
+    { L"Windows.UI.Xaml.Core.Direct.XamlDirectContract", 2 },
+    { L"Windows.UI.Xaml.Hosting.HostingContract", 4 },
+    { L"Windows.Web.Http.Diagnostics.HttpDiagnosticsContract", 2 },
+};
+
+/*
+ * Behaviour measured on Windows 10 22H2 (read-only probe, x64 and x86 identical): the name is
+ * compared case-insensitively, as a whole (a trailing space or a bare type name does not match).
+ * A contract that is not known is not present, with S_OK. For a known contract every major
+ * version up to the highest one is present (also 0), whatever the minor version, and the
+ * highest major version is present for minor version 0 only. An empty name is E_INVALIDARG
+ * (*present = FALSE). Windows faults on a NULL name or result; we fail with E_INVALIDARG.
+ */
+HRESULT WINAPI RoIsApiContractPresent(const WCHAR *name, UINT16 major, UINT16 minor, BOOL *present)
+{
+    DWORD i;
+
+    TRACE("(%s, %u, %u, %p)\n", debugstr_w(name), major, minor, present);
+
+    if (!present)
+        return E_INVALIDARG;
+    *present = FALSE;
+    if (!name || !*name)
+        return E_INVALIDARG;
+
+    for (i = 0; i < ARRAYSIZE(api_contracts); i++)
+    {
+        if (_wcsicmp(name, api_contracts[i].name))
+            continue;
+        *present = major < api_contracts[i].major || (major == api_contracts[i].major && !minor);
+        break;
+    }
+    return S_OK;
+}
+
+HRESULT WINAPI RoIsApiContractMajorVersionPresent(const WCHAR *name, UINT16 major, BOOL *present)
+{
+    TRACE("(%s, %u, %p)\n", debugstr_w(name), major, present);
+    return RoIsApiContractPresent(name, major, 0, present);
+}
+
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **factory)
 {
     FIXME("(%s, %p): no activatable classes\n", debugstr_hstring(classid), factory);
