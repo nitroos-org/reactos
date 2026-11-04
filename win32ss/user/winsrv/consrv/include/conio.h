@@ -430,11 +430,17 @@ NTSTATUS ConioResizeBuffer(PCONSOLE Console,
                            COORD Size);
 
 /* wcwidth.c */
+int mk_wcwidth(wchar_t ucs);
 int mk_wcwidth_cjk(wchar_t ucs);
 
 // NOTE: The check against 0x80 is to avoid calling the helper function
 // for characters that we already know are not full-width.
 #define IS_FULL_WIDTH(wch)  \
     (((USHORT)(wch) >= 0x0080) && (mk_wcwidth_cjk(wch) == 2))
+
+/* A wide character takes two cells (leading and trailing byte) in every code page, as on Windows;
+ * only the East Asian Ambiguous characters are narrow outside the CJK code pages. */
+#define CON_IS_FULL_WIDTH(Console, wch) \
+    (((USHORT)(wch) >= 0x0080) && (((Console)->IsCJK ? mk_wcwidth_cjk(wch) : mk_wcwidth(wch)) == 2))
 
 /* EOF */

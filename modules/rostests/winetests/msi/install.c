@@ -2323,7 +2323,26 @@ BOOL is_process_elevated(void)
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return FALSE;
     ret = GetTokenInformation(token, TokenElevationType, &type, sizeof(type), &size);
     CloseHandle(token);
-    return (ret && type == TokenElevationTypeFull);
+    if (ret && type == TokenElevationTypeFull) return TRUE;
+#ifdef __REACTOS__
+    /* No UAC split token (as on Windows with UAC off): an administrator token
+     * reports TokenElevationTypeDefault and is as capable as an elevated one. */
+    if (ret && type == TokenElevationTypeDefault)
+    {
+        SID_IDENTIFIER_AUTHORITY nt = {SECURITY_NT_AUTHORITY};
+        PSID admins;
+        BOOL member = FALSE;
+
+        if (AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+                                     0, 0, 0, 0, 0, 0, &admins))
+        {
+            if (!CheckTokenMembership(NULL, admins, &member)) member = FALSE;
+            FreeSid(admins);
+        }
+        return member;
+    }
+#endif
+    return FALSE;
 }
 
 static BOOL check_record(MSIHANDLE rec, UINT field, LPCSTR val)

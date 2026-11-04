@@ -1261,7 +1261,9 @@ BackgroundPageProc(HWND hwndDlg,
                             SetDesktopBackColor(hwndDlg, pData);
                         if (pData->desktopData.bSettingsChanged)
                             SetDesktopSettings(&pData->desktopData);
-                        SendMessage(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)_T(""));
+                        /* Like Windows: a window that stopped reading its messages must not hang the applet */
+                        SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)_T(""),
+                                           SMTO_ABORTIFHUNG, 5000, NULL);
                         return TRUE;
 
                     case LVN_ITEMCHANGED:

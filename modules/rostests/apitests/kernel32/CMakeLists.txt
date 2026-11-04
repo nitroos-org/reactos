@@ -245,6 +245,12 @@ set_source_files_properties(CopyFile2Identity.c PROPERTIES INCLUDE_DIRECTORIES "
 add_pch(kernel32_apitest precomp.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET kernel32_apitest)
 
+add_executable(win32klock_child win32klock_child.c)
+set_module_type(win32klock_child win32cui ENTRYPOINT mainCRTStartup)
+add_importlibs(win32klock_child kernel32)
+add_dependencies(kernel32_apitest win32klock_child)
+add_rostests_file(TARGET win32klock_child)
+
 add_executable(wow64_native wow64_native.c)
 set_module_type(wow64_native win32cui ENTRYPOINT mainCRTStartup)
 add_importlibs(wow64_native kernel32)

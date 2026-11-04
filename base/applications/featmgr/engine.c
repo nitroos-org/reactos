@@ -381,7 +381,21 @@ static BOOL LoadManifestEx(LPCWSTR path, FM_FEATURE *f, BOOL fast)
             f->Verified = _wtoi(tmp) != 0;
         }
         else
-            StringCchCopyW(f->Source, ARRAYSIZE(f->Source), f->Provider[0] ? f->Provider : L"payload");
+        {
+            if (FmNativeIsProvider(f->Provider))
+            {
+                /* "rapps" is the old spelling of the native provider (caches written before rapps.exe went away) */
+                WCHAR pk[8];
+                StringCchCopyW(f->Provider, ARRAYSIZE(f->Provider), L"native");
+                IniGet(&ini, L"Rapps", L"Pkg", L"", pk, ARRAYSIZE(pk));
+                IniGet(&ini, L"Rapps", L"RegName", L"", f->RegName, ARRAYSIZE(f->RegName));
+                if (!f->RegName[0]) IniGet(&ini, L"Rapps", L"UninstallName", L"", f->RegName, ARRAYSIZE(f->RegName));
+                /* entries from the RAPPS catalog say "rapps", the hand-written ones (PowerShell 7, Claude Desktop) "native" */
+                StringCchCopyW(f->Source, ARRAYSIZE(f->Source), pk[0] && !_wcsnicmp(f->Id, L"rapps-", 6) ? L"rapps" : L"native");
+            }
+            else
+                StringCchCopyW(f->Source, ARRAYSIZE(f->Source), f->Provider[0] ? f->Provider : L"payload");
+        }
     }
     IniClose(&ini);
     return TRUE;
@@ -453,29 +467,7 @@ static BOOL InstallerPath(const FM_FEATURE *f, LPWSTR out, DWORD cch)
     return SUCCEEDED(StringCchCatW(out, cch, L"\\")) && SUCCEEDED(StringCchCatW(out, cch, exp));
 }
 
-static BOOL RappsExePath(LPWSTR out, DWORD cch)
-{
-    WCHAR sys[MAX_PATH];
-    if (!GetSystemDirectoryW(sys, MAX_PATH)) return FALSE;
-    return SUCCEEDED(StringCchPrintfW(out, cch, L"%s\\rapps.exe", sys));
-}
-
-/* [Rapps] Entry= : a RAPPS-format entry that ships in the image (absolute, %SystemRoot% etc.
- * expanded; or relative to the feature's payload dir) for packages that are not in the online
- * RAPPS database. */
-static BOOL RappsEntryPath(const FM_FEATURE *f, LPWSTR out, DWORD cch)
-{
-    WCHAR raw[MAX_PATH], exp[MAX_PATH];
-    GetPrivateProfileStringW(L"Rapps", L"Entry", L"", raw, MAX_PATH, f->ManifestPath);
-    if (!raw[0]) return FALSE;
-    ExpandCmd(f->Id, raw, exp, MAX_PATH);
-    if (IsAbsPath(exp))
-        return SUCCEEDED(StringCchCopyW(out, cch, exp));
-    FmGetPayloadDir(f->Id, out, cch);
-    return SUCCEEDED(StringCchCatW(out, cch, L"\\")) && SUCCEEDED(StringCchCatW(out, cch, exp));
-}
-
-/* Can the install be attempted? rapps provider: rapps.exe present (the download
+/* Can the install be attempted? native provider: the entry has an address and a checksum (the download
  * happens at install time, so there is no staged payload to check). command
  * provider: the installer file is staged. */
 static BOOL SoftwareAvailable(const FM_FEATURE *f)
@@ -490,24 +482,133 @@ static BOOL SoftwareAvailable(const FM_FEATURE *f)
         FM_COMPONENT c;                                 /* downloaded by featmgr itself: needs only its list entry */
         return FmCompLoad(f->Id, &c) && c.ArchOk && c.Install[0];
     }
-    if (_wcsicmp(f->Provider, L"rapps"))
-        return FALSE;                                   /* unknown provider */
-    if (!RappsExePath(p, MAX_PATH) || GetFileAttributesW(p) == INVALID_FILE_ATTRIBUTES)
+    if (FmNativeIsProvider(f->Provider))
+        return FmNativeAvailable(f);                    /* a download address and a checksum, for this architecture */
+    return FALSE;                                       /* unknown provider */
+}
+
+/* ---- hosted payloads ([Download]) ------------------------------------------
+ * An OS-tier pack whose files are not in the image lists them in [Download]:
+ *     File<N>=<name>|<sha256>|<size in bytes>
+ * <name> is the [Payload] source name of the file. At enable time each file that is not already staged (and
+ * verified) in the feature's payload dir is fetched over https from
+ *     <base>/<[Source] Path>/<name>
+ * with the component downloader (progress, retries, cancel), refused unless its SHA-256 matches, and moved into the
+ * payload dir; [Payload]/[Registry] are then applied as for any staged pack, and the downloaded copies are deleted.
+ * <base> = HKLM\SOFTWARE\ReactOS\Nitro\Featmgr PayloadBaseUrl (REG_SZ) when set, else [Source] BaseUrl of the
+ * manifest. A base that still holds the placeholder (REPLACE-WITH-...) means the hosting is not published yet: the
+ * pack is listed as not available yet, and enable is refused before anything is changed. */
+static const WCHAR SETTINGS_KEY[] = L"SOFTWARE\\ReactOS\\Nitro\\Featmgr";
+#define URL_PLACEHOLDER L"REPLACE-WITH-"
+
+static BOOL HostedPack(const FM_FEATURE *f)
+{
+    WCHAR *sect;
+    BOOL any;
+    if (f->Tier != FM_TIER_OS) return FALSE;
+    sect = ReadSection(f->ManifestPath, L"Download");
+    if (!sect) return FALSE;
+    any = sect[0] != L'\0';                       /* an absent section reads as an empty buffer */
+    HeapFree(GetProcessHeap(), 0, sect);
+    return any;
+}
+
+/* The pinned SHA-256 of a [Download] file (FALSE: the file has no [Download] line). */
+static BOOL DownloadShaFor(LPCWSTR manifest, LPCWSTR name, WCHAR sha[72])
+{
+    WCHAR *sect, *line;
+    size_t l = wcslen(name);
+    BOOL found = FALSE;
+    if (!(sect = ReadSection(manifest, L"Download"))) return FALSE;
+    for (line = sect; *line && !found; line += wcslen(line) + 1)
+    {
+        WCHAR *eq = wcschr(line, L'='), *bar;
+        if (!eq || line[0] == L';') continue;
+        if (_wcsnicmp(eq + 1, name, l) || eq[1 + l] != L'|') continue;
+        bar = wcschr(eq + 1 + l + 1, L'|');
+        if (bar) *bar = L'\0';
+        StringCchCopyW(sha, 72, eq + 1 + l + 1);
+        found = TRUE;
+    }
+    HeapFree(GetProcessHeap(), 0, sect);
+    return found;
+}
+
+/* The base address of hosted payloads (no trailing '/'): the registry setting, else the manifest's default. */
+static BOOL HostedBaseUrl(LPCWSTR manifest, LPWSTR out, DWORD cch)
+{
+    HKEY k;
+    DWORD type, cb;
+    size_t n;
+
+    out[0] = L'\0';
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, SETTINGS_KEY, 0, KEY_QUERY_VALUE, &k) == ERROR_SUCCESS)
+    {
+        cb = (cch - 1) * sizeof(WCHAR);
+        if (RegQueryValueExW(k, L"PayloadBaseUrl", NULL, &type, (LPBYTE)out, &cb) != ERROR_SUCCESS
+            || (type != REG_SZ && type != REG_EXPAND_SZ))
+            cb = 0;
+        out[min(cb / sizeof(WCHAR), cch - 1)] = L'\0';
+        RegCloseKey(k);
+    }
+    StrTrimW(out, L" \t");
+    if (!out[0])
+        GetPrivateProfileStringW(L"Source", L"BaseUrl", L"", out, cch, manifest);
+    StrTrimW(out, L" \t");
+    n = wcslen(out);
+    while (n && out[n - 1] == L'/') out[--n] = L'\0';
+    return out[0] != L'\0';
+}
+
+/* Total size of a hosted pack's [Download] files (0: none / not a hosted pack). */
+ULONGLONG FmHostedDownloadSize(LPCWSTR manifest)
+{
+    WCHAR *sect, *line, *last;
+    ULONGLONG n = 0;
+    if (!(sect = ReadSection(manifest, L"Download"))) return 0;
+    for (line = sect; *line; line += wcslen(line) + 1)
+        if (line[0] != L';' && (last = wcsrchr(line, L'|')) != NULL) n += _wcstoui64(last + 1, NULL, 10);
+    HeapFree(GetProcessHeap(), 0, sect);
+    return n;
+}
+
+/* Can the hosted files be downloaded? FALSE with the reason (for the UI) when not. */
+static BOOL HostedUsable(LPCWSTR manifest, LPWSTR why, DWORD cch)
+{
+    WCHAR base[512];
+    if (!HostedBaseUrl(manifest, base, ARRAYSIZE(base)) || StrStrIW(base, URL_PLACEHOLDER))
+    {
+        StringCchCopyW(why, cch, L"Not available yet: the download location of this pack has not been published yet.");
         return FALSE;
-    if (RappsEntryPath(f, p, MAX_PATH))                 /* shipped RAPPS entry must be present */
-        return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+    }
+    if (_wcsnicmp(base, L"https://", 8))
+    {
+        StringCchPrintfW(why, cch, L"Not available: the download address of this pack (%.200s) is not an https address; "
+                                   L"featmgr only downloads over https.", base);
+        return FALSE;
+    }
     return TRUE;
 }
 
+/* [Source] Arch= (x86, amd64): FALSE with the reason when this build is not listed. */
+static BOOL ManifestArchOk(LPCWSTR manifest, LPWSTR why, DWORD cch)
+{
+    WCHAR arch[64];
+    GetPrivateProfileStringW(L"Source", L"Arch", L"", arch, ARRAYSIZE(arch), manifest);
+    if (FmArchListed(arch)) return TRUE;
+    if (!_wcsicmp(arch, L"amd64"))
+        StringCchCopyW(why, cch, L"Only for 64-bit (amd64) NitroOS: not available on this 32-bit (x86) system.");
+    else
+        StringCchPrintfW(why, cch, L"Not available on this architecture (it is for %s only).", arch);
+    return FALSE;
+}
+
 /* Does every declared [Payload] source file exist on disk? */
-static BOOL PayloadPresent(const FM_FEATURE *f)
+static BOOL StagedPayloadPresent(const FM_FEATURE *f)
 {
     WCHAR payloadDir[MAX_PATH], src[MAX_PATH];
     WCHAR *sect, *p, *sep;
     BOOL ok = TRUE;
-
-    if (f->Tier == FM_TIER_SOFTWARE && f->Provider[0])
-        return SoftwareAvailable(f);
 
     sect = ReadSection(f->ManifestPath, L"Payload");
     if (!sect) return TRUE; /* no payload section => registry-only, always available */
@@ -529,6 +630,46 @@ static BOOL PayloadPresent(const FM_FEATURE *f)
     HeapFree(GetProcessHeap(), 0, sect);
     return ok;
 }
+
+/* Can the feature be turned on: software tier = its provider works; OS tier = this architecture is listed and the
+ * payload is staged, or it is a hosted pack whose download location is published. Sets f->Hosted / f->Unavailable. */
+static BOOL PayloadPresent(FM_FEATURE *f)
+{
+    f->Hosted = FALSE;
+    f->Unavailable[0] = L'\0';
+    if (f->Tier == FM_TIER_SOFTWARE && f->Provider[0])
+        return SoftwareAvailable(f);
+    if (!ManifestArchOk(f->ManifestPath, f->Unavailable, ARRAYSIZE(f->Unavailable)))
+        return FALSE;
+    if (StagedPayloadPresent(f))
+        return TRUE;
+    if (!HostedPack(f))
+        return FALSE;
+    f->Hosted = TRUE;
+    return HostedUsable(f->ManifestPath, f->Unavailable, ARRAYSIZE(f->Unavailable));
+}
+
+/* [Feature] BuiltInFile=<path>: the image itself carries what this pack installs (setup put it in place, e.g. an
+ * image built with the llvmpipe/lavapipe GPU stack in system32). With no featmgr record for the feature and that file
+ * present, the feature is shown Enabled and cannot be turned off here: there is no in-box copy to put back. */
+static void ResolveBuiltIn(FM_FEATURE *f)
+{
+    WCHAR raw[MAX_PATH], path[MAX_PATH];
+    HKEY k;
+
+    f->BuiltIn = FALSE;
+    if (f->Tier != FM_TIER_OS) return;
+    GetPrivateProfileStringW(L"Feature", L"BuiltInFile", L"", raw, ARRAYSIZE(raw), f->ManifestPath);
+    if (!raw[0]) return;
+    if (OpenStateKey(f->Id, FALSE, KEY_READ, &k) == ERROR_SUCCESS) { RegCloseKey(k); return; }   /* featmgr owns it */
+    if (!ExpandEnvironmentStringsW(raw, path, ARRAYSIZE(path)) || GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES)
+        return;
+    f->BuiltIn = TRUE;
+    f->State = FM_STATE_ENABLED;
+    f->Removable = FALSE;
+}
+
+static BOOL PendingRebootActive(HKEY state);
 
 /* InstallDate / PendingReboot from the persisted record. */
 static void ReadStateExtras(FM_FEATURE *f)
@@ -560,6 +701,12 @@ static void ReadStateExtras(FM_FEATURE *f)
         if (!_wcsicmp(v, L"Yes")) f->PendingReboot = TRUE;
     }
     RegCloseKey(k);
+    if (f->PendingReboot && OpenStateKey(f->Id, FALSE, KEY_READ | KEY_WRITE, &k) == ERROR_SUCCESS)
+    {
+        /* the reboot may have happened: the record is stale once the pending files / services are gone */
+        f->PendingReboot = PendingRebootActive(k);
+        RegCloseKey(k);
+    }
 }
 
 /* ---- installed-state detection (software tier) ---------------------------- */
@@ -596,9 +743,12 @@ static void ResolveState(FM_FEATURE *f)
         if (!c.DetectReg[0] && !c.DetectFile[0]) return;      /* no detect rule: the recorded state stands */
         present = FmCompDetect(&c);
     }
-    else if (f->Tier != FM_TIER_SOFTWARE || !DetectPathFor(f, p, MAX_PATH)) return;
-    else
+    else if (f->Tier != FM_TIER_SOFTWARE) return;
+    else if (DetectPathFor(f, p, MAX_PATH))
         present = GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+    else if (!_wcsicmp(f->Provider, L"native") && (f->RegName[0] || f->Name[0]))
+        present = FmNativeIsInstalled(f->RegName, f->Name);       /* the Uninstall keys, as RAPPS saw it; installs done by hand count */
+    else return;
     if (present && f->State != FM_STATE_ENABLED)
         f->State = FM_STATE_ENABLED;
     else if (!present && f->State == FM_STATE_ENABLED)
@@ -630,6 +780,7 @@ static void FinishEntry(FM_FEATURE *f, int scoopUsable)
 {
     f->State = RawState(f->Id);
     ResolveState(f);
+    ResolveBuiltIn(f);
     if (scoopUsable >= 0 && !_wcsicmp(f->Provider, L"scoop"))
         f->PayloadAvailable = scoopUsable != 0;
     else
@@ -696,6 +847,7 @@ int FmEnumFeatures(FM_FEATURE **outArr)
     int count = 0, cap = 0;
 
     *outArr = NULL;
+    FmNativeInvalidate();                 /* installed programs are read once per enumeration */
     if (!FmGetCatalogDir(catDir, MAX_PATH)) return 0;
     EnumDir(catDir, FALSE, &arr, &count, &cap);
     if (FmGetSoftwareCatalogDir(swDir, MAX_PATH))
@@ -749,6 +901,7 @@ BOOL FmFindFeature(LPCWSTR id, FM_FEATURE *out)
     int n, i;
     BOOL found = FALSE;
 
+    FmNativeInvalidate();
     if (FindByName(id, out)) return TRUE;
     n = FmEnumFeatures(&arr);
     for (i = 0; i < n; i++)
@@ -783,7 +936,7 @@ static HKEY HiveFromName(LPCWSTR s)
  * <dest>.fmbak first and recorded in "Backups" as "dest|bak", so disable can
  * put the original back instead of just deleting it. */
 static HRESULT ApplyPayloadFile(LPCWSTR payloadDir, LPCWSTR srcRel, LPCWSTR destRaw,
-                                HKEY state, FILE *log)
+                                LPCWSTR wantSha, HKEY state, FILE *log)
 {
     WCHAR src[MAX_PATH], dest[MAX_PATH], destDir[MAX_PATH], bak[MAX_PATH + 8], rec[2 * MAX_PATH + 16];
     StringCchPrintfW(src, MAX_PATH, L"%s\\%s", payloadDir, srcRel);
@@ -813,6 +966,17 @@ static HRESULT ApplyPayloadFile(LPCWSTR payloadDir, LPCWSTR srcRel, LPCWSTR dest
     {
         LOGF(log, L"  ERROR: CopyFile failed (%lu)\n", GetLastError());
         return HRESULT_FROM_WIN32(GetLastError());
+    }
+    if (wantSha)
+    {
+        /* hosted pack: check what actually landed at the destination against the pinned hash */
+        WCHAR got[72];
+        if (!FmFileSha256(dest, got) || _wcsicmp(got, wantSha))
+        {
+            LOGF(log, L"  ERROR: %s does not match its pinned SHA-256 after the copy (expected %s)\n", dest, wantSha);
+            SetLastMsg(L"An installed file of this pack does not match its pinned SHA-256 checksum; the change was undone.");
+            return HRESULT_FROM_WIN32(ERROR_CRC);
+        }
     }
     return S_OK;
 }
@@ -1680,7 +1844,7 @@ out:
  * install time so disable stays data-driven (same as the OS tier's undo lists). */
 static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR uninst, DWORD cch, FILE *log)
 {
-    WCHAR pkg[128], name[128], rapps[MAX_PATH], ucmd[1024], local[128], lpath[MAX_PATH], lentry[MAX_PATH];
+    WCHAR ucmd[1024];
 
     inst[0] = uninst[0] = L'\0';
     if (!_wcsicmp(f->Provider, L"command"))
@@ -1771,48 +1935,14 @@ static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR un
         if (c.Uninstall[0]) ExpandCmd(f->Id, c.Uninstall, uninst, cch);
         return S_OK;
     }
-    if (_wcsicmp(f->Provider, L"rapps"))
+    if (!FmNativeIsProvider(f->Provider))
     {
         LOGF(log, L"error: '%s' has unknown install provider '%s'\n", f->Id, f->Provider);
         return E_INVALIDARG;
     }
-    /* rapps provider: pkg name from [Rapps] Pkg */
-    GetPrivateProfileStringW(L"Rapps", L"Pkg", L"", pkg, ARRAYSIZE(pkg), f->ManifestPath);
-    if (!pkg[0] || wcspbrk(pkg, L"\"\r\n"))
-    {
-        LOGF(log, L"error: '%s' has no valid [Rapps] Pkg\n", f->Id);
-        return E_INVALIDARG;
-    }
-    if (!RappsExePath(rapps, MAX_PATH)) return E_FAIL;
-    StringCchPrintfW(inst, cch, L"\"%s\" /install /S \"%s\"", rapps, pkg);
-    /* [Rapps] LocalInstaller= : file name of an MSI in the feature's payload dir (the image puts it there). When it
-     * exists the install is local-first: msiexec on that file with the entry's MsiProperties, no download, so it
-     * works offline. When it is absent rapps downloads the package as usual. */
-    GetPrivateProfileStringW(L"Rapps", L"LocalInstaller", L"", local, ARRAYSIZE(local), f->ManifestPath);
-    if (local[0] && !wcspbrk(local, L"\\/\"\r\n") && RappsEntryPath(f, lentry, MAX_PATH))
-    {
-        WCHAR props[1024];
-        FmGetPayloadDir(f->Id, lpath, MAX_PATH);
-        if (SUCCEEDED(StringCchCatW(lpath, MAX_PATH, L"\\")) && SUCCEEDED(StringCchCatW(lpath, MAX_PATH, local))
-            && GetFileAttributesW(lpath) != INVALID_FILE_ATTRIBUTES)
-        {
-            GetPrivateProfileStringW(L"Section", L"MsiProperties", L"", props, ARRAYSIZE(props), lentry);
-            if (!wcspbrk(props, L"\"\r\n") &&
-                SUCCEEDED(StringCchPrintfW(inst, cch, L"msiexec.exe /i \"%s\" /qn /norestart %s", lpath, props)))
-            {
-                LOGF(log, L"  local installer %s\n", lpath);
-                /* the same package removes it: no registry lookup and no rapps, which would try to update its
-                 * online database first and stop at an error box on a machine without network */
-                if (SUCCEEDED(StringCchPrintfW(uninst, cch, L"msiexec.exe /x \"%s\" /qn /norestart", lpath)))
-                    return S_OK;
-            }
-            StringCchPrintfW(inst, cch, L"\"%s\" /install /S \"%s\"", rapps, pkg);
-        }
-    }
-    /* [Rapps] UninstallCmd= : the command line that removes the app, for an installer whose registered uninstall
-     * command is not silent (rapps /uninstall starts that one as it is, and the maintenance dialog would wait for
-     * a click). UninstallCmd.amd64 / UninstallCmd.x86 (the architecture of this build, as in the RAPPS entry's
-     * [Section.amd64]) wins over UninstallCmd. Environment variables are expanded, as for the command provider. */
+    /* native provider: the install line needs the downloaded file (SoftwareInstallRun builds it after the download);
+     * the uninstall line is the entry's own UninstallCmd, else a featmgr child that finds the program's Uninstall key. */
+    StringCchCopyW(inst, cch, L"(native)");
 #ifdef _WIN64
     GetPrivateProfileStringW(L"Rapps", L"UninstallCmd.amd64", L"", ucmd, ARRAYSIZE(ucmd), f->ManifestPath);
 #else
@@ -1825,20 +1955,18 @@ static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR un
         ExpandCmd(f->Id, ucmd, uninst, cch);
         return S_OK;
     }
-    /* [Rapps] UninstallName= : the installed app's display name. Uninstall then resolves it
-     * from the registry, so it keeps working when the entry is no longer in the RAPPS DB. */
-    GetPrivateProfileStringW(L"Rapps", L"UninstallName", L"", name, ARRAYSIZE(name), f->ManifestPath);
-    if (name[0] && !wcspbrk(name, L"\"\r\n"))
-        StringCchPrintfW(uninst, cch, L"\"%s\" /uninstall /S \"%s\"", rapps, name);
-    else
-        StringCchPrintfW(uninst, cch, L"\"%s\" /uninstall /S \"%s\"", rapps, pkg);
+    if (!FmNativeUninstallLine(f, uninst, cch))
+    {
+        LOGF(log, L"error: '%s' has an unusable name for the uninstall record\n", f->Id);
+        return E_INVALIDARG;
+    }
     return S_OK;
 }
 
-/* Free space the system volume needs before a [Rapps] install is attempted, as a multiple of the
+/* Free space the system volume needs before a native install is attempted, as a multiple of the
  * package size ([Source] SizeBytes): the download (1x) plus the Windows Installer cached copy (1x)
  * plus the unpacked files and rollback data. Measured with PowerShell 7 (105 MB MSI): an 8 GB volume
- * with ~0.5 GB free fails inside msiexec, ~1.4 GB free installs and uses ~0.5 GB. The rapps/msiexec
+ * with ~0.5 GB free fails inside msiexec, ~1.4 GB free installs and uses ~0.5 GB. The msiexec
  * failure itself is only a bare "exit code 1", so refuse early with a clear message instead. */
 #define SW_DISK_FACTOR 6
 
@@ -1883,9 +2011,7 @@ static HRESULT CheckSoftwareDiskSpace(const FM_FEATURE *f, FILE *log, BOOL faile
  * SizeBytes, when it has them) and what runs. */
 static void ReportInstallStep(const FM_FEATURE *f, LPCWSTR inst)
 {
-    WCHAR url[300], sz[40];
-    ULONGLONG n = 0;
-    PWSTR end;
+    WCHAR url[300];
 
     FmOpPhase(FM_PHASE_APPLY);
     if (!_wcsicmp(f->Provider, L"component"))
@@ -1894,20 +2020,13 @@ static void ReportInstallStep(const FM_FEATURE *f, LPCWSTR inst)
         return;
     }
     GetPrivateProfileStringW(L"Source", L"Artifact", L"", url, ARRAYSIZE(url), f->ManifestPath);
-    GetPrivateProfileStringW(L"Source", L"SizeBytes", L"", sz, ARRAYSIZE(sz), f->ManifestPath);
-    if (sz[0]) { n = _wcstoui64(sz, &end, 10); if (*end) n = 0; }
-    if (wcsstr(inst, L"msiexec"))
-        FmOpStep(L"Running the installer package for %s (no download needed)", f->Name);
-    else if (!_wcsicmp(f->Provider, L"rapps"))
+    if (FmNativeIsProvider(f->Provider))
     {
-        InterlockedExchange(&g_MayMsi, 1);            /* rapps runs the downloaded installer, usually an MSI */
-        if (url[0] && n)
-            FmOpStep(L"Downloading and installing %s (%I64u MB) from %s", f->Name, (n + (1u << 20) - 1) >> 20, url);
-        else if (url[0])
-            FmOpStep(L"Downloading and installing %s from %s", f->Name, url);
-        else
-            FmOpStep(L"Downloading and installing %s", f->Name);
+        InterlockedExchange(&g_MayMsi, 1);            /* the downloaded (or local) installer is usually an MSI */
+        FmOpStep(L"Installing %s", f->Name);
     }
+    else if (wcsstr(inst, L"msiexec"))
+        FmOpStep(L"Running the installer package for %s (no download needed)", f->Name);
     else if (!_wcsicmp(f->Provider, L"scoop"))
         FmOpStep(L"Installing %s with Scoop", f->Name);
     else if (url[0])
@@ -1952,7 +2071,9 @@ static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
     DWORD code;
     HRESULT hr;
     BOOL scoopFresh;
-    BOOL comp = !_wcsicmp(f->Provider, L"component");
+    BOOL nat = FmNativeIsProvider(f->Provider);
+    BOOL comp = !_wcsicmp(f->Provider, L"component") || nat;
+    BOOL keepFile = FALSE;                 /* the file is the image's own payload: never deleted */
     WCHAR *pathBefore = NULL;
 
     compFile[0] = L'\0';
@@ -1965,7 +2086,7 @@ static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
         FM_COMPONENT c;
         hr = CheckSoftwareDiskSpace(f, log, FALSE);
         if (FAILED(hr)) return hr;
-        if (!FmCompLoad(f->Id, &c)) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+        if (nat ? !FmNativePlan(f, &c) : !FmCompLoad(f->Id, &c)) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
         hr = FmCompDownload(&c, compFile, ARRAYSIZE(compFile), log);
         if (FAILED(hr))
         {
@@ -1974,19 +2095,19 @@ static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
             LOGF(log, L"error: %s\n", why);      /* the CLI shows the log; the window shows the last message */
             return hr;
         }
-        FmCompInstallLine(&c, compFile, inst, ARRAYSIZE(inst));
-    }
-    if (!_wcsicmp(f->Provider, L"rapps"))
-    {
-        WCHAR entry[MAX_PATH], pkg[128];
-        hr = CheckSoftwareDiskSpace(f, log, FALSE);
-        if (FAILED(hr)) return hr;
-        if (RappsEntryPath(f, entry, MAX_PATH))
+        keepFile = nat && c.LocalFile[0] && !_wcsicmp(compFile, c.LocalFile);
+        if (nat)
         {
-            GetPrivateProfileStringW(L"Rapps", L"Pkg", L"", pkg, ARRAYSIZE(pkg), f->ManifestPath);
-            if (!FmStageRappsEntry(entry, pkg, log))
-                return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+            hr = FmNativeInstallLine(f, compFile, inst, ARRAYSIZE(inst));
+            if (FAILED(hr))
+            {
+                LOGF(log, L"error: cannot build the installer command line for '%s'\n", f->Id);
+                SetLastMsg(L"The catalog entry of '%s' gives an installer command line that cannot be used.", f->Id);
+                return hr;
+            }
         }
+        else
+            FmCompInstallLine(&c, compFile, inst, ARRAYSIZE(inst));
     }
     LOGF(log, L"  software install via '%s' provider\n", f->Provider);
     if (!_wcsicmp(f->Provider, L"scoop"))
@@ -2017,7 +2138,7 @@ static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
     if (comp)
     {
         /* success and cancel leave no copy of the download behind; a failed installer keeps the verified file for the retry */
-        if (SUCCEEDED(hr) ? (code == 0 || code == 3010 || code == 1641) : hr == HRESULT_FROM_WIN32(ERROR_CANCELLED))
+        if (!keepFile && (SUCCEEDED(hr) ? (code == 0 || code == 3010 || code == 1641) : hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)))
             DeleteFileW(compFile);
         if (SUCCEEDED(hr) && (code == 3010 || code == 1641))
         {
@@ -2058,7 +2179,7 @@ static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
     {
         if (pathBefore) HeapFree(GetProcessHeap(), 0, pathBefore);
         LOGF(log, L"error: installer for '%s' failed (exit code %lu)\n", f->Id, code);
-        if ((!_wcsicmp(f->Provider, L"rapps") || comp) && FAILED(CheckSoftwareDiskSpace(f, log, TRUE)))
+        if (comp && FAILED(CheckSoftwareDiskSpace(f, log, TRUE)))
             return HRESULT_FROM_WIN32(ERROR_DISK_FULL);
         SetLastMsg(L"The %s installer for '%s' failed (exit code %lu).\n\n%s",
                    f->Provider, f->Id, code, g_Tail);
@@ -2090,7 +2211,8 @@ static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
         NotePathChange(f, pathBefore);
         HeapFree(GetProcessHeap(), 0, pathBefore);
     }
-    if ((comp || !_wcsicmp(f->Provider, L"rapps")) && ShellDefaultsId(f->Id))   /* PowerShell 7 / Firefox: desktop, Start menu, default browser (shelldefaults.c) */
+    FmNativeInvalidate();
+    if (comp && ShellDefaultsId(f->Id))   /* PowerShell 7 / Firefox: desktop, Start menu, default browser (shelldefaults.c) */
         FmShellDefaults(!_wcsicmp(f->Id, L"firefox") ? FM_SHELL_ADOPT_BROWSER : 0, log);
     return S_OK;
 }
@@ -2109,7 +2231,7 @@ static HRESULT SoftwareUninstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
         cmd[0] = L'\0';
         /* installed outside featmgr (scoop CLI; setup for an image-bundled rapps entry): no recorded line,
          * derive it from the manifest */
-        if (f && (!_wcsicmp(f->Provider, L"scoop") || !_wcsicmp(f->Provider, L"rapps") || !_wcsicmp(f->Provider, L"component")))
+        if (f && (!_wcsicmp(f->Provider, L"scoop") || FmNativeIsProvider(f->Provider) || !_wcsicmp(f->Provider, L"component")))
         {
             WCHAR inst[2048];
             hr = BuildSoftwareCommands(f, inst, cmd, ARRAYSIZE(cmd), log);
@@ -2135,7 +2257,8 @@ static HRESULT SoftwareUninstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
         SetLastMsg(L"The uninstaller for '%s' failed (exit code %lu).\n\n%s", f ? f->Id : L"?", code, g_Tail);
         return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
     }
-    if (f && (!_wcsicmp(f->Provider, L"component") || !_wcsicmp(f->Provider, L"rapps")) && ShellDefaultsId(f->Id))   /* back to Command Prompt / Internet Explorer when pwsh / Firefox is gone */
+    FmNativeInvalidate();
+    if (f && (!_wcsicmp(f->Provider, L"component") || FmNativeIsProvider(f->Provider)) && ShellDefaultsId(f->Id))   /* back to Command Prompt / the image's browser defaults when pwsh / Firefox is gone */
         FmShellDefaults(!_wcsicmp(f->Id, L"firefox") ? FM_SHELL_FORGET_BROWSER : 0, log);
     return S_OK;
 }
@@ -2234,7 +2357,13 @@ static int DetectInstalledNow(const FM_FEATURE *f)
         if (!FmCompLoad(f->Id, &c) || (!c.DetectReg[0] && !c.DetectFile[0])) return -1;
         return FmCompDetect(&c) ? 1 : 0;
     }
-    if (f->Tier != FM_TIER_SOFTWARE || !DetectPathFor(f, p, MAX_PATH)) return -1;
+    if (f->Tier != FM_TIER_SOFTWARE) return -1;
+    if (!DetectPathFor(f, p, MAX_PATH))
+    {
+        if (_wcsicmp(f->Provider, L"native") || !(f->RegName[0] || f->Name[0])) return -1;
+        FmNativeInvalidate();
+        return FmNativeIsInstalled(f->RegName, f->Name) ? 1 : 0;
+    }
     return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES ? 1 : 0;
 }
 
@@ -2338,6 +2467,214 @@ static HRESULT CheckFsRequirement(const FM_FEATURE *f, FILE *log)
     return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
 }
 
+/* [A-Za-z0-9._-] only (not iswalnum: that depends on the locale and accepts non-ASCII letters) */
+static BOOL AsciiNameChar(WCHAR c)
+{
+    return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') ||
+           c == L'.' || c == L'-' || c == L'_';
+}
+
+/* A [Download] file name: a plain file name (it becomes part of the URL and of a path). */
+static BOOL HostedNameOk(LPCWSTR n)
+{
+    LPCWSTR q;
+    if (!n[0] || n[0] == L'.' || wcslen(n) > 80) return FALSE;
+    for (q = n; *q; q++)
+        if (!AsciiNameChar(*q)) return FALSE;
+    return TRUE;
+}
+
+/* [Source] Path: segments of [A-Za-z0-9._-] separated by '/', no "." / ".." segment, no leading or trailing '/'. */
+static BOOL HostedPathOk(LPCWSTR p)
+{
+    LPCWSTR q, seg = p;
+    if (!p[0] || wcslen(p) > 200) return FALSE;
+    for (q = p; ; q++)
+    {
+        if (*q == L'/' || !*q)
+        {
+            size_t l = q - seg;
+            if (!l || (l == 1 && seg[0] == L'.') || (l == 2 && seg[0] == L'.' && seg[1] == L'.')) return FALSE;
+            if (!*q) return TRUE;
+            seg = q + 1;
+        }
+        else if (!AsciiNameChar(*q))
+            return FALSE;
+    }
+}
+
+/* Hosted pack: put every [Download] file, verified, into the payload dir (download what is missing or does not
+ * match). *fetched = files this call downloaded (multi-sz, the caller deletes them after the enable). Nothing outside
+ * %SystemRoot%\Featmgr is changed here. S_OK with nothing to do for a pack without [Download]. */
+static HRESULT StageHostedPayload(const FM_FEATURE *f, WCHAR **fetched, FILE *log)
+{
+    WCHAR *sect, *line, payloadDir[MAX_PATH], base[512], path[256], why[256], sys[MAX_PATH], root[4];
+    ULONGLONG need = 0;
+    BOOL usable;
+    HRESULT hr = S_OK;
+    size_t cap = 0, used = 0;
+    ULARGE_INTEGER avail, total, freeAll;
+
+    *fetched = NULL;
+    if (f->Tier != FM_TIER_OS || !(sect = ReadSection(f->ManifestPath, L"Download"))) return S_OK;
+    if (!sect[0]) { HeapFree(GetProcessHeap(), 0, sect); return S_OK; }
+    why[0] = L'\0';
+    usable = HostedUsable(f->ManifestPath, why, ARRAYSIZE(why));
+    HostedBaseUrl(f->ManifestPath, base, ARRAYSIZE(base));
+    GetPrivateProfileStringW(L"Source", L"Path", L"", path, ARRAYSIZE(path), f->ManifestPath);
+    if (usable && !HostedPathOk(path))
+    {
+        StringCchPrintfW(why, ARRAYSIZE(why), L"The catalog entry of '%s' has an invalid [Source] Path.", f->Id);
+        usable = FALSE;
+    }
+    if (!FmGetPayloadDir(f->Id, payloadDir, MAX_PATH)) { HeapFree(GetProcessHeap(), 0, sect); return E_FAIL; }
+
+    /* every [Payload] source of a hosted pack must have a pinned hash: fail closed before anything is fetched */
+    {
+        WCHAR *pay = ReadSection(f->ManifestPath, L"Payload"), *q, want[72];
+        for (q = pay; q && *q && SUCCEEDED(hr); q += wcslen(q) + 1)
+        {
+            WCHAR *eq = wcschr(q, L'='), *bar;
+            if (!eq || q[0] == L';' || !(bar = wcschr(eq + 1, L'|'))) continue;
+            *bar = L'\0';
+            if (!DownloadShaFor(f->ManifestPath, eq + 1, want))
+            {
+                LOGF(log, L"error: [Payload] file %s of hosted pack '%s' has no [Download] hash\n", eq + 1, f->Id);
+                SetLastMsg(L"The catalog entry of '%s' lists a file without a pinned checksum, so nothing is downloaded.", f->Id);
+                hr = E_INVALIDARG;
+            }
+            *bar = L'|';
+        }
+        if (pay) HeapFree(GetProcessHeap(), 0, pay);
+        if (FAILED(hr)) { HeapFree(GetProcessHeap(), 0, sect); return hr; }
+    }
+
+    /* room for the download, the installed copy and the moved-aside originals */
+    for (line = sect; *line; line += wcslen(line) + 1)
+    {
+        WCHAR *last = wcsrchr(line, L'|');
+        if (last && line[0] != L';') need += _wcstoui64(last + 1, NULL, 10);
+    }
+    if (need && GetSystemDirectoryW(sys, MAX_PATH) && sys[1] == L':')
+    {
+        root[0] = sys[0]; root[1] = L':'; root[2] = L'\\'; root[3] = L'\0';
+        if (GetDiskFreeSpaceExW(root, &avail, &total, &freeAll) && avail.QuadPart < need * 3)
+        {
+            LOGF(log, L"error: not enough disk space on %.2s for '%s': %I64u MB free, about %I64u MB needed\n",
+                 root, f->Id, avail.QuadPart >> 20, (need * 3) >> 20);
+            SetLastMsg(L"Not enough disk space on %.2s to install '%s': %I64u MB free, about %I64u MB needed. Nothing was changed.",
+                       root, f->Name, avail.QuadPart >> 20, (need * 3) >> 20);
+            HeapFree(GetProcessHeap(), 0, sect);
+            return HRESULT_FROM_WIN32(ERROR_DISK_FULL);
+        }
+    }
+
+    for (line = sect; *line && SUCCEEDED(hr); line += wcslen(line) + 1)
+    {
+        WCHAR spec[400], *eq, *name, *sha, *size, *ctx = NULL, staged[MAX_PATH], got[72], dl[MAX_PATH];
+        FM_COMPONENT c;
+        size_t i, need2;
+
+        eq = wcschr(line, L'=');
+        if (!eq || line[0] == L';') continue;
+        StringCchCopyW(spec, ARRAYSIZE(spec), eq + 1);
+        name = wcstok_s(spec, L"|", &ctx);
+        sha = wcstok_s(NULL, L"|", &ctx);
+        size = wcstok_s(NULL, L"|", &ctx);
+        for (i = 0; sha && sha[i]; i++)
+            if (!iswxdigit(sha[i])) break;
+        if (!name || !sha || i != 64 || sha[i] || !HostedNameOk(name))
+        {
+            LOGF(log, L"error: bad [Download] line in %s: %s\n", f->ManifestPath, line);
+            SetLastMsg(L"The catalog entry of '%s' has an invalid [Download] line, so nothing is downloaded.", f->Id);
+            hr = E_INVALIDARG;
+            break;
+        }
+        StringCchPrintfW(staged, ARRAYSIZE(staged), L"%s\\%s", payloadDir, name);
+        if (GetFileAttributesW(staged) != INVALID_FILE_ATTRIBUTES)
+        {
+            FmOpPhase(FM_PHASE_SEARCH);
+            FmOpStep(L"Checking %s", name);
+            if (FmFileSha256(staged, got) && !_wcsicmp(got, sha))
+            {
+                LOGF(log, L"  staged and verified: %s\n", staged);
+                continue;
+            }
+            if (FmOpCancelled()) { SetLastMsg(L"The operation was cancelled. Nothing was changed."); hr = HRESULT_FROM_WIN32(ERROR_CANCELLED); break; }
+            LOGF(log, L"  staged copy does not match its SHA-256, replacing: %s\n", staged);
+            if (usable) DeleteFileW(staged);
+        }
+        if (!usable)
+        {
+            LOGF(log, L"error: '%s': %s\n", f->Id, why);
+            SetLastMsg(L"%s", why);
+            hr = HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+            break;
+        }
+        ZeroMemory(&c, sizeof(c));
+        StringCchCopyW(c.Id, ARRAYSIZE(c.Id), f->Id);
+        StringCchPrintfW(c.Name, ARRAYSIZE(c.Name), L"%s", name);
+        if (FAILED(StringCchPrintfW(c.Url, ARRAYSIZE(c.Url), L"%s/%s/%s", base, path, name)))
+        {
+            SetLastMsg(L"The download address of '%s' is too long.", f->Id);
+            hr = E_INVALIDARG;
+            break;
+        }
+        StringCchCopyW(c.Sha256, ARRAYSIZE(c.Sha256), sha);
+        StringCchPrintfW(c.FileName, ARRAYSIZE(c.FileName), L"%s.%s", f->Id, name);
+        c.Size = size ? _wcstoui64(size, NULL, 10) : 0;
+        c.MaxSize = c.Size;                            /* pinned: a longer answer is aborted as soon as it passes this */
+        c.ArchOk = TRUE;
+        LOGF(log, L"  download: %s\n", c.Url);
+        hr = FmCompDownload(&c, dl, ARRAYSIZE(dl), log);
+        if (FAILED(hr))
+        {
+            WCHAR m[1024];
+            FmGetLastMessage(m, ARRAYSIZE(m));
+            LOGF(log, L"error: %s\n", m);
+            break;
+        }
+        SHCreateDirectoryExW(NULL, payloadDir, NULL);
+        if (!MoveFileExW(dl, staged, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+        {
+            DWORD e = GetLastError();
+            DeleteFileW(dl);
+            SetLastMsg(L"Cannot move the download of %s into %s (error %lu).", name, payloadDir, e);
+            hr = HRESULT_FROM_WIN32(e);
+            break;
+        }
+        /* remember it: the caller deletes the downloaded copies once they are installed */
+        need2 = used + wcslen(staged) + 2;
+        if (need2 > cap)
+        {
+            size_t nc = max(need2, cap ? cap * 2 : 1024);
+            WCHAR *nb = *fetched ? (WCHAR *)HeapReAlloc(GetProcessHeap(), 0, *fetched, nc * sizeof(WCHAR))
+                                 : (WCHAR *)HeapAlloc(GetProcessHeap(), 0, nc * sizeof(WCHAR));
+            if (!nb) continue;                         /* only the clean-up is lost */
+            *fetched = nb; cap = nc;
+        }
+        StringCchCopyW(*fetched + used, cap - used, staged);
+        used += wcslen(staged) + 1;
+        (*fetched)[used] = L'\0';
+    }
+    HeapFree(GetProcessHeap(), 0, sect);
+    return hr;
+}
+
+/* Delete the payload copies StageHostedPayload downloaded (and the payload dir once empty). */
+static void DropFetched(WCHAR *fetched, LPCWSTR id, FILE *log)
+{
+    WCHAR *p, dir[MAX_PATH];
+    if (!fetched) return;
+    for (p = fetched; *p; p += wcslen(p) + 1)
+    {
+        LOGF(log, L"  drop downloaded payload copy: %s\n", p);
+        DeleteFileW(p);
+    }
+    HeapFree(GetProcessHeap(), 0, fetched);
+    if (FmGetPayloadDir(id, dir, MAX_PATH)) RemoveDirectoryW(dir);
+}
+
 HRESULT FmEnable(LPCWSTR id, FILE *log)
 {
     HRESULT result;
@@ -2353,8 +2690,9 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
     FM_FEATURE f;
     HKEY state = NULL;
     WCHAR payloadDir[MAX_PATH], now[32];
-    WCHAR *sect, *p;
+    WCHAR *sect, *p, *fetched = NULL, want[72];
     HRESULT hr = S_OK;
+    BOOL hosted;
 
     if (!FmFindFeature(id, &f))
     {
@@ -2375,7 +2713,12 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
         }
         else if (f.Tier == FM_TIER_SOFTWARE && f.Provider[0])
             LOGF(log, L"error: installer for '%s' is not available on this system "
-                      L"(provider '%s': rapps.exe or the staged installer is missing)\n", id, f.Provider);
+                      L"(provider '%s': no download address or checksum for this system, or the staged installer is missing)\n", id, f.Provider);
+        else if (f.Unavailable[0])
+        {
+            LOGF(log, L"error: '%s' cannot be turned on: %s\n", id, f.Unavailable);
+            SetLastMsg(L"%s: %s", f.Name, f.Unavailable);
+        }
         else
             LOGF(log, L"error: payload for '%s' is not staged on this system "
                       L"(catalog entry present, payload deferred)\n", id);
@@ -2404,8 +2747,20 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
     hr = EnableDeps(&f, log);
     if (FAILED(hr)) return hr;
 
+    /* hosted pack: download + verify the payload first; until it is complete nothing outside Featmgr changes */
+    hr = StageHostedPayload(&f, &fetched, log);
+    if (FAILED(hr))
+    {
+        LOGF(log, L"enable FAILED (0x%08lx): the payload could not be fetched; nothing was changed\n", hr);
+        if (fetched) HeapFree(GetProcessHeap(), 0, fetched);      /* verified copies stay for the next try */
+        return hr;
+    }
+
     if (OpenStateKey(id, TRUE, KEY_READ | KEY_WRITE, &state) != ERROR_SUCCESS)
+    {
+        DropFetched(fetched, id, log);
         return E_FAIL;
+    }
 
     if (f.Tier == FM_TIER_SOFTWARE && f.Provider[0])
     {
@@ -2458,7 +2813,10 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
     RegDeleteValueW(state, L"Backups");
     RegDeleteValueW(state, L"Services");
 
-    /* payload files */
+    /* payload files (a hosted pack: each one checked against its pinned hash where it lands) */
+    hosted = HostedPack(&f);
+    FmOpPhase(FM_PHASE_APPLY);
+    FmOpStep(L"Installing %s", f.Name);
     FmGetPayloadDir(id, payloadDir, MAX_PATH);
     sect = ReadSection(f.ManifestPath, L"Payload");
     if (sect)
@@ -2470,7 +2828,15 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
             sep = wcschr(eq + 1, L'|');
             if (!sep) continue;
             *sep = L'\0';
-            hr = ApplyPayloadFile(payloadDir, eq + 1, sep + 1, state, log);
+            if (hosted && !DownloadShaFor(f.ManifestPath, eq + 1, want))
+            {
+                LOGF(log, L"error: [Payload] file %s of hosted pack '%s' has no [Download] hash; nothing installed\n", eq + 1, id);
+                SetLastMsg(L"The catalog entry of '%s' lists a file without a pinned checksum, so it is not installed.", id);
+                *sep = L'|';
+                hr = E_INVALIDARG;
+                goto done;
+            }
+            hr = ApplyPayloadFile(payloadDir, eq + 1, sep + 1, hosted ? want : NULL, state, log);
             *sep = L'|';
             if (FAILED(hr)) goto done;
         }
@@ -2511,7 +2877,22 @@ done:
         if (state) RevertState(state, log);
     }
     if (state) RegCloseKey(state);
+    if (SUCCEEDED(hr))
+        DropFetched(fetched, id, log);              /* installed: the downloaded copies are not needed any more */
+    else if (fetched)
+        HeapFree(GetProcessHeap(), 0, fetched);     /* verified copies stay for the next try */
     return hr;
+}
+
+/* Is dest one of the "dest|bak" records of the Backups list? */
+static BOOL HasBackup(const WCHAR *baks, LPCWSTR dest)
+{
+    const WCHAR *p;
+    size_t l = wcslen(dest);
+    if (!baks) return FALSE;
+    for (p = baks; *p; p += wcslen(p) + 1)
+        if (!_wcsnicmp(p, dest, l) && p[l] == L'|') return TRUE;
+    return FALSE;
 }
 
 /* Undo everything recorded in the state key: registry, placed files, then
@@ -2533,6 +2914,7 @@ static void RevertState(HKEY state, FILE *log)
     }
 
     /* delete installed files */
+    baks = MultiSzRead(state, L"Backups");
     files = MultiSzRead(state, L"Files");
     if (files)
     {
@@ -2542,7 +2924,36 @@ static void RevertState(HKEY state, FILE *log)
             if (!DeleteFileW(p) && GetLastError() != ERROR_FILE_NOT_FOUND)
             {
                 DWORD e = GetLastError();
-                if (MoveFileExW(p, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
+                WCHAR aside[MAX_PATH + 16];
+                BOOL moved = FALSE, backedUp = HasBackup(baks, p);
+                int n;
+                /* in use (a loaded DLL): rename it to a free aside name and delete THAT at reboot, so a backed-up
+                 * original can go back under the real name at once. A reboot-delete is never queued for the real
+                 * name of a file that has a backup: the restored original would be deleted with it. */
+                for (n = 0; n < 10 && !moved; n++)
+                {
+                    if (n) StringCchPrintfW(aside, ARRAYSIZE(aside), L"%s.fmdel%d", p, n);
+                    else StringCchPrintfW(aside, ARRAYSIZE(aside), L"%s.fmdel", p);
+                    if (GetFileAttributesW(aside) != INVALID_FILE_ATTRIBUTES && !DeleteFileW(aside))
+                        continue;                                   /* an older aside copy, itself still in use */
+                    moved = MoveFileExW(p, aside, 0);
+                }
+                if (moved)
+                {
+                    if (MoveFileExW(aside, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
+                    {
+                        LOGF(log, L"  note: %s is in use (%lu); moved to %s, which is deleted at reboot\n", p, e, aside);
+                        MultiSzAppend(state, L"PendingFiles", aside);
+                    }
+                    else
+                        LOGF(log, L"  warn: %s moved to %s but its reboot-delete failed (%lu)\n", p, aside, GetLastError());
+                }
+                else if (backedUp)
+                {
+                    /* the restore below replaces it at reboot (MOVEFILE_DELAY_UNTIL_REBOOT | REPLACE_EXISTING) */
+                    LOGF(log, L"  note: %s is in use (%lu) and cannot be moved aside; the original replaces it at reboot\n", p, e);
+                }
+                else if (MoveFileExW(p, NULL, MOVEFILE_DELAY_UNTIL_REBOOT))
                 {
                     LOGF(log, L"  note: %s is in use (%lu); will be deleted at reboot\n", p, e);
                     MultiSzAppend(state, L"PendingFiles", p);
@@ -2563,7 +2974,6 @@ static void RevertState(HKEY state, FILE *log)
     }
 
     /* put back files that enable moved aside ("dest|bak") */
-    baks = MultiSzRead(state, L"Backups");
     if (baks)
     {
         for (p = baks; *p; p += wcslen(p) + 1)
@@ -2574,7 +2984,18 @@ static void RevertState(HKEY state, FILE *log)
             LOGF(log, L"  restore file: %s <- %s\n", p, sep + 1);
             DeleteFileW(p);
             if (!MoveFileW(sep + 1, p))
-                LOGF(log, L"  warn: restore failed (%lu)\n", GetLastError());
+            {
+                DWORD e = GetLastError();
+                if (GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES &&
+                    MoveFileExW(sep + 1, p, MOVEFILE_DELAY_UNTIL_REBOOT | MOVEFILE_REPLACE_EXISTING))
+                {
+                    /* the pack's file is still in place and in use: the original takes its name at the next boot */
+                    LOGF(log, L"  note: restore of %s is deferred to the next reboot (%lu)\n", p, e);
+                    MultiSzAppend(state, L"PendingFiles", sep + 1);
+                }
+                else
+                    LOGF(log, L"  warn: restore failed (%lu)\n", e);
+            }
             *sep = L'|';
         }
         HeapFree(GetProcessHeap(), 0, baks);
@@ -2647,7 +3068,17 @@ static HRESULT CheckRemovable(LPCWSTR id, FILE *log)
     FM_FEATURE feat;
     if (FmFindFeature(id, &feat) && !feat.Removable)
     {
-        LOGF(log, L"error: '%s' is a base component of the system and cannot be disabled or removed\n", id);
+        if (feat.BuiltIn)
+        {
+            LOGF(log, L"error: '%s' is a base component of this image (setup installed it with the system, not featmgr) "
+                      L"and cannot be disabled or removed here\n", id);
+            SetLastMsg(L"%s is part of this NitroOS image (setup installed it with the system), so it cannot be turned off here.", feat.Name);
+        }
+        else
+        {
+            LOGF(log, L"error: '%s' is a base component of the system and cannot be disabled or removed\n", id);
+            SetLastMsg(L"%s is a base component of the system and cannot be turned off.", feat.Name);
+        }
         return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
     }
     return S_OK;

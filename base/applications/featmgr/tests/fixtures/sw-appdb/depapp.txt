@@ -1,4 +1,5 @@
 [Section]
+SHA1 = 2222222222222222222222222222222222222222
 Name = Dep App
 Version = 2.0
 Description = Depends on testlib (present) and on a package absent from the DB (dropped from the catalog graph).

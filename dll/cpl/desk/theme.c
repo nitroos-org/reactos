@@ -1104,7 +1104,8 @@ ThemesPageProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
             switch (lpnm->code)
             {
                 case PSN_APPLY:
-                    SendMessage(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)TEXT(""));
+                    SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)TEXT(""),
+                                       SMTO_ABORTIFHUNG, 5000, NULL);
                     return TRUE;
             }
             break;

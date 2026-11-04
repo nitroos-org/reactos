@@ -4,7 +4,7 @@ rem   dotnet48-live.cmd install     negative checksum test, then install dotnet-
 rem   dotnet48-live.cmd run [DIR]   run the managed test programs in DIR (default %~dp0managed): hello32.exe, helloany.exe,
 rem                                 wf32.exe, hello.cs (compiled with the Framework's csc) and on amd64 hello64.exe, wf64.exe
 rem   dotnet48-live.cmd uninstall   uninstall dotnet-framework-4.8 and check it is gone
-rem Run from a directory holding fixtures\fmt-net48bad.ini and fixtures\fmt-net48bad.txt (default: this script's
+rem Run from a directory holding fixtures\fmt-net48bad.ini (default: this script's
 rem directory). The programs are small C# programs built with the Framework's csc (hello: prints, exits 42; wf: a WinForms
 rem form that closes itself and exits 7; both write their progress to the file named on the command line).
 rem Result: %O%\net48live.txt, last line NET48LIVE-RESULT: PASS|FAIL n
@@ -50,14 +50,13 @@ call :rc1 "I5 no .NET 4.x Release key before the install"
 
 rem --- wrong SHA-256 must be refused after the download: nothing installed, no record
 copy /y %FX%\fmt-net48bad.ini %R%\Catalog\ >nul
-copy /y %FX%\fmt-net48bad.txt %R%\ >nul
 %FM% /install fmt-net48bad > %O%\bad.txt 2>&1
 call :rc1 "I6 install with a wrong SHA-256 fails"
 type %O%\bad.txt >> %LOG%
 reg query "%NDPKEY%" /v Release >nul 2>&1
 call :rc1 "I7 nothing installed after the checksum failure"
 call :st fmt-net48bad NotInstalled "I8 wrong-hash entry left NotInstalled"
-del /q %R%\Catalog\fmt-net48bad.ini %R%\fmt-net48bad.txt 2>nul
+del /q %R%\Catalog\fmt-net48bad.ini 2>nul
 
 rem --- the real install (the installer is given the Windows 7 SP1 answer by the compatibility database; no layer is set here)
 set __COMPAT_LAYER=

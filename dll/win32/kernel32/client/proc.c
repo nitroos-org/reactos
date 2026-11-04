@@ -2774,12 +2774,14 @@ BasepReadProcThreadAttributes(
     _In_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList,
     _Out_ PPROC_THREAD_ATTRIBUTE_ENTRY *HandleList,
     _Out_ PPROC_THREAD_ATTRIBUTE_ENTRY *JobList,
-    _Out_ PPROC_THREAD_ATTRIBUTE_ENTRY *PseudoConsole)
+    _Out_ PPROC_THREAD_ATTRIBUTE_ENTRY *PseudoConsole,
+    _Out_ PBOOLEAN Win32kLockdown)
 {
     DWORD i;
     *HandleList = NULL;
     *JobList = NULL;
     *PseudoConsole = NULL;
+    *Win32kLockdown = FALSE;
     if (AttributeList->LastAttribute > AttributeList->AttributeCount ||
         AttributeList->AttributeCount > PROC_THREAD_ATTRIBUTE_NUMBER)
         return STATUS_INVALID_PARAMETER;
@@ -2793,6 +2795,12 @@ BasepReadProcThreadAttributes(
 
             if (!NT_SUCCESS(Status))
                 return Status;
+
+            /* PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON: bits 28-29 of the first
+             * QWORD, in the wide forms only */
+            if (Entry->Size >= sizeof(DWORD64) &&
+                ((*(PDWORD64)Entry->Value >> 28) & 3) == 1)
+                *Win32kLockdown = TRUE;
             continue;
         }
 
@@ -2925,6 +2933,7 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     PPROC_THREAD_ATTRIBUTE_ENTRY HandleListAttribute = NULL;
     PPROC_THREAD_ATTRIBUTE_ENTRY JobListAttribute = NULL;
     PPROC_THREAD_ATTRIBUTE_ENTRY PseudoConsoleAttribute = NULL;
+    BOOLEAN Win32kLockdown = FALSE;
     PBASE_PSEUDOCONSOLE PseudoConsole = NULL;
     PHANDLE KernelHandleList = NULL, ConsoleHandleList = NULL;
     SIZE_T KernelHandleCount = 0, ConsoleHandleCount = 0;
@@ -3014,7 +3023,8 @@ CreateProcessInternalW(IN HANDLE hUserToken,
             Status = BasepReadProcThreadAttributes(((LPSTARTUPINFOEXW)lpStartupInfo)->lpAttributeList,
                                                    &HandleListAttribute,
                                                    &JobListAttribute,
-                                                   &PseudoConsoleAttribute);
+                                                   &PseudoConsoleAttribute,
+                                                   &Win32kLockdown);
             if (!NT_SUCCESS(Status))
             {
                 BaseSetLastNTError(Status);
@@ -5346,6 +5356,23 @@ StartScan:
                 Result = FALSE;
                 goto Quickie;
             }
+        }
+    }
+
+    /* The Win32k lockdown of the mitigation policy attribute is in force before the first thread runs, so
+     * that the child never makes a Win32k system call */
+    if (Win32kLockdown)
+    {
+        struct { ULONG Policy; ULONG Flags; } Request = { ProcessSystemCallDisablePolicy, 1 };
+
+        Status = NtSetInformationProcess(ProcessHandle, (PROCESSINFOCLASS)52, &Request, sizeof(Request));
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Failed to set the Win32k lockdown: %lx\n", Status);
+            NtTerminateProcess(ProcessHandle, STATUS_ACCESS_DENIED);
+            BaseSetLastNTError(Status);
+            Result = FALSE;
+            goto Quickie;
         }
     }
 

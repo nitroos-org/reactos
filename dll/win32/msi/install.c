@@ -1157,6 +1157,18 @@ static INT feature_cost( MSIFEATURE *feature )
     return cost;
 }
 
+static INT feature_tree_cost( MSIFEATURE *feature, INSTALLSTATE state )
+{
+    INT cost = 0;
+    MSIFEATURE *child;
+
+    if (feature->ActionRequest == state)
+        cost = feature_cost( feature );
+    LIST_FOR_EACH_ENTRY( child, &feature->Children, MSIFEATURE, entry )
+        cost += feature_tree_cost( child, state );
+    return cost;
+}
+
 UINT MSI_GetFeatureCost( MSIPACKAGE *package, MSIFEATURE *feature, MSICOSTTREE tree,
                          INSTALLSTATE state, LPINT cost )
 {
@@ -1166,19 +1178,16 @@ UINT MSI_GetFeatureCost( MSIPACKAGE *package, MSIFEATURE *feature, MSICOSTTREE t
     switch (tree)
     {
     case MSICOSTTREE_CHILDREN:
-    {
-        MSIFEATURE *child;
-
-        LIST_FOR_EACH_ENTRY( child, &feature->Children, MSIFEATURE, entry )
-        {
-            if (child->ActionRequest == state)
-                *cost += feature_cost( child );
-        }
+        /* the feature itself and all of its descendants */
+        *cost = feature_tree_cost( feature, state );
         break;
-    }
     case MSICOSTTREE_PARENTS:
     {
         const WCHAR *feature_parent = feature->Feature_Parent;
+
+        /* the feature itself and its ancestors */
+        if (feature->ActionRequest == state)
+            *cost += feature_cost( feature );
         for (;;)
         {
             MSIFEATURE *parent = msi_get_loaded_feature( package, feature_parent );
@@ -1217,10 +1226,14 @@ UINT WINAPI MsiGetFeatureCostW( MSIHANDLE hInstall, const WCHAR *szFeature, MSIC
 
     TRACE( "%lu, %s, %d, %d, %p\n", hInstall, debugstr_w(szFeature), iCostTree, iState, piCost );
 
-    if (!szFeature)
-        return ERROR_INVALID_PARAMETER;
-
     package = msihandle2msiinfo(hInstall, MSIHANDLETYPE_PACKAGE);
+    if (!szFeature)
+    {
+        /* through a custom action handle the result is cleared */
+        if (!package && piCost) *piCost = 0;
+        if (package) msiobj_release( &package->hdr );
+        return ERROR_INVALID_PARAMETER;
+    }
     if (!package)
     {
         MSIHANDLE remote;

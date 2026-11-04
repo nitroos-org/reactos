@@ -52,6 +52,7 @@ extern void func_Handle32(void);
 extern void func_HookChainUnhookUaf(void);
 extern void func_HookFamilies(void);
 extern void func_HungWindow(void);
+extern void func_WmCancelModeLastError(void);
 extern void func_InitializeLpkHooks(void);
 extern void func_IsDialogMessage(void);
 extern void func_IsServerSideWindow(void);
@@ -102,6 +103,7 @@ extern void func_SetScrollInfo(void);
 extern void func_SetScrollRange(void);
 extern void func_SetWindowPlacement(void);
 extern void func_SetWindowPosOwned(void);
+extern void func_SetWindowRgn(void);
 extern void func_ShowWindow(void);
 extern void func_ShowWindowFrame(void);
 extern void func_SwitchDesktop(void);
@@ -183,6 +185,7 @@ const struct test winetest_testlist[] =
     { "HookChainUnhookUaf", func_HookChainUnhookUaf },
     { "HookFamilies", func_HookFamilies },
     { "HungWindow", func_HungWindow },
+    { "WmCancelModeLastError", func_WmCancelModeLastError },
     { "InitializeLpkHooks", func_InitializeLpkHooks },
     { "IsDialogMessage", func_IsDialogMessage },
     { "IsServerSideWindow", func_IsServerSideWindow },
@@ -233,6 +236,7 @@ const struct test winetest_testlist[] =
     { "SetScrollRange", func_SetScrollRange },
     { "SetWindowPlacement", func_SetWindowPlacement },
     { "SetWindowPosOwned", func_SetWindowPosOwned },
+    { "SetWindowRgn", func_SetWindowRgn },
     { "ShowWindow", func_ShowWindow },
     { "ShowWindowFrame", func_ShowWindowFrame },
     { "SwitchDesktop", func_SwitchDesktop },

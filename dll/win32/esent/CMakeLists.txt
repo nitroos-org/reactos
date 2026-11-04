@@ -2,6 +2,7 @@
 spec2def(esent.dll esent.spec)
 
 list(APPEND SOURCE
+    esent.c
     ${CMAKE_CURRENT_BINARY_DIR}/esent_stubs.c)
 
 add_library(esent MODULE

@@ -95,3 +95,22 @@ BEGIN
     IDS_INVALID_NAME "The shortcut name you entered either contained characters that are invalid for file names or was too long."
     IDS_BROWSE_FOR_TARGET "Please select the target of the shortcut below:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "Programmid ja funktsioonid"
+    IDS_PROG_HEADER "Programmi desinstallimine või muutmine. Tarkvara installimiseks või süsteemifunktsioonide sisse- ja väljalülitamiseks kasutage valikut ""NitroOS-i funktsioonide sisse või välja lülitamine""."
+    IDS_PROG_COL_NAME "Nimi"
+    IDS_PROG_COL_PUBLISHER "Väljaandja"
+    IDS_PROG_COL_VERSION "Versioon"
+    IDS_PROG_COL_DATE "Installitud"
+    IDS_PROG_UNINSTALL "&Desinstalli"
+    IDS_PROG_CHANGE "&Muuda"
+    IDS_PROG_REFRESH "&Värskenda"
+    IDS_PROG_FEATURES "&NitroOS-i funktsioonide sisse või välja lülitamine"
+    IDS_PROG_CLOSE "&Sulge"
+    IDS_PROG_CONFIRM "Kas soovite programmi '%s' desinstallida?"
+    IDS_PROG_STARTFAIL "Programmi ei õnnestunud käivitada (viga %lu):\n%s"
+    IDS_FEATURESNAME "NitroOS-i funktsioonide sisse või välja lülitamine"
+    IDS_FEATURESDESCRIPTION "NitroOS-i valikuliste funktsioonide ja lisatarkvara sisse või välja lülitamine."
+END

@@ -104,19 +104,120 @@ call :rc0 "36 uninstall of enabled feature"
 call :st fmt-base NotInstalled "37 NotInstalled after enabled-uninstall"
 call :ex %R%\fmt-base.out 0 "38 base file gone"
 
-rem --- Removable=0 (base component) guards (GFX-FU), coexisting with the dependency guard
-rem the real shipped lavapipe-pack manifest (Removable=0), if staged next to the fixtures
+rem --- lavapipe-pack (GPU pack): included in an image built with the GPU stack in system32 (not removable there),
+rem otherwise a hosted pack that is "not available yet" while its download location is the placeholder; amd64 only
+set FMK=HKLM\SOFTWARE\ReactOS\Nitro\Featmgr
+reg delete %FMK% /v PayloadBaseUrl /f >nul 2>&1
 if exist %FX%\lavapipe-pack.ini copy /y %FX%\lavapipe-pack.ini %R%\Catalog\ >nul
-if exist %FX%\lavapipe-pack.ini (
-  %FM% /disable lavapipe-pack > %O%\b.txt 2>&1
-  call :rc1 "39 disable lavapipe-pack refused"
-  find "base component" %O%\b.txt >nul
-  call :rc0 "40 ...with the base-component error"
-  %FM% /uninstall lavapipe-pack > %O%\b.txt 2>&1
-  call :rc1 "41 uninstall lavapipe-pack refused"
-  find "base component" %O%\b.txt >nul
-  call :rc0 "42 ...with the base-component error"
-)
+if not exist %R%\Catalog\lavapipe-pack.ini goto lvp_done
+%FM% /query lavapipe-pack > %O%\q.txt 2>&1
+type %O%\q.txt >> %LOG%
+if /i "%PROCESSOR_ARCHITECTURE%"=="x86" goto lvp_x86
+reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\lavapipe-pack >nul 2>&1
+if not errorlevel 1 goto lvp_done
+if not exist %SystemRoot%\System32\vulkan_lvp.dll goto lvp_hosted
+find /i "included in this image" %O%\q.txt >nul
+call :rc0 "39 lavapipe-pack: included in this image (vulkan_lvp.dll in system32, no record)"
+call :st lavapipe-pack Enabled "40 ...shown Enabled"
+%FM% /disable lavapipe-pack > %O%\b.txt 2>&1
+call :rc1 "41 disable lavapipe-pack refused"
+find "base component" %O%\b.txt >nul
+call :rc0 "42 ...with the base-component error"
+%FM% /uninstall lavapipe-pack > %O%\b.txt 2>&1
+call :rc1 "43 uninstall lavapipe-pack refused"
+call :ex %SystemRoot%\System32\vulkan_lvp.dll 1 "44 ...and the in-box files stay"
+goto lvp_done
+:lvp_hosted
+find /i "not available yet" %O%\q.txt >nul
+call :rc0 "39h lavapipe-pack (image without the GPU stack): not available yet with the placeholder URL"
+%FM% /install lavapipe-pack > %O%\b.txt 2>&1
+call :rc1 "40h install refused"
+call :st lavapipe-pack NotInstalled "41h ...left NotInstalled"
+goto lvp_done
+:lvp_x86
+find "64-bit (amd64)" %O%\q.txt >nul
+call :rc0 "39x lavapipe-pack on x86: amd64 only"
+%FM% /install lavapipe-pack > %O%\b.txt 2>&1
+call :rc1 "40x install refused on x86"
+find "64-bit" %O%\b.txt >nul
+call :rc0 "41x ...with the amd64-only message"
+:lvp_done
+
+rem --- hosted pack ([Download]) offline checks: placeholder, non-https base, arch, pre-staged payload
+copy /y %FX%\fmt-hosted.ini %R%\Catalog\ >nul
+copy /y %FX%\fmt-hostedarch.ini %R%\Catalog\ >nul
+rmdir /s /q %R%\Payload\fmt-hosted 2>nul
+%FM% /query fmt-hosted > %O%\q.txt 2>&1
+find /i "not available yet" %O%\q.txt >nul
+call :rc0 "H1 hosted pack with the placeholder base: not available yet"
+%FM% /list > %O%\l.txt 2>&1
+find "fmt-hosted " %O%\l.txt | find "*" >nul
+call :rc0 "H2 /list marks it '*'"
+%FM% /install fmt-hosted > %O%\b.txt 2>&1
+call :rc1 "H3 install refused with the placeholder"
+type %O%\b.txt >> %LOG%
+find /i "not available yet" %O%\b.txt >nul
+call :rc0 "H4 ...with the not-available-yet message"
+call :st fmt-hosted NotInstalled "H5 ...left NotInstalled"
+call :ex %R%\fmt-hosted.out 0 "H6 ...nothing installed"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmt-hosted >nul 2>&1
+call :rc1 "H7 ...no state record"
+reg add %FMK% /v PayloadBaseUrl /t REG_SZ /d http://127.0.0.1/featmgr /f >nul
+%FM% /query fmt-hosted > %O%\q.txt 2>&1
+find "https" %O%\q.txt >nul
+call :rc0 "H8 PayloadBaseUrl override that is not https: not available (names https)"
+%FM% /install fmt-hosted > %O%\b.txt 2>&1
+call :rc1 "H9 ...install refused"
+reg add %FMK% /v PayloadBaseUrl /t REG_SZ /d https://127.0.0.1:1/featmgr /f >nul
+%FM% /query fmt-hosted > %O%\q.txt 2>&1
+find "downloaded at enable" %O%\q.txt >nul
+call :rc0 "H10 https PayloadBaseUrl override: the pack can be turned on (downloaded at enable)"
+%FM% /install fmt-hosted > %O%\b.txt 2>&1
+call :rc1 "H11 unreachable server: install fails"
+type %O%\b.txt >> %LOG%
+find /i "nothing was changed" %O%\b.txt >nul
+call :rc0 "H12 ...and nothing was changed"
+call :ex %R%\fmt-hosted.out 0 "H13 ...nothing installed"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmt-hosted >nul 2>&1
+call :rc1 "H14 ...no state record"
+reg delete %FMK% /v PayloadBaseUrl /f >nul 2>&1
+mkdir %R%\Payload\fmt-hosted 2>nul
+echo wrong> %R%\Payload\fmt-hosted\fmt-hosted.txt
+%FM% /install fmt-hosted > %O%\b.txt 2>&1
+call :rc1 "H15 pre-staged file with a wrong SHA-256 (placeholder base): refused"
+call :ex %R%\fmt-hosted.out 0 "H16 ...nothing installed"
+copy /y %FX%\fmt-hosted.txt %R%\Payload\fmt-hosted\ >nul
+%FM% /install fmt-hosted > %O%\b.txt 2>&1
+call :rc0 "H17 pre-staged verified payload installs offline (placeholder base)"
+type %O%\b.txt >> %LOG%
+call :st fmt-hosted Enabled "H18 ...Enabled"
+call :ex %R%\fmt-hosted.out 1 "H19 ...payload file placed"
+call :ex %R%\Payload\fmt-hosted\fmt-hosted.txt 1 "H20 ...a pre-staged (not downloaded) copy is kept"
+%FM% /uninstall fmt-hosted > %O%\b.txt 2>&1
+call :rc0 "H21 uninstall"
+call :ex %R%\fmt-hosted.out 0 "H22 ...payload file removed"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\FmTest /v Hosted >nul 2>&1
+call :rc1 "H23 ...registry value reverted"
+%FM% /query fmt-hostedarch > %O%\q.txt 2>&1
+find /i "architecture" %O%\q.txt >nul
+call :rc0 "H24 [Source] Arch without this architecture: not available on this architecture"
+%FM% /install fmt-hostedarch > %O%\b.txt 2>&1
+call :rc1 "H25 ...install refused"
+copy /y %FX%\fmt-hostednohash.ini %R%\Catalog\ >nul
+mkdir %R%\Payload\fmt-hostednohash 2>nul
+copy /y %FX%\fmt-hosted.txt %R%\Payload\fmt-hostednohash\ >nul
+copy /y %FX%\fmt-base.txt %R%\Payload\fmt-hostednohash\ >nul
+%FM% /install fmt-hostednohash > %O%\b.txt 2>&1
+call :rc1 "H26 hosted pack with a [Payload] file that has no [Download] hash: refused (fail closed)"
+type %O%\b.txt >> %LOG%
+find /i "no [Download] hash" %O%\b.txt >nul
+call :rc0 "H27 ...naming the missing hash"
+call :ex %R%\fmt-hostednohash.out 0 "H28 ...nothing installed"
+call :ex %R%\fmt-hostednohash2.out 0 "H29 ...not even the unhashed file"
+del /q %R%\Catalog\fmt-hostednohash.ini 2>nul
+rmdir /s /q %R%\Payload\fmt-hostednohash 2>nul
+del /q %R%\Catalog\fmt-hosted.ini %R%\Catalog\fmt-hostedarch.ini 2>nul
+rmdir /s /q %R%\Payload\fmt-hosted 2>nul
 mkdir %R%\Payload\fmt-sys 2>nul
 mkdir %R%\Payload\fmt-sysdep 2>nul
 copy /y %FX%\fmt-sys.ini %R%\Catalog\ >nul
@@ -159,8 +260,12 @@ call :rc0 "53 import-rapps rc0"
 type %O%\imp.txt >> %LOG%
 find "imported 5 RAPPS entries" %O%\imp.txt >nul
 call :rc0 "54 imported 5 (testapp testlib depapp archapp utf16app)"
-find "(2 skipped)" %O%\imp.txt >nul
-call :rc0 "55 2 skipped (no URL, unusable package name)"
+find "(3 skipped)" %O%\imp.txt >nul
+call :rc0 "55 3 skipped (no URL, unusable package name, no checksum)"
+find "no SHA-256 or SHA-1 checksum" %O%\imp.txt >nul
+call :rc0 "55a the entry without a checksum says why it is not offered"
+%FM% /query rapps-nohash >nul 2>&1
+call :rc1 "55b entry without a checksum is not in the catalog"
 %FM% /list /tier:software > %O%\l.txt 2>&1
 find "rapps-testapp" %O%\l.txt >nul
 call :rc0 "56 imported entry listed in software tier"
@@ -172,8 +277,10 @@ call :st rapps-testapp NotInstalled "58 imported entry NotInstalled"
 type %O%\q.txt >> %LOG%
 find "Tier:         software" %O%\q.txt >nul
 call :rc0 "59 query: Tier=software"
-find "Provider:     rapps" %O%\q.txt >nul
-call :rc0 "60 query: Provider=rapps"
+find "Provider:     native" %O%\q.txt >nul
+call :rc0 "60 query: Provider=native (featmgr itself installs it; rapps.exe is not involved)"
+find "Source:       rapps" %O%\q.txt >nul
+call :rc0 "60a query: Source=rapps (it came from the RAPPS catalog)"
 find "Rapps.Pkg:    testapp" %O%\q.txt >nul
 call :rc0 "61 query: Rapps.Pkg"
 find "Version:      1.2.3" %O%\q.txt >nul
@@ -341,10 +448,10 @@ find "fmt-sw " %O%\l.txt | find "*" >nul
 call :rc0 "102 software entry with missing installer marked deferred (*)"
 %FM% /install fmt-sw >> %LOG% 2>&1
 call :rc1 "103 install refused when installer not staged"
-rem rapps package larger than the free space: refused up front with a clear message (not a bare exit code)
+rem native package larger than the free space (the fixture still says Provider=rapps: the old spelling must keep working): refused up front with a clear message (not a bare exit code)
 copy /y %FX%\fmt-bigdisk.ini %R%\Catalog\ >nul
 %FM% /install fmt-bigdisk > %O%\i.txt 2>&1
-call :rc1 "103a oversized rapps package -> install refused"
+call :rc1 "103a oversized native package -> install refused"
 type %O%\i.txt >> %LOG%
 find "not enough disk space" %O%\i.txt >nul
 call :rc0 "103b ...with a 'not enough disk space' message"
@@ -353,31 +460,230 @@ call :rc1 "103c ...and the installer was never started"
 call :st fmt-bigdisk NotInstalled "103d refused install leaves NotInstalled"
 del /q %R%\Catalog\fmt-bigdisk.ini 2>nul
 
-rem ===== RAPPS-provider /S no-hang (RAPPS-S-dialog-hang fix) =====
-rem rapps.exe is only present in a full image. A failing silent download must return
-rem PROMPTLY with a non-zero code and no modal dialog; before the fix it popped a modal
-rem MessageBox on the (headless) worker thread and blocked featmgr up to the 60-min watchdog.
-rem The .invalid URLDownload fails fast whether or not the VM has network.
-if exist %SystemRoot%\system32\rapps.exe (
-  mkdir "%LOCALAPPDATA%\RApps\appdb" 2>nul
-  copy /y %FX%\nohang-appdb\fmnohang.txt "%LOCALAPPDATA%\RApps\appdb\" >nul
-  %FM% /import-rapps "%LOCALAPPDATA%\RApps\appdb" /clean /anyarch > %O%\nohang-imp.txt 2>&1
-  call :rc0 "104 import nohang rapps entry"
-  echo NOHANG-START %time% >> %LOG%
-  %FM% /install rapps-fmnohang > %O%\nohang.txt 2>&1
-  call :rc1 "105 rapps /S download failure returns non-zero (no modal hang)"
-  echo NOHANG-END %time% >> %LOG%
-  type %O%\nohang.txt >> %LOG%
-  rem control returned to the script => proven not hung
-  echo NOHANG-RETURNED ok >> %LOG%
-  call :st rapps-fmnohang NotInstalled "106 failed live install leaves NotInstalled"
-  reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\rapps-fmnohang >nul 2>&1
-  call :rc1 "107 failed live install leaves no state record"
-  del "%LOCALAPPDATA%\RApps\appdb\fmnohang.txt" 2>nul
-  rd /s /q %SW% 2>nul
-) else (
-  echo SKIP 104-107 rapps.exe not present ^(module-only test image^) >> %LOG%
-)
+rem ===== native provider: a failing download returns PROMPTLY (no dialog, no hang) and leaves nothing behind =====
+rem The .invalid URLDownload fails fast whether or not the VM has network. featmgr downloads it itself (wininet),
+rem so there is no child installer that could raise a modal dialog; the old rapps.exe /S no-hang fix is moot.
+%FM% /import-rapps %FX%\nohang-appdb /clean /anyarch > %O%\nohang-imp.txt 2>&1
+call :rc0 "104 import nohang entry"
+echo NOHANG-START %time% >> %LOG%
+%FM% /install rapps-fmnohang > %O%\nohang.txt 2>&1
+call :rc1 "105 native download failure returns non-zero (no modal hang)"
+echo NOHANG-END %time% >> %LOG%
+type %O%\nohang.txt >> %LOG%
+echo NOHANG-RETURNED ok >> %LOG%
+call :st rapps-fmnohang NotInstalled "106 failed live install leaves NotInstalled"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\rapps-fmnohang >nul 2>&1
+call :rc1 "107 failed live install leaves no state record"
+rd /s /q %SW% 2>nul
+
+rem ===== a bare RAPPS package name resolves to rapps-<name> (syssetup, the language page and scripts use it) =====
+%FM% /import-rapps %FX%\sw-appdb /anyarch /clean > %O%\imp.txt 2>&1
+%FM% /install testapp > %O%\bare.txt 2>&1
+call :rc1 "107a /install <bare name> runs the install of rapps-<name> (the download then fails: .invalid host)"
+find "enabling 'rapps-testapp'" %O%\bare.txt >nul
+call :rc0 "107b ...and says it resolved the name to rapps-testapp"
+call :st rapps-testapp NotInstalled "107c failed install leaves NotInstalled"
+rd /s /q %SW% 2>nul
+
+rem ===== the RAPPS catalog is only fetched from the official https address (pinned) or a local file =====
+rd /s /q %R%\RappsDb 2>nul
+set FEATMGR_RAPPS_DB=http://10.0.2.2:1/rappmgr2.cab
+%FM% /update-catalog > %O%\cat1.txt 2>&1
+call :rc1 "C1 catalog override over plain http refused"
+find "Refused" %O%\cat1.txt >nul
+call :rc0 "C2 ...with the reason"
+set FEATMGR_RAPPS_DB=https://example.invalid/rappmgr2.cab
+%FM% /update-catalog > %O%\cat2.txt 2>&1
+call :rc1 "C3 catalog override with another https address refused (no pin bypass)"
+find "Refused" %O%\cat2.txt >nul
+call :rc0 "C4 ...with the reason"
+set FEATMGR_RAPPS_DB=%O%\no-such-catalog.cab
+%FM% /update-catalog > %O%\cat3.txt 2>&1
+call :rc1 "C5 a local override that does not exist fails"
+set FEATMGR_RAPPS_DB=\\10.0.2.2\share\rappmgr2.cab
+%FM% /update-catalog > %O%\cat4.txt 2>&1
+call :rc1 "C7 a UNC catalog override is refused (no SMB fetch)"
+find "Refused" %O%\cat4.txt >nul
+call :rc0 "C8 ...with the reason"
+set FEATMGR_RAPPS_DB=\\?\UNC\10.0.2.2\share\rappmgr2.cab
+%FM% /update-catalog > %O%\cat5.txt 2>&1
+call :rc1 "C9 a \\?\UNC catalog override is refused"
+find "Refused" %O%\cat5.txt >nul
+call :rc0 "C10 ...with the reason"
+set FEATMGR_RAPPS_DB=
+call :ex %R%\RappsDb\appdb 0 "C6 a refused catalog left nothing behind"
+
+rem ===== Generate installs: what an install record may delete, and where an install may go =====
+copy /y %FX%\fmt-gen-*.ini %R%\Catalog\ >nul
+set GZ=%FX%\fmgen.zip
+set LP=%LOCALAPPDATA%\Programs
+set ARPK=HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\FmGen Ok
+%FM% /nat-install fmt-gen-ok %GZ% > %O%\g1.txt 2>&1
+call :rc0 "G1 a normal Generate install works (zip unpacked, files moved)"
+call :ex "%LP%\FmGenOk\app.exe" 1 "G2 the file is in its own folder"
+echo x> "%LP%\FmGenOk\canary.txt"
+echo x> C:\fmgen-outside.txt
+reg add "%ARPK%\RApps" /v D90 /t REG_SZ /d "\." /f >nul
+reg add "%ARPK%\RApps" /v D91 /t REG_SZ /d "\..\.." /f >nul
+reg add "%ARPK%\RApps" /v F92 /t REG_SZ /d "C:\fmgen-outside.txt" /f >nul
+reg add "%ARPK%\RApps" /v K93 /t REG_SZ /d "HKCU\Software" /f >nul
+%FM% /nat-uninstall "FmGen Ok" "FmGen Ok" "-" > %O%\g2.txt 2>&1
+type %O%\g2.txt >> %LOG%
+call :ex "%LP%\FmGenOk\canary.txt" 1 "G3 a tampered record entry '.' or '..' did not delete the install folder"
+call :ex C:\fmgen-outside.txt 1 "G4 a record entry outside the install folder and the Start menu was not deleted"
+find "refused record entry" %O%\g2.txt >nul
+call :rc0 "G5 the refused entries are reported"
+call :ex "%LP%\FmGenOk\app.exe" 0 "G6 the recorded file was removed"
+reg query HKCU\Software >nul 2>&1
+call :rc0 "G7 HKCU\Software is still there"
+del /q "%LP%\FmGenOk\canary.txt" C:\fmgen-outside.txt 2>nul
+rd /s /q "%LP%\FmGenOk" 2>nul
+reg delete "%ARPK%" /f >nul 2>&1
+for %%V in (dirbang dirpf dirdots deldot deldots delreg) do call :genbad %%V
+del /q %R%\Catalog\fmt-gen-*.ini 2>nul
+goto :gen_done
+:genbad
+%FM% /nat-install fmt-gen-%1 %GZ% > %O%\gbad-%1.txt 2>&1
+call :rc1 "G8 fmt-gen-%1 refused"
+goto :eof
+:gen_done
+call :ex "%LP%\app.exe" 0 "G9 Dir=! put nothing in the base folder"
+call :ex "%LP%\FmGenDot" 0 "G10 DelDir=. created no install folder"
+
+rem ===== Generate: DelDirEmpty = .|.. (the RAPPS idiom), canonical install dirs, own shortcuts, protected keys =====
+copy /y %FX%\fmt-gen-*.ini %R%\Catalog\ >nul
+set GE=%FX%\fmgen-empty.zip
+set UNK=HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall
+rem the 9 entries of the real catalog (rappmgr2.cab, verbatim) that use DelDirEmpty = .|..: each passes the cleanup and install-dir
+rem checks (they run before anything is created), so the run reaches the archive, which here is empty
+%FM% /import-rapps %FX%\rapps-real /anyarch /clean > %O%\gd-imp.txt 2>&1
+call :rc0 "GD1 the 9 real DelDirEmpty = .|.. catalog entries import"
+for %%A in (autoruns chrome diskview filemon processexplorer tcpview vmmap winobj zoomit) do call :gdreal %%A
+rem Process Explorer, the real entry: Dir = SysInternals\Process Explorer, DelDirEmpty = .|..
+rd /s /q "%LP%\SysInternals" 2>nul
+%FM% /nat-install rapps-processexplorer %FX%\fmgen-pe.zip > %O%\gd-pe.txt 2>&1
+call :rc0 "GD4 Process Explorer (real catalog entry with DelDirEmpty = .|..) installs"
+type %O%\gd-pe.txt >> %LOG%
+call :ex "%LP%\SysInternals\Process Explorer\procexp.chm" 1 "GD5 ...into SysInternals\Process Explorer"
+reg query "%UNK%\Process Explorer\RApps" > %O%\gd-pe-rec.txt 2>&1
+type %O%\gd-pe-rec.txt >> %LOG%
+find "\.." %O%\gd-pe-rec.txt >nul
+call :rc0 "GD6 ...the record lists the vendor folder (\..) for removal if empty"
+%FM% /nat-uninstall "Process Explorer" "Process Explorer" "-" > %O%\gd-pe-un.txt 2>&1
+call :rc0 "GD7 Process Explorer uninstalls"
+type %O%\gd-pe-un.txt >> %LOG%
+call :ex "%LP%\SysInternals\Process Explorer" 0 "GD8 the install folder is gone"
+call :ex "%LP%\SysInternals" 0 "GD9 the empty vendor folder (..) is gone too"
+call :ex "%LP%" 1 "GD10 LocalAppData\Programs stays"
+%FM% /nat-install rapps-processexplorer %FX%\fmgen-pe.zip > %O%\gd-pe2.txt 2>&1
+mkdir "%LP%\SysInternals\Other" 2>nul
+echo x> "%LP%\SysInternals\Other\keep.txt"
+%FM% /nat-uninstall "Process Explorer" "Process Explorer" "-" > %O%\gd-pe2-un.txt 2>&1
+call :ex "%LP%\SysInternals\Other\keep.txt" 1 "GD11 a vendor folder that is not empty stays (another app's files kept)"
+call :ex "%LP%\SysInternals\Process Explorer" 0 "GD12 ...while Process Explorer itself is gone"
+rd /s /q "%LP%\SysInternals" 2>nul
+rem one-level Dir: ".." would be LocalAppData\Programs, so the item is dropped with a log line, and a tampered record is refused
+%FM% /nat-install fmt-gen-ddroot %GZ% > %O%\gd-root.txt 2>&1
+call :rc0 "GD13 Dir=<one name> with DelDirEmpty = .|.. installs"
+type %O%\gd-root.txt >> %LOG%
+find "dropped the entry's DelDirEmpty item" %O%\gd-root.txt >nul
+call :rc0 "GD14 ...the '..' item (LocalAppData\Programs) is dropped with a log line"
+reg query "%UNK%\FmGen DD\RApps" > %O%\gd-root-rec.txt 2>&1
+find "\.." %O%\gd-root-rec.txt >nul
+call :rc1 "GD15 ...and is not in the record"
+reg add "%UNK%\FmGen DD\RApps" /v d99 /t REG_SZ /d "\.." /f >nul
+%FM% /nat-uninstall "FmGen DD" "FmGen DD" "-" > %O%\gd-root-un.txt 2>&1
+type %O%\gd-root-un.txt >> %LOG%
+find "is a protected folder" %O%\gd-root-un.txt >nul
+call :rc0 "GD16 a tampered record '\..' whose parent is LocalAppData\Programs is refused at uninstall"
+call :ex "%LP%" 1 "GD17 LocalAppData\Programs is still there"
+call :ex "%LP%\FmGenDD" 0 "GD18 the app folder itself is gone"
+rem the install directory is checked in canonical form: 8.3 names, doubled or trailing separators, " ", a trailing dot
+for %%V in (dirshort dirdbl dirslash dirlpslash dirspace dirtdot dirwin deldirdots delfiledot regcrypt regnitro regclsid) do call :genbad %%V
+reg query "%UNK%" > %O%\gb-arp.txt 2>&1
+find /i "FmGen Bad" %O%\gb-arp.txt >nul
+call :rc1 "GB1 no refused install left an Add/Remove Programs record"
+dir /b "%LP%" > %O%\gb-lp.txt 2>&1
+find /i "FmGenBad" %O%\gb-lp.txt >nul
+call :rc1 "GB2 ...or a folder"
+call :ex "%LP%\FmGenTdot" 0 "GB3 Dir=<name>. created nothing"
+%FM% /nat-install fmt-gen-pfok %GZ% > %O%\gp1.txt 2>&1
+call :rc0 "GP1 Dir=%%ProgramFiles%%\<name> (strictly below Program Files) installs"
+call :ex "%ProgramFiles%\FmGenPf\app.exe" 1 "GP2 ...into its own folder"
+%FM% /nat-uninstall "FmGen Pf" "FmGen Pf" "-" > %O%\gp2.txt 2>&1
+call :ex "%ProgramFiles%\FmGenPf" 0 "GP3 ...and uninstalls"
+%FM% /nat-install fmt-gen-shortok %GZ% > %O%\gp3.txt 2>&1
+if exist "%SystemDrive%\PROGRA~1\" goto :gp_short
+call :rc1 "GP4 no 8.3 names on this volume: Dir=%%SystemDrive%%\PROGRA~1\<name> is not below Program Files, refused"
+goto :gp_short_done
+:gp_short
+call :rc0 "GP4 Dir=%%SystemDrive%%\PROGRA~1\<name> (8.3) installs below Program Files"
+reg query "%UNK%\FmGen Short" /v InstallLocation > %O%\gp4.txt 2>&1
+type %O%\gp4.txt >> %LOG%
+find /i "PROGRA~1" %O%\gp4.txt >nul
+call :rc1 "GP5 ...and the record holds the long name"
+%FM% /nat-uninstall "FmGen Short" "FmGen Short" "-" > %O%\gp5.txt 2>&1
+call :ex "%ProgramFiles%\FmGenShort" 0 "GP6 ...and uninstalls"
+:gp_short_done
+rem registry: the app's own per-user ProgID may go; the Cryptography and ReactOS keys never
+%FM% /nat-install fmt-gen-progid %GZ% > %O%\gr1.txt 2>&1
+call :rc0 "GR1 DelReg = HKCU\SOFTWARE\Classes\<App.ProgID> (as the Sysinternals entries) is accepted"
+reg add "HKCU\Software\Classes\FmGen.Logfile.1" /v x /d y /f >nul
+%FM% /nat-uninstall "FmGen ProgId" "FmGen ProgId" "-" > %O%\gr2.txt 2>&1
+reg query "HKCU\Software\Classes\FmGen.Logfile.1" >nul 2>&1
+call :rc1 "GR2 ...and that ProgID key is removed at uninstall"
+%FM% /nat-install fmt-gen-ok %GZ% > %O%\gr3.txt 2>&1
+reg add HKLM\SOFTWARE\ReactOS\Nitro\FmGenKeep /v x /d y /f >nul
+reg add HKLM\SOFTWARE\Microsoft\Cryptography\FmGenKeep /v x /d y /f >nul
+reg add "%ARPK%\RApps" /v K97 /t REG_SZ /d "HKLM\SOFTWARE\ReactOS\Nitro\FmGenKeep" /f >nul
+reg add "%ARPK%\RApps" /v K98 /t REG_SZ /d "HKLM\SOFTWARE\Microsoft\Cryptography\FmGenKeep" /f >nul
+%FM% /nat-uninstall "FmGen Ok" "FmGen Ok" "-" > %O%\gr4.txt 2>&1
+type %O%\gr4.txt >> %LOG%
+reg query HKLM\SOFTWARE\ReactOS\Nitro\FmGenKeep >nul 2>&1
+call :rc0 "GR3 a tampered record cannot delete under HKLM\SOFTWARE\ReactOS\Nitro (featmgr state)"
+reg query HKLM\SOFTWARE\Microsoft\Cryptography\FmGenKeep >nul 2>&1
+call :rc0 "GR4 ...or under HKLM\SOFTWARE\Microsoft\Cryptography"
+reg delete HKLM\SOFTWARE\ReactOS\Nitro\FmGenKeep /f >nul 2>&1
+reg delete HKLM\SOFTWARE\Microsoft\Cryptography\FmGenKeep /f >nul 2>&1
+rd /s /q "%LP%\FmGenOk" 2>nul
+rem Start menu: uninstall deletes the shortcut this install made (its target is in the install folder), nothing else there
+%FM% /nat-install fmt-gen-lnk %GZ% > %O%\gs1.txt 2>&1
+call :rc0 "GS1 a Generate install with a Start menu shortcut"
+set LNK=
+reg query "%UNK%\FmGen Lnk\RApps" > %O%\gs-rec.txt 2>&1
+type %O%\gs-rec.txt >> %LOG%
+for /f "tokens=2,*" %%A in ('find /i "FmGen Lnk.lnk" ^< %O%\gs-rec.txt') do set LNK=%%B
+if defined LNK (echo PASS GS2 the record holds the exact path of the shortcut>> %LOG%) else (call :fail "GS2 the record holds the exact path of the shortcut" "no .lnk entry")
+call :ex "%LNK%" 1 "GS3 the shortcut exists"
+for %%I in ("%LNK%") do set PMU=%%~dpI
+echo x> "%PMU%FmGen Other.lnk"
+set OL=
+for /r "%ALLUSERSPROFILE%" %%L in (*.lnk) do if not defined OL set OL=%%L
+if defined OL copy /y "%OL%" "%PMU%FmGen Foreign.lnk" >nul
+reg add "%UNK%\FmGen Lnk\RApps" /v F95 /t REG_SZ /d "%PMU%FmGen Foreign.lnk" /f >nul
+reg add "%UNK%\FmGen Lnk\RApps" /v F96 /t REG_SZ /d "%PMU%FmGen Other.lnk" /f >nul
+%FM% /nat-uninstall "FmGen Lnk" "FmGen Lnk" "-" > %O%\gs2.txt 2>&1
+type %O%\gs2.txt >> %LOG%
+call :ex "%LNK%" 0 "GS4 the app's own shortcut is removed"
+call :ex "%PMU%FmGen Other.lnk" 1 "GS5 a file in the Start menu that is not the app's shortcut is kept"
+if defined OL call :ex "%PMU%FmGen Foreign.lnk" 1 "GS6 another program's shortcut named in the record is kept"
+find "refused record entry F96" %O%\gs2.txt >nul
+call :rc0 "GS7 ...and the refusal is reported"
+del /q "%PMU%FmGen Other.lnk" "%PMU%FmGen Foreign.lnk" 2>nul
+rd /s /q "%LP%\FmGenLnk" 2>nul
+del /q %R%\Catalog\fmt-gen-*.ini 2>nul
+goto :gd_done
+:gdreal
+%FM% /nat-install rapps-%1 %GE% > %O%\gd-real-%1.txt 2>&1
+type %O%\gd-real-%1.txt >> %LOG%
+find "unsafe cleanup entry" %O%\gd-real-%1.txt >nul
+call :rc1 "GD2 rapps-%1: its Del* lists pass the checks (no unsafe cleanup entry)"
+find "has no archive installer" %O%\gd-real-%1.txt >nul
+if not errorlevel 1 (echo PASS GD3 rapps-%1: on this architecture the entry is not an archive install, nothing to check>> %LOG%& goto :eof)
+find "held none of the files" %O%\gd-real-%1.txt >nul
+call :rc0 "GD3 rapps-%1: install folder accepted; the run got as far as the (empty) archive"
+goto :eof
+:gd_done
 
 rem ===== SCOOP (SCOOP-FEATMGR-01): bucket import, Provider=scoop install/uninstall/state =====
 rem Offline: the bucket is a fixture directory and "scoop" is a stub (fixtures\scoop-stub.cmd) in a fake
@@ -1034,7 +1340,7 @@ type %O%\sd3.txt >> %LOG%
 call :ex "%CD%\PowerShell.lnk" 0 "SD19 PowerShell shortcut removed"
 call :ex "%CD%\Firefox.lnk" 0 "SD20 Firefox shortcut removed"
 call :cmdlnk 1 "SD21 Command Prompt is back on the desktop"
-call :ielnk 1 "SD22 the Internet Explorer entry is back in the Start menu"
+call :ielnk 0 "SD22 no Internet Explorer entry comes back, iexplore opens the default browser as on Windows 11"
 rd /s /q "%FD%" 2>nul
 rd /s /q "%ProgramFiles%\PowerShell" 2>nul
 goto :sd_done
@@ -1048,7 +1354,7 @@ call :ex "%PM%\PowerShell.lnk" 1 "SP3 PowerShell shortcut in the Start menu"
 call :cmdlnk 0 "SP4 no Command Prompt shortcut on the desktop"
 call :wslnk 1 "SP5 Command Prompt is under Start/Windows System"
 call :ex "%CD%\Firefox.lnk" 0 "SP6 no Firefox shortcut while Firefox is absent"
-call :ielnk 1 "SP7 the Internet Explorer entry is in the Start menu"
+call :ielnk 0 "SP7 no Internet Explorer entry in the Start menu, as on Windows 11"
 mkdir "%FD%" 2>nul
 copy /y %SystemRoot%\system32\cmd.exe "%FD%\firefox.exe" >nul
 %FM% /shell-defaults > %O%\sp1.txt 2>&1
@@ -1060,11 +1366,42 @@ del /q "%FD%\firefox.exe" 2>nul
 %FM% /shell-defaults > %O%\sp2.txt 2>&1
 call :rc0 "SP12 /shell-defaults after the Firefox stand-in is gone"
 call :ex "%CD%\Firefox.lnk" 0 "SP13 Firefox shortcut removed"
-call :ielnk 1 "SP14 the Internet Explorer entry is back in the Start menu"
+call :ielnk 0 "SP14 no Internet Explorer entry comes back, iexplore opens the default browser"
 call :ex "%CD%\PowerShell.lnk" 1 "SP15 PowerShell shortcut still on the desktop"
 call :cmdlnk 0 "SP16 still no Command Prompt shortcut on the desktop"
 rd /s /q "%FD%" 2>nul
 :sd_done
+
+rem --- leftover plain Internet Explorer shortcuts are removed once (RemoveIeLinksOnce, flag IeShortcutsRemoved): a plain
+rem     one the user makes afterwards stays, one with arguments is never removed. WScript.Shell makes the shortcuts.
+set IEX=%ProgramFiles%\Internet Explorer\iexplore.exe
+set IEL=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Wine Internet Explorer.lnk
+set IEA=%APPDATA%\Microsoft\Windows\Start Menu\Programs\IE with arguments.lnk
+set IEK=HKCU\SOFTWARE\ReactOS\Nitro\Featmgr
+echo Set l = CreateObject("WScript.Shell").CreateShortcut(WScript.Arguments(0))> %O%\mklnk.vbs
+echo l.TargetPath = WScript.Arguments(1)>> %O%\mklnk.vbs
+echo If WScript.Arguments.Count ^> 2 Then l.Arguments = WScript.Arguments(2)>> %O%\mklnk.vbs
+echo l.Save>> %O%\mklnk.vbs
+%FM% /shell-defaults > %O%\ie0.txt 2>&1
+reg query %IEK% /v IeShortcutsRemoved >nul 2>&1
+call :rc0 "IE1 the per-user IE shortcut flag is set once shell defaults ran"
+cscript //nologo %O%\mklnk.vbs "%IEL%" "%IEX%" >> %LOG% 2>&1
+cscript //nologo %O%\mklnk.vbs "%IEA%" "%IEX%" "https://example.com" >> %LOG% 2>&1
+call :ex "%IEL%" 1 "IE2 a plain IE shortcut made by the user"
+call :ex "%IEA%" 1 "IE3 an IE shortcut with arguments made by the user"
+%FM% /shell-defaults > %O%\ie1.txt 2>&1
+call :ex "%IEL%" 1 "IE4 the user's plain IE shortcut survives the next run, the flag is set"
+reg delete %IEK% /v IeShortcutsRemoved /f >nul 2>&1
+%FM% /shell-defaults > %O%\ie2.txt 2>&1
+type %O%\ie2.txt >> %LOG%
+call :ex "%IEL%" 0 "IE5 with the flag cleared the plain IE shortcut is removed, once"
+call :ex "%IEA%" 1 "IE6 the IE shortcut with arguments is never removed"
+reg query %IEK% /v IeShortcutsRemoved >nul 2>&1
+call :rc0 "IE7 the flag is set again"
+cscript //nologo %O%\mklnk.vbs "%IEL%" "%IEX%" >> %LOG% 2>&1
+%FM% /shell-defaults > %O%\ie3.txt 2>&1
+call :ex "%IEL%" 1 "IE8 a plain IE shortcut re-created afterwards stays"
+del /q "%IEL%" "%IEA%" %O%\mklnk.vbs 2>nul
 
 rem --- cleanup fixtures
 del /q %R%\Catalog\fmt-base.ini %R%\Catalog\fmt-dep.ini 2>nul

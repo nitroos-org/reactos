@@ -292,6 +292,8 @@
 292 stub esent
 @ stub JetSetSystemParameterA
 @ stub JetSetSystemParameterW
+@ stdcall JetDetachDatabase2W(ptr wstr long)
+@ stdcall JetGetSystemParameterW(ptr ptr long ptr ptr long)
 @ stub JetOpenTableW
 @ stub JetOpenDatabaseW
 @ stub JetGetTableColumnInfoW

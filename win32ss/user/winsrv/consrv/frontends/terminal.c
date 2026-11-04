@@ -532,7 +532,6 @@ ConioWriteText(PFRONTEND FrontEnd,
     COORD OldCursor;
     UINT ScrolledLines;
     BOOLEAN bFullwidth;
-    BOOLEAN bCJK = Console->IsCJK;
     BOOLEAN bWrap = (Vt || (Buff->Mode & ENABLE_WRAP_AT_EOL_OUTPUT));
     WCHAR Char;
 
@@ -802,7 +801,7 @@ ConioWriteText(PFRONTEND FrontEnd,
         UpdateRect.Right = max(UpdateRect.Right, Buff->CursorPosition.X);
 
         /* For Chinese, Japanese and Korean */
-        bFullwidth = (bCJK && IS_FULL_WIDTH(Char));
+        bFullwidth = CON_IS_FULL_WIDTH(Console, Char);
 
         /* Check whether we can insert the full-width character */
         if (bFullwidth)

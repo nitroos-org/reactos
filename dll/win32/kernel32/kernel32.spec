@@ -541,6 +541,7 @@
 @ stdcall GetLocaleInfoA(long long ptr long)
 @ stdcall -version=0x600+ GetLocaleInfoEx(wstr long ptr long)
 @ stdcall GetLocaleInfoW(long long ptr long)
+@ stdcall GetPackageApplicationIds(ptr ptr ptr ptr)
 @ stdcall GetPackageFamilyName(long ptr ptr)
 @ stdcall GetPackageFamilyNameFromToken(long ptr ptr)
 @ stdcall GetPackageFullName(long ptr ptr)
