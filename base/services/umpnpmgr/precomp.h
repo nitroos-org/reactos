@@ -73,6 +73,7 @@ PnpEventThread(
 /* install.c */
 
 extern HANDLE hUserToken;
+extern CRITICAL_SECTION UserTokenLock;
 extern HANDLE hInstallEvent;
 extern HANDLE hNoPendingInstalls;
 
