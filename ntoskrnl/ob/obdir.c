@@ -492,6 +492,19 @@ NtOpenDirectoryObject(OUT PHANDLE DirectoryHandle,
         }
         _SEH2_END;
     }
+    else
+    {
+        /* Windows stores NULL in the caller's handle when the call fails; it was probed above */
+        _SEH2_TRY
+        {
+            *DirectoryHandle = NULL;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            /* The variable went away meanwhile; keep the failure status */
+        }
+        _SEH2_END;
+    }
 
     /* Return the status to the caller */
     return Status;

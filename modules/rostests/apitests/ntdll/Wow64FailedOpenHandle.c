@@ -6,6 +6,9 @@
  * the old value left in place it closes whatever the variable held, possibly a live handle.
  * A failure found before the native call (an unreadable object name) and an unwritable handle
  * variable leave the variable unchanged.
+ * A native caller (64-bit, or 32-bit on a 32-bit system) gets the native services' own rules, which
+ * differ per service. Windows 10 22H2 writes NULL for the services in NativeChecks and, measured for
+ * 64-bit callers only (so only a 64-bit build checks them), leaves the variable alone for the others.
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 #include "precomp.h"
@@ -36,6 +39,149 @@ static void CheckFailed(int Line, const char *Service, NTSTATUS Status, HANDLE H
 }
 #define CHECK_FAILED(Service) CheckFailed(__LINE__, Service, Status, Handle)
 
+#ifdef _WIN64
+static void CheckUnchanged(int Line, const char *Service, NTSTATUS Status, HANDLE Handle)
+{
+    ok_(__FILE__, Line)(!NT_SUCCESS(Status), "%s: status 0x%lx, expected a failure\n", Service, Status);
+    if (NT_SUCCESS(Status))
+    {
+        if (Handle && Handle != SENTINEL) NtClose(Handle);
+        return;
+    }
+    ok_(__FILE__, Line)(Handle == SENTINEL, "%s: status 0x%lx, handle %p, expected it unchanged\n", Service, Status, Handle);
+}
+#define CHECK_UNCHANGED(Service) CheckUnchanged(__LINE__, Service, Status, Handle)
+#endif
+
+static void NativeChecks(void)
+{
+    HANDLE Handle, *ReadOnly;
+    NTSTATUS Status;
+    CLIENT_ID ClientId;
+    CONTEXT Context;
+    INITIAL_TEB InitialTeb;
+    ULONG Old;
+#ifdef _WIN64
+    IO_STATUS_BLOCK Io;
+    LARGE_INTEGER Value;
+#endif
+
+    /* The successful calls still return a handle */
+    Handle = SENTINEL;
+    Status = NtOpenDirectoryObject(&Handle, DIRECTORY_QUERY, Named(L"\\BaseNamedObjects"));
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok(Handle != NULL && Handle != SENTINEL, "NtOpenDirectoryObject: handle %p\n", Handle);
+    if (NT_SUCCESS(Status)) NtClose(Handle);
+    Handle = SENTINEL;
+    Status = NtCreateKeyedEvent(&Handle, EVENT_ALL_ACCESS, NULL, 0);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok(Handle != NULL && Handle != SENTINEL, "NtCreateKeyedEvent: handle %p\n", Handle);
+    if (NT_SUCCESS(Status)) NtClose(Handle);
+    Handle = SENTINEL;
+    Status = NtCreateJobObject(&Handle, JOB_OBJECT_ALL_ACCESS, NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok(Handle != NULL && Handle != SENTINEL, "NtCreateJobObject: handle %p\n", Handle);
+    if (NT_SUCCESS(Status)) NtClose(Handle);
+
+    /* Registry */
+    Handle = SENTINEL;
+    Status = NtOpenKey(&Handle, KEY_READ, Named(L"\\Registry\\Machine\\Software\\WoW64NullHandleNoSuchKey"));
+    CHECK_FAILED("NtOpenKey");
+    Handle = SENTINEL;
+    Status = NtOpenKeyEx(&Handle, KEY_READ, Named(L"\\Registry\\Machine\\Software\\WoW64NullHandleNoSuchKey"), 0);
+    CHECK_FAILED("NtOpenKeyEx");
+    Handle = SENTINEL;
+    Status = NtCreateKey(&Handle, KEY_ALL_ACCESS, Named(L"\\Registry\\User\\WoW64NullHandleNoSuchSid\\Sub"), 0, NULL, 0, NULL);
+    CHECK_FAILED("NtCreateKey");
+
+    /* Object directories, symbolic links, sections, keyed events and jobs */
+    Handle = SENTINEL;
+    Status = NtOpenDirectoryObject(&Handle, DIRECTORY_ALL_ACCESS, Named(MISSING_DIR));
+    ok_ntstatus(Status, STATUS_OBJECT_NAME_NOT_FOUND);
+    CHECK_FAILED("NtOpenDirectoryObject");
+    Handle = SENTINEL;
+    Status = NtCreateDirectoryObject(&Handle, DIRECTORY_ALL_ACCESS, Named(MISSING_DIR L"\\Directory"));
+    CHECK_FAILED("NtCreateDirectoryObject");
+    Handle = SENTINEL;
+    Status = NtOpenSymbolicLinkObject(&Handle, SYMBOLIC_LINK_ALL_ACCESS, Named(MISSING_DIR));
+    CHECK_FAILED("NtOpenSymbolicLinkObject");
+    Handle = SENTINEL;
+    Status = NtOpenSection(&Handle, SECTION_ALL_ACCESS, Named(MISSING_OBJECT));
+    CHECK_FAILED("NtOpenSection");
+    Handle = SENTINEL;
+    Status = NtCreateKeyedEvent(&Handle, EVENT_ALL_ACCESS, Named(MISSING_DIR L"\\KeyedEvent"), 0);
+    ok_ntstatus(Status, STATUS_OBJECT_PATH_NOT_FOUND);
+    CHECK_FAILED("NtCreateKeyedEvent");
+    Handle = SENTINEL;
+    Status = NtCreateJobObject(&Handle, JOB_OBJECT_ALL_ACCESS, Named(MISSING_DIR L"\\Job"));
+    ok_ntstatus(Status, STATUS_OBJECT_PATH_NOT_FOUND);
+    CHECK_FAILED("NtCreateJobObject");
+
+    /* Duplication of an invalid handle */
+    Handle = SENTINEL;
+    Status = NtDuplicateObject(NtCurrentProcess(), (HANDLE)(ULONG_PTR)0x1230, NtCurrentProcess(), &Handle,
+                               0, 0, DUPLICATE_SAME_ACCESS);
+    CHECK_FAILED("NtDuplicateObject");
+
+    /* A thread in an invalid process, with an empty context and initial TEB. Windows 10 gives
+     * STATUS_INVALID_PARAMETER; which of the two it checks first is unknown, so not implemented */
+    RtlZeroMemory(&ClientId, sizeof(ClientId));
+    RtlZeroMemory(&Context, sizeof(Context));
+    RtlZeroMemory(&InitialTeb, sizeof(InitialTeb));
+    Handle = SENTINEL;
+    Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, (HANDLE)(ULONG_PTR)0x1230, &ClientId, &Context, &InitialTeb, TRUE);
+    todo_if(is_reactos()) ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+    CHECK_FAILED("NtCreateThread");
+
+    /* An unwritable handle variable fails the call and is not written */
+    Status = NtOpenDirectoryObject(NULL, DIRECTORY_ALL_ACCESS, Named(MISSING_DIR));
+    ok_ntstatus(Status, STATUS_ACCESS_VIOLATION);
+    Status = NtCreateJobObject(NULL, JOB_OBJECT_ALL_ACCESS, Named(MISSING_DIR L"\\Job"));
+    ok_ntstatus(Status, STATUS_ACCESS_VIOLATION);
+    ReadOnly = VirtualAlloc(NULL, PAGE_SIZE, MEM_COMMIT, PAGE_READWRITE);
+    ok(ReadOnly != NULL, "VirtualAlloc failed %lu\n", GetLastError());
+    if (!ReadOnly) return;
+    *ReadOnly = SENTINEL;
+    ok(VirtualProtect(ReadOnly, PAGE_SIZE, PAGE_READONLY, &Old), "VirtualProtect failed %lu\n", GetLastError());
+    Status = NtOpenDirectoryObject(ReadOnly, DIRECTORY_ALL_ACCESS, Named(MISSING_DIR));
+    ok_ntstatus(Status, STATUS_ACCESS_VIOLATION);
+    ok(*ReadOnly == SENTINEL, "Handle %p\n", *ReadOnly);
+    Status = NtCreateJobObject(ReadOnly, JOB_OBJECT_ALL_ACCESS, Named(MISSING_DIR L"\\Job"));
+    ok_ntstatus(Status, STATUS_ACCESS_VIOLATION);
+    ok(*ReadOnly == SENTINEL, "Handle %p\n", *ReadOnly);
+    Status = NtCreateThread(ReadOnly, THREAD_ALL_ACCESS, NULL, (HANDLE)(ULONG_PTR)0x1230, &ClientId, &Context, &InitialTeb, TRUE);
+    ok_ntstatus(Status, STATUS_ACCESS_VIOLATION);
+    ok(*ReadOnly == SENTINEL, "Handle %p\n", *ReadOnly);
+    VirtualFree(ReadOnly, 0, MEM_RELEASE);
+
+#ifdef _WIN64
+    /* These native services leave the variable alone */
+    Handle = SENTINEL;
+    Status = NtOpenFile(&Handle, FILE_GENERIC_READ, Named(L"\\??\\C:\\WoW64NullHandleNoSuchDir\\x.txt"), &Io,
+                        FILE_SHARE_READ, FILE_SYNCHRONOUS_IO_NONALERT);
+    CHECK_UNCHANGED("NtOpenFile");
+    Handle = SENTINEL;
+    Status = NtOpenEvent(&Handle, EVENT_ALL_ACCESS, Named(MISSING_OBJECT));
+    CHECK_UNCHANGED("NtOpenEvent");
+    Handle = SENTINEL;
+    Status = NtCreateEvent(&Handle, EVENT_ALL_ACCESS, Named(MISSING_DIR L"\\Event"), NotificationEvent, FALSE);
+    CHECK_UNCHANGED("NtCreateEvent");
+    Handle = SENTINEL;
+    Status = NtCreateSemaphore(&Handle, SEMAPHORE_ALL_ACCESS, NULL, 2, 1);
+    CHECK_UNCHANGED("NtCreateSemaphore(count)");
+    Handle = SENTINEL;
+    Status = NtOpenTimer(&Handle, TIMER_ALL_ACCESS, Named(MISSING_OBJECT));
+    CHECK_UNCHANGED("NtOpenTimer");
+    Handle = SENTINEL;
+    Status = NtOpenJobObject(&Handle, JOB_OBJECT_ALL_ACCESS, Named(MISSING_OBJECT));
+    CHECK_UNCHANGED("NtOpenJobObject");
+    Handle = SENTINEL;
+    Value.QuadPart = PAGE_SIZE;
+    Status = NtCreateSection(&Handle, SECTION_ALL_ACCESS, Named(MISSING_DIR L"\\Section"), &Value, PAGE_READWRITE, SEC_COMMIT, NULL);
+    CHECK_UNCHANGED("NtCreateSection");
+#endif
+}
+
 START_TEST(Wow64FailedOpenHandle)
 {
     HANDLE Handle, *ReadOnly;
@@ -52,8 +198,8 @@ START_TEST(Wow64FailedOpenHandle)
     IsWow64Process(GetCurrentProcess(), &Wow64);
     if (!Wow64)
     {
-        /* The native services differ per service; this contract is the WoW64 layer's */
-        skip("Not running under WoW64\n");
+        /* The native services differ per service; the contract below is the WoW64 layer's */
+        NativeChecks();
         return;
     }
 
