@@ -1,0 +1,11 @@
+[Section]
+Name = FmGen NoFiles
+Version = 1.0
+Category = 12
+URLDownload = https://example.invalid/nofiles.zip
+SHA1 = 5c37425065c4be5ab8c071102f944080abeeba11
+Installer = Generate
+
+[Generate]
+Dir = FmGenNoFiles\App
+DelDirEmpty = .|..
