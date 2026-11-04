@@ -88,3 +88,22 @@ BEGIN
     IDS_INVALID_NAME "Le nom de raccourci saisi contient des caractères invalides pour les noms de fichier, ou est trop long."
     IDS_BROWSE_FOR_TARGET "Veuillez sélectionner la cible du raccourci ci-dessous :"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "Programmes et fonctionnalités"
+    IDS_PROG_HEADER "Désinstallez ou modifiez un programme. Pour installer un logiciel ou activer ou désactiver des fonctionnalités de NitroOS, utilisez ""Activer ou désactiver des fonctionnalités de NitroOS""."
+    IDS_PROG_COL_NAME "Nom"
+    IDS_PROG_COL_PUBLISHER "Éditeur"
+    IDS_PROG_COL_VERSION "Version"
+    IDS_PROG_COL_DATE "Installé le"
+    IDS_PROG_UNINSTALL "&Désinstaller"
+    IDS_PROG_CHANGE "&Modifier"
+    IDS_PROG_REFRESH "Ac&tualiser"
+    IDS_PROG_FEATURES "&Activer ou désactiver des fonctionnalités de NitroOS"
+    IDS_PROG_CLOSE "&Fermer"
+    IDS_PROG_CONFIRM "Voulez-vous désinstaller '%s' ?"
+    IDS_PROG_STARTFAIL "Le programme n'a pas pu être démarré (erreur %lu) :\n%s"
+    IDS_FEATURESNAME "Activer ou désactiver des fonctionnalités de NitroOS"
+    IDS_FEATURESDESCRIPTION "Activer ou désactiver des fonctionnalités facultatives de NitroOS et des logiciels complémentaires."
+END

@@ -92,3 +92,22 @@ BEGIN
     IDS_INVALID_NAME "A megadott parancsikon név érvénytelen fájlnév karaktereket tartalmaz, vagy túl hosszú."
     IDS_BROWSE_FOR_TARGET "Kérem válassza ki a parancsikon hivatkozását:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "Programok és szolgáltatások"
+    IDS_PROG_HEADER "Távolítson el vagy módosítson egy programot. Szoftver telepítéséhez, illetve rendszerfunkciók be- vagy kikapcsolásához használja a következőt: ""NitroOS funkcióinak be- vagy kikapcsolása""."
+    IDS_PROG_COL_NAME "Név"
+    IDS_PROG_COL_PUBLISHER "Kiadó"
+    IDS_PROG_COL_VERSION "Verzió"
+    IDS_PROG_COL_DATE "Telepítés dátuma"
+    IDS_PROG_UNINSTALL "&Eltávolítás"
+    IDS_PROG_CHANGE "&Módosítás"
+    IDS_PROG_REFRESH "&Frissítés"
+    IDS_PROG_FEATURES "&NitroOS funkcióinak be- vagy kikapcsolása"
+    IDS_PROG_CLOSE "&Bezárás"
+    IDS_PROG_CONFIRM "Biztosan eltávolítja a(z) '%s' programot?"
+    IDS_PROG_STARTFAIL "A program nem indítható el (hibakód: %lu):\n%s"
+    IDS_FEATURESNAME "NitroOS funkcióinak be- vagy kikapcsolása"
+    IDS_FEATURESDESCRIPTION "A NitroOS opcionális funkcióinak és a kiegészítő szoftvereknek be- vagy kikapcsolása."
+END
