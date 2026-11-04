@@ -2085,14 +2085,28 @@ MiNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
         MmUnlockSectionSegment(Segment);
         MmUnlockAddressSpace(AddressSpace);
 
-        /* The data must be paged in. Lock the file, so that the VDL doesn't get updated behind us. */
-        FsRtlAcquireFileExclusive(Segment->FileObject);
-
         PFSRTL_COMMON_FCB_HEADER FcbHeader = Segment->FileObject->FsContext;
+        BOOLEAN FileLocked = FALSE;
+
+        /*
+         * The data must be paged in. Lock the file, so that the VDL doesn't get updated behind us.
+         *
+         * Unless this thread holds the file already: a file system copying from the cache under its
+         * shared hold of the file (CcCopyRead, FsRtlCopyRead) faults here when Mm took the view's page
+         * away after Cc made it resident. Waiting for the file exclusively would wait for ourselves,
+         * forever, and every later user of the file would queue behind us. Our hold keeps the VDL from
+         * moving just as well, and Cc pages the same data in under it (CcRosEnsureVacbResident).
+         */
+        if (!FcbHeader || !FcbHeader->Resource || !ExIsResourceAcquiredSharedLite(FcbHeader->Resource))
+        {
+            FsRtlAcquireFileExclusive(Segment->FileObject);
+            FileLocked = TRUE;
+        }
 
         Status = MmMakeSegmentResident(Segment, Offset.QuadPart, PAGE_SIZE, &FcbHeader->ValidDataLength, FALSE, NULL);
 
-        FsRtlReleaseFile(Segment->FileObject);
+        if (FileLocked)
+            FsRtlReleaseFile(Segment->FileObject);
 
         /* Lock address space again */
         MmLockAddressSpace(AddressSpace);
