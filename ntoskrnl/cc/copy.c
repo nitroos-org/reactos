@@ -816,7 +816,7 @@ CcZeroData (
     LARGE_INTEGER WriteOffset;
     LONGLONG Length;
     PROS_VACB Vacb;
-    PROS_SHARED_CACHE_MAP SharedCacheMap = FileObject->SectionObjectPointer->SharedCacheMap;
+    PROS_SHARED_CACHE_MAP SharedCacheMap;
 
     CCTRACE(CC_API_DEBUG, "FileObject=%p StartOffset=%I64u EndOffset=%I64u Wait=%d\n",
         FileObject, StartOffset->QuadPart, EndOffset->QuadPart, Wait);
@@ -827,6 +827,10 @@ CcZeroData (
 
     Length = EndOffset->QuadPart - StartOffset->QuadPart;
     WriteOffset.QuadPart = StartOffset->QuadPart;
+
+    /* Referenced: the file object may hold no private cache map, and then nothing else keeps the
+     * map (the lazy writer deletes a map nobody has open once it wrote its dirty data) */
+    SharedCacheMap = CcRosReferenceSharedCacheMap(FileObject->SectionObjectPointer);
 
     if (!SharedCacheMap)
     {
@@ -880,6 +884,8 @@ CcZeroData (
         return TRUE;
     }
 
+    _SEH2_TRY
+    {
     ASSERT(EndOffset->QuadPart <= SharedCacheMap->SectionSize.QuadPart);
 
     while(WriteOffset.QuadPart < EndOffset->QuadPart)
@@ -891,7 +897,7 @@ CcZeroData (
         if (!NT_SUCCESS(Status))
         {
             ExRaiseStatus(Status);
-            return FALSE;
+            _SEH2_YIELD(return FALSE);
         }
 
         _SEH2_TRY
@@ -916,6 +922,12 @@ CcZeroData (
         }
         _SEH2_END;
     }
+    }
+    _SEH2_FINALLY
+    {
+        CcRosDereferenceSharedCacheMap(SharedCacheMap);
+    }
+    _SEH2_END;
 
     /* Flush if needed */
     if (FileObject->Flags & FO_WRITE_THROUGH)
