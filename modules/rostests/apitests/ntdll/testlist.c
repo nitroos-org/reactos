@@ -233,6 +233,15 @@ extern void func_SystemDllTls(void);
 extern void func_TimerResolution(void);
 extern void func_UserModeException(void);
 extern void func_StackOverflowDispatch(void);
+extern void func_NtFlushBuffersFileEx(void);
+extern void func_NtGetCurrentProcessorNumberEx(void);
+extern void func_RtlCrc64(void);
+extern void func_RtlExtractBitMap(void);
+extern void func_RtlFls(void);
+extern void func_RtlGetPreciseTime(void);
+extern void func_RtlInitializeContext(void);
+extern void func_RtlWow64GetProcessMachines(void);
+extern void func_ZwQuerySystemInformationEx(void);
 
 const struct test winetest_testlist[] =
 {
@@ -464,6 +473,15 @@ const struct test winetest_testlist[] =
     { "TimerResolution",                func_TimerResolution },
     { "UserModeException",              func_UserModeException },
     { "StackOverflowDispatch",          func_StackOverflowDispatch },
+    { "NtFlushBuffersFileEx",           func_NtFlushBuffersFileEx },
+    { "NtGetCurrentProcessorNumberEx",  func_NtGetCurrentProcessorNumberEx },
+    { "RtlCrc64",                       func_RtlCrc64 },
+    { "RtlExtractBitMap",               func_RtlExtractBitMap },
+    { "RtlFls",                         func_RtlFls },
+    { "RtlGetPreciseTime",              func_RtlGetPreciseTime },
+    { "RtlInitializeContext",           func_RtlInitializeContext },
+    { "RtlWow64GetProcessMachines",     func_RtlWow64GetProcessMachines },
+    { "ZwQuerySystemInformationEx",     func_ZwQuerySystemInformationEx },
 #ifdef _M_IX86
     { "RtlUnwind",                      func_RtlUnwind },
 #endif
