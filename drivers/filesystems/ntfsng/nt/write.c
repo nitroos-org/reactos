@@ -1000,6 +1000,7 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             {
                 CcInitializeCacheMap(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize, FALSE,
                                      &NgGlobal.CacheCallbacks, Fcb);
+                CcRosAllowLazyClose(FileObject);
             }
             if (!CcCopyWrite(FileObject, &Offset, Length, TRUE, Buffer))
                 Status = STATUS_UNSUCCESSFUL;

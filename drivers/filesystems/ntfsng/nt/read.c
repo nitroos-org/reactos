@@ -302,6 +302,7 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             {
                 CcInitializeCacheMap(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize, FALSE,
                                      &NgGlobal.CacheCallbacks, Fcb);
+                CcRosAllowLazyClose(FileObject);
             }
             if (CcCopyRead(FileObject, &Offset, Length, TRUE, Buffer, &Irp->IoStatus))
                 Status = Irp->IoStatus.Status;

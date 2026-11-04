@@ -1705,10 +1705,17 @@ VOID NgFcbIdle(PNG_FCB Fcb)
     NgFcbTrimIdle(Vcb);
 }
 
-/* Caller holds a counted reference, drops it here.  Nothing else is held: closing the file object runs NgClose. */
+/*
+ * Caller holds a counted reference, drops it here.  Nothing else is held: closing the file object runs NgClose.
+ * An idle FCB that still has a shared cache map is not flushed here: Cc keeps the map of a closed file until its
+ * lazy writer wrote the dirty data, then deletes it.  Flushing it now would bring back the synchronous write at
+ * every close (the FCB evicted is only some 1000 closes old); it goes back to the tail and is evicted once the map
+ * is gone.
+ */
 static VOID NgEvictFcb(PNG_FCB Fcb)
 {
     PNG_VCB Vcb = Fcb->Vcb;
+    BOOLEAN Requeue = FALSE;
 
     /* Only an idle FCB nobody is working on; a writer that comes in meanwhile waits for the main resource. */
     if (ExAcquireResourceExclusiveLite(&Fcb->MainResource, FALSE))
@@ -1718,7 +1725,11 @@ static VOID NgEvictFcb(PNG_FCB Fcb)
         Idle = !Fcb->OpenHandles && !Fcb->Opening && !Fcb->Deleted && !Fcb->DeletePending && !Fcb->IsPagingFile &&
                !Vcb->Dismounted && !Vcb->WrongMedia && !Vcb->LockedBy;
         ExReleaseFastMutex(&Vcb->FcbListLock);
-        if (Idle && !Fcb->SectionObjectPointers.SharedCacheMap && Fcb->SectionObjectPointers.DataSectionObject)
+        if (Idle && Fcb->SectionObjectPointers.SharedCacheMap)
+        {
+            Requeue = TRUE;
+        }
+        else if (Idle && Fcb->SectionObjectPointers.DataSectionObject)
         {
             IO_STATUS_BLOCK Iosb;
             NgFlushStream(Fcb, &Iosb);
@@ -1726,6 +1737,17 @@ static VOID NgEvictFcb(PNG_FCB Fcb)
                 NgPurgeFrom(Fcb, 0);
         }
         ExReleaseResourceLite(&Fcb->MainResource);
+    }
+    if (Requeue)
+    {
+        ExAcquireFastMutex(&Vcb->FcbListLock);
+        if (Fcb->VcbLinks.Flink && !Fcb->IdleLinks.Flink && !Fcb->OpenHandles && !Fcb->Opening && !Fcb->Deleted &&
+            !Fcb->DeletePending)
+        {
+            InsertTailList(&Vcb->IdleList, &Fcb->IdleLinks);
+            Vcb->IdleCount++;
+        }
+        ExReleaseFastMutex(&Vcb->FcbListLock);
     }
     NgDereferenceFcb(Fcb);
 }

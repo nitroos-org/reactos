@@ -59,6 +59,19 @@ LIST_ENTRY CcDeferredWrites;
 KSPIN_LOCK CcDeferredWriteSpinLock;
 LIST_ENTRY CcCleanSharedCacheMapList;
 
+/*
+ * Views of maps that were closed with dirty data and wait for the lazy writer (master lock).  Their
+ * mappings are parked (CcRosParkViews), but each such file keeps its map, section, file object and the
+ * file system's FCB until the lazy writer wrote it: past this many views a close writes its data itself,
+ * as before.  From a quarter of it on the lazy writer keeps writing (CcRosDeferredBacklog).
+ */
+static ULONG CcDeferredVacbs = 0;
+#ifdef _WIN64
+#define CC_MAX_DEFERRED_VACBS 16384
+#else
+#define CC_MAX_DEFERRED_VACBS 512
+#endif
+
 #if DBG
 ULONG CcRosVacbIncRefCount_(PROS_VACB vacb, PCSTR file, INT line)
 {
@@ -236,10 +249,13 @@ CcRosDeleteFileCache (
  */
 {
     LIST_ENTRY LocalVacbList;
+    PCACHE_UNINITIALIZE_EVENT Events;
+    BOOLEAN Discard;
 
     ASSERT(SharedCacheMap);
     ASSERT(SharedCacheMap == FileObject->SectionObjectPointer->SharedCacheMap);
     ASSERT(SharedCacheMap->OpenCount == 0);
+    ASSERT(IsListEmpty(&SharedCacheMap->PrivateList));
 
     InitializeListHead(&LocalVacbList);
 
@@ -281,6 +297,14 @@ CcRosDeleteFileCache (
     /* Make sure there is no trace anymore of this map */
     FileObject->SectionObjectPointer->SharedCacheMap = NULL;
     RemoveEntryList(&SharedCacheMap->SharedCacheMapLinks);
+    Discard = BooleanFlagOn(SharedCacheMap->Flags, SHARED_CACHE_MAP_DISCARD);
+    Events = SharedCacheMap->UninitializeEvents;
+    SharedCacheMap->UninitializeEvents = NULL;
+    if (SharedCacheMap->Flags & SHARED_CACHE_MAP_DEFERRED)
+    {
+        CcDeferredVacbs -= SharedCacheMap->DeferredVacbs;
+        SharedCacheMap->Flags &= ~SHARED_CACHE_MAP_DEFERRED;
+    }
 
     KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
     KeReleaseQueuedSpinLock(LockQueueMasterLock, *OldIrql);
@@ -293,8 +317,8 @@ CcRosDeleteFileCache (
 
         InitializeListHead(&Vacb->CacheMapVacbListEntry);
 
-        /* Flush to disk, if needed */
-        if (Vacb->Dirty)
+        /* Flush to disk, if needed (not for a map whose writes keep failing: its data is dropped) */
+        if (Vacb->Dirty && !Discard)
         {
             IO_STATUS_BLOCK Iosb;
             NTSTATUS Status;
@@ -305,6 +329,10 @@ CcRosDeleteFileCache (
                 /* Complain. There's not much we can do */
                 DPRINT1("Failed to flush VACB to disk while deleting the cache entry. Status: 0x%08x\n", Status);
             }
+            Vacb->Dirty = FALSE;
+        }
+        else
+        {
             Vacb->Dirty = FALSE;
         }
 
@@ -337,10 +365,188 @@ CcRosDeleteFileCache (
 
     ExFreeToNPagedLookasideList(&SharedCacheMapLookasideList, SharedCacheMap);
 
+    /* The map is gone: wake whoever waits for that (CcUninitializeCacheMap's UninitializeCompleteEvent).
+     * The waiter may free its entry as soon as it is signalled, so the link is read first. */
+    while (Events)
+    {
+        PCACHE_UNINITIALIZE_EVENT Next = Events->Next;
+        KeSetEvent(&Events->Event, IO_NO_INCREMENT, FALSE);
+        Events = Next;
+    }
+
     /* Acquire the lock again for our caller */
     *OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
 
     return STATUS_SUCCESS;
+}
+
+/*
+ * Can the lazy writer take over the dirty data of a map nobody has open?  Only when the file system
+ * said so (CcRosAllowLazyClose): a deferred map keeps pointing at the file system's SectionObjectPointers
+ * and lazy write context, which the file systems that were not written for that free once they closed
+ * their file (vfatfs's directory FCBs, for one), so they get the synchronous flush and delete they
+ * always had.  Not for temporary files and files that disabled write-behind, which the lazy writer skips:
+ * those are written at their last close, as before.  Not when somebody waits for the map to go
+ * (UninitializeCompleteEvent), or when its data is dropped.
+ */
+static
+BOOLEAN
+CcRosCanDeferDelete(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap)
+{
+    return BooleanFlagOn(SharedCacheMap->Flags, SHARED_CACHE_MAP_LAZY_CLOSE) &&
+           !BooleanFlagOn(SharedCacheMap->Flags, WRITEBEHIND_DISABLED | SHARED_CACHE_MAP_SYNC_DELETE | SHARED_CACHE_MAP_DISCARD) &&
+           !BooleanFlagOn(SharedCacheMap->FileObject->Flags, FO_TEMPORARY_FILE);
+}
+
+/*
+ * The map's last reference is gone (OpenCount 0: no private cache map, no flush, purge or lazy write
+ * using it).  As on Windows, a map that still has dirty views is not flushed and deleted here: it stays,
+ * unreferenced, on the lazy writer's dirty list, and the lazy writer deletes it once it wrote them (the
+ * next drop of its OpenCount to 0 comes back here, clean).  A clean map is deleted now.
+ * Called with the master lock held; TRUE if the map was deleted (that released and reacquired the lock).
+ */
+static
+BOOLEAN
+CcRosDeleteOrDeferFileCache(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap,
+    _Inout_ PKIRQL OldIrql)
+{
+    ASSERT(SharedCacheMap->OpenCount == 0);
+
+    if (SharedCacheMap->DirtyPages != 0 && CcRosCanDeferDelete(SharedCacheMap))
+    {
+        if (!(SharedCacheMap->Flags & SHARED_CACHE_MAP_DEFERRED))
+        {
+            PLIST_ENTRY Entry;
+            ULONG Vacbs = 0;
+
+            KeAcquireSpinLockAtDpcLevel(&SharedCacheMap->CacheMapLock);
+            for (Entry = SharedCacheMap->CacheMapVacbListHead.Flink;
+                 Entry != &SharedCacheMap->CacheMapVacbListHead;
+                 Entry = Entry->Flink)
+            {
+                Vacbs++;
+            }
+            KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
+
+            if (CcDeferredVacbs + Vacbs <= CC_MAX_DEFERRED_VACBS)
+            {
+                SharedCacheMap->Flags |= SHARED_CACHE_MAP_DEFERRED;
+                SharedCacheMap->DeferredVacbs = Vacbs;
+                CcDeferredVacbs += Vacbs;
+
+                /* A backlog: do not wait for the next scan */
+                if (CcDeferredVacbs > CC_MAX_DEFERRED_VACBS / 4 &&
+                    CcDeferredVacbs - Vacbs <= CC_MAX_DEFERRED_VACBS / 4)
+                {
+                    CcScheduleLazyWriteScan(TRUE);
+                }
+            }
+        }
+
+        if (SharedCacheMap->Flags & SHARED_CACHE_MAP_DEFERRED)
+        {
+            /* Its dirty views keep the lazy writer scheduled; make sure it runs */
+            if (!LazyWriter.ScanActive)
+                CcScheduleLazyWriteScan(FALSE);
+            return FALSE;
+        }
+    }
+
+    CcRosDeleteFileCache(SharedCacheMap->FileObject, SharedCacheMap, OldIrql);
+    return TRUE;
+}
+
+/* Are many closed files waiting for the lazy writer?  It then keeps writing (CcWriteBehind). */
+BOOLEAN
+CcRosDeferredBacklog(VOID)
+{
+    return CcDeferredVacbs > CC_MAX_DEFERRED_VACBS / 4;
+}
+
+static
+VOID
+CcpPostFlushDereference(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap);
+
+/*
+ * Drops the reference CcRosFlushDirtyPages holds on the map while it writes a view.  Deleting a map closes
+ * its file object, which runs the file system's close in the thread that drops the last reference.  The lazy
+ * writer (a worker thread) and the full flush at shutdown may do that.  The caller that trims the cache for
+ * the memory manager, the balancer thread, must not: a close takes locks and memory, and the balancer is what
+ * everybody who waits for memory waits for.  A map is no longer deleted by the close of its file: with
+ * the dirty data left to the lazy writer, the one that writes the last of it ends up holding the last reference.
+ * That one gives it to a worker.  Master lock held; TRUE if it was released and taken again (the dirty list
+ * may have changed, the map may be gone).
+ */
+static
+BOOLEAN
+CcRosDropFlushReference(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap,
+    _Inout_ PKIRQL OldIrql,
+    _In_ BOOLEAN MayCloseFile)
+{
+    if (!MayCloseFile && SharedCacheMap->OpenCount == 1)
+    {
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, *OldIrql);
+        CcpPostFlushDereference(SharedCacheMap);
+        *OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+        return TRUE;
+    }
+
+    if (--SharedCacheMap->OpenCount == 0)
+        return CcRosDeleteOrDeferFileCache(SharedCacheMap, OldIrql);
+
+    return FALSE;
+}
+
+/* Maps whose write failed in one CcRosFlushDirtyPages call are skipped for the rest of it */
+#define CC_FLUSH_FAILED_MAPS 16
+/* A full flush waits this many 10 ms for the lazy writer to finish with a map before it gives up */
+#define CC_FLUSHALL_BUSY_WAITS 1000
+/* A closed map whose writes failed this many times in a row, over this long, is dropped */
+#define CC_LAZY_WRITE_GIVEUP_FAILURES 5
+#define CC_LAZY_WRITE_GIVEUP_TIME (30ULL * 1000 * 1000 * 10)
+
+/*
+ * A write of a view of the map failed.  A map that is closed (left to the lazy writer) and whose writes
+ * keep failing (media removed or write protected, volume gone) would stay for ever, with its file object,
+ * the file system's FCB and the volume, and be retried every second.  As Windows does, the data is given
+ * up after a while and the user is told (the lost delayed write popup).  An open map is not touched: the
+ * application still has the file.  Called at PASSIVE_LEVEL with the map referenced, no lock held;
+ * TRUE if the closed map is to be dropped.
+ */
+static
+BOOLEAN
+CcRosLazyWriteFailed(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap,
+    _In_ NTSTATUS Status)
+{
+    ULONGLONG Now;
+
+    if (SharedCacheMap->LazyWriteFailures++ == 0)
+        SharedCacheMap->FirstLazyWriteFailure = KeQueryInterruptTime();
+
+    if (!(SharedCacheMap->Flags & SHARED_CACHE_MAP_DEFERRED) ||
+        (SharedCacheMap->Flags & SHARED_CACHE_MAP_DISCARD))
+    {
+        return FALSE;
+    }
+
+    Now = KeQueryInterruptTime();
+    if (SharedCacheMap->LazyWriteFailures < CC_LAZY_WRITE_GIVEUP_FAILURES ||
+        Now - SharedCacheMap->FirstLazyWriteFailure < CC_LAZY_WRITE_GIVEUP_TIME)
+    {
+        return FALSE;
+    }
+
+    DPRINT1("CC: giving up the delayed write of a closed file (status 0x%08lx, %lu failures)\n",
+            Status, SharedCacheMap->LazyWriteFailures);
+    IoRaiseInformationalHardError(STATUS_LOST_WRITEBEHIND_DATA,
+                                  &SharedCacheMap->FileObject->FileName,
+                                  NULL);
+    return TRUE;
 }
 
 NTSTATUS
@@ -354,6 +560,13 @@ CcRosFlushDirtyPages (
     NTSTATUS Status;
     KIRQL OldIrql;
     BOOLEAN FlushAll = (Target == MAXULONG);
+    ULONG Failures = 0;
+    PROS_SHARED_CACHE_MAP FailedMaps[CC_FLUSH_FAILED_MAPS];
+    ULONG FailedCount = 0;
+    ULONG LapFlushed = 0;
+    ULONG BusyWaits = 0;
+    BOOLEAN LapBusy = FALSE;
+    ULONG i;
 
     DPRINT("CcRosFlushDirtyPages(Target %lu)\n", Target);
 
@@ -373,12 +586,39 @@ CcRosFlushDirtyPages (
         PROS_SHARED_CACHE_MAP SharedCacheMap;
         PROS_VACB current;
         BOOLEAN Locked;
+        BOOLEAN GiveUp;
 
         if (current_entry == &DirtyVacbListHead)
         {
             ASSERT(FlushAll);
             if (IsListEmpty(&DirtyVacbListHead))
                 break;
+
+            if (LapFlushed == 0)
+            {
+                /*
+                 * A whole lap wrote nothing.  What is left belongs to maps whose writes fail (given up
+                 * for this call), or to maps the lazy writer is writing at this moment.  That one needs
+                 * the master lock to finish with the map and let it go: wait for it, without the lock
+                 * (spinning on the list with it held never ended), for a bounded time.
+                 */
+                if (!LapBusy || ++BusyWaits > CC_FLUSHALL_BUSY_WAITS)
+                    break;
+
+                KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+                {
+                    LARGE_INTEGER Interval;
+                    Interval.QuadPart = -10 * 1000 * 10; /* 10 ms */
+                    KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+                }
+                OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+
+                if (IsListEmpty(&DirtyVacbListHead))
+                    break;
+            }
+
+            LapFlushed = 0;
+            LapBusy = FALSE;
             current_entry = DirtyVacbListHead.Flink;
         }
 
@@ -407,9 +647,22 @@ CcRosFlushDirtyPages (
 
         ASSERT(current->Dirty);
 
+        /* A map whose write failed in this call is left for the next one (compared as a pointer only) */
+        for (i = 0; i < FailedCount; i++)
+        {
+            if (FailedMaps[i] == SharedCacheMap)
+                break;
+        }
+        if (i < FailedCount)
+        {
+            CcRosVacbDecRefCount(current);
+            continue;
+        }
+
         /* Do not lazy-write the same file concurrently. Fastfat ASSERTS on that */
         if (SharedCacheMap->Flags & SHARED_CACHE_MAP_IN_LAZYWRITE)
         {
+            LapBusy = TRUE;
             CcRosVacbDecRefCount(current);
             continue;
         }
@@ -444,10 +697,8 @@ CcRosFlushDirtyPages (
 
             SharedCacheMap->Flags &= ~SHARED_CACHE_MAP_IN_LAZYWRITE;
 
-            if (--SharedCacheMap->OpenCount == 0)
+            if (CcRosDropFlushReference(SharedCacheMap, &OldIrql, CalledFromLazy || FlushAll))
             {
-                CcRosDeleteFileCache(SharedCacheMap->FileObject, SharedCacheMap, &OldIrql);
-
                 /* That released the lock as well */
                 current_entry = DirtyVacbListHead.Flink;
             }
@@ -465,21 +716,43 @@ CcRosFlushDirtyPages (
          * Refcount. Freeing must be done outside of the lock.
          * The refcount is decremented atomically. So this is OK. */
         CcRosVacbDecRefCount(current);
+
+        /* The map is referenced (OpenCount) until the lock is taken again below */
+        GiveUp = FALSE;
+        if (NT_SUCCESS(Status))
+            SharedCacheMap->LazyWriteFailures = 0;
+        else
+            GiveUp = CcRosLazyWriteFailed(SharedCacheMap, Status);
+
         OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
 
         SharedCacheMap->Flags &= ~SHARED_CACHE_MAP_IN_LAZYWRITE;
+        if (GiveUp)
+            SharedCacheMap->Flags |= SHARED_CACHE_MAP_DISCARD;
 
-        if (--SharedCacheMap->OpenCount == 0)
-            CcRosDeleteFileCache(SharedCacheMap->FileObject, SharedCacheMap, &OldIrql);
+        CcRosDropFlushReference(SharedCacheMap, &OldIrql, CalledFromLazy || FlushAll);
 
-        if (!NT_SUCCESS(Status) && (Status != STATUS_END_OF_FILE) &&
-            (Status != STATUS_MEDIA_WRITE_PROTECTED))
+        if (!NT_SUCCESS(Status))
         {
-            DPRINT1("CC: Failed to flush VACB.\n");
+            if ((Status != STATUS_END_OF_FILE) && (Status != STATUS_MEDIA_WRITE_PROTECTED))
+                DPRINT1("CC: Failed to flush VACB.\n");
+
+            /*
+             * The view went back on the dirty list (at its tail), and the walk starts over.  The rest
+             * of this map is left for the next call (its other views would fail the same way and wait
+             * for the device each), and the views of the other maps are written: media that went away
+             * must not hold the writing of the others up.  A call that finds many maps failing gives up.
+             */
+            if (FailedCount < CC_FLUSH_FAILED_MAPS)
+                FailedMaps[FailedCount++] = SharedCacheMap;
+            if (FailedCount >= CC_FLUSH_FAILED_MAPS || ++Failures >= 64)
+                break;
         }
         else
         {
             ULONG PagesFreed;
+
+            LapFlushed++;
 
             /* How many pages did we free? */
             PagesFreed = Iosb.Information / PAGE_SIZE;
@@ -506,8 +779,104 @@ CcRosFlushDirtyPages (
     KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
     KeLeaveCriticalRegion();
 
+    if (BusyWaits != 0)
+        DPRINT1("CC: the full flush waited %lu x 10 ms for the lazy writer\n", BusyWaits);
+
     DPRINT("CcRosFlushDirtyPages() finished\n");
     return STATUS_SUCCESS;
+}
+
+/*
+ * Writes the dirty views of the map through Mm, without the file system's lazy write locks, as
+ * CcRosDeleteFileCache does when it deletes a map; used by CcPurgeCacheSection for the caller that asked
+ * to uninitialize the private cache maps.  The caller holds a reference on the map.
+ */
+VOID
+CcRosFlushSharedCacheMapNoCallbacks(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap)
+{
+    LONGLONG Next = 0;
+
+    for (;;)
+    {
+        KIRQL OldIrql;
+        PLIST_ENTRY Entry;
+        PROS_VACB Vacb = NULL;
+        IO_STATUS_BLOCK Iosb;
+        NTSTATUS Status;
+
+        OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+        KeAcquireSpinLockAtDpcLevel(&SharedCacheMap->CacheMapLock);
+        for (Entry = SharedCacheMap->CacheMapVacbListHead.Flink;
+             Entry != &SharedCacheMap->CacheMapVacbListHead;
+             Entry = Entry->Flink)
+        {
+            PROS_VACB Candidate = CONTAINING_RECORD(Entry, ROS_VACB, CacheMapVacbListEntry);
+
+            if (Candidate->Dirty && Candidate->FileOffset.QuadPart >= Next)
+            {
+                Vacb = Candidate;
+                CcRosVacbIncRefCount(Vacb);
+                break;
+            }
+        }
+        KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+
+        if (!Vacb)
+            break;
+
+        Next = Vacb->FileOffset.QuadPart + VACB_MAPPING_GRANULARITY;
+        Status = MmFlushSegment(SharedCacheMap->FileObject->SectionObjectPointer,
+                                &Vacb->FileOffset,
+                                VACB_MAPPING_GRANULARITY,
+                                &Iosb);
+        if (NT_SUCCESS(Status))
+            CcRosUnmarkDirtyVacb(Vacb, TRUE);
+        else
+            DPRINT1("CC: Failed to flush a view before purging it. Status: 0x%08x\n", Status);
+
+        /* The map still holds the view: not its last reference */
+        CcRosVacbDecRefCount(Vacb);
+    }
+}
+
+/*
+ * Does the lazy writer have anything to write?  Dirty views of temporary files and of files that
+ * disabled write-behind count in CcTotalDirtyPages, but the lazy writer skips them: it must not keep
+ * scanning for them.  The Locked variant is for a caller that holds the master lock (and must decide
+ * under it, or a dirty view added meanwhile finds the scan switched off).
+ */
+BOOLEAN
+CcRosHasLazyWritableDataLocked(VOID)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = DirtyVacbListHead.Flink; Entry != &DirtyVacbListHead; Entry = Entry->Flink)
+    {
+        PROS_VACB Vacb = CONTAINING_RECORD(Entry, ROS_VACB, DirtyVacbListEntry);
+        PROS_SHARED_CACHE_MAP SharedCacheMap = Vacb->SharedCacheMap;
+
+        if (!BooleanFlagOn(SharedCacheMap->Flags, WRITEBEHIND_DISABLED) &&
+            !BooleanFlagOn(SharedCacheMap->FileObject->Flags, FO_TEMPORARY_FILE))
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+BOOLEAN
+CcRosHasLazyWritableData(VOID)
+{
+    KIRQL OldIrql;
+    BOOLEAN Found;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    Found = CcRosHasLazyWritableDataLocked();
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+
+    return Found;
 }
 
 VOID
@@ -645,6 +1014,27 @@ retry:
     DPRINT("Evicted %lu cache pages\n", (*NrFreed));
 }
 
+/*
+ * Dirty pages a view is charged for: its pages below the end of file (at least one), not the whole
+ * 256 KB view.  The pages of a view past the end of file are never written, and charging a small
+ * file's view in full made a few thousand closed small files look like a cache full of dirty data,
+ * which throttles writers (CcCanIWrite, Mm's page request pacing) although little is left to write.
+ * The charge grows with the file (CcRosReleaseVacb).  Exact with the view's CacheMapLock held.
+ */
+static
+ULONG
+CcRosVacbFilePages(
+    _In_ PROS_VACB Vacb)
+{
+    LONGLONG Bytes = Vacb->SharedCacheMap->FileSize.QuadPart - Vacb->FileOffset.QuadPart;
+
+    if (Bytes >= VACB_MAPPING_GRANULARITY)
+        return VACB_MAPPING_GRANULARITY / PAGE_SIZE;
+    if (Bytes <= PAGE_SIZE)
+        return 1;
+    return (ULONG)BYTES_TO_PAGES(Bytes);
+}
+
 NTSTATUS
 CcRosReleaseVacb (
     PROS_SHARED_CACHE_MAP SharedCacheMap,
@@ -672,6 +1062,24 @@ CcRosReleaseVacb (
     if (Dirty && !Vacb->Dirty)
     {
         CcRosMarkDirtyVacb(Vacb);
+    }
+    else if (Dirty && Vacb->DirtyPagesCharged < CcRosVacbFilePages(Vacb))
+    {
+        /* Written again while dirty: charge the pages the file grew into since */
+        KIRQL OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+        KeAcquireSpinLockAtDpcLevel(&SharedCacheMap->CacheMapLock);
+        if (Vacb->Dirty)
+        {
+            ULONG Pages = CcRosVacbFilePages(Vacb);
+            if (Pages > Vacb->DirtyPagesCharged)
+            {
+                CcTotalDirtyPages += Pages - Vacb->DirtyPagesCharged;
+                SharedCacheMap->DirtyPages += Pages - Vacb->DirtyPagesCharged;
+                Vacb->DirtyPagesCharged = Pages;
+            }
+        }
+        KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
     }
 
     if (Mapped)
@@ -765,9 +1173,9 @@ CcRosMarkDirtyVacb (
     }
 
     InsertTailList(&DirtyVacbListHead, &Vacb->DirtyVacbListEntry);
-    /* FIXME: There is no reason to account for the whole VACB. */
-    CcTotalDirtyPages += VACB_MAPPING_GRANULARITY / PAGE_SIZE;
-    Vacb->SharedCacheMap->DirtyPages += VACB_MAPPING_GRANULARITY / PAGE_SIZE;
+    Vacb->DirtyPagesCharged = CcRosVacbFilePages(Vacb);
+    CcTotalDirtyPages += Vacb->DirtyPagesCharged;
+    Vacb->SharedCacheMap->DirtyPages += Vacb->DirtyPagesCharged;
     CcRosVacbIncRefCount(Vacb);
 
     /* Move to the tail of the LRU list */
@@ -822,8 +1230,9 @@ CcRosUnmarkDirtyVacb (
     RemoveEntryList(&Vacb->DirtyVacbListEntry);
     InitializeListHead(&Vacb->DirtyVacbListEntry);
 
-    CcTotalDirtyPages -= VACB_MAPPING_GRANULARITY / PAGE_SIZE;
-    Vacb->SharedCacheMap->DirtyPages -= VACB_MAPPING_GRANULARITY / PAGE_SIZE;
+    CcTotalDirtyPages -= Vacb->DirtyPagesCharged;
+    Vacb->SharedCacheMap->DirtyPages -= Vacb->DirtyPagesCharged;
+    Vacb->DirtyPagesCharged = 0;
 
     CcRosVacbDecRefCount(Vacb);
 
@@ -925,6 +1334,7 @@ CcRosCreateVacb (
     current->FileOffset.QuadPart = ROUND_DOWN(FileOffset, VACB_MAPPING_GRANULARITY);
     current->SharedCacheMap = SharedCacheMap;
     current->MappedCount = 0;
+    current->DirtyPagesCharged = 0;
     current->ReferenceCount = 0;
     InitializeListHead(&current->CacheMapVacbListEntry);
     InitializeListHead(&current->DirtyVacbListEntry);
@@ -1109,6 +1519,41 @@ CcRosGetVacb (
         }
     }
 
+    /* A view parked when its file was closed (CcRosParkViews) is mapped again */
+    if (current->BaseAddress == NULL)
+    {
+        PVOID BaseAddress = NULL;
+        SIZE_T ViewSize = VACB_MAPPING_GRANULARITY;
+        LARGE_INTEGER ViewOffset = current->FileOffset;
+
+        while (TRUE)
+        {
+            Status = MmMapViewInSystemSpaceEx(SharedCacheMap->Section, &BaseAddress, &ViewSize, &ViewOffset, 0);
+            if (NT_SUCCESS(Status))
+                break;
+            if (!CcRosFreeOneUnusedVacb())
+            {
+                /* The map holds the view too: this is not its last reference */
+                CcRosVacbDecRefCount(current);
+                return Status;
+            }
+        }
+
+        OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+        KeAcquireSpinLockAtDpcLevel(&SharedCacheMap->CacheMapLock);
+        if (current->BaseAddress == NULL)
+        {
+            current->BaseAddress = BaseAddress;
+            BaseAddress = NULL;
+        }
+        KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+
+        /* Another thread mapped it meanwhile */
+        if (BaseAddress)
+            MmUnmapViewInSystemSpace(BaseAddress);
+    }
+
     Refs = CcRosVacbGetRefCount(current);
 
     OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
@@ -1184,8 +1629,8 @@ CcRosInternalFreeVacb (
     ASSERT(IsListEmpty(&Vacb->DirtyVacbListEntry));
     ASSERT(IsListEmpty(&Vacb->VacbLruListEntry));
 
-    /* Delete the mapping */
-    Status = MmUnmapViewInSystemSpace(Vacb->BaseAddress);
+    /* Delete the mapping (a parked view has none, see CcRosParkViews) */
+    Status = Vacb->BaseAddress ? MmUnmapViewInSystemSpace(Vacb->BaseAddress) : STATUS_SUCCESS;
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("Failed to unmap VACB from System address space! Status 0x%08X\n", Status);
@@ -1206,7 +1651,7 @@ CcRosDereferenceFlushedCacheMap(
 
     OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
     if (--SharedCacheMap->OpenCount == 0)
-        CcRosDeleteFileCache(SharedCacheMap->FileObject, SharedCacheMap, &OldIrql);
+        CcRosDeleteOrDeferFileCache(SharedCacheMap, &OldIrql);
     KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
 }
 
@@ -1228,6 +1673,53 @@ CcpPostFlushDereference(
 }
 
 /*
+ * A temporary reference on the shared cache map of a section, for a Cc call on a file object that may
+ * hold no private cache map (a flush, purge, size change or zeroing through any handle): a map nobody
+ * has open stays alive until the lazy writer wrote its dirty data, and is then deleted by the lazy writer
+ * without any file system lock, so such a call must keep it alive itself.  NULL if there is no map.
+ */
+PROS_SHARED_CACHE_MAP
+CcRosReferenceSharedCacheMap(
+    _In_ PSECTION_OBJECT_POINTERS SectionObjectPointers)
+{
+    PROS_SHARED_CACHE_MAP SharedCacheMap;
+    KIRQL OldIrql;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    SharedCacheMap = SectionObjectPointers->SharedCacheMap;
+    if (SharedCacheMap)
+        SharedCacheMap->OpenCount++;
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+
+    return SharedCacheMap;
+}
+
+/*
+ * Drops a reference of CcRosReferenceSharedCacheMap.  A worker drops the last one: deleting the map
+ * releases its file object, and the close that follows must not run here, where the caller may hold
+ * file system locks.
+ */
+VOID
+CcRosDereferenceSharedCacheMap(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap)
+{
+    KIRQL OldIrql;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    if (SharedCacheMap->OpenCount > 1)
+    {
+        SharedCacheMap->OpenCount--;
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+    }
+    else
+    {
+        ASSERT(SharedCacheMap->OpenCount == 1);
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+        CcpPostFlushDereference(SharedCacheMap);
+    }
+}
+
+/*
  * @implemented
  */
 VOID
@@ -1241,7 +1733,6 @@ CcFlushCache (
     PROS_SHARED_CACHE_MAP SharedCacheMap;
     LONGLONG FlushStart, FlushEnd;
     NTSTATUS Status;
-    KIRQL OldIrql;
 
     CCTRACE(CC_API_DEBUG, "SectionObjectPointers=%p FileOffset=0x%I64X Length=%lu\n",
         SectionObjectPointers, FileOffset ? FileOffset->QuadPart : 0LL, Length);
@@ -1256,11 +1747,7 @@ CcFlushCache (
      * Reference the shared cache map for the flush: a close of the last cached handle or the
      * lazy writer's dereference can otherwise delete the map while the flush uses it.
      */
-    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
-    SharedCacheMap = SectionObjectPointers->SharedCacheMap;
-    if (SharedCacheMap)
-        SharedCacheMap->OpenCount++;
-    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+    SharedCacheMap = CcRosReferenceSharedCacheMap(SectionObjectPointers);
 
     if (!SharedCacheMap)
     {
@@ -1369,22 +1856,7 @@ CcFlushCache (
     KeReleaseGuardedMutex(&SharedCacheMap->FlushCacheLock);
 
 dereference:
-    /*
-     * A worker drops the last reference: deleting the map releases its file object, and the
-     * close that follows must not run here, where the caller may hold file system locks.
-     */
-    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
-    if (SharedCacheMap->OpenCount > 1)
-    {
-        SharedCacheMap->OpenCount--;
-        KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
-    }
-    else
-    {
-        ASSERT(SharedCacheMap->OpenCount == 1);
-        KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
-        CcpPostFlushDereference(SharedCacheMap);
-    }
+    CcRosDereferenceSharedCacheMap(SharedCacheMap);
 
 quit:
     if (IoStatus)
@@ -1393,17 +1865,140 @@ quit:
     }
 }
 
+/*
+ * A map left to the lazy writer at its last close keeps its views, but nobody uses them: the lazy writer
+ * writes through Mm by file offset, and the dirty state of the pages is in the segment (Cc marks it there
+ * when it copies, zeroes or pins).  Their mappings are taken away (the view's BaseAddress becomes NULL;
+ * CcRosGetVacb maps it again if the file is used again), so that thousands of closed files waiting for the
+ * lazy writer do not hold thousands of 256 KB system views: views are kernel memory areas, and the gap
+ * search for a new one is linear in their number.  Only idle views (no user beyond the map and its dirty
+ * list, not mapped for a BCB); each is referenced until the caller unmapped it (CcRosUnparkViews).
+ * Called with the master lock held; returns the number of views taken (at most Max).
+ */
+#define CC_PARK_BATCH 16
+static
+ULONG
+CcRosParkViews(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap,
+    _Out_writes_(Max) PROS_VACB *Vacbs,
+    _Out_writes_(Max) PVOID *BaseAddresses,
+    _In_ ULONG Max)
+{
+    PLIST_ENTRY Entry;
+    ULONG Count = 0;
+
+    KeAcquireSpinLockAtDpcLevel(&SharedCacheMap->CacheMapLock);
+    for (Entry = SharedCacheMap->CacheMapVacbListHead.Flink;
+         Entry != &SharedCacheMap->CacheMapVacbListHead && Count < Max;
+         Entry = Entry->Flink)
+    {
+        PROS_VACB Vacb = CONTAINING_RECORD(Entry, ROS_VACB, CacheMapVacbListEntry);
+
+        if (Vacb->BaseAddress == NULL || Vacb->MappedCount != 0 ||
+            CcRosVacbGetRefCount(Vacb) != (Vacb->Dirty ? 2 : 1))
+        {
+            continue;
+        }
+
+        BaseAddresses[Count] = Vacb->BaseAddress;
+        Vacb->BaseAddress = NULL;
+        CcRosVacbIncRefCount(Vacb);
+        Vacbs[Count++] = Vacb;
+    }
+    KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
+
+    return Count;
+}
+
+/* Unmaps what CcRosParkViews took and drops its references; master lock not held */
+static
+VOID
+CcRosUnparkViews(
+    _In_reads_(Count) PROS_VACB *Vacbs,
+    _In_reads_(Count) PVOID *BaseAddresses,
+    _In_ ULONG Count)
+{
+    ULONG i;
+
+    for (i = 0; i < Count; i++)
+    {
+        MmUnmapViewInSystemSpace(BaseAddresses[i]);
+        CcRosVacbDecRefCount(Vacbs[i]);
+    }
+}
+
+/*
+ * UninitializeCompleteEvent is signalled when the shared cache map is deleted, as on Windows.  Queued
+ * on a map that stays for now (the lazy writer, a flush or a purge still use it): the map is then
+ * deleted by whoever drops its last reference, at once (SYNC_DELETE: not deferred, it flushes what is
+ * dirty itself), and wakes the waiter.  Master lock held.
+ */
+static
+VOID
+CcRosQueueUninitializeEvent(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap,
+    _In_ PCACHE_UNINITIALIZE_EVENT UninitializeCompleteEvent)
+{
+    UninitializeCompleteEvent->Next = SharedCacheMap->UninitializeEvents;
+    SharedCacheMap->UninitializeEvents = UninitializeCompleteEvent;
+    SharedCacheMap->Flags |= SHARED_CACHE_MAP_SYNC_DELETE;
+}
+
+/*
+ * A file system that is written for it (it keeps its SectionObjectPointers and lazy write context valid
+ * until the file object it cached through is closed, which the map's reference delays until the map is
+ * deleted) lets the last close of a file leave the dirty data to the lazy writer: the map is then kept,
+ * closed, until it is written.  Call it after CcInitializeCacheMap, for the file objects of files.  Without it the last close writes
+ * the data and deletes the map, as it always did.
+ */
+VOID
+NTAPI
+CcRosAllowLazyClose (
+    _In_ PFILE_OBJECT FileObject)
+{
+    KIRQL OldIrql;
+    PROS_SHARED_CACHE_MAP SharedCacheMap;
+
+    /*
+     * Not for stream file objects (the file system's directories, volume file and the like): their
+     * FCBs are torn down by the file system itself, not by the close of a file object, and then
+     * nothing would keep a deferred map's SectionObjectPointers and context valid.
+     */
+    if (FileObject->Flags & FO_STREAM_FILE)
+        return;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    SharedCacheMap = FileObject->SectionObjectPointer->SharedCacheMap;
+    if (SharedCacheMap)
+        SharedCacheMap->Flags |= SHARED_CACHE_MAP_LAZY_CLOSE;
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+}
+
 NTSTATUS
 CcRosReleaseFileCache (
-    PFILE_OBJECT FileObject)
+    _In_ PFILE_OBJECT FileObject,
+    _In_ BOOLEAN AllowDeferredDelete,
+    _In_opt_ PCACHE_UNINITIALIZE_EVENT UninitializeCompleteEvent,
+    _Out_opt_ PBOOLEAN EventQueued)
 /*
  * FUNCTION: Called by the file system when a handle to a file object
  * has been closed.
+ * With AllowDeferredDelete, the last close of a map with dirty data leaves the map to the lazy
+ * writer when the file system allows it (see CcRosDeleteOrDeferFileCache).  Otherwise (a truncation,
+ * or somebody waits for the deletion) the map is deleted now, writing what is still dirty, as before.
+ * UninitializeCompleteEvent is queued on the map if it is not deleted by this (*EventQueued is set);
+ * the caller signals it itself otherwise.
  */
 {
     KIRQL OldIrql;
     PPRIVATE_CACHE_MAP PrivateMap;
     PROS_SHARED_CACHE_MAP SharedCacheMap;
+    PROS_VACB ParkedVacbs[CC_PARK_BATCH];
+    PVOID ParkedViews[CC_PARK_BATCH];
+    ULONG Parked = 0;
+
+    if (EventQueued)
+        *EventQueued = FALSE;
 
     OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
 
@@ -1441,11 +2036,47 @@ CcRosReleaseFileCache (
             SharedCacheMap->OpenCount--;
             if (SharedCacheMap->OpenCount == 0)
             {
-                CcRosDeleteFileCache(FileObject, SharedCacheMap, &OldIrql);
+                if (!AllowDeferredDelete)
+                {
+                    CcRosDeleteFileCache(FileObject, SharedCacheMap, &OldIrql);
+                }
+                else if (!CcRosDeleteOrDeferFileCache(SharedCacheMap, &OldIrql))
+                {
+                    /* Left to the lazy writer */
+                    Parked = CcRosParkViews(SharedCacheMap, ParkedVacbs, ParkedViews, CC_PARK_BATCH);
+                }
+            }
+            else if (UninitializeCompleteEvent && IsListEmpty(&SharedCacheMap->PrivateList))
+            {
+                /* Nobody caches through the map any more, but something still uses it: wait for that */
+                CcRosQueueUninitializeEvent(SharedCacheMap, UninitializeCompleteEvent);
+                *EventQueued = TRUE;
+            }
+        }
+        else if (UninitializeCompleteEvent && IsListEmpty(&SharedCacheMap->PrivateList) &&
+                 !(SharedCacheMap->Flags & SHARED_CACHE_MAP_IN_CREATION))
+        {
+            /*
+             * This file object caches nothing, but its file's map is still there, closed: left to the
+             * lazy writer, or in use by it.  The caller waits for the map to go before it frees what it
+             * points to, and may hold the locks the lazy writer needs: delete it now when nothing uses
+             * it, write what is dirty, as it always was done.
+             */
+            if (SharedCacheMap->OpenCount == 0)
+            {
+                SharedCacheMap->Flags |= SHARED_CACHE_MAP_SYNC_DELETE;
+                CcRosDeleteFileCache(SharedCacheMap->FileObject, SharedCacheMap, &OldIrql);
+            }
+            else
+            {
+                CcRosQueueUninitializeEvent(SharedCacheMap, UninitializeCompleteEvent);
+                *EventQueued = TRUE;
             }
         }
     }
     KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+
+    CcRosUnparkViews(ParkedVacbs, ParkedViews, Parked);
     return STATUS_SUCCESS;
 }
 
@@ -1571,6 +2202,15 @@ CcRosInitializeFileCache (
 
         FileObject->PrivateCacheMap = PrivateMap;
         SharedCacheMap->OpenCount++;
+
+        /* Open again: no longer a closed map waiting for the lazy writer */
+        if (SharedCacheMap->Flags & SHARED_CACHE_MAP_DEFERRED)
+        {
+            CcDeferredVacbs -= SharedCacheMap->DeferredVacbs;
+            SharedCacheMap->Flags &= ~SHARED_CACHE_MAP_DEFERRED;
+        }
+        SharedCacheMap->Flags &= ~SHARED_CACHE_MAP_DISCARD;
+        SharedCacheMap->LazyWriteFailures = 0;
     }
 
     KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
@@ -1596,7 +2236,7 @@ CcRosInitializeFileCache (
 
         if (!NT_SUCCESS(Status))
         {
-            CcRosReleaseFileCache(FileObject);
+            CcRosReleaseFileCache(FileObject, FALSE, NULL, NULL);
             return Status;
         }
 
