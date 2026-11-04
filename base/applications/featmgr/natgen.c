@@ -185,6 +185,20 @@ static void AddFromDb(LPCWSTR key, WCHAR type, LPCWSTR prefix, BOOL checkOnly)
     for (tok = wcstok_s(list, L"|", &ctx); tok && !g_err; tok = wcstok_s(NULL, L"|", &ctx))
     {
         BOOL ok;
+        if (type == L'd' && (!wcscmp(tok, L".") || !wcscmp(tok, L"..")))
+        {
+            /* "DelDirEmpty = .|.." (the RAPPS idiom: the install folder and the vendor folder above it, each if empty).
+             * "." is the install folder itself, which the record always lists ("d \"). ".." is recorded only when the parent is
+             * itself a folder an install could own (strictly below Program Files / LocalAppData\Programs, not protected);
+             * otherwise the item is dropped. Only DelDirEmpty: DelDir / DelFile with "." or ".." stay refused. */
+            WCHAR par[MAX_PATH];
+            if (checkOnly || tok[1] == L'\0') continue;
+            StringCchCopyW(par, MAX_PATH, g_installDir);
+            PathRemoveFileSpecW(par);
+            if (FmInstallDirOk(par, NULL)) AddEntry(L'd', L"\\..");
+            else wprintf(L"note: dropped the entry's DelDirEmpty item '..': the parent folder %s is a protected folder\n", par);
+            continue;
+        }
         if (type == L'K' || type == L'k')
             ok = FmGenRegOk(tok, type == L'K');
         else
@@ -302,21 +316,34 @@ static int GenInstall(LPCWSTR archive)
     else if (FAILED(SHGetFolderPathW(NULL, CSIDL_PROGRAM_FILES, NULL, 0, base))) return Fail(L"no Program Files folder", GetLastError()), g_err;
 
     Rk(L"Generate", L"Dir", dirKey, ARRAYSIZE(dirKey));
-    if (dirKey[0] == L'%' && ExpandEnvironmentStringsW(dirKey, tmp, ARRAYSIZE(tmp)) && tmp[0])
-        StringCchCopyW(g_installDir, MAX_PATH, tmp);
+    if (dirKey[0] == L'%')
+    {
+        DWORD n = ExpandEnvironmentStringsW(dirKey, tmp, ARRAYSIZE(tmp));
+        if (!n || n > ARRAYSIZE(tmp) || !tmp[0] || wcschr(tmp, L'%'))
+            return Fail(L"the install directory names an unknown variable", ERROR_BAD_PATHNAME), g_err;
+        if (FAILED(StringCchCopyW(dirKey, ARRAYSIZE(dirKey), tmp))) return Fail(L"the install directory is too long", ERROR_BAD_PATHNAME), g_err;
+    }
     else if (wcscmp(dirKey, NONE))
     {
-        WCHAR leaf[MAX_PATH];
+        /* a name below the base: "Vendor\App"; leading / trailing separators are dropped ("/thepowdertoy/" is "thepowdertoy") */
+        WCHAR leaf[MAX_PATH], *l = leaf;
+        size_t n;
         StringCchCopyW(leaf, MAX_PATH, dirKey[0] ? dirKey : g_f.Name);
-        if (!FmSafeTreeName(leaf)) return Fail(L"the install directory name is not valid", ERROR_BAD_PATHNAME), g_err;
-        StringCchPrintfW(g_installDir, MAX_PATH, L"%s\\%s", base, leaf);
+        while (*l == L'\\' || *l == L'/') l++;
+        n = wcslen(l);
+        while (n && (l[n - 1] == L'\\' || l[n - 1] == L'/')) l[--n] = L'\0';
+        if (!FmSafeTreeName(l)) return Fail(L"the install directory name is not valid", ERROR_BAD_PATHNAME), g_err;
+        if (FAILED(StringCchPrintfW(dirKey, ARRAYSIZE(dirKey), L"%s\\%s", base, l))) return Fail(L"the install directory is too long", ERROR_BAD_PATHNAME), g_err;
     }
     else
-        StringCchCopyW(g_installDir, MAX_PATH, base);
-    PathRemoveBackslashW(g_installDir);
+        StringCchCopyW(dirKey, ARRAYSIZE(dirKey), base);
+    /* canonical first (8.3 names, doubled or trailing separators, names ending in a space or dot), then the allow-list */
+    if (!FmInstallDirOk(dirKey, g_installDir))
+    {
+        wprintf(L"error: the install directory '%s' is not a folder of its own below Program Files or %%LOCALAPPDATA%%\\Programs\n", dirKey);
+        return Fail(L"the install directory is a system or profile folder (or not below Program Files / LocalAppData\\Programs); it must be a folder of its own", ERROR_BAD_PATHNAME), g_err;
+    }
     g_installLen = wcslen(g_installDir);
-    if (g_installLen < 8 || FmBadInstallRoot(g_installDir))
-        return Fail(L"the install directory is a system or profile folder (or an ancestor of one); it must be a folder of its own", ERROR_BAD_PATHNAME), g_err;
     if (IsReparse(g_installDir)) return Fail(L"the install directory is a link", ERROR_ACCESS_DENIED), g_err;
     if (SHCreateDirectoryExW(NULL, g_installDir, NULL) != ERROR_SUCCESS && GetFileAttributesW(g_installDir) == INVALID_FILE_ATTRIBUTES)
         return Fail(L"cannot create the install directory", GetLastError()), g_err;

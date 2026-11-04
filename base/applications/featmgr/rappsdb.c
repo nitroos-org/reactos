@@ -140,6 +140,8 @@ BOOL FmSafeTreeName(LPWSTR name)
     {
         size_t l = wcscspn(comp, L"\\");
         if (l == 0 || (l == 1 && comp[0] == L'.') || (l == 2 && comp[0] == L'.' && comp[1] == L'.')) return FALSE;
+        /* Windows drops a trailing space or dot ("App " and "App." are "App"): such a name would alias another one */
+        if (comp[l - 1] == L' ' || comp[l - 1] == L'.') return FALSE;
         if (!comp[l]) break;
         comp += l + 1;
         if (!*comp) return FALSE;
@@ -279,6 +281,13 @@ HRESULT FmRappsFetchDb(LPCWSTR urlOverride, FILE *log)
             LOGF(log, L"error: catalog address %s refused (only the official address, or a local file)\n", url);
             return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
         }
+    }
+    /* a local catalog is a file on a local drive letter ("X:\..."): no UNC or device path, which would be read over SMB */
+    if (_wcsnicmp(url, L"https://", 8) && !(((url[0] | 0x20) >= L'a' && (url[0] | 0x20) <= L'z') && url[1] == L':' && (url[2] == L'\\' || url[2] == L'/')))
+    {
+        FmSetLastMessage(L"Refused: a local RAPPS catalog must be a file on a drive letter (X:\\...); %s is not accepted.", url);
+        LOGF(log, L"error: catalog path %s refused (not a drive-letter path)\n", url);
+        return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
     }
     if (!FmGetRootDir(root, MAX_PATH)) return E_FAIL;
     StringCchPrintfW(base, MAX_PATH, L"%s\\RappsDb", root);

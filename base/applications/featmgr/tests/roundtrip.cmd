@@ -500,6 +500,16 @@ call :rc0 "C4 ...with the reason"
 set FEATMGR_RAPPS_DB=%O%\no-such-catalog.cab
 %FM% /update-catalog > %O%\cat3.txt 2>&1
 call :rc1 "C5 a local override that does not exist fails"
+set FEATMGR_RAPPS_DB=\\10.0.2.2\share\rappmgr2.cab
+%FM% /update-catalog > %O%\cat4.txt 2>&1
+call :rc1 "C7 a UNC catalog override is refused (no SMB fetch)"
+find "Refused" %O%\cat4.txt >nul
+call :rc0 "C8 ...with the reason"
+set FEATMGR_RAPPS_DB=\\?\UNC\10.0.2.2\share\rappmgr2.cab
+%FM% /update-catalog > %O%\cat5.txt 2>&1
+call :rc1 "C9 a \\?\UNC catalog override is refused"
+find "Refused" %O%\cat5.txt >nul
+call :rc0 "C10 ...with the reason"
 set FEATMGR_RAPPS_DB=
 call :ex %R%\RappsDb\appdb 0 "C6 a refused catalog left nothing behind"
 
@@ -539,6 +549,141 @@ goto :eof
 :gen_done
 call :ex "%LP%\app.exe" 0 "G9 Dir=! put nothing in the base folder"
 call :ex "%LP%\FmGenDot" 0 "G10 DelDir=. created no install folder"
+
+rem ===== Generate: DelDirEmpty = .|.. (the RAPPS idiom), canonical install dirs, own shortcuts, protected keys =====
+copy /y %FX%\fmt-gen-*.ini %R%\Catalog\ >nul
+set GE=%FX%\fmgen-empty.zip
+set UNK=HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall
+rem the 9 entries of the real catalog (rappmgr2.cab, verbatim) that use DelDirEmpty = .|..: each passes the cleanup and install-dir
+rem checks (they run before anything is created), so the run reaches the archive, which here is empty
+%FM% /import-rapps %FX%\rapps-real /anyarch /clean > %O%\gd-imp.txt 2>&1
+call :rc0 "GD1 the 9 real DelDirEmpty = .|.. catalog entries import"
+for %%A in (autoruns chrome diskview filemon processexplorer tcpview vmmap winobj zoomit) do call :gdreal %%A
+rem Process Explorer, the real entry: Dir = SysInternals\Process Explorer, DelDirEmpty = .|..
+rd /s /q "%LP%\SysInternals" 2>nul
+%FM% /nat-install rapps-processexplorer %FX%\fmgen-pe.zip > %O%\gd-pe.txt 2>&1
+call :rc0 "GD4 Process Explorer (real catalog entry with DelDirEmpty = .|..) installs"
+type %O%\gd-pe.txt >> %LOG%
+call :ex "%LP%\SysInternals\Process Explorer\procexp.chm" 1 "GD5 ...into SysInternals\Process Explorer"
+reg query "%UNK%\Process Explorer\RApps" > %O%\gd-pe-rec.txt 2>&1
+type %O%\gd-pe-rec.txt >> %LOG%
+find "\.." %O%\gd-pe-rec.txt >nul
+call :rc0 "GD6 ...the record lists the vendor folder (\..) for removal if empty"
+%FM% /nat-uninstall "Process Explorer" "Process Explorer" "-" > %O%\gd-pe-un.txt 2>&1
+call :rc0 "GD7 Process Explorer uninstalls"
+type %O%\gd-pe-un.txt >> %LOG%
+call :ex "%LP%\SysInternals\Process Explorer" 0 "GD8 the install folder is gone"
+call :ex "%LP%\SysInternals" 0 "GD9 the empty vendor folder (..) is gone too"
+call :ex "%LP%" 1 "GD10 LocalAppData\Programs stays"
+%FM% /nat-install rapps-processexplorer %FX%\fmgen-pe.zip > %O%\gd-pe2.txt 2>&1
+mkdir "%LP%\SysInternals\Other" 2>nul
+echo x> "%LP%\SysInternals\Other\keep.txt"
+%FM% /nat-uninstall "Process Explorer" "Process Explorer" "-" > %O%\gd-pe2-un.txt 2>&1
+call :ex "%LP%\SysInternals\Other\keep.txt" 1 "GD11 a vendor folder that is not empty stays (another app's files kept)"
+call :ex "%LP%\SysInternals\Process Explorer" 0 "GD12 ...while Process Explorer itself is gone"
+rd /s /q "%LP%\SysInternals" 2>nul
+rem one-level Dir: ".." would be LocalAppData\Programs, so the item is dropped with a log line, and a tampered record is refused
+%FM% /nat-install fmt-gen-ddroot %GZ% > %O%\gd-root.txt 2>&1
+call :rc0 "GD13 Dir=<one name> with DelDirEmpty = .|.. installs"
+type %O%\gd-root.txt >> %LOG%
+find "dropped the entry's DelDirEmpty item" %O%\gd-root.txt >nul
+call :rc0 "GD14 ...the '..' item (LocalAppData\Programs) is dropped with a log line"
+reg query "%UNK%\FmGen DD\RApps" > %O%\gd-root-rec.txt 2>&1
+find "\.." %O%\gd-root-rec.txt >nul
+call :rc1 "GD15 ...and is not in the record"
+reg add "%UNK%\FmGen DD\RApps" /v d99 /t REG_SZ /d "\.." /f >nul
+%FM% /nat-uninstall "FmGen DD" "FmGen DD" "-" > %O%\gd-root-un.txt 2>&1
+type %O%\gd-root-un.txt >> %LOG%
+find "is a protected folder" %O%\gd-root-un.txt >nul
+call :rc0 "GD16 a tampered record '\..' whose parent is LocalAppData\Programs is refused at uninstall"
+call :ex "%LP%" 1 "GD17 LocalAppData\Programs is still there"
+call :ex "%LP%\FmGenDD" 0 "GD18 the app folder itself is gone"
+rem the install directory is checked in canonical form: 8.3 names, doubled or trailing separators, " ", a trailing dot
+for %%V in (dirshort dirdbl dirslash dirlpslash dirspace dirtdot dirwin deldirdots delfiledot regcrypt regnitro regclsid) do call :genbad %%V
+reg query "%UNK%" > %O%\gb-arp.txt 2>&1
+find /i "FmGen Bad" %O%\gb-arp.txt >nul
+call :rc1 "GB1 no refused install left an Add/Remove Programs record"
+dir /b "%LP%" > %O%\gb-lp.txt 2>&1
+find /i "FmGenBad" %O%\gb-lp.txt >nul
+call :rc1 "GB2 ...or a folder"
+call :ex "%LP%\FmGenTdot" 0 "GB3 Dir=<name>. created nothing"
+%FM% /nat-install fmt-gen-pfok %GZ% > %O%\gp1.txt 2>&1
+call :rc0 "GP1 Dir=%%ProgramFiles%%\<name> (strictly below Program Files) installs"
+call :ex "%ProgramFiles%\FmGenPf\app.exe" 1 "GP2 ...into its own folder"
+%FM% /nat-uninstall "FmGen Pf" "FmGen Pf" "-" > %O%\gp2.txt 2>&1
+call :ex "%ProgramFiles%\FmGenPf" 0 "GP3 ...and uninstalls"
+%FM% /nat-install fmt-gen-shortok %GZ% > %O%\gp3.txt 2>&1
+if exist "%SystemDrive%\PROGRA~1\" goto :gp_short
+call :rc1 "GP4 no 8.3 names on this volume: Dir=%%SystemDrive%%\PROGRA~1\<name> is not below Program Files, refused"
+goto :gp_short_done
+:gp_short
+call :rc0 "GP4 Dir=%%SystemDrive%%\PROGRA~1\<name> (8.3) installs below Program Files"
+reg query "%UNK%\FmGen Short" /v InstallLocation > %O%\gp4.txt 2>&1
+type %O%\gp4.txt >> %LOG%
+find /i "PROGRA~1" %O%\gp4.txt >nul
+call :rc1 "GP5 ...and the record holds the long name"
+%FM% /nat-uninstall "FmGen Short" "FmGen Short" "-" > %O%\gp5.txt 2>&1
+call :ex "%ProgramFiles%\FmGenShort" 0 "GP6 ...and uninstalls"
+:gp_short_done
+rem registry: the app's own per-user ProgID may go; the Cryptography and ReactOS keys never
+%FM% /nat-install fmt-gen-progid %GZ% > %O%\gr1.txt 2>&1
+call :rc0 "GR1 DelReg = HKCU\SOFTWARE\Classes\<App.ProgID> (as the Sysinternals entries) is accepted"
+reg add "HKCU\Software\Classes\FmGen.Logfile.1" /v x /d y /f >nul
+%FM% /nat-uninstall "FmGen ProgId" "FmGen ProgId" "-" > %O%\gr2.txt 2>&1
+reg query "HKCU\Software\Classes\FmGen.Logfile.1" >nul 2>&1
+call :rc1 "GR2 ...and that ProgID key is removed at uninstall"
+%FM% /nat-install fmt-gen-ok %GZ% > %O%\gr3.txt 2>&1
+reg add HKLM\SOFTWARE\ReactOS\Nitro\FmGenKeep /v x /d y /f >nul
+reg add HKLM\SOFTWARE\Microsoft\Cryptography\FmGenKeep /v x /d y /f >nul
+reg add "%ARPK%\RApps" /v K97 /t REG_SZ /d "HKLM\SOFTWARE\ReactOS\Nitro\FmGenKeep" /f >nul
+reg add "%ARPK%\RApps" /v K98 /t REG_SZ /d "HKLM\SOFTWARE\Microsoft\Cryptography\FmGenKeep" /f >nul
+%FM% /nat-uninstall "FmGen Ok" "FmGen Ok" "-" > %O%\gr4.txt 2>&1
+type %O%\gr4.txt >> %LOG%
+reg query HKLM\SOFTWARE\ReactOS\Nitro\FmGenKeep >nul 2>&1
+call :rc0 "GR3 a tampered record cannot delete under HKLM\SOFTWARE\ReactOS\Nitro (featmgr state)"
+reg query HKLM\SOFTWARE\Microsoft\Cryptography\FmGenKeep >nul 2>&1
+call :rc0 "GR4 ...or under HKLM\SOFTWARE\Microsoft\Cryptography"
+reg delete HKLM\SOFTWARE\ReactOS\Nitro\FmGenKeep /f >nul 2>&1
+reg delete HKLM\SOFTWARE\Microsoft\Cryptography\FmGenKeep /f >nul 2>&1
+rd /s /q "%LP%\FmGenOk" 2>nul
+rem Start menu: uninstall deletes the shortcut this install made (its target is in the install folder), nothing else there
+%FM% /nat-install fmt-gen-lnk %GZ% > %O%\gs1.txt 2>&1
+call :rc0 "GS1 a Generate install with a Start menu shortcut"
+set LNK=
+reg query "%UNK%\FmGen Lnk\RApps" > %O%\gs-rec.txt 2>&1
+type %O%\gs-rec.txt >> %LOG%
+for /f "tokens=2,*" %%A in ('find /i "FmGen Lnk.lnk" ^< %O%\gs-rec.txt') do set LNK=%%B
+if defined LNK (echo PASS GS2 the record holds the exact path of the shortcut>> %LOG%) else (call :fail "GS2 the record holds the exact path of the shortcut" "no .lnk entry")
+call :ex "%LNK%" 1 "GS3 the shortcut exists"
+for %%I in ("%LNK%") do set PMU=%%~dpI
+echo x> "%PMU%FmGen Other.lnk"
+set OL=
+for /r "%ALLUSERSPROFILE%" %%L in (*.lnk) do if not defined OL set OL=%%L
+if defined OL copy /y "%OL%" "%PMU%FmGen Foreign.lnk" >nul
+reg add "%UNK%\FmGen Lnk\RApps" /v F95 /t REG_SZ /d "%PMU%FmGen Foreign.lnk" /f >nul
+reg add "%UNK%\FmGen Lnk\RApps" /v F96 /t REG_SZ /d "%PMU%FmGen Other.lnk" /f >nul
+%FM% /nat-uninstall "FmGen Lnk" "FmGen Lnk" "-" > %O%\gs2.txt 2>&1
+type %O%\gs2.txt >> %LOG%
+call :ex "%LNK%" 0 "GS4 the app's own shortcut is removed"
+call :ex "%PMU%FmGen Other.lnk" 1 "GS5 a file in the Start menu that is not the app's shortcut is kept"
+if defined OL call :ex "%PMU%FmGen Foreign.lnk" 1 "GS6 another program's shortcut named in the record is kept"
+find "refused record entry F96" %O%\gs2.txt >nul
+call :rc0 "GS7 ...and the refusal is reported"
+del /q "%PMU%FmGen Other.lnk" "%PMU%FmGen Foreign.lnk" 2>nul
+rd /s /q "%LP%\FmGenLnk" 2>nul
+del /q %R%\Catalog\fmt-gen-*.ini 2>nul
+goto :gd_done
+:gdreal
+%FM% /nat-install rapps-%1 %GE% > %O%\gd-real-%1.txt 2>&1
+type %O%\gd-real-%1.txt >> %LOG%
+find "unsafe cleanup entry" %O%\gd-real-%1.txt >nul
+call :rc1 "GD2 rapps-%1: its Del* lists pass the checks (no unsafe cleanup entry)"
+find "has no archive installer" %O%\gd-real-%1.txt >nul
+if not errorlevel 1 (echo PASS GD3 rapps-%1: on this architecture the entry is not an archive install, nothing to check>> %LOG%& goto :eof)
+find "held none of the files" %O%\gd-real-%1.txt >nul
+call :rc0 "GD3 rapps-%1: install folder accepted; the run got as far as the (empty) archive"
+goto :eof
+:gd_done
 
 rem ===== SCOOP (SCOOP-FEATMGR-01): bucket import, Provider=scoop install/uninstall/state =====
 rem Offline: the bucket is a fixture directory and "scoop" is a stub (fixtures\scoop-stub.cmd) in a fake
