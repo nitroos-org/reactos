@@ -677,6 +677,7 @@ DevInstallW(
     BOOL ret;
     DWORD config_flags;
     BOOL retval = FALSE;
+    BOOL NeedRestart = FALSE;
 
     TRACE("(%p, %p, %s, %d)\n", hWndParent, hInstance, debugstr_w(InstanceId), Show);
 
@@ -787,7 +788,7 @@ DevInstallW(
         /* Driver found ; install it */
         retval = InstallCurrentDriver(DevInstData);
         TRACE("InstallCurrentDriver() returned %d\n", retval);
-        if (retval && Show != SW_HIDE)
+        if (retval)
         {
             /* Should we display the 'Need to reboot' page? */
             SP_DEVINSTALL_PARAMS installParams;
@@ -799,8 +800,16 @@ DevInstallW(
             {
                 if (installParams.Flags & (DI_NEEDRESTART | DI_NEEDREBOOT))
                 {
-                    TRACE("Displaying 'Reboot' wizard page\n");
-                    retval = DisplayWizard(DevInstData, hWndParent, IDD_NEEDREBOOT);
+                    if (Show != SW_HIDE)
+                    {
+                        TRACE("Displaying 'Reboot' wizard page\n");
+                        retval = DisplayWizard(DevInstData, hWndParent, IDD_NEEDREBOOT);
+                    }
+                    else
+                    {
+                        /* No UI here: the caller (drvinst.exe) has the page shown in the user's session */
+                        NeedRestart = TRUE;
+                    }
                 }
             }
         }
@@ -834,6 +843,52 @@ cleanup:
         HeapFree(GetProcessHeap(), 0, DevInstData);
     }
 
+    if (retval && NeedRestart)
+        SetLastError(ERROR_SUCCESS_REBOOT_REQUIRED);
+
+    return retval;
+}
+
+
+/* The wizard's restart page alone, for a device the Plug and Play service
+   installed in its own context (drvinst.exe) that needs a restart */
+static BOOL
+ShowRestartPage(
+    IN LPCWSTR InstanceId)
+{
+    PDEVINSTDATA DevInstData;
+    BOOL retval = FALSE;
+
+    DevInstData = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DEVINSTDATA));
+    if (!DevInstData)
+        return FALSE;
+
+    DevInstData->hDevInfo = SetupDiCreateDeviceInfoListExW(NULL, NULL, NULL, NULL);
+    if (DevInstData->hDevInfo == INVALID_HANDLE_VALUE)
+        goto cleanup;
+
+    DevInstData->devInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+    if (!SetupDiOpenDeviceInfoW(DevInstData->hDevInfo, InstanceId, NULL, 0, &DevInstData->devInfoData))
+        goto cleanup;
+
+    /* The page names the device by the description its driver gave it */
+    if (!SetupDiGetDeviceRegistryPropertyW(DevInstData->hDevInfo,
+                                           &DevInstData->devInfoData,
+                                           SPDRP_DEVICEDESC,
+                                           NULL,
+                                           (PBYTE)DevInstData->drvInfoData.Description,
+                                           sizeof(DevInstData->drvInfoData.Description) - sizeof(WCHAR),
+                                           NULL))
+    {
+        lstrcpynW(DevInstData->drvInfoData.Description, InstanceId, LINE_LEN);
+    }
+
+    retval = DisplayWizard(DevInstData, NULL, IDD_NEEDREBOOT);
+
+cleanup:
+    if (DevInstData->hDevInfo != INVALID_HANDLE_VALUE && DevInstData->hDevInfo != NULL)
+        SetupDiDestroyDeviceInfoList(DevInstData->hDevInfo);
+    HeapFree(GetProcessHeap(), 0, DevInstData);
     return retval;
 }
 
@@ -977,7 +1032,7 @@ ClientSideInstallW(
     IN INT Show)
 {
     BOOL ReturnValue = FALSE;
-    BOOL ShowWizard;
+    DWORD UiMode;
     DWORD BytesRead;
     DWORD Value;
     HANDLE hPipe = INVALID_HANDLE_VALUE;
@@ -1011,8 +1066,8 @@ ClientSideInstallW(
     }
 
     /* I couldn't figure out what the following value means under Windows XP.
-       Therefore I used it in umpnpmgr to pass the ShowWizard variable. */
-    if(!ReadFile(hPipe, &ShowWizard, sizeof(ShowWizard), &BytesRead, NULL))
+       Therefore I used it in umpnpmgr to pass the UI mode (NEWDEV_UI_*). */
+    if(!ReadFile(hPipe, &UiMode, sizeof(UiMode), &BytesRead, NULL))
     {
         ERR("ReadFile failed with error %u\n", GetLastError());
         goto cleanup;
@@ -1033,7 +1088,10 @@ ClientSideInstallW(
         goto cleanup;
     }
 
-    ReturnValue = DevInstallW(NULL, NULL, DeviceInstance, ShowWizard ? SW_SHOWNOACTIVATE : SW_HIDE);
+    if (UiMode == NEWDEV_UI_RESTART_PAGE)
+        ReturnValue = ShowRestartPage(DeviceInstance);
+    else
+        ReturnValue = DevInstallW(NULL, NULL, DeviceInstance, UiMode != NEWDEV_UI_HIDDEN ? SW_SHOWNOACTIVATE : SW_HIDE);
     if(!ReturnValue)
     {
         ERR("DevInstallW failed with error %lu\n", GetLastError());
