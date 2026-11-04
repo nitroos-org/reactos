@@ -397,61 +397,71 @@ IsConsoleMode(VOID)
 /************************************************/
 
 
+#define MAX_TOPLEVEL_WINDOWS 128
+
+typedef struct tagTOPLEVEL_LIST
+{
+    ULONG Count;
+    HWND Windows[MAX_TOPLEVEL_WINDOWS];
+} TOPLEVEL_LIST, *PTOPLEVEL_LIST;
+
+static BOOL CALLBACK
+CollectTopLevelWnd(IN HWND hWnd, IN LPARAM lParam)
+{
+    PTOPLEVEL_LIST List = (PTOPLEVEL_LIST)lParam;
+
+    /* Unowned windows only, as FindTopLevelWnd does */
+    if (GetWindow(hWnd, GW_OWNER) == NULL && List->Count < MAX_TOPLEVEL_WINDOWS)
+        List->Windows[List->Count++] = hWnd;
+    return TRUE;
+}
+
+/*
+ * Windows sends the end-session messages to EVERY top-level window of the
+ * thread (a program's visible window, its hidden helper windows, ...), not
+ * only to the first one found. Programs such as Firefox rely on this: the
+ * window that handles WM_QUERYENDSESSION/WM_ENDSESSION is not necessarily the
+ * first top-level window in z-order.
+ */
 static BOOL
 ThreadShutdownNotify(IN PCSR_THREAD CsrThread,
                      IN ULONG Flags,
                      IN ULONG Flags2,
                      IN PNOTIFY_CONTEXT Context)
 {
-    HWND TopWnd = NULL;
+    PTOPLEVEL_LIST List;
+    ULONG i;
+    BOOL Notified = FALSE;
+
+    List = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(*List));
+    if (!List)
+        return FALSE;
+    List->Count = 0;
 
     EnumThreadWindows(HandleToUlong(CsrThread->ClientId.UniqueThread),
-                      FindTopLevelWnd, (LPARAM)&TopWnd);
-    if (TopWnd)
-    {
-        HWND hWndOwner;
-
-        /*** FOR TESTING PURPOSES ONLY!! ***/
-        HWND tmpWnd;
-        tmpWnd = TopWnd;
-        /***********************************/
-
-        while ((hWndOwner = GetWindow(TopWnd, GW_OWNER)) != NULL)
-        {
-            MY_DPRINT("GetWindow(TopWnd, GW_OWNER) not returned NULL...\n");
-            TopWnd = hWndOwner;
-        }
-        if (TopWnd != tmpWnd) MY_DPRINT("(TopWnd = %x) != (tmpWnd = %x)\n", TopWnd, tmpWnd);
-    }
-    else
-    {
-        return FALSE;
-    }
+                      CollectTopLevelWnd, (LPARAM)List);
 
     Context->wParam = Flags2;
     Context->lParam = (0 != (Flags & EWX_CALLER_WINLOGON_LOGOFF) ?
                        ENDSESSION_LOGOFF : 0);
-
-    Context->StartTime = 0;
-    Context->UIThread = NULL;
     Context->ShowUI = !IsConsoleMode() && (Flags2 & (MCS_QUERYENDSESSION | MCS_ENDSESSION));
-    Context->Dlg = NULL;
 
-#if 0 // Obviously, switching desktops like that from within WINSRV doesn't work...
+    for (i = 0; i < List->Count; i++)
     {
-    BOOL Success;
-    Context->OldDesktop = GetThreadDesktop(GetCurrentThreadId());
-    // Context->Desktop    = GetThreadDesktop(HandleToUlong(CsrThread->ClientId.UniqueThread));
-    Context->Desktop    = GetThreadDesktop(GetWindowThreadProcessId(TopWnd, NULL));
-    MY_DPRINT("Last error = %d\n", GetLastError());
-    MY_DPRINT("Before switching to desktop 0x%x\n", Context->Desktop);
-    Success = SwitchDesktop(Context->Desktop);
-    MY_DPRINT("After switching to desktop (Success = %s ; last error = %d); going to notify top-level...\n",
-            Success ? "TRUE" : "FALSE", GetLastError());
-    }
-#endif
+        HWND TopWnd = List->Windows[i];
 
-    NotifyTopLevelWindow(TopWnd, Context);
+        /* The window may have been destroyed by a previous message */
+        if (!IsWindow(TopWnd))
+            continue;
+        Notified = TRUE;
+
+        /* Each window gets its own timeouts */
+        Context->StartTime = 0;
+        Context->UIThread = NULL;
+        Context->Dlg = NULL;
+        Context->QueryResult = QUERY_RESULT_CONTINUE;
+
+        NotifyTopLevelWindow(TopWnd, Context);
 
 /******************************************************************************/
 #if 1
@@ -481,7 +491,17 @@ ThreadShutdownNotify(IN PCSR_THREAD CsrThread,
     MY_DPRINT("Switched back ok\n");
 #endif
 
-    return TRUE;
+
+        /*
+         * Stop on an abort, or when the thread did not answer (timeout, error,
+         * forced end): its other windows cannot answer either.
+         */
+        if (Context->QueryResult != QUERY_RESULT_CONTINUE)
+            break;
+    }
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, List);
+    return Notified;
 }
 
 static ULONG
