@@ -6,7 +6,7 @@
  *
  * The provider keeps one table per class. This file adds what WMI clients expect
  * around those tables: the namespaces (root, root\cimv2, root\default,
- * root\Interop, root\Interop\ms_409) with their __NAMESPACE instances, the
+ * root\Interop, root\Interop\ms_409, root\StandardCimv2) with their __NAMESPACE instances, the
  * superclass of every class (__SUPERCLASS, __DERIVATION, deep enumeration of a
  * base class), the abstract CIM base classes as tables without rows, the
  * property order Windows reports, and the read/write/key qualifiers.
@@ -31,6 +31,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(wbemprox);
 #define SCHEMA_NS_ROOT    (1 << WBEMPROX_NAMESPACE_ROOT)
 #define SCHEMA_NS_CIMV2   ((1 << WBEMPROX_NAMESPACE_CIMV2) | (1 << WBEMPROX_NAMESPACE_DEFAULT))
 #define SCHEMA_NS_INTEROP (1 << WBEMPROX_NAMESPACE_INTEROP)
+#define SCHEMA_NS_SCV2    (1 << WBEMPROX_NAMESPACE_STANDARDCIMV2)
 #define SCHEMA_NS_ALL     ((1 << WBEMPROX_NAMESPACE_LAST) - 1)
 
 #ifndef WBEM_FLAG_SHALLOW
@@ -54,6 +55,7 @@ struct schema_class
     BOOL abstract;                      /* no provider: a table without rows */
 };
 
+#include "schema_scv2.h"
 #include "schema_data.h"
 
 static const struct
@@ -70,6 +72,7 @@ namespaces[WBEMPROX_NAMESPACE_LAST] =
     { L"DEFAULT", L"ROOT\\DEFAULT", WBEMPROX_NAMESPACE_ROOT, L"DEFAULT" },
     { L"Interop", L"ROOT\\Interop", WBEMPROX_NAMESPACE_ROOT, L"Interop" },
     { L"Interop\\ms_409", L"ROOT\\Interop\\ms_409", WBEMPROX_NAMESPACE_INTEROP, L"ms_409" },
+    { L"StandardCimv2", L"ROOT\\StandardCimv2", WBEMPROX_NAMESPACE_ROOT, L"StandardCimv2" },
 };
 
 BOOL parse_namespace( const WCHAR *path, enum wbm_namespace *ns )
@@ -164,6 +167,7 @@ void init_schema_tables( struct list *list )
     }
     init_namespace_tables();
     list_add_tail( list, &ns_tables[WBEMPROX_NAMESPACE_ROOT].entry );
+    init_scv2_tables( list );
 
     /* leaf classes are the common case of a SELECT: know them without walking the table list */
     for (i = 0; i < ARRAY_SIZE(schema_classes); i++)
@@ -184,21 +188,49 @@ static const struct schema_class *find_schema_class( const WCHAR *name )
     return NULL;
 }
 
-const WCHAR *get_superclass( const WCHAR *name )
+/* a few classes have another superclass in root\StandardCimv2 than in root\cimv2 (the tables are shared) */
+static const struct
 {
-    const struct schema_class *class = find_schema_class( name );
+    const WCHAR *name;
+    const WCHAR *superclass;
+}
+scv2_superclasses[] =
+{
+    { L"CIM_ManagedSystemElement", L"CIM_ManagedElement" },
+    { L"CIM_LogicalDevice", L"CIM_EnabledLogicalElement" },
+};
+
+const WCHAR *get_superclass_ns( const WCHAR *name, enum wbm_namespace ns )
+{
+    const struct schema_class *class;
+    UINT i;
+
+    if (ns == WBEMPROX_NAMESPACE_STANDARDCIMV2)
+        for (i = 0; i < ARRAY_SIZE(scv2_superclasses); i++)
+            if (name && !wcsicmp( scv2_superclasses[i].name, name )) return scv2_superclasses[i].superclass;
+    class = find_schema_class( name );
     return class ? class->superclass : NULL;
 }
 
+const WCHAR *get_superclass( const WCHAR *name )
+{
+    return get_superclass_ns( name, WBEMPROX_NAMESPACE_CIMV2 );
+}
+
 /* is name a (direct or indirect) subclass of ancestor */
-BOOL is_subclass( const WCHAR *name, const WCHAR *ancestor )
+BOOL is_subclass_ns( const WCHAR *name, const WCHAR *ancestor, enum wbm_namespace ns )
 {
     const WCHAR *super = name;
     UINT depth = 0;
 
-    while ((super = get_superclass( super )) && depth++ < MAX_DERIVATION)
+    while ((super = get_superclass_ns( super, ns )) && depth++ < MAX_DERIVATION)
         if (!wcsicmp( super, ancestor )) return TRUE;
     return FALSE;
+}
+
+BOOL is_subclass( const WCHAR *name, const WCHAR *ancestor )
+{
+    return is_subclass_ns( name, ancestor, WBEMPROX_NAMESPACE_CIMV2 );
 }
 
 /* internal tables of this provider (__ASSOCIATORS, __PARAMETERS, __QUALIFIERS and the method signatures) */
@@ -217,13 +249,13 @@ BOOL is_table_visible( const WCHAR *name, enum wbm_namespace ns )
 }
 
 /* __DERIVATION: the superclasses, nearest first */
-SAFEARRAY *get_derivation( const WCHAR *name )
+SAFEARRAY *get_derivation( const WCHAR *name, enum wbm_namespace ns )
 {
     const WCHAR *chain[MAX_DERIVATION], *super = name;
     SAFEARRAY *sa;
     LONG i, count = 0;
 
-    while (count < MAX_DERIVATION && (super = get_superclass( super ))) chain[count++] = super;
+    while (count < MAX_DERIVATION && (super = get_superclass_ns( super, ns ))) chain[count++] = super;
     if (!(sa = SafeArrayCreateVector( VT_BSTR, 0, count ))) return NULL;
     for (i = 0; i < count; i++)
     {
@@ -277,6 +309,7 @@ static_methods[] =
 {
     { L"Win32_Process", L"Create" },
     { L"Win32_Service", L"Create" },
+    { L"MSFT_NetIPAddress", L"Create" },
 };
 
 /* methods that run on the class, not on an instance of it: the Static ones, and the registry and security
@@ -410,10 +443,10 @@ HRESULT create_class_enum( enum wbm_namespace ns, const WCHAR *superclass, LONG 
         const WCHAR *super;
 
         if (is_internal_table( table->name ) || !is_table_visible( table->name, ns )) continue;
-        super = get_superclass( table->name );
+        super = get_superclass_ns( table->name, ns );
         if (superclass)
         {
-            if (shallow ? (!super || wcsicmp( super, superclass )) : !is_subclass( table->name, superclass )) continue;
+            if (shallow ? (!super || wcsicmp( super, superclass )) : !is_subclass_ns( table->name, superclass, ns )) continue;
         }
         else if (shallow && super) continue;
 
@@ -490,7 +523,7 @@ HRESULT resolve_view_namespace( struct view *view, enum wbm_namespace ns )
     {
         struct table **tmp;
 
-        if (table == base || !is_table_visible( table->name, ns ) || !is_subclass( table->name, base->name )) continue;
+        if (table == base || !is_table_visible( table->name, ns ) || !is_subclass_ns( table->name, base->name, ns )) continue;
         if (!(tmp = heap_realloc( view->table, (view->table_count + 1) * sizeof(*tmp) )))
         {
             hr = E_OUTOFMEMORY;
