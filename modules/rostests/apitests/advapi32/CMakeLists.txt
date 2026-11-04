@@ -48,6 +48,7 @@ list(APPEND SOURCE
     RegLoadKey.c
     RegOpenKeyExW.c
     RegPerformanceData.c
+    InitiateShutdown.c
     RegQueryInfoKey.c
     RegQueryValueExW.c
     RegKeyNameCase.c
