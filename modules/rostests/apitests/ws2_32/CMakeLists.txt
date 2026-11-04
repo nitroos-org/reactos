@@ -45,7 +45,6 @@ list(APPEND SOURCE
     OwnHostname.c
     ReverseLookup.c
     rcvbuf.c
-    rcvwindow.c
     recv.c
     WSARecvMsg.c
     WSASendMsg.c

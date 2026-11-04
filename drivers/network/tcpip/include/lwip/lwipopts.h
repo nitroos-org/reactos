@@ -61,20 +61,9 @@
  * add support for other transport mediums */
 #define TCP_MSS                         1460
 
-/* The receive window is per connection (tcp_pcb.rcv_wnd_max). A connection starts with
- * TCP_WND_DEFAULT (what the SYN can announce); once AFD owns it, LibTCPSetReceiveWindow gives it the
- * window of its SO_RCVBUF, or LIBTCP_DEFAULT_WINDOW if there is none. TCP_WND is the largest window
- * (4 MB). Window scaling (shift 7: windows up to 8 MB, 128-byte steps) carries windows above 64K */
-#define LWIP_WND_SCALE                  1
+#define TCP_WND                         0xFFFF
 
-#define TCP_RCV_SCALE                   7
-
-#define TCP_WND                         0x400000
-
-#define TCP_WND_DEFAULT                 0x10000
-
-/* The send buffer stays 64K: it does not follow TCP_WND */
-#define TCP_SND_BUF                     0xFFFF
+#define TCP_SND_BUF                     TCP_WND
 
 #define TCP_MAXRTX                      8
 

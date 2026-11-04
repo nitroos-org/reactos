@@ -571,9 +571,6 @@ NTSTATUS TCPReceiveData
         ExFreeToNPagedLookasideList(&TdiBucketLookasideList, Bucket);
 
         (*BytesReceived) = Received;
-
-        /* What was read makes room in the receive window */
-        LibTCPReturnReceiveCredit(Connection);
     }
 
     return Status;
@@ -772,17 +769,6 @@ TCPSetNoDelay(
     LibTCPSetNoDelay(Connection->SocketContext, Set);
     UnlockObject(Connection);
     return STATUS_SUCCESS;
-}
-
-NTSTATUS
-TCPSetReceiveWindow(
-    PCONNECTION_ENDPOINT Connection,
-    ULONG Size)
-{
-    if (!Connection)
-        return STATUS_UNSUCCESSFUL;
-
-    return LibTCPSetReceiveWindow(Connection, Size);
 }
 
 NTSTATUS
