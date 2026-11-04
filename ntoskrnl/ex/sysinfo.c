@@ -2969,6 +2969,194 @@ ExpGetProcessorPackageId(
 #endif
 }
 
+/* One cache of a processor as the CPUID instruction describes it, and the number of the low APIC id bits that
+ * tell the logical processors sharing one such cache apart from the others */
+typedef struct _EXP_CPU_CACHE
+{
+    CACHE_DESCRIPTOR Descriptor;
+    ULONG ShareShift;
+} EXP_CPU_CACHE, *PEXP_CPU_CACHE;
+
+#define EXP_MAX_CPU_CACHES 8
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+
+static
+ULONG
+ExpCacheShiftForIds(
+    _In_ ULONG Ids)
+{
+    ULONG Shift = 0;
+
+    while ((Shift < 16) && ((1UL << Shift) < Ids))
+        Shift++;
+    return Shift;
+}
+
+static
+BYTE
+ExpAmdCacheAssociativity(
+    _In_ ULONG Encoded)
+{
+    /* The associativity field of CPUID 0x80000006 */
+    static const UCHAR Ways[16] = {0, 1, 2, 0, 4, 0, 8, 0, 16, 0, 32, 48, 64, 96, 128, 0xFF};
+
+    return Ways[Encoded & 0xF];
+}
+
+/* Read the caches from the executing processor: CPUID leaf 4 (Intel and others) or 0x8000001D (AMD, Hygon), and
+ * 0x80000005/6 on an AMD processor without it. They are the same on all processors. */
+static
+ULONG
+ExpQueryCpuCaches(
+    _Out_writes_(EXP_MAX_CPU_CACHES) PEXP_CPU_CACHE Caches)
+{
+    int Regs[4];
+    ULONG MaxLeaf, MaxExtLeaf, Leaf, SubLeaf, Count = 0, Type, Ids, Ways, Partitions, Sets, Line;
+    BOOLEAN Amd;
+
+    __cpuid(Regs, 0);
+    MaxLeaf = Regs[0];
+    Amd = (Regs[1] == 0x68747541 /* Auth */) || (Regs[1] == 0x6F677948 /* Hygo */);
+
+    __cpuid(Regs, 0x80000000);
+    MaxExtLeaf = Regs[0];
+
+    Leaf = 0;
+    if (Amd)
+    {
+        if (MaxExtLeaf >= 0x8000001D)
+        {
+            __cpuid(Regs, 0x80000001);
+            if (Regs[2] & (1 << 22)) /* TopologyExtensions */
+                Leaf = 0x8000001D;
+        }
+    }
+    else if (MaxLeaf >= 4)
+    {
+        Leaf = 4;
+    }
+
+    if (Leaf)
+    {
+        for (SubLeaf = 0; Count < EXP_MAX_CPU_CACHES; SubLeaf++)
+        {
+            __cpuidex(Regs, Leaf, SubLeaf);
+            Type = Regs[0] & 0x1F;
+            if (!Type)
+                break;
+            if (Type > 3)
+                continue;
+
+            Ids = ((Regs[0] >> 14) & 0xFFF) + 1;
+            Line = (Regs[1] & 0xFFF) + 1;
+            Partitions = ((Regs[1] >> 12) & 0x3FF) + 1;
+            Ways = ((Regs[1] >> 22) & 0x3FF) + 1;
+            Sets = (ULONG)Regs[2] + 1;
+
+            RtlZeroMemory(&Caches[Count], sizeof(Caches[Count]));
+            Caches[Count].Descriptor.Level = (UCHAR)((Regs[0] >> 5) & 7);
+            Caches[Count].Descriptor.Type = (Type == 1) ? CacheData :
+                                            (Type == 2) ? CacheInstruction : CacheUnified;
+            Caches[Count].Descriptor.LineSize = (USHORT)Line;
+            Caches[Count].Descriptor.Associativity = (Regs[0] & (1 << 9)) ? 0xFF : (UCHAR)min(Ways, 0xFE);
+            Caches[Count].Descriptor.Size = Ways * Partitions * Line * Sets;
+            Caches[Count].ShareShift = ExpCacheShiftForIds(Ids);
+            Count++;
+        }
+    }
+    else if (Amd && (MaxExtLeaf >= 0x80000005))
+    {
+        /* The legacy information does not say what is shared: Windows reports every one of these caches (the L3
+         * too) per core, so do we */
+        /* L1 data and instruction */
+        __cpuid(Regs, 0x80000005);
+        for (SubLeaf = 0; SubLeaf < 2; SubLeaf++)
+        {
+            ULONG Value = (ULONG)Regs[SubLeaf ? 3 : 2];
+
+            if (!(Value >> 24))
+                continue;
+            RtlZeroMemory(&Caches[Count], sizeof(Caches[Count]));
+            Caches[Count].Descriptor.Level = 1;
+            Caches[Count].Descriptor.Type = SubLeaf ? CacheInstruction : CacheData;
+            Caches[Count].Descriptor.Associativity = (UCHAR)((Value >> 16) & 0xFF);
+            Caches[Count].Descriptor.LineSize = (USHORT)(Value & 0xFF);
+            Caches[Count].Descriptor.Size = (Value >> 24) * 1024;
+            Count++;
+        }
+
+        /* L2 and L3 */
+        if (MaxExtLeaf >= 0x80000006)
+        {
+            ULONG L2, L3;
+
+            __cpuid(Regs, 0x80000006);
+            L2 = (ULONG)Regs[2];
+            L3 = (ULONG)Regs[3];
+            if ((L2 >> 16) && ExpAmdCacheAssociativity(L2 >> 12))
+            {
+                RtlZeroMemory(&Caches[Count], sizeof(Caches[Count]));
+                Caches[Count].Descriptor.Level = 2;
+                Caches[Count].Descriptor.Type = CacheUnified;
+                Caches[Count].Descriptor.Associativity = ExpAmdCacheAssociativity(L2 >> 12);
+                Caches[Count].Descriptor.LineSize = (USHORT)(L2 & 0xFF);
+                Caches[Count].Descriptor.Size = (L2 >> 16) * 1024;
+                Count++;
+            }
+            if ((L3 >> 18) && ExpAmdCacheAssociativity(L3 >> 12))
+            {
+                RtlZeroMemory(&Caches[Count], sizeof(Caches[Count]));
+                Caches[Count].Descriptor.Level = 3;
+                Caches[Count].Descriptor.Type = CacheUnified;
+                Caches[Count].Descriptor.Associativity = ExpAmdCacheAssociativity(L3 >> 12);
+                Caches[Count].Descriptor.LineSize = (USHORT)(L3 & 0xFF);
+                Caches[Count].Descriptor.Size = (L3 >> 18) * 512 * 1024;
+                Count++;
+            }
+        }
+    }
+
+    return Count;
+}
+
+#else
+
+static
+ULONG
+ExpQueryCpuCaches(
+    _Out_writes_(EXP_MAX_CPU_CACHES) PEXP_CPU_CACHE Caches)
+{
+    UNREFERENCED_PARAMETER(Caches);
+    return 0;
+}
+
+#endif
+
+/* The active processors that share a cache of the processor with the given index */
+static
+KAFFINITY
+ExpGetCacheSharingMask(
+    _In_ ULONG ProcessorIndex,
+    _In_ ULONG ShareShift)
+{
+    KAFFINITY Mask = 0;
+    ULONG i, Id;
+
+    Id = KiProcessorBlock[ProcessorIndex]->InitialApicId >> ShareShift;
+    for (i = 0; i < sizeof(KAFFINITY) * 8; i++)
+    {
+        if ((KeActiveProcessors & AFFINITY_MASK(i)) &&
+            ((ULONG)(KiProcessorBlock[i]->InitialApicId >> ShareShift) == Id))
+        {
+            Mask |= AFFINITY_MASK(i);
+        }
+    }
+
+    /* Never empty: the processor itself shares with itself */
+    return Mask | AFFINITY_MASK(ProcessorIndex);
+}
+
 /* Class 73 - Logical processor information */
 QSI_DEF(SystemLogicalProcessorInformation)
 {
@@ -2979,6 +3167,13 @@ QSI_DEF(SystemLogicalProcessorInformation)
     NTSTATUS Status = STATUS_SUCCESS;
     ULONG DataSize = 0, ProcessorFlags;
     PSYSTEM_LOGICAL_PROCESSOR_INFORMATION CurrentInfo;
+    EXP_CPU_CACHE Caches[EXP_MAX_CPU_CACHES];
+    ULONG CacheCount, c;
+    KAFFINITY CoreMask, CacheMask;
+    LONG j;
+
+    /* The caches are the same on all processors: read them from the one executing */
+    CacheCount = ExpQueryCpuCaches(Caches);
 
     /* First, browse active processors, thanks to the map */
     i = 0;
@@ -3018,6 +3213,41 @@ QSI_DEF(SystemLogicalProcessorInformation)
                 CurrentInfo->Relationship = RelationProcessorCore;
                 CurrentInfo->ProcessorCore.Flags = ProcessorFlags;
                 ++CurrentInfo;
+            }
+
+            /* Then the caches of its processors, each once, with the processor that has the lowest number
+             * among those that share it (Windows: the data, instruction and unified caches of a core, and
+             * the shared ones with the first core) */
+            CoreMask = Prcb->MultiThreadProcessorSet & KeActiveProcessors;
+            for (j = 0; j < (LONG)(sizeof(KAFFINITY) * 8); ++j)
+            {
+                if (!(CoreMask & AFFINITY_MASK(j)))
+                    continue;
+
+                for (c = 0; c < CacheCount; ++c)
+                {
+                    CacheMask = ExpGetCacheSharingMask(j, Caches[c].ShareShift);
+                    if (!(CacheMask & AFFINITY_MASK(j)) ||
+                        (CacheMask & (AFFINITY_MASK(j) - 1)))
+                    {
+                        /* Owned by a processor with a lower number */
+                        continue;
+                    }
+
+                    DataSize += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+                    if (DataSize > Size)
+                    {
+                        Status = STATUS_INFO_LENGTH_MISMATCH;
+                    }
+                    else
+                    {
+                        RtlZeroMemory(CurrentInfo, sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION));
+                        CurrentInfo->ProcessorMask = CacheMask;
+                        CurrentInfo->Relationship = RelationCache;
+                        CurrentInfo->Cache = Caches[c].Descriptor;
+                        ++CurrentInfo;
+                    }
+                }
             }
         }
 

@@ -1461,9 +1461,11 @@ CmpRemoveSubkeysInRemainingName(
  * Returns STATUS_SUCCESS if cache lookup has completed successfully.
  * STATUS_OBJECT_NAME_NOT_FOUND is returned if the current KCB of
  * the key pathname has been deleted. STATUS_RETRY is returned if
- * at least the current KCB or its parent have been deleted
- * and a cache lookup must be retried again. STATUS_UNSUCCESSFUL is
- * returned if a KCB is referenced too many times.
+ * at least the current KCB or its parent have been deleted, or if
+ * the KCB found needs an exclusive lock to be referenced, and a
+ * cache lookup must be retried again with exclusive lock.
+ * STATUS_UNSUCCESSFUL is returned if a KCB is referenced too many
+ * times.
  *
  * @remarks
  * The function attempts to do a cache lookup with a shared lock
@@ -1594,6 +1596,28 @@ CmpLookInCache(
 
                             /* Stop looking for next hashes as the KCB is kaput */
                             break;
+                        }
+
+                        /*
+                         * Referencing a KCB that has no references or sits in
+                         * the delayed close table needs its hash lock held
+                         * exclusively. Do not let CmpReferenceKeyControlBlock
+                         * convert it below: that releases and re-acquires one
+                         * lock of the sorted array while the others stay held,
+                         * out of order. With push locks preferring a queued
+                         * exclusive waiter over new shared acquires, that
+                         * deadlocks against a thread that locks an array
+                         * exclusively in order. Retry the lookup with the whole
+                         * array locked exclusively instead, before the remaining
+                         * name is consumed.
+                         */
+                        if (!LockKcbsExclusive &&
+                            CmpKcbReferenceNeedsExclusiveLock(CurrentKcb))
+                        {
+                            CmpUnLockKcbArray(LockedKcbs);
+                            CmpDereferenceKeyControlBlock(*Kcb);
+                            DPRINT("The found KCB needs an exclusive lock to be referenced, retrying looking in the cache\n");
+                            return STATUS_RETRY;
                         }
 
                         /* We finally found the key in cache, acknowledge it */

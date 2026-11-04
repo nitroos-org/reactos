@@ -324,7 +324,20 @@ NtCreateKeyedEvent(
                             (PVOID*)&KeyedEvent);
 
     /* Check for success */
-    if (!NT_SUCCESS(Status)) return Status;
+    if (!NT_SUCCESS(Status))
+    {
+        /* Windows stores NULL in the caller's handle when the call fails */
+        _SEH2_TRY
+        {
+            *OutHandle = NULL;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            /* The variable went away meanwhile; keep the failure status */
+        }
+        _SEH2_END;
+        return Status;
+    }
 
     /* Initialize the keyed event */
     ExpInitializeKeyedEvent(KeyedEvent);
@@ -338,7 +351,20 @@ NtCreateKeyedEvent(
                             &KeyedEventHandle);
 
     /* Check for success (ObInsertObject dereferences!) */
-    if (!NT_SUCCESS(Status)) return Status;
+    if (!NT_SUCCESS(Status))
+    {
+        /* Windows stores NULL in the caller's handle when the call fails */
+        _SEH2_TRY
+        {
+            *OutHandle = NULL;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            /* The variable went away meanwhile; keep the failure status */
+        }
+        _SEH2_END;
+        return Status;
+    }
 
     if (PreviousMode != KernelMode)
     {

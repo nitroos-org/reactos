@@ -961,7 +961,7 @@
 @ cdecl _o__dsign(double) _dsign
 @ cdecl _o__dsin(double long) _dsin
 @ cdecl _o__dtest(ptr) _dtest
-@ cdecl _o__dunscalee(ptr ptr) _dunscale
+@ cdecl _o__dunscale(ptr ptr) _dunscale
 @ cdecl _o__dup(long) _dup
 @ cdecl _o__dup2(long long) _dup2
 @ cdecl _o__dupenv_s(ptr ptr str) _dupenv_s
@@ -1276,7 +1276,7 @@
 @ cdecl _o__mbsnbcat_s(str long ptr long) _mbsnbcat_s
 @ cdecl _o__mbsnbcat_s_l(str long ptr long ptr) _mbsnbcat_s_l
 @ cdecl _o__mbsnbcmp(str str long) _mbsnbcmp
-@ cdecl _o_mbsnbcmp_l(str str long ptr) _mbsnbcmp_l
+@ cdecl _o__mbsnbcmp_l(str str long ptr) _mbsnbcmp_l
 @ cdecl _o__mbsnbcnt(ptr long) _mbsnbcnt
 @ cdecl _o__mbsnbcnt_l(ptr long ptr) _mbsnbcnt_l
 @ cdecl _o__mbsnbcoll(str str long) _mbsnbcoll
@@ -1800,7 +1800,7 @@
 @ cdecl _o_nexttowardf(float double) nexttowardf
 @ cdecl _o_nexttowardl(double double) nextafter
 @ cdecl _o_pow(double double) pow
-@ cdecl -arch=!i386 _o_powf(float float) powf
+@ cdecl _o_powf(float float) powf
 @ cdecl _o_putc(long ptr) putc
 @ cdecl _o_putchar(long) putchar
 @ cdecl _o_puts(str) puts
@@ -2548,7 +2548,7 @@
 @ cdecl perror(str)
 @ cdecl -arch=i386 pow(double double) ucrt_pow
 @ cdecl -arch=!i386 pow(double double)
-@ cdecl -arch=!i386 powf(float float)
+@ cdecl powf(float float)
 @ cdecl putc(long ptr)
 @ cdecl putchar(long)
 @ cdecl puts(str)

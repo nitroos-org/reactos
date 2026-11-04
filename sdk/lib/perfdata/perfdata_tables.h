@@ -72,6 +72,8 @@ enum perf_counter_id
     CID_PROCESS_CREATING_PROCESS_ID,
     CID_PROCESS_PAGE_FILE_BYTES,
     CID_PROCESS_ELAPSED_TIME,
+    CID_PAGINGFILE_USAGE,
+    CID_PAGINGFILE_USAGE_PEAK,
 };
 
 static const struct perf_counter_def counters_memory[] =
@@ -168,10 +170,17 @@ static const struct perf_counter_def counters_process[] =
     { 684, L"Elapsed Time", 0x30240500, -4, 400, CID_PROCESS_ELAPSED_TIME },
 };
 
+static const struct perf_counter_def counters_pagingfile[] =
+{
+    { 702, L"% Usage", 0x20020400, 0, 200, CID_PAGINGFILE_USAGE },
+    { 704, L"% Usage Peak", 0x20020400, 0, 200, CID_PAGINGFILE_USAGE_PEAK },
+};
+
 static const struct perf_object_def objects[] =
 {
     { 4, L"Memory", INST_NONE, counters_memory, ARRAY_SIZE(counters_memory) },
     { 510, L"Network Interface", INST_NET, counters_network_interface, ARRAY_SIZE(counters_network_interface) },
+    { 700, L"Paging File", INST_PAGE, counters_pagingfile, ARRAY_SIZE(counters_pagingfile) },
     { 234, L"PhysicalDisk", INST_DISK, counters_physicaldisk, ARRAY_SIZE(counters_physicaldisk) },
     { 230, L"Process", INST_PROC, counters_process, ARRAY_SIZE(counters_process) },
     { 238, L"Processor", INST_CPU, counters_processor, ARRAY_SIZE(counters_processor) },

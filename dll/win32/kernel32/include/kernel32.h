@@ -243,6 +243,41 @@ BasepProbeForDllManifest(
     OUT PVOID *ActCtx
 );
 
+/*
+ * The thread start: ntdll!RtlUserThreadStart calls it, it calls the thread's routine.
+ * On Windows x86 it is a __fastcall function (ECX: unknown, EDX: the routine, the parameter on the stack):
+ * Firefox's hook of it is compiled so, and reads its arguments from those registers.
+ */
+#ifdef _M_IX86
+#define BASE_THREAD_INIT_THUNK_CALL FASTCALL
+#else
+#define BASE_THREAD_INIT_THUNK_CALL WINAPI
+#endif
+DECLSPEC_NORETURN
+VOID
+BASE_THREAD_INIT_THUNK_CALL
+BaseThreadInitThunk(
+    _In_ DWORD Unknown,
+    _In_ LPTHREAD_START_ROUTINE lpStartAddress,
+    _In_ LPVOID lpParameter);
+
+/* ntdll!RtlUserThreadStart: where every thread of kernel32 starts (x86: routine in EAX, parameter in EBX) */
+VOID
+NTAPI
+RtlUserThreadStart(VOID);
+
+#ifdef _M_IX86
+/* lpStartAddress(lpParameter) whatever its calling convention (a thread routine pops its parameter,
+ * the entry of an image does not); thread.S */
+DWORD
+WINAPI
+BasepCallThreadStart(
+    _In_ LPTHREAD_START_ROUTINE lpStartAddress,
+    _In_ LPVOID lpParameter);
+#else
+#define BasepCallThreadStart(Start, Parameter) (Start)(Parameter)
+#endif
+
 DECLSPEC_NORETURN
 VOID
 WINAPI

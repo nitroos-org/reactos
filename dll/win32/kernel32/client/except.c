@@ -1330,6 +1330,57 @@ RaiseFailFastException(
     NtTerminateProcess(NtCurrentProcess(), ExceptionRecord.ExceptionCode);
 }
 
+/* Builds the record apart from RaiseException: the inlined memset/memcpy of the record use RSI and RDI
+ * (rep stos/movs), and an exception handler of the caller sees the registers of RaiseException, which
+ * must be the caller's as on Windows */
+DECLSPEC_NOINLINE
+static
+PEXCEPTION_RECORD
+BasepInitExceptionRecord(
+    _Out_ PEXCEPTION_RECORD ExceptionRecord,
+    _In_ DWORD dwExceptionCode,
+    _In_ DWORD dwExceptionFlags,
+    _In_ DWORD nNumberOfArguments,
+    _In_opt_ const ULONG_PTR *lpArguments)
+{
+    /* Setup the exception record */
+    RtlZeroMemory(ExceptionRecord, sizeof(*ExceptionRecord));
+    ExceptionRecord->ExceptionCode = dwExceptionCode;
+    ExceptionRecord->ExceptionRecord = NULL;
+    ExceptionRecord->ExceptionAddress = (PVOID)RaiseException;
+    ExceptionRecord->ExceptionFlags = dwExceptionFlags & EXCEPTION_NONCONTINUABLE;
+
+    /* Check if we have arguments */
+    if (!lpArguments)
+    {
+        /* We don't */
+        ExceptionRecord->NumberParameters = 0;
+    }
+    else
+    {
+        /* We do, normalize the count */
+        if (nNumberOfArguments > EXCEPTION_MAXIMUM_PARAMETERS)
+            nNumberOfArguments = EXCEPTION_MAXIMUM_PARAMETERS;
+
+        /* Set the count of parameters and copy them */
+        ExceptionRecord->NumberParameters = nNumberOfArguments;
+        RtlCopyMemory(ExceptionRecord->ExceptionInformation,
+                      lpArguments,
+                      nNumberOfArguments * sizeof(ULONG_PTR));
+    }
+
+    /* Better handling of Delphi Exceptions... a ReactOS Hack */
+    if (dwExceptionCode == 0xeedface || dwExceptionCode == 0xeedfade)
+    {
+        DPRINT1("Delphi Exception at address: %p\n", ExceptionRecord->ExceptionInformation[0]);
+        DPRINT1("Exception-Object: %p\n", ExceptionRecord->ExceptionInformation[1]);
+        DPRINT1("Exception text: %lx\n", ExceptionRecord->ExceptionInformation[2]);
+    }
+
+    /* Returned so that the caller needs no non-volatile register to keep the record's address */
+    return ExceptionRecord;
+}
+
 /*
  * @implemented
  */
@@ -1343,42 +1394,12 @@ RaiseException(
 {
     EXCEPTION_RECORD ExceptionRecord;
 
-    /* Setup the exception record */
-    RtlZeroMemory(&ExceptionRecord, sizeof(ExceptionRecord));
-    ExceptionRecord.ExceptionCode = dwExceptionCode;
-    ExceptionRecord.ExceptionRecord = NULL;
-    ExceptionRecord.ExceptionAddress = (PVOID)RaiseException;
-    ExceptionRecord.ExceptionFlags = dwExceptionFlags & EXCEPTION_NONCONTINUABLE;
-
-    /* Check if we have arguments */
-    if (!lpArguments)
-    {
-        /* We don't */
-        ExceptionRecord.NumberParameters = 0;
-    }
-    else
-    {
-        /* We do, normalize the count */
-        if (nNumberOfArguments > EXCEPTION_MAXIMUM_PARAMETERS)
-            nNumberOfArguments = EXCEPTION_MAXIMUM_PARAMETERS;
-
-        /* Set the count of parameters and copy them */
-        ExceptionRecord.NumberParameters = nNumberOfArguments;
-        RtlCopyMemory(ExceptionRecord.ExceptionInformation,
-                      lpArguments,
-                      nNumberOfArguments * sizeof(ULONG_PTR));
-    }
-
-    /* Better handling of Delphi Exceptions... a ReactOS Hack */
-    if (dwExceptionCode == 0xeedface || dwExceptionCode == 0xeedfade)
-    {
-        DPRINT1("Delphi Exception at address: %p\n", ExceptionRecord.ExceptionInformation[0]);
-        DPRINT1("Exception-Object: %p\n", ExceptionRecord.ExceptionInformation[1]);
-        DPRINT1("Exception text: %lx\n", ExceptionRecord.ExceptionInformation[2]);
-    }
-
     /* Raise the exception */
-    RtlRaiseException(&ExceptionRecord);
+    RtlRaiseException(BasepInitExceptionRecord(&ExceptionRecord,
+                                               dwExceptionCode,
+                                               dwExceptionFlags,
+                                               nNumberOfArguments,
+                                               lpArguments));
 }
 
 /*

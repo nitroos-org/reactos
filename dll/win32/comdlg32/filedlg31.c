@@ -564,6 +564,15 @@ static LRESULT FD31_Validate( const FD31_DATA *lfs, LPCWSTR path, UINT control, 
         GetDlgItemTextW( hWnd, edt1, filename, ARRAY_SIZE(filename));
 
     TRACE("got filename = %s\n", debugstr_w(filename));
+#ifdef __REACTOS__
+    /* Windows accepts forward slashes in a typed path and uses backslashes */
+    if (control != lst1)
+    {
+        LPWSTR slash;
+        for (slash = filename; (slash = wcschr(slash, L'/')) != NULL; )
+            *slash = L'\\';
+    }
+#endif
     /* if we did not click in file list to get there */
     if (control != lst1)
     {

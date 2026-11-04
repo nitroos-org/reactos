@@ -67,6 +67,10 @@ list(APPEND SOURCE
     IdnTo.c
     NormalizeString.c
     IsWow64Process2.c
+    AppPolicy.c
+    FileMappingFromApp.c
+    ThreadpoolEx.c
+    CtrlRoutine.c
     VirtualAllocExNuma.c
     DeviceIoControl.c
     DllInitParentPrecondition.c
@@ -154,6 +158,7 @@ list(APPEND SOURCE
     PreferredUILanguages.c
     PowerRequest.c
     PrefetchVirtualMemory.c
+    RelocatedImageProtection.c
     PrivMoveFileIdentityW.c
     ProcessAffinity.c
     ProcessorNumber.c
@@ -190,6 +195,7 @@ list(APPEND SOURCE
     ThreadFairness.c
     ThreadHandleLeak.c
     ThreadInformation.c
+    ThreadStartFrame.c
     ThreadTimesTimerResolution.c
     TunnelCache.c
     VolumeMountPoint.c

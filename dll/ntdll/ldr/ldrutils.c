@@ -942,7 +942,7 @@ LdrpSetProtection(PVOID ViewBase,
     NTSTATUS Status;
     PVOID SectionBase;
     SIZE_T SectionSize;
-    ULONG NewProtection, OldProtection, i;
+    ULONG NewProtection, OldProtection, Characteristics, i;
 
     /* Get the NT headers */
     NtHeaders = RtlImageNtHeader(ViewBase);
@@ -962,16 +962,33 @@ LdrpSetProtection(PVOID ViewBase,
          * no fixups anyway: leave it alone, or the relocation of the whole
          * image fails.
          */
+        Characteristics = Section->Characteristics;
+        if (!(Characteristics & (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE)))
+        {
+            /* No explicit protection: the same defaults as the section mapper (Mm) */
+            if (Characteristics & IMAGE_SCN_CNT_CODE)
+                Characteristics |= IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ;
+            if (Characteristics & (IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_CNT_UNINITIALIZED_DATA))
+                Characteristics |= IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+        }
+
         if ((Section->SizeOfRawData) &&
-            !(Section->Characteristics & (IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_SHARED)))
+            !(Characteristics & (IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_SHARED)))
         {
             /* Check if we are setting or restoring protection */
             if (Restore)
             {
-                /* Set it to either EXECUTE or READONLY */
-                if (Section->Characteristics & IMAGE_SCN_MEM_EXECUTE)
+                /*
+                 * Back to what the section declares, as Windows does:
+                 * execute+read is PAGE_EXECUTE_READ (a code page of a relocated
+                 * image must not turn into the execute-only PAGE_EXECUTE, which
+                 * hooking and JIT code reject), execute alone PAGE_EXECUTE,
+                 * and anything else PAGE_READONLY.
+                 */
+                if (Characteristics & IMAGE_SCN_MEM_EXECUTE)
                 {
-                    NewProtection = PAGE_EXECUTE;
+                    NewProtection = (Characteristics & IMAGE_SCN_MEM_READ) ?
+                                    PAGE_EXECUTE_READ : PAGE_EXECUTE;
                 }
                 else
                 {
