@@ -143,6 +143,7 @@
 @ stdcall InternetErrorDlg(long long long long ptr)
 @ stdcall InternetFindNextFileA(ptr ptr)
 @ stdcall InternetFindNextFileW(ptr ptr)
+@ stdcall InternetFreeCookies(ptr long)
 @ stub InternetFortezzaCommand
 @ stub InternetGetCertByURL
 @ stub InternetGetCertByURLA
@@ -150,6 +151,7 @@
 @ stdcall InternetGetConnectedStateEx(ptr ptr long long) InternetGetConnectedStateExA
 @ stdcall InternetGetConnectedStateExA(ptr ptr long long)
 @ stdcall InternetGetConnectedStateExW(ptr ptr long long)
+@ stdcall InternetGetCookieEx2(wstr wstr long ptr ptr)
 @ stdcall InternetGetCookieA(str str ptr ptr)
 @ stdcall InternetGetCookieExA(str str ptr ptr long ptr)
 @ stdcall InternetGetCookieExW(wstr wstr ptr ptr long ptr)
