@@ -9,10 +9,12 @@
 #include <apitest.h>
 
 extern void func_VerQueryValue(void);
+extern void func_GetFileVersionInfoSize(void);
 
 const struct test winetest_testlist[] =
 {
     { "VerQueryValue",                 func_VerQueryValue },
+    { "GetFileVersionInfoSize",        func_GetFileVersionInfoSize },
 
     { 0, 0 }
 };

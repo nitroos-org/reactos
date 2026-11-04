@@ -3295,6 +3295,16 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
   if(nFileCount == 0)
       return FALSE;
 
+#ifdef __REACTOS__
+  /* Windows accepts forward slashes in a typed path and uses backslashes */
+  {
+      UINT i;
+      for (i = 0; i < sizeUsed; i++)
+          if (lpstrFileList[i] == L'/')
+              lpstrFileList[i] = L'\\';
+  }
+#endif
+
   if(nFileCount > 1)
   {
       ret = FILEDLG95_OnOpenMultipleFiles(hwnd, lpstrFileList, nFileCount, sizeUsed);
