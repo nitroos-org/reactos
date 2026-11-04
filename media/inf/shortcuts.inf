@@ -22,7 +22,6 @@ QuickLaunchShortcuts=26, Microsoft\Internet Explorer\Quick Launch
 [ProgramShortcuts]
 %SystemRoot%\explorer.exe, %EXPLORER_TITLE%, %EXPLORER_DESC%, 1, %HOMEDRIVE%%HOMEPATH%
 %SystemRoot%\system32\optfeatures.exe, %FEATMGR_TITLE%, %FEATMGR_DESC%, 0
-%16422%\Internet Explorer\iexplore.exe, %IEXPLORE_TITLE%, %IEXPLORE_DESC%, 0
 
 [AdminToolsShortcuts]
 %SystemRoot%\system32\servman.exe, %SERVMAN_TITLE%, %SERVMAN_DESC%, 0

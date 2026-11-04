@@ -423,8 +423,11 @@ NtUserUpdateLayeredWindow(
          ProbeForRead(pptSrc, sizeof(POINT), 1);
          Src = *pptSrc;
       }
-      ProbeForRead(psize, sizeof(SIZE), 1);
-      Size = *psize;
+      if (psize)
+      {
+         ProbeForRead(psize, sizeof(SIZE), 1);
+         Size = *psize;
+      }
       if (pblend)
       {
          ProbeForRead(pblend, sizeof(BLENDFUNCTION), 1);
@@ -455,7 +458,7 @@ NtUserUpdateLayeredWindow(
    info.cbSize   = sizeof(info);
    info.hdcDst   = hdcDst;
    info.pptDst   = pptDst? &Dst : NULL;
-   info.psize    = &Size;
+   info.psize    = psize ? &Size : NULL;
    info.hdcSrc   = hdcSrc;
    info.pptSrc   = pptSrc ? &Src : NULL;
    info.crKey    = crKey;

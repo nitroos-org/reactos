@@ -106,6 +106,7 @@ DceAllocDCE(PWND Window OPTIONAL, DCE_TYPE Type)
   pDce->hrgnClipPublic = NULL;
   pDce->hrgnSavedVis = NULL;
   pDce->ppiOwner = NULL;
+  pDce->bGlass = FALSE;
 
   InsertTailList(&LEDce, &pDce->List);
 
@@ -636,6 +637,25 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
    DceSetDrawable(Wnd, Dce->hDC, Flags, UpdateClipOrigin);
 
    if (bUpdateVisRgn) DceUpdateVisRgn(Dce, Wnd, Flags);
+
+   /* A window marked as glass (HWNDPARAM_ROUTINE_ROS_SETGLASS): its DC blends 32 bpp DIB copies with alpha */
+   {
+      BOOL bGlass = Wnd && UserGetProp(Wnd, gpsi->atomFrostedWindowProp, TRUE) != NULL;
+
+      if (bGlass || Dce->bGlass)
+      {
+         PDC pdcGlass = DC_LockDc(Dce->hDC);
+
+         if (pdcGlass)
+         {
+            pdcGlass->hwndGlass = bGlass ? UserHMGetHandle(Wnd) : NULL;
+            if (bGlass)
+               pdcGlass->rclGlass = *(PRECTL)&Wnd->rcWindow;
+            DC_UnlockDc(pdcGlass);
+         }
+         Dce->bGlass = bGlass;
+      }
+   }
 
    if (Dce->DCXFlags & DCX_CACHE)
    {

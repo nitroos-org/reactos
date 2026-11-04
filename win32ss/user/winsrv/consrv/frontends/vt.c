@@ -156,6 +156,11 @@ VtFillCells(PTEXTMODE_SCREEN_BUFFER Buff, SHORT X, SHORT Y, LONG Count, WORD Att
     {
         Ptr->Char.UnicodeChar = L' ';
         Ptr->Attributes = Attrib;
+        /* Erased with the current colors, which may be extended ones */
+        if (Attrib == Buff->ScreenDefaultAttrib)
+            ConioStampExt(Buff, Ptr);
+        else
+            ConioClearExt(Buff, Ptr, 1);
         ++Ptr;
     }
 }
@@ -190,6 +195,8 @@ VtScrollRows(PTEXTMODE_SCREEN_BUFFER Buff, SHORT Top, SHORT Bottom, LONG Lines, 
         {
             RtlMoveMemory(ConioCoordToPointer(Buff, 0, Y),
                           ConioCoordToPointer(Buff, 0, Y + Lines), RowSize);
+            ConioMoveExt(Buff, ConioCoordToPointer(Buff, 0, Y),
+                         ConioCoordToPointer(Buff, 0, Y + Lines), Buff->ScreenBufferSize.X);
         }
         VtFillRows(Buff, (SHORT)(Bottom - Lines + 1), Bottom, Attrib);
     }
@@ -200,6 +207,8 @@ VtScrollRows(PTEXTMODE_SCREEN_BUFFER Buff, SHORT Top, SHORT Bottom, LONG Lines, 
         {
             RtlMoveMemory(ConioCoordToPointer(Buff, 0, Y),
                           ConioCoordToPointer(Buff, 0, Y - Lines), RowSize);
+            ConioMoveExt(Buff, ConioCoordToPointer(Buff, 0, Y),
+                         ConioCoordToPointer(Buff, 0, Y - Lines), Buff->ScreenBufferSize.X);
         }
         VtFillRows(Buff, Top, (SHORT)(Top + Lines - 1), Attrib);
     }
@@ -394,6 +403,11 @@ VtSetGraphicsRendition(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff)
     BOOLEAN Bold = Vt->Bold;
     UINT Count = min(Vt->NumParams, CONSOLE_VT_MAX_PARAMS);
     UINT i;
+    ULONG ExtFore = Vt->ExtFore, ExtBack = Vt->ExtBack;
+
+    /* Extended colors that the attribute lost (it was set by other means) are gone */
+    if (ExtFore && CONSOLE_EXTCOLOR_SNAP(ExtFore) != (ULONG)(Fore & 0x0F)) ExtFore = 0;
+    if (ExtBack && CONSOLE_EXTCOLOR_SNAP(ExtBack) != (ULONG)(Back & 0x0F)) ExtBack = 0;
 
     /* The intensity that bold added is not part of the color */
     if (Vt->Bold && Vt->BoldBright)
@@ -411,13 +425,25 @@ VtSetGraphicsRendition(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff)
         USHORT Param = Vt->Params[i];
 
         if (Param >= 30 && Param <= 37)
+        {
             Fore = VtAnsiToAttrib[Param - 30];
+            ExtFore = 0;
+        }
         else if (Param >= 40 && Param <= 47)
+        {
             Back = VtAnsiToAttrib[Param - 40];
+            ExtBack = 0;
+        }
         else if (Param >= 90 && Param <= 97)
+        {
             Fore = VtAnsiToAttrib[Param - 90] | FOREGROUND_INTENSITY;
+            ExtFore = 0;
+        }
         else if (Param >= 100 && Param <= 107)
+        {
             Back = VtAnsiToAttrib[Param - 100] | FOREGROUND_INTENSITY;
+            ExtBack = 0;
+        }
         else switch (Param)
         {
         case 0:
@@ -425,6 +451,7 @@ VtSetGraphicsRendition(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff)
             Back  = (Default >> 4) & 0x0F;
             Flags = 0;
             Bold  = FALSE;
+            ExtFore = ExtBack = 0;
             break;
         case 1:  Bold = TRUE; break;
         case 22: Bold = FALSE; break;
@@ -432,8 +459,8 @@ VtSetGraphicsRendition(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff)
         case 24: Flags &= ~COMMON_LVB_UNDERSCORE; break;
         case 7:  Flags |= COMMON_LVB_REVERSE_VIDEO; break;
         case 27: Flags &= ~COMMON_LVB_REVERSE_VIDEO; break;
-        case 39: Fore = Default & 0x0F; break;
-        case 49: Back = (Default >> 4) & 0x0F; break;
+        case 39: Fore = Default & 0x0F; ExtFore = 0; break;
+        case 49: Back = (Default >> 4) & 0x0F; ExtBack = 0; break;
 
         case 38:
         case 48:
@@ -445,19 +472,29 @@ VtSetGraphicsRendition(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff)
                 /* 38;5;N: 256-color palette; an index out of range is ignored */
                 if (Vt->Params[i + 2] <= 255)
                 {
+                    ULONG Ext = 0;
+
                     Color = VtColorFrom256(FrontEnd->Console, Vt->Params[i + 2]);
-                    if (Param == 38) Fore = Color; else Back = Color;
+                    /* The first 16 are the console colors; the others are kept exactly */
+                    if (Vt->Params[i + 2] >= 16)
+                        Ext = CONSOLE_EXTCOLOR_MAKE(CONSOLE_EXTCOLOR_INDEX, Vt->Params[i + 2], 0);
+                    if (Param == 38) { Fore = Color; ExtFore = Ext; } else { Back = Color; ExtBack = Ext; }
                 }
                 i += 2;
             }
             else if (i + 4 < Count && Vt->Params[i + 1] == 2)
             {
                 /* 38;2;R;G;B: 24-bit color */
+                ULONG Ext = CONSOLE_EXTCOLOR_MAKE(CONSOLE_EXTCOLOR_RGB,
+                                                  (min(Vt->Params[i + 2], 255) << 16) |
+                                                  (min(Vt->Params[i + 3], 255) << 8) |
+                                                  min(Vt->Params[i + 4], 255), 0);
+
                 Color = VtNearestColor(FrontEnd->Console,
                                        min(Vt->Params[i + 2], 255),
                                        min(Vt->Params[i + 3], 255),
                                        min(Vt->Params[i + 4], 255));
-                if (Param == 38) Fore = Color; else Back = Color;
+                if (Param == 38) { Fore = Color; ExtFore = Ext; } else { Back = Color; ExtBack = Ext; }
                 i += 4;
             }
             else
@@ -480,6 +517,10 @@ VtSetGraphicsRendition(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff)
         Fore |= FOREGROUND_INTENSITY;
 
     Buff->ScreenDefaultAttrib = Flags | (Back << 4) | Fore;
+
+    /* The extended colors are valid as long as the attribute keeps the colors they were made for */
+    Vt->ExtFore = ExtFore ? CONSOLE_EXTCOLOR_MAKE(CONSOLE_EXTCOLOR_KIND(ExtFore), CONSOLE_EXTCOLOR_VALUE(ExtFore), Fore) : 0;
+    Vt->ExtBack = ExtBack ? CONSOLE_EXTCOLOR_MAKE(CONSOLE_EXTCOLOR_KIND(ExtBack), CONSOLE_EXTCOLOR_VALUE(ExtBack), Back) : 0;
 }
 
 static VOID
@@ -602,6 +643,10 @@ VtAlternateBuffer(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, BOOLEAN Enab
         Cells = ConsoleAllocHeap(0, Size.X * Size.Y * sizeof(CHAR_INFO));
         if (!Cells) return;
 
+        Vt->AltMainExt        = Buff->ExtCells;
+        Vt->AltMainExtCount   = Buff->ExtCount;
+        Buff->ExtCells = NULL;
+        Buff->ExtCount = 0;
         Vt->AltMainBuffer     = Buff->Buffer;
         Vt->AltMainSize       = Buff->ScreenBufferSize;
         Vt->AltMainVirtualY   = Buff->VirtualY;
@@ -621,6 +666,11 @@ VtAlternateBuffer(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, BOOLEAN Enab
         if (!Vt->InAltBuffer) return;
 
         ConsoleFreeHeap(Buff->Buffer);
+        ConioFreeExtra(Buff, Buff->ExtCells, (SIZE_T)Buff->ExtCount * sizeof(CONSOLE_EXT_CELL));
+        Buff->ExtCells         = Vt->AltMainExt;
+        Buff->ExtCount         = Vt->AltMainExtCount;
+        Vt->AltMainExt = NULL;
+        Vt->AltMainExtCount = 0;
         Buff->Buffer           = Vt->AltMainBuffer;
         Buff->ScreenBufferSize = Vt->AltMainSize;
         Buff->VirtualY         = Vt->AltMainVirtualY;
@@ -657,6 +707,7 @@ static VOID
 VtSoftReset(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff)
 {
     Buff->ScreenDefaultAttrib = Buff->Vt.DefaultAttrib;
+    Buff->Vt.ExtFore = Buff->Vt.ExtBack = 0;
     Buff->Vt.Bold = Buff->Vt.BoldBright = FALSE;
     Buff->Vt.DecGraphics = FALSE;
     Buff->Vt.MarginsSet = FALSE;
@@ -920,11 +971,13 @@ VtDispatchCsi(PFRONTEND FrontEnd, PTEXTMODE_SCREEN_BUFFER Buff, WCHAR Final)
         if (Final == L'@')
         {
             RtlMoveMemory(&Row[X + Count], &Row[X], Moved * sizeof(CHAR_INFO));
+            ConioMoveExt(Buff, &Row[X + Count], &Row[X], Moved);
             VtFillCells(Buff, X, Y, Count, Attrib);
         }
         else
         {
             RtlMoveMemory(&Row[X], &Row[X + Count], Moved * sizeof(CHAR_INFO));
+            ConioMoveExt(Buff, &Row[X], &Row[X + Count], Moved);
             VtFillCells(Buff, (SHORT)(X + Moved), Y, Count, Attrib);
         }
         VtRedraw(FrontEnd, Buff, X, Y, Right, Y);

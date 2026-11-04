@@ -38,6 +38,7 @@ typedef LONG (WINAPI *FN_GetBy)(PCWSTR, UINT32 *, PWSTR *, UINT32 *, PWSTR);
 typedef LONG (WINAPI *FN_Open)(PCWSTR, UINT32, PVOID *);
 typedef LONG (WINAPI *FN_Close)(PVOID);
 typedef LONG (WINAPI *FN_GetInfo)(PVOID, UINT32, UINT32 *, BYTE *, UINT32 *);
+typedef LONG (WINAPI *FN_GetApps)(PVOID, UINT32 *, BYTE *, UINT32 *);
 typedef LONG (WINAPI *FN_Path)(const PACKAGE_ID *, UINT32, UINT32 *, PWSTR);
 
 static HMODULE hKernel32, hKernelBase;
@@ -742,6 +743,7 @@ test_Packages(void)
     FN_Open pOpen = (FN_Open)GetFunction("OpenPackageInfoByFullName");
     FN_Close pClose = (FN_Close)GetFunction("ClosePackageInfo");
     FN_GetInfo pGetInfo = (FN_GetInfo)GetFunction("GetPackageInfo");
+    FN_GetApps pGetApps = (FN_GetApps)GetFunction("GetPackageApplicationIds");
     FN_Find pFind = (FN_Find)GetFunction("FindPackagesByPackageFamily");
     FN_GetBy pGetBy = (FN_GetBy)GetFunction("GetPackagesByPackageFamily");
     FN_Path pPath = (FN_Path)GetFunction("GetPackagePath");
@@ -788,6 +790,14 @@ test_Packages(void)
         Length = 100;
         Count = 5;
         ok(pGetInfo(NULL, 0x10, &Length, Bytes, &Count) == ERROR_INVALID_PARAMETER, "GetPackageInfo(NULL)\n");
+    }
+    /* msedge.dll imports GetPackageApplicationIds: it must exist (no package reference is valid here) */
+    ok(pGetApps != NULL, "kernel32 does not export GetPackageApplicationIds\n");
+    if (pGetApps)
+    {
+        Length = 100;
+        Count = 5;
+        ok(pGetApps(NULL, &Length, Bytes, &Count) == ERROR_INVALID_PARAMETER, "GetPackageApplicationIds(NULL)\n");
     }
     if (pPath)
     {

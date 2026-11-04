@@ -31,8 +31,8 @@ static void ReadKey(LPCWSTR file, LPCWSTR sec, LPCWSTR key, LPWSTR out, DWORD cc
     GetPrivateProfileStringW(sec, key, L"", out, cch, file);
 }
 
-/* "x86,amd64" lists this build's architecture (no Arch= = every architecture) */
-static BOOL ArchListed(LPCWSTR list)
+/* "x86,amd64" lists this build's architecture (no Arch= = every architecture; i386 is a synonym of x86) */
+BOOL FmArchListed(LPCWSTR list)
 {
 #ifdef _WIN64
     static const WCHAR me[] = L"amd64";
@@ -43,7 +43,12 @@ static BOOL ArchListed(LPCWSTR list)
     if (!list[0]) return TRUE;
     StringCchCopyW(tmp, ARRAYSIZE(tmp), list);
     for (tok = wcstok_s(tmp, L", ", &ctx); tok; tok = wcstok_s(NULL, L", ", &ctx))
+    {
         if (!_wcsicmp(tok, me)) return TRUE;
+#ifndef _WIN64
+        if (!_wcsicmp(tok, L"i386")) return TRUE;
+#endif
+    }
     return FALSE;
 }
 
@@ -74,7 +79,7 @@ static BOOL LoadSection(LPCWSTR file, LPCWSTR id, FM_COMPONENT *c)
     ReadKey(file, id, L"Default", tmp, ARRAYSIZE(tmp));
     c->Default = _wtoi(tmp) != 0;
     ReadKey(file, id, L"Arch", tmp, ARRAYSIZE(tmp));
-    c->ArchOk = ArchListed(tmp);
+    c->ArchOk = FmArchListed(tmp);
     return TRUE;
 }
 
@@ -270,6 +275,11 @@ static BOOL FileHashes(LPCWSTR path, BOOL want256, BOOL want1, WCHAR hex256[65],
     CloseHandle(f);
     if (!ok) { ShaAbort(&s); return FALSE; }
     return ShaEndEx(&s, hex256, hex1);
+}
+
+BOOL FmFileSha256(LPCWSTR path, WCHAR hex[65])
+{
+    return FileHashes(path, TRUE, FALSE, hex, NULL);
 }
 
 BOOL FmFileHashHex(LPCWSTR path, ALG_ID alg, WCHAR *hex, DWORD cch)
@@ -509,6 +519,13 @@ HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log)
             total = _wcstoui64(len, NULL, 10);
         if (!total) total = c->Size;
     }
+    if (c->MaxSize && total > c->MaxSize)
+    {
+        FmSetLastMessage(L"The server announced %I64u bytes for %s, more than its pinned size of %I64u bytes, so it was not downloaded.",
+                         total, c->Name, c->MaxSize);
+        hr = HRESULT_FROM_WIN32(ERROR_CRC);
+        goto fail;
+    }
     FmOpBytes(0, total);
 
     out = CreateFileW(part, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -551,6 +568,15 @@ HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log)
         }
         stalls = 0;
         if (!nread) break;
+        if (c->MaxSize && done + nread > c->MaxSize)
+        {
+            /* longer than the pinned size: it cannot match its checksum, so stop before it fills the disk */
+            LOGF(log, L"  ERROR: %s is longer than its pinned size of %I64u bytes; download aborted\n", c->Url, c->MaxSize);
+            FmSetLastMessage(L"The file downloaded for %s is larger than its pinned size (%I64u bytes), so the download was stopped "
+                             L"and nothing was installed.", c->Name, c->MaxSize);
+            hr = HRESULT_FROM_WIN32(ERROR_CRC);
+            goto fail;
+        }
         if (!WriteFile(out, buf, nread, &nwritten, NULL) || nwritten != nread)
         {
             err = GetLastError();

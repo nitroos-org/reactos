@@ -45,6 +45,16 @@ static int g_nprog, g_cprog;
 static HWND g_hList, g_hUninst, g_hChange, g_hWnd;
 static HFONT g_font;
 
+/* a string of the string table (en-US text when the language has none) */
+static LPCWSTR Str(UINT id)
+{
+    static WCHAR buf[8][256];
+    static int n;
+    WCHAR *b = buf[n++ & 7];
+    if (!LoadStringW(hApplet, id, b, 256)) b[0] = L'\0';
+    return b;
+}
+
 static BOOL QueryStr(HKEY k, LPCWSTR name, LPWSTR out, DWORD cch)
 {
     DWORD type, cb = (cch - 1) * sizeof(WCHAR);
@@ -173,8 +183,8 @@ static void RunAndRefresh(LPWSTR cmd)
     if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
     {
         WCHAR t[300];
-        StringCchPrintfW(t, ARRAYSIZE(t), L"The program could not be started (error %lu):\n%s", GetLastError(), cmd);
-        MessageBoxW(g_hWnd, t, L"Programs and Features", MB_OK | MB_ICONERROR);
+        StringCchPrintfW(t, ARRAYSIZE(t), Str(IDS_PROG_STARTFAIL), GetLastError(), cmd);
+        MessageBoxW(g_hWnd, t, Str(IDS_PROG_TITLE), MB_OK | MB_ICONERROR);
         return;
     }
     CloseHandle(pi.hThread);
@@ -206,8 +216,8 @@ static void DoUninstall(BOOL modify)
     if (!modify)
     {
         WCHAR t[400];
-        StringCchPrintfW(t, ARRAYSIZE(t), L"Do you want to uninstall '%s'?", g_prog[i].name);
-        if (MessageBoxW(g_hWnd, t, L"Programs and Features", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+        StringCchPrintfW(t, ARRAYSIZE(t), Str(IDS_PROG_CONFIRM), g_prog[i].name);
+        if (MessageBoxW(g_hWnd, t, Str(IDS_PROG_TITLE), MB_YESNO | MB_ICONQUESTION) != IDYES) return;
     }
     if (g_prog[i].msi)
     {
@@ -249,22 +259,21 @@ static LRESULT CALLBACK ProgWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             g_font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
             g_hWnd = hwnd;
-            head = CreateWindowExW(0, L"STATIC", L"Uninstall or change a program. To install software or turn system features on or off, use "
-                                   L"\"Turn features on or off\".", WS_CHILD | WS_VISIBLE, 12, 10, 740, 32, hwnd, (HMENU)IDC_PHEAD, NULL, NULL);
+            head = CreateWindowExW(0, L"STATIC", Str(IDS_PROG_HEADER), WS_CHILD | WS_VISIBLE, 12, 10, 740, 32, hwnd, (HMENU)IDC_PHEAD, NULL, NULL);
             g_hList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
                                       12, 46, 740, 340, hwnd, (HMENU)IDC_PLIST, NULL, NULL);
             ListView_SetExtendedListViewStyle(g_hList, LVS_EX_FULLROWSELECT);
             ZeroMemory(&col, sizeof(col));
             col.mask = LVCF_TEXT | LVCF_WIDTH;
-            col.pszText = (LPWSTR)L"Name";           col.cx = 300; ListView_InsertColumn(g_hList, 0, &col);
-            col.pszText = (LPWSTR)L"Publisher";      col.cx = 190; ListView_InsertColumn(g_hList, 1, &col);
-            col.pszText = (LPWSTR)L"Version";        col.cx = 110; ListView_InsertColumn(g_hList, 2, &col);
-            col.pszText = (LPWSTR)L"Installed on";   col.cx = 100; ListView_InsertColumn(g_hList, 3, &col);
-            g_hUninst = CreateWindowExW(0, L"BUTTON", L"&Uninstall", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_DISABLED, 12, 396, 90, 26, hwnd, (HMENU)IDC_PUNINST, NULL, NULL);
-            g_hChange = CreateWindowExW(0, L"BUTTON", L"C&hange", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_DISABLED, 108, 396, 90, 26, hwnd, (HMENU)IDC_PCHANGE, NULL, NULL);
-            CreateWindowExW(0, L"BUTTON", L"&Refresh", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 204, 396, 90, 26, hwnd, (HMENU)IDC_PREFRESH, NULL, NULL);
-            CreateWindowExW(0, L"BUTTON", L"&Turn features on or off", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 330, 396, 200, 26, hwnd, (HMENU)IDC_PFEAT, NULL, NULL);
-            CreateWindowExW(0, L"BUTTON", L"&Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 662, 396, 90, 26, hwnd, (HMENU)IDC_PCLOSE, NULL, NULL);
+            col.pszText = (LPWSTR)Str(IDS_PROG_COL_NAME);           col.cx = 300; ListView_InsertColumn(g_hList, 0, &col);
+            col.pszText = (LPWSTR)Str(IDS_PROG_COL_PUBLISHER);      col.cx = 190; ListView_InsertColumn(g_hList, 1, &col);
+            col.pszText = (LPWSTR)Str(IDS_PROG_COL_VERSION);        col.cx = 110; ListView_InsertColumn(g_hList, 2, &col);
+            col.pszText = (LPWSTR)Str(IDS_PROG_COL_DATE);   col.cx = 100; ListView_InsertColumn(g_hList, 3, &col);
+            g_hUninst = CreateWindowExW(0, L"BUTTON", Str(IDS_PROG_UNINSTALL), WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_DISABLED, 12, 396, 90, 26, hwnd, (HMENU)IDC_PUNINST, NULL, NULL);
+            g_hChange = CreateWindowExW(0, L"BUTTON", Str(IDS_PROG_CHANGE), WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_DISABLED, 108, 396, 90, 26, hwnd, (HMENU)IDC_PCHANGE, NULL, NULL);
+            CreateWindowExW(0, L"BUTTON", Str(IDS_PROG_REFRESH), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 204, 396, 90, 26, hwnd, (HMENU)IDC_PREFRESH, NULL, NULL);
+            CreateWindowExW(0, L"BUTTON", Str(IDS_PROG_FEATURES), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 330, 396, 200, 26, hwnd, (HMENU)IDC_PFEAT, NULL, NULL);
+            CreateWindowExW(0, L"BUTTON", Str(IDS_PROG_CLOSE), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 662, 396, 90, 26, hwnd, (HMENU)IDC_PCLOSE, NULL, NULL);
             for (c = GetWindow(hwnd, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
             (void)head;
             Fill();
@@ -327,7 +336,7 @@ void ShowProgramsAndFeatures(HWND hwndParent)
     if (h > wa.bottom - wa.top) h = wa.bottom - wa.top;
     x = wa.left + ((wa.right - wa.left) - w) / 2;
     y = wa.top + ((wa.bottom - wa.top) - h) / 2;
-    hwnd = CreateWindowExW(0, wc.lpszClassName, L"Programs and Features", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+    hwnd = CreateWindowExW(0, wc.lpszClassName, Str(IDS_PROG_TITLE), WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                            x, y, w, h, hwndParent, NULL, hApplet, NULL);
     if (!hwnd) return;
     ShowWindow(hwnd, SW_SHOWNORMAL);

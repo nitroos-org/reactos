@@ -314,7 +314,7 @@ static void test_cp855(HANDLE hConOut)
         }
 
         /* Check cursor */
-        len = count;        /* u9580 is normal width in Russian */
+        len = count * 2;     /* u9580 is fullwidth in every code page (Windows 10 takes two cells for it in Russian too) */
         c.X = (SHORT)(len % csbi.dwSize.X);
         c.Y = (SHORT)(len / csbi.dwSize.X);
         okCURSOR(hConOut, c);
@@ -344,7 +344,7 @@ static void test_cp855(HANDLE hConOut)
         }
 
         /* Check cursor */
-        len = 1 + count;
+        len = csbi.dwSize.X + (count - (csbi.dwSize.X - 1) / 2) * 2;
         c.X = (SHORT)(len % csbi.dwSize.X);
         c.Y = (SHORT)(len / csbi.dwSize.X);
         okCURSOR(hConOut, c);
@@ -353,63 +353,41 @@ static void test_cp855(HANDLE hConOut)
         c.X = c.Y = 0;
         ret = FillConsoleOutputCharacterW(hConOut, ideograph_space, csbi.dwSize.X * csbi.dwSize.Y, c, &len);
         ok(ret, "FillConsoleOutputCharacterW failed\n");
-        ok_long(len, csbi.dwSize.X * csbi.dwSize.Y);
 
         /* Read characters at (0,0) */
         c.X = c.Y = 0;
         ret = ReadConsoleOutputCharacterW(hConOut, str, 3 * sizeof(WCHAR), c, &len);
         ok(ret, "ReadConsoleOutputCharacterW failed\n");
-        ok_long(len, 6);
-        ok(str[0] == ideograph_space || str[0] == L'?', "str[0] was: 0x%04X\n", str[0]);
-        ok(str[1] == ideograph_space || str[1] == L'?', "str[1] was: 0x%04X\n", str[1]);
-        ok(str[2] == ideograph_space || str[2] == L'?', "str[2] was: 0x%04X\n", str[2]);
+        ok_long(len, 3);
+        ok_int(str[0], ideograph_space);
+        ok_int(str[1], ideograph_space);
+        ok_int(str[2], ideograph_space);
 
         /* Read attributes at (0,0) */
         c.X = c.Y = 0;
         ret = ReadConsoleOutputAttribute(hConOut, attrs, 6, c, &len);
         ok(ret, "ReadConsoleOutputAttribute failed\n");
         ok_long(len, 6);
-        ok_int(attrs[0], ATTR);
+        ok_int(attrs[0], ATTR | COMMON_LVB_LEADING_BYTE);
+        ok_int(attrs[1], ATTR | COMMON_LVB_TRAILING_BYTE);
+        ok_int(attrs[2], ATTR | COMMON_LVB_LEADING_BYTE);
+        ok_int(attrs[3], ATTR | COMMON_LVB_TRAILING_BYTE);
+        ok_int(attrs[4], ATTR | COMMON_LVB_LEADING_BYTE);
+        ok_int(attrs[5], ATTR | COMMON_LVB_TRAILING_BYTE);
 
-        /* Read characters at (1,0) */
-        c.X = 1;
-        c.Y = 0;
-        ret = ReadConsoleOutputCharacterW(hConOut, str, 3 * sizeof(WCHAR), c, &len);
-        ok(ret, "ReadConsoleOutputCharacterW failed\n");
-        ok_long(len, 6);
-        ok(str[0] == ideograph_space || str[0] == L'?', "str[0] was: 0x%04X\n", str[0]);
-        ok(str[1] == ideograph_space || str[1] == L'?', "str[1] was: 0x%04X\n", str[1]);
-        ok(str[2] == ideograph_space || str[2] == L'?', "str[2] was: 0x%04X\n", str[2]);
-
-        /* Output u9580 "count" once at (1,0) */
+        /*
+         * A wide character overwriting half of another one: the cursor ends after it. (What the other
+         * halves become differs between Windows versions; the terminal shows them blank.)
+         */
         c.X = 1;
         c.Y = 0;
         SetConsoleCursorPosition(hConOut, c);
         okCURSOR(hConOut, c);
         ret = WriteConsoleW(hConOut, u9580, lstrlenW(u9580), &len, NULL);
         ok(ret && len == lstrlenW(u9580), "WriteConsoleW failed\n");
-
-        /* Read attributes at (1,0) */
-        c.X = 1;
-        c.Y = 0;
-        ret = ReadConsoleOutputAttribute(hConOut, attrs, 1, c, &len);
-        ok(ret, "ReadConsoleOutputAttribute failed\n");
-        ok_long(len, 1);
-        ok_int(attrs[0], ATTR);
-
-        /* Check cursor */
-        c.X = 2;
+        c.X = 3;
         c.Y = 0;
         okCURSOR(hConOut, c);
-
-        /* Read characters at (0,0) */
-        c.X = c.Y = 0;
-        ret = ReadConsoleOutputCharacterW(hConOut, str, 3 * sizeof(WCHAR), c, &len);
-        ok(ret, "ReadConsoleOutputCharacterW failed\n");
-        ok_long(len, 6);
-        ok(str[0] == ideograph_space || str[0] == L'?', "str[0] was: 0x%04X\n", str[0]);
-        ok(str[1] == u9580[0] || str[1] == L'?', "str[1] was: 0x%04X\n", str[1]);
-        ok(str[2] == ideograph_space || str[2] == L'?', "str[2] was: 0x%04X\n", str[2]);
     }
 
     /* Restore code page */

@@ -64,6 +64,10 @@ typedef struct _FM_FEATURE
                                            * others: the Version recorded when featmgr enabled it */
     BOOL    UpdateAvailable;     /* Provider=scoop, installed, and the imported catalog has a newer version */
     WCHAR   RegName[96];         /* Provider=native: [Rapps] RegName (else UninstallName): the Uninstall key / DisplayName that says it is installed */
+    BOOL    Hosted;              /* OS tier: the payload is not staged; enable downloads it ([Download], engine.c) */
+    BOOL    BuiltIn;             /* OS tier: the image itself carries it ([Feature] BuiltInFile=), no featmgr record:
+                                  * shown Enabled, not removable here */
+    WCHAR   Unavailable[256];    /* !PayloadAvailable: why, for the UI ("" = the payload is simply not staged) */
 } FM_FEATURE;
 
 /* Catalog / layout helpers. featmgr root = %SystemRoot%\Featmgr */
@@ -257,6 +261,7 @@ typedef struct _FM_COMPONENT
     ULONGLONG Size;
     BOOL     Default;            /* installed by the first-boot installer */
     BOOL     ArchOk;             /* Arch= lists this build's architecture */
+    ULONGLONG MaxSize;           /* > 0: the download is aborted once it is larger (hosted packs: the pinned size) */
 } FM_COMPONENT;
 BOOL   FmCompLoad(LPCWSTR id, FM_COMPONENT *c);
 int    FmCompEnum(FM_COMPONENT **outArr);          /* every component of the file; caller frees with FmCompFree */
@@ -273,6 +278,9 @@ BOOL   FmFileHashHex(LPCWSTR path, ALG_ID alg, WCHAR *hex, DWORD cch);
  * maxBytes bounds the file. Honours FmOpCancel. */
 HRESULT FmDownloadFile(LPCWSTR url, LPCWSTR dest, BOOL pinned, ULONGLONG maxBytes, FILE *log);
 BOOL   FmNetProbe(LPCWSTR url, DWORD timeoutMs);   /* TRUE: the server answered (the network is up) */
+BOOL   FmArchListed(LPCWSTR list);                 /* "x86,amd64" (i386 = x86) lists this build's architecture; "" = all */
+BOOL   FmFileSha256(LPCWSTR path, WCHAR hex[65]);  /* lower-case hex SHA-256 of a file */
+ULONGLONG FmHostedDownloadSize(LPCWSTR manifest);  /* OS-tier hosted pack: bytes its [Download] files add up to */
 void   FmCompInstallLine(const FM_COMPONENT *c, LPCWSTR file, LPWSTR out, DWORD cch);   /* Install with %FILE% filled in */
 
 /* ---- native install path for RAPPS-format entries (native.c, natgen.c, rappsdb.c) ----------------------------------
@@ -312,7 +320,7 @@ HRESULT FmRappsFetchDb(LPCWSTR urlOverride, FILE *log);  /* download + extract; 
 #define FM_SHELL_ADOPT_BROWSER  0x1   /* Firefox is installed: make it the default browser (machine + current user) */
 #define FM_SHELL_FORGET_BROWSER 0x2   /* Firefox is gone: the default browser goes back to Internet Explorer */
 /* Make the desktop / Start shortcuts, the Firefox policies and (flags) the default browser match what is installed:
- * PowerShell 7 and Firefox when they are there, Command Prompt and the Internet Explorer entry otherwise. Idempotent. */
+ * PowerShell 7 and Firefox when they are there, Command Prompt otherwise; no Internet Explorer entry. Idempotent. */
 void   FmShellDefaults(DWORD flags, FILE *log);
 
 /* ---- GUI pieces shared by optfeatures.exe (progwin.c, featwin.c, firstboot.c) ---- */

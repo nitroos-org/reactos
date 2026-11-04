@@ -15,6 +15,7 @@ extern void func_ReadConfigHandles(void);
 extern void func_SchannelHandshake(void);
 extern void func_SchannelServerCert(void);
 extern void func_SetCredentialsAttributes(void);
+extern void func_SspiAuthIdentityExports(void);
 extern void func_QueryContextAttributesEx(void);
 
 const struct test winetest_testlist[] =
@@ -26,6 +27,7 @@ const struct test winetest_testlist[] =
     { "SchannelHandshake", func_SchannelHandshake },
     { "SchannelServerCert", func_SchannelServerCert },
     { "SetCredentialsAttributes", func_SetCredentialsAttributes },
+    { "SspiAuthIdentityExports", func_SspiAuthIdentityExports },
 
     { "QueryContextAttributesEx", func_QueryContextAttributesEx },
     { 0, 0 }
