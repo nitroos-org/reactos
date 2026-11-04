@@ -345,6 +345,20 @@ KiPrepareUserDebugData(void)
        which the caller calls next, can wait */
 }
 
+static
+BOOLEAN
+KiIsDepEnabled(VOID)
+{
+    PEPROCESS Process = PsGetCurrentProcess();
+
+    /* Same rule as MmGetExecuteOptions: a native 64-bit process has DEP
+       unless the system policy is AlwaysOff, another process as it was set */
+    if (!Process->Wow64Process)
+        return SharedUserData->NXSupportPolicy != NX_SUPPORT_POLICY_ALWAYSOFF;
+
+    return Process->Pcb.Flags.ExecuteDisable;
+}
+
 VOID
 NTAPI
 KiDispatchException(IN PEXCEPTION_RECORD ExceptionRecord,
@@ -391,9 +405,16 @@ KiDispatchException(IN PEXCEPTION_RECORD ExceptionRecord,
 
             /* Set correct code */
             ExceptionRecord->ExceptionCode = STATUS_ACCESS_VIOLATION;
-            if (PreviousMode == UserMode)
+            if ((PreviousMode == UserMode) &&
+                (ExceptionRecord->NumberParameters >= 1) &&
+                (ExceptionRecord->ExceptionInformation[0] == EXCEPTION_EXECUTE_FAULT) &&
+                !KiIsDepEnabled())
             {
-                /* FIXME: Handle no execute */
+                /* The fault of an instruction fetch is reported as an
+                   execute fault only for a process that has DEP, otherwise
+                   as a read fault (like the access to a page that is not
+                   accessible at all) */
+                ExceptionRecord->ExceptionInformation[0] = EXCEPTION_READ_FAULT;
             }
             break;
     }
