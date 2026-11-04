@@ -224,13 +224,185 @@ static void EnsureDir(LPCWSTR dir)
     CreateDirectoryW(dir, NULL);
 }
 
-/* Firefox enterprise policies: never ask to be the default browser, no first-run / what's-new pages, no about:welcome
- * onboarding (its "make default" step), no profile import wizard. The Mozilla Terms of Use / privacy notice consent
- * (policy SkipTermsOfUse) is NOT skipped: accepting it is the user's own act. Written only when the file is absent:
- * an administrator's own policies.json is never replaced. */
-static void WriteFirefoxPolicies(FILE *log)
+/* Firefox enterprise policies, written to <Firefox dir>\distribution\policies.json.
+ *
+ * Full set (the x64 install featmgr itself puts there): never ask to be the default browser, no first-run / what's-new
+ * pages, no about:welcome onboarding (its "make default" step), no profile import wizard. The Mozilla Terms of Use / privacy
+ * notice consent (policy SkipTermsOfUse) is NOT skipped: accepting it is the user's own act.
+ *
+ * Preferences policy (every Firefox install found: x64, x86 in Program Files (x86), Scoop): media.wmf.media-engine.enabled
+ * = 0 with Status "default" (a default only: the user can change it in about:config, or with their own user.js). The
+ * pref is an INTEGER pref in Firefox (0 off, 2 on is the default): a boolean false in the policy is silently not applied
+ * ("Not fully applied" in about:policies), so the value must be the number 0.
+ * Why: NitroOS has no H.264 Media Foundation decoder, so Firefox's default decoder order ends at the "Utility MF Media
+ * Engine CDM", which claims H.264 and then fails to play it; with the pref off the bundled OpenH264 plugin plays mp4.
+ * TODO(MF-h264-mft): delete this default once an H.264 decoder MFT exists and the default path works.
+ *
+ * An existing policies.json is never replaced. The full set is only written into a new file. The Preferences entry is
+ * MERGED into an existing file as text (strict JSON: the file is scanned, one member is spliced in, everything else
+ * stays byte for byte); an administrator's own value for the pref, or a file that is not a JSON object with an object
+ * "policies" (and an object "Preferences", when there is one), is left alone. The distribution folder is not Firefox's
+ * own, so a Firefox update (MSI upgrade or the in-app updater) leaves it; a featmgr repair (/shell-defaults) puts the
+ * entry back if somebody removed it.
+ */
+#define FF_PREF_KEY   "media.wmf.media-engine.enabled"
+#define FF_PREF_ENTRY "\"" FF_PREF_KEY "\": { \"Value\": 0, \"Status\": \"default\" }"
+
+/* s[*i] == '"': advance past the string (FALSE: unterminated) */
+static BOOL JsSkipString(const char *s, size_t n, size_t *i)
 {
-    static const char json[] =
+    (*i)++;
+    while (*i < n)
+    {
+        if (s[*i] == '\\') { *i += 2; continue; }
+        if (s[*i] == '"') { (*i)++; return TRUE; }
+        (*i)++;
+    }
+    return FALSE;
+}
+
+static void JsBlank(const char *s, size_t n, size_t *i)
+{
+    while (*i < n && (s[*i] == ' ' || s[*i] == '\t' || s[*i] == '\r' || s[*i] == '\n')) (*i)++;
+}
+
+/* skip one value starting at s[*i] (string, object, array, or a bare literal) */
+static BOOL JsSkipValue(const char *s, size_t n, size_t *i)
+{
+    int depth = 0;
+    JsBlank(s, n, i);
+    if (*i >= n) return FALSE;
+    if (s[*i] == '"') return JsSkipString(s, n, i);
+    if (s[*i] != '{' && s[*i] != '[')
+    {
+        size_t b = *i;
+        while (*i < n && !strchr(",}] \t\r\n", s[*i])) (*i)++;
+        return *i > b;
+    }
+    for (;;)
+    {
+        if (*i >= n) return FALSE;
+        if (s[*i] == '"') { if (!JsSkipString(s, n, i)) return FALSE; continue; }
+        if (s[*i] == '{' || s[*i] == '[') depth++;
+        else if (s[*i] == '}' || s[*i] == ']') { depth--; if (depth == 0) { (*i)++; return TRUE; } }
+        (*i)++;
+    }
+}
+
+typedef struct { BOOL Found; size_t ValPos; size_t Close; size_t LastEnd; BOOL Empty; } JS_OBJ;
+
+/* s[start] == '{': find member `key` (raw compare); fills where its value starts, where the object closes and where its
+ * last member's value ends. FALSE on anything that is not well-formed enough. */
+static BOOL JsObject(const char *s, size_t n, size_t start, const char *key, JS_OBJ *o)
+{
+    size_t i = start + 1, klen = strlen(key);
+    memset(o, 0, sizeof(*o));
+    o->Empty = TRUE;
+    for (;;)
+    {
+        size_t b, kb;
+        JsBlank(s, n, &i);
+        if (i >= n) return FALSE;
+        if (s[i] == '}') { o->Close = i; return TRUE; }
+        if (s[i] != '"') return FALSE;
+        kb = i;
+        if (!JsSkipString(s, n, &i)) return FALSE;
+        b = i;
+        JsBlank(s, n, &i);
+        if (i >= n || s[i] != ':') return FALSE;
+        i++;
+        JsBlank(s, n, &i);
+        if (!o->Found && b - kb - 2 == klen && !memcmp(s + kb + 1, key, klen)) { o->Found = TRUE; o->ValPos = i; }
+        if (!JsSkipValue(s, n, &i)) return FALSE;
+        o->Empty = FALSE;
+        o->LastEnd = i;
+        JsBlank(s, n, &i);
+        if (i < n && s[i] == ',') i++;
+        else if (i >= n || s[i] != '}') return FALSE;
+    }
+}
+
+/* a copy of in[0..n) with `member` added to the object o as its last member: `, member` after the last value
+ * (or alone into an empty object) */
+static char *JsAddMember(const char *in, size_t n, const JS_OBJ *o, const char *member, size_t *outLen)
+{
+    size_t at = o->Empty ? o->Close : o->LastEnd, ml = strlen(member);
+    const char *pre = o->Empty ? " " : ", ", *post = o->Empty ? " " : "";
+    size_t pl = strlen(pre), tl = strlen(post);
+    char *r = (char *)HeapAlloc(GetProcessHeap(), 0, n + ml + pl + tl + 1);
+    if (!r) return NULL;
+    memcpy(r, in, at);
+    memcpy(r + at, pre, pl);
+    memcpy(r + at + pl, member, ml);
+    memcpy(r + at + pl + ml, post, tl);
+    memcpy(r + at + pl + ml + tl, in + at, n - at);
+    *outLen = n + pl + ml + tl;
+    return r;
+}
+
+typedef enum { PP_MERGED = 0, PP_PRESENT, PP_BAD, PP_NOMEM } PP_RESULT;
+
+/* put the Preferences entry into the policies.json text in[0..n); on PP_MERGED *out is a HeapAlloc'd copy */
+static PP_RESULT MergeFirefoxPref(const char *in, size_t n, char **out, size_t *outLen)
+{
+    JS_OBJ root, pol, prefs;
+    size_t i = 0;
+    char *t, *t2;
+    size_t tl, t2l;
+
+    *out = NULL;
+    JsBlank(in, n, &i);
+    if (i >= n || in[i] != '{' || !JsObject(in, n, i, "policies", &root)) return PP_BAD;
+    {   /* nothing but blanks after the document */
+        size_t e = root.Close + 1;
+        JsBlank(in, n, &e);
+        if (e < n) return PP_BAD;
+    }
+    if (!root.Found)
+    {
+        t = JsAddMember(in, n, &root, "\"policies\": { \"Preferences\": { " FF_PREF_ENTRY " } }", &tl);
+        if (!t) return PP_NOMEM;
+        *out = t; *outLen = tl;
+        return PP_MERGED;
+    }
+    if (in[root.ValPos] != '{' || !JsObject(in, n, root.ValPos, "Preferences", &pol)) return PP_BAD;
+    if (!pol.Found)
+    {
+        t = JsAddMember(in, n, &pol, "\"Preferences\": { " FF_PREF_ENTRY " }", &tl);
+        if (!t) return PP_NOMEM;
+        *out = t; *outLen = tl;
+        return PP_MERGED;
+    }
+    if (in[pol.ValPos] != '{' || !JsObject(in, n, pol.ValPos, FF_PREF_KEY, &prefs)) return PP_BAD;
+    if (prefs.Found) return PP_PRESENT;
+    t2 = JsAddMember(in, n, &prefs, FF_PREF_ENTRY, &t2l);
+    if (!t2) return PP_NOMEM;
+    *out = t2; *outLen = t2l;
+    return PP_MERGED;
+}
+
+static BOOL ReplaceFileText(LPCWSTR file, const char *data, size_t len)
+{
+    WCHAR tmp[MAX_PATH];
+    HANDLE h;
+    DWORD w;
+    BOOL ok;
+
+    StringCchPrintfW(tmp, ARRAYSIZE(tmp), L"%s.nitro-tmp", file);
+    h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    ok = WriteFile(h, data, (DWORD)len, &w, NULL) && w == len;
+    CloseHandle(h);
+    if (ok) ok = MoveFileExW(tmp, file, MOVEFILE_REPLACE_EXISTING);
+    if (!ok) DeleteFileW(tmp);
+    return ok;
+}
+
+/* ffDir = the Firefox install (or Scoop app "current") folder; only acted on when firefox.exe is in it. full = also the
+ * default-browser / first-run policies when the file is new. */
+static void FirefoxPolicies(LPCWSTR ffDir, BOOL full, FILE *log)
+{
+    static const char jsonFull[] =
         "{\r\n"
         "  \"policies\": {\r\n"
         "    \"DontCheckDefaultBrowser\": true,\r\n"
@@ -238,22 +410,104 @@ static void WriteFirefoxPolicies(FILE *log)
         "    \"OverrideFirstRunPage\": \"\",\r\n"
         "    \"OverridePostUpdatePage\": \"\",\r\n"
         "    \"DisableProfileImport\": true,\r\n"
-        "    \"UserMessaging\": { \"SkipOnboarding\": true }\r\n"
+        "    \"UserMessaging\": { \"SkipOnboarding\": true },\r\n"
+        "    \"Preferences\": {\r\n"
+        "      " FF_PREF_ENTRY "\r\n"
+        "    }\r\n"
         "  }\r\n"
         "}\r\n";
-    WCHAR dir[MAX_PATH], file[MAX_PATH];
+    static const char jsonPref[] =
+        "{\r\n"
+        "  \"policies\": {\r\n"
+        "    \"Preferences\": {\r\n"
+        "      " FF_PREF_ENTRY "\r\n"
+        "    }\r\n"
+        "  }\r\n"
+        "}\r\n";
+    WCHAR exe[MAX_PATH], dir[MAX_PATH], file[MAX_PATH];
     HANDLE h;
-    DWORD w;
+    DWORD w, size, attr;
+    char *buf, *edited = NULL;
+    size_t skip = 0, elen = 0;
+    PP_RESULT r;
 
-    if (!ProgFile(L"Mozilla Firefox\\distribution", dir, ARRAYSIZE(dir))) return;
+    StringCchPrintfW(exe, ARRAYSIZE(exe), L"%s\\firefox.exe", ffDir);
+    if (!FileExists(exe)) return;
+    StringCchPrintfW(dir, ARRAYSIZE(dir), L"%s\\distribution", ffDir);
     StringCchPrintfW(file, ARRAYSIZE(file), L"%s\\policies.json", dir);
-    if (FileExists(file)) { LOGF(log, L"  firefox: %s exists, left alone\n", file); return; }
-    EnsureDir(dir);
-    h = CreateFileW(file, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) { LOGF(log, L"  firefox: cannot write %s (error %lu)\n", file, GetLastError()); return; }
-    WriteFile(h, json, sizeof(json) - 1, &w, NULL);
+    attr = GetFileAttributesW(file);
+    if (attr == INVALID_FILE_ATTRIBUTES)
+    {
+        const char *j = full ? jsonFull : jsonPref;
+        EnsureDir(dir);
+        h = CreateFileW(file, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) { LOGF(log, L"  firefox: cannot write %s (error %lu)\n", file, GetLastError()); return; }
+        WriteFile(h, j, (DWORD)strlen(j), &w, NULL);
+        CloseHandle(h);
+        LOGF(log, L"  firefox: wrote %s\n", file);
+        return;
+    }
+    if (attr & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) { LOGF(log, L"  firefox: %s is not a plain file, left alone\n", file); return; }
+    h = CreateFileW(file, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { LOGF(log, L"  firefox: cannot read %s (error %lu), left alone\n", file, GetLastError()); return; }
+    size = GetFileSize(h, NULL);
+    if (size == INVALID_FILE_SIZE || size > 4 * 1024 * 1024) { CloseHandle(h); LOGF(log, L"  firefox: %s is too large, left alone\n", file); return; }
+    buf = (char *)HeapAlloc(GetProcessHeap(), 0, size + 1);
+    if (!buf || !ReadFile(h, buf, size, &w, NULL) || w != size)
+    {
+        CloseHandle(h);
+        if (buf) HeapFree(GetProcessHeap(), 0, buf);
+        LOGF(log, L"  firefox: cannot read %s, left alone\n", file);
+        return;
+    }
     CloseHandle(h);
-    LOGF(log, L"  firefox: wrote %s\n", file);
+    if (size >= 3 && (BYTE)buf[0] == 0xEF && (BYTE)buf[1] == 0xBB && (BYTE)buf[2] == 0xBF) skip = 3;
+    r = MergeFirefoxPref(buf + skip, size - skip, &edited, &elen);
+    if (r == PP_PRESENT)
+        LOGF(log, L"  firefox: %s keeps its own %S\n", file, FF_PREF_KEY);
+    else if (r == PP_MERGED)
+    {
+        char *all = (char *)HeapAlloc(GetProcessHeap(), 0, skip + elen);
+        if (all)
+        {
+            memcpy(all, buf, skip);
+            memcpy(all + skip, edited, elen);
+            if (ReplaceFileText(file, all, skip + elen))
+                LOGF(log, L"  firefox: added %S (default 0) to the existing %s\n", FF_PREF_KEY, file);
+            else
+                LOGF(log, L"  firefox: cannot update %s (error %lu), left alone\n", file, GetLastError());
+            HeapFree(GetProcessHeap(), 0, all);
+        }
+    }
+    else
+        LOGF(log, L"  firefox: %s is not a JSON object with a policies object, left alone (add %S by hand)\n", file, FF_PREF_KEY);
+    if (edited) HeapFree(GetProcessHeap(), 0, edited);
+    HeapFree(GetProcessHeap(), 0, buf);
+}
+
+/* x64: Program Files; x86: Program Files (x86) (a different folder on a 64-bit system only) */
+static void FirefoxPoliciesAll(FILE *log)
+{
+    WCHAR p64[MAX_PATH], p86[MAX_PATH], d[MAX_PATH];
+    BOOL have64 = SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PROGRAM_FILES, NULL, SHGFP_TYPE_CURRENT, p64));
+    BOOL have86 = SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PROGRAM_FILESX86, NULL, SHGFP_TYPE_CURRENT, p86));
+
+    if (have64)
+    {
+        StringCchPrintfW(d, ARRAYSIZE(d), L"%s\\Mozilla Firefox", p64);
+        FirefoxPolicies(d, TRUE, log);
+    }
+    if (have86 && (!have64 || _wcsicmp(p86, p64)))
+    {
+        StringCchPrintfW(d, ARRAYSIZE(d), L"%s\\Mozilla Firefox", p86);
+        FirefoxPolicies(d, FALSE, log);
+    }
+}
+
+/* Scoop's firefox apps (called from scoopdefaults.c) */
+void FmFirefoxPoliciesIn(LPCWSTR ffDir, FILE *log)
+{
+    FirefoxPolicies(ffDir, FALSE, log);
 }
 
 /* bchooser /installfirefox with Firefox on disk = "adopt it": the machine-wide web associations (http, https, .htm,
@@ -342,9 +596,9 @@ void FmShellDefaults(DWORD flags, FILE *log)
     /* the browser: Firefox has the entry. Internet Explorer has none in either case, as on Windows 11 (iexplore.exe
      * stays installed and opens the default browser): shortcuts to it left from an older image are removed, once. */
     RemoveIeLinksOnce(desk, progs, log);
+    FirefoxPoliciesAll(log);      /* whichever Firefox installs are there (the x86 one has no shortcut here) */
     if (haveFf)
     {
-        WriteFirefoxPolicies(log);
         StringCchPrintfW(lnk, ARRAYSIZE(lnk), L"%s\\%s.lnk", desk[0], NAME_FF);
         if (!LinksToIn(desk, NULL, L"firefox.exe", FALSE, NULL)) MakeLink(lnk, ff, NULL, L"Mozilla Firefox", log);
         StringCchPrintfW(lnk, ARRAYSIZE(lnk), L"%s\\%s.lnk", progs[0], NAME_FF);

@@ -37,10 +37,11 @@ BOOL FmFeatmgrExePath(LPWSTR out, DWORD cch)
 
 typedef struct _UNENT
 {
-    WCHAR key[128];
+    WCHAR key[256];       /* a registry key name is at most 255 characters */
     WCHAR name[128];
     BYTE  root;       /* 0 = HKCU, 1 = HKLM */
     BYTE  wow32;      /* opened with KEY_WOW64_32KEY */
+    BYTE  view64;     /* opened with KEY_WOW64_64KEY (a 32-bit featmgr reading the 64-bit view) */
 } UNENT;
 
 static UNENT *g_un;
@@ -52,21 +53,29 @@ void FmNativeInvalidate(void)
     g_unValid = FALSE;
 }
 
-static void SnapRoot(HKEY root, BYTE rootId, BOOL wow32)
+static void SnapRoot(HKEY root, BYTE rootId, BOOL wow32, REGSAM view)
 {
     HKEY hk;
-    DWORD i;
-    REGSAM sam = KEY_READ | (wow32 ? KEY_WOW64_32KEY : 0);
+    DWORD i, maxKey = 0;
+    WCHAR *kn;
+    REGSAM sam = KEY_READ | (wow32 ? KEY_WOW64_32KEY : 0) | view;
 
     if (RegOpenKeyExW(root, UNINSTALL_SUBKEY, 0, sam, &hk) != ERROR_SUCCESS) return;
+    /* the enumeration buffer is as long as the longest subkey name (RegQueryInfoKey), so no name ends the enumeration early */
+    if (RegQueryInfoKeyW(hk, NULL, NULL, NULL, NULL, &maxKey, NULL, NULL, NULL, NULL, NULL, NULL) != ERROR_SUCCESS || maxKey < 255)
+        maxKey = 255;
+    kn = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (maxKey + 1) * sizeof(WCHAR));
+    if (!kn) { RegCloseKey(hk); return; }
     for (i = 0; ; i++)
     {
-        WCHAR kn[128];
-        DWORD cch = ARRAYSIZE(kn), type, cb, sc = 0;
+        DWORD cch = maxKey + 1, type, cb, sc = 0;
         HKEY sk;
         UNENT e;
+        LONG er = RegEnumKeyExW(hk, i, kn, &cch, NULL, NULL, NULL, NULL);
 
-        if (RegEnumKeyExW(hk, i, kn, &cch, NULL, NULL, NULL, NULL) != ERROR_SUCCESS) break;
+        if (er == ERROR_MORE_DATA) continue;               /* a name longer than the buffer (a key added since RegQueryInfoKey): skip it */
+        if (er != ERROR_SUCCESS) break;                    /* NO_MORE_ITEMS, or an error that will not go away */
+        if (cch >= ARRAYSIZE(e.key)) continue;
         if (RegOpenKeyExW(hk, kn, 0, sam, &sk) != ERROR_SUCCESS) continue;
         ZeroMemory(&e, sizeof(e));
         StringCchCopyW(e.key, ARRAYSIZE(e.key), kn);
@@ -83,6 +92,14 @@ static void SnapRoot(HKEY root, BYTE rootId, BOOL wow32)
         RegCloseKey(sk);
         e.root = rootId;
         e.wow32 = wow32;
+        e.view64 = (view & KEY_WOW64_64KEY) != 0;
+        {
+            int j;
+            BOOL dup = FALSE;       /* the extra 64-bit-view pass of a 32-bit build: on a 32-bit OS it is the same view again */
+            for (j = 0; view && j < g_nun; j++)
+                if (g_un[j].root == rootId && !_wcsicmp(g_un[j].key, e.key)) { dup = TRUE; break; }
+            if (dup) continue;
+        }
         if (g_nun == g_cun)
         {
             int nc = g_cun ? g_cun * 2 : 256;
@@ -93,6 +110,7 @@ static void SnapRoot(HKEY root, BYTE rootId, BOOL wow32)
         }
         g_un[g_nun++] = e;
     }
+    HeapFree(GetProcessHeap(), 0, kn);
     RegCloseKey(hk);
 }
 
@@ -100,24 +118,32 @@ static void Snapshot(void)
 {
     if (g_unValid) return;
     g_nun = 0;
-    SnapRoot(HKEY_CURRENT_USER, 0, FALSE);
-    SnapRoot(HKEY_LOCAL_MACHINE, 1, FALSE);
+    SnapRoot(HKEY_CURRENT_USER, 0, FALSE, 0);
+    SnapRoot(HKEY_LOCAL_MACHINE, 1, FALSE, 0);
 #ifdef _WIN64
-    SnapRoot(HKEY_LOCAL_MACHINE, 1, TRUE);
+    SnapRoot(HKEY_LOCAL_MACHINE, 1, TRUE, 0);
+#else
+    SnapRoot(HKEY_LOCAL_MACHINE, 1, FALSE, KEY_WOW64_64KEY);   /* a 32-bit build under WoW64 sees the 64-bit programs too (ignored on a 32-bit OS) */
 #endif
     g_unValid = TRUE;
 }
 
-/* RAPPS rule: the Uninstall key is named RegName, or named like the program, or the program's DisplayName matches. */
+/* RAPPS rule: the Uninstall key is named RegName, or named like the program, or the program's DisplayName matches.
+ * Machine-wide entries (HKLM) are searched before per-user ones (HKCU), so a per-user key cannot shadow the machine's program of
+ * the same name: first pass root 1, second pass root 0. */
 static const UNENT *FindInstalled(LPCWSTR regName, LPCWSTR name)
 {
-    int i;
+    int i, pass;
     Snapshot();
-    for (i = 0; i < g_nun; i++)
+    for (pass = 0; pass < 2; pass++)
     {
-        const UNENT *e = &g_un[i];
-        if (regName && regName[0] && (!_wcsicmp(e->key, regName) || (e->name[0] && !_wcsicmp(e->name, regName)))) return e;
-        if (name && name[0] && (!_wcsicmp(e->key, name) || (e->name[0] && !_wcsicmp(e->name, name)))) return e;
+        for (i = 0; i < g_nun; i++)
+        {
+            const UNENT *e = &g_un[i];
+            if (e->root != (pass == 0 ? 1 : 0)) continue;
+            if (regName && regName[0] && (!_wcsicmp(e->key, regName) || (e->name[0] && !_wcsicmp(e->name, regName)))) return e;
+            if (name && name[0] && (!_wcsicmp(e->key, name) || (e->name[0] && !_wcsicmp(e->name, name)))) return e;
+        }
     }
     return NULL;
 }
@@ -149,12 +175,14 @@ static BOOL ArchListed(LPCWSTR list)
     return FALSE;
 }
 
-/* a file name for the downloaded file: <id>-<SaveAs or the URL's last path part>, with nothing a path could use */
+/* a file name for the downloaded file: <id>-<SaveAs or the URL's last path part>, with nothing a path could use. It must fit cch
+ * (FM_COMPONENT.FileName): when the name is too long the middle is cut and the extension (the last dot and what follows, up to 16
+ * characters) is kept, because installers are chosen by extension (.msi, .zip, .cab). */
 static void MakeFileName(const FM_FEATURE *f, LPCWSTR url, LPCWSTR saveAs, LPWSTR out, DWORD cch)
 {
-    WCHAR tail[96];
+    WCHAR tail[260], idp[48], full[320];
     LPCWSTR p = saveAs[0] ? saveAs : NULL;
-    size_t n = 0, i;
+    size_t n = 0, i, room, el = 0;
     WCHAR *q;
 
     if (!p)
@@ -162,12 +190,22 @@ static void MakeFileName(const FM_FEATURE *f, LPCWSTR url, LPCWSTR saveAs, LPWST
         p = wcsrchr(url, L'/');
         p = p ? p + 1 : L"";
     }
-    for (i = 0; p[i] && p[i] != L'?' && p[i] != L'#' && n + 1 < ARRAYSIZE(tail) - 1; i++)
+    for (i = 0; p[i] && p[i] != L'?' && p[i] != L'#' && n + 1 < ARRAYSIZE(tail); i++)
         tail[n++] = (p[i] < 32 || wcschr(L"\\/:*?\"<>|%", p[i])) ? L'_' : p[i];
     tail[n] = L'\0';
     if (!tail[0]) StringCchCopyW(tail, ARRAYSIZE(tail), L"download.bin");
     if (tail[0] == L'.') tail[0] = L'_';
-    StringCchPrintfW(out, cch, L"%.40s-%s", f->Id, tail);
+    StringCchPrintfW(idp, ARRAYSIZE(idp), L"%.40s-", f->Id);
+    room = cch - 1 - wcslen(idp);                       /* characters left for the name */
+    if (wcslen(tail) > room)
+    {
+        const WCHAR *dot = wcsrchr(tail, L'.');
+        if (dot && dot > tail && wcslen(dot) <= 16 && wcslen(dot) < room) el = wcslen(dot);
+        if (el) memmove(tail + room - el, dot, (el + 1) * sizeof(WCHAR));    /* the extension moves up against the cut */
+        else tail[room] = L'\0';
+    }
+    StringCchPrintfW(full, ARRAYSIZE(full), L"%s%s", idp, tail);
+    StringCchCopyW(out, cch, full);
     for (q = out; *q; q++) if (*q == L' ') *q = L'_';
 }
 
@@ -357,7 +395,7 @@ BOOL FmNativeUninstallLine(const FM_FEATURE *f, LPWSTR out, DWORD cch)
 /* ---- uninstalling an installed program (featmgr /nat-uninstall <regname|-> <name> <tag>) ------------------------ */
 
 static HKEY RootOf(const UNENT *e) { return e->root ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER; }
-static REGSAM SamOf(const UNENT *e) { return e->wow32 ? KEY_WOW64_32KEY : 0; }
+static REGSAM SamOf(const UNENT *e) { return e->wow32 ? KEY_WOW64_32KEY : e->view64 ? KEY_WOW64_64KEY : 0; }
 
 static BOOL RegStr(HKEY k, LPCWSTR name, LPWSTR out, DWORD cch)
 {
@@ -466,6 +504,7 @@ BOOL FmCanonPath(LPCWSTR in, LPWSTR out, DWORD cch)
     }
     while (n > 3 && t[n - 1] == L'\\') n--;
     t[n] = L'\0';
+    if (FmHasDeviceName(t + 3)) return FALSE;       /* NUL, CON, COM1 ...: GetFullPathName turns "X:\NUL" into the device "\\.\NUL" */
     for (i = 3; i < n; )
     {
         size_t l = wcscspn(t + i, L"\\");
@@ -522,8 +561,56 @@ BOOL FmBadInstallRoot(LPCWSTR dir)
     return FALSE;
 }
 
+/* TRUE: a component of path below base (base is a leading part of path, same spelling) is a reparse point (a junction or a symbolic
+ * link). leaf: the last component counts too. A path that does not start with base counts as a link (fail closed). Components
+ * that do not exist yet are not links. */
+BOOL FmLinkBelow(LPCWSTR base, LPCWSTR path, BOOL leaf)
+{
+    WCHAR p[MAX_PATH * 2];
+    size_t bl = wcslen(base), n, i;
+
+    while (bl && base[bl - 1] == L'\\') bl--;
+    n = wcslen(path);
+    if (n >= ARRAYSIZE(p) || n < bl || _wcsnicmp(path, base, bl) || (path[bl] != L'\\' && path[bl] != L'\0')) return TRUE;
+    memcpy(p, path, (n + 1) * sizeof(WCHAR));
+    for (i = bl + 1; i <= n; i++)
+    {
+        if (p[i] == L'\\' || (p[i] == L'\0' && leaf))
+        {
+            WCHAR sv = p[i];
+            DWORD a;
+            p[i] = L'\0';
+            a = GetFileAttributesW(p);
+            p[i] = sv;
+            if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT)) return TRUE;
+        }
+        if (!p[i]) break;
+    }
+    return FALSE;
+}
+
+/* the first folder below Program Files that belongs to Windows or to the installer / runtime stack: an app never installs into it
+ * (they are below Program Files, so the "strictly below" rule alone lets them through) */
+static BOOL SystemFirstLevel(int baseIdx, LPCWSTR rel)
+{
+    static const LPCWSTR pf[] = {
+        L"Common Files", L"Windows Defender", L"Windows Defender Advanced Threat Protection", L"Windows NT", L"WindowsApps",
+        L"ModifiableWindowsApps", L"Windows Mail", L"Windows Media Player", L"Windows Photo Viewer", L"Windows Portable Devices",
+        L"Windows Security", L"Windows Sidebar", L"Windows Multimedia Platform", L"Windows Journal", L"WindowsPowerShell",
+        L"Internet Explorer", L"Microsoft Update Health Tools", L"Reference Assemblies", L"Uninstall Information",
+        L"Application Verifier", L"MSBuild", L"dotnet", L"Microsoft.NET" };
+    static const LPCWSTR lp[] = { L"Common", L"Common Files" };
+    const LPCWSTR *list = baseIdx == 2 ? lp : pf;
+    size_t cnt = baseIdx == 2 ? ARRAYSIZE(lp) : ARRAYSIZE(pf), i, l = wcscspn(rel, L"\\");
+    for (i = 0; i < cnt; i++)
+        if (wcslen(list[i]) == l && !_wcsnicmp(rel, list[i], l)) return TRUE;
+    return FALSE;
+}
+
 /* The install directory of a generated install: canonical (FmCanonPath), strictly BELOW Program Files, Program Files (x86) or
- * %LOCALAPPDATA%\Programs (the bases of the RAPPS [Generate] Dir rules), and not a protected folder (FmBadInstallRoot).
+ * %LOCALAPPDATA%\Programs (the bases of the RAPPS [Generate] Dir rules), not a protected folder (FmBadInstallRoot), not inside one of
+ * the system folders below Program Files (Windows Defender, Windows NT, Common Files, WindowsApps, ...), and no component below
+ * the base is a link (junction / symbolic link: the lexical rules cannot see where one leads). Install and uninstall both ask.
  * canon receives the canonical form (MAX_PATH), which is what gets created and recorded. */
 BOOL FmInstallDirOk(LPCWSTR dir, LPWSTR canon)
 {
@@ -540,6 +627,7 @@ BOOL FmInstallDirOk(LPCWSTR dir, LPWSTR canon)
         l = wcslen(b);
         if (!_wcsnicmp(c, b, l) && c[l] == L'\\' && c[l + 1])
         {
+            if (SystemFirstLevel((int)i, c + l + 1) || FmLinkBelow(b, c, TRUE)) return FALSE;
             if (canon) StringCchCopyW(canon, MAX_PATH, c);
             return TRUE;
         }
@@ -547,7 +635,7 @@ BOOL FmInstallDirOk(LPCWSTR dir, LPWSTR canon)
     return FALSE;
 }
 
-/* TRUE: path is below the Start menu Programs folder (user or all users), not the folder itself */
+/* TRUE: path is below the Start menu Programs folder (user or all users), not the folder itself, and no folder between is a link */
 static BOOL UnderStartMenu(LPCWSTR path)
 {
     static const int ids[] = { CSIDL_PROGRAMS, CSIDL_COMMON_PROGRAMS };
@@ -559,7 +647,7 @@ static BOOL UnderStartMenu(LPCWSTR path)
         size_t l;
         if (SHGetFolderPathW(NULL, ids[i], NULL, 0, p) != S_OK) continue;
         l = wcslen(p);
-        if (!_wcsnicmp(path, p, l) && path[l] == L'\\' && path[l + 1]) return TRUE;
+        if (!_wcsnicmp(path, p, l) && path[l] == L'\\' && path[l + 1]) return !FmLinkBelow(p, path, FALSE);   /* no link on the way */
     }
     return FALSE;
 }
@@ -756,7 +844,16 @@ static int UninstallGenerated(const UNENT *e, HKEY arp)
                     continue;
                 }
                 if (data[0] == L'\\')
+                {
                     StringCchPrintfW(path, ARRAYSIZE(path), L"%s%s", loc, data);
+                    /* a junction made inside the install folder since the install would lead the delete elsewhere: a link in any
+                     * folder on the way refuses the entry (the last name may be one: deleting it removes the link only) */
+                    if (FmLinkBelow(loc, path, FALSE))
+                    {
+                        wprintf(L"refused record entry %s: '%s' is reached through a link\n", val, data);
+                        continue;
+                    }
+                }
                 else
                     StringCchCopyW(path, ARRAYSIZE(path), data);
                 if (op == L'F')
@@ -810,6 +907,20 @@ static void DeleteArpKey(const UNENT *e)
     }
 }
 
+/* "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}": the only key name msiexec /x is given */
+static BOOL IsGuidKey(LPCWSTR k)
+{
+    static const WCHAR pat[] = L"{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}";
+    size_t i;
+    if (wcslen(k) != ARRAYSIZE(pat) - 1) return FALSE;
+    for (i = 0; pat[i]; i++)
+    {
+        if (pat[i] == L'x') { if (!iswxdigit(k[i])) return FALSE; }
+        else if (k[i] != pat[i]) return FALSE;
+    }
+    return TRUE;
+}
+
 int FmNativeUninstallMain(int argc, WCHAR **argv)
 {
     /* argv: featmgr /nat-uninstall <regname|-> <name> [<tag>] */
@@ -817,9 +928,9 @@ int FmNativeUninstallMain(int argc, WCHAR **argv)
     const UNENT *e;
     UNENT ent;
     HKEY hk;
-    WCHAR cmd[2048], tmp[2048], keyPath[300];
+    WCHAR cmd[2048], tmp[2048], keyPath[400];
     DWORD wi = 0, type, cb = sizeof(wi), code;
-    BOOL isGen = FALSE, nsisSync = FALSE;
+    BOOL isGen = FALSE, nsisSync = FALSE, msi;
     WCHAR nsisExe[MAX_PATH];
 
     nsisExe[0] = L'\0';
@@ -848,7 +959,11 @@ int FmNativeUninstallMain(int argc, WCHAR **argv)
         if (rc == 0) DeleteArpKey(&ent);
         return rc;
     }
-    if (RegQueryValueExW(hk, L"WindowsInstaller", NULL, &type, (LPBYTE)&wi, &cb) == ERROR_SUCCESS && type == REG_DWORD && wi)
+    /* msiexec /x gets the key name only when it is a product code; a "WindowsInstaller" key of any other name goes the
+     * UninstallString way, like any other program */
+    msi = RegQueryValueExW(hk, L"WindowsInstaller", NULL, &type, (LPBYTE)&wi, &cb) == ERROR_SUCCESS && type == REG_DWORD && wi &&
+          IsGuidKey(ent.key);
+    if (msi)
         StringCchPrintfW(cmd, ARRAYSIZE(cmd), L"msiexec.exe /x%s /qn /norestart", ent.key);
     else
     {
@@ -901,7 +1016,7 @@ int FmNativeUninstallMain(int argc, WCHAR **argv)
     wprintf(L"running: %s\n", tmp);
     code = RunWait(tmp, 60u * 60u * 1000u);
     wprintf(L"exit code: %lu\n", code);
-    if (code == 0 && !wi)
+    if (code == 0 && !msi)
     {
         /* some uninstallers hand the work to a copy of themselves and return at once: wait (up to a minute) for the program's
          * Uninstall key to go, which they remove last, before the caller looks at the result */

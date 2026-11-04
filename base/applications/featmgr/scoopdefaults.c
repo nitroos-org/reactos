@@ -538,12 +538,27 @@ static void HookAlacritty(LPCWSTR root, LPCWSTR app, FILE *log)
     LOGF(log, L"  NitroOS default: %s (font %S, %S)\n", toml, family, strstr(shell, "pwsh") ? "pwsh" : "cmd");
 }
 
+/* Default 4: Firefox from Scoop ("firefox", "firefox-esr", ...): the same Preferences policy as the MSI install gets
+ * (media.wmf.media-engine.enabled = false as a default, see shelldefaults.c: no H.264 MFT, so mp4 plays through the
+ * OpenH264 plugin). Merged into an existing distribution\policies.json. The apps\<app>\current folder is a new
+ * version folder after a Scoop update: featmgr's update runs this hook again; a plain "scoop update" typed in a shell
+ * does not (a featmgr /shell-defaults does not look into Scoop either). */
+static void HookFirefox(LPCWSTR root, LPCWSTR app, FILE *log)
+{
+    WCHAR cur[MAX_PATH];
+    StringCchPrintfW(cur, MAX_PATH, L"%s\\apps\\%s\\current", root, app);
+    FmFirefoxPoliciesIn(cur, log);
+}
+
 typedef void (*APP_HOOK)(LPCWSTR root, LPCWSTR app, FILE *log);
 static const struct { const WCHAR *App; APP_HOOK Fn; } g_Hooks[] =
 {
     { L"wezterm",         HookWezTerm },
     { L"wezterm-nightly", HookWezTerm },
     { L"alacritty",       HookAlacritty },
+    { L"firefox",         HookFirefox },
+    { L"firefox-esr",     HookFirefox },
+    { L"firefox-developer", HookFirefox },
 };
 
 /* After featmgr installed or updated Scoop app `app` (a NULL/unknown app is a no-op). */

@@ -406,11 +406,6 @@ WSPSocket(int AddressFamily,
                           NULL,
                           NULL,
                           NULL);
-
-    /* SO_RCVBUF of a stream socket reads as 64K until it is set, as on Windows; the size AFD reports is
-     * that of its own, smaller staging buffer */
-    if (Socket->SharedData->SocketType == SOCK_STREAM)
-        Socket->SharedData->SizeOfRecvBuffer = 0x10000;
 ok:
 
     /* Save in Process Sockets List */
@@ -1035,10 +1030,6 @@ WSPBind(SOCKET Handle,
     if (Socket->SharedData->ExclusiveAddressUse)
     {
         BindData->ShareType = AFD_SHARE_EXCLUSIVE;
-    }
-    else if (SocketInfo.EndpointInfo == SockaddrEndpointInfoWildcard)
-    {
-        BindData->ShareType = AFD_SHARE_WILDCARD;
     }
     else if (Socket->SharedData->ReuseAddresses)
     {
@@ -1987,7 +1978,6 @@ WSPAccept(
     AcceptSocketInfo->SharedData->ConnectTime = GetCurrentTimeInSeconds();
     AcceptSocketInfo->SharedData->NonBlocking = Socket->SharedData->NonBlocking;
     AcceptSocketInfo->SharedData->TcpNoDelay = Socket->SharedData->TcpNoDelay;
-    AcceptSocketInfo->SharedData->SizeOfRecvBuffer = Socket->SharedData->SizeOfRecvBuffer;
     AcceptSocketInfo->SharedData->RecvTimeout = Socket->SharedData->RecvTimeout;
     AcceptSocketInfo->SharedData->SendTimeout = Socket->SharedData->SendTimeout;
 
@@ -3736,16 +3726,6 @@ WSPSetSockOpt(
                * allocation, so there is nothing for msafd to clamp. */
               SetSocketInformation(Socket,
                                    AFD_INFO_RECEIVE_WINDOW_SIZE,
-                                   NULL,
-                                   (PULONG)optval,
-                                   NULL,
-                                   NULL,
-                                   NULL);
-
-              /* The transport's receive window follows SO_RCVBUF: AFD keeps the hint in any socket state,
-               * for the connection it will have (connect, or accept from a listener that has it) */
-              SetSocketInformation(Socket,
-                                   AFD_INFO_RECEIVE_WINDOW_HINT,
                                    NULL,
                                    (PULONG)optval,
                                    NULL,

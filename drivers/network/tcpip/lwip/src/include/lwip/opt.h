@@ -1485,14 +1485,6 @@
  * TCP_WND_UPDATE_THRESHOLD: difference in window to trigger an
  * explicit window update
  */
-/**
- * TCP_WND_DEFAULT: the receive window a new connection starts with (its largest
- * window until the owner changes tcp_pcb.rcv_wnd_max); TCP_WND is the limit for it.
- */
-#if !defined TCP_WND_DEFAULT || defined __DOXYGEN__
-#define TCP_WND_DEFAULT                 TCP_WND
-#endif
-
 #if !defined TCP_WND_UPDATE_THRESHOLD || defined __DOXYGEN__
 #define TCP_WND_UPDATE_THRESHOLD        LWIP_MIN((TCP_WND / 4), (TCP_MSS * 4))
 #endif

@@ -234,6 +234,27 @@ static void TestHandleTable(void)
     if (Event) CloseHandle(Event);
 }
 
+/* ProcessMitigationPolicy (52): { Policy, Flags }, the same in both widths. A sandboxed 32-bit Firefox asks for the
+ * Win32k lockdown of its own process this way; the request must reach the kernel, not fail as unsupported */
+#define ProcessMitigationPolicyClass ((PROCESSINFOCLASS)52)
+static void TestMitigationPolicy(void)
+{
+    ULONG Request[2], Ret;
+    NTSTATUS Status;
+
+    if (GetNTVersion() < _WIN32_WINNT_WIN8)
+    {
+        skip("ProcessMitigationPolicy is Windows 8 and later\n");
+        return;
+    }
+    Request[0] = 4;     /* ProcessSystemCallDisablePolicy */
+    Request[1] = 0xdeadbeef;
+    Status = Query(ProcessMitigationPolicyClass, Request, sizeof(Request), &Ret);
+    ok(Status == STATUS_SUCCESS, "Mitigation policy: 0x%lx\n", Status);
+    ok(Request[0] == 4, "Mitigation policy: policy %lu\n", Request[0]);
+    ok(Request[1] == 0, "Mitigation policy: flags 0x%lx, a process that was not created locked down has none\n", Request[1]);
+}
+
 START_TEST(Wow64QueryInformationProcess)
 {
     BOOL Wow64 = FALSE;
@@ -252,4 +273,5 @@ START_TEST(Wow64QueryInformationProcess)
     TestImageFileName();
     TestHandleCount();
     TestHandleTable();
+    TestMitigationPolicy();
 }

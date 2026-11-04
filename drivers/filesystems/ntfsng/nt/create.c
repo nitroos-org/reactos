@@ -653,9 +653,9 @@ static NTSTATUS NgPathFromId(PNG_VCB Vcb, PCUNICODE_STRING Id, PUNICODE_STRING P
 }
 
 /*
- * A junction (mount point reparse point) on the path: the open goes back to the I/O manager with
+ * A junction (mount point) or symbolic link on the path: the open goes back to the I/O manager with
  * STATUS_REPARSE and the reparse data, whose Reserved field counts the bytes at the end of the
- * file name that follow the junction.  Other reparse tags open the file itself.  Caller holds CoreLock.
+ * file name that follow the link.  Other reparse tags open the file itself.  Caller holds CoreLock.
  * As is given when the junction is the last component, which is opened through it: the junction's
  * own descriptor has to grant the access asked for first, as on Windows (a junction that denies
  * FILE_LIST_DIRECTORY cannot be listed, but a path below it still resolves on FILE_TRAVERSE).
@@ -666,24 +666,41 @@ static NTSTATUS NgMountPointReparse(PNG_VCB Vcb, ngc_node *Node, PIRP Irp, PFILE
     PREPARSE_DATA_BUFFER Rp, Copy;
     void *Data;
     unsigned int Len;
-    ULONG Path;
+    ULONG Path, Hdr, Sub, SubOff, PrintLen, PrintOff;
 
     if (!ngc_is_reparse(Node) || Tail > FileObject->FileName.Length)
         return STATUS_SUCCESS;
     if (ngc_get_reparse(Node, &Data, &Len))
         return STATUS_SUCCESS;
     Rp = Data;
-    if (Rp->ReparseTag != IO_REPARSE_TAG_MOUNT_POINT)
+    if (Rp->ReparseTag != IO_REPARSE_TAG_MOUNT_POINT && Rp->ReparseTag != IO_REPARSE_TAG_SYMLINK)
     {
         ngc_free(Data);
         return STATUS_SUCCESS;
     }
-    Path = Len - FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer);
-    if (Len < FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer) ||
-        (ULONG)Rp->ReparseDataLength + REPARSE_DATA_BUFFER_HEADER_SIZE != Len ||
-        (ULONG)Rp->MountPointReparseBuffer.SubstituteNameOffset + Rp->MountPointReparseBuffer.SubstituteNameLength > Path ||
-        (ULONG)Rp->MountPointReparseBuffer.PrintNameOffset + Rp->MountPointReparseBuffer.PrintNameLength > Path ||
-        !Rp->MountPointReparseBuffer.SubstituteNameLength)
+    if (Rp->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT)
+    {
+        Hdr = FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer);
+        Sub = Rp->MountPointReparseBuffer.SubstituteNameLength;
+        SubOff = Rp->MountPointReparseBuffer.SubstituteNameOffset;
+        PrintLen = Rp->MountPointReparseBuffer.PrintNameLength;
+        PrintOff = Rp->MountPointReparseBuffer.PrintNameOffset;
+    }
+    else
+    {
+        Hdr = FIELD_OFFSET(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer.PathBuffer);
+        Sub = Rp->SymbolicLinkReparseBuffer.SubstituteNameLength;
+        SubOff = Rp->SymbolicLinkReparseBuffer.SubstituteNameOffset;
+        PrintLen = Rp->SymbolicLinkReparseBuffer.PrintNameLength;
+        PrintOff = Rp->SymbolicLinkReparseBuffer.PrintNameOffset;
+    }
+    if (Len < Hdr || (ULONG)Rp->ReparseDataLength + REPARSE_DATA_BUFFER_HEADER_SIZE != Len)
+    {
+        ngc_free(Data);
+        return STATUS_IO_REPARSE_DATA_INVALID;
+    }
+    Path = Len - Hdr;
+    if (SubOff + Sub > Path || PrintOff + PrintLen > Path || !Sub)
     {
         ngc_free(Data);
         return STATUS_IO_REPARSE_DATA_INVALID;
@@ -721,7 +738,7 @@ static NTSTATUS NgMountPointReparse(PNG_VCB Vcb, ngc_node *Node, PIRP Irp, PFILE
     ngc_free(Data);
     Copy->Reserved = (USHORT)Tail;
     Irp->Tail.Overlay.AuxiliaryBuffer = (PCHAR)Copy;
-    Irp->IoStatus.Information = IO_REPARSE_TAG_MOUNT_POINT;
+    Irp->IoStatus.Information = Copy->ReparseTag;
     return STATUS_REPARSE;
 }
 
@@ -1708,10 +1725,17 @@ VOID NgFcbIdle(PNG_FCB Fcb)
     NgFcbTrimIdle(Vcb);
 }
 
-/* Caller holds a counted reference, drops it here.  Nothing else is held: closing the file object runs NgClose. */
+/*
+ * Caller holds a counted reference, drops it here.  Nothing else is held: closing the file object runs NgClose.
+ * An idle FCB that still has a shared cache map is not flushed here: Cc keeps the map of a closed file until its
+ * lazy writer wrote the dirty data, then deletes it.  Flushing it now would bring back the synchronous write at
+ * every close (the FCB evicted is only some 1000 closes old); it goes back to the tail and is evicted once the map
+ * is gone.
+ */
 static VOID NgEvictFcb(PNG_FCB Fcb)
 {
     PNG_VCB Vcb = Fcb->Vcb;
+    BOOLEAN Requeue = FALSE;
 
     /* Only an idle FCB nobody is working on; a writer that comes in meanwhile waits for the main resource. */
     if (ExAcquireResourceExclusiveLite(&Fcb->MainResource, FALSE))
@@ -1721,7 +1745,11 @@ static VOID NgEvictFcb(PNG_FCB Fcb)
         Idle = !Fcb->OpenHandles && !Fcb->Opening && !Fcb->Deleted && !Fcb->DeletePending && !Fcb->IsPagingFile &&
                !Vcb->Dismounted && !Vcb->WrongMedia && !Vcb->LockedBy;
         ExReleaseFastMutex(&Vcb->FcbListLock);
-        if (Idle && !Fcb->SectionObjectPointers.SharedCacheMap && Fcb->SectionObjectPointers.DataSectionObject)
+        if (Idle && Fcb->SectionObjectPointers.SharedCacheMap)
+        {
+            Requeue = TRUE;
+        }
+        else if (Idle && Fcb->SectionObjectPointers.DataSectionObject)
         {
             IO_STATUS_BLOCK Iosb;
             NgFlushStream(Fcb, &Iosb);
@@ -1729,6 +1757,17 @@ static VOID NgEvictFcb(PNG_FCB Fcb)
                 NgPurgeFrom(Fcb, 0);
         }
         ExReleaseResourceLite(&Fcb->MainResource);
+    }
+    if (Requeue)
+    {
+        ExAcquireFastMutex(&Vcb->FcbListLock);
+        if (Fcb->VcbLinks.Flink && !Fcb->IdleLinks.Flink && !Fcb->OpenHandles && !Fcb->Opening && !Fcb->Deleted &&
+            !Fcb->DeletePending)
+        {
+            InsertTailList(&Vcb->IdleList, &Fcb->IdleLinks);
+            Vcb->IdleCount++;
+        }
+        ExReleaseFastMutex(&Vcb->FcbListLock);
     }
     NgDereferenceFcb(Fcb);
 }

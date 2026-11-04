@@ -166,6 +166,10 @@ static DMA_OPERATIONS HalpDmaOperations = {
 
 #define TAG_DMA ' AMD'
 
+/* Backoff of the retry of a map buffer grow that failed while requests wait */
+#define HAL_GROW_RETRY_MIN_MS 10
+#define HAL_GROW_RETRY_MAX_MS 1000
+
 /* FUNCTIONS *****************************************************************/
 
 #if defined(SARCH_PC98)
@@ -263,6 +267,71 @@ HalpGetAdapterMaximumPhysicalAddress(IN PADAPTER_OBJECT AdapterObject)
 }
 
 #ifndef _MINIHAL_
+
+#if DBG
+/*
+ * Test knob, checked builds only: Services\HalDmaFault\FailMask, read whenever HalGetAdapter runs.
+ *  1: the work item that grows the map buffers fails (as if no contiguous memory were left)
+ *  2: no work item can be allocated for a request that has to wait for more map registers
+ *  4: HalGetAdapter does not grow the map registers up front for its device
+ *  8: the grow fails, except every fourth time
+ * (1 and 8 apply to the work items that grow the map buffers: the failure lasts as long as the value does)
+ * Without the knob the master adapter's map registers always suffice for any one request (HalGetAdapter
+ * makes sure of it), so a request can only wait for another one to finish.
+ */
+#define HAL_DMA_FAULT_GROW_FAILS     1
+#define HAL_DMA_FAULT_NO_WORK_ITEM   2
+#define HAL_DMA_FAULT_NO_PREGROW     4
+#define HAL_DMA_FAULT_GROW_FLAKY     8
+static volatile LONG HalpDmaFaultMask;
+
+static
+VOID
+HalpDmaReadFaultMask(VOID)
+{
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\HalDmaFault");
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"FailMask");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PVOID)Buffer;
+    ULONG Length, Mask = 0;
+    HANDLE Key;
+
+    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    if (NT_SUCCESS(ZwOpenKey(&Key, KEY_READ, &ObjectAttributes)))
+    {
+        if (NT_SUCCESS(ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length)) &&
+            Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+        {
+            Mask = *(PULONG)Info->Data;
+        }
+        ZwClose(Key);
+    }
+    InterlockedExchange(&HalpDmaFaultMask, (LONG)Mask);
+}
+#define HalpDmaFault(Bit) ((HalpDmaFaultMask & (Bit)) != 0)
+
+static volatile LONG HalpDmaFlakyCount;
+
+static
+BOOLEAN
+HalpDmaGrowAllowed(VOID)
+{
+    if (HalpDmaFault(HAL_DMA_FAULT_GROW_FAILS))
+        return FALSE;
+    if (HalpDmaFault(HAL_DMA_FAULT_GROW_FLAKY))
+        return ((ULONG)InterlockedIncrement(&HalpDmaFlakyCount) % 4) == 0;
+    return TRUE;
+}
+#else
+#define HalpDmaReadFaultMask() ((void)0)
+#define HalpDmaFault(Bit) FALSE
+#define HalpDmaGrowAllowed() TRUE
+#endif
+
+static KDEFERRED_ROUTINE HalpGrowRetryDpc;
+static WORKER_THREAD_ROUTINE HalpGrowRetryWorker;
+
 /**
  * @name HalpGrowMapBuffers
  *
@@ -433,6 +502,11 @@ HalpDmaAllocateMasterAdapter(IN BOOLEAN ScatterGather)
     RtlSetAllBits(MasterAdapter->MapRegisters);
     MasterAdapter->NumberOfMapRegisters = 0;
     MasterAdapter->CommittedMapRegisters = 0;
+    KeInitializeTimer(&MasterAdapter->GrowRetryTimer);
+    KeInitializeDpc(&MasterAdapter->GrowRetryDpc, HalpGrowRetryDpc, MasterAdapter);
+    ExInitializeWorkItem(&MasterAdapter->GrowRetryWorkItem, HalpGrowRetryWorker, MasterAdapter);
+    MasterAdapter->GrowRetryDelayMs = HAL_GROW_RETRY_MIN_MS;
+    MasterAdapter->GrowRetryActive = FALSE;
     MasterAdapter->ScatterGather = ScatterGather;
     if (ScatterGather)
     {
@@ -734,6 +808,8 @@ HalGetAdapter(IN PDEVICE_DESCRIPTION DeviceDescription,
     /* Validate parameters in device description */
     if (DeviceDescription->Version > DEVICE_DESCRIPTION_VERSION2) return NULL;
 
+    HalpDmaReadFaultMask();
+
     /*
      * See if we're going to use ISA/EISA DMA adapter. These adapters are
      * special since they're reused.
@@ -826,6 +902,7 @@ HalGetAdapter(IN PDEVICE_DESCRIPTION DeviceDescription,
            need, so a lone request never waits for a grow that can fail */
         if (!(HalpSgMasterAdapter) ||
             ((HalpSgMasterAdapter->NumberOfMapRegisters < MapRegisters) &&
+             !HalpDmaFault(HAL_DMA_FAULT_NO_PREGROW) &&
              !HalpGrowMapBuffers(HalpSgMasterAdapter,
                                  (MapRegisters - HalpSgMasterAdapter->NumberOfMapRegisters) << PAGE_SHIFT)))
         {
@@ -1509,6 +1586,159 @@ HalReadDmaCounter(IN PADAPTER_OBJECT AdapterObject)
 }
 
 #ifndef _MINIHAL_
+static
+VOID
+HalpFreeMapRegisters(IN PADAPTER_OBJECT AdapterObject,
+                     IN PVOID MapRegisterBase,
+                     IN ULONG NumberOfMapRegisters,
+                     IN BOOLEAN FailStarved);
+
+VOID
+NTAPI
+HalpGrowMapBufferWorker(IN PVOID DeferredContext);
+
+/**
+ * @name HalpQueueGrowWorkItem
+ *
+ * Queues the work item that grows the master adapter's map buffers for a request that waits
+ * for map registers. The master adapter's SpinLock is held.
+ *
+ * @return FALSE when no work item could be allocated.
+ */
+static
+BOOLEAN
+HalpQueueGrowWorkItem(IN PADAPTER_OBJECT MasterAdapter,
+                      IN PADAPTER_OBJECT AdapterObject,
+                      IN ULONG NumberOfMapRegisters)
+{
+    PGROW_WORK_ITEM WorkItem;
+
+    if (HalpDmaFault(HAL_DMA_FAULT_NO_WORK_ITEM))
+        return FALSE;
+
+    WorkItem = ExAllocatePoolWithTag(NonPagedPool, sizeof(GROW_WORK_ITEM), TAG_DMA);
+    if (!WorkItem)
+        return FALSE;
+
+    ExInitializeWorkItem(&WorkItem->WorkQueueItem, HalpGrowMapBufferWorker, WorkItem);
+    WorkItem->AdapterObject = AdapterObject;
+    WorkItem->NumberOfMapRegisters = NumberOfMapRegisters;
+    MasterAdapter->GrowWorkItemsPending++;
+    ExQueueWorkItem(&WorkItem->WorkQueueItem, DelayedWorkQueue);
+    return TRUE;
+}
+
+/**
+ * @name HalpScheduleGrowRetry
+ *
+ * A request that waits for map registers is served when another one gives its registers back, or
+ * when the map buffers have grown. When nobody holds any map register, no grow is pending and a
+ * request is queued that does not fit, nothing would ever serve it: the grow that was to make room
+ * for it failed (no contiguous memory) or could not be started, and everything queued behind it
+ * would wait with it. The request cannot be failed (the callback of GetScatterGatherList has no way
+ * to report that), so the grow is tried again later, with a backoff from 10 ms to 1 s: the request is
+ * served once memory is back. At most one retry runs per master adapter.
+ *
+ * Any IRQL up to DISPATCH_LEVEL; no lock held.
+ *
+ * @param AdapterObject
+ *        Any adapter of the master adapter's.
+ */
+static
+VOID
+HalpScheduleGrowRetry(IN PADAPTER_OBJECT AdapterObject)
+{
+    PADAPTER_OBJECT MasterAdapter = AdapterObject->MasterAdapter;
+    LARGE_INTEGER DueTime;
+    BOOLEAN Arm = FALSE;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&MasterAdapter->SpinLock, &OldIrql);
+    if (!MasterAdapter->GrowRetryActive &&
+        MasterAdapter->CommittedMapRegisters == 0 &&
+        MasterAdapter->GrowWorkItemsPending == 0 &&
+        !IsListEmpty(&MasterAdapter->AdapterQueue))
+    {
+        MasterAdapter->GrowRetryActive = TRUE;
+        DueTime.QuadPart = -10000LL * MasterAdapter->GrowRetryDelayMs;
+        Arm = TRUE;
+    }
+    KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
+
+    if (Arm)
+        KeSetTimer(&MasterAdapter->GrowRetryTimer, DueTime, &MasterAdapter->GrowRetryDpc);
+}
+
+static
+VOID
+NTAPI
+HalpGrowRetryDpc(IN PKDPC Dpc,
+                 IN PVOID DeferredContext,
+                 IN PVOID SystemArgument1,
+                 IN PVOID SystemArgument2)
+{
+    PADAPTER_OBJECT MasterAdapter = DeferredContext;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    /* The work item is part of the master adapter: it needs no allocation that could fail */
+    ExQueueWorkItem(&MasterAdapter->GrowRetryWorkItem, DelayedWorkQueue);
+}
+
+static
+VOID
+NTAPI
+HalpGrowRetryWorker(IN PVOID Context)
+{
+    PADAPTER_OBJECT MasterAdapter = Context;
+    PADAPTER_OBJECT Waiter = NULL;
+    ULONG Needed = 0;
+    BOOLEAN Succeeded;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&MasterAdapter->SpinLock, &OldIrql);
+    if (!IsListEmpty(&MasterAdapter->AdapterQueue))
+    {
+        Waiter = CONTAINING_RECORD(MasterAdapter->AdapterQueue.Flink, struct _ADAPTER_OBJECT, AdapterQueue);
+        Needed = Waiter->NumberOfMapRegisters;
+    }
+    else
+    {
+        MasterAdapter->GrowRetryActive = FALSE;
+        MasterAdapter->GrowRetryDelayMs = HAL_GROW_RETRY_MIN_MS;
+    }
+    KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
+
+    if (!Waiter)
+        return;
+
+    KeWaitForSingleObject(&HalpDmaLock, Executive, KernelMode, FALSE, NULL);
+    Succeeded = HalpDmaGrowAllowed() && HalpGrowMapBuffers(MasterAdapter, Needed << PAGE_SHIFT);
+    KeSetEvent(&HalpDmaLock, 0, 0);
+
+    OldIrql = KfRaiseIrql(DISPATCH_LEVEL);
+    KeAcquireSpinLockAtDpcLevel(&MasterAdapter->SpinLock);
+    MasterAdapter->GrowRetryActive = FALSE;
+    if (Succeeded)
+    {
+        MasterAdapter->GrowRetryDelayMs = HAL_GROW_RETRY_MIN_MS;
+    }
+    else
+    {
+        MasterAdapter->GrowRetryDelayMs = min(MasterAdapter->GrowRetryDelayMs * 2, HAL_GROW_RETRY_MAX_MS);
+        DPRINT1("Growing the map buffers by %lu map registers failed again, next try in %lu ms\n",
+                Needed, MasterAdapter->GrowRetryDelayMs);
+    }
+    KeReleaseSpinLockFromDpcLevel(&MasterAdapter->SpinLock);
+
+    /* Serve what fits now, and if the head still does not, try again later */
+    HalpFreeMapRegisters(Waiter, (PVOID)2, 0, FALSE);
+    HalpScheduleGrowRetry(Waiter);
+    KfLowerIrql(OldIrql);
+}
+
 /**
  * @name HalpGrowMapBufferWorker
  *
@@ -1520,6 +1750,8 @@ NTAPI
 HalpGrowMapBufferWorker(IN PVOID DeferredContext)
 {
     PGROW_WORK_ITEM WorkItem = (PGROW_WORK_ITEM)DeferredContext;
+    PADAPTER_OBJECT AdapterObject = WorkItem->AdapterObject;
+    PADAPTER_OBJECT MasterAdapter = AdapterObject->MasterAdapter;
     KIRQL OldIrql;
     BOOLEAN Succeeded;
 
@@ -1530,9 +1762,16 @@ HalpGrowMapBufferWorker(IN PVOID DeferredContext)
      * registers than needed as an optimization.
      */
     KeWaitForSingleObject(&HalpDmaLock, Executive, KernelMode, FALSE, NULL);
-    Succeeded = HalpGrowMapBuffers(WorkItem->AdapterObject->MasterAdapter,
-                                   WorkItem->NumberOfMapRegisters << PAGE_SHIFT);
+    Succeeded = HalpDmaGrowAllowed() &&
+                HalpGrowMapBuffers(MasterAdapter, WorkItem->NumberOfMapRegisters << PAGE_SHIFT);
     KeSetEvent(&HalpDmaLock, 0, 0);
+
+    OldIrql = KfRaiseIrql(DISPATCH_LEVEL);
+
+    KeAcquireSpinLockAtDpcLevel(&MasterAdapter->SpinLock);
+    ASSERT(MasterAdapter->GrowWorkItemsPending != 0);
+    MasterAdapter->GrowWorkItemsPending--;
+    KeReleaseSpinLockFromDpcLevel(&MasterAdapter->SpinLock);
 
     if (Succeeded)
     {
@@ -1542,10 +1781,17 @@ HalpGrowMapBufferWorker(IN PVOID DeferredContext)
          * any registers. Note that we use the magic (PVOID)2 map register
          * base to bypass the parameter checking.
          */
-        OldIrql = KfRaiseIrql(DISPATCH_LEVEL);
-        IoFreeMapRegisters(WorkItem->AdapterObject, (PVOID)2, 0);
-        KfLowerIrql(OldIrql);
+        IoFreeMapRegisters(AdapterObject, (PVOID)2, 0);
     }
+    else
+    {
+        DPRINT1("Growing the map buffers by %lu map registers failed\n", WorkItem->NumberOfMapRegisters);
+        HalpFreeMapRegisters(AdapterObject, (PVOID)2, 0, FALSE);
+    }
+
+    /* The grow may have been the last hope of a request: if it was not enough, try again later */
+    HalpScheduleGrowRetry(AdapterObject);
+    KfLowerIrql(OldIrql);
 
     ExFreePool(WorkItem);
 }
@@ -1582,7 +1828,6 @@ HalAllocateAdapterChannel(IN PADAPTER_OBJECT AdapterObject,
                           IN PDRIVER_CONTROL ExecutionRoutine)
 {
     PADAPTER_OBJECT MasterAdapter;
-    PGROW_WORK_ITEM WorkItem;
     ULONG Index = MAXULONG;
     ULONG Result;
     KIRQL OldIrql;
@@ -1643,6 +1888,7 @@ HalAllocateAdapterChannel(IN PADAPTER_OBJECT AdapterObject,
             Index = RtlFindClearBitsAndSet(MasterAdapter->MapRegisters, NumberOfMapRegisters, 0);
             if (Index != MAXULONG)
             {
+                MasterAdapter->CommittedMapRegisters += NumberOfMapRegisters;
                 AdapterObject->MapRegisterBase = MasterAdapter->MapRegisterBase + Index;
                 if (!AdapterObject->ScatterGather)
                 {
@@ -1653,21 +1899,15 @@ HalAllocateAdapterChannel(IN PADAPTER_OBJECT AdapterObject,
 
         if (Index == MAXULONG)
         {
+            BOOLEAN Queued;
+
             InsertTailList(&MasterAdapter->AdapterQueue, &AdapterObject->AdapterQueue);
-
-            WorkItem = ExAllocatePoolWithTag(NonPagedPool,
-                                             sizeof(GROW_WORK_ITEM),
-                                             TAG_DMA);
-            if (WorkItem)
-            {
-                ExInitializeWorkItem(&WorkItem->WorkQueueItem, HalpGrowMapBufferWorker, WorkItem);
-                WorkItem->AdapterObject = AdapterObject;
-                WorkItem->NumberOfMapRegisters = NumberOfMapRegisters;
-
-                ExQueueWorkItem(&WorkItem->WorkQueueItem, DelayedWorkQueue);
-            }
-
+            Queued = HalpQueueGrowWorkItem(MasterAdapter, AdapterObject, NumberOfMapRegisters);
             KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
+
+            /* Nobody to grow the map buffers: is anybody going to free registers? */
+            if (!Queued)
+                HalpScheduleGrowRetry(AdapterObject);
 
             return STATUS_SUCCESS;
         }
@@ -1787,6 +2027,7 @@ IoFreeAdapterChannel(IN PADAPTER_OBJECT AdapterObject)
                                                0);
                 if (Index != MAXULONG)
                 {
+                    MasterAdapter->CommittedMapRegisters += WaitContextBlock->NumberOfMapRegisters;
                     AdapterObject->MapRegisterBase = MasterAdapter->MapRegisterBase + Index;
                     if (!AdapterObject->ScatterGather)
                     {
@@ -1797,8 +2038,17 @@ IoFreeAdapterChannel(IN PADAPTER_OBJECT AdapterObject)
 
             if (Index == MAXULONG)
             {
+                BOOLEAN Queued;
+
                 InsertTailList(&MasterAdapter->AdapterQueue, &AdapterObject->AdapterQueue);
+                /* Same as HalAllocateAdapterChannel: the map buffers may have to grow for it */
+                Queued = HalpQueueGrowWorkItem(MasterAdapter,
+                                               AdapterObject,
+                                               WaitContextBlock->NumberOfMapRegisters);
                 KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
+
+                if (!Queued)
+                    HalpScheduleGrowRetry(AdapterObject);
                 break;
             }
 
@@ -1858,11 +2108,28 @@ IoFreeMapRegisters(IN PADAPTER_OBJECT AdapterObject,
                    IN PVOID MapRegisterBase,
                    IN ULONG NumberOfMapRegisters)
 {
+    HalpFreeMapRegisters(AdapterObject, MapRegisterBase, NumberOfMapRegisters, TRUE);
+}
+
+/**
+ * @name HalpFreeMapRegisters
+ *
+ * IoFreeMapRegisters. FailStarved: when this leaves the queue of the master adapter with
+ * requests that nothing can serve, schedule the retry of the grow (HalpScheduleGrowRetry).
+ */
+static
+VOID
+HalpFreeMapRegisters(IN PADAPTER_OBJECT AdapterObject,
+                     IN PVOID MapRegisterBase,
+                     IN ULONG NumberOfMapRegisters,
+                     IN BOOLEAN FailStarved)
+{
     PADAPTER_OBJECT MasterAdapter = AdapterObject->MasterAdapter;
     PLIST_ENTRY ListEntry;
     KIRQL OldIrql;
     ULONG Index;
     ULONG Result;
+    BOOLEAN Starved;
 
     ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
 
@@ -1878,6 +2145,8 @@ IoFreeMapRegisters(IN PADAPTER_OBJECT AdapterObject,
         RtlClearBits(MasterAdapter->MapRegisters,
                      (ULONG)(RealMapRegisterBase - MasterAdapter->MapRegisterBase),
                      NumberOfMapRegisters);
+        ASSERT(MasterAdapter->CommittedMapRegisters >= NumberOfMapRegisters);
+        MasterAdapter->CommittedMapRegisters -= NumberOfMapRegisters;
     }
 
     /*
@@ -1898,6 +2167,7 @@ IoFreeMapRegisters(IN PADAPTER_OBJECT AdapterObject,
             break;
         }
 
+        MasterAdapter->CommittedMapRegisters += AdapterObject->NumberOfMapRegisters;
         KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
 
         AdapterObject->MapRegisterBase = MasterAdapter->MapRegisterBase + Index;
@@ -1925,6 +2195,7 @@ IoFreeMapRegisters(IN PADAPTER_OBJECT AdapterObject,
                                  (ULONG)(AdapterObject->MapRegisterBase -
                                          MasterAdapter->MapRegisterBase),
                                  AdapterObject->NumberOfMapRegisters);
+                    MasterAdapter->CommittedMapRegisters -= AdapterObject->NumberOfMapRegisters;
                     KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
                 }
 
@@ -1938,7 +2209,15 @@ IoFreeMapRegisters(IN PADAPTER_OBJECT AdapterObject,
         KeAcquireSpinLock(&MasterAdapter->SpinLock, &OldIrql);
     }
 
+    Starved = FailStarved &&
+              MasterAdapter->CommittedMapRegisters == 0 &&
+              MasterAdapter->GrowWorkItemsPending == 0 &&
+              !IsListEmpty(&MasterAdapter->AdapterQueue);
     KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
+
+    /* The last registers are back and the head of the queue still does not fit */
+    if (Starved)
+        HalpScheduleGrowRetry(AdapterObject);
 }
 
 /**

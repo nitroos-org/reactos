@@ -2983,6 +2983,11 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         case ProcessHandleCount: case 58 /* ProcessHandleTable, Windows 8.1 */:
             /* A ULONG, and the handle values as a ULONG array */
             return NtQueryInformationProcess(H(0), a[1], P(2), a[3], P(4));
+        case 52 /* ProcessMitigationPolicy: { ULONG Policy; ULONG Flags }, the same in both widths. The sandbox of a
+                 * 32-bit Firefox asks it for the Win32k lockdown of its own process (GetProcessMitigationPolicy,
+                 * ProcessSystemCallDisablePolicy); refused, the process thinks it is not locked down and creates the
+                 * window that the lockdown interception then refuses */:
+            return NtQueryInformationProcess(H(0), a[1], P(2), a[3], P(4));
         case ProcessIoCounters: case ProcessTimes: case ProcessVmCounters: case ProcessDeviceMap:
         case ProcessImageFileName: case ProcessQuotaLimits:
             return QueryProcess32(H(0), a[1], a[2], a[3], a[4], Cleanup);
@@ -3000,6 +3005,9 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         switch (a[1])
         {
         case ProcessDefaultHardErrorMode: case ProcessExecuteFlags: case ProcessPriorityClass:
+            return NtSetInformationProcess(H(0), a[1], P(2), a[3]);
+        case 52 /* ProcessMitigationPolicy: the Win32k lockdown of the process, set by a 32-bit CreateProcess for
+                 * its child and by SetProcessMitigationPolicy; the request is 8 bytes in both widths */:
             return NtSetInformationProcess(H(0), a[1], P(2), a[3]);
         case ProcessAccessToken:
         {

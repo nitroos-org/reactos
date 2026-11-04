@@ -7,6 +7,7 @@ list(APPEND SOURCE
     addresschange.c
     asyncselect.c
     backlog.c
+    bindconflict.c
     bind.c
     broadcast.c
     close.c
@@ -44,7 +45,6 @@ list(APPEND SOURCE
     OwnHostname.c
     ReverseLookup.c
     rcvbuf.c
-    rcvwindow.c
     recv.c
     WSARecvMsg.c
     WSASendMsg.c

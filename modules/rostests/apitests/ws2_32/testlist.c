@@ -11,6 +11,7 @@ extern void func_backlog_listen(void);
 extern void func_backlog_open(void);
 extern void func_backlog_replace(void);
 extern void func_bind(void);
+extern void func_bindconflict(void);
 extern void func_broadcast(void);
 extern void func_close(void);
 extern void func_closerace(void);
@@ -49,7 +50,6 @@ extern void func_OwnHostname(void);
 extern void func_ReverseLookup(void);
 extern void func_open_osfhandle(void);
 extern void func_rcvbuf(void);
-extern void func_rcvwindow(void);
 extern void func_recv(void);
 extern void func_send(void);
 extern void func_selecttimeval(void);
@@ -88,6 +88,7 @@ const struct test winetest_testlist[] =
     { "backlog_open", func_backlog_open },
     { "backlog_replace", func_backlog_replace },
     { "bind", func_bind },
+    { "bindconflict", func_bindconflict },
     { "broadcast", func_broadcast },
     { "close", func_close },
     { "closerace", func_closerace },
@@ -126,7 +127,6 @@ const struct test winetest_testlist[] =
     { "OwnHostname", func_OwnHostname },
     { "ReverseLookup", func_ReverseLookup },
     { "rcvbuf", func_rcvbuf },
-    { "rcvwindow", func_rcvwindow },
     { "recv", func_recv },
     { "send", func_send },
     { "selecttimeval", func_selecttimeval },

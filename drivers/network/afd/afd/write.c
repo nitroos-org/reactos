@@ -841,18 +841,6 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (SendLength != 0 && AfdSendQueueHasRemainder(FCB))
         SpaceAvail = 0;
 
-    /* A send that cannot wait (AFD_IMMEDIATE, what msafd asks for on a non-blocking socket; no overlapped
-     * request) is not queued behind a send the transport has not taken yet, which happens once the peer's
-     * receive window is closed: its caller waits for the request to complete and nothing would tell it to try
-     * later. It fails as WSAEWOULDBLOCK and the write event comes when the transport has taken the earlier send. */
-    if (SendLength != 0 && FCB->SendIrp.InFlightRequest &&
-        (SendReq->AfdFlags & AFD_IMMEDIATE) && !(SendReq->AfdFlags & AFD_OVERLAPPED))
-    {
-        FCB->PollState &= ~AFD_EVENT_SEND;
-        UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
-        return UnlockAndMaybeComplete( FCB, STATUS_CANT_WAIT, Irp, 0 );
-    }
-
     /* Make sure we've got the space */
     if (SendLength > SpaceAvail)
     {
@@ -923,26 +911,6 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     else
     {
         FCB->PollState &= ~AFD_EVENT_SEND;
-    }
-
-    /* A send that cannot wait completes with what is in the window now. The transport takes the bytes when it
-     * can (a closed peer window makes that long): AfdSendCompleted counts bytes that no request waits for */
-    if (!Whole && (SendReq->AfdFlags & AFD_IMMEDIATE) && !(SendReq->AfdFlags & AFD_OVERLAPPED))
-    {
-        UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
-
-        if (!FCB->SendIrp.InFlightRequest)
-        {
-            TdiSend(&FCB->SendIrp.InFlightRequest,
-                    FCB->Connection.Object,
-                    0,
-                    FCB->Send.Window,
-                    FCB->Send.BytesUsed,
-                    SendComplete,
-                    FCB);
-        }
-
-        return UnlockAndMaybeComplete( FCB, STATUS_SUCCESS, Irp, TotalBytesCopied );
     }
 
     /* We use the IRP tail for some temporary storage here */

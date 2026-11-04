@@ -322,9 +322,6 @@ MakeSocketIntoConnection(PAFD_FCB FCB, BOOL Receive) {
     FCB->SharedData.State = SOCKET_STATE_CONNECTED;
     FCB->SharedData.ConnectTime = 0; // Not used
 
-    /* SO_RCVBUF set before the connection existed (or inherited from the listener) */
-    AfdApplyReceiveHint(FCB);
-
     if (Receive)
     {
         Status = TdiReceive( &FCB->ReceiveIrp.InFlightRequest,

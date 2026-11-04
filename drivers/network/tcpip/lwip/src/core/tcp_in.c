@@ -1970,7 +1970,7 @@ tcp_parseopt(struct tcp_pcb *pcb)
             /* window scaling is enabled, we can use the full receive window */
             LWIP_ASSERT("window not at default value", pcb->rcv_wnd == TCPWND_MIN16(TCP_WND));
             LWIP_ASSERT("window not at default value", pcb->rcv_ann_wnd == TCPWND_MIN16(TCP_WND));
-            pcb->rcv_wnd = pcb->rcv_ann_wnd = pcb->rcv_wnd_max;
+            pcb->rcv_wnd = pcb->rcv_ann_wnd = TCP_WND;
           }
           break;
 #endif /* LWIP_WND_SCALE */

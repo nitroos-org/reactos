@@ -35,6 +35,8 @@ ULONG CcLazyWriteIos = 0;
  * - Number of worker threads
  */
 LAZY_WRITER LazyWriter;
+/* A write-behind run is queued or running: a scan does not queue another (set by CcLazyWriteScan, cleared by CcWriteBehind) */
+static volatile LONG CcWriteBehindPending = 0;
 NPAGED_LOOKASIDE_LIST CcTwilightLookasideList;
 LIST_ENTRY CcExpressWorkQueue;
 LIST_ENTRY CcRegularWorkQueue;
@@ -113,23 +115,66 @@ CcScanDpc(
     CcPostWorkQueue(WorkItem, &CcRegularWorkQueue);
 }
 
+/*
+ * Dirty pages the lazy writer brings the cache down to when it is over this: a quarter of the threshold
+ * at which writers are throttled, where Mm starts pacing page requests (MmRequestPageMemoryConsumer).
+ */
+static
+ULONG
+CcpDirtyPageTarget(VOID)
+{
+    return CcDirtyPageThreshold / 4;
+}
+
 VOID
 CcWriteBehind(VOID)
 {
-    ULONG Target, Count;
+    ULONG Target, Count, Chunk, Passes;
 
+    /*
+     * One eighth of the dirty pages per run, plus everything above the dirty page target: closed files
+     * leave their dirty data to the lazy writer, and with writers waiting for it (CcCanIWrite throttles
+     * at CcDirtyPageThreshold, Mm paces page requests from a quarter of it) one eighth a second would
+     * make them wait for the scan timer.  The work goes in chunks, and the writers that waited are let
+     * go after each one; while the cache stays above the target, or many closed files wait for their
+     * data to be written (CcRosDeferredBacklog), the run goes on.
+     */
     Target = CcTotalDirtyPages / 8;
-    if (Target != 0)
+    if (Target == 0)
+        Target = CcTotalDirtyPages;
+    if (CcTotalDirtyPages > CcpDirtyPageTarget())
+        Target += CcTotalDirtyPages - CcpDirtyPageTarget();
+
+    for (Passes = 0; Target != 0 && Passes < 256; Passes++)
     {
+        Chunk = min(Target, 256);
+
         /* Flush! */
-        DPRINT("Lazy writer starting (%d)\n", Target);
-        CcRosFlushDirtyPages(Target, &Count, FALSE, TRUE);
+        DPRINT("Lazy writer starting (%d)\n", Chunk);
+        CcRosFlushDirtyPages(Chunk, &Count, FALSE, TRUE);
 
         /* And update stats */
         CcLazyWritePages += Count;
         ++CcLazyWriteIos;
         DPRINT("Lazy writer done (%d)\n", Count);
+
+        if (!IsListEmpty(&CcDeferredWrites))
+            CcPostDeferredWrites();
+
+        /* Nothing could be written (all busy or failing): the next scan tries again */
+        if (Count == 0)
+            break;
+
+        Target = (Target > Count) ? Target - Count : 0;
+        if (Target == 0 && CcTotalDirtyPages > CcpDirtyPageTarget())
+            Target = CcTotalDirtyPages - CcpDirtyPageTarget();
+        /* Many closed files waiting (each holds its map and the file system's structures): go on */
+        if (Target == 0 && CcRosDeferredBacklog())
+            Target = 256;
     }
+
+    /* A scan may queue the next run */
+    InterlockedExchange(&CcWriteBehindPending, 0);
 
     /* Make sure we're not throttling writes after this */
     while (MmAvailablePages < MmThrottleTop)
@@ -166,9 +211,17 @@ CcLazyWriteScan(VOID)
     }
     KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
 
-    /* Our target is one-eighth of the dirty pages */
+    /* Our target is one-eighth of the dirty pages (all of them when there are few) */
     Target = CcTotalDirtyPages / 8;
-    if (Target != 0)
+    if (Target == 0)
+        Target = CcTotalDirtyPages;
+    /*
+     * Dirty pages of temporary files and of files without write-behind are no work: the run skips them.
+     * And a run takes longer than a scan period when the disk is slow: a scan queues the next one only
+     * when the last has ended, they would otherwise pile up (and all rescan the same maps).
+     */
+    if (Target != 0 && CcRosHasLazyWritableData() &&
+        InterlockedCompareExchange(&CcWriteBehindPending, 1, 0) == 0)
     {
         /* There is stuff to flush, schedule a write-behind operation */
 
@@ -178,6 +231,10 @@ CcLazyWriteScan(VOID)
         {
             WorkItem->Function = WriteBehind;
             CcPostWorkQueue(WorkItem, &CcRegularWorkQueue);
+        }
+        else
+        {
+            InterlockedExchange(&CcWriteBehindPending, 0);
         }
     }
 
@@ -200,9 +257,21 @@ CcLazyWriteScan(VOID)
     }
     else
     {
-        /* We're no longer active */
         OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
-        LazyWriter.ScanActive = FALSE;
+        if (CcTotalDirtyPages != 0 && CcRosHasLazyWritableDataLocked())
+        {
+            /*
+             * Dirty data is left (a run writes an eighth of it): scan again in a second, as long as
+             * there is any the lazy writer writes.  Closed files leave their data to the lazy writer,
+             * which must get it to the disk without waiting for more writes to come and schedule it.
+             */
+            CcScheduleLazyWriteScan(FALSE);
+        }
+        else
+        {
+            /* We're no longer active */
+            LazyWriter.ScanActive = FALSE;
+        }
         KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
     }
 }

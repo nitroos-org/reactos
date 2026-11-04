@@ -7,6 +7,7 @@ list(APPEND SOURCE
     AddFontResourceEx.c
     BeginPath.c
     BitBltPointer.c
+    ClipExtremeCoords.c
     CombineRgn.c
     CombineTransform.c
     CreateBitmap.c
@@ -33,6 +34,7 @@ list(APPEND SOURCE
     ExcludeClipRect.c
     ExtCreatePen.c
     ExtCreateRegion.c
+    FontRequestState.c
     FrameRgn.c
     GdiConvertBitmap.c
     GdiConvertBrush.c

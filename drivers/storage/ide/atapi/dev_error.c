@@ -575,7 +575,7 @@ AtaDeviceGenericRecovery(
     _In_ PATAPORT_DEVICE_EXTENSION DevExt)
 {
     PATA_DEVICE_REQUEST Request = PortData->Worker.FailedRequest;
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_SUCCESS;
 
     switch (Request->SrbStatus)
     {

@@ -121,8 +121,6 @@
 /* ReactOS specific */
 #define TCP_SOCKET_KEEPALIVE 2
 #define TCP_SOCKET_KEEPALIVEVALS 3
-/* The largest receive window of the connection in bytes (SO_RCVBUF; a ULONG) */
-#define TCP_SOCKET_WINDOW 4
 
 typedef struct IFEntry
 {

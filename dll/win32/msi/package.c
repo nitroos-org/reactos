@@ -2792,7 +2792,12 @@ UINT WINAPI MsiGetPropertyW(MSIHANDLE hinst, const WCHAR *name, WCHAR *buf, DWOR
         return r;
     }
 
-    row = get_property_row(package->db, name);
+    /* a deferred, commit or rollback custom action only sees these properties */
+    if (package->scheduled_action_running &&
+        wcscmp( name, L"CustomActionData" ) && wcscmp( name, L"ProductCode" ) && wcscmp( name, L"UserSID" ))
+        row = NULL;
+    else
+        row = get_property_row(package->db, name);
     if (row)
         value = msi_record_get_string(row, 1, &len);
 

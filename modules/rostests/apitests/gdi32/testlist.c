@@ -7,6 +7,7 @@ extern void func_AddFontResource(void);
 extern void func_AddFontResourceEx(void);
 extern void func_BeginPath(void);
 extern void func_BitBltPointer(void);
+extern void func_ClipExtremeCoords(void);
 extern void func_CombineRgn(void);
 extern void func_CombineTransform(void);
 extern void func_CreateBitmap(void);
@@ -32,6 +33,7 @@ extern void func_EnumFontFamiliesArial(void);
 extern void func_ExcludeClipRect(void);
 extern void func_ExtCreatePen(void);
 extern void func_ExtCreateRegion(void);
+extern void func_FontRequestState(void);
 extern void func_FrameRgn(void);
 extern void func_GdiConvertBitmap(void);
 extern void func_GdiConvertBrush(void);
@@ -104,6 +106,7 @@ const struct test winetest_testlist[] =
     { "AddFontResourceEx", func_AddFontResourceEx },
     { "BeginPath", func_BeginPath },
     { "BitBltPointer", func_BitBltPointer },
+    { "ClipExtremeCoords", func_ClipExtremeCoords },
     { "CombineRgn", func_CombineRgn },
     { "CombineTransform", func_CombineTransform },
     { "CreateBitmap", func_CreateBitmap },
@@ -129,6 +132,7 @@ const struct test winetest_testlist[] =
     { "ExcludeClipRect", func_ExcludeClipRect },
     { "ExtCreatePen", func_ExtCreatePen },
     { "ExtCreateRegion", func_ExtCreateRegion },
+    { "FontRequestState", func_FontRequestState },
     { "FrameRgn", func_FrameRgn },
     { "GdiConvertBitmap", func_GdiConvertBitmap },
     { "GdiConvertBrush", func_GdiConvertBrush },
