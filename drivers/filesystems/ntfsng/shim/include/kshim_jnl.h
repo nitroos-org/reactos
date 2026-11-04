@@ -20,6 +20,7 @@
 enum { KJ_ST_ACTIVE = 1, KJ_ST_COMMITTED = 2, KJ_ST_UNJOURNALED = 3, KJ_ST_ERRORS = 4 };
 /* Header flags: the core reported errors in this session (kept by every later header, COMMITTED included). */
 #define KJ_FL_ERRORS 1
+#define KJ_FL_KEEP 2	/* the volume was marked dirty on request (fsutil dirty set, a failed check): the flag is real, not the mounted marker */
 
 struct kj_hdr {
 	char magic[8];
@@ -66,6 +67,7 @@ int kj_page_dev(const struct kj_ext *ext, int next, u64 page, u64 *dev);
 int kshim_jnl_activate(struct block_device *b, const struct kj_ext *ext, int next, u64 lf_pages,
 		u64 serial, u64 seq, u64 vol_rec_off);
 int kshim_jnl_retire(struct block_device *b);
+void kshim_jnl_set_keep(struct block_device *b, int keep);
 int kshim_jnl_retire_pending(struct block_device *b);
 int kshim_jnl_failed(struct block_device *b);	/* a write could not be protected: all writes refused */
 /* The disk may hold metadata no commit covers: no journal, or it wrote in place or stopped. */
