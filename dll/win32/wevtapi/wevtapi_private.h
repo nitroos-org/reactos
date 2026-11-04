@@ -98,6 +98,16 @@ void evtx_rewind(struct evtx_file *file);
 DWORD evtx_next(struct evtx_file *file, struct evtx_event **event);
 void evtx_event_free(struct evtx_event *event);
 
+/* evtxw.c: .evtx files that are written. Each XML of an event becomes the next record of the file. */
+
+struct evtx_writer;
+
+/* ERROR_ALREADY_EXISTS for a file that is there, unless it is to be overwritten */
+DWORD evtx_create(const WCHAR *path, BOOL overwrite, struct evtx_writer **writer);
+DWORD evtx_add_xml(struct evtx_writer *writer, ULONGLONG record_id, ULONGLONG time, const WCHAR *xml);
+/* Ends the file; a file that is not kept is deleted. Returns the error of writing the end. */
+DWORD evtx_finish(struct evtx_writer *writer, BOOL keep);
+
 /* classic.c: records, sources and the text of messages */
 
 /* The fields of one record of a classic log, seen as the system section of an event */
@@ -136,6 +146,10 @@ struct classic_pub
     WCHAR *parameter_file;
     WCHAR **logs;                   /* the logs that register it */
     DWORD log_count;
+    WCHAR *resource_file;           /* of a manifest publisher: the raw value, with the metadata resource in it */
+    GUID guid;
+    BOOL has_guid;
+    struct manifest *manifest;      /* read when the publisher is opened, NULL for a classic source */
 };
 
 struct classic_pub *classic_pub_open(const WCHAR *name);
@@ -169,11 +183,21 @@ DWORD classic_format(const struct classic_pub *pub, const struct classic_event *
 /* The properties of publishers, of the elements of their arrays, and of events */
 DWORD classic_pub_property(const struct classic_pub *pub, DWORD id, DWORD size, void *buffer, DWORD *used);
 DWORD classic_array_property(const WCHAR *item, DWORD index, DWORD id, DWORD size, void *buffer, DWORD *used);
+/* The kinds of arrays of a manifest publisher */
+#define MAN_LEVELS   1
+#define MAN_TASKS    2
+#define MAN_OPCODES  3
+#define MAN_KEYWORDS 4
+DWORD classic_manifest_array_size(const struct manifest *m, DWORD kind);
+DWORD classic_manifest_array_property(const struct manifest *m, DWORD kind, DWORD index, DWORD id, DWORD size, void *buffer, DWORD *used);
+DWORD classic_manifest_channel_property(const struct manifest *m, const WCHAR *name, DWORD index, DWORD id, DWORD size, void *buffer, DWORD *used);
+DWORD classic_manifest_event_property(const struct manifest *m, DWORD index, DWORD id, DWORD size, void *buffer, DWORD *used);
 DWORD classic_event_info(const struct classic_event *event, DWORD id, DWORD size, void *buffer, DWORD *used);
 
 /* The properties of the channels and logs that the registry describes */
 DWORD classic_channel_property(const WCHAR *channel, DWORD id, DWORD size, void *buffer, DWORD *used);
 DWORD classic_log_property(const WCHAR *channel, DWORD id, DWORD size, void *buffer, DWORD *used);
+DWORD classic_file_log_property(const WCHAR *path, DWORD id, DWORD size, void *buffer, DWORD *used);
 
 /* A reader of the records of one or more logs, with the filters of a query */
 struct classic_query;
@@ -203,5 +227,85 @@ DWORD classic_query_names(const struct classic_query *query, DWORD size, void *b
 DWORD classic_query_statuses(const struct classic_query *query, DWORD size, void *buffer, DWORD *used);
 /* Starts again from the first event, and skips the given number of events */
 DWORD classic_query_rewind(struct classic_query *query, ULONGLONG skip);
+/* Moves to a position: origin is 1 (from the first event), 2 (last), 3 (current) or 4 (the event of a bookmark) */
+DWORD classic_query_seek(struct classic_query *query, DWORD origin, LONGLONG position, const WCHAR *mark_channel,
+                         ULONGLONG mark_record);
+
+/* Subscriptions: a query that reads what the logs get later */
+#define CLASSIC_FOLLOW_FUTURE   1
+#define CLASSIC_FOLLOW_OLDEST   2
+#define CLASSIC_FOLLOW_BOOKMARK 3
+struct classic_mark
+{
+    const WCHAR *channel;
+    ULONGLONG record_id;
+};
+DWORD classic_query_follow(struct classic_query *query, DWORD origin, const struct classic_mark *marks, DWORD mark_count);
+BOOL classic_query_poll(struct classic_query *query);
+
+/* manifest.c: the metadata of a publisher that an event manifest describes (the WEVT_TEMPLATE resource) */
+
+struct man_named
+{
+    ULONGLONG value;
+    DWORD message;                  /* of the message file, 0xffffffff for none */
+    WCHAR *name;
+};
+
+struct man_task
+{
+    struct man_named named;
+    GUID guid;
+};
+
+struct man_channel
+{
+    DWORD id, flags, message;
+    WCHAR *name;
+};
+
+struct man_event
+{
+    WORD id, task;
+    BYTE version, channel, level, opcode;
+    ULONGLONG keywords;
+    DWORD message;
+    DWORD template_offset;          /* in the resource; 0xffffffff for an event with no data */
+};
+
+struct man_field
+{
+    WCHAR *name;
+    BYTE in_type, out_type;
+};
+
+struct man_template
+{
+    DWORD offset;
+    DWORD field_count;
+    struct man_field *fields;
+};
+
+struct manifest
+{
+    LONG refs;
+    GUID guid;
+    DWORD message;
+    struct man_named *levels, *opcodes, *keywords;
+    struct man_task *tasks;
+    struct man_channel *channels;
+    struct man_event *events;
+    struct man_template *templates;
+    DWORD level_count, opcode_count, keyword_count, task_count, channel_count, event_count, template_count;
+};
+
+DWORD manifest_open(const WCHAR *file, const GUID *guid, struct manifest **man);
+struct manifest *manifest_ref(struct manifest *man);
+/* Gives up a reference; the last one frees the manifest */
+void manifest_free(struct manifest *man);
+/* The template of an event as XML text (heap), or NULL for an event that has no data */
+WCHAR *manifest_template_xml(const struct manifest *man, DWORD template_offset);
+const WCHAR *manifest_in_type_name(BYTE type);
+const WCHAR *manifest_out_type_name(BYTE type);
 
 #endif
