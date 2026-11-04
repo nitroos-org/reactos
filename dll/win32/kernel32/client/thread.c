@@ -55,22 +55,27 @@ BasepNotifyCsrOfThread(IN HANDLE ThreadHandle,
 DECLSPEC_NORETURN
 VOID
 WINAPI
-BaseThreadStartup(
+BasepThreadInitThunk(
+    _In_ DWORD Unknown,
     _In_ LPTHREAD_START_ROUTINE lpStartAddress,
     _In_ LPVOID lpParameter)
 {
     /* Attempt to call the Thread Start Address */
     _SEH2_TRY
     {
-        /* Legacy check which is still used today for Win32 threads */
-        if (NtCurrentTeb()->NtTib.Version == (30 << 8)) // OS/2 V3.0 ("Cruiser")
+        /*
+         * Legacy check which is still used today for Win32 threads. The first thread of a process
+         * (its parameter is the PEB) is registered by BaseDllInitialize when kernel32 connects to CSRSS:
+         * it enters here too now and must not register a second termination port.
+         */
+        if (NtCurrentTeb()->NtTib.Version == (30 << 8) && lpParameter != NtCurrentPeb()) // OS/2 V3.0 ("Cruiser")
         {
             /* This registers the termination port with CSRSS */
             if (!BaseRunningInServerProcess) CsrNewThread();
         }
 
         /* Get the exit code from the Thread Start */
-        ExitThread(lpStartAddress(lpParameter));
+        ExitThread(BasepCallThreadStart(lpStartAddress, lpParameter));
     }
     _SEH2_EXCEPT(UnhandledExceptionFilter(_SEH2_GetExceptionInformation()))
     {
@@ -94,6 +99,17 @@ BaseThreadStartup(
 
     /* Both paths end the thread */
     UNREACHABLE;
+}
+
+DECLSPEC_NORETURN
+VOID
+WINAPI
+BaseThreadStartup(
+    _In_ LPTHREAD_START_ROUTINE lpStartAddress,
+    _In_ LPVOID lpParameter)
+{
+    /* Fibers and the console control thread enter here (not through RtlUserThreadStart) */
+    BasepThreadInitThunk(0, lpStartAddress, lpParameter);
 }
 
 VOID

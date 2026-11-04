@@ -36,6 +36,18 @@ _BaseProcessStartThunk@0:
     jmp _BaseProcessStartup@4
 
 
+/* DWORD WINAPI BasepCallThreadStart(lpStartAddress, lpParameter): lpStartAddress(lpParameter) whatever
+ * its convention (a thread routine pops its parameter, an image entry does not) */
+PUBLIC _BasepCallThreadStart@8
+_BasepCallThreadStart@8:
+    push ebp
+    mov ebp, esp
+    push dword ptr [ebp + 12]
+    call dword ptr [ebp + 8]
+    mov esp, ebp
+    pop ebp
+    ret 8
+
 END
 
 /* EOF */
