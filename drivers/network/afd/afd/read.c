@@ -17,6 +17,10 @@ static VOID RefillSocketBufferEx( PAFD_FCB FCB, BOOLEAN ForPending )
     /* Make sure nothing's in flight first */
     if (FCB->ReceiveIrp.InFlightRequest) return;
 
+    /* A receive that finished inside the call that started it waits for the loop of ReceiveComplete: it
+     * refills when it has been handled, and only one can be waiting */
+    if (FCB->RecvDeferred) return;
+
     /* Now ensure that receive is still allowed */
     if (FCB->TdiReceiveClosed) return;
 
@@ -416,9 +420,34 @@ NTSTATUS NTAPI ReceiveComplete
         return STATUS_INVALID_PARAMETER;
     }
 
-    HandleReceiveComplete( FCB, Irp->IoStatus.Status, Irp->IoStatus.Information );
+    if( FCB->RecvCompleteActive ) {
+        /* The transport finished a receive inside the receive that an outer call of this routine starts
+         * (it had data queued): leave it to that call, which loops. The refill of every 8K of a queue of
+         * megabytes would otherwise nest, one transport call and one completion each, until the kernel
+         * stack is gone */
+        FCB->RecvDeferred = TRUE;
+        FCB->RecvDeferredStatus = Irp->IoStatus.Status;
+        FCB->RecvDeferredBytes = Irp->IoStatus.Information;
+        SocketStateUnlock( FCB );
+        return STATUS_SUCCESS;
+    }
 
-    ReceiveActivity( FCB, NULL );
+    FCB->RecvCompleteActive = TRUE;
+    {
+        NTSTATUS Status = Irp->IoStatus.Status;
+        ULONG_PTR Bytes = Irp->IoStatus.Information;
+
+        for(;;) {
+            FCB->RecvDeferred = FALSE;
+            HandleReceiveComplete( FCB, Status, Bytes );
+            ReceiveActivity( FCB, NULL );
+            if( !FCB->RecvDeferred )
+                break;
+            Status = FCB->RecvDeferredStatus;
+            Bytes = FCB->RecvDeferredBytes;
+        }
+    }
+    FCB->RecvCompleteActive = FALSE;
 
     SocketStateUnlock( FCB );
 

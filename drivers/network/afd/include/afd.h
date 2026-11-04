@@ -227,6 +227,11 @@ typedef struct _AFD_FCB {
     BOOLEAN SendCompleteActive, SendDeferred;
     NTSTATUS SendDeferredStatus;
     ULONG_PTR SendDeferredBytes;
+    /* ReceiveComplete runs in a loop: a receive the transport finishes inside the call that starts it
+     * (data was queued already) is handed on, so the stack does not grow with the data queued */
+    BOOLEAN RecvCompleteActive, RecvDeferred;
+    NTSTATUS RecvDeferredStatus;
+    ULONG_PTR RecvDeferredBytes;
     PIRP AcceptIrp;
     AFD_DATA_WINDOW Send, Recv;
     /* SO_RCVBUF, the largest receive window the transport may offer (0: the transport default) */
