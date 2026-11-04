@@ -1199,11 +1199,12 @@ WSPSend(SOCKET Handle,
                                     NULL,
                                     0);
 
-    /* Wait for completion if not overlapped */
+    /* Wait for completion if not overlapped. A send waits for room in the buffers (a closed receive window
+     * of the peer fills them), for SO_SNDTIMEO at most */
     if (!lpOverlapped && Status == STATUS_PENDING)
     {
-        /* FIXME: Shouldn't wait infinitely for send... */
-        MsafdWaitForAlert(SockEvent);
+        MsafdWaitForRequest((HANDLE)Handle, SockEvent, IOSB,
+                            MsafdSocketTimeout(Socket, Socket->SharedData->SendTimeout));
         Status = IOSB->Status;
     }
 
@@ -1229,7 +1230,8 @@ WSPSend(SOCKET Handle,
                                                &SendInfo, sizeof(SendInfo), NULL, 0);
                 if (Status == STATUS_PENDING)
                 {
-                    MsafdWaitForAlert(SockEvent);
+                    MsafdWaitForRequest((HANDLE)Handle, SockEvent, IOSB,
+                                        MsafdSocketTimeout(Socket, Socket->SharedData->SendTimeout));
                     Status = IOSB->Status;
                 }
                 Total += (ULONG)IOSB->Information;
@@ -1447,11 +1449,12 @@ WSPSendTo(SOCKET Handle,
                                    NULL,
                                    0);
 
-    /* Wait for completion if not overlapped */
+    /* Wait for completion if not overlapped. A send waits for room in the buffers (a closed receive window
+     * of the peer fills them), for SO_SNDTIMEO at most */
     if (!lpOverlapped && Status == STATUS_PENDING)
     {
-        /* FIXME: Shouldn't wait infinitely for send... */
-        MsafdWaitForAlert(SockEvent);
+        MsafdWaitForRequest((HANDLE)Handle, SockEvent, IOSB,
+                            MsafdSocketTimeout(Socket, Socket->SharedData->SendTimeout));
         Status = IOSB->Status;
     }
 

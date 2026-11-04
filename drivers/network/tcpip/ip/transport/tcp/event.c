@@ -433,6 +433,9 @@ TCPRecvEventHandler(void *arg)
         CompleteBucket(Connection, Bucket, FALSE);
     }
     UnlockObject(Connection);
+
+    /* What the pending reads took makes room in the receive window */
+    LibTCPReturnReceiveCredit(Connection);
 }
 
 VOID

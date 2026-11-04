@@ -151,6 +151,7 @@ NTSTATUS LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PUCHA
             RecvLen -= ReadLength;
             RecvBuffer += ReadLength;
             (*Received) += ReadLength;
+            Connection->RecvCredit += ReadLength;
 
             if (qp != NULL)
             {
@@ -182,6 +183,160 @@ NTSTATUS LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PUCHA
     }
 
     UnlockObject(Connection);
+
+    return Status;
+}
+
+/* The receive window. It shrinks as segments arrive and grows again with tcp_recved(), which is called
+ * for the bytes the owner has read (RecvCredit, counted when the queue is read), not for those that
+ * arrived: an owner that stops reading closes the window and the sender stalls once its share of the
+ * buffer is full. The window of a connection is at most tcp_pcb.rcv_wnd_max, set from SO_RCVBUF. */
+
+/* A connection starts with 64K (TCP_WND_DEFAULT: all its SYN can announce, and a peer may use all of it), and
+ * a window is not taken back once announced: the smallest window is that, whatever SO_RCVBUF asks for */
+#define LIBTCP_MIN_WINDOW TCP_WND_DEFAULT
+
+/* The window of a connection whose owner set no SO_RCVBUF: 2 MB. Windows takes about that from a sender
+ * while the application does not read, although SO_RCVBUF reads 64K (measured on Windows 10 22H2) */
+#define LIBTCP_DEFAULT_WINDOW 0x200000
+
+/* Opens the receive window by Bytes (as far as the connection's largest window allows) and announces it
+ * once: tcp_recved() announces after each call, so a long run of calls is a burst of window updates. The core
+ * lock is held */
+static
+VOID
+LibTCPOpenWindow(PTCP_PCB pcb, ULONG Bytes)
+{
+    tcpwnd_size_t Room = TCP_WND_MAX(pcb) - pcb->rcv_wnd;
+
+    if (pcb->rcv_wnd > TCP_WND_MAX(pcb))
+        Room = 0;
+
+    pcb->rcv_wnd += (tcpwnd_size_t)min(Bytes, Room);
+    tcp_recved(pcb, 0);
+}
+
+/* The core lock is held */
+static
+VOID
+LibTCPReturnCreditLocked(PCONNECTION_ENDPOINT Connection)
+{
+    PTCP_PCB pcb;
+    ULONG Credit;
+
+    LockObject(Connection);
+    pcb = Connection->SocketContext;
+    Credit = Connection->RecvCredit;
+    Connection->RecvCredit = 0;
+    UnlockObject(Connection);
+
+    /* No PCB: the connection is over, nothing is announced any more */
+    if (!pcb || !Credit)
+        return;
+
+    LibTCPOpenWindow(pcb, Credit);
+}
+
+static
+void
+LibTCPReturnCreditCallback(void *arg)
+{
+    struct lwip_callback_msg *msg = arg;
+    PCONNECTION_ENDPOINT Connection = msg->Input.Socket.Arg;
+
+    LibTCPReturnCreditLocked(Connection);
+
+    DereferenceObject(Connection);
+    ExFreeToNPagedLookasideList(&MessageLookasideList, msg);
+}
+
+/* Gives lwIP the window of the bytes read from the queue. Called after the object lock is released,
+ * from any thread that reads the queue (on the tcpip thread the core lock is already held) */
+VOID
+LibTCPReturnReceiveCredit(PCONNECTION_ENDPOINT Connection)
+{
+    struct lwip_callback_msg *msg;
+
+    if (!Connection->RecvCredit)
+        return;
+
+    if (sys_tcpip_core_locked())
+    {
+        LibTCPReturnCreditLocked(Connection);
+    }
+    else if (KeGetCurrentIrql() <= APC_LEVEL)
+    {
+        LOCK_TCPIP_CORE();
+        LibTCPReturnCreditLocked(Connection);
+        UNLOCK_TCPIP_CORE();
+    }
+    else
+    {
+        /* Too high for the core lock: the tcpip thread does it */
+        msg = ExAllocateFromNPagedLookasideList(&MessageLookasideList);
+        if (!msg)
+            return; /* the credit stays and goes out with the next read */
+
+        ReferenceObject(Connection);
+        msg->Input.Socket.Arg = Connection;
+        if (tcpip_callback_with_block(LibTCPReturnCreditCallback, msg, 0) != ERR_OK)
+        {
+            DereferenceObject(Connection);
+            ExFreeToNPagedLookasideList(&MessageLookasideList, msg);
+        }
+    }
+}
+
+/* Sets the largest receive window of an established connection (SO_RCVBUF, 0 for the default); PASSIVE_LEVEL.
+ * A larger window is announced at once. A smaller one (a later SO_RCVBUF below an earlier one) cuts the window
+ * left now to it; what the peer sent inside the old window and is still on its way is then dropped and sent
+ * again */
+NTSTATUS
+LibTCPSetReceiveWindow(PCONNECTION_ENDPOINT Connection, ULONG Size)
+{
+    PTCP_PCB pcb;
+    tcpwnd_size_t Old, New;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    BOOLEAN Locked = sys_tcpip_core_locked();
+
+    if (KeGetCurrentIrql() > APC_LEVEL)
+        return STATUS_UNSUCCESSFUL;
+
+    if (Size == 0)
+        Size = LIBTCP_DEFAULT_WINDOW;
+    else if (Size < LIBTCP_MIN_WINDOW)
+        Size = LIBTCP_MIN_WINDOW;
+    if (Size > TCP_WND)
+        Size = TCP_WND;
+
+    if (!Locked)
+        LOCK_TCPIP_CORE();
+
+    LockObject(Connection);
+    pcb = Connection->SocketContext;
+    UnlockObject(Connection);
+
+    if (pcb && pcb->state != LISTEN)
+    {
+        /* What the peer can use: without window scaling the window stays below 64K whatever the limit */
+        Old = TCP_WND_MAX(pcb);
+        pcb->rcv_wnd_max = Size;
+        New = TCP_WND_MAX(pcb);
+
+        if (New > Old)
+        {
+            LibTCPOpenWindow(pcb, New - Old);
+        }
+        else if (New < Old && pcb->rcv_wnd > New)
+        {
+            pcb->rcv_wnd = New;
+        }
+
+        Status = STATUS_SUCCESS;
+    }
+
+    if (!Locked)
+        UNLOCK_TCPIP_CORE();
 
     return Status;
 }
@@ -240,16 +395,13 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
 
     if (p)
     {
-        /* A reader may consume and free the segment as soon as it is queued */
-        u16_t Length = p->tot_len;
-
         /* On lookaside exhaustion let lwIP keep the pbuf and retry later
          * instead of dereferencing a NULL queue entry */
         if (LibTCPEnqueuePacket(Connection, p) != ERR_OK)
             return ERR_MEM;
 
-        tcp_recved(pcb, Length);
-
+        /* The window is given back as the data is read (LibTCPReturnReceiveCredit), not now:
+         * a reader that stops reading closes the window, as on Windows */
         TCPRecvEventHandler(arg);
     }
     else if (err == ERR_OK)
