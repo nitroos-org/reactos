@@ -1076,7 +1076,6 @@ IntReadConsoleOutputStringChars(
     SHORT XStart = ReadCoord->X;
     ULONG nNumChars = 0;
     PCHAR_INFO Ptr;
-    BOOLEAN bCJK = Console->IsCJK;
 
     CodeSize = (Unicode ? RTL_FIELD_SIZE(CODE_ELEMENT, UnicodeChar)
                         : RTL_FIELD_SIZE(CODE_ELEMENT, AsciiChar));
@@ -1094,7 +1093,7 @@ IntReadConsoleOutputStringChars(
              * For full-width characters: copy only the character specified
              * in the leading-byte cell, skipping the trailing-byte cell.
              */
-            if (bCJK && (Ptr->Attributes & COMMON_LVB_TRAILING_BYTE))
+            if (Ptr->Attributes & COMMON_LVB_TRAILING_BYTE)
             {
                 /*
                  * Windows "compensates" for the fact this is a full-width
@@ -1259,7 +1258,6 @@ IntWriteConsoleOutputStringChars(
     SHORT XStart = WriteCoord->X;
     ULONG nNumChars = 0;
     PCHAR_INFO Ptr;
-    BOOLEAN bCJK = Console->IsCJK;
 
     /* Convert the string to UNICODE */
     if (Unicode)
@@ -1298,7 +1296,7 @@ IntWriteConsoleOutputStringChars(
                 goto Quit;
 
             /* For Chinese, Japanese and Korean */
-            if (bCJK && IS_FULL_WIDTH(*WriteBuffer))
+            if (CON_IS_FULL_WIDTH(Console, *WriteBuffer))
             {
                 /* A full-width character cannot cross a line boundary */
                 if (X >= Buffer->ScreenBufferSize.X - 1)
@@ -1530,9 +1528,8 @@ ConDrvFillConsoleOutput(IN PCONSOLE Console,
     Y = WriteCoord->Y;
     bLead = TRUE;
     bFullwidth = FALSE;
-    if (Console->IsCJK)
     {
-        bFullwidth = IS_FULL_WIDTH(Code.UnicodeChar);
+        bFullwidth = CON_IS_FULL_WIDTH(Console, Code.UnicodeChar);
         if (X > 0)
         {
             Ptr = ConioCoordToPointer(Buffer, X - 1, Y);
