@@ -3925,7 +3925,9 @@ NtUserSetWindowRgn(
 {
    HRGN hrgnCopy = NULL;
    PWND Window;
-   INT flags = (SWP_NOCLIENTSIZE|SWP_NOCLIENTMOVE|SWP_NOACTIVATE|SWP_FRAMECHANGED|SWP_NOSIZE|SWP_NOMOVE);
+   /* Setting a window region must not change the Z order (Windows passes SWP_NOZORDER);
+      without it HWND_TOP raised the window above its siblings on every call. */
+   INT flags = (SWP_NOCLIENTSIZE|SWP_NOCLIENTMOVE|SWP_NOACTIVATE|SWP_FRAMECHANGED|SWP_NOSIZE|SWP_NOMOVE|SWP_NOZORDER);
    INT Ret = 0;
 
    TRACE("Enter NtUserSetWindowRgn\n");
