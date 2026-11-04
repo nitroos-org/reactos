@@ -265,12 +265,28 @@ static void ShowDesc(HTREEITEM h)
             StringCchPrintfW(tmp, ARRAYSIZE(tmp), L" Download: %I64u MB.", (c.Size + (1u << 20) - 1) >> 20);
             StringCchCatW(text, ARRAYSIZE(text), tmp);
         }
+        else if (f->Hosted && f->PayloadAvailable && f->State != FM_STATE_ENABLED)
+        {
+            ULONGLONG sz = FmHostedDownloadSize(f->ManifestPath);
+            if (sz)
+            {
+                StringCchPrintfW(tmp, ARRAYSIZE(tmp), L" Download: %I64u MB.", (sz + (1u << 20) - 1) >> 20);
+                StringCchCatW(text, ARRAYSIZE(text), tmp);
+            }
+        }
         DepNames(n, TRUE, tmp, ARRAYSIZE(tmp));
         if (tmp[0]) { StringCchCatW(text, ARRAYSIZE(text), L"\r\nNeeds: "); StringCchCatW(text, ARRAYSIZE(text), tmp); }
         DepNames(n, FALSE, tmp, ARRAYSIZE(tmp));
         if (tmp[0]) { StringCchCatW(text, ARRAYSIZE(text), L"\r\nNeeded by: "); StringCchCatW(text, ARRAYSIZE(text), tmp); }
-        if (!f->Removable && f->State == FM_STATE_ENABLED)
+        if (f->BuiltIn)
+            StringCchCatW(text, ARRAYSIZE(text), L"\r\nIncluded in this NitroOS image (installed by setup): it cannot be turned off here.");
+        else if (!f->Removable && f->State == FM_STATE_ENABLED)
             StringCchCatW(text, ARRAYSIZE(text), L"\r\nA base component of the system: it cannot be turned off.");
+        else if (!f->PayloadAvailable && f->State != FM_STATE_ENABLED && f->Unavailable[0])
+        {
+            StringCchCatW(text, ARRAYSIZE(text), L"\r\n");
+            StringCchCatW(text, ARRAYSIZE(text), f->Unavailable);
+        }
         else if (!f->PayloadAvailable && f->State != FM_STATE_ENABLED)
             StringCchCatW(text, ARRAYSIZE(text), L"\r\nNot available on this system (its payload is not staged).");
     }
@@ -292,12 +308,18 @@ static BOOL CanSet(int idx, BOOL want)
     const FM_FEATURE *f = &g_arr[g_nodes[idx].feat];
     if (!want && f->State == FM_STATE_ENABLED && !f->Removable)
     {
-        StringCchPrintfW(g_note, ARRAYSIZE(g_note), L"%s is a base component of the system and cannot be turned off.", f->Name);
+        if (f->BuiltIn)
+            StringCchPrintfW(g_note, ARRAYSIZE(g_note), L"%s is included in this NitroOS image and cannot be turned off here.", f->Name);
+        else
+            StringCchPrintfW(g_note, ARRAYSIZE(g_note), L"%s is a base component of the system and cannot be turned off.", f->Name);
         return FALSE;
     }
     if (want && f->State != FM_STATE_ENABLED && !f->PayloadAvailable)
     {
-        StringCchPrintfW(g_note, ARRAYSIZE(g_note), L"%s is not available on this system yet.", f->Name);
+        if (f->Unavailable[0])
+            StringCchPrintfW(g_note, ARRAYSIZE(g_note), L"%s: %s", f->Name, f->Unavailable);
+        else
+            StringCchPrintfW(g_note, ARRAYSIZE(g_note), L"%s is not available on this system yet.", f->Name);
         return FALSE;
     }
     return TRUE;
