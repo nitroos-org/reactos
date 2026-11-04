@@ -118,7 +118,9 @@ IntCallLowLevelEvent( PEVENTHOOK pEH,
    Msg.lParam = POSTEVENT_NWE;
    Msg.time = 0;
 
-   MsqPostMessage(pEH->head.pti, &Msg, FALSE, QS_EVENT, POSTEVENT_NWE, (LONG_PTR)pEP);
+   /* Once posted the message owns the pack; a dying target thread refuses it */
+   if (!MsqPostMessage(pEH->head.pti, &Msg, FALSE, QS_EVENT, POSTEVENT_NWE, (LONG_PTR)pEP))
+      ExFreePoolWithTag(pEP, TAG_HOOK);
    return 0;
 }
 

@@ -1,0 +1,21 @@
+# A manifest that the wevtapi tests make up: one publisher with two channels, three levels, two opcodes, two tasks,
+# two keywords and five events. Input of genwevt.py, which writes testmanifest.wevt.rc.
+# Fields of an event: id version channel level opcode task keywords data. The data are name|inType|outType, comma
+# separated; - is an event with no template, = a template without data.
+provider {c2f0a1e0-7f3b-4b4e-9f2a-5d7e1d2f0a12} wevtapi-apitest-synthetic
+channel 16 WevtapiTest/Operational
+channel 17 WevtapiTest/Debug
+level win:Error 2
+level win:Informational 4
+level Trace 17
+opcode Begin 1
+opcode Stop 2
+task Alpha 1 {3f2a9c10-1b5d-4c7e-8a64-0d9e5b7c2f31}
+task Beta 2 {3f2a9c10-1b5d-4c7e-8a64-0d9e5b7c2f32}
+keyword First 1
+keyword Second 8589934592
+event 100 0 16 4 1 1 0x1 Name|win:UnicodeString|xs:string,Count|win:UInt32|xs:unsignedInt
+event 101 1 16 2 2 2 0x3 =
+event 102 0 17 17 0 0 0x2 -
+event 103 2 0 4 0 0 0x0 Value|win:Int64|xs:long
+event 100 1 16 4 1 1 0x1 -

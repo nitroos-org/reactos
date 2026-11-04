@@ -2102,6 +2102,26 @@ static const struct record_param data_param[] =
     { class_systemsecurityW, method_getsdW, -1, param_sdW, CIM_UINT8|CIM_FLAG_ARRAY },
     { class_systemsecurityW, method_setsdW, 1, param_sdW, CIM_UINT8|CIM_FLAG_ARRAY },
     { class_systemsecurityW, method_setsdW, -1, param_returnvalueW, CIM_UINT32 },
+    { L"MSFT_NetIPAddress", L"RequestStateChange", 1, L"RequestedState", CIM_UINT16 },
+    { L"MSFT_NetIPAddress", L"RequestStateChange", 1, L"TimeoutPeriod", CIM_DATETIME },
+    { L"MSFT_NetIPAddress", L"RequestStateChange", -1, L"Job", CIM_REFERENCE },
+    { L"MSFT_NetIPAddress", L"RequestStateChange", -1, param_returnvalueW, CIM_UINT32 },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"AddressFamily", CIM_UINT16 },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"AddressState", CIM_UINT16 },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"DefaultGateway", CIM_STRING },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"InterfaceAlias", CIM_STRING },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"InterfaceIndex", CIM_UINT32 },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"IPAddress", CIM_STRING },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"PassThru", CIM_BOOLEAN },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"PolicyStore", CIM_STRING },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"PreferredLifetime", CIM_DATETIME },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"PrefixLength", CIM_UINT8 },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"PrefixOrigin", CIM_UINT16 },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"SkipAsSource", CIM_BOOLEAN },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"SuffixOrigin", CIM_UINT16 },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"Type", CIM_UINT8 },
+    { L"MSFT_NetIPAddress", L"Create", 1, L"ValidLifetime", CIM_DATETIME },
+    { L"MSFT_NetIPAddress", L"Create", -1, param_returnvalueW, CIM_UINT32 },
 };
 
 #ifdef __REACTOS__
@@ -2174,7 +2194,7 @@ static const struct record_winsat data_winsat[] =
 };
 
 /* check if row matches condition and update status */
-static BOOL match_row( const struct table *table, UINT row, const struct expr *cond, enum fill_status *status )
+BOOL match_row( const struct table *table, UINT row, const struct expr *cond, enum fill_status *status )
 {
     LONGLONG val;
     UINT type;
@@ -2193,7 +2213,7 @@ static BOOL match_row( const struct table *table, UINT row, const struct expr *c
     return val != 0;
 }
 
-static BOOL resize_table( struct table *table, UINT row_count, UINT row_size )
+BOOL resize_table( struct table *table, UINT row_count, UINT row_size )
 {
     if (!table->num_rows_allocated)
     {
@@ -2378,7 +2398,7 @@ static WCHAR *get_baseboard_version( const char *buf, UINT len )
 }
 
 /* ReactOS: helpers for the properties Windows reports and the MI/CIM cmdlets read */
-static struct array *new_string_array( UINT count, const WCHAR **strings )
+struct array *new_string_array( UINT count, const WCHAR **strings )
 {
     struct array *ret;
     WCHAR **ptr;

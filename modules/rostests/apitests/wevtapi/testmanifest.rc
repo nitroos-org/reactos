@@ -1,0 +1,8 @@
+#define REACTOS_VERSION_DLL
+#define REACTOS_STR_FILE_DESCRIPTION  "wevtapi test manifest"
+#define REACTOS_STR_INTERNAL_NAME     "wevtapi_testmanifest"
+#define REACTOS_STR_ORIGINAL_FILENAME "wevtapi_testmanifest.dll"
+#include <reactos/version.rc>
+
+/* the manifest of a made-up publisher: genwevt.py writes this file from testmanifest.dat */
+#include "testmanifest.wevt.rc"

@@ -1,3 +1,10 @@
+/*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     ldump
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
 /* ldump: dump locale/calendar data via the public NLS API, one line per value, for oracle-vs-nitro diffing.
  * Build: x86_64-w64-mingw32-gcc -O1 -o ldump.exe ldump.c   (system mingw; not the RosBE cross compiler)
  * Usage: ldump [-o file] [locale...]   (default: the representative set) */
