@@ -328,6 +328,7 @@ HRESULT FmRappsFetchDb(LPCWSTR urlOverride, FILE *log);  /* download + extract; 
 /* Make the desktop / Start shortcuts, the Firefox policies and (flags) the default browser match what is installed:
  * PowerShell 7 and Firefox when they are there, Command Prompt otherwise; no Internet Explorer entry. Idempotent. */
 void   FmShellDefaults(DWORD flags, FILE *log);
+void   FmFirefoxPoliciesIn(LPCWSTR ffDir, FILE *log);   /* merge the Preferences policy into <ffDir>\distribution\policies.json (Scoop firefox) */
 
 /* ---- GUI pieces shared by optfeatures.exe (progwin.c, featwin.c, firstboot.c) ---- */
 #define FM_JOB_INSTALL 0
