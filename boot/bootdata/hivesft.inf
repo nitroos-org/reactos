@@ -602,6 +602,11 @@ HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",,0x00000012
 ; first-boot installer of the default components (.NET Framework 4.8): runs at logon, installs once the network is up, records its result under
 ; HKLM\SOFTWARE\ReactOS\Nitro\Featmgr. Off switch: AutoInstall=0 (DWORD) there, or delete this value.
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Run","NitroComponents",0x00020000,"%SystemRoot%\system32\optfeatures.exe /firstboot"
+; The channel Setup, which has no events here (Windows installs and servicing log into it)
+HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\WINEVT\Channels\Setup","Enabled",0x00010001,1
+HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\WINEVT\Channels\Setup","Isolation",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\WINEVT\Channels\Setup","ChannelAccess",0x00000000,"O:BAG:SYD:(A;;0x2;;;S-1-15-2-1)(A;;0x2;;;S-1-15-3-1024-3153509613-960666767-3724611135-2725662640-12138253-543910227-1950414635-4190290187)(A;;0xf0007;;;SY)(A;;0x7;;;BA)(A;;0x7;;;SO)(A;;0x3;;;IU)(A;;0x3;;;SU)(A;;0x3;;;S-1-5-3)(A;;0x3;;;S-1-5-33)(A;;0x1;;;S-1-5-32-573)"
+HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\WINEVT\Channels\Setup","Type",0x00010001,1
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnceEx",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Setup",,0x00000012
