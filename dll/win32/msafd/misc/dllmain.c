@@ -1031,10 +1031,6 @@ WSPBind(SOCKET Handle,
     {
         BindData->ShareType = AFD_SHARE_EXCLUSIVE;
     }
-    else if (SocketInfo.EndpointInfo == SockaddrEndpointInfoWildcard)
-    {
-        BindData->ShareType = AFD_SHARE_WILDCARD;
-    }
     else if (Socket->SharedData->ReuseAddresses)
     {
         BindData->ShareType = AFD_SHARE_REUSE;

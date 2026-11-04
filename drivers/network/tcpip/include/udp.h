@@ -60,6 +60,7 @@ NTSTATUS UDPStartup(
 NTSTATUS UDPShutdown(
   VOID);
 UINT UDPAllocatePort( UINT HintPort );
+BOOLEAN UDPReservePort( UINT Port );
 VOID UDPFreePort( UINT Port );
 
 /* EOF */
