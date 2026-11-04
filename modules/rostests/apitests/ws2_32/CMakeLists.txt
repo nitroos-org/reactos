@@ -13,6 +13,7 @@ list(APPEND SOURCE
     closerace.c
     connectex.c
     connectexhandles.c
+    updatecontexthandles.c
     connecterror.c
     connectstate.c
     GetAddrInfoEx.c
