@@ -29,6 +29,7 @@ typedef struct tagDCE
     PTHREADINFO  ptiOwner;
     PPROCESSINFO ppiOwner;
     struct _MONITOR* pMonitor;
+    BOOL         bGlass;     /* the DC was last set up for a glass window (glassblt.c) */
 } DCE, *PDCE;
 
 /* internal DCX flags, see psdk/winuser.h for the rest */

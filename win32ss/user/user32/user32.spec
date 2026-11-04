@@ -765,6 +765,7 @@
 @ stdcall SetUserObjectSecurity(long ptr ptr)
 @ stdcall -version=0x601+ SetWindowFeedbackSetting(ptr long long long ptr)
 @ stdcall SetWinEventHook(long long long ptr long long long)
+@ stdcall NitroSetWindowGlass(long long)
 @ stdcall -version=0x601+ SetWindowCompositionAttribute(ptr ptr)
 @ stdcall SetWindowContextHelpId(long long)
 @ stdcall -version=0x601+ SetWindowDisplayAffinity(long long)
