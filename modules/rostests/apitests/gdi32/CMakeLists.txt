@@ -33,6 +33,7 @@ list(APPEND SOURCE
     ExcludeClipRect.c
     ExtCreatePen.c
     ExtCreateRegion.c
+    FontRequestState.c
     FrameRgn.c
     GdiConvertBitmap.c
     GdiConvertBrush.c

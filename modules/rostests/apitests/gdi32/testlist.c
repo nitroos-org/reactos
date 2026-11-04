@@ -32,6 +32,7 @@ extern void func_EnumFontFamiliesArial(void);
 extern void func_ExcludeClipRect(void);
 extern void func_ExtCreatePen(void);
 extern void func_ExtCreateRegion(void);
+extern void func_FontRequestState(void);
 extern void func_FrameRgn(void);
 extern void func_GdiConvertBitmap(void);
 extern void func_GdiConvertBrush(void);
@@ -129,6 +130,7 @@ const struct test winetest_testlist[] =
     { "ExcludeClipRect", func_ExcludeClipRect },
     { "ExtCreatePen", func_ExtCreatePen },
     { "ExtCreateRegion", func_ExtCreateRegion },
+    { "FontRequestState", func_FontRequestState },
     { "FrameRgn", func_FrameRgn },
     { "GdiConvertBitmap", func_GdiConvertBitmap },
     { "GdiConvertBrush", func_GdiConvertBrush },
