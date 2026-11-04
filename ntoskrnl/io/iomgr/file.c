@@ -191,6 +191,22 @@ IopDoNameTransmogrify(IN PIRP Irp,
     {
         Irp->IoStatus.Status = STATUS_IO_REPARSE_DATA_INVALID;
     }
+    /* The substitute name has to lie inside the data and has to be an absolute name of the object namespace:
+       it replaces the whole name, a relative one would be resolved against whatever directory the caller named */
+    else if (DataBuffer->ReparseDataLength + REPARSE_DATA_BUFFER_HEADER_SIZE <
+             FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer) ||
+             (ULONG)DataBuffer->MountPointReparseBuffer.SubstituteNameOffset +
+             DataBuffer->MountPointReparseBuffer.SubstituteNameLength >
+             (ULONG)DataBuffer->ReparseDataLength + REPARSE_DATA_BUFFER_HEADER_SIZE -
+             FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer) ||
+             (DataBuffer->MountPointReparseBuffer.SubstituteNameOffset & 1) ||
+             DataBuffer->MountPointReparseBuffer.SubstituteNameLength < sizeof(WCHAR) ||
+             (DataBuffer->MountPointReparseBuffer.SubstituteNameLength & 1) ||
+             *(PWCHAR)((ULONG_PTR)DataBuffer->MountPointReparseBuffer.PathBuffer +
+                       DataBuffer->MountPointReparseBuffer.SubstituteNameOffset) != L'\\')
+    {
+        Irp->IoStatus.Status = STATUS_IO_REPARSE_DATA_INVALID;
+    }
 
     /* Everything went right */
     if (NT_SUCCESS(Irp->IoStatus.Status))
@@ -366,6 +382,14 @@ IopDoSymlinkTransmogrify(IN PIRP Irp,
     Relative = (DataBuffer->SymbolicLinkReparseBuffer.Flags & SYMLINK_FLAG_RELATIVE) != 0;
     Rooted = (Sub[0] == L'\\');
 
+    /* An absolute link replaces the whole name, so its substitute has to be an absolute name too
+       (Windows 10 gives ERROR_INVALID_NAME when such a link is opened) */
+    if (!Relative && !Rooted)
+    {
+        Status = STATUS_OBJECT_NAME_INVALID;
+        goto Done;
+    }
+
     if (Relative)
     {
         PWCHAR Head = FileObject->FileName.Buffer;
@@ -490,6 +514,33 @@ Done:
     else
     {
         Irp->IoStatus.Status = Status;
+    }
+}
+
+/* OBJ_DONT_REPARSE: fail instead of traversing a reparse point (not in every header set) */
+#ifndef OBJ_DONT_REPARSE
+#define OBJ_DONT_REPARSE 0x00001000
+#endif
+
+/* The device belongs to a network file system or a redirector */
+static
+BOOLEAN
+IopIsRemoteDeviceObject(IN PDEVICE_OBJECT DeviceObject)
+{
+    if (DeviceObject->Characteristics & FILE_REMOTE_DEVICE) return TRUE;
+
+    switch (DeviceObject->DeviceType)
+    {
+        case FILE_DEVICE_NETWORK_FILE_SYSTEM:
+        case FILE_DEVICE_NETWORK_REDIRECTOR:
+        case FILE_DEVICE_MULTI_UNC_PROVIDER:
+        case FILE_DEVICE_DFS_FILE_SYSTEM:
+        case FILE_DEVICE_DFS:
+        case FILE_DEVICE_DFS_VOLUME:
+            return TRUE;
+
+        default:
+            return FALSE;
     }
 }
 
@@ -1263,8 +1314,32 @@ IopParseDevice(IN PVOID ParseObject,
             /* Handle name change if required */
             if (Status == STATUS_REPARSE)
             {
+                /*
+                 * The caller does not want reparse points traversed, or wants to stop at a symbolic link.
+                 * A link a network file system gives us is not followed either: remote to local and
+                 * remote to remote evaluation are off by default on Windows (STATUS_SYMLINK_CLASS_DISABLED)
+                 */
+                if ((Irp->IoStatus.Information == IO_REPARSE_TAG_MOUNT_POINT ||
+                     Irp->IoStatus.Information == IO_REPARSE_TAG_SYMLINK) &&
+                    ((Attributes & OBJ_DONT_REPARSE) ||
+                     (Irp->IoStatus.Information == IO_REPARSE_TAG_SYMLINK &&
+                      ((OpenPacket->Options & IO_STOP_ON_SYMLINK) ||
+                       IopIsRemoteDeviceObject(OriginalDeviceObject) ||
+                       IopIsRemoteDeviceObject(DeviceObject)))))
+                {
+                    if (Attributes & OBJ_DONT_REPARSE)
+                        Irp->IoStatus.Status = STATUS_REPARSE_POINT_ENCOUNTERED;
+                    else if (OpenPacket->Options & IO_STOP_ON_SYMLINK)
+                        Irp->IoStatus.Status = STATUS_STOPPED_ON_SYMLINK;
+                    else
+                        Irp->IoStatus.Status = STATUS_SYMLINK_CLASS_DISABLED;
+
+                    if (Irp->Tail.Overlay.AuxiliaryBuffer)
+                        ExFreePool(Irp->Tail.Overlay.AuxiliaryBuffer);
+                    Irp->Tail.Overlay.AuxiliaryBuffer = NULL;
+                }
                 /* Check this is a mount point */
-                if (Irp->IoStatus.Information == IO_REPARSE_TAG_MOUNT_POINT)
+                else if (Irp->IoStatus.Information == IO_REPARSE_TAG_MOUNT_POINT)
                 {
                     PREPARSE_DATA_BUFFER ReparseData;
 
