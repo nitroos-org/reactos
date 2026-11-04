@@ -19,6 +19,7 @@ struct ngj_vol {
 	struct block_device *bdev;
 	u32 replayed;
 	int torn, cleared_dirty;
+	int keep;		/* the header carries KJ_FL_KEEP: the dirty flag with it was set on request */
 	int pair_pending;	/* read-only view: the $Volume pair is shown repaired, the write pass must write it */
 };
 

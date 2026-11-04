@@ -51,6 +51,7 @@ struct kshim_jnl {
 	u64 serial;
 	int degraded;			/* the overlay failed: writes go in place under an UNJOURNALED header */
 	int errors;			/* the core reported errors: the header keeps saying so */
+	int keep;			/* the dirty flag is a real request (KJ_FL_KEEP): every header says so */
 	int readonly;			/* only a replay overlay for a read-only mount: no journal writes */
 	int retired;			/* the header page is 0xff: the volume was clean when it was written */
 	int failed;			/* a metadata write could not be protected: no write may reach the device */
@@ -393,7 +394,7 @@ static int kj_hdr_write(struct block_device *b, struct kshim_jnl *j, u32 state, 
 	h->hwm = j->hwm;
 	h->vol_usn_old = j->vol_usn;
 	h->vol_usn_new = usn_new;
-	h->flags = j->errors ? KJ_FL_ERRORS : 0;
+	h->flags = (j->errors ? KJ_FL_ERRORS : 0) | (j->keep ? KJ_FL_KEEP : 0);
 	h->hdr_crc = kj_crc32(0, h, offsetof(struct kj_hdr, hdr_crc));
 	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || kj_dev_write(b, dev, j->hdrpage, KJ_PAGE))
 		return -EIO;
@@ -415,7 +416,7 @@ int kshim_jnl_retire(struct block_device *b)
 	if (!j || j->readonly)
 		return 0;
 	kj_settle(j);
-	if (j->retired || j->npages || j->snpages || j->degraded || j->errors || j->failed)
+	if (j->retired || j->npages || j->snpages || j->degraded || j->errors || j->keep || j->failed)
 		return 0;
 	memset(j->hdrpage, 0xff, KJ_PAGE);
 	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || kj_dev_write(b, dev, j->hdrpage, KJ_PAGE) ||
@@ -1128,6 +1129,14 @@ void kshim_watch_hit(atomic64_t *v)
 	for (int i = 0; i < KSHIM_WATCHES; i++)
 		if (kshim_watch[i].v == v)
 			kshim_watch[i].n++;
+}
+
+/* The dirty flag is a real request: the headers written from now on say so (until cleared). */
+void kshim_jnl_set_keep(struct block_device *b, int keep)
+{
+	struct kshim_jnl *j = b->jnl;
+	if (j && !j->readonly)
+		j->keep = keep;
 }
 
 /* The core reported errors: the header says so (needs repair) from now on, so no mount clears the dirty flag. */
