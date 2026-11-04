@@ -804,6 +804,42 @@ fail:
   return FALSE;
 }
 
+#ifdef __REACTOS__
+/***********************************************************************
+ *      COMDLG32_FixTypedSlashes [internal]
+ *
+ * Windows accepts forward slashes in a typed path and uses backslashes.
+ * names is a list of NUL-terminated names, size characters in all. A name
+ * that is a URL (a scheme of two or more characters, then "://") is left
+ * alone, Windows file dialogs accept URLs. "C://dir/file" is a path.
+ */
+static BOOL is_scheme_char(WCHAR c)
+{
+    return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') ||
+           c == L'+' || c == L'-' || c == L'.';
+}
+
+void COMDLG32_FixTypedSlashes(LPWSTR names, UINT size)
+{
+    LPWSTR p = names, end = names + size;
+
+    while (p < end)
+    {
+        UINT len = lstrlenW(p), scheme = 0;
+
+        while (is_scheme_char(p[scheme]))
+            scheme++;
+        if (scheme < 2 || p[scheme] != L':' || p[scheme + 1] != L'/' || p[scheme + 2] != L'/')
+        {
+            LPWSTR slash;
+            for (slash = p; (slash = wcschr(slash, L'/')) != NULL; )
+                *slash = L'\\';
+        }
+        p += len + 1;
+    }
+}
+#endif
+
 /***********************************************************************
  *      COMDLG32_SplitFileNames [internal]
  *
@@ -3297,12 +3333,7 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
 
 #ifdef __REACTOS__
   /* Windows accepts forward slashes in a typed path and uses backslashes */
-  {
-      UINT i;
-      for (i = 0; i < sizeUsed; i++)
-          if (lpstrFileList[i] == L'/')
-              lpstrFileList[i] = L'\\';
-  }
+  COMDLG32_FixTypedSlashes(lpstrFileList, sizeUsed);
 #endif
 
   if(nFileCount > 1)

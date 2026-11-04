@@ -567,11 +567,7 @@ static LRESULT FD31_Validate( const FD31_DATA *lfs, LPCWSTR path, UINT control, 
 #ifdef __REACTOS__
     /* Windows accepts forward slashes in a typed path and uses backslashes */
     if (control != lst1)
-    {
-        LPWSTR slash;
-        for (slash = filename; (slash = wcschr(slash, L'/')) != NULL; )
-            *slash = L'\\';
-    }
+        COMDLG32_FixTypedSlashes(filename, lstrlenW(filename) + 1);
 #endif
     /* if we did not click in file list to get there */
     if (control != lst1)
