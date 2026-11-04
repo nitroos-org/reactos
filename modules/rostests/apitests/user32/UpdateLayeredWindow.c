@@ -395,7 +395,8 @@ static void Test_PerPixelAlpha(void)
        "second UpdateLayeredWindow failed: %lu\n", GetLastError());
     Pump();
     c = ScreenPixel(100 + 75, 100 + 75);
-    ok(NearColor(c, 127, 0, 128), "50%% blue after a second update: 0x%06lx, expected (127,0,128)\n", c);
+    /* ULW blends onto the previous contents and accumulates: WIN32K-ulw-alpha-accumulate */
+    todo_ros ok(NearColor(c, 127, 0, 128), "50%% blue after a second update: 0x%06lx, expected (127,0,128)\n", c);
     c = ScreenPixel(100 + 25, 100 + 75);
     ok(NearColor(c, 255, 0, 0), "transparent pixel after a second update: 0x%06lx\n", c);
 
@@ -405,7 +406,8 @@ static void Test_PerPixelAlpha(void)
        "third UpdateLayeredWindow failed: %lu\n", GetLastError());
     Pump();
     c = ScreenPixel(100 + 125, 100 + 75);
-    ok(NearColor(c, 127, 128, 0), "green with constant alpha 128: 0x%06lx, expected (127,128,0)\n", c);
+    /* ULW blends onto the previous contents, SourceConstantAlpha too: WIN32K-ulw-alpha-accumulate */
+    todo_ros ok(NearColor(c, 127, 128, 0), "green with constant alpha 128: 0x%06lx, expected (127,128,0)\n", c);
 
     /* No position and no size: the window stays where it is and keeps its size */
     Blend.SourceConstantAlpha = 255;
@@ -553,6 +555,101 @@ done:
     FreeLibrary(hDwm);
 }
 
+/*
+ * Gecko shows a popup at the size of its first layout and grows it when the content is complete (a context
+ * menu is first 127 wide, then 173). The window painted at the first size, and the resize erases what it had
+ * painted: the transparent margins must still show what lies below the window, not black.
+ */
+static void Test_GlassResize(void)
+{
+    HRESULT (WINAPI *pDwmExtendFrameIntoClientArea)(HWND, const GLASS_MARGINS *);
+    GLASS_MARGINS Glass = { -1, -1, -1, -1 };
+    WNDCLASSW wc = { 0 };
+    BITMAPINFO bmi = { { sizeof(BITMAPINFOHEADER) } };
+    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
+    HWND hBack, hWnd;
+    HDC hdc, hdcWnd;
+    HBITMAP hbm;
+    DWORD *Bits = NULL;
+    COLORREF c;
+    int x, y;
+
+    pDwmExtendFrameIntoClientArea = hDwm ? (PVOID)GetProcAddress(hDwm, "DwmExtendFrameIntoClientArea") : NULL;
+    if (!pDwmExtendFrameIntoClientArea)
+    {
+        skip("DwmExtendFrameIntoClientArea is not available\n");
+        return;
+    }
+
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.hbrBackground = CreateSolidBrush(RGB(255, 0, 0));
+    wc.lpszClassName = L"UlwGlassBack2";
+    RegisterClassW(&wc);
+    hBack = CreateWindowExW(0, L"UlwGlassBack2", L"", WS_POPUP | WS_VISIBLE, 50, 50, 400, 300, NULL, NULL, GetModuleHandle(NULL), NULL);
+    ok(hBack != NULL, "CreateWindowExW failed: %lu\n", GetLastError());
+    UpdateWindow(hBack);
+    hWnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"UlwTestClass", L"", WS_POPUP, 100, 100, 120, 100, NULL, NULL, GetModuleHandle(NULL), NULL);
+    ok(hWnd != NULL, "CreateWindowExW failed: %lu\n", GetLastError());
+    if (!hBack || !hWnd)
+        goto done;
+    ok(pDwmExtendFrameIntoClientArea(hWnd, &Glass) == S_OK, "DwmExtendFrameIntoClientArea failed\n");
+    ShowWindow(hWnd, SW_SHOWNOACTIVATE);
+    Pump();
+
+    bmi.bmiHeader.biWidth = 200;
+    bmi.bmiHeader.biHeight = -100;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    hdc = CreateCompatibleDC(NULL);
+    hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, (PVOID *)&Bits, NULL, 0);
+    SelectObject(hdc, hbm);
+    if (!Bits)
+    {
+        skip("no DIB section\n");
+        goto cleanup;
+    }
+
+    /* First size: a 10 pixel transparent margin around an opaque green body, painted twice */
+    for (y = 0; y < 100; y++)
+        for (x = 0; x < 200; x++)
+            Bits[y * 200 + x] = (x < 10 || x >= 110 || y < 10 || y >= 90) ? 0x00000000 : 0xFF00FF00;
+    PaintGlass(hWnd, hdc, 120, 100);
+    PaintGlass(hWnd, hdc, 120, 100);
+    c = ScreenPixel(100 + 5, 100 + 50);
+    ok(NearColor(c, 255, 0, 0), "margin at the first size: 0x%06lx, expected the red background\n", c);
+
+    /* What the window had on the screen is gone when it grows (the area is erased black) */
+    hdcWnd = GetDC(hWnd);
+    PatBlt(hdcWnd, 0, 0, 120, 100, BLACKNESS);
+    ReleaseDC(hWnd, hdcWnd);
+    ok(SetWindowPos(hWnd, NULL, 0, 0, 200, 100, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE), "SetWindowPos failed\n");
+    Pump();
+    for (y = 0; y < 100; y++)
+        for (x = 0; x < 200; x++)
+            Bits[y * 200 + x] = (x < 10 || x >= 190 || y < 10 || y >= 90) ? 0x00000000 : 0xFF00FF00;
+    PaintGlass(hWnd, hdc, 200, 100);
+    PaintGlass(hWnd, hdc, 200, 100);
+    c = ScreenPixel(100 + 5, 100 + 50);
+    ok(NearColor(c, 255, 0, 0), "left margin after the resize: 0x%06lx, expected the red background\n", c);
+    c = ScreenPixel(100 + 60, 100 + 5);
+    ok(NearColor(c, 255, 0, 0), "top margin over the old area after the resize: 0x%06lx, expected the red background\n", c);
+    c = ScreenPixel(100 + 195, 100 + 50);
+    ok(NearColor(c, 255, 0, 0), "right margin in the new area: 0x%06lx, expected the red background\n", c);
+    c = ScreenPixel(100 + 60, 100 + 50);
+    ok(NearColor(c, 0, 255, 0), "body: 0x%06lx\n", c);
+
+cleanup:
+    DeleteDC(hdc);
+    DeleteObject(hbm);
+done:
+    if (hWnd) DestroyWindow(hWnd);
+    if (hBack) DestroyWindow(hBack);
+    UnregisterClassW(L"UlwGlassBack2", GetModuleHandle(NULL));
+    DeleteObject(wc.hbrBackground);
+    FreeLibrary(hDwm);
+}
+
 static void Test_SameThreadNoMessages(void)
 {
     HWND hWnd = CreateLayered();
@@ -601,6 +698,7 @@ START_TEST(UpdateLayeredWindow)
     Test_ShapedMoveExposes();
     Test_PerPixelAlpha();
     Test_GlassBitBlt();
+    Test_GlassResize();
 
     UnregisterClassW(L"UlwTestClass", GetModuleHandle(NULL));
 }

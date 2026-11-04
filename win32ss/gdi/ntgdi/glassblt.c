@@ -103,10 +103,10 @@ GlassGetBackdrop(
     SURFACE *psurfScreen)
 {
     PLIST_ENTRY pe;
-    PGLASS_BACKDROP pbk = NULL;
+    PGLASS_BACKDROP pbk = NULL, pbkOld = NULL;
     ULONG cEntries = 0;
     SIZEL sizl;
-    RECTL rcCopy, rcDst, rcScreen;
+    RECTL rcCopy, rcDst, rcScreen, rcKeep;
     POINTL ptlSrc;
     HBITMAP hbm;
     SURFACE *psurfBk;
@@ -120,13 +120,19 @@ GlassGetBackdrop(
         {
             if (RtlEqualMemory(&p->rcWnd, &pdc->rclGlass, sizeof(RECTL)))
                 return p;
-            pbk = p;
+            pbkOld = p;
             break;
         }
     }
-    if (pbk)
+    /*
+     * The window was moved or resized after it drew (Gecko shows a popup at one size and grows it once its
+     * content is laid out). What is on the screen under the old rectangle is no longer the backdrop: the window
+     * painted there, and the resize erases it. The old snapshot stays valid for the part of the rectangle that
+     * both have in common, and only the rest is read from the screen.
+     */
+    if (pbkOld)
     {
-        GlassFreeEntry(pbk);
+        RemoveEntryList(&pbkOld->Entry);
         cEntries--;
     }
     if (cEntries >= GLASS_MAX_ENTRIES)
@@ -135,16 +141,16 @@ GlassGetBackdrop(
     sizl.cx = pdc->rclGlass.right - pdc->rclGlass.left;
     sizl.cy = pdc->rclGlass.bottom - pdc->rclGlass.top;
     if (sizl.cx <= 0 || sizl.cy <= 0 || (ULONGLONG)sizl.cx * sizl.cy > GLASS_MAX_PIXELS)
-        return NULL;
+        goto fail;
 
     hbm = EngCreateBitmap(sizl, 0, BMF_32BPP, BMF_TOPDOWN, NULL);
     if (!hbm)
-        return NULL;
+        goto fail;
     psurfBk = SURFACE_ShareLockSurface(hbm);
     if (!psurfBk)
     {
         EngDeleteSurface((HSURF)hbm);
-        return NULL;
+        goto fail;
     }
 
     /* What is on the screen now, the part of the window that is on it; the pointer is taken off while it is read */
@@ -164,24 +170,55 @@ GlassGetBackdrop(
         bOk = EngCopyBits(&psurfBk->SurfObj, &psurfScreen->SurfObj, NULL, NULL, &rcDst, &ptlSrc);
         MouseSafetyOnDrawEnd(pdc->ppdev);
     }
+
+    /* Overlay the part that the previous snapshot covers (same screen coordinates) */
+    if (bOk && pbkOld && RECTL_bIntersectRect(&rcKeep, &pbkOld->rcWnd, &pdc->rclGlass))
+    {
+        SURFACE *psurfOld = SURFACE_ShareLockSurface(pbkOld->hbm);
+
+        if (psurfOld)
+        {
+            rcDst.left = rcKeep.left - pdc->rclGlass.left;
+            rcDst.top = rcKeep.top - pdc->rclGlass.top;
+            rcDst.right = rcKeep.right - pdc->rclGlass.left;
+            rcDst.bottom = rcKeep.bottom - pdc->rclGlass.top;
+            ptlSrc.x = rcKeep.left - pbkOld->rcWnd.left;
+            ptlSrc.y = rcKeep.top - pbkOld->rcWnd.top;
+            EngCopyBits(&psurfBk->SurfObj, &psurfOld->SurfObj, NULL, NULL, &rcDst, &ptlSrc);
+            SURFACE_ShareUnlockSurface(psurfOld);
+        }
+    }
     SURFACE_ShareUnlockSurface(psurfBk);
     if (!bOk)
     {
         EngDeleteSurface((HSURF)hbm);
-        return NULL;
+        goto fail;
     }
 
     pbk = ExAllocatePoolWithTag(PagedPool, sizeof(*pbk), GLASS_TAG);
     if (!pbk)
     {
         EngDeleteSurface((HSURF)hbm);
-        return NULL;
+        goto fail;
     }
     pbk->hwnd = pdc->hwndGlass;
     pbk->rcWnd = pdc->rclGlass;
     pbk->hbm = hbm;
     InsertHeadList(&gGlassList, &pbk->Entry);
+    if (pbkOld)
+    {
+        EngDeleteSurface((HSURF)pbkOld->hbm);
+        ExFreePoolWithTag(pbkOld, GLASS_TAG);
+    }
     return pbk;
+
+fail:
+    if (pbkOld)
+    {
+        EngDeleteSurface((HSURF)pbkOld->hbm);
+        ExFreePoolWithTag(pbkOld, GLASS_TAG);
+    }
+    return NULL;
 }
 
 /*
