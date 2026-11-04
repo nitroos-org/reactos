@@ -46,6 +46,7 @@ list(APPEND SOURCE
     RegEnumValueW.c
     RegFlushKey.c
     RegNotifyChangeKeyValue.c
+    RegNotifyLeak.c
     RegLoadKey.c
     RegOpenKeyExW.c
     RegPerformanceData.c
