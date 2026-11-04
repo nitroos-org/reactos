@@ -2,10 +2,11 @@
  * PROJECT:     ReactOS-Nitro Optional Features / Addon Manager
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     NitroOS shell defaults that follow the first-boot components: PowerShell 7 is the headline shell on the
- *              desktop and in the Start menu, Firefox replaces the Wine Internet Explorer entry and is the default
- *              browser. Idempotent: it looks at what is installed and makes the shortcuts match, so it also puts the
- *              Command Prompt desktop shortcut and the Internet Explorer entry back when pwsh or Firefox is removed
- *              (and while they are not installed yet, which is the image's own state).
+ *              desktop and in the Start menu, Firefox is the browser entry and the default browser. Idempotent: it
+ *              looks at what is installed and makes the shortcuts match, so it also puts the Command Prompt desktop
+ *              shortcut back when pwsh is removed (and while it is not installed yet, which is the image's own state).
+ *              Internet Explorer has no entry, as on Windows 11: iexplore.exe opens the default browser, and leftover
+ *              shortcuts to it are removed (once, see RemoveIeLinksOnce).
  *              Nothing here removes a program: Command Prompt stays under Start > Windows System, iexplore stays.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka
  */
@@ -22,7 +23,6 @@
 static const WCHAR NAME_CMD[]  = L"Command Prompt";
 static const WCHAR NAME_PWSH[] = L"PowerShell";
 static const WCHAR NAME_FF[]   = L"Firefox";
-static const WCHAR NAME_IE[]   = L"Wine Internet Explorer";
 static const WCHAR NAME_WINSYS[] = L"Windows System";
 
 static BOOL FileExists(LPCWSTR p)
@@ -91,6 +91,8 @@ static BOOL LinkTarget(LPCWSTR lnk, LPWSTR out, DWORD cch, LPWSTR args, DWORD cc
 }
 
 /* the .lnk files of dir whose target's file name is exe; remove (del) or only count them */
+static int g_DeleteFailures;   /* shortcuts LinksTo was asked to delete but could not (in use, access denied, unreadable while in use) */
+
 static int LinksTo(LPCWSTR dir, LPCWSTR exe, BOOL del, FILE *log)
 {
     WCHAR pat[MAX_PATH], path[MAX_PATH], tgt[MAX_PATH], args[MAX_PATH];
@@ -105,7 +107,18 @@ static int LinksTo(LPCWSTR dir, LPCWSTR exe, BOOL del, FILE *log)
     {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         StringCchPrintfW(path, ARRAYSIZE(path), L"%s\\%s", dir, fd.cFileName);
-        if (!LinkTarget(path, tgt, ARRAYSIZE(tgt), args, ARRAYSIZE(args))) continue;
+        if (!LinkTarget(path, tgt, ARRAYSIZE(tgt), args, ARRAYSIZE(args)))
+        {
+            /* a shortcut held open without sharing cannot be read: when deleting, it may be one, so not done yet */
+            if (del)
+            {
+                HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                       OPEN_EXISTING, 0, NULL);
+                if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+                else if (GetLastError() == ERROR_SHARING_VIOLATION) g_DeleteFailures++;
+            }
+            continue;
+        }
         if (_wcsicmp(PathFindFileNameW(tgt), exe)) continue;
         if (del && args[0]) continue;                /* a shortcut with arguments is the user's own, not the stock entry */
         n++;
@@ -114,6 +127,7 @@ static int LinksTo(LPCWSTR dir, LPCWSTR exe, BOOL del, FILE *log)
             BOOL ok = DeleteFileW(path);
             LOGF(log, L"  shortcut: removed %s %s\n", path, ok ? L"ok" : L"FAILED");
             if (ok) SHChangeNotify(SHCNE_DELETE, SHCNF_PATHW | SHCNF_FLUSH, path, NULL);   /* the open desktop drops the icon */
+            else g_DeleteFailures++;
         }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
@@ -146,6 +160,56 @@ static int LinksToIn(DIRSET d, LPCWSTR sub, LPCWSTR exe, BOOL del, FILE *log)
         n += LinksTo(dir, exe, del, log);
     }
     return n;
+}
+
+/*
+ * Internet Explorer shortcuts left from an older image (no arguments, target iexplore.exe: the stock entry, which only
+ * ever was at the top of Programs) are removed once: from the all-users and Default User folders once per machine,
+ * from the user's own folders once per user. A plain IE shortcut someone makes afterwards is theirs and stays.
+ * The flag is only set when every such shortcut went (or there was none): one that could not be deleted (in use)
+ * is tried again on the next run.
+ */
+static const WCHAR KEY_SHELLDEFAULTS[] = L"SOFTWARE\\ReactOS\\Nitro\\Featmgr";
+static const WCHAR VAL_IE_LINKS_REMOVED[] = L"IeShortcutsRemoved";
+
+static BOOL IeLinksRemoved(HKEY root)
+{
+    DWORD v = 0, cb = sizeof(v), type;
+    HKEY k;
+    LONG rc;
+    if (RegOpenKeyExW(root, KEY_SHELLDEFAULTS, 0, KEY_QUERY_VALUE, &k) != ERROR_SUCCESS) return FALSE;
+    rc = RegQueryValueExW(k, VAL_IE_LINKS_REMOVED, NULL, &type, (BYTE *)&v, &cb);
+    RegCloseKey(k);
+    return rc == ERROR_SUCCESS && type == REG_DWORD && v;
+}
+
+static void SetIeLinksRemoved(HKEY root)
+{
+    DWORD v = 1;
+    HKEY k;
+    if (RegCreateKeyExW(root, KEY_SHELLDEFAULTS, 0, NULL, 0, KEY_SET_VALUE, NULL, &k, NULL) != ERROR_SUCCESS) return;
+    RegSetValueExW(k, VAL_IE_LINKS_REMOVED, 0, REG_DWORD, (const BYTE *)&v, sizeof(v));
+    RegCloseKey(k);
+}
+
+static void RemoveIeLinksOnce(DIRSET desk, DIRSET progs, FILE *log)
+{
+    g_DeleteFailures = 0;
+    if (!IeLinksRemoved(HKEY_LOCAL_MACHINE))
+    {
+        if (desk[0][0]) LinksTo(desk[0], L"iexplore.exe", TRUE, log);
+        if (progs[0][0]) LinksTo(progs[0], L"iexplore.exe", TRUE, log);
+        if (desk[2][0]) LinksTo(desk[2], L"iexplore.exe", TRUE, log);
+        if (progs[2][0]) LinksTo(progs[2], L"iexplore.exe", TRUE, log);
+        if (!g_DeleteFailures) SetIeLinksRemoved(HKEY_LOCAL_MACHINE);
+    }
+    if (!IeLinksRemoved(HKEY_CURRENT_USER))
+    {
+        g_DeleteFailures = 0;
+        if (desk[1][0]) LinksTo(desk[1], L"iexplore.exe", TRUE, log);
+        if (progs[1][0]) LinksTo(progs[1], L"iexplore.exe", TRUE, log);
+        if (!g_DeleteFailures) SetIeLinksRemoved(HKEY_CURRENT_USER);
+    }
 }
 
 static void Refresh(DIRSET d)
@@ -220,7 +284,7 @@ static void RunBchooser(LPCWSTR args, FILE *log)
 void FmShellDefaults(DWORD flags, FILE *log)
 {
     DIRSET desk, progs;
-    WCHAR winsys[MAX_PATH], pwsh[MAX_PATH], ff[MAX_PATH], ie[MAX_PATH], cmd[MAX_PATH];
+    WCHAR winsys[MAX_PATH], pwsh[MAX_PATH], ff[MAX_PATH], cmd[MAX_PATH];
     WCHAR lnk[MAX_PATH], sys[MAX_PATH];
     BOOL havePwsh, haveFf, comInit;
 
@@ -232,7 +296,6 @@ void FmShellDefaults(DWORD flags, FILE *log)
     }
     if (!GetSystemDirectoryW(sys, MAX_PATH)) return;
     StringCchPrintfW(cmd, ARRAYSIZE(cmd), L"%s\\cmd.exe", sys);
-    if (!ProgFile(L"Internet Explorer\\iexplore.exe", ie, ARRAYSIZE(ie))) ie[0] = L'\0';
     if ((flags & FM_SHELL_FORGET_BROWSER) && ProgFile(L"Mozilla Firefox\\firefox.exe", ff, ARRAYSIZE(ff)))
     {
         /* Mozilla's uninstall\helper.exe /S returns while its copy is still removing the files: wait for firefox.exe to go */
@@ -276,7 +339,9 @@ void FmShellDefaults(DWORD flags, FILE *log)
         }
     }
 
-    /* the browser: Firefox replaces the Wine Internet Explorer entry (iexplore stays installed) */
+    /* the browser: Firefox has the entry. Internet Explorer has none in either case, as on Windows 11 (iexplore.exe
+     * stays installed and opens the default browser): shortcuts to it left from an older image are removed, once. */
+    RemoveIeLinksOnce(desk, progs, log);
     if (haveFf)
     {
         WriteFirefoxPolicies(log);
@@ -284,19 +349,12 @@ void FmShellDefaults(DWORD flags, FILE *log)
         if (!LinksToIn(desk, NULL, L"firefox.exe", FALSE, NULL)) MakeLink(lnk, ff, NULL, L"Mozilla Firefox", log);
         StringCchPrintfW(lnk, ARRAYSIZE(lnk), L"%s\\%s.lnk", progs[0], NAME_FF);
         if (!LinksToIn(progs, NULL, L"firefox.exe", FALSE, NULL)) MakeLink(lnk, ff, NULL, L"Mozilla Firefox", log);
-        LinksToIn(progs, NULL, L"iexplore.exe", TRUE, log);
-        LinksToIn(desk, NULL, L"iexplore.exe", TRUE, log);
         if (flags & FM_SHELL_ADOPT_BROWSER) RunBchooser(L"/installfirefox", log);
     }
     else
     {
         LinksToIn(desk, NULL, L"firefox.exe", TRUE, log);
         LinksToIn(progs, NULL, L"firefox.exe", TRUE, log);
-        if (ie[0] && FileExists(ie) && !LinksToIn(progs, NULL, L"iexplore.exe", FALSE, NULL))
-        {
-            StringCchPrintfW(lnk, ARRAYSIZE(lnk), L"%s\\%s.lnk", progs[0], NAME_IE);
-            MakeLink(lnk, ie, NULL, L"Wine Internet Explorer", log);
-        }
         if (flags & FM_SHELL_FORGET_BROWSER) RunBchooser(L"/set IEXPLORE.EXE", log);
     }
 

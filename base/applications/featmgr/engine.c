@@ -2306,7 +2306,7 @@ static HRESULT SoftwareUninstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
         SetLastMsg(L"The uninstaller for '%s' failed (exit code %lu).\n\n%s", f ? f->Id : L"?", code, g_Tail);
         return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
     }
-    if (f && (!_wcsicmp(f->Provider, L"component") || !_wcsicmp(f->Provider, L"rapps")) && ShellDefaultsId(f->Id))   /* back to Command Prompt / Internet Explorer when pwsh / Firefox is gone */
+    if (f && (!_wcsicmp(f->Provider, L"component") || !_wcsicmp(f->Provider, L"rapps")) && ShellDefaultsId(f->Id))   /* back to Command Prompt / the image's browser defaults when pwsh / Firefox is gone */
         FmShellDefaults(!_wcsicmp(f->Id, L"firefox") ? FM_SHELL_FORGET_BROWSER : 0, log);
     return S_OK;
 }

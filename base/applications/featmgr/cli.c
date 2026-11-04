@@ -44,7 +44,7 @@ static void Usage(void)
     Out(L"  featmgr /uninstall <id> [/force]  disable, then forget the record (-> NotInstalled)\n");
     Out(L"  featmgr /shell-defaults [/browser]\n");
     Out(L"                               make the desktop / Start shortcuts match what is installed (PowerShell 7 and\n");
-    Out(L"                               Firefox, else Command Prompt and Internet Explorer); /browser = Firefox default\n");
+    Out(L"                               Firefox, else Command Prompt; no Internet Explorer entry); /browser = Firefox default\n");
     Out(L"  featmgr /import-rapps [<appdb-dir>] [/clean] [/anyarch]\n");
     Out(L"                               convert the RAPPS database (default %%LOCALAPPDATA%%\\RApps\\appdb)\n");
     Out(L"                               into Tier=software catalog entries (Catalog\\Software)\n");
