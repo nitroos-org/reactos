@@ -12,6 +12,7 @@ typedef struct _SECL_REQUEST
     [string] WCHAR *ApplicationName;
     [string] WCHAR *CommandLine;
     [string] WCHAR *CurrentDirectory;
+    [string] WCHAR *Desktop;
     [size_is(dwEnvironmentSize)] BYTE *Environment;
     DWORD dwEnvironmentSize;
     DWORD dwLogonFlags;
@@ -21,8 +22,9 @@ typedef struct _SECL_REQUEST
 
 typedef struct _SECL_RESPONSE
 {
-    DWORD_PTR hProcess;
-    DWORD_PTR hThread;
+    /* Handles are 32 bit on the wire, like all the handles the system shares between processes */
+    DWORD hProcess;
+    DWORD hThread;
     DWORD dwProcessId;
     DWORD dwThreadId;
     DWORD dwError;

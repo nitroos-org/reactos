@@ -705,6 +705,34 @@ GetSystemVersionString(OUT PWSTR pwszzVersion,
 
 
 /*
+ * Whether the DACL of the window station gives the caller what a process needs to use it: the clipboard,
+ * the global atoms, ending the session and reading its attributes (the rights of the interactive user,
+ * not the limited ones of the administrators group).
+ */
+static BOOLEAN
+IntWinStaGrantsUserAccess(
+    _In_ HWINSTA hWinSta)
+{
+    const ACCESS_MASK UserRights = WINSTA_ACCESSCLIPBOARD | WINSTA_ACCESSGLOBALATOMS |
+                                   WINSTA_EXITWINDOWS | WINSTA_READATTRIBUTES;
+    OBJECT_HANDLE_INFORMATION HandleInfo;
+    PVOID WinStaObject;
+    NTSTATUS Status;
+
+    Status = ObReferenceObjectByHandle(hWinSta,
+                                       0,
+                                       ExWindowStationObjectType,
+                                       KernelMode,
+                                       &WinStaObject,
+                                       &HandleInfo);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    ObDereferenceObject(WinStaObject);
+    return (HandleInfo.GrantedAccess & UserRights) == UserRights;
+}
+
+/*
  * IntResolveDesktop
  *
  * The IntResolveDesktop function attempts to retrieve valid handles to
@@ -1182,6 +1210,17 @@ IntResolveDesktop(
                  RtlEqualLuid(&ProcessLuid, &WinStaObject->luidUser))
             {
                 /* We are interactive on this window station */
+                bAccessAllowed = TRUE;
+                Status = STATUS_SUCCESS;
+            }
+            else if (!bUseDefaultWinSta && IntWinStaGrantsUserAccess(hTempWinSta))
+            {
+                /*
+                 * The process asked for WinSta0 by name and its logon is not the interactive one,
+                 * e.g. a process the Secondary Logon service started for another user (runas).
+                 * Like on Windows, the DACL of the window station decides: the logon SID
+                 * of that process has been added to it.
+                 */
                 bAccessAllowed = TRUE;
                 Status = STATUS_SUCCESS;
             }

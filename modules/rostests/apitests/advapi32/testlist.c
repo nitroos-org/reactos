@@ -8,6 +8,7 @@ extern void func_NamedPipeSD(void);
 extern void func_ConvertStringSidToSid(void);
 extern void func_CreateService(void);
 extern void func_CreateProcessAsUserToken(void);
+extern void func_CreateProcessWithLogon(void);
 extern void func_CreateEnvironmentBlockProfile(void);
 extern void func_CloseTrace(void);
 extern void func_DuplicateTokenEx(void);
@@ -123,6 +124,7 @@ const struct test winetest_testlist[] =
     { "RegWow64RelativeView", func_RegWow64RelativeView },
     { "CreateService", func_CreateService },
     { "CreateProcessAsUserToken", func_CreateProcessAsUserToken },
+    { "CreateProcessWithLogon", func_CreateProcessWithLogon },
     { "CreateEnvironmentBlockProfile", func_CreateEnvironmentBlockProfile },
     { "CloseTrace", func_CloseTrace },
     { "DuplicateTokenEx", func_DuplicateTokenEx },
