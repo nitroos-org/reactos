@@ -170,6 +170,9 @@ static int (__cdecl *inparam_cvarray)(int n, int l, int *a);
 static int (__cdecl *inparam_bogus_array)(int n, ipe_t *a);
 static int (__cdecl *inparam_struct)(ips_t *s);
 static int (__cdecl *inparam_carray)(int n, int *a);
+static int (__cdecl *inparam_union)(int n, ipun_t *u);
+static int (__cdecl *inparam_array_form_bogus)(int n, ipe_t *a);
+static int (__cdecl *inparam_array_form_cvarray)(int n, int l, int *a);
 static unsigned int (__cdecl *get_inparam_frees)(void);
 
 #define SERVER_FUNCTIONS \
@@ -286,6 +289,9 @@ static unsigned int (__cdecl *get_inparam_frees)(void);
     X(inparam_bogus_array) \
     X(inparam_struct) \
     X(inparam_carray) \
+    X(inparam_union) \
+    X(inparam_array_form_bogus) \
+    X(inparam_array_form_cvarray) \
     X(get_inparam_frees)
 
 /* type check statements generated in header file */
@@ -1263,6 +1269,25 @@ int __cdecl s_inparam_carray(int n, int *a)
 {
     int i, sum = 0;
     for (i = 0; i < n; i++) sum += a[i];
+    return sum;
+}
+
+int __cdecl s_inparam_union(int n, ipun_t *u)
+{
+    return n ? (int)u->uh : u->ua;
+}
+
+int __cdecl s_inparam_array_form_bogus(int n, ipe_t *a)
+{
+    int i, sum = 0;
+    for (i = 0; i < n; i++) sum += a[i];
+    return sum;
+}
+
+int __cdecl s_inparam_array_form_cvarray(int n, int l, int *a)
+{
+    int i, sum = 0;
+    for (i = 0; i < l; i++) sum += a[i];
     return sum;
 }
 
@@ -2246,6 +2271,47 @@ static void test_inparam_free_count(void)
         ok(frees == N, "bogus array: %u frees for %d calls\n", frees, N);
     else
         trace("mixed bogus array: %u frees for %d calls\n", frees, N);
+
+    base = get_inparam_frees();
+    for (i = 0; i < N; i++)
+    {
+        ipun_t u;
+        u.ua = 5;
+        ret = inparam_union(0, &u);
+        ok(ret == 5, "got %d\n", ret);
+        u.uh = 7;
+        ret = inparam_union(1, &u);
+        ok(ret == 7, "got %d\n", ret);
+    }
+    frees = get_inparam_frees() - base;
+    if (interp_interface)
+        ok(frees == 2 * N, "union: %u frees for %d calls\n", frees, 2 * N);
+    else
+        trace("mixed union: %u frees for %d calls\n", frees, 2 * N);
+
+    base = get_inparam_frees();
+    for (i = 0; i < N; i++)
+    {
+        ret = inparam_array_form_bogus(3, ea);
+        ok(ret == 3, "got %d\n", ret);
+    }
+    frees = get_inparam_frees() - base;
+    if (interp_interface)
+        ok(frees == N, "array form bogus array: %u frees for %d calls\n", frees, N);
+    else
+        trace("mixed array form bogus array: %u frees for %d calls\n", frees, N);
+
+    base = get_inparam_frees();
+    for (i = 0; i < N; i++)
+    {
+        ret = inparam_array_form_cvarray(5, 4, ia);
+        ok(ret == 10, "got %d\n", ret);
+    }
+    frees = get_inparam_frees() - base;
+    if (interp_interface)
+        ok(frees == N, "array form conformant varying array: %u frees for %d calls\n", frees, N);
+    else
+        trace("mixed array form conformant varying array: %u frees for %d calls\n", frees, N);
 
     base = get_inparam_frees();
     for (i = 0; i < N; i++)
