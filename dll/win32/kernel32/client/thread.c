@@ -54,8 +54,8 @@ BasepNotifyCsrOfThread(IN HANDLE ThreadHandle,
 
 DECLSPEC_NORETURN
 VOID
-WINAPI
-BasepThreadInitThunk(
+BASE_THREAD_INIT_THUNK_CALL
+BaseThreadInitThunk(
     _In_ DWORD Unknown,
     _In_ LPTHREAD_START_ROUTINE lpStartAddress,
     _In_ LPVOID lpParameter)
@@ -109,7 +109,7 @@ BaseThreadStartup(
     _In_ LPVOID lpParameter)
 {
     /* Fibers and the console control thread enter here (not through RtlUserThreadStart) */
-    BasepThreadInitThunk(0, lpStartAddress, lpParameter);
+    BaseThreadInitThunk(0, lpStartAddress, lpParameter);
 }
 
 VOID

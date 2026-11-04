@@ -3687,18 +3687,22 @@ LdrpInit(PCONTEXT Context,
 /* EOF */
 
 #if defined(_M_IX86) || defined(_M_AMD64)
-typedef VOID (NTAPI *PBASE_THREAD_INIT_THUNK)(ULONG Unknown, PVOID StartAddress, PVOID Parameter);
+/* __fastcall on x86 as kernel32's (and Windows') BaseThreadInitThunk: ECX Unknown, EDX the routine, the parameter on the stack */
+#ifdef _M_IX86
+#define BASE_THREAD_INIT_THUNK_CALL FASTCALL
+#else
+#define BASE_THREAD_INIT_THUNK_CALL NTAPI
+#endif
+typedef VOID (BASE_THREAD_INIT_THUNK_CALL *PBASE_THREAD_INIT_THUNK)(ULONG Unknown, PVOID StartAddress, PVOID Parameter);
 
-/* kernel32's thread start (BasepThreadInitThunk), which RtlUserThreadStart runs the thread's routine through
- * (Windows' Kernel32ThreadInitThunkFunction, there BaseThreadInitThunk). Found once kernel32 is loaded; a process
- * without it runs the routine directly. kernel32 exports it under its own name: the real BaseThreadInitThunk would
- * be hooked by Firefox (mozglue patches it and runs a thread whose routine is not in PAGE_EXECUTE_READ memory as
- * a function that returns), and the relocated DLLs of a process report PAGE_EXECUTE for their code. */
+/* kernel32's BaseThreadInitThunk, which RtlUserThreadStart runs the thread's routine through (Windows'
+ * Kernel32ThreadInitThunkFunction). Found once kernel32 is loaded; a process without it runs the routine directly.
+ * Hooking libraries (Firefox mozglue) patch the export, so the lookup is by name, as on Windows. */
 static PBASE_THREAD_INIT_THUNK Kernel32ThreadInitThunkFunction;
 
 static PBASE_THREAD_INIT_THUNK RtlpGetThreadInitThunk(VOID)
 {
-    static ANSI_STRING ThunkName = RTL_CONSTANT_STRING("BasepThreadInitThunk");
+    static ANSI_STRING ThunkName = RTL_CONSTANT_STRING("BaseThreadInitThunk");
     PBASE_THREAD_INIT_THUNK Thunk = Kernel32ThreadInitThunkFunction;
     PVOID Kernel32;
 
@@ -3734,7 +3738,7 @@ VOID NTAPI LdrInitializeWow64(PVOID NtdllBase, PCONTEXT StartContext)
 #endif
 
 /* RtlUserThreadStart (dispatch.S) with its EAX and EBX: Routine(Parameter) ends
- * the thread with its result, through kernel32's thread start (BasepThreadInitThunk, Windows BaseThreadInitThunk)
+ * the thread with its result, through kernel32's thread start (BaseThreadInitThunk)
  * (it reports an exception that no frame of the routine handles and ends the
  * thread or the process). A NULL Routine is the image's entry (the WoW64 loader's
  * start): the loader's, which the IL-only start of a .NET image without an entry
@@ -3765,7 +3769,7 @@ VOID NTAPI RtlpUserThreadStart(PVOID Routine, PVOID Parameter)
 }
 #elif defined(_M_AMD64)
 /* A user thread starts here with its routine in RCX and its parameter in RDX (the first thread of a
- * process: the image entry and the PEB), and runs the routine through kernel32's thread start (BasepThreadInitThunk)
+ * process: the image entry and the PEB), and runs the routine through kernel32's thread start (BaseThreadInitThunk)
  * as on Windows, so a stack walk of any thread ends in ntdll!RtlUserThreadStart. Without kernel32 the
  * routine runs here and its result ends the thread. */
 VOID NTAPI RtlUserThreadStart(PVOID Routine, PVOID Parameter)
