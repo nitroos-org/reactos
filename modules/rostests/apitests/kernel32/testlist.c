@@ -157,6 +157,7 @@ extern void func_MappedViewEvict(void);
 extern void func_MultiByteToWideChar(void);
 extern void func_NamedPipeInstanceReuse(void);
 extern void func_PartialContext(void);
+extern void func_Placeholder(void);
 extern void func_PerformanceCounter(void);
 extern void func_Pipes(void);
 extern void func_PipeSqos(void);
@@ -389,6 +390,7 @@ const struct test winetest_testlist[] =
     { "MultiByteToWideChar",         func_MultiByteToWideChar },
     { "NamedPipeInstanceReuse",     func_NamedPipeInstanceReuse },
     { "PartialContext",             func_PartialContext },
+    { "Placeholder",                func_Placeholder },
     { "PerformanceCounter",          func_PerformanceCounter },
     { "Pipes",                       func_Pipes },
     { "PipeSqos",                    func_PipeSqos },

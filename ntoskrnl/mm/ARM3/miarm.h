@@ -2374,6 +2374,54 @@ MiInsertVadEx(
     _In_ ULONG_PTR Alignment,
     _In_ ULONG AllocationType);
 
+NTSTATUS
+NTAPI
+MiInsertVadEx2(
+    _Inout_ PMMVAD Vad,
+    _In_ ULONG_PTR *BaseAddress,
+    _In_ SIZE_T ViewSize,
+    _In_ ULONG_PTR LowestAddress,
+    _In_ ULONG_PTR HighestAddress,
+    _In_ ULONG_PTR Alignment,
+    _In_ ULONG AllocationType);
+
+NTSTATUS
+NTAPI
+MiCaptureExtendedParameters(
+    _In_reads_opt_(Count) PMEM_EXTENDED_PARAMETER Parameters,
+    _In_ ULONG Count,
+    _In_ KPROCESSOR_MODE PreviousMode,
+    _Out_ PULONG_PTR LowestAddress,
+    _Out_ PULONG_PTR HighestAddress,
+    _Out_ PULONG_PTR Alignment);
+
+NTSTATUS
+NTAPI
+MiCheckPlaceholderForReplace(
+    _In_ PEPROCESS Process,
+    _In_ ULONG_PTR StartingAddress,
+    _In_ SIZE_T Size,
+    _Out_opt_ PMMVAD *Placeholder);
+
+VOID
+NTAPI
+MiInitializePlaceholderVad(
+    _Out_ PMMVAD_LONG Vad);
+
+NTSTATUS
+NTAPI
+MiInsertPlaceholderVad(
+    _In_ PEPROCESS Process,
+    _In_ PMMVAD_LONG Vad,
+    _In_ ULONG_PTR StartingAddress,
+    _In_ ULONG_PTR EndingAddress);
+
+/* A free placeholder VAD, and a VAD that replaced one */
+#define MI_IS_PLACEHOLDER_VAD(Vad) \
+    ((Vad)->u.VadFlags.PrivateMemory && (Vad)->u2.VadFlags2.Placeholder)
+#define MI_IS_FROM_PLACEHOLDER_VAD(Vad) \
+    ((Vad)->u2.VadFlags2.FromPlaceholder != 0)
+
 VOID
 NTAPI
 MiInsertBasedSection(

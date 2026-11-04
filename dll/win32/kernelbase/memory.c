@@ -1,99 +1,36 @@
 /*
  * PROJECT:     ReactOS system libraries
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
- * PURPOSE:     VirtualAlloc2 and VirtualAlloc2FromApp
+ * PURPOSE:     VirtualAlloc2, VirtualAlloc2FromApp, MapViewOfFile3, MapViewOfFileNuma2 and UnmapViewOfFile2
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * Cygwin (sshfs-win, git for Windows' ssh, MSYS2) reserves its thread stacks with VirtualAlloc2 and an address
- * requirement and aborts at start when KernelBase.dll does not export it. There is no NtAllocateVirtualMemoryEx
- * here, so the address requirement (lowest and highest address, alignment) is met by looking for a free region
- * and reserving it at that address. The error codes and the checks of the arguments are those of Windows 10.
- * Placeholders, partitions, NUMA nodes other than 0 and the attribute flags are not supported.
+ * requirement and aborts at start when KernelBase.dll does not export it. V8 (Chrome, Electron) reserves its
+ * address space as a placeholder (MEM_RESERVE_PLACEHOLDER), splits it with VirtualFree, and maps views and
+ * private memory into the pieces with MapViewOfFile3 and VirtualAlloc2 (MEM_REPLACE_PLACEHOLDER), when the
+ * three functions are exported. The work is NtAllocateVirtualMemoryEx's and NtMapViewOfSectionEx's; the checks
+ * of the arguments made here first, with their error codes, are those measured on Windows 10.
  */
 
 #include <stdarg.h>
+#include <ntstatus.h>
 #define WIN32_NO_STATUS
 #include <windef.h>
 #include <winbase.h>
+#include <winternl.h>
 
 #define BASEP_GRANULARITY   0x10000
 #define BASEP_PAGE_SIZE     0x1000
-#define BASEP_PLACEHOLDER_FLAGS (0x40000 | 0x4000) /* MEM_RESERVE_PLACEHOLDER, MEM_REPLACE_PLACEHOLDER */
 
 #define BASEP_ROUND_UP(x, a)    (((x) + (a) - 1) & ~((ULONG_PTR)(a) - 1))
 
-/* Find a free range of Needed bytes in [Low, High] with the alignment Align and reserve it */
 static
-PVOID
-BasepAllocateInRange(
-    _In_ HANDLE Process,
-    _In_ SIZE_T Size,
-    _In_ SIZE_T Needed,
-    _In_ ULONG Type,
-    _In_ ULONG Protect,
-    _In_ ULONG_PTR Low,
-    _In_ ULONG_PTR High,
-    _In_ SIZE_T Align)
+BOOL
+BasepSetNtStatus(NTSTATUS Status)
 {
-    BOOL TopDown = (Type & MEM_TOP_DOWN) != 0;
-    ULONG Attempt;
-
-    for (Attempt = 0; Attempt < 8; Attempt++)
-    {
-        MEMORY_BASIC_INFORMATION Info;
-        ULONG_PTR Current = Low, Best = 0;
-
-        while (Current <= High && High - Current + 1 >= Needed)
-        {
-            ULONG_PTR RegionEnd, Last, Candidate;
-
-            if (!VirtualQueryEx(Process, (PVOID)Current, &Info, sizeof(Info)))
-                break;
-
-            RegionEnd = (ULONG_PTR)Info.BaseAddress + Info.RegionSize; /* one past the region, or 0 at the top */
-            Last = (RegionEnd == 0 || RegionEnd - 1 > High) ? High : RegionEnd - 1;
-
-            if (Info.State == MEM_FREE && Last - Current + 1 >= Needed)
-            {
-                if (TopDown)
-                {
-                    /* highest candidate in this region that is not below Current */
-                    Candidate = (Last + 1 - Needed) & ~((ULONG_PTR)Align - 1);
-                    if (Candidate >= Current && Candidate + Needed - 1 <= Last)
-                        Best = Candidate;
-                }
-                else
-                {
-                    Candidate = BASEP_ROUND_UP(Current, Align);
-                    if (Candidate >= Current && Candidate <= Last && Last - Candidate + 1 >= Needed)
-                    {
-                        Best = Candidate;
-                        break;
-                    }
-                }
-            }
-
-            if (RegionEnd == 0 || RegionEnd - 1 >= High)
-                break;
-            Current = RegionEnd;
-        }
-
-        if (!Best)
-        {
-            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-            return NULL;
-        }
-
-        /* Somebody may have taken the range since it was looked up: look again */
-        {
-            PVOID Base = VirtualAllocEx(Process, (PVOID)Best, Size, Type & ~MEM_TOP_DOWN, Protect);
-            if (Base)
-                return Base;
-        }
-    }
-
-    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-    return NULL;
+    if ((LONG)Status >= 0) return TRUE;
+    SetLastError(RtlNtStatusToDosError(Status));
+    return FALSE;
 }
 
 static
@@ -160,17 +97,17 @@ BasepVirtualAlloc2(
         }
     }
 
-    if (AllocationType & BASEP_PLACEHOLDER_FLAGS)
-    {
-        SetLastError(ERROR_NOT_SUPPORTED);
-        return NULL;
-    }
-
-    /* No requirement, or one that does not ask for anything: a plain allocation */
+    /* No requirement, or one that does not ask for anything: the system places it */
     if (!Requirements ||
         (!Requirements->LowestStartingAddress && !Requirements->HighestEndingAddress && !Requirements->Alignment))
     {
-        return VirtualAllocEx(Process, BaseAddress, Size, AllocationType, PageProtection);
+        Base = BaseAddress;
+        if (!BasepSetNtStatus(NtAllocateVirtualMemoryEx(Process, &Base, &Size, AllocationType, PageProtection,
+                                                        ExtendedParameters, ParameterCount)))
+        {
+            return NULL;
+        }
+        return Base;
     }
 
     if (BaseAddress || Size == 0)
@@ -210,36 +147,20 @@ BasepVirtualAlloc2(
     if (!(AllocationType & MEM_RESERVE))
         AllocationType |= MEM_RESERVE;
 
-    if (!Low)
-        Low = BASEP_GRANULARITY;
-
-    if (!High)
-    {
-        /* Only a lowest address or an alignment: let the system choose, and look further only when that does not meet them */
-        Base = VirtualAllocEx(Process, NULL, Size, AllocationType, PageProtection);
-        if (Base)
-        {
-            if ((ULONG_PTR)Base >= Low && (!Align || ((ULONG_PTR)Base & (Align - 1)) == 0))
-                return Base;
-            VirtualFreeEx(Process, Base, 0, MEM_RELEASE);
-        }
-        High = (ULONG_PTR)SystemInfo.lpMaximumApplicationAddress;
-    }
-    else if (High < Low || High - Low + 1 < Needed)
+    if (High && (High < BASEP_GRANULARITY || High - max(Low, BASEP_GRANULARITY) + 1 < Needed))
     {
         /* nothing can be allocated below the first allocation granule */
         SetLastError(ERROR_INVALID_ADDRESS);
         return NULL;
     }
 
-    return BasepAllocateInRange(Process,
-                                Size,
-                                Needed,
-                                AllocationType,
-                                PageProtection,
-                                Low,
-                                High,
-                                Align ? Align : BASEP_GRANULARITY);
+    Base = NULL;
+    if (!BasepSetNtStatus(NtAllocateVirtualMemoryEx(Process, &Base, &Size, AllocationType, PageProtection,
+                                                    ExtendedParameters, ParameterCount)))
+    {
+        return NULL;
+    }
+    return Base;
 }
 
 PVOID
@@ -260,6 +181,72 @@ VirtualAlloc2(
                               PageProtection,
                               ExtendedParameters,
                               ParameterCount);
+}
+
+PVOID
+WINAPI
+MapViewOfFile3(
+    _In_ HANDLE FileMapping,
+    _In_opt_ HANDLE Process,
+    _In_opt_ PVOID BaseAddress,
+    _In_ ULONG64 Offset,
+    _In_ SIZE_T ViewSize,
+    _In_ ULONG AllocationType,
+    _In_ ULONG PageProtection,
+    _Inout_updates_opt_(ParameterCount) MEM_EXTENDED_PARAMETER *ExtendedParameters,
+    _In_ ULONG ParameterCount)
+{
+    LARGE_INTEGER SectionOffset;
+    PVOID Base = BaseAddress;
+
+    if (!Process)
+        Process = GetCurrentProcess();
+
+    SectionOffset.QuadPart = Offset;
+    if (!BasepSetNtStatus(NtMapViewOfSectionEx(FileMapping, Process, &Base, &SectionOffset, &ViewSize,
+                                               AllocationType, PageProtection, ExtendedParameters, ParameterCount)))
+    {
+        return NULL;
+    }
+    return Base;
+}
+
+PVOID
+WINAPI
+MapViewOfFileNuma2(
+    _In_ HANDLE FileMapping,
+    _In_ HANDLE Process,
+    _In_ ULONG64 Offset,
+    _In_opt_ PVOID BaseAddress,
+    _In_ SIZE_T ViewSize,
+    _In_ ULONG AllocationType,
+    _In_ ULONG PageProtection,
+    _In_ ULONG PreferredNode)
+{
+    MEM_EXTENDED_PARAMETER Parameter;
+
+    /* NUMA_NO_PREFERRED_NODE: no parameter at all */
+    if (PreferredNode == 0xFFFFFFFF)
+    {
+        return MapViewOfFile3(FileMapping, Process, BaseAddress, Offset, ViewSize, AllocationType, PageProtection,
+                              NULL, 0);
+    }
+
+    RtlZeroMemory(&Parameter, sizeof(Parameter));
+    Parameter.Type = MemExtendedParameterNumaNode;
+    Parameter.ULong = PreferredNode;
+    return MapViewOfFile3(FileMapping, Process, BaseAddress, Offset, ViewSize, AllocationType, PageProtection,
+                          &Parameter, 1);
+}
+
+BOOL
+WINAPI
+UnmapViewOfFile2(
+    _In_ HANDLE Process,
+    _In_ PVOID BaseAddress,
+    _In_ ULONG UnmapFlags)
+{
+    return BasepSetNtStatus(NtUnmapViewOfSectionEx(Process, BaseAddress, UnmapFlags));
 }
 
 PVOID
