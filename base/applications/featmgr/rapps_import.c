@@ -25,8 +25,10 @@
  *   RegName, Installer,        [Rapps] RegName, Installer, SilentParameters,
  *   SilentParameters, NTVersion,   NTVersion, Scope, SaveAs, LicenseType
  *   Scope, SaveAs              (carried verbatim; rapps.exe remains the executor)
- *   (fixed)                    [Install] Provider=rapps  -> featmgr delegates the
- *                              download + SHA1 check + installer run to rapps.exe
+ *   SHA256, MsiProperties      [Source] ArtifactSHA256, [Rapps] MsiProperties
+ *   [Generate], [ExeInZip]     the same sections of the manifest (arch section wins)
+ *   (fixed)                    [Install] Provider=native  -> featmgr itself downloads, checks the
+ *                              hash and runs the installer (native.c); rapps.exe is not involved
  *
  * Section selection follows RAPPS: [Section.<arch>] overrides [Section]; on
  * non-x86 the generic URLDownload is ignored (RAPPS refuses 32-bit installers
@@ -200,13 +202,6 @@ BOOL FmWriteManifest(LPCWSTR path, const FM_OUTBUF *o)
     return ok;
 }
 
-static BOOL DefaultRappsDir(LPWSTR out, DWORD cch)
-{
-    WCHAR base[MAX_PATH];
-    if (!SHGetSpecialFolderPathW(NULL, base, CSIDL_LOCAL_APPDATA, FALSE)) return FALSE;
-    return SUCCEEDED(StringCchPrintfW(out, cch, L"%s\\RApps\\appdb", base));
-}
-
 /* TRUE if dir holds at least one RAPPS entry (*.txt). */
 static BOOL HasRappsEntries(LPCWSTR dir)
 {
@@ -220,79 +215,63 @@ static BOOL HasRappsEntries(LPCWSTR dir)
     return TRUE;
 }
 
-#define FM_DBFETCH_TIMEOUT_MS (10 * 60 * 1000)
-
-/* No local RAPPS database yet: have rapps.exe download it headless
- * ("rapps /updatedb /S" - the silent mode raises no dialog), then wait for it.
- * Runs on the calling thread (the GUI calls this from its worker thread). */
-static BOOL FetchRappsDatabase(FILE *log)
+/* [<sec>.<arch>] then [<sec>] of a RAPPS entry (the Generate / ExeInZip sections) */
+static BOOL GetSecKey(LPCWSTR file, LPCWSTR sec, LPCWSTR key, LPWSTR out, DWORD cch)
 {
-    WCHAR sys[MAX_PATH], cmd[MAX_PATH + 40];
-    STARTUPINFOW si;
-    PROCESS_INFORMATION pi;
-    DWORD wr, code = 1;
-
-    if (!GetSystemDirectoryW(sys, MAX_PATH)) return FALSE;
-    StringCchPrintfW(cmd, ARRAYSIZE(cmd), L"\"%s\\rapps.exe\" /updatedb /S", sys);
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    LOGF(log, L"no local RAPPS database; fetching the online catalog: %s\n", cmd);
-    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
-    {
-        LOGF(log, L"error: cannot start rapps.exe (%lu)\n", GetLastError());
-        return FALSE;
-    }
-    FmOpStep(L"Downloading the RAPPS catalog");
-    {
-        HANDLE wh[2];
-        wh[0] = pi.hProcess;
-        wh[1] = FmOpCancelHandle();          /* NULL for the CLI: plain wait */
-        wr = WaitForMultipleObjects(wh[1] ? 2 : 1, wh, FALSE, FM_DBFETCH_TIMEOUT_MS);
-    }
-    if (wr == WAIT_OBJECT_0)
-        GetExitCodeProcess(pi.hProcess, &code);
-    else
-    {
-        LOGF(log, wr == WAIT_OBJECT_0 + 1 ? L"cancelled: catalog download stopped\n" : L"error: catalog download timed out\n");
-        TerminateProcess(pi.hProcess, 1);
-        WaitForSingleObject(pi.hProcess, 15000);
-    }
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return wr == WAIT_OBJECT_0 && code == 0;
+    WCHAR s[64];
+    StringCchPrintfW(s, ARRAYSIZE(s), L"%s.%s", sec, FM_ARCH);
+    GetPrivateProfileStringW(s, key, NOTFOUND, out, cch, file);
+    if (out[0] && out[0] != 1) return TRUE;
+    GetPrivateProfileStringW(sec, key, NOTFOUND, out, cch, file);
+    if (out[0] && out[0] != 1) return TRUE;
+    out[0] = L'\0';
+    return FALSE;
 }
 
-/* Make a RAPPS-format entry that ships in the image (a catalog manifest's [Rapps] Entry=)
- * resolvable by rapps.exe as package <pkg>: ensure the per-user RAPPS database exists
- * (fetched headless when missing, so staging never leaves a lone entry that would stop
- * rapps from downloading its catalog), then copy the file in as <pkg>.txt. */
-BOOL FmStageRappsEntry(LPCWSTR entryFile, LPCWSTR pkg, FILE *log)
+static void CopySecKey(FM_OUTBUF *o, LPCWSTR file, LPCWSTR sec, LPCWSTR key)
 {
-    WCHAR dir[MAX_PATH], dest[MAX_PATH];
+    WCHAR v[1024];
+    if (GetSecKey(file, sec, key, v, ARRAYSIZE(v)))
+    {
+        Flatten(v);
+        FmOutLine(o, key, v);
+    }
+}
 
-    if (!ValidPkgName(pkg))
-    {
-        LOGF(log, L"error: invalid RAPPS package name '%s'\n", pkg);
-        return FALSE;
-    }
-    if (!DefaultRappsDir(dir, MAX_PATH))
-    {
-        LOGF(log, L"error: cannot locate the RAPPS database directory\n");
-        return FALSE;
-    }
-    if (!HasRappsEntries(dir))
-        FetchRappsDatabase(log);   /* best effort: offline, the entry is staged alone */
-    SHCreateDirectoryExW(NULL, dir, NULL);
-    if (FAILED(StringCchPrintfW(dest, MAX_PATH, L"%s\\%s.txt", dir, pkg))
-        || !CopyFileW(entryFile, dest, FALSE))
-    {
-        LOGF(log, L"error: cannot stage RAPPS entry %s (%lu)\n", entryFile, GetLastError());
-        return FALSE;
-    }
-    LOGF(log, L"  staged RAPPS entry: %s\n", dest);
-    return TRUE;
+/* RAPPS NTVersion: "Max-", "Min-Max", "Min" or "Min+" (major<<8 | minor), as CAvailableApplicationInfo::IsCompatible */
+static ULONG NtVersionNow(void)
+{
+    typedef LONG (WINAPI *PFN_RGV)(PRTL_OSVERSIONINFOW);
+    PFN_RGV p = (PFN_RGV)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
+    RTL_OSVERSIONINFOW v;
+    ZeroMemory(&v, sizeof(v));
+    v.dwOSVersionInfoSize = sizeof(v);
+    if (!p || p(&v)) return 0x0A00;
+    return (v.dwMajorVersion << 8) | v.dwMinorVersion;
+}
+
+static BOOL NtCompatible(LPCWSTR file, DWORD flags)
+{
+    WCHAR v[64], *p;
+    ULONG minV, maxV, now;
+    if (!GetKey(file, L"NTVersion", v, ARRAYSIZE(v), flags)) return TRUE;
+    minV = wcstoul(v, &p, 0);
+    if (p == v) return TRUE;
+    maxV = (*p == L'-') ? wcstoul(p + 1, NULL, 0) : 0xFFFFFFFFu;
+    if (maxV == 0) { maxV = minV; minV = 0; }
+    now = NtVersionNow();
+    return now >= minV && now <= maxV;
+}
+
+/* nitro replaces these upstream packages: Firefox is the native "firefox" entry (current release, SHA-256 checked); the two
+ * 2016-era Firefox builds and the unpinned "latest ESR" redirect of the old overlay are not offered */
+static BOOL HiddenPkg(LPCWSTR pkg)
+{
+    static const LPCWSTR hidden[] = { L"firefox", L"firefox-esr", L"firefox28", L"firefox36" };
+    int i;
+    for (i = 0; i < (int)ARRAYSIZE(hidden); i++)
+        if (!_wcsicmp(pkg, hidden[i])) return TRUE;
+    return FALSE;
 }
 
 int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
@@ -305,15 +284,25 @@ int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
     if (skipped) *skipped = 0;
     if (srcDir && srcDir[0])
         StringCchCopyW(src, MAX_PATH, srcDir);
-    else if (!DefaultRappsDir(src, MAX_PATH))
+    else if (!FmGetRappsDbDir(src, MAX_PATH))
     {
         LOGF(log, L"error: cannot locate the RAPPS database directory\n");
         return -1;
     }
     PathRemoveBackslashW(src);
-    /* default location only: an explicit directory is the caller's to populate */
-    if (!(srcDir && srcDir[0]) && !HasRappsEntries(src))
-        FetchRappsDatabase(log);
+    /* default location only (an explicit directory is the caller's to populate): fetch the online catalog ourselves when
+     * there is none yet, or when a refresh was asked for. A failed refresh keeps the catalog that is there. */
+    if (!(srcDir && srcDir[0]) && (!HasRappsEntries(src) || (flags & FM_IMPORT_REFETCH)))
+    {
+        HRESULT fh = FmRappsFetchDb(NULL, log);
+        if (FAILED(fh))
+        {
+            WCHAR why[512];
+            FmGetLastMessage(why, ARRAYSIZE(why));
+            LOGF(log, L"error: could not fetch the RAPPS catalog: %s\n", why);
+            if (!HasRappsEntries(src)) return -1;
+        }
+    }
     if (FmOpCancelled()) { FmSetLastMessage(L"The operation was cancelled."); return -1; }   /* before anything is rewritten */
     FmOpStep(L"Converting the RAPPS entries into Software-tab entries");
     if (!FmGetSoftwareCatalogDir(outDir, MAX_PATH)) return -1;
@@ -357,7 +346,9 @@ int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
         StringCchCopyW(pkg, MAX_PATH, fd.cFileName);
         PathRemoveExtensionW(pkg);
         if (!ValidPkgName(pkg)) { skip++; LOGF(log, L"skip: '%s' (unusable package name)\n", fd.cFileName); continue; }
+        if (HiddenPkg(pkg)) { skip++; LOGF(log, L"skip: %s (replaced by the native firefox entry)\n", pkg); continue; }
         StringCchPrintfW(file, MAX_PATH, L"%s\\%s", src, fd.cFileName);
+        if (!NtCompatible(file, flags)) { skip++; LOGF(log, L"skip: %s (needs another Windows version)\n", pkg); continue; }
 
         if (!GetKey(file, L"Name", name, ARRAYSIZE(name), flags)
             || !GetKey(file, L"URLDownload", url, ARRAYSIZE(url), flags))
@@ -367,6 +358,13 @@ int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
             continue;
         }
         Flatten(name); Flatten(url);
+        /* a download is installed only after its hash is checked: an entry with neither SHA-256 nor SHA-1 is not offered */
+        if (!GetKey(file, L"SHA256", v, ARRAYSIZE(v), flags) && !GetKey(file, L"SHA1", v, ARRAYSIZE(v), flags))
+        {
+            skip++;
+            LOGF(log, L"skip: %s (no SHA-256 or SHA-1 checksum, so it could not be verified)\n", pkg);
+            continue;
+        }
         StringCchPrintfW(id, FM_MAX_ID, L"rapps-%s", pkg);
 
         FmOutLine(&o, L"", L"; Generated by featmgr /import-rapps from the RAPPS database. Do not edit;");
@@ -377,6 +375,10 @@ int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
         CopyKey(&o, file, L"Description", L"Description", flags);
         if (GetKey(file, L"Version", v, ARRAYSIZE(v), flags)) { Flatten(v); FmOutLine(&o, L"Version", v); }
         FmOutLine(&o, L"Tier", L"software");
+        catId = 0;
+        if (GetKey(file, L"Category", cat, ARRAYSIZE(cat), flags)) catId = _wtoi(cat);
+        if (catId < 0 || catId >= (int)ARRAYSIZE(g_Categories)) catId = 0;
+        FmOutLine(&o, L"Group", g_Categories[catId]);
         if (GetKey(file, L"Dependencies", v, ARRAYSIZE(v), flags))
         {
             WCHAR deps[512];
@@ -388,11 +390,12 @@ int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
 
         FmOutLine(&o, L"", L"");
         FmOutLine(&o, L"", L"[Install]");
-        FmOutLine(&o, L"Provider", L"rapps");
+        FmOutLine(&o, L"Provider", L"native");
 
         FmOutLine(&o, L"", L"");
         FmOutLine(&o, L"", L"[Source]");
         FmOutLine(&o, L"Artifact", url);
+        CopyKey(&o, file, L"SHA256", L"ArtifactSHA256", flags);
         CopyKey(&o, file, L"SHA1", L"ArtifactSHA1", flags);
         CopyKey(&o, file, L"SizeBytes", L"SizeBytes", flags);
         BuildLicense(file, v, ARRAYSIZE(v), flags);
@@ -403,9 +406,6 @@ int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
         FmOutLine(&o, L"", L"");
         FmOutLine(&o, L"", L"[Rapps]");
         FmOutLine(&o, L"Pkg", pkg);
-        catId = 0;
-        if (GetKey(file, L"Category", cat, ARRAYSIZE(cat), flags)) catId = _wtoi(cat);
-        if (catId < 0 || catId >= (int)ARRAYSIZE(g_Categories)) catId = 0;
         StringCchPrintfW(cat, ARRAYSIZE(cat), L"%d", catId);
         FmOutLine(&o, L"CategoryId", cat);
         FmOutLine(&o, L"Category", g_Categories[catId]);
@@ -417,6 +417,23 @@ int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
         CopyKey(&o, file, L"SaveAs", L"SaveAs", flags);
         CopyKey(&o, file, L"LicenseType", L"LicenseType", flags);
         CopyKey(&o, file, L"Dependencies", L"Dependencies", flags);
+        CopyKey(&o, file, L"MsiProperties", L"MsiProperties", flags);
+        if (GetSecKey(file, L"Generate", L"Files", v, ARRAYSIZE(v)))
+        {
+            static const LPCWSTR gk[] = { L"Files", L"Dir", L"Icon", L"Lnk", L"LnkParameters", L"DelFile", L"DelDir",
+                                          L"DelDirEmpty", L"DelReg", L"DelRegEmpty" };
+            int k;
+            FmOutLine(&o, L"", L"");
+            FmOutLine(&o, L"", L"[Generate]");
+            for (k = 0; k < (int)ARRAYSIZE(gk); k++) CopySecKey(&o, file, L"Generate", gk[k]);
+        }
+        if (GetSecKey(file, L"ExeInZip", L"Exe", v, ARRAYSIZE(v)) || GetSecKey(file, L"ExeInZip", L"Installer", v, ARRAYSIZE(v)))
+        {
+            FmOutLine(&o, L"", L"");
+            FmOutLine(&o, L"", L"[ExeInZip]");
+            CopySecKey(&o, file, L"ExeInZip", L"Installer");
+            CopySecKey(&o, file, L"ExeInZip", L"Exe");
+        }
 
         StringCchPrintfW(outFile, MAX_PATH, L"%s\\%s.ini", outDir, id);
         if (!o.fail && FmWriteManifest(outFile, &o))

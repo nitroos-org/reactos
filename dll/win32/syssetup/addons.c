@@ -12,18 +12,18 @@
 #define NDEBUG
 #include <debug.h>
 
-typedef enum _RappsConsent {
+typedef enum _AddonConsent {
     NOT_ASKED,
     APPROVED,
     DENIED
-} RappsConsent;
+} AddonConsent;
 
 typedef struct _ADDON_INSTALL_DATA
 {
     PCWSTR Title;
     PCWSTR AddonPath;
     PCWSTR CreateProcessFormatString;
-    PCWSTR RappsId;
+    PCWSTR FeatmgrPkg;     /* RAPPS catalog package the feature manager installs when the local file is missing or failed */
     DWORD Flags;
 } ADDON_INSTALL_DATA, *PADDON_INSTALL_DATA;
 typedef const ADDON_INSTALL_DATA* PCADDON_INSTALL_DATA;
@@ -38,7 +38,7 @@ static const ADDON_INSTALL_DATA Addons[] = {
     {L"Wine Gecko", L"%SystemRoot%\\wine_gecko-2.40-x86.msi", L"msiexec.exe /i \"%s\" /qn /norestart", L"gecko"},
     {L"WineVDM", L"%SystemRoot%\\winevdm_setup.exe", L"\"%s\" /VERYSILENT", L"winevdm"},
 #elif defined(_M_AMD64)
-    /* No RappsId: the Applications Manager package is the x86 build. Without the
+    /* No FeatmgrPkg: the catalog package is the x86 build. Without the
      * local file, the Internet Browser offers the download on first use. */
     {L"Wine Gecko", L"%SystemRoot%\\wine_gecko-2.40-x86_64.msi", L"msiexec.exe /i \"%s\" /qn /norestart", NULL},
     /* PowerShell 7: the image carries the official MSI (staged at build time) in the feature manager's payload
@@ -87,7 +87,7 @@ BOOL DoesFileExist(
 HRESULT
 InstallAddon(
     _In_    PCADDON_INSTALL_DATA pInstallData,
-    _Inout_ RappsConsent* Consent,
+    _Inout_ AddonConsent* Consent,
     _In_    PITEMSDATA pItemsData,
     _Inout_ PREGISTRATIONNOTIFY pNotify)
 {
@@ -105,12 +105,12 @@ InstallAddon(
     /* Attempt to install addon from local installer. */
     if (!DoesFileExist(ExpandedAddonPath))
     {
-        if (pInstallData->RappsId == NULL)
+        if (pInstallData->FeatmgrPkg == NULL)
         {
             hr = S_OK;
             goto done;
         }
-        goto rapps_install;
+        goto featmgr_install;
     }
 
     hr = StringCchPrintfW(Command, ARRAYSIZE(Command),
@@ -127,11 +127,12 @@ InstallAddon(
         goto done;
     }
 
-    if (pInstallData->RappsId == NULL)
+    if (pInstallData->FeatmgrPkg == NULL)
         goto done;
 
-rapps_install:
-    /* Local installer doesn't exist or failed. Try installing through Rapps. */
+featmgr_install:
+    /* Local installer doesn't exist or failed. Try installing through the feature manager (it fetches the
+     * RAPPS catalog itself, checks the package's hash and runs the installer silently). */
     if (*Consent == NOT_ASKED)
     {
         WCHAR szMessage[256], szCaption[64];
@@ -148,7 +149,7 @@ rapps_install:
         goto done;
     }
 
-    hr = StringCchPrintfW(Command, ARRAYSIZE(Command), L"rapps.exe /install /S %s", pInstallData->RappsId);
+    hr = StringCchPrintfW(Command, ARRAYSIZE(Command), L"featmgr.exe /install %s", pInstallData->FeatmgrPkg);
     if (!SUCCEEDED(hr))
         goto done;
 
@@ -162,7 +163,7 @@ done:
         LogItem(NULL, L"An optional component could not be installed; setup continues");
         hr = S_OK;
     }
-    /* We don't set an error in pNotify because the user chose to cancel rapps install.
+    /* We don't set an error in pNotify because the user chose to cancel the download.
      * Showing an error may make the user think the installation of the operating system failed. */
     if (!SUCCEEDED(hr) && hr != HRESULT_FROM_WIN32(ERROR_CANCELLED))
         pNotify->LastError = HRESULT_CODE(hr);
@@ -177,7 +178,7 @@ InstallOptionalComponents(
     HRESULT hr = S_OK;
     PSETUPDATA pSetupData;
     REGISTRATIONNOTIFY Notify = { 0 };
-    RappsConsent Consent = NOT_ASKED;
+    AddonConsent Consent = NOT_ASKED;
 
     /* The last element in Addons is null, don't count it as a step. */
     SendMessage(pItemsData->hwndDlg, PM_ITEM_START, 3, (LPARAM)(ARRAYSIZE(Addons) - 1));
@@ -194,7 +195,7 @@ InstallOptionalComponents(
 
         hr = InstallAddon(&Addons[i], &Consent, pItemsData, &Notify);
 
-        /* Cancelling rapps install is not an error. Reset hr to S_OK. */
+        /* Declining the download is not an error. Reset hr to S_OK. */
         if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED))
             hr = S_OK;
 

@@ -195,42 +195,67 @@ void FmCompInstallLine(const FM_COMPONENT *c, LPCWSTR file, LPWSTR out, DWORD cc
         StringCchCopyW(out, cch, raw);
 }
 
-/* ---- SHA-256 -------------------------------------------------------------- */
+/* ---- hashing: SHA-256 and/or SHA-1 over one pass ---------------------------------------------------------- */
 
-typedef struct { HCRYPTPROV prov; HCRYPTHASH hash; } SHA256_CTX_;
+typedef struct { HCRYPTPROV prov; HCRYPTHASH hash; HCRYPTHASH hash1; } SHA256_CTX_;   /* hash = SHA-256 (0: off), hash1 = SHA-1 (0: off) */
 
-static BOOL ShaBegin(SHA256_CTX_ *s)
+static BOOL ShaBeginEx(SHA256_CTX_ *s, BOOL want256, BOOL want1)
 {
-    s->prov = 0; s->hash = 0;
+    s->prov = 0; s->hash = 0; s->hash1 = 0;
     if (!CryptAcquireContextW(&s->prov, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) return FALSE;
-    if (!CryptCreateHash(s->prov, CALG_SHA_256, 0, 0, &s->hash))
+    if ((want256 && !CryptCreateHash(s->prov, CALG_SHA_256, 0, 0, &s->hash)) ||
+        (want1 && !CryptCreateHash(s->prov, CALG_SHA1, 0, 0, &s->hash1)))
     {
+        if (s->hash) CryptDestroyHash(s->hash);
+        if (s->hash1) CryptDestroyHash(s->hash1);
         CryptReleaseContext(s->prov, 0);
-        s->prov = 0;
+        s->prov = 0; s->hash = 0; s->hash1 = 0;
         return FALSE;
     }
     return TRUE;
 }
 
+static BOOL ShaData(SHA256_CTX_ *s, const BYTE *b, DWORD n)
+{
+    return (!s->hash || CryptHashData(s->hash, b, n, 0)) && (!s->hash1 || CryptHashData(s->hash1, b, n, 0));
+}
+
 static void ShaAbort(SHA256_CTX_ *s)
 {
     if (s->hash) CryptDestroyHash(s->hash);
+    if (s->hash1) CryptDestroyHash(s->hash1);
     if (s->prov) CryptReleaseContext(s->prov, 0);
-    s->hash = 0; s->prov = 0;
+    s->hash = 0; s->hash1 = 0; s->prov = 0;
 }
 
-static BOOL ShaEnd(SHA256_CTX_ *s, WCHAR hex[65])
+static BOOL HexOf(HCRYPTHASH h, DWORD len, WCHAR *hex)
 {
     BYTE d[32];
     DWORD cb = sizeof(d), i;
-    BOOL ok = CryptGetHashParam(s->hash, HP_HASHVAL, d, &cb, 0) && cb == sizeof(d);
-    if (ok)
-        for (i = 0; i < sizeof(d); i++) StringCchPrintfW(hex + 2 * i, 3, L"%02x", d[i]);
+    if (!CryptGetHashParam(h, HP_HASHVAL, d, &cb, 0) || cb != len) return FALSE;
+    for (i = 0; i < len; i++) StringCchPrintfW(hex + 2 * i, 3, L"%02x", d[i]);
+    return TRUE;
+}
+
+/* hex256 / hex1 (may be NULL) receive the digests of the hashes that were on */
+static BOOL ShaEndEx(SHA256_CTX_ *s, WCHAR hex256[65], WCHAR hex1[41])
+{
+    BOOL ok = TRUE;
+    if (s->hash) ok = HexOf(s->hash, 32, hex256);
+    if (ok && s->hash1) ok = HexOf(s->hash1, 20, hex1);
     ShaAbort(s);
     return ok;
 }
 
-BOOL FmFileSha256(LPCWSTR path, WCHAR hex[65])
+static BOOL HexValid(LPCWSTR s, size_t n)
+{
+    size_t i;
+    for (i = 0; s[i]; i++)
+        if (!iswxdigit(s[i])) return FALSE;
+    return i == n;
+}
+
+static BOOL FileHashes(LPCWSTR path, BOOL want256, BOOL want1, WCHAR hex256[65], WCHAR hex1[41])
 {
     HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     SHA256_CTX_ s;
@@ -239,17 +264,41 @@ BOOL FmFileSha256(LPCWSTR path, WCHAR hex[65])
     BOOL ok = TRUE;
 
     if (f == INVALID_HANDLE_VALUE) return FALSE;
-    if (!ShaBegin(&s)) { CloseHandle(f); return FALSE; }
+    if (!ShaBeginEx(&s, want256, want1)) { CloseHandle(f); return FALSE; }
     for (;;)
     {
         if (!ReadFile(f, buf, sizeof(buf), &got, NULL)) { ok = FALSE; break; }
         if (!got) break;
-        if (!CryptHashData(s.hash, buf, got, 0)) { ok = FALSE; break; }
+        if (!ShaData(&s, buf, got)) { ok = FALSE; break; }
         if (FmOpCancelled()) { ok = FALSE; break; }
     }
     CloseHandle(f);
     if (!ok) { ShaAbort(&s); return FALSE; }
-    return ShaEnd(&s, hex);
+    return ShaEndEx(&s, hex256, hex1);
+}
+
+BOOL FmFileSha256(LPCWSTR path, WCHAR hex[65])
+{
+    return FileHashes(path, TRUE, FALSE, hex, NULL);
+}
+
+BOOL FmFileHashHex(LPCWSTR path, ALG_ID alg, WCHAR *hex, DWORD cch)
+{
+    WCHAR h256[65], h1[41];
+    if (alg == CALG_SHA_256)
+        return cch >= 65 && FileHashes(path, TRUE, FALSE, h256, NULL) && SUCCEEDED(StringCchCopyW(hex, cch, h256));
+    if (alg == CALG_SHA1)
+        return cch >= 41 && FileHashes(path, FALSE, TRUE, NULL, h1) && SUCCEEDED(StringCchCopyW(hex, cch, h1));
+    return FALSE;
+}
+
+/* the file matches every hash the component declares */
+static BOOL FileMatches(LPCWSTR path, const FM_COMPONENT *c, WCHAR got256[65], WCHAR got1[41])
+{
+    BOOL w256 = c->Sha256[0] != 0, w1 = c->Sha1[0] != 0;
+    got256[0] = got1[0] = L'\0';
+    if (!FileHashes(path, w256, w1, got256, got1)) return FALSE;
+    return (!w256 || !_wcsicmp(got256, c->Sha256)) && (!w1 || !_wcsicmp(got1, c->Sha1));
 }
 
 /* ---- wininet ---------------------------------------------------------------- */
@@ -331,7 +380,7 @@ static BOOL MakeDir(LPCWSTR dir)
 
 HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log)
 {
-    WCHAR root[MAX_PATH], dir[MAX_PATH], part[MAX_PATH + 8], want[72], got[72];
+    WCHAR root[MAX_PATH], dir[MAX_PATH], part[MAX_PATH + 8], want[72], got[72], want1[48], got1[48];
     HINTERNET hNet = NULL, hUrl = NULL;
     HANDLE out = INVALID_HANDLE_VALUE;
     SHA256_CTX_ sha;
@@ -339,20 +388,19 @@ HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log)
     DWORD attempt, status = 0, cb, nread, nwritten, lastTick = 0, err = 0, stalls = 0;
     ULONGLONG total = 0, done = 0;
     HRESULT hr = E_FAIL;
-    BOOL shaOn = FALSE;
-    size_t i;
+    BOOL shaOn = FALSE, has256, has1;
 
-    if (!c->Url[0] || _wcsnicmp(c->Url, L"https://", 8))
+    if (!c->Url[0] || (_wcsnicmp(c->Url, L"https://", 8) && !(c->AllowHttp && !_wcsnicmp(c->Url, L"http://", 7))))
     {
         FmSetLastMessage(L"The download address of '%s' is not an https address; featmgr only downloads over https.", c->Name);
         return E_INVALIDARG;
     }
     /* no checksum, no download: a verified download is the rule for every component */
-    for (i = 0; c->Sha256[i]; i++)
-        if (!iswxdigit(c->Sha256[i])) break;
-    if (i != 64 || c->Sha256[i])
+    has256 = HexValid(c->Sha256, 64);
+    has1 = HexValid(c->Sha1, 40);
+    if ((c->Sha256[0] && !has256) || (c->Sha1[0] && !has1) || (!has256 && !has1))
     {
-        FmSetLastMessage(L"The component list has no valid SHA-256 for '%s', so it is not downloaded.", c->Name);
+        FmSetLastMessage(L"The catalog has no valid SHA-256 (or SHA-1) checksum for '%s', so it is not downloaded.", c->Name);
         return E_INVALIDARG;
     }
     if (wcspbrk(c->FileName, L"\\/:*?\"<>|"))
@@ -362,6 +410,8 @@ HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log)
     }
     StringCchCopyW(want, ARRAYSIZE(want), c->Sha256);
     CharLowerW(want);
+    StringCchCopyW(want1, ARRAYSIZE(want1), c->Sha1);
+    CharLowerW(want1);
     if (!FmGetRootDir(root, MAX_PATH)) return E_FAIL;
     StringCchPrintfW(dir, ARRAYSIZE(dir), L"%s\\Downloads", root);
     if (!MakeDir(root) || !MakeDir(dir))
@@ -373,11 +423,27 @@ HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log)
     StringCchPrintfW(part, ARRAYSIZE(part), L"%s.part", path);
 
     FmOpPhase(FM_PHASE_SEARCH);
+    /* local-first: a file the image already carries (the PowerShell 7 MSI) is used, once its hash matches, with no download */
+    if (c->LocalFile[0] && GetFileAttributesW(c->LocalFile) != INVALID_FILE_ATTRIBUTES)
+    {
+        FmOpStep(L"Found %s on this system, checking it", c->LocalFile);
+        if (FileMatches(c->LocalFile, c, got, got1))
+        {
+            LOGF(log, L"  using the local copy %s (hash verified, no download)\n", c->LocalFile);
+            return StringCchCopyW(path, cch, c->LocalFile);
+        }
+        if (FmOpCancelled())
+        {
+            FmSetLastMessage(L"The operation was cancelled.");
+            return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+        }
+        LOGF(log, L"  the local copy %s does not match its hash; downloading instead\n", c->LocalFile);
+    }
     /* a verified copy from an earlier attempt is reused */
     if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
     {
         FmOpStep(L"Found a downloaded copy of %s, checking it", c->Name);
-        if (FmFileSha256(path, got) && !_wcsicmp(got, want))
+        if (FileMatches(path, c, got, got1))
         {
             LOGF(log, L"  using the verified copy %s\n", path);
             return S_OK;
@@ -470,7 +536,7 @@ HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log)
         hr = HRESULT_FROM_WIN32(err);
         goto fail;
     }
-    if (!ShaBegin(&sha))
+    if (!ShaBeginEx(&sha, has256, has1))
     {
         FmSetLastMessage(L"No cryptographic provider is available, so the download cannot be verified and is not made.");
         hr = E_FAIL;
@@ -518,7 +584,7 @@ HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log)
             hr = HRESULT_FROM_WIN32(err ? err : ERROR_DISK_FULL);
             goto fail;
         }
-        if (!CryptHashData(sha.hash, buf, nread, 0))
+        if (!ShaData(&sha, buf, nread))
         {
             FmSetLastMessage(L"Hashing the download failed.");
             hr = E_FAIL;
@@ -538,7 +604,7 @@ HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log)
 
     FmOpStep(L"Verifying the download of %s", c->Name);
     shaOn = FALSE;
-    if (!ShaEnd(&sha, got))
+    if (!ShaEndEx(&sha, got, got1))
     {
         FmSetLastMessage(L"Hashing the download failed.");
         hr = E_FAIL;
@@ -550,12 +616,14 @@ HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log)
         hr = HRESULT_FROM_WIN32(ERROR_INTERNET_CONNECTION_RESET);
         goto fail;
     }
-    if (_wcsicmp(got, want))
+    if ((has256 && _wcsicmp(got, want)) || (has1 && _wcsicmp(got1, want1)))
     {
-        LOGF(log, L"  ERROR: SHA-256 mismatch for %s: expected %s, got %s\n", c->Url, want, got);
-        FmOpStep(L"SHA-256 expected %s, got %s", want, got);
-        FmSetLastMessage(L"The file downloaded for %s does not match its expected SHA-256 checksum, so it was deleted and "
-                         L"nothing was installed. (The expected and the actual checksum are in the log.)", c->Name);
+        LOGF(log, L"  ERROR: checksum mismatch for %s: expected %s %s, got %s\n", c->Url, has256 ? L"SHA-256" : L"SHA-1",
+             has256 ? want : want1, has256 ? got : got1);
+        FmOpStep(L"%s expected %s, got %s", has256 ? L"SHA-256" : L"SHA-1", has256 ? want : want1, has256 ? got : got1);
+        FmSetLastMessage(L"The file downloaded for %s does not match its expected %s checksum, so it was deleted and "
+                         L"nothing was installed. (The expected and the actual checksum are in the log.)", c->Name,
+                         has256 ? L"SHA-256" : L"SHA-1");
         hr = HRESULT_FROM_WIN32(ERROR_CRC);
         goto fail;
     }
@@ -567,7 +635,7 @@ HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log)
         hr = HRESULT_FROM_WIN32(err);
         goto fail;
     }
-    LOGF(log, L"  downloaded and verified %s (%I64u bytes, sha256 %s)\n", path, done, got);
+    LOGF(log, L"  downloaded and verified %s (%I64u bytes, %s %s)\n", path, done, has256 ? L"sha256" : L"sha1", has256 ? got : got1);
     return S_OK;
 
 fail:
@@ -576,5 +644,172 @@ fail:
     DeleteFileW(part);
     if (hUrl || hNet) CloseNetLater(hUrl, hNet);
     path[0] = L'\0';
+    return hr;
+}
+
+/* ---- plain file download with an optional certificate pin (the RAPPS catalog) ------------------------------------ */
+
+/* SHA-256 of the root certificates the official RAPPS server's chain must end in (Let's Encrypt, https://letsencrypt.org/certificates/):
+ * ISRG Root X1 and X2. The same two pins rapps.exe used for its database download. */
+static const WCHAR *g_PinnedRoots[] = {
+    L"96bcec06264976f37460779acf28c5a7cfe8a3c0aae11a8ffcee05c0bddf08c6",
+    L"69729b8e15a86efc177a57afb7171dfc64add28c2fca8cf1507e34453ccb1470",
+};
+
+static BOOL ChainPinned(HINTERNET hFile)
+{
+    PCCERT_CHAIN_CONTEXT cc = NULL;
+    DWORD cb = sizeof(cc), n, i;
+    BYTE hash[32];
+    WCHAR hex[65];
+    BOOL ok = FALSE;
+
+    if (!InternetQueryOptionA(hFile, INTERNET_OPTION_SERVER_CERT_CHAIN_CONTEXT, &cc, &cb) || !cc) return FALSE;
+    if (cc->cChain >= 1 && cc->rgpChain[0]->cElement >= 2)
+    {
+        CERT_SIMPLE_CHAIN *chain = cc->rgpChain[0];
+        PCCERT_CONTEXT root = chain->rgpElement[chain->cElement - 1]->pCertContext;
+        n = sizeof(hash);
+        if (CryptHashCertificate(0, CALG_SHA_256, 0, root->pbCertEncoded, root->cbCertEncoded, hash, &n) && n == sizeof(hash))
+        {
+            for (i = 0; i < n; i++) StringCchPrintfW(hex + 2 * i, 3, L"%02x", hash[i]);
+            for (i = 0; i < ARRAYSIZE(g_PinnedRoots); i++)
+                if (!_wcsicmp(hex, g_PinnedRoots[i])) ok = TRUE;
+        }
+    }
+    CertFreeCertificateChain(cc);
+    return ok;
+}
+
+HRESULT FmDownloadFile(LPCWSTR url, LPCWSTR dest, BOOL pinned, ULONGLONG maxBytes, FILE *log)
+{
+    WCHAR part[MAX_PATH + 8];
+    HINTERNET hNet = NULL, hUrl = NULL;
+    HANDLE out = INVALID_HANDLE_VALUE;
+    static BYTE buf[64 * 1024];
+    DWORD attempt, status = 0, cb, nread, nwritten, err = 0, stalls = 0;
+    ULONGLONG done = 0, total = 0;
+    HRESULT hr = E_FAIL;
+
+    (void)pinned;      /* the catalog carries every download address and hash: never over plain http, pinned or not */
+    if (_wcsnicmp(url, L"https://", 8))
+    {
+        FmSetLastMessage(L"Refusing to download from %s: not an https address.", url);
+        return E_INVALIDARG;
+    }
+    StringCchPrintfW(part, ARRAYSIZE(part), L"%s.part", dest);
+    DeleteFileW(part);
+    hNet = OpenNet(30000);
+    if (!hNet)
+    {
+        err = GetLastError();
+        FmSetLastMessage(L"Cannot start the network stack (error %lu).", err);
+        return HRESULT_FROM_WIN32(err);
+    }
+    {
+        DWORD rt = READ_TIMEOUT_MS;
+        InternetSetOptionW(hNet, INTERNET_OPTION_RECEIVE_TIMEOUT, &rt, sizeof(rt));
+    }
+    for (attempt = 1; ; attempt++)
+    {
+        DWORD w;
+        err = 0; status = 0;
+        hUrl = InternetOpenUrlW(hNet, url, NULL, 0, DL_FLAGS, 0);
+        if (hUrl)
+        {
+            cb = sizeof(status);
+            if (!HttpQueryInfoW(hUrl, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &status, &cb, NULL))
+                err = GetLastError();
+            else if (status == HTTP_STATUS_OK)
+                break;
+        }
+        else
+            err = GetLastError();
+        if (FmOpCancelled()) { FmSetLastMessage(L"The operation was cancelled."); hr = HRESULT_FROM_WIN32(ERROR_CANCELLED); goto fail; }
+        if (hUrl) { InternetCloseHandle(hUrl); hUrl = NULL; }
+        if (attempt >= DL_ATTEMPTS || (status && !TransientStatus(status)))
+        {
+            if (status)
+                FmSetLastMessage(L"The server answered HTTP %lu for %s. Check the network connection and try again.", status, url);
+            else
+                FmSetLastMessage(L"Cannot reach %s (error %lu). Check the network connection and try again.", url, err);
+            hr = HRESULT_FROM_WIN32(err ? err : ERROR_INTERNET_CANNOT_CONNECT);
+            goto fail;
+        }
+        for (w = 0; w < attempt * 3000 && !FmOpCancelled(); w += 100) Sleep(100);
+    }
+    if (pinned && !ChainPinned(hUrl))
+    {
+        LOGF(log, L"  ERROR: the certificate chain of %s does not end in a pinned root; not downloading\n", url);
+        FmSetLastMessage(L"The server certificate of %s is not the expected one (certificate pin mismatch), so nothing was downloaded.", url);
+        hr = HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+        goto fail;
+    }
+    {
+        WCHAR len[40];
+        cb = sizeof(len);
+        len[0] = L'\0';
+        if (HttpQueryInfoW(hUrl, HTTP_QUERY_CONTENT_LENGTH, len, &cb, NULL) && len[0]) total = _wcstoui64(len, NULL, 10);
+        FmOpBytes(0, total);
+    }
+    out = CreateFileW(part, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (out == INVALID_HANDLE_VALUE)
+    {
+        err = GetLastError();
+        FmSetLastMessage(L"Cannot create %s (error %lu).", part, err);
+        hr = HRESULT_FROM_WIN32(err);
+        goto fail;
+    }
+    for (;;)
+    {
+        if (FmOpCancelled()) { FmSetLastMessage(L"The download was cancelled."); hr = HRESULT_FROM_WIN32(ERROR_CANCELLED); goto fail; }
+        if (!InternetReadFile(hUrl, buf, sizeof(buf), &nread))
+        {
+            err = GetLastError();
+            if (err == ERROR_INTERNET_TIMEOUT && stalls < STALL_LIMIT) { stalls++; continue; }
+            FmSetLastMessage(L"The download was interrupted (error %lu).", err);
+            hr = HRESULT_FROM_WIN32(err ? err : ERROR_INTERNET_CONNECTION_RESET);
+            goto fail;
+        }
+        stalls = 0;
+        if (!nread) break;
+        done += nread;
+        if (maxBytes && done > maxBytes)
+        {
+            FmSetLastMessage(L"The download from %s is larger than the %I64u MB limit; stopped.", url, maxBytes >> 20);
+            hr = HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
+            goto fail;
+        }
+        if (!WriteFile(out, buf, nread, &nwritten, NULL) || nwritten != nread)
+        {
+            err = GetLastError();
+            FmSetLastMessage(L"Cannot write %s (error %lu): the disk may be full.", part, err);
+            hr = HRESULT_FROM_WIN32(err ? err : ERROR_DISK_FULL);
+            goto fail;
+        }
+        FmOpBytes(done, total);
+    }
+    CloseHandle(out); out = INVALID_HANDLE_VALUE;
+    InternetCloseHandle(hUrl); hUrl = NULL;
+    InternetCloseHandle(hNet); hNet = NULL;
+    if (total && done != total)
+    {
+        FmSetLastMessage(L"The download ended early (%I64u of %I64u bytes). Try again.", done, total);
+        hr = HRESULT_FROM_WIN32(ERROR_INTERNET_CONNECTION_RESET);
+        goto fail;
+    }
+    if (!MoveFileExW(part, dest, MOVEFILE_REPLACE_EXISTING))
+    {
+        err = GetLastError();
+        FmSetLastMessage(L"Cannot move the download into place (error %lu).", err);
+        hr = HRESULT_FROM_WIN32(err);
+        goto fail;
+    }
+    LOGF(log, L"  downloaded %s (%I64u bytes)\n", url, done);
+    return S_OK;
+fail:
+    if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+    DeleteFileW(part);
+    if (hUrl || hNet) CloseNetLater(hUrl, hNet);
     return hr;
 }
