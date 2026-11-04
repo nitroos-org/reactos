@@ -203,6 +203,19 @@ find /i "architecture" %O%\q.txt >nul
 call :rc0 "H24 [Source] Arch without this architecture: not available on this architecture"
 %FM% /install fmt-hostedarch > %O%\b.txt 2>&1
 call :rc1 "H25 ...install refused"
+copy /y %FX%\fmt-hostednohash.ini %R%\Catalog\ >nul
+mkdir %R%\Payload\fmt-hostednohash 2>nul
+copy /y %FX%\fmt-hosted.txt %R%\Payload\fmt-hostednohash\ >nul
+copy /y %FX%\fmt-base.txt %R%\Payload\fmt-hostednohash\ >nul
+%FM% /install fmt-hostednohash > %O%\b.txt 2>&1
+call :rc1 "H26 hosted pack with a [Payload] file that has no [Download] hash: refused (fail closed)"
+type %O%\b.txt >> %LOG%
+find /i "no [Download] hash" %O%\b.txt >nul
+call :rc0 "H27 ...naming the missing hash"
+call :ex %R%\fmt-hostednohash.out 0 "H28 ...nothing installed"
+call :ex %R%\fmt-hostednohash2.out 0 "H29 ...not even the unhashed file"
+del /q %R%\Catalog\fmt-hostednohash.ini 2>nul
+rmdir /s /q %R%\Payload\fmt-hostednohash 2>nul
 del /q %R%\Catalog\fmt-hosted.ini %R%\Catalog\fmt-hostedarch.ini 2>nul
 rmdir /s /q %R%\Payload\fmt-hosted 2>nul
 mkdir %R%\Payload\fmt-sys 2>nul
