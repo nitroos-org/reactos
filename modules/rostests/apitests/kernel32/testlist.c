@@ -159,6 +159,7 @@ extern void func_PipeSqos(void);
 extern void func_PreferredUILanguages(void);
 extern void func_PowerRequest(void);
 extern void func_PrefetchVirtualMemory(void);
+extern void func_RelocatedImageProtection(void);
 extern void func_PrivMoveFileIdentityW(void);
 extern void func_ProcessAffinity(void);
 extern void func_ProcessorNumber(void);
@@ -386,6 +387,7 @@ const struct test winetest_testlist[] =
     { "PreferredUILanguages",        func_PreferredUILanguages },
     { "PowerRequest",                func_PowerRequest },
     { "PrefetchVirtualMemory",       func_PrefetchVirtualMemory },
+    { "RelocatedImageProtection",    func_RelocatedImageProtection },
     { "PrivMoveFileIdentityW",       func_PrivMoveFileIdentityW },
     { "ProcessMitigationPolicy",     func_ProcessMitigationPolicy },
     { "PssSnapshot",                 func_PssSnapshot },
