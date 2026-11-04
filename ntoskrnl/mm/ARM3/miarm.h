@@ -2374,6 +2374,16 @@ MiInsertVadEx(
     _In_ ULONG_PTR Alignment,
     _In_ ULONG AllocationType);
 
+TABLE_SEARCH_RESULT
+NTAPI
+MiFindEmptyAddressRangeInTreeEx(
+    _In_ SIZE_T Length,
+    _In_ ULONG_PTR LowestAddress,
+    _In_ ULONG_PTR Alignment,
+    _In_ PMM_AVL_TABLE Table,
+    _Out_ PMMADDRESS_NODE *PreviousVad,
+    _Out_ PULONG_PTR Base);
+
 NTSTATUS
 NTAPI
 MiInsertVadEx2(
@@ -2383,7 +2393,8 @@ MiInsertVadEx2(
     _In_ ULONG_PTR LowestAddress,
     _In_ ULONG_PTR HighestAddress,
     _In_ ULONG_PTR Alignment,
-    _In_ ULONG AllocationType);
+    _In_ ULONG AllocationType,
+    _In_ BOOLEAN AllowLowFixedAddress);
 
 NTSTATUS
 NTAPI

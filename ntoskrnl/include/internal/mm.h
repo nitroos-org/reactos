@@ -685,6 +685,33 @@ MmFindGapInRange(
 
 PVOID
 NTAPI
+MmFindGapInRangeEx(
+    PMMSUPPORT AddressSpace,
+    ULONG_PTR Length,
+    ULONG_PTR Granularity,
+    BOOLEAN TopDown,
+    ULONG_PTR LowestAddress,
+    ULONG_PTR HighestAddress);
+
+/* MmMapViewOfSection with a lowest and a highest address for an automatic placement (0: none) */
+NTSTATUS
+NTAPI
+MiMapViewOfSection(
+    _In_ PVOID SectionObject,
+    _In_ PEPROCESS Process,
+    _Inout_ PVOID *BaseAddress,
+    _In_ ULONG_PTR ZeroBits,
+    _In_ SIZE_T CommitSize,
+    _Inout_opt_ PLARGE_INTEGER SectionOffset,
+    _Inout_ PSIZE_T ViewSize,
+    _In_ SECTION_INHERIT InheritDisposition,
+    _In_ ULONG AllocationType,
+    _In_ ULONG Protect,
+    _In_ ULONG_PTR LowestAddress,
+    _In_ ULONG_PTR HighestBound);
+
+PVOID
+NTAPI
 MmFindGap(
     PMMSUPPORT AddressSpace,
     SIZE_T Length,

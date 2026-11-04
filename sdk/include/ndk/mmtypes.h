@@ -760,6 +760,10 @@ typedef struct _MMVAD_FLAGS
 //
 // Extended flags used in the VAD
 //
+//
+// ReactOS layout, not Windows': Placeholder and FromPlaceholder are taken from FileOffset (written
+// only, an informational 64 KB view offset). Do not use this structure to read Windows VADs.
+//
 typedef struct _MMVAD_FLAGS2
 {
     ULONG FileOffset:22;

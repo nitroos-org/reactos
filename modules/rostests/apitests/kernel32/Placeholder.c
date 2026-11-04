@@ -23,6 +23,8 @@ typedef PVOID (WINAPI *FN_MapViewOfFileNuma2)(HANDLE, HANDLE, ULONG64, PVOID, SI
 typedef BOOL (WINAPI *FN_UnmapViewOfFile2)(HANDLE, PVOID, ULONG);
 typedef NTSTATUS (NTAPI *FN_NtAllocateVirtualMemoryEx)(HANDLE, PVOID *, PSIZE_T, ULONG, ULONG, MEM_EXTENDED_PARAMETER *, ULONG);
 typedef NTSTATUS (NTAPI *FN_NtUnmapViewOfSectionEx)(HANDLE, PVOID, ULONG);
+typedef NTSTATUS (NTAPI *FN_NtMapViewOfSectionEx)(HANDLE, HANDLE, PVOID *, PLARGE_INTEGER, PSIZE_T, ULONG, ULONG,
+                                                  MEM_EXTENDED_PARAMETER *, ULONG);
 typedef BOOL (WINAPI *FN_UnmapViewOfFileEx)(PVOID, ULONG);
 
 static FN_VirtualAlloc2 pVirtualAlloc2;
@@ -31,6 +33,7 @@ static FN_MapViewOfFileNuma2 pMapViewOfFileNuma2;
 static FN_UnmapViewOfFile2 pUnmapViewOfFile2;
 static FN_NtAllocateVirtualMemoryEx pNtAllocateVirtualMemoryEx;
 static FN_NtUnmapViewOfSectionEx pNtUnmapViewOfSectionEx;
+static FN_NtMapViewOfSectionEx pNtMapViewOfSectionEx;
 static FN_UnmapViewOfFileEx pUnmapViewOfFileEx;
 
 /* The private commit of the process (VM_COUNTERS.PagefileUsage) */
@@ -558,6 +561,138 @@ test_Pattern(void)
     CloseHandle(Section);
 }
 
+/* What a free placeholder refuses, as measured on Windows 10 22H2 (x64 and WoW64) */
+static void
+test_PlaceholderRefusals(void)
+{
+    MEM_ADDRESS_REQUIREMENTS Requirements;
+    MEM_EXTENDED_PARAMETER Parameter;
+    NTSTATUS Status;
+    PVOID p, Base;
+    SIZE_T Size;
+    ULONG Old;
+
+    p = NewPlaceholder(2 * GRANULE);
+    if (!p) return;
+    Base = p; Size = PAGE;
+    Status = NtProtectVirtualMemory(NtCurrentProcess(), &Base, &Size, PAGE_READWRITE, &Old);
+    ok(Status == STATUS_NOT_COMMITTED, "protect: %#lx\n", Status);
+    Base = p; Size = PAGE;
+    Status = NtFreeVirtualMemory(NtCurrentProcess(), &Base, &Size, MEM_DECOMMIT);
+    ok(Status == STATUS_MEMORY_NOT_ALLOCATED, "decommit: %#lx\n", Status);
+#ifdef _WIN64
+    Base = p; Size = PAGE;
+    Status = NtLockVirtualMemory(NtCurrentProcess(), &Base, &Size, MAP_PROCESS);
+    ok(Status == STATUS_ACCESS_VIOLATION, "lock: %#lx\n", Status);
+#endif
+    check_placeholder(p, 2 * GRANULE);
+    VirtualFree(p, 0, MEM_RELEASE);
+
+    if (!pNtAllocateVirtualMemoryEx) return;
+
+    /* nothing below the first granule, whatever the requirement asks (the NULL page above all) */
+    Base = (PVOID)PAGE; Size = PAGE;
+    Status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), &Base, &Size, MEM_RESERVE, PAGE_READWRITE, NULL, 0);
+    ok(Status == STATUS_CONFLICTING_ADDRESSES, "base 0x1000: %#lx\n", Status);
+    if (NT_SUCCESS(Status)) { Size = 0; NtFreeVirtualMemory(NtCurrentProcess(), &Base, &Size, MEM_RELEASE); }
+
+    memset(&Requirements, 0, sizeof(Requirements));
+    Requirements.Alignment = 2 * GRANULE;
+    memset(&Parameter, 0, sizeof(Parameter));
+    Parameter.Type = MemExtendedParameterAddressRequirements;
+    Parameter.Pointer = &Requirements;
+    Base = (PVOID)PAGE; Size = PAGE;
+    Status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), &Base, &Size, MEM_RESERVE, PAGE_READWRITE, &Parameter, 1);
+    ok(Status == STATUS_INVALID_PARAMETER, "base 0x1000 with an alignment: %#lx\n", Status);
+    if (NT_SUCCESS(Status)) { Size = 0; NtFreeVirtualMemory(NtCurrentProcess(), &Base, &Size, MEM_RELEASE); }
+    Base = NULL; Size = PAGE;
+    Status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), &Base, &Size, MEM_RESERVE, PAGE_READWRITE, &Parameter, 1);
+    ok(Status == STATUS_SUCCESS, "alignment: %#lx\n", Status);
+    ok(Base && ((ULONG_PTR)Base & (2 * GRANULE - 1)) == 0 && (ULONG_PTR)Base >= GRANULE, "aligned base %p\n", Base);
+    if (NT_SUCCESS(Status)) { Size = 0; NtFreeVirtualMemory(NtCurrentProcess(), &Base, &Size, MEM_RELEASE); }
+
+    /* a placeholder with a requirement */
+    Requirements.Alignment = 0;
+    Requirements.LowestStartingAddress = (PVOID)0x30000000;
+    Requirements.HighestEndingAddress = (PVOID)0x37FFFFFF;
+    Base = NULL; Size = 4 * GRANULE;
+    Status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), &Base, &Size, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
+                                        PAGE_NOACCESS, &Parameter, 1);
+    ok(Status == STATUS_SUCCESS, "placeholder in a window: %#lx\n", Status);
+    ok((ULONG_PTR)Base >= 0x30000000 && (ULONG_PTR)Base + Size - 1 <= 0x37FFFFFF, "placeholder at %p\n", Base);
+    if (NT_SUCCESS(Status))
+    {
+        check_placeholder(Base, 4 * GRANULE);
+        Size = 0; NtFreeVirtualMemory(NtCurrentProcess(), &Base, &Size, MEM_RELEASE);
+    }
+}
+
+/* A view's address requirement bounds its placement exactly (Windows 10 22H2) */
+static void
+test_ViewRequirements(void)
+{
+    MEM_ADDRESS_REQUIREMENTS Requirements;
+    MEM_EXTENDED_PARAMETER Parameter;
+    LARGE_INTEGER Offset;
+    NTSTATUS Status;
+    HANDLE Section;
+    PVOID Base;
+    SIZE_T Size;
+
+    if (!pNtMapViewOfSectionEx) return;
+    Section = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, GRANULE, NULL);
+    ok(Section != NULL, "section: error %lu\n", GetLastError());
+    if (!Section) return;
+    memset(&Parameter, 0, sizeof(Parameter));
+    Parameter.Type = MemExtendedParameterAddressRequirements;
+    Parameter.Pointer = &Requirements;
+
+    /* a highest address that is not 2^n - 1: the view ends right below it, not below 1 GB */
+    memset(&Requirements, 0, sizeof(Requirements));
+    Requirements.HighestEndingAddress = (PVOID)0x5FFEFFFF;
+    Base = NULL; Size = GRANULE; Offset.QuadPart = 0;
+    Status = pNtMapViewOfSectionEx(Section, NtCurrentProcess(), &Base, &Offset, &Size, MEM_TOP_DOWN, PAGE_READWRITE, &Parameter, 1);
+    ok(Status == STATUS_SUCCESS, "highest 0x5FFEFFFF: %#lx\n", Status);
+    ok((ULONG_PTR)Base + GRANULE - 1 <= 0x5FFEFFFF && (ULONG_PTR)Base > 0x40000000, "view at %p\n", Base);
+    if (NT_SUCCESS(Status)) UnmapViewOfFile(Base);
+
+    /* the 32-bit process limit itself: above 1 GB */
+    Requirements.HighestEndingAddress = (PVOID)0x7FFEFFFF;
+    Base = NULL; Size = GRANULE;
+    Status = pNtMapViewOfSectionEx(Section, NtCurrentProcess(), &Base, &Offset, &Size, MEM_TOP_DOWN, PAGE_READWRITE, &Parameter, 1);
+    ok(Status == STATUS_SUCCESS, "highest 0x7FFEFFFF: %#lx\n", Status);
+    ok((ULONG_PTR)Base + GRANULE - 1 <= 0x7FFEFFFF && (ULONG_PTR)Base > 0x40000000, "view at %p\n", Base);
+    if (NT_SUCCESS(Status)) UnmapViewOfFile(Base);
+
+    /* a lowest address */
+    memset(&Requirements, 0, sizeof(Requirements));
+    Requirements.LowestStartingAddress = (PVOID)0x40000000;
+    Base = NULL; Size = GRANULE;
+    Status = pNtMapViewOfSectionEx(Section, NtCurrentProcess(), &Base, &Offset, &Size, 0, PAGE_READWRITE, &Parameter, 1);
+    ok(Status == STATUS_SUCCESS, "lowest 0x40000000: %#lx\n", Status);
+    ok((ULONG_PTR)Base >= 0x40000000, "view at %p\n", Base);
+    if (NT_SUCCESS(Status)) UnmapViewOfFile(Base);
+
+    /* a window */
+    Requirements.LowestStartingAddress = (PVOID)0x30000000;
+    Requirements.HighestEndingAddress = (PVOID)0x3000FFFF;
+    Base = NULL; Size = GRANULE;
+    Status = pNtMapViewOfSectionEx(Section, NtCurrentProcess(), &Base, &Offset, &Size, 0, PAGE_READWRITE, &Parameter, 1);
+    ok(Status == STATUS_SUCCESS, "window: %#lx\n", Status);
+    ok(Base == (PVOID)0x30000000, "view at %p\n", Base);
+    if (NT_SUCCESS(Status)) UnmapViewOfFile(Base);
+
+    /* no alignment for views */
+    memset(&Requirements, 0, sizeof(Requirements));
+    Requirements.Alignment = 2 * GRANULE;
+    Base = NULL; Size = GRANULE;
+    Status = pNtMapViewOfSectionEx(Section, NtCurrentProcess(), &Base, &Offset, &Size, 0, PAGE_READWRITE, &Parameter, 1);
+    ok(Status == STATUS_INVALID_PARAMETER, "alignment: %#lx\n", Status);
+    if (NT_SUCCESS(Status)) UnmapViewOfFile(Base);
+
+    CloseHandle(Section);
+}
+
 START_TEST(Placeholder)
 {
     HMODULE Kernelbase = GetModuleHandleW(L"kernelbase.dll");
@@ -570,6 +705,7 @@ START_TEST(Placeholder)
     pUnmapViewOfFile2 = Kernelbase ? (PVOID)GetProcAddress(Kernelbase, "UnmapViewOfFile2") : NULL;
     pNtAllocateVirtualMemoryEx = (PVOID)GetProcAddress(Ntdll, "NtAllocateVirtualMemoryEx");
     pNtUnmapViewOfSectionEx = (PVOID)GetProcAddress(Ntdll, "NtUnmapViewOfSectionEx");
+    pNtMapViewOfSectionEx = (PVOID)GetProcAddress(Ntdll, "NtMapViewOfSectionEx");
     pUnmapViewOfFileEx = (PVOID)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "UnmapViewOfFileEx");
 
     if (!pVirtualAlloc2 || !pMapViewOfFile3 || !pUnmapViewOfFile2)
@@ -585,4 +721,6 @@ START_TEST(Placeholder)
     test_ReplaceView(FALSE);
     test_ReplaceView(TRUE);
     test_Pattern();
+    test_PlaceholderRefusals();
+    test_ViewRequirements();
 }
