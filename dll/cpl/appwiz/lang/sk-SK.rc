@@ -92,3 +92,22 @@ BEGIN
     IDS_INVALID_NAME "The shortcut name you entered either contained characters that are invalid for file names or was too long."
     IDS_BROWSE_FOR_TARGET "Please select the target of the shortcut below:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "Programy a funkcie"
+    IDS_PROG_HEADER "Odinštalujte alebo zmeňte program. Ak chcete nainštalovať softvér alebo zapnúť či vypnúť funkcie systému, použite ""Zapnúť alebo vypnúť funkcie NitroOS""."
+    IDS_PROG_COL_NAME "Názov"
+    IDS_PROG_COL_PUBLISHER "Vydavateľ"
+    IDS_PROG_COL_VERSION "Verzia"
+    IDS_PROG_COL_DATE "Nainštalované"
+    IDS_PROG_UNINSTALL "&Odinštalovať"
+    IDS_PROG_CHANGE "Zme&niť"
+    IDS_PROG_REFRESH "Ob&noviť"
+    IDS_PROG_FEATURES "&Zapnúť alebo vypnúť funkcie NitroOS"
+    IDS_PROG_CLOSE "Zavr&ieť"
+    IDS_PROG_CONFIRM "Naozaj chcete odinštalovať '%s'?"
+    IDS_PROG_STARTFAIL "Program sa nepodarilo spustiť (chyba %lu):\n%s"
+    IDS_FEATURESNAME "Zapnúť alebo vypnúť funkcie NitroOS"
+    IDS_FEATURESDESCRIPTION "Zapnúť alebo vypnúť voliteľné funkcie NitroOS a doplnkový softvér."
+END

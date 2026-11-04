@@ -92,3 +92,22 @@ BEGIN
     IDS_INVALID_NAME "The shortcut name you entered either contained characters that are invalid for file names or was too long."
     IDS_BROWSE_FOR_TARGET "Please select the target of the shortcut below:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "Programe dhe veçori"
+    IDS_PROG_HEADER "Çinstaloni ose ndryshoni një program. Për të instaluar softuer ose për të aktivizuar ose çaktivizuar veçoritë e sistemit, përdorni ""Aktivizo ose çaktivizo veçoritë e NitroOS""."
+    IDS_PROG_COL_NAME "Emri"
+    IDS_PROG_COL_PUBLISHER "Botuesi"
+    IDS_PROG_COL_VERSION "Versioni"
+    IDS_PROG_COL_DATE "Instaluar më"
+    IDS_PROG_UNINSTALL "Çins&talo"
+    IDS_PROG_CHANGE "&Ndrysho"
+    IDS_PROG_REFRESH "&Rifresko"
+    IDS_PROG_FEATURES "&Aktivizo ose çaktivizo veçoritë e NitroOS"
+    IDS_PROG_CLOSE "&Mbyll"
+    IDS_PROG_CONFIRM "Jeni i sigurt që doni ta çinstaloni '%s'?"
+    IDS_PROG_STARTFAIL "Programi nuk mund të nisej (gabim %lu):\n%s"
+    IDS_FEATURESNAME "Aktivizo ose çaktivizo veçoritë e NitroOS"
+    IDS_FEATURESDESCRIPTION "Aktivizo ose çaktivizo veçoritë opsionale të NitroOS dhe softuerin shtesë."
+END

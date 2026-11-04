@@ -88,3 +88,22 @@ BEGIN
     IDS_INVALID_NAME "入力したショートカット名にファイル名としては無効な文字が含まれているか長すぎます。"
     IDS_BROWSE_FOR_TARGET "ショートカットの参照先を下からお選び下さい:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "プログラムと機能"
+    IDS_PROG_HEADER "プログラムをアンインストールまたは変更します。ソフトウェアのインストールやシステム機能の有効化/無効化には、""NitroOS の機能の有効化または無効化"" を使用してください。"
+    IDS_PROG_COL_NAME "名前"
+    IDS_PROG_COL_PUBLISHER "発行元"
+    IDS_PROG_COL_VERSION "バージョン"
+    IDS_PROG_COL_DATE "インストール日"
+    IDS_PROG_UNINSTALL "アンインストール(&U)"
+    IDS_PROG_CHANGE "変更(&C)"
+    IDS_PROG_REFRESH "最新の情報に更新(&R)"
+    IDS_PROG_FEATURES "&NitroOS の機能の有効化または無効化"
+    IDS_PROG_CLOSE "閉じる(&L)"
+    IDS_PROG_CONFIRM "'%s' をアンインストールしますか？"
+    IDS_PROG_STARTFAIL "プログラムを開始できませんでした (エラー %lu):\n%s"
+    IDS_FEATURESNAME "NitroOS の機能の有効化または無効化"
+    IDS_FEATURESDESCRIPTION "オプションの NitroOS 機能や追加のソフトウェアを有効化または無効化します。"
+END

@@ -98,3 +98,22 @@ BEGIN
     IDS_INVALID_NAME "Wprowadzona nazwa skrótu zawiera nieprawidłowe znaki lub jest za długa."
     IDS_BROWSE_FOR_TARGET "Wybierz element docelowy dla poniższego skrótu:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "Programy i funkcje"
+    IDS_PROG_HEADER "Odinstaluj lub zmień program. Aby zainstalować oprogramowanie albo włączyć lub wyłączyć funkcje systemu, użyj opcji ""Włącz lub wyłącz funkcje NitroOS""."
+    IDS_PROG_COL_NAME "Nazwa"
+    IDS_PROG_COL_PUBLISHER "Wydawca"
+    IDS_PROG_COL_VERSION "Wersja"
+    IDS_PROG_COL_DATE "Zainstalowano"
+    IDS_PROG_UNINSTALL "&Odinstaluj"
+    IDS_PROG_CHANGE "&Zmień"
+    IDS_PROG_REFRESH "Odświe&ż"
+    IDS_PROG_FEATURES "&Włącz lub wyłącz funkcje NitroOS"
+    IDS_PROG_CLOSE "Zam&knij"
+    IDS_PROG_CONFIRM "Czy na pewno chcesz odinstalować '%s'?"
+    IDS_PROG_STARTFAIL "Nie można uruchomić programu (błąd %lu):\n%s"
+    IDS_FEATURESNAME "Włącz lub wyłącz funkcje NitroOS"
+    IDS_FEATURESDESCRIPTION "Włącz lub wyłącz opcjonalne funkcje NitroOS oraz dodatkowe oprogramowanie."
+END

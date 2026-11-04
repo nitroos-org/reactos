@@ -88,3 +88,22 @@ BEGIN
     IDS_INVALID_NAME "The shortcut name you entered either contained characters that are invalid for file names or was too long."
     IDS_BROWSE_FOR_TARGET "Please select the target of the shortcut below:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "Προγράμματα και δυνατότητες"
+    IDS_PROG_HEADER "Απεγκαταστήστε ή αλλάξτε ένα πρόγραμμα. Για να εγκαταστήσετε λογισμικό ή να ενεργοποιήσετε ή να απενεργοποιήσετε δυνατότητες του συστήματος, χρησιμοποιήστε την επιλογή ""Ενεργοποίηση ή απενεργοποίηση δυνατοτήτων του NitroOS""."
+    IDS_PROG_COL_NAME "Όνομα"
+    IDS_PROG_COL_PUBLISHER "Εκδότης"
+    IDS_PROG_COL_VERSION "Έκδοση"
+    IDS_PROG_COL_DATE "Εγκαταστάθηκε στις"
+    IDS_PROG_UNINSTALL "&Απεγκατάσταση"
+    IDS_PROG_CHANGE "Αλλα&γή"
+    IDS_PROG_REFRESH "Ανα&νέωση"
+    IDS_PROG_FEATURES "&Ενεργοποίηση ή απενεργοποίηση δυνατοτήτων του NitroOS"
+    IDS_PROG_CLOSE "&Κλείσιμο"
+    IDS_PROG_CONFIRM "Θέλετε να απεγκαταστήσετε το '%s';"
+    IDS_PROG_STARTFAIL "Το πρόγραμμα δεν μπόρεσε να ξεκινήσει (σφάλμα %lu):\n%s"
+    IDS_FEATURESNAME "Ενεργοποίηση ή απενεργοποίηση δυνατοτήτων του NitroOS"
+    IDS_FEATURESDESCRIPTION "Ενεργοποίηση ή απενεργοποίηση προαιρετικών δυνατοτήτων του NitroOS και πρόσθετου λογισμικού."
+END
