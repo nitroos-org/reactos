@@ -1,4 +1,11 @@
 /*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     sha256
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
+/*
  * PROJECT:     ReactOS test infrastructure
  * PURPOSE:     rosdev: SHA-256 (FIPS 180-4), HMAC-SHA-256 and hex helpers
  */

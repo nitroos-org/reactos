@@ -1,3 +1,10 @@
+/*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     WoW64 native TEB restoration after a compatibility-mode segment reload
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
 /* WoW64 native TEB restoration after a compatibility-mode segment reload. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

@@ -1,3 +1,10 @@
+/*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     MSI compound-file locking: contention, pending completion and guest IOSBs
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
 /* MSI compound-file locking: contention, pending completion and guest IOSBs. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

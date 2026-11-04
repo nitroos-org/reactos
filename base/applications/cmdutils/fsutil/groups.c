@@ -1,4 +1,11 @@
 /*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     groups
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
+/*
  * PROJECT:     ReactOS FS utility tool
  * PURPOSE:     Command group tables and usage text, byte-identical to Windows 10 22H2 fsutil.
  *              The listings were captured from real Windows (bare "fsutil <group>").

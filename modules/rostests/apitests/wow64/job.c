@@ -1,3 +1,10 @@
+/*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     Console-helper job limits, assignment and kill-on-last-close lifetime
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
 /* Console-helper job limits, assignment and kill-on-last-close lifetime. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
