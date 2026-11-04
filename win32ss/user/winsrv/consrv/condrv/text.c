@@ -36,6 +36,34 @@ do { \
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
+/*
+ * Keep the top Rows rows of the buffer before they are scrolled off, for a pseudoconsole host
+ * that asked for them (ConsolepGetScrollback): the host paints the rows into the scrollback of
+ * its terminal, which only receives what scrolls off its own screen. The alternate screen
+ * buffer of the virtual terminal sequences has no scrollback, as on a terminal.
+ */
+VOID
+ConioRecordScrolledRows(PTEXTMODE_SCREEN_BUFFER Buff, ULONG Rows)
+{
+    ULONG Row, Width = Buff->ScreenBufferSize.X;
+
+    if (!Buff->ScrollRows || Buff->Vt.InAltBuffer) return;
+    if (Width != Buff->ScrollWidth)
+    {
+        /* The buffer was resized under the host: what was kept has another layout */
+        ConsoleFreeHeap(Buff->ScrollRows);
+        Buff->ScrollRows = NULL;
+        return;
+    }
+    Rows = min(Rows, (ULONG)Buff->ScreenBufferSize.Y);
+    for (Row = 0; Row < Rows; ++Row)
+    {
+        RtlCopyMemory(&Buff->ScrollRows[(SIZE_T)((ULONG)Buff->ScrollTotal & (CONSOLE_SCROLLBACK_ROWS - 1)) * Width],
+                      ConioCoordToPointer(Buff, 0, Row), Width * sizeof(CHAR_INFO));
+        ++Buff->ScrollTotal;
+    }
+}
+
 /*static*/ VOID
 ClearLineBuffer(PTEXTMODE_SCREEN_BUFFER Buff);
 
@@ -138,6 +166,8 @@ TEXTMODE_BUFFER_Destroy(IN OUT PCONSOLE_SCREEN_BUFFER Buffer)
     Buffer->Header.Type = SCREEN_BUFFER;
 
     ConsoleFreeHeap(Buff->Buffer);
+    if (Buff->ScrollRows)
+        ConsoleFreeHeap(Buff->ScrollRows);
     /* The main buffer saved while the alternate screen buffer is shown */
     if (Buff->Vt.AltMainBuffer)
         ConsoleFreeHeap(Buff->Vt.AltMainBuffer);
