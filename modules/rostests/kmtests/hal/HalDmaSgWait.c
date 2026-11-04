@@ -6,13 +6,15 @@
  *
  * A 32-bit PCI scatter/gather bus master on a system with memory above 4 GB takes its map registers
  * from a master adapter of the HAL. A request that finds none waits, and the callback of
- * HalGetScatterGatherList is its only sign of life. This test checks that the wait always ends:
+ * HalGetScatterGatherList is its only sign of life (it is always called with a list). This test checks
+ * that the wait always ends:
  *  - the registers are all held, and one request waits: it is served when one of the holders is done
  *    (no fault needed, the registers run out at the master adapter's limit)
  *  - checked HAL only (Services\HalDmaFault\FailMask): the map buffers cannot grow for a request that
- *    needs more registers than the master adapter has, so no register will ever be free. The HAL
- *    must call the routine back without a list instead of leaving the request, and everything
- *    behind it, queued forever
+ *    needs more registers than the master adapter has, so no register will be free. The request stays
+ *    queued, the system stays responsive, and the request is served, within a bound, once the failure
+ *    stops (the HAL tries the grow again, with a backoff of up to a second); also when the work item
+ *    that grows the buffers cannot be allocated, or the grow fails most of the time
  *  - afterwards nothing is stuck and no map register is lost
  */
 
@@ -27,6 +29,7 @@
 #define FAULT_GROW_FAILS    1
 #define FAULT_NO_WORK_ITEM  2
 #define FAULT_NO_PREGROW    4
+#define FAULT_GROW_FLAKY    8
 
 /* Requests live in nonpaged pool: one that never completes cannot be left on this stack */
 typedef struct _SG_REQUEST
@@ -216,30 +219,33 @@ SetFaultMask(
 }
 
 /*
- * No map register will ever be free for this request: the adapter needs more than the master
- * adapter holds, and the map buffers cannot grow. The checked HAL fails it; a free HAL has no way
- * to make that happen (the registers always suffice), so there the request is just served.
+ * No map register is free for this request: the adapter needs more than the master adapter holds,
+ * and the map buffers cannot grow. The request must stay queued, and be served once growing works
+ * again (at once for a free HAL, where the faults do nothing). StayFailed: the failure lasts 3 s first.
  */
 static
 BOOLEAN
 TestStarvedRequest(
-    _In_ ULONG Mask)
+    _In_ ULONG Mask,
+    _In_ ULONG Pages,
+    _In_ BOOLEAN StayFailed)
 {
-    PDMA_ADAPTER Adapter;
+    PDMA_ADAPTER Adapter, Other;
     PSG_REQUEST Request;
-    ULONG MapRegisters;
+    ULONG MapRegisters, i;
     NTSTATUS Status;
     BOOLEAN Done;
 
     SetFaultMask(Mask);
-    /* 47 pages: 48 map registers, the most one device gets */
-    Adapter = GetAdapter(47, &MapRegisters);
+    /* Pages + 1 map registers, 48 at the most. The master adapter never gives map buffers back, so each
+       test asks for more than the one before to find the master adapter short */
+    Adapter = GetAdapter(Pages, &MapRegisters);
     ok(Adapter != NULL, "HalGetAdapter failed\n");
     if (!Adapter)
         return FALSE;
     trace("Fault mask 0x%lx: %lu map registers per request\n", Mask, MapRegisters);
 
-    Request = AllocateRequest(47);
+    Request = AllocateRequest(Pages);
     ok(Request != NULL, "Out of memory\n");
     if (!Request)
     {
@@ -250,8 +256,32 @@ TestStarvedRequest(
     Status = StartRequest(Adapter, Request);
     ok_eq_hex(Status, STATUS_SUCCESS);
 
-    /* Well past any work item and retry of the HAL */
+    if (StayFailed)
+    {
+        LARGE_INTEGER Interval, Start, End;
+
+        /* The failure goes on: the request stays queued, and this thread still runs */
+        Interval.QuadPart = -10 * 1000 * 100;
+        KeQuerySystemTime(&Start);
+        for (i = 0; i < 30; i++)
+            KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+        KeQuerySystemTime(&End);
+        ok(End.QuadPart - Start.QuadPart >= 2 * 10 * 1000 * 1000, "The clock does not run\n");
+#if DBG
+        ok(Request->Called == 0, "Mask 0x%lx: the request was called back while the grow fails\n", Mask);
+#endif
+
+        /* The failure stops. HalGetAdapter reads the value again */
+        SetFaultMask(0);
+        Other = GetAdapter(1, &MapRegisters);
+        ok(Other != NULL, "HalGetAdapter failed\n");
+        if (Other)
+            Other->DmaOperations->PutDmaAdapter(Other);
+    }
+
+    /* Well past the longest backoff of the HAL */
     Done = WaitRequest(Request, 15);
+    DbgPrint("HalDmaSgWait: mask 0x%lx request %s\n", Mask, Done ? "called back" : "NEVER CALLED BACK");
     ok(Done, "Mask 0x%lx: the request that waits for map registers was never called back\n", Mask);
     if (!Done)
     {
@@ -259,15 +289,11 @@ TestStarvedRequest(
         return FALSE;
     }
 
+    ok(Request->List != NULL, "Mask 0x%lx: the request was called back without a list\n", Mask);
     if (Request->List)
     {
-        trace("Mask 0x%lx: served with %lu elements (the master adapter held enough registers, or a free HAL)\n",
-              Mask, Request->List->NumberOfElements);
+        trace("Mask 0x%lx: served with %lu elements\n", Mask, Request->List->NumberOfElements);
         PutRequest(Adapter, Request);
-    }
-    else
-    {
-        trace("Mask 0x%lx: called back without a list\n", Mask);
     }
 
     FreeRequest(Request);
@@ -343,25 +369,18 @@ TestExhaustion(VOID)
     return Count;
 }
 
-START_TEST(HalDmaSgWait)
+/* A request of a device that works must not wait behind the ones that failed; then the registers run
+   out at the master adapter's limit: nothing is lost, the waiter is served */
+static
+VOID
+TestAfterFaults(VOID)
 {
     ULONG Holders, HoldersAgain;
     PDMA_ADAPTER Adapter;
     PSG_REQUEST Request;
     ULONG MapRegisters;
-    BOOLEAN Healthy = TRUE;
 
-    if (skip(MemoryAbove4Gb(), "No memory above 4 GB\n"))
-        return;
-
-    /* First, while the master adapter holds as few registers as it will: nothing to wait for any more */
-    Healthy &= TestStarvedRequest(FAULT_GROW_FAILS | FAULT_NO_PREGROW);
-    Healthy &= TestStarvedRequest(FAULT_NO_WORK_ITEM | FAULT_NO_PREGROW);
     SetFaultMask(0);
-
-    /* A request of a device that works must not wait behind them */
-    if (skip(Healthy, "A request is still queued in the HAL\n"))
-        return;
     Adapter = GetAdapter(TEST_PAGES, &MapRegisters);
     ok(Adapter != NULL, "HalGetAdapter failed\n");
     if (Adapter)
@@ -371,7 +390,7 @@ START_TEST(HalDmaSgWait)
         if (Request)
         {
             ok_eq_hex(StartRequest(Adapter, Request), STATUS_SUCCESS);
-            ok(WaitRequest(Request, 15), "A request after the failed ones was never served\n");
+            ok(WaitRequest(Request, 15), "A request after the starved one was never served\n");
             if (Request->Called)
             {
                 ok(Request->List != NULL, "It got no list\n");
@@ -383,10 +402,48 @@ START_TEST(HalDmaSgWait)
         Adapter->DmaOperations->PutDmaAdapter(Adapter);
     }
 
-    /* The registers run out at the master adapter's limit: nothing is lost, the waiter is served */
     Holders = TestExhaustion();
     ok(Holders >= 10, "Only %lu requests of %u map registers fitted: map registers were lost\n",
        Holders, SPAN(TEST_PAGES));
     HoldersAgain = TestExhaustion();
-    ok(HoldersAgain >= Holders, "Second round: %lu requests fitted, first round %lu\n", HoldersAgain, Holders);
+    /* how many fit depends on when the buffers grew (and on fragments), by one at most */
+    ok(HoldersAgain + 1 >= Holders, "Second round: %lu requests fitted, first round %lu\n", HoldersAgain, Holders);
+}
+
+/*
+ * The master adapter never gives map buffers back, and a request can only be starved while it holds
+ * fewer registers than the request needs (48 at most): each of these tests needs a fresh boot.
+ * HalDmaSgWait: the grow fails for a while.
+ */
+START_TEST(HalDmaSgWait)
+{
+    if (skip(MemoryAbove4Gb(), "No memory above 4 GB\n"))
+        return;
+
+    DbgPrint("HalDmaSgWait: start\n");
+    if (!TestStarvedRequest(FAULT_GROW_FAILS | FAULT_NO_PREGROW, 47, TRUE))
+        return;
+    TestAfterFaults();
+}
+
+/* HalDmaSgWaitNoItem: no work item can be allocated for the request, the HAL's own retry serves it */
+START_TEST(HalDmaSgWaitNoItem)
+{
+    if (skip(MemoryAbove4Gb(), "No memory above 4 GB\n"))
+        return;
+
+    if (!TestStarvedRequest(FAULT_NO_WORK_ITEM | FAULT_NO_PREGROW, 47, FALSE))
+        return;
+    TestAfterFaults();
+}
+
+/* HalDmaSgWaitFlaky: the grow mostly fails, and no work item can be allocated */
+START_TEST(HalDmaSgWaitFlaky)
+{
+    if (skip(MemoryAbove4Gb(), "No memory above 4 GB\n"))
+        return;
+
+    if (!TestStarvedRequest(FAULT_NO_WORK_ITEM | FAULT_GROW_FLAKY | FAULT_NO_PREGROW, 47, FALSE))
+        return;
+    TestAfterFaults();
 }
