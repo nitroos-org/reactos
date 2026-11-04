@@ -75,4 +75,5 @@ BEGIN
     IDS_IMPERSONATE_PRIVILEGE "Impersonate a client after authentication"
     IDS_CREATE_GLOBAL_PRIVILEGE "Create global objects"
     IDS_TIME_ZONE_PRIVILEGE "Change the time zone"
+    IDS_CREATE_SYMBOLIC_LINK_PRIVILEGE "Create symbolic links"
 END

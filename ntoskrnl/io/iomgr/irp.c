@@ -355,7 +355,7 @@ IopCompleteIrp(IN PIRP Irp,
                  (Irp->IoStatus.Information == IO_REPARSE_TAG_SYMLINK))
         {
             /* Symbolic links are resolved by IopParseDevice, when the driver completed the create synchronously */
-            ExFreePool((PVOID)*SystemArgument2);
+            ExFreePool(DataBuffer);
             Irp->IoStatus.Status = STATUS_IO_REPARSE_TAG_NOT_HANDLED;
         }
     }
