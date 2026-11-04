@@ -28,6 +28,12 @@ typedef struct _SEP_LOGON_SESSION_TERMINATED_NOTIFY_CONTEXT
     WORK_QUEUE_ITEM NotifyWorkItem;
 } SEP_LOGON_SESSION_TERMINATED_NOTIFY_CONTEXT, *PSEP_LOGON_SESSION_TERMINATED_NOTIFY_CONTEXT;
 
+typedef struct _SEP_LSA_SESSION_TERMINATED_CONTEXT
+{
+    LUID LogonId;
+    WORK_QUEUE_ITEM WorkItem;
+} SEP_LSA_SESSION_TERMINATED_CONTEXT, *PSEP_LSA_SESSION_TERMINATED_CONTEXT;
+
 VOID
 NTAPI
 SepRmCommandServerThread(
@@ -57,6 +63,9 @@ PVOID SepCommandPortViewRemoteBase;
 ULONG_PTR SepCommandPortViewBaseOffset;
 
 static HANDLE SepRmCommandMessagePort;
+
+/* Client port of the SRM to the LSA command port (\SeLsaCommandPort), NULL until LSASS is connected */
+static HANDLE SepLsaCommandPort;
 
 BOOLEAN SepAdtAuditingEnabled;
 ULONG SepAdtMinListLength = 0x2000;
@@ -133,15 +142,16 @@ SepRmNotifyFsCallbacksWorker(
 static
 VOID
 SepRmNotifyTerminatedLogonSession(
-    _In_ PSEP_LOGON_SESSION_REFERENCES Session)
+    _In_ PLUID LogonId,
+    _In_ ULONG SessionFlags)
 {
     PSEP_LOGON_SESSION_TERMINATED_NOTIFY_CONTEXT SessionNotify;
 
     /* No filesystem has taken interest for this logon session */
-    if (!(Session->Flags & SEP_LOGON_SESSION_TERMINATION_NOTIFY))
+    if (!(SessionFlags & SEP_LOGON_SESSION_TERMINATION_NOTIFY))
     {
         DPRINT("No filesystem cares to be notified for this [%08x-%08x] logon ID, bail out!\n",
-               Session->LogonId.HighPart, Session->LogonId.LowPart);
+               LogonId->HighPart, LogonId->LowPart);
         return;
     }
 
@@ -159,8 +169,73 @@ SepRmNotifyTerminatedLogonSession(
                          SepRmNotifyFsCallbacksWorker,
                          SessionNotify);
 
-    SessionNotify->LogonId = Session->LogonId;
+    SessionNotify->LogonId = *LogonId;
     ExQueueWorkItem(&SessionNotify->NotifyWorkItem, CriticalWorkQueue);
+}
+
+/**
+ * @brief
+ * Worker that tells LSASS that a logon session lost its last token.
+ */
+_Function_class_(WORKER_THREAD_ROUTINE)
+static VOID
+NTAPI
+SepRmNotifyLsaWorker(
+    _In_ PVOID Parameter)
+{
+    PSEP_LSA_SESSION_TERMINATED_CONTEXT Context = (PSEP_LSA_SESSION_TERMINATED_CONTEXT)Parameter;
+    LSAP_RM_API_MESSAGE Message;
+    NTSTATUS Status;
+
+    RtlZeroMemory(&Message.Header, sizeof(Message.Header));
+    Message.Header.u1.s1.TotalLength = (CSHORT)(sizeof(PORT_MESSAGE) + sizeof(ULONG) + sizeof(LUID));
+    Message.Header.u1.s1.DataLength = Message.Header.u1.s1.TotalLength - (CSHORT)sizeof(PORT_MESSAGE);
+    Message.ApiNumber = LsapLogonSessionTerminatedApi;
+    Message.u.LogonLuid = Context->LogonId;
+
+    /* A datagram: LSASS deletes its record of the session, nobody waits for it */
+    Status = ZwRequestPort(SepLsaCommandPort, &Message.Header);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Failed to tell LSASS about the end of logon session [%08x-%08x] (Status 0x%lx)\n",
+                Context->LogonId.HighPart, Context->LogonId.LowPart, Status);
+    }
+
+    ExFreePoolWithTag(Context, TAG_LOGON_TERMINATED);
+}
+
+/**
+ * @brief
+ * Tells LSASS that the last token of a logon session was closed so that it can
+ * delete the logon session (the LSA side record, the SRM record and the
+ * authentication package data), like Windows does.
+ *
+ * @remarks
+ * The last token reference can go away in any context (a process or thread
+ * being cleaned up), so hand it to an Executive worker thread.
+ */
+static
+VOID
+SepRmNotifyLsaTerminatedLogonSession(
+    _In_ PLUID LogonId)
+{
+    PSEP_LSA_SESSION_TERMINATED_CONTEXT Context;
+
+    /* LSASS is not connected yet */
+    if (SepLsaCommandPort == NULL)
+        return;
+
+    /* The well known logon sessions (system, anonymous, service accounts) are never deleted */
+    if (LogonId->HighPart == 0 && LogonId->LowPart < 1000)
+        return;
+
+    Context = ExAllocatePoolZero(NonPagedPool, sizeof(*Context), TAG_LOGON_TERMINATED);
+    if (Context == NULL)
+        return;
+
+    ExInitializeWorkItem(&Context->WorkItem, SepRmNotifyLsaWorker, Context);
+    Context->LogonId = *LogonId;
+    ExQueueWorkItem(&Context->WorkItem, DelayedWorkQueue);
 }
 
 /**
@@ -707,13 +782,18 @@ SepRmDeleteLogonSession(
     /* Acquire the database lock */
     KeAcquireGuardedMutex(&SepRmDbLock);
 
-    /* Retrieve the hash bucket, the database will have this session pulled away down below */
+    /*
+     * Retrieve the hash bucket, the database will have this session pulled away down below.
+     * LogonSession points at the link (the bucket head or the Next of the previous session)
+     * that holds the session, so that unlinking a session in the middle of the bucket does
+     * not drop the sessions in front of it.
+     */
     LogonSession = &SepLogonSessions[LogonLuid->LowPart % MAX_LOGON_SESSION_LISTS_IN_ARRAY];
 
     /* Loop over the existing logon sessions */
     for (SessionToDelete = *LogonSession;
          SessionToDelete != NULL;
-         SessionToDelete = SessionToDelete->Next)
+         LogonSession = &SessionToDelete->Next, SessionToDelete = SessionToDelete->Next)
     {
         /*
          * Does the actual logon session exist in the
@@ -1123,7 +1203,8 @@ SepRmDereferenceLogonSession(
     _In_ PLUID LogonLuid)
 {
     ULONG RefCount;
-    PDEVICE_MAP DeviceMap;
+    ULONG SessionFlags;
+    PDEVICE_MAP DeviceMap = NULL;
     PSEP_LOGON_SESSION_REFERENCES CurrentSession;
 
     DPRINT("SepRmDereferenceLogonSession(%08lx:%08lx)\n",
@@ -1144,6 +1225,17 @@ SepRmDereferenceLogonSession(
             RefCount = --CurrentSession->ReferenceCount;
             DPRINT("ReferenceCount: %lu\n", CurrentSession->ReferenceCount);
 
+            /*
+             * Take what we need from the session while the lock is held: once it is released
+             * LSASS can delete the session and free it.
+             */
+            SessionFlags = CurrentSession->Flags;
+            if (RefCount == 0)
+            {
+                DeviceMap = CurrentSession->pDeviceMap;
+                CurrentSession->pDeviceMap = NULL;
+            }
+
             /* Release the database lock */
             KeReleaseGuardedMutex(&SepRmDbLock);
 
@@ -1151,16 +1243,17 @@ SepRmDereferenceLogonSession(
             if (RefCount == 0)
             {
                 /* Get rid of the LUID device map */
-                DeviceMap = CurrentSession->pDeviceMap;
                 if (DeviceMap != NULL)
                 {
-                    CurrentSession->pDeviceMap = NULL;
                     SepCleanupLUIDDeviceMapDirectory(LogonLuid);
                     ObfDereferenceDeviceMap(DeviceMap);
                 }
 
                 /* Alert filesystems that a logon session is about to be deleted */
-                SepRmNotifyTerminatedLogonSession(CurrentSession);
+                SepRmNotifyTerminatedLogonSession(LogonLuid, SessionFlags);
+
+                /* Let LSASS delete the session, nothing references it anymore */
+                SepRmNotifyLsaTerminatedLogonSession(LogonLuid);
             }
 
             return STATUS_SUCCESS;
@@ -1297,6 +1390,10 @@ SepRmCommandServerThreadInit(VOID)
         DPRINT1("Security Rm Init: Connect to LSA Port failed 0x%lx\n", Status);
         goto Cleanup;
     }
+
+    /* Keep the port, SRM tells LSASS about ended logon sessions through it */
+    SepLsaCommandPort = PortHandle;
+    PortHandle = NULL;
 
     /* Remember section base and view offset */
     SepCommandPortViewBase = PortView.ViewBase;
