@@ -892,9 +892,10 @@ WSPCloseSocket(IN SOCKET Handle,
     /* Cleanup Time! */
     Socket->HelperContext = NULL;
     Socket->SharedData->AsyncDisabledEvents = -1;
-    NtClose(Socket->TdiAddressHandle);
+    /* Only the handle WSPBind got is a handle of this process: AFD's own TDI handles are kernel handles */
+    if (Socket->TdiAddressHandle)
+        NtClose(Socket->TdiAddressHandle);
     Socket->TdiAddressHandle = NULL;
-    NtClose(Socket->TdiConnectionHandle);
     Socket->TdiConnectionHandle = NULL;
 ok:
     /* Complete the address list change requests of the socket before it goes */
@@ -1557,8 +1558,6 @@ MsafdAdoptConnectedState(
 {
     IO_STATUS_BLOCK IOSB;
     SOCK_SHARED_INFO SharedData;
-    AFD_TDI_HANDLE_DATA HandleData;
-    ULONG Flags = AFD_CONNECTION_HANDLE;
     HANDLE SockEvent;
     NTSTATUS Status;
 
@@ -1593,28 +1592,8 @@ MsafdAdoptConnectedState(
     /* AFD and the shared enumeration agree on the connected value only */
     if (NT_SUCCESS(Status) && SharedData.State == SocketConnected)
     {
-        Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
-                                       SockEvent,
-                                       NULL,
-                                       NULL,
-                                       &IOSB,
-                                       IOCTL_AFD_GET_TDI_HANDLES,
-                                       &Flags,
-                                       sizeof(Flags),
-                                       &HandleData,
-                                       sizeof(HandleData));
-        if (Status == STATUS_PENDING)
-        {
-            MsafdWaitForAlert(SockEvent);
-            Status = IOSB.Status;
-        }
-
-        if (NT_SUCCESS(Status))
-        {
-            Socket->TdiConnectionHandle = HandleData.TdiConnectionHandle;
-            Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
-            Socket->SharedData->State = SocketConnected;
-        }
+        Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
+        Socket->SharedData->State = SocketConnected;
     }
 
     NtClose(SockEvent);
@@ -2188,7 +2167,7 @@ MsafdConnectAPC(
         if (Socket->SharedData->State != SocketConnected)
             Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
         Socket->SharedData->State = SocketConnected;
-        Socket->TdiConnectionHandle = (HANDLE)IoStatusBlock->Information;
+        /* IoStatusBlock->Information is AFD's kernel handle for the connection, no use (or business) here */
     }
 
     /* Re-enable Async Event */
@@ -2437,7 +2416,6 @@ WSPConnect(SOCKET Handle,
             goto Leave;
 
         Socket->SharedData->State = SocketConnected;
-        Socket->TdiConnectionHandle = (HANDLE)IOSB->Information;
         Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
     }
 
@@ -3471,7 +3449,6 @@ MsafdUpdateConnectionContext(
     PIO_STATUS_BLOCK           IOSB = &DummyIOSB;
     NTSTATUS                   Status;
     SOCK_SHARED_INFO SharedData;
-    AFD_TDI_HANDLE_DATA HandleData;
     HANDLE SockEvent;
     BOOLEAN WasConnected;
     PSOCKET_INFORMATION Socket = GetSocketStructure(Handle);
@@ -3519,44 +3496,17 @@ MsafdUpdateConnectionContext(
     if (!NT_SUCCESS(Status))
         goto Quit;
 
-    ULONG flags = AFD_CONNECTION_HANDLE | AFD_ADDRESS_HANDLE;
-
-    /* Get TDI handles from AFD */
-    Status = NtDeviceIoControlFile((HANDLE)Handle,
-                                   SockEvent,
-                                   NULL,
-                                   NULL,
-                                   IOSB,
-                                   IOCTL_AFD_GET_TDI_HANDLES,
-                                   &flags,
-                                   sizeof(flags),
-                                   &HandleData,
-                                   sizeof(HandleData));
-    
-    if (Status == STATUS_PENDING)
-    {
-        MsafdWaitForAlert(SockEvent);
-        Status = IOSB->Status;
-    }
-
-    /* Bail out if the socket was destroyed */
-    if (!NT_SUCCESS(Status))
-        goto Quit;
-
+    /*
+     * AFD's TDI handles (IOCTL_AFD_GET_TDI_HANDLES, and the connection handle the connect
+     * completes with) are kernel handles. They are no handles of this process: user mode neither
+     * keeps nor closes them, as on Windows. The handle WSPBind returned is the only one the socket owns.
+     */
     Socket->SharedData->State = SharedData.State;
     Socket->ConnectExPending = FALSE;
 
     if (SharedData.State == SocketConnected)
     {
         /* Socket is now connected, update usermode msafd socket structure, same as the end of WSPConnect */
-        Socket->TdiConnectionHandle = HandleData.TdiConnectionHandle;
-        /*
-         * AFD hands out its own kernel handle for the address file. The handle bind returned
-         * (WSPBind, a handle of this process that closesocket closes) is already in place: replacing
-         * it would leak it, one \Device\Tcp handle per ConnectEx socket.
-         */
-        if (!Socket->TdiAddressHandle)
-            Socket->TdiAddressHandle = HandleData.TdiAddressHandle;
         /* AFD keeps no connect time; WSPGetPeerName may have recorded it */
         if (!WasConnected)
             Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
