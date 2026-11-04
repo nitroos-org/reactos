@@ -620,7 +620,9 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
              * native frame stays live until NtCallbackReturn unwinds this call. */
             if (GuestLength > 1024 * 1024 || Previous->Esp < GuestLength + 256)
                 RtlRaiseStatus(STATUS_STACK_OVERFLOW);
-            Guest = P32((Previous->Esp - GuestLength - 64) & ~15);
+            /* The arguments end within 15 bytes of the guest ESP, as in the layout Windows 10 gives its WoW64 callbacks
+             * (ntdll_winetest exception test_KiUserCallbackDispatcher) */
+            Guest = P32((Previous->Esp - GuestLength) & ~15);
             Stack = (ULONG *)Guest - 8;
             ProbeGuestStack(Previous->Esp, (ULONG_PTR)Stack);
             Frame.GuestLength = GuestLength;
@@ -694,6 +696,9 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
              * followed by the two-word exception registration. */
             RtlZeroMemory(Stack,8*sizeof(ULONG));
             Stack[1]=Id; Stack[2]=PtrToUlong(Guest); Stack[3]=GuestLength;
+            /* the guest ESP of the interrupted code and the first argument word follow the two unknowns, where
+             * Windows 10 keeps them (the 32-bit KiUserCallbackDispatcher hook of the winetest reads both) */
+            Stack[6]=Previous->Esp; Stack[7]=GuestLength >= sizeof(ULONG) ? *(ULONG *)Guest : 0;
             WOW64_TEB32(NtCurrentTeb())->LastErrorValue = NtCurrentTeb()->LastErrorValue;
             Cpu = *Previous; Cpu.CallbackFrame = &Frame;
             Cpu.Esp = PtrToUlong(Stack); Cpu.Eip = PtrToUlong(GuestDispatcher);

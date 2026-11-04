@@ -3400,6 +3400,7 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     {
         ExecuteOptions = MEM_EXECUTE_OPTION_ENABLE | MEM_EXECUTE_OPTION_PERMANENT;
     }
+#ifndef _M_AMD64 /* a native 64-bit process has DEP fixed by the kernel, as on Windows */
     Status = NtSetInformationProcess(NtCurrentProcess(),
                                      ProcessExecuteFlags,
                                      &ExecuteOptions,
@@ -3409,6 +3410,7 @@ LdrpInitializeProcess(IN PCONTEXT Context,
         DPRINT1("LDR: Could not set process execute flags 0x%x; status %x\n",
                 ExecuteOptions, Status);
     }
+#endif
 
     // FIXME: Should be done by Application Compatibility features,
     // by reading the registry, etc...
@@ -3684,10 +3686,37 @@ LdrpInit(PCONTEXT Context,
 
 /* EOF */
 
-#if defined(_M_IX86) && defined(SYSWOW64_GUEST)
+#if defined(_M_IX86) || defined(_M_AMD64)
+typedef VOID (NTAPI *PBASE_THREAD_INIT_THUNK)(ULONG Unknown, PVOID StartAddress, PVOID Parameter);
+
+/* kernel32's thread start (BasepThreadInitThunk), which RtlUserThreadStart runs the thread's routine through
+ * (Windows' Kernel32ThreadInitThunkFunction, there BaseThreadInitThunk). Found once kernel32 is loaded; a process
+ * without it runs the routine directly. kernel32 exports it under its own name: the real BaseThreadInitThunk would
+ * be hooked by Firefox (mozglue patches it and runs a thread whose routine is not in PAGE_EXECUTE_READ memory as
+ * a function that returns), and the relocated DLLs of a process report PAGE_EXECUTE for their code. */
+static PBASE_THREAD_INIT_THUNK Kernel32ThreadInitThunkFunction;
+
+static PBASE_THREAD_INIT_THUNK RtlpGetThreadInitThunk(VOID)
+{
+    static ANSI_STRING ThunkName = RTL_CONSTANT_STRING("BasepThreadInitThunk");
+    PBASE_THREAD_INIT_THUNK Thunk = Kernel32ThreadInitThunkFunction;
+    PVOID Kernel32;
+
+    if (!Thunk &&
+        NT_SUCCESS(LdrGetDllHandle(NULL, NULL, &Kernel32String, &Kernel32)) &&
+        NT_SUCCESS(LdrGetProcedureAddress(Kernel32, &ThunkName, 0, (PVOID *)&Thunk)))
+    {
+        Kernel32ThreadInitThunkFunction = Thunk;
+    }
+    return Thunk;
+}
+#endif
+
+#if defined(_M_IX86)
 VOID NTAPI RtlpUserThreadStart(PVOID Routine, PVOID Parameter);
 ULONG NTAPI RtlpCallThreadStart(PVOID Routine, PVOID Parameter);
 
+#ifdef SYSWOW64_GUEST
 /* Entered only by the native WoW64 loader, with an initialized PEB32/TEB32.
  * The main thread's StartContext is the one the kernel staged when the thread
  * was created (and a debugger may have changed since): RtlUserThreadStart with
@@ -3696,59 +3725,50 @@ ULONG NTAPI RtlpCallThreadStart(PVOID Routine, PVOID Parameter);
 VOID NTAPI LdrInitializeWow64(PVOID NtdllBase, PCONTEXT StartContext)
 {
     CONTEXT Context;
+    PVOID Entry;
     if (StartContext) Context = *StartContext;
     else RtlCaptureContext(&Context);
     LdrpInit(&Context, NtdllBase, NULL);
     if (StartContext) NtContinue(&Context, TRUE);
-    RtlpUserThreadStart(NULL, NtCurrentPeb());
+    /* The image's entry: the loader's, which the IL-only start of a .NET image without an entry
+     * point replaced with mscoree!_CorExeMain, or the header's */
+    if (LdrpImageEntry && LdrpImageEntry->EntryPoint)
+    {
+        Entry = LdrpImageEntry->EntryPoint;
+    }
+    else
+    {
+        PIMAGE_NT_HEADERS Header = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
+        Entry = (PVOID)((ULONG_PTR)NtCurrentPeb()->ImageBaseAddress +
+                        Header->OptionalHeader.AddressOfEntryPoint);
+    }
+    RtlpUserThreadStart(Entry, NtCurrentPeb());
 }
+#endif
 
 /* RtlUserThreadStart (dispatch.S) with its EAX and EBX: Routine(Parameter) ends
- * the thread with its result. A NULL Routine is the image's entry: the loader's,
- * which the IL-only start of a .NET image without an entry point replaced with
- * mscoree!_CorExeMain, or the header's. */
+ * the thread with its result, through kernel32's thread start (BasepThreadInitThunk, Windows BaseThreadInitThunk)
+ * (it reports an exception that no frame of the routine handles and ends the
+ * thread or the process). A NULL Routine faults, as on Windows. Without kernel32 the
+ * routine runs here and its result ends the thread. */
 VOID NTAPI RtlpUserThreadStart(PVOID Routine, PVOID Parameter)
 {
-    static ANSI_STRING FilterName = RTL_CONSTANT_STRING("UnhandledExceptionFilter");
-    static ANSI_STRING ExitThreadName = RTL_CONSTANT_STRING("ExitThread");
-    LONG (WINAPI *Filter)(PEXCEPTION_POINTERS) = NULL;
-    VOID (WINAPI *ExitThreadRoutine)(ULONG) = NULL;
-    PIMAGE_NT_HEADERS Header;
-    PVOID Kernel32;
-    if (!Routine)
-    {
-        if (LdrpImageEntry && LdrpImageEntry->EntryPoint)
-        {
-            Routine = LdrpImageEntry->EntryPoint;
-        }
-        else
-        {
-            Header = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
-            Routine = (PVOID)((ULONG_PTR)NtCurrentPeb()->ImageBaseAddress +
-                              Header->OptionalHeader.AddressOfEntryPoint);
-        }
-    }
+    PBASE_THREAD_INIT_THUNK Thunk;
 
-    /* As kernel32's BaseThreadInitThunk on Windows: an exception that no frame
-     * of the routine handles must reach UnhandledExceptionFilter, which reports
-     * it, instead of a second-chance dispatch that ends the process silently.
-     * The routine's result ends the thread; an unhandled exception ends the
-     * process at once, without DLL detach, as on Windows. Without kernel32 the
-     * thread ends through RtlExitUserThread. */
-    if (NT_SUCCESS(LdrGetDllHandle(NULL, NULL, &Kernel32String, &Kernel32)) &&
-        NT_SUCCESS(LdrGetProcedureAddress(Kernel32, &FilterName, 0, (PVOID *)&Filter)) &&
-        NT_SUCCESS(LdrGetProcedureAddress(Kernel32, &ExitThreadName, 0, (PVOID *)&ExitThreadRoutine)))
-    {
-        _SEH2_TRY
-        {
-            ExitThreadRoutine(RtlpCallThreadStart(Routine, Parameter));
-        }
-        _SEH2_EXCEPT(Filter(_SEH2_GetExceptionInformation()))
-        {
-            NtTerminateProcess(NtCurrentProcess(), _SEH2_GetExceptionCode());
-        }
-        _SEH2_END;
-    }
+    Thunk = RtlpGetThreadInitThunk();
+    if (Thunk) Thunk(0, Routine, Parameter);
     RtlExitUserThread(RtlpCallThreadStart(Routine, Parameter));
+}
+#elif defined(_M_AMD64)
+/* A user thread starts here with its routine in RCX and its parameter in RDX (the first thread of a
+ * process: the image entry and the PEB), and runs the routine through kernel32's thread start (BasepThreadInitThunk)
+ * as on Windows, so a stack walk of any thread ends in ntdll!RtlUserThreadStart. Without kernel32 the
+ * routine runs here and its result ends the thread. */
+VOID NTAPI RtlUserThreadStart(PVOID Routine, PVOID Parameter)
+{
+    PBASE_THREAD_INIT_THUNK Thunk = RtlpGetThreadInitThunk();
+
+    if (Thunk) Thunk(0, Routine, Parameter);
+    RtlExitUserThread(((ULONG (NTAPI *)(PVOID))Routine)(Parameter));
 }
 #endif

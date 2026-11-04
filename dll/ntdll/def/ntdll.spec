@@ -1345,7 +1345,8 @@
 @ stdcall -version=0x601+ RtlUTF8ToUnicodeN(ptr long ptr ptr long) RtlpUTF8ToUnicodeNWindows
 @ stdcall -version=0x601+ RtlUnicodeStringToUTF8String(ptr ptr long)
 @ stdcall -version=0x502 RtlUsageHeap(ptr long ptr)
-@ stdcall -stub -version=0x600+ RtlUserThreadStart(long long)
+@ stdcall -version=0x600+ -arch=i386,x86_64 RtlUserThreadStart()
+@ stdcall -stub -version=0x600+ -arch=arm RtlUserThreadStart(long long)
 @ stdcall RtlValidAcl(ptr)
 @ stdcall RtlValidRelativeSecurityDescriptor(ptr long long)
 @ stdcall RtlValidSecurityDescriptor(ptr)

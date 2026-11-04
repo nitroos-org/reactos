@@ -108,7 +108,7 @@ NTSTATUS Wow64CreateThread(HANDLE *Handle, ACCESS_MASK Access,
                                  &Native, &Stack, TRUE);
     if (NT_SUCCESS(Status))
     {
-        /* kernel32's threads start in BaseThreadStartupThunk with the routine in EAX; ntdll's
+        /* kernel32's threads start in ntdll!RtlUserThreadStart with the routine in EAX; ntdll's
          * (RtlCreateUserThread, e.g. a debugger's DbgUiRemoteBreakin) start at the routine with
          * EAX zero. Windows reports the routine for both. */
         ULONG_PTR StartAddress = Captured.Eax ? Captured.Eax : Captured.Eip;
