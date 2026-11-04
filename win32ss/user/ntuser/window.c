@@ -1213,12 +1213,8 @@ co_IntSetParent(PWND Wnd, PWND WndNewParent)
     */
    WasVisible = co_WinPosShowWindow(Wnd, SW_HIDE);
 
-   /* Window must belong to current process */
-   if (Wnd->head.pti->ppi != PsGetCurrentProcessWin32Process())
-   {
-      ERR("IntSetParent Window must belong to current process!\n");
-      return NULL;
-   }
+   /* Windows allows the window to belong to another process (WebView2 hosting: the host process
+      re-parents the browser process' window into its own). The two threads are attached below. */
 
    WndOldParent = Wnd->spwndParent;
 
