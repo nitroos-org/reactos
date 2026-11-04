@@ -154,6 +154,7 @@ list(APPEND SOURCE
     PreferredUILanguages.c
     PowerRequest.c
     PrefetchVirtualMemory.c
+    RelocatedImageProtection.c
     PrivMoveFileIdentityW.c
     ProcessAffinity.c
     ProcessorNumber.c
