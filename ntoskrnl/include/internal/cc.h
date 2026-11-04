@@ -219,7 +219,11 @@ typedef struct _ROS_SHARED_CACHE_MAP
     BOOLEAN PinAccess;
     KSPIN_LOCK CacheMapLock;
     KGUARDED_MUTEX FlushCacheLock;
-    WORK_QUEUE_ENTRY FlushDereferenceEntry; /* posted by CcFlushCache with its last reference */
+    WORK_QUEUE_ENTRY FlushDereferenceEntry; /* posted by the holder of the last temporary reference (CcRosDereferenceSharedCacheMap) */
+    PCACHE_UNINITIALIZE_EVENT UninitializeEvents; /* signalled when the map is deleted (deferred CcUninitializeCacheMap) */
+    ULONG DeferredVacbs; /* views counted in CcDeferredVacbs while SHARED_CACHE_MAP_DEFERRED */
+    ULONG LazyWriteFailures; /* consecutive failed writes of a view of this map (CcRosFlushDirtyPages) */
+    ULONGLONG FirstLazyWriteFailure; /* interrupt time of the first of them */
 #if DBG
     BOOLEAN Trace; /* enable extra trace output for this cache map and it's VACBs */
 #endif
@@ -229,6 +233,10 @@ typedef struct _ROS_SHARED_CACHE_MAP
 #define WRITEBEHIND_DISABLED 0x2
 #define SHARED_CACHE_MAP_IN_CREATION 0x4
 #define SHARED_CACHE_MAP_IN_LAZYWRITE 0x8
+#define SHARED_CACHE_MAP_DEFERRED 0x10 /* closed with dirty data, left to the lazy writer (CcRosDeleteOrDeferFileCache) */
+#define SHARED_CACHE_MAP_LAZY_CLOSE 0x20 /* the file system allows it (CcRosAllowLazyClose): without, the last close writes and deletes the map */
+#define SHARED_CACHE_MAP_SYNC_DELETE 0x40 /* somebody waits for the deletion (UninitializeCompleteEvent): never deferred */
+#define SHARED_CACHE_MAP_DISCARD 0x80 /* writes keep failing: the dirty data of this closed map is dropped at its deletion */
 
 typedef struct _ROS_VACB
 {
@@ -251,6 +259,8 @@ typedef struct _ROS_VACB
     volatile ULONG ReferenceCount;
     /* Pointer to the shared cache map for the file which this view maps data for. */
     PROS_SHARED_CACHE_MAP SharedCacheMap;
+    /* Pages counted in CcTotalDirtyPages and the map's DirtyPages while Dirty (CcRosMarkDirtyVacb) */
+    ULONG DirtyPagesCharged;
     /* Pointer to the next VACB in a chain. */
 } ROS_VACB, *PROS_VACB;
 
@@ -439,8 +449,19 @@ CcRosInitializeFileCache(
 
 NTSTATUS
 CcRosReleaseFileCache(
-    PFILE_OBJECT FileObject
+    _In_ PFILE_OBJECT FileObject,
+    _In_ BOOLEAN AllowDeferredDelete,
+    _In_opt_ PCACHE_UNINITIALIZE_EVENT UninitializeCompleteEvent,
+    _Out_opt_ PBOOLEAN EventQueued
 );
+
+PROS_SHARED_CACHE_MAP
+CcRosReferenceSharedCacheMap(
+    _In_ PSECTION_OBJECT_POINTERS SectionObjectPointers);
+
+VOID
+CcRosDereferenceSharedCacheMap(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap);
 
 VOID
 NTAPI
@@ -553,3 +574,16 @@ CcRosVacbDecRefCount(
 BOOLEAN
 CcRosFreeOneUnusedVacb(
     VOID);
+
+BOOLEAN
+CcRosDeferredBacklog(VOID);
+
+BOOLEAN
+CcRosHasLazyWritableData(VOID);
+
+BOOLEAN
+CcRosHasLazyWritableDataLocked(VOID);
+
+VOID
+CcRosFlushSharedCacheMapNoCallbacks(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap);
