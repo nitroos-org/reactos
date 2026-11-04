@@ -14,5 +14,6 @@
 #include <ndk/extypes.h>
 #include <ndk/exfuncs.h>
 #include <ndk/rtlfuncs.h>
+#include <ndk/obfuncs.h>
 
 #endif /* _KERNEL32_APITEST_PRECOMP_H_ */
