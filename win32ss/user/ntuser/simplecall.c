@@ -902,6 +902,28 @@ NtUserCallHwndParam(
             return 0;
         }
 
+        case HWNDPARAM_ROUTINE_ROS_SETGLASS:
+        {
+            PWND pWnd;
+            BOOL ret = FALSE;
+
+            UserEnterExclusive();
+            pWnd = UserGetWindowObject(hWnd);
+            if (pWnd)
+            {
+                if (Param)
+                    ret = UserSetProp(pWnd, gpsi->atomFrostedWindowProp, (HANDLE)1, TRUE);
+                else
+                {
+                    UserRemoveProp(pWnd, gpsi->atomFrostedWindowProp, TRUE);
+                    ret = TRUE;
+                }
+                GlassBackdropDrop(hWnd);
+            }
+            UserLeave();
+            return ret;
+        }
+
         case HWNDPARAM_ROUTINE_CLEARWINDOWSTATE:
         {
             PWND pWnd;
