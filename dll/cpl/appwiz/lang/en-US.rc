@@ -75,8 +75,8 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_FEATURESNAME "Turn Windows features on or off"
-    IDS_FEATURESDESCRIPTION "Turn optional ReactOS features and add-on software on or off."
+    IDS_FEATURESNAME "Turn NitroOS features on or off"
+    IDS_FEATURESDESCRIPTION "Turn optional NitroOS features and add-on software on or off."
 END
 
 STRINGTABLE

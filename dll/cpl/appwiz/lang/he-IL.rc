@@ -89,3 +89,22 @@ BEGIN
     IDS_INVALID_NAME "The shortcut name you entered either contained characters that are invalid for file names or was too long."
     IDS_BROWSE_FOR_TARGET "Please select the target of the shortcut below:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "תוכניות ותכונות"
+    IDS_PROG_HEADER "הסר התקנה או שנה תוכנית. כדי להתקין תוכנה או להפעיל או לכבות תכונות מערכת, השתמש ב""הפעלה או כיבוי של תכונות NitroOS""."
+    IDS_PROG_COL_NAME "שם"
+    IDS_PROG_COL_PUBLISHER "מפרסם"
+    IDS_PROG_COL_VERSION "גרסה"
+    IDS_PROG_COL_DATE "הותקנה ב-"
+    IDS_PROG_UNINSTALL "&הסר התקנה"
+    IDS_PROG_CHANGE "ש&נה"
+    IDS_PROG_REFRESH "&רענן"
+    IDS_PROG_FEATURES "הפעלה או כיבוי של &תכונות NitroOS"
+    IDS_PROG_CLOSE "&סגור"
+    IDS_PROG_CONFIRM "האם ברצונך להסיר את התקנת '%s'?"
+    IDS_PROG_STARTFAIL "לא ניתן היה להפעיל את התוכנית (שגיאה %lu):\n%s"
+    IDS_FEATURESNAME "הפעלה או כיבוי של תכונות NitroOS"
+    IDS_FEATURESDESCRIPTION "הפעלה או כיבוי של תכונות אופציונליות של NitroOS ותוכנות נוספות."
+END
