@@ -50,6 +50,9 @@
 WINE_DEFAULT_DEBUG_CHANNEL(msi);
 
 BOOL is_wow64;
+#ifdef __REACTOS__
+BOOL msi_in_custom_action_process;  /* this process runs a custom action dll for an installer service */
+#endif
 
 UINT msi_locate_product(LPCWSTR szProduct, MSIINSTALLCONTEXT *context)
 {
@@ -1942,6 +1945,8 @@ UINT WINAPI MsiEnumComponentCostsA( MSIHANDLE handle, const char *component, DWO
 {
     UINT r;
     DWORD len;
+    BOOL remote = FALSE;
+    MSIPACKAGE *package;
     WCHAR *driveW, *componentW = NULL;
 
     TRACE( "%lu, %s, %lu, %d, %p, %p, %p, %p\n", handle, debugstr_a(component), index, state, drive, buflen, cost,
@@ -1951,15 +1956,29 @@ UINT WINAPI MsiEnumComponentCostsA( MSIHANDLE handle, const char *component, DWO
     if (component && !(componentW = strdupAtoW( component ))) return ERROR_OUTOFMEMORY;
 
     len = *buflen;
-    if (!(driveW = malloc( len * sizeof(WCHAR) )))
+    if (!(driveW = calloc( len + 1, sizeof(WCHAR) )))
     {
         free( componentW );
         return ERROR_OUTOFMEMORY;
     }
+    if ((package = msihandle2msiinfo( handle, MSIHANDLETYPE_PACKAGE ))) msiobj_release( &package->hdr );
+    else remote = TRUE;
     r = MsiEnumComponentCostsW( handle, componentW, index, state, driveW, buflen, cost, temp );
     if (!r)
     {
         WideCharToMultiByte( CP_ACP, 0, driveW, -1, drive, len, NULL, NULL );
+    }
+    else if (r == ERROR_MORE_DATA && remote)
+    {
+        /* through a custom action handle the part that fits is returned (nothing for a
+           zero length buffer) and the size needed is given in bytes of the wide string */
+        if (len)
+        {
+            driveW[len - 1] = 0;
+            WideCharToMultiByte( CP_ACP, 0, driveW, -1, drive, len, NULL, NULL );
+            drive[len - 1] = 0;
+        }
+        *buflen *= sizeof(WCHAR);
     }
     free( componentW );
     free( driveW );
