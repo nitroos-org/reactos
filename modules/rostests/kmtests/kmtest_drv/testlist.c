@@ -49,6 +49,9 @@ KMT_TESTFUNC Test_FsRtlTunnel;
 KMT_TESTFUNC Test_HalDma;
 #if defined(_M_IX86) || defined(_M_AMD64)
 KMT_TESTFUNC Test_HalDmaBounce;
+KMT_TESTFUNC Test_HalDmaSgWait;
+KMT_TESTFUNC Test_HalDmaSgWaitNoItem;
+KMT_TESTFUNC Test_HalDmaSgWaitFlaky;
 KMT_TESTFUNC Test_HalIoApic;
 KMT_TESTFUNC Test_HalPortIo;
 #endif
@@ -186,6 +189,9 @@ const KMT_TEST TestList[] =
 #if defined(_M_IX86) || defined(_M_AMD64)
     { "-HalIoApic",                         Test_HalIoApic },
     { "HalDmaBounce",                       Test_HalDmaBounce },
+    { "HalDmaSgWait",                       Test_HalDmaSgWait },
+    { "HalDmaSgWaitNoItem",                 Test_HalDmaSgWaitNoItem },
+    { "HalDmaSgWaitFlaky",                  Test_HalDmaSgWaitFlaky },
     { "HalPortIo",                          Test_HalPortIo },
 #endif
     { "HalSystemInfo",                      Test_HalSystemInfo },

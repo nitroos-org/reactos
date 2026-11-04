@@ -335,7 +335,15 @@ typedef struct _ADAPTER_OBJECT {
    PROS_MAP_REGISTER_ENTRY MapRegisterBase;
 
    ULONG NumberOfMapRegisters;
+   /* Master adapter: map registers its users hold, and grow work items still to run (SpinLock) */
    ULONG CommittedMapRegisters;
+   ULONG GrowWorkItemsPending;
+   /* Master adapter: retry of a grow that failed while requests wait (SpinLock for the flag and delay) */
+   KTIMER GrowRetryTimer;
+   KDPC GrowRetryDpc;
+   WORK_QUEUE_ITEM GrowRetryWorkItem;
+   ULONG GrowRetryDelayMs;
+   BOOLEAN GrowRetryActive;
 
    PWAIT_CONTEXT_BLOCK CurrentWcb;
    KDEVICE_QUEUE ChannelWaitQueue;
