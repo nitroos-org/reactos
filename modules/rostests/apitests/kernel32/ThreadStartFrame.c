@@ -2,7 +2,7 @@
  * PROJECT:     ReactOS API tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     A thread starts in ntdll!RtlUserThreadStart, which calls kernel32's thread start (Windows'
- *              BaseThreadInitThunk, here BasepThreadInitThunk), which calls the start routine: the stack a
+ *              BaseThreadInitThunk), which calls the start routine: the stack a
  *              debugger or a stack walker sees
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
@@ -48,7 +48,7 @@ CheckStack(const TSF_RESULT *Result, PCSTR What)
 {
     HMODULE Ntdll = GetModuleHandleW(L"ntdll.dll");
     HMODULE Kernel32 = GetModuleHandleW(L"kernel32.dll");
-    PUCHAR Thunk = (PUCHAR)GetProcAddress(Kernel32, "BasepThreadInitThunk");
+    PUCHAR Thunk = (PUCHAR)GetProcAddress(Kernel32, "BaseThreadInitThunk");
     PUCHAR Start = (PUCHAR)GetProcAddress(Ntdll, "RtlUserThreadStart");
     USHORT i;
     BOOLEAN FoundThunk = FALSE;
@@ -62,25 +62,24 @@ CheckStack(const TSF_RESULT *Result, PCSTR What)
        What, Result->Frames[Result->Count - 1], ModuleOf(Result->Frames[Result->Count - 1]));
 
     ok(Start != NULL, "%s: ntdll does not export RtlUserThreadStart\n", What);
-
-    /* ReactOS exports its thread start under its own name; Windows has none (BaseThreadInitThunk is not asked for) */
-    if (!Thunk)
-        skip("%s: kernel32 does not export BasepThreadInitThunk\n", What);
+    /* Windows and ReactOS both export the thread start as BaseThreadInitThunk */
+    ok(Thunk != NULL, "%s: kernel32 does not export BaseThreadInitThunk\n", What);
 
     for (i = 0; Thunk && i < Result->Count; i++)
     {
         if ((PUCHAR)Result->Frames[i] > Thunk && (PUCHAR)Result->Frames[i] < Thunk + 0x400)
             FoundThunk = TRUE;
     }
-    ok(FoundThunk, "%s: no frame in BasepThreadInitThunk %p\n", What, Thunk);
+    if (Thunk)
+        ok(FoundThunk, "%s: no frame in BaseThreadInitThunk %p\n", What, Thunk);
 
-    /* BasepThreadInitThunk is called from ntdll, the start routine from kernel32 */
+    /* BaseThreadInitThunk is called from ntdll, the start routine from kernel32 */
     for (i = 1; Thunk && i < Result->Count; i++)
     {
         if ((PUCHAR)Result->Frames[i - 1] > Thunk && (PUCHAR)Result->Frames[i - 1] < Thunk + 0x400)
         {
             ok(ModuleOf(Result->Frames[i]) == Ntdll,
-               "%s: the caller of BasepThreadInitThunk %p is not in ntdll\n", What, Result->Frames[i]);
+               "%s: the caller of BaseThreadInitThunk %p is not in ntdll\n", What, Result->Frames[i]);
             break;
         }
     }
