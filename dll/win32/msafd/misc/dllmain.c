@@ -612,6 +612,7 @@ TranslateNtStatusError(NTSTATUS Status)
           return WSAEADDRINUSE;
 
        case STATUS_LOCAL_DISCONNECT:
+       case STATUS_CONNECTION_ABORTED:
           return WSAECONNABORTED;
 
        case STATUS_ACCESS_VIOLATION:
@@ -1460,10 +1461,7 @@ WSPSelect(IN int nfds,
                     TRACE("Event %x on handle %x\n",
                         Events,
                         Handle);
-                    if ((Events & x) == AFD_EVENT_DISCONNECT || (Events & x) == AFD_EVENT_CLOSE)
-                        Socket->SharedData->SocketLastError = WSAECONNRESET;
-                    if ((Events & x) == AFD_EVENT_ABORT)
-                        Socket->SharedData->SocketLastError = WSAECONNABORTED;
+                    /* SO_ERROR stays 0 after a reset or an abort, as on Windows */
                     if( readfds )
                         FD_SET(Handle, readfds);
                     break;
@@ -4143,6 +4141,20 @@ MsafdInfoAPC(
     HeapFree(GlobalHeap, 0, Context->lpInfoData);
 
     HeapFree(GlobalHeap, 0, ApcContext);
+}
+
+/* shutdown(SD_RECEIVE) with unread or arriving data resets the connection of a stream socket (AFD); the
+ * receives and sends of that socket then fail with WSAECONNABORTED rather than WSAESHUTDOWN */
+BOOLEAN
+MsafdConnectionAborted(PSOCKET_INFORMATION Socket)
+{
+    ULONG Aborted = 0;
+
+    if (Socket->SharedData->ServiceFlags1 & XP1_CONNECTIONLESS)
+        return FALSE;
+
+    return GetSocketInformation(Socket, AFD_INFO_CONNECTION_ABORTED, NULL, &Aborted, NULL, NULL, NULL) == NO_ERROR &&
+           Aborted != 0;
 }
 
 int
