@@ -4859,16 +4859,25 @@ NtQueryVirtualMemory(IN HANDLE ProcessHandle,
 }
 
 /*
- * @implemented
+ * NtAllocateVirtualMemory and NtAllocateVirtualMemoryEx.
+ *
+ * Ex only: LowestAddress, HighestRequired and Alignment come from a MEM_ADDRESS_REQUIREMENTS
+ * (0 when not given) and bound an automatic placement; MEM_RESERVE_PLACEHOLDER reserves a
+ * placeholder, MEM_REPLACE_PLACEHOLDER turns a whole free placeholder into a private allocation
+ * (reserved, or committed with MEM_COMMIT) at the placeholder's address and of its size.
  */
+static
 NTSTATUS
-NTAPI
-NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
+MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
                         IN OUT PVOID* UBaseAddress,
                         IN ULONG_PTR ZeroBits,
                         IN OUT PSIZE_T URegionSize,
                         IN ULONG AllocationType,
-                        IN ULONG Protect)
+                        IN ULONG Protect,
+                        IN ULONG_PTR LowestAddress,
+                        IN ULONG_PTR HighestRequired,
+                        IN ULONG_PTR Alignment,
+                        IN BOOLEAN IsEx)
 {
     PEPROCESS Process;
     PMMVAD Vad = NULL, FoundVad;
@@ -4898,9 +4907,37 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         return MI_PARAM_STATUS(3);
     }
 
+    /* Placeholders need the Ex service (Windows: STATUS_INVALID_PARAMETER without it) */
+    if (AllocationType & (MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER))
+    {
+        if (!IsEx)
+        {
+            DPRINT1("Placeholder flags without NtAllocateVirtualMemoryEx\n");
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        /* A replacement is a reservation of a placeholder's whole range, maybe committed */
+        if ((AllocationType & MEM_REPLACE_PLACEHOLDER) &&
+            (!(AllocationType & MEM_RESERVE) || (AllocationType & MEM_RESERVE_PLACEHOLDER)))
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        /* A placeholder is reserved, not committed, and has no access */
+        if ((AllocationType & MEM_RESERVE_PLACEHOLDER) &&
+            (!(AllocationType & MEM_RESERVE) || (AllocationType & MEM_COMMIT) || (Protect != PAGE_NOACCESS)))
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        if (AllocationType & (MEM_PHYSICAL | MEM_LARGE_PAGES | MEM_RESET))
+            return STATUS_INVALID_PARAMETER;
+    }
+
     /* Check for valid Allocation Types */
     if ((AllocationType & ~(MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_PHYSICAL |
-                    MEM_TOP_DOWN | MEM_WRITE_WATCH | MEM_LARGE_PAGES)))
+                    MEM_TOP_DOWN | MEM_WRITE_WATCH | MEM_LARGE_PAGES |
+                    MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER)))
     {
         DPRINT1("Invalid Allocation Type\n");
         return STATUS_INVALID_PARAMETER_5;
@@ -5089,6 +5126,82 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
     }
 
     //
+    // MEM_REPLACE_PLACEHOLDER: the free placeholder at this address, exactly this size, becomes
+    // a private allocation in place
+    //
+    if (AllocationType & MEM_REPLACE_PLACEHOLDER)
+    {
+        if (Protect & (PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY))
+        {
+            Status = STATUS_INVALID_PAGE_PROTECTION;
+            goto FailPathNoLock;
+        }
+        if (!PBaseAddress)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto FailPathNoLock;
+        }
+
+        /* A placeholder starts on a page, not on an allocation granule */
+        StartingAddress = (ULONG_PTR)PAGE_ALIGN(PBaseAddress);
+        EndingAddress = ((ULONG_PTR)PBaseAddress + PRegionSize - 1) | (PAGE_SIZE - 1);
+        PRegionSize = EndingAddress - StartingAddress + 1;
+
+        /* A committed replacement is charged before anything changes */
+        if (AllocationType & MEM_COMMIT)
+        {
+            CommitPages = BYTES_TO_PAGES(PRegionSize);
+            if (!MiChargeCommitWithGrowth(CommitPages))
+            {
+                Status = STATUS_COMMITMENT_LIMIT;
+                goto FailPathNoLock;
+            }
+        }
+
+        AddressSpace = MmGetCurrentAddressSpace();
+        MmLockAddressSpace(AddressSpace);
+        if (Process->VmDeleted)
+        {
+            Status = STATUS_PROCESS_IS_TERMINATING;
+        }
+        else if (!(FoundVad = MiLocateAddress((PVOID)StartingAddress)))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+        }
+        else if ((FoundVad->StartingVpn != (StartingAddress >> PAGE_SHIFT)) ||
+                 (FoundVad->EndingVpn != (EndingAddress >> PAGE_SHIFT)))
+        {
+            Status = STATUS_CONFLICTING_ADDRESSES;
+        }
+        else if (!MI_IS_PLACEHOLDER_VAD(FoundVad) || MI_IS_MEMORY_AREA_VAD(FoundVad))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+        }
+        else
+        {
+            /* The placeholder never had pages: only its flags change */
+            MiLockProcessWorkingSetUnsafe(Process, CurrentThread);
+            FoundVad->u2.VadFlags2.Placeholder = 0;
+            FoundVad->u2.VadFlags2.FromPlaceholder = 1;
+            FoundVad->u.VadFlags.Protection = ProtectionMask;
+            if (AllocationType & MEM_COMMIT)
+            {
+                FoundVad->u.VadFlags.MemCommit = 1;
+                FoundVad->u.VadFlags.CommitCharge = CommitPages;
+                MiAddProcessCommit(Process, CommitPages);
+                CommitPages = 0;
+            }
+            MiUnlockProcessWorkingSetUnsafe(Process, CurrentThread);
+            Status = STATUS_SUCCESS;
+        }
+        MmUnlockAddressSpace(AddressSpace);
+
+        /* What was charged for a replacement that did not happen goes back */
+        MiReturnCommit(CommitPages);
+        goto FailPathNoLock;
+    }
+
+    //
     // Check if the caller is reserving memory, or committing memory and letting
     // us pick the base address
     //
@@ -5115,6 +5228,10 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
             PRegionSize = ROUND_TO_PAGES(PRegionSize);
             EndingAddress = 0;
             StartingAddress = 0;
+
+            /* An address requirement bounds the placement */
+            if (HighestRequired && (HighestRequired < HighestAddress))
+                HighestAddress = HighestRequired;
 
         }
         else
@@ -5158,6 +5275,7 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         Vad->u.VadFlags.Protection = ProtectionMask;
         Vad->u.VadFlags.PrivateMemory = 1;
         Vad->ControlArea = NULL; // For Memory-Area hack
+        if (AllocationType & MEM_RESERVE_PLACEHOLDER) Vad->u2.VadFlags2.Placeholder = 1;
 
         //
         // A committed reservation is charged in full before the VAD is
@@ -5178,12 +5296,13 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         //
         // Insert the VAD
         //
-        Status = MiInsertVadEx(Vad,
-                               &StartingAddress,
-                               PRegionSize,
-                               HighestAddress,
-                               MM_VIRTMEM_GRANULARITY,
-                               AllocationType);
+        Status = MiInsertVadEx2(Vad,
+                                &StartingAddress,
+                                PRegionSize,
+                                StartingAddress ? 0 : LowestAddress,
+                                HighestAddress,
+                                max(Alignment, MM_VIRTMEM_GRANULARITY),
+                                AllocationType & ~MEM_REPLACE_PLACEHOLDER);
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("Failed to insert the VAD!\n");
@@ -5260,6 +5379,16 @@ RetryCommit:
     if (Result != TableFoundNode)
     {
         DPRINT1("Could not find a VAD for this allocation\n");
+        Status = STATUS_CONFLICTING_ADDRESSES;
+        goto FailPath;
+    }
+
+    //
+    // A free placeholder cannot be committed: it has to be replaced first
+    //
+    if (MI_IS_PLACEHOLDER_VAD(FoundVad) && !MI_IS_MEMORY_AREA_VAD(FoundVad))
+    {
+        DPRINT1("Attempt to commit a placeholder\n");
         Status = STATUS_CONFLICTING_ADDRESSES;
         goto FailPath;
     }
@@ -5663,6 +5792,242 @@ FailPathNoLock:
  */
 NTSTATUS
 NTAPI
+NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
+                        IN OUT PVOID* UBaseAddress,
+                        IN ULONG_PTR ZeroBits,
+                        IN OUT PSIZE_T URegionSize,
+                        IN ULONG AllocationType,
+                        IN ULONG Protect)
+{
+    return MiAllocateVirtualMemory(ProcessHandle,
+                                   UBaseAddress,
+                                   ZeroBits,
+                                   URegionSize,
+                                   AllocationType,
+                                   Protect,
+                                   0,
+                                   0,
+                                   0,
+                                   FALSE);
+}
+
+/*
+ * Capture and check the extended parameters of NtAllocateVirtualMemoryEx and NtMapViewOfSectionEx.
+ * What is accepted: one MEM_ADDRESS_REQUIREMENTS, NUMA node 0 (the only node) and attribute flags 0.
+ * Partitions, physical page handles, other attribute flags and image machines are refused. The checks of a requirement are Windows': an
+ * alignment is a power of two of at least the allocation granularity, the lowest address is a
+ * multiple of the granularity and of the alignment, the highest is the last byte of a page above
+ * the lowest and within user space.
+ */
+NTSTATUS
+NTAPI
+MiCaptureExtendedParameters(
+    _In_reads_opt_(Count) PMEM_EXTENDED_PARAMETER Parameters,
+    _In_ ULONG Count,
+    _In_ KPROCESSOR_MODE PreviousMode,
+    _Out_ PULONG_PTR LowestAddress,
+    _Out_ PULONG_PTR HighestAddress,
+    _Out_ PULONG_PTR Alignment)
+{
+    MEM_EXTENDED_PARAMETER Parameter;
+    MEM_ADDRESS_REQUIREMENTS Requirements;
+    ULONG i, Present = 0;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    *LowestAddress = 0;
+    *HighestAddress = 0;
+    *Alignment = 0;
+
+    if (Count == 0) return STATUS_SUCCESS;
+    if (!Parameters) return STATUS_INVALID_PARAMETER;
+
+    /* Each type may be given once, so there cannot be more parameters than types */
+    if (Count >= MemExtendedParameterMax) return STATUS_INVALID_PARAMETER;
+
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode)
+            ProbeForRead(Parameters, Count * sizeof(MEM_EXTENDED_PARAMETER), sizeof(ULONG));
+
+        for (i = 0; i < Count; i++)
+        {
+            Parameter = Parameters[i];
+            if ((Parameter.Type >= MemExtendedParameterMax) ||
+                (Parameter.Type == MemExtendedParameterInvalidType) ||
+                (Present & (1UL << Parameter.Type)))
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                _SEH2_LEAVE;
+            }
+            Present |= 1UL << Parameter.Type;
+
+            switch (Parameter.Type)
+            {
+                case MemExtendedParameterAddressRequirements:
+                    if (PreviousMode != KernelMode)
+                        ProbeForRead(Parameter.Pointer, sizeof(MEM_ADDRESS_REQUIREMENTS), sizeof(ULONG));
+                    Requirements = *(PMEM_ADDRESS_REQUIREMENTS)Parameter.Pointer;
+
+                    if (Requirements.Alignment &&
+                        ((Requirements.Alignment & (Requirements.Alignment - 1)) ||
+                         (Requirements.Alignment < MM_VIRTMEM_GRANULARITY)))
+                    {
+                        Status = STATUS_INVALID_PARAMETER;
+                        _SEH2_LEAVE;
+                    }
+                    if (Requirements.LowestStartingAddress &&
+                        (((ULONG_PTR)Requirements.LowestStartingAddress > (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) ||
+                         ((ULONG_PTR)Requirements.LowestStartingAddress & (MM_VIRTMEM_GRANULARITY - 1)) ||
+                         (Requirements.Alignment &&
+                          ((ULONG_PTR)Requirements.LowestStartingAddress & (Requirements.Alignment - 1)))))
+                    {
+                        Status = STATUS_INVALID_PARAMETER;
+                        _SEH2_LEAVE;
+                    }
+                    if (Requirements.HighestEndingAddress &&
+                        (((ULONG_PTR)Requirements.HighestEndingAddress > (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) ||
+                         ((ULONG_PTR)Requirements.HighestEndingAddress <= (ULONG_PTR)Requirements.LowestStartingAddress) ||
+                         (((ULONG_PTR)Requirements.HighestEndingAddress & (PAGE_SIZE - 1)) != (PAGE_SIZE - 1))))
+                    {
+                        Status = STATUS_INVALID_PARAMETER;
+                        _SEH2_LEAVE;
+                    }
+                    *LowestAddress = (ULONG_PTR)Requirements.LowestStartingAddress;
+                    *HighestAddress = (ULONG_PTR)Requirements.HighestEndingAddress;
+                    *Alignment = Requirements.Alignment;
+                    break;
+
+                case MemExtendedParameterAttributeFlags:
+                    /* No attribute (large pages, nonpaged, EC code) is supported; none is fine
+                       (kernelbase's VirtualAlloc2 refuses even that, as Windows 10 22H2 does) */
+                    if (Parameter.ULong64 != 0)
+                    {
+                        Status = STATUS_INVALID_PARAMETER;
+                        _SEH2_LEAVE;
+                    }
+                    break;
+
+                case MemExtendedParameterNumaNode:
+                    /* The one node of this system */
+                    if (Parameter.ULong != 0)
+                    {
+                        Status = STATUS_INVALID_PARAMETER;
+                        _SEH2_LEAVE;
+                    }
+                    break;
+
+                default:
+                    Status = STATUS_INVALID_PARAMETER;
+                    _SEH2_LEAVE;
+            }
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return Status;
+}
+
+/* The Ex services have no parameter-specific invalid-parameter codes */
+static
+NTSTATUS
+MiExStatus(NTSTATUS Status)
+{
+    if ((Status >= STATUS_INVALID_PARAMETER_1) && (Status <= STATUS_INVALID_PARAMETER_12))
+        return STATUS_INVALID_PARAMETER;
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+NtAllocateVirtualMemoryEx(
+    _In_ HANDLE ProcessHandle,
+    _Inout_ PVOID *UBaseAddress,
+    _Inout_ PSIZE_T URegionSize,
+    _In_ ULONG AllocationType,
+    _In_ ULONG PageProtection,
+    _Inout_updates_opt_(ExtendedParameterCount) PMEM_EXTENDED_PARAMETER ExtendedParameters,
+    _In_ ULONG ExtendedParameterCount)
+{
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    ULONG_PTR LowestAddress, HighestAddress, Alignment;
+    PVOID BaseAddress;
+    SIZE_T RegionSize;
+    NTSTATUS Status;
+    PAGED_CODE();
+
+    Status = MiCaptureExtendedParameters(ExtendedParameters,
+                                         ExtendedParameterCount,
+                                         PreviousMode,
+                                         &LowestAddress,
+                                         &HighestAddress,
+                                         &Alignment);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    if (AllocationType & ~(MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_TOP_DOWN | MEM_PHYSICAL |
+                           MEM_LARGE_PAGES | MEM_WRITE_WATCH | MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode)
+        {
+            ProbeForWritePointer(UBaseAddress);
+            ProbeForWriteSize_t(URegionSize);
+        }
+        BaseAddress = *UBaseAddress;
+        RegionSize = *URegionSize;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    /* An address and a requirement that asks for something exclude each other */
+    if (BaseAddress && (LowestAddress || HighestAddress || Alignment)) return STATUS_INVALID_PARAMETER;
+    if (!RegionSize) return STATUS_INVALID_PARAMETER;
+
+#ifndef _WIN64
+    /* A 32-bit system has nothing above the user space: the address conflicts (Wine's tests) */
+    if (BaseAddress &&
+        (((ULONG_PTR)BaseAddress > (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS) ||
+         (RegionSize - 1 > (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS - (ULONG_PTR)BaseAddress)))
+    {
+        return STATUS_CONFLICTING_ADDRESSES;
+    }
+#endif
+
+    /* The requirement must leave room for the size */
+    if (HighestAddress &&
+        (ROUND_TO_PAGES(RegionSize) == 0 || ROUND_TO_PAGES(RegionSize) - 1 > HighestAddress - LowestAddress))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Status = MiAllocateVirtualMemory(ProcessHandle,
+                                     UBaseAddress,
+                                     0,
+                                     URegionSize,
+                                     AllocationType,
+                                     PageProtection,
+                                     LowestAddress,
+                                     HighestAddress,
+                                     Alignment,
+                                     TRUE);
+    return MiExStatus(Status);
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
 NtFreeVirtualMemory(IN HANDLE ProcessHandle,
                     IN PVOID* UBaseAddress,
                     IN PSIZE_T URegionSize,
@@ -5675,6 +6040,7 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
     ULONG_PTR StartingAddress, EndingAddress;
     PMMVAD Vad;
     PMMVAD NewVad;
+    PMMVAD_LONG Placeholder = NULL;
     NTSTATUS Status;
     PEPROCESS Process;
     PMMSUPPORT AddressSpace;
@@ -5686,9 +6052,12 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
     PAGED_CODE();
 
     //
-    // Only two flags are supported, exclusively.
+    // MEM_RELEASE or MEM_DECOMMIT, exclusively; a release can split a placeholder off
+    // (MEM_PRESERVE_PLACEHOLDER) or join placeholders (MEM_COALESCE_PLACEHOLDERS)
     //
-    if (FreeType != MEM_RELEASE && FreeType != MEM_DECOMMIT)
+    if (FreeType != MEM_RELEASE && FreeType != MEM_DECOMMIT &&
+        FreeType != (MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER) &&
+        FreeType != (MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
     {
         DPRINT1("Invalid FreeType (0x%08lx)\n", FreeType);
         return STATUS_INVALID_PARAMETER_4;
@@ -5772,6 +6141,27 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
            Process, PBaseAddress, PRegionSize, FreeType);
 
     //
+    // A placeholder split off a range may need a VAD of its own: get it before any lock
+    //
+    if (FreeType == (MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER) && PRegionSize)
+    {
+        Placeholder = ExAllocatePoolWithTag(NonPagedPool, sizeof(MMVAD_LONG), 'SdaV');
+        if (!Placeholder)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto FailPathNoLock;
+        }
+        Status = PsChargeProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
+        if (!NT_SUCCESS(Status))
+        {
+            ExFreePoolWithTag(Placeholder, 'SdaV');
+            Placeholder = NULL;
+            goto FailPathNoLock;
+        }
+        MiInitializePlaceholderVad(Placeholder);
+    }
+
+    //
     // Lock the address space
     //
     AddressSpace = MmGetCurrentAddressSpace();
@@ -5802,9 +6192,9 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
     }
 
     //
-    // If the range exceeds the VAD's ending VPN, fail this request
+    // If the range exceeds the VAD's ending VPN, fail this request (a coalescing spans VADs)
     //
-    if (Vad->EndingVpn < (EndingAddress >> PAGE_SHIFT))
+    if ((Vad->EndingVpn < (EndingAddress >> PAGE_SHIFT)) && !(FreeType & MEM_COALESCE_PLACEHOLDERS))
     {
         DPRINT1("Address 0x%p is beyond the VAD\n", EndingAddress);
         Status = STATUS_UNABLE_TO_FREE_VM;
@@ -5831,6 +6221,90 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
         DPRINT1("Attempt to free protected VAD\n");
         Status = STATUS_INVALID_PAGE_PROTECTION;
         goto FailPath;
+    }
+
+    //
+    // MEM_COALESCE_PLACEHOLDERS: the free placeholders that start at the VAD's base and follow
+    // each other without a gap become one, if together they are exactly the given size
+    //
+    if (FreeType & MEM_COALESCE_PLACEHOLDERS)
+    {
+        PMMVAD Next, Last;
+        ULONG Count = 1;
+
+        if (!PRegionSize)
+        {
+            Status = STATUS_INVALID_PARAMETER_3;
+            goto FailPath;
+        }
+        if (!MI_IS_PLACEHOLDER_VAD(Vad) ||
+            (((ULONG_PTR)PBaseAddress >> PAGE_SHIFT) != Vad->StartingVpn))
+        {
+            Status = STATUS_CONFLICTING_ADDRESSES;
+            goto FailPath;
+        }
+
+        /* Find the last placeholder of the range */
+        Last = Vad;
+        while (Last->EndingVpn < (EndingAddress >> PAGE_SHIFT))
+        {
+            Next = (PMMVAD)MiGetNextNode((PMMADDRESS_NODE)Last);
+            if (!Next || !MI_IS_PLACEHOLDER_VAD(Next) || (Next->StartingVpn != Last->EndingVpn + 1)) break;
+            Last = Next;
+            Count++;
+        }
+        if ((Count < 2) || (Last->EndingVpn != (EndingAddress >> PAGE_SHIFT)))
+        {
+            Status = STATUS_CONFLICTING_ADDRESSES;
+            goto FailPath;
+        }
+
+        /* The first placeholder grows over the others, which go away */
+        MiLockProcessWorkingSetUnsafe(Process, CurrentThread);
+        while (Count-- > 1)
+        {
+            Next = (PMMVAD)MiGetNextNode((PMMADDRESS_NODE)Vad);
+            ASSERT(Next && MI_IS_PLACEHOLDER_VAD(Next));
+            MiRemoveNode((PMMADDRESS_NODE)Next, &Process->VadRoot);
+            Vad->EndingVpn = Next->EndingVpn;
+            ExFreePool(Next);
+            PsReturnProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
+        }
+        MiUnlockProcessWorkingSetUnsafe(Process, CurrentThread);
+
+        StartingAddress = Vad->StartingVpn << PAGE_SHIFT;
+        EndingAddress = (Vad->EndingVpn << PAGE_SHIFT) | (PAGE_SIZE - 1);
+        PRegionSize = EndingAddress - StartingAddress + 1;
+        MmUnlockAddressSpace(AddressSpace);
+        Status = STATUS_SUCCESS;
+        goto WriteBack;
+    }
+
+    //
+    // MEM_PRESERVE_PLACEHOLDER: release a range of a placeholder, or of an allocation that
+    // replaced one, and leave a placeholder in its place
+    //
+    if (FreeType & MEM_PRESERVE_PLACEHOLDER)
+    {
+        if (!PRegionSize)
+        {
+            Status = STATUS_INVALID_PARAMETER_3;
+            goto FailPath;
+        }
+        if (!MI_IS_PLACEHOLDER_VAD(Vad) && !MI_IS_FROM_PLACEHOLDER_VAD(Vad))
+        {
+            Status = STATUS_CONFLICTING_ADDRESSES;
+            goto FailPath;
+        }
+
+        /* A whole free placeholder is one already */
+        if (MI_IS_PLACEHOLDER_VAD(Vad) &&
+            ((StartingAddress >> PAGE_SHIFT) == Vad->StartingVpn) &&
+            ((EndingAddress >> PAGE_SHIFT) == Vad->EndingVpn))
+        {
+            Status = STATUS_CONFLICTING_ADDRESSES;
+            goto FailPath;
+        }
     }
 
     //
@@ -5997,6 +6471,8 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
                     NewVad->EndingVpn = Vad->EndingVpn;
                     NewVad->u.LongFlags = Vad->u.LongFlags;
                     NewVad->u.VadFlags.CommitCharge = 0;
+                    NewVad->u2.VadFlags2.Placeholder = Vad->u2.VadFlags2.Placeholder;
+                    NewVad->u2.VadFlags2.FromPlaceholder = Vad->u2.VadFlags2.FromPlaceholder;
                     ASSERT(NewVad->EndingVpn >= NewVad->StartingVpn);
 
                     //
@@ -6047,6 +6523,16 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
         // around with process pages.
         //
         MiDeleteVirtualAddresses(StartingAddress, EndingAddress, NULL);
+
+        //
+        // The released range becomes a placeholder before anybody else can take it
+        //
+        if (Placeholder)
+        {
+            Status = MiInsertPlaceholderVad(Process, Placeholder, StartingAddress, EndingAddress);
+            ASSERT(NT_SUCCESS(Status));
+            if (NT_SUCCESS(Status)) Placeholder = NULL;
+        }
         MiUnlockProcessWorkingSetUnsafe(Process, CurrentThread);
     }
     else
@@ -6107,11 +6593,11 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
     Status = STATUS_SUCCESS;
 
     //
-    // Update the process counters
+    // Update the process counters (a placeholder keeps the address space)
     //
     PRegionSize = EndingAddress - StartingAddress + 1;
     MiReturnProcessCommit(Process, CommitReduction);
-    if (FreeType & MEM_RELEASE) Process->VirtualSize -= PRegionSize;
+    if ((FreeType & MEM_RELEASE) && !(FreeType & MEM_PRESERVE_PLACEHOLDER)) Process->VirtualSize -= PRegionSize;
 
     //
     // Unlock the address space and free the VAD in failure cases. Next,
@@ -6121,6 +6607,12 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
     //
     MmUnlockAddressSpace(AddressSpace);
     if (Vad) ExFreePool(Vad);
+WriteBack:
+    if (Placeholder)
+    {
+        ExFreePoolWithTag(Placeholder, 'SdaV');
+        PsReturnProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
+    }
     if (Attached) KeUnstackDetachProcess(&ApcState);
     if (ProcessHandle != NtCurrentProcess()) ObDereferenceObject(Process);
 
@@ -6147,6 +6639,12 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
     //
 FailPath:
     MmUnlockAddressSpace(AddressSpace);
+FailPathNoLock:
+    if (Placeholder)
+    {
+        ExFreePoolWithTag(Placeholder, 'SdaV');
+        PsReturnProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
+    }
     if (Attached) KeUnstackDetachProcess(&ApcState);
     if (ProcessHandle != NtCurrentProcess()) ObDereferenceObject(Process);
     return Status;

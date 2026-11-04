@@ -986,10 +986,11 @@
 # #@ stub MapPredefinedHandleInternal
 #@ stdcall MapUserPhysicalPages(ptr long ptr)
 #@ stdcall MapViewOfFile(long long long long long)
-#@ stdcall MapViewOfFile3(long long ptr int64 long long long ptr long)
+@ stdcall MapViewOfFile3(long long ptr int64 long long long ptr long)
 #@ stdcall MapViewOfFileEx(long long long long long ptr)
 #@ stdcall MapViewOfFileExNuma(long long long long long ptr long)
 #@ stdcall MapViewOfFileFromApp(long long int64 long)
+@ stdcall MapViewOfFileNuma2(long long int64 ptr long long long long)
 #@ stdcall MoveFileExW(wstr wstr long)
 # #@ stub MoveFileWithProgressTransactedW
 #@ stdcall MoveFileWithProgressW(wstr wstr ptr ptr long)
@@ -1659,7 +1660,7 @@
 #@ stdcall UnlockFile(long long long long long)
 #@ stdcall UnlockFileEx(long long long long ptr)
 #@ stdcall UnmapViewOfFile(ptr)
-#@ stdcall UnmapViewOfFile2(long ptr long)
+@ stdcall UnmapViewOfFile2(long ptr long)
 #@ stdcall UnmapViewOfFileEx(ptr long)
 # #@ stub UnregisterBadMemoryNotification
 # #@ stub UnregisterGPNotificationInternal

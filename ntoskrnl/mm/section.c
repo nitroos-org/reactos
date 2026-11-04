@@ -4723,6 +4723,14 @@ MmMapViewOfSection(
         goto Exit;
     }
 
+    /* Only a data view can take the place of a placeholder */
+    if ((AllocationType & MEM_REPLACE_PLACEHOLDER) &&
+        (Section->u.Flags.Image || Section->u.Flags.PhysicalMemory))
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
+
     if (Section->u.Flags.Image)
     {
         ULONG i;
@@ -4884,6 +4892,7 @@ MmMapViewOfSection(
         PMM_SECTION_SEGMENT Segment = (PMM_SECTION_SEGMENT)Section->Segment;
         LONGLONG ViewOffset, RequestedOffset;
         LONGLONG SectionLimit;
+        PMMVAD Placeholder = NULL;
 
         ASSERT(Segment->RefCount > 0);
 
@@ -5011,12 +5020,29 @@ MmMapViewOfSection(
             }
         }
 
+        /*
+         * MEM_REPLACE_PLACEHOLDER: the placeholder of exactly this range leaves the tree, and comes
+         * back if the view cannot be mapped. The address space stays locked all along.
+         */
+        if (AllocationType & MEM_REPLACE_PLACEHOLDER)
+        {
+            Status = MiCheckPlaceholderForReplace(Process, (ULONG_PTR)*BaseAddress, *ViewSize, &Placeholder);
+            if (!NT_SUCCESS(Status)) goto Exit;
+        }
+
         /* A copy-on-write view is charged in full: any page can become private */
         ViewCommit = MiViewCommitCharge(Segment, Protect, *ViewSize);
         if (!MiChargeCommit(ViewCommit, MiCommitUserPageable))
         {
             Status = STATUS_COMMITMENT_LIMIT;
             goto Exit;
+        }
+
+        if (Placeholder)
+        {
+            MiLockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+            MiRemoveNode((PMMADDRESS_NODE)Placeholder, &Process->VadRoot);
+            MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
         }
 
         MmLockSectionSegment(Segment);
@@ -5033,7 +5059,31 @@ MmMapViewOfSection(
         if (!NT_SUCCESS(Status))
         {
             MiReturnPageableCommit(ViewCommit);
+            if (Placeholder)
+            {
+                NTSTATUS PlaceholderStatus;
+                MiLockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+                PlaceholderStatus = MiInsertPlaceholderVad(Process,
+                                                           (PMMVAD_LONG)Placeholder,
+                                                           Placeholder->StartingVpn << PAGE_SHIFT,
+                                                           (Placeholder->EndingVpn << PAGE_SHIFT) | (PAGE_SIZE - 1));
+                MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+                ASSERT(NT_SUCCESS(PlaceholderStatus));
+                (void)PlaceholderStatus;
+            }
             goto Exit;
+        }
+
+        if (Placeholder)
+        {
+            PMEMORY_AREA MemoryArea = MmLocateMemoryAreaByAddress(AddressSpace, *BaseAddress);
+
+            /* The view gives the placeholder back when it is unmapped with MEM_PRESERVE_PLACEHOLDER */
+            ASSERT(MemoryArea != NULL);
+            if (MemoryArea) MemoryArea->VadNode.u2.VadFlags2.FromPlaceholder = 1;
+            Process->VirtualSize -= *ViewSize;
+            ExFreePool(Placeholder);
+            PsReturnProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
         }
     }
 

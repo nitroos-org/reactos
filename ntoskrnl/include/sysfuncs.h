@@ -314,4 +314,7 @@
     SVC_(SetTimer2, 4)
     SVC_(CancelTimer2, 2)
     SVC_(QueryWnfStateData, 6)
+    SVC_(AllocateVirtualMemoryEx, 7)
+    SVC_(MapViewOfSectionEx, 9)
+    SVC_(UnmapViewOfSectionEx, 3)
 #endif
