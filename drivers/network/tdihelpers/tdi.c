@@ -91,16 +91,19 @@ static NTSTATUS TdiOpenDevice(
 
     DPRINT("Called. DeviceName (%wZ, %u)\n", DeviceName, ShareType);
 
-    /* Determine the share access */
-    if (ShareType != AFD_SHARE_REUSE)
+    /* Determine the share access. The transport reads it as the bind mode of the address:
+     * none (unique), SO_REUSEADDR (read and write) or SO_EXCLUSIVEADDRUSE (delete only) */
+    if (ShareType == AFD_SHARE_REUSE)
     {
-        /* Exclusive access */
-        ShareAccess = 0;
+        ShareAccess = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    }
+    else if (ShareType == AFD_SHARE_EXCLUSIVE)
+    {
+        ShareAccess = FILE_SHARE_DELETE;
     }
     else
     {
-        /* Shared access */
-        ShareAccess = FILE_SHARE_READ | FILE_SHARE_WRITE;
+        ShareAccess = 0;
     }
 
     InitializeObjectAttributes(&Attr,                   /* Attribute buffer */

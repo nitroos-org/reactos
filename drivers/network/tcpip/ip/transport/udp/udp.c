@@ -403,17 +403,63 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
                              IPPROTO_UDP,
                              &SearchContext);
   if (AddrFile) {
+    /* Broadcast and multicast datagrams reach every socket bound to the port. A unicast one
+       reaches a single socket, as on Windows where several may share a port: the one bound
+       to the destination address itself rather than the wildcard, the latest bound among
+       equals (the list is in order of opening) */
+    BOOLEAN ToAll = FALSE;
+    PADDRESS_FILE Best = NULL;
+
+    if (DstAddress->Type == IP_ADDRESS_V4)
+    {
+      ULONG Dst = DstAddress->Address.IPv4Address;
+      IP_ADDRESS Unspecified;
+
+      RtlZeroMemory(&Unspecified, sizeof(Unspecified));
+      Unspecified.Type = IP_ADDRESS_V4;
+      ToAll = (Dst == 0xFFFFFFFF) || ((Dst & 0xF0) == 0xE0) ||
+              AddrIsBroadcastMatch(&Unspecified, DstAddress);
+    }
+
     do {
+      if (ToAll)
+      {
+        DGDeliverData(Interface,
+                      AddrFile,
+                      SrcAddress,
+                      DstAddress,
+                      UDPHeader->SourcePort,
+                      UDPHeader->DestPort,
+                      IPPacket,
+                      DataSize);
+        DereferenceObject(AddrFile);
+      }
+      else if (!Best ||
+               !AddrIsUnspecified(&AddrFile->Address) ||
+               AddrIsUnspecified(&Best->Address))
+      {
+        if (Best)
+          DereferenceObject(Best);
+        Best = AddrFile;
+      }
+      else
+      {
+        DereferenceObject(AddrFile);
+      }
+    } while ((AddrFile = AddrSearchNext(&SearchContext)) != NULL);
+
+    if (Best)
+    {
       DGDeliverData(Interface,
-		    AddrFile,
-		    SrcAddress,
+                    Best,
+                    SrcAddress,
                     DstAddress,
-		    UDPHeader->SourcePort,
-		    UDPHeader->DestPort,
+                    UDPHeader->SourcePort,
+                    UDPHeader->DestPort,
                     IPPacket,
                     DataSize);
-      DereferenceObject(AddrFile);
-    } while ((AddrFile = AddrSearchNext(&SearchContext)) != NULL);
+      DereferenceObject(Best);
+    }
   } else {
     /* There are no open address files that will take this datagram */
     /* FIXME: IPv4 only */
@@ -479,6 +525,10 @@ UINT UDPAllocatePort( UINT HintPort ) {
     } else return AllocatePortFromRange
                ( &UDPPorts, UDP_STARTING_PORT,
                  UDP_STARTING_PORT + UDP_DYNAMIC_PORTS - 1 );
+}
+
+BOOLEAN UDPReservePort( UINT Port ) {
+    return ReservePort( &UDPPorts, Port );
 }
 
 VOID UDPFreePort( UINT Port ) {

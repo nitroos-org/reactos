@@ -67,6 +67,28 @@ BOOLEAN AllocatePort( PPORT_SET PortSet, ULONG Port ) {
     return Clear;
 }
 
+/* Marks a port as taken whether or not it already was: several address files may share
+ * a port when the bind rules allow it (see AddrBindConflict). FALSE if outside the set. */
+BOOLEAN ReservePort( PPORT_SET PortSet, ULONG Port ) {
+    KIRQL OldIrql;
+
+    Port = htons(Port);
+
+    if ((Port < PortSet->StartingPort) ||
+        (Port >= PortSet->StartingPort + PortSet->PortsToOversee))
+    {
+       return FALSE;
+    }
+
+    Port -= PortSet->StartingPort;
+
+    KeAcquireSpinLock( &PortSet->Lock, &OldIrql );
+    RtlSetBits( &PortSet->ProtoBitmap, Port, 1 );
+    KeReleaseSpinLock( &PortSet->Lock, OldIrql );
+
+    return TRUE;
+}
+
 ULONG AllocateAnyPort( PPORT_SET PortSet ) {
     ULONG AllocatedPort;
     KIRQL OldIrql;

@@ -226,45 +226,6 @@ LogActiveObjects(VOID)
 #endif
 }
 
-PADDRESS_FILE AddrFindShared(
-    PIP_ADDRESS BindAddress,
-    USHORT Port,
-    USHORT Protocol)
-{
-    PLIST_ENTRY CurrentEntry;
-    KIRQL OldIrql;
-    PADDRESS_FILE Current = NULL;
-
-    TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
-
-    CurrentEntry = AddressFileListHead.Flink;
-    while (CurrentEntry != &AddressFileListHead) {
-        Current = CONTAINING_RECORD(CurrentEntry, ADDRESS_FILE, ListEntry);
-
-        /* See if this address matches the search criteria */
-        if ((Current->Port == Port) &&
-            (Current->Protocol == Protocol) &&
-            /* Skip an address file whose last sharer has gone: FileCloseAddress
-             * has decided to tear it down and is about to drop its reference, so
-             * reviving it here would race that into a use-after-free. The count
-             * is read under AddressFileListLock, the same lock the close path
-             * takes around the decrement, so the zero transition is atomic. */
-            (Current->Sharers != 0))
-        {
-            /* Increase the sharer count */
-            InterlockedIncrement(&Current->Sharers);
-            break;
-        }
-
-        CurrentEntry = CurrentEntry->Flink;
-        Current = NULL;
-    }
-
-    TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
-
-    return Current;
-}
-
 /*
  * FUNCTION: Searches through address file entries to find next match
  * ARGUMENTS:
@@ -344,6 +305,100 @@ PADDRESS_FILE AddrSearchNext(
     return Current;
 }
 
+/*
+ * Windows decides whether a second socket may bind a port that others hold from the two
+ * sockets alone, the same for TCP and UDP. Only bound endpoints count: a listener that has
+ * been closed frees the port even while connections it accepted live on, and a connection
+ * in TIME-WAIT holds nothing. With Old already bound and New binding:
+ *   same address:  an exclusive socket on either side refuses (access denied when New asks
+ *                  to reuse an address that Old holds exclusively, in use otherwise); both
+ *                  reusing is allowed; reuse requested by New alone is access denied, and
+ *                  by Old alone is in use
+ *   Old wildcard, New specific: allowed, unless Old is exclusive (access denied)
+ *   Old specific, New wildcard: allowed, unless New is exclusive (in use)
+ *   two different specific addresses: never conflict
+ * (all observed on Windows 10 22H2, probe in releases/2026.11/evidence/wsquirks-20261104).
+ * Called with AddressFileListLock held. */
+static NTSTATUS AddrBindConflictLocked(
+    PADDRESS_FILE New)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead; Entry = Entry->Flink)
+    {
+        PADDRESS_FILE Old = CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry);
+        BOOLEAN OldWild, NewWild;
+
+        if (Old == New || Old->Port != New->Port || Old->Protocol != New->Protocol ||
+            Old->PortReleased || Old->Sharers == 0)
+            continue;
+
+        OldWild = AddrIsUnspecified(&Old->Address);
+        NewWild = AddrIsUnspecified(&New->Address);
+
+        if (OldWild == NewWild)
+        {
+            if (!OldWild && !AddrIsEqual(&Old->Address, &New->Address))
+                continue;
+
+            if (Old->ShareMode == ADDR_SHARE_EXCLUSIVE || New->ShareMode == ADDR_SHARE_EXCLUSIVE)
+            {
+                if (Old->ShareMode == ADDR_SHARE_EXCLUSIVE && New->ShareMode == ADDR_SHARE_REUSE)
+                    return STATUS_ACCESS_DENIED;
+                return STATUS_ADDRESS_ALREADY_EXISTS;
+            }
+            if (Old->ShareMode == ADDR_SHARE_REUSE && New->ShareMode == ADDR_SHARE_REUSE)
+                continue;
+            return (New->ShareMode == ADDR_SHARE_REUSE) ? STATUS_ACCESS_DENIED :
+                                                          STATUS_ADDRESS_ALREADY_EXISTS;
+        }
+        else if (OldWild)
+        {
+            if (Old->ShareMode == ADDR_SHARE_EXCLUSIVE)
+                return STATUS_ACCESS_DENIED;
+        }
+        else if (New->ShareMode == ADDR_SHARE_EXCLUSIVE)
+        {
+            return STATUS_ADDRESS_ALREADY_EXISTS;
+        }
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/* Gives up the port of an address file that has left (or never entered) the global list: the
+ * port bit goes only when no other address file shares the port. */
+static VOID AddrReleasePort(
+    PADDRESS_FILE AddrFile)
+{
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+    BOOLEAN Shared = FALSE;
+
+    if (!AddrFile->Port || (AddrFile->Protocol != IPPROTO_TCP && AddrFile->Protocol != IPPROTO_UDP))
+        return;
+
+    TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
+    for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead; Entry = Entry->Flink)
+    {
+        PADDRESS_FILE Other = CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry);
+
+        if (Other != AddrFile && Other->Port == AddrFile->Port && Other->Protocol == AddrFile->Protocol)
+        {
+            Shared = TRUE;
+            break;
+        }
+    }
+    if (!Shared)
+    {
+        if (AddrFile->Protocol == IPPROTO_TCP)
+            TCPFreePort(AddrFile->Port);
+        else
+            UDPFreePort(AddrFile->Port);
+    }
+    TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
+}
+
 VOID AddrFileFree(
     PVOID Object)
 /*
@@ -367,6 +422,9 @@ VOID AddrFileFree(
   TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
   RemoveEntryList(&AddrFile->ListEntry);
   TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
+
+  /* Give up the port unless another address file shares it */
+  AddrReleasePort(AddrFile);
 
   /* Off the list: the inbound filter can no longer find (and reference) the image */
   NitroFwReleaseImage(AddrFile->FwImage);
@@ -399,20 +457,6 @@ VOID AddrFileFree(
   }
 #endif
 
-  /* Protocol specific handling */
-  switch (AddrFile->Protocol) {
-  case IPPROTO_TCP:
-    if (AddrFile->Port)
-    {
-        TCPFreePort(AddrFile->Port);
-    }
-    break;
-
-  case IPPROTO_UDP:
-    UDPFreePort( AddrFile->Port );
-    break;
-  }
-
   RemoveEntityByContext(AddrFile);
 
   ExDeleteResourceLite(&AddrFile->Resource);
@@ -439,7 +483,8 @@ VOID ControlChannelFree(
  *     Request  = Pointer to TDI request structure for this request
  *     Address  = Pointer to address to be opened
  *     Protocol = Protocol on which to open the address
- *     Shared   = Specifies if the address is opened for shared access
+ *     ShareAccess = Share access of the open: 0 unique, FILE_SHARE_READ/WRITE reuse
+ *                   (SO_REUSEADDR), FILE_SHARE_DELETE alone exclusive (SO_EXCLUSIVEADDRUSE)
  *     Options  = Pointer to option buffer
  * RETURNS:
  *     Status of operation
@@ -448,26 +493,17 @@ NTSTATUS FileOpenAddress(
   PTDI_REQUEST Request,
   PTA_IP_ADDRESS Address,
   USHORT Protocol,
-  BOOLEAN Shared,
+  ULONG ShareAccess,
   PVOID Options)
 {
   PADDRESS_FILE AddrFile;
   UINT AllocatedPort;
+  BOOLEAN ExplicitPort = FALSE;
+  KIRQL OldIrql;
   ULONG EntityType, EntityFlags;
   NTSTATUS Status;
 
   TI_DbgPrint(MID_TRACE, ("Called (Proto %d).\n", Protocol));
-
-  /* If it's shared and has a port specified, look for a match */
-  if ((Shared != FALSE) && (Address->Address[0].Address[0].sin_port != 0))
-  {
-    AddrFile = AddrFindShared(NULL, Address->Address[0].Address[0].sin_port, Protocol);
-    if (AddrFile != NULL)
-    {
-        Request->Handle.AddressHandle = AddrFile;
-        return STATUS_SUCCESS;
-    }
-  }
 
   AddrFile = ExAllocatePoolWithTag(NonPagedPool, sizeof(ADDRESS_FILE),
                                    ADDR_FILE_TAG);
@@ -481,6 +517,12 @@ NTSTATUS FileOpenAddress(
   AddrFile->RefCount = 1;
   AddrFile->Free = AddrFileFree;
   AddrFile->Sharers = 1;
+  if (ShareAccess & (FILE_SHARE_READ | FILE_SHARE_WRITE))
+      AddrFile->ShareMode = ADDR_SHARE_REUSE;
+  else if (ShareAccess & FILE_SHARE_DELETE)
+      AddrFile->ShareMode = ADDR_SHARE_EXCLUSIVE;
+  else
+      AddrFile->ShareMode = ADDR_SHARE_UNIQUE;
 
   /* Set our default options */
   AddrFile->TTL = 128;
@@ -526,19 +568,10 @@ NTSTATUS FileOpenAddress(
   case IPPROTO_TCP:
       if (Address->Address[0].Address[0].sin_port)
       {
-          /* The client specified an explicit port so we force a bind to this */
-          AllocatedPort = TCPAllocatePort(Address->Address[0].Address[0].sin_port);
-
-          /* Check for bind success */
-          if (AllocatedPort == (UINT)-1)
-          {
-              ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
-              return STATUS_ADDRESS_ALREADY_EXISTS;
-          }
-          AddrFile->Port = AllocatedPort;
-
-          /* Sanity check */
-          ASSERT(Address->Address[0].Address[0].sin_port == AddrFile->Port);
+          /* The client specified an explicit port: whether it may have it is decided
+             against the other bound endpoints when the file is listed (below) */
+          ExplicitPort = TRUE;
+          AddrFile->Port = Address->Address[0].Address[0].sin_port;
       }
       else
       {
@@ -563,16 +596,22 @@ NTSTATUS FileOpenAddress(
 
   case IPPROTO_UDP:
       TI_DbgPrint(MID_TRACE,("Allocating udp port\n"));
-      AllocatedPort = UDPAllocatePort(Address->Address[0].Address[0].sin_port);
-
-      if ((Address->Address[0].Address[0].sin_port &&
-           AllocatedPort != Address->Address[0].Address[0].sin_port) ||
-           AllocatedPort == (UINT)-1)
+      if (Address->Address[0].Address[0].sin_port)
       {
-          ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
-          return STATUS_ADDRESS_ALREADY_EXISTS;
+          /* Decided against the other bound endpoints when the file is listed (below) */
+          ExplicitPort = TRUE;
+          AddrFile->Port = Address->Address[0].Address[0].sin_port;
       }
-      AddrFile->Port = AllocatedPort;
+      else
+      {
+          AllocatedPort = UDPAllocatePort(0);
+          if (AllocatedPort == (UINT)-1)
+          {
+              ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
+              return STATUS_ADDRESS_ALREADY_EXISTS;
+          }
+          AddrFile->Port = AllocatedPort;
+      }
 
       TI_DbgPrint(MID_TRACE,("Setting port %d (wanted %d)\n",
                              AddrFile->Port,
@@ -624,10 +663,8 @@ NTSTATUS FileOpenAddress(
   Status = AddEntity(EntityType, AddrFile, EntityFlags);
   if (!NT_SUCCESS(Status))
   {
-      if (Protocol == IPPROTO_TCP && AddrFile->Port)
-          TCPFreePort(AddrFile->Port);
-      else if (Protocol == IPPROTO_UDP)
-          UDPFreePort(AddrFile->Port);
+      if (!ExplicitPort)
+          AddrReleasePort(AddrFile);
       ExDeleteResourceLite(&AddrFile->Resource);
       ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
       return Status;
@@ -636,11 +673,33 @@ NTSTATUS FileOpenAddress(
   /* Return address file object */
   Request->Handle.AddressHandle = AddrFile;
 
-  /* Add address file to global list */
-  ExInterlockedInsertTailList(
-    &AddressFileListHead,
-    &AddrFile->ListEntry,
-    &AddressFileListLock);
+  /* Add address file to global list, if the bind rules let it have its port */
+  TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
+  Status = STATUS_SUCCESS;
+  if (Protocol == IPPROTO_TCP || Protocol == IPPROTO_UDP)
+  {
+      Status = AddrBindConflictLocked(AddrFile);
+      if (NT_SUCCESS(Status) && ExplicitPort)
+      {
+          BOOLEAN Reserved = (Protocol == IPPROTO_TCP) ? TCPReservePort(AddrFile->Port) :
+                                                         UDPReservePort(AddrFile->Port);
+          if (!Reserved)
+              Status = STATUS_ADDRESS_ALREADY_EXISTS;
+      }
+  }
+  if (NT_SUCCESS(Status))
+      InsertTailList(&AddressFileListHead, &AddrFile->ListEntry);
+  TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
+
+  if (!NT_SUCCESS(Status))
+  {
+      RemoveEntityByContext(AddrFile);
+      if (!ExplicitPort)
+          AddrReleasePort(AddrFile);
+      ExDeleteResourceLite(&AddrFile->Resource);
+      ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
+      return Status;
+  }
 
   /* Creator image for program rules of the inbound filter: resolved only while an enforced policy has
      program rules (no work otherwise). Done once the file is listed, so a policy installed
@@ -672,11 +731,13 @@ NTSTATUS FileCloseAddress(
 
   LockObject(AddrFile);
 
-  /* Decrement the sharer count under AddressFileListLock so the transition to
-   * zero is atomic against AddrFindShared, which must not revive an address
-   * file whose last sharer has gone. */
+  /* Decrement the sharer count under AddressFileListLock, so that the bind rules
+   * (AddrBindConflictLocked) see the file as released or not, never in between. */
   TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
   LastSharer = (InterlockedDecrement(&AddrFile->Sharers) == 0);
+  /* No longer a bound endpoint, though connections it accepted may hold the object for a while */
+  if (LastSharer)
+      AddrFile->PortReleased = TRUE;
   TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
 
   if (!LastSharer)
