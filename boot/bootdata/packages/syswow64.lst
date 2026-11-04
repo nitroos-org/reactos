@@ -46,6 +46,8 @@ SysWOW64/webservices.dll
 SysWOW64/appxdeploymentclient.dll
 # Qt 6.8 (32-bit) activates Windows.UI.ViewManagement.UISettings for its platform theme (registered for 32-bit in hivesft_amd64.inf).
 SysWOW64/windows.ui.dll
+# Qt 5.15 (32-bit) creates the Network List Manager (registered for 32-bit in hivesft_amd64.inf).
+SysWOW64/netprofm.dll
 # DirectWrite and its user32 forwarder (Firefox renders text with it)
 SysWOW64/dwrite.dll
 SysWOW64/user32_vista.dll
@@ -200,6 +202,7 @@ SysWOW64/powrprof.dll
 SysWOW64/samlib.dll
 SysWOW64/schannel.dll
 SysWOW64/secur32.dll
+SysWOW64/sppc.dll
 SysWOW64/security.dll
 SysWOW64/cfgmgr32.dll
 # Delay-loaded by 32-bit Firefox (xul.dll): MMCSS thread characteristics, credential prompt.

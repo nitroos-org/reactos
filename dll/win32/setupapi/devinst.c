@@ -6631,11 +6631,28 @@ SetupDiInstallDevice(
     if (!RebootRequired && !(InstallParams.Flags & (DI_NEEDRESTART | DI_NEEDREBOOT | DI_DONOTCALLCONFIGMG)))
     {
         ULONG ulStatus, ulProblem;
+        BOOL Started;
+
+        Started = CM_Get_DevNode_Status_Ex(&ulStatus, &ulProblem, deviceInfo->dnDevInst, 0, set->hMachine) == CR_SUCCESS &&
+                  (ulStatus & DN_STARTED);
+        if (!Started)
+        {
+            ret = ResetDevice(DeviceInfoSet, DeviceInfoData);
+
+            /* The system can start the device itself between the check and the start: a bus
+             * re-enumeration finds the service this install has just written. The start then
+             * fails because the device runs, which is the case below and not a failure. */
+            if (!ret &&
+                CM_Get_DevNode_Status_Ex(&ulStatus, &ulProblem, deviceInfo->dnDevInst, 0, set->hMachine) == CR_SUCCESS &&
+                (ulStatus & DN_STARTED))
+            {
+                Started = TRUE;
+            }
+        }
 
         /* A running device cannot be started again; it is not restarted here either, so the
          * new driver settings take effect at the next boot */
-        if (CM_Get_DevNode_Status_Ex(&ulStatus, &ulProblem, deviceInfo->dnDevInst, 0, set->hMachine) == CR_SUCCESS &&
-            (ulStatus & DN_STARTED))
+        if (Started)
         {
             struct RunningDriverSnapshot RunningAfter;
             BOOL RawUnchanged;
@@ -6662,8 +6679,6 @@ SetupDiInstallDevice(
                 }
             }
         }
-        else
-            ret = ResetDevice(DeviceInfoSet, DeviceInfoData);
     }
     else
         ret = TRUE;

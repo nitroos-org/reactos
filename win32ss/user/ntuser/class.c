@@ -816,6 +816,25 @@ IntMakeCloneBaseClass(IN OUT PCLS Class,
 }
 
 
+static BOOL
+IntMoveClassToSharedHeap(IN OUT PCLS Class,
+                         IN OUT PCLS **ClassLinkPtr);
+
+/* Whether a thread of the process other than the current one is attached to the desktop */
+static BOOL
+IntProcessHasThreadOnDesktop(IN PPROCESSINFO pi,
+                             IN PDESKTOP Desktop)
+{
+    PTHREADINFO ptiCurrent = PsGetCurrentThreadWin32Thread(), pti;
+
+    for (pti = pi->ptiList; pti != NULL; pti = pti->ptiSibling)
+    {
+        if (pti->rpdesk == Desktop && (pti != ptiCurrent || !(pti->TIF_flags & TIF_INCLEANUP)))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 VOID
 IntDereferenceClass(IN OUT PCLS Class,
                     IN PDESKTOPINFO Desktop,
@@ -867,6 +886,22 @@ IntDereferenceClass(IN OUT PCLS Class,
                 BaseClass->pclsBase = NULL;
                 BaseClass->pclsClone = NULL;
                 IntDestroyClass(BaseClass);
+            }
+            else if (BaseClass->rpdeskParent != NULL &&
+                     !IntProcessHasThreadOnDesktop(pi, BaseClass->rpdeskParent))
+            {
+                /* The last window went away after the last thread of the process left
+                   the desktop (a window freed later than its thread exited): no thread
+                   detach will move the class any more, and the process may not even
+                   have the desktop heap mapped (user32 reads the class through it), or
+                   the desktop may be deleted next. Move it to the shared heap now. */
+                PCLS *Link = BaseClass->Global ? &pi->pclsPublicList : &pi->pclsPrivateList;
+
+                while (*Link != NULL && *Link != BaseClass)
+                    Link = &(*Link)->pclsNext;
+
+                if (*Link == BaseClass)
+                    IntMoveClassToSharedHeap(BaseClass, &Link);
             }
         }
         else
@@ -970,11 +1005,30 @@ IntCheckDesktopClasses(IN PDESKTOP Desktop,
         ASSERT(Class->pclsBase == Class);
 
         if (Class->rpdeskParent == Desktop &&
-            Class->cWndReferenceCount == 0)
+            Class->cWndReferenceCount == 0 &&
+            Class->pclsClone != NULL)
         {
-            /* There shouldn't be any clones around anymore! */
-            ASSERT(Class->pclsClone == NULL);
+            /* The base class has no window on this desktop, but threads of the process
+               on other desktops have windows of this class (every clone is referenced
+               by at least one window). Moving the base to the shared heap would leave
+               the clones pointing at the freed base: make the first clone (on another
+               desktop) the base class instead, as IntDereferenceClass does when the
+               last window of a base class goes away, and free this copy. */
+            PCLS NewBase = Class->pclsClone;
 
+            IntMakeCloneBaseClass(NewBase, Link, &Class->pclsClone);
+            ASSERT(*Link == NewBase);
+            ASSERT(NewBase->pclsNext == NextClass);
+
+            Class->pclsBase = NULL;
+            Class->pclsClone = NULL;
+            IntDestroyClass(Class);
+
+            Link = &NewBase->pclsNext;
+        }
+        else if (Class->rpdeskParent == Desktop &&
+                 Class->cWndReferenceCount == 0)
+        {
             /* FIXME: If process is terminating, don't move the class but rather destroy it! */
             /* FIXME: We could move the class to another desktop heap if there's still desktops
                        mapped into the process... */
@@ -1013,6 +1067,82 @@ IntCheckDesktopClasses(IN PDESKTOP Desktop,
     }
 }
 
+static VOID
+IntUnlinkDesktopCallProcs(IN OUT PCLS Class,
+                          IN PDESKTOP Desktop)
+{
+    PCALLPROCDATA *Link = &Class->spcpdFirst;
+
+    /* The base and its clones can point into the same chain: only unlink here,
+       nothing is freed until every chain of the process was walked */
+    while (*Link != NULL)
+    {
+        if ((*Link)->head.rpdesk == Desktop)
+            *Link = (*Link)->spcpdNext;
+        else
+            Link = &(*Link)->spcpdNext;
+    }
+}
+
+/*
+ * The call procedures of a class (CreateCallProc) live in the heap of the desktop
+ * of the window that needed them, while the class chain they are linked into is
+ * shared by every desktop the process has windows of the class on, and survives on
+ * another desktop or in the shared heap. When the last thread of the process leaves
+ * a desktop (it may be deleted, and its heap with it), drop the call procedures of
+ * the process that live there: no window of the process is left on that desktop to
+ * use them, and a later window gets a new one on its own desktop.
+ */
+static VOID
+IntFreeDesktopCallProcs(IN PDESKTOP Desktop,
+                        IN PPROCESSINFO pi)
+{
+    PTHREADINFO ptiCurrent = PsGetCurrentThreadWin32Thread(), pti;
+    PCLS *Lists[2], Class, Clone;
+    PUSER_HANDLE_ENTRY Entry;
+    int i;
+
+    for (pti = pi->ptiList; pti != NULL; pti = pti->ptiSibling)
+    {
+        if (pti != ptiCurrent && pti->rpdesk == Desktop)
+            return;
+    }
+
+    Lists[0] = &pi->pclsPrivateList;
+    Lists[1] = &pi->pclsPublicList;
+    for (i = 0; i < 2; i++)
+    {
+        for (Class = *Lists[i]; Class != NULL; Class = Class->pclsNext)
+        {
+            IntUnlinkDesktopCallProcs(Class, Desktop);
+            for (Clone = Class->pclsClone; Clone != NULL; Clone = Clone->pclsNext)
+                IntUnlinkDesktopCallProcs(Clone, Desktop);
+        }
+    }
+
+    /* An entry in destroy is skipped: for a call procedure that would be one whose
+       handle was freed while a reference was still held, freed (from the heap of its
+       desktop, which holds no desktop reference) only when that reference goes. No
+       code references a call procedure beyond its handle (UserFreeHandle frees it at
+       once, CreateCallProc drops the creation reference), so none exists; the ASSERT
+       catches a change that adds such a reference, it would outlive the desktop heap. */
+    for (i = 0; i < gHandleTable->allocated_handles; i++)
+    {
+        Entry = &gHandleTable->handles[i];
+        if (Entry->type != TYPE_CALLPROC || Entry->pi != pi || Entry->ptr == NULL)
+            continue;
+
+        if (Entry->flags & HANDLEENTRY_INDESTROY)
+        {
+            ASSERT(((PCALLPROCDATA)Entry->ptr)->head.rpdesk != Desktop);
+            continue;
+        }
+
+        if (((PCALLPROCDATA)Entry->ptr)->head.rpdesk == Desktop)
+            DestroyCallProc(Entry->ptr);
+    }
+}
+
 BOOL
 IntCheckProcessDesktopClasses(IN PDESKTOP Desktop,
                               IN BOOL FreeOnFailure)
@@ -1033,7 +1163,15 @@ IntCheckProcessDesktopClasses(IN PDESKTOP Desktop,
                            &pi->pclsPublicList,
                            FreeOnFailure,
                            &Ret);
-    if (!Ret)
+
+    /* On failure the caller does not switch: the thread stays on Desktop, and the
+       classes that did not move still use its call procedures. Only drop them once
+       the thread really leaves (with FreeOnFailure nothing fails). */
+    if (Ret)
+    {
+        IntFreeDesktopCallProcs(Desktop, pi);
+    }
+    else
     {
         ERR("Failed to move process classes from desktop 0x%p to the shared heap!\n", Desktop);
         EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);

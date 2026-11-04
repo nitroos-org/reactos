@@ -435,13 +435,13 @@ static const struct knownFolderDef known_folders[] = {
                  NULL,
                  FILE_ATTRIBUTE_READONLY,
                  KFDF_PRECREATE),
-#else // s/StartUp/Startup/
+#else // s/StartUp/Startup/ (ReactOS #8304); the Windows 10 definition (oracle) says "StartUp", both are accepted
     KNOWN_FOLDER(FOLDERID_CommonStartup,
                  CSIDL_COMMON_STARTUP,
                  "Common Startup",
                  KF_CATEGORY_COMMON,
                  FOLDERID_CommonPrograms, GUID_NULL,
-                 "Startup",
+                 "StartUp\0Startup\0",
                  NULL,
                  FILE_ATTRIBUTE_READONLY,
                  KFDF_PRECREATE),
@@ -1145,13 +1145,13 @@ static const struct knownFolderDef known_folders[] = {
                  NULL,
                  FILE_ATTRIBUTE_READONLY,
                  KFDF_PRECREATE),
-#else // s/StartUp/Startup/
+#else // s/StartUp/Startup/ (ReactOS #8304); the Windows 10 definition (oracle) says "StartUp", both are accepted
     KNOWN_FOLDER(FOLDERID_Startup,
                  CSIDL_STARTUP,
                  "Startup",
                  KF_CATEGORY_PERUSER,
                  FOLDERID_Programs, GUID_NULL,
-                 "Startup\0",
+                 "StartUp\0Startup\0",
                  NULL,
                  FILE_ATTRIBUTE_READONLY,
                  KFDF_PRECREATE),

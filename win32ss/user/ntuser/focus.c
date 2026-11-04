@@ -150,7 +150,7 @@ UpdateShellHook(PWND Window)
    if (IntCheckFullscreen(Window))
        return;
 
-   if ( Window->spwndParent == UserGetDesktopWindow() &&
+   if ( UserIsDesktopWindow(Window->spwndParent) && /* top-level on its own desktop */
        (!(Window->ExStyle & WS_EX_TOOLWINDOW) ||
          (Window->ExStyle & WS_EX_APPWINDOW)))
    {
@@ -322,7 +322,9 @@ IntDeactivateWindow(PTHREADINFO pti, HANDLE tid)
       PWND cWindow;
       HWND *List, *phWnd;
 
-      List = IntWinListChildren(UserGetDesktopWindow());
+      /* The windows of ptiPrev are on ptiPrev's desktop */
+      cWindow = ptiPrev->rpdesk ? IntGetThreadDesktopWindow(ptiPrev) : NULL;
+      List = cWindow ? IntWinListChildren(cWindow) : NULL;
       if ( List )
       {
          if ( OldTID )
@@ -579,7 +581,9 @@ co_IntSendActivateMessages(PWND WindowPrev, PWND Window, BOOL MouseActivate, BOO
       PWND cWindow;
       HWND *List, *phWnd;
 
-      List = IntWinListChildren(UserGetDesktopWindow());
+      /* The windows of the activated and deactivated threads, on their (own) desktop */
+      cWindow = co_GetDesktopWindow(Window ? Window : WindowPrev);
+      List = cWindow ? IntWinListChildren(cWindow) : NULL;
       if ( List )
       {
          if ( OldTID )
@@ -1101,7 +1105,7 @@ co_IntSetActiveWindow(
 
    pWndChg = ThreadQueue->spwndActive; // Keep to notify of a preemptive switch.
 
-   if ( !Wnd || Wnd == UserGetDesktopWindow() )
+   if ( !Wnd || UserIsDesktopWindow(Wnd) ) /* any desktop window */
    {
       //ERR("ISAW : NULL %p\n",Wnd);
       return FALSE;

@@ -61,7 +61,16 @@ DWORD gdwNOIOSectionSize    = 512;
 #endif
 DWORD gdwWinlogonSectionSize = 128;
 
-PDESKTOP gpdeskInputDesktop = NULL;     ///< Currently active desktop.
+/*
+ * Currently active (input) desktop. It holds no object reference: every thread on a
+ * desktop references it, so it is only deleted when nothing runs on it, and the delete
+ * (IntLeaveInputDesktop, under the USER lock) hands input back to "Default" before the
+ * object goes away, so this pointer never dangles. A COPY of it (or of its desktop
+ * window) must not be used after a call that leaves the USER lock: the input desktop can
+ * be switched away from and closed meanwhile. Code that waits uses the thread's own
+ * desktop (referenced by the thread) or re-reads this.
+ */
+PDESKTOP gpdeskInputDesktop = NULL;
 HDC ScreenDeviceContext = NULL;
 PTHREADINFO gptiDesktopThread = NULL;
 HCURSOR gDesktopCursor = NULL;
@@ -194,17 +203,47 @@ IntDesktopObjectParse(IN PVOID ParseObject,
  * so no message is needed: do what the desktop thread would do when it destroys them.
  * A process that exits with the last handle to a desktop (a sandboxed child on its
  * alternate desktop) has no Win32 thread any more, it borrows the desktop thread's.
+ * It has no Win32 process either (ObKillProcess closes the handles after the process
+ * callout), and a deferred delete runs in a system worker thread: freeing the window
+ * needs one (region ownership and REGION_vCleanup), use CSRSS's.
+ *
+ * KeStackAttachProcess nests: a thread that is already attached (a handle closed from
+ * an attached context) saves its state in ApcState and gets it back at the detach.
+ * Only KeAttachProcess, or any attach from a DPC, is an INVALID_PROCESS_ATTACH_ATTEMPT,
+ * and object deletion never runs at DISPATCH_LEVEL (Ob defers it to a worker).
+ * CSRSS's Win32 process is tested under the USER lock, which its process callout also
+ * takes, so it cannot go away between the test and the free.
+ *
+ * Returns FALSE, without touching the window, if no process with a Win32 process is
+ * available (CSRSS has exited: it is a critical process, so the system is going down).
+ * The caller then leaks the desktop heap with the window in it rather than freeing
+ * memory the window still lives in, or freeing it without the context it needs.
  */
-static VOID
+static BOOLEAN
 IntFreeDesktopWindow(IN PWND pwnd)
 {
     USER_REFERENCE_ENTRY Ref;
     PETHREAD Thread = PsGetCurrentThread();
-    BOOLEAN bBorrowed = FALSE;
+    BOOLEAN bBorrowed = FALSE, bAttached = FALSE;
+    KAPC_STATE ApcState;
 
     ASSERT(gptiDesktopThread != NULL);
     ASSERT(pwnd->head.pti == gptiDesktopThread);
     ASSERT(pwnd->spwndChild == NULL);
+    ASSERT(UserIsEnteredExclusive());
+    ASSERT(!KeIsExecutingDpc());
+
+    if (PsGetCurrentProcessWin32Process() == NULL)
+    {
+        if (gpepCSRSS == NULL || PsGetProcessWin32Process(gpepCSRSS) == NULL)
+        {
+            ERR("No Win32 process to free window %p of a deleted desktop in, leaking it\n", pwnd);
+            return FALSE;
+        }
+
+        KeStackAttachProcess(&gpepCSRSS->Pcb, &ApcState);
+        bAttached = TRUE;
+    }
 
     if (PsGetCurrentThreadWin32Thread() == NULL)
     {
@@ -216,8 +255,14 @@ IntFreeDesktopWindow(IN PWND pwnd)
     co_UserFreeWindow(pwnd, gptiDesktopThread->ppi, gptiDesktopThread, FALSE);
     UserDerefObjectCo(pwnd);
 
+    /* Undo in the reverse order: nothing above returns early */
     if (bBorrowed)
         PsSetThreadWin32Thread(Thread, NULL, gptiDesktopThread);
+
+    if (bAttached)
+        KeUnstackDetachProcess(&ApcState);
+
+    return TRUE;
 }
 
 /*
@@ -317,6 +362,7 @@ IntDesktopObjectDelete(
 {
     PWIN32_DELETEMETHOD_PARAMETERS DeleteParameters = Parameters;
     PDESKTOP pdesk = (PDESKTOP)DeleteParameters->Object;
+    BOOLEAN bLeakHeap = FALSE;
 
     TRACE("Deleting desktop object 0x%p\n", pdesk);
 
@@ -331,20 +377,25 @@ IntDesktopObjectDelete(
     if (pdesk->pDeskInfo &&
         pdesk->pDeskInfo->spwnd)
     {
-        IntFreeDesktopWindow(pdesk->pDeskInfo->spwnd);
+        if (!IntFreeDesktopWindow(pdesk->pDeskInfo->spwnd))
+            bLeakHeap = TRUE;
     }
 
-    if (pdesk->spwndMessage)
+    if (pdesk->spwndMessage && !bLeakHeap)
     {
-        IntFreeDesktopWindow(pdesk->spwndMessage);
+        if (!IntFreeDesktopWindow(pdesk->spwndMessage))
+            bLeakHeap = TRUE;
     }
 
     /* Remove the desktop from the window station's list of associated desktops */
     RemoveEntryList(&pdesk->ListEntry);
     UserLeave();
 
-    /* Free the heap */
-    IntFreeDesktopHeap(pdesk);
+    /* Free the heap, unless a window still lives in it (see IntFreeDesktopWindow) */
+    if (bLeakHeap)
+        ERR("Leaking the heap of deleted desktop %p, its windows could not be freed\n", pdesk);
+    else
+        IntFreeDesktopHeap(pdesk);
 
     ObDereferenceObject(pdesk->rpwinstaParent);
 
@@ -1559,6 +1610,14 @@ HWND FASTCALL IntGetDesktopWindow(VOID)
     return pdo->DesktopWindow;
 }
 
+/*
+ * The desktop window of the INPUT desktop (the one on the screen). Only for screen and
+ * hardware-input work (cursor, mouse hit testing in the input path, screen DCs). For
+ * "the desktop window" in the Windows API sense (GetDesktopWindow, NULL parents, top-level
+ * checks) use the calling thread's desktop (UserGetThreadDesktopWindow), the window's own
+ * desktop (co_GetDesktopWindow) or UserIsDesktopWindow. The input desktop holds no
+ * object reference: do not keep the result across a call that can leave the USER lock.
+ */
 PWND FASTCALL UserGetDesktopWindow(VOID)
 {
     PDESKTOP pdo = IntGetActiveDesktop();
@@ -1623,6 +1682,16 @@ HWND FASTCALL IntGetCurrentThreadDesktopWindow(VOID)
         return NULL;
     }
     return pdo->DesktopWindow;
+}
+
+/* The message-only window of the calling thread's desktop (HWND_MESSAGE), else of the input desktop */
+HWND FASTCALL IntGetCurrentThreadMessageWindow(VOID)
+{
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+
+    if (pti && pti->rpdesk && pti->rpdesk->spwndMessage)
+        return UserHMGetHandle(pti->rpdesk->spwndMessage);
+    return IntGetMessageWindow();
 }
 
 /* PUBLIC FUNCTIONS ***********************************************************/
@@ -1807,6 +1876,7 @@ UserGetDesktopDC(ULONG DcType, BOOL bAltDc, BOOL ValidatehWnd)
 
     if (DcType == DCTYPE_DIRECT)
     {
+        /* A direct DC of the screen: the input desktop */
         DesktopObject = UserGetDesktopWindow();
         DesktopHDC = (HDC)UserGetWindowDC(DesktopObject);
     }
@@ -1827,7 +1897,10 @@ UserRedrawDesktop(VOID)
     PWND Window = NULL;
     PREGION Rgn;
 
+    /* After a display change: the desktop on the screen (input desktop) */
     Window = UserGetDesktopWindow();
+    if (!Window)
+        return;
     Rgn = IntSysCreateRectpRgnIndirect(&Window->rcWindow);
     if (!Rgn)
         return;
@@ -1922,8 +1995,30 @@ UserBuildShellHookHwndList(PDESKTOP Desktop)
  */
 VOID co_IntShellHookNotify(WPARAM Message, WPARAM wParam, LPARAM lParam)
 {
-    PDESKTOP Desktop = IntGetActiveDesktop();
+    PDESKTOP Desktop = NULL;
+    PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
     HWND* HwndList;
+
+    /* The shell windows of the desktop the notification is about. A window notification
+       (created, destroyed, activated..., wParam = the window) goes to the desktop of that
+       window. Everything else goes to the caller's desktop, and so does a window
+       notification whose window is already gone: HSHELL_APPCOMMAND comes from
+       DefWindowProc on the thread of a window of that desktop, HSHELL_LANGUAGE from the
+       thread whose keyboard layout changed (wParam is not a window for these two). Only a
+       caller without a desktop (a system thread) falls back to the input desktop. A shell
+       on the input desktop must not get the windows of other desktops (its taskbar would
+       list them). Caller's desktop for the two input notifications: the plausible Windows
+       behaviour (the shell on that desktop owns its windows' app commands), not measured. */
+    if (Message != HSHELL_LANGUAGE && Message != HSHELL_APPCOMMAND && wParam)
+    {
+        PWND pwnd = ValidateHwndNoErr((HWND)wParam);
+        if (pwnd)
+            Desktop = pwnd->head.rpdesk;
+    }
+    if (!Desktop && pti)
+        Desktop = pti->rpdesk;
+    if (!Desktop)
+        Desktop = IntGetActiveDesktop();
 
     if (!gpsi->uiShellMsg)
     {

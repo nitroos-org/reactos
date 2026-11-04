@@ -1,0 +1,63 @@
+; STORNVME.INF
+;
+; Installation file for NVM Express controllers (PCI class 01, subclass 08, interface 02)
+;
+[Version]
+Signature  = "$Windows NT$"
+Class      = SCSIAdapter
+ClassGUID  = {4D36E97B-E325-11CE-BFC1-08002BE10318}
+Provider   = %ReactOS%
+DriverVer  = 11/03/2026,1.0
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[SourceDisksFiles]
+stornvme.sys = 1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[Manufacturer]
+%StandardMfg% = StandardMfg,NTx86,NTamd64
+
+[StandardMfg]
+%PCI\CC_010802.DeviceDesc% = Stornvme_Inst, PCI\CC_010802
+
+[StandardMfg.NTx86]
+%PCI\CC_010802.DeviceDesc% = Stornvme_Inst, PCI\CC_010802
+
+[StandardMfg.NTamd64]
+%PCI\CC_010802.DeviceDesc% = Stornvme_Inst, PCI\CC_010802
+
+[ControlFlags]
+ExcludeFromSelect = *
+
+[Stornvme_Inst]
+CopyFiles = Stornvme_CopyFiles
+
+[Stornvme_Inst.Services]
+AddService = stornvme, 0x00000002, Stornvme_Service_Inst
+
+[Stornvme_Service_Inst]
+DisplayName    = %Stornvme.ServiceDesc%
+ServiceType    = 1
+StartType      = 0
+ErrorControl   = 1
+ServiceBinary  = %12%\stornvme.sys
+LoadOrderGroup = SCSI Miniport
+AddReg         = Stornvme_AddReg
+
+[Stornvme_AddReg]
+HKR, "Parameters\PnpInterface", "5", 0x00010001, 0x00000001
+HKR, "Parameters", "BusType", 0x00010001, 0x00000011
+
+[Stornvme_CopyFiles]
+stornvme.sys,,,0x00000100
+
+[Strings]
+ReactOS = "ReactOS Project"
+DiskName = "ReactOS installation media"
+StandardMfg = "Standard NVM Express Controllers"
+PCI\CC_010802.DeviceDesc = "Standard NVM Express Controller"
+Stornvme.ServiceDesc = "NVM Express Storport Miniport Driver"

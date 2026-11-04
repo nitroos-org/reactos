@@ -268,6 +268,118 @@ NewAddrInfo(IN INT SocketType,
     return AddrInfo;
 }
 
+/*
+ * An IPv6 address in text form: "::1", "fe80::1%4", and both of them in brackets, with or without a
+ * port ("[::1]:80", the port is not used). Windows answers it whether or not the machine has IPv6:
+ * nothing is looked up. A numeric scope id after '%' is the only zone accepted.
+ */
+static
+BOOL
+ParseV6Address(IN PCWSTR AddressString,
+               OUT PIN6_ADDR pAddress,
+               OUT PULONG pScopeId)
+{
+    WCHAR Text[64];
+    PCWSTR Terminator = NULL;
+    PCWSTR Scope, Close;
+    SIZE_T Length;
+    ULONG Id = 0;
+
+    *pScopeId = 0;
+    if (!AddressString || !wcschr(AddressString, L':'))
+        return FALSE;
+
+    if (*AddressString == L'[')
+    {
+        Close = wcschr(AddressString, L']');
+        if (!Close)
+            return FALSE;
+
+        /* After the bracket: nothing, or a port */
+        Scope = Close + 1;
+        if (*Scope == L':')
+        {
+            if (!*++Scope)
+                return FALSE;
+            for (; *Scope; Scope++)
+            {
+                if (*Scope < L'0' || *Scope > L'9')
+                    return FALSE;
+            }
+        }
+        else if (*Scope)
+        {
+            return FALSE;
+        }
+
+        Length = Close - (AddressString + 1);
+        if (!Length || Length >= RTL_NUMBER_OF(Text))
+            return FALSE;
+        RtlCopyMemory(Text, AddressString + 1, Length * sizeof(WCHAR));
+        Text[Length] = UNICODE_NULL;
+        AddressString = Text;
+    }
+
+    if (!NT_SUCCESS(RtlIpv6StringToAddressW(AddressString, &Terminator, pAddress)) || !Terminator)
+        return FALSE;
+
+    if (*Terminator == L'%')
+    {
+        Scope = Terminator + 1;
+        if (!*Scope)
+            return FALSE;
+        for (; *Scope; Scope++)
+        {
+            if (*Scope < L'0' || *Scope > L'9')
+                return FALSE;
+            Id = Id * 10 + (*Scope - L'0');
+        }
+        *pScopeId = Id;
+        return TRUE;
+    }
+
+    return *Terminator == UNICODE_NULL;
+}
+
+static
+PADDRINFOW
+WINAPI
+NewAddrInfo6(IN INT SocketType,
+             IN INT Protocol,
+             IN WORD Port,
+             IN const IN6_ADDR *Address,
+             IN ULONG ScopeId)
+{
+    PADDRINFOW AddrInfo;
+    PSOCKADDR_IN6 SockAddress;
+
+    AddrInfo = HeapAlloc(WsSockHeap, 0, sizeof(ADDRINFOW));
+    if (!AddrInfo) return NULL;
+
+    SockAddress = HeapAlloc(WsSockHeap, HEAP_ZERO_MEMORY, sizeof(SOCKADDR_IN6));
+    if (!SockAddress)
+    {
+        HeapFree(WsSockHeap, 0, AddrInfo);
+        return NULL;
+    }
+
+    SockAddress->sin6_family = AF_INET6;
+    SockAddress->sin6_port = Port;
+    SockAddress->sin6_addr = *Address;
+    SockAddress->sin6_scope_id = ScopeId;
+
+    AddrInfo->ai_family = PF_INET6;
+    AddrInfo->ai_socktype = SocketType;
+    AddrInfo->ai_protocol = Protocol;
+    AddrInfo->ai_flags = 0;
+    AddrInfo->ai_next = 0;
+    AddrInfo->ai_canonname = NULL;
+    AddrInfo->ai_addrlen = sizeof(SOCKADDR_IN6);
+    AddrInfo->ai_addr = (PSOCKADDR)SockAddress;
+
+    return AddrInfo;
+}
+
 static
 INT
 WINAPI
@@ -679,7 +791,9 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
     PSERVENT ptService = NULL;
     PCHAR pc = NULL;
     BOOL bClone = FALSE;
-    BOOL bNumeric, bTrailingSpace = FALSE;
+    BOOL bNumeric, bNumeric6 = FALSE, bTrailingSpace = FALSE;
+    IN6_ADDR Address6;
+    ULONG ulScope6 = 0;
     WORD wTcpPort = 0;
     WORD wUdpPort = 0;
     WCHAR CanonicalName[0x42];
@@ -725,7 +839,9 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
 
         /* Save family and validate it */
         iFamily = ptHints->ai_family;
-        if ((iFamily != PF_UNSPEC) && (iFamily != PF_INET))
+        bNumeric6 = (iFamily == PF_UNSPEC || iFamily == PF_INET6) &&
+                    ParseV6Address(pszNodeName, &Address6, &ulScope6);
+        if ((iFamily != PF_UNSPEC) && (iFamily != PF_INET) && !bNumeric6)
         {
             SetLastError(EAI_FAMILY);
             return EAI_FAMILY;
@@ -821,15 +937,50 @@ GetAddrInfoW(IN PCWSTR pszNodeName,
         }
     }
 
+    /* An IPv6 address answers with itself, and with the family the caller allowed */
+    if (!ptHints)
+        bNumeric6 = ParseV6Address(pszNodeName, &Address6, &ulScope6);
+
     /* Check if this is a valid IPv4 address */
-    bNumeric = pszNodeName && ParseV4Address(pszNodeName, &dwAddress, &bTrailingSpace);
+    bNumeric = pszNodeName && !bNumeric6 && ParseV4Address(pszNodeName, &dwAddress, &bTrailingSpace);
 
     /* An address with trailing whitespace is not strictly numeric */
     if (bNumeric && bTrailingSpace && (iFlags & AI_NUMERICHOST))
         bNumeric = FALSE;
 
+    if (bNumeric6)
+    {
+        *pptResult = NewAddrInfo6(iSocketType, iProtocol, wPort, &Address6, ulScope6);
+        if (!(*pptResult))
+        {
+            iError = EAI_MEMORY;
+        }
+        else
+        {
+            (*pptResult)->ai_flags |= AI_NUMERICHOST;
+
+            /* The canonical name of an address is its numeric form, as for an IPv4 address */
+            if (iFlags & AI_CANONNAME)
+            {
+                ULONG CanonicalLength = RTL_NUMBER_OF(CanonicalName);
+
+                CanonicalName[0] = UNICODE_NULL;
+                RtlIpv6AddressToStringExW(&Address6, ulScope6, 0, CanonicalName, &CanonicalLength);
+
+                (*pptResult)->ai_canonname = HeapAlloc(WsSockHeap,
+                                                       0,
+                                                       (wcslen(CanonicalName) + 1) * sizeof(WCHAR));
+                if (!(*pptResult)->ai_canonname)
+                    iError = EAI_MEMORY;
+                else
+                    RtlMoveMemory((*pptResult)->ai_canonname,
+                                  CanonicalName,
+                                  (wcslen(CanonicalName) + 1) * sizeof(WCHAR));
+            }
+        }
+    }
     /* Check if no node was given or if this is is a valid IPv4 address */
-    if ((!pszNodeName) || bNumeric)
+    else if ((!pszNodeName) || bNumeric)
     {
         /* Check if we don't have a node name */
         if (!pszNodeName)

@@ -62,7 +62,8 @@ IntTopLevelWindowFromPoint(INT x, INT y)
 {
     PWND pWnd, pwndDesktop;
 
-    /* Get the desktop window */
+    /* Get the desktop window: the screen, i.e. the input desktop (cursor shape and
+       hardware mouse messages); nothing below leaves the USER lock */
     pwndDesktop = UserGetDesktopWindow();
     if (!pwndDesktop)
         return NULL;
@@ -748,7 +749,8 @@ co_MsqInsertMouseMessageEx(MSG* Msg, DWORD flags, ULONG_PTR dwExtraInfo, BOOL Ho
    if (dwHookTime)
       Msg->time = dwHookTime;
 
-   /* Get the desktop window */
+   /* Get the desktop window: hardware input goes to the input desktop (read after the
+      low-level hook, which can leave the USER lock; not kept across another wait) */
    pwndDesktop = UserGetDesktopWindow();
    if (!pwndDesktop) return;
 //   pDesk = pwndDesktop->head.rpdesk;
@@ -1652,7 +1654,11 @@ MsqPostQuitMessage(PTHREADINFO pti, ULONG ExitCode)
  */
 static void MsqSendParentNotify( PWND pwnd, WORD event, WORD idChild, POINT pt )
 {
-    PWND pwndDesktop = UserGetDesktopWindow();
+    /* The desktop window of pwnd's own desktop (the input desktop can change while
+       WM_PARENTNOTIFY is sent below; only compared after that) */
+    PWND pwndDesktop = co_GetDesktopWindow(pwnd);
+
+    if (!pwndDesktop) return;
 
     /* pt has to be in the client coordinates of the parent window */
     pt.x += pwndDesktop->rcClient.left - pwnd->rcClient.left;
@@ -1745,7 +1751,10 @@ BOOL co_IntProcessMouseMessage(MSG* msg, BOOL* RemoveMessages, BOOL* NotForUs, L
     PDESKTOP pDesk;
 
     pti = PsGetCurrentThreadWin32Thread();
-    pwndDesktop = UserGetDesktopWindow();
+    /* The desktop of the thread that processes the message, which holds a reference on it:
+       pDesk is used across messages sent below (WM_MOUSELEAVE, WM_SETCURSOR, hooks), while
+       the input desktop can be switched away from and closed */
+    pwndDesktop = UserGetThreadDesktopWindow();
     if (pwndDesktop == NULL)
     {
         ERR("No desktop window!\n");
@@ -2085,7 +2094,7 @@ BOOL co_IntProcessKeyboardMessage(MSG* Msg, BOOL* RemoveMessages)
     if (*RemoveMessages)
     {
         if ((uMsg == WM_KEYDOWN) &&
-            (Msg->hwnd != IntGetDesktopWindow()))
+            !UserIsDesktopWindow(pWnd)) /* not to a desktop window (of any desktop) */
         {
             /* Handle F1 key by sending out WM_HELP message */
             if (Msg->wParam == VK_F1)

@@ -8,6 +8,7 @@
 /* INCLUDES *******************************************************************/
 
 #include "precomp.h"
+#include <sptilib.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -125,7 +126,7 @@ FdoDeviceControlQueryProperty(
         AdapterDescriptor->AdapterScansDown = Miniport->PortConfig.AdapterScansDown;
         AdapterDescriptor->CommandQueueing = TRUE; /* Storport requirement */
         AdapterDescriptor->AcceleratedTransfer = TRUE;
-        AdapterDescriptor->BusType = BusTypeSata; /* FIXME: ＲＥＡＤ　ＦＲＯＭ　ＲＥＧＩＳＴＲＹ */
+        AdapterDescriptor->BusType = FdoExtension->BusType;
         AdapterDescriptor->BusMajorVersion = 2;
         AdapterDescriptor->BusMinorVersion = 0;
 
@@ -221,6 +222,7 @@ PdoDeviceControlQueryProperty(
                 ULONG VendorIdLength = GetFieldLength(InquiryData->VendorId, 8);
                 ULONG ProductIdLength = GetFieldLength(InquiryData->ProductId, 16);
                 ULONG RevisionLength = GetFieldLength(InquiryData->ProductRevisionLevel, 4);
+                ULONG SerialLength = PdoExtension->SerialNumber ? (ULONG)strlen(PdoExtension->SerialNumber) : 0;
                 ULONG TotalLength;
                 PUCHAR Dest;
 
@@ -233,7 +235,7 @@ PdoDeviceControlQueryProperty(
                                VendorIdLength + 1 +
                                ProductIdLength + 1 +
                                RevisionLength + /* Null byte omitted */
-                               1; /* Null byte for serial number */
+                               SerialLength + 1; /* Serial number and its null byte */
 
                 /* Check buffer length */
                 if (IoStack->Parameters.DeviceIoControl.OutputBufferLength < TotalLength)
@@ -265,7 +267,7 @@ PdoDeviceControlQueryProperty(
                     .DeviceTypeModifier = InquiryData->DeviceTypeModifier,
                     .RemovableMedia = InquiryData->RemovableMedia,
                     .CommandQueueing = InquiryData->CommandQueue,
-                    .BusType = BusTypeSata, /* FIXME: USE FDO BUS TYPE FROM REGISTRY */
+                    .BusType = PdoExtension->FdoExtension->BusType,
                 };
 
                 /* Arbitrary data offsets, set them cascading */
@@ -275,8 +277,10 @@ PdoDeviceControlQueryProperty(
                                                     VendorIdLength + 1;
                 DeviceDescriptor->ProductRevisionOffset = DeviceDescriptor->ProductIdOffset +
                                                           ProductIdLength + 1;
-                DeviceDescriptor->SerialNumberOffset = DeviceDescriptor->ProductRevisionOffset +
-                                                       RevisionLength + 1;
+                /* Zero when the unit reports no serial number (VPD page 0x80), as on Windows */
+                DeviceDescriptor->SerialNumberOffset = SerialLength ?
+                                                       DeviceDescriptor->ProductRevisionOffset + RevisionLength + 1 :
+                                                       0;
 
                 /* Fill the arbitrary data */
                 Dest = DeviceDescriptor->RawDeviceProperties;
@@ -293,8 +297,9 @@ PdoDeviceControlQueryProperty(
                 Dest[RevisionLength] = '\0';
                 Dest += RevisionLength + 1;
 
-                /* FIXME: Read serial number when enumerating devices */
-                *Dest = '\0';
+                if (SerialLength)
+                    RtlCopyMemory(Dest, PdoExtension->SerialNumber, SerialLength);
+                Dest[SerialLength] = '\0';
 
                 /* TODO: Verify this doesnt overflow */
                 Irp->IoStatus.Information = TotalLength;
@@ -391,6 +396,30 @@ PortPdoDeviceControl(
 
         case IOCTL_SCSI_GET_ADDRESS:
             return PdoDeviceControlScsiGetAddress(DeviceObject->DeviceExtension, Irp);
+
+        case IOCTL_SCSI_PASS_THROUGH:
+        case IOCTL_SCSI_PASS_THROUGH_DIRECT:
+        {
+            PPDO_DEVICE_EXTENSION PdoExtension = DeviceObject->DeviceExtension;
+            PPORT_CONFIGURATION_INFORMATION PortConfig = &PdoExtension->FdoExtension->Miniport.PortConfig;
+
+            /* A claimed unit takes pass-through only from its class driver, which marks the
+               request it forwards (MinorFunction 1), as scsiport does */
+            if (IoStack->MinorFunction == 0 && PdoExtension->IsClaimed)
+            {
+                Status = STATUS_INVALID_DEVICE_REQUEST;
+                break;
+            }
+
+            /* The library builds the SRB and sends it to this PDO; it leaves completion to us */
+            Status = SptiHandleScsiPassthru(DeviceObject,
+                                            Irp,
+                                            PortConfig->MaximumTransferLength,
+                                            PortConfig->NumberOfPhysicalBreaks);
+            Irp->IoStatus.Status = Status;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return Status;
+        }
 
         default:
             // DbgBreakPoint();

@@ -194,6 +194,106 @@ TestServiceName(VOID)
     }
 }
 
+static
+VOID
+TestIpv6Literal(VOID)
+{
+    static const IN6_ADDR Loopback = { { { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } } };
+    static const IN6_ADDR LinkLocal = { { { 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } } };
+    static const IN6_ADDR Global = { { { 0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11 } } };
+    struct
+    {
+        PCSTR NodeName;
+        INT Family;
+        INT Flags;
+        const IN6_ADDR *Address;    /* NULL: not found */
+        ULONG ScopeId;
+    } Tests[] =
+    {
+        /* An IPv6 address is returned whether or not the machine has IPv6: nothing is looked up */
+        { "::1",                    AF_UNSPEC,  AI_NUMERICHOST, &Loopback },
+        { "::1",                    AF_INET6,   AI_NUMERICHOST, &Loopback },
+        { "::1",                    AF_UNSPEC,  0,              &Loopback },
+        { "[::1]",                  AF_UNSPEC,  AI_NUMERICHOST, &Loopback },
+        { "[::1]:80",               AF_UNSPEC,  AI_NUMERICHOST, &Loopback },
+        { "2606:4700::1111",        AF_UNSPEC,  AI_NUMERICHOST, &Global },
+        { "fe80::1",                AF_UNSPEC,  AI_NUMERICHOST, &LinkLocal },
+        { "fe80::1%4",              AF_UNSPEC,  AI_NUMERICHOST, &LinkLocal, 4 },
+        { "[fe80::1%4]",            AF_UNSPEC,  AI_NUMERICHOST, &LinkLocal, 4 },
+        /* Only the IPv4 family was asked for */
+        { "::1",                    AF_INET,    AI_NUMERICHOST, NULL },
+        /* Not addresses */
+        { "[::1",                   AF_UNSPEC,  AI_NUMERICHOST, NULL },
+        { "::1]",                   AF_UNSPEC,  AI_NUMERICHOST, NULL },
+        { "[::1]x",                 AF_UNSPEC,  AI_NUMERICHOST, NULL },
+        { ":::1",                   AF_UNSPEC,  AI_NUMERICHOST, NULL },
+        { "::g",                    AF_UNSPEC,  AI_NUMERICHOST, NULL },
+        { "fe80::1%",               AF_UNSPEC,  AI_NUMERICHOST, NULL },
+        { "1:2:3:4:5:6:7:8:9",      AF_UNSPEC,  AI_NUMERICHOST, NULL },
+    };
+    INT i;
+
+    trace("IPv6 literals\n");
+    for (i = 0; i < (INT)RTL_NUMBER_OF(Tests); i++)
+    {
+        ADDRINFOA Hints, *AddrInfo = InvalidPointer;
+        INT Error;
+
+        ZeroMemory(&Hints, sizeof(Hints));
+        Hints.ai_family = Tests[i].Family;
+        Hints.ai_flags = Tests[i].Flags;
+        Hints.ai_socktype = SOCK_STREAM;
+        Error = getaddrinfo(Tests[i].NodeName, "80", &Hints, &AddrInfo);
+        if (Tests[i].Address)
+        {
+            ok(Error == 0, "%d: '%s' returned %d\n", i, Tests[i].NodeName, Error);
+            ok(AddrInfo != NULL && AddrInfo != InvalidPointer, "%d: AddrInfo = %p\n", i, AddrInfo);
+            if (!Error && AddrInfo && AddrInfo != InvalidPointer)
+            {
+                SOCKADDR_IN6 *Address = (SOCKADDR_IN6 *)AddrInfo->ai_addr;
+
+                ok(AddrInfo->ai_family == AF_INET6, "%d: ai_family = %d\n", i, AddrInfo->ai_family);
+                ok(AddrInfo->ai_socktype == SOCK_STREAM, "%d: ai_socktype = %d\n", i, AddrInfo->ai_socktype);
+                ok((int)AddrInfo->ai_addrlen == sizeof(SOCKADDR_IN6), "%d: ai_addrlen = %d\n", i, (int)AddrInfo->ai_addrlen);
+                ok(AddrInfo->ai_next == NULL, "%d: ai_next = %p\n", i, AddrInfo->ai_next);
+                if (AddrInfo->ai_addr && (int)AddrInfo->ai_addrlen == sizeof(SOCKADDR_IN6))
+                {
+                    ok(Address->sin6_family == AF_INET6, "%d: sin6_family = %d\n", i, Address->sin6_family);
+                    ok(ntohs(Address->sin6_port) == 80, "%d: sin6_port = %d\n", i, ntohs(Address->sin6_port));
+                    ok(!memcmp(&Address->sin6_addr, Tests[i].Address, sizeof(IN6_ADDR)), "%d: wrong address\n", i);
+                    ok(Address->sin6_scope_id == Tests[i].ScopeId, "%d: sin6_scope_id = %lu\n", i, Address->sin6_scope_id);
+                    ok(Address->sin6_flowinfo == 0, "%d: sin6_flowinfo = %lu\n", i, Address->sin6_flowinfo);
+                }
+                freeaddrinfo(AddrInfo);
+            }
+        }
+        else
+        {
+            ok(Error == WSAHOST_NOT_FOUND, "%d: '%s' returned %d\n", i, Tests[i].NodeName, Error);
+            ok(AddrInfo == NULL, "%d: AddrInfo = %p\n", i, AddrInfo);
+        }
+    }
+
+    /* The canonical name is the numeric form */
+    {
+        ADDRINFOA Hints, *AddrInfo = NULL;
+
+        ZeroMemory(&Hints, sizeof(Hints));
+        Hints.ai_flags = AI_NUMERICHOST | AI_CANONNAME;
+        if (getaddrinfo("::1", NULL, &Hints, &AddrInfo) == 0 && AddrInfo)
+        {
+            ok(AddrInfo->ai_canonname != NULL, "ai_canonname is NULL\n");
+            if (AddrInfo->ai_canonname)
+                ok(!strcmp(AddrInfo->ai_canonname, "::1"), "ai_canonname = '%s'\n", AddrInfo->ai_canonname);
+            freeaddrinfo(AddrInfo);
+        }
+        else
+        {
+            ok(0, "getaddrinfo(::1, AI_CANONNAME) failed\n");
+        }
+    }
+}
+
 START_TEST(getaddrinfo)
 {
     WSADATA WsaData;
@@ -268,9 +368,9 @@ START_TEST(getaddrinfo)
 
     TestNodeName();
     TestServiceName();
+    TestIpv6Literal();
     /* TODO: test passing both node name and service name */
     /* TODO: test hints */
-    /* TODO: test IPv6 */
 
     Error = WSACleanup();
     ok_dec(Error, 0);

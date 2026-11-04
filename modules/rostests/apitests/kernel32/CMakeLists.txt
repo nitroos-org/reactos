@@ -57,6 +57,7 @@ list(APPEND SOURCE
     ActCtxResDirBound.c
     DefaultActCtx.c
     DiscardVirtualMemory.c
+    DeleteFilePosix.c
     DeleteTimerQueueEx.c
     DeriveCapabilitySidsFromName.c
     CallbackCompletion.c
@@ -80,6 +81,7 @@ list(APPEND SOURCE
     FindFiles.c
     FindFirstFileEx.c
     FindFirstStream.c
+    FindNextBoundary.c
     FindNLSStringEx.c
     FindStringOrdinal.c
     FlushProcessWriteBuffers.c

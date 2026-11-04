@@ -121,6 +121,12 @@ PortDeletePdo(
         PdoExtension->InquiryBuffer = NULL;
     }
 
+    if (PdoExtension->SerialNumber)
+    {
+        ExFreePoolWithTag(PdoExtension->SerialNumber, TAG_INQUIRY_DATA);
+        PdoExtension->SerialNumber = NULL;
+    }
+
 
     // FIXME: More uninitialization
 

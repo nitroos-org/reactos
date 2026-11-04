@@ -24,6 +24,7 @@ extern void func_EditChildUserObjects(void);
 extern void func_EditInk(void);
 extern void func_desktop(void);
 extern void func_DesktopHeapNonInteractive(void);
+extern void func_DesktopOtherThreadApis(void);
 extern void func_ClipboardFormatListener(void);
 extern void func_ClipboardSynthBitmap(void);
 extern void func_ConsoleClipText(void);
@@ -154,6 +155,7 @@ const struct test winetest_testlist[] =
     { "EditInk", func_EditInk },
     { "desktop", func_desktop },
     { "DesktopHeapNonInteractive", func_DesktopHeapNonInteractive },
+    { "DesktopOtherThreadApis", func_DesktopOtherThreadApis },
     { "ClipboardFormatListener", func_ClipboardFormatListener },
     { "ClipboardSynthBitmap", func_ClipboardSynthBitmap },
     { "ConsoleClipText", func_ConsoleClipText },

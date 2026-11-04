@@ -61,6 +61,7 @@ extern void func_DebugTrapInterrupts(void);
 extern void func_ActCtxResDirBound(void);
 extern void func_DefaultActCtx(void);
 extern void func_DiscardVirtualMemory(void);
+extern void func_DeleteFilePosix(void);
 extern void func_DeleteTimerQueueEx(void);
 extern void func_DeriveCapabilitySidsFromName(void);
 extern void func_CallbackCompletion(void);
@@ -84,6 +85,7 @@ extern void func_FindActCtxSectionStringW(void);
 extern void func_FindFiles(void);
 extern void func_FindFirstFileEx(void);
 extern void func_FindFirstStream(void);
+extern void func_FindNextBoundary(void);
 extern void func_FindNLSStringEx(void);
 extern void func_FindStringOrdinal(void);
 extern void func_FlushProcessWriteBuffers(void);
@@ -282,6 +284,7 @@ const struct test winetest_testlist[] =
     { "ActCtxResDirBound",          func_ActCtxResDirBound },
     { "DefaultActCtx",               func_DefaultActCtx },
     { "DiscardVirtualMemory", func_DiscardVirtualMemory },
+    { "DeleteFilePosix",             func_DeleteFilePosix },
     { "DeleteTimerQueueEx",          func_DeleteTimerQueueEx },
     { "DeriveCapabilitySidsFromName", func_DeriveCapabilitySidsFromName },
     { "CallbackCompletion", func_CallbackCompletion },
@@ -305,6 +308,7 @@ const struct test winetest_testlist[] =
     { "FindFiles",                   func_FindFiles },
     { "FindFirstFileEx",             func_FindFirstFileEx },
     { "FindFirstStream",             func_FindFirstStream },
+    { "FindNextBoundary",            func_FindNextBoundary },
     { "FindNLSStringEx",             func_FindNLSStringEx },
     { "FindStringOrdinal",           func_FindStringOrdinal },
     { "FlushProcessWriteBuffers",     func_FlushProcessWriteBuffers },

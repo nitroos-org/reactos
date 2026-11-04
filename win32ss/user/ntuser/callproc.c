@@ -89,9 +89,14 @@ FASTCALL
 UserSearchForCallProc(
    PCALLPROCDATA pcpd,
    WNDPROC WndProc,
-   GETCPD Type)
+   GETCPD Type,
+   PDESKTOP pDesk)
 {
-   while ( pcpd && (pcpd->pfnClientPrevious != WndProc || pcpd->wType != Type) )
+   /* The chain of a class is shared by its copies on several desktops, but a call
+      procedure lives in the heap of one desktop (and is freed when the process leaves
+      that desktop, see IntFreeDesktopCallProcs): only reuse one of the desktop asked for */
+   while ( pcpd && (pcpd->pfnClientPrevious != WndProc || pcpd->wType != Type ||
+                    (pDesk && pcpd->head.rpdesk != pDesk)) )
    {
       pcpd = pcpd->spcpdNext;
    }
@@ -126,20 +131,21 @@ UserGetCPD(
    else
       pCls = pvClsWnd;
 
-   // Search Class call proc data list.
+   if (!pCls->rpdeskParent)
+   {
+      TRACE("Null DESKTOP Atom %u\n",pCls->atomClassName);
+      pDesk = pti->rpdesk;
+   }
+   else
+      pDesk = pCls->rpdeskParent;
+
+   // Search Class call proc data list (for one on that desktop).
    if (pCls->spcpdFirst)
-      CallProc = UserSearchForCallProc( pCls->spcpdFirst, (WNDPROC)ProcIn, Flags);
+      CallProc = UserSearchForCallProc( pCls->spcpdFirst, (WNDPROC)ProcIn, Flags, pDesk);
 
    // No luck, create a new one for the requested proc.
    if (!CallProc)
    {
-      if (!pCls->rpdeskParent)
-      {
-         TRACE("Null DESKTOP Atom %u\n",pCls->atomClassName);
-         pDesk = pti->rpdesk;
-      }
-      else
-         pDesk = pCls->rpdeskParent;
       CallProc = CreateCallProc( pDesk,
                                  (WNDPROC)ProcIn,
                                  !!(Flags & UserGetCPDA2U),
