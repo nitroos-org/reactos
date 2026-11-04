@@ -408,6 +408,18 @@ BaseFormatObjectAttributes(OUT POBJECT_ATTRIBUTES ObjectAttributes,
 }
 
 /*
+ * Pages in the guard region below the committed part of a new stack. Windows x64
+ * creates three (and the kernel re-arms three after each guard hit), so a frame
+ * probed in steps of two pages does not jump over the guard. Windows x86 is not
+ * measured here and keeps one.
+ */
+#ifdef _M_AMD64
+#define BASE_STACK_GUARD_PAGES 3
+#else
+#define BASE_STACK_GUARD_PAGES 1
+#endif
+
+/*
  * Creates a stack for a thread or fiber.
  * NOTE: Adapted from sdk/lib/rtl/thread.c:RtlpCreateUserStack().
  */
@@ -502,15 +514,18 @@ BaseCreateStack(
     /* Update the stack position */
     Stack += StackReserve - StackCommit;
 
-    /* Check if we can add a guard page */
+    /* Check if we can add a guard region: as many pages as Windows uses, if they fit */
     if (StackReserve >= StackCommit + PageSize)
     {
-        Stack -= PageSize;
-        StackCommit += PageSize;
+        GuardPageSize = min((SIZE_T)BASE_STACK_GUARD_PAGES * PageSize, StackReserve - StackCommit);
+        GuardPageSize = ALIGN_DOWN_BY(GuardPageSize, PageSize);
+        Stack -= GuardPageSize;
+        StackCommit += GuardPageSize;
         UseGuard = TRUE;
     }
     else
     {
+        GuardPageSize = 0;
         UseGuard = FALSE;
     }
 
@@ -535,7 +550,6 @@ BaseCreateStack(
     /* Create a guard page if needed */
     if (UseGuard)
     {
-        GuardPageSize = PageSize;
         Status = NtProtectVirtualMemory(hProcess,
                                         (PVOID*)&Stack,
                                         &GuardPageSize,
