@@ -933,6 +933,7 @@ DispatchToUser:
             {
                 ULONG Size;
                 ULONG_PTR Stack, NewStack;
+                PCONTEXT_EX ContextEx;
 
                 /* Make sure we have a valid SS and that this isn't V86 mode */
                 if ((TrapFrame->HardwareSegSs != (KGDT_R3_DATA | RPL_MASK)) ||
@@ -945,13 +946,24 @@ DispatchToUser:
                     RtlRaiseException(&LocalExceptRecord);
                 }
 
-                /* Align context size and get stack pointer */
-                Size = (sizeof(CONTEXT) + 3) & ~3;
+                /* Align context size and get stack pointer. The context is
+                   followed by a CONTEXT_EX, as the one of Windows is. */
+                Size = (sizeof(CONTEXT) + sizeof(CONTEXT_EX) + 3) & ~3;
                 Stack = (Context.Esp & ~3) - Size;
 
                 /* Probe stack and copy Context */
                 ProbeForWrite((PVOID)Stack, Size, sizeof(ULONG));
                 RtlCopyMemory((PVOID)Stack, &Context, sizeof(CONTEXT));
+
+                /* Describe the parts of the context, as
+                   RtlInitializeExtendedContext does (no extended state) */
+                ContextEx = (PCONTEXT_EX)((PCONTEXT)Stack + 1);
+                ContextEx->All.Offset = -(LONG)sizeof(CONTEXT);
+                ContextEx->All.Length = sizeof(CONTEXT) + sizeof(CONTEXT_EX);
+                ContextEx->Legacy.Offset = -(LONG)sizeof(CONTEXT);
+                ContextEx->Legacy.Length = sizeof(CONTEXT);
+                ContextEx->XState.Offset = 25;
+                ContextEx->XState.Length = 0;
 
                 /* Align exception record size and get stack pointer */
                 Size = (sizeof(EXCEPTION_RECORD) -
