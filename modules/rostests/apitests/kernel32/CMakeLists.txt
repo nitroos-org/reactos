@@ -162,6 +162,8 @@ list(APPEND SOURCE
     PowerRequest.c
     PrefetchVirtualMemory.c
     RelocatedImageProtection.c
+    MoveFileReparse.c
+    ReparseFollow.c
     PrivMoveFileIdentityW.c
     ProcessAffinity.c
     ProcessorNumber.c

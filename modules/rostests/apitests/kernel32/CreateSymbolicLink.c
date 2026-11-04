@@ -6,9 +6,11 @@
  *
  * Expected behaviour was taken from Windows 10 22H2 (elevated): SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE (0x2)
  * is accepted, bits that are not defined are ignored, relative targets are stored as written with
- * SYMLINK_FLAG_RELATIVE, absolute ones as \??\ paths. Without developer mode Windows still wants
- * SeCreateSymbolicLinkPrivilege (ERROR_PRIVILEGE_NOT_HELD) for every flag combination; ReactOS has no such
- * check, so the tests only create links and never test the unprivileged failure.
+ * SYMLINK_FLAG_RELATIVE, absolute ones as \??\ paths. Without developer mode Windows wants
+ * SeCreateSymbolicLinkPrivilege (ERROR_PRIVILEGE_NOT_HELD) for every flag combination, also with
+ * SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE, and for FSCTL_SET_REPARSE_POINT with a symbolic link tag.
+ * The test adapts to the token: a token that has the privilege runs the link tests, one that does not (a
+ * standard user) tests that every way of creating a link is refused and leaves nothing behind.
  */
 
 #include "precomp.h"
@@ -354,6 +356,224 @@ static void Test_AnsiVariant(void)
     ok(Ok, "target damaged: %lu\n", Err);
 }
 
+static BOOL HasLinkPrivilege(void)
+{
+    HANDLE Token;
+    LUID Luid;
+    BYTE Buf[2048];
+    TOKEN_PRIVILEGES *Priv = (TOKEN_PRIVILEGES *)Buf;
+    DWORD Size, i;
+    BOOL Found = FALSE;
+
+    if (!LookupPrivilegeValueW(NULL, L"SeCreateSymbolicLinkPrivilege", &Luid))
+    {
+        ok(0, "LookupPrivilegeValue(SeCreateSymbolicLinkPrivilege) failed: %lu\n", GetLastError());
+        return FALSE;
+    }
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &Token))
+        return FALSE;
+    if (GetTokenInformation(Token, TokenPrivileges, Buf, sizeof(Buf), &Size))
+    {
+        for (i = 0; i < Priv->PrivilegeCount; i++)
+            Found |= Priv->Privileges[i].Luid.LowPart == Luid.LowPart && Priv->Privileges[i].Luid.HighPart == Luid.HighPart;
+    }
+    CloseHandle(Token);
+    return Found;
+}
+
+static BOOL SetLinkPrivilege(BOOL Enable)
+{
+    HANDLE Token;
+    TOKEN_PRIVILEGES Tp;
+    BOOL Ret;
+
+    Tp.PrivilegeCount = 1;
+    Tp.Privileges[0].Attributes = Enable ? SE_PRIVILEGE_ENABLED : 0;
+    if (!LookupPrivilegeValueW(NULL, L"SeCreateSymbolicLinkPrivilege", &Tp.Privileges[0].Luid))
+        return FALSE;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &Token))
+        return FALSE;
+    Ret = AdjustTokenPrivileges(Token, FALSE, &Tp, 0, NULL, NULL) && GetLastError() == ERROR_SUCCESS;
+    CloseHandle(Token);
+    return Ret;
+}
+
+/* The data of a symbolic link, built by hand: Sub and Print are placed one after the other */
+static DWORD BuildLinkData(BYTE *Buf, DWORD Flags, const WCHAR *Sub, const WCHAR *Print)
+{
+    TEST_SYMLINK_REPARSE *Rp = (TEST_SYMLINK_REPARSE *)Buf;
+    DWORD SubLen = lstrlenW(Sub) * sizeof(WCHAR), PrintLen = lstrlenW(Print) * sizeof(WCHAR);
+
+    Rp->ReparseTag = IO_REPARSE_TAG_SYMLINK;
+    Rp->Reserved = 0;
+    Rp->SubstituteNameOffset = 0;
+    Rp->SubstituteNameLength = (WORD)SubLen;
+    Rp->PrintNameOffset = (WORD)SubLen;
+    Rp->PrintNameLength = (WORD)PrintLen;
+    Rp->Flags = Flags;
+    memcpy((BYTE *)Rp->PathBuffer, Sub, SubLen);
+    memcpy((BYTE *)Rp->PathBuffer + SubLen, Print, PrintLen);
+    Rp->ReparseDataLength = (WORD)(FIELD_OFFSET(TEST_SYMLINK_REPARSE, PathBuffer) - 8 + SubLen + PrintLen);
+    return FIELD_OFFSET(TEST_SYMLINK_REPARSE, PathBuffer) + SubLen + PrintLen;
+}
+
+#ifndef FSCTL_SET_REPARSE_POINT
+#define FSCTL_SET_REPARSE_POINT CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 41, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
+#endif
+
+/* Sets Data on a new file or directory (Name), returns the DeviceIoControl result and the error */
+static BOOL RawSet(const WCHAR *Name, BOOL IsDir, BYTE *Data, DWORD Size, DWORD *Error)
+{
+    WCHAR P[MAX_PATH];
+    HANDLE h;
+    DWORD Ret = 0;
+    BOOL Ok;
+
+    Path(P, Name);
+    if (IsDir)
+    {
+        ok(CreateDirectoryW(P, NULL), "creating %ls failed: %lu\n", P, GetLastError());
+        h = CreateFileW(P, GENERIC_WRITE | DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    }
+    else
+    {
+        h = CreateFileW(P, GENERIC_WRITE | DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                        CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    }
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        ok(0, "opening %ls failed: %lu\n", P, GetLastError());
+        *Error = GetLastError();
+        return TRUE;
+    }
+    SetLastError(0xdeadbeef);
+    Ok = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, Data, Size, NULL, 0, &Ret, NULL);
+    *Error = GetLastError();
+    CloseHandle(h);
+    return Ok;
+}
+
+static void RawRemove(const WCHAR *Name, BOOL IsDir)
+{
+    WCHAR P[MAX_PATH];
+
+    Path(P, Name);
+    if (IsDir) RemoveDirectoryW(P); else DeleteFileW(P);
+}
+
+/* A token without the privilege (a standard user): no way of creating a link works, and nothing is left behind */
+static void Test_Unprivileged(void)
+{
+    static const DWORD Flags[] = { 0, SYMBOLIC_LINK_FLAG_DIRECTORY, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE,
+                                   SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE };
+    WCHAR Link[MAX_PATH], Target[MAX_PATH], Name[16];
+    BYTE Data[512];
+    DWORD Size, Err;
+    UINT i;
+    BOOLEAN Ret;
+    BOOL Ok;
+
+    Path(Target, L"tfile.txt");
+    for (i = 0; i < ARRAYSIZE(Flags); i++)
+    {
+        wsprintfW(Name, L"unpriv%lu", Flags[i]);
+        Path(Link, Name);
+        SetLastError(0xdeadbeef);
+        Ret = pCreateSymbolicLinkW(Link, (Flags[i] & SYMBOLIC_LINK_FLAG_DIRECTORY) ? L"tdir" : Target, Flags[i]);
+        ok(!Ret && GetLastError() == ERROR_PRIVILEGE_NOT_HELD,
+           "flags %lu: CreateSymbolicLinkW returned %d, error %lu (expected ERROR_PRIVILEGE_NOT_HELD)\n",
+           Flags[i], Ret, GetLastError());
+        ok(GetFileAttributesW(Link) == INVALID_FILE_ATTRIBUTES, "flags %lu: a refused link was left behind\n", Flags[i]);
+    }
+
+    /* The ANSI variant is the same call */
+    if (pCreateSymbolicLinkA)
+    {
+        SetLastError(0xdeadbeef);
+        Ret = pCreateSymbolicLinkA("unpriv-ansi-link", "tfile.txt", SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE);
+        ok(!Ret && GetLastError() == ERROR_PRIVILEGE_NOT_HELD, "ANSI: %d, %lu\n", Ret, GetLastError());
+    }
+
+    /* The control code itself: a file and a directory, relative and absolute */
+    Size = BuildLinkData(Data, TEST_SYMLINK_FLAG_RELATIVE, L"tfile.txt", L"tfile.txt");
+    Ok = RawSet(L"unpriv-raw-file", FALSE, Data, Size, &Err);
+    ok(!Ok && Err == ERROR_PRIVILEGE_NOT_HELD, "FSCTL_SET_REPARSE_POINT on a file: %d, %lu\n", Ok, Err);
+    ok(!(GetFileAttributesW((Path(Link, L"unpriv-raw-file"), Link)) & FILE_ATTRIBUTE_REPARSE_POINT),
+       "the refused request made the file a reparse point\n");
+    RawRemove(L"unpriv-raw-file", FALSE);
+
+    /* Windows 10 22H2 let this one through for a token without the privilege (one probe, 2026-11-04); the
+       file systems here require the privilege for every symbolic link, a deliberate difference: a link anyone
+       can create is followed for every process */
+    Size = BuildLinkData(Data, 0, L"\\??\\C:\\Windows", L"C:\\Windows");
+    Ok = RawSet(L"unpriv-raw-dir", TRUE, Data, Size, &Err);
+    ok(!Ok && Err == ERROR_PRIVILEGE_NOT_HELD, "FSCTL_SET_REPARSE_POINT on a directory: %d, %lu\n", Ok, Err);
+    ok(!(GetFileAttributesW((Path(Link, L"unpriv-raw-dir"), Link)) & FILE_ATTRIBUTE_REPARSE_POINT),
+       "the refused request made the directory a reparse point\n");
+    RawRemove(L"unpriv-raw-dir", TRUE);
+}
+
+/* A token with the privilege: the control code needs it enabled, and the data has to be sound */
+static void Test_RawSet(void)
+{
+    BYTE Data[512];
+    DWORD Size, Err;
+    BOOL Ok;
+    TEST_SYMLINK_REPARSE *Rp = (TEST_SYMLINK_REPARSE *)Data;
+    WCHAR P[MAX_PATH];
+
+    /* Disabled: refused, as on Windows (CreateSymbolicLinkW turns the privilege on by itself) */
+    ok(SetLinkPrivilege(FALSE), "disabling the privilege failed: %lu\n", GetLastError());
+    Size = BuildLinkData(Data, TEST_SYMLINK_FLAG_RELATIVE, L"tfile.txt", L"tfile.txt");
+    Ok = RawSet(L"raw-disabled", FALSE, Data, Size, &Err);
+    ok(!Ok && Err == ERROR_PRIVILEGE_NOT_HELD, "privilege disabled: %d, %lu\n", Ok, Err);
+    RawRemove(L"raw-disabled", FALSE);
+
+    ok(SetLinkPrivilege(TRUE), "enabling the privilege failed: %lu\n", GetLastError());
+
+    /* Data that is not sound is refused and leaves no reparse point */
+    Size = BuildLinkData(Data, TEST_SYMLINK_FLAG_RELATIVE, L"tfile.txt", L"tfile.txt");
+    Rp->SubstituteNameOffset = 0x2000;
+    Ok = RawSet(L"raw-badoff", FALSE, Data, Size, &Err);
+    ok(!Ok, "substitute name outside the buffer was accepted\n");
+    Path(P, L"raw-badoff");
+    ok(!(GetFileAttributesW(P) & FILE_ATTRIBUTE_REPARSE_POINT), "bad offset: file became a reparse point\n");
+    RawRemove(L"raw-badoff", FALSE);
+
+    Size = BuildLinkData(Data, TEST_SYMLINK_FLAG_RELATIVE, L"tfile.txt", L"tfile.txt");
+    Rp->PrintNameLength = 0x2000;
+    Ok = RawSet(L"raw-badprint", FALSE, Data, Size, &Err);
+    ok(!Ok, "print name outside the buffer was accepted\n");
+    RawRemove(L"raw-badprint", FALSE);
+
+    Size = BuildLinkData(Data, TEST_SYMLINK_FLAG_RELATIVE, L"tfile.txt", L"tfile.txt");
+    Rp->SubstituteNameOffset = 1;
+    Ok = RawSet(L"raw-odd", FALSE, Data, Size, &Err);
+    ok(!Ok, "odd substitute name offset was accepted\n");
+    RawRemove(L"raw-odd", FALSE);
+
+    Size = BuildLinkData(Data, TEST_SYMLINK_FLAG_RELATIVE, L"tfile.txt", L"tfile.txt");
+    Rp->SubstituteNameLength = 0;
+    Ok = RawSet(L"raw-empty", FALSE, Data, Size, &Err);
+    ok(!Ok, "empty substitute name was accepted\n");
+    RawRemove(L"raw-empty", FALSE);
+
+    /* Flags other than SYMLINK_FLAG_RELATIVE are taken (Windows 10 22H2 accepts 0x81) */
+    Size = BuildLinkData(Data, 0x80 | TEST_SYMLINK_FLAG_RELATIVE, L"tfile.txt", L"tfile.txt");
+    Ok = RawSet(L"raw-flags", FALSE, Data, Size, &Err);
+    ok(Ok, "flags 0x81 refused: %lu\n", Err);
+    RawRemove(L"raw-flags", FALSE);
+
+    /* And sound data works */
+    Size = BuildLinkData(Data, TEST_SYMLINK_FLAG_RELATIVE, L"tfile.txt", L"tfile.txt");
+    Ok = RawSet(L"raw-good", FALSE, Data, Size, &Err);
+    ok(Ok, "sound data refused: %lu\n", Err);
+    Path(P, L"raw-good");
+    ok(!!(GetFileAttributesW(P) & FILE_ATTRIBUTE_REPARSE_POINT), "no reparse point after a good request\n");
+    DeleteFileW(P);
+}
+
 static void Cleanup(void)
 {
     static const WCHAR *Files[] = { L"deeper\\deep.txt", L"inner.txt", L"tfile.txt" };
@@ -447,9 +667,17 @@ START_TEST(CreateSymbolicLink)
     else
         DeleteFileW(P);
 
-    Test_Flags();
-    Test_Follow();
-    Test_AnsiVariant();
+    if (!HasLinkPrivilege())
+    {
+        Test_Unprivileged();
+    }
+    else
+    {
+        Test_Flags();
+        Test_Follow();
+        Test_AnsiVariant();
+        Test_RawSet();
+    }
 
     Cleanup();
 }
