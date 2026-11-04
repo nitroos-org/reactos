@@ -5978,6 +5978,18 @@ struct draw_string_args {
     REAL x, y, rel_width, rel_height, ascent;
 };
 
+#ifdef __REACTOS__
+/* TRUE when draw_driver_string renders through GDI32_GdipDrawDriverString (ExtTextOutW with the
+ * graphics' own HDC and an opaque solid brush). win32k draws the font's underline and strike-out
+ * itself on that path; the software path draws no decoration. */
+static BOOL driver_string_uses_gdi(GpGraphics *graphics, GDIPCONST GpBrush *brush)
+{
+    return has_gdi_dc(graphics) && !graphics->alpha_hdc &&
+           brush->bt == BrushTypeSolidColor &&
+           (((GpSolidFill*)brush)->color & 0xff000000) == 0xff000000;
+}
+#endif
+
 static GpStatus draw_string_callback(struct gdip_format_string_info *info)
 {
     struct draw_string_args *args = info->user_data;
@@ -6012,8 +6024,15 @@ static GpStatus draw_string_callback(struct gdip_format_string_info *info)
 #ifdef __REACTOS__
     /* Like Windows GDI+, an underlined or struck-out font draws its line under the whole line of
      * text: the glyph runs above are rendered glyph by glyph and carry no font decoration
-     * (WinForms labels with Font(..., FontStyle.Underline) showed no underline). */
-    if (stat == Ok && (font_tm->tmUnderlined || font_tm->tmStruckOut) && position.X > line_x)
+     * (WinForms labels with Font(..., FontStyle.Underline) showed no underline).
+     * Only the software path needs this: on the GDI path ExtTextOutW draws the lines itself
+     * (the HFONT carries lfUnderline/lfStrikeOut), and drawing them again would double them.
+     * Right-to-left and vertical formats are not laid out by this code (the text runs left to
+     * right from the origin), so a line computed here would be wrong: draw none. */
+    if (stat == Ok && (font_tm->tmUnderlined || font_tm->tmStruckOut) && position.X > line_x &&
+        !driver_string_uses_gdi(info->graphics, args->brush) &&
+        !(info->format && (info->format->attr & (StringFormatFlagsDirectionRightToLeft |
+                                                 StringFormatFlagsDirectionVertical))))
     {
         OUTLINETEXTMETRICW otm;
 
@@ -7915,9 +7934,13 @@ static GpStatus draw_driver_string(GpGraphics *graphics, GDIPCONST UINT16 *text,
         return METAFILE_DrawDriverString((GpMetafile*)graphics->image, text, length, font,
             format, brush, positions, flags, matrix);
 
+#ifdef __REACTOS__
+    if (driver_string_uses_gdi(graphics, brush))
+#else
     if (has_gdi_dc(graphics) && !graphics->alpha_hdc &&
         brush->bt == BrushTypeSolidColor &&
         (((GpSolidFill*)brush)->color & 0xff000000) == 0xff000000)
+#endif
         stat = GDI32_GdipDrawDriverString(graphics, text, length, font, format,
                                           brush, positions, flags, matrix);
     if (stat == NotImplemented)

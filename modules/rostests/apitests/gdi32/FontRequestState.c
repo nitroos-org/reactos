@@ -314,20 +314,164 @@ typedef int (WINAPI *FN_Clear)(PVOID, DWORD);
 typedef int (WINAPI *FN_Fill)(DWORD, PVOID *);
 typedef int (WINAPI *FN_Draw)(PVOID, PCWSTR, int, PVOID, const GRECTF *, PVOID, PVOID);
 typedef int (WINAPI *FN_Delete)(PVOID);
+typedef int (WINAPI *FN_FromHdc)(HDC, PVOID *);
+
+static DWORD g_Thresh = 0x606060; /* a pixel is "dark" below this, per channel */
 
 static int DarkRow(const DWORD *Bits, int W, int y)
 {
     int x, n = 0;
     for (x = 0; x < W; x++)
-        if ((Bits[y * W + x] & 0xFFFFFF) < 0x606060)
+    {
+        DWORD p = Bits[y * W + x];
+        if ((p & 0xFF) < (g_Thresh & 0xFF) && ((p >> 8) & 0xFF) < ((g_Thresh >> 8) & 0xFF) &&
+            ((p >> 16) & 0xFF) < ((g_Thresh >> 16) & 0xFF))
             n++;
+    }
     return n;
+}
+typedef int (WINAPI *FN_FromHdc)(HDC, PVOID *);
+
+/* Rows that are empty in Plain but dark in Styled, grouped in runs of adjacent rows: the lines
+ * the style added. Returns the number of runs, *Thickness gets the thickest. */
+static int DecorationRuns(const DWORD *Plain, const DWORD *Styled, int W, int H, int *Thickness, int *First)
+{
+    int y, Runs = 0, Len = 0;
+
+    *Thickness = 0;
+    *First = -1;
+    for (y = 0; y <= H; y++)
+    {
+        BOOL New = y < H && DarkRow(Plain, W, y) == 0 && DarkRow(Styled, W, y) >= 20;
+        if (New)
+        {
+            if (*First < 0)
+                *First = y;
+            Len++;
+        }
+        else if (Len)
+        {
+            Runs++;
+            *Thickness = max(*Thickness, Len);
+            Len = 0;
+        }
+    }
+    return Runs;
+}
+
+/* Draw "aaaa" with GDI+ in Arial of the given pixel size and style (underline or none), on a
+ * Scan0 bitmap (software path) or on a DIB section DC (GdipCreateFromHDC, GDI path), copy the
+ * W x H pixels to Out. */
+static FN_Font pFont_; static FN_Bitmap pBitmap_; static FN_Context pContext_; static FN_Clear pClear_;
+typedef int (WINAPI *FN_Smooth)(PVOID, int);
+static FN_Smooth pSmooth_;
+static FN_Draw pDraw_; static FN_Delete pDeleteFont_, pDeleteGraphics_, pDisposeImage_; static FN_FromHdc pFromHdc_;
+
+static BOOL DrawAaaaEx(BOOL UseHdc, PVOID Family, float Size, float OffY, BOOL Underline, PVOID Brush, DWORD *Out, int Smoothing)
+{
+    enum { W = 300, H = 60 };
+    GRECTF R = { 10, 5, 280, 50 };
+    PVOID Font = NULL, Graphics = NULL, Bitmap = NULL;
+    BITMAPINFO bmi;
+    VOID *Bits = NULL;
+    HDC hdc = NULL;
+    HBITMAP hbm = NULL, hbmOld = NULL;
+
+    R.Y += OffY;
+    pFont_(Family, Size, Underline ? 4 : 0, 2 /* UnitPixel */, &Font);
+    if (UseHdc)
+    {
+        hdc = CreateCompatibleDC(NULL);
+        ZeroMemory(&bmi, sizeof(bmi));
+        bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+        bmi.bmiHeader.biWidth = W;
+        bmi.bmiHeader.biHeight = -H;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &Bits, NULL, 0);
+        if (hbm)
+            hbmOld = SelectObject(hdc, hbm);
+        if (Bits)
+            pFromHdc_(hdc, &Graphics);
+    }
+    else
+    {
+        pBitmap_(W, H, W * 4, 0x26200A /* PixelFormat32bppARGB */, (BYTE *)Out, &Bitmap);
+        if (Bitmap)
+            pContext_(Bitmap, &Graphics);
+    }
+    if (!Font || !Graphics)
+    {
+        ok(0, "GDI+ setup failed (hdc %d)\n", UseHdc);
+        if (Graphics) pDeleteGraphics_(Graphics);
+        if (Bitmap) pDisposeImage_(Bitmap);
+        if (Font) pDeleteFont_(Font);
+        if (hdc) { if (hbmOld) SelectObject(hdc, hbmOld); if (hbm) DeleteObject(hbm); DeleteDC(hdc); }
+        return FALSE;
+    }
+    pClear_(Graphics, 0xFFFFFFFF);
+    if (Smoothing && pSmooth_)
+        pSmooth_(Graphics, Smoothing);
+    ok(pDraw_(Graphics, L"aaaa", 4, Font, &R, NULL, Brush) == 0, "GdipDrawString failed\n");
+    pDeleteGraphics_(Graphics);
+    if (UseHdc)
+    {
+        GdiFlush();
+        CopyMemory(Out, Bits, W * H * sizeof(DWORD));
+        SelectObject(hdc, hbmOld);
+        DeleteObject(hbm);
+        DeleteDC(hdc);
+    }
+    else
+        pDisposeImage_(Bitmap);
+    pDeleteFont_(Font);
+    return TRUE;
+}
+
+/* GDI records drawn through an enhanced metafile DC */
+typedef struct { int Total, Text, TextUnderlined, Other; } EMFCOUNT;
+
+static int CALLBACK CountEmfRecord(HDC hdc, HANDLETABLE *Table, const ENHMETARECORD *Rec, int Objs, LPARAM Param)
+{
+    EMFCOUNT *c = (EMFCOUNT *)Param;
+    c->Total++;
+    switch (Rec->iType)
+    {
+        case EMR_EXTTEXTOUTW:
+            c->Text++;
+            break;
+        case EMR_EXTCREATEFONTINDIRECTW:
+            if (((const EMREXTCREATEFONTINDIRECTW *)Rec)->elfw.elfLogFont.lfUnderline)
+                c->TextUnderlined++;
+            break;
+        case EMR_HEADER: case EMR_EOF: case EMR_SAVEDC: case EMR_RESTOREDC: case EMR_SETBKMODE:
+        case EMR_SETTEXTCOLOR: case EMR_SELECTOBJECT: case EMR_DELETEOBJECT: case EMR_SETTEXTALIGN:
+        case EMR_EXTSELECTCLIPRGN: case EMR_SETMAPMODE: case EMR_SETWINDOWEXTEX: case EMR_SETWINDOWORGEX:
+        case EMR_SETVIEWPORTEXTEX: case EMR_SETVIEWPORTORGEX: case EMR_SETWORLDTRANSFORM:
+        case EMR_MODIFYWORLDTRANSFORM: case EMR_SETBKCOLOR:
+        case EMR_GDICOMMENT: case EMR_SETLAYOUT: case EMR_INTERSECTCLIPRECT: case EMR_SELECTCLIPPATH:
+        case EMR_SETICMMODE: case EMR_SETPOLYFILLMODE: case EMR_SETROP2: case EMR_SETSTRETCHBLTMODE:
+        case EMR_SETMITERLIMIT: case EMR_SETBRUSHORGEX: case EMR_SETMAPPERFLAGS:
+            break;
+        default:
+            c->Other++;
+            trace("  EMF record type %lu\n", Rec->iType);
+            break;
+    }
+    return 1;
+}
+
+static BOOL DrawAaaa(BOOL UseHdc, PVOID Family, float Size, float OffY, BOOL Underline, PVOID Brush, DWORD *Out)
+{
+    return DrawAaaaEx(UseHdc, Family, Size, OffY, Underline, Brush, Out, 0);
 }
 
 static void Test_Gdiplus(void)
 {
     enum { W = 300, H = 60 };
-    static DWORD Plain[W * H], Styled[W * H];
+    static DWORD Plain[W * H], Styled[W * H], HdcPlain[W * H], HdcStyled[W * H];
+    FN_FromHdc pFromHdc;
+    int ScanRuns, ScanThick, ScanRow;
     HMODULE hMod = LoadLibraryW(L"gdiplus.dll");
     FN_Startup pStartup; FN_Family pFamily; FN_Font pFont; FN_Style pStyle; FN_Bitmap pBitmap;
     FN_Context pContext; FN_Clear pClear; FN_Fill pFill; FN_Draw pDraw;
@@ -335,13 +479,17 @@ static void Test_Gdiplus(void)
     ULONG_PTR Token;
     GSI si = { 1, NULL, FALSE, FALSE };
     PVOID Family = NULL, Brush = NULL;
-    GRECTF Rect = { 10, 5, 280, 50 };
     int Styles[] = { 0, 1, 2, 4, 8, 5 }, i, y, Below, Ink[2];
 
     if (!hMod)
     {
         skip("no gdiplus\n");
         return;
+    }
+    {
+        WCHAR Path[MAX_PATH] = L"";
+        GetModuleFileNameW(hMod, Path, _countof(Path));
+        trace("gdiplus: %ls\n", Path);
     }
     pStartup = (FN_Startup)GetProcAddress(hMod, "GdiplusStartup");
     pFamily = (FN_Family)GetProcAddress(hMod, "GdipCreateFontFamilyFromName");
@@ -364,6 +512,10 @@ static void Test_Gdiplus(void)
         skip("gdiplus functions missing\n");
         return;
     }
+    pFont_ = pFont; pBitmap_ = pBitmap; pContext_ = pContext; pClear_ = pClear; pDraw_ = pDraw;
+    pDeleteFont_ = pDeleteFont; pDeleteGraphics_ = pDeleteGraphics; pDisposeImage_ = pDisposeImage;
+    pSmooth_ = (FN_Smooth)GetProcAddress(hMod, "GdipSetSmoothingMode");
+    pFromHdc_ = pFromHdc = (FN_FromHdc)GetProcAddress(hMod, "GdipCreateFromHDC");
     ok(pFamily(L"Arial", NULL, &Family) == 0, "GdipCreateFontFamilyFromName(Arial) failed\n");
     if (!Family)
         return;
@@ -384,24 +536,11 @@ static void Test_Gdiplus(void)
     pFill(0xFF000000, &Brush);
     for (i = 0; i < 2; i++)
     {
-        PVOID Font = NULL, Bitmap = NULL, Graphics = NULL;
-        DWORD *Bits = i ? Styled : Plain;
-        pFont(Family, 24.0f, i ? 4 /* FontStyleUnderline */ : 0, 2 /* UnitPixel */, &Font);
-        pBitmap(W, H, W * 4, 0x26200A /* PixelFormat32bppARGB */, (BYTE *)Bits, &Bitmap);
-        pContext(Bitmap, &Graphics);
-        if (!Font || !Bitmap || !Graphics || !Brush)
-        {
-            ok(0, "GDI+ setup failed\n");
+        if (!DrawAaaa(0, Family, 24.0f, 0.0f, i, Brush, i ? Styled : Plain))
             return;
-        }
-        pClear(Graphics, 0xFFFFFFFF);
-        ok(pDraw(Graphics, L"aaaa", 4, Font, &Rect, NULL, Brush) == 0, "GdipDrawString failed\n");
-        pDeleteGraphics(Graphics);
-        pDisposeImage(Bitmap);
-        pDeleteFont(Font);
         Ink[i] = 0;
         for (y = 0; y < H; y++)
-            Ink[i] += DarkRow(Bits, W, y);
+            Ink[i] += DarkRow(i ? Styled : Plain, W, y);
     }
     ok(Ink[0] > 0, "GdipDrawString drew nothing\n");
     Below = 0;
@@ -409,6 +548,109 @@ static void Test_Gdiplus(void)
         if (DarkRow(Plain, W, y) == 0)
             Below = max(Below, DarkRow(Styled, W, y));
     ok(Below >= 20, "GdipDrawString with an underlined font: widest new dark row %d (ink %d / %d)\n", Below, Ink[0], Ink[1]);
+    ScanRuns = DecorationRuns(Plain, Styled, W, H, &ScanThick, &ScanRow);
+    ok(ScanRuns == 1, "GdipDrawString (bitmap): %d underlines, expected 1\n", ScanRuns);
+    ok(ScanThick >= 1 && ScanThick <= 3, "GdipDrawString (bitmap): underline thickness %d\n", ScanThick);
+
+    /* GdipCreateFromHDC on a DIB section with an opaque solid brush: GDI draws the text, and
+     * win32k draws the font's underline. GDI+ must not add a second one. A second line computed
+     * in GDI+ from the same metrics but rounded differently lands on another row at some sizes
+     * and origins, and then the line is thicker; compare with the software path, which draws
+     * exactly one line, over sizes and fractional origins. */
+    if (!pFromHdc)
+    {
+        skip("no GdipCreateFromHDC\n");
+    }
+    else
+    {
+        int Size, Frac, Bad = 0;
+
+        for (Size = 9; Size <= 40; Size++)
+        {
+            for (Frac = 0; Frac < 4; Frac++)
+            {
+                int HdcRuns, HdcThick, HdcRow, ScanRuns2, ScanThick2, ScanRow2;
+                float Fy = Frac * 0.25f;
+
+                if (!DrawAaaa(0, Family, (float)Size, Fy, 0, Brush, Plain) ||
+                    !DrawAaaa(0, Family, (float)Size, Fy, 1, Brush, Styled) ||
+                    !DrawAaaa(1, Family, (float)Size, Fy, 0, Brush, HdcPlain) ||
+                    !DrawAaaa(1, Family, (float)Size, Fy, 1, Brush, HdcStyled))
+                    return;
+                ScanRuns2 = DecorationRuns(Plain, Styled, W, H, &ScanThick2, &ScanRow2);
+                HdcRuns = DecorationRuns(HdcPlain, HdcStyled, W, H, &HdcThick, &HdcRow);
+                trace("underline %dpx +%d/4: bitmap %d line(s) row %d thickness %d, HDC %d line(s) row %d thickness %d\n",
+                      Size, Frac, ScanRuns2, ScanRow2, ScanThick2, HdcRuns, HdcRow, HdcThick);
+                ok(ScanRuns2 == 1, "GdipDrawString (bitmap, %dpx +%d/4): %d underlines, expected 1\n", Size, Frac, ScanRuns2);
+                ok(HdcRuns == 1, "GdipDrawString (HDC, %dpx +%d/4): %d underlines, expected exactly 1\n", Size, Frac, HdcRuns);
+                if (HdcRuns == 1 && ScanRuns2 == 1)
+                {
+                    if (HdcThick > ScanThick2 || abs(HdcRow - ScanRow2) > 1)
+                        Bad++;
+                    ok(HdcThick <= ScanThick2, "GdipDrawString (HDC, %dpx +%d/4): underline thickness %d, the bitmap path draws %d\n",
+                       Size, Frac, HdcThick, ScanThick2);
+                }
+            }
+        }
+        ok(Bad == 0, "GdipDrawString: %d size/origin combinations differ between the HDC and bitmap paths\n", Bad);
+
+        /* With anti-aliased fills, a line drawn by GDI+ on top of the one GDI drew has soft
+         * edges, which widens the line: count any non-white row. */
+
+        /* Record the same call on an enhanced metafile DC: the text is one ExtTextOutW with an
+         * underlined font and nothing else may draw (a filled line would be another record). */
+        {
+            HDC Emf = CreateEnhMetaFileW(NULL, NULL, NULL, NULL);
+            PVOID Font = NULL, Graphics = NULL;
+            GRECTF R = { 10, 5, 280, 50 };
+            EMFCOUNT Count = { 0 };
+            HENHMETAFILE hEmf;
+
+            pFont(Family, 24.0f, 4, 2, &Font);
+            if (Emf && Font && pFromHdc(Emf, &Graphics) == 0 && Graphics)
+            {
+                ok(pDraw(Graphics, L"aaaa", 4, Font, &R, NULL, Brush) == 0, "GdipDrawString (EMF) failed\n");
+                pDeleteGraphics(Graphics);
+            }
+            if (Font)
+                pDeleteFont(Font);
+            hEmf = Emf ? CloseEnhMetaFile(Emf) : NULL;
+            if (hEmf)
+            {
+                EnumEnhMetaFile(NULL, hEmf, CountEmfRecord, &Count, NULL);
+                trace("EMF: %d records, %d ExtTextOutW, %d underlined fonts, %d other\n",
+                      Count.Total, Count.Text, Count.TextUnderlined, Count.Other);
+                /* Windows GDI+ records EMF+ here instead of GDI text: nothing to check then */
+                if (Count.Text == 1)
+                {
+                    ok(Count.TextUnderlined >= 1, "GdipDrawString (EMF): the text font is not underlined\n");
+                    ok(Count.Other == 0, "GdipDrawString (EMF): %d records besides the text, a second underline was drawn\n",
+                       Count.Other);
+                }
+                DeleteEnhMetaFile(hEmf);
+            }
+        }
+
+        g_Thresh = 0xF0F0F0;
+        for (Size = 12; Size <= 30; Size += 3)
+            for (Frac = 0; Frac < 4; Frac++)
+            {
+                int Runs, Thick, Row;
+                float Fy = Frac * 0.25f;
+                int Runs2, Thick2, Row2;
+
+                if (!DrawAaaaEx(1, Family, (float)Size, Fy, 0, Brush, HdcPlain, 4) ||
+                    !DrawAaaaEx(1, Family, (float)Size, Fy, 1, Brush, HdcStyled, 4) ||
+                    !DrawAaaaEx(0, Family, (float)Size, Fy, 0, Brush, Plain, 0) ||
+                    !DrawAaaaEx(0, Family, (float)Size, Fy, 1, Brush, Styled, 0))
+                    break;
+                Runs = DecorationRuns(HdcPlain, HdcStyled, W, H, &Thick, &Row);
+                Runs2 = DecorationRuns(Plain, Styled, W, H, &Thick2, &Row2);
+                trace("AA underline %dpx +%d/4: HDC %d line(s) row %d thickness %d; bitmap %d line(s) thickness %d\n",
+                      Size, Frac, Runs, Row, Thick, Runs2, Thick2);
+            }
+        g_Thresh = 0x606060;
+    }
 
     pDeleteBrush(Brush);
     pDeleteFamily(Family);
