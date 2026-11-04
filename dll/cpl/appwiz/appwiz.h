@@ -38,6 +38,9 @@ typedef struct
 
 extern HINSTANCE hApplet;
 
+/* programs.c */
+void ShowProgramsAndFeatures(HWND hwndParent);
+
 /* createlink.c */
 INT_PTR CALLBACK
 WelcomeDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);

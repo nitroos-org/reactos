@@ -91,12 +91,9 @@ CPlApplet(HWND hwndCPl, UINT uMsg, LPARAM lParam1, LPARAM lParam2)
             }
             else
             {
-                ShellExecuteW(NULL,
-                              NULL,
-                              L"rapps.exe",
-                              L"/appwiz",
-                              NULL,
-                              SW_SHOWNORMAL);
+                /* "Programs and Features": installed programs and their uninstall (programs.c). It replaces
+                 * "rapps.exe /appwiz"; installing software is the feature manager's job, as in Windows 10 */
+                ShowProgramsAndFeatures(hwndCPl);
             }
             break;
     }
