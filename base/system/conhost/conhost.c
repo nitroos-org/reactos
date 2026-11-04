@@ -281,6 +281,11 @@ HostResize(HOST *Host, SHORT Width, SHORT Height)
 #define HOST_IS_HIGH_SURROGATE(c)   ((c) >= 0xD800 && (c) <= 0xDBFF)
 #define HOST_IS_LOW_SURROGATE(c)    ((c) >= 0xDC00 && (c) <= 0xDFFF)
 
+/* A wide character occupies two cells: a leading and a trailing byte. The terminal shows it as one
+ * glyph over two columns, so the pair is diffed and painted as a unit. */
+#define HOST_IS_LEADING(c)          (((c)->Attributes & COMMON_LVB_LEADING_BYTE) != 0)
+#define HOST_IS_TRAILING(c)         (((c)->Attributes & COMMON_LVB_TRAILING_BYTE) != 0)
+
 /* A cell differs from what the terminal shows of it (Ref NULL: nothing is known of the row) */
 #define HOST_DIFFERS(a, b, ea, eb) ((a)->Char.UnicodeChar != (b)->Char.UnicodeChar || (a)->Attributes != (b)->Attributes || \
                                     (ea)->Fore != (eb)->Fore || (ea)->Back != (eb)->Back)
@@ -297,6 +302,11 @@ HostCellChanged(HOST *Host, const CHAR_INFO *Cells, const CONSOLE_EXT_CELL *Ext,
         return HOST_DIFFERS(&Cells[Column + 1], &Ref[Column + 1], &Ext[Column + 1], &RefExt[Column + 1]);
     if (HOST_IS_LOW_SURROGATE(Cells[Column].Char.UnicodeChar) && Column > 0 &&
         HOST_IS_HIGH_SURROGATE(Cells[Column - 1].Char.UnicodeChar))
+        return HOST_DIFFERS(&Cells[Column - 1], &Ref[Column - 1], &Ext[Column - 1], &RefExt[Column - 1]);
+    /* The same for a wide character */
+    if (HOST_IS_LEADING(&Cells[Column]) && Column + 1 < (DWORD)Host->Width && HOST_IS_TRAILING(&Cells[Column + 1]))
+        return HOST_DIFFERS(&Cells[Column + 1], &Ref[Column + 1], &Ext[Column + 1], &RefExt[Column + 1]);
+    if (HOST_IS_TRAILING(&Cells[Column]) && Column > 0 && HOST_IS_LEADING(&Cells[Column - 1]))
         return HOST_DIFFERS(&Cells[Column - 1], &Ref[Column - 1], &Ext[Column - 1], &RefExt[Column - 1]);
     return FALSE;
 }
@@ -336,11 +346,12 @@ HostPaintRow(HOST *Host, DWORD Row, const CHAR_INFO *Cells, const CONSOLE_EXT_CE
         do
         {
             WCHAR Character;
+            WORD Cell = Cells[Column].Attributes & ~COMMON_LVB_SBCSDBCS;
             if (!HostCellChanged(Host, Cells, Ext, Ref, RefExt, Column))
                 break;
-            if (Attribute != Cells[Column].Attributes || Fore != Ext[Column].Fore || Back != Ext[Column].Back)
+            if (Attribute != Cell || Fore != Ext[Column].Fore || Back != Ext[Column].Back)
             {
-                Attribute = Cells[Column].Attributes;
+                Attribute = Cell;
                 Fore = Ext[Column].Fore;
                 Back = Ext[Column].Back;
                 Used += sprintf(Line + Used, "\033[");
@@ -351,7 +362,21 @@ HostPaintRow(HOST *Host, DWORD Row, const CHAR_INFO *Cells, const CONSOLE_EXT_CE
             }
             Character = Cells[Column].Char.UnicodeChar;
             if (!Character || Character < 32) Character = L' ';
-            if (HOST_IS_HIGH_SURROGATE(Character) && Column + 1 < (DWORD)Host->Width &&
+            if (HOST_IS_LEADING(&Cells[Column]) && Column + 1 < (DWORD)Host->Width &&
+                HOST_IS_TRAILING(&Cells[Column + 1]))
+            {
+                /* One glyph over two columns: the trailing cell is part of it */
+                Length = WideCharToMultiByte(CP_UTF8, 0, &Character, 1, Utf8, sizeof(Utf8), NULL, NULL);
+                if (Length)
+                    ++Column;
+            }
+            else if (HOST_IS_LEADING(&Cells[Column]) || HOST_IS_TRAILING(&Cells[Column]))
+            {
+                /* Half of a wide character: a blank, which also clears what the terminal shows there */
+                Utf8[0] = ' ';
+                Length = 1;
+            }
+            else if (HOST_IS_HIGH_SURROGATE(Character) && Column + 1 < (DWORD)Host->Width &&
                 HOST_IS_LOW_SURROGATE(Cells[Column + 1].Char.UnicodeChar))
             {
                 WCHAR Pair[2];
@@ -424,6 +449,49 @@ HostPaintScrolled(HOST *Host, const CHAR_INFO *History, const CONSOLE_EXT_CELL *
     return TRUE;
 }
 
+/* ReadConsoleOutput leaves out the leading and trailing byte flags of wide characters (as Windows
+ * before 8 does); ReadConsoleOutputAttribute has them. Without them the host could not tell the two
+ * cells of a wide character from two characters. The flags of the frame in Host->Current are filled in. */
+static VOID
+HostReadWideFlags(HOST *Host, HANDLE ConsoleOut, const SMALL_RECT *Region, SHORT BufferWidth)
+{
+    WORD *Attributes;
+    DWORD Row, Index, Count, Got, Rows = Region->Bottom - Region->Top + 1, Columns = Region->Right - Region->Left + 1;
+    /* A frame as wide as its buffer is a run of cells: one request for as many as fit */
+    BOOL Whole = !Region->Left && Columns == (DWORD)BufferWidth && Columns == (DWORD)Host->Width;
+    DWORD Run = Whole ? Rows * Columns : Columns, Cells = Whole ? 1 : Rows;
+
+    Attributes = HeapAlloc(GetProcessHeap(), 0, 16384 * sizeof(*Attributes));
+    if (!Attributes) return;
+    for (Row = 0; Row < Cells; ++Row)
+    {
+        for (Index = 0; Index < Run; Index += Got)
+        {
+            CHAR_INFO *Cell = Host->Current + (SIZE_T)Row * Host->Width + Index;
+            COORD Start;
+
+            Count = min(Run - Index, 16384);
+            Got = 0;
+            if (Whole)
+            {
+                Start.X = (SHORT)(Index % Columns);
+                Start.Y = (SHORT)(Region->Top + Index / Columns);
+            }
+            else
+            {
+                Start.X = (SHORT)(Region->Left + Index);
+                Start.Y = (SHORT)(Region->Top + Row);
+            }
+            if (!ReadConsoleOutputAttribute(ConsoleOut, Attributes, Count, Start, &Got) || !Got)
+                break;
+            for (Count = 0; Count < Got; ++Count)
+                Cell[Count].Attributes = (Cell[Count].Attributes & ~COMMON_LVB_SBCSDBCS) |
+                                         (Attributes[Count] & COMMON_LVB_SBCSDBCS);
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Attributes);
+}
+
 static BOOL
 HostReadFrame(HOST *Host, HANDLE ConsoleOut, const CONSOLE_SCREEN_BUFFER_INFO *Info)
 {
@@ -456,6 +524,7 @@ HostReadFrame(HOST *Host, HANDLE ConsoleOut, const CONSOLE_SCREEN_BUFFER_INFO *I
         if (!ReadConsoleOutputW(ConsoleOut, Host->Current + (SIZE_T)Row * Host->Width,
                                 BandSize, BufferOrigin, &Band)) return FALSE;
     }
+    HostReadWideFlags(Host, ConsoleOut, &Region, Info->dwSize.X);
     return TRUE;
 }
 
