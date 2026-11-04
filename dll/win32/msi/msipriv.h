@@ -43,6 +43,9 @@
 
 static const BOOL is_64bit = sizeof(void *) > sizeof(int);
 extern BOOL is_wow64;
+#ifdef __REACTOS__
+extern BOOL msi_in_custom_action_process;
+#endif
 
 #define MSI_DATASIZEMASK 0x00ff
 #define MSITYPE_VALID    0x0100
@@ -793,6 +796,7 @@ UINT msi_strcpy_to_awstring(const WCHAR *, int, awstring *, DWORD *);
 
 /* msi server interface */
 extern MSIHANDLE msi_get_remote(MSIHANDLE handle);
+extern BOOL msi_transform_handles_valid(MSIHANDLE hdb, MSIHANDLE hdbref);
 extern LONG WINAPI rpc_filter(EXCEPTION_POINTERS *eptr);
 
 /* handle functions */
