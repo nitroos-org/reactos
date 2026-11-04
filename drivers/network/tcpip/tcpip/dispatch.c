@@ -1647,22 +1647,6 @@ NTSTATUS DispTdiSetInformationEx(
 
     case TDI_CONNECTION_FILE:
         Request.Handle.ConnectionContext = TranContext->Handle.ConnectionContext;
-
-        /* The receive window is set on the connection file object itself (by AFD, from SO_RCVBUF):
-         * the address file entity the other connection options go by does not name it */
-        if (Info->ID.toi_class == INFO_CLASS_PROTOCOL &&
-            Info->ID.toi_type == INFO_TYPE_CONNECTION &&
-            Info->ID.toi_id == TCP_SOCKET_WINDOW)
-        {
-            if (Request.Handle.ConnectionContext == NULL ||
-                Info->BufferSize < sizeof(ULONG) ||
-                IrpSp->Parameters.DeviceIoControl.InputBufferLength <
-                    FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer) + sizeof(ULONG))
-                return STATUS_INVALID_PARAMETER;
-
-            return TCPSetReceiveWindow((PCONNECTION_ENDPOINT)Request.Handle.ConnectionContext,
-                                       *(ULONG UNALIGNED *)Info->Buffer);
-        }
         break;
 
     case TDI_CONTROL_CHANNEL_FILE:
