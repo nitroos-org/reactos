@@ -1,8 +1,9 @@
 /*
  * PROJECT:     ReactOS API tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     DefWindowProc(WM_CANCELMODE) and EnableWindow leave the last error alone when no menu is open.
- *              Chromium (WebView2) takes a non-zero last error after EnableWindow(.., FALSE) as a failure.
+ * PURPOSE:     DefWindowProc(WM_CANCELMODE), EnableWindow and SetWindowLong(GWL_STYLE, WS_CHILD) leave the last
+ *              error alone when no menu is involved. WebView2 (Chromium, EmbeddedBrowserWebView.dll) takes
+ *              ERROR_INVALID_MENU_HANDLE left behind by them as a failure of its controller creation.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -39,4 +40,18 @@ START_TEST(WmCancelModeLastError)
     ok(IsWindowEnabled(hwnd), "window not enabled\n");
 
     DestroyWindow(hwnd);
+
+    /* a window becoming a child has no menu to release */
+    hwnd = CreateWindowExA(0, "STATIC", "x", WS_POPUP, 0, 0, 10, 10, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    ok(hwnd != NULL, "CreateWindowExA failed: %lu\n", GetLastError());
+    if (hwnd)
+    {
+        LONG_PTR old;
+
+        SetLastError(0x1234);
+        old = SetWindowLongPtrW(hwnd, GWL_STYLE, (LONG_PTR)(WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN));
+        ok(old != 0, "SetWindowLongPtr(GWL_STYLE) returned 0\n");
+        ok(GetLastError() == 0x1234, "SetWindowLong(GWL_STYLE, WS_CHILD) changed the last error to %lu\n", GetLastError());
+        DestroyWindow(hwnd);
+    }
 }
