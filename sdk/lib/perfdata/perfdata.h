@@ -25,7 +25,8 @@ enum inst_kind
     INST_CPU,    /* "0".."n-1", "_Total" */
     INST_DISK,   /* "<number> <letters>", "_Total" */
     INST_NET,    /* adapter description */
-    INST_PROC    /* image name, "name#n" for duplicates, "_Total" */
+    INST_PROC,   /* image name, "name#n" for duplicates, "_Total" */
+    INST_PAGE    /* paging file name as the kernel has it (\??\C:\pagefile.sys), "_Total" */
 };
 
 struct perf_counter_def

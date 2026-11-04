@@ -753,7 +753,7 @@ static const struct column col_pagefileusage[] =
     { L"Caption",           CIM_STRING|COL_FLAG_DYNAMIC },
     { L"CurrentUsage",      CIM_UINT32 },
     { L"Description",       CIM_STRING|COL_FLAG_DYNAMIC },
-    { L"InstallDate",       CIM_DATETIME },
+    { L"InstallDate",       CIM_DATETIME|COL_FLAG_DYNAMIC },
     { L"Name",              CIM_STRING|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
     { L"PeakUsage",         CIM_UINT32 },
     { L"Status",            CIM_STRING },
@@ -6088,6 +6088,8 @@ static enum fill_status fill_pagefileusage( struct table *table, const struct ex
     struct pagefile_information *info, *entry;
     struct record_pagefileusage *rec;
     enum fill_status status = FILL_STATUS_UNFILTERED;
+    WIN32_FIND_DATAW fd;
+    HANDLE find;
     ULONG size = 4096, offset = 0, retlen = 0;
     UINT row = 0, rec_offset = 0;
     SYSTEM_INFO si;
@@ -6133,6 +6135,11 @@ static enum fill_status fill_pagefileusage( struct table *table, const struct ex
         rec->currentusage      = (UINT32)(((UINT64)entry->TotalInUse * si.dwPageSize) >> 20);
         rec->description       = heap_strdupW( name );
         rec->installdate       = NULL;
+        if (name && (find = FindFirstFileW( name, &fd )) != INVALID_HANDLE_VALUE)   /* the file is open to Mm: no GetFileAttributes */
+        {
+            rec->installdate = filetime_to_datetime( &fd.ftCreationTime );
+            FindClose( find );
+        }
         rec->name              = name;
         rec->peakusage         = (UINT32)(((UINT64)entry->PeakUsage * si.dwPageSize) >> 20);
         rec->status            = NULL;

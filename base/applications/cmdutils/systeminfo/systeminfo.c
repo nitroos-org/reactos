@@ -680,54 +680,10 @@ GetSystemEnvironment(VOID)
     SbNA(&g_Fields[F_VM_AVAIL]);
     SbNA(&g_Fields[F_VM_INUSE]);
 
-    /* Page File Location(s): the configured paging files that exist */
+    /* Page File Location(s): the active paging files, from Win32_PageFileUsage as on Windows.
+     * The files cannot be probed with GetFileAttributes: the system keeps them open. */
     Sb = &g_Fields[F_PAGEFILE];
-    {
-        HKEY hKey;
-        PWSTR Data = NULL;
-        DWORD Type, Size = 0;
-
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                          L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management",
-                          0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS)
-        {
-            if (RegQueryValueExW(hKey, L"PagingFiles", NULL, &Type, NULL, &Size) == ERROR_SUCCESS &&
-                Type == REG_MULTI_SZ && (Data = calloc(1, Size + 2 * sizeof(WCHAR))) &&
-                RegQueryValueExW(hKey, L"PagingFiles", NULL, &Type, (PBYTE)Data, &Size) == ERROR_SUCCESS)
-            {
-                PWSTR p;
-
-                for (p = Data; *p; p += wcslen(p) + 1)
-                {
-                    WCHAR Path[MAX_PATH];
-                    PWSTR Sp;
-                    UINT Skip;
-
-                    wcsncpy(Path, p, _countof(Path) - 1);
-                    Path[_countof(Path) - 1] = UNICODE_NULL;
-                    /* "path min max": drop the two trailing size tokens */
-                    for (Skip = 0; Skip < 2 && (Sp = wcsrchr(Path, L' ')); Skip++)
-                    {
-                        PWSTR t;
-                        for (t = Sp + 1; *t >= L'0' && *t <= L'9'; t++) ;
-                        if (*t || Sp[1] == UNICODE_NULL)
-                            break;
-                        *Sp = UNICODE_NULL;
-                    }
-                    if (Path[0] == L'?' && g_SystemDrive[0])
-                        Path[0] = g_SystemDrive[0];
-                    if (GetFileAttributesW(Path) != INVALID_FILE_ATTRIBUTES)
-                    {
-                        if (Sb->Len)
-                            SbAppend(Sb, L", ");
-                        SbAppend(Sb, Path);
-                    }
-                }
-            }
-            free(Data);
-            RegCloseKey(hKey);
-        }
-    }
+    WmiQueryProperty(L"SELECT Name FROM Win32_PageFileUsage", L"Name", Sb);
     SbNA(Sb);
 
     /* Domain and Logon Server */
