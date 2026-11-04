@@ -71,6 +71,7 @@ extern void func_DeriveCapabilitySidsFromName(void);
 extern void func_CallbackCompletion(void);
 extern void func_GetAppContainerNamedObjectPath(void);
 extern void func_CompareObjectHandles(void);
+extern void func_PrivateNamespaceSecurity(void);
 extern void func_CancelSynchronousIo(void);
 extern void func_IdnTo(void);
 extern void func_NormalizeString(void);
@@ -187,6 +188,7 @@ extern void func_SetComputerNameExW(void);
 extern void func_SetConsoleWindowInfo(void);
 extern void func_SetCurrentDirectory(void);
 extern void func_SetThreadStackGuarantee(void);
+extern void func_ThreadStackCommit(void);
 extern void func_SetUnhandledExceptionFilter(void);
 extern void func_SuspendThreadContext(void);
 extern void func_SetWaitableTimerEx(void);
@@ -304,6 +306,7 @@ const struct test winetest_testlist[] =
     { "CallbackCompletion", func_CallbackCompletion },
     { "GetAppContainerNamedObjectPath", func_GetAppContainerNamedObjectPath },
     { "CompareObjectHandles", func_CompareObjectHandles },
+    { "PrivateNamespaceSecurity", func_PrivateNamespaceSecurity },
     { "CancelSynchronousIo", func_CancelSynchronousIo },
     { "IdnTo", func_IdnTo },
     { "NormalizeString", func_NormalizeString },
@@ -420,6 +423,7 @@ const struct test winetest_testlist[] =
     { "SetConsoleWindowInfo",        func_SetConsoleWindowInfo },
     { "SetCurrentDirectory",         func_SetCurrentDirectory },
     { "SetThreadStackGuarantee",     func_SetThreadStackGuarantee },
+    { "ThreadStackCommit",           func_ThreadStackCommit },
     { "SetUnhandledExceptionFilter", func_SetUnhandledExceptionFilter },
     { "SuspendThreadContext",        func_SuspendThreadContext },
     { "SetWaitableTimerEx",          func_SetWaitableTimerEx },

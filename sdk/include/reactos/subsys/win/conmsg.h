@@ -108,6 +108,7 @@ typedef enum _CONSRV_API_NUMBER
     ConsolepGetHistory,                     // Added in Vista+
     ConsolepSetHistory,                     // Added in Vista+
     ConsolepGetScrollback,                  // NitroOS: rows scrolled off the top of a pseudoconsole buffer
+    ConsolepGetExtColors,                   // NitroOS: 256-color / 24-bit color of the cells of a pseudoconsole buffer
     // ConsolepSetCurrentFont,                 // Added in Vista+
     // ConsolepSetScreenBufferInfo,            // Added in Vista+
     // ConsolepClientConnect,                  // Added in Win7
@@ -832,6 +833,7 @@ typedef struct _CONSOLE_SETHISTORYNUMBERCOMMANDS
  */
 #define CONSOLE_SCROLLBACK_ENABLE   0x00000001  /* in: record rows scrolled off from now on */
 #define CONSOLE_SCROLLBACK_ENABLED  0x00000001  /* out: the buffer records its scrolled rows */
+#define CONSOLE_SCROLLBACK_EXTCOLORS 0x00000002 /* out: the buffer holds extended colors (see ConsolepGetExtColors) */
 #define CONSOLE_SCROLLBACK_ROWS     2048        /* rows the server keeps (a power of two) */
 #define CONSOLE_SCROLLBACK_MAX_WIDTH 1024       /* the widest buffer that keeps rows: bounds the memory */
 
@@ -846,6 +848,47 @@ typedef struct _CONSOLE_SCROLLBACK
     ULONG Count;            /* in: rows wanted; out: rows returned */
     PCHAR_INFO CharInfo;    /* Count * Width cells, in the capture buffer */
 } CONSOLE_SCROLLBACK, *PCONSOLE_SCROLLBACK;
+
+/*
+ * ConsolepGetExtColors: the 256-color and 24-bit colors of the cells of a text-mode screen
+ * buffer. The cells (CHAR_INFO) only hold the 16 console colors; a buffer that received
+ * extended colors from virtual terminal sequences (SGR 38/48 ; 5 / 2) also keeps, per cell,
+ * the exact foreground and background, which a headless console host passes on to its
+ * terminal. A color is valid for a cell only while the cell still has the 16-color attribute
+ * it was written with (Snap): other writers of the cell invalidate it without knowing.
+ * Rows are the rows of the screen buffer (First = buffer row) or, with
+ * CONSOLE_EXTCOLORS_SCROLLBACK, rows scrolled off the top (First = row number, as for
+ * ConsolepGetScrollback).
+ */
+#define CONSOLE_EXTCOLOR_NONE   0       /* the 16-color attribute of the cell */
+#define CONSOLE_EXTCOLOR_INDEX  1       /* entry 16..255 of the 256-color palette */
+#define CONSOLE_EXTCOLOR_RGB    2       /* the value is 0xRRGGBB */
+#define CONSOLE_EXTCOLOR_MAKE(Kind, Value, Snap) \
+    ((((ULONG)(Snap) & 0xF) << 26) | (((ULONG)(Kind) & 3) << 24) | ((ULONG)(Value) & 0xFFFFFF))
+#define CONSOLE_EXTCOLOR_KIND(c)    (((ULONG)(c) >> 24) & 3)
+#define CONSOLE_EXTCOLOR_SNAP(c)    (((ULONG)(c) >> 26) & 0xF)
+#define CONSOLE_EXTCOLOR_VALUE(c)   ((ULONG)(c) & 0xFFFFFF)
+
+#define CONSOLE_EXTCOLORS_SCROLLBACK 0x00000001 /* in: the rows are scrollback rows */
+#define CONSOLE_EXTCOLORS_ROWS_MAX   2048       /* rows per request */
+#define CONSOLE_EXTCOLORS_CELLS_MAX  65536      /* cells per request */
+
+typedef struct _CONSOLE_EXT_CELL
+{
+    ULONG Fore;             /* CONSOLE_EXTCOLOR_MAKE(...), 0 if the cell has the 16 colors */
+    ULONG Back;
+} CONSOLE_EXT_CELL, *PCONSOLE_EXT_CELL;
+
+typedef struct _CONSOLE_EXTCOLORS
+{
+    HANDLE ConsoleHandle;
+    HANDLE OutputHandle;
+    ULONGLONG First;        /* in: first row wanted; out: first row returned (scrollback: rows no longer kept are skipped) */
+    ULONG Flags;            /* in: CONSOLE_EXTCOLORS_* */
+    ULONG Width;            /* in: cells per row the caller expects; out: width of the buffer */
+    ULONG Count;            /* in: rows wanted; out: rows returned (0 if the rows have no extended colors) */
+    PCONSOLE_EXT_CELL Cells;/* Count * Width entries, in the capture buffer */
+} CONSOLE_EXTCOLORS, *PCONSOLE_EXTCOLORS;
 
 typedef struct _CONSOLE_SETHISTORYMODE
 {
@@ -1069,6 +1112,7 @@ typedef struct _CONSOLE_API_MESSAGE
         CONSOLE_SETHISTORYNUMBERCOMMANDS SetHistoryNumberCommandsRequest;
         CONSOLE_SETHISTORYMODE SetHistoryModeRequest;
         CONSOLE_SCROLLBACK ScrollbackRequest;
+        CONSOLE_EXTCOLORS ExtColorsRequest;
 
         /* Input and Output Code Pages; keyboard */
         CONSOLE_GETINPUTOUTPUTCP GetConsoleCPRequest;

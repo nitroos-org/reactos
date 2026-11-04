@@ -146,6 +146,16 @@ CreatePrivateNamespaceW(
                                lpPrivateNamespaceAttributes,
                                &AliasName);
 
+    /*
+     * Creating a private namespace that already exists must fail with
+     * ERROR_ALREADY_EXISTS on Windows: callers (the CLR among them) then fall
+     * back to OpenPrivateNamespace.  BaseFormatObjectAttributes sets OBJ_OPENIF
+     * for named objects, which would instead open the existing directory
+     * with DIRECTORY_ALL_ACCESS and fail with access denied against the
+     * restrictive security descriptor the first creator gave it.
+     */
+    ObjectAttributes.Attributes &= ~OBJ_OPENIF;
+
     Status = NtCreateDirectoryObject(&DirectoryHandle,
                                      DIRECTORY_ALL_ACCESS,
                                      &ObjectAttributes);
@@ -195,8 +205,14 @@ OpenPrivateNamespaceW(
                                RootDirectory,
                                NULL);
 
+    /*
+     * Windows grants whatever the namespace's security descriptor allows
+     * the caller; asking for DIRECTORY_ALL_ACCESS would fail against the
+     * minimal DACLs applications give their namespaces (the CLR grants only
+     * DIRECTORY_CREATE_OBJECT).
+     */
     Status = NtOpenDirectoryObject(&DirectoryHandle,
-                                   DIRECTORY_ALL_ACCESS,
+                                   MAXIMUM_ALLOWED,
                                    &ObjectAttributes);
     if (!NT_SUCCESS(Status))
     {

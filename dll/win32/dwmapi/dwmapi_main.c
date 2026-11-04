@@ -78,7 +78,34 @@ HRESULT WINAPI DwmEnableComposition(UINT uCompositionAction)
  */
 HRESULT WINAPI DwmExtendFrameIntoClientArea(HWND hwnd, const MARGINS* margins)
 {
-    FIXME("(%p, %p) stub\n", hwnd, margins);
+    typedef BOOL (WINAPI *PFN_SETGLASS)(HWND, BOOL);
+    static PFN_SETGLASS pfnSetGlass;
+    static BOOL once;
+    BOOL glass;
+
+    TRACE("(%p, %p)\n", hwnd, margins);
+
+    if (!margins)
+        return E_POINTER;
+    if (!IsWindow(hwnd))
+        return E_HANDLE;
+
+    /*
+     * There is no compositor to blend a "sheet of glass" window with what lies below it. Programs that
+     * use one for a shaped or translucent popup (Firefox, Chromium) draw premultiplied ARGB into it:
+     * mark the window, and win32k blends their copies of a 32 bpp DIB with alpha over what is below.
+     */
+    if (!once)
+    {
+        HMODULE hUser = GetModuleHandleW(L"user32.dll");
+        if (hUser)
+            pfnSetGlass = (PFN_SETGLASS)GetProcAddress(hUser, "NitroSetWindowGlass");
+        once = TRUE;
+    }
+    glass = margins->cxLeftWidth == -1 && margins->cxRightWidth == -1 &&
+            margins->cyTopHeight == -1 && margins->cyBottomHeight == -1;
+    if (pfnSetGlass)
+        pfnSetGlass(hwnd, glass);
 
     return S_OK;
 }

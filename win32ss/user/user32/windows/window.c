@@ -1802,6 +1802,16 @@ ShowOwnedPopups(HWND hWnd, BOOL fShow)
 
 
 /*
+ * Private (not on Windows): dwmapi marks a window that uses DwmExtendFrameIntoClientArea as a sheet of glass,
+ * so that win32k blends what is drawn into it with its alpha channel (see win32ss/gdi/ntgdi/glassblt.c).
+ */
+BOOL WINAPI
+NitroSetWindowGlass(HWND hwnd, BOOL fGlass)
+{
+  return NtUserCallHwndParam(hwnd, fGlass != FALSE, HWNDPARAM_ROUTINE_ROS_SETGLASS) != 0;
+}
+
+/*
  * @implemented
  */
 BOOL WINAPI

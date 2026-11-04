@@ -145,6 +145,138 @@ RunAltBufferHelper(VOID)
     Sleep(3000);
 }
 
+
+/* Runs inside the pseudoconsole: draw wide (double-width) characters and overwrite parts of them.
+ * Row 0: A, U+4E2D, U+6587, B; then x y over the first wide character and z over the right half of the
+ * second. Row 1: a b c d, then U+4E2D over a b. The exit code is 0 when the wide characters occupied
+ * two cells (leading and trailing byte) in the console buffer. */
+static VOID
+WideWrite(HANDLE Output, SHORT X, SHORT Y, const WCHAR *Text, DWORD Count)
+{
+    COORD Position = {X, Y};
+    DWORD Written;
+
+    SetConsoleCursorPosition(Output, Position);
+    WriteConsoleW(Output, Text, Count, &Written, NULL);
+}
+
+static VOID
+RunWideHelper(VOID)
+{
+    HANDLE Output = GetStdHandle(STD_OUTPUT_HANDLE);
+    static const WCHAR First[] = { 'A', 0x4E2D, 0x6587, 'B' };
+    static const WCHAR Second[] = { 'a', 'b', 'c', 'd' };
+    static const WCHAR Over1[] = { 'x', 'y' };
+    static const WCHAR Over2[] = { 'z' };
+    static const WCHAR Over3[] = { 0x4E2D };
+    static const WCHAR Done[] = { 'W', 'I', 'D', 'E', 'D', 'O', 'N', 'E' };
+    WORD Attributes[6];
+    WCHAR Chars[6];
+    COORD Zero = {0, 0};
+    DWORD ExitCode = 0, Count;
+
+    WideWrite(Output, 0, 0, First, _countof(First));
+    WideWrite(Output, 0, 1, Second, _countof(Second));
+    Sleep(800);
+    if (!ReadConsoleOutputAttribute(Output, Attributes, 6, Zero, &Count) || Count != 6 ||
+        !ReadConsoleOutputCharacterW(Output, Chars, 6, Zero, &Count) || Count != 4)
+        ExitCode = 0xFF;
+    else
+    {
+        /* ReadConsoleOutput leaves the flags out, as Windows before 8 does; the attributes have them */
+        static const WORD Kind[6] = { 0, COMMON_LVB_LEADING_BYTE, COMMON_LVB_TRAILING_BYTE,
+                                      COMMON_LVB_LEADING_BYTE, COMMON_LVB_TRAILING_BYTE, 0 };
+        DWORD Index;
+
+        /* the bit of every cell that is not what it should be; a bit above them for the characters */
+        for (Index = 0; Index < 6; ++Index)
+            if ((Attributes[Index] & (COMMON_LVB_LEADING_BYTE | COMMON_LVB_TRAILING_BYTE)) != Kind[Index])
+                ExitCode |= 1 << Index;
+        if (Chars[0] != 'A' || Chars[1] != 0x4E2D || Chars[2] != 0x6587 || Chars[3] != 'B')
+            ExitCode |= 0x40;
+    }
+    WideWrite(Output, 1, 0, Over1, _countof(Over1));
+    WideWrite(Output, 4, 0, Over2, _countof(Over2));
+    WideWrite(Output, 0, 1, Over3, _countof(Over3));
+    Sleep(800);
+    WideWrite(Output, 0, 4, Done, _countof(Done));
+    Sleep(1000);
+    ExitProcess(ExitCode);
+}
+
+static const WCHAR WideLine[] = { 'C', 'J', 'K', ':', ' ', 0x4E2D, 0x6587, 0x65E5, 0x672C, 0x8A9E, 0xD55C, 0xAD6D, 0xC5B4 };
+
+/* Runs inside the pseudoconsole: a line of Chinese, Japanese and Korean text, then cls (cmd.exe /c cls).
+ * Exit code 0 when no cell of the line is left in the console buffer. */
+static VOID
+RunWideClsHelper(VOID)
+{
+    HANDLE Output = GetStdHandle(STD_OUTPUT_HANDLE);
+    static const WCHAR Done[] = { 'W', 'I', 'D', 'E', 'D', 'O', 'N', 'E' };
+    static const WCHAR Keep[] = { 'k', 'e', 'e', 'p' };
+    WORD Attributes[40];
+    WCHAR Chars[40];
+    COORD Zero = {0, 0};
+    DWORD Count;
+    STARTUPINFOW Startup = {sizeof(Startup)};
+    PROCESS_INFORMATION Process;
+    WCHAR Command[] = L"cmd.exe /c cls";
+    DWORD ExitCode = 0, Index;
+
+    WideWrite(Output, 0, 2, WideLine, _countof(WideLine));
+    WideWrite(Output, 0, 3, Keep, _countof(Keep));
+    Sleep(1000);
+    if (CreateProcessW(NULL, Command, NULL, NULL, TRUE, 0, NULL, NULL, &Startup, &Process))
+    {
+        WaitForSingleObject(Process.hProcess, 10000);
+        CloseHandle(Process.hThread);
+        CloseHandle(Process.hProcess);
+    }
+    else
+        ExitCode = 2;
+    Sleep(1000);
+    Zero.Y = 2;
+    if (!ReadConsoleOutputAttribute(Output, Attributes, 40, Zero, &Count) || Count != 40 ||
+        !ReadConsoleOutputCharacterW(Output, Chars, 40, Zero, &Count) || Count != 40)
+        ExitCode = 3;
+    else
+        for (Index = 0; Index < 40; ++Index)
+            if (Chars[Index] != ' ' || (Attributes[Index] & (COMMON_LVB_LEADING_BYTE | COMMON_LVB_TRAILING_BYTE)))
+                ExitCode = 4;
+    WideWrite(Output, 0, 6, Done, _countof(Done));
+    Sleep(1000);
+    ExitProcess(ExitCode);
+}
+
+/* Runs inside the pseudoconsole: text in the original buffer, a line of wide characters in a buffer of
+ * its own that becomes the active one, then the original one again. */
+static VOID
+RunWideSwitchHelper(VOID)
+{
+    HANDLE Original = GetStdHandle(STD_OUTPUT_HANDLE);
+    HANDLE Alternate = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                 NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
+    static const WCHAR Main1[] = { 'm', 'a', 'i', 'n' };
+    static const WCHAR Main2[] = { 'a', 'b', 'c', 'd', 'e', 'f' };
+    static const WCHAR Shown[] = { 'A', 'L', 'T', 'S', 'H', 'O', 'W', 'N' };
+    static const WCHAR Done[] = { 'W', 'I', 'D', 'E', 'D', 'O', 'N', 'E' };
+
+    if (Alternate == INVALID_HANDLE_VALUE)
+        ExitProcess(5);
+    WideWrite(Original, 0, 0, Main1, _countof(Main1));
+    WideWrite(Original, 0, 2, Main2, _countof(Main2));
+    Sleep(1000);
+    WideWrite(Alternate, 0, 1, WideLine, _countof(WideLine));
+    WideWrite(Alternate, 0, 10, Shown, _countof(Shown));
+    SetConsoleActiveScreenBuffer(Alternate);
+    Sleep(1500);
+    SetConsoleActiveScreenBuffer(Original);
+    Sleep(1000);
+    WideWrite(Original, 0, 4, Done, _countof(Done));
+    Sleep(1000);
+    ExitProcess(0);
+}
+
 #define SCROLL_LINES    200
 
 /* Runs inside the pseudoconsole: print SCROLL_LINES numbered lines, one write each, and pause
@@ -163,6 +295,70 @@ RunScrollHelper(BOOL Paced)
         if (Paced && !(Index % 4)) Sleep(30);
     }
     ConsoleSay("SCROLLEND\r\n");
+    Sleep(500);
+}
+
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
+
+/* Runs inside the pseudoconsole: write 256-color and 24-bit color sequences (SGR 38/48 ; 5 / 2) and
+ * report the attributes the 16-color console API gives for those cells: the nearest console color
+ * (what a Windows console shows) must come back from ReadConsoleOutput. */
+static VOID
+RunColorsHelper(VOID)
+{
+    static const CHAR Text[] =
+        "\x1b[38;2;255;0;0mRGBF\x1b[0m \x1b[48;2;0;0;255mRGBB\x1b[0m \x1b[38;5;196mIDXF\x1b[0m "
+        "\x1b[48;5;21mIDXB\x1b[0m \x1b[38;5;9mLOW\x1b[0m \x1b[31mLEG\x1b[0m\r\n";
+    static const SHORT Columns[6] = {0, 5, 10, 15, 20, 24};
+    HANDLE Output = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO Info;
+    CHAR_INFO Cells[40];
+    COORD Size = {40, 1}, Origin = {0, 0};
+    SMALL_RECT Region;
+    CHAR Report[128];
+    DWORD Mode = 0, Written, Index;
+
+    GetConsoleMode(Output, &Mode);
+    SetConsoleMode(Output, Mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    GetConsoleScreenBufferInfo(Output, &Info);
+    WriteFile(Output, Text, lstrlenA(Text), &Written, NULL);
+    Region.Left = 0;
+    Region.Right = 39;
+    Region.Top = Region.Bottom = Info.dwCursorPosition.Y;
+    if (!ReadConsoleOutputW(Output, Cells, Size, Origin, &Region))
+    {
+        ConsoleSay("COLORS=error\r\n");
+        return;
+    }
+    StringCchCopyA(Report, sizeof(Report), "COLORS=");
+    for (Index = 0; Index < 6; ++Index)
+        StringCchPrintfA(Report + lstrlenA(Report), sizeof(Report) - lstrlenA(Report), "%04X,", Cells[Columns[Index]].Attributes);
+    StringCchCatA(Report, sizeof(Report), "\r\nCOLOREND\r\n");
+    ConsoleSay(Report);
+    Sleep(500);
+}
+
+#define COLOR_LINES 60
+
+/* Runs inside the pseudoconsole: COLOR_LINES lines (more than the 25 rows of the pseudoconsole), each
+ * in a 24-bit color of its own, so that most of them scroll off before the host looks. */
+static VOID
+RunColorScrollHelper(VOID)
+{
+    HANDLE Output = GetStdHandle(STD_OUTPUT_HANDLE);
+    CHAR Text[96];
+    DWORD Mode = 0, Index, Written;
+
+    GetConsoleMode(Output, &Mode);
+    SetConsoleMode(Output, Mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    for (Index = 1; Index <= COLOR_LINES; ++Index)
+    {
+        StringCchPrintfA(Text, sizeof(Text), "\x1b[38;2;%lu;99;7mCSROW%02lu\x1b[0m\r\n", 100 + Index, Index);
+        WriteFile(Output, Text, lstrlenA(Text), &Written, NULL);
+    }
+    ConsoleSay("COLOREND\r\n");
     Sleep(500);
 }
 
@@ -801,6 +997,291 @@ CheckHelperOutput(PCWSTR ExePath, PCSTR Mode, PCSTR Expected, PCSTR Message)
     CloseHandle(OutWrite);
 }
 
+/* A minimal terminal screen: cursor positioning, SGR and mode sequences are skipped; a character of the
+ * East Asian wide ranges takes two columns and blanks the half of a wide character it overwrites. */
+#define WIDE_COLUMNS    80
+#define WIDE_ROWS       25
+#define WIDE_CONT       0xFFFF
+
+static int
+WideWidth(WCHAR Character)
+{
+    return (Character >= 0x1100 && Character <= 0x115F) || (Character >= 0x2E80 && Character <= 0xA4CF) ||
+           (Character >= 0xAC00 && Character <= 0xD7A3) || (Character >= 0xF900 && Character <= 0xFAFF) ||
+           (Character >= 0xFE30 && Character <= 0xFE6F) || (Character >= 0xFF00 && Character <= 0xFF60) ||
+           (Character >= 0xFFE0 && Character <= 0xFFE6) ? 2 : 1;
+}
+
+static VOID
+WideScreenPut(WCHAR Screen[WIDE_ROWS][WIDE_COLUMNS], int Row, int Column, WCHAR Character)
+{
+    int Width = WideWidth(Character), Index;
+
+    if (Row < 0 || Row >= WIDE_ROWS || Column < 0 || Column + Width > WIDE_COLUMNS) return;
+    if (Screen[Row][Column] == WIDE_CONT && Column > 0) Screen[Row][Column - 1] = ' ';
+    for (Index = 0; Index < Width; ++Index)
+        if (Column + Index + 1 < WIDE_COLUMNS && Screen[Row][Column + Index + 1] == WIDE_CONT)
+            Screen[Row][Column + Index + 1] = ' ';
+    Screen[Row][Column] = Character;
+    if (Width == 2) Screen[Row][Column + 1] = WIDE_CONT;
+}
+
+static VOID
+WideScreenFeed(WCHAR Screen[WIDE_ROWS][WIDE_COLUMNS], const UCHAR *Data, DWORD Size)
+{
+    DWORD Index = 0;
+    int Row = 0, Column = 0;
+
+    while (Index < Size)
+    {
+        UCHAR Byte = Data[Index];
+
+        if (Byte == 0x1B && Index + 1 < Size && Data[Index + 1] == '[')
+        {
+            int Params[4] = {0}, Count = 0;
+
+            Index += 2;
+            while (Index < Size && !(Data[Index] >= 0x40 && Data[Index] <= 0x7E))
+            {
+                if (Data[Index] >= '0' && Data[Index] <= '9' && Count < 4)
+                    Params[Count] = Params[Count] * 10 + (Data[Index] - '0');
+                else if (Data[Index] == ';') ++Count;
+                ++Index;
+            }
+            if (Index < Size && Data[Index] == 'J' && (Params[0] == 2 || Params[0] == 3))
+            {
+                int ClearRow, ClearColumn;
+
+                for (ClearRow = 0; ClearRow < WIDE_ROWS; ++ClearRow)
+                    for (ClearColumn = 0; ClearColumn < WIDE_COLUMNS; ++ClearColumn)
+                        Screen[ClearRow][ClearColumn] = ' ';
+            }
+            else if (Index < Size && Data[Index] == 'H')
+            {
+                Row = Params[0] ? Params[0] - 1 : 0;
+                Column = Count >= 1 && Params[1] ? Params[1] - 1 : 0;
+            }
+            ++Index;
+        }
+        else if (Byte == '\r') { Column = 0; ++Index; }
+        else if (Byte == '\n') { ++Row; ++Index; }
+        else if (Byte < 0x20) ++Index;
+        else
+        {
+            WCHAR Character = 0;
+            DWORD Length = Byte < 0x80 ? 1 : (Byte >= 0xF0 ? 4 : (Byte >= 0xE0 ? 3 : 2));
+
+            if (Index + Length > Size) break;
+            if (Length == 1) Character = Byte;
+            else if (Length == 3) Character = (WCHAR)(((Byte & 0x0F) << 12) | ((Data[Index + 1] & 0x3F) << 6) | (Data[Index + 2] & 0x3F));
+            else if (Length == 2) Character = (WCHAR)(((Byte & 0x1F) << 6) | (Data[Index + 1] & 0x3F));
+            else Character = '?';
+            WideScreenPut(Screen, Row, Column, Character);
+            Column += WideWidth(Character);
+            Index += Length;
+        }
+    }
+}
+
+/* Runs a helper in a pseudoconsole until it prints "WIDEDONE" and collects what the host sent to the
+ * terminal. Returns TRUE if the helper finished. */
+static BOOL
+WideCapture(PCWSTR ExePath, PCWSTR Mode, UCHAR *Data, DWORD Capacity, DWORD *Received, DWORD *ExitCode)
+{
+    HANDLE InRead = NULL, InWrite = NULL, OutRead = NULL, OutWrite = NULL;
+    PROCESS_INFORMATION Child;
+    WCHAR Command[MAX_PATH * 2];
+    COORD Size = {80, 25};
+    PVOID Pty = NULL;
+    HRESULT Status;
+    DWORD Used = 0, Start, Available, Count;
+    BOOL Found = FALSE;
+
+    *Received = 0;
+    *ExitCode = 99;
+    if (!CreatePipe(&InRead, &InWrite, NULL, 0) || !CreatePipe(&OutRead, &OutWrite, NULL, 0))
+    {
+        ok(FALSE, "CreatePipe failed\n");
+        return FALSE;
+    }
+    Status = CreatePty(Size, InRead, OutWrite, 0, &Pty);
+    ok(Status == S_OK, "CreatePseudoConsole failed: %08lx\n", Status);
+    if (Status == S_OK)
+    {
+        StringCchPrintfW(Command, _countof(Command), L"\"%ls\" ConPty %ls", ExePath, Mode);
+        if (SpawnWithPty(Pty, Command, FALSE, &Child))
+        {
+            Start = GetTickCount();
+            while (!Found && GetTickCount() - Start < 30000)
+            {
+                Available = 0;
+                if (!PeekNamedPipe(OutRead, NULL, 0, NULL, &Available, NULL)) break;
+                if (Available)
+                {
+                    if (Available > Capacity - Used - 1) Available = Capacity - Used - 1;
+                    if (!Available || !ReadFile(OutRead, Data + Used, Available, &Count, NULL)) break;
+                    Used += Count;
+                    Data[Used] = 0;
+                    Found = strstr((PCSTR)Data, "WIDEDONE") != NULL;
+                }
+                else
+                    Sleep(10);
+            }
+            WaitForSingleObject(Child.hProcess, 8000);
+            GetExitCodeProcess(Child.hProcess, ExitCode);
+            CloseHandle(Child.hThread);
+            CloseHandle(Child.hProcess);
+        }
+        else
+            ok(FALSE, "CreateProcess with the pseudoconsole failed: %lu\n", GetLastError());
+        ClosePty(Pty);
+    }
+    CloseHandle(InRead);
+    CloseHandle(InWrite);
+    CloseHandle(OutRead);
+    CloseHandle(OutWrite);
+    *Received = Used;
+    return Found;
+}
+
+static VOID
+WideClearScreen(WCHAR Screen[WIDE_ROWS][WIDE_COLUMNS])
+{
+    DWORD Cell;
+
+    for (Cell = 0; Cell < WIDE_ROWS * WIDE_COLUMNS; ++Cell) ((PWCHAR)Screen)[Cell] = ' ';
+}
+
+/* Every cell of the model screen must be what Expected (one string per row) says, a blank when the
+ * row is shorter (the rest of the screen: nothing stale). */
+static VOID
+WideCheckScreen(WCHAR Screen[WIDE_ROWS][WIDE_COLUMNS], const WCHAR *const *Expected, PCSTR Where)
+{
+    int Row, Column, Length;
+
+    for (Row = 0; Row < WIDE_ROWS; ++Row)
+    {
+        Length = 0;
+        if (Expected[Row])
+            while (Expected[Row][Length]) ++Length;
+        for (Column = 0; Column < WIDE_COLUMNS; ++Column)
+        {
+            WCHAR Want = Column < Length ? Expected[Row][Column] : ' ';
+
+            if (Screen[Row][Column] != Want)
+            {
+                ok(FALSE, "%s: row %d column %d holds %04x, expected %04x\n", Where, Row, Column,
+                   Screen[Row][Column], Want);
+                return;
+            }
+        }
+    }
+}
+
+/* The hex of the host's output from the last wide character on, for the log */
+static VOID
+WideTraceTail(const UCHAR *Data, DWORD Used, PCSTR Title)
+{
+    static const UCHAR Last[] = { 0xEC, 0x96, 0xB4 };    /* U+C5B4, the last wide character written */
+    DWORD Start = 0, Index, Count;
+    CHAR Line[200];
+
+    for (Index = 0; Index + 3 <= Used; ++Index)
+        if (!memcmp(Data + Index, Last, 3)) Start = Index + 3;
+    trace("%s: %lu bytes of host output after the last wide character\n", Title, Used - Start);
+    for (Index = Start; Index < Used && Index < Start + 480; Index += 32)
+    {
+        DWORD Length = 0;
+
+        for (Count = 0; Count < 32 && Index + Count < Used; ++Count)
+        {
+            StringCchPrintfA(Line + Length, sizeof(Line) - Length, "%02x ", Data[Index + Count]);
+            Length += 3;
+        }
+        trace("  %s\n", Line);
+    }
+}
+
+/* Wide characters written to the console, partly overwritten by narrow ones and the other way round,
+ * then erased by cls and hidden by a screen buffer switch: the terminal screen that results from the
+ * host's output must be the screen of the console buffer, with no cell of a wide character left. */
+static VOID
+CheckWideCharacters(PCWSTR ExePath)
+{
+    static UCHAR Data[65536];
+    static WCHAR Screen[WIDE_ROWS][WIDE_COLUMNS];
+    static const WCHAR Row0[] = { 'A', 'x', 'y', ' ', 'z', 'B', 0 };
+    static const WCHAR Row1[] = { 0x4E2D, WIDE_CONT, 'c', 'd', 0 };
+    static const WCHAR Row4[] = { 'W', 'I', 'D', 'E', 'D', 'O', 'N', 'E', 0 };
+    static const WCHAR Main1[] = { 'm', 'a', 'i', 'n', 0 };
+    static const WCHAR Main2[] = { 'a', 'b', 'c', 'd', 'e', 'f', 0 };
+    static const WCHAR Alt1[] = { 'C', 'J', 'K', ':', ' ', 0x4E2D, WIDE_CONT, 0x6587, WIDE_CONT, 0x65E5, WIDE_CONT,
+                                  0x672C, WIDE_CONT, 0x8A9E, WIDE_CONT, 0xD55C, WIDE_CONT, 0xAD6D, WIDE_CONT,
+                                  0xC5B4, WIDE_CONT, 0 };
+    static const WCHAR Alt10[] = { 'A', 'L', 'T', 'S', 'H', 'O', 'W', 'N', 0 };
+    const WCHAR *Rows[WIDE_ROWS];
+    DWORD Used, ExitCode;
+    PCSTR Mark;
+
+    /* Overwrites of the halves of wide characters */
+    if (WideCapture(ExePath, L"helper-wide", Data, sizeof(Data), &Used, &ExitCode))
+    {
+        ZeroMemory(Rows, sizeof(Rows));
+        Rows[0] = Row0;
+        Rows[1] = Row1;
+        Rows[4] = Row4;
+        WideClearScreen(Screen);
+        WideScreenFeed(Screen, Data, Used);
+        WideCheckScreen(Screen, Rows, "overwritten halves");
+    }
+    else
+        ok(FALSE, "The wide character test did not finish, received %lu bytes\n", Used);
+    ok(ExitCode == 0, "A wide character did not occupy a leading and a trailing cell (mask of the wrong cells): %lx\n", ExitCode);
+
+    /* cls erases the whole line, both columns of every wide character */
+    if (WideCapture(ExePath, L"helper-widecls", Data, sizeof(Data), &Used, &ExitCode))
+    {
+        static const WCHAR Cleared6[] = { 'W', 'I', 'D', 'E', 'D', 'O', 'N', 'E', 0 };
+
+        ZeroMemory(Rows, sizeof(Rows));
+        Rows[6] = Cleared6;
+        WideClearScreen(Screen);
+        WideScreenFeed(Screen, Data, Used);
+        WideTraceTail(Data, Used, "cls");
+        WideCheckScreen(Screen, Rows, "after cls");
+    }
+    else
+        ok(FALSE, "The cls test did not finish, received %lu bytes\n", Used);
+    ok(ExitCode == 0, "cls left cells of the wide characters in the console buffer: %lu\n", ExitCode);
+
+    /* a screen buffer switch shows the other buffer whole */
+    if (WideCapture(ExePath, L"helper-wideswitch", Data, sizeof(Data), &Used, &ExitCode))
+    {
+        Mark = strstr((PCSTR)Data, "ALTSHOWN");
+        ok(Mark != NULL, "The alternate buffer was not shown\n");
+        if (Mark)
+        {
+            ZeroMemory(Rows, sizeof(Rows));
+            Rows[1] = Alt1;
+            Rows[10] = Alt10;
+            WideClearScreen(Screen);
+            WideScreenFeed(Screen, Data, (DWORD)((const UCHAR *)Mark - Data) + 8);
+            WideCheckScreen(Screen, Rows, "alternate buffer active");
+        }
+        ZeroMemory(Rows, sizeof(Rows));
+        Rows[0] = Main1;
+        Rows[2] = Main2;
+        Rows[4] = Row4;
+        WideClearScreen(Screen);
+        WideScreenFeed(Screen, Data, Used);
+        WideTraceTail(Data, Used, "switch back");
+        WideCheckScreen(Screen, Rows, "back in the original buffer");
+    }
+    else
+        ok(FALSE, "The buffer switch test did not finish, received %lu bytes\n", Used);
+    ok(ExitCode == 0, "The buffer switch helper failed: %lu\n", ExitCode);
+}
+
 /* Text scrolled off a 25-row pseudoconsole must reach the terminal as lines that scroll off its
  * screen (line feeds on the last row), complete and in order, not be repainted in place: the
  * terminal keeps history only for the rows that scroll away. Output that outruns the host (many
@@ -891,6 +1372,113 @@ CheckScrollback(PCWSTR ExePath, BOOL Paced, BOOL Resize)
     ok(Seen == SCROLL_LINES, "Only %lu of %u scrolled lines reached the terminal in order\n", Seen, SCROLL_LINES);
     ok(LineFeeds >= SCROLL_LINES - 30, "The terminal was not scrolled by line feeds (%lu)\n", LineFeeds);
     ok(Clears <= (Resize ? 2U : 1U), "The screen was cleared %lu times while scrolling\n", Clears);
+    WaitForSingleObject(Child.hProcess, 8000);
+    CloseHandle(Child.hThread);
+    CloseHandle(Child.hProcess);
+Done:
+    if (Pty) ClosePty(Pty);
+    if (InRead) CloseHandle(InRead);
+    if (InWrite) CloseHandle(InWrite);
+    if (OutRead) CloseHandle(OutRead);
+    if (OutWrite) CloseHandle(OutWrite);
+    if (Text) HeapFree(GetProcessHeap(), 0, Text);
+}
+
+/* Read what a helper writes until COLOREND (and a little after, for the final paint). */
+static DWORD
+ReadUntilColorEnd(HANDLE OutRead, CHAR *Text, DWORD Size)
+{
+    DWORD Used = 0, Available, Count, Start;
+
+    for (Start = GetTickCount(); GetTickCount() - Start < 30000; Sleep(10))
+    {
+        Available = 0;
+        if (!PeekNamedPipe(OutRead, NULL, 0, NULL, &Available, NULL)) break;
+        if (!Available) continue;
+        if (Available > Size - 1 - Used) Available = Size - 1 - Used;
+        if (!Available || !ReadFile(OutRead, Text + Used, Available, &Count, NULL)) break;
+        Used += Count;
+        Text[Used] = 0;
+        if (strstr(Text, "COLOREND")) { Sleep(400); break; }
+    }
+    Available = 0;
+    if (PeekNamedPipe(OutRead, NULL, 0, NULL, &Available, NULL) && Available && Available < Size - 1 - Used &&
+        ReadFile(OutRead, Text + Used, Available, &Count, NULL))
+        Used += Count;
+    Text[Used] = 0;
+    return Used;
+}
+
+/* 256-color and 24-bit colors written by a client travel to the terminal as such (SGR 38/48 ; 5 / 2),
+ * while the 16-color console API still sees the nearest console color; colors of rows that scrolled
+ * off before the host looked are kept too. */
+static VOID
+CheckExtendedColors(PCWSTR ExePath, BOOL Scrolled)
+{
+    HANDLE InRead = NULL, InWrite = NULL, OutRead = NULL, OutWrite = NULL;
+    PROCESS_INFORMATION Child;
+    WCHAR Command[MAX_PATH * 2];
+    COORD Size = {80, 25};
+    PVOID Pty = NULL;
+    HRESULT Status;
+    CHAR *Text;
+    DWORD Used, Index, Found = 0;
+
+    Text = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 1024 * 1024);
+    if (!Text || !CreatePipe(&InRead, &InWrite, NULL, 0) || !CreatePipe(&OutRead, &OutWrite, NULL, 0))
+    {
+        ok(FALSE, "Setup failed\n");
+        goto Done;
+    }
+    Status = CreatePty(Size, InRead, OutWrite, 0, &Pty);
+    ok(Status == S_OK, "CreatePseudoConsole failed: %08lx\n", Status);
+    if (Status != S_OK) goto Done;
+    StringCchPrintfW(Command, _countof(Command), L"\"%ls\" ConPty helper-%hs", ExePath, Scrolled ? "colorscroll" : "colors");
+    if (!SpawnWithPty(Pty, Command, FALSE, &Child))
+    {
+        ok(FALSE, "CreateProcess with the pseudoconsole failed: %lu\n", GetLastError());
+        goto Done;
+    }
+    Used = ReadUntilColorEnd(OutRead, Text, 1024 * 1024);
+    if (Scrolled)
+    {
+        for (Index = 1; Index <= COLOR_LINES; ++Index)
+        {
+            CHAR Color[40];
+
+            StringCchPrintfA(Color, sizeof(Color), "38;2;%lu;99;7;", 100 + Index);
+            if (strstr(Text, Color)) ++Found;
+        }
+        trace("%lu of %u row colors reached the terminal (%lu bytes)\n", Found, COLOR_LINES, Used);
+        ok(Found == COLOR_LINES, "Only %lu of %u 24-bit row colors reached the terminal\n", Found, COLOR_LINES);
+    }
+    else
+    {
+        const CHAR *Report = strstr(Text, "COLORS=");
+        UINT Attr[6] = {0};
+
+        ok(strstr(Text, "38;2;255;0;0") != NULL, "The 24-bit foreground did not reach the terminal\n");
+        ok(strstr(Text, "48;2;0;0;255") != NULL, "The 24-bit background did not reach the terminal\n");
+        ok(strstr(Text, "38;5;196") != NULL, "The 256-color foreground did not reach the terminal\n");
+        ok(strstr(Text, "48;5;21") != NULL, "The 256-color background did not reach the terminal\n");
+        /* the first 16 palette entries and plain SGR stay the console colors */
+        ok(strstr(Text, "\033[91;") != NULL, "38;5;9 did not stay the bright red console color\n");
+        ok(strstr(Text, "\033[31;") != NULL, "SGR 31 did not stay the red console color\n");
+        ok(!strstr(Text, "38;5;9m") && !strstr(Text, "38;5;9;"), "38;5;9 was sent as a palette color\n");
+        ok(Report != NULL, "The helper did not report\n");
+        if (Report && sscanf(Report, "COLORS=%x,%x,%x,%x,%x,%x,", &Attr[0], &Attr[1], &Attr[2], &Attr[3], &Attr[4], &Attr[5]) == 6)
+        {
+            /* the nearest of the 16 console colors, whatever the color table: red, blue, red, blue, bright red, red */
+            ok((Attr[0] & 7) == FOREGROUND_RED, "RGB foreground: attribute %04x\n", Attr[0]);
+            ok(((Attr[1] >> 4) & 7) == 1, "RGB background: attribute %04x\n", Attr[1]);
+            ok((Attr[2] & 7) == FOREGROUND_RED, "256 foreground: attribute %04x\n", Attr[2]);
+            ok(((Attr[3] >> 4) & 7) == 1, "256 background: attribute %04x\n", Attr[3]);
+            ok((Attr[4] & 0xF) == (FOREGROUND_RED | FOREGROUND_INTENSITY), "palette 9: attribute %04x\n", Attr[4]);
+            ok((Attr[5] & 0xF) == FOREGROUND_RED, "SGR 31: attribute %04x\n", Attr[5]);
+        }
+        else
+            ok(FALSE, "No usable report of the attributes\n");
+    }
     WaitForSingleObject(Child.hProcess, 8000);
     CloseHandle(Child.hThread);
     CloseHandle(Child.hProcess);
@@ -1081,6 +1669,21 @@ START_TEST(ConPty)
             RunEmojiHelper();
             return;
         }
+        if (argc >= 3 && !strcmp(argv[2], "helper-wide"))
+        {
+            RunWideHelper();
+            return;
+        }
+        if (argc >= 3 && !strcmp(argv[2], "helper-widecls"))
+        {
+            RunWideClsHelper();
+            return;
+        }
+        if (argc >= 3 && !strcmp(argv[2], "helper-wideswitch"))
+        {
+            RunWideSwitchHelper();
+            return;
+        }
         if (argc >= 3 && !strcmp(argv[2], "helper-altbuf"))
         {
             RunAltBufferHelper();
@@ -1089,6 +1692,16 @@ START_TEST(ConPty)
         if (argc >= 3 && (!strcmp(argv[2], "helper-scroll") || !strcmp(argv[2], "helper-scrollfast")))
         {
             RunScrollHelper(!strcmp(argv[2], "helper-scroll"));
+            return;
+        }
+        if (argc >= 3 && !strcmp(argv[2], "helper-colors"))
+        {
+            RunColorsHelper();
+            return;
+        }
+        if (argc >= 3 && !strcmp(argv[2], "helper-colorscroll"))
+        {
+            RunColorScrollHelper();
             return;
         }
         if (argc >= 3 && !strcmp(argv[2], "helper-vtinput"))
@@ -1124,9 +1737,12 @@ START_TEST(ConPty)
         CheckKeyTranslation(ExePath);
         CheckHelperOutput(ExePath, "helper-altbuf", "ALTBUFTEXT",
                           "Text drawn in the client's active screen buffer did not reach the terminal");
+        CheckWideCharacters(ExePath);
         CheckScrollback(ExePath, TRUE, FALSE);
         CheckScrollback(ExePath, FALSE, FALSE);
         CheckScrollback(ExePath, FALSE, TRUE);
+        CheckExtendedColors(ExePath, FALSE);
+        CheckExtendedColors(ExePath, TRUE);
         CheckNodePtSequence(0x6, FALSE);   /* RESIZE_QUIRK | WIN32_INPUT_MODE */
         CheckNodePtSequence(0x7, FALSE);   /* ... | INHERIT_CURSOR */
         CheckNodePtSequence(0x8, FALSE);   /* PASSTHROUGH (Windows 11) */
