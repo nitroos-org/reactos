@@ -617,7 +617,7 @@ BaseInitializeContext(IN PCONTEXT Context,
     if (ContextType == 1)
     {
         /* For Threads */
-        Context->Eip = (ULONG)BaseThreadStartupThunk;
+        Context->Eip = (ULONG)RtlUserThreadStart;
     }
     else if (ContextType == 2)
     {
@@ -644,7 +644,8 @@ BaseInitializeContext(IN PCONTEXT Context,
     else
     {
         /* For first thread in a Process */
-        Context->Eip = (ULONG)BaseProcessStartThunk;
+        /* The image entry runs through the same thread start (EAX = entry, EBX = the PEB) */
+        Context->Eip = (ULONG)RtlUserThreadStart;
     }
 
 #elif defined(_M_AMD64)
@@ -674,7 +675,7 @@ BaseInitializeContext(IN PCONTEXT Context,
 
     if (ContextType == 1)      /* For Threads */
     {
-        Context->Rip = (ULONG_PTR)BaseThreadStartup;
+        Context->Rip = (ULONG_PTR)RtlUserThreadStart;
     }
     else if (ContextType == 2) /* For Fibers */
     {
@@ -687,7 +688,8 @@ BaseInitializeContext(IN PCONTEXT Context,
     }
     else                       /* For first thread in a Process */
     {
-        Context->Rip = (ULONG_PTR)BaseProcessStartup;
+        /* The image entry runs through the same thread start (RCX = entry, RDX = the PEB) */
+        Context->Rip = (ULONG_PTR)RtlUserThreadStart;
     }
 
     /* Set the Context Flags */

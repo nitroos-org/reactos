@@ -53,6 +53,7 @@ extern void func_RegLoadKeyZeroBin(void);
 extern void func_RegLoadKeyZeroCell(void);
 extern void func_RegOpenKeyExW(void);
 extern void func_RegPerformanceData(void);
+extern void func_InitiateShutdown(void);
 extern void func_RegQueryInfoKey(void);
 extern void func_RegQueryValueExW(void);
 extern void func_RegKeyNameCase(void);
@@ -168,6 +169,7 @@ const struct test winetest_testlist[] =
     { "RegQueryInfoKey", func_RegQueryInfoKey },
     { "RegOpenKeyExW", func_RegOpenKeyExW },
     { "RegPerformanceData", func_RegPerformanceData },
+    { "InitiateShutdown", func_InitiateShutdown },
     { "RegQueryValueExW", func_RegQueryValueExW },
     { "RegKeyNameCase", func_RegKeyNameCase },
     { "RegRenameKey", func_RegRenameKey },

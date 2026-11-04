@@ -141,3 +141,31 @@ PTP_POOL WINAPI DECLSPEC_HOTPATCH CreateThreadpool(void *reserved)
     }
     return pool;
 }
+
+extern VOID WINAPI TpSetWait(TP_WAIT *wait, HANDLE handle, LARGE_INTEGER *timeout);
+extern VOID WINAPI TpSetTimer(TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LONG window_length);
+
+/*
+ * SetThreadpoolWait, but the reserved argument has to be NULL, and the result says that the wait is set.
+ * (Windows 8 and later.)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetThreadpoolWaitEx( PTP_WAIT wait, HANDLE handle, PFILETIME timeout, PVOID reserved )
+{
+    if (reserved)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    TpSetWait( wait, handle, (LARGE_INTEGER *)timeout );
+    return TRUE;
+}
+
+/*
+ * SetThreadpoolTimer with a result. (Windows 8 and later.)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetThreadpoolTimerEx( PTP_TIMER timer, PFILETIME due_time, DWORD period, DWORD window_length )
+{
+    TpSetTimer( timer, (LARGE_INTEGER *)due_time, period, window_length );
+    return TRUE;
+}

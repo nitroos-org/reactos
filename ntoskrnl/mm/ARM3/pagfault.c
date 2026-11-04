@@ -2827,6 +2827,20 @@ MmGetExecuteOptions(IN PULONG ExecuteOptions)
 
     *ExecuteOptions = 0;
 
+#ifdef _M_AMD64
+    /* A native 64-bit process runs with DEP (unless the system policy is AlwaysOff, which turns it off for 64-bit
+     * processes too), permanently and without thunk emulation, as on
+     * Windows (the page protections already fault on an execute of data) */
+    if (!PsGetCurrentProcess()->Wow64Process &&
+        SharedUserData->NXSupportPolicy != NX_SUPPORT_POLICY_ALWAYSOFF)
+    {
+        *ExecuteOptions = MEM_EXECUTE_OPTION_DISABLE |
+                          MEM_EXECUTE_OPTION_DISABLE_THUNK_EMULATION |
+                          MEM_EXECUTE_OPTION_PERMANENT;
+        return STATUS_SUCCESS;
+    }
+#endif
+
     if (CurrentProcess->Flags.ExecuteDisable)
     {
         *ExecuteOptions |= MEM_EXECUTE_OPTION_DISABLE;
@@ -2868,6 +2882,13 @@ MmSetExecuteOptions(IN ULONG ExecuteOptions)
     KLOCK_QUEUE_HANDLE ProcessLock;
     NTSTATUS Status = STATUS_ACCESS_DENIED;
     ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+
+#ifdef _M_AMD64
+    /* DEP of a native 64-bit process is fixed: Windows refuses the change */
+    if (!PsGetCurrentProcess()->Wow64Process &&
+        SharedUserData->NXSupportPolicy != NX_SUPPORT_POLICY_ALWAYSOFF)
+        return STATUS_INVALID_PARAMETER;
+#endif
 
     /* Only accept valid flags */
     if (ExecuteOptions & ~MEM_EXECUTE_OPTION_VALID_FLAGS)

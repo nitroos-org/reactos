@@ -86,6 +86,8 @@ NTSTATUS GetInterfaceName( PIP_INTERFACE Interface,
     return Status;
 }
 
+BOOLEAN HasLoopbackPrefix(PIP_ADDRESS Address, PIP_ADDRESS Prefix);
+
 /* The interface with that unicast or broadcast address, referenced for the caller (IPDereferenceInterface) */
 PIP_INTERFACE AddrLocateInterface(
     PIP_ADDRESS MatchAddress)
@@ -97,8 +99,10 @@ PIP_INTERFACE AddrLocateInterface(
     TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
 
     ForEachInterface(CurrentIF) {
+	/* The loopback interface owns the whole 127.0.0.0/8, as on Windows */
 	if( AddrIsEqual( &CurrentIF->Unicast, MatchAddress ) ||
-            AddrIsEqual( &CurrentIF->Broadcast, MatchAddress ) ) {
+            AddrIsEqual( &CurrentIF->Broadcast, MatchAddress ) ||
+            HasLoopbackPrefix( MatchAddress, &CurrentIF->Unicast ) ) {
             RetIF = CurrentIF;
             IPReferenceInterface(RetIF);
             break;
@@ -240,7 +244,8 @@ HasLoopbackPrefix(
     PIP_ADDRESS Address,
     PIP_ADDRESS Prefix)
 {
-    if (((Address->Address.IPv4Address & LOOPBACK_ADDRMASK_IPv4) == (LOOPBACK_ADDRESS_IPv4 & LOOPBACK_ADDRMASK_IPv4)) && 
+    if (Address->Type == IP_ADDRESS_V4 && Prefix->Type == IP_ADDRESS_V4 &&
+        ((Address->Address.IPv4Address & LOOPBACK_ADDRMASK_IPv4) == (LOOPBACK_ADDRESS_IPv4 & LOOPBACK_ADDRMASK_IPv4)) && 
         (Prefix->Address.IPv4Address == LOOPBACK_ADDRESS_IPv4))
         return TRUE;
 

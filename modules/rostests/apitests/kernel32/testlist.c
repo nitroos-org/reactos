@@ -23,6 +23,10 @@ extern void func_IocpCancelStatus(void);
 extern void func_IocpThreadExit(void);
 extern void func_ApplicationRestart(void);
 extern void func_AppModel(void);
+extern void func_AppPolicy(void);
+extern void func_FileMappingFromApp(void);
+extern void func_ThreadpoolEx(void);
+extern void func_CtrlRoutine(void);
 extern void func_CalendarInfo(void);
 extern void func_ConsoleCP(void);
 extern void func_CopyFile2(void);
@@ -159,6 +163,7 @@ extern void func_PipeSqos(void);
 extern void func_PreferredUILanguages(void);
 extern void func_PowerRequest(void);
 extern void func_PrefetchVirtualMemory(void);
+extern void func_RelocatedImageProtection(void);
 extern void func_PrivMoveFileIdentityW(void);
 extern void func_ProcessAffinity(void);
 extern void func_ProcessorNumber(void);
@@ -193,6 +198,7 @@ extern void func_ThreadContextObjects(void);
 extern void func_ThreadFairness(void);
 extern void func_ThreadHandleLeak(void);
 extern void func_ThreadInformation(void);
+extern void func_ThreadStartFrame(void);
 extern void func_ThreadTimesTimerResolution(void);
 extern void func_TunnelCache(void);
 extern void func_VolumeMountPoint(void);
@@ -219,6 +225,9 @@ extern void func_Wow64Environment(void);
 extern void func_Wow64ProgramFiles(void);
 extern void func_Wow64EnvironmentBlock(void);
 extern void func_Wow64ChildEnvironment(void);
+extern void func_ReadFile(void);
+extern void func_SetSearchPathMode(void);
+extern void func_WriteFile(void);
 
 const struct test winetest_testlist[] =
 {
@@ -246,6 +255,10 @@ const struct test winetest_testlist[] =
     { "IocpThreadExit",              func_IocpThreadExit },
     { "ApplicationRestart",          func_ApplicationRestart },
     { "AppModel",                    func_AppModel },
+    { "AppPolicy", func_AppPolicy },
+    { "FileMappingFromApp", func_FileMappingFromApp },
+    { "ThreadpoolEx", func_ThreadpoolEx },
+    { "CtrlRoutine", func_CtrlRoutine },
     { "CalendarInfo",                func_CalendarInfo },
     { "ConsoleCP",                   func_ConsoleCP },
     { "CopyFile2",                   func_CopyFile2 },
@@ -382,6 +395,7 @@ const struct test winetest_testlist[] =
     { "PreferredUILanguages",        func_PreferredUILanguages },
     { "PowerRequest",                func_PowerRequest },
     { "PrefetchVirtualMemory",       func_PrefetchVirtualMemory },
+    { "RelocatedImageProtection",    func_RelocatedImageProtection },
     { "PrivMoveFileIdentityW",       func_PrivMoveFileIdentityW },
     { "ProcessMitigationPolicy",     func_ProcessMitigationPolicy },
     { "PssSnapshot",                 func_PssSnapshot },
@@ -415,6 +429,7 @@ const struct test winetest_testlist[] =
     { "ThreadFairness",              func_ThreadFairness },
     { "ThreadHandleLeak",            func_ThreadHandleLeak },
     { "ThreadInformation",           func_ThreadInformation },
+    { "ThreadStartFrame",            func_ThreadStartFrame },
     { "ThreadTimesTimerResolution",  func_ThreadTimesTimerResolution },
     { "ThreadContextObjects",        func_ThreadContextObjects },
     { "TunnelCache",                 func_TunnelCache },
@@ -437,5 +452,8 @@ const struct test winetest_testlist[] =
     { "XState",                      func_XState },
     { "XStateContext",               func_XStateContext },
     { "SetFileInformationByHandle",  func_SetFileInformationByHandle },
+    { "ReadFile",                    func_ReadFile },
+    { "SetSearchPathMode",           func_SetSearchPathMode },
+    { "WriteFile",                   func_WriteFile },
     { 0, 0 }
 };
