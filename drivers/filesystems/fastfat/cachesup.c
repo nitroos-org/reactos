@@ -89,9 +89,10 @@ Routine Description:
 #ifdef __REACTOS__
     //
     //  Deliberately NOT calling CcRosAllowLazyClose here: the lazy cache map close is ntfsng-only.
-    //  With it, a SetEndOfFile shrink on a file whose map is deferred returns wrong data for the
-    //  kept bytes after the reopen (suspected ValidDataLength vs FileSize take-over). See ticket
-    //  releases/2026.11/backlog/CC-lazy-fat-shrink-deferred-map.md
+    //  It is functionally correct for FAT now (the shrink data loss was MmPurgeSegment dropping a
+    //  dirty page that is only partly in the purged range), but a power cut then leaves far more
+    //  damaged files and directories, and a long autochk, than the synchronous close does.
+    //  See ticket releases/2026.11/backlog/CC-lazy-fat-powercut-damage.md
     //
 #endif
 

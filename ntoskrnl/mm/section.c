@@ -6148,7 +6148,9 @@ MmPurgeSegment(
     _In_ ULONG Length)
 {
     LARGE_INTEGER PurgeStart, PurgeEnd;
+    LONGLONG RangeStart;
     PMM_SECTION_SEGMENT Segment;
+    BOOLEAN Success = TRUE;
 
     PurgeStart.QuadPart = Offset ? Offset->QuadPart : 0LL;
     if (Length && Offset)
@@ -6183,6 +6185,7 @@ MmPurgeSegment(
     }
 
     /* Find byte offset of the page to start */
+    RangeStart = PurgeStart.QuadPart;
     PurgeStart.QuadPart = PAGE_ROUND_DOWN_64(PurgeStart.QuadPart);
 
     while (PurgeStart.QuadPart < PurgeEnd.QuadPart)
@@ -6213,6 +6216,19 @@ MmPurgeSegment(
             continue;
         }
 
+        if (IS_DIRTY_SSE(Entry) &&
+            (PurgeStart.QuadPart < RangeStart || PurgeStart.QuadPart + PAGE_SIZE > PurgeEnd.QuadPart))
+        {
+            /*
+             * Only partly in the range, and dirty: dropping it would lose the bytes of it outside the
+             * range that nobody wrote yet (a file cut in the middle of a page whose cache views are
+             * not mapped any more).  Keep it, and tell the caller it could not purge everything.
+             */
+            Success = FALSE;
+            PurgeStart.QuadPart += PAGE_SIZE;
+            continue;
+        }
+
         if (SHARE_COUNT_FROM_SSE(Entry) > 0)
         {
             /* This page is currently in use. Bad luck */
@@ -6228,10 +6244,9 @@ MmPurgeSegment(
         PurgeStart.QuadPart += PAGE_SIZE;
     }
 
-    /* This page is currently in use. Bad luck */
     MmUnlockSectionSegment(Segment);
     MmDereferenceSegment(Segment);
-    return TRUE;
+    return Success;
 }
 
 BOOLEAN
