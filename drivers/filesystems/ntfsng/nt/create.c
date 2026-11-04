@@ -653,9 +653,9 @@ static NTSTATUS NgPathFromId(PNG_VCB Vcb, PCUNICODE_STRING Id, PUNICODE_STRING P
 }
 
 /*
- * A junction (mount point reparse point) on the path: the open goes back to the I/O manager with
+ * A junction (mount point) or symbolic link on the path: the open goes back to the I/O manager with
  * STATUS_REPARSE and the reparse data, whose Reserved field counts the bytes at the end of the
- * file name that follow the junction.  Other reparse tags open the file itself.  Caller holds CoreLock.
+ * file name that follow the link.  Other reparse tags open the file itself.  Caller holds CoreLock.
  * As is given when the junction is the last component, which is opened through it: the junction's
  * own descriptor has to grant the access asked for first, as on Windows (a junction that denies
  * FILE_LIST_DIRECTORY cannot be listed, but a path below it still resolves on FILE_TRAVERSE).
@@ -666,24 +666,41 @@ static NTSTATUS NgMountPointReparse(PNG_VCB Vcb, ngc_node *Node, PIRP Irp, PFILE
     PREPARSE_DATA_BUFFER Rp, Copy;
     void *Data;
     unsigned int Len;
-    ULONG Path;
+    ULONG Path, Hdr, Sub, SubOff, PrintLen, PrintOff;
 
     if (!ngc_is_reparse(Node) || Tail > FileObject->FileName.Length)
         return STATUS_SUCCESS;
     if (ngc_get_reparse(Node, &Data, &Len))
         return STATUS_SUCCESS;
     Rp = Data;
-    if (Rp->ReparseTag != IO_REPARSE_TAG_MOUNT_POINT)
+    if (Rp->ReparseTag != IO_REPARSE_TAG_MOUNT_POINT && Rp->ReparseTag != IO_REPARSE_TAG_SYMLINK)
     {
         ngc_free(Data);
         return STATUS_SUCCESS;
     }
-    Path = Len - FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer);
-    if (Len < FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer) ||
-        (ULONG)Rp->ReparseDataLength + REPARSE_DATA_BUFFER_HEADER_SIZE != Len ||
-        (ULONG)Rp->MountPointReparseBuffer.SubstituteNameOffset + Rp->MountPointReparseBuffer.SubstituteNameLength > Path ||
-        (ULONG)Rp->MountPointReparseBuffer.PrintNameOffset + Rp->MountPointReparseBuffer.PrintNameLength > Path ||
-        !Rp->MountPointReparseBuffer.SubstituteNameLength)
+    if (Rp->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT)
+    {
+        Hdr = FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer);
+        Sub = Rp->MountPointReparseBuffer.SubstituteNameLength;
+        SubOff = Rp->MountPointReparseBuffer.SubstituteNameOffset;
+        PrintLen = Rp->MountPointReparseBuffer.PrintNameLength;
+        PrintOff = Rp->MountPointReparseBuffer.PrintNameOffset;
+    }
+    else
+    {
+        Hdr = FIELD_OFFSET(REPARSE_DATA_BUFFER, SymbolicLinkReparseBuffer.PathBuffer);
+        Sub = Rp->SymbolicLinkReparseBuffer.SubstituteNameLength;
+        SubOff = Rp->SymbolicLinkReparseBuffer.SubstituteNameOffset;
+        PrintLen = Rp->SymbolicLinkReparseBuffer.PrintNameLength;
+        PrintOff = Rp->SymbolicLinkReparseBuffer.PrintNameOffset;
+    }
+    if (Len < Hdr || (ULONG)Rp->ReparseDataLength + REPARSE_DATA_BUFFER_HEADER_SIZE != Len)
+    {
+        ngc_free(Data);
+        return STATUS_IO_REPARSE_DATA_INVALID;
+    }
+    Path = Len - Hdr;
+    if (SubOff + Sub > Path || PrintOff + PrintLen > Path || !Sub)
     {
         ngc_free(Data);
         return STATUS_IO_REPARSE_DATA_INVALID;
@@ -721,7 +738,7 @@ static NTSTATUS NgMountPointReparse(PNG_VCB Vcb, ngc_node *Node, PIRP Irp, PFILE
     ngc_free(Data);
     Copy->Reserved = (USHORT)Tail;
     Irp->Tail.Overlay.AuxiliaryBuffer = (PCHAR)Copy;
-    Irp->IoStatus.Information = IO_REPARSE_TAG_MOUNT_POINT;
+    Irp->IoStatus.Information = Copy->ReparseTag;
     return STATUS_REPARSE;
 }
 

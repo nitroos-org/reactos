@@ -145,13 +145,13 @@ static const ULONG AdminPrivileges[] =
     SE_IMPERSONATE_PRIVILEGE,
     SE_CREATE_GLOBAL_PRIVILEGE,
     SE_TIME_ZONE_PRIVILEGE,
+    SE_CREATE_SYMBOLIC_LINK_PRIVILEGE,
 };
 
 /* Granted to administrators by Windows' default policy only */
 static const ULONG WindowsOnlyAdminPrivileges[] =
 {
     SE_INC_WORKING_SET_PRIVILEGE,
-    SE_CREATE_SYMBOLIC_LINK_PRIVILEGE,
     SE_DELEGATE_SESSION_USER_IMPERSONATE_PRIVILEGE,
 };
 

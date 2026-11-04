@@ -48,6 +48,7 @@ list(APPEND SOURCE
     CreateRemoteThreadEx.c
     CreateProcess.c
     CreateProcessILOnly.c
+    CreateSymbolicLink.c
     CreateProcessRace.c
     CreateProcessStdHandles.c
     CreateWaitableTimerEx.c
@@ -162,6 +163,8 @@ list(APPEND SOURCE
     PowerRequest.c
     PrefetchVirtualMemory.c
     RelocatedImageProtection.c
+    MoveFileReparse.c
+    ReparseFollow.c
     PrivMoveFileIdentityW.c
     ProcessAffinity.c
     ProcessorNumber.c

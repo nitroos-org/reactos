@@ -83,4 +83,5 @@ BEGIN
     IDS_IMPERSONATE_PRIVILEGE "Impersonează un client după autentificare"
     IDS_CREATE_GLOBAL_PRIVILEGE "Crează obiecte globale"
     IDS_TIME_ZONE_PRIVILEGE "Schimbă fusul orar"
+    IDS_CREATE_SYMBOLIC_LINK_PRIVILEGE "Create symbolic links"
 END
