@@ -866,8 +866,8 @@ RemoveDirectoryW(IN LPCWSTR lpPathName)
         goto MarkFileForDelete;
     }
 
-    /* Check if that's a mount point */
-    if (FileTagInfo.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT)
+    /* Check if that is a mount point or a symbolic link (a name surrogate: the link itself is deleted) */
+    if (!IsReparseTagNameSurrogate(FileTagInfo.ReparseTag))
     {
         /* It's not */
         NtClose(DirectoryHandle);

@@ -48,6 +48,7 @@ list(APPEND SOURCE
     CreateRemoteThreadEx.c
     CreateProcess.c
     CreateProcessILOnly.c
+    CreateSymbolicLink.c
     CreateProcessRace.c
     CreateProcessStdHandles.c
     CreateWaitableTimerEx.c
