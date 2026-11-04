@@ -374,6 +374,8 @@
 @ GetSystemWow64DirectoryW
 @ GetTempFileNameA
 @ GetTempFileNameW
+@ GetTempPath2A -version=0x601+
+@ GetTempPath2W -version=0x601+
 @ GetTempPathA
 @ GetTempPathW
 @ GetThreadContext
@@ -815,6 +817,7 @@
 @ VerifyPackageFullName
 @ VerifyPackageId
 @ VerifyPackageRelativeApplicationId
+@ WerRegisterCustomMetadata -version=0x600+
 @ WerRegisterFile -version=0x600+
 @ WerRegisterMemoryBlock -version=0x600+
 @ WerUnregisterFile -version=0x600+
