@@ -29,6 +29,8 @@ typedef struct _HOST
     HANDLE PipeIn, PipeOut, Signal, ConsoleIn, ConsoleOut, Client;
     SHORT Width, Height;
     CHAR_INFO *Previous, *Current;
+    CONSOLE_EXT_CELL *PreviousExt, *CurrentExt; /* 256-color / 24-bit colors of the cells, same index */
+    BOOL ExtPresent;            /* the server holds extended colors for the buffer */
     BOOL Painted, CursorVisible, SawClient;
     BOOL ScrollbackSeen;        /* ScrollbackTotal says how many rows had scrolled off at the last look */
     ULONGLONG ScrollbackTotal;
@@ -105,6 +107,8 @@ HostScrollbackCall(HOST *Host, HANDLE ConsoleOut, DWORD Flags, ULONGLONG First, 
                         CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepGetScrollback),
                         sizeof(*Request));
     Enabled = NT_SUCCESS(Message.Status) && (Request->Flags & CONSOLE_SCROLLBACK_ENABLED);
+    if (NT_SUCCESS(Message.Status))
+        Host->ExtPresent = (Request->Flags & CONSOLE_SCROLLBACK_EXTCOLORS) != 0;
     if (Enabled)
     {
         *Total = Request->Total;
@@ -117,12 +121,94 @@ HostScrollbackCall(HOST *Host, HANDLE ConsoleOut, DWORD Flags, ULONGLONG First, 
     return Enabled;
 }
 
+/*
+ * The cells of the console buffer only have the 16 console colors. A buffer that was written with
+ * 256-color or 24-bit color sequences also has the exact colors (ConsolepGetExtColors), which the
+ * terminal gets as the same sequences. Rows is the number of rows wanted from First (rows of the
+ * buffer, or rows scrolled off with CONSOLE_EXTCOLORS_SCROLLBACK); the colors of the Host->Width
+ * columns from column Left of a buffer BufferWidth wide go to Cells. What the server has no
+ * colors for stays 0.
+ */
+static VOID
+HostFetchExt(HOST *Host, DWORD Flags, HANDLE ConsoleOut, ULONGLONG First, DWORD Rows,
+             DWORD BufferWidth, DWORD Left, CONSOLE_EXT_CELL *Cells)
+{
+    DWORD Row = 0, Chunk;
+
+    ZeroMemory(Cells, (SIZE_T)Rows * Host->Width * sizeof(*Cells));
+    /* One request carries at most 64 KiB (CSR capture buffer) */
+    if (!BufferWidth || BufferWidth > 32768 / sizeof(CONSOLE_EXT_CELL)) return;
+    Chunk = 32768 / (BufferWidth * sizeof(CONSOLE_EXT_CELL));
+    while (Row < Rows)
+    {
+        CONSOLE_API_MESSAGE Message;
+        PCONSOLE_EXTCOLORS Request = &Message.Data.ExtColorsRequest;
+        PCSR_CAPTURE_BUFFER Capture;
+        DWORD Want = min(Chunk, Rows - Row), Got = 0, Index, Column;
+        SIZE_T Size = (SIZE_T)Want * BufferWidth * sizeof(CONSOLE_EXT_CELL);
+
+        Capture = CsrAllocateCaptureBuffer(1, (ULONG)Size);
+        if (!Capture) return;
+        RtlZeroMemory(&Message, sizeof(Message));
+        CsrAllocateMessagePointer(Capture, (ULONG)Size, (PVOID *)&Request->Cells);
+        Request->ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+        Request->OutputHandle = ConsoleOut;
+        Request->Flags = Flags;
+        Request->First = First + Row;
+        Request->Width = BufferWidth;
+        Request->Count = Want;
+        CsrClientCallServer((PCSR_API_MESSAGE)&Message, Capture,
+                            CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepGetExtColors),
+                            sizeof(*Request));
+        if (NT_SUCCESS(Message.Status) && Request->Count && Request->Count <= Want &&
+            Request->First == First + Row && Request->Width == BufferWidth)
+        {
+            Got = Request->Count;
+            for (Index = 0; Index < Got; ++Index)
+            {
+                const CONSOLE_EXT_CELL *Source = Request->Cells + (SIZE_T)Index * BufferWidth;
+                CONSOLE_EXT_CELL *Destination = Cells + (SIZE_T)(Row + Index) * Host->Width;
+
+                for (Column = 0; Column < (DWORD)Host->Width && Left + Column < BufferWidth; ++Column)
+                    Destination[Column] = Source[Left + Column];
+            }
+        }
+        CsrFreeCaptureBuffer(Capture);
+        if (!Got) return;
+        Row += Got;
+    }
+}
+
+/* A color counts for a cell only while the cell has the 16-color attribute it was written with
+ * (the server cannot see every writer of a cell); what is kept is the kind and the value. */
+static VOID
+HostNormalizeExt(const CHAR_INFO *Cells, CONSOLE_EXT_CELL *Ext, SIZE_T Count)
+{
+    SIZE_T Index;
+
+    for (Index = 0; Index < Count; ++Index)
+    {
+        ULONG Fore = Ext[Index].Fore, Back = Ext[Index].Back;
+        WORD Attribute = Cells[Index].Attributes;
+
+        if (!CONSOLE_EXTCOLOR_KIND(Fore) || CONSOLE_EXTCOLOR_SNAP(Fore) != (ULONG)(Attribute & 0x0F) ||
+            (CONSOLE_EXTCOLOR_KIND(Fore) == CONSOLE_EXTCOLOR_INDEX && CONSOLE_EXTCOLOR_VALUE(Fore) > 255))
+            Fore = 0;
+        if (!CONSOLE_EXTCOLOR_KIND(Back) || CONSOLE_EXTCOLOR_SNAP(Back) != (ULONG)((Attribute >> 4) & 0x0F) ||
+            (CONSOLE_EXTCOLOR_KIND(Back) == CONSOLE_EXTCOLOR_INDEX && CONSOLE_EXTCOLOR_VALUE(Back) > 255))
+            Back = 0;
+        Ext[Index].Fore = Fore ? CONSOLE_EXTCOLOR_MAKE(CONSOLE_EXTCOLOR_KIND(Fore), CONSOLE_EXTCOLOR_VALUE(Fore), 0) : 0;
+        Ext[Index].Back = Back ? CONSOLE_EXTCOLOR_MAKE(CONSOLE_EXTCOLOR_KIND(Back), CONSOLE_EXTCOLOR_VALUE(Back), 0) : 0;
+    }
+}
+
 static BOOL
 HostResize(HOST *Host, SHORT Width, SHORT Height)
 {
     SMALL_RECT Window;
     COORD Size;
     CHAR_INFO *Previous, *Current;
+    CONSOLE_EXT_CELL *PreviousExt, *CurrentExt;
     SIZE_T Count;
 
     if (Width <= 0 || Height <= 0 || (SIZE_T)Width * Height > 1000000)
@@ -130,10 +216,14 @@ HostResize(HOST *Host, SHORT Width, SHORT Height)
     Count = (SIZE_T)Width * Height;
     Previous = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Count * sizeof(*Previous));
     Current = HeapAlloc(GetProcessHeap(), 0, Count * sizeof(*Current));
-    if (!Previous || !Current)
+    PreviousExt = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Count * sizeof(*PreviousExt));
+    CurrentExt = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Count * sizeof(*CurrentExt));
+    if (!Previous || !Current || !PreviousExt || !CurrentExt)
     {
         if (Previous) HeapFree(GetProcessHeap(), 0, Previous);
         if (Current) HeapFree(GetProcessHeap(), 0, Current);
+        if (PreviousExt) HeapFree(GetProcessHeap(), 0, PreviousExt);
+        if (CurrentExt) HeapFree(GetProcessHeap(), 0, CurrentExt);
         return FALSE;
     }
 
@@ -147,6 +237,8 @@ HostResize(HOST *Host, SHORT Width, SHORT Height)
     {
         HeapFree(GetProcessHeap(), 0, Previous);
         HeapFree(GetProcessHeap(), 0, Current);
+        HeapFree(GetProcessHeap(), 0, PreviousExt);
+        HeapFree(GetProcessHeap(), 0, CurrentExt);
         return FALSE;
     }
     SetConsoleWindowInfo(Host->ConsoleOut, TRUE, &Window);
@@ -164,8 +256,12 @@ HostResize(HOST *Host, SHORT Width, SHORT Height)
     }
     if (Host->Previous) HeapFree(GetProcessHeap(), 0, Host->Previous);
     if (Host->Current) HeapFree(GetProcessHeap(), 0, Host->Current);
+    if (Host->PreviousExt) HeapFree(GetProcessHeap(), 0, Host->PreviousExt);
+    if (Host->CurrentExt) HeapFree(GetProcessHeap(), 0, Host->CurrentExt);
     Host->Previous = Previous;
     Host->Current = Current;
+    Host->PreviousExt = PreviousExt;
+    Host->CurrentExt = CurrentExt;
     Host->Width = Width;
     Host->Height = Height;
     Host->Painted = FALSE;
@@ -186,37 +282,53 @@ HostResize(HOST *Host, SHORT Width, SHORT Height)
 #define HOST_IS_LOW_SURROGATE(c)    ((c) >= 0xDC00 && (c) <= 0xDFFF)
 
 /* A cell differs from what the terminal shows of it (Ref NULL: nothing is known of the row) */
-#define HOST_DIFFERS(a, b) ((a)->Char.UnicodeChar != (b)->Char.UnicodeChar || (a)->Attributes != (b)->Attributes)
+#define HOST_DIFFERS(a, b, ea, eb) ((a)->Char.UnicodeChar != (b)->Char.UnicodeChar || (a)->Attributes != (b)->Attributes || \
+                                    (ea)->Fore != (eb)->Fore || (ea)->Back != (eb)->Back)
 
 static BOOL
-HostCellChanged(HOST *Host, const CHAR_INFO *Cells, const CHAR_INFO *Ref, DWORD Column)
+HostCellChanged(HOST *Host, const CHAR_INFO *Cells, const CONSOLE_EXT_CELL *Ext,
+                const CHAR_INFO *Ref, const CONSOLE_EXT_CELL *RefExt, DWORD Column)
 {
     if (!Ref) return TRUE;
-    if (HOST_DIFFERS(&Cells[Column], &Ref[Column])) return TRUE;
+    if (HOST_DIFFERS(&Cells[Column], &Ref[Column], &Ext[Column], &RefExt[Column])) return TRUE;
     /* Both halves of a pair are painted together, so a change of either repaints both */
     if (HOST_IS_HIGH_SURROGATE(Cells[Column].Char.UnicodeChar) && Column + 1 < (DWORD)Host->Width &&
         HOST_IS_LOW_SURROGATE(Cells[Column + 1].Char.UnicodeChar))
-        return HOST_DIFFERS(&Cells[Column + 1], &Ref[Column + 1]);
+        return HOST_DIFFERS(&Cells[Column + 1], &Ref[Column + 1], &Ext[Column + 1], &RefExt[Column + 1]);
     if (HOST_IS_LOW_SURROGATE(Cells[Column].Char.UnicodeChar) && Column > 0 &&
         HOST_IS_HIGH_SURROGATE(Cells[Column - 1].Char.UnicodeChar))
-        return HOST_DIFFERS(&Cells[Column - 1], &Ref[Column - 1]);
+        return HOST_DIFFERS(&Cells[Column - 1], &Ref[Column - 1], &Ext[Column - 1], &RefExt[Column - 1]);
     return FALSE;
+}
+
+/* The SGR parameter that sets a color: Base is 30 (foreground) or 40 (background) */
+static DWORD
+HostFormatColor(CHAR *Out, UINT Base, WORD Attribute, UINT Shift, ULONG Ext)
+{
+    static const BYTE Palette[8] = {0, 4, 2, 6, 1, 5, 3, 7};
+
+    if (CONSOLE_EXTCOLOR_KIND(Ext) == CONSOLE_EXTCOLOR_INDEX)
+        return sprintf(Out, "%u;5;%lu", Base + 8, (ULONG)CONSOLE_EXTCOLOR_VALUE(Ext));
+    if (CONSOLE_EXTCOLOR_KIND(Ext) == CONSOLE_EXTCOLOR_RGB)
+        return sprintf(Out, "%u;2;%lu;%lu;%lu", Base + 8, (ULONG)((Ext >> 16) & 0xFF),
+                       (ULONG)((Ext >> 8) & 0xFF), (ULONG)(Ext & 0xFF));
+    return sprintf(Out, "%u", (UINT)(Base + Palette[(Attribute >> Shift) & 7] + (((Attribute >> Shift) & 8) ? 60 : 0)));
 }
 
 /* The escape sequences that paint the cells of one terminal row that differ from Ref, appended to
  * Line at Used; the new length is returned. */
 static DWORD
-HostPaintRow(HOST *Host, DWORD Row, const CHAR_INFO *Cells, const CHAR_INFO *Ref, CHAR *Line, DWORD Used,
-             BOOL *Changed)
+HostPaintRow(HOST *Host, DWORD Row, const CHAR_INFO *Cells, const CONSOLE_EXT_CELL *Ext,
+             const CHAR_INFO *Ref, const CONSOLE_EXT_CELL *RefExt, CHAR *Line, DWORD Used, BOOL *Changed)
 {
-    static const BYTE Palette[8] = {0, 4, 2, 6, 1, 5, 3, 7};
     DWORD Column, Length;
     WORD Attribute = 0xffff;
+    ULONG Fore = 0, Back = 0;
     CHAR Utf8[8];
 
     for (Column = 0; Column < (DWORD)Host->Width; ++Column)
     {
-        if (!HostCellChanged(Host, Cells, Ref, Column))
+        if (!HostCellChanged(Host, Cells, Ext, Ref, RefExt, Column))
             continue;
 
         *Changed = TRUE;
@@ -224,14 +336,18 @@ HostPaintRow(HOST *Host, DWORD Row, const CHAR_INFO *Cells, const CHAR_INFO *Ref
         do
         {
             WCHAR Character;
-            if (!HostCellChanged(Host, Cells, Ref, Column))
+            if (!HostCellChanged(Host, Cells, Ext, Ref, RefExt, Column))
                 break;
-            if (Attribute != Cells[Column].Attributes)
+            if (Attribute != Cells[Column].Attributes || Fore != Ext[Column].Fore || Back != Ext[Column].Back)
             {
                 Attribute = Cells[Column].Attributes;
-                Used += sprintf(Line + Used, "\033[%u;%um",
-                                (UINT)(30 + Palette[Attribute & 7] + ((Attribute & 8) ? 60 : 0)),
-                                (UINT)(40 + Palette[(Attribute >> 4) & 7] + ((Attribute & 128) ? 60 : 0)));
+                Fore = Ext[Column].Fore;
+                Back = Ext[Column].Back;
+                Used += sprintf(Line + Used, "\033[");
+                Used += HostFormatColor(Line + Used, 30, Attribute, 0, Fore);
+                Line[Used++] = ';';
+                Used += HostFormatColor(Line + Used, 40, Attribute, 4, Back);
+                Line[Used++] = 'm';
             }
             Character = Cells[Column].Char.UnicodeChar;
             if (!Character || Character < 32) Character = L' ';
@@ -270,13 +386,16 @@ HostPaintRow(HOST *Host, DWORD Row, const CHAR_INFO *Cells, const CHAR_INFO *Ref
  * the current frame. Lost: older rows were dropped by the server before the host asked, the
  * terminal's screen then goes to its scrollback as it is. */
 static BOOL
-HostPaintScrolled(HOST *Host, const CHAR_INFO *History, DWORD Rows, BOOL Lost, CHAR *Line)
+HostPaintScrolled(HOST *Host, const CHAR_INFO *History, const CONSOLE_EXT_CELL *HistoryExt, DWORD Rows, BOOL Lost,
+                  CHAR *Line)
 {
     DWORD Row, Used, Height = (DWORD)Host->Height;
     BOOL Changed = FALSE;
 
 #define HOST_FRAME_ROW(Index) ((Index) < Rows ? History + (SIZE_T)(Index) * Host->Width \
                                               : Host->Current + (SIZE_T)((Index) - Rows) * Host->Width)
+#define HOST_FRAME_EXT(Index) ((Index) < Rows ? HistoryExt + (SIZE_T)(Index) * Host->Width \
+                                              : Host->CurrentExt + (SIZE_T)((Index) - Rows) * Host->Width)
     if (Lost)
     {
         /* Not a single row of what the terminal shows is known to be among the new ones */
@@ -287,18 +406,21 @@ HostPaintScrolled(HOST *Host, const CHAR_INFO *History, DWORD Rows, BOOL Lost, C
     /* The terminal's screen becomes the rows that stay in view until the first one scrolls away... */
     Used = 0;
     for (Row = 0; Row < Height; ++Row)
-        Used = HostPaintRow(Host, Row, HOST_FRAME_ROW(Row), Lost ? NULL : Host->Previous + (SIZE_T)Row * Host->Width,
-                            Line, Used, &Changed);
+        Used = HostPaintRow(Host, Row, HOST_FRAME_ROW(Row), HOST_FRAME_EXT(Row),
+                            Lost ? NULL : Host->Previous + (SIZE_T)Row * Host->Width,
+                            Host->PreviousExt + (SIZE_T)Row * Host->Width, Line, Used, &Changed);
     if (Used && !HostWrite(Host, Line, Used)) return FALSE;
     /* ...and every row that scrolled off pushes the top row into the terminal's scrollback and brings the next in */
     for (Row = 0; Row < Rows; ++Row)
     {
         /* The default colours first: a terminal may fill the row that scrolls in with the current background */
         Used = sprintf(Line, "\033[0m\033[%lu;1H\n", Height);
-        Used = HostPaintRow(Host, Height - 1, HOST_FRAME_ROW(Row + Height), NULL, Line, Used, &Changed);
+        Used = HostPaintRow(Host, Height - 1, HOST_FRAME_ROW(Row + Height), HOST_FRAME_EXT(Row + Height),
+                            NULL, NULL, Line, Used, &Changed);
         if (!HostWrite(Host, Line, Used)) return FALSE;
     }
 #undef HOST_FRAME_ROW
+#undef HOST_FRAME_EXT
     return TRUE;
 }
 
@@ -343,6 +465,7 @@ HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
     CONSOLE_SCREEN_BUFFER_INFO Info;
     CONSOLE_CURSOR_INFO CursorInfo;
     CHAR_INFO *History = NULL;
+    CONSOLE_EXT_CELL *HistoryExt = NULL;
     CHAR *Line;
     DWORD Row, Rows = 0, Attempt, Chunk, Got;
     BOOL Changed = FALSE, Keeps, Lost = FALSE;
@@ -360,6 +483,15 @@ HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
         if (!Keeps || Attempt >= 8) break;
         if (!HostScrollbackCall(Host, ConsoleOut, 0, 0, 0, NULL, &Again, &First, &Got) || Again == Total) break;
     }
+    /* The exact colors of what the frame shows (the cells have the nearest 16 colors) */
+    if (Host->ExtPresent)
+    {
+        HostFetchExt(Host, 0, ConsoleOut, (ULONGLONG)(ULONG)Info.srWindow.Top, Host->Height,
+                     (DWORD)Info.dwSize.X, (DWORD)Info.srWindow.Left, Host->CurrentExt);
+        HostNormalizeExt(Host->Current, Host->CurrentExt, (SIZE_T)Host->Width * Host->Height);
+    }
+    else
+        ZeroMemory(Host->CurrentExt, (SIZE_T)Host->Width * Host->Height * sizeof(*Host->CurrentExt));
     if (Keeps)
     {
         if (Host->Painted && Host->ScrollbackSeen && Total > Host->ScrollbackTotal)
@@ -372,6 +504,12 @@ HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
                 Lost = First != Total - Wanted;
                 Wanted = Total - First;
                 History = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)Wanted * Host->Width * sizeof(*History));
+                HistoryExt = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)Wanted * Host->Width * sizeof(*HistoryExt));
+                if (History && !HistoryExt)
+                {
+                    HeapFree(GetProcessHeap(), 0, History);
+                    History = NULL;
+                }
                 if (History)
                 {
                     Chunk = 32768 / ((DWORD)Host->Width * sizeof(CHAR_INFO));
@@ -393,6 +531,14 @@ HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
                         History = NULL;
                         Rows = 0;
                     }
+                    else if (Host->ExtPresent)
+                    {
+                        HostFetchExt(Host, CONSOLE_EXTCOLORS_SCROLLBACK, ConsoleOut, First, Rows,
+                                     Host->Width, 0, HistoryExt);
+                        HostNormalizeExt(History, HistoryExt, (SIZE_T)Rows * Host->Width);
+                    }
+                    else
+                        ZeroMemory(HistoryExt, (SIZE_T)Rows * Host->Width * sizeof(*HistoryExt));
                 }
             }
         }
@@ -402,17 +548,25 @@ HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
     else
         Host->ScrollbackSeen = FALSE;
 
+    if (!Rows && HistoryExt)
+    {
+        HeapFree(GetProcessHeap(), 0, HistoryExt);
+        HistoryExt = NULL;
+    }
+
     Line = HeapAlloc(GetProcessHeap(), 0, HOST_LINE_SIZE(Host));
     if (!Line)
     {
         if (History) HeapFree(GetProcessHeap(), 0, History);
+        if (HistoryExt) HeapFree(GetProcessHeap(), 0, HistoryExt);
         return FALSE;
     }
     if (Rows)
     {
-        BOOL Result = HostPaintScrolled(Host, History, Rows, Lost, Line);
+        BOOL Result = HostPaintScrolled(Host, History, HistoryExt, Rows, Lost, Line);
 
         HeapFree(GetProcessHeap(), 0, History);
+        HeapFree(GetProcessHeap(), 0, HistoryExt);
         if (!Result)
         {
             HeapFree(GetProcessHeap(), 0, Line);
@@ -425,7 +579,9 @@ HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
         for (Row = 0; Row < (DWORD)Host->Height; ++Row)
         {
             DWORD Used = HostPaintRow(Host, Row, Host->Current + (SIZE_T)Row * Host->Width,
+                                      Host->CurrentExt + (SIZE_T)Row * Host->Width,
                                       Host->Painted ? Host->Previous + (SIZE_T)Row * Host->Width : NULL,
+                                      Host->PreviousExt + (SIZE_T)Row * Host->Width,
                                       Line, 0, &Changed);
 
             if (Used && !HostWrite(Host, Line, Used))
@@ -438,6 +594,8 @@ HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
     HeapFree(GetProcessHeap(), 0, Line);
     CopyMemory(Host->Previous, Host->Current,
                (SIZE_T)Host->Width * Host->Height * sizeof(*Host->Current));
+    CopyMemory(Host->PreviousExt, Host->CurrentExt,
+               (SIZE_T)Host->Width * Host->Height * sizeof(*Host->CurrentExt));
     Host->Painted = TRUE;
     if (GetConsoleCursorInfo(ConsoleOut, &CursorInfo))
     {

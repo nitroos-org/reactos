@@ -6,6 +6,7 @@
  */
 
 #include "precomp.h"
+#include <ndk/pstypes.h>
 
 /*
  * Every console request goes through CSR, and under WoW64 through a translation of the i386
@@ -593,6 +594,313 @@ TestBeep(VOID)
     ok(Status == 0, "BasepSoundSentryNotification returned %08lx\n", Status);
 }
 
+/*
+ * The private requests of NitroOS with which a console host reads what the buffer cannot give
+ * through the Windows API: the rows that scrolled off (ConsolepGetScrollback) and the 256-color
+ * and 24-bit colors of the cells (ConsolepGetExtColors). A client can send any request of the
+ * console server, so each is sent raw, well-formed and forged (counts, flags, widths, a missing
+ * or short capture buffer, a bad handle), and the memory a console may make the server spend on
+ * them is probed. ReactOS only; the layout is that of the native request, so not under WoW64.
+ */
+#define RAW_GETSCROLLBACK   ((2 << 16) | 599)   /* CONSRV_SERVERDLL_INDEX, ConsolepGetScrollback */
+#define RAW_GETEXTCOLORS    ((2 << 16) | 600)   /* ConsolepGetExtColors */
+
+typedef struct
+{
+    HANDLE ConsoleHandle;
+    HANDLE OutputHandle;
+    ULONGLONG First;
+    ULONGLONG Total;
+    ULONG Flags;
+    ULONG Width;
+    ULONG Count;
+    PVOID Cells;
+} RAW_SCROLLBACK;
+
+typedef struct
+{
+    HANDLE ConsoleHandle;
+    HANDLE OutputHandle;
+    ULONGLONG First;
+    ULONG Flags;
+    ULONG Width;
+    ULONG Count;
+    PVOID Cells;
+} RAW_EXTCOLORS;
+
+typedef struct
+{
+    ULONG Fore;
+    ULONG Back;
+} RAW_EXTCELL;
+
+typedef PVOID (NTAPI *PALLOCCAPTURE)(ULONG, ULONG);
+typedef ULONG (NTAPI *PALLOCPOINTER)(PVOID, ULONG, PVOID *);
+typedef VOID (NTAPI *PFREECAPTURE)(PVOID);
+typedef LONG (NTAPI *PCSRCALL)(PVOID, PVOID, ULONG, ULONG);
+
+static PALLOCCAPTURE pAllocCapture;
+static PALLOCPOINTER pAllocPointer;
+static PFREECAPTURE pFreeCapture;
+static PCSRCALL pCall;
+
+/* Send Request (RequestSize bytes) with a capture buffer of CaptureSize bytes (0: none) that the
+ * pointer at DataOffset of the request points into; ReplyShort says how much of it comes back in Data. */
+static
+LONG
+RawConsoleCall(
+    _In_ ULONG Api,
+    _Inout_ PVOID Request,
+    _In_ ULONG RequestSize,
+    _In_ ULONG DataOffset,
+    _In_ ULONG CaptureSize,
+    _Out_opt_ PVOID Data,
+    _In_ ULONG DataSize)
+{
+    struct
+    {
+        CHAR Header[sizeof(PVOID) == 8 ? 40 : 24]; /* PORT_MESSAGE */
+        PVOID CaptureData;
+        ULONG ApiNumber;
+        LONG Status;
+        ULONG Reserved;
+        ULONGLONG Data[32];
+    } Message;
+    PVOID Capture = NULL;
+    LONG Status;
+
+    RtlZeroMemory(&Message, sizeof(Message));
+    RtlCopyMemory(Message.Data, Request, RequestSize);
+    if (CaptureSize)
+    {
+        Capture = pAllocCapture(1, CaptureSize);
+        if (!Capture) return (LONG)0xC0000017;
+        pAllocPointer(Capture, CaptureSize, (PVOID *)((PUCHAR)Message.Data + DataOffset));
+    }
+    Status = pCall(&Message, Capture, Api, RequestSize);
+    RtlCopyMemory(Request, Message.Data, RequestSize);
+    if (Status >= 0 && Capture && Data && DataSize)
+        RtlCopyMemory(Data, *(PVOID *)((PUCHAR)Request + DataOffset), DataSize);
+    if (Capture) pFreeCapture(Capture);
+    return Status;
+}
+
+#define RAW_STATUS_INVALID_PARAMETER ((LONG)0xC000000D)
+
+static
+LONG
+RawExtColors(
+    _In_ HANDLE Output,
+    _In_ ULONG Flags,
+    _In_ ULONGLONG First,
+    _In_ ULONG Width,
+    _In_ ULONG Count,
+    _In_ ULONG CaptureSize,
+    _Out_opt_ RAW_EXTCELL *Cells,
+    _Out_opt_ ULONG *Returned)
+{
+    RAW_EXTCOLORS Request;
+    LONG Status;
+
+    RtlZeroMemory(&Request, sizeof(Request));
+    Request.ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+    Request.OutputHandle = Output;
+    Request.Flags = Flags;
+    Request.First = First;
+    Request.Width = Width;
+    Request.Count = Count;
+    Status = RawConsoleCall(RAW_GETEXTCOLORS, &Request, sizeof(Request), FIELD_OFFSET(RAW_EXTCOLORS, Cells),
+                            CaptureSize, Cells, Cells ? CaptureSize : 0);
+    if (Returned) *Returned = Request.Count;
+    return Status;
+}
+
+static
+LONG
+RawScrollback(
+    _In_ HANDLE Output,
+    _In_ ULONG Flags,
+    _In_ ULONG Width,
+    _In_ ULONG Count,
+    _In_ ULONG CaptureSize,
+    _Out_ ULONG *OutFlags)
+{
+    RAW_SCROLLBACK Request;
+    LONG Status;
+
+    RtlZeroMemory(&Request, sizeof(Request));
+    Request.ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+    Request.OutputHandle = Output;
+    Request.Flags = Flags;
+    Request.Width = Width;
+    Request.Count = Count;
+    Status = RawConsoleCall(RAW_GETSCROLLBACK, &Request, sizeof(Request), FIELD_OFFSET(RAW_SCROLLBACK, Cells),
+                            CaptureSize, NULL, 0);
+    *OutFlags = Request.Flags;
+    return Status;
+}
+
+static
+VOID
+TestExtColorsRequests(VOID)
+{
+    CONSOLE_SCREEN_BUFFER_INFO Info;
+    static const CHAR Text[] = "\x1b[38;2;10;20;30mA\x1b[48;5;200mB\x1b[0mC\x1b[38;5;9mD";
+    RAW_EXTCELL *Cells;
+    HANDLE Buffers[8];
+    WORD Attributes[4];
+    COORD Origin = {0, 0};
+    DWORD Written, Mode, Index, Enabled = 0, Flags;
+    ULONG Width, Returned, Size, Fore, Back;
+    LONG Status;
+    BOOL IsWow64 = FALSE;
+
+    pAllocCapture = (PVOID)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "CsrAllocateCaptureBuffer");
+    pAllocPointer = (PVOID)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "CsrAllocateMessagePointer");
+    pFreeCapture = (PVOID)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "CsrFreeCaptureBuffer");
+    pCall = (PVOID)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "CsrClientCallServer");
+    IsWow64Process(GetCurrentProcess(), &IsWow64);
+    if (!is_reactos() || IsWow64 || !pAllocCapture || !pAllocPointer || !pFreeCapture || !pCall)
+    {
+        skip("The raw requests of the pseudoconsole host are for the native ReactOS server\n");
+        return;
+    }
+
+    /* The colors a client sets with the sequences are kept per cell... */
+    ok(GetConsoleMode(hOut, &Mode), "GetConsoleMode failed with %lu\n", GetLastError());
+    ok(SetConsoleMode(hOut, Mode | 0x0004), "SetConsoleMode(VT) failed with %lu\n", GetLastError());
+    SetConsoleTextAttribute(hOut, 0x07);
+    ok(SetConsoleCursorPosition(hOut, Origin), "SetConsoleCursorPosition failed with %lu\n", GetLastError());
+    ok(WriteConsoleA(hOut, Text, lstrlenA(Text), &Written, NULL), "WriteConsoleA failed with %lu\n", GetLastError());
+    GetConsoleScreenBufferInfo(hOut, &Info);
+    Width = Info.dwSize.X;
+    Size = Width * sizeof(RAW_EXTCELL);
+    Cells = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size);
+
+    /* ...with the nearest console color left in the cell */
+    ok(ReadConsoleOutputAttribute(hOut, Attributes, 4, Origin, &Written) && Written == 4,
+       "ReadConsoleOutputAttribute failed with %lu\n", GetLastError());
+    ok(((Attributes[1] >> 4) & 0x0F) != 0, "The 256-color background left no console color in the cell: %04x\n", Attributes[1]);
+    ok(Attributes[2] == 0x07, "Colors leaked into the cell after SGR 0: %04x\n", Attributes[2]);
+    ok((Attributes[3] & 0x0F) == 0x0C, "38;5;9 is not bright red: %04x\n", Attributes[3]);
+
+    Returned = 0;
+    Status = RawExtColors(hOut, 0, 0, Width, 1, Size, Cells, &Returned);
+    ok(Status == 0, "ConsolepGetExtColors returned %08lx\n", Status);
+    ok(Returned == 1, "ConsolepGetExtColors returned %lu rows\n", Returned);
+    Fore = Cells[0].Fore;
+    Back = Cells[1].Back;
+    ok(((Fore >> 24) & 3) == 2 && (Fore & 0xFFFFFF) == 0x0A141E, "A: foreground %08lx\n", Fore);
+    ok(((Fore >> 26) & 0xF) == (ULONG)(Attributes[0] & 0x0F), "A: foreground does not carry the color of the cell: %08lx %04x\n", Fore, Attributes[0]);
+    ok(((Back >> 24) & 3) == 1 && (Back & 0xFFFFFF) == 200, "B: background %08lx\n", Back);
+    ok(Cells[2].Fore == 0 && Cells[2].Back == 0, "C (after SGR 0) has colors %08lx %08lx\n", Cells[2].Fore, Cells[2].Back);
+    ok(Cells[3].Fore == 0, "D (palette entry 9) has an extended color %08lx\n", Cells[3].Fore);
+
+    /* a legacy writer of the cells takes their extended colors away */
+    ok(WriteConsoleOutputAttribute(hOut, Attributes, 2, Origin, &Written), "WriteConsoleOutputAttribute failed\n");
+    Status = RawExtColors(hOut, 0, 0, Width, 1, Size, Cells, &Returned);
+    ok(Status == 0 && Cells[0].Fore == 0 && Cells[1].Back == 0, "Extended colors survived WriteConsoleOutputAttribute: %08lx %08lx\n",
+       Cells[0].Fore, Cells[1].Back);
+
+    /* the colors move with the cells: ScrollConsoleScreenBuffer, then a larger buffer */
+    {
+        static const CHAR Move[] = "\x1b[38;2;7;8;9mS\x1b[0m";
+        COORD Row5 = {0, 5};
+        SMALL_RECT Source = {0, 5, 0, 5};
+        COORD Row7 = {0, 7}, NewSize;
+        CHAR_INFO Fill;
+
+        Fill.Char.UnicodeChar = L' ';
+        Fill.Attributes = 0x07;
+        ok(SetConsoleCursorPosition(hOut, Row5) && WriteConsoleA(hOut, Move, lstrlenA(Move), &Written, NULL),
+           "Writing a colored cell failed with %lu\n", GetLastError());
+        Status = RawExtColors(hOut, 0, 5, Width, 1, Size, Cells, &Returned);
+        ok(Status == 0 && Returned == 1 && (Cells[0].Fore & 0xFFFFFF) == 0x070809 && ((Cells[0].Fore >> 24) & 3) == 2,
+           "The colored cell has %08lx (%08lx, %lu rows)\n", Cells[0].Fore, Status, Returned);
+        ok(ScrollConsoleScreenBufferW(hOut, &Source, NULL, Row7, &Fill), "ScrollConsoleScreenBuffer failed with %lu\n", GetLastError());
+        Status = RawExtColors(hOut, 0, 7, Width, 1, Size, Cells, &Returned);
+        ok(Status == 0 && Returned == 1 && (Cells[0].Fore & 0xFFFFFF) == 0x070809,
+           "The color did not move with the cell: %08lx (%08lx)\n", Cells[0].Fore, Status);
+        Status = RawExtColors(hOut, 0, 5, Width, 1, Size, Cells, &Returned);
+        ok(Status == 0 && Cells[0].Fore == 0, "The vacated cell kept its color: %08lx\n", Cells[0].Fore);
+
+        NewSize.X = (SHORT)Width + 1;
+        NewSize.Y = Info.dwSize.Y;
+        ok(SetConsoleScreenBufferSize(hOut, NewSize), "SetConsoleScreenBufferSize failed with %lu\n", GetLastError());
+        Status = RawExtColors(hOut, 0, 7, Width + 1, 1, (Width + 1) * sizeof(RAW_EXTCELL), NULL, &Returned);
+        ok(Status == 0, "ConsolepGetExtColors after the resize: %08lx\n", Status);
+        {
+            RAW_EXTCELL *Wider = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (Width + 1) * sizeof(RAW_EXTCELL));
+
+            Status = RawExtColors(hOut, 0, 7, Width + 1, 1, (Width + 1) * sizeof(RAW_EXTCELL), Wider, &Returned);
+            ok(Status == 0 && Returned == 1 && (Wider[0].Fore & 0xFFFFFF) == 0x070809,
+               "The color did not survive the resize: %08lx (%08lx, %lu rows)\n", Wider[0].Fore, Status, Returned);
+            HeapFree(GetProcessHeap(), 0, Wider);
+        }
+        /* the old width is not the buffer's any more */
+        Status = RawExtColors(hOut, 0, 7, Width, 1, Size, NULL, &Returned);
+        ok(Status == RAW_STATUS_INVALID_PARAMETER, "The width before the resize was accepted: %08lx\n", Status);
+        NewSize.X = (SHORT)Width;
+        SetConsoleScreenBufferSize(hOut, NewSize);
+    }
+
+    /* forged requests */
+    Status = RawExtColors(hOut, 0, 0, Width, 0, 0, NULL, &Returned);
+    ok(Status == 0 && Returned == 0, "Count 0: %08lx, %lu rows\n", Status, Returned);
+    Status = RawExtColors(hOut, 0, 0, Width, 2049, Size, NULL, &Returned);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "Count over the limit: %08lx\n", Status);
+    Status = RawExtColors(hOut, 0x80, 0, Width, 1, Size, NULL, &Returned);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "Unknown flag: %08lx\n", Status);
+    Status = RawExtColors(hOut, 0, 0, Width + 1, 1, (Width + 1) * sizeof(RAW_EXTCELL), NULL, &Returned);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "Wrong width: %08lx\n", Status);
+    Status = RawExtColors(hOut, 0, 0, Width, 1, 0, NULL, &Returned);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "No capture buffer: %08lx\n", Status);
+    Status = RawExtColors(hOut, 0, 0, Width, 3, Size, NULL, &Returned);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "A capture buffer too short for the rows: %08lx\n", Status);
+    Status = RawExtColors(hOut, 0, 0, 0xFFFFFFFF, 2048, Size, NULL, &Returned);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "Overflowing size: %08lx\n", Status);
+    Status = RawExtColors((HANDLE)(ULONG_PTR)0x7FFC, 0, 0, Width, 1, Size, NULL, &Returned);
+    ok(Status != 0, "A bad handle succeeded\n");
+    Status = RawExtColors(hOut, 0, 0x7FFFFFFFFFFFFFFFULL, Width, 1, Size, Cells, &Returned);
+    ok(Status == 0 && Returned == 0, "A first row beyond the buffer: %08lx, %lu rows\n", Status, Returned);
+    Status = RawExtColors(hOut, 1, 0x7FFFFFFFFFFFFFFFULL, Width, 1, Size, Cells, &Returned);
+    ok(Status == 0 && Returned == 0, "A first scrollback row beyond the buffer: %08lx, %lu rows\n", Status, Returned);
+
+    /* the same for the scrollback request */
+    Status = RawScrollback(hOut, 0, Width, 2049, Size, &Flags);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "Scrollback, count over the limit: %08lx\n", Status);
+    Status = RawScrollback(hOut, 0x80, Width, 1, Size, &Flags);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "Scrollback, unknown flag: %08lx\n", Status);
+    Status = RawScrollback(hOut, 0, Width + 1, 1, (Width + 1) * sizeof(CHAR_INFO), &Flags);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "Scrollback, wrong width: %08lx\n", Status);
+    Status = RawScrollback(hOut, 0, Width, 1, 0, &Flags);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "Scrollback, no capture buffer: %08lx\n", Status);
+    Status = RawScrollback(hOut, 0, Width, 3, Width * sizeof(CHAR_INFO), &Flags);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "Scrollback, a capture buffer too short: %08lx\n", Status);
+    Status = RawScrollback((HANDLE)(ULONG_PTR)0x7FFC, 0, Width, 0, 0, &Flags);
+    ok(Status != 0, "Scrollback, a bad handle succeeded\n");
+
+    /* what a console may make the server keep is limited: rows for 1024 columns are 8 MB, a console
+     * has room for four of those (and the colors of the cells count too) */
+    for (Index = 0; Index < _countof(Buffers); ++Index)
+    {
+        COORD Wide = {1024, 200};
+
+        Buffers[Index] = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                   NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
+        if (Buffers[Index] == INVALID_HANDLE_VALUE) continue;
+        ok(SetConsoleScreenBufferSize(Buffers[Index], Wide), "SetConsoleScreenBufferSize failed with %lu\n", GetLastError());
+        Flags = 0;
+        Status = RawScrollback(Buffers[Index], 1, 1024, 0, 0, &Flags);
+        if (Status == 0 && (Flags & 1)) ++Enabled;
+    }
+    trace("%lu of %u wide buffers got scrollback rows\n", Enabled, (UINT)_countof(Buffers));
+    ok(Enabled >= 1 && Enabled <= 4, "%lu buffers of one console were given 8 MB of scrollback rows each\n", Enabled);
+    for (Index = 0; Index < _countof(Buffers); ++Index)
+        if (Buffers[Index] != INVALID_HANDLE_VALUE) CloseHandle(Buffers[Index]);
+    HeapFree(GetProcessHeap(), 0, Cells);
+}
+
 static
 VOID
 TestAllocConsole(VOID)
@@ -640,6 +948,7 @@ RunChild(VOID)
     TestAliasesAndHistory();
     TestWindowRequests();
     TestBeep();
+    TestExtColorsRequests();
 
     ok(CloseHandle(hOut), "CloseHandle(screen buffer) failed with %lu\n", GetLastError());
     ok(CloseHandle(hIn), "CloseHandle(CONIN$) failed with %lu\n", GetLastError());
