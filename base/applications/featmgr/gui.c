@@ -157,7 +157,7 @@ static void Populate(LPCWSTR keepId)
         ListView_InsertItem(g_hList, &it);
 
         StringCchPrintfW(buf, ARRAYSIZE(buf), L"%s%s", FmStateStr(g_arr[i].State),
-                         g_arr[i].PayloadAvailable ? L"" : L" (deferred)");
+                         g_arr[i].PayloadAvailable ? L"" : g_arr[i].Unavailable[0] ? L" (not available)" : L" (deferred)");
         ListView_SetItemText(g_hList, row, 1, buf);
         ListView_SetItemText(g_hList, row, 2, g_arr[i].Version);
         ListView_SetItemText(g_hList, row, 3, g_arr[i].InstalledVersion);
@@ -165,7 +165,9 @@ static void Populate(LPCWSTR keepId)
         ListView_SetItemText(g_hList, row, 5, g_arr[i].Source);
 
         buf[0] = L'\0';
-        if (!g_arr[i].Removable)
+        if (g_arr[i].BuiltIn)
+            StringCchCatW(buf, ARRAYSIZE(buf), L"Included in this image");
+        else if (!g_arr[i].Removable)
             StringCchCatW(buf, ARRAYSIZE(buf), L"Base component");
         else if (g_arr[i].State != FM_STATE_NOT_INSTALLED)
         {
@@ -305,8 +307,17 @@ static void UpdateButtons(void)
             StringCchCatW(text, ARRAYSIZE(text), L"\r\nCannot be turned off or uninstalled while enabled features depend on it: ");
             StringCchCatW(text, ARRAYSIZE(text), dep);
         }
-        if (!f->PayloadAvailable && f->State != FM_STATE_ENABLED)
+        if (!f->PayloadAvailable && f->State != FM_STATE_ENABLED && f->Unavailable[0])
+        {
+            StringCchCatW(text, ARRAYSIZE(text), L"\r\n");
+            StringCchCatW(text, ARRAYSIZE(text), f->Unavailable);
+        }
+        else if (!f->PayloadAvailable && f->State != FM_STATE_ENABLED)
             StringCchCatW(text, ARRAYSIZE(text), L"\r\nPayload not staged on this system (deferred).");
+        else if (f->Hosted && f->State != FM_STATE_ENABLED)
+            StringCchPrintfW(text + wcslen(text), ARRAYSIZE(text) - wcslen(text),
+                             L"\r\nDownloaded when turned on (%I64u MB, SHA-256 checked).",
+                             (FmHostedDownloadSize(f->ManifestPath) + (1u << 20) - 1) >> 20);
         SetWindowTextW(g_hDesc, text);
     }
     else
@@ -984,14 +995,15 @@ static void OnOsCheck(int row, BOOL nowChecked)
     f = &g_arr[it.lParam];
 
     if (!nowChecked && f->State == FM_STATE_ENABLED && !f->Removable)
-        why = L"is a base component of the system and cannot be turned off.";
+        why = f->BuiltIn ? L"is included in this NitroOS image and cannot be turned off here."
+                         : L"is a base component of the system and cannot be turned off.";
     else if (nowChecked && f->State != FM_STATE_ENABLED && !f->PayloadAvailable)
-        why = L"has a deferred payload that is not staged on this system yet.";
+        why = f->Unavailable[0] ? f->Unavailable : L"has a deferred payload that is not staged on this system yet.";
 
     if (why)
     {
-        WCHAR msg[256];
-        StringCchPrintfW(msg, ARRAYSIZE(msg), L"'%s' %s", f->Name, why);
+        WCHAR msg[512];
+        StringCchPrintfW(msg, ARRAYSIZE(msg), (why == f->Unavailable) ? L"'%s': %s" : L"'%s' %s", f->Name, why);
         g_reverting = TRUE;
         ListView_SetCheckState(g_hList, row, !nowChecked);  /* snap back */
         g_reverting = FALSE;
