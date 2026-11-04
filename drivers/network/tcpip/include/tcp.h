@@ -178,6 +178,8 @@ NTSTATUS TCPTranslateError( const INT8 err );
 
 UINT TCPAllocatePort( const UINT HintPort );
 
+BOOLEAN TCPReservePort( const UINT Port );
+
 UINT TCPAllocateEphemeralPort( PPORT_IN_USE_ROUTINE InUse );
 
 VOID TCPFreePort( const UINT Port );

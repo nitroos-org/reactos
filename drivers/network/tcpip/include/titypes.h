@@ -107,6 +107,11 @@ typedef struct _DATAGRAM_SEND_REQUEST {
     ULONG Flags;                          /* Protocol specific flags */
 } DATAGRAM_SEND_REQUEST, *PDATAGRAM_SEND_REQUEST;
 
+/* How an address file was bound (Winsock: none, SO_REUSEADDR, SO_EXCLUSIVEADDRUSE) */
+#define ADDR_SHARE_UNIQUE     0
+#define ADDR_SHARE_REUSE      1
+#define ADDR_SHARE_EXCLUSIVE  2
+
 /* Transport address file context structure. The FileObject->FsContext2
    field holds a pointer to this structure */
 typedef struct _ADDRESS_FILE {
@@ -119,6 +124,9 @@ typedef struct _ADDRESS_FILE {
     USHORT Protocol;                      /* Protocol number */
     USHORT Port;                          /* Network port (network byte order) */
     LONG Sharers;                         /* Number of file objects with this addr file */
+    UCHAR ShareMode;                      /* ADDR_SHARE_xxx: SO_REUSEADDR / SO_EXCLUSIVEADDRUSE at bind */
+    BOOLEAN PortReleased;                 /* The last handle is closed: no longer a bound endpoint, though
+                                             connections may still hold the object */
     UCHAR TTL;                            /* Time to live stored in packets sent from this address file */
     UINT DF;                              /* Don't fragment */
     UINT BCast;                           /* Receive broadcast packets */
