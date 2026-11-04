@@ -1404,4 +1404,155 @@ FindPackagesByPackageFamily(
     return BasepListPackages(packageFamilyName, count, packageFullNames, bufferLength, buffer);
 }
 
+/* PUBLIC FUNCTIONS: APPLICATION POLICIES *************************************/
+
+/*
+ * The policies of an application that is not a package: Windows' answers for a classic desktop program, the ones
+ * the C runtime and the CLR ask for (ucrtbase reads the first four through GetProcAddress). They are those of
+ * Wine's implementation of these functions; the token is not examined, because there is no package or
+ * AppContainer token here that could change a policy. Not measured on Windows 10: the ClrCompat, CreateFileAccess
+ * and LifecycleManagement values are the documented ones for a desktop process.
+ */
+static
+LONG
+BasepSetPolicy(
+    _Out_opt_ PULONG Policy,
+    _In_ ULONG Value)
+{
+    LONG Error = ERROR_SUCCESS;
+
+    if (!Policy)
+        return ERROR_SUCCESS;
+
+    _SEH2_TRY
+    {
+        *Policy = Value;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Error = ERROR_NOACCESS;
+    }
+    _SEH2_END;
+
+    return Error;
+}
+
+/*
+ * @implemented
+ */
+LONG
+WINAPI
+AppPolicyGetClrCompat(
+    _In_ HANDLE processToken,
+    _Out_ AppPolicyClrCompat *policy)
+{
+    return BasepSetPolicy((PULONG)policy, AppPolicyClrCompat_ClassicDesktop);
+}
+
+/*
+ * @implemented
+ */
+LONG
+WINAPI
+AppPolicyGetCreateFileAccess(
+    _In_ HANDLE processToken,
+    _Out_ AppPolicyCreateFileAccess *policy)
+{
+    return BasepSetPolicy((PULONG)policy, AppPolicyCreateFileAccess_Full);
+}
+
+/*
+ * @implemented
+ */
+LONG
+WINAPI
+AppPolicyGetLifecycleManagement(
+    _In_ HANDLE processToken,
+    _Out_ AppPolicyLifecycleManagement *policy)
+{
+    return BasepSetPolicy((PULONG)policy, AppPolicyLifecycleManagement_Unmanaged);
+}
+
+/*
+ * @implemented
+ */
+LONG
+WINAPI
+AppPolicyGetMediaFoundationCodecLoading(
+    _In_ HANDLE processToken,
+    _Out_ AppPolicyMediaFoundationCodecLoading *policy)
+{
+    return BasepSetPolicy((PULONG)policy, AppPolicyMediaFoundationCodecLoading_All);
+}
+
+/*
+ * @implemented
+ */
+LONG
+WINAPI
+AppPolicyGetProcessTerminationMethod(
+    _In_ HANDLE processToken,
+    _Out_ AppPolicyProcessTerminationMethod *policy)
+{
+    return BasepSetPolicy((PULONG)policy, AppPolicyProcessTerminationMethod_ExitProcess);
+}
+
+/*
+ * @implemented
+ */
+LONG
+WINAPI
+AppPolicyGetShowDeveloperDiagnostic(
+    _In_ HANDLE processToken,
+    _Out_ AppPolicyShowDeveloperDiagnostic *policy)
+{
+    return BasepSetPolicy((PULONG)policy, AppPolicyShowDeveloperDiagnostic_ShowUI);
+}
+
+/*
+ * @implemented
+ */
+LONG
+WINAPI
+AppPolicyGetThreadInitializationType(
+    _In_ HANDLE processToken,
+    _Out_ AppPolicyThreadInitializationType *policy)
+{
+    return BasepSetPolicy((PULONG)policy, AppPolicyThreadInitializationType_None);
+}
+
+/*
+ * @implemented
+ */
+LONG
+WINAPI
+AppPolicyGetWindowingModel(
+    _In_ HANDLE processToken,
+    _Out_ AppPolicyWindowingModel *policy)
+{
+    return BasepSetPolicy((PULONG)policy, AppPolicyWindowingModel_ClassicDesktop);
+}
+
+/*
+ * @implemented
+ *
+ * Only a package can be loaded from: a process without a package gets APPMODEL_ERROR_NO_PACKAGE, as Windows
+ * answers it. The reserved argument has to be 0 (checked first).
+ */
+HMODULE
+WINAPI
+LoadPackagedLibrary(
+    _In_ PCWSTR lpwLibFileName,
+    _Reserved_ DWORD Reserved)
+{
+    if (Reserved != 0 || !lpwLibFileName)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    SetLastError(APPMODEL_ERROR_NO_PACKAGE);
+    return NULL;
+}
+
 /* EOF */
