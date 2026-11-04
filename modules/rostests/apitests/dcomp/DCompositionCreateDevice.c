@@ -263,6 +263,119 @@ static void TestShowSwapChain(IDCompositionDevice *Device)
     ID3D11Device_Release(D3D);
 }
 
+/* Clear buffer 0 of the swap chain to a colour and present it. */
+static void PaintAndPresent(ID3D11Device *D3D, IDXGISwapChain1 *SwapChain, const float Color[4])
+{
+    ID3D11RenderTargetView *View;
+    ID3D11DeviceContext *Context;
+    ID3D11Texture2D *Buffer;
+    HRESULT hr;
+
+    ID3D11Device_GetImmediateContext(D3D, &Context);
+    hr = IDXGISwapChain1_GetBuffer(SwapChain, 0, &IID_ID3D11Texture2D, (void **)&Buffer);
+    ok(hr == S_OK, "GetBuffer returned %08lx\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        hr = ID3D11Device_CreateRenderTargetView(D3D, (ID3D11Resource *)Buffer, NULL, &View);
+        ok(hr == S_OK, "CreateRenderTargetView returned %08lx\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            ID3D11DeviceContext_ClearRenderTargetView(Context, View, Color);
+            ID3D11RenderTargetView_Release(View);
+        }
+        ID3D11Texture2D_Release(Buffer);
+    }
+    ID3D11DeviceContext_Release(Context);
+    hr = IDXGISwapChain1_Present(SwapChain, 0, 0);
+    ok(hr == S_OK, "Present returned %08lx\n", hr);
+}
+
+/* The target goes before the swap chain: once it is released, presenting must not paint into its window.
+ * Then the swap chain is released with no buffer reference outstanding, on this thread and on another one
+ * that never pumps messages, and its helper window must be gone. */
+static void TestReleaseOrder(IDCompositionDevice *Device)
+{
+    static const float Red[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
+    static const float Blue[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+    IDXGISwapChain1 *SwapChain;
+    IDCompositionTarget *Target;
+    IDCompositionVisual *Visual;
+    DXGI_SWAP_CHAIN_DESC1 Desc;
+    IDXGIFactory2 *Factory;
+    ID3D11Device *D3D;
+    int Baseline, Pass;
+    COLORREF Color;
+    HWND Window;
+    HRESULT hr;
+
+    D3D = CreateD3D11Device();
+    if (!D3D)
+    {
+        skip("no Direct3D 11 device\n");
+        return;
+    }
+    hr = CreateDXGIFactory1(&IID_IDXGIFactory2, (void **)&Factory);
+    ok(hr == S_OK, "CreateDXGIFactory1 returned %08lx\n", hr);
+    if (FAILED(hr))
+    {
+        ID3D11Device_Release(D3D);
+        return;
+    }
+
+    /* windows of swap chains released earlier go away on their own */
+    ok(WaitForCompositionWindows(0), "%d helper windows before the test\n", CountCompositionWindows());
+    Baseline = 0;
+    for (Pass = 0; Pass < 3; Pass++)
+    {
+        FillCompositionDesc(&Desc, 100, 60);
+        hr = IDXGIFactory2_CreateSwapChainForComposition(Factory, (IUnknown *)D3D, &Desc, NULL, &SwapChain);
+        ok(hr == S_OK, "CreateSwapChainForComposition returned %08lx\n", hr);
+        if (FAILED(hr))
+            break;
+
+        Window = CreateTestWindow();
+        hr = Device_CreateTargetForHwnd(Device, Window, TRUE, &Target);
+        ok(hr == S_OK, "CreateTargetForHwnd returned %08lx\n", hr);
+        hr = Device_CreateVisual(Device, &Visual);
+        ok(hr == S_OK, "CreateVisual returned %08lx\n", hr);
+        if (FAILED(hr) || !Target)
+        {
+            IDXGISwapChain1_Release(SwapChain);
+            DestroyWindow(Window);
+            break;
+        }
+        Visual_SetContent(Visual, (IUnknown *)SwapChain);
+        Target_SetRoot(Target, Visual);
+        hr = Device_Commit(Device);
+        ok(hr == S_OK, "Commit returned %08lx\n", hr);
+
+        PaintAndPresent(D3D, SwapChain, Red);
+        Pump(300);
+        Color = ScreenPixel(Window, 25, 15);
+        ok(Color == RGB(255, 0, 0), "pass %d: pixel in the content is %06lx\n", Pass, Color);
+
+        /* the target first, while the visual still holds the swap chain */
+        IDCompositionTarget_Release(Target);
+        PaintAndPresent(D3D, SwapChain, Blue);
+        Pump(300);
+        Color = ScreenPixel(Window, 25, 15);
+        ok(Color != RGB(0, 0, 255), "pass %d: swap chain painted into the window of a released target\n", Pass);
+
+        IDCompositionVisual_Release(Visual);
+        /* the last reference, none of the buffers is held */
+        if (Pass == 2)
+            ReleaseOnOtherThread((IUnknown *)SwapChain);
+        else
+            IDXGISwapChain1_Release(SwapChain);
+        ok(WaitForCompositionWindows(Baseline), "pass %d: %d helper windows left, expected %d\n",
+           Pass, CountCompositionWindows(), Baseline);
+        DestroyWindow(Window);
+    }
+
+    IDXGIFactory2_Release(Factory);
+    ID3D11Device_Release(D3D);
+}
+
 START_TEST(DCompositionCreateDevice)
 {
     IDCompositionDevice *Device;
@@ -291,5 +404,6 @@ START_TEST(DCompositionCreateDevice)
 
     TestObjects(Device);
     TestShowSwapChain(Device);
+    TestReleaseOrder(Device);
     IDCompositionDevice_Release(Device);
 }
