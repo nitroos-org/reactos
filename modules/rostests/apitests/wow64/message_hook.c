@@ -1,3 +1,10 @@
+/*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     Current-thread WH_GETMESSAGE capture, chaining and message writeback
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
 /* Current-thread WH_GETMESSAGE capture, chaining and message writeback. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
