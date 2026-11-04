@@ -413,6 +413,15 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
      */
     _SEH2_TRY
     {
+        /*
+         * The check of the cache map is not locked against Cc: a closed file's map lives on until the lazy writer
+         * wrote its dirty data, and is then deleted without any of our locks.  If that happens between the check
+         * and CcZeroData, CcZeroData finds no map and writes the zeros straight to the disk, while Mm may still
+         * hold pages of the range from before (the segment outlives the map).  So the growth is followed by the
+         * no-map purge whenever the map is gone afterwards: either it was gone before, or it went away during
+         * this, and then nothing tells which of the two writes CcZeroData did.  A purge after a
+         * cached zeroing whose map the lazy writer deleted since loses nothing: the flush comes first.
+         */
         if (FileObject && Fcb->SectionObjectPointers.SharedCacheMap)
         {
             if (NewSize > OldSize && NT_SUCCESS(Status))
@@ -430,7 +439,8 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
             }
             CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
         }
-        else if (NewSize > OldSize && Fcb->SectionObjectPointers.DataSectionObject)
+        if (NewSize > OldSize && Fcb->SectionObjectPointers.DataSectionObject &&
+            (!FileObject || !Fcb->SectionObjectPointers.SharedCacheMap))
         {
             /* No cache map: drop whatever Mm still holds from the old EOF's view on (flushed first:
              * the pages below the old EOF may be dirty). */
@@ -1000,6 +1010,7 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             {
                 CcInitializeCacheMap(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize, FALSE,
                                      &NgGlobal.CacheCallbacks, Fcb);
+                CcRosAllowLazyClose(FileObject);
             }
             if (!CcCopyWrite(FileObject, &Offset, Length, TRUE, Buffer))
                 Status = STATUS_UNSUCCESSFUL;
