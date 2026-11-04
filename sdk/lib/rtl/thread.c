@@ -20,6 +20,16 @@
 
 /* PRIVATE FUNCTIONS *******************************************************/
 
+/*
+ * Pages in the guard region below the committed part of a new stack: three on
+ * Windows x64 (see BaseCreateStack), one elsewhere.
+ */
+#ifdef _M_AMD64
+#define RTLP_STACK_GUARD_PAGES 3
+#else
+#define RTLP_STACK_GUARD_PAGES 1
+#endif
+
 NTSTATUS
 NTAPI
 RtlpCreateUserStack(IN HANDLE ProcessHandle,
@@ -101,15 +111,19 @@ RtlpCreateUserStack(IN HANDLE ProcessHandle,
     /* Update the stack position */
     Stack += StackReserve - StackCommit;
 
-    /* Check if we can add a guard page */
+    /* Check if we can add a guard region: as many pages as Windows uses, if they fit */
     if (StackReserve >= StackCommit + SystemBasicInfo.PageSize)
     {
-        Stack -= SystemBasicInfo.PageSize;
-        StackCommit += SystemBasicInfo.PageSize;
+        GuardPageSize = min((SIZE_T)RTLP_STACK_GUARD_PAGES * SystemBasicInfo.PageSize,
+                            StackReserve - StackCommit);
+        GuardPageSize = ROUND_DOWN(GuardPageSize, SystemBasicInfo.PageSize);
+        Stack -= GuardPageSize;
+        StackCommit += GuardPageSize;
         UseGuard = TRUE;
     }
     else
     {
+        GuardPageSize = 0;
         UseGuard = FALSE;
     }
 
@@ -133,7 +147,6 @@ RtlpCreateUserStack(IN HANDLE ProcessHandle,
     /* Create a guard page if needed */
     if (UseGuard)
     {
-        GuardPageSize = SystemBasicInfo.PageSize;
         Status = ZwProtectVirtualMemory(ProcessHandle,
                                         (PVOID*)&Stack,
                                         &GuardPageSize,
