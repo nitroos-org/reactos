@@ -3550,7 +3550,13 @@ MsafdUpdateConnectionContext(
     {
         /* Socket is now connected, update usermode msafd socket structure, same as the end of WSPConnect */
         Socket->TdiConnectionHandle = HandleData.TdiConnectionHandle;
-        Socket->TdiAddressHandle = HandleData.TdiAddressHandle;
+        /*
+         * AFD hands out its own kernel handle for the address file. The handle bind returned
+         * (WSPBind, a handle of this process that closesocket closes) is already in place: replacing
+         * it would leak it, one \Device\Tcp handle per ConnectEx socket.
+         */
+        if (!Socket->TdiAddressHandle)
+            Socket->TdiAddressHandle = HandleData.TdiAddressHandle;
         /* AFD keeps no connect time; WSPGetPeerName may have recorded it */
         if (!WasConnected)
             Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
