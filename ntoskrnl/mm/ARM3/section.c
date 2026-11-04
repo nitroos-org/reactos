@@ -905,7 +905,8 @@ MiUnmapViewOfSection(IN PEPROCESS Process,
         MiInitializePlaceholderVad(Placeholder);
     }
 
-    /* Lock the address space */
+    /* Lock the address space. It is always taken here now (the old Flags meant "the caller holds it"):
+       no caller may hold the address space lock of Process when it calls this */
     MmLockAddressSpace(&Process->Vm);
 
     /* Find the VAD for the address and make sure it's a section VAD */
@@ -3968,6 +3969,27 @@ NtMapViewOfSectionEx(
 
     if (SafeBaseAddress && (LowestAddress || HighestAddress)) return STATUS_INVALID_PARAMETER;
 
+    /* A view that cannot fit between the bounds fails before anything is looked up */
+    if (HighestAddress)
+    {
+        SIZE_T RequestedSize = 0;
+        _SEH2_TRY
+        {
+            if (PreviousMode != KernelMode) ProbeForWriteSize_t(ViewSize);
+            RequestedSize = *ViewSize;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+        if (RequestedSize && (ROUND_TO_PAGES(RequestedSize) == 0 ||
+                              ROUND_TO_PAGES(RequestedSize) - 1 > HighestAddress - LowestAddress))
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+
 #ifndef _WIN64
     /* A 32-bit system: a view that starts in user space and runs past it conflicts; one that starts
        above it is an invalid parameter, as NtMapViewOfSection has it (Wine's tests) */
@@ -4022,7 +4044,7 @@ NtUnmapViewOfSectionEx(
     NTSTATUS Status;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
 
-    /* The flags come first (Windows 10: before the handle and the address) */
+    /* The flags are checked before the process handle and the address are looked at (Windows 10 22H2) */
     if (Flags & ~(MEM_UNMAP_WITH_TRANSIENT_BOOST | MEM_PRESERVE_PLACEHOLDER))
         return STATUS_INVALID_PARAMETER;
 

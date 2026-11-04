@@ -682,6 +682,41 @@ test_ViewRequirements(void)
     ok(Base == (PVOID)0x30000000, "view at %p\n", Base);
     if (NT_SUCCESS(Status)) UnmapViewOfFile(Base);
 
+    /* a view larger than its bounds fails, paging-file and file views alike */
+    memset(&Requirements, 0, sizeof(Requirements));
+    Requirements.HighestEndingAddress = (PVOID)0x2FFFF;
+    Base = NULL; Size = GRANULE;
+    Status = pNtMapViewOfSectionEx(Section, NtCurrentProcess(), &Base, &Offset, &Size, 0, PAGE_READWRITE, &Parameter, 1);
+    ok(Status != STATUS_SUCCESS || (ULONG_PTR)Base + GRANULE - 1 <= 0x2FFFF, "small window: %#lx at %p\n", Status, Base);
+    if (NT_SUCCESS(Status)) UnmapViewOfFile(Base);
+    {
+        WCHAR Path[MAX_PATH];
+        HANDLE Big = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 0x100000, NULL);
+        HANDLE FileSection = NewFileSection(Path, 4 * GRANULE);
+        HANDLE Sections[2];
+        SIZE_T Sizes[2];
+        ULONG i;
+
+        Sections[0] = Big; Sizes[0] = 0x100000;
+        Sections[1] = FileSection; Sizes[1] = 4 * GRANULE;
+        for (i = 0; i < 2; i++)
+        {
+            if (!Sections[i]) continue;
+            /* given size, and size 0 (the whole section) */
+            Requirements.HighestEndingAddress = (PVOID)0x3FFFF;
+            Base = NULL; Size = Sizes[i];
+            Status = pNtMapViewOfSectionEx(Sections[i], NtCurrentProcess(), &Base, &Offset, &Size, 0, PAGE_READWRITE, &Parameter, 1);
+            ok(!NT_SUCCESS(Status), "%lu: view of %Ix below 0x3FFFF: %#lx at %p\n", i, Sizes[i], Status, Base);
+            if (NT_SUCCESS(Status)) UnmapViewOfFile(Base);
+            Base = NULL; Size = 0;
+            Status = pNtMapViewOfSectionEx(Sections[i], NtCurrentProcess(), &Base, &Offset, &Size, MEM_TOP_DOWN, PAGE_READWRITE, &Parameter, 1);
+            ok(!NT_SUCCESS(Status), "%lu: whole view below 0x3FFFF: %#lx at %p\n", i, Status, Base);
+            if (NT_SUCCESS(Status)) UnmapViewOfFile(Base);
+            CloseHandle(Sections[i]);
+        }
+        if (FileSection) DeleteFileW(Path);
+    }
+
     /* no alignment for views */
     memset(&Requirements, 0, sizeof(Requirements));
     Requirements.Alignment = 2 * GRANULE;
