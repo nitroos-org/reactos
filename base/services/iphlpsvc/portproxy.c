@@ -582,7 +582,8 @@ ConfigThread(LPVOID lpParam)
     HKEY hKey = NULL;
     HANDLE hEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
     HANDLE h[2];
-    BOOL bArmed;
+    BOOL bArmed = FALSE;
+    DWORD dwWait;
 
     h[0] = g_hStop;
     h[1] = hEvent;
@@ -599,16 +600,22 @@ ConfigThread(LPVOID lpParam)
 
     for (;;)
     {
-        /* arm first, then read, so a change during the read is not lost */
-        bArmed = hKey && hEvent &&
-                 RegNotifyChangeKeyValue(hKey, TRUE,
-                                         REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET,
-                                         hEvent, TRUE) == ERROR_SUCCESS;
+        /* arm first, then read, so a change during the read is not lost.
+         * A request stays pending until the key changes, so arm again only
+         * after the event fired: every request armed on a poll timeout would
+         * stay queued on the handle (one more every RELOAD_POLL_MS). */
+        if (!bArmed && hKey && hEvent)
+            bArmed = RegNotifyChangeKeyValue(hKey, TRUE,
+                                             REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET,
+                                             hEvent, TRUE) == ERROR_SUCCESS;
 
         ReloadConfig();
 
-        if (WaitForMultipleObjects(bArmed ? 2 : 1, h, FALSE, RELOAD_POLL_MS) == WAIT_OBJECT_0)
+        dwWait = WaitForMultipleObjects(bArmed ? 2 : 1, h, FALSE, RELOAD_POLL_MS);
+        if (dwWait == WAIT_OBJECT_0)
             break;
+        if (dwWait == WAIT_OBJECT_0 + 1)
+            bArmed = FALSE;     /* the request completed */
     }
 
     if (hKey)
