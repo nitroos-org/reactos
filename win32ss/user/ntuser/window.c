@@ -3552,6 +3552,8 @@ UserGetAncestor(_In_ PWND pWnd, _In_ UINT uType)
                 ASSERT(pDesktop->pDeskInfo);
 
                 Parent = Parent->spwndParent;
+                if (!Parent) /* the chain ends at a destroyed window: do not walk off it */
+                    break;
             } while (Parent != pDesktop->pDeskInfo->spwnd);
             break;
 

@@ -100,13 +100,28 @@ START_TEST(SetParentCrossProcess)
         ok(GetParent(Child) == Parent, "GetParent returned %p, expected %p\n", GetParent(Child), Parent);
     }
 
+    /* the child destroys its window, a child of ours: that sends messages to this thread, so keep pumping */
     SetEvent(Event);
-    Wait = WaitForSingleObject(Pi.hProcess, 15000);
-    if (Wait != WAIT_OBJECT_0)
+    Tick = GetTickCount();
+    for (;;)
     {
-        ok(0, "the child did not finish\n");
-        TerminateProcess(Pi.hProcess, 99);
-        WaitForSingleObject(Pi.hProcess, 5000);
+        MSG Msg;
+
+        Wait = MsgWaitForMultipleObjects(1, &Pi.hProcess, FALSE, 100, QS_ALLINPUT);
+        while (PeekMessageA(&Msg, NULL, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&Msg);
+            DispatchMessageA(&Msg);
+        }
+        if (Wait == WAIT_OBJECT_0)
+            break;
+        if (GetTickCount() - Tick > 15000)
+        {
+            ok(0, "the child did not finish\n");
+            TerminateProcess(Pi.hProcess, 99);
+            WaitForSingleObject(Pi.hProcess, 5000);
+            break;
+        }
     }
     GetExitCodeProcess(Pi.hProcess, &ExitCode);
     ok(ExitCode == 0, "the child process returned %lu\n", ExitCode);
