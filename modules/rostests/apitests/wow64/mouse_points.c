@@ -1,3 +1,10 @@
+/*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     mouse_points
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
 /* GetMouseMovePointsEx must neither read nor write the guest entries the
  * kernel did not fill. Run the same i386 executable as "mouse_points native"
  * on native i386 (the oracle) and as "mouse_points wow64" under WoW64. */

@@ -1,3 +1,10 @@
+/*
+ * PROJECT:     NitroOS
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     usage
+ * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
+ */
+
 static const WCHAR g_Usage[] =
     L"\r\n"
     L"NitroOS TypePerf.exe (" L"" KERNEL_VERSION_STR L")\r\n"
