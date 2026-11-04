@@ -1308,6 +1308,23 @@ ClosePackageInfo(
 
 /*
  * @implemented
+ *
+ * Like GetPackageInfo: no package reference is ever handed out, so none is valid. msedge.dll (the Edge WebView2
+ * runtime) imports this function; without it msedgewebview2.exe cannot start.
+ */
+LONG
+WINAPI
+GetPackageApplicationIds(
+    _In_ PACKAGE_INFO_REFERENCE packageInfoReference,
+    _Inout_ UINT32 *bufferLength,
+    _Out_writes_bytes_opt_(*bufferLength) BYTE *buffer,
+    _Out_opt_ UINT32 *count)
+{
+    return ERROR_INVALID_PARAMETER;
+}
+
+/*
+ * @implemented
  */
 LONG
 WINAPI

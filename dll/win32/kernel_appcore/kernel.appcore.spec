@@ -16,6 +16,7 @@
 @ stdcall GetCurrentPackageId(ptr ptr) kernel32.GetCurrentPackageId
 @ stdcall GetCurrentPackageInfo(long ptr ptr ptr) kernel32.GetCurrentPackageInfo
 @ stdcall GetCurrentPackagePath(ptr ptr) kernel32.GetCurrentPackagePath
+@ stdcall GetPackageApplicationIds(ptr ptr ptr ptr) kernel32.GetPackageApplicationIds
 @ stdcall GetPackageFamilyName(long ptr ptr) kernel32.GetPackageFamilyName
 @ stdcall GetPackageFamilyNameFromToken(long ptr ptr) kernel32.GetPackageFamilyNameFromToken
 @ stdcall GetPackageFullName(long ptr ptr) kernel32.GetPackageFullName

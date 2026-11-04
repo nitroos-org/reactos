@@ -53,6 +53,7 @@ static const FWD Forwarders[] =
     {"GetConsoleSelectionInfo", L"kernel32.dll", "GetConsoleSelectionInfo"},
     {"GetCurrentApplicationUserModelId", L"kernel32.dll", "GetCurrentApplicationUserModelId"},
     {"GetEnabledXStateFeatures", L"kernel32.dll", "GetEnabledXStateFeatures"},
+    {"GetPackageApplicationIds", L"kernel32.dll", "GetPackageApplicationIds"},
     {"GetPackageFamilyNameFromToken", L"kernel32.dll", "GetPackageFamilyNameFromToken"},
     {"GetPackageFullNameFromToken", L"kernel32.dll", "GetPackageFullNameFromToken"},
     {"GetPackageId", L"kernel32.dll", "GetPackageId"},
