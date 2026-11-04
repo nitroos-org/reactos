@@ -78,6 +78,13 @@ extern "C" {
 #define MEM_EXECUTE_OPTION_IMAGE_DISPATCH_ENABLE            0x20
 #define MEM_EXECUTE_OPTION_VALID_FLAGS                      0x3F
 
+//
+// Flags of NtUnmapViewOfSectionEx
+//
+#ifndef MEM_UNMAP_WITH_TRANSIENT_BOOST
+#define MEM_UNMAP_WITH_TRANSIENT_BOOST                      0x1
+#endif
+
 #ifndef NTOS_MODE_USER
 
 //
@@ -88,6 +95,59 @@ extern "C" {
 #define MEM_ROTATE                                          0x800000
 #define MEM_IMAGE                                           SEC_IMAGE
 #define MEM_DOS_LIM                                         0x40000000
+
+//
+// Placeholder flags (Windows 10 1803 and later)
+//
+#ifndef MEM_RESERVE_PLACEHOLDER
+#define MEM_REPLACE_PLACEHOLDER                             0x4000
+#define MEM_RESERVE_PLACEHOLDER                             0x40000
+#define MEM_COALESCE_PLACEHOLDERS                           0x1
+#define MEM_PRESERVE_PLACEHOLDER                            0x2
+#endif
+
+//
+// Extended parameters of NtAllocateVirtualMemoryEx and NtMapViewOfSectionEx
+//
+#ifndef MEM_EXTENDED_PARAMETER_TYPE_BITS
+typedef enum MEM_EXTENDED_PARAMETER_TYPE
+{
+    MemExtendedParameterInvalidType,
+    MemExtendedParameterAddressRequirements,
+    MemExtendedParameterNumaNode,
+    MemExtendedParameterPartitionHandle,
+    MemExtendedParameterUserPhysicalHandle,
+    MemExtendedParameterAttributeFlags,
+    MemExtendedParameterImageMachine,
+    MemExtendedParameterMax
+} MEM_EXTENDED_PARAMETER_TYPE, *PMEM_EXTENDED_PARAMETER_TYPE;
+
+typedef struct _MEM_ADDRESS_REQUIREMENTS
+{
+    PVOID LowestStartingAddress;
+    PVOID HighestEndingAddress;
+    SIZE_T Alignment;
+} MEM_ADDRESS_REQUIREMENTS, *PMEM_ADDRESS_REQUIREMENTS;
+
+#define MEM_EXTENDED_PARAMETER_TYPE_BITS 8
+
+typedef struct DECLSPEC_ALIGN(8) MEM_EXTENDED_PARAMETER
+{
+    struct
+    {
+        ULONG64 Type : MEM_EXTENDED_PARAMETER_TYPE_BITS;
+        ULONG64 Reserved : 64 - MEM_EXTENDED_PARAMETER_TYPE_BITS;
+    } DUMMYSTRUCTNAME;
+    union
+    {
+        ULONG64 ULong64;
+        PVOID Pointer;
+        SIZE_T Size;
+        HANDLE Handle;
+        ULONG ULong;
+    } DUMMYUNIONNAME;
+} MEM_EXTENDED_PARAMETER, *PMEM_EXTENDED_PARAMETER;
+#endif
 
 //
 // Section Flags for NtCreateSection
@@ -700,9 +760,15 @@ typedef struct _MMVAD_FLAGS
 //
 // Extended flags used in the VAD
 //
+//
+// ReactOS layout, not Windows': Placeholder and FromPlaceholder are taken from FileOffset (written
+// only, an informational 64 KB view offset). Do not use this structure to read Windows VADs.
+//
 typedef struct _MMVAD_FLAGS2
 {
-    ULONG FileOffset:24;
+    ULONG FileOffset:22;
+    ULONG Placeholder:1;        // a free placeholder (private, reserved, no access)
+    ULONG FromPlaceholder:1;    // replaced a placeholder: MEM_PRESERVE_PLACEHOLDER turns it back into one
     ULONG SecNoChange:1;
     ULONG OneSecured:1;
     ULONG MultipleSecured:1;

@@ -1210,6 +1210,78 @@ static NTSTATUS Wow64SetInformationFile(const ULONG *a, WOW64_CLEANUP *Cleanup)
     }
 }
 
+/* The i386 MEM_EXTENDED_PARAMETER array of NtAllocateVirtualMemoryEx and NtMapViewOfSectionEx: the same
+ * 16-byte records (type, then an 8-byte union whose low half holds a pointer or a handle); the address
+ * requirement it points to has 32-bit addresses. A placement the caller does not bound stays below the
+ * process' highest 32-bit address: then a requirement with that highest address is added (Placement).
+ * The counts and types are checked again by the kernel on the native copy. */
+#define WOW64_MAX_EXTENDED_PARAMETERS 8
+static NTSTATUS ExtendedParameters32(ULONG Address, ULONG Count, BOOLEAN Placement,
+                                     MEM_EXTENDED_PARAMETER *Params, MEM_ADDRESS_REQUIREMENTS *Requirements,
+                                     ULONG *NativeCount)
+{
+    const struct { ULONG64 Type; ULONG64 Value; } *From = PTR32(Address);
+    struct { ULONG Lowest, Highest, Alignment; } Requirements32;
+    const VOID *Guest;
+    BOOLEAN HaveRequirements = FALSE;
+    ULONG i;
+
+    *NativeCount = 0;
+    if (Count && !Address) return STATUS_INVALID_PARAMETER;
+    if (Count >= WOW64_MAX_EXTENDED_PARAMETERS) return STATUS_INVALID_PARAMETER;
+    for (i = 0; i < Count; i++)
+    {
+        struct { ULONG64 Type; ULONG64 Value; } Record;
+        /* One read of each guest record as well */
+        RtlCopyMemory(&Record, &From[i], sizeof(Record));
+        RtlZeroMemory(&Params[i], sizeof(Params[i]));
+        Params[i].Type = Record.Type & 0xFF;
+        Params[i].Reserved = Record.Type >> 8;
+        Params[i].ULong64 = Record.Value;
+        switch (Params[i].Type)
+        {
+        case MemExtendedParameterAddressRequirements:
+            if (HaveRequirements) return STATUS_INVALID_PARAMETER;
+            HaveRequirements = TRUE;
+            /* One copy of the guest's 12 bytes: what is checked is what is converted */
+            Guest = PTR32((ULONG)Record.Value);
+            if (!Guest) return STATUS_ACCESS_VIOLATION;
+            RtlCopyMemory(&Requirements32, Guest, sizeof(Requirements32));
+            /* Addresses beyond the 32-bit user space are not valid for this process */
+            if (Requirements32.Highest > Wow64HighestUserAddress ||
+                Requirements32.Lowest > Wow64HighestUserAddress)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+            Requirements->LowestStartingAddress = PTR32(Requirements32.Lowest);
+            Requirements->HighestEndingAddress = PTR32(Requirements32.Highest);
+            Requirements->Alignment = Requirements32.Alignment;
+            /* A 32-bit process has no addresses above its highest one */
+            if (!Requirements->HighestEndingAddress && Placement)
+                Requirements->HighestEndingAddress = ULongToPtr(Wow64HighestUserAddress);
+            Params[i].Pointer = Requirements;
+            break;
+        case MemExtendedParameterPartitionHandle:
+        case MemExtendedParameterUserPhysicalHandle:
+            Params[i].Handle = HANDLE32((ULONG)Record.Value);
+            break;
+        default:
+            break;
+        }
+    }
+    if (Placement && !HaveRequirements)
+    {
+        RtlZeroMemory(&Params[i], sizeof(Params[i]));
+        RtlZeroMemory(Requirements, sizeof(*Requirements));
+        Requirements->HighestEndingAddress = ULongToPtr(Wow64HighestUserAddress);
+        Params[i].Type = MemExtendedParameterAddressRequirements;
+        Params[i].Pointer = Requirements;
+        i++;
+    }
+    *NativeCount = i;
+    return STATUS_SUCCESS;
+}
+
 /* a is Wow64SystemService's local copy of the guest argument list: counts and pointers
  * read from it (e.g. the NtWaitForMultipleObjects and NtRaiseHardError counts) cannot
  * change between their check and their use. What they point to is still guest memory. */
@@ -1576,6 +1648,38 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             Cleanup->Base = NULL;
         }
         return Status;
+    case W64_NtAllocateVirtualMemoryEx:
+    {
+        MEM_EXTENDED_PARAMETER Params[WOW64_MAX_EXTENDED_PARAMETERS];
+        MEM_ADDRESS_REQUIREMENTS Requirements;
+        ULONG Count;
+        PROBE(1); PROBE(2);
+        Base = PTR32(U(1)); Size = U(2);
+        /* Only a new allocation gets the 32-bit limit; an address excludes a requirement */
+        Status = ExtendedParameters32(a[5], a[6], Base == NULL, Params, &Requirements, &Count);
+        if (!NT_SUCCESS(Status)) return Status;
+        Cleanup->Process = H(0);
+        Cleanup->Mapped = FALSE;
+        /* A replaced placeholder stays the caller's, like an existing reservation */
+        Length = (!Base || (a[3] & MEM_RESERVE)) && !(a[3] & MEM_REPLACE_PLACEHOLDER);
+        Status = NtAllocateVirtualMemoryEx(H(0), &Base, &Size, a[3], a[4], Count ? Params : NULL, Count);
+        if (NT_SUCCESS(Status))
+        {
+            if (Length) Cleanup->Base = Base;
+            U(1) = PtrToUlong(Base); U(2) = Size;
+            Cleanup->Base = NULL;
+        }
+        return Status;
+    }
+    case W64_NtLockVirtualMemory:
+    case W64_NtUnlockVirtualMemory:
+        /* VirtualLock/VirtualUnlock: the base and size come back rounded to pages, like NtProtectVirtualMemory's */
+        PROBE(1); PROBE(2);
+        Base = PTR32(U(1)); Size = U(2);
+        Status = (Number == W64_NtLockVirtualMemory) ? NtLockVirtualMemory(H(0), &Base, &Size, a[3])
+                                                     : NtUnlockVirtualMemory(H(0), &Base, &Size, a[3]);
+        if (NT_SUCCESS(Status)) { U(1) = PtrToUlong(Base); U(2) = Size; }
+        return Status;
     case W64_NtFreeVirtualMemory:
         PROBE(1); PROBE(2);
         Base = PTR32(U(1)); Size = U(2);
@@ -1634,6 +1738,43 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     }
     case W64_NtFlushInstructionCache: return NtFlushInstructionCache(H(0), P(1), a[2]);
     case W64_NtUnmapViewOfSection: return NtUnmapViewOfSection(H(0), P(1));
+    case W64_NtUnmapViewOfSectionEx: return NtUnmapViewOfSectionEx(H(0), P(1), a[2]);
+    case W64_NtMapViewOfSectionEx:
+    {
+        MEM_EXTENDED_PARAMETER Params[WOW64_MAX_EXTENDED_PARAMETERS];
+        MEM_ADDRESS_REQUIREMENTS Requirements;
+        ULONG Count;
+        PROBE(2); PROBE(4);
+        if (a[3]) ProbeOutput(a[3], sizeof(LARGE_INTEGER));
+        Base = PTR32(U(2)); Size = U(4);
+        /* AT_ROUND_TO_PAGE is not for WoW64; an address must be in the 32-bit user space */
+        if ((a[5] & 0x40000000 /* AT_ROUND_TO_PAGE */) || (U(2) > Wow64HighestUserAddress)) return STATUS_INVALID_PARAMETER;
+        Cleanup->Process = H(1);
+        Cleanup->Mapped = TRUE;
+        if (!Base && !a[8])
+        {
+            /* No address and no requirement: the process' 32-bit limit, as NtMapViewOfSection has it
+             * (a placeholder is replaced at its address, so this is never a replacement) */
+            Status = NtMapViewOfSection(H(0), H(1), &Base, Wow64ZeroBits(0), 0, P(3), &Size, ViewUnmap, a[5], a[6]);
+            if ((Status >= STATUS_INVALID_PARAMETER_1) && (Status <= STATUS_INVALID_PARAMETER_12))
+                Status = STATUS_INVALID_PARAMETER;
+        }
+        else
+        {
+            Status = ExtendedParameters32(a[7], a[8], Base == NULL, Params, &Requirements, &Count);
+            if (!NT_SUCCESS(Status)) return Status;
+            Status = NtMapViewOfSectionEx(H(0), H(1), &Base, P(3), &Size, a[5], a[6], Count ? Params : NULL, Count);
+        }
+        if (NT_SUCCESS(Status))
+        {
+            /* A view that replaced a placeholder is not undone on a bad output: unmapping it would
+             * free the caller's range instead of giving the placeholder back */
+            if (!(a[5] & MEM_REPLACE_PLACEHOLDER)) Cleanup->Base = Base;
+            U(2) = PtrToUlong(Base); U(4) = Size;
+            Cleanup->Base = NULL;
+        }
+        return Status;
+    }
     case W64_NtMapViewOfSection:
         PROBE(2); PROBE(6);
         if (a[5]) ProbeOutput(a[5], sizeof(LARGE_INTEGER));

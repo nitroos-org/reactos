@@ -121,8 +121,9 @@ VirtualFreeEx(IN HANDLE hProcess,
 {
     NTSTATUS Status;
 
-    /* Validate size and flags */
-    if (!(dwSize) || !(dwFreeType & MEM_RELEASE))
+    /* Validate size and flags: a size goes with a release only to split or join placeholders */
+    if (!(dwSize) || !(dwFreeType & MEM_RELEASE) ||
+        (dwFreeType & (MEM_PRESERVE_PLACEHOLDER | MEM_COALESCE_PLACEHOLDERS)))
     {
         /* Free the memory */
         Status = NtFreeVirtualMemory(hProcess,

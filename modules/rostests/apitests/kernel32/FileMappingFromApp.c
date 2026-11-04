@@ -7,10 +7,7 @@
  *
  * Chrome, Firefox and Visual Code look the FromApp pair up with GetProcAddress.
  *
- * MapViewOfFile3, MapViewOfFileNuma2 and UnmapViewOfFile2 are deliberately NOT exported (see the ticket
- * EXPORTS-kernelbase-missing): V8 (Chrome, VS Code) takes the three together with VirtualAlloc2 as the sign that
- * placeholders work and then reserves its address space with MEM_RESERVE_PLACEHOLDER, which is not supported
- * here; with the three present the renderers died with "Out of Memory".
+ * MapViewOfFile3, MapViewOfFileNuma2 and UnmapViewOfFile2 are tested with placeholders in Placeholder.c.
  */
 
 #include "precomp.h"

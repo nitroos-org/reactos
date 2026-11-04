@@ -185,7 +185,9 @@ MmMapViewOfArm3Section(
     _Inout_ PSIZE_T ViewSize,
     _In_range_(ViewShare, ViewUnmap) SECTION_INHERIT InheritDisposition,
     _In_ ULONG AllocationType,
-    _In_ ULONG Protect);
+    _In_ ULONG Protect,
+    _In_ ULONG_PTR LowestAddress,
+    _In_ ULONG_PTR HighestBound);
 
 //
 // PeFmtCreateSection depends on the following:
@@ -4654,7 +4656,7 @@ NtQuerySection(
  * @implemented
  */
 NTSTATUS NTAPI
-MmMapViewOfSection(
+MiMapViewOfSection(
     _In_ PVOID SectionObject,
     _In_ PEPROCESS Process,
     _Outptr_result_bytebuffer_(*ViewSize) _Pre_opt_valid_ PVOID *BaseAddress,
@@ -4664,7 +4666,9 @@ MmMapViewOfSection(
     _Inout_ PSIZE_T ViewSize,
     _In_range_(ViewShare, ViewUnmap) SECTION_INHERIT InheritDisposition,
     _In_ ULONG AllocationType,
-    _In_ ULONG Protect)
+    _In_ ULONG Protect,
+    _In_ ULONG_PTR LowestAddress,
+    _In_ ULONG_PTR HighestBound)
 {
     PSECTION Section;
     PMMSUPPORT AddressSpace;
@@ -4678,6 +4682,8 @@ MmMapViewOfSection(
 
     if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress))
         return MI_PARAM_STATUS(4);
+    if (HighestBound && (HighestBound < HighestAddress))
+        HighestAddress = HighestBound;
 
     if (MiIsRosSectionObject(SectionObject) == FALSE)
     {
@@ -4692,7 +4698,9 @@ MmMapViewOfSection(
                                       ViewSize,
                                       InheritDisposition,
                                       AllocationType,
-                                      Protect);
+                                      Protect,
+                                      LowestAddress,
+                                      HighestBound);
     }
 
     ASSERT(Process);
@@ -4720,6 +4728,14 @@ MmMapViewOfSection(
     if (Process->VmDeleted)
     {
         Status = STATUS_PROCESS_IS_TERMINATING;
+        goto Exit;
+    }
+
+    /* Only a data view can take the place of a placeholder */
+    if ((AllocationType & MEM_REPLACE_PLACEHOLDER) &&
+        (Section->u.Flags.Image || Section->u.Flags.PhysicalMemory))
+    {
+        Status = STATUS_INVALID_PARAMETER;
         goto Exit;
     }
 
@@ -4884,6 +4900,7 @@ MmMapViewOfSection(
         PMM_SECTION_SEGMENT Segment = (PMM_SECTION_SEGMENT)Section->Segment;
         LONGLONG ViewOffset, RequestedOffset;
         LONGLONG SectionLimit;
+        PMMVAD Placeholder = NULL;
 
         ASSERT(Segment->RefCount > 0);
 
@@ -4986,7 +5003,7 @@ MmMapViewOfSection(
             goto Exit;
         }
 
-        if (ZeroBits)
+        if (ZeroBits || LowestAddress || HighestBound)
         {
             if (*BaseAddress)
             {
@@ -4999,10 +5016,11 @@ MmMapViewOfSection(
             }
             else
             {
-                *BaseAddress = MmFindGapInRange(AddressSpace, *ViewSize,
-                                               MM_VIRTMEM_GRANULARITY,
-                                               BooleanFlagOn(AllocationType, MEM_TOP_DOWN),
-                                               HighestAddress);
+                *BaseAddress = MmFindGapInRangeEx(AddressSpace, *ViewSize,
+                                                 MM_VIRTMEM_GRANULARITY,
+                                                 BooleanFlagOn(AllocationType, MEM_TOP_DOWN),
+                                                 LowestAddress,
+                                                 HighestAddress);
                 if (!*BaseAddress)
                 {
                     Status = STATUS_NO_MEMORY;
@@ -5011,12 +5029,29 @@ MmMapViewOfSection(
             }
         }
 
+        /*
+         * MEM_REPLACE_PLACEHOLDER: the placeholder of exactly this range leaves the tree, and comes
+         * back if the view cannot be mapped. The address space stays locked all along.
+         */
+        if (AllocationType & MEM_REPLACE_PLACEHOLDER)
+        {
+            Status = MiCheckPlaceholderForReplace(Process, (ULONG_PTR)*BaseAddress, *ViewSize, &Placeholder);
+            if (!NT_SUCCESS(Status)) goto Exit;
+        }
+
         /* A copy-on-write view is charged in full: any page can become private */
         ViewCommit = MiViewCommitCharge(Segment, Protect, *ViewSize);
         if (!MiChargeCommit(ViewCommit, MiCommitUserPageable))
         {
             Status = STATUS_COMMITMENT_LIMIT;
             goto Exit;
+        }
+
+        if (Placeholder)
+        {
+            MiLockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+            MiRemoveNode((PMMADDRESS_NODE)Placeholder, &Process->VadRoot);
+            MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
         }
 
         MmLockSectionSegment(Segment);
@@ -5033,7 +5068,31 @@ MmMapViewOfSection(
         if (!NT_SUCCESS(Status))
         {
             MiReturnPageableCommit(ViewCommit);
+            if (Placeholder)
+            {
+                NTSTATUS PlaceholderStatus;
+                MiLockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+                PlaceholderStatus = MiInsertPlaceholderVad(Process,
+                                                           (PMMVAD_LONG)Placeholder,
+                                                           Placeholder->StartingVpn << PAGE_SHIFT,
+                                                           (Placeholder->EndingVpn << PAGE_SHIFT) | (PAGE_SIZE - 1));
+                MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+                ASSERT(NT_SUCCESS(PlaceholderStatus));
+                (void)PlaceholderStatus;
+            }
             goto Exit;
+        }
+
+        if (Placeholder)
+        {
+            PMEMORY_AREA MemoryArea = MmLocateMemoryAreaByAddress(AddressSpace, *BaseAddress);
+
+            /* The view gives the placeholder back when it is unmapped with MEM_PRESERVE_PLACEHOLDER */
+            ASSERT(MemoryArea != NULL);
+            if (MemoryArea) MemoryArea->VadNode.u2.VadFlags2.FromPlaceholder = 1;
+            Process->VirtualSize -= *ViewSize;
+            ExFreePool(Placeholder);
+            PsReturnProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
         }
     }
 
@@ -5054,6 +5113,24 @@ Exit:
     }
 
     return Status;
+}
+
+NTSTATUS
+NTAPI
+MmMapViewOfSection(
+    _In_ PVOID SectionObject,
+    _In_ PEPROCESS Process,
+    _Outptr_result_bytebuffer_(*ViewSize) _Pre_opt_valid_ PVOID *BaseAddress,
+    _In_ ULONG_PTR ZeroBits,
+    _In_ SIZE_T CommitSize,
+    _Inout_opt_ PLARGE_INTEGER SectionOffset,
+    _Inout_ PSIZE_T ViewSize,
+    _In_range_(ViewShare, ViewUnmap) SECTION_INHERIT InheritDisposition,
+    _In_ ULONG AllocationType,
+    _In_ ULONG Protect)
+{
+    return MiMapViewOfSection(SectionObject, Process, BaseAddress, ZeroBits, CommitSize, SectionOffset,
+                              ViewSize, InheritDisposition, AllocationType, Protect, 0, 0);
 }
 
 /*

@@ -240,21 +240,44 @@ MiInsertVad(IN PMMVAD Vad,
     MiInsertNode(VadRoot, (PVOID)Vad, Parent, Result);
 }
 
+/* A free placeholder that covers exactly the pages from StartingAddress to EndingAddress */
+static
+BOOLEAN
+MiIsPlaceholderFor(
+    _In_ PMMVAD Placeholder,
+    _In_ ULONG_PTR StartingAddress,
+    _In_ ULONG_PTR EndingAddress)
+{
+    return (Placeholder->u.VadFlags.PrivateMemory &&
+            Placeholder->u2.VadFlags2.Placeholder &&
+            (Placeholder->StartingVpn == (StartingAddress >> PAGE_SHIFT)) &&
+            (Placeholder->EndingVpn == (EndingAddress >> PAGE_SHIFT)));
+}
+
+/*
+ * LowestAddress bounds an automatic placement from below (MEM_ADDRESS_REQUIREMENTS).
+ * MEM_REPLACE_PLACEHOLDER in AllocationType: the new VAD takes the place of a free placeholder
+ * that covers exactly the same pages. The placeholder leaves the tree under the same locks as
+ * the new VAD enters it, so no other thread can find the range free in between.
+ */
 NTSTATUS
 NTAPI
-MiInsertVadEx(
+MiInsertVadEx2(
     _Inout_ PMMVAD Vad,
     _In_ ULONG_PTR *BaseAddress,
     _In_ SIZE_T ViewSize,
+    _In_ ULONG_PTR LowestAddress,
     _In_ ULONG_PTR HighestAddress,
     _In_ ULONG_PTR Alignment,
-    _In_ ULONG AllocationType)
+    _In_ ULONG AllocationType,
+    _In_ BOOLEAN AllowLowFixedAddress)
 {
     ULONG_PTR StartingAddress = 0, EndingAddress;
     PEPROCESS CurrentProcess;
     PETHREAD CurrentThread;
     TABLE_SEARCH_RESULT Result;
     PMMADDRESS_NODE Parent;
+    PMMVAD Replaced = NULL;
 
     /* Align the view size to pages */
     ViewSize = ALIGN_UP_BY(ViewSize, PAGE_SIZE);
@@ -285,6 +308,13 @@ MiInsertVadEx(
             return STATUS_NO_MEMORY;
         }
 
+        /* A placeholder is replaced at its own address only */
+        if (AllocationType & MEM_REPLACE_PLACEHOLDER)
+        {
+            KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
+            return STATUS_INVALID_PARAMETER;
+        }
+
         /* Which way should we search? */
         if ((AllocationType & MEM_TOP_DOWN) || CurrentProcess->VmTopDown)
         {
@@ -295,22 +325,27 @@ MiInsertVadEx(
                                                      &CurrentProcess->VadRoot,
                                                      &StartingAddress,
                                                      &Parent);
+
+            /* The highest place that fits lies below the lowest address: nothing fits */
+            if ((Result != TableFoundNode) && (StartingAddress < LowestAddress))
+                Result = TableFoundNode;
         }
         else
         {
             /* Find an address bottom-up */
-            Result = MiFindEmptyAddressRangeInTree(ViewSize,
-                                                   Alignment,
-                                                   &CurrentProcess->VadRoot,
-                                                   &Parent,
-                                                   &StartingAddress);
+            Result = MiFindEmptyAddressRangeInTreeEx(ViewSize,
+                                                     LowestAddress,
+                                                     Alignment,
+                                                     &CurrentProcess->VadRoot,
+                                                     &Parent,
+                                                     &StartingAddress);
         }
 
         /* Get the ending address, which is the last piece we need for the VAD */
         EndingAddress = StartingAddress + ViewSize - 1;
 
         /* Check if we found a suitable location */
-        if ((Result == TableFoundNode) || (EndingAddress > HighestAddress))
+        if ((Result == TableFoundNode) || (EndingAddress > HighestAddress) || (EndingAddress < StartingAddress))
         {
             DPRINT1("Not enough free space to insert this VAD node!\n");
             KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
@@ -325,6 +360,18 @@ MiInsertVadEx(
     {
         /* Calculate the starting and ending address */
         StartingAddress = ALIGN_DOWN_BY(*BaseAddress, Alignment);
+
+        /*
+         * Nothing goes below the lowest user address, the NULL page included, except for the
+         * legacy callers that reserve the VDM's first megabyte from address 1 (kernel32's
+         * CreateProcessInternalW and ntvdm on x86)
+         */
+        if (!AllowLowFixedAddress && (StartingAddress < (ULONG_PTR)MM_LOWEST_USER_ADDRESS))
+        {
+            /* Windows 10 22H2: NtAllocateVirtualMemoryEx at 0x1000 is STATUS_CONFLICTING_ADDRESSES */
+            KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
+            return STATUS_CONFLICTING_ADDRESSES;
+        }
 
         /* A section can supply a fixed SEC_BASED address even when its caller
          * requested automatic placement. Enforce the final range here too,
@@ -345,7 +392,19 @@ MiInsertVadEx(
                                            &Parent);
         if (Result == TableFoundNode)
         {
-            DPRINT("Given address conflicts with existing node\n");
+            /* Only a placeholder of exactly this range may be in the way of a replacement */
+            if (!(AllocationType & MEM_REPLACE_PLACEHOLDER) ||
+                !MiIsPlaceholderFor((PMMVAD)Parent, StartingAddress, EndingAddress))
+            {
+                DPRINT("Given address conflicts with existing node\n");
+                KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
+                return STATUS_CONFLICTING_ADDRESSES;
+            }
+            Replaced = (PMMVAD)Parent;
+        }
+        else if (AllocationType & MEM_REPLACE_PLACEHOLDER)
+        {
+            /* The placeholder went away since the caller looked at it */
             KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
             return STATUS_CONFLICTING_ADDRESSES;
         }
@@ -383,6 +442,20 @@ MiInsertVadEx(
     CurrentThread = PsGetCurrentThread();
     MiLockProcessWorkingSetUnsafe(CurrentProcess, CurrentThread);
 
+    /* Take the placeholder out; the tree changed, so look up the parent again */
+    if (Replaced)
+    {
+        MiRemoveNode((PMMADDRESS_NODE)Replaced, &CurrentProcess->VadRoot);
+        CurrentProcess->VirtualSize -= ViewSize;
+        Vad->u2.VadFlags2.FromPlaceholder = 1;
+        Result = MiCheckForConflictingNode(StartingAddress >> PAGE_SHIFT,
+                                           EndingAddress >> PAGE_SHIFT,
+                                           &CurrentProcess->VadRoot,
+                                           &Parent);
+        ASSERT(Result != TableFoundNode);
+        if (Result == TableEmptyTree) Parent = NULL;
+    }
+
     /* Insert the VAD */
     CurrentProcess->VadRoot.NodeHint = Vad;
     MiInsertNode(&CurrentProcess->VadRoot, (PVOID)Vad, Parent, Result);
@@ -407,7 +480,72 @@ MiInsertVadEx(
     /* Unlock the address space */
     KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
 
+    /* The placeholder had no pages and no charge, only its VAD */
+    if (Replaced)
+    {
+        ExFreePool(Replaced);
+        PsReturnProcessNonPagedPoolQuota(CurrentProcess, sizeof(MMVAD_LONG));
+    }
+
     *BaseAddress = StartingAddress;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+MiInsertVadEx(
+    _Inout_ PMMVAD Vad,
+    _In_ ULONG_PTR *BaseAddress,
+    _In_ SIZE_T ViewSize,
+    _In_ ULONG_PTR HighestAddress,
+    _In_ ULONG_PTR Alignment,
+    _In_ ULONG AllocationType)
+{
+    return MiInsertVadEx2(Vad, BaseAddress, ViewSize, 0, HighestAddress, Alignment, AllocationType, TRUE);
+}
+
+/* A free placeholder: private, reserved, no access; it takes no commit charge */
+VOID
+NTAPI
+MiInitializePlaceholderVad(
+    _Out_ PMMVAD_LONG Vad)
+{
+    RtlZeroMemory(Vad, sizeof(MMVAD_LONG));
+    Vad->u.VadFlags.Protection = MiMakeProtectionMask(PAGE_NOACCESS);
+    Vad->u.VadFlags.PrivateMemory = 1;
+    Vad->u2.VadFlags2.Placeholder = 1;
+}
+
+/*
+ * Insert a free placeholder VAD for the pages from StartingAddress to EndingAddress, which the
+ * caller has just released. The caller holds the address creation lock and the working set lock
+ * of the current process, has charged the VAD's pool quota and accounts the virtual size.
+ */
+NTSTATUS
+NTAPI
+MiInsertPlaceholderVad(
+    _In_ PEPROCESS Process,
+    _In_ PMMVAD_LONG Vad,
+    _In_ ULONG_PTR StartingAddress,
+    _In_ ULONG_PTR EndingAddress)
+{
+    TABLE_SEARCH_RESULT Result;
+    PMMADDRESS_NODE Parent = NULL;
+
+    ASSERT(Process == PsGetCurrentProcess());
+    ASSERT(Vad->u2.VadFlags2.Placeholder);
+
+    Result = MiCheckForConflictingNode(StartingAddress >> PAGE_SHIFT,
+                                       EndingAddress >> PAGE_SHIFT,
+                                       &Process->VadRoot,
+                                       &Parent);
+    if (Result == TableFoundNode) return STATUS_CONFLICTING_ADDRESSES;
+    if (Result == TableEmptyTree) Parent = NULL;
+
+    Vad->StartingVpn = StartingAddress >> PAGE_SHIFT;
+    Vad->EndingVpn = EndingAddress >> PAGE_SHIFT;
+    Process->VadRoot.NodeHint = Vad;
+    MiInsertNode(&Process->VadRoot, (PVOID)Vad, Parent, Result);
     return STATUS_SUCCESS;
 }
 
@@ -523,11 +661,12 @@ MiGetNextNode(IN PMMADDRESS_NODE Node)
 
 TABLE_SEARCH_RESULT
 NTAPI
-MiFindEmptyAddressRangeInTree(IN SIZE_T Length,
-                              IN ULONG_PTR Alignment,
-                              IN PMM_AVL_TABLE Table,
-                              OUT PMMADDRESS_NODE *PreviousVad,
-                              OUT PULONG_PTR Base)
+MiFindEmptyAddressRangeInTreeEx(IN SIZE_T Length,
+                                IN ULONG_PTR LowestAddress,
+                                IN ULONG_PTR Alignment,
+                                IN PMM_AVL_TABLE Table,
+                                OUT PMMADDRESS_NODE *PreviousVad,
+                                OUT PULONG_PTR Base)
 {
     PMMADDRESS_NODE Node, PreviousNode;
     ULONG_PTR PageCount, AlignmentVpn, LowVpn, HighestVpn;
@@ -538,7 +677,7 @@ MiFindEmptyAddressRangeInTree(IN SIZE_T Length,
     /* Calculate page numbers for the length, alignment, and starting address */
     PageCount = BYTES_TO_PAGES(Length);
     AlignmentVpn = Alignment >> PAGE_SHIFT;
-    LowVpn = ALIGN_UP_BY((ULONG_PTR)MM_LOWEST_USER_ADDRESS >> PAGE_SHIFT, AlignmentVpn);
+    LowVpn = ALIGN_UP_BY(max(LowestAddress, (ULONG_PTR)MM_LOWEST_USER_ADDRESS) >> PAGE_SHIFT, AlignmentVpn);
 
     /* Check for kernel mode table (memory areas) */
     if (Table->Unused == 1)
@@ -616,6 +755,17 @@ MiFindEmptyAddressRangeInTree(IN SIZE_T Length,
 
     /* Nyet, there's no free address space for this allocation, so we'll fail */
     return TableFoundNode;
+}
+
+TABLE_SEARCH_RESULT
+NTAPI
+MiFindEmptyAddressRangeInTree(IN SIZE_T Length,
+                              IN ULONG_PTR Alignment,
+                              IN PMM_AVL_TABLE Table,
+                              OUT PMMADDRESS_NODE *PreviousVad,
+                              OUT PULONG_PTR Base)
+{
+    return MiFindEmptyAddressRangeInTreeEx(Length, 0, Alignment, Table, PreviousVad, Base);
 }
 
 TABLE_SEARCH_RESULT
