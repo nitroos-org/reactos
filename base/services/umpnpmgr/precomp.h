@@ -60,6 +60,7 @@ typedef struct
     DWORD_PTR hRecipient;
     DWORD ulFlags;
     GUID ClassGuid;
+    PSID pOwnerSid;     /* account of the registering caller: only it (or an administrator) may unregister */
 } NOTIFY_ENTRY, *PNOTIFY_ENTRY;
 
 /* event.c */
