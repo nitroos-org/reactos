@@ -13,13 +13,38 @@
 #include <debug.h>
 
 /*
- * The system enforces none of the policies except DEP, so every policy is reported as not enabled. A request to
+ * The system enforces none of the policies except DEP and the system call disable policy (Win32k lockdown), so every
+ * other policy is reported as not enabled. A request to
  * enable a policy that restricts the process itself is accepted, as it is on Windows, and has no effect; a request
  * that Windows refuses is refused here with the same error. The rules of what is accepted are the ones that
  * Windows 10 gave for the first request of a process; they depend on the flags alone, the system keeps no state.
  */
 
 /* FUNCTIONS ******************************************************************/
+
+/* NtQueryInformationProcess / NtSetInformationProcess class of the policy the kernel keeps */
+#define BASEP_ProcessMitigationPolicy   ((PROCESSINFOCLASS)52)
+
+typedef struct _BASEP_MITIGATION_REQUEST
+{
+    ULONG Policy;
+    ULONG Flags;
+} BASEP_MITIGATION_REQUEST;
+
+/* Asks the kernel for the Win32k lockdown flags of a process */
+static
+NTSTATUS
+BasepQuerySystemCallDisable(
+    _In_ HANDLE hProcess,
+    _Out_ PULONG Flags)
+{
+    BASEP_MITIGATION_REQUEST Request = { ProcessSystemCallDisablePolicy, 0 };
+    NTSTATUS Status;
+
+    Status = NtQueryInformationProcess(hProcess, BASEP_ProcessMitigationPolicy, &Request, sizeof(Request), NULL);
+    *Flags = NT_SUCCESS(Status) ? Request.Flags : 0;
+    return Status;
+}
 
 static
 ULONG
@@ -168,13 +193,28 @@ GetProcessMitigationPolicy(
         }
         else if (MitigationPolicy == ProcessMitigationOptionsMask)
         {
+            /* The mask of the creation mitigations that can be requested: only the Win32k lockdown (the field of
+             * bits 28-29 of the first QWORD) is enforced, so only it is offered. A sandbox ANDs its request with
+             * this mask, so it asks for nothing else. */
             RtlZeroMemory(lpBuffer, nLength);
+            if (nLength >= sizeof(ULONGLONG))
+                *(PULONGLONG)lpBuffer = 3ULL << 28;
+        }
+        else if (MitigationPolicy == ProcessSystemCallDisablePolicy)
+        {
+            ULONG SysFlags;
+
+            /* The kernel keeps this one: ask it for the process of the handle */
+            Status = BasepQuerySystemCallDisable(hProcess, &SysFlags);
+            if (NT_SUCCESS(Status))
+                *(PULONG)lpBuffer = SysFlags & 1;
         }
         else
         {
             *(PULONG)lpBuffer = 0;
         }
-        Status = STATUS_SUCCESS;
+        if (MitigationPolicy != ProcessSystemCallDisablePolicy)
+            Status = STATUS_SUCCESS;
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -244,6 +284,19 @@ SetProcessMitigationPolicy(
     {
         SetLastError(Error);
         return FALSE;
+    }
+
+    if (MitigationPolicy == ProcessSystemCallDisablePolicy)
+    {
+        BASEP_MITIGATION_REQUEST Request = { ProcessSystemCallDisablePolicy, Flags & 1 };
+
+        /* The lockdown is the one setting that does something; it can be turned on and not off */
+        Status = NtSetInformationProcess(NtCurrentProcess(), BASEP_ProcessMitigationPolicy, &Request, sizeof(Request));
+        if (!NT_SUCCESS(Status))
+        {
+            BaseSetLastNTError(Status);
+            return FALSE;
+        }
     }
 
     return TRUE;
