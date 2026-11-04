@@ -123,6 +123,40 @@ static BOOL SafeEntryName(LPWSTR name)
     return TRUE;
 }
 
+/* TRUE: comp (len chars, no separator) names a DOS device: CON PRN AUX NUL COM1-9 LPT1-9 CONIN$ CONOUT$ CLOCK$, with any extension
+ * ("NUL.txt") and trailing spaces ("NUL "), which Windows still maps to the device. The superscript digits of COM / LPT too. */
+static BOOL IsDeviceComp(LPCWSTR comp, size_t len)
+{
+    static const LPCWSTR plain[] = { L"CON", L"PRN", L"AUX", L"NUL", L"CONIN$", L"CONOUT$", L"CLOCK$" };
+    WCHAR stem[16];
+    size_t n = 0, i;
+
+    while (n < len && comp[n] != L'.') n++;
+    while (n && comp[n - 1] == L' ') n--;
+    if (!n || n >= ARRAYSIZE(stem)) return FALSE;
+    for (i = 0; i < n; i++) stem[i] = (comp[i] >= L'a' && comp[i] <= L'z') ? (WCHAR)(comp[i] - 32) : comp[i];
+    stem[n] = L'\0';
+    for (i = 0; i < ARRAYSIZE(plain); i++)
+        if (!wcscmp(stem, plain[i])) return TRUE;
+    if (n == 4 && (!wcsncmp(stem, L"COM", 3) || !wcsncmp(stem, L"LPT", 3)) &&
+        ((stem[3] >= L'1' && stem[3] <= L'9') || stem[3] == 0xB9 || stem[3] == 0xB2 || stem[3] == 0xB3))
+        return TRUE;
+    return FALSE;
+}
+
+/* TRUE: some component of path ('\\' or '/') is a DOS device name (NUL, CON, COM1, ...): such a name is never a folder or file */
+BOOL FmHasDeviceName(LPCWSTR path)
+{
+    while (*path)
+    {
+        size_t l = wcscspn(path, L"\\/");
+        if (l && IsDeviceComp(path, l)) return TRUE;
+        path += l;
+        if (*path) path++;
+    }
+    return FALSE;
+}
+
 /* a relative path inside an archive: no drive, no stream, no ".." and no leading separator; '/' becomes '\\' */
 BOOL FmSafeTreeName(LPWSTR name)
 {
@@ -142,6 +176,7 @@ BOOL FmSafeTreeName(LPWSTR name)
         if (l == 0 || (l == 1 && comp[0] == L'.') || (l == 2 && comp[0] == L'.' && comp[1] == L'.')) return FALSE;
         /* Windows drops a trailing space or dot ("App " and "App." are "App"): such a name would alias another one */
         if (comp[l - 1] == L' ' || comp[l - 1] == L'.') return FALSE;
+        if (IsDeviceComp(comp, l)) return FALSE;
         if (!comp[l]) break;
         comp += l + 1;
         if (!*comp) return FALSE;
@@ -288,6 +323,18 @@ HRESULT FmRappsFetchDb(LPCWSTR urlOverride, FILE *log)
         FmSetLastMessage(L"Refused: a local RAPPS catalog must be a file on a drive letter (X:\\...); %s is not accepted.", url);
         LOGF(log, L"error: catalog path %s refused (not a drive-letter path)\n", url);
         return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+    }
+    /* ... and not on a mapped network drive: "Z:" mapped to \\server\share is read over SMB just like the UNC path above */
+    if (_wcsnicmp(url, L"https://", 8))
+    {
+        WCHAR rootPath[4];
+        rootPath[0] = url[0]; rootPath[1] = L':'; rootPath[2] = L'\\'; rootPath[3] = L'\0';
+        if (GetDriveTypeW(rootPath) == DRIVE_REMOTE)
+        {
+            FmSetLastMessage(L"Refused: a local RAPPS catalog must be on a local drive; %s is on a network drive.", url);
+            LOGF(log, L"error: catalog path %s refused (a mapped network drive)\n", url);
+            return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+        }
     }
     if (!FmGetRootDir(root, MAX_PATH)) return E_FAIL;
     StringCchPrintfW(base, MAX_PATH, L"%s\\RappsDb", root);

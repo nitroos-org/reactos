@@ -122,6 +122,11 @@ static DWORD ExtractArchive(LPCWSTR archive, LPCWSTR outDir)
 
 /* ---- Generate ------------------------------------------------------------------------------------------------- */
 
+/* the entry's cleanup items, judged before anything is created and written to the record after the files */
+#define MAX_PENDING 512
+static struct { WCHAR type; WCHAR value[MAX_PATH]; } g_pend[MAX_PENDING];
+static int g_npend;
+
 static void AddEntry(WCHAR type, LPCWSTR value)
 {
     WCHAR name[24];
@@ -177,8 +182,22 @@ static BOOL InstallFiles(LPCWSTR srcBase, LPCWSTR spec, LPCWSTR dstDir)
     return ok;
 }
 
-/* the entry's Del* lists become record entries; each must stay inside the app's own directory / registry key (native.c) */
-static void AddFromDb(LPCWSTR key, WCHAR type, LPCWSTR prefix, BOOL checkOnly)
+static void AddPending(WCHAR type, LPCWSTR value)
+{
+    if (g_npend >= MAX_PENDING)
+    {
+        wprintf(L"note: dropped a cleanup item: the entry lists more than %d\n", MAX_PENDING);
+        return;
+    }
+    g_pend[g_npend].type = type;
+    StringCchCopyW(g_pend[g_npend].value, MAX_PATH, value);
+    g_npend++;
+}
+
+/* the entry's Del* lists become record entries; each must stay inside the app's own directory / registry key (native.c).
+ * An item that does not is DROPPED with a log line, not a failed install: what it named stays behind (a leftover is safer than
+ * a program that cannot be installed at all, and the uninstaller would refuse such an item anyway). */
+static void AddFromDb(LPCWSTR key, WCHAR type, LPCWSTR prefix)
 {
     WCHAR list[1024], *tok, *ctx = NULL, item[MAX_PATH], chk[MAX_PATH];
     Rk(L"Generate", key, list, ARRAYSIZE(list));
@@ -190,12 +209,12 @@ static void AddFromDb(LPCWSTR key, WCHAR type, LPCWSTR prefix, BOOL checkOnly)
             /* "DelDirEmpty = .|.." (the RAPPS idiom: the install folder and the vendor folder above it, each if empty).
              * "." is the install folder itself, which the record always lists ("d \"). ".." is recorded only when the parent is
              * itself a folder an install could own (strictly below Program Files / LocalAppData\Programs, not protected);
-             * otherwise the item is dropped. Only DelDirEmpty: DelDir / DelFile with "." or ".." stay refused. */
+             * otherwise the item is dropped. Only DelDirEmpty: DelDir / DelFile with "." or ".." are dropped as unsafe. */
             WCHAR par[MAX_PATH];
-            if (checkOnly || tok[1] == L'\0') continue;
+            if (tok[1] == L'\0') continue;
             StringCchCopyW(par, MAX_PATH, g_installDir);
             PathRemoveFileSpecW(par);
-            if (FmInstallDirOk(par, NULL)) AddEntry(L'd', L"\\..");
+            if (FmInstallDirOk(par, NULL)) AddPending(L'd', L"\\..");
             else wprintf(L"note: dropped the entry's DelDirEmpty item '..': the parent folder %s is a protected folder\n", par);
             continue;
         }
@@ -204,18 +223,24 @@ static void AddFromDb(LPCWSTR key, WCHAR type, LPCWSTR prefix, BOOL checkOnly)
         else
         {
             StringCchCopyW(chk, MAX_PATH, tok);
-            ok = FmSafeTreeName(chk);                  /* not "." or "..", no drive, not absolute, not empty */
+            ok = FmSafeTreeName(chk);                  /* not "." or "..", no drive, not absolute, not empty, no device name */
         }
         if (!ok)
         {
-            wprintf(L"error: the entry's %s item '%s' is outside the app's own folder or registry key\n", key, tok);
-            Fail(L"unsafe cleanup entry", ERROR_BAD_PATHNAME);
-            return;
+            wprintf(L"note: dropped the entry's %s item '%s': it is outside the app's own folder or registry key, so it was not "
+                    L"recorded and uninstall leaves it alone\n", key, tok);
+            continue;
         }
-        if (checkOnly) continue;
         StringCchPrintfW(item, MAX_PATH, L"%s%s", prefix, tok);
-        AddEntry(type, item);
+        AddPending(type, item);
     }
+}
+
+static void FlushPending(void)
+{
+    int i;
+    for (i = 0; i < g_npend; i++) AddEntry(g_pend[i].type, g_pend[i].value);
+    g_npend = 0;
 }
 
 /* a [Generate] Files item: names and wildcards below the unpacked archive, nothing that climbs out of it */
@@ -242,7 +267,7 @@ static HRESULT MakeShortcut(BOOL perUser, LPCWSTR target, LPCWSTR lnkName, LPCWS
     if (!FmSafeTreeName(rel)) return E_INVALIDARG;
     if (!FmMakeParents(dir, rel)) return HRESULT_FROM_WIN32(GetLastError());
     StringCchPrintfW(path, MAX_PATH, L"%s\\%s", dir, rel);
-    if (IsReparse(path)) return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
+    if (FmLinkBelow(dir, path, TRUE)) return HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);   /* a link in any folder below the Start menu */
     hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, (void **)&sl);
     if (FAILED(hr)) return hr;
     IShellLinkW_SetPath(sl, target);
@@ -271,9 +296,21 @@ static HRESULT MakeShortcut(BOOL perUser, LPCWSTR target, LPCWSTR lnkName, LPCWS
         StringCchCopyW(dir, MAX_PATH, path);
         PathRemoveFileSpecW(dir);
         p = dir;
-        AddEntry(L'd', p);
+        /* the shortcut's own folder (a folder of the Start menu, removed when empty); not the Start menu's Programs folder itself,
+         * which uninstall would only refuse */
+        if (wcschr(rel, L'\\')) AddEntry(L'd', p);
     }
     return hr;
+}
+
+/* TRUE (and the error is set): a DOS device name (NUL, CON, COM1, "NUL.txt" ...) is never a folder. Refused by name, not by the
+ * accident that the path no longer matches the base once Windows has turned it into "\\.\NUL". */
+static BOOL DeviceDir(LPCWSTR dir)
+{
+    if (!FmHasDeviceName(dir)) return FALSE;
+    wprintf(L"error: the install directory '%s' names a DOS device (NUL, CON, COM1, ...)\n", dir);
+    Fail(L"the install directory is a DOS device name", ERROR_BAD_PATHNAME);
+    return TRUE;
 }
 
 static int GenInstall(LPCWSTR archive)
@@ -292,13 +329,6 @@ static int GenInstall(LPCWSTR archive)
     if (!files[0]) StringCchCopyW(files, ARRAYSIZE(files), L"*.exe|*.*");
     Rk(L"Rapps", L"Scope", scope, ARRAYSIZE(scope));
     if (!_wcsicmp(scope, L"Machine")) perUser = FALSE;
-    /* check the cleanup lists before anything is created or moved: a bad entry must leave nothing behind */
-    AddFromDb(L"DelReg", L'K', L"", TRUE);
-    AddFromDb(L"DelRegEmpty", L'k', L"", TRUE);
-    AddFromDb(L"DelFile", L'F', L"", TRUE);
-    AddFromDb(L"DelDir", L'D', L"", TRUE);
-    AddFromDb(L"DelDirEmpty", L'd', L"", TRUE);
-    if (g_err) return g_err;
     {
         WCHAR fl[512], *ft, *fc = NULL;
         Rk(L"Generate", L"Files", fl, ARRAYSIZE(fl));
@@ -332,22 +362,33 @@ static int GenInstall(LPCWSTR archive)
         while (*l == L'\\' || *l == L'/') l++;
         n = wcslen(l);
         while (n && (l[n - 1] == L'\\' || l[n - 1] == L'/')) l[--n] = L'\0';
+        if (DeviceDir(l)) return g_err;
         if (!FmSafeTreeName(l)) return Fail(L"the install directory name is not valid", ERROR_BAD_PATHNAME), g_err;
         if (FAILED(StringCchPrintfW(dirKey, ARRAYSIZE(dirKey), L"%s\\%s", base, l))) return Fail(L"the install directory is too long", ERROR_BAD_PATHNAME), g_err;
     }
     else
         StringCchCopyW(dirKey, ARRAYSIZE(dirKey), base);
-    /* canonical first (8.3 names, doubled or trailing separators, names ending in a space or dot), then the allow-list */
+    if (DeviceDir(dirKey)) return g_err;
+    /* canonical first (8.3 names, doubled or trailing separators, names ending in a space or dot), then the allow-list, the
+     * system folders below Program Files, and links (junctions) in any folder below the base */
     if (!FmInstallDirOk(dirKey, g_installDir))
     {
-        wprintf(L"error: the install directory '%s' is not a folder of its own below Program Files or %%LOCALAPPDATA%%\\Programs\n", dirKey);
+        wprintf(L"error: the install directory '%s' is not a folder of its own below Program Files or %%LOCALAPPDATA%%\\Programs "
+                L"(or it is a Windows system folder there, or reached through a link)\n", dirKey);
         return Fail(L"the install directory is a system or profile folder (or not below Program Files / LocalAppData\\Programs); it must be a folder of its own", ERROR_BAD_PATHNAME), g_err;
     }
     g_installLen = wcslen(g_installDir);
-    if (IsReparse(g_installDir)) return Fail(L"the install directory is a link", ERROR_ACCESS_DENIED), g_err;
+    /* the cleanup lists, judged now (before anything is created or moved): an item outside the app's own folder or key is dropped
+     * with a log line, the others go into the record once the files are in */
+    AddFromDb(L"DelReg", L'K', L"");
+    AddFromDb(L"DelRegEmpty", L'k', L"");
+    AddFromDb(L"DelFile", L'F', L"\\");
+    AddFromDb(L"DelDir", L'D', L"\\");
+    AddFromDb(L"DelDirEmpty", L'd', L"\\");
     if (SHCreateDirectoryExW(NULL, g_installDir, NULL) != ERROR_SUCCESS && GetFileAttributesW(g_installDir) == INVALID_FILE_ATTRIBUTES)
         return Fail(L"cannot create the install directory", GetLastError()), g_err;
-    if (IsReparse(g_installDir)) return Fail(L"the install directory is a link", ERROR_ACCESS_DENIED), g_err;
+    /* again, now that it exists: a link planted in between (or at the last name) is seen */
+    if (!FmInstallDirOk(g_installDir, NULL)) return Fail(L"the install directory is (or is reached through) a link", ERROR_ACCESS_DENIED), g_err;
 
     StringCchPrintfW(tempDir, MAX_PATH, L"%s\\~featmgr%lu.tmp", g_installDir, GetCurrentProcessId());
     FmDeleteTree(tempDir);
@@ -379,12 +420,7 @@ static int GenInstall(LPCWSTR archive)
     if (g_err) goto out;
     if (!g_mainApp[0]) { Fail(L"the archive held none of the files the entry installs", ERROR_FILE_NOT_FOUND); goto out; }
 
-    AddFromDb(L"DelReg", L'K', L"", FALSE);
-    AddFromDb(L"DelRegEmpty", L'k', L"", FALSE);
-    AddFromDb(L"DelFile", L'F', L"\\", FALSE);
-    AddFromDb(L"DelDir", L'D', L"\\", FALSE);
-    AddFromDb(L"DelDirEmpty", L'd', L"\\", FALSE);
-    if (g_err) goto out;
+    FlushPending();
     AddEntry(L'd', L"\\");
 
     if (!FmFeatmgrExePath(fm, MAX_PATH)) StringCchCopyW(fm, MAX_PATH, L"featmgr.exe");
