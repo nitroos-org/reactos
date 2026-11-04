@@ -1,6 +1,6 @@
 static const WCHAR g_Usage[] =
     L"\r\n"
-    L"Microsoft r TypePerf.exe (10.0.19041.1741)\r\n"
+    L"NitroOS TypePerf.exe (" L"" KERNEL_VERSION_STR L")\r\n"
     L"\r\n"
     L"Typeperf writes performance data to the command window or to a log file. To\r\n"
     L"stop Typeperf, press CTRL+C.\r\n"
