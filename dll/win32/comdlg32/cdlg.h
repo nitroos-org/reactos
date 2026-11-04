@@ -179,6 +179,7 @@ HRESULT FileSaveDialog_Constructor(IUnknown *pUnkOuter, REFIID riid, void **ppv)
 /* Shared helper functions */
 BOOL COMDLG32_GetCanonicalPath(PCIDLIST_ABSOLUTE pidlAbsCurrent, LPCWSTR lpstrFile, LPWSTR lpstrPathAndFile);
 #ifdef __REACTOS__
+void COMDLG32_FixTypedSlashes(LPWSTR names, UINT size);
 struct FileOpenDlgInfos;
 int FILEDLG95_ValidatePathAction(struct FileOpenDlgInfos *fodInfos, LPWSTR lpstrPathAndFile, IShellFolder **ppsf,
                                  HWND hwnd, DWORD flags, BOOL isSaveDlg, int defAction);
