@@ -199,6 +199,7 @@ struct d3d11_swapchain
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
         struct wined3d_swapchain_desc *desc);
 HWND dxgi_create_composition_window(unsigned int width, unsigned int height);
+void dxgi_destroy_composition_window(HWND window);
 BOOL d3d11_swapchain_set_composition(IDXGISwapChain1 *iface, HWND window, BOOL gdi_flag);
 
 HRESULT d3d12_swapchain_create(IWineDXGIFactory *factory, ID3D12CommandQueue *queue, HWND window,

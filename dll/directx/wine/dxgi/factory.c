@@ -382,6 +382,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
         IUnknown *device, const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
     IWineDXGISwapChainFactory *swapchain_factory;
+    ID3D12CommandQueue *command_queue;
     DXGI_SWAP_CHAIN_DESC1 composition_desc;
     BOOL gdi_flag = FALSE;
     HWND window;
@@ -418,6 +419,13 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
     if (output)
         FIXME("Ignoring output %p.\n", output);
 
+    if (SUCCEEDED(IUnknown_QueryInterface(device, &IID_ID3D12CommandQueue, (void **)&command_queue)))
+    {
+        ID3D12CommandQueue_Release(command_queue);
+        FIXME("Composition swap chains for Direct3D 12 are not implemented.\n");
+        return E_NOTIMPL;
+    }
+
     if (FAILED(IUnknown_QueryInterface(device, &IID_IWineDXGISwapChainFactory, (void **)&swapchain_factory)))
     {
         FIXME("Composition swap chains for device %p are not implemented.\n", device);
@@ -450,7 +458,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
     if (FAILED(hr))
     {
         WARN("Failed to create composition swap chain, hr %#lx.\n", hr);
-        DestroyWindow(window);
+        dxgi_destroy_composition_window(window);
         *swapchain = NULL;
         return hr;
     }
@@ -460,7 +468,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
         ERR("Swap chain %p is not a d3d11 swap chain.\n", *swapchain);
         IDXGISwapChain1_Release(*swapchain);
         *swapchain = NULL;
-        DestroyWindow(window);
+        dxgi_destroy_composition_window(window);
         return E_FAIL;
     }
 
