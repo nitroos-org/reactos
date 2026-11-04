@@ -471,6 +471,60 @@ NtGdiGetAppClipBox(
     return iComplexity;
 }
 
+/*
+ * Converts the logical rectangle of IntersectClipRect/ExcludeClipRect to device
+ * space. Windows keeps clip coordinates in a 28-bit space [MIN_COORD,
+ * MAX_COORD]. Without scaling (identity or an offset), a rectangle that reaches
+ * outside it is refused: the call fails with ERROR and leaves the clip region
+ * alone, so IntersectClipRect(hdc, x, y, INT_MAX, INT_MAX) does not clip at all
+ * (user32 DrawText and WinForms TextRenderer pass such bounds). With scaling,
+ * the rectangle becomes empty.
+ */
+typedef enum _CLIPRECT_XFORM
+{
+    CLIPRECT_OK,
+    CLIPRECT_REFUSED,
+    CLIPRECT_EMPTY
+} CLIPRECT_XFORM;
+
+static
+CLIPRECT_XFORM
+IntClipRectLPtoDP(
+    _In_ PDC pdc,
+    _In_ INT xLeft,
+    _In_ INT yTop,
+    _In_ INT xRight,
+    _In_ INT yBottom,
+    _Out_ PRECTL prcl)
+{
+    BOOLEAN bOk;
+
+    prcl->left   = xLeft;
+    prcl->top    = yTop;
+    prcl->right  = xRight;
+    prcl->bottom = yBottom;
+    RECTL_vMakeWellOrdered(prcl);
+    bOk = IntLPtoDP(pdc, (LPPOINT)prcl, 2);
+
+    if (bOk &&
+        prcl->left >= MIN_COORD && prcl->left <= MAX_COORD &&
+        prcl->top >= MIN_COORD && prcl->top <= MAX_COORD &&
+        prcl->right >= MIN_COORD && prcl->right <= MAX_COORD &&
+        prcl->bottom >= MIN_COORD && prcl->bottom <= MAX_COORD)
+    {
+        return CLIPRECT_OK;
+    }
+
+    if ((pdc->pdcattr->mxWorldToDevice.flAccel & (XFORM_SCALE | XFORM_UNITY)) ==
+        (XFORM_SCALE | XFORM_UNITY))
+    {
+        return CLIPRECT_REFUSED;
+    }
+
+    RECTL_vSetEmptyRect(prcl);
+    return CLIPRECT_EMPTY;
+}
+
 INT
 APIENTRY
 NtGdiExcludeClipRect(
@@ -494,12 +548,11 @@ NtGdiExcludeClipRect(
     }
 
     /* Convert coordinates to device space */
-    rect.left   = xLeft;
-    rect.top    = yTop;
-    rect.right  = xRight;
-    rect.bottom = yBottom;
-    RECTL_vMakeWellOrdered(&rect);
-    IntLPtoDP(pdc, (LPPOINT)&rect, 2);
+    if (IntClipRectLPtoDP(pdc, xLeft, yTop, xRight, yBottom, &rect) == CLIPRECT_REFUSED)
+    {
+        DC_UnlockDc(pdc);
+        return ERROR;
+    }
 
     prgn = IntSysCreateRectpRgnIndirect(&rect);
     if ( prgn )
@@ -532,6 +585,7 @@ NtGdiIntersectClipRect(
     RECTL rect;
     PDC pdc;
     PREGION prgn;
+    CLIPRECT_XFORM xform;
 
     DPRINT("NtGdiIntersectClipRect(%p, %d,%d-%d,%d)\n",
             hdc, xLeft, yTop, xRight, yBottom);
@@ -545,12 +599,12 @@ NtGdiIntersectClipRect(
     }
 
     /* Convert coordinates to device space */
-    rect.left   = xLeft;
-    rect.top    = yTop;
-    rect.right  = xRight;
-    rect.bottom = yBottom;
-    RECTL_vMakeWellOrdered(&rect);
-    IntLPtoDP(pdc, (LPPOINT)&rect, 2);
+    xform = IntClipRectLPtoDP(pdc, xLeft, yTop, xRight, yBottom, &rect);
+    if (xform == CLIPRECT_REFUSED)
+    {
+        DC_UnlockDc(pdc);
+        return ERROR;
+    }
 
     prgn = IntSysCreateRectpRgnIndirect(&rect);
     if ( prgn )
@@ -560,9 +614,13 @@ NtGdiIntersectClipRect(
         REGION_Delete(prgn);
     }
 
-    /* Emulate Windows behavior */
-    if ( iComplexity == SIMPLEREGION )
+    /* Emulate Windows behavior (also when a scaled rectangle overflowed and
+       the clip region became empty) */
+    if (iComplexity == SIMPLEREGION ||
+        (xform == CLIPRECT_EMPTY && iComplexity != ERROR))
+    {
         iComplexity = COMPLEXREGION;
+    }
 
     /* Unlock the DC */
     DC_UnlockDc(pdc);
