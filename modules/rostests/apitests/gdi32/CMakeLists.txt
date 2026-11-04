@@ -29,6 +29,7 @@ list(APPEND SOURCE
     EngCreateSemaphore.c
     EngReleaseSemaphore.c
     EnumFontFamilies.c
+    EnumFontFamiliesArial.c
     ExcludeClipRect.c
     ExtCreatePen.c
     ExtCreateRegion.c
