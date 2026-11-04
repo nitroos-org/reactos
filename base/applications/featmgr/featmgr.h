@@ -63,6 +63,10 @@ typedef struct _FM_FEATURE
     WCHAR   InstalledVersion[FM_MAX_VER]; /* "" unless installed. Scoop: apps\<app>\current\manifest.json;
                                            * others: the Version recorded when featmgr enabled it */
     BOOL    UpdateAvailable;     /* Provider=scoop, installed, and the imported catalog has a newer version */
+    BOOL    Hosted;              /* OS tier: the payload is not staged; enable downloads it ([Download], engine.c) */
+    BOOL    BuiltIn;             /* OS tier: the image itself carries it ([Feature] BuiltInFile=), no featmgr record:
+                                  * shown Enabled, not removable here */
+    WCHAR   Unavailable[256];    /* !PayloadAvailable: why, for the UI ("" = the payload is simply not staged) */
 } FM_FEATURE;
 
 /* Catalog / layout helpers. featmgr root = %SystemRoot%\Featmgr */
@@ -254,6 +258,7 @@ typedef struct _FM_COMPONENT
     ULONGLONG Size;
     BOOL     Default;            /* installed by the first-boot installer */
     BOOL     ArchOk;             /* Arch= lists this build's architecture */
+    ULONGLONG MaxSize;           /* > 0: the download is aborted once it is larger (hosted packs: the pinned size) */
 } FM_COMPONENT;
 BOOL   FmCompLoad(LPCWSTR id, FM_COMPONENT *c);
 int    FmCompEnum(FM_COMPONENT **outArr);          /* every component of the file; caller frees with FmCompFree */
@@ -264,6 +269,9 @@ BOOL   FmCompDetect(const FM_COMPONENT *c);        /* TRUE: installed (DetectReg
  * a file whose SHA-256 differs (the file is deleted). path = the verified file. */
 HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log);
 BOOL   FmNetProbe(LPCWSTR url, DWORD timeoutMs);   /* TRUE: the server answered (the network is up) */
+BOOL   FmArchListed(LPCWSTR list);                 /* "x86,amd64" (i386 = x86) lists this build's architecture; "" = all */
+BOOL   FmFileSha256(LPCWSTR path, WCHAR hex[65]);  /* lower-case hex SHA-256 of a file */
+ULONGLONG FmHostedDownloadSize(LPCWSTR manifest);  /* OS-tier hosted pack: bytes its [Download] files add up to */
 void   FmCompInstallLine(const FM_COMPONENT *c, LPCWSTR file, LPWSTR out, DWORD cch);   /* Install with %FILE% filled in */
 
 /* ---- NitroOS shell defaults (shelldefaults.c) ---- */

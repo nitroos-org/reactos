@@ -191,14 +191,21 @@ static int DoQuery(LPCWSTR id)
         FmGetDependents(f.Id, dep, ARRAYSIZE(dep));
         Out(L"EnabledDependents: %s\n", dep[0] ? dep : L"(none)");
     }
-    Out(L"Payload:      %s\n", f.PayloadAvailable ? L"staged" : L"NOT staged (deferred)");
+    if (f.BuiltIn)
+        Out(L"Payload:      included in this image (installed by setup; not removable here)\n");
+    else if (f.Hosted && f.PayloadAvailable)
+        Out(L"Payload:      downloaded at enable (%I64u bytes, SHA-256 checked)\n", FmHostedDownloadSize(f.ManifestPath));
+    else if (f.Unavailable[0])
+        Out(L"Payload:      NOT available: %s\n", f.Unavailable);
+    else
+        Out(L"Payload:      %s\n", f.PayloadAvailable ? L"staged" : L"NOT staged (deferred)");
     Out(L"Dependencies: %s\n", f.Dependencies[0] ? f.Dependencies : L"(none)");
     Out(L"Manifest:     %s\n", f.ManifestPath);
     Out(L"Description:  %s\n", f.Description);
     {
         WCHAR v[512];
         static const WCHAR *k[] = { L"Artifact", L"ArtifactSHA256", L"ArtifactSHA1", L"SizeBytes",
-                                    L"License", L"Publisher", L"URLSite" };
+                                    L"License", L"Publisher", L"URLSite", L"BaseUrl", L"Path", L"Arch" };
         int i;
         if (f.Provider[0]) Out(L"Provider:     %s\n", f.Provider);
         if (f.Source[0]) Out(L"Source:       %s\n", f.Source);
@@ -217,7 +224,7 @@ static int DoQuery(LPCWSTR id)
         if (v[0]) Out(L"Rapps.Pkg:    %s\n", v);
         GetPrivateProfileStringW(L"Rapps", L"Category", L"", v, 512, f.ManifestPath);
         if (v[0]) Out(L"Category:     %s\n", v);
-        for (i = 0; i < 7; i++)
+        for (i = 0; i < (int)ARRAYSIZE(k); i++)
         {
             GetPrivateProfileStringW(L"Source", k[i], L"", v, 512, f.ManifestPath);
             if (v[0]) Out(L"Source.%s: %s\n", k[i], v);

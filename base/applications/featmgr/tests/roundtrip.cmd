@@ -104,19 +104,120 @@ call :rc0 "36 uninstall of enabled feature"
 call :st fmt-base NotInstalled "37 NotInstalled after enabled-uninstall"
 call :ex %R%\fmt-base.out 0 "38 base file gone"
 
-rem --- Removable=0 (base component) guards (GFX-FU), coexisting with the dependency guard
-rem the real shipped lavapipe-pack manifest (Removable=0), if staged next to the fixtures
+rem --- lavapipe-pack (GPU pack): included in an image built with the GPU stack in system32 (not removable there),
+rem otherwise a hosted pack that is "not available yet" while its download location is the placeholder; amd64 only
+set FMK=HKLM\SOFTWARE\ReactOS\Nitro\Featmgr
+reg delete %FMK% /v PayloadBaseUrl /f >nul 2>&1
 if exist %FX%\lavapipe-pack.ini copy /y %FX%\lavapipe-pack.ini %R%\Catalog\ >nul
-if exist %FX%\lavapipe-pack.ini (
-  %FM% /disable lavapipe-pack > %O%\b.txt 2>&1
-  call :rc1 "39 disable lavapipe-pack refused"
-  find "base component" %O%\b.txt >nul
-  call :rc0 "40 ...with the base-component error"
-  %FM% /uninstall lavapipe-pack > %O%\b.txt 2>&1
-  call :rc1 "41 uninstall lavapipe-pack refused"
-  find "base component" %O%\b.txt >nul
-  call :rc0 "42 ...with the base-component error"
-)
+if not exist %R%\Catalog\lavapipe-pack.ini goto lvp_done
+%FM% /query lavapipe-pack > %O%\q.txt 2>&1
+type %O%\q.txt >> %LOG%
+if /i "%PROCESSOR_ARCHITECTURE%"=="x86" goto lvp_x86
+reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\lavapipe-pack >nul 2>&1
+if not errorlevel 1 goto lvp_done
+if not exist %SystemRoot%\System32\vulkan_lvp.dll goto lvp_hosted
+find /i "included in this image" %O%\q.txt >nul
+call :rc0 "39 lavapipe-pack: included in this image (vulkan_lvp.dll in system32, no record)"
+call :st lavapipe-pack Enabled "40 ...shown Enabled"
+%FM% /disable lavapipe-pack > %O%\b.txt 2>&1
+call :rc1 "41 disable lavapipe-pack refused"
+find "base component" %O%\b.txt >nul
+call :rc0 "42 ...with the base-component error"
+%FM% /uninstall lavapipe-pack > %O%\b.txt 2>&1
+call :rc1 "43 uninstall lavapipe-pack refused"
+call :ex %SystemRoot%\System32\vulkan_lvp.dll 1 "44 ...and the in-box files stay"
+goto lvp_done
+:lvp_hosted
+find /i "not available yet" %O%\q.txt >nul
+call :rc0 "39h lavapipe-pack (image without the GPU stack): not available yet with the placeholder URL"
+%FM% /install lavapipe-pack > %O%\b.txt 2>&1
+call :rc1 "40h install refused"
+call :st lavapipe-pack NotInstalled "41h ...left NotInstalled"
+goto lvp_done
+:lvp_x86
+find "64-bit (amd64)" %O%\q.txt >nul
+call :rc0 "39x lavapipe-pack on x86: amd64 only"
+%FM% /install lavapipe-pack > %O%\b.txt 2>&1
+call :rc1 "40x install refused on x86"
+find "64-bit" %O%\b.txt >nul
+call :rc0 "41x ...with the amd64-only message"
+:lvp_done
+
+rem --- hosted pack ([Download]) offline checks: placeholder, non-https base, arch, pre-staged payload
+copy /y %FX%\fmt-hosted.ini %R%\Catalog\ >nul
+copy /y %FX%\fmt-hostedarch.ini %R%\Catalog\ >nul
+rmdir /s /q %R%\Payload\fmt-hosted 2>nul
+%FM% /query fmt-hosted > %O%\q.txt 2>&1
+find /i "not available yet" %O%\q.txt >nul
+call :rc0 "H1 hosted pack with the placeholder base: not available yet"
+%FM% /list > %O%\l.txt 2>&1
+find "fmt-hosted " %O%\l.txt | find "*" >nul
+call :rc0 "H2 /list marks it '*'"
+%FM% /install fmt-hosted > %O%\b.txt 2>&1
+call :rc1 "H3 install refused with the placeholder"
+type %O%\b.txt >> %LOG%
+find /i "not available yet" %O%\b.txt >nul
+call :rc0 "H4 ...with the not-available-yet message"
+call :st fmt-hosted NotInstalled "H5 ...left NotInstalled"
+call :ex %R%\fmt-hosted.out 0 "H6 ...nothing installed"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmt-hosted >nul 2>&1
+call :rc1 "H7 ...no state record"
+reg add %FMK% /v PayloadBaseUrl /t REG_SZ /d http://127.0.0.1/featmgr /f >nul
+%FM% /query fmt-hosted > %O%\q.txt 2>&1
+find "https" %O%\q.txt >nul
+call :rc0 "H8 PayloadBaseUrl override that is not https: not available (names https)"
+%FM% /install fmt-hosted > %O%\b.txt 2>&1
+call :rc1 "H9 ...install refused"
+reg add %FMK% /v PayloadBaseUrl /t REG_SZ /d https://127.0.0.1:1/featmgr /f >nul
+%FM% /query fmt-hosted > %O%\q.txt 2>&1
+find "downloaded at enable" %O%\q.txt >nul
+call :rc0 "H10 https PayloadBaseUrl override: the pack can be turned on (downloaded at enable)"
+%FM% /install fmt-hosted > %O%\b.txt 2>&1
+call :rc1 "H11 unreachable server: install fails"
+type %O%\b.txt >> %LOG%
+find /i "nothing was changed" %O%\b.txt >nul
+call :rc0 "H12 ...and nothing was changed"
+call :ex %R%\fmt-hosted.out 0 "H13 ...nothing installed"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmt-hosted >nul 2>&1
+call :rc1 "H14 ...no state record"
+reg delete %FMK% /v PayloadBaseUrl /f >nul 2>&1
+mkdir %R%\Payload\fmt-hosted 2>nul
+echo wrong> %R%\Payload\fmt-hosted\fmt-hosted.txt
+%FM% /install fmt-hosted > %O%\b.txt 2>&1
+call :rc1 "H15 pre-staged file with a wrong SHA-256 (placeholder base): refused"
+call :ex %R%\fmt-hosted.out 0 "H16 ...nothing installed"
+copy /y %FX%\fmt-hosted.txt %R%\Payload\fmt-hosted\ >nul
+%FM% /install fmt-hosted > %O%\b.txt 2>&1
+call :rc0 "H17 pre-staged verified payload installs offline (placeholder base)"
+type %O%\b.txt >> %LOG%
+call :st fmt-hosted Enabled "H18 ...Enabled"
+call :ex %R%\fmt-hosted.out 1 "H19 ...payload file placed"
+call :ex %R%\Payload\fmt-hosted\fmt-hosted.txt 1 "H20 ...a pre-staged (not downloaded) copy is kept"
+%FM% /uninstall fmt-hosted > %O%\b.txt 2>&1
+call :rc0 "H21 uninstall"
+call :ex %R%\fmt-hosted.out 0 "H22 ...payload file removed"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\FmTest /v Hosted >nul 2>&1
+call :rc1 "H23 ...registry value reverted"
+%FM% /query fmt-hostedarch > %O%\q.txt 2>&1
+find /i "architecture" %O%\q.txt >nul
+call :rc0 "H24 [Source] Arch without this architecture: not available on this architecture"
+%FM% /install fmt-hostedarch > %O%\b.txt 2>&1
+call :rc1 "H25 ...install refused"
+copy /y %FX%\fmt-hostednohash.ini %R%\Catalog\ >nul
+mkdir %R%\Payload\fmt-hostednohash 2>nul
+copy /y %FX%\fmt-hosted.txt %R%\Payload\fmt-hostednohash\ >nul
+copy /y %FX%\fmt-base.txt %R%\Payload\fmt-hostednohash\ >nul
+%FM% /install fmt-hostednohash > %O%\b.txt 2>&1
+call :rc1 "H26 hosted pack with a [Payload] file that has no [Download] hash: refused (fail closed)"
+type %O%\b.txt >> %LOG%
+find /i "no [Download] hash" %O%\b.txt >nul
+call :rc0 "H27 ...naming the missing hash"
+call :ex %R%\fmt-hostednohash.out 0 "H28 ...nothing installed"
+call :ex %R%\fmt-hostednohash2.out 0 "H29 ...not even the unhashed file"
+del /q %R%\Catalog\fmt-hostednohash.ini 2>nul
+rmdir /s /q %R%\Payload\fmt-hostednohash 2>nul
+del /q %R%\Catalog\fmt-hosted.ini %R%\Catalog\fmt-hostedarch.ini 2>nul
+rmdir /s /q %R%\Payload\fmt-hosted 2>nul
 mkdir %R%\Payload\fmt-sys 2>nul
 mkdir %R%\Payload\fmt-sysdep 2>nul
 copy /y %FX%\fmt-sys.ini %R%\Catalog\ >nul
