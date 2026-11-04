@@ -1033,7 +1033,17 @@ RtlpExecuteHandlerForUnwindHandler(
         }
     }
 
-    // TODO: properly handle nested exceptions
+    /* An exception was raised by a handler that ran during the dispatch of
+       another exception (neither this record nor the original call is an
+       unwind). Report the frame whose handler was running, through the
+       establisher frame of the dispatcher context of this walk, so that
+       RtlpUnwindInternal can mark the record as nested and knows where the
+       nested part of the walk ends. */
+    if (!IS_UNWINDING(ExceptionFlags) && !IS_UNWINDING(ExceptionRecord->ExceptionFlags))
+    {
+        DispatcherContext->EstablisherFrame = PreviousDispatcherContext->EstablisherFrame;
+        return ExceptionNestedException;
+    }
 
     return ExceptionContinueSearch;
 }
@@ -1069,6 +1079,8 @@ RtlpUnwindInternal(
     ULONG64 ImageBase, EstablisherFrame;
     CONTEXT UnwindContext;
     BOOLEAN Collided;
+    ULONG64 NestedFrame = 0;
+    BOOLEAN InUnwind = FALSE;
 
     /* Get the current stack limits */
     RtlpGetStackLimits(&StackLow, &StackHigh);
@@ -1163,6 +1175,16 @@ RtlpUnwindInternal(
             DispatcherContext.EstablisherFrame = EstablisherFrame;
             DispatcherContext.ScopeIndex = 0;
 
+            /* Remember that the walk of an exception passes the handler call
+               of an unwind (the home space of the call holds the flags of
+               the record it was made for) */
+            if ((HandlerType == UNW_FLAG_EHANDLER) &&
+                (ExceptionRoutine == RtlpExecuteHandlerForUnwindHandler) &&
+                IS_UNWINDING((ULONG)*((PULONG64)EstablisherFrame + 6)))
+            {
+                InUnwind = TRUE;
+            }
+
             /* Store the return value in the unwind context */
             UnwindContext.Rax = (ULONG64)ReturnValue;
 
@@ -1207,8 +1229,26 @@ RtlpUnwindInternal(
                     }
                     else if (Disposition == ExceptionNestedException)
                     {
-                        /// TODO
-                        __debugbreak();
+                        /* The handler left the frame of the interrupted
+                           handler in the dispatcher context. The record
+                           stays nested until the walk has passed that frame.
+                           Our own establisher frame is still in the local
+                           variable. */
+                        ULONG64 HandlerFrame = DispatcherContext.EstablisherFrame;
+                        DispatcherContext.EstablisherFrame = EstablisherFrame;
+
+                        /* An exception raised by an unwind handler is not
+                           nested: the walk has already passed the handler
+                           call of an unwind, which is no dispatch */
+                        if (!InUnwind)
+                        {
+                            if (HandlerFrame > NestedFrame)
+                            {
+                                NestedFrame = HandlerFrame;
+                            }
+                            ExceptionRecord->ExceptionFlags |= EXCEPTION_NESTED_CALL;
+                        }
+                        break;
                     }
                 }
 
@@ -1281,6 +1321,14 @@ RtlpUnwindInternal(
             {
                 ZwRaiseException(ExceptionRecord, ContextRecord, FALSE);
             }
+        }
+
+        /* The nested part of the walk ends with the frame whose handler
+           raised the exception (it still saw the nested flag) */
+        if ((NestedFrame != 0) && (EstablisherFrame >= NestedFrame))
+        {
+            ExceptionRecord->ExceptionFlags &= ~EXCEPTION_NESTED_CALL;
+            NestedFrame = 0;
         }
 
         if (EstablisherFrame == (ULONG64)TargetFrame)
