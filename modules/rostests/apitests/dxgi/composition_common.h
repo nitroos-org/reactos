@@ -36,3 +36,57 @@ static void FillCompositionDesc(DXGI_SWAP_CHAIN_DESC1 *Desc, UINT Width, UINT He
     Desc->SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     Desc->AlphaMode = DXGI_ALPHA_MODE_IGNORE;
 }
+
+/* The helper window of a composition swap chain lives until the swap chain is released, whichever thread
+ * does it. On Windows there is no such window, so the count stays the same. */
+static BOOL CALLBACK CountCompositionWindowProc(HWND Window, LPARAM Param)
+{
+    WCHAR Class[64];
+
+    if (GetClassNameW(Window, Class, ARRAYSIZE(Class)) && !lstrcmpW(Class, L"WineDXGICompositionWindow"))
+        ++*(int *)Param;
+    return TRUE;
+}
+
+static int CountCompositionWindows(void)
+{
+    int Count = 0;
+
+    EnumWindows(CountCompositionWindowProc, (LPARAM)&Count);
+    return Count;
+}
+
+/* no message is pumped here: the window must go without help from this thread */
+static BOOL WaitForCompositionWindows(int Expected)
+{
+    DWORD Start = GetTickCount();
+
+    while (CountCompositionWindows() != Expected)
+    {
+        if (GetTickCount() - Start > 5000)
+            return FALSE;
+        Sleep(20);
+    }
+    return TRUE;
+}
+
+static DWORD WINAPI ReleaseThreadProc(void *Param)
+{
+    IUnknown_Release((IUnknown *)Param);
+    return 0;
+}
+
+static void ReleaseOnOtherThread(IUnknown *Object)
+{
+    HANDLE Thread = CreateThread(NULL, 0, ReleaseThreadProc, Object, 0, NULL);
+
+    if (Thread)
+    {
+        WaitForSingleObject(Thread, 10000);
+        CloseHandle(Thread);
+    }
+    else
+    {
+        IUnknown_Release(Object);
+    }
+}

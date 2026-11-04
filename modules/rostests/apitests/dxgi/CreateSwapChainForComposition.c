@@ -12,10 +12,41 @@
 #include <apitest.h>
 #include <windef.h>
 #include <winbase.h>
+#include <winuser.h>
 #define COBJMACROS
 #include <d3d11.h>
 #include <dxgi1_6.h>
 #include "composition_common.h"
+
+/* Release with no buffer reference outstanding (the last wined3d reference goes with it), on this thread
+ * and on another one that never pumps messages. The helper window must be gone afterwards. */
+static void TestRelease(IDXGIFactory2 *Factory, ID3D11Device *Device)
+{
+    IDXGISwapChain1 *SwapChain;
+    DXGI_SWAP_CHAIN_DESC1 Desc;
+    int Baseline, Pass;
+    HRESULT hr;
+
+    /* windows of swap chains released earlier go away on their own */
+    ok(WaitForCompositionWindows(0), "%d helper windows before the test\n", CountCompositionWindows());
+    Baseline = 0;
+    for (Pass = 0; Pass < 2; Pass++)
+    {
+        FillCompositionDesc(&Desc, 64, 32);
+        hr = IDXGIFactory2_CreateSwapChainForComposition(Factory, (IUnknown *)Device, &Desc, NULL, &SwapChain);
+        ok(hr == S_OK, "CreateSwapChainForComposition returned %08lx\n", hr);
+        if (FAILED(hr))
+            return;
+        hr = IDXGISwapChain1_Present(SwapChain, 0, 0);
+        ok(hr == S_OK, "Present returned %08lx\n", hr);
+        if (Pass)
+            ReleaseOnOtherThread((IUnknown *)SwapChain);
+        else
+            IDXGISwapChain1_Release(SwapChain);
+        ok(WaitForCompositionWindows(Baseline), "pass %d: %d helper windows left, expected %d\n",
+           Pass, CountCompositionWindows(), Baseline);
+    }
+}
 
 START_TEST(CreateSwapChainForComposition)
 {
@@ -119,6 +150,8 @@ START_TEST(CreateSwapChainForComposition)
 
         IDXGISwapChain1_Release(SwapChain);
     }
+
+    TestRelease(Factory, Device);
 
     IDXGIFactory2_Release(Factory);
     ID3D11Device_Release(Device);
