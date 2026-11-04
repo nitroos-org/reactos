@@ -159,8 +159,12 @@ call :rc0 "53 import-rapps rc0"
 type %O%\imp.txt >> %LOG%
 find "imported 5 RAPPS entries" %O%\imp.txt >nul
 call :rc0 "54 imported 5 (testapp testlib depapp archapp utf16app)"
-find "(2 skipped)" %O%\imp.txt >nul
-call :rc0 "55 2 skipped (no URL, unusable package name)"
+find "(3 skipped)" %O%\imp.txt >nul
+call :rc0 "55 3 skipped (no URL, unusable package name, no checksum)"
+find "no SHA-256 or SHA-1 checksum" %O%\imp.txt >nul
+call :rc0 "55a the entry without a checksum says why it is not offered"
+%FM% /query rapps-nohash >nul 2>&1
+call :rc1 "55b entry without a checksum is not in the catalog"
 %FM% /list /tier:software > %O%\l.txt 2>&1
 find "rapps-testapp" %O%\l.txt >nul
 call :rc0 "56 imported entry listed in software tier"
@@ -172,8 +176,10 @@ call :st rapps-testapp NotInstalled "58 imported entry NotInstalled"
 type %O%\q.txt >> %LOG%
 find "Tier:         software" %O%\q.txt >nul
 call :rc0 "59 query: Tier=software"
-find "Provider:     rapps" %O%\q.txt >nul
-call :rc0 "60 query: Provider=rapps"
+find "Provider:     native" %O%\q.txt >nul
+call :rc0 "60 query: Provider=native (featmgr itself installs it; rapps.exe is not involved)"
+find "Source:       rapps" %O%\q.txt >nul
+call :rc0 "60a query: Source=rapps (it came from the RAPPS catalog)"
 find "Rapps.Pkg:    testapp" %O%\q.txt >nul
 call :rc0 "61 query: Rapps.Pkg"
 find "Version:      1.2.3" %O%\q.txt >nul
@@ -341,10 +347,10 @@ find "fmt-sw " %O%\l.txt | find "*" >nul
 call :rc0 "102 software entry with missing installer marked deferred (*)"
 %FM% /install fmt-sw >> %LOG% 2>&1
 call :rc1 "103 install refused when installer not staged"
-rem rapps package larger than the free space: refused up front with a clear message (not a bare exit code)
+rem native package larger than the free space (the fixture still says Provider=rapps: the old spelling must keep working): refused up front with a clear message (not a bare exit code)
 copy /y %FX%\fmt-bigdisk.ini %R%\Catalog\ >nul
 %FM% /install fmt-bigdisk > %O%\i.txt 2>&1
-call :rc1 "103a oversized rapps package -> install refused"
+call :rc1 "103a oversized native package -> install refused"
 type %O%\i.txt >> %LOG%
 find "not enough disk space" %O%\i.txt >nul
 call :rc0 "103b ...with a 'not enough disk space' message"
@@ -353,31 +359,30 @@ call :rc1 "103c ...and the installer was never started"
 call :st fmt-bigdisk NotInstalled "103d refused install leaves NotInstalled"
 del /q %R%\Catalog\fmt-bigdisk.ini 2>nul
 
-rem ===== RAPPS-provider /S no-hang (RAPPS-S-dialog-hang fix) =====
-rem rapps.exe is only present in a full image. A failing silent download must return
-rem PROMPTLY with a non-zero code and no modal dialog; before the fix it popped a modal
-rem MessageBox on the (headless) worker thread and blocked featmgr up to the 60-min watchdog.
-rem The .invalid URLDownload fails fast whether or not the VM has network.
-if exist %SystemRoot%\system32\rapps.exe (
-  mkdir "%LOCALAPPDATA%\RApps\appdb" 2>nul
-  copy /y %FX%\nohang-appdb\fmnohang.txt "%LOCALAPPDATA%\RApps\appdb\" >nul
-  %FM% /import-rapps "%LOCALAPPDATA%\RApps\appdb" /clean /anyarch > %O%\nohang-imp.txt 2>&1
-  call :rc0 "104 import nohang rapps entry"
-  echo NOHANG-START %time% >> %LOG%
-  %FM% /install rapps-fmnohang > %O%\nohang.txt 2>&1
-  call :rc1 "105 rapps /S download failure returns non-zero (no modal hang)"
-  echo NOHANG-END %time% >> %LOG%
-  type %O%\nohang.txt >> %LOG%
-  rem control returned to the script => proven not hung
-  echo NOHANG-RETURNED ok >> %LOG%
-  call :st rapps-fmnohang NotInstalled "106 failed live install leaves NotInstalled"
-  reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\rapps-fmnohang >nul 2>&1
-  call :rc1 "107 failed live install leaves no state record"
-  del "%LOCALAPPDATA%\RApps\appdb\fmnohang.txt" 2>nul
-  rd /s /q %SW% 2>nul
-) else (
-  echo SKIP 104-107 rapps.exe not present ^(module-only test image^) >> %LOG%
-)
+rem ===== native provider: a failing download returns PROMPTLY (no dialog, no hang) and leaves nothing behind =====
+rem The .invalid URLDownload fails fast whether or not the VM has network. featmgr downloads it itself (wininet),
+rem so there is no child installer that could raise a modal dialog; the old rapps.exe /S no-hang fix is moot.
+%FM% /import-rapps %FX%\nohang-appdb /clean /anyarch > %O%\nohang-imp.txt 2>&1
+call :rc0 "104 import nohang entry"
+echo NOHANG-START %time% >> %LOG%
+%FM% /install rapps-fmnohang > %O%\nohang.txt 2>&1
+call :rc1 "105 native download failure returns non-zero (no modal hang)"
+echo NOHANG-END %time% >> %LOG%
+type %O%\nohang.txt >> %LOG%
+echo NOHANG-RETURNED ok >> %LOG%
+call :st rapps-fmnohang NotInstalled "106 failed live install leaves NotInstalled"
+reg query HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\rapps-fmnohang >nul 2>&1
+call :rc1 "107 failed live install leaves no state record"
+rd /s /q %SW% 2>nul
+
+rem ===== a bare RAPPS package name resolves to rapps-<name> (syssetup, the language page and scripts use it) =====
+%FM% /import-rapps %FX%\sw-appdb /anyarch /clean > %O%\imp.txt 2>&1
+%FM% /install testapp > %O%\bare.txt 2>&1
+call :rc1 "107a /install <bare name> runs the install of rapps-<name> (the download then fails: .invalid host)"
+find "enabling 'rapps-testapp'" %O%\bare.txt >nul
+call :rc0 "107b ...and says it resolved the name to rapps-testapp"
+call :st rapps-testapp NotInstalled "107c failed install leaves NotInstalled"
+rd /s /q %SW% 2>nul
 
 rem ===== SCOOP (SCOOP-FEATMGR-01): bucket import, Provider=scoop install/uninstall/state =====
 rem Offline: the bucket is a fixture directory and "scoop" is a stub (fixtures\scoop-stub.cmd) in a fake

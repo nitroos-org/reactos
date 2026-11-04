@@ -45,9 +45,13 @@ static void Usage(void)
     Out(L"  featmgr /shell-defaults [/browser]\n");
     Out(L"                               make the desktop / Start shortcuts match what is installed (PowerShell 7 and\n");
     Out(L"                               Firefox, else Command Prompt and Internet Explorer); /browser = Firefox default\n");
-    Out(L"  featmgr /import-rapps [<appdb-dir>] [/clean] [/anyarch]\n");
-    Out(L"                               convert the RAPPS database (default %%LOCALAPPDATA%%\\RApps\\appdb)\n");
-    Out(L"                               into Tier=software catalog entries (Catalog\\Software)\n");
+    Out(L"  featmgr /update-catalog      download the RAPPS online catalog (rappmgr2.cab, the address rapps used; certificate-pinned)\n");
+    Out(L"                               into %%SystemRoot%%\\Featmgr\\RappsDb and convert it into software entries (Catalog\\Software)\n");
+    Out(L"  featmgr /import-rapps [<appdb-dir>] [/clean] [/anyarch] [/refresh]\n");
+    Out(L"                               convert a RAPPS database (default: the catalog /update-catalog downloaded; fetched when\n");
+    Out(L"                               there is none, or again with /refresh) into Tier=software entries (Catalog\\Software).\n");
+    Out(L"                               An entry without a SHA-256 or SHA-1 checksum is not offered.\n");
+    Out(L"  featmgr /install <id|package>  a RAPPS package name (7zip) is looked up as rapps-<name>; the catalog is fetched if absent\n");
     Out(L"  featmgr /import-scoop [main|extras|<bucket> /trust] [/dir:<manifest-dir>] [/clean] [/limit:N]\n");
     Out(L"                       [/unverified]\n");
     Out(L"                               convert Scoop bucket manifests (read from the buckets Scoop already\n");
@@ -264,11 +268,56 @@ static int DoImportRapps(int argc, WCHAR **argv)
     {
         if (!_wcsicmp(argv[a], L"/clean")) fl |= FM_IMPORT_CLEAN;
         else if (!_wcsicmp(argv[a], L"/anyarch")) fl |= FM_IMPORT_ANYARCH;
+        else if (!_wcsicmp(argv[a], L"/refresh")) fl |= FM_IMPORT_REFETCH;
         else if (argv[a][0] != L'/' && !dir) dir = argv[a];
         else { Out(L"error: unknown /import-rapps option '%s'\n", argv[a]); return 2; }
     }
     n = FmImportRapps(dir, fl, &skipped, stdout);
     return n < 0 ? 3 : 0;
+}
+
+/* featmgr /update-catalog: fetch the online RAPPS catalog again and rebuild the entries */
+static int DoUpdateCatalog(void)
+{
+    int n, skipped = 0;
+    n = FmImportRapps(NULL, FM_IMPORT_CLEAN | FM_IMPORT_REFETCH, &skipped, stdout);
+    if (n < 0)
+    {
+        WCHAR why[1024];
+        FmGetLastMessage(why, ARRAYSIZE(why));
+        if (why[0]) Out(L"error: %s\n", why);
+        return 3;
+    }
+    return 0;
+}
+
+/* /install <name>: a feature id, else a RAPPS package name (rapps-<name>); with no catalog yet, fetch it once */
+static BOOL ResolveInstallId(LPCWSTR in, WCHAR *out, size_t cch)
+{
+    FM_FEATURE f;
+    WCHAR dir[MAX_PATH], glob[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    BOOL have;
+
+    StringCchCopyW(out, cch, in);
+    if (FmFindFeature(in, &f)) return TRUE;
+    StringCchPrintfW(out, cch, L"rapps-%s", in);
+    if (FmFindFeature(out, &f)) return TRUE;
+    if (FmGetRappsDbDir(dir, MAX_PATH))
+    {
+        StringCchPrintfW(glob, MAX_PATH, L"%s\\*.txt", dir);
+        h = FindFirstFileW(glob, &fd);
+        have = h != INVALID_HANDLE_VALUE;
+        if (have) FindClose(h);
+        if (!have)
+        {
+            Out(L"'%s' is not in the catalog yet; fetching the RAPPS catalog\n", in);
+            if (FmImportRapps(NULL, FM_IMPORT_CLEAN, NULL, stdout) > 0 && FmFindFeature(out, &f)) return TRUE;
+        }
+    }
+    StringCchCopyW(out, cch, in);
+    return FALSE;
 }
 
 static int DoImportScoop(int argc, WCHAR **argv)
@@ -379,6 +428,15 @@ int wmain(int argc, WCHAR **argv)
     if (!_wcsicmp(cmd, L"/import-rapps") || !_wcsicmp(cmd, L"import-rapps"))
         return DoImportRapps(argc, argv);
 
+    if (!_wcsicmp(cmd, L"/update-catalog") || !_wcsicmp(cmd, L"update-catalog"))
+        return DoUpdateCatalog();
+
+    /* the native install helpers the engine runs as child processes (native.c, natgen.c): not for people */
+    if (!_wcsicmp(cmd, L"/nat-uninstall"))
+        return FmNativeUninstallMain(argc, argv);
+    if (!_wcsicmp(cmd, L"/nat-install"))
+        return FmNativeInstallMain(argc, argv);
+
     if (!_wcsicmp(cmd, L"/import-scoop") || !_wcsicmp(cmd, L"import-scoop"))
         return DoImportScoop(argc, argv);
 
@@ -412,7 +470,10 @@ int wmain(int argc, WCHAR **argv)
     if (!_wcsicmp(cmd, L"/enable") || !_wcsicmp(cmd, L"/install")
         || !_wcsicmp(cmd, L"enable") || !_wcsicmp(cmd, L"install"))
     {
-        hr = FmEnable(argv[2], stdout);
+        WCHAR rid[FM_MAX_ID];
+        if (!ResolveInstallId(argv[2], rid, ARRAYSIZE(rid)))
+        { Out(L"error: unknown feature '%s'\n", argv[2]); return 3; }
+        hr = FmEnable(rid, stdout);
         if (SUCCEEDED(hr)) PrintPathHint();
         return SUCCEEDED(hr) ? 0 : 3;
     }

@@ -51,8 +51,8 @@ typedef struct _FM_FEATURE
     BOOL    PayloadAvailable;    /* every declared payload source present on disk */
     WCHAR   InstallDate[32];     /* UTC ISO-8601 of last enable, "" if never */
     BOOL    PendingReboot;       /* disabled but some component awaits reboot-delete */
-    WCHAR   Provider[16];        /* software tier: [Install] Provider= "rapps" | "command" | "scoop"; "" for OS tier */
-    WCHAR   Source[32];          /* software tier display source: "rapps", "command", "scoop/<bucket>"; "" for OS tier */
+    WCHAR   Provider[16];        /* software tier: [Install] Provider= "native" | "command" | "scoop" | "component"; "" for OS tier */
+    WCHAR   Source[32];          /* software tier display source: "rapps" (native entries from the RAPPS catalog), "native", "command", "scoop/<bucket>"; "" for OS tier */
     WCHAR   App[48];             /* Provider=scoop: [Scoop] App (the Scoop app name) */
     WCHAR   Detect[128];         /* software tier: raw [Install] DetectPath (installed iff the path exists) */
     WCHAR   Group[48];           /* [Feature] Group: the parent node of the Turn-features-on-or-off tree ("" = by tier) */
@@ -63,6 +63,7 @@ typedef struct _FM_FEATURE
     WCHAR   InstalledVersion[FM_MAX_VER]; /* "" unless installed. Scoop: apps\<app>\current\manifest.json;
                                            * others: the Version recorded when featmgr enabled it */
     BOOL    UpdateAvailable;     /* Provider=scoop, installed, and the imported catalog has a newer version */
+    WCHAR   RegName[96];         /* Provider=native: [Rapps] RegName (else UninstallName): the Uninstall key / DisplayName that says it is installed */
 } FM_FEATURE;
 
 /* Catalog / layout helpers. featmgr root = %SystemRoot%\Featmgr */
@@ -104,18 +105,21 @@ int     FmGetDependents(LPCWSTR id, LPWSTR buf, DWORD cch);
  * enable of in-image bits) and FmDisable runs its uninstaller. State model is
  * unchanged: NotInstalled -> Enabled (== installed) -> Disabled (uninstalled,
  * record kept) -> NotInstalled (FmUninstall forgets). Providers ([Install] Provider=):
- *   rapps   - delegate to rapps.exe (/install /S <pkg>, /uninstall /S <pkg>), which
- *             owns the cert-pinned download + SHA1 integrity + installer-type handling.
+ *   native  - featmgr's own installer for RAPPS-format entries (native.c, natgen.c): download (wininet), verify SHA-256 else
+ *             SHA-1, run the installer silently (MSI properties, Inno / NSIS switches, SilentParameters, or unpack a zip /
+ *             cab: Installer=Generate / ExeInZip), and uninstall through the program's Uninstall key. "rapps" is the old
+ *             spelling of this provider and is read as native.
  *   command - run [Install] Installer (relative to the Payload dir, or absolute) with
  *             SilentArgs; uninstall runs UninstallCmd. For local/controlled installers.
  */
 
-/* On-demand RAPPS -> featmgr catalog converter. srcDir == NULL: the per-user RAPPS
- * database (%LOCALAPPDATA%\RApps\appdb). Writes Software\rapps-<pkg>.ini manifests.
+/* On-demand RAPPS -> featmgr catalog converter. srcDir == NULL: featmgr's own copy of the online catalog
+ * (%SystemRoot%\Featmgr\RappsDb\appdb, fetched by FmRappsFetchDb). Writes Software\rapps-<pkg>.ini manifests.
  * Returns number of entries written (<0 on error); *skipped (optional) = entries not
  * convertible. */
 #define FM_IMPORT_ANYARCH 0x1  /* accept the generic URLDownload on non-x86 (RAPPS ignores it there) */
 #define FM_IMPORT_CLEAN   0x2  /* first delete previously generated rapps-*.ini */
+#define FM_IMPORT_REFETCH 0x4  /* default location: download the online catalog again first (FmRappsFetchDb) */
 int    FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log);
 
 /* ---- Scoop (SCOOP-FEATMGR-01) ---------------------------------------------
@@ -203,10 +207,6 @@ void   FmPathHint(LPCWSTR name, int shell, LPWSTR out, DWORD cch);
 /* Same as FmGetDependents, over an already loaded array (no catalog rescan). */
 int    FmGetDependentsIn(const FM_FEATURE *arr, int n, LPCWSTR id, LPWSTR buf, DWORD cch);
 
-/* Stage a RAPPS-format entry that ships in the image into the RAPPS database as <pkg>
- * (see FmEnable: [Rapps] Entry=). */
-BOOL   FmStageRappsEntry(LPCWSTR entryFile, LPCWSTR pkg, FILE *log);
-
 /* Progress and cancel for a long operation (the GUI's worker thread; the CLI never calls these, so
  * it behaves as before). FmOpBegin runs on the UI thread before the worker starts: it clears a
  * previous cancel and installs the progress sink. The sink is called ON THE WORKER THREAD: it must
@@ -246,6 +246,9 @@ typedef struct _FM_COMPONENT
     WCHAR    Name[FM_MAX_NAME];
     WCHAR    Url[512];
     WCHAR    Sha256[72];
+    WCHAR    Sha1[48];           /* native provider: RAPPS entries that only publish SHA-1 (checked when Sha256 is empty, else in addition) */
+    WCHAR    LocalFile[MAX_PATH];/* native provider: a file already on this system (the image's payload); used, once its hash matches, instead of a download */
+    BOOL     AllowHttp;          /* native provider: plain http is allowed because the hash is checked (RAPPS entries); components stay https-only */
     WCHAR    FileName[96];
     WCHAR    DetectReg[320];     /* HKLM\key|value|>=N  (or just key|value: the value exists) */
     WCHAR    DetectFile[MAX_PATH];
@@ -263,8 +266,47 @@ BOOL   FmCompDetect(const FM_COMPONENT *c);        /* TRUE: installed (DetectReg
  * Reports FM_PHASE_DOWNLOAD / FM_PROG_BYTES; honours FmOpCancel (the partial file is deleted). Never returns S_OK for
  * a file whose SHA-256 differs (the file is deleted). path = the verified file. */
 HRESULT FmCompDownload(const FM_COMPONENT *c, LPWSTR path, DWORD cch, FILE *log);
+/* Lower-case hex digest of a file (alg CALG_SHA1 or CALG_SHA_256); FALSE on any error or cancel. */
+BOOL   FmFileHashHex(LPCWSTR path, ALG_ID alg, WCHAR *hex, DWORD cch);
+/* Download url to dest (replaced atomically, partial file deleted on failure). pinned: HTTPS only, and the server's
+ * certificate chain must end in a pinned root (the ISRG roots rapps.reactos.org uses; the same pin rapps had).
+ * maxBytes bounds the file. Honours FmOpCancel. */
+HRESULT FmDownloadFile(LPCWSTR url, LPCWSTR dest, BOOL pinned, ULONGLONG maxBytes, FILE *log);
 BOOL   FmNetProbe(LPCWSTR url, DWORD timeoutMs);   /* TRUE: the server answered (the network is up) */
 void   FmCompInstallLine(const FM_COMPONENT *c, LPCWSTR file, LPWSTR out, DWORD cch);   /* Install with %FILE% filled in */
+
+/* ---- native install path for RAPPS-format entries (native.c, natgen.c, rappsdb.c) ----------------------------------
+ * [Install] Provider=native (the old spelling "rapps" is read as native). An entry carries what a RAPPS entry carried:
+ * [Source] Artifact / ArtifactSHA256 / ArtifactSHA1 / SizeBytes; [Rapps] Installer (Generate | ExeInZip | Inno | NSIS),
+ * SilentParameters, MsiProperties, SaveAs, RegName, UninstallName, UninstallCmd[.amd64|.x86], LocalInstaller (a file in
+ * the feature's payload folder, used first when its hash matches); [Generate] / [ExeInZip] as in the RAPPS format. */
+#define FM_FK_NONE 0
+#define FM_FK_MSI  1
+#define FM_FK_EXE  2
+#define FM_FK_CAB  3
+#define FM_FK_ZIP  4
+BOOL   FmNativeIsProvider(LPCWSTR provider);
+BOOL   FmFeatmgrExePath(LPWSTR out, DWORD cch);
+void   FmNativeInvalidate(void);                       /* forget the installed-programs snapshot (after an install, uninstall, refresh) */
+BOOL   FmNativeIsInstalled(LPCWSTR regName, LPCWSTR name);
+BOOL   FmNativePlan(const FM_FEATURE *f, FM_COMPONENT *c);
+BOOL   FmNativeAvailable(const FM_FEATURE *f);
+HRESULT FmNativeInstallLine(const FM_FEATURE *f, LPCWSTR file, LPWSTR out, DWORD cch);
+BOOL   FmNativeUninstallLine(const FM_FEATURE *f, LPWSTR out, DWORD cch);
+int    FmNativeFileKind(LPCWSTR path);                 /* FM_FK_* */
+int    FmNativeGuessInstaller(LPCWSTR path);           /* 0 unknown, 1 Inno Setup, 2 NSIS */
+LPCWSTR FmNativeSilentSwitches(int type);
+int    FmNativeUninstallMain(int argc, WCHAR **argv);  /* featmgr /nat-uninstall <regname|-> <name> <tag> */
+int    FmNativeInstallMain(int argc, WCHAR **argv);    /* featmgr /nat-install <id> <file>  (natgen.c, featmgr.exe only) */
+/* The RAPPS online catalog, fetched by featmgr itself: the same address rapps used (rappmgr2.cab), certificate-pinned, the
+ * entries (*.txt) extracted into %SystemRoot%\Featmgr\RappsDb\appdb. */
+#define FM_RAPPS_DB_URL L"https://rapps.reactos.org/rappmgr2.cab"
+BOOL   FmGetRappsDbDir(LPWSTR buf, DWORD cch);         /* ...\Featmgr\RappsDb\appdb */
+BOOL   FmDeleteTree(LPCWSTR dir);                      /* recursive delete; a reparse point is removed, never entered */
+BOOL   FmSafeTreeName(LPWSTR name);                    /* archive entry name check ('/' -> '\\'); FALSE: absolute, drive, stream, ".." */
+BOOL   FmMakeParents(LPCWSTR base, LPCWSTR rel);
+BOOL   FmExtractCab(LPCWSTR cabFile, LPCWSTR outDir, BOOL tree, int *count);   /* CREATE_NEW into a directory the caller made */
+HRESULT FmRappsFetchDb(LPCWSTR urlOverride, FILE *log);  /* download + extract; the old entries are replaced only when the new ones are complete */
 
 /* ---- NitroOS shell defaults (shelldefaults.c) ---- */
 #define FM_SHELL_ADOPT_BROWSER  0x1   /* Firefox is installed: make it the default browser (machine + current user) */

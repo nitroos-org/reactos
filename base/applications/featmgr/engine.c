@@ -381,7 +381,21 @@ static BOOL LoadManifestEx(LPCWSTR path, FM_FEATURE *f, BOOL fast)
             f->Verified = _wtoi(tmp) != 0;
         }
         else
-            StringCchCopyW(f->Source, ARRAYSIZE(f->Source), f->Provider[0] ? f->Provider : L"payload");
+        {
+            if (FmNativeIsProvider(f->Provider))
+            {
+                /* "rapps" is the old spelling of the native provider (caches written before rapps.exe went away) */
+                WCHAR pk[8];
+                StringCchCopyW(f->Provider, ARRAYSIZE(f->Provider), L"native");
+                IniGet(&ini, L"Rapps", L"Pkg", L"", pk, ARRAYSIZE(pk));
+                IniGet(&ini, L"Rapps", L"RegName", L"", f->RegName, ARRAYSIZE(f->RegName));
+                if (!f->RegName[0]) IniGet(&ini, L"Rapps", L"UninstallName", L"", f->RegName, ARRAYSIZE(f->RegName));
+                /* entries from the RAPPS catalog say "rapps", the hand-written ones (PowerShell 7, Claude Desktop) "native" */
+                StringCchCopyW(f->Source, ARRAYSIZE(f->Source), pk[0] && !_wcsnicmp(f->Id, L"rapps-", 6) ? L"rapps" : L"native");
+            }
+            else
+                StringCchCopyW(f->Source, ARRAYSIZE(f->Source), f->Provider[0] ? f->Provider : L"payload");
+        }
     }
     IniClose(&ini);
     return TRUE;
@@ -453,29 +467,7 @@ static BOOL InstallerPath(const FM_FEATURE *f, LPWSTR out, DWORD cch)
     return SUCCEEDED(StringCchCatW(out, cch, L"\\")) && SUCCEEDED(StringCchCatW(out, cch, exp));
 }
 
-static BOOL RappsExePath(LPWSTR out, DWORD cch)
-{
-    WCHAR sys[MAX_PATH];
-    if (!GetSystemDirectoryW(sys, MAX_PATH)) return FALSE;
-    return SUCCEEDED(StringCchPrintfW(out, cch, L"%s\\rapps.exe", sys));
-}
-
-/* [Rapps] Entry= : a RAPPS-format entry that ships in the image (absolute, %SystemRoot% etc.
- * expanded; or relative to the feature's payload dir) for packages that are not in the online
- * RAPPS database. */
-static BOOL RappsEntryPath(const FM_FEATURE *f, LPWSTR out, DWORD cch)
-{
-    WCHAR raw[MAX_PATH], exp[MAX_PATH];
-    GetPrivateProfileStringW(L"Rapps", L"Entry", L"", raw, MAX_PATH, f->ManifestPath);
-    if (!raw[0]) return FALSE;
-    ExpandCmd(f->Id, raw, exp, MAX_PATH);
-    if (IsAbsPath(exp))
-        return SUCCEEDED(StringCchCopyW(out, cch, exp));
-    FmGetPayloadDir(f->Id, out, cch);
-    return SUCCEEDED(StringCchCatW(out, cch, L"\\")) && SUCCEEDED(StringCchCatW(out, cch, exp));
-}
-
-/* Can the install be attempted? rapps provider: rapps.exe present (the download
+/* Can the install be attempted? native provider: the entry has an address and a checksum (the download
  * happens at install time, so there is no staged payload to check). command
  * provider: the installer file is staged. */
 static BOOL SoftwareAvailable(const FM_FEATURE *f)
@@ -490,13 +482,9 @@ static BOOL SoftwareAvailable(const FM_FEATURE *f)
         FM_COMPONENT c;                                 /* downloaded by featmgr itself: needs only its list entry */
         return FmCompLoad(f->Id, &c) && c.ArchOk && c.Install[0];
     }
-    if (_wcsicmp(f->Provider, L"rapps"))
-        return FALSE;                                   /* unknown provider */
-    if (!RappsExePath(p, MAX_PATH) || GetFileAttributesW(p) == INVALID_FILE_ATTRIBUTES)
-        return FALSE;
-    if (RappsEntryPath(f, p, MAX_PATH))                 /* shipped RAPPS entry must be present */
-        return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
-    return TRUE;
+    if (FmNativeIsProvider(f->Provider))
+        return FmNativeAvailable(f);                    /* a download address and a checksum, for this architecture */
+    return FALSE;                                       /* unknown provider */
 }
 
 /* Does every declared [Payload] source file exist on disk? */
@@ -596,9 +584,12 @@ static void ResolveState(FM_FEATURE *f)
         if (!c.DetectReg[0] && !c.DetectFile[0]) return;      /* no detect rule: the recorded state stands */
         present = FmCompDetect(&c);
     }
-    else if (f->Tier != FM_TIER_SOFTWARE || !DetectPathFor(f, p, MAX_PATH)) return;
-    else
+    else if (f->Tier != FM_TIER_SOFTWARE) return;
+    else if (DetectPathFor(f, p, MAX_PATH))
         present = GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+    else if (!_wcsicmp(f->Provider, L"native") && (f->RegName[0] || f->Name[0]))
+        present = FmNativeIsInstalled(f->RegName, f->Name);       /* the Uninstall keys, as RAPPS saw it; installs done by hand count */
+    else return;
     if (present && f->State != FM_STATE_ENABLED)
         f->State = FM_STATE_ENABLED;
     else if (!present && f->State == FM_STATE_ENABLED)
@@ -696,6 +687,7 @@ int FmEnumFeatures(FM_FEATURE **outArr)
     int count = 0, cap = 0;
 
     *outArr = NULL;
+    FmNativeInvalidate();                 /* installed programs are read once per enumeration */
     if (!FmGetCatalogDir(catDir, MAX_PATH)) return 0;
     EnumDir(catDir, FALSE, &arr, &count, &cap);
     if (FmGetSoftwareCatalogDir(swDir, MAX_PATH))
@@ -749,6 +741,7 @@ BOOL FmFindFeature(LPCWSTR id, FM_FEATURE *out)
     int n, i;
     BOOL found = FALSE;
 
+    FmNativeInvalidate();
     if (FindByName(id, out)) return TRUE;
     n = FmEnumFeatures(&arr);
     for (i = 0; i < n; i++)
@@ -1680,7 +1673,7 @@ out:
  * install time so disable stays data-driven (same as the OS tier's undo lists). */
 static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR uninst, DWORD cch, FILE *log)
 {
-    WCHAR pkg[128], name[128], rapps[MAX_PATH], ucmd[1024], local[128], lpath[MAX_PATH], lentry[MAX_PATH];
+    WCHAR ucmd[1024];
 
     inst[0] = uninst[0] = L'\0';
     if (!_wcsicmp(f->Provider, L"command"))
@@ -1771,48 +1764,14 @@ static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR un
         if (c.Uninstall[0]) ExpandCmd(f->Id, c.Uninstall, uninst, cch);
         return S_OK;
     }
-    if (_wcsicmp(f->Provider, L"rapps"))
+    if (!FmNativeIsProvider(f->Provider))
     {
         LOGF(log, L"error: '%s' has unknown install provider '%s'\n", f->Id, f->Provider);
         return E_INVALIDARG;
     }
-    /* rapps provider: pkg name from [Rapps] Pkg */
-    GetPrivateProfileStringW(L"Rapps", L"Pkg", L"", pkg, ARRAYSIZE(pkg), f->ManifestPath);
-    if (!pkg[0] || wcspbrk(pkg, L"\"\r\n"))
-    {
-        LOGF(log, L"error: '%s' has no valid [Rapps] Pkg\n", f->Id);
-        return E_INVALIDARG;
-    }
-    if (!RappsExePath(rapps, MAX_PATH)) return E_FAIL;
-    StringCchPrintfW(inst, cch, L"\"%s\" /install /S \"%s\"", rapps, pkg);
-    /* [Rapps] LocalInstaller= : file name of an MSI in the feature's payload dir (the image puts it there). When it
-     * exists the install is local-first: msiexec on that file with the entry's MsiProperties, no download, so it
-     * works offline. When it is absent rapps downloads the package as usual. */
-    GetPrivateProfileStringW(L"Rapps", L"LocalInstaller", L"", local, ARRAYSIZE(local), f->ManifestPath);
-    if (local[0] && !wcspbrk(local, L"\\/\"\r\n") && RappsEntryPath(f, lentry, MAX_PATH))
-    {
-        WCHAR props[1024];
-        FmGetPayloadDir(f->Id, lpath, MAX_PATH);
-        if (SUCCEEDED(StringCchCatW(lpath, MAX_PATH, L"\\")) && SUCCEEDED(StringCchCatW(lpath, MAX_PATH, local))
-            && GetFileAttributesW(lpath) != INVALID_FILE_ATTRIBUTES)
-        {
-            GetPrivateProfileStringW(L"Section", L"MsiProperties", L"", props, ARRAYSIZE(props), lentry);
-            if (!wcspbrk(props, L"\"\r\n") &&
-                SUCCEEDED(StringCchPrintfW(inst, cch, L"msiexec.exe /i \"%s\" /qn /norestart %s", lpath, props)))
-            {
-                LOGF(log, L"  local installer %s\n", lpath);
-                /* the same package removes it: no registry lookup and no rapps, which would try to update its
-                 * online database first and stop at an error box on a machine without network */
-                if (SUCCEEDED(StringCchPrintfW(uninst, cch, L"msiexec.exe /x \"%s\" /qn /norestart", lpath)))
-                    return S_OK;
-            }
-            StringCchPrintfW(inst, cch, L"\"%s\" /install /S \"%s\"", rapps, pkg);
-        }
-    }
-    /* [Rapps] UninstallCmd= : the command line that removes the app, for an installer whose registered uninstall
-     * command is not silent (rapps /uninstall starts that one as it is, and the maintenance dialog would wait for
-     * a click). UninstallCmd.amd64 / UninstallCmd.x86 (the architecture of this build, as in the RAPPS entry's
-     * [Section.amd64]) wins over UninstallCmd. Environment variables are expanded, as for the command provider. */
+    /* native provider: the install line needs the downloaded file (SoftwareInstallRun builds it after the download);
+     * the uninstall line is the entry's own UninstallCmd, else a featmgr child that finds the program's Uninstall key. */
+    StringCchCopyW(inst, cch, L"(native)");
 #ifdef _WIN64
     GetPrivateProfileStringW(L"Rapps", L"UninstallCmd.amd64", L"", ucmd, ARRAYSIZE(ucmd), f->ManifestPath);
 #else
@@ -1825,20 +1784,18 @@ static HRESULT BuildSoftwareCommands(const FM_FEATURE *f, LPWSTR inst, LPWSTR un
         ExpandCmd(f->Id, ucmd, uninst, cch);
         return S_OK;
     }
-    /* [Rapps] UninstallName= : the installed app's display name. Uninstall then resolves it
-     * from the registry, so it keeps working when the entry is no longer in the RAPPS DB. */
-    GetPrivateProfileStringW(L"Rapps", L"UninstallName", L"", name, ARRAYSIZE(name), f->ManifestPath);
-    if (name[0] && !wcspbrk(name, L"\"\r\n"))
-        StringCchPrintfW(uninst, cch, L"\"%s\" /uninstall /S \"%s\"", rapps, name);
-    else
-        StringCchPrintfW(uninst, cch, L"\"%s\" /uninstall /S \"%s\"", rapps, pkg);
+    if (!FmNativeUninstallLine(f, uninst, cch))
+    {
+        LOGF(log, L"error: '%s' has an unusable name for the uninstall record\n", f->Id);
+        return E_INVALIDARG;
+    }
     return S_OK;
 }
 
-/* Free space the system volume needs before a [Rapps] install is attempted, as a multiple of the
+/* Free space the system volume needs before a native install is attempted, as a multiple of the
  * package size ([Source] SizeBytes): the download (1x) plus the Windows Installer cached copy (1x)
  * plus the unpacked files and rollback data. Measured with PowerShell 7 (105 MB MSI): an 8 GB volume
- * with ~0.5 GB free fails inside msiexec, ~1.4 GB free installs and uses ~0.5 GB. The rapps/msiexec
+ * with ~0.5 GB free fails inside msiexec, ~1.4 GB free installs and uses ~0.5 GB. The msiexec
  * failure itself is only a bare "exit code 1", so refuse early with a clear message instead. */
 #define SW_DISK_FACTOR 6
 
@@ -1883,9 +1840,7 @@ static HRESULT CheckSoftwareDiskSpace(const FM_FEATURE *f, FILE *log, BOOL faile
  * SizeBytes, when it has them) and what runs. */
 static void ReportInstallStep(const FM_FEATURE *f, LPCWSTR inst)
 {
-    WCHAR url[300], sz[40];
-    ULONGLONG n = 0;
-    PWSTR end;
+    WCHAR url[300];
 
     FmOpPhase(FM_PHASE_APPLY);
     if (!_wcsicmp(f->Provider, L"component"))
@@ -1894,20 +1849,13 @@ static void ReportInstallStep(const FM_FEATURE *f, LPCWSTR inst)
         return;
     }
     GetPrivateProfileStringW(L"Source", L"Artifact", L"", url, ARRAYSIZE(url), f->ManifestPath);
-    GetPrivateProfileStringW(L"Source", L"SizeBytes", L"", sz, ARRAYSIZE(sz), f->ManifestPath);
-    if (sz[0]) { n = _wcstoui64(sz, &end, 10); if (*end) n = 0; }
-    if (wcsstr(inst, L"msiexec"))
-        FmOpStep(L"Running the installer package for %s (no download needed)", f->Name);
-    else if (!_wcsicmp(f->Provider, L"rapps"))
+    if (FmNativeIsProvider(f->Provider))
     {
-        InterlockedExchange(&g_MayMsi, 1);            /* rapps runs the downloaded installer, usually an MSI */
-        if (url[0] && n)
-            FmOpStep(L"Downloading and installing %s (%I64u MB) from %s", f->Name, (n + (1u << 20) - 1) >> 20, url);
-        else if (url[0])
-            FmOpStep(L"Downloading and installing %s from %s", f->Name, url);
-        else
-            FmOpStep(L"Downloading and installing %s", f->Name);
+        InterlockedExchange(&g_MayMsi, 1);            /* the downloaded (or local) installer is usually an MSI */
+        FmOpStep(L"Installing %s", f->Name);
     }
+    else if (wcsstr(inst, L"msiexec"))
+        FmOpStep(L"Running the installer package for %s (no download needed)", f->Name);
     else if (!_wcsicmp(f->Provider, L"scoop"))
         FmOpStep(L"Installing %s with Scoop", f->Name);
     else if (url[0])
@@ -1952,7 +1900,9 @@ static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
     DWORD code;
     HRESULT hr;
     BOOL scoopFresh;
-    BOOL comp = !_wcsicmp(f->Provider, L"component");
+    BOOL nat = FmNativeIsProvider(f->Provider);
+    BOOL comp = !_wcsicmp(f->Provider, L"component") || nat;
+    BOOL keepFile = FALSE;                 /* the file is the image's own payload: never deleted */
     WCHAR *pathBefore = NULL;
 
     compFile[0] = L'\0';
@@ -1965,7 +1915,7 @@ static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
         FM_COMPONENT c;
         hr = CheckSoftwareDiskSpace(f, log, FALSE);
         if (FAILED(hr)) return hr;
-        if (!FmCompLoad(f->Id, &c)) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+        if (nat ? !FmNativePlan(f, &c) : !FmCompLoad(f->Id, &c)) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
         hr = FmCompDownload(&c, compFile, ARRAYSIZE(compFile), log);
         if (FAILED(hr))
         {
@@ -1974,19 +1924,19 @@ static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
             LOGF(log, L"error: %s\n", why);      /* the CLI shows the log; the window shows the last message */
             return hr;
         }
-        FmCompInstallLine(&c, compFile, inst, ARRAYSIZE(inst));
-    }
-    if (!_wcsicmp(f->Provider, L"rapps"))
-    {
-        WCHAR entry[MAX_PATH], pkg[128];
-        hr = CheckSoftwareDiskSpace(f, log, FALSE);
-        if (FAILED(hr)) return hr;
-        if (RappsEntryPath(f, entry, MAX_PATH))
+        keepFile = nat && c.LocalFile[0] && !_wcsicmp(compFile, c.LocalFile);
+        if (nat)
         {
-            GetPrivateProfileStringW(L"Rapps", L"Pkg", L"", pkg, ARRAYSIZE(pkg), f->ManifestPath);
-            if (!FmStageRappsEntry(entry, pkg, log))
-                return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+            hr = FmNativeInstallLine(f, compFile, inst, ARRAYSIZE(inst));
+            if (FAILED(hr))
+            {
+                LOGF(log, L"error: cannot build the installer command line for '%s'\n", f->Id);
+                SetLastMsg(L"The catalog entry of '%s' gives an installer command line that cannot be used.", f->Id);
+                return hr;
+            }
         }
+        else
+            FmCompInstallLine(&c, compFile, inst, ARRAYSIZE(inst));
     }
     LOGF(log, L"  software install via '%s' provider\n", f->Provider);
     if (!_wcsicmp(f->Provider, L"scoop"))
@@ -2017,7 +1967,7 @@ static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
     if (comp)
     {
         /* success and cancel leave no copy of the download behind; a failed installer keeps the verified file for the retry */
-        if (SUCCEEDED(hr) ? (code == 0 || code == 3010 || code == 1641) : hr == HRESULT_FROM_WIN32(ERROR_CANCELLED))
+        if (!keepFile && (SUCCEEDED(hr) ? (code == 0 || code == 3010 || code == 1641) : hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)))
             DeleteFileW(compFile);
         if (SUCCEEDED(hr) && (code == 3010 || code == 1641))
         {
@@ -2058,7 +2008,7 @@ static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
     {
         if (pathBefore) HeapFree(GetProcessHeap(), 0, pathBefore);
         LOGF(log, L"error: installer for '%s' failed (exit code %lu)\n", f->Id, code);
-        if ((!_wcsicmp(f->Provider, L"rapps") || comp) && FAILED(CheckSoftwareDiskSpace(f, log, TRUE)))
+        if (comp && FAILED(CheckSoftwareDiskSpace(f, log, TRUE)))
             return HRESULT_FROM_WIN32(ERROR_DISK_FULL);
         SetLastMsg(L"The %s installer for '%s' failed (exit code %lu).\n\n%s",
                    f->Provider, f->Id, code, g_Tail);
@@ -2090,7 +2040,8 @@ static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
         NotePathChange(f, pathBefore);
         HeapFree(GetProcessHeap(), 0, pathBefore);
     }
-    if ((comp || !_wcsicmp(f->Provider, L"rapps")) && ShellDefaultsId(f->Id))   /* PowerShell 7 / Firefox: desktop, Start menu, default browser (shelldefaults.c) */
+    FmNativeInvalidate();
+    if (comp && ShellDefaultsId(f->Id))   /* PowerShell 7 / Firefox: desktop, Start menu, default browser (shelldefaults.c) */
         FmShellDefaults(!_wcsicmp(f->Id, L"firefox") ? FM_SHELL_ADOPT_BROWSER : 0, log);
     return S_OK;
 }
@@ -2109,7 +2060,7 @@ static HRESULT SoftwareUninstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
         cmd[0] = L'\0';
         /* installed outside featmgr (scoop CLI; setup for an image-bundled rapps entry): no recorded line,
          * derive it from the manifest */
-        if (f && (!_wcsicmp(f->Provider, L"scoop") || !_wcsicmp(f->Provider, L"rapps") || !_wcsicmp(f->Provider, L"component")))
+        if (f && (!_wcsicmp(f->Provider, L"scoop") || FmNativeIsProvider(f->Provider) || !_wcsicmp(f->Provider, L"component")))
         {
             WCHAR inst[2048];
             hr = BuildSoftwareCommands(f, inst, cmd, ARRAYSIZE(cmd), log);
@@ -2135,7 +2086,8 @@ static HRESULT SoftwareUninstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
         SetLastMsg(L"The uninstaller for '%s' failed (exit code %lu).\n\n%s", f ? f->Id : L"?", code, g_Tail);
         return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
     }
-    if (f && (!_wcsicmp(f->Provider, L"component") || !_wcsicmp(f->Provider, L"rapps")) && ShellDefaultsId(f->Id))   /* back to Command Prompt / Internet Explorer when pwsh / Firefox is gone */
+    FmNativeInvalidate();
+    if (f && (!_wcsicmp(f->Provider, L"component") || FmNativeIsProvider(f->Provider)) && ShellDefaultsId(f->Id))   /* back to Command Prompt / Internet Explorer when pwsh / Firefox is gone */
         FmShellDefaults(!_wcsicmp(f->Id, L"firefox") ? FM_SHELL_FORGET_BROWSER : 0, log);
     return S_OK;
 }
@@ -2234,7 +2186,13 @@ static int DetectInstalledNow(const FM_FEATURE *f)
         if (!FmCompLoad(f->Id, &c) || (!c.DetectReg[0] && !c.DetectFile[0])) return -1;
         return FmCompDetect(&c) ? 1 : 0;
     }
-    if (f->Tier != FM_TIER_SOFTWARE || !DetectPathFor(f, p, MAX_PATH)) return -1;
+    if (f->Tier != FM_TIER_SOFTWARE) return -1;
+    if (!DetectPathFor(f, p, MAX_PATH))
+    {
+        if (_wcsicmp(f->Provider, L"native") || !(f->RegName[0] || f->Name[0])) return -1;
+        FmNativeInvalidate();
+        return FmNativeIsInstalled(f->RegName, f->Name) ? 1 : 0;
+    }
     return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES ? 1 : 0;
 }
 
@@ -2375,7 +2333,7 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
         }
         else if (f.Tier == FM_TIER_SOFTWARE && f.Provider[0])
             LOGF(log, L"error: installer for '%s' is not available on this system "
-                      L"(provider '%s': rapps.exe or the staged installer is missing)\n", id, f.Provider);
+                      L"(provider '%s': no download address or checksum for this system, or the staged installer is missing)\n", id, f.Provider);
         else
             LOGF(log, L"error: payload for '%s' is not staged on this system "
                       L"(catalog entry present, payload deferred)\n", id);

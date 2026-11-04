@@ -48,7 +48,8 @@ static const WCHAR szStartMenuInternet[] = L"SOFTWARE\\Clients\\StartMenuInterne
 static const WCHAR szRegisteredApps[]    = L"SOFTWARE\\RegisteredApplications";
 static const WCHAR szClasses[]           = L"SOFTWARE\\Classes";
 static const WCHAR szConfigKey[]         = L"SOFTWARE\\ReactOS\\BrowserChooser";
-/* nitro overlay entry (rapps/overlay/firefox.txt): the current Firefox release. "firefox-esr" is the ESR one. */
+/* the feature manager's catalog entry (featmgr catalog\firefox.ini, recipe in components.ini): the current Firefox
+ * release, downloaded from Mozilla and checked against its SHA-256. The FirefoxPackage value can name another entry. */
 static const WCHAR szDefaultFfPackage[]  = L"firefox";
 
 /* ------------------------------------------------------------------ */
@@ -180,7 +181,7 @@ IsSafeExePath(LPCWSTR pszExe)
     return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-/* A RAPPS package name: letters, digits, '.', '-', '_' only. It is appended to
+/* A feature id: letters, digits, '.', '-', '_' only. It is appended to
  * a command line, so nothing that could add an argument is accepted. */
 static BOOL
 IsSafePackageName(LPCWSTR psz)
@@ -871,7 +872,7 @@ WaitForNetwork(DWORD dwTimeoutMs)
 }
 
 /* ------------------------------------------------------------------ */
-/* Firefox install through RAPPS                                       */
+/* Firefox install through the feature manager                        */
 /* ------------------------------------------------------------------ */
 
 static void
@@ -895,12 +896,12 @@ GetFirefoxPackage(LPWSTR pszOut, size_t cchOut)
     }
 }
 
-/* Run "rapps.exe /install /S <package>" and wait for it. Returns TRUE if
+/* Run "featmgr.exe /install <package>" (hidden console) and wait for it. Returns TRUE if
  * firefox.exe is on disk afterwards. */
 static BOOL
 InstallFirefox(void)
 {
-    WCHAR szRapps[MAX_PATH];
+    WCHAR szFeatmgr[MAX_PATH];
     WCHAR szPackage[128];
     WCHAR szCmd[MAX_PATH + 128];
     WCHAR szFfExe[MAX_PATH];
@@ -909,7 +910,7 @@ InstallFirefox(void)
     DWORD dwExit = (DWORD)-1;
 
     /* If Firefox is already installed, just adopt it as the default instead of
-     * downloading it again (also avoids a redundant RAPPS run). */
+     * downloading it again (also avoids a redundant installer run). */
     if (FindFirefoxExe(szFfExe, ARRAYSIZE(szFfExe)))
     {
         LogLine(L"InstallFirefox: firefox already present at %s; adopting as default", szFfExe);
@@ -922,12 +923,12 @@ InstallFirefox(void)
         return FALSE;
     }
 
-    if (!GetSystemDirectoryW(szRapps, ARRAYSIZE(szRapps)))
+    if (!GetSystemDirectoryW(szFeatmgr, ARRAYSIZE(szFeatmgr)))
         return FALSE;
-    StringCchCatW(szRapps, ARRAYSIZE(szRapps), L"\\rapps.exe");
+    StringCchCatW(szFeatmgr, ARRAYSIZE(szFeatmgr), L"\\featmgr.exe");
 
     GetFirefoxPackage(szPackage, ARRAYSIZE(szPackage));
-    StringCchPrintfW(szCmd, ARRAYSIZE(szCmd), L"\"%s\" /install /S %s", szRapps, szPackage);
+    StringCchPrintfW(szCmd, ARRAYSIZE(szCmd), L"\"%s\" /install %s", szFeatmgr, szPackage);
 
     LogLine(L"InstallFirefox: launching %s", szCmd);
 
@@ -935,7 +936,7 @@ InstallFirefox(void)
     si.cb = sizeof(si);
     ZeroMemory(&pi, sizeof(pi));
 
-    if (!CreateProcessW(NULL, szCmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+    if (!CreateProcessW(NULL, szCmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
     {
         LogLine(L"InstallFirefox: CreateProcess failed err=%lu", GetLastError());
         return FALSE;
@@ -946,7 +947,7 @@ InstallFirefox(void)
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 
-    LogLine(L"InstallFirefox: rapps exit=%lu", dwExit);
+    LogLine(L"InstallFirefox: featmgr exit=%lu", dwExit);
 
     if (FindFirefoxExe(szFfExe, ARRAYSIZE(szFfExe)))
     {
@@ -1055,7 +1056,7 @@ OnOk(HWND hDlg)
 
     if (data == -1)
     {
-        /* Install-Firefox item: run RAPPS on a worker thread. */
+        /* Install-Firefox item: run the feature manager on a worker thread. */
         HANDLE hThread;
         SetBusy(hDlg, TRUE, IDS_INSTALLING);
         hThread = CreateThread(NULL, 0, InstallThreadProc, NULL, 0, NULL);
@@ -1185,7 +1186,7 @@ DlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
  * Non-interactive automation entry points (also useful for unattended
  * provisioning scripts):
  *   bchooser.exe /set <key or name>            set that StartMenuInternet client as default
- *   bchooser.exe /installfirefox               install Firefox via RAPPS + set default
+ *   bchooser.exe /installfirefox               install Firefox via the feature manager + set default
  *   bchooser.exe /settings [ms-settings:defaultapps[?registeredAppUser=name]]   the "Default apps" page
  *                                              (what ms-settings: opens): the chooser, that browser selected
  *   bchooser.exe /firstlogon                   the RunOnce launch: show the chooser, except
