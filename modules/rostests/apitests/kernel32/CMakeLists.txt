@@ -185,6 +185,7 @@ list(APPEND SOURCE
     SetCurrentDirectory.c
     SetSearchPathMode.c
     SetThreadStackGuarantee.c
+    ThreadStackCommit.c
     SetUnhandledExceptionFilter.c
     SuspendThreadContext.c
     SetWaitableTimerEx.c

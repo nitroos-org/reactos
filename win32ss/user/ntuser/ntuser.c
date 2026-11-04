@@ -95,6 +95,7 @@ InitUserImpl(VOID)
     }
 
     InitUserAtoms();
+    GlassBackdropInit();
 
     Status = RegOpenKey(L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows",
                         &hKey);
