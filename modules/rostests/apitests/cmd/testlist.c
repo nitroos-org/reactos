@@ -17,6 +17,7 @@ extern void func_pushd(void);
 extern void func_ren(void);
 extern void func_search(void);
 extern void func_start(void);
+extern void func_typeperf(void);
 
 const struct test winetest_testlist[] =
 {
@@ -36,5 +37,6 @@ const struct test winetest_testlist[] =
     { "ren", func_ren },
     { "search", func_search },
     { "start", func_start },
+    { "typeperf", func_typeperf },
     { 0, 0 }
 };

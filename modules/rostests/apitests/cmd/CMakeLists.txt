@@ -12,6 +12,7 @@ list(APPEND SOURCE
     mkdir.c
     ren.c
     start.c
+    typeperf.c
     testlist.c)
 
 add_executable(cmd_apitest ${SOURCE})
