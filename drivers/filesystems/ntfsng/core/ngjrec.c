@@ -487,6 +487,7 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 		}
 	}
 	res = NGJ_CLEAN;
+	jv->keep = !!(h.flags & KJ_FL_KEEP);
 	if (h.state == KJ_ST_COMMITTED) {
 		u32 crc = 0, total = h.ndesc + h.npages, i;
 		int ok = h.npages && h.npages < (1u << 24) &&

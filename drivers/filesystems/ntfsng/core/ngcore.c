@@ -294,7 +294,7 @@ enum { NGC_PASS_RO, NGC_PASS_CHECK, NGC_PASS_WRITE };
  * which replays in place, clears the dirty flag and goes read-write.
  */
 static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sector_size, int pass,
-		ngc_vol **out, const char **why_ro)
+		ngc_vol **out, const char **why_ro, int *was_dirty)
 {
 	struct fs_context *fc;
 	struct block_device *b;
@@ -385,6 +385,13 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 		/* Our journal clears the dirty flag in the write pass: in the check pass it only marks an unclean shutdown. */
 		int ours = jrec == NGJ_CLEAN, dirty = !!(vol->vol_flags & VOLUME_IS_DIRTY);
 		int need_write = ours && (v->jv->replayed || v->jv->torn || v->jv->pair_pending || dirty);
+		/*
+		 * The flag is the mounted marker when our journal header accounts for it (a crash of ours): replayed and
+		 * cleared.  A flag that came from outside (no header of ours, or a header that says the flag was set on
+		 * request) is real, as for Windows: checked, kept for autochk, cleared by it.
+		 */
+		if (pass == NGC_PASS_CHECK && dirty && (!ours || v->jv->keep))
+			*was_dirty = 1;
 		/*
 		 * A dirty flag with no journal of ours behind it (ntfsresize, a check another system scheduled,
 		 * FSCTL_MARK_VOLUME_DIRTY, an ntfs-3g session that ended badly): what Windows' autochk settles
@@ -518,13 +525,27 @@ fail:
 int ngc_mount(void *osdev, unsigned long long size, unsigned int sector_size, int want_rw,
 		ngc_vol **out, const char **why_ro)
 {
-	int err;
+	int err, was_dirty = 0;
 	if (!want_rw)
-		return ngc_mount_pass(osdev, size, sector_size, NGC_PASS_RO, out, why_ro);
-	err = ngc_mount_pass(osdev, size, sector_size, NGC_PASS_CHECK, out, why_ro);
+		return ngc_mount_pass(osdev, size, sector_size, NGC_PASS_RO, out, why_ro, &was_dirty);
+	err = ngc_mount_pass(osdev, size, sector_size, NGC_PASS_CHECK, out, why_ro, &was_dirty);
 	if (err != NGC_NEED_WRITE_PASS)
 		return err;
-	return ngc_mount_pass(osdev, size, sector_size, NGC_PASS_WRITE, out, why_ro);
+	err = ngc_mount_pass(osdev, size, sector_size, NGC_PASS_WRITE, out, why_ro, &was_dirty);
+	/*
+	 * A real dirty flag the disk carried (see ngc_mount_pass) is a request for autochk, as on Windows: the checks
+	 * above found nothing wrong and the volume goes read-write for the system to boot, but the flag stays (set again
+	 * here, after the replay) until a check (autochk, chkdsk /f) clears it.  A crash before it is set again loses
+	 * only that request.
+	 */
+	if (!err && was_dirty && *out && !sb_rdonly((*out)->sb)) {
+		int e = ngc_mark_volume_dirty(*out);
+		if (e)
+			printk(KERN_ERR "could not keep the dirty flag (%d): the mount-time check settled it\n", e);
+		else
+			printk(KERN_WARNING "dirty flag kept for autochk (it did not come from this driver's own session)\n");
+	}
+	return err;
 }
 
 void ngc_umount(ngc_vol *v, int discard)
@@ -626,7 +647,8 @@ void ngc_volinfo(ngc_vol *v, struct ngc_volinfo *vi)
 	vi->major = vol->major_ver;
 	vi->minor = vol->minor_ver;
 	vi->read_only = sb_rdonly(v->sb) ? 1 : 0;
-	vi->dirty = (vol->vol_flags & VOLUME_IS_DIRTY) ? 1 : 0;
+	/* What FSCTL_IS_VOLUME_DIRTY says: the flag is on disk while a session has changes in flight (the mounted marker), which is not "dirty". */
+	vi->dirty = ((vol->vol_flags & VOLUME_IS_DIRTY) && (vol->keep_dirty || sb_rdonly(v->sb))) || v->damaged || NVolErrors(vol) ? 1 : 0;
 	vi->damaged = v->damaged ? 1 : 0;
 	ngc_load_label(v);
 	memcpy(vi->label, v->label, v->label_len * sizeof(v->label[0]));
@@ -1713,7 +1735,9 @@ static int ngc_before_alloc(struct ngc_vol *v)
 
 /*
  * Sets VOLUME_IS_DIRTY before the first change after a clean point, and puts it on disk
- * before the change proceeds, so a crash always leaves it behind.  Also commits when the
+ * before the change proceeds, so a crash always leaves it behind (also for another system that
+ * mounts the volume).  This is the "mounted, unclean" marker, not a dirty volume: keep_dirty is
+ * what makes the flag real (FSCTL_IS_VOLUME_DIRTY and autochk only count it then).  Also commits when the
  * journal overlay has grown large.
  */
 int ngc_mark_dirty(ngc_vol *v)
@@ -1749,6 +1773,13 @@ int ngc_mark_dirty(ngc_vol *v)
 	return err;
 }
 
+/* The flag on disk is (or no longer is) a real request: in memory, and in the journal headers. */
+static void ngc_set_keep(ngc_vol *v, bool keep)
+{
+	NTFS_SB(v->sb)->keep_dirty = keep;
+	kshim_jnl_set_keep(v->bdev, keep);
+}
+
 /*
  * FSCTL_MARK_VOLUME_DIRTY: the flag goes on disk and stays (no quiet flusher pass or unmount clears it) until
  * the next mount's check has run, as a check scheduled with chkdsk or chkntfs.
@@ -1759,16 +1790,32 @@ int ngc_mark_volume_dirty(ngc_vol *v)
 	int err;
 	if (sb_rdonly(v->sb))
 		return -EROFS;
-	vol->keep_dirty = true;
-	if (vol->vol_flags & VOLUME_IS_DIRTY)
-		return 0;
+	if (vol->vol_flags & VOLUME_IS_DIRTY) {
+		/*
+		 * On disk already (the mounted marker): $Volume is rewritten (flag off and on in the same transaction)
+		 * so that the commit writes a journal header with the keep mark.
+		 */
+		vol->keep_dirty = false;
+		err = ntfs_clear_volume_flags(vol, VOLUME_IS_DIRTY);
+		if (!err)
+			err = ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
+		ngc_set_keep(v, true);
+		if (!err)
+			err = write_inode_now(vol->vol_ino, 1);
+		if (!err)
+			err = ngc_commit(v);
+		if (err)
+			ngc_set_keep(v, false);
+		return err;
+	}
+	ngc_set_keep(v, true);
 	err = ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
 	if (!err)
 		err = write_inode_now(vol->vol_ino, 1);
 	if (!err)
 		err = ngc_commit(v);
 	if (err)
-		vol->keep_dirty = false;
+		ngc_set_keep(v, false);
 	return err;
 }
 
@@ -4353,7 +4400,7 @@ int ngc_check(ngc_vol *v, unsigned int flags, struct ngc_check *out)
 				 * becomes read-only, as a volume the mount-time check found damaged.
 				 */
 				int e = 0;
-				vol->keep_dirty = true;
+				ngc_set_keep(v, true);
 				if (!(vol->vol_flags & VOLUME_IS_DIRTY)) {
 					e = ntfs_set_volume_flags(vol, VOLUME_IS_DIRTY);
 					if (!e)
@@ -4377,7 +4424,7 @@ int ngc_check(ngc_vol *v, unsigned int flags, struct ngc_check *out)
 			}
 			/* Nothing wrong that is left: a flag a check was scheduled with (FSCTL_MARK_VOLUME_DIRTY) goes. */
 			if (!e) {
-				vol->keep_dirty = false;
+				ngc_set_keep(v, false);
 				e = ngc_sync_impl(v);
 				if (!e && !(vol->vol_flags & VOLUME_IS_DIRTY) && (out->flags & NGC_CHK_DIRTY))
 					out->flags |= NGC_CHK_DIRTY_CLEARED;
