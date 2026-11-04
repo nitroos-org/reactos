@@ -37,7 +37,6 @@
 /* GLOBALS ******************************************************************/
 
 static WCHAR szRootDeviceInstanceID[] = L"HTREE\\ROOT\\0";
-LUID LoadDriverPrivilege = {SE_LOAD_DRIVER_PRIVILEGE, 0};
 
 LIST_ENTRY NotificationListHead;
 RTL_RESOURCE NotificationListLock;
@@ -425,11 +424,17 @@ IsPresentDeviceInstanceID(
 }
 
 
+/* Opens the LogConf (boot, basic) or Control (allocated, filtered) subkey of a device instance.
+ * A read-only RPC passes bCreate = FALSE: it opens the key and answers CR_NO_MORE_LOG_CONF when
+ * it is not there, it never creates anything (these RPCs are open to every caller, and they run
+ * as the system, so a created key would be the system's). Only an RPC that adds or frees a
+ * configuration passes TRUE, after its administrator check. */
 static
 CONFIGRET
 OpenConfigurationKey(
     _In_ LPCWSTR pszDeviceID,
     _In_ DWORD ulLogConfType,
+    _In_ BOOL bCreate,
     _Out_ PHKEY phKey)
 {
     WCHAR szKeyName[MAX_PATH];
@@ -445,7 +450,7 @@ OpenConfigurationKey(
     dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                             szKeyName,
                             0,
-                            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_CREATE_SUB_KEY,
+                            bCreate ? (KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_CREATE_SUB_KEY) : KEY_QUERY_VALUE,
                             &hInstanceKey);
     if (dwError != ERROR_SUCCESS)
         return CR_INVALID_DEVINST;
@@ -464,19 +469,37 @@ OpenConfigurationKey(
 
         default:
             DPRINT1("Unsupported configuration type!\n");
+            RegCloseKey(hInstanceKey);
             return CR_FAILURE;
     }
 
-    /* Create or open the LogConf key */
-    dwError = RegCreateKeyExW(hInstanceKey,
-                              pszSubKeyName,
-                              0,
-                              NULL,
-                              REG_OPTION_NON_VOLATILE,
-                              KEY_ALL_ACCESS,
-                              NULL,
-                              phKey,
-                              NULL);
+    if (bCreate)
+    {
+        /* Create or open the LogConf key */
+        dwError = RegCreateKeyExW(hInstanceKey,
+                                  pszSubKeyName,
+                                  0,
+                                  NULL,
+                                  REG_OPTION_NON_VOLATILE,
+                                  KEY_ALL_ACCESS,
+                                  NULL,
+                                  phKey,
+                                  NULL);
+    }
+    else
+    {
+        /* Only open it; a device without a configuration has no key */
+        dwError = RegOpenKeyExW(hInstanceKey,
+                                pszSubKeyName,
+                                0,
+                                KEY_QUERY_VALUE,
+                                phKey);
+        if (dwError == ERROR_FILE_NOT_FOUND || dwError == ERROR_PATH_NOT_FOUND)
+        {
+            RegCloseKey(hInstanceKey);
+            return CR_NO_MORE_LOG_CONF;
+        }
+    }
 
     /* Close the device instance key */
     RegCloseKey(hInstanceKey);
@@ -681,9 +704,19 @@ done:
 }
 
 
-/* Tells whether the caller of an RPC is an administrator (or the system). The kernel checks
- * a privilege on NtPlugPlayControl, but umpnpmgr makes that call as the system, and its
- * endpoint is open to everyone, so the check has to be made here, on the client's token. */
+/* Tells whether the caller of an RPC may change device state: the "write" access of the
+ * Plug and Play service on Windows, which Administrators and the system have (the DACL of the
+ * service's RPC interface). Nothing else passes, as on Windows: an earlier version also let a
+ * caller holding SeLoadDriverPrivilege through, a ReactOS extension that Windows does not have
+ * (Print Operators hold that privilege and cannot change device state there), and it was
+ * dropped. The kernel checks a privilege on NtPlugPlayControl, but umpnpmgr makes that call as
+ * the system, and its endpoint is open to everyone, so the check has to be made here, on the
+ * client's token. Read-only RPCs stay open to every caller, as on Windows.
+ *
+ * RULE for every RPC of this file: one that changes device, registry or service state must
+ * call this (or IsCallerAllowedToEject) BEFORE its first side effect. A stub that will change
+ * state when it is implemented uses PNP_STATE_CHANGE_STUB (below), so the check is already
+ * in the function when somebody replaces the stub's body. */
 static
 BOOL
 IsCallerAdmin(
@@ -727,7 +760,245 @@ IsCallerAdmin(
 done:
     FreeSid(pSystemSid);
     FreeSid(pAdminSid);
+
+    if (!bAdmin)
+        DPRINT1("PnP state change refused: the caller is not an administrator\n");
+
     return bAdmin;
+}
+
+
+/* Tells whether a device can be taken out by its user: it reports CM_DEVCAP_REMOVABLE or
+ * CM_DEVCAP_EJECTSUPPORTED (a device that is gone or never started has no such capability) */
+static
+BOOL
+IsDeviceRemovableByUser(
+    _In_ LPWSTR pszDeviceID)
+{
+    DWORD ulCapabilities = 0, ulType = 0;
+    PNP_PROP_SIZE ulTransferLength = sizeof(ulCapabilities), ulLength = sizeof(ulCapabilities);
+
+    if (PNP_GetDeviceRegProp(NULL,
+                             pszDeviceID,
+                             CM_DRP_CAPABILITIES,
+                             &ulType,
+                             (PBYTE)&ulCapabilities,
+                             &ulTransferLength,
+                             &ulLength,
+                             0) != CR_SUCCESS)
+        return FALSE;
+
+    return (ulCapabilities & (CM_DEVCAP_REMOVABLE | CM_DEVCAP_EJECTSUPPORTED)) != 0;
+}
+
+
+/* Removing or ejecting a device. An administrator may remove any device. An interactive user
+ * may take out a device that is removable or ejectable (Safely Remove Hardware runs as the
+ * user), as on Windows 10: measured on build 19045, a standard user's request to eject or
+ * remove a devnode that is not removable (CM_Request_Device_Eject, CM_Query_And_Remove_SubTree)
+ * is refused with CR_ACCESS_DENIED (a request for the root device answers CR_FAILURE there; here
+ * the root device is refused for every caller with CR_INVALID_DEVINST before this is asked,
+ * as PNP_QueryRemove always did). */
+static
+BOOL
+IsCallerAllowedToEject(
+    _In_ handle_t hBinding,
+    _In_ LPWSTR pszDeviceID)
+{
+    if (IsCallerAdmin(hBinding))
+        return TRUE;
+
+    return IsCallerInteractive(hBinding) && IsDeviceRemovableByUser(pszDeviceID);
+}
+
+
+/* Copies the user SID of the caller of an RPC into a heap block (free with HeapFree);
+ * NULL when the caller cannot be identified */
+static
+PSID
+GetCallerUserSid(
+    _In_ handle_t hBinding)
+{
+    HANDLE hToken;
+    PTOKEN_USER pUser = NULL;
+    PSID pSid = NULL;
+    DWORD dwSize = 0;
+
+    if (RpcImpersonateClient(hBinding) != RPC_S_OK)
+        return NULL;
+
+    if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, FALSE, &hToken))
+    {
+        if (!GetTokenInformation(hToken, TokenUser, NULL, 0, &dwSize) &&
+            GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+        {
+            pUser = HeapAlloc(GetProcessHeap(), 0, dwSize);
+            if (pUser != NULL && GetTokenInformation(hToken, TokenUser, pUser, dwSize, &dwSize))
+            {
+                dwSize = GetLengthSid(pUser->User.Sid);
+                pSid = HeapAlloc(GetProcessHeap(), 0, dwSize);
+                if (pSid != NULL && !CopySid(dwSize, pSid, pUser->User.Sid))
+                {
+                    HeapFree(GetProcessHeap(), 0, pSid);
+                    pSid = NULL;
+                }
+            }
+
+            if (pUser != NULL)
+                HeapFree(GetProcessHeap(), 0, pUser);
+        }
+
+        CloseHandle(hToken);
+    }
+
+    RpcRevertToSelf();
+    return pSid;
+}
+
+
+/* Tells whether the service that a caller names for DEVICE_NOTIFY_SERVICE_HANDLE is its own:
+ * the process that hosts the service runs under the caller's account. Administrators and the
+ * system may name any service. The service control manager hands out the status handle of any
+ * service to any caller of this function, as it is asked here as the system, so a caller that
+ * is not checked could have device events sent to a service of another account. */
+static
+BOOL
+IsServiceOwnedByCaller(
+    _In_ handle_t hBinding,
+    _In_ LPCWSTR pszServiceName)
+{
+    SC_HANDLE hManager = NULL, hService = NULL;
+    SERVICE_STATUS_PROCESS Status;
+    HANDLE hProcess = NULL, hToken = NULL;
+    PTOKEN_USER pUser = NULL;
+    PSID pCallerSid = NULL;
+    DWORD dwSize = 0;
+    BOOL bOwned = FALSE;
+
+    if (IsCallerAdmin(hBinding))
+        return TRUE;
+
+    pCallerSid = GetCallerUserSid(hBinding);
+    if (pCallerSid == NULL)
+        goto done;
+
+    hManager = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (hManager == NULL)
+        goto done;
+
+    hService = OpenServiceW(hManager, pszServiceName, SERVICE_QUERY_STATUS);
+    if (hService == NULL)
+        goto done;
+
+    if (!QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&Status, sizeof(Status), &dwSize) ||
+        Status.dwProcessId == 0)
+        goto done;
+
+    hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, Status.dwProcessId);
+    if (hProcess == NULL || !OpenProcessToken(hProcess, TOKEN_QUERY, &hToken))
+        goto done;
+
+    dwSize = 0;
+    if (!GetTokenInformation(hToken, TokenUser, NULL, 0, &dwSize) &&
+        GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+    {
+        pUser = HeapAlloc(GetProcessHeap(), 0, dwSize);
+        if (pUser != NULL && GetTokenInformation(hToken, TokenUser, pUser, dwSize, &dwSize))
+            bOwned = EqualSid(pUser->User.Sid, pCallerSid);
+    }
+
+done:
+    if (!bOwned)
+        DPRINT1("PNP_RegisterNotification refused: the service is not the caller's own\n");
+
+    if (pUser != NULL)
+        HeapFree(GetProcessHeap(), 0, pUser);
+    if (hToken != NULL)
+        CloseHandle(hToken);
+    if (hProcess != NULL)
+        CloseHandle(hProcess);
+    if (hService != NULL)
+        CloseServiceHandle(hService);
+    if (hManager != NULL)
+        CloseServiceHandle(hManager);
+    if (pCallerSid != NULL)
+        HeapFree(GetProcessHeap(), 0, pCallerSid);
+
+    return bOwned;
+}
+
+
+/* The body of an RPC that is not implemented yet and will change device, registry or service
+ * state when it is: refuses a caller that may not change state first, then reports the call as
+ * not implemented. Whoever implements the RPC replaces the last two lines and keeps the check.
+ * An RPC that only reads state needs no check and keeps UNIMPLEMENTED. */
+#define PNP_STATE_CHANGE_STUB(hBinding) \
+    do { \
+        if (!IsCallerAdmin(hBinding)) \
+            return CR_ACCESS_DENIED; \
+        UNIMPLEMENTED; \
+        return CR_CALL_NOT_IMPLEMENTED; \
+    } while (0)
+
+
+/* PNP_ReportLogOn: the token of the reported process becomes the token of every install UI
+ * process (wizard, restart page). Who may report, as this function decides it (PNP_ReportLogOn
+ * has already required an interactive caller, unless the system runs in MiniNT mode, where the
+ * caller is the system):
+ *  - the system (reachable only in MiniNT mode) may report any process;
+ *  - any other caller may report a process of its own account in its own session (userinit
+ *    reports itself). That is not limited to the active console session: a user in a
+ *    disconnected or remote session may replace the install-UI token with one of its own
+ *    processes. That changes whose session the wizard appears in, and it hands out nothing the
+ *    user does not have (the token is the caller's own); it is a UX matter, not a privilege one;
+ *  - a process of another account is refused, the system's processes included. */
+static
+BOOL
+CallerMayReportLogOn(
+    _In_ handle_t hBinding,
+    _In_ HANDLE hProcessToken)
+{
+    BYTE CallerUserBuffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    BYTE ProcessUserBuffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    PTOKEN_USER pCallerUser = (PTOKEN_USER)CallerUserBuffer;
+    PTOKEN_USER pProcessUser = (PTOKEN_USER)ProcessUserBuffer;
+    DWORD CallerSession = 0, ProcessSession = 0, dwSize;
+    HANDLE hCallerToken;
+    BOOL bResult = FALSE, bCallerToken = FALSE;
+    RPC_STATUS RpcStatus;
+
+    if (!GetTokenInformation(hProcessToken, TokenUser, pProcessUser, sizeof(ProcessUserBuffer), &dwSize) ||
+        !GetTokenInformation(hProcessToken, TokenSessionId, &ProcessSession, sizeof(ProcessSession), &dwSize))
+        return FALSE;
+
+    RpcStatus = RpcImpersonateClient(hBinding);
+    if (RpcStatus != RPC_S_OK)
+    {
+        DPRINT1("RpcImpersonateClient failed (Status 0x%08lx)\n", RpcStatus);
+        return FALSE;
+    }
+
+    if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, FALSE, &hCallerToken))
+    {
+        bCallerToken = GetTokenInformation(hCallerToken, TokenUser, pCallerUser, sizeof(CallerUserBuffer), &dwSize) &&
+                       GetTokenInformation(hCallerToken, TokenSessionId, &CallerSession, sizeof(CallerSession), &dwSize);
+        CloseHandle(hCallerToken);
+    }
+
+    RpcRevertToSelf();
+
+    if (!bCallerToken)
+        return FALSE;
+
+    if (IsWellKnownSid(pCallerUser->User.Sid, WinLocalSystemSid))
+        bResult = TRUE;
+    else if (EqualSid(pCallerUser->User.Sid, pProcessUser->User.Sid) && CallerSession == ProcessSession)
+        bResult = TRUE;
+
+    if (!bResult)
+        DPRINT1("PNP_ReportLogOn refused: the process is not the caller's own\n");
+
+    return bResult;
 }
 
 
@@ -832,6 +1103,7 @@ PNP_ReportLogOn(
 {
     DWORD ReturnValue = CR_FAILURE;
     HANDLE hProcess = NULL;
+    HANDLE hToken = NULL, hOldToken;
 
     UNREFERENCED_PARAMETER(Admin);
 
@@ -843,7 +1115,7 @@ PNP_ReportLogOn(
         goto cleanup;
 
     /* Get the users token */
-    hProcess = OpenProcess(PROCESS_ALL_ACCESS, TRUE, ProcessId);
+    hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, ProcessId);
 
     if (!hProcess)
     {
@@ -851,17 +1123,29 @@ PNP_ReportLogOn(
         goto cleanup;
     }
 
-    if (hUserToken)
-    {
-        CloseHandle(hUserToken);
-        hUserToken = NULL;
-    }
-
-    if (!OpenProcessToken(hProcess, TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY, &hUserToken))
+    if (!OpenProcessToken(hProcess, TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY, &hToken))
     {
         DPRINT1("OpenProcessToken failed with error %u\n", GetLastError());
+        hToken = NULL;
         goto cleanup;
     }
+
+    /* The caller may only report its own process (the system, in MiniNT mode, any process) */
+    if (!CallerMayReportLogOn(hBinding, hToken))
+    {
+        ReturnValue = CR_ACCESS_DENIED;
+        goto cleanup;
+    }
+
+    /* InstallDevice duplicates hUserToken under the same lock */
+    EnterCriticalSection(&UserTokenLock);
+    hOldToken = hUserToken;
+    hUserToken = hToken;
+    LeaveCriticalSection(&UserTokenLock);
+    hToken = NULL;
+
+    if (hOldToken)
+        CloseHandle(hOldToken);
 
     /* Trigger the installer thread */
     if (hInstallEvent)
@@ -870,6 +1154,9 @@ PNP_ReportLogOn(
     ReturnValue = CR_SUCCESS;
 
 cleanup:
+    if (hToken)
+        CloseHandle(hToken);
+
     if (hProcess)
         CloseHandle(hProcess);
 
@@ -2238,12 +2525,15 @@ PNP_SetDeviceRegProp(
     LPWSTR lpValueName = NULL;
     HKEY hKey = 0;
 
-    UNREFERENCED_PARAMETER(hBinding);
     UNREFERENCED_PARAMETER(ulFlags);
 
     DPRINT("PNP_SetDeviceRegProp(%p %S %lu %lu %p %lu 0x%08lx)\n",
            hBinding, pDeviceId, ulProperty, ulDataType, Buffer,
            ulLength, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (!IsValidDeviceInstanceID(pDeviceId))
         return CR_INVALID_DEVINST;
@@ -2416,6 +2706,14 @@ PNP_GetClassInstance(
         goto done;
     }
 
+    /* The device has no driver key yet. Creating one changes device state, which takes an
+     * administrator, as on Windows; reading an existing one (above) is open to everyone. */
+    if (!IsCallerAdmin(hBinding))
+    {
+        ret = CR_ACCESS_DENIED;
+        goto done;
+    }
+
     dwError = RegOpenKeyExW(hClassKey,
                             szClassGuid,
                             0,
@@ -2493,11 +2791,14 @@ PNP_CreateKey(
     DWORD dwError;
     CONFIGRET ret = CR_SUCCESS;
 
-    UNREFERENCED_PARAMETER(hBinding);
     UNREFERENCED_PARAMETER(samDesired);
 
     DPRINT("PNP_CreateKey(%p %S 0x%lx 0x%08lx)\n",
            hBinding, pszSubKey, samDesired, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (ulFlags != 0)
         return CR_INVALID_FLAG;
@@ -2554,8 +2855,7 @@ PNP_DeleteRegistryKey(
     LPWSTR pszChildKey,
     DWORD ulFlags)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    PNP_STATE_CHANGE_STUB(hBinding);
 }
 
 
@@ -2672,10 +2972,12 @@ PNP_DeleteClassKey(
 {
     CONFIGRET ret = CR_SUCCESS;
 
-    UNREFERENCED_PARAMETER(hBinding);
-
     DPRINT("PNP_DeleteClassKey(%p %S 0x%08lx)\n",
            hBinding, pszClassGuid, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (ulFlags & CM_DELETE_CLASS_SUBKEYS)
     {
@@ -2862,11 +3164,13 @@ PNP_RegisterDeviceClassAssociation(
     NTSTATUS Status;
     CONFIGRET ret = CR_SUCCESS;
 
-    UNREFERENCED_PARAMETER(hBinding);
-
     DPRINT1("PNP_RegisterDeviceClassAssociation(%p %S %p %S %S %p %p 0x%08lx)\n",
            hBinding, pszDeviceID, InterfaceGuid, pszReference, pszSymLink,
            pulLength, pulTransferLen, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if ((InterfaceGuid == NULL) ||
         (pszSymLink == NULL) ||
@@ -2917,10 +3221,12 @@ PNP_UnregisterDeviceClassAssociation(
     NTSTATUS Status;
     CONFIGRET ret = CR_SUCCESS;
 
-    UNREFERENCED_PARAMETER(hBinding);
-
     DPRINT1("PNP_UnregisterDeviceClassAssociation(%p %S 0x%08lx)\n",
            hBinding, pszInterfaceDevice, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (pszInterfaceDevice == NULL)
         return CR_INVALID_POINTER;
@@ -3087,11 +3393,13 @@ PNP_SetClassRegProp(
     HKEY hPropKey = 0;
     LONG lError;
 
-    UNREFERENCED_PARAMETER(hBinding);
-
     DPRINT("PNP_SetClassRegProp(%p %S %lu %lu %p %lu 0x%08lx)\n",
            hBinding, pszClassGuid, ulProperty, ulDataType,
            Buffer, ulLength, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (ulFlags != 0)
         return CR_INVALID_FLAG;
@@ -3360,6 +3668,10 @@ PNP_CreateDevInst(
 
     DPRINT("PNP_CreateDevInst(%p %S %S %lu 0x%08lx)\n",
            hBinding, pszParentDeviceID, pszDeviceID, ulLength, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (ulFlags & ~CM_CREATE_DEVNODE_BITS)
         return CR_INVALID_FLAG;
@@ -3672,11 +3984,16 @@ PNP_DeviceInstanceAction(
 {
     CONFIGRET ret = CR_SUCCESS;
 
-    UNREFERENCED_PARAMETER(hBinding);
-
     DPRINT("PNP_DeviceInstanceAction(%p %lu 0x%08lx %S %S)\n",
            hBinding, ulMajorAction, ulMinorAction,
            pszDeviceInstance1, pszDeviceInstance2);
+
+    /* Every action changes device state (setup starts an install as the system, enable
+     * starts a device, re-enumeration can add devices and start their installs), and takes
+     * an administrator, as on Windows 10 (CM_Reenumerate_DevNode of the root as a standard
+     * user returns CR_ACCESS_DENIED there, measured). */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     switch (ulMajorAction)
     {
@@ -3686,12 +4003,6 @@ PNP_DeviceInstanceAction(
             break;
 
         case PNP_DEVINST_ENABLE:
-            /* Changing the state of a device takes an administrator */
-            if (!IsCallerAdmin(hBinding))
-            {
-                ret = CR_ACCESS_DENIED;
-                break;
-            }
             ret = EnableDeviceInstance(pszDeviceInstance1);
             break;
 
@@ -3891,8 +4202,7 @@ PNP_UninstallDevInst(
     LPWSTR pDeviceID,
     DWORD ulFlags)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    PNP_STATE_CHANGE_STUB(hBinding);
 }
 
 
@@ -3954,10 +4264,12 @@ PNP_AddID(
     DWORD dwNewDeviceIdSize;
     WCHAR * pszDeviceIdList = NULL;
 
-    UNREFERENCED_PARAMETER(hBinding);
-
     DPRINT("PNP_AddID(%p %S %S 0x%08lx)\n",
            hBinding, pszDeviceID, pszID, ulFlags);
+
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (RegOpenKeyExW(hEnumKey,
                       pszDeviceID,
@@ -4056,6 +4368,10 @@ PNP_RegisterDriver(
     DPRINT("PNP_RegisterDriver(%p %S 0x%lx)\n",
            hBinding, pszDeviceID, ulFlags);
 
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
+
     if (ulFlags & ~CM_REGISTER_DEVICE_DRIVER_BITS)
         return CR_INVALID_FLAG;
 
@@ -4093,6 +4409,10 @@ PNP_QueryRemove(
     if (!IsValidDeviceInstanceID(pszDeviceID) ||
         IsRootDeviceInstanceID(pszDeviceID))
         return CR_INVALID_DEVINST;
+
+    /* Removing a device takes an administrator, or an interactive user for a removable device */
+    if (!IsCallerAllowedToEject(hBinding, pszDeviceID))
+        return CR_ACCESS_DENIED;
 
     if (pVetoType != NULL)
         *pVetoType = PNP_VetoTypeUnknown;
@@ -4151,8 +4471,14 @@ PNP_RequestDeviceEject(
     if (ulFlags != 0)
         return CR_INVALID_FLAG;
 
-    if (!IsValidDeviceInstanceID(pszDeviceID))
+    /* The root device is not ejectable (PNP_QueryRemove refuses it the same way) */
+    if (!IsValidDeviceInstanceID(pszDeviceID) ||
+        IsRootDeviceInstanceID(pszDeviceID))
         return CR_INVALID_DEVINST;
+
+    /* Ejecting a device takes an administrator, or an interactive user for a removable device */
+    if (!IsCallerAllowedToEject(hBinding, pszDeviceID))
+        return CR_ACCESS_DENIED;
 
     if (pVetoType != NULL)
         *pVetoType = PNP_VetoTypeUnknown;
@@ -4308,9 +4634,12 @@ PNP_HwProfFlags(
     HKEY hDeviceKey;
     DWORD dwSize;
 
-    UNREFERENCED_PARAMETER(hBinding);
-
     DPRINT("PNP_HwProfFlags() called\n");
+
+    /* The SET action is not implemented below. It changes state when it is, so it takes an
+     * administrator, which is checked here already (see IsCallerAdmin for the rule). */
+    if (ulAction == PNP_SET_HWPROFFLAGS && !IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
 
     if (!IsValidDeviceInstanceID(pDeviceID))
         return CR_INVALID_DEVINST;
@@ -4386,7 +4715,6 @@ PNP_GetHwProfInfo(
     HKEY hKeyConfig = NULL;
     HKEY hKeyProfiles = NULL;
     HKEY hKeyProfile = NULL;
-    DWORD dwDisposition;
     DWORD dwSize;
     LONG lError;
     CONFIGRET ret = CR_SUCCESS;
@@ -4413,15 +4741,11 @@ PNP_GetHwProfInfo(
     pHWProfileInfo->HWPI_dwFlags = 0;
 
     /* Open the 'IDConfigDB' key */
-    lError = RegCreateKeyExW(HKEY_LOCAL_MACHINE,
-                             L"System\\CurrentControlSet\\Control\\IDConfigDB",
-                             0,
-                             NULL,
-                             REG_OPTION_NON_VOLATILE,
-                             KEY_QUERY_VALUE,
-                             NULL,
-                             &hKeyConfig,
-                             &dwDisposition);
+    lError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                           L"System\\CurrentControlSet\\Control\\IDConfigDB",
+                           0,
+                           KEY_QUERY_VALUE,
+                           &hKeyConfig);
     if (lError != ERROR_SUCCESS)
     {
         ret = CR_REGISTRY_ERROR;
@@ -4429,15 +4753,11 @@ PNP_GetHwProfInfo(
     }
 
     /* Open the 'Hardware Profiles' subkey */
-    lError = RegCreateKeyExW(hKeyConfig,
-                             L"Hardware Profiles",
-                             0,
-                             NULL,
-                             REG_OPTION_NON_VOLATILE,
-                             KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE,
-                             NULL,
-                             &hKeyProfiles,
-                             &dwDisposition);
+    lError = RegOpenKeyExW(hKeyConfig,
+                           L"Hardware Profiles",
+                           0,
+                           KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE,
+                           &hKeyProfiles);
     if (lError != ERROR_SUCCESS)
     {
         ret = CR_REGISTRY_ERROR;
@@ -4527,6 +4847,10 @@ PNP_AddEmptyLogConf(
     DPRINT("PNP_AddEmptyLogConf(%p %S %lu %p 0x%08lx)\n",
            hBinding, pDeviceID, ulPriority, pulLogConfTag, ulFlags);
 
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
+
     if (pulLogConfTag == NULL)
         return CR_INVALID_POINTER;
 
@@ -4540,6 +4864,7 @@ PNP_AddEmptyLogConf(
 
     ret = OpenConfigurationKey(pDeviceID,
                                ulFlags & LOG_CONF_BITS,
+                               TRUE,
                                &hConfigKey);
     if (ret != CR_SUCCESS)
     {
@@ -4744,6 +5069,10 @@ PNP_FreeLogConf(
     DPRINT("PNP_FreeLogConf(%p %S %lu %lu 0x%08lx)\n",
            hBinding, pDeviceID, ulLogConfType, ulLogConfTag, ulFlags);
 
+    /* Changing device state takes an administrator, as on Windows */
+    if (!IsCallerAdmin(hBinding))
+        return CR_ACCESS_DENIED;
+
     if (ulFlags != 0)
         return CR_INVALID_FLAG;
 
@@ -4752,6 +5081,7 @@ PNP_FreeLogConf(
 
     ret = OpenConfigurationKey(pDeviceID,
                                ulLogConfType,
+                               TRUE,
                                &hConfigKey);
     if (ret != CR_SUCCESS)
     {
@@ -4945,6 +5275,7 @@ PNP_GetFirstLogConf(
 
     ret = OpenConfigurationKey(pDeviceID,
                                ulLogConfType,
+                               FALSE,
                                &hConfigKey);
     if (ret != CR_SUCCESS)
     {
@@ -5047,6 +5378,7 @@ PNP_GetNextLogConf(
 
     ret = OpenConfigurationKey(pDeviceID,
                                ulLogConfType,
+                               FALSE,
                                &hConfigKey);
     if (ret != CR_SUCCESS)
     {
@@ -5163,8 +5495,7 @@ PNP_AddResDes(
     PNP_RPC_BUFFER_SIZE ResourceLen,
     DWORD ulFlags)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    PNP_STATE_CHANGE_STUB(hBinding);
 }
 
 
@@ -5182,8 +5513,7 @@ PNP_FreeResDes(
     DWORD *pulPreviousResTag,
     DWORD ulFlags)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    PNP_STATE_CHANGE_STUB(hBinding);
 }
 
 
@@ -5224,6 +5554,7 @@ PNP_GetNextResDes(
 
     ret = OpenConfigurationKey(pDeviceID,
                                ulLogConfType,
+                               FALSE,
                                &hConfigKey);
     if (ret != CR_SUCCESS)
     {
@@ -5336,8 +5667,7 @@ PNP_ModifyResDes(
     PNP_RPC_BUFFER_SIZE ResourceLen,
     DWORD ulFlags)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    PNP_STATE_CHANGE_STUB(hBinding);
 }
 
 
@@ -5388,7 +5718,7 @@ PNP_SetHwProf(
     DWORD ulHardwareProfile,
     DWORD ulFlags)
 {
-    return CR_CALL_NOT_IMPLEMENTED;
+    PNP_STATE_CHANGE_STUB(hBinding);
 }
 
 
@@ -5491,6 +5821,7 @@ PNP_RegisterNotification(
         }
 
         pNotifyData->dwType = CLASS_NOTIFICATION;
+        pNotifyData->pOwnerSid = GetCallerUserSid(hBinding);
 
         if (pszName != NULL)
         {
@@ -5513,6 +5844,14 @@ PNP_RegisterNotification(
         else
         {
             DPRINT("Validate service: %S\n", pszName);
+
+            /* The service must be the caller's own (window-handle registrations stay open) */
+            if (pszName == NULL || !IsServiceOwnedByCaller(hBinding, pszName))
+            {
+                ret = CR_ACCESS_DENIED;
+                goto done;
+            }
+
             if (I_ScValidatePnpService(NULL,
                                        pszName,
                                        (SERVICE_STATUS_HANDLE *)&pNotifyData->hRecipient) != ERROR_SUCCESS)
@@ -5576,6 +5915,9 @@ done:
             if (pNotifyData->pszName)
                 RtlFreeHeap(GetProcessHeap(), 0, pNotifyData->pszName);
 
+            if (pNotifyData->pOwnerSid)
+                HeapFree(GetProcessHeap(), 0, pNotifyData->pOwnerSid);
+
             RtlFreeHeap(GetProcessHeap(), 0, pNotifyData);
         }
     }
@@ -5591,7 +5933,10 @@ PNP_UnregisterNotification(
     handle_t hBinding,
     PNP_NOTIFY_HANDLE *pNotifyHandle)
 {
-    PNOTIFY_ENTRY pEntry;
+    PNOTIFY_ENTRY pEntry, pCurrent;
+    PLIST_ENTRY Current;
+    PSID pCallerSid = NULL;
+    BOOL bFound = FALSE, bAdmin, bAllowed = FALSE;
 
     DPRINT1("PNP_UnregisterNotification(%p %p)\n",
            hBinding, pNotifyHandle);
@@ -5600,12 +5945,49 @@ PNP_UnregisterNotification(
     if (pEntry == NULL)
         return CR_INVALID_DATA;
 
+    /* Only the account that registered (or an administrator) may unregister */
+    bAdmin = IsCallerAdmin(hBinding);
+    if (!bAdmin)
+        pCallerSid = GetCallerUserSid(hBinding);
+
     RtlAcquireResourceExclusive(&NotificationListLock, TRUE);
-    RemoveEntryList(&pEntry->ListEntry);
+
+    /* The handle must still be a registration, so that a stale handle does not free twice
+     * (the entry is not touched before it is found in the list) */
+    for (Current = NotificationListHead.Flink; Current != &NotificationListHead; Current = Current->Flink)
+    {
+        pCurrent = CONTAINING_RECORD(Current, NOTIFY_ENTRY, ListEntry);
+        if (pCurrent == pEntry)
+        {
+            bFound = TRUE;
+            break;
+        }
+    }
+
+    if (bFound)
+    {
+        bAllowed = bAdmin ||
+                   (pCallerSid != NULL && pEntry->pOwnerSid != NULL &&
+                    EqualSid(pCallerSid, pEntry->pOwnerSid));
+        if (bAllowed)
+            RemoveEntryList(&pEntry->ListEntry);
+    }
+
     RtlReleaseResource(&NotificationListLock);
+
+    if (pCallerSid != NULL)
+        HeapFree(GetProcessHeap(), 0, pCallerSid);
+
+    if (!bFound)
+        return CR_INVALID_DATA;
+
+    if (!bAllowed)
+        return CR_ACCESS_DENIED;
 
     if (pEntry->pszName)
         RtlFreeHeap(RtlGetProcessHeap(), 0, pEntry->pszName);
+    if (pEntry->pOwnerSid)
+        HeapFree(GetProcessHeap(), 0, pEntry->pOwnerSid);
     RtlFreeHeap(RtlGetProcessHeap(), 0, pEntry);
     *pNotifyHandle = NULL;
 
@@ -5820,8 +6202,7 @@ PNP_SetObjectProp(
     BYTE *PropertyBuffer,
     DWORD Flags)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    PNP_STATE_CHANGE_STUB(hBinding);
 }
 
 
@@ -5831,8 +6212,7 @@ WINAPI
 PNP_InstallDevInst(
     handle_t hBinding)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    PNP_STATE_CHANGE_STUB(hBinding);
 }
 
 
@@ -5853,8 +6233,7 @@ WINAPI
 PNP_DriverStoreAddDriverPackage(
     handle_t hBinding)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    PNP_STATE_CHANGE_STUB(hBinding);
 }
 
 
@@ -5864,8 +6243,7 @@ WINAPI
 PNP_DriverStoreDeleteDriverPackage(
     handle_t hBinding)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    PNP_STATE_CHANGE_STUB(hBinding);
 }
 
 
@@ -5899,6 +6277,5 @@ WINAPI
 PNP_DeleteServiceDevices(
     handle_t hBinding)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    PNP_STATE_CHANGE_STUB(hBinding);
 }

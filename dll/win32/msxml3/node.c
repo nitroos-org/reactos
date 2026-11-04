@@ -928,13 +928,8 @@ BSTR EnsureCorrectEOL(BSTR sInput)
 
 struct ns_fixups
 {
-    struct ns_fixup
-    {
-        xmlNodePtr node;
-        xmlNsPtr ns;
-    } *entries;
-    size_t count;
-    size_t size;
+    BOOL scan;   /* only look for the declarations that are missing, do not add them */
+    BOOL needed;
 };
 
 /* Is ns->prefix bound by a declaration on 'node' or one of its ancestors up to 'top' (the root of the output)? */
@@ -961,31 +956,26 @@ static void ns_fixup_add(struct ns_fixups *fixups, xmlNodePtr node, xmlNodePtr t
     if (!ns || !ns->href || xmlStrEqual(ns->href, XML_XML_NAMESPACE)) return;
     if (ns_declared_in_output(node, top, ns)) return;
 
-    if (fixups->count == fixups->size)
+    if (fixups->scan)
     {
-        size_t size = fixups->size ? fixups->size * 2 : 8;
-        struct ns_fixup *entries = realloc(fixups->entries, size * sizeof(*entries));
-        if (!entries) return;
-        fixups->entries = entries;
-        fixups->size = size;
+        fixups->needed = TRUE;
+        return;
     }
 
     if (!(decl = xmlNewNs(NULL, ns->href, ns->prefix))) return;
     decl->next = node->nsDef;
     node->nsDef = decl;
-    fixups->entries[fixups->count].node = node;
-    fixups->entries[fixups->count].ns = decl;
-    fixups->count++;
 }
 
 /* Like msxml, make the serialized subtree namespace-well-formed on its own: an element or attribute in the
-   subtree whose namespace is declared only on an ancestor outside the subtree gets a temporary declaration,
-   e.g. the child <p:b/> of <a xmlns:p="urn:p"> is serialized as <p:b xmlns:p="urn:p"/>. */
-static void ns_fixups_apply(struct ns_fixups *fixups, xmlNodePtr top)
+   subtree whose namespace is declared only on an ancestor outside the subtree gets its own declaration (on
+   each element that uses it, msxml does not hoist), e.g. the child <p:b/> of <a xmlns:p="urn:p"> is serialized
+   as <p:b xmlns:p="urn:p"/>. With fixups->scan set this only reports whether a declaration is missing.
+   Declarations are added to the nodes passed in, so the caller must own them (see node_get_xml). */
+static void ns_fixups_walk(struct ns_fixups *fixups, xmlNodePtr top)
 {
     xmlNodePtr node = top;
 
-    memset(fixups, 0, sizeof(*fixups));
     if (top->type != XML_ELEMENT_NODE && top->type != XML_DOCUMENT_FRAG_NODE) return;
 
     while (node)
@@ -1016,16 +1006,58 @@ static void ns_fixups_apply(struct ns_fixups *fixups, xmlNodePtr top)
     }
 }
 
-static void ns_fixups_revert(struct ns_fixups *fixups)
+static BOOL ns_fixups_needed(xmlNodePtr top)
 {
-    while (fixups->count)
-    {
-        struct ns_fixup *entry = &fixups->entries[--fixups->count];
+    struct ns_fixups fixups = { .scan = TRUE };
 
-        entry->node->nsDef = entry->ns->next;
-        xmlFreeNs(entry->ns);
+    ns_fixups_walk(&fixups, top);
+    return fixups.needed;
+}
+
+/* Copy 'orig' (an element) into 'doc'. libxml2 declares the namespaces the copy inherits on the root of the
+   copy; take those declarations off again (they are appended after the copied ones) and keep them in
+   *stash, the copy's nodes still point to them. */
+static xmlNodePtr ns_copy_element(xmlDocPtr doc, xmlNodePtr orig, xmlNsPtr *stash)
+{
+    xmlNodePtr copy = xmlDocCopyNode(orig, doc, 1);
+    xmlNsPtr def, tail, *link;
+
+    if (!copy) return NULL;
+    link = &copy->nsDef;
+    for (def = orig->nsDef; def && *link; def = def->next) link = &(*link)->next;
+    if ((tail = *link))
+    {
+        xmlNsPtr last;
+
+        *link = NULL;
+        for (last = tail; last->next; last = last->next) {}
+        last->next = *stash;
+        *stash = tail;
     }
-    free(fixups->entries);
+    return copy;
+}
+
+/* Serializing must not modify the document: other threads may read it at the same time. When declarations are
+   missing, serialize a private copy of the subtree that gets them. */
+static xmlNodePtr ns_copy_subtree(xmlDocPtr doc, xmlNodePtr top, xmlNsPtr *stash)
+{
+    xmlNodePtr copy, child, c;
+
+    if (top->type == XML_ELEMENT_NODE) return ns_copy_element(doc, top, stash);
+
+    if (!(copy = xmlNewDocFragment(doc))) return NULL;
+    for (child = top->children; child; child = child->next)
+    {
+        if (child->type == XML_ELEMENT_NODE) c = ns_copy_element(doc, child, stash);
+        else c = xmlDocCopyNode(child, doc, 1);
+        if (!c || !xmlAddChild(copy, c))
+        {
+            xmlFreeNode(c);
+            xmlFreeNode(copy);
+            return NULL;
+        }
+    }
+    return copy;
 }
 
 /*
@@ -1037,9 +1069,11 @@ static void ns_fixups_revert(struct ns_fixups *fixups)
  */
 HRESULT node_get_xml(xmlnode *This, BOOL ensure_eol, BSTR *ret)
 {
-    struct ns_fixups fixups;
+    xmlNodePtr dump = This->node, copy = NULL;
+    xmlNsPtr stash = NULL;
+    xmlDocPtr copy_doc = NULL;
     xmlBufferPtr xml_buf;
-    xmlNodePtr xmldecl;
+    xmlDoc shadow;
     int size;
 
     if(!ret)
@@ -1051,11 +1085,32 @@ HRESULT node_get_xml(xmlnode *This, BOOL ensure_eol, BSTR *ret)
     if(!xml_buf)
         return E_OUTOFMEMORY;
 
-    xmldecl = xmldoc_unlink_xmldecl( This->node->doc );
-    ns_fixups_apply(&fixups, This->node);
+    if (dump->type == XML_DOCUMENT_NODE)
+    {
+        /* libxml2 writes the declaration itself: dump the document without its "<?xml" node, through a
+           shadow of the document header, the document is not modified */
+        xmlNodePtr first = dump->children;
 
-    size = xmlNodeDump(xml_buf, This->node->doc, This->node, 0, 1);
-    ns_fixups_revert(&fixups);
+        shadow = *(xmlDocPtr)dump;
+        if (first && first->type == XML_PI_NODE && xmlStrEqual(first->name, BAD_CAST "xml"))
+            shadow.children = first->next;
+        dump = (xmlNodePtr)&shadow;
+    }
+    else if (ns_fixups_needed(dump) && (copy_doc = xmlNewDoc(NULL)))
+    {
+        if ((copy = ns_copy_subtree(copy_doc, dump, &stash)))
+        {
+            struct ns_fixups fixups = { 0 };
+
+            ns_fixups_walk(&fixups, copy);
+            dump = copy;
+        }
+    }
+
+    size = xmlNodeDump(xml_buf, This->node->doc, dump, 0, 1);
+    if (copy) xmlFreeNode(copy);
+    if (copy_doc) xmlFreeDoc(copy_doc);
+    if (stash) xmlFreeNsList(stash);
     if(size > 0) {
         const xmlChar *buf_content;
         BSTR content;
@@ -1073,7 +1128,6 @@ HRESULT node_get_xml(xmlnode *This, BOOL ensure_eol, BSTR *ret)
     }
 
     xmlBufferFree(xml_buf);
-    xmldoc_link_xmldecl( This->node->doc, xmldecl );
     return *ret ? S_OK : E_OUTOFMEMORY;
 }
 

@@ -1,47 +1,35 @@
-diff -pudN e:\wine-patched\tools\widl/hash.c e:\reactos-sync-clean\tools\widl/hash.c
---- e:\wine-patched\tools\widl/hash.c	2015-02-22 13:23:48 +0100
-+++ e:\reactos-sync-clean\tools\widl/hash.c	2013-10-15 20:06:18 +0100
-@@ -21,9 +21,7 @@
+Differences between Wine widl and the ReactOS copy (sdk/tools/widl).
+Wine side: tools/widl of wine-mirror/wine at 415a275e3844c252ad385b46023095e9401ca234.
+Regenerate after a Wine sync (CMakeLists.txt, Makefile.in, widl.man.in, winmd_ros.h and this file are left out):
+  git -C wine archive 415a275e3844 tools/widl | tar -x -C wine-patched
+  cp <the files of sdk/tools/widl without those> reactos/sdk/tools/widl/
+  diff -pudN wine-patched/tools/widl reactos/sdk/tools/widl
+diff -pudN wine-patched/tools/widl/hash.c reactos/sdk/tools/widl/hash.c
+--- wine-patched/tools/widl/hash.c
++++ reactos/sdk/tools/widl/hash.c
+@@ -21,9 +21,14 @@
  #include <stdio.h>
  #include <stdarg.h>
  
--#include "windef.h"
--#include "winbase.h"
--#include "winnls.h"
++#ifdef __REACTOS__
 +#include <nls.h>
++#include <string.h>
++#else
+ #include "windef.h"
+ #include "winbase.h"
+ #include "winnls.h"
++#endif
  
  #include "widltypes.h"
  #include "hash.h"
-@@ -539,10 +537,10 @@ unsigned int lhash_val_of_name_sys( sysk
-   case LANG_VIETNAMESE: case LANG_MALTESE:    case LANG_IRISH:
-   case LANG_SAMI:       case LANG_UPPER_SORBIAN: case LANG_TSWANA:
-   case LANG_XHOSA:      case LANG_ZULU:       case LANG_WELSH:
--  case LANG_BRETON:     case LANG_SCOTTISH_GAELIC: case LANG_NEUTRAL:
-+  case LANG_BRETON:     case LANG_NEUTRAL:
- /* some languages not in all windows versions or ReactOS */
--#ifdef LANG_MANX_GAELIC
--  case LANG_MANX_GAELIC:
-+#ifdef LANG_GAELIC
-+  case LANG_GAELIC:
- #endif
- #ifdef LANG_TAJIK
-   case LANG_TAJIK:
-diff -pudN e:\wine-patched\tools\widl/header.c e:\reactos-sync-clean\tools\widl/header.c
---- e:\wine-patched\tools\widl/header.c	2015-10-30 18:41:54 +0100
-+++ e:\reactos-sync-clean\tools\widl/header.c	2015-11-16 20:04:15 +0100
-@@ -1068,7 +1068,7 @@ static void write_inline_wrappers(FILE *
-     if (!is_callas(func->attrs)) {
-       const var_t *arg;
- 
--      fprintf(header, "static FORCEINLINE ");
-+      fprintf(header, "FORCEINLINE ");
-       write_type_decl_left(header, type_function_get_rettype(func->type));
-       fprintf(header, " %s_%s(", name, get_name(func));
-       write_args(header, type_get_function_args(func->type), name, 1, FALSE);
-@@ -1103,6 +1103,15 @@ static void do_write_c_method_def(FILE *
+diff -pudN wine-patched/tools/widl/header.c reactos/sdk/tools/widl/header.c
+--- wine-patched/tools/widl/header.c
++++ reactos/sdk/tools/widl/header.c
+@@ -1138,6 +1138,17 @@ static void do_write_c_method_def(FILE *
  
    if (type_iface_get_inherit(iface))
      do_write_c_method_def(header, type_iface_get_inherit(iface), name);
++#ifdef __REACTOS__ /* r59312 / 3ab1571 */
 +  else if (type_iface_get_stmts(iface) == NULL)
 +  {
 +    fprintf(header, "#ifndef __cplusplus\n");
@@ -51,62 +39,963 @@ diff -pudN e:\wine-patched\tools\widl/header.c e:\reactos-sync-clean\tools\widl/
 +    fprintf(header, "\n");
 +    return;
 +  }
++#endif
  
    STATEMENTS_FOR_EACH_FUNC(stmt, type_iface_get_stmts(iface))
    {
-@@ -1640,6 +1649,10 @@ void write_header(const statement_list_t
-   fprintf(header, "#define __REQUIRED_RPCNDR_H_VERSION__ 475\n");
-   fprintf(header, "#endif\n\n");
+diff -pudN wine-patched/tools/widl/metadata.c reactos/sdk/tools/widl/metadata.c
+--- wine-patched/tools/widl/metadata.c
++++ reactos/sdk/tools/widl/metadata.c
+@@ -21,12 +21,19 @@
+ #include <stdio.h>
  
-+  fprintf(header, "#ifdef __REACTOS__\n");
-+  fprintf(header, "#define WIN32_LEAN_AND_MEAN\n");
-+  fprintf(header, "#endif\n\n");
+ #include "widl.h"
++#ifdef __REACTOS__
++#include "winmd_ros.h"
++#else
+ #include "windef.h"
+ #include "winbase.h"
+ #include "wincrypt.h"
+ #include "winnt.h"
++#endif
+ #include "utils.h"
+ #include "typetree.h"
++#ifdef __REACTOS__
++#include "hash.h"
++#endif
+ 
+ static const IMAGE_DOS_HEADER dos_header =
+ {
+@@ -141,10 +148,12 @@ static void write_headers( UINT image_si
+ 
+     put_data( &dos_header, sizeof(dos_header) );
+ 
++#ifndef __REACTOS__
+     image_size += nt_header.OptionalHeader.SizeOfHeaders + sizeof(section_header);
+     nt_header.OptionalHeader.SizeOfImage = (image_size + 0x1fff) & ~0x1fff;
+ 
+     put_data( &nt_header, sizeof(nt_header) );
++#endif
+ 
+     for (i = 0; i < WINMD_STREAM_MAX; i++)
+     {
+@@ -152,6 +161,14 @@ static void write_headers( UINT image_si
+         streams_size += streams[i].header_size + streams[i].data_size;
+         num_streams++;
+     }
++#ifdef __REACTOS__
++    /* the headers and the section rounded up to the section alignment: a section that ends past
++       SizeOfImage (above 0x4000 bytes of metadata) makes the CLR reject the file (BadImageFormat) */
++    nt_header.OptionalHeader.SizeOfImage = SECTION_ALIGNMENT +
++        ((sizeof(cor_header) + sizeof(metadata_header) + streams_size + 8 + SECTION_ALIGNMENT - 1) & ~(SECTION_ALIGNMENT - 1));
 +
-   fprintf(header, "#include <rpc.h>\n" );
-   fprintf(header, "#include <rpcndr.h>\n\n" );
++    put_data( &nt_header, sizeof(nt_header) );
++#endif
  
-diff -pudN e:\wine-patched\tools\widl/parser.y e:\reactos-sync-clean\tools\widl/parser.y
---- e:\wine-patched\tools\widl/parser.y	2015-11-15 19:23:32 +0100
-+++ e:\reactos-sync-clean\tools\widl/parser.y	2015-11-16 20:04:15 +0100
-@@ -1899,6 +1899,14 @@ static type_t *reg_typedefs(decl_spec_t 
+     section_header.PointerToRawData = FILE_ALIGNMENT;
+     section_header.VirtualAddress = SECTION_ALIGNMENT;
+@@ -937,6 +954,12 @@ static void serialize_interfaceimpl_tabl
+         (const struct interfaceimpl_row *)current_winmd->tables[TABLE_INTERFACEIMPL].ptr;
+     UINT i;
+ 
++#ifdef __REACTOS__
++    /* qsort is not stable: keep the order of the rows of one class (DefaultAttribute points at a row) */
++    for (i = 1; i < current_winmd->tables[TABLE_INTERFACEIMPL].count; i++)
++        if (cmp_interfaceimpl_row( row + i - 1, row + i ) > 0) break;
++    if (i < current_winmd->tables[TABLE_INTERFACEIMPL].count)
++#endif
+     qsort( current_winmd->tables[TABLE_INTERFACEIMPL].ptr, current_winmd->tables[TABLE_INTERFACEIMPL].count,
+            sizeof(*row), cmp_interfaceimpl_row );
+ 
+@@ -1300,6 +1323,31 @@ static void serialize_methodimpl_table(
+     }
+ }
+ 
++#ifdef __REACTOS__
++struct typespec_row
++{
++    UINT signature;
++};
++
++static UINT add_typespec_row( UINT signature )
++{
++    struct typespec_row row = { signature };
++    return add_row( TABLE_TYPESPEC, (const BYTE *)&row, sizeof(row) );
++}
++
++static void serialize_typespec_table( void )
++{
++    const struct typespec_row *row = (const struct typespec_row *)current_winmd->tables[TABLE_TYPESPEC].ptr;
++    UINT i;
++
++    for (i = 0; i < current_winmd->tables[TABLE_TYPESPEC].count; i++)
++    {
++        serialize_blob_idx( row->signature );
++        row++;
++    }
++}
++#endif
++
+ static UINT typedef_or_ref( enum table table, UINT row )
+ {
+     switch (table)
+@@ -1580,11 +1628,158 @@ static const char *get_import( const cha
+     return NULL;
+ }
+ 
++#ifdef __REACTOS__
++/* the longest import whose name is a namespace prefix of name */
++static const char *get_import_prefix( const char *name )
++{
++    const char *best = NULL;
++    UINT i, len;
++
++    for (i = 0; i < current_winmd->num_imports; i++)
++    {
++        len = strlen( current_winmd->imports[i] );
++        if (strncasecmp( name, current_winmd->imports[i], len ) || name[len] != '.') continue;
++        if (!best || len > strlen( best )) best = current_winmd->imports[i];
++    }
++    return best;
++}
++#endif
++
+ #define MODULE_ROW      1
+ #define MSCORLIB_ROW    1
+ 
+ #define MAX_NAME        256
+ 
++#ifdef __REACTOS__
++static UINT make_type_sig( const type_t *type, BYTE *buf );
++static void create_typeref( type_t *type );
++
++/* the type parameters of the generic interface or delegate being written */
++static const typeref_list_t *current_generic_params;
++
++static BOOL is_generic_template( const type_t *type )
++{
++    const type_t *inner;
++
++    if (type_get_type_detect_alias( type ) != TYPE_PARAMETERIZED_TYPE) return FALSE;
++    inner = type->details.parameterized.type;
++    return inner && (inner->type_type == TYPE_INTERFACE || inner->type_type == TYPE_DELEGATE);
++}
++
++/* a generic used with type parameters inside another generic: IAsyncOperation<TResult> */
++static BOOL is_generic_partial( const type_t *type )
++{
++    return type_get_type_detect_alias( type ) == TYPE_PARAMETERIZED_TYPE && !is_generic_template( type );
++}
++
++static UINT generic_param_index( const type_t *type )
++{
++    const typeref_t *param;
++    UINT i = 0;
++
++    if (current_generic_params) LIST_FOR_EACH_ENTRY( param, current_generic_params, const typeref_t, entry )
++    {
++        if (param->type == type || (param->type->name && type->name && !strcmp( param->type->name, type->name )))
++            return i;
++        i++;
++    }
++    error( "type parameter %s outside of its generic\n", type->name );
++    return 0;
++}
++
++struct genericparam_row
++{
++    UINT number;
++    UINT flags;
++    UINT owner;
++    UINT name;
++};
++
++static UINT add_genericparam_row( UINT number, UINT owner, UINT name )
++{
++    struct genericparam_row row = { number, 0, owner, name };
++    return add_row( TABLE_GENERICPARAM, (const BYTE *)&row, sizeof(row) );
++}
++
++static void serialize_genericparam_table( void )
++{
++    const struct genericparam_row *row = (const struct genericparam_row *)current_winmd->tables[TABLE_GENERICPARAM].ptr;
++    UINT i;
++
++    for (i = 0; i < current_winmd->tables[TABLE_GENERICPARAM].count; i++)
++    {
++        serialize_ushort( row->number );
++        serialize_ushort( row->flags );
++        serialize_table_idx( row->owner, row->owner & 1 ? TABLE_METHODDEF : TABLE_TYPEDEF );
++        serialize_string_idx( row->name );
++        row++;
++    }
++}
++
++/* the statements of the imported IDL files, for --winmd-merge */
++struct import_statements
++{
++    char *name;
++    statement_list_t *stmts;
++};
++static struct import_statements *import_stmts;
++static UINT import_stmts_count;
++
++static BOOL is_merged_import( const char *name )
++{
++    const char *base = strrchr( name, '/' );
++
++    base = base ? base + 1 : name;
++    return strarray_exists( winmd_merge, base );
++}
++
++/* GENERICINST CLASS <generic> <count> <arguments>, for a parameterized interface or delegate instance */
++static UINT make_generic_inst_sig( const type_t *type, BYTE *buf )
++{
++    const typeref_t *arg;
++    UINT len = 0;
++
++    buf[len++] = 0x15; /* ELEMENT_TYPE_GENERICINST */
++    buf[len++] = 0x12; /* ELEMENT_TYPE_CLASS */
++    len += encode_int( typedef_or_ref(TABLE_TYPEREF, type->md.ref), buf + len );
++    len += encode_int( list_count(type->param_args), buf + len );
++    LIST_FOR_EACH_ENTRY( arg, type->param_args, const typeref_t, entry )
++        len += make_type_sig( arg->type, buf + len );
++    return len;
++}
++
++static void create_typespec( type_t *type )
++{
++    const typeref_t *arg;
++    BYTE sig[256];
++
++    if (type->md.spec || !type->param_args) return;
++    LIST_FOR_EACH_ENTRY( arg, type->param_args, const typeref_t, entry ) create_typeref( arg->type );
++    type->md.spec = add_typespec_row( add_blob(sig, make_generic_inst_sig( type, sig )) );
++}
++
++/* TypeDefOrRef / MemberRefParent of a type: the TypeSpec of a generic instance, else its TypeRef */
++static UINT type_token( const type_t *type )
++{
++    /* a generic instance with type parameters, in a generic (IIterable<IKeyValuePair<K, V>> of
++       IMapView`2): a TypeSpec of its own, with VAR for the parameters of the generic being written */
++    if (is_generic_partial( type_get_real_type( (type_t *)type ) ))
++    {
++        BYTE sig[256];
++        UINT len = make_type_sig( type, sig );
++        return add_typespec_row( add_blob( sig, len ) ) << 2 | 2;
++    }
++    if (type->md.spec) return type->md.spec << 2 | 2;
++    return type->md.ref << 2 | 1;
++}
++
++static UINT type_parent_token( const type_t *type )
++{
++    if (type->md.spec) return type->md.spec << 3 | 4;
++    return type->md.ref << 3 | 1;
++}
++#endif
++
+ /* create a type reference if needed and store it in the base type */
+ static void create_typeref( type_t *type )
+ {
+@@ -1596,6 +1791,19 @@ static void create_typeref( type_t *type
+     while (type_get_type( type ) == TYPE_POINTER) type = type_pointer_get_ref_type( type );
+     base_type = type_get_real_type( type );
+ 
++#ifdef __REACTOS__
++    if (type_get_type_detect_alias( base_type ) == TYPE_PARAMETER) return;
++    if (is_generic_partial( base_type ))
++    {
++        const typeref_t *arg;
++
++        create_typeref( base_type->details.parameterized.type );
++        if (base_type->details.parameterized.params)
++            LIST_FOR_EACH_ENTRY( arg, base_type->details.parameterized.params, const typeref_t, entry )
++                create_typeref( arg->type );
++        return;
++    }
++#endif
+     if (base_type->md.ref) return;
+ 
+     /* basic types don't get a reference */
+@@ -1617,6 +1825,14 @@ static void create_typeref( type_t *type
+ 
+     if (base_type->winmd_short_name)
+         base_type->md.name = add_string( base_type->winmd_short_name );
++#ifdef __REACTOS__
++    else if (is_generic_template( base_type ))
++    {
++        char *name = strmake( "%s`%u", base_type->name, list_count( base_type->details.parameterized.params ) );
++        base_type->md.name = add_string( name );
++        free( name );
++    }
++#endif
+     else
+         base_type->md.name = add_string( base_type->name );
+ 
+@@ -1625,10 +1841,24 @@ static void create_typeref( type_t *type
+ 
+     if (base_type->md.namespace && (import_name = get_import( namespace_str )))
+     {
++#ifdef __REACTOS__
++        /* the import's file name is lower case; the assembly is named like the namespace (Windows.Foundation) */
++        assemblyref = add_assemblyref_row( 0x200, 0, base_type->md.namespace );
++#else
+         assemblyref = add_assemblyref_row( 0x200, 0, add_string(import_name) );
++#endif
+         scope = resolution_scope( TABLE_ASSEMBLYREF, assemblyref );
+         base_type->md.ref = add_typeref_row( scope, base_type->md.name, base_type->md.namespace );
+     }
++#ifdef __REACTOS__
++    else if (!base_type->md.namespace && !strcmp( current_winmd->name, "Windows.Foundation" ))
++    {
++        /* Windows.Foundation.winmd defines them (asyncinfo.idl, eventtoken.idl) */
++        base_type->md.namespace = add_string( "Windows.Foundation" );
++        scope = resolution_scope( TABLE_MODULE, MODULE_ROW );
++        base_type->md.ref = add_typeref_row( scope, base_type->md.name, base_type->md.namespace );
++    }
++#endif
+     else if (!base_type->md.namespace) /* types without namespace are imported from Windows.Foundation */
+     {
+         namespace = add_string( "Windows.Foundation" );
+@@ -1636,6 +1866,20 @@ static void create_typeref( type_t *type
+         scope = resolution_scope( TABLE_ASSEMBLYREF, assemblyref );
+         base_type->md.ref = add_typeref_row( scope, base_type->md.name, namespace );
+     }
++#ifdef __REACTOS__
++    else if ((base_type->param_tmpl ? base_type->param_tmpl : base_type)->defined_in_import &&
++             (import_name = get_import_prefix( namespace_str )))
++    {
++        /* a sub-namespace of an imported file (Windows.Foundation.Collections of windows.foundation) */
++        char *assembly = xstrdup( namespace_str );
++
++        assembly[strlen( import_name )] = 0;
++        assemblyref = add_assemblyref_row( 0x200, 0, add_string(assembly) );
++        free( assembly );
++        scope = resolution_scope( TABLE_ASSEMBLYREF, assemblyref );
++        base_type->md.ref = add_typeref_row( scope, base_type->md.name, base_type->md.namespace );
++    }
++#endif
+     else
+     {
+         scope = resolution_scope( TABLE_MODULE, MODULE_ROW );
+@@ -1643,6 +1887,9 @@ static void create_typeref( type_t *type
+     }
+ 
+     free( namespace_str );
++#ifdef __REACTOS__
++    create_typespec( base_type );
++#endif
+ }
+ 
+ static UINT make_field_value_sig( UINT token, BYTE *buf )
+@@ -1797,6 +2044,9 @@ static UINT make_type_sig( const type_t
+ 
+         switch (type_get_type( ref_type ))
+         {
++#ifdef __REACTOS__
++        case TYPE_PARAMETERIZED_TYPE:
++#endif
+         case TYPE_DELEGATE:
+         case TYPE_INTERFACE:
+         case TYPE_RUNTIMECLASS:
+@@ -1814,11 +2064,36 @@ static UINT make_type_sig( const type_t
+         len += make_type_sig( type_array_get_element_type(type), buf + len );
+         break;
+ 
++#ifdef __REACTOS__
++    case TYPE_INTERFACE:
++    case TYPE_DELEGATE:
++        /* IInspectable is System.Object; anything else is its interface or delegate type */
++        if (type->name && !strcmp( type->name, "IInspectable" ))
++        {
++            buf[len++] = ELEMENT_TYPE_OBJECT;
++            break;
++        }
++        if (!type->md.ref)
++        {
++            fprintf( stderr, "warning: no type reference for %s, using System.Object\n", type->name );
++            buf[len++] = ELEMENT_TYPE_OBJECT;
++            break;
++        }
++        if (type->param_args)
++        {
++            len += make_generic_inst_sig( type, buf );
++            break;
++        }
++        buf[len++] = ELEMENT_TYPE_CLASS;
++        len += encode_int( typedef_or_ref(TABLE_TYPEREF, type->md.ref), buf + 1 );
++        break;
++#else
+     case TYPE_INTERFACE:
+         buf[len++] = ELEMENT_TYPE_OBJECT;
+         break;
+ 
+     case TYPE_DELEGATE:
++#endif
+     case TYPE_RUNTIMECLASS:
+         buf[len++] = ELEMENT_TYPE_CLASS;
+         len += encode_int( typedef_or_ref(TABLE_TYPEREF, type->md.ref), buf + 1 );
+@@ -1834,6 +2109,33 @@ static UINT make_type_sig( const type_t
+         buf[len++] = map_basic_type( type_basic_get_type(type), type_basic_get_sign(type) );
+         break;
+ 
++#ifdef __REACTOS__
++    case TYPE_PARAMETER:
++        buf[len++] = ELEMENT_TYPE_VAR;
++        len += encode_int( generic_param_index( type ), buf + len );
++        break;
++
++    case TYPE_PARAMETERIZED_TYPE:
++    {
++        const type_t *tmpl = type->details.parameterized.type;
++        const typeref_t *arg;
++
++        if (!is_generic_partial( type ) || !tmpl->md.ref)
++        {
++            fprintf( stderr, "warning: generic %s used without its arguments, using System.Object\n", type->name );
++            buf[len++] = ELEMENT_TYPE_OBJECT;
++            break;
++        }
++        buf[len++] = ELEMENT_TYPE_GENERICINST;
++        buf[len++] = ELEMENT_TYPE_CLASS;
++        len += encode_int( typedef_or_ref( TABLE_TYPEREF, tmpl->md.ref ), buf + len );
++        len += encode_int( list_count( type->details.parameterized.params ), buf + len );
++        LIST_FOR_EACH_ENTRY( arg, type->details.parameterized.params, const typeref_t, entry )
++            len += make_type_sig( arg->type, buf + len );
++        break;
++    }
++#endif
++
+     default:
+         fprintf( stderr, "Unhandled type %u.\n", type_get_type( type ) );
+         exit( 1 );
+@@ -2051,6 +2353,9 @@ static void add_version_attr_step1( cons
+     attr_t *attr;
+ 
+     if (!(attr = get_attr( type->attrs, ATTR_VERSION )) && is_attr( type->attrs, ATTR_CONTRACT )) return;
++#ifdef __REACTOS__
++    if (!attr) return; /* neither a version nor a contract (asyncinfo.idl) */
++#endif
+ 
+     assemblyref = add_assemblyref_row( 0x200, 0, add_string("Windows.Foundation") );
+     scope = resolution_scope( TABLE_ASSEMBLYREF, assemblyref );
+@@ -2067,6 +2372,9 @@ static void add_version_attr_step2( cons
+     const attr_t *attr;
+ 
+     if (!(attr = get_attr( type->attrs, ATTR_VERSION )) && is_attr( type->attrs, ATTR_CONTRACT )) return;
++#ifdef __REACTOS__
++    if (!attr) return; /* neither a version nor a contract (asyncinfo.idl) */
++#endif
+ 
+     parent = has_customattribute( TABLE_TYPEDEF, type->md.def );
+     attr_type = customattribute_type( TABLE_MEMBERREF, attr->md_member );
+@@ -2556,6 +2864,10 @@ static UINT get_method_attrs( const type
+     return attrs;
+ }
+ 
++#ifdef __REACTOS__
++static void add_property( type_t *class, type_t *iface, const var_t *method );
++#endif
++
+ static void add_propget_method( const type_t *class, const type_t *iface, const var_t *method )
+ {
+     UINT sig_size, property, paramlist, flags, attrs = get_method_attrs( class, iface, method, &flags );
+@@ -2600,6 +2912,13 @@ static void add_propput_method( const ty
+     type->md.def = add_methoddef_row( flags, attrs, add_string(name), add_blob(sig, sig_size), paramlist );
+     free( name );
+ 
++#ifdef __REACTOS__
++    /* a propput ahead of its propget (Windows.Foundation.Collections): the property first, the getter
++       follows in its own place with it */
++    if (!(class ? propget->declspec.type->md.class_property : propget->declspec.type->md.iface_property))
++        add_property( (type_t *)class, (type_t *)iface, propget );
++#endif
++
+     /* add propget method first if not already added */
+     if (class)
+     {
+@@ -2696,6 +3015,9 @@ static void add_property( type_t *class,
+     BYTE sig[256];
+ 
+     if (!is_attr( method->attrs, ATTR_PROPGET )) return;
++#ifdef __REACTOS__
++    if (class ? type->md.class_property : type->md.iface_property) return; /* added by its propput */
++#endif
+ 
+     sig_size = make_property_sig( method, sig, is_static_iface(class, iface) );
+     if (class)
+@@ -2723,7 +3045,11 @@ static void add_event( type_t *class, ty
+         type_t *arg_type = arg->declspec.type;
+ 
+         arg_type = type_pointer_get_ref_type( arg_type ); /* first arg must be a delegate pointer */
++#ifdef __REACTOS__
++        event_type = type_token( arg_type );
++#else
+         event_type = typedef_or_ref( TABLE_TYPEREF, arg_type->md.ref );
++#endif
+         break;
+     }
+ 
+@@ -2763,7 +3089,11 @@ static void add_interface_type_step2( ty
+ 
+     if (require_list) LIST_FOR_EACH_ENTRY( require, require_list, typeref_t, entry )
+     {
++#ifdef __REACTOS__
++        interface = type_token( require->type );
++#else
+         interface = typedef_or_ref( TABLE_TYPEREF, require->type->md.ref );
++#endif
+         add_interfaceimpl_row( type->md.def, interface );
+     }
+ 
+@@ -2912,7 +3242,11 @@ static void add_method_impl( const type_
+     type_t *type = method->declspec.type;
+     BYTE sig[256];
+ 
++#ifdef __REACTOS__
++    parent = type_parent_token( iface );
++#else
+     parent = memberref_parent( TABLE_TYPEREF, iface->md.ref );
++#endif
+     sig_size = make_method_sig( method, sig, FALSE );
+ 
+     memberref = add_memberref_row( parent, add_string(name), add_blob(sig, sig_size) );
+@@ -2930,6 +3264,11 @@ static void add_method_contract_attrs( c
+     BYTE value[MAX_NAME + sizeof(UINT) + 5];
+     const attr_t *attr = get_attr( iface->attrs, ATTR_CONTRACT );
+ 
++#ifdef __REACTOS__
++    /* a parameterized interface instance has no contract of its own: use the class's */
++    if (!attr || !attr->md_member) attr = get_attr( class->attrs, ATTR_CONTRACT );
++    if (!attr || !attr->md_member) return;
++#endif
+     parent = has_customattribute( TABLE_METHODDEF, method->md.def );
+     attr_type = customattribute_type( TABLE_MEMBERREF, attr->md_member );
+     value_size = make_contract_value( get_attr(class->attrs, ATTR_CONTRACT), value );
+@@ -3322,7 +3661,11 @@ static void add_member_interfaces( type_
+ 
+         create_typeref( iface->type );
+ 
++#ifdef __REACTOS__
++        interface = type_token( iface->type );
++#else
+         interface = typedef_or_ref( TABLE_TYPEREF, iface->type->md.ref );
++#endif
+         interfaceimpl_ref = add_interfaceimpl_row( class->md.def, interface );
+ 
+         if (is_attr( iface->attrs, ATTR_DEFAULT )) add_default_attr( interfaceimpl_ref );
+@@ -3593,6 +3936,217 @@ static void add_delegate_type_step2( typ
+     add_contract_attr_step2( type );
+ }
+ 
++#ifdef __REACTOS__
++/* A generic interface or delegate (IAsyncOperation`1): a TypeDef with GenericParam rows whose
++   methods use VAR for the type parameters. */
++static void add_generic_type_step1( type_t *type )
++{
++    type_t *inner = type->details.parameterized.type;
++    const statement_t *stmt;
++    const typeref_t *require;
++
++    create_typeref( type );
++    add_contract_attr_step1( type );
++    add_uuid_attr_step1( type );
++
++    if (inner->type_type == TYPE_DELEGATE)
++    {
++        UINT scope = resolution_scope( TABLE_ASSEMBLYREF, MSCORLIB_ROW );
++        UINT typeref = add_typeref_row( scope, add_string("MulticastDelegate"), add_string("System") );
++
++        type->md.extends = typedef_or_ref( TABLE_TYPEREF, typeref );
++        STATEMENTS_FOR_EACH_FUNC( stmt, type_iface_get_stmts(type_delegate_get_iface( inner )) )
++            add_method_params_step1( stmt->u.var );
++        return;
++    }
++
++    if (inner->details.iface->requires)
++        LIST_FOR_EACH_ENTRY( require, inner->details.iface->requires, const typeref_t, entry )
++            create_typeref( require->type );
++
++    STATEMENTS_FOR_EACH_FUNC( stmt, type_iface_get_stmts(inner) )
++    {
++        const var_t *method = stmt->u.var;
++
++        add_method_params_step1( method );
++        add_overload_attr_step1( method );
++        add_default_overload_attr_step1( method );
++        add_deprecated_attr_step1( method );
++    }
++}
++
++static void add_generic_params( const type_t *type )
++{
++    const typeref_t *param;
++    UINT number = 0;
++
++    LIST_FOR_EACH_ENTRY( param, type->details.parameterized.params, const typeref_t, entry )
++        add_genericparam_row( number++, type->md.def << 1, add_string(param->type->name) );
++}
++
++static void add_generic_type_step2( type_t *type )
++{
++    type_t *inner = type->details.parameterized.type;
++    const statement_t *stmt;
++    const typeref_t *require;
++
++    current_generic_params = type->details.parameterized.params;
++
++    if (inner->type_type == TYPE_DELEGATE)
++    {
++        static const BYTE sig_ctor[] = { SIG_TYPE_HASTHIS, 2, ELEMENT_TYPE_VOID, ELEMENT_TYPE_OBJECT, ELEMENT_TYPE_I };
++        UINT methoddef, flags, paramlist;
++
++        flags = METHOD_ATTR_RTSPECIALNAME | METHOD_ATTR_SPECIALNAME | METHOD_ATTR_HIDEBYSIG | METHOD_ATTR_PRIVATE;
++        methoddef = add_methoddef_row( METHOD_IMPL_RUNTIME, flags, add_string(".ctor"),
++                                       add_blob(sig_ctor, sizeof(sig_ctor)), 0 );
++        add_param_row( 0, 1, add_string("object") );
++        add_param_row( 0, 2, add_string("method") );
++
++        flags = METHOD_ATTR_SPECIALNAME | METHOD_ATTR_HIDEBYSIG | METHOD_ATTR_PUBLIC | METHOD_ATTR_VIRTUAL |
++                METHOD_ATTR_NEWSLOT;
++        STATEMENTS_FOR_EACH_FUNC( stmt, type_iface_get_stmts(type_delegate_get_iface( inner )) )
++        {
++            const var_t *method = stmt->u.var;
++            BYTE sig[256];
++            UINT sig_size = make_method_sig( method, sig, FALSE );
++
++            paramlist = add_method_params_step2( type_function_get_args(method->declspec.type) );
++            add_methoddef_row( METHOD_IMPL_RUNTIME, flags, add_string("Invoke"), add_blob(sig, sig_size), paramlist );
++            break;
++        }
++        type->md.def = add_typedef_row( TYPE_ATTR_PUBLIC | TYPE_ATTR_SEALED | TYPE_ATTR_UNKNOWN, type->md.name,
++                                        type->md.namespace, type->md.extends, 0, methoddef );
++        add_generic_params( type );
++    }
++    else
++    {
++        type->md.def = add_typedef_row( TYPE_ATTR_INTERFACE | TYPE_ATTR_ABSTRACT | TYPE_ATTR_UNKNOWN | TYPE_ATTR_PUBLIC,
++                                        type->md.name, type->md.namespace, 0, 0, 0 );
++        inner->md.def = type->md.def;
++        add_generic_params( type );
++
++        if (inner->details.iface->requires)
++            LIST_FOR_EACH_ENTRY( require, inner->details.iface->requires, const typeref_t, entry )
++                add_interfaceimpl_row( type->md.def, type_token( require->type ) );
++
++        STATEMENTS_FOR_EACH_FUNC( stmt, type_iface_get_stmts(inner) )
++        {
++            const var_t *method = stmt->u.var;
++
++            add_property( NULL, inner, method );
++            add_event( NULL, inner, method );
++            add_method( NULL, inner, method );
++
++            add_deprecated_attr_step2( method );
++            add_default_overload_attr_step2( method );
++            add_overload_attr_step2( method );
++        }
++    }
++
++    add_uuid_attr_step2( type );
++    add_contract_attr_step2( type );
++    current_generic_params = NULL;
++}
++
++void record_import_statements( const char *name, statement_list_t *stmts )
++{
++    if (!stmts) return;
++    import_stmts = xrealloc( import_stmts, (import_stmts_count + 1) * sizeof(*import_stmts) );
++    import_stmts[import_stmts_count].name = xstrdup( name );
++    import_stmts[import_stmts_count].stmts = stmts;
++    import_stmts_count++;
++}
++
++/* a type of a merged import, or an old-style typedef'd enum or struct of one (asyncinfo.idl) */
++static type_t *merged_statement_type( const statement_t *stmt )
++{
++    if (stmt->type == STMT_TYPE) return stmt->u.type;
++    if (stmt->type == STMT_TYPEDEF && stmt->u.type_list)
++    {
++        const typeref_t *ref;
++
++        LIST_FOR_EACH_ENTRY( ref, stmt->u.type_list, const typeref_t, entry )
++        {
++            type_t *type = type_get_real_type( ref->type );
++
++            if ((type->type_type == TYPE_ENUM || type->type_type == TYPE_STRUCT) && type->defined &&
++                !type->md.def && !type->written)
++            {
++                type->written = 1;
++                return type;
++            }
++        }
++    }
++    return NULL;
++}
++
++static void add_merged_imports( int step )
++{
++    UINT i;
++
++    for (i = 0; i < import_stmts_count; i++)
++    {
++        const statement_t *stmt;
++
++        if (!is_merged_import( import_stmts[i].name )) continue;
++
++        LIST_FOR_EACH_ENTRY( stmt, import_stmts[i].stmts, const statement_t, entry )
++        {
++            type_t *type;
++
++            if (step == 2 && stmt->type == STMT_TYPEDEF)
++            {
++                const typeref_t *ref;
++
++                if (stmt->u.type_list) LIST_FOR_EACH_ENTRY( ref, stmt->u.type_list, const typeref_t, entry )
++                {
++                    type = type_get_real_type( ref->type );
++                    if (type->written && !type->md.def)
++                    {
++                        if (type->type_type == TYPE_ENUM) add_enum_type_step2( type );
++                        else add_struct_type_step2( type );
++                    }
++                }
++                continue;
++            }
++            if (!(type = merged_statement_type( stmt ))) continue;
++
++            switch (type->type_type)
++            {
++            case TYPE_ENUM:
++                if (step == 1) { type->written = 1; add_enum_type_step1( type ); }
++                else if (!type->md.def) add_enum_type_step2( type );
++                break;
++            case TYPE_STRUCT:
++                if (step == 1) { type->written = 1; add_struct_type_step1( type ); }
++                else if (!type->md.def) add_struct_type_step2( type );
++                break;
++            case TYPE_INTERFACE:
++                if (type->signature && !strncmp( type->signature, "pinterface", 10 )) break;
++                if (step == 1) add_interface_type_step1( type ); else add_interface_type_step2( type );
++                break;
++            case TYPE_APICONTRACT:
++                if (step == 1) add_apicontract_type_step1( type ); else add_apicontract_type_step2( type );
++                break;
++            case TYPE_RUNTIMECLASS:
++                if (step == 1) add_runtimeclass_type_step1( type ); else add_runtimeclass_type_step2( type );
++                break;
++            case TYPE_DELEGATE:
++                if (step == 1) add_delegate_type_step1( type ); else add_delegate_type_step2( type );
++                break;
++            case TYPE_PARAMETERIZED_TYPE:
++                if (!is_generic_template( type ) || !type->defined) break;
++                if (step == 1) add_generic_type_step1( type ); else add_generic_type_step2( type );
++                break;
++            default:
++                break;
++            }
++        }
++    }
++}
++#endif
++
+ static void build_tables( const statement_list_t *stmt_list )
+ {
+     const statement_t *stmt;
+@@ -3600,11 +4154,19 @@ static void build_tables( const statemen
+     /* Adding a type involves two passes: the first creates various references and the second
+        uses those references to create the remaining rows. */
+ 
++#ifdef __REACTOS__
++    LIST_FOR_EACH_ENTRY( stmt, stmt_list, const statement_t, entry )
++        if (stmt->type == STMT_IMPORT && !is_merged_import( stmt->u.str )) append_import( stmt->u.str );
++    add_merged_imports( 1 );
++#endif
++
+     LIST_FOR_EACH_ENTRY( stmt, stmt_list, const statement_t, entry )
+     {
+         type_t *type = stmt->u.type;
+ 
++#ifndef __REACTOS__
+         if (stmt->type == STMT_IMPORT) append_import( stmt->u.str );
++#endif
+ 
+         if (stmt->type != STMT_TYPE) continue;
+ 
+@@ -3633,12 +4195,21 @@ static void build_tables( const statemen
+         case TYPE_DELEGATE:
+             add_delegate_type_step1( type );
+             break;
++#ifdef __REACTOS__
++        case TYPE_PARAMETERIZED_TYPE:
++            if (is_generic_template( type )) add_generic_type_step1( type );
++            break;
++#endif
+         default:
+             fprintf( stderr, "Unhandled type %u name '%s'.\n", type->type_type, type->name );
+             break;
+         }
+     }
+ 
++#ifdef __REACTOS__
++    add_merged_imports( 2 );
++#endif
++
+     LIST_FOR_EACH_ENTRY( stmt, stmt_list, const statement_t, entry )
+     {
+         type_t *type = stmt->u.type;
+@@ -3670,6 +4241,11 @@ static void build_tables( const statemen
+         case TYPE_DELEGATE:
+             add_delegate_type_step2( type );
+             break;
++#ifdef __REACTOS__
++        case TYPE_PARAMETERIZED_TYPE:
++            if (is_generic_template( type )) add_generic_type_step2( type );
++            break;
++#endif
+         default:
+             break;
+         }
+@@ -3710,8 +4286,14 @@ static void build_table_stream( void )
+     serialize_property_table();
+     serialize_methodsemantics_table();
+     serialize_methodimpl_table();
++#ifdef __REACTOS__
++    serialize_typespec_table();
++#endif
+     serialize_assembly_table();
+     serialize_assemblyref_table();
++#ifdef __REACTOS__
++    serialize_genericparam_table();
++#endif
+ }
+ 
+ static void build_streams( void )
+@@ -3789,7 +4371,25 @@ static void init_winmd( struct winmd *wi
+ 
+     add_typedef_row( 0, add_string("<Module>"), 0, 0, 1, 1 );
+     add_assembly_row( add_string(winmd->name) );
++#ifdef __REACTOS__
++    {
++        /* The runtime tells modules apart by their MVID: derive a stable one from the module name */
++        struct sha1_context ctx;
++        unsigned int hash[5];
++        GUID mvid;
++
++        sha1_init( &ctx );
++        sha1_update( &ctx, (const char *)&guid, sizeof(guid) );
++        sha1_update( &ctx, winmd->name, strlen(winmd->name) );
++        sha1_finalize( &ctx, hash );
++        memcpy( &mvid, hash, sizeof(mvid) );
++        mvid.Data3 = (mvid.Data3 & 0x0fff) | 0x5000;
++        mvid.Data4[0] = (mvid.Data4[0] & 0x3f) | 0x80;
++        add_module_row( add_string(get_basename(metadata_name)), add_guid(&mvid) );
++    }
++#else
+     add_module_row( add_string(get_basename(metadata_name)), add_guid(&guid) );
++#endif
+     add_assemblyref_row( 0, add_blob(mscorlib_token, sizeof(mscorlib_token)), add_string("mscorlib") );
+ }
+ 
+diff -pudN wine-patched/tools/widl/parser.y reactos/sdk/tools/widl/parser.y
+--- wine-patched/tools/widl/parser.y
++++ reactos/sdk/tools/widl/parser.y
+@@ -378,7 +378,9 @@ input: gbl_statements m_acf			{ $1 = app
+ 						  write_client($1);
+ 						  write_server($1);
+ 						  write_regscript($1);
++#ifndef __REACTOS__
+ 						  write_typelib_regscript($1);
++#endif
+ 						  write_dlldata($1);
+ 						  write_local_stubs($1);
+ 						  write_metadata($1);
+@@ -521,21 +523,40 @@ cppquote: tCPPQUOTE '(' aSTRING ')'		{ $
+ 
+ import_start: tIMPORT aSTRING ';'		{ $$ = $2; push_import( $2, &yylloc ); }
+ 	;
+-import: import_start imp_statements aEOF	{ yylloc = pop_import(); }
++import: import_start imp_statements aEOF	{ yylloc = pop_import();
++/* ifdef __REACTOS__ */
++						  record_import_statements( $1, $2 );
++/* endif __REACTOS__ */
++						}
+ 	;
+ 
+ importlib: tIMPORTLIB '(' aSTRING ')'
++/* ifdef __REACTOS__ */
++	   semicolon_opt			{ $$ = $3; if(!parse_only) add_importlib($3); }
++/* else
+ 	   semicolon_opt			{ $$ = $3; if(!parse_only) add_importlib($3, current_typelib); }
++*/
+ 	;
+ 
+ libraryhdr: tLIBRARY typename			{ $$ = $2; }
+ 	;
+ library_start: attributes libraryhdr '{'	{ $$ = make_library($2, check_library_attrs($2, $1));
++/* ifdef __REACTOS__ */
++						  if (!parse_only) start_typelib($$);
++/* else
+ 						  if (!parse_only && do_typelib) current_typelib = $$;
++*/
+ 						}
+ 	;
+ librarydef: library_start imp_statements '}'
++/* ifdef __REACTOS__ */
++	    semicolon_opt			{ $$ = $1;
++						  $$->stmts = $2;
++						  if (!parse_only) end_typelib();
++						}
++/* else
+ 	    semicolon_opt			{ $$ = $1; $$->stmts = $2; }
++*/
+ 	;
+ 
+ m_args
+@@ -2157,6 +2178,14 @@ static type_t *reg_typedefs( struct loca
          type->attrs = attrs;
    }
  
-+#ifdef __REACTOS__
++#ifdef __REACTOS__ /* r53187 / 5bf224e */
 +  /* Append the SWITCHTYPE attribute to a non-encapsulated union if it does not already have it.  */
 +  if (type_get_type_detect_alias(type) == TYPE_UNION &&
 +      is_attr(attrs, ATTR_SWITCHTYPE) &&
 +      !is_attr(type->attrs, ATTR_SWITCHTYPE))
-+    type->attrs = append_attr(type->attrs, make_attrp(ATTR_SWITCHTYPE, get_attrp(attrs, ATTR_SWITCHTYPE)));
++    type->attrs = append_attr(type->attrs, attr_ptr( where, ATTR_SWITCHTYPE, get_attrp(attrs, ATTR_SWITCHTYPE) ));
 +#endif
 +
-   LIST_FOR_EACH_ENTRY( decl, decls, const declarator_t, entry )
+   LIST_FOR_EACH_ENTRY( decl, decls, declarator_t, entry )
    {
  
-diff -pudN e:\wine-patched\tools\widl/proxy.c e:\reactos-sync-clean\tools\widl/proxy.c
---- e:\wine-patched\tools\widl/proxy.c	2015-02-22 13:23:48 +0100
-+++ e:\reactos-sync-clean\tools\widl/proxy.c	2015-11-16 20:04:15 +0100
-@@ -87,7 +87,13 @@ static void init_proxy(const statement_l
+diff -pudN wine-patched/tools/widl/proxy.c reactos/sdk/tools/widl/proxy.c
+--- wine-patched/tools/widl/proxy.c
++++ reactos/sdk/tools/widl/proxy.c
+@@ -83,7 +83,15 @@ static void init_proxy(const statement_l
      error("Could not open %s for output\n", proxy_name);
    print_proxy( "/*** Autogenerated by WIDL %s from %s - Do not edit ***/\n", PACKAGE_VERSION, input_name);
    print_proxy( "\n");
--  print_proxy( "#define __midl_proxy\n");
++#ifdef __REACTOS__
 +  print_proxy( "#define __midl_proxy\n\n");
-+
 +  print_proxy( "#ifdef __REACTOS__\n");
 +  print_proxy( "#define WIN32_NO_STATUS\n");
 +  print_proxy( "#define WIN32_LEAN_AND_MEAN\n");
 +  print_proxy( "#endif\n\n");
-+
++#else
+   print_proxy( "#define __midl_proxy\n");
++#endif
    print_proxy( "#include \"objbase.h\"\n");
    print_proxy( "\n");
-   print_proxy( "#ifndef DECLSPEC_HIDDEN\n");
-@@ -476,14 +482,15 @@ static const statement_t * get_callas_so
+ }
+@@ -475,14 +483,19 @@ const statement_t *get_callas_source(con
    return NULL;
  }
  
--static void write_proxy_procformatstring_offsets( const type_t *iface, int skip )
++#ifdef __REACTOS__ /* r57019 / c3be8a3 */
 +static int write_proxy_procformatstring_offsets( const type_t *iface, int skip )
++#else
+ static void write_proxy_procformatstring_offsets( const type_t *iface, int skip )
++#endif
  {
      const statement_t *stmt;
 +    int i = 0;
@@ -120,127 +1009,507 @@ diff -pudN e:\wine-patched\tools\widl/proxy.c e:\reactos-sync-clean\tools\widl/p
  
      STATEMENTS_FOR_EACH_FUNC( stmt, type_iface_get_stmts(iface) )
      {
-@@ -503,7 +510,9 @@ static void write_proxy_procformatstring
+@@ -502,7 +515,11 @@ static void write_proxy_procformatstring
              print_proxy( "(unsigned short)-1,  /* %s::%s */\n", iface->name, get_name(func));
          else
              print_proxy( "%u,  /* %s::%s */\n", func->procstring_offset, iface->name, get_name(func));
 +        i++;
      }
++#ifdef __REACTOS__ /* r57019 / c3be8a3 */
 +    return i;
++#endif
  }
  
  static int write_proxy_methods(type_t *iface, int skip)
-@@ -636,7 +645,10 @@ static void write_proxy(type_t *iface, u
+@@ -635,7 +652,14 @@ static void write_proxy(type_t *iface, u
    print_proxy( "static const unsigned short %s_FormatStringOffsetTable[] =\n", iface->name );
    print_proxy( "{\n" );
    indent++;
--  write_proxy_procformatstring_offsets( iface, 0 );
++#ifdef __REACTOS__ /* r57019 / c3be8a3 */
 +  if (write_proxy_procformatstring_offsets( iface, 0 ) == 0)
 +  {
 +      print_proxy( "0\n" );
 +  }
++#else
+   write_proxy_procformatstring_offsets( iface, 0 );
++#endif
    indent--;
    print_proxy( "};\n\n" );
  
-@@ -710,7 +722,10 @@ static void write_proxy(type_t *iface, u
+@@ -710,7 +734,14 @@ static void write_proxy(type_t *iface, u
        print_proxy( "static const PRPC_STUB_FUNCTION %s_table[] =\n", iface->name);
        print_proxy( "{\n");
        indent++;
--      write_stub_methods(iface, FALSE);
++#ifdef __REACTOS__ /* r57019 / c3be8a3 */
 +      if (write_stub_methods(iface, FALSE) == 0)
 +      {
 +          fprintf(proxy, "0");
 +      }
++#else
+       write_stub_methods(iface, FALSE);
++#endif
        fprintf(proxy, "\n");
        indent--;
        fprintf(proxy, "};\n\n");
-diff -pudN e:\wine-patched\tools\widl/typegen.c e:\reactos-sync-clean\tools\widl/typegen.c
---- e:\wine-patched\tools\widl/typegen.c	2015-10-30 18:41:54 +0100
-+++ e:\reactos-sync-clean\tools\widl/typegen.c	2015-11-16 20:04:16 +0100
-@@ -4747,7 +4747,7 @@ void write_func_param_struct( FILE *file
-         if (align >= pointer_size)
-             fprintf( file, "%s;\n", arg->name );
-         else
--            fprintf( file, "%s DECLSPEC_ALIGN(%u);\n", arg->name, pointer_size );
-+            fprintf( file, "DECLSPEC_ALIGN(%u) %s;\n", pointer_size, arg->name );
-     }
-     if (add_retval && !is_void( retval->type ))
+diff -pudN wine-patched/tools/widl/register.c reactos/sdk/tools/widl/register.c
+--- wine-patched/tools/widl/register.c
++++ reactos/sdk/tools/widl/register.c
+@@ -164,7 +164,7 @@ static int write_coclass( const type_t *
      {
-diff -pudN e:\wine-patched\tools\widl/typelib.c e:\reactos-sync-clean\tools\widl/typelib.c
---- e:\wine-patched\tools\widl/typelib.c	2015-10-30 18:41:54 +0100
-+++ e:\reactos-sync-clean\tools\widl/typelib.c	2015-11-16 20:04:16 +0100
-@@ -32,9 +32,7 @@
- #include <string.h>
+         const struct uuid *typelib_uuid = get_attrp( typelib->attrs, ATTR_UUID );
+         put_str( indent, "TypeLib = s '%s'\n", format_uuid( typelib_uuid ));
+-        if (!(major && minor))
++        if (!(major || minor))
+             get_version( typelib->attrs, &major, &minor );
+     }
+     if (major || minor) put_str( indent, "Version = s '%u.%u'\n", major, minor );
+diff -pudN wine-patched/tools/widl/typelib.c reactos/sdk/tools/widl/typelib.c
+--- wine-patched/tools/widl/typelib.c
++++ reactos/sdk/tools/widl/typelib.c
+@@ -28,9 +28,17 @@
  #include <ctype.h>
  
--#include "windef.h"
--#include "winbase.h"
--
+ #include "widl.h"
++#ifdef __REACTOS__
 +#include <typedefs.h>
++#include <pecoff.h>
++#ifndef RTL_IMAGE_MAX_DOS_HEADER
++#define RTL_IMAGE_MAX_DOS_HEADER (256 * 1024 * 1024)
++#endif
++#else
+ #include "windef.h"
+ #include "winbase.h"
+ #include "winternl.h"
++#endif
+ #include "utils.h"
+ #include "wpp_private.h"
+ #include "parser.h"
+@@ -40,6 +48,9 @@
+ #include "typelib_struct.h"
+ #include "typetree.h"
+ 
++#ifdef __REACTOS__
++static typelib_t *typelib;
++#endif
+ 
+ /* List of oleauto types that should be recognized by name.
+  * (most of) these seem to be intrinsic types in mktyplib.
+@@ -240,6 +251,21 @@ unsigned short get_type_vt(type_t *t)
+   return 0;
+ }
+ 
++#ifdef __REACTOS__
++void start_typelib(typelib_t *typelib_type)
++{
++    if (!do_typelib) return;
++    typelib = typelib_type;
++}
++
++void end_typelib(void)
++{
++    if (!typelib) return;
++
++    create_msft_typelib(typelib);
++}
++#endif
++
+ static void msft_read_guid(void *data, MSFT_SegDir *segdir, int offset, struct uuid *guid)
+ {
+     memcpy( guid, (char *)data + segdir->pGuidTab.offset + offset, sizeof(*guid) );
+@@ -297,6 +323,9 @@ static unsigned int rva_to_va( const IMA
+         if (sec->VirtualAddress <= rva && sec->VirtualAddress + sec->Misc.VirtualSize > rva)
+             return sec->PointerToRawData + (rva - sec->VirtualAddress);
+     error( "no PE section found for addr %x\n", rva );
++#ifdef __REACTOS__
++    return 0;
++#endif
+ }
+ 
+ static void read_pe_importlib(importlib_t *importlib, void *data, unsigned int size)
+@@ -381,7 +410,11 @@ static void read_importlib(importlib_t *
+     free( data );
+ }
+ 
++#ifdef __REACTOS__
++void add_importlib(const char *name)
++#else
+ void add_importlib(const char *name, typelib_t *typelib)
++#endif
+ {
+     importlib_t *importlib;
+ 
+diff -pudN wine-patched/tools/widl/typelib.h reactos/sdk/tools/widl/typelib.h
+--- wine-patched/tools/widl/typelib.h
++++ reactos/sdk/tools/widl/typelib.h
+@@ -21,7 +21,13 @@
+ #ifndef __WIDL_TYPELIB_H
+ #define __WIDL_TYPELIB_H
+ 
++#ifdef __REACTOS__
++extern void start_typelib(typelib_t *typelib_type);
++extern void end_typelib(void);
++extern void add_importlib(const char *name);
++#else
+ extern void add_importlib(const char *name, typelib_t *typelib);
++#endif
+ 
+ /* Copied from wtypes.h. Not included directly because that would create a
+  * circular dependency (after all, wtypes.h is generated by widl...) */
+diff -pudN wine-patched/tools/widl/typetree.c reactos/sdk/tools/widl/typetree.c
+--- wine-patched/tools/widl/typetree.c
++++ reactos/sdk/tools/widl/typetree.c
+@@ -23,6 +23,9 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#ifdef __REACTOS__
++#include <stddef.h>
++#endif
+ 
  #include "widl.h"
  #include "utils.h"
- #include "parser.h"
-diff -pudN e:\wine-patched\tools\widl/widl.c e:\reactos-sync-clean\tools\widl/widl.c
---- e:\wine-patched\tools\widl/widl.c	2015-10-30 18:41:54 +0100
-+++ e:\reactos-sync-clean\tools\widl/widl.c	2015-11-16 20:04:16 +0100
-@@ -364,6 +364,12 @@ static void write_dlldata_list(struct li
+@@ -56,6 +59,10 @@ type_t *make_type(enum type_type type)
+     t->param_name = NULL;
+     t->short_name = NULL;
+     t->winmd_short_name = NULL;
++#ifdef __REACTOS__
++    t->param_tmpl = NULL;
++    t->param_args = NULL;
++#endif
+     memset(&t->details, 0, sizeof(t->details));
+     memset(&t->md, 0, sizeof(t->md));
+     t->typestring_offset = 0;
+@@ -1277,6 +1284,9 @@ type_t *type_delegate_define(type_t *del
+     iface->details.iface->disp_inherit = NULL;
+     iface->details.iface->async_iface = NULL;
+     iface->details.iface->requires = NULL;
++#ifdef __REACTOS__
++    iface->details.iface->runtime_class = NULL;
++#endif
+     define_type(iface, where);
+     iface->defined = TRUE;
+     compute_method_indexes(iface);
+@@ -1320,6 +1330,9 @@ type_t *type_parameterized_interface_def
+     iface->details.iface->disp_inherit = NULL;
+     iface->details.iface->async_iface = NULL;
+     iface->details.iface->requires = requires;
++#ifdef __REACTOS__
++    iface->details.iface->runtime_class = NULL;
++#endif
+ 
+     iface->name = type->name;
+ 
+@@ -1359,6 +1372,9 @@ type_t *type_parameterized_delegate_defi
+     iface->details.iface->disp_inherit = NULL;
+     iface->details.iface->async_iface = NULL;
+     iface->details.iface->requires = NULL;
++#ifdef __REACTOS__
++    iface->details.iface->runtime_class = NULL;
++#endif
+ 
+     delegate->name = type->name;
+     compute_delegate_iface_names(delegate, type, type->details.parameterized.params);
+@@ -1550,6 +1566,9 @@ static void type_parameterized_interface
+     iface->details.iface->disp_inherit = NULL;
+     iface->details.iface->async_iface = NULL;
+     iface->details.iface->requires = NULL;
++#ifdef __REACTOS__
++    iface->details.iface->runtime_class = NULL;
++#endif
+ }
+ 
+ static void type_parameterized_delegate_specialize(type_t *tmpl, type_t *delegate, typeref_list_t *orig, typeref_list_t *repl)
+@@ -1569,6 +1588,10 @@ type_t *type_parameterized_type_speciali
+     new_type->short_name = format_parameterized_type_short_name(type, params, "");
+     new_type->param_name = format_parameterized_type_c_name(type, params, "", "__C");
+     new_type->winmd_short_name = format_parameterized_type_winmd_short_name(type, params);
++#ifdef __REACTOS__
++    new_type->param_tmpl = type;
++    new_type->param_args = params;
++#endif
+ 
+     if (new_type->type_type == TYPE_DELEGATE)
+     {
+diff -pudN wine-patched/tools/widl/typetree.h reactos/sdk/tools/widl/typetree.h
+--- wine-patched/tools/widl/typetree.h
++++ reactos/sdk/tools/widl/typetree.h
+@@ -418,6 +418,10 @@ static inline type_t *type_runtimeclass_
+ 
+     if (!check) return NULL;
+     error_at( &type->where, "runtimeclass %s needs a default interface\n", type->name );
++
++#ifdef __REACTOS__
++    return NULL;
++#endif
+ }
+ 
+ static inline type_t *type_delegate_get_iface(const type_t *type)
+diff -pudN wine-patched/tools/widl/widl.c reactos/sdk/tools/widl/widl.c
+--- wine-patched/tools/widl/widl.c
++++ reactos/sdk/tools/widl/widl.c
+@@ -77,6 +77,10 @@ static const char usage[] =
+ "   -W                 Enable pedantic warnings\n"
+ "   --win32, --win64   Set the target architecture (Win32 or Win64)\n"
+ "   --winmd            Generate metadata (implies --winrt)\n"
++#ifdef __REACTOS__
++"   --winmd-merge=file Also write the types that the imported IDL file defines\n"
++#endif
++
+ "   --winrt            Enable Windows Runtime mode\n"
+ "Debug level 'n' is a bitmask with following meaning:\n"
+ "    * 0x01 Tell which resource is parsed (verbose mode)\n"
+@@ -123,6 +127,9 @@ char *local_stubs_name;
+ char *header_token;
+ char *typelib_name;
+ char *metadata_name;
++#ifdef __REACTOS__
++struct strarray winmd_merge;
++#endif
+ char *dlldata_name;
+ char *proxy_name;
+ char *proxy_token;
+@@ -172,6 +179,9 @@ enum {
+     WIN32_OPTION,
+     WIN64_OPTION,
+     WINMD_OPTION,
++#ifdef __REACTOS__
++    WINMD_MERGE_OPTION,
++#endif
+ };
+ 
+ static const char short_options[] =
+@@ -200,6 +210,9 @@ static const struct long_option long_opt
+     { "win32", 0, WIN32_OPTION },
+     { "win64", 0, WIN64_OPTION },
+     { "winmd", 0, WINMD_OPTION },
++#ifdef __REACTOS__
++    { "winmd-merge", 1, WINMD_MERGE_OPTION },
++#endif
+     { NULL }
+ };
+ 
+@@ -297,6 +310,14 @@ static void write_dlldata_list( struct s
    fprintf(dlldata, "- Do not edit ***/\n\n");
    if (define_proxy_delegation)
        fprintf(dlldata, "#define PROXY_DELEGATION\n");
 +
++#ifdef __REACTOS__
 +  fprintf(dlldata, "#ifdef __REACTOS__\n");
 +  fprintf(dlldata, "#define WIN32_NO_STATUS\n");
 +  fprintf(dlldata, "#define WIN32_LEAN_AND_MEAN\n");
 +  fprintf(dlldata, "#endif\n\n");
++#endif
 +
    fprintf(dlldata, "#include <objbase.h>\n");
    fprintf(dlldata, "#include <rpcproxy.h>\n\n");
    start_cplusplus_guard(dlldata);
-@@ -504,6 +510,12 @@ void write_id_data(const statement_list_
+@@ -435,6 +456,12 @@ void write_id_data(const statement_list_
  
    fprintf(idfile, "/*** Autogenerated by WIDL %s ", PACKAGE_VERSION);
-   fprintf(idfile, "from %s - Do not edit ***/\n\n", input_idl_name);
-+
+   fprintf(idfile, "from %s - Do not edit ***/\n\n", idl_name);
++#ifdef __REACTOS__
 +  fprintf(idfile, "#ifdef __REACTOS__\n");
 +  fprintf(idfile, "#define WIN32_NO_STATUS\n");
 +  fprintf(idfile, "#define WIN32_LEAN_AND_MEAN\n");
 +  fprintf(idfile, "#endif\n\n");
-+
++#endif
    fprintf(idfile, "#include <rpc.h>\n");
    fprintf(idfile, "#include <rpcndr.h>\n\n");
  
-diff -pudN e:\wine-patched\tools\widl/widltypes.h e:\reactos-sync-clean\tools\widl/widltypes.h
---- e:\wine-patched\tools\widl/widltypes.h	2015-10-30 18:41:54 +0100
-+++ e:\reactos-sync-clean\tools\widl/widltypes.h	2015-11-16 20:04:16 +0100
-@@ -21,6 +21,15 @@
- #ifndef __WIDL_WIDLTYPES_H
- #define __WIDL_WIDLTYPES_H
+@@ -527,6 +554,11 @@ static void option_callback( int optc, c
+       winrt_mode = 1;
+       do_metadata = 1;
+       break;
++#ifdef __REACTOS__
++    case WINMD_MERGE_OPTION:
++      strarray_add( &winmd_merge, xstrdup( optarg ) );
++      break;
++#endif
+     case PACKING_OPTION:
+       packing = strtol(optarg, NULL, 0);
+       if(packing != 2 && packing != 4 && packing != 8)
+@@ -643,7 +675,9 @@ static void option_callback( int optc, c
  
-+#define S_OK           0
-+#define S_FALSE        1
-+#define E_OUTOFMEMORY  ((HRESULT)0x8007000EL)
-+#define TYPE_E_IOERROR ((HRESULT)0x80028CA2L)
-+
-+#ifndef max
-+#define max(a, b) ((a) > (b) ? a : b)
+ int open_typelib( const char *name )
+ {
++#ifndef __REACTOS__
+     static const char *default_dirs[] = { LIBDIR "/wine", "/usr/lib/wine", "/usr/local/lib/wine" };
++#endif
+     struct target win_target = { target.cpu, PLATFORM_WINDOWS };
+     const char *pe_dir = get_arch_dir( win_target );
+     int fd;
+@@ -670,6 +704,7 @@ int open_typelib( const char *name )
+         }
+     }
+ 
++#ifndef __REACTOS__
+     if (stdinc)
+     {
+         if (libdir)
+@@ -683,8 +718,14 @@ int open_typelib( const char *name )
+             TRYOPEN( strmake( "%s%s/%s", default_dirs[i], pe_dir, name ));
+         }
+     }
 +#endif
 +
- #include <stdarg.h>
- #include <assert.h>
- #include "guiddef.h"
-diff -pudN e:\wine-patched\tools\widl/write_msft.c e:\reactos-sync-clean\tools\widl/write_msft.c
---- e:\wine-patched\tools\widl/write_msft.c	2015-11-15 19:23:32 +0100
-+++ e:\reactos-sync-clean\tools\widl/write_msft.c	2015-11-16 20:04:16 +0100
-@@ -39,10 +39,8 @@
+     error( "cannot find %s\n", name );
+ #undef TRYOPEN
++
++#ifdef __REACTOS__
++  return 1;
++#endif
+ }
  
- #define NONAMELESSUNION
+ int main(int argc,char *argv[])
+@@ -703,6 +744,7 @@ int main(int argc,char *argv[])
  
--#include "winerror.h"
--#include "windef.h"
--#include "winbase.h"
--#include "winnls.h"
-+#include <typedefs.h>
-+#include <nls.h>
+   files = parse_options( argc, argv, short_options, long_options, 1, option_callback );
+ 
++#ifndef __REACTOS__
+   if (stdinc)
+   {
+       static const char *incl_dirs[] = { INCLUDEDIR, "/usr/include", "/usr/local/include" };
+@@ -719,6 +761,7 @@ int main(int argc,char *argv[])
+           wpp_add_include_path( strmake( "%s%s/wine/windows", sysroot, incl_dirs[i] ));
+       }
+   }
++#endif
+ 
+   if (pointer_size)
+       set_target_ptr_size( &target, pointer_size );
+diff -pudN wine-patched/tools/widl/widl.h reactos/sdk/tools/widl/widl.h
+--- wine-patched/tools/widl/widl.h
++++ reactos/sdk/tools/widl/widl.h
+@@ -60,6 +60,10 @@ extern char *header_token;
+ extern char *local_stubs_name;
+ extern char *typelib_name;
+ extern char *metadata_name;
++#ifdef __REACTOS__
++extern struct strarray winmd_merge;
++extern void record_import_statements( const char *name, statement_list_t *stmts );
++#endif
+ extern char *dlldata_name;
+ extern char *proxy_name;
+ extern char *proxy_token;
+diff -pudN wine-patched/tools/widl/widltypes.h reactos/sdk/tools/widl/widltypes.h
+--- wine-patched/tools/widl/widltypes.h
++++ reactos/sdk/tools/widl/widltypes.h
+@@ -508,6 +508,9 @@ struct metadata
+     unsigned int ref;
+     unsigned int def;
+     unsigned int extends;
++#ifdef __REACTOS__
++    unsigned int spec;      /* TypeSpec row of a generic instance */
++#endif
+     /* get/put methods */
+     unsigned int class_property;
+     unsigned int iface_property;
+@@ -547,6 +550,10 @@ struct _type_t {
+   const char *param_name;         /* used to build c_name of a parameterized type, when used as a parameter */
+   const char *short_name;         /* widl specific short name */
+   const char *winmd_short_name;   /* metadata short name for parameterized type */
++#ifdef __REACTOS__
++  struct _type_t *param_tmpl;     /* generic of a parameterized type instance */
++  typeref_list_t *param_args;     /* type arguments of a parameterized type instance */
++#endif
+   unsigned int typestring_offset;
+   unsigned int ptrdesc;           /* used for complex structs */
+   int typelib_idx;
+diff -pudN wine-patched/tools/widl/write_msft.c reactos/sdk/tools/widl/write_msft.c
+--- wine-patched/tools/widl/write_msft.c
++++ reactos/sdk/tools/widl/write_msft.c
+@@ -2752,6 +2752,9 @@ static void save_all_changes(msft_typeli
+         add_output_to_resources( "TYPELIB", typelib_id );
+         if (strendswith( typelib_name, "_t.res" ))  /* add typelib registration */
+             output_typelib_regscript( typelib->typelib );
++#ifdef __REACTOS__
++        flush_output_resources( typelib_name );
++#endif
+     }
+     else flush_output_buffer( typelib_name );
+ }
+diff -pudN wine-patched/tools/widl/write_sltg.c reactos/sdk/tools/widl/write_sltg.c
+--- wine-patched/tools/widl/write_sltg.c
++++ reactos/sdk/tools/widl/write_sltg.c
+@@ -28,8 +28,14 @@
+ #include <time.h>
  
  #include "widl.h"
++#ifdef __REACTOS__
++#include <typedefs.h>
++#include <nls.h>
++#include <stddef.h>
++#else
+ #include "windef.h"
+ #include "winbase.h"
++#endif
+ 
  #include "typelib.h"
+ #include "typelib_struct.h"
+@@ -37,6 +43,21 @@
+ #include "header.h"
+ #include "typetree.h"
+ 
++#ifdef __REACTOS__
++
++typedef struct _GUID
++{
++#ifdef _MSC_VER
++    unsigned long  Data1;
++#else
++    unsigned int   Data1;
++#endif
++    unsigned short Data2;
++    unsigned short Data3;
++    unsigned char  Data4[ 8 ];
++} GUID;
++#endif
++
+ static const GUID sltg_library_guid = { 0x204ff,0,0,{ 0xc0,0,0,0,0,0,0,0x46 } };
+ 
+ struct sltg_data
+@@ -304,7 +325,11 @@ static void init_library(struct sltg_typ
+     sltg->library.name = add_name(&sltg->name_table, sltg->typelib->name);
+     sltg->library.helpstring = NULL;
+     sltg->library.helpcontext = 0;
++#ifdef __REACTOS__
++    sltg->library.syskind = (pointer_size == 8) ? SYS_WIN64 : SYS_WIN32;
++#else
+     sltg->library.syskind = SYS_WIN32;
++#endif
+     sltg->library.lcid = 0x0409;
+     sltg->library.libflags = 0;
+     sltg->library.version = 0;
+@@ -655,13 +680,21 @@ static int get_element_size(type_t *type
+     case VT_BSTR:
+     case VT_LPSTR:
+     case VT_LPWSTR:
++#ifdef __REACTOS__
++        return pointer_size;
++#else
+         return 4;
++#endif
+ 
+     case VT_VOID:
+         return 0;
+ 
+     case VT_VARIANT:
++#ifdef __REACTOS__
++        return pointer_size == 8 ? 24 : 16;
++#else
+         return 16;
++#endif
+ 
+     case VT_USERDEFINED:
+         return 0;
+@@ -1971,8 +2004,10 @@ int create_sltg_typelib(typelib_t *typel
+     void *library_block;
+     int library_block_size, library_block_index;
+ 
++#ifndef __REACTOS__
+     if (pointer_size != 4)
+         error("Only 32-bit platform is supported\n");
++#endif
+ 
+     sltg.typelib = typelib;
+     sltg.typeinfo_count = 0;

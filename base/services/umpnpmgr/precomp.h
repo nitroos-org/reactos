@@ -31,8 +31,10 @@
 #include <regstr.h>
 #include <userenv.h>
 #include <shlwapi.h>
+#include <sddl.h>
 #include <winsvc_undoc.h>
 #include <pnp_s.h>
+#include <dll/newdevp.h>
 
 
 #define LOGCONF_NAME_BUFFER_SIZE 32
@@ -58,6 +60,7 @@ typedef struct
     DWORD_PTR hRecipient;
     DWORD ulFlags;
     GUID ClassGuid;
+    PSID pOwnerSid;     /* account of the registering caller: only it (or an administrator) may unregister */
 } NOTIFY_ENTRY, *PNOTIFY_ENTRY;
 
 /* event.c */
@@ -71,6 +74,7 @@ PnpEventThread(
 /* install.c */
 
 extern HANDLE hUserToken;
+extern CRITICAL_SECTION UserTokenLock;
 extern HANDLE hInstallEvent;
 extern HANDLE hNoPendingInstalls;
 
