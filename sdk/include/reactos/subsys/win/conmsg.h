@@ -107,6 +107,7 @@ typedef enum _CONSRV_API_NUMBER
 
     ConsolepGetHistory,                     // Added in Vista+
     ConsolepSetHistory,                     // Added in Vista+
+    ConsolepGetScrollback,                  // NitroOS: rows scrolled off the top of a pseudoconsole buffer
     // ConsolepSetCurrentFont,                 // Added in Vista+
     // ConsolepSetScreenBufferInfo,            // Added in Vista+
     // ConsolepClientConnect,                  // Added in Win7
@@ -823,6 +824,29 @@ typedef struct _CONSOLE_SETHISTORYNUMBERCOMMANDS
     BOOLEAN Unicode2;
 } CONSOLE_SETHISTORYNUMBERCOMMANDS, *PCONSOLE_SETHISTORYNUMBERCOMMANDS;
 
+/*
+ * ConsolepGetScrollback: the rows that scrolled off the top of a text-mode screen buffer (a
+ * headless console host keeps the scrollback of its terminal in step). The server keeps the
+ * last rows of a buffer that asked for it with CONSOLE_SCROLLBACK_ENABLE; rows are numbered by
+ * the count of rows scrolled off since the buffer was created.
+ */
+#define CONSOLE_SCROLLBACK_ENABLE   0x00000001  /* in: record rows scrolled off from now on */
+#define CONSOLE_SCROLLBACK_ENABLED  0x00000001  /* out: the buffer records its scrolled rows */
+#define CONSOLE_SCROLLBACK_ROWS     2048        /* rows the server keeps (a power of two) */
+#define CONSOLE_SCROLLBACK_MAX_WIDTH 1024       /* the widest buffer that keeps rows: bounds the memory */
+
+typedef struct _CONSOLE_SCROLLBACK
+{
+    HANDLE ConsoleHandle;
+    HANDLE OutputHandle;
+    ULONGLONG First;        /* in: number of the first row wanted; out: number of the first row returned */
+    ULONGLONG Total;        /* out: rows scrolled off the top so far */
+    ULONG Flags;
+    ULONG Width;            /* in: cells per row the caller expects; out: width of the buffer */
+    ULONG Count;            /* in: rows wanted; out: rows returned */
+    PCHAR_INFO CharInfo;    /* Count * Width cells, in the capture buffer */
+} CONSOLE_SCROLLBACK, *PCONSOLE_SCROLLBACK;
+
 typedef struct _CONSOLE_SETHISTORYMODE
 {
     HANDLE ConsoleHandle;
@@ -1044,6 +1068,7 @@ typedef struct _CONSOLE_API_MESSAGE
         CONSOLE_GETSETHISTORYINFO HistoryInfoRequest;
         CONSOLE_SETHISTORYNUMBERCOMMANDS SetHistoryNumberCommandsRequest;
         CONSOLE_SETHISTORYMODE SetHistoryModeRequest;
+        CONSOLE_SCROLLBACK ScrollbackRequest;
 
         /* Input and Output Code Pages; keyboard */
         CONSOLE_GETINPUTOUTPUTCP GetConsoleCPRequest;

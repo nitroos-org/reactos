@@ -195,6 +195,11 @@ typedef struct _TEXTMODE_SCREEN_BUFFER
     USHORT PopupDefaultAttrib;  /* Default popup char attribute */
 
     CONSOLE_VT_STATE Vt;        /* Virtual terminal output state */
+
+    /* Rows scrolled off the top, kept for a pseudoconsole host (see ConsolepGetScrollback) */
+    PCHAR_INFO ScrollRows;      /* CONSOLE_SCROLLBACK_ROWS rows of ScrollWidth cells (a ring), or NULL */
+    ULONG      ScrollWidth;
+    ULONGLONG  ScrollTotal;     /* Rows scrolled off the top since the buffer exists */
 } TEXTMODE_SCREEN_BUFFER, *PTEXTMODE_SCREEN_BUFFER;
 
 
@@ -396,6 +401,7 @@ do { \
 
 /* conoutput.c */
 PCHAR_INFO ConioCoordToPointer(PTEXTMODE_SCREEN_BUFFER Buff, ULONG X, ULONG Y);
+VOID ConioRecordScrolledRows(PTEXTMODE_SCREEN_BUFFER Buff, ULONG Rows);
 NTSTATUS ConioResizeBuffer(PCONSOLE Console,
                            PTEXTMODE_SCREEN_BUFFER ScreenBuffer,
                            COORD Size);

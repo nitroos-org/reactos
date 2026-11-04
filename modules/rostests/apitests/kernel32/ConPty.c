@@ -145,6 +145,27 @@ RunAltBufferHelper(VOID)
     Sleep(3000);
 }
 
+#define SCROLL_LINES    200
+
+/* Runs inside the pseudoconsole: print SCROLL_LINES numbered lines, one write each, and pause
+ * briefly every few lines unless Paced is off (output that outruns the terminal). */
+static VOID
+RunScrollHelper(BOOL Paced)
+{
+    HANDLE Output = GetStdHandle(STD_OUTPUT_HANDLE);
+    CHAR Text[64];
+    DWORD Index, Written;
+
+    for (Index = 1; Index <= SCROLL_LINES; ++Index)
+    {
+        StringCchPrintfA(Text, sizeof(Text), "SCROLL%03lu\r\n", Index);
+        WriteFile(Output, Text, lstrlenA(Text), &Written, NULL);
+        if (Paced && !(Index % 4)) Sleep(30);
+    }
+    ConsoleSay("SCROLLEND\r\n");
+    Sleep(500);
+}
+
 #ifndef ENABLE_VIRTUAL_TERMINAL_INPUT
 #define ENABLE_VIRTUAL_TERMINAL_INPUT 0x0200
 #endif
@@ -780,6 +801,108 @@ CheckHelperOutput(PCWSTR ExePath, PCSTR Mode, PCSTR Expected, PCSTR Message)
     CloseHandle(OutWrite);
 }
 
+/* Text scrolled off a 25-row pseudoconsole must reach the terminal as lines that scroll off its
+ * screen (line feeds on the last row), complete and in order, not be repainted in place: the
+ * terminal keeps history only for the rows that scroll away. Output that outruns the host (many
+ * rows between two looks of it) must not lose rows either. */
+static VOID
+CheckScrollback(PCWSTR ExePath, BOOL Paced, BOOL Resize)
+{
+    HANDLE InRead = NULL, InWrite = NULL, OutRead = NULL, OutWrite = NULL;
+    PROCESS_INFORMATION Child;
+    WCHAR Command[MAX_PATH * 2];
+    COORD Size = {80, 25};
+    PVOID Pty = NULL;
+    HRESULT Status;
+    CHAR *Text;
+    DWORD Used = 0, Available, Count, Start, Seen = 0, Index, LineFeeds = 0, Last = 0, First = 0, Clears = 0;
+    const CHAR *Position;
+
+    Text = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4 * 1024 * 1024);
+    if (!Text || !CreatePipe(&InRead, &InWrite, NULL, 0) || !CreatePipe(&OutRead, &OutWrite, NULL, 0))
+    {
+        ok(FALSE, "Setup failed\n");
+        goto Done;
+    }
+    Status = CreatePty(Size, InRead, OutWrite, 0, &Pty);
+    ok(Status == S_OK, "CreatePseudoConsole failed: %08lx\n", Status);
+    if (Status != S_OK) goto Done;
+    if (Resize)
+    {
+        /* The host re-arms the rows it keeps for the terminal when the size changes */
+        COORD NewSize = {100, 30};
+
+        Status = ResizePty(Pty, NewSize);
+        ok(Status == S_OK, "ResizePseudoConsole failed: %08lx\n", Status);
+        Sleep(500);
+    }
+    StringCchPrintfW(Command, _countof(Command), L"\"%ls\" ConPty helper-%hs", ExePath, Paced ? "scroll" : "scrollfast");
+    if (!SpawnWithPty(Pty, Command, FALSE, &Child))
+    {
+        ok(FALSE, "CreateProcess with the pseudoconsole failed: %lu\n", GetLastError());
+        goto Done;
+    }
+    for (Start = GetTickCount(); GetTickCount() - Start < 60000; Sleep(10))
+    {
+        Available = 0;
+        if (!PeekNamedPipe(OutRead, NULL, 0, NULL, &Available, NULL)) break;
+        if (!Available) continue;
+        if (Available > 4 * 1024 * 1024 - 1 - Used) Available = 4 * 1024 * 1024 - 1 - Used;
+        if (!Available || !ReadFile(OutRead, Text + Used, Available, &Count, NULL)) break;
+        Used += Count;
+        Text[Used] = 0;
+        /* the final repaint comes after the client's last line */
+        if (strstr(Text, "SCROLLEND")) { Sleep(300); break; }
+    }
+    /* take what the final paint added */
+    Available = 0;
+    if (PeekNamedPipe(OutRead, NULL, 0, NULL, &Available, NULL) && Available &&
+        Available < 4 * 1024 * 1024 - 1 - Used && ReadFile(OutRead, Text + Used, Available, &Count, NULL))
+        Used += Count;
+    Text[Used] = 0;
+
+    Position = Text;
+    for (Index = 1; Index <= SCROLL_LINES; ++Index)
+    {
+        CHAR Name[16];
+        const CHAR *Found;
+
+        StringCchPrintfA(Name, sizeof(Name), "SCROLL%03lu", Index);
+        Found = strstr(Position, Name);
+        if (!Found)
+        {
+            /* a line that is missing may still be there earlier: only the order is checked */
+            continue;
+        }
+        if (!First) First = Index;
+        Last = Index;
+        ++Seen;
+        Position = Found + 9;
+    }
+    for (Count = 0; Count < Used; ++Count)
+    {
+        if (Text[Count] == '\n') ++LineFeeds;
+        if (!strncmp(Text + Count, "\033[2J", 4)) ++Clears;
+    }
+    trace("Paced=%d Resize=%d: %lu of %u lines in order (first %lu, last %lu), %lu LF, %lu clears, %lu bytes\n",
+          Paced, Resize, Seen, SCROLL_LINES, First, Last, LineFeeds, Clears, Used);
+    ok(Last == SCROLL_LINES, "The last line did not reach the terminal\n");
+    ok(First == 1, "The first line did not reach the terminal (first seen: %lu)\n", First);
+    ok(Seen == SCROLL_LINES, "Only %lu of %u scrolled lines reached the terminal in order\n", Seen, SCROLL_LINES);
+    ok(LineFeeds >= SCROLL_LINES - 30, "The terminal was not scrolled by line feeds (%lu)\n", LineFeeds);
+    ok(Clears <= (Resize ? 2U : 1U), "The screen was cleared %lu times while scrolling\n", Clears);
+    WaitForSingleObject(Child.hProcess, 8000);
+    CloseHandle(Child.hThread);
+    CloseHandle(Child.hProcess);
+Done:
+    if (Pty) ClosePty(Pty);
+    if (InRead) CloseHandle(InRead);
+    if (InWrite) CloseHandle(InWrite);
+    if (OutRead) CloseHandle(OutRead);
+    if (OutWrite) CloseHandle(OutWrite);
+    if (Text) HeapFree(GetProcessHeap(), 0, Text);
+}
+
 /* Bytes typed in the terminal become key events as Windows reports them: Ctrl+O is VK 'O' with
  * LEFT_CTRL_PRESSED and the character 0x0F, U+1F600 (UTF-8 F0 9F 98 80) is two events, one per
  * UTF-16 unit. */
@@ -963,6 +1086,11 @@ START_TEST(ConPty)
             RunAltBufferHelper();
             return;
         }
+        if (argc >= 3 && (!strcmp(argv[2], "helper-scroll") || !strcmp(argv[2], "helper-scrollfast")))
+        {
+            RunScrollHelper(!strcmp(argv[2], "helper-scroll"));
+            return;
+        }
         if (argc >= 3 && !strcmp(argv[2], "helper-vtinput"))
         {
             RunVtInputHelper();
@@ -996,6 +1124,9 @@ START_TEST(ConPty)
         CheckKeyTranslation(ExePath);
         CheckHelperOutput(ExePath, "helper-altbuf", "ALTBUFTEXT",
                           "Text drawn in the client's active screen buffer did not reach the terminal");
+        CheckScrollback(ExePath, TRUE, FALSE);
+        CheckScrollback(ExePath, FALSE, FALSE);
+        CheckScrollback(ExePath, FALSE, TRUE);
         CheckNodePtSequence(0x6, FALSE);   /* RESIZE_QUIRK | WIN32_INPUT_MODE */
         CheckNodePtSequence(0x7, FALSE);   /* ... | INHERIT_CURSOR */
         CheckNodePtSequence(0x8, FALSE);   /* PASSTHROUGH (Windows 11) */
