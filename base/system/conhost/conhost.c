@@ -267,11 +267,18 @@ HostResize(HOST *Host, SHORT Width, SHORT Height)
     Host->Painted = FALSE;
     Host->ScrollbackSeen = FALSE;
     {
-        ULONGLONG Total, First;
+        ULONGLONG Total = 0, First;
         DWORD Rows;
 
-        /* From now on the server keeps the rows that scroll off the top of this buffer */
-        HostScrollbackCall(Host, Host->ConsoleOut, CONSOLE_SCROLLBACK_ENABLE, 0, 0, NULL, &Total, &First, &Rows);
+        /* From now on the server keeps the rows that scroll off the top of this buffer. The count
+         * at this moment is where the terminal's history starts: a client that prints before the
+         * host paints for the first time (a terminal starts its child as soon as the pseudoconsole
+         * exists) has its first rows in the server's ring, and the first paint hands them over. */
+        if (HostScrollbackCall(Host, Host->ConsoleOut, CONSOLE_SCROLLBACK_ENABLE, 0, 0, NULL, &Total, &First, &Rows))
+        {
+            Host->ScrollbackTotal = Total;
+            Host->ScrollbackSeen = TRUE;
+        }
     }
     return TRUE;
 }
@@ -409,10 +416,12 @@ HostPaintRow(HOST *Host, DWORD Row, const CHAR_INFO *Cells, const CONSOLE_EXT_CE
 /* Rows scrolled off the top of the console buffer since the last look (Rows of them in History,
  * oldest first) go to the terminal as rows that scroll off its screen, then the screen shows
  * the current frame. Lost: older rows were dropped by the server before the host asked, the
- * terminal's screen then goes to its scrollback as it is. */
+ * terminal's screen then goes to its scrollback as it is. Fresh: nothing is known of the
+ * terminal's screen (first paint, cleared just now), so it is painted whole and no row of it is
+ * pushed away: the history is exactly the rows. */
 static BOOL
 HostPaintScrolled(HOST *Host, const CHAR_INFO *History, const CONSOLE_EXT_CELL *HistoryExt, DWORD Rows, BOOL Lost,
-                  CHAR *Line)
+                  BOOL Fresh, CHAR *Line)
 {
     DWORD Row, Used, Height = (DWORD)Host->Height;
     BOOL Changed = FALSE;
@@ -421,7 +430,7 @@ HostPaintScrolled(HOST *Host, const CHAR_INFO *History, const CONSOLE_EXT_CELL *
                                               : Host->Current + (SIZE_T)((Index) - Rows) * Host->Width)
 #define HOST_FRAME_EXT(Index) ((Index) < Rows ? HistoryExt + (SIZE_T)(Index) * Host->Width \
                                               : Host->CurrentExt + (SIZE_T)((Index) - Rows) * Host->Width)
-    if (Lost)
+    if (Lost && !Fresh)
     {
         /* Not a single row of what the terminal shows is known to be among the new ones */
         Used = sprintf(Line, "\033[0m\033[%lu;1H", Height);
@@ -432,7 +441,7 @@ HostPaintScrolled(HOST *Host, const CHAR_INFO *History, const CONSOLE_EXT_CELL *
     Used = 0;
     for (Row = 0; Row < Height; ++Row)
         Used = HostPaintRow(Host, Row, HOST_FRAME_ROW(Row), HOST_FRAME_EXT(Row),
-                            Lost ? NULL : Host->Previous + (SIZE_T)Row * Host->Width,
+                            (Lost || Fresh) ? NULL : Host->Previous + (SIZE_T)Row * Host->Width,
                             Host->PreviousExt + (SIZE_T)Row * Host->Width, Line, Used, &Changed);
     if (Used && !HostWrite(Host, Line, Used)) return FALSE;
     /* ...and every row that scrolled off pushes the top row into the terminal's scrollback and brings the next in */
@@ -563,7 +572,7 @@ HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
         ZeroMemory(Host->CurrentExt, (SIZE_T)Host->Width * Host->Height * sizeof(*Host->CurrentExt));
     if (Keeps)
     {
-        if (Host->Painted && Host->ScrollbackSeen && Total > Host->ScrollbackTotal)
+        if (Host->ScrollbackSeen && Total > Host->ScrollbackTotal)
         {
             ULONGLONG Wanted = Total - Host->ScrollbackTotal;
 
@@ -632,7 +641,7 @@ HostPaintBuffer(HOST *Host, HANDLE ConsoleOut)
     }
     if (Rows)
     {
-        BOOL Result = HostPaintScrolled(Host, History, HistoryExt, Rows, Lost, Line);
+        BOOL Result = HostPaintScrolled(Host, History, HistoryExt, Rows, Lost, !Host->Painted, Line);
 
         HeapFree(GetProcessHeap(), 0, History);
         HeapFree(GetProcessHeap(), 0, HistoryExt);
@@ -1094,7 +1103,12 @@ int wmain(int argc, WCHAR **argv)
                 /* Frames are three WORDs: type, then two WORD arguments (the Windows
                  * pseudoconsole signal protocol that sshd also speaks). */
                 if (Message[0] == HOST_SIGNAL_RESIZE && Message[1] <= 32767 && Message[2] <= 32767)
+                {
+                    /* What the client printed so far goes to the terminal before the buffer is
+                     * resized: a new width drops the rows the server kept for the old one. */
+                    HostPaint(&Host);
                     HostResize(&Host, (SHORT)Message[1], (SHORT)Message[2]);
+                }
                 else if (Message[0] == HOST_SIGNAL_CLIENT && !Host.Client)
                 {
                     Host.Client = OpenProcess(SYNCHRONIZE, FALSE, Message[1] | ((DWORD)Message[2] << 16));
