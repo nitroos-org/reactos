@@ -38,6 +38,7 @@
 #define IDC_SRCHLABEL  1021
 #define IDC_OPCANCEL   1022  /* "Cancel operation": shown while a background op runs */
 #define IDC_PROGRESS   1023  /* marquee bar: shown while a background op runs */
+#define IDC_CATEGORY   1024  /* Software tab: category filter */
 #define IDT_SEARCH     1     /* debounce timer: filter the list shortly after the last keystroke */
 #define IDT_ELAPSED    2     /* once a second while busy: refresh the elapsed time in the status text */
 
@@ -50,7 +51,8 @@
 
 static HWND g_hTab, g_hList, g_hDesc, g_hInstr;
 static HWND g_hInstall, g_hEnable, g_hDisable, g_hUninstall, g_hImport, g_hImportSc;
-static HWND g_hSource, g_hSrcLabel, g_hUpdate, g_hAddBucket, g_hSearch, g_hSrchLabel;
+static HWND g_hSource, g_hSrcLabel, g_hUpdate, g_hAddBucket, g_hSearch, g_hSrchLabel, g_hCat;
+static WCHAR g_catFilter[48];     /* Software tab category filter ("" = all categories) */
 static WCHAR g_selectId[FM_MAX_ID]; /* command line /select:<id>: select that entry on the first fill (screenshots) */
 static WCHAR g_search[64];        /* Software tab search text (name + description, case-insensitive) */
 static WCHAR g_srcFilter[32];     /* Software tab source filter ("" = all sources) */
@@ -147,6 +149,7 @@ static void Populate(LPCWSTR keepId)
         WCHAR buf[FM_MAX_DEPS * 2 + 64];
         if ((g_arr[i].Tier == FM_TIER_SOFTWARE ? 1 : 0) != g_tier) continue;
         if (!os && g_srcFilter[0] && _wcsicmp(g_arr[i].Source, g_srcFilter)) continue;
+        if (!os && g_catFilter[0] && _wcsicmp(g_arr[i].Group, g_catFilter)) continue;
         if (!os && g_search[0] && !FmMatchSearch(&g_arr[i], g_search)) continue;
 
         ZeroMemory(&it, sizeof(it));
@@ -228,6 +231,29 @@ static void RebuildSources(void)
     SendMessageW(g_hSource, CB_SETCURSEL, sel, 0);
 }
 
+/* Category dropdown: "All categories" + every distinct Group of the software entries (the RAPPS categories: Internet, Office,
+ * Development ...; the hand-written entries' own groups). */
+static void RebuildCategories(void)
+{
+    int i, j, sel = 0, n = 0;
+    WCHAR seen[40][48];
+
+    SendMessageW(g_hCat, CB_RESETCONTENT, 0, 0);
+    SendMessageW(g_hCat, CB_ADDSTRING, 0, (LPARAM)L"All categories");
+    for (i = 0; i < g_count; i++)
+    {
+        BOOL dup = FALSE;
+        if (g_arr[i].Tier != FM_TIER_SOFTWARE || !g_arr[i].Group[0]) continue;
+        for (j = 0; j < n; j++) if (!_wcsicmp(seen[j], g_arr[i].Group)) { dup = TRUE; break; }
+        if (dup || n >= 40) continue;
+        StringCchCopyW(seen[n++], 48, g_arr[i].Group);
+        SendMessageW(g_hCat, CB_ADDSTRING, 0, (LPARAM)g_arr[i].Group);
+        if (g_catFilter[0] && !_wcsicmp(g_catFilter, g_arr[i].Group)) sel = n;
+    }
+    if (g_catFilter[0] && !sel) g_catFilter[0] = L'\0';
+    SendMessageW(g_hCat, CB_SETCURSEL, sel, 0);
+}
+
 static void FillList(void)
 {
     WCHAR keep[FM_MAX_ID];
@@ -243,6 +269,7 @@ static void FillList(void)
     t1 = GetTickCount();
     UpdateTabLabels();
     RebuildSources();
+    RebuildCategories();
     Populate(keep);
     /* test hook: FEATMGR_TIMING_FILE=<path> appends how long the enumeration and the list fill took */
     if (GetEnvironmentVariableW(L"FEATMGR_TIMING_FILE", tf, MAX_PATH))
@@ -321,7 +348,7 @@ static void UpdateButtons(void)
                 L"so Scoop's own one-liner refuses to run as administrator), or run: iex \"&& {$(irm get.scoop.sh)} -RunAsAdmin\"" :
                 L"Select a feature to see its description.") :
             (g_tier == FM_TIER_SOFTWARE ?
-                L"No software-tier entries in the catalog yet." :
+                L"No software entries yet. Click \"Update catalog\" to download the RAPPS catalog (needs the network)." :
                 L"No OS features in the catalog."));
     }
 
@@ -576,8 +603,9 @@ static DWORD WINAPI OpThreadProc(LPVOID param)
         case OP_ADD_BUCKET: c->hr = FmScoopAddBucket(c->name, NULL, 0, NULL); break;
         case OP_COMMIT_OS:  ApplyOsRows(c); c->hr = S_OK; break;
         case OP_IMPORT:
-            FmOpStep(L"Importing the RAPPS catalog");
-            c->importWritten = FmImportRapps(NULL, 0, &c->importSkipped, NULL);
+            FmOpStep(L"Updating the RAPPS catalog");
+            FmSetLastMessage(L"");
+            c->importWritten = FmImportRapps(NULL, FM_IMPORT_CLEAN | FM_IMPORT_REFETCH, &c->importSkipped, NULL);
             c->hr = (c->importWritten < 0) ? E_FAIL : S_OK;
             break;
         case OP_IMPORT_SCOOP:
@@ -637,7 +665,7 @@ static void DoAction(HWND hwnd, ACTION act)
     StartOp(hwnd, c);
 }
 
-/* "Import from RAPPS": populate the Software tier from the per-user RAPPS database. */
+/* "Update catalog": download the RAPPS online catalog (featmgr's own fetch) and rebuild the Software entries from it. */
 static void DoImport(HWND hwnd)
 {
     OPCTX *c;
@@ -798,16 +826,29 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
     }
     else if (c->op == OP_IMPORT)
     {
-        caption = L"Import from RAPPS";
+        caption = L"Update catalog";
         if (SUCCEEDED(c->hr))
+        {
+            WCHAR why[1024];
+            FmGetLastMessage(why, ARRAYSIZE(why));
             StringCchPrintfW(msg, ARRAYSIZE(msg),
-                L"Imported %d program(s) from the RAPPS catalog into the Software "
-                L"tab (%d skipped).", c->importWritten, c->importSkipped);
+                L"The Software tab now lists %d program(s) from the RAPPS catalog (%d entries were not offered: "
+                L"no checksum, another Windows version, or replaced by a built-in entry).", c->importWritten, c->importSkipped);
+            if (why[0])     /* the download failed but an earlier catalog was there: say so */
+            {
+                StringCchCatW(msg, ARRAYSIZE(msg), L"\n\nThe online catalog could not be downloaded, so this list comes from the last "
+                              L"download:\n");
+                StringCchCatW(msg, ARRAYSIZE(msg), why);
+                icon = MB_ICONWARNING;
+            }
+        }
         else
         {
-            StringCchCopyW(msg, ARRAYSIZE(msg),
-                L"Could not import the RAPPS catalog. The online catalog could not be "
-                L"downloaded: check the network connection (or run RAPPS once), then try again.");
+            WCHAR why[1024];
+            FmGetLastMessage(why, ARRAYSIZE(why));
+            StringCchPrintfW(msg, ARRAYSIZE(msg),
+                L"Could not update the catalog. The online RAPPS catalog could not be downloaded: check the network "
+                L"connection, then try again.%s%s", why[0] ? L"\n\n" : L"", why);
             icon = MB_ICONWARNING;
         }
     }
@@ -1038,6 +1079,7 @@ static void LayoutButtons(HWND hwnd)
     ShowWindow(g_hUpdate,   os ? SW_HIDE : SW_SHOW);
     ShowWindow(g_hAddBucket, os ? SW_HIDE : SW_SHOW);
     ShowWindow(g_hSource,   os ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_hCat,      os ? SW_HIDE : SW_SHOW);
     ShowWindow(g_hSrcLabel, os ? SW_HIDE : SW_SHOW);
     ShowWindow(g_hSearch,   os ? SW_HIDE : SW_SHOW);
     ShowWindow(g_hSrchLabel, os ? SW_HIDE : SW_SHOW);
@@ -1053,6 +1095,7 @@ static void LayoutButtons(HWND hwnd)
         MoveWindow(g_hSrchLabel, 262, tabY + 5, 46, 18, TRUE);
         MoveWindow(g_hSearch, 310, tabY + 1, 170, 22, TRUE);
         MoveWindow(g_hSource, rc.right - 12 - 222, tabY + 1, 222, 200, TRUE);
+        MoveWindow(g_hCat, 490, tabY + 1, 140, 200, TRUE);
         MoveWindow(g_hSrcLabel, rc.right - 12 - 222 - 50, tabY + 5, 46, 18, TRUE);
     }
 
@@ -1066,16 +1109,19 @@ static void LayoutButtons(HWND hwnd)
     }
     else
     {
-        bw = 84; gap = 4;       /* ten verbs in one row */
-        if (10 * bw + 9 * gap > rc.right - 24) bw = (rc.right - 24 - 9 * gap) / 10;
-        MoveWindow(g_hInstall,   12,                    y, bw, bh, TRUE);
-        MoveWindow(g_hEnable,    12 + (bw + gap),       y, bw, bh, TRUE);
-        MoveWindow(g_hDisable,   12 + 2 * (bw + gap),   y, bw, bh, TRUE);
-        MoveWindow(g_hUninstall, 12 + 3 * (bw + gap),   y, bw, bh, TRUE);
-        MoveWindow(g_hUpdate,    12 + 4 * (bw + gap),   y, bw, bh, TRUE);
-        MoveWindow(g_hImport,    12 + 5 * (bw + gap),   y, bw, bh, TRUE);
-        MoveWindow(g_hImportSc,  12 + 6 * (bw + gap),   y, bw, bh, TRUE);
-        MoveWindow(g_hAddBucket, 12 + 7 * (bw + gap),   y, bw, bh, TRUE);
+        bw = 80; gap = 4;       /* ten verbs in one row (the catalog button is one and a half wide) */
+        if (10 * bw + bw / 2 + 9 * gap > rc.right - 24) bw = (rc.right - 24 - 9 * gap) * 2 / 21;
+        {
+            int cw = bw + bw / 2;       /* "Update catalog" is longer than the other verbs */
+            MoveWindow(g_hInstall,   12,                    y, bw, bh, TRUE);
+            MoveWindow(g_hEnable,    12 + (bw + gap),       y, bw, bh, TRUE);
+            MoveWindow(g_hDisable,   12 + 2 * (bw + gap),   y, bw, bh, TRUE);
+            MoveWindow(g_hUninstall, 12 + 3 * (bw + gap),   y, bw, bh, TRUE);
+            MoveWindow(g_hUpdate,    12 + 4 * (bw + gap),   y, bw, bh, TRUE);
+            MoveWindow(g_hImport,    12 + 5 * (bw + gap),   y, cw, bh, TRUE);
+            MoveWindow(g_hImportSc,  12 + 5 * (bw + gap) + cw + gap,            y, bw, bh, TRUE);
+            MoveWindow(g_hAddBucket, 12 + 6 * (bw + gap) + cw + gap,            y, bw, bh, TRUE);
+        }
         MoveWindow(g_hClose,  right - bw,               y, bw, bh, TRUE);
         MoveWindow(g_hRefresh, right - 2 * bw - gap,    y, bw, bh, TRUE);
     }
@@ -1176,7 +1222,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 WS_CHILD | WS_TABSTOP, 0, 0, 90, 26, hwnd,
                 (HMENU)(INT_PTR)IDC_CLOSE, NULL, NULL);
             /* Software-tier: populate the tab from the RAPPS database on demand. */
-            g_hImport = CreateWindowExW(0, L"BUTTON", L"I&mport RAPPS",
+            g_hImport = CreateWindowExW(0, L"BUTTON", L"Update &catalog",
                 WS_CHILD | WS_TABSTOP, 0, 0, 90, 26, hwnd,
                 (HMENU)(INT_PTR)IDC_IMPORT, NULL, NULL);
 
@@ -1202,6 +1248,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 WS_CHILD | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
                 498, 65, 222, 200, hwnd, (HMENU)(INT_PTR)IDC_SOURCE, NULL, NULL);
             SetWindowPos(g_hSource, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            g_hCat = CreateWindowExW(0, L"COMBOBOX", L"",
+                WS_CHILD | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
+                490, 65, 140, 200, hwnd, (HMENU)(INT_PTR)IDC_CATEGORY, NULL, NULL);
+            SetWindowPos(g_hCat, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
             /* the tab repaints over its siblings below it when an op disables and re-enables it: keep the
              * labels and the search box above it too (they vanished after every op) */
             SetWindowPos(g_hSrcLabel, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
@@ -1293,6 +1343,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         Populate(NULL);
                     }
                     break;
+                case IDC_CATEGORY:
+                    if (HIWORD(wp) == CBN_SELCHANGE)
+                    {
+                        int sel = (int)SendMessageW(g_hCat, CB_GETCURSEL, 0, 0);
+                        g_catFilter[0] = L'\0';
+                        if (sel > 0)
+                            SendMessageW(g_hCat, CB_GETLBTEXT, sel, (LPARAM)g_catFilter);
+                        Populate(NULL);
+                    }
+                    break;
                 case IDC_REFRESH:   FillList(); break;
                 case IDC_OK:        CommitOs(hwnd, TRUE); break;
                 case IDC_APPLY:     CommitOs(hwnd, FALSE); break;
@@ -1371,10 +1431,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
         return FmFirstBootMain(hInst, lpCmd);
     /* no switch of the classic list: "Turn NitroOS features on or off", the tree of features */
     if (!(lpCmd && (wcsstr(lpCmd, L"/software") || wcsstr(lpCmd, L"/addbucket") || wcsstr(lpCmd, L"/classic") ||
-                    wcsstr(lpCmd, L"/select:") || wcsstr(lpCmd, L"/search:") || wcsstr(lpCmd, L"/source:"))))
+                    wcsstr(lpCmd, L"/select:") || wcsstr(lpCmd, L"/search:") || wcsstr(lpCmd, L"/source:") || wcsstr(lpCmd, L"/category:"))))
         return FmFeatTreeMain(hInst, lpCmd, nShow);
 
-    /* optfeatures /software [/source:<source>] : open on the Software tab, optionally filtered */
+    /* optfeatures /software [/source:<source>] [/category:<name>] [/search:<text>] : open on the Software tab, optionally filtered */
     if (lpCmd && wcsstr(lpCmd, L"/software")) g_startSoftware = TRUE;
     if (lpCmd && wcsstr(lpCmd, L"/addbucket")) { g_startSoftware = TRUE; g_openAddBucket = TRUE; }
     if (lpCmd)
@@ -1387,6 +1447,20 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
             {
                 wcsncpy(g_srcFilter, sp + 8, n);
                 g_srcFilter[n] = L'\0';
+            }
+        }
+    }
+
+    if (lpCmd)
+    {
+        LPCWSTR sp = wcsstr(lpCmd, L"/category:");
+        if (sp)
+        {
+            size_t n = wcscspn(sp + 10, L" \t");
+            if (n && n < ARRAYSIZE(g_catFilter))
+            {
+                wcsncpy(g_catFilter, sp + 10, n);
+                g_catFilter[n] = L'\0';
             }
         }
     }

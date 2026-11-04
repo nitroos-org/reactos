@@ -1,12 +1,11 @@
 @echo off
-rem FEATMGMT-01 software-tier LIVE install proof (rapps provider: real HTTP download +
-rem SHA1 verify + silent install, then uninstall round-trip). Unlike roundtrip.cmd this
+rem FEATMGMT-01 software-tier LIVE install proof (native provider: real HTTP download +
+rem SHA1 verify + silent install by featmgr itself, then uninstall round-trip). Unlike roundtrip.cmd this
 rem needs a reachable HTTP server. The harness stages:
 rem   - an appdb dir (default C:\harness\appdb) holding one RAPPS entry whose URLDownload
 rem     points at the server and whose SHA1 matches the served installer,
-rem   - the same entry into %LOCALAPPDATA%\RApps\appdb so rapps.exe can resolve the pkg.
 rem The installed test package's side effect is a registry marker (written by the silent
-rem installer that rapps downloads + runs): HKLM\SOFTWARE\ReactOS\Nitro\FmLiveMarker.
+rem installer that featmgr downloads + runs): HKLM\SOFTWARE\ReactOS\Nitro\FmLiveMarker.
 rem Usage: live-install.cmd [appdb-dir] [pkg]
 setlocal
 set APPDB=%1
@@ -30,7 +29,7 @@ call :rc0 "L1 import-rapps rc0"
 type %O%\live-import.txt >> %LOG%
 call :st rapps-%PKG% NotInstalled "L2 imported entry NotInstalled"
 
-rem --- live install: rapps downloads over HTTP, verifies SHA1, runs the silent installer
+rem --- live install: featmgr downloads over HTTP, verifies SHA1, runs the silent installer
 %FM% /install rapps-%PKG% > %O%\live-install.txt 2>&1
 call :rc0 "L3 live install rc0 (HTTP download + SHA1 + silent install)"
 type %O%\live-install.txt >> %LOG%
