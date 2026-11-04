@@ -73,6 +73,13 @@
 @ stdcall OpenServiceA(long str long) advapi32.OpenServiceA
 @ stdcall OpenServiceW(long wstr long) advapi32.OpenServiceW
 @ stdcall OpenTraceW(ptr) advapi32.OpenTraceW
+@ stdcall -version=0x600+ PerfCreateInstance(long ptr wstr long) advapi32.PerfCreateInstance
+@ stdcall -version=0x600+ PerfDeleteInstance(long ptr) advapi32.PerfDeleteInstance
+@ stdcall -version=0x600+ PerfSetCounterRefValue(long ptr long ptr) advapi32.PerfSetCounterRefValue
+@ stdcall -version=0x600+ PerfSetCounterSetInfo(long ptr long) advapi32.PerfSetCounterSetInfo
+@ stdcall -version=0x600+ PerfStartProvider(ptr ptr ptr) advapi32.PerfStartProvider
+@ stdcall -version=0x600+ PerfStartProviderEx(ptr ptr ptr) advapi32.PerfStartProviderEx
+@ stdcall -version=0x600+ PerfStopProvider(long) advapi32.PerfStopProvider
 @ stdcall ProcessTrace(ptr long ptr ptr) advapi32.ProcessTrace
 @ stdcall -version=0x502 QueryAllTracesA(ptr long ptr) advapi32.QueryAllTracesA
 @ stdcall -version=0x600+ QueryAllTracesA(ptr long ptr) advapi32.QueryAllTracesA
