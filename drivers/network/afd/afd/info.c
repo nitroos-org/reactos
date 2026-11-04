@@ -74,6 +74,10 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         InfoReq->Information.Ulong = (ULONG)FCB->AsyncConnectStatus;
         break;
 
+    case AFD_INFO_CONNECTION_ABORTED:
+        InfoReq->Information.Ulong = FCB->ConnectionAborted;
+        break;
+
         case AFD_INFO_SENDS_IN_PROGRESS:
             InfoReq->Information.Ulong = 0;
 

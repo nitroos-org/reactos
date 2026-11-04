@@ -869,14 +869,18 @@ DisconnectComplete(PDEVICE_OBJECT DeviceObject,
     {
         CurrentEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_DISCONNECT]);
         CurrentIrp = CONTAINING_RECORD(CurrentEntry, IRP, Tail.Overlay.ListEntry);
-        CurrentIrp->IoStatus.Status = Irp->IoStatus.Status;
+        CurrentIrp->IoStatus.Status = FCB->ConnectionAborted ? STATUS_SUCCESS : Irp->IoStatus.Status;
         CurrentIrp->IoStatus.Information = 0;
         UnlockRequest(CurrentIrp, IoGetCurrentIrpStackLocation(CurrentIrp));
         AfdClearCancelRoutine(CurrentIrp);
         IoCompleteRequest(CurrentIrp, IO_NETWORK_INCREMENT );
     }
 
-    if (!(FCB->DisconnectFlags & TDI_DISCONNECT_RELEASE))
+    if (FCB->ConnectionAborted)
+    {
+        /* The state was set when the connection was aborted (AfdAbortConnection) */
+    }
+    else if (!(FCB->DisconnectFlags & TDI_DISCONNECT_RELEASE))
     {
         /* Signal complete connection closure immediately */
         FCB->PollState |= AFD_EVENT_ABORT;
@@ -938,6 +942,59 @@ RetryDisconnectCompletion(PAFD_FCB FCB)
     }
 }
 
+/* The state of a connection that shutdown(SD_RECEIVE) reset because data was unread or arrived with no
+ * receive pending: Windows fails every later operation of the socket with WSAECONNABORTED and reports
+ * the socket readable and writable (the operations fail at once) and FD_CLOSE with the same error.
+ * The state lock is held. */
+static VOID
+AfdMarkConnectionAborted(PAFD_FCB FCB, BOOLEAN Unread)
+{
+    FCB->ConnectionAborted = TRUE;
+    FCB->ReceiveShutdown = FALSE;
+    FCB->ShutdownBoth = FALSE;
+    FCB->TdiReceiveClosed = TRUE;
+    FCB->SendClosed = TRUE;
+    FCB->Recv.Content = 0;
+    FCB->Recv.BytesUsed = 0;
+    FCB->LastReceiveStatus = STATUS_CONNECTION_ABORTED;
+    FCB->PollState &= ~AFD_EVENT_RECEIVE;
+    FCB->PollState |= AFD_EVENT_ABORT | AFD_EVENT_SEND;
+    /* data that was queued still signals FD_READ, as on Windows (data that arrives later does not) */
+    if (Unread)
+    {
+        FCB->PollState |= AFD_EVENT_RECEIVE;
+        FCB->PollStatus[FD_READ_BIT] = STATUS_SUCCESS;
+    }
+    FCB->PollStatus[FD_CLOSE_BIT] = STATUS_CONNECTION_ABORTED;
+    FCB->PollStatus[FD_WRITE_BIT] = STATUS_SUCCESS;
+    PollReeval(FCB->DeviceExt, FCB->FileObject);
+}
+
+/* Aborts the connection of a stream socket whose receive direction was shut down by shutdown(SD_RECEIVE)
+ * when data arrives: an RST goes to the peer and the socket fails as AfdMarkConnectionAborted says.
+ * The state lock is held. */
+VOID
+AfdAbortConnection(PAFD_FCB FCB)
+{
+    if (FCB->ConnectionAborted ||
+        (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) ||
+        FCB->SharedData.State != SOCKET_STATE_CONNECTED ||
+        !FCB->ConnectCallInfo ||
+        !FCB->Connection.Object)
+        return;
+
+    AfdMarkConnectionAborted(FCB, FALSE);
+
+    /* A graceful disconnect that the transport is working on ends by itself */
+    if (FCB->DisconnectIrp.InFlightRequest)
+        return;
+
+    FCB->DisconnectFlags = TDI_DISCONNECT_ABORT;
+    FCB->DisconnectTimeout.QuadPart = -1000000LL;
+    FCB->DisconnectPending = TRUE;
+    DoDisconnect(FCB);
+}
+
 static NTSTATUS NTAPI
 AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
               PIO_STACK_LOCATION IrpSp) {
@@ -948,6 +1005,7 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     USHORT Flags;
     PLIST_ENTRY CurrentEntry;
     PIRP CurrentIrp;
+    BOOLEAN AbortConnection = FALSE;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -960,6 +1018,10 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (!(DisReq = LockRequest(Irp, IrpSp, FALSE, NULL)))
         return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY,
                                        Irp, 0 );
+
+    /* The connection is reset already (see AfdAbortConnection): a shutdown succeeds and does nothing */
+    if (FCB->ConnectionAborted)
+        return UnlockAndMaybeComplete( FCB, STATUS_SUCCESS, Irp, 0 );
 
     /* Send direction only */
     if ((DisReq->DisconnectType & AFD_DISCONNECT_SEND) &&
@@ -982,8 +1044,18 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         }
         else
         {
+            /* Unread data at shutdown(SD_RECEIVE) of a live stream connection resets it, as on Windows */
+            AbortConnection = !(DisReq->DisconnectType & AFD_DISCONNECT_ABORT) &&
+                              !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) &&
+                              FCB->SharedData.State == SOCKET_STATE_CONNECTED &&
+                              FCB->ConnectCallInfo &&
+                              !FCB->TdiReceiveClosed &&
+                              FCB->Recv.Content != FCB->Recv.BytesUsed;
+
             /* Mark that we can't issue another receive request */
             FCB->TdiReceiveClosed = TRUE;
+            if (!(DisReq->DisconnectType & AFD_DISCONNECT_ABORT))
+                FCB->LocalReceiveShutdown = TRUE;
 
             /* An abortive close of a stream socket aborts the receives that are pending (the
                cancel of the transport's receive below would complete them as cancelled) */
@@ -1008,16 +1080,21 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
             /* Clear the receive event */
             FCB->PollState &= ~AFD_EVENT_RECEIVE;
+
+            if (AbortConnection)
+                AfdMarkConnectionAborted(FCB, TRUE);
         }
 
         /* Receive direction only */
         if ((DisReq->DisconnectType & AFD_DISCONNECT_RECV) &&
-            !(DisReq->DisconnectType & (AFD_DISCONNECT_SEND | AFD_DISCONNECT_ABORT)))
+            !(DisReq->DisconnectType & (AFD_DISCONNECT_SEND | AFD_DISCONNECT_ABORT)) &&
+            !AbortConnection)
         {
             /* No need to tell the transport driver for receive direction only */
             return UnlockAndMaybeComplete( FCB, STATUS_SUCCESS, Irp, 0 );
         }
-        else if ((DisReq->DisconnectType & AFD_DISCONNECT_ABORT) ||
+        else if (AbortConnection ||
+                 (DisReq->DisconnectType & AFD_DISCONNECT_ABORT) ||
                  (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
         {
             /* Perform an abortive disconnect */
@@ -1066,6 +1143,9 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         FCB->DisconnectPending = TRUE;
         FCB->SendClosed = TRUE;
         FCB->PollState &= ~AFD_EVENT_SEND;
+        /* a reset connection stays writable: the send fails at once */
+        if (FCB->ConnectionAborted)
+            FCB->PollState |= AFD_EVENT_SEND;
 
         Status = QueueUserModeIrp(FCB, Irp, FUNCTION_DISCONNECT);
         if (Status == STATUS_PENDING)
