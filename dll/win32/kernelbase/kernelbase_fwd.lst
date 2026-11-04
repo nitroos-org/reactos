@@ -781,6 +781,7 @@
 @ GetConsoleSelectionInfo
 @ GetCurrentApplicationUserModelId
 @ GetEnabledXStateFeatures -version=0x601+ -arch=i386,x86_64
+@ GetPackageApplicationIds
 @ GetPackageFamilyNameFromToken
 @ GetPackageFullNameFromToken
 @ GetPackageId
