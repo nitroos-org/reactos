@@ -10,6 +10,11 @@
 #include <shlobj.h>
 #include <strsafe.h>
 #include <tlhelp32.h>
+#include <sddl.h>
+
+/* msiexec exit 1618 (another install running): bounded retry */
+#define MSI_BUSY_RETRIES   6
+#define MSI_BUSY_WAIT_MS   30000u
 
 /* Persisted feature state lives here (DISM /Get-Features-like, queryable). */
 static const WCHAR STATE_KEY[] =
@@ -1939,9 +1944,9 @@ static BOOL ShellDefaultsId(LPCWSTR id)
     return !_wcsicmp(id, L"powershell-7") || !_wcsicmp(id, L"firefox");
 }
 
-/* Download + install. Returns S_OK only if the installer exited 0; on success the
- * uninstall command line is recorded in the state key. */
-static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
+/* Download + install (the caller holds the install lock). Returns S_OK only if the installer exited 0;
+ * on success the uninstall command line is recorded in the state key. */
+static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
 {
     WCHAR inst[2048], uninst[2048], compFile[MAX_PATH];
     DWORD code;
@@ -1991,6 +1996,24 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
     pathBefore = HeapAlloc(GetProcessHeap(), 0, PATHSNAP_CCH * sizeof(WCHAR));
     if (pathBefore) ReadRegistryPaths(pathBefore, PATHSNAP_CCH);
     hr = RunAndWait(inst, SW_RUN_TIMEOUT_MS, &code, log);
+    if (SUCCEEDED(hr) && code == ERROR_INSTALL_ALREADY_RUNNING && wcsstr(inst, L"msiexec"))
+    {
+        /* another Windows Installer install (not featmgr's own: those are serialized by the install lock) holds
+         * the installer's single-install lock and msiexec exits 1618: retry a bounded number of times */
+        int tries;
+        for (tries = 0; tries < MSI_BUSY_RETRIES && SUCCEEDED(hr) && code == ERROR_INSTALL_ALREADY_RUNNING; tries++)
+        {
+            DWORD w;
+            LOGF(log, L"  another Windows Installer install is running (1618), retry %d of %d in %lu s\n",
+                 tries + 1, MSI_BUSY_RETRIES, MSI_BUSY_WAIT_MS / 1000);
+            FmOpStep(L"Another Windows Installer install is running, waiting to install %s (retry %d of %d)", f->Name, tries + 1, MSI_BUSY_RETRIES);
+            if (FmOpCancelHandle()) w = WaitForSingleObject(FmOpCancelHandle(), MSI_BUSY_WAIT_MS);
+            else { Sleep(MSI_BUSY_WAIT_MS); w = WAIT_TIMEOUT; }
+            if (w != WAIT_TIMEOUT) { hr = HRESULT_FROM_WIN32(ERROR_CANCELLED); SetLastMsg(L"The operation was cancelled."); break; }
+            ReportInstallStep(f, inst);
+            hr = RunAndWait(inst, SW_RUN_TIMEOUT_MS, &code, log);
+        }
+    }
     if (comp)
     {
         /* success and cancel leave no copy of the download behind; a failed installer keeps the verified file for the retry */
@@ -2072,8 +2095,8 @@ static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
     return S_OK;
 }
 
-/* Run the uninstall command recorded at install time. S_OK if there is none. */
-static HRESULT SoftwareUninstall(const FM_FEATURE *f, HKEY state, FILE *log)
+/* Run the uninstall command recorded at install time. S_OK if there is none (the caller holds the install lock). */
+static HRESULT SoftwareUninstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
 {
     WCHAR cmd[2048];
     DWORD cb = sizeof(cmd) - sizeof(WCHAR), type = 0, code;
@@ -2115,6 +2138,140 @@ static HRESULT SoftwareUninstall(const FM_FEATURE *f, HKEY state, FILE *log)
     if (f && (!_wcsicmp(f->Provider, L"component") || !_wcsicmp(f->Provider, L"rapps")) && ShellDefaultsId(f->Id))   /* back to Command Prompt / Internet Explorer when pwsh / Firefox is gone */
         FmShellDefaults(!_wcsicmp(f->Id, L"firefox") ? FM_SHELL_FORGET_BROWSER : 0, log);
     return S_OK;
+}
+
+/* ---- cross-process install lock ---------------------------------------------
+ * Two featmgr processes (first boot's optfeatures.exe /firstboot window plus a featmgr /install, or two CLI
+ * calls) must not run component installers at the same time: a second .NET setup exits 5100 while the first
+ * runs. One named mutex in the Global namespace serializes SoftwareInstall/SoftwareUninstall. Its DACL gives
+ * full access to SYSTEM and Administrators (installs need admin anyway), so a service, a CLI session and the
+ * logon session all open the same object. If the object cannot be created or opened (a foreign DACL), the
+ * operation runs unserialized as before rather than failing. */
+#define FM_INSTALL_MUTEX   L"Global\\NitroFeatmgrInstall"
+
+static HANDLE OpenInstallMutex(void)
+{
+    SECURITY_ATTRIBUTES sa;
+    HANDLE h;
+    ZeroMemory(&sa, sizeof(sa));
+    sa.nLength = sizeof(sa);
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;GA;;;SY)(A;;GA;;;BA)", SDDL_REVISION_1,
+                                                              &sa.lpSecurityDescriptor, NULL))
+        sa.lpSecurityDescriptor = NULL;
+    h = CreateMutexW(sa.lpSecurityDescriptor ? &sa : NULL, FALSE, FM_INSTALL_MUTEX);
+    if (sa.lpSecurityDescriptor) LocalFree(sa.lpSecurityDescriptor);
+    return h;
+}
+
+/* S_OK: lock held (*phMutex set, or NULL when running unserialized); ERROR_CANCELLED when cancelled while waiting.
+ * No timeout: an install can take many minutes. WAIT_ABANDONED (the holder died) counts as acquired. */
+static HRESULT AcquireInstallLock(LPCWSTR what, HANDLE *phMutex, FILE *log)
+{
+    HANDLE h, wh[2];
+    DWORD r, nwh = 1, start = 0, last = 0;
+
+    *phMutex = NULL;
+    h = OpenInstallMutex();
+    if (!h)
+    {
+        LOGF(log, L"  note: cannot open the install lock (%lu); running without it\n", GetLastError());
+        return S_OK;
+    }
+    r = WaitForSingleObject(h, 0);
+    if (r == WAIT_TIMEOUT)
+    {
+        LOGF(log, L"  another install or uninstall is running; waiting for it to finish before %s\n", what);
+        start = GetTickCount();
+        for (;;)
+        {
+            DWORD el = (GetTickCount() - start) / 1000;
+            if (!last || el >= last + 5)
+            {
+                last = el ? el : 1;
+                FmOpStep(L"Waiting for another install or uninstall to finish (%lu:%02lu), then %s", el / 60, el % 60, what);
+            }
+            wh[0] = h; nwh = 1;
+            if (FmOpCancelHandle()) wh[nwh++] = FmOpCancelHandle();
+            r = WaitForMultipleObjects(nwh, wh, FALSE, 1000);
+            if (r == WAIT_TIMEOUT) continue;
+            break;
+        }
+        if (nwh == 2 && r == WAIT_OBJECT_0 + 1)
+        {
+            CloseHandle(h);
+            SetLastMsg(L"The operation was cancelled while waiting for another install to finish.");
+            return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+        }
+        LOGF(log, L"  waited %lu s for the other install\n", (GetTickCount() - start) / 1000);
+    }
+    if (r == WAIT_ABANDONED)
+        LOGF(log, L"  note: the previous holder of the install lock ended without releasing it; continuing\n");
+    else if (r != WAIT_OBJECT_0)
+    {
+        LOGF(log, L"  note: waiting for the install lock failed (%lu); running without it\n", GetLastError());
+        CloseHandle(h);
+        return S_OK;
+    }
+    *phMutex = h;
+    return S_OK;
+}
+
+static void ReleaseInstallLock(HANDLE h)
+{
+    if (!h) return;
+    ReleaseMutex(h);
+    CloseHandle(h);
+}
+
+/* 1 installed, 0 not installed, -1 no detect rule: the component list's rule, or [Install] DetectPath / the scoop app link */
+static int DetectInstalledNow(const FM_FEATURE *f)
+{
+    WCHAR p[MAX_PATH];
+    if (!f) return -1;
+    if (f->Tier == FM_TIER_SOFTWARE && !_wcsicmp(f->Provider, L"component"))
+    {
+        FM_COMPONENT c;
+        if (!FmCompLoad(f->Id, &c) || (!c.DetectReg[0] && !c.DetectFile[0])) return -1;
+        return FmCompDetect(&c) ? 1 : 0;
+    }
+    if (f->Tier != FM_TIER_SOFTWARE || !DetectPathFor(f, p, MAX_PATH)) return -1;
+    return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES ? 1 : 0;
+}
+
+static HRESULT SoftwareInstall(const FM_FEATURE *f, HKEY state, FILE *log)
+{
+    HANDLE lock;
+    HRESULT hr = AcquireInstallLock(L"installing", &lock, log);
+
+    if (FAILED(hr)) return hr;
+    if (lock && DetectInstalledNow(f) == 1)
+    {
+        /* whoever held the lock put it there: do not run the installer again */
+        LOGF(log, L"  '%s' is already installed (by the install that just finished)\n", f->Id);
+        FmOpStep(L"%s is already installed", f->Name);
+        ReleaseInstallLock(lock);
+        return S_OK;
+    }
+    hr = SoftwareInstallRun(f, state, log);
+    ReleaseInstallLock(lock);
+    return hr;
+}
+
+static HRESULT SoftwareUninstall(const FM_FEATURE *f, HKEY state, FILE *log)
+{
+    HANDLE lock;
+    HRESULT hr = AcquireInstallLock(L"uninstalling", &lock, log);
+
+    if (FAILED(hr)) return hr;
+    if (lock && DetectInstalledNow(f) == 0)
+    {
+        LOGF(log, L"  '%s' is already removed (by the uninstall that just finished)\n", f->Id);
+        ReleaseInstallLock(lock);
+        return S_OK;
+    }
+    hr = SoftwareUninstallRun(f, state, log);
+    ReleaseInstallLock(lock);
+    return hr;
 }
 
 /* ---- enable / disable ---------------------------------------------------- */

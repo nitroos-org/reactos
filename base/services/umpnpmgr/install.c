@@ -37,6 +37,7 @@
 /* GLOBALS ******************************************************************/
 
 HANDLE hUserToken = NULL;
+CRITICAL_SECTION UserTokenLock; /* guards hUserToken: PNP_ReportLogOn writes it, InstallDevice duplicates it */
 HANDLE hInstallEvent = NULL;
 HANDLE hNoPendingInstalls = NULL;
 
@@ -49,34 +50,360 @@ DWORD
 CreatePnpInstallEventSecurity(
     _Out_ PSECURITY_DESCRIPTOR *EventSd);
 
+/* Bounds, so that an install process that dies or hangs cannot block the install queue forever */
+#define PNP_PIPE_CONNECT_TIMEOUT    (60 * 1000)         /* the process must connect within 60 s */
+#define PNP_DRVINST_TIMEOUT         (10 * 60 * 1000)    /* the service-side install gets 10 min */
+
 /* FUNCTIONS *****************************************************************/
 
+/*
+ * Waits for an overlapped operation on the install pipe, but not longer than
+ * Timeout, and not after the install process has died (it can no longer
+ * connect or read). On failure the operation is cancelled and has completed.
+ */
 static BOOL
-InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
+WaitPipeOperation(
+    _In_ HANDLE hPipe,
+    _Inout_ LPOVERLAPPED Overlapped,
+    _In_ HANDLE hProcess,
+    _In_ DWORD Timeout,
+    _In_ PCSTR Operation)
+{
+    HANDLE Handles[2];
+    DWORD Wait, Bytes;
+
+    Handles[0] = Overlapped->hEvent;
+    Handles[1] = hProcess;
+    Wait = WaitForMultipleObjects(2, Handles, FALSE, Timeout);
+    if (Wait == WAIT_OBJECT_0)
+        return GetOverlappedResult(hPipe, Overlapped, &Bytes, FALSE);
+
+    if (Wait == WAIT_TIMEOUT)
+        DPRINT1("The install process did not %s the pipe within %lu ms\n", Operation, Timeout);
+    else
+        DPRINT1("The install process exited before it could %s the pipe\n", Operation);
+
+    CancelIo(hPipe);
+    WaitForSingleObject(Overlapped->hEvent, 5000);
+    return FALSE;
+}
+
+static BOOL
+WritePipeTimeout(
+    _In_ HANDLE hPipe,
+    _In_ HANDLE hEvent,
+    _In_ HANDLE hProcess,
+    _In_reads_bytes_(Size) LPCVOID Data,
+    _In_ DWORD Size)
+{
+    OVERLAPPED Overlapped;
+    DWORD Written;
+
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Overlapped.hEvent = hEvent;
+    ResetEvent(hEvent);
+    if (WriteFile(hPipe, Data, Size, &Written, &Overlapped))
+        return TRUE;
+    if (GetLastError() != ERROR_IO_PENDING)
+        return FALSE;
+    return WaitPipeOperation(hPipe, &Overlapped, hProcess, PNP_PIPE_CONNECT_TIMEOUT, "read from");
+}
+
+/*
+ * The install pipe of a process in the user's session: SYSTEM and
+ * Administrators as before, and read access for that user only (the default
+ * DACL of the service's token does not let a standard user open it).
+ */
+static PSECURITY_DESCRIPTOR
+CreateUserPipeSecurity(
+    _In_ HANDLE hToken)
+{
+    BYTE Buffer[256];
+    PTOKEN_USER User = (PTOKEN_USER)Buffer;
+    DWORD Size;
+    LPWSTR SidString = NULL;
+    WCHAR Sddl[160];
+    PSECURITY_DESCRIPTOR Sd = NULL;
+
+    if (!GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &Size) ||
+        !ConvertSidToStringSidW(User->User.Sid, &SidString))
+    {
+        DPRINT1("Cannot get the user of the token, error %lu\n", GetLastError());
+        return NULL;
+    }
+
+    if (_snwprintf(Sddl, _countof(Sddl), L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;%s)", SidString) > 0)
+    {
+        Sddl[_countof(Sddl) - 1] = UNICODE_NULL;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(Sddl, SDDL_REVISION_1, &Sd, NULL))
+        {
+            DPRINT1("ConvertStringSecurityDescriptorToSecurityDescriptorW failed, error %lu\n", GetLastError());
+            Sd = NULL;
+        }
+    }
+
+    LocalFree(SidString);
+    return Sd;
+}
+
+
+/*
+ * Starts one install process for DeviceInstance and waits for it. With
+ * hToken == NULL the process is drvinst.exe in the service's own context
+ * (SYSTEM), with no UI, as DrvInst.exe on Windows: it does the driver search
+ * and every registry and file write of the install. Otherwise it is the
+ * newdev.dll wizard (ClientSideInstall) in the user's session, as that user.
+ * Both read the device and the UI mode (NEWDEV_UI_*) from the same pipe and
+ * signal the event on success.
+ */
+static BOOL
+RunInstallProcess(
+    _In_ PCWSTR DeviceInstance,
+    _In_opt_ HANDLE hToken,
+    _In_ DWORD UiMode,
+    _Out_opt_ PDWORD ExitCode)
 {
     BOOL DeviceInstalled = FALSE;
-    DWORD BytesWritten;
     DWORD Value;
     DWORD ErrCode;
     HANDLE hInstallEvent;
     HANDLE hPipe = INVALID_HANDLE_VALUE;
+    HANDLE hIoEvent = NULL;
+    OVERLAPPED Overlapped;
+    BOOL Abandon = FALSE, PassedAll;
+    WCHAR DrvInstPath[MAX_PATH];
+    UINT SystemDirLength;
     LPVOID Environment = NULL;
     PROCESS_INFORMATION ProcessInfo;
     STARTUPINFOW StartupInfo;
     UUID RandomUuid;
-    HKEY DeviceKey;
     SECURITY_ATTRIBUTES EventAttrs;
     PSECURITY_DESCRIPTOR EventSd;
+    SECURITY_ATTRIBUTES PipeAttrs;
+    PSECURITY_DESCRIPTOR PipeSd = NULL;
 
     /* The following lengths are constant (see below), they cannot overflow */
-    WCHAR CommandLine[116];
+    WCHAR CommandLine[MAX_PATH + 100];
     WCHAR InstallEventName[73];
     WCHAR PipeName[74];
     WCHAR UuidString[39];
 
-    DPRINT("InstallDevice(%S, %d)\n", DeviceInstance, ShowWizard);
-
     ZeroMemory(&ProcessInfo, sizeof(ProcessInfo));
+    if (ExitCode)
+        *ExitCode = ERROR_GEN_FAILURE;
+
+    /* Create a random UUID for the named pipe & event*/
+    UuidCreate(&RandomUuid);
+    _swprintf(UuidString, L"{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+        RandomUuid.Data1, RandomUuid.Data2, RandomUuid.Data3,
+        RandomUuid.Data4[0], RandomUuid.Data4[1], RandomUuid.Data4[2],
+        RandomUuid.Data4[3], RandomUuid.Data4[4], RandomUuid.Data4[5],
+        RandomUuid.Data4[6], RandomUuid.Data4[7]);
+
+    ErrCode = CreatePnpInstallEventSecurity(&EventSd);
+    if (ErrCode != ERROR_SUCCESS)
+    {
+        DPRINT1("CreatePnpInstallEventSecurity failed with error %u\n", GetLastError());
+        return FALSE;
+    }
+
+    /* Set up the security attributes for the event */
+    EventAttrs.nLength = sizeof(SECURITY_ATTRIBUTES);
+    EventAttrs.lpSecurityDescriptor = EventSd;
+    EventAttrs.bInheritHandle = FALSE;
+
+    /* Create the event */
+    wcscpy(InstallEventName, L"Global\\PNP_Device_Install_Event_0.");
+    wcscat(InstallEventName, UuidString);
+    hInstallEvent = CreateEventW(&EventAttrs, TRUE, FALSE, InstallEventName);
+    HeapFree(GetProcessHeap(), 0, EventSd);
+    if (!hInstallEvent)
+    {
+        DPRINT1("CreateEventW('%ls') failed with error %lu\n", InstallEventName, GetLastError());
+        goto cleanup;
+    }
+
+    /* Create the named pipe */
+    wcscpy(PipeName, L"\\\\.\\pipe\\PNP_Device_Install_Pipe_0.");
+    wcscat(PipeName, UuidString);
+    if (hToken)
+    {
+        PipeSd = CreateUserPipeSecurity(hToken);
+        if (!PipeSd)
+            goto cleanup;
+        PipeAttrs.nLength = sizeof(PipeAttrs);
+        PipeAttrs.lpSecurityDescriptor = PipeSd;
+        PipeAttrs.bInheritHandle = FALSE;
+    }
+    /* Overlapped, so that waiting for the install process can time out; and it must be
+       the first instance of this (random) name, so nothing else can have created it */
+    hPipe = CreateNamedPipeW(PipeName,
+                             PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                             PIPE_TYPE_BYTE, 1, 512, 512, 0, PipeSd ? &PipeAttrs : NULL);
+    if (PipeSd)
+        LocalFree(PipeSd);
+    if (hPipe == INVALID_HANDLE_VALUE)
+    {
+        DPRINT1("CreateNamedPipeW failed with error %u\n", GetLastError());
+        goto cleanup;
+    }
+
+    ZeroMemory(&StartupInfo, sizeof(StartupInfo));
+    StartupInfo.cb = sizeof(StartupInfo);
+
+    if (hToken)
+    {
+        /* Launch rundll32 to call ClientSideInstallW */
+        wcscpy(CommandLine, L"rundll32.exe newdev.dll,ClientSideInstall ");
+        wcscat(CommandLine, PipeName);
+
+        /* newdev has to run under the environment of the current user */
+        if (!CreateEnvironmentBlock(&Environment, hToken, FALSE))
+        {
+            DPRINT1("CreateEnvironmentBlock failed with error %d\n", GetLastError());
+            goto cleanup;
+        }
+
+        if (!CreateProcessAsUserW(hToken, NULL, CommandLine, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT, Environment, NULL, &StartupInfo, &ProcessInfo))
+        {
+            DPRINT1("CreateProcessAsUserW failed with error %u\n", GetLastError());
+            goto cleanup;
+        }
+    }
+    else
+    {
+        /* The service-side installer runs as SYSTEM and never shows UI. It is started by its full
+           path in the system directory, so that no search can find another program of that name. */
+        SystemDirLength = GetSystemDirectoryW(DrvInstPath, _countof(DrvInstPath));
+        if (SystemDirLength == 0 || SystemDirLength + 13 >= _countof(DrvInstPath))
+        {
+            DPRINT1("GetSystemDirectoryW failed with error %u\n", GetLastError());
+            goto cleanup;
+        }
+        wcscat(DrvInstPath, L"\\drvinst.exe");
+        _snwprintf(CommandLine, _countof(CommandLine), L"\"%s\" %s", DrvInstPath, PipeName);
+        CommandLine[_countof(CommandLine) - 1] = UNICODE_NULL;
+
+        if (!CreateProcessW(DrvInstPath, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
+        {
+            DPRINT1("CreateProcessW failed with error %u\n", GetLastError());
+            goto cleanup;
+        }
+    }
+
+    /* Wait (bounded) for the process to connect to our pipe. If it dies or hangs first, this install fails. */
+    hIoEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!hIoEvent)
+    {
+        DPRINT1("CreateEventW failed with error %u\n", GetLastError());
+        goto cleanup;
+    }
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Overlapped.hEvent = hIoEvent;
+    if (!ConnectNamedPipe(hPipe, &Overlapped))
+    {
+        ErrCode = GetLastError();
+        if (ErrCode == ERROR_IO_PENDING)
+        {
+            if (!WaitPipeOperation(hPipe, &Overlapped, ProcessInfo.hProcess, PNP_PIPE_CONNECT_TIMEOUT, "connect to"))
+            {
+                DPRINT1("Install process for '%ls' did not connect, install abandoned\n", DeviceInstance);
+                Abandon = TRUE;
+                goto cleanup;
+            }
+        }
+        else if (ErrCode != ERROR_PIPE_CONNECTED)
+        {
+            DPRINT1("ConnectNamedPipe failed with error %u\n", ErrCode);
+            goto cleanup;
+        }
+    }
+
+    /* Pass the data. The following output is partly compatible to Windows XP SP2 (researched using a modified newdev.dll to log this stuff).
+       I couldn't figure out what the UI value means under WinXP. It's usually 0 in my tests, but was also 5 once.
+       Therefore that value is entirely ReactOS-specific. We use it to pass the UI mode.
+       drvinst.exe never shows UI; for it the value says whether the wizard follows if it finds no driver. */
+    Value = sizeof(InstallEventName);
+    PassedAll = WritePipeTimeout(hPipe, hIoEvent, ProcessInfo.hProcess, &Value, sizeof(Value)) &&
+                WritePipeTimeout(hPipe, hIoEvent, ProcessInfo.hProcess, InstallEventName, Value) &&
+                WritePipeTimeout(hPipe, hIoEvent, ProcessInfo.hProcess, &UiMode, sizeof(UiMode));
+    if (PassedAll)
+    {
+        Value = (wcslen(DeviceInstance) + 1) * sizeof(WCHAR);
+        PassedAll = WritePipeTimeout(hPipe, hIoEvent, ProcessInfo.hProcess, &Value, sizeof(Value)) &&
+                    WritePipeTimeout(hPipe, hIoEvent, ProcessInfo.hProcess, DeviceInstance, Value);
+    }
+    if (!PassedAll)
+    {
+        DPRINT1("Cannot pass the device to the install process, error %u\n", GetLastError());
+        Abandon = TRUE;
+        goto cleanup;
+    }
+
+    /* Wait for the install process to finish. The service-side install is bounded; the wizard
+       and the restart page wait for the user, so they are not. */
+    if (WaitForSingleObject(ProcessInfo.hProcess, hToken ? INFINITE : PNP_DRVINST_TIMEOUT) == WAIT_TIMEOUT)
+    {
+        DPRINT1("The install of '%ls' did not finish within %lu ms, terminating it\n", DeviceInstance, PNP_DRVINST_TIMEOUT);
+        TerminateProcess(ProcessInfo.hProcess, ERROR_TIMEOUT);
+        WaitForSingleObject(ProcessInfo.hProcess, 5000);
+        if (ExitCode)
+            *ExitCode = ERROR_TIMEOUT;
+        goto cleanup;
+    }
+
+    if (ExitCode && !GetExitCodeProcess(ProcessInfo.hProcess, ExitCode))
+        *ExitCode = ERROR_GEN_FAILURE;
+
+    /* If the event got signalled, this is success. drvinst also reports success by its exit code,
+       which covers an event it could not open after the install had succeeded. */
+    DeviceInstalled = WaitForSingleObject(hInstallEvent, 0) == WAIT_OBJECT_0;
+    if (!DeviceInstalled && !hToken && ExitCode &&
+        (*ExitCode == ERROR_SUCCESS || *ExitCode == ERROR_SUCCESS_REBOOT_REQUIRED))
+        DeviceInstalled = TRUE;
+
+cleanup:
+    /* A process that failed to connect or to read is of no use any more */
+    if (Abandon && ProcessInfo.hProcess && WaitForSingleObject(ProcessInfo.hProcess, 0) == WAIT_TIMEOUT)
+    {
+        TerminateProcess(ProcessInfo.hProcess, ERROR_TIMEOUT);
+        WaitForSingleObject(ProcessInfo.hProcess, 5000);
+    }
+
+    if (hIoEvent)
+        CloseHandle(hIoEvent);
+
+    if (hInstallEvent)
+        CloseHandle(hInstallEvent);
+
+    if (hPipe != INVALID_HANDLE_VALUE)
+        CloseHandle(hPipe);
+
+    if (Environment)
+        DestroyEnvironmentBlock(Environment);
+
+    if (ProcessInfo.hProcess)
+        CloseHandle(ProcessInfo.hProcess);
+
+    if (ProcessInfo.hThread)
+        CloseHandle(ProcessInfo.hThread);
+
+    return DeviceInstalled;
+}
+
+
+static BOOL
+InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
+{
+    BOOL DeviceInstalled;
+    DWORD BytesWritten;
+    DWORD Value;
+    DWORD UiMode;
+    DWORD ExitCode = ERROR_SUCCESS;
+    HKEY DeviceKey;
+    HANDLE hToken = NULL;
+
+    DPRINT("InstallDevice(%S, %d)\n", DeviceInstance, ShowWizard);
 
     if (RegOpenKeyExW(hEnumKey,
                       DeviceInstance,
@@ -117,128 +444,44 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
 
     DPRINT1("Installing: %S\n", DeviceInstance);
 
-    /* Create a random UUID for the named pipe & event*/
-    UuidCreate(&RandomUuid);
-    _swprintf(UuidString, L"{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
-        RandomUuid.Data1, RandomUuid.Data2, RandomUuid.Data3,
-        RandomUuid.Data4[0], RandomUuid.Data4[1], RandomUuid.Data4[2],
-        RandomUuid.Data4[3], RandomUuid.Data4[4], RandomUuid.Data4[5],
-        RandomUuid.Data4[6], RandomUuid.Data4[7]);
-
-    ErrCode = CreatePnpInstallEventSecurity(&EventSd);
-    if (ErrCode != ERROR_SUCCESS)
+    /* Take the user's token once: PNP_ReportLogOn replaces and closes hUserToken on another
+       RPC thread, under UserTokenLock, so the duplicate is made under that lock too. */
+    if (ShowWizard)
     {
-        DPRINT1("CreatePnpInstallEventSecurity failed with error %u\n", GetLastError());
-        return FALSE;
-    }
-
-    /* Set up the security attributes for the event */
-    EventAttrs.nLength = sizeof(SECURITY_ATTRIBUTES);
-    EventAttrs.lpSecurityDescriptor = EventSd;
-    EventAttrs.bInheritHandle = FALSE;
-
-    /* Create the event */
-    wcscpy(InstallEventName, L"Global\\PNP_Device_Install_Event_0.");
-    wcscat(InstallEventName, UuidString);
-    hInstallEvent = CreateEventW(&EventAttrs, TRUE, FALSE, InstallEventName);
-    HeapFree(GetProcessHeap(), 0, EventSd);
-    if (!hInstallEvent)
-    {
-        DPRINT1("CreateEventW('%ls') failed with error %lu\n", InstallEventName, GetLastError());
-        goto cleanup;
-    }
-
-    /* Create the named pipe */
-    wcscpy(PipeName, L"\\\\.\\pipe\\PNP_Device_Install_Pipe_0.");
-    wcscat(PipeName, UuidString);
-    hPipe = CreateNamedPipeW(PipeName, PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE, 1, 512, 512, 0, NULL);
-    if (hPipe == INVALID_HANDLE_VALUE)
-    {
-        DPRINT1("CreateNamedPipeW failed with error %u\n", GetLastError());
-        goto cleanup;
-    }
-
-    /* Launch rundll32 to call ClientSideInstallW */
-    wcscpy(CommandLine, L"rundll32.exe newdev.dll,ClientSideInstall ");
-    wcscat(CommandLine, PipeName);
-
-    ZeroMemory(&StartupInfo, sizeof(StartupInfo));
-    StartupInfo.cb = sizeof(StartupInfo);
-
-    if (hUserToken)
-    {
-        /* newdev has to run under the environment of the current user */
-        if (!CreateEnvironmentBlock(&Environment, hUserToken, FALSE))
+        EnterCriticalSection(&UserTokenLock);
+        if (hUserToken != NULL &&
+            !DuplicateHandle(GetCurrentProcess(), hUserToken, GetCurrentProcess(), &hToken, 0, FALSE, DUPLICATE_SAME_ACCESS))
         {
-            DPRINT1("CreateEnvironmentBlock failed with error %d\n", GetLastError());
-            goto cleanup;
+            DPRINT1("Cannot duplicate the user token, error %lu\n", GetLastError());
+            hToken = NULL;
         }
-
-        if (!CreateProcessAsUserW(hUserToken, NULL, CommandLine, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT, Environment, NULL, &StartupInfo, &ProcessInfo))
-        {
-            DPRINT1("CreateProcessAsUserW failed with error %u\n", GetLastError());
-            goto cleanup;
-        }
+        LeaveCriticalSection(&UserTokenLock);
     }
-    else
+
+    /* UI is only possible in an interactive user's session */
+    UiMode = (ShowWizard && hToken != NULL) ? NEWDEV_UI_WIZARD : NEWDEV_UI_HIDDEN;
+
+    /* As on Windows: the install itself (driver search in the system INF
+       directory, class installers, registry and file writes) runs here in the
+       service context, as SYSTEM, for administrators and standard users alike. */
+    DeviceInstalled = RunInstallProcess(DeviceInstance, NULL, UiMode, &ExitCode);
+
+    if (DeviceInstalled)
     {
-        /* FIXME: This is probably not correct, I guess newdev should never be run with SYSTEM privileges.
-
-           Still, we currently do that in 2nd stage setup and probably Console mode as well, so allow it here.
-           (ShowWizard is only set to FALSE for these two modes) */
-        ASSERT(!ShowWizard);
-
-        if (!CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
-        {
-            DPRINT1("CreateProcessW failed with error %u\n", GetLastError());
-            goto cleanup;
-        }
+        /* The UI of the install stays in the user's session: the restart page */
+        if (ExitCode == ERROR_SUCCESS_REBOOT_REQUIRED && UiMode != NEWDEV_UI_HIDDEN)
+            RunInstallProcess(DeviceInstance, hToken, NEWDEV_UI_RESTART_PAGE, NULL);
     }
-
-    /* Wait for the function to connect to our pipe */
-    if (!ConnectNamedPipe(hPipe, NULL))
+    else if (UiMode == NEWDEV_UI_WIZARD)
     {
-        if (GetLastError() != ERROR_PIPE_CONNECTED)
-        {
-            DPRINT1("ConnectNamedPipe failed with error %u\n", GetLastError());
-            goto cleanup;
-        }
+        /* No driver found: the wizard lets the user point to one, in the user's
+           session and as the user. newdev.dll allows that to administrators only. */
+        DPRINT1("No driver installed for '%ws', starting the wizard\n", DeviceInstance);
+        DeviceInstalled = RunInstallProcess(DeviceInstance, hToken, NEWDEV_UI_WIZARD, NULL);
     }
 
-    /* Pass the data. The following output is partly compatible to Windows XP SP2 (researched using a modified newdev.dll to log this stuff) */
-    Value = sizeof(InstallEventName);
-    WriteFile(hPipe, &Value, sizeof(Value), &BytesWritten, NULL);
-    WriteFile(hPipe, InstallEventName, Value, &BytesWritten, NULL);
-
-    /* I couldn't figure out what the following value means under WinXP. It's usually 0 in my tests, but was also 5 once.
-       Therefore the following line is entirely ReactOS-specific. We use the value here to pass the ShowWizard variable. */
-    WriteFile(hPipe, &ShowWizard, sizeof(ShowWizard), &BytesWritten, NULL);
-
-    Value = (wcslen(DeviceInstance) + 1) * sizeof(WCHAR);
-    WriteFile(hPipe, &Value, sizeof(Value), &BytesWritten, NULL);
-    WriteFile(hPipe, DeviceInstance, Value, &BytesWritten, NULL);
-
-    /* Wait for newdev.dll to finish processing */
-    WaitForSingleObject(ProcessInfo.hProcess, INFINITE);
-
-    /* If the event got signalled, this is success */
-    DeviceInstalled = WaitForSingleObject(hInstallEvent, 0) == WAIT_OBJECT_0;
-
-cleanup:
-    if (hInstallEvent)
-        CloseHandle(hInstallEvent);
-
-    if (hPipe != INVALID_HANDLE_VALUE)
-        CloseHandle(hPipe);
-
-    if (Environment)
-        DestroyEnvironmentBlock(Environment);
-
-    if (ProcessInfo.hProcess)
-        CloseHandle(ProcessInfo.hProcess);
-
-    if (ProcessInfo.hThread)
-        CloseHandle(ProcessInfo.hThread);
+    if (hToken)
+        CloseHandle(hToken);
 
     if (!DeviceInstalled)
     {

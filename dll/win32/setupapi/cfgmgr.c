@@ -232,7 +232,8 @@ GetDeviceInstanceKeyPath(
     _Out_ PWSTR pszKeyPath,
     _Out_ PWSTR pszInstancePath,
     _In_ ULONG ulHardwareProfile,
-    _In_ ULONG ulFlags)
+    _In_ ULONG ulFlags,
+    _In_ BOOL bCreate)
 {
     PWSTR pszBuffer = NULL;
     ULONG ulType = 0;
@@ -275,6 +276,16 @@ GetDeviceInstanceKeyPath(
 
         if (ret != CR_SUCCESS)
         {
+            /* A devnode without a driver key: only a caller that creates the key (RegDisposition_OpenAlways)
+             * asks the service to make one. Opening or deleting one that is not there fails, as on
+             * Windows (measured on Windows 10 22H2: a standard user's CM_Open_DevNode_Key with
+             * RegDisposition_OpenExisting for such a devnode says CR_NO_SUCH_REGISTRY_KEY). */
+            if (!bCreate)
+            {
+                ret = CR_NO_SUCH_REGISTRY_KEY;
+                goto done;
+            }
+
             RpcTryExcept
             {
                 ret = PNP_GetClassInstance(BindingHandle,
@@ -1685,7 +1696,8 @@ CM_Delete_DevNode_Key_Ex(
                                    pszKeyPath,
                                    pszInstancePath,
                                    ulHardwareProfile,
-                                   ulFlags);
+                                   ulFlags,
+                                   FALSE);
     if (ret != CR_SUCCESS)
         goto done;
 
@@ -6781,7 +6793,8 @@ CM_Open_DevNode_Key_Ex(
                                    pszKeyPath,
                                    pszInstancePath,
                                    ulHardwareProfile,
-                                   ulFlags);
+                                   ulFlags,
+                                   Disposition == RegDisposition_OpenAlways);
     if (ret != CR_SUCCESS)
         goto done;
 
