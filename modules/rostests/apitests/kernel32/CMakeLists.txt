@@ -151,6 +151,7 @@ list(APPEND SOURCE
     lstrlen.c
     Mailslot.c
     MappedFileGrowth.c
+    FileCutAfterClose.c
     MappedViewEvict.c
     MultiByteToWideChar.c
     NamedPipeInstanceReuse.c
