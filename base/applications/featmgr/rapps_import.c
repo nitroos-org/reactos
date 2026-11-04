@@ -87,6 +87,16 @@ static BOOL GetKey(LPCWSTR file, LPCWSTR key, LPWSTR out, DWORD cch, DWORD flags
     return FALSE;
 }
 
+/* exactly n hex digits (SHA-256: 64, SHA-1: 40) */
+static BOOL IsHexDigest(LPCWSTR s, size_t n)
+{
+    size_t i;
+    if (wcslen(s) != n) return FALSE;
+    for (i = 0; i < n; i++)
+        if (!((s[i] >= L'0' && s[i] <= L'9') || (s[i] >= L'a' && s[i] <= L'f') || (s[i] >= L'A' && s[i] <= L'F'))) return FALSE;
+    return TRUE;
+}
+
 /* A package name becomes part of an id, a file name and a command line. */
 static BOOL ValidPkgName(LPCWSTR s)
 {
@@ -359,11 +369,23 @@ int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
         }
         Flatten(name); Flatten(url);
         /* a download is installed only after its hash is checked: an entry with neither SHA-256 nor SHA-1 is not offered */
-        if (!GetKey(file, L"SHA256", v, ARRAYSIZE(v), flags) && !GetKey(file, L"SHA1", v, ARRAYSIZE(v), flags))
         {
-            skip++;
-            LOGF(log, L"skip: %s (no SHA-256 or SHA-1 checksum, so it could not be verified)\n", pkg);
-            continue;
+            WCHAR h256[160], h1[160];
+            BOOL has256 = GetKey(file, L"SHA256", h256, ARRAYSIZE(h256), flags);
+            BOOL has1 = GetKey(file, L"SHA1", h1, ARRAYSIZE(h1), flags);
+            if (!has256 && !has1)
+            {
+                skip++;
+                LOGF(log, L"skip: %s (no SHA-256 or SHA-1 checksum, so it could not be verified)\n", pkg);
+                continue;
+            }
+            /* a checksum that is not a hex string of the right length can never match: the download would only fail later */
+            if ((has256 && !IsHexDigest(h256, 64)) || (has1 && !IsHexDigest(h1, 40)))
+            {
+                skip++;
+                LOGF(log, L"skip: %s (the SHA-256 / SHA-1 checksum is malformed: %d / %d hex digits expected)\n", pkg, 64, 40);
+                continue;
+            }
         }
         StringCchPrintfW(id, FM_MAX_ID, L"rapps-%s", pkg);
 
@@ -418,14 +440,20 @@ int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
         CopyKey(&o, file, L"LicenseType", L"LicenseType", flags);
         CopyKey(&o, file, L"Dependencies", L"Dependencies", flags);
         CopyKey(&o, file, L"MsiProperties", L"MsiProperties", flags);
-        if (GetSecKey(file, L"Generate", L"Files", v, ARRAYSIZE(v)))
+        /* [Generate] is imported when it has any of its keys: without a Files line the install defaults to "*.exe|*.*", but the
+         * Dir and the cleanup lists still apply (27 catalog entries have no Files line) */
         {
             static const LPCWSTR gk[] = { L"Files", L"Dir", L"Icon", L"Lnk", L"LnkParameters", L"DelFile", L"DelDir",
                                           L"DelDirEmpty", L"DelReg", L"DelRegEmpty" };
             int k;
+            BOOL any = FALSE;
+            for (k = 0; k < (int)ARRAYSIZE(gk) && !any; k++) any = GetSecKey(file, L"Generate", gk[k], v, ARRAYSIZE(v));
+            if (any)
+            {
             FmOutLine(&o, L"", L"");
             FmOutLine(&o, L"", L"[Generate]");
             for (k = 0; k < (int)ARRAYSIZE(gk); k++) CopySecKey(&o, file, L"Generate", gk[k]);
+            }
         }
         if (GetSecKey(file, L"ExeInZip", L"Exe", v, ARRAYSIZE(v)) || GetSecKey(file, L"ExeInZip", L"Installer", v, ARRAYSIZE(v)))
         {

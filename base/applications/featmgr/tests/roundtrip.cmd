@@ -539,12 +539,28 @@ call :rc0 "G7 HKCU\Software is still there"
 del /q "%LP%\FmGenOk\canary.txt" C:\fmgen-outside.txt 2>nul
 rd /s /q "%LP%\FmGenOk" 2>nul
 reg delete "%ARPK%" /f >nul 2>&1
-for %%V in (dirbang dirpf dirdots deldot deldots delreg) do call :genbad %%V
+for %%V in (dirbang dirpf dirdots) do call :genbad %%V
+rem a cleanup item the rules refuse is DROPPED with a log line; the install itself goes ahead (a leftover is safer than a failed install)
+call :gendrop deldot "FmGen Dot"
+call :gendrop deldots "FmGen Dots2"
+call :gendrop delreg "FmGen Reg"
 del /q %R%\Catalog\fmt-gen-*.ini 2>nul
 goto :gen_done
 :genbad
 %FM% /nat-install fmt-gen-%1 %GZ% > %O%\gbad-%1.txt 2>&1
 call :rc1 "G8 fmt-gen-%1 refused"
+goto :eof
+:gendrop
+rem :gendrop <fixture> "<ARP name>": the unsafe cleanup item is dropped, the install works and uninstalls clean
+%FM% /nat-install fmt-gen-%1 %GZ% > %O%\gdrop-%1.txt 2>&1
+call :rc0 "G8 fmt-gen-%1: the install goes ahead (the unsafe cleanup item is dropped, not fatal)"
+type %O%\gdrop-%1.txt >> %LOG%
+find "dropped the entry's" %O%\gdrop-%1.txt >nul
+call :rc0 "G8 fmt-gen-%1: ...the drop is logged"
+%FM% /nat-uninstall %2 %2 "-" > %O%\gdrop-%1-un.txt 2>&1
+call :rc0 "G8 fmt-gen-%1: uninstalls"
+reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\%~2" >nul 2>&1
+call :rc1 "G8 fmt-gen-%1: ...and its record is gone"
 goto :eof
 :gen_done
 call :ex "%LP%\app.exe" 0 "G9 Dir=! put nothing in the base folder"
@@ -599,7 +615,12 @@ call :rc0 "GD16 a tampered record '\..' whose parent is LocalAppData\Programs is
 call :ex "%LP%" 1 "GD17 LocalAppData\Programs is still there"
 call :ex "%LP%\FmGenDD" 0 "GD18 the app folder itself is gone"
 rem the install directory is checked in canonical form: 8.3 names, doubled or trailing separators, " ", a trailing dot
-for %%V in (dirshort dirdbl dirslash dirlpslash dirspace dirtdot dirwin deldirdots delfiledot regcrypt regnitro regclsid) do call :genbad %%V
+for %%V in (dirshort dirdbl dirslash dirlpslash dirspace dirtdot dirwin dirdefender dirwinnt dircommon dirwinapps dirnul dirnulx dircon dircom1) do call :genbad %%V
+call :gendrop deldirdots "FmGen Bad deldirdots"
+call :gendrop delfiledot "FmGen Bad delfiledot"
+call :gendrop regcrypt "FmGen Bad regcrypt"
+call :gendrop regnitro "FmGen Bad regnitro"
+call :gendrop regclsid "FmGen Bad regclsid"
 reg query "%UNK%" > %O%\gb-arp.txt 2>&1
 find /i "FmGen Bad" %O%\gb-arp.txt >nul
 call :rc1 "GB1 no refused install left an Add/Remove Programs record"
@@ -607,6 +628,165 @@ dir /b "%LP%" > %O%\gb-lp.txt 2>&1
 find /i "FmGenBad" %O%\gb-lp.txt >nul
 call :rc1 "GB2 ...or a folder"
 call :ex "%LP%\FmGenTdot" 0 "GB3 Dir=<name>. created nothing"
+rem ===== catalog compat round: system folders below Program Files, DOS device names, links (junctions), dropped cleanup items =====
+find "Windows system folder" %O%\gbad-dirdefender.txt >nul
+call :rc0 "GN1 Dir=%%ProgramFiles%%\Windows Defender\x is refused as a Windows system folder"
+find "Windows system folder" %O%\gbad-dirwinnt.txt >nul
+call :rc0 "GN2 ...Windows NT\x"
+find "Windows system folder" %O%\gbad-dircommon.txt >nul
+call :rc0 "GN3 ...Common Files\x"
+find "Windows system folder" %O%\gbad-dirwinapps.txt >nul
+call :rc0 "GN4 ...WindowsApps\x"
+call :ex "%ProgramFiles%\Windows Defender\FmGen" 0 "GN5 nothing was created in a refused system folder (Windows Defender)"
+call :ex "%ProgramFiles%\Common Files\FmGen" 0 "GN6 ...(Common Files)"
+call :ex "%ProgramFiles%\Windows NT\FmGen" 0 "GN7 ...(Windows NT)"
+call :ex "%ProgramFiles%\WindowsApps\FmGen" 0 "GN8 ...(WindowsApps)"
+find "DOS device" %O%\gbad-dirnul.txt >nul
+call :rc0 "GN9 Dir=NUL is refused by name (a DOS device), with that reason"
+find "DOS device" %O%\gbad-dirnulx.txt >nul
+call :rc0 "GN10 Dir=vendor\Nul.txt (a device name with an extension) is refused as a DOS device"
+find "DOS device" %O%\gbad-dircon.txt >nul
+call :rc0 "GN11 Dir=%%ProgramFiles%%\CON is refused as a DOS device"
+find "DOS device" %O%\gbad-dircom1.txt >nul
+call :rc0 "GN12 Dir=vendor\com1 is refused as a DOS device"
+call :ex "%LP%\FmGenBadNX" 0 "GN13 ...and no vendor folder was created for it"
+
+rem --- links: no junction in any folder below the base, at install and at uninstall
+set JT=C:\fmgen-jt
+rd /s /q %JT% 2>nul
+mkdir %JT%
+echo x> %JT%\canary.txt
+mklink /J "%LP%\FmGenJunc" %JT% > %O%\gj-mk.txt 2>&1
+if errorlevel 1 goto :gj_nolink
+%FM% /nat-install fmt-gen-dirjunc %GZ% > %O%\gj1.txt 2>&1
+call :rc1 "GJ1 Dir=junction\App is refused (a link in a folder below the base)"
+type %O%\gj1.txt >> %LOG%
+call :ex %JT%\App 0 "GJ2 ...no folder was made through the junction"
+call :ex %JT%\app.exe 0 "GJ3 ...and no file was written through it"
+rmdir "%LP%\FmGenJunc"
+mklink /J "%LP%\FmGenJuncLeaf" %JT% > %O%\gj-mk2.txt 2>&1
+%FM% /nat-install fmt-gen-dirjuncleaf %GZ% > %O%\gj2.txt 2>&1
+call :rc1 "GJ4 Dir=a junction is refused (the install folder itself is a link)"
+type %O%\gj2.txt >> %LOG%
+call :ex %JT%\app.exe 0 "GJ5 ...nothing was written into the link's target"
+call :ex %JT%\canary.txt 1 "GJ6 ...and nothing was deleted from it"
+rmdir "%LP%\FmGenJuncLeaf"
+rem uninstall, case 1: the install folder became a link after the install: the record is not trusted, nothing is deleted
+%FM% /nat-install fmt-gen-ok %GZ% > %O%\gj3.txt 2>&1
+call :rc0 "GJ7 a normal install, for the uninstall cases"
+rd /s /q "%LP%\FmGenOk" 2>nul
+mklink /J "%LP%\FmGenOk" %JT% > %O%\gj-mk3.txt 2>&1
+echo x> %JT%\app.exe
+%FM% /nat-uninstall "FmGen Ok" "FmGen Ok" "-" > %O%\gj4.txt 2>&1
+type %O%\gj4.txt >> %LOG%
+call :ex %JT%\app.exe 1 "GJ8 uninstall through an install folder that is now a link deletes nothing"
+call :ex %JT%\canary.txt 1 "GJ9 ...the target's other files are untouched"
+find "no usable install location" %O%\gj4.txt >nul
+call :rc0 "GJ10 ...and the refusal is reported"
+rmdir "%LP%\FmGenOk"
+reg delete "%ARPK%" /f >nul 2>&1
+rem uninstall, case 2: a folder inside the install became a junction: entries reached through it are refused
+%FM% /nat-install fmt-gen-ok %GZ% > %O%\gj5.txt 2>&1
+call :rc0 "GJ11 a normal install again"
+mklink /J "%LP%\FmGenOk\sub" %JT% > %O%\gj-mk4.txt 2>&1
+echo x> %JT%\victim.txt
+reg add "%ARPK%\RApps" /v F90 /t REG_SZ /d "\sub\victim.txt" /f >nul
+%FM% /nat-uninstall "FmGen Ok" "FmGen Ok" "-" > %O%\gj6.txt 2>&1
+type %O%\gj6.txt >> %LOG%
+call :ex %JT%\victim.txt 1 "GJ12 a record entry below a junction inside the install folder deletes nothing"
+find "reached through a link" %O%\gj6.txt >nul
+call :rc0 "GJ13 ...and the refusal is reported"
+call :ex "%LP%\FmGenOk\app.exe" 0 "GJ14 the install's own files were still removed"
+rmdir "%LP%\FmGenOk\sub" 2>nul
+rd /s /q "%LP%\FmGenOk" 2>nul
+reg delete "%ARPK%" /f >nul 2>&1
+goto :gj_done
+:gj_nolink
+type %O%\gj-mk.txt >> %LOG%
+call :fail "GJ0 mklink /J works in the guest (the junction cases need it)" "see gj-mk.txt"
+:gj_done
+rd /s /q %JT% 2>nul
+
+rem --- cleanup items: good ones are recorded, refused ones dropped (Classes\.txt, exefile, .., a device name, an absolute path, 2-level keys)
+echo x> C:\fmgen-abs.txt
+reg add "HKCU\Software\Classes\.txt" /v FmGenKeep /d y /f >nul
+reg add "HKCU\Software\Classes\exefile" /v FmGenKeep /d y /f >nul
+reg add "HKCU\Software\FmGenTwo" /v FmGenKeep /d y /f >nul
+%FM% /nat-install fmt-gen-dropmix %GZ% > %O%\gm1.txt 2>&1
+call :rc0 "GM1 an entry with refused cleanup items installs"
+type %O%\gm1.txt >> %LOG%
+find "DelReg item 'HKCU\Software\Classes\.txt'" %O%\gm1.txt >nul
+call :rc0 "GM2 DelReg = HKCU\Software\Classes\.txt is dropped with a log line"
+find "DelReg item 'HKCU\Software\Classes\exefile'" %O%\gm1.txt >nul
+call :rc0 "GM3 DelReg = HKCU\Software\Classes\exefile is dropped with a log line"
+find "DelReg item 'HKCU\Software\FmGenTwo'" %O%\gm1.txt >nul
+call :rc0 "GM4 a two-level vendor key (HKCU\Software\<Vendor>) is dropped with a log line"
+find "DelFile item '..\..\x'" %O%\gm1.txt >nul
+call :rc0 "GM5 DelFile = ..\..\x is dropped with a log line"
+find "DelDir item 'NUL'" %O%\gm1.txt >nul
+call :rc0 "GM6 DelDir = NUL (a device name) is dropped with a log line"
+reg query "%UNK%\FmGen DropMix\RApps" > %O%\gm-rec.txt 2>&1
+type %O%\gm-rec.txt >> %LOG%
+find "junk.txt" %O%\gm-rec.txt >nul
+call :rc0 "GM7 the good DelFile item is in the record"
+find "FmGenVend\FmGenMix" %O%\gm-rec.txt >nul
+call :rc0 "GM8 the good DelReg item (3 levels) is in the record"
+find "FmGenVend\Empty" %O%\gm-rec.txt >nul
+call :rc0 "GM9 the good DelRegEmpty item is in the record"
+find "Classes" %O%\gm-rec.txt >nul
+call :rc1 "GM10 neither Classes key is in the record"
+find "FmGenTwo" %O%\gm-rec.txt >nul
+call :rc1 "GM11 ...nor the two-level key"
+find "fmgen-abs" %O%\gm-rec.txt >nul
+call :rc1 "GM12 ...nor the absolute path"
+find "\.." %O%\gm-rec.txt >nul
+call :rc1 "GM13 ...nor a '..' item"
+%FM% /nat-uninstall "FmGen DropMix" "FmGen DropMix" "-" > %O%\gm2.txt 2>&1
+call :rc0 "GM14 uninstall"
+call :ex C:\fmgen-abs.txt 1 "GM15 the absolute path was not deleted"
+reg query "HKCU\Software\Classes\.txt" /v FmGenKeep >nul 2>&1
+call :rc0 "GM16 HKCU\Software\Classes\.txt is untouched"
+reg query "HKCU\Software\Classes\exefile" /v FmGenKeep >nul 2>&1
+call :rc0 "GM17 HKCU\Software\Classes\exefile is untouched"
+reg query "HKCU\Software\FmGenTwo" /v FmGenKeep >nul 2>&1
+call :rc0 "GM18 the two-level vendor key is untouched"
+call :ex "%LP%\FmGenDropMix" 0 "GM19 the install folder is gone"
+reg delete "HKCU\Software\Classes\.txt" /f >nul 2>&1
+reg delete "HKCU\Software\Classes\exefile" /f >nul 2>&1
+reg delete "HKCU\Software\FmGenTwo" /f >nul 2>&1
+del /q C:\fmgen-abs.txt 2>nul
+call :gendrop dropotter "FmGen DropOtter"
+call :gendrop dropvendor "FmGen DropVendor"
+call :gendrop drophkcr "FmGen DropHkcr"
+
+rem --- importer: [Generate] without a Files line keeps its Dir and cleanup lists; a malformed checksum is skipped
+%FM% /import-rapps %FX%\rapps-compat /anyarch /clean > %O%\gi-imp.txt 2>&1
+call :rc0 "GI1 the compat fixture catalog imports"
+type %O%\gi-imp.txt >> %LOG%
+find "imported 2 RAPPS entries" %O%\gi-imp.txt >nul
+call :rc0 "GI2 2 entries imported (no Files line, upper-case SHA-256)"
+find "(3 skipped)" %O%\gi-imp.txt >nul
+call :rc0 "GI3 3 skipped (SHA-1 too short, SHA-256 not hex, valid SHA-256 with a bad SHA-1)"
+find "malformed" %O%\gi-imp.txt >nul
+call :rc0 "GI4 ...with the reason"
+rem the catalog ini is UTF-16 (find cannot read it): the proof is the behaviour of an install of the imported entry
+%FM% /nat-install rapps-nofiles %GE% > %O%\gi-nat.txt 2>&1
+type %O%\gi-nat.txt >> %LOG%
+find "held none of the files" %O%\gi-nat.txt >nul
+call :rc0 "GI5 an install of it reaches the archive with the default Files (*.exe|*.*)"
+rmdir "%LP%\FmGenNoFiles" 2>nul
+%FM% /nat-install rapps-nofiles %GZ% > %O%\gi-nat2.txt 2>&1
+call :rc0 "GI6 a real install of the entry without a Files line works"
+call :ex "%LP%\FmGenNoFiles\App\app.exe" 1 "GI7 ...into its Dir (FmGenNoFiles\App), not Programs\Name"
+reg query "%UNK%\FmGen NoFiles\RApps" > %O%\gi-rec.txt 2>&1
+type %O%\gi-rec.txt >> %LOG%
+find "\.." %O%\gi-rec.txt >nul
+call :rc0 "GI8 ...and its DelDirEmpty cleanup list (the vendor folder) is in the record"
+%FM% /nat-uninstall "FmGen NoFiles" "FmGen NoFiles" "-" > %O%\gi-un.txt 2>&1
+call :rc0 "GI9 uninstall"
+call :ex "%LP%\FmGenNoFiles" 0 "GI10 ...removes the install folder and the empty vendor folder"
+%FM% /import-rapps %FX%\rapps-real /anyarch /clean > %O%\gi-imp2.txt 2>&1
+
 %FM% /nat-install fmt-gen-pfok %GZ% > %O%\gp1.txt 2>&1
 call :rc0 "GP1 Dir=%%ProgramFiles%%\<name> (strictly below Program Files) installs"
 call :ex "%ProgramFiles%\FmGenPf\app.exe" 1 "GP2 ...into its own folder"

@@ -316,6 +316,8 @@ BOOL   FmInstallDirOk(LPCWSTR dir, LPWSTR canon);      /* strictly below Program
 BOOL   FmGenRegOk(LPCWSTR spec, BOOL tree);             /* a Generate DelReg key: the app's own key under HKCU\Software / HKLM\SOFTWARE */
 BOOL   FmDeleteTree(LPCWSTR dir);                      /* recursive delete; a reparse point is removed, never entered */
 BOOL   FmSafeTreeName(LPWSTR name);                    /* archive entry name check ('/' -> '\\'); FALSE: absolute, drive, stream, ".." */
+BOOL   FmHasDeviceName(LPCWSTR path);                  /* some component is a DOS device name (NUL, CON, COM1, ..., also "NUL.txt") */
+BOOL   FmLinkBelow(LPCWSTR base, LPCWSTR path, BOOL leaf);   /* a reparse point (junction / symlink) in a component of path below base (leaf: the last one too) */
 BOOL   FmMakeParents(LPCWSTR base, LPCWSTR rel);
 BOOL   FmExtractCab(LPCWSTR cabFile, LPCWSTR outDir, BOOL tree, int *count);   /* CREATE_NEW into a directory the caller made */
 HRESULT FmRappsFetchDb(LPCWSTR urlOverride, FILE *log);  /* download + extract; the old entries are replaced only when the new ones are complete */

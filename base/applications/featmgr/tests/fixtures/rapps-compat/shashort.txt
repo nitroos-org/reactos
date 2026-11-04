@@ -1,0 +1,7 @@
+[Section]
+Name = FmGen ShaShort
+Version = 1.0
+Category = 12
+URLDownload = https://example.invalid/shashort.zip
+SHA1 = 5c37425065c4be5ab8c071102f944080abeeba1
+Installer = Generate

@@ -1,0 +1,7 @@
+[Section]
+Name = FmGen ShaNonHex
+Version = 1.0
+Category = 12
+URLDownload = https://example.invalid/shanonhex.zip
+SHA256 = 0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789ABCDEg
+Installer = Generate
