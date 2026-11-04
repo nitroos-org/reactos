@@ -1918,6 +1918,54 @@ NtQueryInformationProcess(
             break;
         }
 
+        /* Mitigation policy: only the system call disable policy (Win32k lockdown) is kept here */
+        case ProcessMitigationPolicy:
+        {
+            PS_MITIGATION_POLICY_REQUEST Request;
+
+            /* Set the return length */
+            Length = sizeof(Request);
+
+            _SEH2_TRY
+            {
+                Request = *(PPS_MITIGATION_POLICY_REQUEST)ProcessInformation;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+                _SEH2_YIELD(break);
+            }
+            _SEH2_END;
+
+            if (Request.Policy != PS_MITIGATION_SYSTEM_CALL_DISABLE)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            Status = ObReferenceObjectByHandle(ProcessHandle,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+                                               PsProcessType,
+                                               PreviousMode,
+                                               (PVOID*)&Process,
+                                               NULL);
+            if (!NT_SUCCESS(Status)) break;
+
+            Request.Flags = (Process->Flags & PSF_DISALLOW_WIN32K_BIT) ? PS_MITIGATION_DISALLOW_WIN32K : 0;
+            ObDereferenceObject(Process);
+
+            _SEH2_TRY
+            {
+                *(PPS_MITIGATION_POLICY_REQUEST)ProcessInformation = Request;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            break;
+        }
+
         case ProcessExecuteFlags:
         {
             ULONG ExecuteOptions = 0;
@@ -3231,6 +3279,58 @@ NtSetInformationProcess(
 #endif
             /* Done */
             break;
+
+        /* Mitigation policy: the Win32k lockdown can be turned on, never off */
+        case ProcessMitigationPolicy:
+        {
+            PS_MITIGATION_POLICY_REQUEST Request;
+
+            _SEH2_TRY
+            {
+                Request = *(PPS_MITIGATION_POLICY_REQUEST)ProcessInformation;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+                _SEH2_YIELD(break);
+            }
+            _SEH2_END;
+
+            if (Request.Policy != PS_MITIGATION_SYSTEM_CALL_DISABLE ||
+                (Request.Flags & ~0x3))
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            /*
+             * Measured on Windows 10: the request is accepted by a process that has made no Win32k call yet, which
+             * is the case of a child of the creator before it runs, and fails with ERROR_WRITE_PROTECT once the
+             * process has used Win32k. Asking for what is already so is always accepted.
+             */
+            if ((Request.Flags & PS_MITIGATION_DISALLOW_WIN32K) == (Process->Flags & PSF_DISALLOW_WIN32K_BIT ? PS_MITIGATION_DISALLOW_WIN32K : 0) &&
+                !(Request.Flags & 2))
+            {
+                break;
+            }
+
+            if (Process->Win32Process != NULL)
+            {
+                Status = STATUS_MEDIA_WRITE_PROTECTED;
+                break;
+            }
+
+            if (Request.Flags & PS_MITIGATION_DISALLOW_WIN32K)
+            {
+                PspSetProcessFlag(Process, PSF_DISALLOW_WIN32K_BIT);
+            }
+            else if (Process->Flags & PSF_DISALLOW_WIN32K_BIT)
+            {
+                /* The lockdown cannot be taken back */
+                Status = STATUS_ACCESS_DENIED;
+            }
+            break;
+        }
 
         case ProcessExecuteFlags:
 
