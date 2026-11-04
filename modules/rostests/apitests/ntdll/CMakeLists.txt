@@ -138,6 +138,7 @@ list(APPEND SOURCE
     NtQuerySystemProcessInformationTail.c
     NtQueryValueKey.c
     NtQueryVirtualMemory.c
+    NtQueryVirtualMemoryRegion.c
     NtQueryVolumeInformationFile.c
     NtRaiseHardErrorMode.c
     NtReadFile.c

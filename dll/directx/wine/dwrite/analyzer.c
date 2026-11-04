@@ -217,19 +217,28 @@ static const struct fallback_description
     const WCHAR *families;
     const WCHAR *locale;
 }
+/* Entries are tried in order, a family list is tried left to right and the first family that has the character wins.
+   Besides the upstream Noto names, the lists name the fonts NitroOS ships in %WINDIR%\Fonts (media/fonts):
+   Noto Sans SC / Noto Sans KR (Han, kana, Hangul; the SC subset has no Hangul), Noto Emoji (monochrome),
+   Noto Sans Symbols 2, Tahoma (Latin, Greek, Cyrillic, Hebrew, Arabic) and FreeSans (Hebrew, Armenian, Georgian,
+   Devanagari, Bengali).  Nothing shipped covers Thai, Lao, Khmer, Tamil and the other Indic scripts, those stay
+   unmapped.  A family that is not installed is skipped.  Keep at most 4 families per entry. */
 system_fallback_config[] =
 {
     /* Latin, Combining Diacritical Marks */
     { "0000-007F, 0080-00FF, 0100-017F, 0180-024F, "
       "0250-02AF, 02B0-02FF, 0300-036F", L"Tahoma" },
 
-    { "0530-058F, FB10-FB1C",   L"Noto Sans Armenian" },
+    /* Greek, Cyrillic, Greek Extended */
+    { "0370-03FF, 0400-052F, 1F00-1FFF", L"Tahoma, FreeSans" },
 
-    { "0590-05FF, FB1D-FB4F",   L"Noto Sans Hebrew" },
+    { "0530-058F, FB10-FB1C",   L"Noto Sans Armenian, FreeSans" },
+
+    { "0590-05FF, FB1D-FB4F",   L"Noto Sans Hebrew, Tahoma, FreeSans" },
 
     { "0600-06FF, 0750-077F, "
       "08A0-08FF, FB50-FDCF, "
-      "FDF0-FDFF, FE70-FEFE",   L"Noto Sans Arabic" },
+      "FDF0-FDFF, FE70-FEFE",   L"Noto Sans Arabic, Tahoma" },
 
     { "0700-074F",              L"Noto Sans Syriac" },
     { "0780-07BF",              L"Noto Sans Thaana" },
@@ -237,8 +246,8 @@ system_fallback_config[] =
     { "0800-083F",              L"Noto Sans Samaritan" },
     { "0840-085F",              L"Noto Sans Mandaic" },
 
-    { "0900-097F",              L"Noto Sans Devanagari" },
-    { "0980-09FF",              L"Noto Sans Bengali" },
+    { "0900-097F",              L"Noto Sans Devanagari, FreeSans" },
+    { "0980-09FF",              L"Noto Sans Bengali, FreeSans" },
     { "0A00-0A7F",              L"Noto Sans Gurmukhi" },
     { "0A80-0AFF",              L"Noto Sans Gujarati" },
     { "0B00-0B7F",              L"Noto Sans Oriya" },
@@ -255,7 +264,7 @@ system_fallback_config[] =
 
     { "1000-109F, A9E0-A9FF, AA60-AA7F", L"Noto Sans Myanmar" },
 
-    { "10A0-10FF, 2D00-2D2F",   L"Noto Sans Georgian" },
+    { "10A0-10FF, 2D00-2D2F",   L"Noto Sans Georgian, FreeSans" },
 
     /* Hangul Jamo               - 1100-11FF
        Hangul Compatibility Jamo - 3130-318F
@@ -268,7 +277,21 @@ system_fallback_config[] =
     { "1100-11FF, 3130-318F, "
       "3200-321F, 3260-327F, "
       "A960-A97F, AC00-D7FF, "
-      "D7B0-D7FF",              L"Noto Sans CJK KR" },
+      "D7B0-D7FF",              L"Noto Sans CJK KR, Noto Sans KR" },
+
+    /* Mahjong, cards, enclosed alphanumerics, pictographs, emoticons, transport, supplemental symbols.
+       Variation selectors must stay unmapped: Windows does not map them on their own and winetest checks that. */
+    { "1F000-1FAFF",            L"Noto Emoji, Noto Sans Symbols 2" },
+
+    /* General Punctuation, Currency, Letterlike, Number Forms */
+    { "2000-206F, 20A0-20CF, "
+      "2100-218F",              L"Tahoma, Noto Sans SC" },
+
+    /* Arrows, Math Operators, Misc Technical, Box Drawing, Geometric Shapes, Misc Symbols, Dingbats, Braille,
+       Supplemental Arrows and Misc Symbols and Arrows */
+    { "2190-23FF, 2460-24FF, "
+      "2500-27FF, 2800-28FF, "
+      "2900-2BFF",              L"Noto Sans Symbols 2, Noto Emoji, Noto Sans SC" },
 
     { "1680-169F",              L"Noto Sans Ogham" },
 
@@ -297,27 +320,28 @@ system_fallback_config[] =
 
     /* CJK Radicals Supplement - 2E80-2EFF */
 
-    { "2E80-2EFF",              L"Noto Sans CJK SC", L"zh-Hans" },
-    { "2E80-2EFF",              L"Noto Sans CJK TC", L"zh-Hant" },
-    { "2E80-2EFF",              L"Noto Sans CJK KR", L"ko" },
+    { "2E80-2EFF",              L"Noto Sans CJK SC, Noto Sans SC", L"zh-Hans" },
+    { "2E80-2EFF",              L"Noto Sans CJK TC, Noto Sans SC", L"zh-Hant" },
+    { "2E80-2EFF",              L"Noto Sans CJK KR, Noto Sans KR, Noto Sans SC", L"ko" },
 
     /* CJK Symbols and Punctuation - 3000-303F
        Hiragana                    - 3040-309F
        Katakana                    - 30A0-30FF
        Katakana Phonetic Ext.      - 31F0-31FF */
 
-    { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK SC", L"zh-Hans" },
-    { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK TC", L"zh-Hant" },
-    { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK KR", L"ko" },
-    { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK JP" },
+    { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK SC, Noto Sans SC", L"zh-Hans" },
+    { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK TC, Noto Sans SC", L"zh-Hant" },
+    { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK KR, Noto Sans KR, Noto Sans SC", L"ko" },
+    { "3000-30FF, 31F0-31FF, "
+      "3200-33FF",              L"Noto Sans CJK JP, Noto Sans SC, Noto Sans KR" },
 
     /* CJK Unified Ext A - 3400-4DBF
        CJK Unified       - 4E00-9FFF */
 
-    { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK SC", L"zh-Hans" },
-    { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK TC", L"zh-Hant" },
-    { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK KR", L"ko" },
-    { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK JP" },
+    { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK SC, Noto Sans SC", L"zh-Hans" },
+    { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK TC, Noto Sans SC", L"zh-Hant" },
+    { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK KR, Noto Sans KR, Noto Sans SC", L"ko" },
+    { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK JP, Noto Sans SC, Noto Sans KR" },
 
     { "A000-A4CF",              L"Noto Sans Yi" },
     { "A4D0-A4FF",              L"Noto Sans Lisu" },
@@ -333,30 +357,30 @@ system_fallback_config[] =
 
     /* CJK Compatibility Ideographs - F900-FAFF */
 
-    { "F900-FAFF",              L"Noto Sans CJK SC", L"zh-Hans" },
-    { "F900-FAFF",              L"Noto Sans CJK TC", L"zh-Hant" },
-    { "F900-FAFF",              L"Noto Sans CJK KR", L"ko" },
-    { "F900-FAFF",              L"Noto Sans CJK JP" },
+    { "F900-FAFF",              L"Noto Sans CJK SC, Noto Sans SC", L"zh-Hans" },
+    { "F900-FAFF",              L"Noto Sans CJK TC, Noto Sans SC", L"zh-Hant" },
+    { "F900-FAFF",              L"Noto Sans CJK KR, Noto Sans KR, Noto Sans SC", L"ko" },
+    { "F900-FAFF",              L"Noto Sans CJK JP, Noto Sans SC, Noto Sans KR" },
 
     /* Vertical Forms - FE10-FE1F */
 
-    { "FE10-FE1F",              L"Noto Sans CJK SC", L"zh-Hans" },
-    { "FE10-FE1F",              L"Noto Sans CJK KR", L"ko" },
-    { "FE10-FE1F",              L"Noto Sans CJK TC" },
+    { "FE10-FE1F",              L"Noto Sans CJK SC, Noto Sans SC", L"zh-Hans" },
+    { "FE10-FE1F",              L"Noto Sans CJK KR, Noto Sans KR, Noto Sans SC", L"ko" },
+    { "FE10-FE1F",              L"Noto Sans CJK TC, Noto Sans SC" },
 
     /* CJK Compatibility Forms - FE30-FE4F
        Small Form Variants     - FE50-FE6F */
 
-    { "FE30-FE6F",              L"Noto Sans CJK SC", L"zh-Hans" },
-    { "FE30-FE6F",              L"Noto Sans CJK KR", L"ko" },
-    { "FE30-FE6F",              L"Noto Sans CJK JP", L"ja" },
-    { "FE30-FE6F",              L"Noto Sans CJK TC" },
+    { "FE30-FE6F",              L"Noto Sans CJK SC, Noto Sans SC", L"zh-Hans" },
+    { "FE30-FE6F",              L"Noto Sans CJK KR, Noto Sans KR, Noto Sans SC", L"ko" },
+    { "FE30-FE6F",              L"Noto Sans CJK JP, Noto Sans SC", L"ja" },
+    { "FE30-FE6F",              L"Noto Sans CJK TC, Noto Sans SC" },
 
     /* Halfwidth and Fullwidth Forms */
-    { "FF00-FFEF",              L"Noto Sans CJK SC", L"zh-Hans" },
-    { "FF00-FFEF",              L"Noto Sans CJK TC", L"zh-Hant" },
-    { "FF00-FFEF",              L"Noto Sans CJK KR", L"ko" },
-    { "FF00-FFEF",              L"Noto Sans CJK JP" },
+    { "FF00-FFEF",              L"Noto Sans CJK SC, Noto Sans SC", L"zh-Hans" },
+    { "FF00-FFEF",              L"Noto Sans CJK TC, Noto Sans SC", L"zh-Hant" },
+    { "FF00-FFEF",              L"Noto Sans CJK KR, Noto Sans KR, Noto Sans SC", L"ko" },
+    { "FF00-FFEF",              L"Noto Sans CJK JP, Noto Sans SC, Noto Sans KR" },
 };
 
 struct text_source_context
@@ -2411,7 +2435,7 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
     const struct fallback_data *data;
     const WCHAR *locale_name = NULL;
     struct fallback_locale *locale;
-    UINT32 i, length = 0, mapped;
+    UINT32 i, length = 0, mapped, supported;
     IDWriteFont3 *font;
     HRESULT hr;
 
@@ -2455,14 +2479,16 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
         if (SUCCEEDED(create_matching_font(mapping->collection ? mapping->collection : fallback->systemcollection,
                 mapping->families[i], weight, style, stretch, &IID_IDWriteFont3, (void **)&font)))
         {
-            if (!(mapped = fallback_font_get_supported_length(font, source, position, mapped)))
+            /* Do not clobber the run length when this family does not have the character, the next family
+               in the list has to be tried with the full length. */
+            if (!(supported = fallback_font_get_supported_length(font, source, position, mapped)))
             {
                 IDWriteFont3_Release(font);
                 continue;
             }
 
             *ret_font = (IDWriteFont *)font;
-            *ret_length = mapped;
+            *ret_length = supported;
             *scale = mapping->scale;
 
             return S_OK;

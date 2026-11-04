@@ -161,6 +161,8 @@ typedef struct _CONSOLE_VT_STATE
     WCHAR   OscString[CONSOLE_VT_MAX_OSC];
 
     USHORT  DefaultAttrib;          /* Attribute restored by SGR 0, 39 and 49 */
+    ULONG   ExtFore;                /* Extended (256 / 24-bit) colors set by SGR, CONSOLE_EXTCOLOR_MAKE or 0 */
+    ULONG   ExtBack;
     BOOLEAN Bold;                   /* SGR 1 */
     BOOLEAN BoldBright;             /* The foreground intensity bit comes from Bold */
     BOOLEAN DecGraphics;            /* G0 is the DEC special graphics character set */
@@ -182,6 +184,8 @@ typedef struct _CONSOLE_VT_STATE
     USHORT  AltMainVirtualY;
     COORD   AltMainCursor;
     COORD   AltMainViewOrigin;
+    PCONSOLE_EXT_CELL AltMainExt;   /* Extended colors of the saved main buffer, or NULL */
+    ULONG   AltMainExtCount;
 } CONSOLE_VT_STATE, *PCONSOLE_VT_STATE;
 
 typedef struct _TEXTMODE_SCREEN_BUFFER
@@ -200,6 +204,17 @@ typedef struct _TEXTMODE_SCREEN_BUFFER
     PCHAR_INFO ScrollRows;      /* CONSOLE_SCROLLBACK_ROWS rows of ScrollWidth cells (a ring), or NULL */
     ULONG      ScrollWidth;
     ULONGLONG  ScrollTotal;     /* Rows scrolled off the top since the buffer exists */
+
+    /*
+     * Extended colors (see ConsolepGetExtColors): one entry per cell of Buffer, same index, only
+     * allocated once a virtual terminal sequence sets a 256-color or 24-bit color. ScrollExt is
+     * the same for the rows of ScrollRows. ExtraBytes is what the buffer holds of these (and of
+     * ScrollRows), which counts against the limits of the console and of the server.
+     */
+    PCONSOLE_EXT_CELL ExtCells;
+    ULONG      ExtCount;        /* entries of ExtCells (must be the number of cells of Buffer to be used) */
+    PCONSOLE_EXT_CELL ScrollExt;
+    SIZE_T     ExtraBytes;
 } TEXTMODE_SCREEN_BUFFER, *PTEXTMODE_SCREEN_BUFFER;
 
 
@@ -402,6 +417,14 @@ do { \
 /* conoutput.c */
 PCHAR_INFO ConioCoordToPointer(PTEXTMODE_SCREEN_BUFFER Buff, ULONG X, ULONG Y);
 VOID ConioRecordScrolledRows(PTEXTMODE_SCREEN_BUFFER Buff, ULONG Rows);
+VOID ConioDropScrollback(PTEXTMODE_SCREEN_BUFFER Buff);
+BOOLEAN ConioEnableScrollback(PTEXTMODE_SCREEN_BUFFER Buff, ULONG Width);
+PVOID ConioAllocExtra(PTEXTMODE_SCREEN_BUFFER Buff, SIZE_T Size);
+VOID ConioFreeExtra(PTEXTMODE_SCREEN_BUFFER Buff, PVOID Memory, SIZE_T Size);
+VOID ConioStampExt(PTEXTMODE_SCREEN_BUFFER Buff, PCHAR_INFO Ptr);
+VOID ConioClearExt(PTEXTMODE_SCREEN_BUFFER Buff, PCHAR_INFO Ptr, ULONG Count);
+VOID ConioMoveExt(PTEXTMODE_SCREEN_BUFFER Buff, PCHAR_INFO Dst, PCHAR_INFO Src, ULONG Count);
+BOOLEAN ConioExtIsUsable(PTEXTMODE_SCREEN_BUFFER Buff);
 NTSTATUS ConioResizeBuffer(PCONSOLE Console,
                            PTEXTMODE_SCREEN_BUFFER ScreenBuffer,
                            COORD Size);

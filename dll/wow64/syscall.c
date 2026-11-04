@@ -1722,6 +1722,42 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             if (!IsCurrentProcess(Process)) UNSUPPORTED(MODE, 3);
             return SectionName32(Process, a[1], a[3], a[4], a[5], Cleanup);
         }
+        if (a[2] == MemoryRegionInformation)
+        {
+            /* The 32-bit layout is seven ULONGs; as on Windows (measured on Windows 10 22H2) the whole
+             * structure is required, a null buffer is not written (and succeeds), and a bad ReturnLength
+             * is ignored */
+            MEMORY_REGION_INFORMATION Region;
+            struct { ULONG AllocationBase, AllocationProtect, RegionType, RegionSize, CommitSize, PartitionId,
+                     NodePreference; } *Region32 = P(3);
+            if (a[4] < sizeof(*Region32)) return STATUS_INFO_LENGTH_MISMATCH;
+            if ((ULONG64)a[1] > (ULONG64)Wow64HighestUserAddress) return STATUS_INVALID_PARAMETER;
+            if (a[3]) ProbeOutput(a[3], sizeof(*Region32));
+            Status = NtQueryVirtualMemory(H(0), P(1), MemoryRegionInformation, &Region, sizeof(Region), NULL);
+            if (!NT_SUCCESS(Status)) return Status;
+            if (a[3])
+            {
+                Region32->AllocationBase = PtrToUlong(Region.AllocationBase);
+                Region32->AllocationProtect = Region.AllocationProtect;
+                Region32->RegionType = Region.RegionType;
+                Region32->RegionSize = (ULONG)min(Region.RegionSize, (SIZE_T)MAXULONG);
+                Region32->CommitSize = (ULONG)min(Region.CommitSize, (SIZE_T)MAXULONG);
+                Region32->PartitionId = (ULONG)Region.PartitionId;
+                Region32->NodePreference = (ULONG)Region.NodePreference;
+            }
+            if (a[5])
+            {
+                _SEH2_TRY
+                {
+                    U(5) = sizeof(*Region32);
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                }
+                _SEH2_END;
+            }
+            return STATUS_SUCCESS;
+        }
         if (a[2] != MemoryBasicInformation) UNSUPPORTED(CLASS, a[2]);
         if (a[4] < sizeof(*Info32)) return STATUS_INFO_LENGTH_MISMATCH;
         Status = NtQueryVirtualMemory(H(0), P(1), a[2], &Info, sizeof(Info), NULL);

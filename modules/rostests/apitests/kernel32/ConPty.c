@@ -166,6 +166,70 @@ RunScrollHelper(BOOL Paced)
     Sleep(500);
 }
 
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
+
+/* Runs inside the pseudoconsole: write 256-color and 24-bit color sequences (SGR 38/48 ; 5 / 2) and
+ * report the attributes the 16-color console API gives for those cells: the nearest console color
+ * (what a Windows console shows) must come back from ReadConsoleOutput. */
+static VOID
+RunColorsHelper(VOID)
+{
+    static const CHAR Text[] =
+        "\x1b[38;2;255;0;0mRGBF\x1b[0m \x1b[48;2;0;0;255mRGBB\x1b[0m \x1b[38;5;196mIDXF\x1b[0m "
+        "\x1b[48;5;21mIDXB\x1b[0m \x1b[38;5;9mLOW\x1b[0m \x1b[31mLEG\x1b[0m\r\n";
+    static const SHORT Columns[6] = {0, 5, 10, 15, 20, 24};
+    HANDLE Output = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO Info;
+    CHAR_INFO Cells[40];
+    COORD Size = {40, 1}, Origin = {0, 0};
+    SMALL_RECT Region;
+    CHAR Report[128];
+    DWORD Mode = 0, Written, Index;
+
+    GetConsoleMode(Output, &Mode);
+    SetConsoleMode(Output, Mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    GetConsoleScreenBufferInfo(Output, &Info);
+    WriteFile(Output, Text, lstrlenA(Text), &Written, NULL);
+    Region.Left = 0;
+    Region.Right = 39;
+    Region.Top = Region.Bottom = Info.dwCursorPosition.Y;
+    if (!ReadConsoleOutputW(Output, Cells, Size, Origin, &Region))
+    {
+        ConsoleSay("COLORS=error\r\n");
+        return;
+    }
+    StringCchCopyA(Report, sizeof(Report), "COLORS=");
+    for (Index = 0; Index < 6; ++Index)
+        StringCchPrintfA(Report + lstrlenA(Report), sizeof(Report) - lstrlenA(Report), "%04X,", Cells[Columns[Index]].Attributes);
+    StringCchCatA(Report, sizeof(Report), "\r\nCOLOREND\r\n");
+    ConsoleSay(Report);
+    Sleep(500);
+}
+
+#define COLOR_LINES 60
+
+/* Runs inside the pseudoconsole: COLOR_LINES lines (more than the 25 rows of the pseudoconsole), each
+ * in a 24-bit color of its own, so that most of them scroll off before the host looks. */
+static VOID
+RunColorScrollHelper(VOID)
+{
+    HANDLE Output = GetStdHandle(STD_OUTPUT_HANDLE);
+    CHAR Text[96];
+    DWORD Mode = 0, Index, Written;
+
+    GetConsoleMode(Output, &Mode);
+    SetConsoleMode(Output, Mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    for (Index = 1; Index <= COLOR_LINES; ++Index)
+    {
+        StringCchPrintfA(Text, sizeof(Text), "\x1b[38;2;%lu;99;7mCSROW%02lu\x1b[0m\r\n", 100 + Index, Index);
+        WriteFile(Output, Text, lstrlenA(Text), &Written, NULL);
+    }
+    ConsoleSay("COLOREND\r\n");
+    Sleep(500);
+}
+
 #ifndef ENABLE_VIRTUAL_TERMINAL_INPUT
 #define ENABLE_VIRTUAL_TERMINAL_INPUT 0x0200
 #endif
@@ -903,6 +967,113 @@ Done:
     if (Text) HeapFree(GetProcessHeap(), 0, Text);
 }
 
+/* Read what a helper writes until COLOREND (and a little after, for the final paint). */
+static DWORD
+ReadUntilColorEnd(HANDLE OutRead, CHAR *Text, DWORD Size)
+{
+    DWORD Used = 0, Available, Count, Start;
+
+    for (Start = GetTickCount(); GetTickCount() - Start < 30000; Sleep(10))
+    {
+        Available = 0;
+        if (!PeekNamedPipe(OutRead, NULL, 0, NULL, &Available, NULL)) break;
+        if (!Available) continue;
+        if (Available > Size - 1 - Used) Available = Size - 1 - Used;
+        if (!Available || !ReadFile(OutRead, Text + Used, Available, &Count, NULL)) break;
+        Used += Count;
+        Text[Used] = 0;
+        if (strstr(Text, "COLOREND")) { Sleep(400); break; }
+    }
+    Available = 0;
+    if (PeekNamedPipe(OutRead, NULL, 0, NULL, &Available, NULL) && Available && Available < Size - 1 - Used &&
+        ReadFile(OutRead, Text + Used, Available, &Count, NULL))
+        Used += Count;
+    Text[Used] = 0;
+    return Used;
+}
+
+/* 256-color and 24-bit colors written by a client travel to the terminal as such (SGR 38/48 ; 5 / 2),
+ * while the 16-color console API still sees the nearest console color; colors of rows that scrolled
+ * off before the host looked are kept too. */
+static VOID
+CheckExtendedColors(PCWSTR ExePath, BOOL Scrolled)
+{
+    HANDLE InRead = NULL, InWrite = NULL, OutRead = NULL, OutWrite = NULL;
+    PROCESS_INFORMATION Child;
+    WCHAR Command[MAX_PATH * 2];
+    COORD Size = {80, 25};
+    PVOID Pty = NULL;
+    HRESULT Status;
+    CHAR *Text;
+    DWORD Used, Index, Found = 0;
+
+    Text = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 1024 * 1024);
+    if (!Text || !CreatePipe(&InRead, &InWrite, NULL, 0) || !CreatePipe(&OutRead, &OutWrite, NULL, 0))
+    {
+        ok(FALSE, "Setup failed\n");
+        goto Done;
+    }
+    Status = CreatePty(Size, InRead, OutWrite, 0, &Pty);
+    ok(Status == S_OK, "CreatePseudoConsole failed: %08lx\n", Status);
+    if (Status != S_OK) goto Done;
+    StringCchPrintfW(Command, _countof(Command), L"\"%ls\" ConPty helper-%hs", ExePath, Scrolled ? "colorscroll" : "colors");
+    if (!SpawnWithPty(Pty, Command, FALSE, &Child))
+    {
+        ok(FALSE, "CreateProcess with the pseudoconsole failed: %lu\n", GetLastError());
+        goto Done;
+    }
+    Used = ReadUntilColorEnd(OutRead, Text, 1024 * 1024);
+    if (Scrolled)
+    {
+        for (Index = 1; Index <= COLOR_LINES; ++Index)
+        {
+            CHAR Color[40];
+
+            StringCchPrintfA(Color, sizeof(Color), "38;2;%lu;99;7;", 100 + Index);
+            if (strstr(Text, Color)) ++Found;
+        }
+        trace("%lu of %u row colors reached the terminal (%lu bytes)\n", Found, COLOR_LINES, Used);
+        ok(Found == COLOR_LINES, "Only %lu of %u 24-bit row colors reached the terminal\n", Found, COLOR_LINES);
+    }
+    else
+    {
+        const CHAR *Report = strstr(Text, "COLORS=");
+        UINT Attr[6] = {0};
+
+        ok(strstr(Text, "38;2;255;0;0") != NULL, "The 24-bit foreground did not reach the terminal\n");
+        ok(strstr(Text, "48;2;0;0;255") != NULL, "The 24-bit background did not reach the terminal\n");
+        ok(strstr(Text, "38;5;196") != NULL, "The 256-color foreground did not reach the terminal\n");
+        ok(strstr(Text, "48;5;21") != NULL, "The 256-color background did not reach the terminal\n");
+        /* the first 16 palette entries and plain SGR stay the console colors */
+        ok(strstr(Text, "\033[91;") != NULL, "38;5;9 did not stay the bright red console color\n");
+        ok(strstr(Text, "\033[31;") != NULL, "SGR 31 did not stay the red console color\n");
+        ok(!strstr(Text, "38;5;9m") && !strstr(Text, "38;5;9;"), "38;5;9 was sent as a palette color\n");
+        ok(Report != NULL, "The helper did not report\n");
+        if (Report && sscanf(Report, "COLORS=%x,%x,%x,%x,%x,%x,", &Attr[0], &Attr[1], &Attr[2], &Attr[3], &Attr[4], &Attr[5]) == 6)
+        {
+            /* the nearest of the 16 console colors, whatever the color table: red, blue, red, blue, bright red, red */
+            ok((Attr[0] & 7) == FOREGROUND_RED, "RGB foreground: attribute %04x\n", Attr[0]);
+            ok(((Attr[1] >> 4) & 7) == 1, "RGB background: attribute %04x\n", Attr[1]);
+            ok((Attr[2] & 7) == FOREGROUND_RED, "256 foreground: attribute %04x\n", Attr[2]);
+            ok(((Attr[3] >> 4) & 7) == 1, "256 background: attribute %04x\n", Attr[3]);
+            ok((Attr[4] & 0xF) == (FOREGROUND_RED | FOREGROUND_INTENSITY), "palette 9: attribute %04x\n", Attr[4]);
+            ok((Attr[5] & 0xF) == FOREGROUND_RED, "SGR 31: attribute %04x\n", Attr[5]);
+        }
+        else
+            ok(FALSE, "No usable report of the attributes\n");
+    }
+    WaitForSingleObject(Child.hProcess, 8000);
+    CloseHandle(Child.hThread);
+    CloseHandle(Child.hProcess);
+Done:
+    if (Pty) ClosePty(Pty);
+    if (InRead) CloseHandle(InRead);
+    if (InWrite) CloseHandle(InWrite);
+    if (OutRead) CloseHandle(OutRead);
+    if (OutWrite) CloseHandle(OutWrite);
+    if (Text) HeapFree(GetProcessHeap(), 0, Text);
+}
+
 /* Bytes typed in the terminal become key events as Windows reports them: Ctrl+O is VK 'O' with
  * LEFT_CTRL_PRESSED and the character 0x0F, U+1F600 (UTF-8 F0 9F 98 80) is two events, one per
  * UTF-16 unit. */
@@ -1091,6 +1262,16 @@ START_TEST(ConPty)
             RunScrollHelper(!strcmp(argv[2], "helper-scroll"));
             return;
         }
+        if (argc >= 3 && !strcmp(argv[2], "helper-colors"))
+        {
+            RunColorsHelper();
+            return;
+        }
+        if (argc >= 3 && !strcmp(argv[2], "helper-colorscroll"))
+        {
+            RunColorScrollHelper();
+            return;
+        }
         if (argc >= 3 && !strcmp(argv[2], "helper-vtinput"))
         {
             RunVtInputHelper();
@@ -1127,6 +1308,8 @@ START_TEST(ConPty)
         CheckScrollback(ExePath, TRUE, FALSE);
         CheckScrollback(ExePath, FALSE, FALSE);
         CheckScrollback(ExePath, FALSE, TRUE);
+        CheckExtendedColors(ExePath, FALSE);
+        CheckExtendedColors(ExePath, TRUE);
         CheckNodePtSequence(0x6, FALSE);   /* RESIZE_QUIRK | WIN32_INPUT_MODE */
         CheckNodePtSequence(0x7, FALSE);   /* ... | INHERIT_CURSOR */
         CheckNodePtSequence(0x8, FALSE);   /* PASSTHROUGH (Windows 11) */
