@@ -422,6 +422,7 @@ GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
     WORD LastAttribute, Attribute;
     HFONT OldFont, NewFont;
     BOOLEAN IsUnderline;
+    BOOLEAN bWide;
     LONG OriginX, OriginY;
 
     // ASSERT(Console == GuiData->Console);
@@ -462,7 +463,23 @@ GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
     NewFont = GuiData->Font[IsUnderline ? FONT_BOLD : FONT_NORMAL];
     OldFont = SelectObject(GuiData->hMemDC, NewFont);
 
-    if (Console->IsCJK)
+    /* Wide characters take two cells in every code page: a trailing cell is not drawn, and each
+     * character goes to its own cell column */
+    bWide = Console->IsCJK;
+    for (Line = TopLine; !bWide && Line <= BottomLine; Line++)
+    {
+        From = ConioCoordToPointer(Buffer, LeftColumn, Line);
+        for (Char = LeftColumn; Char <= RightColumn; Char++, From++)
+        {
+            if (From->Attributes & (COMMON_LVB_LEADING_BYTE | COMMON_LVB_TRAILING_BYTE))
+            {
+                bWide = TRUE;
+                break;
+            }
+        }
+    }
+
+    if (bWide)
     {
         for (Line = TopLine; Line <= BottomLine; Line++)
         {
@@ -483,13 +500,35 @@ GuiPaintTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
                     SelectObject(GuiData->hMemDC, NewFont);
                 }
 
-                if (Attribute & COMMON_LVB_TRAILING_BYTE)
-                    continue;
+                {
+                    /* A wide character fills the two cells of its pair, whatever the font's glyph width;
+                     * half of a pair (the other half was overwritten) is a blank cell */
+                    static const WCHAR Blank = L' ';
+                    BOOLEAN bPair = FALSE, bOrphan = FALSE;
+                    RECT CellRect;
 
-                TextOutW(GuiData->hMemDC,
-                         (LONG)(Char * GuiData->CharWidth) - OriginX,
-                         (LONG)(Line * GuiData->CharHeight) - OriginY,
-                         &From->Char.UnicodeChar, 1);
+                    if (Attribute & COMMON_LVB_TRAILING_BYTE)
+                    {
+                        if (Char > 0 && (ConioCoordToPointer(Buffer, Char - 1, Line)->Attributes & COMMON_LVB_LEADING_BYTE))
+                            continue;
+                        bOrphan = TRUE;
+                    }
+                    else if (Attribute & COMMON_LVB_LEADING_BYTE)
+                    {
+                        if (Char + 1 < (ULONG)Buffer->ScreenBufferSize.X &&
+                            (ConioCoordToPointer(Buffer, Char + 1, Line)->Attributes & COMMON_LVB_TRAILING_BYTE))
+                            bPair = TRUE;
+                        else
+                            bOrphan = TRUE;
+                    }
+
+                    CellRect.left   = (LONG)(Char * GuiData->CharWidth) - OriginX;
+                    CellRect.top    = (LONG)(Line * GuiData->CharHeight) - OriginY;
+                    CellRect.right  = CellRect.left + GuiData->CharWidth * (bPair ? 2 : 1);
+                    CellRect.bottom = CellRect.top + GuiData->CharHeight;
+                    ExtTextOutW(GuiData->hMemDC, CellRect.left, CellRect.top, ETO_OPAQUE, &CellRect,
+                                bOrphan ? &Blank : &From->Char.UnicodeChar, 1, NULL);
+                }
             }
         }
     }
