@@ -98,3 +98,22 @@ BEGIN
     IDS_INVALID_NAME "El nombre del acceso directo que has introducido contiene o bien caracteres inválidos, o su nombre es demasiado largo."
     IDS_BROWSE_FOR_TARGET "Please select the target of the shortcut below:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "Programas y características"
+    IDS_PROG_HEADER "Desinstale o cambie un programa. Para instalar software o activar o desactivar características del sistema, use ""Activar o desactivar características de NitroOS""."
+    IDS_PROG_COL_NAME "Nombre"
+    IDS_PROG_COL_PUBLISHER "Editor"
+    IDS_PROG_COL_VERSION "Versión"
+    IDS_PROG_COL_DATE "Instalado el"
+    IDS_PROG_UNINSTALL "&Desinstalar"
+    IDS_PROG_CHANGE "Cam&biar"
+    IDS_PROG_REFRESH "Actua&lizar"
+    IDS_PROG_FEATURES "&Activar o desactivar características de NitroOS"
+    IDS_PROG_CLOSE "&Cerrar"
+    IDS_PROG_CONFIRM "¿Desea desinstalar '%s'?"
+    IDS_PROG_STARTFAIL "No se pudo iniciar el programa (error %lu):\n%s"
+    IDS_FEATURESNAME "Activar o desactivar características de NitroOS"
+    IDS_FEATURESDESCRIPTION "Activar o desactivar características opcionales de NitroOS y software complementario."
+END

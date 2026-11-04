@@ -88,3 +88,22 @@ BEGIN
     IDS_INVALID_NAME "Заданное имя ярлыка содержит символы, недопустимые в именах файлов, или имеет слишком большую длину."
     IDS_BROWSE_FOR_TARGET "Укажите объект для ярлыка:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "Программы и компоненты"
+    IDS_PROG_HEADER "Удаление или изменение программы. Чтобы установить программу или включить либо отключить компоненты системы, используйте ""Включение или отключение компонентов NitroOS""."
+    IDS_PROG_COL_NAME "Имя"
+    IDS_PROG_COL_PUBLISHER "Издатель"
+    IDS_PROG_COL_VERSION "Версия"
+    IDS_PROG_COL_DATE "Установлено"
+    IDS_PROG_UNINSTALL "&Удалить"
+    IDS_PROG_CHANGE "&Изменить"
+    IDS_PROG_REFRESH "&Обновить"
+    IDS_PROG_FEATURES "&Включение или отключение компонентов NitroOS"
+    IDS_PROG_CLOSE "&Закрыть"
+    IDS_PROG_CONFIRM "Вы действительно хотите удалить '%s'?"
+    IDS_PROG_STARTFAIL "Не удалось запустить программу (ошибка %lu):\n%s"
+    IDS_FEATURESNAME "Включение или отключение компонентов NitroOS"
+    IDS_FEATURESDESCRIPTION "Включение или отключение необязательных компонентов NitroOS и дополнительного программного обеспечения."
+END

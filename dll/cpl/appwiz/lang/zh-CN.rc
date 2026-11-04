@@ -97,3 +97,22 @@ BEGIN
     IDS_INVALID_NAME "您输入的快捷方式名称过长，或含有不能在文件名中使用的字符。"
     IDS_BROWSE_FOR_TARGET "请在下方选择快捷方式的目标："
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "程序和功能"
+    IDS_PROG_HEADER "卸载或更改程序。若要安装软件或启用/禁用系统功能，请使用 ""启用或关闭 NitroOS 功能""。"
+    IDS_PROG_COL_NAME "名称"
+    IDS_PROG_COL_PUBLISHER "发布者"
+    IDS_PROG_COL_VERSION "版本"
+    IDS_PROG_COL_DATE "安装时间"
+    IDS_PROG_UNINSTALL "卸载(&U)"
+    IDS_PROG_CHANGE "更改(&H)"
+    IDS_PROG_REFRESH "刷新(&R)"
+    IDS_PROG_FEATURES "启用或关闭 &NitroOS 功能"
+    IDS_PROG_CLOSE "关闭(&C)"
+    IDS_PROG_CONFIRM "确定要卸载 '%s' 吗？"
+    IDS_PROG_STARTFAIL "无法启动程序（错误 %lu）:\n%s"
+    IDS_FEATURESNAME "启用或关闭 NitroOS 功能"
+    IDS_FEATURESDESCRIPTION "启用或关闭可选的 NitroOS 功能和附加软件。"
+END

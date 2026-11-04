@@ -96,3 +96,22 @@ BEGIN
     IDS_INVALID_NAME "Numele comenzii rapide pe care l-ați introdus conținea fie caractere nevalide pentru numele fișierelor, fie era prea lung."
     IDS_BROWSE_FOR_TARGET "Selectați ținta comenzii rapide de mai jos:"
 END
+
+STRINGTABLE
+BEGIN
+    IDS_PROG_TITLE "Programe și caracteristici"
+    IDS_PROG_HEADER "Dezinstalați sau modificați un program. Pentru a instala software sau a activa ori dezactiva caracteristicile sistemului, utilizați ""Activați sau dezactivați caracteristicile NitroOS""."
+    IDS_PROG_COL_NAME "Nume"
+    IDS_PROG_COL_PUBLISHER "Editor"
+    IDS_PROG_COL_VERSION "Versiune"
+    IDS_PROG_COL_DATE "Instalat la"
+    IDS_PROG_UNINSTALL "&Dezinstalare"
+    IDS_PROG_CHANGE "&Modificare"
+    IDS_PROG_REFRESH "&Reîmprospătare"
+    IDS_PROG_FEATURES "&Activați sau dezactivați caracteristicile NitroOS"
+    IDS_PROG_CLOSE "În&chide"
+    IDS_PROG_CONFIRM "Doriți să dezinstalați '%s'?"
+    IDS_PROG_STARTFAIL "Programul nu a putut fi pornit (eroarea %lu):\n%s"
+    IDS_FEATURESNAME "Activați sau dezactivați caracteristicile NitroOS"
+    IDS_FEATURESDESCRIPTION "Activați sau dezactivați caracteristicile opționale NitroOS și software-ul suplimentar."
+END
