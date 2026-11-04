@@ -215,6 +215,20 @@ CmpReleaseKcbLockByKey(ULONG ConvKey)
 }
 
 //
+// Tells whether CmpReferenceKeyControlBlock needs the KCB's hash lock held
+// exclusively: the first reference (RefCount == 0) and taking the KCB off the
+// delayed close table (DelayedCloseIndex == 0) both do. With the lock held
+// shared, CmpReferenceKeyControlBlock then converts it by releasing and
+// re-acquiring it, which is only safe when no other KCB lock is held.
+//
+FORCEINLINE
+BOOLEAN
+CmpKcbReferenceNeedsExclusiveLock(IN PCM_KEY_CONTROL_BLOCK k)
+{
+    return (k->RefCount == 0) || (k->DelayedCloseIndex == 0);
+}
+
+//
 // Converts a KCB lock
 //
 FORCEINLINE
