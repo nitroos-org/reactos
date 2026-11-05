@@ -541,8 +541,12 @@ _main(IN INT argc,
         }
         SmpReleasePrivilege(State);
 
-        /* NitroSessions=1: a second session with a test command */
-        if (SmpNitroSessions == 1) SmpStartNitroTestSession();
+        /* NitroSessions: 1, a second session with a test command; 4, a
+           second session with its own csrss */
+        if (SmpNitroSessions == SMP_NITRO_SESSIONS_TEST)
+            SmpStartNitroTestSession();
+        else if (SmpNitroSessions == SMP_NITRO_SESSIONS_CSR)
+            SmpStartNitroCsrSession();
 
         /* Wait on either CSRSS or the initial command to die */
         Status = NtWaitForMultipleObjects(RTL_NUMBER_OF(Handles),

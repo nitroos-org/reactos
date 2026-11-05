@@ -2503,6 +2503,7 @@ SmpInit(IN PUNICODE_STRING InitialCommand,
     RtlInitializeCriticalSection(&SmpKnownSubSysLock);
     InitializeListHead(&SmpKnownSubSysHead);
     RtlInitializeCriticalSection(&SmpSessionListLock);
+    RtlInitializeCriticalSection(&SmpMuSessionLock);
     InitializeListHead(&SmpSessionListHead);
 
     /* Initialize the process list */
