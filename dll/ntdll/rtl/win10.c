@@ -216,20 +216,32 @@ RtlGetDeviceFamilyInfoEnum(
     {
         RTL_OSVERSIONINFOW VersionInfo = { sizeof(VersionInfo) };
         ULONG Revision = 0;
-        RTL_QUERY_REGISTRY_TABLE QueryTable[2] = { { 0 } };
+        UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion");
+        UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"UBR");
+        OBJECT_ATTRIBUTES ObjectAttributes;
+        HANDLE KeyHandle;
+        ULONG InfoBuffer[(FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + sizeof(ULONG) + sizeof(ULONG) - 1) /
+                         sizeof(ULONG)];
+        PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)InfoBuffer;
+        ULONG ResultLength;
 
         RtlGetVersion(&VersionInfo);
 
-        QueryTable[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
-        QueryTable[0].Name = L"UBR";
-        QueryTable[0].EntryContext = &Revision;
-        if (!NT_SUCCESS(RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE,
-                                               L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion",
-                                               QueryTable,
-                                               NULL,
-                                               NULL)))
+        /* The value is read by hand: it is only a revision when it is a REG_DWORD, whatever the key holds */
+        InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        if (NT_SUCCESS(NtOpenKey(&KeyHandle, KEY_QUERY_VALUE, &ObjectAttributes)))
         {
-            Revision = 0;
+            if (NT_SUCCESS(NtQueryValueKey(KeyHandle,
+                                           &ValueName,
+                                           KeyValuePartialInformation,
+                                           Info,
+                                           sizeof(InfoBuffer),
+                                           &ResultLength)) &&
+                (Info->Type == REG_DWORD) && (Info->DataLength == sizeof(ULONG)))
+            {
+                Revision = *(PULONG)Info->Data;
+            }
+            NtClose(KeyHandle);
         }
 
         *UapInfo = ((ULONGLONG)(VersionInfo.dwMajorVersion & 0xFFFF) << 48) |
