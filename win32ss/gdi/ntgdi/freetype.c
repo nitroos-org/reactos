@@ -5078,19 +5078,20 @@ ftGdiGetGlyphOutline(
            gm.gmBlackBoxX, gm.gmBlackBoxY,
            gm.gmptGlyphOrigin.x, gm.gmptGlyphOrigin.y);
 
-    IntUnLockFreeType();
-
+    /* Still locked: the format handling below reads and transforms the glyph slot, which any
+     * other thread's request would overwrite. Every path leaves through Done, which unlocks */
     if (iFormat == GGO_METRICS)
     {
         DPRINT("GGO_METRICS Exit!\n");
         *pgm = gm;
-        return 1; /* FIXME */
+        needed = 1; /* FIXME */
+        goto Done;
     }
 
     if (ft_face->glyph->format != ft_glyph_format_outline && iFormat != GGO_BITMAP)
     {
         DPRINT1("Loaded a bitmap\n");
-        return GDI_ERROR;
+        goto Fail;
     }
 
     switch (iFormat)
@@ -5103,9 +5104,9 @@ ftGdiGetGlyphOutline(
         needed = pitch * height;
 
         if (!pvBuf || !cjBuf) break;
-        if (!needed) return GDI_ERROR;  /* empty glyph */
+        if (!needed) goto Fail;  /* empty glyph */
         if (needed > cjBuf)
-            return GDI_ERROR;
+            goto Fail;
 
         switch (ft_face->glyph->format)
         {
@@ -5131,7 +5132,6 @@ ftGdiGetGlyphOutline(
             ft_bitmap.pixel_mode = FT_PIXEL_MODE_MONO;
             ft_bitmap.buffer = pvBuf;
 
-            IntLockFreeType();
             if (needsTransform)
             {
                 FT_Outline_Transform(&ft_face->glyph->outline, &transMat);
@@ -5140,13 +5140,12 @@ ftGdiGetGlyphOutline(
             /* Note: FreeType will only set 'black' bits for us. */
             RtlZeroMemory(pvBuf, needed);
             FT_Outline_Get_Bitmap(g_FreeTypeLibrary, &ft_face->glyph->outline, &ft_bitmap);
-            IntUnLockFreeType();
             break;
         }
 
         default:
             DPRINT1("Loaded glyph format %x\n", ft_face->glyph->format);
-            return GDI_ERROR;
+            goto Fail;
         }
 
         break;
@@ -5165,9 +5164,9 @@ ftGdiGetGlyphOutline(
         needed = pitch * height;
 
         if (!pvBuf || !cjBuf) break;
-        if (!needed) return GDI_ERROR;  /* empty glyph */
+        if (!needed) goto Fail;  /* empty glyph */
         if (needed > cjBuf)
-            return GDI_ERROR;
+            goto Fail;
 
         switch (ft_face->glyph->format)
         {
@@ -5198,7 +5197,6 @@ ftGdiGetGlyphOutline(
             ft_bitmap.pixel_mode = FT_PIXEL_MODE_GRAY;
             ft_bitmap.buffer = pvBuf;
 
-            IntLockFreeType();
             if (needsTransform)
             {
                 FT_Outline_Transform(&ft_face->glyph->outline, &transMat);
@@ -5206,7 +5204,6 @@ ftGdiGetGlyphOutline(
             FT_Outline_Translate(&ft_face->glyph->outline, -left, -bottom );
             RtlZeroMemory(ft_bitmap.buffer, cjBuf);
             FT_Outline_Get_Bitmap(g_FreeTypeLibrary, &ft_face->glyph->outline, &ft_bitmap);
-            IntUnLockFreeType();
 
             if (iFormat == GGO_GRAY2_BITMAP)
                 mult = 4;
@@ -5216,7 +5213,7 @@ ftGdiGetGlyphOutline(
                 mult = 64;
             else
             {
-                return GDI_ERROR;
+                goto Fail;
             }
 
             start = pvBuf;
@@ -5234,7 +5231,7 @@ ftGdiGetGlyphOutline(
         }
         default:
             DPRINT1("Loaded glyph format %x\n", ft_face->glyph->format);
-            return GDI_ERROR;
+            goto Fail;
         }
 
         break;
@@ -5246,23 +5243,19 @@ ftGdiGetGlyphOutline(
 
         if (cjBuf == 0) pvBuf = NULL; /* This is okay, need cjBuf to allocate. */
 
-        IntLockFreeType();
         if (needsTransform && pvBuf) FT_Outline_Transform(outline, &transMat);
 
         needed = get_native_glyph_outline(outline, cjBuf, NULL);
 
         if (!pvBuf || !cjBuf)
         {
-            IntUnLockFreeType();
             break;
         }
         if (needed > cjBuf)
         {
-            IntUnLockFreeType();
-            return GDI_ERROR;
+            goto Fail;
         }
         get_native_glyph_outline(outline, cjBuf, pvBuf);
-        IntUnLockFreeType();
         break;
     }
 
@@ -5273,16 +5266,14 @@ ftGdiGetGlyphOutline(
 
         if (needsTransform && pvBuf)
         {
-            IntLockFreeType();
             FT_Outline_Transform(outline, &transMat);
-            IntUnLockFreeType();
         }
         needed = get_bezier_glyph_outline(outline, cjBuf, NULL);
 
         if (!pvBuf || !cjBuf)
             break;
         if (needed > cjBuf)
-            return GDI_ERROR;
+            goto Fail;
 
         get_bezier_glyph_outline(outline, cjBuf, pvBuf);
         break;
@@ -5290,7 +5281,7 @@ ftGdiGetGlyphOutline(
 
     default:
         DPRINT1("Unsupported format %u\n", iFormat);
-        return GDI_ERROR;
+        goto Fail;
     }
 
     DPRINT("ftGdiGetGlyphOutline END and needed %lu\n", needed);
@@ -5301,6 +5292,13 @@ ftGdiGetGlyphOutline(
         gm.gmBlackBoxY = 1;
 
     *pgm = gm;
+    goto Done;
+
+Fail:
+    needed = GDI_ERROR;
+
+Done:
+    IntUnLockFreeType();
     return needed;
 }
 

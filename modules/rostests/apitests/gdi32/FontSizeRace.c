@@ -11,12 +11,12 @@
 /*
  * A face has one current size, shared by every DC that realizes a font of it. Each thread here selects
  * its own size of the same face and repeats GetTextMetrics, GetOutlineTextMetrics, GetTextExtentPoint32,
- * GetGlyphOutline (metrics), GetKerningPairs and ExtTextOut. Every result must equal the one a single
- * thread got for that size before the threads started.
+ * GetGlyphOutline (metrics, bitmap, gray bitmaps, native, bezier), GetKerningPairs and ExtTextOut.
+ * Every result must equal the one a single thread got for that size before the threads started.
  */
 
 #define NUM_THREADS   8
-#define ITERATIONS    150
+#define ITERATIONS    180
 #define TEXT_W        200
 #define TEXT_H        64
 
@@ -35,6 +35,8 @@ typedef struct
     KERNINGPAIR *Kern;
     DWORD InkHash;
     LONG InkPixels;
+    DWORD GgoBitmap;    /* GGO_BITMAP and the gray bitmaps: results, metrics and bytes */
+    DWORD GgoNative;    /* GGO_NATIVE and GGO_BEZIER */
 } REFERENCE;
 
 typedef struct
@@ -43,7 +45,7 @@ typedef struct
     REFERENCE Ref;
     HANDLE hThread;
     LONG Bad;       /* operations that gave other than the reference */
-    LONG BadTm, BadOtm, BadExt, BadGgo, BadKern, BadInk;
+    LONG BadTm, BadOtm, BadExt, BadGgo, BadKern, BadInk, BadBitmap, BadNative;
 } WORKER;
 
 static HANDLE g_hStart;
@@ -62,6 +64,65 @@ static DWORD GetKern(HDC hdc, KERNINGPAIR **ppKern)
         return 0;
     got = GetKerningPairsW(hdc, n, *ppKern);
     return got == n ? n : 0;
+}
+
+static DWORD HashBytes(DWORD h, const void *p, SIZE_T n)
+{
+    const BYTE *b = p;
+    while (n--)
+        h = (h ^ *b++) * 16777619u;
+    return h;
+}
+
+/* Everything GetGlyphOutline gives for a few glyphs in a format: return values, metrics and buffer bytes */
+static DWORD GgoHash(HDC hdc, UINT Format, BOOL UseMat)
+{
+    static const WCHAR Glyphs[] = L"Agm%&e";
+    MAT2 mat = { {0, 1}, {0, 0}, {0, 0}, {0, 1} };
+    DWORD h = 2166136261u;
+    UINT i;
+
+    for (i = 0; Glyphs[i]; i++)
+    {
+        GLYPHMETRICS gm;
+        DWORD Size, Ret;
+        PVOID Buf;
+
+        ZeroMemory(&gm, sizeof(gm));
+        Size = GetGlyphOutlineW(hdc, Glyphs[i], Format, &gm, 0, NULL, UseMat ? &mat : NULL);
+        h = HashBytes(h, &Size, sizeof(Size));
+        h = HashBytes(h, &gm, sizeof(gm));
+        if (Size == GDI_ERROR || Size == 0)
+            continue;
+        Buf = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size);
+        if (!Buf)
+            continue;
+        ZeroMemory(&gm, sizeof(gm));
+        Ret = GetGlyphOutlineW(hdc, Glyphs[i], Format, &gm, Size, Buf, UseMat ? &mat : NULL);
+        h = HashBytes(h, &Ret, sizeof(Ret));
+        h = HashBytes(h, &gm, sizeof(gm));
+        if (Ret != GDI_ERROR)
+            h = HashBytes(h, Buf, min(Ret, Size));
+        HeapFree(GetProcessHeap(), 0, Buf);
+    }
+    return h;
+}
+
+static DWORD BitmapGgoHash(HDC hdc)
+{
+    DWORD h = GgoHash(hdc, GGO_BITMAP, FALSE);
+    h = h * 31 + GgoHash(hdc, GGO_BITMAP, TRUE);
+    h = h * 31 + GgoHash(hdc, GGO_GRAY2_BITMAP, TRUE);
+    h = h * 31 + GgoHash(hdc, GGO_GRAY4_BITMAP, FALSE);
+    h = h * 31 + GgoHash(hdc, GGO_GRAY8_BITMAP, TRUE);
+    return h;
+}
+
+static DWORD NativeGgoHash(HDC hdc)
+{
+    DWORD h = GgoHash(hdc, GGO_NATIVE, TRUE);
+    h = h * 31 + GgoHash(hdc, GGO_BEZIER, TRUE);
+    return h;
 }
 
 static HFONT MakeFont(PCWSTR Face, LONG Height, LONG Width)
@@ -157,6 +218,8 @@ static void Measure(HDC hdc, CANVAS *c, LONG Height, REFERENCE *Out)
     Out->KernCount = GetKern(hdc, &Out->Kern);
     DrawText1(c, Height);
     Ink(c, &Out->InkHash, &Out->InkPixels);
+    Out->GgoBitmap = BitmapGgoHash(hdc);
+    Out->GgoNative = NativeGgoHash(hdc);
 }
 
 static DWORD WINAPI Worker(PVOID Param)
@@ -194,7 +257,7 @@ static DWORD WINAPI Worker(PVOID Param)
 
         /* Rotate through the calls, each run alone as well as in combination, so that different
          * calls of different threads meet */
-        switch (i % 4)
+        switch (i % 6)
         {
             case 0:
                 GetTextMetricsW(hdc, &tm);
@@ -229,6 +292,14 @@ static DWORD WINAPI Worker(PVOID Param)
                     if (Hash != w->Ref.InkHash || Pixels != w->Ref.InkPixels)
                         { InterlockedIncrement(&w->BadInk); Bad = TRUE; }
                 }
+                break;
+            case 4:
+                if (BitmapGgoHash(hdc) != w->Ref.GgoBitmap)
+                    { InterlockedIncrement(&w->BadBitmap); Bad = TRUE; }
+                break;
+            case 5:
+                if (NativeGgoHash(hdc) != w->Ref.GgoNative)
+                    { InterlockedIncrement(&w->BadNative); Bad = TRUE; }
                 break;
         }
         if (Bad)
@@ -325,6 +396,10 @@ static void RunFace(PCWSTR Face)
            Face, Workers[i].Ref.Height, Workers[i].BadKern);
         ok(Workers[i].BadInk == 0, "%ls %ld: %ld ExtTextOut images differ\n",
            Face, Workers[i].Ref.Height, Workers[i].BadInk);
+        ok(Workers[i].BadBitmap == 0, "%ls %ld: %ld GetGlyphOutline bitmap/gray results differ\n",
+           Face, Workers[i].Ref.Height, Workers[i].BadBitmap);
+        ok(Workers[i].BadNative == 0, "%ls %ld: %ld GetGlyphOutline native/bezier results differ\n",
+           Face, Workers[i].Ref.Height, Workers[i].BadNative);
         TotalBad += Workers[i].Bad;
     }
     trace("%ls: %ld of %d operations differed\n", Face, TotalBad, NUM_THREADS * ITERATIONS);
