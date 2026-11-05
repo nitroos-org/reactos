@@ -160,7 +160,7 @@ HANDLE
 WINAPI
 DECLSPEC_HOTPATCH
 CreateThread(IN LPSECURITY_ATTRIBUTES lpThreadAttributes,
-             IN DWORD dwStackSize,
+             IN SIZE_T dwStackSize,
              IN LPTHREAD_START_ROUTINE lpStartAddress,
              IN LPVOID lpParameter,
              IN DWORD dwCreationFlags,
@@ -183,7 +183,7 @@ HANDLE
 WINAPI
 CreateRemoteThread(IN HANDLE hProcess,
                    IN LPSECURITY_ATTRIBUTES lpThreadAttributes,
-                   IN DWORD dwStackSize,
+                   IN SIZE_T dwStackSize,
                    IN LPTHREAD_START_ROUTINE lpStartAddress,
                    IN LPVOID lpParameter,
                    IN DWORD dwCreationFlags,

@@ -53,6 +53,7 @@ list(APPEND SOURCE
     RtlConvertDeviceFamilyInfo.c
     ZeroBits.c
     CommitCharge.c
+    CommitStress.c
     RtlCurrentTransaction.c
     CreatorAccess.c
     DllLoadNotification.c
