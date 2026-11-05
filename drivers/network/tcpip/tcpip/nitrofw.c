@@ -29,7 +29,7 @@
  * send path looped back, see NitroFwInboundAllowed).
  *
  * DisableUnicastResponsesToMulticastBroadcast (NITROFW_PROFILE_NO_UNICAST_RESPONSES): replies to a
- * broadcast/multicast send are not admitted.
+ * broadcast/multicast send are not admitted. Drop log: see NITROFW_DROPLOG in nitrofw.h.
  */
 
 #include "precomp.h"
@@ -89,6 +89,7 @@ typedef struct _FW_POLICY
     BOOLEAN DefaultBlockInbound;
     BOOLEAN HasAppRules;        /* an inbound rule has a program condition */
     BOOLEAN NoUnicastResponses; /* an enabled active profile has DisableUnicastResponsesToMulticastBroadcast */
+    BOOLEAN LogDropped;         /* an enabled active profile logs dropped packets */
     ULONG InRuleCount;
     PULONG InRuleOffsets;       /* offsets of the inbound rules in Blob */
     ULONG BlobSize;
@@ -137,6 +138,15 @@ static FW_ICMPFLOW FwIcmpFlows[FW_ICMP_SETS][FW_FLOW_WAYS];
 
 /* Set from the installed policy while it is enforced (under FwPolicyLock; read without a lock) */
 static volatile LONG FwNoUnicast = 0;   /* replies to broadcast/multicast sends are not admitted */
+static volatile LONG FwLogEnabled = 0;  /* record dropped packets */
+
+/* The drop log: a ring of the last NITROFW_DROPLOG_RECORDS drops, NITROFW_DROPLOG_RATE records per second */
+static KSPIN_LOCK FwLogLock;
+static NITROFW_DROP_RECORD FwLog[NITROFW_DROPLOG_RECORDS];
+static ULONGLONG FwLogNext = 1;         /* sequence of the next record */
+static ULONGLONG FwLogSuppressed = 0;
+static ULONG FwLogWindow = 0;           /* FwNow() second the counter below belongs to */
+static ULONG FwLogInWindow = 0;
 
 static LONG64 FwDroppedInbound = 0;
 static LONG64 FwPassedInbound = 0;
@@ -303,6 +313,7 @@ static VOID FwInstallPolicy(PFW_POLICY NewPolicy)
     InterlockedExchange((PLONG)&NitroFwEnforcing, FwPolicyEnforced(NewPolicy) ? 1 : 0);
     InterlockedExchange((PLONG)&NitroFwWantImages, (FwPolicyEnforced(NewPolicy) && NewPolicy->HasAppRules) ? 1 : 0);
     InterlockedExchange((PLONG)&FwNoUnicast, (FwPolicyEnforced(NewPolicy) && NewPolicy->NoUnicastResponses) ? 1 : 0);
+    InterlockedExchange((PLONG)&FwLogEnabled, (FwPolicyEnforced(NewPolicy) && NewPolicy->LogDropped) ? 1 : 0);
     KeReleaseSpinLock(&FwPolicyLock, OldIrql);
 
     if (Old)
@@ -525,6 +536,8 @@ static NTSTATUS FwCompilePolicy(PFW_POLICY Policy)
             Policy->DefaultBlockInbound = TRUE;
         if (Hdr->Profile[i].Flags & NITROFW_PROFILE_NO_UNICAST_RESPONSES)
             Policy->NoUnicastResponses = TRUE;
+        if (Hdr->Profile[i].Flags & NITROFW_PROFILE_LOG_DROPPED)
+            Policy->LogDropped = TRUE;
     }
     return STATUS_SUCCESS;
 }
@@ -534,6 +547,7 @@ static NTSTATUS FwCompilePolicy(PFW_POLICY Policy)
  * ---------------------------------------------------------------------------------------------- */
 
 static VOID FwBackfillImages(VOID);
+static NTSTATUS FwGetDropLog(PVOID Buf, ULONG InLen, ULONG OutLen, PULONG_PTR Information);
 
 static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
@@ -649,6 +663,14 @@ static NTSTATUS FwDeviceControl(PIRP Irp, PIO_STACK_LOCATION IrpSp)
                 St->ImagesCaptured = (ULONGLONG)InterlockedCompareExchange64(&FwImagesCaptured, 0, 0);
             Irp->IoStatus.Information = StSize;
             return STATUS_SUCCESS;
+        }
+
+        case IOCTL_NITROFW_GET_DROPLOG:
+        {
+            ULONG_PTR Info = 0;
+            NTSTATUS Status = FwGetDropLog(Buf, IrpSp->Parameters.DeviceIoControl.InputBufferLength, OutLen, &Info);
+            Irp->IoStatus.Information = Info;
+            return Status;
         }
 
         case IOCTL_NITROFW_CLEAR_POLICY:
@@ -776,6 +798,7 @@ NTSTATUS NitroFwInitialize(PDRIVER_OBJECT DriverObject)
     KeInitializeSpinLock(&FwPolicyLock);
     for (i = 0; i < FW_FLOW_LOCKS; i++)
         KeInitializeSpinLock(&FwFlowLocks[i]);
+    KeInitializeSpinLock(&FwLogLock);
     ExInitializeFastMutex(&FwSetMutex);
 
     if (FwReadSwitch(L"NitroFwDisable") || FwBootOptionOff())
@@ -1326,7 +1349,83 @@ typedef struct _FW_PKT
     PIP_ADDRESS Dst;
     PFW_IMAGE Owner;
     BOOLEAN OwnerLooked;
+    BOOLEAN IcmpUnsolicitedReply;   /* an ICMP reply with no request of ours behind it */
 } FW_PKT, *PFW_PKT;
+
+/* ------------------------------------------------------------------------------------------------
+ * Drop log
+ * ---------------------------------------------------------------------------------------------- */
+
+static VOID FwLogDrop(PFW_PKT Pkt, ULONG Size, UCHAR Reason)
+{
+    KIRQL OldIrql;
+    ULONG Now = FwNow();
+    PNITROFW_DROP_RECORD Rec;
+
+    KeAcquireSpinLock(&FwLogLock, &OldIrql);
+    if (FwLogWindow != Now)
+    {
+        FwLogWindow = Now;
+        FwLogInWindow = 0;
+    }
+    if (FwLogInWindow >= NITROFW_DROPLOG_RATE)
+    {
+        FwLogSuppressed++;
+        KeReleaseSpinLock(&FwLogLock, OldIrql);
+        return;
+    }
+    FwLogInWindow++;
+    Rec = &FwLog[(FwLogNext - 1) % NITROFW_DROPLOG_RECORDS];
+    RtlZeroMemory(Rec, sizeof(*Rec));
+    Rec->Sequence = FwLogNext++;
+    KeQuerySystemTime((PLARGE_INTEGER)&Rec->Time);
+    Rec->SrcAddr = Pkt->RemoteAddr;
+    Rec->DstAddr = Pkt->LocalAddr;
+    Rec->SrcPort = Pkt->RemotePort;
+    Rec->DstPort = Pkt->LocalPort;
+    Rec->Protocol = (UCHAR)Pkt->Protocol;
+    Rec->Reason = Reason;
+    Rec->Size = Size;
+    if (Pkt->IsIcmp)
+    {
+        Rec->IcmpType = Pkt->IcmpType;
+        Rec->IcmpCode = Pkt->IcmpCode;
+    }
+    KeReleaseSpinLock(&FwLogLock, OldIrql);
+}
+
+/* IOCTL_NITROFW_GET_DROPLOG: Buf is both the (optional) ULONGLONG input and the output */
+static NTSTATUS FwGetDropLog(PVOID Buf, ULONG InLen, ULONG OutLen, PULONG_PTR Information)
+{
+    PNITROFW_DROPLOG Hdr = Buf;
+    PNITROFW_DROP_RECORD Out;
+    ULONGLONG From = 0, Oldest, Start;
+    ULONG Fit, Count = 0, i;
+    KIRQL OldIrql;
+
+    if (!Buf || OutLen < sizeof(NITROFW_DROPLOG))
+        return STATUS_BUFFER_TOO_SMALL;
+    if (InLen >= sizeof(ULONGLONG))
+        From = *(PULONGLONG)Buf;
+    Out = (PNITROFW_DROP_RECORD)(Hdr + 1);
+    Fit = (OutLen - sizeof(NITROFW_DROPLOG)) / sizeof(NITROFW_DROP_RECORD);
+
+    KeAcquireSpinLock(&FwLogLock, &OldIrql);
+    Oldest = FwLogNext > NITROFW_DROPLOG_RECORDS ? FwLogNext - NITROFW_DROPLOG_RECORDS : 1;
+    Start = From > Oldest ? From : Oldest;
+    for (i = 0; Start + i < FwLogNext && Count < Fit; i++)
+    {
+        Out[Count++] = FwLog[(Start + i - 1) % NITROFW_DROPLOG_RECORDS];
+    }
+    Hdr->NextSequence = FwLogNext;
+    Hdr->Suppressed = FwLogSuppressed;
+    KeReleaseSpinLock(&FwLogLock, OldIrql);
+
+    Hdr->Count = Count;
+    Hdr->Flags = FwLogEnabled ? NITROFW_DROPLOG_ON : 0;
+    *Information = sizeof(NITROFW_DROPLOG) + (ULONG_PTR)Count * sizeof(NITROFW_DROP_RECORD);
+    return STATUS_SUCCESS;
+}
 
 static BOOLEAN FwPortIn(PUCHAR Rule, ULONG Count, ULONG Offset, USHORT Port)
 {
@@ -1426,6 +1525,7 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
     PUCHAR Data;
     ULONG DataLen, i;
     BOOLEAN Allow, AllowRule = FALSE, Decided = FALSE;
+    UCHAR DropReason = NITROFW_DROP_DEFAULT;
 
     /* loopback passes: by interface only. A 127/8 address on a real interface is not loopback
        (spoofed or misrouted) and goes through the rules or the default like any other packet. */
@@ -1483,6 +1583,7 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
                        evaluated like a request (the rules, then the profile default) */
                     if (FwIcmpReplyExpected(IPPacket->SrcAddr.Address.IPv4Address, Data, DataLen))
                         goto PassCounted;
+                    Pkt.IcmpUnsolicitedReply = TRUE;
                     break;
             }
             break;
@@ -1514,6 +1615,7 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
     {
         Allow = FALSE;
         Decided = TRUE;
+        DropReason = NITROFW_DROP_BLOCK_ALL;
     }
     for (i = 0; !Decided && i < Policy->InRuleCount; i++)
     {
@@ -1528,6 +1630,7 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
         {
             Allow = FALSE;      /* block beats allow */
             Decided = TRUE;
+            DropReason = NITROFW_DROP_BLOCK_RULE;
         }
         else
             AllowRule = TRUE;
@@ -1542,6 +1645,8 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
     if (!Allow)
     {
         InterlockedIncrement64(&FwDroppedInbound);
+        if (FwLogEnabled)
+            FwLogDrop(&Pkt, IPPacket->TotalSize, (DropReason == NITROFW_DROP_DEFAULT && Pkt.IcmpUnsolicitedReply) ? NITROFW_DROP_ICMP_REPLY : DropReason);
         return FALSE;
     }
 
