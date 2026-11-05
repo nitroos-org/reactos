@@ -242,7 +242,7 @@ static int DoQuery(LPCWSTR id)
             {
                 Out(L"Source.Artifact: %s\n", c.Url);
                 Out(L"Source.ArtifactSHA256: %s\n", c.Sha256);
-                if (c.Size) Out(L"Source.SizeBytes: %I64u\n", c.Size);
+                if (c.Size) Out(L"Source.SizeBytes: %I64u\n", FmCompTotalSize(&c));
             }
         }
     }

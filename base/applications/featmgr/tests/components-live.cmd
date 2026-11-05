@@ -24,7 +24,7 @@ goto netwait
 :netup
 echo network wait: %N% tries>> %LOG%
 
-for %%i in (fmt-comp fmt-compbad fmt-comphttp fmt-compnosha fmt-compreg) do copy /y %FX%\%%i.ini %R%\Catalog\ >nul
+for %%i in (fmt-comp fmt-compbad fmt-comphttp fmt-compnosha fmt-compreg fmt-compchain fmt-compchainbad) do copy /y %FX%\%%i.ini %R%\Catalog\ >nul
 set FEATMGR_COMPONENTS=%FX%\fmt-comp.components.ini
 
 %FM% /query fmt-comp > %O%\q.txt 2>&1
@@ -73,8 +73,42 @@ reg add HKLM\SOFTWARE\ReactOS\Nitro\FmTest /v CompDetect /t REG_DWORD /d 3 /f >n
 call :st fmt-compreg NotInstalled "C24 detect rule not met again (3 < 5)"
 reg delete HKLM\SOFTWARE\ReactOS\Nitro\FmTest /f >nul 2>&1
 
+rem ===== multi-package component (Also=): every package installs, a package already there is kept, a failing later package rolls back =====
+call :st fmt-compchain NotInstalled "C25 chain: NotInstalled before"
+%FM% /install fmt-compchain > %O%\ch1.txt 2>&1
+call :rc0 "C26 chain: install of both packages"
+type %O%\ch1.txt >> %LOG%
+call :ex %R%\fmt-chainA.out 1 "C27 chain: package A installed"
+call :ex %R%\fmt-chainB.out 1 "C28 chain: package B installed"
+call :st fmt-compchain Enabled "C29 chain: Enabled when both are there"
+%FM% /uninstall fmt-compchain > %O%\ch2.txt 2>&1
+call :rc0 "C30 chain: uninstall runs both uninstall lines"
+call :ex %R%\fmt-chainA.out 0 "C31 chain: package A removed"
+call :ex %R%\fmt-chainB.out 0 "C32 chain: package B removed"
+call :st fmt-compchain NotInstalled "C33 chain: NotInstalled after the uninstall"
+echo keep> %R%\fmt-chainA.out
+call :st fmt-compchain NotInstalled "C34 chain: only package A there is not installed"
+%FM% /install fmt-compchain > %O%\ch3.txt 2>&1
+call :rc0 "C35 chain: install completes the missing package"
+type %O%\ch3.txt >> %LOG%
+call :ex %R%\fmt-chainB.out 1 "C36 chain: package B installed"
+find "keep" %R%\fmt-chainA.out >nul
+call :rc0 "C37 chain: the package that was already there was not installed again"
+call :st fmt-compchain Enabled "C38 chain: Enabled"
+reg delete "HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmt-compchain" /f >nul 2>&1
+%FM% /uninstall fmt-compchain > %O%\ch4.txt 2>&1
+call :rc0 "C39 chain: uninstall without a recorded line derives both from the list"
+call :ex %R%\fmt-chainA.out 0 "C40 chain: package A removed (derived line)"
+call :ex %R%\fmt-chainB.out 0 "C41 chain: package B removed (derived line)"
+%FM% /install fmt-compchainbad > %O%\chb.txt 2>&1
+call :rc1 "C42 chain: a failing second package fails the install"
+type %O%\chb.txt >> %LOG%
+call :ex %R%\fmt-chainbadA.out 0 "C43 chain: the first package was rolled back"
+call :ex %R%\fmt-chainbadB.out 0 "C44 chain: the failing package did not install"
+call :st fmt-compchainbad NotInstalled "C45 chain: left NotInstalled"
+
 set FEATMGR_COMPONENTS=
-for %%i in (fmt-comp fmt-compbad fmt-comphttp fmt-compnosha fmt-compreg) do del /q %R%\Catalog\%%i.ini 2>nul
+for %%i in (fmt-comp fmt-compbad fmt-comphttp fmt-compnosha fmt-compreg fmt-compchain fmt-compchainbad) do del /q %R%\Catalog\%%i.ini 2>nul
 if "%FAILS%"=="0" (echo COMPLIVE-RESULT: PASS>> %LOG%) else (echo COMPLIVE-RESULT: FAIL %FAILS%>> %LOG%)
 goto :eof
 
