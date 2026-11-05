@@ -145,6 +145,7 @@ list(APPEND SOURCE
     NtRaiseHardErrorMode.c
     NtReadFile.c
     NtSaveKey.c
+    NtSaveMergedKeys.c
     NtSetDefaultLocale.c
     NtSetInformationDebugObject.c
     NtSetInformationFile.c
