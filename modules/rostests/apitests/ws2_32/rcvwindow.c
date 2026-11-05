@@ -329,6 +329,74 @@ TestShutdownQueued(
     closesocket(Listener);
 }
 
+/* One thread sends 8K pieces on a non-blocking socket and reads what has arrived before it sends the next
+ * (the loop of a .NET program with non-blocking sockets). The short last segment of a piece waits for the
+ * acknowledgement of the one before it (Nagle), and the loop waits for the piece: without an acknowledgement
+ * at once, a tick per piece (2 MB/s here, 50 MB/s with it; Windows gives GB/s) */
+static
+VOID
+TestNonBlockingLoop(VOID)
+{
+    static UCHAR Buffer[65536];
+    SOCKET Listener, Sender, Receiver;
+    SOCKADDR_IN Address;
+    INT Length = sizeof(Address);
+    ULONGLONG Total = 16ULL * 1024 * 1024, Sent = 0, Got = 0;
+    ULONG Mode = 1, Start;
+
+    Listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    Sender = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ZeroMemory(&Address, sizeof(Address));
+    Address.sin_family = AF_INET;
+    Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(Listener, (SOCKADDR *)&Address, sizeof(Address)) || listen(Listener, 1) ||
+        getsockname(Listener, (SOCKADDR *)&Address, &Length) ||
+        connect(Sender, (SOCKADDR *)&Address, sizeof(Address)))
+    {
+        ok(0, "loop: setup failed, error %d\n", WSAGetLastError());
+        return;
+    }
+    Receiver = accept(Listener, NULL, NULL);
+    ioctlsocket(Sender, FIONBIO, &Mode);
+
+    Start = GetTickCount();
+    while (Got < Total && GetTickCount() - Start < 60000)
+    {
+        ULONG Available = 0;
+        INT Count;
+
+        if (Sent < Total)
+        {
+            Count = send(Sender, (PCHAR)Buffer, 8192, 0);
+            if (Count > 0)
+                Sent += Count;
+        }
+        Sleep(0);
+        while (ioctlsocket(Receiver, FIONREAD, &Available) == 0 && Available != 0)
+        {
+            Count = recv(Receiver, (PCHAR)Buffer, sizeof(Buffer), 0);
+            if (Count <= 0)
+                break;
+            Got += Count;
+        }
+        if (Sent < Total && Available == 0 && Got < Sent)
+        {
+            fd_set Set;
+            TIMEVAL Wait = { 0, 1000 };
+
+            FD_ZERO(&Set);
+            FD_SET(Receiver, &Set);
+            select(0, &Set, NULL, NULL, &Wait);
+        }
+    }
+    Start = GetTickCount() - Start;
+    ok(Got == Total, "loop: read %I64u of %I64u bytes\n", Got, Total);
+    ok(Start < 15000, "loop: %I64u MB took %lu ms\n", Total >> 20, Start);
+    closesocket(Receiver);
+    closesocket(Sender);
+    closesocket(Listener);
+}
+
 START_TEST(rcvwindow)
 {
     WSADATA wsaData;
@@ -344,6 +412,7 @@ START_TEST(rcvwindow)
     TestSize(8192, 8192, 8192 * 8 + 256 * 1024);
     TestSize(65536, 65536, 65536 * 8 + 256 * 1024);
     TestSize(1048576, 1048576, 1048576 * 8 + 256 * 1024);
+    TestNonBlockingLoop();
     TestQueueDrain(24, 65536);
     TestQueueDrain(4, 1460);
     TestShutdownQueued(0);
