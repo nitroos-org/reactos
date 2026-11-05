@@ -422,6 +422,7 @@
 #define IDC_ABOUT_ICON                0x3009
 #define IDC_ABOUT_APPNAME             0x3500
 #define IDS_ABOUT_VERSION_STRING      0x3501
+#define IDS_ABOUT_NITRO_NOTICE        0x3510
 #define IDC_ABOUT_VERSION             0x3502
 #define IDC_ABOUT_OTHERSTUFF          0x350D
 #define IDC_ABOUT_REG_TO              0x3506

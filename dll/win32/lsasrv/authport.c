@@ -15,8 +15,54 @@ static LIST_ENTRY LsapLogonContextList;
 static HANDLE PortThreadHandle = NULL;
 static HANDLE AuthPortHandle = NULL;
 
+/*
+ * The port context of a connection is an identifier, not the pointer to its LSAP_LOGON_CONTEXT: a
+ * message queued for a connection can arrive after its context was freed (LPC_PORT_CLOSED after
+ * LsaDeregisterLogonProcess) and the block can already belong to another connection.
+ */
+static ULONG_PTR LsapNextLogonContextId = 1;
+
 
 /* FUNCTIONS ***************************************************************/
+
+static
+PLSAP_LOGON_CONTEXT
+LsapFindLogonContext(
+    _In_ PVOID PortContext)
+{
+    PLIST_ENTRY ListEntry;
+    PLSAP_LOGON_CONTEXT Context;
+
+    if (PortContext == NULL)
+        return NULL;
+
+    for (ListEntry = LsapLogonContextList.Flink;
+         ListEntry != &LsapLogonContextList;
+         ListEntry = ListEntry->Flink)
+    {
+        Context = CONTAINING_RECORD(ListEntry, LSAP_LOGON_CONTEXT, Entry);
+        if (Context->ContextId == (ULONG_PTR)PortContext)
+            return Context;
+    }
+
+    return NULL;
+}
+
+
+/* Releases a connection: its handles and its context. */
+static VOID
+LsapDestroyLogonContext(PLSAP_LOGON_CONTEXT LogonContext)
+{
+    RemoveEntryList(&LogonContext->Entry);
+
+    if (LogonContext->ClientProcessHandle != NULL)
+        NtClose(LogonContext->ClientProcessHandle);
+    if (LogonContext->ConnectionHandle != NULL)
+        NtClose(LogonContext->ConnectionHandle);
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, LogonContext);
+}
+
 
 static NTSTATUS
 LsapDeregisterLogonProcess(PLSA_API_MSG RequestMsg,
@@ -24,12 +70,7 @@ LsapDeregisterLogonProcess(PLSA_API_MSG RequestMsg,
 {
     TRACE("LsapDeregisterLogonProcess(%p %p)\n", RequestMsg, LogonContext);
 
-    RemoveEntryList(&LogonContext->Entry);
-
-    NtClose(LogonContext->ClientProcessHandle);
-    NtClose(LogonContext->ConnectionHandle);
-
-    RtlFreeHeap(RtlGetProcessHeap(), 0, LogonContext);
+    LsapDestroyLogonContext(LogonContext);
 
     return STATUS_SUCCESS;
 }
@@ -161,6 +202,7 @@ LsapCheckLogonProcess(PLSA_API_MSG RequestMsg,
     TRACE("New LogonContext: %p\n", Context);
 
     Context->ClientProcessHandle = ProcessHandle;
+    Context->ContextId = LsapNextLogonContextId++;
 
     switch (RequestMsg->ConnectInfo.TrustedCaller)
     {
@@ -220,7 +262,7 @@ LsapHandlePortConnection(PLSA_API_MSG RequestMsg)
 
     RemotePortView.Length = sizeof(REMOTE_PORT_VIEW);
     Status = NtAcceptConnectPort(&ConnectionHandle,
-                                 (PVOID*)LogonContext,
+                                 (LogonContext != NULL) ? (PVOID)LogonContext->ContextId : NULL,
                                  &RequestMsg->h,
                                  Accept,
                                  NULL,
@@ -228,7 +270,22 @@ LsapHandlePortConnection(PLSA_API_MSG RequestMsg)
     if (!NT_SUCCESS(Status))
     {
         ERR("NtAcceptConnectPort failed (Status 0x%lx)\n", Status);
+
+        /* The connection never existed, release what the check opened */
+        if (LogonContext != NULL)
+        {
+            NtClose(LogonContext->ClientProcessHandle);
+            RtlFreeHeap(RtlGetProcessHeap(), 0, LogonContext);
+        }
         return Status;
+    }
+
+    /* A rejected connection has no handle and no use for the context */
+    if (Accept == FALSE && LogonContext != NULL)
+    {
+        NtClose(LogonContext->ClientProcessHandle);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, LogonContext);
+        LogonContext = NULL;
     }
 
     if (Accept != FALSE)
@@ -257,6 +314,7 @@ NTSTATUS WINAPI
 AuthPortThreadRoutine(PVOID Param)
 {
     PLSAP_LOGON_CONTEXT LogonContext;
+    PVOID PortContext = NULL;
     PLSA_API_MSG ReplyMsg = NULL;
     LSA_API_MSG RequestMsg;
     NTSTATUS Status;
@@ -269,7 +327,7 @@ AuthPortThreadRoutine(PVOID Param)
     {
         TRACE("Reply: %p\n", ReplyMsg);
         Status = NtReplyWaitReceivePort(AuthPortHandle,
-                                        (PVOID*)&LogonContext,
+                                        &PortContext,
                                         (PPORT_MESSAGE)ReplyMsg,
                                         (PPORT_MESSAGE)&RequestMsg);
         if (!NT_SUCCESS(Status))
@@ -277,6 +335,10 @@ AuthPortThreadRoutine(PVOID Param)
             TRACE("NtReplyWaitReceivePort() failed (Status %lx)\n", Status);
             break;
         }
+
+        /* A connection that is gone (or has no context) is not found */
+        LogonContext = (RequestMsg.h.u2.s2.Type == LPC_CONNECTION_REQUEST) ?
+                       NULL : LsapFindLogonContext(PortContext);
 
         TRACE("Received message\n");
 
@@ -290,16 +352,33 @@ AuthPortThreadRoutine(PVOID Param)
 
             case LPC_PORT_CLOSED:
                 TRACE("Port closed\n");
+                /* The client went away without LsaDeregisterLogonProcess */
+                if (LogonContext != NULL)
+                    LsapDestroyLogonContext(LogonContext);
                 ReplyMsg = NULL;
                 break;
 
             case LPC_CLIENT_DIED:
                 TRACE("Client died\n");
+                if (LogonContext != NULL)
+                    LsapDestroyLogonContext(LogonContext);
                 ReplyMsg = NULL;
                 break;
 
             default:
                 TRACE("Received request (ApiNumber: %lu)\n", RequestMsg.ApiNumber);
+
+                /* These requests need the context of the connection */
+                if (LogonContext == NULL &&
+                    (RequestMsg.ApiNumber == LSASS_REQUEST_CALL_AUTHENTICATION_PACKAGE ||
+                     RequestMsg.ApiNumber == LSASS_REQUEST_LOGON_USER ||
+                     RequestMsg.ApiNumber == LSASS_REQUEST_LOOKUP_AUTHENTICATION_PACKAGE ||
+                     RequestMsg.ApiNumber == LSASS_REQUEST_DEREGISTER_LOGON_PROCESS))
+                {
+                    RequestMsg.Status = STATUS_INVALID_HANDLE;
+                    ReplyMsg = &RequestMsg;
+                    break;
+                }
 
                 switch (RequestMsg.ApiNumber)
                 {

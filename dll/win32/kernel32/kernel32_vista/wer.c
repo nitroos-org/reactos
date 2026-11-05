@@ -374,3 +374,21 @@ WerUnregisterFile(
     RtlFreeHeap(RtlGetProcessHeap(), 0, Path);
     return S_OK;
 }
+
+/*
+ * @implemented
+ *
+ * Custom metadata only goes into a report, and there is no error reporting service to send one to:
+ * a well-formed pair is accepted and dropped.
+ */
+HRESULT
+WINAPI
+WerRegisterCustomMetadata(
+    _In_ PCWSTR pwzKey,
+    _In_ PCWSTR pwzValue)
+{
+    if (!pwzKey || !pwzValue || !*pwzKey)
+        return E_INVALIDARG;
+
+    return S_OK;
+}

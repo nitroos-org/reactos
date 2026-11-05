@@ -787,6 +787,9 @@ Ext2WriteFile(IN PEXT2_IRP_CONTEXT IrpContext)
     BOOLEAN             RecursiveWriteThrough = FALSE;
     BOOLEAN             MainResourceAcquired = FALSE;
     BOOLEAN             PagingIoResourceAcquired = FALSE;
+#ifdef __REACTOS__
+    BOOLEAN             PagingIoHeldForVdl = FALSE;
+#endif
 
     BOOLEAN             bDeferred = FALSE;
 #ifndef __REACTOS__
@@ -973,6 +976,21 @@ Ext2WriteFile(IN PEXT2_IRP_CONTEXT IrpContext)
                 _SEH2_LEAVE;
             }
             MainResourceAcquired = TRUE;
+
+#ifdef __REACTOS__
+            /*
+             * A non-cached write that ends past the valid data length raises it once the data is on the disk.
+             * Hold the paging resource exclusive from the flush and purge until then, as fastfat does: a page-in
+             * holds it shared while Mm clamps the read at the valid data length, and must not take the old one
+             * and leave zeros in the cache for data this write puts on the disk. Synchronous, so that the hold
+             * is released here and not by an I/O completion.
+             */
+            if (Nocache && (ByteOffset.QuadPart + Length) > Fcb->Header.ValidDataLength.QuadPart) {
+                SetFlag(IrpContext->Flags, IRP_CONTEXT_FLAG_WAIT);
+                ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
+                PagingIoHeldForVdl = TRUE;
+            }
+#endif
 
             //
             //  Do flushing for such cases
@@ -1270,6 +1288,12 @@ Ext2WriteFile(IN PEXT2_IRP_CONTEXT IrpContext)
             if (PagingIoResourceAcquired) {
                 ExReleaseResourceLite(&Fcb->PagingIoResource);
             }
+
+#ifdef __REACTOS__
+            if (PagingIoHeldForVdl) {
+                ExReleaseResourceLite(&Fcb->PagingIoResource);
+            }
+#endif
 
             if (MainResourceAcquired) {
                 ExReleaseResourceLite(&Fcb->MainResource);

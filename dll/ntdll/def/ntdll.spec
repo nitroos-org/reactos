@@ -719,6 +719,7 @@
 @ stdcall RtlComputePrivatizedDllName_U(ptr ptr ptr)
 @ stdcall -stub -version=0x600+ RtlConnectToSm(ptr ptr long ptr)
 @ stdcall RtlConsoleMultiByteToUnicodeN(ptr long ptr ptr long ptr)
+@ stdcall -version=0x601+ RtlConvertDeviceFamilyInfoToString(ptr ptr ptr ptr)
 @ stdcall RtlConvertExclusiveToShared(ptr)
 @ stdcall -version=0x600+ RtlConvertLCIDToString(long long long ptr long)
 @ stdcall -arch=win32 -ret64 RtlConvertLongToLargeInteger(long)

@@ -50,6 +50,7 @@ list(APPEND SOURCE
     RtlUtf8String.c
     NtQueryWnfStateData.c
     RtlWin10Helpers.c
+    RtlConvertDeviceFamilyInfo.c
     ZeroBits.c
     CommitCharge.c
     RtlCurrentTransaction.c
