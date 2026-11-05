@@ -1674,6 +1674,18 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
     if (MaximumSize == 0)
         return STATUS_INVALID_PARAMETER_4;
 
+    /*
+     * Committed pages that no paging file configuration could ever back fail as a commitment, as on Windows,
+     * whose paged pool holds the Prototype PTEs of any such section. Only a size that would fit the
+     * commit limit may fail for its Prototype PTEs below.
+     */
+    if ((AllocationAttributes & SEC_COMMIT) &&
+        ((LONG64)MaximumSize >= 0) && /* a negative size is too big, not a commitment */
+        ((MaximumSize >> PAGE_SHIFT) > (ULONG64)MmTotalCommitLimitMaximum))
+    {
+        return STATUS_COMMITMENT_LIMIT;
+    }
+
     /* Calculate the maximum size possible, given the Prototype PTEs we'll need */
     SizeLimit = MmSizeOfPagedPoolInBytes - sizeof(SEGMENT);
     SizeLimit /= sizeof(MMPTE);

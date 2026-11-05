@@ -425,6 +425,21 @@ TestSections(VOID)
     CheckSystemDelta(System, 0, "close the SEC_RESERVE section");
 }
 
+#ifdef _WIN64
+static
+DWORD
+WINAPI
+EmptyThread(PVOID Parameter)
+{
+    return 0;
+}
+#endif
+
+/*
+ * A request no commit limit can hold fails as a commitment limit, whichever way it is asked for (all of
+ * these are the answers of Windows 10 22H2): STATUS_COMMITMENT_LIMIT from the Nt functions,
+ * ERROR_COMMITMENT_LIMIT from the Win32 ones, also for a thread stack, which is committed.
+ */
 static
 VOID
 TestHugeCommit(VOID)
@@ -432,7 +447,10 @@ TestHugeCommit(VOID)
 #ifdef _WIN64
     PVOID Base = NULL;
     SIZE_T Size = (SIZE_T)1 << 40;
+    LARGE_INTEGER MaximumSize;
     ULONG_PTR CommitLimit;
+    HANDLE Section, Thread;
+    PVOID Address;
     NTSTATUS Status;
 
     QuerySystemCommit(&CommitLimit);
@@ -448,6 +466,39 @@ TestHugeCommit(VOID)
     {
         Size = 0;
         NtFreeVirtualMemory(NtCurrentProcess(), &Base, &Size, MEM_RELEASE);
+    }
+
+    SetLastError(0xdeadbeef);
+    Address = VirtualAlloc(NULL, (SIZE_T)1 << 40, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    ok(Address == NULL, "VirtualAlloc of 1 TB succeeded\n");
+    ok_err(ERROR_COMMITMENT_LIMIT);
+    if (Address)
+        VirtualFree(Address, 0, MEM_RELEASE);
+
+    /* A pagefile-backed section */
+    MaximumSize.QuadPart = (LONGLONG)1 << 40;
+    Section = NULL;
+    Status = NtCreateSection(&Section, SECTION_ALL_ACCESS, NULL, &MaximumSize, PAGE_READWRITE, SEC_COMMIT, NULL);
+    ok_ntstatus(Status, STATUS_COMMITMENT_LIMIT);
+    if (NT_SUCCESS(Status))
+        NtClose(Section);
+
+    SetLastError(0xdeadbeef);
+    Section = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0x100, 0, NULL);
+    ok(Section == NULL, "CreateFileMappingW of 1 TB succeeded\n");
+    ok_err(ERROR_COMMITMENT_LIMIT);
+    if (Section)
+        CloseHandle(Section);
+
+    /* The stack size of CreateThread is a SIZE_T, the commit of the stack */
+    SetLastError(0xdeadbeef);
+    Thread = CreateThread(NULL, (SIZE_T)1 << 40, EmptyThread, NULL, CREATE_SUSPENDED, NULL);
+    ok(Thread == NULL, "CreateThread with a 1 TB stack succeeded\n");
+    ok_err(ERROR_COMMITMENT_LIMIT);
+    if (Thread)
+    {
+        TerminateThread(Thread, 0);
+        CloseHandle(Thread);
     }
 #endif
 }
