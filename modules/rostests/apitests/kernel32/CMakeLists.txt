@@ -121,6 +121,7 @@ list(APPEND SOURCE
     GetSystemFileCacheSize.c
     GetSystemTimePrecise.c
     GetThreadUILanguage.c
+    GetTimeFormat.c
     DiskPerformance.c
     GetVolumeInformation.c
     HandleList.c

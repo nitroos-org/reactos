@@ -104,7 +104,9 @@ static HRESULT WINAPI fw_app_GetTypeInfoCount(
     return S_OK;
 }
 
+/* NetFwPublicTypeLib (resource 1) and NATUPNPLib (resource 2) are two separate type libraries */
 static ITypeLib *typelib;
+static ITypeLib *nat_typelib;
 static ITypeInfo *typeinfo[last_tid];
 
 static REFIID tid_id[] =
@@ -117,33 +119,43 @@ static REFIID tid_id[] =
     &IID_INetFwPolicy,
     &IID_INetFwPolicy2,
     &IID_INetFwProfile,
+    &IID_INetFwRule,
+    &IID_INetFwRules,
     &IID_IUPnPNAT,
     &IID_IStaticPortMappingCollection,
     &IID_IStaticPortMapping,
 };
 
+static HRESULT load_typelib( ITypeLib **cache, REFGUID libid )
+{
+    ITypeLib *lib;
+    HRESULT hr;
+
+    if (*cache) return S_OK;
+    hr = LoadRegTypeLib( libid, 1, 0, LOCALE_SYSTEM_DEFAULT, &lib );
+    if (FAILED(hr))
+    {
+        ERR("LoadRegTypeLib(%s) failed: %08lx\n", debugstr_guid(libid), hr);
+        return hr;
+    }
+    if (InterlockedCompareExchangePointer( (void **)cache, lib, NULL ))
+        ITypeLib_Release( lib );
+    return S_OK;
+}
+
 HRESULT get_typeinfo( enum type_id tid, ITypeInfo **ret )
 {
     HRESULT hr;
 
-    if (!typelib)
-    {
-        ITypeLib *lib;
-
-        hr = LoadRegTypeLib( &LIBID_NetFwPublicTypeLib, 1, 0, LOCALE_SYSTEM_DEFAULT, &lib );
-        if (FAILED(hr))
-        {
-            ERR("LoadRegTypeLib failed: %08lx\n", hr);
-            return hr;
-        }
-        if (InterlockedCompareExchangePointer( (void **)&typelib, lib, NULL ))
-            ITypeLib_Release( lib );
-    }
     if (!typeinfo[tid])
     {
         ITypeInfo *info;
+        BOOL nat = tid >= IUPnPNAT_tid;
+        ITypeLib **lib = nat ? &nat_typelib : &typelib;
 
-        hr = ITypeLib_GetTypeInfoOfGuid( typelib, tid_id[tid], &info );
+        hr = load_typelib( lib, nat ? &LIBID_NATUPNPLib : &LIBID_NetFwPublicTypeLib );
+        if (FAILED(hr)) return hr;
+        hr = ITypeLib_GetTypeInfoOfGuid( *lib, tid_id[tid], &info );
         if (FAILED(hr))
         {
             ERR("GetTypeInfoOfGuid(%s) failed: %08lx\n", debugstr_guid(tid_id[tid]), hr);
@@ -167,6 +179,8 @@ void release_typelib(void)
 
     if (typelib)
         ITypeLib_Release(typelib);
+    if (nat_typelib)
+        ITypeLib_Release(nat_typelib);
 }
 
 static HRESULT WINAPI fw_app_GetTypeInfo(

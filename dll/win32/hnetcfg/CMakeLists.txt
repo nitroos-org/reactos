@@ -23,7 +23,7 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
 endif()
 
 set_module_type(hnetcfg win32dll)
-add_idl_reg_scripts(hnetcfg regtypelib hnetcfg_tlb.idl)
+add_idl_reg_scripts(hnetcfg regtypelib hnetcfg_tlb.idl hnetcfg_nat_tlb.idl)
 add_idl_reg_scripts(hnetcfg registry hnetcfg.idl)
 add_dependencies(hnetcfg stdole2)
 target_link_libraries(hnetcfg wine wine_dll_register wine_dll_canunload uuid oldnames msvcrtex fwstore)
