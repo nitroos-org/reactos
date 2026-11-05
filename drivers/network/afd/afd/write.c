@@ -108,6 +108,144 @@ static BOOLEAN AfdSendQueueHasRemainder(PAFD_FCB FCB)
     return FALSE;
 }
 
+/* Bytes in the send window that no request waits for: those of a stream send that was cancelled with them in
+ * the window, and those of a send that completed when it was copied (it cannot wait). They are still sent, and
+ * must not be counted against the requests behind them. They are kept as ghosts in window order, each with the
+ * number of window bytes in front of it. The socket state lock is held */
+VOID AfdFreeSendGhosts(PAFD_FCB FCB)
+{
+    while (!IsListEmpty(&FCB->SendGhosts))
+    {
+        PLIST_ENTRY Entry = RemoveHeadList(&FCB->SendGhosts);
+
+        ExFreePoolWithTag(CONTAINING_RECORD(Entry, AFD_SEND_GHOST, ListEntry), TAG_AFD_SEND_GHOST);
+    }
+}
+
+/* Bytes that are in the send window, Pos bytes from its front, and that no request waits for */
+static VOID AfdAddSendGhost(PAFD_FCB FCB, UINT Pos, UINT Bytes)
+{
+    PLIST_ENTRY GhostEntry, Prev;
+    PAFD_SEND_GHOST Ghost, New, Next;
+
+    if (Bytes == 0 || Pos >= FCB->Send.BytesUsed)
+        return;
+    if (Bytes > FCB->Send.BytesUsed - Pos)
+        Bytes = FCB->Send.BytesUsed - Pos;
+
+    /* The last ghost that starts before Pos */
+    Prev = &FCB->SendGhosts;
+    for (GhostEntry = FCB->SendGhosts.Flink; GhostEntry != &FCB->SendGhosts; GhostEntry = GhostEntry->Flink)
+    {
+        Ghost = CONTAINING_RECORD(GhostEntry, AFD_SEND_GHOST, ListEntry);
+        if (Ghost->Ahead >= Pos)
+            break;
+        Prev = GhostEntry;
+    }
+
+    Ghost = (Prev != &FCB->SendGhosts) ? CONTAINING_RECORD(Prev, AFD_SEND_GHOST, ListEntry) : NULL;
+    if (Ghost && Ghost->Ahead + Ghost->Bytes == Pos)
+    {
+        Ghost->Bytes += Bytes;
+    }
+    else
+    {
+        /* Without the memory the bytes stay unattributed: the count of the sends behind is early by them */
+        New = ExAllocatePoolWithTag(NonPagedPool, sizeof(*New), TAG_AFD_SEND_GHOST);
+        if (!New)
+            return;
+        New->Ahead = Pos;
+        New->Bytes = Bytes;
+        InsertHeadList(Prev, &New->ListEntry);
+        Ghost = New;
+    }
+
+    /* It may now touch the next one */
+    if (Ghost->ListEntry.Flink != &FCB->SendGhosts)
+    {
+        Next = CONTAINING_RECORD(Ghost->ListEntry.Flink, AFD_SEND_GHOST, ListEntry);
+        if (Next->Ahead == Ghost->Ahead + Ghost->Bytes)
+        {
+            Ghost->Bytes += Next->Bytes;
+            RemoveEntryList(&Next->ListEntry);
+            ExFreePoolWithTag(Next, TAG_AFD_SEND_GHOST);
+        }
+    }
+}
+
+/* Called as a stream send is removed from the queue by a cancel: what of it is in the window is still sent */
+VOID AfdOrphanStreamSend(PAFD_FCB FCB, PIRP Irp)
+{
+    PLIST_ENTRY Entry, GhostEntry;
+    UINT Pos = 0, Bytes = (UINT)(ULONG_PTR)Irp->Tail.Overlay.DriverContext[3];
+
+    if ((FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) || Bytes == 0 || FCB->Send.BytesUsed == 0)
+        return;
+
+    /* Where the request's bytes are in the window: behind the requests queued before it and the ghosts there */
+    GhostEntry = FCB->SendGhosts.Flink;
+    for (Entry = FCB->PendingIrpList[FUNCTION_SEND].Flink;
+         Entry != &FCB->PendingIrpList[FUNCTION_SEND];
+         Entry = Entry->Flink)
+    {
+        PIRP Queued = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+
+        while (GhostEntry != &FCB->SendGhosts &&
+               CONTAINING_RECORD(GhostEntry, AFD_SEND_GHOST, ListEntry)->Ahead <= Pos)
+        {
+            Pos += CONTAINING_RECORD(GhostEntry, AFD_SEND_GHOST, ListEntry)->Bytes;
+            GhostEntry = GhostEntry->Flink;
+        }
+        if (Queued == Irp)
+            break;
+        Pos += (UINT)(ULONG_PTR)Queued->Tail.Overlay.DriverContext[3];
+    }
+
+    AfdAddSendGhost(FCB, Pos, Bytes);
+}
+
+/* Bytes of the window in front of the ghosts were sent: they move up */
+static VOID AfdAdvanceSendGhosts(PAFD_FCB FCB, UINT Sent)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = FCB->SendGhosts.Flink; Entry != &FCB->SendGhosts; Entry = Entry->Flink)
+    {
+        PAFD_SEND_GHOST Ghost = CONTAINING_RECORD(Entry, AFD_SEND_GHOST, ListEntry);
+
+        Ghost->Ahead = Ghost->Ahead > Sent ? Ghost->Ahead - Sent : 0;
+    }
+}
+
+/* The bytes sent from the front of the window that belong to a cancelled send are used up first */
+static VOID AfdConsumeFrontGhost(PAFD_FCB FCB, PUINT SendLength)
+{
+    PAFD_SEND_GHOST Ghost;
+    UINT Used;
+
+    if (IsListEmpty(&FCB->SendGhosts))
+        return;
+    Ghost = CONTAINING_RECORD(FCB->SendGhosts.Flink, AFD_SEND_GHOST, ListEntry);
+    if (Ghost->Ahead != 0)
+        return;
+
+    Used = MIN(MIN(Ghost->Bytes, *SendLength), FCB->Send.BytesUsed);
+    if (Used == 0)
+    {
+        /* The window holds less than the ghosts say: drop them rather than loop */
+        AfdFreeSendGhosts(FCB);
+        return;
+    }
+    Ghost->Bytes -= Used;
+    FCB->Send.BytesUsed -= Used;
+    *SendLength -= Used;
+    if (Ghost->Bytes == 0)
+    {
+        RemoveEntryList(&Ghost->ListEntry);
+        ExFreePoolWithTag(Ghost, TAG_AFD_SEND_GHOST);
+    }
+}
+
 static IO_COMPLETION_ROUTINE SendComplete;
 
 /* What follows a send to the transport that sent Sent bytes of the window: completes the requests
@@ -189,14 +327,31 @@ AfdSendCompleted
 
     TotalBytesProcessed = 0;
     SendLength = (UINT)Sent;
-    while (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]) && SendLength > 0) {
+    while (SendLength > 0) {
+        /* Bytes that no request waits for, in front of the queued requests */
+        if (!IsListEmpty(&FCB->SendGhosts) &&
+            CONTAINING_RECORD(FCB->SendGhosts.Flink, AFD_SEND_GHOST, ListEntry)->Ahead == 0)
+        {
+            AfdConsumeFrontGhost(FCB, &SendLength);
+            continue;
+        }
+        if (IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]))
+            break;
+
         NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]);
         NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
         NextIrpSp = IoGetCurrentIrpStackLocation( NextIrp );
         SendReq = GetLockedData(NextIrp, NextIrpSp);
 
         TotalBytesCopied = (ULONG_PTR)NextIrp->Tail.Overlay.DriverContext[3];
-        ASSERT(TotalBytesCopied != 0);
+
+        /* Nothing of this request is in the window: what is left of what was sent is not its */
+        if (TotalBytesCopied == 0)
+        {
+            InsertHeadList(&FCB->PendingIrpList[FUNCTION_SEND],
+                           &NextIrp->Tail.Overlay.ListEntry);
+            break;
+        }
 
         /* If we didn't get enough, keep waiting */
         if (TotalBytesCopied > SendLength)
@@ -208,6 +363,7 @@ AfdSendCompleted
             /* Update the state variables */
             FCB->Send.BytesUsed -= SendLength;
             TotalBytesProcessed += SendLength;
+            AfdAdvanceSendGhosts(FCB, SendLength);
             SendLength = 0;
 
             /* Pend the IRP */
@@ -219,6 +375,7 @@ AfdSendCompleted
         FCB->Send.BytesUsed -= TotalBytesCopied;
         TotalBytesProcessed += TotalBytesCopied;
         SendLength -= TotalBytesCopied;
+        AfdAdvanceSendGhosts(FCB, (UINT)TotalBytesCopied);
 
         /* All that was copied is sent, but a whole send has more to copy: it stays queued
          * and is refilled below, nothing can have been sent beyond it */
@@ -249,8 +406,12 @@ AfdSendCompleted
     if (SendLength != 0)
     {
         FCB->Send.BytesUsed -= SendLength;
+        AfdAdvanceSendGhosts(FCB, SendLength);
         SendLength = 0;
     }
+    /* Nothing is left in the window, so nothing that no request waits for either */
+    if (FCB->Send.BytesUsed == 0)
+        AfdFreeSendGhosts(FCB);
 
     /* Copy into the window from the request at the head of the queue if it has bytes left to copy */
     if (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND])) {
@@ -941,6 +1102,9 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                     SendComplete,
                     FCB);
         }
+
+        /* No request waits for these bytes: later requests must not be counted against them */
+        AfdAddSendGhost(FCB, FCB->Send.BytesUsed - TotalBytesCopied, TotalBytesCopied);
 
         return UnlockAndMaybeComplete( FCB, STATUS_SUCCESS, Irp, TotalBytesCopied );
     }

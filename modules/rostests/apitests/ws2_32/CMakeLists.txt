@@ -29,6 +29,7 @@ list(APPEND SOURCE
     getservbyport.c
     getsockname.c
     handleinherit.c
+    sendcancel.c
     sendwhole.c
     tcpnodelay.c
     inheritedsocket.c

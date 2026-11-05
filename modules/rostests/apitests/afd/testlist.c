@@ -3,6 +3,7 @@
 
 extern void func_select(void);
 extern void func_send(void);
+extern void func_sendcancel(void);
 extern void func_sendtounbound(void);
 extern void func_windowsize(void);
 extern void func_defensive(void);
@@ -23,6 +24,7 @@ const struct test winetest_testlist[] =
 {
     { "select", func_select },
     { "send", func_send },
+    { "sendcancel", func_sendcancel },
     { "sendtounbound", func_sendtounbound },
     { "windowsize", func_windowsize },
     { "defensive", func_defensive },
