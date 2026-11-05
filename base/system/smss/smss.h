@@ -250,6 +250,18 @@ NTAPI
 SmpUnhandledExceptionFilter(
     _In_ PEXCEPTION_POINTERS ExceptionInfo);
 
+/* smnitro.c */
+
+extern ULONG SmpNitroSessions;
+
+VOID
+NTAPI
+SmpReadNitroSessionsConfig(VOID);
+
+NTSTATUS
+NTAPI
+SmpStartNitroTestSession(VOID);
+
 /* smsubsys.c */
 
 VOID
