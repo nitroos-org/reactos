@@ -62,7 +62,36 @@ typedef struct _CONSOLE_STATE_INFO
 C_ASSERT(sizeof(CONSOLE_STATE_INFO) == 0xD0);
 #endif
 
+/*
+ * Settings added after the layout above was fixed (it is what Windows' console.dll
+ * sends and expects, with the title as its tail). Windows' newer console property
+ * structure carries these two settings as fCtrlKeyShortcutsDisabled and fLineSelection
+ * in a different tail (its titles are pointers), so they cannot be appended to
+ * CONSOLE_STATE_INFO itself without moving the title. They travel as a self-describing
+ * block in the LAST sizeof(CONSOLE_STATE_INFO_EX) bytes of the buffer that cbSize
+ * covers, after the title: a sender that does not know it (a Windows console.dll)
+ * simply leaves it out and the receiver keeps its current values.
+ * Use ConCfgGetStateInfoEx(); never read the block directly.
+ */
+#define CONSOLE_STATE_INFO_EX_SIGNATURE 0x58454343  // 'CCEX'
+
+typedef struct _CONSOLE_STATE_INFO_EX
+{
+    ULONG   Signature;                  // CONSOLE_STATE_INFO_EX_SIGNATURE
+    ULONG   Size;                       // sizeof(CONSOLE_STATE_INFO_EX)
+    BOOL    CtrlKeyShortcutsDisabled;   // HKCU\Console CtrlKeyShortcutsDisabled (default FALSE)
+    BOOL    LineSelection;              // HKCU\Console LineSelection (default TRUE)
+} CONSOLE_STATE_INFO_EX, *PCONSOLE_STATE_INFO_EX;
+
 #pragma pack(pop)
+
+/*
+ * Number of WCHARs (without the terminating NUL) that fit in ConsoleTitle of a
+ * buffer of cbSize bytes that also carries the CONSOLE_STATE_INFO_EX block.
+ */
+#define CONSOLE_STATE_INFO_TITLE_CCH(cbSize) \
+    (((cbSize) - FIELD_OFFSET(CONSOLE_STATE_INFO, ConsoleTitle) - \
+      sizeof(CONSOLE_STATE_INFO_EX) - sizeof(UNICODE_NULL)) / sizeof(WCHAR))
 
 /*
  * BYTE Foreground = LOBYTE(Attributes) & 0x0F;
@@ -91,6 +120,20 @@ BOOLEAN
 ConCfgWriteUserSettings(
     IN PCONSOLE_STATE_INFO ConsoleInfo,
     IN BOOLEAN DefaultSettings);
+
+/*
+ * The CONSOLE_STATE_INFO_EX block of ConsoleInfo, or NULL if the buffer has none.
+ * InfoSize is the number of bytes that are really readable (at most cbSize).
+ */
+PCONSOLE_STATE_INFO_EX
+ConCfgGetStateInfoEx(
+    IN PCONSOLE_STATE_INFO ConsoleInfo,
+    IN SIZE_T InfoSize);
+
+/* Reserve and initialise the block at the end of a buffer of cbSize bytes */
+VOID
+ConCfgInitStateInfoEx(
+    IN OUT PCONSOLE_STATE_INFO ConsoleInfo);
 
 VOID
 ConCfgInitDefaultSettings(

@@ -163,6 +163,55 @@ ConCfgOpenUserSettings(
     return Success;
 }
 
+PCONSOLE_STATE_INFO_EX
+ConCfgGetStateInfoEx(
+    IN PCONSOLE_STATE_INFO ConsoleInfo,
+    IN SIZE_T InfoSize)
+{
+    PCONSOLE_STATE_INFO_EX Ex;
+
+    if (ConsoleInfo == NULL)
+        return NULL;
+
+    /* The block is the tail of the buffer: it must be fully inside what is readable */
+    if (InfoSize < sizeof(CONSOLE_STATE_INFO) + sizeof(CONSOLE_STATE_INFO_EX) ||
+        ConsoleInfo->cbSize < sizeof(CONSOLE_STATE_INFO) + sizeof(CONSOLE_STATE_INFO_EX) ||
+        ConsoleInfo->cbSize > InfoSize)
+    {
+        return NULL;
+    }
+
+    Ex = (PCONSOLE_STATE_INFO_EX)((PUCHAR)ConsoleInfo + ConsoleInfo->cbSize - sizeof(CONSOLE_STATE_INFO_EX));
+    if (((ULONG_PTR)Ex & (sizeof(ULONG) - 1)) != 0 ||
+        Ex->Signature != CONSOLE_STATE_INFO_EX_SIGNATURE ||
+        Ex->Size != sizeof(CONSOLE_STATE_INFO_EX))
+    {
+        return NULL;
+    }
+
+    return Ex;
+}
+
+VOID
+ConCfgInitStateInfoEx(
+    IN OUT PCONSOLE_STATE_INFO ConsoleInfo)
+{
+    PCONSOLE_STATE_INFO_EX Ex;
+
+    if (ConsoleInfo == NULL ||
+        ConsoleInfo->cbSize < sizeof(CONSOLE_STATE_INFO) + sizeof(CONSOLE_STATE_INFO_EX) ||
+        (ConsoleInfo->cbSize & (sizeof(ULONG) - 1)) != 0)
+    {
+        return;
+    }
+
+    Ex = (PCONSOLE_STATE_INFO_EX)((PUCHAR)ConsoleInfo + ConsoleInfo->cbSize - sizeof(CONSOLE_STATE_INFO_EX));
+    Ex->Signature = CONSOLE_STATE_INFO_EX_SIGNATURE;
+    Ex->Size = sizeof(CONSOLE_STATE_INFO_EX);
+    Ex->CtrlKeyShortcutsDisabled = FALSE;   // Windows 10 default: the shortcuts are on
+    Ex->LineSelection = TRUE;               // Windows 10 default: line wrapping selection on
+}
+
 BOOLEAN
 ConCfgReadUserSettings(
     IN OUT PCONSOLE_STATE_INFO ConsoleInfo,
@@ -179,6 +228,7 @@ ConCfgReadUserSettings(
     WCHAR szValue[LF_FACESIZE] = L"";
     DWORD Value;
     DWORD dwValue;
+    PCONSOLE_STATE_INFO_EX Ex = ConCfgGetStateInfoEx(ConsoleInfo, ConsoleInfo->cbSize);
 
     if (!ConCfgOpenUserSettings(DefaultSettings ? L"" : ConsoleInfo->ConsoleTitle,
                                 &hKey, KEY_READ, FALSE))
@@ -295,6 +345,16 @@ ConCfgReadUserSettings(
             ConsoleInfo->InsertMode = !!Value;
             Success = TRUE;
         }
+        else if (!wcscmp(szValueName, L"CtrlKeyShortcutsDisabled"))
+        {
+            if (Ex) Ex->CtrlKeyShortcutsDisabled = !!Value;
+            Success = TRUE;
+        }
+        else if (!wcscmp(szValueName, L"LineSelection"))
+        {
+            if (Ex) Ex->LineSelection = !!Value;
+            Success = TRUE;
+        }
         else if (!wcscmp(szValueName, L"ScreenBufferSize"))
         {
             ConsoleInfo->ScreenBufferSize.X = LOWORD(Value);
@@ -362,6 +422,7 @@ do {                                                                            
 
     WCHAR szValueName[15];
     UINT i;
+    PCONSOLE_STATE_INFO_EX Ex = ConCfgGetStateInfoEx(ConsoleInfo, ConsoleInfo->cbSize);
 
     if (!ConCfgOpenUserSettings(DefaultSettings ? L"" : ConsoleInfo->ConsoleTitle,
                                 &hKey, KEY_WRITE, TRUE))
@@ -400,6 +461,16 @@ do {                                                                            
 
     Storage = ConsoleInfo->InsertMode;
     SetConsoleSetting(L"InsertMode", REG_DWORD, sizeof(DWORD), &Storage, TRUE);
+
+    /* Only when the sender carried them: otherwise leave what is stored */
+    if (Ex)
+    {
+        Storage = !!Ex->CtrlKeyShortcutsDisabled;
+        SetConsoleSetting(L"CtrlKeyShortcutsDisabled", REG_DWORD, sizeof(DWORD), &Storage, FALSE);
+
+        Storage = !!Ex->LineSelection;
+        SetConsoleSetting(L"LineSelection", REG_DWORD, sizeof(DWORD), &Storage, TRUE);
+    }
 
     Storage = MAKELONG(ConsoleInfo->ScreenBufferSize.X, ConsoleInfo->ScreenBufferSize.Y);
     SetConsoleSetting(L"ScreenBufferSize", REG_DWORD, sizeof(DWORD), &Storage, MAKELONG(120, 9001));
@@ -465,6 +536,9 @@ ConCfgInitDefaultSettings(
     ConsoleInfo->QuickEdit  = TRUE;
     ConsoleInfo->InsertMode = TRUE;
     // ConsoleInfo->InputBufferSize = 0;
+
+    /* Ctrl key shortcuts and line wrapping selection (when the buffer carries them) */
+    ConCfgInitStateInfoEx(ConsoleInfo);
 
     // Rule: ScreenBufferSize >= WindowSize
     // Windows 10 conhost defaults: 120x30 window on a 120x9001 screen buffer.

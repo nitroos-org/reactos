@@ -1010,11 +1010,18 @@ UpdateSelection(PGUI_CONSOLE_DATA GuiData,
         HRGN newRgn;
 
         /*
-         * Pressing the Control key while selecting text, allows us to enter
-         * into line-selection mode, the selection mode of *nix terminals.
+         * With "Enable line wrapping selection" (Windows 10 default) the
+         * selection follows the line wraps like a text editor's, and the
+         * Alt key switches to a block selection. Without it, selections are
+         * blocks, and pressing the Control key while selecting text allows
+         * us to enter into line-selection mode, the selection mode of
+         * *nix terminals.
          */
         BOOL OldLineSel = GuiData->LineSelection;
-        GuiData->LineSelection = !!(GetKeyState(VK_CONTROL) & KEY_PRESSED);
+        if (Console->LineSelection)
+            GuiData->LineSelection = !(GetKeyState(VK_MENU) & KEY_PRESSED);
+        else
+            GuiData->LineSelection = !!(GetKeyState(VK_CONTROL) & KEY_PRESSED);
 
         /* Exchange left/top with right/bottom if required */
         rc.Left   = min(GuiData->Selection.dwSelectionAnchor.X, coord->X);
@@ -1247,6 +1254,197 @@ IsSystemKey(WORD VirtualKeyCode)
     }
 }
 
+/*
+ * The character at a position of the screen buffer, linearly numbered row after row.
+ * A blank is a NUL, a space or a tab.
+ */
+static BOOL
+IsBlankCellAt(PTEXTMODE_SCREEN_BUFFER Buffer, LONG Index)
+{
+    WCHAR Char = ConioCoordToPointer(Buffer,
+                                     Index % Buffer->ScreenBufferSize.X,
+                                     Index / Buffer->ScreenBufferSize.X)->Char.UnicodeChar;
+    return (Char == L'\0' || Char == L' ' || Char == L'\t');
+}
+
+/*
+ * Move the selection cursor to the start of the previous word or past the end of
+ * the next one. The movement runs on over the line ends, as on Windows 10: from
+ * blank rows it stops at the end of the screen buffer.
+ */
+static VOID
+MoveSelectionCursorByWord(PCONSOLE_SCREEN_BUFFER ActiveBuffer, PCOORD Cursor, BOOL Forward)
+{
+    PTEXTMODE_SCREEN_BUFFER Buffer;
+    LONG Width, Last, Index;
+
+    if (GetType(ActiveBuffer) != TEXTMODE_BUFFER) return;
+    Buffer = (PTEXTMODE_SCREEN_BUFFER)ActiveBuffer;
+    Width = Buffer->ScreenBufferSize.X;
+    Last  = Width * Buffer->ScreenBufferSize.Y - 1;
+    if (Cursor->X < 0 || Cursor->Y < 0 || Cursor->X >= Width || Cursor->Y >= Buffer->ScreenBufferSize.Y) return;
+    Index = Cursor->Y * Width + Cursor->X;
+
+    if (Forward)
+    {
+        while (Index < Last && !IsBlankCellAt(Buffer, Index)) Index++;  /* the rest of this word */
+        while (Index < Last &&  IsBlankCellAt(Buffer, Index)) Index++;  /* the blanks after it */
+    }
+    else
+    {
+        while (Index > 0 &&  IsBlankCellAt(Buffer, Index - 1)) Index--; /* the blanks before */
+        while (Index > 0 && !IsBlankCellAt(Buffer, Index - 1)) Index--; /* the word itself */
+    }
+
+    Cursor->X = (SHORT)(Index % Width);
+    Cursor->Y = (SHORT)(Index / Width);
+}
+
+/*
+ * Move the selection cursor for an arrow, Home, End, Page Up or Page Down key.
+ * Returns FALSE for any other key.
+ */
+static BOOL
+MoveSelectionCursor(PGUI_CONSOLE_DATA GuiData, PCONSOLE_SCREEN_BUFFER ActiveBuffer,
+                    WORD VirtualKeyCode, BOOL Ctrl)
+{
+    switch (VirtualKeyCode)
+    {
+        case VK_LEFT:
+            if (Ctrl)
+                MoveSelectionCursorByWord(ActiveBuffer, &GuiData->dwSelectionCursor, FALSE);
+            else if (GuiData->dwSelectionCursor.X > 0)
+                GuiData->dwSelectionCursor.X--;
+            return TRUE;
+
+        case VK_RIGHT:
+            if (Ctrl)
+                MoveSelectionCursorByWord(ActiveBuffer, &GuiData->dwSelectionCursor, TRUE);
+            else if (GuiData->dwSelectionCursor.X < ActiveBuffer->ScreenBufferSize.X - 1)
+                GuiData->dwSelectionCursor.X++;
+            return TRUE;
+
+        case VK_UP:
+            if (GuiData->dwSelectionCursor.Y > 0)
+                GuiData->dwSelectionCursor.Y--;
+            return TRUE;
+
+        case VK_DOWN:
+            if (GuiData->dwSelectionCursor.Y < ActiveBuffer->ScreenBufferSize.Y - 1)
+                GuiData->dwSelectionCursor.Y++;
+            return TRUE;
+
+        case VK_HOME:
+            GuiData->dwSelectionCursor.X = 0;
+            if (Ctrl) GuiData->dwSelectionCursor.Y = 0;
+            return TRUE;
+
+        case VK_END:
+            GuiData->dwSelectionCursor.X = ActiveBuffer->ScreenBufferSize.X - 1;
+            if (Ctrl) GuiData->dwSelectionCursor.Y = ActiveBuffer->ScreenBufferSize.Y - 1;
+            return TRUE;
+
+        case VK_PRIOR:
+            GuiData->dwSelectionCursor.Y -= ActiveBuffer->ViewSize.Y;
+            if (GuiData->dwSelectionCursor.Y < 0)
+                GuiData->dwSelectionCursor.Y = 0;
+            return TRUE;
+
+        case VK_NEXT:
+            GuiData->dwSelectionCursor.Y += ActiveBuffer->ViewSize.Y;
+            if (GuiData->dwSelectionCursor.Y >= ActiveBuffer->ScreenBufferSize.Y)
+                GuiData->dwSelectionCursor.Y  = ActiveBuffer->ScreenBufferSize.Y - 1;
+            return TRUE;
+
+        default:
+            return FALSE;
+    }
+}
+
+/* The keys that start or extend a keyboard selection with Shift held, as on Windows 10 */
+static BOOL
+IsSelectionKey(WORD VirtualKeyCode)
+{
+    switch (VirtualKeyCode)
+    {
+        case VK_LEFT:
+        case VK_RIGHT:
+        case VK_UP:
+        case VK_DOWN:
+        case VK_HOME:
+        case VK_END:
+        case VK_PRIOR:
+        case VK_NEXT:
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
+/* Select from Begin to End as a selection that the next key clears and passes on, like a mouse one */
+static VOID
+SelectRange(PGUI_CONSOLE_DATA GuiData, COORD Begin, COORD End)
+{
+    GuiData->Selection.dwFlags = CONSOLE_NO_SELECTION;
+    GuiData->dwSelectionCursor = End;
+    GuiData->Selection.dwFlags |= CONSOLE_MOUSE_SELECTION;
+    UpdateSelection(GuiData, &Begin, &End);
+}
+
+/*
+ * Ctrl+A as on Windows 10: in a line read with text typed, the typed text first, and then
+ * (or when there is none) everything from the top of the screen buffer to the end of the
+ * text, or to the cursor.
+ * The console must be locked.
+ */
+static VOID
+SelectAllShortcut(PGUI_CONSOLE_DATA GuiData, PCONSOLE_SCREEN_BUFFER ActiveBuffer)
+{
+    PCONSRV_CONSOLE Console = GuiData->Console;
+    PTEXTMODE_SCREEN_BUFFER Buffer;
+    COORD Origin = {0, 0}, Begin, End;
+    LONG Width, CursorIndex;
+    BOOL Selecting = !!(GuiData->Selection.dwFlags & CONSOLE_SELECTION_IN_PROGRESS);
+
+    if (GetType(ActiveBuffer) != TEXTMODE_BUFFER)
+    {
+        SelectAll(GuiData, ActiveBuffer);
+        return;
+    }
+
+    Buffer = (PTEXTMODE_SCREEN_BUFFER)ActiveBuffer;
+    Width = Buffer->ScreenBufferSize.X;
+    CursorIndex = Buffer->CursorPosition.Y * Width + Buffer->CursorPosition.X;
+    End = Buffer->CursorPosition;
+
+    if (Console->LineBuffer && !Console->LineComplete && Console->LineSize > 0 &&
+        (ULONG)CursorIndex >= Console->LinePos)
+    {
+        /* The typed text is [Start, Start + LineSize - 1] */
+        LONG Start = CursorIndex - Console->LinePos;
+        LONG Stop  = Start + Console->LineSize - 1;
+
+        if (Stop < Width * Buffer->ScreenBufferSize.Y)
+        {
+            Begin.X = (SHORT)(Start % Width); Begin.Y = (SHORT)(Start / Width);
+            End.X   = (SHORT)(Stop  % Width); End.Y   = (SHORT)(Stop  / Width);
+
+            /* A second Ctrl+A, with the typed text already selected, widens to everything */
+            if (!(Selecting &&
+                  GuiData->Selection.dwSelectionAnchor.X == Begin.X &&
+                  GuiData->Selection.dwSelectionAnchor.Y == Begin.Y &&
+                  GuiData->dwSelectionCursor.X == End.X &&
+                  GuiData->dwSelectionCursor.Y == End.Y))
+            {
+                SelectRange(GuiData, Begin, End);
+                return;
+            }
+        }
+    }
+
+    SelectRange(GuiData, Origin, End);
+}
+
 static VOID
 OnKey(PGUI_CONSOLE_DATA GuiData, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -1254,118 +1452,134 @@ OnKey(PGUI_CONSOLE_DATA GuiData, UINT msg, WPARAM wParam, LPARAM lParam)
     PCONSOLE_SCREEN_BUFFER ActiveBuffer;
     UINT ClipFormat = 0;
     HANDLE ClipData = NULL;
+    BOOL DoPaste = FALSE;
+    WORD VirtualKeyCode = LOWORD(wParam);
+    BOOL Ctrl, Shift, Alt;
+    BOOL Shortcuts;
 
     if (!ConDrvValidateConsoleUnsafe((PCONSOLE)Console, CONSOLE_RUNNING, TRUE)) return;
 
     ActiveBuffer = GuiData->ActiveBuffer;
 
+    /*
+     * The character that follows a shortcut we took (the ^C of a Ctrl+C that copied,
+     * the ^V of a Ctrl+V that pasted...) is not for the program: it would be a break.
+     */
+    if (GuiData->SwallowKey)
+    {
+        if (msg == WM_CHAR || msg == WM_DEADCHAR)
+        {
+            goto Quit;
+        }
+        else if (msg == WM_KEYUP && VirtualKeyCode == GuiData->SwallowKey)
+        {
+            GuiData->SwallowKey = 0;    /* the key-up itself goes on to the program, as on Windows */
+        }
+        else if (msg == WM_KEYDOWN && VirtualKeyCode != GuiData->SwallowKey &&
+                 VirtualKeyCode != VK_CONTROL && VirtualKeyCode != VK_SHIFT && VirtualKeyCode != VK_MENU)
+        {
+            GuiData->SwallowKey = 0;
+        }
+    }
+
+    Ctrl  = !!(GetKeyState(VK_CONTROL) & KEY_PRESSED);
+    Shift = !!(GetKeyState(VK_SHIFT) & KEY_PRESSED);
+    Alt   = !!(GetKeyState(VK_MENU) & KEY_PRESSED);
+    Shortcuts = !Console->CtrlKeyShortcutsDisabled && msg == WM_KEYDOWN && !Alt;
+
+    /*
+     * Windows 10 Ctrl key shortcuts (HKCU\Console CtrlKeyShortcutsDisabled = 0),
+     * measured on Windows 10 22H2:
+     * - Ctrl+C (also Ctrl+Shift+C, Ctrl+Insert) copies when there is a selection.
+     *   Without one it is not a shortcut: it stays the break key, or a key event
+     *   when the program turned off processed input.
+     * - Ctrl+V and Shift+Insert paste, Ctrl+A selects all, Shift+arrows, Home, End,
+     *   Page Up and Page Down select from the cursor; but only while the program has
+     *   processed input on, and Ctrl+V (and here Ctrl+A) not with virtual terminal
+     *   input either: a program that reads raw keys gets them as keys.
+     *   Ctrl+Shift+V is not a paste.
+     */
+    if (Shortcuts)
+    {
+        BOOL Selecting = !!(GuiData->Selection.dwFlags & CONSOLE_SELECTION_IN_PROGRESS);
+        ULONG Mode = GetConsoleInputBufferMode(Console);
+        BOOL Processed = !!(Mode & ENABLE_PROCESSED_INPUT);
+        BOOL VtInput   = !!(Mode & ENABLE_VIRTUAL_TERMINAL_INPUT);
+
+        if (Selecting && Ctrl && (VirtualKeyCode == 'C' || VirtualKeyCode == VK_INSERT))
+        {
+            /* Copy (and clear) the selection; Ctrl+Shift+C keeps the blanks that end the lines */
+            GuiData->CopyNoTrim = (Shift && VirtualKeyCode == 'C');
+            CopySelection(GuiData, ActiveBuffer, &ClipFormat, &ClipData);
+            GuiData->CopyNoTrim = FALSE;
+            GuiData->SwallowKey = VirtualKeyCode;
+            goto Quit;
+        }
+        else if (Processed && !VtInput &&
+                 ((Ctrl && !Shift && VirtualKeyCode == 'V') || (Shift && !Ctrl && VirtualKeyCode == VK_INSERT)))
+        {
+            /* Paste. The selection, if any, is dropped first */
+            if (Selecting) UpdateSelection(GuiData, NULL, NULL);
+            DoPaste = TRUE;
+            GuiData->SwallowKey = VirtualKeyCode;
+            goto Quit;
+        }
+        else if (Processed && !VtInput && Ctrl && !Shift && VirtualKeyCode == 'A')
+        {
+            SelectAllShortcut(GuiData, ActiveBuffer);
+            GuiData->SwallowKey = VirtualKeyCode;
+            goto Quit;
+        }
+        else if (Processed && Shift && IsSelectionKey(VirtualKeyCode) &&
+                 GetType(ActiveBuffer) == TEXTMODE_BUFFER &&
+                 (!Selecting || (GuiData->Selection.dwFlags & CONSOLE_MOUSE_SELECTION)))
+        {
+            if (!Selecting)
+            {
+                /* The first key selects the cell at the cursor, and nothing more */
+                COORD Start = ActiveBuffer->CursorPosition;
+                SelectRange(GuiData, Start, Start);
+            }
+            else
+            {
+                /* The next ones move the end of the selection */
+                MoveSelectionCursor(GuiData, ActiveBuffer, VirtualKeyCode, Ctrl);
+                UpdateSelection(GuiData, NULL, &GuiData->dwSelectionCursor);
+            }
+            GuiData->SwallowKey = VirtualKeyCode;
+            goto Quit;
+        }
+    }
+
     if (GuiData->Selection.dwFlags & CONSOLE_SELECTION_IN_PROGRESS)
     {
-        WORD VirtualKeyCode = LOWORD(wParam);
-
         if (msg != WM_KEYDOWN) goto Quit;
 
         if (VirtualKeyCode == VK_RETURN)
         {
-            /* Copy (and clear) selection if ENTER is pressed */
+            /* Copy (and clear) selection if ENTER is pressed; its character is not the program's */
             CopySelection(GuiData, ActiveBuffer, &ClipFormat, &ClipData);
+            GuiData->SwallowKey = VirtualKeyCode;
             goto Quit;
         }
         else if ( VirtualKeyCode == VK_ESCAPE ||
-                 (VirtualKeyCode == 'C' && (GetKeyState(VK_CONTROL) & KEY_PRESSED)) )
+                 (VirtualKeyCode == 'C' && Ctrl) )
         {
-            /* Cancel selection if ESC or Ctrl-C are pressed */
+            /* Cancel selection if ESC or Ctrl-C are pressed; nor are their characters */
             UpdateSelection(GuiData, NULL, NULL);
+            GuiData->SwallowKey = VirtualKeyCode;
             goto Quit;
         }
 
         if ((GuiData->Selection.dwFlags & CONSOLE_MOUSE_SELECTION) == 0)
         {
-            /* Keyboard selection mode */
-            BOOL Interpreted = FALSE;
-            BOOL MajPressed  = !!(GetKeyState(VK_SHIFT) & KEY_PRESSED);
-
-            switch (VirtualKeyCode)
-            {
-                case VK_LEFT:
-                {
-                    Interpreted = TRUE;
-                    if (GuiData->dwSelectionCursor.X > 0)
-                        GuiData->dwSelectionCursor.X--;
-
-                    break;
-                }
-
-                case VK_RIGHT:
-                {
-                    Interpreted = TRUE;
-                    if (GuiData->dwSelectionCursor.X < ActiveBuffer->ScreenBufferSize.X - 1)
-                        GuiData->dwSelectionCursor.X++;
-
-                    break;
-                }
-
-                case VK_UP:
-                {
-                    Interpreted = TRUE;
-                    if (GuiData->dwSelectionCursor.Y > 0)
-                        GuiData->dwSelectionCursor.Y--;
-
-                    break;
-                }
-
-                case VK_DOWN:
-                {
-                    Interpreted = TRUE;
-                    if (GuiData->dwSelectionCursor.Y < ActiveBuffer->ScreenBufferSize.Y - 1)
-                        GuiData->dwSelectionCursor.Y++;
-
-                    break;
-                }
-
-                case VK_HOME:
-                {
-                    Interpreted = TRUE;
-                    GuiData->dwSelectionCursor.X = 0;
-                    GuiData->dwSelectionCursor.Y = 0;
-                    break;
-                }
-
-                case VK_END:
-                {
-                    Interpreted = TRUE;
-                    GuiData->dwSelectionCursor.Y = ActiveBuffer->ScreenBufferSize.Y - 1;
-                    break;
-                }
-
-                case VK_PRIOR:
-                {
-                    Interpreted = TRUE;
-                    GuiData->dwSelectionCursor.Y -= ActiveBuffer->ViewSize.Y;
-                    if (GuiData->dwSelectionCursor.Y < 0)
-                        GuiData->dwSelectionCursor.Y = 0;
-
-                    break;
-                }
-
-                case VK_NEXT:
-                {
-                    Interpreted = TRUE;
-                    GuiData->dwSelectionCursor.Y += ActiveBuffer->ViewSize.Y;
-                    if (GuiData->dwSelectionCursor.Y >= ActiveBuffer->ScreenBufferSize.Y)
-                        GuiData->dwSelectionCursor.Y  = ActiveBuffer->ScreenBufferSize.Y - 1;
-
-                    break;
-                }
-
-                default:
-                    break;
-            }
+            /* Keyboard selection mode (Edit > Mark) */
+            BOOL Interpreted = MoveSelectionCursor(GuiData, ActiveBuffer, VirtualKeyCode, Ctrl);
 
             if (Interpreted)
             {
                 UpdateSelection(GuiData,
-                                !MajPressed ? &GuiData->dwSelectionCursor : NULL,
+                                !Shift ? &GuiData->dwSelectionCursor : NULL,
                                 &GuiData->dwSelectionCursor);
             }
             else if (!IsSystemKey(VirtualKeyCode))
@@ -1409,6 +1623,7 @@ Quit:
 
     /* The clipboard owner may be waiting for this console: never under its lock */
     PutClipboard(GuiData, ClipFormat, ClipData);
+    if (DoPaste) PasteFromClipboard(GuiData);
 }
 
 
