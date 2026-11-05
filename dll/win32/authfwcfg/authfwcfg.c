@@ -398,6 +398,11 @@ static BOOL RuleMatches(const FW_RULE *r, const FILTER *f)
     }
     if (p->has[P_GROUP]) { PWSTR g = Resolve(r->Group); BOOL ok = EqI(g, p->val[P_GROUP]); free(g); if (!ok) return FALSE; }
     if (p->has[P_DIR] && r->Dir != f->dir) return FALSE;
+    if (p->has[P_STATUS])
+    {
+        if (!_wcsicmp(p->val[P_STATUS], L"enabled") && !r->Enabled) return FALSE;
+        if (!_wcsicmp(p->val[P_STATUS], L"disabled") && r->Enabled) return FALSE;
+    }
     if (p->has[P_PROFILE] && !(((r->Profiles == FWP_ANY_COM) ? FWP_ALL : r->Profiles) & ((f->profiles == FWP_ANY_COM) ? FWP_ALL : f->profiles))) return FALSE;
     if (p->has[P_PROGRAM] && !EqI(r->App, p->val[P_PROGRAM])) return FALSE;
     if (p->has[P_SERVICE] && !EqI(r->Svc, !_wcsicmp(p->val[P_SERVICE], L"any") ? L"*" : p->val[P_SERVICE])) return FALSE;
