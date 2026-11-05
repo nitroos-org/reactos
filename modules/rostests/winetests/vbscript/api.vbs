@@ -3046,6 +3046,16 @@ sub testFormatDateTime()
     call ok(getVT(x) = "VT_BSTR*", "getVT = " & getVT(x))
     x = FormatDateTime(0.1,1)
     call ok(getVT(x) = "VT_BSTR*", "getVT = " & getVT(x))
+
+    ' vbShortTime is a 24-hour hh:mm without a time marker (Windows 10 22H2 prints 13:45, 09:05, 00:05)
+    x = FormatDateTime(TimeSerial(13, 45, 7), 4)
+    call ok(x = "13:45", "vbShortTime 13:45:07 = " & x)
+    x = FormatDateTime(TimeSerial(9, 5, 0), 4)
+    call ok(x = "09:05", "vbShortTime 09:05:00 = " & x)
+    x = FormatDateTime(TimeSerial(0, 5, 0), 4)
+    call ok(x = "00:05", "vbShortTime 00:05:00 = " & x)
+    x = FormatDateTime(TimeSerial(12, 0, 0), 4)
+    call ok(x = "12:00", "vbShortTime 12:00:00 = " & x)
 end sub
 
 call testFormatDateTime()
