@@ -43,8 +43,9 @@
  *     a 127.0.0.0/8 source or destination on any other interface is not loopback and is filtered like
  *     any other packet. Traffic from one of the host's own addresses to one of its own addresses (LAN IP to
  *     LAN IP) is local too, as on Windows: the stack sends it out through the adapter and NDIS loops it
- *     back, so it arrives with the adapter's own MAC as the frame source; a packet from the wire that
- *     merely carries a local source address does not qualify.
+ *     back up from inside the send call. tcpip tags exactly those frames on its own send path; a packet
+ *     from the wire that carries a local source address, or even our MAC and IP, is not tagged and is
+ *     filtered like any other inbound packet.
  *  2. If NITROFW_POLICY_ENFORCE is clear in Policy.Flags, nothing is filtered (the service clears it when
  *     the registry kill switch says so). Counters may still run.
  *  3. A packet is evaluated against the profiles in Policy.ActiveProfiles. Profile[i] covers profile
