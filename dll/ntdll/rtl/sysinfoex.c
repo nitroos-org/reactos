@@ -36,7 +36,6 @@ RtlpAddArchitecture(
     _In_ USHORT Machine,
     _In_ BOOLEAN IsNative,
     _In_ BOOLEAN KernelMode,
-    _In_ BOOLEAN WoW64Container,
     _In_ USHORT ProcessMachine)
 {
     SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION* Entry = &Machines[Count];
@@ -47,7 +46,6 @@ RtlpAddArchitecture(
     Entry->UserMode = TRUE;
     Entry->Native = IsNative;
     Entry->Process = (Machine == ProcessMachine);
-    Entry->WoW64Container = WoW64Container;
     return Count + 1;
 }
 
@@ -100,7 +98,7 @@ RtlpQuerySupportedArchitectures(
 
     /* The kernel's own architecture is first */
     NativeMachine = SharedUserData->ImageNumberLow;
-    Count = RtlpAddArchitecture(Machines, Count, NativeMachine, TRUE, TRUE, FALSE, ProcessMachine);
+    Count = RtlpAddArchitecture(Machines, Count, NativeMachine, TRUE, TRUE, ProcessMachine);
 
     /* An AMD64 kernel also runs i386 code when WOW64 is there; a process that already is one proves it */
 #ifdef BUILD_WOW64_ENABLED
@@ -109,7 +107,7 @@ RtlpQuerySupportedArchitectures(
     if ((NativeMachine == IMAGE_FILE_MACHINE_AMD64) && (ProcessMachine == IMAGE_FILE_MACHINE_I386))
 #endif
     {
-        Count = RtlpAddArchitecture(Machines, Count, IMAGE_FILE_MACHINE_I386, FALSE, FALSE, TRUE, ProcessMachine);
+        Count = RtlpAddArchitecture(Machines, Count, IMAGE_FILE_MACHINE_I386, FALSE, FALSE, ProcessMachine);
     }
 
     /* The list ends with a zero entry */
