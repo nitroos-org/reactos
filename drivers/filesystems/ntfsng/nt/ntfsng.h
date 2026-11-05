@@ -105,7 +105,7 @@ typedef struct _NG_VCB
     LONG DioActive;
     KEVENT DioIdle;
     NPAGED_LOOKASIDE_LIST DioBounce;    /* NG_DIO_BOUNCE buffers for those transfers */
-    ULONG DioWrites, DioFallbacks, DioRedone;
+    ULONG DioWrites, DioFallbacks, DioRedone, DioZeroPieces;   /* DioZeroPieces: gap zero-fill pieces written without CoreLock */
     ULONG DioReads, DioReadFallbacks;   /* paging and non-cached reads with / without the transfer outside CoreLock */
     FAST_MUTEX FcbListLock;
     LIST_ENTRY FcbList;
