@@ -162,6 +162,7 @@ typedef struct _CONSRV_CONSOLE
     BOOLEAN QuickEdit;
     BOOLEAN CtrlKeyShortcutsDisabled;       /* HKCU\Console CtrlKeyShortcutsDisabled: no Ctrl+C/V/A, Shift+arrow selection of the console window */
     BOOLEAN LineSelection;                  /* HKCU\Console LineSelection: selections follow the line wraps (Alt = block) */
+    BOOLEAN FilterOnPaste;                  /* HKCU\Console FilterOnPaste: pasted text has tabs removed and smart quotes, dashes, nbsp replaced */
     BOOLEAN ExtendedFlags;                  /* The last input mode had ENABLE_EXTENDED_FLAGS: GetConsoleMode reports it */
 
 /************************ Virtual DOS Machine support *************************/
