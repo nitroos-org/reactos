@@ -1445,6 +1445,9 @@ MmCreateProcessAddressSpace(IN ULONG MinWs,
     ASSERT(Process->AddressSpaceInitialized == 0);
     Process->AddressSpaceInitialized = 1;
 
+    /* The session tables of the session the process joins (NitroSessions) */
+    MiSessionInitializeProcessTables(Process, TableBaseIndex);
+
     /* Add the process to the session */
     MiSessionAddProcess(Process);
     return TRUE;
