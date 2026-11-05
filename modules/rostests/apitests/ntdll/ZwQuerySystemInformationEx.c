@@ -44,8 +44,7 @@ TestEntry(PCSTR Name, PFN_QUERY_EX Query)
         ok_eq_hex((First >> 16) & 7, 7);
         ok_eq_hex(Second & 0xFFFF, IMAGE_FILE_MACHINE_I386);
         ok_eq_hex((Second >> 16) & 7, 2);
-        todo_if(is_reactos())
-            ok_eq_hex((Second >> 20) & 1, 0);
+        ok_eq_hex((Second >> 20) & 1, 0);
     }
 
     /* no process: nothing is the current one */

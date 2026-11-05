@@ -34,6 +34,28 @@ ULONG LdrpImportWalkDepth;
  */
 static ULONG LdrpSnapHardErrorCount;
 
+/*
+ * The steps of a chain of forwarders (a forwarder to a forwarder) are
+ * resolved by nested LdrpSnapThunk calls that are not static, but they belong
+ * to the static snap of an import: a target DLL that cannot be loaded fails
+ * the import with STATUS_DLL_NOT_FOUND (a GetProcAddress reports a missing
+ * procedure instead). The first step that cannot load its target leaves the
+ * name that the system is told ("Name.DLL") for the outermost step
+ */
+static ULONG LdrpStaticForwarderDepth;
+static CHAR LdrpForwarderMissingDll[MAX_PATH];
+
+/*
+ * A forwarder resolves through nested snaps, one per step. A loop (a DLL
+ * forwarding to itself, two that forward to each other) never ends: the
+ * resolution would run out of stack, and the exception was swallowed by
+ * LdrpGetProcedureAddress, which then reported success with the address of the
+ * forwarder string in the import. A chain longer than this fails like a
+ * missing export (the longest real chain has a few steps)
+ */
+#define LDRP_MAX_FORWARDER_DEPTH 32
+static ULONG LdrpForwarderDepth;
+
 /* FUNCTIONS *****************************************************************/
 
 
@@ -406,16 +428,16 @@ LdrpHandleOneNewFormatImportDescriptor(IN LPWSTR DllPath OPTIONAL,
         }
         else
         {
-            /* Show debug message */
+            /*
+             * Show debug message. The binding to the DLL itself may be
+             * stale, a forwarder that is current does not make it good
+             */
             if (ShowSnaps)
             {
                 DPRINT1("LDR: %wZ has correct binding to %s\n",
                         &LdrEntry->BaseDllName,
                         ForwarderName);
             }
-
-            /* Remember it's valid */
-            Stale = FALSE;
         }
 
         /* Move to the next one */
@@ -435,8 +457,8 @@ LdrpHandleOneNewFormatImportDescriptor(IN LPWSTR DllPath OPTIONAL,
                                                    IMAGE_DIRECTORY_ENTRY_IMPORT,
                                                    &IatSize);
 
-        /* Make sure it has a name */
-        while (ImportEntry->Name)
+        /* Make sure there is an import directory to find it in, and a name */
+        while (ImportEntry && ImportEntry->Name)
         {
             /* Get the name */
             ImportName = (LPSTR)((ULONG_PTR)LdrEntry->DllBase + ImportEntry->Name);
@@ -449,7 +471,7 @@ LdrpHandleOneNewFormatImportDescriptor(IN LPWSTR DllPath OPTIONAL,
         }
 
         /* If we didn't find a name, fail */
-        if (!ImportEntry->Name)
+        if (!ImportEntry || !ImportEntry->Name)
         {
             /* Show debug message */
             if (ShowSnaps)
@@ -1003,6 +1025,7 @@ LdrpSnapThunk(IN PVOID ExportBase,
     PULONG NameTable;
     PUSHORT OrdinalTable;
     LPSTR ImportName = NULL, DotPosition, Forwarder;
+    ULONG_PTR ForwarderLimit;
     USHORT Hint;
     NTSTATUS Status;
     ULONG_PTR HardErrorParameters[3];
@@ -1020,6 +1043,8 @@ LdrpSnapThunk(IN PVOID ExportBase,
     ANSI_STRING ForwarderDll = { 0, 0, NULL };
     ULONG ForwarderHardErrors = LdrpFatalHardErrorCount;
     ULONG ForwarderSnapErrors = LdrpSnapHardErrorCount;
+    BOOLEAN StaticChain = Static || (LdrpStaticForwarderDepth != 0);
+    CHAR MissingDllBuffer[MAX_PATH];
 
     /* Check if the snap is by ordinal */
     if ((IsOrdinal = IMAGE_SNAP_BY_ORDINAL(OriginalThunk->u1.Ordinal)))
@@ -1226,7 +1251,28 @@ FailurePath:
                  * Report it like a missing static import. A load later
                  * (LoadLibrary) reports nothing, as for a missing import DLL
                  */
-                if (NT_SUCCESS(RtlAnsiStringToUnicodeString(&HardErrorDllName, &ForwarderDll, TRUE)))
+                /*
+                 * The DLL that could not be loaded, as the system names
+                 * it: the module of the forwarder that failed (this step or
+                 * a later one of a chain) with ".DLL" appended. A module that
+                 * cannot be named by one of the steps is the one of this step
+                 */
+                if (LdrpForwarderMissingDll[0])
+                {
+                    RtlInitAnsiString(&TempString, LdrpForwarderMissingDll);
+                }
+                else if (ForwarderDll.Length &&
+                         ForwarderDll.Length < sizeof(MissingDllBuffer) - sizeof(".DLL"))
+                {
+                    RtlCopyMemory(MissingDllBuffer, ForwarderDll.Buffer, ForwarderDll.Length);
+                    RtlCopyMemory(MissingDllBuffer + ForwarderDll.Length, ".DLL", sizeof(".DLL"));
+                    RtlInitAnsiString(&TempString, MissingDllBuffer);
+                }
+                else
+                {
+                    TempString = ForwarderDll;
+                }
+                if (NT_SUCCESS(RtlAnsiStringToUnicodeString(&HardErrorDllName, &TempString, TRUE)))
                 {
                     RtlInitUnicodeString(&TempUString, LdrpDefaultPath.Buffer);
                     HardErrorParameters[0] = (ULONG_PTR)&HardErrorDllName;
@@ -1277,11 +1323,27 @@ FailurePath:
              */
             Forwarder = (LPSTR)Thunk->u1.Function;
 
-            DotPosition = strchr(Forwarder, '.');
-            ASSERT(DotPosition != NULL);
-            if (!DotPosition)
+            /*
+             * The string is image data and lies inside the export directory.
+             * It ends with a NUL inside the directory, and so does the module
+             * part (the part before the first dot)
+             */
+            ForwarderLimit = (ULONG_PTR)ExportDirectory + ExportSize - (ULONG_PTR)Forwarder;
+            DotPosition = memchr(Forwarder, '.', ForwarderLimit);
+            if (!DotPosition ||
+                !memchr(DotPosition, '\0', ForwarderLimit - (DotPosition - Forwarder)) ||
+                (DotPosition - Forwarder) >= MAX_PATH)
+            {
                 goto FailurePath;
+            }
 
+            if (LdrpForwarderDepth >= LDRP_MAX_FORWARDER_DEPTH)
+            {
+                DPRINT1("LDR: forwarder chain of %s is too long (a loop?)\n", Forwarder);
+                goto FailurePath;
+            }
+
+            if (!LdrpStaticForwarderDepth) LdrpForwarderMissingDll[0] = ANSI_NULL;
             ForwarderName.Buffer = Forwarder;
             ForwarderName.Length = (USHORT)(DotPosition - Forwarder);
             ForwarderName.MaximumLength = ForwarderName.Length;
@@ -1328,7 +1390,15 @@ FailurePath:
                  * status (STATUS_DLL_NOT_FOUND, ...). GetProcAddress reports
                  * a missing procedure instead, as on Windows
                  */
-                if (!NT_SUCCESS(Status) && Static) ForwarderStatus = Status;
+                if (!NT_SUCCESS(Status) && StaticChain)
+                {
+                    ForwarderStatus = Status;
+                    if ((Status == STATUS_DLL_NOT_FOUND) && (ForwarderName.Length < sizeof(LdrpForwarderMissingDll) - sizeof(".DLL")))
+                    {
+                        RtlCopyMemory(LdrpForwarderMissingDll, ForwarderName.Buffer, ForwarderName.Length);
+                        RtlCopyMemory(LdrpForwarderMissingDll + ForwarderName.Length, ".DLL", sizeof(".DLL"));
+                    }
+                }
             }
 
             /* If the load or conversion failed, use the failure path */
@@ -1359,18 +1429,31 @@ FailurePath:
                 ForwardOrdinal = 0;
             }
 
-            /* Get the pointer */
+            /* Get the pointer; the steps of a chain below belong to a static snap too */
+            if (StaticChain) LdrpStaticForwarderDepth++;
+            LdrpForwarderDepth++;
             Status = LdrpGetProcedureAddress(ForwarderHandle,
                                              ForwardName,
                                              ForwardOrdinal,
                                              (PVOID*)&Thunk->u1.Function,
                                              FALSE);
+            LdrpForwarderDepth--;
+            if (StaticChain) LdrpStaticForwarderDepth--;
+
             /* If this fails, then error out with the status of the target */
             if (!NT_SUCCESS(Status))
             {
                 ForwarderStatus = Status;
                 goto FailurePath;
             }
+
+            /*
+             * The target stays loaded as long as the DLL with the forwarder
+             * does: the reference that loading it took belongs to that DLL
+             * now, and is given back when the DLL is unmapped (this, and a
+             * failed load later in the walk, must not leave it loaded)
+             */
+            LdrpAddForwarderReference(ExportBase, ForwarderHandle);
         }
         else
         {
