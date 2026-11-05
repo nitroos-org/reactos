@@ -86,6 +86,9 @@ GuiConsoleShowConsoleProperties(PGUI_CONSOLE_DATA GuiData,
          */
         SectionSize.QuadPart  = sizeof(CONSOLE_STATE_INFO);    // Standard size
         SectionSize.QuadPart += Console->OriginalTitle.Length; // Add the length in bytes of the console title string
+        /* The CONSOLE_STATE_INFO_EX block ends the section, 4-byte aligned after the title */
+        SectionSize.QuadPart  = (SectionSize.QuadPart + sizeof(ULONG) - 1) & ~(LONGLONG)(sizeof(ULONG) - 1);
+        SectionSize.QuadPart += sizeof(CONSOLE_STATE_INFO_EX);
 
         Status = NtCreateSection(&hSection,
                                  SECTION_ALL_ACCESS,
@@ -180,6 +183,17 @@ GuiConsoleShowConsoleProperties(PGUI_CONSOLE_DATA GuiData,
                       Console->OriginalTitle.Length);
 
         pSharedInfo->ConsoleTitle[Console->OriginalTitle.Length / sizeof(WCHAR)] = UNICODE_NULL;
+
+        /* Ctrl key shortcuts and line wrapping selection */
+        ConCfgInitStateInfoEx(pSharedInfo);
+        {
+            PCONSOLE_STATE_INFO_EX pSharedEx = ConCfgGetStateInfoEx(pSharedInfo, pSharedInfo->cbSize);
+            if (pSharedEx)
+            {
+                pSharedEx->CtrlKeyShortcutsDisabled = Console->CtrlKeyShortcutsDisabled;
+                pSharedEx->LineSelection = Console->LineSelection;
+            }
+        }
 
 
         /* Unmap the view */
@@ -324,7 +338,7 @@ GuiApplyUserSettings(PGUI_CONSOLE_DATA GuiData,
         RefreshTTFontCache();
 
         /* Apply the generic console settings */
-        ConSrvApplyUserSettings(Console, pConInfo);
+        ConSrvApplyUserSettings(Console, pConInfo, ViewSize);
 
         /* Set the terminal settings */
 

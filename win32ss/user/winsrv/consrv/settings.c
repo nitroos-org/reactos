@@ -35,9 +35,11 @@ ConDrvChangeScreenBufferAttributes(IN PCONSOLE Console,
 VOID
 ConSrvApplyUserSettings(
     IN PCONSRV_CONSOLE Console,
-    IN PCONSOLE_STATE_INFO ConsoleInfo)
+    IN PCONSOLE_STATE_INFO ConsoleInfo,
+    IN SIZE_T InfoSize)
 {
     PCONSOLE_SCREEN_BUFFER ActiveBuffer = Console->ActiveBuffer;
+    PCONSOLE_STATE_INFO_EX ConsoleInfoEx = ConCfgGetStateInfoEx(ConsoleInfo, InfoSize);
 
     /*
      * Apply terminal-edition settings:
@@ -46,6 +48,12 @@ ConSrvApplyUserSettings(
      */
     Console->QuickEdit  = !!ConsoleInfo->QuickEdit;
     Console->InsertMode = !!ConsoleInfo->InsertMode;
+    /* A sender without the extension block (a Windows console.dll) keeps the current values */
+    if (ConsoleInfoEx)
+    {
+        Console->CtrlKeyShortcutsDisabled = !!ConsoleInfoEx->CtrlKeyShortcutsDisabled;
+        Console->LineSelection = !!ConsoleInfoEx->LineSelection;
+    }
     /// Console->InputBufferSize = 0;
     HistoryReshapeAllBuffers(Console,
                              ConsoleInfo->HistoryBufferSize,

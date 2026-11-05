@@ -147,13 +147,14 @@ CopyBlock(PTEXTMODE_SCREEN_BUFFER Buffer,
 static HANDLE
 CopyLines(PTEXTMODE_SCREEN_BUFFER Buffer,
           PCOORD Begin,
-          PCOORD End)
+          PCOORD End,
+          BOOL NoTrim)
 {
     HANDLE hData;
     PCHAR_INFO ptr;
     LPWSTR data, dstPos;
-    ULONG NumChars, size;
-    ULONG xPos, yPos, xBeg, xEnd;
+    ULONG Width, Rows, size;
+    ULONG xPos, yPos, xBeg, xEnd, length;
 
     DPRINT("CopyLines((%u, %u) ; (%u, %u))\n",
            Begin->X, Begin->Y, End->X, End->Y);
@@ -162,25 +163,16 @@ CopyLines(PTEXTMODE_SCREEN_BUFFER Buffer,
     if (Begin == NULL || End == NULL) return NULL;
     /* ... or malformed blocks */
     if (Begin->Y > End->Y || (Begin->Y == End->Y && Begin->X > End->X)) return NULL;
+    if (Begin->X < 0 || End->X < 0 || Begin->Y < 0 ||
+        End->Y >= Buffer->ScreenBufferSize.Y || Begin->X >= Buffer->ScreenBufferSize.X ||
+        End->X >= Buffer->ScreenBufferSize.X)
+        return NULL;
 
-    /* Compute the number of characters to copy */
-    if (End->Y == Begin->Y) // top == bottom
-    {
-        NumChars = End->X - Begin->X + 1;
-    }
-    else // if (End->Y > Begin->Y)
-    {
-        NumChars = Buffer->ScreenBufferSize.X - Begin->X;
+    Width = Buffer->ScreenBufferSize.X;
+    Rows  = End->Y - Begin->Y + 1;
 
-        if (End->Y >= Begin->Y + 2)
-        {
-            NumChars += (End->Y - Begin->Y - 1) * Buffer->ScreenBufferSize.X;
-        }
-
-        NumChars += End->X + 1;
-    }
-
-    size = (NumChars + 1) * sizeof(WCHAR); /* Null-terminated */
+    /* At most a full row and a line break per row, and the NUL */
+    size = (Rows * (Width + 2) + 1) * sizeof(WCHAR);
 
     /* Allocate some memory area to be given to the clipboard, so it will not be freed here */
     hData = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, size);
@@ -193,23 +185,27 @@ CopyLines(PTEXTMODE_SCREEN_BUFFER Buffer,
         return NULL;
     }
 
-    DPRINT("Copying %d characters\n", NumChars);
     dstPos = data;
 
     /*
-     * We need to walk per-lines, and not just looping in the big screen-buffer
-     * array, because of the way things are stored inside it. The downside is
-     * that it makes the code more complicated.
+     * Walk per row, as the selection follows the line wraps like text: the blanks
+     * that end a row are not copied, and a row break is a line break unless the
+     * row is filled up to the right edge (the text goes on in the next row).
      */
-    for (yPos = Begin->Y; (yPos <= (ULONG)End->Y) && (NumChars > 0); yPos++)
+    for (yPos = Begin->Y; yPos <= (ULONG)End->Y; yPos++)
     {
-        xBeg = (yPos == Begin->Y ? Begin->X : 0);
-        xEnd = (yPos ==   End->Y ?   End->X : Buffer->ScreenBufferSize.X - 1);
+        xBeg = (yPos == (ULONG)Begin->Y ? Begin->X : 0);
+        xEnd = (yPos == (ULONG)End->Y   ? End->X   : Width - 1);
 
         ptr = ConioCoordToPointer(Buffer, 0, yPos);
 
+        /* Trim whitespace from the right */
+        length = xEnd - xBeg + 1;
+        while (!NoTrim && length > 0 && IS_WHITESPACE(ptr[xBeg + length - 1].Char.UnicodeChar))
+            --length;
+
         /* Copy only the characters, leave attributes alone */
-        for (xPos = xBeg; (xPos <= xEnd) && (NumChars-- > 0); xPos++)
+        for (xPos = xBeg; xPos < xBeg + length; xPos++)
         {
             /*
              * Sometimes, applications can put NULL chars into the screen-buffer
@@ -222,7 +218,19 @@ CopyLines(PTEXTMODE_SCREEN_BUFFER Buffer,
                 *dstPos++ = (ptr[xPos].Char.UnicodeChar ? ptr[xPos].Char.UnicodeChar : L' ');
             }
         }
+
+        if (yPos != (ULONG)End->Y)
+        {
+            BOOL Wrapped = (xEnd == Width - 1) &&
+                           !IS_WHITESPACE(ptr[Width - 1].Char.UnicodeChar);
+            if (!Wrapped)
+            {
+                *dstPos++ = L'\r';
+                *dstPos++ = L'\n';
+            }
+        }
     }
+    *dstPos = UNICODE_NULL;
 
     DPRINT("Copied <%S>\n", data);
     GlobalUnlock(hData);
@@ -327,7 +335,7 @@ GuiCopyFromTextModeBuffer(PTEXTMODE_SCREEN_BUFFER Buffer,
                              &GuiData->Selection.dwSelectionAnchor,
                              &GuiData->Selection.srSelection);
 
-        return CopyLines(Buffer, &Begin, &End);
+        return CopyLines(Buffer, &Begin, &End, GuiData->CopyNoTrim);
     }
 }
 
