@@ -39,23 +39,23 @@ the original replaces it at the next boot (a reboot-delete is never queued for t
   `[Download]` plus `SHA256SUMS`); they are published at `https://repo.nitroos.org/featmgr/lavapipe-pack/26.2.4-6ab3d0fe/`. Copying them into the payload
   folder instead makes the pack installable offline (they are still verified). Offline tests: `tests\roundtrip.cmd` (H1-H29).
 
-## Wine Gecko 2.40 (the mshtml engine), on demand
+## Wine Gecko 2.47.4 (the mshtml engine), on demand
 
 Entry `wine-gecko` (`catalog/wine-gecko.ini`, i386 and amd64; Provider=component, recipe in `catalog/components.ini`). Gecko is not
 in the image: Install downloads the official packages, refuses them unless the SHA-256 (and the SHA-1) match, and runs them silently.
-It is compatibility-only (a 2017-era engine for WebBrowser controls, help viewers and installers; not for browsing untrusted
+It is compatibility-only (an old engine for WebBrowser controls, help viewers and installers; not for browsing untrusted
 sites). Licence: MPL 2.0, with the LGPL and the third-party licences of the engine's about:license page (the package's `LICENSE`
-points to it); nothing is redistributed. Re-evaluate when a newer Gecko build is available (upstream ReactOS PR 9550).
+points to it); nothing is redistributed. mshtml (synced to Wine 10.0) accepts exactly Gecko 2.47.4 (`GECKO_VERSION` in `dll/win32/mshtml/nsiface.idl`), WineHQ has nothing newer.
 
 - Two packages on a 64-bit system, as for the add-on prompt of appwiz.cpl (the same sources and SHA-1 pins; `tools\check-gecko-pins.sh`
-  compares `dll\cpl\appwiz\addons.c` with `components.ini`): `[wine-gecko]` is the ReactOS-hosted 32-bit MSI (installed by the
+  compares `dll\cpl\appwiz\addons.c` with `components.ini`): `[wine-gecko]` is the WineHQ 32-bit MSI (installed by the
   32-bit msiexec into SysWOW64, and the only package on i386), `[wine-gecko-x64]` the WineHQ x86_64 MSI. `Also=` in the component
   list chains them: installed one after the other, a package whose own detect rule already holds (installed by appwiz's prompt) is
   skipped, a failing second package takes the first out again, and the entry is Enabled only when every package of this build is there.
   appwiz's prompt installs only the package of its own architecture, so after it on amd64 featmgr shows Wine Gecko as not installed
   (the 32-bit programs have no engine yet) and Install adds the missing one.
-- Detected by the engine's `gecko\2.40\wine_gecko\xul.dll` in System32 (and SysWOW64); the packages also write
-  `HKLM\Software\Wine\MSHTML\2.40\GeckoPath`, which iexplore's check and mshtml read.
+- Detected by the engine's `gecko\2.47.4\wine_gecko\xul.dll` in System32 (and SysWOW64); the packages also write
+  `HKLM\Software\Wine\MSHTML\2.47.4\GeckoPath`, which iexplore's check and mshtml read.
 - Uninstall runs `msiexec /x` for each product (an already removed one, error 1605, counts as removed), then the list's `Cleanup=`
   line: the 32-bit and the 64-bit MSI register one component, so removing both leaves the files of one of them behind, and a stale
   32-bit `GeckoPath`. Without a recorded install (appwiz did it) the same lines are derived from the component list.

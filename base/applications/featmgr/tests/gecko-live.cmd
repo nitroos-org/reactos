@@ -2,7 +2,7 @@
 rem Wine Gecko through the feature manager (catalog entry wine-gecko, components.ini [wine-gecko] + [wine-gecko-x64]): a real
 rem download of the official MSI packages (needs internet), SHA-256 check, silent install into System32 (and SysWOW64 on a 64-bit
 rem system), an mshtml consumer that renders afterwards, the uninstall, and the two-way visibility with the appwiz.cpl add-on path.
-rem Run from a directory holding mshtmlrender32.exe (and mshtmlrender64.exe on amd64); for the appwiz step also gm\wine_gecko-2.40-<arch>.msi
+rem Run from a directory holding mshtmlrender32.exe (and mshtmlrender64.exe on amd64); for the appwiz step also gm\wine-gecko-2.47.4-<arch>.msi
 rem (not in git: the harness stages it). Result: %O%\geckolive.txt, last line GECKOLIVE-RESULT: PASS|FAIL n
 setlocal
 set H=%~dp0
@@ -12,9 +12,9 @@ set LOG=%O%\geckolive.txt
 set FAILS=0
 set WOW=0
 if exist "%SystemRoot%\SysWOW64\kernel32.dll" set WOW=1
-set G64=%SystemRoot%\System32\gecko\2.40\wine_gecko\xul.dll
-set G32=%SystemRoot%\System32\gecko\2.40\wine_gecko\xul.dll
-if "%WOW%"=="1" set G32=%SystemRoot%\SysWOW64\gecko\2.40\wine_gecko\xul.dll
+set G64=%SystemRoot%\System32\gecko\2.47.4\wine_gecko\xul.dll
+set G32=%SystemRoot%\System32\gecko\2.47.4\wine_gecko\xul.dll
+if "%WOW%"=="1" set G32=%SystemRoot%\SysWOW64\gecko\2.47.4\wine_gecko\xul.dll
 mkdir %O% 2>nul
 echo Wine Gecko featmgr live test %date% %time% (WOW=%WOW%)> %LOG%
 
@@ -42,19 +42,19 @@ type %O%\i.txt >> %LOG%
 call :st wine-gecko Enabled "G5 Enabled after the install"
 call :ex %G32% 1 "G6 the 32-bit engine is in place (xul.dll)"
 if "%WOW%"=="1" call :ex %G64% 1 "G7 the 64-bit engine is in place (xul.dll)"
-%SystemRoot%\system32\reg.exe query HKLM\Software\Wine\MSHTML\2.40 /v GeckoPath > %O%\reg64.txt 2>&1
+%SystemRoot%\system32\reg.exe query HKLM\Software\Wine\MSHTML\2.47.4 /v GeckoPath > %O%\reg64.txt 2>&1
 type %O%\reg64.txt >> %LOG%
 find "GeckoPath" %O%\reg64.txt >nul
 call :rc0 "G8 GeckoPath is registered (native registry view)"
 if exist "%SystemRoot%\SysWOW64\reg.exe" (
-  %SystemRoot%\SysWOW64\reg.exe query HKLM\Software\Wine\MSHTML\2.40 /v GeckoPath > %O%\reg32.txt 2>&1
+  %SystemRoot%\SysWOW64\reg.exe query HKLM\Software\Wine\MSHTML\2.47.4 /v GeckoPath > %O%\reg32.txt 2>&1
   type %O%\reg32.txt >> %LOG%
   find "GeckoPath" %O%\reg32.txt >nul
   call :rc0 "G9 GeckoPath is registered (32-bit registry view)"
 )
 call :renderall 0 "G10 mshtml renders a page and runs its script"
-dir /b "%SystemRoot%\Featmgr\Downloads\wine_gecko*" > %O%\dl.txt 2>&1
-find "wine_gecko" %O%\dl.txt >nul
+dir /b "%SystemRoot%\Featmgr\Downloads\wine-gecko*" > %O%\dl.txt 2>&1
+find "wine-gecko" %O%\dl.txt >nul
 call :rc1 "G11 the downloaded MSI files are removed after the install"
 %FM% /install wine-gecko > %O%\i2.txt 2>&1
 call :rc0 "G12 a second install is a no-op"
@@ -66,16 +66,16 @@ type %O%\u.txt >> %LOG%
 call :st wine-gecko NotInstalled "G14 NotInstalled after the uninstall"
 call :ex %G32% 0 "G15 the 32-bit engine is gone"
 if "%WOW%"=="1" call :ex %G64% 0 "G16 the 64-bit engine is gone"
-%SystemRoot%\system32\reg.exe query HKLM\Software\Wine\MSHTML\2.40 /v GeckoPath > %O%\reg64b.txt 2>&1
+%SystemRoot%\system32\reg.exe query HKLM\Software\Wine\MSHTML\2.47.4 /v GeckoPath > %O%\reg64b.txt 2>&1
 find "GeckoPath" %O%\reg64b.txt >nul
 call :rc1 "G17 GeckoPath is gone"
 if exist "%SystemRoot%\SysWOW64\reg.exe" (
-  %SystemRoot%\SysWOW64\reg.exe query HKLM\Software\Wine\MSHTML\2.40 /v GeckoPath > %O%\reg32b.txt 2>&1
+  %SystemRoot%\SysWOW64\reg.exe query HKLM\Software\Wine\MSHTML\2.47.4 /v GeckoPath > %O%\reg32b.txt 2>&1
   find "GeckoPath" %O%\reg32b.txt >nul
   call :rc1 "G17b GeckoPath is gone (32-bit registry view)"
 )
-call :ex %SystemRoot%\System32\gecko\2.40 0 "G17c the 64-bit engine folder is gone"
-if "%WOW%"=="1" call :ex %SystemRoot%\SysWOW64\gecko\2.40 0 "G17d the 32-bit engine folder is gone"
+call :ex %SystemRoot%\System32\gecko\2.47.4 0 "G17c the 64-bit engine folder is gone"
+if "%WOW%"=="1" call :ex %SystemRoot%\SysWOW64\gecko\2.47.4 0 "G17d the 32-bit engine folder is gone"
 call :renderall 1 "G18 mshtml cannot render again"
 
 rem ----- the other way: the appwiz.cpl add-on path (GeckoCabDir points at the staged MSI, no dialog) installs, featmgr sees it -----
