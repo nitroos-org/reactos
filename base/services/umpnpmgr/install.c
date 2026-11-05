@@ -40,6 +40,7 @@ HANDLE hUserToken = NULL;
 CRITICAL_SECTION UserTokenLock; /* guards hUserToken: PNP_ReportLogOn writes it, InstallDevice duplicates it */
 HANDLE hInstallEvent = NULL;
 HANDLE hNoPendingInstalls = NULL;
+HANDLE hUserLogOnEvent = NULL; /* auto-reset: set by PNP_ReportLogOn, wakes the install thread */
 
 /* Device-install event list */
 HANDLE hDeviceInstallListMutex;
@@ -54,7 +55,36 @@ CreatePnpInstallEventSecurity(
 #define PNP_PIPE_CONNECT_TIMEOUT    (60 * 1000)         /* the process must connect within 60 s */
 #define PNP_DRVINST_TIMEOUT         (10 * 60 * 1000)    /* the service-side install gets 10 min */
 
+/* The things of an install process that outlive RunInstallProcess (the restart page) */
+typedef struct _PNP_DETACHED_INSTALL
+{
+    HANDLE hProcess;
+    HANDLE hThread;
+    HANDLE hPipe;
+    HANDLE hIoEvent;
+    HANDLE hInstallEvent;
+    LPVOID Environment;
+} PNP_DETACHED_INSTALL, *PPNP_DETACHED_INSTALL;
+
 /* FUNCTIONS *****************************************************************/
+
+/* Waits for the restart page to end, then closes what RunInstallProcess handed over */
+static DWORD WINAPI
+DetachedInstallThread(LPVOID Context)
+{
+    PPNP_DETACHED_INSTALL Detached = Context;
+
+    WaitForSingleObject(Detached->hProcess, INFINITE);
+    CloseHandle(Detached->hProcess);
+    CloseHandle(Detached->hThread);
+    CloseHandle(Detached->hPipe);
+    CloseHandle(Detached->hIoEvent);
+    CloseHandle(Detached->hInstallEvent);
+    if (Detached->Environment)
+        DestroyEnvironmentBlock(Detached->Environment);
+    HeapFree(GetProcessHeap(), 0, Detached);
+    return 0;
+}
 
 /*
  * Waits for an overlapped operation on the install pipe, but not longer than
@@ -340,8 +370,41 @@ RunInstallProcess(
         goto cleanup;
     }
 
+    /* The restart page is a notification: Windows goes on installing while it is open, so the queue does not
+       wait for it. A thread waits for the process and closes the handles (the pipe stays open meanwhile). */
+    if (hToken && UiMode == NEWDEV_UI_RESTART_PAGE)
+    {
+        PPNP_DETACHED_INSTALL Detached = HeapAlloc(GetProcessHeap(), 0, sizeof(*Detached));
+        HANDLE hWaiter = NULL;
+
+        if (Detached)
+        {
+            Detached->hProcess = ProcessInfo.hProcess;
+            Detached->hThread = ProcessInfo.hThread;
+            Detached->hPipe = hPipe;
+            Detached->hIoEvent = hIoEvent;
+            Detached->hInstallEvent = hInstallEvent;
+            Detached->Environment = Environment;
+            hWaiter = CreateThread(NULL, 0, DetachedInstallThread, Detached, 0, NULL);
+            if (hWaiter)
+            {
+                CloseHandle(hWaiter);
+                /* The thread owns them now */
+                ZeroMemory(&ProcessInfo, sizeof(ProcessInfo));
+                hPipe = INVALID_HANDLE_VALUE;
+                hIoEvent = NULL;
+                hInstallEvent = NULL;
+                Environment = NULL;
+                DeviceInstalled = TRUE;
+                goto cleanup;
+            }
+            HeapFree(GetProcessHeap(), 0, Detached);
+        }
+        /* Could not detach: wait for it as before */
+    }
+
     /* Wait for the install process to finish. The service-side install is bounded; the wizard
-       and the restart page wait for the user, so they are not. */
+       and the restart page (when it could not be detached) wait for the user, so they are not. */
     if (WaitForSingleObject(ProcessInfo.hProcess, hToken ? INFINITE : PNP_DRVINST_TIMEOUT) == WAIT_TIMEOUT)
     {
         DPRINT1("The install of '%ls' did not finish within %lu ms, terminating it\n", DeviceInstance, PNP_DRVINST_TIMEOUT);
@@ -393,7 +456,22 @@ cleanup:
 
 
 static BOOL
-InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
+UserIsLoggedOn(VOID)
+{
+    BOOL LoggedOn;
+
+    EnterCriticalSection(&UserTokenLock);
+    LoggedOn = (hUserToken != NULL);
+    LeaveCriticalSection(&UserTokenLock);
+    return LoggedOn;
+}
+
+/*
+ * Installs one device. With ShowWizard and nobody logged on, the install runs without UI; if that finds
+ * no driver, *NeedWizard is set (when given) so that the caller offers the wizard after the logon.
+ */
+static BOOL
+InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard, PBOOL NeedWizard)
 {
     BOOL DeviceInstalled;
     DWORD BytesWritten;
@@ -404,6 +482,9 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
     HANDLE hToken = NULL;
 
     DPRINT("InstallDevice(%S, %d)\n", DeviceInstance, ShowWizard);
+
+    if (NeedWizard)
+        *NeedWizard = FALSE;
 
     if (RegOpenKeyExW(hEnumKey,
                       DeviceInstance,
@@ -478,6 +559,11 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
            session and as the user. newdev.dll allows that to administrators only. */
         DPRINT1("No driver installed for '%ws', starting the wizard\n", DeviceInstance);
         DeviceInstalled = RunInstallProcess(DeviceInstance, hToken, NEWDEV_UI_WIZARD, NULL);
+    }
+    else if (ShowWizard && NeedWizard)
+    {
+        /* Nobody is logged on yet: the wizard follows at the logon */
+        *NeedWizard = TRUE;
     }
 
     if (hToken)
@@ -771,8 +857,12 @@ DeviceInstallThread(LPVOID lpParameter)
 {
     PLIST_ENTRY ListEntry;
     DeviceInstallParams* Params;
+    LIST_ENTRY WaitingForUser;
+    BOOL NeedWizard;
 
     UNREFERENCED_PARAMETER(lpParameter);
+
+    InitializeListHead(&WaitingForUser);
 
     // Step 1: install all drivers which were configured during the boot
 
@@ -815,7 +905,7 @@ DeviceInstallThread(LPVOID lpParameter)
          currentDev[0] != UNICODE_NULL;
          currentDev += lstrlenW(currentDev) + 1)
     {
-        InstallDevice(currentDev, FALSE);
+        InstallDevice(currentDev, FALSE, NULL);
     }
 
 Cleanup:
@@ -826,12 +916,24 @@ Step2:
 
     DPRINT("Step 2: Starting the wait-loop\n");
 
-    WaitForSingleObject(hInstallEvent, INFINITE);
-
+    /* Devices are installed from here on, whether or not a user is logged on (Windows installs with
+       nobody logged on): the install itself runs service-side. Only the wizard needs a user. */
     BOOL showWizard = !SetupIsActive() && !IsConsoleBoot();
 
     while (TRUE)
     {
+        /* Devices for which no driver was found before the logon get the wizard now */
+        if (!IsListEmpty(&WaitingForUser) && UserIsLoggedOn())
+        {
+            while (!IsListEmpty(&WaitingForUser))
+            {
+                ListEntry = RemoveHeadList(&WaitingForUser);
+                Params = CONTAINING_RECORD(ListEntry, DeviceInstallParams, ListEntry);
+                InstallDevice(Params->DeviceIds, showWizard && !IsUISuppressionAllowed(), NULL);
+                HeapFree(GetProcessHeap(), 0, Params);
+            }
+        }
+
         /* Dequeue the next oldest device-install event */
         WaitForSingleObject(hDeviceInstallListMutex, INFINITE);
         ListEntry = (IsListEmpty(&DeviceInstallListHead)
@@ -840,15 +942,23 @@ Step2:
 
         if (ListEntry == NULL)
         {
+            HANDLE WakeUp[2];
+
             SetEvent(hNoPendingInstalls);
-            WaitForSingleObject(hDeviceInstallListNotEmpty, INFINITE);
+            WakeUp[0] = hDeviceInstallListNotEmpty;
+            WakeUp[1] = hUserLogOnEvent;
+            WaitForMultipleObjects(hUserLogOnEvent ? 2 : 1, WakeUp, FALSE, INFINITE);
         }
         else
         {
             ResetEvent(hNoPendingInstalls);
             Params = CONTAINING_RECORD(ListEntry, DeviceInstallParams, ListEntry);
-            InstallDevice(Params->DeviceIds, showWizard && !IsUISuppressionAllowed());
-            HeapFree(GetProcessHeap(), 0, Params);
+            NeedWizard = FALSE;
+            InstallDevice(Params->DeviceIds, showWizard && !IsUISuppressionAllowed(), &NeedWizard);
+            if (NeedWizard)
+                InsertTailList(&WaitingForUser, &Params->ListEntry);
+            else
+                HeapFree(GetProcessHeap(), 0, Params);
         }
     }
 
