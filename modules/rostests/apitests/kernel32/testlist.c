@@ -41,6 +41,7 @@ extern void func_ConsoleCsrRequests(void);
 extern void func_ConsoleCtrlEventRace(void);
 extern void func_ConsoleCtrlHandler(void);
 extern void func_ConsoleDisplayMode(void);
+extern void func_ConsoleQuickEdit(void);
 extern void func_ConsoleViewFollow(void);
 extern void func_ConsoleFramebufferCommit(void);
 extern void func_ConsoleVirtualTerminal(void);
@@ -283,6 +284,7 @@ const struct test winetest_testlist[] =
     { "ConsoleCtrlEventRace",        func_ConsoleCtrlEventRace },
     { "ConsoleCtrlHandler",          func_ConsoleCtrlHandler },
     { "ConsoleDisplayMode",          func_ConsoleDisplayMode },
+    { "ConsoleQuickEdit",            func_ConsoleQuickEdit },
     { "ConsoleViewFollow",           func_ConsoleViewFollow },
     { "ConsoleFramebufferCommit",    func_ConsoleFramebufferCommit },
     { "ConsoleVirtualTerminal",      func_ConsoleVirtualTerminal },
