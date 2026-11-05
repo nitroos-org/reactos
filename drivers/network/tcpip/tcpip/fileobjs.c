@@ -21,6 +21,7 @@
 /* List of all address file objects managed by this driver */
 LIST_ENTRY AddressFileListHead;
 KSPIN_LOCK AddressFileListLock;
+LIST_ENTRY AddressFilePortHash[ADDRESS_FILE_PORT_BUCKETS];
 
 /* List of all connection endpoint file objects managed by this driver */
 LIST_ENTRY ConnectionEndpointListHead;
@@ -421,6 +422,7 @@ VOID AddrFileFree(
   /* Remove address file from the global list */
   TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
   RemoveEntryList(&AddrFile->ListEntry);
+  RemoveEntryList(&AddrFile->FwPortEntry);
   TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
 
   /* Give up the port unless another address file shares it */
@@ -690,7 +692,10 @@ NTSTATUS FileOpenAddress(
       }
   }
   if (NT_SUCCESS(Status))
+  {
       InsertTailList(&AddressFileListHead, &AddrFile->ListEntry);
+      InsertTailList(&AddressFilePortHash[ADDRESS_FILE_PORT_BUCKET(AddrFile->Port)], &AddrFile->FwPortEntry);
+  }
   TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
 
   if (!NT_SUCCESS(Status))

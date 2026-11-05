@@ -966,17 +966,19 @@ static PFW_IMAGE FwImageOfPid(HANDLE Pid)
 /* Attach Image (reference transferred) to the address file if it is still on the list and has none;
    otherwise release it. AddrFile is only compared, never dereferenced, unless found on the list; the
    creator id and creation time guard against the structure having been freed and reused meanwhile. */
-static VOID FwAttachImage(PADDRESS_FILE AddrFile, HANDLE Pid, LONGLONG Created, PFW_IMAGE Image)
+static VOID FwAttachImage(PADDRESS_FILE AddrFile, USHORT PortN, HANDLE Pid, LONGLONG Created, PFW_IMAGE Image)
 {
     KIRQL OldIrql;
-    PLIST_ENTRY Entry;
+    PLIST_ENTRY Head, Entry;
 
     if (!Image)
         return;
+    /* the port of an address file never changes: only its bucket needs a look */
+    Head = &AddressFilePortHash[ADDRESS_FILE_PORT_BUCKET(PortN)];
     TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
-    for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead; Entry = Entry->Flink)
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
     {
-        if (CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry) == AddrFile)
+        if (CONTAINING_RECORD(Entry, ADDRESS_FILE, FwPortEntry) == AddrFile)
         {
             if (!AddrFile->FwImage && AddrFile->ProcessId == Pid && AddrFile->CreationTime.QuadPart == Created)
             {
@@ -997,7 +999,7 @@ VOID NitroFwAddressFileCreated(PADDRESS_FILE AddrFile)
 {
     if (FwKilled || KeGetCurrentIrql() != PASSIVE_LEVEL)
         return;
-    FwAttachImage(AddrFile, AddrFile->ProcessId, AddrFile->CreationTime.QuadPart, FwImageOfCurrent());
+    FwAttachImage(AddrFile, AddrFile->Port, AddrFile->ProcessId, AddrFile->CreationTime.QuadPart, FwImageOfCurrent());
 }
 
 /* Called after a policy that has program rules came into force: sockets opened before that (listeners
@@ -1011,6 +1013,7 @@ static VOID FwBackfillImages(VOID)
         PADDRESS_FILE Todo = NULL;
         HANDLE Pid = NULL;
         LONGLONG Created = 0;
+        USHORT PortN = 0;
         PFW_IMAGE Image;
 
         TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
@@ -1023,6 +1026,7 @@ static VOID FwBackfillImages(VOID)
                 Todo = A;
                 Pid = A->ProcessId;
                 Created = A->CreationTime.QuadPart;
+                PortN = A->Port;
                 break;
             }
         }
@@ -1031,7 +1035,7 @@ static VOID FwBackfillImages(VOID)
             return;
 
         Image = FwImageOfPid(Pid);
-        FwAttachImage(Todo, Pid, Created, Image);   /* Todo may be gone by now; it is looked up on the list again */
+        FwAttachImage(Todo, PortN, Pid, Created, Image);   /* Todo may be gone by now; it is looked up on the list again */
     }
 }
 
@@ -1046,14 +1050,16 @@ VOID NitroFwReleaseImage(PVOID Image)
 static PFW_IMAGE FwFindOwner(UINT Protocol, USHORT PortN, PIP_ADDRESS Local)
 {
     KIRQL OldIrql;
-    PLIST_ENTRY Entry;
+    PLIST_ENTRY Head, Entry;
     PFW_IMAGE Found = NULL;
     BOOLEAN FoundListener = FALSE;
 
+    /* only the address files of this port bucket (same relative order as the global list) */
+    Head = &AddressFilePortHash[ADDRESS_FILE_PORT_BUCKET(PortN)];
     TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
-    for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead; Entry = Entry->Flink)
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
     {
-        PADDRESS_FILE AddrFile = CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry);
+        PADDRESS_FILE AddrFile = CONTAINING_RECORD(Entry, ADDRESS_FILE, FwPortEntry);
         BOOLEAN IsListener;
 
         if (AddrFile->Protocol != Protocol || AddrFile->Port != PortN || !AddrFile->FwImage)

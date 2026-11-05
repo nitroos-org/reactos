@@ -145,6 +145,8 @@ typedef struct _ADDRESS_FILE {
     HANDLE ProcessId;                     /* Creator process ID */
     PVOID SubProcessTag;                  /* Creator process tag */
     LARGE_INTEGER CreationTime;           /* Time of creation */
+    LIST_ENTRY FwPortEntry;               /* Bucket of AddressFilePortHash (by Port), under AddressFileListLock: the inbound filter
+                                             finds the owner of a local port without scanning every address file */
     PVOID FwImage;                        /* Creator image path for the inbound filter (nitrofw.c), lazy */
     BOOLEAN FwImageTried;                 /* Image resolution already attempted (nitrofw.c) */
     BOOLEAN ExplicitPort;                 /* The client asked for this port (not an ephemeral one): UDP listeners for the block prompt */
