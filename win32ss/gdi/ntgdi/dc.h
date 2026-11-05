@@ -146,6 +146,8 @@ VOID NTAPI GlassBackdropInit(VOID);
 VOID NTAPI GlassBackdropDrop(HWND hwnd);
 BOOL NTAPI GlassBlendSource(PDC pdc, struct _SURFACE *psurfDest, struct _SURFACE *psurfSrc, const RECTL *prcDest, const RECTL *prcSrc, struct _SURFACE **ppsurfOut);
 VOID NTAPI GlassBlendDone(struct _SURFACE *psurf);
+BOOL NTAPI GlassBackdropPrepare(HWND hwnd, const RECTL *prcWnd);
+BOOL NTAPI GlassBackdropCopyTo(HWND hwnd, const RECTL *prcWnd, struct _SURFACE *psurfDst);
 
 /* Internal functions *********************************************************/
 

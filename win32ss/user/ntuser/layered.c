@@ -97,13 +97,58 @@ IntSetLayeredWindowAttributes(PWND pWnd,
    return TRUE;
 }
 
+/*
+ * Blend the source (hdcBuffer, a copy of the caller's bitmap at 0,0) over the snapshot of what is below the window
+ * (glassblt.c), then replace the window's pixels with the result. The blend is made off screen, so the window is
+ * never shown half way. Returns FALSE when the snapshot is not available; nothing is drawn then.
+ */
+static BOOL
+IntUlwBlendOnBackdrop(PWND pWnd,
+                      HDC hdc,
+                      HDC hdcBuffer,
+                      const RECT *Rect,
+                      BLENDFUNCTION blend)
+{
+   LONG cx = Rect->right - Rect->left, cy = Rect->bottom - Rect->top;
+   HDC hdcWork;
+   HBITMAP hbmWork, hOldWork = NULL;
+   SURFACE *psurf;
+   BOOL ok = FALSE, haveBase = FALSE;
+
+   hdcWork = NtGdiCreateCompatibleDC(hdc);
+   hbmWork = NtGdiCreateCompatibleBitmap(hdc, cx, cy);
+   if (hdcWork && hbmWork)
+      hOldWork = (HBITMAP)NtGdiSelectBitmap(hdcWork, hbmWork);
+   if (hOldWork)
+   {
+      psurf = SURFACE_ShareLockSurface(hbmWork);
+      if (psurf)
+      {
+         haveBase = GlassBackdropCopyTo(UserHMGetHandle(pWnd), (PRECTL)&pWnd->rcWindow, psurf);
+         SURFACE_ShareUnlockSurface(psurf);
+      }
+   }
+   if (haveBase &&
+       NtGdiAlphaBlend(hdcWork, 0, 0, cx, cy, hdcBuffer, 0, 0, cx, cy, blend, 0) &&
+       NtGdiBitBlt(hdc, 0, 0, cx, cy, hdcWork, 0, 0, SRCCOPY, 0, 0))
+   {
+      ok = TRUE;
+   }
+
+   if (hOldWork) NtGdiSelectBitmap(hdcWork, hOldWork);
+   if (hbmWork) GreDeleteObject(hbmWork);
+   if (hdcWork) IntGdiDeleteDC(hdcWork, FALSE);
+   return ok;
+}
+
 BOOL FASTCALL
 IntUpdateLayeredWindowI( PWND pWnd,
                          UPDATELAYEREDWINDOWINFO *info )
 {
    PWND Parent;
    RECT Window, Client;
-   BOOL Moved = FALSE, PointerCrossed = FALSE;
+   BOOL Moved = FALSE, PointerCrossed = FALSE, UseBackdrop = FALSE;
+   RECT NewRect = { 0 };
    SIZE Offset;
    BOOL ret = FALSE;
    DWORD flags = SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_DEFERERASE;
@@ -153,6 +198,19 @@ IntUpdateLayeredWindowI( PWND pWnd,
    }
 
    /*
+    * Each UpdateLayeredWindow(ULW_ALPHA) replaces the content of the window: the source is blended once with what
+    * lies below the window, not with what the window showed after the previous call (nothing keeps the window
+    * apart from the screen here). The screen under the window is kept as a snapshot (glassblt.c) that is taken
+    * before the window moves onto it or draws. A window that is a child or hidden, or a screen that cannot be captured,
+    * leaves the blend on the screen.
+    */
+   if ((info->dwFlags & ULW_ALPHA) && info->hdcSrc && (pWnd->style & WS_VISIBLE) && !(pWnd->style & WS_CHILD))
+   {
+      NewRect = Window;
+      UseBackdrop = GlassBackdropPrepare(UserHMGetHandle(pWnd), (PRECTL)&NewRect);
+   }
+
+   /*
     * The geometry and the content change as one unit, with no callback into
     * user mode in between: UpdateLayeredWindow calls no window procedure (the
     * caller is often a renderer thread that the window's own thread waits
@@ -193,6 +251,7 @@ IntUpdateLayeredWindowI( PWND pWnd,
    if (info->hdcSrc)
    {
       HDC hdc, hdcBuffer;
+      BOOL bOwnDc;
       RECT Rect;
       BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, 0 };
       COLORREF color_key = (info->dwFlags & ULW_COLORKEY) ? info->crKey : CLR_INVALID;
@@ -205,7 +264,9 @@ IntUpdateLayeredWindowI( PWND pWnd,
 
       TRACE("H %d W %d\n",Rect.bottom - Rect.top,Rect.right - Rect.left);
 
-      if (!info->hdcDst) hdc = UserGetDCEx(pWnd, NULL, DCX_USESTYLE);
+      /* hdcDst is the screen DC, for palette matching only: with a snapshot the window's own DC is drawn */
+      bOwnDc = !info->hdcDst || UseBackdrop;
+      if (bOwnDc) hdc = UserGetDCEx(pWnd, NULL, DCX_USESTYLE);
       else hdc = info->hdcDst;
 
       hbmSrc = NtGdiCreateCompatibleBitmap(info->hdcSrc, Rect.right - Rect.left, Rect.bottom - Rect.top);
@@ -247,25 +308,28 @@ IntUpdateLayeredWindowI( PWND pWnd,
          TRACE("ULW_ALPHA bop %d Alpha %d aF %d\n", blend.BlendOp, blend.SourceConstantAlpha, blend.AlphaFormat);
       }
 
-      ret = NtGdiAlphaBlend( hdc,
-                             Rect.left,
-                             Rect.top,
-                             Rect.right - Rect.left,
-                             Rect.bottom - Rect.top,
-                             hdcBuffer,
-                             Rect.left + (info->pptSrc ? info->pptSrc->x : 0),
-                             Rect.top  + (info->pptSrc ? info->pptSrc->y : 0),
-                             Rect.right - Rect.left,
-                             Rect.bottom - Rect.top,
-                             blend,
-                             0);
+      /* Onto a copy of what is below the window, else (no snapshot) onto the screen */
+      ret = UseBackdrop && IntUlwBlendOnBackdrop(pWnd, hdc, hdcBuffer, &Rect, blend);
+      if (!ret)
+         ret = NtGdiAlphaBlend( hdc,
+                                Rect.left,
+                                Rect.top,
+                                Rect.right - Rect.left,
+                                Rect.bottom - Rect.top,
+                                hdcBuffer,
+                                Rect.left + (info->pptSrc ? info->pptSrc->x : 0),
+                                Rect.top  + (info->pptSrc ? info->pptSrc->y : 0),
+                                Rect.right - Rect.left,
+                                Rect.bottom - Rect.top,
+                                blend,
+                                0);
 
       NtGdiSelectBitmap(hdc, hOldBitmap1);
       NtGdiSelectBitmap(hdcBuffer, hOldBitmap);
       if (hbmSrc) GreDeleteObject(hbmSrc);
       if (hbmDst) GreDeleteObject(hbmDst);
       if (hdcBuffer) IntGdiDeleteDC(hdcBuffer, FALSE);
-      if (!info->hdcDst) UserReleaseDC(pWnd, hdc, FALSE);
+      if (bOwnDc) UserReleaseDC(pWnd, hdc, FALSE);
    }
    else
       ret = TRUE;

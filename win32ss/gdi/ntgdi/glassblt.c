@@ -17,6 +17,11 @@
  * the previous contents of the window, so that repeated paints do not accumulate.
  * The snapshot is taken at the first such copy after the window's rectangle changed,
  * and dropped when the window is shown, hidden or destroyed.
+ *
+ * UpdateLayeredWindow(ULW_ALPHA) has the same need: each call replaces the content of
+ * the window, blended once with what is below it, not with what the window showed after
+ * the previous call. It takes the same snapshot (GlassBackdropPrepare, before the window
+ * moves or draws) and reads it back as the base of the blend (GlassBackdropCopyTo).
  */
 
 #include <win32k.h>
@@ -99,7 +104,9 @@ GlassIsBgr32(SURFACE *psurf, BOOL bNeedBits)
 static
 PGLASS_BACKDROP
 GlassGetBackdrop(
-    PDC pdc,
+    HWND hwnd,
+    const RECTL *prcWnd,
+    PPDEVOBJ ppdev,
     SURFACE *psurfScreen)
 {
     PLIST_ENTRY pe;
@@ -116,9 +123,9 @@ GlassGetBackdrop(
     {
         PGLASS_BACKDROP p = CONTAINING_RECORD(pe, GLASS_BACKDROP, Entry);
         cEntries++;
-        if (p->hwnd == pdc->hwndGlass)
+        if (p->hwnd == hwnd)
         {
-            if (RtlEqualMemory(&p->rcWnd, &pdc->rclGlass, sizeof(RECTL)))
+            if (RtlEqualMemory(&p->rcWnd, prcWnd, sizeof(RECTL)))
                 return p;
             pbkOld = p;
             break;
@@ -138,8 +145,8 @@ GlassGetBackdrop(
     if (cEntries >= GLASS_MAX_ENTRIES)
         GlassFreeEntry(CONTAINING_RECORD(gGlassList.Blink, GLASS_BACKDROP, Entry));
 
-    sizl.cx = pdc->rclGlass.right - pdc->rclGlass.left;
-    sizl.cy = pdc->rclGlass.bottom - pdc->rclGlass.top;
+    sizl.cx = prcWnd->right - prcWnd->left;
+    sizl.cy = prcWnd->bottom - prcWnd->top;
     if (sizl.cx <= 0 || sizl.cy <= 0 || (ULONGLONG)sizl.cx * sizl.cy > GLASS_MAX_PIXELS)
         goto fail;
 
@@ -157,31 +164,31 @@ GlassGetBackdrop(
     rcScreen.left = rcScreen.top = 0;
     rcScreen.right = psurfScreen->SurfObj.sizlBitmap.cx;
     rcScreen.bottom = psurfScreen->SurfObj.sizlBitmap.cy;
-    bOk = RECTL_bIntersectRect(&rcCopy, &pdc->rclGlass, &rcScreen);
+    bOk = RECTL_bIntersectRect(&rcCopy, prcWnd, &rcScreen);
     if (bOk)
     {
-        rcDst.left = rcCopy.left - pdc->rclGlass.left;
-        rcDst.top = rcCopy.top - pdc->rclGlass.top;
-        rcDst.right = rcCopy.right - pdc->rclGlass.left;
-        rcDst.bottom = rcCopy.bottom - pdc->rclGlass.top;
+        rcDst.left = rcCopy.left - prcWnd->left;
+        rcDst.top = rcCopy.top - prcWnd->top;
+        rcDst.right = rcCopy.right - prcWnd->left;
+        rcDst.bottom = rcCopy.bottom - prcWnd->top;
         ptlSrc.x = rcCopy.left;
         ptlSrc.y = rcCopy.top;
-        MouseSafetyOnDrawStart(pdc->ppdev, rcCopy.left, rcCopy.top, rcCopy.right, rcCopy.bottom);
+        MouseSafetyOnDrawStart(ppdev, rcCopy.left, rcCopy.top, rcCopy.right, rcCopy.bottom);
         bOk = EngCopyBits(&psurfBk->SurfObj, &psurfScreen->SurfObj, NULL, NULL, &rcDst, &ptlSrc);
-        MouseSafetyOnDrawEnd(pdc->ppdev);
+        MouseSafetyOnDrawEnd(ppdev);
     }
 
     /* Overlay the part that the previous snapshot covers (same screen coordinates) */
-    if (bOk && pbkOld && RECTL_bIntersectRect(&rcKeep, &pbkOld->rcWnd, &pdc->rclGlass))
+    if (bOk && pbkOld && RECTL_bIntersectRect(&rcKeep, &pbkOld->rcWnd, prcWnd))
     {
         SURFACE *psurfOld = SURFACE_ShareLockSurface(pbkOld->hbm);
 
         if (psurfOld)
         {
-            rcDst.left = rcKeep.left - pdc->rclGlass.left;
-            rcDst.top = rcKeep.top - pdc->rclGlass.top;
-            rcDst.right = rcKeep.right - pdc->rclGlass.left;
-            rcDst.bottom = rcKeep.bottom - pdc->rclGlass.top;
+            rcDst.left = rcKeep.left - prcWnd->left;
+            rcDst.top = rcKeep.top - prcWnd->top;
+            rcDst.right = rcKeep.right - prcWnd->left;
+            rcDst.bottom = rcKeep.bottom - prcWnd->top;
             ptlSrc.x = rcKeep.left - pbkOld->rcWnd.left;
             ptlSrc.y = rcKeep.top - pbkOld->rcWnd.top;
             EngCopyBits(&psurfBk->SurfObj, &psurfOld->SurfObj, NULL, NULL, &rcDst, &ptlSrc);
@@ -201,8 +208,8 @@ GlassGetBackdrop(
         EngDeleteSurface((HSURF)hbm);
         goto fail;
     }
-    pbk->hwnd = pdc->hwndGlass;
-    pbk->rcWnd = pdc->rclGlass;
+    pbk->hwnd = hwnd;
+    pbk->rcWnd = *prcWnd;
     pbk->hbm = hbm;
     InsertHeadList(&gGlassList, &pbk->Entry);
     if (pbkOld)
@@ -271,7 +278,7 @@ GlassBlendSource(
         return FALSE;
 
     ExAcquireFastMutex(&gGlassLock);
-    pbk = GlassGetBackdrop(pdc, psurfDest);
+    pbk = GlassGetBackdrop(pdc->hwndGlass, &pdc->rclGlass, pdc->ppdev, psurfDest);
     if (pbk)
         psurfBk = SURFACE_ShareLockSurface(pbk->hbm);
     if (!psurfBk)
@@ -336,4 +343,83 @@ GlassBlendDone(SURFACE *psurf)
 
     SURFACE_ShareUnlockSurface(psurf);
     EngDeleteSurface((HSURF)hbm);
+}
+
+/*
+ * UpdateLayeredWindow: the snapshot of the screen under the window's rectangle (screen coordinates), taken before
+ * the window moves or draws, or kept from the previous call (for the part the rectangles have in common).
+ * Returns FALSE when there is none (no device, a screen that is not 32 bpp BGR, too large): the caller then blends
+ * on the screen as before.
+ */
+BOOL
+NTAPI
+GlassBackdropPrepare(
+    HWND hwnd,
+    const RECTL *prcWnd)
+{
+    PPDEVOBJ ppdev;
+    SURFACE *psurfScreen;
+    BOOL bRet = FALSE;
+
+    if (!gGlassInit || !gpmdev || !(ppdev = gpmdev->ppdevGlobal))
+        return FALSE;
+
+    EngAcquireSemaphore(ppdev->hsemDevLock);
+    psurfScreen = ppdev->pSurface;
+    if (psurfScreen && GlassIsBgr32(psurfScreen, FALSE))
+    {
+        ExAcquireFastMutex(&gGlassLock);
+        bRet = GlassGetBackdrop(hwnd, prcWnd, ppdev, psurfScreen) != NULL;
+        ExReleaseFastMutex(&gGlassLock);
+    }
+    EngReleaseSemaphore(ppdev->hsemDevLock);
+    return bRet;
+}
+
+/*
+ * Copies the snapshot of the window to a 32 bpp surface of the size of the window (the base of a blend). Only a
+ * snapshot of exactly this rectangle is used.
+ */
+BOOL
+NTAPI
+GlassBackdropCopyTo(
+    HWND hwnd,
+    const RECTL *prcWnd,
+    SURFACE *psurfDst)
+{
+    PLIST_ENTRY pe;
+    BOOL bRet = FALSE;
+    RECTL rcDst;
+    POINTL ptlSrc = { 0, 0 };
+
+    if (!gGlassInit || psurfDst->SurfObj.iBitmapFormat != BMF_32BPP || psurfDst->SurfObj.pvScan0 == NULL ||
+        psurfDst->SurfObj.sizlBitmap.cx != prcWnd->right - prcWnd->left ||
+        psurfDst->SurfObj.sizlBitmap.cy != prcWnd->bottom - prcWnd->top)
+    {
+        return FALSE;
+    }
+
+    rcDst.left = rcDst.top = 0;
+    rcDst.right = psurfDst->SurfObj.sizlBitmap.cx;
+    rcDst.bottom = psurfDst->SurfObj.sizlBitmap.cy;
+
+    ExAcquireFastMutex(&gGlassLock);
+    for (pe = gGlassList.Flink; pe != &gGlassList; pe = pe->Flink)
+    {
+        PGLASS_BACKDROP pbk = CONTAINING_RECORD(pe, GLASS_BACKDROP, Entry);
+
+        if (pbk->hwnd == hwnd && RtlEqualMemory(&pbk->rcWnd, prcWnd, sizeof(RECTL)))
+        {
+            SURFACE *psurfBk = SURFACE_ShareLockSurface(pbk->hbm);
+
+            if (psurfBk)
+            {
+                bRet = EngCopyBits(&psurfDst->SurfObj, &psurfBk->SurfObj, NULL, NULL, &rcDst, &ptlSrc);
+                SURFACE_ShareUnlockSurface(psurfBk);
+            }
+            break;
+        }
+    }
+    ExReleaseFastMutex(&gGlassLock);
+    return bRet;
 }
