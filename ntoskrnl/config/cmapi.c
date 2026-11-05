@@ -3056,8 +3056,7 @@ CmSaveMergedKeys(IN PCM_KEY_CONTROL_BLOCK HighKcb,
 
     /* Lock the registry and the KCBs */
     CmpLockRegistry();
-    CmpAcquireKcbLockShared(HighKcb);
-    CmpAcquireKcbLockShared(LowKcb);
+    CmpAcquireTwoKcbLocksSharedByKey(HighKcb->ConvKey, LowKcb->ConvKey);
 
 #if DBG
     /* Get the high and low hives for validation */
@@ -3139,8 +3138,7 @@ done:
 #endif
 
     /* Release the locks */
-    CmpReleaseKcbLock(LowKcb);
-    CmpReleaseKcbLock(HighKcb);
+    CmpReleaseTwoKcbLocksSharedByKey(HighKcb->ConvKey, LowKcb->ConvKey);
     CmpUnlockRegistry();
 
     return Status;

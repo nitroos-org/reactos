@@ -536,6 +536,74 @@ static NTSTATUS WorkingSetList32(HANDLE Process, ULONG Address, ULONG Buffer, UL
     return STATUS_SUCCESS;
 }
 
+static ULONG Narrow(SIZE_T Value);
+
+/* MemoryWorkingSetExInformation (class 4) of a 32-bit caller: an array of {ULONG VirtualAddress, ULONG attributes}
+ * (8 bytes); a buffer of fewer than 8 bytes fails with STATUS_INFO_LENGTH_MISMATCH, a trailing partial entry is
+ * ignored and ReturnLength is the size of the whole entries (measured on Windows 10 22H2 under WoW64). */
+static NTSTATUS WorkingSetEx32(HANDLE Process, ULONG Buffer, ULONG Length, ULONG ReturnLength)
+{
+    struct { PVOID VirtualAddress; ULONG_PTR Attributes; } Native[32];
+    ULONG UNALIGNED *Guest = PTR32(Buffer);
+    ULONG Count = Length / 8, Done = 0, Batch, i;
+    NTSTATUS Status;
+
+    if (Length < 8) return STATUS_INFO_LENGTH_MISMATCH;
+    if (ReturnLength)
+    {
+        if (!GuestSpan(ReturnLength, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+        ProbeOutput(ReturnLength, sizeof(ULONG));
+    }
+    if (!GuestSpan(Buffer, Count * 8)) return STATUS_ACCESS_VIOLATION;
+    ProbeOutput(Buffer, Count * 8);
+
+    while (Done < Count)
+    {
+        Batch = min(Count - Done, (ULONG)RTL_NUMBER_OF(Native));
+        for (i = 0; i < Batch; i++)
+        {
+            Native[i].VirtualAddress = (PVOID)(ULONG_PTR)Guest[2 * (Done + i)];
+            Native[i].Attributes = 0;
+        }
+        Status = NtQueryVirtualMemory(Process, NULL, 4 /* MemoryWorkingSetExInformation */, Native,
+                                      Batch * sizeof(Native[0]), NULL);
+        if (!NT_SUCCESS(Status)) return Status;
+        for (i = 0; i < Batch; i++) Guest[2 * (Done + i) + 1] = (ULONG)Native[i].Attributes;
+        Done += Batch;
+    }
+    if (ReturnLength) *(ULONG UNALIGNED *)PTR32(ReturnLength) = Count * 8;
+    return STATUS_SUCCESS;
+}
+
+/* MemoryImageInformation (class 6) of a 32-bit caller: {ULONG ImageBase, ULONG SizeOfImage, ULONG ImageFlags}
+ * (12 bytes, at least 12 needed). Measured on Windows 10 22H2: an address above the guest's range is invalid
+ * before anything is stored; the length 12 is stored before the process and the address are looked at. */
+static NTSTATUS ImageInfo32(HANDLE Process, ULONG Address, ULONG Buffer, ULONG Length, ULONG ReturnLength)
+{
+    struct { PVOID ImageBase; SIZE_T SizeOfImage; ULONG ImageFlags; } Native;
+    ULONG UNALIGNED *Guest = PTR32(Buffer);
+    NTSTATUS Status;
+
+    if (Length < 12) return STATUS_INFO_LENGTH_MISMATCH;
+    if (Address > Wow64HighestUserAddress) return STATUS_INVALID_PARAMETER;
+    if (ReturnLength)
+    {
+        if (!GuestSpan(ReturnLength, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+        ProbeOutput(ReturnLength, sizeof(ULONG));
+    }
+    if (!GuestSpan(Buffer, 12)) return STATUS_ACCESS_VIOLATION;
+    ProbeOutput(Buffer, 12);
+    if (ReturnLength) *(ULONG UNALIGNED *)PTR32(ReturnLength) = 12;
+
+    RtlZeroMemory(&Native, sizeof(Native));
+    Status = NtQueryVirtualMemory(Process, PTR32(Address), 6 /* MemoryImageInformation */, &Native, sizeof(Native), NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    Guest[0] = PtrToUlong(Native.ImageBase);
+    Guest[1] = Narrow(Native.SizeOfImage);
+    Guest[2] = Native.ImageFlags;
+    return STATUS_SUCCESS;
+}
+
 /* NtQueryInformationProcess classes with a different or alignment-sensitive 32-bit form. Each
  * native result goes through a native temporary and is stored with the semantics measured on
  * Windows Server 2008 R2 and Windows 10 WoW64: exact lengths (VM_COUNTERS or VM_COUNTERS_EX for
@@ -1827,6 +1895,8 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             return STATUS_SUCCESS;
         }
+        if (a[2] == 4 /* MemoryWorkingSetExInformation */) return WorkingSetEx32(H(0), a[3], a[4], a[5]);
+        if (a[2] == 6 /* MemoryImageInformation */) return ImageInfo32(H(0), a[1], a[3], a[4], a[5]);
         if (a[2] != MemoryBasicInformation && a[2] != 8 /* MemoryPrivilegedBasicInformation */) UNSUPPORTED(CLASS, a[2]);
         if (a[4] < sizeof(*Info32)) return STATUS_INFO_LENGTH_MISMATCH;
         if (a[2] == 8 && a[5])
