@@ -2065,7 +2065,7 @@ static BOOL ShellDefaultsId(LPCWSTR id)
 
 /* Download + install (the caller holds the install lock). Returns S_OK only if the installer exited 0;
  * on success the uninstall command line is recorded in the state key. */
-static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
+static HRESULT SoftwareInstallPiece(const FM_FEATURE *f, HKEY state, FILE *log, WCHAR *uninstOut)
 {
     WCHAR inst[2048], uninst[2048], compFile[MAX_PATH];
     DWORD code;
@@ -2203,8 +2203,13 @@ static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
         FmScoopAppDefaults(f->App, log);        /* NitroOS default for VS Code (scoopdefaults.c) */
     else if (!_wcsicmp(f->Id, L"scoop"))
         FmScoopAppDefaultsSeed(log);            /* ...ready before a later plain "scoop install" */
-    SetStateSz(state, L"Provider", f->Provider);
-    SetStateSz(state, L"Uninstall", uninst);
+    if (uninstOut)
+        StringCchCopyW(uninstOut, 2048, uninst);          /* a piece of a multi-package component: the caller records the lines */
+    else
+    {
+        SetStateSz(state, L"Provider", f->Provider);
+        SetStateSz(state, L"Uninstall", uninst);
+    }
     NotifyEnvironmentChanged();
     if (pathBefore)
     {
@@ -2215,6 +2220,166 @@ static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
     if (comp && ShellDefaultsId(f->Id))   /* PowerShell 7 / Firefox: desktop, Start menu, default browser (shelldefaults.c) */
         FmShellDefaults(!_wcsicmp(f->Id, L"firefox") ? FM_SHELL_ADOPT_BROWSER : 0, log);
     return S_OK;
+}
+
+static void AppendCleanupLine(const FM_FEATURE *f, LPWSTR uninst, DWORD cch);
+
+/* One catalog entry, several packages (Wine Gecko: the 32-bit package, then the 64-bit one on a 64-bit system; the list's
+ * Also= names the next section). Each package is downloaded, verified and installed as a component of its own; one that
+ * is already there (its own detect rule holds: installed by appwiz's prompt, say) is skipped. When a later package fails,
+ * the earlier ones this run installed are taken out again, so a failed install leaves nothing half-done. The uninstall
+ * lines of all packages are recorded together, one per line. A plain component goes straight to the single-package path. */
+static HRESULT SoftwareInstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
+{
+    FM_COMPONENT c, piece, nxt;
+    FM_FEATURE *pf;
+    WCHAR (*unin)[2048];
+    BOOL ran[4];
+    WCHAR all[4096];
+    int n = 0, i;
+    HRESULT hr = S_OK;
+
+    if (_wcsicmp(f->Provider, L"component") || !FmCompLoad(f->Id, &c) || !FmCompNext(&c, &nxt))
+        return SoftwareInstallPiece(f, state, log, NULL);
+
+    pf = (FM_FEATURE *)HeapAlloc(GetProcessHeap(), 0, sizeof(*pf));
+    unin = (WCHAR (*)[2048])HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4 * sizeof(*unin));
+    if (!pf || !unin)
+    {
+        if (pf) HeapFree(GetProcessHeap(), 0, pf);
+        if (unin) HeapFree(GetProcessHeap(), 0, unin);
+        return E_OUTOFMEMORY;
+    }
+    piece = c;
+    for (;;)
+    {
+        *pf = *f;
+        StringCchCopyW(pf->Id, ARRAYSIZE(pf->Id), piece.Id);
+        StringCchCopyW(pf->Name, ARRAYSIZE(pf->Name), piece.Name);
+        ran[n] = FALSE;
+        if (FmCompDetectOne(&piece))
+        {
+            LOGF(log, L"  '%s' is already installed, skipping its package\n", piece.Id);
+            ExpandCmd(piece.Id, piece.Uninstall, unin[n], 2048);
+        }
+        else
+        {
+            hr = SoftwareInstallPiece(pf, state, log, unin[n]);
+            ran[n] = SUCCEEDED(hr);
+        }
+        if (FAILED(hr)) break;
+        n++;
+        if (n >= 4 || !FmCompNext(&piece, &nxt)) break;
+        piece = nxt;
+    }
+    if (FAILED(hr))
+    {
+        WCHAR why[ARRAYSIZE(g_LastMsg)];
+        BOOL nc = g_NoCancel;
+        StringCchCopyW(why, ARRAYSIZE(why), g_LastMsg);
+        for (i = n - 1; i >= 0; i--)
+        {
+            DWORD ucode;
+            if (!ran[i] || !unin[i][0]) continue;
+            LOGF(log, L"  a later package failed: removing the package installed before it again\n");
+            g_NoCancel = TRUE;
+            RunAndWait(unin[i], 10u * 60u * 1000u, &ucode, log);
+            g_NoCancel = nc;
+        }
+        SetLastMsg(L"%s", why);
+    }
+    else
+    {
+        all[0] = L'\0';
+        for (i = 0; i < n; i++)
+        {
+            if (!unin[i][0]) continue;
+            if (all[0]) StringCchCatW(all, ARRAYSIZE(all), L"\n");
+            StringCchCatW(all, ARRAYSIZE(all), unin[i]);
+        }
+        AppendCleanupLine(f, all, ARRAYSIZE(all));
+        SetStateSz(state, L"Provider", f->Provider);
+        SetStateSz(state, L"Uninstall", all);
+    }
+    HeapFree(GetProcessHeap(), 0, pf);
+    HeapFree(GetProcessHeap(), 0, unin);
+    return hr;
+}
+
+/* A multi-package component may name a Cleanup= command (the first section's): it is the last uninstall line, marked with a
+ * leading '?' (run only when every line before it succeeded). Wine Gecko: the 32-bit and the 64-bit MSI register one
+ * component, so removing both products leaves the files of one of them; the cleanup removes the engine's folders. */
+static void AppendCleanupLine(const FM_FEATURE *f, LPWSTR uninst, DWORD cch)
+{
+    FM_COMPONENT c, nxt;
+    size_t len = wcslen(uninst);
+    if (_wcsicmp(f->Provider, L"component") || !FmCompLoad(f->Id, &c) || !c.Cleanup[0] || !FmCompNext(&c, &nxt)) return;
+    if (len + 3 >= cch) return;
+    if (len) uninst[len++] = L'\n';
+    uninst[len++] = L'?';
+    uninst[len] = L'\0';
+    ExpandCmd(f->Id, c.Cleanup, uninst + len, (DWORD)(cch - len));
+}
+
+/* The uninstall lines of every package of a multi-package component (Also=), one per text line, for an install that
+ * featmgr did not record (appwiz's Gecko prompt). Appends to uninst, which already holds the first package's line. */
+static void AppendChainUninstall(const FM_FEATURE *f, LPWSTR uninst, DWORD cch)
+{
+    FM_COMPONENT piece, nxt;
+    int n;
+    if (_wcsicmp(f->Provider, L"component") || !FmCompLoad(f->Id, &piece)) return;
+    for (n = 1; n < 4 && FmCompNext(&piece, &nxt); n++)
+    {
+        size_t len = wcslen(uninst);
+        if (nxt.Uninstall[0] && len + 2 < cch)
+        {
+            if (len) uninst[len++] = L'\n';
+            ExpandCmd(f->Id, nxt.Uninstall, uninst + len, (DWORD)(cch - len));
+        }
+        piece = nxt;
+    }
+    AppendCleanupLine(f, uninst, cch);
+}
+
+/* Run a (possibly multi-line) uninstall: one command per line, all of them run; a Windows Installer product that is
+ * not there any more (msiexec /x answers 1605) counts as removed. Returns the first failure's HRESULT. */
+static HRESULT RunUninstallLines(const FM_FEATURE *f, WCHAR *cmd, FILE *log)
+{
+    HRESULT first = S_OK;
+    WCHAR *line = cmd, *nl;
+    DWORD code;
+
+    while (line && *line)
+    {
+        HRESULT hr;
+        nl = wcschr(line, L'\n');
+        if (nl) *nl = L'\0';
+        if (*line == L'?')
+        {
+            /* the cleanup line: only after every line before it worked */
+            line++;
+            if (FAILED(first)) { LOGF(log, L"  skipping the cleanup: an uninstall line failed\n"); *line = L'\0'; }
+        }
+        if (*line)
+        {
+            hr = RunAndWait(line, SW_RUN_TIMEOUT_MS, &code, log);
+            if (FAILED(hr))
+            {
+                if (SUCCEEDED(first)) first = hr;
+                if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) return hr;
+            }
+            else if (code == ERROR_UNKNOWN_PRODUCT && wcsstr(line, L"msiexec"))
+                LOGF(log, L"  note: the package is not installed any more (1605), nothing to remove\n");
+            else if (code != 0)
+            {
+                LOGF(log, L"error: uninstaller failed (exit code %lu)\n", code);
+                SetLastMsg(L"The uninstaller for '%s' failed (exit code %lu).\n\n%s", f ? f->Id : L"?", code, g_Tail);
+                if (SUCCEEDED(first)) first = HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
+            }
+        }
+        line = nl ? nl + 1 : NULL;
+    }
+    return first;
 }
 
 /* Run the uninstall command recorded at install time. S_OK if there is none (the caller holds the install lock). */
@@ -2236,6 +2401,7 @@ static HRESULT SoftwareUninstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
             WCHAR inst[2048];
             hr = BuildSoftwareCommands(f, inst, cmd, ARRAYSIZE(cmd), log);
             if (FAILED(hr)) return hr;
+            AppendChainUninstall(f, cmd, ARRAYSIZE(cmd));
         }
         if (!cmd[0])
         {
@@ -2248,6 +2414,15 @@ static HRESULT SoftwareUninstallRun(const FM_FEATURE *f, HKEY state, FILE *log)
         FmScoopPrepareEnv();
     FmOpPhase(FM_PHASE_APPLY);
     FmOpStep(L"Running the uninstaller for %s", f ? f->Name : L"the feature");
+    if (wcschr(cmd, L'\n'))
+    {
+        /* several packages (Wine Gecko 32-bit + 64-bit) */
+        hr = RunUninstallLines(f, cmd, log);
+        NotifyEnvironmentChanged();
+        if (FAILED(hr)) return hr;
+        FmNativeInvalidate();
+        return S_OK;
+    }
     hr = RunAndWait(cmd, SW_RUN_TIMEOUT_MS, &code, log);
     if (FAILED(hr)) return hr;
     NotifyEnvironmentChanged();
