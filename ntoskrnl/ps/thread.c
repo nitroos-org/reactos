@@ -1062,13 +1062,11 @@ NtCreateThread(OUT PHANDLE ThreadHandle,
         goto Failed;
     }
 
-    /* Windows 10 refuses a stack with neither StackLimit nor AllocatedStackBase before it
-     * looks at the process handle (measured: a zero INITIAL_TEB and a StackBase-only one
-     * fail with STATUS_INVALID_PARAMETER whatever the handle, a StackBase of NULL with the
-     * other two set is accepted, and the CONTEXT flags are not checked). Which of the two
-     * fields it tests is not known, so only the case where both are NULL is refused. */
+    /* Windows 10 refuses a stack without an AllocatedStackBase before it looks at the process
+     * handle (measured: a zero INITIAL_TEB, StackBase only, StackLimit only and StackBase with
+     * StackLimit all fail with STATUS_INVALID_PARAMETER whatever the handle; AllocatedStackBase alone,
+     * or with either of the others, is accepted, and the CONTEXT flags are not checked). */
     if ((KeGetPreviousMode() != KernelMode) &&
-        (SafeInitialTeb.StackLimit == NULL) &&
         (SafeInitialTeb.AllocatedStackBase == NULL))
     {
         Status = STATUS_INVALID_PARAMETER;
