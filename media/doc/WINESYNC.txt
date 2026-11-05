@@ -167,7 +167,7 @@ dll/win32/mciqtz32            # Synced to Wine-10.0
 dll/win32/mciseq              # Synced to Wine-10.0
 dll/win32/mciwave             # Synced to Wine-10.0
 dll/win32/mf                  # Synced to Wine-11.21 (winetests/mf/transform.c kept at 11.19: new tests need wmcodecdsp.h header sync)
-dll/win32/mfplat              # Synced to Wine-11.19. Below 0x603 the Rtwq queue code of rtworkq is linked in.
+dll/win32/mfplat              # Synced to Wine-11.21. Below 0x603 the Rtwq queue code of rtworkq is linked in.
 dll/win32/mfplay              # Synced to Wine-11.19
 dll/win32/mfreadwrite         # Synced to Wine-11.19
 dll/win32/mgmtapi             # Synced to Wine-10.0
