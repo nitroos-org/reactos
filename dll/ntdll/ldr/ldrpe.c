@@ -45,6 +45,17 @@ static ULONG LdrpSnapHardErrorCount;
 static ULONG LdrpStaticForwarderDepth;
 static CHAR LdrpForwarderMissingDll[MAX_PATH];
 
+/*
+ * A forwarder resolves through nested snaps, one per step. A loop (a DLL
+ * forwarding to itself, two that forward to each other) never ends: the
+ * resolution would run out of stack, and the exception was swallowed by
+ * LdrpGetProcedureAddress, which then reported success with the address of the
+ * forwarder string in the import. A chain longer than this fails like a
+ * missing export (the longest real chain has a few steps)
+ */
+#define LDRP_MAX_FORWARDER_DEPTH 32
+static ULONG LdrpForwarderDepth;
+
 /* FUNCTIONS *****************************************************************/
 
 
@@ -1326,6 +1337,12 @@ FailurePath:
                 goto FailurePath;
             }
 
+            if (LdrpForwarderDepth >= LDRP_MAX_FORWARDER_DEPTH)
+            {
+                DPRINT1("LDR: forwarder chain of %s is too long (a loop?)\n", Forwarder);
+                goto FailurePath;
+            }
+
             if (!LdrpStaticForwarderDepth) LdrpForwarderMissingDll[0] = ANSI_NULL;
             ForwarderName.Buffer = Forwarder;
             ForwarderName.Length = (USHORT)(DotPosition - Forwarder);
@@ -1414,11 +1431,13 @@ FailurePath:
 
             /* Get the pointer; the steps of a chain below belong to a static snap too */
             if (StaticChain) LdrpStaticForwarderDepth++;
+            LdrpForwarderDepth++;
             Status = LdrpGetProcedureAddress(ForwarderHandle,
                                              ForwardName,
                                              ForwardOrdinal,
                                              (PVOID*)&Thunk->u1.Function,
                                              FALSE);
+            LdrpForwarderDepth--;
             if (StaticChain) LdrpStaticForwarderDepth--;
 
             /* If this fails, then error out with the status of the target */

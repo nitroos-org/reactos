@@ -300,6 +300,8 @@ static const FWEXPORT FwdExports[] =
     { "FwdChain3Ord", "ldrfw_chain.DeepOrd" },              /* 16: three forwarders, then a missing ordinal */
     { "FwdChain3Dll", "ldrfw_chain.DeepDll" },              /* 17: three forwarders, then a missing DLL */
     { "FwdChainOk", "ldrfw_chain.Ok" },                     /* 18: three forwarders that resolve */
+    { "FwdLoop",    "ldrfw_chain.Loop" },                   /* 19: a loop through two DLLs */
+    { "FwdSelf",    "ldrfw_fwd.FwdSelf" },                  /* 20: a forwarder to itself */
 };
 
 /* ldrfw_chain.dll: the second step of the chained forwarders */
@@ -311,6 +313,7 @@ static const FWEXPORT ChainExports[] =
     { "DeepOrd",    "ldrfw_chain2.DeepOrd" },               /* 4 */
     { "DeepDll",    "ldrfw_chain2.DeepDll" },               /* 5 */
     { "Ok",         "ldrfw_chain2.Ok" },                    /* 6 */
+    { "Loop",       "ldrfw_fwd.FwdLoop" },                  /* 7: back to the first step */
 };
 
 /* ldrfw_chain2.dll: the third step */
@@ -338,6 +341,7 @@ typedef struct _FWCASE
 } FWCASE;
 
 #define HARD_AT_MOST_ONE    (-1)
+#define ERROR_ANY           ((DWORD)-1)
 
 /*
  * Windows 10 22H2 (x64 and WoW64): the status is that of the step that
@@ -372,6 +376,9 @@ static const FWCASE Cases[] =
     { L"ldrfw_u_chain3.dll", "FwdChain3", 0, ERROR_PROC_NOT_FOUND,  1, L"FwdChain3", STATUS_ENTRYPOINT_NOT_FOUND, L"ldrfw_u_chain3.dll" },
     { L"ldrfw_u_chord3.dll", "FwdChain3Ord", 0, ERROR_INVALID_ORDINAL, HARD_AT_MOST_ONE, NULL, STATUS_ORDINAL_NOT_FOUND },
     { L"ldrfw_u_chdll3.dll", "FwdChain3Dll", 0, ERROR_MOD_NOT_FOUND, 0, NULL, STATUS_DLL_NOT_FOUND },
+    /* Loops: not measured on Windows, so only that the load fails (some error), cleanly, is checked */
+    { L"ldrfw_u_loop.dll",   "FwdLoop", 0, ERROR_ANY, HARD_AT_MOST_ONE, NULL, 0 },
+    { L"ldrfw_u_self.dll",   "FwdSelf", 0, ERROR_ANY, HARD_AT_MOST_ONE, NULL, 0 },
 };
 
 /* Every image the test writes; none of them may stay loaded after a failure */
@@ -596,8 +603,11 @@ TestDynamic(PCWSTR Dir)
                 continue;
             }
             ok(Req.Module == NULL, "LoadLibraryW(%ls) #%lu succeeded: %p\n", Cases[i].File, n, Req.Module);
-            ok(Req.Error == Cases[i].LoadError, "LoadLibraryW(%ls) #%lu error %lu, expected %lu\n",
-               Cases[i].File, n, Req.Error, Cases[i].LoadError);
+            if (Cases[i].LoadError == ERROR_ANY)
+                ok(Req.Error != 0 && Req.Error != 0xdeadbeef, "LoadLibraryW(%ls) #%lu error %lu\n", Cases[i].File, n, Req.Error);
+            else
+                ok(Req.Error == Cases[i].LoadError, "LoadLibraryW(%ls) #%lu error %lu, expected %lu\n",
+                   Cases[i].File, n, Req.Error, Cases[i].LoadError);
             if (Req.Module)
                 FreeLibrary(Req.Module);
             ok(GetModuleHandleW(Cases[i].File) == NULL, "%ls stays loaded after #%lu\n", Cases[i].File, n);
