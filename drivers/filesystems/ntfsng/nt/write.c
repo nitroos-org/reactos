@@ -23,7 +23,9 @@ int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int le
  * by a try that never waits, then CoreLock; nobody holding PagingWriteLock waits for PagingIoResource or
  * MainResource, and nobody holding CoreLock waits for PagingWriteLock, so Cc's lazy writer and Mm's
  * writers cannot deadlock with a user thread that holds FCB resources while it waits inside Cc.
- * DataIoGate: see NgPagingWrite.
+ * DataIoGate: see NgPagingWrite.  The zero fill below a write past the initialized size (NgZeroGap) takes no new lock: it runs
+ * under the same PagingWriteLock (and PagingIoResource shared / MainResource) as the write it belongs to, and takes CoreLock
+ * per 1 MB piece like an unlocked paging write.
  *
  * The lazy writer's order differs: Cc takes PagingIoResource shared (NgAcquireForLazyWrite) before it calls in,
  * and the write then takes PagingWriteLock, so it holds PagingIoResource(shared) -> PagingWriteLock, the reverse of
@@ -541,6 +543,73 @@ static int NgDioTransfer(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Buffer, 
     return 0;
 }
 
+/* The zero runs of a gap piece (ngc_dio_zero_begin): the bounce buffer, zeroed, written run by run. */
+static int NgDioZeroTransfer(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Bounce)
+{
+    ULONG r, Done;
+    RtlZeroMemory(Bounce, NG_DIO_BOUNCE);
+    for (r = 0; r < Dio->nruns; r++)
+    {
+        for (Done = 0; Done < Dio->run[r].len; )
+        {
+            ULONG n = min(Dio->run[r].len - Done, NG_DIO_BOUNCE);
+            if (ngos_dev_write(Vcb->StorageDevice, Dio->run[r].dev + Done, Bounce, n))
+                return -1;
+            Done += n;
+        }
+    }
+    return 0;
+}
+
+#define NG_ZGAP_DELETED 1
+#define NG_ZGAP_DROP    2
+
+/*
+ * Fills the gap between the stream's initialized size and Offset with zeros before a write at Offset, in pieces
+ * (ngc_dio_zero_begin, core/ngcore.c) whose device transfer runs without CoreLock, like an unlocked paging write
+ * (NgPagingWrite): a gap of tens of megabytes used to be written inside ngc_write under CoreLock, and every other
+ * file system call of the volume waited for it.  Each piece takes and drops CoreLock on its own, so a create, a size
+ * change or a cluster free of another file gets in between.  The caller holds the FCB's PagingWriteLock exclusive (no
+ * other data write or zero fill of the stream), and either PagingIoResource shared or MainResource exclusive (no size
+ * change), CoreLock once, Fcb->Node valid and a bounce buffer; CoreLock is held again on return.
+ * Returns 0 (the gap is filled, or what is left is for ngc_write to fill under the lock: it does the same work, so a
+ * stream or a state this does not take, e.g. sparse or an unaligned tail, still gets its zeros there),
+ * NG_ZGAP_DELETED (the file was deleted meanwhile: nothing to write), NG_ZGAP_DROP (a raw volume write started: drop the
+ * page write like NgPagingWrite does) or an error (<0).  The initialized size only moves up, after the zeros of the
+ * piece are on the device (ngc_dio_end), so a crash leaves the gap zero or unexposed.
+ */
+static long NgZeroGap(PNG_VCB Vcb, PNG_FCB Fcb, LONGLONG Offset, PUCHAR Bounce)
+{
+    struct ngc_dio Dio;
+    long Z;
+    int IoErr;
+
+    for (;;)
+    {
+        if (Fcb->Deleted)
+            return NG_ZGAP_DELETED;
+        if (Vcb->RawWritten)
+            return NG_ZGAP_DROP;
+        if (Vcb->CoreDepth != 1 || Vcb->Dismounted || Vcb->WriteThrough)
+            return 0;
+        Z = ngc_dio_zero_begin(Vcb->Core, Fcb->Node, Offset, &Dio);
+        if (Z == NGC_ZERO_DONE || Z == -NGC_EAGAIN)
+            return 0;
+        if (Z < 0)
+            return Z;
+        NgDataIoBegin(Vcb);
+        IoErr = NgDioZeroTransfer(Vcb, &Dio, Bounce);
+        NgDataIoTransferred(Vcb);
+        Z = ngc_dio_end(Vcb->Core, &Dio, NULL, IoErr);
+        NgDataIoDone(Vcb);
+        if (Z == -NGC_EAGAIN)
+            return 0;
+        if (Z < 0)
+            return Z;
+        Vcb->DioZeroPieces++;
+    }
+}
+
 /*
  * Paging write from the lazy writer or Mm.  It holds the FCB's PagingWriteLock exclusive (one data write
  * of the stream at a time: no zero fill or initialized-size change of another write overlaps it) and,
@@ -600,6 +669,24 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
         goto out;
     }
     Done = NgEnsureNode(Fcb);
+    if (!Done && Bounce && Vcb->CoreDepth == 1 && !Vcb->Dismounted && !Vcb->WriteThrough)
+    {
+        /* A write past the initialized size: zero the gap in pieces without CoreLock first (then ngc_dio_begin below). */
+        Done = NgZeroGap(Vcb, Fcb, Offset, Bounce);
+        if (Done == NG_ZGAP_DELETED)
+        {
+            NgReleaseCore(Vcb);
+            Done = 0;
+            goto out;
+        }
+        if (Done == NG_ZGAP_DROP)
+        {
+            NgReleaseCore(Vcb);
+            Done = 0;
+            Drop = TRUE;
+            goto out;
+        }
+    }
     if (!Done && Bounce && Vcb->CoreDepth == 1 && !Vcb->Dismounted && !Vcb->WriteThrough)
     {
         Done = ngc_dio_begin(Vcb->Core, Fcb->Node, Offset, Clipped, Length, &Dio);
@@ -1033,9 +1120,18 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     else
     {
         /* PagingWriteLock: its zero fill below the start must not overlap a paging write's unlocked transfer. */
+        PUCHAR ZBounce = Vcb->WriteThrough ? NULL : ExAllocateFromNPagedLookasideList(&Vcb->DioBounce);
+
         ExAcquireResourceExclusiveLite(&Fcb->PagingWriteLock, TRUE);
         NgAcquireCore(Vcb);
         Err = NgEnsureNode(Fcb);
+        /* MainResource (held) keeps size changes out; the gap below Offset is zeroed without CoreLock, then written here. */
+        if (!Err && ZBounce)
+        {
+            Err = (int)NgZeroGap(Vcb, Fcb, Offset.QuadPart, ZBounce);
+            if (Err == NG_ZGAP_DELETED || Err == NG_ZGAP_DROP)
+                Err = -NGC_EIO;
+        }
         Done = Err ? Err : ngc_write(Vcb->Core, Fcb->Node, Offset.QuadPart, Length, Buffer);
         if (Done >= 0)
         {
@@ -1045,6 +1141,8 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         }
         NgReleaseCore(Vcb);
         ExReleaseResourceLite(&Fcb->PagingWriteLock);
+        if (ZBounce)
+            ExFreeToNPagedLookasideList(&Vcb->DioBounce, ZBounce);
         if (Done < 0)
         {
             DPRINT1("ntfsng: write of %I64x at %I64d len %lu failed %ld\n", Fcb->MftNo, Offset.QuadPart, Length, Done);

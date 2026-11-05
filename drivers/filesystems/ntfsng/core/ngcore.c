@@ -2171,6 +2171,7 @@ int ngc_dio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int 
 	int err;
 
 	d->n = NULL;
+	d->zero = 0;
 	if (sb_rdonly(v->sb) || !len || (loff_t)off >= size || !v->bdev->kshim_drain)
 		return -EAGAIN;
 	if (off + len > (u64)size)
@@ -2239,12 +2240,76 @@ long ngc_dio_end(ngc_vol *v, struct ngc_dio *d, const void *buf, int io_err)
 			if (err)
 				ret = err;
 		}
-		if (ret >= 0)
+		if (ret >= 0 && !d->zero)
 			kshim_mapping_update(vi->i_mapping, d->off, buf, d->len);
 	}
 	iput(vi);
 	d->n = NULL;
 	return ret;
+}
+
+/*
+ * The zero fill below a write that starts past the initialized size, without the volume lock (what ngc_write does
+ * under it, byte for byte, for a stream whose [initialized size, off) is allocated).  One call prepares the next piece
+ * of the gap, at most NGC_ZERO_CHUNK bytes, as a dio of zeros: the caller writes zeros to each run (unlocked, as for
+ * ngc_dio_begin) and ngc_dio_end raises the initialized size to the end of the piece, so after a power cut the gap is
+ * zero below the initialized size that reached the journal and not read at all above it: zeros are on the device
+ * before the size that exposes them is published, exactly the order of ngc_write.  Pieces are small so the volume lock
+ * and the drain gate are free between them.
+ * Returns 0 (a piece is pinned: ngc_dio_end must follow), NGC_ZERO_DONE (nothing left for this to fill: the gap is
+ * closed or only a tail shorter than a sector remains; ngc_write finishes that under the lock) or -NGC_EAGAIN
+ * (ngc_write does all of it under the lock; what was filled so far stays filled).  An unaligned initialized size is
+ * first raised to the next sector under the lock (at most one sector of zeros, written as ngc_write writes them).
+ */
+int ngc_dio_zero_begin(ngc_vol *v, ngc_node *n, unsigned long long upto, struct ngc_dio *d)
+{
+	struct inode *vi = (struct inode *)n;
+	struct ntfs_inode *ni = NTFS_I(vi);
+	loff_t size = i_size_read(vi);
+	u64 bs = v->bdev->logical_block_size, start, end;
+	int err;
+
+	d->n = NULL;
+	d->nruns = 0;
+	d->zero = 0;
+	if ((loff_t)upto <= ni->initialized_size)
+		return NGC_ZERO_DONE;
+	if (sb_rdonly(v->sb) || (loff_t)upto > size || !v->bdev->kshim_drain)
+		return -EAGAIN;
+	if (!ngc_is_data_inode(vi) || !NInoNonResident(ni) || NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni) ||
+	    NInoSparse(ni) || v->bdev->kshim_gone || v->bdev->kshim_frozen || (v->bdev->jnl && kshim_jnl_failed(v->bdev)))
+		return -EAGAIN;
+	err = ngc_mark_dirty(v);
+	if (err)
+		return err;
+	start = ni->initialized_size;
+	if (start & (bs - 1)) {
+		u64 head = min_t(u64, upto, round_up(start, bs));
+		err = ngc_nr_write(v, vi, start, head - start, NULL);
+		if (!err) {
+			mutex_lock(&ni->mrec_lock);
+			err = ntfs_attr_set_initialized_size(ni, head);
+			mutex_unlock(&ni->mrec_lock);
+		}
+		if (err)
+			return err;
+		start = head;
+	}
+	if (start >= upto)
+		return NGC_ZERO_DONE;
+	end = min_t(u64, upto, start + NGC_ZERO_CHUNK) & ~(bs - 1);
+	if (end <= start)
+		return NGC_ZERO_DONE;
+	if (sb_rdonly(v->sb) || kshim_mapping_dirty(vi->i_mapping) || ngc_dio_map(v, ni, start, end - start, end - start, d))
+		return -EAGAIN;
+	if (!igrab(vi))
+		return -EAGAIN;
+	d->n = n;
+	d->off = start;
+	d->len = (unsigned int)(end - start);
+	d->cap = d->len;
+	d->zero = 1;
+	return 0;
 }
 
 /*
