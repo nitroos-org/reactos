@@ -65,6 +65,7 @@
 @ stdcall CoGetState(ptr)
 @ stdcall -stub CoGetStdMarshalEx(ptr long ptr) combase.CoGetStdMarshalEx
 @ stub CoGetSystemSecurityPermissions
+@ stdcall CoGetSystemWow64DirectoryW(ptr long)
 @ stub CoGetTIDFromIPID
 @ stdcall CoGetTreatAsClass(ptr ptr) combase.CoGetTreatAsClass
 @ stdcall CoImpersonateClient() combase.CoImpersonateClient
@@ -89,6 +90,7 @@
 @ stdcall CoQueryProxyBlanket(ptr ptr ptr ptr ptr ptr ptr ptr) combase.CoQueryProxyBlanket
 @ stub CoQueryReleaseObject
 @ stub CoReactivateObject
+@ stdcall CoDecodeProxy(long int64 ptr) combase.CoDecodeProxy
 @ stdcall CoRegisterActivationFilter(ptr) combase.CoRegisterActivationFilter
 @ stdcall CoRegisterChannelHook(ptr ptr) combase.CoRegisterChannelHook
 @ stdcall CoRegisterClassObject(ptr ptr long long ptr) combase.CoRegisterClassObject
@@ -164,13 +166,13 @@
 @ stub GetHookInterface
 @ stdcall GetRunningObjectTable(long ptr)
 @ stdcall HACCEL_UserFree(ptr ptr) combase.HACCEL_UserFree
-@ stub -arch=win64 HACCEL_UserFree64
+@ stdcall -arch=win64 HACCEL_UserFree64(ptr ptr) combase.HACCEL_UserFree64
 @ stdcall HACCEL_UserMarshal(ptr ptr ptr) combase.HACCEL_UserMarshal
-@ stub -arch=win64 HACCEL_UserMarshal64
+@ stdcall -arch=win64 HACCEL_UserMarshal64(ptr ptr ptr) combase.HACCEL_UserMarshal64
 @ stdcall HACCEL_UserSize(ptr long ptr) combase.HACCEL_UserSize
-@ stub -arch=win64 HACCEL_UserSize64
+@ stdcall -arch=win64 HACCEL_UserSize64(ptr long ptr) combase.HACCEL_UserSize64
 @ stdcall HACCEL_UserUnmarshal(ptr ptr ptr) combase.HACCEL_UserUnmarshal
-@ stub -arch=win64 HACCEL_UserUnmarshal64
+@ stdcall -arch=win64 HACCEL_UserUnmarshal64(ptr ptr ptr) combase.HACCEL_UserUnmarshal64
 @ stdcall HBITMAP_UserFree(ptr ptr) combase.HBITMAP_UserFree
 @ stub -arch=win64 HBITMAP_UserFree64
 @ stdcall HBITMAP_UserMarshal(ptr ptr ptr) combase.HBITMAP_UserMarshal
@@ -180,21 +182,21 @@
 @ stdcall HBITMAP_UserUnmarshal(ptr ptr ptr) combase.HBITMAP_UserUnmarshal
 @ stub -arch=win64 HBITMAP_UserUnmarshal64
 @ stdcall HBRUSH_UserFree(ptr ptr) combase.HBRUSH_UserFree
-@ stub -arch=win64 HBRUSH_UserFree64
+@ stdcall -arch=win64 HBRUSH_UserFree64(ptr ptr) combase.HBRUSH_UserFree64
 @ stdcall HBRUSH_UserMarshal(ptr ptr ptr) combase.HBRUSH_UserMarshal
-@ stub -arch=win64 HBRUSH_UserMarshal64
+@ stdcall -arch=win64 HBRUSH_UserMarshal64(ptr ptr ptr) combase.HBRUSH_UserMarshal64
 @ stdcall HBRUSH_UserSize(ptr long ptr) combase.HBRUSH_UserSize
-@ stub -arch=win64 HBRUSH_UserSize64
+@ stdcall -arch=win64 HBRUSH_UserSize64(ptr long ptr) combase.HBRUSH_UserSize64
 @ stdcall HBRUSH_UserUnmarshal(ptr ptr ptr) combase.HBRUSH_UserUnmarshal
-@ stub -arch=win64 HBRUSH_UserUnmarshal64
+@ stdcall -arch=win64 HBRUSH_UserUnmarshal64(ptr ptr ptr) combase.HBRUSH_UserUnmarshal64
 @ stdcall HDC_UserFree(ptr ptr) combase.HDC_UserFree
-@ stub -arch=win64 HDC_UserFree64
+@ stdcall -arch=win64 HDC_UserFree64(ptr ptr) combase.HDC_UserFree64
 @ stdcall HDC_UserMarshal(ptr ptr ptr) combase.HDC_UserMarshal
-@ stub -arch=win64 HDC_UserMarshal64
+@ stdcall -arch=win64 HDC_UserMarshal64(ptr ptr ptr) combase.HDC_UserMarshal64
 @ stdcall HDC_UserSize(ptr long ptr) combase.HDC_UserSize
-@ stub -arch=win64 HDC_UserSize64
+@ stdcall -arch=win64 HDC_UserSize64(ptr long ptr) combase.HDC_UserSize64
 @ stdcall HDC_UserUnmarshal(ptr ptr ptr) combase.HDC_UserUnmarshal
-@ stub -arch=win64 HDC_UserUnmarshal64
+@ stdcall -arch=win64 HDC_UserUnmarshal64(ptr ptr ptr) combase.HDC_UserUnmarshal64
 @ stdcall HENHMETAFILE_UserFree(ptr ptr)
 @ stub -arch=win64 HENHMETAFILE_UserFree64
 @ stdcall HENHMETAFILE_UserMarshal(ptr ptr ptr)
@@ -212,21 +214,21 @@
 @ stdcall HGLOBAL_UserUnmarshal(ptr ptr ptr) combase.HGLOBAL_UserUnmarshal
 @ stub -arch=win64 HGLOBAL_UserUnmarshal64
 @ stdcall HICON_UserFree(ptr ptr) combase.HICON_UserFree
-@ stub -arch=win64 HICON_UserFree64
+@ stdcall -arch=win64 HICON_UserFree64(ptr ptr) combase.HICON_UserFree64
 @ stdcall HICON_UserMarshal(ptr ptr ptr) combase.HICON_UserMarshal
-@ stub -arch=win64 HICON_UserMarshal64
+@ stdcall -arch=win64 HICON_UserMarshal64(ptr ptr ptr) combase.HICON_UserMarshal64
 @ stdcall HICON_UserSize(ptr long ptr) combase.HICON_UserSize
-@ stub -arch=win64 HICON_UserSize64
+@ stdcall -arch=win64 HICON_UserSize64(ptr long ptr) combase.HICON_UserSize64
 @ stdcall HICON_UserUnmarshal(ptr ptr ptr) combase.HICON_UserUnmarshal
-@ stub -arch=win64 HICON_UserUnmarshal64
+@ stdcall -arch=win64 HICON_UserUnmarshal64(ptr ptr ptr) combase.HICON_UserUnmarshal64
 @ stdcall HMENU_UserFree(ptr ptr) combase.HMENU_UserFree
-@ stub -arch=win64 HMENU_UserFree64
+@ stdcall -arch=win64 HMENU_UserFree64(ptr ptr) combase.HMENU_UserFree64
 @ stdcall HMENU_UserMarshal(ptr ptr ptr) combase.HMENU_UserMarshal
-@ stub -arch=win64 HMENU_UserMarshal64
+@ stdcall -arch=win64 HMENU_UserMarshal64(ptr ptr ptr) combase.HMENU_UserMarshal64
 @ stdcall HMENU_UserSize(ptr long ptr) combase.HMENU_UserSize
-@ stub -arch=win64 HMENU_UserSize64
+@ stdcall -arch=win64 HMENU_UserSize64(ptr long ptr) combase.HMENU_UserSize64
 @ stdcall HMENU_UserUnmarshal(ptr ptr ptr) combase.HMENU_UserUnmarshal
-@ stub -arch=win64 HMENU_UserUnmarshal64
+@ stdcall -arch=win64 HMENU_UserUnmarshal64(ptr ptr ptr) combase.HMENU_UserUnmarshal64
 @ stdcall HMETAFILE_UserFree(ptr ptr)
 @ stub -arch=win64 HMETAFILE_UserFree64
 @ stdcall HMETAFILE_UserMarshal(ptr ptr ptr)
@@ -251,18 +253,26 @@
 @ stub -arch=win64 HPALETTE_UserSize64
 @ stdcall HPALETTE_UserUnmarshal(ptr ptr ptr) combase.HPALETTE_UserUnmarshal
 @ stub -arch=win64 HPALETTE_UserUnmarshal64
-@ stub HRGN_UserFree
-@ stub HRGN_UserMarshal
-@ stub HRGN_UserSize
-@ stub HRGN_UserUnmarshal
+@ stdcall HMONITOR_UserFree(ptr ptr) combase.HMONITOR_UserFree
+@ stdcall -arch=win64 HMONITOR_UserFree64(ptr ptr) combase.HMONITOR_UserFree64
+@ stdcall HMONITOR_UserMarshal(ptr ptr ptr) combase.HMONITOR_UserMarshal
+@ stdcall -arch=win64 HMONITOR_UserMarshal64(ptr ptr ptr) combase.HMONITOR_UserMarshal64
+@ stdcall HMONITOR_UserSize(ptr long ptr) combase.HMONITOR_UserSize
+@ stdcall -arch=win64 HMONITOR_UserSize64(ptr long ptr) combase.HMONITOR_UserSize64
+@ stdcall HMONITOR_UserUnmarshal(ptr ptr ptr) combase.HMONITOR_UserUnmarshal
+@ stdcall -arch=win64 HMONITOR_UserUnmarshal64(ptr ptr ptr) combase.HMONITOR_UserUnmarshal64
+@ stdcall HRGN_UserFree(ptr ptr) combase.HRGN_UserFree
+@ stdcall HRGN_UserMarshal(ptr ptr ptr) combase.HRGN_UserMarshal
+@ stdcall HRGN_UserSize(ptr long ptr) combase.HRGN_UserSize
+@ stdcall HRGN_UserUnmarshal(ptr ptr ptr) combase.HRGN_UserUnmarshal
 @ stdcall HWND_UserFree(ptr ptr) combase.HWND_UserFree
-@ stub -arch=win64 HWND_UserFree64
+@ stdcall -arch=win64 HWND_UserFree64(ptr ptr) combase.HWND_UserFree64
 @ stdcall HWND_UserMarshal(ptr ptr ptr) combase.HWND_UserMarshal
-@ stub -arch=win64 HWND_UserMarshal64
+@ stdcall -arch=win64 HWND_UserMarshal64(ptr ptr ptr) combase.HWND_UserMarshal64
 @ stdcall HWND_UserSize(ptr long ptr) combase.HWND_UserSize
-@ stub -arch=win64 HWND_UserSize64
+@ stdcall -arch=win64 HWND_UserSize64(ptr long ptr) combase.HWND_UserSize64
 @ stdcall HWND_UserUnmarshal(ptr ptr ptr) combase.HWND_UserUnmarshal
-@ stub -arch=win64 HWND_UserUnmarshal64
+@ stdcall -arch=win64 HWND_UserUnmarshal64(ptr ptr ptr) combase.HWND_UserUnmarshal64
 @ stub HkOleRegisterObject
 @ stdcall IIDFromString(wstr ptr) combase.IIDFromString
 @ stub I_RemoteMain
@@ -276,6 +286,8 @@
 @ stdcall MonikerCommonPrefixWith(ptr ptr ptr)
 @ stub MonikerRelativePathTo
 # NdrOleInitializeExtension
+@ stdcall CStdAsyncStubBuffer_AddRef(ptr) combase.CStdAsyncStubBuffer_AddRef
+@ stdcall CStdAsyncStubBuffer_Disconnect(ptr) combase.CStdAsyncStubBuffer_Disconnect
 # NdrProxyForwardingFunction3...32
 # ObjectStublessClient3...32
 @ stdcall Ole32DllGetClassObject(ptr ptr ptr)
