@@ -445,7 +445,7 @@ static NTSTATUS SectionName32(HANDLE Process, ULONG Address, ULONG Buffer, ULONG
                               ULONG ReturnLength, WOW64_CLEANUP *Cleanup)
 {
     /* The native MaximumLength is a USHORT: keep it even and below 64 KiB */
-    const ULONG NativeLength = sizeof(MEMORY_SECTION_NAME) + MAXUSHORT - 1;
+    const ULONG NativeLength = sizeof(MEMORY_SECTION_NAME) + MAXUSHORT + 1;
     MEMORY_SECTION_NAME *Native;
     WOW64_STRING UNALIGNED *Guest = PTR32(Buffer);
     SIZE_T Bytes = 0;
@@ -480,6 +480,59 @@ static NTSTATUS SectionName32(HANDLE Process, ULONG Address, ULONG Buffer, ULONG
     *(WCHAR UNALIGNED *)((PUCHAR)Guest + Needed - sizeof(WCHAR)) = UNICODE_NULL;
     /* Last, as the native service does, in case it lies inside the buffer */
     if (ReturnLength) *(ULONG UNALIGNED *)PTR32(ReturnLength) = Needed;
+    return STATUS_SUCCESS;
+}
+
+/* MemoryWorkingSetInformation (class 1) of a 32-bit caller: the count and the entries are ULONGs and only the pages
+ * below the guest's highest address are listed (the low 12 bits keep the attributes). Measured on Windows 10 22H2:
+ * a buffer of fewer than 4 bytes fails with STATUS_INFO_LENGTH_MISMATCH, a buffer too small for the list gets only
+ * the count, BaseAddress above the guest's range is invalid, and ReturnLength is the size of the list. */
+static NTSTATUS WorkingSetList32(HANDLE Process, ULONG Address, ULONG Buffer, ULONG Length, ULONG ReturnLength,
+                                 WOW64_CLEANUP *Cleanup)
+{
+    SIZE_T NativeSize = 0x10000, Bytes;
+    ULONG_PTR *List;
+    ULONG Count = 0, Needed, i, Pass;
+    ULONG UNALIGNED *Guest = PTR32(Buffer);
+    NTSTATUS Status;
+
+    if (Length < sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+    if (Address > Wow64HighestUserAddress) return STATUS_INVALID_PARAMETER;
+    if (ReturnLength)
+    {
+        if (!GuestSpan(ReturnLength, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+        ProbeOutput(ReturnLength, sizeof(ULONG));
+    }
+    if (!GuestSpan(Buffer, Length)) return STATUS_ACCESS_VIOLATION;
+    ProbeOutput(Buffer, Length);
+
+    for (Pass = 0; ; Pass++)
+    {
+        if (Cleanup->Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, Cleanup->Buffer);
+        List = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, NativeSize);
+        if (!List) return STATUS_NO_MEMORY;
+        Status = NtQueryVirtualMemory(Process, NULL, 1 /* MemoryWorkingSetInformation */, List, NativeSize, &Bytes);
+        if (Status != STATUS_INFO_LENGTH_MISMATCH) break;
+        /* The list grows while it is being asked for: leave room */
+        NativeSize = sizeof(ULONG_PTR) + ((SIZE_T)List[0] + 256 * (Pass + 1)) * sizeof(ULONG_PTR);
+        if (Pass >= 16) return Status;
+    }
+    if (!NT_SUCCESS(Status)) return Status;
+
+    for (i = 0; i < List[0]; i++)
+        if ((List[1 + i] & ~(ULONG_PTR)(PAGE_SIZE - 1)) <= Wow64HighestUserAddress) Count++;
+    Needed = sizeof(ULONG) + Count * sizeof(ULONG);
+    *Guest = Count;
+    if (Length < Needed) return STATUS_INFO_LENGTH_MISMATCH;
+
+    Count = 0;
+    for (i = 0; i < List[0]; i++)
+    {
+        if ((List[1 + i] & ~(ULONG_PTR)(PAGE_SIZE - 1)) <= Wow64HighestUserAddress)
+            Guest[1 + Count++] = (ULONG)List[1 + i];
+    }
+    *Guest = Count;
+    if (ReturnLength) *(ULONG UNALIGNED *)PTR32(ReturnLength) = sizeof(ULONG) + Count * sizeof(ULONG);
     return STATUS_SUCCESS;
 }
 
@@ -1722,7 +1775,11 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             if (!IsCurrentProcess(Process)) UNSUPPORTED(MODE, 3);
             return SectionName32(Process, a[1], a[3], a[4], a[5], Cleanup);
         }
-        if (a[2] == MemoryRegionInformation)
+        if (a[2] == 1 /* MemoryWorkingSetInformation */)
+            return WorkingSetList32(H(0), a[1], a[3], a[4], a[5], Cleanup);
+        /* MemorySharedCommitInformation does not exist for a WoW64 caller (Windows 10 22H2) */
+        if (a[2] == 5) return STATUS_INVALID_INFO_CLASS;
+        if (a[2] == MemoryRegionInformation || a[2] == 7 /* MemoryRegionInformationEx */)
         {
             /* The 32-bit layout is seven ULONGs; as on Windows (measured on Windows 10 22H2) the whole
              * structure is required, a null buffer is not written (and succeeds), and a bad ReturnLength
@@ -1733,7 +1790,19 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             if (a[4] < sizeof(*Region32)) return STATUS_INFO_LENGTH_MISMATCH;
             if ((ULONG64)a[1] > (ULONG64)Wow64HighestUserAddress) return STATUS_INVALID_PARAMETER;
             if (a[3]) ProbeOutput(a[3], sizeof(*Region32));
-            Status = NtQueryVirtualMemory(H(0), P(1), MemoryRegionInformation, &Region, sizeof(Region), NULL);
+            if (a[2] == 7 && a[5])
+            {
+                /* The Ex class stores the length before the process is looked at (measured) */
+                _SEH2_TRY
+                {
+                    U(5) = sizeof(*Region32);
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                }
+                _SEH2_END;
+            }
+            Status = NtQueryVirtualMemory(H(0), P(1), a[2], &Region, sizeof(Region), NULL);
             if (!NT_SUCCESS(Status)) return Status;
             if (a[3])
             {
@@ -1758,8 +1827,20 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
             }
             return STATUS_SUCCESS;
         }
-        if (a[2] != MemoryBasicInformation) UNSUPPORTED(CLASS, a[2]);
+        if (a[2] != MemoryBasicInformation && a[2] != 8 /* MemoryPrivilegedBasicInformation */) UNSUPPORTED(CLASS, a[2]);
         if (a[4] < sizeof(*Info32)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (a[2] == 8 && a[5])
+        {
+            /* Class 8 stores the length before the process is looked at (measured) */
+            _SEH2_TRY
+            {
+                U(5) = sizeof(*Info32);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+            }
+            _SEH2_END;
+        }
         Status = NtQueryVirtualMemory(H(0), P(1), a[2], &Info, sizeof(Info), NULL);
         if (NT_SUCCESS(Status))
         {
