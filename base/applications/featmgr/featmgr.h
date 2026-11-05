@@ -262,11 +262,18 @@ typedef struct _FM_COMPONENT
     BOOL     Default;            /* installed by the first-boot installer */
     BOOL     ArchOk;             /* Arch= lists this build's architecture */
     ULONGLONG MaxSize;           /* > 0: the download is aborted once it is larger (hosted packs: the pinned size) */
+    WCHAR    Cleanup[512];       /* Also= components: run after every package's Uninstall line succeeded (Gecko: its two MSIs share a component, each leaves files) */
+    WCHAR    Also[FM_MAX_ID];    /* another section of the list that belongs to this one (Wine Gecko: the 64-bit package after the 32-bit one) */
 } FM_COMPONENT;
 BOOL   FmCompLoad(LPCWSTR id, FM_COMPONENT *c);
 int    FmCompEnum(FM_COMPONENT **outArr);          /* every component of the file; caller frees with FmCompFree */
 void   FmCompFree(FM_COMPONENT *arr);
-BOOL   FmCompDetect(const FM_COMPONENT *c);        /* TRUE: installed (DetectReg or DetectFile holds) */
+BOOL   FmCompDetect(const FM_COMPONENT *c);        /* TRUE: installed (DetectReg or DetectFile holds, and so does that of every Also= piece of this build) */
+BOOL   FmCompDetectOne(const FM_COMPONENT *c);     /* the component's own rule only (no Also= pieces) */
+/* Also=<id>: the next piece of a multi-package component. TRUE and *next filled when c names one that this build's
+ * architecture lists (Arch=); a piece without a detect rule or with a missing section ends the chain (FALSE). */
+BOOL   FmCompNext(const FM_COMPONENT *c, FM_COMPONENT *next);
+ULONGLONG FmCompTotalSize(const FM_COMPONENT *c);  /* Size of c and of its Also= pieces */
 /* Download c->Url into %SystemRoot%\Featmgr\Downloads and verify it. A copy already there that matches is reused.
  * Reports FM_PHASE_DOWNLOAD / FM_PROG_BYTES; honours FmOpCancel (the partial file is deleted). Never returns S_OK for
  * a file whose SHA-256 differs (the file is deleted). path = the verified file. */
