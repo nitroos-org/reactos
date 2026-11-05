@@ -25,6 +25,24 @@
 #define REACTOS_DLL_VERSION_RC      "@DLL_VERSION_STR@\0"
 #define REACTOS_DLL_VERSION_STR     "@DLL_VERSION_STR@"
 
+/* Product name and version shown to users (NitroOS, an unofficial build based on ReactOS) */
+#define BRAND_PRODUCT_NAME          "@NITRO_NAME@"
+/* The OS identity text for the display surfaces that show a Windows-style caption (WMI Win32_OperatingSystem.Caption,
+ * systeminfo "OS Name", cmd ver, dxdiag). "Windows 10" stays inside so scripts that match it keep working.
+ * The version NUMBERS and the registry ProductName are NOT derived from this: they stay Windows 10. */
+#define BRAND_OS_CAPTION            BRAND_PRODUCT_NAME " (Windows 10 compatible) Pro"
+#define BRAND_WIDEN_(s)             L##s
+#define BRAND_WIDEN(s)              BRAND_WIDEN_(s)
+#define BRAND_PRODUCT_NAME_W        BRAND_WIDEN(BRAND_PRODUCT_NAME)
+#define BRAND_OS_CAPTION_W          BRAND_WIDEN(BRAND_OS_CAPTION)
+#define BRAND_VERSION_MAIN_STR      "@BRAND_VERSION_MAIN@"
+#define BRAND_VERSION_DETAIL_STR    "@BRAND_VERSION_DETAIL@"
+#define BRAND_VERSION_STR           "@BRAND_VERSION@"
+#define BRAND_VERSION_FULL_STR      "@NITRO_TITLE@"
+#define BRAND_VERSION_FULL_RC       "@NITRO_TITLE@\0"
+#define BRAND_NOTICE_STR            "@NITRO_NOTICE@"
+#define BRAND_BASED_ON_VERSION_RC   "Based on ReactOS @KERNEL_VERSION_MAJOR@.@KERNEL_VERSION_MINOR@.@KERNEL_VERSION_PATCH_LEVEL@\0"
+
 #define REACTOS_COMPILER_NAME       "@CMAKE_C_COMPILER_ID@"
 #define REACTOS_COMPILER_VERSION    "@CMAKE_C_COMPILER_VERSION@"
 

@@ -6,6 +6,7 @@
  */
 
 #include "featmgr.h"
+#include <reactos/buildno.h>
 #include <stdio.h>
 #include <strsafe.h>
 #include <tlhelp32.h>
@@ -28,7 +29,7 @@ static void Out(LPCWSTR fmt, ...)
 
 static void Usage(void)
 {
-    Out(L"featmgr - ReactOS-Nitro Optional Features manager (FEATMGMT-01)\n\n");
+    Out(L"featmgr - " BRAND_PRODUCT_NAME_W L" Features manager (FEATMGMT-01)\n\n");
     Out(L"Usage:\n");
     Out(L"  featmgr /list [/state:<Enabled|Disabled|NotInstalled>] [/tier:<os|software>] [/source:<src>]\n");
     Out(L"                [/search:<text>] [/timing]\n");

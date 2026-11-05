@@ -47,6 +47,9 @@ MUIDisplayPage(
     ULONG PageNumber);
 
 VOID
+MUIDisplayBrandNotice(VOID);
+
+VOID
 MUIClearPage(
     ULONG PageNumber);
 
@@ -186,3 +189,4 @@ extern CHAR CharDoubleLowerRightCorner;
 #define STRING_GB                           55
 #define STRING_ADDKBLAYOUTS                 56
 #define STRING_REBOOTPROGRESSBAR            57
+#define STRING_BRAND_NOTICE                 58

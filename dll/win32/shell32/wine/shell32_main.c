@@ -1396,6 +1396,7 @@ BOOL WINAPI ShellAboutW( HWND hWnd, LPCWSTR szApp, LPCWSTR szOtherStuff,
 #ifdef __REACTOS__
     WCHAR szVersionString[256];
     WCHAR szFormat[256];
+    WCHAR szNotice[256];
     WCHAR szOtherStuff2[1024];
 #endif
 
@@ -1411,12 +1412,14 @@ BOOL WINAPI ShellAboutW( HWND hWnd, LPCWSTR szApp, LPCWSTR szOtherStuff,
         return FALSE;
 
 #ifdef __REACTOS__
-    /* Output the version OS kernel strings */
+    /* Output the product version */
     LoadStringW(shell32_hInstance, IDS_ABOUT_VERSION_STRING, szFormat, _countof(szFormat));
-    StringCchPrintfW(szVersionString, _countof(szVersionString), szFormat, KERNEL_VERSION_STR, KERNEL_VERSION_BUILD_STR);
-    /* nitro build identification, in front of the caller's text: title, notice, upstream base */
-    StringCchPrintfW(szOtherStuff2, _countof(szOtherStuff2), L"%S\n%S\nBased on ReactOS %S (%S)%s%s",
-                     NITRO_TITLE_STR, NITRO_NOTICE_STR, KERNEL_VERSION_STR, NITRO_UPSTREAM_SHA_STR,
+    StringCchPrintfW(szVersionString, _countof(szVersionString), szFormat, BRAND_VERSION_MAIN_STR, BRAND_VERSION_DETAIL_STR);
+    /* Nitro notice (translated, English text as fallback), the ReactOS base, then the caller's text */
+    if (!LoadStringW(shell32_hInstance, IDS_ABOUT_NITRO_NOTICE, szNotice, _countof(szNotice)))
+        StringCchPrintfW(szNotice, _countof(szNotice), L"%S", NITRO_NOTICE_STR);
+    StringCchPrintfW(szOtherStuff2, _countof(szOtherStuff2), L"%s\nBased on ReactOS %S (%S)%s%s",
+                     szNotice, KERNEL_VERSION_STR, NITRO_UPSTREAM_SHA_STR,
                      (szOtherStuff && *szOtherStuff) ? L"\n" : L"", szOtherStuff ? szOtherStuff : L"");
 #endif
 
