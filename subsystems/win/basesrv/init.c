@@ -624,7 +624,6 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
 
         /* Make local point back to \Sessions\x\BNO */
         RtlInitUnicodeString(&DirectoryName, L"Local");
-        ASSERT(SessionId == 0);
         InitializeObjectAttributes(&ObjectAttributes,
                                    &DirectoryName,
                                    OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
