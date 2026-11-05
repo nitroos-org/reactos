@@ -1062,16 +1062,29 @@ CsrConnectToUser(VOID)
         }
     }
 
-    /* Connect to user32 */
-    _SEH2_TRY
+    if (!CsrClientThreadSetup && (NtCurrentPeb()->SessionId != 0))
     {
-        Connected = CsrClientThreadSetup();
+        /*
+         * NitroSessions (phase P2): the csrss of a session other than 0 runs
+         * without the user server (winsrv), so user32 is not loaded and there
+         * is no user connection to make until win32k runs per session (P3b).
+         * Session 0's csrss always loads winsrv, and with it user32.
+         */
+        Connected = TRUE;
     }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    else
     {
-        Connected = FALSE;
+        /* Connect to user32 */
+        _SEH2_TRY
+        {
+            Connected = CsrClientThreadSetup();
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Connected = FALSE;
+        }
+        _SEH2_END;
     }
-    _SEH2_END;
 
     if (!Connected)
     {
