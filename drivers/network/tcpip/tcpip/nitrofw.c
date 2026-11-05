@@ -1367,6 +1367,7 @@ static BOOLEAN FwIsOwnUnicast(PIP_ADDRESS Address)
 typedef struct _FW_PKT
 {
     UINT Protocol;
+    ULONG IfType;           /* NITROFW_IFTYPE_* bit of the interface the packet came in on */
     BOOLEAN HasPorts;       /* TCP or UDP */
     BOOLEAN IsIcmp;
     USHORT LocalPort;       /* host order */
@@ -1536,10 +1537,8 @@ static BOOLEAN FwRuleMatches(PNITROFW_RULE Rule, PFW_PKT Pkt)
 
     if (Rule->Protocol != NITROFW_PROTO_ANY && Rule->Protocol != Pkt->Protocol)
         return FALSE;
-    /* Interface types cannot be resolved yet: every interface counts as LAN. A rule that includes LAN
-       applies; a rule without it never matches if it Allows, but a Block rule applies anyway (fail
-       closed: a Block restricted to Wireless/RemoteAccess is not silently ignored). */
-    if (!(Rule->IfTypes & NITROFW_IFTYPE_LAN) && Rule->Action == NITROFW_ACTION_ALLOW)
+    /* a rule applies on the interface types it lists (NITROFW_IFTYPE_ALL = any) */
+    if (!(Rule->IfTypes & Pkt->IfType))
         return FALSE;
 
     if (Rule->LocalPortCount || Rule->RemotePortCount)
@@ -1625,6 +1624,7 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
 
     RtlZeroMemory(&Pkt, sizeof(Pkt));
     Pkt.Protocol = Protocol;
+    Pkt.IfType = LANGetFwIfType(Interface);
     Pkt.RemoteAddr = FwNtohl(IPPacket->SrcAddr.Address.IPv4Address);
     Pkt.LocalAddr = FwNtohl(IPPacket->DstAddr.Address.IPv4Address);
     Pkt.Dst = &IPPacket->DstAddr;
