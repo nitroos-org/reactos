@@ -251,7 +251,7 @@ Describe 'filters' {
         $a.Count | Should -BeGreaterThan 0
         ($a.InterfaceIndex | Select-Object -Unique) | Should -Be $script:Adapter.InterfaceIndex
     }
-    It 'Get-NetIPAddress -PolicyStore PersistentStore returns nothing and bogus is Windows error 87' {
+    It 'Get-NetIPAddress -PolicyStore PersistentStore returns nothing for DHCP interfaces (measured) and bogus is Windows error 87' {
         @(Get-NetIPAddress -PolicyStore PersistentStore -ErrorAction SilentlyContinue).Count | Should -Be 0
         $e = Err { Get-NetIPAddress -PolicyStore bogus }
         $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 87,Get-NetIPAddress'
@@ -773,6 +773,7 @@ Describe 'write cmdlets: round trip on the guest (state read back with the Get- 
             Remove-NetIPAddress -InterfaceIndex $script:ix -Confirm:$false -ErrorAction SilentlyContinue
             Remove-NetIPAddress -PolicyStore PersistentStore -InterfaceIndex $script:ix -Confirm:$false -ErrorAction SilentlyContinue
             Set-DnsClientServerAddress -InterfaceIndex $script:ix -ResetServerAddresses
+            Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -AutomaticMetric Enabled
             Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -Dhcp Enabled
         }
     }
@@ -793,6 +794,10 @@ Describe 'write cmdlets: round trip on the guest (state read back with the Get- 
         $o[0].psobject.TypeNames[0] | Should -Be 'Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_NetIPAddress'
         $o[0].IPAddress | Should -Be '10.0.2.99'
         $a = Get-NetIPAddress -IPAddress 10.0.2.99
+        $pp = @(Get-NetIPAddress -PolicyStore PersistentStore -IPAddress 10.0.2.99)
+        $pp.Count | Should -Be 1
+        $pp[0].PrefixLength | Should -Be 24
+        [string]$pp[0].Store | Should -Be 'PersistentStore'
         $a.InterfaceIndex | Should -Be $script:ix
         $a.PrefixLength | Should -Be 24
         [string]$a.PrefixOrigin | Should -Be 'Manual'
@@ -874,13 +879,74 @@ Describe 'write cmdlets: round trip on the guest (state read back with the Get- 
         @((Get-ItemProperty $script:regPath).IPAddress) | Should -Be @('10.0.2.77')
         @((Get-ItemProperty $script:regPath).SubnetMask) | Should -Be @('255.255.0.0')
         @(Get-NetIPAddress -IPAddress 10.0.2.77 -ErrorAction SilentlyContinue).Count | Should -Be 0
+        # the PersistentStore lists it (only that store), with the same shape as an active row
+        $p = @(Get-NetIPAddress -PolicyStore PersistentStore)
+        $p.Count | Should -Be 1
+        $p[0].IPAddress | Should -Be '10.0.2.77'
+        $p[0].PrefixLength | Should -Be 16
+        $p[0].InterfaceIndex | Should -Be $script:ix
+        [string]$p[0].Store | Should -Be 'PersistentStore'
+        [string]$p[0].AddressFamily | Should -Be 'IPv4'
+        [string]$p[0].PrefixOrigin | Should -Be 'Manual'
+        $p[0].psobject.TypeNames[0] | Should -Be 'Microsoft.Management.Infrastructure.CimInstance#ROOT/StandardCimv2/MSFT_NetIPAddress'
+        (MemberNames $p[0]) | Should -Be (MemberNames (Get-NetIPAddress -AddressFamily IPv4 | Select-Object -First 1))
+        @(Get-NetIPAddress -PolicyStore PersistentStore -IPAddress 10.0.2.77).Count | Should -Be 1
+        @(Get-NetIPAddress -PolicyStore PersistentStore -InterfaceIndex $script:ix).Count | Should -Be 1
+        @(Get-NetIPAddress -PolicyStore PersistentStore -InterfaceAlias $p[0].InterfaceAlias -PrefixLength 16).Count | Should -Be 1
+        @(Get-NetIPAddress -PolicyStore PersistentStore -PrefixLength 24 -ErrorAction SilentlyContinue).Count | Should -Be 0
+        $e = @(Err { Get-NetIPAddress -PolicyStore PersistentStore -IPAddress 1.2.3.4 })
+        $e[0].FullyQualifiedErrorId | Should -Be 'CmdletizationQuery_NotFound_IPAddress,Get-NetIPAddress'
+        @(Get-NetIPAddress -PolicyStore ActiveStore -IPAddress 10.0.2.77 -ErrorAction SilentlyContinue).Count | Should -Be 0
         Remove-NetIPAddress -IPAddress 10.0.2.77 -PolicyStore PersistentStore -Confirm:$false
+        @(Get-NetIPAddress -PolicyStore PersistentStore -ErrorAction SilentlyContinue).Count | Should -Be 0
         @((Get-ItemProperty $script:regPath).IPAddress) | Should -Be @('0.0.0.0')
+    }
+    It 'Set-NetIPInterface -InterfaceMetric: Get-NetIPInterface, the registry and GetIpInterfaceEntry agree; -AutomaticMetric Enabled undoes it' -Skip:$script:SkipRt {
+        $auto = (Get-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4).InterfaceMetric
+        [string](Get-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4).AutomaticMetric | Should -Be 'Enabled'
+        $r = Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -InterfaceMetric 55 -PassThru
+        @($r).Count | Should -Be 1
+        $r.InterfaceMetric | Should -Be 55
+        [string]$r.AutomaticMetric | Should -Be 'Disabled'
+        $g = Get-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4
+        $g.InterfaceMetric | Should -Be 55
+        [string]$g.AutomaticMetric | Should -Be 'Disabled'
+        (Get-ItemProperty $script:regPath).InterfaceMetric | Should -Be 55
+        @(Get-NetIPInterface -InterfaceMetric 55).Count | Should -Be 1
+        # a metric above the stack's maximum is rejected, the registry keeps 55
+        foreach ($bad in 0, 10000) {
+            $e = @(Err { Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -InterfaceMetric $bad -Confirm:$false })
+            $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 87,Set-NetIPInterface'
+            $e[0].Exception.Message | Should -Match "InterfaceMetric $bad"
+        }
+        $e = @(Err { Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -InterfaceMetric 5 -AutomaticMetric Enabled -Confirm:$false })
+        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 87,Set-NetIPInterface'
+        $e = @(Err { Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -InterfaceMetric 5 -PolicyStore ActiveStore -Confirm:$false })
+        $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 50,Set-NetIPInterface'
+        (Get-ItemProperty $script:regPath).InterfaceMetric | Should -Be 55
+        # the framework's view of the same interface list still enumerates
+        { [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | ForEach-Object { $_.GetIPProperties().GetIPv4Properties() | Out-Null } } | Should -Not -Throw
+        $r = Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -AutomaticMetric Enabled -PassThru
+        [string]$r.AutomaticMetric | Should -Be 'Enabled'
+        $null -eq (Get-ItemProperty $script:regPath).InterfaceMetric | Should -BeTrue
+        (Get-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4).InterfaceMetric | Should -Be $auto
+    }
+    It 'Set-NetIPInterface -AutomaticMetric Disabled keeps the metric in force as the fixed one' -Skip:$script:SkipRt {
+        $auto = (Get-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4).InterfaceMetric
+        $r = Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -AutomaticMetric Disabled -PassThru
+        [string]$r.AutomaticMetric | Should -Be 'Disabled'
+        $r.InterfaceMetric | Should -Be $auto
+        (Get-ItemProperty $script:regPath).InterfaceMetric | Should -Be $auto
+        $null = Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -AutomaticMetric Enabled
+        $null -eq (Get-ItemProperty $script:regPath).InterfaceMetric | Should -BeTrue
     }
     It 'Set-NetIPInterface refuses what the stack cannot set' -Skip:$script:SkipRt {
         $e = @(Err { Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -Forwarding Enabled -Confirm:$false })
         $e[0].FullyQualifiedErrorId | Should -Be 'Windows System Error 50,Set-NetIPInterface'
         $e[0].Exception.Message | Should -Match 'Forwarding'
+        $e = @(Err { Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -Forwarding Enabled -InterfaceMetric 40 -Confirm:$false })
+        $e[0].Exception.Message | Should -Not -Match 'InterfaceMetric'
+        (Get-ItemProperty $script:regPath).InterfaceMetric | Should -BeNullOrEmpty
     }
     It 'Set-NetIPInterface -Dhcp Enabled restores the lease: Get-, ipconfig and the registry agree' -Skip:$script:SkipRt {
         $r = Set-NetIPInterface -InterfaceIndex $script:ix -AddressFamily IPv4 -Dhcp Enabled -PassThru
@@ -895,5 +961,45 @@ Describe 'write cmdlets: round trip on the guest (state read back with the Get- 
         $cfg = & $script:ipcfg
         $cfg | Should -Match 'DHCP Enabled\. [. ]+: Yes'
         $cfg | Should -Match ('IPv4 Address\. [. ]+: ' + [regex]::Escape($a.IPAddress))
+    }
+}
+
+
+# The framework's whole NetworkInformation enumeration path (a flag, field or registry value that one call reads can open a code path
+# in another: ipv4p made GetAllNetworkInterfaces throw on 2026-11-03). Read-only, runs on the oracle as well.
+Describe 'System.Net.NetworkInformation enumeration smoke' {
+    It 'GetAllNetworkInterfaces and every property of every interface read without error' {
+        $nics = @([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces())
+        $nics.Count | Should -BeGreaterThan 1
+        $seen = 0
+        foreach ($n in $nics) {
+            { $null = $n.Name, $n.Description, $n.Id, $n.NetworkInterfaceType, $n.OperationalStatus, $n.Speed, $n.SupportsMulticast, $n.IsReceiveOnly, $n.GetPhysicalAddress() } | Should -Not -Throw
+            $ip = $n.GetIPProperties()
+            { $null = $ip.DnsSuffix, $ip.IsDnsEnabled, $ip.IsDynamicDnsEnabled, $ip.DnsAddresses, $ip.GatewayAddresses, $ip.DhcpServerAddresses, $ip.WinsServersAddresses, $ip.MulticastAddresses, $ip.AnycastAddresses } | Should -Not -Throw
+            foreach ($u in $ip.UnicastAddresses) {
+                { $null = $u.Address, $u.PrefixLength, $u.PrefixOrigin, $u.SuffixOrigin, $u.DuplicateAddressDetectionState, $u.AddressPreferredLifetime, $u.AddressValidLifetime, $u.DhcpLeaseLifetime, $u.IsDnsEligible, $u.IsTransient } | Should -Not -Throw
+                if ($u.Address.AddressFamily -eq 'InterNetwork') { { $null = $u.IPv4Mask } | Should -Not -Throw }
+            }
+            if ($n.Supports([System.Net.NetworkInformation.NetworkInterfaceComponent]::IPv4)) {
+                { $v4 = $ip.GetIPv4Properties(); $null = $v4.Index, $v4.IsAutomaticPrivateAddressingActive, $v4.IsAutomaticPrivateAddressingEnabled, $v4.IsDhcpEnabled, $v4.IsForwardingEnabled, $v4.Mtu, $v4.UsesWins } | Should -Not -Throw
+                { $st = $n.GetIPv4Statistics(); $null = $st.BytesReceived, $st.BytesSent, $st.IncomingPacketsDiscarded, $st.OutputQueueLength, $st.UnicastPacketsReceived } | Should -Not -Throw
+            }
+            if ($n.Supports([System.Net.NetworkInformation.NetworkInterfaceComponent]::IPv6)) { { $null = $ip.GetIPv6Properties() } | Should -Not -Throw }
+            $seen++
+        }
+        $seen | Should -Be $nics.Count
+        @($nics | Where-Object NetworkInterfaceType -eq 'Loopback').Count | Should -Be 1
+    }
+    It 'IPGlobalProperties reads: names, statistics, connections and listeners' {
+        $g = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties()
+        { $null = $g.HostName, $g.DomainName, $g.NodeType, $g.IsWinsProxy, $g.DhcpScopeName } | Should -Not -Throw
+        { $null = $g.GetIPv4GlobalStatistics().NumberOfInterfaces } | Should -Not -Throw
+        { $null = $g.GetTcpIPv4Statistics().CurrentConnections } | Should -Not -Throw
+        { $null = $g.GetUdpIPv4Statistics().DatagramsReceived } | Should -Not -Throw
+        { $null = $g.GetIcmpV4Statistics().MessagesSent } | Should -Not -Throw
+        { $null = $g.GetActiveTcpConnections() } | Should -Not -Throw
+        { $null = $g.GetActiveTcpListeners() } | Should -Not -Throw
+        { $null = $g.GetActiveUdpListeners() } | Should -Not -Throw
+        @($g.GetActiveTcpListeners() | Where-Object Port -eq $script:Port).Count | Should -BeGreaterThan 0
     }
 }
