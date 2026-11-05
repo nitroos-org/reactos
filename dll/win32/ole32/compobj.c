@@ -974,3 +974,15 @@ HRESULT WINAPI DllUnregisterServer(void)
 {
     return OLE32_DllUnregisterServer();
 }
+
+/***********************************************************************
+ *		CoGetSystemWow64DirectoryW (OLE32.@)
+ *
+ * Undocumented. Measured on Windows 10 22H2 (x64 and x86 callers): it takes a buffer and its size in
+ * characters and returns what GetSystemWow64DirectoryW returns (19 for "C:\Windows\SysWOW64").
+ */
+UINT WINAPI CoGetSystemWow64DirectoryW(LPWSTR buffer, UINT size)
+{
+    TRACE("%p, %u\n", buffer, size);
+    return GetSystemWow64DirectoryW(buffer, size);
+}
