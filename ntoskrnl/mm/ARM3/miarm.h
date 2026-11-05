@@ -2499,6 +2499,13 @@ MiSessionAddProcess(
     IN PEPROCESS NewProcess
 );
 
+VOID
+NTAPI
+MiSessionInitializeProcessTables(
+    _In_ PEPROCESS NewProcess,
+    _In_ PFN_NUMBER TableBasePfn
+);
+
 ULONG
 NTAPI
 MiMakeProtectionMask(
