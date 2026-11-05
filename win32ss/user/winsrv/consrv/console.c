@@ -763,6 +763,7 @@ ConSrvInitConsole(OUT PHANDLE NewConsoleHandle,
     ConsoleInfoEx = ConCfgGetStateInfoEx(ConsoleInfo, ConsoleInfo->cbSize);
     Console->CtrlKeyShortcutsDisabled = ConsoleInfoEx ? !!ConsoleInfoEx->CtrlKeyShortcutsDisabled : FALSE;
     Console->LineSelection = ConsoleInfoEx ? !!ConsoleInfoEx->LineSelection : TRUE;
+    Console->FilterOnPaste = ConsoleInfoEx ? !!ConsoleInfoEx->FilterOnPaste : TRUE;
 
     /* Popup windows */
     InitializeListHead(&Console->PopupWindows);

@@ -227,11 +227,14 @@ UpdateDialogElements(
                            pConInfoEx->CtrlKeyShortcutsDisabled ? BST_UNCHECKED : BST_CHECKED);
             CheckDlgButton(hDlg, IDC_CHECK_LINE_SELECTION,
                            pConInfoEx->LineSelection ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hDlg, IDC_CHECK_FILTER_PASTE,
+                           pConInfoEx->FilterOnPaste ? BST_CHECKED : BST_UNCHECKED);
         }
         else
         {
             EnableWindow(GetDlgItem(hDlg, IDC_CHECK_CTRL_KEYS), FALSE);
             EnableWindow(GetDlgItem(hDlg, IDC_CHECK_LINE_SELECTION), FALSE);
+            EnableWindow(GetDlgItem(hDlg, IDC_CHECK_FILTER_PASTE), FALSE);
         }
     }
 }
@@ -345,6 +348,16 @@ OptionsProc(HWND hDlg,
                     if (pConInfoEx)
                     {
                         pConInfoEx->LineSelection = (IsDlgButtonChecked(hDlg, IDC_CHECK_LINE_SELECTION) == BST_CHECKED);
+                        PropSheet_Changed(GetParent(hDlg), hDlg);
+                    }
+                    break;
+                }
+                case IDC_CHECK_FILTER_PASTE:
+                {
+                    PCONSOLE_STATE_INFO_EX pConInfoEx = ConCfgGetStateInfoEx(ConInfo, ConInfo->cbSize);
+                    if (pConInfoEx)
+                    {
+                        pConInfoEx->FilterOnPaste = (IsDlgButtonChecked(hDlg, IDC_CHECK_FILTER_PASTE) == BST_CHECKED);
                         PropSheet_Changed(GetParent(hDlg), hDlg);
                     }
                     break;
