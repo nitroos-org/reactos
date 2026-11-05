@@ -146,8 +146,9 @@ BEGIN
     LTEXT "Copyright 1996-", IDC_STATIC, 35, 75, 53, 10
     LTEXT COPYRIGHT_YEAR, IDC_STATIC, 88, 75, 17, 10
     LTEXT " ReactOS Team\0", IDC_STATIC, 105, 75, 53, 10
-    LTEXT "", IDC_ABOUT_OTHERSTUFF, 35, 90, 180, 20, SS_NOPREFIX
-    LTEXT "This ReactOS version is registered to:", IDC_ABOUT_REG_TO, 35, 115, 180, 10
+    LTEXT "NitroOS is based on ReactOS.", IDC_STATIC, 35, 85, 200, 10
+    LTEXT "", IDC_ABOUT_OTHERSTUFF, 35, 96, 180, 18, SS_NOPREFIX
+    LTEXT "This NitroOS version is registered to:", IDC_ABOUT_REG_TO, 35, 115, 180, 10
     LTEXT "", IDC_ABOUT_REG_USERNAME, 45, 125, 180, 10, SS_NOPREFIX
     LTEXT "", IDC_ABOUT_REG_ORGNAME, 45, 135, 180, 10, SS_NOPREFIX
     LTEXT "", IDC_STATIC, 35, 147, 235, 1, SS_ETCHEDHORZ
@@ -157,12 +158,12 @@ BEGIN
     PUSHBUTTON "", IDC_ABOUT_AUTHORS, 5, 178, 70, 14
 END
 
-IDD_ABOUT_AUTHORS DIALOGEX 35, 90, 235, 85
+IDD_ABOUT_AUTHORS DIALOGEX 35, 96, 235, 80
 STYLE DS_SHELLFONT | WS_CHILD
 FONT 8, "MS Shell Dlg"
 BEGIN
     LTEXT "ReactOS was brought to you by:", IDC_STATIC, 0, 0, 180, 10
-    LISTBOX IDC_ABOUT_AUTHORS_LISTBOX, 0, 10, 165, 75
+    LISTBOX IDC_ABOUT_AUTHORS_LISTBOX, 0, 10, 165, 70
 END
 
 IDD_RUN DIALOGEX 0, 0, 227, 95
@@ -519,7 +520,7 @@ END
 
 IDD_LOG_OFF DIALOGEX 0, 0, 188, 60
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUPWINDOW | WS_CAPTION
-CAPTION "Log Off ReactOS"
+CAPTION "Log Off NitroOS"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON IDI_SHELL_LOGOFF, IDC_STATIC, 8, 6, 21, 20
@@ -537,14 +538,14 @@ BEGIN
     PUSHBUTTON "&Switch User", IDC_SWITCH_USER_BUTTON, 55, 46, 22, 20, BS_OWNERDRAW | WS_DISABLED | WS_GROUP
     PUSHBUTTON "&Log Off", IDC_LOG_OFF_BUTTON, 132, 46, 22, 20, BS_OWNERDRAW
     PUSHBUTTON "Cancel", IDCANCEL, 162, 103, 40, 12, WS_GROUP | BS_FLAT
-    LTEXT "Log Off ReactOS", IDC_LOG_OFF_TEXT_STATIC, 4, 7, 130, 19
+    LTEXT "Log Off NitroOS", IDC_LOG_OFF_TEXT_STATIC, 4, 7, 130, 19
     CTEXT "Switch User", IDC_SWITCH_USER_STATIC, 41, 70, 51, 11
     CTEXT "Log Off", IDC_LOG_OFF_STATIC, 118, 70, 51, 11
 END
 
 IDD_DISCONNECT DIALOGEX 0, 0, 188, 60
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUPWINDOW | WS_CAPTION
-CAPTION "Disconnect ReactOS"
+CAPTION "Disconnect NitroOS"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON IDI_SHELL_DISCONN, IDC_STATIC, 8, 6, 21, 20
@@ -612,7 +613,7 @@ END
 
 IDD_SHUTDOWN DIALOGEX 0, 0, 211, 103
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUPWINDOW | WS_CAPTION
-CAPTION "Shut Down ReactOS"
+CAPTION "Shut Down NitroOS"
 FONT 8, "MS Shell Dlg"
 BEGIN
     ICON 8240, -1, 6, 6, 21, 20, SS_REALSIZECONTROL | WS_GROUP
@@ -813,6 +814,7 @@ BEGIN
 
     /* About shell dialog version string */
     IDS_ABOUT_VERSION_STRING "Version %S (%S)"
+    IDS_ABOUT_NITRO_NOTICE BRAND_PRODUCT_NAME " is an unofficial build based on ReactOS. ReactOS is a trademark of the ReactOS project. Do not report issues from this build to the ReactOS project."
 
     /* context menus */
     IDS_VIEW_LARGE "Lar&ge Icons"
@@ -1113,7 +1115,7 @@ BEGIN
     IDS_SYSTEMFOLDER "System Folder"
 
     /* For IDD_LOG_OFF_FANCY */
-    IDS_LOG_OFF_DESC "Closes your programs and ends your ReactOS session."
+    IDS_LOG_OFF_DESC "Closes your programs and ends your NitroOS session."
     IDS_SWITCH_USER_DESC "Lets another user log on while your programs and files remain open.\r\n\r\n(You can also switch users by pressing the Windows logo key + L.)"
     IDS_LOG_OFF_TITLE "Log Off"
     IDS_SWITCH_USER_TITLE "Switch User"

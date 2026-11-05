@@ -196,6 +196,52 @@ MUIDisplayPage(
 }
 
 VOID
+MUIDisplayBrandNotice(VOID)
+{
+    /* Product notice on the first setup screens: the translated string if the language has one, English otherwise */
+    const MUI_STRING * entry;
+    PCSTR Text = BRAND_NOTICE_STR;
+    CHAR Line[80];
+    ULONG Y = 5;
+
+    entry = FindMUIStringEntries();
+    if (entry)
+    {
+        for (; entry->Number != 0; entry++)
+        {
+            if (entry->Number == STRING_BRAND_NOTICE)
+            {
+                Text = entry->String;
+                break;
+            }
+        }
+    }
+
+    while (*Text)
+    {
+        ULONG Len = 0, Cut;
+
+        while (Text[Len] && Text[Len] != '\n' && Len < sizeof(Line) - 4)
+            ++Len;
+        Cut = Len;
+        if (Text[Len] && Text[Len] != '\n')
+        {
+            /* Too long for one line: wrap at the last space */
+            while (Cut > 0 && Text[Cut] != ' ')
+                --Cut;
+            if (Cut == 0)
+                Cut = Len;
+        }
+        RtlCopyMemory(Line, Text, Cut);
+        Line[Cut] = '\0';
+        Text += Cut;
+        if (*Text == ' ' || *Text == '\n')
+            ++Text;
+        CONSOLE_SetTextXY(4, (SHORT)Y++, Line);
+    }
+}
+
+VOID
 MUIDisplayErrorV(
     IN ULONG ErrorNum,
     OUT PINPUT_RECORD Ir,

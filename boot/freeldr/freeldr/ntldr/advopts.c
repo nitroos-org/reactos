@@ -12,6 +12,7 @@
 /* INCLUDES *******************************************************************/
 
 #include <freeldr.h>
+#include <reactos/buildno.h>
 #include "ntldropts.h"
 
 /* GLOBALS ********************************************************************/
@@ -73,7 +74,7 @@ static ADVBOOT_OPTIONS AdvBootOptions[] = // OptionsMenuList
 #ifdef HAS_OPTION_MENU_EDIT_CMDLINE
     {ActionEditBootCmdLine,     "Edit Boot Command Line (F10)"},
 #endif
-    {ActionStartNormally,       "Start ReactOS normally"},
+    {ActionStartNormally,       "Start " BRAND_PRODUCT_NAME " normally"},
     {ActionReboot,              "Reboot"},
     {ActionBackToPrevMenu,      "Return to OS Choices menu"},
 };
