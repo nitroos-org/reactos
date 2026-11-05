@@ -166,19 +166,11 @@ PerfIsListed(PCWSTR List, ULONG Index)
 static ULONG
 PerfDefaultCounter(const struct perf_object_def *Object)
 {
-    ULONG NameIndex, i, Slot = 0;
-
-    switch (Object->index)
-    {
-        case PERF_NAME_INDEX_MEMORY:   NameIndex = 40; break;   /* Pages/sec */
-        case PERF_NAME_INDEX_SYSTEM:   NameIndex = 406; break;  /* File Data Operations/sec */
-        case PERF_NAME_INDEX_PHYSDISK: NameIndex = 200; break;  /* % Disk Time */
-        default: return 0;
-    }
+    ULONG i, Slot = 0;
 
     for (i = 0; i < Object->count; i++)
     {
-        if (Object->counters[i].index == NameIndex)
+        if (!_wcsicmp(Object->counters[i].name, Object->default_counter))
             return Slot;
         Slot += PerfNeedsBase(Object->counters[i].type) ? 2 : 1;
     }

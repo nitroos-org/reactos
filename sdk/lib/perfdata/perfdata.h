@@ -26,7 +26,10 @@ enum inst_kind
     INST_DISK,   /* "<number> <letters>", "_Total" */
     INST_NET,    /* adapter description */
     INST_PROC,   /* image name, "name#n" for duplicates, "_Total" */
-    INST_PAGE    /* paging file name as the kernel has it (\??\C:\pagefile.sys), "_Total" */
+    INST_PAGE,   /* paging file name as the kernel has it (\??\C:\pagefile.sys), "_Total" */
+    INST_LDISK,  /* "<letter>:" or "HarddiskVolume<n>" for a volume without a letter, "_Total" */
+    INST_THREAD, /* "<process instance>/<thread number>" */
+    INST_CPUINFO /* "<group>,<processor>", "<group>,_Total", "_Total" */
 };
 
 struct perf_counter_def
@@ -37,6 +40,7 @@ struct perf_counter_def
     LONG         defscale;
     DWORD        detail;   /* PERF_DETAIL_* */
     DWORD        id;       /* provider-private id */
+    const WCHAR *help;     /* explain text of the counter in this object */
 };
 
 struct perf_object_def
@@ -46,6 +50,9 @@ struct perf_object_def
     enum inst_kind                 kind;
     const struct perf_counter_def *counters;
     DWORD                          count;
+    const WCHAR                   *default_counter;   /* name of the default counter */
+    DWORD                          cversion;          /* CVersion that PdhGetCounterInfo reports, 0 for the usual one */
+    const WCHAR                   *help;              /* explain text of the object */
 };
 
 #define PERF_TIME_BASE 10000000   /* all raw time bases are 100 ns units */
