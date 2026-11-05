@@ -10,6 +10,7 @@
  */
 
 #include <windef.h>
+#include <reactos/buildno.h>
 #include <winbase.h>
 #include <winuser.h>
 #include <shellapi.h>
@@ -25,8 +26,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
                          (lpCmd && lpCmd[0]) ? lpCmd : NULL, NULL, nShow);
     if ((INT_PTR)hRet <= 32)
     {
-        MessageBoxW(NULL, L"Could not start the Optional Features manager (optfeatures.exe).",
-                    L"Optional Features", MB_OK | MB_ICONERROR);
+        MessageBoxW(NULL, L"Could not start the " BRAND_PRODUCT_NAME_W L" Features manager (optfeatures.exe).",
+                    BRAND_PRODUCT_NAME_W L" Features", MB_OK | MB_ICONERROR);
         return 1;
     }
     return 0;

@@ -191,6 +191,7 @@
 #define IDS_INSTALLADDONSCAPTION        4010
 #define IDS_INSTALLADDONSMESSAGE        4011
 #define IDS_INSTALLADDONSFAILEDMESSAGE  4012
+#define IDS_NITRO_NOTICE                4013
 
 /* Timer ID for the animated dialog bar. */
 #define IDT_BAR 1
