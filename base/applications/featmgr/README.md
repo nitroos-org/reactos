@@ -87,8 +87,9 @@ with `-DNITRO_SHIP_RAPPS=ON`). Everything it did for us is done here:
   importer keeps RAPPS rules: `[Section.<arch>]` overrides `[Section]`, the generic URL is ignored on non-x86 unless `/anyarch`,
   `NTVersion` is honoured. Dropped: entries without a checksum, and `firefox`, `firefox-esr`, `firefox28`, `firefox36` (the native
   `firefox` entry, current release, replaces the old overlay).
-- `featmgr /install <name>` resolves a bare RAPPS package name to `rapps-<name>` and fetches the catalog when there is none (setup's
-  Gecko / WineVDM add-ons, the Japanese language package, scripts).
+- `featmgr /install <name>` resolves a bare RAPPS package name to `rapps-<name>` and fetches the catalog when there is none (the Japanese
+  language package, scripts). Setup installs and asks for neither Gecko nor WineVDM; both are catalog entries (`wine-gecko`; `winevdm`, i386 only: a
+  `Provider=component` manifest plus its `components.ini` section), so they need no RAPPS catalog download.
 - **Entry points**: Start menu "Optional Features" replaces "Applications Manager"; appwiz.cpl "Programs and Features" is its own
   list of installed programs (uninstall / change) with a "Turn features on or off" button, and has no software catalog (as in
   Windows 10); browserchooser installs Firefox with `featmgr /install firefox`; syssetup and the language page call

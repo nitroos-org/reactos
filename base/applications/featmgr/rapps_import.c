@@ -274,10 +274,11 @@ static BOOL NtCompatible(LPCWSTR file, DWORD flags)
 }
 
 /* nitro replaces these upstream packages: Firefox is the native "firefox" entry (current release, SHA-256 checked); the two
- * 2016-era Firefox builds and the unpinned "latest ESR" redirect of the old overlay are not offered */
+ * 2016-era Firefox builds and the unpinned "latest ESR" redirect of the old overlay are not offered; WineVDM is the catalog
+ * entry "winevdm" (same installer, SHA-256 checked, no catalog download needed), so the RAPPS copy would list it twice */
 static BOOL HiddenPkg(LPCWSTR pkg)
 {
-    static const LPCWSTR hidden[] = { L"firefox", L"firefox-esr", L"firefox28", L"firefox36" };
+    static const LPCWSTR hidden[] = { L"firefox", L"firefox-esr", L"firefox28", L"firefox36", L"winevdm" };
     int i;
     for (i = 0; i < (int)ARRAYSIZE(hidden); i++)
         if (!_wcsicmp(pkg, hidden[i])) return TRUE;
@@ -356,7 +357,7 @@ int FmImportRapps(LPCWSTR srcDir, DWORD flags, int *skipped, FILE *log)
         StringCchCopyW(pkg, MAX_PATH, fd.cFileName);
         PathRemoveExtensionW(pkg);
         if (!ValidPkgName(pkg)) { skip++; LOGF(log, L"skip: '%s' (unusable package name)\n", fd.cFileName); continue; }
-        if (HiddenPkg(pkg)) { skip++; LOGF(log, L"skip: %s (replaced by the native firefox entry)\n", pkg); continue; }
+        if (HiddenPkg(pkg)) { skip++; LOGF(log, L"skip: %s (replaced by a native entry)\n", pkg); continue; }
         StringCchPrintfW(file, MAX_PATH, L"%s\\%s", src, fd.cFileName);
         if (!NtCompatible(file, flags)) { skip++; LOGF(log, L"skip: %s (needs another Windows version)\n", pkg); continue; }
 
