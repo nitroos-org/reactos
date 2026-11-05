@@ -31,6 +31,8 @@
  *                              (the service increments it on every push; it restarts from a boot-time value).
  *  IOCTL_NITROFW_GET_STATUS    out: NITROFW_STATUS
  *  IOCTL_NITROFW_CLEAR_POLICY  no data. Removes all rules and disables filtering (service stop / uninstall).
+ *  IOCTL_NITROFW_GET_DROPLOG   in : optional ULONGLONG, first sequence number wanted (0 or absent = oldest kept)
+ *                              out: NITROFW_DROPLOG followed by Count NITROFW_DROP_RECORD (see below)
  *
  *  A new open handle starts with whatever policy the previous service instance installed: the policy
  *  belongs to the device, not to the handle. A service crash therefore leaves the last policy in force
@@ -113,6 +115,7 @@
 #define IOCTL_NITROFW_SET_POLICY    CTL_CODE(FILE_DEVICE_NETWORK, 0x841, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 #define IOCTL_NITROFW_GET_STATUS    CTL_CODE(FILE_DEVICE_NETWORK, 0x842, METHOD_BUFFERED, FILE_READ_ACCESS)
 #define IOCTL_NITROFW_CLEAR_POLICY  CTL_CODE(FILE_DEVICE_NETWORK, 0x843, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+#define IOCTL_NITROFW_GET_DROPLOG   CTL_CODE(FILE_DEVICE_NETWORK, 0x844, METHOD_BUFFERED, FILE_READ_ACCESS)
 
 /* NITROFW_VERSION_INFO.Features */
 #define NITROFW_FEATURE_INBOUND        0x00000001
@@ -139,6 +142,7 @@ typedef struct _NITROFW_VERSION_INFO
 #define NITROFW_PROFILE_ENABLED            0x00000001   /* EnableFirewall */
 #define NITROFW_PROFILE_BLOCK_ALL_INBOUND  0x00000002   /* DoNotAllowExceptions */
 #define NITROFW_PROFILE_NO_UNICAST_RESPONSES 0x00000004 /* DisableUnicastResponsesToMulticastBroadcast */
+#define NITROFW_PROFILE_LOG_DROPPED        0x00000008   /* Logging\LogDroppedPackets: keep the drop log */
 
 #define NITROFW_ACTION_ALLOW  0
 #define NITROFW_ACTION_BLOCK  1
@@ -263,3 +267,45 @@ typedef struct _NITROFW_STATUS
                                    output buffer is at least sizeof(NITROFW_STATUS), else the V1 size. */
 } NITROFW_STATUS, *PNITROFW_STATUS;
 #define NITROFW_STATUS_V1_SIZE  FIELD_OFFSET(NITROFW_STATUS, ImagesCaptured)
+
+/*
+ * Drop log. While an enabled active profile has NITROFW_PROFILE_LOG_DROPPED, every dropped inbound packet
+ * is recorded in a ring of NITROFW_DROPLOG_RECORDS entries (the oldest are overwritten), at most
+ * NITROFW_DROPLOG_RATE records per second (the drops beyond that are counted in Suppressed, and still
+ * counted in DroppedInbound). Nothing is recorded, and nothing costs anything, while no profile asks for it.
+ * IOCTL_NITROFW_GET_DROPLOG returns the records with Sequence >= the requested one that fit in the output
+ * buffer; the caller continues at NextSequence. The ring survives a policy change.
+ */
+#define NITROFW_DROPLOG_RECORDS  128
+#define NITROFW_DROPLOG_RATE     20
+
+#define NITROFW_DROP_DEFAULT     1   /* no rule admitted it, the profile's default is Block */
+#define NITROFW_DROP_BLOCK_RULE  2   /* a Block rule matched */
+#define NITROFW_DROP_BLOCK_ALL   3   /* the profile blocks all inbound (DoNotAllowExceptions) */
+#define NITROFW_DROP_ICMP_REPLY  4   /* an ICMP reply with no outstanding request, and no rule admitted it */
+
+typedef struct _NITROFW_DROP_RECORD
+{
+    ULONGLONG Sequence;         /* 1, 2, 3 ... never reused */
+    LONGLONG Time;              /* KeQuerySystemTime (100 ns since 1601, UTC) */
+    ULONG SrcAddr;              /* IPv4, host byte order */
+    ULONG DstAddr;
+    USHORT SrcPort;             /* TCP/UDP, host order; 0 otherwise */
+    USHORT DstPort;
+    UCHAR Protocol;
+    UCHAR IcmpType;             /* ICMP only */
+    UCHAR IcmpCode;
+    UCHAR Reason;               /* NITROFW_DROP_* */
+    ULONG Size;                 /* IP datagram size in bytes */
+    ULONG Reserved;
+} NITROFW_DROP_RECORD, *PNITROFW_DROP_RECORD;   /* 40 bytes */
+
+#define NITROFW_DROPLOG_ON  0x00000001   /* NITROFW_DROPLOG.Flags: logging is on in the installed policy */
+
+typedef struct _NITROFW_DROPLOG
+{
+    ULONGLONG NextSequence;     /* Sequence the next recorded drop gets */
+    ULONGLONG Suppressed;       /* drops not recorded because of the rate limit, since load */
+    ULONG Count;                /* NITROFW_DROP_RECORD entries that follow this header */
+    ULONG Flags;                /* NITROFW_DROPLOG_* */
+} NITROFW_DROPLOG, *PNITROFW_DROPLOG;           /* 24 bytes; the records follow */
