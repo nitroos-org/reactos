@@ -70,6 +70,14 @@ struct sample
     PDH_STATUS  status;     /* PDH_CSTATUS_* of the sample */
 };
 
+struct item
+{
+    WCHAR          *name;       /* instance name as the counter set lists it ("name#1") */
+    struct sample   cur;
+    struct sample   prev;
+    BOOL            has_prev;   /* prev is valid: this instance was present in the previous collection */
+};
+
 struct counter
 {
     DWORD           magic;                          /* signature */
@@ -90,6 +98,10 @@ struct counter
     struct sample   cur;                            /* newest sample */
     struct sample   prev;                           /* the one before, valid once collects >= 2 */
     DWORD           collects;                       /* number of collections since the counter was added */
+    BOOL            multi;                          /* the instance is a wildcard pattern: one item per matching instance */
+    WCHAR          *pattern;                        /* the pattern, as written between the parentheses */
+    struct item    *items;                          /* items of a wildcard counter */
+    DWORD           nitems;
 };
 
 #define PDH_MAGIC_COUNTER   0x50444831 /* 'PDH1' */
@@ -106,8 +118,20 @@ static struct counter *create_counter( void )
     return NULL;
 }
 
+static void free_items( struct counter *counter )
+{
+    DWORD i;
+
+    for (i = 0; i < counter->nitems; i++) free( counter->items[i].name );
+    free( counter->items );
+    counter->items = NULL;
+    counter->nitems = 0;
+}
+
 static void destroy_counter( struct counter *counter )
 {
+    free_items( counter );
+    free( counter->pattern );
     /* Ensure compiler doesn't optimize out the assignment with 0. */
     SecureZeroMemory( &counter->magic, sizeof( counter->magic ) );
     free( counter->path );
@@ -290,7 +314,13 @@ static BOOL instance_exists( const struct perf_object_def *obj, const struct pat
     BOOL found = FALSE;
 
     if (perf_get_instances( obj, &names, &count )) return FALSE;
-    lstrcpynW( key, pe->instance, ARRAY_SIZE(key) - 16 );
+    key[0] = 0;
+    if (pe->parent)   /* "process/thread": the instance name of a thread has its process in front */
+    {
+        lstrcpynW( key, pe->parent, ARRAY_SIZE(key) - 32 );
+        lstrcatW( key, L"/" );
+    }
+    lstrcpynW( key + lstrlenW( key ), pe->instance, ARRAY_SIZE(key) - 16 - lstrlenW( key ) );
     if (pe->index && pe->index != ~0u)
     {
         WCHAR num[16];
@@ -342,19 +372,87 @@ static PDH_STATUS check_path( const WCHAR *path, BOOL add, struct path_elements 
     return ERROR_SUCCESS;
 }
 
-static void sample_counter( struct counter *counter, struct sample *sample )
+/* a paging file name is \??\C:\pagefile.sys: its question marks are part of the name */
+static BOOL is_pattern( const struct perf_object_def *obj, const WCHAR *s )
+{
+    return s && (wcschr( s, '*' ) || (obj->kind != INST_PAGE && wcschr( s, '?' )));
+}
+
+static void stamp_now( FILETIME *stamp )
 {
     SYSTEMTIME time;
 
-    if (!counter->object)  /* a counter of another machine */
+    GetLocalTime( &time );
+    SystemTimeToFileTime( &time, stamp );
+}
+
+/* Windows hands the items out ordered by name, compared by code unit: "Idle" before "csrss", "0" before "_Total" */
+static int __cdecl cmp_item( const void *a, const void *b )
+{
+    return wcscmp( ((const struct item *)a)->name, ((const struct item *)b)->name );
+}
+
+/* One item per instance that matches the pattern, taken from the instances present now. An instance that was
+ * present at the previous collection keeps that sample, so that rates can be calculated for it. */
+static void sample_multi( struct counter *counter )
+{
+    struct item *old = counter->items, *items = NULL;
+    DWORD nold = counter->nitems, n = 0, count = 0, i, k;
+    WCHAR **names = NULL;
+    FILETIME stamp;
+
+    counter->items = NULL;
+    counter->nitems = 0;
+    stamp_now( &stamp );
+    if (!perf_get_instances( counter->object, &names, &count ) && count && (items = calloc( count, sizeof(*items) )))
+    {
+        for (i = 0; i < count; i++)
+        {
+            struct item *it = &items[n];
+
+            if (!wild_match( counter->pattern, names[i] )) continue;
+            if (!(it->name = wcsdup( names[i] ))) continue;
+            it->cur.status = perf_fetch( counter->object, counter->def, names[i], 0, &it->cur.first, &it->cur.second );
+            it->cur.stamp = stamp;
+            for (k = 0; k < nold; k++)
+            {
+                if (!wcsicmp( old[k].name, it->name ))
+                {
+                    if (counter->collects >= 2)
+                    {
+                        it->prev = old[k].cur;
+                        it->has_prev = TRUE;
+                    }
+                    break;
+                }
+            }
+            n++;
+        }
+    }
+    if (names) perf_free_instances( names, count );
+    if (n > 1) qsort( items, n, sizeof(*items), cmp_item );   /* by name, as Windows does */
+    for (i = 0; i < nold; i++) free( old[i].name );
+    free( old );
+    counter->items = items;
+    counter->nitems = n;
+}
+
+static void sample_counter( struct counter *counter, struct sample *sample )
+{
+    if (counter->multi)
+    {
+        sample_multi( counter );
+        sample->first = sample->second = 0;
+        sample->status = ERROR_SUCCESS;
+    }
+    else if (!counter->object)  /* a counter of another machine */
     {
         sample->first = sample->second = 0;
         sample->status = PDH_CSTATUS_NO_MACHINE;
     }
     else sample->status = perf_fetch( counter->object, counter->def, counter->instance, counter->instance_index,
                                       &sample->first, &sample->second );
-    GetLocalTime( &time );
-    SystemTimeToFileTime( &time, &sample->stamp );
+    stamp_now( &sample->stamp );
 }
 
 /***********************************************************************
@@ -427,8 +525,23 @@ static PDH_STATUS add_counter( PDH_HQUERY hquery, LPCWSTR path, DWORD_PTR userda
         counter->defaultscale   = def->defscale;
         counter->object         = obj;
         counter->def            = def;
-        counter->instance       = pe.instance ? wcsdup( pe.instance ) : NULL;
+        if (pe.instance && pe.parent)
+        {
+            counter->instance = malloc( (lstrlenW( pe.parent ) + lstrlenW( pe.instance ) + 2) * sizeof(WCHAR) );
+            if (counter->instance)
+            {
+                lstrcpyW( counter->instance, pe.parent );
+                lstrcatW( counter->instance, L"/" );
+                lstrcatW( counter->instance, pe.instance );
+            }
+        }
+        else counter->instance  = pe.instance ? wcsdup( pe.instance ) : NULL;
         counter->instance_index = pe.index == ~0u ? 0 : pe.index;
+        if (obj->kind != INST_NONE && is_pattern( obj, pe.inst_raw ))
+        {
+            counter->multi   = TRUE;
+            counter->pattern = wcsdup( pe.inst_raw );
+        }
     }
     free_path( &pe );
 
@@ -489,6 +602,7 @@ PDH_STATUS WINAPI PdhAddEnglishCounterW( PDH_HQUERY query, LPCWSTR path,
 /* caller must hold counter lock */
 
 #define PDH_PRECISION_100NS_TIMER 0x20570500
+#define PDH_QUEUELEN_100NS        0x00550500   /* PERF_COUNTER_100NS_QUEUELEN_TYPE */
 
 static PDH_STATUS calc_value( DWORD type, const struct sample *cur, const struct sample *prev, DWORD format, double *out )
 {
@@ -518,6 +632,9 @@ static PDH_STATUS calc_value( DWORD type, const struct sample *cur, const struct
     case PERF_100NSEC_TIMER:
     case PERF_100NSEC_TIMER_INV:
     case PDH_PRECISION_100NS_TIMER:
+    case PDH_QUEUELEN_100NS:
+    case PERF_AVERAGE_TIMER:
+    case PERF_AVERAGE_BULK:
         timer = type != PERF_COUNTER_COUNTER && type != PERF_COUNTER_BULK_COUNT;
         if (!prev) return PDH_INVALID_DATA;
         dt = (double)(cur->second - prev->second);
@@ -525,6 +642,9 @@ static PDH_STATUS calc_value( DWORD type, const struct sample *cur, const struct
         if (dt <= 0.0) return PDH_CALC_NEGATIVE_DENOMINATOR;
         if (d1 < 0.0) return PDH_CALC_NEGATIVE_VALUE;
         if (!timer) *out = d1 * PERF_TIME_BASE / dt;
+        else if (type == PDH_QUEUELEN_100NS) *out = d1 / dt;                    /* time integral over time */
+        else if (type == PERF_AVERAGE_TIMER) *out = d1 / PERF_TIME_BASE / dt;           /* seconds per operation */
+        else if (type == PERF_AVERAGE_BULK) *out = d1 / dt;                             /* amount per operation */
         else if (type == PERF_100NSEC_TIMER_INV) *out = 100.0 * (1.0 - d1 / dt);
         else *out = 100.0 * d1 / dt;
         if (*out < 0.0) *out = 0.0;
@@ -693,6 +813,7 @@ PDH_STATUS WINAPI PdhFormatFromRawValue( DWORD type, DWORD format, LONGLONG *tim
     case PERF_PRECISION_OBJECT_TIMER:
     case PERF_AVERAGE_TIMER:
     case PERF_AVERAGE_BULK:
+    case PDH_QUEUELEN_100NS:
         if (!raw2)
         {
             value->CStatus = PDH_CSTATUS_INVALID_DATA;
@@ -719,6 +840,7 @@ PDH_STATUS WINAPI PdhFormatFromRawValue( DWORD type, DWORD format, LONGLONG *tim
                 if (d < 0.0) ret = PDH_CALC_NEGATIVE_DENOMINATOR;
                 break;
             case PERF_AVERAGE_BULK:
+            case PDH_QUEUELEN_100NS:
                 d = d1 / dt;
                 break;
             default:
@@ -973,14 +1095,78 @@ PDH_STATUS WINAPI PdhCollectQueryDataWithTime( PDH_HQUERY handle, LONGLONG *time
     return ERROR_SUCCESS;
 }
 
-/***********************************************************************
- *              PdhGetCounterInfoA   (PDH.@)
- */
-PDH_STATUS WINAPI PdhGetCounterInfoA( PDH_HCOUNTER handle, BOOLEAN text, LPDWORD size, PPDH_COUNTER_INFO_A info )
+/* The elements of the path of a counter as PdhGetCounterInfo reports them. */
+struct info_strings
+{
+    WCHAR *full, *machine, *object, *instance, *parent, *counter;
+    const WCHAR *explain;
+    DWORD index;
+};
+
+static void free_info_strings( struct info_strings *is )
+{
+    free( is->full );
+    free( is->machine );
+    free( is->object );
+    free( is->instance );
+    free( is->parent );
+    free( is->counter );
+    memset( is, 0, sizeof(*is) );
+}
+
+/* The names the way the counter set spells them, not as the path was typed. */
+static BOOL make_info_strings( const struct counter *counter, BOOL text, struct info_strings *is )
+{
+    struct path_elements pe;
+    WCHAR host[MAX_COMPUTERNAME_LENGTH + 3];
+    DWORD len = MAX_COMPUTERNAME_LENGTH + 1;
+    BOOL has_instance;
+
+    memset( is, 0, sizeof(*is) );
+    if (parse_path( counter->path, &pe )) return FALSE;
+
+    is->full = wcsdup( counter->path );
+    if (pe.machine) is->machine = wcsdup( pe.machine );
+    else
+    {
+        host[0] = host[1] = '\\';
+        if (!GetComputerNameW( host + 2, &len )) host[2] = 0;
+        is->machine = wcsdup( host );
+    }
+    is->object = counter->object ? wcsdup( counter->object->name ) : wcsdup( pe.object );
+    if (pe.inst_raw)
+    {
+        is->instance = wcsdup( pe.instance );
+        if (pe.parent) is->parent = wcsdup( pe.parent );
+        is->index = pe.index == ~0u ? 0 : pe.index;
+    }
+    is->counter = counter->def ? wcsdup( counter->def->name ) : wcsdup( pe.counter );
+    if (text && counter->def) is->explain = counter->def->help;
+    has_instance = pe.inst_raw != NULL;
+    free_path( &pe );
+    if (!is->full || !is->machine || !is->object || !is->counter || (has_instance && !is->instance))
+    {
+        free_info_strings( is );
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static DWORD info_string_bytes( const WCHAR *str, BOOL ansi )
+{
+    DWORD n = ansi ? WideCharToMultiByte( CP_ACP, 0, str, -1, NULL, 0, NULL, NULL ) : (lstrlenW( str ) + 1) * sizeof(WCHAR);
+    return (n + 3) & ~3;   /* every string starts on a DWORD */
+}
+
+/* Fills a PDH_COUNTER_INFO_A or _W: the record, then the strings from its DataBuffer on. */
+static PDH_STATUS counter_info( PDH_HCOUNTER handle, BOOLEAN text, LPDWORD size, void *buffer, BOOL ansi )
 {
     struct counter *counter = handle;
-
-    TRACE("%p %d %p %p\n", handle, text, size, info);
+    struct info_strings is;
+    const WCHAR *list[7];
+    DWORD need, offs[7], i;
+    const DWORD base = ansi ? FIELD_OFFSET(PDH_COUNTER_INFO_A, DataBuffer) : FIELD_OFFSET(PDH_COUNTER_INFO_W, DataBuffer);
+    PDH_STATUS ret = ERROR_SUCCESS;
 
     EnterCriticalSection( &pdh_handle_cs );
     if (!counter || counter->magic != PDH_MAGIC_COUNTER)
@@ -993,26 +1179,97 @@ PDH_STATUS WINAPI PdhGetCounterInfoA( PDH_HCOUNTER handle, BOOLEAN text, LPDWORD
         LeaveCriticalSection( &pdh_handle_cs );
         return PDH_INVALID_ARGUMENT;
     }
-    if (*size < sizeof(PDH_COUNTER_INFO_A))
+    if (!make_info_strings( counter, text, &is ))
     {
-        *size = sizeof(PDH_COUNTER_INFO_A);
         LeaveCriticalSection( &pdh_handle_cs );
-        return PDH_MORE_DATA;
+        return PDH_MEMORY_ALLOCATION_FAILURE;
     }
 
-    memset( info, 0, sizeof(PDH_COUNTER_INFO_A) );
+    list[0] = is.full; list[1] = is.machine; list[2] = is.object; list[3] = is.instance;
+    list[4] = is.parent; list[5] = is.counter; list[6] = is.explain;
+    need = base;
+    for (i = 0; i < 7; i++)
+    {
+        offs[i] = need;
+        if (list[i]) need += info_string_bytes( list[i], ansi );
+    }
+    need += 4;
 
-    info->dwType          = counter->type;
-    info->CStatus         = counter->status;
-    info->lScale          = counter->scale;
-    info->lDefaultScale   = counter->defaultscale;
-    info->dwUserData      = counter->user;
-    info->dwQueryUserData = counter->queryuser;
+    if (!buffer || *size < need)
+    {
+        *size = need;
+        ret = PDH_MORE_DATA;
+    }
+    else
+    {
+        char *buf = buffer;
+        char *str[7];
+        DWORD type = counter->type, cversion = counter->object && counter->object->cversion ? counter->object->cversion : 0x10001;
 
-    *size = sizeof(PDH_COUNTER_INFO_A);
+        memset( buf, 0, need );
+        for (i = 0; i < 7; i++)
+        {
+            str[i] = list[i] ? buf + offs[i] : NULL;
+            if (!list[i]) continue;
+            if (ansi) WideCharToMultiByte( CP_ACP, 0, list[i], -1, str[i], need - offs[i], NULL, NULL );
+            else lstrcpyW( (WCHAR *)str[i], list[i] );
+        }
+        if (ansi)
+        {
+            PDH_COUNTER_INFO_A *info = buffer;
 
+            info->dwLength = need;
+            info->dwType = type;
+            info->CVersion = cversion;
+            info->CStatus = counter->status;
+            info->lScale = counter->scale;
+            info->lDefaultScale = counter->defaultscale;
+            info->dwUserData = counter->user;
+            info->dwQueryUserData = counter->queryuser;
+            info->szFullPath = str[0];
+            info->szMachineName = str[1];
+            info->szObjectName = str[2];
+            info->szInstanceName = str[3];
+            info->szParentInstance = str[4];
+            info->dwInstanceIndex = is.index;
+            info->szCounterName = str[5];
+            info->szExplainText = str[6];
+        }
+        else
+        {
+            PDH_COUNTER_INFO_W *info = buffer;
+
+            info->dwLength = need;
+            info->dwType = type;
+            info->CVersion = cversion;
+            info->CStatus = counter->status;
+            info->lScale = counter->scale;
+            info->lDefaultScale = counter->defaultscale;
+            info->dwUserData = counter->user;
+            info->dwQueryUserData = counter->queryuser;
+            info->szFullPath = (WCHAR *)str[0];
+            info->szMachineName = (WCHAR *)str[1];
+            info->szObjectName = (WCHAR *)str[2];
+            info->szInstanceName = (WCHAR *)str[3];
+            info->szParentInstance = (WCHAR *)str[4];
+            info->dwInstanceIndex = is.index;
+            info->szCounterName = (WCHAR *)str[5];
+            info->szExplainText = (WCHAR *)str[6];
+        }
+        *size = need;
+    }
+    free_info_strings( &is );
     LeaveCriticalSection( &pdh_handle_cs );
-    return ERROR_SUCCESS;
+    return ret;
+}
+
+/***********************************************************************
+ *              PdhGetCounterInfoA   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhGetCounterInfoA( PDH_HCOUNTER handle, BOOLEAN text, LPDWORD size, PPDH_COUNTER_INFO_A info )
+{
+    TRACE("%p %d %p %p\n", handle, text, size, info);
+    return counter_info( handle, text, size, info, TRUE );
 }
 
 /***********************************************************************
@@ -1020,41 +1277,8 @@ PDH_STATUS WINAPI PdhGetCounterInfoA( PDH_HCOUNTER handle, BOOLEAN text, LPDWORD
  */
 PDH_STATUS WINAPI PdhGetCounterInfoW( PDH_HCOUNTER handle, BOOLEAN text, LPDWORD size, PPDH_COUNTER_INFO_W info )
 {
-    struct counter *counter = handle;
-
     TRACE("%p %d %p %p\n", handle, text, size, info);
-
-    EnterCriticalSection( &pdh_handle_cs );
-    if (!counter || counter->magic != PDH_MAGIC_COUNTER)
-    {
-        LeaveCriticalSection( &pdh_handle_cs );
-        return PDH_INVALID_HANDLE;
-    }
-    if (!size)
-    {
-        LeaveCriticalSection( &pdh_handle_cs );
-        return PDH_INVALID_ARGUMENT;
-    }
-    if (*size < sizeof(PDH_COUNTER_INFO_W))
-    {
-        *size = sizeof(PDH_COUNTER_INFO_W);
-        LeaveCriticalSection( &pdh_handle_cs );
-        return PDH_MORE_DATA;
-    }
-
-    memset( info, 0, sizeof(PDH_COUNTER_INFO_W) );
-
-    info->dwType          = counter->type;
-    info->CStatus         = counter->status;
-    info->lScale          = counter->scale;
-    info->lDefaultScale   = counter->defaultscale;
-    info->dwUserData      = counter->user;
-    info->dwQueryUserData = counter->queryuser;
-
-    *size = sizeof(PDH_COUNTER_INFO_W);
-
-    LeaveCriticalSection( &pdh_handle_cs );
-    return ERROR_SUCCESS;
+    return counter_info( handle, text, size, info, FALSE );
 }
 
 /***********************************************************************
@@ -1114,7 +1338,10 @@ PDH_STATUS WINAPI PdhGetFormattedCounterValue( PDH_HCOUNTER handle, DWORD format
         return PDH_INVALID_HANDLE;
     }
     /* rates and timers need two collections; the sample from PdhAddCounterW does not count */
-    ret = format_value( counter, format, &counter->cur, counter->collects >= 2 ? &counter->prev : NULL, value );
+    if (counter->multi && counter->nitems)   /* a wildcard counter answers with its first instance */
+        ret = format_value( counter, format, &counter->items[0].cur, counter->items[0].has_prev ? &counter->items[0].prev : NULL, value );
+    else
+        ret = format_value( counter, format, &counter->cur, counter->collects >= 2 ? &counter->prev : NULL, value );
     if (!ret && type) *type = counter->type;
 
     LeaveCriticalSection( &pdh_handle_cs );
@@ -1140,11 +1367,15 @@ PDH_STATUS WINAPI PdhGetRawCounterValue( PDH_HCOUNTER handle, LPDWORD type,
         return PDH_INVALID_HANDLE;
     }
 
-    value->CStatus                  = counter->cur.status;
-    value->TimeStamp.dwLowDateTime  = counter->cur.stamp.dwLowDateTime;
-    value->TimeStamp.dwHighDateTime = counter->cur.stamp.dwHighDateTime;
-    value->FirstValue               = counter->cur.first;
-    value->SecondValue              = counter->cur.second;
+    {
+        const struct sample *cur = counter->multi && counter->nitems ? &counter->items[0].cur : &counter->cur;
+
+        value->CStatus                  = cur->status;
+        value->TimeStamp.dwLowDateTime  = cur->stamp.dwLowDateTime;
+        value->TimeStamp.dwHighDateTime = cur->stamp.dwHighDateTime;
+        value->FirstValue               = cur->first;
+        value->SecondValue              = cur->second;
+    }
     value->MultiCount               = 1;
 
     if (type) *type = counter->type;
@@ -1612,8 +1843,14 @@ PDH_STATUS WINAPI PdhGetLogFileTypeW(const WCHAR *log, DWORD *type)
  */
 PDH_STATUS WINAPI PdhConnectMachineA(const char *name)
 {
-    FIXME("%s: stub\n", debugstr_a(name));
-    return PDH_NOT_IMPLEMENTED;
+    PDH_STATUS ret;
+    WCHAR *nameW = NULL;
+
+    TRACE("%s\n", debugstr_a(name));
+    if (name && !(nameW = pdh_strdup_aw( name ))) return PDH_MEMORY_ALLOCATION_FAILURE;
+    ret = PdhConnectMachineW( nameW );
+    free( nameW );
+    return ret;
 }
 
 /* ---- counter set enumeration and wildcard expansion ---- */
@@ -2494,4 +2731,604 @@ PDH_STATUS WINAPI PdhOpenQueryH( PDH_HLOG source, DWORD_PTR userdata, PDH_HQUERY
     if (!query) return PDH_INVALID_ARGUMENT;
     if (source) return PDH_INVALID_HANDLE;
     return PdhOpenQueryW( NULL, userdata, query );
+}
+
+/* ---- counter arrays, defaults, translation ---- */
+
+/* The item list of a counter for the array functions: a wildcard counter has its items, any other counter one item
+ * named after its instance. Returns the number of items. The caller holds pdh_handle_cs. */
+static DWORD counter_items( struct counter *counter, struct item *single, const WCHAR **single_name )
+{
+    if (counter->multi) return counter->nitems;
+    memset( single, 0, sizeof(*single) );
+    single->cur = counter->cur;
+    if (counter->collects >= 2)
+    {
+        single->prev = counter->prev;
+        single->has_prev = TRUE;
+    }
+    *single_name = counter->instance ? counter->instance : L"";
+    single->name = (WCHAR *)*single_name;
+    return 1;
+}
+
+static const struct item *item_at( struct counter *counter, const struct item *single, DWORD i )
+{
+    return counter->multi ? &counter->items[i] : single;
+}
+
+static PDH_STATUS formatted_array( PDH_HCOUNTER handle, DWORD format, DWORD *size, DWORD *count, void *buffer, BOOL ansi )
+{
+    struct counter *counter = handle;
+    struct item single;
+    const WCHAR *single_name = NULL;
+    DWORD n, i, need, strbytes = 0;
+    PDH_STATUS ret = ERROR_SUCCESS;
+    const DWORD item_size = ansi ? sizeof(PDH_FMT_COUNTERVALUE_ITEM_A) : sizeof(PDH_FMT_COUNTERVALUE_ITEM_W);
+
+    if (!size || !count) return PDH_INVALID_ARGUMENT;
+
+    EnterCriticalSection( &pdh_handle_cs );
+    if (!counter || counter->magic != PDH_MAGIC_COUNTER)
+    {
+        LeaveCriticalSection( &pdh_handle_cs );
+        return PDH_INVALID_HANDLE;
+    }
+    n = counter_items( counter, &single, &single_name );
+    for (i = 0; i < n; i++)
+    {
+        const WCHAR *name = item_at( counter, &single, i )->name;
+        strbytes += ansi ? WideCharToMultiByte( CP_ACP, 0, name, -1, NULL, 0, NULL, NULL ) : (lstrlenW( name ) + 1) * sizeof(WCHAR);
+    }
+    need = n * item_size + strbytes;
+    if (*size < need || !buffer)
+    {
+        *size = need;
+        *count = n;
+        LeaveCriticalSection( &pdh_handle_cs );
+        return PDH_MORE_DATA;
+    }
+    {
+        char *str = (char *)buffer + n * item_size;
+
+        for (i = 0; i < n; i++)
+        {
+            const struct item *it = item_at( counter, &single, i );
+            PDH_FMT_COUNTERVALUE *value;
+            PDH_STATUS st;
+
+            if (ansi)
+            {
+                PDH_FMT_COUNTERVALUE_ITEM_A *out = (PDH_FMT_COUNTERVALUE_ITEM_A *)buffer + i;
+                int len = WideCharToMultiByte( CP_ACP, 0, it->name, -1, str, strbytes, NULL, NULL );
+                out->szName = str;
+                str += len;
+                value = &out->FmtValue;
+            }
+            else
+            {
+                PDH_FMT_COUNTERVALUE_ITEM_W *out = (PDH_FMT_COUNTERVALUE_ITEM_W *)buffer + i;
+                DWORD len = (lstrlenW( it->name ) + 1) * sizeof(WCHAR);
+                memcpy( str, it->name, len );
+                out->szName = (WCHAR *)str;
+                str += len;
+                value = &out->FmtValue;
+            }
+            st = format_value( counter, format, &it->cur, it->has_prev ? &it->prev : NULL, value );
+            if (st && !ret) ret = ERROR_SUCCESS;   /* a failed item reports its own CStatus */
+        }
+    }
+    *size = need;
+    *count = n;
+    LeaveCriticalSection( &pdh_handle_cs );
+    return ret;
+}
+
+/***********************************************************************
+ *              PdhGetFormattedCounterArrayW   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhGetFormattedCounterArrayW( PDH_HCOUNTER handle, DWORD format, LPDWORD size, LPDWORD count,
+                                                PPDH_FMT_COUNTERVALUE_ITEM_W buffer )
+{
+    TRACE("%p %lx %p %p %p\n", handle, format, size, count, buffer);
+    return formatted_array( handle, format, size, count, buffer, FALSE );
+}
+
+/***********************************************************************
+ *              PdhGetFormattedCounterArrayA   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhGetFormattedCounterArrayA( PDH_HCOUNTER handle, DWORD format, LPDWORD size, LPDWORD count,
+                                                PPDH_FMT_COUNTERVALUE_ITEM_A buffer )
+{
+    TRACE("%p %lx %p %p %p\n", handle, format, size, count, buffer);
+    return formatted_array( handle, format, size, count, buffer, TRUE );
+}
+
+static PDH_STATUS raw_array( PDH_HCOUNTER handle, DWORD *size, DWORD *count, void *buffer, BOOL ansi )
+{
+    struct counter *counter = handle;
+    struct item single;
+    const WCHAR *single_name = NULL;
+    DWORD n, i, need, strbytes = 0;
+    const DWORD item_size = ansi ? sizeof(PDH_RAW_COUNTER_ITEM_A) : sizeof(PDH_RAW_COUNTER_ITEM_W);
+
+    if (!size || !count) return PDH_INVALID_ARGUMENT;
+
+    EnterCriticalSection( &pdh_handle_cs );
+    if (!counter || counter->magic != PDH_MAGIC_COUNTER)
+    {
+        LeaveCriticalSection( &pdh_handle_cs );
+        return PDH_INVALID_HANDLE;
+    }
+    n = counter_items( counter, &single, &single_name );
+    for (i = 0; i < n; i++)
+    {
+        const WCHAR *name = item_at( counter, &single, i )->name;
+        strbytes += ansi ? WideCharToMultiByte( CP_ACP, 0, name, -1, NULL, 0, NULL, NULL ) : (lstrlenW( name ) + 1) * sizeof(WCHAR);
+    }
+    need = n * item_size + strbytes;
+    if (*size < need || !buffer)
+    {
+        *size = need;
+        *count = n;
+        LeaveCriticalSection( &pdh_handle_cs );
+        return PDH_MORE_DATA;
+    }
+    {
+        char *str = (char *)buffer + n * item_size;
+
+        for (i = 0; i < n; i++)
+        {
+            const struct item *it = item_at( counter, &single, i );
+            PDH_RAW_COUNTER *raw;
+
+            if (ansi)
+            {
+                PDH_RAW_COUNTER_ITEM_A *out = (PDH_RAW_COUNTER_ITEM_A *)buffer + i;
+                int len = WideCharToMultiByte( CP_ACP, 0, it->name, -1, str, strbytes, NULL, NULL );
+                out->szName = str;
+                str += len;
+                raw = &out->RawValue;
+            }
+            else
+            {
+                PDH_RAW_COUNTER_ITEM_W *out = (PDH_RAW_COUNTER_ITEM_W *)buffer + i;
+                DWORD len = (lstrlenW( it->name ) + 1) * sizeof(WCHAR);
+                memcpy( str, it->name, len );
+                out->szName = (WCHAR *)str;
+                str += len;
+                raw = &out->RawValue;
+            }
+            raw->CStatus     = it->cur.status;
+            raw->TimeStamp   = it->cur.stamp;
+            raw->FirstValue  = it->cur.first;
+            raw->SecondValue = it->cur.second;
+            raw->MultiCount  = 1;
+        }
+    }
+    *size = need;
+    *count = n;
+    LeaveCriticalSection( &pdh_handle_cs );
+    return ERROR_SUCCESS;
+}
+
+/***********************************************************************
+ *              PdhGetRawCounterArrayW   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhGetRawCounterArrayW( PDH_HCOUNTER handle, LPDWORD size, LPDWORD count, PPDH_RAW_COUNTER_ITEM_W buffer )
+{
+    TRACE("%p %p %p %p\n", handle, size, count, buffer);
+    return raw_array( handle, size, count, buffer, FALSE );
+}
+
+/***********************************************************************
+ *              PdhGetRawCounterArrayA   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhGetRawCounterArrayA( PDH_HCOUNTER handle, LPDWORD size, LPDWORD count, PPDH_RAW_COUNTER_ITEM_A buffer )
+{
+    TRACE("%p %p %p %p\n", handle, size, count, buffer);
+    return raw_array( handle, size, count, buffer, TRUE );
+}
+
+/***********************************************************************
+ *              PdhIsRealTimeQuery   (PDH.@)
+ */
+BOOL WINAPI PdhIsRealTimeQuery( PDH_HQUERY handle )
+{
+    struct query *query = handle;
+    BOOL ret = FALSE;
+
+    TRACE("%p\n", handle);
+
+    EnterCriticalSection( &pdh_handle_cs );
+    if (query && query->magic == PDH_MAGIC_QUERY) ret = TRUE;   /* the live system is the only data source */
+    LeaveCriticalSection( &pdh_handle_cs );
+    return ret;
+}
+
+/***********************************************************************
+ *              PdhConnectMachineW   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhConnectMachineW( LPCWSTR name )
+{
+    TRACE("%s\n", debugstr_w(name));
+    if (!name || !*name) return ERROR_SUCCESS;
+    return is_local_name( name ) ? ERROR_SUCCESS : PDH_CSTATUS_NO_MACHINE;
+}
+
+/* the default counter of each set, as the performance counter registry names it */
+static const WCHAR *default_counter_name( const struct perf_object_def *obj )
+{
+    return obj->default_counter;
+}
+
+static PDH_STATUS return_string( const WCHAR *str, WCHAR *buf, DWORD *size )
+{
+    DWORD need = lstrlenW( str ) + 1;
+
+    if (!buf || *size < need)
+    {
+        *size = need;
+        return PDH_MORE_DATA;
+    }
+    memcpy( buf, str, need * sizeof(WCHAR) );
+    *size = need;
+    return ERROR_SUCCESS;
+}
+
+static PDH_STATUS return_string_a( const WCHAR *str, char *buf, DWORD *size )
+{
+    int need = WideCharToMultiByte( CP_ACP, 0, str, -1, NULL, 0, NULL, NULL );
+
+    if (!buf || *size < need)
+    {
+        *size = need;
+        return PDH_MORE_DATA;
+    }
+    WideCharToMultiByte( CP_ACP, 0, str, -1, buf, need, NULL, NULL );
+    *size = need;
+    return ERROR_SUCCESS;
+}
+
+static PDH_STATUS default_object( const WCHAR *source, const WCHAR *machine, WCHAR *buf, DWORD *size )
+{
+    PDH_STATUS ret;
+
+    if (!size || (machine && !*machine)) return PDH_INVALID_ARGUMENT;
+    /* the data source is not looked at: a file that does not exist is accepted, as on Windows */
+    if ((ret = check_machine_name( machine ))) return ret;
+    return return_string( L"Processor", buf, size );
+}
+
+static PDH_STATUS default_counter( const WCHAR *source, const WCHAR *machine, const WCHAR *object, WCHAR *buf, DWORD *size )
+{
+    const struct perf_object_def *obj;
+    PDH_STATUS ret;
+
+    if (!object || !size || (machine && !*machine)) return PDH_INVALID_ARGUMENT;
+    if ((ret = check_machine_name( machine ))) return ret;
+    if (!(obj = perf_find_object( object ))) return PDH_CSTATUS_NO_OBJECT;
+    return return_string( default_counter_name( obj ), buf, size );
+}
+
+/***********************************************************************
+ *              PdhGetDefaultPerfObjectW   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhGetDefaultPerfObjectW( LPCWSTR source, LPCWSTR machine, LPWSTR buf, LPDWORD size )
+{
+    TRACE("%s %s %p %p\n", debugstr_w(source), debugstr_w(machine), buf, size);
+    return default_object( source, machine, buf, size );
+}
+
+/***********************************************************************
+ *              PdhGetDefaultPerfObjectHW   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhGetDefaultPerfObjectHW( PDH_HLOG source, LPCWSTR machine, LPWSTR buf, LPDWORD size )
+{
+    TRACE("%p %s %p %p\n", source, debugstr_w(machine), buf, size);
+    if (source) return PDH_INVALID_HANDLE;
+    return default_object( NULL, machine, buf, size );
+}
+
+static PDH_STATUS default_object_a( PDH_HLOG hsource, LPCSTR machine, LPSTR buf, LPDWORD size )
+{
+    WCHAR *machineW = NULL;
+    PDH_STATUS ret;
+
+    if (!size || (machine && !*machine)) return PDH_INVALID_ARGUMENT;
+    if (hsource) return PDH_INVALID_HANDLE;
+    if (machine && !(machineW = pdh_strdup_aw( machine ))) return PDH_MEMORY_ALLOCATION_FAILURE;
+    if (!(ret = check_machine_name( machineW ))) ret = return_string_a( L"Processor", buf, size );
+    free( machineW );
+    return ret;
+}
+
+/***********************************************************************
+ *              PdhGetDefaultPerfObjectA   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhGetDefaultPerfObjectA( LPCSTR source, LPCSTR machine, LPSTR buf, LPDWORD size )
+{
+    TRACE("%s %s %p %p\n", debugstr_a(source), debugstr_a(machine), buf, size);
+    return default_object_a( NULL, machine, buf, size );
+}
+
+/***********************************************************************
+ *              PdhGetDefaultPerfObjectHA   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhGetDefaultPerfObjectHA( PDH_HLOG source, LPCSTR machine, LPSTR buf, LPDWORD size )
+{
+    TRACE("%p %s %p %p\n", source, debugstr_a(machine), buf, size);
+    return default_object_a( source, machine, buf, size );
+}
+
+/***********************************************************************
+ *              PdhGetDefaultPerfCounterW   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhGetDefaultPerfCounterW( LPCWSTR source, LPCWSTR machine, LPCWSTR object, LPWSTR buf, LPDWORD size )
+{
+    TRACE("%s %s %s %p %p\n", debugstr_w(source), debugstr_w(machine), debugstr_w(object), buf, size);
+    return default_counter( source, machine, object, buf, size );
+}
+
+/***********************************************************************
+ *              PdhGetDefaultPerfCounterHW   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhGetDefaultPerfCounterHW( PDH_HLOG source, LPCWSTR machine, LPCWSTR object, LPWSTR buf, LPDWORD size )
+{
+    TRACE("%p %s %s %p %p\n", source, debugstr_w(machine), debugstr_w(object), buf, size);
+    if (source) return PDH_INVALID_HANDLE;
+    return default_counter( NULL, machine, object, buf, size );
+}
+
+static PDH_STATUS default_counter_a( PDH_HLOG hsource, LPCSTR machine, LPCSTR object, LPSTR buf, LPDWORD size )
+{
+    WCHAR *machineW = NULL, *objectW = NULL;
+    const struct perf_object_def *obj;
+    PDH_STATUS ret;
+
+    if (!object || !size || (machine && !*machine)) return PDH_INVALID_ARGUMENT;
+    if (hsource) return PDH_INVALID_HANDLE;
+    if (machine && !(machineW = pdh_strdup_aw( machine ))) return PDH_MEMORY_ALLOCATION_FAILURE;
+    if (!(objectW = pdh_strdup_aw( object ))) ret = PDH_MEMORY_ALLOCATION_FAILURE;
+    else if ((ret = check_machine_name( machineW ))) ;
+    else if (!(obj = perf_find_object( objectW ))) ret = PDH_CSTATUS_NO_OBJECT;
+    else ret = return_string_a( default_counter_name( obj ), buf, size );
+    free( machineW );
+    free( objectW );
+    return ret;
+}
+
+/***********************************************************************
+ *              PdhGetDefaultPerfCounterA   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhGetDefaultPerfCounterA( LPCSTR source, LPCSTR machine, LPCSTR object, LPSTR buf, LPDWORD size )
+{
+    TRACE("%s %s %s %p %p\n", debugstr_a(source), debugstr_a(machine), debugstr_a(object), buf, size);
+    return default_counter_a( NULL, machine, object, buf, size );
+}
+
+/***********************************************************************
+ *              PdhGetDefaultPerfCounterHA   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhGetDefaultPerfCounterHA( PDH_HLOG source, LPCSTR machine, LPCSTR object, LPSTR buf, LPDWORD size )
+{
+    TRACE("%p %s %s %p %p\n", source, debugstr_a(machine), debugstr_a(object), buf, size);
+    return default_counter_a( source, machine, object, buf, size );
+}
+
+/***********************************************************************
+ *              PdhTranslate009CounterW   (PDH.@)
+ *              PdhTranslateLocaleCounterW   (PDH.@)
+ *
+ * Only the English counter names exist, so a valid path translates to itself.
+ */
+static PDH_STATUS translate_counter( const WCHAR *path, WCHAR *buf, DWORD *size )
+{
+    struct path_elements pe;
+    PDH_STATUS ret;
+
+    if (!path || !size) return PDH_INVALID_ARGUMENT;
+    ret = check_path( path, TRUE, &pe, NULL, NULL );
+    free_path( &pe );
+    if (ret) return ret;
+    return return_string( path, buf, size );
+}
+
+PDH_STATUS WINAPI PdhTranslate009CounterW( LPCWSTR path, LPWSTR buf, LPDWORD size )
+{
+    TRACE("%s %p %p\n", debugstr_w(path), buf, size);
+    return translate_counter( path, buf, size );
+}
+
+PDH_STATUS WINAPI PdhTranslateLocaleCounterW( LPCWSTR path, LPWSTR buf, LPDWORD size )
+{
+    TRACE("%s %p %p\n", debugstr_w(path), buf, size);
+    return translate_counter( path, buf, size );
+}
+
+static PDH_STATUS translate_counter_a( const char *path, char *buf, DWORD *size )
+{
+    WCHAR *pathW, *out;
+    DWORD len = PDH_MAX_COUNTER_PATH;
+    PDH_STATUS ret;
+
+    if (!path || !size) return PDH_INVALID_ARGUMENT;
+    if (!(pathW = pdh_strdup_aw( path ))) return PDH_MEMORY_ALLOCATION_FAILURE;
+    if (!(out = malloc( len * sizeof(WCHAR) )))
+    {
+        free( pathW );
+        return PDH_MEMORY_ALLOCATION_FAILURE;
+    }
+    if (!(ret = translate_counter( pathW, out, &len ))) ret = return_string_a( out, buf, size );
+    free( pathW );
+    free( out );
+    return ret;
+}
+
+PDH_STATUS WINAPI PdhTranslate009CounterA( LPCSTR path, LPSTR buf, LPDWORD size )
+{
+    TRACE("%s %p %p\n", debugstr_a(path), buf, size);
+    return translate_counter_a( path, buf, size );
+}
+
+PDH_STATUS WINAPI PdhTranslateLocaleCounterA( LPCSTR path, LPSTR buf, LPDWORD size )
+{
+    TRACE("%s %p %p\n", debugstr_a(path), buf, size);
+    return translate_counter_a( path, buf, size );
+}
+
+/***********************************************************************
+ *              PdhParseInstanceNameW   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhParseInstanceNameW( LPCWSTR instance, LPWSTR name, LPDWORD name_len, LPWSTR parent,
+                                         LPDWORD parent_len, LPDWORD index )
+{
+    const WCHAR *slash, *start;
+    WCHAR tmp[PDH_MAX_INSTANCE_NAME];
+    DWORD idx = 0, n, plen;
+    const WCHAR *hash;
+
+    TRACE("%s %p %p %p %p %p\n", debugstr_w(instance), name, name_len, parent, parent_len, index);
+
+    if (!instance || !name_len || !parent_len || !index) return PDH_INVALID_ARGUMENT;
+
+    if ((slash = wcschr( instance, '/' )))
+    {
+        plen = slash - instance;
+        start = slash + 1;
+    }
+    else
+    {
+        plen = 0;
+        start = instance;
+    }
+    lstrcpynW( tmp, start, ARRAY_SIZE(tmp) );
+    if ((hash = wcsrchr( tmp, '#' )) && hash > tmp && hash[1])
+    {
+        const WCHAR *d;
+        for (d = hash + 1; *d >= '0' && *d <= '9'; d++) ;
+        if (!*d)
+        {
+            idx = wcstoul( hash + 1, NULL, 10 );
+            tmp[hash - tmp] = 0;
+        }
+    }
+    n = lstrlenW( tmp ) + 1;
+    if (!name || !parent || *name_len < n || *parent_len < plen + 1)
+    {
+        *name_len = n;
+        *parent_len = plen + 1;
+        return PDH_MORE_DATA;
+    }
+    memcpy( name, tmp, n * sizeof(WCHAR) );
+    *name_len = n;
+    memcpy( parent, instance, plen * sizeof(WCHAR) );
+    parent[plen] = 0;
+    *parent_len = plen + 1;
+    *index = idx;
+    return ERROR_SUCCESS;
+}
+
+/***********************************************************************
+ *              PdhParseInstanceNameA   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhParseInstanceNameA( LPCSTR instance, LPSTR name, LPDWORD name_len, LPSTR parent,
+                                         LPDWORD parent_len, LPDWORD index )
+{
+    WCHAR *instW, nameW[PDH_MAX_INSTANCE_NAME], parentW[PDH_MAX_INSTANCE_NAME];
+    DWORD nl = ARRAY_SIZE(nameW), pl = ARRAY_SIZE(parentW);
+    PDH_STATUS ret;
+
+    TRACE("%s %p %p %p %p %p\n", debugstr_a(instance), name, name_len, parent, parent_len, index);
+
+    if (!instance || !name_len || !parent_len || !index) return PDH_INVALID_ARGUMENT;
+    if (!(instW = pdh_strdup_aw( instance ))) return PDH_MEMORY_ALLOCATION_FAILURE;
+    ret = PdhParseInstanceNameW( instW, nameW, &nl, parentW, &pl, index );
+    free( instW );
+    if (ret) return ret;
+    {
+        int n = WideCharToMultiByte( CP_ACP, 0, nameW, -1, NULL, 0, NULL, NULL );
+        int p = WideCharToMultiByte( CP_ACP, 0, parentW, -1, NULL, 0, NULL, NULL );
+
+        if (!name || !parent || *name_len < n || *parent_len < p)
+        {
+            *name_len = n;
+            *parent_len = p;
+            return PDH_MORE_DATA;
+        }
+        WideCharToMultiByte( CP_ACP, 0, nameW, -1, name, n, NULL, NULL );
+        WideCharToMultiByte( CP_ACP, 0, parentW, -1, parent, p, NULL, NULL );
+        *name_len = n;
+        *parent_len = p;
+    }
+    return ERROR_SUCCESS;
+}
+
+/***********************************************************************
+ *              PdhComputeCounterStatistics   (PDH.@)
+ */
+PDH_STATUS WINAPI PdhComputeCounterStatistics( PDH_HCOUNTER handle, DWORD format, DWORD first, DWORD count,
+                                               PPDH_RAW_COUNTER raw, PPDH_STATISTICS stat )
+{
+    struct counter *counter = handle;
+    PDH_STATUS ret = ERROR_SUCCESS;
+    PDH_FMT_COUNTERVALUE value;
+    double sum = 0.0, min = 0.0, max = 0.0, v;
+    DWORD i, valid = 0;
+    struct sample cur, prev;
+
+    TRACE("%p %lx %lu %lu %p %p\n", handle, format, first, count, raw, stat);
+
+    if (!raw || !stat || !count) return PDH_INVALID_ARGUMENT;
+
+    EnterCriticalSection( &pdh_handle_cs );
+    if (!counter || counter->magic != PDH_MAGIC_COUNTER)
+    {
+        LeaveCriticalSection( &pdh_handle_cs );
+        return PDH_INVALID_HANDLE;
+    }
+    memset( stat, 0, sizeof(*stat) );
+    stat->dwFormat = format;
+    /* the values come from consecutive pairs of the array: entry i against entry i-1 */
+    for (i = first + 1; i < first + count; i++)
+    {
+        raw_to_sample( &raw[i], &cur );
+        raw_to_sample( &raw[i - 1], &prev );
+        if (format_value( counter, PDH_FMT_DOUBLE | (format & ~(PDH_FMT_LONG | PDH_FMT_LARGE | PDH_FMT_DOUBLE)), &cur, &prev,
+                          &value )) continue;
+        v = value.doubleValue;
+        if (!valid || v < min) min = v;
+        if (!valid || v > max) max = v;
+        sum += v;
+        valid++;
+    }
+    if (!valid && count == 1)
+    {
+        raw_to_sample( &raw[first], &cur );
+        if (!format_value( counter, PDH_FMT_DOUBLE | (format & ~(PDH_FMT_LONG | PDH_FMT_LARGE | PDH_FMT_DOUBLE)), &cur, NULL, &value ))
+        {
+            min = max = sum = value.doubleValue;
+            valid = 1;
+        }
+    }
+    if (!valid)
+    {
+        ret = PDH_INVALID_DATA;
+    }
+    else
+    {
+        PDH_FMT_COUNTERVALUE *dst[3] = { &stat->min, &stat->max, &stat->mean };
+        double val[3] = { min, max, sum / valid };
+
+        stat->count = valid;
+        for (i = 0; i < 3; i++)
+        {
+            dst[i]->CStatus = PDH_CSTATUS_VALID_DATA;
+            if (format & PDH_FMT_LONG) dst[i]->longValue = to_long( val[i] );
+            else if (format & PDH_FMT_LARGE) dst[i]->largeValue = to_large( val[i] );
+            else dst[i]->doubleValue = val[i];
+        }
+    }
+    LeaveCriticalSection( &pdh_handle_cs );
+    return ret;
 }
