@@ -914,7 +914,8 @@ ExpQuerySystemProcessInformation(
     _Out_writes_bytes_(Size) PVOID Buffer,
     _In_ ULONG Size,
     _Out_ PULONG ReqSize,
-    _In_ BOOLEAN Extended)
+    _In_ BOOLEAN Extended,
+    _In_ ULONG SessionFilter)
 {
     const ULONG ThreadInfoSize = Extended ? sizeof(SYSTEM_EXTENDED_THREAD_INFORMATION) : sizeof(SYSTEM_THREAD_INFORMATION);
     PSYSTEM_PROCESS_INFORMATION SpiCurrent;
@@ -992,6 +993,21 @@ ExpQuerySystemProcessInformation(
             {
                 DPRINT1("Process %p (%s:%p) is a zombie\n",
                         Process, Process->ImageFileName, Process->UniqueProcessId);
+                CurrentSize = 0;
+                ImageNameMaximumLength = 0;
+
+                /* Unlock the Process */
+                ExReleasePushLockShared(&Process->ProcessLock);
+                KeLeaveCriticalRegion();
+                ProcessLockHeld = FALSE;
+                goto Skip;
+            }
+
+            /* SystemSessionProcessInformation: only the processes of one session,
+               by the same session id the entries report */
+            if ((SessionFilter != MAXULONG) &&
+                (MmGetSessionId(Process) != SessionFilter))
+            {
                 CurrentSize = 0;
                 ImageNameMaximumLength = 0;
 
@@ -1123,6 +1139,8 @@ ExpQuerySystemProcessInformation(
 
                 SpiCurrent->BasePriority = Process->Pcb.BasePriority;
                 SpiCurrent->UniqueProcessId = Process->UniqueProcessId;
+                /* The Mm session; processes outside any session report 0 */
+                SpiCurrent->SessionId = MmGetSessionId(Process);
                 SpiCurrent->InheritedFromUniqueProcessId = Process->InheritedFromUniqueProcessId;
 
                 /* PsIdleProcess shares its handle table with PsInitialSystemProcess,
@@ -1255,7 +1273,7 @@ Skip:
 /* Class 5 - Process Information */
 QSI_DEF(SystemProcessInformation)
 {
-    return ExpQuerySystemProcessInformation(Buffer, Size, ReqSize, FALSE);
+    return ExpQuerySystemProcessInformation(Buffer, Size, ReqSize, FALSE, MAXULONG);
 }
 
 /* Class 6 - Call Count Information */
@@ -2601,9 +2619,28 @@ SSI_DEF(SystemVerifierThunkExtend)
 /* Class 53 - A session's processes */
 QSI_DEF(SystemSessionProcessInformation)
 {
-    /* FIXME */
-    DPRINT1("NtQuerySystemInformation - SystemSessionProcessInformation not implemented\n");
-    return STATUS_NOT_IMPLEMENTED;
+    SYSTEM_SESSION_PROCESS_INFORMATION Request;
+
+    /* The caller passes a request, the process data goes to its buffer */
+    if (Size != sizeof(SYSTEM_SESSION_PROCESS_INFORMATION))
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    /* Capture the request once: the caller can change it at any time.
+       Faults land in NtQuerySystemInformation's handler */
+    Request = *(volatile SYSTEM_SESSION_PROCESS_INFORMATION *)Buffer;
+
+    /* The output buffer is a pointer of the caller's choosing */
+    if (ExGetPreviousMode() != KernelMode)
+        ProbeForWrite(Request.Buffer, Request.SizeOfBuf, TYPE_ALIGNMENT(ULONG));
+
+    /* Same data and rules as SystemProcessInformation, one session only.
+       Any session can be asked for: every process is visible through
+       SystemProcessInformation already */
+    return ExpQuerySystemProcessInformation(Request.Buffer,
+                                            Request.SizeOfBuf,
+                                            ReqSize,
+                                            FALSE,
+                                            Request.SessionId);
 }
 
 /* Class 54 - Load & map in system space */
@@ -2670,7 +2707,7 @@ QSI_DEF(SystemPrefetcherInformation)
 /* Class 57 - Extended process information */
 QSI_DEF(SystemExtendedProcessInformation)
 {
-    return ExpQuerySystemProcessInformation(Buffer, Size, ReqSize, TRUE);
+    return ExpQuerySystemProcessInformation(Buffer, Size, ReqSize, TRUE, MAXULONG);
 }
 
 /* Class 58 - Recommended shared data alignment */
