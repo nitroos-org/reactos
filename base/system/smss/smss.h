@@ -252,7 +252,12 @@ SmpUnhandledExceptionFilter(
 
 /* smnitro.c */
 
+/* NitroSessions values (HKLM\...\Session Manager\NitroSessions) */
+#define SMP_NITRO_SESSIONS_TEST     1   /* P0: session 1 with a native test command, no csrss */
+#define SMP_NITRO_SESSIONS_CSR      4   /* P2: session 1 with its own csrss (basesrv only) */
+
 extern ULONG SmpNitroSessions;
+extern RTL_CRITICAL_SECTION SmpMuSessionLock;
 
 VOID
 NTAPI
@@ -261,6 +266,10 @@ SmpReadNitroSessionsConfig(VOID);
 NTSTATUS
 NTAPI
 SmpStartNitroTestSession(VOID);
+
+NTSTATUS
+NTAPI
+SmpStartNitroCsrSession(VOID);
 
 /* smsubsys.c */
 
