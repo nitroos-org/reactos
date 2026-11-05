@@ -95,31 +95,34 @@ if(NITRO_SHA STREQUAL "")
         if(GIT_CALL_RESULT EQUAL 0)
             set(NITRO_SHA "${NITRO_GIT_SHA}")
         endif()
-        # Re-run CMake (and so regenerate buildno.h) when HEAD moves, otherwise an incremental tree keeps the SHA
-        # of its first configure. Only existing files may be listed (a missing one breaks the ninja manifest).
-        execute_process(
-            COMMAND "${GIT_EXECUTABLE}" symbolic-ref -q HEAD
-            WORKING_DIRECTORY ${REACTOS_SOURCE_DIR}
-            OUTPUT_VARIABLE NITRO_GIT_HEAD_REF
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_QUIET
-        )
-        foreach(_nitro_dep HEAD logs/HEAD ${NITRO_GIT_HEAD_REF})
+        option(NITRO_TRACK_GIT_HEAD "re-run CMake when git HEAD moves (keeps the UI sha exact in incremental trees)" OFF)
+        if(NITRO_TRACK_GIT_HEAD)
+            # Re-run CMake (and so regenerate buildno.h) when HEAD moves, otherwise an incremental tree keeps the SHA
+            # of its first configure. Only existing files may be listed (a missing one breaks the ninja manifest).
             execute_process(
-                COMMAND "${GIT_EXECUTABLE}" rev-parse --git-path ${_nitro_dep}
+                COMMAND "${GIT_EXECUTABLE}" symbolic-ref -q HEAD
                 WORKING_DIRECTORY ${REACTOS_SOURCE_DIR}
-                OUTPUT_VARIABLE _nitro_dep_file
-                RESULT_VARIABLE GIT_CALL_RESULT
+                OUTPUT_VARIABLE NITRO_GIT_HEAD_REF
                 OUTPUT_STRIP_TRAILING_WHITESPACE
                 ERROR_QUIET
             )
-            if(GIT_CALL_RESULT EQUAL 0)
-                get_filename_component(_nitro_dep_file "${_nitro_dep_file}" ABSOLUTE BASE_DIR "${REACTOS_SOURCE_DIR}")
-                if(EXISTS "${_nitro_dep_file}")
-                    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_nitro_dep_file}")
+            foreach(_nitro_dep HEAD logs/HEAD ${NITRO_GIT_HEAD_REF})
+                execute_process(
+                    COMMAND "${GIT_EXECUTABLE}" rev-parse --git-path ${_nitro_dep}
+                    WORKING_DIRECTORY ${REACTOS_SOURCE_DIR}
+                    OUTPUT_VARIABLE _nitro_dep_file
+                    RESULT_VARIABLE GIT_CALL_RESULT
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET
+                )
+                if(GIT_CALL_RESULT EQUAL 0)
+                    get_filename_component(_nitro_dep_file "${_nitro_dep_file}" ABSOLUTE BASE_DIR "${REACTOS_SOURCE_DIR}")
+                    if(EXISTS "${_nitro_dep_file}")
+                        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_nitro_dep_file}")
+                    endif()
                 endif()
-            endif()
-        endforeach()
+            endforeach()
+        endif()
     endif()
 endif()
 
