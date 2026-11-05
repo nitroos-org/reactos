@@ -11,9 +11,12 @@ list(APPEND vbscript_winetest_rc_deps
     ${CMAKE_CURRENT_SOURCE_DIR}/api.vbs
     ${CMAKE_CURRENT_SOURCE_DIR}/error.vbs
     ${CMAKE_CURRENT_SOURCE_DIR}/lang.vbs
+    ${CMAKE_CURRENT_SOURCE_DIR}/noexplicit.vbs
     ${CMAKE_CURRENT_SOURCE_DIR}/regexp.vbs)
 
 set_source_files_properties(rsrc.rc PROPERTIES OBJECT_DEPENDS "${vbscript_winetest_rc_deps}")
+remove_definitions(-D_WIN32_WINNT=0x502 -DWINVER=0x502)
+add_definitions(-D_WIN32_WINNT=0x601 -DWINVER=0x601)
 add_executable(vbscript_winetest ${SOURCE} rsrc.rc)
 set_module_type(vbscript_winetest win32cui)
 target_compile_definitions(vbscript_winetest PRIVATE USE_WINE_TODOS)
