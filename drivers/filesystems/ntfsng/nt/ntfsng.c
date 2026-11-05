@@ -185,6 +185,7 @@ VOID NgPrintLockStats(PNG_VCB Vcb)
     ULONG i;
     DPRINT1("ntfsng: paging writes: %lu with the transfer outside CoreLock, %lu under it, %lu written again\n",
             Vcb->DioWrites, Vcb->DioFallbacks, Vcb->DioRedone);
+    DPRINT1("ntfsng: gap zero fill: %lu pieces written outside CoreLock\n", Vcb->DioZeroPieces);
     DPRINT1("ntfsng: paging and non-cached reads: %lu with the transfer outside CoreLock, %lu under it\n",
             Vcb->DioReads, Vcb->DioReadFallbacks);
 #if DBG
