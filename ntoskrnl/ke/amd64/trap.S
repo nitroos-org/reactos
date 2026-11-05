@@ -385,7 +385,11 @@ FUNC KiDoubleFaultAbort
     /* A zero error code is pushed */
     EnterTrap (TF_HAS_ERROR_CODE OR TF_SAVE_ALL)
 
+#if DBG
+    /* Let a kernel debugger look at the double fault. A free build has none: the breakpoint would be
+       reported as STOP 0x1E (STATUS_BREAKPOINT) instead of the real double fault. */
     int 3
+#endif
 
     /* Bugcheck */
     Fatal 8 // EXCEPTION_DOUBLE_FAULT
