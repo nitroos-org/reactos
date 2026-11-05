@@ -63,6 +63,19 @@
 @ stdcall CLIPFORMAT_UserMarshal(ptr ptr ptr)
 @ stdcall CLIPFORMAT_UserSize(ptr long ptr)
 @ stdcall CLIPFORMAT_UserUnmarshal(ptr ptr ptr)
+@ stdcall CStdAsyncStubBuffer_AddRef(ptr) rpcrt4.CStdStubBuffer_AddRef
+@ stdcall CStdAsyncStubBuffer_Disconnect(ptr) rpcrt4.CStdStubBuffer_Disconnect
+@ stdcall CStdStubBuffer_AddRef(ptr) rpcrt4.CStdStubBuffer_AddRef
+@ stdcall CStdStubBuffer_Connect(ptr ptr) rpcrt4.CStdStubBuffer_Connect
+@ stdcall CStdStubBuffer_CountRefs(ptr) rpcrt4.CStdStubBuffer_CountRefs
+@ stdcall CStdStubBuffer_DebugServerQueryInterface(ptr ptr) rpcrt4.CStdStubBuffer_DebugServerQueryInterface
+@ stdcall CStdStubBuffer_DebugServerRelease(ptr ptr) rpcrt4.CStdStubBuffer_DebugServerRelease
+@ stdcall CStdStubBuffer_Disconnect(ptr) rpcrt4.CStdStubBuffer_Disconnect
+@ stdcall CStdStubBuffer_Invoke(ptr ptr ptr) rpcrt4.CStdStubBuffer_Invoke
+@ stdcall CStdStubBuffer_IsIIDSupported(ptr ptr) rpcrt4.CStdStubBuffer_IsIIDSupported
+@ stdcall CStdStubBuffer_QueryInterface(ptr ptr ptr) rpcrt4.CStdStubBuffer_QueryInterface
+@ stdcall NdrCStdStubBuffer2_Release(ptr ptr) rpcrt4.NdrCStdStubBuffer2_Release
+@ stdcall NdrCStdStubBuffer_Release(ptr ptr) rpcrt4.NdrCStdStubBuffer_Release
 @ stub CLSIDFromOle1Class
 @ stdcall CLSIDFromProgID(wstr ptr)
 @ stdcall CLSIDFromProgIDEx(wstr ptr)
@@ -186,37 +199,73 @@
 @ stub GetHookInterface
 @ stdcall GetRestrictedErrorInfo(ptr)
 @ stdcall HACCEL_UserFree(ptr ptr)
+@ stdcall -arch=win64 HACCEL_UserFree64(ptr ptr) HACCEL_UserFree
 @ stdcall HACCEL_UserMarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HACCEL_UserMarshal64(ptr ptr ptr) HACCEL_UserMarshal
 @ stdcall HACCEL_UserSize(ptr long ptr)
+@ stdcall -arch=win64 HACCEL_UserSize64(ptr long ptr) HACCEL_UserSize
 @ stdcall HACCEL_UserUnmarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HACCEL_UserUnmarshal64(ptr ptr ptr) HACCEL_UserUnmarshal
 @ stdcall HBITMAP_UserFree(ptr ptr)
 @ stdcall HBITMAP_UserMarshal(ptr ptr ptr)
 @ stdcall HBITMAP_UserSize(ptr long ptr)
 @ stdcall HBITMAP_UserUnmarshal(ptr ptr ptr)
 @ stdcall HBRUSH_UserFree(ptr ptr)
+@ stdcall -arch=win64 HBRUSH_UserFree64(ptr ptr) HBRUSH_UserFree
 @ stdcall HBRUSH_UserMarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HBRUSH_UserMarshal64(ptr ptr ptr) HBRUSH_UserMarshal
 @ stdcall HBRUSH_UserSize(ptr long ptr)
+@ stdcall -arch=win64 HBRUSH_UserSize64(ptr long ptr) HBRUSH_UserSize
 @ stdcall HBRUSH_UserUnmarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HBRUSH_UserUnmarshal64(ptr ptr ptr) HBRUSH_UserUnmarshal
 @ stdcall HDC_UserFree(ptr ptr)
+@ stdcall -arch=win64 HDC_UserFree64(ptr ptr) HDC_UserFree
 @ stdcall HDC_UserMarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HDC_UserMarshal64(ptr ptr ptr) HDC_UserMarshal
 @ stdcall HDC_UserSize(ptr long ptr)
+@ stdcall -arch=win64 HDC_UserSize64(ptr long ptr) HDC_UserSize
 @ stdcall HDC_UserUnmarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HDC_UserUnmarshal64(ptr ptr ptr) HDC_UserUnmarshal
 @ stdcall HGLOBAL_UserFree(ptr ptr)
 @ stdcall HGLOBAL_UserMarshal(ptr ptr ptr)
 @ stdcall HGLOBAL_UserSize(ptr long ptr)
 @ stdcall HGLOBAL_UserUnmarshal(ptr ptr ptr)
 @ stdcall HICON_UserFree(ptr ptr)
+@ stdcall -arch=win64 HICON_UserFree64(ptr ptr) HICON_UserFree
 @ stdcall HICON_UserMarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HICON_UserMarshal64(ptr ptr ptr) HICON_UserMarshal
 @ stdcall HICON_UserSize(ptr long ptr)
+@ stdcall -arch=win64 HICON_UserSize64(ptr long ptr) HICON_UserSize
 @ stdcall HICON_UserUnmarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HICON_UserUnmarshal64(ptr ptr ptr) HICON_UserUnmarshal
 @ stdcall HMENU_UserFree(ptr ptr)
+@ stdcall -arch=win64 HMENU_UserFree64(ptr ptr) HMENU_UserFree
 @ stdcall HMENU_UserMarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HMENU_UserMarshal64(ptr ptr ptr) HMENU_UserMarshal
 @ stdcall HMENU_UserSize(ptr long ptr)
+@ stdcall -arch=win64 HMENU_UserSize64(ptr long ptr) HMENU_UserSize
 @ stdcall HMENU_UserUnmarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HMENU_UserUnmarshal64(ptr ptr ptr) HMENU_UserUnmarshal
 @ stdcall HPALETTE_UserFree(ptr ptr)
 @ stdcall HPALETTE_UserMarshal(ptr ptr ptr)
 @ stdcall HPALETTE_UserSize(ptr long ptr)
 @ stdcall HPALETTE_UserUnmarshal(ptr ptr ptr)
+@ stdcall HMONITOR_UserFree(ptr ptr)
+@ stdcall -arch=win64 HMONITOR_UserFree64(ptr ptr) HMONITOR_UserFree
+@ stdcall HMONITOR_UserMarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HMONITOR_UserMarshal64(ptr ptr ptr) HMONITOR_UserMarshal
+@ stdcall HMONITOR_UserSize(ptr long ptr)
+@ stdcall -arch=win64 HMONITOR_UserSize64(ptr long ptr) HMONITOR_UserSize
+@ stdcall HMONITOR_UserUnmarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HMONITOR_UserUnmarshal64(ptr ptr ptr) HMONITOR_UserUnmarshal
+@ stdcall HRGN_UserFree(ptr ptr)
+@ stdcall -arch=win64 HRGN_UserFree64(ptr ptr) HRGN_UserFree
+@ stdcall HRGN_UserMarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HRGN_UserMarshal64(ptr ptr ptr) HRGN_UserMarshal
+@ stdcall HRGN_UserSize(ptr long ptr)
+@ stdcall -arch=win64 HRGN_UserSize64(ptr long ptr) HRGN_UserSize
+@ stdcall HRGN_UserUnmarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HRGN_UserUnmarshal64(ptr ptr ptr) HRGN_UserUnmarshal
 @ stub HSTRING_UserFree
 @ stub -arch=win64 HSTRING_UserFree64
 @ stub HSTRING_UserMarshal
@@ -226,9 +275,13 @@
 @ stub HSTRING_UserUnmarshal
 @ stub -arch=win64 HSTRING_UserUnmarshal64
 @ stdcall HWND_UserFree(ptr ptr)
+@ stdcall -arch=win64 HWND_UserFree64(ptr ptr) HWND_UserFree
 @ stdcall HWND_UserMarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HWND_UserMarshal64(ptr ptr ptr) HWND_UserMarshal
 @ stdcall HWND_UserSize(ptr long ptr)
+@ stdcall -arch=win64 HWND_UserSize64(ptr long ptr) HWND_UserSize
 @ stdcall HWND_UserUnmarshal(ptr ptr ptr)
+@ stdcall -arch=win64 HWND_UserUnmarshal64(ptr ptr ptr) HWND_UserUnmarshal
 @ stub HkOleRegisterObject
 @ stdcall IIDFromString(wstr ptr)
 @ stub InternalAppInvokeExceptionFilter

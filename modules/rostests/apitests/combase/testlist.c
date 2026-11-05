@@ -14,6 +14,7 @@ extern void func_InprocLoadFailure(void);
 extern void func_LocalServerStartup(void);
 extern void func_RoFailFast(void);
 extern void func_StubReleaseInCall(void);
+extern void func_WireHandles(void);
 
 const struct test winetest_testlist[] =
 {
@@ -23,6 +24,7 @@ const struct test winetest_testlist[] =
     { "LocalServerStartup", func_LocalServerStartup },
     { "RoFailFast", func_RoFailFast },
     { "StubReleaseInCall", func_StubReleaseInCall },
+    { "WireHandles", func_WireHandles },
 
     { 0, 0 }
 };
