@@ -57,6 +57,10 @@
  *     FW_BCAST_TIMEOUT), and the first reply gives that peer an exchange of its own. DHCP client
  *     replies (UDP source port 67, destination port 68) always pass: they answer our own request, and
  *     losing the lease would take the network down.
+ *     ICMP: the reply to a request the host sent (echo, timestamp, information request, address mask
+ *     request; matched on the peer address and the identifier) passes; an echo, timestamp, information
+ *     or address mask reply with no such request is unsolicited and goes through the rules like a request
+ *     (dropped by default, as on Windows). ICMP errors (types 3, 4, 11, 12) pass.
  *  5. Otherwise: if the profile has NITROFW_PROFILE_BLOCK_ALL_INBOUND, an inbound packet is dropped.
  *     Else the rules whose ProfileMask includes the active profile and whose Direction matches are
  *     tested. A matching Block rule drops the packet (block beats allow); else a matching Allow rule passes
