@@ -9,6 +9,12 @@
 
 extern LIST_ENTRY AddressFileListHead;
 extern KSPIN_LOCK AddressFileListLock;
+
+/* The same address files, indexed by Port (network byte order; every protocol in one bucket), under
+   AddressFileListLock. Within a bucket the order is the creation order, as on AddressFileListHead. */
+#define ADDRESS_FILE_PORT_BUCKETS 256
+#define ADDRESS_FILE_PORT_BUCKET(PortN) (((PortN) ^ ((PortN) >> 8)) & (ADDRESS_FILE_PORT_BUCKETS - 1))
+extern LIST_ENTRY AddressFilePortHash[ADDRESS_FILE_PORT_BUCKETS];
 extern LIST_ENTRY ConnectionEndpointListHead;
 extern KSPIN_LOCK ConnectionEndpointListLock;
 
