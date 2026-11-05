@@ -304,6 +304,7 @@ add_subdirectory(xolehlp)
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(avrt)
     add_subdirectory(bcryptprimitives)
+    add_subdirectory(coremessaging)
     add_subdirectory(dwmapi)
     add_subdirectory(ktmw32)
     if(NOT MSVC) # needs the GNU inline assembler for the C++ vtables
