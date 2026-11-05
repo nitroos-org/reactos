@@ -124,6 +124,7 @@ extern void func_NtQueryVolumeInformationFile(void);
 extern void func_NtRaiseHardErrorMode(void);
 extern void func_NtReadFile(void);
 extern void func_NtSaveKey(void);
+extern void func_NtSaveMergedKeys(void);
 extern void func_NtSetDefaultLocale(void);
 extern void func_NtSetInformationDebugObject(void);
 extern void func_NtSetInformationFile(void);
@@ -372,6 +373,7 @@ const struct test winetest_testlist[] =
     { "NtRaiseHardErrorMode",           func_NtRaiseHardErrorMode },
     { "NtReadFile",                     func_NtReadFile },
     { "NtSaveKey",                      func_NtSaveKey},
+    { "NtSaveMergedKeys",               func_NtSaveMergedKeys },
     { "NtSetDefaultLocale",             func_NtSetDefaultLocale },
     { "NtSetInformationDebugObject",   func_NtSetInformationDebugObject },
     { "NtSetInformationFile",           func_NtSetInformationFile },

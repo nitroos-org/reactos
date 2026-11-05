@@ -2246,6 +2246,52 @@ CmpReleaseTwoKcbLockByKey(IN ULONG ConvKey1,
 
 VOID
 NTAPI
+CmpAcquireTwoKcbLocksSharedByKey(IN ULONG ConvKey1,
+                                 IN ULONG ConvKey2)
+{
+    ULONG Index1, Index2;
+
+    /* Sanity check */
+    CMP_ASSERT_REGISTRY_LOCK();
+
+    Index1 = GET_HASH_INDEX(ConvKey1);
+    Index2 = GET_HASH_INDEX(ConvKey2);
+
+    /* Always take the lower bucket first (the order the exclusive helper uses),
+       and a single bucket only once: a second shared acquire of the same push
+       lock can deadlock behind a queued exclusive waiter. */
+    if (Index1 < Index2)
+    {
+        CmpAcquireKcbLockSharedByIndex(Index1);
+        CmpAcquireKcbLockSharedByIndex(Index2);
+    }
+    else
+    {
+        CmpAcquireKcbLockSharedByIndex(Index2);
+        if (Index1 != Index2) CmpAcquireKcbLockSharedByIndex(Index1);
+    }
+}
+
+VOID
+NTAPI
+CmpReleaseTwoKcbLocksSharedByKey(IN ULONG ConvKey1,
+                                 IN ULONG ConvKey2)
+{
+    ULONG Index1, Index2;
+
+    /* Sanity check */
+    CMP_ASSERT_REGISTRY_LOCK();
+
+    Index1 = GET_HASH_INDEX(ConvKey1);
+    Index2 = GET_HASH_INDEX(ConvKey2);
+
+    /* Release exactly what CmpAcquireTwoKcbLocksSharedByKey took */
+    CmpReleaseKcbLockByIndex(Index1);
+    if (Index1 != Index2) CmpReleaseKcbLockByIndex(Index2);
+}
+
+VOID
+NTAPI
 CmShutdownSystem(VOID)
 {
     PLIST_ENTRY ListEntry;
