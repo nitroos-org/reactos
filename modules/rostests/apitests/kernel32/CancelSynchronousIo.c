@@ -60,6 +60,86 @@ static DWORD WINAPI SleepThread(LPVOID Param)
     return 0;
 }
 
+
+/* Nonpaged pool the allocations tagged "Io  " hold, in bytes, or (SIZE_T)-1 when the tags cannot be read */
+static SIZE_T GetIoTagNonPagedBytes(void)
+{
+    ULONG Size = 0x40000, Length;
+    PSYSTEM_POOLTAG_INFORMATION Info;
+    SIZE_T Bytes = (SIZE_T)-1;
+    NTSTATUS Status;
+    ULONG i;
+
+    for (;;)
+    {
+        Info = HeapAlloc(GetProcessHeap(), 0, Size);
+        if (!Info)
+            return Bytes;
+        Status = NtQuerySystemInformation(SystemPoolTagInformation, Info, Size, &Length);
+        if (Status != STATUS_INFO_LENGTH_MISMATCH)
+            break;
+        HeapFree(GetProcessHeap(), 0, Info);
+        Size = Length + 0x10000;
+    }
+    if (NT_SUCCESS(Status))
+    {
+        Bytes = 0;
+        for (i = 0; i < Info->Count; i++)
+        {
+            if (Info->TagInfo[i].TagUlong == 0x20206F49) /* "Io  " */
+                Bytes += Info->TagInfo[i].NonPagedUsed;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Info);
+    return Bytes;
+}
+
+/*
+ * A thread that cannot run its normal kernel APCs (here: suspended, so the suspend APC holds it at APC_LEVEL
+ * inside the system call) keeps every cancel request queued. A caller that cancels in a loop must not queue
+ * one nonpaged APC per call: Node's libuv did that, hundreds of megabytes in seconds. The request that is
+ * queued still cancels the read when the thread runs again.
+ */
+static void TestCancelFlood(void)
+{
+    HANDLE Read, Write, Thread;
+    READER Reader;
+    DWORD ThreadId, i;
+    SIZE_T Before, After;
+    BOOL Ret;
+    const DWORD Calls = 200000;
+
+    ok(CreatePipe(&Read, &Write, NULL, 0), "CreatePipe failed with %lu\n", GetLastError());
+    Thread = StartReader(Read, &Reader, &ThreadId);
+    if (!Thread)
+        return;
+
+    ok(SuspendThread(Thread) != (DWORD)-1, "SuspendThread failed with %lu\n", GetLastError());
+    Sleep(200);
+
+    Before = GetIoTagNonPagedBytes();
+    for (i = 0; i < Calls; i++)
+    {
+        Ret = pCancelSynchronousIo(Thread);
+        if (!Ret)
+            break;
+    }
+    ok(i == Calls, "CancelSynchronousIo failed after %lu calls, error %lu\n", i, GetLastError());
+    After = GetIoTagNonPagedBytes();
+    if (Before == (SIZE_T)-1 || After == (SIZE_T)-1)
+        skip("the pool tags cannot be read\n");
+    else
+        ok(After < Before + 2 * 1024 * 1024, "%lu cancel requests of a suspended reader queued %Iu bytes of nonpaged pool\n",
+           Calls, After - Before);
+
+    ok(ResumeThread(Thread) != (DWORD)-1, "ResumeThread failed with %lu\n", GetLastError());
+    ok(WaitForSingleObject(Thread, 5000) == WAIT_OBJECT_0, "the reader did not return\n");
+    ok(!Reader.Ret && Reader.Error == ERROR_OPERATION_ABORTED, "flooded reader: ret %d, error %lu\n", Reader.Ret, Reader.Error);
+    CloseHandle(Thread);
+    CloseHandle(Read);
+    CloseHandle(Write);
+}
+
 START_TEST(CancelSynchronousIo)
 {
     PFN_NtCancelSynchronousIoFile pNtCancel;
@@ -182,4 +262,6 @@ START_TEST(CancelSynchronousIo)
 
     CloseHandle(Read);
     CloseHandle(Write);
+
+    TestCancelFlood();
 }

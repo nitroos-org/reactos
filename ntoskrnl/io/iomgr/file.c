@@ -4954,7 +4954,30 @@ typedef struct _IOP_SYNC_CANCEL_APC
 {
     KAPC Apc;
     PIO_STATUS_BLOCK IoRequestToCancel;
+    PETHREAD TargetThread;
+    LIST_ENTRY PendingEntry;
 } IOP_SYNC_CANCEL_APC, *PIOP_SYNC_CANCEL_APC;
+
+/*
+ * The cancel requests that are queued and not yet delivered. A thread that waits where its normal
+ * kernel APCs cannot run (a critical region of a driver) keeps them queued, and a caller that cancels
+ * in a loop (a runtime stopping a reader thread) would queue one nonpaged APC per call, hundreds of
+ * megabytes of pool in a few seconds. One pending request per thread and I/O status block does the
+ * same work: when it runs it cancels every matching request the thread has.
+ */
+static LIST_ENTRY IopSyncCancelPending = { &IopSyncCancelPending, &IopSyncCancelPending };
+static KSPIN_LOCK IopSyncCancelPendingLock;
+
+static
+VOID
+IopSyncCancelForget(IN PIOP_SYNC_CANCEL_APC CancelApc)
+{
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&IopSyncCancelPendingLock, &OldIrql);
+    RemoveEntryList(&CancelApc->PendingEntry);
+    KeReleaseSpinLock(&IopSyncCancelPendingLock, OldIrql);
+}
 
 /*
  * A request the thread waits for inside its system service: one on a file
@@ -5052,8 +5075,11 @@ VOID
 NTAPI
 IopSyncCancelApcRundownRoutine(IN PKAPC Apc)
 {
+    PIOP_SYNC_CANCEL_APC CancelApc = CONTAINING_RECORD(Apc, IOP_SYNC_CANCEL_APC, Apc);
+
     /* The thread exited before the APC ran: it cancelled its own requests then */
-    ExFreePoolWithTag(CONTAINING_RECORD(Apc, IOP_SYNC_CANCEL_APC, Apc), TAG_IO);
+    IopSyncCancelForget(CancelApc);
+    ExFreePoolWithTag(CancelApc, TAG_IO);
 }
 
 /* Normal kernel APC: not delivered while the thread is in a critical region, where drivers hold their cancel locks */
@@ -5066,6 +5092,9 @@ IopSyncCancelApcNormalRoutine(IN PVOID NormalContext,
 {
     PIOP_SYNC_CANCEL_APC CancelApc = NormalContext;
     KIRQL OldIrql;
+
+    /* From here on a new request queues its own APC: this one may already have passed the thread's list */
+    IopSyncCancelForget(CancelApc);
 
     /* Completion runs as a special kernel APC, which APC_LEVEL holds off */
     KeRaiseIrql(APC_LEVEL, &OldIrql);
@@ -5138,14 +5167,44 @@ NtCancelSynchronousIoFile(IN HANDLE ThreadHandle,
     }
     else
     {
-        CancelApc = ExAllocatePoolWithTag(NonPagedPool, sizeof(*CancelApc), TAG_IO);
-        if (!CancelApc)
+        PLIST_ENTRY Entry;
+        BOOLEAN Queued = FALSE;
+
+        /* An earlier request for this thread and status block still waits for delivery: it does this one's work too */
+        CancelApc = NULL;
+        KeAcquireSpinLock(&IopSyncCancelPendingLock, &OldIrql);
+        for (Entry = IopSyncCancelPending.Flink; Entry != &IopSyncCancelPending; Entry = Entry->Flink)
+        {
+            PIOP_SYNC_CANCEL_APC Pending = CONTAINING_RECORD(Entry, IOP_SYNC_CANCEL_APC, PendingEntry);
+
+            if ((Pending->TargetThread == Thread) && (Pending->IoRequestToCancel == IoRequestToCancel))
+            {
+                Queued = TRUE;
+                break;
+            }
+        }
+        if (!Queued)
+        {
+            CancelApc = ExAllocatePoolWithTag(NonPagedPool, sizeof(*CancelApc), TAG_IO);
+            if (CancelApc)
+            {
+                CancelApc->IoRequestToCancel = IoRequestToCancel;
+                CancelApc->TargetThread = Thread;
+                InsertTailList(&IopSyncCancelPending, &CancelApc->PendingEntry);
+            }
+        }
+        KeReleaseSpinLock(&IopSyncCancelPendingLock, OldIrql);
+
+        if (Queued)
+        {
+            Status = STATUS_SUCCESS;
+        }
+        else if (!CancelApc)
         {
             Status = STATUS_INSUFFICIENT_RESOURCES;
         }
         else
         {
-            CancelApc->IoRequestToCancel = IoRequestToCancel;
             KeInitializeApc(&CancelApc->Apc,
                             &Thread->Tcb,
                             OriginalApcEnvironment,
@@ -5157,7 +5216,10 @@ NtCancelSynchronousIoFile(IN HANDLE ThreadHandle,
 
             /* A thread that is exiting cancels its I/O itself (IoCancelThreadIo) */
             if (!KeInsertQueueApc(&CancelApc->Apc, NULL, NULL, IO_NO_INCREMENT))
+            {
+                IopSyncCancelForget(CancelApc);
                 ExFreePoolWithTag(CancelApc, TAG_IO);
+            }
             Status = STATUS_SUCCESS;
         }
     }
