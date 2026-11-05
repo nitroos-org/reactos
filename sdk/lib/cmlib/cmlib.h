@@ -924,6 +924,15 @@ CmpGetValueData(
     OUT PHCELL_INDEX CellToRelease
 );
 
+HCELL_INDEX
+NTAPI
+CmpCopyValue(
+    IN PHHIVE SourceHive,
+    IN HCELL_INDEX SourceValueCell,
+    IN PHHIVE DestinationHive,
+    IN HSTORAGE_TYPE StorageType
+);
+
 NTSTATUS
 NTAPI
 CmpCopyKeyValueList(
