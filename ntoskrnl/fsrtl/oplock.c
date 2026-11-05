@@ -115,7 +115,7 @@ FsRtlCancelWaitIrp(IN PDEVICE_OBJECT DeviceObject,
                    IN PIRP Irp)
 {
     PINTERNAL_OPLOCK Oplock;
-    PLIST_ENTRY NextEntry;
+    PLIST_ENTRY NextEntry, NextNext;
     PWAIT_CONTEXT WaitCtx;
 
     DPRINT("FsRtlCancelWaitIrp(%p, %p)\n", DeviceObject, Irp);
@@ -132,8 +132,10 @@ FsRtlCancelWaitIrp(IN PDEVICE_OBJECT DeviceObject,
     ExAcquireFastMutex(Oplock->IntLock);
     for (NextEntry = Oplock->WaitListHead.Flink;
          NextEntry != &Oplock->WaitListHead;
-         NextEntry = NextEntry->Flink)
+         NextEntry = NextNext)
     {
+        /* Completing a waiter frees its context: fetch the successor first */
+        NextNext = NextEntry->Flink;
         WaitCtx = CONTAINING_RECORD(NextEntry, WAIT_CONTEXT, WaitListEntry);
 
         if (WaitCtx->Irp->Cancel)
@@ -276,7 +278,7 @@ FsRtlOplockBreakNotify(IN PINTERNAL_OPLOCK Oplock,
     /* Otherwise, wait on the IRP */
     Irp->IoStatus.Status = STATUS_SUCCESS;
     FsRtlWaitOnIrp(Oplock, Irp, NULL, FsRtlNotifyCompletion, NULL, NULL);
-    return STATUS_SUCCESS;
+    return STATUS_PENDING;
 }
 
 VOID
@@ -312,7 +314,7 @@ FsRtlCancelOplockIIIrp(IN PDEVICE_OBJECT DeviceObject,
                        IN PIRP Irp)
 {
     PINTERNAL_OPLOCK Oplock;
-    PLIST_ENTRY NextEntry;
+    PLIST_ENTRY NextEntry, NextNext;
     PIRP ListIrp;
     BOOLEAN Removed;
 
@@ -331,8 +333,10 @@ FsRtlCancelOplockIIIrp(IN PDEVICE_OBJECT DeviceObject,
     /* Browse all the IRPs associated to the shared lock */
     for (NextEntry = Oplock->SharedListHead.Flink;
          NextEntry != &Oplock->SharedListHead;
-         NextEntry = NextEntry->Flink)
+         NextEntry = NextNext)
     {
+        /* Completing the IRP may free it: fetch the successor first */
+        NextNext = NextEntry->Flink;
         ListIrp = CONTAINING_RECORD(NextEntry, IRP, Tail.Overlay.ListEntry);
 
         /* If canceled, remove it */
@@ -358,7 +362,6 @@ FsRtlAcknowledgeOplockBreak(IN PINTERNAL_OPLOCK Oplock,
                             IN PIRP Irp,
                             IN BOOLEAN SwitchToLevel2)
 {
-    PLIST_ENTRY NextEntry;
     PWAIT_CONTEXT WaitCtx;
     BOOLEAN Deref;
     BOOLEAN Locked;
@@ -441,13 +444,12 @@ FsRtlAcknowledgeOplockBreak(IN PINTERNAL_OPLOCK Oplock,
     }
 
     /* Now, complete any IRP waiting */
-    for (NextEntry = Oplock->WaitListHead.Flink;
-         NextEntry != &Oplock->WaitListHead;
-         NextEntry = NextEntry->Flink)
-    {
-        WaitCtx = CONTAINING_RECORD(NextEntry, WAIT_CONTEXT, WaitListEntry);
-        FsRtlRemoveAndCompleteWaitIrp(WaitCtx);
-    }
+    while (!IsListEmpty(&Oplock->WaitListHead))
+        {
+            /* The wait context is freed by the completion, so never walk through it */
+            WaitCtx = CONTAINING_RECORD(Oplock->WaitListHead.Flink, WAIT_CONTEXT, WaitListEntry);
+            FsRtlRemoveAndCompleteWaitIrp(WaitCtx);
+        }
 
     /* If we dropped oplock, remove our extra ref */
     if (Deref)
@@ -472,7 +474,6 @@ FsRtlOpBatchBreakClosePending(IN PINTERNAL_OPLOCK Oplock,
                               IN PIRP Irp)
 {
     NTSTATUS Status;
-    PLIST_ENTRY NextEntry;
     PWAIT_CONTEXT WaitCtx;
 
     PAGED_CODE();
@@ -509,13 +510,12 @@ FsRtlOpBatchBreakClosePending(IN PINTERNAL_OPLOCK Oplock,
             Oplock->FileObject = NULL;
 
             /* Complete any waiting IRP */
-            for (NextEntry = Oplock->WaitListHead.Flink;
-                 NextEntry != &Oplock->WaitListHead;
-                 NextEntry = NextEntry->Flink)
-            {
-                WaitCtx = CONTAINING_RECORD(NextEntry, WAIT_CONTEXT, WaitListEntry);
-                FsRtlRemoveAndCompleteWaitIrp(WaitCtx);
-            }
+            while (!IsListEmpty(&Oplock->WaitListHead))
+        {
+            /* The wait context is freed by the completion, so never walk through it */
+            WaitCtx = CONTAINING_RECORD(Oplock->WaitListHead.Flink, WAIT_CONTEXT, WaitListEntry);
+            FsRtlRemoveAndCompleteWaitIrp(WaitCtx);
+        }
         }
         /* Otherwise, mark the oplock as close pending */
         else
@@ -585,7 +585,6 @@ FsRtlCancelExclusiveIrp(IN PDEVICE_OBJECT DeviceObject,
                         IN PIRP Irp)
 {
     PINTERNAL_OPLOCK IntOplock;
-    PLIST_ENTRY NextEntry;
     PWAIT_CONTEXT WaitCtx;
 
     DPRINT("FsRtlCancelExclusiveIrp(%p, %p)\n", DeviceObject, Irp);
@@ -613,11 +612,10 @@ FsRtlCancelExclusiveIrp(IN PDEVICE_OBJECT DeviceObject,
         IntOplock->Flags = NO_OPLOCK;
 
         /* And complete any waiting IRP */
-        for (NextEntry = IntOplock->WaitListHead.Flink;
-             NextEntry != &IntOplock->WaitListHead;
-             NextEntry = NextEntry->Flink)
+        while (!IsListEmpty(&IntOplock->WaitListHead))
         {
-            WaitCtx = CONTAINING_RECORD(NextEntry, WAIT_CONTEXT, WaitListEntry);
+            /* The wait context is freed by the completion, so never walk through it */
+            WaitCtx = CONTAINING_RECORD(IntOplock->WaitListHead.Flink, WAIT_CONTEXT, WaitListEntry);
             FsRtlRemoveAndCompleteWaitIrp(WaitCtx);
         }
     }
@@ -703,6 +701,8 @@ FsRtlRequestExclusiveOplock(IN POPLOCK Oplock,
                 {
                     IoSetCancelRoutine(Irp, FsRtlCancelExclusiveIrp);
                     IoReleaseCancelSpinLock(Irp->CancelIrql);
+                    /* The request stays pending until the oplock breaks */
+                    Status = STATUS_PENDING;
                 }
             }
             /* Cannot set exclusiveness, fail */
@@ -790,6 +790,8 @@ FsRtlRequestOplockII(IN POPLOCK Oplock,
             {
                 IoSetCancelRoutine(Irp, FsRtlCancelOplockIIIrp);
                 IoReleaseCancelSpinLock(Irp->CancelIrql);
+                /* The request stays pending until the oplock breaks */
+                Status = STATUS_PENDING;
             }
         }
         /* Otherwise, just fail */
@@ -817,7 +819,7 @@ FsRtlOplockCleanup(IN PINTERNAL_OPLOCK Oplock,
                    IN PIO_STACK_LOCATION Stack)
 {
     PIO_STACK_LOCATION ListStack;
-    PLIST_ENTRY NextEntry;
+    PLIST_ENTRY NextEntry, NextNext;
     PIRP ListIrp;
     PWAIT_CONTEXT WaitCtx;
 
@@ -833,8 +835,10 @@ FsRtlOplockCleanup(IN PINTERNAL_OPLOCK Oplock,
             /* Complete any associated IRP */
             for (NextEntry = Oplock->SharedListHead.Flink;
                  NextEntry != &Oplock->SharedListHead;
-                 NextEntry = NextEntry->Flink)
+                 NextEntry = NextNext)
             {
+                /* Completing the IRP may free it: fetch the successor first */
+                NextNext = NextEntry->Flink;
                 ListIrp = CONTAINING_RECORD(NextEntry, IRP, Tail.Overlay.ListEntry);
                 ListStack = IoGetCurrentIrpStackLocation(ListIrp);
 
@@ -883,13 +887,12 @@ FsRtlOplockCleanup(IN PINTERNAL_OPLOCK Oplock,
                 Oplock->Flags = NO_OPLOCK;
 
                 /* And complete any waiting IRP */
-                for (NextEntry = Oplock->WaitListHead.Flink;
-                     NextEntry != &Oplock->WaitListHead;
-                     NextEntry = NextEntry->Flink)
-                {
-                    WaitCtx = CONTAINING_RECORD(NextEntry, WAIT_CONTEXT, WaitListEntry);
-                    FsRtlRemoveAndCompleteWaitIrp(WaitCtx);
-                }
+                while (!IsListEmpty(&Oplock->WaitListHead))
+        {
+            /* The wait context is freed by the completion, so never walk through it */
+            WaitCtx = CONTAINING_RECORD(Oplock->WaitListHead.Flink, WAIT_CONTEXT, WaitListEntry);
+            FsRtlRemoveAndCompleteWaitIrp(WaitCtx);
+        }
             }
         }
     }
@@ -905,7 +908,6 @@ FsRtlOplockBreakToNone(IN PINTERNAL_OPLOCK Oplock,
                        IN POPLOCK_WAIT_COMPLETE_ROUTINE CompletionRoutine OPTIONAL,
                        IN POPLOCK_FS_PREPOST_IRP PostIrpRoutine OPTIONAL)
 {
-    PLIST_ENTRY NextEntry;
     PWAIT_CONTEXT WaitCtx;
     PIRP ListIrp;
     KEVENT WaitEvent;
@@ -948,13 +950,12 @@ FsRtlOplockBreakToNone(IN PINTERNAL_OPLOCK Oplock,
             Oplock->FileObject = NULL;
 
             /* And complete any waiting IRP */
-            for (NextEntry = Oplock->WaitListHead.Flink;
-                 NextEntry != &Oplock->WaitListHead;
-                 NextEntry = NextEntry->Flink)
-            {
-                WaitCtx = CONTAINING_RECORD(NextEntry, WAIT_CONTEXT, WaitListEntry);
-                FsRtlRemoveAndCompleteWaitIrp(WaitCtx);
-            }
+            while (!IsListEmpty(&Oplock->WaitListHead))
+        {
+            /* The wait context is freed by the completion, so never walk through it */
+            WaitCtx = CONTAINING_RECORD(Oplock->WaitListHead.Flink, WAIT_CONTEXT, WaitListEntry);
+            FsRtlRemoveAndCompleteWaitIrp(WaitCtx);
+        }
 
             /* Done! */
             ExReleaseFastMutexUnsafe(Oplock->IntLock);
@@ -975,11 +976,10 @@ FsRtlOplockBreakToNone(IN PINTERNAL_OPLOCK Oplock,
     else if (Oplock->Flags == LEVEL_2_OPLOCK)
     {
         /* Complete any IRP in the shared lock */
-        for (NextEntry = Oplock->SharedListHead.Flink;
-             NextEntry != &Oplock->SharedListHead;
-             NextEntry = NextEntry->Flink)
+        while (!IsListEmpty(&Oplock->SharedListHead))
         {
-            ListIrp = CONTAINING_RECORD(NextEntry, IRP, Tail.Overlay.ListEntry);
+            /* The IRP is completed (and may be freed), so never walk through it */
+            ListIrp = CONTAINING_RECORD(Oplock->SharedListHead.Flink, IRP, Tail.Overlay.ListEntry);
             FsRtlRemoveAndCompleteIrp(ListIrp);
         }
 
@@ -1016,11 +1016,12 @@ FsRtlOplockBreakToNone(IN PINTERNAL_OPLOCK Oplock,
     /* Otherwise, wait on the IRP */
     if (Stack->MajorFunction != IRP_MJ_CREATE || !BooleanFlagOn(Stack->Parameters.Create.Options, FILE_COMPLETE_IF_OPLOCKED))
     {
+        /* FsRtlWaitOnIrp releases IntLock itself */
         FsRtlWaitOnIrp(Oplock, Irp, Context, CompletionRoutine, PostIrpRoutine, &WaitEvent);
 
-        ExReleaseFastMutexUnsafe(Oplock->IntLock);
-
-        return STATUS_SUCCESS;
+        /* With a completion routine the IRP is queued and the caller must not
+         * touch it any more: tell it so. Without one we waited for the break. */
+        return (CompletionRoutine != NULL) ? STATUS_PENDING : STATUS_SUCCESS;
     }
     /* Done */
     else
@@ -1039,7 +1040,6 @@ FsRtlOplockBreakToII(IN PINTERNAL_OPLOCK Oplock,
                      IN POPLOCK_WAIT_COMPLETE_ROUTINE CompletionRoutine OPTIONAL,
                      IN POPLOCK_FS_PREPOST_IRP PostIrpRoutine OPTIONAL)
 {
-    PLIST_ENTRY NextEntry;
     PWAIT_CONTEXT WaitCtx;
     KEVENT WaitEvent;
 
@@ -1091,13 +1091,12 @@ FsRtlOplockBreakToII(IN PINTERNAL_OPLOCK Oplock,
             Oplock->FileObject = NULL;
 
             /* Finally, complete any waiter */
-            for (NextEntry = Oplock->WaitListHead.Flink;
-                 NextEntry != &Oplock->WaitListHead;
-                 NextEntry = NextEntry->Flink)
-            {
-                WaitCtx = CONTAINING_RECORD(NextEntry, WAIT_CONTEXT, WaitListEntry);
-                FsRtlRemoveAndCompleteWaitIrp(WaitCtx);
-            }
+            while (!IsListEmpty(&Oplock->WaitListHead))
+        {
+            /* The wait context is freed by the completion, so never walk through it */
+            WaitCtx = CONTAINING_RECORD(Oplock->WaitListHead.Flink, WAIT_CONTEXT, WaitListEntry);
+            FsRtlRemoveAndCompleteWaitIrp(WaitCtx);
+        }
 
             ExReleaseFastMutexUnsafe(Oplock->IntLock);
 
@@ -1124,11 +1123,12 @@ FsRtlOplockBreakToII(IN PINTERNAL_OPLOCK Oplock,
     /* Wait if required */
     if (Stack->MajorFunction != IRP_MJ_CREATE || !BooleanFlagOn(Stack->Parameters.Create.Options, FILE_COMPLETE_IF_OPLOCKED))
     {
+        /* FsRtlWaitOnIrp releases IntLock itself */
         FsRtlWaitOnIrp(Oplock, Irp, Context, CompletionRoutine, PostIrpRoutine, &WaitEvent);
 
-        ExReleaseFastMutexUnsafe(Oplock->IntLock);
-
-        return STATUS_SUCCESS;
+        /* With a completion routine the IRP is queued and the caller must not
+         * touch it any more: tell it so. Without one we waited for the break. */
+        return (CompletionRoutine != NULL) ? STATUS_PENDING : STATUS_SUCCESS;
     }
     else
     {
@@ -1623,10 +1623,10 @@ FsRtlUninitializeOplock(IN POPLOCK Oplock)
         ExAcquireFastMutexUnsafe(IntOplock->IntLock);
 
         /* If we had IRPs waiting for the lock, complete them */
-        for (NextEntry = IntOplock->WaitListHead.Flink;
-             NextEntry != &IntOplock->WaitListHead;
-            NextEntry = NextEntry->Flink)
+        while (!IsListEmpty(&IntOplock->WaitListHead))
         {
+            /* The wait context is freed below, so always take the head */
+            NextEntry = IntOplock->WaitListHead.Flink;
             WaitCtx = CONTAINING_RECORD(NextEntry, WAIT_CONTEXT, WaitListEntry);
             Irp = WaitCtx->Irp;
 
@@ -1644,10 +1644,10 @@ FsRtlUninitializeOplock(IN POPLOCK Oplock)
         }
 
         /* If we had shared IRPs (LEVEL_2), complete them */
-        for (NextEntry = IntOplock->SharedListHead.Flink;
-             NextEntry != &IntOplock->SharedListHead;
-             NextEntry = NextEntry->Flink)
+        while (!IsListEmpty(&IntOplock->SharedListHead))
         {
+            /* The IRP is completed (and freed) below, so always take the head */
+            NextEntry = IntOplock->SharedListHead.Flink;
             Irp = CONTAINING_RECORD(NextEntry, IRP, Tail.Overlay.ListEntry);
 
             RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
