@@ -1834,6 +1834,65 @@ MiReserveFaultRmap(PEPROCESS Process, PVOID *RmapEntry)
         *(RmapEntry) = NULL;                                                  \
     } while (0)
 
+/*
+ * Synchronization of a page-in from a file with the file system, for the fault path.
+ *
+ * Windows takes no file system lock in Mm when a fault pages data in: it sends the file system a paging
+ * read (IRP_PAGING_IO | IRP_NOCACHE, IoPageRead), and the file system synchronizes that read itself,
+ * normally with its paging I/O resource shared, which size changes hold exclusive. The acquire callbacks
+ * have other callers: AcquireFileForNtCreateSection (and the FsFilter section synchronization callbacks)
+ * is for creating a section, AcquireForCcFlush for flushing, AcquireForModWrite for the mapped page writer.
+ *
+ * Our Mm clamps the read at the file's valid data length itself (MmMakeSegmentResident), so the VDL must not
+ * move while the read runs. That used to be done with the section creation acquire, which made a fault
+ * call the file system's and the filters' section callbacks, and wait for the file exclusively: a thread
+ * that faulted on a cache view while it held the file waited for itself. Instead, the paging I/O semantics:
+ *  - a thread that holds the file's main resource, in either mode, takes nothing more: every size or VDL change
+ *    needs the main resource exclusive, so its hold pins the VDL (Cc pages data in under that hold too). It
+ *    must not wait for the paging resource either: a file system may take the paging resource before the main
+ *    one (btrfs, non-cached write), and our hold of the main one would then deadlock with it;
+ *  - otherwise the paging resource, shared, without waiting for exclusive waiters while it is shared-owned, as
+ *    paging I/O does. A thread that holds it already, in either mode, gets it recursively;
+ *  - a file without a paging resource: the main resource, the same way.
+ * No callback is called. A file system-private lock the thread holds is not known here; the only wait is for the
+ * paging resource while another thread changes the file's size, which is what the file system's own paging read
+ * waits for too.
+ */
+static
+PERESOURCE
+MiLockFileForPageIn(
+    _In_ PFILE_OBJECT FileObject)
+{
+    PFSRTL_COMMON_FCB_HEADER FcbHeader = FileObject->FsContext;
+    PERESOURCE Resource;
+
+    if (!FcbHeader)
+        return NULL;
+
+    if (FcbHeader->Resource && ExIsResourceAcquiredSharedLite(FcbHeader->Resource))
+        return NULL;
+
+    Resource = FcbHeader->PagingIoResource ? FcbHeader->PagingIoResource : FcbHeader->Resource;
+    if (!Resource)
+        return NULL;
+
+    FsRtlEnterFileSystem();
+    ExAcquireSharedStarveExclusive(Resource, TRUE);
+    return Resource;
+}
+
+static
+VOID
+MiUnlockFileForPageIn(
+    _In_opt_ PERESOURCE Resource)
+{
+    if (!Resource)
+        return;
+
+    ExReleaseResourceLite(Resource);
+    FsRtlExitFileSystem();
+}
+
 static
 NTSTATUS
 MiNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
@@ -2088,27 +2147,20 @@ MiNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
         MmUnlockAddressSpace(AddressSpace);
 
         PFSRTL_COMMON_FCB_HEADER FcbHeader = Segment->FileObject->FsContext;
-        BOOLEAN FileLocked = FALSE;
+        PERESOURCE FileLock;
 
         /*
-         * The data must be paged in. Lock the file, so that the VDL doesn't get updated behind us.
-         *
-         * Unless this thread holds the file already: a file system copying from the cache under its
-         * shared hold of the file (CcCopyRead, FsRtlCopyRead) faults here when Mm took the view's page
-         * away after Cc made it resident. Waiting for the file exclusively would wait for ourselves,
-         * forever, and every later user of the file would queue behind us. Our hold keeps the VDL from
-         * moving just as well, and Cc pages the same data in under it (CcRosEnsureVacbResident).
+         * The data must be paged in, with the VDL held still while the read runs (see MiLockFileForPageIn).
+         * A file system copying from the cache under its shared hold of the file (CcCopyRead, FsRtlCopyRead)
+         * faults here when Mm took the view's page away after Cc made it resident: it must not wait for the
+         * file, nor must a thread that holds only the file's paging resource.
          */
-        if (!FcbHeader || !FcbHeader->Resource || !ExIsResourceAcquiredSharedLite(FcbHeader->Resource))
-        {
-            FsRtlAcquireFileExclusive(Segment->FileObject);
-            FileLocked = TRUE;
-        }
+        FileLock = MiLockFileForPageIn(Segment->FileObject);
 
-        Status = MmMakeSegmentResident(Segment, Offset.QuadPart, PAGE_SIZE, &FcbHeader->ValidDataLength, FALSE, NULL);
+        Status = MmMakeSegmentResident(Segment, Offset.QuadPart, PAGE_SIZE,
+                                       FcbHeader ? &FcbHeader->ValidDataLength : NULL, FALSE, NULL);
 
-        if (FileLocked)
-            FsRtlReleaseFile(Segment->FileObject);
+        MiUnlockFileForPageIn(FileLock);
 
         /* Lock address space again */
         MmLockAddressSpace(AddressSpace);
