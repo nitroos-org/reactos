@@ -757,6 +757,7 @@ ConSrvInitConsole(OUT PHANDLE NewConsoleHandle,
     Console->LineInsertToggle =
     Console->InsertMode = ConsoleInfo->InsertMode;
     Console->QuickEdit  = ConsoleInfo->QuickEdit;
+    Console->ExtendedFlags = FALSE;
 
     /* Popup windows */
     InitializeListHead(&Console->PopupWindows);
@@ -1985,7 +1986,7 @@ CON_API(SrvGetConsoleMode,
          */
         if (INPUT_BUFFER == Object->Type)
         {
-            if (Console->InsertMode || Console->QuickEdit)
+            if (Console->InsertMode || Console->QuickEdit || Console->ExtendedFlags)
             {
                 /* Windows also adds ENABLE_EXTENDED_FLAGS, even if it's not documented on MSDN */
                 *ConsoleMode |= ENABLE_EXTENDED_FLAGS;
@@ -2056,7 +2057,21 @@ CON_API(SrvSetConsoleMode,
                 {
                     Console->InsertMode = !!(ConsoleMode & ENABLE_INSERT_MODE);
                     Console->QuickEdit  = !!(ConsoleMode & ENABLE_QUICK_EDIT_MODE);
+                    Console->ExtendedFlags = TRUE;
                 }
+            }
+            else
+            {
+                /*
+                 * A mode without ENABLE_EXTENDED_FLAGS turns insert mode and
+                 * QuickEdit off, as on Windows 10 (GetConsoleMode then reports
+                 * neither). This is how a program that sets its own input mode
+                 * (for example only ENABLE_MOUSE_INPUT) gets the mouse events:
+                 * with QuickEdit on, the mouse selects text instead.
+                 */
+                Console->InsertMode = FALSE;
+                Console->QuickEdit  = FALSE;
+                Console->ExtendedFlags = FALSE;
             }
         }
     }

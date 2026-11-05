@@ -160,6 +160,7 @@ typedef struct _CONSRV_CONSOLE
 
     BOOLEAN InsertMode;
     BOOLEAN QuickEdit;
+    BOOLEAN ExtendedFlags;                  /* The last input mode had ENABLE_EXTENDED_FLAGS: GetConsoleMode reports it */
 
 /************************ Virtual DOS Machine support *************************/
     COORD   VDMBufferSize;             /* Real size of the VDM buffer, in units of ??? */

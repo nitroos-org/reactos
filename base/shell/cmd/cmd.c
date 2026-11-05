@@ -335,6 +335,23 @@ ResetConTitle(VOID)
 }
 
 /*
+ * The standard input mode of the console: line input with echo, keeping the
+ * control modes (QuickEdit, insert mode) the console has now, as on Windows.
+ * A mode without ENABLE_EXTENDED_FLAGS turns them off, and that would take the
+ * mouse selection from the console window at the first command.
+ */
+static DWORD
+GetStandardInputMode(HANDLE hInput)
+{
+    DWORD dwMode = 0;
+
+    if (!GetConsoleMode(hInput, &dwMode))
+        dwMode = 0;
+    return ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT |
+           (dwMode & (ENABLE_EXTENDED_FLAGS | ENABLE_INSERT_MODE | ENABLE_QUICK_EDIT_MODE));
+}
+
+/*
  * This command (in First) was not found in the command table
  *
  * Full  - output buffer to hold whole command line
@@ -454,7 +471,7 @@ Execute(LPTSTR Full, LPTSTR First, LPTSTR Rest, PARSED_COMMAND *Cmd)
 
         /* Set the console to standard mode */
         SetConsoleMode(ConStreamGetOSHandle(StdIn),
-                       ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+                       GetStandardInputMode(ConStreamGetOSHandle(StdIn)));
 
         if (CreateProcess(szFullName,
                           szFullCmdLine,
@@ -530,7 +547,7 @@ Execute(LPTSTR Full, LPTSTR First, LPTSTR Rest, PARSED_COMMAND *Cmd)
 
         /* Restore the default console mode */
         SetConsoleMode(ConStreamGetOSHandle(StdIn),
-                       ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+                       GetStandardInputMode(ConStreamGetOSHandle(StdIn)));
         SetConsoleMode(ConStreamGetOSHandle(StdOut),
                        ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT);
     }
@@ -697,7 +714,7 @@ static VOID
 SetStandardConsoleModes(VOID)
 {
     SetConsoleMode(ConStreamGetOSHandle(StdIn),
-                   ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+                   GetStandardInputMode(ConStreamGetOSHandle(StdIn)));
     SetConsoleMode(ConStreamGetOSHandle(StdOut),
                    ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT);
 }
@@ -2358,7 +2375,7 @@ Initialize(VOID)
     hIn  = ConStreamGetOSHandle(StdIn);
     SetConsoleMode(hOut, 0); // Reinitialize the console output mode
     SetConsoleMode(hOut, ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT);
-    SetConsoleMode(hIn , ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+    SetConsoleMode(hIn , GetStandardInputMode(hIn));
 
     cmdLine = GetCommandLine();
     TRACE ("[command args: %s]\n", debugstr_aw(cmdLine));
@@ -2538,7 +2555,7 @@ static VOID Cleanup(VOID)
 
     /* Restore the default console mode */
     SetConsoleMode(ConStreamGetOSHandle(StdIn),
-                   ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+                   GetStandardInputMode(ConStreamGetOSHandle(StdIn)));
     SetConsoleMode(ConStreamGetOSHandle(StdOut),
                    ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT);
 
