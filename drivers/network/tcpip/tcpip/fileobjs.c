@@ -673,6 +673,8 @@ NTSTATUS FileOpenAddress(
   /* Return address file object */
   Request->Handle.AddressHandle = AddrFile;
 
+  AddrFile->ExplicitPort = ExplicitPort;
+
   /* Add address file to global list, if the bind rules let it have its port */
   TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
   Status = STATUS_SUCCESS;

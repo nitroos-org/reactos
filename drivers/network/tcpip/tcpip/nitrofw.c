@@ -550,6 +550,7 @@ static NTSTATUS FwCompilePolicy(PFW_POLICY Policy)
 
 static VOID FwBackfillImages(VOID);
 static NTSTATUS FwGetDropLog(PVOID Buf, ULONG InLen, ULONG OutLen, PULONG_PTR Information);
+static NTSTATUS FwGetListeners(PVOID Buf, ULONG OutLen, PULONG_PTR Information);
 
 static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
@@ -671,6 +672,14 @@ static NTSTATUS FwDeviceControl(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         {
             ULONG_PTR Info = 0;
             NTSTATUS Status = FwGetDropLog(Buf, IrpSp->Parameters.DeviceIoControl.InputBufferLength, OutLen, &Info);
+            Irp->IoStatus.Information = Info;
+            return Status;
+        }
+
+        case IOCTL_NITROFW_GET_LISTENERS:
+        {
+            ULONG_PTR Info = 0;
+            NTSTATUS Status = FwGetListeners(Buf, OutLen, &Info);
             Irp->IoStatus.Information = Info;
             return Status;
         }
@@ -1426,6 +1435,60 @@ static NTSTATUS FwGetDropLog(PVOID Buf, ULONG InLen, ULONG OutLen, PULONG_PTR In
     Hdr->Count = Count;
     Hdr->Flags = FwLogEnabled ? NITROFW_DROPLOG_ON : 0;
     *Information = sizeof(NITROFW_DROPLOG) + (ULONG_PTR)Count * sizeof(NITROFW_DROP_RECORD);
+    return STATUS_SUCCESS;
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Listener snapshot (the block prompt in mpssvc)
+ * ---------------------------------------------------------------------------------------------- */
+
+/* IOCTL_NITROFW_GET_LISTENERS: TCP address files with a listener and UDP address files bound to an explicit port */
+static NTSTATUS FwGetListeners(PVOID Buf, ULONG OutLen, PULONG_PTR Information)
+{
+    PNITROFW_LISTENERS Hdr = Buf;
+    PNITROFW_LISTENER Out;
+    ULONG Fit, Count = 0, Total = 0;
+    KIRQL OldIrql;
+    PLIST_ENTRY Entry;
+
+    if (!Buf || OutLen < sizeof(NITROFW_LISTENERS))
+        return STATUS_BUFFER_TOO_SMALL;
+    Out = (PNITROFW_LISTENER)(Hdr + 1);
+    Fit = (OutLen - sizeof(NITROFW_LISTENERS)) / sizeof(NITROFW_LISTENER);
+    if (Fit > NITROFW_MAX_LISTENERS)
+        Fit = NITROFW_MAX_LISTENERS;
+
+    TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
+    for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead; Entry = Entry->Flink)
+    {
+        PADDRESS_FILE A = CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry);
+        UCHAR Flags;
+
+        if (A->PortReleased || A->Sharers == 0 || A->Port == 0 || A->Address.Type != IP_ADDRESS_V4)
+            continue;
+        if (A->Protocol == IPPROTO_TCP && A->Listener != NULL)
+            Flags = NITROFW_LISTENER_TCP;
+        else if (A->Protocol == IPPROTO_UDP && A->ExplicitPort)
+            Flags = 0;
+        else
+            continue;
+        Total++;
+        if (Count >= Fit)
+            continue;
+        RtlZeroMemory(&Out[Count], sizeof(Out[Count]));
+        Out[Count].ProcessId = (ULONG)(ULONG_PTR)A->ProcessId;
+        Out[Count].Port = RtlUshortByteSwap(A->Port);
+        Out[Count].Protocol = (UCHAR)A->Protocol;
+        Out[Count].Flags = Flags;
+        Out[Count].Addr = FwNtohl(A->Address.Address.IPv4Address);
+        Out[Count].CreationTime = A->CreationTime.QuadPart;
+        Count++;
+    }
+    TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
+
+    Hdr->Count = Count;
+    Hdr->Total = Total;
+    *Information = sizeof(NITROFW_LISTENERS) + (ULONG_PTR)Count * sizeof(NITROFW_LISTENER);
     return STATUS_SUCCESS;
 }
 
