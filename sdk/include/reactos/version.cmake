@@ -72,7 +72,7 @@ if((EXISTS "${REACTOS_SOURCE_DIR}/.git") AND (NOT NO_REACTOS_BUILDNO))
     endif()
 endif()
 
-# nitro identification, shown in the OS UI next to the ReactOS version (desktop watermark, About/winver).
+# NitroOS product identification shown in the OS UI (setup titles, desktop watermark, About/winver, boot text).
 # Cosmetic only: no API-visible version number depends on it.
 set(NITRO_VERSION "dev" CACHE STRING "nitro release version shown in the OS UI")
 # Base URL of the release pages, WITHOUT the version: the release page of a build is <base>/<NITRO_VERSION>
@@ -94,6 +94,34 @@ if(NITRO_SHA STREQUAL "")
         )
         if(GIT_CALL_RESULT EQUAL 0)
             set(NITRO_SHA "${NITRO_GIT_SHA}")
+        endif()
+        option(NITRO_TRACK_GIT_HEAD "re-run CMake when git HEAD moves (keeps the UI sha exact in incremental trees)" OFF)
+        if(NITRO_TRACK_GIT_HEAD)
+            # Re-run CMake (and so regenerate buildno.h) when HEAD moves, otherwise an incremental tree keeps the SHA
+            # of its first configure. Only existing files may be listed (a missing one breaks the ninja manifest).
+            execute_process(
+                COMMAND "${GIT_EXECUTABLE}" symbolic-ref -q HEAD
+                WORKING_DIRECTORY ${REACTOS_SOURCE_DIR}
+                OUTPUT_VARIABLE NITRO_GIT_HEAD_REF
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+            )
+            foreach(_nitro_dep HEAD logs/HEAD ${NITRO_GIT_HEAD_REF})
+                execute_process(
+                    COMMAND "${GIT_EXECUTABLE}" rev-parse --git-path ${_nitro_dep}
+                    WORKING_DIRECTORY ${REACTOS_SOURCE_DIR}
+                    OUTPUT_VARIABLE _nitro_dep_file
+                    RESULT_VARIABLE GIT_CALL_RESULT
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET
+                )
+                if(GIT_CALL_RESULT EQUAL 0)
+                    get_filename_component(_nitro_dep_file "${_nitro_dep_file}" ABSOLUTE BASE_DIR "${REACTOS_SOURCE_DIR}")
+                    if(EXISTS "${_nitro_dep_file}")
+                        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_nitro_dep_file}")
+                    endif()
+                endif()
+            endforeach()
         endif()
     endif()
 endif()
@@ -126,14 +154,22 @@ if(NITRO_VERSION STREQUAL "dev")
 else()
     set(NITRO_ID "${NITRO_VERSION}")
 endif()
-set(NITRO_TITLE_TEMPLATE "ReactOS (Nitro) - @NITRO_ID@" CACHE STRING "OS UI title: desktop watermark first line and About/winver")
-set(NITRO_NOTICE "Unofficial build, not supported by the ReactOS project" CACHE STRING "OS UI notice shown in About/winver")
+# NITRO_NAME is THE product name: every string the branding layer adds is built from it (BRAND_PRODUCT_NAME in buildno.h).
+set(NITRO_NAME "NitroOS" CACHE STRING "product name shown in the OS UI (central switch for the branding layer)")
+set(NITRO_TITLE_TEMPLATE "@NITRO_NAME@ @NITRO_ID@ (unofficial build based on ReactOS)" CACHE STRING "OS UI title: desktop watermark first line and About/winver")
+set(NITRO_NOTICE "@NITRO_NAME@ is an unofficial build based on ReactOS. ReactOS is a trademark of the ReactOS project. Do not report issues from this build to the ReactOS project." CACHE STRING "OS UI notice shown in About/winver")
 string(CONFIGURE "${NITRO_TITLE_TEMPLATE}" NITRO_TITLE @ONLY)
+string(CONFIGURE "${NITRO_NOTICE}" NITRO_NOTICE @ONLY)
+# Pieces used by the branding layer: BRAND_VERSION is the short form ("dev <sha>" or the release version),
+# BRAND_VERSION_DETAIL the qualifier shown after it. REVISION, BuildLab and the NT version numbers that programs read are unchanged.
+set(BRAND_VERSION "${NITRO_ID}")
+set(BRAND_VERSION_MAIN "${NITRO_ID}")
+set(BRAND_VERSION_DETAIL "unofficial build based on ReactOS")
 # every NITRO_* string ends up inside a C string literal in buildno.h: printable ASCII only, no quotes or backslashes
-foreach(_nitro_var NITRO_VERSION NITRO_SHA NITRO_UPSTREAM_SHA NITRO_RELEASE_URL NITRO_TITLE_TEMPLATE NITRO_TITLE NITRO_NOTICE)
+foreach(_nitro_var NITRO_NAME NITRO_VERSION NITRO_SHA NITRO_UPSTREAM_SHA NITRO_RELEASE_URL NITRO_TITLE_TEMPLATE NITRO_TITLE NITRO_NOTICE)
     string(LENGTH "${${_nitro_var}}" _nitro_len)
-    if(_nitro_len GREATER 128 OR "${${_nitro_var}}" MATCHES "[^ -~]" OR "${${_nitro_var}}" MATCHES "[\"\\\\]")
-        message(FATAL_ERROR "${_nitro_var} must be at most 128 printable ASCII characters without quotes or backslashes")
+    if(_nitro_len GREATER 256 OR "${${_nitro_var}}" MATCHES "[^ -~]" OR "${${_nitro_var}}" MATCHES "[\"\\\\]")
+        message(FATAL_ERROR "${_nitro_var} must be at most 256 printable ASCII characters without quotes or backslashes")
     endif()
 endforeach()
 

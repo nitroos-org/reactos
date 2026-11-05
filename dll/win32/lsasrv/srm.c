@@ -127,6 +127,29 @@ LsapRmServerThread(
             continue;
         }
 
+        /* A datagram carries no reply: the SRM tells us that a logon session lost its last token */
+        if (Message.Header.u2.s2.Type == LPC_DATAGRAM)
+        {
+            ReplyMessage = NULL;
+
+            if (Message.ApiNumber == LsapLogonSessionTerminatedApi)
+            {
+                /*
+                 * Windows deletes the session here (LogonSessionTerminated). The SRM refuses
+                 * the delete if a token took a new reference in the meantime, then the session
+                 * stays and the next last close reports it again.
+                 */
+                LsapDeleteLogonSession(&Message.u.LogonLuid);
+            }
+            else
+            {
+                ERR("LsapRmServerThread - invalid datagram API number: 0x%lx\n",
+                    Message.ApiNumber);
+            }
+
+            continue;
+        }
+
         /* Check if this is an actual request */
         if (Message.Header.u2.s2.Type == LPC_REQUEST)
         {

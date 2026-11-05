@@ -245,6 +245,39 @@ RtlGetDeviceFamilyInfoEnum(
         *DeviceForm = 0;
 }
 
+/*
+ * The names of the family and form RtlGetDeviceFamilyInfoEnum reports: sizes are in bytes and count
+ * the terminating null. Where one buffer is too small both sizes come back and nothing is copied.
+ */
+NTSTATUS
+NTAPI
+RtlConvertDeviceFamilyInfoToString(
+    _Inout_ PULONG DeviceFamilySize,
+    _Inout_ PULONG DeviceFormSize,
+    _Out_writes_bytes_opt_(*DeviceFamilySize) PWSTR DeviceFamily,
+    _Out_writes_bytes_opt_(*DeviceFormSize) PWSTR DeviceForm)
+{
+    static const WCHAR FamilyName[] = L"Windows.Desktop";
+    static const WCHAR FormName[] = L"Unknown";
+
+    if (!DeviceFamilySize || !DeviceFormSize)
+        return STATUS_INVALID_PARAMETER;
+
+    if (*DeviceFamilySize < sizeof(FamilyName) || *DeviceFormSize < sizeof(FormName) ||
+        !DeviceFamily || !DeviceForm)
+    {
+        *DeviceFamilySize = sizeof(FamilyName);
+        *DeviceFormSize = sizeof(FormName);
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlCopyMemory(DeviceFamily, FamilyName, sizeof(FamilyName));
+    RtlCopyMemory(DeviceForm, FormName, sizeof(FormName));
+    *DeviceFamilySize = sizeof(FamilyName);
+    *DeviceFormSize = sizeof(FormName);
+    return STATUS_SUCCESS;
+}
+
 /* STRINGS ******************************************************************/
 
 BOOLEAN

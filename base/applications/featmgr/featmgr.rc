@@ -1,4 +1,4 @@
-#define REACTOS_STR_FILE_DESCRIPTION  "Optional Features manager (CLI)"
+#define REACTOS_STR_FILE_DESCRIPTION  BRAND_PRODUCT_NAME " Features manager (CLI)"
 #define REACTOS_STR_INTERNAL_NAME     "featmgr"
 #define REACTOS_STR_ORIGINAL_FILENAME "featmgr.exe"
 #include <reactos/version.rc>

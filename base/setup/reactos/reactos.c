@@ -8,6 +8,7 @@
  */
 
 #include "reactos.h"
+#include <reactos/buildno.h>
 #include <winnls.h> // For GetUserDefaultLCID()
 
 #define NTOS_MODE_USER
@@ -1215,7 +1216,7 @@ SummaryDlgProc(
                     else
                     {
                         StringCchCopyW(CurrentItemText, ARRAYSIZE(CurrentItemText),
-                                       L"New ReactOS installation");
+                                       L"New " BRAND_PRODUCT_NAME_W L" installation");
                     }
                     SetDlgItemTextW(hwndDlg, IDC_INSTALLTYPE, CurrentItemText);
 

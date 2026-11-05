@@ -30,6 +30,13 @@ typedef struct _LSAP_LOGON_SESSION
 LIST_ENTRY SessionListHead;
 ULONG SessionCount;
 
+/*
+ * Protects SessionListHead, SessionCount and the session entries. The list is changed by the
+ * authentication port threads (logon) and by the SRM server thread (a logon session whose last
+ * token was closed is deleted there), so every access takes this lock.
+ */
+static RTL_CRITICAL_SECTION SessionListLock;
+
 /* FUNCTIONS ***************************************************************/
 
 VOID
@@ -37,6 +44,7 @@ LsapInitLogonSessions(VOID)
 {
     InitializeListHead(&SessionListHead);
     SessionCount = 0;
+    RtlInitializeCriticalSection(&SessionListLock);
 }
 
 
@@ -63,8 +71,9 @@ LsapGetLogonSession(IN PLUID LogonId)
 }
 
 
+static
 NTSTATUS
-LsapSetLogonSessionData(
+LsapSetLogonSessionDataLocked(
     _In_ PLUID LogonId,
     _In_ ULONG LogonType,
     _In_ PUNICODE_STRING UserName,
@@ -106,6 +115,7 @@ LsapSetLogonSessionData(
         /* Cleanup and fail */
         if (Session->UserName.Buffer != NULL)
             RtlFreeHeap(RtlGetProcessHeap(), 0, Session->UserName.Buffer);
+        RtlInitEmptyUnicodeString(&Session->UserName, NULL, 0);
 
         return STATUS_INVALID_PARAMETER;
     }
@@ -122,6 +132,7 @@ LsapSetLogonSessionData(
             /* Cleanup and fail */
             if (Session->UserName.Buffer != NULL)
                 RtlFreeHeap(RtlGetProcessHeap(), 0, Session->UserName.Buffer);
+            RtlInitEmptyUnicodeString(&Session->UserName, NULL, 0);
 
             return STATUS_INSUFFICIENT_RESOURCES;
         }
@@ -142,8 +153,10 @@ LsapSetLogonSessionData(
         /* Cleanup and fail */
         if (Session->LogonDomain.Buffer != NULL)
             RtlFreeHeap(RtlGetProcessHeap(), 0, Session->LogonDomain.Buffer);
+        RtlInitEmptyUnicodeString(&Session->LogonDomain, NULL, 0);
         if (Session->UserName.Buffer != NULL)
             RtlFreeHeap(RtlGetProcessHeap(), 0, Session->UserName.Buffer);
+        RtlInitEmptyUnicodeString(&Session->UserName, NULL, 0);
 
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -151,6 +164,24 @@ LsapSetLogonSessionData(
     RtlCopyMemory(Session->Sid, Sid, Length);
 
     return STATUS_SUCCESS;
+}
+
+
+NTSTATUS
+LsapSetLogonSessionData(
+    _In_ PLUID LogonId,
+    _In_ ULONG LogonType,
+    _In_ PUNICODE_STRING UserName,
+    _In_ PUNICODE_STRING LogonDomain,
+    _In_ PSID Sid)
+{
+    NTSTATUS Status;
+
+    RtlEnterCriticalSection(&SessionListLock);
+    Status = LsapSetLogonSessionDataLocked(LogonId, LogonType, UserName, LogonDomain, Sid);
+    RtlLeaveCriticalSection(&SessionListLock);
+
+    return Status;
 }
 
 
@@ -163,16 +194,24 @@ LsapCreateLogonSession(IN PLUID LogonId)
 
     TRACE("LsapCreateLogonSession(%p)\n", LogonId);
 
+    RtlEnterCriticalSection(&SessionListLock);
+
     /* Fail, if a session already exists */
     if (LsapGetLogonSession(LogonId) != NULL)
+    {
+        RtlLeaveCriticalSection(&SessionListLock);
         return STATUS_LOGON_SESSION_COLLISION;
+    }
 
     /* Allocate a new session entry */
     Session = RtlAllocateHeap(RtlGetProcessHeap(),
                               HEAP_ZERO_MEMORY,
                               sizeof(LSAP_LOGON_SESSION));
     if (Session == NULL)
+    {
+        RtlLeaveCriticalSection(&SessionListLock);
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     /* Initialize the session entry */
     RtlCopyLuid(&Session->LogonId, LogonId);
@@ -185,12 +224,15 @@ LsapCreateLogonSession(IN PLUID LogonId)
     if (!NT_SUCCESS(Status))
     {
         RtlFreeHeap(RtlGetProcessHeap(), 0, Session);
+        RtlLeaveCriticalSection(&SessionListLock);
         return Status;
     }
 
     /* Insert the new session into the session list */
     InsertHeadList(&SessionListHead, &Session->Entry);
     SessionCount++;
+
+    RtlLeaveCriticalSection(&SessionListLock);
 
     return STATUS_SUCCESS;
 }
@@ -205,18 +247,29 @@ LsapDeleteLogonSession(IN PLUID LogonId)
 
     TRACE("LsapDeleteLogonSession(%p)\n", LogonId);
 
+    RtlEnterCriticalSection(&SessionListLock);
+
     /* Fail, if the session does not exist */
     Session = LsapGetLogonSession(LogonId);
     if (Session == NULL)
+    {
+        RtlLeaveCriticalSection(&SessionListLock);
         return STATUS_NO_SUCH_LOGON_SESSION;
+    }
 
     TRACE("LsapDeleteLogonSession(0x%08lx%08lx)\n",
           LogonId->HighPart, LogonId->LowPart);
 
-    /* Tell ntoskrnl to delete the logon session */
+    /*
+     * Tell ntoskrnl to delete the logon session. It refuses while a token still references it.
+     * A session that ntoskrnl no longer knows is only a stale entry of ours, drop it.
+     */
     Status = LsapRmDeleteLogonSession(LogonId);
-    if (!NT_SUCCESS(Status))
+    if (!NT_SUCCESS(Status) && Status != STATUS_NO_SUCH_LOGON_SESSION)
+    {
+        RtlLeaveCriticalSection(&SessionListLock);
         return Status;
+    }
 
     /* Notify the authentication packages */
     LsapTerminateLogon(LogonId);
@@ -249,6 +302,8 @@ LsapDeleteLogonSession(IN PLUID LogonId)
 
     /* Free the session entry */
     RtlFreeHeap(RtlGetProcessHeap(), 0, Session);
+
+    RtlLeaveCriticalSection(&SessionListLock);
 
     return STATUS_SUCCESS;
 }
@@ -303,19 +358,25 @@ LsapEnumLogonSessions(IN OUT PLSA_API_MSG RequestMsg)
     PLIST_ENTRY SessionEntry;
     PLSAP_LOGON_SESSION CurrentSession;
     PLUID SessionList;
-    ULONG i, Length;
+    ULONG i, Length, Count;
     SIZE_T MemSize;
     PVOID ClientBaseAddress = NULL;
     NTSTATUS Status;
 
     TRACE("LsapEnumLogonSessions(%p)\n", RequestMsg);
 
-    Length = SessionCount * sizeof(LUID);
+    RtlEnterCriticalSection(&SessionListLock);
+
+    Count = SessionCount;
+    Length = Count * sizeof(LUID);
     SessionList = RtlAllocateHeap(RtlGetProcessHeap(),
                                   HEAP_ZERO_MEMORY,
                                   Length);
     if (SessionList == NULL)
+    {
+        RtlLeaveCriticalSection(&SessionListLock);
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     i = 0;
     SessionEntry = SessionListHead.Flink;
@@ -331,6 +392,8 @@ LsapEnumLogonSessions(IN OUT PLSA_API_MSG RequestMsg)
         SessionEntry = SessionEntry->Flink;
         i++;
     }
+
+    RtlLeaveCriticalSection(&SessionListLock);
 
     InitializeObjectAttributes(&ObjectAttributes,
                                NULL,
@@ -377,7 +440,7 @@ LsapEnumLogonSessions(IN OUT PLSA_API_MSG RequestMsg)
         goto done;
     }
 
-    RequestMsg->EnumLogonSessions.Reply.LogonSessionCount = SessionCount;
+    RequestMsg->EnumLogonSessions.Reply.LogonSessionCount = Count;
     RequestMsg->EnumLogonSessions.Reply.LogonSessionBuffer = ClientBaseAddress;
 
 done:
@@ -407,9 +470,14 @@ LsapGetLogonSessionData(IN OUT PLSA_API_MSG RequestMsg)
     TRACE("LsapGetLogonSessionData(%p)\n", RequestMsg);
 
     TRACE("LogonId: %lx\n", RequestMsg->GetLogonSessionData.Request.LogonId.LowPart);
+    RtlEnterCriticalSection(&SessionListLock);
+
     Session = LsapGetLogonSession(&RequestMsg->GetLogonSessionData.Request.LogonId);
     if (Session == NULL)
+    {
+        RtlLeaveCriticalSection(&SessionListLock);
         return STATUS_NO_SUCH_LOGON_SESSION;
+    }
 
     /* Calculate the required buffer size */
     TotalLength = sizeof(SECURITY_LOGON_SESSION_DATA) +
@@ -431,7 +499,10 @@ LsapGetLogonSessionData(IN OUT PLSA_API_MSG RequestMsg)
                                        HEAP_ZERO_MEMORY,
                                        TotalLength);
     if (LocalSessionData == NULL)
+    {
+        RtlLeaveCriticalSection(&SessionListLock);
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     Ptr = (PUCHAR)((ULONG_PTR)LocalSessionData + sizeof(SECURITY_LOGON_SESSION_DATA));
     TRACE("LocalSessionData: %p  Ptr: %p\n", LocalSessionData, Ptr);
@@ -522,6 +593,9 @@ LsapGetLogonSessionData(IN OUT PLSA_API_MSG RequestMsg)
 
         Ptr = (PUCHAR)((ULONG_PTR)Ptr + Session->Upn.MaximumLength);
     }
+
+    /* The session data is copied, the entry is not used below */
+    RtlLeaveCriticalSection(&SessionListLock);
 
     InitializeObjectAttributes(&ObjectAttributes,
                                NULL,

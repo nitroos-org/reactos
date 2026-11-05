@@ -11,6 +11,7 @@
  */
 
 #include "featmgr.h"
+#include <reactos/buildno.h>
 #include <commctrl.h>
 #include <strsafe.h>
 #include "resource.h"
@@ -664,7 +665,7 @@ static void DoAction(HWND hwnd, ACTION act)
             L"it returns to Not installed.%s", g_arr[i].Name,
             !_wcsicmp(g_arr[i].Id, L"scoop") ?
                 L"\n\nThis also removes Scoop's apps and their persisted data (C:\\scoop)." : L"");
-        if (MessageBoxW(hwnd, msg, L"Optional Features", MB_YESNO | MB_ICONQUESTION) != IDYES)
+        if (MessageBoxW(hwnd, msg, BRAND_PRODUCT_NAME_W L" Features", MB_YESNO | MB_ICONQUESTION) != IDYES)
             return;
     }
 
@@ -787,7 +788,7 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
 {
     WCHAR msg[2400];
     UINT icon = MB_ICONINFORMATION;
-    LPCWSTR caption = L"Optional Features";
+    LPCWSTR caption = BRAND_PRODUCT_NAME_W L" Features";
 
     BOOL cancelled;
 
@@ -821,7 +822,7 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
     }
     else if (c->op == OP_COMMIT_OS)
     {
-        caption = L"Windows Features";
+        caption = BRAND_PRODUCT_NAME_W L" Features";
         if (c->failed)
         {
             StringCchPrintfW(msg, ARRAYSIZE(msg),
@@ -832,7 +833,7 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
             c->closeAfter = FALSE;   /* keep the dialog open so the user sees the corrected state */
         }
         else
-            StringCchCopyW(msg, ARRAYSIZE(msg), L"ReactOS has applied the requested changes.");
+            StringCchCopyW(msg, ARRAYSIZE(msg), BRAND_PRODUCT_NAME_W L" has applied the requested changes.");
         FmTakePathChange(NULL, 0);      /* the system-features summary has no PATH hint: drop a stale flag */
     }
     else if (c->op == OP_IMPORT)
@@ -948,7 +949,7 @@ static void OnOpDone(HWND hwnd, OPCTX *c)
         }
     }
 
-    if (cancelled && c->op == OP_COMMIT_OS) caption = L"Windows Features";
+    if (cancelled && c->op == OP_COMMIT_OS) caption = BRAND_PRODUCT_NAME_W L" Features";
     {
         BOOL closeAfter = c->closeAfter && !cancelled;
         FreeOp(c);
@@ -1160,7 +1161,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (!g_hFont)
                 g_hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 
-            hHdr = CreateWindowExW(0, L"STATIC", L"Turn ReactOS features on or off",
+            hHdr = CreateWindowExW(0, L"STATIC", L"Turn " BRAND_PRODUCT_NAME_W L" features on or off",
                 WS_CHILD | WS_VISIBLE, 12, 10, 708, 18, hwnd, NULL, NULL, NULL);
             g_hInstr = CreateWindowExW(0, L"STATIC", szOsInstr,
                 WS_CHILD | WS_VISIBLE, 12, 30, 708, 30, hwnd,
@@ -1326,7 +1327,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         L"that is already installing cannot be rolled back, so it is allowed to finish and is then "
                         L"removed again; this can take a little while." :
                         L"Cancel the running operation?\n\nThe running installer or script is stopped at once.",
-                        L"Optional Features", MB_YESNO | MB_ICONQUESTION) == IDYES && g_busy)
+                        BRAND_PRODUCT_NAME_W L" Features", MB_YESNO | MB_ICONQUESTION) == IDYES && g_busy)
                     BeginCancel();
                 return 0;
             }
@@ -1404,7 +1405,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     g_closeAfterOp = TRUE;      /* already stopping: close as soon as it has */
                     return 0;
                 }
-                if (MessageBoxW(hwnd, L"An operation is running: cancel it and close?", L"Optional Features",
+                if (MessageBoxW(hwnd, L"An operation is running: cancel it and close?", BRAND_PRODUCT_NAME_W L" Features",
                                 MB_YESNO | MB_ICONQUESTION) != IDYES)
                     return 0;
                 if (g_busy)
@@ -1532,7 +1533,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
         if (h > wa.bottom - wa.top) h = wa.bottom - wa.top;
         x = wa.left + ((wa.right - wa.left) - w) / 2;
         y = wa.top + ((wa.bottom - wa.top) - h) / 2;
-        hwnd = CreateWindowExW(0, wc.lpszClassName, L"Windows Features",
+        hwnd = CreateWindowExW(0, wc.lpszClassName, BRAND_PRODUCT_NAME_W L" Features",
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
             x, y, w, h, NULL, NULL, hInst, NULL);
     }

@@ -10,6 +10,7 @@
 /* INCLUDES *****************************************************************/
 
 #include "precomp.h"
+#include <reactos/buildno.h>
 
 #define COBJMACROS
 
@@ -66,7 +67,7 @@ FatalError(char *pszFmt,...)
     strcat(szBuffer, "\nRebooting now!");
     MessageBoxA(NULL,
                 szBuffer,
-                "ReactOS Setup",
+                BRAND_PRODUCT_NAME " Setup",
                 MB_OK);
 }
 
@@ -1216,7 +1217,7 @@ InstallLiveCD(VOID)
 error:
     MessageBoxW(NULL,
                 L"Failed to load LiveCD! You can shutdown your computer, or press ENTER to reboot.",
-                L"ReactOS LiveCD",
+                BRAND_PRODUCT_NAME_W L" LiveCD",
                 MB_OK);
     // HACK: This shouldn't be done here, but by the caller of InstallWindowsNt()
     /* Enable the shutdown privilege and reboot the machine */

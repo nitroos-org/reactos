@@ -1144,9 +1144,10 @@ LONG_PTR WINAPI ndr_stubless_client_call( unsigned int index, void **args, void 
  * after the call.
  *
  * The server argument area is zero initialised, so the unmarshallers of
- * FC_BOGUS_STRUCT, FC_CVARRAY and FC_BOGUS_ARRAY always allocate the block
- * (the memory layout differs from the wire layout, so the request buffer is
- * never used in place). All other types (FC_STRUCT, FC_CARRAY, strings, ...)
+ * FC_BOGUS_STRUCT, FC_CVARRAY, FC_BOGUS_ARRAY and the two union types always
+ * allocate the block (the memory layout differs from the wire layout, so the
+ * request buffer is never used in place; NdrEncapsulatedUnionUnmarshall and
+ * NdrNonEncapsulatedUnionUnmarshall allocate whenever *ppMemory is NULL). All other types (FC_STRUCT, FC_CARRAY, strings, ...)
  * may point straight into the request buffer and are left alone, as are
  * context handles and user marshalled types. As a second guard a pointer inside
  * the request buffer is never freed. If this guess is ever wrong the result is
@@ -1154,14 +1155,22 @@ LONG_PTR WINAPI ndr_stubless_client_call( unsigned int index, void **args, void 
 static BOOL stub_owns_in_block(const MIDL_STUB_MESSAGE *pStubMsg, PARAM_ATTRIBUTES attr,
                                const unsigned char *pTypeFormat, const void *block)
 {
-    if (!attr.IsIn || !attr.IsSimpleRef || attr.IsBasetype || attr.IsByValue || !block)
+    if (!attr.IsIn || attr.IsBasetype || attr.IsByValue || !block)
         return FALSE;
 
+    /* A reference parameter points at the struct or array (IsSimpleRef); a
+     * parameter declared as an array (int a[], Names[*]) has no IsSimpleRef
+     * and its type format is the array itself, the argument is the block. */
     switch (*pTypeFormat)
     {
     case FC_BOGUS_STRUCT:
+        if (!attr.IsSimpleRef)
+            return FALSE;
+        break;
     case FC_CVARRAY:
     case FC_BOGUS_ARRAY:
+    case FC_ENCAPSULATED_UNION:
+    case FC_NON_ENCAPSULATED_UNION:
         break;
     default:
         return FALSE;

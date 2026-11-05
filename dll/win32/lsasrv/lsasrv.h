@@ -77,6 +77,7 @@ typedef struct _LSAP_POLICY_AUDIT_EVENTS_DATA
 typedef struct _LSAP_LOGON_CONTEXT
 {
     LIST_ENTRY Entry;
+    ULONG_PTR ContextId;
     HANDLE ClientProcessHandle;
     HANDLE ConnectionHandle;
     BOOL TrustedCaller;

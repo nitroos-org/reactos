@@ -6,6 +6,7 @@
  */
 
 #include <freeldr.h>
+#include <reactos/buildno.h>
 #include <ndk/ldrtypes.h>
 #include <arc/setupblk.h>
 #include "winldr.h"
@@ -444,7 +445,7 @@ LoadReactOSSetup(
     /* Let the user know we started loading */
     UiDrawBackdrop(UiGetScreenHeight());
     UiDrawStatusText("Setup is loading...");
-    UiDrawProgressBarCenter("Loading ReactOS Setup...");
+    UiDrawProgressBarCenter("Loading " BRAND_PRODUCT_NAME " Setup...");
 
     /* Retrieve the system path */
     *BootPath = ANSI_NULL;

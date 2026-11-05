@@ -685,6 +685,8 @@
 @ stdcall GetTapeStatus(ptr)
 @ stdcall GetTempFileNameA(str str long ptr)
 @ stdcall GetTempFileNameW(wstr wstr long ptr)
+@ stdcall -version=0x601+ GetTempPath2A(long ptr)
+@ stdcall -version=0x601+ GetTempPath2W(long ptr)
 @ stdcall GetTempPathA(long ptr)
 @ stdcall GetTempPathW(long ptr)
 @ stdcall GetThreadContext(long ptr)
@@ -936,6 +938,7 @@
 @ stub -version=0x600+ NlsWriteEtwEvent
 @ stdcall -version=0x600+ NormalizeString(long wstr long ptr long)
 @ stdcall -stub -version=0x600+ NotifyUILanguageChange(long wstr wstr long ptr)
+@ stdcall -version=0x601+ OOBEComplete(ptr)
 @ stdcall OpenConsoleW(wstr long long long)
 @ stdcall -version=0x500-0x502 OpenDataFile(long long)
 @ stdcall OpenEventA(long long str)
@@ -1342,6 +1345,7 @@
 @ stdcall -version=0x600+ WakeAllConditionVariable(ptr) ntdll.RtlWakeAllConditionVariable
 @ stdcall -version=0x600+ WakeConditionVariable(ptr) ntdll.RtlWakeConditionVariable
 @ stdcall -version=0x600+ WerGetFlags(ptr ptr)
+@ stdcall -version=0x600+ WerRegisterCustomMetadata(wstr wstr)
 @ stdcall -version=0x600+ WerRegisterFile(wstr long long)
 @ stdcall -version=0x600+ WerRegisterMemoryBlock(ptr long)
 @ stdcall -version=0x601+ WerRegisterRuntimeExceptionModule(wstr ptr)
