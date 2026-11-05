@@ -1,0 +1,31 @@
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+IDD_ALERT DIALOGEX 0, 0, 290, 206
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | DS_SETFOREGROUND | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+EXSTYLE WS_EX_TOPMOST
+CAPTION "NitroOS Security Alert"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    ICON "", IDC_ALERTICON, 10, 10, 21, 20
+    LTEXT "NitroOS Firewall has blocked some features of this app", IDC_HEAD, 40, 10, 240, 20
+    LTEXT "", IDC_BODY, 40, 34, 240, 20
+    LTEXT "Name:", IDC_LBL_NAME, 40, 62, 40, 10
+    LTEXT "", IDC_VAL_NAME, 84, 62, 196, 10, SS_ENDELLIPSIS
+    LTEXT "Publisher:", IDC_LBL_PUB, 40, 74, 40, 10
+    LTEXT "", IDC_VAL_PUB, 84, 74, 196, 10, SS_ENDELLIPSIS
+    LTEXT "Path:", IDC_LBL_PATH, 40, 86, 40, 10
+    LTEXT "", IDC_VAL_PATH, 84, 86, 196, 20, SS_PATHELLIPSIS | SS_NOPREFIX
+    LTEXT "", IDC_ALLOW_TEXT, 40, 112, 240, 10
+    AUTOCHECKBOX "&Domain networks, such as a workplace network", IDC_DOMAIN, 50, 126, 230, 10
+    AUTOCHECKBOX "&Private networks, such as my home or work network", IDC_PRIVATE, 50, 140, 230, 10
+    AUTOCHECKBOX "P&ublic networks, such as those in airports and coffee shops (not recommended because these networks often have little or no security)", IDC_PUBLIC, 50, 154, 230, 30, BS_MULTILINE
+    DEFPUSHBUTTON "&Allow access", IDC_ALLOW, 170, 188, 56, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 230, 188, 50, 14
+END
+
+STRINGTABLE
+BEGIN
+    IDS_BODY        "NitroOS Firewall has blocked some features of %1 on all public and private networks."
+    IDS_ALLOW_TEXT  "Allow %1 to communicate on these networks:"
+    IDS_UNKNOWN     "Unknown"
+END
