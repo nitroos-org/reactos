@@ -3057,10 +3057,17 @@ WSPIoctl(IN  SOCKET Handle,
                 break;
             }
 
-            if (cbInBuffer < sizeof(GUID) ||
-                cbOutBuffer < sizeof(PVOID))
+            if (cbInBuffer < sizeof(GUID))
             {
                 Errno = WSAEINVAL;
+                break;
+            }
+
+            /* An output buffer that cannot hold the pointer: WSAEFAULT on Windows 10 (WSAID_WSASENDMSG, 2 bytes) */
+            if (cbOutBuffer < sizeof(PVOID))
+            {
+                cbRet = sizeof(PVOID);
+                Errno = WSAEFAULT;
                 break;
             }
 
@@ -3421,9 +3428,16 @@ WSPGetSockOpt(IN SOCKET Handle,
                     BufferSize = sizeof(Socket->ProtocolInfo);
                     break;
 
+                case SO_MAX_MSG_SIZE:
+                    /* The largest datagram: IPv4 UDP (65535 less the IP and UDP headers); a stream
+                     * has no message size and Windows answers all ones */
+                    DwordBuffer = (Socket->SharedData->SocketType == SOCK_DGRAM) ? 65507 : 0xFFFFFFFF;
+                    Buffer = &DwordBuffer;
+                    BufferSize = sizeof(DWORD);
+                    break;
+
                 case SO_GROUP_ID:
                 case SO_GROUP_PRIORITY:
-                case SO_MAX_MSG_SIZE:
 
                 default:
                     DbgPrint("MSAFD: Get unknown optname %x\n", OptionName);
@@ -3440,6 +3454,11 @@ WSPGetSockOpt(IN SOCKET Handle,
             RtlCopyMemory(OptionValue, Buffer, BufferSize);
 
             return 0;
+
+        case IPPROTO_IP:
+        case IPPROTO_UDP:
+            /* The helper keeps these options (TTL, TOS, DF, RECVTOS, ECN, UDP message sizes) */
+            goto SendToHelper;
 
         default:
             if (lpErrno) *lpErrno = WSAEINVAL;
