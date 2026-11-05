@@ -183,9 +183,33 @@ static BOOL ProcessPath(ULONG pid, PWSTR path, DWORD cch)
 
 static PCWSTR BaseName(PCWSTR p) { PCWSTR b = wcsrchr(p, L'\\'); return b ? b + 1 : p; }
 
+/* a process running as LocalSystem, LocalService or NetworkService is not a user's program (installers, setup steps,
+   services): nobody to ask, and Windows never asks about them either */
+static BOOL IsSystemIdentity(ULONG pid)
+{
+    HANDLE hp, tok; BYTE buf[256]; DWORD cb; BOOL r = FALSE; ULONG i;
+    static const WELL_KNOWN_SID_TYPE types[] = { WinLocalSystemSid, WinLocalServiceSid, WinNetworkServiceSid };
+    hp = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hp) return FALSE;
+    if (OpenProcessToken(hp, TOKEN_QUERY, &tok))
+    {
+        if (GetTokenInformation(tok, TokenUser, buf, sizeof(buf), &cb))
+            for (i = 0; i < ARRAYSIZE(types) && !r; i++)
+            {
+                BYTE sid[SECURITY_MAX_SID_SIZE]; DWORD sz = sizeof(sid);
+                if (CreateWellKnownSid(types[i], NULL, sid, &sz) && EqualSid(((TOKEN_USER *)buf)->User.Sid, sid)) r = TRUE;
+            }
+        CloseHandle(tok);
+    }
+    CloseHandle(hp);
+    return r;
+}
+
 /* services have nobody to answer: skip the service control manager's children and the usual system processes */
 static BOOL IsServiceProcess(ULONG pid, PCWSTR path)
 {
+    if (IsSystemIdentity(pid)) return TRUE;
+
     static const WCHAR *sys[] = { L"services.exe", L"lsass.exe", L"svchost.exe", L"smss.exe", L"csrss.exe", L"wininit.exe", L"winlogon.exe" };
     PROCESSENTRY32W pe; HANDLE snap; ULONG i, parent = 0; BOOL svc = FALSE;
     PCWSTR base = BaseName(path);
