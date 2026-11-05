@@ -11,6 +11,7 @@ list(APPEND SOURCE
     devclass.c
     RootBusDisable.c
     RootDeviceDisable.c
+    RootDeviceInstallRestart.c
     RootDeviceRemove.c
     SetupDiInstallClassExA.c
     SetupDiGetActualModelsSection.c
