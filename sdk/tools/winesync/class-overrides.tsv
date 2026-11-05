@@ -1,0 +1,26 @@
+# module	class	reason   (tab separated; consulted by winewatch.py scan)
+kernel32	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+kernelbase	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+advapi32	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+shell32	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+setupapi	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+userenv	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+netapi32	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+ws2_32	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+wsock32	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+mswsock	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+iphlpapi	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+uxtheme	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+winmm	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+wldap32	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+secur32	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+msv1_0	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+version	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+psapi	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+powrprof	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+cfgmgr32	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+browseui	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+shdocvw	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+imm32	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+winspool	c	ReactOS-native implementation (csrss/SCM/registry/PEB semantics); import single functions or tests only
+mshtml	c	ReactOS mshtml is a 1.7.55-era fork; needs a full rework, not a sync
