@@ -32,6 +32,27 @@ LIST_ENTRY MmWorkingSetExpansionHead;
 KSPIN_LOCK MmExpansionLock;
 PETHREAD MiExpansionLockOwner;
 
+/* Set once the leader has created a session; only then can it hold a stale view */
+static BOOLEAN MiSessionLeaderCreatedSession;
+
+#if (_MI_PAGING_LEVELS == 4)
+/*
+ * amd64: session space shares one page directory (the one of its PPE) with
+ * the top of system view space, and that PD hangs off a PML4 entry that all
+ * processes share. Session 0 keeps living in those shared tables, exactly as
+ * before. Every later session gets a private PDPT and a private PD for the
+ * session PPE; its processes get a PML4 entry that points to the private PDPT.
+ * MiSessionSharedPxe is the shared PML4 entry, captured when the first private
+ * session is created (zero until then).
+ */
+MMPTE MiSessionSharedPxe;
+
+VOID
+NTAPI
+MiFillSystemPageDirectory(IN PVOID Base,
+                          IN SIZE_T NumberOfBytes);
+#endif
+
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
@@ -594,6 +615,179 @@ MiSessionInitializeWorkingSetList(VOID)
     return STATUS_SUCCESS;
 }
 
+/*
+ * NitroSessions (P0), lazy unmap. When the session leader detaches from the
+ * session it created, MiDereferenceSession leaves the leader's view of that
+ * session mapped. Before the leader creates another session, the stale view is
+ * dropped here. The first session create never finds one, so a boot that
+ * creates only session 0 does exactly what it did before.
+ */
+static
+VOID
+MiSessionDropLeaderMapping(
+    _In_ PEPROCESS Process)
+{
+    UNREFERENCED_PARAMETER(Process);
+
+    /* The first create: there is nothing to drop, and nothing is touched */
+    if (!MiSessionLeaderCreatedSession) return;
+
+    ASSERT(Process == PsGetCurrentProcess());
+    ASSERT(Process->Vm.Flags.SessionLeader == 1);
+    ASSERT((Process->Flags & PSF_PROCESS_IN_SESSION_BIT) == 0);
+    ASSERT(!KeIsAttachedProcess());
+
+#if (_MI_PAGING_LEVELS == 2)
+    {
+        PMMPDE PointerPde, LastPde;
+        BOOLEAN Stale = FALSE;
+
+        /* The session PDEs are private to each page directory: clear the leader's */
+        PointerPde = MiAddressToPde(MmSessionBase);
+        LastPde = MiAddressToPde((PVOID)((ULONG_PTR)MiSessionSpaceEnd - 1));
+        while (PointerPde <= LastPde)
+        {
+            if (PointerPde->u.Long != 0)
+            {
+                PointerPde->u.Long = 0;
+                Stale = TRUE;
+            }
+            PointerPde++;
+        }
+
+        /* Nothing of the old session may stay in any TB */
+        if (Stale) KeFlushEntireTb(TRUE, TRUE);
+    }
+#elif (_MI_PAGING_LEVELS == 4)
+    {
+        PMMPTE PointerPxe;
+
+        /* No private session was ever created, so the leader is on the shared tables */
+        if (MiSessionSharedPxe.u.Long == 0) return;
+
+        /* Point the leader back to the shared tables (session 0) */
+        PointerPxe = MiAddressToPxe(MmSessionBase);
+        if (PointerPxe->u.Hard.PageFrameNumber != MiSessionSharedPxe.u.Hard.PageFrameNumber)
+        {
+            InterlockedExchange64((PLONG64)&PointerPxe->u.Long,
+                                  (LONG64)MiSessionSharedPxe.u.Long);
+            KeFlushEntireTb(TRUE, TRUE);
+        }
+    }
+#endif
+}
+
+#if (_MI_PAGING_LEVELS == 4)
+/*
+ * Builds the private paging tables of a session other than 0: a PDPT that is
+ * a copy of the shared one, except that the session PPE points to a private
+ * PD. The private PD holds the same system view PDEs as the shared PD and no
+ * session PDEs. Called by the leader on the shared tables, with the session
+ * creation flag owned. Returns the PML4 entry for the session's processes.
+ */
+static
+NTSTATUS
+MiSessionCreatePrivateTables(
+    _Out_ PMMPTE NewPxe)
+{
+    PEPROCESS Process = PsGetCurrentProcess();
+    PVOID PpeBase;
+    PMMPTE SharedPxe, SharedPpe, SharedPdpt, SharedPd, Mapping;
+    PFN_NUMBER PdptPfn, PdPfn, SystemPml4Pfn;
+    MMPTE TempPte;
+    KIRQL OldIrql;
+    ULONG Index, FirstSessionPde;
+
+    /* The PD of the session PPE covers system view space, then session space */
+    PpeBase = MiPpeToAddress(MiAddressToPpe(MmSessionBase));
+    ASSERT((PVOID)MiSystemViewStart <= PpeBase);
+    ASSERT(MiAddressToPpe(MmSessionBase) ==
+           MiAddressToPpe((PVOID)((ULONG_PTR)MiSessionSpaceEnd - 1)));
+
+    SharedPxe = MiAddressToPxe(MmSessionBase);
+    SharedPpe = MiAddressToPpe(MmSessionBase);
+    ASSERT(SharedPxe->u.Hard.Valid == 1);
+    ASSERT(SharedPpe->u.Hard.Valid == 1);
+
+    /* The first time, take the shared PML4 entry from the System process */
+    if (MiSessionSharedPxe.u.Long == 0)
+    {
+        SystemPml4Pfn = PsInitialSystemProcess->Pcb.DirectoryTableBase[0] >> PAGE_SHIFT;
+        Mapping = MiMapPageInHyperSpace(Process, SystemPml4Pfn, &OldIrql);
+        TempPte = Mapping[MiAddressToPxi(MmSessionBase)];
+        MiUnmapPageInHyperSpace(Process, Mapping, OldIrql);
+
+        if ((TempPte.u.Hard.Valid == 0) ||
+            (TempPte.u.Hard.PageFrameNumber != SharedPxe->u.Hard.PageFrameNumber))
+        {
+            DPRINT1("Session tables: the leader is not on the shared tables\n");
+            return STATUS_INTERNAL_ERROR;
+        }
+        MiSessionSharedPxe = TempPte;
+    }
+    ASSERT(SharedPxe->u.Hard.PageFrameNumber == MiSessionSharedPxe.u.Hard.PageFrameNumber);
+
+    /* Every system view PDE in this PD must exist before it is copied. System
+       view page tables are never freed, so the copies stay right from then on */
+    MiFillSystemPageDirectory(PpeBase, (ULONG_PTR)MmSessionBase - (ULONG_PTR)PpeBase);
+
+    /* Grab the two pages; both are fully written below */
+    OldIrql = MiAcquirePfnLock();
+    if (MiGetFreeOrZeroedPageCount() < 2)
+    {
+        MiReleasePfnLock(OldIrql);
+        return STATUS_NO_MEMORY;
+    }
+    MI_SET_USAGE(MI_USAGE_PAGE_DIRECTORY);
+    PdptPfn = MiRemoveAnyPage(MI_GET_NEXT_COLOR());
+    MI_SET_USAGE(MI_USAGE_PAGE_DIRECTORY);
+    PdPfn = MiRemoveAnyPage(MI_GET_NEXT_COLOR());
+
+    /* The PFN entries. Neither page is freed today: session teardown is
+       incomplete (P6), as for the other session pages */
+    MiInitializePfnForOtherProcess(PdptPfn, SharedPxe, PdptPfn);
+    MiInitializePfnForOtherProcess(PdPfn, SharedPpe, PdptPfn);
+    MiReleasePfnLock(OldIrql);
+
+    /* The private PD: the shared system view PDEs, then no session PDEs */
+    SharedPd = MiAddressToPde(PpeBase);
+    FirstSessionPde = MiAddressToPdi(MmSessionBase);
+    Mapping = MiMapPageInHyperSpace(Process, PdPfn, &OldIrql);
+    for (Index = 0; Index < PAGE_SIZE / sizeof(MMPTE); Index++)
+    {
+        if (Index < FirstSessionPde)
+        {
+            ASSERT(SharedPd[Index].u.Hard.Valid == 1);
+            Mapping[Index] = SharedPd[Index];
+        }
+        else
+        {
+            Mapping[Index].u.Long = 0;
+        }
+    }
+    MiUnmapPageInHyperSpace(Process, Mapping, OldIrql);
+
+    /* The private PDPT: the shared one, with the session PPE on the private PD.
+       Only system view and session space use this PDPT; no other range can
+       appear later in the shared one */
+    SharedPdpt = (PMMPTE)PAGE_ALIGN(SharedPpe);
+    TempPte = *SharedPpe;
+    TempPte.u.Hard.PageFrameNumber = PdPfn;
+    Mapping = MiMapPageInHyperSpace(Process, PdptPfn, &OldIrql);
+    RtlCopyMemory(Mapping, SharedPdpt, PAGE_SIZE);
+    Mapping[SharedPpe - SharedPdpt] = TempPte;
+    MiUnmapPageInHyperSpace(Process, Mapping, OldIrql);
+
+    /* The PML4 entry of the session */
+    TempPte = MiSessionSharedPxe;
+    TempPte.u.Hard.PageFrameNumber = PdptPfn;
+    *NewPxe = TempPte;
+
+    DPRINT1("Session tables: PDPT %Ix, PD %Ix\n", PdptPfn, PdPfn);
+    return STATUS_SUCCESS;
+}
+#endif
+
 NTSTATUS
 NTAPI
 MiSessionCreateInternal(OUT PULONG SessionId)
@@ -615,9 +809,11 @@ MiSessionCreateInternal(OUT PULONG SessionId)
     PFN_NUMBER SessionPageDirIndex;
     PFN_NUMBER TagPage[MI_SESSION_TAG_PAGES_MAXIMUM];
     PFN_NUMBER DataPage[MI_SESSION_DATA_PAGES_MAXIMUM];
+#if (_MI_PAGING_LEVELS == 4)
+    MMPTE SessionPxe;
 
-    /* This should not exist yet */
-    ASSERT(MmIsAddressValid(MmSessionSpace) == FALSE);
+    SessionPxe.u.Long = 0;
+#endif
 
     /* Loop so we can set the session-is-creating flag */
     Flags = Process->Flags;
@@ -644,6 +840,14 @@ MiSessionCreateInternal(OUT PULONG SessionId)
     /* Now we should own the flag */
     ASSERT(Process->Flags & PSF_SESSION_CREATION_UNDERWAY_BIT);
 
+    /* Drop the leader's view of the session it created before, if any */
+    MiSessionDropLeaderMapping(Process);
+
+#if (_MI_PAGING_LEVELS != 4)
+    /* This should not exist yet */
+    ASSERT(MmIsAddressValid(MmSessionSpace) == FALSE);
+#endif
+
 #if (_MI_PAGING_LEVELS < 3)
     /*
      * Session space covers everything from 0xA0000000 to 0xC0000000.
@@ -664,14 +868,40 @@ MiSessionCreateInternal(OUT PULONG SessionId)
     {
         /* We ran out of session IDs, we should expand */
         DPRINT1("Too many sessions created. Expansion not yet supported\n");
+        KeReleaseGuardedMutex(&MiSessionIdMutex);
 #if (_MI_PAGING_LEVELS < 3)
         ExFreePoolWithTag(PageTables, 'tHmM');
 #endif // (_MI_PAGING_LEVELS < 3)
+        PspClearProcessFlag(Process, PSF_SESSION_CREATION_UNDERWAY_BIT);
         return STATUS_NO_MEMORY;
     }
 
     /* Unlock the session ID creation mutex */
     KeReleaseGuardedMutex(&MiSessionIdMutex);
+
+#if (_MI_PAGING_LEVELS == 4)
+    /* Session 0 lives in the shared tables; any other session gets its own */
+    if (*SessionId != 0)
+    {
+        Status = MiSessionCreatePrivateTables(&SessionPxe);
+        if (!NT_SUCCESS(Status))
+        {
+            KeAcquireGuardedMutex(&MiSessionIdMutex);
+            RtlClearBit(MiSessionIdBitmap, *SessionId);
+            KeReleaseGuardedMutex(&MiSessionIdMutex);
+            PspClearProcessFlag(Process, PSF_SESSION_CREATION_UNDERWAY_BIT);
+            return Status;
+        }
+
+        /* The leader works in the new session's tables until it detaches */
+        InterlockedExchange64((PLONG64)&MiAddressToPxe(MmSessionBase)->u.Long,
+                              (LONG64)SessionPxe.u.Long);
+        KeFlushEntireTb(TRUE, TRUE);
+    }
+
+    /* This should not exist yet */
+    ASSERT(MmIsAddressValid(MmSessionSpace) == FALSE);
+#endif
 
     /* Reserve the global PTEs */
     SessionPte = MiReserveSystemPtes(MiSessionDataPages, SystemPteSpace);
@@ -788,6 +1018,9 @@ MiSessionCreateInternal(OUT PULONG SessionId)
 #ifndef _M_AMD64
     MmSessionSpace->PageTables = PageTables;
     MmSessionSpace->PageTables[PointerPde - MiAddressToPde(MmSessionBase)] = *PointerPde;
+#else
+    /* The PML4 entry of a private session (zero: the shared tables) */
+    MmSessionSpace->PageDirectory = SessionPxe;
 #endif
     InitializeListHead(&MmSessionSpace->ImageList);
 
@@ -816,6 +1049,9 @@ MiSessionCreateInternal(OUT PULONG SessionId)
     ASSERT(Process->Session == NULL);
     ASSERT(SessionGlobal->ProcessReferenceToSession == 0);
     SessionGlobal->ProcessReferenceToSession = 1;
+
+    /* From now on the leader may hold a stale view of this session */
+    MiSessionLeaderCreatedSession = TRUE;
 
     /* We're done */
     InterlockedIncrement(&MmSessionDataPages);
@@ -1050,9 +1286,9 @@ NTAPI
 MmGetSessionById(
     _In_ ULONG SessionId)
 {
-    PLIST_ENTRY ListEntry;
+    PLIST_ENTRY ListEntry, ProcessEntry;
     PMM_SESSION_SPACE Session;
-    PEPROCESS Process = NULL;
+    PEPROCESS Process = NULL, Candidate;
     KIRQL OldIrql;
 
     /* Acquire the expansion lock while touching the session */
@@ -1066,20 +1302,24 @@ MmGetSessionById(
         ListEntry = ListEntry->Flink;
 
         /* Check if this is the session we are looking for */
-        if (Session->SessionId == SessionId)
-        {
-            /* Check if we also have a process in the process list */
-            if (!IsListEmpty(&Session->ProcessList))
-            {
-                Process = CONTAINING_RECORD(Session->ProcessList.Flink,
-                                            EPROCESS,
-                                            SessionProcessLinks);
+        if (Session->SessionId != SessionId) continue;
 
-                /* Reference the process */
-                ObReferenceObject(Process);
+        /* A session that is going away cannot be entered any more */
+        if (Session->u.Flags.DeletePending) break;
+
+        /* Return the first process of the session that is not being deleted */
+        for (ProcessEntry = Session->ProcessList.Flink;
+             ProcessEntry != &Session->ProcessList;
+             ProcessEntry = ProcessEntry->Flink)
+        {
+            Candidate = CONTAINING_RECORD(ProcessEntry, EPROCESS, SessionProcessLinks);
+            if (ObReferenceObjectSafe(Candidate))
+            {
+                Process = Candidate;
                 break;
             }
         }
+        break;
     }
 
     /* Release the lock again */

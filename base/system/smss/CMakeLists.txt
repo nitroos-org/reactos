@@ -6,6 +6,7 @@ list(APPEND SOURCE
     pagefile.c
     sminit.c
     smloop.c
+    smnitro.c
     smsbapi.c
     smsessn.c
     smsubsys.c

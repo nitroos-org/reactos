@@ -499,6 +499,9 @@ _main(IN INT argc,
             _SEH2_LEAVE;
         }
 
+        /* Read the NitroSessions feature flag (absent = 0) */
+        SmpReadNitroSessionsConfig();
+
         /* Get the global flags */
         Status = NtQuerySystemInformation(SystemFlagsInformation,
                                           &Flags,
@@ -537,6 +540,9 @@ _main(IN INT argc,
             AttachedSessionId = -1;
         }
         SmpReleasePrivilege(State);
+
+        /* NitroSessions=1: a second session with a test command */
+        if (SmpNitroSessions == 1) SmpStartNitroTestSession();
 
         /* Wait on either CSRSS or the initial command to die */
         Status = NtWaitForMultipleObjects(RTL_NUMBER_OF(Handles),
