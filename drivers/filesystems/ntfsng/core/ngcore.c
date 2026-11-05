@@ -4123,19 +4123,25 @@ int ngc_deleted_dir(ngc_vol *v, int create, ngc_node **out)
 /*
  * The purge reads the on-disk index of $Deleted, which is untrusted input (another system, a damaged or crafted
  * volume): an entry is removed only if it names a user record (number 24 and up: never a metadata file or one of the
- * reserved records) whose loaded record is that number and whose first name is not in $Extend (no $Extend child, even
- * if a corrupt index points at one; a directory that is not empty is refused by the unlink itself).  The work is
- * bounded: the entries counted by a first pass, at most NGC_PURGE_MAX, are looked at once each (entries left in place
- * are skipped by position in later passes), so a corrupt index cannot keep the mount looping.
+ * reserved records) whose loaded record is that number (the lookup refuses a reference with a stale sequence number,
+ * -EIO, so such an entry is left in place; readdir does not pass the sequence number on) and whose first name has $Deleted itself as its parent (a positive check: a legitimate orphan
+ * always has, so a record of a subdirectory of $Extend, such as $RmMetadata\$TxfLog\*, is left alone, as is anything
+ * else that is not an orphan of a POSIX delete; a directory that is not empty is refused by the unlink itself).  The
+ * work is bounded: the entries counted by a first pass, at most NGC_PURGE_MAX, are looked at once each (entries left in
+ * place, and entries a lookup does not find although they are still listed, are skipped by position in later passes),
+ * so a corrupt index cannot keep the mount looping.
  */
 #define NGC_PURGE_BATCH 64
 #define NGC_PURGE_MAX 65536
 #define NGC_PURGE_FIRST_USER 24
 struct ngc_purge_ctx {
-	unsigned int n, skip, seen, total;
+	unsigned int n, skip, seen, total, nogo_n;
 	unsigned long long mft[NGC_PURGE_BATCH];
 	unsigned short len[NGC_PURGE_BATCH];
 	unsigned short name[NGC_PURGE_BATCH][NTFS_MAX_NAME_LEN];
+	/* names the last pass could not look up (-ENOENT): when one is still listed it is left in place */
+	unsigned short nogo_len[NGC_PURGE_BATCH];
+	unsigned short nogo[NGC_PURGE_BATCH][NTFS_MAX_NAME_LEN];
 };
 
 static int ngc_purge_dot(const unsigned short *name, unsigned int len)
@@ -4166,14 +4172,20 @@ static int ngc_purge_collect(void *ctx, const unsigned short *name, unsigned int
 		printk(KERN_WARNING "deleted: an entry of $Extend\\$Deleted names record %llu, left alone\n", no);
 		return 0;
 	}
+	for (unsigned int i = 0; i < c->nogo_n; i++) {
+		if (c->nogo_len[i] == len && !memcmp(c->nogo[i], name, len * sizeof(*name))) {
+			c->skip++;	/* listed, but not found by name in the last pass: left in place */
+			return 0;
+		}
+	}
 	c->mft[c->n] = no;
 	memcpy(c->name[c->n], name, len * sizeof(*name));
 	c->len[c->n++] = (unsigned short)len;
 	return c->n == NGC_PURGE_BATCH;
 }
 
-/* 0 when @n may go: the record @mft_no it was listed as, a user record, its first name not in $Extend. */
-static int ngc_purge_check(ngc_node *n, unsigned long long mft_no)
+/* 0 when @n may go: the record @mft_no it was listed as, a user record, its first name in the directory @deleted_no. */
+static int ngc_purge_check(ngc_node *n, unsigned long long mft_no, unsigned long long deleted_no)
 {
 	unsigned short *nm;
 	unsigned long long parent = 0;
@@ -4186,7 +4198,7 @@ static int ngc_purge_check(ngc_node *n, unsigned long long mft_no)
 		return -ENOMEM;
 	err = ngc_parent_name(n, &parent, nm, &len);
 	kfree(nm);
-	if (!err && parent == FILE_Extend)
+	if (!err && parent != deleted_no)
 		err = -EPERM;
 	return err;
 }
@@ -4196,6 +4208,7 @@ int ngc_purge_deleted(ngc_vol *v, unsigned int *count)
 	struct ngc_purge_ctx *c;
 	ngc_node *d, *n;
 	unsigned int i, done = 0, looked = 0;
+	unsigned long long deleted_no;
 	int err;
 	*count = 0;
 	if (sb_rdonly(v->sb))
@@ -4213,6 +4226,10 @@ int ngc_purge_deleted(ngc_vol *v, unsigned int *count)
 	if (err < 0)
 		goto out;
 	err = 0;
+	if (c->total >= NGC_PURGE_MAX)
+		printk(KERN_WARNING "deleted: $Extend\\$Deleted lists %u or more entries, only the first %u are looked at\n",
+			c->total, NGC_PURGE_MAX);
+	deleted_no = NTFS_I((struct inode *)d)->mft_no;
 	while (looked < c->total) {
 		int e;
 		c->n = 0;
@@ -4222,14 +4239,20 @@ int ngc_purge_deleted(ngc_vol *v, unsigned int *count)
 			err = e;
 			break;
 		}
+		c->nogo_n = 0;	/* this pass' collection has used the last one's */
 		if (!c->n)
 			break;
 		for (i = 0; i < c->n && looked < c->total; i++, looked++) {
 			e = ngc_lookup(v, d, c->name[i], c->len[i], &n, NULL, NULL);
-			if (e == -ENOENT)
-				continue;	/* already gone: the other name of a DOS/Win32 pair went with the first */
+			if (e == -ENOENT) {
+				/* Already gone (the other name of a DOS/Win32 pair went with the first), or still listed
+				 * although it cannot be found: remembered, so that the next pass leaves it alone if it is */
+				c->nogo_len[c->nogo_n] = c->len[i];
+				memcpy(c->nogo[c->nogo_n++], c->name[i], c->len[i] * sizeof(c->name[i][0]));
+				continue;
+			}
 			if (!e) {
-				e = ngc_purge_check(n, c->mft[i]);
+				e = ngc_purge_check(n, c->mft[i], deleted_no);
 				if (!e)
 					e = ngc_unlink(v, d, c->name[i], c->len[i], n);
 				ngc_put(n);	/* after an unlink the last reference: the record and its clusters are freed */
