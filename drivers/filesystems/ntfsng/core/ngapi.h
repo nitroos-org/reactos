@@ -216,10 +216,21 @@ struct ngc_dio {
 	unsigned int len;                /* clipped to the stream size */
 	unsigned int cap;
 	unsigned int nruns;
+	unsigned int zero;               /* the transfer writes zeros (ngc_dio_zero_begin): the buffer is not used */
 	struct ngc_dio_run run[NGC_DIO_RUNS];
 };
 int ngc_dio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, unsigned int cap, struct ngc_dio *d);
 long ngc_dio_end(ngc_vol *v, struct ngc_dio *d, const void *buf, int io_err);
+/*
+ * The zero fill between the initialized size and the start of a write, in pieces of at most NGC_ZERO_CHUNK bytes, each
+ * a dio of zeros (ngc_dio_zero_begin, the caller writes zeros to the runs, ngc_dio_end raises the initialized size)
+ * that runs without the volume lock.  @upto = the start of the write.  Returns 0 (a piece is pinned: write zeros to its
+ * runs, then ngc_dio_end; call again), NGC_ZERO_DONE (nothing more for this to do: go on with ngc_dio_begin/ngc_write,
+ * which fill what is left) or -NGC_EAGAIN (ngc_write fills the gap under the lock).
+ */
+#define NGC_ZERO_CHUNK (1u << 20)
+#define NGC_ZERO_DONE 1
+int ngc_dio_zero_begin(ngc_vol *v, ngc_node *n, unsigned long long upto, struct ngc_dio *d);
 /*
  * Paging and non-cached reads the same way (ngc_rdio_begin/end, for streams ngc_read_direct handles): begin
  * (locked) maps the clusters of [off, off+len) into runs and pins the node; the caller then fills the
