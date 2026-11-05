@@ -1060,6 +1060,11 @@ FsRtlNotifyFilterChangeDirectory(IN PNOTIFY_SYNC NotifySync,
             {
                 SavedLength = NotifyChange->DataLength;
                 NotifyChange->DataLength = 0;
+                /* The records are handed over: the next change starts a new chain. LastEntry is the offset
+                 * of the last record of the chain being built, so a stale one made the next change set the
+                 * link of a record that does not exist and left the real first record unlinked: the reader
+                 * saw one record of a read that held many (and a rename lost its NEW_NAME record). */
+                NotifyChange->LastEntry = 0;
                 FsRtlNotifyCompleteIrp(NotifyIrp, NotifyChange, SavedLength, STATUS_SUCCESS, FALSE);
             }
 
