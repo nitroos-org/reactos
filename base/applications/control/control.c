@@ -178,7 +178,10 @@ wWinMain(HINSTANCE hInstance,
             {
                 pszPage = argv[argi + 3];
             }
-            hr = OpenControlPanelItem(argv[argi + 1], pszPage);
+            if (!_wcsicmp(argv[argi + 1], L"Microsoft.WindowsFirewall"))
+                hr = RunControlPanel(L"firewall.cpl") ? S_OK : E_FAIL;
+            else
+                hr = OpenControlPanelItem(argv[argi + 1], pszPage);
         }
         LocalFree(argv);
         if (hr != -1)
