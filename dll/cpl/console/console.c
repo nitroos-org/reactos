@@ -213,8 +213,9 @@ InitApplet(HANDLE hSectionOrWnd)
         /* Allocate a local buffer to hold console information */
         ConInfo = HeapAlloc(GetProcessHeap(),
                             HEAP_ZERO_MEMORY,
-                            sizeof(CONSOLE_STATE_INFO));
+                            sizeof(CONSOLE_STATE_INFO) + sizeof(CONSOLE_STATE_INFO_EX));
         if (!ConInfo) return 0;
+        ConInfo->cbSize = sizeof(CONSOLE_STATE_INFO) + sizeof(CONSOLE_STATE_INFO_EX);
 
         /*
          * Setting the console window handle to NULL indicates we are

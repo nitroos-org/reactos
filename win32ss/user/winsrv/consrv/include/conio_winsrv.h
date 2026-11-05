@@ -160,6 +160,8 @@ typedef struct _CONSRV_CONSOLE
 
     BOOLEAN InsertMode;
     BOOLEAN QuickEdit;
+    BOOLEAN CtrlKeyShortcutsDisabled;       /* HKCU\Console CtrlKeyShortcutsDisabled: no Ctrl+C/V/A, Shift+arrow selection of the console window */
+    BOOLEAN LineSelection;                  /* HKCU\Console LineSelection: selections follow the line wraps (Alt = block) */
     BOOLEAN ExtendedFlags;                  /* The last input mode had ENABLE_EXTENDED_FLAGS: GetConsoleMode reports it */
 
 /************************ Virtual DOS Machine support *************************/

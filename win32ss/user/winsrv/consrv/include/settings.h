@@ -29,6 +29,7 @@
 VOID
 ConSrvApplyUserSettings(
     IN PCONSRV_CONSOLE Console,
-    IN PCONSOLE_STATE_INFO ConsoleInfo);
+    IN PCONSOLE_STATE_INFO ConsoleInfo,
+    IN SIZE_T InfoSize);
 
 /* EOF */

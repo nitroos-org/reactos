@@ -29,6 +29,8 @@
 #define IDC_RADIO_DISPLAY_WINDOW        210
 #define IDC_RADIO_DISPLAY_FULL          211
 #define IDL_CODEPAGE                    212
+#define IDC_CHECK_CTRL_KEYS             213
+#define IDC_CHECK_LINE_SELECTION        214
 
 /* Apply dialog */
 #define IDC_RADIO_APPLY_ALL     300
