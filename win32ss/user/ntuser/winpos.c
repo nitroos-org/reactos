@@ -1838,6 +1838,17 @@ co_WinPosSetWindowPos(
    return co_WinPosSetWindowPosEx(Window, WndInsertAfter, x, y, cx, cy, flags, FALSE);
 }
 
+/* TRUE when the running thread has used most of the kernel stack it can grow to. IoGetRemainingStackSize
+ * only counts the committed part of the stack, which is small until a callback to user mode grows it. */
+static BOOLEAN FASTCALL
+IntKernelStackNearlyUsed(VOID)
+{
+    ULONG_PTR Low, High;
+
+    IoGetStackLimits(&Low, &High);
+    return (High - (ULONG_PTR)&Low) > (KERNEL_LARGE_STACK_SIZE - 0x8000);
+}
+
 /*
  * NoMessages: apply the new geometry with no callback into user mode at all
  * (no window procedure, hook or WinEvent), as UpdateLayeredWindow needs. The
@@ -2426,7 +2437,7 @@ co_WinPosSetWindowPosEx(
                /* (the input desktop is meant here: foreground is per input desktop) */
                if (IntGetActiveDesktop() && Window->head.rpdesk != IntGetActiveDesktop())
                   co_IntSetActiveWindow(Window, FALSE, TRUE, FALSE);
-               else
+               else if (!IntKernelStackNearlyUsed()) // foreground fights between threads nest here: stop before the kernel stack is gone
                   co_IntSetForegroundWindow(Window); // Fixes SW_HIDE issues. Wine win test_SetActiveWindow & test_SetForegroundWindow.
             }
          }
