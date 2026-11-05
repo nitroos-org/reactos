@@ -1071,6 +1071,12 @@ MiCheckPlaceholderForReplace(
 }
 
 static
+ULONG
+MiRemoveFromSystemSpace(IN PMMSESSION Session,
+                        IN PVOID Base,
+                        OUT PCONTROL_AREA *ControlArea);
+
+static
 NTSTATUS
 MiSessionCommitPageTables(IN PVOID StartVa,
                           IN PVOID EndVa)
@@ -1090,6 +1096,59 @@ MiSessionCommitPageTables(IN PVOID StartVa,
     /* Get the start and end PDE, then loop each one */
     StartPde = MiAddressToPde(StartVa);
     EndPde = MiAddressToPde((PVOID)((ULONG_PTR)EndVa - 1));
+
+#ifdef _M_AMD64
+    /*
+     * Session 0 lives in the shared tables and keeps today's behaviour: no
+     * page table is committed here. The other sessions (NitroSessions) have a
+     * private page directory, shared by all their processes: commit the page
+     * tables in it, under the PFN lock so that two threads of the session
+     * cannot both create one.
+     */
+    if (MmSessionSpace->SessionId != 0)
+    {
+        while (StartPde <= EndPde)
+        {
+            OldIrql = MiAcquirePfnLock();
+            if (StartPde->u.Hard.Valid == 0)
+            {
+                ASSERT(StartPde->u.Long == 0);
+
+                /* ReactOS check to avoid MiEnsureAvailablePageOrWait */
+                if (MiGetFreeOrZeroedPageCount() == 0)
+                {
+                    MiReleasePfnLock(OldIrql);
+                    break;
+                }
+
+                MI_SET_USAGE(MI_USAGE_PAGE_TABLE);
+                MI_SET_PROCESS2(PsGetCurrentProcess()->ImageFileName);
+                Color = (++MmSessionSpace->Color) & MmSecondaryColorMask;
+                PageFrameNumber = MiRemoveZeroPage(Color);
+                TempPde.u.Hard.PageFrameNumber = PageFrameNumber;
+                MI_WRITE_VALID_PDE(StartPde, TempPde);
+
+                /* The parent is the session's private page directory */
+                MiInitializePfnForOtherProcess(PageFrameNumber,
+                                               StartPde,
+                                               MiPdeToPpe(StartPde)->u.Hard.PageFrameNumber);
+                ActualPages++;
+            }
+            MiReleasePfnLock(OldIrql);
+            StartPde++;
+        }
+
+        if (ActualPages)
+        {
+            InterlockedExchangeAddSizeT(&MmSessionSpace->NonPageablePages, ActualPages);
+            InterlockedExchangeAddSizeT(&MmSessionSpace->CommittedPages, ActualPages);
+        }
+
+        /* Every PDE of the range must be there now */
+        return (StartPde > EndPde) ? STATUS_SUCCESS : STATUS_NO_MEMORY;
+    }
+#endif
+
     Index = ((ULONG_PTR)StartVa - (ULONG_PTR)MmSessionBase) >> 22;
     while (StartPde <= EndPde)
     {
@@ -1113,12 +1172,9 @@ MiSessionCommitPageTables(IN PVOID StartVa,
 //  MiLockWorkingSet(PsGetCurrentThread(),
 //                   &MmSessionSpace->GlobalVirtualAddress->Vm);
 #ifdef _M_AMD64
-_WARN("MiSessionCommitPageTables halfplemented for amd64")
-    DBG_UNREFERENCED_LOCAL_VARIABLE(OldIrql);
+    /* Unreachable: on amd64 the page tables are not counted above */
     DBG_UNREFERENCED_LOCAL_VARIABLE(Color);
-    DBG_UNREFERENCED_LOCAL_VARIABLE(TempPde);
     DBG_UNREFERENCED_LOCAL_VARIABLE(Pfn1);
-    DBG_UNREFERENCED_LOCAL_VARIABLE(PageFrameNumber);
     ASSERT(FALSE);
 #else
     while (StartPde <= EndPde)
@@ -1283,7 +1339,19 @@ MiMapViewInSystemSpace(
         Status = MiSessionCommitPageTables(Base,
                                            (PVOID)((ULONG_PTR)Base +
                                            Buckets * MI_SYSTEM_VIEW_BUCKET_SIZE));
-        ASSERT(NT_SUCCESS(Status));
+        if (!NT_SUCCESS(Status))
+        {
+            /* No page tables for the view (amd64 private sessions only): give the space back */
+            DPRINT1("No page tables for a session view, Status 0x%lx\n", Status);
+            KeAcquireGuardedMutex(Session->SystemSpaceViewLockPointer);
+            Buckets = MiRemoveFromSystemSpace(Session, Base, &ControlArea);
+            RtlClearBits(Session->SystemSpaceBitMap,
+                         (ULONG)(((ULONG_PTR)Base - (ULONG_PTR)Session->SystemSpaceViewStart) >> 16),
+                         Buckets);
+            KeReleaseGuardedMutex(Session->SystemSpaceViewLockPointer);
+            MiDereferenceControlArea(ControlArea);
+            return Status;
+        }
     }
 
     /* Create the actual prototype PTEs for this mapping */

@@ -132,6 +132,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_mm/MmOomRetry.c
     ntos_mm/MmReservedMapping.c
     ntos_mm/MmSection.c
+    ntos_mm/MmSessionSpace.c
     ntos_mm/MmSpecialPool.c
     ntos_mm/ZwAllocateVirtualMemory.c
     ntos_mm/ZwCreateSection.c
