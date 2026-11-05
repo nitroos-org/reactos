@@ -74,6 +74,7 @@ typedef struct _TOUCH_CONTEXT
     KEVENT Held;
     KEVENT Go;
     KEVENT Done;
+    CONTENDER Contender; /* in pool with the rest: a contender that never finishes keeps using it */
 } TOUCH_CONTEXT, *PTOUCH_CONTEXT;
 
 /* The counting routine in the file system's AcquireFileForNtCreateSection slot */
@@ -82,6 +83,7 @@ static PFAST_IO_ACQUIRE_FILE HookOriginalAcquire;
 static PFAST_IO_RELEASE_FILE HookOriginalRelease;
 static PVOID HookFcb;
 static volatile LONG HookCount;
+static volatile LONG HookInFlight; /* callers inside the routines below: the driver must not unload under them */
 
 static
 VOID
@@ -90,6 +92,7 @@ HookAcquireFileForNtCreateSection(PFILE_OBJECT FileObject)
 {
     PFSRTL_COMMON_FCB_HEADER FcbHeader = FileObject->FsContext;
 
+    InterlockedIncrement(&HookInFlight);
     if (FcbHeader == HookFcb)
         InterlockedIncrement(&HookCount);
 
@@ -98,6 +101,7 @@ HookAcquireFileForNtCreateSection(PFILE_OBJECT FileObject)
         HookOriginalAcquire(FileObject);
     else if (FcbHeader && FcbHeader->Resource)
         ExAcquireResourceExclusiveLite(FcbHeader->Resource, TRUE);
+    InterlockedDecrement(&HookInFlight);
 }
 
 static
@@ -107,10 +111,12 @@ HookReleaseFileForNtCreateSection(PFILE_OBJECT FileObject)
 {
     PFSRTL_COMMON_FCB_HEADER FcbHeader = FileObject->FsContext;
 
+    InterlockedIncrement(&HookInFlight);
     if (HookOriginalRelease)
         HookOriginalRelease(FileObject);
     else if (FcbHeader && FcbHeader->Resource)
         ExReleaseResourceLite(FcbHeader->Resource);
+    InterlockedDecrement(&HookInFlight);
 }
 
 static
@@ -126,6 +132,7 @@ HookInstall(PFILE_OBJECT FileObject)
     HookDispatch = Dispatch;
     HookFcb = FileObject->FsContext;
     HookCount = 0;
+    HookInFlight = 0;
     HookOriginalAcquire = Dispatch->AcquireFileForNtCreateSection;
     HookOriginalRelease = Dispatch->ReleaseFileForNtCreateSection;
     /* Each routine does what the slot did, so a caller that sees one new and one old slot pairs up all the same */
@@ -134,20 +141,29 @@ HookInstall(PFILE_OBJECT FileObject)
     return TRUE;
 }
 
+/* FALSE when a caller is still inside a routine after the bounded wait: the driver must then stay loaded */
 static
-VOID
+BOOLEAN
 HookRemove(VOID)
 {
     LARGE_INTEGER Delay;
+    ULONG Waited;
 
     if (!HookDispatch)
-        return;
+        return TRUE;
     InterlockedExchangePointer((PVOID *)&HookDispatch->AcquireFileForNtCreateSection, (PVOID)HookOriginalAcquire);
     InterlockedExchangePointer((PVOID *)&HookDispatch->ReleaseFileForNtCreateSection, (PVOID)HookOriginalRelease);
     HookDispatch = NULL;
-    /* Let a caller that is still inside one of the routines leave it before the driver can unload */
-    Delay.QuadPart = -500LL * 10 * 1000;
+
+    /* A caller that read the slot just before the swap gets into the routine within this moment; then wait for
+       every caller inside to leave (one that waits for a file inside the file system's acquire can take long) */
+    Delay.QuadPart = -50LL * 10 * 1000;
     KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    Delay.QuadPart = -10LL * 10 * 1000;
+    for (Waited = 0; HookInFlight != 0 && Waited < 60 * 1000; Waited += 10)
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    ok(HookInFlight == 0, "%ld callers still inside the counting routine after 60 s\n", HookInFlight);
+    return (HookInFlight == 0);
 }
 
 static ULONG
@@ -237,9 +253,14 @@ StartContender(PCONTENDER Contender, PFSRTL_COMMON_FCB_HEADER FcbHeader)
     Timeout.QuadPart = TOUCH_TIMEOUT;
     Status = KeWaitForSingleObject(&Contender->MainHeld, Executive, KernelMode, FALSE, &Timeout);
     ok(Status == STATUS_SUCCESS, "The contender did not get the main resource\n");
-    /* Give it the moment to queue for the paging resource */
-    Timeout.QuadPart = -200LL * 10 * 1000;
-    KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+    /* Wait until it queues for the paging resource (bounded) */
+    {
+        ULONG Waited;
+        Timeout.QuadPart = -10LL * 10 * 1000;
+        for (Waited = 0; ExGetExclusiveWaiterCount(Contender->PagingResource) == 0 && Waited < 10 * 1000; Waited += 10)
+            KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+        ok(ExGetExclusiveWaiterCount(Contender->PagingResource) != 0, "The contender did not queue for the paging resource\n");
+    }
     return TRUE;
 }
 
@@ -252,7 +273,6 @@ TouchPage(PUCHAR View, ULONG Page, PERESOURCE Resource, HOLD_MODE Hold, PFSRTL_C
           PCSTR What, PBOOLEAN Leaked)
 {
     PTOUCH_CONTEXT Touch;
-    CONTENDER Contender;
     BOOLEAN ContenderRuns = FALSE;
     BOOLEAN Result = TRUE;
     HANDLE Thread;
@@ -288,7 +308,7 @@ TouchPage(PUCHAR View, ULONG Page, PERESOURCE Resource, HOLD_MODE Hold, PFSRTL_C
     if (Contended)
     {
         KeWaitForSingleObject(&Touch->Held, Executive, KernelMode, FALSE, NULL);
-        ContenderRuns = StartContender(&Contender, Contended);
+        ContenderRuns = StartContender(&Touch->Contender, Contended);
         KeSetEvent(&Touch->Go, IO_NO_INCREMENT, FALSE);
     }
 
@@ -305,6 +325,7 @@ TouchPage(PUCHAR View, ULONG Page, PERESOURCE Resource, HOLD_MODE Hold, PFSRTL_C
         ok(Status == STATUS_SUCCESS, "%s: the fault on page %lu did not finish after the hold was given up\n", What, Page);
         if (Status != STATUS_SUCCESS)
         {
+            /* The context stays: the touch thread (and a contender) still use it */
             *Leaked = TRUE;
             return FALSE;
         }
@@ -320,12 +341,13 @@ TouchPage(PUCHAR View, ULONG Page, PERESOURCE Resource, HOLD_MODE Hold, PFSRTL_C
     {
         /* With the touch's hold gone, the contender gets the paging resource and leaves */
         Timeout.QuadPart = TOUCH_TIMEOUT;
-        Status = KeWaitForSingleObject(&Contender.Done, Executive, KernelMode, FALSE, &Timeout);
+        Status = KeWaitForSingleObject(&Touch->Contender.Done, Executive, KernelMode, FALSE, &Timeout);
         ok(Status == STATUS_SUCCESS, "%s: the contender did not finish\n", What);
         if (Status != STATUS_SUCCESS)
         {
-            /* It still uses Contender, on our stack: do not return */
-            KeWaitForSingleObject(&Contender.Done, Executive, KernelMode, FALSE, NULL);
+            /* It still uses the context: leave it, and stop the test like for a stuck touch */
+            *Leaked = TRUE;
+            return FALSE;
         }
     }
 
@@ -469,7 +491,8 @@ START_TEST(MmFaultFileHeld)
     }
 
 Unhook:
-    HookRemove();
+    if (!HookRemove())
+        Stuck = TRUE; /* a caller may still run in this driver: leave everything, as for a stuck thread */
     if (Stuck)
         goto Free;
 
