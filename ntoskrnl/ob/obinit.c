@@ -284,9 +284,11 @@ ObInitSystem(VOID)
     ObjectTypeInitializer.CaseInsensitive = TRUE;
     ObjectTypeInitializer.MaintainTypeList = FALSE;
     ObjectTypeInitializer.GenericMapping = ObpDirectoryMapping;
+    ObjectTypeInitializer.SecurityRequired = TRUE; /* as on Windows 7 and later: an unnamed directory gets a descriptor too */
     ObjectTypeInitializer.DeleteProcedure = NULL;
     ObjectTypeInitializer.DefaultNonPagedPoolCharge = sizeof(OBJECT_DIRECTORY);
     ObCreateObjectType(&Name, &ObjectTypeInitializer, NULL, &ObpDirectoryObjectType);
+    ObjectTypeInitializer.SecurityRequired = FALSE;
     ObpDirectoryObjectType->TypeInfo.ValidAccessMask &= ~SYNCHRONIZE;
 
     /* Create 'symbolic link' object type */
