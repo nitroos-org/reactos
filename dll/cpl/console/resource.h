@@ -31,6 +31,7 @@
 #define IDL_CODEPAGE                    212
 #define IDC_CHECK_CTRL_KEYS             213
 #define IDC_CHECK_LINE_SELECTION        214
+#define IDC_CHECK_FILTER_PASTE          215
 
 /* Apply dialog */
 #define IDC_RADIO_APPLY_ALL     300

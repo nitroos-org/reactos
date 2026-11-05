@@ -210,6 +210,7 @@ ConCfgInitStateInfoEx(
     Ex->Size = sizeof(CONSOLE_STATE_INFO_EX);
     Ex->CtrlKeyShortcutsDisabled = FALSE;   // Windows 10 default: the shortcuts are on
     Ex->LineSelection = TRUE;               // Windows 10 default: line wrapping selection on
+    Ex->FilterOnPaste = TRUE;               // Windows 10 default: pasted text is filtered
 }
 
 BOOLEAN
@@ -355,6 +356,11 @@ ConCfgReadUserSettings(
             if (Ex) Ex->LineSelection = !!Value;
             Success = TRUE;
         }
+        else if (!wcscmp(szValueName, L"FilterOnPaste"))
+        {
+            if (Ex) Ex->FilterOnPaste = !!Value;
+            Success = TRUE;
+        }
         else if (!wcscmp(szValueName, L"ScreenBufferSize"))
         {
             ConsoleInfo->ScreenBufferSize.X = LOWORD(Value);
@@ -470,6 +476,9 @@ do {                                                                            
 
         Storage = !!Ex->LineSelection;
         SetConsoleSetting(L"LineSelection", REG_DWORD, sizeof(DWORD), &Storage, TRUE);
+
+        Storage = !!Ex->FilterOnPaste;
+        SetConsoleSetting(L"FilterOnPaste", REG_DWORD, sizeof(DWORD), &Storage, TRUE);
     }
 
     Storage = MAKELONG(ConsoleInfo->ScreenBufferSize.X, ConsoleInfo->ScreenBufferSize.Y);

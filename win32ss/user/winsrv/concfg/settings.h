@@ -81,6 +81,7 @@ typedef struct _CONSOLE_STATE_INFO_EX
     ULONG   Size;                       // sizeof(CONSOLE_STATE_INFO_EX)
     BOOL    CtrlKeyShortcutsDisabled;   // HKCU\Console CtrlKeyShortcutsDisabled (default FALSE)
     BOOL    LineSelection;              // HKCU\Console LineSelection (default TRUE)
+    BOOL    FilterOnPaste;              // HKCU\Console FilterOnPaste (default TRUE)
 } CONSOLE_STATE_INFO_EX, *PCONSOLE_STATE_INFO_EX;
 
 #pragma pack(pop)

@@ -192,6 +192,7 @@ GuiConsoleShowConsoleProperties(PGUI_CONSOLE_DATA GuiData,
             {
                 pSharedEx->CtrlKeyShortcutsDisabled = Console->CtrlKeyShortcutsDisabled;
                 pSharedEx->LineSelection = Console->LineSelection;
+                pSharedEx->FilterOnPaste = Console->FilterOnPaste;
             }
         }
 

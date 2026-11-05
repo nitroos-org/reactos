@@ -264,6 +264,30 @@ PasteText(
         }
         CurChar = *Buffer++;
 
+        /*
+         * HKCU\Console FilterOnPaste, as Windows 10 does it (measured on 22H2): tabs are
+         * dropped, the typographic double quotes and the en and em dashes become the ASCII
+         * ones, and the no-break space becomes a plain space. Trailing blanks and the line
+         * endings are not touched.
+         */
+        if (Console->FilterOnPaste)
+        {
+            switch (CurChar)
+            {
+                case L'\t':
+                    continue;
+                case 0x201C: case 0x201D:
+                    CurChar = L'"';
+                    break;
+                case 0x2013: case 0x2014:
+                    CurChar = L'-';
+                    break;
+                case 0x00A0:
+                    CurChar = L' ';
+                    break;
+            }
+        }
+
         /* Get the key code (+ shift state) corresponding to the character */
         VkKey = VkKeyScanW(CurChar);
         if (VkKey == 0xFFFF)
@@ -276,6 +300,7 @@ PasteText(
              * convert the character to OEM / multibyte and use MapVirtualKey()
              * on each byte (simulating an Alt-0xxx OEM keyboard press).
              */
+            VkKey = 0; // No key: Windows reports a virtual key code of 0 for such characters
         }
 
         /* Pressing some control keys */

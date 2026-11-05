@@ -1962,7 +1962,7 @@ NtUserVkKeyScanEx(
     PVK_TO_WCHAR_TABLE pVkToWchTbl;
     PVK_TO_WCHARS10 pVkToWch;
     PKL pKl = NULL;
-    DWORD i, dwModBits = 0, dwModNumber = 0, Ret = (DWORD)-1;
+    DWORD i, dwModBits = 0, dwModNumber = 0, Ret = (DWORD)-1, NumpadRet = (DWORD)-1;
 
     TRACE("NtUserVkKeyScanEx() wch %u, KbdLayout 0x%p\n", wch, dwhkl);
     UserEnterShared();
@@ -2001,12 +2001,27 @@ NtUserVkKeyScanEx(
                     TRACE("i %lu wC %04x: dwModBits %08x dwModNumber %08x MaxModBits %08x\n",
                           i, wch, dwModBits, dwModNumber, pKbdTbl->pCharModifiers->wMaxModBits);
                     Ret = (dwModBits << 8) | (pVkToWch->VirtualKey & 0xFF);
+
+                    /*
+                     * Like Windows, prefer the key of the main keyboard over the numeric
+                     * keypad ('1' is VK_1, not VK_NUMPAD1); the keypad is the fallback
+                     * for a layout that has the character nowhere else.
+                     */
+                    if ((pVkToWch->VirtualKey & 0xFF) >= VK_NUMPAD0 &&
+                        (pVkToWch->VirtualKey & 0xFF) <= VK_DIVIDE)
+                    {
+                        if (NumpadRet == (DWORD)-1)
+                            NumpadRet = Ret;
+                        Ret = (DWORD)-1;
+                        break;
+                    }
                     goto Exit;
                 }
             }
             pVkToWch = (PVK_TO_WCHARS10)(((BYTE *)pVkToWch) + pVkToWchTbl->cbSize);
         }
     }
+    Ret = NumpadRet;
 Exit:
     UserLeave();
     return Ret;
