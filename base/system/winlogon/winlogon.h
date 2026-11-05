@@ -246,6 +246,7 @@ typedef struct _WLSESSION
     HHOOK KeyboardHook;
     HHOOK MouseHook;
 #endif
+    HANDLE hScreenSaverThread;
     HANDLE hEndOfScreenSaverThread;
     HANDLE hScreenSaverParametersChanged;
     HANDLE hUserActivity;
@@ -347,6 +348,9 @@ InitializeSAS(IN OUT PWLSESSION Session);
 /* screensaver.c */
 BOOL
 InitializeScreenSaver(IN OUT PWLSESSION Session);
+
+VOID
+TerminateScreenSaverThread(IN OUT PWLSESSION Session);
 
 VOID
 StartScreenSaver(IN PWLSESSION Session);

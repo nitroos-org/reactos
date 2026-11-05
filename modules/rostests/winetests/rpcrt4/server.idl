@@ -533,6 +533,7 @@ cpp_quote("#ifndef SKIP_TYPE_DECLS")
   typedef enum { IPE_A, IPE_B, IPE_C } ipe_t;
   typedef struct { ipe_t e; int x; } ipb_t;
   typedef struct { int a; int b; } ips_t;
+  typedef [switch_type(int)] union { [case(0)] int ua; [case(1)] hyper uh; [default] ; } ipun_t;
 cpp_quote("#endif")
 
   int inparam_bogus_struct([in] ipb_t *s);
@@ -541,5 +542,11 @@ cpp_quote("#endif")
   int inparam_bogus_array([in] int n, [in, size_is(n)] ipe_t *a);
   int inparam_struct([in] ips_t *s);
   int inparam_carray([in] int n, [in, size_is(n)] int *a);
+  /* the same arrays declared in array form (a[*]): no simple reference attribute, the
+     argument itself is the block (SAMR SamrLookupNamesInDomain Names[*]) */
+  /* an [in] union parameter (SAMR SamrSetInformationUser2 Buffer) */
+  int inparam_union([in] int n, [in, switch_is(n)] ipun_t *u);
+  int inparam_array_form_bogus([in] int n, [in, size_is(n)] ipe_t a[*]);
+  int inparam_array_form_cvarray([in] int n, [in] int l, [in, size_is(n), length_is(l)] int a[*]);
   unsigned int get_inparam_frees(void);
 }

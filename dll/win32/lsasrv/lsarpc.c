@@ -111,11 +111,43 @@ LsarStartRpcServer(VOID)
 }
 
 
+NTSTATUS
+WINAPI
+LsarClose(
+    LSAPR_HANDLE *ObjectHandle);
+
+/* Frees the SIDs and the array of a LSAPR_TRANSLATED_SIDS_EX2 that is not returned to the client */
+static
+VOID
+LsarpFreeTranslatedSidsEx2(
+    PLSAPR_TRANSLATED_SIDS_EX2 TranslatedSids)
+{
+    ULONG i;
+
+    if (TranslatedSids->Sids == NULL)
+        return;
+
+    for (i = 0; i < TranslatedSids->Entries; i++)
+    {
+        if (TranslatedSids->Sids[i].Sid != NULL)
+            MIDL_user_free(TranslatedSids->Sids[i].Sid);
+    }
+
+    MIDL_user_free(TranslatedSids->Sids);
+    TranslatedSids->Sids = NULL;
+    TranslatedSids->Entries = 0;
+}
+
+
 void
 __RPC_USER
 LSAPR_HANDLE_rundown(
     LSAPR_HANDLE hHandle)
 {
+    /* The client went away holding the handle: close it like LsarClose does */
+    TRACE("LSAPR_HANDLE_rundown(%p)\n", hHandle);
+
+    LsarClose(&hHandle);
 }
 
 
@@ -980,14 +1012,15 @@ LsarEnumerateAccounts(
     if (!NT_SUCCESS(Status))
     {
         ERR("LsapRegQueryKeyInfo returned 0x%08lx\n", Status);
-        return Status;
+        goto done;
     }
 
     AccountKeyBufferSize += sizeof(WCHAR);
     AccountKeyBuffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, AccountKeyBufferSize);
     if (AccountKeyBuffer == NULL)
     {
-        return STATUS_NO_MEMORY;
+        Status = STATUS_NO_MEMORY;
+        goto done;
     }
 
     EnumIndex = *EnumerationContext;
@@ -1225,7 +1258,11 @@ LsarLookupNames(
                              0,
                              0);
     if (!NT_SUCCESS(Status))
+    {
+        /* STATUS_NONE_MAPPED still hands out the array: it is not an output of this call */
+        LsarpFreeTranslatedSidsEx2(&TranslatedSidsEx2);
         return Status;
+    }
 
     TranslatedSids->Entries = TranslatedSidsEx2.Entries;
     TranslatedSids->Sids = MIDL_user_allocate(TranslatedSids->Entries * sizeof(LSA_TRANSLATED_SID));
@@ -2649,14 +2686,15 @@ LsarEnumerateAccountsWithUserRight(
     if (!NT_SUCCESS(Status))
     {
         ERR("LsapRegOpenKey returned 0x%08lx\n", Status);
-        return Status;
+        goto done;
     }
 
     AccountKeyBufferSize += sizeof(WCHAR);
     AccountKeyBuffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, AccountKeyBufferSize);
     if (AccountKeyBuffer == NULL)
     {
-        return STATUS_INSUFFICIENT_RESOURCES;
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto done;
     }
 
     EnumBuffer = RtlAllocateHeap(RtlGetProcessHeap(),
@@ -2847,6 +2885,9 @@ done:
     if (AccountKeyBuffer != NULL)
         RtlFreeHeap(RtlGetProcessHeap(), 0, AccountKeyBuffer);
 
+    if (AccountsKeyHandle != NULL)
+        LsapRegCloseKey(AccountsKeyHandle);
+
     if (Status == STATUS_SUCCESS && EnumCount == 0)
         Status = STATUS_NO_MORE_ENTRIES;
 
@@ -2904,7 +2945,8 @@ LsarEnumerateAccountRights(
         goto done;
     }
 
-    RightsCount = PrivilegeSet->PrivilegeCount;
+    /* An account that only has account rights has no privilege set (STATUS_OBJECT_NAME_NOT_FOUND) */
+    RightsCount = (PrivilegeSet != NULL) ? PrivilegeSet->PrivilegeCount : 0;
 
     /* Count account rights */
     for (i = 0; i < sizeof(ACCESS_MASK) * 8; i++)
@@ -4014,7 +4056,11 @@ LsarLookupNames2(
                              LookupOptions,
                              ClientRevision);
     if (!NT_SUCCESS(Status))
+    {
+        /* STATUS_NONE_MAPPED still hands out the array: it is not an output of this call */
+        LsarpFreeTranslatedSidsEx2(&TranslatedSidsEx2);
         return Status;
+    }
 
     TranslatedSids->Entries = TranslatedSidsEx2.Entries;
     TranslatedSids->Sids = MIDL_user_allocate(TranslatedSids->Entries * sizeof(LSA_TRANSLATED_SID));
