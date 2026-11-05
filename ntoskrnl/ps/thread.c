@@ -1001,6 +1001,7 @@ NtCreateThread(OUT PHANDLE ThreadHandle,
                IN BOOLEAN CreateSuspended)
 {
     INITIAL_TEB SafeInitialTeb;
+    CONTEXT SafeContext;
     NTSTATUS Status;
     PAGED_CODE();
     PSTRACE(PS_THREAD_DEBUG,
@@ -1031,6 +1032,12 @@ NtCreateThread(OUT PHANDLE ThreadHandle,
             /* Check the Initial TEB */
             ProbeForRead(InitialTeb, sizeof(INITIAL_TEB), sizeof(ULONG));
             SafeInitialTeb = *InitialTeb;
+
+            /* Windows reads the context here, so an unreadable one fails with
+             * STATUS_ACCESS_VIOLATION before the process handle is looked at, and the
+             * thread is built from this copy, not from memory the caller can change */
+            RtlCopyMemory(&SafeContext, ThreadContext, sizeof(CONTEXT));
+            ThreadContext = &SafeContext;
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -1052,6 +1059,19 @@ NtCreateThread(OUT PHANDLE ThreadHandle,
          (SafeInitialTeb.PreviousStackLimit != NULL)))
     {
         Status = STATUS_NOT_SUPPORTED;
+        goto Failed;
+    }
+
+    /* Windows 10 refuses a stack with neither StackLimit nor AllocatedStackBase before it
+     * looks at the process handle (measured: a zero INITIAL_TEB and a StackBase-only one
+     * fail with STATUS_INVALID_PARAMETER whatever the handle, a StackBase of NULL with the
+     * other two set is accepted, and the CONTEXT flags are not checked). Which of the two
+     * fields it tests is not known, so only the case where both are NULL is refused. */
+    if ((KeGetPreviousMode() != KernelMode) &&
+        (SafeInitialTeb.StackLimit == NULL) &&
+        (SafeInitialTeb.AllocatedStackBase == NULL))
+    {
+        Status = STATUS_INVALID_PARAMETER;
         goto Failed;
     }
 
