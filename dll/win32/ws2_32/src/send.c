@@ -249,6 +249,12 @@ WSASendDisconnect(IN SOCKET s,
  * Neither AFD nor the TCP/IP driver has an interface for per-message options, so a request that is well
  * formed is refused with WSAEOPNOTSUPP, except for packet information that asks for what the socket does
  * anyway (its own bound address, any interface), instead of being dropped without its effect.
+ *
+ * Two more that Rust's quinn-udp (Firefox HTTP/3) puts on its datagrams are carried out or ignored, as it
+ * cannot work without: UDP_SEND_MSG_SIZE (level UDP, type 2, a segment size; the datagram is sent as several
+ * of that size, see WSASendMsg) and IP_ECN (type 50, 0 to 3 on Windows 10, anything else is invalid). The
+ * ECN codepoint cannot be put into the IP header: the packet goes out Not-ECT, which QUIC's ECN validation
+ * treats as a path that does not carry ECN.
  */
 #define WS_CMSG_IP_OPTIONS       1
 #define WS_CMSG_IP_TOS           3
@@ -256,6 +262,8 @@ WSASendDisconnect(IN SOCKET s,
 #define WS_CMSG_IP_PKTINFO      19
 #define WS_CMSG_IP_TTL          21
 #define WS_CMSG_IP_RTHDR        32
+#define WS_CMSG_IP_ECN          50
+#define WS_CMSG_UDP_SEND_MSG_SIZE 2
 
 /* Not inlined: inside the SEH frame of WSASendMsg the i386 optimizer lost the result of the loop */
 static
@@ -263,7 +271,9 @@ DECLSPEC_NOINLINE
 INT
 WsCheckSendMsgControl(IN PWSSOCKET Socket,
                       IN SOCKET Handle,
-                      IN LPWSABUF Control)
+                      IN INT SocketType,
+                      IN LPWSABUF Control,
+                      OUT PULONG SegmentSize)
 {
     PUCHAR Cursor = (PUCHAR)Control->buf;
     ULONG Remaining = Control->len;
@@ -271,6 +281,8 @@ WsCheckSendMsgControl(IN PWSSOCKET Socket,
     ULONGLONG Step;
     INT Family = Socket->CatalogEntry->ProtocolInfo.iAddressFamily;
     BOOLEAN Unsupported = FALSE;
+
+    *SegmentSize = 0;
 
     if ((Control->buf == NULL) != (Control->len == 0))
         return WSAEFAULT;
@@ -288,7 +300,15 @@ WsCheckSendMsgControl(IN PWSSOCKET Socket,
             return WSAEINVAL;
         Payload = (ULONG)(Header->cmsg_len - sizeof(WSACMSGHDR));
 
-        if (Family == AF_INET)
+        if (Family == AF_INET && Header->cmsg_level == IPPROTO_UDP)
+        {
+            /* A segment size: the only message of this level, for a datagram socket */
+            if (Header->cmsg_type != WS_CMSG_UDP_SEND_MSG_SIZE || SocketType != SOCK_DGRAM ||
+                Payload < sizeof(ULONG))
+                return WSAEINVAL;
+            *SegmentSize = *(UNALIGNED ULONG *)WSA_CMSG_DATA(Header);
+        }
+        else if (Family == AF_INET)
         {
             if (Header->cmsg_level != IPPROTO_IP)
                 return WSAEINVAL;
@@ -328,6 +348,10 @@ WsCheckSendMsgControl(IN PWSSOCKET Socket,
                     }
                     break;
                 }
+                case WS_CMSG_IP_ECN:
+                    if (Payload < sizeof(INT) || *(UNALIGNED ULONG *)WSA_CMSG_DATA(Header) > 3)
+                        return WSAEINVAL;
+                    break;
                 case WS_CMSG_IP_RTHDR:
                     if (Payload != 0)
                         return WSAEINVAL;
@@ -434,6 +458,30 @@ WsCompleteInlineSend(IN LPWSAOVERLAPPED Overlapped,
 }
 
 /*
+ * Windows binds an unbound IPv4 socket to a wildcard address and port at the start of WSASendMsg, so that the
+ * socket is bound also when the call then fails (the winetest sock test expects it).
+ */
+static
+VOID
+WsBindForSendMsg(IN PWSSOCKET Socket,
+                 IN SOCKET Handle)
+{
+    SOCKADDR_IN Local;
+    INT LocalLength = sizeof(Local), LocalError = NO_ERROR;
+
+    if (Socket->CatalogEntry->ProtocolInfo.iAddressFamily != AF_INET)
+        return;
+
+    if (Socket->Provider->Service.lpWSPGetSockName(Handle, (LPSOCKADDR)&Local, &LocalLength, &LocalError) &&
+        LocalError == WSAEINVAL)
+    {
+        RtlZeroMemory(&Local, sizeof(Local));
+        Local.sin_family = AF_INET;
+        Socket->Provider->Service.lpWSPBind(Handle, (LPSOCKADDR)&Local, sizeof(Local), &LocalError);
+    }
+}
+
+/*
  * @implemented
  *
  * Only datagram and raw sockets, as on Windows. The message is sent with the
@@ -466,11 +514,14 @@ WSASendMsg(IN SOCKET s,
     WSABUF Single;
     LPWSABUF SendBuffers = NULL;
     LPWSABUF volatile Snapshot = NULL;
-    DWORD Sent = 0, Index;
+    DWORD volatile Sent = 0;
+    DWORD Index;
     ULONGLONG Total = 0;
     PCHAR volatile Gathered = NULL;
     PWS_SENDMSG_APC volatile CompletionApc = NULL;
     BOOLEAN Inline;
+    ULONG SegmentSize = 0;
+    BOOLEAN Segmented = FALSE;
     DPRINT("WSASendMsg: %lx, %p, %lx\n", s, lpMsg, dwFlags);
 
     /* Check for WSAStartup */
@@ -615,11 +666,22 @@ WSASendMsg(IN SOCKET s,
         }
 
         if (ErrorCode == NO_ERROR)
-            ErrorCode = WsCheckSendMsgControl(Socket, s, &Msg.Control);
+            ErrorCode = WsCheckSendMsgControl(Socket, s, SocketType, &Msg.Control, &SegmentSize);
+
+        /* A segment size smaller than the message splits it into datagrams of that size (the last one is smaller) */
+        if (ErrorCode == NO_ERROR && SegmentSize && Total > SegmentSize)
+        {
+            Segmented = TRUE;
+            if (lpOverlapped && !Inline)
+                ErrorCode = WSAEOPNOTSUPP;
+        }
 
         /* A synchronous send has to report its byte count */
         if (ErrorCode == NO_ERROR && !lpNumberOfBytesSent && !lpOverlapped)
+        {
             ErrorCode = WSAEFAULT;
+            WsBindForSendMsg(Socket, s);
+        }
 
         /* The structure is probed here, not by the provider */
         if (ErrorCode == NO_ERROR && lpOverlapped && !WsProbeOverlapped(lpOverlapped))
@@ -683,32 +745,55 @@ WSASendMsg(IN SOCKET s,
         Status = SOCKET_ERROR;
         _SEH2_TRY
         {
-            if (Msg.name)
+            ULONG Offset = 0;
+            WSABUF Segment;
+            DWORD SentNow;
+
+            Sent = 0;
+            do
             {
-                Status = Socket->Provider->Service.lpWSPSendTo(s,
-                                                               SendBuffers,
-                                                               1,
-                                                               &Sent,
-                                                               dwFlags,
-                                                               Msg.name,
-                                                               Msg.namelen,
-                                                               Inline ? NULL : lpOverlapped,
-                                                               Inline ? NULL : lpCompletionRoutine,
-                                                               ThreadId,
-                                                               &ErrorCode);
-            }
-            else
-            {
-                Status = Socket->Provider->Service.lpWSPSend(s,
-                                                             SendBuffers,
-                                                             1,
-                                                             &Sent,
-                                                             dwFlags,
-                                                             Inline ? NULL : lpOverlapped,
-                                                             Inline ? NULL : lpCompletionRoutine,
-                                                             ThreadId,
-                                                             &ErrorCode);
-            }
+                LPWSABUF Buffers = SendBuffers;
+
+                SentNow = 0;
+                if (Segmented)
+                {
+                    Segment.buf = SendBuffers->buf + Offset;
+                    Segment.len = (ULONG)min((ULONGLONG)SegmentSize, Total - Offset);
+                    Buffers = &Segment;
+                }
+
+                if (Msg.name)
+                {
+                    Status = Socket->Provider->Service.lpWSPSendTo(s,
+                                                                   Buffers,
+                                                                   1,
+                                                                   &SentNow,
+                                                                   dwFlags,
+                                                                   Msg.name,
+                                                                   Msg.namelen,
+                                                                   Inline ? NULL : lpOverlapped,
+                                                                   Inline ? NULL : lpCompletionRoutine,
+                                                                   ThreadId,
+                                                                   &ErrorCode);
+                }
+                else
+                {
+                    Status = Socket->Provider->Service.lpWSPSend(s,
+                                                                 Buffers,
+                                                                 1,
+                                                                 &SentNow,
+                                                                 dwFlags,
+                                                                 Inline ? NULL : lpOverlapped,
+                                                                 Inline ? NULL : lpCompletionRoutine,
+                                                                 ThreadId,
+                                                                 &ErrorCode);
+                }
+
+                if (Status != ERROR_SUCCESS)
+                    break;
+                Sent += SentNow;
+                Offset += SentNow;
+            } while (Segmented && Offset < Total);
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {

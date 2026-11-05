@@ -13,6 +13,17 @@
 #define NDEBUG
 #include <debug.h>
 
+/* PROTOTYPES (send.c) *******************************************************/
+
+INT
+WSAAPI
+WSASendMsg(IN SOCKET s,
+           IN LPWSAMSG lpMsg,
+           IN DWORD dwFlags,
+           OUT LPDWORD lpNumberOfBytesSent,
+           IN LPWSAOVERLAPPED lpOverlapped,
+           IN LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+
 /* FUNCTIONS *****************************************************************/
 
 /*
@@ -65,6 +76,25 @@ WSAIoctl(IN SOCKET s,
         /* Get the Socket Context */
         if ((Socket = WsSockGetSocket(s)))
         {
+            /* WSASendMsg is a function of this DLL, not of the provider, so its extension
+             * function pointer is answered here (WSARecvMsg and the others belong to the provider) */
+            if (dwIoControlCode == SIO_GET_EXTENSION_FUNCTION_POINTER &&
+                lpvInBuffer && cbInBuffer >= sizeof(GUID) &&
+                lpvOutBuffer && cbOutBuffer >= sizeof(PVOID) && lpcbBytesReturned &&
+                !lpOverlapped && !lpCompletionRoutine)
+            {
+                /* WSAID_WSASENDMSG (mswsock.h) */
+                GUID SendMsgGuid = {0xa441e712,0x754f,0x43ca,{0x84,0xa7,0x0d,0xee,0x44,0xcf,0x60,0x6d}};
+
+                if (IsEqualGUID(&SendMsgGuid, lpvInBuffer))
+                {
+                    *((PVOID *)lpvOutBuffer) = (PVOID)WSASendMsg;
+                    *lpcbBytesReturned = sizeof(PVOID);
+                    WsSockDereference(Socket);
+                    return ERROR_SUCCESS;
+                }
+            }
+
             /* Make the call */
             Status = Socket->Provider->Service.lpWSPIoctl(s,
                                                   dwIoControlCode,
