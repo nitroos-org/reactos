@@ -51,6 +51,18 @@ typedef struct _SOCKET_CONTEXT {
     SOCKET_STATE SocketState;
     PQUEUED_REQUEST RequestQueue;
     BOOL DontRoute;
+    /* IP and UDP options of a socket as set, for getsockopt (WshGetKeptOption); WSH_OPT_SET_* marks the set ones */
+    DWORD OptionsSet;
+    LONG IpTtl;
+    LONG IpTos;
+    LONG IpDontFragment;
+    LONG IpRecvTos;
+    LONG IpRecvEcn;
+    LONG IpMulticastLoop;
+    LONG IpMulticastTtl;
+    LONG IpMtuDiscover;
+    LONG UdpSendMsgSize;
+    LONG UdpRecvMaxCoalescedSize;
 } SOCKET_CONTEXT, *PSOCKET_CONTEXT;
 
 INT
