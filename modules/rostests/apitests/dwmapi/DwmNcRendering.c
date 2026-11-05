@@ -165,6 +165,7 @@ START_TEST(DwmNcRendering)
     ok_int(g_NcState, 0);
     ok(g_cFrameChanged >= 1, "no frame change (%d)\n", g_cFrameChanged);
     CHECK_ENABLED(hwnd, 0);
+    CHECK_BOUNDS_EMPTY(hwnd, TRUE);
 
     /* The same value again: nothing */
     Reset();
@@ -181,6 +182,7 @@ START_TEST(DwmNcRendering)
     Pump(300);
     ok_int(g_cNcMessages, 0);
     CHECK_ENABLED(hwnd, 0);
+    CHECK_BOUNDS_EMPTY(hwnd, TRUE);
 
     /* Enabled again */
     Reset();
@@ -221,10 +223,12 @@ START_TEST(DwmNcRendering)
     hr = SetPolicy(hwnd, 1);
     ok_hex(hr, S_OK);
     CHECK_ENABLED(hwnd, 0);
+    CHECK_BOUNDS_EMPTY(hwnd, TRUE);
     ShowWindow(hwnd, SW_SHOW);
     Pump(500);
     ok_int(g_cNcMessages, 0);
     CHECK_ENABLED(hwnd, 0);
+    CHECK_BOUNDS_EMPTY(hwnd, TRUE);
     DestroyWindow(hwnd);
     Pump(50);
 

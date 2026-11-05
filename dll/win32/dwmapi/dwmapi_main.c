@@ -375,7 +375,8 @@ BOOL WINAPI DwmDefWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, 
  * (30 / 25); right = the right edge of EXTENDED_FRAME_BOUNDS (width - 7 with the 7 invisible pixels of a
  * sizing frame, width - 2 for a fixed frame), and width - fw - 1 for a maximized window; left = right - 146
  * for the three buttons of a window with a system menu and a minimize or maximize box, right - 49 for the
- * close button alone (no such box, or a tool window). A window without a caption has an all-zero RECT. It is
+ * close button alone (no such box, or a tool window). A window without a caption, and one whose non-client
+ * rendering is disabled by DwmSetWindowAttribute(DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED), has an all-zero RECT. It is
  * the same for a hidden and for a minimized window (the right edge follows the minimized rectangle).
  *
  * EXTENDED_FRAME_BOUNDS is the window rectangle in screen coordinates without the invisible resize border
@@ -440,6 +441,9 @@ static void get_caption_button_bounds(HWND hwnd, RECT *rect)
 
     SetRectEmpty(rect);
     if (!(style & WS_CAPTION) || !(style & WS_SYSMENU))
+        return;
+    /* No non-client rendering, no system buttons: all zero (Windows 10, also for a hidden window) */
+    if ((get_nc_data(hwnd) & NITRO_NC_POLICY_MASK) == 1)
         return;
 
     GetWindowRect(hwnd, &wr);
