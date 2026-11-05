@@ -2,6 +2,16 @@
 
 extern ATOM AtomMessage;
 extern ATOM AtomWndObj; /* WNDOBJ list */
+extern ATOM AtomDwmNc;      /* NitroDwmNc: non-client rendering policy, a property dwmapi sets, see window.c */
+extern ATOM AtomDwmNcState; /* SysDwmNc: what was announced of the non-client rendering, a system property */
+
+/* WM_DWMNCRENDERINGCHANGED is posted to a captioned top-level window when it is first shown (lParam DWMNC_PENDING),
+   and by dwmapi when the policy of a window changes (lParam DWMNC_POLICY). The state is worked out when the
+   application takes the message, after it had its chance to set the policy (IntDwmNcResolve). */
+#define DWMNC_PENDING ((LPARAM)0x4E4D5744)
+#define DWMNC_POLICY  ((LPARAM)0x4E4D5745)
+BOOL FASTCALL IntDwmNcResolve(PWND Window, PMSG Msg);
+VOID FASTCALL IntDwmNcAnnounceFirstShow(PWND Window);
 extern ATOM AtomLayer;
 extern ATOM AtomFlashWndState;
 extern BOOL g_bWindowSnapEnabled;

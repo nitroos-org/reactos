@@ -1307,7 +1307,8 @@ BOOL FASTCALL
 co_WinPosDoWinPosChanging(PWND Window,
                           PWINDOWPOS WinPos,
                           PRECTL WindowRect,
-                          PRECTL ClientRect)
+                          PRECTL ClientRect,
+                          PPOINT ParentOffset)
 {
    ASSERT_REFS_CO(Window);
 
@@ -1324,6 +1325,17 @@ co_WinPosDoWinPosChanging(PWND Window,
 
    *WindowRect = Window->rcWindow;
    *ClientRect = (Window->style & WS_MINIMIZE) ? Window->rcWindow : Window->rcClient;
+
+   /* The origin of the coordinates of SetWindowPos: the client area of the parent for a child window, the
+      screen for a top-level window. It is read here, after the callbacks of WM_WINDOWPOSCHANGING, which can
+      move the parent, and WM_WINDOWPOSCHANGED turns the new window rectangle back into the same coordinates. */
+   ParentOffset->x = 0;
+   ParentOffset->y = 0;
+   if (Window->spwndParent && Window->spwndParent != Window->head.rpdesk->pDeskInfo->spwnd)
+   {
+      ParentOffset->x = Window->spwndParent->rcClient.left;
+      ParentOffset->y = Window->spwndParent->rcClient.top;
+   }
 
    if (!(WinPos->flags & SWP_NOSIZE))
    {
@@ -1342,22 +1354,16 @@ co_WinPosDoWinPosChanging(PWND Window,
    if (!(WinPos->flags & SWP_NOMOVE))
    {
       INT X, Y;
-      PWND Parent;
       X = WinPos->x;
       Y = WinPos->y;
 
-      Parent = Window->spwndParent;
-
       // Parent child position issue is in here. SetParent_W7 test CORE-6651.
-      if (//((Window->style & WS_CHILD) != 0) && <- Fixes wine msg test_SetParent: "rects do not match", the last test.
-           Parent &&
-           Parent != Window->head.rpdesk->pDeskInfo->spwnd)
-      {
-         TRACE("Not SWP_NOMOVE 1 Parent client offset X %d Y %d\n",X,Y);
-         X += Parent->rcClient.left;
-         Y += Parent->rcClient.top;
-         TRACE("Not SWP_NOMOVE 2 Parent client offset X %d Y %d\n",X,Y);
-      }
+      // (A parent that is not the desktop: ParentOffset is its client origin, also for a window that is not a
+      // WS_CHILD, which Fixes wine msg test_SetParent: "rects do not match", the last test.)
+      TRACE("Not SWP_NOMOVE 1 Parent client offset X %d Y %d\n",X,Y);
+      X += ParentOffset->x;
+      Y += ParentOffset->y;
+      TRACE("Not SWP_NOMOVE 2 Parent client offset X %d Y %d\n",X,Y);
 
       WindowRect->left    = X;
       WindowRect->top     = Y;
@@ -1549,6 +1555,7 @@ WinPosDoOwnedPopups(PWND Window, HWND hWndInsertAfter)
 done:
    return hWndInsertAfter;
 }
+
 ////
 
 /***********************************************************************
@@ -1878,6 +1885,7 @@ co_WinPosSetWindowPosEx(
    PREGION CopyRgn = NULL;
    ULONG WvrFlags = 0;
    RECTL OldWindowRect, OldClientRect;
+   POINT ParentOffset;
    int RgnType;
    HDC Dc;
    RECTL CopyRect;
@@ -1937,7 +1945,7 @@ co_WinPosSetWindowPosEx(
       WinPos.flags |= SWP_NOSENDCHANGING;
    }
 
-   co_WinPosDoWinPosChanging(Window, &WinPos, &NewWindowRect, &NewClientRect);
+   co_WinPosDoWinPosChanging(Window, &WinPos, &NewWindowRect, &NewClientRect, &ParentOffset);
 
    /* Does the window still exist? */
    if (!IntIsWindow(WinPos.hwnd))
@@ -2524,16 +2532,10 @@ co_WinPosSetWindowPosEx(
       WinPos.cx = NewWindowRect.right - NewWindowRect.left;
       WinPos.cy = NewWindowRect.bottom - NewWindowRect.top;
       /* The position is in the coordinates SetWindowPos takes, as in WM_WINDOWPOSCHANGING: relative to
-         the client area of the parent for a child window (the inverse of co_WinPosDoWinPosChanging).
-         NewWindowRect is in screen coordinates. */
-      {
-         PWND Parent = Window->spwndParent;
-         if (Parent && Parent != Window->head.rpdesk->pDeskInfo->spwnd)
-         {
-            WinPos.x -= Parent->rcClient.left;
-            WinPos.y -= Parent->rcClient.top;
-         }
-      }
+         the client area of the parent for a child window. NewWindowRect is in screen coordinates; the
+         offset is the one co_WinPosDoWinPosChanging used, whatever the callbacks did to the parent since. */
+      WinPos.x -= ParentOffset.x;
+      WinPos.y -= ParentOffset.y;
       TRACE("WM_WINDOWPOSCHANGED hwnd %p Flags %04x\n",WinPos.hwnd,WinPos.flags);
       co_IntSendMessageNoWait(WinPos.hwnd, WM_WINDOWPOSCHANGED, 0, (LPARAM) &WinPos);
    }
