@@ -10,6 +10,7 @@ list(APPEND SOURCE
     ftype.c
     mklink.c
     mkdir.c
+    dirstreams.c
     ren.c
     start.c
     typeperf.c
