@@ -1,0 +1,382 @@
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+IDR_MAINMENU MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "&Import Policy...", IDM_IMPORT
+        MENUITEM "&Export Policy...", IDM_EXPORT
+        MENUITEM SEPARATOR
+        MENUITEM "E&xit", IDM_EXIT
+    END
+    POPUP "&Action"
+    BEGIN
+        MENUITEM "&New Rule...", IDM_NEWRULE
+        MENUITEM SEPARATOR
+        MENUITEM "&Enable Rule", IDM_ENABLE
+        MENUITEM "Dis&able Rule", IDM_DISABLE
+        MENUITEM "&Delete", IDM_DELETE
+        MENUITEM "Rule P&roperties", IDM_RULEPROPS
+        MENUITEM SEPARATOR
+        MENUITEM "&Properties", IDM_PROFPROPS
+        MENUITEM "Restore Default &Policy", IDM_RESTORE
+    END
+    POPUP "&View"
+    BEGIN
+        MENUITEM "&Refresh\tF5", IDM_REFRESH
+    END
+    POPUP "&Help"
+    BEGIN
+        MENUITEM "&About NitroOS Firewall with Advanced Security", IDM_ABOUT
+    END
+END
+
+/* ---- rule properties pages ---- */
+IDD_RP_GENERAL DIALOGEX 0, 0, 252, 218
+STYLE DS_SHELLFONT | WS_CHILD | WS_DISABLED | WS_CAPTION
+CAPTION "General"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    GROUPBOX "General", -1, 6, 6, 240, 96
+    LTEXT "&Name:", -1, 14, 20, 40, 10
+    EDITTEXT IDC_RP_NAME, 58, 18, 180, 12, ES_AUTOHSCROLL
+    LTEXT "&Description:", -1, 14, 36, 40, 10
+    EDITTEXT IDC_RP_DESC, 58, 34, 180, 36, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL
+    LTEXT "Group:", -1, 14, 76, 40, 10
+    EDITTEXT IDC_RP_GROUP, 58, 74, 180, 12, ES_AUTOHSCROLL | ES_READONLY
+    AUTOCHECKBOX "&Enabled", IDC_RP_ENABLED, 14, 88, 100, 10
+    GROUPBOX "Action", -1, 6, 108, 240, 56
+    RADIOBUTTON "&Allow the connection", IDC_RP_ALLOW, 14, 122, 200, 10, WS_GROUP
+    RADIOBUTTON "&Block the connection", IDC_RP_BLOCK, 14, 138, 200, 10
+END
+
+IDD_RP_PROGRAMS DIALOGEX 0, 0, 252, 218
+STYLE DS_SHELLFONT | WS_CHILD | WS_DISABLED | WS_CAPTION
+CAPTION "Programs and Services"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    GROUPBOX "Programs", -1, 6, 6, 240, 82
+    RADIOBUTTON "A&ll programs", IDC_RP_ALLPROGS, 14, 20, 200, 10, WS_GROUP
+    LTEXT "Rule applies to connections for all programs on the computer that match other rule properties.", -1, 26, 32, 212, 18
+    RADIOBUTTON "T&his program:", IDC_RP_THISPROG, 14, 54, 200, 10
+    EDITTEXT IDC_RP_PROGPATH, 26, 68, 160, 12, ES_AUTOHSCROLL
+    PUSHBUTTON "B&rowse...", IDC_RP_BROWSE, 190, 67, 48, 14
+    GROUPBOX "Services", -1, 6, 94, 240, 46
+    LTEXT "Service short name (empty: all programs and services):", -1, 14, 108, 224, 10
+    EDITTEXT IDC_RP_SERVICE, 14, 120, 224, 12, ES_AUTOHSCROLL
+END
+
+IDD_RP_PORTS DIALOGEX 0, 0, 252, 218
+STYLE DS_SHELLFONT | WS_CHILD | WS_DISABLED | WS_CAPTION
+CAPTION "Protocols and Ports"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    GROUPBOX "Protocols and ports", -1, 6, 6, 240, 150
+    LTEXT "Protocol &type:", -1, 14, 22, 60, 10
+    COMBOBOX IDC_RP_PROTO, 80, 20, 70, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT "Protocol n&umber:", -1, 14, 38, 60, 10
+    EDITTEXT IDC_RP_PROTONUM, 80, 36, 40, 12, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT "&Local port:", -1, 14, 58, 60, 10
+    EDITTEXT IDC_RP_LPORT, 80, 56, 158, 12, ES_AUTOHSCROLL
+    LTEXT "&Remote port:", -1, 14, 76, 60, 10
+    EDITTEXT IDC_RP_RPORT, 80, 74, 158, 12, ES_AUTOHSCROLL
+    LTEXT "Example: 80, 443, 5000-5010 (empty: all ports)", IDC_RP_PORTHINT, 80, 90, 160, 10
+    LTEXT "&ICMP types:", -1, 14, 112, 60, 10
+    EDITTEXT IDC_RP_ICMP, 80, 110, 158, 12, ES_AUTOHSCROLL
+    LTEXT "Example: 8:*, 3:4 (empty: all ICMP types)", -1, 80, 126, 160, 10
+END
+
+IDD_RP_SCOPE DIALOGEX 0, 0, 252, 218
+STYLE DS_SHELLFONT | WS_CHILD | WS_DISABLED | WS_CAPTION
+CAPTION "Scope"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    GROUPBOX "Local IP address", -1, 6, 6, 240, 66
+    RADIOBUTTON "A&ny IP address", IDC_RP_LADDR_ANY, 14, 20, 200, 10, WS_GROUP
+    RADIOBUTTON "T&hese IP addresses:", IDC_RP_LADDR_SEL, 14, 34, 200, 10
+    EDITTEXT IDC_RP_LADDR, 26, 48, 212, 12, ES_AUTOHSCROLL
+    GROUPBOX "Remote IP address", -1, 6, 80, 240, 66
+    RADIOBUTTON "An&y IP address", IDC_RP_RADDR_ANY, 14, 94, 200, 10, WS_GROUP
+    RADIOBUTTON "Th&ese IP addresses:", IDC_RP_RADDR_SEL, 14, 108, 200, 10
+    EDITTEXT IDC_RP_RADDR, 26, 122, 212, 12, ES_AUTOHSCROLL
+    LTEXT "Addresses, ranges, subnets and keywords separated by commas, for example 10.0.0.1, 192.168.0.0/24, LocalSubnet.", -1, 6, 152, 240, 20
+END
+
+IDD_RP_ADVANCED DIALOGEX 0, 0, 252, 218
+STYLE DS_SHELLFONT | WS_CHILD | WS_DISABLED | WS_CAPTION
+CAPTION "Advanced"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    GROUPBOX "Profiles", -1, 6, 6, 240, 62
+    LTEXT "Specify profiles to which this rule applies.", -1, 14, 18, 224, 10
+    AUTOCHECKBOX "D&omain", IDC_RP_DOMAIN, 22, 30, 100, 10
+    AUTOCHECKBOX "P&rivate", IDC_RP_PRIVATE, 22, 42, 100, 10
+    AUTOCHECKBOX "P&ublic", IDC_RP_PUBLIC, 22, 54, 100, 10
+    GROUPBOX "Interface types", -1, 6, 74, 240, 62
+    LTEXT "Specify the interface types to which this rule applies.", -1, 14, 86, 224, 10
+    AUTOCHECKBOX "&Local area network", IDC_RP_IF_LAN, 22, 98, 120, 10
+    AUTOCHECKBOX "R&emote access", IDC_RP_IF_RAS, 22, 110, 120, 10
+    AUTOCHECKBOX "&Wireless", IDC_RP_IF_WIFI, 22, 122, 120, 10
+    GROUPBOX "Edge traversal", -1, 6, 142, 240, 32
+    AUTOCHECKBOX "&Allow edge traversal", IDC_RP_EDGE, 14, 156, 200, 10
+END
+
+/* ---- New Rule wizard ---- */
+IDD_WIZARD DIALOGEX 0, 0, 360, 230
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "New Inbound Rule Wizard"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT "", IDC_W_TITLE, 10, 8, 340, 14
+    LTEXT "", IDC_W_SUBTITLE, 10, 24, 340, 24
+    LTEXT "", IDC_W_LINE, 0, 50, 360, 1, SS_ETCHEDHORZ
+    /* page 0: rule type */
+    RADIOBUTTON "P&rogram", IDC_W(WP_TYPE, WT_PROGRAM), 14, 62, 200, 10, WS_GROUP
+    LTEXT "Rule that controls connections for a program.", IDC_W(WP_TYPE, 10), 28, 74, 320, 10
+    RADIOBUTTON "P&ort", IDC_W(WP_TYPE, WT_PORT), 14, 94, 200, 10
+    LTEXT "Rule that controls connections for a TCP or UDP port.", IDC_W(WP_TYPE, 11), 28, 106, 320, 10
+    RADIOBUTTON "Pre&defined", IDC_W(WP_TYPE, WT_PREDEF), 14, 126, 200, 10
+    LTEXT "Rule that controls connections for a group of well-known services.", IDC_W(WP_TYPE, 12), 28, 138, 320, 10
+    RADIOBUTTON "C&ustom", IDC_W(WP_TYPE, WT_CUSTOM), 14, 158, 200, 10
+    LTEXT "Custom rule.", IDC_W(WP_TYPE, 13), 28, 170, 320, 10
+    /* page 1: program */
+    RADIOBUTTON "A&ll programs", IDC_W(WP_PROGRAM, WN_ALLPROGS), 14, 62, 200, 10, WS_GROUP
+    LTEXT "Rule applies to all connections on the computer that match other rule properties.", IDC_W(WP_PROGRAM, 10), 28, 74, 320, 18
+    RADIOBUTTON "T&his program path:", IDC_W(WP_PROGRAM, WN_THISPROG), 14, 100, 200, 10
+    EDITTEXT IDC_W(WP_PROGRAM, WN_PATH), 28, 114, 250, 12, ES_AUTOHSCROLL
+    PUSHBUTTON "B&rowse...", IDC_W(WP_PROGRAM, WN_BROWSE), 284, 113, 60, 14
+    LTEXT "Example: c:\\path\\program.exe", IDC_W(WP_PROGRAM, 11), 28, 130, 250, 10
+    /* page 2: protocol and ports */
+    LTEXT "&Protocol:", IDC_W(WP_PORTS, 20), 14, 64, 40, 10
+    COMBOBOX IDC_W(WP_PORTS, WN_PROTO), 60, 62, 90, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT "Protocol n&umber:", IDC_W(WP_PORTS, 21), 170, 64, 56, 10
+    EDITTEXT IDC_W(WP_PORTS, WN_PROTONUM), 230, 62, 40, 12, ES_AUTOHSCROLL | ES_NUMBER
+    RADIOBUTTON "A&ll local ports", IDC_W(WP_PORTS, WN_LALL), 14, 86, 200, 10, WS_GROUP
+    RADIOBUTTON "Specific &local ports:", IDC_W(WP_PORTS, WN_LSEL), 14, 98, 200, 10
+    EDITTEXT IDC_W(WP_PORTS, WN_LPORT), 28, 110, 250, 12, ES_AUTOHSCROLL
+    RADIOBUTTON "All &remote ports", IDC_W(WP_PORTS, WN_RALL), 14, 130, 200, 10, WS_GROUP
+    RADIOBUTTON "Specific r&emote ports:", IDC_W(WP_PORTS, WN_RSEL), 14, 142, 200, 10
+    EDITTEXT IDC_W(WP_PORTS, WN_RPORT), 28, 154, 250, 12, ES_AUTOHSCROLL
+    LTEXT "Example: 80, 443, 5000-5010", IDC_W(WP_PORTS, WN_HINT), 28, 172, 250, 10
+    /* page 3: predefined */
+    COMBOBOX IDC_W(WP_PREDEF, WN_GROUP), 14, 62, 220, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL "", IDC_W(WP_PREDEF, WN_RULES), "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_NOCOLUMNHEADER | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 14, 80, 330, 108
+    /* page 4: scope */
+    LTEXT "Which local IP addresses does this rule apply to?", IDC_W(WP_SCOPE, 20), 14, 60, 320, 10
+    RADIOBUTTON "A&ny IP address", IDC_W(WP_SCOPE, WN_LANY), 14, 72, 200, 10, WS_GROUP
+    RADIOBUTTON "T&hese IP addresses:", IDC_W(WP_SCOPE, WN_LTHESE), 14, 84, 200, 10
+    EDITTEXT IDC_W(WP_SCOPE, WN_LADDR), 28, 96, 300, 12, ES_AUTOHSCROLL
+    LTEXT "Which remote IP addresses does this rule apply to?", IDC_W(WP_SCOPE, 21), 14, 120, 320, 10
+    RADIOBUTTON "An&y IP address", IDC_W(WP_SCOPE, WN_RANY), 14, 132, 200, 10, WS_GROUP
+    RADIOBUTTON "Th&ese IP addresses:", IDC_W(WP_SCOPE, WN_RTHESE), 14, 144, 200, 10
+    EDITTEXT IDC_W(WP_SCOPE, WN_RADDR), 28, 156, 300, 12, ES_AUTOHSCROLL
+    LTEXT "Example: 10.0.0.1, 192.168.0.0/24, LocalSubnet", IDC_W(WP_SCOPE, 22), 28, 174, 300, 10
+    /* page 5: action */
+    RADIOBUTTON "&Allow the connection", IDC_W(WP_ACTION, WN_ALLOW), 14, 64, 200, 10, WS_GROUP
+    LTEXT "This includes connections that are protected with IPsec as well as those are not.", IDC_W(WP_ACTION, 10), 28, 76, 320, 18
+    RADIOBUTTON "&Block the connection", IDC_W(WP_ACTION, WN_BLOCK), 14, 108, 200, 10
+    /* page 6: profile */
+    LTEXT "When does this rule apply?", IDC_W(WP_PROFILE, 20), 14, 60, 320, 10
+    AUTOCHECKBOX "D&omain", IDC_W(WP_PROFILE, WN_DOMAIN), 14, 78, 200, 10
+    LTEXT "Applies when a computer is connected to its corporate domain.", IDC_W(WP_PROFILE, 10), 28, 90, 320, 10
+    AUTOCHECKBOX "P&rivate", IDC_W(WP_PROFILE, WN_PRIVATE), 14, 110, 200, 10
+    LTEXT "Applies when a computer is connected to a private network location, such as a home or work place.", IDC_W(WP_PROFILE, 11), 28, 122, 320, 20
+    AUTOCHECKBOX "P&ublic", IDC_W(WP_PROFILE, WN_PUBLIC), 14, 148, 200, 10
+    LTEXT "Applies when a computer is connected to a public network location.", IDC_W(WP_PROFILE, 12), 28, 160, 320, 10
+    /* page 7: name */
+    LTEXT "&Name:", IDC_W(WP_NAME, 20), 14, 64, 60, 10
+    EDITTEXT IDC_W(WP_NAME, WN_NAME), 14, 76, 330, 12, ES_AUTOHSCROLL
+    LTEXT "&Description (optional):", IDC_W(WP_NAME, 21), 14, 100, 120, 10
+    EDITTEXT IDC_W(WP_NAME, WN_DESC), 14, 112, 330, 52, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL
+    LTEXT "", IDC_W_LINE2, 0, 196, 360, 1, SS_ETCHEDHORZ
+    PUSHBUTTON "< &Back", IDC_W_BACK, 190, 208, 50, 14
+    DEFPUSHBUTTON "&Next >", IDC_W_NEXT, 244, 208, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 300, 208, 50, 14
+END
+
+/* ---- profile properties ---- */
+IDD_PROFILE DIALOGEX 0, 0, 260, 236
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "NitroOS Firewall Properties"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    CONTROL "", IDC_P_TAB, "SysTabControl32", WS_TABSTOP, 7, 7, 246, 196
+    LTEXT "Specify the behavior for the profile selected above.", -1, 14, 26, 232, 10
+    GROUPBOX "State", -1, 14, 40, 232, 62
+    LTEXT "&Firewall state:", -1, 22, 54, 80, 10
+    COMBOBOX IDC_P_STATE, 106, 52, 132, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT "&Inbound connections:", -1, 22, 70, 80, 10
+    COMBOBOX IDC_P_INBOUND, 106, 68, 132, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT "&Outbound connections:", -1, 22, 86, 80, 10
+    COMBOBOX IDC_P_OUTBOUND, 106, 84, 132, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    GROUPBOX "Settings", -1, 14, 108, 232, 42
+    LTEXT "Notifications:", -1, 22, 122, 50, 10
+    LTEXT "", IDC_P_NOTIFYTXT, 74, 122, 100, 10
+    PUSHBUTTON "&Customize...", IDC_P_SETTINGS, 186, 126, 52, 14
+    GROUPBOX "Logging", -1, 14, 156, 232, 42
+    LTEXT "", IDC_P_LOGTXT, 22, 170, 160, 10
+    PUSHBUTTON "Custo&mize...", IDC_P_LOGGING, 186, 174, 52, 14
+    DEFPUSHBUTTON "OK", IDOK, 96, 214, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 150, 214, 50, 14
+    PUSHBUTTON "&Apply", IDC_P_APPLY, 204, 214, 50, 14
+END
+
+IDD_PROF_SETTINGS DIALOGEX 0, 0, 220, 76
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Customize Settings"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    GROUPBOX "Firewall settings", -1, 6, 6, 208, 40
+    LTEXT "Display a &notification:", -1, 14, 22, 80, 10
+    COMBOBOX IDC_PS_NOTIFY, 98, 20, 108, 40, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    DEFPUSHBUTTON "OK", IDOK, 110, 54, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 164, 54, 50, 14
+END
+
+IDD_PROF_LOGGING DIALOGEX 0, 0, 250, 126
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Customize Logging Settings"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT "&Name:", -1, 8, 10, 40, 10
+    EDITTEXT IDC_PL_PATH, 52, 8, 190, 12, ES_AUTOHSCROLL
+    LTEXT "&Size limit (KB):", -1, 8, 28, 64, 10
+    EDITTEXT IDC_PL_SIZE, 76, 26, 50, 12, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT "Log &dropped packets:", -1, 8, 48, 110, 10
+    COMBOBOX IDC_PL_DROPPED, 122, 46, 64, 40, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT "Log s&uccessful connections:", -1, 8, 66, 110, 10
+    COMBOBOX IDC_PL_SUCCESS, 122, 64, 64, 40, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    DEFPUSHBUTTON "OK", IDOK, 134, 104, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 190, 104, 50, 14
+END
+
+STRINGTABLE
+BEGIN
+    IDS_APPNAME "NitroOS Firewall with Advanced Security"
+    IDS_ROOT "NitroOS Firewall with Advanced Security on Local Computer"
+    IDS_INBOUND "Inbound Rules"
+    IDS_OUTBOUND "Outbound Rules"
+    IDS_CSR "Connection Security Rules"
+    IDS_MONITORING "Monitoring"
+    IDS_ACTIONS "Actions"
+    IDS_COL_NAME "Name"
+    IDS_COL_GROUP "Group"
+    IDS_COL_PROFILE "Profile"
+    IDS_COL_ENABLED "Enabled"
+    IDS_COL_ACTION "Action"
+    IDS_COL_PROGRAM "Program"
+    IDS_COL_LADDR "Local Address"
+    IDS_COL_RADDR "Remote Address"
+    IDS_COL_PROTOCOL "Protocol"
+    IDS_COL_LPORT "Local Port"
+    IDS_COL_RPORT "Remote Port"
+    IDS_ANY "Any"
+    IDS_YES "Yes"
+    IDS_NO "No"
+    IDS_ALLOW "Allow"
+    IDS_BLOCK "Block"
+    IDS_ALLPROF "All"
+    IDS_PROF_DOMAIN "Domain"
+    IDS_PROF_PRIVATE "Private"
+    IDS_PROF_PUBLIC "Public"
+    IDS_ACT_NEWRULE "New Rule..."
+    IDS_ACT_REFRESH "Refresh"
+    IDS_ACT_IMPORT "Import Policy..."
+    IDS_ACT_EXPORT "Export Policy..."
+    IDS_ACT_RESTORE "Restore Default Policy"
+    IDS_ACT_PROPS "Properties"
+    IDS_ACT_ENABLE "Enable Rule"
+    IDS_ACT_DISABLE "Disable Rule"
+    IDS_ACT_DELETE "Delete"
+    IDS_ACT_RULEPROPS "Properties"
+    IDS_ACT_SELRULE "Selected Rules"
+    IDS_OVERVIEW "NitroOS Firewall with Advanced Security provides network security for NitroOS computers."
+    IDS_PROFTITLE_DOM "Domain Profile"
+    IDS_PROFTITLE_PRI "Private Profile"
+    IDS_PROFTITLE_PUB "Public Profile"
+    IDS_ACTIVE_SUFFIX " is Active"
+    IDS_FW_ON "NitroOS Firewall is on."
+    IDS_FW_OFF "NitroOS Firewall is off."
+    IDS_IN_BLOCK "Inbound connections that do not match a rule are blocked."
+    IDS_IN_ALLOW "Inbound connections that do not match a rule are allowed."
+    IDS_IN_BLOCKALL "All inbound connections are blocked."
+    IDS_OUT_ALLOW "Outbound connections that do not match a rule are allowed."
+    IDS_OUT_BLOCK "Outbound connections that do not match a rule are blocked."
+    IDS_PROPLINK "NitroOS Firewall Properties"
+    IDS_CSR_TEXT "Connection security rules are not supported yet."
+    IDS_MON_TEXT "Current firewall activity for the active network profile."
+    IDS_RULES_COUNT "%d rule(s)"
+    IDS_CONFIRM_DELETE "Are you sure you want to delete the selected rules?"
+    IDS_CONFIRM_RESTORE "Restoring the default policy removes every rule and setting you created and restores the NitroOS default firewall policy. Do you want to continue?"
+    IDS_RESTORED "The default policy was restored."
+    IDS_ERR_STORE "The firewall policy could not be changed (error %lu)."
+    IDS_ERR_NONAME "Enter a name for the rule."
+    IDS_ERR_PORTS "The port list is not valid. Use port numbers or ranges separated by commas, for example 80, 443, 5000-5010."
+    IDS_ERR_ADDRS "The IP address list is not valid. Use addresses, ranges, subnets or keywords separated by commas."
+    IDS_ERR_PROTO "The protocol number is not valid. Enter a number from 0 to 255."
+    IDS_ERR_PATH "Enter the full path of the program."
+    IDS_ERR_FILE "The file could not be accessed (error %lu)."
+    IDS_ERR_BADFILE "The file is not a NitroOS firewall policy file."
+    IDS_IMPORTED "The policy was imported."
+    IDS_EXPORTED "The policy was exported."
+    IDS_FILTER_EXE "Programs (*.exe)"
+    IDS_FILTER_POLICY "Firewall policy (*.wfw)"
+    IDS_FILTER_ALL "All files (*.*)"
+    IDS_BROWSE_TITLE "Browse"
+    IDS_IMPORT_TITLE "Import Policy"
+    IDS_EXPORT_TITLE "Export Policy"
+    IDS_CONFIRM_IMPORT "Importing a policy replaces all current firewall rules and settings. Do you want to continue?"
+    IDS_PROTO_ANY "Any"
+    IDS_PROTO_TCP "TCP"
+    IDS_PROTO_UDP "UDP"
+    IDS_PROTO_ICMP4 "ICMPv4"
+    IDS_PROTO_ICMP6 "ICMPv6"
+    IDS_PROTO_IGMP "IGMP"
+    IDS_PROTO_CUSTOM "Custom"
+    IDS_RP_TITLE "Properties"
+    IDS_RP_GENERAL "General"
+    IDS_RP_PROGRAMS "Programs and Services"
+    IDS_RP_PORTS "Protocols and Ports"
+    IDS_RP_SCOPE "Scope"
+    IDS_RP_ADVANCED "Advanced"
+    IDS_ABOUT "NitroOS Firewall with Advanced Security\nManages the NitroOS firewall rules and profile settings."
+    IDS_PROF_TITLE "Properties"
+    IDS_PROF_TAB_DOM "Domain Profile"
+    IDS_PROF_TAB_PRI "Private Profile"
+    IDS_PROF_TAB_PUB "Public Profile"
+    IDS_CMB_IN_BLOCK "Block (default)"
+    IDS_CMB_IN_BLOCKALL "Block all connections"
+    IDS_CMB_IN_ALLOW "Allow"
+    IDS_CMB_OUT_ALLOW "Allow (default)"
+    IDS_CMB_OUT_BLOCK "Block"
+    IDS_FIREWALL_ON "On (recommended)"
+    IDS_FIREWALL_OFF "Off"
+    IDS_NOTIF_YES "Yes (default)"
+    IDS_NOTIF_NO "No"
+    IDS_LOG_DROPPED "Dropped packets are logged."
+    IDS_LOG_NOTDROPPED "Dropped packets are not logged."
+    IDS_ERR_LOGSIZE "The size limit must be a number from 1 to 32767."
+    IDS_ERR_LOGPATH "Enter the path of the log file."
+    IDS_WIZ_TITLE "New Inbound Rule Wizard"
+    IDS_WIZ_TITLE_OUT "New Outbound Rule Wizard"
+    IDS_WIZ_NEXT "&Next >"
+    IDS_WIZ_FINISH "&Finish"
+    IDS_WIZ_PG_TYPE "Rule Type"
+    IDS_WIZ_PG_PROGRAM "Program"
+    IDS_WIZ_PG_PORTS "Protocol and Ports"
+    IDS_WIZ_PG_PREDEF "Predefined Rules"
+    IDS_WIZ_PG_SCOPE "Scope"
+    IDS_WIZ_PG_ACTION "Action"
+    IDS_WIZ_PG_PROFILE "Profile"
+    IDS_WIZ_PG_NAME "Name"
+    IDS_WIZ_SUB_TYPE "Select the type of firewall rule to create."
+    IDS_WIZ_SUB_PROGRAM "Specify the full program path and executable name of the program that this rule matches."
+    IDS_WIZ_SUB_PORTS "Specify the protocols and ports to which this rule applies."
+    IDS_WIZ_SUB_PREDEF "Select the rules that you want to create for the group."
+    IDS_WIZ_SUB_SCOPE "Specify the local and remote IP addresses to which this rule applies."
+    IDS_WIZ_SUB_ACTION "Specify the action to be taken when a connection matches the conditions specified in the rule."
+    IDS_WIZ_SUB_PROFILE "Specify the profiles for which this rule applies."
+    IDS_WIZ_SUB_NAME "Specify the name and description of this rule."
+    IDS_WIZ_ERR_PROG "Select at least one rule."
+    IDS_RULEDLG_FMT "%s Properties"
+END
