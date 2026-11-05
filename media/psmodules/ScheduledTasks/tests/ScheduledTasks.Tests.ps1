@@ -204,11 +204,40 @@ Describe 'New-ScheduledTaskTrigger' {
     It '-Once with -User is an ambiguous parameter set' {
         (Err { New-ScheduledTaskTrigger -Once -At '2030-01-02' -User x })[0].FullyQualifiedErrorId | Should -Be 'AmbiguousParameterSet,New-ScheduledTaskTrigger'
     }
-    It 'refuses a weekly trigger (phase-1 limit: the service never fires it)' {
-        $e = @(Err { New-ScheduledTaskTrigger -Weekly -At '2030-01-02 03:04:05' -DaysOfWeek Monday })
+    It 'Weekly: MSFT_TaskWeeklyTrigger, property set and order, UInt16 mask and interval (Windows 10 measured)' {
+        $at = [datetime]'2030-01-02 11:04:05'
+        $t = New-ScheduledTaskTrigger -Weekly -At $at
+        $t.PSObject.TypeNames | Should -Be (Chain 'MSFT_TaskWeeklyTrigger' @('MSFT_TaskTrigger'))
+        (Names $t) | Should -Be ($trigBase + @('DaysOfWeek', 'RandomDelay', 'WeeksInterval', 'PSComputerName'))
+        $t.StartBoundary | Should -Be ($at.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"))
+        $t.DaysOfWeek | Should -Be 0
+        $t.DaysOfWeek.GetType().FullName | Should -Be 'System.UInt16'
+        $t.WeeksInterval | Should -Be 1
+        $t.WeeksInterval.GetType().FullName | Should -Be 'System.UInt16'
+        $t.Enabled | Should -BeTrue
+        $null -eq $t.RandomDelay | Should -BeTrue
+    }
+    It 'Weekly: -DaysOfWeek is a Sunday=1 .. Saturday=64 mask, -WeeksInterval and -RandomDelay are kept' {
+        $i = 1
+        foreach ($d in 'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday') {
+            (New-ScheduledTaskTrigger -Weekly -At '2030-01-02 03:04:05' -DaysOfWeek $d).DaysOfWeek | Should -Be $i
+            $i *= 2
+        }
+        (New-ScheduledTaskTrigger -Weekly -At '2030-01-02 03:04:05' -DaysOfWeek Monday, Friday).DaysOfWeek | Should -Be 34
+        (New-ScheduledTaskTrigger -Weekly -At '2030-01-02 03:04:05' -DaysOfWeek Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday).DaysOfWeek | Should -Be 127
+        (New-ScheduledTaskTrigger -Weekly -At '2030-01-02 03:04:05' -DaysOfWeek Monday, Monday).DaysOfWeek | Should -Be 2
+        $t = New-ScheduledTaskTrigger -Weekly -At '2030-01-02 03:04:05' -DaysOfWeek Monday -WeeksInterval 2 -RandomDelay (New-TimeSpan -Minutes 30)
+        $t.WeeksInterval | Should -Be 2
+        $t.RandomDelay | Should -Be 'PT30M'
+        (New-ScheduledTaskTrigger -Weekly -At '2030-01-02 03:04:05' -WeeksInterval 255).WeeksInterval | Should -Be 255
+        (New-ScheduledTaskTrigger -Weekly -At '2030-01-02 03:04:05' -WeeksInterval 0).WeeksInterval | Should -Be 0
+    }
+    It 'Weekly needs -At, and an interval above 16 bits is the general HRESULT 0xc0000095 (Windows 10 measured)' {
+        (Err { New-ScheduledTaskTrigger -Weekly })[0].FullyQualifiedErrorId | Should -Be 'MissingMandatoryParameter,New-ScheduledTaskTrigger'
+        $e = @(Err { New-ScheduledTaskTrigger -Weekly -At '2030-01-02 03:04:05' -WeeksInterval 70000 })
         $e.Count | Should -Be 1
-        $e[0].FullyQualifiedErrorId | Should -Be 'TriggerTypeNotSupported,New-ScheduledTaskTrigger'
-        $e[0].CategoryInfo.Category | Should -Be 'NotImplemented'
+        $e[0].FullyQualifiedErrorId | Should -Be 'HRESULT 0xc0000095,New-ScheduledTaskTrigger'
+        $e[0].CategoryInfo.Category | Should -Be 'NotSpecified'
     }
 }
 
@@ -379,14 +408,12 @@ Describe 'Get-ScheduledTask / Get-ScheduledTaskInfo errors' {
     }
 }
 
-Describe 'refusals (phase-1 limits of the task service)' {
+Describe 'refusals (idle, event and session-state triggers are stored but never fired by the task service)' {
     BeforeAll {
         $script:xmlHead = '<?xml version="1.0" encoding="UTF-16"?><Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers>'
         $script:xmlTail = '</Triggers><Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType></Principal></Principals><Actions Context="Author"><Exec><Command>cmd.exe</Command></Exec></Actions></Task>'
     }
     It 'Register-ScheduledTask -Xml refuses <What> and registers nothing' -TestCases @(
-        @{ What = 'a weekly trigger'; Body = '<CalendarTrigger><StartBoundary>2030-01-02T11:04:05Z</StartBoundary><ScheduleByWeek><WeeksInterval>1</WeeksInterval><DaysOfWeek><Monday/></DaysOfWeek></ScheduleByWeek></CalendarTrigger>' }
-        @{ What = 'a monthly trigger'; Body = '<CalendarTrigger><StartBoundary>2030-01-02T11:04:05Z</StartBoundary><ScheduleByMonth><DaysOfMonth><Day>1</Day></DaysOfMonth><Months><January/></Months></ScheduleByMonth></CalendarTrigger>' }
         @{ What = 'an idle trigger'; Body = '<IdleTrigger/>' }
         @{ What = 'an event trigger'; Body = '<EventTrigger><Subscription>x</Subscription></EventTrigger>' }
         @{ What = 'a session state change trigger'; Body = '<SessionStateChangeTrigger><StateChange>SessionLock</StateChange></SessionStateChangeTrigger>' }
@@ -404,7 +431,7 @@ Describe 'refusals (phase-1 limits of the task service)' {
     It 'Register-ScheduledTask refuses a trigger object of an unsupported kind' {
         $n = New-TestName
         $w = [pscustomobject]@{ Enabled = $true }
-        $w.PSObject.TypeNames.Insert(0, "$NS/MSFT_TaskWeeklyTrigger")
+        $w.PSObject.TypeNames.Insert(0, "$NS/MSFT_TaskEventTrigger")
         $e = @(Err { Register-ScheduledTask -TaskName $n -Action (New-ScheduledTaskAction -Execute cmd.exe) -Trigger $w })
         $e[0].FullyQualifiedErrorId | Should -Be 'TriggerTypeNotSupported,Register-ScheduledTask'
         @(Ok { Get-ScheduledTask -TaskName $n }).Count | Should -Be 0
@@ -770,7 +797,7 @@ Describe 'Set-ScheduledTask and Export-ScheduledTask round trip' {
         $g.Actions[0].Arguments | Should -Be '/c echo three'
         $g.Settings.Enabled | Should -BeTrue
     }
-    It 'Set-ScheduledTask keeps what the module cannot write: a weekly trigger made by schtasks.exe survives -Action, -Settings and -User' -Skip:$skipRt {
+    It 'Set-ScheduledTask keeps a weekly trigger made by schtasks.exe through -Action, -Settings, -User and the object set' -Skip:$skipRt {
         $n = New-TestName
         $null = & schtasks.exe /create /tn $n /tr 'cmd /c exit 0' /sc weekly /d MON /st 03:00 /f
         $LASTEXITCODE | Should -Be 0
@@ -787,10 +814,14 @@ Describe 'Set-ScheduledTask and Export-ScheduledTask round trip' {
         @($t.Triggers).Count | Should -Be 1
         $t.Triggers[0].PSObject.TypeNames[0] | Should -Be "$NS/MSFT_TaskWeeklyTrigger"
         [int]$t.Triggers[0].DaysOfWeek | Should -Be 2
-        # the object set writes the definition from the object, which cannot carry a weekly trigger back: refused, nothing changes
-        $e = @(Err { $t | Set-ScheduledTask })
-        $e[0].FullyQualifiedErrorId | Should -Be 'TriggerTypeNotSupported,Set-ScheduledTask'
-        ((& schtasks.exe /query /tn $n /xml) -join "`n") | Should -Match '<ScheduleByWeek>'
+        # the object set writes the definition from the object, which carries the weekly trigger back unchanged
+        $null = $t | Set-ScheduledTask
+        $x = (& schtasks.exe /query /tn $n /xml) -join "`n"
+        $x | Should -Match '<ScheduleByWeek>'
+        $x | Should -Match '<Monday\s*/>'
+        $x | Should -Match '<WeeksInterval>1</WeeksInterval>'
+        $t2 = Get-ScheduledTask -TaskName $n
+        [int]$t2.Triggers[0].DaysOfWeek | Should -Be 2
     }
     It 'Set-ScheduledTask of an unknown task is HRESULT 0x80070002 and registers nothing' -Skip:$skipRt {
         $e = @(Err { Set-ScheduledTask -TaskName nosuchtask-nitro -Action (New-ScheduledTaskAction -Execute cmd.exe) })
@@ -845,5 +876,126 @@ Describe 'Set-ScheduledTask and Export-ScheduledTask round trip' {
         ([xml](Export-ScheduledTask -InputObject (New-ScheduledTask -Action (New-ScheduledTaskAction -Execute cmd.exe) -Settings $s -Principal (New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount)))).Task.version | Should -Be '1.4'
         $s = New-ScheduledTaskSettingsSet -Compatibility Vista
         ([xml](Export-ScheduledTask -InputObject (New-ScheduledTask -Action (New-ScheduledTaskAction -Execute cmd.exe) -Settings $s -Principal (New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount)))).Task.version | Should -Be '1.3'
+    }
+}
+
+
+Describe 'weekly, monthly and monthly day-of-week triggers: object round trip through the task service' {
+    BeforeAll {
+        $script:xmlHead = '<?xml version="1.0" encoding="UTF-16"?><Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers>'
+        $script:xmlTail = '</Triggers><Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType></Principal></Principals><Actions Context="Author"><Exec><Command>cmd.exe</Command><Arguments>/c exit 0</Arguments></Exec></Actions></Task>'
+        $script:act = New-ScheduledTaskAction -Execute cmd.exe -Argument '/c exit 0'
+    }
+    AfterAll { Remove-TestTasks }
+
+    It 'registers a weekly trigger built with New-ScheduledTaskTrigger: read-back, XML, schtasks and a next run time' -Skip:$skipRt {
+        $n = New-TestName
+        $at = [datetime]::Today.AddDays(1).AddHours(3)
+        $tr = New-ScheduledTaskTrigger -Weekly -At $at -DaysOfWeek Monday, Thursday -WeeksInterval 2 -RandomDelay (New-TimeSpan -Minutes 5)
+        $t = Register-ScheduledTask -TaskName $n -Action $script:act -Trigger $tr
+        @($t.Triggers).Count | Should -Be 1
+        $w = $t.Triggers[0]
+        $w.PSObject.TypeNames[0] | Should -Be "$NS/MSFT_TaskWeeklyTrigger"
+        [int]$w.DaysOfWeek | Should -Be 18
+        [int]$w.WeeksInterval | Should -Be 2
+        $w.RandomDelay | Should -Be 'PT5M'
+        $w.StartBoundary | Should -Be $tr.StartBoundary
+        $x = (& schtasks.exe /query /tn $n /xml) -join "`n"
+        $x | Should -Match '<ScheduleByWeek>'
+        $x | Should -Match '<Monday\s*/>'
+        $x | Should -Match '<Thursday\s*/>'
+        $x | Should -Not -Match '<Tuesday'
+        $x | Should -Match '<WeeksInterval>2</WeeksInterval>'
+        $x | Should -Match '<RandomDelay>PT5M</RandomDelay>'
+        (& schtasks.exe /query /tn $n /v /fo list) -join "`n" | Should -Match 'Weekly'
+        $info = Get-ScheduledTaskInfo -TaskName $n
+        $null -ne $info.NextRunTime | Should -BeTrue
+        $info.NextRunTime | Should -BeGreaterThan ([datetime]::Now)
+    }
+    It 'Set-ScheduledTask -Trigger replaces a daily trigger by a weekly one' -Skip:$skipRt {
+        $n = New-TestName
+        $null = Register-ScheduledTask -TaskName $n -Action $script:act -Trigger (New-ScheduledTaskTrigger -Daily -At '2031-05-06 03:30:00')
+        $null = Set-ScheduledTask -TaskName $n -Trigger (New-ScheduledTaskTrigger -Weekly -At '2031-05-06 03:30:00' -DaysOfWeek Friday)
+        $t = Get-ScheduledTask -TaskName $n
+        @($t.Triggers).Count | Should -Be 1
+        $t.Triggers[0].PSObject.TypeNames[0] | Should -Be "$NS/MSFT_TaskWeeklyTrigger"
+        [int]$t.Triggers[0].DaysOfWeek | Should -Be 32
+        ((& schtasks.exe /query /tn $n /xml) -join "`n") | Should -Match '<Friday\s*/>'
+    }
+    It 'a weekly task read back by Get-ScheduledTask registers again under another name (-InputObject copy)' -Skip:$skipRt {
+        $n = New-TestName
+        $null = Register-ScheduledTask -TaskName $n -Action $script:act -Trigger (New-ScheduledTaskTrigger -Weekly -At '2031-05-06 03:30:00' -DaysOfWeek Tuesday, Sunday -WeeksInterval 3)
+        $copy = New-TestName
+        $null = Get-ScheduledTask -TaskName $n | Register-ScheduledTask -TaskName $copy
+        $c = Get-ScheduledTask -TaskName $copy
+        [int]$c.Triggers[0].DaysOfWeek | Should -Be 5
+        [int]$c.Triggers[0].WeeksInterval | Should -Be 3
+        $c.Triggers[0].StartBoundary | Should -Be (Get-ScheduledTask -TaskName $n).Triggers[0].StartBoundary
+    }
+    It 'a monthly trigger (days, Last, months) registers from XML, reads back as MSFT_TaskMonthlyTrigger and survives the object round trip' -Skip:$skipRt {
+        $n = New-TestName
+        $body = '<CalendarTrigger><StartBoundary>2031-01-02T11:04:05Z</StartBoundary><ScheduleByMonth><DaysOfMonth><Day>1</Day><Day>15</Day><Day>Last</Day></DaysOfMonth><Months><January/><July/></Months></ScheduleByMonth></CalendarTrigger>'
+        $t = Register-ScheduledTask -TaskName $n -Xml ($script:xmlHead + $body + $script:xmlTail)
+        $m = $t.Triggers[0]
+        $m.PSObject.TypeNames | Should -Be (Chain 'MSFT_TaskMonthlyTrigger' @('MSFT_TaskTrigger'))
+        (Names $m) | Should -Be ($trigBase + @('DaysOfMonth', 'MonthsOfYear', 'RandomDelay', 'RunOnLastDayOfMonth', 'PSComputerName'))
+        [uint32]$m.DaysOfMonth | Should -Be ([uint32](1 + 16384))
+        [uint16]$m.MonthsOfYear | Should -Be 65
+        $m.RunOnLastDayOfMonth | Should -BeTrue
+        $m.DaysOfMonth.GetType().FullName | Should -Be 'System.UInt32'
+        $m.MonthsOfYear.GetType().FullName | Should -Be 'System.UInt16'
+        $copy = New-TestName
+        $null = Get-ScheduledTask -TaskName $n | Register-ScheduledTask -TaskName $copy
+        $x = (& schtasks.exe /query /tn $copy /xml) -join "`n"
+        $x | Should -Match '<ScheduleByMonth>'
+        $x | Should -Match '<Day>1</Day>'
+        $x | Should -Match '<Day>15</Day>'
+        $x | Should -Match '<Day>Last</Day>'
+        $x | Should -Match '<January\s*/>'
+        $x | Should -Match '<July\s*/>'
+        $x | Should -Not -Match '<February'
+        (Get-ScheduledTask -TaskName $copy).Triggers[0].DaysOfMonth | Should -Be $m.DaysOfMonth
+        $null -ne (Get-ScheduledTaskInfo -TaskName $copy).NextRunTime | Should -BeTrue
+    }
+    It 'a monthly day-of-week trigger registers from XML, reads back as MSFT_TaskMonthlyDOWTrigger and survives the object round trip' -Skip:$skipRt {
+        $n = New-TestName
+        $body = '<CalendarTrigger><StartBoundary>2031-01-02T11:04:05Z</StartBoundary><ScheduleByMonthDayOfWeek><Weeks><Week>1</Week><Week>3</Week><Week>Last</Week></Weeks><DaysOfWeek><Monday/><Friday/></DaysOfWeek><Months><March/><December/></Months></ScheduleByMonthDayOfWeek></CalendarTrigger>'
+        $t = Register-ScheduledTask -TaskName $n -Xml ($script:xmlHead + $body + $script:xmlTail)
+        $m = $t.Triggers[0]
+        $m.PSObject.TypeNames | Should -Be (Chain 'MSFT_TaskMonthlyDOWTrigger' @('MSFT_TaskTrigger'))
+        (Names $m) | Should -Be ($trigBase + @('DaysOfWeek', 'MonthsOfYear', 'RandomDelay', 'RunOnLastWeekOfMonth', 'WeeksOfMonth', 'PSComputerName'))
+        [uint16]$m.DaysOfWeek | Should -Be 34
+        [uint16]$m.MonthsOfYear | Should -Be (4 + 2048)
+        [uint16]$m.WeeksOfMonth | Should -Be 5
+        $m.RunOnLastWeekOfMonth | Should -BeTrue
+        $copy = New-TestName
+        $null = Get-ScheduledTask -TaskName $n | Register-ScheduledTask -TaskName $copy
+        $x = (& schtasks.exe /query /tn $copy /xml) -join "`n"
+        $x | Should -Match '<ScheduleByMonthDayOfWeek>'
+        $x | Should -Match '<Week>1</Week>'
+        $x | Should -Match '<Week>3</Week>'
+        $x | Should -Match '<Week>Last</Week>'
+        $x | Should -Match '<Monday\s*/>'
+        $x | Should -Match '<Friday\s*/>'
+        $x | Should -Match '<March\s*/>'
+        $x | Should -Match '<December\s*/>'
+        $c = (Get-ScheduledTask -TaskName $copy).Triggers[0]
+        [uint16]$c.WeeksOfMonth | Should -Be 5
+        $c.RunOnLastWeekOfMonth | Should -BeTrue
+    }
+    It 'Register-ScheduledTask -Xml with weekly and monthly triggers is no longer refused' -Skip:$skipRt {
+        foreach ($body in '<CalendarTrigger><StartBoundary>2031-01-02T11:04:05Z</StartBoundary><ScheduleByWeek><WeeksInterval>1</WeeksInterval><DaysOfWeek><Monday/></DaysOfWeek></ScheduleByWeek></CalendarTrigger>',
+                          '<CalendarTrigger><StartBoundary>2031-01-02T11:04:05Z</StartBoundary><ScheduleByMonth><DaysOfMonth><Day>1</Day></DaysOfMonth><Months><January/></Months></ScheduleByMonth></CalendarTrigger>') {
+            $n = New-TestName
+            @(Err { Register-ScheduledTask -TaskName $n -Xml ($script:xmlHead + $body + $script:xmlTail) }).Count | Should -Be 0
+            @(Ok { Get-ScheduledTask -TaskName $n }).Count | Should -Be 1
+        }
+    }
+    It 'Export-ScheduledTask of a weekly task object writes ScheduleByWeek in schema order (RandomDelay before ScheduleByWeek)' {
+        $t = New-ScheduledTask -Action $script:act -Trigger (New-ScheduledTaskTrigger -Weekly -At '2031-05-06 03:30:00' -DaysOfWeek Monday -WeeksInterval 2 -RandomDelay (New-TimeSpan -Minutes 1))
+        $x = Export-ScheduledTask -InputObject $t
+        $x | Should -Match '<CalendarTrigger>'
+        $x.IndexOf('<RandomDelay>') | Should -BeLessThan $x.IndexOf('<ScheduleByWeek>')
+        $x.IndexOf('<DaysOfWeek>') | Should -BeLessThan $x.IndexOf('<WeeksInterval>')
     }
 }

@@ -4,8 +4,9 @@
 # properties. The output objects carry the Microsoft.Management.Infrastructure.CimInstance#Root/Microsoft/Windows/TaskScheduler/
 # MSFT_* type names, the properties in the order Windows reports them and the same value types.
 #
-# Phase-1 limits of the nitro task service: weekly, monthly, idle, event and session-state triggers are not implemented and are
-# never fired; this module refuses them (an error) instead of registering a task that would never run.
+# Limits of the nitro task service: idle, event and session-state triggers are stored exactly but never fired (weekly, monthly and
+# monthly day-of-week triggers are fired); this module refuses the three never-fired kinds (an error) instead of registering a
+# task that would never run.
 
 Set-StrictMode -Version 2.0
 
@@ -14,6 +15,8 @@ $script:TsPath = 'Microsoft/Windows/TaskScheduler'
 $script:EnumNs = 'Microsoft.PowerShell.Cmdletization.GeneratedTypes.ScheduledTask'
 $script:TaskXmlNs = 'http://schemas.microsoft.com/windows/2004/02/mit/task'
 $script:TSSvc = $null
+# Trigger kinds the module writes (the service fires them); idle, event and session-state triggers are stored but never fired
+$script:WritableKinds = 'Time', 'Daily', 'Weekly', 'Monthly', 'MonthlyDOW', 'Boot', 'Logon', 'Registration'
 $script:ServiceAccounts = @('SYSTEM', 'NT AUTHORITY\SYSTEM', 'LOCAL SERVICE', 'NT AUTHORITY\LOCAL SERVICE', 'LOCALSERVICE',
     'NETWORK SERVICE', 'NT AUTHORITY\NETWORK SERVICE', 'NETWORKSERVICE', 'NT AUTHORITY\LOCALSERVICE', 'NT AUTHORITY\NETWORKSERVICE')
 
@@ -296,6 +299,15 @@ function Get-TSXmlChildren {
 
 $script:LogonFromXml = @{ Password = 1; S4U = 2; InteractiveToken = 3; Group = 4; ServiceAccount = 5; InteractiveTokenOrPassword = 6 }
 $script:DayBits = [ordered]@{ Sunday = 1; Monday = 2; Tuesday = 4; Wednesday = 8; Thursday = 16; Friday = 32; Saturday = 64 }
+$script:MonthBits = [ordered]@{ January = 1; February = 2; March = 4; April = 8; May = 16; June = 32; July = 64; August = 128; September = 256; October = 512; November = 1024; December = 2048 }
+$script:WeekBits = [ordered]@{ '1' = 1; '2' = 2; '3' = 4; '4' = 8 }
+
+function Read-TSMask {
+    param($Parent, [System.Collections.IDictionary]$Bits)
+    $mask = 0
+    foreach ($d in (Get-TSXmlChildren $Parent)) { if ($Bits.Contains($d.LocalName)) { $mask += $Bits[$d.LocalName] } }
+    $mask
+}
 
 function Read-TSRepetition {
     param($Node)
@@ -323,15 +335,37 @@ function Read-TSTrigger {
             } elseif (Get-TSXmlNode $Node @('ScheduleByWeek')) {
                 $kind = 'Weekly'
                 $mask = 0
-                foreach ($d in (Get-TSXmlChildren (Get-TSXmlNode $Node @('ScheduleByWeek', 'DaysOfWeek')))) { if ($script:DayBits.Contains($d.LocalName)) { $mask += $script:DayBits[$d.LocalName] } }
+                $mask = Read-TSMask (Get-TSXmlNode $Node @('ScheduleByWeek', 'DaysOfWeek')) $script:DayBits
                 $wi = Get-TSXmlText $Node @('ScheduleByWeek', 'WeeksInterval')
                 $extra['DaysOfWeek'] = [uint16]$mask
                 $extra['RandomDelay'] = $rd
                 $extra['WeeksInterval'] = [uint16]$(if ($wi) { $wi } else { 1 })
             } elseif (Get-TSXmlNode $Node @('ScheduleByMonthDayOfWeek')) {
-                $kind = 'MonthlyDOW'; $extra['RandomDelay'] = $rd
+                $kind = 'MonthlyDOW'
+                $sch = Get-TSXmlNode $Node @('ScheduleByMonthDayOfWeek')
+                $wm = 0; $lastWeek = $false
+                foreach ($w in (Get-TSXmlChildren (Get-TSXmlNode $sch @('Weeks')))) {
+                    $wt = ([string]$w.InnerText).Trim()
+                    if ($wt -eq 'Last') { $lastWeek = $true } elseif ($script:WeekBits.Contains($wt)) { $wm += $script:WeekBits[$wt] }
+                }
+                $extra['DaysOfWeek'] = [uint16](Read-TSMask (Get-TSXmlNode $sch @('DaysOfWeek')) $script:DayBits)
+                $extra['MonthsOfYear'] = [uint16](Read-TSMask (Get-TSXmlNode $sch @('Months')) $script:MonthBits)
+                $extra['RandomDelay'] = $rd
+                $extra['RunOnLastWeekOfMonth'] = $lastWeek
+                $extra['WeeksOfMonth'] = [uint16]$wm
             } else {
-                $kind = 'Monthly'; $extra['RandomDelay'] = $rd
+                $kind = 'Monthly'
+                $sch = Get-TSXmlNode $Node @('ScheduleByMonth')
+                $dm = [uint32]0; $lastDay = $false
+                foreach ($d in (Get-TSXmlChildren (Get-TSXmlNode $sch @('DaysOfMonth')))) {
+                    $dt = ([string]$d.InnerText).Trim()
+                    $n = 0
+                    if ($dt -eq 'Last') { $lastDay = $true } elseif ([int]::TryParse($dt, [ref]$n) -and $n -ge 1 -and $n -le 31) { $dm = $dm -bor [uint32][math]::Pow(2, $n - 1) }
+                }
+                $extra['DaysOfMonth'] = $dm
+                $extra['MonthsOfYear'] = [uint16](Read-TSMask (Get-TSXmlNode $sch @('Months')) $script:MonthBits)
+                $extra['RandomDelay'] = $rd
+                $extra['RunOnLastDayOfMonth'] = $lastDay
             }
         }
         'BootTrigger' { $kind = 'Boot'; $extra['Delay'] = Get-TSXmlText $Node @('Delay') }
@@ -471,7 +505,6 @@ function ConvertTo-TSTime {
 }
 
 $script:UnsupportedXml = @{
-    ScheduleByWeek = 'a weekly trigger'; ScheduleByMonth = 'a monthly trigger'; ScheduleByMonthDayOfWeek = 'a monthly day-of-week trigger'
     IdleTrigger = 'an idle trigger'; EventTrigger = 'an event trigger'; SessionStateChangeTrigger = 'a session state change trigger' }
 
 # Names of the unsupported trigger kinds a task XML uses
@@ -546,7 +579,7 @@ function ConvertTo-TSTaskXml {
             $kind = Get-TSTriggerKind $t
             $e = switch ($kind) {
                 'Time' { Add-TSElement $doc $tr 'TimeTrigger' }
-                'Daily' { Add-TSElement $doc $tr 'CalendarTrigger' }
+                { $_ -in 'Daily', 'Weekly', 'Monthly', 'MonthlyDOW' } { Add-TSElement $doc $tr 'CalendarTrigger' }
                 'Boot' { Add-TSElement $doc $tr 'BootTrigger' }
                 'Logon' { Add-TSElement $doc $tr 'LogonTrigger' }
                 'Registration' { Add-TSElement $doc $tr 'RegistrationTrigger' }
@@ -567,9 +600,36 @@ function ConvertTo-TSTaskXml {
             switch ($kind) {
                 'Time' { Add-TSOptional $doc $e 'RandomDelay' $t.RandomDelay }
                 'Daily' {
+                    Add-TSOptional $doc $e 'RandomDelay' $t.RandomDelay
                     $d = Add-TSElement $doc $e 'ScheduleByDay'
                     $null = Add-TSElement $doc $d 'DaysInterval' ([int]$t.DaysInterval)
+                }
+                'Weekly' {
                     Add-TSOptional $doc $e 'RandomDelay' $t.RandomDelay
+                    $w = Add-TSElement $doc $e 'ScheduleByWeek'
+                    $dw = Add-TSElement $doc $w 'DaysOfWeek'
+                    foreach ($k in $script:DayBits.Keys) { if ([int]$t.DaysOfWeek -band $script:DayBits[$k]) { $null = Add-TSElement $doc $dw $k } }
+                    $null = Add-TSElement $doc $w 'WeeksInterval' ([int]$t.WeeksInterval)
+                }
+                'Monthly' {
+                    Add-TSOptional $doc $e 'RandomDelay' $t.RandomDelay
+                    $m = Add-TSElement $doc $e 'ScheduleByMonth'
+                    $dm = Add-TSElement $doc $m 'DaysOfMonth'
+                    for ($i = 1; $i -le 31; $i++) { if (([uint32]$t.DaysOfMonth -band [uint32][math]::Pow(2, $i - 1)) -ne 0) { $null = Add-TSElement $doc $dm 'Day' $i } }
+                    if ([bool]$t.RunOnLastDayOfMonth) { $null = Add-TSElement $doc $dm 'Day' 'Last' }
+                    $mo = Add-TSElement $doc $m 'Months'
+                    foreach ($k in $script:MonthBits.Keys) { if ([int]$t.MonthsOfYear -band $script:MonthBits[$k]) { $null = Add-TSElement $doc $mo $k } }
+                }
+                'MonthlyDOW' {
+                    Add-TSOptional $doc $e 'RandomDelay' $t.RandomDelay
+                    $m = Add-TSElement $doc $e 'ScheduleByMonthDayOfWeek'
+                    $wk = Add-TSElement $doc $m 'Weeks'
+                    foreach ($k in $script:WeekBits.Keys) { if ([int]$t.WeeksOfMonth -band $script:WeekBits[$k]) { $null = Add-TSElement $doc $wk 'Week' $k } }
+                    if ([bool]$t.RunOnLastWeekOfMonth) { $null = Add-TSElement $doc $wk 'Week' 'Last' }
+                    $dw = Add-TSElement $doc $m 'DaysOfWeek'
+                    foreach ($k in $script:DayBits.Keys) { if ([int]$t.DaysOfWeek -band $script:DayBits[$k]) { $null = Add-TSElement $doc $dw $k } }
+                    $mo = Add-TSElement $doc $m 'Months'
+                    foreach ($k in $script:MonthBits.Keys) { if ([int]$t.MonthsOfYear -band $script:MonthBits[$k]) { $null = Add-TSElement $doc $mo $k } }
                 }
                 'Boot' { Add-TSOptional $doc $e 'Delay' $t.Delay }
                 'Logon' { Add-TSOptional $doc $e 'UserId' $t.UserId; Add-TSOptional $doc $e 'Delay' $t.Delay }
@@ -1028,7 +1088,14 @@ function New-ScheduledTaskTrigger {
                 $di = if ($PSBoundParameters.ContainsKey('DaysInterval')) { $DaysInterval } else { 1 }
                 New-TSTrigger -Kind Daily -StartBoundary (ConvertTo-TSTime $At) -Extra ([ordered]@{ DaysInterval = [int16]$di; RandomDelay = $rd })
             }
-            'Weekly' { Stop-TSUnsupported $PSCmdlet 'A weekly trigger (New-ScheduledTaskTrigger -Weekly)' }
+            'Weekly' {
+                $wi = if ($PSBoundParameters.ContainsKey('WeeksInterval')) { $WeeksInterval } else { 1 }
+                # the Windows module stores the interval in a 16-bit field and fails with a general error above it (measured: 70000)
+                if ($wi -gt 65535) { $PSCmdlet.ThrowTerminatingError((New-TSHresultError ([int]0xC0000095) 'A general error occurred that is not covered by a more specific error code.')) }
+                $mask = 0
+                if ($PSBoundParameters.ContainsKey('DaysOfWeek')) { foreach ($d in @($DaysOfWeek)) { $mask = $mask -bor $script:DayBits[[string]$d] } }
+                New-TSTrigger -Kind Weekly -StartBoundary (ConvertTo-TSTime $At) -Extra ([ordered]@{ DaysOfWeek = [uint16]$mask; RandomDelay = $rd; WeeksInterval = [uint16]$wi })
+            }
             'Startup' { New-TSTrigger -Kind Boot -Extra ([ordered]@{ Delay = $null }) }
             'Logon' { New-TSTrigger -Kind Logon -Extra ([ordered]@{ Delay = $null; UserId = $(if ($User) { $User } else { $null }) }) }
         }
@@ -1258,7 +1325,7 @@ function Register-ScheduledTask {
             if (-not $name) { $PSCmdlet.ThrowTerminatingError([System.Management.Automation.ErrorRecord]::new([System.ArgumentException]::new('A task name is required.'), 'TaskNameRequired', 'InvalidArgument', $null)) }
             foreach ($t in @(@($triggers) | Where-Object { $null -ne $_ })) {
                 $k = Get-TSTriggerKind $t
-                if ($k -notin 'Time', 'Daily', 'Boot', 'Logon', 'Registration') { Stop-TSUnsupported $PSCmdlet "A trigger of kind '$k'" }
+                if ($k -notin $script:WritableKinds) { Stop-TSUnsupported $PSCmdlet "A trigger of kind '$k'" }
             }
             $cur = "$([Environment]::UserDomainName)\$([Environment]::UserName)"
             if ($set -eq 'User' -or $User) {
@@ -1401,13 +1468,13 @@ function Set-ScheduledTask {
             $pr = $InputObject.Principal
             foreach ($t in @(@($InputObject.Triggers) | Where-Object { $null -ne $_ })) {
                 $k = Get-TSTriggerKind $t
-                if ($k -notin 'Time', 'Daily', 'Boot', 'Logon', 'Registration') { Stop-TSUnsupported $PSCmdlet "A trigger of kind '$k'" }
+                if ($k -notin $script:WritableKinds) { Stop-TSUnsupported $PSCmdlet "A trigger of kind '$k'" }
             }
         } elseif ($PSBoundParameters.ContainsKey('Principal')) { $pr = $Principal }
         if ($PSBoundParameters.ContainsKey('Trigger')) {
             foreach ($t in @(@($Trigger) | Where-Object { $null -ne $_ })) {
                 $k = Get-TSTriggerKind $t
-                if ($k -notin 'Time', 'Daily', 'Boot', 'Logon', 'Registration') { Stop-TSUnsupported $PSCmdlet "A trigger of kind '$k'" }
+                if ($k -notin $script:WritableKinds) { Stop-TSUnsupported $PSCmdlet "A trigger of kind '$k'" }
             }
         }
         if ($PSBoundParameters.ContainsKey('User')) {
