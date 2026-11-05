@@ -111,7 +111,7 @@ dll/win32/avifil32            # Synced to Wine-10.0
 dll/win32/avrt                # Synced to Wine-10.0
 dll/win32/bcp47langs          # Synced to Wine-10.0
 dll/win32/bcrypt              # Synced to Wine-11.19
-dll/win32/bcryptprimitives    # Synced to Wine-10.0
+dll/win32/bcryptprimitives    # Synced to Wine-11.21
 dll/win32/bluetoothapis       # Synced to Wine-10.0
 dll/win32/cabinet             # Synced to Wine-10.0
 dll/win32/clusapi             # Synced to Wine-10.0
