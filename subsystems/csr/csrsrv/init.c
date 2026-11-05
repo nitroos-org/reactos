@@ -593,20 +593,51 @@ CsrParseServerCommandLine(IN ULONG ArgumentCount,
         /* Check for Object Directory */
         if (_stricmp(ParameterName, "ObjectDirectory") == 0)
         {
-            /* Check if a session ID is specified */
-            if (SessionId != 0)
-            {
-                DPRINT1("Sessions not yet implemented\n");
-                ASSERT(SessionId);
-            }
-
             /* Initialize the directory name */
             RtlInitAnsiString(&AnsiString, ParameterValue);
-            Status = RtlAnsiStringToUnicodeString(&CsrDirectoryName,
-                                                  &AnsiString,
-                                                  TRUE);
-            ASSERT(NT_SUCCESS(Status) || SessionId != 0);
-            if (!NT_SUCCESS(Status)) return Status;
+            if (SessionId != 0)
+            {
+                /* The csrss of a session other than 0 (NitroSessions):
+                   ObjectDirectory=\Windows means \Sessions\<id>\Windows */
+                UNICODE_STRING SessionDirectory;
+                WCHAR SessionPrefix[32];
+                USHORT Size;
+
+                _swprintf(SessionPrefix, L"%ws\\%lu", SESSION_ROOT, SessionId);
+                Status = RtlAnsiStringToUnicodeString(&SessionDirectory,
+                                                      &AnsiString,
+                                                      TRUE);
+                if (!NT_SUCCESS(Status)) return Status;
+
+                Size = (USHORT)(wcslen(SessionPrefix) * sizeof(WCHAR)) +
+                       SessionDirectory.Length + sizeof(UNICODE_NULL);
+                if (Size < SessionDirectory.Length)
+                {
+                    RtlFreeUnicodeString(&SessionDirectory);
+                    return STATUS_NAME_TOO_LONG;
+                }
+                CsrDirectoryName.Buffer = RtlAllocateHeap(CsrHeap, 0, Size);
+                if (!CsrDirectoryName.Buffer)
+                {
+                    RtlFreeUnicodeString(&SessionDirectory);
+                    return STATUS_NO_MEMORY;
+                }
+                CsrDirectoryName.Length = 0;
+                CsrDirectoryName.MaximumLength = Size;
+                RtlAppendUnicodeToString(&CsrDirectoryName, SessionPrefix);
+                RtlAppendUnicodeStringToString(&CsrDirectoryName, &SessionDirectory);
+                RtlFreeUnicodeString(&SessionDirectory);
+                DPRINT1("CSRSS: session %lu object directory %wZ\n",
+                        SessionId, &CsrDirectoryName);
+            }
+            else
+            {
+                Status = RtlAnsiStringToUnicodeString(&CsrDirectoryName,
+                                                      &AnsiString,
+                                                      TRUE);
+                ASSERT(NT_SUCCESS(Status));
+                if (!NT_SUCCESS(Status)) return Status;
+            }
 
             /* Create it */
             InitializeObjectAttributes(&ObjectAttributes,
@@ -1113,6 +1144,17 @@ CsrServerInitialization(IN ULONG ArgumentCount,
 
     /* Have us handle Hard Errors */
     Status = NtSetDefaultHardErrorPort(CsrApiPort);
+    if (!NT_SUCCESS(Status) && (SessionId != 0))
+    {
+        /*
+         * NitroSessions: the kernel has one default hard error port, which
+         * session 0's csrss owns. Until it has one per session, the hard
+         * errors of other sessions keep going there.
+         */
+        DPRINT1("CSRSS: session %lu keeps the hard error port of session 0 (Status=0x%08lx)\n",
+                SessionId, Status);
+        Status = STATUS_SUCCESS;
+    }
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("CSRSRV:%s: NtSetDefaultHardErrorPort failed (Status=0x%08lx)\n",
