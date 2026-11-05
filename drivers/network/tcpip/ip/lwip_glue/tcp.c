@@ -79,7 +79,7 @@ LibTCPEmptyQueue(PCONNECTION_ENDPOINT Connection)
     DereferenceObject(Connection);
 }
 
-err_t LibTCPEnqueuePacket(PCONNECTION_ENDPOINT Connection, struct pbuf *p, ULONG PreCredit)
+err_t LibTCPEnqueuePacket(PCONNECTION_ENDPOINT Connection, struct pbuf *p)
 {
     PQUEUE_ENTRY qp;
 
@@ -92,8 +92,6 @@ err_t LibTCPEnqueuePacket(PCONNECTION_ENDPOINT Connection, struct pbuf *p, ULONG
 
     LockObject(Connection);
     InsertTailList(&Connection->PacketQueue, &qp->ListEntry);
-    Connection->RecvQueued += p->tot_len;
-    Connection->PreCredited += PreCredit;
     UnlockObject(Connection);
 
     return ERR_OK;
@@ -153,14 +151,7 @@ NTSTATUS LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PUCHA
             RecvLen -= ReadLength;
             RecvBuffer += ReadLength;
             (*Received) += ReadLength;
-            /* what was acknowledged on arrival (PreCredited) is not credited again */
-            {
-                ULONG Pre = min(ReadLength, Connection->PreCredited);
-
-                Connection->PreCredited -= Pre;
-                Connection->RecvCredit += ReadLength - Pre;
-            }
-            Connection->RecvQueued -= (Connection->RecvQueued < ReadLength) ? Connection->RecvQueued : ReadLength;
+            Connection->RecvCredit += ReadLength;
             Connection->Consumed += ReadLength;
 
             if (qp != NULL)
@@ -209,9 +200,6 @@ NTSTATUS LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PUCHA
 /* The window of a connection whose owner set no SO_RCVBUF: 2 MB. Windows takes about that from a sender
  * while the application does not read, although SO_RCVBUF reads 64K (measured on Windows 10 22H2) */
 #define LIBTCP_DEFAULT_WINDOW 0x200000
-
-/* What a peer without window scaling may have queued before its window closes */
-#define LIBTCP_NOWS_QUEUE 0x4000000
 
 /* Opens the receive window by Bytes (as far as the connection's largest window allows) and announces it
  * once: tcp_recved() announces after each call, so a long run of calls is a burst of window updates. The core
@@ -438,19 +426,8 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
     {
         /* On lookaside exhaustion let lwIP keep the pbuf and retry later
          * instead of dereferencing a NULL queue entry */
-        {
-            /* Without window scaling the peer'"'"'s window is 64K and the window closes at every stall of the reader
-             * (a file write of 0.3 s): the data is acknowledged on arrival, as it was before the window closed,
-             * while at most LIBTCP_NOWS_QUEUE are queued */
-            ULONG Length = p->tot_len;
-            ULONG Pre = (!(pcb->flags & TF_WND_SCALE) && Connection->RecvQueued < LIBTCP_NOWS_QUEUE) ? Length : 0;
-
-            if (LibTCPEnqueuePacket(Connection, p, Pre) != ERR_OK)
-                return ERR_MEM;
-
-            if (Pre)
-                LibTCPOpenWindow(Connection, pcb, Pre);
-        }
+        if (LibTCPEnqueuePacket(Connection, p) != ERR_OK)
+            return ERR_MEM;
 
         /* A peer on this machine gets every segment acknowledged at once. lwIP acknowledges every second
          * segment and the odd one after a timer tick; the sender's Nagle rule holds the short last segment of a
