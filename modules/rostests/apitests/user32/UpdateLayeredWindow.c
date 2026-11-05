@@ -395,8 +395,7 @@ static void Test_PerPixelAlpha(void)
        "second UpdateLayeredWindow failed: %lu\n", GetLastError());
     Pump();
     c = ScreenPixel(100 + 75, 100 + 75);
-    /* ULW blends onto the previous contents and accumulates: WIN32K-ulw-alpha-accumulate */
-    todo_ros ok(NearColor(c, 127, 0, 128), "50%% blue after a second update: 0x%06lx, expected (127,0,128)\n", c);
+    ok(NearColor(c, 127, 0, 128), "50%% blue after a second update: 0x%06lx, expected (127,0,128)\n", c);
     c = ScreenPixel(100 + 25, 100 + 75);
     ok(NearColor(c, 255, 0, 0), "transparent pixel after a second update: 0x%06lx\n", c);
 
@@ -406,8 +405,7 @@ static void Test_PerPixelAlpha(void)
        "third UpdateLayeredWindow failed: %lu\n", GetLastError());
     Pump();
     c = ScreenPixel(100 + 125, 100 + 75);
-    /* ULW blends onto the previous contents, SourceConstantAlpha too: WIN32K-ulw-alpha-accumulate */
-    todo_ros ok(NearColor(c, 127, 128, 0), "green with constant alpha 128: 0x%06lx, expected (127,128,0)\n", c);
+    ok(NearColor(c, 127, 128, 0), "green with constant alpha 128: 0x%06lx, expected (127,128,0)\n", c);
 
     /* No position and no size: the window stays where it is and keeps its size */
     Blend.SourceConstantAlpha = 255;
@@ -424,6 +422,89 @@ done:
     if (hWnd) DestroyWindow(hWnd);
     if (hBack) DestroyWindow(hBack);
     UnregisterClassW(L"UlwAlphaBack", GetModuleHandle(NULL));
+    DeleteObject(wc.hbrBackground);
+}
+
+/*
+ * An update that moves the window blends with what is below the window at its new place: the part it had before,
+ * the part it covers newly and the part it left are all correct, and no update blends with the previous frame.
+ */
+static void Test_PerPixelAlphaMove(void)
+{
+    WNDCLASSW wc = { 0 };
+    HWND hBack, hWnd;
+    POINT Pos = { 100, 100 }, Pos2 = { 140, 100 };
+    SIZE Size = { 200, 150 };
+    COLORREF c;
+
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.hbrBackground = CreateSolidBrush(RGB(255, 0, 0));
+    wc.lpszClassName = L"UlwAlphaMoveBack";
+    RegisterClassW(&wc);
+    hBack = CreateWindowExW(0, L"UlwAlphaMoveBack", L"", WS_POPUP | WS_VISIBLE, 50, 50, 400, 300, NULL, NULL, GetModuleHandle(NULL), NULL);
+    ok(hBack != NULL, "CreateWindowExW failed: %lu\n", GetLastError());
+    UpdateWindow(hBack);
+    hWnd = CreateLayered();
+    if (!hBack || !hWnd)
+        goto done;
+
+    /* 50% blue everywhere, premultiplied */
+    ok(UpdateColor(hWnd, &Pos, &Size, 0x80000080), "UpdateLayeredWindow failed: %lu\n", GetLastError());
+    Pump();
+    Sleep(100);
+    c = ScreenPixel(100 + 100, 100 + 75);
+    ok(NearColor(c, 127, 0, 128), "50%% blue over red: 0x%06lx\n", c);
+
+    ok(UpdateColor(hWnd, &Pos2, &Size, 0x80000080), "UpdateLayeredWindow with a move failed: %lu\n", GetLastError());
+    Pump();
+    Sleep(100);
+    Pump();
+    c = ScreenPixel(110, 100 + 75);
+    ok(NearColor(c, 255, 0, 0), "area the window left: 0x%06lx, expected the red background\n", c);
+    c = ScreenPixel(170, 100 + 75);
+    ok(NearColor(c, 127, 0, 128), "area under the window before and after the move: 0x%06lx, expected (127,0,128)\n", c);
+    c = ScreenPixel(320, 100 + 75);
+    ok(NearColor(c, 127, 0, 128), "area the window covers newly: 0x%06lx, expected (127,0,128)\n", c);
+
+    /* Fading out: the same content with a falling SourceConstantAlpha shows the background through more and more */
+    {
+        BLENDFUNCTION Blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        BITMAPINFO bmi = { { sizeof(BITMAPINFOHEADER) } };
+        HDC hdc = CreateCompatibleDC(NULL);
+        HBITMAP hbm;
+        DWORD *Bits = NULL;
+        POINT Src = { 0, 0 };
+        int i;
+
+        bmi.bmiHeader.biWidth = Size.cx;
+        bmi.bmiHeader.biHeight = -Size.cy;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, (PVOID *)&Bits, NULL, 0);
+        SelectObject(hdc, hbm);
+        if (Bits)
+        {
+            for (i = 0; i < Size.cx * Size.cy; i++)
+                Bits[i] = 0xFF0000FF;   /* opaque blue */
+            for (i = 255; i >= 0; i -= 85)
+            {
+                Blend.SourceConstantAlpha = i;
+                ok(UpdateLayeredWindow(hWnd, NULL, &Pos2, &Size, hdc, &Src, 0, &Blend, ULW_ALPHA), "fade update failed\n");
+                Pump();
+            }
+            /* The last one has alpha 0: only the background is left */
+            c = ScreenPixel(170, 100 + 75);
+            ok(NearColor(c, 255, 0, 0), "fully faded out: 0x%06lx, expected the red background\n", c);
+        }
+        DeleteDC(hdc);
+        DeleteObject(hbm);
+    }
+
+done:
+    if (hWnd) DestroyWindow(hWnd);
+    if (hBack) DestroyWindow(hBack);
+    UnregisterClassW(L"UlwAlphaMoveBack", GetModuleHandle(NULL));
     DeleteObject(wc.hbrBackground);
 }
 
@@ -697,6 +778,7 @@ START_TEST(UpdateLayeredWindow)
     RunHook(2);
     Test_ShapedMoveExposes();
     Test_PerPixelAlpha();
+    Test_PerPixelAlphaMove();
     Test_GlassBitBlt();
     Test_GlassResize();
 
