@@ -140,6 +140,111 @@ static void TestCancelFlood(void)
     CloseHandle(Write);
 }
 
+
+typedef struct
+{
+    HANDLE Pipe;
+    HANDLE Ready;
+    volatile HANDLE ThreadHandle;   /* set once the thread is about to read, INVALID_HANDLE_VALUE when it is past the read */
+    BOOL Ret;
+    DWORD Error;
+} STOPPABLE_READER;
+
+static DWORD WINAPI StoppableReaderThread(LPVOID Param)
+{
+    STOPPABLE_READER *Reader = Param;
+    HANDLE Self;
+    char Buffer[1];
+    DWORD Read;
+
+    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &Self, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    Reader->ThreadHandle = Self;
+    SetEvent(Reader->Ready);
+    Reader->Ret = ReadFile(Reader->Pipe, Buffer, sizeof(Buffer), &Read, NULL);
+    Reader->Error = GetLastError();
+    /* the acknowledgement the caller spins for */
+    Reader->ThreadHandle = INVALID_HANDLE_VALUE;
+    CloseHandle(Self);
+    return 0;
+}
+
+/*
+ * How a runtime stops a thread blocked in a synchronous read of a named pipe (libuv): it calls CancelSynchronousIo
+ * in a loop, yielding in between, until the thread says it is past the read. The cancel must take effect promptly:
+ * the reader fails with ERROR_OPERATION_ABORTED, the loop ends within a moment and the calls do not pile up
+ * (every call used to queue a nonpaged APC the thread had to run before it could return).
+ */
+static void TestStopReaderLoop(void)
+{
+    const int Rounds = 40;
+    int Round;
+    DWORD TotalCalls = 0, MaxCalls = 0, MaxMs = 0;
+    SIZE_T Before, After;
+
+    Before = GetIoTagNonPagedBytes();
+    for (Round = 0; Round < Rounds; Round++)
+    {
+        HANDLE Server, Client, Thread;
+        STOPPABLE_READER Reader;
+        DWORD Calls = 0, Start, Ms;
+        BOOL TimedOut = FALSE;
+
+        Server = CreateNamedPipeW(L"\\\\.\\pipe\\CancelSynchronousIoStop", PIPE_ACCESS_INBOUND,
+                                  PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 64, 64, 0, NULL);
+        ok(Server != INVALID_HANDLE_VALUE, "CreateNamedPipe failed with %lu\n", GetLastError());
+        if (Server == INVALID_HANDLE_VALUE)
+            return;
+        Client = CreateFileW(L"\\\\.\\pipe\\CancelSynchronousIoStop", GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        ok(Client != INVALID_HANDLE_VALUE, "CreateFile failed with %lu\n", GetLastError());
+
+        Reader.Pipe = Server;
+        Reader.Ready = CreateEventW(NULL, FALSE, FALSE, NULL);
+        Reader.ThreadHandle = NULL;
+        Reader.Ret = TRUE;
+        Reader.Error = 0;
+        Thread = CreateThread(NULL, 0, StoppableReaderThread, &Reader, 0, NULL);
+        WaitForSingleObject(Reader.Ready, 5000);
+        if (Round & 1)
+            Sleep(20);      /* the thread is blocked in the read */
+
+        Start = GetTickCount();
+        while (Reader.ThreadHandle != INVALID_HANDLE_VALUE)
+        {
+            if (Reader.ThreadHandle)
+                pCancelSynchronousIo(Reader.ThreadHandle);
+            SwitchToThread();
+            Calls++;
+            if (GetTickCount() - Start > 5000)
+            {
+                TimedOut = TRUE;
+                break;
+            }
+        }
+        Ms = GetTickCount() - Start;
+        ok(!TimedOut, "round %d: the reader was not stopped within 5 s (%lu calls)\n", Round, Calls);
+        if (TimedOut)
+        {
+            DWORD Written;
+            WriteFile(Client, "x", 1, &Written, NULL);
+        }
+        WaitForSingleObject(Thread, 5000);
+        ok(!Reader.Ret && Reader.Error == ERROR_OPERATION_ABORTED, "round %d: reader ret %d, error %lu\n", Round, Reader.Ret, Reader.Error);
+        TotalCalls += Calls;
+        if (Calls > MaxCalls) MaxCalls = Calls;
+        if (Ms > MaxMs) MaxMs = Ms;
+        CloseHandle(Thread);
+        CloseHandle(Reader.Ready);
+        CloseHandle(Client);
+        CloseHandle(Server);
+    }
+    trace("%d stops: %lu calls in total, at most %lu calls and %lu ms for one\n", Rounds, TotalCalls, MaxCalls, MaxMs);
+    ok(MaxMs < 1000, "a reader took %lu ms to stop\n", MaxMs);
+    ok(MaxCalls < 100000, "stopping a reader took %lu CancelSynchronousIo calls\n", MaxCalls);
+    After = GetIoTagNonPagedBytes();
+    if (Before != (SIZE_T)-1 && After != (SIZE_T)-1)
+        ok(After < Before + 2 * 1024 * 1024, "stopping readers left %Iu bytes of nonpaged pool\n", After - Before);
+}
+
 START_TEST(CancelSynchronousIo)
 {
     PFN_NtCancelSynchronousIoFile pNtCancel;
@@ -264,4 +369,5 @@ START_TEST(CancelSynchronousIo)
     CloseHandle(Write);
 
     TestCancelFlood();
+    TestStopReaderLoop();
 }
