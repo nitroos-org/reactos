@@ -119,9 +119,20 @@ HRESULT WINAPI DwmExtendFrameIntoClientArea(HWND hwnd, const MARGINS* margins)
  */
 HRESULT WINAPI DwmGetColorizationColor(DWORD *colorization, BOOL *opaque_blend)
 {
+#ifdef __REACTOS__
+    /* Windows 10 22H2 in an interactive session: S_OK, ARGB 0xe3006fc7 and opaque TRUE (the default accent) */
+    TRACE("(%p, %p)\n", colorization, opaque_blend);
+
+    if (!colorization || !opaque_blend)
+        return E_INVALIDARG;
+    *colorization = 0xe3006fc7;
+    *opaque_blend = TRUE;
+    return S_OK;
+#else
     FIXME("(%p, %p) stub\n", colorization, opaque_blend);
 
     return E_NOTIMPL;
+#endif
 }
 
 #ifdef __REACTOS__
@@ -211,9 +222,22 @@ HRESULT WINAPI DwmGetGraphicsStreamClient(UINT uIndex, UUID *pClientUuid)
  */
 HRESULT WINAPI DwmGetTransportAttributes(BOOL *pfIsRemoting, BOOL *pfIsConnected, DWORD *pDwGeneration)
 {
+#ifdef __REACTOS__
+    /* Windows 10 22H2 in an interactive session: S_OK, not remoting, connected, generation 1 (a session
+     * without a desktop answers DWM_E_COMPOSITIONDISABLED) */
+    TRACE("(%p, %p, %p)\n", pfIsRemoting, pfIsConnected, pDwGeneration);
+
+    if (!pfIsRemoting || !pfIsConnected || !pDwGeneration)
+        return E_INVALIDARG;
+    *pfIsRemoting = FALSE;
+    *pfIsConnected = TRUE;
+    *pDwGeneration = 1;
+    return S_OK;
+#else
     FIXME("(%p, %p, %p) stub\n", pfIsRemoting, pfIsConnected, pDwGeneration);
 
     return DWM_E_COMPOSITIONDISABLED;
+#endif
 }
 
 /**********************************************************************
@@ -268,14 +292,159 @@ BOOL WINAPI DwmDefWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, 
     return FALSE;
 }
 
+#ifdef __REACTOS__
+/*
+ * DwmGetWindowAttribute. The answers below were measured on Windows 10 22H2 (interactive session, 96 DPI)
+ * for attributes 0..40 with buffer sizes 0, 1, 4, 8 and 16, on an overlapped, a maximized, a minimized,
+ * a hidden, a layered, a tool, a popup-with-caption, a dialog-modal-frame and a caption-less popup window,
+ * and on the shell's windows:
+ *   - an invalid or NULL window is E_HANDLE, a NULL buffer E_INVALIDARG;
+ *   - NCRENDERING_ENABLED (1), CLOAKED (14), FREEZE_REPRESENTATION (15), PASSIVE_UPDATE_MODE (16) and
+ *     USE_IMMERSIVE_DARK_MODE (20) are DWORDs: S_OK with any size from 4 up, E_INVALIDARG below. Every
+ *     window answers 0 for the last four; NCRENDERING_ENABLED is 1 for a window with a caption and 0 for
+ *     one without (a caption-less popup, the taskbar, the desktop);
+ *   - CAPTION_BUTTON_BOUNDS (5) and EXTENDED_FRAME_BOUNDS (9) are RECTs: S_OK with 16 bytes,
+ *     HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) with 4 or 8, E_INVALIDARG with 0 or 1;
+ *   - every other attribute 0..40 (2, 3, 4, 6, 7, 8, 10, 11, 12, 13, 17..19, 21..40) is E_INVALIDARG.
+ * Sizes 2, 3, 5..15 and above 16 were not measured: below 4 is taken as invalid, 4..15 as too small for a
+ * RECT, above 16 as enough.
+ *
+ * CAPTION_BUTTON_BOUNDS is the rectangle of the system caption buttons, in window coordinates. Measured
+ * (frame fw = 8 for a sizing frame, 3 for a fixed one, SM_CYCAPTION 23, 96 DPI): top 0, bottom fw + 23 - 1
+ * (30 / 25); right = the right edge of EXTENDED_FRAME_BOUNDS (width - 7 with the 7 invisible pixels of a
+ * sizing frame, width - 2 for a fixed frame), and width - fw - 1 for a maximized window; left = right - 146
+ * for the three buttons of a window with a system menu and a minimize or maximize box, right - 49 for the
+ * close button alone (no such box, or a tool window). A window without a caption has an all-zero RECT. It is
+ * the same for a hidden and for a minimized window (the right edge follows the minimized rectangle).
+ *
+ * EXTENDED_FRAME_BOUNDS is the window rectangle in screen coordinates without the invisible resize border
+ * of Windows 10 and, for a maximized window, without its off-screen overhang (the work area). ReactOS draws
+ * no invisible border, so its frame bounds are the window rectangle, except for a maximized window.
+ * Not measured here: a window with another DPI than the system's (button width and caption scale with
+ * the DPI as on Windows is assumed), WS_EX_CONTEXTHELP's third button, a window without WS_SYSMENU (zero
+ * RECT assumed), a window with only WS_DLGFRAME.
+ */
+#define NITRO_CAPTION_BUTTON_CX 46
+#ifndef SM_CXPADDEDBORDER
+#define SM_CXPADDEDBORDER 92
+#endif
+
+static UINT get_window_dpi(HWND hwnd)
+{
+    typedef UINT (WINAPI *PFN_GETDPIFORWINDOW)(HWND);
+    static PFN_GETDPIFORWINDOW pGetDpiForWindow;
+    static BOOL once;
+    UINT dpi = 0;
+
+    if (!once)
+    {
+        HMODULE hUser = GetModuleHandleW(L"user32.dll");
+        if (hUser)
+            pGetDpiForWindow = (PFN_GETDPIFORWINDOW)GetProcAddress(hUser, "GetDpiForWindow");
+        once = TRUE;
+    }
+    if (pGetDpiForWindow)
+        dpi = pGetDpiForWindow(hwnd);
+    return dpi ? dpi : 96;
+}
+
+static BOOL window_has_caption(HWND hwnd)
+{
+    return (GetWindowLongW(hwnd, GWL_STYLE) & WS_CAPTION) != 0;
+}
+
+static LONG window_frame_width(HWND hwnd)
+{
+    if (GetWindowLongW(hwnd, GWL_STYLE) & WS_THICKFRAME)
+        return GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+    return GetSystemMetrics(SM_CXFIXEDFRAME);
+}
+
+static void get_extended_frame_bounds(HWND hwnd, RECT *bounds)
+{
+    GetWindowRect(hwnd, bounds);
+    if (IsZoomed(hwnd) && IsWindowVisible(hwnd) && window_has_caption(hwnd))
+    {
+        LONG fw = window_frame_width(hwnd);
+        InflateRect(bounds, -fw, -fw);
+    }
+}
+
+static void get_caption_button_bounds(HWND hwnd, RECT *rect)
+{
+    LONG style = GetWindowLongW(hwnd, GWL_STYLE), ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    UINT dpi = get_window_dpi(hwnd);
+    LONG fw, width, count, right;
+    RECT wr, bounds;
+
+    SetRectEmpty(rect);
+    if (!(style & WS_CAPTION) || !(style & WS_SYSMENU))
+        return;
+
+    GetWindowRect(hwnd, &wr);
+    get_extended_frame_bounds(hwnd, &bounds);
+    fw = window_frame_width(hwnd);
+    count = (!(ex & WS_EX_TOOLWINDOW) && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX))) ? 3 : 1;
+    width = MulDiv(count * NITRO_CAPTION_BUTTON_CX, dpi, 96) + fw;
+
+    right = bounds.right - wr.left;
+    if (IsZoomed(hwnd))
+        right--;
+    rect->right = right;
+    rect->left = right - width;
+    rect->top = 0;
+    rect->bottom = fw + GetSystemMetrics(SM_CYCAPTION) - 1;
+}
+#endif
+
 /**********************************************************************
  *           DwmGetWindowAttribute         (DWMAPI.@)
  */
 HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attribute, DWORD size)
 {
+#ifdef __REACTOS__
+    RECT rect;
+
+    TRACE("(%p %ld %p %ld)\n", hwnd, attribute, pv_attribute, size);
+
+    if (!IsWindow(hwnd))
+        return HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE);
+    if (!pv_attribute)
+        return E_INVALIDARG;
+
+    switch (attribute)
+    {
+        case 1: /* DWMWA_NCRENDERING_ENABLED */
+        case 14: /* DWMWA_CLOAKED */
+        case 15: /* DWMWA_FREEZE_REPRESENTATION */
+        case 16: /* DWMWA_PASSIVE_UPDATE_MODE */
+        case 20: /* DWMWA_USE_IMMERSIVE_DARK_MODE */
+            if (size < sizeof(DWORD))
+                return E_INVALIDARG;
+            *(DWORD *)pv_attribute = (attribute == 1) ? window_has_caption(hwnd) : 0;
+            return S_OK;
+
+        case 5: /* DWMWA_CAPTION_BUTTON_BOUNDS */
+        case 9: /* DWMWA_EXTENDED_FRAME_BOUNDS */
+            if (size < sizeof(DWORD))
+                return E_INVALIDARG;
+            if (size < sizeof(RECT))
+                return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+            if (attribute == 5)
+                get_caption_button_bounds(hwnd, &rect);
+            else
+                get_extended_frame_bounds(hwnd, &rect);
+            *(RECT *)pv_attribute = rect;
+            return S_OK;
+
+        default:
+            return E_INVALIDARG;
+    }
+#else
     FIXME("(%p %ld %p %ld) stub\n", hwnd, attribute, pv_attribute, size);
 
     return E_NOTIMPL;
+#endif
 }
 
 /**********************************************************************
