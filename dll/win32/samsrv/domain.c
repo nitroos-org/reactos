@@ -128,6 +128,8 @@ SampCheckAccountNameInDomain(IN PSAM_DB_OBJECT DomainObject,
                 Status = STATUS_SUCCESS;
         }
 
+        /* The Names key is still open when the name was not found */
+        SampRegCloseKey(&NamesKey);
         SampRegCloseKey(&AccountKey);
     }
 
@@ -163,6 +165,8 @@ SampCheckAccountNameInDomain(IN PSAM_DB_OBJECT DomainObject,
                 Status = STATUS_SUCCESS;
         }
 
+        /* The Names key is still open when the name was not found */
+        SampRegCloseKey(&NamesKey);
         SampRegCloseKey(&AccountKey);
     }
 
@@ -198,6 +202,8 @@ SampCheckAccountNameInDomain(IN PSAM_DB_OBJECT DomainObject,
                 Status = STATUS_SUCCESS;
         }
 
+        /* The Names key is still open when the name was not found */
+        SampRegCloseKey(&NamesKey);
         SampRegCloseKey(&AccountKey);
     }
 

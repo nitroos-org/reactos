@@ -842,6 +842,12 @@ done:
     if (AdministratorsSid != NULL)
         RtlFreeSid(AdministratorsSid);
 
+    if (UsersSid != NULL)
+        RtlFreeSid(UsersSid);
+
+    if (GuestsSid != NULL)
+        RtlFreeSid(GuestsSid);
+
     if (Dacl != NULL)
         RtlFreeHeap(RtlGetProcessHeap(), 0, Dacl);
 
@@ -1129,6 +1135,9 @@ done:
     if (AdministratorsSid != NULL)
         RtlFreeSid(AdministratorsSid);
 
+    if (AccountOperatorsSid != NULL)
+        RtlFreeSid(AccountOperatorsSid);
+
     if (Dacl != NULL)
         RtlFreeHeap(RtlGetProcessHeap(), 0, Dacl);
 
@@ -1415,6 +1424,9 @@ done:
 
     if (AdministratorsSid != NULL)
         RtlFreeSid(AdministratorsSid);
+
+    if (AccountOperatorsSid != NULL)
+        RtlFreeSid(AccountOperatorsSid);
 
     if (Dacl != NULL)
         RtlFreeHeap(RtlGetProcessHeap(), 0, Dacl);

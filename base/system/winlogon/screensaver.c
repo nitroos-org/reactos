@@ -246,11 +246,39 @@ InitializeScreenSaver(
                                      0,
                                      NULL);
     if (ScreenSaverThread)
-        CloseHandle(ScreenSaverThread);
+        Session->hScreenSaverThread = ScreenSaverThread;
     else
         ERR("WL: Unable to start screen saver thread\n");
 
     return TRUE;
+}
+
+
+/*
+ * The screen saver thread runs as the logged-on user (it impersonates the user token) and was
+ * only ever stopped when Winlogon shuts down: every logon left one thread behind that kept an
+ * impersonation token, so the logon session of every logged-off user stayed referenced forever.
+ * Stop it when the user logs off.
+ */
+VOID
+TerminateScreenSaverThread(
+    IN OUT PWLSESSION Session)
+{
+    if (!Session->hScreenSaverThread)
+        return;
+
+    if (Session->hEndOfScreenSaverThread)
+        SetEvent(Session->hEndOfScreenSaverThread);
+
+    if (WaitForSingleObject(Session->hScreenSaverThread, 10000) != WAIT_OBJECT_0)
+        WARN("WL: The screen saver thread did not end\n");
+
+    CloseHandle(Session->hScreenSaverThread);
+    Session->hScreenSaverThread = NULL;
+
+    /* The thread closed these */
+    Session->hEndOfScreenSaverThread = NULL;
+    Session->hScreenSaverParametersChanged = NULL;
 }
 
 

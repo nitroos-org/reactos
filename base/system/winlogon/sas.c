@@ -1062,6 +1062,9 @@ HandleLogoff(
     SetWindowStationUser(Session->InteractiveWindowStation,
                          &LuidNone, NULL, 0);
 
+    /* The screen saver thread impersonates the user: end it before the token and profile go */
+    TerminateScreenSaverThread(Session);
+
     /* Kill remaining COM processes that may have been started by logoff scripts */
     hThread = CreateThread(psa, 0, KillComProcesses, (PVOID)Session->UserToken, 0, NULL);
     if (hThread)
