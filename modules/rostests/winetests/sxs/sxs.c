@@ -231,13 +231,7 @@ static void run_child_process(void)
     si.cb = sizeof(si);
     ret = CreateProcessA(exe, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
     ok(ret, "Could not create process: %lu\n", GetLastError());
-#ifdef __REACTOS__ /* ROS wine/test.h still takes the process handle, not PROCESS_INFORMATION* */
-    wait_child_process(pi.hProcess);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-#else
     wait_child_process(&pi);
-#endif
 }
 
 static void test_SxsLookupClrGuid(void)
