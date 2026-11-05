@@ -1225,6 +1225,222 @@ Test_SectionNameNoFile(VOID)
     if (Section) NtClose(Section);
 }
 
+/* Windows 10 22H2 (measured): classes 0, 1, 2, 3, 4, 6, 7 and 8 need only PROCESS_QUERY_LIMITED_INFORMATION on a
+ * process handle (a handle with other rights, such as PROCESS_VM_READ or SYNCHRONIZE alone, is refused) */
+static
+VOID
+Test_LimitedAccess(VOID)
+{
+    PUCHAR Private = AllocPrivate(0x2000, PAGE_READWRITE);
+    HANDLE Limited, Sync;
+    MEMORY_BASIC_INFORMATION Info;
+    TEST_WS_EX_ENTRY Entry;
+    SIZE_T ReturnLength;
+    NTSTATUS Status;
+
+    if (!Private) return;
+    Private[0] = 1;
+    Limited = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, GetCurrentProcessId());
+    Sync = OpenProcess(SYNCHRONIZE, FALSE, GetCurrentProcessId());
+    ok(Limited != NULL && Sync != NULL, "OpenProcess failed\n");
+    if (Limited)
+    {
+        Status = QueryClass(Limited, Private, MemoryBasicInformation, &Info, sizeof(Info), &ReturnLength);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_hex(Info.State, MEM_COMMIT);
+        Status = QueryClass(Limited, Private, MEMORY_CLASS_PRIVILEGED_BASIC, &Info, sizeof(Info), &ReturnLength);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        Entry.VirtualAddress = Private;
+        Entry.VirtualAttributes = 0;
+        Status = QueryWsEx(Limited, NULL, &Entry, sizeof(Entry), &ReturnLength);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_hex(Entry.VirtualAttributes & 1, 1);
+        CloseHandle(Limited);
+    }
+    if (Sync)
+    {
+        Status = QueryClass(Sync, Private, MemoryBasicInformation, &Info, sizeof(Info), &ReturnLength);
+        ok_ntstatus(Status, STATUS_ACCESS_DENIED);
+        Status = QueryClass(Sync, Private, MEMORY_CLASS_PRIVILEGED_BASIC, &Info, sizeof(Info), &ReturnLength);
+        ok_ntstatus(Status, STATUS_ACCESS_DENIED);
+        Entry.VirtualAddress = Private;
+        Status = QueryWsEx(Sync, NULL, &Entry, sizeof(Entry), &ReturnLength);
+        ok_ntstatus(Status, STATUS_ACCESS_DENIED);
+        CloseHandle(Sync);
+    }
+    {
+        SIZE_T Size = 0;
+        PVOID Base = Private;
+
+        NtFreeVirtualMemory(NtCurrentProcess(), &Base, &Size, MEM_RELEASE);
+    }
+}
+
+static volatile UCHAR TestData[0x3000] = { 1 };
+
+/* Windows 10 22H2 (measured): the share count of a page is the number of page table entries that map it (up to 7),
+ * KUSER_SHARED_DATA is valid, read-only and shared with the count saturated, a view page that is not resident has
+ * only the shared flags, and an image data page that was only read is write-copy and shared until it is written */
+static
+VOID
+Test_ShareCountAndData(VOID)
+{
+    HANDLE Section;
+    LARGE_INTEGER MaxSize;
+    PUCHAR A = NULL, B = NULL;
+    SIZE_T ViewSize = 0, ReturnLength;
+    PULONG_PTR List;
+    ULONG_PTR Entry;
+    TEST_WS_EX_ENTRY Ex;
+    NTSTATUS Status;
+
+    MaxSize.QuadPart = 0x2000;
+    Status = NtCreateSection(&Section, SECTION_ALL_ACCESS, NULL, &MaxSize, PAGE_READWRITE, SEC_COMMIT, NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtMapViewOfSection(Section, NtCurrentProcess(), (PVOID *)&A, 0, 0, NULL, &ViewSize, ViewUnmap, 0, PAGE_READWRITE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ViewSize = 0;
+        Status = NtMapViewOfSection(Section, NtCurrentProcess(), (PVOID *)&B, 0, 0, NULL, &ViewSize, ViewUnmap, 0, PAGE_READWRITE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+    }
+    if (A && B)
+    {
+        /* Not resident yet: no page, but the view's flags (Shared, SharedOriginal), nothing else */
+        Ex.VirtualAddress = A;
+        Ex.VirtualAttributes = 0;
+        Status = QueryWsEx(NtCurrentProcess(), NULL, &Ex, sizeof(Ex), &ReturnLength);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+#ifdef _WIN64
+        ok_hex(Ex.VirtualAttributes, 0x40008000);
+#endif
+        A[0] = 1;
+        (VOID)*(volatile UCHAR *)B;
+        List = GetWorkingSetList(NtCurrentProcess(), &ReturnLength);
+        if (List)
+        {
+            ok(FindWorkingSetEntry(List, A, &Entry), "view page A not listed\n");
+            if (FindWorkingSetEntry(List, A, &Entry)) ok_hex((Entry >> 5) & 7, 2);
+            ok(FindWorkingSetEntry(List, B, &Entry), "view page B not listed\n");
+            if (FindWorkingSetEntry(List, B, &Entry)) ok_hex((Entry >> 5) & 7, 2);
+            VirtualFree(List, 0, MEM_RELEASE);
+        }
+        Ex.VirtualAddress = A;
+        Ex.VirtualAttributes = 0;
+        Status = QueryWsEx(NtCurrentProcess(), NULL, &Ex, sizeof(Ex), &ReturnLength);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_hex((Ex.VirtualAttributes >> 1) & 7, 2);
+    }
+    if (A) NtUnmapViewOfSection(NtCurrentProcess(), A);
+    if (B) NtUnmapViewOfSection(NtCurrentProcess(), B);
+    if (Section) NtClose(Section);
+
+    /* KUSER_SHARED_DATA */
+    Ex.VirtualAddress = (PVOID)(ULONG_PTR)0x7FFE0000;
+    Ex.VirtualAttributes = 0;
+    Status = QueryWsEx(NtCurrentProcess(), NULL, &Ex, sizeof(Ex), &ReturnLength);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_hex(Ex.VirtualAttributes & 0x803F, 0x802F);      /* valid, share count 7, read-only, shared */
+    ok_hex((Ex.VirtualAttributes >> 4) & 0x7FF, PAGE_READONLY);
+    List = GetWorkingSetList(NtCurrentProcess(), &ReturnLength);
+    if (List)
+    {
+        ok(FindWorkingSetEntry(List, (PVOID)(ULONG_PTR)0x7FFE0000, &Entry), "KUSER_SHARED_DATA not listed\n");
+        if (FindWorkingSetEntry(List, (PVOID)(ULONG_PTR)0x7FFE0000, &Entry))
+        {
+            ok_hex(Entry & 0x1F, 1);
+            ok_hex((Entry >> 5) & 7, 7);
+            ok_hex((Entry >> 8) & 1, 1);
+        }
+        VirtualFree(List, 0, MEM_RELEASE);
+    }
+
+#ifdef _WIN64
+    /* An image data page that was only read: write-copy, shared; once written: a private page */
+    {
+        PVOID Page = (PVOID)(ULONG_PTR)PAGE_OF(&TestData[0x2000]);
+
+        (VOID)TestData[0x2000];
+        Ex.VirtualAddress = Page;
+        Ex.VirtualAttributes = 0;
+        Status = QueryWsEx(NtCurrentProcess(), NULL, &Ex, sizeof(Ex), &ReturnLength);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_hex(Ex.VirtualAttributes & 0x8001, 0x8001);
+        ok_hex((Ex.VirtualAttributes >> 4) & 0x7FF, PAGE_WRITECOPY);
+        List = GetWorkingSetList(NtCurrentProcess(), &ReturnLength);
+        if (List)
+        {
+            if (FindWorkingSetEntry(List, Page, &Entry)) ok_hex(Entry & 0x13F, 0x125 & 0x13F);   /* write-copy, shared */
+            VirtualFree(List, 0, MEM_RELEASE);
+        }
+        TestData[0x2000] = 5;
+        Ex.VirtualAttributes = 0;
+        Status = QueryWsEx(NtCurrentProcess(), NULL, &Ex, sizeof(Ex), &ReturnLength);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_hex(Ex.VirtualAttributes & 0x8001, 1);
+        ok_hex((Ex.VirtualAttributes >> 4) & 0x7FF, PAGE_READWRITE);
+        List = GetWorkingSetList(NtCurrentProcess(), &ReturnLength);
+        if (List)
+        {
+            if (FindWorkingSetEntry(List, Page, &Entry)) ok_hex(Entry & 0x1FF, 4);              /* read-write, not shared */
+            VirtualFree(List, 0, MEM_RELEASE);
+        }
+    }
+#endif
+}
+
+/* A view of \\Device\\PhysicalMemory over a range that is not RAM has no PFN database entry: the working set queries
+ * must not look for one (Windows is not measured here: only that it works and the values are sane) */
+static
+VOID
+Test_PhysicalMemoryView(VOID)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Device\\PhysicalMemory");
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Section;
+    PVOID View = NULL;
+    SIZE_T ViewSize = 0x1000, ReturnLength;
+    LARGE_INTEGER Offset;
+    TEST_WS_EX_ENTRY Ex;
+    PULONG_PTR List;
+    ULONG_PTR Entry;
+    NTSTATUS Status;
+
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenSection(&Section, SECTION_MAP_READ, &Attributes);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Cannot open \\Device\\PhysicalMemory (0x%08lx)\n", Status);
+        return;
+    }
+    Offset.QuadPart = 0xA0000;
+    Status = NtMapViewOfSection(Section, NtCurrentProcess(), &View, 0, 0, &Offset, &ViewSize, ViewUnmap, 0, PAGE_READONLY);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Cannot map physical memory at 0xA0000 (0x%08lx)\n", Status);
+        NtClose(Section);
+        return;
+    }
+    (VOID)*(volatile UCHAR *)View;
+    Ex.VirtualAddress = View;
+    Ex.VirtualAttributes = 0;
+    Status = QueryWsEx(NtCurrentProcess(), NULL, &Ex, sizeof(Ex), &ReturnLength);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (Ex.VirtualAttributes & 1)
+        ok(((Ex.VirtualAttributes >> 1) & 7) >= 1, "ShareCount 0 for a valid page\n");
+    List = GetWorkingSetList(NtCurrentProcess(), &ReturnLength);
+    ok(List != NULL, "No list\n");
+    if (List)
+    {
+        if (FindWorkingSetEntry(List, View, &Entry))
+            ok(((Entry >> 5) & 7) >= 1, "ShareCount 0 for a listed page\n");
+        VirtualFree(List, 0, MEM_RELEASE);
+    }
+    NtUnmapViewOfSection(NtCurrentProcess(), View);
+    NtClose(Section);
+}
+
 START_TEST(NtQueryVirtualMemory)
 {
     Test_InvalidClasses();
@@ -1242,4 +1458,7 @@ START_TEST(NtQueryVirtualMemory)
     Test_PrivilegedBasic();
     Test_ProtectAfterAccess();
     Test_SectionNameNoFile();
+    Test_LimitedAccess();
+    Test_ShareCountAndData();
+    Test_PhysicalMemoryView();
 }

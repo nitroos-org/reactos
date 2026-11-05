@@ -239,6 +239,61 @@ static void TestNewClasses(void)
     Status = NtQueryVirtualMemory((HANDLE)0x1230, Private, 8, Privileged, 28, &Bytes);
     ok_ntstatus(Status, STATUS_INVALID_HANDLE);
 
+    /* Class 4 (working set, extended): entries of two ULONGs, at least one, a partial entry is ignored (Windows 10
+     * 22H2 under WoW64) */
+    {
+        ULONG Entries[6];
+
+        memset(Entries, Fill, sizeof(Entries));
+        Entries[0] = (ULONG)(ULONG_PTR)Private;
+        Bytes = 0xdeadbeef;
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), NULL, 4, Entries, 4, &Bytes);
+        ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+        ok(Bytes == 0xdeadbeef, "Return length written for a short buffer\n");
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), NULL, 4, Entries, 12, &Bytes);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok(Bytes == 8, "Class 4 return length %lu\n", (ULONG)Bytes);
+        ok((Entries[1] & 0x7FFF) == 0x41, "Class 4 attributes of a private page %lx\n", Entries[1]);
+        ok(Entries[2] == Fill * 0x01010101UL, "Class 4 wrote a partial entry\n");
+        Entries[0] = (ULONG)(ULONG_PTR)Private;
+        Entries[2] = (ULONG)(ULONG_PTR)GetModuleHandleW(NULL);
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), NULL, 4, Entries, 16, &Bytes);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok(Bytes == 16, "Class 4 return length %lu\n", (ULONG)Bytes);
+        ok((Entries[3] & 0x8001) == 0x8001, "Class 4 attributes of the image %lx\n", Entries[3]);
+        Status = NtQueryVirtualMemory((HANDLE)0x1230, NULL, 4, Entries, 8, &Bytes);
+        ok_ntstatus(Status, STATUS_INVALID_HANDLE);
+    }
+
+    /* Class 6 (image information): ImageBase, SizeOfImage, ImageFlags; 12 bytes, at least 12; the length is stored
+     * before the address and the handle are looked at */
+    {
+        ULONG Image3[4];
+
+        memset(Image3, Fill, sizeof(Image3));
+        Bytes = 0xdeadbeef;
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), GetModuleHandleW(NULL), 6, Image3, 8, &Bytes);
+        ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+        ok(Bytes == 0xdeadbeef, "Return length written for a short buffer\n");
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), GetModuleHandleW(NULL), 6, Image3, 16, &Bytes);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok(Bytes == 12, "Class 6 return length %lu\n", (ULONG)Bytes);
+        ok(Image3[0] == (ULONG)(ULONG_PTR)GetModuleHandleW(NULL) && Image3[1] != 0, "Class 6 image %lx size %lx\n", Image3[0], Image3[1]);
+        ok(Image3[3] == Fill * 0x01010101UL, "Class 6 wrote past 12 bytes\n");
+        Bytes = 0xdeadbeef;
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), NULL, 6, Image3, 12, &Bytes);
+        ok_ntstatus(Status, STATUS_INVALID_ADDRESS);
+        ok(Bytes == 12, "Return length %lu\n", (ULONG)Bytes);
+        Bytes = 0xdeadbeef;
+        Status = NtQueryVirtualMemory((HANDLE)0x1230, Private, 6, Image3, 12, &Bytes);
+        ok_ntstatus(Status, STATUS_INVALID_HANDLE);
+        ok(Bytes == 12, "Return length %lu\n", (ULONG)Bytes);
+        Bytes = 0xdeadbeef;
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), (PVOID)0xC0000000, 6, Image3, 12, &Bytes);
+        ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+        ok(Bytes == 0xdeadbeef, "Return length written for a bad address\n");
+    }
+
     VirtualFree(Private, 0, MEM_RELEASE);
 }
 

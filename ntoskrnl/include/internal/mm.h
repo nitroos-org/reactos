@@ -1127,6 +1127,12 @@ VOID
 NTAPI
 MmFreeRmapEntry(PVOID Entry);
 
+ULONG
+NTAPI
+MmCountPageMappers(
+    PFN_NUMBER Page
+);
+
 VOID
 NTAPI
 MmInsertRmapEntry(
