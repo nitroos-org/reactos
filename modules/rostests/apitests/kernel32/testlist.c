@@ -124,6 +124,7 @@ extern void func_GetQueuedCompletionStatusEx(void);
 extern void func_GetSystemFileCacheSize(void);
 extern void func_GetSystemTimePrecise(void);
 extern void func_GetThreadUILanguage(void);
+extern void func_GetTimeFormat(void);
 extern void func_DiskPerformance(void);
 extern void func_GetVolumeInformation(void);
 extern void func_HeapCreateExecute(void);
@@ -370,6 +371,7 @@ const struct test winetest_testlist[] =
     { "GetSystemFileCacheSize",      func_GetSystemFileCacheSize },
     { "GetSystemTimePrecise",        func_GetSystemTimePrecise },
     { "GetThreadUILanguage",         func_GetThreadUILanguage },
+    { "GetTimeFormat",               func_GetTimeFormat },
     { "DiskPerformance",             func_DiskPerformance },
     { "GetVolumeInformation",        func_GetVolumeInformation },
     { "HeapCreateExecute",           func_HeapCreateExecute },

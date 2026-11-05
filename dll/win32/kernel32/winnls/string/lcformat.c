@@ -587,6 +587,7 @@ static INT NLS_GetDateTimeFormatW(LCID lcid, DWORD dwFlags,
   INT cchWritten = 0;
   INT lastFormatPos = 0;
   BOOL bSkipping = FALSE; /* Skipping text around marker? */
+  BOOL bDropSpaces = FALSE; /* Dropping the spaces after a leading marker that is not shown? */
   BOOL d_dd_formatted = FALSE; /* previous formatted part was for d or dd */
 
   /* Verify our arguments */
@@ -712,6 +713,7 @@ static INT NLS_GetDateTimeFormatW(LCID lcid, DWORD dwFlags,
       int   count = 0, dwLen;
 
       bSkipping = FALSE;
+      bDropSpaces = FALSE;
 
       fmtChar = *lpFormat;
       while (*lpFormat == fmtChar)
@@ -926,6 +928,10 @@ static INT NLS_GetDateTimeFormatW(LCID lcid, DWORD dwFlags,
         {
           cchWritten = lastFormatPos; /* Skip */
           bSkipping = TRUE;
+          /* Windows also drops the spaces behind a marker at the start of the output */
+#ifdef __REACTOS__
+          bDropSpaces = (cchWritten == 0);
+#endif
         }
         else
         {
@@ -933,6 +939,15 @@ static INT NLS_GetDateTimeFormatW(LCID lcid, DWORD dwFlags,
             szAdd = lpTime->wHour < 12 ? node->szShortAM : node->szShortPM;
           else
             szAdd = lpTime->wHour < 12 ? GetAM(node) : GetPM(node);
+#ifdef __REACTOS__
+          /* An empty marker string (de-DE) takes the space in front of it away, like a skipped marker */
+          if (szAdd && !*szAdd)
+          {
+            cchWritten = lastFormatPos;
+            bSkipping = TRUE;
+            szAdd = NULL;
+          }
+#endif
         }
         break;
       }
@@ -962,6 +977,11 @@ static INT NLS_GetDateTimeFormatW(LCID lcid, DWORD dwFlags,
     else
     {
       /* Literal character */
+#ifdef __REACTOS__
+      if (bDropSpaces && *lpFormat == ' ')
+        ; /* Not shown, see TIME_NOTIMEMARKER above */
+      else
+#endif
       if (!cchOut)
         cchWritten++;   /* Count size only */
       else if (cchWritten >= cchOut)
