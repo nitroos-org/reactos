@@ -216,6 +216,24 @@ UpdateDialogElements(
     /* Update "Insert mode" state */
     CheckDlgButton(hDlg, IDC_CHECK_INSERT_MODE,
                    pConInfo->InsertMode ? BST_CHECKED : BST_UNCHECKED);
+
+    /* Update the Ctrl key shortcuts and line wrapping selection states */
+    {
+        PCONSOLE_STATE_INFO_EX pConInfoEx = ConCfgGetStateInfoEx(pConInfo, pConInfo->cbSize);
+
+        if (pConInfoEx)
+        {
+            CheckDlgButton(hDlg, IDC_CHECK_CTRL_KEYS,
+                           pConInfoEx->CtrlKeyShortcutsDisabled ? BST_UNCHECKED : BST_CHECKED);
+            CheckDlgButton(hDlg, IDC_CHECK_LINE_SELECTION,
+                           pConInfoEx->LineSelection ? BST_CHECKED : BST_UNCHECKED);
+        }
+        else
+        {
+            EnableWindow(GetDlgItem(hDlg, IDC_CHECK_CTRL_KEYS), FALSE);
+            EnableWindow(GetDlgItem(hDlg, IDC_CHECK_LINE_SELECTION), FALSE);
+        }
+    }
 }
 
 INT_PTR
@@ -309,6 +327,26 @@ OptionsProc(HWND hDlg,
                 {
                     ConInfo->InsertMode = (IsDlgButtonChecked(hDlg, IDC_CHECK_INSERT_MODE) == BST_CHECKED); // BST_UNCHECKED or BST_INDETERMINATE => FALSE
                     PropSheet_Changed(GetParent(hDlg), hDlg);
+                    break;
+                }
+                case IDC_CHECK_CTRL_KEYS:
+                {
+                    PCONSOLE_STATE_INFO_EX pConInfoEx = ConCfgGetStateInfoEx(ConInfo, ConInfo->cbSize);
+                    if (pConInfoEx)
+                    {
+                        pConInfoEx->CtrlKeyShortcutsDisabled = (IsDlgButtonChecked(hDlg, IDC_CHECK_CTRL_KEYS) != BST_CHECKED);
+                        PropSheet_Changed(GetParent(hDlg), hDlg);
+                    }
+                    break;
+                }
+                case IDC_CHECK_LINE_SELECTION:
+                {
+                    PCONSOLE_STATE_INFO_EX pConInfoEx = ConCfgGetStateInfoEx(ConInfo, ConInfo->cbSize);
+                    if (pConInfoEx)
+                    {
+                        pConInfoEx->LineSelection = (IsDlgButtonChecked(hDlg, IDC_CHECK_LINE_SELECTION) == BST_CHECKED);
+                        PropSheet_Changed(GetParent(hDlg), hDlg);
+                    }
                     break;
                 }
                 case IDC_CHECK_DISCARD_DUPLICATES:

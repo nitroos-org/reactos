@@ -127,6 +127,8 @@ typedef struct _GUI_CONSOLE_DATA
     CONSOLE_SELECTION_INFO Selection;       /* Contains information about the selection */
     COORD dwSelectionCursor;                /* Selection cursor position, most of the time different from Selection.dwSelectionAnchor */
     BOOL  LineSelection;                    /* TRUE if line-oriented selection (a la *nix terminals), FALSE if block-oriented selection (default on Windows) */
+    BOOL  CopyNoTrim;                       /* The copy being made (Ctrl+Shift+C) keeps the blanks that end the lines */
+    WORD  SwallowKey;                       /* Virtual key whose WM_CHAR and key-up belong to a shortcut the window took (Ctrl+C, Ctrl+V...) and must not reach the program; 0 if none */
 
     GUI_CONSOLE_INFO GuiInfo;   /* GUI terminal settings */
 } GUI_CONSOLE_DATA, *PGUI_CONSOLE_DATA;

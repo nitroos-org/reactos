@@ -436,7 +436,7 @@ LoadShellLinkConsoleInfo(IN OUT PCONSOLE_STATE_INFO ConsoleInfo,
 
                     /* Reset the name of the console with the name of the shortcut */
                     Length = min(/*Length*/ Length - 4, // 4 == len(".lnk")
-                                 (ConsoleInfo->cbSize - FIELD_OFFSET(CONSOLE_STATE_INFO, ConsoleTitle) - sizeof(UNICODE_NULL)) / sizeof(WCHAR));
+                                 CONSOLE_STATE_INFO_TITLE_CCH(ConsoleInfo->cbSize));
                     wcsncpy(ConsoleInfo->ConsoleTitle, LinkName, Length);
                     ConsoleInfo->ConsoleTitle[Length] = UNICODE_NULL;
 
@@ -543,7 +543,9 @@ ConSrvInitConsole(OUT PHANDLE NewConsoleHandle,
     HANDLE ConsoleHandle;
     PCONSRV_CONSOLE Console;
 
-    BYTE ConsoleInfoBuffer[sizeof(CONSOLE_STATE_INFO) + MAX_PATH * sizeof(WCHAR)]; // CONSRV console information
+    /* CONSRV console information: the title, then the CONSOLE_STATE_INFO_EX block. ULONGs for the alignment. */
+    ULONG ConsoleInfoBuffer[(sizeof(CONSOLE_STATE_INFO) + MAX_PATH * sizeof(WCHAR) + sizeof(CONSOLE_STATE_INFO_EX)) / sizeof(ULONG)];
+    PCONSOLE_STATE_INFO_EX ConsoleInfoEx;
     PCONSOLE_STATE_INFO ConsoleInfo = (PCONSOLE_STATE_INFO)&ConsoleInfoBuffer;
     CONSOLE_INFO DrvConsoleInfo; // Console information for CONDRV
 
@@ -570,7 +572,7 @@ ConSrvInitConsole(OUT PHANDLE NewConsoleHandle,
     /* 1. Get the title of the console (initialize ConsoleInfo->ConsoleTitle) */
     /* TitleLength is in bytes (client-supplied): the copy is bounded in WCHARs */
     Length = min(ConsoleInitInfo->TitleLength / sizeof(WCHAR),
-                 (ConsoleInfo->cbSize - FIELD_OFFSET(CONSOLE_STATE_INFO, ConsoleTitle) - sizeof(UNICODE_NULL)) / sizeof(WCHAR));
+                 CONSOLE_STATE_INFO_TITLE_CCH(ConsoleInfo->cbSize));
     wcsncpy(ConsoleInfo->ConsoleTitle, ConsoleInitInfo->ConsoleTitle, Length);
     ConsoleInfo->ConsoleTitle[Length] = UNICODE_NULL; // NULL-terminate it.
 
@@ -758,6 +760,9 @@ ConSrvInitConsole(OUT PHANDLE NewConsoleHandle,
     Console->InsertMode = ConsoleInfo->InsertMode;
     Console->QuickEdit  = ConsoleInfo->QuickEdit;
     Console->ExtendedFlags = FALSE;
+    ConsoleInfoEx = ConCfgGetStateInfoEx(ConsoleInfo, ConsoleInfo->cbSize);
+    Console->CtrlKeyShortcutsDisabled = ConsoleInfoEx ? !!ConsoleInfoEx->CtrlKeyShortcutsDisabled : FALSE;
+    Console->LineSelection = ConsoleInfoEx ? !!ConsoleInfoEx->LineSelection : TRUE;
 
     /* Popup windows */
     InitializeListHead(&Console->PopupWindows);
