@@ -106,6 +106,13 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/dotnet-framework-4.8.ini
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/wine-gecko.ini
             DESTINATION reactos/Featmgr/Catalog FOR all)
 
+# --- WineVDM (16-bit Windows applications): software-tier entry, i386 only, on demand (setup no longer requests it) ---
+# The manifest only; its recipe is the [winevdm] section of Catalog\components.ini (official installer, downloaded at install time).
+if(ARCH STREQUAL "i386")
+    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/winevdm.ini
+                DESTINATION reactos/Featmgr/Catalog FOR all)
+endif()
+
 # --- the component list: the one data file for downloaded components (name, URL, SHA-256, size, detect rule, install
 # command) and for the first-boot installer's default set ("optfeatures /firstboot", started by the HKLM Run value
 # NitroComponents in hivesft.inf).

@@ -22,6 +22,7 @@ list(APPEND SOURCE
     CreateIconIndirect.c
     CreatePen.c
     CreateRectRgn.c
+    D3DKMTCheckOcclusion.c
     D3DKMTCreateDCFromMemory.c
     D3DKMTWow64Thunks.c
     DcAttrPool.c
