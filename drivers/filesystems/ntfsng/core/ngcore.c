@@ -2389,6 +2389,33 @@ static bool ngc_grow_allocates(struct ntfs_inode *ni, loff_t newsize)
 }
 
 /*
+ * False when growing to @newsize needs more clusters than the volume has free (what the allocator checks for each step,
+ * here for the whole growth and before any change is made).  Only a size that certainly needs clusters is judged:
+ * a nonresident stream, or a resident one that cannot stay in its MFT record.  True when unsure (the growth then runs
+ * and rolls back what it did, as before).
+ */
+static bool ngc_grow_fits(ngc_vol *v, struct ntfs_inode *ni, loff_t newsize)
+{
+	struct ntfs_volume *vol = ni->vol;
+	s64 need, have, avail;
+
+	if (!ngc_grow_allocates(ni, newsize) || !NVolFreeClusterKnown(vol) || !NVolDisableSparse(vol))
+		return true;
+	if (NInoNonResident(ni)) {
+		if (!ngc_plain_nonresident(ni))
+			return true;
+		have = (s64)ni->allocated_size >> vol->cluster_size_bits;
+	} else {
+		if (newsize <= (loff_t)vol->mft_record_size)
+			return true;
+		have = 0;
+	}
+	need = (s64)(round_up((u64)newsize, vol->cluster_size) >> vol->cluster_size_bits) - have;
+	avail = atomic64_read(&vol->free_clusters) - atomic64_read(&vol->dirty_clusters);
+	return need <= avail;
+}
+
+/*
  * Gives back the clusters allocated ahead of the size (the last close of the stream).  Nothing to do, and no cost,
  * for a stream that has none.  A failure leaves them: they are an allocation like any other.
  */
@@ -2430,6 +2457,13 @@ static int ngc_set_size_impl(ngc_vol *v, ngc_node *n, unsigned long long newsize
 		return 0;
 	if (NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni))
 		return -EOPNOTSUPP;
+	/*
+	 * A growth that cannot fit in the free clusters fails here, before ngc_mark_dirty and before any step touches the
+	 * bitmap, the runlist or an MFT record: it must cost no write (an application that retries a failing extend on a
+	 * full volume would otherwise write a journal transaction per attempt).
+	 */
+	if ((loff_t)newsize > old && !ngc_grow_fits(v, ni, newsize))
+		return -ENOSPC;
 	err = ngc_mark_dirty(v);
 	/* Growth inside the allocation takes no cluster, so nothing a free could hand out (ngc_before_alloc). */
 	if (!err && (loff_t)newsize > old && ngc_grow_allocates(ni, newsize))
