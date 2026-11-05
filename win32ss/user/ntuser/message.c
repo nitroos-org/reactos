@@ -1361,13 +1361,27 @@ co_IntGetPeekMessage( PMSG pMsg,
 
     do
     {
-        Present = co_IntPeekMessage( pMsg,
-                                     Window,
-                                     MsgFilterMin,
-                                     MsgFilterMax,
-                                     RemoveMsg,
-                                     &ExtraInfo,
-                                     bGMSG );
+        for (;;)
+        {
+            Present = co_IntPeekMessage( pMsg,
+                                         Window,
+                                         MsgFilterMin,
+                                         MsgFilterMax,
+                                         RemoveMsg,
+                                         &ExtraInfo,
+                                         bGMSG );
+            /* The state of the non-client rendering of a window is worked out when the application takes the
+               notification (posted at its creation, or by dwmapi after a policy change): a notification that
+               says nothing new is dropped */
+            if (Present && (RemoveMsg & PM_REMOVE) && pMsg->message == WM_DWMNCRENDERINGCHANGED &&
+                (pMsg->lParam == DWMNC_PENDING || pMsg->lParam == DWMNC_POLICY))
+            {
+                PWND NcWindow = UserGetWindowObject(pMsg->hwnd);
+                if (!NcWindow || !IntDwmNcResolve(NcWindow, pMsg))
+                    continue;
+            }
+            break;
+        }
         if (Present)
         {
            if ( pMsg->message != WM_DEVICECHANGE || (pMsg->wParam & 0x8000) )
