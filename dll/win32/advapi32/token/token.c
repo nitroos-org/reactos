@@ -343,3 +343,32 @@ GetSiteSidFromToken(IN HANDLE TokenHandle)
     RtlFreeHeap(RtlGetProcessHeap(), 0, RestrictedSids);
     return PSiteSid;
 }
+
+/*
+ * CheckTokenMembershipEx (Windows 8 and later; kernel32 exports it for the contract api-ms-win-security-base-l1-2-x).
+ * Measured on Windows 10 22H2: the flags are CTMF_INCLUDE_APPCONTAINER (1) and CTMF_INCLUDE_LPAC (2), anything else is
+ * ERROR_INVALID_PARAMETER and *IsMember is FALSE; a NULL SID is ERROR_INVALID_PARAMETER and leaves *IsMember alone. The
+ * rest, including the token rules, is CheckTokenMembership. The flags only matter for an AppContainer token.
+ */
+BOOL WINAPI
+CheckTokenMembershipEx(IN HANDLE ExistingTokenHandle,
+                       IN PSID SidToCheck,
+                       IN DWORD Flags,
+                       OUT PBOOL IsMember)
+{
+    if (!SidToCheck)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    *IsMember = FALSE;
+
+    if (Flags & ~0x3)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    return CheckTokenMembership(ExistingTokenHandle, SidToCheck, IsMember);
+}

@@ -437,6 +437,24 @@ GlobalAddAtomW(LPCWSTR lpString)
 }
 
 /*
+ * GlobalAddAtomExW (Windows 8 and later). Measured on Windows 10 22H2: the only flag is ATOM_FLAG_GLOBAL (2), which is
+ * what a global atom is anyway; 0 and 2 add the atom. Any other bit is refused before the atom table is touched, with
+ * ERROR_INVALID_PARAMETER.
+ */
+ATOM
+WINAPI
+GlobalAddAtomExW(LPCWSTR lpString, DWORD Flags)
+{
+    if (Flags & ~0x2)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    return InternalAddAtom(FALSE, TRUE, (LPSTR)lpString);
+}
+
+/*
  * @implemented
  */
 ATOM
