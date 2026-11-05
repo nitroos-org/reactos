@@ -35,6 +35,19 @@ PETHREAD MiExpansionLockOwner;
 /* Set once the leader has created a session; only then can it hold a stale view */
 static BOOLEAN MiSessionLeaderCreatedSession;
 
+/*
+ * The id of the session whose view the leader may still hold, MAXULONG for
+ * none. 0 until a session other than 0 is created, so a boot with session 0
+ * only never looks at it. Written by the leader only.
+ */
+static ULONG MiSessionLeaderViewId;
+
+static
+VOID
+MiSessionLeaderDetachView(
+    _In_ PEPROCESS Process,
+    _In_ ULONG SessionId);
+
 #if (_MI_PAGING_LEVELS == 4)
 /*
  * amd64: session space shares one page directory (the one of its PPE) with
@@ -394,6 +407,9 @@ MiDereferenceSession(VOID)
         /* Get the global session address before we kill the session mapping */
         SessionGlobal = MmSessionSpace->GlobalVirtualAddress;
 
+        /* NitroSessions: the view of a session other than 0 goes now */
+        MiSessionLeaderDetachView(Process, SessionId);
+
         /* Delete all session PDEs and flush the TB */
         //RtlZeroMemory(MiAddressToPde(MmSessionBase),
         //              BYTES_TO_PAGES(MmSessionSize) * sizeof(MMPDE));
@@ -616,25 +632,18 @@ MiSessionInitializeWorkingSetList(VOID)
 }
 
 /*
- * NitroSessions (P0), lazy unmap. When the session leader detaches from the
- * session it created, MiDereferenceSession leaves the leader's view of that
- * session mapped. Before the leader creates another session, the stale view is
- * dropped here. The first session create never finds one, so a boot that
- * creates only session 0 does exactly what it did before.
+ * Removes the leader's view of session space: on i386 its session PDEs, on
+ * amd64 its PML4 entry goes back to the shared tables (session 0).
  */
 static
 VOID
-MiSessionDropLeaderMapping(
+MiSessionLeaderUnmapView(
     _In_ PEPROCESS Process)
 {
     UNREFERENCED_PARAMETER(Process);
 
-    /* The first create: there is nothing to drop, and nothing is touched */
-    if (!MiSessionLeaderCreatedSession) return;
-
     ASSERT(Process == PsGetCurrentProcess());
     ASSERT(Process->Vm.Flags.SessionLeader == 1);
-    ASSERT((Process->Flags & PSF_PROCESS_IN_SESSION_BIT) == 0);
     ASSERT(!KeIsAttachedProcess());
 
 #if (_MI_PAGING_LEVELS == 2)
@@ -674,6 +683,116 @@ MiSessionDropLeaderMapping(
             KeFlushEntireTb(TRUE, TRUE);
         }
     }
+#endif
+}
+
+/*
+ * NitroSessions (P0), lazy unmap. When the session leader detaches from
+ * session 0, MiDereferenceSession leaves the leader's view of it mapped, as
+ * it always did. Before the leader creates another session, that view is
+ * dropped here. The first session create never finds one, so a boot that
+ * creates only session 0 does exactly what it did before.
+ */
+static
+VOID
+MiSessionDropLeaderMapping(
+    _In_ PEPROCESS Process)
+{
+    /* The first create: there is nothing to drop, and nothing is touched */
+    if (!MiSessionLeaderCreatedSession) return;
+
+    ASSERT((Process->Flags & PSF_PROCESS_IN_SESSION_BIT) == 0);
+    MiSessionLeaderUnmapView(Process);
+    MiSessionLeaderViewId = MAXULONG;
+}
+
+/*
+ * NitroSessions (P2). The leader detaches from a session other than 0: drop
+ * its view now, not at the next create. Otherwise every process the leader
+ * creates until then, in no session, would copy the view of that session.
+ * The leader's detach from session 0 keeps today's lazy behaviour.
+ */
+static
+VOID
+MiSessionLeaderDetachView(
+    _In_ PEPROCESS Process,
+    _In_ ULONG SessionId)
+{
+    if (SessionId == 0) return;
+
+    MiSessionLeaderUnmapView(Process);
+    MiSessionLeaderViewId = MAXULONG;
+}
+
+/*
+ * NitroSessions (P2). Called by MmCreateProcessAddressSpace once the new
+ * process's top-level table is built as a copy of its creator's, and before
+ * MiSessionAddProcess. The new process joins its creator's session when the
+ * creator is in one, and no session otherwise. Its session tables are set
+ * explicitly from that rule, never left as whatever the creator maps:
+ *  - amd64: the session PML4 entry is the session's private one
+ *    (MmSessionSpace->PageDirectory), or the shared one (session 0, and
+ *    processes in no session);
+ *  - i386: a process in no session created by the leader gets no session
+ *    PDEs while the leader may hold the view of a session other than 0.
+ * Until a session other than 0 exists, nothing is written: a boot with
+ * session 0 only builds its processes exactly as before.
+ */
+VOID
+NTAPI
+MiSessionInitializeProcessTables(
+    _In_ PEPROCESS NewProcess,
+    _In_ PFN_NUMBER TableBasePfn)
+{
+    PEPROCESS Creator = PsGetCurrentProcess();
+    PMMPTE Mapping;
+    KIRQL OldIrql;
+
+    UNREFERENCED_PARAMETER(NewProcess);
+
+#if (_MI_PAGING_LEVELS == 4)
+    {
+        MMPTE Pxe;
+
+        /* No private session was ever created: all processes share the tables */
+        if (MiSessionSharedPxe.u.Long == 0) return;
+
+        Pxe = MiSessionSharedPxe;
+        if (Creator->Flags & PSF_PROCESS_IN_SESSION_BIT)
+        {
+            /* The child joins the creator's session, which is the one mapped */
+            ASSERT(MmIsAddressValid(MmSessionSpace) == TRUE);
+            if (MmSessionSpace->PageDirectory.u.Long != 0)
+                Pxe = MmSessionSpace->PageDirectory;
+        }
+
+        Mapping = MiMapPageInHyperSpace(Creator, TableBasePfn, &OldIrql);
+        Mapping[MiAddressToPxi(MmSessionBase)] = Pxe;
+        MiUnmapPageInHyperSpace(Creator, Mapping, OldIrql);
+    }
+#elif (_MI_PAGING_LEVELS == 2)
+    {
+        ULONG Index, LastIndex;
+
+        /* Only the leader can hold the view of a session it is not in */
+        if (!Creator->Vm.Flags.SessionLeader) return;
+        if (Creator->Flags & PSF_PROCESS_IN_SESSION_BIT) return;
+        if (MiSessionLeaderViewId == 0) return;
+
+        Index = MiGetPdeOffset(MmSessionBase);
+        LastIndex = MiGetPdeOffset((PVOID)((ULONG_PTR)MiSessionSpaceEnd - 1));
+        Mapping = MiMapPageInHyperSpace(Creator, TableBasePfn, &OldIrql);
+        for (; Index <= LastIndex; Index++)
+        {
+            Mapping[Index].u.Long = 0;
+        }
+        MiUnmapPageInHyperSpace(Creator, Mapping, OldIrql);
+    }
+#else
+    UNREFERENCED_PARAMETER(Creator);
+    UNREFERENCED_PARAMETER(TableBasePfn);
+    UNREFERENCED_PARAMETER(Mapping);
+    UNREFERENCED_PARAMETER(OldIrql);
 #endif
 }
 
@@ -878,6 +997,9 @@ MiSessionCreateInternal(OUT PULONG SessionId)
 
     /* Unlock the session ID creation mutex */
     KeReleaseGuardedMutex(&MiSessionIdMutex);
+
+    /* From here on the leader maps this session */
+    MiSessionLeaderViewId = *SessionId;
 
 #if (_MI_PAGING_LEVELS == 4)
     /* Session 0 lives in the shared tables; any other session gets its own */
