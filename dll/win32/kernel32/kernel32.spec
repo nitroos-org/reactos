@@ -6,9 +6,11 @@
 @ stdcall AddConsoleAliasA(str str str) ;check
 @ stdcall AddConsoleAliasW(wstr wstr wstr) ;check
 @ stdcall AddDllDirectory(wstr)
+@ stdcall -version=0x601+ AddIntegrityLabelToBoundaryDescriptor(ptr ptr)
 @ stdcall AddLocalAlternateComputerNameA(str ptr)
 @ stdcall AddLocalAlternateComputerNameW(wstr ptr)
 @ stdcall AddRefActCtx(ptr)
+@ stdcall -version=0x601+ AddScopedPolicyIDAce(ptr long long long ptr)
 @ stdcall -version=0x600+ AddSIDToBoundaryDescriptor(ptr ptr)
 @ stdcall -stub -version=0x600+ AddSecureMemoryCacheCallback(ptr)
 @ stdcall AddVectoredContinueHandler(long ptr) ntdll.RtlAddVectoredContinueHandler
@@ -38,6 +40,68 @@
 @ stdcall BaseCleanupAppcompatCacheSupport(ptr)
 @ stdcall BaseDumpAppcompatCache()
 @ stdcall BaseFlushAppcompatCache()
+@ stdcall -version=0x601+ CheckTokenCapability(ptr ptr ptr)
+@ stdcall -private -version=0x601+ CheckTokenMembershipEx(long ptr long ptr) advapi32.CheckTokenMembershipEx
+@ stdcall -private -version=0x601+ CreateProcessAsUserA(long str str ptr ptr long long ptr str ptr ptr) advapi32.CreateProcessAsUserA
+@ stdcall -version=0x601+ DeleteSynchronizationBarrier(ptr) ntdll.RtlDeleteBarrier
+@ stdcall -version=0x601+ DnsHostnameToComputerNameExW(wstr ptr ptr)
+@ stdcall -version=0x601+ EnterSynchronizationBarrier(ptr long) ntdll.RtlBarrier
+@ stdcall -version=0x601+ GetAppContainerAce(ptr long ptr ptr)
+@ stdcall -version=0x601+ GetDiskSpaceInformationA(str ptr)
+@ stdcall -version=0x601+ GetDiskSpaceInformationW(wstr ptr)
+@ stdcall -version=0x601+ GetMemoryErrorHandlingCapabilities(ptr)
+@ stdcall -version=0x601+ GetNumaAvailableMemoryNodeEx(long ptr)
+@ stdcall -version=0x601+ GetNumaNodeNumberFromHandle(ptr ptr)
+@ stdcall -version=0x601+ GetNumaProximityNodeEx(long ptr)
+@ stdcall -version=0x601+ GlobalAddAtomExA(str long)
+@ stdcall -version=0x601+ GlobalAddAtomExW(wstr long)
+@ stdcall -version=0x601+ InitializeSynchronizationBarrier(ptr long long)
+@ stdcall -version=0x601+ IsNativeVhdBoot(ptr)
+@ stdcall -version=0x601+ LocalFileTimeToLocalSystemTime(ptr ptr ptr)
+@ stdcall -version=0x601+ LocalSystemTimeToLocalFileTime(ptr ptr ptr)
+@ stdcall -version=0x601+ QueryThreadpoolStackInformation(ptr ptr)
+@ stdcall -private -version=0x601+ RegCloseKey(long) advapi32.RegCloseKey
+@ stdcall -private -version=0x601+ RegCopyTreeW(ptr wstr ptr) advapi32.RegCopyTreeW
+@ stdcall -private -version=0x601+ RegCreateKeyExA(long str long ptr long long ptr ptr ptr) advapi32.RegCreateKeyExA
+@ stdcall -private -version=0x601+ RegCreateKeyExW(long wstr long ptr long long ptr ptr ptr) advapi32.RegCreateKeyExW
+@ stdcall -private -version=0x601+ RegDeleteKeyExA(long str long long) advapi32.RegDeleteKeyExA
+@ stdcall -private -version=0x601+ RegDeleteKeyExW(long wstr long long) advapi32.RegDeleteKeyExW
+@ stdcall -private -version=0x601+ RegDeleteTreeA(long str) advapi32.RegDeleteTreeA
+@ stdcall -private -version=0x601+ RegDeleteTreeW(long wstr) advapi32.RegDeleteTreeW
+@ stdcall -private -version=0x601+ RegDeleteValueA(long str) advapi32.RegDeleteValueA
+@ stdcall -private -version=0x601+ RegDeleteValueW(long wstr) advapi32.RegDeleteValueW
+@ stdcall -private -version=0x601+ RegDisablePredefinedCacheEx() advapi32.RegDisablePredefinedCacheEx
+@ stdcall -private -version=0x601+ RegEnumKeyExA(long long ptr ptr ptr ptr ptr ptr) advapi32.RegEnumKeyExA
+@ stdcall -private -version=0x601+ RegEnumKeyExW(long long ptr ptr ptr ptr ptr ptr) advapi32.RegEnumKeyExW
+@ stdcall -private -version=0x601+ RegEnumValueA(long long ptr ptr ptr ptr ptr ptr) advapi32.RegEnumValueA
+@ stdcall -private -version=0x601+ RegEnumValueW(long long ptr ptr ptr ptr ptr ptr) advapi32.RegEnumValueW
+@ stdcall -private -version=0x601+ RegFlushKey(long) advapi32.RegFlushKey
+@ stdcall -private -version=0x601+ RegGetKeySecurity(long long ptr ptr) advapi32.RegGetKeySecurity
+@ stdcall -private -version=0x601+ RegGetValueA(long str str long ptr ptr ptr) advapi32.RegGetValueA
+@ stdcall -private -version=0x601+ RegGetValueW(long wstr wstr long ptr ptr ptr) advapi32.RegGetValueW
+@ stdcall -private -version=0x601+ RegLoadKeyA(long str str) advapi32.RegLoadKeyA
+@ stdcall -private -version=0x601+ RegLoadKeyW(long wstr wstr) advapi32.RegLoadKeyW
+@ stdcall -private -version=0x601+ RegLoadMUIStringA(ptr str str long ptr long str) advapi32.RegLoadMUIStringA
+@ stdcall -private -version=0x601+ RegLoadMUIStringW(ptr wstr wstr long ptr long wstr) advapi32.RegLoadMUIStringW
+@ stdcall -private -version=0x601+ RegNotifyChangeKeyValue(long long long long long) advapi32.RegNotifyChangeKeyValue
+@ stdcall -private -version=0x601+ RegOpenCurrentUser(long ptr) advapi32.RegOpenCurrentUser
+@ stdcall -private -version=0x601+ RegOpenKeyExA(long str long long ptr) advapi32.RegOpenKeyExA
+@ stdcall -private -version=0x601+ RegOpenKeyExW(long wstr long long ptr) advapi32.RegOpenKeyExW
+@ stdcall -private -version=0x601+ RegOpenUserClassesRoot(ptr long long ptr) advapi32.RegOpenUserClassesRoot
+@ stdcall -private -version=0x601+ RegQueryInfoKeyA(long ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr) advapi32.RegQueryInfoKeyA
+@ stdcall -private -version=0x601+ RegQueryInfoKeyW(long ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr) advapi32.RegQueryInfoKeyW
+@ stdcall -private -version=0x601+ RegQueryValueExA(long str ptr ptr ptr ptr) advapi32.RegQueryValueExA
+@ stdcall -private -version=0x601+ RegQueryValueExW(long wstr ptr ptr ptr ptr) advapi32.RegQueryValueExW
+@ stdcall -private -version=0x601+ RegRestoreKeyA(long str long) advapi32.RegRestoreKeyA
+@ stdcall -private -version=0x601+ RegRestoreKeyW(long wstr long) advapi32.RegRestoreKeyW
+@ stdcall -private -version=0x601+ RegSaveKeyExA(long str ptr long) advapi32.RegSaveKeyExA
+@ stdcall -private -version=0x601+ RegSaveKeyExW(long str ptr long) advapi32.RegSaveKeyExW
+@ stdcall -private -version=0x601+ RegSetKeySecurity(long long ptr) advapi32.RegSetKeySecurity
+@ stdcall -private -version=0x601+ RegSetValueExA(long str long long ptr long) advapi32.RegSetValueExA
+@ stdcall -private -version=0x601+ RegSetValueExW(long wstr long long ptr long) advapi32.RegSetValueExW
+@ stdcall -private -version=0x601+ RegUnLoadKeyA(long str) advapi32.RegUnLoadKeyA
+@ stdcall -private -version=0x601+ RegUnLoadKeyW(long wstr) advapi32.RegUnLoadKeyW
+@ stdcall -version=0x601+ SetThreadpoolStackInformation(ptr ptr)
 @ stub -version=0x600+ BaseGenerateAppCompatData
 @ stdcall BaseInitAppcompatCacheSupport()
 @ stdcall BaseIsAppcompatInfrastructureDisabled() IsShimInfrastructureDisabled
@@ -1088,7 +1152,7 @@
 @ stdcall -version=0x600+ RtlIsEcCode(ptr) ntdll.RtlIsEcCode
 @ stdcall -arch=x86_64 RtlLookupFunctionEntry(ptr ptr ptr) ntdll.RtlLookupFunctionEntry
 @ stdcall RtlMoveMemory(ptr ptr long) ntdll.RtlMoveMemory
-@ stdcall -arch=x86_64 RtlPcToFileHeader(ptr ptr) ntdll.RtlPcToFileHeader
+@ stdcall RtlPcToFileHeader(ptr ptr) ntdll.RtlPcToFileHeader
 @ stdcall -arch=x86_64 RtlRaiseException(ptr) ntdll.RtlRaiseException
 @ stdcall -arch=x86_64 RtlRestoreContext(ptr ptr) ntdll.RtlRestoreContext
 @ stdcall RtlUnwind(ptr ptr ptr ptr) ntdll.RtlUnwind
@@ -1268,12 +1332,18 @@
 @ stdcall SwitchToThread()
 @ stdcall SystemTimeToFileTime(ptr ptr)
 @ stdcall SystemTimeToTzSpecificLocalTime(ptr ptr ptr)
+@ stdcall -version=0x601+ SystemTimeToTzSpecificLocalTimeEx(ptr ptr ptr)
 @ stdcall TerminateJobObject(ptr long)
 @ stdcall TerminateProcess(ptr long)
 @ stdcall TerminateThread(ptr long)
 @ stdcall TermsrvAppInstallMode()
 @ stdcall Thread32First(long ptr)
 @ stdcall Thread32Next(long ptr)
+@ stdcall -private -version=0x601+ timeBeginPeriod(long) winmm.timeBeginPeriod
+@ stdcall -private -version=0x601+ timeEndPeriod(long) winmm.timeEndPeriod
+@ stdcall -private -version=0x601+ timeGetDevCaps(ptr long) winmm.timeGetDevCaps
+@ stdcall -private -version=0x601+ timeGetSystemTime(ptr long) winmm.timeGetSystemTime
+@ stdcall -private -version=0x601+ timeGetTime() winmm.timeGetTime
 @ stdcall TlsAlloc()
 @ stdcall TlsFree(long)
 @ stdcall -norelay TlsGetValue(long)
@@ -1286,6 +1356,7 @@
 @ stdcall TryEnterCriticalSection(ptr) ntdll.RtlTryEnterCriticalSection
 @ stdcall -version=0x600+ TrySubmitThreadpoolCallback(ptr ptr ptr)
 @ stdcall TzSpecificLocalTimeToSystemTime(ptr ptr ptr)
+@ stdcall -version=0x601+ TzSpecificLocalTimeToSystemTimeEx(ptr ptr ptr)
 @ stdcall UTRegister(long str str str ptr ptr ptr)
 @ stdcall UTUnRegister(long)
 @ stdcall UnhandledExceptionFilter(ptr)
