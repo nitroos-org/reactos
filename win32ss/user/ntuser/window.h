@@ -1,7 +1,23 @@
 #pragma once
 
 extern ATOM AtomMessage;
+/* A flag for co_WinPosSetWindowPos that win32k adds itself to the z-order requests of an application
+   (SetWindowPos, MoveWindow, DeferWindowPos): only those tell an owner group with WM_WINDOWPOSCHANGING (see
+   co_WinPosNotifyOwnerGroup). The raises win32k does on its own, for an activation or for a ShowWindow, do
+   not: it does several where Windows does one, and a window would be told for each. */
+#define SWP_GROUPNOTICE 0x40000000
+
 extern ATOM AtomWndObj; /* WNDOBJ list */
+extern ATOM AtomDwmNc;      /* NitroDwmNc: non-client rendering policy, a property dwmapi sets, see window.c */
+extern ATOM AtomDwmNcState; /* SysDwmNc: what was announced of the non-client rendering, a system property */
+
+/* WM_DWMNCRENDERINGCHANGED is posted to a captioned top-level window when it is first shown (lParam DWMNC_PENDING),
+   and by dwmapi when the policy of a window changes (lParam DWMNC_POLICY). The state is worked out when the
+   application takes the message, after it had its chance to set the policy (IntDwmNcResolve). */
+#define DWMNC_PENDING ((LPARAM)0x4E4D5744)
+#define DWMNC_POLICY  ((LPARAM)0x4E4D5745)
+BOOL FASTCALL IntDwmNcResolve(PWND Window, PMSG Msg);
+VOID FASTCALL IntDwmNcAnnounceFirstShow(PWND Window);
 extern ATOM AtomLayer;
 extern ATOM AtomFlashWndState;
 extern BOOL g_bWindowSnapEnabled;

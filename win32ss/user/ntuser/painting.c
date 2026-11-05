@@ -359,6 +359,17 @@ IntSendNCPaint(PWND pWnd, HRGN hRgn)
 {
    pWnd->state &= ~WNDS_SENDNCPAINT;
 
+   /* Windows 10 sends no WM_NCPAINT to a layered window that has no non-client area (the borders of
+      the shadows and the glow that applications draw with UpdateLayeredWindow): there is nothing to
+      paint, and the system does not paint a layered window itself. */
+   if ((pWnd->ExStyle & WS_EX_LAYERED) &&
+       pWnd->rcWindow.left == pWnd->rcClient.left && pWnd->rcWindow.top == pWnd->rcClient.top &&
+       pWnd->rcWindow.right == pWnd->rcClient.right && pWnd->rcWindow.bottom == pWnd->rcClient.bottom)
+   {
+      pWnd->state2 &= ~WNDS2_FORCEFULLNCPAINTCLIPRGN;
+      return;
+   }
+
    if ( pWnd == GetW32ThreadInfo()->MessageQueue->spwndActive &&
        !(pWnd->state & WNDS_ACTIVEFRAME))
    {

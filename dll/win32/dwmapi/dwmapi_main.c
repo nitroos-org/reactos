@@ -198,11 +198,72 @@ HRESULT WINAPI DwmInvalidateIconicBitmaps(HWND hwnd)
 /**********************************************************************
  *           DwmSetWindowAttribute         (DWMAPI.@)
  */
+#ifdef __REACTOS__
+/*
+ * DWMWA_NCRENDERING_POLICY (2), measured on Windows 10 22H2: a DWORD, S_OK for any value (also 3), E_INVALIDARG
+ * for a size other than 4 or a NULL pointer. DWMNCRP_DISABLED (1) turns the non-client rendering off for the
+ * window, DWMNCRP_ENABLED (2) on even for a window without a caption, DWMNCRP_USEWINDOWSTYLE (0) leaves it to
+ * the window style; DWMWA_NCRENDERING_ENABLED and the caption button bounds follow it, also for a hidden window.
+ * The policy is kept in the window property NitroDwmNc, which win32k reads. What happens when it changes (the
+ * frame change and WM_DWMNCRENDERINGCHANGED) is decided by win32k when the window's thread takes the message
+ * posted here, see IntDwmNcResolve: Windows too does it a moment after the call has returned.
+ */
+#define NITRO_NC_POLICY_MASK 3
+#define NITRO_NC_POLICY_POSTED_LPARAM 0x4E4D5745 /* DWMNC_POLICY of win32k */
+
+/* The property is an integer atom: RegisterWindowMessage gives the atom of win32k's table that win32k reads it with */
+static LPCWSTR nitro_nc_prop(void)
+{
+    static UINT atom;
+
+    if (!atom)
+        atom = RegisterWindowMessageW(L"NitroDwmNc");
+    return (LPCWSTR)(ULONG_PTR)atom;
+}
+
+static ULONG_PTR get_nc_data(HWND hwnd)
+{
+    return (ULONG_PTR)GetPropW(hwnd, nitro_nc_prop());
+}
+
+/* The state of the non-client rendering of a window for the policy in the low bits of data */
+static BOOL nc_rendering_enabled(HWND hwnd, ULONG_PTR data)
+{
+    switch (data & NITRO_NC_POLICY_MASK)
+    {
+        case 1: return FALSE;
+        case 2: return TRUE;
+        default: return (GetWindowLongW(hwnd, GWL_STYLE) & WS_CAPTION) == WS_CAPTION;
+    }
+}
+
+static HRESULT set_ncrendering_policy(HWND hwnd, DWORD policy)
+{
+    SetPropW(hwnd, nitro_nc_prop(), (HANDLE)(ULONG_PTR)(policy == 1 || policy == 2 ? policy : 0));
+    PostMessageW(hwnd, WM_DWMNCRENDERINGCHANGED, 0, NITRO_NC_POLICY_POSTED_LPARAM);
+    return S_OK;
+}
+#endif
+
 HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attribute, DWORD size)
 {
-    static BOOL once;
+#ifdef __REACTOS__
+    TRACE("(%p, %lx, %p, %lx)\n", hwnd, attributenum, attribute, size);
 
-    if (!once++) FIXME("(%p, %lx, %p, %lx) stub\n", hwnd, attributenum, attribute, size);
+    if (attributenum == 2 /* DWMWA_NCRENDERING_POLICY */)
+    {
+        if (!IsWindow(hwnd))
+            return HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE);
+        if (!attribute || size != sizeof(DWORD))
+            return E_INVALIDARG;
+        return set_ncrendering_policy(hwnd, *(const DWORD *)attribute);
+    }
+#endif
+    {
+        static BOOL once;
+
+        if (!once++) FIXME("(%p, %lx, %p, %lx) stub\n", hwnd, attributenum, attribute, size);
+    }
 
     return S_OK;
 }
@@ -314,7 +375,8 @@ BOOL WINAPI DwmDefWindowProc(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, 
  * (30 / 25); right = the right edge of EXTENDED_FRAME_BOUNDS (width - 7 with the 7 invisible pixels of a
  * sizing frame, width - 2 for a fixed frame), and width - fw - 1 for a maximized window; left = right - 146
  * for the three buttons of a window with a system menu and a minimize or maximize box, right - 49 for the
- * close button alone (no such box, or a tool window). A window without a caption has an all-zero RECT. It is
+ * close button alone (no such box, or a tool window). A window without a caption, and one whose non-client
+ * rendering is disabled by DwmSetWindowAttribute(DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED), has an all-zero RECT. It is
  * the same for a hidden and for a minimized window (the right edge follows the minimized rectangle).
  *
  * EXTENDED_FRAME_BOUNDS is the window rectangle in screen coordinates without the invisible resize border
@@ -380,6 +442,9 @@ static void get_caption_button_bounds(HWND hwnd, RECT *rect)
     SetRectEmpty(rect);
     if (!(style & WS_CAPTION) || !(style & WS_SYSMENU))
         return;
+    /* No non-client rendering, no system buttons: all zero (Windows 10, also for a hidden window) */
+    if ((get_nc_data(hwnd) & NITRO_NC_POLICY_MASK) == 1)
+        return;
 
     GetWindowRect(hwnd, &wr);
     get_extended_frame_bounds(hwnd, &bounds);
@@ -421,7 +486,7 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
         case 20: /* DWMWA_USE_IMMERSIVE_DARK_MODE */
             if (size < sizeof(DWORD))
                 return E_INVALIDARG;
-            *(DWORD *)pv_attribute = (attribute == 1) ? window_has_caption(hwnd) : 0;
+            *(DWORD *)pv_attribute = (attribute == 1) ? nc_rendering_enabled(hwnd, get_nc_data(hwnd)) : 0;
             return S_OK;
 
         case 5: /* DWMWA_CAPTION_BUTTON_BOUNDS */

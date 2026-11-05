@@ -1307,7 +1307,8 @@ BOOL FASTCALL
 co_WinPosDoWinPosChanging(PWND Window,
                           PWINDOWPOS WinPos,
                           PRECTL WindowRect,
-                          PRECTL ClientRect)
+                          PRECTL ClientRect,
+                          PPOINT ParentOffset)
 {
    ASSERT_REFS_CO(Window);
 
@@ -1324,6 +1325,17 @@ co_WinPosDoWinPosChanging(PWND Window,
 
    *WindowRect = Window->rcWindow;
    *ClientRect = (Window->style & WS_MINIMIZE) ? Window->rcWindow : Window->rcClient;
+
+   /* The origin of the coordinates of SetWindowPos: the client area of the parent for a child window, the
+      screen for a top-level window. It is read here, after the callbacks of WM_WINDOWPOSCHANGING, which can
+      move the parent, and WM_WINDOWPOSCHANGED turns the new window rectangle back into the same coordinates. */
+   ParentOffset->x = 0;
+   ParentOffset->y = 0;
+   if (Window->spwndParent && Window->spwndParent != Window->head.rpdesk->pDeskInfo->spwnd)
+   {
+      ParentOffset->x = Window->spwndParent->rcClient.left;
+      ParentOffset->y = Window->spwndParent->rcClient.top;
+   }
 
    if (!(WinPos->flags & SWP_NOSIZE))
    {
@@ -1342,22 +1354,16 @@ co_WinPosDoWinPosChanging(PWND Window,
    if (!(WinPos->flags & SWP_NOMOVE))
    {
       INT X, Y;
-      PWND Parent;
       X = WinPos->x;
       Y = WinPos->y;
 
-      Parent = Window->spwndParent;
-
       // Parent child position issue is in here. SetParent_W7 test CORE-6651.
-      if (//((Window->style & WS_CHILD) != 0) && <- Fixes wine msg test_SetParent: "rects do not match", the last test.
-           Parent &&
-           Parent != Window->head.rpdesk->pDeskInfo->spwnd)
-      {
-         TRACE("Not SWP_NOMOVE 1 Parent client offset X %d Y %d\n",X,Y);
-         X += Parent->rcClient.left;
-         Y += Parent->rcClient.top;
-         TRACE("Not SWP_NOMOVE 2 Parent client offset X %d Y %d\n",X,Y);
-      }
+      // (A parent that is not the desktop: ParentOffset is its client origin, also for a window that is not a
+      // WS_CHILD, which Fixes wine msg test_SetParent: "rects do not match", the last test.)
+      TRACE("Not SWP_NOMOVE 1 Parent client offset X %d Y %d\n",X,Y);
+      X += ParentOffset->x;
+      Y += ParentOffset->y;
+      TRACE("Not SWP_NOMOVE 2 Parent client offset X %d Y %d\n",X,Y);
 
       WindowRect->left    = X;
       WindowRect->top     = Y;
@@ -1549,6 +1555,63 @@ WinPosDoOwnedPopups(PWND Window, HWND hWndInsertAfter)
 done:
    return hWndInsertAfter;
 }
+
+/*
+ * co_WinPosNotifyOwnerGroup
+ *
+ * Windows keeps an owner and the windows it owns together in the z-order and tells every window of such a group,
+ * the hidden ones too, when one of them is z-ordered: WM_WINDOWPOSCHANGING with SWP_NOMOVE | SWP_NOSIZE |
+ * SWP_NOACTIVATE, a zero position and size, and the window above it as hwndInsertAfter (HWND_TOP for the top
+ * one). Measured on Windows 10 22H2 for a popup raised, sent to the bottom and made topmost, for the owner raised
+ * and sent to the bottom, with a second popup and with a hidden one; nothing for SWP_NOZORDER,
+ * SWP_NOOWNERZORDER, a window without an owner or owned windows, or at the creation of a popup.
+ * The caller notifies the others after the window's own WM_WINDOWPOSCHANGING; Windows sends the group in
+ * z-order, so the popups of an owner that is raised are told before it.
+ */
+static
+VOID FASTCALL
+co_WinPosNotifyOwnerGroup(PWND Window)
+{
+   PWND Root, Desktop, Wnd;
+   HWND *List, hWindow, hRoot;
+   int i;
+
+   hWindow = UserHMGetHandle(Window);
+   Root = Window->spwndOwner ? Window->spwndOwner : Window;
+   hRoot = UserHMGetHandle(Root);
+
+   Desktop = co_GetDesktopWindow(Window);
+   List = IntWinListChildren(Desktop);
+   if (!List)
+      return;
+
+   for (i = 0; List[i]; i++)
+   {
+      USER_REFERENCE_ENTRY Ref;
+      WINDOWPOS WinPos;
+
+      if (List[i] == hWindow)
+         continue;
+
+      /* The list holds handles: the callbacks of the earlier windows can destroy later ones */
+      Wnd = ValidateHwndNoErr(List[i]);
+      if (!Wnd)
+         continue;
+      if (List[i] != hRoot && Wnd->spwndOwner != Root)
+         continue;
+
+      RtlZeroMemory(&WinPos, sizeof(WinPos));
+      WinPos.hwnd = List[i];
+      WinPos.hwndInsertAfter = (i > 0) ? List[i - 1] : HWND_TOP;
+      WinPos.flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+
+      UserRefObjectCo(Wnd, &Ref);
+      co_IntSendMessage(WinPos.hwnd, WM_WINDOWPOSCHANGING, 0, (LPARAM)&WinPos);
+      UserDerefObjectCo(Wnd);
+   }
+   ExFreePoolWithTag(List, USERTAG_WINDOWLIST);
+}
+
 ////
 
 /***********************************************************************
@@ -1878,6 +1941,8 @@ co_WinPosSetWindowPosEx(
    PREGION CopyRgn = NULL;
    ULONG WvrFlags = 0;
    RECTL OldWindowRect, OldClientRect;
+   POINT ParentOffset;
+   BOOL GroupNotice;
    int RgnType;
    HDC Dc;
    RECTL CopyRect;
@@ -1889,6 +1954,10 @@ co_WinPosSetWindowPosEx(
 
    TRACE("pwnd %p, after %p, %d,%d (%dx%d), flags 0x%x\n",
          Window, WndInsertAfter, x, y, cx, cy, flags);
+
+   /* An internal flag, not one for the messages (see SWP_GROUPNOTICE) */
+   GroupNotice = (flags & SWP_GROUPNOTICE) != 0;
+   flags &= ~SWP_GROUPNOTICE;
 
    /* A request to activate a top-level window ends the startup of its process. This
       must see the flags as given: WinPosFixupFlags drops SWP_SHOWWINDOW for a visible window. */
@@ -1937,7 +2006,7 @@ co_WinPosSetWindowPosEx(
       WinPos.flags |= SWP_NOSENDCHANGING;
    }
 
-   co_WinPosDoWinPosChanging(Window, &WinPos, &NewWindowRect, &NewClientRect);
+   co_WinPosDoWinPosChanging(Window, &WinPos, &NewWindowRect, &NewClientRect, &ParentOffset);
 
    /* Does the window still exist? */
    if (!IntIsWindow(WinPos.hwnd))
@@ -1960,7 +2029,23 @@ co_WinPosSetWindowPosEx(
    {
       /* SWP_NOOWNERZORDER leaves the relation between a window and its owned popups alone */
       if (!(WinPos.flags & SWP_NOOWNERZORDER))
+      {
+         /* The others of the owner group are told that the z-order of the group changes. Not when
+            the caller asked to send nothing, which is also what the nested calls of
+            WinPosDoOwnedPopups do, and only for the z-order requests of an application. The input method window the system keeps for an application is left
+            out: Windows was not measured to tell the application about it, and the CloseWindow
+            apitest counts the messages of a window. */
+         if (!(WinPos.flags & (SWP_NOZORDER | SWP_NOSENDCHANGING)) && GroupNotice && Window->fnid != FNID_IME)
+         {
+            co_WinPosNotifyOwnerGroup(Window);
+            if (!IntIsWindow(WinPos.hwnd))
+            {
+               EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+               return FALSE;
+            }
+         }
          WinPos.hwndInsertAfter = WinPosDoOwnedPopups(Window, WinPos.hwndInsertAfter);
+      }
    }
 
    if (!(WinPos.flags & SWP_NOREDRAW))
@@ -2101,6 +2186,10 @@ co_WinPosSetWindowPosEx(
       Window->head.pti->cVisWindows++;
 
       IntNotifyWinEvent(EVENT_OBJECT_SHOW, Window, OBJID_WINDOW, CHILDID_SELF, WEF_SETBYWNDPTI);
+
+      /* A captioned top-level window gets WM_DWMNCRENDERINGCHANGED, once, when it first appears */
+      if (UserIsDesktopWindow(Window->spwndParent) && (Window->style & WS_CAPTION) == WS_CAPTION)
+         IntDwmNcAnnounceFirstShow(Window);
    }
    else if (!NoMessages)
    {
@@ -2524,16 +2613,10 @@ co_WinPosSetWindowPosEx(
       WinPos.cx = NewWindowRect.right - NewWindowRect.left;
       WinPos.cy = NewWindowRect.bottom - NewWindowRect.top;
       /* The position is in the coordinates SetWindowPos takes, as in WM_WINDOWPOSCHANGING: relative to
-         the client area of the parent for a child window (the inverse of co_WinPosDoWinPosChanging).
-         NewWindowRect is in screen coordinates. */
-      {
-         PWND Parent = Window->spwndParent;
-         if (Parent && Parent != Window->head.rpdesk->pDeskInfo->spwnd)
-         {
-            WinPos.x -= Parent->rcClient.left;
-            WinPos.y -= Parent->rcClient.top;
-         }
-      }
+         the client area of the parent for a child window. NewWindowRect is in screen coordinates; the
+         offset is the one co_WinPosDoWinPosChanging used, whatever the callbacks did to the parent since. */
+      WinPos.x -= ParentOffset.x;
+      WinPos.y -= ParentOffset.y;
       TRACE("WM_WINDOWPOSCHANGED hwnd %p Flags %04x\n",WinPos.hwnd,WinPos.flags);
       co_IntSendMessageNoWait(WinPos.hwnd, WM_WINDOWPOSCHANGED, 0, (LPARAM) &WinPos);
    }
@@ -3577,7 +3660,7 @@ BOOL FASTCALL IntEndDeferWindowPosEx(HDWP hdwp, BOOL bAsync)
                                         winpos->pos.y,
                                         winpos->pos.cx,
                                         winpos->pos.cy,
-                                        winpos->pos.flags);
+                                        winpos->pos.flags | SWP_GROUPNOTICE);
 
         // Hack to pass tests.... Must have some work to do so clear the error.
         if (res && (winpos->pos.flags & (SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER)) == SWP_NOZORDER )
@@ -3893,6 +3976,15 @@ NtUserSetWindowPos(
    TRACE("Enter NtUserSetWindowPos\n");
    UserEnterExclusive();
 
+   /* Windows 10 refuses the flags only win32k itself uses (SWP_NOCLIENTSIZE, SWP_NOCLIENTMOVE, SWP_STATECHANGED)
+      and the top bit: FALSE with ERROR_INVALID_FLAGS, before the window is looked at, so nothing is sent.
+      The other bits above SWP_ASYNCWINDOWPOS (0x10000, 0x20000) were measured to pass. */
+   if (uFlags & (SWP_NOCLIENTSIZE | SWP_NOCLIENTMOVE | SWP_STATECHANGED | 0x80000000))
+   {
+      EngSetLastError(ERROR_INVALID_FLAGS);
+      goto Exit; // Return FALSE
+   }
+
    if (!(Window = UserGetWindowObject(hWnd)) ||
         UserIsDesktopWindow(Window) || UserIsMessageWindow(Window))
    {
@@ -3930,7 +4022,7 @@ NtUserSetWindowPos(
    }
 
    UserRefObjectCo(Window, &Ref);
-   ret = co_WinPosSetWindowPos(Window, hWndInsertAfter, X, Y, cx, cy, uFlags);
+   ret = co_WinPosSetWindowPos(Window, hWndInsertAfter, X, Y, cx, cy, (uFlags & ~SWP_GROUPNOTICE) | SWP_GROUPNOTICE);
    UserDerefObjectCo(Window);
 
 Exit:

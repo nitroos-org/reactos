@@ -11,12 +11,14 @@
 extern void func_DwmExtendFrame(void);
 extern void func_DwmFlush(void);
 extern void func_DwmWindowAttribute(void);
+extern void func_DwmNcRendering(void);
 
 const struct test winetest_testlist[] =
 {
     { "DwmExtendFrame", func_DwmExtendFrame },
     { "DwmFlush", func_DwmFlush },
     { "DwmWindowAttribute", func_DwmWindowAttribute },
+    { "DwmNcRendering", func_DwmNcRendering },
 
     { 0, 0 }
 };
