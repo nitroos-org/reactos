@@ -38,6 +38,7 @@ typedef struct _BASE_BOUNDARY_DESCRIPTOR
 {
     ULONG Magic;
     ULONG Flags;
+    BOOLEAN HasIntegrityLabel;
 } BASE_BOUNDARY_DESCRIPTOR, *PBASE_BOUNDARY_DESCRIPTOR;
 
 /* FUNCTIONS *****************************************************************/
@@ -92,6 +93,41 @@ AddSIDToBoundaryDescriptor(
     }
 
     /* Membership is not enforced in this implementation */
+    return TRUE;
+}
+
+/*
+ * AddIntegrityLabelToBoundaryDescriptor. Measured on Windows 10 22H2: any SID with at least one subauthority is
+ * taken (Windows does not check that it is an integrity SID); a NULL SID or one without subauthorities is
+ * ERROR_INVALID_PARAMETER; a descriptor holds one label, the second one is ERROR_OBJECT_ALREADY_EXISTS. Ordinary SIDs
+ * can be added before or after the label. As with the SIDs, the label is not enforced here.
+ */
+BOOL
+WINAPI
+AddIntegrityLabelToBoundaryDescriptor(
+    _Inout_ HANDLE *BoundaryDescriptor,
+    _In_ PSID IntegrityLabel)
+{
+    PBASE_BOUNDARY_DESCRIPTOR Descriptor;
+
+    if (!BoundaryDescriptor ||
+        !(Descriptor = *BoundaryDescriptor) ||
+        Descriptor->Magic != BOUNDARY_DESCRIPTOR_MAGIC ||
+        !IntegrityLabel ||
+        !RtlValidSid(IntegrityLabel) ||
+        *RtlSubAuthorityCountSid(IntegrityLabel) == 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (Descriptor->HasIntegrityLabel)
+    {
+        SetLastError(ERROR_OBJECT_ALREADY_EXISTS);
+        return FALSE;
+    }
+
+    Descriptor->HasIntegrityLabel = TRUE;
     return TRUE;
 }
 

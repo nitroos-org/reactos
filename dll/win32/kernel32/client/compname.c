@@ -696,39 +696,66 @@ SetComputerNameExW(COMPUTER_NAME_FORMAT NameType,
 
 
 /*
+ * DnsHostnameToComputerNameW and DnsHostnameToComputerNameExW. Measured on Windows 10 22H2 (x64 and x86):
+ *  - the result is the name in upper case, cut to MAX_COMPUTERNAME_LENGTH (15) characters; no character is refused;
+ *  - the old function (W) uses the first label only (up to the first dot), an empty label is
+ *    ERROR_INVALID_COMPUTERNAME, as is a NULL name; the Ex function keeps the dots, and an empty name gives an empty result;
+ *  - the buffer must hold the result and the null (*size > length): else ERROR_MORE_DATA, *size is the length without the
+ *    null, and the buffer is not touched. On success *size is the length without the null.
+ */
+static
+BOOL
+BasepDnsHostnameToComputerName(
+    _In_opt_ LPCWSTR Hostname,
+    _Out_writes_opt_(*Size) LPWSTR ComputerName,
+    _Inout_ LPDWORD Size,
+    _In_ BOOL FirstLabelOnly)
+{
+    WCHAR Name[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD Length = 0;
+
+    if (!Hostname || !Size)
+    {
+        SetLastError(FirstLabelOnly ? ERROR_INVALID_COMPUTERNAME : ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    while (Length < MAX_COMPUTERNAME_LENGTH && Hostname[Length] && !(FirstLabelOnly && Hostname[Length] == L'.'))
+    {
+        Name[Length] = RtlUpcaseUnicodeChar(Hostname[Length]);
+        Length++;
+    }
+
+    if (FirstLabelOnly && Length == 0)
+    {
+        SetLastError(ERROR_INVALID_COMPUTERNAME);
+        return FALSE;
+    }
+
+    if (!ComputerName || *Size <= Length)
+    {
+        *Size = Length;
+        SetLastError(ERROR_MORE_DATA);
+        return FALSE;
+    }
+
+    RtlCopyMemory(ComputerName, Name, Length * sizeof(WCHAR));
+    ComputerName[Length] = UNICODE_NULL;
+    *Size = Length;
+    return TRUE;
+}
+
+/*
  * @implemented
  */
 BOOL
 WINAPI
-DnsHostnameToComputerNameA(LPCSTR Hostname,
-                           LPSTR ComputerName,
-                           LPDWORD nSize)
+DnsHostnameToComputerNameExW(LPCWSTR Hostname,
+                             LPWSTR ComputerName,
+                             LPDWORD nSize)
 {
-    DWORD len;
-
-    DPRINT("(%s, %p, %p)\n", Hostname, ComputerName, nSize);
-
-    if (!Hostname || !nSize)
-        return FALSE;
-
-    len = lstrlenA(Hostname);
-
-    if (len > MAX_COMPUTERNAME_LENGTH)
-        len = MAX_COMPUTERNAME_LENGTH;
-
-    if (*nSize < len)
-    {
-        *nSize = len;
-        return FALSE;
-    }
-
-    if (!ComputerName) return FALSE;
-
-    memcpy(ComputerName, Hostname, len);
-    ComputerName[len + 1] = 0;
-    return TRUE;
+    return BasepDnsHostnameToComputerName(Hostname, ComputerName, nSize, FALSE);
 }
-
 
 /*
  * @implemented
@@ -739,25 +766,63 @@ DnsHostnameToComputerNameW(LPCWSTR hostname,
                            LPWSTR computername,
                            LPDWORD size)
 {
-    DWORD len;
+    return BasepDnsHostnameToComputerName(hostname, computername, size, TRUE);
+}
 
-    DPRINT("(%s, %p, %p): stub\n", hostname, computername, size);
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+DnsHostnameToComputerNameA(LPCSTR Hostname,
+                           LPSTR ComputerName,
+                           LPDWORD nSize)
+{
+    WCHAR Result[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD Length, Needed;
+    INT Converted;
 
-    if (!hostname || !size) return FALSE;
-    len = lstrlenW(hostname);
-
-    if (len > MAX_COMPUTERNAME_LENGTH)
-        len = MAX_COMPUTERNAME_LENGTH;
-
-    if (*size < len)
+    if (!Hostname || !nSize)
     {
-        *size = len;
+        SetLastError(ERROR_INVALID_COMPUTERNAME);
         return FALSE;
     }
-    if (!computername) return FALSE;
 
-    memcpy(computername, hostname, len * sizeof(WCHAR));
-    computername[len + 1] = 0;
+    Converted = MultiByteToWideChar(CP_ACP, 0, Hostname, -1, NULL, 0);
+    if (Converted > 0)
+    {
+        PWCHAR Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Converted * sizeof(WCHAR));
+        BOOL Ok;
+
+        if (!Buffer)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        MultiByteToWideChar(CP_ACP, 0, Hostname, -1, Buffer, Converted);
+        Length = ARRAYSIZE(Result);
+        Ok = BasepDnsHostnameToComputerName(Buffer, Result, &Length, TRUE);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+        if (!Ok && GetLastError() != ERROR_MORE_DATA)
+            return FALSE;
+    }
+    else
+    {
+        SetLastError(ERROR_INVALID_COMPUTERNAME);
+        return FALSE;
+    }
+
+    Needed = WideCharToMultiByte(CP_ACP, 0, Result, Length, NULL, 0, NULL, NULL);
+    if (!ComputerName || *nSize <= Needed)
+    {
+        *nSize = Needed;
+        SetLastError(ERROR_MORE_DATA);
+        return FALSE;
+    }
+
+    WideCharToMultiByte(CP_ACP, 0, Result, Length, ComputerName, Needed, NULL, NULL);
+    ComputerName[Needed] = ANSI_NULL;
+    *nSize = Needed;
     return TRUE;
 }
 

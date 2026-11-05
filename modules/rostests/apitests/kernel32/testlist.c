@@ -81,6 +81,7 @@ extern void func_IdnTo(void);
 extern void func_NormalizeString(void);
 extern void func_IsWow64Process2(void);
 extern void func_VirtualAllocExNuma(void);
+extern void func_Win10Exports(void);
 extern void func_DeviceIoControl(void);
 extern void func_DllInitParentPrecondition(void);
 extern void func_dosdev(void);
@@ -326,6 +327,7 @@ const struct test winetest_testlist[] =
     { "NormalizeString", func_NormalizeString },
     { "IsWow64Process2", func_IsWow64Process2 },
     { "VirtualAllocExNuma", func_VirtualAllocExNuma },
+    { "Win10Exports", func_Win10Exports },
     { "DeviceIoControl",             func_DeviceIoControl },
     { "DllInitParentPrecondition",   func_DllInitParentPrecondition },
     { "dosdev",                      func_dosdev },

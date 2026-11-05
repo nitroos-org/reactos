@@ -64,6 +64,7 @@ list(APPEND SOURCE
     ldr/ldrutils.c
     ldr/verifier.c
     rtl/apisetquery.c
+    rtl/barrier.c
     rtl/bitmapx.c
     rtl/capsid.c
     rtl/crt_s.c

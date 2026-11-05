@@ -61,6 +61,7 @@
 @ stdcall ChangeServiceConfigA(long long long long wstr str ptr str str str str)
 @ stdcall ChangeServiceConfigW(long long long long wstr wstr ptr wstr wstr wstr wstr)
 @ stdcall CheckTokenMembership(long ptr ptr)
+@ stdcall -version=0x601+ CheckTokenMembershipEx(long ptr long ptr)
 @ stdcall ClearEventLogA(long str)
 @ stdcall ClearEventLogW(long wstr)
 @ stub CloseCodeAuthzLevel

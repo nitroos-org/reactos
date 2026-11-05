@@ -16,6 +16,7 @@
 @ AddConsoleAliasA
 @ AddConsoleAliasW
 @ AddRefActCtx
+@ AddScopedPolicyIDAce
 @ AddVectoredContinueHandler
 @ AddVectoredExceptionHandler
 @ AllocConsole
@@ -27,6 +28,7 @@
 @ BaseDumpAppcompatCache
 @ BaseFlushAppcompatCache
 @ BaseInitAppcompatCacheSupport
+@ BaseIsAppcompatInfrastructureDisabled
 @ BaseUpdateAppcompatCache
 @ Beep
 @ CallbackMayRunLong -version=0x600+
@@ -37,6 +39,8 @@
 @ CancelThreadpoolIo -version=0x600+
 @ ChangeTimerQueueTimer
 @ CheckRemoteDebuggerPresent
+@ CheckTokenCapability
+@ CheckTokenMembershipEx
 @ ClearCommBreak
 @ ClearCommError
 @ CloseHandle
@@ -118,6 +122,7 @@
 @ DisableThreadLibraryCalls
 @ DiscardVirtualMemory -version=0x601+
 @ DisconnectNamedPipe
+@ DnsHostnameToComputerNameExW
 @ DuplicateHandle
 @ EncodePointer
 @ EncodeSystemPointer
@@ -193,6 +198,8 @@
 @ FreeUserPhysicalPages
 @ GenerateConsoleCtrlEvent
 @ GetACP
+@ GetAppContainerAce
+@ GetAppContainerNamedObjectPath
 @ GetApplicationRestartSettings -version=0x600+
 @ GetCPFileNameFromRegistry -version=0x501-0x600
 @ GetCPInfo
@@ -263,6 +270,8 @@
 @ GetDiskFreeSpaceExA
 @ GetDiskFreeSpaceExW
 @ GetDiskFreeSpaceW
+@ GetDiskSpaceInformationA
+@ GetDiskSpaceInformationW
 @ GetDriveTypeA
 @ GetDriveTypeW
 @ GetDynamicTimeZoneInformation -version=0x600+
@@ -305,6 +314,7 @@
 @ GetLogicalProcessorInformationEx -version=0x601+
 @ GetLongPathNameA
 @ GetLongPathNameW
+@ GetMemoryErrorHandlingCapabilities
 @ GetModuleFileNameA
 @ GetModuleFileNameW
 @ GetModuleHandleA
@@ -317,6 +327,7 @@
 @ GetNamedPipeInfo
 @ GetNativeSystemInfo
 @ GetNumaHighestNodeNumber
+@ GetNumaProximityNodeEx
 @ GetNumberFormatEx -version=0x600+
 @ GetNumberFormatW
 @ GetNumberOfConsoleInputEvents
@@ -439,6 +450,7 @@
 @ IdnToUnicode -version=0x600+
 @ InitializeProcThreadAttributeList -version=0x600+
 @ InitializeSListHead
+@ InitializeSynchronizationBarrier
 @ InterlockedCompareExchange -arch=i386
 @ InterlockedCompareExchange64 -arch=i386
 @ InterlockedDecrement -arch=i386
@@ -505,9 +517,11 @@
 @ LoadStringW -version=0x601+
 @ LocalAlloc
 @ LocalFileTimeToFileTime
+@ LocalFileTimeToLocalSystemTime
 @ LocalFree
 @ LocalLock
 @ LocalReAlloc
+@ LocalSystemTimeToLocalFileTime
 @ LocalUnlock
 @ LocaleNameToLCID -version=0x600+
 @ LockFile
@@ -563,6 +577,7 @@
 @ QueryPerformanceFrequency
 @ QueryProcessCycleTime -version=0x600+
 @ QueryThreadCycleTime -version=0x600+
+@ QueryThreadpoolStackInformation
 @ QueueUserAPC
 @ QueueUserWorkItem
 @ RaiseException
@@ -628,6 +643,7 @@
 @ SetConsoleWindowInfo
 @ SetCurrentDirectoryA
 @ SetCurrentDirectoryW
+@ SetDynamicTimeZoneInformation -version=0x600+
 @ SetEndOfFile
 @ SetEnvironmentStringsA
 @ SetEnvironmentStringsW
@@ -673,6 +689,7 @@
 @ SetThreadStackGuarantee
 @ SetThreadToken -version=0x601+
 @ SetThreadUILanguage
+@ SetThreadpoolStackInformation
 @ SetThreadpoolThreadMaximum -version=0x600+
 @ SetThreadpoolThreadMinimum -version=0x600+
 @ SetThreadpoolTimer -version=0x600+
@@ -689,6 +706,7 @@
 @ SwitchToThread
 @ SystemTimeToFileTime
 @ SystemTimeToTzSpecificLocalTime
+@ SystemTimeToTzSpecificLocalTimeEx
 @ TerminateProcess
 @ TerminateThread
 @ TlsAlloc
@@ -699,6 +717,7 @@
 @ TransmitCommChar
 @ TrySubmitThreadpoolCallback -version=0x600+
 @ TzSpecificLocalTimeToSystemTime
+@ TzSpecificLocalTimeToSystemTimeEx
 @ UnhandledExceptionFilter
 @ UnlockFile
 @ UnlockFileEx
@@ -734,7 +753,9 @@
 @ WideCharToMultiByte
 @ Wow64DisableWow64FsRedirection
 @ Wow64EnableWow64FsRedirection
+@ Wow64GetThreadContext -version=0x600+ -arch=x86_64
 @ Wow64RevertWow64FsRedirection
+@ Wow64SetThreadContext -version=0x600+ -arch=x86_64
 @ WriteConsoleA
 @ WriteConsoleInputA
 @ WriteConsoleInputW

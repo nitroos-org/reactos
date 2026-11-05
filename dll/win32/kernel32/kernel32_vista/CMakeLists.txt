@@ -7,10 +7,12 @@ include_directories(${REACTOS_SOURCE_DIR}/sdk/include/reactos/subsys ..)
 spec2def(kernel32_vista.dll kernel32_vista.spec ADD_IMPORTLIB)
 
 list(APPEND SOURCE
+    Barrier.c
     CancelIoEx.c
     CancelSynchronousIo.c
     CompareObjectHandles.c
     DiscardVirtualMemory.c
+    DiskSpaceInfo.c
     EnumSystemLocalesEx.c
     firmware.c
     GetLocaleInfoEx.c
@@ -27,7 +29,10 @@ list(APPEND SOURCE
     IsValidLocaleName.c
     LoadString.c
     LCIDToLocaleName.c
+    LocalTime.c
     LocaleNameToLCID.c
+    MiscWin10.c
+    NumaHandle.c
     NumaProcessorNodeEx.c
     PreferredUILanguages.c
     SetFileInformationByHandle.c
@@ -39,6 +44,7 @@ list(APPEND SOURCE
     sync.c
     ThreadDescription.c
     UnmapViewOfFileEx.c
+    Win10Security.c
     threadpool.c
     vista.c
     wer.c

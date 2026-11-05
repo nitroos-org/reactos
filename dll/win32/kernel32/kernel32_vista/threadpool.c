@@ -169,3 +169,37 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetThreadpoolTimerEx( PTP_TIMER timer, PFILETIME d
     TpSetTimer( timer, (LARGE_INTEGER *)due_time, period, window_length );
     return TRUE;
 }
+
+/***********************************************************************
+ *           SetThreadpoolStackInformation   (kernelbase.@)
+ *
+ * Measured on Windows 10 22H2: any reserve and commit pair is stored as it is (zero, commit above reserve) and read back
+ * as it was set; a pool starts with the stack sizes of the process image. A NULL structure is ERROR_INVALID_PARAMETER.
+ */
+extern NTSTATUS WINAPI TpSetPoolStackInformation( TP_POOL *pool, TP_POOL_STACK_INFORMATION *stack_info );
+extern NTSTATUS WINAPI TpQueryPoolStackInformation( TP_POOL *pool, TP_POOL_STACK_INFORMATION *stack_info );
+
+BOOL WINAPI DECLSPEC_HOTPATCH SetThreadpoolStackInformation( PTP_POOL pool, PTP_POOL_STACK_INFORMATION stack_info )
+{
+    NTSTATUS status = TpSetPoolStackInformation( pool, stack_info );
+    if (!NT_SUCCESS(status))
+    {
+        BaseSetLastNTError(status);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/***********************************************************************
+ *           QueryThreadpoolStackInformation   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH QueryThreadpoolStackInformation( PTP_POOL pool, PTP_POOL_STACK_INFORMATION stack_info )
+{
+    NTSTATUS status = TpQueryPoolStackInformation( pool, stack_info );
+    if (!NT_SUCCESS(status))
+    {
+        BaseSetLastNTError(status);
+        return FALSE;
+    }
+    return TRUE;
+}

@@ -26,6 +26,22 @@ GlobalAddAtomA(LPCSTR lpString)
 }
 
 /*
+ * GlobalAddAtomExA: see GlobalAddAtomExW for the flags
+ */
+ATOM
+WINAPI
+GlobalAddAtomExA(LPCSTR lpString, DWORD Flags)
+{
+    if (Flags & ~0x2)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    return InternalAddAtom(FALSE, FALSE, lpString);
+}
+
+/*
  * @implemented
  */
 ATOM

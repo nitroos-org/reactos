@@ -1,39 +1,39 @@
-#@ stdcall AccessCheck(ptr long long ptr ptr ptr ptr ptr)
-#@ stdcall AccessCheckAndAuditAlarmW(wstr ptr wstr wstr ptr long ptr long ptr ptr ptr)
-#@ stdcall AccessCheckByType(ptr ptr long long ptr long ptr ptr ptr ptr ptr)
-#@ stub AccessCheckByTypeAndAuditAlarmW
-#@ stub AccessCheckByTypeResultList
-#@ stub AccessCheckByTypeResultListAndAuditAlarmByHandleW
-#@ stub AccessCheckByTypeResultListAndAuditAlarmW
+@ stdcall -version=0x601+ AccessCheck(ptr long long ptr ptr ptr ptr ptr) advapi32.AccessCheck
+@ stdcall -version=0x601+ AccessCheckAndAuditAlarmW(wstr ptr wstr wstr ptr long ptr long ptr ptr ptr) advapi32.AccessCheckAndAuditAlarmW
+@ stdcall -version=0x601+ AccessCheckByType(ptr ptr long long ptr long ptr ptr ptr ptr ptr) advapi32.AccessCheckByType
+@ stdcall -version=0x601+ AccessCheckByTypeAndAuditAlarmW(wstr ptr wstr wstr ptr ptr long long long ptr long ptr long ptr ptr ptr) advapi32.AccessCheckByTypeAndAuditAlarmW
+@ stdcall -version=0x601+ AccessCheckByTypeResultList(ptr ptr long long ptr long ptr ptr ptr ptr ptr) advapi32.AccessCheckByTypeResultList
+@ stdcall -version=0x601+ AccessCheckByTypeResultListAndAuditAlarmByHandleW(wstr ptr ptr wstr wstr ptr long long long long ptr long ptr long ptr ptr ptr) advapi32.AccessCheckByTypeResultListAndAuditAlarmByHandleW
+@ stdcall -version=0x601+ AccessCheckByTypeResultListAndAuditAlarmW(wstr ptr wstr wstr ptr long long long long ptr long ptr long ptr ptr ptr) advapi32.AccessCheckByTypeResultListAndAuditAlarmW
 @ stdcall -version=0x600+ AcquireSRWLockExclusive(ptr) kernel32.AcquireSRWLockExclusive
 @ stdcall -version=0x600+ AcquireSRWLockShared(ptr) kernel32.AcquireSRWLockShared
 # #@ stub AcquireStateLock
 #@ stdcall ActivateActCtx(ptr ptr)
-#@ stdcall AddAccessAllowedAce(ptr long long ptr)
-#@ stdcall AddAccessAllowedAceEx(ptr long long long ptr)
-#@ stdcall AddAccessAllowedObjectAce(ptr long long long ptr ptr ptr)
-#@ stdcall AddAccessDeniedAce(ptr long long ptr)
-#@ stdcall AddAccessDeniedAceEx(ptr long long long ptr)
-#@ stdcall AddAccessDeniedObjectAce(ptr long long long ptr ptr ptr)
-#@ stdcall AddAce(ptr long long ptr long)
-#@ stdcall AddAuditAccessAce(ptr long long ptr long long)
-#@ stdcall AddAuditAccessAceEx(ptr long long long ptr long long)
-#@ stdcall AddAuditAccessObjectAce(ptr long long long ptr ptr ptr long long)
+@ stdcall -version=0x601+ AddAccessAllowedAce(ptr long long ptr) advapi32.AddAccessAllowedAce
+@ stdcall -version=0x601+ AddAccessAllowedAceEx(ptr long long long ptr) advapi32.AddAccessAllowedAceEx
+@ stdcall -version=0x601+ AddAccessAllowedObjectAce(ptr long long long ptr ptr ptr) advapi32.AddAccessAllowedObjectAce
+@ stdcall -version=0x601+ AddAccessDeniedAce(ptr long long ptr) advapi32.AddAccessDeniedAce
+@ stdcall -version=0x601+ AddAccessDeniedAceEx(ptr long long long ptr) advapi32.AddAccessDeniedAceEx
+@ stdcall -version=0x601+ AddAccessDeniedObjectAce(ptr long long long ptr ptr ptr) advapi32.AddAccessDeniedObjectAce
+@ stdcall -version=0x601+ AddAce(ptr long long ptr long) advapi32.AddAce
+@ stdcall -version=0x601+ AddAuditAccessAce(ptr long long ptr long long) advapi32.AddAuditAccessAce
+@ stdcall -version=0x601+ AddAuditAccessAceEx(ptr long long long ptr long long) advapi32.AddAuditAccessAceEx
+@ stdcall -version=0x601+ AddAuditAccessObjectAce(ptr long long long ptr ptr ptr long long) advapi32.AddAuditAccessObjectAce
 #@ stdcall AddConsoleAliasA(str str str)
 #@ stdcall AddConsoleAliasW(wstr wstr wstr)
 @ stdcall AddDllDirectory(wstr) kernel32.AddDllDirectory
-#@ stdcall AddMandatoryAce(ptr long long long ptr)
+@ stdcall -version=0x601+ AddMandatoryAce(ptr long long long ptr) advapi32.AddMandatoryAce
 #@ stdcall AddRefActCtx(ptr)
 # #@ stub AddResourceAttributeAce
 # #@ stub AddSIDToBoundaryDescriptor
 # #@ stub AddScopedPolicyIDAce
 #@ stdcall AddVectoredContinueHandler(long ptr) ntdll.RtlAddVectoredContinueHandler
 #@ stdcall AddVectoredExceptionHandler(long ptr) ntdll.RtlAddVectoredExceptionHandler
-#@ stdcall AdjustTokenGroups(long long ptr long ptr ptr)
-#@ stdcall AdjustTokenPrivileges(long long ptr long ptr ptr)
+@ stdcall -version=0x601+ AdjustTokenGroups(long long ptr long ptr ptr) advapi32.AdjustTokenGroups
+@ stdcall -version=0x601+ AdjustTokenPrivileges(long long ptr long ptr ptr) advapi32.AdjustTokenPrivileges
 #@ stdcall AllocConsole()
-#@ stdcall AllocateAndInitializeSid(ptr long long long long long long long long long ptr)
-#@ stdcall AllocateLocallyUniqueId(ptr)
+@ stdcall -version=0x601+ AllocateAndInitializeSid(ptr long long long long long long long long long ptr) advapi32.AllocateAndInitializeSid
+@ stdcall -version=0x601+ AllocateLocallyUniqueId(ptr) advapi32.AllocateLocallyUniqueId
 #@ stdcall AllocateUserPhysicalPages(long ptr ptr)
 #@ stdcall AllocateUserPhysicalPagesNuma(long ptr ptr long)
 # #@ stub AppContainerDeriveSidFromMoniker
@@ -64,8 +64,8 @@
 # #@ stub AppXReleaseAppXContext
 # #@ stub AppXUpdatePackageCapabilities
 # #@ stub ApplicationUserModelIdFromProductId
-#@ stdcall AreAllAccessesGranted(long long)
-#@ stdcall AreAnyAccessesGranted(long long)
+@ stdcall -version=0x601+ AreAllAccessesGranted(long long) advapi32.AreAllAccessesGranted
+@ stdcall -version=0x601+ AreAnyAccessesGranted(long long) advapi32.AreAnyAccessesGranted
 #@ stdcall AreFileApisANSI()
 # #@ stub AreThereVisibleLogoffScriptsInternal
 # #@ stub AreThereVisibleShutdownScriptsInternal
@@ -130,7 +130,7 @@
 # #@ stub CheckIfStateChangeNotificationExists
 #@ stdcall CheckRemoteDebuggerPresent(long ptr)
 # #@ stub CheckTokenCapability
-#@ stdcall CheckTokenMembership(long ptr ptr)
+@ stdcall -version=0x601+ CheckTokenMembership(long ptr ptr) advapi32.CheckTokenMembership
 # #@ stub CheckTokenMembershipEx
 @ stdcall ChrCmpIA(long long)
 @ stdcall ChrCmpIW(long long)
@@ -166,13 +166,13 @@
 #@ stdcall ConvertFiberToThread()
 #@ stdcall ConvertThreadToFiber(ptr)
 #@ stdcall ConvertThreadToFiberEx(ptr long)
-#@ stdcall ConvertToAutoInheritPrivateObjectSecurity(ptr ptr ptr ptr long ptr)
+# @ stdcall -version=0x601+ ConvertToAutoInheritPrivateObjectSecurity(ptr ptr ptr ptr long ptr) advapi32.ConvertToAutoInheritPrivateObjectSecurity ; not forwarded: a stub in the DLL it would forward to
 #@ stdcall CopyContext(ptr long ptr)
 #@ stdcall CopyFile2(wstr wstr ptr)
 #@ stdcall CopyFileExW(wstr wstr ptr ptr ptr long)
 #@ stdcall CopyFileW(wstr wstr long)
 #@ stdcall -version=0x600+ -arch=x86_64 CopyMemoryNonTemporal(ptr ptr long) ntdll.RtlCopyMemoryNonTemporal
-#@ stdcall CopySid(long ptr ptr)
+@ stdcall -version=0x601+ CopySid(long ptr ptr) advapi32.CopySid
 # #@ stub CouldMultiUserAppsBehaviorBePossibleForPackage
 #@ stdcall CreateActCtxW(ptr)
 # #@ stub CreateAppContainerToken
@@ -205,11 +205,11 @@
 #@ stdcall CreateNamedPipeW(wstr long long long long long long ptr)
 #@ stdcall CreatePipe(ptr ptr ptr long)
 # #@ stub CreatePrivateNamespaceW
-#@ stdcall CreatePrivateObjectSecurity(ptr ptr ptr long long ptr)
-#@ stdcall CreatePrivateObjectSecurityEx(ptr ptr ptr ptr long long long ptr)
-#@ stdcall CreatePrivateObjectSecurityWithMultipleInheritance(ptr ptr ptr ptr long long long long ptr)
+@ stdcall -version=0x601+ CreatePrivateObjectSecurity(ptr ptr ptr long long ptr) advapi32.CreatePrivateObjectSecurity
+@ stdcall -version=0x601+ CreatePrivateObjectSecurityEx(ptr ptr ptr ptr long long ptr ptr) advapi32.CreatePrivateObjectSecurityEx
+# @ stdcall -version=0x601+ CreatePrivateObjectSecurityWithMultipleInheritance(ptr ptr ptr ptr long long long ptr ptr) advapi32.CreatePrivateObjectSecurityWithMultipleInheritance ; not forwarded: a stub in the DLL it would forward to
 #@ stdcall CreateProcessA(str str ptr ptr long long ptr str ptr ptr)
-#@ stdcall CreateProcessAsUserA(long str str ptr ptr long long ptr str ptr ptr)
+@ stdcall -version=0x601+ CreateProcessAsUserA(long str str ptr ptr long long ptr str ptr ptr) advapi32.CreateProcessAsUserA
 #@ stdcall CreateProcessAsUserW(long wstr wstr ptr ptr long long ptr wstr ptr ptr)
 #@ stdcall CreateProcessInternalA(long str str ptr ptr long long ptr str ptr ptr ptr)
 #@ stdcall CreateProcessInternalW(long wstr wstr ptr ptr long long ptr wstr ptr ptr ptr)
@@ -217,7 +217,7 @@
 #@ stdcall CreatePseudoConsole(long long long long ptr)
 #@ stdcall CreateRemoteThread(long ptr long ptr long long ptr)
 #@ stdcall CreateRemoteThreadEx(long ptr long ptr ptr long ptr ptr)
-#@ stdcall CreateRestrictedToken(long long long ptr long ptr long ptr ptr)
+@ stdcall -version=0x601+ CreateRestrictedToken(long long long ptr long ptr long ptr ptr) advapi32.CreateRestrictedToken
 @ stdcall -version=0x600+ CreateSemaphoreExW(ptr long long wstr long long) kernel32.CreateSemaphoreExW
 @ stdcall CreateSemaphoreW(ptr long long wstr) kernel32.CreateSemaphoreW
 # #@ stub CreateStateAtom
@@ -237,7 +237,7 @@
 #@ stdcall CreateTimerQueueTimer(ptr long ptr ptr long long long)
 @ stdcall -version=0x600+ CreateWaitableTimerExW(ptr wstr long long) kernel32.CreateWaitableTimerExW
 @ stdcall CreateWaitableTimerW(ptr long wstr) kernel32.CreateWaitableTimerW
-#@ stdcall CreateWellKnownSid(long ptr ptr ptr)
+@ stdcall -version=0x601+ CreateWellKnownSid(long ptr ptr ptr) advapi32.CreateWellKnownSid
 #@ stdcall CtrlRoutine(ptr)
 # #@ stub CveEventWrite
 #@ stdcall DeactivateActCtx(long long)
@@ -250,7 +250,7 @@
 #@ stdcall DefineDosDeviceW(long wstr wstr)
 #@ stdcall DelayLoadFailureHook(str str)
 # #@ stub DelayLoadFailureHookLookup
-#@ stdcall DeleteAce(ptr long)
+@ stdcall -version=0x601+ DeleteAce(ptr long) advapi32.DeleteAce
 # #@ stub DeleteBoundaryDescriptor
 @ stdcall DeleteCriticalSection(ptr) kernel32.DeleteCriticalSection
 #@ stdcall DeleteFiber(ptr)
@@ -260,11 +260,11 @@
 # #@ stub DeleteStateAtomValue
 # #@ stub DeleteStateContainer
 # #@ stub DeleteStateContainerValue
-#@ stdcall -version=0x600+ DeleteSynchronizationBarrier(long) ntdll.RtlDeleteBarrier
+@ stdcall -version=0x601+ DeleteSynchronizationBarrier(ptr) ntdll.RtlDeleteBarrier
 #@ stdcall DeleteTimerQueueEx(long long)
 #@ stdcall DeleteTimerQueueTimer(long long long)
 #@ stdcall DeleteVolumeMountPointW(wstr)
-#@ stdcall DestroyPrivateObjectSecurity(ptr)
+@ stdcall -version=0x601+ DestroyPrivateObjectSecurity(ptr) advapi32.DestroyPrivateObjectSecurity
 #@ stdcall DeviceIoControl(long long ptr long ptr long ptr ptr)
 #@ stdcall DisablePredefinedHandleTableInternal(long)
 #@ stdcall DisableThreadLibraryCalls(long)
@@ -273,7 +273,7 @@
 #@ stdcall DisconnectNamedPipe(long)
 #@ stdcall DnsHostnameToComputerNameExW(wstr ptr ptr)
 # #@ stub DsBindWithSpnExW
-# #@ stub DsCrackNamesW
+# @ stdcall -version=0x601+ DsCrackNamesW(ptr long long long long ptr ptr) ntdsapi.DsCrackNamesW ; not forwarded: a stub in the DLL it would forward to
 # #@ stub DsFreeDomainControllerInfoW
 # #@ stub DsFreeNameResultW
 # #@ stub DsFreeNgcKey
@@ -285,29 +285,29 @@
 # #@ stub DsWriteNgcKeyW
 #@ stdcall DuplicateHandle(long long long ptr long long long)
 # #@ stub DuplicateStateContainerHandle
-#@ stdcall DuplicateToken(long long ptr)
-#@ stdcall DuplicateTokenEx(long long ptr long long ptr)
-#@ stdcall EmptyWorkingSet(long)
+@ stdcall -version=0x601+ DuplicateToken(long long ptr) advapi32.DuplicateToken
+@ stdcall -version=0x601+ DuplicateTokenEx(long long ptr long long ptr) advapi32.DuplicateTokenEx
+@ stdcall -version=0x601+ EmptyWorkingSet(ptr) psapi.EmptyWorkingSet
 #@ stdcall EncodePointer(ptr) ntdll.RtlEncodePointer
 # #@ stub EncodeRemotePointer
 #@ stdcall EncodeSystemPointer(ptr) ntdll.RtlEncodeSystemPointer
 # #@ stub EnterCriticalPolicySectionInternal
 @ stdcall EnterCriticalSection(ptr) kernel32.EnterCriticalSection
-# #@ stub EnterSynchronizationBarrier
+@ stdcall -version=0x601+ EnterSynchronizationBarrier(ptr long) ntdll.RtlBarrier
 #@ stdcall EnumCalendarInfoExEx(ptr wstr long wstr long long)
 #@ stdcall EnumCalendarInfoExW(ptr long long long)
 #@ stdcall EnumCalendarInfoW(ptr long long long)
 #@ stdcall EnumDateFormatsExEx(ptr wstr long long)
 #@ stdcall EnumDateFormatsExW(ptr long long)
 #@ stdcall EnumDateFormatsW(ptr long long)
-#@ stdcall EnumDeviceDrivers(ptr long ptr)
+@ stdcall -version=0x601+ EnumDeviceDrivers(ptr long ptr) psapi.EnumDeviceDrivers
 #@ stdcall EnumDynamicTimeZoneInformation(long ptr)
 #@ stdcall EnumLanguageGroupLocalesW(ptr long long ptr)
-#@ stdcall EnumPageFilesA(ptr ptr)
-#@ stdcall EnumPageFilesW(ptr ptr)
-#@ stdcall EnumProcessModules(long ptr long ptr)
-#@ stdcall EnumProcessModulesEx(long ptr long ptr long)
-#@ stdcall EnumProcesses(ptr long ptr)
+@ stdcall -version=0x601+ EnumPageFilesA(ptr ptr) psapi.EnumPageFilesA
+@ stdcall -version=0x601+ EnumPageFilesW(ptr ptr) psapi.EnumPageFilesW
+@ stdcall -version=0x601+ EnumProcessModules(ptr ptr long ptr) psapi.EnumProcessModules
+@ stdcall -version=0x601+ EnumProcessModulesEx(ptr ptr long ptr long) psapi.EnumProcessModulesEx
+@ stdcall -version=0x601+ EnumProcesses(ptr long ptr) psapi.EnumProcesses
 #@ stdcall EnumResourceLanguagesExA(long str str ptr long long long)
 #@ stdcall EnumResourceLanguagesExW(long wstr wstr ptr long long long)
 #@ stdcall EnumResourceNamesExA(long str ptr long long long)
@@ -327,18 +327,18 @@
 #@ stdcall EnumUILanguagesW(ptr long long)
 # #@ stub EnumerateStateAtomValues
 # #@ stub EnumerateStateContainerItems
-#@ stdcall EqualDomainSid(ptr ptr ptr)
-#@ stdcall EqualPrefixSid(ptr ptr)
-#@ stdcall EqualSid(ptr ptr)
+@ stdcall -version=0x601+ EqualDomainSid(ptr ptr ptr) advapi32.EqualDomainSid
+@ stdcall -version=0x601+ EqualPrefixSid(ptr ptr) advapi32.EqualPrefixSid
+@ stdcall -version=0x601+ EqualSid(ptr ptr) advapi32.EqualSid
 #@ stdcall EscapeCommFunction(long long)
-#@ stdcall -version=0x600+ EventActivityIdControl(long ptr) ntdll.EtwEventActivityIdControl
+@ stdcall -version=0x601+ EventActivityIdControl(long ptr) advapi32.EventActivityIdControl
 @ stdcall -version=0x600+ EventEnabled(int64 ptr) ntdll.EtwEventEnabled
 @ stdcall -version=0x600+ EventProviderEnabled(int64 long int64) ntdll.EtwEventProviderEnabled
 @ stdcall -version=0x600+ EventRegister(ptr ptr ptr ptr) ntdll.EtwEventRegister
 @ stdcall -version=0x601+ EventSetInformation(int64 long ptr long) ntdll.EtwEventSetInformation
 @ stdcall -version=0x600+ EventUnregister(int64) ntdll.EtwEventUnregister
 @ stdcall -version=0x600+ EventWrite(int64 ptr long ptr) ntdll.EtwEventWrite
-# #@ stub EventWriteEx
+# @ stdcall -version=0x601+ EventWriteEx(int64 ptr int64 long ptr ptr long ptr) advapi32.EventWriteEx ; not forwarded: a stub in the DLL it would forward to
 @ stdcall -version=0x600+ EventWriteString(int64 long int64 wstr) ntdll.EtwEventWriteString
 @ stdcall -version=0x600+ EventWriteTransfer(int64 ptr ptr ptr long ptr) ntdll.EtwEventWriteTransfer
 #@ stdcall ExitProcess(long) ntdll.RtlExitUserProcess
@@ -365,7 +365,7 @@
 #@ stdcall FindFirstFileExW(wstr long ptr long ptr long)
 #@ stdcall FindFirstFileNameW(wstr long ptr ptr)
 #@ stdcall FindFirstFileW(wstr ptr)
-#@ stdcall FindFirstFreeAce(ptr ptr)
+@ stdcall -version=0x601+ FindFirstFreeAce(ptr ptr) advapi32.FindFirstFreeAce
 #@ stdcall FindFirstStreamW(wstr long ptr long)
 #@ stdcall FindFirstVolumeW(ptr long)
 #@ stdcall FindNLSString(long long wstr long wstr long ptr)
@@ -404,15 +404,15 @@
 #@ stdcall FreeLibraryAndExitThread(long long)
 @ stdcall -version=0x600+ FreeLibraryWhenCallbackReturns(ptr ptr) ntdll.TpCallbackUnloadDllOnCompletion
 #@ stdcall FreeResource(long)
-#@ stdcall FreeSid(ptr)
+@ stdcall -version=0x601+ FreeSid(ptr) advapi32.FreeSid
 #@ stdcall FreeUserPhysicalPages(long ptr ptr)
 #@ stdcall GenerateConsoleCtrlEvent(long long)
 # #@ stub GenerateGPNotificationInternal
 #@ stdcall GetACP()
-#@ stdcall GetAcceptLanguagesA(ptr ptr)
-#@ stdcall GetAcceptLanguagesW(ptr ptr)
-#@ stdcall GetAce(ptr long ptr)
-#@ stdcall GetAclInformation(ptr ptr long long)
+@ stdcall -version=0x601+ GetAcceptLanguagesA(ptr ptr) shlwapi.GetAcceptLanguagesA
+@ stdcall -version=0x601+ GetAcceptLanguagesW(ptr ptr) shlwapi.GetAcceptLanguagesW
+@ stdcall -version=0x601+ GetAce(ptr long ptr) advapi32.GetAce
+@ stdcall -version=0x601+ GetAclInformation(ptr ptr long long) advapi32.GetAclInformation
 # #@ stub GetAdjustObjectAttributesForPrivateNamespaceRoutine
 # #@ stub GetAlternatePackageRoots
 # #@ stub GetAppContainerAce
@@ -504,10 +504,10 @@
 #@ stdcall GetDateFormatA(long long ptr str ptr long)
 #@ stdcall GetDateFormatEx(wstr long ptr wstr ptr long wstr)
 #@ stdcall GetDateFormatW(long long ptr wstr ptr long)
-#@ stdcall GetDeviceDriverBaseNameA(ptr ptr long)
-#@ stdcall GetDeviceDriverBaseNameW(ptr ptr long)
-#@ stdcall GetDeviceDriverFileNameA(ptr ptr long)
-#@ stdcall GetDeviceDriverFileNameW(ptr ptr long)
+@ stdcall -version=0x601+ GetDeviceDriverBaseNameA(ptr ptr long) psapi.GetDeviceDriverBaseNameA
+@ stdcall -version=0x601+ GetDeviceDriverBaseNameW(ptr ptr long) psapi.GetDeviceDriverBaseNameW
+@ stdcall -version=0x601+ GetDeviceDriverFileNameA(ptr ptr long) psapi.GetDeviceDriverFileNameA
+@ stdcall -version=0x601+ GetDeviceDriverFileNameW(ptr ptr long) psapi.GetDeviceDriverFileNameW
 #@ stdcall GetDiskFreeSpaceA(str ptr ptr ptr ptr)
 #@ stdcall GetDiskFreeSpaceExA(str ptr ptr ptr)
 #@ stdcall GetDiskFreeSpaceExW(wstr ptr ptr ptr)
@@ -539,20 +539,20 @@
 #@ stdcall GetFileInformationByHandleEx(long long ptr long)
 #@ stdcall GetFileMUIInfo(long wstr ptr ptr)
 #@ stdcall GetFileMUIPath(long wstr wstr ptr ptr ptr ptr)
-#@ stdcall GetFileSecurityW(wstr long ptr long ptr)
+@ stdcall -version=0x601+ GetFileSecurityW(wstr long ptr long ptr) advapi32.GetFileSecurityW
 #@ stdcall GetFileSize(long ptr)
 #@ stdcall GetFileSizeEx(long ptr)
 #@ stdcall GetFileTime(long ptr ptr ptr)
 #@ stdcall GetFileType(long)
-#@ stdcall GetFileVersionInfoA(str long long ptr)
+@ stdcall -version=0x601+ GetFileVersionInfoA(str long long ptr) version.GetFileVersionInfoA
 # #@ stub GetFileVersionInfoByHandle
-#@ stdcall GetFileVersionInfoExA(long str long long ptr)
-#@ stdcall GetFileVersionInfoExW(long wstr long long ptr)
-#@ stdcall GetFileVersionInfoSizeA(str ptr)
-#@ stdcall GetFileVersionInfoSizeExA(long str ptr)
-#@ stdcall GetFileVersionInfoSizeExW(long wstr ptr)
-#@ stdcall GetFileVersionInfoSizeW(wstr ptr)
-#@ stdcall GetFileVersionInfoW(wstr long long ptr)
+@ stdcall -version=0x601+ GetFileVersionInfoExA(long str long long ptr) version.GetFileVersionInfoExA
+@ stdcall -version=0x601+ GetFileVersionInfoExW(long wstr long long ptr) version.GetFileVersionInfoExW
+@ stdcall -version=0x601+ GetFileVersionInfoSizeA(str ptr) version.GetFileVersionInfoSizeA
+@ stdcall -version=0x601+ GetFileVersionInfoSizeExA(long str ptr) version.GetFileVersionInfoSizeExA
+@ stdcall -version=0x601+ GetFileVersionInfoSizeExW(long wstr ptr) version.GetFileVersionInfoSizeExW
+@ stdcall -version=0x601+ GetFileVersionInfoSizeW(wstr ptr) version.GetFileVersionInfoSizeW
+@ stdcall -version=0x601+ GetFileVersionInfoW(wstr long long ptr) version.GetFileVersionInfoW
 #@ stdcall GetFinalPathNameByHandleA(long ptr long long)
 #@ stdcall GetFinalPathNameByHandleW(long ptr long long)
 #@ stdcall GetFullPathNameA(str long ptr ptr)
@@ -565,11 +565,11 @@
 # #@ stub GetHivePath
 # #@ stub GetIntegratedDisplaySize
 # #@ stub GetIsEdpEnabled
-#@ stdcall GetKernelObjectSecurity(long long ptr long ptr)
+@ stdcall -version=0x601+ GetKernelObjectSecurity(long long ptr long ptr) advapi32.GetKernelObjectSecurity
 #@ stdcall GetLargePageMinimum()
 #@ stdcall GetLargestConsoleWindowSize(long)
 #@ stdcall GetLastError() kernelbase_GetLastError
-#@ stdcall GetLengthSid(ptr)
+@ stdcall -version=0x601+ GetLengthSid(ptr) advapi32.GetLengthSid
 #@ stdcall GetLocalTime(ptr)
 #@ stdcall GetLocaleInfoA(long long ptr long)
 #@ stdcall GetLocaleInfoEx(wstr long ptr long)
@@ -581,20 +581,20 @@
 #@ stdcall GetLogicalProcessorInformationEx(long ptr ptr)
 #@ stdcall GetLongPathNameA(str ptr long)
 #@ stdcall GetLongPathNameW(wstr ptr long)
-#@ stdcall GetMappedFileNameA(long ptr ptr long)
-#@ stdcall GetMappedFileNameW(long ptr ptr long)
+@ stdcall -version=0x601+ GetMappedFileNameA(ptr ptr ptr long) psapi.GetMappedFileNameA
+@ stdcall -version=0x601+ GetMappedFileNameW(ptr ptr ptr long) psapi.GetMappedFileNameW
 # #@ stub GetMemoryErrorHandlingCapabilities
-#@ stdcall GetModuleBaseNameA(long long ptr long)
-#@ stdcall GetModuleBaseNameW(long long ptr long)
+@ stdcall -version=0x601+ GetModuleBaseNameA(ptr ptr ptr long) psapi.GetModuleBaseNameA
+@ stdcall -version=0x601+ GetModuleBaseNameW(ptr ptr ptr long) psapi.GetModuleBaseNameW
 #@ stdcall GetModuleFileNameA(long ptr long)
-#@ stdcall GetModuleFileNameExA(long long ptr long)
-#@ stdcall GetModuleFileNameExW(long long ptr long)
+@ stdcall -version=0x601+ GetModuleFileNameExA(ptr ptr ptr long) psapi.GetModuleFileNameExA
+@ stdcall -version=0x601+ GetModuleFileNameExW(ptr ptr ptr long) psapi.GetModuleFileNameExW
 #@ stdcall GetModuleFileNameW(long ptr long)
 #@ stdcall GetModuleHandleA(str)
 #@ stdcall GetModuleHandleExA(long ptr ptr)
 #@ stdcall GetModuleHandleExW(long ptr ptr)
 #@ stdcall GetModuleHandleW(wstr)
-#@ stdcall GetModuleInformation(long long ptr long)
+@ stdcall -version=0x601+ GetModuleInformation(ptr ptr ptr long) psapi.GetModuleInformation
 #@ stdcall GetNLSVersion(long long ptr)
 #@ stdcall GetNLSVersionEx(long wstr ptr)
 #@ stub GetNamedLocaleHashNode
@@ -644,11 +644,11 @@
 # #@ stub GetPackageTargetPlatformProperty
 # #@ stub GetPackageVolumeSisPath
 #@ stdcall GetPackagesByPackageFamily(wstr ptr ptr ptr ptr)
-#@ stdcall GetPerformanceInfo(ptr long)
+@ stdcall -version=0x601+ GetPerformanceInfo(ptr long) psapi.GetPerformanceInfo
 #@ stdcall GetPhysicallyInstalledSystemMemory(ptr)
 # #@ stub GetPreviousFgPolicyRefreshInfoInternal
 #@ stdcall GetPriorityClass(long)
-#@ stdcall GetPrivateObjectSecurity(ptr long ptr long ptr)
+@ stdcall -version=0x601+ GetPrivateObjectSecurity(ptr long ptr long ptr) advapi32.GetPrivateObjectSecurity
 #@ stdcall GetProcAddress(long str)
 # #@ stub GetProcAddressForCaller
 # #@ stub GetProcessDefaultCpuSets
@@ -658,10 +658,10 @@
 #@ stdcall -import GetProcessHeaps(long ptr) RtlGetProcessHeaps
 #@ stdcall GetProcessId(long)
 #@ stdcall GetProcessIdOfThread(long)
-#@ stdcall GetProcessImageFileNameA(long ptr long)
-#@ stdcall GetProcessImageFileNameW(long ptr long)
+@ stdcall -version=0x601+ GetProcessImageFileNameA(ptr ptr long) psapi.GetProcessImageFileNameA
+@ stdcall -version=0x601+ GetProcessImageFileNameW(ptr ptr long) psapi.GetProcessImageFileNameW
 @ stdcall GetProcessInformation(long long ptr long) kernel32.GetProcessInformation
-#@ stdcall GetProcessMemoryInfo(long ptr long)
+@ stdcall -version=0x601+ GetProcessMemoryInfo(ptr ptr long) psapi.GetProcessMemoryInfo
 #@ stdcall GetProcessMitigationPolicy(long long ptr long)
 #@ stdcall GetProcessPreferredUILanguages(long ptr ptr ptr)
 #@ stdcall GetProcessPriorityBoost(long ptr)
@@ -679,20 +679,20 @@
 #@ stdcall GetQueuedCompletionStatusEx(ptr ptr long ptr long long)
 # #@ stub GetRegistryExtensionFlags
 # #@ stub GetRoamingLastObservedChangeTime
-#@ stdcall GetSecurityDescriptorControl(ptr ptr ptr)
-#@ stdcall GetSecurityDescriptorDacl(ptr ptr ptr ptr)
-#@ stdcall GetSecurityDescriptorGroup(ptr ptr ptr)
-#@ stdcall GetSecurityDescriptorLength(ptr)
-#@ stdcall GetSecurityDescriptorOwner(ptr ptr ptr)
-#@ stub GetSecurityDescriptorRMControl
-#@ stdcall GetSecurityDescriptorSacl(ptr ptr ptr ptr)
+@ stdcall -version=0x601+ GetSecurityDescriptorControl(ptr ptr ptr) advapi32.GetSecurityDescriptorControl
+@ stdcall -version=0x601+ GetSecurityDescriptorDacl(ptr ptr ptr ptr) advapi32.GetSecurityDescriptorDacl
+@ stdcall -version=0x601+ GetSecurityDescriptorGroup(ptr ptr ptr) advapi32.GetSecurityDescriptorGroup
+@ stdcall -version=0x601+ GetSecurityDescriptorLength(ptr) advapi32.GetSecurityDescriptorLength
+@ stdcall -version=0x601+ GetSecurityDescriptorOwner(ptr ptr ptr) advapi32.GetSecurityDescriptorOwner
+@ stdcall -version=0x601+ GetSecurityDescriptorRMControl(ptr ptr) advapi32.GetSecurityDescriptorRMControl
+@ stdcall -version=0x601+ GetSecurityDescriptorSacl(ptr ptr ptr ptr) advapi32.GetSecurityDescriptorSacl
 # #@ stub GetSerializedAtomBytes
 # #@ stub GetSharedLocalFolder
 #@ stdcall GetShortPathNameW(wstr ptr long)
-#@ stdcall GetSidIdentifierAuthority(ptr)
-#@ stdcall GetSidLengthRequired(long)
-#@ stdcall GetSidSubAuthority(ptr long)
-#@ stdcall GetSidSubAuthorityCount(ptr)
+@ stdcall -version=0x601+ GetSidIdentifierAuthority(ptr) advapi32.GetSidIdentifierAuthority
+@ stdcall -version=0x601+ GetSidLengthRequired(long) advapi32.GetSidLengthRequired
+@ stdcall -version=0x601+ GetSidSubAuthority(ptr long) advapi32.GetSidSubAuthority
+@ stdcall -version=0x601+ GetSidSubAuthorityCount(ptr) advapi32.GetSidSubAuthorityCount
 # #@ stub GetStagedPackageOrigin
 # #@ stub GetStagedPackagePathByFullName
 #@ stdcall GetStartupInfoW(ptr)
@@ -765,7 +765,7 @@
 #@ stdcall GetTimeFormatW(long long ptr wstr ptr long)
 #@ stdcall GetTimeZoneInformation(ptr)
 #@ stdcall GetTimeZoneInformationForYear(long ptr ptr)
-#@ stdcall GetTokenInformation(long long ptr long ptr)
+@ stdcall -version=0x601+ GetTokenInformation(long long ptr long ptr) advapi32.GetTokenInformation
 @ stdcall GetTraceEnableFlags(double) ntdll.EtwGetTraceEnableFlags
 @ stdcall GetTraceEnableLevel(double) ntdll.EtwGetTraceEnableLevel
 @ stdcall GetTraceLoggerHandle(ptr) ntdll.EtwGetTraceLoggerHandle
@@ -792,11 +792,11 @@
 #@ stdcall GetVolumeNameForVolumeMountPointW(wstr ptr long)
 #@ stdcall GetVolumePathNameW(wstr ptr long)
 #@ stdcall GetVolumePathNamesForVolumeNameW(wstr ptr long ptr)
-#@ stdcall GetWindowsAccountDomainSid(ptr ptr ptr)
+# @ stdcall -version=0x601+ GetWindowsAccountDomainSid(ptr ptr ptr) advapi32.GetWindowsAccountDomainSid ; not forwarded: a stub in the DLL it would forward to
 #@ stdcall GetWindowsDirectoryA(ptr long)
 #@ stdcall GetWindowsDirectoryW(ptr long)
 #@ stdcall GetWriteWatch(long ptr long ptr ptr ptr)
-#@ stdcall GetWsChanges(long ptr long)
+@ stdcall -version=0x601+ GetWsChanges(ptr ptr long) psapi.GetWsChanges
 #@ stdcall GetWsChangesEx(long ptr ptr)
 #@ stdcall -arch=i386,x86_64 GetXStateFeaturesMask(ptr ptr)
 #@ stdcall GlobalAlloc(long long)
@@ -822,16 +822,16 @@
 #@ stdcall IdnToAscii(long wstr long ptr long)
 #@ stdcall IdnToNameprepUnicode(long wstr long ptr long)
 #@ stdcall IdnToUnicode(long wstr long ptr long)
-#@ stdcall ImpersonateAnonymousToken(long)
-#@ stdcall ImpersonateLoggedOnUser(long)
-#@ stdcall ImpersonateNamedPipeClient(long)
-#@ stdcall ImpersonateSelf(long)
+@ stdcall -version=0x601+ ImpersonateAnonymousToken(ptr) advapi32.ImpersonateAnonymousToken
+@ stdcall -version=0x601+ ImpersonateLoggedOnUser(long) advapi32.ImpersonateLoggedOnUser
+@ stdcall -version=0x601+ ImpersonateNamedPipeClient(long) advapi32.ImpersonateNamedPipeClient
+@ stdcall -version=0x601+ ImpersonateSelf(long) advapi32.ImpersonateSelf
 # #@ stub IncrementPackageStatusVersion
 @ stdcall -version=0x600+ InitOnceBeginInitialize(ptr long ptr ptr) kernel32.InitOnceBeginInitialize
 @ stdcall -version=0x600+ InitOnceComplete(ptr long ptr) kernel32.InitOnceComplete
 @ stdcall -version=0x600+ InitOnceExecuteOnce(ptr ptr ptr ptr) kernel32.InitOnceExecuteOnce
 @ stdcall -version=0x600+ InitOnceInitialize(ptr) kernel32.InitOnceInitialize
-#@ stdcall InitializeAcl(ptr long long)
+@ stdcall -version=0x601+ InitializeAcl(ptr long long) advapi32.InitializeAcl
 @ stdcall -version=0x600+ InitializeConditionVariable(ptr) kernel32.InitializeConditionVariable
 #@ stdcall InitializeContext(ptr long ptr ptr)
 #@ stdcall InitializeContext2(ptr long ptr ptr int64)
@@ -840,11 +840,11 @@
 @ stdcall -version=0x600+ InitializeCriticalSectionEx(ptr long long) kernel32.InitializeCriticalSectionEx
 # #@ stub InitializeEnclave
 #@ stdcall InitializeProcThreadAttributeList(ptr long long ptr)
-#@ stdcall InitializeProcessForWsWatch(long)
+@ stdcall -version=0x601+ InitializeProcessForWsWatch(ptr) psapi.InitializeProcessForWsWatch
 #@ stdcall InitializeSListHead(ptr) ntdll.RtlInitializeSListHead
 @ stdcall -version=0x600+ InitializeSRWLock(ptr) kernel32.InitializeSRWLock
-#@ stdcall InitializeSecurityDescriptor(ptr long)
-#@ stdcall InitializeSid(ptr ptr long)
+@ stdcall -version=0x601+ InitializeSecurityDescriptor(ptr long) advapi32.InitializeSecurityDescriptor
+@ stdcall -version=0x601+ InitializeSid(ptr ptr long) advapi32.InitializeSid
 # #@ stub InitializeSynchronizationBarrier
 # #@ stub InstallELAMCertificateInfo
 #@ stdcall -arch=i386 InterlockedCompareExchange(ptr long long)
@@ -867,10 +867,10 @@
 #@ stub Internal_EnumSystemLocales
 #@ stdcall Internal_EnumTimeFormats(ptr long long long long long)
 #@ stdcall Internal_EnumUILanguages(ptr long long long)
-# #@ stub InternetTimeFromSystemTimeA
-# #@ stub InternetTimeFromSystemTimeW
-# #@ stub InternetTimeToSystemTimeA
-# #@ stub InternetTimeToSystemTimeW
+@ stdcall -version=0x601+ InternetTimeFromSystemTimeA(ptr long ptr long) wininet.InternetTimeFromSystemTimeA
+@ stdcall -version=0x601+ InternetTimeFromSystemTimeW(ptr long ptr long) wininet.InternetTimeFromSystemTimeW
+@ stdcall -version=0x601+ InternetTimeToSystemTimeA(str ptr long) wininet.InternetTimeToSystemTimeA
+@ stdcall -version=0x601+ InternetTimeToSystemTimeW(wstr ptr long) wininet.InternetTimeToSystemTimeW
 # #@ stub InvalidateAppModelVersionCache
 #@ stub InvalidateTzSpecificCache
 #@ stdcall IsApiSetImplemented(str)
@@ -884,8 +884,8 @@
 #@ stdcall IsCharLowerA(long)
 #@ stdcall IsCharLowerW(long)
 #@ stdcall IsCharPunctW(long)
-#@ stdcall IsCharSpaceA(long)
-#@ stdcall IsCharSpaceW(long)
+@ stdcall -version=0x601+ IsCharSpaceA(long) shlwapi.IsCharSpaceA
+@ stdcall -version=0x601+ IsCharSpaceW(long) shlwapi.IsCharSpaceW
 #@ stdcall IsCharUpperA(long)
 #@ stdcall IsCharUpperW(long)
 #@ stdcall IsCharXDigitW(long)
@@ -908,17 +908,17 @@
 #@ stdcall IsThreadAFiber()
 #@ stdcall IsThreadpoolTimerSet(ptr) ntdll.TpIsTimerSet
 # #@ stub IsTimeZoneRedirectionEnabled
-#@ stdcall IsTokenRestricted(long)
-#@ stdcall IsValidAcl(ptr)
+@ stdcall -version=0x601+ IsTokenRestricted(long) advapi32.IsTokenRestricted
+@ stdcall -version=0x601+ IsValidAcl(ptr) advapi32.IsValidAcl
 #@ stdcall IsValidCodePage(long)
 #@ stdcall IsValidLanguageGroup(long long)
 #@ stdcall IsValidLocale(long long)
 #@ stdcall IsValidLocaleName(wstr)
 #@ stdcall IsValidNLSVersion(long wstr ptr)
-#@ stub IsValidRelativeSecurityDescriptor
-#@ stdcall IsValidSecurityDescriptor(ptr)
-#@ stdcall IsValidSid(ptr)
-#@ stdcall IsWellKnownSid(ptr long)
+@ stdcall -version=0x601+ IsValidRelativeSecurityDescriptor(ptr long long) advapi32.IsValidRelativeSecurityDescriptor
+@ stdcall -version=0x601+ IsValidSecurityDescriptor(ptr) advapi32.IsValidSecurityDescriptor
+@ stdcall -version=0x601+ IsValidSid(ptr) advapi32.IsValidSid
+@ stdcall -version=0x601+ IsWellKnownSid(ptr long) advapi32.IsWellKnownSid
 #@ stdcall IsWow64Process(ptr ptr)
 #@ stdcall IsWow64Process2(ptr ptr ptr)
 #@ stdcall K32EmptyWorkingSet(long) EmptyWorkingSet
@@ -979,10 +979,10 @@
 #@ stdcall LockFile(long long long long long)
 #@ stdcall LockFileEx(long long long long long ptr)
 #@ stdcall LockResource(long)
-#@ stdcall MakeAbsoluteSD(ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr)
-#@ stub MakeAbsoluteSD2
-#@ stdcall MakeSelfRelativeSD(ptr ptr ptr)
-#@ stdcall MapGenericMask(ptr ptr)
+@ stdcall -version=0x601+ MakeAbsoluteSD(ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr) advapi32.MakeAbsoluteSD
+@ stdcall -version=0x601+ MakeAbsoluteSD2(ptr ptr) advapi32.MakeAbsoluteSD2
+@ stdcall -version=0x601+ MakeSelfRelativeSD(ptr ptr ptr) advapi32.MakeSelfRelativeSD
+@ stdcall -version=0x601+ MapGenericMask(ptr ptr) advapi32.MapGenericMask
 # #@ stub MapPredefinedHandleInternal
 #@ stdcall MapUserPhysicalPages(ptr long ptr)
 #@ stdcall MapViewOfFile(long long long long long)
@@ -1013,10 +1013,10 @@
 #@ stdcall NormalizeString(long wstr long ptr long)
 #@ stub NotifyMountMgr
 #@ stub NotifyRedirectedStringChange
-#@ stdcall ObjectCloseAuditAlarmW(wstr ptr long)
-#@ stdcall ObjectDeleteAuditAlarmW(wstr ptr long)
-#@ stdcall ObjectOpenAuditAlarmW(wstr ptr wstr wstr ptr long long long ptr long long ptr)
-#@ stdcall ObjectPrivilegeAuditAlarmW(wstr ptr long long ptr long)
+@ stdcall -version=0x601+ ObjectCloseAuditAlarmW(wstr ptr long) advapi32.ObjectCloseAuditAlarmW
+@ stdcall -version=0x601+ ObjectDeleteAuditAlarmW(wstr ptr long) advapi32.ObjectDeleteAuditAlarmW
+@ stdcall -version=0x601+ ObjectOpenAuditAlarmW(wstr ptr wstr wstr ptr long long long ptr long long ptr) advapi32.ObjectOpenAuditAlarmW
+@ stdcall -version=0x601+ ObjectPrivilegeAuditAlarmW(wstr ptr long long ptr long) advapi32.ObjectPrivilegeAuditAlarmW
 # #@ stub OfferVirtualMemory
 @ stdcall OpenEventA(long long str) kernel32.OpenEventA
 @ stdcall OpenEventW(long long wstr) kernel32.OpenEventW
@@ -1182,26 +1182,26 @@
 #@ stdcall PeekConsoleInputA(ptr ptr long ptr)
 #@ stdcall PeekConsoleInputW(ptr ptr long ptr)
 #@ stdcall PeekNamedPipe(long ptr long ptr ptr ptr)
-#@ stdcall PerfCreateInstance(long ptr wstr long)
+@ stdcall -version=0x601+ PerfCreateInstance(long ptr wstr long) advapi32.PerfCreateInstance
 # #@ stub PerfDecrementULongCounterValue
 # #@ stub PerfDecrementULongLongCounterValue
-#@ stdcall PerfDeleteInstance(long ptr)
+@ stdcall -version=0x601+ PerfDeleteInstance(long ptr) advapi32.PerfDeleteInstance
 # #@ stub PerfIncrementULongCounterValue
 # #@ stub PerfIncrementULongLongCounterValue
 # #@ stub PerfQueryInstance
-#@ stdcall PerfSetCounterRefValue(long ptr long ptr)
-#@ stdcall PerfSetCounterSetInfo(long ptr long)
+@ stdcall -version=0x601+ PerfSetCounterRefValue(long ptr long ptr) advapi32.PerfSetCounterRefValue
+@ stdcall -version=0x601+ PerfSetCounterSetInfo(long ptr long) advapi32.PerfSetCounterSetInfo
 # #@ stub PerfSetULongCounterValue
 # #@ stub PerfSetULongLongCounterValue
-#@ stdcall PerfStartProvider(ptr ptr ptr)
-#@ stdcall PerfStartProviderEx(ptr ptr ptr)
-#@ stdcall PerfStopProvider(long)
+@ stdcall -version=0x601+ PerfStartProvider(ptr ptr ptr) advapi32.PerfStartProvider
+@ stdcall -version=0x601+ PerfStartProviderEx(ptr ptr ptr) advapi32.PerfStartProviderEx
+@ stdcall -version=0x601+ PerfStopProvider(long) advapi32.PerfStopProvider
 # #@ stub PoolPerAppKeyStateInternal
 #@ stdcall PostQueuedCompletionStatus(long long ptr ptr)
 #@ stdcall PrefetchVirtualMemory(ptr ptr ptr long)
 #@ stub PrivCopyFileExW
-#@ stdcall PrivilegeCheck(ptr ptr ptr)
-#@ stdcall PrivilegedServiceAuditAlarmW(wstr wstr long ptr long)
+@ stdcall -version=0x601+ PrivilegeCheck(ptr ptr ptr) advapi32.PrivilegeCheck
+@ stdcall -version=0x601+ PrivilegedServiceAuditAlarmW(wstr wstr long ptr long) advapi32.PrivilegedServiceAuditAlarmW
 #@ stdcall ProcessIdToSessionId(long ptr)
 # #@ stub ProductIdFromPackageFamilyName
 # #@ stub PsmCreateKey
@@ -1247,7 +1247,7 @@
 #@ stub QueryProcessAffinityUpdateMode
 #@ stdcall QueryProcessCycleTime(long ptr)
 # #@ stub QueryProtectedPolicy
-#@ stub QuerySecurityAccessMask
+@ stdcall -version=0x601+ QuerySecurityAccessMask(long ptr) advapi32.QuerySecurityAccessMask
 # #@ stub QueryStateAtomValueInfo
 # #@ stub QueryStateContainerCreatedNew
 # #@ stub QueryStateContainerItemInfo
@@ -1256,8 +1256,8 @@
 @ stdcall -version=0x601+ QueryUnbiasedInterruptTime(ptr) kernel32.QueryUnbiasedInterruptTime
 @ stdcall QueryUnbiasedInterruptTimePrecise(ptr) kernel32.QueryUnbiasedInterruptTimePrecise
 #@ stdcall QueryVirtualMemoryInformation(long ptr long ptr long ptr)
-#@ stdcall QueryWorkingSet(long ptr long)
-#@ stdcall QueryWorkingSetEx(long ptr long)
+@ stdcall -version=0x601+ QueryWorkingSet(ptr ptr long) psapi.QueryWorkingSet
+@ stdcall -version=0x601+ QueryWorkingSetEx(ptr ptr long) psapi.QueryWorkingSetEx
 #@ stdcall QueueUserAPC(ptr long long)
 #@ stdcall QueueUserWorkItem(ptr ptr long)
 # #@ stub QuirkGetData
@@ -1294,31 +1294,31 @@
 # #@ stub ReclaimVirtualMemory
 # #@ stub RefreshPolicyExInternal
 # #@ stub RefreshPolicyInternal
-#@ stdcall RegCloseKey(long)
-#@ stdcall RegCopyTreeW(long wstr long)
-#@ stdcall RegCreateKeyExA(long str long ptr long long ptr ptr ptr)
+@ stdcall -version=0x601+ RegCloseKey(long) advapi32.RegCloseKey
+@ stdcall -version=0x601+ RegCopyTreeW(ptr wstr ptr) advapi32.RegCopyTreeW
+@ stdcall -version=0x601+ RegCreateKeyExA(long str long ptr long long ptr ptr ptr) advapi32.RegCreateKeyExA
 # #@ stub RegCreateKeyExInternalA
 # #@ stub RegCreateKeyExInternalW
-#@ stdcall RegCreateKeyExW(long wstr long ptr long long ptr ptr ptr)
-#@ stdcall RegDeleteKeyExA(long str long long)
+@ stdcall -version=0x601+ RegCreateKeyExW(long wstr long ptr long long ptr ptr ptr) advapi32.RegCreateKeyExW
+@ stdcall -version=0x601+ RegDeleteKeyExA(long str long long) advapi32.RegDeleteKeyExA
 # #@ stub RegDeleteKeyExInternalA
 # #@ stub RegDeleteKeyExInternalW
-#@ stdcall RegDeleteKeyExW(long wstr long long)
-#@ stdcall RegDeleteKeyValueA(long str str)
-#@ stdcall RegDeleteKeyValueW(long wstr wstr)
-#@ stdcall RegDeleteTreeA(long str)
-#@ stdcall RegDeleteTreeW(long wstr)
-#@ stdcall RegDeleteValueA(long str)
-#@ stdcall RegDeleteValueW(long wstr)
-# #@ stub RegDisablePredefinedCacheEx
-#@ stdcall RegEnumKeyExA(long long ptr ptr ptr ptr ptr ptr)
-#@ stdcall RegEnumKeyExW(long long ptr ptr ptr ptr ptr ptr)
-#@ stdcall RegEnumValueA(long long ptr ptr ptr ptr ptr ptr)
-#@ stdcall RegEnumValueW(long long ptr ptr ptr ptr ptr ptr)
-#@ stdcall RegFlushKey(long)
-#@ stdcall RegGetKeySecurity(long long ptr ptr)
-#@ stdcall RegGetValueA(long str str long ptr ptr ptr)
-#@ stdcall RegGetValueW(long wstr wstr long ptr ptr ptr)
+@ stdcall -version=0x601+ RegDeleteKeyExW(long wstr long long) advapi32.RegDeleteKeyExW
+@ stdcall -version=0x601+ RegDeleteKeyValueA(long wstr wstr) advapi32.RegDeleteKeyValueA
+@ stdcall -version=0x601+ RegDeleteKeyValueW(long wstr wstr) advapi32.RegDeleteKeyValueW
+@ stdcall -version=0x601+ RegDeleteTreeA(long str) advapi32.RegDeleteTreeA
+@ stdcall -version=0x601+ RegDeleteTreeW(long wstr) advapi32.RegDeleteTreeW
+@ stdcall -version=0x601+ RegDeleteValueA(long str) advapi32.RegDeleteValueA
+@ stdcall -version=0x601+ RegDeleteValueW(long wstr) advapi32.RegDeleteValueW
+@ stdcall -version=0x601+ RegDisablePredefinedCacheEx() advapi32.RegDisablePredefinedCacheEx
+@ stdcall -version=0x601+ RegEnumKeyExA(long long ptr ptr ptr ptr ptr ptr) advapi32.RegEnumKeyExA
+@ stdcall -version=0x601+ RegEnumKeyExW(long long ptr ptr ptr ptr ptr ptr) advapi32.RegEnumKeyExW
+@ stdcall -version=0x601+ RegEnumValueA(long long ptr ptr ptr ptr ptr ptr) advapi32.RegEnumValueA
+@ stdcall -version=0x601+ RegEnumValueW(long long ptr ptr ptr ptr ptr ptr) advapi32.RegEnumValueW
+@ stdcall -version=0x601+ RegFlushKey(long) advapi32.RegFlushKey
+@ stdcall -version=0x601+ RegGetKeySecurity(long long ptr ptr) advapi32.RegGetKeySecurity
+@ stdcall -version=0x601+ RegGetValueA(long str str long ptr ptr ptr) advapi32.RegGetValueA
+@ stdcall -version=0x601+ RegGetValueW(long wstr wstr long ptr ptr ptr) advapi32.RegGetValueW
 # #@ stub RegKrnGetAppKeyEventAddressInternal
 # #@ stub RegKrnGetAppKeyLoaded
 # #@ stub RegKrnGetClassesEnumTableAddressInternal
@@ -1329,32 +1329,32 @@
 # #@ stub RegKrnSetTermsrvRegistryExtensionFlags
 #@ stdcall RegLoadAppKeyA(str ptr long long long)
 #@ stdcall RegLoadAppKeyW(wstr ptr long long long)
-#@ stdcall RegLoadKeyA(long str str)
-#@ stdcall RegLoadKeyW(long wstr wstr)
-#@ stdcall RegLoadMUIStringA(long str str long ptr long str)
-#@ stdcall RegLoadMUIStringW(long wstr wstr long ptr long wstr)
-#@ stdcall RegNotifyChangeKeyValue(long long long long long)
-#@ stdcall RegOpenCurrentUser(long ptr)
-#@ stdcall RegOpenKeyExA(long str long long ptr)
+@ stdcall -version=0x601+ RegLoadKeyA(long str str) advapi32.RegLoadKeyA
+@ stdcall -version=0x601+ RegLoadKeyW(long wstr wstr) advapi32.RegLoadKeyW
+@ stdcall -version=0x601+ RegLoadMUIStringA(ptr str str long ptr long str) advapi32.RegLoadMUIStringA
+@ stdcall -version=0x601+ RegLoadMUIStringW(ptr wstr wstr long ptr long wstr) advapi32.RegLoadMUIStringW
+@ stdcall -version=0x601+ RegNotifyChangeKeyValue(long long long long long) advapi32.RegNotifyChangeKeyValue
+@ stdcall -version=0x601+ RegOpenCurrentUser(long ptr) advapi32.RegOpenCurrentUser
+@ stdcall -version=0x601+ RegOpenKeyExA(long str long long ptr) advapi32.RegOpenKeyExA
 # #@ stub RegOpenKeyExInternalA
 # #@ stub RegOpenKeyExInternalW
-#@ stdcall RegOpenKeyExW(long wstr long long ptr)
-#@ stdcall RegOpenUserClassesRoot(ptr long long ptr)
-#@ stdcall RegQueryInfoKeyA(long ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr)
-#@ stdcall RegQueryInfoKeyW(long ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr)
-#@ stdcall RegQueryValueExA(long str ptr ptr ptr ptr)
-#@ stdcall RegQueryValueExW(long wstr ptr ptr ptr ptr)
-#@ stdcall RegRestoreKeyA(long str long)
-#@ stdcall RegRestoreKeyW(long wstr long)
-#@ stdcall RegSaveKeyExA(long str ptr long)
-#@ stdcall RegSaveKeyExW(long wstr ptr long)
-#@ stdcall RegSetKeySecurity(long long ptr)
-#@ stdcall RegSetKeyValueA(long str str long ptr long)
-#@ stdcall RegSetKeyValueW(long wstr wstr long ptr long)
-#@ stdcall RegSetValueExA(long str long long ptr long)
-#@ stdcall RegSetValueExW(long wstr long long ptr long)
-#@ stdcall RegUnLoadKeyA(long str)
-#@ stdcall RegUnLoadKeyW(long wstr)
+@ stdcall -version=0x601+ RegOpenKeyExW(long wstr long long ptr) advapi32.RegOpenKeyExW
+@ stdcall -version=0x601+ RegOpenUserClassesRoot(ptr long long ptr) advapi32.RegOpenUserClassesRoot
+@ stdcall -version=0x601+ RegQueryInfoKeyA(long ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr) advapi32.RegQueryInfoKeyA
+@ stdcall -version=0x601+ RegQueryInfoKeyW(long ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr) advapi32.RegQueryInfoKeyW
+@ stdcall -version=0x601+ RegQueryValueExA(long str ptr ptr ptr ptr) advapi32.RegQueryValueExA
+@ stdcall -version=0x601+ RegQueryValueExW(long wstr ptr ptr ptr ptr) advapi32.RegQueryValueExW
+@ stdcall -version=0x601+ RegRestoreKeyA(long str long) advapi32.RegRestoreKeyA
+@ stdcall -version=0x601+ RegRestoreKeyW(long wstr long) advapi32.RegRestoreKeyW
+@ stdcall -version=0x601+ RegSaveKeyExA(long str ptr long) advapi32.RegSaveKeyExA
+@ stdcall -version=0x601+ RegSaveKeyExW(long str ptr long) advapi32.RegSaveKeyExW
+@ stdcall -version=0x601+ RegSetKeySecurity(long long ptr) advapi32.RegSetKeySecurity
+@ stdcall -version=0x601+ RegSetKeyValueA(long str str long ptr long) advapi32.RegSetKeyValueA
+@ stdcall -version=0x601+ RegSetKeyValueW(long wstr wstr long ptr long) advapi32.RegSetKeyValueW
+@ stdcall -version=0x601+ RegSetValueExA(long str long long ptr long) advapi32.RegSetValueExA
+@ stdcall -version=0x601+ RegSetValueExW(long wstr long long ptr long) advapi32.RegSetValueExW
+@ stdcall -version=0x601+ RegUnLoadKeyA(long str) advapi32.RegUnLoadKeyA
+@ stdcall -version=0x601+ RegUnLoadKeyW(long wstr) advapi32.RegUnLoadKeyW
 # #@ stub RegisterBadMemoryNotification
 # #@ stub RegisterGPNotificationInternal
 # #@ stub RegisterStateChangeNotification
@@ -1362,6 +1362,8 @@
 @ stdcall RegisterTraceGuidsW(ptr ptr ptr long ptr wstr wstr ptr) ntdll.EtwRegisterTraceGuidsW
 #@ stdcall RegisterWaitForSingleObjectEx(long ptr ptr long long)
 #@ stdcall ReleaseActCtx(ptr)
+@ stdcall -version=0x601+ RegQueryMultipleValuesA(long ptr long ptr ptr) advapi32.RegQueryMultipleValuesA
+@ stdcall -version=0x601+ RegQueryMultipleValuesW(long ptr long ptr ptr) advapi32.RegQueryMultipleValuesW
 @ stdcall ReleaseMutex(long) kernel32.ReleaseMutex
 @ stdcall -version=0x600+ ReleaseMutexWhenCallbackReturns(ptr ptr) ntdll.TpCallbackReleaseMutexOnCompletion
 @ stdcall -version=0x600+ ReleaseSRWLockExclusive(ptr) kernel32.ReleaseSRWLockExclusive
@@ -1388,38 +1390,38 @@
 #@ stdcall ResolveLocaleName(wstr ptr long)
 #@ stdcall RestoreLastError(long) ntdll.RtlRestoreLastWin32Error
 #@ stdcall ResumeThread(long)
-#@ stdcall RevertToSelf()
+@ stdcall -version=0x601+ RevertToSelf() advapi32.RevertToSelf
 # #@ stub RsopLoggingEnabledInternal
-# #@ stub SHCoCreateInstance
+@ stdcall -version=0x601+ SHCoCreateInstance(wstr ptr ptr ptr ptr) shell32.SHCoCreateInstance
 #@ stdcall SHExpandEnvironmentStringsA(str ptr long) ExpandEnvironmentStringsA
 #@ stdcall SHExpandEnvironmentStringsW(wstr ptr long) ExpandEnvironmentStringsW
 @ stdcall SHLoadIndirectString(wstr ptr long ptr)
 # #@ stub SHLoadIndirectStringInternal
-#@ stdcall SHRegCloseUSKey(ptr)
-#@ stdcall SHRegCreateUSKeyA(str long long ptr long)
-#@ stdcall SHRegCreateUSKeyW(wstr long long ptr long)
-#@ stdcall SHRegDeleteEmptyUSKeyA(long str long)
-#@ stdcall SHRegDeleteEmptyUSKeyW(long wstr long)
-#@ stdcall SHRegDeleteUSValueA(long str long)
-#@ stdcall SHRegDeleteUSValueW(long wstr long)
-#@ stdcall SHRegEnumUSKeyA(long long str ptr long)
-#@ stdcall SHRegEnumUSKeyW(long long wstr ptr long)
-#@ stdcall SHRegEnumUSValueA(long long ptr ptr ptr ptr ptr long)
-#@ stdcall SHRegEnumUSValueW(long long ptr ptr ptr ptr ptr long)
-#@ stdcall SHRegGetBoolUSValueA(str str long long)
-#@ stdcall SHRegGetBoolUSValueW(wstr wstr long long)
-#@ stdcall SHRegGetUSValueA(str str ptr ptr ptr long ptr long)
-#@ stdcall SHRegGetUSValueW(wstr wstr ptr ptr ptr long ptr long)
-#@ stdcall SHRegOpenUSKeyA(str long long ptr long)
-#@ stdcall SHRegOpenUSKeyW(wstr long long ptr long)
-#@ stdcall SHRegQueryInfoUSKeyA(long ptr ptr ptr ptr long)
-#@ stdcall SHRegQueryInfoUSKeyW(long ptr ptr ptr ptr long)
-#@ stdcall SHRegQueryUSValueA(long str ptr ptr ptr long ptr long)
-#@ stdcall SHRegQueryUSValueW(long wstr ptr ptr ptr long ptr long)
-#@ stdcall SHRegSetUSValueA(str str long ptr long long)
-#@ stdcall SHRegSetUSValueW(wstr wstr long ptr long long)
-#@ stdcall SHRegWriteUSValueA(long str long ptr long long)
-#@ stdcall SHRegWriteUSValueW(long wstr long ptr long long)
+@ stdcall -version=0x601+ SHRegCloseUSKey(ptr) shlwapi.SHRegCloseUSKey
+@ stdcall -version=0x601+ SHRegCreateUSKeyA(str long long ptr long) shlwapi.SHRegCreateUSKeyA
+@ stdcall -version=0x601+ SHRegCreateUSKeyW(wstr long long ptr long) shlwapi.SHRegCreateUSKeyW
+@ stdcall -version=0x601+ SHRegDeleteEmptyUSKeyA(long str long) shlwapi.SHRegDeleteEmptyUSKeyA
+@ stdcall -version=0x601+ SHRegDeleteEmptyUSKeyW(long wstr long) shlwapi.SHRegDeleteEmptyUSKeyW
+@ stdcall -version=0x601+ SHRegDeleteUSValueA(long str long) shlwapi.SHRegDeleteUSValueA
+@ stdcall -version=0x601+ SHRegDeleteUSValueW(long wstr long) shlwapi.SHRegDeleteUSValueW
+@ stdcall -version=0x601+ SHRegEnumUSKeyA(long long str ptr long) shlwapi.SHRegEnumUSKeyA
+@ stdcall -version=0x601+ SHRegEnumUSKeyW(long long wstr ptr long) shlwapi.SHRegEnumUSKeyW
+@ stdcall -version=0x601+ SHRegEnumUSValueA(long long ptr ptr ptr ptr ptr long) shlwapi.SHRegEnumUSValueA
+@ stdcall -version=0x601+ SHRegEnumUSValueW(long long ptr ptr ptr ptr ptr long) shlwapi.SHRegEnumUSValueW
+@ stdcall -version=0x601+ SHRegGetBoolUSValueA(str str long long) shlwapi.SHRegGetBoolUSValueA
+@ stdcall -version=0x601+ SHRegGetBoolUSValueW(wstr wstr long long) shlwapi.SHRegGetBoolUSValueW
+@ stdcall -version=0x601+ SHRegGetUSValueA(str str ptr ptr ptr long ptr long) shlwapi.SHRegGetUSValueA
+@ stdcall -version=0x601+ SHRegGetUSValueW(wstr wstr ptr ptr ptr long ptr long) shlwapi.SHRegGetUSValueW
+@ stdcall -version=0x601+ SHRegOpenUSKeyA(str long long long long) shlwapi.SHRegOpenUSKeyA
+@ stdcall -version=0x601+ SHRegOpenUSKeyW(wstr long long long long) shlwapi.SHRegOpenUSKeyW
+@ stdcall -version=0x601+ SHRegQueryInfoUSKeyA(long ptr ptr ptr ptr long) shlwapi.SHRegQueryInfoUSKeyA
+@ stdcall -version=0x601+ SHRegQueryInfoUSKeyW(long ptr ptr ptr ptr long) shlwapi.SHRegQueryInfoUSKeyW
+@ stdcall -version=0x601+ SHRegQueryUSValueA(long str ptr ptr ptr long ptr long) shlwapi.SHRegQueryUSValueA
+@ stdcall -version=0x601+ SHRegQueryUSValueW(long wstr ptr ptr ptr long ptr long) shlwapi.SHRegQueryUSValueW
+@ stdcall -version=0x601+ SHRegSetUSValueA(str str long ptr long long) shlwapi.SHRegSetUSValueA
+@ stdcall -version=0x601+ SHRegSetUSValueW(wstr wstr long ptr long long) shlwapi.SHRegSetUSValueW
+@ stdcall -version=0x601+ SHRegWriteUSValueA(long str long ptr long long) shlwapi.SHRegWriteUSValueA
+@ stdcall -version=0x601+ SHRegWriteUSValueW(long wstr long ptr long long) shlwapi.SHRegWriteUSValueW
 @ stdcall SHTruncateString(str long)
 # #@ stub SaveAlternatePackageRootPath
 # #@ stub SaveStateRootFolderPath
@@ -1427,7 +1429,7 @@
 #@ stdcall ScrollConsoleScreenBufferW(long ptr ptr ptr ptr)
 #@ stdcall SearchPathA(str str str long ptr ptr)
 #@ stdcall SearchPathW(wstr wstr wstr long ptr ptr)
-#@ stdcall SetAclInformation(ptr ptr long long)
+@ stdcall -version=0x601+ SetAclInformation(ptr ptr long long) advapi32.SetAclInformation
 #@ stdcall SetCachedSigningLevel(ptr long long long)
 #@ stdcall SetCalendarInfoW(long long long wstr)
 # #@ stub SetClientDynamicTimeZoneInformation
@@ -1480,21 +1482,21 @@
 # #@ stub SetFileIoOverlappedRange
 #@ stdcall SetFilePointer(long long ptr long)
 #@ stdcall SetFilePointerEx(long int64 ptr long)
-#@ stdcall SetFileSecurityW(wstr long ptr)
+@ stdcall -version=0x601+ SetFileSecurityW(wstr long ptr) advapi32.SetFileSecurityW
 #@ stdcall SetFileTime(long ptr ptr ptr)
 #@ stdcall SetFileValidData(ptr int64)
 #@ stdcall SetHandleCount(long)
 #@ stdcall SetHandleInformation(long long long)
 # #@ stub SetIsDeveloperModeEnabled
 # #@ stub SetIsSideloadingEnabled
-#@ stdcall SetKernelObjectSecurity(long long ptr)
+@ stdcall -version=0x601+ SetKernelObjectSecurity(long long ptr) advapi32.SetKernelObjectSecurity
 #@ stub SetLastConsoleEventActive
 #@ stdcall SetLastError(long) ntdll.RtlSetLastWin32Error
 #@ stdcall SetLocalTime(ptr)
 #@ stdcall SetLocaleInfoW(long long wstr)
 #@ stdcall SetNamedPipeHandleState(long ptr ptr ptr)
 #@ stdcall SetPriorityClass(long long)
-#@ stdcall SetPrivateObjectSecurity(long ptr ptr ptr long)
+@ stdcall -version=0x601+ SetPrivateObjectSecurity(long ptr ptr ptr long) advapi32.SetPrivateObjectSecurity
 #@ stdcall SetPrivateObjectSecurityEx(long ptr ptr long ptr long)
 #@ stdcall SetProcessAffinityUpdateMode(long long)
 #@ stdcall SetProcessDefaultCpuSets(ptr ptr long)
@@ -1508,13 +1510,13 @@
 #@ stdcall SetProcessWorkingSetSizeEx(long long long long)
 # #@ stub SetProtectedPolicy
 # #@ stub SetRoamingLastObservedChangeTime
-#@ stub SetSecurityAccessMask
-#@ stdcall SetSecurityDescriptorControl(ptr long long)
-#@ stdcall SetSecurityDescriptorDacl(ptr long ptr long)
-#@ stdcall SetSecurityDescriptorGroup(ptr ptr long)
-#@ stdcall SetSecurityDescriptorOwner(ptr ptr long)
-#@ stub SetSecurityDescriptorRMControl
-#@ stdcall SetSecurityDescriptorSacl(ptr long ptr long)
+@ stdcall -version=0x601+ SetSecurityAccessMask(long ptr) advapi32.SetSecurityAccessMask
+@ stdcall -version=0x601+ SetSecurityDescriptorControl(ptr long long) advapi32.SetSecurityDescriptorControl
+@ stdcall -version=0x601+ SetSecurityDescriptorDacl(ptr long ptr long) advapi32.SetSecurityDescriptorDacl
+@ stdcall -version=0x601+ SetSecurityDescriptorGroup(ptr ptr long) advapi32.SetSecurityDescriptorGroup
+@ stdcall -version=0x601+ SetSecurityDescriptorOwner(ptr ptr long) advapi32.SetSecurityDescriptorOwner
+@ stdcall -version=0x601+ SetSecurityDescriptorRMControl(ptr ptr) advapi32.SetSecurityDescriptorRMControl
+@ stdcall -version=0x601+ SetSecurityDescriptorSacl(ptr long ptr long) advapi32.SetSecurityDescriptorSacl
 # #@ stub SetStateVersion
 #@ stdcall SetStdHandle(long long)
 #@ stdcall SetStdHandleEx(long long ptr)
@@ -1544,7 +1546,7 @@
 #@ stdcall SetThreadpoolWait(ptr long ptr) ntdll.TpSetWait
 # #@ stub SetThreadpoolWaitEx
 #@ stdcall SetTimeZoneInformation(ptr)
-#@ stdcall SetTokenInformation(long long ptr long)
+@ stdcall -version=0x601+ SetTokenInformation(long long ptr long) advapi32.SetTokenInformation
 #@ stdcall SetUnhandledExceptionFilter(ptr)
 #@ stdcall SetUserGeoID(long)
 #@ stdcall SetUserGeoName(wstr)
@@ -1580,7 +1582,7 @@
 #@ stub StrChrA_MB
 @ stdcall StrChrIA(str long)
 @ stdcall StrChrIW(wstr long)
-#@ stub StrChrNIW
+@ stdcall -version=0x601+ StrChrNIW(wstr long long) shlwapi.StrChrNIW
 @ stdcall StrChrNW(wstr long long)
 @ stdcall StrChrW(wstr long)
 @ stdcall StrCmpCA(str str)
@@ -1645,9 +1647,9 @@
 #@ stdcall TlsFree(long)
 #@ stdcall TlsGetValue(long)
 #@ stdcall TlsSetValue(long ptr)
-#@ stdcall -version=0x600+ TraceEvent(int64 ptr) ntdll.EtwLogTraceEvent
+# @ stdcall -version=0x601+ TraceEvent(double ptr) advapi32.TraceEvent ; not forwarded: a stub in the DLL it would forward to
 @ varargs TraceMessage(int64 long ptr long) ntdll.EtwTraceMessage
-#@ stdcall TraceMessageVa(int64 long ptr long ptr) ntdll.EtwTraceMessageVa
+# @ stdcall -version=0x601+ TraceMessageVa() advapi32.TraceMessageVa ; not forwarded: a stub in the DLL it would forward to
 #@ stdcall TransactNamedPipe(long ptr long ptr long ptr ptr)
 #@ stdcall TransmitCommChar(long long)
 @ stdcall -version=0x601+ TryAcquireSRWLockExclusive(ptr) kernel32.TryAcquireSRWLockExclusive
@@ -1700,12 +1702,12 @@
 @ stdcall UrlIsW(wstr long)
 @ stdcall UrlUnescapeA(str ptr ptr long)
 @ stdcall UrlUnescapeW(wstr ptr ptr long)
-#@ stdcall VerFindFileA(long str str str ptr ptr ptr ptr)
-#@ stdcall VerFindFileW(long wstr wstr wstr ptr ptr ptr ptr)
+@ stdcall -version=0x601+ VerFindFileA(long str str str ptr ptr ptr ptr) version.VerFindFileA
+@ stdcall -version=0x601+ VerFindFileW(long wstr wstr wstr ptr ptr ptr ptr) version.VerFindFileW
 #@ stdcall VerLanguageNameA(long str long)
 #@ stdcall VerLanguageNameW(long wstr long)
-#@ stdcall VerQueryValueA(ptr str ptr ptr)
-#@ stdcall VerQueryValueW(ptr wstr ptr ptr)
+@ stdcall -version=0x601+ VerQueryValueA(ptr str ptr ptr) version.VerQueryValueA
+@ stdcall -version=0x601+ VerQueryValueW(ptr wstr ptr ptr) version.VerQueryValueW
 #@ stdcall -ret64 VerSetConditionMask(long long long long) ntdll.VerSetConditionMask
 # #@ stub VerifyApplicationUserModelId
 # #@ stub VerifyPackageFamilyName
