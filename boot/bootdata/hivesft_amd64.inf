@@ -29,6 +29,16 @@ HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.M
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager","Threading",0x00010001,0
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager","TrustLevel",0x00010001,1
 
+; The 32-bit view of the DispatcherQueue WinRT classes (CreateDispatcherQueueController, Windows.System.DispatcherQueue*): SysWOW64\CoreMessaging.dll.
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueue","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueue","DllPath",0x00020000,"%SystemRoot%\SysWOW64\CoreMessaging.dll"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueue","Threading",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueue","TrustLevel",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueueController","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueueController","DllPath",0x00020000,"%SystemRoot%\SysWOW64\CoreMessaging.dll"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueueController","Threading",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueueController","TrustLevel",0x00010001,0
+
 ; The 32-bit view of the UISettings WinRT class (Qt 6.8 builds its Windows platform theme from it): SysWOW64\Windows.UI.dll.
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings","ActivationType",0x00010001,0
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings","DllPath",0x00020000,"%SystemRoot%\SysWOW64\Windows.UI.dll"
