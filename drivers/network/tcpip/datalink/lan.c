@@ -43,6 +43,7 @@ typedef struct _LAN_WQ_ITEM {
     UINT BytesTransferred;
     BOOLEAN LegacyReceive;
     BOOLEAN Held;
+    BOOLEAN FromOwnLink;    /* Frame is one our own send path looped back (LanLoopTagged), taken at indication */
 } LAN_WQ_ITEM, *PLAN_WQ_ITEM;
 
 typedef struct _RECONFIGURE_CONTEXT {
@@ -114,27 +115,55 @@ NDIS_STATUS NDISCall(
     return NdisStatus;
 }
 
-/* The frame carries this adapter's own MAC as its source: NDIS looped a frame the host sent back up
-   (traffic to one of the host's own addresses). Used by the inbound filter to tell that from a
-   frame that arrived from the wire. */
+/* Frames the host sends to its own address.
+   NDIS loops those back up from inside NdisSend (the miniport has NO_LOOPBACK set, or loops them itself),
+   on the CPU that sends, before NdisSend returns. LANTransmit tags that window: LanLoopAdapter[cpu] holds
+   the adapter while a frame addressed to the adapter's own MAC is inside NdisSend (IRQL is DISPATCH_LEVEL
+   there: LANTransmit holds the adapter lock, so no wire frame can be indicated on this CPU meanwhile). The
+   receive handlers read the tag at indication time. The frame's source MAC is deliberately not what
+   decides it: a peer on the wire can put our MAC and our IP on a frame, and that frame must be filtered like
+   any other inbound one. The inbound filter passes only tagged frames as local traffic. */
+static PVOID volatile LanLoopAdapter[MAXIMUM_PROCESSORS];
+
 static BOOLEAN
-LanSourceIsOwn(PLAN_ADAPTER Adapter, PVOID HeaderBuffer, ULONG HeaderBufferSize)
+LanDestIsOwn(PLAN_ADAPTER Adapter, PETH_HEADER Header)
 {
+    return RtlCompareMemory(Header->DstAddr, Adapter->HWAddress, IEEE_802_ADDR_LENGTH) == IEEE_802_ADDR_LENGTH;
+}
+
+/* True while the calling CPU is inside NdisSend of a frame to this adapter's own MAC: the frame being
+   indicated now is that frame, looped back. Cheap sanity check on top: it must also carry our MAC as source
+   (LANTransmit puts it there). */
+static BOOLEAN
+LanLoopTagged(PLAN_ADAPTER Adapter, PVOID HeaderBuffer, ULONG HeaderBufferSize)
+{
+    KIRQL OldIrql;
+    ULONG Cpu;
+    BOOLEAN Tagged;
+
     if (Adapter->Media != NdisMedium802_3 || HeaderBufferSize < sizeof(ETH_HEADER) ||
         Adapter->HWAddressLength != IEEE_802_ADDR_LENGTH)
         return FALSE;
-    return RtlCompareMemory(((PETH_HEADER)HeaderBuffer)->SrcAddr, Adapter->HWAddress, IEEE_802_ADDR_LENGTH) == IEEE_802_ADDR_LENGTH;
+
+    /* the CPU number must not change while it is read */
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+    Cpu = KeGetCurrentProcessorNumber();
+    Tagged = Cpu < MAXIMUM_PROCESSORS && LanLoopAdapter[Cpu] == (PVOID)Adapter;
+    KeLowerIrql(OldIrql);
+
+    return Tagged &&
+           RtlCompareMemory(((PETH_HEADER)HeaderBuffer)->SrcAddr, Adapter->HWAddress, IEEE_802_ADDR_LENGTH) == IEEE_802_ADDR_LENGTH;
 }
 
 static BOOLEAN
-LanNdisPacketSourceIsOwn(PLAN_ADAPTER Adapter, PNDIS_PACKET NdisPacket)
+LanNdisPacketLoopTagged(PLAN_ADAPTER Adapter, PNDIS_PACKET NdisPacket)
 {
     UCHAR Header[sizeof(ETH_HEADER)];
 
     if (Adapter->Media != NdisMedium802_3 ||
         CopyPacketToBuffer((PCHAR)Header, NdisPacket, 0, sizeof(Header)) != sizeof(Header))
         return FALSE;
-    return LanSourceIsOwn(Adapter, Header, sizeof(Header));
+    return LanLoopTagged(Adapter, Header, sizeof(Header));
 }
 
 /* Used by legacy ProtocolReceive for packet type */
@@ -445,13 +474,14 @@ static VOID LanReceivePacket(
     PLAN_ADAPTER Adapter,
     PNDIS_PACKET Packet,
     UINT BytesTransferred,
-    BOOLEAN LegacyReceive);
+    BOOLEAN LegacyReceive,
+    BOOLEAN FromOwnLink);
 
 static VOID LanReceiveItem( PLAN_WQ_ITEM WorkItem ) {
     PNDIS_PACKET Packet;
     PLAN_ADAPTER Adapter;
     UINT BytesTransferred;
-    BOOLEAN LegacyReceive, Held;
+    BOOLEAN LegacyReceive, Held, FromOwnLink;
 
     TI_DbgPrint(DEBUG_DATALINK, ("Called.\n"));
 
@@ -460,10 +490,11 @@ static VOID LanReceiveItem( PLAN_WQ_ITEM WorkItem ) {
     BytesTransferred = WorkItem->BytesTransferred;
     LegacyReceive = WorkItem->LegacyReceive;
     Held = WorkItem->Held;
+    FromOwnLink = WorkItem->FromOwnLink;
 
     ExFreePoolWithTag(WorkItem, WQ_CONTEXT_TAG);
 
-    LanReceivePacket(Adapter, Packet, BytesTransferred, LegacyReceive);
+    LanReceivePacket(Adapter, Packet, BytesTransferred, LegacyReceive, FromOwnLink);
 
     /* The miniport's packet has left the queue */
     if (Held)
@@ -503,7 +534,8 @@ static VOID LanReceivePacket(
     PLAN_ADAPTER Adapter,
     PNDIS_PACKET Packet,
     UINT BytesTransferred,
-    BOOLEAN LegacyReceive) {
+    BOOLEAN LegacyReceive,
+    BOOLEAN FromOwnLink) {
     ULONG PacketType;
     BOOLEAN NonUnicast = FALSE;
     IP_PACKET IPPacket;
@@ -543,7 +575,7 @@ static VOID LanReceivePacket(
 
         /* A legacy receive was counted by ProtocolReceive or LanSubmitReceiveCopy, which had the header */
         LanCountReceivedFrame(Adapter, NonUnicast);
-        IPPacket.FromOwnLink = LanNdisPacketSourceIsOwn(Adapter, IPPacket.NdisPacket);
+        IPPacket.FromOwnLink = FromOwnLink;
 
         /* Data is at the end of the media header */
         IPPacket.Position = Adapter->HeaderSize;
@@ -609,7 +641,8 @@ BOOLEAN LanSubmitReceiveWork(
     PNDIS_PACKET Packet,
     UINT BytesTransferred,
     BOOLEAN LegacyReceive,
-    BOOLEAN Tcp) {
+    BOOLEAN Tcp,
+    BOOLEAN FromOwnLink) {
     PLAN_WQ_ITEM WQItem = ExAllocatePoolWithTag(NonPagedPool, sizeof(LAN_WQ_ITEM),
                                                 WQ_CONTEXT_TAG);
     PLAN_ADAPTER Adapter = (PLAN_ADAPTER)BindingContext;
@@ -624,6 +657,7 @@ BOOLEAN LanSubmitReceiveWork(
     WQItem->BytesTransferred = BytesTransferred;
     WQItem->LegacyReceive = LegacyReceive;
     WQItem->Held = Tcp && !LegacyReceive;
+    WQItem->FromOwnLink = FromOwnLink;
 
     /* TCP segments go through one worker per adapter, so they reach TCP in the order
        they were indicated. Other frames keep a work item each: nothing they wait for
@@ -680,7 +714,8 @@ VOID NTAPI ProtocolTransferDataComplete(
                               Packet,
                               BytesTransferred,
                               TRUE,
-                              LanIsTcpPacket(BindingContext, Packet, TRUE)))
+                              LanIsTcpPacket(BindingContext, Packet, TRUE),
+                              FALSE /* unused: the tag was kept in the packet context */))
         FreeNdisPacket(Packet);
 }
 
@@ -706,11 +741,11 @@ static VOID LanSubmitReceiveCopy(
     GetDataPtr(Copy, 0, &Data, &Size);
     CopyPacketToBuffer(Data, NdisPacket, Adapter->HeaderSize, Length);
     PC(Copy)->PacketType = PacketType;
-    PC(Copy)->FromOwnLink = LanNdisPacketSourceIsOwn(Adapter, NdisPacket);
+    PC(Copy)->FromOwnLink = LanNdisPacketLoopTagged(Adapter, NdisPacket);
 
     LanCountReceivedFrame(Adapter, NonUnicast);
 
-    if (!LanSubmitReceiveWork(Adapter, Copy, Length, TRUE, TRUE))
+    if (!LanSubmitReceiveWork(Adapter, Copy, Length, TRUE, TRUE, FALSE))
         FreeNdisPacket(Copy);
 }
 
@@ -719,7 +754,7 @@ INT NTAPI ProtocolReceivePacket(
     PNDIS_PACKET NdisPacket)
 {
     PLAN_ADAPTER Adapter = BindingContext;
-    BOOLEAN Tcp;
+    BOOLEAN Tcp, FromOwnLink;
 
     if (Adapter->State != LAN_STATE_STARTED) {
         TI_DbgPrint(DEBUG_DATALINK, ("Adapter is stopped.\n"));
@@ -727,6 +762,7 @@ INT NTAPI ProtocolReceivePacket(
     }
 
     Tcp = LanIsTcpPacket(Adapter, NdisPacket, FALSE);
+    FromOwnLink = LanNdisPacketLoopTagged(Adapter, NdisPacket);   /* only valid here, inside the indication */
 
     if (Tcp && InterlockedIncrement(&Adapter->HeldPackets) > LAN_MAX_HELD_PACKETS) {
         InterlockedDecrement(&Adapter->HeldPackets);
@@ -738,7 +774,8 @@ INT NTAPI ProtocolReceivePacket(
                               NdisPacket,
                               0, /* Unused */
                               FALSE,
-                              Tcp)) {
+                              Tcp,
+                              FromOwnLink)) {
         if (Tcp)
             InterlockedDecrement(&Adapter->HeldPackets);
         return 0;
@@ -811,7 +848,7 @@ NDIS_STATUS NTAPI ProtocolReceive(
     }
 
     PC(NdisPacket)->PacketType = PacketType;
-    PC(NdisPacket)->FromOwnLink = LanSourceIsOwn(Adapter, HeaderBuffer, HeaderBufferSize);
+    PC(NdisPacket)->FromOwnLink = LanLoopTagged(Adapter, HeaderBuffer, HeaderBufferSize);
 
     TI_DbgPrint(DEBUG_DATALINK, ("pretransfer LookaheadBufferSize %d packsize %d\n",LookaheadBufferSize,PacketSize));
 
@@ -1443,9 +1480,22 @@ VOID LANTransmit(
 	TcpipAcquireSpinLock( &Adapter->Lock, &OldIrql );
 	TI_DbgPrint(MID_TRACE, ("NdisSend\n"));
 	/* LANUnregisterAdapter closes the binding under the lock */
-	if (Adapter->NdisHandle)
+	if (Adapter->NdisHandle) {
+	    /* NDIS loops a frame to our own MAC back up from inside this call: tag that window (see LanLoopAdapter).
+	       The lock is held, so this is DISPATCH_LEVEL and the CPU number is stable */
+	    PVOID PrevTag = NULL;
+	    ULONG Cpu = KeGetCurrentProcessorNumber();
+	    BOOLEAN Tag = Adapter->Media == NdisMedium802_3 && Cpu < MAXIMUM_PROCESSORS &&
+	                  LanDestIsOwn(Adapter, (PETH_HEADER)Data);
+
+	    if (Tag) {
+	        PrevTag = LanLoopAdapter[Cpu];
+	        LanLoopAdapter[Cpu] = Adapter;
+	    }
 	    NdisSend(&NdisStatus, Adapter->NdisHandle, XmitPacket);
-	else
+	    if (Tag)
+	        LanLoopAdapter[Cpu] = PrevTag;
+	} else
 	    NdisStatus = NDIS_STATUS_CLOSING;
 	TI_DbgPrint(MID_TRACE, ("NdisSend %s\n",
 				NdisStatus == NDIS_STATUS_PENDING ?

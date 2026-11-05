@@ -23,8 +23,8 @@
  * ICMP requests and other protocols that no Allow rule admits, or that a Block rule matches. Passed
  * without rule evaluation: loopback, TCP segments that are not a connection request (established
  * connections, the stack answers the rest as before), UDP replies from a peer the host sent to recently
- * (flow table), DHCP client replies (UDP 67 -> 68), ICMP replies and errors, and traffic from one of the
- * host's own addresses to one of the host's own addresses (see NitroFwInboundAllowed).
+ * (flow table), DHCP client replies (UDP 67 -> 68), ICMP replies and errors, and traffic the host sent to
+ * itself over a real address (the frames our own send path looped back, see NitroFwInboundAllowed).
  */
 
 #include "precomp.h"
@@ -1264,11 +1264,11 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
     if (Interface == Loopback || IPPacket->Type != IP_ADDRESS_V4)
         return TRUE;
 
-    /* Host to itself over a real address (LAN IP to LAN IP): the stack sends it through the adapter and
-       NDIS loops it back with the adapter's own MAC as source. Source and destination both being ours
-       is not enough on its own (a packet from the wire can carry any source address): the frame must
-       also have come from our own MAC (IP_PACKET.FromOwnLink, carried through reassembly: every
-       fragment must have had it). */
+    /* Host to itself over a real address (LAN IP to LAN IP): the stack sends it out through the adapter
+       and NDIS loops it back up from inside the send call. Source and destination both being ours is not
+       enough on its own, and neither is the frame's source MAC (a peer on the wire can send a frame with
+       our MAC and our IP): the frame must be one our own send path tagged as looped back
+       (IP_PACKET.FromOwnLink, carried through reassembly: every fragment must have been tagged). */
     if (IPPacket->FromOwnLink && FwIsOwnUnicast(&IPPacket->SrcAddr) && FwIsOwnUnicast(&IPPacket->DstAddr))
         goto PassCounted;
 
