@@ -291,9 +291,6 @@ typedef struct _CONNECTION_ENDPOINT {
     ULONG RecvWndNow, RecvWndMax;
     /* Window autotuning (a socket that set no SO_RCVBUF): bytes read so far (object lock) and as of the last growth */
     BOOLEAN AutoTune;
-    /* A peer without window scaling (QEMU user networking, old stacks) is limited to a 64K window, which a reader
-       that stalls for a moment shuts: bytes queued (object lock), and bytes acknowledged on arrival, not on read */
-    ULONG RecvQueued, PreCredited;
     ULONG Consumed, AutoSeen;
 
     struct _CONNECTION_ENDPOINT *Next; /* Next connection in address file list */
