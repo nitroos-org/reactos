@@ -79,7 +79,7 @@ LibTCPEmptyQueue(PCONNECTION_ENDPOINT Connection)
     DereferenceObject(Connection);
 }
 
-err_t LibTCPEnqueuePacket(PCONNECTION_ENDPOINT Connection, struct pbuf *p)
+err_t LibTCPEnqueuePacket(PCONNECTION_ENDPOINT Connection, struct pbuf *p, ULONG PreCredit)
 {
     PQUEUE_ENTRY qp;
 
@@ -92,6 +92,8 @@ err_t LibTCPEnqueuePacket(PCONNECTION_ENDPOINT Connection, struct pbuf *p)
 
     LockObject(Connection);
     InsertTailList(&Connection->PacketQueue, &qp->ListEntry);
+    Connection->RecvQueued += p->tot_len;
+    Connection->PreCredited += PreCredit;
     UnlockObject(Connection);
 
     return ERR_OK;
@@ -151,7 +153,15 @@ NTSTATUS LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PUCHA
             RecvLen -= ReadLength;
             RecvBuffer += ReadLength;
             (*Received) += ReadLength;
-            Connection->RecvCredit += ReadLength;
+            /* what was acknowledged on arrival (PreCredited) is not credited again */
+            {
+                ULONG Pre = min(ReadLength, Connection->PreCredited);
+
+                Connection->PreCredited -= Pre;
+                Connection->RecvCredit += ReadLength - Pre;
+            }
+            Connection->RecvQueued -= (Connection->RecvQueued < ReadLength) ? Connection->RecvQueued : ReadLength;
+            Connection->Consumed += ReadLength;
 
             if (qp != NULL)
             {
@@ -200,12 +210,15 @@ NTSTATUS LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PUCHA
  * while the application does not read, although SO_RCVBUF reads 64K (measured on Windows 10 22H2) */
 #define LIBTCP_DEFAULT_WINDOW 0x200000
 
+/* What a peer without window scaling may have queued before its window closes */
+#define LIBTCP_NOWS_QUEUE 0x4000000
+
 /* Opens the receive window by Bytes (as far as the connection's largest window allows) and announces it
  * once: tcp_recved() announces after each call, so a long run of calls is a burst of window updates. The core
  * lock is held */
 static
 VOID
-LibTCPOpenWindow(PTCP_PCB pcb, ULONG Bytes)
+LibTCPOpenWindow(PCONNECTION_ENDPOINT Connection, PTCP_PCB pcb, ULONG Bytes)
 {
     tcpwnd_size_t Room = TCP_WND_MAX(pcb) - pcb->rcv_wnd;
 
@@ -213,7 +226,25 @@ LibTCPOpenWindow(PTCP_PCB pcb, ULONG Bytes)
         Room = 0;
 
     pcb->rcv_wnd += (tcpwnd_size_t)min(Bytes, Room);
-    tcp_recved(pcb, 0);
+
+    /* tcp_recved() would send a window update whenever the window has opened by a few segments. With a
+     * large window the peer has room and the packet is waste (each one costs a guest exit: 20% of the speed
+     * of a download); the update goes out on the next acknowledgement. It is sent when what the peer was told
+     * is less than half of the largest window, the window being nearly shut or small */
+    {
+        tcpwnd_size_t Max = TCP_WND_MAX(pcb);
+        u32_t Inflation = tcp_update_rcv_ann_wnd(pcb);
+        u32_t Left = TCP_SEQ_GT(pcb->rcv_ann_right_edge, pcb->rcv_nxt) ? pcb->rcv_ann_right_edge - pcb->rcv_nxt : 0;
+
+        if (Inflation >= LWIP_MIN(TCP_WND_UPDATE_THRESHOLD, Max / 2) && Left < Max / 2)
+        {
+            tcp_ack_now(pcb);
+            tcp_output(pcb);
+        }
+    }
+
+    Connection->RecvWndNow = pcb->rcv_wnd;
+    Connection->RecvWndMax = TCP_WND_MAX(pcb);
 }
 
 /* The core lock is held */
@@ -234,7 +265,7 @@ LibTCPReturnCreditLocked(PCONNECTION_ENDPOINT Connection)
     if (!pcb || !Credit)
         return;
 
-    LibTCPOpenWindow(pcb, Credit);
+    LibTCPOpenWindow(Connection, pcb, Credit);
 }
 
 static
@@ -258,6 +289,15 @@ LibTCPReturnReceiveCredit(PCONNECTION_ENDPOINT Connection)
     struct lwip_callback_msg *msg;
 
     if (!Connection->RecvCredit)
+        return;
+
+    /* A reader that takes the core lock while the segments of a burst arrive waits for the receive worker,
+     * which holds it for every one of them: the reader stalls for tens of milliseconds to a second, and with
+     * it the window (a 200 MB download to a file ran 25% slower than before the window closed). While the
+     * window is mostly open the credit waits for the next segment, which returns it under the lock the worker
+     * has anyway; a window that is half shut or less is reopened by the reader. At the close of the connection
+     * what is left is returned (LibTCPCloseCallback, LibTCPShutdownCallback). */
+    if (!sys_tcpip_core_locked() && Connection->RecvWndMax && Connection->RecvWndNow > Connection->RecvWndMax / 2)
         return;
 
     if (sys_tcpip_core_locked())
@@ -302,6 +342,7 @@ LibTCPSetReceiveWindow(PCONNECTION_ENDPOINT Connection, ULONG Size)
     if (KeGetCurrentIrql() > APC_LEVEL)
         return STATUS_UNSUCCESSFUL;
 
+    Connection->AutoTune = (Size == 0);
     if (Size == 0)
         Size = LIBTCP_DEFAULT_WINDOW;
     else if (Size < LIBTCP_MIN_WINDOW)
@@ -325,7 +366,7 @@ LibTCPSetReceiveWindow(PCONNECTION_ENDPOINT Connection, ULONG Size)
 
         if (New > Old)
         {
-            LibTCPOpenWindow(pcb, New - Old);
+            LibTCPOpenWindow(Connection, pcb, New - Old);
         }
         else if (New < Old && pcb->rcv_wnd > New)
         {
@@ -397,8 +438,47 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
     {
         /* On lookaside exhaustion let lwIP keep the pbuf and retry later
          * instead of dereferencing a NULL queue entry */
-        if (LibTCPEnqueuePacket(Connection, p) != ERR_OK)
-            return ERR_MEM;
+        {
+            /* Without window scaling the peer'"'"'s window is 64K and the window closes at every stall of the reader
+             * (a file write of 0.3 s): the data is acknowledged on arrival, as it was before the window closed,
+             * while at most LIBTCP_NOWS_QUEUE are queued */
+            ULONG Length = p->tot_len;
+            ULONG Pre = (!(pcb->flags & TF_WND_SCALE) && Connection->RecvQueued < LIBTCP_NOWS_QUEUE) ? Length : 0;
+
+            if (LibTCPEnqueuePacket(Connection, p, Pre) != ERR_OK)
+                return ERR_MEM;
+
+            if (Pre)
+                LibTCPOpenWindow(Connection, pcb, Pre);
+        }
+
+        /* A peer on this machine gets every segment acknowledged at once. lwIP acknowledges every second
+         * segment and the odd one after a timer tick; the sender's Nagle rule holds the short last segment of a
+         * write back until everything before it is acknowledged, so a program that waits for its data before
+         * it writes more (one 8K write is five full segments and a short one) waits a tick per write: 2 MB/s
+         * for a loopback loop that does 50 MB/s when the window update of every segment used to acknowledge
+         * it. Where the round trip costs nothing the extra packet is free */
+        if (ip4_addr_isloopback(&pcb->remote_ip) || ip4_addr_cmp(&pcb->remote_ip, &pcb->local_ip))
+            tcp_ack_now(pcb);
+
+        /* Autotuning, as Windows does (the same default socket took 2.7 MB from a sender that did not read and
+         * 6.9 MB after it had read 64 MB): when the window shuts while the owner reads, the owner is slower
+         * than the peer for a while (a download written to a file stalls for 0.3 to 1.7 s at a time), and the
+         * window doubles, up to TCP_WND (32 MB). Before the window shut, such stalls were hidden by a queue
+         * without limit: a 200 MB download ran 30% slower with a 2 MB window and as fast as before with a
+         * 32 MB one. An owner that does not read gets no more. A SO_RCVBUF is kept as asked, as on Windows. */
+        if (Connection->AutoTune && (pcb->flags & TF_WND_SCALE) && pcb->rcv_wnd < 2 * TCP_MSS &&
+            Connection->Consumed != Connection->AutoSeen && pcb->rcv_wnd_max < TCP_WND)
+        {
+            ULONG Old = pcb->rcv_wnd_max;
+
+            Connection->AutoSeen = Connection->Consumed;
+            pcb->rcv_wnd_max = min(Old * 2, (ULONG)TCP_WND);
+            LibTCPOpenWindow(Connection, pcb, pcb->rcv_wnd_max - Old);
+        }
+
+        Connection->RecvWndNow = pcb->rcv_wnd;
+        Connection->RecvWndMax = TCP_WND_MAX(pcb);
 
         /* The window is given back as the data is read (LibTCPReturnReceiveCredit), not now:
          * a reader that stops reading closes the window, as on Windows */
@@ -1447,6 +1527,8 @@ LibTCPShutdownCallback(void *arg)
         goto done;
     }
 
+    LibTCPReturnCreditLocked(msg->Input.Shutdown.Connection);
+
     /* LwIP makes the (questionable) assumption that SHUTDOWN_RDWR is equivalent to tcp_close().
      * This assumption holds even if the shutdown calls are done separately (even through multiple
      * WinSock shutdown() calls). This assumption means that lwIP has the right to deallocate our
@@ -1642,6 +1724,9 @@ LibTCPCloseCallback(void *arg)
         msg->Output.Close.Error = ERR_OK;
         goto done;
     }
+
+    /* What the owner read and lwIP was not told yet: without it the close sees unread data and resets */
+    LibTCPReturnCreditLocked(msg->Input.Close.Connection);
 
     /* Clear the PCB pointer and stop callbacks */
     msg->Input.Close.Connection->SocketContext = NULL;

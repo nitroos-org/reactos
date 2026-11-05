@@ -286,6 +286,15 @@ typedef struct _CONNECTION_ENDPOINT {
 
     /* Receive window (lwip_glue/tcp.c): bytes read from the queue that lwIP was not told yet (object lock) */
     ULONG RecvCredit;
+    /* The receive window as the lwIP side last saw it, and its largest size (core lock; read by readers
+       without it): a reader does not take the core lock while the window is mostly open */
+    ULONG RecvWndNow, RecvWndMax;
+    /* Window autotuning (a socket that set no SO_RCVBUF): bytes read so far (object lock) and as of the last growth */
+    BOOLEAN AutoTune;
+    /* A peer without window scaling (QEMU user networking, old stacks) is limited to a 64K window, which a reader
+       that stalls for a moment shuts: bytes queued (object lock), and bytes acknowledged on arrival, not on read */
+    ULONG RecvQueued, PreCredited;
+    ULONG Consumed, AutoSeen;
 
     struct _CONNECTION_ENDPOINT *Next; /* Next connection in address file list */
 } CONNECTION_ENDPOINT, *PCONNECTION_ENDPOINT;
