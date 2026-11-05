@@ -45,6 +45,7 @@ typedef struct IPDATAGRAM_REASSEMBLY {
     LIST_ENTRY FragmentListHead; /* IP fragment list */
     LIST_ENTRY HoleListHead;     /* IP datagram hole list */
     UINT TimeoutCount;           /* Timeout counter */
+    BOOLEAN AllFromOwnLink;      /* Every fragment's frame carried the adapter's own source MAC */
 } IPDATAGRAM_REASSEMBLY, *PIPDATAGRAM_REASSEMBLY;
 
 

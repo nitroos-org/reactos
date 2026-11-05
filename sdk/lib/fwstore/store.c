@@ -203,7 +203,7 @@ DWORD FwProfileReset(ULONG bit)
     return err;
 }
 
-/* NitroOS default rule set: the two rules a stateless inbound filter needs to keep the network usable.
+/* NitroOS default rule set: the rules a stateless inbound filter needs to keep the network usable.
    This is NOT Microsoft's default rule set. */
 static const struct { PCWSTR Id, Name, Desc, Group, Proto, Port, RPort; } g_Defaults[] = {
     { L"NitroOS-CoreNet-DHCP-In", L"NitroOS Core Networking - Dynamic Host Configuration Protocol (DHCP-In)",
@@ -212,6 +212,9 @@ static const struct { PCWSTR Id, Name, Desc, Group, Proto, Port, RPort; } g_Defa
     { L"NitroOS-CoreNet-ICMP4-DU-In", L"NitroOS Core Networking - Destination Unreachable (ICMPv4-In)",
       L"Destination Unreachable error messages are sent from any node that a packet traveled through and was unable to be forwarded at the IP layer.",
       L"NitroOS Core Networking", L"1", NULL, NULL },
+    { L"NitroOS-CoreNet-IGMP-In", L"NitroOS Core Networking - Internet Group Management Protocol (IGMP-In)",
+      L"IGMP messages are sent and received by hosts and routers to determine multicast group membership; without this rule membership queries are dropped.",
+      L"NitroOS Core Networking", L"2", NULL, NULL },
 };
 
 static DWORD WriteDefaultRules(VOID)
@@ -225,7 +228,7 @@ static DWORD WriteDefaultRules(VOID)
         FwRuleSetStr(&r.Desc, g_Defaults[i].Desc); FwRuleSetStr(&r.Group, g_Defaults[i].Group);
         r.Enabled = TRUE; r.Dir = 1; r.Action = 1; r.Protocol = _wtoi(g_Defaults[i].Proto);
         if (g_Defaults[i].Port) { FwRuleSetStr(&r.LPorts, g_Defaults[i].Port); FwRuleSetStr(&r.RPorts, g_Defaults[i].RPort); }
-        else FwRuleSetStr(&r.Icmp, L"3:*");
+        else if (r.Protocol == 1) FwRuleSetStr(&r.Icmp, L"3:*");
         err = FwStoreAdd(&r);
         FwRuleFree(&r);
     }
