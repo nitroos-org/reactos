@@ -10,6 +10,11 @@
  * is none), Ctrl+V pastes, Ctrl+A selects all. A program that turned processed input off, or
  * (for Ctrl+V and Ctrl+A) asked for virtual terminal input, gets all of them as keys.
  *
+ * Pasting (Ctrl+V) goes through HKCU\Console FilterOnPaste = 1 (the default): tabs are dropped, the
+ * typographic double quotes and the en/em dashes become the ASCII ones, the no-break space becomes a
+ * space; trailing blanks and line endings are left alone. Digits and the other main-keyboard
+ * characters are pasted as the keys of the main keyboard, not of the numeric keypad.
+ *
  * The keys are sent with SendInput to a console window of its own, which the test starts as a child
  * process: it reports the number of failed checks as its exit code, and says which in a file.
  */
@@ -376,7 +381,127 @@ static VOID TestCtrlA(VOID)
     Clear();
 }
 
+/*
+ * Paste Text with Ctrl+V and collect the characters and virtual key codes of the key-down events
+ * that arrive, without the modifier keys (they differ in number between the implementations).
+ */
+static DWORD PasteOf(PCWSTR Text, WCHAR *Chars, WORD *Vks, DWORD Max)
+{
+    INPUT_RECORD Records[256];
+    DWORD Count = 0, i, n = 0;
+
+    SetClip(Text);
+    SetConsoleMode(hIn, BASE_MODE | ENABLE_PROCESSED_INPUT);
+    Screen();
+    Press('V', CTRL);
+    PeekConsoleInputW(hIn, Records, _countof(Records), &Count);
+    for (i = 0; i < Count && n < Max; i++)
+    {
+        KEY_EVENT_RECORD *Key;
+
+        if (Records[i].EventType != KEY_EVENT) continue;
+        Key = &Records[i].Event.KeyEvent;
+        if (!Key->bKeyDown || Key->wVirtualKeyCode == VK_SHIFT ||
+            Key->wVirtualKeyCode == VK_CONTROL || Key->wVirtualKeyCode == VK_MENU)
+            continue;
+        Chars[n] = Key->uChar.UnicodeChar;
+        Vks[n] = Key->wVirtualKeyCode;
+        n++;
+    }
+    FlushConsoleInputBuffer(hIn);
+    return n;
+}
+
+static VOID CheckPaste(PCWSTR What, PCWSTR Text, PCWSTR Expected)
+{
+    WCHAR Chars[64];
+    WORD Vks[64];
+    DWORD n = PasteOf(Text, Chars, Vks, _countof(Chars) - 1);
+    DWORD i;
+    WCHAR Got[64], Shown[256];
+    PWSTR p = Shown;
+
+    for (i = 0; i < n; i++) Got[i] = Chars[i];
+    Got[n] = UNICODE_NULL;
+    *p = UNICODE_NULL;
+    for (i = 0; i < n; i++)
+    {
+        StringCchPrintfW(p, Shown + _countof(Shown) - p, L"%02x ", Got[i]);
+        p += wcslen(p);
+    }
+    CHECK(n == wcslen(Expected) && !wcsncmp(Got, Expected, n),
+          "%ls: pasted %lu characters: %ls", What, n, Shown);
+}
+
+static VOID CheckPasteVks(PCWSTR What, PCWSTR Text, const WORD *Expected, DWORD Count)
+{
+    WCHAR Chars[64];
+    WORD Vks[64];
+    DWORD n = PasteOf(Text, Chars, Vks, _countof(Chars));
+    DWORD i;
+
+    if (n != Count)
+    {
+        Fail("%ls: pasted %lu keys, expected %lu", What, n, Count);
+        return;
+    }
+    for (i = 0; i < n; i++)
+        CHECK(Vks[i] == Expected[i], "%ls: key %lu has virtual key 0x%x, expected 0x%x", What, i, Vks[i], Expected[i]);
+}
+
+static VOID TestPasteFilter(VOID)
+{
+    static const WORD Digits[] = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' };
+    static const WORD Quotes[] = { 'A', 0xDE, 'B', 0xDE };
+    static const WORD Dashes[] = { 'A', 0xBD, 'B', 0xBD };
+    static const WORD Punct[] = { 0xBB, 0xBD, '8', 0xBF, 0xBE, 0xBB };
+
+    /* what the filter does */
+    CheckPaste(L"tabs", L"a\tb\t", L"ab");
+    CheckPaste(L"double quotes", L"a\x201C" L"b\x201D", L"a\"b\"");
+    CheckPasteVks(L"double quotes keys", L"a\x201C" L"b\x201D", Quotes, _countof(Quotes));
+    CheckPaste(L"dashes", L"a\x2013" L"b\x2014", L"a-b-");
+    CheckPasteVks(L"dashes keys", L"a\x2013" L"b\x2014", Dashes, _countof(Dashes));
+    CheckPaste(L"no-break space", L"a\x00A0" L"b", L"a b");
+
+    /* what it leaves alone */
+    CheckPaste(L"trailing blanks", L"abc  \r\ndef  ", L"abc  \rdef  ");
+    CheckPaste(L"CRLF pair", L"a\r\n\r\nb", L"a\r\rb");
+    CheckPaste(L"LF alone", L"a\nb", L"a\nb");
+    CheckPaste(L"CR alone", L"a\rb", L"a\rb");
+    CheckPaste(L"leading blanks", L"   a", L"   a");
+
+    /* the keys of the main keyboard, not the numeric keypad (needs the US layout) */
+    if (LOWORD(GetKeyboardLayout(0)) == 0x0409)
+    {
+        CheckPaste(L"digits", L"0123456789", L"0123456789");
+        CheckPasteVks(L"digit keys", L"0123456789", Digits, _countof(Digits));
+        CheckPasteVks(L"punctuation keys", L"+-*/.=", Punct, _countof(Punct));
+    }
+}
+
+/* VkKeyScanW is not a console function but it decides what a pasted character looks like */
+static VOID TestVkKeyScan(VOID)
+{
+    if (LOWORD(GetKeyboardLayout(0)) != 0x0409)
+    {
+        skip("VkKeyScanW values are for the US keyboard layout\n");
+        return;
+    }
+    ok(VkKeyScanW(L'1') == 0x0031, "VkKeyScanW('1') = 0x%04x\n", VkKeyScanW(L'1'));
+    ok(VkKeyScanW(L'0') == 0x0030, "VkKeyScanW('0') = 0x%04x\n", VkKeyScanW(L'0'));
+    ok(VkKeyScanW(L'9') == 0x0039, "VkKeyScanW('9') = 0x%04x\n", VkKeyScanW(L'9'));
+    ok(VkKeyScanW(L'+') == 0x01BB, "VkKeyScanW('+') = 0x%04x\n", VkKeyScanW(L'+'));
+    ok(VkKeyScanW(L'-') == 0x00BD, "VkKeyScanW('-') = 0x%04x\n", VkKeyScanW(L'-'));
+    ok(VkKeyScanW(L'*') == 0x0138, "VkKeyScanW('*') = 0x%04x\n", VkKeyScanW(L'*'));
+    ok(VkKeyScanW(L'/') == 0x00BF, "VkKeyScanW('/') = 0x%04x\n", VkKeyScanW(L'/'));
+    ok(VkKeyScanW(L'.') == 0x00BE, "VkKeyScanW('.') = 0x%04x\n", VkKeyScanW(L'.'));
+    ok(VkKeyScanW(L'=') == 0x00BB, "VkKeyScanW('=') = 0x%04x\n", VkKeyScanW(L'='));
+}
+
 /* The child: its own console window; the report goes to a file */
+static BOOL FilterOnPaste(VOID);
+
 static DWORD ChildMain(PCWSTR ReportFile)
 {
     DWORD Saved = 0;
@@ -416,24 +541,36 @@ static DWORD ChildMain(PCWSTR ReportFile)
     TestCtrlC();
     TestCtrlV();
     TestCtrlA();
+    if (FilterOnPaste())
+        TestPasteFilter();
     SetConsoleMode(hIn, Saved);
     fclose(Report);
     return Failures;
 }
 
-static BOOL ShortcutsDisabled(VOID)
+/* The value of a DWORD in HKCU\Console, Default when it is not there */
+static BOOL ConsoleFlag(PCWSTR Name, BOOL Default)
 {
     HKEY Key;
     DWORD Value, Size = sizeof(Value), Type;
-    BOOL Disabled = FALSE;
+    BOOL Flag = Default;
 
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Console", 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
-        return FALSE;
-    if (RegQueryValueExW(Key, L"CtrlKeyShortcutsDisabled", NULL, &Type, (PBYTE)&Value, &Size) == ERROR_SUCCESS &&
-        Type == REG_DWORD && Value != 0)
-        Disabled = TRUE;
+        return Default;
+    if (RegQueryValueExW(Key, Name, NULL, &Type, (PBYTE)&Value, &Size) == ERROR_SUCCESS && Type == REG_DWORD)
+        Flag = (Value != 0);
     RegCloseKey(Key);
-    return Disabled;
+    return Flag;
+}
+
+static BOOL ShortcutsDisabled(VOID)
+{
+    return ConsoleFlag(L"CtrlKeyShortcutsDisabled", FALSE);
+}
+
+static BOOL FilterOnPaste(VOID)
+{
+    return ConsoleFlag(L"FilterOnPaste", TRUE);
 }
 
 START_TEST(ConsoleKeyShortcuts)
@@ -455,6 +592,8 @@ START_TEST(ConsoleKeyShortcuts)
         MultiByteToWideChar(CP_ACP, 0, argv[3], -1, Wide, _countof(Wide));
         ExitProcess(ChildMain(Wide));
     }
+
+    TestVkKeyScan();
 
     if (ShortcutsDisabled())
     {

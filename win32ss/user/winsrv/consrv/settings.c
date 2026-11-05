@@ -53,6 +53,7 @@ ConSrvApplyUserSettings(
     {
         Console->CtrlKeyShortcutsDisabled = !!ConsoleInfoEx->CtrlKeyShortcutsDisabled;
         Console->LineSelection = !!ConsoleInfoEx->LineSelection;
+        Console->FilterOnPaste = !!ConsoleInfoEx->FilterOnPaste;
     }
     /// Console->InputBufferSize = 0;
     HistoryReshapeAllBuffers(Console,

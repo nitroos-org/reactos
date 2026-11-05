@@ -24,6 +24,7 @@ HKCU,"Console","QuickEdit",0x00010003,1
 HKCU,"Console","InsertMode",0x00010003,1
 HKCU,"Console","LineSelection",0x00010003,1
 HKCU,"Console","CtrlKeyShortcutsDisabled",0x00010003,0
+HKCU,"Console","FilterOnPaste",0x00010003,1
 
 HKCU,"Control Panel",,0x00000012
 
