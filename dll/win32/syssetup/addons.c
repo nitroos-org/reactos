@@ -35,12 +35,10 @@ typedef const ADDON_INSTALL_DATA* PCADDON_INSTALL_DATA;
 /* TODO: Move this out of code and into an .inf or something. */
 static const ADDON_INSTALL_DATA Addons[] = {
 #ifdef _M_IX86
-    {L"Wine Gecko", L"%SystemRoot%\\wine_gecko-2.40-x86.msi", L"msiexec.exe /i \"%s\" /qn /norestart", L"gecko"},
+    /* Wine Gecko is not installed by setup: it is offered on demand by the feature manager (wine-gecko)
+     * and by the add-on prompt of appwiz.cpl on first use of the mshtml engine. */
     {L"WineVDM", L"%SystemRoot%\\winevdm_setup.exe", L"\"%s\" /VERYSILENT", L"winevdm"},
 #elif defined(_M_AMD64)
-    /* No FeatmgrPkg: the catalog package is the x86 build. Without the
-     * local file, the Internet Browser offers the download on first use. */
-    {L"Wine Gecko", L"%SystemRoot%\\wine_gecko-2.40-x86_64.msi", L"msiexec.exe /i \"%s\" /qn /norestart", NULL},
     /* PowerShell 7: the image carries the official MSI (staged at build time) in the feature manager's payload
      * folder. The feature manager installs it silently, local-first, with the properties of its catalog entry
      * (powershell-7.txt), and records the install so that it shows as installed and can be repaired or removed.
