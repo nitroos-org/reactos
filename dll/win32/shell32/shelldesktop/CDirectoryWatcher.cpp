@@ -24,10 +24,6 @@ static HANDLE s_hThreadAPC = NULL;
 // Terminate now?
 static BOOL s_fTerminateAllWatchers = FALSE;
 
-// the buffer for ReadDirectoryChangesW
-#define BUFFER_SIZE 0x1000
-static BYTE s_buffer[BUFFER_SIZE];
-
 // The APC thread function for directory watch
 static unsigned __stdcall DirectoryWatcherThreadFuncAPC(void *)
 {
@@ -75,6 +71,8 @@ CDirectoryWatcher::CDirectoryWatcher(HWND hNotifyWnd, LPCWSTR pszDirectoryPath, 
     , m_dir_list(pszDirectoryPath, fSubTree)
 {
     TRACE("%p, '%S'\n", this, pszDirectoryPath);
+
+    m_szRenameOld[0] = UNICODE_NULL;
 
     GetFullPathNameW(pszDirectoryPath, _countof(m_szDirectoryPath), m_szDirectoryPath, NULL);
 
@@ -133,14 +131,14 @@ ConvertActionToEvent(DWORD Action, BOOL fDir)
 // Notify a filesystem notification using pDirectoryWatcher.
 void CDirectoryWatcher::ProcessNotification()
 {
-    PFILE_NOTIFY_INFORMATION pInfo = (PFILE_NOTIFY_INFORMATION)s_buffer;
-    WCHAR szName[MAX_PATH], szPath[MAX_PATH], szTempPath[MAX_PATH];
-    DWORD dwEvent, cbName;
-    BOOL fDir;
+    PFILE_NOTIFY_INFORMATION pInfo = (PFILE_NOTIFY_INFORMATION)m_buffer;
+    WCHAR szName[MAX_PATH], szPath[MAX_PATH];
+    DWORD dwEvent, cbName, dwAction;
+    BOOL fDir, fRenamed;
     TRACE("CDirectoryWatcher::ProcessNotification: enter\n");
 
-    // for each entry in s_buffer
-    szPath[0] = szTempPath[0] = 0;
+    // for each entry in m_buffer
+    szPath[0] = 0;
     for (;;)
     {
         // get name (relative from m_szDirectoryPath)
@@ -168,9 +166,29 @@ void CDirectoryWatcher::ProcessNotification()
             }
         }
 
+        // The old name of a rename is kept until its new name comes, also across reads. A new name without
+        // an old one (the pair was lost or the old name was outside of the watch) is a new item.
+        dwAction = pInfo->Action;
+        fRenamed = FALSE;
+        if (dwAction == FILE_ACTION_RENAMED_OLD_NAME)
+        {
+            lstrcpynW(m_szRenameOld, szPath, _countof(m_szRenameOld));
+            goto NextEntry;
+        }
+        if (dwAction == FILE_ACTION_RENAMED_NEW_NAME)
+        {
+            if (m_szRenameOld[0] != UNICODE_NULL)
+                fRenamed = TRUE;
+            else
+                dwAction = FILE_ACTION_ADDED;
+        }
+
         // convert action to event
-        fDir = PathIsDirectoryW(szPath);
-        dwEvent = ConvertActionToEvent(pInfo->Action, fDir);
+        if (fRenamed)
+            fDir = PathIsDirectoryW(szPath) || m_dir_list.ContainsPath(m_szRenameOld);
+        else
+            fDir = PathIsDirectoryW(szPath);
+        dwEvent = ConvertActionToEvent(dwAction, fDir);
 
         // convert SHCNE_DELETE to SHCNE_RMDIR if the path is a directory
         if (!fDir && (dwEvent == SHCNE_DELETE) && m_dir_list.ContainsPath(szPath))
@@ -191,11 +209,24 @@ void CDirectoryWatcher::ProcessNotification()
                     dwEvent = 0;
                 break;
             case SHCNE_RENAMEFOLDER:
-                if (!PathIsDirectoryW(szPath) || !m_dir_list.RenamePath(szTempPath, szPath))
-                    dwEvent = 0;
+                // The rename is reported even if the new name is gone again (renamed or deleted since):
+                // the view holds the old name and only this event can replace it. What happened after
+                // comes as the events that follow.
+                if (!m_dir_list.RenamePath(m_szRenameOld, szPath))
+                {
+                    // the old name was not known: only a directory that is still there can be added
+                    if (!PathIsDirectoryW(szPath) || !m_dir_list.AddPath(szPath))
+                        dwEvent = 0;
+                    else
+                        dwEvent = SHCNE_MKDIR;
+                    fRenamed = FALSE;
+                }
                 break;
             case SHCNE_RENAMEITEM:
-                if (!PathFileExistsW(szPath) || PathIsDirectoryW(szPath))
+                // see SHCNE_RENAMEFOLDER: no check for the new name
+                break;
+            case SHCNE_UPDATEITEM:
+                if (!PathFileExistsW(szPath))
                     dwEvent = 0;
                 break;
             case SHCNE_RMDIR:
@@ -211,17 +242,15 @@ void CDirectoryWatcher::ProcessNotification()
         if (dwEvent != 0)
         {
             // notify
-            if (pInfo->Action == FILE_ACTION_RENAMED_NEW_NAME)
-                NotifyFileSystemChange(dwEvent, szTempPath, szPath);
+            if (fRenamed)
+                NotifyFileSystemChange(dwEvent, m_szRenameOld, szPath);
             else
                 NotifyFileSystemChange(dwEvent, szPath, NULL);
         }
-        else if (pInfo->Action == FILE_ACTION_RENAMED_OLD_NAME)
-        {
-            // save path for next FILE_ACTION_RENAMED_NEW_NAME
-            lstrcpynW(szTempPath, szPath, MAX_PATH);
-        }
+        if (dwAction == FILE_ACTION_RENAMED_NEW_NAME)
+            m_szRenameOld[0] = UNICODE_NULL;
 
+    NextEntry:
         if (pInfo->NextEntryOffset == 0)
             break; // there is no next entry
 
@@ -264,6 +293,7 @@ void CDirectoryWatcher::ReadCompletion(DWORD dwErrorCode, DWORD dwNumberOfBytesT
     if (dwNumberOfBytesTransfered == 0)
     {
         // do notify a SHCNE_UPDATEDIR
+        m_szRenameOld[0] = UNICODE_NULL; // the pairing is lost with the data
         NotifyFileSystemChange(SHCNE_UPDATEDIR, m_szDirectoryPath, NULL);
     }
     else
@@ -315,13 +345,13 @@ BOOL CDirectoryWatcher::RestartWatching()
     }
 
     // initialize the buffer and the overlapped
-    ZeroMemory(s_buffer, sizeof(s_buffer));
+    ZeroMemory(m_buffer, sizeof(m_buffer));
     ZeroMemory(&m_overlapped, sizeof(m_overlapped));
     m_overlapped.hEvent = (HANDLE)this;
 
     // start the directory watch
     DWORD dwFilter = GetFilterFromEvents(SHCNE_ALLEVENTS);
-    if (!ReadDirectoryChangesW(m_hDirectory, s_buffer, sizeof(s_buffer),
+    if (!ReadDirectoryChangesW(m_hDirectory, m_buffer, sizeof(m_buffer),
                                m_fRecursive, dwFilter, NULL,
                                &m_overlapped, _NotificationCompletion))
     {
