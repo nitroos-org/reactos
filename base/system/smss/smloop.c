@@ -9,6 +9,7 @@
 /* INCLUDES *******************************************************************/
 
 #include "smss.h"
+#include <ndk/sefuncs.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -32,6 +33,63 @@ NTSTATUS
 
 volatile LONG SmTotalApiThreads;
 HANDLE SmUniqueProcessId;
+
+/*
+ * Security gate S8 (NitroSessions design). \SmApiPort is open to
+ * Administrators and SYSTEM (SmpCreateSecurityDescriptors). The APIs below
+ * start processes or sessions on the caller's behalf, so they only serve SMSS
+ * itself and LocalSystem processes in session 0. The session is the kernel's
+ * (ProcessSessionInformation), never the client's PEB. Every in-tree caller
+ * is SMSS itself.
+ */
+static
+BOOLEAN
+SmpIsSessionZeroSystemClient(
+    _In_ PSM_API_MSG SmApiMsg,
+    _In_ PSMP_CLIENT_CONTEXT ClientContext)
+{
+    static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    NTSTATUS Status;
+    HANDLE TokenHandle;
+    ULONG SessionId, Length;
+    union
+    {
+        TOKEN_USER User;
+        UCHAR Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    } TokenInfo;
+    UCHAR SystemSidBuffer[SECURITY_MAX_SID_SIZE];
+    PSID SystemSid = (PSID)SystemSidBuffer;
+    BOOLEAN IsSystem;
+
+    /* SMSS connected to itself */
+    if (SmApiMsg->h.ClientId.UniqueProcess == SmUniqueProcessId) return TRUE;
+    if (!ClientContext->ProcessHandle) return FALSE;
+
+    /* Session 0 */
+    Status = NtQueryInformationProcess(ClientContext->ProcessHandle,
+                                       ProcessSessionInformation,
+                                       &SessionId,
+                                       sizeof(SessionId),
+                                       NULL);
+    if (!NT_SUCCESS(Status) || (SessionId != 0)) return FALSE;
+
+    /* LocalSystem */
+    Status = NtOpenProcessToken(ClientContext->ProcessHandle, TOKEN_QUERY, &TokenHandle);
+    if (!NT_SUCCESS(Status)) return FALSE;
+    Status = NtQueryInformationToken(TokenHandle,
+                                     TokenUser,
+                                     &TokenInfo,
+                                     sizeof(TokenInfo),
+                                     &Length);
+    NtClose(TokenHandle);
+    if (!NT_SUCCESS(Status)) return FALSE;
+
+    Status = RtlInitializeSid(SystemSid, &NtAuthority, 1);
+    if (!NT_SUCCESS(Status)) return FALSE;
+    *RtlSubAuthoritySid(SystemSid, 0) = SECURITY_LOCAL_SYSTEM_RID;
+    IsSystem = RtlEqualSid(TokenInfo.User.User.Sid, SystemSid);
+    return IsSystem;
+}
 
 /* API HANDLERS ***************************************************************/
 
@@ -210,9 +268,12 @@ SmpStartCsr(IN PSM_API_MSG SmApiMsg,
     HANDLE InitialCommandProcess, InitialCommandProcessId, WindowsSubSysProcessId;
     NTSTATUS Status;
 
+    /* One session create at a time (NitroSessions design 3.1) */
+    RtlEnterCriticalSection(&SmpMuSessionLock);
     Status = SmpLoadSubSystemsForMuSession(&SmStartCsr->MuSessionId,
                                            &WindowsSubSysProcessId,
                                            &InitialCommand);
+    RtlLeaveCriticalSection(&SmpMuSessionLock);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("SMSS: SmpLoadSubSystemsForMuSession failed with status 0x%08x\n", Status);
@@ -525,6 +586,18 @@ SmpApiLoop(
                     /* It's valid, but doesn't have a subsystem with it */
                     DPRINT1("SMSS: Invalid session API\n");
                     Status = STATUS_INVALID_PARAMETER;
+                }
+                else if (((RequestMsg.ApiNumber == SmpExecPgmApi) ||
+                          (RequestMsg.ApiNumber == SmpStartCsrApi) ||
+                          (RequestMsg.ApiNumber == SmpStopCsrApi)) &&
+                         !SmpIsSessionZeroSystemClient(&RequestMsg, ClientContext))
+                {
+                    /* Gate S8: only SMSS and LocalSystem in session 0 */
+                    DPRINT1("SMSS: Api %lu refused for %lx.%lx\n",
+                            RequestMsg.ApiNumber,
+                            RequestMsg.h.ClientId.UniqueProcess,
+                            RequestMsg.h.ClientId.UniqueThread);
+                    Status = STATUS_ACCESS_DENIED;
                 }
                 else
                 {
