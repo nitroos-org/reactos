@@ -148,7 +148,12 @@ MiMapPagesInZeroSpace(IN PMMPFN Pfn1,
     // Sanity checks
     //
     ASSERT(KeGetCurrentThread() == MiZeroPageThread);
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* The caller stays on this processor from the mapping to the unmapping */
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+#else
     ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+#endif
     ASSERT(NumberOfPages != 0);
     ASSERT(NumberOfPages <= MI_ZERO_PTES);
 
@@ -168,7 +173,16 @@ MiMapPagesInZeroSpace(IN PMMPFN Pfn1,
         //
         Offset = MI_ZERO_PTES;
         PointerPte->u.Hard.PageFrameNumber = Offset;
+#if !defined(_M_IX86) && !defined(_M_AMD64)
         KeFlushRangeTb(MiPteToAddress(PointerPte + 1), MI_ZERO_PTES, TRUE);
+#endif
+        /* On x86 and x64 no other processor is told: the window is used on one
+           processor from its mapping to its unmapping, and that processor
+           flushes it at both ends (below and in MiUnmapPagesInZeroSpace), so
+           that no processor holds a translation of it that a later use could
+           meet. An IPI to all processors per 32 pages stalled the others (disk
+           completions, the lazy writer) for the 20 s the free memory of a
+           large guest takes to zero. */
     }
 
     //
@@ -215,6 +229,11 @@ MiMapPagesInZeroSpace(IN PMMPFN Pfn1,
         Pfn1 = (PMMPFN)Pfn1->u1.Flink;
     }
 
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* Drop what this processor may hold of the window (stale or speculative) */
+    KxFlushRangeCurrentTb(MiPteToAddress(PointerPte), (ULONG)NumberOfPages);
+#endif
+
     //
     // Return the address
     //
@@ -232,7 +251,11 @@ MiUnmapPagesInZeroSpace(IN PVOID VirtualAddress,
     // Sanity checks
     //
     ASSERT(KeGetCurrentThread() == MiZeroPageThread);
+#if defined(_M_IX86) || defined(_M_AMD64)
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+#else
     ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+#endif
     ASSERT (NumberOfPages != 0);
     ASSERT(NumberOfPages <= MI_ZERO_PTES);
 
@@ -267,7 +290,7 @@ MiUnmapPagesInZeroSpace(IN PVOID VirtualAddress,
 
     //
     // Blow away the mapped zero PTEs.
-    // Note: the flush on all processors happens in MiMapPagesInZeroSpace, when a new range is started
+    // Note: no flush on other processors, see MiMapPagesInZeroSpace (x86, x64)
     //
     RtlZeroMemory(PointerPte, NumberOfPages * sizeof(MMPTE));
 
