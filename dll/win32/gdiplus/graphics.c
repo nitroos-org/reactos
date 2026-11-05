@@ -85,6 +85,10 @@ static GpStatus draw_driver_string(GpGraphics *graphics, GDIPCONST UINT16 *text,
                                    GDIPCONST GpFont *font, GDIPCONST GpStringFormat *format,
                                    GDIPCONST GpBrush *brush, GDIPCONST PointF *positions,
                                    INT flags, GDIPCONST GpMatrix *matrix);
+static GpStatus draw_driver_string_ex(GpGraphics *graphics, GDIPCONST UINT16 *text, INT length,
+                                      GDIPCONST GpFont *font, GDIPCONST GpStringFormat *format,
+                                      GDIPCONST GpBrush *brush, GDIPCONST PointF *positions,
+                                      INT flags, GDIPCONST GpMatrix *matrix, BOOL *software_drawn);
 
 /* Converts from gdiplus path point type to gdi path point type. */
 static BYTE convert_path_point_type(BYTE type)
@@ -6000,6 +6004,7 @@ static GpStatus draw_string_callback(struct gdip_format_string_info *info)
     struct gdip_font_link_section *section;
     GpStatus stat = Ok;
     REAL line_x;
+    BOOL software_drawn = FALSE;
     const TEXTMETRICW *font_tm = &info->font_link_info.base_font->otm.otmTextMetrics;
 
     position.X = args->x + info->bounds->X / args->rel_width;
@@ -6013,9 +6018,9 @@ static GpStatus draw_string_callback(struct gdip_format_string_info *info)
         to_draw_length = min(info->length - (i - info->index), section->end - i);
         TRACE("index %d, todraw %ld, used %s\n", i, to_draw_length, section->font == info->font_link_info.base_font ? "base font" : "map");
         font_link_get_text_extent_point(info, i, to_draw_length, 0, NULL, &size);
-        stat = draw_driver_string(info->graphics, &info->string[i], to_draw_length,
+        stat = draw_driver_string_ex(info->graphics, &info->string[i], to_draw_length,
             section->font, info->format, args->brush, &position,
-            DriverStringOptionsCmapLookup|DriverStringOptionsRealizedAdvance, NULL);
+            DriverStringOptionsCmapLookup|DriverStringOptionsRealizedAdvance, NULL, &software_drawn);
         position.X += size.cx / args->rel_width;
         i += to_draw_length;
         if (stat != Ok || (i - info->index) >= info->length) break;
@@ -6027,10 +6032,12 @@ static GpStatus draw_string_callback(struct gdip_format_string_info *info)
      * (WinForms labels with Font(..., FontStyle.Underline) showed no underline).
      * Only the software path needs this: on the GDI path ExtTextOutW draws the lines itself
      * (the HFONT carries lfUnderline/lfStrikeOut), and drawing them again would double them.
+     * What counts is the path the runs really took: a run the GDI path declined (NotImplemented)
+     * went to the software path although the graphics qualified for GDI.
      * Right-to-left and vertical formats are not laid out by this code (the text runs left to
      * right from the origin), so a line computed here would be wrong: draw none. */
     if (stat == Ok && (font_tm->tmUnderlined || font_tm->tmStruckOut) && position.X > line_x &&
-        !driver_string_uses_gdi(info->graphics, args->brush) &&
+        software_drawn &&
         !(info->format && (info->format->attr & (StringFormatFlagsDirectionRightToLeft |
                                                  StringFormatFlagsDirectionVertical))))
     {
@@ -7920,10 +7927,10 @@ static GpStatus SOFTWARE_GdipDrawDriverString(GpGraphics *graphics, GDIPCONST UI
     return stat;
 }
 
-static GpStatus draw_driver_string(GpGraphics *graphics, GDIPCONST UINT16 *text, INT length,
-                                   GDIPCONST GpFont *font, GDIPCONST GpStringFormat *format,
-                                   GDIPCONST GpBrush *brush, GDIPCONST PointF *positions,
-                                   INT flags, GDIPCONST GpMatrix *matrix)
+static GpStatus draw_driver_string_ex(GpGraphics *graphics, GDIPCONST UINT16 *text, INT length,
+                                      GDIPCONST GpFont *font, GDIPCONST GpStringFormat *format,
+                                      GDIPCONST GpBrush *brush, GDIPCONST PointF *positions,
+                                      INT flags, GDIPCONST GpMatrix *matrix, BOOL *software_drawn)
 {
     GpStatus stat = NotImplemented;
 
@@ -7944,9 +7951,23 @@ static GpStatus draw_driver_string(GpGraphics *graphics, GDIPCONST UINT16 *text,
         stat = GDI32_GdipDrawDriverString(graphics, text, length, font, format,
                                           brush, positions, flags, matrix);
     if (stat == NotImplemented)
+    {
+        /* The GDI path declined: the software path draws no font decoration */
+        if (software_drawn)
+            *software_drawn = TRUE;
         stat = SOFTWARE_GdipDrawDriverString(graphics, text, length, font, format,
                                              brush, positions, flags, matrix);
+    }
     return stat;
+}
+
+static GpStatus draw_driver_string(GpGraphics *graphics, GDIPCONST UINT16 *text, INT length,
+                                   GDIPCONST GpFont *font, GDIPCONST GpStringFormat *format,
+                                   GDIPCONST GpBrush *brush, GDIPCONST PointF *positions,
+                                   INT flags, GDIPCONST GpMatrix *matrix)
+{
+    return draw_driver_string_ex(graphics, text, length, font, format, brush, positions, flags,
+                                 matrix, NULL);
 }
 
 /*****************************************************************************
