@@ -1941,6 +1941,15 @@ MmCheckDirtySegment(
 
 BOOLEAN
 NTAPI
+MmCheckDirtySegmentEx(
+    PMM_SECTION_SEGMENT Segment,
+    PLARGE_INTEGER Offset,
+    BOOLEAN ForceDirty,
+    BOOLEAN PageOut,
+    _Out_ PNTSTATUS WriteStatus);
+
+BOOLEAN
+NTAPI
 MmUnsharePageEntrySectionSegment(PMEMORY_AREA MemoryArea,
                                  PMM_SECTION_SEGMENT Segment,
                                  PLARGE_INTEGER Offset,
