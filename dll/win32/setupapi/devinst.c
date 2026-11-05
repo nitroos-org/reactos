@@ -6160,6 +6160,31 @@ InfIsFromOEMLocation(
     return TRUE;
 }
 
+/* TRUE if the service (a name) is a boot-start driver */
+static BOOL
+IsBootStartService(
+        IN HKEY hRoot,
+        IN LPCWSTR Service)
+{
+    WCHAR KeyName[MAX_PATH];
+    DWORD dwType, dwSize = sizeof(DWORD), dwStart = (DWORD)-1;
+    HKEY hKey;
+
+    if (Service[0] == UNICODE_NULL)
+        return FALSE;
+
+    lstrcpyW(KeyName, L"SYSTEM\\CurrentControlSet\\Services\\");
+    lstrcatW(KeyName, Service);
+    if (RegOpenKeyExW(hRoot, KeyName, 0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW(hKey, L"Start", NULL, &dwType, (LPBYTE)&dwStart, &dwSize) != ERROR_SUCCESS ||
+            dwType != REG_DWORD)
+            dwStart = (DWORD)-1;
+        RegCloseKey(hKey);
+    }
+    return dwStart == SERVICE_BOOT_START;
+}
+
 /* The filters that would load on a device: device UpperFilters and LowerFilters, then
  * the same values of its class key */
 #define RUNNING_FILTER_VALUES 4
@@ -6168,6 +6193,8 @@ struct RunningDriverSnapshot
 {
     BOOL Installed; /* installed before (Class value), or not known */
     BOOL HasService;
+    WCHAR Service[256]; /* the Service value, empty if there is none or it does not fit */
+    BOOL BootStart;     /* that service is a boot-start driver: the system boots from it */
     DWORD Size[RUNNING_FILTER_VALUES];
     LPWSTR Data[RUNNING_FILTER_VALUES];
 };
@@ -6260,7 +6287,19 @@ TakeRunningDriverSnapshot(
      * or legacy devices, which keep asking for a restart */
     Snapshot->Installed = RunningValueExists(hKey, REGSTR_VAL_CLASS, &rc);
     if (rc == ERROR_SUCCESS)
+    {
         Snapshot->HasService = RunningValueExists(hKey, REGSTR_VAL_SERVICE, &rc);
+        if (rc == ERROR_SUCCESS && Snapshot->HasService)
+        {
+            dwSize = sizeof(Snapshot->Service) - sizeof(WCHAR);
+            if (RegQueryValueExW(hKey, REGSTR_VAL_SERVICE, NULL, &dwType, (LPBYTE)Snapshot->Service, &dwSize) != ERROR_SUCCESS ||
+                dwType != REG_SZ)
+                Snapshot->Service[0] = UNICODE_NULL;
+            else
+                Snapshot->Service[dwSize / sizeof(WCHAR)] = UNICODE_NULL;
+            Snapshot->BootStart = IsBootStartService(set->HKLM, Snapshot->Service);
+        }
+    }
     if (rc == ERROR_SUCCESS)
         rc = ReadRunningFilter(hKey, REGSTR_VAL_UPPERFILTERS, Snapshot, 0);
     if (rc == ERROR_SUCCESS)
@@ -6311,6 +6350,23 @@ TakeRunningDriverSnapshot(
     return TRUE;
 }
 
+/* TRUE if the filters that would load are the same in both snapshots */
+static BOOL
+SameRunningFilters(
+        IN const struct RunningDriverSnapshot *A,
+        IN const struct RunningDriverSnapshot *B)
+{
+    DWORD i;
+
+    for (i = 0; i < RUNNING_FILTER_VALUES; i++)
+    {
+        if (A->Size[i] != B->Size[i] ||
+            (A->Size[i] != 0 && memcmp(A->Data[i], B->Data[i], A->Size[i]) != 0))
+            return FALSE;
+    }
+    return TRUE;
+}
+
 /* An empty REG_MULTI_SZ list counts as no filter */
 static BOOL
 NoRunningFilters(
@@ -6328,6 +6384,86 @@ NoRunningFilters(
     }
 
     return TRUE;
+}
+
+/* Classes whose stack is never restarted after an install: the system boots from them or
+ * runs on them (disk, storage controller, volume, display, buses and system devices, the
+ * computer itself), the serial ports, which carry the kernel debugger, and CD-ROM drives
+ * (cdrom.sys is a KMDF driver that fails to be added again after its stack was removed,
+ * measured on the QEMU DVD drive). The install then asks for a restart instead. */
+static BOOL
+IsClassNeverRestarted(
+        IN const GUID *Class)
+{
+    static const GUID Never[] =
+    {
+        /* CDROM */       {0x4D36E965, 0xE325, 0x11CE, {0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18}},
+        /* DiskDrive */   {0x4D36E967, 0xE325, 0x11CE, {0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18}},
+        /* Display */     {0x4D36E968, 0xE325, 0x11CE, {0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18}},
+        /* Computer */    {0x4D36E966, 0xE325, 0x11CE, {0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18}},
+        /* HDC */         {0x4D36E96A, 0xE325, 0x11CE, {0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18}},
+        /* Ports */       {0x4D36E978, 0xE325, 0x11CE, {0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18}},
+        /* SCSIAdapter */ {0x4D36E97B, 0xE325, 0x11CE, {0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18}},
+        /* System */      {0x4D36E97D, 0xE325, 0x11CE, {0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18}},
+        /* Volume */      {0x71A27CDD, 0x812A, 0x11D0, {0xBE, 0xC7, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18}},
+    };
+    DWORD i;
+
+    for (i = 0; i < ARRAYSIZE(Never); i++)
+    {
+        if (IsEqualGUID(Class, &Never[i]))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* TRUE if the stack of the device may be stopped and started again to apply an install.
+ * Never for a device the system boots from or runs on: the PnP manager says it cannot be
+ * disabled (the boot-start drivers and what they sit on), or its class or the class it is
+ * installed into is one of those above, or the firmware enumerates it (ACPI: the PS/2
+ * keyboard and mouse, the serial ports, the embedded controller). */
+static BOOL
+DeviceStackRestartable(
+        IN struct DeviceInfoSet *set,
+        IN struct DeviceInfo *deviceInfo,
+        IN const GUID *NewClass OPTIONAL)
+{
+    ULONG ulStatus, ulProblem;
+
+    if (CM_Get_DevNode_Status_Ex(&ulStatus, &ulProblem, deviceInfo->dnDevInst, 0, set->hMachine) != CR_SUCCESS ||
+        !(ulStatus & DN_DISABLEABLE))
+        return FALSE;
+
+    if (IsClassNeverRestarted(&deviceInfo->ClassGuid) || (NewClass && IsClassNeverRestarted(NewClass)))
+        return FALSE;
+
+    if (deviceInfo->instanceId && !_wcsnicmp(deviceInfo->instanceId, L"ACPI\\", 5))
+        return FALSE;
+
+    return TRUE;
+}
+
+/* Stops the stack of the device and starts it again, as the device installer does so that
+ * the new driver and its settings take effect. FALSE if the device could not be stopped (it
+ * is left running as it was) or not be started again (*Stopped is TRUE then). */
+static BOOL
+RestartDeviceStack(
+        IN HDEVINFO DeviceInfoSet,
+        IN PSP_DEVINFO_DATA DeviceInfoData,
+        OUT PBOOL Stopped)
+{
+    *Stopped = FALSE;
+
+    if (!StopDevice(DeviceInfoSet, DeviceInfoData))
+        return FALSE;
+
+    *Stopped = TRUE;
+    if (ResetDevice(DeviceInfoSet, DeviceInfoData) || ResetDevice(DeviceInfoSet, DeviceInfoData))
+    {
+        *Stopped = FALSE;
+        return TRUE;
+    }
+    return FALSE;
 }
 
 /***********************************************************************
@@ -6360,6 +6496,7 @@ SetupDiInstallDevice(
     LONG rc;
     PVOID Context = NULL;
     struct RunningDriverSnapshot RunningBefore;
+    BOOL ClassBeforeExcluded = FALSE;
     BOOL ret = FALSE; /* Return value */
 
     TRACE("%s(%p %p)\n", __FUNCTION__, DeviceInfoSet, DeviceInfoData);
@@ -6490,6 +6627,10 @@ SetupDiInstallDevice(
 
     /* What the device runs now, before this install changes it */
     TakeRunningDriverSnapshot(set, deviceInfo, &RunningBefore);
+
+    /* What the device was before decides too: the install rewrites its service and class, so a
+     * boot-start driver (or a class the system runs on) that it had is remembered here */
+    ClassBeforeExcluded = IsClassNeverRestarted(&deviceInfo->ClassGuid);
 
     /* Open/Create driver key information */
 #if _WIN32_WINNT >= 0x502
@@ -6650,8 +6791,9 @@ SetupDiInstallDevice(
             }
         }
 
-        /* A running device cannot be started again; it is not restarted here either, so the
-         * new driver settings take effect at the next boot */
+        /* A running device cannot be started again. Its stack is stopped and started again so
+         * that the new driver and its settings take effect now, unless the system runs on it;
+         * then, or when that fails, the restart is left to the caller (DI_NEEDRESTART) */
         if (Started)
         {
             struct RunningDriverSnapshot RunningAfter;
@@ -6666,16 +6808,41 @@ SetupDiInstallDevice(
                            !RunningBefore.HasService && !RunningAfter.HasService &&
                            NoRunningFilters(&RunningBefore) && NoRunningFilters(&RunningAfter);
             FreeRunningDriverSnapshot(&RunningAfter);
+            /* The first install over a device the system started with the driver the
+             * critical device database names (the pointer, the keyboard, the volume): when the
+             * install selects that same driver and the filters stay the same, nothing running
+             * differs */
+            if (!RawUnchanged && !RunningBefore.Installed && RunningBefore.Service[0] != UNICODE_NULL)
+            {
+                struct RunningDriverSnapshot RunningNow;
+
+                RawUnchanged = TakeRunningDriverSnapshot(set, deviceInfo, &RunningNow) &&
+                               !_wcsicmp(RunningBefore.Service, RunningNow.Service) &&
+                               SameRunningFilters(&RunningBefore, &RunningNow);
+                FreeRunningDriverSnapshot(&RunningNow);
+            }
             if (RawUnchanged)
                 ret = TRUE;
             else
             {
-                InstallParams.cbSize = sizeof(SP_DEVINSTALL_PARAMS_W);
-                ret = SetupDiGetDeviceInstallParamsW(DeviceInfoSet, DeviceInfoData, &InstallParams);
-                if (ret)
+                BOOL Stopped = FALSE;
+
+                if (!ClassBeforeExcluded && !RunningBefore.BootStart &&
+                    DeviceStackRestartable(set, deviceInfo, &ClassGuid) &&
+                    RestartDeviceStack(DeviceInfoSet, DeviceInfoData, &Stopped))
                 {
-                    InstallParams.Flags |= DI_NEEDRESTART;
-                    ret = SetupDiSetDeviceInstallParamsW(DeviceInfoSet, DeviceInfoData, &InstallParams);
+                    ret = TRUE;
+                }
+                else
+                {
+                    InstallParams.cbSize = sizeof(SP_DEVINSTALL_PARAMS_W);
+                    ret = SetupDiGetDeviceInstallParamsW(DeviceInfoSet, DeviceInfoData, &InstallParams);
+                    if (ret)
+                    {
+                        /* A stack that was stopped and does not start again needs a reboot */
+                        InstallParams.Flags |= Stopped ? (DI_NEEDRESTART | DI_NEEDREBOOT) : DI_NEEDRESTART;
+                        ret = SetupDiSetDeviceInstallParamsW(DeviceInfoSet, DeviceInfoData, &InstallParams);
+                    }
                 }
             }
         }
