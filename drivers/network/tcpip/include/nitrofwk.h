@@ -19,10 +19,14 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
 #define NITROFW_INBOUND_OK(IF, Packet, Protocol) \
     (!NitroFwEnforcing || NitroFwInboundAllowed((IF), (Packet), (Protocol)))
 
+/* Non-zero while the filter is loaded (not killed): UDP sends feed the flow table even when nothing is
+   enforced yet, so an exchange that is in flight when enforcement starts is not cut off. */
+extern volatile LONG NitroFwTracking;
+
 /* UDP send path: remember the exchange so the peer's replies pass (ports in network order) */
 VOID NitroFwNoteUdpSend(USHORT LocalPort, PIP_ADDRESS Remote, USHORT RemotePort, BOOLEAN NonUnicast);
 #define NITROFW_NOTE_UDP_SEND(LocalPort, Remote, RemotePort, NonUnicast) \
-    do { if (NitroFwEnforcing) NitroFwNoteUdpSend((LocalPort), (Remote), (RemotePort), (NonUnicast)); } while (0)
+    do { if (NitroFwTracking) NitroFwNoteUdpSend((LocalPort), (Remote), (RemotePort), (NonUnicast)); } while (0)
 
 /* Address files: the image path of the creating process is only needed when a program rule is
    evaluated. It is resolved lazily, and only while an enforced policy has program rules

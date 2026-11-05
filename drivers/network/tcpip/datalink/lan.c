@@ -114,6 +114,29 @@ NDIS_STATUS NDISCall(
     return NdisStatus;
 }
 
+/* The frame carries this adapter's own MAC as its source: NDIS looped a frame the host sent back up
+   (traffic to one of the host's own addresses). Used by the inbound filter to tell that from a
+   frame that arrived from the wire. */
+static BOOLEAN
+LanSourceIsOwn(PLAN_ADAPTER Adapter, PVOID HeaderBuffer, ULONG HeaderBufferSize)
+{
+    if (Adapter->Media != NdisMedium802_3 || HeaderBufferSize < sizeof(ETH_HEADER) ||
+        Adapter->HWAddressLength != IEEE_802_ADDR_LENGTH)
+        return FALSE;
+    return RtlCompareMemory(((PETH_HEADER)HeaderBuffer)->SrcAddr, Adapter->HWAddress, IEEE_802_ADDR_LENGTH) == IEEE_802_ADDR_LENGTH;
+}
+
+static BOOLEAN
+LanNdisPacketSourceIsOwn(PLAN_ADAPTER Adapter, PNDIS_PACKET NdisPacket)
+{
+    UCHAR Header[sizeof(ETH_HEADER)];
+
+    if (Adapter->Media != NdisMedium802_3 ||
+        CopyPacketToBuffer((PCHAR)Header, NdisPacket, 0, sizeof(Header)) != sizeof(Header))
+        return FALSE;
+    return LanSourceIsOwn(Adapter, Header, sizeof(Header));
+}
+
 /* Used by legacy ProtocolReceive for packet type */
 NDIS_STATUS
 GetPacketTypeFromHeaderBuffer(PLAN_ADAPTER Adapter,
@@ -497,6 +520,7 @@ static VOID LanReceivePacket(
     {
         /* Packet type is precomputed */
         PacketType = PC(IPPacket.NdisPacket)->PacketType;
+        IPPacket.FromOwnLink = PC(IPPacket.NdisPacket)->FromOwnLink;
 
         /* Data is at position 0 */
         IPPacket.Position = 0;
@@ -519,6 +543,7 @@ static VOID LanReceivePacket(
 
         /* A legacy receive was counted by ProtocolReceive or LanSubmitReceiveCopy, which had the header */
         LanCountReceivedFrame(Adapter, NonUnicast);
+        IPPacket.FromOwnLink = LanNdisPacketSourceIsOwn(Adapter, IPPacket.NdisPacket);
 
         /* Data is at the end of the media header */
         IPPacket.Position = Adapter->HeaderSize;
@@ -681,6 +706,7 @@ static VOID LanSubmitReceiveCopy(
     GetDataPtr(Copy, 0, &Data, &Size);
     CopyPacketToBuffer(Data, NdisPacket, Adapter->HeaderSize, Length);
     PC(Copy)->PacketType = PacketType;
+    PC(Copy)->FromOwnLink = LanNdisPacketSourceIsOwn(Adapter, NdisPacket);
 
     LanCountReceivedFrame(Adapter, NonUnicast);
 
@@ -785,6 +811,7 @@ NDIS_STATUS NTAPI ProtocolReceive(
     }
 
     PC(NdisPacket)->PacketType = PacketType;
+    PC(NdisPacket)->FromOwnLink = LanSourceIsOwn(Adapter, HeaderBuffer, HeaderBufferSize);
 
     TI_DbgPrint(DEBUG_DATALINK, ("pretransfer LookaheadBufferSize %d packsize %d\n",LookaheadBufferSize,PacketSize));
 
