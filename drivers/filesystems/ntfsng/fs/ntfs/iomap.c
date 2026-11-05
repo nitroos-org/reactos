@@ -657,13 +657,19 @@ static int ntfs_write_iomap_begin_resident(struct inode *inode, loff_t offset,
 		struct iomap *iomap)
 {
 	struct ntfs_inode *ni = NTFS_I(inode);
+	struct ntfs_inode *base_ni = NInoAttr(ni) ? ni->ext.base_ntfs_ino : ni;
 	struct attr_record *a;
 	struct ntfs_attr_search_ctx *ctx;
 	u32 attr_len;
 	int err = 0;
 	char *kattr;
 
-	ctx = ntfs_attr_get_search_ctx(ni, NULL);
+	/*
+	 * Search over the base inode: the inode of a named stream has a private
+	 * record copy (never written back) and no attribute list, so the inline
+	 * data returned here would be written into a copy that is lost.
+	 */
+	ctx = ntfs_attr_get_search_ctx(base_ni, NULL);
 	if (!ctx) {
 		err = -ENOMEM;
 		goto out;
@@ -743,7 +749,7 @@ static int ntfs_write_iomap_end_resident(struct inode *inode, loff_t pos,
 {
 	struct ntfs_inode *ni = NTFS_I(inode);
 
-	mark_mft_record_dirty(ni);
+	mark_mft_record_dirty(NInoAttr(ni) ? ni->ext.base_ntfs_ino : ni);
 	mutex_unlock(&ni->mrec_lock);
 	return written;
 }

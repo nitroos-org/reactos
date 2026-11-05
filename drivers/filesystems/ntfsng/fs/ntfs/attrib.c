@@ -4361,7 +4361,13 @@ static int ntfs_non_resident_attr_shrink(struct ntfs_inode *ni,
 			goto unlock_runlist;
 		}
 
-		ctx = ntfs_attr_get_search_ctx(ni, NULL);
+		/*
+		 * The context goes to ntfs_cluster_free(), which uses it to map
+		 * unmapped runlist parts: it must search the BASE inode (the inode
+		 * of a named stream holds a private copy of the record and no
+		 * attribute list).
+		 */
+		ctx = ntfs_attr_get_search_ctx(base_ni, NULL);
 		if (!ctx) {
 			ntfs_error(vol->sb, "%s: Failed to get search context", __func__);
 			err = -ENOMEM;
@@ -4895,7 +4901,15 @@ attr_resize_again:
 		if (a->type == AT_DATA && !value_len)
 			continue;
 
-		if (a->type == AT_DATA)
+		/*
+		 * Open the inode that describes THIS record: the unnamed $DATA is
+		 * the base inode, a named stream is an attribute inode.  Opening
+		 * the base inode for a named stream converted the wrong
+		 * attribute (value_len is the stream's length, the conversion
+		 * then saw a different value length: WARN_ON in
+		 * ntfs_attr_make_non_resident()).
+		 */
+		if (a->type == AT_DATA && !a->name_length)
 			tvi = ntfs_iget(sb, base_ni->mft_no);
 		else
 			tvi = ntfs_attr_iget(VFS_I(base_ni), a->type,
@@ -5208,6 +5222,16 @@ int ntfs_attr_map_cluster(struct ntfs_inode *ni, s64 vcn_start, s64 *lcn_start,
 	if (err)
 		return err;
 
+	/*
+	 * A deferred mapping pairs update is carried by NI_RunlistDirty of this
+	 * inode and written when the inode is written.  __ntfs_write_inode()
+	 * skips attribute inodes (their record is written through the base), so
+	 * the flag of a stream inode would never be acted on: write the mapping
+	 * pairs now.
+	 */
+	if (NInoAttr(ni))
+		update_mp = true;
+
 	if (NInoAttr(ni))
 		ctx = ntfs_attr_get_search_ctx(ni->ext.base_ntfs_ino, NULL);
 	else
@@ -5402,7 +5426,8 @@ int ntfs_attr_rm(struct ntfs_inode *ni)
 		err = ntfs_attr_map_whole_runlist(ni);
 		if (err)
 			return err;
-		ctx = ntfs_attr_get_search_ctx(ni, NULL);
+		/* As in ntfs_non_resident_attr_shrink(): the context is the base inode's. */
+		ctx = ntfs_attr_get_search_ctx(base_ni, NULL);
 		if (!ctx) {
 			ntfs_error(sb, "%s: Failed to get search context", __func__);
 			return -ENOMEM;
@@ -5448,6 +5473,9 @@ int ntfs_attr_exist(struct ntfs_inode *ni, const __le32 type, __le16 *name,
 
 	ntfs_debug("Entering\n");
 
+	/* An attribute inode has no attribute list and a private record copy: search the base. */
+	if (NInoAttr(ni))
+		ni = ni->ext.base_ntfs_ino;
 	ctx = ntfs_attr_get_search_ctx(ni, NULL);
 	if (!ctx) {
 		ntfs_error(ni->vol->sb, "%s: Failed to get search context",
@@ -5473,6 +5501,8 @@ int ntfs_attr_remove(struct ntfs_inode *ni, const __le32 type, __le16 *name,
 
 	if (!ni)
 		return -EINVAL;
+	if (NInoAttr(ni))
+		ni = ni->ext.base_ntfs_ino;
 
 	attr_vi = ntfs_attr_iget(VFS_I(ni), type, name, name_len);
 	if (IS_ERR(attr_vi)) {
@@ -5520,6 +5550,9 @@ void *ntfs_attr_readall(struct ntfs_inode *ni, const __le32 type,
 
 	ntfs_debug("Entering\n");
 
+	/* The attribute is opened relative to the base inode. */
+	if (NInoAttr(ni))
+		ni = ni->ext.base_ntfs_ino;
 	bmp_vi = ntfs_attr_iget(VFS_I(ni), type, name, name_len);
 	if (IS_ERR(bmp_vi)) {
 		ret = ERR_PTR(PTR_ERR(bmp_vi));

@@ -9,7 +9,8 @@
 
 #define STREAM_SHARE (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
 #define STREAM_APPEND 7000
-#define STREAM_MAX (40000 + STREAM_APPEND)
+#define STREAM_EXTRA 9000
+#define STREAM_MAX (40000 + STREAM_APPEND + STREAM_EXTRA + 3000)
 
 /* Sizes cycle through resident (300, 1) and non-resident (6000, 40000) streams. */
 static ULONG StreamSize(ULONG File, ULONG Stream)
@@ -80,22 +81,43 @@ static BOOLEAN FlushTestVolume(PCWSTR TestDir, DWORD *Error)
     return TRUE;
 }
 
-/* The state after CreateStreams (Mutated FALSE) or after MutateStreams: class Stream % 4 grew by 7000 bytes (0),
- * was cut to half (1), was deleted (2) or untouched (3). */
-static ULONG StreamWanted(ULONG File, ULONG Stream, BOOLEAN Mutated, BOOLEAN *Gone)
+/*
+ * The expected content of a stream is REPLAYED on a byte array: round 0 is the state after CreateStreams, round 1 after
+ * MutateStreams(1), round 2 after MutateStreams(2).  Class Stream % 6:
+ *   round 1: 0 append 7000, 1 cut to half, 2 delete, 3 untouched, 4 cut to 0 and write 500 (non-resident -> resident,
+ *            then resident growth), 5 SetEndOfFile up by 9000 (zero filled)
+ *   round 2: 0 cut to 0, 1 SetEndOfFile up by 3000, 2 recreate (5000 bytes), 3 delete, 4 append 100, 5 untouched
+ */
+static ULONG StreamModel(ULONG File, ULONG Stream, ULONG Round, PUCHAR Ex, BOOLEAN *Gone)
 {
-    ULONG Size = StreamSize(File, Stream);
+    ULONG Len = StreamSize(File, Stream), Cls = Stream % 6;
 
+    RtlZeroMemory(Ex, STREAM_MAX + 16);
+    StreamFill(Ex, Len, File, Stream);
     *Gone = FALSE;
-    if (!Mutated)
-        return Size;
-    switch (Stream % 4)
+    if (Round >= 1)
     {
-        case 0: return Size + STREAM_APPEND;
-        case 1: return Size / 2;
-        case 2: *Gone = TRUE; return 0;
-        default: return Size;
+        switch (Cls)
+        {
+            case 0: StreamFill(Ex, Len + STREAM_APPEND, File, Stream); Len += STREAM_APPEND; break;
+            case 1: RtlZeroMemory(Ex + Len / 2, Len - Len / 2); Len /= 2; break;
+            case 2: *Gone = TRUE; Len = 0; RtlZeroMemory(Ex, STREAM_MAX); break;
+            case 4: RtlZeroMemory(Ex, Len); StreamFill(Ex, 500, File, Stream); Len = 500; break;
+            case 5: Len += STREAM_EXTRA; break;
+        }
     }
+    if (Round >= 2)
+    {
+        switch (Cls)
+        {
+            case 0: RtlZeroMemory(Ex, Len); Len = 0; break;
+            case 1: Len += 3000; break;
+            case 2: *Gone = FALSE; RtlZeroMemory(Ex, STREAM_MAX); StreamFill(Ex, 5000, File, Stream); Len = 5000; break;
+            case 3: *Gone = TRUE; Len = 0; RtlZeroMemory(Ex, STREAM_MAX); break;
+            case 4: StreamFill(Ex, Len + 100, File, Stream); Len += 100; break;
+        }
+    }
+    return Len;
 }
 
 static VOID CreateStreams(ULONG File, ULONG Count, PUCHAR Buffer)
@@ -125,53 +147,80 @@ static VOID CreateStreams(ULONG File, ULONG Count, PUCHAR Buffer)
     }
 }
 
-static VOID MutateStreams(ULONG File, ULONG Count, PUCHAR Buffer)
+static BOOLEAN WriteRange(HANDLE Handle, PUCHAR Ex, ULONG Offset, ULONG Count, PCWSTR Path)
+{
+    DWORD Done;
+
+    SetFilePointer(Handle, Offset, NULL, FILE_BEGIN);
+    ok(WriteFile(Handle, Ex + Offset, Count, &Done, NULL) && Done == Count, "Writing %lu bytes at %lu of %ls: %lu\n",
+       Count, Offset, Path, GetLastError());
+    return TRUE;
+}
+
+static VOID SetEnd(HANDLE Handle, ULONG Length, PCWSTR What, PCWSTR Path)
+{
+    SetFilePointer(Handle, Length, NULL, FILE_BEGIN);
+    ok(SetEndOfFile(Handle), "%ls (%lu) %ls: %lu\n", What, Length, Path, GetLastError());
+}
+
+/* Applies round Round (1 or 2) to the streams of one file. */
+static VOID MutateStreams(ULONG File, ULONG Count, ULONG Round, PUCHAR Buffer)
 {
     WCHAR Path[MAX_PATH];
     HANDLE Handle;
-    DWORD Done;
-    ULONG Stream, Size;
+    ULONG Stream, Cls, Before, After;
+    BOOLEAN Gone;
 
     for (Stream = 0; Stream < Count; Stream++)
     {
+        Cls = Stream % 6;
         StreamPath(Path, File, Stream);
-        Size = StreamSize(File, Stream);
-        if (Stream % 4 == 2)
+        Before = StreamModel(File, Stream, Round - 1, Buffer, &Gone);
+        After = StreamModel(File, Stream, Round, Buffer, &Gone);
+        if (Round == 1 ? Cls == 3 : Cls == 5)
+            continue;
+        if ((Round == 1 && Cls == 2) || (Round == 2 && Cls == 3))
         {
             ok(DeleteFileW(Path), "Deleting %ls: %lu\n", Path, GetLastError());
             continue;
         }
-        Handle = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, STREAM_SHARE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        ok(Handle != INVALID_HANDLE_VALUE, "Opening %ls: %lu\n", Path, GetLastError());
+        Handle = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, STREAM_SHARE, NULL,
+                             (Round == 2 && Cls == 2) ? CREATE_NEW : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        ok(Handle != INVALID_HANDLE_VALUE, "Opening %ls for round %lu: %lu\n", Path, Round, GetLastError());
         if (Handle == INVALID_HANDLE_VALUE)
             continue;
-        if (Stream % 4 == 0)
+        if (Round == 1)
         {
-            StreamFill(Buffer, Size + STREAM_APPEND, File, Stream);
-            SetFilePointer(Handle, Size, NULL, FILE_BEGIN);
-            ok(WriteFile(Handle, Buffer + Size, STREAM_APPEND, &Done, NULL) && Done == STREAM_APPEND, "Appending to %ls: %lu\n", Path, GetLastError());
+            if (Cls == 0) WriteRange(Handle, Buffer, Before, STREAM_APPEND, Path);
+            else if (Cls == 1) SetEnd(Handle, Before / 2, L"Cutting", Path);
+            else if (Cls == 4) { SetEnd(Handle, 0, L"Cutting to 0", Path); WriteRange(Handle, Buffer, 0, 500, Path); }
+            else SetEnd(Handle, Before + STREAM_EXTRA, L"Extending", Path);
         }
-        else if (Stream % 4 == 1)
+        else
         {
-            SetFilePointer(Handle, Size / 2, NULL, FILE_BEGIN);
-            ok(SetEndOfFile(Handle), "Cutting %ls: %lu\n", Path, GetLastError());
+            if (Cls == 0) SetEnd(Handle, 0, L"Cutting to 0", Path);
+            else if (Cls == 1) SetEnd(Handle, Before + 3000, L"Extending", Path);
+            else if (Cls == 2) WriteRange(Handle, Buffer, 0, 5000, Path);
+            else WriteRange(Handle, Buffer, Before, 100, Path);
         }
+        (void)After;
         CloseHandle(Handle);
     }
 }
 
-static VOID CheckStreams(ULONG File, ULONG Count, BOOLEAN Mutated, PUCHAR Buffer, PUCHAR Expected, PCSTR When)
+static VOID CheckStreams(ULONG File, ULONG Count, ULONG Round, PUCHAR Buffer, PUCHAR Expected, PCSTR When)
 {
     WCHAR Path[MAX_PATH];
     HANDLE Handle;
     DWORD Done;
     ULONG Stream, Want;
     BOOLEAN Gone;
+    LARGE_INTEGER Size;
 
     for (Stream = 0; Stream < Count; Stream++)
     {
         StreamPath(Path, File, Stream);
-        Want = StreamWanted(File, Stream, Mutated, &Gone);
+        Want = StreamModel(File, Stream, Round, Expected, &Gone);
         Handle = CreateFileW(Path, GENERIC_READ, STREAM_SHARE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (Gone)
         {
@@ -183,7 +232,9 @@ static VOID CheckStreams(ULONG File, ULONG Count, BOOLEAN Mutated, PUCHAR Buffer
         ok(Handle != INVALID_HANDLE_VALUE, "%s: opening %ls: %lu\n", When, Path, GetLastError());
         if (Handle == INVALID_HANDLE_VALUE)
             continue;
-        StreamFill(Expected, Want, File, Stream);
+        Size.QuadPart = -1;
+        ok(GetFileSizeEx(Handle, &Size) && Size.QuadPart == Want, "%s: size of %ls is %I64d, wanted %lu\n", When, Path,
+           Size.QuadPart, Want);
         RtlZeroMemory(Buffer, STREAM_MAX + 16);
         ok(ReadFile(Handle, Buffer, Want + 10, &Done, NULL) && Done == Want, "%s: reading %ls: %lu bytes of %lu (%lu)\n",
            When, Path, Done, Want, GetLastError());
@@ -198,15 +249,19 @@ static VOID CheckStreams(ULONG File, ULONG Count, BOOLEAN Mutated, PUCHAR Buffer
  * the base file's) failed with -ENOENT for an attribute in an extension record, so the paging write failed for good, a flush
  * reported it, and shutdown looped on the dirty page (the guest never powered off); for 2 and 4 streams the lookup
  * found a private copy of the base record, and the initialized size was lost (the stream read back as zeros after the
- * volume was mounted again).  Streams of 300, 6000, 1 and 40000 bytes; 4 streams are the control without an attribute list.
+ * volume was mounted again).  Streams of 300, 6000, 1 and 40000 bytes; 4 and 6 streams stay in the base record (no attribute list).
+ * Two rounds of changes follow (append, cut, cut to 0 and rewrite, extend, delete, recreate: StreamModel), each flushed, verified and
+ * verified again after a remount: streams in the base and in the extension records, resident -> non-resident growth and the way back.
  */
 START_TEST(NtfsStreamsAttrList)
 {
-    static const ULONG Counts[] = { 4, 8, 14, 30 };
+    static const ULONG Counts[] = { 4, 8, 14, 30, 6, 1 };
     PUCHAR Buffer, Expected;
-    ULONG i;
+    ULONG i, Round;
     DWORD Error;
-    BOOLEAN Remounted;
+    BOOLEAN Remounted = FALSE;
+    static const CHAR *Names[] = { "created", "round 1", "round 2" };
+    static const CHAR *NamesRemount[] = { "created, after the remount", "round 1, after the remount", "round 2, after the remount" };
 
     if (!NtInit("NtfsStreamsAttrList"))
         return;
@@ -219,28 +274,27 @@ START_TEST(NtfsStreamsAttrList)
     }
     for (i = 0; i < RTL_NUMBER_OF(Counts); i++)
         CreateStreams(i, Counts[i], Buffer);
-    /* The streams are closed with their data in the cache: a page that cannot be written leaves it dirty for good
-     * (the flush of the volume reports it, shutdown loops on it). */
-    if (FlushTestVolume(NtTestDir(), &Error))
-        ok(!Error, "Flushing the volume failed: %lu\n", Error);
-    for (i = 0; i < RTL_NUMBER_OF(Counts); i++)
-        CheckStreams(i, Counts[i], FALSE, Buffer, Expected, "created");
-    Remounted = RemountTestVolume(NtTestDir());
-    if (Remounted)
+    for (Round = 0; Round <= 2; Round++)
+    {
+        if (Round)
+            for (i = 0; i < RTL_NUMBER_OF(Counts); i++)
+                MutateStreams(i, Counts[i], Round, Buffer);
+        /* The streams are closed with their data in the cache: a page that cannot be written leaves it dirty for good
+         * (the flush of the volume reports it, shutdown loops on it). */
+        if (FlushTestVolume(NtTestDir(), &Error))
+            ok(!Error, "Flushing the volume after round %lu failed: %lu\n", Round, Error);
         for (i = 0; i < RTL_NUMBER_OF(Counts); i++)
-            CheckStreams(i, Counts[i], FALSE, Buffer, Expected, "after the remount");
-    else
-        skip("The volume of %ls cannot be locked (the system volume): the data after a remount is not checked\n", NtTestDir());
-
-    for (i = 0; i < RTL_NUMBER_OF(Counts); i++)
-        MutateStreams(i, Counts[i], Buffer);
-    if (FlushTestVolume(NtTestDir(), &Error))
-        ok(!Error, "Flushing the volume after the changes failed: %lu\n", Error);
-    for (i = 0; i < RTL_NUMBER_OF(Counts); i++)
-        CheckStreams(i, Counts[i], TRUE, Buffer, Expected, "changed");
-    if (Remounted && RemountTestVolume(NtTestDir()))
-        for (i = 0; i < RTL_NUMBER_OF(Counts); i++)
-            CheckStreams(i, Counts[i], TRUE, Buffer, Expected, "changed, after the remount");
+            CheckStreams(i, Counts[i], Round, Buffer, Expected, Names[Round]);
+        if (Round == 0)
+            Remounted = RemountTestVolume(NtTestDir());
+        else if (Remounted)
+            Remounted = RemountTestVolume(NtTestDir());
+        if (Remounted)
+            for (i = 0; i < RTL_NUMBER_OF(Counts); i++)
+                CheckStreams(i, Counts[i], Round, Buffer, Expected, NamesRemount[Round]);
+        else if (Round == 0)
+            skip("The volume of %ls cannot be locked (the system volume): the data after a remount is not checked\n", NtTestDir());
+    }
 
 cleanup:
     if (Buffer)
