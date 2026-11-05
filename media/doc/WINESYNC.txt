@@ -267,7 +267,7 @@ dll/win32/softpub             # Synced to Wine-10.0
 dll/win32/sspicli             # Synced to Wine-10.0
 dll/win32/stdole2.tlb         # Synced to WineStaging-3.3
 dll/win32/stdole32.tlb        # Synced to WineStaging-3.3
-dll/win32/sti                 # Synced to Wine-10.0
+dll/win32/sti                 # Synced to Wine-11.21
 dll/win32/sxs                 # Synced to Wine-11.21
 dll/win32/t2embed             # Synced to Wine-10.0
 dll/win32/tapi32              # Synced to Wine-10.0
