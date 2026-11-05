@@ -21,6 +21,7 @@ extern void func_CreateFontIndirect(void);
 extern void func_CreateIconIndirect(void);
 extern void func_CreatePen(void);
 extern void func_CreateRectRgn(void);
+extern void func_D3DKMTCheckOcclusion(void);
 extern void func_D3DKMTCreateDCFromMemory(void);
 extern void func_D3DKMTWow64Thunks(void);
 extern void func_DcAttrPool(void);
@@ -123,6 +124,7 @@ const struct test winetest_testlist[] =
     { "CreateIconIndirect", func_CreateIconIndirect },
     { "CreatePen", func_CreatePen },
     { "CreateRectRgn", func_CreateRectRgn },
+    { "D3DKMTCheckOcclusion", func_D3DKMTCheckOcclusion },
     { "D3DKMTCreateDCFromMemory", func_D3DKMTCreateDCFromMemory },
     { "D3DKMTWow64Thunks", func_D3DKMTWow64Thunks },
     { "DcAttrPool", func_DcAttrPool },
