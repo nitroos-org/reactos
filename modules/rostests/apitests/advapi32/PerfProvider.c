@@ -118,7 +118,6 @@ START_TEST(PerfProvider)
         Template.Counters[1].Type = 0x10000;
         Template.Counters[1].Attrib = 1; /* PERF_ATTRIB_BY_REFERENCE */
         Template.Counters[1].Size = sizeof(PVOID);
-        Template.Counters[1].Offset = 8;
 
         ok(pSetInfo(Provider, &Template.Set, 0) == ERROR_INVALID_PARAMETER, "size 0\n");
         ok(pSetInfo(Provider, &Template.Set, sizeof(CSET)) == ERROR_INVALID_PARAMETER, "header only\n");
@@ -132,6 +131,9 @@ START_TEST(PerfProvider)
 
         Error = pSetInfo(Provider, &Template.Set, sizeof(Template));
         ok(Error == ERROR_SUCCESS, "PerfSetCounterSetInfo returned %lu\n", Error);
+        /* winref10: the offsets are written into the template, from the start of the instance block (see PerfCounterValues) */
+        ok(Template.Counters[0].Offset == 32 && Template.Counters[1].Offset == 40, "offsets %lu %lu\n",
+           Template.Counters[0].Offset, Template.Counters[1].Offset);
         Error = pSetInfo(Provider, &Template.Set, sizeof(Template));
         ok(Error == ERROR_ALREADY_EXISTS, "second PerfSetCounterSetInfo returned %lu\n", Error);
 
@@ -142,7 +144,7 @@ START_TEST(PerfProvider)
             ok(IsEqualGUID(&Instance->CounterSetGuid, &SetGuid), "wrong guid in the instance\n");
             ok(Instance->InstanceId == 1, "id %lu\n", Instance->InstanceId);
             ok(Instance->InstanceNameSize == 6 * sizeof(WCHAR), "name size %lu\n", Instance->InstanceNameSize);
-            ok(Instance->InstanceNameOffset >= sizeof(CINST) && Instance->InstanceNameOffset < Instance->dwSize,
+            ok(Instance->InstanceNameOffset == 48 && Instance->dwSize == 64,
                "name offset %lu, size %lu\n", Instance->InstanceNameOffset, Instance->dwSize);
             ok(!wcscmp((WCHAR *)((BYTE *)Instance + Instance->InstanceNameOffset), L"alpha"), "name\n");
 

@@ -3,6 +3,10 @@
 #include <apitest.h>
 
 extern void func_AddMandatoryAce(void);
+extern void func_AuditCategories(void);
+extern void func_CveEventWrite(void);
+extern void func_DynamicTimeZone(void);
+extern void func_PerfCounterValues(void);
 extern void func_BuildSecurityDescriptor(void);
 extern void func_NamedPipeSD(void);
 extern void func_ConvertStringSidToSid(void);
@@ -112,6 +116,10 @@ extern void func_LsaLookupSids2(void);
 const struct test winetest_testlist[] =
 {
     { "AddMandatoryAce", func_AddMandatoryAce },
+    { "AuditCategories", func_AuditCategories },
+    { "CveEventWrite", func_CveEventWrite },
+    { "DynamicTimeZone", func_DynamicTimeZone },
+    { "PerfCounterValues", func_PerfCounterValues },
     { "BuildSecurityDescriptor", func_BuildSecurityDescriptor },
     { "NamedPipeSD", func_NamedPipeSD },
     { "ConvertStringSidToSid", func_ConvertStringSidToSid },
