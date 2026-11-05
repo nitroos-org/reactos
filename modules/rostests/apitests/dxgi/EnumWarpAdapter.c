@@ -8,7 +8,9 @@
  * both the Microsoft Basic Render Driver (1414:008c): the first has flags 0, the second is WARP, with a
  * LUID of its own and DXGI_ADAPTER_FLAG_SOFTWARE. EnumWarpAdapter returns a new object for the second
  * one on every call, never the first adapter, whatever the interface asked for (IDXGIAdapter, 1, 4).
- * What the list of EnumAdapters1 holds is not checked: ReactOS lists one adapter, Windows lists WARP last.
+ * EnumAdapters, EnumAdapters1 and EnumAdapterByGpuPreference list WARP last, after the display adapter(s):
+ * the same identity as EnumWarpAdapter returns (LUID, flags), and no other listed adapter is software.
+ * Programs that want WARP walk that list for DXGI_ADAPTER_FLAG_SOFTWARE (Microsoft Office does).
  * No adapter of that machine has an output (EnumOutputs fails with DXGI_ERROR_NOT_CURRENTLY_AVAILABLE).
  */
 
@@ -293,6 +295,129 @@ static void TestAdapterZeroDevice(IDXGIFactory1 *Factory1)
     IDXGIAdapter1_Release(Adapter);
 }
 
+/* the list ends with WARP: one software adapter, the last one, with the identity of EnumWarpAdapter */
+static void TestAdapterList(IDXGIFactory4 *Factory, IDXGIFactory1 *Factory1)
+{
+    IDXGIAdapter1 *Warp = NULL, *Adapter = NULL;
+    IDXGIAdapter *Plain = NULL;
+    IDXGIFactory6 *Factory6 = NULL;
+    DXGI_ADAPTER_DESC1 WarpDesc, Desc;
+    DXGI_ADAPTER_DESC Desc0;
+    UINT Count, Software = 0, LastFlags = 0, i, Pref;
+    LUID LastLuid = { 0, 0 };
+    HRESULT hr;
+
+    hr = IDXGIFactory4_EnumWarpAdapter(Factory, &IID_IDXGIAdapter1, (void **)&Warp);
+    ok(hr == S_OK, "EnumWarpAdapter returned %08lx\n", hr);
+    if (!Warp)
+        return;
+    hr = IDXGIAdapter1_GetDesc1(Warp, &WarpDesc);
+    ok(hr == S_OK, "GetDesc1 returned %08lx\n", hr);
+    IDXGIAdapter1_Release(Warp);
+
+    for (Count = 0; (hr = IDXGIFactory1_EnumAdapters1(Factory1, Count, &Adapter)) == S_OK; Count++)
+    {
+        memset(&Desc, 0xcc, sizeof(Desc));
+        hr = IDXGIAdapter1_GetDesc1(Adapter, &Desc);
+        ok(hr == S_OK, "GetDesc1 of adapter %u returned %08lx\n", Count, hr);
+        trace("adapter %u: '%ls' %04x:%04x flags %#x LUID %08lx:%08lx\n", Count, Desc.Description, Desc.VendorId,
+              Desc.DeviceId, Desc.Flags, Desc.AdapterLuid.HighPart, Desc.AdapterLuid.LowPart);
+        if (Desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+            Software++;
+        LastFlags = Desc.Flags;
+        LastLuid = Desc.AdapterLuid;
+        IDXGIAdapter1_Release(Adapter);
+        if (Count > 16)
+            break;
+    }
+    ok(hr == DXGI_ERROR_NOT_FOUND, "EnumAdapters1(%u) returned %08lx\n", Count, hr);
+    ok(Count >= 2, "%u adapters listed, expected the display adapter and WARP\n", Count);
+    ok(Software == 1, "%u software adapters listed\n", Software);
+    ok(LastFlags & DXGI_ADAPTER_FLAG_SOFTWARE, "the last adapter has flags %#x\n", LastFlags);
+    ok(SameLuid(LastLuid, WarpDesc.AdapterLuid), "the last adapter is not WARP (LUID %08lx:%08lx)\n",
+       LastLuid.HighPart, LastLuid.LowPart);
+    Adapter = (IDXGIAdapter1 *)(ULONG_PTR)0x1234;
+    hr = IDXGIFactory1_EnumAdapters1(Factory1, Count + 1, &Adapter);
+    ok(hr == DXGI_ERROR_NOT_FOUND, "EnumAdapters1(%u) returned %08lx\n", Count + 1, hr);
+    ok(Adapter == NULL, "the output is %p\n", Adapter);
+    if (Count < 2)
+        return;
+
+    /* the last one is WARP in every respect a program checks */
+    hr = IDXGIFactory1_EnumAdapters1(Factory1, Count - 1, &Adapter);
+    ok(hr == S_OK, "EnumAdapters1(%u) returned %08lx\n", Count - 1, hr);
+    if (hr == S_OK && Adapter)
+    {
+        IDXGIOutput *Output = NULL;
+
+        hr = IDXGIAdapter1_GetDesc1(Adapter, &Desc);
+        ok(hr == S_OK, "GetDesc1 returned %08lx\n", hr);
+        ok(wcscmp(Desc.Description, s_Brd) == 0, "the last adapter is '%ls'\n", Desc.Description);
+        ok(Desc.VendorId == 0x1414 && Desc.DeviceId == 0x8c, "the last adapter is %04x:%04x\n", Desc.VendorId, Desc.DeviceId);
+        ok(Desc.DedicatedVideoMemory == WarpDesc.DedicatedVideoMemory, "dedicated memory %Iu, WARP %Iu\n",
+           Desc.DedicatedVideoMemory, WarpDesc.DedicatedVideoMemory);
+        hr = IDXGIAdapter1_EnumOutputs(Adapter, 0, &Output);
+        ok(hr == DXGI_ERROR_NOT_FOUND || hr == MY_DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, "EnumOutputs returned %08lx\n", hr);
+        if (hr == S_OK && Output)
+            IDXGIOutput_Release(Output);
+        IDXGIAdapter1_Release(Adapter);
+    }
+
+    /* the first one is the display adapter, never software */
+    hr = IDXGIFactory1_EnumAdapters1(Factory1, 0, &Adapter);
+    ok(hr == S_OK, "EnumAdapters1(0) returned %08lx\n", hr);
+    if (hr == S_OK && Adapter)
+    {
+        hr = IDXGIAdapter1_GetDesc1(Adapter, &Desc);
+        ok(hr == S_OK && !(Desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE), "adapter 0 has flags %#x\n", Desc.Flags);
+        ok(!SameLuid(Desc.AdapterLuid, WarpDesc.AdapterLuid), "adapter 0 has the LUID of WARP\n");
+        IDXGIAdapter1_Release(Adapter);
+    }
+
+    /* IDXGIFactory::EnumAdapters lists the same */
+    hr = IDXGIFactory1_EnumAdapters(Factory1, Count - 1, &Plain);
+    ok(hr == S_OK, "EnumAdapters(%u) returned %08lx\n", Count - 1, hr);
+    if (hr == S_OK && Plain)
+    {
+        hr = IDXGIAdapter_GetDesc(Plain, &Desc0);
+        ok(hr == S_OK && SameLuid(Desc0.AdapterLuid, WarpDesc.AdapterLuid), "EnumAdapters(%u) is not WARP\n", Count - 1);
+        IDXGIAdapter_Release(Plain);
+    }
+    Plain = NULL;
+    hr = IDXGIFactory1_EnumAdapters(Factory1, Count, &Plain);
+    ok(hr == DXGI_ERROR_NOT_FOUND, "EnumAdapters(%u) returned %08lx\n", Count, hr);
+    if (hr == S_OK && Plain)
+        IDXGIAdapter_Release(Plain);
+
+    /* and so does EnumAdapterByGpuPreference, whatever the preference */
+    hr = IDXGIFactory1_QueryInterface(Factory1, &IID_IDXGIFactory6, (void **)&Factory6);
+    ok(hr == S_OK, "QueryInterface(IDXGIFactory6) returned %08lx\n", hr);
+    if (hr != S_OK || !Factory6)
+        return;
+    for (Pref = DXGI_GPU_PREFERENCE_UNSPECIFIED; Pref <= DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE; Pref++)
+    {
+        LastFlags = 0;
+        for (i = 0; (hr = IDXGIFactory6_EnumAdapterByGpuPreference(Factory6, i, Pref, &IID_IDXGIAdapter1,
+                                                                     (void **)&Adapter)) == S_OK; i++)
+        {
+            hr = IDXGIAdapter1_GetDesc1(Adapter, &Desc);
+            ok(hr == S_OK, "GetDesc1 returned %08lx\n", hr);
+            trace("preference %u adapter %u: flags %#x LUID %08lx:%08lx\n", Pref, i, Desc.Flags,
+                  Desc.AdapterLuid.HighPart, Desc.AdapterLuid.LowPart);
+            LastFlags = Desc.Flags;
+            LastLuid = Desc.AdapterLuid;
+            IDXGIAdapter1_Release(Adapter);
+            if (i > 16)
+                break;
+        }
+        ok(hr == DXGI_ERROR_NOT_FOUND, "preference %u: EnumAdapterByGpuPreference(%u) returned %08lx\n", Pref, i, hr);
+        ok(i == Count, "preference %u: %u adapters, EnumAdapters1 lists %u\n", Pref, i, Count);
+        ok((LastFlags & DXGI_ADAPTER_FLAG_SOFTWARE) && SameLuid(LastLuid, WarpDesc.AdapterLuid),
+           "preference %u: the last adapter is not WARP\n", Pref);
+    }
+    IDXGIFactory6_Release(Factory6);
+}
+
 /* a 32-bit process on 64-bit ReactOS has the same 3D stack as a 64-bit one */
 static BOOL IsWow64(void)
 {
@@ -339,6 +464,7 @@ START_TEST(EnumWarpAdapter)
     if (Factory4)
     {
         TestWarpAdapter(Factory4, Factory1);
+        TestAdapterList(Factory4, Factory1);
         IDXGIFactory4_Release(Factory4);
     }
     TestAdapterZeroDevice(Factory1);
