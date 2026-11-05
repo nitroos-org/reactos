@@ -54,6 +54,10 @@ list(APPEND SOURCE
     HookFamilies.c
     HungWindow.c
     WindowPosChanged.c
+    PowerSettingNotification.c
+    OwnerZOrderNotice.c
+    NcPaintLayered.c
+    SetWindowPosFlags.c
     WmCancelModeLastError.c
     InitializeLpkHooks.c
     IsDialogMessage.c

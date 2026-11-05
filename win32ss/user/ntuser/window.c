@@ -2219,6 +2219,92 @@ Error:
 }
 
 /*
+ * IntDwmNcResolve
+ *
+ * Runs when an application takes a WM_DWMNCRENDERINGCHANGED that was posted with DWMNC_PENDING (when a captioned
+ * top-level window is first shown, IntDwmNcAnnounceFirstShow) or DWMNC_POLICY (by dwmapi, after DwmSetWindowAttribute(DWMWA_NCRENDERING_POLICY)), and
+ * answers whether the application gets it, with the state in wParam. Measured on Windows 10 22H2:
+ *  - a captioned window is told TRUE once, unless its policy turned the rendering off before the message is
+ *    taken: then it hears nothing. Windows 10 tells a hidden window too, a moment after its creation; here it is
+ *    told when it is first shown, so that the queue of a thread that creates windows it never shows stays empty;
+ *  - later, when the state changes the window gets a frame change (a visible one) and the message with the new
+ *    state; a policy that changes nothing says nothing; a window without a caption starts as "off".
+ * The policy is the property NitroDwmNc (0 the style decides, 1 disabled, 2 enabled); what has been announced
+ * is the system property SysDwmNc (bit 0 announced, bit 1 the state announced).
+ */
+VOID FASTCALL
+IntDwmNcAnnounceFirstShow(PWND Window)
+{
+   ULONG_PTR State;
+
+   if (!AtomDwmNcState)
+      return;
+
+   /* Bit 0: told already; bit 2: the notification is on its way. */
+   State = (ULONG_PTR)UserGetProp(Window, AtomDwmNcState, TRUE);
+   if (State & (1 | 4))
+      return;
+   UserSetProp(Window, AtomDwmNcState, (HANDLE)(State | 4), TRUE);
+   UserPostMessage(UserHMGetHandle(Window), WM_DWMNCRENDERINGCHANGED, TRUE, DWMNC_PENDING);
+}
+
+BOOL FASTCALL
+IntDwmNcResolve(PWND Window, PMSG Msg)
+{
+   ULONG_PTR Policy = 0, State = 0;
+   BOOL Captioned = ((Window->style & WS_CAPTION) == WS_CAPTION);
+   BOOL FromCreation = (Msg->lParam == DWMNC_PENDING);
+   BOOL Enabled, Announced, OldState;
+
+   if (AtomDwmNc)
+      Policy = (ULONG_PTR)UserGetProp(Window, AtomDwmNc, FALSE) & 3;
+   if (AtomDwmNcState)
+      State = (ULONG_PTR)UserGetProp(Window, AtomDwmNcState, TRUE);
+
+   switch (Policy)
+   {
+      case 1:  Enabled = FALSE; break;
+      case 2:  Enabled = TRUE; break;
+      default: Enabled = Captioned; break;
+   }
+   Announced = (State & 1) != 0;
+
+   Msg->lParam = 0;
+   Msg->wParam = Enabled;
+
+   if (!Announced && Captioned)
+   {
+      /* Not looked at yet: the notification of its creation is the first, a policy waits for it */
+      if (!FromCreation)
+         return FALSE;
+      if (AtomDwmNcState)
+         UserSetProp(Window, AtomDwmNcState, (HANDLE)(ULONG_PTR)(1 | (Enabled ? 2 : 0)), TRUE);
+      return Enabled;
+   }
+
+   OldState = Announced ? ((State & 2) != 0) : FALSE;
+   if (Enabled == OldState)
+      return FALSE;
+
+   if (AtomDwmNcState)
+      UserSetProp(Window, AtomDwmNcState, (HANDLE)(ULONG_PTR)(1 | (Enabled ? 2 : 0)), TRUE);
+
+   if (Window->style & WS_VISIBLE)
+   {
+      USER_REFERENCE_ENTRY Ref;
+      HWND hWnd = UserHMGetHandle(Window);
+
+      UserRefObjectCo(Window, &Ref);
+      co_WinPosSetWindowPos(Window, 0, 0, 0, 0, 0,
+                            SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+      UserDerefObjectCo(Window);
+      if (!IntIsWindow(hWnd))
+         return FALSE;
+   }
+   return TRUE;
+}
+
+/*
  * @implemented
  */
 PWND FASTCALL
