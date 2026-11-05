@@ -140,6 +140,14 @@ TextIntUpdateSize(
     _In_ PFONTGDI FontGDI,
     _In_ BOOL bDoLock);
 
+INT FASTCALL
+TextIntGetOutlineTextMetrics(
+    _In_ PTEXTOBJ TextObj,
+    _In_ PFONTGDI FontGDI,
+    _In_ UINT Size,
+    _Out_opt_ OUTLINETEXTMETRICW *Otm,
+    _In_opt_ const LOGFONTW *plfStyle);
+
 BOOL FASTCALL ftGdiGetRasterizerCaps(LPRASTERIZER_STATUS);
 BOOL FASTCALL TextIntGetTextExtentPoint(PDC, PTEXTOBJ, PCWCH, INT, ULONG, PINT, PINT, PSIZE, FLONG);
 BOOL FASTCALL ftGdiGetTextMetricsW(HDC,PTMW_INTERNAL);
@@ -152,7 +160,7 @@ BOOL FASTCALL ftGdiRealizationInfo(PFONTGDI,PREALIZATION_INFO);
 BOOL FASTCALL ftGdiGetFontFileInfo(ULONG InstanceId, ULONG FileIndex, PFONT_FILE_INFO *ppInfo, PSIZE_T pcbInfo);
 BOOL FASTCALL ftGdiGetFontFileData(ULONG InstanceId, ULONG FileIndex, ULONGLONG Offset, PVOID pvBuf, SIZE_T cjBuf);
 BOOL FASTCALL ftGdiGetFontRealization(PFONTGDI FontGDI, const LOGFONTW *LogFont, PFONT_REALIZATION_INFO Info);
-DWORD FASTCALL ftGdiGetKerningPairs(PFONTGDI,DWORD,LPKERNINGPAIR);
+DWORD FASTCALL ftGdiGetKerningPairs(PTEXTOBJ,DWORD,LPKERNINGPAIR);
 BOOL
 APIENTRY
 GreExtTextOutW(

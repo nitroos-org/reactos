@@ -34,8 +34,10 @@ list(APPEND SOURCE
     ExcludeClipRect.c
     ExtCreatePen.c
     ExtCreateRegion.c
+    FontCharsetFallback.c
     FontLinkCJK.c
     FontRequestState.c
+    FontSizeRace.c
     FrameRgn.c
     GdiConvertBitmap.c
     GdiConvertBrush.c
