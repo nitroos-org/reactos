@@ -600,10 +600,8 @@ GetSystemVersionString(OUT PWSTR pwszzVersion,
         /* String for Safe Mode */
         Status = RtlStringCchPrintfW(pwszzVersion,
                                      cchDest,
-                                     L"%S (Version %S) %wZ (NT %u.%u Build %u%s)\n",
+                                     L"%S (NT %u.%u Build %u%s)\n",
                                      NITRO_TITLE_STR,
-                                     KERNEL_VERSION_STR,
-                                     &BuildLabString,
                                      SharedUserData->NtMajorVersion,
                                      SharedUserData->NtMinorVersion,
                                      (VerInfo.dwBuildNumber & 0xFFFF),
@@ -642,11 +640,8 @@ GetSystemVersionString(OUT PWSTR pwszzVersion,
         Status = RtlStringCchPrintfW(pwszzVersion,
                                      cchDest,
                                      L"%S\n"
-                                     L"Version %S Build %wZ\n"
                                      L"Reporting NT %u.%u (Build %u%s)\n",
                                      NITRO_TITLE_STR,
-                                     KERNEL_VERSION_STR,
-                                     &BuildLabString,
                                      SharedUserData->NtMajorVersion,
                                      SharedUserData->NtMinorVersion,
                                      (VerInfo.dwBuildNumber & 0xFFFF),
@@ -675,10 +670,8 @@ GetSystemVersionString(OUT PWSTR pwszzVersion,
         /* Fall-back string */
         Status = RtlStringCchPrintfW(pwszzVersion,
                                      cchDest,
-                                     L"%S (Version %S) %wZ\n",
-                                     NITRO_TITLE_STR,
-                                     KERNEL_VERSION_STR,
-                                     &BuildLabString);
+                                     L"%S\n",
+                                     NITRO_TITLE_STR);
         if (!NT_SUCCESS(Status))
         {
             /* General failure, NULL-terminate the string */

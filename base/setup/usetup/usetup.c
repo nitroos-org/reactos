@@ -26,6 +26,7 @@
  */
 
 #include <usetup.h>
+#include <reactos/buildno.h>
 #include <math.h>
 #include <ntstrsafe.h>
 
@@ -719,6 +720,7 @@ LanguagePage(PINPUT_RECORD Ir)
     ScrollToPositionGenericList(&ListUi, GetDefaultLanguageIndex());
 
     MUIDisplayPage(LANGUAGE_PAGE);
+    MUIDisplayBrandNotice();
 
     while (TRUE)
     {
@@ -833,6 +835,7 @@ static PAGE_NUMBER
 WelcomePage(PINPUT_RECORD Ir)
 {
     MUIDisplayPage(WELCOME_PAGE);
+    MUIDisplayBrandNotice();
 
     while (TRUE)
     {
@@ -1722,7 +1725,7 @@ SelectPartitionPage(PINPUT_RECORD Ir)
             if (CurrentPartition->DiskEntry->MediaType == FixedMedia &&
                 !CurrentPartition->DiskEntry->BiosFound)
             {
-                PopupError("The disk you have selected for installing ReactOS\n"
+                PopupError("The disk you have selected for installing " BRAND_PRODUCT_NAME "\n"
                            "is not visible by the firmware of your computer,\n"
                            "and so may not be bootable.\n"
                            "Press ENTER to continue anyway.",
@@ -2674,9 +2677,9 @@ FsVolCallback(
             // or use an external drive as the system drive/partition
             // (e.g. floppy, USB drive, etc...)
             //
-            PopupError("The ReactOS Setup could not find a supported system partition\n"
+            PopupError("The " BRAND_PRODUCT_NAME " Setup could not find a supported system partition\n"
                        "on your system or could not create a new one. Without such a partition\n"
-                       "the Setup program cannot install ReactOS.\n"
+                       "the Setup program cannot install " BRAND_PRODUCT_NAME ".\n"
                        "Press ENTER to return to the partition selection list.",
                        MUIGetString(STRING_CONTINUE),
                        Ir, POPUP_WAIT_ENTER);

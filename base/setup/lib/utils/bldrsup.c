@@ -11,6 +11,7 @@
 /* INCLUDES *****************************************************************/
 
 #include "precomp.h"
+#include <reactos/buildno.h>
 
 #include "bldrsup.h"
 #include "filesup.h"
@@ -392,7 +393,7 @@ CreateCommonFreeLdrSections(
     IniSection = IniAddSection(BootStore->IniCache, L"Display");
 
     /* TitleText and MinimalUI */
-    IniAddKey(IniSection, L"TitleText", L"ReactOS Boot Manager");
+    IniAddKey(IniSection, L"TitleText", BRAND_PRODUCT_NAME_W L" Boot Manager");
     IniAddKey(IniSection, L"MinimalUI", L"Yes");
 
     /*
