@@ -2512,6 +2512,17 @@ co_WinPosSetWindowPosEx(
       WinPos.y = NewWindowRect.top;
       WinPos.cx = NewWindowRect.right - NewWindowRect.left;
       WinPos.cy = NewWindowRect.bottom - NewWindowRect.top;
+      /* The position is in the coordinates SetWindowPos takes, as in WM_WINDOWPOSCHANGING: relative to
+         the client area of the parent for a child window (the inverse of co_WinPosDoWinPosChanging).
+         NewWindowRect is in screen coordinates. */
+      {
+         PWND Parent = Window->spwndParent;
+         if (Parent && Parent != Window->head.rpdesk->pDeskInfo->spwnd)
+         {
+            WinPos.x -= Parent->rcClient.left;
+            WinPos.y -= Parent->rcClient.top;
+         }
+      }
       TRACE("WM_WINDOWPOSCHANGED hwnd %p Flags %04x\n",WinPos.hwnd,WinPos.flags);
       co_IntSendMessageNoWait(WinPos.hwnd, WM_WINDOWPOSCHANGED, 0, (LPARAM) &WinPos);
    }
