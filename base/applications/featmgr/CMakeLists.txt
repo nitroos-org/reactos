@@ -99,6 +99,13 @@ endif()
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/dotnet-framework-4.8.ini
             DESTINATION reactos/Featmgr/Catalog FOR all)
 
+# --- Wine Gecko 2.40 (the mshtml engine): software-tier entry, i386 and amd64, on demand (it is not in the image) ---
+# The manifest only; its recipe is the [wine-gecko] / [wine-gecko-x64] sections of Catalog\components.ini: featmgr downloads the official
+# MSI packages (the same sources and SHA-1 pins as the add-on prompt of appwiz.cpl, tools/check-gecko-pins.sh compares them),
+# refuses them unless the SHA-256 matches, and never bundles them. Compatibility only (2017-era engine, MPL 2.0).
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/wine-gecko.ini
+            DESTINATION reactos/Featmgr/Catalog FOR all)
+
 # --- the component list: the one data file for downloaded components (name, URL, SHA-256, size, detect rule, install
 # command) and for the first-boot installer's default set ("optfeatures /firstboot", started by the HKLM Run value
 # NitroComponents in hivesft.inf).

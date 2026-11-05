@@ -52,6 +52,20 @@ BOOL FmArchListed(LPCWSTR list)
     return FALSE;
 }
 
+/* key.amd64 / key.x86 of this build wins over key (Install, DetectReg, DetectFile: a 32-bit package on a 64-bit system
+ * installs into SysWOW64 through the 32-bit msiexec) */
+static void ReadKeyArch(LPCWSTR file, LPCWSTR sec, LPCWSTR key, LPWSTR out, DWORD cch)
+{
+    WCHAR k[48];
+#ifdef _WIN64
+    StringCchPrintfW(k, ARRAYSIZE(k), L"%s.amd64", key);
+#else
+    StringCchPrintfW(k, ARRAYSIZE(k), L"%s.x86", key);
+#endif
+    ReadKey(file, sec, k, out, cch);
+    if (!out[0]) ReadKey(file, sec, key, out, cch);
+}
+
 static BOOL LoadSection(LPCWSTR file, LPCWSTR id, FM_COMPONENT *c)
 {
     WCHAR tmp[512];
@@ -63,11 +77,15 @@ static BOOL LoadSection(LPCWSTR file, LPCWSTR id, FM_COMPONENT *c)
     StringCchCopyW(c->Id, ARRAYSIZE(c->Id), id);
     if (!c->Name[0]) StringCchCopyW(c->Name, ARRAYSIZE(c->Name), id);
     ReadKey(file, id, L"Sha256", c->Sha256, ARRAYSIZE(c->Sha256));
+    ReadKey(file, id, L"Sha1", c->Sha1, ARRAYSIZE(c->Sha1));     /* optional, checked in addition to the SHA-256 */
     ReadKey(file, id, L"FileName", c->FileName, ARRAYSIZE(c->FileName));
     if (!c->FileName[0]) StringCchPrintfW(c->FileName, ARRAYSIZE(c->FileName), L"%s.bin", id);
-    ReadKey(file, id, L"DetectReg", c->DetectReg, ARRAYSIZE(c->DetectReg));
-    ReadKey(file, id, L"DetectFile", c->DetectFile, ARRAYSIZE(c->DetectFile));
-    ReadKey(file, id, L"Install", c->Install, ARRAYSIZE(c->Install));
+    ReadKeyArch(file, id, L"DetectReg", c->DetectReg, ARRAYSIZE(c->DetectReg));
+    ReadKeyArch(file, id, L"DetectFile", c->DetectFile, ARRAYSIZE(c->DetectFile));
+    ReadKeyArch(file, id, L"Install", c->Install, ARRAYSIZE(c->Install));
+    ReadKeyArch(file, id, L"Cleanup", c->Cleanup, ARRAYSIZE(c->Cleanup));
+    ReadKey(file, id, L"Also", c->Also, ARRAYSIZE(c->Also));
+    if (wcspbrk(c->Also, L"[]=\r\n")) c->Also[0] = L'\0';
 #ifdef _WIN64
     ReadKey(file, id, L"Uninstall.amd64", c->Uninstall, ARRAYSIZE(c->Uninstall));
 #else
@@ -159,7 +177,7 @@ static BOOL DetectRegRule(LPCWSTR rule)
     return ok;
 }
 
-BOOL FmCompDetect(const FM_COMPONENT *c)
+BOOL FmCompDetectOne(const FM_COMPONENT *c)
 {
     WCHAR p[MAX_PATH];
     if (DetectRegRule(c->DetectReg)) return TRUE;
@@ -167,6 +185,44 @@ BOOL FmCompDetect(const FM_COMPONENT *c)
         GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES)
         return TRUE;
     return FALSE;
+}
+
+/* a chain is short and never loops: the hop count is capped (an Also= cycle in a damaged list ends there) */
+#define COMP_MAX_PIECES 4
+
+BOOL FmCompNext(const FM_COMPONENT *c, FM_COMPONENT *next)
+{
+    if (!c->Also[0] || !FmCompLoad(c->Also, next)) return FALSE;
+    if (!next->ArchOk || !next->Install[0] || (!next->DetectReg[0] && !next->DetectFile[0])) return FALSE;
+    return TRUE;
+}
+
+BOOL FmCompDetect(const FM_COMPONENT *c)
+{
+    FM_COMPONENT piece, nxt;
+    int n;
+    if (!FmCompDetectOne(c)) return FALSE;
+    piece = *c;
+    for (n = 1; n < COMP_MAX_PIECES && FmCompNext(&piece, &nxt); n++)
+    {
+        if (!FmCompDetectOne(&nxt)) return FALSE;
+        piece = nxt;
+    }
+    return TRUE;
+}
+
+ULONGLONG FmCompTotalSize(const FM_COMPONENT *c)
+{
+    FM_COMPONENT piece, nxt;
+    ULONGLONG total = c->Size;
+    int n;
+    piece = *c;
+    for (n = 1; n < COMP_MAX_PIECES && FmCompNext(&piece, &nxt); n++)
+    {
+        total += nxt.Size;
+        piece = nxt;
+    }
+    return total;
 }
 
 void FmCompInstallLine(const FM_COMPONENT *c, LPCWSTR file, LPWSTR out, DWORD cch)

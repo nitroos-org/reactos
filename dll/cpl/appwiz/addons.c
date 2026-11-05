@@ -28,6 +28,11 @@
 
 #define GECKO_VERSION "2.40"
 
+/* NitroOS: the optional feature manager offers the same Gecko on demand (base/applications/featmgr, entry "wine-gecko").
+ * The URLs and SHA-1 pins below must stay the ones in its Catalog\components.ini ([wine-gecko], [wine-gecko-x64]);
+ * base/applications/featmgr/tools/check-gecko-pins.sh compares them. Either installer is seen by the other (the package's
+ * HKLM\Software\Wine\MSHTML\2.40 GeckoPath, and its gecko\2.40\wine_gecko folder). */
+
 #ifdef __i386__
 #define ARCH_STRING "x86"
 #define GECKO_SHA "8a3adedf3707973d1ed4ac3b2e791486abf814bd"

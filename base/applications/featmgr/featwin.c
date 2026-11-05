@@ -262,7 +262,7 @@ static void ShowDesc(HTREEITEM h)
         }
         if (!_wcsicmp(f->Provider, L"component") && FmCompLoad(f->Id, &c) && c.Size && f->State != FM_STATE_ENABLED)
         {
-            StringCchPrintfW(tmp, ARRAYSIZE(tmp), L" Download: %I64u MB.", (c.Size + (1u << 20) - 1) >> 20);
+            StringCchPrintfW(tmp, ARRAYSIZE(tmp), L" Download: %I64u MB.", (FmCompTotalSize(&c) + (1u << 20) - 1) >> 20);
             StringCchCatW(text, ARRAYSIZE(text), tmp);
         }
         else if (f->Hosted && f->PayloadAvailable && f->State != FM_STATE_ENABLED)
