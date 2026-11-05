@@ -9,6 +9,11 @@
  * provider, nothing is published to a consumer. This is what an application sees on Windows when
  * nobody queries the counters, which is all that Edge/Chromium (msedge.dll delay-loads these
  * exports at start-up) needs.
+ *
+ * Layout of a counter set instance block, measured on Windows 10 22H2 (x64 and x86): the 32 bytes of
+ * PERF_COUNTERSET_INSTANCE, then the counters, each in a slot of its size rounded up to 8 bytes, in the order of
+ * the template (PerfSetCounterSetInfo writes the Offset of every counter into the caller's template, from the
+ * start of the block), then the instance name, and the block size is rounded up to 8 bytes.
  */
 
 #include <advapi32.h>
@@ -218,6 +223,24 @@ PerfSetCounterSetInfo(
     RtlCopyMemory(&Set->Info, Template, (SIZE_T)Needed);
     InitializeListHead(&Set->Instances);
 
+    /* The offsets are assigned here; the caller's template gets them too, they are how it finds its counters */
+    {
+        PERF_COUNTER_INFO *Own = PerfCounters(Set);
+        ULONG64 Next = sizeof(PERF_COUNTERSET_INSTANCE);
+        ULONG k;
+
+        for (k = 0; k < Set->Info.NumCounters; k++)
+        {
+            Own[k].Offset = (ULONG)Next;
+            Next += ((ULONG64)Own[k].Size + 7) & ~7ULL;
+            if (Next > MAXULONG / 2)
+            {
+                HeapFree(GetProcessHeap(), 0, Set);
+                return ERROR_INVALID_PARAMETER;
+            }
+        }
+    }
+
     EnterCriticalSection(&PerfLock);
     Prov = PerfFindProvider(ProviderHandle);
     if (!Prov)
@@ -234,7 +257,15 @@ PerfSetCounterSetInfo(
             }
         }
         if (Ret == ERROR_SUCCESS)
+        {
+            PERF_COUNTER_INFO *Given = (PERF_COUNTER_INFO *)(Template + 1);
+            PERF_COUNTER_INFO *Own = PerfCounters(Set);
+            ULONG k;
+
+            for (k = 0; k < Set->Info.NumCounters; k++)
+                Given[k].Offset = Own[k].Offset;
             InsertTailList(&Prov->Sets, &Set->Entry);
+        }
     }
     LeaveCriticalSection(&PerfLock);
 
@@ -306,9 +337,9 @@ PerfCreateInstance(
         Counters = PerfCounters(Set);
         for (i = 0; i < Set->Info.NumCounters; i++)
             DataSize += (Counters[i].Size + 7) & ~7;
-        NameOffset = sizeof(PERF_COUNTERSET_INSTANCE);
-        DataOffset = (NameOffset + (ULONG)NameBytes + 7) & ~7;
-        Total = FIELD_OFFSET(PERF_INSTANCE_NODE, Instance) + DataOffset + DataSize;
+        DataOffset = sizeof(PERF_COUNTERSET_INSTANCE);
+        NameOffset = DataOffset + (ULONG)DataSize;
+        Total = FIELD_OFFSET(PERF_INSTANCE_NODE, Instance) + ((NameOffset + (ULONG)NameBytes + 7) & ~7);
 
         Node = PerfAlloc(Prov, Total);
         if (!Node)
@@ -320,7 +351,7 @@ PerfCreateInstance(
             Node->DataOffset = DataOffset;
             Node->DataSize = (ULONG)DataSize;
             Node->Instance.CounterSetGuid = *CounterSetGuid;
-            Node->Instance.dwSize = DataOffset + (ULONG)DataSize;
+            Node->Instance.dwSize = (NameOffset + (ULONG)NameBytes + 7) & ~7;
             Node->Instance.InstanceId = InstanceId;
             Node->Instance.InstanceNameOffset = NameOffset;
             Node->Instance.InstanceNameSize = (ULONG)NameBytes;
@@ -409,19 +440,182 @@ PerfSetCounterRefValue(
             if (Counters[i].CounterId != CounterId)
                 continue;
             if (!(Counters[i].Attrib & PERF_ATTRIB_BY_REFERENCE) ||
-                Counters[i].Offset > Node->DataSize ||
-                Node->DataSize - Counters[i].Offset < sizeof(PVOID))
+                Counters[i].Offset < Node->DataOffset ||
+                Counters[i].Offset - Node->DataOffset > Node->DataSize ||
+                Node->DataOffset + Node->DataSize - Counters[i].Offset < sizeof(PVOID))
             {
                 Ret = ERROR_INVALID_PARAMETER;
                 break;
             }
-            *(PVOID *)((PBYTE)Instance + Node->DataOffset + Counters[i].Offset) = Address;
+            *(PVOID *)((PBYTE)Instance + Counters[i].Offset) = Address;
             Ret = ERROR_SUCCESS;
             break;
         }
     }
     LeaveCriticalSection(&PerfLock);
     return Ret;
+}
+
+/* Called with the lock held; the provider handle does not take part (Windows 10 accepts a bad one). */
+static PERF_INSTANCE_NODE *PerfFindInstanceAnyProvider(PPERF_COUNTERSET_INSTANCE Instance)
+{
+    LIST_ENTRY *p;
+
+    for (p = PerfProviders.Flink; p != &PerfProviders; p = p->Flink)
+    {
+        PERF_INSTANCE_NODE *Node = PerfFindInstance(CONTAINING_RECORD(p, PERF_PROVIDER, Entry), Instance);
+        if (Node)
+            return Node;
+    }
+    return NULL;
+}
+
+typedef enum _PERF_VALUE_OP { PerfOpSet, PerfOpIncrement, PerfOpDecrement } PERF_VALUE_OP;
+
+/*
+ * The six value calls differ in the width and the operation. Windows 10: the counter is found by its identifier
+ * in the instance (ERROR_NOT_FOUND if none), a counter of another width and a by-reference counter are
+ * ERROR_INVALID_PARAMETER, so is a NULL instance; the provider handle is not looked at. The arithmetic wraps.
+ */
+static ULONG PerfChangeValue(PPERF_COUNTERSET_INSTANCE Instance, ULONG CounterId, ULONG Width,
+                             ULONGLONG Value, PERF_VALUE_OP Op)
+{
+    PERF_INSTANCE_NODE *Node;
+    PERF_COUNTER_INFO *Counters;
+    ULONG i, Ret = ERROR_INVALID_PARAMETER;
+
+    if (!Instance)
+        return ERROR_INVALID_PARAMETER;
+
+    EnterCriticalSection(&PerfLock);
+    Node = PerfFindInstanceAnyProvider(Instance);
+    if (Node)
+    {
+        Ret = ERROR_NOT_FOUND;
+        Counters = PerfCounters(Node->Set);
+        for (i = 0; i < Node->Set->Info.NumCounters; i++)
+        {
+            PBYTE Data;
+
+            if (Counters[i].CounterId != CounterId)
+                continue;
+            if ((Counters[i].Attrib & PERF_ATTRIB_BY_REFERENCE) || Counters[i].Size != Width ||
+                Counters[i].Offset < Node->DataOffset ||
+                Counters[i].Offset - Node->DataOffset + Width > Node->DataSize)
+            {
+                Ret = ERROR_INVALID_PARAMETER;
+                break;
+            }
+            Data = (PBYTE)Instance + Counters[i].Offset;
+            if (Width == sizeof(ULONG))
+            {
+                ULONG Old;
+                RtlCopyMemory(&Old, Data, sizeof(Old));
+                Old = (Op == PerfOpSet) ? (ULONG)Value : (Op == PerfOpIncrement) ? Old + (ULONG)Value : Old - (ULONG)Value;
+                RtlCopyMemory(Data, &Old, sizeof(Old));
+            }
+            else
+            {
+                ULONGLONG Old;
+                RtlCopyMemory(&Old, Data, sizeof(Old));
+                Old = (Op == PerfOpSet) ? Value : (Op == PerfOpIncrement) ? Old + Value : Old - Value;
+                RtlCopyMemory(Data, &Old, sizeof(Old));
+            }
+            Ret = ERROR_SUCCESS;
+            break;
+        }
+    }
+    LeaveCriticalSection(&PerfLock);
+    return Ret;
+}
+
+ULONG WINAPI PerfSetULongCounterValue(_In_ HANDLE Provider, _Inout_ PPERF_COUNTERSET_INSTANCE Instance,
+                                      _In_ ULONG CounterId, _In_ ULONG Value)
+{
+    return PerfChangeValue(Instance, CounterId, sizeof(ULONG), Value, PerfOpSet);
+}
+
+ULONG WINAPI PerfSetULongLongCounterValue(_In_ HANDLE Provider, _Inout_ PPERF_COUNTERSET_INSTANCE Instance,
+                                          _In_ ULONG CounterId, _In_ ULONGLONG Value)
+{
+    return PerfChangeValue(Instance, CounterId, sizeof(ULONGLONG), Value, PerfOpSet);
+}
+
+ULONG WINAPI PerfIncrementULongCounterValue(_In_ HANDLE Provider, _Inout_ PPERF_COUNTERSET_INSTANCE Instance,
+                                            _In_ ULONG CounterId, _In_ ULONG Value)
+{
+    return PerfChangeValue(Instance, CounterId, sizeof(ULONG), Value, PerfOpIncrement);
+}
+
+ULONG WINAPI PerfIncrementULongLongCounterValue(_In_ HANDLE Provider, _Inout_ PPERF_COUNTERSET_INSTANCE Instance,
+                                                _In_ ULONG CounterId, _In_ ULONGLONG Value)
+{
+    return PerfChangeValue(Instance, CounterId, sizeof(ULONGLONG), Value, PerfOpIncrement);
+}
+
+ULONG WINAPI PerfDecrementULongCounterValue(_In_ HANDLE Provider, _Inout_ PPERF_COUNTERSET_INSTANCE Instance,
+                                            _In_ ULONG CounterId, _In_ ULONG Value)
+{
+    return PerfChangeValue(Instance, CounterId, sizeof(ULONG), Value, PerfOpDecrement);
+}
+
+ULONG WINAPI PerfDecrementULongLongCounterValue(_In_ HANDLE Provider, _Inout_ PPERF_COUNTERSET_INSTANCE Instance,
+                                                _In_ ULONG CounterId, _In_ ULONGLONG Value)
+{
+    return PerfChangeValue(Instance, CounterId, sizeof(ULONGLONG), Value, PerfOpDecrement);
+}
+
+/*
+ * The instance of the counter set with this name (not case sensitive) and this identifier. Windows 10: both must
+ * match, otherwise NULL with ERROR_NOT_FOUND (also for a counter set the provider did not set); the last error is
+ * left alone on success. NULL arguments and a bad handle are ERROR_INVALID_PARAMETER (not measured).
+ */
+PPERF_COUNTERSET_INSTANCE
+WINAPI
+PerfQueryInstance(
+    _In_ HANDLE ProviderHandle,
+    _In_ LPCGUID CounterSetGuid,
+    _In_ LPCWSTR Name,
+    _In_ ULONG InstanceId)
+{
+    PERF_PROVIDER *Prov;
+    PPERF_COUNTERSET_INSTANCE Result = NULL;
+    ULONG Err = ERROR_INVALID_PARAMETER;
+    LIST_ENTRY *s, *i;
+
+    if (!CounterSetGuid || !Name)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    EnterCriticalSection(&PerfLock);
+    Prov = PerfFindProvider(ProviderHandle);
+    if (Prov)
+    {
+        Err = ERROR_NOT_FOUND;
+        for (s = Prov->Sets.Flink; s != &Prov->Sets && !Result; s = s->Flink)
+        {
+            PERF_SET_NODE *Set = CONTAINING_RECORD(s, PERF_SET_NODE, Entry);
+            if (!IsEqualGUID(&Set->Info.CounterSetGuid, CounterSetGuid))
+                continue;
+            for (i = Set->Instances.Flink; i != &Set->Instances; i = i->Flink)
+            {
+                PERF_INSTANCE_NODE *Node = CONTAINING_RECORD(i, PERF_INSTANCE_NODE, Entry);
+                if (Node->Instance.InstanceId == InstanceId &&
+                    !_wcsicmp((PCWSTR)((PBYTE)&Node->Instance + Node->Instance.InstanceNameOffset), Name))
+                {
+                    Result = &Node->Instance;
+                    break;
+                }
+            }
+        }
+    }
+    LeaveCriticalSection(&PerfLock);
+
+    if (!Result)
+        SetLastError(Err);
+    return Result;
 }
 
 #endif /* DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA */

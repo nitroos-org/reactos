@@ -228,3 +228,166 @@ EventWriteEndScenario(
         return ERROR_INVALID_PARAMETER;
     return ERROR_INVALID_HANDLE;
 }
+
+/******************************************************************************
+ * CveEventWrite [ADVAPI32.@]
+ *
+ * Windows 10 writes an event of its audit provider for the CVE (an application that detects the exploit of a known
+ * vulnerability reports it); the call is a success whatever the identifier is, even an empty or an unusual one,
+ * when no session listens, and does not touch the last error. Only a NULL identifier is
+ * ERROR_INVALID_PARAMETER. There is no event tracing session controller here (EnableTraceEx2 and the others
+ * do not start sessions), so the event has no listener and is not written anywhere.
+ */
+ULONG
+WINAPI
+CveEventWrite(
+    _In_ PCWSTR CveId,
+    _In_opt_ PCWSTR AdditionalDetails)
+{
+    UNREFERENCED_PARAMETER(AdditionalDetails);
+
+    if (CveId == NULL)
+        return ERROR_INVALID_PARAMETER;
+    return ERROR_SUCCESS;
+}
+
+/* Dynamic time zones: the zones are the subkeys of the Time Zones key, like Windows (and Wine) reads them */
+#define TZ_KEY_PATH L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones"
+
+typedef struct _TZ_REG_TZI
+{
+    LONG Bias;
+    LONG StandardBias;
+    LONG DaylightBias;
+    SYSTEMTIME StandardDate;
+    SYSTEMTIME DaylightDate;
+} TZ_REG_TZI;
+
+static
+VOID
+TzQueryName(
+    _In_ HKEY Key,
+    _In_ PCWSTR ValueName,
+    _Out_writes_(32) PWSTR Buffer)
+{
+    /* The name fields hold 31 characters; a longer registry value is cut (hivesft.inf has one of 32) */
+    WCHAR Value[128];
+    DWORD Type, Size = sizeof(Value) - sizeof(WCHAR);
+
+    Buffer[0] = L'\0';
+    if (RegQueryValueExW(Key, ValueName, NULL, &Type, (PBYTE)Value, &Size) != ERROR_SUCCESS || Type != REG_SZ)
+        return;
+    Value[Size / sizeof(WCHAR)] = L'\0';
+    wcsncpy(Buffer, Value, 31);
+    Buffer[31] = L'\0';
+}
+
+/******************************************************************************
+ * EnumDynamicTimeZoneInformation [ADVAPI32.@]
+ *
+ * Index i is the i-th zone in the order of the Time Zones key; the end is ERROR_NO_MORE_ITEMS (also for an index
+ * far beyond it); a NULL buffer is ERROR_INVALID_PARAMETER. The zone is returned with its base values (the
+ * TZI value), DynamicDaylightTimeDisabled FALSE.
+ */
+DWORD
+WINAPI
+EnumDynamicTimeZoneInformation(
+    _In_ DWORD dwIndex,
+    _Out_ PDYNAMIC_TIME_ZONE_INFORMATION lpTimeZoneInformation)
+{
+    DYNAMIC_TIME_ZONE_INFORMATION Zone;
+    TZ_REG_TZI Tzi;
+    HKEY Zones, Key;
+    DWORD Size, Type, Ret;
+
+    if (!lpTimeZoneInformation)
+        return ERROR_INVALID_PARAMETER;
+
+    Ret = RegOpenKeyExW(HKEY_LOCAL_MACHINE, TZ_KEY_PATH, 0, KEY_READ, &Zones);
+    if (Ret != ERROR_SUCCESS)
+        return Ret;
+
+    RtlZeroMemory(&Zone, sizeof(Zone));
+    Size = ARRAYSIZE(Zone.TimeZoneKeyName);
+    Ret = RegEnumKeyExW(Zones, dwIndex, Zone.TimeZoneKeyName, &Size, NULL, NULL, NULL, NULL);
+    if (Ret == ERROR_SUCCESS)
+    {
+        Ret = RegOpenKeyExW(Zones, Zone.TimeZoneKeyName, 0, KEY_READ, &Key);
+        if (Ret == ERROR_SUCCESS)
+        {
+            Size = sizeof(Tzi);
+            Ret = RegQueryValueExW(Key, L"TZI", NULL, &Type, (PBYTE)&Tzi, &Size);
+            if (Ret == ERROR_SUCCESS && (Type != REG_BINARY || Size != sizeof(Tzi)))
+                Ret = ERROR_BADDB;
+            if (Ret == ERROR_SUCCESS)
+            {
+                Zone.Bias = Tzi.Bias;
+                Zone.StandardBias = Tzi.StandardBias;
+                Zone.DaylightBias = Tzi.DaylightBias;
+                Zone.StandardDate = Tzi.StandardDate;
+                Zone.DaylightDate = Tzi.DaylightDate;
+                TzQueryName(Key, L"Std", Zone.StandardName);
+                TzQueryName(Key, L"Dlt", Zone.DaylightName);
+                Zone.DynamicDaylightTimeDisabled = FALSE;
+            }
+            RegCloseKey(Key);
+        }
+    }
+    RegCloseKey(Zones);
+
+    if (Ret == ERROR_SUCCESS)
+        *lpTimeZoneInformation = Zone;
+    return Ret;
+}
+
+/******************************************************************************
+ * GetDynamicTimeZoneInformationEffectiveYears [ADVAPI32.@]
+ *
+ * The years of the zone's "Dynamic DST" key (FirstEntry and LastEntry). A zone without the key, and a name that is
+ * not a zone (an empty one too), is ERROR_FILE_NOT_FOUND and leaves both outputs alone; the name is not case
+ * sensitive. NULL arguments are ERROR_INVALID_PARAMETER (not measured).
+ */
+DWORD
+WINAPI
+GetDynamicTimeZoneInformationEffectiveYears(
+    _In_ const DYNAMIC_TIME_ZONE_INFORMATION *lpTimeZoneInformation,
+    _Out_ LPDWORD FirstYear,
+    _Out_ LPDWORD LastYear)
+{
+    WCHAR Path[ARRAYSIZE(TZ_KEY_PATH) + ARRAYSIZE(lpTimeZoneInformation->TimeZoneKeyName) + 16];
+    HKEY Key;
+    DWORD Type, Size, First, Last, Ret;
+    SIZE_T Length;
+
+    if (!lpTimeZoneInformation || !FirstYear || !LastYear)
+        return ERROR_INVALID_PARAMETER;
+
+    for (Length = 0; Length < ARRAYSIZE(lpTimeZoneInformation->TimeZoneKeyName); Length++)
+    {
+        if (!lpTimeZoneInformation->TimeZoneKeyName[Length])
+            break;
+    }
+    if (Length == ARRAYSIZE(lpTimeZoneInformation->TimeZoneKeyName) || Length == 0)
+        return ERROR_FILE_NOT_FOUND;
+
+    wcscpy(Path, TZ_KEY_PATH L"\\");
+    wcscat(Path, lpTimeZoneInformation->TimeZoneKeyName);
+    wcscat(Path, L"\\Dynamic DST");
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
+        return ERROR_FILE_NOT_FOUND;
+
+    Ret = ERROR_FILE_NOT_FOUND;
+    Size = sizeof(DWORD);
+    if (RegQueryValueExW(Key, L"FirstEntry", NULL, &Type, (PBYTE)&First, &Size) == ERROR_SUCCESS && Type == REG_DWORD)
+    {
+        Size = sizeof(DWORD);
+        if (RegQueryValueExW(Key, L"LastEntry", NULL, &Type, (PBYTE)&Last, &Size) == ERROR_SUCCESS && Type == REG_DWORD)
+        {
+            *FirstYear = First;
+            *LastYear = Last;
+            Ret = ERROR_SUCCESS;
+        }
+    }
+    RegCloseKey(Key);
+    return Ret;
+}

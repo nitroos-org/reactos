@@ -1,6 +1,11 @@
 # Forward-only module: exports of Windows 10 sechost.dll (names checked on the reference VM) whose implementation
 # lives in advapi32. Every entry copies the version/arch gate of the target spec line; stubs are not forwarded.
 # Regenerate when a target spec gains or loses an export.
+@ stdcall -version=0x600+ AuditEnumerateCategories(ptr ptr) advapi32.AuditEnumerateCategories
+@ stdcall -version=0x600+ AuditEnumerateSubCategories(ptr long ptr ptr) advapi32.AuditEnumerateSubCategories
+@ stdcall -version=0x600+ AuditFree(ptr) advapi32.AuditFree
+@ stdcall -version=0x600+ AuditLookupCategoryNameW(ptr ptr) advapi32.AuditLookupCategoryNameW
+@ stdcall -version=0x600+ AuditLookupSubCategoryNameW(ptr ptr) advapi32.AuditLookupSubCategoryNameW
 @ stdcall ChangeServiceConfig2A(long long ptr) advapi32.ChangeServiceConfig2A
 @ stdcall ChangeServiceConfig2W(long long ptr) advapi32.ChangeServiceConfig2W
 @ stdcall ChangeServiceConfigA(long long long long wstr str ptr str str str str) advapi32.ChangeServiceConfigA
