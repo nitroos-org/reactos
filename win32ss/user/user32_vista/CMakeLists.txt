@@ -12,6 +12,7 @@ list(APPEND VISTA_SOURCE
      wine/win.c
      autorotation.c
      suspendresume.c
+     powernotify.c
      pointer.c
      win8user.c
      physical.c
