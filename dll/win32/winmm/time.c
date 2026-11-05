@@ -298,11 +298,12 @@ void	TIME_MMTimeStop(void)
 MMRESULT WINAPI timeGetSystemTime(LPMMTIME lpTime, UINT wSize)
 {
 
-    if (wSize >= sizeof(*lpTime)) {
-	lpTime->wType = TIME_MS;
-	lpTime->u.ms = GetTickCount();
+    /* Windows 10: a size below sizeof(MMTIME) is TIMERR_STRUCT (129), nothing is written */
+    if (wSize < sizeof(*lpTime))
+        return TIMERR_STRUCT;
 
-    }
+    lpTime->wType = TIME_MS;
+    lpTime->u.ms = GetTickCount();
 
     return 0;
 }
