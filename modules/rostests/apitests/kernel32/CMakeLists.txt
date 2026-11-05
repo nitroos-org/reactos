@@ -139,10 +139,12 @@ list(APPEND SOURCE
     LoadString.c
     LoadLibraryErrorMode.c
     LoadLibraryExW.c
+    LoadLibraryMalformed.c
     LoadLibraryILOnly.c
     LoadLibraryMachine.c
     LoadLibraryForwarder.c
     LoadLibraryMissingImport.c
+    LoadLibraryNoExecute.c
     LocalDumps.c
     CrashDialog.c
     LocaleNameToLCID.c
