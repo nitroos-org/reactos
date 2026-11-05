@@ -386,7 +386,8 @@ static void test_ip_interface(const IF_TABLE2 *IfTable, USHORT Family)
            i, Row->Connected, If->OperStatus);
         ok(Row->NlMtu != 0, "Row %lu: no MTU\n", i);
         ok(Row->Metric != 0 && Row->Metric < 1000, "Row %lu: metric %lu\n", i, Row->Metric);
-        ok(Row->UseAutomaticMetric, "Row %lu: no automatic metric\n", i);
+        /* a metric set by hand (Tcpip registry InterfaceMetric) is not automatic: test_manual_metric covers that */
+        ok(Row->UseAutomaticMetric || Row->Metric <= 9999, "Row %lu: metric %lu\n", i, Row->Metric);
         ok(Row->ZoneIndices[0] == Row->InterfaceIndex, "Row %lu: zone %lu, index %lu\n",
            i, Row->ZoneIndices[0], Row->InterfaceIndex);
         ok(!Row->ForwardingEnabled && !Row->AdvertisingEnabled, "Row %lu: router\n", i);
@@ -470,6 +471,89 @@ static void test_ip_interface_errors(void)
     Error = pGetIpInterfaceEntry(&Row);
     ok(Error == NO_ERROR, "GetIpInterfaceEntry(loopback luid, bad index): %lu\n", Error);
     ok(Row.InterfaceLuid.Value == LOOPBACK_LUID, "Luid %I64x\n", Row.InterfaceLuid.Value);
+}
+
+/* ReactOS: the stack reads the InterfaceMetric value of Tcpip\Parameters\Interfaces\{guid} at bind time, and the IP interface
+ * rows report it (the same value netsh and Set-NetIPInterface write): a value is a fixed metric (at most 9999), none or 0 the
+ * automatic one. Windows takes the change from its own stack, not from the registry, so this is a ReactOS-only check. */
+static void test_manual_metric(const IF_TABLE2 *IfTable)
+{
+    static const WCHAR Prefix[] = L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\";
+    WCHAR Path[160], GuidText[40];
+    const IF_ROW2 *Nic = NULL;
+    IPIF_ROW Row;
+    HKEY Key;
+    DWORD Old = 0, Size, Type, Value, Error;
+    BOOL HadOld;
+    ULONG i;
+
+    for (i = 0; i < IfTable->NumEntries; i++)
+    {
+        if (!is_loopback(&IfTable->Table[i]) && IfTable->Table[i].InterfaceGuid.Data1 != 0)
+        {
+            Nic = &IfTable->Table[i];
+            break;
+        }
+    }
+    if (!Nic)
+    {
+        skip("No adapter\n");
+        return;
+    }
+    _snwprintf(GuidText, ARRAYSIZE(GuidText), L"{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}", Nic->InterfaceGuid.Data1, Nic->InterfaceGuid.Data2,
+             Nic->InterfaceGuid.Data3, Nic->InterfaceGuid.Data4[0], Nic->InterfaceGuid.Data4[1], Nic->InterfaceGuid.Data4[2],
+             Nic->InterfaceGuid.Data4[3], Nic->InterfaceGuid.Data4[4], Nic->InterfaceGuid.Data4[5], Nic->InterfaceGuid.Data4[6],
+             Nic->InterfaceGuid.Data4[7]);
+    wcscpy(Path, Prefix);
+    wcscat(Path, GuidText);
+    Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &Key);
+    if (Error != ERROR_SUCCESS)
+    {
+        skip("Cannot open the adapter key: %lu\n", Error);
+        return;
+    }
+    Size = sizeof(Old);
+    HadOld = RegQueryValueExW(Key, L"InterfaceMetric", NULL, &Type, (LPBYTE)&Old, &Size) == ERROR_SUCCESS && Type == REG_DWORD;
+
+    Value = 1234;
+    RegSetValueExW(Key, L"InterfaceMetric", 0, REG_DWORD, (LPBYTE)&Value, sizeof(Value));
+    memset(&Row, 0, sizeof(Row));
+    Row.Family = AF_INET;
+    Row.InterfaceLuid = Nic->InterfaceLuid;
+    Error = pGetIpInterfaceEntry(&Row);
+    ok(Error == NO_ERROR, "GetIpInterfaceEntry: %lu\n", Error);
+    ok(Row.Metric == 1234, "Metric %lu, expected 1234\n", Row.Metric);
+    ok(!Row.UseAutomaticMetric, "Automatic metric with a fixed one\n");
+
+    Value = 20000;
+    RegSetValueExW(Key, L"InterfaceMetric", 0, REG_DWORD, (LPBYTE)&Value, sizeof(Value));
+    memset(&Row, 0, sizeof(Row));
+    Row.Family = AF_INET;
+    Row.InterfaceLuid = Nic->InterfaceLuid;
+    Error = pGetIpInterfaceEntry(&Row);
+    ok(Error == NO_ERROR, "GetIpInterfaceEntry: %lu\n", Error);
+    ok(Row.Metric == 9999, "Metric %lu, expected 9999\n", Row.Metric);
+
+    Value = 0;
+    RegSetValueExW(Key, L"InterfaceMetric", 0, REG_DWORD, (LPBYTE)&Value, sizeof(Value));
+    memset(&Row, 0, sizeof(Row));
+    Row.Family = AF_INET;
+    Row.InterfaceLuid = Nic->InterfaceLuid;
+    Error = pGetIpInterfaceEntry(&Row);
+    ok(Error == NO_ERROR, "GetIpInterfaceEntry: %lu\n", Error);
+    ok(Row.UseAutomaticMetric && Row.Metric != 0 && Row.Metric != 1234, "Metric %lu, automatic %u\n", Row.Metric, Row.UseAutomaticMetric);
+
+    RegDeleteValueW(Key, L"InterfaceMetric");
+    memset(&Row, 0, sizeof(Row));
+    Row.Family = AF_INET;
+    Row.InterfaceLuid = Nic->InterfaceLuid;
+    Error = pGetIpInterfaceEntry(&Row);
+    ok(Error == NO_ERROR, "GetIpInterfaceEntry: %lu\n", Error);
+    ok(Row.UseAutomaticMetric, "No automatic metric without a value\n");
+
+    if (HadOld)
+        RegSetValueExW(Key, L"InterfaceMetric", 0, REG_DWORD, (LPBYTE)&Old, sizeof(Old));
+    RegCloseKey(Key);
 }
 
 /* every adapter of GetAdaptersAddresses is an interface of the IP interface table, with the same luid */
@@ -1121,6 +1205,10 @@ START_TEST(IpInterface)
         pFreeMibTable(Table);
     }
     test_ip_interface_errors();
+    if (is_reactos())
+        test_manual_metric(IfTable);
+    else
+        skip("test_manual_metric is ReactOS-only\n");
     test_adapters_addresses();
     test_unicast(IfTable);
     test_names(IfTable);
