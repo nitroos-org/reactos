@@ -482,21 +482,25 @@ static void TestDirectory(void)
     ok_long(Attr(L"dp"), ERROR_FILE_NOT_FOUND);
 }
 
-/* a batch oplock on another handle does not keep DeleteFile waiting */
+/* A batch oplock on another handle does not keep DeleteFile waiting: DeleteFile breaks the oplock, the holder
+ * sees the break and closes its handle, the delete goes through.  The same sequence used to bugcheck a FAT
+ * volume (STOP 0x23): FsRtl queued the create of the delete on the oplock but reported success, and granted
+ * the oplock request without leaving it pending, so FastFAT completed the request itself and the oplock kept a
+ * stale pointer to it.  Runs on every file system. */
 static DWORD WINAPI OplockBreak(PVOID Param)
 {
     HANDLE *H = Param;
-    WaitForSingleObject(H[1], 5000);    /* the break; without an oplock, the timeout */
+    DWORD Wait = WaitForSingleObject(H[1], 5000);   /* the break; without an oplock, the timeout */
     CloseHandle(H[0]);
-    return 0;
+    return Wait;
 }
 
 static void TestOplock(void)
 {
     OVERLAPPED Ov = {0};
     HANDLE H[2], Thread;
-    DWORD Bytes, Start;
-    BOOL Ret;
+    DWORD Bytes, Start, BreakWait = WAIT_FAILED;
+    BOOL Ret, Granted = FALSE;
 
     Make(L"op", "x");
     H[0] = Open(L"op", GENERIC_READ, SHARE_ALL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED);
@@ -505,14 +509,20 @@ static void TestOplock(void)
     if (!Ret && GetLastError() == ERROR_OPLOCK_NOT_GRANTED)
         skip("the file system grants no batch oplock\n");   /* the delete below still has to work */
     else
+    {
         ok(!Ret && GetLastError() == ERROR_IO_PENDING, "oplock: %d, error %lu\n", Ret, GetLastError());
+        Granted = !Ret && GetLastError() == ERROR_IO_PENDING;
+    }
     Thread = CreateThread(NULL, 0, OplockBreak, H, 0, NULL);
     Start = GetTickCount();
     ok(Del(L"op"), "DeleteFile failed, error %lu\n", GetLastError());
     ok(GetTickCount() - Start < 8000, "DeleteFile took %lu ms\n", GetTickCount() - Start);
     WaitForSingleObject(Thread, 15000);
+    GetExitCodeThread(Thread, &BreakWait);
     CloseHandle(Thread);
     CloseHandle(H[1]);
+    if (Granted)
+        ok(BreakWait == WAIT_OBJECT_0, "the oplock break was not seen: wait %lu\n", BreakWait);
     ok_long(Attr(L"op"), ERROR_FILE_NOT_FOUND);
 }
 
@@ -564,10 +574,9 @@ START_TEST(DeleteFilePosix)
 
     if (!IsNtfs)
     {
-        /* POSIX semantics are an NTFS feature; FastFAT's oplock teardown also bugchecks on ReactOS (0x23 in
-         * FsRtlUninitializeOplock, before this change too), so the oplock test stays on NTFS */
         skip("POSIX delete semantics need NTFS: the classic fallback only\n");
         TestFallback();
+        TestOplock();
     }
     else
     {
