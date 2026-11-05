@@ -203,18 +203,81 @@ DWORD FwProfileReset(ULONG bit)
     return err;
 }
 
-/* NitroOS default rule set: the rules a stateless inbound filter needs to keep the network usable.
-   This is NOT Microsoft's default rule set. */
-static const struct { PCWSTR Id, Name, Desc, Group, Proto, Port, RPort; } g_Defaults[] = {
-    { L"NitroOS-CoreNet-DHCP-In", L"NitroOS Core Networking - Dynamic Host Configuration Protocol (DHCP-In)",
-      L"Allows DHCP (Dynamic Host Configuration Protocol) messages for stateful auto-configuration.",
-      L"NitroOS Core Networking", L"17", L"68", L"67" },
-    { L"NitroOS-CoreNet-ICMP4-DU-In", L"NitroOS Core Networking - Destination Unreachable (ICMPv4-In)",
-      L"Destination Unreachable error messages are sent from any node that a packet traveled through and was unable to be forwarded at the IP layer.",
-      L"NitroOS Core Networking", L"1", NULL, NULL },
-    { L"NitroOS-CoreNet-IGMP-In", L"NitroOS Core Networking - Internet Group Management Protocol (IGMP-In)",
-      L"IGMP messages are sent and received by hosts and routers to determine multicast group membership; without this rule membership queries are dropped.",
-      L"NitroOS Core Networking", L"2", NULL, NULL },
+/* Default rule set: the Windows 10 Core Networking group as measured on the oracle (inbound IPv4 DHCP, IGMP,
+   ICMPv4 errors; the IPv6/NDP rules are stored for parity and match nothing in the IPv4-only filter), plus
+   rules that ship DISABLED so that netsh/INetFwPolicy2 can enable them by group, as on Windows. Rules whose
+   Windows form needs a service or keyword the filter cannot match are not included (Teredo, IPHTTPS, mDNS,
+   Delivery Optimization, Network Discovery, WinRM). The same strings are in boot/bootdata/hivesys.inf: keep
+   them identical (generated from one list; see the tools note in the commit). */
+static const struct { PCWSTR Id, Rule; } g_Defaults[] = {
+    { L"CoreNet-DHCP-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=17|LPort=68|RPort=67|Name=Core Networking - Dynamic Host Configuration Protocol (DHCP-In)|Desc=Allows inbound DHCP replies (UDP 67 -> 68).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-DHCPV6-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=17|LPort=546|RPort=547|Name=Core Networking - Dynamic Host Configuration Protocol for IPv6(DHCPV6-In)|Desc=Allows inbound DHCPv6 replies (UDP 547 -> 546).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-ICMP4-DUFRAG-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=1|ICMP4=3:4|Name=Core Networking - Destination Unreachable Fragmentation Needed (ICMPv4-In)|Desc=Allows inbound ICMPv4 destination unreachable, fragmentation needed (type 3 code 4).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-IGMP-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=2|Name=Core Networking - Internet Group Management Protocol (IGMP-In)|Desc=Allows inbound IGMP (IP protocol 2) multicast membership messages.|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-IPv6-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=41|Name=Core Networking - IPv6 (IPv6-In)|Desc=Allows inbound IPv6-in-IPv4 encapsulated traffic (IP protocol 41).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-ICMP6-LD-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=58|ICMP6=132:*|Name=Core Networking - Multicast Listener Done (ICMPv6-In)|Desc=Allows inbound ICMPv6 multicast listener done (type 132).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-ICMP6-LR2-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=58|ICMP6=143:*|Name=Core Networking - Multicast Listener Report v2 (ICMPv6-In)|Desc=Allows inbound ICMPv6 multicast listener report v2 (type 143).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-ICMP6-LR-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=58|ICMP6=131:*|Name=Core Networking - Multicast Listener Report (ICMPv6-In)|Desc=Allows inbound ICMPv6 multicast listener report (type 131).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-ICMP6-LQ-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=58|ICMP6=130:*|Name=Core Networking - Multicast Listener Query (ICMPv6-In)|Desc=Allows inbound ICMPv6 multicast listener query (type 130).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-ICMP6-RS-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=58|ICMP6=133:*|Name=Core Networking - Router Solicitation (ICMPv6-In)|Desc=Allows inbound ICMPv6 router solicitation (type 133).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-ICMP6-RA-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=58|ICMP6=134:*|Name=Core Networking - Router Advertisement (ICMPv6-In)|Desc=Allows inbound ICMPv6 router advertisement (type 134).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-ICMP6-NDA-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=58|ICMP6=136:*|Name=Core Networking - Neighbor Discovery Advertisement (ICMPv6-In)|Desc=Allows inbound ICMPv6 neighbor advertisement (type 136).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-ICMP6-NDS-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=58|ICMP6=135:*|Name=Core Networking - Neighbor Discovery Solicitation (ICMPv6-In)|Desc=Allows inbound ICMPv6 neighbor solicitation (type 135).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-ICMP6-PP-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=58|ICMP6=4:*|Name=Core Networking - Parameter Problem (ICMPv6-In)|Desc=Allows inbound ICMPv6 parameter problem errors (type 4).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-ICMP6-TE-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=58|ICMP6=3:*|Name=Core Networking - Time Exceeded (ICMPv6-In)|Desc=Allows inbound ICMPv6 time exceeded errors (type 3).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-ICMP6-PTB-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=58|ICMP6=2:*|Name=Core Networking - Packet Too Big (ICMPv6-In)|Desc=Allows inbound ICMPv6 packet too big errors (type 2).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-ICMP6-DU-In",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=58|ICMP6=1:*|Name=Core Networking - Destination Unreachable (ICMPv6-In)|Desc=Allows inbound ICMPv6 destination unreachable errors (type 1).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-DHCP-Out",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=Out|Protocol=17|LPort=68|RPort=67|Name=Core Networking - Dynamic Host Configuration Protocol (DHCP-Out)|Desc=Allows outbound DHCP client requests (UDP 68 -> 67).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-DNS-Out-UDP",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=Out|Protocol=17|RPort=53|Name=Core Networking - DNS (UDP-Out)|Desc=Allows outbound DNS queries over UDP (port 53).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-IPv6-Out",
+      L"v2.30|Action=Allow|Active=TRUE|Dir=Out|Protocol=41|Name=Core Networking - IPv6 (IPv6-Out)|Desc=Allows outbound IPv6-in-IPv4 encapsulated traffic (IP protocol 41).|EmbedCtxt=Core Networking|" },
+    { L"CoreNet-Diag-ICMP4-EchoRequest-In",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=1|Profile=Private|Profile=Public|ICMP4=8:*|RA4=LocalSubnet|Name=Core Networking Diagnostics - ICMP Echo Request (ICMPv4-In)|Desc=Allows inbound ICMPv4 echo requests (ping) from the local subnet. Disabled by default.|EmbedCtxt=Core Networking Diagnostics|" },
+    { L"CoreNet-Diag-ICMP4-EchoRequest-In-NoScope",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=1|Profile=Domain|ICMP4=8:*|Name=Core Networking Diagnostics - ICMP Echo Request (ICMPv4-In)|Desc=Allows inbound ICMPv4 echo requests (ping) from any address, Domain profile. Disabled by default.|EmbedCtxt=Core Networking Diagnostics|" },
+    { L"FPS-ICMP4-ERQ-In",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=1|Profile=Private|Profile=Public|ICMP4=8:*|RA4=LocalSubnet|Name=File and Printer Sharing (Echo Request - ICMPv4-In)|Desc=Allows inbound ICMPv4 echo requests (ping) from the local subnet. Disabled by default.|EmbedCtxt=File and Printer Sharing|" },
+    { L"FPS-ICMP4-ERQ-In-NoScope",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=1|Profile=Domain|ICMP4=8:*|Name=File and Printer Sharing (Echo Request - ICMPv4-In)|Desc=Allows inbound ICMPv4 echo requests (ping) from any address, Domain profile. Disabled by default.|EmbedCtxt=File and Printer Sharing|" },
+    { L"FPS-SMB-In-TCP",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=6|Profile=Private|Profile=Public|LPort=445|RA4=LocalSubnet|Name=File and Printer Sharing (SMB-In)|Desc=Allows inbound SMB file sharing (TCP 445) from the local subnet. Disabled by default.|EmbedCtxt=File and Printer Sharing|" },
+    { L"FPS-SMB-In-TCP-NoScope",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=6|Profile=Domain|LPort=445|Name=File and Printer Sharing (SMB-In)|Desc=Allows inbound SMB file sharing (TCP 445), Domain profile. Disabled by default.|EmbedCtxt=File and Printer Sharing|" },
+    { L"FPS-NB_Session-In-TCP",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=6|Profile=Private|Profile=Public|LPort=139|RA4=LocalSubnet|Name=File and Printer Sharing (NB-Session-In)|Desc=Allows inbound NetBIOS session service (TCP 139) from the local subnet. Disabled by default.|EmbedCtxt=File and Printer Sharing|" },
+    { L"FPS-NB_Session-In-TCP-NoScope",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=6|Profile=Domain|LPort=139|Name=File and Printer Sharing (NB-Session-In)|Desc=Allows inbound NetBIOS session service (TCP 139), Domain profile. Disabled by default.|EmbedCtxt=File and Printer Sharing|" },
+    { L"FPS-NB_Datagram-In-UDP",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=17|Profile=Private|Profile=Public|LPort=138|RA4=LocalSubnet|Name=File and Printer Sharing (NB-Datagram-In)|Desc=Allows inbound NetBIOS datagram service (UDP 138) from the local subnet. Disabled by default.|EmbedCtxt=File and Printer Sharing|" },
+    { L"FPS-NB_Datagram-In-UDP-NoScope",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=17|Profile=Domain|LPort=138|Name=File and Printer Sharing (NB-Datagram-In)|Desc=Allows inbound NetBIOS datagram service (UDP 138), Domain profile. Disabled by default.|EmbedCtxt=File and Printer Sharing|" },
+    { L"FPS-NB_Name-In-UDP",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=17|Profile=Private|Profile=Public|LPort=137|RA4=LocalSubnet|Name=File and Printer Sharing (NB-Name-In)|Desc=Allows inbound NetBIOS name service (UDP 137) from the local subnet. Disabled by default.|EmbedCtxt=File and Printer Sharing|" },
+    { L"FPS-NB_Name-In-UDP-NoScope",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=17|Profile=Domain|LPort=137|Name=File and Printer Sharing (NB-Name-In)|Desc=Allows inbound NetBIOS name service (UDP 137), Domain profile. Disabled by default.|EmbedCtxt=File and Printer Sharing|" },
+    { L"RemoteDesktop-UserMode-In-TCP",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=6|Profile=Domain|Profile=Private|Profile=Public|LPort=3389|Name=Remote Desktop - User Mode (TCP-In)|Desc=Allows inbound Remote Desktop connections (TCP 3389). Disabled by default.|EmbedCtxt=Remote Desktop|" },
+    { L"RemoteDesktop-UserMode-In-UDP",
+      L"v2.30|Action=Allow|Active=FALSE|Dir=In|Protocol=17|Profile=Domain|Profile=Private|Profile=Public|LPort=3389|Name=Remote Desktop - User Mode (UDP-In)|Desc=Allows inbound Remote Desktop traffic (UDP 3389). Disabled by default.|EmbedCtxt=Remote Desktop|" },
 };
 
 static DWORD WriteDefaultRules(VOID)
@@ -222,13 +285,11 @@ static DWORD WriteDefaultRules(VOID)
     ULONG i; DWORD err = 0;
     for (i = 0; i < _countof(g_Defaults) && !err; i++)
     {
-        FW_RULE r;
+        FW_RULE r; FWR raw;
+        if (!FwrParse(&raw, g_Defaults[i].Id, g_Defaults[i].Rule)) { FwrFree(&raw); return ERROR_OUTOFMEMORY; }
         FwRuleInit(&r);
-        FwRuleSetStr(&r.Id, g_Defaults[i].Id); FwRuleSetStr(&r.Name, g_Defaults[i].Name);
-        FwRuleSetStr(&r.Desc, g_Defaults[i].Desc); FwRuleSetStr(&r.Group, g_Defaults[i].Group);
-        r.Enabled = TRUE; r.Dir = 1; r.Action = 1; r.Protocol = _wtoi(g_Defaults[i].Proto);
-        if (g_Defaults[i].Port) { FwRuleSetStr(&r.LPorts, g_Defaults[i].Port); FwRuleSetStr(&r.RPorts, g_Defaults[i].RPort); }
-        else if (r.Protocol == 1) FwRuleSetStr(&r.Icmp, L"3:*");
+        if (!FwRuleFromRaw(&r, &raw)) { FwRuleFree(&r); FwrFree(&raw); return ERROR_OUTOFMEMORY; }
+        FwrFree(&raw);
         err = FwStoreAdd(&r);
         FwRuleFree(&r);
     }
