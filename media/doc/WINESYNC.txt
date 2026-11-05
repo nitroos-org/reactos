@@ -251,7 +251,7 @@ dll/win32/rstrtmgr            # Own implementation (Wine-10.0 has only stubs): s
 dll/win32/rtworkq             # Synced to Wine-11.19
 dll/win32/sccbase             # Synced to Wine-10.0
 dll/win32/schannel            # Synced to WineStaging-3.3
-dll/win32/scrrun              # Synced to Wine-10.0
+dll/win32/scrrun              # Synced to Wine-11.21
 dll/win32/secur32             # Forked
 dll/win32/security            # Forked (different .spec)
 dll/win32/sensapi             # Synced to Wine-10.0
