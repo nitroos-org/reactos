@@ -2483,6 +2483,7 @@ HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy",
 ; NitroOS default rule set (two rules; not the Microsoft default set)
 HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules","NitroOS-CoreNet-DHCP-In",0x00000000,"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=17|LPort=68|RPort=67|Name=NitroOS Core Networking - Dynamic Host Configuration Protocol (DHCP-In)|Desc=Allows DHCP (Dynamic Host Configuration Protocol) messages for stateful auto-configuration.|EmbedCtxt=NitroOS Core Networking|"
 HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules","NitroOS-CoreNet-ICMP4-DU-In",0x00000000,"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=1|ICMP4=3:*|Name=NitroOS Core Networking - Destination Unreachable (ICMPv4-In)|Desc=Destination Unreachable error messages are sent from any node that a packet traveled through and was unable to be forwarded at the IP layer.|EmbedCtxt=NitroOS Core Networking|"
+HKLM,"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules","NitroOS-CoreNet-IGMP-In",0x00000000,"v2.30|Action=Allow|Active=TRUE|Dir=In|Protocol=2|Name=NitroOS Core Networking - Internet Group Management Protocol (IGMP-In)|Desc=IGMP messages are sent and received by hosts and routers to determine multicast group membership; without this rule membership queries are dropped.|EmbedCtxt=NitroOS Core Networking|"
 
 ; DCOMLAUNCH Service
 HKLM,"SYSTEM\CurrentControlSet\Services\DcomLaunch","DisplayName",0x00000000,%DCOMLAUNCH_SERVICE%

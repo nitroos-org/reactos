@@ -88,6 +88,7 @@ typedef struct _IP_PACKET {
     PNDIS_PACKET NdisPacket;            /* Pointer to NDIS packet */
     IP_ADDRESS SrcAddr;                 /* Source address */
     IP_ADDRESS DstAddr;                 /* Destination address */
+    BOOLEAN FromOwnLink;                /* Frame's source MAC is this adapter's own (the frame was looped back by NDIS) */
 } IP_PACKET, *PIP_PACKET;
 
 #define IP_PACKET_FLAG_RAW      0x01    /* Raw IP packet */
@@ -100,6 +101,7 @@ typedef struct _PACKET_CONTEXT {
 					   * in a queue */
     PVOID Context;                        /* Context information for handler */
     UINT  PacketType;                     /* Type of packet */
+    BOOLEAN FromOwnLink;                  /* Frame source MAC is the adapter's own */
 } PACKET_CONTEXT, *PPACKET_CONTEXT;
 
 /* The ProtocolReserved field is structured as a PACKET_CONTEXT */

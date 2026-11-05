@@ -372,6 +372,7 @@ VOID ProcessFragment(
 
     /* Reset the timeout since we received a fragment */
     IPDR->TimeoutCount = 0;
+    IPDR->AllFromOwnLink &= IPPacket->FromOwnLink;
   } else {
     TI_DbgPrint(DEBUG_IP, ("Starting new assembly.\n"));
 
@@ -399,6 +400,7 @@ VOID ProcessFragment(
     IPDR->Id         = IPv4Header->Id;
     IPDR->Protocol   = IPv4Header->Protocol;
     IPDR->TimeoutCount = 0;
+    IPDR->AllFromOwnLink = IPPacket->FromOwnLink;
     InitializeListHead(&IPDR->FragmentListHead);
     InitializeListHead(&IPDR->HoleListHead);
     InsertTailList(&IPDR->HoleListHead, &Hole->ListEntry);
@@ -566,6 +568,7 @@ VOID ProcessFragment(
     IPInitializePacket(&Datagram, IP_ADDRESS_V4);
 
     Success = ReassembleDatagram(&Datagram, IPDR);
+    Datagram.FromOwnLink = IPDR->AllFromOwnLink;
 
     FreeIPDR(IPDR);
 
