@@ -60,7 +60,6 @@ GreGetKerningPairs(
   PDC dc;
   PDC_ATTR pdcattr;
   PTEXTOBJ TextObj;
-  PFONTGDI FontGDI;
   DWORD Count;
   KERNINGPAIR *pKP;
 
@@ -81,30 +80,31 @@ GreGetKerningPairs(
      return 0;
   }
 
-  FontGDI = ObjToGDI(TextObj->Font, FONT);
-  TEXTOBJ_UnlockText(TextObj);
-
-  Count = ftGdiGetKerningPairs(FontGDI,0,NULL);
+  /* The realization stays locked: the amounts are for its size */
+  Count = ftGdiGetKerningPairs(TextObj,0,NULL);
 
   if ( Count && krnpair )
   {
      if (Count > NumPairs)
      {
+        TEXTOBJ_UnlockText(TextObj);
         EngSetLastError(ERROR_INSUFFICIENT_BUFFER);
         return 0;
      }
      pKP = ExAllocatePoolWithTag(PagedPool, Count * sizeof(KERNINGPAIR), GDITAG_TEXT);
      if (!pKP)
      {
+        TEXTOBJ_UnlockText(TextObj);
         EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return 0;
      }
-     ftGdiGetKerningPairs(FontGDI,Count,pKP);
+     ftGdiGetKerningPairs(TextObj,Count,pKP);
 
      RtlCopyMemory(krnpair, pKP, Count * sizeof(KERNINGPAIR));
 
      ExFreePoolWithTag(pKP,GDITAG_TEXT);
   }
+  TEXTOBJ_UnlockText(TextObj);
   return Count;
 }
 
@@ -895,7 +895,6 @@ NtGdiGetKerningPairs(
   PDC dc;
   PDC_ATTR pdcattr;
   PTEXTOBJ TextObj;
-  PFONTGDI FontGDI;
   DWORD Count;
   KERNINGPAIR *pKP;
   NTSTATUS Status = STATUS_SUCCESS;
@@ -917,25 +916,25 @@ NtGdiGetKerningPairs(
      return 0;
   }
 
-  FontGDI = ObjToGDI(TextObj->Font, FONT);
-  TEXTOBJ_UnlockText(TextObj);
-
-  Count = ftGdiGetKerningPairs(FontGDI,0,NULL);
+  /* The realization stays locked: the amounts are for its size */
+  Count = ftGdiGetKerningPairs(TextObj,0,NULL);
 
   if ( Count && krnpair )
   {
      if (Count > NumPairs)
      {
+        TEXTOBJ_UnlockText(TextObj);
         EngSetLastError(ERROR_INSUFFICIENT_BUFFER);
         return 0;
      }
      pKP = ExAllocatePoolWithTag(PagedPool, Count * sizeof(KERNINGPAIR), GDITAG_TEXT);
      if (!pKP)
      {
+        TEXTOBJ_UnlockText(TextObj);
         EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return 0;
      }
-     ftGdiGetKerningPairs(FontGDI,Count,pKP);
+     ftGdiGetKerningPairs(TextObj,Count,pKP);
      _SEH2_TRY
      {
         ProbeForWrite(krnpair, Count * sizeof(KERNINGPAIR), 1);
@@ -953,6 +952,7 @@ NtGdiGetKerningPairs(
      }
      ExFreePoolWithTag(pKP,GDITAG_TEXT);
   }
+  TEXTOBJ_UnlockText(TextObj);
   return Count;
 }
 
@@ -999,25 +999,32 @@ NtGdiGetOutlineTextMetricsInternalW(
      TEXTOBJ_UnlockText(TextObj);
      return 0;
   }
-  TextIntUpdateSize(TextObj, FontGDI, TRUE);
-  /* This realization's request: its style is reported, not the last one realized with the face */
+  /* This realization's request: its style is reported, not the last one realized with the face.
+   * The size is requested and the metrics read under one hold of the FreeType lock, and the
+   * realization stays locked meanwhile. */
   lf = TextObj->logfont.elfEnumLogfontEx.elfLogFont;
-  TEXTOBJ_UnlockText(TextObj);
-  Size = IntGetOutlineTextMetrics(FontGDI, 0, NULL, FALSE, &lf);
-  if (!otm) return Size;
+  Size = TextIntGetOutlineTextMetrics(TextObj, FontGDI, 0, NULL, &lf);
+  if (!otm)
+  {
+      TEXTOBJ_UnlockText(TextObj);
+      return Size;
+  }
   if (Size > Data)
   {
+      TEXTOBJ_UnlockText(TextObj);
       EngSetLastError(ERROR_INSUFFICIENT_BUFFER);
       return 0;
   }
   potm = ExAllocatePoolWithTag(PagedPool, Size, GDITAG_TEXT);
   if (!potm)
   {
+      TEXTOBJ_UnlockText(TextObj);
       EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
       return 0;
   }
   RtlZeroMemory(potm, Size);
-  IntGetOutlineTextMetrics(FontGDI, Size, potm, FALSE, &lf);
+  TextIntGetOutlineTextMetrics(TextObj, FontGDI, Size, potm, &lf);
+  TEXTOBJ_UnlockText(TextObj);
 
   _SEH2_TRY
   {

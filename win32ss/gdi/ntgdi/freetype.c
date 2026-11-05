@@ -1649,6 +1649,69 @@ UINT FASTCALL IntGetCharSet(INT nIndex, FT_ULong CodePageRange1)
     return (nIndex < 0) ? nCount : ANSI_CHARSET;
 }
 
+/* Sample ideographs of the CJK code pages, ones that are not among the commonest: a CJK face that claims a
+ * code page in its OS/2 table but lacks them covers a part of it only. The Hangul face claims JIS X 0208 and
+ * GB 2312 as well (it holds about 87 % of the first and about 60 % of the second), and as the first
+ * face enumerated with those charsets it was picked for Shift-JIS and GB2312 requests; the face that holds
+ * them all is the one such a request should reach. */
+static const WCHAR g_JisProbe[] =
+    { 0x5516, 0x59F6, 0x7A50, 0x9BF5, 0x5727, 0x88B7, 0x663F, 0x9F63, 0 };
+static const WCHAR g_Gb2312Probe[] =
+    { 0x54CE, 0x6D51, 0x9E4F, 0x9A8C, 0x5DEF, 0x6120, 0x89D1, 0x75E8, 0 };
+
+/* Does the face hold the sample of the charset's code page? Charsets without a sample always pass. */
+static BOOL
+IntFaceCoversCharSet(_In_ FT_Face Face, _In_ UINT CharSet)
+{
+    const WCHAR *Probe;
+    FT_CharMap Saved, Unicode = NULL;
+    BOOL Ret = TRUE;
+    INT i;
+
+    switch (CharSet)
+    {
+        case SHIFTJIS_CHARSET: Probe = g_JisProbe; break;
+        case GB2312_CHARSET:   Probe = g_Gb2312Probe; break;
+        default:               return TRUE;
+    }
+
+    ASSERT_FREETYPE_LOCK_HELD();
+
+    for (i = 0; i < Face->num_charmaps; ++i)
+    {
+        if (Face->charmaps[i]->encoding == FT_ENCODING_UNICODE)
+        {
+            Unicode = Face->charmaps[i];
+            break;
+        }
+    }
+    if (!Unicode)
+        return TRUE; /* no Unicode map to ask: believe the face */
+
+    Saved = Face->charmap;
+    if (FT_Set_Charmap(Face, Unicode) != FT_Err_Ok)
+        return TRUE;
+    /* A face without the commonest ideographs is no CJK font that is short of some: a symbol or test
+     * font that claims a code page in its OS/2 table keeps the claim */
+    if (!FT_Get_Char_Index(Face, 0x65E5) || !FT_Get_Char_Index(Face, 0x672C))
+    {
+        if (Saved)
+            FT_Set_Charmap(Face, Saved);
+        return TRUE;
+    }
+    for (; *Probe; ++Probe)
+    {
+        if (!FT_Get_Char_Index(Face, *Probe))
+        {
+            Ret = FALSE;
+            break;
+        }
+    }
+    if (Saved)
+        FT_Set_Charmap(Face, Saved);
+    return Ret;
+}
+
 /* Borrowed and adapted from Wine */
 static BOOL select_charmap(FT_Face ft_face, FT_Encoding encoding)
 {
@@ -1857,6 +1920,16 @@ IntGdiLoadFontsFromMemory(PGDI_LOAD_FONT pLoadFont,
         os2_version = pOS2->version;
         os2_ulCodePageRange1 = pOS2->ulCodePageRange1;
         os2_usWeightClass = pOS2->usWeightClass;
+
+        /* A code page the face claims but only partly holds does not get a charset of its own */
+        for (BitIndex = 0; BitIndex < MAXTCIINDEX; ++BitIndex)
+        {
+            if ((os2_ulCodePageRange1 & (1 << BitIndex)) &&
+                !IntFaceCoversCharSet(Face, g_FontTci[BitIndex].ciCharset))
+            {
+                os2_ulCodePageRange1 &= ~(1 << BitIndex);
+            }
+        }
     }
     IntUnLockFreeType();
 
@@ -3905,6 +3978,25 @@ GetFontFamilyInfoForList(const LOGFONTW *LogFont,
     return TRUE;
 }
 
+/* Legacy aliases a full enumeration leaves out on Windows: they only exist for lookups by name. The other
+ * substitutes (the metric substitutes for Segoe UI, Calibri, Cambria, the East Asian names ...) are listed. */
+static const PCWSTR g_HiddenFromFullEnum[] =
+{
+    L"Helv", L"Helvetica", L"MS Shell Dlg", L"MS Shell Dlg 2", L"Times", L"Tms Rmn"
+};
+
+static BOOL
+IsHiddenFromFullEnum(_In_ PCUNICODE_STRING pName)
+{
+    UINT i;
+    for (i = 0; i < RTL_NUMBER_OF(g_HiddenFromFullEnum); ++i)
+    {
+        if (_wcsicmp(pName->Buffer, g_HiddenFromFullEnum[i]) == 0)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 static BOOLEAN FASTCALL
 GetFontFamilyInfoForSubstitutes(const LOGFONTW *LogFont,
                                 PFONTFAMILYINFO Info,
@@ -3927,6 +4019,10 @@ GetFontFamilyInfoForSubstitutes(const LOGFONTW *LogFont,
             /* check name */
             if (_wcsicmp(LogFont->lfFaceName, pFromW->Buffer) != 0)
                 continue;   /* mismatch */
+        }
+        else if (IsHiddenFromFullEnum(pFromW))
+        {
+            continue;   /* a full enumeration does not list it */
         }
 
         pToW = &pCurrentEntry->FontNames[FONTSUBST_TO];
@@ -4541,6 +4637,30 @@ TextIntUpdateSize(
     return (error == FT_Err_Ok);
 }
 
+/* The outline text metrics of the realized font's request: the size is set and the metrics are read
+ * under one hold of the FreeType lock. A face is shared by every DC with a font of it, so a size set
+ * under an earlier hold can be another thread's by the time it is read. */
+INT FASTCALL
+TextIntGetOutlineTextMetrics(
+    _In_ PTEXTOBJ TextObj,
+    _In_ PFONTGDI FontGDI,
+    _In_ UINT Size,
+    _Out_opt_ OUTLINETEXTMETRICW *Otm,
+    _In_opt_ const LOGFONTW *plfStyle)
+{
+    INT Ret;
+
+    IntLockFreeType();
+    if (!TextIntUpdateSize(TextObj, FontGDI, FALSE))
+    {
+        IntUnLockFreeType();
+        return 0;
+    }
+    Ret = IntGetOutlineTextMetrics(FontGDI, Size, Otm, TRUE, plfStyle);
+    IntUnLockFreeType();
+    return Ret;
+}
+
 static inline FT_UInt FASTCALL
 get_glyph_index_symbol(FT_Face ft_face, UINT glyph)
 {
@@ -4747,8 +4867,9 @@ ftGdiGetGlyphOutline(
     orientation = FT_IS_SCALABLE(ft_face) ? plf->lfOrientation : 0;
 
     ASSERT_FREETYPE_LOCK_NOT_HELD();
-    /* Only the face's metrics are used here (width ratio): no request style */
-    Size = IntGetOutlineTextMetrics(FontGDI, 0, NULL, FALSE, NULL);
+    /* Only the face's metrics are used here (width ratio): no request style. They are taken at
+     * this request's size, with the size set and read under one hold of the FreeType lock */
+    Size = TextIntGetOutlineTextMetrics(TextObj, FontGDI, 0, NULL, NULL);
     if (!Size)
     {
         TEXTOBJ_UnlockText(TextObj);
@@ -4763,7 +4884,7 @@ ftGdiGetGlyphOutline(
         return GDI_ERROR;
     }
     ASSERT_FREETYPE_LOCK_NOT_HELD();
-    Size = IntGetOutlineTextMetrics(FontGDI, Size, potm, FALSE, NULL);
+    Size = TextIntGetOutlineTextMetrics(TextObj, FontGDI, Size, potm, NULL);
     if (!Size)
     {
         ExFreePoolWithTag(potm, GDITAG_TEXT);
@@ -4799,10 +4920,12 @@ ftGdiGetGlyphOutline(
     }
 
     error = FT_Load_Glyph(ft_face, glyph_index, load_flags);
-    IntUnLockFreeType();
 
+    /* The lock stays held from the size request to the last read of the glyph's metrics: the
+     * face has one current size and one glyph slot, and another thread's request would change both */
     if (error)
     {
+        IntUnLockFreeType();
         DPRINT1("WARNING: Failed to load and render glyph! [index: %u]\n", glyph_index);
         ExFreePoolWithTag(potm, GDITAG_TEXT);
         return GDI_ERROR;
@@ -4839,8 +4962,6 @@ ftGdiGetGlyphOutline(
     bbx = (right - left) >> 6;
 
     DPRINT("Advance = %d, lsb = %d, bbx = %d\n",adv, lsb, bbx);
-
-    IntLockFreeType();
 
     /* Width scaling transform */
     if (!FLOATOBJ_Equal1(&widthRatio))
@@ -5337,9 +5458,11 @@ IntGetRealGlyph(
     return realglyph;
 }
 
-BOOL
-FASTCALL
-TextIntGetTextExtentPoint(
+/* bLocked: the caller holds the FreeType lock, which then stays held (text output measuring a
+ * space in the middle of its own run must not let another thread change the face's size) */
+static BOOL
+TextIntGetTextExtentPointEx(
+    _In_ BOOL bLocked,
     _In_ PDC dc,
     _In_ PTEXTOBJ TextObj,
     _In_reads_(Count) PCWCH String,
@@ -5388,10 +5511,14 @@ TextIntGetTextExtentPoint(
         Cache.Hashed.Aspect.RenderMode = (BYTE)FT_RENDER_MODE_MONO;
 
     // NOTE: GetTextExtentPoint32 simply ignores lfEscapement and XFORM.
-    IntLockFreeType();
+    if (!bLocked)
+        IntLockFreeType();
+    else
+        ASSERT_FREETYPE_LOCK_HELD();
     if (!TextIntUpdateSize(TextObj, FontGDI, FALSE))
     {
-        IntUnLockFreeType();
+        if (!bLocked)
+            IntUnLockFreeType();
         return FALSE;
     }
     Cache.Hashed.matTransform = identityMat;
@@ -5419,7 +5546,8 @@ TextIntGetTextExtentPoint(
         if (error != FT_Err_Ok)
         {
             FontLink_Chain_Finish(&Chain);
-            IntUnLockFreeType();
+            if (!bLocked)
+                IntUnLockFreeType();
             IntSetAdvanceError(error);
             return FALSE;
         }
@@ -5458,7 +5586,8 @@ TextIntGetTextExtentPoint(
     ascender = FontGDI->tmAscent; /* Units above baseline */
     descender = FontGDI->tmDescent; /* Units below baseline */
     FontLink_Chain_Finish(&Chain);
-    IntUnLockFreeType();
+    if (!bLocked)
+        IntUnLockFreeType();
 
     if (bVerticalWriting)
     {
@@ -5472,6 +5601,22 @@ TextIntGetTextExtentPoint(
     }
 
     return TRUE;
+}
+
+BOOL
+FASTCALL
+TextIntGetTextExtentPoint(
+    _In_ PDC dc,
+    _In_ PTEXTOBJ TextObj,
+    _In_reads_(Count) PCWCH String,
+    _In_ INT Count,
+    _In_ ULONG MaxExtent,
+    _Out_ PINT Fit,
+    _Out_writes_to_opt_(Count, *Fit) PINT Dx,
+    _Out_ PSIZE Size,
+    _In_ FLONG fl)
+{
+    return TextIntGetTextExtentPointEx(FALSE, dc, TextObj, String, Count, MaxExtent, Fit, Dx, Size, fl);
 }
 
 INT
@@ -7120,23 +7265,25 @@ ftGdiGetFontRealization(
 
 DWORD
 FASTCALL
-ftGdiGetKerningPairs( PFONTGDI Font,
+ftGdiGetKerningPairs( PTEXTOBJ TextObj,
                       DWORD cPairs,
                       LPKERNINGPAIR pKerningPair)
 {
     DWORD Count = 0;
     INT i = 0;
+    PFONTGDI Font = ObjToGDI(TextObj->Font, FONT);
     FT_Face face = Font->SharedFace->Face;
 
-    if (FT_HAS_KERNING(face) && face->charmap->encoding == FT_ENCODING_UNICODE)
+    IntLockFreeType();
+    /* The amounts are scaled to the realized font's size */
+    if (FT_HAS_KERNING(face) && face->charmap && face->charmap->encoding == FT_ENCODING_UNICODE &&
+        TextIntUpdateSize(TextObj, Font, FALSE))
     {
         FT_UInt previous_index = 0, glyph_index = 0;
         FT_ULong char_code, char_previous;
         FT_Vector delta;
 
         char_previous = char_code = FT_Get_First_Char(face, &glyph_index);
-
-        IntLockFreeType();
 
         while (glyph_index)
         {
@@ -7158,8 +7305,8 @@ ftGdiGetKerningPairs( PFONTGDI Font,
             char_previous = char_code;
             char_code = FT_Get_Next_Char(face, char_code, &glyph_index);
         }
-        IntUnLockFreeType();
     }
+    IntUnLockFreeType();
     return Count;
 }
 
@@ -7723,10 +7870,10 @@ IntExtTextOutW(
         if ((pdcattr->flTextAlign & TA_UPDATECP) && glyphSize.cx == 0 &&
             (ch0 == L' ' || ch0 == nbsp)) // Space chars needing x-dim widths
         {
-            IntUnLockFreeType();
-            /* Get the width of the space character */
-            TextIntGetTextExtentPoint(dc, TextObj, L" ", 1, 0, NULL, NULL, &spaceWidth, 0);
-            IntLockFreeType();
+            /* Get the width of the space character; the lock stays held, and the measuring reset
+             * the face's transform, which the rest of the run needs back */
+            TextIntGetTextExtentPointEx(TRUE, dc, TextObj, L" ", 1, 0, NULL, NULL, &spaceWidth, 0);
+            FT_Set_Transform(FontGDI->SharedFace->Face, &Cache.Hashed.matTransform, NULL);
             glyphSize.cx = spaceWidth.cx;
             realglyph->left = 0;
         }
