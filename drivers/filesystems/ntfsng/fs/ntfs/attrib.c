@@ -2338,6 +2338,43 @@ out_ctx:
 }
 
 /*
+ * ntfs_free_attr_instance - the instance number for a new attribute of an mft record
+ * @m:		mft record the attribute is going to be put in
+ *
+ * @m->next_attr_instance, but when that counter has wrapped (it is 16 bits and counts every
+ * attribute ever added, so a record whose names change often wraps it) skip the numbers that
+ * attributes of the record still carry.  The counter used to restart at 0 (the instance of
+ * $STANDARD_INFORMATION) and every change of the record after that failed with an I/O error.
+ */
+static __le16 ntfs_free_attr_instance(struct mft_record *m)
+{
+	u16 inst = le16_to_cpu(m->next_attr_instance);
+	u8 *end = (u8 *)m + min_t(u32, le32_to_cpu(m->bytes_in_use), le32_to_cpu(m->bytes_allocated));
+	unsigned int tries;
+
+	for (tries = 0; tries <= 0xffff; tries++, inst++) {
+		struct attr_record *a = (struct attr_record *)((u8 *)m + le16_to_cpu(m->attrs_offset));
+		bool used = false;
+
+		while ((u8 *)a + sizeof(a->type) <= end && a->type != AT_END) {
+			u32 len = le32_to_cpu(a->length);
+
+			if ((u8 *)a + offsetof(struct attr_record, data.resident.reserved) > end || !len ||
+			    (u8 *)a + len > end)
+				break;
+			if (le16_to_cpu(a->instance) == inst) {
+				used = true;
+				break;
+			}
+			a = (struct attr_record *)((u8 *)a + len);
+		}
+		if (!used)
+			break;
+	}
+	return cpu_to_le16(inst);
+}
+
+/*
  * ntfs_make_room_for_attr - make room for an attribute inside an mft record
  * @m:		mft record
  * @pos:	position at which to make space
@@ -2402,6 +2439,7 @@ int ntfs_resident_attr_record_add(struct ntfs_inode *ni, __le32 type,
 	struct mft_record *m;
 	int err, offset;
 	struct ntfs_inode *base_ni;
+	__le16 instance;
 
 	if (!ni || (!name && name_len))
 		return -EINVAL;
@@ -2449,6 +2487,7 @@ int ntfs_resident_attr_record_add(struct ntfs_inode *ni, __le32 type,
 			  sizeof(a->data.resident.reserved) +
 		((name_len * sizeof(__le16) + 7) & ~7) +
 		((size + 7) & ~7);
+	instance = ntfs_free_attr_instance(ctx->mrec);
 	err = ntfs_make_room_for_attr(ctx->mrec, (u8 *) ctx->attr, length);
 	if (err) {
 		ntfs_debug("Failed to make room for attribute.\n");
@@ -2466,7 +2505,7 @@ int ntfs_resident_attr_record_add(struct ntfs_inode *ni, __le32 type,
 				sizeof(a->data.resident.reserved))) : cpu_to_le16(0);
 
 	a->flags = flags;
-	a->instance = m->next_attr_instance;
+	a->instance = instance;
 	a->data.resident.value_length = cpu_to_le32(size);
 	a->data.resident.value_offset = cpu_to_le16(length - ((size + 7) & ~7));
 	if (val)
@@ -2480,8 +2519,7 @@ int ntfs_resident_attr_record_add(struct ntfs_inode *ni, __le32 type,
 	if (name_len)
 		memcpy((u8 *)a + le16_to_cpu(a->name_offset),
 				name, sizeof(__le16) * name_len);
-	m->next_attr_instance =
-		cpu_to_le16((le16_to_cpu(m->next_attr_instance) + 1) & 0xffff);
+	m->next_attr_instance = cpu_to_le16((le16_to_cpu(instance) + 1) & 0xffff);
 	if (ni->nr_extents == -1)
 		base_ni = ni->ext.base_ntfs_ino;
 	else
@@ -2523,6 +2561,7 @@ static int ntfs_non_resident_attr_record_add(struct ntfs_inode *ni, __le32 type,
 	struct mft_record *m;
 	struct ntfs_inode *base_ni;
 	int err, offset;
+	__le16 instance;
 
 	if (!ni || dataruns_size <= 0 || (!name && name_len))
 		return -EINVAL;
@@ -2572,6 +2611,7 @@ static int ntfs_non_resident_attr_record_add(struct ntfs_inode *ni, __le32 type,
 		((sizeof(__le16) * name_len + 7) & ~7) + dataruns_size +
 		((flags & (ATTR_IS_COMPRESSED | ATTR_IS_SPARSE)) ?
 		 sizeof(a->data.non_resident.compressed_size) : 0);
+	instance = ntfs_free_attr_instance(ctx->mrec);
 	err = ntfs_make_room_for_attr(ctx->mrec, (u8 *) ctx->attr, length);
 	if (err) {
 		pr_err("Failed to make room for attribute\n");
@@ -2588,7 +2628,7 @@ static int ntfs_non_resident_attr_record_add(struct ntfs_inode *ni, __le32 type,
 			((flags & (ATTR_IS_COMPRESSED | ATTR_IS_SPARSE)) ?
 			 sizeof(a->data.non_resident.compressed_size) : 0));
 	a->flags = flags;
-	a->instance = m->next_attr_instance;
+	a->instance = instance;
 	a->data.non_resident.lowest_vcn = cpu_to_le64(lowest_vcn);
 	a->data.non_resident.mapping_pairs_offset = cpu_to_le16(length - dataruns_size);
 	a->data.non_resident.compression_unit =
@@ -2605,8 +2645,7 @@ static int ntfs_non_resident_attr_record_add(struct ntfs_inode *ni, __le32 type,
 	if (name_len)
 		memcpy((u8 *)a + le16_to_cpu(a->name_offset),
 				name, sizeof(__le16) * name_len);
-	m->next_attr_instance =
-		cpu_to_le16((le16_to_cpu(m->next_attr_instance) + 1) & 0xffff);
+	m->next_attr_instance = cpu_to_le16((le16_to_cpu(instance) + 1) & 0xffff);
 	if (ni->nr_extents == -1)
 		base_ni = ni->ext.base_ntfs_ino;
 	else
@@ -3396,6 +3435,7 @@ int ntfs_attr_record_move_to(struct ntfs_attr_search_ctx *ctx, struct ntfs_inode
 	int err;
 	struct mft_record *ni_mrec;
 	struct super_block *sb;
+	__le16 instance;
 
 	if (!ctx || !ctx->attr || !ctx->ntfs_ino || !ni) {
 		ntfs_debug("Invalid arguments passed.\n");
@@ -3449,6 +3489,7 @@ int ntfs_attr_record_move_to(struct ntfs_attr_search_ctx *ctx, struct ntfs_inode
 		goto put_err_out;
 	}
 
+	instance = ntfs_free_attr_instance(nctx->mrec);
 	err = ntfs_make_room_for_attr(ni_mrec, (u8 *) nctx->attr,
 				le32_to_cpu(a->length));
 	if (err) {
@@ -3457,9 +3498,8 @@ int ntfs_attr_record_move_to(struct ntfs_attr_search_ctx *ctx, struct ntfs_inode
 		goto put_err_out;
 	}
 	memcpy(nctx->attr, a, le32_to_cpu(a->length));
-	nctx->attr->instance = nctx->mrec->next_attr_instance;
-	nctx->mrec->next_attr_instance =
-		cpu_to_le16((le16_to_cpu(nctx->mrec->next_attr_instance) + 1) & 0xffff);
+	nctx->attr->instance = instance;
+	nctx->mrec->next_attr_instance = cpu_to_le16((le16_to_cpu(instance) + 1) & 0xffff);
 	ntfs_attr_record_resize(ctx->mrec, a, 0);
 	mark_mft_record_dirty(ctx->ntfs_ino);
 	mark_mft_record_dirty(ni);
