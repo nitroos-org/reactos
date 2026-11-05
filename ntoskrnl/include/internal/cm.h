@@ -1123,6 +1123,20 @@ CmpReleaseTwoKcbLockByKey(
 
 VOID
 NTAPI
+CmpAcquireTwoKcbLocksSharedByKey(
+    IN ULONG ConvKey1,
+    IN ULONG ConvKey2
+);
+
+VOID
+NTAPI
+CmpReleaseTwoKcbLocksSharedByKey(
+    IN ULONG ConvKey1,
+    IN ULONG ConvKey2
+);
+
+VOID
+NTAPI
 CmpFlushNotifiesOnKeyBodyList(
     IN PCM_KEY_CONTROL_BLOCK Kcb,
     IN BOOLEAN LockHeld

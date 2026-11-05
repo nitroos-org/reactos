@@ -1965,6 +1965,12 @@ MiQueryAddressState(IN PVOID Va,
     return State;
 }
 
+static
+NTSTATUS
+MiReferenceProcessForQuery(IN HANDLE ProcessHandle,
+                           IN KPROCESSOR_MODE PreviousMode,
+                           OUT PEPROCESS *Process);
+
 NTSTATUS
 NTAPI
 MiQueryMemoryBasicInformation(IN HANDLE ProcessHandle,
@@ -2042,13 +2048,9 @@ MiQueryMemoryBasicInformation(IN HANDLE ProcessHandle,
     }
     else
     {
-        /* Reference the target process */
-        Status = ObReferenceObjectByHandle(ProcessHandle,
-                                           PROCESS_QUERY_INFORMATION,
-                                           PsProcessType,
-                                           ExGetPreviousMode(),
-                                           (PVOID*)&TargetProcess,
-                                           NULL);
+        /* Reference the target process (PROCESS_QUERY_LIMITED_INFORMATION is enough on Windows,
+         * for classes 0 and 8) */
+        Status = MiReferenceProcessForQuery(ProcessHandle, PreviousMode, &TargetProcess);
         if (!NT_SUCCESS(Status)) return Status;
 
         /* Attach to it now */
@@ -2505,7 +2507,10 @@ Done:
  *   given. BaseAddress is only checked against the user range. A page that is not resident
  *   (free, reserved, committed but never touched, kernel address) gets 0; a resident one gets
  *   Valid, Win32Protection (the page protection), Priority 5, and for a mapped or image page
- *   Shared, ShareCount 1 and SharedOriginal. The real share count is not tracked.
+ *   Shared, ShareCount (the mapping count as for class 1) and SharedOriginal; a page of a view or image that is
+ *   not resident has only Shared and SharedOriginal; KUSER_SHARED_DATA is valid, read-only, count 7. The
+ *   access needed on a process handle is PROCESS_QUERY_LIMITED_INFORMATION. Left: Windows uses priority 7 for
+ *   the pages of the system DLLs, nitro always 5.
  */
 #define MI_MEMORY_WORKING_SET_EX_CLASS 4
 #define MI_MEMORY_IMAGE_CLASS 6
@@ -2588,13 +2593,8 @@ MiQueryMemoryWorkingSetEx(IN HANDLE ProcessHandle,
 
     if (ProcessHandle != NtCurrentProcess())
     {
-        /* PROCESS_QUERY_INFORMATION, as the other classes */
-        Status = ObReferenceObjectByHandle(ProcessHandle,
-                                           PROCESS_QUERY_INFORMATION,
-                                           PsProcessType,
-                                           PreviousMode,
-                                           (PVOID*)&TargetProcess,
-                                           NULL);
+        /* PROCESS_QUERY_LIMITED_INFORMATION is enough on Windows */
+        Status = MiReferenceProcessForQuery(ProcessHandle, PreviousMode, &TargetProcess);
         if (!NT_SUCCESS(Status)) return Status;
     }
 
@@ -2635,19 +2635,51 @@ MiQueryMemoryWorkingSetEx(IN HANDLE ProcessHandle,
             ULONG_PTR Attr = 0;
             PVOID Address = Batch[i].VirtualAddress;
 
-            if (((ULONG_PTR)Address <= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) &&
-                (Basic[i].State == MEM_COMMIT) &&
-                MmIsAddressValid(Address))
+            if ((ULONG_PTR)Address > (ULONG_PTR)MM_HIGHEST_USER_ADDRESS)
             {
-                /* The page protection VirtualQuery reports for a resident page of a mapped (not image) view
-                 * follows the PTE bits and so changes with the first write; the protection of the view
-                 * is what Windows reports here */
-                ULONG Protect = (Basic[i].Type == MEM_MAPPED) ? Basic[i].AllocationProtect : Basic[i].Protect;
-
-                Attr = 1 | ((ULONG_PTR)(Protect & 0x7FF) << 4) | ((ULONG_PTR)5 << 24);
-                if (Basic[i].Type != MEM_PRIVATE)
+                /* not a user page */
+            }
+            else if (PAGE_ALIGN(Address) == (PVOID)MM_SHARED_USER_DATA_VA)
+            {
+                /* Windows: valid, read-only, the share count saturated, shared */
+                Attr = 1 | (7 << 1) | ((ULONG_PTR)PAGE_READONLY << 4) | (1 << 15) | ((ULONG_PTR)5 << 24) | ((ULONG_PTR)1 << 30);
+            }
+            else if (Basic[i].State == MEM_COMMIT)
+            {
+                if (MmIsAddressValid(Address))
                 {
-                    Attr |= (1 << 1) | (1 << 15) | ((ULONG_PTR)1 << 30);
+                    /* The page protection VirtualQuery reports for a resident page of a mapped (not image) view
+                     * follows the PTE bits and so changes with the first write; the protection of the view
+                     * is what Windows reports here */
+                    ULONG Protect = (Basic[i].Type == MEM_MAPPED) ? Basic[i].AllocationProtect : Basic[i].Protect;
+                    PMMPTE Pte = MiAddressToPte(Address);
+                    BOOLEAN Shared = (Basic[i].Type != MEM_PRIVATE);
+
+                    /* An image page of a writable section is the shared copy-on-write page until it is
+                     * written, then a private one (Windows lists it so) */
+                    if ((Basic[i].Type == MEM_IMAGE) &&
+                        ((Protect == PAGE_READWRITE) || (Protect == PAGE_EXECUTE_READWRITE)))
+                    {
+                        if (MI_IS_PAGE_WRITEABLE(Pte))
+                            Shared = FALSE;
+                        else
+                            Protect = (Protect == PAGE_READWRITE) ? PAGE_WRITECOPY : PAGE_EXECUTE_WRITECOPY;
+                    }
+
+                    Attr = 1 | ((ULONG_PTR)(Protect & 0x7FF) << 4) | ((ULONG_PTR)5 << 24);
+                    if (Shared)
+                    {
+                        /* The processes that map the page, up to 7 as on Windows */
+                        ULONG Sharers = MmCountPageMappers(PFN_FROM_PTE(Pte));
+
+                        Sharers = min(max(Sharers, 1UL), 7UL);
+                        Attr |= ((ULONG_PTR)Sharers << 1) | (1 << 15) | ((ULONG_PTR)1 << 30);
+                    }
+                }
+                else if (Basic[i].Type != MEM_PRIVATE)
+                {
+                    /* A page of a view that is not resident: only the shared flags */
+                    Attr = (1 << 15) | ((ULONG_PTR)1 << 30);
                 }
             }
             Batch[i].VirtualAttributes = Attr;
@@ -2696,8 +2728,12 @@ MiQueryMemoryWorkingSetEx(IN HANDLE ProcessHandle,
  *   A buffer smaller than the list fails with STATUS_INFO_LENGTH_MISMATCH and gets only the count (when it
  *   holds that), a big enough one gets the list and ReturnLength is the size of the list. The access needed
  *   on a process handle is PROCESS_QUERY_LIMITED_INFORMATION (as for class 3). Private pages have
- *   ShareCount 0 and are not Shared; pages of a view or an image are Shared with ShareCount 1 here (Windows
- *   counts the sharers, up to 7: not tracked).
+ *   ShareCount 0 and are not Shared; pages of a view or an image are Shared, the ShareCount being the number
+ *   of page table entries that map the page, up to 7 (the rmap list of a page of a file or image section,
+ *   the PFN share count for a page of a section without a file). An image data page that was not written is
+ *   listed write-copy and Shared; once written it is private. Differences left: Windows lists
+ *   KUSER_SHARED_DATA first (x64) or after the pages below 0x7ffe0000 are mixed in (WoW64), nitro keeps the
+ *   list in ascending order.
  * - Class 5: a SIZE_T written whatever the address, section or handle; 0x64 on the machine measured, for
  *   every address kind (private, free, pagefile view, file view, image, NULL). Kernel address and handle
  *   checks as the other classes.
@@ -2836,6 +2872,24 @@ MiWsListBuildEntry(IN PEPROCESS Process,
         if (!NT_SUCCESS(MmQuerySectionView((PMEMORY_AREA)Vad, (PVOID)Address, &Info, &Length))) return FALSE;
         Win32Protect = Info.Protect;
         ViewProtect = Win32Protect;
+
+        /* An image page of a writable section that was not written yet is the shared, copy-on-write
+         * one (Windows lists it write-copy); once written it is a private copy */
+        if (Info.Type == MEM_IMAGE)
+        {
+            if ((Info.Protect == PAGE_READWRITE) || (Info.Protect == PAGE_EXECUTE_READWRITE))
+            {
+                if (Writable)
+                {
+                    Shared = FALSE;
+                }
+                else
+                {
+                    Win32Protect = (Info.Protect == PAGE_READWRITE) ? PAGE_WRITECOPY : PAGE_EXECUTE_WRITECOPY;
+                    ViewProtect = Win32Protect;
+                }
+            }
+        }
     }
     else if (Vad->u.VadFlags.VadType == VadNone)
     {
@@ -2852,7 +2906,15 @@ MiWsListBuildEntry(IN PEPROCESS Process,
     if (Shared && Writable && ((ViewProtect == PAGE_WRITECOPY) || (ViewProtect == PAGE_EXECUTE_WRITECOPY)))
         Shared = FALSE;
 
-    *Entry = Address | MiWin32ProtectToMmValue(Win32Protect) | (Shared ? ((ULONG_PTR)1 << 5) | ((ULONG_PTR)1 << 8) : 0);
+    *Entry = Address | MiWin32ProtectToMmValue(Win32Protect);
+    if (Shared)
+    {
+        /* The sharers are the processes that map the page, up to 7 as on Windows */
+        ULONG Sharers = MmCountPageMappers(PFN_FROM_PTE(PointerPte));
+
+        Sharers = min(max(Sharers, 1UL), 7UL);
+        *Entry |= ((ULONG_PTR)Sharers << 5) | ((ULONG_PTR)1 << 8);
+    }
     return TRUE;
 }
 
