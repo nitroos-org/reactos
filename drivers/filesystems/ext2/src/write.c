@@ -984,6 +984,13 @@ Ext2WriteFile(IN PEXT2_IRP_CONTEXT IrpContext)
              * holds it shared while Mm clamps the read at the valid data length, and must not take the old one
              * and leave zeros in the cache for data this write puts on the disk. Synchronous, so that the hold
              * is released here and not by an I/O completion.
+             *
+             * Forcing WAIT is harmless: the one thing it changes is that an overlapped non-cached write of this
+             * kind completes in the caller instead of in the background. Ext2 keeps the valid data length equal to
+             * the file size (fileinfo.c, create.c), and a write that ends past the file size is already forced
+             * synchronous by the extension path below, so the only writes this adds are the rare ones after the
+             * valid data length was lowered by hand with a set-VDL call. The paging resource stays released by
+             * this write on every exit (PagingIoHeldForVdl, in the finally block).
              */
             if (Nocache && (ByteOffset.QuadPart + Length) > Fcb->Header.ValidDataLength.QuadPart) {
                 SetFlag(IrpContext->Flags, IRP_CONTEXT_FLAG_WAIT);
