@@ -126,8 +126,19 @@ static void detach_inner_window(HTMLInnerWindow *window)
     if(outer_window && is_main_content_window(outer_window))
         window->doc->cp_container.forward_container = NULL;
 
+#ifdef __REACTOS__
+    /* The documents are only detached from the window here: HTMLDocumentNode_unlink() removes a document from this list
+     * only while it still has a script_global, and that is cleared below. A document that was freed afterwards stayed in
+     * the list, and the next walk (the window's own unlink) crashed in it. Take every document off the list here. */
+    while(!list_empty(&window->documents)) {
+        doc_iter = LIST_ENTRY(list_head(&window->documents), HTMLDocumentNode, script_global_entry);
+        list_remove(&doc_iter->script_global_entry);
+        doc_iter->script_global = NULL;
+    }
+#else
     LIST_FOR_EACH_ENTRY(doc_iter, &window->documents, HTMLDocumentNode, script_global_entry)
         doc_iter->script_global = NULL;
+#endif
     if(doc)
         detach_document_node(doc);
 
