@@ -34,6 +34,12 @@ protected:
     BOOL m_fRecursive;
     CDirectoryList m_dir_list;
     OVERLAPPED m_overlapped;
+    // Each watcher owns its notification buffer: the buffers of all watchers used to be one static array, so a
+    // completion of one watcher could overwrite (or a restart could zero) what another had just received.
+    BYTE m_buffer[0x4000];
+    // Old name of a rename whose new name has not arrived yet. FILE_ACTION_RENAMED_OLD_NAME and _NEW_NAME can be
+    // returned by two different reads, so this outlives one ProcessNotification call.
+    WCHAR m_szRenameOld[MAX_PATH];
 
     BOOL CreateAPCThread();
     void ProcessNotification();

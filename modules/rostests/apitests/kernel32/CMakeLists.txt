@@ -184,6 +184,7 @@ list(APPEND SOURCE
     QueueUserWorkItem.c
     RaiseFailFastException.c
     ReadDirectoryChanges.c
+    ReadDirectoryChangesRename.c
     ReadFile.c
     RegisterWait.c
     ResolveDelayLoadedAPI.c
