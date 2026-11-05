@@ -17,6 +17,14 @@ HKCU,"Software\Microsoft\SystemCertificates\ClientAuthIssuer",,0x00000012
 HKCU,"Software\Microsoft\SystemCertificates\Local NonRemovable Certificates",,0x00000012
 HKCU,"Software\Microsoft\SystemCertificates\SmartCardRoot",,0x00000012
 
+; Console defaults, as a new Windows 10 account has them: mouse selection (QuickEdit), insert mode,
+; line-wrapping selection, Ctrl+C / Ctrl+V shortcuts enabled
+HKCU,"Console",,0x00000012
+HKCU,"Console","QuickEdit",0x00010003,1
+HKCU,"Console","InsertMode",0x00010003,1
+HKCU,"Console","LineSelection",0x00010003,1
+HKCU,"Console","CtrlKeyShortcutsDisabled",0x00010003,0
+
 HKCU,"Control Panel",,0x00000012
 
 ; Accessibility

@@ -34,6 +34,7 @@ list(APPEND SOURCE
     ConsoleCtrlEventRace.c
     ConsoleCtrlHandler.c
     ConsoleDisplayMode.c
+    ConsoleQuickEdit.c
     ConsoleViewFollow.c
     ConsoleFramebufferCommit.c
     ConsoleVirtualTerminal.c

@@ -396,7 +396,7 @@ do {                                                                            
     SetConsoleSetting(L"HistoryNoDup", REG_DWORD, sizeof(DWORD), &Storage, FALSE);
 
     Storage = ConsoleInfo->QuickEdit;
-    SetConsoleSetting(L"QuickEdit", REG_DWORD, sizeof(DWORD), &Storage, FALSE);
+    SetConsoleSetting(L"QuickEdit", REG_DWORD, sizeof(DWORD), &Storage, TRUE);
 
     Storage = ConsoleInfo->InsertMode;
     SetConsoleSetting(L"InsertMode", REG_DWORD, sizeof(DWORD), &Storage, TRUE);
@@ -462,7 +462,7 @@ ConCfgInitDefaultSettings(
     ConsoleInfo->NumberOfHistoryBuffers = 4;
     ConsoleInfo->HistoryNoDup = FALSE;
 
-    ConsoleInfo->QuickEdit  = FALSE;
+    ConsoleInfo->QuickEdit  = TRUE;
     ConsoleInfo->InsertMode = TRUE;
     // ConsoleInfo->InputBufferSize = 0;
 
