@@ -26,19 +26,20 @@
 
 #include <msi.h>
 
-#define GECKO_VERSION "2.40"
+#define GECKO_VERSION "2.47.4"
 
 /* NitroOS: the optional feature manager offers the same Gecko on demand (base/applications/featmgr, entry "wine-gecko").
  * The URLs and SHA-1 pins below must stay the ones in its Catalog\components.ini ([wine-gecko], [wine-gecko-x64]);
  * base/applications/featmgr/tools/check-gecko-pins.sh compares them. Either installer is seen by the other (the package's
- * HKLM\Software\Wine\MSHTML\2.40 GeckoPath, and its gecko\2.40\wine_gecko folder). */
+ * HKLM\Software\Wine\MSHTML\2.47.4 GeckoPath, and its gecko\wine-gecko-2.47.4-<arch> folder).
+ * GECKO_VERSION must equal the GECKO_VERSION of dll/win32/mshtml/nsiface.idl: mshtml refuses any other Gecko. */
 
 #ifdef __i386__
 #define ARCH_STRING "x86"
-#define GECKO_SHA "8a3adedf3707973d1ed4ac3b2e791486abf814bd"
+#define GECKO_SHA "6cbebd8c10c252826dbd6729462355529fd21ff2"
 #elif defined(__x86_64__) || defined(_M_AMD64)
 #define ARCH_STRING "x86_64"
-#define GECKO_SHA "356c414527b08b015b6dc53dbbf78d752320ae90"
+#define GECKO_SHA "ffe081064127df463953da886bf1b74f3011faf8"
 #else
 #define ARCH_STRING ""
 #define GECKO_SHA "???"
@@ -56,7 +57,7 @@ typedef struct {
 static const addon_info_t addons_info[] = {
     {
         GECKO_VERSION,
-        "wine_gecko-" GECKO_VERSION "-" ARCH_STRING ".msi",
+        "wine-gecko-" GECKO_VERSION "-" ARCH_STRING ".msi",
         GECKO_SHA,
         "MSHTML",
         "GeckoCabDir",
@@ -71,9 +72,9 @@ static CRITICAL_SECTION csLock;
 static IBinding *download_binding = NULL;
 
 #if defined(__x86_64__) || defined(_M_AMD64)
-static WCHAR GeckoUrl[] = L"https://dl.winehq.org/wine/wine-gecko/2.40/wine_gecko-2.40-x86_64.msi";
+static WCHAR GeckoUrl[] = L"https://dl.winehq.org/wine/wine-gecko/2.47.4/wine-gecko-2.47.4-x86_64.msi";
 #else
-static WCHAR GeckoUrl[] = L"https://svn.reactos.org/amine/wine_gecko-2.40-x86.msi";
+static WCHAR GeckoUrl[] = L"https://dl.winehq.org/wine/wine-gecko/2.47.4/wine-gecko-2.47.4-x86.msi";
 #endif
 
 /* SHA definitions are copied from advapi32. They aren't available in headers. */
