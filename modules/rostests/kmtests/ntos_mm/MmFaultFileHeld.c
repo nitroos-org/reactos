@@ -27,8 +27,23 @@
  * data. A thread that does not finish within the timeout is the deadlock. The test
  * then releases the file on behalf of the stuck thread, which lets the fault go on
  * (it takes the file exclusively, as it did on its own), so the failure is reported
- * and the test ends in order, with the driver able to unload. Without that the
- * thread would stay in the driver for good and the run would hang with it.
+ * and the test ends in order. Without that the thread would stay in the driver
+ * for good and the run would hang with it.
+ *
+ * A thread, or a caller of the counting routine, that still runs code of this
+ * driver when the test ends (only after a failure) must not find it unloaded:
+ * returning from the test releases nothing that keeps kmtest.sys mapped, and the
+ * service stop that follows would free the image under it. The test then takes a
+ * reference on the driver object (IopUnloadDriver calls DriverUnload and drops its
+ * own references; the image goes with the object's last reference), so the image
+ * stays mapped until the next boot.
+ *
+ * Test knob: if the file \SystemRoot\kmtest-mmfaultheld-stuck.flag exists, the
+ * test starts a thread that stays inside the counting routine's in-flight window
+ * for longer than HookRemove waits. This forces the failure path above; the
+ * reported failure is then expected, and what is checked is that the machine
+ * stays up after the service stops. It is for the test's own development; a
+ * normal run never creates the file.
  *
  * Windows does not call the file system's section synchronization (the FsFilter
  * AcquireForSectionSynchronization callbacks and the fast I/O
@@ -49,6 +64,14 @@
 #define TEST_PAGES      (TEST_CHUNKS * CHUNK_PAGES)
 #define TEST_TAG        'hFmM'
 #define TOUCH_TIMEOUT   (-20LL * 10 * 1000 * 1000) /* 20 s */
+#define HELD_TIMEOUT    TOUCH_TIMEOUT                /* the touch thread getting its hold */
+/* The two polling loops below count 10 ms per iteration, but KeDelayExecutionThread rounds up to the clock
+   tick (15.6 ms at the default rate), so the real bounds are up to about 1.5 times the nominal ones:
+   about 94 s for HookRemove and about 15 s for the contender's queueing. */
+#define HOOK_REMOVE_WAIT_MS     (60 * 1000)
+#define CONTENDER_QUEUE_WAIT_MS (10 * 1000)
+/* The forced stuck caller outlasts the longest real HookRemove wait with room to spare */
+#define STUCK_CALLER_SECONDS    130
 
 typedef enum _HOLD_MODE { HoldNone, HoldShared, HoldExclusive } HOLD_MODE;
 
@@ -83,7 +106,12 @@ static PFAST_IO_ACQUIRE_FILE HookOriginalAcquire;
 static PFAST_IO_RELEASE_FILE HookOriginalRelease;
 static PVOID HookFcb;
 static volatile LONG HookCount;
-static volatile LONG HookInFlight; /* callers inside the routines below: the driver must not unload under them */
+/* Callers inside the routines below: the driver must not unload under them. The count is not a gate and has two
+   windows nobody can close from here, both a few instructions wide: a caller may have read the slot before
+   HookRemove swapped it back and not yet incremented (HookRemove's 50 ms grace covers it in practice), and a
+   caller may have decremented and not yet returned (it still runs code of this driver, with the count at zero).
+   That is why the driver object reference on the failure path is the real protection, not this count. */
+static volatile LONG HookInFlight;
 
 static
 VOID
@@ -156,13 +184,14 @@ HookRemove(VOID)
     HookDispatch = NULL;
 
     /* A caller that read the slot just before the swap gets into the routine within this moment; then wait for
-       every caller inside to leave (one that waits for a file inside the file system's acquire can take long) */
+       every caller inside to leave (one that waits for a file inside the file system's acquire can take long).
+       Bounded: nominally 60 s, in real time up to about 94 s (see HOOK_REMOVE_WAIT_MS) */
     Delay.QuadPart = -50LL * 10 * 1000;
     KeDelayExecutionThread(KernelMode, FALSE, &Delay);
     Delay.QuadPart = -10LL * 10 * 1000;
-    for (Waited = 0; HookInFlight != 0 && Waited < 60 * 1000; Waited += 10)
+    for (Waited = 0; HookInFlight != 0 && Waited < HOOK_REMOVE_WAIT_MS; Waited += 10)
         KeDelayExecutionThread(KernelMode, FALSE, &Delay);
-    ok(HookInFlight == 0, "%ld callers still inside the counting routine after 60 s\n", HookInFlight);
+    ok(HookInFlight == 0, "%ld callers still inside the counting routine after the bounded wait (about 90 s)\n", HookInFlight);
     return (HookInFlight == 0);
 }
 
@@ -170,6 +199,44 @@ static ULONG
 PageTag(ULONG Page, ULONG Index)
 {
     return 0x4D460000UL ^ (Page << 8) ^ Index;
+}
+
+/* The forced failure: a caller that stays inside the counting routine's window (counted in flight) and then runs
+   on in this driver's code. That is what an unloaded driver would be returned into. */
+static KSTART_ROUTINE StuckCallerThread;
+static
+VOID
+NTAPI
+StuckCallerThread(PVOID Context)
+{
+    LARGE_INTEGER Delay;
+
+    UNREFERENCED_PARAMETER(Context);
+    InterlockedIncrement(&HookInFlight);
+    Delay.QuadPart = -(LONGLONG)STUCK_CALLER_SECONDS * 10 * 1000 * 1000;
+    KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    InterlockedDecrement(&HookInFlight); /* code of this driver, after the wait */
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+static
+BOOLEAN
+ForceStuckRequested(VOID)
+{
+    UNICODE_STRING FlagName = RTL_CONSTANT_STRING(L"\\SystemRoot\\kmtest-mmfaultheld-stuck.flag");
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK IoStatus;
+    HANDLE Flag;
+    NTSTATUS Status;
+
+    InitializeObjectAttributes(&Attributes, &FlagName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = ZwCreateFile(&Flag, SYNCHRONIZE, &Attributes, &IoStatus, NULL, FILE_ATTRIBUTE_NORMAL,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+                          FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+    ZwClose(Flag);
+    return TRUE;
 }
 
 static KSTART_ROUTINE ContenderThread;
@@ -253,11 +320,11 @@ StartContender(PCONTENDER Contender, PFSRTL_COMMON_FCB_HEADER FcbHeader)
     Timeout.QuadPart = TOUCH_TIMEOUT;
     Status = KeWaitForSingleObject(&Contender->MainHeld, Executive, KernelMode, FALSE, &Timeout);
     ok(Status == STATUS_SUCCESS, "The contender did not get the main resource\n");
-    /* Wait until it queues for the paging resource (bounded) */
+    /* Wait until it queues for the paging resource (bounded: nominally 10 s, up to about 15 s real) */
     {
         ULONG Waited;
         Timeout.QuadPart = -10LL * 10 * 1000;
-        for (Waited = 0; ExGetExclusiveWaiterCount(Contender->PagingResource) == 0 && Waited < 10 * 1000; Waited += 10)
+        for (Waited = 0; ExGetExclusiveWaiterCount(Contender->PagingResource) == 0 && Waited < CONTENDER_QUEUE_WAIT_MS; Waited += 10)
             KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
         ok(ExGetExclusiveWaiterCount(Contender->PagingResource) != 0, "The contender did not queue for the paging resource\n");
     }
@@ -307,7 +374,17 @@ TouchPage(PUCHAR View, ULONG Page, PERESOURCE Resource, HOLD_MODE Hold, PFSRTL_C
 
     if (Contended)
     {
-        KeWaitForSingleObject(&Touch->Held, Executive, KernelMode, FALSE, NULL);
+        /* The thread takes its hold at once unless a resource a failed earlier case left behind is in the way */
+        Timeout.QuadPart = HELD_TIMEOUT;
+        Status = KeWaitForSingleObject(&Touch->Held, Executive, KernelMode, FALSE, &Timeout);
+        ok(Status == STATUS_SUCCESS, "%s: the touch thread did not get its hold in 20 s\n", What);
+        if (Status != STATUS_SUCCESS)
+        {
+            /* Let it go on if it ever gets the hold; the context stays, the thread still uses it */
+            KeSetEvent(&Touch->Go, IO_NO_INCREMENT, FALSE);
+            *Leaked = TRUE;
+            return FALSE;
+        }
         ContenderRuns = StartContender(&Touch->Contender, Contended);
         KeSetEvent(&Touch->Go, IO_NO_INCREMENT, FALSE);
     }
@@ -372,9 +449,10 @@ START_TEST(MmFaultFileHeld)
     LARGE_INTEGER Offset;
     NTSTATUS Status;
     ULONG Page, Chunk, i;
-    BOOLEAN Stuck = FALSE, Purged, Hooked, HavePaging;
+    BOOLEAN Stuck = FALSE, Purged, Hooked, HavePaging, ForceStuck;
     LONG Count;
 
+    ForceStuck = ForceStuckRequested();
     Buffer = ExAllocatePoolWithTag(NonPagedPool, CHUNK_PAGES * PAGE_SIZE, TEST_TAG);
     if (skip(Buffer != NULL, "No memory\n"))
         return;
@@ -456,6 +534,16 @@ START_TEST(MmFaultFileHeld)
         skip(Hooked, "Creating a section did not call the file system's AcquireFileForNtCreateSection (synchronized in an FsFilter callback): no count\n");
     }
 
+    if (ForceStuck && !skip(HookDispatch != NULL, "Stuck caller requested, but no hook is installed to be stuck in\n"))
+    {
+        HANDLE Thread;
+
+        Status = PsCreateSystemThread(&Thread, THREAD_ALL_ACCESS, NULL, NULL, NULL, StuckCallerThread, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+            ZwClose(Thread);
+    }
+
     /* The write and the view leave pages of the file in the segment (Cc keeps its own views of the same
        section), and a fault on one of those never takes the page-in path. Take them out. */
     Purged = CcPurgeCacheSection(FileObject->SectionObjectPointer, NULL, 0, FALSE);
@@ -494,7 +582,12 @@ Unhook:
     if (!HookRemove())
         Stuck = TRUE; /* a caller may still run in this driver: leave everything, as for a stuck thread */
     if (Stuck)
+    {
+        /* A thread or a caller may still run code of this driver. The service stop that follows the test would
+           unload the image under it; a reference on the driver object keeps the image mapped (until reboot) */
+        ObReferenceObject(KmtDriverObject);
         goto Free;
+    }
 
     MmUnmapViewInSystemSpace(View);
 DerefSection:
