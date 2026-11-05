@@ -152,6 +152,12 @@ RtlpHandleDpcStackException(IN PEXCEPTION_REGISTRATION_RECORD RegistrationFrame,
 
 #endif /* !_BLDR_ */
 
+/* image.c: size of the view behind a data-file module handle (base without the tag bits), 0 if unknown */
+ULONG_PTR
+NTAPI
+RtlpQueryDataFileViewSize(
+    _In_ PVOID ViewBase);
+
 #define RtlpAllocateStringMemory RtlpAllocateMemory
 #define RtlpFreeStringMemory     RtlpFreeMemory
 

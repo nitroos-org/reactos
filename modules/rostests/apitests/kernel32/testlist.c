@@ -142,10 +142,12 @@ extern void func_LCMapStringHash(void);
 extern void func_LoadString(void);
 extern void func_LoadLibraryErrorMode(void);
 extern void func_LoadLibraryExW(void);
+extern void func_LoadLibraryMalformed(void);
 extern void func_LoadLibraryILOnly(void);
 extern void func_LoadLibraryMachine(void);
 extern void func_LoadLibraryForwarder(void);
 extern void func_LoadLibraryMissingImport(void);
+extern void func_LoadLibraryNoExecute(void);
 extern void func_LocalDumps(void);
 extern void func_CrashDialog(void);
 extern void func_LocaleNameToLCID(void);
@@ -382,10 +384,12 @@ const struct test winetest_testlist[] =
     { "LoadString", func_LoadString },
     { "LoadLibraryErrorMode",        func_LoadLibraryErrorMode },
     { "LoadLibraryExW",              func_LoadLibraryExW },
+    { "LoadLibraryMalformed",         func_LoadLibraryMalformed },
     { "LoadLibraryILOnly",            func_LoadLibraryILOnly },
     { "LoadLibraryMachine",          func_LoadLibraryMachine },
     { "LoadLibraryForwarder",         func_LoadLibraryForwarder },
     { "LoadLibraryMissingImport",     func_LoadLibraryMissingImport },
+    { "LoadLibraryNoExecute",         func_LoadLibraryNoExecute },
     { "LocalDumps",                  func_LocalDumps },
     { "CrashDialog",                 func_CrashDialog },
     { "LocaleNameToLCID",            func_LocaleNameToLCID },

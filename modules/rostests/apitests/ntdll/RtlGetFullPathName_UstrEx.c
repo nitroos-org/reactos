@@ -281,6 +281,174 @@ RunTestCases(VOID)
     }
 }
 
+/*
+ * Names with trailing spaces: the spaces are trimmed off the path, the size needed still counts them
+ * (as Windows reports), the result is terminated at once, and an exactly sized buffer is not overrun.
+ * The name is a counted string whose next WCHAR is not a terminator.
+ */
+typedef struct _PATH_TYPE_PADDED
+{
+    RTL_PATH_TYPE Type;
+    ULONG Unknown;
+} PATH_TYPE_PADDED;
+
+static
+VOID
+TestTrailingSpaces(VOID)
+{
+    static const struct
+    {
+        PCWSTR Name;
+        PCWSTR Expected;
+        SIZE_T FilePart;    /* in characters, 0 for none */
+    } Cases[] =
+    {
+        { L"C:\\foo  ",         L"C:\\foo",         3 },
+        { L"C:\\foo.  ",        L"C:\\foo",         3 },
+        { L"C:\\foo. . ",       L"C:\\foo",         3 },
+        { L"C:\\foo\\  ",       L"C:\\foo\\",       0 },
+        { L"C:\\ ",             L"C:\\",            0 },
+        { L"C:\\x\\ \\",        L"C:\\x\\ \\",      0 },
+        { L"\\\\srv\\sh\\x  ",  L"\\\\srv\\sh\\x",  9 },
+        { L"\\\\srv\\sh  ",     L"\\\\srv\\sh",     0 },
+    };
+    static const WCHAR Followers[] = { L'X', L' ', L'\\' };
+    ULONG i, f;
+
+    for (i = 0; i < _countof(Cases); i++)
+    {
+        for (f = 0; f < _countof(Followers); f++)
+        {
+            SIZE_T Chars = wcslen(Cases[i].Name), Needed = 0, FilePartSize = 77, NeededBytes;
+            PWCHAR Source;
+            UNICODE_STRING FileName, Static;
+            PUNICODE_STRING StringUsed = NULL;
+            PATH_TYPE_PADDED PathType = { RtlPathTypeUnknown, 0 };
+            BOOLEAN NameInvalid = TRUE;
+            NTSTATUS Status;
+            PWCHAR Exact;
+
+            /* the counted name ends at its last space; the WCHAR behind it is not a terminator */
+            Source = AllocateGuarded((Chars + 1) * sizeof(WCHAR));
+            RtlCopyMemory(Source, Cases[i].Name, Chars * sizeof(WCHAR));
+            Source[Chars] = Followers[f];
+            FileName.Buffer = Source;
+            FileName.Length = FileName.MaximumLength = (USHORT)(Chars * sizeof(WCHAR));
+
+            /* no room: how much is needed (Windows: the whole name and a terminator) */
+            Static.Buffer = Source;
+            Static.Length = 0;
+            Static.MaximumLength = 0;
+            StartSeh()
+                Status = pRtlGetFullPathName_UstrEx(&FileName, &Static, NULL, &StringUsed, NULL,
+                                                    &NameInvalid, (RTL_PATH_TYPE *)&PathType, &Needed);
+            EndSeh(STATUS_SUCCESS);
+            ok(Status == STATUS_BUFFER_TOO_SMALL, "Case %lu/%lu: status = 0x%08lx\n", i, f, Status);
+            ok(Needed == (Chars + 1) * sizeof(WCHAR), "Case %lu/%lu: needed %lu, expected %lu\n",
+               i, f, (ULONG)Needed, (ULONG)((Chars + 1) * sizeof(WCHAR)));
+            NeededBytes = Needed;
+            if (NeededBytes != (Chars + 1) * sizeof(WCHAR) || NeededBytes > 0x1000)
+            {
+                FreeGuarded(Source);
+                continue;
+            }
+
+            /* a buffer of exactly that size, ending at a guard page */
+            Exact = AllocateGuarded(NeededBytes);
+            RtlFillMemory(Exact, NeededBytes, 0xAA);
+            Static.Buffer = Exact;
+            Static.Length = 0xFFF0;
+            Static.MaximumLength = (USHORT)NeededBytes;
+            StringUsed = NULL;
+            FilePartSize = 77;
+            StartSeh()
+                Status = pRtlGetFullPathName_UstrEx(&FileName, &Static, NULL, &StringUsed, &FilePartSize,
+                                                    &NameInvalid, (RTL_PATH_TYPE *)&PathType, &Needed);
+            EndSeh(STATUS_SUCCESS);
+            ok(Status == STATUS_SUCCESS, "Case %lu/%lu: status = 0x%08lx\n", i, f, Status);
+            if (Status == STATUS_SUCCESS)
+            {
+                ok(StringUsed == &Static, "Case %lu/%lu: StringUsed = %p\n", i, f, StringUsed);
+                ok(Static.Length == wcslen(Cases[i].Expected) * sizeof(WCHAR),
+                   "Case %lu/%lu: length %u, expected %lu\n", i, f, Static.Length,
+                   (ULONG)(wcslen(Cases[i].Expected) * sizeof(WCHAR)));
+                ok(!wcscmp(Exact, Cases[i].Expected), "Case %lu/%lu: got '%ls', expected '%ls'\n",
+                   i, f, Exact, Cases[i].Expected);
+                ok(FilePartSize == Cases[i].FilePart, "Case %lu/%lu: file part %lu, expected %lu\n",
+                   i, f, (ULONG)FilePartSize, (ULONG)Cases[i].FilePart);
+            }
+            FreeGuarded(Exact);
+
+            /* one character short fails the same way as no room at all */
+            Exact = AllocateGuarded(NeededBytes - sizeof(WCHAR));
+            Static.Buffer = Exact;
+            Static.Length = 0;
+            Static.MaximumLength = (USHORT)(NeededBytes - sizeof(WCHAR));
+            StartSeh()
+                Status = pRtlGetFullPathName_UstrEx(&FileName, &Static, NULL, &StringUsed, NULL,
+                                                    &NameInvalid, (RTL_PATH_TYPE *)&PathType, &Needed);
+            EndSeh(STATUS_SUCCESS);
+            ok(Status == STATUS_BUFFER_TOO_SMALL, "Case %lu/%lu: short status = 0x%08lx\n", i, f, Status);
+            FreeGuarded(Exact);
+            FreeGuarded(Source);
+        }
+    }
+
+    /* a path of MAX_PATH characters and more, followed by spaces */
+    {
+        WCHAR Name[MAX_PATH + 8], Expected[MAX_PATH + 8];
+        SIZE_T Chars;
+        PWCHAR Source, Exact;
+        UNICODE_STRING FileName, Static;
+        PUNICODE_STRING StringUsed = NULL;
+        PATH_TYPE_PADDED PathType = { RtlPathTypeUnknown, 0 };
+        BOOLEAN NameInvalid;
+        SIZE_T Needed = 0;
+        NTSTATUS Status;
+        ULONG Pad;
+
+        for (Pad = 0; Pad <= 3; Pad++)
+        {
+            ULONG k;
+
+            wcscpy(Name, L"C:\\");
+            for (k = 3; k < MAX_PATH - 2; k++) Name[k] = L'a';
+            Name[MAX_PATH - 2] = L'b';
+            Name[MAX_PATH - 1] = UNICODE_NULL;
+            wcscpy(Expected, Name);
+            for (k = 0; k < Pad + 1; k++) wcscat(Name, L" ");
+            Chars = wcslen(Name);
+
+            Source = AllocateGuarded((Chars + 1) * sizeof(WCHAR));
+            RtlCopyMemory(Source, Name, Chars * sizeof(WCHAR));
+            Source[Chars] = L'X';
+            FileName.Buffer = Source;
+            FileName.Length = FileName.MaximumLength = (USHORT)(Chars * sizeof(WCHAR));
+            Static.Buffer = Source;
+            Static.Length = 0;
+            Static.MaximumLength = 0;
+            Status = pRtlGetFullPathName_UstrEx(&FileName, &Static, NULL, &StringUsed, NULL,
+                                                &NameInvalid, (RTL_PATH_TYPE *)&PathType, &Needed);
+            ok(Status == STATUS_BUFFER_TOO_SMALL, "Pad %lu: status = 0x%08lx\n", Pad, Status);
+            ok(Needed == (Chars + 1) * sizeof(WCHAR), "Pad %lu: needed %lu\n", Pad, (ULONG)Needed);
+
+            Exact = AllocateGuarded(Chars * sizeof(WCHAR) + sizeof(WCHAR));
+            Static.Buffer = Exact;
+            Static.Length = 0;
+            Static.MaximumLength = (USHORT)(Chars * sizeof(WCHAR) + sizeof(WCHAR));
+            StartSeh()
+                Status = pRtlGetFullPathName_UstrEx(&FileName, &Static, NULL, &StringUsed, NULL,
+                                                    &NameInvalid, (RTL_PATH_TYPE *)&PathType, &Needed);
+            EndSeh(STATUS_SUCCESS);
+            ok(Status == STATUS_SUCCESS, "Pad %lu: status = 0x%08lx\n", Pad, Status);
+            if (Status == STATUS_SUCCESS)
+                ok(!wcscmp(Exact, Expected), "Pad %lu: wrong path\n", Pad);
+            FreeGuarded(Exact);
+            FreeGuarded(Source);
+        }
+    }
+}
+
 START_TEST(RtlGetFullPathName_UstrEx)
 {
     NTSTATUS Status;
@@ -420,4 +588,6 @@ START_TEST(RtlGetFullPathName_UstrEx)
 
     /* Check the actual functionality with different paths */
     RunTestCases();
+
+    TestTrailingSpaces();
 }

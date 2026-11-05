@@ -52,6 +52,19 @@ static int is_data_file_module( PVOID BaseAddress )
     return (ULONG_PTR)BaseAddress & 1;
 }
 
+/**********************************************************************
+ *  untag_image_resource
+ *
+ * A LOAD_LIBRARY_AS_IMAGE_RESOURCE handle (bit 1) points at an image mapping that is never executed:
+ * its offsets are RVAs like those of a loaded module, so the tag is all that has to go.
+ */
+static PVOID untag_image_resource( PVOID BaseAddress )
+{
+    if (!((ULONG_PTR)BaseAddress & 1) && ((ULONG_PTR)BaseAddress & 2))
+        return (PVOID)((ULONG_PTR)BaseAddress & ~(ULONG_PTR)2);
+    return BaseAddress;
+}
+
 
 /**********************************************************************
  *  push_language
@@ -218,6 +231,8 @@ static NTSTATUS LdrpAccessResource( PVOID BaseAddress, IMAGE_RESOURCE_DATA_ENTRY
 {
     NTSTATUS status = STATUS_SUCCESS;
 
+    BaseAddress = untag_image_resource( BaseAddress );
+
     _SEH2_TRY
     {
         ULONG dirsize;
@@ -230,8 +245,22 @@ static NTSTATUS LdrpAccessResource( PVOID BaseAddress, IMAGE_RESOURCE_DATA_ENTRY
             {
                 if (is_data_file_module(BaseAddress))
                 {
-                    PVOID mod = (PVOID)((ULONG_PTR)BaseAddress & ~1);
-                    *ptr = RtlImageRvaToVa( RtlImageNtHeader(mod), mod, entry->OffsetToData, NULL );
+                    PVOID mod = (PVOID)((ULONG_PTR)BaseAddress & ~(ULONG_PTR)1);
+                    ULONG_PTR ViewSize = RtlpQueryDataFileViewSize( mod );
+                    ULONG_PTR Offset;
+                    PIMAGE_NT_HEADERS NtHeaders = ViewSize ? RtlImageNtHeader( mod ) : NULL;
+
+                    *ptr = NtHeaders ? RtlImageRvaToVa( NtHeaders, mod, entry->OffsetToData, NULL ) : NULL;
+
+                    /* The resource must lie entirely inside the view of the file */
+                    if (*ptr)
+                    {
+                        Offset = (ULONG_PTR)*ptr - (ULONG_PTR)mod;
+                        if (((ULONG_PTR)*ptr < (ULONG_PTR)mod) || (Offset >= ViewSize) ||
+                            (entry->Size > (ViewSize - Offset)))
+                            *ptr = NULL;
+                    }
+                    if (!*ptr) status = STATUS_RESOURCE_DATA_NOT_FOUND;
                 }
                 else *ptr = (char *)BaseAddress + entry->OffsetToData;
             }
@@ -258,6 +287,8 @@ LdrFindResource_U(PVOID BaseAddress,
 {
     void *res;
     NTSTATUS status = STATUS_SUCCESS;
+
+    BaseAddress = untag_image_resource( BaseAddress );
 
     _SEH2_TRY
     {
@@ -306,6 +337,8 @@ LdrFindResourceDirectory_U(IN PVOID BaseAddress,
 {
     void *res;
     NTSTATUS status = STATUS_SUCCESS;
+
+    BaseAddress = untag_image_resource( BaseAddress );
 
     _SEH2_TRY
     {

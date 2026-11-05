@@ -1177,7 +1177,8 @@ RtlValidRelativeSecurityDescriptor(IN PSECURITY_DESCRIPTOR SecurityDescriptorInp
 
         /* Read the DACL, check if it's valid and if the buffer contains it */
         Dacl = (PSID)((ULONG_PTR)Sd->Dacl + (ULONG_PTR)Sd);
-        if (!(RtlValidAcl(Dacl)) || (Length < Dacl->AclSize)) return FALSE;
+        /* The ACL must fit the buffer before RtlValidAcl walks up to AclSize bytes of it */
+        if ((Length < Dacl->AclSize) || !RtlValidAcl(Dacl)) return FALSE;
     }
 
     /* Is there a SACL? */
@@ -1195,7 +1196,8 @@ RtlValidRelativeSecurityDescriptor(IN PSECURITY_DESCRIPTOR SecurityDescriptorInp
 
         /* Read the SACL, check if it's valid and if the buffer contains it */
         Sacl = (PSID)((ULONG_PTR)Sd->Sacl + (ULONG_PTR)Sd);
-        if (!(RtlValidAcl(Sacl)) || (Length < Sacl->AclSize)) return FALSE;
+        /* The ACL must fit the buffer before RtlValidAcl walks up to AclSize bytes of it */
+        if ((Length < Sacl->AclSize) || !RtlValidAcl(Sacl)) return FALSE;
     }
 
     /* All good */
