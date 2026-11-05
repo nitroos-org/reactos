@@ -63,6 +63,7 @@ list(APPEND SOURCE
     udprecv.c
     udpzerolen.c
     v6only.c
+    udpoptions.c
     timewait.c
     transmitfile.c
     WSAAsync.c
