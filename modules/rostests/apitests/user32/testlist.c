@@ -55,6 +55,7 @@ extern void func_HungWindow(void);
 extern void func_WindowPosChanged(void);
 extern void func_PowerSettingNotification(void);
 extern void func_OwnerZOrderNotice(void);
+extern void func_NcPaintLayered(void);
 extern void func_WmCancelModeLastError(void);
 extern void func_InitializeLpkHooks(void);
 extern void func_IsDialogMessage(void);
@@ -192,6 +193,7 @@ const struct test winetest_testlist[] =
     { "WindowPosChanged", func_WindowPosChanged },
     { "PowerSettingNotification", func_PowerSettingNotification },
     { "OwnerZOrderNotice", func_OwnerZOrderNotice },
+    { "NcPaintLayered", func_NcPaintLayered },
     { "WmCancelModeLastError", func_WmCancelModeLastError },
     { "InitializeLpkHooks", func_InitializeLpkHooks },
     { "IsDialogMessage", func_IsDialogMessage },
