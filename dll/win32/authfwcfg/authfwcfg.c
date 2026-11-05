@@ -439,14 +439,14 @@ static VOID Line(PCWSTR label, PCWSTR value)
     Out(b);
 }
 
-static VOID ShowRule(const FW_RULE *r, BOOL verbose)
+static VOID ShowRuleEx(const FW_RULE *r, BOOL verbose, BOOL lead)
 {
     PWSTR name = Resolve(r->Name), grp = Resolve(r->Group), desc = Resolve(r->Desc);
     WCHAR prof[64] = L"", tmp[512];
     LONG pm = (r->Profiles == FWP_ANY_COM) ? FWP_ALL : r->Profiles;
     PCWSTR proto, ed;
 
-    Out(L"\n");
+    if (lead) Out(L"\n");
     Line(L"Rule Name:", name);
     Out(g_Dashes); Out(L"\n");
     if (verbose && r->Desc) Line(L"Description:", desc);
@@ -631,6 +631,8 @@ static DWORD WINAPI DeleteRule(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DW
     return ERROR_NETSH_OK;
 }
 
+static VOID ShowRule(const FW_RULE *r, BOOL verbose) { ShowRuleEx(r, verbose, TRUE); }
+
 static DWORD WINAPI ShowRuleCmd(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
 {
     PARAMS p; PCWSTR bogus = NULL; int pe; FILTER f; PERR e; FW_RULESET rs; ULONG *idx, n, i; DWORD err;
@@ -714,7 +716,7 @@ static BOOL RemoteAdminEnabled(ULONG bit)
     return v != 0;
 }
 
-static VOID ShowProfileBlock(ULONG bit, DWORD sec)
+static VOID ShowProfileBlock(ULONG bit, DWORD sec, BOOL mon)
 {
     FW_PROFILE p; WCHAR b[400];
     FwProfileLoad(bit, &p);
@@ -727,8 +729,9 @@ static VOID ShowProfileBlock(ULONG bit, DWORD sec)
                                   : (p.DefaultOutbound ? L"AllowInbound,BlockOutbound" : L"AllowInbound,AllowOutbound"));
     if (sec & SEC_SETTINGS)
     {
-        Line(L"LocalFirewallRules", L"N/A (GPO-store only)");
-        Line(L"LocalConSecRules", L"N/A (GPO-store only)");
+        /* monitor: the effective state (the local store is merged, there is no policy store); show: the GPO-store note */
+        Line(L"LocalFirewallRules", mon ? L"Enable" : L"N/A (GPO-store only)");
+        Line(L"LocalConSecRules", mon ? L"Enable" : L"N/A (GPO-store only)");
         Line(L"InboundUserNotification", p.DisableNotifications ? L"Disable" : L"Enable");
         Line(L"RemoteManagement", RemoteAdminEnabled(bit) ? L"Enable" : L"Disable");
         Line(L"UnicastResponseToMulticast", p.DisableUnicastResponses ? L"Disable" : L"Enable");
@@ -760,7 +763,7 @@ static DWORD ShowProfile(ULONG bits, LPWSTR *argv, DWORD cur, DWORD cnt, UINT he
         else if (!_wcsicmp(argv[cur], L"logging")) sec = SEC_LOGGING;
         else return Fail(IDS_PFX_SHOWVALUE, helpId, TRUE);
     }
-    for (b = 1; b <= 4; b <<= 1) if (bits & b) ShowProfileBlock(b, sec);
+    for (b = 1; b <= 4; b <<= 1) if (bits & b) ShowProfileBlock(b, sec, FALSE);
     return ERROR_NETSH_OK;
 }
 
@@ -941,6 +944,105 @@ static CMD_GROUP_ENTRY g_AdvGroups[] =
     { L"show", IDS_SH_ADV_SHOW, sizeof(g_AdvShow) / sizeof(CMD_ENTRY), 0, g_AdvShow, NULL },
 };
 
+
+/* ---------------------------------------------------------------- monitor context
+ * Output verified against the Windows 10 oracle (fwfu probe): show firewall, show currentprofile,
+ * show consec rule, show mmsa / qmsa, show mainmode (essential parameters). NOT verified: which rules
+ * "show firewall rule" lists (here: enabled, for the active profile or the profile= filter, optional dir=,
+ * name= all or exact), the "show consec" form without arguments, the network name (always "Network"). */
+static BOOL MonProfileMask(PCWSTR v, ULONG *mask)
+{
+    WCHAR *copy = _wcsdup(v), *tok; BOOL ok = TRUE;
+    *mask = 0;
+    for (tok = wcstok(copy, L","); tok; tok = wcstok(NULL, L","))
+    {
+        if (!_wcsicmp(tok, L"public")) *mask |= FWP_PUBLIC; else if (!_wcsicmp(tok, L"private")) *mask |= FWP_PRIVATE;
+        else if (!_wcsicmp(tok, L"domain")) *mask |= FWP_DOMAIN; else if (!_wcsicmp(tok, L"any")) *mask |= FWP_ALL;
+        else if (!_wcsicmp(tok, L"active")) *mask |= FwCurrentProfiles(); else ok = FALSE;
+    }
+    free(copy);
+    return ok && *mask;
+}
+
+static DWORD WINAPI MonShowFirewall(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
+{
+    BOOL verbose = FALSE, rule = FALSE, haveName = FALSE, haveDir = FALSE, first = TRUE;
+    PCWSTR name = NULL; ULONG pmask = 0; LONG dir = 1; DWORD i, err; ULONG b, shown = 0;
+    FW_RULESET rs;
+    for (i = cur; i < cnt; i++)
+    {
+        if (!_wcsicmp(argv[i], L"verbose")) verbose = TRUE;
+        else if (!_wcsicmp(argv[i], L"rule")) rule = TRUE;
+        else if (!_wcsnicmp(argv[i], L"name=", 5)) { name = argv[i] + 5; haveName = TRUE; }
+        else if (!_wcsnicmp(argv[i], L"dir=", 4))
+        {
+            if (!_wcsicmp(argv[i] + 4, L"in")) dir = 1; else if (!_wcsicmp(argv[i] + 4, L"out")) dir = 2;
+            else return Fail(IDS_PFX_VALUE, IDS_HLP_MON_SHOWFW, TRUE);
+            haveDir = TRUE;
+        }
+        else if (!_wcsnicmp(argv[i], L"profile=", 8))
+        { if (!MonProfileMask(argv[i] + 8, &pmask)) return Fail(IDS_PFX_VALUE, IDS_HLP_MON_SHOWFW, TRUE); }
+        else return Fail(IDS_PFX_NUMARGS, IDS_HLP_MON_SHOWFW, TRUE);
+    }
+    if (!rule)
+    {
+        OutRes(IDS_OUT_SHOW_GLOBAL);
+        for (b = 1; b <= 4; b <<= 1) ShowProfileBlock(b, SEC_ALL, TRUE);
+        Out(L"\n");
+        return ERROR_NETSH_OK;
+    }
+    if (!haveName) { OutFailRes(IDS_MSG_ESSENTIAL); return ERROR_NETSH_FAILED_OUTPUT; }
+    if (!pmask) pmask = FwCurrentProfiles();
+    err = FwStoreLoad(&rs);
+    if (err) return err;
+    for (i = 0; i < rs.N; i++)
+    {
+        const FW_RULE *r = &rs.R[i];
+        LONG pm = (r->Profiles == FWP_ANY_COM) ? FWP_ALL : r->Profiles;
+        if (!r->Enabled || !(pm & (LONG)pmask) || (haveDir && r->Dir != dir)) continue;
+        if (_wcsicmp(name, L"all")) { PWSTR n = Resolve(r->Name); BOOL ok = EqI(n, name); free(n); if (!ok) continue; }
+        if (first) { OutRes(IDS_OUT_MON_RULES_HDR); Out(g_Dashes); Out(L"\n"); }
+        ShowRuleEx(r, verbose, !first);
+        first = FALSE; shown++;
+    }
+    FwRuleSetFree(&rs);
+    if (!shown) { OutFailRes(IDS_MSG_NORULES); return ERROR_NETSH_FAILED_OUTPUT; }
+    return ERROR_NETSH_OK;
+}
+
+static DWORD WINAPI MonShowCurrentProfile(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
+{
+    WCHAR b[100]; ULONG bit = FwCurrentProfiles();
+    if (cnt - cur != 0) return ERROR_NOT_SUPPORTED;
+    _swprintf(b, L"\n%s Profile: \n", ProfileTitle(bit)); Out(b);
+    Out(g_Dashes); Out(L"\n");
+    OutRes(IDS_OUT_MON_CURPROF_NET);
+    return ERROR_NETSH_OK;
+}
+
+static DWORD WINAPI MonShowConsec(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
+{
+    if (cnt - cur >= 1 && !_wcsicmp(argv[cur], L"rule"))
+    {
+        /* no connection security rules exist */
+        OutRes(IDS_OUT_CONSEC_HDR); OutRes(IDS_MSG_NORULES);
+        return ERROR_NETSH_OK;
+    }
+    return ERROR_NOT_SUPPORTED;
+}
+
+static DWORD WINAPI MonShowSas(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
+{
+    OutFailRes(IDS_MSG_NOSAS);
+    return ERROR_NETSH_FAILED_OUTPUT;
+}
+
+static DWORD WINAPI MonShowMainMode(LPCWSTR m, LPWSTR *argv, DWORD cur, DWORD cnt, DWORD fl, LPCVOID pv, BOOL *pDone)
+{
+    if (cnt - cur == 0) { OutFailRes(IDS_MSG_ESSENTIAL); return ERROR_NETSH_FAILED_OUTPUT; }
+    return ERROR_NOT_SUPPORTED;
+}
+
 /* consec / mainmode / monitor: listed and reachable, not implemented */
 static CMD_ENTRY g_ConsecAdd[]  = { { L"rule", NotSupported, IDS_SH_CONSEC_ADD,    0, 0, NULL } };
 static CMD_ENTRY g_ConsecDel[]  = { { L"rule", NotSupported, IDS_SH_CONSEC_DELETE, 0, 0, NULL } };
@@ -961,10 +1063,18 @@ static CMD_GROUP_ENTRY g_MainGroups[] =
     { L"set", IDS_SH_MAIN_SET, 1, 0, g_MainSet, NULL }, { L"show", IDS_SH_MAIN_SHOW, 1, 0, g_MainShow, NULL },
 };
 static CMD_ENTRY g_MonDel[]  = { { L"mmsa", NotSupported, IDS_SH_MON_DELETE, 0, 0, NULL } };
-static CMD_ENTRY g_MonShow[] = { { L"mmsa", NotSupported, IDS_SH_MON_SHOW,   0, 0, NULL } };
+static CMD_ENTRY g_MonShow[] =
+{
+    { L"consec",         MonShowConsec,         IDS_SH_MON_SHOW_CONSEC,  0,                  0, NULL },
+    { L"currentprofile", MonShowCurrentProfile, IDS_SH_MON_SHOW_CURPROF, 0,                  0, NULL },
+    { L"firewall",       MonShowFirewall,       IDS_SH_MON_SHOW_FW,      IDS_HLP_MON_SHOWFW, 0, NULL },
+    { L"mainmode",       MonShowMainMode,       IDS_SH_MON_SHOW_MAIN,    0,                  0, NULL },
+    { L"mmsa",           MonShowSas,            IDS_SH_MON_SHOW_MMSA,    0,                  0, NULL },
+    { L"qmsa",           MonShowSas,            IDS_SH_MON_SHOW_QMSA,    0,                  0, NULL },
+};
 static CMD_GROUP_ENTRY g_MonGroups[] =
 {
-    { L"delete", IDS_SH_MON_DELETE, 1, 0, g_MonDel, NULL }, { L"show", IDS_SH_MON_SHOW, 1, 0, g_MonShow, NULL },
+    { L"delete", IDS_SH_MON_DELETE, 1, 0, g_MonDel, NULL }, { L"show", IDS_SH_MON_SHOW, sizeof(g_MonShow) / sizeof(CMD_ENTRY), 0, g_MonShow, NULL },
 };
 
 static DWORD WINAPI NoticeConnect(LPCWSTR pwszRouter)
