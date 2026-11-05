@@ -17,9 +17,9 @@
 @ stdcall PdhCollectQueryData(ptr)
 @ stdcall PdhCollectQueryDataWithTime(ptr ptr)
 @ stdcall PdhCollectQueryDataEx(ptr long ptr)
-@ stub PdhComputeCounterStatistics
+@ stdcall PdhComputeCounterStatistics(ptr long long long ptr ptr)
 @ stdcall PdhConnectMachineA(str)
-@ stub PdhConnectMachineW
+@ stdcall PdhConnectMachineW(wstr)
 @ stub PdhCreateSQLTablesA
 @ stub PdhCreateSQLTablesW
 @ stub PdhEnumLogSetNamesA
@@ -49,26 +49,26 @@
 @ stub PdhGetDataSourceTimeRangeA
 @ stub PdhGetDataSourceTimeRangeH
 @ stub PdhGetDataSourceTimeRangeW
-@ stub PdhGetDefaultPerfCounterA
-@ stub PdhGetDefaultPerfCounterHA
-@ stub PdhGetDefaultPerfCounterHW
-@ stub PdhGetDefaultPerfCounterW
-@ stub PdhGetDefaultPerfObjectA
-@ stub PdhGetDefaultPerfObjectHA
-@ stub PdhGetDefaultPerfObjectHW
-@ stub PdhGetDefaultPerfObjectW
+@ stdcall PdhGetDefaultPerfCounterA(str str str ptr ptr)
+@ stdcall PdhGetDefaultPerfCounterHA(ptr str str ptr ptr)
+@ stdcall PdhGetDefaultPerfCounterHW(ptr wstr wstr ptr ptr)
+@ stdcall PdhGetDefaultPerfCounterW(wstr wstr wstr ptr ptr)
+@ stdcall PdhGetDefaultPerfObjectA(str str ptr ptr)
+@ stdcall PdhGetDefaultPerfObjectHA(ptr str ptr ptr)
+@ stdcall PdhGetDefaultPerfObjectHW(ptr wstr ptr ptr)
+@ stdcall PdhGetDefaultPerfObjectW(wstr wstr ptr ptr)
 @ stdcall PdhGetDllVersion(ptr)
-@ stub PdhGetFormattedCounterArrayA
-@ stub PdhGetFormattedCounterArrayW
+@ stdcall PdhGetFormattedCounterArrayA(ptr long ptr ptr ptr)
+@ stdcall PdhGetFormattedCounterArrayW(ptr long ptr ptr ptr)
 @ stdcall PdhGetFormattedCounterValue(ptr long ptr ptr)
 @ stub PdhGetLogFileSize
 @ stdcall PdhGetLogFileTypeA(str ptr)
 @ stdcall PdhGetLogFileTypeW(wstr ptr)
 @ stub PdhGetLogSetGUID
-@ stub PdhGetRawCounterArrayA
-@ stub PdhGetRawCounterArrayW
+@ stdcall PdhGetRawCounterArrayA(ptr ptr ptr ptr)
+@ stdcall PdhGetRawCounterArrayW(ptr ptr ptr ptr)
 @ stdcall PdhGetRawCounterValue(ptr ptr ptr)
-@ stub PdhIsRealTimeQuery
+@ stdcall PdhIsRealTimeQuery(ptr)
 @ stub PdhListLogFileHeaderA
 @ stub PdhListLogFileHeaderW
 @ stub PdhLogServiceCommandA
@@ -89,8 +89,8 @@
 @ stdcall PdhOpenQueryW(wstr long ptr)
 @ stdcall PdhParseCounterPathA(str ptr ptr long)
 @ stdcall PdhParseCounterPathW(wstr ptr ptr long)
-@ stub PdhParseInstanceNameA
-@ stub PdhParseInstanceNameW
+@ stdcall PdhParseInstanceNameA(str ptr ptr ptr ptr ptr)
+@ stdcall PdhParseInstanceNameW(wstr ptr ptr ptr ptr ptr)
 @ stub PdhPlaAddItemA
 @ stub PdhPlaAddItemW
 @ stub PdhPlaCreateA
@@ -130,10 +130,10 @@
 @ stdcall PdhSetDefaultRealTimeDataSource(long)
 @ stub PdhSetLogSetRunID
 @ stub PdhSetQueryTimeRange
-@ stub PdhTranslate009CounterA
-@ stub PdhTranslate009CounterW
-@ stub PdhTranslateLocaleCounterA
-@ stub PdhTranslateLocaleCounterW
+@ stdcall PdhTranslate009CounterA(str ptr ptr)
+@ stdcall PdhTranslate009CounterW(wstr ptr ptr)
+@ stdcall PdhTranslateLocaleCounterA(str ptr ptr)
+@ stdcall PdhTranslateLocaleCounterW(wstr ptr ptr)
 @ stub PdhUpdateLogA
 @ stub PdhUpdateLogFileCatalog
 @ stub PdhUpdateLogW
