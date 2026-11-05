@@ -9,9 +9,13 @@
 #include <apitest.h>
 
 extern void func_DispatcherQueue(void);
+extern void func_DispatcherQueueThreads(void);
+extern void func_DispatcherQueueForge(void);
 
 const struct test winetest_testlist[] =
 {
     { "DispatcherQueue", func_DispatcherQueue },
+    { "DispatcherQueueThreads", func_DispatcherQueueThreads },
+    { "DispatcherQueueForge", func_DispatcherQueueForge },
     { 0, 0 }
 };
