@@ -146,6 +146,7 @@ extern void func_LoadLibraryILOnly(void);
 extern void func_LoadLibraryMachine(void);
 extern void func_LoadLibraryForwarder(void);
 extern void func_LoadLibraryMissingImport(void);
+extern void func_LoadLibraryNoExecute(void);
 extern void func_LocalDumps(void);
 extern void func_CrashDialog(void);
 extern void func_LocaleNameToLCID(void);
@@ -386,6 +387,7 @@ const struct test winetest_testlist[] =
     { "LoadLibraryMachine",          func_LoadLibraryMachine },
     { "LoadLibraryForwarder",         func_LoadLibraryForwarder },
     { "LoadLibraryMissingImport",     func_LoadLibraryMissingImport },
+    { "LoadLibraryNoExecute",         func_LoadLibraryNoExecute },
     { "LocalDumps",                  func_LocalDumps },
     { "CrashDialog",                 func_CrashDialog },
     { "LocaleNameToLCID",            func_LocaleNameToLCID },

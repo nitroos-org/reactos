@@ -11,6 +11,96 @@
 #define NDEBUG
 #include <debug.h>
 
+#ifndef LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE
+#define LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE 0x00000040
+#endif
+#ifndef LOAD_LIBRARY_AS_IMAGE_RESOURCE
+#define LOAD_LIBRARY_AS_IMAGE_RESOURCE 0x00000020
+#endif
+
+/* The loads that map the file for its contents and never run it */
+#define BASEP_LOAD_LIBRARY_NO_EXECUTE (LOAD_LIBRARY_AS_DATAFILE | \
+                                       LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | \
+                                       LOAD_LIBRARY_AS_IMAGE_RESOURCE)
+
+/* Files kept open (and so locked against writers) for as long as an exclusive data-file module lives */
+typedef struct _BASEP_EXCLUSIVE_DATAFILE
+{
+    struct _BASEP_EXCLUSIVE_DATAFILE *Next;
+    PVOID Module;
+    HANDLE File;
+} BASEP_EXCLUSIVE_DATAFILE, *PBASEP_EXCLUSIVE_DATAFILE;
+
+static RTL_CRITICAL_SECTION BasepExclusiveDatafileLock;
+static volatile LONG BasepExclusiveDatafileLockState; /* 0 = not set up, 1 = being set up, 2 = ready */
+static PBASEP_EXCLUSIVE_DATAFILE BasepExclusiveDatafileList;
+
+static
+VOID
+BasepLockExclusiveDatafiles(VOID)
+{
+    if (BasepExclusiveDatafileLockState != 2)
+    {
+        if (InterlockedCompareExchange(&BasepExclusiveDatafileLockState, 1, 0) == 0)
+        {
+            RtlInitializeCriticalSection(&BasepExclusiveDatafileLock);
+            InterlockedExchange(&BasepExclusiveDatafileLockState, 2);
+        }
+        else
+        {
+            while (BasepExclusiveDatafileLockState != 2) YieldProcessor();
+        }
+    }
+    RtlEnterCriticalSection(&BasepExclusiveDatafileLock);
+}
+
+/* Takes ownership of File on success */
+static
+BOOLEAN
+BasepAddExclusiveDatafile(PVOID Module, HANDLE File)
+{
+    PBASEP_EXCLUSIVE_DATAFILE Entry;
+
+    Entry = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(*Entry));
+    if (!Entry) return FALSE;
+
+    Entry->Module = Module;
+    Entry->File = File;
+    BasepLockExclusiveDatafiles();
+    Entry->Next = BasepExclusiveDatafileList;
+    BasepExclusiveDatafileList = Entry;
+    RtlLeaveCriticalSection(&BasepExclusiveDatafileLock);
+    return TRUE;
+}
+
+static
+VOID
+BasepReleaseExclusiveDatafile(PVOID Module)
+{
+    PBASEP_EXCLUSIVE_DATAFILE *Link, Entry;
+    HANDLE File = NULL;
+
+    if (BasepExclusiveDatafileLockState != 2) return;
+
+    BasepLockExclusiveDatafiles();
+    for (Link = &BasepExclusiveDatafileList; (Entry = *Link) != NULL; Link = &Entry->Next)
+    {
+        if (Entry->Module == Module)
+        {
+            *Link = Entry->Next;
+            File = Entry->File;
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Entry);
+            break;
+        }
+    }
+    RtlLeaveCriticalSection(&BasepExclusiveDatafileLock);
+
+    if (File) CloseHandle(File);
+}
+
+/* The view of a data-file module handle: the handle without its tag bits */
+#define BASEP_DATAFILE_VIEW(hModule) ((PVOID)((ULONG_PTR)(hModule) & ~(ULONG_PTR)3))
+
 /* FUNCTIONS ****************************************************************/
 
 NTSTATUS
@@ -69,8 +159,8 @@ BasepMapModuleHandle(HMODULE hModule, BOOLEAN AsDataFile)
     /* If no handle is provided - use current image base address */
     if (!hModule) return NtCurrentPeb()->ImageBaseAddress;
 
-    /* Check if it's a normal or a datafile one */
-    if (LDR_IS_DATAFILE(hModule) && !AsDataFile)
+    /* Check if it's a normal or a datafile (or image resource) one */
+    if (LDR_IS_RESOURCE(hModule) && !AsDataFile)
         return NULL;
 
     /* It's a normal DLL, just return its handle */
@@ -185,7 +275,7 @@ LoadLibraryW(LPCWSTR lpLibFileName)
 
 static
 NTSTATUS
-BasepLoadLibraryAsDatafile(PWSTR Path, LPCWSTR Name, HMODULE *hModule)
+BasepLoadLibraryAsDatafile(PWSTR Path, LPCWSTR Name, DWORD Flags, HMODULE *hModule)
 {
     WCHAR FilenameW[MAX_PATH];
     HANDLE hFile = INVALID_HANDLE_VALUE;
@@ -193,6 +283,9 @@ BasepLoadLibraryAsDatafile(PWSTR Path, LPCWSTR Name, HMODULE *hModule)
     NTSTATUS Status;
     PVOID lpBaseAddress = NULL;
     SIZE_T ViewSize = 0;
+    BOOLEAN AsImage = (Flags & LOAD_LIBRARY_AS_IMAGE_RESOURCE) != 0;
+    BOOLEAN Exclusive = !AsImage && (Flags & LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE) != 0;
+    PIMAGE_NT_HEADERS NtHeaders;
     //PUNICODE_STRING OriginalName;
     //UNICODE_STRING dotDLL = RTL_CONSTANT_STRING(L".DLL");
 
@@ -235,14 +328,19 @@ BasepLoadLibraryAsDatafile(PWSTR Path, LPCWSTR Name, HMODULE *hModule)
     /* If opening failed - return last status value */
     if (hFile == INVALID_HANDLE_VALUE) return NtCurrentTeb()->LastStatusValue;
 
-    /* Create file mapping */
-    hMapping = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+    /* Create file mapping: an image mapping is never executed, it only gives the resources their RVAs */
+    hMapping = CreateFileMappingW(hFile, NULL, PAGE_READONLY | (AsImage ? SEC_IMAGE : 0), 0, 0, NULL);
 
-    /* Close the file handle */
-    CloseHandle(hFile);
+    /* Close the file handle, unless the file stays locked for the life of the module */
+    if (!Exclusive) CloseHandle(hFile);
 
     /* If creating file mapping failed - return last status value */
-    if (!hMapping) return NtCurrentTeb()->LastStatusValue;
+    if (!hMapping)
+    {
+        Status = NtCurrentTeb()->LastStatusValue;
+        if (Exclusive) CloseHandle(hFile);
+        return Status;
+    }
 
     /* Map view of section */
     Status = NtMapViewOfSection(hMapping,
@@ -260,18 +358,31 @@ BasepLoadLibraryAsDatafile(PWSTR Path, LPCWSTR Name, HMODULE *hModule)
     CloseHandle(hMapping);
 
     /* If mapping view of section failed - return last status value */
-    if (!NT_SUCCESS(Status)) return NtCurrentTeb()->LastStatusValue;
+    if (!NT_SUCCESS(Status))
+    {
+        if (Exclusive) CloseHandle(hFile);
+        return Status;
+    }
 
-    /* Make sure it's a valid PE file */
-    if (!RtlImageNtHeader(lpBaseAddress))
+    /* Make sure it's a valid PE file, whose NT headers lie inside the view */
+    if (!NT_SUCCESS(RtlImageNtHeaderEx(0, lpBaseAddress, ViewSize, &NtHeaders)))
     {
         /* Unmap the view and return failure status */
         UnmapViewOfFile(lpBaseAddress);
+        if (Exclusive) CloseHandle(hFile);
         return STATUS_INVALID_IMAGE_FORMAT;
     }
 
-    /* Set low bit of handle to indicate datafile module */
-    *hModule = (HMODULE)((ULONG_PTR)lpBaseAddress | 1);
+    /* The file stays open while the exclusive module exists */
+    if (Exclusive && !BasepAddExclusiveDatafile(lpBaseAddress, hFile))
+    {
+        UnmapViewOfFile(lpBaseAddress);
+        CloseHandle(hFile);
+        return STATUS_NO_MEMORY;
+    }
+
+    /* Set the tag bit of the handle: bit 0 is a data-file module, bit 1 an image-resource module */
+    *hModule = (HMODULE)((ULONG_PTR)lpBaseAddress | (AsImage ? 2 : 1));
 
     /* Load alternate resource module */
     //LdrLoadAlternateResourceModule(*hModule, FilenameW);
@@ -296,6 +407,13 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
     ULONG DllCharacteristics = 0, SearchFlags;
     BOOL FreeString = FALSE;
 
+    /* An exclusive data file is a data file by itself: the two flags do not go together (Windows) */
+    if ((dwFlags & LOAD_LIBRARY_AS_DATAFILE) && (dwFlags & LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE))
+    {
+        BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+        return NULL;
+    }
+
     /* Check for any flags LdrLoadDll might be interested in */
     if (dwFlags & DONT_RESOLVE_DLL_REFERENCES)
     {
@@ -311,7 +429,7 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
         LdrEnumerateLoadedModules(0, BasepLocateExeLdrEntry, NtCurrentPeb()->ImageBaseAddress);
 
     /* Check if that module is our exe*/
-    if (BasepExeLdrEntry && !(dwFlags & LOAD_LIBRARY_AS_DATAFILE) &&
+    if (BasepExeLdrEntry && !(dwFlags & BASEP_LOAD_LIBRARY_NO_EXECUTE) &&
         DllName.Length == BasepExeLdrEntry->FullDllName.Length)
     {
         /* Lengths match and it's not a datafile, so perform name comparison */
@@ -372,7 +490,7 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
         }
     }
 
-    if (!(dwFlags & LOAD_LIBRARY_AS_DATAFILE) && (SharedUserData->NtMajorVersion >= 10))
+    if (!(dwFlags & BASEP_LOAD_LIBRARY_NO_EXECUTE) && (SharedUserData->NtMajorVersion >= 10))
     {
         /* Windows 10 kernel32 has no exception frame around the loader call (VERBUMP B5) */
         Status = LdrLoadDll(SearchPath,
@@ -384,14 +502,14 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
 
     _SEH2_TRY
     {
-        if (dwFlags & LOAD_LIBRARY_AS_DATAFILE)
+        if (dwFlags & BASEP_LOAD_LIBRARY_NO_EXECUTE)
         {
             /* If the image is loaded as a datafile, try to get its handle */
             Status = LdrGetDllHandleEx(0, SearchPath, NULL, &DllName, (PVOID*)&hInst);
             if (!NT_SUCCESS(Status))
             {
-                /* It's not loaded yet - so load it up */
-                Status = BasepLoadLibraryAsDatafile(SearchPath, DllName.Buffer, &hInst);
+                /* It's not loaded yet - so map it for its contents, without running anything */
+                Status = BasepLoadLibraryAsDatafile(SearchPath, DllName.Buffer, dwFlags, &hInst);
             }
             _SEH2_YIELD(goto done;)
         }
@@ -497,18 +615,21 @@ FreeLibrary(HINSTANCE hLibModule)
     NTSTATUS Status;
     PIMAGE_NT_HEADERS NtHeaders;
 
-    if (LDR_IS_DATAFILE(hLibModule))
+    if (LDR_IS_RESOURCE(hLibModule))
     {
-        /* This is a LOAD_LIBRARY_AS_DATAFILE module, check if it's a valid one */
-        NtHeaders = RtlImageNtHeader((PVOID)((ULONG_PTR)hLibModule & ~1));
+        /* This is a data-file or image-resource module, check if it's a valid one */
+        NtHeaders = RtlImageNtHeader(BASEP_DATAFILE_VIEW(hLibModule));
 
         if (NtHeaders)
         {
             /* Unmap view */
-            Status = NtUnmapViewOfSection(NtCurrentProcess(), (PVOID)((ULONG_PTR)hLibModule & ~1));
+            Status = NtUnmapViewOfSection(NtCurrentProcess(), BASEP_DATAFILE_VIEW(hLibModule));
 
             /* Unload alternate resource module */
             LdrUnloadAlternateResourceModule(hLibModule);
+
+            /* An exclusive data file is unlocked with its last view */
+            if (NT_SUCCESS(Status)) BasepReleaseExclusiveDatafile(BASEP_DATAFILE_VIEW(hLibModule));
         }
         else
             Status = STATUS_INVALID_IMAGE_FORMAT;
@@ -543,16 +664,19 @@ FreeLibraryAndExitThread(HMODULE hLibModule,
                          DWORD dwExitCode)
 {
 
-    if (LDR_IS_DATAFILE(hLibModule))
+    if (LDR_IS_RESOURCE(hLibModule))
     {
-        /* This is a LOAD_LIBRARY_AS_DATAFILE module */
-        if (RtlImageNtHeader((PVOID)((ULONG_PTR)hLibModule & ~1)))
+        /* This is a data-file or image-resource module */
+        if (RtlImageNtHeader(BASEP_DATAFILE_VIEW(hLibModule)))
         {
             /* Unmap view */
-            NtUnmapViewOfSection(NtCurrentProcess(), (PVOID)((ULONG_PTR)hLibModule & ~1));
+            NtUnmapViewOfSection(NtCurrentProcess(), BASEP_DATAFILE_VIEW(hLibModule));
 
             /* Unload alternate resource module */
             LdrUnloadAlternateResourceModule(hLibModule);
+
+            /* An exclusive data file is unlocked with its last view */
+            BasepReleaseExclusiveDatafile(BASEP_DATAFILE_VIEW(hLibModule));
         }
     }
     else
