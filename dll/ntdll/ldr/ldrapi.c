@@ -1356,6 +1356,7 @@ LdrUnloadDll(
     RTL_CALLER_ALLOCATED_ACTIVATION_CONTEXT_STACK_FRAME_EXTENDED ActCtx;
     PVOID CorImageData;
     ULONG ComSectionSize;
+    BOOLEAN ForwarderReleased;
 
     /* Get the LDR Lock */
     if (!LdrpInLdrInit) RtlEnterCriticalSection(Peb->LoaderLock);
@@ -1410,7 +1411,14 @@ LdrUnloadDll(
     /* Check if this is our only unload and initialize the list if so */
     if (LdrpActiveUnloadCount == 1) InitializeListHead(&LdrpUnloadHead);
 
-    /* Loop the modules to build the list */
+    /*
+     * Loop the modules to build the list. A DLL that is unmapped gives back
+     * the references it holds to the targets of its forwarders: they are
+     * unmapped as well when that was their last, and the list is built again
+     * (the target is listed after the DLL and was passed already)
+     */
+BuildUnloadList:
+    ForwarderReleased = FALSE;
     NextEntry = Peb->Ldr->InInitializationOrderModuleList.Blink;
     while (NextEntry != &Peb->Ldr->InInitializationOrderModuleList)
     {
@@ -1460,8 +1468,13 @@ LdrUnloadDll(
 
             /* Add the entry on the unload list */
             InsertTailList(&LdrpUnloadHead, &CurrentEntry->HashLinks);
+
+            /* It does not keep the targets of its forwarders any more */
+            if (LdrpReleaseForwarderReferences(CurrentEntry->DllBase))
+                ForwarderReleased = TRUE;
         }
     }
+    if (ForwarderReleased) goto BuildUnloadList;
 
     /* Only call the entrypoints once */
     if (LdrpActiveUnloadCount > 1) goto Quickie;

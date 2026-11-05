@@ -157,6 +157,13 @@ LdrpClearLoadInProgress(VOID);
 VOID NTAPI
 LdrpDereferenceNestedLoad(IN PLDR_DATA_TABLE_ENTRY LdrEntry);
 
+VOID NTAPI
+LdrpAddForwarderReference(IN PVOID Owner,
+                          IN PVOID Target);
+
+BOOLEAN NTAPI
+LdrpReleaseForwarderReferences(IN PVOID Owner);
+
 NTSTATUS
 NTAPI
 LdrpSetProtection(PVOID ViewBase,
