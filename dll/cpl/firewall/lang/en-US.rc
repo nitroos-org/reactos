@@ -1,0 +1,184 @@
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+IDD_MAIN DIALOGEX 0, 0, 480, 262
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+CAPTION "NitroOS Firewall"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT "Help protect your PC with NitroOS Firewall", IDC_M_TITLE, 128, 8, 344, 14
+    LTEXT "NitroOS Firewall can help prevent hackers or malicious software from gaining access to your PC through the Internet or a network.", IDC_M_DESC, 128, 26, 344, 20
+    CONTROL "<a>Allow an app or feature through NitroOS Firewall</a>", IDC_M_LINK_ALLOW, "SysLink", WS_TABSTOP, 8, 50, 108, 24
+    CONTROL "<a>Change notification settings</a>", IDC_M_LINK_NOTIFY, "SysLink", WS_TABSTOP, 8, 82, 108, 12
+    CONTROL "<a>Turn NitroOS Firewall on or off</a>", IDC_M_LINK_ONOFF, "SysLink", WS_TABSTOP, 8, 100, 108, 24
+    CONTROL "<a>Restore defaults</a>", IDC_M_LINK_RESTORE, "SysLink", WS_TABSTOP, 8, 132, 108, 12
+    CONTROL "<a>Advanced settings</a>", IDC_M_LINK_ADV, "SysLink", WS_TABSTOP, 8, 150, 108, 12
+    LTEXT "", IDC_SEC(0, SEC_BAR), 128, 50, 6, 16
+    LTEXT "", IDC_SEC(0, SEC_TITLE), 142, 53, 190, 10
+    LTEXT "", IDC_SEC(0, SEC_STATUS), 372, 53, 82, 10, SS_RIGHT
+    PUSHBUTTON "", IDC_SEC(0, SEC_CHEVRON), 458, 52, 14, 12
+    LTEXT "", IDC_SEC(0, SEC_DESC), 142, 72, 326, 10
+    LTEXT "NitroOS Firewall state:", IDC_SEC(0, SEC_LBL_STATE), 142, 88, 106, 10
+    LTEXT "", IDC_SEC(0, SEC_VAL_STATE), 252, 88, 216, 10
+    LTEXT "Incoming connections:", IDC_SEC(0, SEC_LBL_INC), 142, 100, 106, 10
+    LTEXT "", IDC_SEC(0, SEC_VAL_INC), 252, 100, 216, 20
+    LTEXT "", IDC_SEC(0, SEC_LBL_ACTIVE), 142, 122, 106, 10
+    LTEXT "", IDC_SEC(0, SEC_VAL_ACTIVE), 252, 122, 216, 10
+    LTEXT "Notification state:", IDC_SEC(0, SEC_LBL_NOTIF), 142, 134, 106, 10
+    LTEXT "", IDC_SEC(0, SEC_VAL_NOTIF), 252, 134, 216, 20
+    LTEXT "", IDC_SEC(1, SEC_BAR), 128, 74, 6, 16
+    LTEXT "", IDC_SEC(1, SEC_TITLE), 142, 77, 190, 10
+    LTEXT "", IDC_SEC(1, SEC_STATUS), 372, 77, 82, 10, SS_RIGHT
+    PUSHBUTTON "", IDC_SEC(1, SEC_CHEVRON), 458, 76, 14, 12
+    LTEXT "", IDC_SEC(1, SEC_DESC), 142, 96, 326, 10
+    LTEXT "NitroOS Firewall state:", IDC_SEC(1, SEC_LBL_STATE), 142, 112, 106, 10
+    LTEXT "", IDC_SEC(1, SEC_VAL_STATE), 252, 112, 216, 10
+    LTEXT "Incoming connections:", IDC_SEC(1, SEC_LBL_INC), 142, 124, 106, 10
+    LTEXT "", IDC_SEC(1, SEC_VAL_INC), 252, 124, 216, 20
+    LTEXT "", IDC_SEC(1, SEC_LBL_ACTIVE), 142, 146, 106, 10
+    LTEXT "", IDC_SEC(1, SEC_VAL_ACTIVE), 252, 146, 216, 10
+    LTEXT "Notification state:", IDC_SEC(1, SEC_LBL_NOTIF), 142, 158, 106, 10
+    LTEXT "", IDC_SEC(1, SEC_VAL_NOTIF), 252, 158, 216, 20
+    LTEXT "", IDC_SEC(2, SEC_BAR), 128, 98, 6, 16
+    LTEXT "", IDC_SEC(2, SEC_TITLE), 142, 101, 190, 10
+    LTEXT "", IDC_SEC(2, SEC_STATUS), 372, 101, 82, 10, SS_RIGHT
+    PUSHBUTTON "", IDC_SEC(2, SEC_CHEVRON), 458, 100, 14, 12
+    LTEXT "", IDC_SEC(2, SEC_DESC), 142, 120, 326, 10
+    LTEXT "NitroOS Firewall state:", IDC_SEC(2, SEC_LBL_STATE), 142, 136, 106, 10
+    LTEXT "", IDC_SEC(2, SEC_VAL_STATE), 252, 136, 216, 10
+    LTEXT "Incoming connections:", IDC_SEC(2, SEC_LBL_INC), 142, 148, 106, 10
+    LTEXT "", IDC_SEC(2, SEC_VAL_INC), 252, 148, 216, 20
+    LTEXT "", IDC_SEC(2, SEC_LBL_ACTIVE), 142, 170, 106, 10
+    LTEXT "", IDC_SEC(2, SEC_VAL_ACTIVE), 252, 170, 216, 10
+    LTEXT "Notification state:", IDC_SEC(2, SEC_LBL_NOTIF), 142, 182, 106, 10
+    LTEXT "", IDC_SEC(2, SEC_VAL_NOTIF), 252, 182, 216, 20
+    PUSHBUTTON "&Close", IDC_M_CLOSE, 422, 242, 50, 14
+END
+
+IDD_CUSTOMIZE DIALOGEX 0, 0, 330, 290
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+CAPTION "Customize Settings"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT "Customize settings for each type of network", IDC_C_TITLE, 14, 8, 300, 14
+    LTEXT "You can modify the firewall settings for each type of network that you use.", IDC_C_SUB, 14, 26, 300, 10
+    LTEXT "Domain network settings", IDC_CS(0, CS_HEADER), 14, 44, 120, 10
+    CONTROL "", IDC_CS(0, CS_LINE), "Static", SS_ETCHEDHORZ | WS_CHILD | WS_VISIBLE, 136, 48, 180, 1
+    LTEXT "", IDC_CS(0, CS_GREEN), 20, 59, 5, 10
+    AUTORADIOBUTTON "Turn on NitroOS Firewall", IDC_CS(0, CS_ON), 34, 58, 280, 10, WS_GROUP | WS_TABSTOP
+    AUTOCHECKBOX "Block all incoming connections, including those in the list of allowed apps", IDC_CS(0, CS_BLOCK), 50, 70, 266, 10, WS_TABSTOP
+    AUTOCHECKBOX "Notify me when NitroOS Firewall blocks a new app", IDC_CS(0, CS_NOTIFY), 50, 82, 266, 10, WS_TABSTOP
+    LTEXT "", IDC_CS(0, CS_RED), 20, 97, 5, 10
+    AUTORADIOBUTTON "Turn off NitroOS Firewall (not recommended)", IDC_CS(0, CS_OFF), 34, 96, 280, 10, WS_TABSTOP
+    LTEXT "Private network settings", IDC_CS(1, CS_HEADER), 14, 116, 120, 10
+    CONTROL "", IDC_CS(1, CS_LINE), "Static", SS_ETCHEDHORZ | WS_CHILD | WS_VISIBLE, 136, 120, 180, 1
+    LTEXT "", IDC_CS(1, CS_GREEN), 20, 131, 5, 10
+    AUTORADIOBUTTON "Turn on NitroOS Firewall", IDC_CS(1, CS_ON), 34, 130, 280, 10, WS_GROUP | WS_TABSTOP
+    AUTOCHECKBOX "Block all incoming connections, including those in the list of allowed apps", IDC_CS(1, CS_BLOCK), 50, 142, 266, 10, WS_TABSTOP
+    AUTOCHECKBOX "Notify me when NitroOS Firewall blocks a new app", IDC_CS(1, CS_NOTIFY), 50, 154, 266, 10, WS_TABSTOP
+    LTEXT "", IDC_CS(1, CS_RED), 20, 169, 5, 10
+    AUTORADIOBUTTON "Turn off NitroOS Firewall (not recommended)", IDC_CS(1, CS_OFF), 34, 168, 280, 10, WS_TABSTOP
+    LTEXT "Public network settings", IDC_CS(2, CS_HEADER), 14, 188, 120, 10
+    CONTROL "", IDC_CS(2, CS_LINE), "Static", SS_ETCHEDHORZ | WS_CHILD | WS_VISIBLE, 136, 192, 180, 1
+    LTEXT "", IDC_CS(2, CS_GREEN), 20, 203, 5, 10
+    AUTORADIOBUTTON "Turn on NitroOS Firewall", IDC_CS(2, CS_ON), 34, 202, 280, 10, WS_GROUP | WS_TABSTOP
+    AUTOCHECKBOX "Block all incoming connections, including those in the list of allowed apps", IDC_CS(2, CS_BLOCK), 50, 214, 266, 10, WS_TABSTOP
+    AUTOCHECKBOX "Notify me when NitroOS Firewall blocks a new app", IDC_CS(2, CS_NOTIFY), 50, 226, 266, 10, WS_TABSTOP
+    LTEXT "", IDC_CS(2, CS_RED), 20, 241, 5, 10
+    AUTORADIOBUTTON "Turn off NitroOS Firewall (not recommended)", IDC_CS(2, CS_OFF), 34, 240, 280, 10, WS_TABSTOP
+    DEFPUSHBUTTON "OK", IDOK, 214, 270, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 270, 270, 50, 14
+END
+
+IDD_ALLOWED DIALOGEX 0, 0, 340, 260
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+CAPTION "Allowed apps"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT "Allow apps to communicate through NitroOS Firewall", IDC_A_TITLE, 14, 8, 312, 14
+    LTEXT "To change where an app can communicate, select the network types in the list. Use Allow another app to add an app, or Remove to delete one you added.", IDC_A_HINT, 14, 26, 312, 20
+    GROUPBOX "Allowed apps and features:", IDC_A_GROUP, 14, 52, 312, 150
+    CONTROL "", IDC_A_LIST, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | WS_BORDER | WS_TABSTOP, 20, 64, 300, 112
+    PUSHBUTTON "D&etails...", IDC_A_DETAILS, 212, 181, 50, 14
+    PUSHBUTTON "&Remove", IDC_A_REMOVE, 268, 181, 50, 14
+    PUSHBUTTON "Allow another &app...", IDC_A_ADD, 224, 208, 102, 14
+    DEFPUSHBUTTON "OK", IDOK, 214, 240, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 270, 240, 50, 14
+END
+
+IDD_ADDAPP DIALOGEX 0, 0, 290, 140
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+CAPTION "Add an app"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT "&Path:", -1, 14, 16, 36, 10
+    EDITTEXT IDC_AA_PATH, 52, 14, 164, 12, ES_AUTOHSCROLL
+    PUSHBUTTON "B&rowse...", IDC_AA_BROWSE, 222, 13, 54, 14
+    LTEXT "&Name:", -1, 14, 36, 36, 10
+    EDITTEXT IDC_AA_NAME, 52, 34, 164, 12, ES_AUTOHSCROLL
+    GROUPBOX "Network types", -1, 14, 56, 262, 48
+    AUTOCHECKBOX "&Private", IDC_AA_PRIVATE, 26, 70, 120, 10, WS_TABSTOP
+    AUTOCHECKBOX "P&ublic", IDC_AA_PUBLIC, 26, 84, 120, 10, WS_TABSTOP
+    DEFPUSHBUTTON "A&dd", IDOK, 166, 118, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 222, 118, 54, 14
+END
+
+IDD_RESTORE DIALOGEX 0, 0, 320, 110
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+CAPTION "Restore defaults"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT "Restore default settings", IDC_R_TITLE, 14, 10, 292, 14
+    LTEXT "Restoring default settings will remove all NitroOS Firewall settings that you have configured for all network locations. This might cause some apps to stop working.", IDC_R_TEXT, 14, 32, 292, 24
+    PUSHBUTTON "&Restore defaults", IDC_R_RESTORE, 14, 64, 70, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 256, 90, 50, 14
+END
+
+STRINGTABLE
+BEGIN
+    IDS_CPLNAME "NitroOS Firewall"
+    IDS_CPLDESCRIPTION "Check firewall status and allow apps through NitroOS Firewall."
+    IDS_NET_DOMAIN "Domain networks"
+    IDS_NET_PRIVATE "Private networks"
+    IDS_NET_PUBLIC "Guest or public networks"
+    IDS_NETDESC_DOMAIN "Networks at a workplace that are attached to a domain"
+    IDS_NETDESC_PRIVATE "Networks at home or work where you know and trust the people and devices on the network"
+    IDS_NETDESC_PUBLIC "Networks in public places such as airports or coffee shops"
+    IDS_ACTIVE_DOMAIN "Active domain networks:"
+    IDS_ACTIVE_PRIVATE "Active private networks:"
+    IDS_ACTIVE_PUBLIC "Active public networks:"
+    IDS_CONNECTED "Connected"
+    IDS_NOTCONNECTED "Not connected"
+    IDS_ON "On"
+    IDS_OFF "Off"
+    IDS_INC_BLOCKALL "Block all incoming connections, including those in the list of allowed apps"
+    IDS_INC_BLOCK "Block all connections to apps that are not on the list of allowed apps"
+    IDS_INC_ALLOW "Allow connections to apps that are not on the list of allowed apps"
+    IDS_NOTIF_ON "Notify me when NitroOS Firewall blocks a new app"
+    IDS_NOTIF_OFF "Do not notify me when NitroOS Firewall blocks a new app"
+    IDS_NETNAME "Network"
+    IDS_NONE "None"
+    IDS_COL_NAME "Name"
+    IDS_COL_PRIVATE "Private"
+    IDS_COL_PUBLIC "Public"
+    IDS_ERR_SAVE "NitroOS Firewall could not save the settings (error %u). Make sure you are signed in as an administrator."
+    IDS_CONFIRM_REMOVE "Are you sure you want to remove %s? Removing it might stop the app from communicating on the network."
+    IDS_CONFIRM_RESTORE "Restore the default NitroOS Firewall settings for all network locations? Settings and allowed apps you added will be removed."
+    IDS_RESTORED "The default NitroOS Firewall settings were restored."
+    IDS_DET_NAME "Name: %s"
+    IDS_DET_GROUP "Group: %s"
+    IDS_DET_RULE "Rule: %s"
+    IDS_DET_PROGRAM "Program: %s"
+    IDS_DET_DESC "Description: %s"
+    IDS_DET_PORTS "Local ports: %s"
+    IDS_DET_PROFILES "Network types: %s"
+    IDS_DET_DISABLED "(disabled)"
+    IDS_FILTER_EXE "Programs (*.exe;*.com)"
+    IDS_FILTER_ALL "All files (*.*)"
+    IDS_BROWSE_TITLE "Browse"
+    IDS_ERR_ADDPATH "Enter the full path of an app, or click Browse to find it."
+    IDS_ERR_ADDNET "Select at least one network type."
+    IDS_DOM_ONLY "Domain"
+    IDS_DETAILS_TITLE "Details"
+    IDS_ADV_HELP_TITLE "NitroOS Firewall - advanced settings"
+    IDS_ERR_RESTORE "The default settings could not be restored (error %u)."
+END
