@@ -6637,18 +6637,26 @@ Quit:
     return STATUS_SUCCESS;
 }
 
+/*
+ * As MmCheckDirtySegment, and reports in *WriteStatus how the write of the page went (STATUS_SUCCESS when
+ * there was nothing to write), for a caller that has to decide whether a page can ever be written
+ * (MiShutdownSystem).
+ */
 _Requires_exclusive_lock_held_(Segment->Lock)
 BOOLEAN
 NTAPI
-MmCheckDirtySegment(
+MmCheckDirtySegmentEx(
     PMM_SECTION_SEGMENT Segment,
     PLARGE_INTEGER Offset,
     BOOLEAN ForceDirty,
-    BOOLEAN PageOut)
+    BOOLEAN PageOut,
+    _Out_ PNTSTATUS WriteStatus)
 {
     ULONG_PTR Entry;
     NTSTATUS Status;
     PFN_NUMBER Page;
+
+    *WriteStatus = STATUS_SUCCESS;
 
     ASSERT(Segment->Locked);
 
@@ -6768,6 +6776,7 @@ MmCheckDirtySegment(
         }
 
         MmLockSectionSegment(Segment);
+        *WriteStatus = Status;
 
         /* Get the entry again */
         Entry = MmGetPageEntrySectionSegment(Segment, Offset);
@@ -6821,6 +6830,20 @@ MmCheckDirtySegment(
     }
 
     return FALSE;
+}
+
+_Requires_exclusive_lock_held_(Segment->Lock)
+BOOLEAN
+NTAPI
+MmCheckDirtySegment(
+    PMM_SECTION_SEGMENT Segment,
+    PLARGE_INTEGER Offset,
+    BOOLEAN ForceDirty,
+    BOOLEAN PageOut)
+{
+    NTSTATUS WriteStatus;
+
+    return MmCheckDirtySegmentEx(Segment, Offset, ForceDirty, PageOut, &WriteStatus);
 }
 
 /* This function is not used. It is left for future use, when per-process
