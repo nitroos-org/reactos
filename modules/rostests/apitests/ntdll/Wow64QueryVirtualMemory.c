@@ -129,6 +129,119 @@ static void TestOtherProcess(PVOID Image, PVOID DataView)
     CloseHandle(Child.hProcess);
 }
 
+/* Classes 1, 5, 7 and 8 of a 32-bit caller, measured on Windows 10 22H2 (WoW64): the list has ULONG entries,
+ * class 5 does not exist, class 7 is class 3 with the RegionType bits of the SDK header and class 8 is class 0 */
+static void TestNewClasses(void)
+{
+    UCHAR Small[16];
+    ULONG Region[7], RegionEx[7], Basic[7], Privileged[8], *List = NULL, Size = 0x10000, i, j, Count = 0;
+    PUCHAR Private = VirtualAlloc(NULL, 0x3000, MEM_RESERVE, PAGE_READWRITE);
+    PVOID Addresses[3];
+    SIZE_T Bytes;
+    NTSTATUS Status;
+    BOOL Found = FALSE, FoundUntouched = FALSE, FoundReserved = FALSE;
+
+    ok(Private != NULL, "VirtualAlloc failed\n");
+    if (!Private) return;
+    VirtualAlloc(Private, 0x2000, MEM_COMMIT, PAGE_READWRITE);
+    Private[0] = 1;
+
+    /* Class 1: no room for the count, then room for the count only */
+    memset(Small, Fill, sizeof(Small));
+    Bytes = 0xdeadbeef;
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), NULL, 1, Small, 3, &Bytes);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+    ok(Bytes == 0xdeadbeef && Small[0] == Fill, "Written for a buffer too small for the count\n");
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), NULL, 1, Small, 4, &Bytes);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+    ok(Bytes == 0xdeadbeef && *(ULONG *)Small > 8 && Small[4] == Fill, "Count %lu\n", *(ULONG *)Small);
+
+    for (i = 0; i < 16 && !List; i++)
+    {
+        List = HeapAlloc(GetProcessHeap(), 0, Size);
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), NULL, 1, List, Size, &Bytes);
+        if (NT_SUCCESS(Status)) break;
+        ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+        Size = sizeof(ULONG) + (List[0] + 256 * (i + 1)) * sizeof(ULONG);
+        HeapFree(GetProcessHeap(), 0, List);
+        List = NULL;
+        if (Status != STATUS_INFO_LENGTH_MISMATCH) break;
+    }
+    ok(List != NULL, "No list\n");
+    if (List && NT_SUCCESS(Status))
+    {
+        Count = List[0];
+        ok(Bytes == sizeof(ULONG) + Count * sizeof(ULONG), "Return length %lu, %lu entries\n", (ULONG)Bytes, Count);
+        for (j = 0; j < Count; j++)
+        {
+            ULONG Entry = List[1 + j];
+
+            if ((Entry & ~0xFFFul) == (ULONG)Private)
+            {
+                Found = TRUE;
+                ok((Entry & 0x1F) == 4 && !((Entry >> 5) & 7) && !((Entry >> 8) & 1), "Entry %lx\n", Entry);
+            }
+            if ((Entry & ~0xFFFul) == (ULONG)Private + 0x1000) FoundUntouched = TRUE;
+            if ((Entry & ~0xFFFul) == (ULONG)Private + 0x2000) FoundReserved = TRUE;
+        }
+        ok(Found, "The touched page is not listed\n");
+        ok(!FoundUntouched, "A page that was never touched is listed\n");
+        ok(!FoundReserved, "A reserved page is listed\n");
+        HeapFree(GetProcessHeap(), 0, List);
+    }
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), (PVOID)0xC0000000, 1, Small, sizeof(Small), &Bytes);
+    ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+    Status = NtQueryVirtualMemory((HANDLE)0x1230, NULL, 1, Small, sizeof(Small), &Bytes);
+    ok_ntstatus(Status, STATUS_INVALID_HANDLE);
+
+    /* Class 5 is not there */
+    for (i = 0; i < 3; i++)
+    {
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), Private, 5, Small, i * 8, &Bytes);
+        ok_ntstatus(Status, STATUS_INVALID_INFO_CLASS);
+    }
+
+    /* Classes 7 and 8 against 3 and 0 */
+    Addresses[0] = Private;
+    Addresses[1] = GetModuleHandleW(NULL);
+    Addresses[2] = GetModuleHandleW(L"ntdll.dll");
+    for (i = 0; i < 3; i++)
+    {
+        MEMORY_BASIC_INFORMATION Info0, Info8;
+        ULONG Type3, Type7;
+
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), Addresses[i], 3, Region, sizeof(Region), &Bytes);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), Addresses[i], 7, RegionEx, sizeof(RegionEx), &Bytes);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok(Bytes == 28, "Class 7 return length %lu\n", (ULONG)Bytes);
+        Type3 = Region[2];
+        Type7 = RegionEx[2];
+        Region[2] = RegionEx[2] = 0;
+        ok(!memcmp(Region, RegionEx, 28), "Class 7 differs from class 3 beyond the type\n");
+        ok(Type7 == (i == 0 ? 1 : 4) && Type3 == (i == 0 ? MEM_PRIVATE : MEM_IMAGE), "Types %lx, %lx\n", Type3, Type7);
+
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), Addresses[i], 0, &Info0, sizeof(Info0), &Bytes);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), Addresses[i], 8, &Info8, sizeof(Info8), &Bytes);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_size_t(Bytes, sizeof(Info8));
+        ok(!memcmp(&Info0, &Info8, sizeof(Info0)), "Class 8 differs from class 0\n");
+    }
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), Private, 7, RegionEx, 24, &Bytes);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), Private, 8, Basic, 27, &Bytes);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), (PVOID)0xC0000000, 7, RegionEx, sizeof(RegionEx), &Bytes);
+    ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+    Status = NtQueryVirtualMemory((HANDLE)0x1230, Private, 7, RegionEx, sizeof(RegionEx), &Bytes);
+    ok_ntstatus(Status, STATUS_INVALID_HANDLE);
+    Status = NtQueryVirtualMemory((HANDLE)0x1230, Private, 8, Privileged, 28, &Bytes);
+    ok_ntstatus(Status, STATUS_INVALID_HANDLE);
+
+    VirtualFree(Private, 0, MEM_RELEASE);
+}
+
 START_TEST(Wow64QueryVirtualMemory)
 {
     SYSTEM_BASIC_INFORMATION Basic;
@@ -143,8 +256,7 @@ START_TEST(Wow64QueryVirtualMemory)
     DWORD Written;
     BOOL Wow64 = FALSE;
 
-    /* The length semantics are those of the WoW64 translation: the ReactOS kernel
-     * truncates the name for a native caller instead */
+    /* The length semantics of the WoW64 translation */
     IsWow64Process(GetCurrentProcess(), &Wow64);
     if (!Wow64)
     {
@@ -194,22 +306,23 @@ START_TEST(Wow64QueryVirtualMemory)
     }
 
     /* No mapped file: free memory, private memory, a pagefile-backed view. Windows returns
-     * STATUS_INVALID_ADDRESS for private memory and STATUS_FILE_INVALID for the pagefile view;
-     * the ReactOS kernel returns STATUS_SECTION_NOT_IMAGE for both, for 64-bit callers too. */
+     * STATUS_INVALID_ADDRESS for private memory and STATUS_FILE_INVALID for the pagefile view. */
     Bytes = 0xdeadbeef;
     Status = NtQueryVirtualMemory(NtCurrentProcess(), NULL, MemorySectionName, Buffer, sizeof(Buffer), &Bytes);
     ok_ntstatus(Status, STATUS_INVALID_ADDRESS);
     Heap = HeapAlloc(GetProcessHeap(), 0, 64);
     Status = NtQueryVirtualMemory(NtCurrentProcess(), Heap, MemorySectionName, Buffer, sizeof(Buffer), &Bytes);
-    ok(Status == STATUS_INVALID_ADDRESS || Status == STATUS_SECTION_NOT_IMAGE, "Private memory: 0x%lx\n", Status);
+    ok_ntstatus(Status, STATUS_INVALID_ADDRESS);
     HeapFree(GetProcessHeap(), 0, Heap);
     Map = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 4096, NULL);
     View = Map ? MapViewOfFile(Map, FILE_MAP_READ, 0, 0, 0) : NULL;
     ok(View != NULL, "Pagefile view failed: %lu\n", GetLastError());
     Status = NtQueryVirtualMemory(NtCurrentProcess(), View, MemorySectionName, Buffer, sizeof(Buffer), &Bytes);
-    ok(Status == STATUS_FILE_INVALID || Status == STATUS_SECTION_NOT_IMAGE, "Pagefile view: 0x%lx\n", Status);
+    ok_ntstatus(Status, STATUS_FILE_INVALID);
     if (View) UnmapViewOfFile(View);
     if (Map) CloseHandle(Map);
+
+    TestNewClasses();
 
     /* Beyond the process's 2 GiB user range */
     if (Basic.MaximumUserModeAddress < 0x80000000)
