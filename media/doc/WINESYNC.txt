@@ -68,7 +68,7 @@ dll/directx/wine/dmband         # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dmcompos       # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dmime          # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dmloader       # Synced to wine-10.1-dev (b00c7619f1b)
-dll/directx/wine/dmscript       # Synced to wine-10.1-dev (b00c7619f1b)
+dll/directx/wine/dmscript       # Synced to Wine-11.21
 dll/directx/wine/dmstyle        # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dmusic         # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dmusic32       # Synced to wine-10.1-dev (b00c7619f1b)
@@ -86,7 +86,7 @@ dll/directx/wine/dswave         # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dwrite         # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dx8vb          # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dxcore         # Synced to wine-10.1-dev (b00c7619f1b)
-dll/directx/wine/dxdiagn        # Synced to wine-10.1-dev (b00c7619f1b)
+dll/directx/wine/dxdiagn        # Synced to Wine-11.21
 dll/directx/wine/dxgi           # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dxtrans        # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dxva2          # Synced to wine-10.1-dev (b00c7619f1b)
@@ -132,19 +132,19 @@ dll/win32/dbghelp             # Synced to WineStaging-5.16
 dll/win32/dciman32            # Synced to Wine-10.1-dev (b00c7619f1b)
 dll/win32/dcomp               # Synced to Wine-10.0
 dll/win32/dwmapi              # Synced to Wine-8.14
-dll/win32/evr                 # Synced to Wine-11.19
+dll/win32/evr                 # Synced to Wine-11.21
 dll/win32/explorerframe        # Synced to Wine-11.19 (ebrowser.c is shell32/ebrowser.c of Wine; Wine's taskbarlist.c is not used, browseui provides it; the ReactOS changes are under __REACTOS__)
-dll/win32/faultrep            # Synced to Wine-10.0
+dll/win32/faultrep            # Synced to Wine-11.21
 dll/win32/feclient            # Synced to Wine-10.0
 dll/win32/fontsub             # Synced to Wine-10.0
 dll/win32/fusion              # Synced to Wine-10.0
 dll/win32/gdiplus             # Synced to Wine-10.0
 dll/win32/hhctrl.ocx          # Synced to Wine-10.0
-dll/win32/hlink               # Synced to Wine-10.0
+dll/win32/hlink               # Synced to Wine-11.21
 dll/win32/hnetcfg             # Synced to Wine-10.0
 dll/win32/iccvid              # Synced to Wine-10.0
 dll/win32/ieframe             # Synced to Wine-10.0
-dll/win32/ieproxy             # Synced to Wine-10.0
+dll/win32/ieproxy             # Synced to Wine-11.21
 dll/win32/imaadp32.acm        # Synced to Wine-10.0
 dll/win32/imagehlp            # Synced to Wine-11.21
 dll/win32/inetcomm            # Synced to Wine-11.21
@@ -162,14 +162,14 @@ dll/win32/loadperf            # Synced to Wine-10.0
 dll/win32/lz32                # Synced to Wine-10.0
 dll/win32/mapi32              # Synced to Wine-10.0
 dll/win32/mciavi32            # Synced to Wine-11.11
-dll/win32/mcicda              # Synced to Wine-10.0
+dll/win32/mcicda              # Synced to Wine-11.21
 dll/win32/mciqtz32            # Synced to Wine-10.0
 dll/win32/mciseq              # Synced to Wine-10.0
 dll/win32/mciwave             # Synced to Wine-10.0
-dll/win32/mf                  # Synced to Wine-11.19
-dll/win32/mfplat              # Synced to Wine-11.19. Below 0x603 the Rtwq queue code of rtworkq is linked in.
-dll/win32/mfplay              # Synced to Wine-11.19
-dll/win32/mfreadwrite         # Synced to Wine-11.19
+dll/win32/mf                  # Synced to Wine-11.21 (winetests/mf/transform.c kept at 11.19: new tests need wmcodecdsp.h header sync)
+dll/win32/mfplat              # Synced to Wine-11.21. Below 0x603 the Rtwq queue code of rtworkq is linked in.
+dll/win32/mfplay              # Synced to Wine-11.21
+dll/win32/mfreadwrite         # Synced to Wine-11.21
 dll/win32/mgmtapi             # Synced to Wine-10.0
 dll/win32/mlang               # Synced to Wine-10.0
 dll/win32/mmdevapi            # Synced to WineStaging-4.18
@@ -220,7 +220,7 @@ dll/win32/npptools            # Synced to Wine-10.0
 dll/win32/ntdsapi             # Synced to Wine-11.21
 dll/win32/objsel              # Synced to Wine-10.0
 dll/win32/odbc32              # Synced to WineStaging-4.18. Depends on port of Linux ODBC.
-dll/win32/odbccp32            # Synced to Wine-10.0
+dll/win32/odbccp32            # Synced to Wine-11.21
 dll/win32/ole32               # Synced to Wine-10.0
 dll/win32/oleacc              # Synced to Wine-10.0
 dll/win32/oleaut32            # Synced to Wine-11.21 (except vartype.c and the tmarshal/vartype tests: Wine 11 types VARIANT.cVal as CHAR, the psdk headers keep signed char)
@@ -234,9 +234,9 @@ dll/win32/pidgen              # Synced to Wine-10.0
 dll/win32/powrprof            # Forked at Wine-1.0rc5
 dll/win32/printui             # Synced to Wine-10.0
 dll/win32/propsys             # Synced to Wine-10.0
-dll/win32/prntvpt             # Forked at Wine-11.19 (main.c adds the Windows 10 exports Wine lacks: PTGetPrintDeviceCapabilities, PTGetPrintDeviceResources, DllGetClassObject, DllMain; the signature-less @ stub thunks are dropped because ReactOS stubs raise EXCEPTION_WINE_STUB)
+dll/win32/prntvpt             # Forked at Wine-11.21 (main.c adds the Windows 10 exports Wine lacks: PTGetPrintDeviceCapabilities, PTGetPrintDeviceResources, DllGetClassObject, DllMain; the signature-less @ stub thunks are dropped because ReactOS stubs raise EXCEPTION_WINE_STUB)
 dll/win32/pstorec             # Synced to Wine-10.0
-dll/win32/qmgr                # Synced to Wine-10.0
+dll/win32/qmgr                # Synced to Wine-11.21
 dll/win32/qmgrprxy            # Synced to Wine-10.0
 dll/win32/query               # Synced to Wine-10.0
 dll/win32/rasapi32            # Synced to Wine-10.0
@@ -246,7 +246,7 @@ dll/win32/riched20            # Synced to Wine-10.0
 dll/win32/riched32            # Synced to Wine-10.0
 dll/win32/rpcrt4              # Synced to Wine-10.0
 dll/win32/rsabase             # Synced to Wine-10.0
-dll/win32/rsaenh              # Synced to Wine-11.19
+dll/win32/rsaenh              # Synced to Wine-11.21
 dll/win32/rstrtmgr            # Own implementation (Wine-10.0 has only stubs): sessions, files/handles/modules, applications, services; checked against Windows 10 22H2
 dll/win32/rtworkq             # Synced to Wine-11.19
 dll/win32/sccbase             # Synced to Wine-10.0
@@ -267,8 +267,8 @@ dll/win32/softpub             # Synced to Wine-10.0
 dll/win32/sspicli             # Synced to Wine-10.0
 dll/win32/stdole2.tlb         # Synced to WineStaging-3.3
 dll/win32/stdole32.tlb        # Synced to WineStaging-3.3
-dll/win32/sti                 # Synced to Wine-10.0
-dll/win32/sxs                 # Synced to Wine-10.0
+dll/win32/sti                 # Synced to Wine-11.21
+dll/win32/sxs                 # Synced to Wine-11.21
 dll/win32/t2embed             # Synced to Wine-10.0
 dll/win32/tapi32              # Synced to Wine-10.0
 dll/win32/taskschd            # Synced to Wine-11.20
@@ -311,7 +311,7 @@ dll/win32/wmiutils            # Synced to Wine-11.21
 dll/win32/wmvcore             # Synced to WineStaging-4.18
 dll/win32/wshom.ocx           # Synced to Wine-10.0
 dll/win32/wtsapi32            # Synced to WineStaging-4.18
-dll/win32/wuapi               # Synced to Wine-10.0
+dll/win32/wuapi               # Synced to Wine-11.21
 dll/win32/xinput1_1           # Synced to WineStaging-2.9
 dll/win32/xinput1_2           # Synced to WineStaging-2.9
 dll/win32/xinput1_3           # Synced to WineStaging-2.9
