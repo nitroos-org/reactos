@@ -301,8 +301,8 @@ Test_AbortiveCloseWithData(BOOL Blocking)
         }
         Queued += Result;
     }
-    /* ReactOS tcpip opens the receive window again as soon as data is queued, so the sender never waits */
-    todo_ros ok(Error == WSAEWOULDBLOCK, "Filling the connection ended with %d after %d bytes\n", Error, Queued);
+    /* The receive window closes when the peer does not read, and the sender waits */
+    ok(Error == WSAEWOULDBLOCK, "Filling the connection ended with %d after %d bytes\n", Error, Queued);
 
     if (Blocking)
     {
@@ -359,8 +359,15 @@ Test_AbortiveCloseWithData(BOOL Blocking)
     if (Thread)
     {
         ok(WaitForSingleObject(Thread, 5000) == WAIT_OBJECT_0, "The blocked send did not return after the close\n");
-        /* ReactOS AFD completes a blocking send of more than its buffer in part */
-        todo_ros ok(Call.Result == SOCKET_ERROR, "The blocked send returned %d\n", Call.Result);
+        /* ReactOS AFD may complete a blocking send of more than its buffer in part */
+        if (Call.Result == SOCKET_ERROR)
+        {
+            ok(TRUE, "The blocked send failed\n");
+        }
+        else
+        {
+            todo_ros ok(FALSE, "The blocked send returned %d\n", Call.Result);
+        }
         CloseHandle(Thread);
     }
     closesocket(Client);

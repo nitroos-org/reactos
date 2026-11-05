@@ -1147,7 +1147,17 @@ AfdDisconnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         if (FCB->ConnectionAborted)
             FCB->PollState |= AFD_EVENT_SEND;
 
-        Status = QueueUserModeIrp(FCB, Irp, FUNCTION_DISCONNECT);
+        /* A graceful shutdown while data is still waiting to be sent (the peer's window is closed, say) returns
+         * at once, as on Windows: the end of the stream goes out after the data (RetryDisconnectCompletion,
+         * when the transport has taken it all) and the request is not kept for it */
+        if (!(FCB->DisconnectFlags & TDI_DISCONNECT_ABORT) &&
+            (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]) || FCB->SendIrp.InFlightRequest))
+        {
+            Status = STATUS_SUCCESS;
+        }
+        else
+            Status = QueueUserModeIrp(FCB, Irp, FUNCTION_DISCONNECT);
+
         if (Status == STATUS_PENDING)
         {
             if ((IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]) && !FCB->SendIrp.InFlightRequest) ||

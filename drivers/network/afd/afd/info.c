@@ -10,6 +10,7 @@
 
 #include "afd.h"
 #include <reactos/drivers/tdiext.h>
+#include <tdiinfo.h>
 
 NTSTATUS NTAPI
 AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
@@ -118,6 +119,78 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
 }
 
+/* Gives the transport the receive window SO_RCVBUF asked for (a stream socket with a connection object):
+ * the transport announces at most that to the peer, and announces more as the data is read (tcpip.sys).
+ * Without a hint the transport gets its default window.
+ *
+ * On Windows a socket whose application does not read takes about twice SO_RCVBUF from the sender (measured on
+ * Windows 10 22H2: the buffer of AFD, which FIONREAD reports, and the receive window of TCP; 8K, 64K and 1M all
+ * match). AFD's own buffer here is its small staging area (Recv.Size), so the window makes up the rest. */
+NTSTATUS
+AfdApplyReceiveHint(PAFD_FCB FCB)
+{
+    PFILE_OBJECT FileObject = FCB->Connection.Object;
+    PDEVICE_OBJECT DeviceObject;
+    PTCP_REQUEST_SET_INFORMATION_EX Request;
+    ULONG RequestSize = FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer) + sizeof(ULONG);
+    ULONG Window;
+    IO_STATUS_BLOCK Iosb;
+    KEVENT Event;
+    PIRP Irp;
+    PIO_STACK_LOCATION IrpSp;
+    NTSTATUS Status;
+
+    if (!FileObject || (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS))
+        return STATUS_SUCCESS;
+
+    /* No hint: 0, the transport's default window (a connection starts with 64K, the most a SYN announces).
+     * A hint above 1 GB is clamped by the transport anyway (4 MB) */
+    Window = min(FCB->RecvHint, 0x40000000UL);
+    if (Window > FCB->Recv.Size)
+        Window = Window * 2 - FCB->Recv.Size;
+
+    Request = ExAllocatePoolWithTag(NonPagedPool, RequestSize, TAG_AFD_DATA_BUFFER);
+    if (!Request)
+        return STATUS_NO_MEMORY;
+
+    RtlZeroMemory(Request, RequestSize);
+    Request->ID.toi_class = INFO_CLASS_PROTOCOL;
+    Request->ID.toi_type = INFO_TYPE_CONNECTION;
+    Request->ID.toi_id = TCP_SOCKET_WINDOW;
+    Request->BufferSize = sizeof(ULONG);
+    RtlCopyMemory(Request->Buffer, &Window, sizeof(ULONG));
+
+    DeviceObject = IoGetRelatedDeviceObject(FileObject);
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp = IoBuildDeviceIoControlRequest(IOCTL_TCP_SET_INFORMATION_EX,
+                                        DeviceObject,
+                                        Request,
+                                        RequestSize,
+                                        NULL,
+                                        0,
+                                        FALSE,
+                                        &Event,
+                                        &Iosb);
+    if (!Irp)
+    {
+        ExFreePoolWithTag(Request, TAG_AFD_DATA_BUFFER);
+        return STATUS_NO_MEMORY;
+    }
+
+    IrpSp = IoGetNextIrpStackLocation(Irp);
+    IrpSp->FileObject = FileObject;
+
+    Status = IoCallDriver(DeviceObject, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = Iosb.Status;
+    }
+
+    ExFreePoolWithTag(Request, TAG_AFD_DATA_BUFFER);
+    return Status;
+}
+
 NTSTATUS NTAPI
 AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             PIO_STACK_LOCATION IrpSp ) {
@@ -146,6 +219,19 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 break;
             case AFD_INFO_INLINING_MODE:
                 FCB->OobInline = InfoReq->Information.Boolean;
+                break;
+            case AFD_INFO_RECEIVE_WINDOW_HINT:
+                /* SO_RCVBUF: kept in any socket state and given to the transport once there is a connection
+                 * (at connect and accept, MakeSocketIntoConnection). AFD_INFO_RECEIVE_WINDOW_SIZE reports
+                 * the size of AFD's own buffer and is not changed by it. */
+                if (InfoReq->Information.Ulong == 0)
+                {
+                    Status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
+                FCB->RecvHint = InfoReq->Information.Ulong;
+                if (FCB->SharedData.State == SOCKET_STATE_CONNECTED)
+                    Status = AfdApplyReceiveHint(FCB);
                 break;
             case AFD_INFO_RECEIVE_WINDOW_SIZE:
                 if (FCB->SharedData.State == SOCKET_STATE_CONNECTED ||
