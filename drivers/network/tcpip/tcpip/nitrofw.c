@@ -9,15 +9,16 @@
  * Switches (HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters, REG_DWORD):
  *   NitroFwDisable = 1   kill switch, read once at driver load: no device, no filtering at all.
  *                        The boot option /NOFIREWALL does the same (SystemStartOptions).
- *   NitroFwEnforce = 1   opt-in for the first release: without it a policy is accepted and reported by
- *                        IOCTL_NITROFW_GET_STATUS but nothing is dropped. Read at load and on every
- *                        IOCTL_NITROFW_SET_POLICY, so it takes effect at the service's next push.
+ *   NitroFwEnforce       default 1 (enforcement on). NitroFwEnforce = 0 turns it off: a policy is accepted
+ *                        and reported by IOCTL_NITROFW_GET_STATUS but nothing is dropped. An absent value
+ *                        means 1. Read at load and on every IOCTL_NITROFW_SET_POLICY, so a change takes
+ *                        effect at the service's next push.
  * The policy's own NITROFW_POLICY_ENFORCE flag (mpssvc: HKLM\SOFTWARE\ReactOS\Nitro\Firewall Enforce)
  * must be set as well.
  *
- * Reading NitroFwEnforce at SET time: a value that is absent counts as 0 (off). Any other failure to read it
- * (no memory, wrong type, registry error) keeps the opt-in the previous push established, so a transient
- * registry fault cannot silently turn enforcement off (or on); it is logged.
+ * Reading NitroFwEnforce at SET time: a value that is absent counts as 1 (on). Any other failure to read it
+ * (no memory, wrong type, registry error) keeps the opt-in the previous push established (at load: on), so a
+ * transient registry fault or a malformed value cannot silently turn enforcement off (or on); it is logged.
  *
  * Scope: IPv4 inbound only (the IP layer has no IPv6). Dropped: unsolicited TCP SYNs, unsolicited UDP,
  * ICMP requests and other protocols that no Allow rule admits, or that a Block rule matches. Passed
@@ -121,7 +122,7 @@ volatile LONG NitroFwTracking = 0;      /* filter loaded: outbound UDP sends fee
 volatile LONG NitroFwWantImages = 0;     /* enforced policy with program rules: address files need their image */
 
 static BOOLEAN FwKilled = TRUE;         /* until NitroFwInitialize decides otherwise */
-static BOOLEAN FwOptIn = FALSE;
+static BOOLEAN FwOptIn = TRUE;   /* NitroFwEnforce default: on (an absent value, or a value that cannot be read at load) */
 static PDEVICE_OBJECT FwDevice = NULL;
 static BOOLEAN FwSymlink = FALSE;
 static PSECURITY_DESCRIPTOR FwSD = NULL;
@@ -207,9 +208,10 @@ static NTSTATUS FwQueryValue(PCWSTR KeyPath, PCWSTR Name, ULONG Type, PVOID Data
     return Status;
 }
 
-/* Read a REG_DWORD switch. An absent key or value is a definite "off" (returns TRUE, *Value 0); any other
-   failure returns FALSE and leaves *Value alone: the caller decides what an unreadable switch means. */
-static BOOLEAN FwReadSwitchEx(PCWSTR Name, PBOOLEAN Value)
+/* Read a REG_DWORD switch. An absent key or value is a definite answer, the switch default (returns TRUE,
+   *Value = Default); any other failure returns FALSE and leaves *Value alone: the caller decides what an
+   unreadable switch means. */
+static BOOLEAN FwReadSwitchEx(PCWSTR Name, BOOLEAN Default, PBOOLEAN Value)
 {
     ULONG Data = 0, Len = sizeof(Data);
     NTSTATUS Status = FwQueryValue(FW_PARAMS_KEY, Name, REG_DWORD, &Data, &Len);
@@ -223,7 +225,7 @@ static BOOLEAN FwReadSwitchEx(PCWSTR Name, PBOOLEAN Value)
     }
     if (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_OBJECT_PATH_NOT_FOUND)
     {
-        *Value = FALSE;
+        *Value = Default;
         return TRUE;
     }
     return FALSE;
@@ -232,7 +234,7 @@ static BOOLEAN FwReadSwitchEx(PCWSTR Name, PBOOLEAN Value)
 static BOOLEAN FwReadSwitch(PCWSTR Name)
 {
     BOOLEAN Value = FALSE;
-    return FwReadSwitchEx(Name, &Value) && Value;
+    return FwReadSwitchEx(Name, FALSE, &Value) && Value;
 }
 
 /* /NOFIREWALL on the boot entry; the kernel stores the options without slashes */
@@ -579,7 +581,7 @@ static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     }
 
     /* registry access (Zw calls) before the APC_LEVEL mutex is taken */
-    OptInRead = FwReadSwitchEx(L"NitroFwEnforce", &OptIn);
+    OptInRead = FwReadSwitchEx(L"NitroFwEnforce", TRUE, &OptIn);
 
     ExAcquireFastMutex(&FwSetMutex);
     if (Policy->Generation <= FwLastGeneration)
@@ -806,7 +808,7 @@ NTSTATUS NitroFwInitialize(PDRIVER_OBJECT DriverObject)
         DbgPrint("NitroFw: disabled by the kill switch (NitroFwDisable or /NOFIREWALL)\n");
         return STATUS_SUCCESS;
     }
-    FwOptIn = FwReadSwitch(L"NitroFwEnforce");
+    FwReadSwitchEx(L"NitroFwEnforce", TRUE, &FwOptIn);   /* unreadable: stays at the default (on) */
 
     Status = FwCreateSD();
     if (!NT_SUCCESS(Status))
