@@ -147,6 +147,7 @@ typedef struct _ADDRESS_FILE {
     LARGE_INTEGER CreationTime;           /* Time of creation */
     PVOID FwImage;                        /* Creator image path for the inbound filter (nitrofw.c), lazy */
     BOOLEAN FwImageTried;                 /* Image resolution already attempted (nitrofw.c) */
+    BOOLEAN ExplicitPort;                 /* The client asked for this port (not an ephemeral one): UDP listeners for the block prompt */
 
     /* The following members are used to control event notification */
 

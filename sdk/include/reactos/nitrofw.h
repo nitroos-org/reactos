@@ -33,6 +33,9 @@
  *  IOCTL_NITROFW_CLEAR_POLICY  no data. Removes all rules and disables filtering (service stop / uninstall).
  *  IOCTL_NITROFW_GET_DROPLOG   in : optional ULONGLONG, first sequence number wanted (0 or absent = oldest kept)
  *                              out: NITROFW_DROPLOG followed by Count NITROFW_DROP_RECORD (see below)
+ *  IOCTL_NITROFW_GET_LISTENERS no input
+ *                              out: NITROFW_LISTENERS followed by Count NITROFW_LISTENER (see below). The block
+ *                              prompt (mpssvc) polls it: a snapshot of the local endpoints that accept traffic.
  *
  *  A new open handle starts with whatever policy the previous service instance installed: the policy
  *  belongs to the device, not to the handle. A service crash therefore leaves the last policy in force
@@ -116,6 +119,7 @@
 #define IOCTL_NITROFW_GET_STATUS    CTL_CODE(FILE_DEVICE_NETWORK, 0x842, METHOD_BUFFERED, FILE_READ_ACCESS)
 #define IOCTL_NITROFW_CLEAR_POLICY  CTL_CODE(FILE_DEVICE_NETWORK, 0x843, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 #define IOCTL_NITROFW_GET_DROPLOG   CTL_CODE(FILE_DEVICE_NETWORK, 0x844, METHOD_BUFFERED, FILE_READ_ACCESS)
+#define IOCTL_NITROFW_GET_LISTENERS CTL_CODE(FILE_DEVICE_NETWORK, 0x845, METHOD_BUFFERED, FILE_READ_ACCESS)
 
 /* NITROFW_VERSION_INFO.Features */
 #define NITROFW_FEATURE_INBOUND        0x00000001
@@ -309,3 +313,34 @@ typedef struct _NITROFW_DROPLOG
     ULONG Count;                /* NITROFW_DROP_RECORD entries that follow this header */
     ULONG Flags;                /* NITROFW_DROPLOG_* */
 } NITROFW_DROPLOG, *PNITROFW_DROPLOG;           /* 24 bytes; the records follow */
+
+/*
+ * Listener snapshot (the "NitroOS Firewall has blocked some features of this app" prompt). The kernel does not
+ * decide whether a listener is blocked, and does not resolve anything: it reports who accepts traffic, mpssvc
+ * (which owns the rules, the profile settings and the notification setting) decides, once per program and
+ * profile. Reported: TCP address files that have a listener (a listen was issued on them), and UDP address
+ * files bound to an explicit port (a port the application chose, not the ephemeral one an unbound send gets).
+ * Endpoints whose handles are all closed are not reported. At most NITROFW_MAX_LISTENERS records are returned
+ * (Total says how many there were). Nothing is recorded or kept: the cost is one walk of the address file list
+ * per call, and nothing at all while nobody calls.
+ */
+#define NITROFW_MAX_LISTENERS  256
+
+#define NITROFW_LISTENER_TCP   0x01   /* NITROFW_LISTENER.Flags: a TCP listener (else UDP) */
+
+typedef struct _NITROFW_LISTENER
+{
+    ULONG ProcessId;            /* creator of the address file */
+    USHORT Port;                /* host order */
+    UCHAR Protocol;             /* 6 TCP, 17 UDP */
+    UCHAR Flags;                /* NITROFW_LISTENER_* */
+    ULONG Addr;                 /* local IPv4, host order, 0 = any */
+    ULONG Reserved;
+    LONGLONG CreationTime;      /* of the address file (KeQuerySystemTime): with ProcessId and Port it identifies the endpoint */
+} NITROFW_LISTENER, *PNITROFW_LISTENER;     /* 24 bytes */
+
+typedef struct _NITROFW_LISTENERS
+{
+    ULONG Count;                /* NITROFW_LISTENER entries that follow this header */
+    ULONG Total;                /* endpoints found (>= Count when the output buffer or the limit cut the list) */
+} NITROFW_LISTENERS, *PNITROFW_LISTENERS;   /* 8 bytes; the records follow */
