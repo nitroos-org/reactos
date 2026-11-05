@@ -2109,6 +2109,10 @@ co_WinPosSetWindowPosEx(
       Window->head.pti->cVisWindows++;
 
       IntNotifyWinEvent(EVENT_OBJECT_SHOW, Window, OBJID_WINDOW, CHILDID_SELF, WEF_SETBYWNDPTI);
+
+      /* A captioned top-level window gets WM_DWMNCRENDERINGCHANGED, once, when it first appears */
+      if (UserIsDesktopWindow(Window->spwndParent) && (Window->style & WS_CAPTION) == WS_CAPTION)
+         IntDwmNcAnnounceFirstShow(Window);
    }
    else if (!NoMessages)
    {

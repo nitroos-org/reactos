@@ -18,6 +18,8 @@ BOOL g_AlwaysDisplayVersion = FALSE;
 ERESOURCE UserLock;
 ATOM AtomMessage;       // Window Message atom.
 ATOM AtomWndObj;        // Window Object atom.
+ATOM AtomDwmNc;         // Non-client rendering policy of a window, set by dwmapi (NitroDwmNc, a user property).
+ATOM AtomDwmNcState;    // What was announced of its non-client rendering (a system property).
 ATOM AtomLayer;         // Window Layer atom.
 ATOM AtomFlashWndState; // Window Flash State atom.
 ATOM AtomDDETrack;      // Window DDE Tracking atom.
@@ -64,6 +66,11 @@ InitUserAtoms(VOID)
      */
     // AtomWndObj = IntAddGlobalAtom(L"SysWNDO", TRUE);
     NtAddAtom(L"SysWNDO", 14, &AtomWndObj);
+
+    /* dwmapi keeps the policy of DwmSetWindowAttribute(DWMWA_NCRENDERING_POLICY) in a window property with the
+       atom RegisterWindowMessage gives for this name, which is an atom of this table; see IntDwmNcResolvePending. */
+    AtomDwmNc = IntAddGlobalAtom(L"NitroDwmNc", TRUE);
+    AtomDwmNcState = IntAddGlobalAtom(L"SysDwmNc", TRUE);
 
     AtomLayer = IntAddGlobalAtom(L"SysLayer", TRUE);
     AtomFlashWndState = IntAddGlobalAtom(L"FlashWState", TRUE);
