@@ -235,6 +235,7 @@ list(APPEND SOURCE
     RtlUTF8.c
     RtlUpcaseUnicodeStringToCountedOemString.c
     RtlValidateUnicodeString.c
+    RtlStringSdBounds.c
     SectionFaultCost.c
     SectionPageLeak.c
     SectionVirtualLockLeak.c

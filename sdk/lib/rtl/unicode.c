@@ -1984,7 +1984,8 @@ RtlUpcaseUnicodeStringToAnsiString(
     }
     else if (AnsiDest->Length >= AnsiDest->MaximumLength)
     {
-        if (!AnsiDest->MaximumLength) return STATUS_BUFFER_OVERFLOW;
+        /* Like Windows (and the OEM variant): a destination that is too small is not written at all */
+        return STATUS_BUFFER_OVERFLOW;
     }
 
     Status = RtlUpcaseUnicodeToMultiByteN(AnsiDest->Buffer,
