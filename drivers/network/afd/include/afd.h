@@ -36,6 +36,7 @@
 #define	IP_MIB_ADDRTABLE_ENTRY_ID 0x102
 
 #define TAG_AFD_DATA_BUFFER                'BdfA'
+#define TAG_AFD_SEND_GHOST                 'GdfA'
 #define TAG_AFD_TRANSPORT_ADDRESS          'tdfA'
 #define TAG_AFD_SOCKET_CONTEXT             'XdfA'
 #define TAG_AFD_CONNECT_DATA               'cdfA'
@@ -170,6 +171,12 @@ typedef struct _AFD_DGRAM_SEND_CONTEXT {
     BOOLEAN CancelRequested;
 } AFD_DGRAM_SEND_CONTEXT, *PAFD_DGRAM_SEND_CONTEXT;
 
+/* Bytes of a cancelled stream send that are still in the send window. Ahead is the number of window bytes in front of them */
+typedef struct _AFD_SEND_GHOST {
+    LIST_ENTRY ListEntry;
+    UINT Ahead, Bytes;
+} AFD_SEND_GHOST, *PAFD_SEND_GHOST;
+
 typedef struct _AFD_DATA_WINDOW {
     PCHAR Window;
     UINT BytesUsed, Size, Content;
@@ -236,6 +243,7 @@ typedef struct _AFD_FCB {
     AFD_DATA_WINDOW Send, Recv;
     /* SO_RCVBUF, the largest receive window the transport may offer (0: the transport default) */
     ULONG RecvHint;
+    LIST_ENTRY SendGhosts;      /* AFD_SEND_GHOST in window order */
     KMUTEX Mutex;
     KEVENT InFlightIdle;
     PKEVENT EventSelect;
@@ -388,6 +396,8 @@ VOID SocketStateUnlock( PAFD_FCB FCB );
 BOOLEAN AfdHasInFlightRequest( PAFD_FCB FCB );
 VOID AfdOrphanDatagramSend( PAFD_FCB FCB, PIRP Irp );
 VOID AfdCancelDatagramSends( PAFD_FCB FCB );
+VOID AfdOrphanStreamSend( PAFD_FCB FCB, PIRP Irp );
+VOID AfdFreeSendGhosts( PAFD_FCB FCB );
 VOID AfdClearCancelRoutine( PIRP Irp );
 NTSTATUS LostSocket( PIRP Irp );
 NTSTATUS LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount,

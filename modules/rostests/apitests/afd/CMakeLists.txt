@@ -7,6 +7,7 @@ list(APPEND SOURCE
     AfdHelpers.c
     select.c
     send.c
+    sendcancel.c
     sendtounbound.c
     windowsize.c
     defensive.c

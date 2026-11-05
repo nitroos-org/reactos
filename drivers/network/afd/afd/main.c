@@ -506,6 +506,7 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     FCB->Recv.Size = AfdReceiveWindowSize;
     FCB->Send.Size = AfdSendWindowSize;
 
+    InitializeListHead( &FCB->SendGhosts );
     KeInitializeMutex( &FCB->Mutex, 0 );
     KeInitializeEvent( &FCB->RelistenIdle, NotificationEvent, TRUE );
     KeInitializeEvent( &FCB->AcceptWorkIdle, NotificationEvent, TRUE );
@@ -738,6 +739,8 @@ AfdCloseSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if (FCB->RecvRelaunchWorkItem)
         IoFreeWorkItem(FCB->RecvRelaunchWorkItem);
+
+    AfdFreeSendGhosts(FCB);
 
     if (FCB->Send.Window)
         ExFreePoolWithTag(FCB->Send.Window, TAG_AFD_DATA_BUFFER);
@@ -1709,7 +1712,10 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
             }
 
             if (Function == FUNCTION_SEND)
+            {
                 AfdOrphanDatagramSend(FCB, Irp);
+                AfdOrphanStreamSend(FCB, Irp);
+            }
             RemoveEntryList(CurrentEntry);
             CleanupPendingIrp(FCB, Irp, IrpSp, NULL);
             /* The last receive that shutdown(SD_RECEIVE) kept pending */
