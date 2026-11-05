@@ -34,6 +34,7 @@ extern void func_getservbyname(void);
 extern void func_getservbyport(void);
 extern void func_getsockname(void);
 extern void func_handleinherit(void);
+extern void func_sendcancel(void);
 extern void func_sendwhole(void);
 extern void func_tcpnodelay(void);
 extern void func_inheritedsocket(void);
@@ -110,6 +111,7 @@ const struct test winetest_testlist[] =
     { "getservbyport", func_getservbyport },
     { "getsockname", func_getsockname },
     { "handleinherit", func_handleinherit },
+    { "sendcancel", func_sendcancel },
     { "sendwhole", func_sendwhole },
     { "addresschange", func_addresschange },
     { "asyncselect", func_asyncselect },
