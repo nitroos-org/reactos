@@ -303,15 +303,25 @@ RtlpCheckDeviceName(IN PUNICODE_STRING FileName,
  * Returns the full path length without its terminating NULL character.
  */
 static ULONG
-RtlpCollapsePath(PWSTR Path, /* ULONG PathBufferSize, ULONG PathLength, */ ULONG mark, BOOLEAN SkipTrailingPathSeparators)
+RtlpCollapsePath(PWSTR Path, ULONG PathBufferChars, ULONG mark, BOOLEAN SkipTrailingPathSeparators)
 {
     PWSTR p, next;
-
-    // FIXME: Do not suppose NULL-terminated strings!!
-
-    SIZE_T PathLength = wcslen(Path);
-    PWSTR EndBuffer = Path + PathLength; // Path + PathBufferSize / sizeof(WCHAR);
+    SIZE_T PathLength = 0;
+    PWSTR EndBuffer;
     PWSTR EndPath;
+
+    /* The length is bounded by the buffer: an unterminated string is cut at its last character */
+    ASSERT(PathBufferChars != 0);
+    while ((PathLength < PathBufferChars) && (Path[PathLength] != UNICODE_NULL)) PathLength++;
+    if (PathLength >= PathBufferChars)
+    {
+        PathLength = PathBufferChars - 1;
+        Path[PathLength] = UNICODE_NULL;
+    }
+    EndBuffer = Path + PathLength;
+
+    /* The start mark can never lie behind the end of the string */
+    if (mark > PathLength) mark = (ULONG)PathLength;
 
     /* Convert slashes into backslashes */
     for (p = Path; *p; p++)
@@ -428,14 +438,16 @@ RtlpCollapsePath(PWSTR Path, /* ULONG PathBufferSize, ULONG PathLength, */ ULONG
  * (which can point on the last backslash of "dir\").
  */
 static SIZE_T
-RtlpSkipUNCPrefix(PCWSTR FileNameBuffer)
+RtlpSkipUNCPrefix(PCWSTR FileNameBuffer, PCWSTR End)
 {
     PCWSTR UncPath = FileNameBuffer + 2;
     DPRINT("RtlpSkipUNCPrefix(%S)\n", FileNameBuffer);
 
-    while (*UncPath && !IS_PATH_SEPARATOR(*UncPath)) UncPath++;  /* share name */
-    while (IS_PATH_SEPARATOR(*UncPath)) UncPath++;
-    while (*UncPath && !IS_PATH_SEPARATOR(*UncPath)) UncPath++;  /* dir name */
+    /* End is the end of a counted name that is not terminated, or NULL for a terminated one */
+    if (End && UncPath > End) UncPath = End;
+    while (UncPath != End && *UncPath && !IS_PATH_SEPARATOR(*UncPath)) UncPath++;  /* share name */
+    while (UncPath != End && IS_PATH_SEPARATOR(*UncPath)) UncPath++;
+    while (UncPath != End && *UncPath && !IS_PATH_SEPARATOR(*UncPath)) UncPath++;  /* dir name */
     /* while (IS_PATH_SEPARATOR(*UncPath)) UncPath++; */
 
     return (UncPath - FileNameBuffer);
@@ -787,6 +799,12 @@ RtlGetFullPathName_Ustr(
     if (FileNameLength == 0) return 0;
 
     /*
+     * Like Windows, the trailing spaces stay in the copy of the name and are dropped again when the path is
+     * collapsed (a name ending in ".. " has no ".." component). The size needed counts them as well.
+     */
+    FileNameLength = FileName->Length;
+
+    /*
      * Check whether we'll need to skip trailing path separators in the
      * computed full path name. If the original file name already contained
      * trailing separators, then we keep them in the full path name. On the
@@ -855,6 +873,7 @@ RtlGetFullPathName_Ustr(
     SourceLength = FileNameLength;
     EnvVarValue.Buffer = NULL;
 
+
     /* Lock the PEB to get the current directory */
     RtlAcquirePebLock();
     CurDirName = &NtCurrentPeb()->ProcessParameters->CurrentDirectory.DosPath;
@@ -863,7 +882,7 @@ RtlGetFullPathName_Ustr(
     {
         case RtlPathTypeUncAbsolute:        /* \\foo   */
         {
-            PrefixCut = RtlpSkipUNCPrefix(FileNameBuffer);
+            PrefixCut = RtlpSkipUNCPrefix(FileNameBuffer, FileNameBuffer + FileNameLength / sizeof(WCHAR));
             break;
         }
 
@@ -969,7 +988,7 @@ RtlGetFullPathName_Ustr(
             PrefixLength = CurDirName->Length;
             if (CurDirName->Buffer[1] != L':')
             {
-                PrefixCut = RtlpSkipUNCPrefix(CurDirName->Buffer);
+                PrefixCut = RtlpSkipUNCPrefix(CurDirName->Buffer, NULL);
             }
             else
             {
@@ -993,7 +1012,7 @@ RtlGetFullPathName_Ustr(
             }
             else
             {
-                PrefixCut = RtlpSkipUNCPrefix(CurDirName->Buffer);
+                PrefixCut = RtlpSkipUNCPrefix(CurDirName->Buffer, NULL);
                 PrefixLength = PrefixCut * sizeof(WCHAR);
                 Prefix = CurDirName->Buffer;
             }
@@ -1029,8 +1048,13 @@ RtlGetFullPathName_Ustr(
      */
     /* Copy the path's prefix */
     if (PrefixLength) RtlMoveMemory(Buffer, Prefix, PrefixLength);
-    /* Copy the remaining part of the path */
-    RtlMoveMemory(Buffer + PrefixLength / sizeof(WCHAR), Source, SourceLength + sizeof(WCHAR));
+    /*
+     * Copy the remaining part of the path and terminate it explicitly:
+     * the source can be a counted string, so the WCHAR after SourceLength
+     * is not a terminator.
+     */
+    RtlMoveMemory(Buffer + PrefixLength / sizeof(WCHAR), Source, SourceLength);
+    Buffer[(PrefixLength + SourceLength) / sizeof(WCHAR)] = UNICODE_NULL;
 
     /* Some cleanup */
     Prefix = NULL;
@@ -1045,7 +1069,7 @@ RtlGetFullPathName_Ustr(
      * (back)slashes...) and retrieve the length of the full path name
      * (without its terminating null character) (in chars).
      */
-    reqsize = RtlpCollapsePath(Buffer, /* Size, reqsize, */ PrefixCut, SkipTrailingPathSeparators);
+    reqsize = RtlpCollapsePath(Buffer, Size / sizeof(WCHAR), PrefixCut, SkipTrailingPathSeparators);
 
     /* Find the file part, which is present after the last path separator */
     if (ShortName)
