@@ -3261,6 +3261,25 @@ WSPGetSockOpt(IN SOCKET Handle,
         return NO_ERROR;
     }
 
+    /* IPV6_V6ONLY on an IPv4 socket: Windows 10 answers success and a one byte BOOLEAN TRUE (an
+     * AF_INET socket is "v6 only" in the sense that it is not dual-stack; verified on 22H2 for a
+     * datagram socket, bound and not). The helper refuses the option (WSAEINVAL), and Rust's
+     * quinn-udp, which Firefox's HTTP/3 (neqo) uses, asks every UDP socket and fails to set up on
+     * the error ("failed to initialize socket ... os error 10022"). ReactOS has no AF_INET6
+     * sockets, so an IPv4 socket is the only case. */
+    if (Level == IPPROTO_IPV6 && OptionName == IPV6_V6ONLY &&
+        Socket->SharedData->AddressFamily == AF_INET)
+    {
+        if (*OptionLength < (INT)sizeof(BOOLEAN))
+        {
+            if (lpErrno) *lpErrno = WSAEFAULT;
+            return SOCKET_ERROR;
+        }
+        *(BOOLEAN *)OptionValue = TRUE;
+        *OptionLength = sizeof(BOOLEAN);
+        return NO_ERROR;
+    }
+
     /* TCP_NODELAY: kept with the socket (the helper cannot read it back). Windows answers with a
      * one byte BOOLEAN whatever the size of the buffer, and refuses it on a socket that is not a stream */
     if (Level == IPPROTO_TCP && OptionName == TCP_NODELAY)

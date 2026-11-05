@@ -4355,8 +4355,12 @@ static HRESULT Global_FormatDateTime(BuiltinDisp *This, VARIANT *args, unsigned 
 
     /* vbGeneralDate (0) falls back to oleaut32 — the "show date if date, time if
      * time, both otherwise" logic depends on the tokenizer; ctx->lcid does not
-     * yet propagate. */
-    if(format == 0) {
+     * yet propagate.
+     * vbShortTime (4) goes there too (__REACTOS__ divergence from Wine 11.21): Windows
+     * prints a 24-hour "hh:mm" ("13:45", "09:05") with no time marker. Wine's
+     * GetTimeFormatW(TIME_NOSECONDS|TIME_FORCE24HOURFORMAT, NULL format) call keeps the
+     * locale's time marker ("13:45 PM") and uses an "h" hour ("9:05"). */
+    if(format == 0 || format == 4) {
         hres = VarFormatDateTime(args, format, 0, &str);
         if(FAILED(hres)) return hres;
         return return_bstr(res, str);
@@ -4378,10 +4382,8 @@ static HRESULT Global_FormatDateTime(BuiltinDisp *This, VARIANT *args, unsigned 
         if(!GetTimeFormatW(lcid, 0, &st, NULL, buff, ARRAY_SIZE(buff)))
             return E_FAIL;
         break;
-    case 4: /* vbShortTime */
-        if(!GetTimeFormatW(lcid, TIME_NOSECONDS|TIME_FORCE24HOURFORMAT, &st, NULL, buff, ARRAY_SIZE(buff)))
-            return E_FAIL;
-        break;
+    case 4: /* vbShortTime: taken by the oleaut32 path above */
+        return E_INVALIDARG;
     default:
         return E_INVALIDARG;
     }
