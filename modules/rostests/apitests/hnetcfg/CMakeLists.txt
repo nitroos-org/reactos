@@ -1,0 +1,6 @@
+
+add_executable(hnetcfg_apitest TypeLib.c)
+set_module_type(hnetcfg_apitest win32cui)
+target_link_libraries(hnetcfg_apitest winetestlib uuid)
+add_importlibs(hnetcfg_apitest oleaut32 ole32 msvcrt kernel32)
+add_rostests_file(TARGET hnetcfg_apitest)
