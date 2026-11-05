@@ -425,6 +425,10 @@ VOID AddrFileFree(
   RemoveEntryList(&AddrFile->FwPortEntry);
   TcpipReleaseSpinLock(&AddressFileListLock, OldIrql);
 
+  /* The creator process was referenced when the address file was listed */
+  if (AddrFile->FwCreator)
+      ObDereferenceObject(AddrFile->FwCreator);
+
   /* Give up the port unless another address file shares it */
   AddrReleasePort(AddrFile);
 
@@ -693,6 +697,11 @@ NTSTATUS FileOpenAddress(
   }
   if (NT_SUCCESS(Status))
   {
+      /* The creator stays referenced for the life of the address file: its process id cannot be handed to a new
+         process meanwhile, so the id on the address file always names the creator (the inbound filter resolves a
+         program rule image from it for sockets that exist before the rule does) */
+      AddrFile->FwCreator = PsGetCurrentProcess();
+      ObReferenceObject(AddrFile->FwCreator);
       InsertTailList(&AddressFileListHead, &AddrFile->ListEntry);
       InsertTailList(&AddressFilePortHash[ADDRESS_FILE_PORT_BUCKET(AddrFile->Port)], &AddrFile->FwPortEntry);
   }

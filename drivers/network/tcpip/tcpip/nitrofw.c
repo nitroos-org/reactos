@@ -942,8 +942,13 @@ static PFW_IMAGE FwImageOfCurrent(VOID)
     return FwImageFromHandle(NtCurrentProcess());
 }
 
-/* Image of the process with the given id, which need not be the caller; NULL if it is gone (PASSIVE_LEVEL) */
-static PFW_IMAGE FwImageOfPid(HANDLE Pid)
+/* Image of the process with the given id, which need not be the caller; NULL if it is gone (PASSIVE_LEVEL).
+   Creator is the process the address file was created by (FwCreator, only compared here, never used): the id must
+   still belong to it. The address file holds a reference to its creator, so the id of a creator that exited is
+   not handed to a new process while the address file lives; the lookup then finds the creator itself, exited,
+   and its image is resolved all the same. The comparison guards the case that must not happen: an id that
+   names another process would attribute the endpoint to a program that does not own it. */
+static PFW_IMAGE FwImageOfPid(HANDLE Pid, PVOID Creator)
 {
     PEPROCESS Process;
     HANDLE Handle;
@@ -951,6 +956,11 @@ static PFW_IMAGE FwImageOfPid(HANDLE Pid)
 
     if (!NT_SUCCESS(PsLookupProcessByProcessId(Pid, &Process)))
         return NULL;
+    if ((PVOID)Process != Creator)
+    {
+        ObDereferenceObject(Process);
+        return NULL;
+    }
     if (Process == PsInitialSystemProcess)
         Image = FwMakeSystemImage();
     else if (NT_SUCCESS(ObOpenObjectByPointer(Process, OBJ_KERNEL_HANDLE, NULL, PROCESS_QUERY_INFORMATION,
@@ -1014,6 +1024,7 @@ static VOID FwBackfillImages(VOID)
         HANDLE Pid = NULL;
         LONGLONG Created = 0;
         USHORT PortN = 0;
+        PVOID Creator = NULL;
         PFW_IMAGE Image;
 
         TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
@@ -1027,6 +1038,7 @@ static VOID FwBackfillImages(VOID)
                 Pid = A->ProcessId;
                 Created = A->CreationTime.QuadPart;
                 PortN = A->Port;
+                Creator = A->FwCreator;
                 break;
             }
         }
@@ -1034,7 +1046,7 @@ static VOID FwBackfillImages(VOID)
         if (!Todo)
             return;
 
-        Image = FwImageOfPid(Pid);
+        Image = FwImageOfPid(Pid, Creator);
         FwAttachImage(Todo, PortN, Pid, Created, Image);   /* Todo may be gone by now; it is looked up on the list again */
     }
 }
