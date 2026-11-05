@@ -28,19 +28,21 @@ typedef struct _FWIMG
 #define IMG_SECT_ALIGN  0x1000
 
 /* Section layout, offsets from the section start */
-#define OFF_IMPORTS     0x000   /* IMAGE_IMPORT_DESCRIPTOR[2] */
-#define OFF_ILT         0x040
-#define OFF_IAT         0x060
-#define OFF_HINTNAME    0x080
-#define OFF_DLLNAME     0x0C0
-#define OFF_CODE        0x100
-#define OFF_EXPORT      0x200   /* IMAGE_EXPORT_DIRECTORY */
-#define OFF_EXPFUNCS    0x240
-#define OFF_EXPNAMES    0x280
-#define OFF_EXPORDS     0x2C0
-#define OFF_EXPSTR      0x2E0   /* DLL name, export names, forwarder strings */
-#define SECT_SIZE       0x800
-#define MAX_EXPORTS     16
+#define OFF_IMPORTS     0x000   /* IMAGE_IMPORT_DESCRIPTOR[MAX_IMPORTS + 1] */
+#define OFF_ILT         0x060   /* 0x20 bytes per import: two thunks and the terminator */
+#define OFF_IAT         0x0C0
+#define OFF_HINTNAME    0x120   /* two names per import, 0x20 bytes each */
+#define OFF_DLLNAME     0x1E0   /* 0x20 bytes per import */
+#define OFF_BOUND       0x240   /* bound import directory */
+#define OFF_CODE        0x2C0
+#define OFF_EXPORT      0x300   /* IMAGE_EXPORT_DIRECTORY */
+#define OFF_EXPFUNCS    0x340
+#define OFF_EXPNAMES    0x3A0
+#define OFF_EXPORDS     0x400
+#define OFF_EXPSTR      0x440   /* DLL name, export names, forwarder strings */
+#define SECT_SIZE       0xC00
+#define MAX_EXPORTS     24
+#define MAX_IMPORTS     3
 
 #ifdef _WIN64
 typedef ULONGLONG THUNK;
@@ -50,23 +52,47 @@ typedef ULONG THUNK;
 #define ORD_FLAG        IMAGE_ORDINAL_FLAG32
 #endif
 
+/* What a bound image has in its IAT: not the address of anything */
+#define PREBOUND        ((THUNK)0x7F000100)
+
 typedef struct _FWEXPORT
 {
     PCSTR Name;     /* exported name; the ordinal is the position + 1 */
     PCSTR Forward;  /* "Dll.Name" / "Dll.#Ordinal", or NULL for code */
 } FWEXPORT;
 
+/* One import descriptor: the DLL and one or two thunks (a name, or an ordinal when the name is NULL) */
+typedef struct _FWIMPORT
+{
+    PCSTR Dll;
+    PCSTR Name[2];
+    WORD Ordinal[2];
+    ULONG Count;
+} FWIMPORT;
+
+/* A bound import directory: the DLL the image is bound to and its time stamp, and one forwarder reference */
+typedef struct _FWBOUND
+{
+    DWORD Tds;
+    PCSTR FwdDll;
+    DWORD FwdTds;
+} FWBOUND;
+
 /* When not 0, the name RVA of the import descriptor (out of the image: the
  * loader faults when it reads the name of the DLL to import) */
 static DWORD BadImportNameRva;
 
-/* A minimal image. It imports Name (or Ordinal when Name is NULL) from
- * ImportDll unless ImportDll is NULL, and a DLL exports Exports. A DLL has no
- * entry point; an EXE returns 0 at once */
+/* Each DLL gets a base address of its own: one that is not at its base is not a current binding */
+static ULONG ImageSeq;
+
+/* A minimal image. It imports Imports (one descriptor each), when Bound is
+ * not NULL it is bound to the DLL of the first import (the IAT then holds
+ * PREBOUND), and a DLL exports Exports. A DLL has no entry point; an EXE
+ * returns 0 at once */
 static
 BOOL
-WriteFwImage(PCWSTR Path, BOOL IsDll, PCSTR DllName, PCSTR ImportDll, PCSTR Name, WORD Ordinal,
-             const FWEXPORT *Exports, ULONG ExportCount)
+WriteFwImageEx(PCWSTR Path, BOOL IsDll, PCSTR DllName, const FWIMPORT *Imports, ULONG ImportCount,
+               const FWBOUND *Bound, const FWEXPORT *Exports, ULONG ExportCount)
 {
     BYTE Image[IMG_FILE_ALIGN + SECT_SIZE] = { 0 };
     FWIMG *Img = (FWIMG *)Image;
@@ -74,9 +100,10 @@ WriteFwImage(PCWSTR Path, BOOL IsDll, PCSTR DllName, PCSTR ImportDll, PCSTR Name
     HANDLE hFile;
     DWORD Written;
     BOOL Ret;
+    ULONG n, t;
 
     C_ASSERT(sizeof(FWIMG) <= IMG_FILE_ALIGN);
-    if (ExportCount > MAX_EXPORTS)
+    if (ExportCount > MAX_EXPORTS || ImportCount > MAX_IMPORTS)
         return FALSE;
 
     Img->Dos.e_magic = IMAGE_DOS_SIGNATURE;
@@ -86,12 +113,12 @@ WriteFwImage(PCWSTR Path, BOOL IsDll, PCSTR DllName, PCSTR ImportDll, PCSTR Name
     Img->Nt.FileHeader.Machine = IMAGE_FILE_MACHINE_AMD64;
     Img->Nt.FileHeader.Characteristics = IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_LARGE_ADDRESS_AWARE;
     Img->Nt.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
-    Img->Nt.OptionalHeader.ImageBase = IsDll ? 0x180000000ULL : 0x140000000ULL;
+    Img->Nt.OptionalHeader.ImageBase = IsDll ? 0x180000000ULL + (ImageSeq++ % 64) * 0x100000 : 0x140000000ULL;
 #else
     Img->Nt.FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
     Img->Nt.FileHeader.Characteristics = IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_32BIT_MACHINE;
     Img->Nt.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR32_MAGIC;
-    Img->Nt.OptionalHeader.ImageBase = IsDll ? 0x10000000 : 0x00400000;
+    Img->Nt.OptionalHeader.ImageBase = IsDll ? 0x10000000 + (ImageSeq++ % 64) * 0x100000 : 0x00400000;
 #endif
     if (IsDll)
         Img->Nt.FileHeader.Characteristics |= IMAGE_FILE_DLL;
@@ -120,25 +147,58 @@ WriteFwImage(PCWSTR Path, BOOL IsDll, PCSTR DllName, PCSTR ImportDll, PCSTR Name
     Img->Sect.Characteristics = IMAGE_SCN_CNT_CODE | IMAGE_SCN_CNT_INITIALIZED_DATA |
                                 IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
 
-    if (ImportDll)
+    if (ImportCount)
     {
         PIMAGE_IMPORT_DESCRIPTOR Imp = (PIMAGE_IMPORT_DESCRIPTOR)(Sect + OFF_IMPORTS);
-        THUNK *Ilt = (THUNK *)(Sect + OFF_ILT), *Iat = (THUNK *)(Sect + OFF_IAT);
 
         Img->Nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress = IMG_SECT_ALIGN + OFF_IMPORTS;
-        Img->Nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size = 2 * sizeof(*Imp);
-        Imp[0].OriginalFirstThunk = IMG_SECT_ALIGN + OFF_ILT;
-        Imp[0].Name = BadImportNameRva ? BadImportNameRva : IMG_SECT_ALIGN + OFF_DLLNAME;
-        Imp[0].FirstThunk = IMG_SECT_ALIGN + OFF_IAT;
-        StringCchCopyA((char *)(Sect + OFF_DLLNAME), 0x40, ImportDll);
-        if (Name)
+        Img->Nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size = (ImportCount + 1) * sizeof(*Imp);
+        for (n = 0; n < ImportCount; n++)
         {
-            StringCchCopyA((char *)(Sect + OFF_HINTNAME + 2), 0x3E, Name);
-            Ilt[0] = Iat[0] = IMG_SECT_ALIGN + OFF_HINTNAME;
+            THUNK *Ilt = (THUNK *)(Sect + OFF_ILT + n * 0x20), *Iat = (THUNK *)(Sect + OFF_IAT + n * 0x20);
+
+            if (Imports[n].Count < 1 || Imports[n].Count > 2)
+                return FALSE;
+            Imp[n].OriginalFirstThunk = IMG_SECT_ALIGN + OFF_ILT + n * 0x20;
+            Imp[n].Name = (BadImportNameRva && n == 0) ? BadImportNameRva : IMG_SECT_ALIGN + OFF_DLLNAME + n * 0x20;
+            Imp[n].FirstThunk = IMG_SECT_ALIGN + OFF_IAT + n * 0x20;
+            StringCchCopyA((char *)(Sect + OFF_DLLNAME + n * 0x20), 0x20, Imports[n].Dll);
+            for (t = 0; t < Imports[n].Count; t++)
+            {
+                if (Imports[n].Name[t])
+                {
+                    ULONG Hint = OFF_HINTNAME + (n * 2 + t) * 0x20;
+
+                    StringCchCopyA((char *)(Sect + Hint + 2), 0x1E, Imports[n].Name[t]);
+                    Ilt[t] = Iat[t] = IMG_SECT_ALIGN + Hint;
+                }
+                else
+                {
+                    Ilt[t] = Iat[t] = ORD_FLAG | Imports[n].Ordinal[t];
+                }
+                if (Bound)
+                    Iat[t] = PREBOUND;
+            }
         }
-        else
+        if (Bound)
         {
-            Ilt[0] = Iat[0] = ORD_FLAG | Ordinal;
+            PIMAGE_BOUND_IMPORT_DESCRIPTOR Bd = (PIMAGE_BOUND_IMPORT_DESCRIPTOR)(Sect + OFF_BOUND);
+            ULONG NameOff = sizeof(*Bd) + (Bound->FwdDll ? sizeof(IMAGE_BOUND_FORWARDER_REF) : 0) + sizeof(*Bd);
+
+            Bd->TimeDateStamp = Bound->Tds;
+            Bd->OffsetModuleName = (WORD)NameOff;
+            Bd->NumberOfModuleForwarderRefs = Bound->FwdDll ? 1 : 0;
+            StringCchCopyA((char *)Bd + NameOff, 0x20, Imports[0].Dll);
+            if (Bound->FwdDll)
+            {
+                PIMAGE_BOUND_FORWARDER_REF Ref = (PIMAGE_BOUND_FORWARDER_REF)(Bd + 1);
+
+                Ref->TimeDateStamp = Bound->FwdTds;
+                Ref->OffsetModuleName = (WORD)(NameOff + strlen(Imports[0].Dll) + 1);
+                StringCchCopyA((char *)Bd + Ref->OffsetModuleName, 0x20, Bound->FwdDll);
+            }
+            Img->Nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT].VirtualAddress = IMG_SECT_ALIGN + OFF_BOUND;
+            Img->Nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT].Size = 0x40;
         }
     }
 
@@ -205,6 +265,17 @@ WriteFwImage(PCWSTR Path, BOOL IsDll, PCSTR DllName, PCSTR ImportDll, PCSTR Name
     return Ret;
 }
 
+/* An image that imports Name (or Ordinal when Name is NULL) from ImportDll, unless ImportDll is NULL */
+static
+BOOL
+WriteFwImage(PCWSTR Path, BOOL IsDll, PCSTR DllName, PCSTR ImportDll, PCSTR Name, WORD Ordinal,
+             const FWEXPORT *Exports, ULONG ExportCount)
+{
+    FWIMPORT Import = { ImportDll, { Name, NULL }, { Ordinal, 0 }, 1 };
+
+    return WriteFwImageEx(Path, IsDll, DllName, &Import, ImportDll ? 1 : 0, NULL, Exports, ExportCount);
+}
+
 /*
  * ldrfw_fwd.dll forwards its exports. The ordinal of an export is its
  * position here + 1
@@ -224,6 +295,11 @@ static const FWEXPORT FwdExports[] =
     { "FwdMal2",    "ldrmal_gpa.Foo" },                     /* 11: same, for GetProcAddress */
     { "FwdChain",   "ldrfw_chain.Mid" },                    /* 12: a forwarder to a forwarder to a missing name */
     { "FwdChainOrd", "ldrfw_chain.MidOrd" },                /* 13: a forwarder to a forwarder to a missing ordinal */
+    { "FwdTgtFoo",  "ldrfw_tgt.Foo" },                      /* 14: target mapped by the snap, resolves */
+    { "FwdChain3",  "ldrfw_chain.Deep" },                   /* 15: three forwarders, then a missing name */
+    { "FwdChain3Ord", "ldrfw_chain.DeepOrd" },              /* 16: three forwarders, then a missing ordinal */
+    { "FwdChain3Dll", "ldrfw_chain.DeepDll" },              /* 17: three forwarders, then a missing DLL */
+    { "FwdChainOk", "ldrfw_chain.Ok" },                     /* 18: three forwarders that resolve */
 };
 
 /* ldrfw_chain.dll: the second step of the chained forwarders */
@@ -231,6 +307,19 @@ static const FWEXPORT ChainExports[] =
 {
     { "Mid",        "ldrfw_tgt.LdrFwNoSuchExport" },        /* 1: target mapped by the nested snap, missing name */
     { "MidOrd",     "kernel32.#32000" },                    /* 2: loaded target, missing ordinal */
+    { "Deep",       "ldrfw_chain2.Deep" },                  /* 3 */
+    { "DeepOrd",    "ldrfw_chain2.DeepOrd" },               /* 4 */
+    { "DeepDll",    "ldrfw_chain2.DeepDll" },               /* 5 */
+    { "Ok",         "ldrfw_chain2.Ok" },                    /* 6 */
+};
+
+/* ldrfw_chain2.dll: the third step */
+static const FWEXPORT Chain2Exports[] =
+{
+    { "Deep",       "ldrfw_tgt.LdrFwNoSuchExport" },        /* 1 */
+    { "DeepOrd",    "kernel32.#32000" },                    /* 2 */
+    { "DeepDll",    "ldrfw_nonexistent.Foo" },              /* 3 */
+    { "Ok",         "ldrfw_tgt.Foo" },                      /* 4 */
 };
 
 static const FWEXPORT FooExport[] = { { "Foo", NULL } };
@@ -279,11 +368,23 @@ static const FWCASE Cases[] =
     { L"ldrfw_u_plain.dll",  "LdrFwNoSuchExport", 0, ERROR_PROC_NOT_FOUND, 1, L"LdrFwNoSuchExport", STATUS_ENTRYPOINT_NOT_FOUND,
       L"ldrfw_u_plain.dll", "kernel32.dll" },
     { L"ldrfw_u_plord.dll",  NULL, 32000, ERROR_INVALID_ORDINAL, 1, NULL, STATUS_ORDINAL_NOT_FOUND, L"ldrfw_u_plord.dll", "kernel32.dll" },
+    /* Chains three forwarders deep */
+    { L"ldrfw_u_chain3.dll", "FwdChain3", 0, ERROR_PROC_NOT_FOUND,  1, L"FwdChain3", STATUS_ENTRYPOINT_NOT_FOUND, L"ldrfw_u_chain3.dll" },
+    { L"ldrfw_u_chord3.dll", "FwdChain3Ord", 0, ERROR_INVALID_ORDINAL, HARD_AT_MOST_ONE, NULL, STATUS_ORDINAL_NOT_FOUND },
+    { L"ldrfw_u_chdll3.dll", "FwdChain3Dll", 0, ERROR_MOD_NOT_FOUND, 0, NULL, STATUS_DLL_NOT_FOUND },
 };
 
 /* Every image the test writes; none of them may stay loaded after a failure */
 static const PCWSTR Helpers[] = { L"ldrfw_fwd.dll", L"ldrfw_tgt.dll", L"ldrfw_bad.dll", L"ldrfw_badimp.dll",
-                                  L"ldrfw_chain.dll" };
+                                  L"ldrfw_chain.dll", L"ldrfw_chain2.dll" };
+
+/* Bits for the helpers above */
+#define H_FWD       0x01
+#define H_TGT       0x02
+#define H_BAD       0x04
+#define H_BADIMP    0x08
+#define H_CHAIN     0x10
+#define H_CHAIN2    0x20
 
 #define LOAD_TIMEOUT    20000
 #define LOAD_REPEAT     10
@@ -722,6 +823,474 @@ TestMalformed(PCWSTR Dir)
 
 #endif /* __REACTOS__ */
 
+static
+BOOL
+IsLoadedW(PCWSTR Name)
+{
+    return GetModuleHandleW(Name) != NULL;
+}
+
+/* Which of the helper DLLs are loaded now */
+static
+ULONG
+LoadedHelpers(VOID)
+{
+    ULONG Mask = 0, h;
+
+    for (h = 0; h < _countof(Helpers); h++)
+    {
+        if (IsLoadedW(Helpers[h]))
+            Mask |= 1UL << h;
+    }
+    return Mask;
+}
+
+/*
+ * Images with several imports. A forwarder that resolved while an import was
+ * snapped keeps its target loaded, and a later import of the same image that
+ * fails must not leave that target (or the DLL that forwards to it) behind
+ */
+typedef struct _MULTICASE
+{
+    PCWSTR File;
+    FWIMPORT Imports[MAX_IMPORTS];
+    ULONG ImportCount;
+    DWORD LoadError;        /* 0 = it loads */
+    LONG HardErrors;        /* NtRaiseHardError calls during one LoadLibrary */
+    PCWSTR HardName;        /* the entry point the hard error names, NULL = not checked */
+    ULONG Loaded;           /* helpers loaded after the LoadLibrary (failed or not) */
+    ULONG AfterFree;        /* helpers loaded after FreeLibrary of the module that loaded */
+} MULTICASE;
+
+#define FWD_TGT_FOO     { "FwdTgtFoo" }
+static const MULTICASE MultiCases[] =
+{
+    /* Control: loads, the forwarder target stays while the image is loaded */
+    { L"ldrfw_m_ok.dll", { { "ldrfw_fwd.dll", FWD_TGT_FOO, { 0 }, 1 }, { "kernel32.dll", { "Sleep" }, { 0 }, 1 } }, 2,
+      0, 0, NULL, H_FWD | H_TGT, 0 },
+    { L"ldrfw_m_chok.dll", { { "ldrfw_fwd.dll", { "FwdChainOk" }, { 0 }, 1 }, { "kernel32.dll", { "Sleep" }, { 0 }, 1 } }, 2,
+      0, 0, NULL, H_FWD | H_TGT | H_CHAIN | H_CHAIN2, 0 },
+    /* A resolved forwarder, then another import fails */
+    { L"ldrfw_m_name.dll", { { "ldrfw_fwd.dll", FWD_TGT_FOO, { 0 }, 1 }, { "kernel32.dll", { "LdrFwNoSuchExport" }, { 0 }, 1 } }, 2,
+      ERROR_PROC_NOT_FOUND, 1, L"LdrFwNoSuchExport", 0, 0 },
+    { L"ldrfw_m_ord.dll", { { "ldrfw_fwd.dll", FWD_TGT_FOO, { 0 }, 1 }, { "kernel32.dll", { NULL }, { 32000 }, 1 } }, 2,
+      ERROR_INVALID_ORDINAL, 1, NULL, 0, 0 },
+    { L"ldrfw_m_nodll.dll", { { "ldrfw_fwd.dll", FWD_TGT_FOO, { 0 }, 1 }, { "ldrfw_nonexistent.dll", { "Foo" }, { 0 }, 1 } }, 2,
+      ERROR_MOD_NOT_FOUND, 0, NULL, 0, 0 },
+    { L"ldrfw_m_chname.dll", { { "ldrfw_fwd.dll", { "FwdChainOk" }, { 0 }, 1 }, { "kernel32.dll", { "LdrFwNoSuchExport" }, { 0 }, 1 } }, 2,
+      ERROR_PROC_NOT_FOUND, 1, L"LdrFwNoSuchExport", 0, 0 },
+    /* A resolved forwarder, then a forwarder that fails, in one descriptor and in two */
+    { L"ldrfw_m_same.dll", { { "ldrfw_fwd.dll", { "FwdTgtFoo", "FwdNewDll" }, { 0 }, 2 } }, 1,
+      ERROR_PROC_NOT_FOUND, 1, L"FwdNewDll", 0, 0 },
+    { L"ldrfw_m_two.dll", { { "ldrfw_fwd.dll", FWD_TGT_FOO, { 0 }, 1 }, { "ldrfw_fwd.dll", { "FwdNewDll" }, { 0 }, 1 } }, 2,
+      ERROR_PROC_NOT_FOUND, 1, L"FwdNewDll", 0, 0 },
+    { L"ldrfw_m_twoord.dll", { { "ldrfw_fwd.dll", FWD_TGT_FOO, { 0 }, 1 }, { "ldrfw_fwd.dll", { "FwdNewOrd" }, { 0 }, 1 } }, 2,
+      ERROR_INVALID_ORDINAL, 0, NULL, 0, 0 },
+    { L"ldrfw_m_twodll.dll", { { "ldrfw_fwd.dll", FWD_TGT_FOO, { 0 }, 1 }, { "ldrfw_fwd.dll", { "FwdBadDll" }, { 0 }, 1 } }, 2,
+      ERROR_MOD_NOT_FOUND, 0, NULL, 0, 0 },
+};
+
+/*
+ * Bound images. A binding that is stale (the time stamp of the DLL is not the
+ * recorded one) is snapped again from the import names, with the same
+ * results as an image that is not bound
+ */
+typedef struct _BOUNDCASE
+{
+    PCWSTR File;
+    FWIMPORT Import;
+    FWBOUND Bound;
+    DWORD LoadError;
+    LONG HardErrors;
+    PCWSTR HardName;
+    ULONG Loaded;
+    ULONG AfterFree;
+} BOUNDCASE;
+
+static const BOUNDCASE BoundCases[] =
+{
+    { L"ldrfw_b_ok.dll",   { "ldrfw_fwd.dll", FWD_TGT_FOO, { 0 }, 1 }, { 1, NULL, 0 },
+      0, 0, NULL, H_FWD | H_TGT, 0 },
+    { L"ldrfw_b_ref.dll",  { "ldrfw_fwd.dll", FWD_TGT_FOO, { 0 }, 1 }, { 1, "ldrfw_tgt.dll", 1 },
+      0, 0, NULL, H_FWD | H_TGT, 0 },
+    /* The binding to ldrfw_fwd.dll is stale, the one to the forwarder target is current: snapped again nevertheless
+     * (not measured on Windows 10, which snapped every binding the probe had: a stale one cannot be trusted) */
+    { L"ldrfw_b_stref.dll", { "ldrfw_fwd.dll", FWD_TGT_FOO, { 0 }, 1 }, { 1, "ldrfw_tgt.dll", 0 },
+      0, 0, NULL, H_FWD | H_TGT, 0 },
+    { L"ldrfw_b_name.dll", { "ldrfw_fwd.dll", { "FwdName" }, { 0 }, 1 }, { 1, NULL, 0 },
+      ERROR_PROC_NOT_FOUND, 1, L"FwdName", 0, 0 },
+    { L"ldrfw_b_nd.dll",   { "ldrfw_fwd.dll", { "FwdNewDll" }, { 0 }, 1 }, { 1, NULL, 0 },
+      ERROR_PROC_NOT_FOUND, 1, L"FwdNewDll", 0, 0 },
+    { L"ldrfw_b_two.dll",  { "ldrfw_fwd.dll", { "FwdTgtFoo", "FwdNewDll" }, { 0 }, 2 }, { 1, NULL, 0 },
+      ERROR_PROC_NOT_FOUND, 1, L"FwdNewDll", 0, 0 },
+    { L"ldrfw_b_ord.dll",  { "ldrfw_fwd.dll", { "FwdNewOrd" }, { 0 }, 1 }, { 1, NULL, 0 },
+      ERROR_INVALID_ORDINAL, 0, NULL, 0, 0 },
+    { L"ldrfw_b_dll.dll",  { "ldrfw_fwd.dll", { "FwdBadDll" }, { 0 }, 1 }, { 1, NULL, 0 },
+      ERROR_MOD_NOT_FOUND, 0, NULL, 0, 0 },
+    { L"ldrfw_b_c3.dll",   { "ldrfw_fwd.dll", { "FwdChain3" }, { 0 }, 1 }, { 1, NULL, 0 },
+      ERROR_PROC_NOT_FOUND, 1, L"FwdChain3", 0, 0 },
+};
+
+/* Reads the first thunk of the IAT of a loaded image */
+static
+ULONG_PTR
+FirstIatEntry(HMODULE Module)
+{
+    return (ULONG_PTR)*(THUNK *)((PBYTE)Module + IMG_SECT_ALIGN + OFF_IAT);
+}
+
+/*
+ * Loads Dir\File ten times and checks the error, the hard errors, which
+ * helpers are loaded afterwards (and after FreeLibrary), and that the loader
+ * lists are as before
+ */
+static
+VOID
+CheckLoad(PCWSTR Dir, PCWSTR File, DWORD LoadError, LONG HardErrors, PCWSTR HardName, ULONG Loaded, ULONG AfterFree,
+          const LISTCOUNT *Before, ULONG_PTR *Iat, ULONG_PTR *Resolved)
+{
+    CHAR Where[64];
+    ULONG n;
+    LISTCOUNT After;
+
+    for (n = 0; n < 3 && !Hung; n++)
+    {
+        static LOADREQ Req; /* static: outlives a stuck thread */
+        LONG HardErrorsBefore = HardErrorCount;
+        ULONG Mask;
+
+        ZeroMemory(&Req, sizeof(Req));
+        StringCchPrintfW(Req.Path, _countof(Req.Path), L"%ls\\%ls", Dir, File);
+        if (!LoadGuarded(&Req))
+        {
+            ok(0, "LoadLibraryW(%ls) #%lu did not return within %lu ms\n", File, n, (ULONG)LOAD_TIMEOUT);
+            Hung = TRUE;
+            return;
+        }
+        Mask = LoadedHelpers();
+        trace("OBS %ls #%lu: module %p error %lu hard %ld helpers 0x%lx\n", File, n, Req.Module, Req.Error,
+              HardErrorCount - HardErrorsBefore, Mask);
+        ok(HardErrorCount - HardErrorsBefore == HardErrors, "LoadLibraryW(%ls) #%lu raised %ld hard errors (last 0x%lx), expected %ld\n",
+           File, n, HardErrorCount - HardErrorsBefore, (ULONG)HardErrorLast, HardErrors);
+        if (HardName && HardErrorCount != HardErrorsBefore)
+            ok(!_wcsicmp(HardErrorName, HardName), "LoadLibraryW(%ls) #%lu: the hard error names %ls, expected %ls\n",
+               File, n, HardErrorName, HardName);
+        ok(Mask == Loaded, "LoadLibraryW(%ls) #%lu: helpers loaded 0x%lx, expected 0x%lx\n", File, n, Mask, Loaded);
+        if (!LoadError)
+        {
+            ok(Req.Module != NULL, "LoadLibraryW(%ls) #%lu failed: %lu\n", File, n, Req.Error);
+            if (Req.Module)
+            {
+                if (Iat && n == 0)
+                {
+                    HMODULE FwdDll = GetModuleHandleW(L"ldrfw_fwd.dll");
+
+                    *Iat = FirstIatEntry(Req.Module);
+                    *Resolved = FwdDll ? (ULONG_PTR)GetProcAddress(FwdDll, "FwdTgtFoo") : 0;
+                }
+                ok(FreeLibrary(Req.Module), "FreeLibrary(%ls) failed: %lu\n", File, GetLastError());
+                Mask = LoadedHelpers();
+                trace("OBS %ls #%lu after FreeLibrary: helpers 0x%lx, module loaded %d\n", File, n, Mask, IsLoadedW(File));
+                ok(Mask == AfterFree, "%ls #%lu: helpers loaded after FreeLibrary 0x%lx, expected 0x%lx\n", File, n, Mask, AfterFree);
+                ok(!IsLoadedW(File), "%ls stays loaded after FreeLibrary #%lu\n", File, n);
+            }
+        }
+        else
+        {
+            ok(Req.Module == NULL, "LoadLibraryW(%ls) #%lu succeeded: %p\n", File, n, Req.Module);
+            ok(Req.Error == LoadError, "LoadLibraryW(%ls) #%lu error %lu, expected %lu\n", File, n, Req.Error, LoadError);
+            if (Req.Module)
+                FreeLibrary(Req.Module);
+            ok(!IsLoadedW(File), "%ls stays loaded after #%lu\n", File, n);
+        }
+        /* Get rid of what a leak of the loader keeps, to see each load on its own */
+        for (Mask = 0; Mask < _countof(Helpers); Mask++)
+        {
+            HMODULE Leaked = GetModuleHandleW(Helpers[Mask]);
+
+            if (Leaked && !((LoadError ? Loaded : AfterFree) & (1UL << Mask)))
+            {
+                ULONG k;
+
+                for (k = 0; k < 8 && GetModuleHandleW(Helpers[Mask]); k++)
+                    FreeLibrary(Leaked);
+            }
+        }
+    }
+    StringCchPrintfA(Where, _countof(Where), "after %ls", File);
+    CheckModuleLists(&After, Where);
+    ok(After.Load == Before->Load && After.Memory == Before->Memory && After.Init == Before->Init,
+       "after %ls: %ld/%ld/%ld modules (load/memory/init order), before %ld/%ld/%ld\n", File,
+       After.Load, After.Memory, After.Init, Before->Load, Before->Memory, Before->Init);
+}
+
+static
+VOID
+TestMulti(PCWSTR Dir)
+{
+    LISTCOUNT Before;
+    ULONG i;
+
+    CheckModuleLists(&Before, "before multi");
+    for (i = 0; i < _countof(MultiCases) && !Hung; i++)
+    {
+        const MULTICASE *Case = &MultiCases[i];
+
+        CheckLoad(Dir, Case->File, Case->LoadError, Case->HardErrors, Case->HardName, Case->Loaded, Case->AfterFree,
+                  &Before, NULL, NULL);
+    }
+}
+
+static
+VOID
+TestBound(PCWSTR Dir)
+{
+    LISTCOUNT Before;
+    ULONG i;
+
+    CheckModuleLists(&Before, "before bound");
+    for (i = 0; i < _countof(BoundCases) && !Hung; i++)
+    {
+        const BOUNDCASE *Case = &BoundCases[i];
+        ULONG_PTR Iat = 0, Resolved = 0;
+
+        CheckLoad(Dir, Case->File, Case->LoadError, Case->HardErrors, Case->HardName, Case->Loaded, Case->AfterFree,
+                  &Before, &Iat, &Resolved);
+        if (Case->LoadError || Hung)
+            continue;
+
+        /* The IAT of a successful load is snapped again (Windows 10 does so for a current binding too; not tested: ReactOS keeps the bound IAT then) */
+        trace("OBS %ls: first IAT entry 0x%lx (prebound 0x%lx), the forwarder resolves to 0x%lx\n", Case->File,
+              (ULONG)Iat, (ULONG)PREBOUND, (ULONG)Resolved);
+        ok(Resolved != 0 && Iat == Resolved, "%ls: the IAT holds 0x%lx, the forwarder resolves to 0x%lx\n",
+           Case->File, (ULONG)Iat, (ULONG)Resolved);
+    }
+}
+
+/*
+ * What the loader tells the system when a process cannot start because of a
+ * forwarder: the process is started under a debugger, and its first call of
+ * NtRaiseHardError is caught (int 3 at its entry) and its arguments read
+ */
+typedef struct _STARTERR
+{
+    BOOL Captured;
+    BOOL Ended;
+    DWORD ExitCode;
+    NTSTATUS Status;
+    ULONG Count;
+    ULONG Mask;
+    WCHAR Str[2][MAX_PATH];
+    ULONG_PTR Val[2];
+} STARTERR;
+
+static
+VOID
+ReadChildString(HANDLE Process, ULONG_PTR Address, PWCHAR Out)
+{
+    UNICODE_STRING Us;
+    SIZE_T Done;
+
+    Out[0] = 0;
+    if (!ReadProcessMemory(Process, (PVOID)Address, &Us, sizeof(Us), &Done) || Done != sizeof(Us))
+        return;
+    if (Us.Length >= (MAX_PATH - 1) * sizeof(WCHAR))
+        Us.Length = (MAX_PATH - 1) * sizeof(WCHAR);
+    if (!ReadProcessMemory(Process, Us.Buffer, Out, Us.Length, &Done))
+        return;
+    Out[Us.Length / sizeof(WCHAR)] = 0;
+}
+
+static
+BOOL
+CaptureStartupHardError(PCWSTR Dir, PCWSTR ExePath, STARTERR *Out)
+{
+    WCHAR CmdLine[MAX_PATH + 4];
+    STARTUPINFOW Si;
+    PROCESS_INFORMATION Pi;
+    DEBUG_EVENT Ev;
+    PBYTE Target = (PBYTE)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtRaiseHardError");
+    BYTE Orig = 0, Int3 = 0xCC;
+    SIZE_T Done;
+    BOOL Armed = FALSE, Running = TRUE;
+    DWORD Start;
+    UINT OldMode;
+
+    ZeroMemory(Out, sizeof(*Out));
+    ZeroMemory(&Si, sizeof(Si));
+    Si.cb = sizeof(Si);
+    StringCchPrintfW(CmdLine, _countof(CmdLine), L"\"%ls\"", ExePath);
+    OldMode = SetErrorMode(SEM_FAILCRITICALERRORS);
+    if (!CreateProcessW(NULL, CmdLine, NULL, NULL, FALSE, DEBUG_ONLY_THIS_PROCESS, NULL, Dir, &Si, &Pi))
+    {
+        SetErrorMode(OldMode);
+        return FALSE;
+    }
+    Start = GetTickCount();
+    while (Running && GetTickCount() - Start < LOAD_TIMEOUT)
+    {
+        DWORD Continue = DBG_CONTINUE;
+
+        if (!WaitForDebugEvent(&Ev, 1000))
+            continue;
+        switch (Ev.dwDebugEventCode)
+        {
+            case CREATE_PROCESS_DEBUG_EVENT:
+                if (Ev.u.CreateProcessInfo.hFile)
+                    CloseHandle(Ev.u.CreateProcessInfo.hFile);
+                if (Target &&
+                    ReadProcessMemory(Pi.hProcess, Target, &Orig, 1, &Done) && Done == 1 &&
+                    WriteProcessMemory(Pi.hProcess, Target, &Int3, 1, &Done) && Done == 1)
+                {
+                    FlushInstructionCache(Pi.hProcess, Target, 1);
+                    Armed = TRUE;
+                }
+                break;
+            case LOAD_DLL_DEBUG_EVENT:
+                if (Ev.u.LoadDll.hFile)
+                    CloseHandle(Ev.u.LoadDll.hFile);
+                break;
+            case EXIT_PROCESS_DEBUG_EVENT:
+                Out->Ended = TRUE;
+                Out->ExitCode = Ev.u.ExitProcess.dwExitCode;
+                Running = FALSE;
+                break;
+            case EXCEPTION_DEBUG_EVENT:
+                /* 0x4000001F: the initial breakpoint of a 32-bit process on a 64-bit system */
+                if (Ev.u.Exception.ExceptionRecord.ExceptionCode == 0x4000001F)
+                    break;
+                if (Ev.u.Exception.ExceptionRecord.ExceptionCode != EXCEPTION_BREAKPOINT)
+                {
+                    Continue = DBG_EXCEPTION_NOT_HANDLED;
+                    break;
+                }
+                if (Armed && !Out->Captured && (PBYTE)Ev.u.Exception.ExceptionRecord.ExceptionAddress == Target)
+                {
+                    HANDLE Thread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, Ev.dwThreadId);
+                    CONTEXT Ctx;
+                    ULONG_PTR Params = 0, Vals[4] = { 0 };
+                    ULONG i;
+
+                    ZeroMemory(&Ctx, sizeof(Ctx));
+                    Ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+                    if (Thread && GetThreadContext(Thread, &Ctx))
+                    {
+#ifdef _WIN64
+                        Out->Status = (NTSTATUS)Ctx.Rcx;
+                        Out->Count = (ULONG)Ctx.Rdx;
+                        Out->Mask = (ULONG)Ctx.R8;
+                        Params = Ctx.R9;
+#else
+                        ULONG Args[5] = { 0 };
+
+                        ReadProcessMemory(Pi.hProcess, (PVOID)(ULONG_PTR)Ctx.Esp, Args, sizeof(Args), &Done);
+                        Out->Status = (NTSTATUS)Args[1];
+                        Out->Count = Args[2];
+                        Out->Mask = Args[3];
+                        Params = Args[4];
+#endif
+                        if (Out->Count > 4)
+                            Out->Count = 4;
+                        if (Params)
+                            ReadProcessMemory(Pi.hProcess, (PVOID)Params, Vals, Out->Count * sizeof(ULONG_PTR), &Done);
+                        for (i = 0; i < 2 && i < Out->Count; i++)
+                        {
+                            Out->Val[i] = Vals[i];
+                            if (Out->Mask & (1UL << i))
+                                ReadChildString(Pi.hProcess, Vals[i], Out->Str[i]);
+                        }
+                        Out->Captured = TRUE;
+
+                        /* Put the instruction back and run it */
+                        WriteProcessMemory(Pi.hProcess, Target, &Orig, 1, &Done);
+                        FlushInstructionCache(Pi.hProcess, Target, 1);
+#ifdef _WIN64
+                        Ctx.Rip = (ULONG_PTR)Target;
+#else
+                        Ctx.Eip = (ULONG_PTR)Target;
+#endif
+                        SetThreadContext(Thread, &Ctx);
+                    }
+                    if (Thread)
+                        CloseHandle(Thread);
+                }
+                break;
+        }
+        ContinueDebugEvent(Ev.dwProcessId, Ev.dwThreadId, Continue);
+    }
+    if (Running)
+    {
+        TerminateProcess(Pi.hProcess, 0xdead);
+        WaitForSingleObject(Pi.hProcess, 5000);
+    }
+    CloseHandle(Pi.hThread);
+    CloseHandle(Pi.hProcess);
+    SetErrorMode(OldMode);
+    return TRUE;
+}
+
+typedef struct _STARTERRCASE
+{
+    PCSTR Name;                 /* for the messages */
+    PCSTR Dll;                  /* the import of the EXE */
+    PCSTR Import;
+    NTSTATUS Status;            /* exit code and the status of the hard error */
+    PCWSTR Param0;              /* first parameter (a string), NULL = not checked */
+} STARTERRCASE;
+
+static const STARTERRCASE StartErrCases[] =
+{
+    { "plain",    "ldrfw_nonexistent.dll", "Foo",          STATUS_DLL_NOT_FOUND, L"ldrfw_nonexistent.dll" },
+    { "fwd-nodll", "ldrfw_fwd.dll",        "FwdNoDll",     STATUS_DLL_NOT_FOUND, L"ldrfw_nonexistent.DLL" },
+    { "fwd-bad",   "ldrfw_fwd.dll",        "FwdBadDll",    STATUS_DLL_NOT_FOUND, L"ldrfw_nonexistent_dep.dll" },
+    { "fwd-c3dll", "ldrfw_fwd.dll",        "FwdChain3Dll", STATUS_DLL_NOT_FOUND, L"ldrfw_nonexistent.DLL" },
+};
+
+static
+VOID
+TestStartupHardErrors(PCWSTR Dir)
+{
+    WCHAR ExePath[MAX_PATH];
+    STARTERR Err;
+    ULONG i;
+
+    for (i = 0; i < _countof(StartErrCases) && !Hung; i++)
+    {
+        const STARTERRCASE *Case = &StartErrCases[i];
+
+        StringCchPrintfW(ExePath, _countof(ExePath), L"%ls\\ldrfw_hexe%lu.exe", Dir, i);
+        if (!WriteFwImage(ExePath, FALSE, NULL, Case->Dll, Case->Import, 0, NULL, 0))
+        {
+            ok(0, "Cannot write %ls: %lu\n", ExePath, GetLastError());
+            continue;
+        }
+        if (!CaptureStartupHardError(Dir, ExePath, &Err))
+        {
+            skip("Cannot start %ls under a debugger: %lu\n", ExePath, GetLastError());
+            DeleteFileW(ExePath);
+            continue;
+        }
+        trace("OBS startup %s: ended %d exit 0x%lx, hard error %d status 0x%lx count %lu mask %lu val0 0x%lx val1 0x%lx '%ls' '%ls'\n",
+              Case->Name, Err.Ended, Err.ExitCode, Err.Captured, (ULONG)Err.Status, Err.Count, Err.Mask,
+              (ULONG)Err.Val[0], (ULONG)Err.Val[1], Err.Str[0], Err.Str[1]);
+        ok(Err.Ended, "%s: the process did not end\n", Case->Name);
+        ok(Err.ExitCode == (DWORD)Case->Status, "%s: exit code 0x%lx, expected 0x%lx\n", Case->Name, Err.ExitCode, (DWORD)Case->Status);
+        if (Err.Captured)
+        {
+            ok(Err.Status == Case->Status, "%s: the hard error is 0x%lx, expected 0x%lx\n", Case->Name, (ULONG)Err.Status, (ULONG)Case->Status);
+            ok(Err.Count >= 1 && (Err.Mask & 1), "%s: the hard error has %lu parameters, mask %lu\n", Case->Name, Err.Count, Err.Mask);
+            if (Case->Param0)
+                ok(!wcscmp(Err.Str[0], Case->Param0), "%s: the hard error names '%ls', expected '%ls'\n", Case->Name,
+                   Err.Str[0], Case->Param0);
+        }
+        else
+        {
+            skip("%s: no hard error caught\n", Case->Name);
+        }
+        DeleteFileW(ExePath);
+    }
+}
+
 /* A process whose static import fails ends with the loader's status. The
  * error mode of this process is inherited by the child, so the system does
  * not show the error */
@@ -898,7 +1467,7 @@ START_TEST(LoadLibraryForwarder)
     PATCH NtPatch, ZwPatch;
 
     Length = GetTempPathW(_countof(Dir), Dir);
-    if (!Length || FAILED(StringCchPrintfW(Dir + Length, _countof(Dir) - Length, L"ldrfw-%lu", GetCurrentProcessId())) ||
+    if (!Length || FAILED(StringCchPrintfW(Dir + Length, _countof(Dir) - Length, L"ldrfw-%lu-%lu", GetCurrentProcessId(), GetTickCount())) ||
         !CreateDirectoryW(Dir, NULL))
     {
         skip("Cannot create the test directory: %lu\n", GetLastError());
@@ -915,6 +1484,18 @@ START_TEST(LoadLibraryForwarder)
     Written &= WriteFwImage(Path, TRUE, "ldrfw_badimp.dll", "kernel32.dll", "LdrFwNoSuchExport", 0, FooExport, 1);
     StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_chain.dll", Dir);
     Written &= WriteFwImage(Path, TRUE, "ldrfw_chain.dll", NULL, NULL, 0, ChainExports, _countof(ChainExports));
+    StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_chain2.dll", Dir);
+    Written &= WriteFwImage(Path, TRUE, "ldrfw_chain2.dll", NULL, NULL, 0, Chain2Exports, _countof(Chain2Exports));
+    for (i = 0; i < _countof(MultiCases); i++)
+    {
+        StringCchPrintfW(Path, _countof(Path), L"%ls\\%ls", Dir, MultiCases[i].File);
+        Written &= WriteFwImageEx(Path, TRUE, "ldrfw_u.dll", MultiCases[i].Imports, MultiCases[i].ImportCount, NULL, FooExport, 1);
+    }
+    for (i = 0; i < _countof(BoundCases); i++)
+    {
+        StringCchPrintfW(Path, _countof(Path), L"%ls\\%ls", Dir, BoundCases[i].File);
+        Written &= WriteFwImageEx(Path, TRUE, "ldrfw_u.dll", &BoundCases[i].Import, 1, &BoundCases[i].Bound, FooExport, 1);
+    }
     StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrmal_tgt.dll", Dir);
     BadImportNameRva = 0x7F000000;
     Written &= WriteFwImage(Path, TRUE, "ldrmal_tgt.dll", "kernel32.dll", "Sleep", 0, FooExport, 1);
@@ -953,6 +1534,10 @@ START_TEST(LoadLibraryForwarder)
                 TestDynamic(Dir);
             if (!Hung)
                 TestGetProcAddress(Dir);
+            if (!Hung)
+                TestMulti(Dir);
+            if (!Hung)
+                TestBound(Dir);
             PatchRemove(&ZwPatch);
             PatchRemove(&NtPatch);
         }
@@ -962,6 +1547,8 @@ START_TEST(LoadLibraryForwarder)
         }
         if (!Hung)
             TestStartup(Dir);
+        if (!Hung)
+            TestStartupHardErrors(Dir);
 
         SetCurrentDirectoryW(OldDir);
     }
@@ -976,6 +1563,18 @@ START_TEST(LoadLibraryForwarder)
     DeleteFileW(Path);
     StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_chain.dll", Dir);
     DeleteFileW(Path);
+    StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrfw_chain2.dll", Dir);
+    DeleteFileW(Path);
+    for (i = 0; i < _countof(MultiCases); i++)
+    {
+        StringCchPrintfW(Path, _countof(Path), L"%ls\\%ls", Dir, MultiCases[i].File);
+        DeleteFileW(Path);
+    }
+    for (i = 0; i < _countof(BoundCases); i++)
+    {
+        StringCchPrintfW(Path, _countof(Path), L"%ls\\%ls", Dir, BoundCases[i].File);
+        DeleteFileW(Path);
+    }
     StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrmal_tgt.dll", Dir);
     DeleteFileW(Path);
     StringCchPrintfW(Path, _countof(Path), L"%ls\\ldrmal_gpa.dll", Dir);
