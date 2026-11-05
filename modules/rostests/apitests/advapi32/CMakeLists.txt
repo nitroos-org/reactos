@@ -1,6 +1,9 @@
 
 list(APPEND SOURCE
     AddMandatoryAce.c
+    AuditCategories.c
+    CveEventWrite.c
+    DynamicTimeZone.c
     BuildSecurityDescriptor.c
     NamedPipeSD.c
     ConvertStringSidToSid.c
@@ -76,6 +79,7 @@ list(APPEND SOURCE
     SetNamedSecurityInfoInherit.c
     SddlRights.c
     ServiceProcess.c
+    PerfCounterValues.c
     PerfProvider.c
     ServiceStructLayout.c
     ServiceTriggerPrivileges.c
