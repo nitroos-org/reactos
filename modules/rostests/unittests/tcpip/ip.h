@@ -66,6 +66,7 @@ typedef struct _IP_PACKET {
     PNDIS_PACKET NdisPacket;
     IP_ADDRESS SrcAddr;
     IP_ADDRESS DstAddr;
+    BOOLEAN FromOwnLink;
 } IP_PACKET, *PIP_PACKET;
 
 typedef struct _IP_INTERFACE {

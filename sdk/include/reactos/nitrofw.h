@@ -41,13 +41,21 @@
  * ============================================================================
  *  1. Loopback always passes: packets that arrive on the loopback interface. The address is not looked at:
  *     a 127.0.0.0/8 source or destination on any other interface is not loopback and is filtered like
- *     any other packet.
+ *     any other packet. Traffic from one of the host's own addresses to one of its own addresses (LAN IP to
+ *     LAN IP) is local too, as on Windows: the stack sends it out through the adapter and NDIS loops it
+ *     back, so it arrives with the adapter's own MAC as the frame source; a packet from the wire that
+ *     merely carries a local source address does not qualify.
  *  2. If NITROFW_POLICY_ENFORCE is clear in Policy.Flags, nothing is filtered (the service clears it when
  *     the registry kill switch says so). Counters may still run.
  *  3. A packet is evaluated against the profiles in Policy.ActiveProfiles. Profile[i] covers profile
  *     bit (1 << i). If no active profile has NITROFW_PROFILE_ENABLED the packet passes.
  *  4. Traffic belonging to a connection or exchange the local host started passes (TCP established,
- *     UDP/ICMP replies from the peer the host sent to): the filter keeps a small flow table.
+ *     UDP/ICMP replies from the peer the host sent to): the filter keeps a small flow table, fed while the
+ *     filter is loaded, so exchanges in flight when enforcement starts continue. A send to a broadcast or
+ *     multicast address admits unicast replies from any peer for 3 seconds (Windows' documented window,
+ *     FW_BCAST_TIMEOUT), and the first reply gives that peer an exchange of its own. DHCP client
+ *     replies (UDP source port 67, destination port 68) always pass: they answer our own request, and
+ *     losing the lease would take the network down.
  *  5. Otherwise: if the profile has NITROFW_PROFILE_BLOCK_ALL_INBOUND, an inbound packet is dropped.
  *     Else the rules whose ProfileMask includes the active profile and whose Direction matches are
  *     tested. A matching Block rule drops the packet (block beats allow); else a matching Allow rule passes
@@ -204,6 +212,7 @@ typedef struct _NITROFW_RULE
  * The whole policy. Rules follow the header at RulesOffset, back to back, RuleCount of them.
  * TotalSize covers the header and all rules.
  */
+#define NITROFW_MAX_GENERATION  0x4000000000000000ULL  /* a larger Generation is rejected (it would lock out every later push) */
 #define NITROFW_POLICY_ENFORCE  0x00000001  /* clear = observe only, nothing is dropped */
 
 typedef struct _NITROFW_POLICY

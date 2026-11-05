@@ -15,11 +15,16 @@
  * The policy's own NITROFW_POLICY_ENFORCE flag (mpssvc: HKLM\SOFTWARE\ReactOS\Nitro\Firewall Enforce)
  * must be set as well.
  *
+ * Reading NitroFwEnforce at SET time: a value that is absent counts as 0 (off). Any other failure to read it
+ * (no memory, wrong type, registry error) keeps the opt-in the previous push established, so a transient
+ * registry fault cannot silently turn enforcement off (or on); it is logged.
+ *
  * Scope: IPv4 inbound only (the IP layer has no IPv6). Dropped: unsolicited TCP SYNs, unsolicited UDP,
  * ICMP requests and other protocols that no Allow rule admits, or that a Block rule matches. Passed
  * without rule evaluation: loopback, TCP segments that are not a connection request (established
  * connections, the stack answers the rest as before), UDP replies from a peer the host sent to recently
- * (flow table), ICMP replies and errors.
+ * (flow table), DHCP client replies (UDP 67 -> 68), ICMP replies and errors, and traffic from one of the
+ * host's own addresses to one of the host's own addresses (see NitroFwInboundAllowed).
  */
 
 #include "precomp.h"
@@ -43,11 +48,16 @@ NTSYSAPI NTSTATUS NTAPI ZwQueryInformationProcess(HANDLE ProcessHandle, PROCESSI
 
 /* UDP flow table: 4-way set associative, replies pass for FW_UDP_TIMEOUT seconds after the last packet.
    A send to a broadcast or multicast address admits unicast replies from any peer for FW_BCAST_TIMEOUT
-   seconds (Windows' "unicast response to multicast/broadcast" default). */
+   seconds (Windows' documented 3 s window for unicast responses to broadcast/multicast; replies that
+   come later are dropped, as on Windows), and the first such reply turns into an exact flow for that
+   peer so its follow-up packets from the same address and port pass for FW_UDP_TIMEOUT. The flow
+   table is fed whenever the filter is loaded (NitroFwTracking), not only while enforcing, so exchanges
+   already in flight when enforcement starts keep working. */
 #define FW_FLOW_SETS        256
 #define FW_FLOW_WAYS        4
 #define FW_UDP_TIMEOUT      60
 #define FW_BCAST_TIMEOUT    3
+#define FW_FLOW_LOCKS       16      /* the flow table's locks: set index modulo this */
 
 typedef struct _FW_IMAGE
 {
@@ -70,8 +80,11 @@ typedef struct _FW_POLICY
     ULONG InRuleCount;
     PULONG InRuleOffsets;       /* offsets of the inbound rules in Blob */
     ULONG BlobSize;
-    UCHAR Blob[ANYSIZE_ARRAY];  /* validated copy of the NITROFW_POLICY sent by the service */
+    DECLSPEC_ALIGN(8) UCHAR Blob[ANYSIZE_ARRAY];  /* validated copy of the NITROFW_POLICY sent by the service */
 } FW_POLICY, *PFW_POLICY;
+
+/* the blob starts 8-aligned, so every 8-aligned offset inside it (Generation, the rules) is 8-aligned in memory */
+C_ASSERT((FIELD_OFFSET(FW_POLICY, Blob) & 7) == 0);
 
 typedef struct _FW_FLOW
 {
@@ -82,6 +95,7 @@ typedef struct _FW_FLOW
 } FW_FLOW, *PFW_FLOW;
 
 volatile LONG NitroFwEnforcing = 0;
+volatile LONG NitroFwTracking = 0;      /* filter loaded: outbound UDP sends feed the flow table (also while not enforcing) */
 volatile LONG NitroFwWantImages = 0;     /* enforced policy with program rules: address files need their image */
 
 static BOOLEAN FwKilled = TRUE;         /* until NitroFwInitialize decides otherwise */
@@ -96,7 +110,7 @@ static PFW_POLICY FwPolicy = NULL;      /* under FwPolicyLock */
 static FAST_MUTEX FwSetMutex;           /* serializes SET/CLEAR */
 static ULONGLONG FwLastGeneration = 0;  /* high-water mark, survives CLEAR */
 
-static KSPIN_LOCK FwFlowLock;
+static KSPIN_LOCK FwFlowLocks[FW_FLOW_LOCKS];
 static FW_FLOW FwFlows[FW_FLOW_SETS][FW_FLOW_WAYS];
 
 static LONG64 FwDroppedInbound = 0;
@@ -158,10 +172,32 @@ static NTSTATUS FwQueryValue(PCWSTR KeyPath, PCWSTR Name, ULONG Type, PVOID Data
     return Status;
 }
 
+/* Read a REG_DWORD switch. An absent key or value is a definite "off" (returns TRUE, *Value 0); any other
+   failure returns FALSE and leaves *Value alone: the caller decides what an unreadable switch means. */
+static BOOLEAN FwReadSwitchEx(PCWSTR Name, PBOOLEAN Value)
+{
+    ULONG Data = 0, Len = sizeof(Data);
+    NTSTATUS Status = FwQueryValue(FW_PARAMS_KEY, Name, REG_DWORD, &Data, &Len);
+
+    if (NT_SUCCESS(Status))
+    {
+        if (Len != sizeof(Data))
+            return FALSE;
+        *Value = Data != 0;
+        return TRUE;
+    }
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_OBJECT_PATH_NOT_FOUND)
+    {
+        *Value = FALSE;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static BOOLEAN FwReadSwitch(PCWSTR Name)
 {
-    ULONG Value = 0, Len = sizeof(Value);
-    return NT_SUCCESS(FwQueryValue(FW_PARAMS_KEY, Name, REG_DWORD, &Value, &Len)) && Len == sizeof(Value) && Value != 0;
+    BOOLEAN Value = FALSE;
+    return FwReadSwitchEx(Name, &Value) && Value;
 }
 
 /* /NOFIREWALL on the boot entry; the kernel stores the options without slashes */
@@ -380,7 +416,9 @@ static NTSTATUS FwCompilePolicy(PFW_POLICY Policy)
         return STATUS_INVALID_PARAMETER;
     if (Hdr->RuleCount > NITROFW_MAX_RULES)
         return STATUS_INVALID_PARAMETER;
-    if (Hdr->Generation == 0)
+    /* a Generation near 2^64 would lock out every later push (the high-water mark only moves up) until
+       reboot; the service starts from seconds since 1601 and adds one per push, so 2^62 is never reached */
+    if (Hdr->Generation == 0 || Hdr->Generation >= NITROFW_MAX_GENERATION)
         return STATUS_INVALID_PARAMETER;
     for (i = 0; i < NITROFW_PROFILE_COUNT; i++)
     {
@@ -389,12 +427,18 @@ static NTSTATUS FwCompilePolicy(PFW_POLICY Policy)
     }
     if (Hdr->RuleCount)
     {
-        if (Hdr->RulesOffset < sizeof(NITROFW_POLICY) || (Hdr->RulesOffset & 7) || Hdr->RulesOffset > Size)
+        /* the rules start right behind the header: no gap that carries unvalidated bytes */
+        if (Hdr->RulesOffset != sizeof(NITROFW_POLICY))
             return STATUS_INVALID_PARAMETER;
         Cursor = Hdr->RulesOffset;
     }
     else
+    {
+        /* no rules: nothing may follow the header */
+        if (Size != sizeof(NITROFW_POLICY))
+            return STATUS_INVALID_PARAMETER;
         Cursor = Size;
+    }
 
     /* pass 1: walk and validate every rule */
     for (i = 0; i < Hdr->RuleCount; i++)
@@ -468,7 +512,7 @@ static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     ULONG InLen = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
     PFW_POLICY Policy;
     NTSTATUS Status;
-    BOOLEAN OptIn;
+    BOOLEAN OptIn = FALSE, OptInRead;
     ULONGLONG Generation;
     ULONG RuleCount, InRuleCount, ActiveProfiles, EnabledProfiles, Flags;
     LONG Enforcing;
@@ -493,7 +537,7 @@ static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     }
 
     /* registry access (Zw calls) before the APC_LEVEL mutex is taken */
-    OptIn = FwReadSwitch(L"NitroFwEnforce");
+    OptInRead = FwReadSwitchEx(L"NitroFwEnforce", &OptIn);
 
     ExAcquireFastMutex(&FwSetMutex);
     if (Policy->Generation <= FwLastGeneration)
@@ -503,7 +547,10 @@ static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         return STATUS_REVISION_MISMATCH;
     }
     FwLastGeneration = Policy->Generation;
-    FwOptIn = OptIn;
+    if (OptInRead)
+        FwOptIn = OptIn;
+    else
+        OptIn = FwOptIn;    /* unreadable: keep what the last push established (never silently flip) */
     /* the policy is owned by FwPolicy from here on (and may be replaced or freed by the next SET/CLEAR
        as soon as the mutex is gone): everything logged below is copied while still under the mutex */
     Generation = Policy->Generation;
@@ -520,6 +567,8 @@ static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
     if (NitroFwWantImages)
         FwBackfillImages();
 
+    if (!OptInRead)
+        DbgPrint("NitroFw: NitroFwEnforce could not be read, opt-in kept at %u\n", OptIn);
     DbgPrint("NitroFw: policy %I64u installed, %lu rules (%lu inbound), profiles 0x%lx enabled 0x%lx, flags 0x%lx, opt-in %u, enforcing %ld\n",
             Generation, RuleCount, InRuleCount, ActiveProfiles, EnabledProfiles, Flags, OptIn, Enforcing);
     return STATUS_SUCCESS;
@@ -621,6 +670,8 @@ static NTSTATUS NTAPI FwDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     {
         case IRP_MJ_CREATE:
             Status = FwCheckCreate(Irp, IrpSp);
+            if (NT_SUCCESS(Status))
+                Irp->IoStatus.Information = FILE_OPENED;
             break;
         case IRP_MJ_CLEANUP:
         case IRP_MJ_CLOSE:
@@ -695,7 +746,8 @@ NTSTATUS NitroFwInitialize(PDRIVER_OBJECT DriverObject)
     ULONG i;
 
     KeInitializeSpinLock(&FwPolicyLock);
-    KeInitializeSpinLock(&FwFlowLock);
+    for (i = 0; i < FW_FLOW_LOCKS; i++)
+        KeInitializeSpinLock(&FwFlowLocks[i]);
     ExInitializeFastMutex(&FwSetMutex);
 
     if (FwReadSwitch(L"NitroFwDisable") || FwBootOptionOff())
@@ -745,6 +797,7 @@ NTSTATUS NitroFwInitialize(PDRIVER_OBJECT DriverObject)
 
     FwDevice->Flags &= ~DO_DEVICE_INITIALIZING;
     FwKilled = FALSE;
+    InterlockedExchange((PLONG)&NitroFwTracking, 1);
     DbgPrint("NitroFw: filter ready, enforcement opt-in %u\n", FwOptIn);
     return STATUS_SUCCESS;
 }
@@ -756,6 +809,7 @@ VOID NitroFwUnload(VOID)
     if (FwKilled)
         return;
     InterlockedExchange((PLONG)&NitroFwEnforcing, 0);
+    InterlockedExchange((PLONG)&NitroFwTracking, 0);
     InterlockedExchange((PLONG)&NitroFwWantImages, 0);
     if (FwSymlink)
         IoDeleteSymbolicLink(&DosName);
@@ -974,11 +1028,12 @@ static ULONG FwFlowSet(USHORT LocalPort, ULONG RemoteAddr, USHORT RemotePort)
 
 static VOID FwFlowInsert(USHORT LocalPort, ULONG RemoteAddr, USHORT RemotePort, ULONG Timeout)
 {
-    PFW_FLOW Set = FwFlows[FwFlowSet(LocalPort, RemoteAddr, RemotePort)], Victim = NULL;
+    ULONG SetIndex = FwFlowSet(LocalPort, RemoteAddr, RemotePort);
+    PFW_FLOW Set = FwFlows[SetIndex], Victim = NULL;
     ULONG Now = FwNow(), i;
     KIRQL OldIrql;
 
-    KeAcquireSpinLock(&FwFlowLock, &OldIrql);
+    KeAcquireSpinLock(&FwFlowLocks[SetIndex % FW_FLOW_LOCKS], &OldIrql);
     /* the same exchange again, else a free or expired way, else the way that expires first */
     for (i = 0; i < FW_FLOW_WAYS; i++)
     {
@@ -1006,36 +1061,47 @@ static VOID FwFlowInsert(USHORT LocalPort, ULONG RemoteAddr, USHORT RemotePort, 
     Victim->RemoteAddr = RemoteAddr;
     Victim->RemotePort = RemotePort;
     Victim->Expiry = Now + Timeout;
-    KeReleaseSpinLock(&FwFlowLock, OldIrql);
+    KeReleaseSpinLock(&FwFlowLocks[SetIndex % FW_FLOW_LOCKS], OldIrql);
+}
+
+/* One lookup of (LocalPort, Ra, Rp); an exact peer (Ra != 0) entry is kept alive by traffic */
+static BOOLEAN FwFlowFind(USHORT LocalPort, ULONG Ra, USHORT Rp)
+{
+    ULONG SetIndex = FwFlowSet(LocalPort, Ra, Rp), Now = FwNow(), i;
+    PFW_FLOW Set = FwFlows[SetIndex];
+    BOOLEAN Hit = FALSE;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&FwFlowLocks[SetIndex % FW_FLOW_LOCKS], &OldIrql);
+    for (i = 0; i < FW_FLOW_WAYS; i++)
+    {
+        if (Set[i].Expiry && (LONG)(Set[i].Expiry - Now) >= 0 &&
+            Set[i].LocalPort == LocalPort && Set[i].RemoteAddr == Ra && Set[i].RemotePort == Rp)
+        {
+            if (Ra != 0)    /* concrete peers only: the wildcard entry is never extended by traffic */
+                Set[i].Expiry = Now + FW_UDP_TIMEOUT;
+            Hit = TRUE;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&FwFlowLocks[SetIndex % FW_FLOW_LOCKS], OldIrql);
+    return Hit;
 }
 
 static BOOLEAN FwFlowLookup(USHORT LocalPort, ULONG RemoteAddr, USHORT RemotePort)
 {
-    ULONG Now = FwNow(), i, pass;
-    BOOLEAN Hit = FALSE;
-    KIRQL OldIrql;
-
-    KeAcquireSpinLock(&FwFlowLock, &OldIrql);
-    for (pass = 0; pass < 2 && !Hit; pass++)
+    if (FwFlowFind(LocalPort, RemoteAddr, RemotePort))
+        return TRUE;
+    /* a reply to a broadcast/multicast send: the wildcard entry. The sender (a concrete peer) now has an
+       exchange of its own, so its next packets (a second DHCP/SSDP message, the follow-up of a slow
+       responder) pass without needing the wildcard window to still be open. 0.0.0.0 never promotes. */
+    if (FwFlowFind(LocalPort, 0, 0))
     {
-        /* pass 0: exact peer; pass 1: reply to a broadcast/multicast send */
-        ULONG Ra = pass ? 0 : RemoteAddr;
-        USHORT Rp = pass ? 0 : RemotePort;
-        PFW_FLOW Set = FwFlows[FwFlowSet(LocalPort, Ra, Rp)];
-        for (i = 0; i < FW_FLOW_WAYS; i++)
-        {
-            if (Set[i].Expiry && (LONG)(Set[i].Expiry - Now) >= 0 &&
-                Set[i].LocalPort == LocalPort && Set[i].RemoteAddr == Ra && Set[i].RemotePort == Rp)
-            {
-                if (!pass && RemoteAddr != 0)   /* concrete peers only: 0.0.0.0 must not extend the wildcard entry */
-                    Set[i].Expiry = Now + FW_UDP_TIMEOUT;   /* traffic keeps the exchange alive */
-                Hit = TRUE;
-                break;
-            }
-        }
+        if (RemoteAddr != 0)
+            FwFlowInsert(LocalPort, RemoteAddr, RemotePort, FW_UDP_TIMEOUT);
+        return TRUE;
     }
-    KeReleaseSpinLock(&FwFlowLock, OldIrql);
-    return Hit;
+    return FALSE;
 }
 
 VOID NitroFwNoteUdpSend(USHORT LocalPort, PIP_ADDRESS Remote, USHORT RemotePort, BOOLEAN NonUnicast)
@@ -1056,6 +1122,27 @@ VOID NitroFwNoteUdpSend(USHORT LocalPort, PIP_ADDRESS Remote, USHORT RemotePort,
 /* ------------------------------------------------------------------------------------------------
  * The inbound decision
  * ---------------------------------------------------------------------------------------------- */
+
+/* Is Address the unicast address of one of the host's interfaces? */
+static BOOLEAN FwIsOwnUnicast(PIP_ADDRESS Address)
+{
+    KIRQL OldIrql;
+    BOOLEAN Own = FALSE;
+    IF_LIST_ITER(CurrentIF);
+
+    if (Address->Type != IP_ADDRESS_V4 || AddrIsUnspecified(Address))
+        return FALSE;
+    TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
+    ForEachInterface(CurrentIF) {
+        if (AddrIsEqual(&CurrentIF->Unicast, Address))
+        {
+            Own = TRUE;
+            break;
+        }
+    } EndFor(CurrentIF);
+    TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
+    return Own;
+}
 
 typedef struct _FW_PKT
 {
@@ -1177,6 +1264,14 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
     if (Interface == Loopback || IPPacket->Type != IP_ADDRESS_V4)
         return TRUE;
 
+    /* Host to itself over a real address (LAN IP to LAN IP): the stack sends it through the adapter and
+       NDIS loops it back with the adapter's own MAC as source. Source and destination both being ours
+       is not enough on its own (a packet from the wire can carry any source address): the frame must
+       also have come from our own MAC (IP_PACKET.FromOwnLink, carried through reassembly: every
+       fragment must have had it). */
+    if (IPPacket->FromOwnLink && FwIsOwnUnicast(&IPPacket->SrcAddr) && FwIsOwnUnicast(&IPPacket->DstAddr))
+        goto PassCounted;
+
     RtlZeroMemory(&Pkt, sizeof(Pkt));
     Pkt.Protocol = Protocol;
     Pkt.RemoteAddr = FwNtohl(IPPacket->SrcAddr.Address.IPv4Address);
@@ -1223,9 +1318,14 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
         Pkt.RemotePort = (USHORT)((Data[0] << 8) | Data[1]);
         Pkt.LocalPort = (USHORT)((Data[2] << 8) | Data[3]);
         Pkt.LocalPortN = *(USHORT UNALIGNED *)(Data + 2);
-        if (Protocol == IPPROTO_UDP &&
-            FwFlowLookup(Pkt.LocalPortN, IPPacket->SrcAddr.Address.IPv4Address, *(USHORT UNALIGNED *)Data))
-            goto PassCounted;
+        if (Protocol == IPPROTO_UDP)
+        {
+            /* DHCP client replies (the server answers from 67 to our 68) */
+            if (Pkt.RemotePort == 67 && Pkt.LocalPort == 68)
+                goto PassCounted;
+            if (FwFlowLookup(Pkt.LocalPortN, IPPacket->SrcAddr.Address.IPv4Address, *(USHORT UNALIGNED *)Data))
+                goto PassCounted;
+        }
     }
 
     Policy = FwRefPolicy();
