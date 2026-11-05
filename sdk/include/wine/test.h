@@ -123,7 +123,22 @@ extern int winetest_vprintf( const char *msg, va_list args );
 extern int winetest_get_time(void);
 
 extern int winetest_get_mainargs( char*** pargv );
-extern void winetest_wait_child_process( HANDLE process );
+extern void winetest_wait_child_process_handle( HANDLE process );
+extern void winetest_wait_child_process_info( const PROCESS_INFORMATION *info );
+
+/* Wine 11 passes the PROCESS_INFORMATION (and the wait closes both handles); older tests in the tree still pass the
+ * process handle (and close the handles themselves). Accept both. */
+#ifdef __cplusplus
+extern "C++" {
+static inline void winetest_wait_child_process( HANDLE process ) { winetest_wait_child_process_handle( process ); }
+static inline void winetest_wait_child_process( const PROCESS_INFORMATION *info ) { winetest_wait_child_process_info( info ); }
+}
+#else
+#define winetest_wait_child_process(arg) _Generic((arg), \
+    PROCESS_INFORMATION *: winetest_wait_child_process_info, \
+    const PROCESS_INFORMATION *: winetest_wait_child_process_info, \
+    default: winetest_wait_child_process_handle)(arg)
+#endif
 
 #ifdef STANDALONE
 #define START_TEST(name) \
@@ -704,7 +719,7 @@ int winetest_get_mainargs( char ***pargv )
     return winetest_argc;
 }
 
-void winetest_wait_child_process( HANDLE process )
+void winetest_wait_child_process_handle( HANDLE process )
 {
     DWORD exit_code = 1;
 
@@ -728,6 +743,14 @@ void winetest_wait_child_process( HANDLE process )
                 InterlockedIncrement(&winetest_failures);
         }
     }
+}
+
+void winetest_wait_child_process_info( const PROCESS_INFORMATION *info )
+{
+    winetest_wait_child_process_handle( info->hProcess );
+    if (info->hProcess && !CloseHandle( info->hProcess ))
+        fprintf( stdout, "%s: failed to close process handle, error %u\n", current_test->name, (unsigned)GetLastError() );
+    if (info->hThread) CloseHandle( info->hThread );
 }
 
 /* Find a test by name */

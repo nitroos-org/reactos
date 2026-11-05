@@ -102,7 +102,7 @@ sdk/lib/wmcodecdspuuid          # Synced to Wine-11.19
 
 dll/win32/activeds            # Synced to Wine-10.0
 dll/win32/activeds.tlb        # Synced to Wine-10.0
-dll/win32/actxprxy            # Synced to Wine-10.0
+dll/win32/actxprxy            # Synced to Wine-11.21
 dll/win32/advpack             # Synced to Wine-11.21
 dll/win32/atl                 # Synced to Wine-11.21
 dll/win32/atl80               # Synced to Wine-10.0
@@ -127,7 +127,7 @@ dll/win32/cryptdlg            # Synced to Wine-10.0
 dll/win32/cryptdll            # Synced to Wine-10.0
 dll/win32/cryptnet            # Synced to Wine-11.21
 dll/win32/cryptui             # Synced to Wine-10.0
-dll/win32/dbgeng              # Synced to Wine-10.0
+dll/win32/dbgeng              # Synced to Wine-11.21
 dll/win32/dbghelp             # Synced to WineStaging-5.16
 dll/win32/dciman32            # Synced to Wine-10.1-dev (b00c7619f1b)
 dll/win32/dcomp               # Synced to Wine-10.0
@@ -166,7 +166,7 @@ dll/win32/mcicda              # Synced to Wine-11.21
 dll/win32/mciqtz32            # Synced to Wine-10.0
 dll/win32/mciseq              # Synced to Wine-10.0
 dll/win32/mciwave             # Synced to Wine-10.0
-dll/win32/mf                  # Synced to Wine-11.21 (winetests/mf/transform.c kept at 11.19: new tests need wmcodecdsp.h header sync)
+dll/win32/mf                  # Synced to Wine-11.21
 dll/win32/mfplat              # Synced to Wine-11.21. Below 0x603 the Rtwq queue code of rtworkq is linked in.
 dll/win32/mfplay              # Synced to Wine-11.21
 dll/win32/mfreadwrite         # Synced to Wine-11.21
@@ -223,7 +223,7 @@ dll/win32/odbc32              # Synced to WineStaging-4.18. Depends on port of L
 dll/win32/odbccp32            # Synced to Wine-11.21
 dll/win32/ole32               # Synced to Wine-10.0
 dll/win32/oleacc              # Synced to Wine-10.0
-dll/win32/oleaut32            # Synced to Wine-11.21 (except vartype.c and the tmarshal/vartype tests: Wine 11 types VARIANT.cVal as CHAR, the psdk headers keep signed char)
+dll/win32/oleaut32            # Synced to Wine-11.21
 dll/win32/olecli32            # Synced to Wine-10.0
 dll/win32/oledlg              # Synced to Wine-10.0
 dll/win32/olepro32            # Synced to Wine-10.0
