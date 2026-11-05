@@ -664,9 +664,11 @@ MiSessionCreateInternal(OUT PULONG SessionId)
     {
         /* We ran out of session IDs, we should expand */
         DPRINT1("Too many sessions created. Expansion not yet supported\n");
+        KeReleaseGuardedMutex(&MiSessionIdMutex);
 #if (_MI_PAGING_LEVELS < 3)
         ExFreePoolWithTag(PageTables, 'tHmM');
 #endif // (_MI_PAGING_LEVELS < 3)
+        PspClearProcessFlag(Process, PSF_SESSION_CREATION_UNDERWAY_BIT);
         return STATUS_NO_MEMORY;
     }
 
@@ -1050,9 +1052,9 @@ NTAPI
 MmGetSessionById(
     _In_ ULONG SessionId)
 {
-    PLIST_ENTRY ListEntry;
+    PLIST_ENTRY ListEntry, ProcessEntry;
     PMM_SESSION_SPACE Session;
-    PEPROCESS Process = NULL;
+    PEPROCESS Process = NULL, Candidate;
     KIRQL OldIrql;
 
     /* Acquire the expansion lock while touching the session */
@@ -1066,20 +1068,24 @@ MmGetSessionById(
         ListEntry = ListEntry->Flink;
 
         /* Check if this is the session we are looking for */
-        if (Session->SessionId == SessionId)
-        {
-            /* Check if we also have a process in the process list */
-            if (!IsListEmpty(&Session->ProcessList))
-            {
-                Process = CONTAINING_RECORD(Session->ProcessList.Flink,
-                                            EPROCESS,
-                                            SessionProcessLinks);
+        if (Session->SessionId != SessionId) continue;
 
-                /* Reference the process */
-                ObReferenceObject(Process);
+        /* A session that is going away cannot be entered any more */
+        if (Session->u.Flags.DeletePending) break;
+
+        /* Return the first process of the session that is not being deleted */
+        for (ProcessEntry = Session->ProcessList.Flink;
+             ProcessEntry != &Session->ProcessList;
+             ProcessEntry = ProcessEntry->Flink)
+        {
+            Candidate = CONTAINING_RECORD(ProcessEntry, EPROCESS, SessionProcessLinks);
+            if (ObReferenceObjectSafe(Candidate))
+            {
+                Process = Candidate;
                 break;
             }
         }
+        break;
     }
 
     /* Release the lock again */
