@@ -529,7 +529,10 @@ CcRosDropFlushReference(
     return FALSE;
 }
 
-/* Maps whose write failed in one CcRosFlushDirtyPages call are skipped for the rest of it */
+/*
+ * Maps whose write failed in one CcRosFlushDirtyPages call are skipped for the rest of it, and so are maps
+ * the lazy writer could not lock without waiting (below).
+ */
 #define CC_FLUSH_FAILED_MAPS 16
 /* A full flush waits this many 10 ms in a row, with no dirty page written meanwhile, for the lazy writer to finish with a map before it gives up */
 #define CC_FLUSHALL_BUSY_WAITS 1000
@@ -607,6 +610,8 @@ CcRosFlushDirtyPages (
     ULONG Failures = 0;
     PROS_SHARED_CACHE_MAP FailedMaps[CC_FLUSH_FAILED_MAPS];
     ULONG FailedCount = 0;
+    PROS_SHARED_CACHE_MAP BusyMaps[CC_FLUSH_FAILED_MAPS];
+    ULONG BusyCount = 0;
     ULONG LapFlushed = 0;
     ULONG BusyWaits = 0;
     ULONG TotalWaits = 0;
@@ -718,6 +723,23 @@ CcRosFlushDirtyPages (
             continue;
         }
 
+        /*
+         * A map the file system would not let us lock without waiting (its owner holds the paging resource
+         * exclusive: a growing file) is left for the next call, whole.  Going on with its later views would
+         * write the file out of order (the file system then zero-fills the gap below each view, under its
+         * locks, only for the skipped views to be written again).
+         */
+        for (i = 0; i < BusyCount; i++)
+        {
+            if (BusyMaps[i] == SharedCacheMap)
+                break;
+        }
+        if (i < BusyCount)
+        {
+            CcRosVacbDecRefCount(current);
+            continue;
+        }
+
         /* Do not lazy-write the same file concurrently. Fastfat ASSERTS on that */
         if (SharedCacheMap->Flags & SHARED_CACHE_MAP_IN_LAZYWRITE)
         {
@@ -755,6 +777,10 @@ CcRosFlushDirtyPages (
             CcRosVacbDecRefCount(current);
 
             SharedCacheMap->Flags &= ~SHARED_CACHE_MAP_IN_LAZYWRITE;
+
+            /* Compared as a pointer only; with the array full the map is tried again view by view */
+            if (BusyCount < CC_FLUSH_FAILED_MAPS)
+                BusyMaps[BusyCount++] = SharedCacheMap;
 
             if (CcRosDropFlushReference(SharedCacheMap, &OldIrql, CalledFromLazy || FlushAll))
             {
