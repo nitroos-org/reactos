@@ -155,6 +155,8 @@ typedef struct _RENAMER
     BOOL AtA;
     ULONG Done;
     DWORD LastError;
+    ULONG FailedAt;     /* Done when a rename first failed (0: none) */
+    ULONG Failures;
 } RENAMER;
 
 /* Moves the directory between a short and a long name until told to stop. */
@@ -172,6 +174,8 @@ static DWORD WINAPI RenameLoop(PVOID Context)
         else
         {
             Rn->LastError = GetLastError();
+            if (!Rn->Failures++)
+                Rn->FailedAt = Rn->Done;
             Sleep(1);
         }
     }
@@ -179,7 +183,7 @@ static DWORD WINAPI RenameLoop(PVOID Context)
 }
 
 /* NtCreateFile of a new file relative to the directory handle (survives the directory's rename). */
-static BOOL CreateRelative(HANDLE Dir, PCWSTR Name)
+static NTSTATUS CreateRelative(HANDLE Dir, PCWSTR Name)
 {
     UNICODE_STRING Str;
     OBJECT_ATTRIBUTES Oa;
@@ -193,7 +197,7 @@ static BOOL CreateRelative(HANDLE Dir, PCWSTR Name)
                           FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
     if (NT_SUCCESS(Status))
         NtClose(H);
-    return NT_SUCCESS(Status);
+    return Status;
 }
 
 START_TEST(NtfsNotifyRename)
@@ -207,6 +211,7 @@ START_TEST(NtfsNotifyRename)
     DWORD Bytes;
     ULONG i, Delivered = 0;
     BOOL Pending;
+    NTSTATUS Status;
 
     if (!NtInit("NtfsNotifyRename"))
         return;
@@ -277,7 +282,9 @@ START_TEST(NtfsNotifyRename)
         }
         Sleep(1);   /* let the renamer run: a single processor switches threads only at a wait or a quantum */
         _snwprintf(Rel, 63, L"sub\\n%lu.txt", i);
-        ok(CreateRelative(W.Dir, Rel), "Creating %ls relative to the directory handle\n", Rel);
+        Status = CreateRelative(W.Dir, Rel);
+        ok(NT_SUCCESS(Status), "Creating %ls relative to the directory handle: 0x%lx (renames done %lu, first failed at %lu, %lu failures, last error %lu)\n",
+           Rel, Status, Rn.Done, Rn.FailedAt, Rn.Failures, Rn.LastError);
         Pending = !WaitWatch(&W, 50, &Bytes);
         if (Pending)
         {
@@ -386,5 +393,59 @@ START_TEST(NtfsNotifyScale)
     }
 
 cleanup:
+    NtCleanup();
+}
+
+/* A rename to or from a name that is no 8.3 name adds $FILE_NAME attributes to the MFT record, and each attribute added
+ * takes the record's next 16-bit instance number.  Once the number wrapped the driver gave a new attribute an instance
+ * another attribute of the record still had, and every later change of the directory failed (STATUS_UNEXPECTED_IO_ERROR
+ * from the 43687th rename between a short and a 200 character name; the race in NtfsNotifyRename reached it on a fast
+ * host).  Names of 180 or more characters. */
+START_TEST(NtfsRenameInstanceWrap)
+{
+    WCHAR Short[MAX_PATH], Long[MAX_PATH], Name[MAX_PATH], Other[MAX_PATH];
+    HANDLE F;
+    BOOL AtShort = TRUE;
+    ULONG i, Done = 0, Failed = 0;
+    DWORD Error = 0;
+
+    if (!NtInit("NtfsRenameInstanceWrap"))
+        return;
+
+    NtPath(Short, L"iw");
+    MakeLongName(Name, L'q', 200);
+    NtPath(Long, Name);
+    ok(CreateDirectoryW(Short, NULL), "Creating %ls: %lu\n", Short, GetLastError());
+    _snwprintf(Other, MAX_PATH - 1, L"%ls\\sub", Short);
+    ok(CreateDirectoryW(Other, NULL), "Creating %ls: %lu\n", Other, GetLastError());
+
+    for (i = 0; i < 48000; i++)
+    {
+        if (MoveFileW(AtShort ? Short : Long, AtShort ? Long : Short))
+        {
+            AtShort = !AtShort;
+            Done++;
+        }
+        else
+        {
+            Error = GetLastError();
+            Failed++;
+            break;
+        }
+    }
+    ok(!Failed, "rename %lu of 48000 failed: %lu\n", Done + 1, Error);
+    trace("%lu renames\n", Done);
+
+    /* the directory and its parent still work */
+    ok(GetFileAttributesW(AtShort ? Short : Long) != INVALID_FILE_ATTRIBUTES, "the directory is gone: %lu\n", GetLastError());
+    NtPath(Other, L"iw2");
+    F = CreateFileW(Other, GENERIC_WRITE, SHARE_ALL, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    ok(F != INVALID_HANDLE_VALUE, "Creating %ls: %lu\n", Other, GetLastError());
+    if (F != INVALID_HANDLE_VALUE)
+        CloseHandle(F);
+    _snwprintf(Other, MAX_PATH - 1, L"%ls\\sub", AtShort ? Short : Long);
+    ok(RemoveDirectoryW(Other), "Removing %ls: %lu\n", Other, GetLastError());
+    ok(RemoveDirectoryW(AtShort ? Short : Long), "Removing the renamed directory: %lu\n", GetLastError());
+
     NtCleanup();
 }
