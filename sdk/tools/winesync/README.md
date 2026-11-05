@@ -44,7 +44,7 @@ The report (`process/WINESYNC-REPORT.md` in the harness) is regenerated, not edi
     python3 src/sdk/tools/winesync/winewatch.py scan --wine wine --ros src \
         --out-md WINESYNC-REPORT.md --out-tsv wine-map.tsv --out-json scan.json
 
-Add `--write-configs` to (re)write `modules/*.cfg` from the detected tags. It takes about 15 minutes on the first run (blob fetches).
+Add `--write-configs` to (re)write `modules/*.cfg` from the detected tags. It takes about 10 minutes on the first run (blob fetches), a few minutes after that.
 
 ## Adding a module config
 
@@ -77,7 +77,9 @@ command then exits 1). It also removes files Wine deleted (if ReactOS never touc
 bumps `tags.wine` in the config and rewrites the module's line in `media/doc/WINESYNC.txt`. It never commits and refuses a dirty module path.
 
 After it runs: resolve conflict markers, add the new files it listed (and the matching `CMakeLists.txt` entries) if the new Wine
-code needs them, build i386 and amd64 in Release and Debug, run the module's winetests on the base build and on the fix (same
+code needs them, and compare the module's `Makefile.in` `IMPORTS =` line in Wine at the target tag with the `add_importlibs`/`target_link_libraries`
+in the module's `CMakeLists.txt` (and its winetest's): the tool does not touch CMake, and new Wine code often needs a new import library
+(wmiutils 11.21: `ole32` and `uuid`, found by the link step), build i386 and amd64 in Release and Debug, run the module's winetests on the base build and on the fix (same
 counts or better; the `todo_ros`/`broken` lines may only shrink), then commit one module per commit:
 
     git commit -m "[WINHTTP] Sync to Wine-11.21"
