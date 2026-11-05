@@ -1032,6 +1032,76 @@ test_open(VOID)
     ok(ret == ERROR_INVALID_HANDLE, "RegOpenKeyExW without a subkey returned %ld\n", ret);
 }
 
+static
+VOID
+test_new_objects(VOID)
+{
+    static const struct { DWORD Index; PCWSTR Name; DWORD Counters; DWORD DefaultName; } Objects[] =
+    {
+        { 232, L"Thread", 11, 146 },
+        { 236, L"LogicalDisk", 23, 200 },
+        { 3518, L"Processor Information", 10, 6 },
+    };
+    const PERF_OBJECT_TYPE *Object;
+    const PERF_COUNTER_DEFINITION *Definition;
+    DWORD Type, Size, i, k, Slots;
+    const WCHAR *Text;
+    LONG ret;
+
+    /* the objects of the Global block and of a list by index */
+    ret = QueryValue(HKEY_PERFORMANCE_DATA, L"232 236 3518", &Type, &Size);
+    ok(ret == ERROR_SUCCESS, "232 236 3518: ret = %ld\n", ret);
+    if (ret == ERROR_SUCCESS)
+    {
+        ValidateBlock("232 236 3518", g_Buffer, Size);
+        for (i = 0; i < PERF_ARRAY_SIZE(Objects); i++)
+        {
+            Object = FindObject(g_Buffer, Objects[i].Index);
+            ok(Object != NULL, "%ls: not in the block\n", Objects[i].Name);
+            if (!Object)
+                continue;
+            ok(Object->ObjectHelpTitleIndex == Objects[i].Index + 1, "%ls: help index %lu\n", Objects[i].Name, Object->ObjectHelpTitleIndex);
+            ok(Object->NumInstances > 0, "%ls: %ld instances\n", Objects[i].Name, (LONG)Object->NumInstances);
+            /* a counter followed by a base counter takes two definitions */
+            Slots = Object->NumCounters;
+            ok(Slots >= Objects[i].Counters, "%ls: %lu definitions\n", Objects[i].Name, Slots);
+            Definition = (const PERF_COUNTER_DEFINITION *)((const BYTE *)Object + Object->HeaderLength);
+            for (k = 0; k < Slots; k++)
+                ok(Definition[k].CounterHelpTitleIndex == Definition[k].CounterNameTitleIndex + 1, "%ls: counter %lu help %lu\n",
+                   Objects[i].Name, Definition[k].CounterNameTitleIndex, Definition[k].CounterHelpTitleIndex);
+            ok(Object->DefaultCounter < (LONG)Slots && Definition[Object->DefaultCounter].CounterNameTitleIndex == Objects[i].DefaultName,
+               "%ls: default counter %ld is %lu, expected %lu\n", Objects[i].Name, Object->DefaultCounter,
+               Object->DefaultCounter < (LONG)Slots ? Definition[Object->DefaultCounter].CounterNameTitleIndex : 0, Objects[i].DefaultName);
+        }
+        /* the Processor Information counter that has no Processor equivalent */
+        Object = FindObject(g_Buffer, 3518);
+        if (Object)
+            ok(FindCounter(Object, 3572) != NULL, "Processor Information: no % Processor Utility\n");
+    }
+
+    /* the names and the explain text of the objects are in the tables */
+    ret = QueryValue(HKEY_PERFORMANCE_DATA, L"Counter 009", &Type, &Size);
+    ok(ret == ERROR_SUCCESS, "Counter 009: ret = %ld\n", ret);
+    if (ret == ERROR_SUCCESS)
+    {
+        for (i = 0; i < PERF_ARRAY_SIZE(Objects); i++)
+        {
+            Text = FindText((PWSTR)g_Buffer, Size, Objects[i].Index);
+            ok(Text && !lstrcmpW(Text, Objects[i].Name), "%lu: name is %ls\n", Objects[i].Index, Text);
+        }
+    }
+    ret = QueryValue(HKEY_PERFORMANCE_DATA, L"Help 009", &Type, &Size);
+    ok(ret == ERROR_SUCCESS, "Help 009: ret = %ld\n", ret);
+    if (ret == ERROR_SUCCESS)
+    {
+        for (i = 0; i < PERF_ARRAY_SIZE(Objects); i++)
+        {
+            Text = FindText((PWSTR)g_Buffer, Size, Objects[i].Index + 1);
+            ok(Text && lstrlenW(Text) > 20, "%lu: help is %ls\n", Objects[i].Index + 1, Text);
+        }
+    }
+}
+
 START_TEST(RegPerformanceData)
 {
     LONG ret;
@@ -1049,6 +1119,7 @@ START_TEST(RegPerformanceData)
     test_global();
     test_object_lists();
     test_objects();
+    test_new_objects();
     test_processor_time();
     test_ansi();
     test_open();

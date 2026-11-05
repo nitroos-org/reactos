@@ -539,7 +539,7 @@ static void test_PdhGetCounterInfoA( void )
     PDH_STATUS ret;
     PDH_HQUERY query;
     PDH_HCOUNTER counter;
-    PDH_COUNTER_INFO_A info;
+    PDH_COUNTER_INFO_A *info;
     DWORD size;
 
     ret = PdhOpenQueryA( NULL, 0, &query );
@@ -554,36 +554,38 @@ static void test_PdhGetCounterInfoA( void )
     ret = PdhGetCounterInfoA( counter, 0, NULL, NULL );
     ok(ret == PDH_INVALID_ARGUMENT, "PdhGetCounterInfoA failed 0x%08lx\n", ret);
 
-    ret = PdhGetCounterInfoA( counter, 0, NULL, &info );
+    ret = PdhGetCounterInfoA( counter, 0, NULL, (PDH_COUNTER_INFO_A *)&ret );
     ok(ret == PDH_INVALID_ARGUMENT, "PdhGetCounterInfoA failed 0x%08lx\n", ret);
 
-    size = sizeof(info) - 1;
+    size = 0;
     ret = PdhGetCounterInfoA( counter, 0, &size, NULL );
     ok(ret == PDH_MORE_DATA || ret == PDH_INVALID_ARGUMENT, "PdhGetCounterInfoA failed 0x%08lx\n", ret);
+    ok(size > sizeof(*info), "size %ld\n", size);   /* the strings of the path follow the record */
+    info = malloc( size );
 
-    size = sizeof(info);
-    ret = PdhGetCounterInfoA( counter, 0, &size, &info );
+    ret = PdhGetCounterInfoA( counter, 0, &size, info );
     ok(ret == ERROR_SUCCESS, "PdhGetCounterInfoA failed 0x%08lx\n", ret);
-    ok(size == sizeof(info), "PdhGetCounterInfoA failed %ld\n", size);
+    ok(info->dwLength == size, "dwLength %ld, size %ld\n", info->dwLength, size);
 
-    ret = PdhGetCounterInfoA( counter, 0, &size, &info );
+    ret = PdhGetCounterInfoA( counter, 0, &size, info );
     ok(ret == ERROR_SUCCESS, "PdhGetCounterInfoA failed 0x%08lx\n", ret);
-    ok(info.lScale == 0, "lScale %ld\n", info.lScale);
+    ok(info->lScale == 0, "lScale %ld\n", info->lScale);
 
     ret = PdhSetCounterScaleFactor( counter, 0 );
     ok(ret == ERROR_SUCCESS, "PdhSetCounterScaleFactor failed 0x%08lx\n", ret);
 
-    ret = PdhGetCounterInfoA( counter, 0, &size, &info );
+    ret = PdhGetCounterInfoA( counter, 0, &size, info );
     ok(ret == ERROR_SUCCESS, "PdhGetCounterInfoA failed 0x%08lx\n", ret);
-    ok(info.lScale == 0, "lScale %ld\n", info.lScale);
+    ok(info->lScale == 0, "lScale %ld\n", info->lScale);
 
     ret = PdhSetCounterScaleFactor( counter, -5 );
     ok(ret == ERROR_SUCCESS, "PdhSetCounterScaleFactor failed 0x%08lx\n", ret);
 
-    ret = PdhGetCounterInfoA( counter, 0, &size, &info );
+    ret = PdhGetCounterInfoA( counter, 0, &size, info );
     ok(ret == ERROR_SUCCESS, "PdhGetCounterInfoA failed 0x%08lx\n", ret);
-    ok(info.lScale == -5, "lScale %ld\n", info.lScale);
+    ok(info->lScale == -5, "lScale %ld\n", info->lScale);
 
+    free( info );
     ret = PdhCloseQuery( query );
     ok(ret == ERROR_SUCCESS, "PdhCloseQuery failed 0x%08lx\n", ret);
 }
@@ -593,7 +595,7 @@ static void test_PdhGetCounterInfoW( void )
     PDH_STATUS ret;
     PDH_HQUERY query;
     PDH_HCOUNTER counter;
-    PDH_COUNTER_INFO_W info;
+    PDH_COUNTER_INFO_W *info;
     DWORD size;
 
     ret = PdhOpenQueryW( NULL, 0, &query );
@@ -608,36 +610,38 @@ static void test_PdhGetCounterInfoW( void )
     ret = PdhGetCounterInfoW( counter, 0, NULL, NULL );
     ok(ret == PDH_INVALID_ARGUMENT, "PdhGetCounterInfoW failed 0x%08lx\n", ret);
 
-    ret = PdhGetCounterInfoW( counter, 0, NULL, &info );
+    ret = PdhGetCounterInfoW( counter, 0, NULL, (PDH_COUNTER_INFO_W *)&ret );
     ok(ret == PDH_INVALID_ARGUMENT, "PdhGetCounterInfoW failed 0x%08lx\n", ret);
 
-    size = sizeof(info) - 1;
+    size = 0;
     ret = PdhGetCounterInfoW( counter, 0, &size, NULL );
     ok(ret == PDH_MORE_DATA || ret == PDH_INVALID_ARGUMENT, "PdhGetCounterInfoW failed 0x%08lx\n", ret);
+    ok(size > sizeof(*info), "size %ld\n", size);   /* the strings of the path follow the record */
+    info = malloc( size );
 
-    size = sizeof(info);
-    ret = PdhGetCounterInfoW( counter, 0, &size, &info );
+    ret = PdhGetCounterInfoW( counter, 0, &size, info );
     ok(ret == ERROR_SUCCESS, "PdhGetCounterInfoW failed 0x%08lx\n", ret);
-    ok(size == sizeof(info), "PdhGetCounterInfoW failed %ld\n", size);
+    ok(info->dwLength == size, "dwLength %ld, size %ld\n", info->dwLength, size);
 
-    ret = PdhGetCounterInfoW( counter, 0, &size, &info );
+    ret = PdhGetCounterInfoW( counter, 0, &size, info );
     ok(ret == ERROR_SUCCESS, "PdhGetCounterInfoW failed 0x%08lx\n", ret);
-    ok(info.lScale == 0, "lScale %ld\n", info.lScale);
+    ok(info->lScale == 0, "lScale %ld\n", info->lScale);
 
     ret = PdhSetCounterScaleFactor( counter, 0 );
     ok(ret == ERROR_SUCCESS, "PdhSetCounterScaleFactor failed 0x%08lx\n", ret);
 
-    ret = PdhGetCounterInfoW( counter, 0, &size, &info );
+    ret = PdhGetCounterInfoW( counter, 0, &size, info );
     ok(ret == ERROR_SUCCESS, "PdhGetCounterInfoW failed 0x%08lx\n", ret);
-    ok(info.lScale == 0, "lScale %ld\n", info.lScale);
+    ok(info->lScale == 0, "lScale %ld\n", info->lScale);
 
     ret = PdhSetCounterScaleFactor( counter, -5 );
     ok(ret == ERROR_SUCCESS, "PdhSetCounterScaleFactor failed 0x%08lx\n", ret);
 
-    ret = PdhGetCounterInfoW( counter, 0, &size, &info );
+    ret = PdhGetCounterInfoW( counter, 0, &size, info );
     ok(ret == ERROR_SUCCESS, "PdhGetCounterInfoW failed 0x%08lx\n", ret);
-    ok(info.lScale == -5, "lScale %ld\n", info.lScale);
+    ok(info->lScale == -5, "lScale %ld\n", info->lScale);
 
+    free( info );
     ret = PdhCloseQuery( query );
     ok(ret == ERROR_SUCCESS, "PdhCloseQuery failed 0x%08lx\n", ret);
 }
@@ -1630,6 +1634,498 @@ static void test_add_counter_sets(void)
     ok(ret == ERROR_SUCCESS, "PdhCloseQuery failed 0x%08lx\n", ret);
 }
 
+/* PdhGetCounterInfo: the record is followed by the strings of the path, each on a DWORD, then four bytes */
+static void test_counter_info_layout(void)
+{
+    static const struct { const WCHAR *path, *object, *instance, *parent, *counter; DWORD index; } tests[] =
+    {
+        { L"\\Processor(_Total)\\% Processor Time", L"Processor", L"_Total", NULL, L"% Processor Time", 6 },
+        { L"\\Memory\\Available MBytes", L"Memory", NULL, NULL, L"Available MBytes", 1382 },
+        { L"\\Process(*)\\ID Process", L"Process", L"*", NULL, L"ID Process", 784 },
+    };
+    PDH_COUNTER_INFO_W *info;
+    PDH_COUNTER_INFO_A *infoA;
+    PDH_HQUERY query;
+    PDH_HCOUNTER counter;
+    PDH_STATUS ret;
+    DWORD size, size_notext, sizeA, i, expect;
+    WCHAR host[MAX_COMPUTERNAME_LENGTH + 3];
+    DWORD hostlen = MAX_COMPUTERNAME_LENGTH + 1;
+    char *end;
+
+    host[0] = host[1] = '\\';
+    GetComputerNameW( host + 2, &hostlen );
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        ret = PdhOpenQueryW( NULL, 0, &query );
+        ok(ret == ERROR_SUCCESS, "PdhOpenQueryW failed 0x%08lx\n", ret);
+        ret = PdhAddEnglishCounterW( query, tests[i].path, 0, &counter );
+        ok(ret == ERROR_SUCCESS, "%s: PdhAddEnglishCounterW failed 0x%08lx\n", debugstr_w(tests[i].path), ret);
+
+        size = 0;
+        ret = PdhGetCounterInfoW( counter, TRUE, &size, NULL );
+        ok(ret == PDH_MORE_DATA, "PdhGetCounterInfoW failed 0x%08lx\n", ret);
+        size_notext = 0;
+        ret = PdhGetCounterInfoW( counter, FALSE, &size_notext, NULL );
+        ok(ret == PDH_MORE_DATA, "PdhGetCounterInfoW failed 0x%08lx\n", ret);
+        ok(size_notext > sizeof(*info) && size_notext < size, "sizes %lu, %lu\n", size_notext, size);
+
+        info = malloc( size );
+        memset( info, 0xcc, size );
+        ret = PdhGetCounterInfoW( counter, TRUE, &size, info );
+        ok(ret == ERROR_SUCCESS, "PdhGetCounterInfoW failed 0x%08lx\n", ret);
+        ok(info->dwLength == size, "dwLength %lu, size %lu\n", info->dwLength, size);
+        ok(info->CStatus == PDH_CSTATUS_VALID_DATA || info->CStatus == PDH_CSTATUS_NEW_DATA, "CStatus 0x%08lx\n", info->CStatus);
+        ok(!lstrcmpW( info->szFullPath, tests[i].path ), "%s: full path %s\n", debugstr_w(tests[i].path), debugstr_w(info->szFullPath));
+        ok(!lstrcmpW( info->szMachineName, host ), "machine %s, expected %s\n", debugstr_w(info->szMachineName), debugstr_w(host));
+        ok(!lstrcmpW( info->szObjectName, tests[i].object ), "object %s\n", debugstr_w(info->szObjectName));
+        if (tests[i].instance) ok(!lstrcmpW( info->szInstanceName, tests[i].instance ), "instance %s\n", debugstr_w(info->szInstanceName));
+        else ok(!info->szInstanceName, "instance %s\n", debugstr_w(info->szInstanceName));
+        ok(!info->szParentInstance, "parent %s\n", debugstr_w(info->szParentInstance));
+        ok(!info->dwInstanceIndex, "index %lu\n", info->dwInstanceIndex);
+        ok(!lstrcmpW( info->szCounterName, tests[i].counter ), "counter %s\n", debugstr_w(info->szCounterName));
+        ok(info->szExplainText && lstrlenW( info->szExplainText ) > 20, "explain %s\n", debugstr_w(info->szExplainText));
+
+        /* the strings follow the structure in this order, every one on a DWORD */
+        ok((char *)info->szFullPath == (char *)info->DataBuffer, "full path at %p, data at %p\n", info->szFullPath, info->DataBuffer);
+        expect = (lstrlenW( info->szFullPath ) + 1) * sizeof(WCHAR);
+        expect = (expect + 3) & ~3;
+        ok((char *)info->szMachineName == (char *)info->szFullPath + expect, "machine at %ld, expected %lu\n",
+           (long)((char *)info->szMachineName - (char *)info->szFullPath), expect);
+        end = (char *)info->szExplainText + (((lstrlenW( info->szExplainText ) + 1) * sizeof(WCHAR) + 3) & ~3);
+        ok(end + 4 == (char *)info + size, "strings end at %lu, size %lu\n", (DWORD)(end - (char *)info), size);
+
+        /* the name of the counter is in the name table */
+        {
+            DWORD index = 0;
+            ret = PdhLookupPerfIndexByNameW( NULL, info->szCounterName, &index );
+            ok(ret == ERROR_SUCCESS, "PdhLookupPerfIndexByNameW failed 0x%08lx\n", ret);
+            ok(index == tests[i].index, "%s: index %lu, expected %lu\n", debugstr_w(tests[i].counter), index, tests[i].index);
+        }
+
+        /* without the explain text the record ends after the counter name */
+        memset( info, 0xcc, size );
+        ret = PdhGetCounterInfoW( counter, FALSE, &size_notext, info );
+        ok(ret == ERROR_SUCCESS, "PdhGetCounterInfoW failed 0x%08lx\n", ret);
+        ok(!info->szExplainText, "explain %s\n", debugstr_w(info->szExplainText));
+
+        size = 2;
+        ret = PdhGetCounterInfoW( counter, TRUE, &size, info );
+        ok(ret == PDH_MORE_DATA, "PdhGetCounterInfoW failed 0x%08lx\n", ret);
+        ok(size > sizeof(*info), "size %lu\n", size);
+
+        sizeA = 0;
+        ret = PdhGetCounterInfoA( counter, TRUE, &sizeA, NULL );
+        ok(ret == PDH_MORE_DATA, "PdhGetCounterInfoA failed 0x%08lx\n", ret);
+        infoA = malloc( sizeA );
+        ret = PdhGetCounterInfoA( counter, TRUE, &sizeA, infoA );
+        ok(ret == ERROR_SUCCESS, "PdhGetCounterInfoA failed 0x%08lx\n", ret);
+        ok(infoA->szCounterName && infoA->szFullPath && infoA->szExplainText, "missing strings\n");
+        ok(infoA->dwType == info->dwType, "type 0x%08lx, expected 0x%08lx\n", infoA->dwType, info->dwType);
+        free( infoA );
+
+        free( info );
+        PdhCloseQuery( query );
+    }
+
+    /* "System/0": the parent comes first in the path, the thread number is the instance */
+    ret = PdhOpenQueryW( NULL, 0, &query );
+    ok(ret == ERROR_SUCCESS, "PdhOpenQueryW failed 0x%08lx\n", ret);
+    ret = PdhAddEnglishCounterW( query, L"\\Thread(System/0)\\ID Thread", 0, &counter );
+    ok(ret == ERROR_SUCCESS, "PdhAddEnglishCounterW failed 0x%08lx\n", ret);
+    size = 0;
+    ret = PdhGetCounterInfoW( counter, TRUE, &size, NULL );
+    ok(ret == PDH_MORE_DATA, "PdhGetCounterInfoW failed 0x%08lx\n", ret);
+    info = malloc( size );
+    ret = PdhGetCounterInfoW( counter, TRUE, &size, info );
+    ok(ret == ERROR_SUCCESS, "PdhGetCounterInfoW failed 0x%08lx\n", ret);
+    ok(info->szInstanceName && !lstrcmpW( info->szInstanceName, L"0" ), "instance %s\n", debugstr_w(info->szInstanceName));
+    ok(info->szParentInstance && !lstrcmpW( info->szParentInstance, L"System" ), "parent %s\n", debugstr_w(info->szParentInstance));
+    free( info );
+    PdhCloseQuery( query );
+}
+
+static void test_default_perf(void)
+{
+    static const struct { const WCHAR *object, *counter; } tests[] =
+    {
+        { L"Processor", L"% Processor Time" }, { L"Memory", L"Pages/sec" }, { L"PhysicalDisk", L"% Disk Time" },
+        { L"Process", L"% Processor Time" }, { L"System", L"File Data Operations/sec" },
+        { L"Network Interface", L"Bytes Total/sec" }, { L"LogicalDisk", L"% Disk Time" },
+        { L"Thread", L"Context Switches/sec" }, { L"Processor Information", L"% Processor Time" },
+    };
+    WCHAR buf[64];
+    char bufA[64];
+    DWORD size, i;
+    PDH_STATUS ret;
+
+    size = 0;
+    ret = PdhGetDefaultPerfObjectW( NULL, NULL, NULL, &size );
+    ok(ret == PDH_MORE_DATA, "PdhGetDefaultPerfObjectW failed 0x%08lx\n", ret);
+    ok(size == 10, "size %lu\n", size);
+    size = 3;
+    ret = PdhGetDefaultPerfObjectW( NULL, NULL, buf, &size );
+    ok(ret == PDH_MORE_DATA, "PdhGetDefaultPerfObjectW failed 0x%08lx\n", ret);
+    ok(size == 10, "size %lu\n", size);
+    size = ARRAY_SIZE(buf);
+    ret = PdhGetDefaultPerfObjectW( NULL, NULL, buf, &size );
+    ok(ret == ERROR_SUCCESS, "PdhGetDefaultPerfObjectW failed 0x%08lx\n", ret);
+    ok(!lstrcmpW( buf, L"Processor" ), "got %s\n", debugstr_w(buf));
+    ok(size == 10, "size %lu\n", size);
+    size = ARRAY_SIZE(bufA);
+    ret = PdhGetDefaultPerfObjectA( NULL, NULL, bufA, &size );
+    ok(ret == ERROR_SUCCESS, "PdhGetDefaultPerfObjectA failed 0x%08lx\n", ret);
+    ok(!strcmp( bufA, "Processor" ), "got %s\n", bufA);
+    size = ARRAY_SIZE(buf);
+    ret = PdhGetDefaultPerfObjectW( NULL, L"", buf, &size );
+    ok(ret == PDH_INVALID_ARGUMENT, "PdhGetDefaultPerfObjectW failed 0x%08lx\n", ret);
+    size = 0;
+    ret = PdhGetDefaultPerfObjectHW( NULL, NULL, NULL, &size );
+    ok(ret == PDH_MORE_DATA, "PdhGetDefaultPerfObjectHW failed 0x%08lx\n", ret);
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        size = 0;
+        ret = PdhGetDefaultPerfCounterW( NULL, NULL, tests[i].object, NULL, &size );
+        ok(ret == PDH_MORE_DATA, "%s: PdhGetDefaultPerfCounterW failed 0x%08lx\n", debugstr_w(tests[i].object), ret);
+        ok(size == lstrlenW( tests[i].counter ) + 1, "%s: size %lu\n", debugstr_w(tests[i].object), size);
+        size = ARRAY_SIZE(buf);
+        ret = PdhGetDefaultPerfCounterW( NULL, NULL, tests[i].object, buf, &size );
+        ok(ret == ERROR_SUCCESS, "%s: PdhGetDefaultPerfCounterW failed 0x%08lx\n", debugstr_w(tests[i].object), ret);
+        ok(!lstrcmpW( buf, tests[i].counter ), "%s: got %s\n", debugstr_w(tests[i].object), debugstr_w(buf));
+    }
+    size = ARRAY_SIZE(bufA);
+    ret = PdhGetDefaultPerfCounterA( NULL, NULL, "Memory", bufA, &size );
+    ok(ret == ERROR_SUCCESS, "PdhGetDefaultPerfCounterA failed 0x%08lx\n", ret);
+    ok(!strcmp( bufA, "Pages/sec" ), "got %s\n", bufA);
+
+    size = ARRAY_SIZE(buf);
+    ret = PdhGetDefaultPerfCounterW( NULL, NULL, L"No Such Object", buf, &size );
+    ok(ret == PDH_CSTATUS_NO_OBJECT, "PdhGetDefaultPerfCounterW failed 0x%08lx\n", ret);
+    ret = PdhGetDefaultPerfCounterW( NULL, NULL, NULL, buf, &size );
+    ok(ret == PDH_INVALID_ARGUMENT, "PdhGetDefaultPerfCounterW failed 0x%08lx\n", ret);
+}
+
+static void test_counter_arrays(void)
+{
+    PDH_FMT_COUNTERVALUE_ITEM_W *items;
+    PDH_RAW_COUNTER_ITEM_W *raw;
+    PDH_FMT_COUNTERVALUE value;
+    PDH_HQUERY query;
+    PDH_HCOUNTER wild, single, total;
+    PDH_STATUS ret;
+    DWORD size, count, size2, count2, type, i, strings;
+    WCHAR *p;
+
+    ret = PdhOpenQueryW( NULL, 0, &query );
+    ok(ret == ERROR_SUCCESS, "PdhOpenQueryW failed 0x%08lx\n", ret);
+    ok(PdhIsRealTimeQuery( query ), "query is not real time\n");
+    ret = PdhAddEnglishCounterW( query, L"\\Processor(*)\\% Processor Time", 0, &wild );
+    ok(ret == ERROR_SUCCESS, "PdhAddEnglishCounterW failed 0x%08lx\n", ret);
+    ret = PdhAddEnglishCounterW( query, L"\\Memory\\Available MBytes", 0, &single );
+    ok(ret == ERROR_SUCCESS, "PdhAddEnglishCounterW failed 0x%08lx\n", ret);
+    ret = PdhAddEnglishCounterW( query, L"\\Processor(_Total)\\% Processor Time", 0, &total );
+    ok(ret == ERROR_SUCCESS, "PdhAddEnglishCounterW failed 0x%08lx\n", ret);
+    ret = PdhCollectQueryData( query );
+    ok(ret == ERROR_SUCCESS, "PdhCollectQueryData failed 0x%08lx\n", ret);
+    Sleep( 200 );
+    ret = PdhCollectQueryData( query );
+    ok(ret == ERROR_SUCCESS, "PdhCollectQueryData failed 0x%08lx\n", ret);
+
+    /* the size and the count of the items come back with PDH_MORE_DATA */
+    size = count = 0;
+    ret = PdhGetFormattedCounterArrayW( wild, PDH_FMT_DOUBLE, &size, &count, NULL );
+    ok(ret == PDH_MORE_DATA, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+    ok(count >= 2, "count %lu\n", count);
+    ok(size > count * sizeof(*items), "size %lu\n", size);
+    items = malloc( size );
+    size2 = size - 1;
+    count2 = 0;
+    ret = PdhGetFormattedCounterArrayW( wild, PDH_FMT_DOUBLE, &size2, &count2, items );
+    ok(ret == PDH_MORE_DATA, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+    ok(size2 == size, "size %lu, expected %lu\n", size2, size);
+    ret = PdhGetFormattedCounterArrayW( wild, PDH_FMT_DOUBLE, &size, &count, items );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+    strings = 0;
+    for (i = 0; i < count; i++)
+    {
+        ok(items[i].FmtValue.CStatus == PDH_CSTATUS_VALID_DATA || items[i].FmtValue.CStatus == PDH_CSTATUS_NEW_DATA,
+           "%lu: CStatus 0x%08lx\n", i, items[i].FmtValue.CStatus);
+        ok(items[i].FmtValue.doubleValue >= 0.0 && items[i].FmtValue.doubleValue <= 100.0, "%lu: value %f\n", i, items[i].FmtValue.doubleValue);
+        strings += (lstrlenW( items[i].szName ) + 1) * sizeof(WCHAR);
+        if (i) ok(wcsicmp( items[i - 1].szName, items[i].szName ) < 0, "%s before %s\n", debugstr_w(items[i - 1].szName), debugstr_w(items[i].szName));
+    }
+    /* the names are in the buffer after the items, and nothing else */
+    ok((char *)items[0].szName == (char *)(items + count), "names at %p, items end at %p\n", items[0].szName, items + count);
+    ok(size == count * sizeof(*items) + strings, "size %lu, expected %lu\n", size, count * (DWORD)sizeof(*items) + strings);
+    ok(!lstrcmpW( items[count - 1].szName, L"_Total" ), "last item %s\n", debugstr_w(items[count - 1].szName));
+    free( items );
+
+    size = count = 0;
+    ret = PdhGetRawCounterArrayW( wild, &size, &count, NULL );
+    ok(ret == PDH_MORE_DATA, "PdhGetRawCounterArrayW failed 0x%08lx\n", ret);
+    ok(count >= 2, "count %lu\n", count);
+    raw = malloc( size );
+    ret = PdhGetRawCounterArrayW( wild, &size, &count, raw );
+    ok(ret == ERROR_SUCCESS, "PdhGetRawCounterArrayW failed 0x%08lx\n", ret);
+    for (i = 0; i < count; i++)
+    {
+        ok(raw[i].szName && raw[i].szName[0], "%lu: no name\n", i);
+        ok(raw[i].RawValue.TimeStamp.dwHighDateTime, "%lu: no time stamp\n", i);
+    }
+    free( raw );
+
+    /* a counter without wildcards has one item: the instance, or an empty name */
+    size = count = 0;
+    ret = PdhGetFormattedCounterArrayW( single, PDH_FMT_LONG, &size, &count, NULL );
+    ok(ret == PDH_MORE_DATA, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+    ok(count == 1, "count %lu\n", count);
+    ok(size == sizeof(*items) + sizeof(WCHAR), "size %lu\n", size);
+    items = malloc( size );
+    ret = PdhGetFormattedCounterArrayW( single, PDH_FMT_LONG, &size, &count, items );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+    ok(!items[0].szName[0], "name %s\n", debugstr_w(items[0].szName));
+    ok(items[0].FmtValue.longValue > 0, "value %ld\n", items[0].FmtValue.longValue);
+    free( items );
+
+    size = count = 0;
+    ret = PdhGetFormattedCounterArrayW( total, PDH_FMT_DOUBLE, &size, &count, NULL );
+    ok(ret == PDH_MORE_DATA, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+    ok(count == 1 && size == sizeof(*items) + 7 * sizeof(WCHAR), "count %lu, size %lu\n", count, size);
+
+    /* the value of a wildcard counter itself can be read */
+    ret = PdhGetFormattedCounterValue( wild, PDH_FMT_DOUBLE, &type, &value );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterValue failed 0x%08lx\n", ret);
+
+    ret = PdhGetFormattedCounterArrayW( NULL, PDH_FMT_DOUBLE, &size, &count, NULL );
+    ok(ret == PDH_INVALID_HANDLE, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+    (void)p;
+    PdhCloseQuery( query );
+}
+
+static void test_translate_parse_stats(void)
+{
+    WCHAR buf[PDH_MAX_COUNTER_PATH], inst[64], parent[64];
+    PDH_STATISTICS stat;
+    PDH_RAW_COUNTER raw[4];
+    PDH_HQUERY query;
+    PDH_HCOUNTER counter;
+    PDH_STATUS ret;
+    DWORD size, isize, psize, index, i, type;
+
+    size = ARRAY_SIZE(buf);
+    ret = PdhTranslate009CounterW( L"\\Processor(_Total)\\% Processor Time", buf, &size );
+    ok(ret == ERROR_SUCCESS, "PdhTranslate009CounterW failed 0x%08lx\n", ret);
+    ok(!lstrcmpW( buf, L"\\Processor(_Total)\\% Processor Time" ), "got %s\n", debugstr_w(buf));
+    ok(size == 36, "size %lu\n", size);
+    size = 0;
+    ret = PdhTranslate009CounterW( L"\\Memory\\Available MBytes", NULL, &size );
+    ok(ret == PDH_MORE_DATA && size == 25, "got 0x%08lx, size %lu\n", ret, size);
+    size = 4;
+    ret = PdhTranslateLocaleCounterW( L"\\Memory\\Available MBytes", buf, &size );
+    ok(ret == PDH_MORE_DATA && size == 25, "got 0x%08lx, size %lu\n", ret, size);
+    size = ARRAY_SIZE(buf);
+    ret = PdhTranslateLocaleCounterW( L"\\Processor(*)\\Interrupts/sec", buf, &size );
+    ok(ret == ERROR_SUCCESS && !lstrcmpW( buf, L"\\Processor(*)\\Interrupts/sec" ), "got 0x%08lx %s\n", ret, debugstr_w(buf));
+    size = ARRAY_SIZE(buf);
+    ret = PdhTranslate009CounterW( L"\\Nosuch\\Thing", buf, &size );
+    ok(ret == PDH_CSTATUS_NO_OBJECT, "PdhTranslate009CounterW failed 0x%08lx\n", ret);
+    ret = PdhTranslate009CounterW( L"Processor(_Total)\\% Processor Time", buf, &size );
+    ok(ret == PDH_CSTATUS_BAD_COUNTERNAME, "PdhTranslate009CounterW failed 0x%08lx\n", ret);
+
+    /* the length of the parent counts its terminator even when there is none */
+    isize = psize = ARRAY_SIZE(inst);
+    ret = PdhParseInstanceNameW( L"svchost#2", inst, &isize, parent, &psize, &index );
+    ok(ret == ERROR_SUCCESS, "PdhParseInstanceNameW failed 0x%08lx\n", ret);
+    ok(!lstrcmpW( inst, L"svchost" ) && !parent[0] && index == 2, "got %s, %s, %lu\n", debugstr_w(inst), debugstr_w(parent), index);
+    ok(isize == 8 && psize == 1, "lengths %lu, %lu\n", isize, psize);
+    isize = psize = ARRAY_SIZE(inst);
+    ret = PdhParseInstanceNameW( L"System/3", inst, &isize, parent, &psize, &index );
+    ok(ret == ERROR_SUCCESS, "PdhParseInstanceNameW failed 0x%08lx\n", ret);
+    ok(!lstrcmpW( inst, L"3" ) && !lstrcmpW( parent, L"System" ) && !index, "got %s, %s, %lu\n", debugstr_w(inst), debugstr_w(parent), index);
+    ok(isize == 2 && psize == 7, "lengths %lu, %lu\n", isize, psize);
+    isize = psize = ARRAY_SIZE(inst);
+    ret = PdhParseInstanceNameW( L"C:", inst, &isize, parent, &psize, &index );
+    ok(ret == ERROR_SUCCESS && !lstrcmpW( inst, L"C:" ) && !index, "got 0x%08lx, %s\n", ret, debugstr_w(inst));
+    isize = psize = ARRAY_SIZE(inst);
+    ret = PdhParseInstanceNameW( L"x#y#4", inst, &isize, parent, &psize, &index );
+    ok(ret == ERROR_SUCCESS && !lstrcmpW( inst, L"x#y" ) && index == 4, "got 0x%08lx, %s, %lu\n", ret, debugstr_w(inst), index);
+
+    ok(PdhConnectMachineW( NULL ) == ERROR_SUCCESS, "PdhConnectMachineW failed\n");
+
+    /* statistics over four samples: three values */
+    ret = PdhOpenQueryW( NULL, 0, &query );
+    ok(ret == ERROR_SUCCESS, "PdhOpenQueryW failed 0x%08lx\n", ret);
+    ret = PdhAddEnglishCounterW( query, L"\\Processor(_Total)\\% Processor Time", 0, &counter );
+    ok(ret == ERROR_SUCCESS, "PdhAddEnglishCounterW failed 0x%08lx\n", ret);
+    for (i = 0; i < 4; i++)
+    {
+        PdhCollectQueryData( query );
+        Sleep( 100 );
+        ret = PdhGetRawCounterValue( counter, &type, &raw[i] );
+        ok(ret == ERROR_SUCCESS, "PdhGetRawCounterValue failed 0x%08lx\n", ret);
+    }
+    memset( &stat, 0xcc, sizeof(stat) );
+    ret = PdhComputeCounterStatistics( counter, PDH_FMT_DOUBLE, 0, 4, raw, &stat );
+    ok(ret == ERROR_SUCCESS, "PdhComputeCounterStatistics failed 0x%08lx\n", ret);
+    ok(stat.dwFormat == PDH_FMT_DOUBLE && stat.count == 3, "format 0x%08lx, count %lu\n", stat.dwFormat, stat.count);
+    ok(stat.min.CStatus == PDH_CSTATUS_VALID_DATA && stat.max.CStatus == PDH_CSTATUS_VALID_DATA && stat.mean.CStatus == PDH_CSTATUS_VALID_DATA,
+       "status 0x%08lx 0x%08lx 0x%08lx\n", stat.min.CStatus, stat.max.CStatus, stat.mean.CStatus);
+    ok(stat.min.doubleValue <= stat.mean.doubleValue && stat.mean.doubleValue <= stat.max.doubleValue, "%f %f %f\n",
+       stat.min.doubleValue, stat.mean.doubleValue, stat.max.doubleValue);
+    ret = PdhComputeCounterStatistics( counter, PDH_FMT_DOUBLE, 0, 0, raw, &stat );
+    ok(ret == PDH_INVALID_ARGUMENT, "PdhComputeCounterStatistics failed 0x%08lx\n", ret);
+    PdhCloseQuery( query );
+}
+
+/* the objects that were added after the first six: names, counters and instances */
+static void test_more_objects(void)
+{
+    static const struct { const WCHAR *object; const WCHAR *counters[3]; const WCHAR *instance; } tests[] =
+    {
+        { L"Processor Information", { L"% Processor Time", L"% Processor Utility", L"DPCs Queued/sec" }, L"_Total" },
+        { L"LogicalDisk", { L"% Free Space", L"Free Megabytes", L"Avg. Disk Queue Length" }, L"_Total" },
+        { L"Thread", { L"ID Thread", L"Thread State", L"Context Switches/sec" }, NULL },
+        { L"PhysicalDisk", { L"Avg. Disk Queue Length", L"Avg. Disk sec/Transfer", L"Avg. Disk Bytes/Transfer" }, L"_Total" },
+        { L"Processor", { L"% Processor Time", L"DPCs Queued/sec", L"DPC Rate" }, L"_Total" },
+    };
+    WCHAR *objects = get_object_list(), *counters, *instances;
+    DWORD csize, isize, i, k;
+    PDH_STATUS ret;
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        ok(list_contains( objects, tests[i].object ), "%s not in the list\n", debugstr_w(tests[i].object));
+
+        csize = isize = 0;
+        ret = PdhEnumObjectItemsW( NULL, NULL, tests[i].object, NULL, &csize, NULL, &isize, PERF_DETAIL_WIZARD, 0 );
+        ok(ret == PDH_MORE_DATA, "%s: PdhEnumObjectItemsW failed 0x%08lx\n", debugstr_w(tests[i].object), ret);
+        counters = malloc( csize * sizeof(WCHAR) );
+        instances = malloc( isize * sizeof(WCHAR) );
+        ret = PdhEnumObjectItemsW( NULL, NULL, tests[i].object, counters, &csize, instances, &isize, PERF_DETAIL_WIZARD, 0 );
+        ok(ret == ERROR_SUCCESS, "%s: PdhEnumObjectItemsW failed 0x%08lx\n", debugstr_w(tests[i].object), ret);
+        for (k = 0; k < 3; k++)
+            ok(list_contains( counters, tests[i].counters[k] ), "%s: %s not found\n", debugstr_w(tests[i].object), debugstr_w(tests[i].counters[k]));
+        if (tests[i].instance) ok(list_contains( instances, tests[i].instance ), "%s: no %s\n", debugstr_w(tests[i].object), debugstr_w(tests[i].instance));
+        else ok(list_count( instances ) > 0, "%s: no instances\n", debugstr_w(tests[i].object));
+        free( counters );
+        free( instances );
+    }
+    free( objects );
+}
+
+/* the instances of the new objects have values, and their names follow the Windows spelling */
+static void test_more_values(void)
+{
+    static const WCHAR *paths[] =
+    {
+        L"\\Processor Information(_Total)\\% Processor Time", L"\\Processor Information(0,_Total)\\Interrupts/sec",
+        L"\\Processor Information(0,0)\\% Idle Time", L"\\LogicalDisk(_Total)\\% Free Space", L"\\LogicalDisk(_Total)\\Free Megabytes",
+        L"\\Thread(*)\\ID Thread", L"\\Thread(*)\\ID Process", L"\\PhysicalDisk(_Total)\\Avg. Disk Queue Length",
+        L"\\LogicalDisk(_Total)\\Avg. Disk sec/Transfer", L"\\Processor(_Total)\\DPC Rate",
+    };
+    PDH_FMT_COUNTERVALUE_ITEM_W *items;
+    PDH_FMT_COUNTERVALUE value;
+    PDH_HQUERY query;
+    PDH_HCOUNTER counter[ARRAY_SIZE(paths)];
+    PDH_STATUS ret;
+    DWORD i, size, count, type;
+    BOOL found;
+
+    ret = PdhOpenQueryW( NULL, 0, &query );
+    ok(ret == ERROR_SUCCESS, "PdhOpenQueryW failed 0x%08lx\n", ret);
+    for (i = 0; i < ARRAY_SIZE(paths); i++)
+    {
+        ret = PdhAddEnglishCounterW( query, paths[i], 0, &counter[i] );
+        ok(ret == ERROR_SUCCESS, "%s: PdhAddEnglishCounterW failed 0x%08lx\n", debugstr_w(paths[i]), ret);
+    }
+    PdhCollectQueryData( query );
+    Sleep( 300 );
+    ret = PdhCollectQueryData( query );
+    ok(ret == ERROR_SUCCESS, "PdhCollectQueryData failed 0x%08lx\n", ret);
+
+    for (i = 0; i < 5; i++)
+    {
+        ret = PdhGetFormattedCounterValue( counter[i], PDH_FMT_DOUBLE, &type, &value );
+        ok(ret == ERROR_SUCCESS, "%s: PdhGetFormattedCounterValue failed 0x%08lx\n", debugstr_w(paths[i]), ret);
+    }
+    ret = PdhGetFormattedCounterValue( counter[3], PDH_FMT_DOUBLE, &type, &value );
+    ok(value.doubleValue >= 0.0 && value.doubleValue <= 100.0, "free space %f\n", value.doubleValue);
+    ret = PdhGetFormattedCounterValue( counter[4], PDH_FMT_LARGE, &type, &value );
+    ok(ret == ERROR_SUCCESS && value.largeValue > 0, "free megabytes %I64d\n", value.largeValue);
+
+    /* every thread of System is named System/<n> */
+    size = count = 0;
+    ret = PdhGetFormattedCounterArrayW( counter[5], PDH_FMT_LONG, &size, &count, NULL );
+    ok(ret == PDH_MORE_DATA && count > 0, "got 0x%08lx, count %lu\n", ret, count);
+    items = malloc( size );
+    ret = PdhGetFormattedCounterArrayW( counter[5], PDH_FMT_LONG, &size, &count, items );
+    ok(ret == ERROR_SUCCESS, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+    found = FALSE;
+    for (i = 0; i < count; i++) if (!wcsncmp( items[i].szName, L"System/", 7 )) found = TRUE;
+    ok(found, "no System thread among %lu\n", count);
+    free( items );
+
+    ret = PdhGetFormattedCounterValue( counter[8], PDH_FMT_DOUBLE, &type, &value );
+    ok(ret == ERROR_SUCCESS || ret == PDH_CALC_NEGATIVE_DENOMINATOR, "avg sec/transfer: 0x%08lx\n", ret);
+    PdhCloseQuery( query );
+}
+
+/* Perflib\009 has a Help value next to Counter: an even index in Counter has its text at index + 1 */
+static void test_perflib_help(void)
+{
+    static const DWORD objects[] = { 2, 4, 230, 232, 234, 236, 238, 510, 700, 3518 };
+    HKEY key;
+    DWORD type, size = 0, i, n, index, found = 0, *seen;
+    WCHAR *data, *p;
+    LONG res;
+
+    res = RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Perflib\\009", 0, KEY_READ, &key );
+    ok(res == ERROR_SUCCESS, "RegOpenKeyExW failed %ld\n", res);
+    if (res) return;
+    res = RegQueryValueExW( key, L"Help", NULL, &type, NULL, &size );
+    ok(res == ERROR_SUCCESS, "no Help value: %ld\n", res);
+    ok(type == REG_MULTI_SZ, "type %lu\n", type);
+    if (res || type != REG_MULTI_SZ) { RegCloseKey( key ); return; }
+    data = malloc( size + 4 * sizeof(WCHAR) );
+    memset( data, 0, size + 4 * sizeof(WCHAR) );
+    res = RegQueryValueExW( key, L"Help", NULL, &type, (BYTE *)data, &size );
+    ok(res == ERROR_SUCCESS, "RegQueryValueExW failed %ld\n", res);
+    seen = calloc( ARRAY_SIZE(objects), sizeof(*seen) );
+    for (p = data, n = 0; *p; n++)
+    {
+        WCHAR *text = p + lstrlenW( p ) + 1;
+
+        index = wcstoul( p, NULL, 10 );
+        ok(index & 1, "help index %lu is even\n", index);
+        ok(*text, "empty text for %lu\n", index);
+        for (i = 0; i < ARRAY_SIZE(objects); i++) if (index == objects[i] + 1) { seen[i]++; found++; }
+        p = text + lstrlenW( text ) + 1;
+    }
+    ok(n > 50, "only %lu entries\n", n);
+    for (i = 0; i < ARRAY_SIZE(objects); i++) ok(seen[i] == 1, "help of object %lu found %lu times\n", objects[i], seen[i]);
+    free( seen );
+    free( data );
+
+    size = sizeof(DWORD);
+    res = RegQueryValueExW( key, L"Last Help", NULL, &type, (BYTE *)&index, &size );
+    RegCloseKey( key );
+    res = RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Perflib", 0, KEY_READ, &key );
+    ok(res == ERROR_SUCCESS, "RegOpenKeyExW failed %ld\n", res);
+    size = sizeof(DWORD);
+    res = RegQueryValueExW( key, L"Last Help", NULL, &type, (BYTE *)&index, &size );
+    ok(res == ERROR_SUCCESS && type == REG_DWORD, "Last Help: %ld type %lu\n", res, type);
+    if (!res)
+    {
+        DWORD last_counter = 0;
+        size = sizeof(DWORD);
+        RegQueryValueExW( key, L"Last Counter", NULL, &type, (BYTE *)&last_counter, &size );
+        ok(index == last_counter + 1, "Last Help %lu, Last Counter %lu\n", index, last_counter);
+    }
+    RegCloseKey( key );
+}
+
 START_TEST(pdh)
 {
     if (!is_lang_english())
@@ -1688,4 +2184,11 @@ START_TEST(pdh)
     test_data_source();
     test_add_counter_sets();
     test_counter_values();
+    test_counter_info_layout();
+    test_default_perf();
+    test_counter_arrays();
+    test_translate_parse_stats();
+    test_more_objects();
+    test_more_values();
+    test_perflib_help();
 }
