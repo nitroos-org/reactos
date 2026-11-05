@@ -12,6 +12,16 @@
  * window on its thread: work items, timers and the shutdown sequence arrive there as messages, so they run
  * in whatever message loop the thread has (the caller's for DQTYPE_THREAD_CURRENT, our own for
  * DQTYPE_THREAD_DEDICATED). Microsoft Word loads this DLL for its composition (WinComp) renderer.
+ *
+ * Also measured on Windows 10 22H2 with coremessaging_apitest: a NULL callback is E_POINTER, a priority other than
+ * the three values E_INVALIDARG; the second ShutdownQueueAsync is E_UNEXPECTED; work queued before the shutdown ends
+ * runs before ShutdownCompleted; a running timer keeps its interval until the next Start. Where this differs on
+ * purpose: timers end with their queue, and a queue whose thread ended refuses work (Windows keeps both going).
+ *
+ * The window of a queue can be posted to by any process of the user, so the window messages carry no data and act
+ * only on state kept in the queue under its lock: a Start or Stop another thread asked for is in a list, a shutdown
+ * must have been requested, a finish must have been posted by the queue. A thread that ends without a shutdown
+ * takes its window with it; other threads notice that (the thread's handle) and the queue lets go of its work.
  */
 
 #include <stdarg.h>
@@ -41,6 +51,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(coremessaging);
 #define WM_DQ_SHUTDOWN  (WM_USER + 2)
 #define WM_DQ_FINISH    (WM_USER + 3)
 #define WM_DQ_TIMER     (WM_USER + 4)
+
+#define DQ_DRAIN_LIMIT  10000   /* work items run at the end of a shutdown */
 
 static HINSTANCE dq_instance;
 static DWORD dq_tls = TLS_OUT_OF_INDEXES;
@@ -73,6 +85,15 @@ struct work_item
 struct async_action;
 struct timer;
 
+/* a Start or Stop another thread asked for; the queue thread applies it when WM_DQ_TIMER arrives. The window
+ * message carries nothing: the requests are only taken from this list, which only this DLL can add to. */
+struct timer_req
+{
+    struct list entry;
+    struct timer *timer;      /* holds a reference */
+    BOOL start;
+};
+
 struct queue
 {
     IDqQueue IDqQueue_iface;
@@ -87,9 +108,14 @@ struct queue
     struct list starting;     /* handler_entry */
     struct list completed;
     struct list timers;       /* running timers, each holds a reference */
+    struct list timer_reqs;   /* timer_req, from other threads */
     INT64 next_token;
     LONG deferrals;
-    BOOL finish_pending;
+    BOOL finish_pending;      /* a WM_DQ_FINISH was posted and not handled yet */
+    BOOL quit;                /* dedicated thread: the message loop has been told to end */
+    BOOL window_ref;          /* the window holds a reference */
+    BOOL tls_ref;             /* the thread's TLS slot holds a reference */
+    HANDLE thread;            /* the queue thread, to notice that it ended without a shutdown */
     struct async_action *shutdown;
 };
 
@@ -481,6 +507,11 @@ static void action_complete(struct async_action *action)
     IDqActionHandler *handler;
 
     EnterCriticalSection(&action->cs);
+    if (action->status != DqAsyncStarted)
+    {
+        LeaveCriticalSection(&action->cs);
+        return;
+    }
     action->status = DqAsyncCompleted;
     handler = action->handler;
     action->handler = NULL;
@@ -508,9 +539,11 @@ static void queue_addref(struct queue *queue)
     InterlockedIncrement(&queue->ref);
 }
 
-static void queue_release(struct queue *queue)
+static ULONG queue_release(struct queue *queue)
 {
-    if (!InterlockedDecrement(&queue->ref))
+    ULONG ref = InterlockedDecrement(&queue->ref);
+
+    if (!ref)
     {
         struct work_item *item, *next;
         int i;
@@ -529,9 +562,12 @@ static void queue_release(struct queue *queue)
         free_handlers(&queue->completed);
         if (queue->shutdown)
             action_Release(&queue->shutdown->IDqAsyncAction_iface);
+        if (queue->thread)
+            CloseHandle(queue->thread);
         DeleteCriticalSection(&queue->cs);
         HeapFree(GetProcessHeap(), 0, queue);
     }
+    return ref;
 }
 
 static HRESULT STDMETHODCALLTYPE queue_QueryInterface(IDqQueue *iface, REFIID iid, void **out)
@@ -562,11 +598,7 @@ static ULONG STDMETHODCALLTYPE queue_AddRef(IDqQueue *iface)
 
 static ULONG STDMETHODCALLTYPE queue_Release(IDqQueue *iface)
 {
-    struct queue *queue = impl_from_IDqQueue(iface);
-    ULONG ref = queue->ref - 1;
-
-    queue_release(queue);
-    return ref;
+    return queue_release(impl_from_IDqQueue(iface));
 }
 
 static HRESULT STDMETHODCALLTYPE queue_GetIids(IDqQueue *iface, ULONG *count, IID **iids)
@@ -597,6 +629,105 @@ static HRESULT STDMETHODCALLTYPE queue_CreateTimer(IDqQueue *iface, IDqTimer **t
     return timer_create(impl_from_IDqQueue(iface), timer);
 }
 
+static ULONG STDMETHODCALLTYPE timer_Release(IDqTimer *iface);
+
+/* The queue has no window any more, because it was destroyed on the thread or because the thread ended
+ * without a shutdown: pending work is dropped, running timers stop, a shutdown that was asked for completes,
+ * and the references the window and the thread's TLS slot held go. Safe to call more than once. */
+static void queue_detach(struct queue *queue)
+{
+    struct work_item *item, *next_item;
+    struct timer_req *req, *next_req;
+    struct timer *timer, *next_timer;
+    struct list items, reqs, timers;
+    struct async_action *action;
+    BOOL drop_window, drop_tls;
+    int i;
+
+    queue_addref(queue);
+    list_init(&items);
+    list_init(&reqs);
+    list_init(&timers);
+    EnterCriticalSection(&queue->cs);
+    queue->state = QUEUE_SHUT_DOWN;
+    queue->hwnd = NULL;
+    queue->finish_pending = FALSE;
+    for (i = 0; i < 3; i++)
+        list_move_tail(&items, &queue->items[i]);
+    list_move_tail(&reqs, &queue->timer_reqs);
+    list_move_tail(&timers, &queue->timers);
+    LIST_FOR_EACH_ENTRY(req, &reqs, struct timer_req, entry)
+        req->timer->running = FALSE;
+    LIST_FOR_EACH_ENTRY(timer, &timers, struct timer, entry)
+    {
+        timer->running = FALSE;
+        timer->listed = FALSE;
+    }
+    action = queue->shutdown;
+    if (action)
+        action_AddRef(&action->IDqAsyncAction_iface);
+    drop_window = queue->window_ref;
+    drop_tls = queue->tls_ref;
+    queue->window_ref = queue->tls_ref = FALSE;
+    LeaveCriticalSection(&queue->cs);
+
+    LIST_FOR_EACH_ENTRY_SAFE(item, next_item, &items, struct work_item, entry)
+    {
+        list_remove(&item->entry);
+        IUnknown_Release((IUnknown *)item->handler);
+        HeapFree(GetProcessHeap(), 0, item);
+    }
+    LIST_FOR_EACH_ENTRY_SAFE(req, next_req, &reqs, struct timer_req, entry)
+    {
+        list_remove(&req->entry);
+        timer_Release(&req->timer->IDqTimer_iface);
+        HeapFree(GetProcessHeap(), 0, req);
+    }
+    LIST_FOR_EACH_ENTRY_SAFE(timer, next_timer, &timers, struct timer, entry)
+    {
+        list_remove(&timer->entry);
+        timer_Release(&timer->IDqTimer_iface); /* the list's */
+    }
+    if (action)
+    {
+        action_complete(action);
+        action_Release(&action->IDqAsyncAction_iface);
+    }
+    if (drop_tls)
+    {
+        if (queue->thread_id == GetCurrentThreadId() && dq_tls != TLS_OUT_OF_INDEXES && TlsGetValue(dq_tls) == queue)
+            TlsSetValue(dq_tls, NULL);
+        queue_release(queue);
+    }
+    if (drop_window)
+        queue_release(queue);
+    queue_release(queue);
+}
+
+/* the reference of the thread's TLS slot goes: the thread has no queue any more */
+static void queue_drop_tls(struct queue *queue)
+{
+    BOOL had;
+
+    EnterCriticalSection(&queue->cs);
+    had = queue->tls_ref;
+    queue->tls_ref = FALSE;
+    LeaveCriticalSection(&queue->cs);
+    if (!had)
+        return;
+    if (queue->thread_id == GetCurrentThreadId() && dq_tls != TLS_OUT_OF_INDEXES && TlsGetValue(dq_tls) == queue)
+        TlsSetValue(dq_tls, NULL);
+    queue_release(queue);
+}
+
+/* called from other threads: a thread that ended took its windows with it, and may not have told us */
+static void queue_check_thread(struct queue *queue)
+{
+    if (queue->hwnd && queue->thread && queue->thread_id != GetCurrentThreadId()
+        && WaitForSingleObject(queue->thread, 0) == WAIT_OBJECT_0)
+        queue_detach(queue);
+}
+
 static int priority_slot(INT32 priority)
 {
     if (priority > DqPriorityNormal)
@@ -611,19 +742,25 @@ static HRESULT STDMETHODCALLTYPE queue_TryEnqueueWithPriority(IDqQueue *iface, I
 {
     struct queue *queue = impl_from_IDqQueue(iface);
     struct work_item *item;
-    BOOL post = FALSE;
+    HWND hwnd;
 
     TRACE("queue %p, priority %d, callback %p\n", queue, priority, callback);
 
-    if (!callback)
-        return E_INVALIDARG;
-    if (!result)
+    /* measured on Windows 10 22H2: a NULL callback is E_POINTER; a priority that is not one of the three
+     * DispatcherQueuePriority values is E_INVALIDARG and the result is FALSE */
+    if (!callback || !result)
         return E_POINTER;
+    if (priority != DqPriorityLow && priority != DqPriorityNormal && priority != DqPriorityHigh)
+    {
+        *result = FALSE;
+        return E_INVALIDARG;
+    }
     if (!(item = HeapAlloc(GetProcessHeap(), 0, sizeof(*item))))
         return E_OUTOFMEMORY;
     item->handler = callback;
+    queue_check_thread(queue);
     EnterCriticalSection(&queue->cs);
-    if (queue->state == QUEUE_SHUT_DOWN)
+    if (queue->state == QUEUE_SHUT_DOWN || !queue->hwnd)
     {
         LeaveCriticalSection(&queue->cs);
         HeapFree(GetProcessHeap(), 0, item);
@@ -632,10 +769,18 @@ static HRESULT STDMETHODCALLTYPE queue_TryEnqueueWithPriority(IDqQueue *iface, I
     }
     IUnknown_AddRef((IUnknown *)callback);
     list_add_tail(&queue->items[priority_slot(priority)], &item->entry);
-    post = TRUE;
+    hwnd = queue->hwnd;
     LeaveCriticalSection(&queue->cs);
-    if (post && !PostMessageW(queue->hwnd, WM_DQ_WORK, 0, 0))
+    if (!PostMessageW(hwnd, WM_DQ_WORK, 0, 0))
+    {
         WARN("PostMessage failed, error %lu\n", GetLastError());
+        /* the thread may be gone: then the item was dropped */
+        queue_check_thread(queue);
+        EnterCriticalSection(&queue->cs);
+        *result = queue->state != QUEUE_SHUT_DOWN;
+        LeaveCriticalSection(&queue->cs);
+        return S_OK;
+    }
     *result = TRUE;
     return S_OK;
 }
@@ -707,45 +852,51 @@ static const IDqQueue2Vtbl queue2_vtbl =
     queue2_get_HasThreadAccess,
 };
 
-/* runs the work items present now, highest priority first; items added meanwhile get a message of their own */
-static void queue_run_items(struct queue *queue)
+/* the next work item, highest priority first; the lock is held */
+static struct work_item *queue_pop_item(struct queue *queue)
 {
-    struct work_item *item;
     struct list *head;
     int i;
 
-    for (;;)
+    for (i = 0; i < 3; i++)
     {
-        item = NULL;
-        EnterCriticalSection(&queue->cs);
-        if (queue->state != QUEUE_SHUT_DOWN)
+        if ((head = list_head(&queue->items[i])))
         {
-            for (i = 0; i < 3 && !item; i++)
-            {
-                if ((head = list_head(&queue->items[i])))
-                {
-                    item = LIST_ENTRY(head, struct work_item, entry);
-                    list_remove(&item->entry);
-                }
-            }
+            struct work_item *item = LIST_ENTRY(head, struct work_item, entry);
+            list_remove(&item->entry);
+            return item;
         }
-        LeaveCriticalSection(&queue->cs);
-        if (!item)
-            break;
-        {
-            HRESULT hr = item->handler->lpVtbl->Invoke(item->handler);
-            if (FAILED(hr))
-                WARN("work item %p returned %#lx\n", item->handler, hr);
-        }
-        IUnknown_Release((IUnknown *)item->handler);
-        HeapFree(GetProcessHeap(), 0, item);
-        /* one item per message, so input and paint messages interleave with the work */
-        break;
     }
+    return NULL;
+}
+
+static void run_item(struct work_item *item)
+{
+    HRESULT hr = item->handler->lpVtbl->Invoke(item->handler);
+
+    if (FAILED(hr))
+        WARN("work item %p returned %#lx\n", item->handler, hr);
+    IUnknown_Release((IUnknown *)item->handler);
+    HeapFree(GetProcessHeap(), 0, item);
+}
+
+/* runs one work item, the highest priority first; if more are left they get a message of their own, so input
+ * and paint messages interleave with the work */
+static void queue_run_items(struct queue *queue)
+{
+    struct work_item *item = NULL;
+    int i;
+
+    EnterCriticalSection(&queue->cs);
+    if (queue->state != QUEUE_SHUT_DOWN)
+        item = queue_pop_item(queue);
+    LeaveCriticalSection(&queue->cs);
+    if (item)
+        run_item(item);
     EnterCriticalSection(&queue->cs);
     for (i = 0; i < 3; i++)
     {
-        if (!list_empty(&queue->items[i]) && queue->state != QUEUE_SHUT_DOWN)
+        if (!list_empty(&queue->items[i]) && queue->state != QUEUE_SHUT_DOWN && queue->hwnd)
         {
             PostMessageW(queue->hwnd, WM_DQ_WORK, 0, 0);
             break;
@@ -756,7 +907,8 @@ static void queue_run_items(struct queue *queue)
 
 static void timer_stop_on_thread(struct timer *timer);
 
-/* the last step of a shutdown, on the queue thread: no work any more, ShutdownCompleted, the action completes */
+/* the last step of a shutdown, on the queue thread: no work any more, ShutdownCompleted, the action completes.
+ * It acts only when the queue itself is shutting down and no deferral is outstanding, whoever asked. */
 static void queue_finish_shutdown(struct queue *queue)
 {
     struct work_item *item, *next_item;
@@ -765,10 +917,27 @@ static void queue_finish_shutdown(struct queue *queue)
     struct async_action *action;
     int i;
 
-    TRACE("queue %p shut down\n", queue);
-    queue_addref(queue);
     list_init(&items);
-    EnterCriticalSection(&queue->cs);
+    queue_addref(queue);
+    /* Windows 10 22H2 runs the work that is queued when the shutdown ends, including an item that was queued
+     * after ShutdownQueueAsync returned, before ShutdownCompleted; the limit keeps an item that queues itself
+     * again from holding the shutdown for ever */
+    for (i = 0;; i++)
+    {
+        EnterCriticalSection(&queue->cs);
+        if (queue->state != QUEUE_SHUTTING_DOWN || queue->deferrals)
+        {
+            LeaveCriticalSection(&queue->cs);
+            queue_release(queue);
+            return;
+        }
+        item = i < DQ_DRAIN_LIMIT ? queue_pop_item(queue) : NULL;
+        if (!item)
+            break; /* the lock stays held: state and queue change together */
+        LeaveCriticalSection(&queue->cs);
+        run_item(item);
+    }
+    TRACE("queue %p shut down\n", queue);
     queue->state = QUEUE_SHUT_DOWN;
     queue->finish_pending = FALSE;
     for (i = 0; i < 3; i++)
@@ -778,7 +947,7 @@ static void queue_finish_shutdown(struct queue *queue)
         action_AddRef(&action->IDqAsyncAction_iface);
     LeaveCriticalSection(&queue->cs);
 
-    LIST_FOR_EACH_ENTRY_SAFE(item, next_item, &items, struct work_item, entry)
+    LIST_FOR_EACH_ENTRY_SAFE(item, next_item, &items, struct work_item, entry) /* only past the limit */
     {
         list_remove(&item->entry);
         IUnknown_Release((IUnknown *)item->handler);
@@ -789,19 +958,20 @@ static void queue_finish_shutdown(struct queue *queue)
 
     raise_event(&queue->cs, &queue->completed, (IInspectable *)&queue->IDqQueue_iface, NULL);
 
-    if (dq_tls != TLS_OUT_OF_INDEXES && TlsGetValue(dq_tls) == queue)
-    {
-        TlsSetValue(dq_tls, NULL);
-        queue_release(queue);
-    }
+    queue_drop_tls(queue);
     if (action)
     {
         action_complete(action);
         action_Release(&action->IDqAsyncAction_iface);
     }
     if (queue->dedicated)
+    {
+        EnterCriticalSection(&queue->cs);
+        queue->quit = TRUE;
+        LeaveCriticalSection(&queue->cs);
         PostQuitMessage(0);
-    else
+    }
+    else if (queue->hwnd)
         DestroyWindow(queue->hwnd);
     queue_release(queue);
 }
@@ -813,8 +983,9 @@ static void queue_start_shutdown(struct queue *queue)
     IInspectable *args = NULL;
     BOOL finish;
 
+    /* only a shutdown that ShutdownQueueAsync (or the last release of a dedicated queue's controller) asked for */
     EnterCriticalSection(&queue->cs);
-    if (queue->state != QUEUE_RUNNING)
+    if (queue->state != QUEUE_RUNNING || !queue->shutdown)
     {
         LeaveCriticalSection(&queue->cs);
         return;
@@ -839,26 +1010,58 @@ static void queue_start_shutdown(struct queue *queue)
 
 static void queue_deferral_done(struct queue *queue)
 {
-    BOOL finish;
+    HWND hwnd = NULL;
 
     EnterCriticalSection(&queue->cs);
-    finish = !--queue->deferrals && queue->state == QUEUE_SHUTTING_DOWN && !queue->finish_pending;
-    if (finish)
+    if (!--queue->deferrals && queue->state == QUEUE_SHUTTING_DOWN && !queue->finish_pending && queue->hwnd)
+    {
         queue->finish_pending = TRUE;
+        hwnd = queue->hwnd;
+    }
     LeaveCriticalSection(&queue->cs);
-    if (finish)
-        PostMessageW(queue->hwnd, WM_DQ_FINISH, 0, 0);
+    if (hwnd)
+        PostMessageW(hwnd, WM_DQ_FINISH, 0, 0);
 }
 
 static void timer_tick(struct queue *queue, UINT_PTR id);
-static void timer_apply(struct timer *timer, BOOL start);
+static void timer_apply(struct timer *timer, BOOL start, BOOL requested);
+
+/* on the queue thread: the Start and Stop calls other threads made, in order */
+static void queue_run_timer_reqs(struct queue *queue)
+{
+    struct timer_req *req;
+    struct list *head;
+
+    for (;;)
+    {
+        req = NULL;
+        EnterCriticalSection(&queue->cs);
+        if ((head = list_head(&queue->timer_reqs)))
+        {
+            req = LIST_ENTRY(head, struct timer_req, entry);
+            list_remove(&req->entry);
+        }
+        LeaveCriticalSection(&queue->cs);
+        if (!req)
+            break;
+        timer_apply(req->timer, req->start, TRUE); /* releases the request's reference */
+        HeapFree(GetProcessHeap(), 0, req);
+    }
+}
 
 static LRESULT CALLBACK queue_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
     struct queue *queue = (struct queue *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    BOOL run;
 
     if (!queue)
         return DefWindowProcW(hwnd, msg, wparam, lparam);
+
+    /* Any process of the user can post to this window. The messages carry no data, and each of them acts only
+     * on state this DLL set: pending work, a requested shutdown, a posted finish, queued timer requests. We
+     * never send them, so one that arrives sent is not ours. */
+    if (msg >= WM_DQ_WORK && msg <= WM_DQ_TIMER && InSendMessage())
+        return 0;
 
     switch (msg)
     {
@@ -869,18 +1072,25 @@ static LRESULT CALLBACK queue_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM
         queue_start_shutdown(queue);
         return 0;
     case WM_DQ_FINISH:
-        if (queue->state == QUEUE_SHUTTING_DOWN && !queue->deferrals)
+        EnterCriticalSection(&queue->cs);
+        run = queue->finish_pending;
+        queue->finish_pending = FALSE;
+        LeaveCriticalSection(&queue->cs);
+        /* a deferral taken after the last one completed keeps the shutdown open; its Complete posts again */
+        if (run)
             queue_finish_shutdown(queue);
         return 0;
     case WM_DQ_TIMER:
-        timer_apply((struct timer *)lparam, (BOOL)wparam);
+        queue_run_timer_reqs(queue);
         return 0;
     case WM_TIMER:
         timer_tick(queue, wparam);
         return 0;
+    case WM_CLOSE:
+        return 0; /* the window ends with the queue, not because another process asks */
     case WM_NCDESTROY:
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-        queue_release(queue);
+        queue_detach(queue);
         break;
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -907,13 +1117,18 @@ static HRESULT queue_attach(struct queue *queue)
 {
     if (!register_class())
         return HRESULT_FROM_WIN32(GetLastError());
+    queue->thread_id = GetCurrentThreadId();
+    /* a handle to this thread, which tells other threads that it ended */
+    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &queue->thread, SYNCHRONIZE, FALSE, 0))
+        queue->thread = NULL;
     queue->hwnd = CreateWindowExW(0, dq_class_name, NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, dq_instance, NULL);
     if (!queue->hwnd)
         return HRESULT_FROM_WIN32(GetLastError());
-    queue->thread_id = GetCurrentThreadId();
     queue_addref(queue); /* the window's */
+    queue->window_ref = TRUE;
     SetWindowLongPtrW(queue->hwnd, GWLP_USERDATA, (LONG_PTR)queue);
     queue_addref(queue); /* the thread's */
+    queue->tls_ref = TRUE;
     TlsSetValue(dq_tls, queue);
     return S_OK;
 }
@@ -936,29 +1151,48 @@ static struct queue *queue_create(BOOL dedicated)
     list_init(&queue->starting);
     list_init(&queue->completed);
     list_init(&queue->timers);
+    list_init(&queue->timer_reqs);
     return queue;
 }
 
 static HRESULT queue_request_shutdown(struct queue *queue, IDqAsyncAction **out)
 {
     struct async_action *action;
-    BOOL post = FALSE;
+    BOOL post = FALSE, done = FALSE;
+    HWND hwnd = NULL;
 
+    queue_check_thread(queue);
     EnterCriticalSection(&queue->cs);
-    if (!(action = queue->shutdown))
+    if (queue->shutdown)
     {
-        if (!(action = action_create()))
-        {
-            LeaveCriticalSection(&queue->cs);
-            return E_OUTOFMEMORY;
-        }
-        queue->shutdown = action;
-        post = TRUE;
+        /* measured on Windows 10 22H2: the second ShutdownQueueAsync fails with E_UNEXPECTED, also after the
+         * first one completed */
+        LeaveCriticalSection(&queue->cs);
+        if (out)
+            *out = NULL;
+        return E_UNEXPECTED;
     }
+    if (!(action = action_create()))
+    {
+        LeaveCriticalSection(&queue->cs);
+        return E_OUTOFMEMORY;
+    }
+    queue->shutdown = action;
+    hwnd = queue->hwnd;
+    if (queue->state == QUEUE_SHUT_DOWN || !hwnd)
+        done = TRUE; /* the thread ended without a shutdown: nothing is left to shut down, so it is complete
+                      * (Windows leaves the action started for ever) */
+    else
+        post = TRUE;
     action_AddRef(&action->IDqAsyncAction_iface);
     LeaveCriticalSection(&queue->cs);
-    if (post && !PostMessageW(queue->hwnd, WM_DQ_SHUTDOWN, 0, 0))
+    if (done)
+        action_complete(action);
+    else if (post && !PostMessageW(hwnd, WM_DQ_SHUTDOWN, 0, 0))
+    {
         WARN("PostMessage failed, error %lu\n", GetLastError());
+        queue_check_thread(queue); /* completes the action when the thread is gone */
+    }
     if (out)
         *out = &action->IDqAsyncAction_iface;
     else
@@ -1145,10 +1379,14 @@ static HRESULT STDMETHODCALLTYPE args_GetDeferral(IDqShutdownArgs *iface, IDqDef
     deferral->IDqDeferral_iface.lpVtbl = &deferral_vtbl;
     deferral->IDqClosable_iface.lpVtbl = &closable_vtbl;
     deferral->ref = 1;
-    deferral->queue = args->queue;
-    queue_addref(args->queue);
+    /* after the shutdown is over there is nothing left to hold open */
     EnterCriticalSection(&args->queue->cs);
-    args->queue->deferrals++;
+    if (args->queue->state != QUEUE_SHUT_DOWN)
+    {
+        args->queue->deferrals++;
+        deferral->queue = args->queue;
+        queue_addref(args->queue);
+    }
     LeaveCriticalSection(&args->queue->cs);
     *out = &deferral->IDqDeferral_iface;
     return S_OK;
@@ -1253,6 +1491,8 @@ static HRESULT STDMETHODCALLTYPE timer_put_Interval(IDqTimer *iface, DqTimeSpan 
 
     if (value.Duration < 0)
         return E_INVALIDARG;
+    /* measured on Windows 10 22H2: the interval of a running timer changes only for the next Start (no tick
+     * came within 3 s of 60 s -> 50 ms) */
     EnterCriticalSection(&timer->queue->cs);
     timer->interval = value.Duration;
     LeaveCriticalSection(&timer->queue->cs);
@@ -1313,17 +1553,27 @@ static void timer_stop_on_thread(struct timer *timer)
     }
 }
 
-/* on the queue thread: (re)start or stop the window timer */
-static void timer_apply(struct timer *timer, BOOL start)
+/* the window timer period in milliseconds for a TimeSpan in 100 ns units, rounded up */
+static UINT interval_ms(INT64 interval)
+{
+    INT64 ms = interval / 10000 + (interval % 10000 != 0);
+
+    return (UINT)min(ms, (INT64)USER_TIMER_MAXIMUM);
+}
+
+/* on the queue thread: (re)start or stop the window timer. A request from another thread already set
+ * running when it was made; it is the request's reference that is released here */
+static void timer_apply(struct timer *timer, BOOL start, BOOL requested)
 {
     struct queue *queue = timer->queue;
     UINT ms;
 
     if (start && queue->state != QUEUE_SHUT_DOWN)
     {
-        ms = (UINT)min((timer->interval + 9999) / 10000, (INT64)USER_TIMER_MAXIMUM);
         EnterCriticalSection(&queue->cs);
-        timer->running = TRUE;
+        ms = interval_ms(timer->interval);
+        if (!requested)
+            timer->running = TRUE;
         if (!timer->listed)
         {
             timer_AddRef(&timer->IDqTimer_iface); /* the list's */
@@ -1337,31 +1587,71 @@ static void timer_apply(struct timer *timer, BOOL start)
             timer_stop_on_thread(timer);
         }
     }
-    else if (!start)
-        timer_stop_on_thread(timer);
+    else
+        timer_stop_on_thread(timer); /* also a start that came after the queue was shut down */
     timer_Release(&timer->IDqTimer_iface); /* the request's */
 }
 
 static HRESULT timer_request(struct timer *timer, BOOL start)
 {
     struct queue *queue = timer->queue;
+    struct timer_req *req;
+    HWND hwnd;
 
-    if (queue->state == QUEUE_SHUT_DOWN)
-        return start ? RPC_E_DISCONNECTED : S_OK;
-    timer_AddRef(&timer->IDqTimer_iface);
     if (queue->thread_id == GetCurrentThreadId())
     {
-        timer_apply(timer, start);
+        /* Windows 10 22H2 returns S_OK for a Start on a queue that was shut down (and the timer goes on ticking);
+         * here the timer ends with its queue, so it does not run */
+        if (queue->state == QUEUE_SHUT_DOWN)
+            return S_OK;
+        timer_AddRef(&timer->IDqTimer_iface);
+        timer_apply(timer, start, FALSE);
         return S_OK;
     }
-    /* SetTimer works only on the thread of the window; the caller sees the new state right away */
+    /* SetTimer works only on the thread of the window: queue the request for it. The caller sees the new
+     * state right away. */
+    queue_check_thread(queue);
+    if (!(req = HeapAlloc(GetProcessHeap(), 0, sizeof(*req))))
+        return E_OUTOFMEMORY;
     EnterCriticalSection(&queue->cs);
-    timer->running = start;
-    LeaveCriticalSection(&queue->cs);
-    if (!PostMessageW(queue->hwnd, WM_DQ_TIMER, start, (LPARAM)timer))
+    if (queue->state == QUEUE_SHUT_DOWN || !queue->hwnd)
     {
-        timer_Release(&timer->IDqTimer_iface);
-        return HRESULT_FROM_WIN32(GetLastError());
+        LeaveCriticalSection(&queue->cs);
+        HeapFree(GetProcessHeap(), 0, req);
+        return S_OK;
+    }
+    timer_AddRef(&timer->IDqTimer_iface);
+    req->timer = timer;
+    req->start = start;
+    list_add_tail(&queue->timer_reqs, &req->entry);
+    timer->running = start;
+    hwnd = queue->hwnd;
+    LeaveCriticalSection(&queue->cs);
+    if (!PostMessageW(hwnd, WM_DQ_TIMER, 0, 0))
+    {
+        DWORD error = GetLastError();
+        struct timer_req *e;
+        BOOL found = FALSE;
+
+        queue_check_thread(queue); /* drops the request when the thread is gone */
+        EnterCriticalSection(&queue->cs);
+        LIST_FOR_EACH_ENTRY(e, &queue->timer_reqs, struct timer_req, entry)
+        {
+            if (e == req)
+            {
+                list_remove(&req->entry);
+                timer->running = timer->listed;
+                found = TRUE;
+                break;
+            }
+        }
+        LeaveCriticalSection(&queue->cs);
+        if (found)
+        {
+            timer_Release(&timer->IDqTimer_iface);
+            HeapFree(GetProcessHeap(), 0, req);
+            return HRESULT_FROM_WIN32(error);
+        }
     }
     return S_OK;
 }
@@ -1560,36 +1850,53 @@ static DWORD WINAPI dedicated_thread(void *param)
 {
     struct thread_start *start = param;
     struct queue *queue = start->queue;
-    HRESULT com = E_FAIL, hr;
+    HRESULT com = E_FAIL, hr = S_OK;
     HMODULE self = NULL;
     MSG msg;
+    int ret;
 
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)dedicated_thread, &self);
+    queue_addref(queue);
     if (start->apartment == DQTAT_COM_STA || start->apartment == DQTAT_COM_ASTA)
     {
         if (start->apartment == DQTAT_COM_ASTA)
             FIXME("application STA: a single-threaded apartment is used\n");
         com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+        if (FAILED(com))
+        {
+            ERR("CoInitializeEx failed, %#lx\n", com);
+            hr = com;
+        }
     }
-    queue_addref(queue);
-    hr = queue_attach(queue);
+    if (SUCCEEDED(hr))
+        hr = queue_attach(queue);
     start->hr = hr;
     SetEvent(start->ready); /* start is gone after this */
     if (SUCCEEDED(hr))
     {
-        while (GetMessageW(&msg, NULL, 0, 0) > 0)
+        for (;;)
         {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            ret = GetMessageW(&msg, NULL, 0, 0);
+            if (ret > 0)
+            {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+                continue;
+            }
+            if (ret < 0)
+                break;
+            /* WM_QUIT: ours, or one that another process posted to the window, which does not end the queue */
+            EnterCriticalSection(&queue->cs);
+            ret = queue->quit;
+            LeaveCriticalSection(&queue->cs);
+            if (ret)
+                break;
         }
         if (queue->hwnd)
             DestroyWindow(queue->hwnd);
+        queue_detach(queue); /* if the loop ended some other way */
     }
-    if (TlsGetValue(dq_tls) == queue)
-    {
-        TlsSetValue(dq_tls, NULL);
-        queue_release(queue);
-    }
+    queue_drop_tls(queue);
     queue_release(queue);
     if (SUCCEEDED(com))
         CoUninitialize();

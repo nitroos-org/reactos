@@ -6,8 +6,7 @@
  *
  * From the published Windows Runtime metadata (sdk/include/psdk/windows.system.idl, windows.foundation.idl,
  * asyncinfo.idl): the C binding widl would generate, written out because these IDL files are not compiled
- * to headers in this tree. The IIDs of parameterized interfaces are computed from their type signatures with
- * the documented Windows Runtime algorithm.
+ * to headers in this tree. The IIDs are the ones in those IDL files; no parameterized interface is used.
  */
 
 #pragma once
