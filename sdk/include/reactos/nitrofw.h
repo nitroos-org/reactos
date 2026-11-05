@@ -56,7 +56,9 @@
  *     multicast address admits unicast replies from any peer for 3 seconds (Windows' documented window,
  *     FW_BCAST_TIMEOUT), and the first reply gives that peer an exchange of its own. DHCP client
  *     replies (UDP source port 67, destination port 68) always pass: they answer our own request, and
- *     losing the lease would take the network down.
+ *     losing the lease would take the network down. With NITROFW_PROFILE_NO_UNICAST_RESPONSES set in an
+ *     enabled active profile, replies to a broadcast or multicast send (UDP or ICMP) are not admitted
+ *     (Windows' DisableUnicastResponsesToMulticastBroadcast); replies to unicast sends still are.
  *     ICMP: the reply to a request the host sent (echo, timestamp, information request, address mask
  *     request; matched on the peer address and the identifier) passes; an echo, timestamp, information
  *     or address mask reply with no such request is unsolicited and goes through the rules like a request
@@ -136,6 +138,7 @@ typedef struct _NITROFW_VERSION_INFO
 /* NITROFW_PROFILE_SETTINGS.Flags */
 #define NITROFW_PROFILE_ENABLED            0x00000001   /* EnableFirewall */
 #define NITROFW_PROFILE_BLOCK_ALL_INBOUND  0x00000002   /* DoNotAllowExceptions */
+#define NITROFW_PROFILE_NO_UNICAST_RESPONSES 0x00000004 /* DisableUnicastResponsesToMulticastBroadcast */
 
 #define NITROFW_ACTION_ALLOW  0
 #define NITROFW_ACTION_BLOCK  1

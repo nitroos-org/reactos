@@ -27,6 +27,9 @@
  * (echo, timestamp, information, address mask; an ICMP reply with no such request is unsolicited and is
  * evaluated like a request), and traffic the host sent to itself over a real address (the frames our own
  * send path looped back, see NitroFwInboundAllowed).
+ *
+ * DisableUnicastResponsesToMulticastBroadcast (NITROFW_PROFILE_NO_UNICAST_RESPONSES): replies to a
+ * broadcast/multicast send are not admitted.
  */
 
 #include "precomp.h"
@@ -85,6 +88,7 @@ typedef struct _FW_POLICY
     BOOLEAN BlockAllInbound;
     BOOLEAN DefaultBlockInbound;
     BOOLEAN HasAppRules;        /* an inbound rule has a program condition */
+    BOOLEAN NoUnicastResponses; /* an enabled active profile has DisableUnicastResponsesToMulticastBroadcast */
     ULONG InRuleCount;
     PULONG InRuleOffsets;       /* offsets of the inbound rules in Blob */
     ULONG BlobSize;
@@ -130,6 +134,9 @@ static ULONGLONG FwLastGeneration = 0;  /* high-water mark, survives CLEAR */
 static KSPIN_LOCK FwFlowLocks[FW_FLOW_LOCKS];
 static FW_FLOW FwFlows[FW_FLOW_SETS][FW_FLOW_WAYS];
 static FW_ICMPFLOW FwIcmpFlows[FW_ICMP_SETS][FW_FLOW_WAYS];
+
+/* Set from the installed policy while it is enforced (under FwPolicyLock; read without a lock) */
+static volatile LONG FwNoUnicast = 0;   /* replies to broadcast/multicast sends are not admitted */
 
 static LONG64 FwDroppedInbound = 0;
 static LONG64 FwPassedInbound = 0;
@@ -295,6 +302,7 @@ static VOID FwInstallPolicy(PFW_POLICY NewPolicy)
     FwPolicy = NewPolicy;
     InterlockedExchange((PLONG)&NitroFwEnforcing, FwPolicyEnforced(NewPolicy) ? 1 : 0);
     InterlockedExchange((PLONG)&NitroFwWantImages, (FwPolicyEnforced(NewPolicy) && NewPolicy->HasAppRules) ? 1 : 0);
+    InterlockedExchange((PLONG)&FwNoUnicast, (FwPolicyEnforced(NewPolicy) && NewPolicy->NoUnicastResponses) ? 1 : 0);
     KeReleaseSpinLock(&FwPolicyLock, OldIrql);
 
     if (Old)
@@ -515,6 +523,8 @@ static NTSTATUS FwCompilePolicy(PFW_POLICY Policy)
             Policy->BlockAllInbound = TRUE;
         if (Hdr->Profile[i].DefaultInbound == NITROFW_ACTION_BLOCK)
             Policy->DefaultBlockInbound = TRUE;
+        if (Hdr->Profile[i].Flags & NITROFW_PROFILE_NO_UNICAST_RESPONSES)
+            Policy->NoUnicastResponses = TRUE;
     }
     return STATUS_SUCCESS;
 }
@@ -1113,7 +1123,7 @@ static BOOLEAN FwFlowLookup(USHORT LocalPort, ULONG RemoteAddr, USHORT RemotePor
     /* a reply to a broadcast/multicast send: the wildcard entry. The sender (a concrete peer) now has an
        exchange of its own, so its next packets (a second DHCP/SSDP message, the follow-up of a slow
        responder) pass without needing the wildcard window to still be open. 0.0.0.0 never promotes. */
-    if (FwFlowFind(LocalPort, 0, 0))
+    if (!FwNoUnicast && FwFlowFind(LocalPort, 0, 0))
     {
         if (RemoteAddr != 0)
             FwFlowInsert(LocalPort, RemoteAddr, RemotePort, FW_UDP_TIMEOUT);
@@ -1274,7 +1284,7 @@ static BOOLEAN FwIcmpReplyExpected(ULONG SrcAddrN, PUCHAR Icmp, ULONG Length)
     Ident = *(USHORT UNALIGNED *)(Icmp + 4);
     if (FwIcmpFind(SrcAddrN, Ident, Icmp[0]))
         return TRUE;
-    return FwIcmpFind(0, Ident, Icmp[0]);
+    return !FwNoUnicast && FwIcmpFind(0, Ident, Icmp[0]);
 }
 
 /* ------------------------------------------------------------------------------------------------
