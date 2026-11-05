@@ -35,9 +35,9 @@ typedef const ADDON_INSTALL_DATA* PCADDON_INSTALL_DATA;
 /* TODO: Move this out of code and into an .inf or something. */
 static const ADDON_INSTALL_DATA Addons[] = {
 #ifdef _M_IX86
-    /* Wine Gecko is not installed by setup: it is offered on demand by the feature manager (wine-gecko)
-     * and by the add-on prompt of appwiz.cpl on first use of the mshtml engine. */
-    {L"WineVDM", L"%SystemRoot%\\winevdm_setup.exe", L"\"%s\" /VERYSILENT", L"winevdm"},
+    /* Nothing is installed or requested by setup on i386. Wine Gecko is offered on demand by the feature manager
+     * (wine-gecko) and by the add-on prompt of appwiz.cpl on first use of the mshtml engine; WineVDM (16-bit
+     * application support) is offered on demand by the feature manager (winevdm). Setup shows no download prompt. */
 #elif defined(_M_AMD64)
     /* PowerShell 7: the image carries the official MSI (staged at build time) in the feature manager's payload
      * folder. The feature manager installs it silently, local-first, with the properties of its catalog entry
