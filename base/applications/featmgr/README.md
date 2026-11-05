@@ -30,13 +30,13 @@ renamed to a free `<name>.fmdel[N]` and deleted at reboot, so the original goes 
 the original replaces it at the next boot (a reboot-delete is never queued for the real name of a backed-up file).
 
 - `<base>`: `HKLM\SOFTWARE\ReactOS\Nitro\Featmgr`, value `PayloadBaseUrl` (REG_SZ), when set; otherwise `[Source] BaseUrl`
-  of the manifest. While it holds the placeholder `REPLACE-WITH-...`, the pack is listed as "not available yet" (no
-  broken enable); a base that is not `https://` is refused the same way.
+  of the manifest (`lavapipe-pack`: `https://repo.nitroos.org/featmgr`). A base that still holds a `REPLACE-WITH-...`
+  placeholder, or that is not `https://`, makes the pack listed as "not available yet" (no broken enable).
 - `[Source] Arch=amd64`: on any other architecture the entry says so ("Only for 64-bit (amd64) NitroOS").
 - `[Feature] BuiltInFile=<path>`: when the image already carries the pack (that file exists) and featmgr has no record of
   it, the entry shows Enabled, "included in this image", and cannot be turned off there.
 - The hosted files of `lavapipe-pack` are produced by `tools/stage-lavapipe-payload.sh <dir>` (the six files of
-  `[Download]` plus `SHA256SUMS`); upload them to `<base>/lavapipe-pack/26.2.4-6ab3d0fe/`. Copying them into the payload
+  `[Download]` plus `SHA256SUMS`); they are published at `https://repo.nitroos.org/featmgr/lavapipe-pack/26.2.4-6ab3d0fe/`. Copying them into the payload
   folder instead makes the pack installable offline (they are still verified). Offline tests: `tests\roundtrip.cmd` (H1-H29).
 
 ## Wine Gecko 2.40 (the mshtml engine), on demand

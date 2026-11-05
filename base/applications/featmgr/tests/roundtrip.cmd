@@ -105,7 +105,7 @@ call :st fmt-base NotInstalled "37 NotInstalled after enabled-uninstall"
 call :ex %R%\fmt-base.out 0 "38 base file gone"
 
 rem --- lavapipe-pack (GPU pack): included in an image built with the GPU stack in system32 (not removable there),
-rem otherwise a hosted pack that is "not available yet" while its download location is the placeholder; amd64 only
+rem otherwise a hosted pack (downloaded at enable; the test only uses an unreachable override); amd64 only
 set FMK=HKLM\SOFTWARE\ReactOS\Nitro\Featmgr
 reg delete %FMK% /v PayloadBaseUrl /f >nul 2>&1
 if exist %FX%\lavapipe-pack.ini copy /y %FX%\lavapipe-pack.ini %R%\Catalog\ >nul
@@ -128,10 +128,14 @@ call :rc1 "43 uninstall lavapipe-pack refused"
 call :ex %SystemRoot%\System32\vulkan_lvp.dll 1 "44 ...and the in-box files stay"
 goto lvp_done
 :lvp_hosted
-find /i "not available yet" %O%\q.txt >nul
-call :rc0 "39h lavapipe-pack (image without the GPU stack): not available yet with the placeholder URL"
+find /i "downloaded at enable" %O%\q.txt >nul
+call :rc0 "39h lavapipe-pack (image without the GPU stack): available, downloaded at enable (repo.nitroos.org)"
+reg add %FMK% /v PayloadBaseUrl /t REG_SZ /d https://127.0.0.1:1/featmgr /f >nul
 %FM% /install lavapipe-pack > %O%\b.txt 2>&1
-call :rc1 "40h install refused"
+call :rc1 "40h install with an unreachable PayloadBaseUrl override fails"
+find /i "nothing was changed" %O%\b.txt >nul
+call :rc0 "40i ...and nothing was changed"
+reg delete %FMK% /v PayloadBaseUrl /f >nul 2>&1
 call :st lavapipe-pack NotInstalled "41h ...left NotInstalled"
 goto lvp_done
 :lvp_x86
