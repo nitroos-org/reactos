@@ -3012,21 +3012,39 @@ LRESULT CDefView::OnChangeNotify(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &
                 LV_AddItem(child0);
             else
                 LV_UpdateItem(child0);
+            UpdateStatusbar();
             break;
         case SHCNE_RMDIR:
         case SHCNE_DELETE:
         case SHCNE_DRIVEREMOVED:
             if (child0)
                 LV_DeleteItem(child0);
+            UpdateStatusbar();
             break;
         case SHCNE_RENAMEFOLDER:
         case SHCNE_RENAMEITEM:
             if (child0 && child1)
-                LV_RenameItem(child0, child1);
+            {
+                // The desktop gets every change twice (as the file's own path and as the merged desktop's
+                // item), so the new name may be listed already, and an old name the view does not have (the
+                // item was never listed) must not lose the new one.
+                int iOld = LV_FindItemByPidl(child0);
+                int iNew = LV_FindItemByPidl(child1);
+                if (iNew >= 0 && iNew != iOld)
+                {
+                    if (iOld >= 0)
+                        LV_DeleteItem(child0);
+                }
+                else if (!LV_RenameItem(child0, child1) && iNew < 0)
+                {
+                    LV_AddItem(child1);
+                }
+            }
             else if (child0)
                 LV_DeleteItem(child0);
             else if (child1)
                 LV_AddItem(child1);
+            UpdateStatusbar();
             break;
         case SHCNE_UPDATEITEM:
             if (child0)
