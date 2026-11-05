@@ -2608,7 +2608,13 @@ LdrpInitializeProcess(IN PCONTEXT Context,
                                            &Wow64Peb,
                                            sizeof(Wow64Peb),
                                            NULL);
-        if (NT_SUCCESS(Status) && !Wow64Peb)
+        /* Without the answer the image cannot be told from one that WoW64 runs: do not guess */
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("LDR: %wZ: ProcessWow64Information failed (%08lx)\n", &ImagePathName, Status);
+            return Status;
+        }
+        if (!Wow64Peb)
         {
             if (!LdrpCorFixupIlOnlyImage(Peb->ImageBaseAddress, NtHeader))
             {

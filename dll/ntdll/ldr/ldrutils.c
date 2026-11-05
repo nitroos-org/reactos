@@ -1140,6 +1140,14 @@ LdrpCorFixupIlOnlyImage(
     Opt64.NumberOfRvaAndSizes = Directories;
     for (i = 0; i < Directories; i++)
         Opt64.DataDirectory[i] = Opt32.DataDirectory[i];
+    /* The loader reads these two with the PE32+ layouts from here on, and the PE32 structures that the file holds do
+       not have them: take them out, as the converted header has no use for them (a PE32 TLS directory read wide
+       sizes the TLS block from garbage and fails the process start). Not measured on Windows: see
+       DOTNET-anycpu-review-followups */
+    if (Directories > IMAGE_DIRECTORY_ENTRY_TLS)
+        RtlZeroMemory(&Opt64.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS], sizeof(IMAGE_DATA_DIRECTORY));
+    if (Directories > IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)
+        RtlZeroMemory(&Opt64.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG], sizeof(IMAGE_DATA_DIRECTORY));
 
     /* The header page of an image view is read-only; the write makes it a private copy */
     ProtectBase = ViewBase;
@@ -1157,7 +1165,12 @@ LdrpCorFixupIlOnlyImage(
 
     ProtectBase = ViewBase;
     ProtectSize = PAGE_SIZE;
-    NtProtectVirtualMemory(NtCurrentProcess(), &ProtectBase, &ProtectSize, OldProtect, &OldProtect);
+    Status = NtProtectVirtualMemory(NtCurrentProcess(), &ProtectBase, &ProtectSize, OldProtect, &OldProtect);
+    if (!NT_SUCCESS(Status))
+    {
+        /* The headers are PE32+ now and the page is a private copy of this process: go on, but say so */
+        DPRINT1("LDR: cannot restore the protection of the converted headers at %p (%08lx)\n", ViewBase, Status);
+    }
     return TRUE;
 }
 #endif
