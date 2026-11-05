@@ -86,7 +86,7 @@ dll/directx/wine/dswave         # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dwrite         # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dx8vb          # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dxcore         # Synced to wine-10.1-dev (b00c7619f1b)
-dll/directx/wine/dxdiagn        # Synced to wine-10.1-dev (b00c7619f1b)
+dll/directx/wine/dxdiagn        # Synced to Wine-11.21
 dll/directx/wine/dxgi           # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dxtrans        # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dxva2          # Synced to wine-10.1-dev (b00c7619f1b)
