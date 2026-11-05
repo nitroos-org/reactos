@@ -13,6 +13,8 @@
 #include <ntifs.h>
 #include <receive.h>
 #include <wait.h>
+#include <reactos/nitrofw.h>
+#include "fwiftype.h"
 
 UINT TransferDataCalled = 0;
 UINT TransferDataCompleteCalled = 0;
@@ -343,6 +345,13 @@ VOID DenyOpenAdapter(
     }
 }
 
+
+ULONG LANGetFwIfType(PIP_INTERFACE Interface)
+{
+    if (!Interface || !Interface->Context || Interface == Loopback)
+        return NITROFW_IFTYPE_LAN;
+    return ((PLAN_ADAPTER)Interface->Context)->FwIfType;
+}
 
 NTSTATUS TcpipLanGetDwordOid
 ( PIP_INTERFACE Interface,
@@ -1977,6 +1986,14 @@ NDIS_STATUS LANRegisterAdapter(
         TI_DbgPrint(MIN_TRACE, ("Unsupported media.\n"));
         DenyOpenAdapter(IF);
         return NDIS_STATUS_NOT_SUPPORTED;
+    }
+
+    /* Interface type for the inbound filter's rule conditions (a miniport that does not answer is a LAN adapter) */
+    {
+        ULONG Physical = 0;
+        if (NDISCall(IF, NdisRequestQueryInformation, OID_GEN_PHYSICAL_MEDIUM, &Physical, sizeof(Physical)) != NDIS_STATUS_SUCCESS)
+            Physical = 0;
+        IF->FwIfType = FwIfTypeFromMedium((ULONG)IF->Media, Physical);
     }
 
     /* Get maximum number of packets we can pass to NdisSend(Packets) at one time */
