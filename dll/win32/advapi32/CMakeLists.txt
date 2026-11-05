@@ -15,6 +15,7 @@ add_rpc_files(client
     ${REACTOS_SOURCE_DIR}/sdk/include/reactos/idl/winreg.idl)
 
 list(APPEND SOURCE
+    misc/auditpol.c
     misc/dllmain.c
     misc/efs.c
     misc/evntrace.c
