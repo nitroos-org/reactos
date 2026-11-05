@@ -264,6 +264,93 @@ RtlImageNtHeader(IN PVOID Base)
     return NtHeader;
 }
 
+#ifndef _BLDR_
+/*
+ * The size of the view a data-file module handle points into: the committed region that starts
+ * at the (untagged) base. Returns 0 when it cannot be told.
+ */
+ULONG_PTR
+NTAPI
+RtlpQueryDataFileViewSize(_In_ PVOID ViewBase)
+{
+    MEMORY_BASIC_INFORMATION Info;
+
+    if (!NT_SUCCESS(NtQueryVirtualMemory(NtCurrentProcess(),
+                                         ViewBase,
+                                         MemoryBasicInformation,
+                                         &Info,
+                                         sizeof(Info),
+                                         NULL)))
+    {
+        return 0;
+    }
+
+    if ((ULONG_PTR)Info.BaseAddress > (ULONG_PTR)ViewBase) return 0;
+    return Info.RegionSize - ((ULONG_PTR)ViewBase - (ULONG_PTR)Info.BaseAddress);
+}
+
+/*
+ * Locate the NT headers of a data-file view and make sure that the optional header, the section
+ * table and the requested data directory entry lie inside the view.
+ */
+static
+PIMAGE_NT_HEADERS
+RtlpDataFileNtHeaders(
+    _In_ PVOID ViewBase,
+    _In_ ULONG_PTR ViewSize,
+    _In_ USHORT Directory,
+    _Out_ PIMAGE_DATA_DIRECTORY *DirectoryEntry)
+{
+    PIMAGE_NT_HEADERS NtHeader;
+    PIMAGE_DATA_DIRECTORY DataDirectory;
+    ULONG_PTR ViewEnd = (ULONG_PTR)ViewBase + ViewSize;
+    ULONG_PTR OptionalStart, OptionalEnd, SectionEnd;
+    ULONG NumberOfRvaAndSizes;
+
+    *DirectoryEntry = NULL;
+
+    if (!NT_SUCCESS(RtlImageNtHeaderEx(0, ViewBase, ViewSize, &NtHeader)))
+        return NULL;
+
+    OptionalStart = (ULONG_PTR)&NtHeader->OptionalHeader;
+    OptionalEnd = OptionalStart + SWAPW(NtHeader->FileHeader.SizeOfOptionalHeader);
+    SectionEnd = OptionalEnd + (ULONG_PTR)SWAPW(NtHeader->FileHeader.NumberOfSections) *
+                               sizeof(IMAGE_SECTION_HEADER);
+
+    /* The optional header must hold at least its magic and the directory count */
+    if ((OptionalEnd < OptionalStart) || (SectionEnd < OptionalEnd) || (SectionEnd > ViewEnd))
+        return NULL;
+
+    if (NtHeader->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+    {
+        PIMAGE_OPTIONAL_HEADER64 OptionalHeader = (PIMAGE_OPTIONAL_HEADER64)&NtHeader->OptionalHeader;
+
+        if ((OptionalEnd - OptionalStart) < FIELD_OFFSET(IMAGE_OPTIONAL_HEADER64, DataDirectory))
+            return NULL;
+        NumberOfRvaAndSizes = SWAPD(OptionalHeader->NumberOfRvaAndSizes);
+        DataDirectory = OptionalHeader->DataDirectory;
+    }
+    else
+    {
+        PIMAGE_OPTIONAL_HEADER32 OptionalHeader = (PIMAGE_OPTIONAL_HEADER32)&NtHeader->OptionalHeader;
+
+        if ((OptionalEnd - OptionalStart) < FIELD_OFFSET(IMAGE_OPTIONAL_HEADER32, DataDirectory))
+            return NULL;
+        NumberOfRvaAndSizes = SWAPD(OptionalHeader->NumberOfRvaAndSizes);
+        DataDirectory = OptionalHeader->DataDirectory;
+    }
+
+    if (Directory >= NumberOfRvaAndSizes)
+        return NULL;
+    if (((ULONG_PTR)&DataDirectory[Directory] + sizeof(IMAGE_DATA_DIRECTORY)) > OptionalEnd)
+        return NULL;
+
+    *DirectoryEntry = &DataDirectory[Directory];
+    return NtHeader;
+}
+
+#endif /* _BLDR_ */
+
 /*
  * @implemented
  */
@@ -277,12 +364,51 @@ RtlImageDirectoryEntryToData(
 {
     PIMAGE_NT_HEADERS NtHeader;
     ULONG Va;
+#ifndef _BLDR_
+    PIMAGE_DATA_DIRECTORY DirectoryEntry;
+    ULONG DirSize;
+    ULONG_PTR ViewSize = 0, Offset;
+    PVOID Data;
+#endif
 
     /* Magic flag for non-mapped images. */
     if ((ULONG_PTR)BaseAddress & 1)
     {
-        BaseAddress = (PVOID)((ULONG_PTR)BaseAddress & ~1);
+        BaseAddress = (PVOID)((ULONG_PTR)BaseAddress & ~(ULONG_PTR)1);
         MappedAsImage = FALSE;
+
+#ifndef _BLDR_
+        /* The file's own fields are untrusted here: bound all of them by the view */
+        ViewSize = RtlpQueryDataFileViewSize(BaseAddress);
+        if (ViewSize == 0)
+            return NULL;
+
+        NtHeader = RtlpDataFileNtHeaders(BaseAddress, ViewSize, Directory, &DirectoryEntry);
+        if (NtHeader == NULL)
+            return NULL;
+
+        Va = SWAPD(DirectoryEntry->VirtualAddress);
+        if (Va == 0)
+            return NULL;
+        DirSize = SWAPD(DirectoryEntry->Size);
+
+        if (Va < SWAPD(NtHeader->OptionalHeader.SizeOfHeaders))
+            Data = (PVOID)((ULONG_PTR)BaseAddress + Va);
+        else
+            Data = RtlImageRvaToVa(NtHeader, BaseAddress, Va, NULL);
+
+        /* The data must start inside the view, and is cut at its end */
+        if (Data == NULL)
+            return NULL;
+        Offset = (ULONG_PTR)Data - (ULONG_PTR)BaseAddress;
+        if ((Data < BaseAddress) || (Offset >= ViewSize))
+            return NULL;
+        if (DirSize > (ViewSize - Offset))
+            DirSize = (ULONG)(ViewSize - Offset);
+
+        *Size = DirSize;
+        return Data;
+#endif /* _BLDR_ */
     }
 
     NtHeader = RtlImageNtHeader(BaseAddress);
@@ -387,13 +513,18 @@ RtlImageRvaToVa(
                    (ULONG_PTR)SWAPD(Section->VirtualAddress));
 }
 
+/*
+ * Apply one relocation block. When ImageEnd is not 0, a fixup that does not lie entirely
+ * inside the image (below ImageEnd) makes the block fail.
+ */
+static
 PIMAGE_BASE_RELOCATION
-NTAPI
-LdrProcessRelocationBlockLongLong(
+LdrpProcessRelocationBlockBounded(
     IN ULONG_PTR Address,
     IN ULONG Count,
     IN PUSHORT TypeOffset,
-    IN LONGLONG Delta)
+    IN LONGLONG Delta,
+    IN ULONG_PTR ImageEnd)
 {
     SHORT Offset;
     USHORT Type;
@@ -401,12 +532,42 @@ LdrProcessRelocationBlockLongLong(
     PUSHORT ShortPtr;
     PULONG LongPtr;
     PULONGLONG LongLongPtr;
+    ULONG_PTR FixupSize;
 
     for (i = 0; i < Count; i++)
     {
         Offset = SWAPW(*TypeOffset) & 0xFFF;
         Type = SWAPW(*TypeOffset) >> 12;
         ShortPtr = (PUSHORT)(RVA(Address, Offset));
+
+        if (ImageEnd != 0)
+        {
+            switch (Type)
+            {
+                case IMAGE_REL_BASED_HIGH:
+                case IMAGE_REL_BASED_LOW:
+                    FixupSize = sizeof(USHORT);
+                    break;
+                case IMAGE_REL_BASED_HIGHLOW:
+                    FixupSize = sizeof(ULONG);
+                    break;
+                case IMAGE_REL_BASED_DIR64:
+                    FixupSize = sizeof(ULONGLONG);
+                    break;
+                default:
+                    FixupSize = 0;
+                    break;
+            }
+
+            /* A fixup that is not applied (absolute or unknown) touches nothing */
+            if ((FixupSize != 0) &&
+                (((ULONG_PTR)ShortPtr + FixupSize > ImageEnd) ||
+                 ((ULONG_PTR)ShortPtr + FixupSize < (ULONG_PTR)ShortPtr)))
+            {
+                DPRINT1("Relocation target %p is outside of the image\n", ShortPtr);
+                return (PIMAGE_BASE_RELOCATION)NULL;
+            }
+        }
         /*
         * Don't relocate within the relocation section itself.
         * GCC/LD generates sometimes relocation records for the relocation section.
@@ -457,6 +618,18 @@ LdrProcessRelocationBlockLongLong(
     return (PIMAGE_BASE_RELOCATION)TypeOffset;
 }
 
+PIMAGE_BASE_RELOCATION
+NTAPI
+LdrProcessRelocationBlockLongLong(
+    IN ULONG_PTR Address,
+    IN ULONG Count,
+    IN PUSHORT TypeOffset,
+    IN LONGLONG Delta)
+{
+    /* The caller of the exported function owns the bounds */
+    return LdrpProcessRelocationBlockBounded(Address, Count, TypeOffset, Delta, 0);
+}
+
 ULONG
 NTAPI
 LdrRelocateImage(
@@ -486,6 +659,8 @@ LdrRelocateImageWithBias(
     ULONG_PTR Address;
     PUSHORT TypeOffset;
     LONGLONG Delta;
+    ULONG BlockSize, ImageSize;
+    ULONG_PTR ImageEnd, RelocationLimit;
 
     UNREFERENCED_PARAMETER(LoaderName);
 
@@ -510,17 +685,41 @@ LdrRelocateImageWithBias(
     RelocationDir = (PIMAGE_BASE_RELOCATION)((ULONG_PTR)BaseAddress + SWAPD(RelocationDDir->VirtualAddress));
     RelocationEnd = (PIMAGE_BASE_RELOCATION)((ULONG_PTR)RelocationDir + SWAPD(RelocationDDir->Size));
 
+    /* The directory and every fixup it names must lie inside the mapped image */
+    ImageSize = SWAPD(NtHeaders->OptionalHeader.SizeOfImage);
+    ImageEnd = (ULONG_PTR)BaseAddress + ImageSize;
+    RelocationLimit = (ULONG_PTR)RelocationEnd;
+    if (((ULONG_PTR)RelocationDir < (ULONG_PTR)BaseAddress) ||
+        ((ULONG_PTR)RelocationEnd < (ULONG_PTR)RelocationDir) ||
+        (RelocationLimit > ImageEnd) ||
+        (SWAPD(RelocationDDir->VirtualAddress) >= ImageSize))
+    {
+        DPRINT1("Relocation directory is outside of the image\n");
+        return Invalid;
+    }
+
     while (RelocationDir < RelocationEnd &&
             SWAPW(RelocationDir->SizeOfBlock) > 0)
     {
-        Count = (SWAPW(RelocationDir->SizeOfBlock) - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(USHORT);
+        BlockSize = SWAPD(RelocationDir->SizeOfBlock);
+
+        /* A block holds its header, and ends inside the directory */
+        if ((BlockSize < sizeof(IMAGE_BASE_RELOCATION)) ||
+            (BlockSize > (RelocationLimit - (ULONG_PTR)RelocationDir)))
+        {
+            DPRINT1("Invalid relocation block size %lu\n", BlockSize);
+            return Invalid;
+        }
+
+        Count = (BlockSize - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(USHORT);
         Address = (ULONG_PTR)RVA(BaseAddress, SWAPD(RelocationDir->VirtualAddress));
         TypeOffset = (PUSHORT)(RelocationDir + 1);
 
-        RelocationDir = LdrProcessRelocationBlockLongLong(Address,
+        RelocationDir = LdrpProcessRelocationBlockBounded(Address,
                         Count,
                         TypeOffset,
-                        Delta);
+                        Delta,
+                        ImageEnd);
 
         if (RelocationDir == NULL)
         {

@@ -245,8 +245,22 @@ static NTSTATUS LdrpAccessResource( PVOID BaseAddress, IMAGE_RESOURCE_DATA_ENTRY
             {
                 if (is_data_file_module(BaseAddress))
                 {
-                    PVOID mod = (PVOID)((ULONG_PTR)BaseAddress & ~1);
-                    *ptr = RtlImageRvaToVa( RtlImageNtHeader(mod), mod, entry->OffsetToData, NULL );
+                    PVOID mod = (PVOID)((ULONG_PTR)BaseAddress & ~(ULONG_PTR)1);
+                    ULONG_PTR ViewSize = RtlpQueryDataFileViewSize( mod );
+                    ULONG_PTR Offset;
+                    PIMAGE_NT_HEADERS NtHeaders = ViewSize ? RtlImageNtHeader( mod ) : NULL;
+
+                    *ptr = NtHeaders ? RtlImageRvaToVa( NtHeaders, mod, entry->OffsetToData, NULL ) : NULL;
+
+                    /* The resource must lie entirely inside the view of the file */
+                    if (*ptr)
+                    {
+                        Offset = (ULONG_PTR)*ptr - (ULONG_PTR)mod;
+                        if (((ULONG_PTR)*ptr < (ULONG_PTR)mod) || (Offset >= ViewSize) ||
+                            (entry->Size > (ViewSize - Offset)))
+                            *ptr = NULL;
+                    }
+                    if (!*ptr) status = STATUS_RESOURCE_DATA_NOT_FOUND;
                 }
                 else *ptr = (char *)BaseAddress + entry->OffsetToData;
             }
