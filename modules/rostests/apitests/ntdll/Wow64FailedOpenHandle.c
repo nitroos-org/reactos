@@ -124,13 +124,14 @@ static void NativeChecks(void)
     CHECK_FAILED("NtDuplicateObject");
 
     /* A thread in an invalid process, with an empty context and initial TEB. Windows 10 gives
-     * STATUS_INVALID_PARAMETER; which of the two it checks first is unknown, so not implemented */
+     * STATUS_INVALID_PARAMETER: an INITIAL_TEB with no StackLimit and no AllocatedStackBase is
+     * refused before the process handle is looked at (see the NtCreateThread test) */
     RtlZeroMemory(&ClientId, sizeof(ClientId));
     RtlZeroMemory(&Context, sizeof(Context));
     RtlZeroMemory(&InitialTeb, sizeof(InitialTeb));
     Handle = SENTINEL;
     Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, (HANDLE)(ULONG_PTR)0x1230, &ClientId, &Context, &InitialTeb, TRUE);
-    todo_if(is_reactos()) ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+    ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
     CHECK_FAILED("NtCreateThread");
 
     /* An unwritable handle variable fails the call and is not written */
