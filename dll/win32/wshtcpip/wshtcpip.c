@@ -156,6 +156,71 @@ WSHGetSockaddrType(
     return NO_ERROR;
 }
 
+/*
+ * IP and UDP options that the TCP/IP driver has no interface for (or cannot read back) are kept with the
+ * socket and answered from there, as Windows answers them (measured on Windows 10 22H2 for a datagram socket:
+ * what was set is read back; an option that was not set reads as its default). IP_RECVECN and IP_ECN are the
+ * same option (50). IP_MTU_DISCOVER takes 0 to 3, and IP_DONTFRAGMENT and IP_MTU_DISCOVER refuse to be
+ * set once the other one is in use. The receive switches and the UDP options are refused on a stream socket.
+ */
+#define WSH_IP_RECVTOS          40
+#define WSH_IP_RECVECN          50
+#define WSH_IP_MTU_DISCOVER     71
+#define WSH_UDP_SEND_MSG_SIZE   2
+#define WSH_UDP_RECV_MAX_COALESCED_SIZE 3
+
+#define WSH_SET_TTL     0x01
+#define WSH_SET_TOS     0x02
+#define WSH_SET_DF      0x04
+#define WSH_SET_RECVTOS 0x08
+#define WSH_SET_RECVECN 0x10
+#define WSH_SET_MLOOP   0x20
+#define WSH_SET_MTTL    0x40
+#define WSH_SET_USENDSZ 0x80
+#define WSH_SET_URECVSZ 0x100
+#define WSH_SET_MTUD    0x200
+
+/* Finds the kept value of an option; Boolean is TRUE when it is a switch, Default what an unset one reads */
+static
+PLONG
+WshKeptOption(
+    _In_ PSOCKET_CONTEXT Context,
+    _In_ INT Level,
+    _In_ INT OptionName,
+    _Out_ PDWORD Bit,
+    _Out_ PLONG Default,
+    _Out_ PBOOLEAN Boolean)
+{
+    *Boolean = FALSE;
+    *Default = 0;
+
+    if (Level == IPPROTO_IP)
+    {
+        switch (OptionName)
+        {
+            case IP_TTL:            *Bit = WSH_SET_TTL; *Default = 128; return &Context->IpTtl;
+            case IP_TOS:            *Bit = WSH_SET_TOS; return &Context->IpTos;
+            case IP_DONTFRAGMENT:   *Bit = WSH_SET_DF; *Boolean = TRUE; return &Context->IpDontFragment;
+            case WSH_IP_MTU_DISCOVER: *Bit = WSH_SET_MTUD; return &Context->IpMtuDiscover;
+            case WSH_IP_RECVTOS:    *Bit = WSH_SET_RECVTOS; *Boolean = TRUE; return &Context->IpRecvTos;
+            case WSH_IP_RECVECN:    *Bit = WSH_SET_RECVECN; *Boolean = TRUE; return &Context->IpRecvEcn;
+            case IP_MULTICAST_LOOP: *Bit = WSH_SET_MLOOP; *Default = 1; *Boolean = TRUE; return &Context->IpMulticastLoop;
+            case IP_MULTICAST_TTL:  *Bit = WSH_SET_MTTL; *Default = 1; return &Context->IpMulticastTtl;
+            default: break;
+        }
+    }
+    else if (Level == IPPROTO_UDP)
+    {
+        switch (OptionName)
+        {
+            case WSH_UDP_SEND_MSG_SIZE:           *Bit = WSH_SET_USENDSZ; return &Context->UdpSendMsgSize;
+            case WSH_UDP_RECV_MAX_COALESCED_SIZE: *Bit = WSH_SET_URECVSZ; return &Context->UdpRecvMaxCoalescedSize;
+            default: break;
+        }
+    }
+    return NULL;
+}
+
 static
 void
 GetTdiTypeId(
@@ -237,13 +302,51 @@ WSHGetSocketInformation(
     OUT PCHAR OptionValue,
     OUT LPINT OptionLength)
 {
-    UNIMPLEMENTED;
+    PSOCKET_CONTEXT Context = HelperDllSocketContext;
+    PLONG Kept;
+    DWORD Bit;
+    LONG Default, Value;
+    BOOLEAN Boolean;
 
+    if (Context && (Level == IPPROTO_IP || Level == IPPROTO_UDP))
+    {
+        Kept = WshKeptOption(Context, Level, OptionName, &Bit, &Default, &Boolean);
+        if (!Kept)
+            goto Unknown;
+
+        /* The datagram only options are invalid on a stream */
+        if (Context->SocketType != SOCK_DGRAM && Context->SocketType != SOCK_RAW &&
+            (Level == IPPROTO_UDP || OptionName == WSH_IP_RECVTOS || OptionName == WSH_IP_RECVECN))
+            return WSAEINVAL;
+
+        if (!OptionLength || !OptionValue || *OptionLength < (INT)sizeof(CHAR))
+        {
+            if (OptionLength) *OptionLength = sizeof(LONG);
+            return WSAEFAULT;
+        }
+
+        Value = (Context->OptionsSet & Bit) ? *Kept : Default;
+        if (*OptionLength >= (INT)sizeof(LONG))
+        {
+            *(PLONG)OptionValue = Value;
+            *OptionLength = sizeof(LONG);
+        }
+        else
+        {
+            /* Less than four bytes: the low byte */
+            *(PUCHAR)OptionValue = (UCHAR)Value;
+            *OptionLength = sizeof(UCHAR);
+        }
+        return NO_ERROR;
+    }
+
+Unknown:
     DPRINT1("Get: Unknown level/option name: %d %d\n", Level, OptionName);
 
-    *OptionLength = 0;
+    /* Not an option of this protocol: IP says so, UDP finds the request invalid */
+    if (OptionLength) *OptionLength = 0;
 
-    return NO_ERROR;
+    return (Level == IPPROTO_UDP) ? WSAEINVAL : WSAENOPROTOOPT;
 }
 
 
@@ -767,6 +870,67 @@ WSHSetSocketInformation(
             break;
 
         case IPPROTO_IP:
+            if (OptionName != IP_HDRINCL)
+            {
+                PLONG Kept;
+                DWORD Bit;
+                LONG Default, Value;
+                BOOLEAN Boolean;
+
+                Kept = WshKeptOption(Context, Level, OptionName, &Bit, &Default, &Boolean);
+                if (Kept)
+                {
+                    if (!OptionValue || OptionLength < (INT)sizeof(CHAR))
+                        return WSAEFAULT;
+
+                    /* The receive switches are for datagrams */
+                    if (Context->SocketType != SOCK_DGRAM && Context->SocketType != SOCK_RAW &&
+                        (OptionName == WSH_IP_RECVTOS || OptionName == WSH_IP_RECVECN))
+                        return WSAEINVAL;
+
+                    Value = (OptionLength >= (INT)sizeof(LONG)) ? *(PLONG)OptionValue : *(PUCHAR)OptionValue;
+                    if (Boolean)
+                        Value = (Value != 0);
+
+                    switch (OptionName)
+                    {
+                        case IP_TTL:
+                            /* A byte; -1 changes nothing */
+                            if (Value == -1)
+                                return NO_ERROR;
+                            /* fall through */
+                        case IP_TOS:
+                            if (Value < 0 || Value > 255)
+                                return WSAEINVAL;
+                            break;
+
+                        case WSH_IP_MTU_DISCOVER:
+                            if (Value < 0 || Value > 3)
+                                return WSAEINVAL;
+                            /* Not once IP_DONTFRAGMENT is in use */
+                            if (Value != 0 && (Context->OptionsSet & WSH_SET_DF) && Context->IpDontFragment)
+                                return WSAEINVAL;
+                            break;
+
+                        case IP_DONTFRAGMENT:
+                            /* Not once IP_MTU_DISCOVER is in use */
+                            if ((Context->OptionsSet & WSH_SET_MTUD) && Context->IpMtuDiscover)
+                                return WSAEINVAL;
+                            break;
+
+                        default:
+                            break;
+                    }
+
+                    *Kept = Value;
+                    Context->OptionsSet |= Bit;
+
+                    /* Only these two have an effect in the driver */
+                    if (OptionName != IP_TTL && OptionName != IP_DONTFRAGMENT)
+                        return NO_ERROR;
+                }
+            }
+
             switch (OptionName)
             {
                 case IP_TTL:
@@ -798,6 +962,29 @@ WSHSetSocketInformation(
                     return 0;
             }
             break;
+
+        case IPPROTO_UDP:
+        {
+            PLONG Kept;
+            DWORD Bit;
+            LONG Default;
+            BOOLEAN Boolean;
+
+            Kept = WshKeptOption(Context, Level, OptionName, &Bit, &Default, &Boolean);
+            if (!Kept)
+            {
+                DPRINT1("Set: Received unexpected IPPROTO_UDP option %d\n", OptionName);
+                return 0;
+            }
+            /* Datagrams only, and a whole DWORD */
+            if (Context->SocketType != SOCK_DGRAM && Context->SocketType != SOCK_RAW)
+                return WSAEINVAL;
+            if (!OptionValue || OptionLength < (INT)sizeof(LONG))
+                return WSAEFAULT;
+            *Kept = *(PLONG)OptionValue;
+            Context->OptionsSet |= Bit;
+            return NO_ERROR;
+        }
 
         default:
             DPRINT1("Set: Received unexpected %d option %d\n", Level, OptionName);
