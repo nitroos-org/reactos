@@ -76,6 +76,9 @@ MmZeroPageThread(VOID)
             PMMPFN Pfn1 = (PMMPFN)LIST_HEAD;
             PVOID ZeroAddress;
             PFN_NUMBER PageIndex, FreePage;
+#if defined(_M_IX86) || defined(_M_AMD64)
+            KIRQL ZeroIrql;
+#endif
 
             while (PageCount < MI_ZERO_PTES)
             {
@@ -113,10 +116,18 @@ MmZeroPageThread(VOID)
                 break;
             }
 
+#if defined(_M_IX86) || defined(_M_AMD64)
+            /* Stay on this processor while the pages are mapped: their
+               translations are flushed here, with no IPI to the others */
+            KeRaiseIrql(DISPATCH_LEVEL, &ZeroIrql);
+#endif
             ZeroAddress = MiMapPagesInZeroSpace(Pfn1, PageCount);
             ASSERT(ZeroAddress);
             KeZeroPages(ZeroAddress, PageCount * PAGE_SIZE);
             MiUnmapPagesInZeroSpace(ZeroAddress, PageCount);
+#if defined(_M_IX86) || defined(_M_AMD64)
+            KeLowerIrql(ZeroIrql);
+#endif
 
             OldIrql = MiAcquirePfnLock();
 
