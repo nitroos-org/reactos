@@ -202,9 +202,10 @@ static void TestNewThreadResetsState(void)
 
 /* Windows 10 22H2 (measured): the CONTEXT and INITIAL_TEB are read first (an unreadable one fails
  * with STATUS_ACCESS_VIOLATION whatever the process handle, and the handle variable is left alone),
- * then an INITIAL_TEB with neither StackLimit nor AllocatedStackBase set fails with
- * STATUS_INVALID_PARAMETER (variable set to NULL) before the process handle is looked at. The CONTEXT
- * flags are not checked, nor is StackBase. */
+ * then an INITIAL_TEB without an AllocatedStackBase fails with STATUS_INVALID_PARAMETER (variable set
+ * to NULL) before the process handle is looked at, whatever StackBase and StackLimit hold; with an
+ * AllocatedStackBase alone it goes on. The CONTEXT flags are not checked, nor are StackBase and
+ * StackLimit. */
 static
 VOID
 Test_ArgumentOrder(VOID)
@@ -249,6 +250,30 @@ Test_ArgumentOrder(VOID)
     Handle = (HANDLE)(ULONG_PTR)0x1234;
     Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, BadProcess, &ClientId, &Context, &Teb, TRUE);
     ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+    ok_ptr(Handle, NULL);
+
+    /* StackLimit is not what is tested: with StackBase it is still refused */
+    Teb = ZeroTeb;
+    Teb.StackBase = &Stack[ARRAYSIZE(Stack) - 2];
+    Teb.StackLimit = Stack;
+    Handle = (HANDLE)(ULONG_PTR)0x1234;
+    Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, BadProcess, &ClientId, &Context, &Teb, TRUE);
+    ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+    ok_ptr(Handle, NULL);
+
+    Teb = ZeroTeb;
+    Teb.StackLimit = Stack;
+    Handle = (HANDLE)(ULONG_PTR)0x1234;
+    Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, BadProcess, &ClientId, &Context, &Teb, TRUE);
+    ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+    ok_ptr(Handle, NULL);
+
+    /* AllocatedStackBase alone is enough to reach the process handle */
+    Teb = ZeroTeb;
+    Teb.AllocatedStackBase = Stack;
+    Handle = (HANDLE)(ULONG_PTR)0x1234;
+    Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, BadProcess, &ClientId, &Context, &Teb, TRUE);
+    ok_ntstatus(Status, STATUS_INVALID_HANDLE);
     ok_ptr(Handle, NULL);
 
     /* A good INITIAL_TEB reaches the process handle; the CONTEXT flags are not checked */

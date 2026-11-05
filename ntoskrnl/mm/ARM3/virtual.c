@@ -1870,6 +1870,22 @@ MiQueryAddressState(IN PVOID Va,
                 /* Get protection state of this page */
                 Protect = MiGetPageProtection(PointerPte);
 
+                /* A resident page of a section view (not private memory) keeps the protection of the view, whatever
+                 * the hardware PTE says: a read fault maps it read-only and a write dirties it. Only a page that
+                 * copy-on-write replaced by a private copy changed, to the writable form (Windows 10 22H2 measured). */
+                if (TempPte.u.Hard.Valid && !Vad->u.VadFlags.PrivateMemory && Vad->ControlArea)
+                {
+                    PMMPFN SectionPfn = MiGetPfnEntry(TempPte.u.Hard.PageFrameNumber);
+                    ULONG ViewProtect = Vad->u.VadFlags.Protection;
+
+                    if (SectionPfn)
+                    {
+                        if (!SectionPfn->u3.e1.PrototypePte && ((ViewProtect & 5) == MM_WRITECOPY))
+                            ViewProtect &= ~1;
+                        Protect = MmProtectToValue[ViewProtect];
+                    }
+                }
+
                 /* Check if this PTE points to a prototype PTE of a section */
                 if ((TempPte.u.Soft.Valid == 0) &&
                     (TempPte.u.Soft.Prototype == 1) &&
@@ -2304,7 +2320,8 @@ MiQueryMemoryRegionInformation(IN HANDLE ProcessHandle,
                                IN PVOID BaseAddress,
                                OUT PVOID MemoryInformation,
                                IN SIZE_T MemoryInformationLength,
-                               OUT PSIZE_T ReturnLength)
+                               OUT PSIZE_T ReturnLength,
+                               IN BOOLEAN Ex)
 {
     PEPROCESS TargetProcess;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -2434,6 +2451,20 @@ Done:
     }
     if (!NT_SUCCESS(Status)) return Status;
 
+    /* MemoryRegionInformationEx (class 7) is the same structure with RegionType as the bits of the SDK
+     * header (Private 1, MappedDataFile 2, MappedImage 4, MappedPageFile 8), measured on Windows 10 22H2 */
+    if (Ex)
+    {
+        switch (Info.RegionType)
+        {
+            case MEM_PRIVATE: Info.RegionType = 1; break;
+            case MEM_MAPPED: Info.RegionType = 2; break;
+            case MEM_IMAGE: Info.RegionType = 4; break;
+            case MI_REGION_TYPE_PAGEFILE: Info.RegionType = 8; break;
+            default: break;
+        }
+    }
+
     /* Whole fields only, from CommitSize on */
     Written = FIELD_OFFSET(MEMORY_REGION_INFORMATION, CommitSize);
     if (MemoryInformationLength >= FIELD_OFFSET(MEMORY_REGION_INFORMATION, PartitionId))
@@ -2508,7 +2539,7 @@ MiQueryMemoryImageInformation(IN HANDLE ProcessHandle,
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     NTSTATUS Status;
 
-    Status = MiQueryMemoryRegionInformation(ProcessHandle, BaseAddress, &Region, sizeof(Region), NULL);
+    Status = MiQueryMemoryRegionInformation(ProcessHandle, BaseAddress, &Region, sizeof(Region), NULL, FALSE);
     if (!NT_SUCCESS(Status)) return Status;
 
     RtlZeroMemory(&Info, sizeof(Info));
@@ -2652,6 +2683,383 @@ MiQueryMemoryWorkingSetEx(IN HANDLE ProcessHandle,
         }
         _SEH2_END;
     }
+    return Status;
+}
+
+/*
+ * MemoryWorkingSetInformation (class 1), MemorySharedCommitInformation (class 5),
+ * MemoryRegionInformationEx (class 7) and MemoryPrivilegedBasicInformation (class 8), as measured on
+ * Windows 10 22H2 (x64 and WoW64; the layouts are the public ntddk/ntmmapi ones):
+ * - Class 1: MEMORY_WORKING_SET_INFORMATION, a count then one pointer-sized entry per resident page of the
+ *   process, in ascending address order: the page address with Protection (5 bits, the MM protection value),
+ *   ShareCount (3 bits), Shared (1 bit) and Node (3 bits, 0) in the low 12 bits. BaseAddress is ignored.
+ *   A buffer smaller than the list fails with STATUS_INFO_LENGTH_MISMATCH and gets only the count (when it
+ *   holds that), a big enough one gets the list and ReturnLength is the size of the list. The access needed
+ *   on a process handle is PROCESS_QUERY_LIMITED_INFORMATION (as for class 3). Private pages have
+ *   ShareCount 0 and are not Shared; pages of a view or an image are Shared with ShareCount 1 here (Windows
+ *   counts the sharers, up to 7: not tracked).
+ * - Class 5: a SIZE_T written whatever the address, section or handle; 0x64 on the machine measured, for
+ *   every address kind (private, free, pagefile view, file view, image, NULL). Kernel address and handle
+ *   checks as the other classes.
+ * - Class 7: class 3 with the RegionType bits of the SDK header; at least up to CommitSize is needed.
+ * - Class 8: the same as class 0 for every kind of address.
+ */
+#define MI_MEMORY_WORKING_SET_CLASS 1
+#define MI_MEMORY_SHARED_COMMIT_CLASS 5
+#define MI_MEMORY_REGION_EX_CLASS 7
+#define MI_MEMORY_PRIVILEGED_BASIC_CLASS 8
+#define MI_WS_LIST_BATCH 128
+#define MI_SHARED_COMMIT_VALUE 0x64
+
+static
+NTSTATUS
+MiReferenceProcessForQuery(IN HANDLE ProcessHandle,
+                           IN KPROCESSOR_MODE PreviousMode,
+                           OUT PEPROCESS *Process)
+{
+    NTSTATUS Status;
+
+    *Process = NULL;
+    if (ProcessHandle == NtCurrentProcess()) return STATUS_SUCCESS;
+
+    /* PROCESS_QUERY_LIMITED_INFORMATION is enough on Windows */
+    Status = ObReferenceObjectByHandle(ProcessHandle,
+                                       PROCESS_QUERY_INFORMATION,
+                                       PsProcessType,
+                                       PreviousMode,
+                                       (PVOID*)Process,
+                                       NULL);
+    if (Status == STATUS_ACCESS_DENIED)
+    {
+        Status = ObReferenceObjectByHandle(ProcessHandle,
+                                           PROCESS_QUERY_LIMITED_INFORMATION,
+                                           PsProcessType,
+                                           PreviousMode,
+                                           (PVOID*)Process,
+                                           NULL);
+    }
+    return Status;
+}
+
+static
+NTSTATUS
+MiQueryMemorySharedCommit(IN HANDLE ProcessHandle,
+                          OUT PVOID MemoryInformation,
+                          OUT PSIZE_T ReturnLength)
+{
+    PEPROCESS Process;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    NTSTATUS Status;
+
+    Status = MiReferenceProcessForQuery(ProcessHandle, PreviousMode, &Process);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (Process) ObDereferenceObject(Process);
+
+    if (PreviousMode != KernelMode)
+    {
+        _SEH2_TRY
+        {
+            *(PSIZE_T)MemoryInformation = MI_SHARED_COMMIT_VALUE;
+            if (ReturnLength) *ReturnLength = sizeof(SIZE_T);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+    }
+    else
+    {
+        *(PSIZE_T)MemoryInformation = MI_SHARED_COMMIT_VALUE;
+        if (ReturnLength) *ReturnLength = sizeof(SIZE_T);
+    }
+    return Status;
+}
+
+static
+ULONG
+MiWin32ProtectToMmValue(IN ULONG Protect)
+{
+    ULONG Mm;
+
+    switch (Protect & 0xFF)
+    {
+        case PAGE_READONLY: Mm = MM_READONLY; break;
+        case PAGE_EXECUTE: Mm = 2; break;
+        case PAGE_EXECUTE_READ: Mm = 3; break;
+        case PAGE_READWRITE: Mm = MM_READWRITE; break;
+        case PAGE_WRITECOPY: Mm = MM_WRITECOPY; break;
+        case PAGE_EXECUTE_READWRITE: Mm = 6; break;
+        case PAGE_EXECUTE_WRITECOPY: Mm = 7; break;
+        default: Mm = 0; break;
+    }
+    if (Protect & PAGE_NOCACHE) Mm |= MM_NOCACHE;
+    if (Protect & PAGE_GUARD) Mm |= MM_GUARDPAGE;
+    return Mm & 0x1F;
+}
+
+/* The working set list entry of one resident page of the current (possibly attached) process. The caller holds
+ * the address space lock and the working set lock. FALSE for a page that has no view to describe. */
+static
+BOOLEAN
+MiWsListBuildEntry(IN PEPROCESS Process,
+                   IN ULONG_PTR Address,
+                   IN PMMPTE PointerPte,
+                   IN OUT PMMVAD *CachedVad,
+                   OUT PULONG_PTR Entry)
+{
+    PMMVAD Vad = *CachedVad;
+    ULONG_PTR Vpn = Address >> PAGE_SHIFT;
+    ULONG Win32Protect = 0, ViewProtect;
+    BOOLEAN Shared = TRUE, Writable = MI_IS_PAGE_WRITEABLE(PointerPte);
+    PVOID NextAddress;
+
+    if (Address == (ULONG_PTR)MM_SHARED_USER_DATA_VA)
+    {
+        /* Windows: read-only, the share count saturated */
+        *Entry = Address | MM_READONLY | (7 << 5) | (1 << 8);
+        return TRUE;
+    }
+
+    if (!Vad || (Vpn < Vad->StartingVpn) || (Vpn > Vad->EndingVpn))
+    {
+        Vad = MiLocateAddress((PVOID)Address);
+        *CachedVad = Vad;
+    }
+    if (!Vad) return FALSE;
+
+    if (MI_IS_ROSMM_VAD(Vad))
+    {
+        MEMORY_BASIC_INFORMATION Info;
+        SIZE_T Length;
+
+        if (!NT_SUCCESS(MmQuerySectionView((PMEMORY_AREA)Vad, (PVOID)Address, &Info, &Length))) return FALSE;
+        Win32Protect = Info.Protect;
+        ViewProtect = Win32Protect;
+    }
+    else if (Vad->u.VadFlags.VadType == VadNone)
+    {
+        if (MiQueryAddressState((PVOID)Address, Vad, Process, &Win32Protect, &NextAddress) != MEM_COMMIT) return FALSE;
+        ViewProtect = MmProtectToValue[Vad->u.VadFlags.Protection];
+        if (Vad->u.VadFlags.PrivateMemory) Shared = FALSE;
+    }
+    else
+    {
+        return FALSE;
+    }
+
+    /* A page of a copy-on-write view that was written is a private copy now */
+    if (Shared && Writable && ((ViewProtect == PAGE_WRITECOPY) || (ViewProtect == PAGE_EXECUTE_WRITECOPY)))
+        Shared = FALSE;
+
+    *Entry = Address | MiWin32ProtectToMmValue(Win32Protect) | (Shared ? ((ULONG_PTR)1 << 5) | ((ULONG_PTR)1 << 8) : 0);
+    return TRUE;
+}
+
+/* Walk the page tables of the current (possibly attached) process from *Resume. With Entries NULL count the
+ * resident pages of the whole address space, else store up to Max entries. The caller holds the address space
+ * lock and the working set lock (shared). *Finished tells whether the walk reached the end. */
+static
+ULONG_PTR
+MiWsListWalk(IN PEPROCESS Process,
+             IN OUT PULONG_PTR Resume,
+             OUT PULONG_PTR Entries OPTIONAL,
+             IN ULONG_PTR Max,
+             OUT PBOOLEAN Finished)
+{
+    ULONG_PTR Address = *Resume, Count = 0;
+    PMMVAD Vad = NULL;
+
+    *Finished = FALSE;
+    while (Address <= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS)
+    {
+        PMMPTE PointerPte;
+        PMMPDE PointerPde;
+#if (_MI_PAGING_LEVELS >= 4)
+        PMMPXE PointerPxe = MiAddressToPxe((PVOID)Address);
+
+        /* A page table that is not resident cannot have a resident page below it */
+        if (!PointerPxe->u.Hard.Valid)
+        {
+            Address = (ULONG_PTR)MiPxeToAddress(PointerPxe + 1);
+            continue;
+        }
+#endif
+#if (_MI_PAGING_LEVELS >= 3)
+        {
+            PMMPPE PointerPpe = MiAddressToPpe((PVOID)Address);
+
+            if (!PointerPpe->u.Hard.Valid)
+            {
+                Address = (ULONG_PTR)MiPpeToAddress(PointerPpe + 1);
+                continue;
+            }
+        }
+#endif
+        PointerPde = MiAddressToPde((PVOID)Address);
+        if (!PointerPde->u.Hard.Valid || PointerPde->u.Hard.LargePage)
+        {
+            /* Large pages are not listed */
+            Address = (ULONG_PTR)MiPdeToAddress(PointerPde + 1);
+            continue;
+        }
+
+        PointerPte = MiAddressToPte((PVOID)Address);
+        do
+        {
+            if (Address > (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) break;
+            if (PointerPte->u.Hard.Valid)
+            {
+                if (!Entries)
+                {
+                    Count++;
+                }
+                else
+                {
+                    ULONG_PTR Entry;
+
+                    if (MiWsListBuildEntry(Process, Address, PointerPte, &Vad, &Entry))
+                    {
+                        if (Count == Max)
+                        {
+                            *Resume = Address;
+                            return Count;
+                        }
+                        Entries[Count++] = Entry;
+                    }
+                }
+            }
+            PointerPte++;
+            Address += PAGE_SIZE;
+        } while (!MiIsPteOnPdeBoundary(PointerPte));
+    }
+
+    *Resume = Address;
+    *Finished = TRUE;
+    return Count;
+}
+
+/* Lock the target, run one walk, unlock; Entries NULL counts. STATUS_PROCESS_IS_TERMINATING when it is dying */
+static
+NTSTATUS
+MiWsListPass(IN PEPROCESS TargetProcess,
+             IN OUT PULONG_PTR Resume,
+             OUT PULONG_PTR Entries OPTIONAL,
+             IN ULONG_PTR Max,
+             OUT PULONG_PTR Count,
+             OUT PBOOLEAN Finished)
+{
+    KAPC_STATE ApcState;
+    NTSTATUS Status = STATUS_SUCCESS;
+    PETHREAD Thread = PsGetCurrentThread();
+    BOOLEAN Attached = FALSE;
+
+    if (TargetProcess != PsGetCurrentProcess())
+    {
+        KeStackAttachProcess(&TargetProcess->Pcb, &ApcState);
+        Attached = TRUE;
+    }
+
+    MmLockAddressSpace(&TargetProcess->Vm);
+    if (TargetProcess->VmDeleted)
+    {
+        Status = STATUS_PROCESS_IS_TERMINATING;
+        *Count = 0;
+        *Finished = TRUE;
+    }
+    else
+    {
+        MiLockProcessWorkingSetShared(TargetProcess, Thread);
+        *Count = MiWsListWalk(TargetProcess, Resume, Entries, Max, Finished);
+        MiUnlockProcessWorkingSetShared(TargetProcess, Thread);
+    }
+    MmUnlockAddressSpace(&TargetProcess->Vm);
+
+    if (Attached) KeUnstackDetachProcess(&ApcState);
+    return Status;
+}
+
+static
+NTSTATUS
+MiQueryMemoryWorkingSetList(IN HANDLE ProcessHandle,
+                            OUT PVOID MemoryInformation,
+                            IN SIZE_T MemoryInformationLength,
+                            OUT PSIZE_T ReturnLength)
+{
+    PEPROCESS Process, TargetProcess;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    PULONG_PTR UserList = MemoryInformation;
+    ULONG_PTR Batch[MI_WS_LIST_BATCH];
+    ULONG_PTR Capacity = (MemoryInformationLength - sizeof(ULONG_PTR)) / sizeof(ULONG_PTR);
+    ULONG_PTR Total, Done = 0, Got, Resume = 0, Want;
+    BOOLEAN Finished = FALSE, Overflow = FALSE;
+    NTSTATUS Status;
+
+    Status = MiReferenceProcessForQuery(ProcessHandle, PreviousMode, &Process);
+    if (!NT_SUCCESS(Status)) return Status;
+    TargetProcess = Process ? Process : PsGetCurrentProcess();
+
+    /* How many pages are resident now: a buffer that cannot hold them gets the count only */
+    Status = MiWsListPass(TargetProcess, &Resume, NULL, 0, &Total, &Finished);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    if (Total > Capacity)
+    {
+        Overflow = TRUE;
+        goto Report;
+    }
+
+    /* The list, a batch at a time (the working set lock is not held while the caller's buffer is written) */
+    Resume = 0;
+    Finished = FALSE;
+    while (!Finished)
+    {
+        Want = min((ULONG_PTR)MI_WS_LIST_BATCH, Capacity - Done);
+        Status = MiWsListPass(TargetProcess, &Resume, Batch, Want, &Got, &Finished);
+        if (!NT_SUCCESS(Status)) goto Cleanup;
+
+        if (Got)
+        {
+            _SEH2_TRY
+            {
+                RtlCopyMemory(&UserList[1 + Done], Batch, Got * sizeof(ULONG_PTR));
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            if (!NT_SUCCESS(Status)) goto Cleanup;
+            Done += Got;
+        }
+
+        /* More pages became resident than the buffer holds */
+        if (!Finished && (Want == 0))
+        {
+            Overflow = TRUE;
+            Resume = 0;
+            MiWsListPass(TargetProcess, &Resume, NULL, 0, &Total, &Finished);
+            if (Total <= Done) Total = Done + 1;
+            break;
+        }
+    }
+    if (!Overflow) Total = Done;
+
+Report:
+    Status = STATUS_SUCCESS;
+    _SEH2_TRY
+    {
+        UserList[0] = Total;
+        if (!Overflow && ReturnLength) *ReturnLength = sizeof(ULONG_PTR) + Total * sizeof(ULONG_PTR);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (NT_SUCCESS(Status)) Status = Overflow ? STATUS_INFO_LENGTH_MISMATCH : STATUS_SUCCESS;
+
+Cleanup:
+    if (Process) ObDereferenceObject(Process);
     return Status;
 }
 
@@ -5173,6 +5581,10 @@ NtQueryVirtualMemory(IN HANDLE ProcessHandle,
         case MemoryRegionInformation:
         case MI_MEMORY_WORKING_SET_EX_CLASS:
         case MI_MEMORY_IMAGE_CLASS:
+        case MI_MEMORY_WORKING_SET_CLASS:
+        case MI_MEMORY_SHARED_COMMIT_CLASS:
+        case MI_MEMORY_REGION_EX_CLASS:
+        case MI_MEMORY_PRIVILEGED_BASIC_CLASS:
             break;
 
         default:
@@ -5180,11 +5592,32 @@ NtQueryVirtualMemory(IN HANDLE ProcessHandle,
             return STATUS_INVALID_INFO_CLASS;
     }
 
-    /* MemoryRegionInformation checks its length first (Windows 10), even for a kernel address */
-    if ((MemoryInformationClass == MemoryRegionInformation) &&
-        (MemoryInformationLength < FIELD_OFFSET(MEMORY_REGION_INFORMATION, CommitSize)))
+    /* MemoryRegionInformation checks its length first (Windows 10), even for a kernel address; so do the
+     * classes 1, 5, 7 and 8 (measured, 22H2) */
+    switch ((ULONG)MemoryInformationClass)
     {
-        return STATUS_INFO_LENGTH_MISMATCH;
+        case MemoryRegionInformation:
+            if (MemoryInformationLength < FIELD_OFFSET(MEMORY_REGION_INFORMATION, CommitSize))
+                return STATUS_INFO_LENGTH_MISMATCH;
+            break;
+        case MI_MEMORY_REGION_EX_CLASS:
+            if (MemoryInformationLength < FIELD_OFFSET(MEMORY_REGION_INFORMATION, PartitionId))
+                return STATUS_INFO_LENGTH_MISMATCH;
+            break;
+        case MI_MEMORY_PRIVILEGED_BASIC_CLASS:
+            if (MemoryInformationLength < sizeof(MEMORY_BASIC_INFORMATION))
+                return STATUS_INFO_LENGTH_MISMATCH;
+            break;
+        case MI_MEMORY_SHARED_COMMIT_CLASS:
+            if (MemoryInformationLength < sizeof(SIZE_T))
+                return STATUS_INFO_LENGTH_MISMATCH;
+            break;
+        case MI_MEMORY_WORKING_SET_CLASS:
+            if (MemoryInformationLength < sizeof(ULONG_PTR))
+                return STATUS_INFO_LENGTH_MISMATCH;
+            break;
+        default:
+            break;
     }
 
     /* Bail out if the address is invalid */
@@ -5231,12 +5664,7 @@ NtQueryVirtualMemory(IN HANDLE ProcessHandle,
             break;
 
         case MemorySectionName:
-            /* Validate the size information of the class */
-            if (MemoryInformationLength < sizeof(MEMORY_SECTION_NAME))
-            {
-                /* The size is invalid */
-                return STATUS_INFO_LENGTH_MISMATCH;
-            }
+            /* The length is checked once the address is known to be backed by a file (Windows 10) */
             Status = MiQueryMemorySectionName(ProcessHandle,
                                               BaseAddress,
                                               MemoryInformation,
@@ -5249,7 +5677,37 @@ NtQueryVirtualMemory(IN HANDLE ProcessHandle,
                                                     BaseAddress,
                                                     MemoryInformation,
                                                     MemoryInformationLength,
-                                                    ReturnLength);
+                                                    ReturnLength,
+                                                    FALSE);
+            break;
+
+        case MI_MEMORY_REGION_EX_CLASS:
+            Status = MiQueryMemoryRegionInformation(ProcessHandle,
+                                                    BaseAddress,
+                                                    MemoryInformation,
+                                                    MemoryInformationLength,
+                                                    ReturnLength,
+                                                    TRUE);
+            break;
+
+        case MI_MEMORY_PRIVILEGED_BASIC_CLASS:
+            /* The same answer as MemoryBasicInformation (measured on every kind of address) */
+            Status = MiQueryMemoryBasicInformation(ProcessHandle,
+                                                   BaseAddress,
+                                                   MemoryInformation,
+                                                   MemoryInformationLength,
+                                                   ReturnLength);
+            break;
+
+        case MI_MEMORY_SHARED_COMMIT_CLASS:
+            Status = MiQueryMemorySharedCommit(ProcessHandle, MemoryInformation, ReturnLength);
+            break;
+
+        case MI_MEMORY_WORKING_SET_CLASS:
+            Status = MiQueryMemoryWorkingSetList(ProcessHandle,
+                                                 MemoryInformation,
+                                                 MemoryInformationLength,
+                                                 ReturnLength);
             break;
 
         case MI_MEMORY_WORKING_SET_EX_CLASS:

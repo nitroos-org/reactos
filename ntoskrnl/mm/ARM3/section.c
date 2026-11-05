@@ -2001,9 +2001,12 @@ MmGetFileNameForAddressInProcess(IN PEPROCESS Process,
     FileObject = MiGetFileObjectForVad(Vad);
     if (FileObject == NULL)
     {
-        DPRINT1("Failed to get file object for Address %p\n", Address);
+        DPRINT("Failed to get file object for Address %p\n", Address);
+        /* Windows 10: private memory is not a valid address for a name, a view of a paging file
+         * section is an invalid file */
+        Status = Vad->u.VadFlags.PrivateMemory ? STATUS_INVALID_ADDRESS : STATUS_FILE_INVALID;
         MmUnlockAddressSpace(AddressSpace);
-        return STATUS_SECTION_NOT_IMAGE;
+        return Status;
     }
 
     /* Reference the file object */
@@ -2052,9 +2055,16 @@ MmGetFileNameForAddress(IN PVOID Address,
  * The UNICODE_STRING header is built entirely in kernel memory from the
  * already captured buffer length and written out once. Nothing in the
  * output buffer is ever read back. May raise on a bad user buffer.
+ *
+ * Windows 10 22H2 (measured): the string is Length + 2 long (MaximumLength, the terminator is stored),
+ * ReturnLength is the whole size (header, name and terminator) for a success and for a buffer that is
+ * too small; a buffer smaller than the header fails with STATUS_INFO_LENGTH_MISMATCH and one that holds
+ * the header but not the whole name with STATUS_BUFFER_OVERFLOW, and nothing is written in either case.
+ * (A buffer of 0x40 bytes for a name that needs 0x82 gave STATUS_OBJECT_PATH_INVALID with part of the
+ * name written; that case is not reproduced.)
  */
 static
-VOID
+NTSTATUS
 MiWriteMemorySectionName(
     _Out_ PMEMORY_SECTION_NAME SectionName,
     _In_ SIZE_T MemoryInformationLength,
@@ -2062,26 +2072,30 @@ MiWriteMemorySectionName(
     _Out_opt_ PSIZE_T ReturnLength)
 {
     UNICODE_STRING LocalName;
-    SIZE_T Available;
-    SIZE_T CopyLength;
+    SIZE_T Needed;
 
-    /* Callers guarantee MemoryInformationLength >= sizeof(MEMORY_SECTION_NAME) */
-    Available = MemoryInformationLength - sizeof(MEMORY_SECTION_NAME);
-    if (Available > MAXUSHORT) Available = MAXUSHORT;
-    Available &= ~(SIZE_T)(sizeof(WCHAR) - 1);
+    if (ModuleFileName->Length > MAXUSHORT - sizeof(WCHAR)) return STATUS_NAME_TOO_LONG;
+    Needed = sizeof(MEMORY_SECTION_NAME) + ModuleFileName->Length + sizeof(WCHAR);
 
-    CopyLength = min(ModuleFileName->Length, Available);
+    if (MemoryInformationLength < Needed)
+    {
+        if (ReturnLength) *ReturnLength = Needed;
+        return (MemoryInformationLength < sizeof(MEMORY_SECTION_NAME)) ? STATUS_INFO_LENGTH_MISMATCH :
+                                                                         STATUS_BUFFER_OVERFLOW;
+    }
 
     /* Build the header locally */
     LocalName.Buffer = (PWSTR)(SectionName + 1);
-    LocalName.MaximumLength = (USHORT)Available;
-    LocalName.Length = (USHORT)CopyLength;
+    LocalName.MaximumLength = ModuleFileName->Length + sizeof(WCHAR);
+    LocalName.Length = ModuleFileName->Length;
 
-    /* Write the characters, then the header, in one go each */
-    RtlCopyMemory(LocalName.Buffer, ModuleFileName->Buffer, CopyLength);
+    /* Write the characters and the terminator, then the header */
+    RtlCopyMemory(LocalName.Buffer, ModuleFileName->Buffer, ModuleFileName->Length);
+    LocalName.Buffer[ModuleFileName->Length / sizeof(WCHAR)] = UNICODE_NULL;
     SectionName->SectionFileName = LocalName;
 
-    if (ReturnLength) *ReturnLength = ModuleFileName->Length + sizeof(MEMORY_SECTION_NAME);
+    if (ReturnLength) *ReturnLength = Needed;
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -2097,15 +2111,22 @@ MiQueryMemorySectionName(IN HANDLE ProcessHandle,
     UNICODE_STRING ModuleFileName;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
 
-    if (MemoryInformationLength < sizeof(MEMORY_SECTION_NAME))
-        return STATUS_INFO_LENGTH_MISMATCH;
-
+    /* PROCESS_QUERY_LIMITED_INFORMATION is enough on Windows 10 (measured) */
     Status = ObReferenceObjectByHandle(ProcessHandle,
                                        PROCESS_QUERY_INFORMATION,
-                                       NULL,
+                                       PsProcessType,
                                        PreviousMode,
                                        (PVOID*)(&Process),
                                        NULL);
+    if (Status == STATUS_ACCESS_DENIED)
+    {
+        Status = ObReferenceObjectByHandle(ProcessHandle,
+                                           PROCESS_QUERY_LIMITED_INFORMATION,
+                                           PsProcessType,
+                                           PreviousMode,
+                                           (PVOID*)(&Process),
+                                           NULL);
+    }
 
     if (!NT_SUCCESS(Status))
     {
@@ -2113,7 +2134,8 @@ MiQueryMemorySectionName(IN HANDLE ProcessHandle,
         return Status;
     }
 
-    /* Resolve the address in the TARGET process, not the calling one */
+    /* Resolve the address in the TARGET process, not the calling one. Private and free memory, and a
+     * paging file view, are refused here whatever the length of the buffer (Windows 10) */
     Status = MmGetFileNameForAddressInProcess(Process, BaseAddress, &ModuleFileName);
 
     if (NT_SUCCESS(Status))
@@ -2122,10 +2144,10 @@ MiQueryMemorySectionName(IN HANDLE ProcessHandle,
         {
             _SEH2_TRY
             {
-                MiWriteMemorySectionName(MemoryInformation,
-                                         MemoryInformationLength,
-                                         &ModuleFileName,
-                                         ReturnLength);
+                Status = MiWriteMemorySectionName(MemoryInformation,
+                                                  MemoryInformationLength,
+                                                  &ModuleFileName,
+                                                  ReturnLength);
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -2135,10 +2157,10 @@ MiQueryMemorySectionName(IN HANDLE ProcessHandle,
         }
         else
         {
-            MiWriteMemorySectionName(MemoryInformation,
-                                     MemoryInformationLength,
-                                     &ModuleFileName,
-                                     ReturnLength);
+            Status = MiWriteMemorySectionName(MemoryInformation,
+                                              MemoryInformationLength,
+                                              &ModuleFileName,
+                                              ReturnLength);
         }
 
         RtlFreeUnicodeString(&ModuleFileName);
