@@ -2,6 +2,7 @@ spec2def(mpssvc.dll mpssvc.spec ADD_IMPORTLIB)
 
 add_library(mpssvc MODULE
     mpssvc.c
+    prompt.c
     mpssvc.rc
     ${CMAKE_CURRENT_BINARY_DIR}/mpssvc.def)
 

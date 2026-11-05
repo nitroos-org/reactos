@@ -1,0 +1,18 @@
+#include <windef.h>
+#include <winuser.h>
+#include <winnt.h>
+
+#include "resource.h"
+
+#define REACTOS_STR_FILE_DESCRIPTION  "NitroOS Firewall block prompt"
+#define REACTOS_STR_INTERNAL_NAME     "fwalert"
+#define REACTOS_STR_ORIGINAL_FILENAME "fwalert.exe"
+#include <reactos/version.rc>
+
+#include <reactos/manifest_exe.rc>
+
+/* UTF-8 */
+#pragma code_page(65001)
+
+/* Only en-US text exists; the resource lookup falls back to it for every other UI language. */
+#include "lang_en-US.rc"
