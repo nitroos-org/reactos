@@ -82,6 +82,7 @@ list(APPEND SOURCE
     NtConnectPortTerminate.c
     ContextExceptionRequest.c
     NtContinue.c
+    ThreadDebugRegisters.c
     Wow64Continue.c
     Wow64ServiceArguments.c
     NtCreateDirectoryObject.c
