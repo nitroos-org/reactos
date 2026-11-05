@@ -57,6 +57,7 @@ list(APPEND SOURCE
     PowerSettingNotification.c
     OwnerZOrderNotice.c
     NcPaintLayered.c
+    SetWindowPosFlags.c
     WmCancelModeLastError.c
     InitializeLpkHooks.c
     IsDialogMessage.c

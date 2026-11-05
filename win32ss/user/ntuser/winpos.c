@@ -3976,6 +3976,15 @@ NtUserSetWindowPos(
    TRACE("Enter NtUserSetWindowPos\n");
    UserEnterExclusive();
 
+   /* Windows 10 refuses the flags only win32k itself uses (SWP_NOCLIENTSIZE, SWP_NOCLIENTMOVE, SWP_STATECHANGED)
+      and the top bit: FALSE with ERROR_INVALID_FLAGS, before the window is looked at, so nothing is sent.
+      The other bits above SWP_ASYNCWINDOWPOS (0x10000, 0x20000) were measured to pass. */
+   if (uFlags & (SWP_NOCLIENTSIZE | SWP_NOCLIENTMOVE | SWP_STATECHANGED | 0x80000000))
+   {
+      EngSetLastError(ERROR_INVALID_FLAGS);
+      goto Exit; // Return FALSE
+   }
+
    if (!(Window = UserGetWindowObject(hWnd)) ||
         UserIsDesktopWindow(Window) || UserIsMessageWindow(Window))
    {
