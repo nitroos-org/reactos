@@ -143,6 +143,7 @@ list(APPEND SOURCE
     LoadLibraryMachine.c
     LoadLibraryForwarder.c
     LoadLibraryMissingImport.c
+    LoadLibraryNoExecute.c
     LocalDumps.c
     CrashDialog.c
     LocaleNameToLCID.c
