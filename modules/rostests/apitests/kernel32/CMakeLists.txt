@@ -78,6 +78,7 @@ list(APPEND SOURCE
     ThreadpoolEx.c
     CtrlRoutine.c
     VirtualAllocExNuma.c
+    Win10Exports.c
     DeviceIoControl.c
     DllInitParentPrecondition.c
     dosdev.c
