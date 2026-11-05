@@ -8,6 +8,7 @@ extern void func_CM_Register_Notification(void);
 extern void func_devclass(void);
 extern void func_RootBusDisable(void);
 extern void func_RootDeviceDisable(void);
+extern void func_RootDeviceInstallRestart(void);
 extern void func_RootDeviceRemove(void);
 extern void func_SetupDiGetActualModelsSection(void);
 extern void func_SetupDiGetDeviceProperty(void);
@@ -27,6 +28,7 @@ const struct test winetest_testlist[] =
     { "devclass", func_devclass },
     { "RootBusDisable", func_RootBusDisable },
     { "RootDeviceDisable", func_RootDeviceDisable },
+    { "RootDeviceInstallRestart", func_RootDeviceInstallRestart },
     { "RootDeviceRemove", func_RootDeviceRemove },
     { "SetupDiGetActualModelsSection", func_SetupDiGetActualModelsSection },
     { "SetupDiGetDeviceProperty", func_SetupDiGetDeviceProperty },
