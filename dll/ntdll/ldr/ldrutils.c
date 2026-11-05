@@ -3004,6 +3004,107 @@ LdrpDereferenceNestedLoad(IN PLDR_DATA_TABLE_ENTRY LdrEntry)
     }
 }
 
+/*
+ * Forwarder targets. A DLL that exports a forwarder keeps the target of the
+ * forwarder loaded for as long as the DLL is mapped (Windows frees the target
+ * with the DLL: nothing stays loaded after FreeLibrary, or after a LoadLibrary
+ * that fails). The reference that loading the target took, when a forwarder
+ * was resolved, belongs to the DLL: one list of (DLL, target) pairs, guarded
+ * by the loader lock, one reference per pair. The pairs of a DLL are given
+ * back when the DLL is unmapped (LdrUnloadDll).
+ */
+typedef struct _LDRP_FORWARDER_REF
+{
+    LIST_ENTRY Link;
+    PVOID Owner;
+    PVOID Target;
+} LDRP_FORWARDER_REF, *PLDRP_FORWARDER_REF;
+
+static LIST_ENTRY LdrpForwarderRefs = { &LdrpForwarderRefs, &LdrpForwarderRefs };
+
+/* Give back one reference to a module (no unload sweep: see LdrpDereferenceNestedLoad) */
+static
+VOID
+LdrpGiveBackReference(IN PVOID Base)
+{
+    PLDR_DATA_TABLE_ENTRY Entry;
+
+    if (LdrpCheckForLoadedDllHandle(Base, &Entry) && (Entry->LoadCount != 0) && (Entry->LoadCount != 0xFFFF))
+        LdrpDereferenceNestedLoad(Entry);
+}
+
+/*
+ * The caller holds a reference to Target that loading it took, for the
+ * forwarder it has resolved in the exports of Owner. Called with the loader
+ * lock held (or while the process starts)
+ */
+VOID
+NTAPI
+LdrpAddForwarderReference(IN PVOID Owner,
+                          IN PVOID Target)
+{
+    PLIST_ENTRY Entry;
+    PLDRP_FORWARDER_REF Ref;
+
+    /* A DLL that forwards to itself keeps no reference to itself */
+    if (Owner != Target)
+    {
+        for (Entry = LdrpForwarderRefs.Flink; Entry != &LdrpForwarderRefs; Entry = Entry->Flink)
+        {
+            Ref = CONTAINING_RECORD(Entry, LDRP_FORWARDER_REF, Link);
+            if ((Ref->Owner == Owner) && (Ref->Target == Target))
+            {
+                /* The DLL has the reference of its first forwarder to the target already */
+                LdrpGiveBackReference(Target);
+                return;
+            }
+        }
+
+        Ref = RtlAllocateHeap(LdrpHeap, 0, sizeof(*Ref));
+        if (Ref)
+        {
+            Ref->Owner = Owner;
+            Ref->Target = Target;
+            InsertTailList(&LdrpForwarderRefs, &Ref->Link);
+            return;
+        }
+
+        /* No memory for the pair: the reference stays with the target, as it did before */
+        return;
+    }
+
+    LdrpGiveBackReference(Target);
+}
+
+/*
+ * The DLL at Owner is being unmapped: give back the references it holds to
+ * the targets of its forwarders. TRUE when there were any (a target whose
+ * count drops to 0 is to be unmapped with the DLL). Loader lock held
+ */
+BOOLEAN
+NTAPI
+LdrpReleaseForwarderReferences(IN PVOID Owner)
+{
+    PLIST_ENTRY Entry, Next;
+    PLDRP_FORWARDER_REF Ref;
+    BOOLEAN Released = FALSE;
+
+    for (Entry = LdrpForwarderRefs.Flink; Entry != &LdrpForwarderRefs; Entry = Next)
+    {
+        Next = Entry->Flink;
+        Ref = CONTAINING_RECORD(Entry, LDRP_FORWARDER_REF, Link);
+        if (Ref->Owner != Owner)
+            continue;
+
+        RemoveEntryList(&Ref->Link);
+        LdrpGiveBackReference(Ref->Target);
+        RtlFreeHeap(LdrpHeap, 0, Ref);
+        Released = TRUE;
+    }
+
+    return Released;
+}
+
 ULONG
 NTAPI
 LdrpClearLoadInProgress(VOID)
