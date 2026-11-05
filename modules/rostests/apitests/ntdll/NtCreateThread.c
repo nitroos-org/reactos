@@ -200,6 +200,90 @@ static void TestNewThreadResetsState(void)
     ok_eq_hex(NewThreadFpCtrl & _MCW_RC, _RC_NEAR);
 }
 
+/* Windows 10 22H2 (measured): the CONTEXT and INITIAL_TEB are read first (an unreadable one fails
+ * with STATUS_ACCESS_VIOLATION whatever the process handle, and the handle variable is left alone),
+ * then an INITIAL_TEB with neither StackLimit nor AllocatedStackBase set fails with
+ * STATUS_INVALID_PARAMETER (variable set to NULL) before the process handle is looked at. The CONTEXT
+ * flags are not checked, nor is StackBase. */
+static
+VOID
+Test_ArgumentOrder(VOID)
+{
+    HANDLE BadProcess = (HANDLE)(ULONG_PTR)0x1230;
+    HANDLE Handle;
+    CONTEXT ZeroContext, Context;
+    INITIAL_TEB ZeroTeb, ValidTeb, Teb;
+    DECLSPEC_ALIGN(16) ULONG_PTR Stack[128];
+    CLIENT_ID ClientId;
+    NTSTATUS Status;
+
+    RtlZeroMemory(&ZeroContext, sizeof(ZeroContext));
+    RtlZeroMemory(&ZeroTeb, sizeof(ZeroTeb));
+    InitializeTestContext(&Context);
+    ValidTeb = ZeroTeb;
+    ValidTeb.StackBase = &Stack[ARRAYSIZE(Stack) - 2];
+    ValidTeb.StackLimit = Stack;
+    ValidTeb.AllocatedStackBase = Stack;
+
+    /* Zero CONTEXT and INITIAL_TEB, bad process */
+    Handle = (HANDLE)(ULONG_PTR)0x1234;
+    Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, BadProcess, &ClientId, &ZeroContext, &ZeroTeb, TRUE);
+    ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+    ok_ptr(Handle, NULL);
+
+    /* A good CONTEXT does not help */
+    Handle = (HANDLE)(ULONG_PTR)0x1234;
+    Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, BadProcess, &ClientId, &Context, &ZeroTeb, TRUE);
+    ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+    ok_ptr(Handle, NULL);
+
+    /* The same with the current process: no thread is created */
+    Handle = (HANDLE)(ULONG_PTR)0x1234;
+    Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, NtCurrentProcess(), &ClientId, &Context, &ZeroTeb, TRUE);
+    ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+    ok_ptr(Handle, NULL);
+
+    /* StackBase alone is not enough */
+    Teb = ZeroTeb;
+    Teb.StackBase = &Stack[ARRAYSIZE(Stack) - 2];
+    Handle = (HANDLE)(ULONG_PTR)0x1234;
+    Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, BadProcess, &ClientId, &Context, &Teb, TRUE);
+    ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+    ok_ptr(Handle, NULL);
+
+    /* A good INITIAL_TEB reaches the process handle; the CONTEXT flags are not checked */
+    Handle = (HANDLE)(ULONG_PTR)0x1234;
+    Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, BadProcess, &ClientId, &ZeroContext, &ValidTeb, TRUE);
+    ok_ntstatus(Status, STATUS_INVALID_HANDLE);
+    ok_ptr(Handle, NULL);
+
+    /* StackBase is not checked either */
+    Teb = ValidTeb;
+    Teb.StackBase = NULL;
+    Handle = (HANDLE)(ULONG_PTR)0x1234;
+    Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, BadProcess, &ClientId, &Context, &Teb, TRUE);
+    ok_ntstatus(Status, STATUS_INVALID_HANDLE);
+    ok_ptr(Handle, NULL);
+
+    /* An unreadable CONTEXT fails before the handle, and the variable is not written */
+    Handle = (HANDLE)(ULONG_PTR)0x1234;
+    Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, BadProcess, &ClientId, (PCONTEXT)(ULONG_PTR)0x10, &ValidTeb, TRUE);
+    ok_ntstatus(Status, STATUS_ACCESS_VIOLATION);
+    ok_ptr(Handle, (HANDLE)(ULONG_PTR)0x1234);
+
+    /* ... also when the INITIAL_TEB would be refused */
+    Handle = (HANDLE)(ULONG_PTR)0x1234;
+    Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, BadProcess, &ClientId, (PCONTEXT)(ULONG_PTR)0x10, &ZeroTeb, TRUE);
+    ok_ntstatus(Status, STATUS_ACCESS_VIOLATION);
+    ok_ptr(Handle, (HANDLE)(ULONG_PTR)0x1234);
+
+    /* A missing CONTEXT is a bad parameter and leaves the variable alone */
+    Handle = (HANDLE)(ULONG_PTR)0x1234;
+    Status = NtCreateThread(&Handle, THREAD_ALL_ACCESS, NULL, BadProcess, &ClientId, NULL, &ValidTeb, TRUE);
+    ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+    ok_ptr(Handle, (HANDLE)(ULONG_PTR)0x1234);
+}
+
 START_TEST(NtCreateThread)
 {
     NTSTATUS Status;
@@ -213,6 +297,8 @@ START_TEST(NtCreateThread)
 
     BOOL IsWow64 = FALSE;
     IsWow64Process(GetCurrentProcess(), &IsWow64);
+
+    Test_ArgumentOrder();
 
     InitializeObjectAttributes(&Attributes, NULL, 0, NULL, NULL);
     ZeroMemory(&InitialTeb, sizeof(INITIAL_TEB));

@@ -2463,6 +2463,198 @@ Done:
     return Status;
 }
 
+/*
+ * MemoryImageInformation (class 6) and MemoryWorkingSetExInformation (class 4), as measured on
+ * Windows 10 22H2:
+ * - Image: at least 0x18 bytes, 0x18 are written. For an address in an image view the base and
+ *   size of the image are returned; any other mapped, private or stack address succeeds with
+ *   zeros (flags are 0 for the images measured); a free address gives STATUS_INVALID_ADDRESS.
+ * - WorkingSetEx: the buffer is an array of {VirtualAddress, attributes}; at least one entry
+ *   (16 bytes) is needed, entries that fit completely are filled and ReturnLength is the length
+ *   given. BaseAddress is only checked against the user range. A page that is not resident
+ *   (free, reserved, committed but never touched, kernel address) gets 0; a resident one gets
+ *   Valid, Win32Protection (the page protection), Priority 5, and for a mapped or image page
+ *   Shared, ShareCount 1 and SharedOriginal. The real share count is not tracked.
+ */
+#define MI_MEMORY_WORKING_SET_EX_CLASS 4
+#define MI_MEMORY_IMAGE_CLASS 6
+
+typedef struct _MI_WS_EX_ENTRY
+{
+    PVOID VirtualAddress;
+    ULONG_PTR VirtualAttributes;
+} MI_WS_EX_ENTRY, *PMI_WS_EX_ENTRY;
+
+/* ImageBase, SizeOfImage, ImageFlags: 0x18 bytes on x64 (measured), the structure size elsewhere */
+typedef struct _MI_IMAGE_INFORMATION
+{
+    PVOID ImageBase;
+    SIZE_T SizeOfImage;
+    ULONG ImageFlags;
+} MI_IMAGE_INFORMATION;
+#define MI_IMAGE_INFORMATION_SIZE sizeof(MI_IMAGE_INFORMATION)
+
+#define MI_WS_EX_BATCH 32
+
+static
+NTSTATUS
+MiQueryMemoryImageInformation(IN HANDLE ProcessHandle,
+                              IN PVOID BaseAddress,
+                              OUT PVOID MemoryInformation,
+                              OUT PSIZE_T ReturnLength)
+{
+    MEMORY_REGION_INFORMATION Region;
+    MI_IMAGE_INFORMATION Info;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    NTSTATUS Status;
+
+    Status = MiQueryMemoryRegionInformation(ProcessHandle, BaseAddress, &Region, sizeof(Region), NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    RtlZeroMemory(&Info, sizeof(Info));
+    if (Region.RegionType == MEM_IMAGE)
+    {
+        Info.ImageBase = Region.AllocationBase;
+        Info.SizeOfImage = Region.RegionSize;
+    }
+
+    if (PreviousMode != KernelMode)
+    {
+        _SEH2_TRY
+        {
+            RtlCopyMemory(MemoryInformation, &Info, MI_IMAGE_INFORMATION_SIZE);
+            if (ReturnLength) *ReturnLength = MI_IMAGE_INFORMATION_SIZE;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+    }
+    else
+    {
+        RtlCopyMemory(MemoryInformation, &Info, MI_IMAGE_INFORMATION_SIZE);
+        if (ReturnLength) *ReturnLength = MI_IMAGE_INFORMATION_SIZE;
+    }
+    return Status;
+}
+
+static
+NTSTATUS
+MiQueryMemoryWorkingSetEx(IN HANDLE ProcessHandle,
+                          OUT PVOID MemoryInformation,
+                          IN SIZE_T MemoryInformationLength,
+                          OUT PSIZE_T ReturnLength)
+{
+    PEPROCESS TargetProcess = NULL;
+    NTSTATUS Status = STATUS_SUCCESS;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    PMI_WS_EX_ENTRY UserEntries = MemoryInformation;
+    MI_WS_EX_ENTRY Batch[MI_WS_EX_BATCH];
+    MEMORY_BASIC_INFORMATION Basic[MI_WS_EX_BATCH];
+    SIZE_T Count = MemoryInformationLength / sizeof(MI_WS_EX_ENTRY), Done = 0, Chunk, i;
+    KAPC_STATE ApcState;
+
+    if (ProcessHandle != NtCurrentProcess())
+    {
+        /* PROCESS_QUERY_INFORMATION, as the other classes */
+        Status = ObReferenceObjectByHandle(ProcessHandle,
+                                           PROCESS_QUERY_INFORMATION,
+                                           PsProcessType,
+                                           PreviousMode,
+                                           (PVOID*)&TargetProcess,
+                                           NULL);
+        if (!NT_SUCCESS(Status)) return Status;
+    }
+
+    while (Done < Count)
+    {
+        Chunk = min(Count - Done, MI_WS_EX_BATCH);
+
+        /* The addresses come from the caller's space, so read them before attaching */
+        _SEH2_TRY
+        {
+            if (PreviousMode != KernelMode) ProbeForRead(&UserEntries[Done], Chunk * sizeof(MI_WS_EX_ENTRY), 1);
+            for (i = 0; i < Chunk; i++) Batch[i].VirtualAddress = UserEntries[Done + i].VirtualAddress;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        if (!NT_SUCCESS(Status)) break;
+
+        /* Protection and kind of each page from the VAD (Basic does its own attach and lock) */
+        for (i = 0; i < Chunk; i++)
+        {
+            RtlZeroMemory(&Basic[i], sizeof(Basic[i]));
+            Status = MiQueryMemoryBasicInformation(ProcessHandle,
+                                                   PAGE_ALIGN(Batch[i].VirtualAddress),
+                                                   &Basic[i],
+                                                   sizeof(Basic[i]),
+                                                   NULL);
+            if (!NT_SUCCESS(Status)) break;
+        }
+        if (!NT_SUCCESS(Status)) break;
+
+        /* Whether each page is resident, in the target's address space */
+        if (TargetProcess) KeStackAttachProcess(&TargetProcess->Pcb, &ApcState);
+        for (i = 0; i < Chunk; i++)
+        {
+            ULONG_PTR Attr = 0;
+            PVOID Address = Batch[i].VirtualAddress;
+
+            if (((ULONG_PTR)Address <= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) &&
+                (Basic[i].State == MEM_COMMIT) &&
+                MmIsAddressValid(Address))
+            {
+                /* The page protection VirtualQuery reports for a resident page of a mapped (not image) view
+                 * follows the PTE bits and so changes with the first write; the protection of the view
+                 * is what Windows reports here */
+                ULONG Protect = (Basic[i].Type == MEM_MAPPED) ? Basic[i].AllocationProtect : Basic[i].Protect;
+
+                Attr = 1 | ((ULONG_PTR)(Protect & 0x7FF) << 4) | ((ULONG_PTR)5 << 24);
+                if (Basic[i].Type != MEM_PRIVATE)
+                {
+                    Attr |= (1 << 1) | (1 << 15) | ((ULONG_PTR)1 << 30);
+                }
+            }
+            Batch[i].VirtualAttributes = Attr;
+        }
+        if (TargetProcess) KeUnstackDetachProcess(&ApcState);
+
+        _SEH2_TRY
+        {
+            if (PreviousMode != KernelMode) ProbeForWrite(&UserEntries[Done], Chunk * sizeof(MI_WS_EX_ENTRY), 1);
+            for (i = 0; i < Chunk; i++) UserEntries[Done + i].VirtualAttributes = Batch[i].VirtualAttributes;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        if (!NT_SUCCESS(Status)) break;
+
+        Done += Chunk;
+    }
+
+    if (TargetProcess) ObDereferenceObject(TargetProcess);
+
+    if (NT_SUCCESS(Status) && ReturnLength)
+    {
+        _SEH2_TRY
+        {
+            *ReturnLength = MemoryInformationLength;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+    }
+    return Status;
+}
+
 BOOLEAN
 NTAPI
 MiIsEntireRangeCommitted(IN ULONG_PTR StartingAddress,
@@ -4970,6 +5162,24 @@ NtQueryVirtualMemory(IN HANDLE ProcessHandle,
 
     DPRINT("Querying class %d about address: %p\n", MemoryInformationClass, BaseAddress);
 
+    /* Windows 10 refuses an unknown class before looking at anything else (even the process
+     * handle or a kernel address). Classes it has but this kernel does not (working set list,
+     * shared commit, region and privileged basic ex, physical contiguity, bad information) are
+     * refused the same way instead of reporting success without writing anything. */
+    switch ((ULONG)MemoryInformationClass)
+    {
+        case MemoryBasicInformation:
+        case MemorySectionName:
+        case MemoryRegionInformation:
+        case MI_MEMORY_WORKING_SET_EX_CLASS:
+        case MI_MEMORY_IMAGE_CLASS:
+            break;
+
+        default:
+            DPRINT1("Unsupported memory information class %d\n", MemoryInformationClass);
+            return STATUS_INVALID_INFO_CLASS;
+    }
+
     /* MemoryRegionInformation checks its length first (Windows 10), even for a kernel address */
     if ((MemoryInformationClass == MemoryRegionInformation) &&
         (MemoryInformationLength < FIELD_OFFSET(MEMORY_REGION_INFORMATION, CommitSize)))
@@ -5004,7 +5214,7 @@ NtQueryVirtualMemory(IN HANDLE ProcessHandle,
         }
     }
 
-    switch(MemoryInformationClass)
+    switch ((ULONG)MemoryInformationClass)
     {
         case MemoryBasicInformation:
             /* Validate the size information of the class */
@@ -5042,9 +5252,32 @@ NtQueryVirtualMemory(IN HANDLE ProcessHandle,
                                                     ReturnLength);
             break;
 
-        case MemoryWorkingSetList:
+        case MI_MEMORY_WORKING_SET_EX_CLASS:
+            /* One entry is the least; the input array lives in the buffer */
+            if (MemoryInformationLength < sizeof(MI_WS_EX_ENTRY))
+            {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            Status = MiQueryMemoryWorkingSetEx(ProcessHandle,
+                                               MemoryInformation,
+                                               MemoryInformationLength,
+                                               ReturnLength);
+            break;
+
+        case MI_MEMORY_IMAGE_CLASS:
+            if (MemoryInformationLength < MI_IMAGE_INFORMATION_SIZE)
+            {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            Status = MiQueryMemoryImageInformation(ProcessHandle,
+                                                   BaseAddress,
+                                                   MemoryInformation,
+                                                   ReturnLength);
+            break;
+
         default:
-            DPRINT1("Unhandled memory information class %d\n", MemoryInformationClass);
+            ASSERT(FALSE);
+            Status = STATUS_INVALID_INFO_CLASS;
             break;
     }
 

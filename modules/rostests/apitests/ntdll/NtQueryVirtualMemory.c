@@ -352,8 +352,213 @@ Test_SectionNameOtherProcess(VOID)
     CloseHandle(Pi.hProcess);
 }
 
+#ifdef _WIN64
+#define TEST_KERNEL_ADDRESS ((PVOID)(ULONG_PTR)0xFFFF800000000000ull)
+#else
+#define TEST_KERNEL_ADDRESS ((PVOID)(ULONG_PTR)0xFFFF0000ul)
+#endif
+
+/* Windows 10 22H2 (measured): an unknown class fails with STATUS_INVALID_INFO_CLASS before the process
+ * handle or the address is looked at, and writes nothing. */
+static
+VOID
+Test_InvalidClasses(VOID)
+{
+    static const ULONG Classes[] = { 9, 10, 14, 15, 99, 0x100, 0x7FFFFFFF, 0xFFFFFFFF };
+    UCHAR Buffer[0x40];
+    SIZE_T ReturnLength;
+    NTSTATUS Status;
+    ULONG i, j;
+
+    for (i = 0; i < ARRAYSIZE(Classes); i++)
+    {
+        PVOID Addresses[] = { Buffer, (PVOID)(ULONG_PTR)0x1000, TEST_KERNEL_ADDRESS };
+        HANDLE Handles[] = { NtCurrentProcess(), (HANDLE)(ULONG_PTR)0x1230, NULL };
+
+        for (j = 0; j < ARRAYSIZE(Addresses); j++)
+        {
+            RtlFillMemory(Buffer, sizeof(Buffer), 0xAA);
+            ReturnLength = 0xDEAD;
+            Status = NtQueryVirtualMemory(Handles[j], Addresses[j], (MEMORY_INFORMATION_CLASS)Classes[i],
+                                          Buffer, sizeof(Buffer), &ReturnLength);
+            ok(Status == STATUS_INVALID_INFO_CLASS, "class %lx: status %lx\n", Classes[i], Status);
+            ok(ReturnLength == 0xDEAD, "class %lx: ReturnLength %Ix\n", Classes[i], ReturnLength);
+            ok(Buffer[0] == 0xAA && Buffer[sizeof(Buffer) - 1] == 0xAA, "class %lx: buffer written\n", Classes[i]);
+        }
+    }
+}
+
+typedef struct _TEST_WS_EX_ENTRY
+{
+    PVOID VirtualAddress;
+    ULONG_PTR VirtualAttributes;
+} TEST_WS_EX_ENTRY;
+
+static
+NTSTATUS
+QueryWsEx(HANDLE Process, PVOID BaseAddress, TEST_WS_EX_ENTRY *Entries, SIZE_T Length, PSIZE_T ReturnLength)
+{
+    return NtQueryVirtualMemory(Process, BaseAddress, (MEMORY_INFORMATION_CLASS)4, Entries, Length, ReturnLength);
+}
+
+/* MemoryWorkingSetExInformation (class 4), measured on Windows 10 22H2 x64 */
+static
+VOID
+Test_WorkingSetEx(VOID)
+{
+    PUCHAR Private = NULL;
+    SIZE_T Size = 0x10000, ReturnLength;
+    TEST_WS_EX_ENTRY Entries[6];
+    HANDLE Section;
+    LARGE_INTEGER MaxSize;
+    PVOID View = NULL;
+    SIZE_T ViewSize = 0;
+    NTSTATUS Status;
+    PVOID Image = GetModuleHandleW(NULL);
+
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), (PVOID*)&Private, 0, &Size, MEM_RESERVE, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Size = 0x2000;
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), (PVOID*)&Private, 0, &Size, MEM_COMMIT, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    Private[0] = 1;     /* touched; the second page is committed and never touched; the third is reserved */
+
+    MaxSize.QuadPart = 0x2000;
+    Status = NtCreateSection(&Section, SECTION_ALL_ACCESS, NULL, &MaxSize, PAGE_READWRITE, SEC_COMMIT, NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtMapViewOfSection(Section, NtCurrentProcess(), &View, 0, 0, NULL, &ViewSize, ViewShare, 0, PAGE_READWRITE);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status)) *(volatile UCHAR *)View = 7;
+    }
+
+    RtlFillMemory(Entries, sizeof(Entries), 0xAA);
+    Entries[0].VirtualAddress = Private;
+    Entries[1].VirtualAddress = Private + 0x1000;
+    Entries[2].VirtualAddress = Private + 0x2000;
+    Entries[3].VirtualAddress = (PVOID)(ULONG_PTR)0x1000;
+    Entries[4].VirtualAddress = View ? View : Private;
+    Entries[5].VirtualAddress = Image;
+    ReturnLength = 0xDEAD;
+    Status = QueryWsEx(NtCurrentProcess(), NULL, Entries, sizeof(Entries), &ReturnLength);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_size_t(ReturnLength, sizeof(Entries));
+    ok_ptr(Entries[0].VirtualAddress, Private);
+#ifdef _WIN64
+    ok_hex(Entries[0].VirtualAttributes & 0x7FFF, 0x41);       /* valid, PAGE_READWRITE, not shared */
+    ok_hex((Entries[0].VirtualAttributes >> 24) & 7, 5);       /* default priority */
+    ok_hex(Entries[1].VirtualAttributes, 0);                   /* committed, never touched */
+    ok_hex(Entries[2].VirtualAttributes, 0);                   /* reserved */
+    ok_hex(Entries[3].VirtualAttributes, 0);                   /* free */
+    if (View) ok_hex(Entries[4].VirtualAttributes & 0xFFFF, 0x8043);  /* valid, share count 1, PAGE_READWRITE, shared */
+    ok_hex(Entries[5].VirtualAttributes & 0x8001, 0x8001);     /* the image: valid and shared */
+#endif
+
+    /* Lengths: one entry is the least, a partial entry at the end is ignored, ReturnLength is the length given */
+    RtlFillMemory(Entries, sizeof(Entries), 0xAA);
+    Entries[0].VirtualAddress = Private;
+    ReturnLength = 0xDEAD;
+    Status = QueryWsEx(NtCurrentProcess(), NULL, Entries, 0, &ReturnLength);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+    Status = QueryWsEx(NtCurrentProcess(), NULL, Entries, sizeof(Entries[0]) - 1, &ReturnLength);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+    ok_size_t(ReturnLength, 0xDEAD);
+    Status = QueryWsEx(NtCurrentProcess(), NULL, Entries, sizeof(Entries[0]) + 1, &ReturnLength);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_size_t(ReturnLength, sizeof(Entries[0]) + 1);
+    ok(((PUCHAR)&Entries[1])[0] == 0xAA && ((PUCHAR)&Entries[1])[sizeof(Entries[1]) - 1] == 0xAA, "partial entry written\n");
+
+    /* BaseAddress is only checked against the user range; the process handle must be valid */
+    Status = QueryWsEx(NtCurrentProcess(), TEST_KERNEL_ADDRESS, Entries, sizeof(Entries[0]), &ReturnLength);
+    ok_ntstatus(Status, STATUS_INVALID_PARAMETER);
+    Status = QueryWsEx((HANDLE)(ULONG_PTR)0x1230, NULL, Entries, sizeof(Entries[0]), &ReturnLength);
+    ok_ntstatus(Status, STATUS_INVALID_HANDLE);
+    Status = QueryWsEx(NULL, NULL, Entries, sizeof(Entries[0]), &ReturnLength);
+    ok_ntstatus(Status, STATUS_INVALID_HANDLE);
+
+    if (View) NtUnmapViewOfSection(NtCurrentProcess(), View);
+    if (Section) NtClose(Section);
+    Size = 0;
+    NtFreeVirtualMemory(NtCurrentProcess(), (PVOID*)&Private, &Size, MEM_RELEASE);
+}
+
+#ifdef _WIN64
+/* MemoryImageInformation (class 6): ImageBase, SizeOfImage, flags; 0x18 bytes on x64 */
+typedef struct _TEST_IMAGE_INFORMATION
+{
+    PVOID ImageBase;
+    SIZE_T SizeOfImage;
+    ULONG ImageFlags;
+} TEST_IMAGE_INFORMATION;
+
+static
+VOID
+Test_ImageInformation(VOID)
+{
+    TEST_IMAGE_INFORMATION Info;
+    PVOID Image = GetModuleHandleW(NULL);
+    PIMAGE_NT_HEADERS NtHeaders = RtlImageNtHeader(Image);
+    PUCHAR Private = NULL;
+    SIZE_T Size = 0x1000, ReturnLength;
+    NTSTATUS Status;
+
+    C_ASSERT(sizeof(Info) == 0x18);
+
+    RtlFillMemory(&Info, sizeof(Info), 0xAA);
+    ReturnLength = 0xDEAD;
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), Image, (MEMORY_INFORMATION_CLASS)6, &Info, sizeof(Info), &ReturnLength);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_size_t(ReturnLength, sizeof(Info));
+    ok_ptr(Info.ImageBase, Image);
+    ok_size_t(Info.SizeOfImage, NtHeaders->OptionalHeader.SizeOfImage);
+    ok_hex(Info.ImageFlags, 0);
+
+    /* Any address of the image gives the same answer */
+    RtlFillMemory(&Info, sizeof(Info), 0xAA);
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), (PUCHAR)Image + 0x1234, (MEMORY_INFORMATION_CLASS)6, &Info, sizeof(Info), &ReturnLength);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_ptr(Info.ImageBase, Image);
+
+    /* Short buffers; longer ones still write 0x18 bytes */
+    ReturnLength = 0xDEAD;
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), Image, (MEMORY_INFORMATION_CLASS)6, &Info, sizeof(Info) - 1, &ReturnLength);
+    ok_ntstatus(Status, STATUS_INFO_LENGTH_MISMATCH);
+    ok_size_t(ReturnLength, 0xDEAD);
+    {
+        UCHAR Big[0x40];
+        RtlFillMemory(Big, sizeof(Big), 0xAA);
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), Image, (MEMORY_INFORMATION_CLASS)6, Big, sizeof(Big), &ReturnLength);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_size_t(ReturnLength, sizeof(Info));
+        ok(Big[sizeof(Info)] == 0xAA, "wrote past the structure\n");
+    }
+
+    /* Private memory is not an image: success with zeros. Free memory is an invalid address. */
+    Status = NtAllocateVirtualMemory(NtCurrentProcess(), (PVOID*)&Private, 0, &Size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    RtlFillMemory(&Info, sizeof(Info), 0xAA);
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), Private, (MEMORY_INFORMATION_CLASS)6, &Info, sizeof(Info), &ReturnLength);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_size_t(ReturnLength, sizeof(Info));
+    ok_ptr(Info.ImageBase, NULL);
+    ok_size_t(Info.SizeOfImage, 0);
+    ok_hex(Info.ImageFlags, 0);
+    Size = 0;
+    NtFreeVirtualMemory(NtCurrentProcess(), (PVOID*)&Private, &Size, MEM_RELEASE);
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), (PVOID)(ULONG_PTR)0x1000, (MEMORY_INFORMATION_CLASS)6, &Info, sizeof(Info), &ReturnLength);
+    ok_ntstatus(Status, STATUS_INVALID_ADDRESS);
+}
+#endif
+
 START_TEST(NtQueryVirtualMemory)
 {
+    Test_InvalidClasses();
+    Test_WorkingSetEx();
+#ifdef _WIN64
+    Test_ImageInformation();
+#endif
     Test_SecReserveAccessedPage();
     Test_SectionNameBasic();
     Test_SectionNameHeaderRace();
