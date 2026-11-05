@@ -121,6 +121,20 @@ static HRESULT GetMscRootNode(PCWSTR pszFilePath, IXMLDOMNode **ppRoot)
     return hr;
 }
 
+/* "mmc wf.msc" names the file without a directory: like Windows, look for it in the current directory
+ * and then along the system search path (system32 holds the consoles). */
+static BOOL ResolveMscPath(PCWSTR pszName, PWSTR pszOut, DWORD cch)
+{
+    DWORD n;
+    if (GetFileAttributesW(pszName) != INVALID_FILE_ATTRIBUTES)
+    {
+        n = GetFullPathNameW(pszName, cch, pszOut, NULL);
+        return n && n < cch;
+    }
+    n = SearchPathW(NULL, pszName, L".msc", cch, pszOut, NULL);
+    return n && n < cch;
+}
+
 EXTERN_C BOOL HandleRosMscLaunch(PCWSTR pszCmdLine)
 {
     BOOL result = FALSE;
@@ -131,7 +145,9 @@ EXTERN_C BOOL HandleRosMscLaunch(PCWSTR pszCmdLine)
     LPWSTR *argv = CommandLineToArgvW(pszCmdLine, &argc);
     if (argv && argc > 0)
     {
-        if (SUCCEEDED(GetMscRootNode(argv[0], &pRoot)))
+        WCHAR szPath[MAX_PATH];
+        PCWSTR pszFile = ResolveMscPath(argv[0], szPath, ARRAYSIZE(szPath)) ? szPath : argv[0];
+        if (SUCCEEDED(GetMscRootNode(pszFile, &pRoot)))
         {
             IXMLDOMNode *pNode;
             HRESULT hr = xmldomunk_getelembytag((IUnknown*)pRoot, L"RosLaunch", 0, &pNode);
