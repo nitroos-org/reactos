@@ -141,13 +141,26 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_EnumAdapters1(IWineDXGIFactory *if
     adapter_count = wined3d_get_adapter_count(factory->wined3d);
     wined3d_mutex_unlock();
 
+#ifdef __REACTOS__
+    /* Windows lists the software (WARP) adapter last, after the adapters of the display: on a machine
+     * without a graphics driver it is adapter 1, after the Microsoft Basic Render Driver. Our WARP adapter
+     * is built on the first wined3d adapter, so it is listed only when there is one. */
+    if (adapter_idx > adapter_count || !adapter_count)
+#else
     if (adapter_idx >= adapter_count)
+#endif
     {
         *adapter = NULL;
         return DXGI_ERROR_NOT_FOUND;
     }
 
-    if (FAILED(hr = dxgi_adapter_create(factory, adapter_idx, &adapter_object)))
+#ifdef __REACTOS__
+    if (adapter_idx == adapter_count)
+        hr = dxgi_adapter_create_warp(factory, &adapter_object);
+    else
+#endif
+    hr = dxgi_adapter_create(factory, adapter_idx, &adapter_object);
+    if (FAILED(hr))
     {
         *adapter = NULL;
         return hr;
@@ -486,7 +499,6 @@ static UINT STDMETHODCALLTYPE dxgi_factory_GetCreationFlags(IWineDXGIFactory *if
 static HRESULT STDMETHODCALLTYPE dxgi_factory_EnumAdapterByLuid(IWineDXGIFactory *iface,
         LUID luid, REFIID iid, void **adapter)
 {
-    struct dxgi_adapter *warp_adapter;
     unsigned int adapter_index;
     DXGI_ADAPTER_DESC1 desc;
     IDXGIAdapter1 *adapter1;
@@ -521,19 +533,6 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_EnumAdapterByLuid(IWineDXGIFactory
     }
     if (hr != DXGI_ERROR_NOT_FOUND)
         WARN("Failed to enumerate adapters, hr %#lx.\n", hr);
-
-    /* The WARP adapter comes after the others, as on Windows. */
-    if (SUCCEEDED(hr = dxgi_adapter_create_warp(impl_from_IWineDXGIFactory(iface), &warp_adapter)))
-    {
-        if (SUCCEEDED(hr = IWineDXGIAdapter_GetDesc1(&warp_adapter->IWineDXGIAdapter_iface, &desc))
-                && desc.AdapterLuid.LowPart == luid.LowPart && desc.AdapterLuid.HighPart == luid.HighPart)
-            hr = IWineDXGIAdapter_QueryInterface(&warp_adapter->IWineDXGIAdapter_iface, iid, adapter);
-        else
-            hr = DXGI_ERROR_NOT_FOUND;
-        IWineDXGIAdapter_Release(&warp_adapter->IWineDXGIAdapter_iface);
-        if (hr != DXGI_ERROR_NOT_FOUND)
-            return hr;
-    }
 
     WARN("Adapter could not be found.\n");
     return DXGI_ERROR_NOT_FOUND;
