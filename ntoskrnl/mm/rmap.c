@@ -434,6 +434,37 @@ MiInsertRmapEntry(PFN_NUMBER Page, PEPROCESS Process,
     }
 }
 
+ULONG
+NTAPI
+MmCountPageMappers(PFN_NUMBER Page)
+{
+    PMM_RMAP_ENTRY Entry;
+    PMMPFN Pfn;
+    KIRQL OldIrql;
+    ULONG Count = 0;
+
+    /* The number of process mappings of the page (the segment association is not one) */
+    OldIrql = MiAcquirePfnLock();
+    Pfn = MiGetPfnEntry(Page);
+    if (!Pfn)
+    {
+        /* Not RAM (a view of \Device\PhysicalMemory over a device range): no rmap list, no share count */
+        MiReleasePfnLock(OldIrql);
+        return 1;
+    }
+    for (Entry = MmGetRmapListHeadPage(Page); Entry; Entry = Entry->Next)
+    {
+        if (!RMAP_IS_SEGMENT(Entry->Address) && Entry->Process) Count++;
+    }
+    if (Count == 0)
+    {
+        /* A page of a section that is not backed by a file has no rmap entries: the PFN counts its mappings */
+        Count = Pfn->u2.ShareCount;
+    }
+    MiReleasePfnLock(OldIrql);
+    return Count;
+}
+
 VOID
 NTAPI
 MmInsertRmapEntry(PFN_NUMBER Page, PEPROCESS Process,
