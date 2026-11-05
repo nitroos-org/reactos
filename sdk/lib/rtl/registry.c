@@ -60,10 +60,11 @@ RtlpQueryRegistryDirect(IN ULONG ValueType,
         /* Check if the return string has been allocated */
         if (!ReturnString->Buffer)
         {
-            /* Allocate it */
-            ReturnString->Buffer = RtlpAllocateStringMemory(ActualLength, TAG_RTLREGISTRY);
+            /* Allocate it (always with room for a terminator, even for an empty value) */
+            ReturnString->Buffer = RtlpAllocateStringMemory(max(ActualLength, sizeof(UNICODE_NULL)),
+                                                            TAG_RTLREGISTRY);
             if (!ReturnString->Buffer) return STATUS_NO_MEMORY;
-            ReturnString->MaximumLength = ActualLength;
+            ReturnString->MaximumLength = max(ActualLength, sizeof(UNICODE_NULL));
         }
         else if (ActualLength > ReturnString->MaximumLength)
         {
@@ -73,7 +74,19 @@ RtlpQueryRegistryDirect(IN ULONG ValueType,
 
         /* Copy the data */
         RtlCopyMemory(ReturnString->Buffer, ValueData, ActualLength);
-        ReturnString->Length = ActualLength - sizeof(UNICODE_NULL);
+
+        /* The length excludes the terminator; an empty or one-byte value has no characters at all */
+        if (ActualLength < sizeof(UNICODE_NULL))
+        {
+            ReturnString->Length = 0;
+            if (ReturnString->MaximumLength >= sizeof(UNICODE_NULL))
+                ReturnString->Buffer[0] = UNICODE_NULL;
+        }
+        else
+        {
+            /* A counted string holds whole characters */
+            ReturnString->Length = (ActualLength - sizeof(UNICODE_NULL)) & ~(sizeof(WCHAR) - 1);
+        }
     }
     else if (ValueLength <= sizeof(ULONG))
     {
@@ -90,7 +103,7 @@ RtlpQueryRegistryDirect(IN ULONG ValueType,
         if ((LONG)*Length < 0)
         {
             /* Get the real length and copy the buffer */
-            RealLength = -(LONG)*Length;
+            RealLength = 0 - *Length;
             if (RealLength < ValueLength) return STATUS_BUFFER_TOO_SMALL;
             RtlCopyMemory(Buffer, ValueData, ValueLength);
         }
@@ -112,6 +125,9 @@ RtlpQueryRegistryDirect(IN ULONG ValueType,
             }
             else
             {
+                /* The caller's size (the first ULONG) bounds the REG_BINARY data like the other types */
+                if (*Length < ValueLength) return STATUS_BUFFER_TOO_SMALL;
+
                 /* Return the REG_BINARY data */
                 RtlCopyMemory(Length, ValueData, ValueLength);
             }
@@ -135,7 +151,7 @@ RtlpCallQueryRegistryRoutine(IN PRTL_QUERY_REGISTRY_TABLE QueryTable,
     ULONG RequiredLength;
     PCHAR SpareData, DataEnd;
     ULONG Type;
-    PWCHAR Name, p, ValueEnd;
+    PWCHAR Name, p, ValueEnd, WholeEnd;
     PVOID Data;
     NTSTATUS Status;
     BOOLEAN FoundExpander = FALSE;
@@ -241,7 +257,7 @@ RtlpCallQueryRegistryRoutine(IN PRTL_QUERY_REGISTRY_TABLE QueryTable,
             /* Update the spare data information */
             SpareData += RequiredLength;
             SpareData = (PVOID)(((ULONG_PTR)SpareData + 7) & ~7);
-            SpareLength = DataEnd - SpareData;
+            SpareLength = (SpareData < DataEnd) ? (DataEnd - SpareData) : 0;
         }
         else
         {
@@ -264,14 +280,19 @@ RtlpCallQueryRegistryRoutine(IN PRTL_QUERY_REGISTRY_TABLE QueryTable,
             /* Prepare defaults */
             Status = STATUS_SUCCESS;
             /* Skip the last two UNICODE_NULL chars (the terminating null string) */
-            ValueEnd = (PWSTR)((ULONG_PTR)Data + Length - 2 * sizeof(UNICODE_NULL));
+            ValueEnd = (PWSTR)((ULONG_PTR)Data +
+                               ((Length >= 2 * sizeof(UNICODE_NULL)) ? (Length - 2 * sizeof(UNICODE_NULL)) : 0));
+            /* The strings never extend past the end of the value data */
+            WholeEnd = (PWSTR)((ULONG_PTR)Data + (Length & ~(sizeof(WCHAR) - 1)));
             p = Data;
 
             /* Loop all strings */
             while (p < ValueEnd)
             {
-                /* Go to the next string */
-                while (*p++);
+                /* Go to the next string, but not beyond the data: an unterminated string ends the list */
+                while ((p < WholeEnd) && *p) p++;
+                if (p >= WholeEnd) break;
+                p++;
 
                 /* Get the length and check if this is direct */
                 Length = (ULONG_PTR)p - (ULONG_PTR)Data;
@@ -313,7 +334,7 @@ RtlpCallQueryRegistryRoutine(IN PRTL_QUERY_REGISTRY_TABLE QueryTable,
         if ((Type == REG_EXPAND_SZ) && (Length >= sizeof(WCHAR)))
         {
             /* Try to find the expander */
-            c = Length - sizeof(UNICODE_NULL);
+            c = (Length - sizeof(UNICODE_NULL)) & ~(sizeof(WCHAR) - 1);
             p = (PWCHAR)Data;
             while (c)
             {
@@ -333,15 +354,17 @@ RtlpCallQueryRegistryRoutine(IN PRTL_QUERY_REGISTRY_TABLE QueryTable,
             /* So check if we have one */
             if (FoundExpander)
             {
-                /* Setup the source string */
-                RtlInitEmptyUnicodeString(&Source, Data, (USHORT)Length);
+                /* Setup the source string (whole characters, at most what a UNICODE_STRING can count) */
+                RtlInitEmptyUnicodeString(&Source,
+                                          Data,
+                                          (USHORT)min(Length & ~(sizeof(WCHAR) - 1), MAXUSHORT - 1));
                 Source.Length = Source.MaximumLength - sizeof(UNICODE_NULL);
 
                 /* Setup the destination string */
                 RtlInitEmptyUnicodeString(&Destination, (PWCHAR)SpareData, 0);
 
                 /* Check if we're out of space */
-                if (SpareLength <= 0)
+                if (SpareLength < sizeof(WCHAR))
                 {
                     /* Then we don't have any space in our string */
                     Destination.MaximumLength = 0;
