@@ -6,6 +6,9 @@
  *              ProcessSessionInformation, through SystemProcessInformation
  *              and through SystemSessionProcessInformation, then stays
  *              alive so that kernel tests can attach to its session.
+ *              Arguments: "exit" (do not stay alive), "name=<tag>" (report
+ *              file sesstest-<tag>.txt instead of sesstest-<session>.txt).
+ *              The report also lists every csrss with its session.
  * COPYRIGHT:   Copyright 2026 Tomas Srnka
  */
 
@@ -50,11 +53,49 @@ FindSpiSession(
     return Found;
 }
 
+/* "csrss=<pid>:<session>,..." for every csrss.exe in the snapshot */
+static
+VOID
+ListCsrss(
+    _In_ PSYSTEM_PROCESS_INFORMATION Spi,
+    _In_ ULONG Length,
+    _Out_writes_(Size) PCHAR Text,
+    _In_ SIZE_T Size)
+{
+    static const WCHAR Csrss[] = L"csrss.exe";
+    ULONG Offset = 0;
+    UNICODE_STRING Name;
+    SIZE_T Used;
+
+    RtlStringCbCopyA(Text, Size, "csrss=");
+    if (Length < sizeof(*Spi))
+        return;
+
+    RtlInitUnicodeString(&Name, Csrss);
+    for (;;)
+    {
+        PSYSTEM_PROCESS_INFORMATION Entry = (PSYSTEM_PROCESS_INFORMATION)((PUCHAR)Spi + Offset);
+        if (Entry->ImageName.Buffer && RtlEqualUnicodeString(&Entry->ImageName, &Name, TRUE))
+        {
+            Used = strlen(Text);
+            RtlStringCbPrintfA(Text + Used, Size - Used, "%s%lu:%lu",
+                               (Text[Used - 1] == '=') ? "" : ",",
+                               HandleToUlong(Entry->UniqueProcessId), Entry->SessionId);
+        }
+        if (!Entry->NextEntryOffset)
+            break;
+        Offset += Entry->NextEntryOffset;
+        if (Offset + sizeof(*Entry) > Length)
+            break;
+    }
+}
+
 static
 VOID
 WriteReport(
     _In_ PCSTR Text,
-    _In_ ULONG SessionId)
+    _In_ ULONG SessionId,
+    _In_opt_ PCSTR Tag)
 {
     WCHAR Path[64];
     UNICODE_STRING Name;
@@ -63,7 +104,10 @@ WriteReport(
     HANDLE File;
     NTSTATUS Status;
 
-    RtlStringCbPrintfW(Path, sizeof(Path), L"\\SystemRoot\\sesstest-%lu.txt", SessionId);
+    if (Tag)
+        RtlStringCbPrintfW(Path, sizeof(Path), L"\\SystemRoot\\sesstest-%.16S.txt", Tag);
+    else
+        RtlStringCbPrintfW(Path, sizeof(Path), L"\\SystemRoot\\sesstest-%lu.txt", SessionId);
     RtlInitUnicodeString(&Name, Path);
     InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
     Status = NtCreateFile(&File,
@@ -98,8 +142,20 @@ _main(int argc, char *argv[], char *envp[], ULONG DebugFlag)
     PVOID Buffer;
     SIZE_T BufferSize = 512 * 1024;
     HANDLE Pid = NtCurrentTeb()->ClientId.UniqueProcess;
-    CHAR Text[512];
+    CHAR Text[768], CsrssText[192];
     LARGE_INTEGER Interval;
+    PCSTR Tag = NULL;
+    BOOLEAN Exit = FALSE;
+    int i;
+
+    for (i = 1; i < argc; i++)
+    {
+        if (!_stricmp(argv[i], "exit"))
+            Exit = TRUE;
+        else if (!_strnicmp(argv[i], "name=", 5) && argv[i][5])
+            Tag = argv[i] + 5;
+    }
+    CsrssText[0] = ANSI_NULL;
 
     PebSession = NtCurrentPeb()->SessionId;
 
@@ -120,7 +176,10 @@ _main(int argc, char *argv[], char *envp[], ULONG DebugFlag)
                                          (ULONG)BufferSize,
                                          &Length);
     if (NT_SUCCESS(SpiStatus))
+    {
         SpiSession = FindSpiSession(Buffer, Length, Pid, &SpiCount);
+        ListCsrss(Buffer, Length, CsrssText, sizeof(CsrssText));
+    }
 
     /* Only the processes of our (kernel) session, which must include us */
     SessionProcessInfo.SessionId = PsiSession;
@@ -135,17 +194,17 @@ _main(int argc, char *argv[], char *envp[], ULONG DebugFlag)
 
     RtlStringCbPrintfA(Text, sizeof(Text),
                        "SESSTEST pid=%lu peb=%lu psi=%lu (0x%lx) spi=%lu (0x%lx, %lu procs) "
-                       "sessproc=%lu (0x%lx, %lu procs, %lu bytes)\r\n",
+                       "sessproc=%lu (0x%lx, %lu procs, %lu bytes) %s\r\n",
                        HandleToUlong(Pid), PebSession, PsiSession, Status,
                        SpiSession, SpiStatus, SpiCount,
-                       SessSession, SessStatus, SessCount, SessLength);
+                       SessSession, SessStatus, SessCount, SessLength, CsrssText);
     DbgPrint("%s", Text);
-    WriteReport(Text, PsiSession);
+    WriteReport(Text, PsiSession, Tag);
 
     RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
 
-    /* "exit" as the first argument: do not stay alive */
-    if (argc > 1 && !_stricmp(argv[1], "exit"))
+    /* "exit": do not stay alive */
+    if (Exit)
         return STATUS_SUCCESS;
 
     /* Stay alive, so that kernel tests can attach to this session */
