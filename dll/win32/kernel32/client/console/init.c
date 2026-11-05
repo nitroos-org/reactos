@@ -757,6 +757,20 @@ ConDllInitialize(IN ULONG Reason,
                         &ConnectInfo,
                         &InServerProcess))
     {
+        /*
+         * NitroSessions (phase P2): the csrss of a session other than 0 has
+         * no console server until win32k runs per session (phase P3b). A
+         * process that needs no console still starts there, without one.
+         * Session 0's csrss always has the console server.
+         */
+        if ((NtCurrentPeb()->SessionId != 0) && !ConnectInfo.IsConsoleApp)
+        {
+            DPRINT1("No console server in session %lu, starting without a console\n",
+                    NtCurrentPeb()->SessionId);
+            Parameters->ConsoleHandle = NULL;
+            return TRUE;
+        }
+
         // DPRINT1("Failed to connect to the Console Server (Status %lx)\n", Status);
         return FALSE;
     }
