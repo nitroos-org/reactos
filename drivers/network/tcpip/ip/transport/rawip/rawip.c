@@ -9,6 +9,7 @@
  */
 
 #include "precomp.h"
+#include <nitrofwk.h>
 
 NTSTATUS AddGenericHeaderIPv4(
     PADDRESS_FILE AddrFile,
@@ -254,6 +255,10 @@ NTSTATUS RawIPSendDatagram(
     }
 
     TI_DbgPrint(MID_TRACE,("About to send datagram\n"));
+
+    /* the inbound filter lets the reply to this ICMP request through */
+    if (AddrFile->Protocol == IPPROTO_ICMP)
+        NITROFW_NOTE_ICMP_SEND(&RemoteAddress, (PUCHAR)BufferData, DataSize);
 
     Status = IPSendDatagram(&Packet, NCE);
     NBDereferenceNeighbor(NCE);
