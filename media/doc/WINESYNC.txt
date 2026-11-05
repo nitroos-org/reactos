@@ -134,7 +134,7 @@ dll/win32/dcomp               # Synced to Wine-10.0
 dll/win32/dwmapi              # Synced to Wine-8.14
 dll/win32/evr                 # Synced to Wine-11.19
 dll/win32/explorerframe        # Synced to Wine-11.19 (ebrowser.c is shell32/ebrowser.c of Wine; Wine's taskbarlist.c is not used, browseui provides it; the ReactOS changes are under __REACTOS__)
-dll/win32/faultrep            # Synced to Wine-10.0
+dll/win32/faultrep            # Synced to Wine-11.21
 dll/win32/feclient            # Synced to Wine-10.0
 dll/win32/fontsub             # Synced to Wine-10.0
 dll/win32/fusion              # Synced to Wine-10.0
