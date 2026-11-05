@@ -363,6 +363,10 @@ static void test_VarFormat(void)
   VARFMT(VT_R8,V_R8,1.0001e-27,"##00.0000e-0",S_OK,"1000.1000e-30");
   VARFMT(VT_R8,V_R8,47.11,".0000E+0",S_OK,".4711E+2");
   VARFMT(VT_R8,V_R8,3.0401e-13,"#####.####e-0%",S_OK,"30401.e-15%");
+  VARFMT(VT_R8,V_R8,29.565331,"0.#####E-#",S_OK,"2.95653E1");
+  VARFMT(VT_R8,V_R8,29.123456789,"0.#####E-###",S_OK,"2.91235E1");
+  VARFMT(VT_R8,V_R8,29.123456789,"0.#####E-#0#0",S_OK,"2.91235E01");
+  VARFMT(VT_R8,V_R8,29.123456789,"0.#####E-0#0#",S_OK,"2.91235E01");
   VARFMT(VT_R8,V_R8,1.57,"0.00",S_OK,"1.57");
   VARFMT(VT_R8,V_R8,-1.57,"0.00",S_OK,"-1.57");
   VARFMT(VT_R8,V_R8,-1.57,"#.##",S_OK,"-1.57");
@@ -520,6 +524,7 @@ static void test_VarFormatFromTokens(void)
     static WCHAR number_fmt[] = L"###,##0.00";
     static WCHAR date_fmt[] = L"dd-mm";
     static WCHAR string_fmt[] = L"@";
+    static WCHAR currency_fmt[] = L"C";
 
     BYTE buff[256];
     LCID lcid;
@@ -586,6 +591,30 @@ static void test_VarFormatFromTokens(void)
     hres = VarFormatFromTokens(&var, string_fmt, buff, 0, &bstr, lcid);
     ok(hres == S_OK, "VarFormatFromTokens failed: %lx\n", hres);
     ok(!wcscmp(bstr, L"1,5"), "incorrectly formatted string: %s\n", wine_dbgstr_w(bstr));
+    SysFreeString(bstr);
+
+    V_VT(&var) = VT_R8;
+    V_R8(&var) = 1234.56;
+
+    lcid = MAKELCID(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), SORT_DEFAULT);
+    hres = VarTokenizeFormatString(currency_fmt, buff, sizeof(buff), 1, 1, lcid, NULL);
+    ok(hres == S_OK, "VarTokenizeFormatString failed: %lx\n", hres);
+    hres = VarFormatFromTokens(&var, currency_fmt, buff, 0, &bstr, lcid);
+    ok(hres == S_OK, "VarFormatFromTokens failed: %lx\n", hres);
+    ok(!wcscmp(bstr, L"5/18/1903 1:26:24 PM"), "incorrectly formatted number: %s\n", wine_dbgstr_w(bstr));
+    SysFreeString(bstr);
+
+    lcid = MAKELCID(MAKELANGID(LANG_GERMAN, SUBLANG_GERMAN), SORT_DEFAULT);
+    hres = VarTokenizeFormatString(currency_fmt, buff, sizeof(buff), 1, 1, lcid, NULL);
+    ok(hres == S_OK, "VarTokenizeFormatString failed: %lx\n", hres);
+    hres = VarFormatFromTokens(&var, currency_fmt, buff, 0, &bstr, lcid);
+    ok(hres == S_OK, "VarFormatFromTokens failed: %lx\n", hres);
+#ifdef __REACTOS__
+    /* ReactOS gets the German date format right; the todo is Wine locale data */
+    ok(!wcscmp(bstr, L"18.05.1903 13:26:24"), "incorrectly formatted number: %s\n", wine_dbgstr_w(bstr));
+#else
+    todo_wine ok(!wcscmp(bstr, L"18.05.1903 13:26:24"), "incorrectly formatted number: %s\n", wine_dbgstr_w(bstr));
+#endif
     SysFreeString(bstr);
 }
 
@@ -672,6 +701,29 @@ static void test_VarFormatDateTime(void)
     ok(!str, "Unexpected out string %p.\n", str);
 }
 
+static void test_VarFormatPercent(void)
+{
+    HRESULT hr;
+    VARIANT in;
+    BSTR str;
+
+    V_VT(&in) = VT_R8;
+    V_R8(&in) = 0.745;
+
+    hr = VarFormatPercent(&in, 2, -1, -1, -1, 0, &str);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!lstrcmpW(str, L"74.50%"), "got %s\n", debugstr_w(str));
+    SysFreeString(str);
+
+    V_R8(&in) = -0.745;
+
+    hr = VarFormatPercent(&in, 2, -1, -1, -1, 0, &str);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!lstrcmpW(str, L"(74.50%)"), "got %s\n", debugstr_w(str));
+
+    SysFreeString(str);
+}
+
 START_TEST(varformat)
 {
     test_VarFormatNumber();
@@ -681,4 +733,5 @@ START_TEST(varformat)
     test_GetAltMonthNames();
     test_VarFormatCurrency();
     test_VarFormatDateTime();
+    test_VarFormatPercent();
 }

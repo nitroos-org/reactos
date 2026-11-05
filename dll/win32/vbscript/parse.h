@@ -163,6 +163,7 @@ typedef struct _dim_list_t {
 
 typedef struct _dim_decl_t {
     const WCHAR *name;
+    unsigned loc;
     BOOL is_array;
     BOOL is_public; /* Used only for class members. */
     dim_list_t *dims;
@@ -176,8 +177,10 @@ typedef struct _dim_statement_t {
 
 typedef struct _redim_decl_t {
     const WCHAR *identifier;
+    unsigned loc;
     expression_t *dims;
     struct _redim_decl_t *next;
+    struct _redim_decl_t *next_declared;
 } redim_decl_t;
 
 typedef struct {
@@ -188,6 +191,7 @@ typedef struct {
 
 typedef struct _arg_decl_t {
     const WCHAR *name;
+    unsigned loc;
     BOOL by_ref;
     struct _arg_decl_t *next;
 } arg_decl_t;
@@ -199,6 +203,8 @@ typedef struct _function_decl_t {
     BOOL is_default;
     arg_decl_t *args;
     statement_t *body;
+    unsigned loc;
+    unsigned name_loc;
     struct _function_decl_t *next;
     struct _function_decl_t *next_prop_func;
 } function_decl_t;
@@ -210,6 +216,7 @@ typedef struct {
 
 typedef struct _class_decl_t {
     const WCHAR *name;
+    unsigned loc;
     function_decl_t *funcs;
     dim_decl_t *props;
     struct _class_decl_t *next;
@@ -259,6 +266,7 @@ typedef struct {
 
 typedef struct _const_decl_t {
     const WCHAR *name;
+    unsigned loc;
     expression_t *value_expr;
     struct _const_decl_t *next;
 } const_decl_t;
@@ -291,6 +299,9 @@ typedef struct {
     expression_t *expr;
 } retval_statement_t;
 
+#define STORAGE_IS_PRIVATE    1
+#define STORAGE_IS_DEFAULT    2
+
 typedef struct {
     const WCHAR *code;
     const WCHAR *ptr;
@@ -304,6 +315,7 @@ typedef struct {
 
     int last_token;
     unsigned last_nl;
+    BOOL after_continuation;
 
     statement_t *stats;
     statement_t *stats_tail;
