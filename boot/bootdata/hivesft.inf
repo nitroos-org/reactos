@@ -696,7 +696,8 @@ HKLM,"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps",,0x00000010
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","Dll",0x00000000,"libgallium_wgl.dll"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","Version",0x00010001,0x00000001
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","DriverVersion",0x00010001,0x00000001
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib","Last Counter",0x00010003,1846
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib","Last Counter",0x00010003,3572
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib","Last Help",0x00010003,3573
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib","Base Index",0x00010003,1847
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib\009","Counter",0x00010000,"1","1847","2","System","4","Memory","6","% Processor Time","10",\
 "File Read Operations/sec","12","File Write Operations/sec","14","File Control Operations/sec","16","File Read Bytes/sec","18","File Write Bytes/sec",\
@@ -835,7 +836,89 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib\009","Counter",0x0001
 "Dirty Pages","1812","Dirty Page Threshold","1814","NUMA Node Memory","1816","Total MBytes","1818","Free & Zero Page List MBytes","1820",\
 "Network Adapter","1822","Standby List MBytes","1824","Available MBytes","1826","SMB BranchCache Hash V2 Header Requests","1828",\
 "SMB BranchCache Hash V2 Generation Requests","1830","SMB BranchCache Hash V2 Requests Received","1832","SMB BranchCache Hash V2 Responses Sent",\
-"1834","SMB BranchCache Hash V2 Bytes Sent","1836","SMB BranchCache Hash V2 Requests Served From Dedup","1846","End Marker"
+"1834","SMB BranchCache Hash V2 Bytes Sent","1836","SMB BranchCache Hash V2 Requests Served From Dedup","1846","End Marker",\
+"3518","Processor Information","3572","% Processor Utility"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib\009","Help",0x00010000,"3","Counters that apply to the computer as a whole rather than to one device or process: file operations, context switches, system calls, and the number of processes and threads.",\
+"5","Counters that describe the physical and virtual memory of the computer: how much is free, how much is committed, how often pages are fetched or written, and the size of the pools.",\
+"7","The percentage of elapsed time that the processor spends running threads other than the idle thread. It is a measure of how busy the processor is.",\
+"11","The rate of file read operations issued to all file system devices, including requests satisfied from the cache.",\
+"13","The rate of file write operations issued to all file system devices, including requests satisfied from the cache.",\
+"15","The rate of file system operations that are neither reads nor writes, such as directory queries and device control requests.",\
+"17","The number of bytes per second transferred by file read operations to all file system devices.",\
+"19","The number of bytes per second transferred by file write operations to all file system devices.",\
+"21","The number of bytes per second transferred by file system operations that are neither reads nor writes.",\
+"25","The amount of physical memory that can be given to a process or to the system right away, in bytes. It is the sum of the zeroed, free and standby lists.",\
+"27","The amount of virtual memory that has been committed, in bytes. Committed memory is backed by physical memory or by space in a paging file.",\
+"29","The rate at which the processors hit a page that was not in a process working set. It counts both faults that were resolved from memory and faults that needed the disk.",\
+"31","The amount of virtual memory that can be committed without growing the paging files, in bytes. It is the physical memory plus the current size of the paging files.",\
+"35","The rate of faults resolved by a page that was already in memory on the standby or modified list, or being written out, so that no disk read was needed.",\
+"37","The rate of faults that occurred in the file system cache and had to be resolved from memory or from disk.",\
+"39","The rate of faults that were resolved by supplying a page of zeros.",\
+"41","The rate at which pages are read from or written to disk to resolve hard faults. It is the sum of Pages Input/sec and Pages Output/sec.",\
+"43","The rate of read operations on the disk to resolve hard faults. Each operation can bring in several pages.",\
+"45","The number of threads that are ready to run but are waiting for a processor, counted for all processors together. It is an instantaneous value, not an average.",\
+"47","The execution state of the thread as a number: 0 initialized, 1 ready, 2 running, 3 standby, 4 terminated, 5 waiting, 6 transition, 7 deferred ready.",\
+"49","The rate at which pages are written to disk to free space in physical memory.",\
+"51","The rate of write operations on the disk to free space in physical memory. Each operation can write several pages.",\
+"57","The size of the paged pool, in bytes. The paged pool is an area of system memory for objects that can be written to disk when they are not in use.",\
+"59","The size of the nonpaged pool, in bytes. The nonpaged pool is an area of system memory for objects that must stay in physical memory.",\
+"143","The percentage of elapsed time that the processor spends running threads in user mode.",\
+"145","The percentage of elapsed time that the processor spends running threads in privileged (kernel) mode, including interrupt and deferred procedure call work.",\
+"147","The rate at which processors switch from one thread to another, counted for all processors together.",\
+"149","The rate at which the processor receives and services hardware interrupts.",\
+"151","The rate at which programs call operating system services, counted for all processors together.",\
+"175","The size of the virtual address space the process is using, in bytes. It does not imply that the space is backed by memory or disk.",\
+"181","The size of the working set of the process, in bytes: the pages recently touched by its threads that are resident in physical memory.",\
+"185","The amount of paging file space, in bytes, that the process has committed.",\
+"187","The amount of memory, in bytes, that the process has committed and that cannot be shared with other processes.",\
+"199","The number of requests outstanding on the disk at the time of the measurement, including requests being serviced.",\
+"201","The percentage of elapsed time that the disk was busy servicing read or write requests.",\
+"203","The percentage of elapsed time that the disk was busy servicing read requests.","205","The percentage of elapsed time that the disk was busy servicing write requests.",\
+"207","The average time, in seconds, of a read or write operation on the disk.","209","The average time, in seconds, of a read operation on the disk.",\
+"211","The average time, in seconds, of a write operation on the disk.","213","The rate of read and write operations on the disk.",\
+"215","The rate of read operations on the disk.","217","The rate of write operations on the disk.",\
+"219","The number of bytes per second transferred to or from the disk during read and write operations.",\
+"221","The number of bytes per second transferred from the disk during read operations.",\
+"223","The number of bytes per second transferred to the disk during write operations.",\
+"225","The average number of bytes transferred to or from the disk during a read or write operation.",\
+"227","The average number of bytes transferred from the disk during a read operation.","229","The average number of bytes transferred to the disk during a write operation.",\
+"231","Counters for each running process: processor time, memory use, threads, handles and identifiers.",\
+"233","Counters for each thread of each process: processor time, context switches, priorities, state and identifiers. A thread is named after its process and its position in the process.",\
+"235","Counters for each physical disk drive: transfer rates, throughput, queue length and the share of time the drive is busy.",\
+"237","Counters for each logical disk: a volume with a drive letter or a volume without one. They report free space and the same transfer, throughput, queue and time figures as the physical disk counters.",\
+"239","Counters for each processor of the computer: how its time is divided between running programs in user mode, running the kernel, servicing interrupts and being idle.",\
+"249","The number of processes in the computer at the time of the measurement.","251","The number of threads in the computer at the time of the measurement.",\
+"265","The number of bytes per second received over the adapter, including framing characters.","267","The number of packets per second received over the adapter.",\
+"337","The reason the thread is waiting, as a number, while its state is waiting. The value has no meaning for a thread that is not waiting.",\
+"389","The number of bytes per second sent and received over the adapter, including framing characters.",\
+"401","The number of packets per second sent and received over the adapter.","407","The rate of file read and write operations issued to all file system devices.",\
+"409","The percentage of the total usable space of the volume that is free.","411","The unallocated space on the volume, in megabytes.",\
+"453","The number of packets per second sent over the adapter.","507","The number of bytes per second sent over the adapter, including framing characters.",\
+"511","Counters for each network adapter: traffic in bytes and packets, errors, and the bandwidth of the link.",\
+"521","An estimate of the current bandwidth of the adapter, in bits per second.","531","The number of received packets that contained errors and were discarded.",\
+"543","The number of outbound packets that could not be sent because of errors.","675","The time, in seconds, that has elapsed since the computer was started.",\
+"681","The number of threads currently active in the process.",\
+"683","The base priority of the thread, which is the priority of its process adjusted by the thread priority level.",\
+"685","The time, in seconds, that the process has been running.","695","The current dynamic priority of the thread. The scheduler can raise it above the base priority.",\
+"697","The percentage of elapsed time that the processor spends servicing deferred procedure calls. It is included in Privileged Time.",\
+"699","The percentage of elapsed time that the processor spends servicing hardware interrupts. It is included in Privileged Time.",\
+"701","Counters for each paging file: how much of its space is in use, and the peak.","703","The percentage of the paging file that is in use.",\
+"705","The highest percentage of the paging file that has been in use since the computer started.",\
+"785","The identifier of the process, which is unique while the process runs.","805","The identifier of the thread, which is unique while the thread runs.",\
+"823","The rate at which pages are read from disk to resolve hard faults.","953","The number of handles the process currently has open, counted over all its threads.",\
+"1335","The rate at which deferred procedure calls are queued on the processor for later processing.",\
+"1337","The rate at which deferred procedure calls were queued on the processor during the last sampling interval of the system, as an instantaneous value.",\
+"1381","The amount of physical memory that can be given to a process or to the system right away, in kilobytes.",\
+"1383","The amount of physical memory that can be given to a process or to the system right away, in megabytes.",\
+"1401","The average number of requests that were queued for the disk during the sample interval, including requests being serviced.",\
+"1403","The average number of read requests that were queued for the disk during the sample interval.",\
+"1405","The average number of write requests that were queued for the disk during the sample interval.",\
+"1407","The ratio of Committed Bytes to the Commit Limit, as a percentage. It shows how much of the available virtual memory is in use.",\
+"1411","The identifier of the process that created this process. The identifier can refer to a process that has since ended.",\
+"1483","The percentage of elapsed time that the processor spends running the idle thread.",\
+"1485","The rate at which requests to the disk were split into more than one request because the data was fragmented or the request was large.",\
+"3519","Counters for each processor and for each group of processors: how its time is divided between user mode, kernel mode, interrupts and idle, and the work done by deferred procedure calls. Instances are named by group and processor number.",\
+"3573","The amount of work the processor has done, as a percentage of the work it could do at its maximum performance. This system reports no frequency scaling, so the value follows Processor Time."
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib\CurrentLanguage","Counter",0x00010000,"1","1847","2","System","4","Memory","6",\
 "% Processor Time","10","File Read Operations/sec","12","File Write Operations/sec","14","File Control Operations/sec","16","File Read Bytes/sec","18",\
 "File Write Bytes/sec","20","File Control Bytes/sec","24","Available Bytes","26","Committed Bytes","28","Page Faults/sec","30","Commit Limit","32",\
@@ -973,7 +1056,89 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib\CurrentLanguage","Cou
 "Dirty Pages","1812","Dirty Page Threshold","1814","NUMA Node Memory","1816","Total MBytes","1818","Free & Zero Page List MBytes","1820",\
 "Network Adapter","1822","Standby List MBytes","1824","Available MBytes","1826","SMB BranchCache Hash V2 Header Requests","1828",\
 "SMB BranchCache Hash V2 Generation Requests","1830","SMB BranchCache Hash V2 Requests Received","1832","SMB BranchCache Hash V2 Responses Sent",\
-"1834","SMB BranchCache Hash V2 Bytes Sent","1836","SMB BranchCache Hash V2 Requests Served From Dedup","1846","End Marker"
+"1834","SMB BranchCache Hash V2 Bytes Sent","1836","SMB BranchCache Hash V2 Requests Served From Dedup","1846","End Marker",\
+"3518","Processor Information","3572","% Processor Utility"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib\CurrentLanguage","Help",0x00010000,"3","Counters that apply to the computer as a whole rather than to one device or process: file operations, context switches, system calls, and the number of processes and threads.",\
+"5","Counters that describe the physical and virtual memory of the computer: how much is free, how much is committed, how often pages are fetched or written, and the size of the pools.",\
+"7","The percentage of elapsed time that the processor spends running threads other than the idle thread. It is a measure of how busy the processor is.",\
+"11","The rate of file read operations issued to all file system devices, including requests satisfied from the cache.",\
+"13","The rate of file write operations issued to all file system devices, including requests satisfied from the cache.",\
+"15","The rate of file system operations that are neither reads nor writes, such as directory queries and device control requests.",\
+"17","The number of bytes per second transferred by file read operations to all file system devices.",\
+"19","The number of bytes per second transferred by file write operations to all file system devices.",\
+"21","The number of bytes per second transferred by file system operations that are neither reads nor writes.",\
+"25","The amount of physical memory that can be given to a process or to the system right away, in bytes. It is the sum of the zeroed, free and standby lists.",\
+"27","The amount of virtual memory that has been committed, in bytes. Committed memory is backed by physical memory or by space in a paging file.",\
+"29","The rate at which the processors hit a page that was not in a process working set. It counts both faults that were resolved from memory and faults that needed the disk.",\
+"31","The amount of virtual memory that can be committed without growing the paging files, in bytes. It is the physical memory plus the current size of the paging files.",\
+"35","The rate of faults resolved by a page that was already in memory on the standby or modified list, or being written out, so that no disk read was needed.",\
+"37","The rate of faults that occurred in the file system cache and had to be resolved from memory or from disk.",\
+"39","The rate of faults that were resolved by supplying a page of zeros.",\
+"41","The rate at which pages are read from or written to disk to resolve hard faults. It is the sum of Pages Input/sec and Pages Output/sec.",\
+"43","The rate of read operations on the disk to resolve hard faults. Each operation can bring in several pages.",\
+"45","The number of threads that are ready to run but are waiting for a processor, counted for all processors together. It is an instantaneous value, not an average.",\
+"47","The execution state of the thread as a number: 0 initialized, 1 ready, 2 running, 3 standby, 4 terminated, 5 waiting, 6 transition, 7 deferred ready.",\
+"49","The rate at which pages are written to disk to free space in physical memory.",\
+"51","The rate of write operations on the disk to free space in physical memory. Each operation can write several pages.",\
+"57","The size of the paged pool, in bytes. The paged pool is an area of system memory for objects that can be written to disk when they are not in use.",\
+"59","The size of the nonpaged pool, in bytes. The nonpaged pool is an area of system memory for objects that must stay in physical memory.",\
+"143","The percentage of elapsed time that the processor spends running threads in user mode.",\
+"145","The percentage of elapsed time that the processor spends running threads in privileged (kernel) mode, including interrupt and deferred procedure call work.",\
+"147","The rate at which processors switch from one thread to another, counted for all processors together.",\
+"149","The rate at which the processor receives and services hardware interrupts.",\
+"151","The rate at which programs call operating system services, counted for all processors together.",\
+"175","The size of the virtual address space the process is using, in bytes. It does not imply that the space is backed by memory or disk.",\
+"181","The size of the working set of the process, in bytes: the pages recently touched by its threads that are resident in physical memory.",\
+"185","The amount of paging file space, in bytes, that the process has committed.",\
+"187","The amount of memory, in bytes, that the process has committed and that cannot be shared with other processes.",\
+"199","The number of requests outstanding on the disk at the time of the measurement, including requests being serviced.",\
+"201","The percentage of elapsed time that the disk was busy servicing read or write requests.",\
+"203","The percentage of elapsed time that the disk was busy servicing read requests.","205","The percentage of elapsed time that the disk was busy servicing write requests.",\
+"207","The average time, in seconds, of a read or write operation on the disk.","209","The average time, in seconds, of a read operation on the disk.",\
+"211","The average time, in seconds, of a write operation on the disk.","213","The rate of read and write operations on the disk.",\
+"215","The rate of read operations on the disk.","217","The rate of write operations on the disk.",\
+"219","The number of bytes per second transferred to or from the disk during read and write operations.",\
+"221","The number of bytes per second transferred from the disk during read operations.",\
+"223","The number of bytes per second transferred to the disk during write operations.",\
+"225","The average number of bytes transferred to or from the disk during a read or write operation.",\
+"227","The average number of bytes transferred from the disk during a read operation.","229","The average number of bytes transferred to the disk during a write operation.",\
+"231","Counters for each running process: processor time, memory use, threads, handles and identifiers.",\
+"233","Counters for each thread of each process: processor time, context switches, priorities, state and identifiers. A thread is named after its process and its position in the process.",\
+"235","Counters for each physical disk drive: transfer rates, throughput, queue length and the share of time the drive is busy.",\
+"237","Counters for each logical disk: a volume with a drive letter or a volume without one. They report free space and the same transfer, throughput, queue and time figures as the physical disk counters.",\
+"239","Counters for each processor of the computer: how its time is divided between running programs in user mode, running the kernel, servicing interrupts and being idle.",\
+"249","The number of processes in the computer at the time of the measurement.","251","The number of threads in the computer at the time of the measurement.",\
+"265","The number of bytes per second received over the adapter, including framing characters.","267","The number of packets per second received over the adapter.",\
+"337","The reason the thread is waiting, as a number, while its state is waiting. The value has no meaning for a thread that is not waiting.",\
+"389","The number of bytes per second sent and received over the adapter, including framing characters.",\
+"401","The number of packets per second sent and received over the adapter.","407","The rate of file read and write operations issued to all file system devices.",\
+"409","The percentage of the total usable space of the volume that is free.","411","The unallocated space on the volume, in megabytes.",\
+"453","The number of packets per second sent over the adapter.","507","The number of bytes per second sent over the adapter, including framing characters.",\
+"511","Counters for each network adapter: traffic in bytes and packets, errors, and the bandwidth of the link.",\
+"521","An estimate of the current bandwidth of the adapter, in bits per second.","531","The number of received packets that contained errors and were discarded.",\
+"543","The number of outbound packets that could not be sent because of errors.","675","The time, in seconds, that has elapsed since the computer was started.",\
+"681","The number of threads currently active in the process.",\
+"683","The base priority of the thread, which is the priority of its process adjusted by the thread priority level.",\
+"685","The time, in seconds, that the process has been running.","695","The current dynamic priority of the thread. The scheduler can raise it above the base priority.",\
+"697","The percentage of elapsed time that the processor spends servicing deferred procedure calls. It is included in Privileged Time.",\
+"699","The percentage of elapsed time that the processor spends servicing hardware interrupts. It is included in Privileged Time.",\
+"701","Counters for each paging file: how much of its space is in use, and the peak.","703","The percentage of the paging file that is in use.",\
+"705","The highest percentage of the paging file that has been in use since the computer started.",\
+"785","The identifier of the process, which is unique while the process runs.","805","The identifier of the thread, which is unique while the thread runs.",\
+"823","The rate at which pages are read from disk to resolve hard faults.","953","The number of handles the process currently has open, counted over all its threads.",\
+"1335","The rate at which deferred procedure calls are queued on the processor for later processing.",\
+"1337","The rate at which deferred procedure calls were queued on the processor during the last sampling interval of the system, as an instantaneous value.",\
+"1381","The amount of physical memory that can be given to a process or to the system right away, in kilobytes.",\
+"1383","The amount of physical memory that can be given to a process or to the system right away, in megabytes.",\
+"1401","The average number of requests that were queued for the disk during the sample interval, including requests being serviced.",\
+"1403","The average number of read requests that were queued for the disk during the sample interval.",\
+"1405","The average number of write requests that were queued for the disk during the sample interval.",\
+"1407","The ratio of Committed Bytes to the Commit Limit, as a percentage. It shows how much of the available virtual memory is in use.",\
+"1411","The identifier of the process that created this process. The identifier can refer to a process that has since ended.",\
+"1483","The percentage of elapsed time that the processor spends running the idle thread.",\
+"1485","The rate at which requests to the disk were split into more than one request because the data was fragmented or the request was large.",\
+"3519","Counters for each processor and for each group of processors: how its time is divided between user mode, kernel mode, interrupts and idle, and the work done by deferred procedure calls. Instances are named by group and processor number.",\
+"3573","The amount of work the processor has done, as a percentage of the work it could do at its maximum performance. This system reports no frequency scaling, so the value follows Processor Time."
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","Flags",0x00010001,0x00000001
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\Mesa3D","RequiresSSE2",0x00010001,0x00000001
 HKLM,"SOFTWARE\ReactOS\OpenGL",,0x00000000,"Mesa3D"

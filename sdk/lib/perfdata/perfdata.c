@@ -218,6 +218,7 @@ struct pdh_process
 #define PDH_SYSINFO_PROCESS       5
 #define PDH_SYSINFO_PAGEFILE      18
 #define PDH_SYSINFO_CPU_PERF      8
+#define PDH_SYSINFO_INTERRUPT     23
 #define PDH_CPU_RECORD_MIN        44
 #define PDH_CPU_RECORD_MAX        48
 
@@ -262,6 +263,35 @@ struct disk_info
 };
 static struct { DWORD gen; DWORD count; struct disk_info *disk; } snap_disk;
 
+/* one record of SystemInterruptInformation */
+struct pdh_int
+{
+    ULONG ContextSwitches;
+    ULONG DpcCount;
+    ULONG DpcRate;
+    ULONG TimeIncrement;
+    ULONG DpcBypassCount;
+    ULONG ApcBypassCount;
+};
+static struct { DWORD gen; DWORD count; struct pdh_int *cpu; } snap_int;
+
+struct ldisk_info
+{
+    WCHAR name[64];
+    struct pdh_disk_perf perf;
+    BOOL have_perf;
+    ULONGLONG total_mb, free_mb;
+    BOOL have_space;
+};
+static struct { DWORD gen; DWORD count; struct ldisk_info *disk; } snap_ldisk;
+
+struct thread_ref
+{
+    WCHAR *name;
+    const SYSTEM_THREAD_INFORMATION *thread;
+};
+static struct { DWORD gen; DWORD count; struct thread_ref *thr; } snap_thread;
+
 struct net_info
 {
     WCHAR name[128];
@@ -291,6 +321,7 @@ static struct
     DWORD gen;
     DWORD count, threads, ready;
     BYTE *buf;
+    ULONG buf_len;
     struct pdh_process **proc;
     WCHAR **name;
 } snap_proc;
@@ -309,8 +340,11 @@ void perf_next_generation(void)
     LeaveCriticalSection( &perf_cs );
 }
 
+static void free_snap_thread(void);
+
 static void free_snap_proc(void)
 {
+    free_snap_thread();   /* its entries point into the process snapshot */
     DWORD i;
     for (i = 0; i < snap_proc.count; i++) free( snap_proc.name[i] );
     free( snap_proc.name );
@@ -383,6 +417,27 @@ fail:
     return FALSE;
 }
 
+static BOOL ensure_int( BOOL force )
+{
+    DWORD n = cpu_count();
+    ULONG len = 0;
+
+    if (!force && snap_int.gen == cur_gen) return snap_int.cpu != NULL;
+    free( snap_int.cpu );
+    snap_int.cpu = NULL;
+    snap_int.count = 0;
+    snap_int.gen = cur_gen;
+    if (!(snap_int.cpu = calloc( n, sizeof(*snap_int.cpu) ))) return FALSE;
+    if (query_sysinfo( PDH_SYSINFO_INTERRUPT, snap_int.cpu, n * sizeof(*snap_int.cpu), &len ) < 0)
+    {
+        free( snap_int.cpu );
+        snap_int.cpu = NULL;
+        return FALSE;
+    }
+    snap_int.count = n;
+    return TRUE;
+}
+
 static void append_letter( WCHAR *name, DWORD size, WCHAR letter )
 {
     DWORD len = lstrlenW( name );
@@ -442,6 +497,98 @@ static BOOL ensure_disk( BOOL force )
     }
     snap_disk.disk = disks;
     snap_disk.count = n;
+    return TRUE;
+}
+
+static void ldisk_fill( struct ldisk_info *d, const WCHAR *devpath, const WCHAR *root )
+{
+    HANDLE h;
+    DWORD ret;
+    ULARGE_INTEGER avail, total, free_bytes;
+
+    h = CreateFileW( devpath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL );
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        d->have_perf = DeviceIoControl( h, IOCTL_DISK_PERFORMANCE, NULL, 0, &d->perf, sizeof(d->perf), &ret, NULL );
+        CloseHandle( h );
+    }
+    if (GetDiskFreeSpaceExW( root, &avail, &total, &free_bytes ))
+    {
+        d->total_mb = total.QuadPart >> 20;
+        d->free_mb = free_bytes.QuadPart >> 20;
+        d->have_space = TRUE;
+    }
+}
+
+typedef BOOL (WINAPI *GetVolumePathNamesForNameW_t)( LPCWSTR, LPWSTR, DWORD, PDWORD );
+
+/* The fixed volumes: a letter ("C:") or, for a volume without a letter, the name of its device ("HarddiskVolume1") */
+static BOOL ensure_ldisk( BOOL force )
+{
+    struct ldisk_info *disks;
+    DWORD n = 0, i, max_disks = 64;
+    GetVolumePathNamesForNameW_t pGetPaths;
+    WCHAR vol[MAX_PATH], path[MAX_PATH], letter_vol[26][64];
+    HANDLE find;
+
+    if (!force && snap_ldisk.gen == cur_gen) return TRUE;
+    free( snap_ldisk.disk );
+    snap_ldisk.disk = NULL;
+    snap_ldisk.count = 0;
+    snap_ldisk.gen = cur_gen;
+    if (!(disks = calloc( max_disks, sizeof(*disks) ))) return FALSE;
+
+    pGetPaths = (GetVolumePathNamesForNameW_t)GetProcAddress( GetModuleHandleW( L"kernel32.dll" ), "GetVolumePathNamesForNameW" );
+
+    /* the volumes that have a drive letter are listed by it, however the volume list reports them */
+    for (i = 0; i < 26; i++)
+    {
+        lstrcpyW( path, L"A:\\" );
+        path[0] = 'A' + i;
+        letter_vol[i][0] = 0;
+        if (GetDriveTypeW( path ) == DRIVE_FIXED) GetVolumeNameForVolumeMountPointW( path, letter_vol[i], ARRAY_SIZE(letter_vol[i]) );
+    }
+    if ((find = FindFirstVolumeW( vol, ARRAY_SIZE(vol) )) != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            WCHAR names[MAX_PATH * 2], dev[MAX_PATH], *p;
+            DWORD len = 0;
+            size_t vl = lstrlenW( vol );
+
+            if (n >= max_disks || vl < 6 || GetDriveTypeW( vol ) != DRIVE_FIXED) continue;
+            for (i = 0; i < 26; i++) if (letter_vol[i][0] && !wcsicmp( letter_vol[i], vol )) break;
+            if (i < 26) continue;
+            names[0] = 0;
+            if (pGetPaths && pGetPaths( vol, names, ARRAY_SIZE(names), &len ) && names[0]) continue;  /* mounted: listed by its path */
+            if (vol[vl - 1] != '\\') continue;
+            vol[vl - 1] = 0;   /* \\?\Volume{guid} */
+            if (QueryDosDeviceW( vol + 4, dev, ARRAY_SIZE(dev) ) && (p = wcsrchr( dev, '\\' )) && p[1])
+            {
+                lstrcpynW( disks[n].name, p + 1, ARRAY_SIZE(disks[n].name) );
+                vol[vl - 1] = '\\';
+                lstrcpyW( path, vol );
+                vol[vl - 1] = 0;
+                ldisk_fill( &disks[n], vol, path );
+                n++;
+            }
+        } while (FindNextVolumeW( find, vol, ARRAY_SIZE(vol) ));
+        FindVolumeClose( find );
+    }
+
+    for (i = 0; i < 26 && n < max_disks; i++)
+    {
+        lstrcpyW( path, L"A:\\" );
+        path[0] = 'A' + i;
+        if (GetDriveTypeW( path ) != DRIVE_FIXED) continue;
+        lstrcpyW( vol, L"\\\\.\\A:" );
+        vol[4] = 'A' + i;
+        _snwprintf( disks[n].name, ARRAY_SIZE(disks[n].name), L"%c:", 'A' + i );
+        ldisk_fill( &disks[n], vol, path );
+        n++;
+    }
+    snap_ldisk.disk = disks;
+    snap_ldisk.count = n;
     return TRUE;
 }
 
@@ -630,6 +777,7 @@ static BOOL ensure_proc( BOOL force )
         if (!p->NextEntryOffset) break;
     }
     snap_proc.buf = buf;
+    snap_proc.buf_len = ret;
     snap_proc.count = n;
     snap_proc.proc = calloc( n, sizeof(*snap_proc.proc) );
     snap_proc.name = calloc( n, sizeof(*snap_proc.name) );
@@ -669,6 +817,47 @@ static BOOL ensure_proc( BOOL force )
             lstrcatW( name, num );
         }
         snap_proc.name[i] = wcsdup( name );
+    }
+    return TRUE;
+}
+
+static void free_snap_thread(void)
+{
+    DWORD i;
+    for (i = 0; i < snap_thread.count; i++) free( snap_thread.thr[i].name );
+    free( snap_thread.thr );
+    memset( &snap_thread, 0, sizeof(snap_thread) );
+}
+
+/* every thread of the process snapshot, named "<process instance>/<number of the thread in its process>" */
+static BOOL ensure_thread( BOOL force )
+{
+    DWORD i, j, n = 0;
+
+    if (!force && snap_thread.gen == cur_gen) return snap_thread.thr != NULL || !snap_thread.count;
+    free_snap_thread();
+    snap_thread.gen = cur_gen;
+    if (!ensure_proc( force )) return FALSE;
+
+    for (i = 0; i < snap_proc.count; i++) n += snap_proc.proc[i]->NumberOfThreads;
+    if (!n) return TRUE;
+    if (!(snap_thread.thr = calloc( n, sizeof(*snap_thread.thr) ))) return FALSE;
+    for (i = 0; i < snap_proc.count; i++)
+    {
+        const SYSTEM_PROCESS_INFORMATION *spi = (const SYSTEM_PROCESS_INFORMATION *)snap_proc.proc[i];
+        const SYSTEM_THREAD_INFORMATION *thr = (const SYSTEM_THREAD_INFORMATION *)(spi + 1);
+
+        for (j = 0; j < spi->NumberOfThreads && snap_thread.count < n; j++, thr++)
+        {
+            WCHAR name[320];
+
+            if ((const BYTE *)(thr + 1) > snap_proc.buf + snap_proc.buf_len) break;
+            _snwprintf( name, ARRAY_SIZE(name), L"%s/%u", snap_proc.name[i], j );
+            name[ARRAY_SIZE(name) - 1] = 0;
+            snap_thread.thr[snap_thread.count].thread = thr;
+            if (!(snap_thread.thr[snap_thread.count].name = wcsdup( name ))) continue;
+            snap_thread.count++;
+        }
     }
     return TRUE;
 }
@@ -857,6 +1046,33 @@ static void load_names(void)
     }
 }
 
+/* an installed name table can be older than this library: the objects and counters it serves are always found */
+static BOOL builtin_name_by_index( DWORD index, const WCHAR **name )
+{
+    DWORD i, k;
+
+    for (i = 0; i < ARRAY_SIZE(objects); i++)
+    {
+        if (objects[i].index == index) { *name = objects[i].name; return TRUE; }
+        for (k = 0; k < objects[i].count; k++)
+            if (objects[i].counters[k].index == index) { *name = objects[i].counters[k].name; return TRUE; }
+    }
+    return FALSE;
+}
+
+static BOOL builtin_index_by_name( const WCHAR *name, DWORD *index )
+{
+    DWORD i, k;
+
+    for (i = 0; i < ARRAY_SIZE(objects); i++)
+    {
+        if (!wcsicmp( objects[i].name, name )) { *index = objects[i].index; return TRUE; }
+        for (k = 0; k < objects[i].count; k++)
+            if (!wcsicmp( objects[i].counters[k].name, name )) { *index = objects[i].counters[k].index; return TRUE; }
+    }
+    return FALSE;
+}
+
 BOOL perf_name_by_index( DWORD index, const WCHAR **name )
 {
     DWORD i;
@@ -874,7 +1090,7 @@ BOOL perf_name_by_index( DWORD index, const WCHAR **name )
         }
     }
     LeaveCriticalSection( &perf_cs );
-    return found;
+    return found || builtin_name_by_index( index, name );
 }
 
 BOOL perf_index_by_name( const WCHAR *name, DWORD *index )
@@ -894,7 +1110,7 @@ BOOL perf_index_by_name( const WCHAR *name, DWORD *index )
         }
     }
     LeaveCriticalSection( &perf_cs );
-    return found;
+    return found || builtin_index_by_name( name, index );
 }
 
 /* ---- instances ---- */
@@ -954,6 +1170,35 @@ LONG perf_get_instances( const struct perf_object_def *obj, WCHAR ***names, DWOR
         if (!(list = calloc( n, sizeof(*list) ))) { ret = PDH_MEMORY_ALLOCATION_FAILURE; break; }
         for (i = 0; i + 1 < n; i++) list[i] = wcsdup( snap_page.page[i].name );
         list[n - 1] = wcsdup( L"_Total" );
+        break;
+
+    case INST_CPUINFO:
+        n = cpu_count() + 2;
+        if (!(list = calloc( n, sizeof(*list) ))) { ret = PDH_MEMORY_ALLOCATION_FAILURE; break; }
+        for (i = 0; i + 2 < n; i++)
+        {
+            WCHAR buf[24];
+            _snwprintf( buf, ARRAY_SIZE(buf), L"0,%u", i );
+            list[i] = wcsdup( buf );
+        }
+        list[n - 2] = wcsdup( L"0,_Total" );
+        list[n - 1] = wcsdup( L"_Total" );
+        break;
+
+    case INST_LDISK:
+        ensure_ldisk( TRUE );
+        n = snap_ldisk.count + 1;
+        if (!(list = calloc( n, sizeof(*list) ))) { ret = PDH_MEMORY_ALLOCATION_FAILURE; break; }
+        for (i = 0; i + 1 < n; i++) list[i] = wcsdup( snap_ldisk.disk[i].name );
+        list[n - 1] = wcsdup( L"_Total" );
+        break;
+
+    case INST_THREAD:
+        if (!ensure_thread( TRUE )) { ret = PDH_CSTATUS_NO_INSTANCE; break; }
+        n = snap_thread.count;
+        if (!n) break;
+        if (!(list = calloc( n, sizeof(*list) ))) { ret = PDH_MEMORY_ALLOCATION_FAILURE; break; }
+        for (i = 0; i < n; i++) list[i] = wcsdup( snap_thread.thr[i].name );
         break;
 
     default:
@@ -1090,9 +1335,12 @@ static void fetch_system( DWORD id, LONGLONG *first, LONGLONG *second, BOOL *ok 
     *second = perf_now();
 }
 
-static LONGLONG cpu_value( DWORD id, const struct pdh_cpu *c )
+static LONGLONG cpu_value( DWORD id, const struct pdh_cpu *c, DWORD index )
 {
     LONGLONG priv;
+
+    if (id == CID_PROCESSOR_DPCS_QUEUED_SEC) return index < snap_int.count ? snap_int.cpu[index].DpcCount : 0;
+    if (id == CID_PROCESSOR_DPC_RATE) return index < snap_int.count ? snap_int.cpu[index].DpcRate : 0;
 
     switch (id)
     {
@@ -1109,68 +1357,232 @@ static LONGLONG cpu_value( DWORD id, const struct pdh_cpu *c )
     return 0;
 }
 
-static void fetch_cpu( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *second, LONG *status )
+/* the counters that are counts, not times: the total adds them up instead of averaging */
+static BOOL cpu_is_count( DWORD id )
+{
+    return id == CID_PROCESSOR_INTERRUPTS_SEC || id == CID_PROCESSOR_DPCS_QUEUED_SEC || id == CID_PROCESSOR_DPC_RATE;
+}
+
+/* % Processor Utility: busy time (kernel without idle, plus user) times 100 over the time of the processor, both
+ * cumulative; the ratio of the differences is the percentage. */
+static void cpu_utility( const struct pdh_cpu *c, LONGLONG *busy, LONGLONG *total )
+{
+    LONGLONG all = c->KernelTime.QuadPart + c->UserTime.QuadPart;
+    LONGLONG b = all - c->IdleTime.QuadPart;
+
+    *busy = (b > 0 ? b : 0) * 100;
+    *total = all;
+}
+
+/* inst is "n" (Processor) or "group,n" (Processor Information); "_Total" and "group,_Total" are the sum */
+static void fetch_cpu( DWORD id, const WCHAR *inst, BOOL info, LONGLONG *first, LONGLONG *second, LONG *status )
 {
     DWORD i;
+    BOOL utility = id == CID_PROCINFO_PROCESSOR_UTILITY;
+    const WCHAR *name = inst;
 
     if (!ensure_cpu( FALSE )) { *status = PDH_CSTATUS_INVALID_DATA; return; }
-    if (!wcsicmp( inst, L"_Total" ))
+    ensure_int( FALSE );
+    if (info && !wcsicmp( inst, L"_Total" )) name = inst;
+    else if (info)
     {
-        LONGLONG sum = 0;
-        for (i = 0; i < snap_cpu.count; i++) sum += cpu_value( id, &snap_cpu.cpu[i] );
+        const WCHAR *comma = wcschr( inst, ',' );
+        if (!comma || wcsncmp( inst, L"0", comma - inst ) || comma - inst != 1) { *status = PDH_CSTATUS_NO_INSTANCE; return; }
+        name = comma + 1;
+    }
+    if (!wcsicmp( name, L"_Total" ))
+    {
+        LONGLONG sum = 0, b = 0, t = 0;
+        for (i = 0; i < snap_cpu.count; i++)
+        {
+            LONGLONG b1, t1;
+            if (utility) { cpu_utility( &snap_cpu.cpu[i], &b1, &t1 ); b += b1; t += t1; }
+            else sum += cpu_value( id, &snap_cpu.cpu[i], i );
+        }
+        if (utility) { *first = b; *second = t; return; }
         /* the time counters of the total are the average over the processors */
-        *first = id == CID_PROCESSOR_INTERRUPTS_SEC ? sum : sum / (LONGLONG)snap_cpu.count;
+        *first = cpu_is_count( id ) ? sum : sum / (LONGLONG)snap_cpu.count;
     }
     else
     {
         WCHAR *end;
-        i = wcstoul( inst, &end, 10 );
-        if (!*inst || *end || i >= snap_cpu.count) { *status = PDH_CSTATUS_NO_INSTANCE; return; }
-        *first = cpu_value( id, &snap_cpu.cpu[i] );
+        i = wcstoul( name, &end, 10 );
+        if (!*name || *end || i >= snap_cpu.count) { *status = PDH_CSTATUS_NO_INSTANCE; return; }
+        if (utility) { cpu_utility( &snap_cpu.cpu[i], first, second ); return; }
+        *first = cpu_value( id, &snap_cpu.cpu[i], i );
     }
-    *second = perf_now();
+    *second = id == CID_PROCESSOR_DPC_RATE || id == CID_PROCINFO_DPC_RATE ? 0 : perf_now();
 }
 
-static LONGLONG disk_value( DWORD id, const struct disk_info *d )
+/* the Processor counter that a Processor Information counter reads */
+static DWORD info_to_cpu_id( DWORD id )
 {
-    const struct pdh_disk_perf *p = &d->perf;
-
-    if (!d->have_perf) return 0;
     switch (id)
     {
-    case CID_PHYSICALDISK_CURRENT_DISK_QUEUE_LENGTH: return p->QueueDepth;
-    case CID_PHYSICALDISK_DISK_TIME:                 return p->ReadTime.QuadPart + p->WriteTime.QuadPart;
-    case CID_PHYSICALDISK_DISK_READ_TIME:            return p->ReadTime.QuadPart;
-    case CID_PHYSICALDISK_DISK_WRITE_TIME:           return p->WriteTime.QuadPart;
-    case CID_PHYSICALDISK_IDLE_TIME:                 return p->IdleTime.QuadPart;
-    case CID_PHYSICALDISK_DISK_TRANSFERS_SEC:        return (LONGLONG)p->ReadCount + p->WriteCount;
-    case CID_PHYSICALDISK_DISK_READS_SEC:            return p->ReadCount;
-    case CID_PHYSICALDISK_DISK_WRITES_SEC:           return p->WriteCount;
-    case CID_PHYSICALDISK_DISK_BYTES_SEC:            return p->BytesRead.QuadPart + p->BytesWritten.QuadPart;
-    case CID_PHYSICALDISK_DISK_READ_BYTES_SEC:       return p->BytesRead.QuadPart;
-    case CID_PHYSICALDISK_DISK_WRITE_BYTES_SEC:      return p->BytesWritten.QuadPart;
+    case CID_PROCINFO_PROCESSOR_TIME:    return CID_PROCESSOR_PROCESSOR_TIME;
+    case CID_PROCINFO_USER_TIME:         return CID_PROCESSOR_USER_TIME;
+    case CID_PROCINFO_PRIVILEGED_TIME:   return CID_PROCESSOR_PRIVILEGED_TIME;
+    case CID_PROCINFO_INTERRUPTS_SEC:    return CID_PROCESSOR_INTERRUPTS_SEC;
+    case CID_PROCINFO_DPC_TIME:          return CID_PROCESSOR_DPC_TIME;
+    case CID_PROCINFO_INTERRUPT_TIME:    return CID_PROCESSOR_INTERRUPT_TIME;
+    case CID_PROCINFO_DPCS_QUEUED_SEC:   return CID_PROCESSOR_DPCS_QUEUED_SEC;
+    case CID_PROCINFO_DPC_RATE:          return CID_PROCESSOR_DPC_RATE;
+    case CID_PROCINFO_IDLE_TIME:         return CID_PROCESSOR_IDLE_TIME;
     }
-    return 0;
+    return id;
+}
+
+/* The value of a disk counter in first and second, from the record of the disk performance IOCTL. The ids are
+ * those of PhysicalDisk; the LogicalDisk counters are mapped to them. */
+static void disk_pair( DWORD id, const struct pdh_disk_perf *p, LONGLONG *first, LONGLONG *second )
+{
+    LONGLONG ops = (LONGLONG)p->ReadCount + p->WriteCount;
+
+    *second = perf_now();
+    switch (id)
+    {
+    case CID_PHYSICALDISK_CURRENT_DISK_QUEUE_LENGTH: *first = p->QueueDepth; *second = 0; break;
+    case CID_PHYSICALDISK_DISK_TIME:                 *first = p->ReadTime.QuadPart + p->WriteTime.QuadPart; break;
+    case CID_PHYSICALDISK_DISK_READ_TIME:            *first = p->ReadTime.QuadPart; break;
+    case CID_PHYSICALDISK_DISK_WRITE_TIME:           *first = p->WriteTime.QuadPart; break;
+    case CID_PHYSICALDISK_IDLE_TIME:                 *first = p->IdleTime.QuadPart; break;
+    case CID_PHYSICALDISK_DISK_TRANSFERS_SEC:        *first = ops; break;
+    case CID_PHYSICALDISK_DISK_READS_SEC:            *first = p->ReadCount; break;
+    case CID_PHYSICALDISK_DISK_WRITES_SEC:           *first = p->WriteCount; break;
+    case CID_PHYSICALDISK_DISK_BYTES_SEC:            *first = p->BytesRead.QuadPart + p->BytesWritten.QuadPart; break;
+    case CID_PHYSICALDISK_DISK_READ_BYTES_SEC:       *first = p->BytesRead.QuadPart; break;
+    case CID_PHYSICALDISK_DISK_WRITE_BYTES_SEC:      *first = p->BytesWritten.QuadPart; break;
+    /* queue lengths: the summed request latency over the time that passed (the sample time is the time base) */
+    case CID_PHYSICALDISK_AVG_DISK_QUEUE_LENGTH:       *first = p->ReadTime.QuadPart + p->WriteTime.QuadPart; break;
+    case CID_PHYSICALDISK_AVG_DISK_READ_QUEUE_LENGTH:  *first = p->ReadTime.QuadPart; break;
+    case CID_PHYSICALDISK_AVG_DISK_WRITE_QUEUE_LENGTH: *first = p->WriteTime.QuadPart; break;
+    /* averages: the sum over the number of operations */
+    case CID_PHYSICALDISK_AVG_DISK_SEC_TRANSFER:       *first = p->ReadTime.QuadPart + p->WriteTime.QuadPart; *second = ops; break;
+    case CID_PHYSICALDISK_AVG_DISK_SEC_READ:           *first = p->ReadTime.QuadPart; *second = p->ReadCount; break;
+    case CID_PHYSICALDISK_AVG_DISK_SEC_WRITE:          *first = p->WriteTime.QuadPart; *second = p->WriteCount; break;
+    case CID_PHYSICALDISK_AVG_DISK_BYTES_TRANSFER:     *first = p->BytesRead.QuadPart + p->BytesWritten.QuadPart; *second = ops; break;
+    case CID_PHYSICALDISK_AVG_DISK_BYTES_READ:         *first = p->BytesRead.QuadPart; *second = p->ReadCount; break;
+    case CID_PHYSICALDISK_AVG_DISK_BYTES_WRITE:        *first = p->BytesWritten.QuadPart; *second = p->WriteCount; break;
+    case CID_PHYSICALDISK_SPLIT_IO_SEC:                *first = p->SplitCount; break;
+    default: *first = 0; *second = 0; break;
+    }
+}
+
+static void disk_add( DWORD id, const struct pdh_disk_perf *p, BOOL have_perf, LONGLONG *first, LONGLONG *second, BOOL *any )
+{
+    LONGLONG f = 0, s = 0;
+
+    if (have_perf) disk_pair( id, p, &f, &s );
+    else s = id == CID_PHYSICALDISK_CURRENT_DISK_QUEUE_LENGTH ? 0 : perf_now();
+    *first += f;
+    if (!*any) *second = s;
+    else if (id >= CID_PHYSICALDISK_AVG_DISK_SEC_TRANSFER && id <= CID_PHYSICALDISK_AVG_DISK_BYTES_WRITE) *second += s;
+    *any = TRUE;
 }
 
 static void fetch_disk( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *second, LONG *status )
 {
     DWORD i;
+    BOOL any = FALSE;
 
+    *first = *second = 0;
     if (!ensure_disk( FALSE )) { *status = PDH_CSTATUS_INVALID_DATA; return; }
     if (!wcsicmp( inst, L"_Total" ))
     {
-        LONGLONG sum = 0;
-        for (i = 0; i < snap_disk.count; i++) sum += disk_value( id, &snap_disk.disk[i] );
-        *first = sum;
+        for (i = 0; i < snap_disk.count; i++) disk_add( id, &snap_disk.disk[i].perf, snap_disk.disk[i].have_perf, first, second, &any );
     }
     else
     {
         for (i = 0; i < snap_disk.count; i++) if (!wcsicmp( snap_disk.disk[i].name, inst )) break;
         if (i == snap_disk.count) { *status = PDH_CSTATUS_NO_INSTANCE; return; }
-        *first = disk_value( id, &snap_disk.disk[i] );
+        disk_add( id, &snap_disk.disk[i].perf, snap_disk.disk[i].have_perf, first, second, &any );
     }
-    *second = id == CID_PHYSICALDISK_CURRENT_DISK_QUEUE_LENGTH ? 0 : perf_now();
+    if (!any) *second = id == CID_PHYSICALDISK_CURRENT_DISK_QUEUE_LENGTH ? 0 : perf_now();
+}
+
+/* the PhysicalDisk counter that a LogicalDisk counter reads from the same record */
+static DWORD ldisk_to_disk_id( DWORD id )
+{
+    switch (id)
+    {
+    case CID_LOGICALDISK_CURRENT_DISK_QUEUE_LENGTH:    return CID_PHYSICALDISK_CURRENT_DISK_QUEUE_LENGTH;
+    case CID_LOGICALDISK_DISK_TIME:                    return CID_PHYSICALDISK_DISK_TIME;
+    case CID_LOGICALDISK_AVG_DISK_QUEUE_LENGTH:        return CID_PHYSICALDISK_AVG_DISK_QUEUE_LENGTH;
+    case CID_LOGICALDISK_DISK_READ_TIME:               return CID_PHYSICALDISK_DISK_READ_TIME;
+    case CID_LOGICALDISK_AVG_DISK_READ_QUEUE_LENGTH:   return CID_PHYSICALDISK_AVG_DISK_READ_QUEUE_LENGTH;
+    case CID_LOGICALDISK_DISK_WRITE_TIME:              return CID_PHYSICALDISK_DISK_WRITE_TIME;
+    case CID_LOGICALDISK_AVG_DISK_WRITE_QUEUE_LENGTH:  return CID_PHYSICALDISK_AVG_DISK_WRITE_QUEUE_LENGTH;
+    case CID_LOGICALDISK_AVG_DISK_SEC_TRANSFER:        return CID_PHYSICALDISK_AVG_DISK_SEC_TRANSFER;
+    case CID_LOGICALDISK_AVG_DISK_SEC_READ:            return CID_PHYSICALDISK_AVG_DISK_SEC_READ;
+    case CID_LOGICALDISK_AVG_DISK_SEC_WRITE:           return CID_PHYSICALDISK_AVG_DISK_SEC_WRITE;
+    case CID_LOGICALDISK_DISK_TRANSFERS_SEC:           return CID_PHYSICALDISK_DISK_TRANSFERS_SEC;
+    case CID_LOGICALDISK_DISK_READS_SEC:               return CID_PHYSICALDISK_DISK_READS_SEC;
+    case CID_LOGICALDISK_DISK_WRITES_SEC:              return CID_PHYSICALDISK_DISK_WRITES_SEC;
+    case CID_LOGICALDISK_DISK_BYTES_SEC:               return CID_PHYSICALDISK_DISK_BYTES_SEC;
+    case CID_LOGICALDISK_DISK_READ_BYTES_SEC:          return CID_PHYSICALDISK_DISK_READ_BYTES_SEC;
+    case CID_LOGICALDISK_DISK_WRITE_BYTES_SEC:         return CID_PHYSICALDISK_DISK_WRITE_BYTES_SEC;
+    case CID_LOGICALDISK_AVG_DISK_BYTES_TRANSFER:      return CID_PHYSICALDISK_AVG_DISK_BYTES_TRANSFER;
+    case CID_LOGICALDISK_AVG_DISK_BYTES_READ:          return CID_PHYSICALDISK_AVG_DISK_BYTES_READ;
+    case CID_LOGICALDISK_AVG_DISK_BYTES_WRITE:         return CID_PHYSICALDISK_AVG_DISK_BYTES_WRITE;
+    case CID_LOGICALDISK_IDLE_TIME:                    return CID_PHYSICALDISK_IDLE_TIME;
+    case CID_LOGICALDISK_SPLIT_IO_SEC:                 return CID_PHYSICALDISK_SPLIT_IO_SEC;
+    }
+    return ~0u;
+}
+
+static void fetch_ldisk( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *second, LONG *status )
+{
+    DWORD i, did = ldisk_to_disk_id( id );
+    BOOL any = FALSE, total = !wcsicmp( inst, L"_Total" );
+
+    *first = *second = 0;
+    if (!ensure_ldisk( FALSE )) { *status = PDH_CSTATUS_INVALID_DATA; return; }
+    for (i = 0; i < snap_ldisk.count; i++)
+    {
+        const struct ldisk_info *d = &snap_ldisk.disk[i];
+
+        if (!total && wcsicmp( d->name, inst )) continue;
+        if (did == ~0u)   /* % Free Space: free megabytes over the total; Free Megabytes */
+        {
+            *first += d->free_mb;
+            if (id == CID_LOGICALDISK_FREE_SPACE) *second += d->total_mb;
+        }
+        else disk_add( did, &d->perf, d->have_perf, first, second, &any );
+        any = TRUE;
+        if (!total) break;
+    }
+    if (!any && !total) { *status = PDH_CSTATUS_NO_INSTANCE; return; }
+    if (did == ~0u) { if (id == CID_LOGICALDISK_FREE_MEGABYTES) *second = 0; }
+    else if (!any) *second = did == CID_PHYSICALDISK_CURRENT_DISK_QUEUE_LENGTH ? 0 : perf_now();
+}
+
+static void fetch_thread( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *second, LONG *status )
+{
+    DWORD i;
+    const SYSTEM_THREAD_INFORMATION *t;
+
+    *first = *second = 0;
+    if (!ensure_thread( FALSE )) { *status = PDH_CSTATUS_INVALID_DATA; return; }
+    for (i = 0; i < snap_thread.count; i++) if (!wcsicmp( snap_thread.thr[i].name, inst )) break;
+    if (i == snap_thread.count) { *status = PDH_CSTATUS_NO_INSTANCE; return; }
+    t = snap_thread.thr[i].thread;
+
+    *second = perf_now();
+    switch (id)
+    {
+    case CID_THREAD_CONTEXT_SWITCHES_SEC: *first = t->ContextSwitches; break;
+    case CID_THREAD_PROCESSOR_TIME:       *first = t->UserTime.QuadPart + t->KernelTime.QuadPart; break;
+    case CID_THREAD_USER_TIME:            *first = t->UserTime.QuadPart; break;
+    case CID_THREAD_PRIVILEGED_TIME:      *first = t->KernelTime.QuadPart; break;
+    case CID_THREAD_ELAPSED_TIME:         *first = t->CreateTime.QuadPart; break;
+    case CID_THREAD_PRIORITY_CURRENT:     *first = t->Priority; *second = 0; break;
+    case CID_THREAD_PRIORITY_BASE:        *first = t->BasePriority; *second = 0; break;
+    case CID_THREAD_THREAD_STATE:         *first = t->ThreadState; *second = 0; break;
+    case CID_THREAD_THREAD_WAIT_REASON:   *first = t->WaitReason; *second = 0; break;
+    case CID_THREAD_ID_PROCESS:           *first = (LONGLONG)(ULONG_PTR)t->ClientId.UniqueProcess; *second = 0; break;
+    case CID_THREAD_ID_THREAD:            *first = (LONGLONG)(ULONG_PTR)t->ClientId.UniqueThread; *second = 0; break;
+    default: *status = PDH_CSTATUS_INVALID_DATA; break;
+    }
 }
 
 static void fetch_net( DWORD id, const WCHAR *inst, LONGLONG *first, LONGLONG *second, LONG *status )
@@ -1280,7 +1692,10 @@ LONG perf_fetch( const struct perf_object_def *obj, const struct perf_counter_de
         else fetch_system( ctr->id, first, second, &ok );
         if (!ok) status = PDH_CSTATUS_INVALID_DATA;
         break;
-    case INST_CPU:  fetch_cpu( ctr->id, key, first, second, &status ); break;
+    case INST_CPU:  fetch_cpu( ctr->id, key, FALSE, first, second, &status ); break;
+    case INST_CPUINFO: fetch_cpu( info_to_cpu_id( ctr->id ), key, TRUE, first, second, &status ); break;
+    case INST_LDISK: fetch_ldisk( ctr->id, key, first, second, &status ); break;
+    case INST_THREAD: fetch_thread( ctr->id, key, first, second, &status ); break;
     case INST_DISK: fetch_disk( ctr->id, key, first, second, &status ); break;
     case INST_NET:  fetch_net( ctr->id, key, first, second, &status ); break;
     case INST_PROC: fetch_proc( ctr->id, key, first, second, &status ); break;
@@ -1298,21 +1713,6 @@ struct name_entry
     const WCHAR *text;
     WCHAR       *owned;   /* text built here, freed after the table is made */
 };
-
-static const WCHAR *object_help_text( const struct perf_object_def *obj )
-{
-    switch (obj->index)
-    {
-    case 2:   return L"Counters for the system as a whole: file operations, context switches, system calls, processes and threads.";
-    case 4:   return L"Counters for physical and virtual memory: available and committed memory, paging activity and pool sizes.";
-    case 700: return L"Counters for each paging file: how much of its space is in use, and the peak.";
-    case 230: return L"Counters for each running process: processor time, memory use, threads, handles and identifiers.";
-    case 234: return L"Counters for each physical disk drive: transfer rates, throughput, queue length and busy time.";
-    case 238: return L"Counters for each processor: how its time is divided between user mode, kernel mode, interrupts and idle.";
-    case 510: return L"Counters for each network adapter: traffic in bytes and packets, errors and the bandwidth of the link.";
-    }
-    return L"";
-}
 
 static void add_entry( struct name_entry *list, DWORD *count, DWORD index, const WCHAR *text, WCHAR *owned )
 {
@@ -1347,21 +1747,13 @@ WCHAR *perf_builtin_names( BOOL help, DWORD *bytes )
         const struct perf_object_def *obj = &objects[i];
 
         if (!help) add_entry( list, &n, obj->index, obj->name, NULL );
-        else add_entry( list, &n, obj->index + 1, object_help_text( obj ), NULL );
+        else add_entry( list, &n, obj->index + 1, obj->help, NULL );
         for (k = 0; k < obj->count; k++)
         {
             const struct perf_counter_def *ctr = &obj->counters[k];
 
-            if (!help) add_entry( list, &n, ctr->index, ctr->name, NULL );
-            else
-            {
-                /* no descriptive text yet: the help of a counter is its name */
-                WCHAR *text = perf_alloc( (lstrlenW( ctr->name ) + 2) * sizeof(WCHAR) );
-                if (!text) continue;
-                lstrcpyW( text, ctr->name );
-                lstrcatW( text, L"." );
-                add_entry( list, &n, ctr->index + 1, text, text );
-            }
+            /* a name index shared by several objects has the text of the first object that uses it */
+            add_entry( list, &n, help ? ctr->index + 1 : ctr->index, help ? ctr->help : ctr->name, NULL );
         }
     }
 
