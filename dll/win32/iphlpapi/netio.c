@@ -40,6 +40,7 @@ typedef struct _NETIO_IF
   BOOL Connected;
   BOOL Dhcp;
   DWORD LeaseTerminates;                /* seconds since 1970, 0 when unknown */
+  DWORD ManualMetric;                   /* Tcpip\Parameters\Interfaces\{guid}\InterfaceMetric, 0 = automatic */
   WCHAR Alias[IF_MAX_STRING_SIZE + 1];
   WCHAR Description[IF_MAX_STRING_SIZE + 1];
   MIB_IFROW Row;
@@ -103,6 +104,13 @@ static void read_dhcp_state(NETIO_IF *If)
         Type == REG_DWORD)
       If->LeaseTerminates = Value;
   }
+
+  /* a metric set by hand (netsh, Set-NetIPInterface, the adapter's advanced TCP/IP page); the stack reads the same value
+     at bind time. 0 or no value = the automatic metric, and the stack takes at most 9999. */
+  Size = sizeof(Value);
+  if (RegQueryValueExW(Handle, L"InterfaceMetric", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
+      Type == REG_DWORD && Value != 0)
+    If->ManualMetric = min(Value, 9999);
   RegCloseKey(Handle);
 }
 
@@ -446,7 +454,13 @@ static void fill_ip_interface(const NETIO_IF *If, ADDRESS_FAMILY Family, PMIB_IP
   else
   {
     Out->NlMtu = If->Row.dwMtu;
-    Out->Metric = automatic_metric(If->Row.dwSpeed);
+    if (If->ManualMetric)
+    {
+      Out->UseAutomaticMetric = FALSE;
+      Out->Metric = If->ManualMetric;
+    }
+    else
+      Out->Metric = automatic_metric(If->Row.dwSpeed);
     Out->UseNeighborUnreachabilityDetection = TRUE;
     Out->SupportsNeighborDiscovery = TRUE;
     Out->SupportsRouterDiscovery = TRUE;

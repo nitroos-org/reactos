@@ -1,4 +1,4 @@
-# NetTCPIP for ReactOS-Nitro: a clean-room PowerShell 7 script module (read side and the write cmdlets New-/Remove-NetIPAddress, Set-NetIPInterface -Dhcp). Same module, cmdlet and parameter names
+# NetTCPIP for ReactOS-Nitro: a clean-room PowerShell 7 script module (read side and the write cmdlets New-/Remove-NetIPAddress, Set-NetIPInterface -Dhcp/-InterfaceMetric/-AutomaticMetric). Same module, cmdlet and parameter names
 # and the same object shapes as the Windows module (see NetAdapter.psm1). The data comes from iphlpapi through
 # Nitro.Net.Native (NitroNetNative.cs); the IPv4 forwarding table is the only route source this system offers.
 
@@ -25,12 +25,18 @@ function Invoke-NetQuery {
         [System.Collections.IDictionary]$Bound,
         [string[]]$Filters,
         [hashtable]$PropertyOf = @{},
-        [System.Collections.IDictionary]$Extra = $null
+        [System.Collections.IDictionary]$Extra = $null,
+        [scriptblock]$PersistentRows = $null
     )
     if ($Bound.ContainsKey('PolicyStore') -and $Bound['PolicyStore'] -ne 'ActiveStore') {
-        if ($Bound['PolicyStore'] -eq 'PersistentStore') { return }
-        $Cmdlet.WriteError([Nitro.Net.Errors]::InvalidStore([string]$Bound['PolicyStore']))
-        return
+        if ($Bound['PolicyStore'] -eq 'PersistentStore') {
+            # the rows of the persistent configuration (the registry), for the classes that have them; the other classes report none
+            if ($null -eq $PersistentRows) { return }
+            $Rows = & $PersistentRows
+        } else {
+            $Cmdlet.WriteError([Nitro.Net.Errors]::InvalidStore([string]$Bound['PolicyStore']))
+            return
+        }
     }
     $q = [Nitro.Net.Query]::new()
     foreach ($f in $Filters) {
@@ -76,7 +82,7 @@ function Get-NetIPAddress {
         }
         Invoke-NetQuery $PSCmdlet 'MSFT_NetIPAddress' ([Nitro.Net.Native]::IPAddresses()) $PSBoundParameters `
             @('IPAddress', 'InterfaceIndex', 'InterfaceAlias', 'AddressFamily', 'Type', 'PrefixLength', 'PrefixOrigin', 'SuffixOrigin',
-              'AddressState', 'ValidLifetime', 'PreferredLifetime', 'SkipAsSource') -Extra $extra
+              'AddressState', 'ValidLifetime', 'PreferredLifetime', 'SkipAsSource') -Extra $extra -PersistentRows { Get-NetPersistentIPAddressRows }
     }
 }
 
@@ -446,6 +452,47 @@ function Get-NetRegStrings {
     @(@($v) | Where-Object { $_ -is [string] -and $_ -ne '' -and $_ -ne '0.0.0.0' })
 }
 
+# 255.255.255.0 -> 24 (a non-contiguous mask counts its set bits, as the stack does when it reads the registry)
+function ConvertTo-NetPrefixLength {
+    param([string]$Mask)
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($Mask, [ref]$ip)) { return 32 }
+    $n = 0
+    foreach ($b in $ip.GetAddressBytes()) { while ($b) { $n += $b -band 1; $b = $b -shr 1 } }
+    $n
+}
+
+# The addresses of the PersistentStore: what the registry configures for the interfaces that do not use DHCP (the stack and the
+# DHCP client read IPAddress/SubnetMask at bind time). An interface with DHCP enabled has none, as on Windows (measured: a
+# DHCP machine returns no object for -PolicyStore PersistentStore). Same fields as the active rows; the store is 0 and the
+# address is not tracked by the stack as an address state.
+function Get-NetPersistentIPAddressRows {
+    $rows = [System.Collections.Generic.List[System.Collections.Generic.Dictionary[string, object]]]::new()
+    foreach ($r in [Nitro.Net.Native]::IPInterfaces()) {
+        if ([int]$r['AddressFamily'] -ne 2) { continue }
+        $ix = [uint32]$r['InterfaceIndex']
+        $k = [Nitro.Net.Config]::InterfaceKey($ix, $false)
+        if ($null -eq $k) { continue }
+        try {
+            if ([int]$k.GetValue('EnableDHCP', 1) -ne 0) { continue }
+            $ips = @(Get-NetRegStrings $k 'IPAddress'); $masks = @(Get-NetRegStrings $k 'SubnetMask')
+            $guid = [Nitro.Net.Native]::AdapterGuid($ix)
+            for ($i = 0; $i -lt $ips.Count; $i++) {
+                $plen = if ($i -lt $masks.Count) { ConvertTo-NetPrefixLength $masks[$i] } else { 32 }
+                $d = [System.Collections.Generic.Dictionary[string, object]]::new()
+                $spec = [ordered]@{ InstanceID = "$($ips[$i])++$ix"; Name = "${guid}:$($ips[$i])"; CreationClassName = ''; SystemCreationClassName = ''; SystemName = ''
+                    EnabledDefault = [uint16]2; RequestedState = [uint16]12; TransitioningToState = [uint16]12; ProtocolIFType = [uint16]4096; AddressOrigin = [uint16]0
+                    IPv4Address = $ips[$i]; PrefixLength = [byte]$plen; AddressFamily = [uint16]2; AddressState = [uint16]0
+                    InterfaceAlias = $r['InterfaceAlias']; InterfaceIndex = $ix; IPAddress = $ips[$i]; PreferredLifetime = [timespan]::MaxValue
+                    PrefixOrigin = [uint16]1; SkipAsSource = $false; Store = [byte]0; SuffixOrigin = [uint16]1; Type = [byte]1; ValidLifetime = [timespan]::MaxValue }
+                foreach ($kv in $spec.GetEnumerator()) { $d[$kv.Key] = $kv.Value }
+                $rows.Add($d)
+            }
+        } finally { $k.Dispose() }
+    }
+    ,$rows
+}
+
 function Set-NetRegStatic {
     param($Key, [string[]]$Addresses, [string[]]$Masks)
     if ($Addresses.Count -eq 0) { $Addresses = @('0.0.0.0'); $Masks = @('0.0.0.0') }
@@ -742,7 +789,7 @@ function Set-NetIPInterface {
             'WeakHostSend', 'WeakHostReceive', 'IgnoreDefaultRoutes', 'AdvertisedRouterLifetime', 'AdvertiseDefaultRoute', 'CurrentHopLimit',
             'ForceArpNdWolPattern', 'DirectedMacWolPattern', 'EcnMarking', 'Dhcp', 'AutomaticMetric'
         $asked = @($settable | Where-Object { $PSBoundParameters.ContainsKey($_) })
-        $unsupported = @($asked | Where-Object { $_ -ne 'Dhcp' })
+        $unsupported = @($asked | Where-Object { $_ -notin 'Dhcp', 'InterfaceMetric', 'AutomaticMetric' })
         foreach ($row in $rows) {
             $ifx = [uint32]$row.InterfaceIndex
             $fam = "$($row.AddressFamily)"
@@ -758,6 +805,16 @@ function Set-NetIPInterface {
                 continue
             }
             if ($asked.Count -gt 0) {
+                # what the call itself rejects, before anything is written
+                if ($PSBoundParameters.ContainsKey('InterfaceMetric') -and ($InterfaceMetric -lt 1 -or $InterfaceMetric -gt 9999)) {
+                    Write-NetWin32Error $PSCmdlet 87 "Invalid parameter InterfaceMetric $InterfaceMetric`n" $class; continue
+                }
+                if ($PSBoundParameters.ContainsKey('InterfaceMetric') -and $PSBoundParameters.ContainsKey('AutomaticMetric') -and [int]$AutomaticMetric -eq 1) {
+                    Write-NetWin32Error $PSCmdlet 87 "Inconsistent parameters InterfaceMetric and AutomaticMetric Enabled`n" $class; continue
+                }
+                if (($PSBoundParameters.ContainsKey('InterfaceMetric') -or $PSBoundParameters.ContainsKey('AutomaticMetric')) -and -not $ok['Persistent']) {
+                    Write-NetWin32Error $PSCmdlet 50 "The request is not supported. This network stack keeps the interface metric in the persistent configuration only (it is read at bind time).`n" $class 'NotImplemented'; continue
+                }
                 if ($famName -ne 'IPv4') { Write-NetWin32Error $PSCmdlet 50 "The request is not supported. This network stack has no IPv6.`n" $class 'NotImplemented'; continue }
                 $key = [Nitro.Net.Config]::InterfaceKey($ifx, $true)
                 if ($null -eq $key) { Write-NetWin32Error $PSCmdlet 87 "Invalid parameter InterfaceIndex $ifx`n" $class; continue }
@@ -783,6 +840,19 @@ function Set-NetIPInterface {
                                 $null = [Nitro.Net.Config]::DeleteIPv4($ifx)
                             }
                             if ($null -ne $key.GetValue('DhcpNameServer', $null)) { $key.DeleteValue('DhcpNameServer') }
+                        }
+                    }
+                    # the interface metric: a value of Tcpip\Parameters\Interfaces\{guid} (none = automatic) that the stack reads when the
+                    # adapter binds and the IP interface rows report at once
+                    if ($PSBoundParameters.ContainsKey('InterfaceMetric')) {
+                        $key.SetValue('InterfaceMetric', [int]$InterfaceMetric, [Microsoft.Win32.RegistryValueKind]::DWord)
+                    } elseif ($PSBoundParameters.ContainsKey('AutomaticMetric')) {
+                        if ([int]$AutomaticMetric -eq 1) {
+                            if ($null -ne $key.GetValue('InterfaceMetric', $null)) { $key.DeleteValue('InterfaceMetric') }
+                        } elseif ([int]$key.GetValue('InterfaceMetric', 0) -eq 0) {
+                            # automatic off: the metric in force becomes the fixed one
+                            $cur = @([Nitro.Net.Native]::IPInterfaces() | Where-Object { [uint32]$_['InterfaceIndex'] -eq $ifx -and [int]$_['AddressFamily'] -eq 2 })
+                            if ($cur.Count -gt 0) { $key.SetValue('InterfaceMetric', [int][uint32]$cur[0]['InterfaceMetric'], [Microsoft.Win32.RegistryValueKind]::DWord) }
                         }
                     }
                 } finally { $key.Dispose() }
