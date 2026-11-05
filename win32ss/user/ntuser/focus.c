@@ -938,7 +938,13 @@ co_IntSetForegroundMessageQueue(
 
                  UpdateShellHook(Wnd);
 
-                 co_WinPosSetWindowPos(Wnd, HWND_TOP, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);
+                 /* Only the z-order is wanted here. The window is being activated by this very call: without
+                  * SWP_NOACTIVATE, co_WinPosSetWindowPosEx makes the window's queue the foreground queue again
+                  * whenever another thread took the foreground during the WM_NCACTIVATE callback above (the user
+                  * lock is released there). With many threads showing windows at once (50 notepads started from
+                  * one cmd loop) the threads then take it from each other and each retry nests one level deeper
+                  * in the same kernel stack, until the stack overflows. */
+                 co_WinPosSetWindowPos(Wnd, HWND_TOP, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
               }
               else
               {
