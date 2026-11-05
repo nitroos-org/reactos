@@ -55,6 +55,7 @@ list(APPEND SOURCE
     HungWindow.c
     WindowPosChanged.c
     PowerSettingNotification.c
+    OwnerZOrderNotice.c
     WmCancelModeLastError.c
     InitializeLpkHooks.c
     IsDialogMessage.c
