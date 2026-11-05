@@ -230,8 +230,8 @@ static void test_CheckOcclusion(void)
     ok_not_unsupported(Status);
     ok(Desc->hWindow == GetDesktopWindow(), "hWindow was changed to %p\n", Desc->hWindow);
     CheckTail(Raw, sizeof(*Desc), "D3DKMTCheckOcclusion");
-    if (is_reactos())
-        ok(Status == STATUS_PROCEDURE_NOT_FOUND, "Got unexpected status 0x%lx\n", Status);
+    /* No miniport: the answer depends on the window handle only, see D3DKMTCheckOcclusion.c */
+    ok(Status == STATUS_SUCCESS, "Got unexpected status 0x%lx\n", Status);
 }
 
 /* gdi32 opens the adapter and the device itself when win32k has none, so these work under WoW64 only if
