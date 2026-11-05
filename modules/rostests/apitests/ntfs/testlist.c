@@ -30,6 +30,7 @@ extern void func_NtfsRename(void);
 extern void func_NtfsRenameInstanceWrap(void);
 extern void func_NtfsReparseRouting(void);
 extern void func_NtfsSharing(void);
+extern void func_NtfsStreamsAttrList(void);
 extern void func_NtfsSystemFiles(void);
 extern void func_NtfsTraverse(void);
 extern void func_NtfsVolumeAttributes(void);
@@ -63,6 +64,7 @@ const struct test winetest_testlist[] =
     { "NtfsRenameInstanceWrap", func_NtfsRenameInstanceWrap },
     { "NtfsReparseRouting", func_NtfsReparseRouting },
     { "NtfsSharing", func_NtfsSharing },
+    { "NtfsStreamsAttrList", func_NtfsStreamsAttrList },
     { "NtfsSystemFiles", func_NtfsSystemFiles },
     { "NtfsTraverse", func_NtfsTraverse },
     { "NtfsVolumeAttributes", func_NtfsVolumeAttributes },

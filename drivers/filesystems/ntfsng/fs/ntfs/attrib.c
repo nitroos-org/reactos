@@ -2315,14 +2315,27 @@ int ntfs_attr_set(struct ntfs_inode *ni, s64 ofs, s64 cnt, const u8 val)
 int ntfs_attr_set_initialized_size(struct ntfs_inode *ni, loff_t new_size)
 {
 	struct ntfs_attr_search_ctx *ctx;
+	struct ntfs_inode *base_ni = NInoAttr(ni) ? ni->ext.base_ntfs_ino : ni;
 	int err = 0;
 
 	if (!NInoNonResident(ni))
 		return -EINVAL;
 
-	ctx = ntfs_attr_get_search_ctx(ni, NULL);
-	if (!ctx)
+	/*
+	 * The search runs over the BASE inode.  The inode of a named stream (NInoAttr) holds a private copy of
+	 * the mft record that is never written back, and has no attribute list.  A lookup through it found only
+	 * that copy of the base record (the new size was lost at the next unmount and the stream read back as
+	 * zeros) or, when the attribute lives in an extension record, failed with -ENOENT (the paging write
+	 * failed for good, and shutdown looped on the dirty page).
+	 */
+	if (base_ni != ni)
+		mutex_lock(&base_ni->mrec_lock);
+	ctx = ntfs_attr_get_search_ctx(base_ni, NULL);
+	if (!ctx) {
+		if (base_ni != ni)
+			mutex_unlock(&base_ni->mrec_lock);
 		return -ENOMEM;
+	}
 
 	err = ntfs_attr_lookup(ni->type, ni->name, ni->name_len,
 			       CASE_SENSITIVE, 0, NULL, 0, ctx);
@@ -2334,6 +2347,8 @@ int ntfs_attr_set_initialized_size(struct ntfs_inode *ni, loff_t new_size)
 	mark_mft_record_dirty(ctx->ntfs_ino);
 out_ctx:
 	ntfs_attr_put_search_ctx(ctx);
+	if (base_ni != ni)
+		mutex_unlock(&base_ni->mrec_lock);
 	return err;
 }
 
