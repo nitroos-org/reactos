@@ -246,7 +246,7 @@ dll/win32/riched20            # Synced to Wine-10.0
 dll/win32/riched32            # Synced to Wine-10.0
 dll/win32/rpcrt4              # Synced to Wine-10.0
 dll/win32/rsabase             # Synced to Wine-10.0
-dll/win32/rsaenh              # Synced to Wine-11.19
+dll/win32/rsaenh              # Synced to Wine-11.21
 dll/win32/rstrtmgr            # Own implementation (Wine-10.0 has only stubs): sessions, files/handles/modules, applications, services; checked against Windows 10 22H2
 dll/win32/rtworkq             # Synced to Wine-11.19
 dll/win32/sccbase             # Synced to Wine-10.0
