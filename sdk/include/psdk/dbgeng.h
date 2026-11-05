@@ -76,7 +76,9 @@ DEFINE_GUID(IID_IDebugSystemObjects3,     0xe9676e2f, 0xe286, 0x4ea3, 0xb0, 0xf9
 #define DEBUG_ENGOPT_DISABLESQM                     0x00080000
 #define DEBUG_ENGOPT_DISABLE_STEPLINES_OPTIONS      0x00200000
 #define DEBUG_ENGOPT_DEBUGGING_SENSITIVE_DATA       0x00400000
-#define DEBUG_ENGOPT_ALL                            0x004fffff
+#define DEBUG_ENGOPT_PREFER_TRACE_FILES             0x00800000
+#define DEBUG_ENGOPT_RESOLVE_SHADOWED_VARIABLES     0x01000000
+#define DEBUG_ENGOPT_ALL                            0x01efffff
 #define DEBUG_ENGOPT_NETWORK_PATHS (DEBUG_ENGOPT_ALLOW_NETWORK_PATHS | DEBUG_ENGOPT_DISALLOW_NETWORK_PATHS)
 
 /* AttachProcess() flags */
@@ -1968,8 +1970,8 @@ DECLARE_INTERFACE_(IDebugControl2, IUnknown)
     STDMETHOD(GetLastEventInformation)(THIS_ ULONG *type, ULONG *pid, ULONG *tid, void *extra_info,
             ULONG extra_info_size, ULONG *extra_info_used, char *description, ULONG desc_size, ULONG *desc_used) PURE;
     /* IDebugControl2 */
-    STDMETHOD(GetCurrentTimeDate)(THIS_ ULONG timedate) PURE;
-    STDMETHOD(GetCurrentSystemUpTime)(THIS_ ULONG uptime) PURE;
+    STDMETHOD(GetCurrentTimeDate)(THIS_ ULONG *timedate) PURE;
+    STDMETHOD(GetCurrentSystemUpTime)(THIS_ ULONG *uptime) PURE;
     STDMETHOD(GetDumpFormatFlags)(THIS_ ULONG *flags) PURE;
     STDMETHOD(GetNumberTextPlacements)(THIS_ ULONG *count) PURE;
     STDMETHOD(GetNumberTextReplacement)(THIS_ const char *src_text, ULONG index, char *src_buffer,
@@ -2098,8 +2100,8 @@ DECLARE_INTERFACE_(IDebugControl3, IUnknown)
     STDMETHOD(GetLastEventInformation)(THIS_ ULONG *type, ULONG *pid, ULONG *tid, void *extra_info,
             ULONG extra_info_size, ULONG *extra_info_used, char *description, ULONG desc_size, ULONG *desc_used) PURE;
     /* IDebugControl2 */
-    STDMETHOD(GetCurrentTimeDate)(THIS_ ULONG timedate) PURE;
-    STDMETHOD(GetCurrentSystemUpTime)(THIS_ ULONG uptime) PURE;
+    STDMETHOD(GetCurrentTimeDate)(THIS_ ULONG *timedate) PURE;
+    STDMETHOD(GetCurrentSystemUpTime)(THIS_ ULONG *uptime) PURE;
     STDMETHOD(GetDumpFormatFlags)(THIS_ ULONG *flags) PURE;
     STDMETHOD(GetNumberTextPlacements)(THIS_ ULONG *count) PURE;
     STDMETHOD(GetNumberTextReplacement)(THIS_ const char *src_text, ULONG index, char *src_buffer,
@@ -2244,8 +2246,8 @@ DECLARE_INTERFACE_(IDebugControl4, IUnknown)
     STDMETHOD(GetLastEventInformation)(THIS_ ULONG *type, ULONG *pid, ULONG *tid, void *extra_info,
             ULONG extra_info_size, ULONG *extra_info_used, char *description, ULONG desc_size, ULONG *desc_used) PURE;
     /* IDebugControl2 */
-    STDMETHOD(GetCurrentTimeDate)(THIS_ ULONG timedate) PURE;
-    STDMETHOD(GetCurrentSystemUpTime)(THIS_ ULONG uptime) PURE;
+    STDMETHOD(GetCurrentTimeDate)(THIS_ ULONG *timedate) PURE;
+    STDMETHOD(GetCurrentSystemUpTime)(THIS_ ULONG *uptime) PURE;
     STDMETHOD(GetDumpFormatFlags)(THIS_ ULONG *flags) PURE;
     STDMETHOD(GetNumberTextPlacements)(THIS_ ULONG *count) PURE;
     STDMETHOD(GetNumberTextReplacement)(THIS_ const char *src_text, ULONG index, char *src_buffer,
@@ -2426,6 +2428,7 @@ DECLARE_INTERFACE_(IDebugSystemObjects, IUnknown)
     STDMETHOD(GetEventProcess)(THIS_ ULONG *id) PURE;
     STDMETHOD(GetCurrentThreadId)(THIS_ ULONG *id) PURE;
     STDMETHOD(SetCurrentThreadId)(THIS_ ULONG id) PURE;
+    STDMETHOD(GetCurrentProcessId)(THIS_ ULONG *id) PURE;
     STDMETHOD(SetCurrentProcessId)(THIS_ ULONG id) PURE;
     STDMETHOD(GetNumberThreads)(THIS_ ULONG *number) PURE;
     STDMETHOD(GetTotalNumberThreads)(THIS_ ULONG *total, ULONG *largest_process) PURE;
@@ -2465,6 +2468,7 @@ DECLARE_INTERFACE_(IDebugSystemObjects2, IUnknown)
     STDMETHOD(GetEventProcess)(THIS_ ULONG *id) PURE;
     STDMETHOD(GetCurrentThreadId)(THIS_ ULONG *id) PURE;
     STDMETHOD(SetCurrentThreadId)(THIS_ ULONG id) PURE;
+    STDMETHOD(GetCurrentProcessId)(THIS_ ULONG *id) PURE;
     STDMETHOD(SetCurrentProcessId)(THIS_ ULONG id) PURE;
     STDMETHOD(GetNumberThreads)(THIS_ ULONG *number) PURE;
     STDMETHOD(GetTotalNumberThreads)(THIS_ ULONG *total, ULONG *largest_process) PURE;
@@ -2510,6 +2514,7 @@ DECLARE_INTERFACE_(IDebugSystemObjects3, IUnknown)
     STDMETHOD(GetEventProcess)(THIS_ ULONG *id) PURE;
     STDMETHOD(GetCurrentThreadId)(THIS_ ULONG *id) PURE;
     STDMETHOD(SetCurrentThreadId)(THIS_ ULONG id) PURE;
+    STDMETHOD(GetCurrentProcessId)(THIS_ ULONG *id) PURE;
     STDMETHOD(SetCurrentProcessId)(THIS_ ULONG id) PURE;
     STDMETHOD(GetNumberThreads)(THIS_ ULONG *number) PURE;
     STDMETHOD(GetTotalNumberThreads)(THIS_ ULONG *total, ULONG *largest_process) PURE;
