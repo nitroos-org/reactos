@@ -71,9 +71,19 @@ typedef struct _IL_CASE
     WORD MajorRuntimeVersion;
     WORD MinorRuntimeVersion;
     DWORD ComSize;
-    UCHAR ImageFlags;   /* & IMAGE_FLAGS_COMPLUS */
+    UCHAR ImageFlags;   /* & IMAGE_FLAGS_COMPLUS; IL_FLAGS_ANY: not checked */
     BOOL Native;        /* a 64-bit process on a 64-bit system */
+    ULONG Layout;
 } IL_CASE;
+
+/* Where the descriptor is. IL_LAYOUT_RAWTAIL: .text has 0x1200 bytes of file data for 0x100 bytes of virtual size,
+ * and the descriptor is in the file bytes at RVA 0x2100, which the view maps as .reloc (not as .text's tail).
+ * IL_LAYOUT_STRADDLE: .reloc has 0x1200 bytes of file data, and the descriptor is at RVA 0x2ff0, past SizeOfImage.
+ * Windows 10 22H2 does not see the descriptor there and starts both under WOW64. */
+#define IL_LAYOUT_NORMAL    0
+#define IL_LAYOUT_RAWTAIL   1
+#define IL_LAYOUT_STRADDLE  2
+#define IL_FLAGS_ANY        0xff
 
 static const IL_CASE IlCases[] =
 {
@@ -93,6 +103,9 @@ static const IL_CASE IlCases[] =
     { IL_ILONLY,                                        2, 4, sizeof(IL_COR20_HEADER), 0x00, FALSE },
     /* A directory too small for the descriptor */
     { IL_ILONLY,                                        2, 5, 0x40,                    0x00, FALSE },
+    /* A descriptor that the view of the image does not hold, though the file does */
+    { IL_ILONLY,                                        2, 5, sizeof(IL_COR20_HEADER), IL_FLAGS_ANY, FALSE, IL_LAYOUT_RAWTAIL },
+    { IL_ILONLY,                                        2, 5, sizeof(IL_COR20_HEADER), IL_FLAGS_ANY, FALSE, IL_LAYOUT_STRADDLE },
 };
 
 /* A console executable like the one csc writes: the COM descriptor, a metadata root, an import of
@@ -103,17 +116,24 @@ WriteIlExe(
     _In_ PCWSTR Path,
     _In_ const IL_CASE *Case)
 {
-    BYTE Image[3 * IL_FILE_ALIGN];
+    static BYTE Image[IL_FILE_ALIGN + 0x1200 + 0x1200];
+    ULONG TextRaw = (Case->Layout == IL_LAYOUT_RAWTAIL) ? 0x1200 : IL_FILE_ALIGN;
+    ULONG RelocRaw = (Case->Layout == IL_LAYOUT_STRADDLE) ? 0x1200 : IL_FILE_ALIGN;
+    ULONG FileSize = IL_FILE_ALIGN + TextRaw + RelocRaw;
     PIMAGE_DOS_HEADER Dos = (PIMAGE_DOS_HEADER)Image;
     PIMAGE_NT_HEADERS32 Nt = (PIMAGE_NT_HEADERS32)(Image + 0x80);
     PIMAGE_SECTION_HEADER Section;
     PBYTE Text = Image + IL_FILE_ALIGN;
 #define IL_AT(Rva) (Text + (Rva) - IL_TEXT_RVA)
-    IL_COR20_HEADER *Cor = (IL_COR20_HEADER *)IL_AT(IL_COR_RVA);
+    ULONG ComRva = (Case->Layout == IL_LAYOUT_RAWTAIL) ? 0x2100 :
+                   (Case->Layout == IL_LAYOUT_STRADDLE) ? 0x2ff0 : IL_COR_RVA;
+    IL_COR20_HEADER *Cor = (IL_COR20_HEADER *)((Case->Layout == IL_LAYOUT_STRADDLE) ?
+                                                Image + IL_FILE_ALIGN + TextRaw + (ComRva - IL_RELOC_RVA) :
+                                                IL_AT(ComRva));
     PBYTE Metadata = IL_AT(IL_META_RVA);
     PIMAGE_IMPORT_DESCRIPTOR Import = (PIMAGE_IMPORT_DESCRIPTOR)IL_AT(IL_IMPORT_RVA);
     PBYTE Entry = IL_AT(IL_ENTRY_RVA);
-    PIMAGE_BASE_RELOCATION Reloc = (PIMAGE_BASE_RELOCATION)(Image + 2 * IL_FILE_ALIGN);
+    PIMAGE_BASE_RELOCATION Reloc = (PIMAGE_BASE_RELOCATION)(Image + IL_FILE_ALIGN + TextRaw);
     HANDLE File;
     DWORD Written;
     BOOL Ok;
@@ -156,21 +176,21 @@ WriteIlExe(
     Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size = sizeof(IMAGE_BASE_RELOCATION) + 2 * sizeof(WORD);
     Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT].VirtualAddress = IL_IAT_RVA;
     Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT].Size = 2 * sizeof(DWORD);
-    Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress = IL_COR_RVA;
+    Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress = ComRva;
     Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].Size = Case->ComSize;
 
     Section = IMAGE_FIRST_SECTION(Nt);
     memcpy(Section[0].Name, ".text", 5);
     Section[0].Misc.VirtualSize = 0x100;
     Section[0].VirtualAddress = IL_TEXT_RVA;
-    Section[0].SizeOfRawData = IL_FILE_ALIGN;
+    Section[0].SizeOfRawData = TextRaw;
     Section[0].PointerToRawData = IL_FILE_ALIGN;
     Section[0].Characteristics = IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ;
     memcpy(Section[1].Name, ".reloc", 6);
     Section[1].Misc.VirtualSize = 0x0c;
     Section[1].VirtualAddress = IL_RELOC_RVA;
-    Section[1].SizeOfRawData = IL_FILE_ALIGN;
-    Section[1].PointerToRawData = 2 * IL_FILE_ALIGN;
+    Section[1].SizeOfRawData = RelocRaw;
+    Section[1].PointerToRawData = IL_FILE_ALIGN + TextRaw;
     Section[1].Characteristics = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_DISCARDABLE | IMAGE_SCN_MEM_READ;
 
     /* IAT and lookup table: _CorExeMain by name */
@@ -206,7 +226,7 @@ WriteIlExe(
     File = CreateFileW(Path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (File == INVALID_HANDLE_VALUE)
         return FALSE;
-    Ok = WriteFile(File, Image, sizeof(Image), &Written, NULL) && Written == sizeof(Image);
+    Ok = WriteFile(File, Image, FileSize, &Written, NULL) && Written == FileSize;
     CloseHandle(File);
     return Ok;
 }
@@ -246,8 +266,16 @@ test_SectionInfo(
                Index, Info.TransferAddress);
         }
         ok(Info.ImageContainsCode == TRUE, "%lu: contains code %u\n", Index, Info.ImageContainsCode);
-        ok((Info.ImageFlags & IMAGE_FLAGS_COMPLUS) == Case->ImageFlags, "%lu: image flags 0x%02x, expected 0x%02x\n",
-           Index, Info.ImageFlags, Case->ImageFlags);
+        if (Case->ImageFlags != IL_FLAGS_ANY)
+        {
+            ok((Info.ImageFlags & IMAGE_FLAGS_COMPLUS) == Case->ImageFlags, "%lu: image flags 0x%02x, expected 0x%02x\n",
+               Index, Info.ImageFlags, Case->ImageFlags);
+        }
+        else
+        {
+            /* Not measured; the descriptor is not seen, so it cannot say the image runs natively */
+            ok(!(Info.ImageFlags & IMAGE_FLAG_NATIVE_READY), "%lu: image flags 0x%02x\n", Index, Info.ImageFlags);
+        }
         /* Any COM descriptor marks the image for the loader */
         ok(Info.LoaderFlags == LOADER_FLAGS_COMPLUS, "%lu: loader flags 0x%lx\n", Index, Info.LoaderFlags);
     }

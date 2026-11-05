@@ -375,6 +375,11 @@ typedef struct _PEFMT_COR20_PREFIX
  * ComPlusNativeReady unless it requires 32 bits without preferring them (Prefer32Bit sets both bits), and
  * ComPlusPrefer32bit when it prefers them. The 64-bit kernel starts a native-ready PE32 image that does not prefer
  * 32 bits as a 64-bit process. A descriptor that cannot be read only leaves the flags clear.
+ *
+ * The descriptor is the one the loader finds in the mapped view of the image, as measured on Windows 10 22H2: it lies
+ * wholly inside the image (RVA + 0x48 <= SizeOfImage) and inside one section's virtual extent, and of that section only
+ * the bytes with file data count (the rest of the view is zero). A descriptor in file bytes beyond what the view maps
+ * there (the raw data of a section longer than its virtual size) is not seen: Windows starts such an image under WOW64.
  */
 static
 VOID
@@ -384,6 +389,7 @@ PeFmtSetComPlusFlags(
     _In_ USHORT Magic,
     _In_ ULONG ComRva,
     _In_ ULONG ComSize,
+    _In_ ULONG SizeOfImage,
     _In_ PEXEFMT_CB_READ_FILE ReadFileCb)
 {
     PMM_SECTION_SEGMENT Segments = ImageSectionObject->Segments;
@@ -392,25 +398,30 @@ PeFmtSetComPlusFlags(
     PPEFMT_COR20_PREFIX Cor;
     PVOID Data, Buffer = NULL;
     ULONG ReadSize, Flags, i;
-    ULONGLONG Delta = 0;
+    ULONGLONG Delta = 0, Extent;
     NTSTATUS Status;
 
     if (ComSize < PEFMT_COR20_HEADER_SIZE)
         return;
 
-    /* Find the descriptor in the raw data of a segment (the headers are segment 0) */
+    /* The descriptor must lie in the image */
+    if (SizeOfImage < PEFMT_COR20_HEADER_SIZE || ComRva > SizeOfImage - PEFMT_COR20_HEADER_SIZE)
+        return;
+
+    /* Find the segment whose virtual range holds the RVA (the headers are segment 0), and the descriptor in the part of
+       it that has file data */
     for (i = 0; i < ImageSectionObject->NrSegments; i++)
     {
         if (ComRva < Segments[i].Image.VirtualAddress)
             continue;
         Delta = ComRva - Segments[i].Image.VirtualAddress;
-        if ((ULONGLONG)Segments[i].RawLength.QuadPart >= PEFMT_COR20_HEADER_SIZE &&
-            Delta <= (ULONGLONG)Segments[i].RawLength.QuadPart - PEFMT_COR20_HEADER_SIZE)
-        {
+        if (Delta < (ULONGLONG)Segments[i].Length.QuadPart)
             break;
-        }
     }
     if (i == ImageSectionObject->NrSegments)
+        return;
+    Extent = min((ULONGLONG)Segments[i].RawLength.QuadPart, (ULONGLONG)Segments[i].Length.QuadPart);
+    if (Extent < PEFMT_COR20_HEADER_SIZE || Delta > Extent - PEFMT_COR20_HEADER_SIZE)
         return;
 
     Offset.QuadPart = Segments[i].Image.FileOffset + Delta;
@@ -1099,7 +1110,7 @@ l_ReadHeaderFromFile:
     if ((ImageSectionObject->NrSegments == 1) && (AlignedSizeOfImage <= nPrevVirtualEndOfSegment))
         DIE(("The image has no sections and SizeOfImage %lx ends with the headers\n", nSizeOfImage));
 
-    PeFmtSetComPlusFlags(File, ImageSectionObject, Magic, ComRva, ComSize, ReadFileCb);
+    PeFmtSetComPlusFlags(File, ImageSectionObject, Magic, ComRva, ComSize, nSizeOfImage, ReadFileCb);
 
     if(nSectionAlignment >= PAGE_SIZE)
         *Flags |= EXEFMT_LOAD_ASSUME_SEGMENTS_PAGE_ALIGNED;
