@@ -23,8 +23,13 @@
  * ICMP requests and other protocols that no Allow rule admits, or that a Block rule matches. Passed
  * without rule evaluation: loopback, TCP segments that are not a connection request (established
  * connections, the stack answers the rest as before), UDP replies from a peer the host sent to recently
- * (flow table), DHCP client replies (UDP 67 -> 68), ICMP replies and errors, and traffic from one of the
- * host's own addresses to one of the host's own addresses (see NitroFwInboundAllowed).
+ * (flow table), DHCP client replies (UDP 67 -> 68), ICMP errors, ICMP replies to a request the host sent
+ * (echo, timestamp, information, address mask; an ICMP reply with no such request is unsolicited and is
+ * evaluated like a request), and traffic the host sent to itself over a real address (the frames our own
+ * send path looped back, see NitroFwInboundAllowed).
+ *
+ * DisableUnicastResponsesToMulticastBroadcast (NITROFW_PROFILE_NO_UNICAST_RESPONSES): replies to a
+ * broadcast/multicast send are not admitted. Drop log: see NITROFW_DROPLOG in nitrofw.h.
  */
 
 #include "precomp.h"
@@ -59,6 +64,12 @@ NTSYSAPI NTSTATUS NTAPI ZwQueryInformationProcess(HANDLE ProcessHandle, PROCESSI
 #define FW_BCAST_TIMEOUT    3
 #define FW_FLOW_LOCKS       16      /* the flow table's locks: set index modulo this */
 
+/* Outstanding ICMP requests (the host's own pings and the like): the reply passes for FW_ICMP_TIMEOUT
+   seconds, matched on peer address, identifier and reply type. A request to a broadcast/multicast address
+   keeps a wildcard peer for FW_BCAST_TIMEOUT. Same table shape and locks as the UDP flows. */
+#define FW_ICMP_SETS        64
+#define FW_ICMP_TIMEOUT     60
+
 typedef struct _FW_IMAGE
 {
     LONG RefCount;
@@ -77,6 +88,8 @@ typedef struct _FW_POLICY
     BOOLEAN BlockAllInbound;
     BOOLEAN DefaultBlockInbound;
     BOOLEAN HasAppRules;        /* an inbound rule has a program condition */
+    BOOLEAN NoUnicastResponses; /* an enabled active profile has DisableUnicastResponsesToMulticastBroadcast */
+    BOOLEAN LogDropped;         /* an enabled active profile logs dropped packets */
     ULONG InRuleCount;
     PULONG InRuleOffsets;       /* offsets of the inbound rules in Blob */
     ULONG BlobSize;
@@ -93,6 +106,15 @@ typedef struct _FW_FLOW
     USHORT RemotePort;          /* network order, 0 = any */
     ULONG Expiry;               /* FwNow() seconds, 0 = free */
 } FW_FLOW, *PFW_FLOW;
+
+typedef struct _FW_ICMPFLOW
+{
+    ULONG RemoteAddr;           /* network order, 0 = any (reply to a broadcast/multicast request) */
+    USHORT Ident;               /* as in the packet (network order) */
+    UCHAR ReplyType;
+    UCHAR Reserved;
+    ULONG Expiry;               /* FwNow() seconds, 0 = free */
+} FW_ICMPFLOW, *PFW_ICMPFLOW;
 
 volatile LONG NitroFwEnforcing = 0;
 volatile LONG NitroFwTracking = 0;      /* filter loaded: outbound UDP sends feed the flow table (also while not enforcing) */
@@ -112,6 +134,19 @@ static ULONGLONG FwLastGeneration = 0;  /* high-water mark, survives CLEAR */
 
 static KSPIN_LOCK FwFlowLocks[FW_FLOW_LOCKS];
 static FW_FLOW FwFlows[FW_FLOW_SETS][FW_FLOW_WAYS];
+static FW_ICMPFLOW FwIcmpFlows[FW_ICMP_SETS][FW_FLOW_WAYS];
+
+/* Set from the installed policy while it is enforced (under FwPolicyLock; read without a lock) */
+static volatile LONG FwNoUnicast = 0;   /* replies to broadcast/multicast sends are not admitted */
+static volatile LONG FwLogEnabled = 0;  /* record dropped packets */
+
+/* The drop log: a ring of the last NITROFW_DROPLOG_RECORDS drops, NITROFW_DROPLOG_RATE records per second */
+static KSPIN_LOCK FwLogLock;
+static NITROFW_DROP_RECORD FwLog[NITROFW_DROPLOG_RECORDS];
+static ULONGLONG FwLogNext = 1;         /* sequence of the next record */
+static ULONGLONG FwLogSuppressed = 0;
+static ULONG FwLogWindow = 0;           /* FwNow() second the counter below belongs to */
+static ULONG FwLogInWindow = 0;
 
 static LONG64 FwDroppedInbound = 0;
 static LONG64 FwPassedInbound = 0;
@@ -277,6 +312,8 @@ static VOID FwInstallPolicy(PFW_POLICY NewPolicy)
     FwPolicy = NewPolicy;
     InterlockedExchange((PLONG)&NitroFwEnforcing, FwPolicyEnforced(NewPolicy) ? 1 : 0);
     InterlockedExchange((PLONG)&NitroFwWantImages, (FwPolicyEnforced(NewPolicy) && NewPolicy->HasAppRules) ? 1 : 0);
+    InterlockedExchange((PLONG)&FwNoUnicast, (FwPolicyEnforced(NewPolicy) && NewPolicy->NoUnicastResponses) ? 1 : 0);
+    InterlockedExchange((PLONG)&FwLogEnabled, (FwPolicyEnforced(NewPolicy) && NewPolicy->LogDropped) ? 1 : 0);
     KeReleaseSpinLock(&FwPolicyLock, OldIrql);
 
     if (Old)
@@ -497,6 +534,10 @@ static NTSTATUS FwCompilePolicy(PFW_POLICY Policy)
             Policy->BlockAllInbound = TRUE;
         if (Hdr->Profile[i].DefaultInbound == NITROFW_ACTION_BLOCK)
             Policy->DefaultBlockInbound = TRUE;
+        if (Hdr->Profile[i].Flags & NITROFW_PROFILE_NO_UNICAST_RESPONSES)
+            Policy->NoUnicastResponses = TRUE;
+        if (Hdr->Profile[i].Flags & NITROFW_PROFILE_LOG_DROPPED)
+            Policy->LogDropped = TRUE;
     }
     return STATUS_SUCCESS;
 }
@@ -506,6 +547,7 @@ static NTSTATUS FwCompilePolicy(PFW_POLICY Policy)
  * ---------------------------------------------------------------------------------------------- */
 
 static VOID FwBackfillImages(VOID);
+static NTSTATUS FwGetDropLog(PVOID Buf, ULONG InLen, ULONG OutLen, PULONG_PTR Information);
 
 static NTSTATUS FwSetPolicy(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
@@ -621,6 +663,14 @@ static NTSTATUS FwDeviceControl(PIRP Irp, PIO_STACK_LOCATION IrpSp)
                 St->ImagesCaptured = (ULONGLONG)InterlockedCompareExchange64(&FwImagesCaptured, 0, 0);
             Irp->IoStatus.Information = StSize;
             return STATUS_SUCCESS;
+        }
+
+        case IOCTL_NITROFW_GET_DROPLOG:
+        {
+            ULONG_PTR Info = 0;
+            NTSTATUS Status = FwGetDropLog(Buf, IrpSp->Parameters.DeviceIoControl.InputBufferLength, OutLen, &Info);
+            Irp->IoStatus.Information = Info;
+            return Status;
         }
 
         case IOCTL_NITROFW_CLEAR_POLICY:
@@ -748,6 +798,7 @@ NTSTATUS NitroFwInitialize(PDRIVER_OBJECT DriverObject)
     KeInitializeSpinLock(&FwPolicyLock);
     for (i = 0; i < FW_FLOW_LOCKS; i++)
         KeInitializeSpinLock(&FwFlowLocks[i]);
+    KeInitializeSpinLock(&FwLogLock);
     ExInitializeFastMutex(&FwSetMutex);
 
     if (FwReadSwitch(L"NitroFwDisable") || FwBootOptionOff())
@@ -1095,7 +1146,7 @@ static BOOLEAN FwFlowLookup(USHORT LocalPort, ULONG RemoteAddr, USHORT RemotePor
     /* a reply to a broadcast/multicast send: the wildcard entry. The sender (a concrete peer) now has an
        exchange of its own, so its next packets (a second DHCP/SSDP message, the follow-up of a slow
        responder) pass without needing the wildcard window to still be open. 0.0.0.0 never promotes. */
-    if (FwFlowFind(LocalPort, 0, 0))
+    if (!FwNoUnicast && FwFlowFind(LocalPort, 0, 0))
     {
         if (RemoteAddr != 0)
             FwFlowInsert(LocalPort, RemoteAddr, RemotePort, FW_UDP_TIMEOUT);
@@ -1117,6 +1168,146 @@ VOID NitroFwNoteUdpSend(USHORT LocalPort, PIP_ADDRESS Remote, USHORT RemotePort,
         FwFlowInsert(LocalPort, 0, 0, FW_BCAST_TIMEOUT);
     else
         FwFlowInsert(LocalPort, Ra, RemotePort, FW_UDP_TIMEOUT);
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Outstanding ICMP requests
+ * ---------------------------------------------------------------------------------------------- */
+
+static ULONG FwIcmpSet(ULONG RemoteAddr, USHORT Ident, UCHAR ReplyType)
+{
+    ULONG h = RemoteAddr * 0x9E3779B1u;
+    h ^= (ULONG)Ident * 0x85EBCA6Bu;
+    h ^= (ULONG)ReplyType * 0xC2B2AE35u;
+    h ^= h >> 15;
+    return h % FW_ICMP_SETS;
+}
+
+static VOID FwIcmpInsert(ULONG RemoteAddr, USHORT Ident, UCHAR ReplyType, ULONG Timeout)
+{
+    ULONG SetIndex = FwIcmpSet(RemoteAddr, Ident, ReplyType);
+    PFW_ICMPFLOW Set = FwIcmpFlows[SetIndex], Victim = NULL;
+    ULONG Now = FwNow(), i;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&FwFlowLocks[SetIndex % FW_FLOW_LOCKS], &OldIrql);
+    for (i = 0; i < FW_FLOW_WAYS; i++)
+    {
+        if (Set[i].Expiry && Set[i].RemoteAddr == RemoteAddr && Set[i].Ident == Ident && Set[i].ReplyType == ReplyType)
+        {
+            Victim = &Set[i];
+            break;
+        }
+    }
+    for (i = 0; !Victim && i < FW_FLOW_WAYS; i++)
+    {
+        if (Set[i].Expiry == 0 || (LONG)(Set[i].Expiry - Now) < 0)
+            Victim = &Set[i];
+    }
+    if (!Victim)
+    {
+        Victim = &Set[0];
+        for (i = 1; i < FW_FLOW_WAYS; i++)
+        {
+            if ((LONG)(Set[i].Expiry - Victim->Expiry) < 0)
+                Victim = &Set[i];
+        }
+    }
+    Victim->RemoteAddr = RemoteAddr;
+    Victim->Ident = Ident;
+    Victim->ReplyType = ReplyType;
+    Victim->Expiry = Now + Timeout;
+    KeReleaseSpinLock(&FwFlowLocks[SetIndex % FW_FLOW_LOCKS], OldIrql);
+}
+
+static BOOLEAN FwIcmpFind(ULONG RemoteAddr, USHORT Ident, UCHAR ReplyType)
+{
+    ULONG SetIndex = FwIcmpSet(RemoteAddr, Ident, ReplyType), Now = FwNow(), i;
+    PFW_ICMPFLOW Set = FwIcmpFlows[SetIndex];
+    BOOLEAN Hit = FALSE;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&FwFlowLocks[SetIndex % FW_FLOW_LOCKS], &OldIrql);
+    for (i = 0; i < FW_FLOW_WAYS; i++)
+    {
+        if (Set[i].Expiry && (LONG)(Set[i].Expiry - Now) >= 0 &&
+            Set[i].RemoteAddr == RemoteAddr && Set[i].Ident == Ident && Set[i].ReplyType == ReplyType)
+        {
+            Hit = TRUE;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&FwFlowLocks[SetIndex % FW_FLOW_LOCKS], OldIrql);
+    return Hit;
+}
+
+/* The reply type that answers an ICMP request type, 0xFF if the type is not a request we track */
+static UCHAR FwIcmpReplyFor(UCHAR RequestType)
+{
+    switch (RequestType)
+    {
+        case 8:  return 0;      /* echo */
+        case 13: return 14;     /* timestamp */
+        case 15: return 16;     /* information */
+        case 17: return 18;     /* address mask */
+    }
+    return 0xFF;
+}
+
+static BOOLEAN FwIsBroadcastAddress(ULONG AddrN)
+{
+    KIRQL OldIrql;
+    BOOLEAN Bcast = AddrN == 0xFFFFFFFF;
+    IF_LIST_ITER(CurrentIF);
+
+    if (Bcast)
+        return TRUE;
+    TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
+    ForEachInterface(CurrentIF) {
+        if (CurrentIF != Loopback && CurrentIF->Broadcast.Type == IP_ADDRESS_V4 &&
+            CurrentIF->Broadcast.Address.IPv4Address == AddrN)
+        {
+            Bcast = TRUE;
+            break;
+        }
+    } EndFor(CurrentIF);
+    TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
+    return Bcast;
+}
+
+/* A raw ICMP message the host sends: remember a request so that its reply passes the inbound filter */
+VOID NitroFwNoteIcmpSend(PIP_ADDRESS Remote, PUCHAR Icmp, ULONG Length)
+{
+    ULONG Ra;
+    UCHAR Reply;
+    USHORT Ident;
+    BOOLEAN NonUnicast;
+
+    if (!Remote || Remote->Type != IP_ADDRESS_V4 || !Icmp || Length < 8)
+        return;
+    Reply = FwIcmpReplyFor(Icmp[0]);
+    if (Reply == 0xFF)
+        return;
+    Ra = Remote->Address.IPv4Address;
+    Ident = *(USHORT UNALIGNED *)(Icmp + 4);
+    NonUnicast = (FwNtohl(Ra) >> 28) == 0xE || FwIsBroadcastAddress(Ra);
+    if (NonUnicast)
+        FwIcmpInsert(0, Ident, Reply, FW_BCAST_TIMEOUT);
+    else
+        FwIcmpInsert(Ra, Ident, Reply, FW_ICMP_TIMEOUT);
+}
+
+/* Is this an ICMP reply to a request the host sent? */
+static BOOLEAN FwIcmpReplyExpected(ULONG SrcAddrN, PUCHAR Icmp, ULONG Length)
+{
+    USHORT Ident;
+
+    if (Length < 8)
+        return FALSE;
+    Ident = *(USHORT UNALIGNED *)(Icmp + 4);
+    if (FwIcmpFind(SrcAddrN, Ident, Icmp[0]))
+        return TRUE;
+    return !FwNoUnicast && FwIcmpFind(0, Ident, Icmp[0]);
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -1158,7 +1349,83 @@ typedef struct _FW_PKT
     PIP_ADDRESS Dst;
     PFW_IMAGE Owner;
     BOOLEAN OwnerLooked;
+    BOOLEAN IcmpUnsolicitedReply;   /* an ICMP reply with no request of ours behind it */
 } FW_PKT, *PFW_PKT;
+
+/* ------------------------------------------------------------------------------------------------
+ * Drop log
+ * ---------------------------------------------------------------------------------------------- */
+
+static VOID FwLogDrop(PFW_PKT Pkt, ULONG Size, UCHAR Reason)
+{
+    KIRQL OldIrql;
+    ULONG Now = FwNow();
+    PNITROFW_DROP_RECORD Rec;
+
+    KeAcquireSpinLock(&FwLogLock, &OldIrql);
+    if (FwLogWindow != Now)
+    {
+        FwLogWindow = Now;
+        FwLogInWindow = 0;
+    }
+    if (FwLogInWindow >= NITROFW_DROPLOG_RATE)
+    {
+        FwLogSuppressed++;
+        KeReleaseSpinLock(&FwLogLock, OldIrql);
+        return;
+    }
+    FwLogInWindow++;
+    Rec = &FwLog[(FwLogNext - 1) % NITROFW_DROPLOG_RECORDS];
+    RtlZeroMemory(Rec, sizeof(*Rec));
+    Rec->Sequence = FwLogNext++;
+    KeQuerySystemTime((PLARGE_INTEGER)&Rec->Time);
+    Rec->SrcAddr = Pkt->RemoteAddr;
+    Rec->DstAddr = Pkt->LocalAddr;
+    Rec->SrcPort = Pkt->RemotePort;
+    Rec->DstPort = Pkt->LocalPort;
+    Rec->Protocol = (UCHAR)Pkt->Protocol;
+    Rec->Reason = Reason;
+    Rec->Size = Size;
+    if (Pkt->IsIcmp)
+    {
+        Rec->IcmpType = Pkt->IcmpType;
+        Rec->IcmpCode = Pkt->IcmpCode;
+    }
+    KeReleaseSpinLock(&FwLogLock, OldIrql);
+}
+
+/* IOCTL_NITROFW_GET_DROPLOG: Buf is both the (optional) ULONGLONG input and the output */
+static NTSTATUS FwGetDropLog(PVOID Buf, ULONG InLen, ULONG OutLen, PULONG_PTR Information)
+{
+    PNITROFW_DROPLOG Hdr = Buf;
+    PNITROFW_DROP_RECORD Out;
+    ULONGLONG From = 0, Oldest, Start;
+    ULONG Fit, Count = 0, i;
+    KIRQL OldIrql;
+
+    if (!Buf || OutLen < sizeof(NITROFW_DROPLOG))
+        return STATUS_BUFFER_TOO_SMALL;
+    if (InLen >= sizeof(ULONGLONG))
+        From = *(PULONGLONG)Buf;
+    Out = (PNITROFW_DROP_RECORD)(Hdr + 1);
+    Fit = (OutLen - sizeof(NITROFW_DROPLOG)) / sizeof(NITROFW_DROP_RECORD);
+
+    KeAcquireSpinLock(&FwLogLock, &OldIrql);
+    Oldest = FwLogNext > NITROFW_DROPLOG_RECORDS ? FwLogNext - NITROFW_DROPLOG_RECORDS : 1;
+    Start = From > Oldest ? From : Oldest;
+    for (i = 0; Start + i < FwLogNext && Count < Fit; i++)
+    {
+        Out[Count++] = FwLog[(Start + i - 1) % NITROFW_DROPLOG_RECORDS];
+    }
+    Hdr->NextSequence = FwLogNext;
+    Hdr->Suppressed = FwLogSuppressed;
+    KeReleaseSpinLock(&FwLogLock, OldIrql);
+
+    Hdr->Count = Count;
+    Hdr->Flags = FwLogEnabled ? NITROFW_DROPLOG_ON : 0;
+    *Information = sizeof(NITROFW_DROPLOG) + (ULONG_PTR)Count * sizeof(NITROFW_DROP_RECORD);
+    return STATUS_SUCCESS;
+}
 
 static BOOLEAN FwPortIn(PUCHAR Rule, ULONG Count, ULONG Offset, USHORT Port)
 {
@@ -1258,17 +1525,18 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
     PUCHAR Data;
     ULONG DataLen, i;
     BOOLEAN Allow, AllowRule = FALSE, Decided = FALSE;
+    UCHAR DropReason = NITROFW_DROP_DEFAULT;
 
     /* loopback passes: by interface only. A 127/8 address on a real interface is not loopback
        (spoofed or misrouted) and goes through the rules or the default like any other packet. */
     if (Interface == Loopback || IPPacket->Type != IP_ADDRESS_V4)
         return TRUE;
 
-    /* Host to itself over a real address (LAN IP to LAN IP): the stack sends it through the adapter and
-       NDIS loops it back with the adapter's own MAC as source. Source and destination both being ours
-       is not enough on its own (a packet from the wire can carry any source address): the frame must
-       also have come from our own MAC (IP_PACKET.FromOwnLink, carried through reassembly: every
-       fragment must have had it). */
+    /* Host to itself over a real address (LAN IP to LAN IP): the stack sends it out through the adapter
+       and NDIS loops it back up from inside the send call. Source and destination both being ours is not
+       enough on its own, and neither is the frame's source MAC (a peer on the wire can send a frame with
+       our MAC and our IP): the frame must be one our own send path tagged as looped back
+       (IP_PACKET.FromOwnLink, carried through reassembly: every fragment must have been tagged). */
     if (IPPacket->FromOwnLink && FwIsOwnUnicast(&IPPacket->SrcAddr) && FwIsOwnUnicast(&IPPacket->DstAddr))
         goto PassCounted;
 
@@ -1308,8 +1576,15 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
             Pkt.IcmpCode = Data[1];
             switch (Pkt.IcmpType)
             {
-                case 0: case 3: case 4: case 11: case 12: case 14: case 16: case 18:
-                    goto PassCounted;   /* replies and errors */
+                case 3: case 4: case 11: case 12:
+                    goto PassCounted;   /* errors */
+                case 0: case 14: case 16: case 18:
+                    /* a reply: it passes if the host sent the request; else it is unsolicited and is
+                       evaluated like a request (the rules, then the profile default) */
+                    if (FwIcmpReplyExpected(IPPacket->SrcAddr.Address.IPv4Address, Data, DataLen))
+                        goto PassCounted;
+                    Pkt.IcmpUnsolicitedReply = TRUE;
+                    break;
             }
             break;
     }
@@ -1340,6 +1615,7 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
     {
         Allow = FALSE;
         Decided = TRUE;
+        DropReason = NITROFW_DROP_BLOCK_ALL;
     }
     for (i = 0; !Decided && i < Policy->InRuleCount; i++)
     {
@@ -1354,6 +1630,7 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
         {
             Allow = FALSE;      /* block beats allow */
             Decided = TRUE;
+            DropReason = NITROFW_DROP_BLOCK_RULE;
         }
         else
             AllowRule = TRUE;
@@ -1368,6 +1645,8 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
     if (!Allow)
     {
         InterlockedIncrement64(&FwDroppedInbound);
+        if (FwLogEnabled)
+            FwLogDrop(&Pkt, IPPacket->TotalSize, (DropReason == NITROFW_DROP_DEFAULT && Pkt.IcmpUnsolicitedReply) ? NITROFW_DROP_ICMP_REPLY : DropReason);
         return FALSE;
     }
 

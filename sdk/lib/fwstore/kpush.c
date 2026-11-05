@@ -203,7 +203,8 @@ DWORD FwPushToKernel(ULONGLONG gen, BOOL *pPresent)
     for (bit = 1, i = 0; i < NITROFW_PROFILE_COUNT; i++, bit <<= 1)
     {
         FW_PROFILE p; FwProfileLoad(bit, &p);
-        pol.Profile[i].Flags = (p.Enable ? NITROFW_PROFILE_ENABLED : 0) | (p.DoNotAllowExceptions ? NITROFW_PROFILE_BLOCK_ALL_INBOUND : 0);
+        pol.Profile[i].Flags = (p.Enable ? NITROFW_PROFILE_ENABLED : 0) | (p.DoNotAllowExceptions ? NITROFW_PROFILE_BLOCK_ALL_INBOUND : 0) |
+                                (p.DisableUnicastResponses ? NITROFW_PROFILE_NO_UNICAST_RESPONSES : 0) | (p.LogDropped ? NITROFW_PROFILE_LOG_DROPPED : 0);
         pol.Profile[i].DefaultInbound = (UCHAR)(p.DefaultInbound ? NITROFW_ACTION_BLOCK : NITROFW_ACTION_ALLOW);
         pol.Profile[i].DefaultOutbound = (UCHAR)(p.DefaultOutbound ? NITROFW_ACTION_BLOCK : NITROFW_ACTION_ALLOW);
     }
