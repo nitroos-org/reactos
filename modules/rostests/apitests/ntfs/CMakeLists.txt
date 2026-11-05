@@ -8,6 +8,7 @@ list(APPEND SOURCE
     relopen.c
     reparse.c
     special.c
+    streams.c
     util.c
     volume.c)
 
