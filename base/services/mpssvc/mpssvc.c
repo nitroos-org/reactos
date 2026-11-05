@@ -63,9 +63,16 @@ static VOID Push(VOID)
     Report(err, present);
 }
 
+/* prompt.c: the "NitroOS Firewall has blocked some features of this app" prompt */
+VOID PromptInit(HANDLE hStop);
+VOID PromptStop(VOID);
+VOID PromptPoll(VOID);
+
+#define POLL_MS            1000   /* block prompt poll; the filter-device retry below runs every NITROFW_RETRY_SECONDS */
+
 static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
 {
-    HKEY hKey = NULL; HANDLE hChange = NULL, hs[2]; DWORD wait;
+    HKEY hKey = NULL; HANDLE hChange = NULL, hs[2]; DWORD wait; ULONG retryTicks = 0;
     FILETIME ft;
 
     g_hStatus = RegisterServiceCtrlHandlerExW(g_Name, CtrlHandler, NULL);
@@ -81,10 +88,12 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
     SetState(SERVICE_RUNNING);
     Push();
     hs[0] = g_hStop; hs[1] = hChange;
+    PromptInit(g_hStop);
     for (;;)
     {
-        /* when the device is absent retry periodically; netsh/COM changes arrive through the key notification */
-        wait = WaitForMultipleObjects(2, hs, FALSE, NITROFW_RETRY_SECONDS * 1000);
+        /* wake every POLL_MS for the block prompt; when the device is absent retry every NITROFW_RETRY_SECONDS;
+           netsh/COM changes arrive through the key notification */
+        wait = WaitForMultipleObjects(2, hs, FALSE, POLL_MS);
         if (wait == WAIT_OBJECT_0) break;
         if (wait == WAIT_OBJECT_0 + 1)
         {
@@ -95,11 +104,15 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
         else if (wait == WAIT_TIMEOUT)
         {
             HKEY hk; DWORD present = 0, cb = 4, t;
+            PromptPoll();
+            if (++retryTicks < NITROFW_RETRY_SECONDS * 1000 / POLL_MS) continue;
+            retryTicks = 0;
             if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ReactOS\\Nitro\\Firewall", 0, KEY_READ, &hk) == 0)
             { RegQueryValueExW(hk, L"KernelFilterPresent", NULL, &t, (BYTE *)&present, &cb); RegCloseKey(hk); }
             if (!present) Push();   /* device may have appeared */
         }
     }
+    PromptStop();
 done:
     if (hKey) RegCloseKey(hKey);
     if (hChange) CloseHandle(hChange);
