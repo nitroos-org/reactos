@@ -21,7 +21,9 @@
 #include <wine/port.h>
 #endif
 #include <assert.h>
+#include <errno.h>
 #include <limits.h>
+#include <locale.h>
 #include <math.h>
 
 #include "vbscript.h"
@@ -32,27 +34,44 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(vbscript);
 
+#define MAX_IDENTIFIER_LENGTH 255
+
+static int lex_error(parser_ctx_t *ctx, HRESULT hres)
+{
+    ctx->hres = hres;
+    ctx->error_loc = ctx->ptr - ctx->code;
+    return 0;
+}
+
 static const struct {
     const WCHAR *word;
     int token;
 } keywords[] = {
     {L"and",       tAND},
+    {L"as",        tRESERVED},
+    {L"boolean",   tRESERVED},
     {L"byref",     tBYREF},
+    {L"byte",      tRESERVED},
     {L"byval",     tBYVAL},
     {L"call",      tCALL},
     {L"case",      tCASE},
     {L"class",     tCLASS},
     {L"const",     tCONST},
+    {L"currency",  tRESERVED},
     {L"default",   tDEFAULT},
     {L"dim",       tDIM},
     {L"do",        tDO},
+    {L"double",    tRESERVED},
     {L"each",      tEACH},
     {L"else",      tELSE},
     {L"elseif",    tELSEIF},
     {L"empty",     tEMPTY},
     {L"end",       tEND},
+    {L"endif",     tRESERVED},
+    {L"enum",      tRESERVED},
     {L"eqv",       tEQV},
     {L"error",     tERROR},
+    {L"event",     tRESERVED},
     {L"exit",      tEXIT},
     {L"explicit",  tEXPLICIT},
     {L"false",     tFALSE},
@@ -62,10 +81,15 @@ static const struct {
     {L"goto",      tGOTO},
     {L"if",        tIF},
     {L"imp",       tIMP},
+    {L"implements", tRESERVED},
     {L"in",        tIN},
+    {L"integer",   tRESERVED},
     {L"is",        tIS},
     {L"let",       tLET},
+    {L"like",      tRESERVED},
+    {L"long",      tRESERVED},
     {L"loop",      tLOOP},
+    {L"lset",      tRESERVED},
     {L"me",        tME},
     {L"mod",       tMOD},
     {L"new",       tNEW},
@@ -75,34 +99,51 @@ static const struct {
     {L"null",      tNULL},
     {L"on",        tON},
     {L"option",    tOPTION},
+    {L"optional",  tRESERVED},
     {L"or",        tOR},
+    {L"paramarray", tRESERVED},
     {L"preserve",  tPRESERVE},
     {L"private",   tPRIVATE},
     {L"property",  tPROPERTY},
     {L"public",    tPUBLIC},
+    {L"raiseevent", tRESERVED},
     {L"redim",     tREDIM},
     {L"rem",       tREM},
     {L"resume",    tRESUME},
+    {L"rset",      tRESERVED},
     {L"select",    tSELECT},
     {L"set",       tSET},
+    {L"shared",    tRESERVED},
+    {L"single",    tRESERVED},
+    {L"static",    tRESERVED},
     {L"step",      tSTEP},
     {L"stop",      tSTOP},
     {L"sub",       tSUB},
     {L"then",      tTHEN},
     {L"to",        tTO},
     {L"true",      tTRUE},
+    {L"type",      tRESERVED},
+    {L"typeof",    tRESERVED},
     {L"until",     tUNTIL},
+    {L"variant",   tRESERVED},
     {L"wend",      tWEND},
     {L"while",     tWHILE},
     {L"with",      tWITH},
     {L"xor",       tXOR}
 };
 
+/* VBScript identifiers are ASCII-only: [A-Za-z0-9_]. Windows rejects all
+ * non-ASCII characters (Latin-1, Cyrillic, CJK) at the lexer level with
+ * error 1032 "Invalid character". */
 static inline BOOL is_identifier_char(WCHAR c)
 {
-    return iswalnum(c) || c == '_';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
+/* Compare the current parse position against a keyword using ASCII-only
+ * case-insensitive matching. Keywords are all lowercase ASCII, so we only
+ * need to lowercase [A-Z] in the source. Returns 0 on match, <0 or >0
+ * for ordering (used by the binary search in check_keywords). */
 static int check_keyword(parser_ctx_t *ctx, const WCHAR *word, const WCHAR **lval)
 {
     const WCHAR *p1 = ctx->ptr;
@@ -110,7 +151,8 @@ static int check_keyword(parser_ctx_t *ctx, const WCHAR *word, const WCHAR **lva
     WCHAR c;
 
     while(p1 < ctx->end && *p2) {
-        c = towlower(*p1);
+        c = *p1;
+        if(c >= 'A' && c <= 'Z') c += 'a' - 'A';
         if(c != *p2)
             return c - *p2;
         p1++;
@@ -155,6 +197,9 @@ static int parse_identifier(parser_ctx_t *ctx, const WCHAR **ret)
         ctx->ptr++;
     len = ctx->ptr-ptr;
 
+    if(len > MAX_IDENTIFIER_LENGTH)
+        return lex_error(ctx, MAKE_VBSERROR(VBSE_IDENTIFIER_TOO_LONG));
+
     str = parser_alloc(ctx, (len+1)*sizeof(WCHAR));
     if(!str)
         return 0;
@@ -173,8 +218,7 @@ static int parse_string_literal(parser_ctx_t *ctx, const WCHAR **ret)
 
     while(ctx->ptr < ctx->end) {
         if(*ctx->ptr == '\n' || *ctx->ptr == '\r') {
-            FIXME("newline inside string literal\n");
-            return 0;
+            return lex_error(ctx, MAKE_VBSERROR(VBSE_UNTERMINATED_STRING));
         }
 
        if(*ctx->ptr == '"') {
@@ -187,8 +231,7 @@ static int parse_string_literal(parser_ctx_t *ctx, const WCHAR **ret)
     }
 
     if(ctx->ptr == ctx->end) {
-        FIXME("unterminated string literal\n");
-        return 0;
+        return lex_error(ctx, MAKE_VBSERROR(VBSE_UNTERMINATED_STRING));
     }
 
     len += ctx->ptr-ptr;
@@ -210,6 +253,7 @@ static int parse_string_literal(parser_ctx_t *ctx, const WCHAR **ret)
 
 static int parse_date_literal(parser_ctx_t *ctx, DATE *ret)
 {
+    const WCHAR *start = ctx->ptr;
     const WCHAR *ptr = ++ctx->ptr;
     WCHAR *rptr;
     int len = 0;
@@ -217,8 +261,8 @@ static int parse_date_literal(parser_ctx_t *ctx, DATE *ret)
 
     while(ctx->ptr < ctx->end) {
         if(*ctx->ptr == '\n' || *ctx->ptr == '\r') {
-            FIXME("newline inside date literal\n");
-            return 0;
+            ctx->ptr = start;
+            return lex_error(ctx, MAKE_VBSERROR(VBSE_SYNTAX_ERROR));
         }
 
        if(*ctx->ptr == '#')
@@ -227,8 +271,8 @@ static int parse_date_literal(parser_ctx_t *ctx, DATE *ret)
     }
 
     if(ctx->ptr == ctx->end) {
-        FIXME("unterminated date literal\n");
-        return 0;
+        ctx->ptr = start;
+        return lex_error(ctx, MAKE_VBSERROR(VBSE_SYNTAX_ERROR));
     }
 
     len += ctx->ptr-ptr;
@@ -242,101 +286,116 @@ static int parse_date_literal(parser_ctx_t *ctx, DATE *ret)
     res = VarDateFromStr(rptr, ctx->lcid, 0, ret);
     free(rptr);
     if (FAILED(res)) {
-        FIXME("Invalid date literal\n");
-        return 0;
+        ctx->ptr = start;
+        return lex_error(ctx, MAKE_VBSERROR(VBSE_SYNTAX_ERROR));
     }
 
     ctx->ptr++;
     return tDate;
 }
 
+/* Cached C locale, lazily created and reused for the lifetime of the process.
+ * Used by parse_numeric_literal to feed _wcstod_l for double conversion that
+ * is locale-invariant regardless of the host's runtime locale. */
+static _locale_t c_locale;
+
+static _locale_t get_c_locale(void)
+{
+    _locale_t l;
+
+    if(c_locale)
+        return c_locale;
+
+    if(!(l = _create_locale(LC_ALL, "C")))
+        return NULL;
+    if(InterlockedCompareExchangePointer((void **)&c_locale, l, NULL))
+        _free_locale(l);
+    return c_locale;
+}
+
+void release_c_locale(void)
+{
+    if(c_locale) {
+        _free_locale(c_locale);
+        c_locale = NULL;
+    }
+}
+
 static int parse_numeric_literal(parser_ctx_t *ctx, void **ret)
 {
-    BOOL use_int = TRUE;
+    const WCHAR *start = ctx->ptr;
+    BOOL is_double = FALSE, overflow = FALSE;
     LONGLONG d = 0, hlp;
-    int exp = 0;
+    _locale_t locale;
+    WCHAR stackbuf[64];
+    WCHAR *buf, *endptr;
+    size_t len;
     double r;
 
     if(*ctx->ptr == '0' && !('0' <= ctx->ptr[1] && ctx->ptr[1] <= '9') && ctx->ptr[1] != '.')
         return *ctx->ptr++;
 
+    /* Walk integer digits, accumulating into d while it fits. */
     while(ctx->ptr < ctx->end && is_digit(*ctx->ptr)) {
-        hlp = d*10 + *(ctx->ptr++) - '0';
-        if(d>MAXLONGLONG/10 || hlp<0) {
-            exp++;
-            break;
+        if(!overflow) {
+            hlp = d*10 + *ctx->ptr - '0';
+            if(d > MAXLONGLONG/10 || hlp < 0)
+                overflow = TRUE;
+            else
+                d = hlp;
         }
-        else
-            d = hlp;
-    }
-    while(ctx->ptr < ctx->end && is_digit(*ctx->ptr)) {
-        exp++;
         ctx->ptr++;
     }
 
     if(*ctx->ptr == '.') {
-        use_int = FALSE;
+        is_double = TRUE;
         ctx->ptr++;
-
-        while(ctx->ptr < ctx->end && is_digit(*ctx->ptr)) {
-            hlp = d*10 + *(ctx->ptr++) - '0';
-            if(d>MAXLONGLONG/10 || hlp<0)
-                break;
-
-            d = hlp;
-            exp--;
-        }
         while(ctx->ptr < ctx->end && is_digit(*ctx->ptr))
             ctx->ptr++;
     }
 
     if(*ctx->ptr == 'e' || *ctx->ptr == 'E') {
-        int e = 0, sign = 1;
-
+        is_double = TRUE;
         ctx->ptr++;
-        if(*ctx->ptr == '-') {
+        if(*ctx->ptr == '+' || *ctx->ptr == '-')
             ctx->ptr++;
-            sign = -1;
-        }else if(*ctx->ptr == '+') {
+        if(!is_digit(*ctx->ptr))
+            return lex_error(ctx, MAKE_VBSERROR(VBSE_INVALID_NUMBER));
+        while(is_digit(*ctx->ptr))
             ctx->ptr++;
-        }
-
-        if(!is_digit(*ctx->ptr)) {
-            FIXME("Invalid numeric literal\n");
-            return 0;
-        }
-
-        use_int = FALSE;
-
-        do {
-            e = e*10 + *(ctx->ptr++) - '0';
-            if(sign == -1 && -e+exp < -(INT_MAX/100)) {
-                /* The literal will be rounded to 0 anyway. */
-                while(is_digit(*ctx->ptr))
-                    ctx->ptr++;
-                *(double*)ret = 0;
-                return tDouble;
-            }
-
-            if(sign*e + exp > INT_MAX/100) {
-                FIXME("Invalid numeric literal\n");
-                return 0;
-            }
-        } while(is_digit(*ctx->ptr));
-
-        exp += sign*e;
     }
 
-    if(use_int && (LONG)d == d) {
+    if(!is_double && !overflow && (LONG)d == d) {
         *(LONG*)ret = d;
         return tInt;
     }
 
-    r = exp>=0 ? d*pow(10, exp) : d/pow(10, -exp);
-    if(isinf(r)) {
-        FIXME("Invalid numeric literal\n");
-        return 0;
+    /* Delegate the real-number conversion to ucrtbase's locale-aware parser
+     * with a C locale, which handles rounding, subnormals, and overflow per
+     * IEEE 754. The lexer above has already determined the literal span; we
+     * just need to hand wcstod a null-terminated copy. Number literals have no
+     * upper length limit (e.g. trailing fractional zeroes), so fall back to a
+     * heap buffer when the stack buffer is too small. */
+    len = ctx->ptr - start;
+    if(len < ARRAY_SIZE(stackbuf)) {
+        buf = stackbuf;
+    }else if(!(buf = malloc((len + 1) * sizeof(WCHAR)))) {
+        return lex_error(ctx, MAKE_VBSERROR(VBSE_OUT_OF_MEMORY));
     }
+    memcpy(buf, start, len * sizeof(WCHAR));
+    buf[len] = 0;
+
+    locale = get_c_locale();
+    if(!locale) {
+        if(buf != stackbuf) free(buf);
+        return lex_error(ctx, MAKE_VBSERROR(VBSE_OUT_OF_MEMORY));
+    }
+    errno = 0;
+    r = _wcstod_l(buf, &endptr, locale);
+    if(buf != stackbuf) free(buf);
+
+    if(errno == ERANGE && isinf(r))
+        return lex_error(ctx, MAKE_VBSERROR(VBSE_INVALID_NUMBER));
 
     *(double*)ret = r;
     return tDouble;
@@ -353,17 +412,31 @@ static int hex_to_int(WCHAR c)
     return -1;
 }
 
+/* The error is reported at the '&' that starts the literal. */
+static int literal_overflow_error(parser_ctx_t *ctx)
+{
+    while(*ctx->ptr != '&')
+        ctx->ptr--;
+    return lex_error(ctx, MAKE_VBSERROR(VBSE_SYNTAX_ERROR));
+}
+
 static int parse_hex_literal(parser_ctx_t *ctx, LONG *ret)
 {
-    const WCHAR *begin = ctx->ptr;
+    const WCHAR *begin;
     unsigned l = 0, d;
+
+    /* Skip leading zeros — Windows allows any number of them. */
+    while(ctx->ptr[1] == '0')
+        ctx->ptr++;
+
+    begin = ctx->ptr;
 
     while((d = hex_to_int(*++ctx->ptr)) != -1)
         l = l*16 + d;
 
-    if(begin + 9 /* max digits+1 */ < ctx->ptr) {
-        FIXME("invalid literal\n");
-        return 0;
+    if(begin + 9 /* max 8 significant digits + 1 */ < ctx->ptr) {
+        WARN("overflow in hex literal\n");
+        return literal_overflow_error(ctx);
     }
 
     if(*ctx->ptr == '&') {
@@ -375,10 +448,66 @@ static int parse_hex_literal(parser_ctx_t *ctx, LONG *ret)
     return tInt;
 }
 
+static int oct_to_int(WCHAR c)
+{
+    if('0' <= c && c <= '7')
+        return c-'0';
+    return -1;
+}
+
+static int parse_oct_literal(parser_ctx_t *ctx, LONG *ret)
+{
+    ULONGLONG l = 0;
+    int d;
+
+    while((d = oct_to_int(*++ctx->ptr)) != -1) {
+        l = l*8 + d;
+        if(l > UINT_MAX) {
+            WARN("overflow in oct literal\n");
+            return literal_overflow_error(ctx);
+        }
+    }
+
+    /* A decimal digit (8 or 9) ends the octal run: it is an invalid octal digit. */
+    if(*ctx->ptr == '8' || *ctx->ptr == '9')
+        return lex_error(ctx, MAKE_VBSERROR(VBSE_SYNTAX_ERROR));
+
+    if(*ctx->ptr == '&') {
+        ctx->ptr++;
+        *ret = (LONG)l;
+    }else {
+        *ret = l == (UINT16)l ? (INT16)l : (LONG)l;
+    }
+    return tInt;
+}
+
+static BOOL is_space(WCHAR c)
+{
+    return c == ' ' || c == '\t' || c == '\v' || c == '\f';
+}
+
 static void skip_spaces(parser_ctx_t *ctx)
 {
-    while(*ctx->ptr == ' ' || *ctx->ptr == '\t')
+    while(is_space(*ctx->ptr))
         ctx->ptr++;
+}
+
+static BOOL is_literal_token(int token)
+{
+    switch(token) {
+    case tString:
+    case tInt:
+    case tDouble:
+    case tDate:
+    case tTRUE:
+    case tFALSE:
+    case tEMPTY:
+    case tNULL:
+    case tNOTHING:
+        return TRUE;
+    default:
+        return FALSE;
+    }
 }
 
 static int comment_line(parser_ctx_t *ctx)
@@ -389,6 +518,115 @@ static int comment_line(parser_ctx_t *ctx)
     else
         ctx->ptr = ctx->end;
     return tNL;
+}
+
+static int parse_bracket_identifier(parser_ctx_t *ctx, const WCHAR **ret)
+{
+    const WCHAR *start = ++ctx->ptr;
+    WCHAR *str;
+    int len;
+
+    while(ctx->ptr < ctx->end && *ctx->ptr != ']' && *ctx->ptr != '\n' && *ctx->ptr != '\r')
+        ctx->ptr++;
+
+    if(ctx->ptr >= ctx->end || *ctx->ptr != ']')
+        return lex_error(ctx, MAKE_VBSERROR(VBSE_EXPECTED_RBRACKET));
+
+    len = ctx->ptr - start;
+    ctx->ptr++; /* skip ']' */
+
+    if(len > MAX_IDENTIFIER_LENGTH)
+        return lex_error(ctx, MAKE_VBSERROR(VBSE_IDENTIFIER_TOO_LONG));
+
+    str = parser_alloc(ctx, (len+1)*sizeof(WCHAR));
+    if(!str)
+        return 0;
+
+    memcpy(str, start, len*sizeof(WCHAR));
+    str[len] = 0;
+    *ret = str;
+    return tIdentifier;
+}
+
+/* Check if the next word, possibly after a line continuation, is the given
+ * keyword. If it is, move the position past it and store its location. */
+static BOOL skip_keyword(parser_ctx_t *ctx, const WCHAR **pos, const WCHAR *word, unsigned *loc)
+{
+    const WCHAR *ptr = *pos, *end;
+    WCHAR c;
+
+    while(1) {
+        while(ptr < ctx->end && is_space(*ptr))
+            ptr++;
+        if(ptr == ctx->end || *ptr != '_')
+            break;
+        end = ptr + 1;
+        while(end < ctx->end && is_space(*end))
+            end++;
+        if(end == ctx->end || (*end != '\n' && *end != '\r'))
+            return FALSE;
+        if(*end == '\r')
+            end++;
+        if(end < ctx->end && *end == '\n')
+            end++;
+        ptr = end;
+    }
+
+    for(end = ptr; *word; end++, word++) {
+        if(end == ctx->end)
+            return FALSE;
+        c = *end;
+        if(c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if(c != *word)
+            return FALSE;
+    }
+    if(end < ctx->end && is_identifier_char(*end))
+        return FALSE;
+
+    if(loc)
+        *loc = ptr - ctx->code;
+    *pos = end;
+    return TRUE;
+}
+
+/* The keyword of a Sub, Function or Property declaration is returned together
+ * with the storage specifiers preceding it, which are the token value. Default
+ * and Property are keywords only as a part of such a declaration: "Public
+ * Default" and "Private Property" declare member variables. */
+static int parse_decl_keywords(parser_ctx_t *ctx, int token, unsigned *storage, unsigned *loc)
+{
+    const WCHAR *ptr = ctx->ptr, *kind;
+    unsigned flags = 0, decl_loc = *loc;
+    int ret = token;
+
+    if(token == tPUBLIC || token == tPRIVATE) {
+        if(token == tPRIVATE)
+            flags = STORAGE_IS_PRIVATE;
+        else if(skip_keyword(ctx, &ptr, L"default", NULL))
+            flags = STORAGE_IS_DEFAULT;
+
+        if(skip_keyword(ctx, &ptr, L"sub", &decl_loc))
+            ret = tSUB;
+        else if(skip_keyword(ctx, &ptr, L"function", &decl_loc))
+            ret = tFUNCTION;
+        else if(skip_keyword(ctx, &ptr, L"property", &decl_loc))
+            ret = tPROPERTY;
+        else
+            return token;
+    }
+
+    if(ret == tPROPERTY) {
+        kind = ptr;
+        if(!(flags & STORAGE_IS_DEFAULT) && !skip_keyword(ctx, &kind, L"get", NULL)
+                && !skip_keyword(ctx, &kind, L"let", NULL) && !skip_keyword(ctx, &kind, L"set", NULL))
+            return token;
+        ret = tPROPDECL;
+    }
+
+    ctx->ptr = ptr;
+    *loc = decl_loc;
+    *storage = flags;
+    return ret;
 }
 
 static int parse_next_token(void *lval, unsigned *loc, parser_ctx_t *ctx)
@@ -405,14 +643,24 @@ static int parse_next_token(void *lval, unsigned *loc, parser_ctx_t *ctx)
     if('0' <= c && c <= '9')
         return parse_numeric_literal(ctx, lval);
 
-    if(iswalpha(c)) {
+    if((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
         int ret = 0;
         if(ctx->last_token != '.' && ctx->last_token != tDOT)
             ret = check_keywords(ctx, lval);
-        if(!ret)
+        switch(ret) {
+        case 0:
             return parse_identifier(ctx, lval);
-        if(ret != tREM)
+        case tPUBLIC:
+        case tPRIVATE:
+        case tPROPERTY:
+        case tSUB:
+        case tFUNCTION:
+            return parse_decl_keywords(ctx, ret, lval, loc);
+        case tREM:
+            break;
+        default:
             return ret;
+        }
         c = '\'';
     }
 
@@ -438,16 +686,40 @@ static int parse_next_token(void *lval, unsigned *loc, parser_ctx_t *ctx)
          * We need to distinguish between '.' used as part of a member expression and
          * a beginning of a dot expression (a member expression accessing with statement
          * expression) and a floating point number like ".2" .
+         *
+         * A dot immediately followed by a digit is always a numeric literal, even
+         * right after an identifier: obj.method.5 parses as obj.method(0.5).
          */
+        if('0' <= ctx->ptr[1] && ctx->ptr[1] <= '9')
+            return parse_numeric_literal(ctx, lval);
         c = ctx->ptr > ctx->code ? ctx->ptr[-1] : '\n';
-        if (is_identifier_char(c) || c == ')') {
+        if ((is_identifier_char(c) || c == ')')
+                && (ctx->last_token == tIdentifier || ctx->last_token == ')'
+                || ctx->last_token == tEMPTYBRACKETS || ctx->last_token == tME)) {
             ctx->ptr++;
             return '.';
         }
-        c = ctx->ptr[1];
-        if('0' <= c && c <= '9')
-            return parse_numeric_literal(ctx, lval);
+        /* A dot right after a literal is a member access too, "s".p is valid
+         * and fails at run time. */
+        if(!is_space(c) && is_literal_token(ctx->last_token)) {
+            ctx->ptr++;
+            return '.';
+        }
+        /* After line continuation, ptr[-1] is a newline or space, but the dot
+         * is logically on the same line as the previous token. */
+        if(ctx->after_continuation
+                && (ctx->last_token == tIdentifier || ctx->last_token == ')'
+                || ctx->last_token == tEMPTYBRACKETS)) {
+            ctx->ptr++;
+            return '.';
+        }
+        /* Unlike a member dot, a with-statement dot can only be separated from
+         * the member name by a line continuation. */
         ctx->ptr++;
+        skip_spaces(ctx);
+        c = *ctx->ptr;
+        if(ctx->ptr[-1] != '.' && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '['))
+            return lex_error(ctx, MAKE_VBSERROR(VBSE_SYNTAX_ERROR));
         return tDOT;
     case '-':
         if(ctx->is_html && ctx->ptr[1] == '-' && ctx->ptr[2] == '>')
@@ -469,9 +741,17 @@ static int parse_next_token(void *lval, unsigned *loc, parser_ctx_t *ctx)
          * Parser can't predict if bracket is part of argument expression or an argument
          * in call expression. We predict it here instead.
          */
-        if(ctx->last_token == tIdentifier || ctx->last_token == ')')
+        if(ctx->last_token == tIdentifier || ctx->last_token == ')' || ctx->last_token == tME
+                || ctx->last_token == tEMPTYBRACKETS)
+            return '(';
+        /* default and property are never followed by a bracket as keywords, so they
+         * are identifiers here. The parser needs this token as lookahead to tell,
+         * so it has not updated last_token yet. */
+        if(ctx->last_token == tDEFAULT || ctx->last_token == tPROPERTY)
             return '(';
         return tEXPRLBRACKET;
+    case '[':
+        return parse_bracket_identifier(ctx, lval);
     case '"':
         return parse_string_literal(ctx, lval);
     case '#':
@@ -479,6 +759,13 @@ static int parse_next_token(void *lval, unsigned *loc, parser_ctx_t *ctx)
     case '&':
         if((*++ctx->ptr == 'h' || *ctx->ptr == 'H') && hex_to_int(ctx->ptr[1]) != -1)
             return parse_hex_literal(ctx, lval);
+        if((*ctx->ptr == 'o' || *ctx->ptr == 'O') && oct_to_int(ctx->ptr[1]) != -1)
+            return parse_oct_literal(ctx, lval);
+        if(oct_to_int(*ctx->ptr) != -1) {
+            /* A bare '&' followed by octal digits (no 'o'/'O') is also octal. */
+            ctx->ptr--;
+            return parse_oct_literal(ctx, lval);
+        }
         return '&';
     case '=':
         switch(*++ctx->ptr) {
@@ -514,7 +801,7 @@ static int parse_next_token(void *lval, unsigned *loc, parser_ctx_t *ctx)
         }
         return '>';
     default:
-        FIXME("Unhandled char %c in %s\n", *ctx->ptr, debugstr_w(ctx->ptr));
+        return lex_error(ctx, MAKE_VBSERROR(VBSE_INVALID_CHAR));
     }
 
     return 0;
@@ -535,13 +822,13 @@ int parser_lex(void *lval, unsigned *loc, parser_ctx_t *ctx)
         if(ret == '_') {
             skip_spaces(ctx);
             if(*ctx->ptr != '\n' && *ctx->ptr != '\r') {
-                FIXME("'_' not followed by newline\n");
-                return 0;
+                return lex_error(ctx, MAKE_VBSERROR(VBSE_INVALID_CHAR));
             }
             if(*ctx->ptr == '\r')
                 ctx->ptr++;
             if(*ctx->ptr == '\n')
                 ctx->ptr++;
+            ctx->after_continuation = TRUE;
             continue;
         }
         if(ret != tNL || ctx->last_token != tNL)
@@ -550,5 +837,6 @@ int parser_lex(void *lval, unsigned *loc, parser_ctx_t *ctx)
         ctx->last_nl = ctx->ptr-ctx->code;
     }
 
+    ctx->after_continuation = FALSE;
     return (ctx->last_token = ret);
 }
