@@ -60,6 +60,7 @@ list(APPEND SOURCE
 #    ntuser/NtUserCallHwndParamLock.c
 #    ntuser/NtUserCallNoParam.c
 #    ntuser/NtUserCallOneParam.c
+    ntuser/NtUserClipboardHandles.c
     ntuser/NtUserConvertMemHandle.c
     ntuser/NtUserCountClipboardFormats.c
     ntuser/NtUserCreateAcceleratorTable.c

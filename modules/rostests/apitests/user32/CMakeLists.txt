@@ -28,6 +28,7 @@ list(APPEND SOURCE
     DesktopOtherThreadApis.c
     ClipboardFormatListener.c
     ClipboardSetData.c
+    ClipboardMedBatch.c
     ClipboardSynthBitmap.c
     ConsoleClipText.c
     EmptyClipboard.c
