@@ -590,6 +590,16 @@ static long NgZeroGap(PNG_VCB Vcb, PNG_FCB Fcb, LONGLONG Offset, PUCHAR Bounce)
             return NG_ZGAP_DELETED;
         if (Vcb->RawWritten)
             return NG_ZGAP_DROP;
+        /*
+         * The transfer of the previous piece ran without CoreLock: a paging read of an FCB without handles, or
+         * a create, may have parked the node meanwhile (its piece stayed pinned, so the core was not harmed).
+         */
+        if (!Fcb->Node)
+        {
+            Z = NgEnsureNode(Fcb);
+            if (Z)
+                return Z;
+        }
         if (Vcb->CoreDepth != 1 || Vcb->Dismounted || Vcb->WriteThrough)
             return 0;
         Z = ngc_dio_zero_begin(Vcb->Core, Fcb->Node, Offset, &Dio);
@@ -603,7 +613,18 @@ static long NgZeroGap(PNG_VCB Vcb, PNG_FCB Fcb, LONGLONG Offset, PUCHAR Bounce)
         Z = ngc_dio_end(Vcb->Core, &Dio, NULL, IoErr);
         NgDataIoDone(Vcb);
         if (Z == -NGC_EAGAIN)
+        {
+            /* The caller goes on with Fcb->Node, which may have been parked during the transfer. */
+            if (!Fcb->Node)
+            {
+                if (Fcb->Deleted)
+                    return NG_ZGAP_DELETED;
+                Z = NgEnsureNode(Fcb);
+                if (Z)
+                    return Z;
+            }
             return 0;
+        }
         if (Z < 0)
             return Z;
         Vcb->DioZeroPieces++;
