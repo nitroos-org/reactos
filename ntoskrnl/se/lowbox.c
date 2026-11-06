@@ -222,8 +222,8 @@ SepCreateLowbox(
     *Result = NULL;
     PackageLength = RtlLengthSid(PackageSid);
     if (CapabilityCount > 0)
-        CapabilitiesLength = CapabilityCount * sizeof(SID_AND_ATTRIBUTES) +
-                             RtlLengthSidAndAttributes(CapabilityCount, Capabilities);
+        /* RtlLengthSidAndAttributes counts the array itself as well as the SIDs */
+        CapabilitiesLength = RtlLengthSidAndAttributes(CapabilityCount, Capabilities);
 
     /* The block: header, handles, capability array and SIDs, package SID (pointer-aligned pieces) */
     Size = ALIGN_UP_BY(sizeof(SEP_LOWBOX), sizeof(PVOID)) +
