@@ -27,6 +27,14 @@ MM_ALLOCATION_REQUEST, *PMM_ALLOCATION_REQUEST;
 
 MM_MEMORY_CONSUMER MiMemoryConsumers[MC_MAXIMUM];
 static ULONG MiMinimumAvailablePages;
+/*
+ * Free pages the balancer works to keep (see MmInitializeBalancer). Reclaim used to start only
+ * below MiMinimumAvailablePages (256 pages): cache views and file data then filled every free page
+ * between two 2 s timer passes, the free list sat at 0, reclaim could only page out user pages one
+ * at a time, and metadata pins (which cannot wait for pages) failed with STATUS_NO_MEMORY half way
+ * through a file system operation.
+ */
+static ULONG MiLowWaterPages;
 static ULONG MiMinimumPagesPerRun;
 static CLIENT_ID MiBalancerThreadId;
 static HANDLE MiBalancerThreadHandle = NULL;
@@ -48,6 +56,8 @@ MmInitializeBalancer(ULONG NrAvailablePages, ULONG NrSystemPages)
     /* Set up targets. */
     MiMinimumAvailablePages = 256;
     MiMinimumPagesPerRun = 256;
+    /* 1/32 of the pages at start (8 MB at 256 MB, 32 MB from 1 GB), at least 4 MB */
+    MiLowWaterPages = min(max(NrAvailablePages / 32, 1024), 8192);
     MiMemoryConsumers[MC_USER].PagesTarget = NrAvailablePages / 2;
 }
 
@@ -394,6 +404,14 @@ MmRequestPageMemoryConsumer(ULONG Consumer, BOOLEAN CanWait,
     }
 
     /*
+     * Start reclaiming before the free list is empty: a pass trims clean cache views up to the
+     * low-water mark (MiBalancerThread), which is cheap, instead of paging out user pages once
+     * everything is gone. Asynchronous, the caller does not wait here.
+     */
+    if (MmAvailablePages < MiLowWaterPages)
+        MmRebalanceMemoryConsumers();
+
+    /*
      * Actually allocate the page.
      */
     Page = MmAllocPage(Consumer);
@@ -455,11 +473,11 @@ MiBalancerThread(PVOID Unused)
 
                 /* Trim cache */
                 /* UF-22: snapshot MmAvailablePages once, then trim the cache only for the shortfall
-                 * below the minimum. abs() of the unsigned difference evicted the whole clean cache
+                 * below the low-water mark. abs() of the unsigned difference evicted the whole clean cache
                  * every timer pass when memory was plentiful; reading MmAvailablePages twice (compare
                  * then subtract) could also race a concurrent change and underflow into a giant target. */
                 ULONG Avail = MmAvailablePages;
-                Target = max(InitialTarget, Avail < MiMinimumAvailablePages ? MiMinimumAvailablePages - Avail : 0);
+                Target = max(InitialTarget, Avail < MiLowWaterPages ? MiLowWaterPages - Avail : 0);
                 if (Target)
                 {
                     CcRosTrimCache(Target, &NrFreedPages);
