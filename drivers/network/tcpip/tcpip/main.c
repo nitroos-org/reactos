@@ -1064,6 +1064,11 @@ DriverEntry(
 
     /* Initialize address file list and protecting spin lock */
     InitializeListHead(&AddressFileListHead);
+    {
+        ULONG b;
+        for (b = 0; b < ADDRESS_FILE_PORT_BUCKETS; b++)
+            InitializeListHead(&AddressFilePortHash[b]);
+    }
     KeInitializeSpinLock(&AddressFileListLock);
 
     /* Initialize connection endpoint list and protecting spin lock */

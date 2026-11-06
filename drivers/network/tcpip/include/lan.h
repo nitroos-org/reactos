@@ -54,6 +54,7 @@ typedef struct LAN_ADAPTER {
     NDIS_HANDLE NdisHandle;                 /* NDIS binding handle */
     NDIS_STATUS NdisStatus;                 /* NDIS status of last request */
     NDIS_MEDIUM Media;                      /* Media type */
+    ULONG FwIfType;                         /* NITROFW_IFTYPE_* of this adapter (fwiftype.h), set once at registration */
     UCHAR HWAddress[IEEE_802_ADDR_LENGTH];  /* Local HW address */
     UINT HWAddressLength;                   /* Length of HW address */
     UCHAR BCastMask;                        /* Mask for checking broadcast */
@@ -120,3 +121,6 @@ NDIS_STATUS NDISCall(
     UINT Length);
 
 /* EOF */
+
+/* NITROFW_IFTYPE_* of the interface (LAN for the loopback and anything that is not a LAN adapter) */
+ULONG LANGetFwIfType(PIP_INTERFACE Interface);

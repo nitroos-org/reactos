@@ -78,12 +78,12 @@
  *     An empty list means "any". Port lists apply to TCP and UDP only; ICMP entries to protocol 1/58.
  *     A rule with ICMP entries must have Protocol 1 (ICMPv4) or 58 (ICMPv6); the kernel rejects the policy
  *     otherwise (with Protocol ANY the entries would match every non-ICMP packet).
- *     Interface types: until a filter can resolve the type of the receiving interface, EVERY interface
- *     counts as LAN. IfTypes must be non-zero and use only NITROFW_IFTYPE_* bits (else the policy is
- *     rejected). A rule whose IfTypes includes NITROFW_IFTYPE_LAN applies. A rule without the LAN bit
- *     (Wireless and/or RemoteAccess only) is skipped if it is an Allow rule, but still applies if it is a
- *     Block rule: it fails closed instead of being silently ignored, so such a Block rule also blocks
- *     LAN traffic.
+ *     Interface types: IfTypes must be non-zero and use only NITROFW_IFTYPE_* bits (else the policy is
+ *     rejected). A rule applies to a packet when its IfTypes includes the type of the interface the packet
+ *     came in on: Wireless for 802.11 adapters (NDIS physical medium WirelessLan or Native802_11), RemoteAccess
+ *     for WAN adapters (medium Wan/CoWan, physical medium WiredWAN/WiredCoWan; this stack binds only 802.3
+ *     adapters, so none exists today), LAN for everything else and for an adapter that does not answer the
+ *     physical medium query. A Block or Allow rule restricted to a type the interface does not have is skipped.
  *  7. Outbound rules are carried for completeness; a filter that only implements the inbound path ignores
  *     rules with Direction == NITROFW_DIR_OUT and reports NITROFW_FEATURE_OUTBOUND clear in GET_VERSION.
  *  8. Service-name conditions (ServiceNameOffset) are advisory: a filter that cannot resolve the
