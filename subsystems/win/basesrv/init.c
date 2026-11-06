@@ -221,11 +221,21 @@ CreateBaseAcls(OUT PACL* Dacl,
         NtClose(hKey);
     }
 
-    /* Get object security mode */
-    if (SessionId == 0 ||
-        !NT_SUCCESS(NtQuerySystemInformation(SystemObjectSecurityMode, &ObjectSecurityMode, sizeof(ULONG), NULL)))
+    /*
+     * Get object security mode. Windows 10 builds the named object directory
+     * of every session other than 0 in the restricted mode (measured: the
+     * directory lets the world only query and traverse; the logged-on user is
+     * granted access when the session is logged on), whatever the kernel's
+     * default says: the fork's kernel default is 0. Session 0 stays open.
+     */
+    if (SessionId == 0)
     {
         ObjectSecurityMode = 0;
+    }
+    else if (!NT_SUCCESS(NtQuerySystemInformation(SystemObjectSecurityMode, &ObjectSecurityMode, sizeof(ULONG), NULL)) ||
+             ObjectSecurityMode == 0)
+    {
+        ObjectSecurityMode = 1;
     }
 
     /* Allocate the System SID */
@@ -354,6 +364,142 @@ Return:
     return Status;
 }
 
+/* S-1-15-2-2, "all restricted application packages" (not in the headers) */
+#ifndef SECURITY_BUILTIN_PACKAGE_ANY_RESTRICTED_PACKAGE
+#define SECURITY_BUILTIN_PACKAGE_ANY_RESTRICTED_PACKAGE 2
+#endif
+
+/* One ACE of a DACL made by BaseBuildDacl */
+typedef struct _BASE_ACE_SPEC
+{
+    PSID Sid;
+    ACCESS_MASK Mask;
+    UCHAR Flags;
+} BASE_ACE_SPEC;
+
+static
+NTSTATUS
+BaseBuildDacl(
+    IN const BASE_ACE_SPEC *Aces,
+    IN ULONG Count,
+    OUT PACL *Dacl)
+{
+    ULONG AclLength = sizeof(ACL), i;
+    NTSTATUS Status;
+
+    for (i = 0; i < Count; i++)
+        AclLength += sizeof(ACCESS_ALLOWED_ACE) - sizeof(ULONG) + RtlLengthSid(Aces[i].Sid);
+
+    *Dacl = RtlAllocateHeap(BaseSrvHeap, 0, AclLength);
+    if (*Dacl == NULL) return STATUS_NO_MEMORY;
+
+    Status = RtlCreateAcl(*Dacl, AclLength, ACL_REVISION2);
+    for (i = 0; NT_SUCCESS(Status) && i < Count; i++)
+    {
+        Status = RtlAddAccessAllowedAceEx(*Dacl, ACL_REVISION2, Aces[i].Flags, Aces[i].Mask, Aces[i].Sid);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeHeap(BaseSrvHeap, 0, *Dacl);
+        *Dacl = NULL;
+    }
+    return Status;
+}
+
+/*
+ * The DACLs of the namespace objects of a session other than 0, as measured
+ * on Windows 10 22H2 (session 1, minus the entries that are made for the
+ * session's logon: the user, the logon SID, the Desktop Window Manager group):
+ *  - the BaseNamedObjects directory: the world and the restricted code may
+ *    only query/traverse (world: container-inheritable), SYSTEM has full
+ *    access and its and the creator's children inherit full access;
+ *  - the symbolic links in it (Global, Local, Session, AppContainerNamedObjects):
+ *    the world may only query, SYSTEM has full access;
+ *  - the AppContainerNamedObjects directory: as BaseNamedObjects, and the
+ *    AppContainer packages may query/traverse.
+ * Sessions are added at logon by the logon code (phase P3c/P4).
+ */
+static
+NTSTATUS
+BaseBuildSessionNamespaceDacls(
+    OUT PACL *DirectoryDacl,
+    OUT PACL *LinkDacl,
+    OUT PACL *AppContainerDacl)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY CreatorAuthority = {SECURITY_CREATOR_SID_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY PackageAuthority = {SECURITY_APP_PACKAGE_AUTHORITY};
+    PSID SystemSid = NULL, WorldSid = NULL, CreatorSid = NULL, RestrictedSid = NULL;
+    PSID AnyPackageSid = NULL, AnyRestrictedPackageSid = NULL;
+    const UCHAR Inherit = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
+    NTSTATUS Status;
+
+    *DirectoryDacl = *LinkDacl = *AppContainerDacl = NULL;
+
+    Status = RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID,
+                                         0, 0, 0, 0, 0, 0, 0, &SystemSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID,
+                                             0, 0, 0, 0, 0, 0, 0, &WorldSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAllocateAndInitializeSid(&CreatorAuthority, 1, SECURITY_CREATOR_OWNER_RID,
+                                             0, 0, 0, 0, 0, 0, 0, &CreatorSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_RESTRICTED_CODE_RID,
+                                             0, 0, 0, 0, 0, 0, 0, &RestrictedSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAllocateAndInitializeSid(&PackageAuthority, 2, SECURITY_APP_PACKAGE_BASE_RID,
+                                             SECURITY_BUILTIN_PACKAGE_ANY_PACKAGE,
+                                             0, 0, 0, 0, 0, 0, &AnyPackageSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAllocateAndInitializeSid(&PackageAuthority, 2, SECURITY_APP_PACKAGE_BASE_RID,
+                                             SECURITY_BUILTIN_PACKAGE_ANY_RESTRICTED_PACKAGE,
+                                             0, 0, 0, 0, 0, 0, &AnyRestrictedPackageSid);
+    if (NT_SUCCESS(Status))
+    {
+        const BASE_ACE_SPEC Directory[] =
+        {
+            { SystemSid,     DIRECTORY_ALL_ACCESS,                         0 },
+            { SystemSid,     GENERIC_ALL,                                  Inherit },
+            { CreatorSid,    GENERIC_ALL,                                  Inherit },
+            { WorldSid,      DIRECTORY_QUERY | DIRECTORY_TRAVERSE,         CONTAINER_INHERIT_ACE },
+            { RestrictedSid, DIRECTORY_TRAVERSE,                           0 },
+        };
+        const BASE_ACE_SPEC Link[] =
+        {
+            { WorldSid,      SYMBOLIC_LINK_QUERY,                          0 },
+            { RestrictedSid, 0,                                            0 },
+            { SystemSid,     SYMBOLIC_LINK_ALL_ACCESS,                     0 },
+        };
+        const BASE_ACE_SPEC AppContainer[] =
+        {
+            { SystemSid,     DIRECTORY_ALL_ACCESS,                         0 },
+            { SystemSid,     GENERIC_ALL,                                  Inherit },
+            { CreatorSid,    GENERIC_ALL,                                  Inherit },
+            { WorldSid,      DIRECTORY_QUERY | DIRECTORY_TRAVERSE,         CONTAINER_INHERIT_ACE },
+            { RestrictedSid, DIRECTORY_TRAVERSE,                           0 },
+            { AnyPackageSid, DIRECTORY_QUERY | DIRECTORY_TRAVERSE,         0 },
+            { AnyRestrictedPackageSid, DIRECTORY_QUERY | DIRECTORY_TRAVERSE, 0 },
+        };
+
+        Status = BaseBuildDacl(Directory, RTL_NUMBER_OF(Directory), DirectoryDacl);
+        if (NT_SUCCESS(Status))
+            Status = BaseBuildDacl(Link, RTL_NUMBER_OF(Link), LinkDacl);
+        if (NT_SUCCESS(Status))
+            Status = BaseBuildDacl(AppContainer, RTL_NUMBER_OF(AppContainer), AppContainerDacl);
+    }
+
+    /* The ACLs hold copies of the SIDs */
+    if (SystemSid) RtlFreeSid(SystemSid);
+    if (WorldSid) RtlFreeSid(WorldSid);
+    if (CreatorSid) RtlFreeSid(CreatorSid);
+    if (RestrictedSid) RtlFreeSid(RestrictedSid);
+    if (AnyPackageSid) RtlFreeSid(AnyPackageSid);
+    if (AnyRestrictedPackageSid) RtlFreeSid(AnyRestrictedPackageSid);
+    return Status;
+}
+
 VOID
 NTAPI
 BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
@@ -373,7 +519,8 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
     HANDLE BaseSrvNamedObjectDirectory;
     HANDLE BaseSrvRestrictedObjectDirectory;
     PACL BnoDacl, BnoRestrictedDacl;
-    PSECURITY_DESCRIPTOR BnoSd;
+    PACL LinkDacl = NULL, AppContainerDacl = NULL;
+    PSECURITY_DESCRIPTOR BnoSd, LinkSd = NULL, AppContainerSd = NULL;
     HANDLE SymHandle;
     UNICODE_STRING DirectoryName, SymlinkName;
     ULONG LuidEnabled;
@@ -546,6 +693,39 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
     Status = CreateBaseAcls(&BnoDacl, &BnoRestrictedDacl);
     ASSERT(NT_SUCCESS(Status));
 
+    /*
+     * Sessions other than 0: the DACLs measured on Windows (see
+     * BaseBuildSessionNamespaceDacls) replace the generic BNO DACL, and the
+     * links and the AppContainer directory get their own security descriptors.
+     */
+    if (SessionId != 0)
+    {
+        PACL DirectoryDacl;
+
+        Status = BaseBuildSessionNamespaceDacls(&DirectoryDacl, &LinkDacl, &AppContainerDacl);
+        ASSERT(NT_SUCCESS(Status));
+        if (NT_SUCCESS(Status))
+        {
+            BnoDacl = DirectoryDacl;
+            LinkSd = RtlAllocateHeap(BaseSrvHeap, 0, 2 * 1024);
+            AppContainerSd = RtlAllocateHeap(BaseSrvHeap, 0, 2 * 1024);
+            ASSERT(LinkSd && AppContainerSd);
+            Status = RtlCreateSecurityDescriptor(LinkSd, SECURITY_DESCRIPTOR_REVISION);
+            ASSERT(NT_SUCCESS(Status));
+            Status = RtlSetDaclSecurityDescriptor(LinkSd, TRUE, LinkDacl, FALSE);
+            ASSERT(NT_SUCCESS(Status));
+            Status = RtlCreateSecurityDescriptor(AppContainerSd, SECURITY_DESCRIPTOR_REVISION);
+            ASSERT(NT_SUCCESS(Status));
+            Status = RtlSetDaclSecurityDescriptor(AppContainerSd, TRUE, AppContainerDacl, FALSE);
+            ASSERT(NT_SUCCESS(Status));
+        }
+        else
+        {
+            DPRINT1("BASESRV: cannot build the namespace DACLs of session %lu, Status=%lx\n",
+                    SessionId, Status);
+        }
+    }
+
     /* Set the BNO DACL as active for now */
     Status = RtlSetDaclSecurityDescriptor(BnoSd, TRUE, BnoDacl, FALSE);
     ASSERT(NT_SUCCESS(Status));
@@ -584,15 +764,23 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
         if (NT_SUCCESS(Status)) NtClose(Session0BnoDirectory);
     }
 
-    /* Check if we are session 0 */
-    if (SessionId == 0)
+    /*
+     * Tag the directory with this process's session (the object manager keeps
+     * the caller's session id in it): creating a section or a symbolic link in
+     * a directory of another session then needs SeCreateGlobalPrivilege. Every
+     * session's directory is tagged, so that a process of session 1 cannot
+     * plant a section in session 0's \BaseNamedObjects, nor in another
+     * session's directory, as on Windows.
+     */
+    Status = NtSetInformationObject(BaseSrvNamedObjectDirectory,
+                                    ObjectSessionInformation,
+                                    NULL,
+                                    0);
+    ASSERT(NT_SUCCESS(Status));
+    if (!NT_SUCCESS(Status))
     {
-        /* Mark this as a session 0 directory */
-        Status = NtSetInformationObject(BaseSrvNamedObjectDirectory,
-                                        ObjectSessionInformation,
-                                        NULL,
-                                        0);
-        ASSERT(NT_SUCCESS(Status));
+        DPRINT1("BASESRV: cannot tag the named object directory of session %lu, Status=%lx\n",
+                SessionId, Status);
     }
 
     /* Check if LUID device maps are enabled */
@@ -615,7 +803,7 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
                                    &DirectoryName,
                                    OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
                                    BaseSrvNamedObjectDirectory,
-                                   BnoSd);
+                                   LinkSd ? LinkSd : BnoSd);
         Status = NtCreateSymbolicLinkObject(&SymHandle,
                                             SYMBOLIC_LINK_ALL_ACCESS,
                                             &ObjectAttributes,
@@ -628,7 +816,7 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
                                    &DirectoryName,
                                    OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
                                    BaseSrvNamedObjectDirectory,
-                                   BnoSd);
+                                   LinkSd ? LinkSd : BnoSd);
         Status = NtCreateSymbolicLinkObject(&SymHandle,
                                             SYMBOLIC_LINK_ALL_ACCESS,
                                             &ObjectAttributes,
@@ -642,12 +830,59 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
                                    &DirectoryName,
                                    OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
                                    BaseSrvNamedObjectDirectory,
-                                   BnoSd);
+                                   LinkSd ? LinkSd : BnoSd);
         Status = NtCreateSymbolicLinkObject(&SymHandle,
                                             SYMBOLIC_LINK_ALL_ACCESS,
                                             &ObjectAttributes,
                                             &SymlinkName);
         if ((NT_SUCCESS(Status)) && SessionId == 0) NtClose(SymHandle);
+
+        /*
+         * Sessions other than 0 (NitroSessions): AppContainerNamedObjects
+         * points to the session's directory for AppContainer packages,
+         * \Sessions\<id>\AppContainerNamedObjects, which is created here.
+         * Session 0 keeps its set of objects until the phase that makes it
+         * a Windows-style session.
+         */
+        if (SessionId != 0)
+        {
+            WCHAR AcBuffer[100];
+            UNICODE_STRING AcName;
+            HANDLE AcDirectory;
+
+            _swprintf(AcBuffer, L"\\Sessions\\%lu\\AppContainerNamedObjects", SessionId);
+            RtlInitUnicodeString(&AcName, AcBuffer);
+            InitializeObjectAttributes(&ObjectAttributes,
+                                       &AcName,
+                                       OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
+                                       NULL,
+                                       AppContainerSd);
+            Status = NtCreateDirectoryObject(&AcDirectory,
+                                             DIRECTORY_ALL_ACCESS,
+                                             &ObjectAttributes);
+            ASSERT(NT_SUCCESS(Status));
+            if (NT_SUCCESS(Status))
+            {
+                NtClose(AcDirectory);
+
+                RtlInitUnicodeString(&DirectoryName, L"AppContainerNamedObjects");
+                InitializeObjectAttributes(&ObjectAttributes,
+                                           &DirectoryName,
+                                           OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
+                                           BaseSrvNamedObjectDirectory,
+                                           LinkSd);
+                Status = NtCreateSymbolicLinkObject(&SymHandle,
+                                                    SYMBOLIC_LINK_ALL_ACCESS,
+                                                    &ObjectAttributes,
+                                                    &AcName);
+                ASSERT(NT_SUCCESS(Status));
+                if (NT_SUCCESS(Status)) NtClose(SymHandle);
+            }
+            else
+            {
+                DPRINT1("BASESRV: cannot create %wZ, Status=%lx\n", &AcName, Status);
+            }
+        }
 
         /* Create the BNO\Restricted directory and set the restricted DACL */
         RtlInitUnicodeString(&DirectoryName, L"Restricted");
