@@ -55,6 +55,8 @@ typedef struct _LOCK_SHARED_RANGE
     LARGE_INTEGER Start, End;
     ULONG Key;
     PVOID ProcessId;
+    /* The file object that took the lock: a lock belongs to a file object (and process and key) */
+    PFILE_OBJECT FileObject;
 }
     LOCK_SHARED_RANGE, *PLOCK_SHARED_RANGE;
 
@@ -522,6 +524,7 @@ FsRtlpLockRangeLocked(IN PLOCK_INFORMATION LockInfo,
         NewSharedRange->End = ToInsert->Exclusive.FileLock.EndingByte;
         NewSharedRange->Key = ToInsert->Exclusive.FileLock.Key;
         NewSharedRange->ProcessId = ToInsert->Exclusive.FileLock.ProcessId;
+        NewSharedRange->FileObject = ToInsert->Exclusive.FileLock.FileObject;
     }
 
     Conflict = RtlInsertElementGenericTable(&LockInfo->RangeTable,
@@ -642,7 +645,7 @@ FsRtlpRemoveSharedRangeLocked(IN PLOCK_INFORMATION LockInfo,
         PLOCK_SHARED_RANGE Range = CONTAINING_RECORD(SharedEntry, LOCK_SHARED_RANGE, Entry);
 
         FsRtlpInitLockElement(&LockElement,
-                              FileObject,
+                              Range->FileObject,
                               Range->Start.QuadPart,
                               Range->End.QuadPart - Range->Start.QuadPart,
                               Range->ProcessId,
@@ -688,6 +691,7 @@ FsRtlpUnlockRangeLocked(IN PLOCK_INFORMATION LockInfo,
     {
         if (Entry->Exclusive.FileLock.Key != Key ||
             Entry->Exclusive.FileLock.ProcessId != Process ||
+            Entry->Exclusive.FileLock.FileObject != FileObject ||
             Entry->Exclusive.FileLock.StartingByte.QuadPart != Start ||
             Entry->Exclusive.FileLock.EndingByte.QuadPart != Start + Length)
         {
@@ -708,7 +712,8 @@ FsRtlpUnlockRangeLocked(IN PLOCK_INFORMATION LockInfo,
         if (SharedRange->Start.QuadPart == Start &&
             SharedRange->End.QuadPart == Start + Length &&
             SharedRange->Key == Key &&
-            SharedRange->ProcessId == Process)
+            SharedRange->ProcessId == Process &&
+            SharedRange->FileObject == FileObject)
         {
             FsRtlpRemoveSharedRangeLocked(LockInfo, SharedRange, FileObject, Unlocked);
             return STATUS_SUCCESS;
@@ -718,7 +723,7 @@ FsRtlpUnlockRangeLocked(IN PLOCK_INFORMATION LockInfo,
     return STATUS_RANGE_NOT_LOCKED;
 }
 
-/* Removes every lock of Process (and Key). Returns TRUE if any was removed. Called with RangeLock held. */
+/* Removes every lock of FileObject and Process (and Key). Returns TRUE if any was removed. Called with RangeLock held. */
 static
 BOOLEAN
 FsRtlpUnlockAllLocked(IN PLOCK_INFORMATION LockInfo,
@@ -739,7 +744,8 @@ FsRtlpUnlockAllLocked(IN PLOCK_INFORMATION LockInfo,
     {
         PLOCK_SHARED_RANGE Range = CONTAINING_RECORD(ListEntry, LOCK_SHARED_RANGE, Entry);
         ListEntry = ListEntry->Flink;
-        if (Range->ProcessId != Process || (MatchKey && Range->Key != Key))
+        if (Range->FileObject != FileObject || Range->ProcessId != Process ||
+            (MatchKey && Range->Key != Key))
             continue;
         FsRtlpRemoveSharedRangeLocked(LockInfo, Range, FileObject, &Unlocked);
         Removed = TRUE;
@@ -752,6 +758,7 @@ FsRtlpUnlockAllLocked(IN PLOCK_INFORMATION LockInfo,
     {
         Next = RtlEnumerateGenericTableWithoutSplaying(&LockInfo->RangeTable, &RestartKey);
         if (Entry->Exclusive.FileLock.ExclusiveLock &&
+            Entry->Exclusive.FileLock.FileObject == FileObject &&
             Entry->Exclusive.FileLock.ProcessId == Process &&
             (!MatchKey || Entry->Exclusive.FileLock.Key == Key))
         {
