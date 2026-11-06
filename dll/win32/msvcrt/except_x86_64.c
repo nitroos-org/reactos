@@ -27,7 +27,9 @@
 #undef longjmp
 
 #include "ntstatus.h"
+#ifdef __REACTOS__
 #define WIN32_NO_STATUS
+#endif
 #include "windef.h"
 #include "winbase.h"
 #include "winternl.h"
