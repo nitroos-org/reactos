@@ -8,6 +8,7 @@ list(APPEND SOURCE
     LegacyProfileJunctions.c
     LoadUserProfile.c
     ProfileSecurity.c
+    ProgramDataSecurity.c
     testlist.c)
 
 add_executable(userenv_apitest ${SOURCE})
