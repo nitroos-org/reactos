@@ -463,11 +463,6 @@ VOID
 CcRosDereferenceSharedCacheMap(
     _In_ PROS_SHARED_CACHE_MAP SharedCacheMap);
 
-BOOLEAN
-CcRosGetValidDataLength(
-    _In_ PSECTION_OBJECT_POINTERS SectionObjectPointers,
-    _Out_ PLARGE_INTEGER ValidDataLength);
-
 VOID
 NTAPI
 CcShutdownSystem(VOID);
