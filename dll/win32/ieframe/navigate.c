@@ -609,7 +609,10 @@ static const IHttpSecurityVtbl HttpSecurityVtbl = {
 static BindStatusCallback *create_callback(DocHost *doc_host, LPCWSTR url, PBYTE post_data,
         ULONG post_data_len, LPCWSTR headers)
 {
-    BindStatusCallback *ret = malloc(sizeof(BindStatusCallback));
+    BindStatusCallback *ret;
+
+    if(!(ret = malloc(sizeof(BindStatusCallback))))
+        return NULL;
 
     ret->IBindStatusCallback_iface.lpVtbl = &BindStatusCallbackVtbl;
     ret->IHttpNegotiate_iface.lpVtbl      = &HttpNegotiateVtbl;
@@ -702,8 +705,6 @@ static BOOL try_application_url(LPCWSTR url)
     DWORD res, type;
     HRESULT hres;
 
-    static const WCHAR wszURLProtocol[] = {'U','R','L',' ','P','r','o','t','o','c','o','l',0};
-
     hres = CoInternetParseUrl(url, PARSE_SCHEMA, 0, app, ARRAY_SIZE(app), NULL, 0);
     if(FAILED(hres))
         return FALSE;
@@ -712,7 +713,7 @@ static BOOL try_application_url(LPCWSTR url)
     if(res != ERROR_SUCCESS)
         return FALSE;
 
-    res = RegQueryValueExW(hkey, wszURLProtocol, NULL, &type, NULL, NULL);
+    res = RegQueryValueExW(hkey, L"URL Protocol", NULL, &type, NULL, NULL);
     RegCloseKey(hkey);
     if(res != ERROR_SUCCESS || type != REG_SZ)
         return FALSE;
@@ -938,7 +939,7 @@ static HRESULT navigate_bsc(DocHost *This, BindStatusCallback *bsc, IMoniker *mo
 
     if(bsc->post_data) {
         post_data = SafeArrayCreateVector(VT_UI1, 0, bsc->post_data_len);
-        memcpy(post_data->pvData, post_data, bsc->post_data_len);
+        memcpy(post_data->pvData, bsc->post_data, bsc->post_data_len);
     }
 
     on_before_navigate2(This, bsc->url, post_data, bsc->headers, &cancel);
@@ -1021,8 +1022,9 @@ HRESULT navigate_url(DocHost *This, LPCWSTR url, const VARIANT *Flags,
 
     if(post_array) {
         LONG elem_max;
-        SafeArrayAccessData(post_array, (void**)&post_data);
-        SafeArrayGetUBound(post_array, 1, &elem_max);
+        if(FAILED(hres = SafeArrayAccessData(post_array, (void**)&post_data)) ||
+           FAILED(hres = SafeArrayGetUBound(post_array, 1, &elem_max)))
+            return hres;
         post_data_len = (elem_max+1) * SafeArrayGetElemsize(post_array);
     }
 
@@ -1057,8 +1059,10 @@ HRESULT navigate_url(DocHost *This, LPCWSTR url, const VARIANT *Flags,
         task_navigate_bsc_t *task;
 
         task = malloc(sizeof(*task));
-        task->bsc = create_callback(This, url, post_data, post_data_len, headers);
-        push_dochost_task(This, &task->header, navigate_bsc_proc, navigate_bsc_task_destr, This->url == NULL);
+        if((task->bsc = create_callback(This, url, post_data, post_data_len, headers)))
+            push_dochost_task(This, &task->header, navigate_bsc_proc, navigate_bsc_task_destr, This->url == NULL);
+        else
+            hres = E_OUTOFMEMORY;
     }
 
     if(post_data)
@@ -1109,8 +1113,10 @@ static HRESULT navigate_hlink(DocHost *This, IMoniker *mon, IBindCtx *bindctx,
     if(This->doc_navigate) {
         hres = async_doc_navigate(This, url, headers, post_data, post_data_len, FALSE);
     }else {
-        bsc = create_callback(This, url, post_data, post_data_len, headers);
-        hres = navigate_bsc(This, bsc, mon);
+        if((bsc = create_callback(This, url, post_data, post_data_len, headers)))
+            hres = navigate_bsc(This, bsc, mon);
+        else
+            hres = E_OUTOFMEMORY;
         IBindStatusCallback_Release(&bsc->IBindStatusCallback_iface);
     }
 
@@ -1126,22 +1132,16 @@ HRESULT go_home(DocHost *This)
     HKEY hkey;
     DWORD res, type, size;
     WCHAR wszPageName[MAX_PATH];
-    static const WCHAR wszAboutBlank[] = {'a','b','o','u','t',':','b','l','a','n','k',0};
-    static const WCHAR wszStartPage[] = {'S','t','a','r','t',' ','P','a','g','e',0};
-    static const WCHAR wszSubKey[] = {'S','o','f','t','w','a','r','e','\\',
-                                      'M','i','c','r','o','s','o','f','t','\\',
-                                      'I','n','t','e','r','n','e','t',' ','E','x','p','l','o','r','e','r','\\',
-                                      'M','a','i','n',0};
 
-    res = RegOpenKeyW(HKEY_CURRENT_USER, wszSubKey, &hkey);
+    res = RegOpenKeyW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Internet Explorer\\Main", &hkey);
     if (res != ERROR_SUCCESS)
-        return navigate_url(This, wszAboutBlank, NULL, NULL, NULL, NULL);
+        return navigate_url(This, L"about:blank", NULL, NULL, NULL, NULL);
 
     size = sizeof(wszPageName);
-    res = RegQueryValueExW(hkey, wszStartPage, NULL, &type, (LPBYTE)wszPageName, &size);
+    res = RegQueryValueExW(hkey, L"Start Page", NULL, &type, (LPBYTE)wszPageName, &size);
     RegCloseKey(hkey);
     if (res != ERROR_SUCCESS || type != REG_SZ)
-        return navigate_url(This, wszAboutBlank, NULL, NULL, NULL, NULL);
+        return navigate_url(This, L"about:blank", NULL, NULL, NULL, NULL);
 
     return navigate_url(This, wszPageName, NULL, NULL, NULL, NULL);
 }
