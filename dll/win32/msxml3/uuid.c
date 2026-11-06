@@ -40,6 +40,7 @@
 /* Now we can initialize the rest of the uuids */
 #include "initguid.h"
 #include "msxml2.h"
+#include "saxreader_extensions.h"
 
 /*
  * Note that because of a #define in msxml2.h, we end up initializing
