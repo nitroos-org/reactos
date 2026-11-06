@@ -13,8 +13,12 @@
  * validates the answer and writes the rule.
  */
 #include <windows.h>
+#include <wincrypt.h>
+#include <softpub.h>
+#include <wintrust.h>
 #include <shellapi.h>
 #include <stdlib.h>
+#include <string.h>
 #include <wchar.h>
 
 #include "resource.h"
@@ -23,6 +27,7 @@
 
 static WCHAR g_Path[MAX_PATH];
 static WCHAR g_Name[MAX_PATH];
+static WCHAR g_Publisher[256];
 static ULONG g_Pre = 0x2;
 
 static VOID DisplayName(VOID)
@@ -42,8 +47,13 @@ static VOID DisplayName(VOID)
             {
                 WCHAR key[64]; PWSTR desc = NULL;
                 wsprintfW(key, L"\\StringFileInfo\\%04x%04x\\FileDescription", tr->Lang, tr->CodePage);
-                if (VerQueryValueW(data, key, (PVOID *)&desc, &len) && desc && *desc)
-                    lstrcpynW(g_Name, desc, ARRAYSIZE(g_Name));
+                /* a description of only blanks (some compilers write one) is no name: the file name stands in */
+                if (VerQueryValueW(data, key, (PVOID *)&desc, &len) && desc)
+                {
+                    while (*desc == L' ' || *desc == L'\t') desc++;
+                    if (*desc)
+                        lstrcpynW(g_Name, desc, ARRAYSIZE(g_Name));
+                }
             }
         }
         HeapFree(GetProcessHeap(), 0, data);
@@ -53,6 +63,34 @@ static VOID DisplayName(VOID)
     lstrcpynW(g_Name, base ? base + 1 : g_Path, ARRAYSIZE(g_Name));
     dot = wcsrchr(g_Name, L'.');
     if (dot && dot != g_Name) *dot = 0;
+}
+
+/* The publisher is the subject of the certificate that signed the program, when its signature verifies (embedded or
+ * catalog, no user interface, no revocation or network lookups); unsigned or untrusted: g_Publisher stays empty. */
+static VOID SignerName(VOID)
+{
+    GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    WINTRUST_FILE_INFO fi;
+    WINTRUST_DATA wd;
+    LONG st;
+
+    memset(&fi, 0, sizeof(fi)); fi.cbStruct = sizeof(fi); fi.pcwszFilePath = g_Path;
+    memset(&wd, 0, sizeof(wd)); wd.cbStruct = sizeof(wd);
+    wd.dwUIChoice = WTD_UI_NONE; wd.fdwRevocationChecks = WTD_REVOKE_NONE;
+    wd.dwUnionChoice = WTD_CHOICE_FILE; wd.pFile = &fi;
+    wd.dwStateAction = WTD_STATEACTION_VERIFY;
+    wd.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE;
+    st = WinVerifyTrust(INVALID_HANDLE_VALUE, &action, &wd);
+    if (st == ERROR_SUCCESS && wd.hWVTStateData)
+    {
+        CRYPT_PROVIDER_DATA *prov = WTHelperProvDataFromStateData(wd.hWVTStateData);
+        CRYPT_PROVIDER_SGNR *sgnr = prov ? WTHelperGetProvSignerFromChain(prov, 0, FALSE, 0) : NULL;
+        CRYPT_PROVIDER_CERT *cert = sgnr ? WTHelperGetProvCertFromChain(sgnr, 0) : NULL;
+        if (cert && cert->pCert)
+            CertGetNameStringW(cert->pCert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, NULL, g_Publisher, ARRAYSIZE(g_Publisher));
+    }
+    wd.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(INVALID_HANDLE_VALUE, &action, &wd);
 }
 
 static VOID SetFormatted(HWND hDlg, UINT ctl, UINT fmtId)
@@ -88,11 +126,12 @@ static INT_PTR CALLBACK AlertProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
             }
             SendDlgItemMessageW(hDlg, IDC_ALERTICON, STM_SETICON, (WPARAM)LoadIconW(NULL, (PCWSTR)IDI_WARNING), 0);
             DisplayName();
+            SignerName();
             SetFormatted(hDlg, IDC_BODY, IDS_BODY);
             SetFormatted(hDlg, IDC_ALLOW_TEXT, IDS_ALLOW_TEXT);
             LoadStringW(NULL, IDS_UNKNOWN, unk, ARRAYSIZE(unk));
             SetDlgItemTextW(hDlg, IDC_VAL_NAME, g_Name);
-            SetDlgItemTextW(hDlg, IDC_VAL_PUB, unk);
+            SetDlgItemTextW(hDlg, IDC_VAL_PUB, g_Publisher[0] ? g_Publisher : unk);
             SetDlgItemTextW(hDlg, IDC_VAL_PATH, g_Path);
             CheckDlgButton(hDlg, IDC_DOMAIN, (g_Pre & 1) ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hDlg, IDC_PRIVATE, (g_Pre & 2) ? BST_CHECKED : BST_UNCHECKED);
