@@ -201,7 +201,7 @@ dll/win32/msvcp140            # Synced to Wine-11.19, builds the sources of dll/
 dll/win32/msvcp140_1          # Synced to Wine-11.19
 dll/win32/msvcp140_2          # Synced to Wine-11.19
 dll/win32/msvcp90             # Synced to Wine-11.19, shared sources only: msvcp90.dll is not built
-dll/win32/msvcrt              # Synced to Wine-10.0
+dll/win32/msvcrt              # Synced to Wine-11.21
 dll/win32/msvcrt20            # Out of sync
 dll/win32/msvcrt40            # Out of sync
 dll/win32/msvfw32             # Synced to Wine-10.0
