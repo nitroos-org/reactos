@@ -256,8 +256,10 @@ START_TEST(MmSessionTables)
               PsGetProcessId(Processes[i].Process));
         ViewCount++;
     }
-    if (ViewCount < 2)
-        trace("Only %lu session(s) with a member: no second session (NitroSessions 0)\n", ViewCount);
+    /* Needs a second session (NitroSessions 1 or 4): with one, nothing is
+       compared and the test would pass for nothing */
+    ok(ViewCount >= 2, "Only %lu session(s) with a member: no second session (NitroSessions 0?)\n",
+       ViewCount);
 
     /*
      * Every process against every session's view:
