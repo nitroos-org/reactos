@@ -121,6 +121,8 @@ SeclCreateProcessWithLogonW(
     PROFILEINFOW ProfileInfo;
     SECL_DESKTOP_ACCESS *DesktopAccess = NULL;
     PWSTR pszDesktop = NULL;
+    LPVOID pEnvironment = NULL;
+    DWORD dwCreationFlags;
     HANDLE hToken = NULL;
     HANDLE hTargetProcessHandle = NULL;
 
@@ -199,6 +201,26 @@ SeclCreateProcessWithLogonW(
     SeclGrantDesktopAccess(hToken, pRequest->Desktop, &DesktopAccess, &pszDesktop);
     StartupInfo.lpDesktop = pszDesktop;
 
+    /*
+     * Without an environment from the caller, the new process gets one made from the profile of
+     * the user (CreateProcessWithLogonW documents that); passing none would give it the one of this
+     * service, with the profile of the system as USERPROFILE.
+     */
+    dwCreationFlags = pRequest->dwCreationFlags;
+    if (pRequest->Environment != NULL)
+    {
+        pEnvironment = pRequest->Environment;
+    }
+    else if (CreateEnvironmentBlock(&pEnvironment, hToken, FALSE))
+    {
+        dwCreationFlags |= CREATE_UNICODE_ENVIRONMENT;
+    }
+    else
+    {
+        WARN("CreateEnvironmentBlock() failed with Error %lu\n", GetLastError());
+        pEnvironment = NULL;
+    }
+
     /* Create Process */
     rc = CreateProcessAsUserW(hToken,
                               pRequest->ApplicationName,
@@ -206,11 +228,17 @@ SeclCreateProcessWithLogonW(
                               NULL,  // lpProcessAttributes,
                               NULL,  // lpThreadAttributes,
                               FALSE, // bInheritHandles,
-                              pRequest->dwCreationFlags,
-                              pRequest->Environment,  // lpEnvironment,
+                              dwCreationFlags,
+                              pEnvironment,  // lpEnvironment,
                               pRequest->CurrentDirectory,
                               &StartupInfo,
                               &ProcessInfo);
+    if (pEnvironment != NULL && pEnvironment != pRequest->Environment)
+    {
+        DestroyEnvironmentBlock(pEnvironment);
+        pEnvironment = NULL;
+    }
+
     if (rc == FALSE)
     {
         dwError = GetLastError();

@@ -927,8 +927,7 @@ CreateUserProfileExW(
     }
 
     /* Create the profiles directory if it does not exist yet */
-    // FIXME: Security!
-    if (!CreateDirectoryW(szProfilesPath, NULL))
+    if (!CreateSecuredProfileDir(szProfilesPath, ProfileDirUsers, NULL))
     {
         if (GetLastError() != ERROR_ALREADY_EXISTS)
         {
@@ -972,8 +971,7 @@ CreateUserProfileExW(
     StringCbCatW(szUserProfilePath, sizeof(szUserProfilePath), L"\\");
     StringCbCatW(szUserProfilePath, sizeof(szUserProfilePath), szUserProfileName);
 
-    // FIXME: Security!
-    if (!CreateDirectoryW(szUserProfilePath, NULL))
+    if (!CreateSecuredProfileDir(szUserProfilePath, ProfileDirUser, pSid))
     {
         if (GetLastError() != ERROR_ALREADY_EXISTS)
         {
@@ -989,8 +987,7 @@ CreateUserProfileExW(
             StringCbCatW(szUserProfilePath, sizeof(szUserProfilePath), L"\\");
             StringCbCatW(szUserProfilePath, sizeof(szUserProfilePath), szUserProfileName);
 
-            // FIXME: Security!
-            if (CreateDirectoryW(szUserProfilePath, NULL))
+            if (CreateSecuredProfileDir(szUserProfilePath, ProfileDirUser, pSid))
                 break;
 
             if (GetLastError() != ERROR_ALREADY_EXISTS)
@@ -2007,6 +2004,53 @@ cleanup:
 }
 
 
+/*
+ * Profiles that were made before the profile directories got the DACLs of Windows have the one of the
+ * volume root (Authenticated Users: Modify, so any user can change the profile of another). Fix the ones
+ * this logon touches the first time it loads: the profiles directory, the Default and Public profiles
+ * and the profile of this user. Nothing is done to a directory whose DACL is already protected.
+ */
+static VOID
+UpgradeProfileSecurity(
+    _In_ HANDLE hToken,
+    _In_ PCWSTR pszProfilePath)
+{
+    WCHAR szPath[MAX_PATH], szRaw[MAX_PATH];
+    DWORD dwLength, dwType;
+    PSID pUserSid;
+    HKEY hKey;
+
+    dwLength = ARRAYSIZE(szPath);
+    if (GetProfilesDirectoryW(szPath, &dwLength))
+        SecureExistingProfileDirectory(szPath, ProfileDirUsers, NULL, FALSE);
+
+    dwLength = ARRAYSIZE(szPath);
+    if (GetDefaultUserProfileDirectoryW(szPath, &dwLength))
+        SecureExistingProfileDirectory(szPath, ProfileDirUsers, NULL, TRUE);
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
+                      0, KEY_QUERY_VALUE, &hKey) == ERROR_SUCCESS)
+    {
+        dwLength = sizeof(szRaw);
+        if (RegQueryValueExW(hKey, L"Public", NULL, &dwType, (LPBYTE)szRaw, &dwLength) == ERROR_SUCCESS &&
+            (dwType == REG_SZ || dwType == REG_EXPAND_SZ) &&
+            ExpandEnvironmentStringsW(szRaw, szPath, ARRAYSIZE(szPath)))
+        {
+            SecureExistingProfileDirectory(szPath, ProfileDirPublic, NULL, TRUE);
+        }
+        RegCloseKey(hKey);
+    }
+
+    pUserSid = GetUserSid(hToken);
+    if (pUserSid)
+    {
+        SecureExistingProfileDirectory(pszProfilePath, ProfileDirUser, pUserSid, TRUE);
+        LocalFree(pUserSid);
+    }
+}
+
+
 BOOL
 WINAPI
 LoadUserProfileW(
@@ -2086,6 +2130,8 @@ LoadUserProfileW(
             }
             StringCbCatW(szUserHivePath, sizeof(szUserHivePath), L"\\");
             StringCbCatW(szUserHivePath, sizeof(szUserHivePath), lpProfileInfo->lpUserName);
+
+            UpgradeProfileSecurity(hToken, szUserHivePath);
         }
 
         /* Create user hive name */
