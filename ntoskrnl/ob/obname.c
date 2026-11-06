@@ -894,16 +894,19 @@ ParseFromRoot:
                 /*
                  * Deny object creation if:
                  * That's a section object or a symbolic link
-                 * Which isn't in the same section that root directory
+                 * Which isn't in the same session as the directory it is
+                 * inserted in (the directory found by the lookup, which is
+                 * not the root directory when the name went through a
+                 * symbolic link such as Global\ or Session\1\)
                  * That doesn't have the SeCreateGlobalPrivilege
                  * And that is not a known unsecure name
                  */
-                if (RootDirectory->SessionId != -1)
+                if (Directory->SessionId != -1)
                 {
                     if (ObjectHeader->Type == MmSectionObjectType ||
                         ObjectHeader->Type == ObpSymbolicLinkObjectType)
                     {
-                        if (RootDirectory->SessionId != PsGetCurrentProcessSessionId() &&
+                        if (Directory->SessionId != PsGetCurrentProcessSessionId() &&
                             !SeSinglePrivilegeCheck(SeCreateGlobalPrivilege, AccessCheckMode) &&
                             !ObpIsUnsecureName(&ComponentName, BooleanFlagOn(Attributes, OBJ_CASE_INSENSITIVE)))
                         {
