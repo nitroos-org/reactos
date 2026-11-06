@@ -1382,6 +1382,7 @@ DirList(IN OUT LPTSTR szFullPath,   /* [IN] The full path we are listing with tr
     ULONGLONG u64CountBytes;            /* Counter for bytes */
     ULARGE_INTEGER u64Temp;             /* A temporary counter */
     WIN32_FIND_STREAM_DATA wfsdStreamInfo;
+    TCHAR szStreamPath[MAX_PATH];       /* Directory being listed + file name, for the stream lookup */
     PDIRFINDSTREAMNODE * ptrCurNode;    /* The pointer to the first stream */
     static HANDLE (WINAPI *pFindFirstStreamW)(LPCWSTR, STREAM_INFO_LEVELS, LPVOID, DWORD);
     static BOOL (WINAPI *pFindNextStreamW)(HANDLE, LPVOID);
@@ -1449,7 +1450,14 @@ DirList(IN OUT LPTSTR szFullPath,   /* [IN] The full path we are listing with tr
                     /* Try to get stream information */
                     if (pFindFirstStreamW && pFindNextStreamW)
                     {
-                        hStreams = pFindFirstStreamW(wfdFileInfo.cFileName, FindStreamInfoStandard, &wfsdStreamInfo, 0);
+                        /* The file name is relative to the listed directory, not to the current one */
+                        hStreams = INVALID_HANDLE_VALUE;
+                        if ((SIZE_T)(pszFilePart - szFullPath) + _tcslen(wfdFileInfo.cFileName) < ARRAYSIZE(szStreamPath))
+                        {
+                            memcpy(szStreamPath, szFullPath, (pszFilePart - szFullPath) * sizeof(TCHAR));
+                            _tcscpy(&szStreamPath[pszFilePart - szFullPath], wfdFileInfo.cFileName);
+                            hStreams = pFindFirstStreamW(szStreamPath, FindStreamInfoStandard, &wfsdStreamInfo, 0);
+                        }
                     }
                     else
                     {

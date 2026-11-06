@@ -223,6 +223,11 @@ PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
             {
                 ProbeForWrite(Initial, sizeof(*Initial), sizeof(ULONG));
                 Wow64CopyContext(Initial, &Request->Context, Flags);
+                /* The start context is loaded by the thread's first NtContinue, which takes only the groups
+                 * its flags name: the creator's flags do not name the debug registers, so name them here
+                 * or the registers set before the thread starts never reach the hardware */
+                if (Flags & (WOW64_CONTEXT_DEBUG_REGISTERS & ~WOW64_CONTEXT_i386))
+                    Initial->ContextFlags |= WOW64_CONTEXT_DEBUG_REGISTERS;
                 /* Windows reads the sanitized flags back: no NT, no IOPL */
                 if (Flags & (WOW64_CONTEXT_CONTROL & ~WOW64_CONTEXT_i386))
                     Initial->EFlags = (Initial->EFlags & WOW64_EFLAGS_USER_SANITIZE) | 0x202;
