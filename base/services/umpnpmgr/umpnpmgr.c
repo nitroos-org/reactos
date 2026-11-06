@@ -305,6 +305,14 @@ InitializePnPManager(VOID)
         return dwError;
     }
 
+    hUserLogOnEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (hUserLogOnEvent == NULL)
+    {
+        dwError = GetLastError();
+        DPRINT1("Could not create the Logon Event! (Error %lu)\n", dwError);
+        return dwError;
+    }
+
     hNoPendingInstalls = CreateEventW(NULL,
                                       TRUE,
                                       FALSE,

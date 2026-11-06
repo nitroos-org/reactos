@@ -77,6 +77,7 @@ extern HANDLE hUserToken;
 extern CRITICAL_SECTION UserTokenLock;
 extern HANDLE hInstallEvent;
 extern HANDLE hNoPendingInstalls;
+extern HANDLE hUserLogOnEvent;
 
 /* Device-install event list */
 extern HANDLE hDeviceInstallListMutex;

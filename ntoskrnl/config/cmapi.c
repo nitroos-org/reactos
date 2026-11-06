@@ -3036,6 +3036,184 @@ Cleanup:
     return Status;
 }
 
+/* The name of a key or value cell as a counted Unicode string (compressed names are widened). Free with CmpFree. */
+static
+NTSTATUS
+CmpMergeCellName(IN BOOLEAN Compressed,
+                 IN PVOID Name,
+                 IN ULONG Length,
+                 OUT PUNICODE_STRING Result)
+{
+    ULONG Chars = Compressed ? Length : Length / sizeof(WCHAR);
+    PWCHAR Buffer = CmpAllocate((Chars ? Chars : 1) * sizeof(WCHAR), TRUE, TAG_CM);
+
+    if (!Buffer)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    if (Compressed)
+        CmpCopyCompressedName(Buffer, Chars * sizeof(WCHAR), Name, Length);
+    else
+        RtlCopyMemory(Buffer, Name, Chars * sizeof(WCHAR));
+
+    Result->Buffer = Buffer;
+    Result->Length = Result->MaximumLength = (USHORT)(Chars * sizeof(WCHAR));
+    return STATUS_SUCCESS;
+}
+
+/*
+ * Merges the values of a source key into a destination key: a value of the same name (case-insensitive)
+ * replaces the destination's value in place, any other value is appended.
+ */
+static
+NTSTATUS
+CmpMergeKeyValues(IN PHHIVE SourceHive,
+                  IN PCM_KEY_NODE SrcNode,
+                  IN PHHIVE DestinationHive,
+                  IN PCM_KEY_NODE DestNode,
+                  IN HSTORAGE_TYPE StorageType)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    PCELL_DATA SrcList, DestList;
+    PCM_KEY_VALUE SrcValue;
+    UNICODE_STRING Name;
+    HCELL_INDEX OldValue, NewValue;
+    ULONG Index, Position;
+
+    if (SrcNode->ValueList.Count == 0)
+        return STATUS_SUCCESS;
+
+    SrcList = HvGetCell(SourceHive, SrcNode->ValueList.List);
+    ASSERT(SrcList);
+
+    for (Index = 0; Index < SrcNode->ValueList.Count; Index++)
+    {
+        SrcValue = (PCM_KEY_VALUE)HvGetCell(SourceHive, SrcList->u.KeyList[Index]);
+        ASSERT(SrcValue);
+        Status = CmpMergeCellName((SrcValue->Flags & VALUE_COMP_NAME) != 0,
+                                  SrcValue->Name,
+                                  SrcValue->NameLength,
+                                  &Name);
+        HvReleaseCell(SourceHive, SrcList->u.KeyList[Index]);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        OldValue = HCELL_NIL;
+        Position = 0;
+        if (!CmpFindNameInList(DestinationHive, &DestNode->ValueList, &Name, &Position, &OldValue))
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        CmpFree(Name.Buffer, TAG_CM);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        NewValue = CmpCopyValue(SourceHive, SrcList->u.KeyList[Index], DestinationHive, StorageType);
+        if (NewValue == HCELL_NIL)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+
+        if (OldValue != HCELL_NIL)
+        {
+            /* The source value wins: it takes the place of the old one */
+            DestList = HvGetCell(DestinationHive, DestNode->ValueList.List);
+            ASSERT(DestList);
+            DestList->u.KeyList[Position] = NewValue;
+            HvReleaseCell(DestinationHive, DestNode->ValueList.List);
+            if (!CmpFreeValue(DestinationHive, OldValue))
+                HvFreeCell(DestinationHive, OldValue);
+        }
+        else
+        {
+            Status = CmpAddValueToList(DestinationHive,
+                                       NewValue,
+                                       DestNode->ValueList.Count,
+                                       StorageType,
+                                       &DestNode->ValueList);
+            if (!NT_SUCCESS(Status))
+            {
+                if (!CmpFreeValue(DestinationHive, NewValue))
+                    HvFreeCell(DestinationHive, NewValue);
+                break;
+            }
+        }
+    }
+
+    HvReleaseCell(SourceHive, SrcNode->ValueList.List);
+    return Status;
+}
+
+/*
+ * Merges the source key into the destination key that is already in DestinationHive: values of the same
+ * name are taken from the source, subkeys of the same name are merged recursively, the others are copied.
+ */
+static
+NTSTATUS
+CmpMergeKeyInternal(IN PHHIVE SourceHive,
+                    IN HCELL_INDEX SrcKeyCell,
+                    IN PHHIVE DestinationHive,
+                    IN HCELL_INDEX DestKeyCell,
+                    IN HSTORAGE_TYPE StorageType)
+{
+    NTSTATUS Status;
+    PCM_KEY_NODE SrcNode, DestNode, SubNode;
+    HCELL_INDEX SubKey, DestSubKey, NewSubKey;
+    UNICODE_STRING Name;
+    ULONG Index, SubKeyCount;
+
+    PAGED_CODE();
+
+    SrcNode = (PCM_KEY_NODE)HvGetCell(SourceHive, SrcKeyCell);
+    ASSERT(SrcNode);
+    DestNode = (PCM_KEY_NODE)HvGetCell(DestinationHive, DestKeyCell);
+    ASSERT(DestNode);
+
+    Status = CmpMergeKeyValues(SourceHive, SrcNode, DestinationHive, DestNode, StorageType);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    SubKeyCount = SrcNode->SubKeyCounts[Stable] + SrcNode->SubKeyCounts[Volatile];
+    for (Index = 0; Index < SubKeyCount; Index++)
+    {
+        SubKey = CmpFindSubKeyByNumber(SourceHive, SrcNode, Index);
+        ASSERT(SubKey != HCELL_NIL);
+
+        SubNode = (PCM_KEY_NODE)HvGetCell(SourceHive, SubKey);
+        ASSERT(SubNode);
+        Status = CmpMergeCellName((SubNode->Flags & KEY_COMP_NAME) != 0,
+                                  SubNode->Name,
+                                  SubNode->NameLength,
+                                  &Name);
+        HvReleaseCell(SourceHive, SubKey);
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+
+        DestSubKey = CmpFindSubKeyByName(DestinationHive, DestNode, &Name);
+        CmpFree(Name.Buffer, TAG_CM);
+
+        if (DestSubKey != HCELL_NIL)
+        {
+            /* FIXME: Danger!! Kernel stack exhaustion, as in CmpDeepCopyKeyInternal */
+            Status = CmpMergeKeyInternal(SourceHive, SubKey, DestinationHive, DestSubKey, StorageType);
+        }
+        else
+        {
+            Status = CmpDeepCopyKeyInternal(SourceHive, SubKey, DestinationHive, DestKeyCell, StorageType, &NewSubKey);
+            if (NT_SUCCESS(Status) && !CmpAddSubKey(DestinationHive, DestKeyCell, NewSubKey))
+            {
+                HvFreeCell(DestinationHive, NewSubKey);
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+            }
+        }
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+    }
+
+Cleanup:
+    HvReleaseCell(DestinationHive, DestKeyCell);
+    HvReleaseCell(SourceHive, SrcKeyCell);
+    return Status;
+}
+
 NTSTATUS
 NTAPI
 CmSaveMergedKeys(IN PCM_KEY_CONTROL_BLOCK HighKcb,
@@ -3103,12 +3281,14 @@ CmSaveMergedKeys(IN PCM_KEY_CONTROL_BLOCK HighKcb,
     if (!NT_SUCCESS(Status))
         goto done;
 
-    /* Copy the high precedence key recursively into the new hive */
-    Status = CmpDeepCopyKey(HighKcb->KeyHive,
-                            HighKcb->KeyCell,
-                            &KeyHive->Hive,
-                            Stable,
-                            &KeyHive->Hive.BaseBlock->RootCell);
+    /* Merge the high precedence key into the copy of the low one: its values replace the values of the same
+     * name, its subkeys are merged with the subkeys of the same name (copying it over the root would drop
+     * everything the low key has) */
+    Status = CmpMergeKeyInternal(HighKcb->KeyHive,
+                                 HighKcb->KeyCell,
+                                 &KeyHive->Hive,
+                                 KeyHive->Hive.BaseBlock->RootCell,
+                                 Stable);
     if (!NT_SUCCESS(Status))
         goto done;
 

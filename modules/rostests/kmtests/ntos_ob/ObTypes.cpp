@@ -11,45 +11,48 @@
 #define NDEBUG
 #include <debug.h>
 
-const UCHAR TypeIndex_Type[] = { 1, 1 };
-const UCHAR TypeIndex_Directory[] = { 2, 2 };
-const UCHAR TypeIndex_SymbolicLink[] = { 3, 3 };
-const UCHAR TypeIndex_Token[] = { 4, 4 };
-const UCHAR TypeIndex_Process[] = { 5, 6 };
-const UCHAR TypeIndex_Thread[] = { 6, 7 };
-const UCHAR TypeIndex_Job[] = { 7, 5 };
-const UCHAR TypeIndex_DebugObject[] = { 8, 8 };
-const UCHAR TypeIndex_Event[] = { 9, 9 };
-const UCHAR TypeIndex_EventPair[] = { 10, 10 };
-const UCHAR TypeIndex_Mutant[] = { 11, 11 };
-const UCHAR TypeIndex_Callback[] = { 12, 12 };
-const UCHAR TypeIndex_Semaphore[] = { 13, 13 };
-const UCHAR TypeIndex_Timer[] = { 14, 14 };
-const UCHAR TypeIndex_Profile[] = { 15, 15 };
-const UCHAR TypeIndex_KeyedEvent[] = { 16, 16 };
-const UCHAR TypeIndex_WindowStation[] = { 17, 17 };
-const UCHAR TypeIndex_Desktop[] = { 18, 18 };
-const UCHAR TypeIndex_Section[] = { 19, 30 };
-const UCHAR TypeIndex_Key[] = { 20, 32 };
-const UCHAR TypeIndex_Port[] = { 21, 21 };
-const UCHAR TypeIndex_WaitablePort[] = { 22, 22 };
-const UCHAR TypeIndex_Adapter[] = { 23, 20 };
-const UCHAR TypeIndex_Controller[] = { 24, 21 };
-const UCHAR TypeIndex_Device[] = { 25, 22 };
-const UCHAR TypeIndex_Driver[] = { 26, 23 };
-const UCHAR TypeIndex_IoCompletion[] = { 27, 24 };
-const UCHAR TypeIndex_File[] = { 28, 25 };
-const UCHAR TypeIndex_WmiGuid[] = { 29, 34 };
-const UCHAR TypeIndex_FilterConnectionPort[] = { 30, 36 };
-const UCHAR TypeIndex_FilterCommunicationPort[] = { 31, 37 };
+const UCHAR TypeIndex_Type[] = { 1, 1, 1 };
+const UCHAR TypeIndex_Directory[] = { 2, 2, 2 };
+const UCHAR TypeIndex_SymbolicLink[] = { 3, 3, 3 };
+const UCHAR TypeIndex_Token[] = { 4, 4, 4 };
+const UCHAR TypeIndex_Process[] = { 5, 6, 5 };
+const UCHAR TypeIndex_Thread[] = { 6, 7, 6 };
+const UCHAR TypeIndex_Job[] = { 7, 5, 7 };
+const UCHAR TypeIndex_DebugObject[] = { 8, 8, 8 };
+const UCHAR TypeIndex_Event[] = { 9, 9, 10 };
+const UCHAR TypeIndex_EventPair[] = { 10, 10, 11 };
+const UCHAR TypeIndex_Mutant[] = { 11, 11, 12 };
+const UCHAR TypeIndex_Callback[] = { 12, 12, 13 };
+const UCHAR TypeIndex_Semaphore[] = { 13, 13, 14 };
+const UCHAR TypeIndex_Timer[] = { 14, 14, 15 };
+const UCHAR TypeIndex_Profile[] = { 15, 15, 17 };
+const UCHAR TypeIndex_KeyedEvent[] = { 16, 16, 18 };
+const UCHAR TypeIndex_WindowStation[] = { 17, 17, 19 };
+const UCHAR TypeIndex_Desktop[] = { 18, 18, 20 };
+const UCHAR TypeIndex_Section[] = { 19, 30, 21 };
+const UCHAR TypeIndex_Key[] = { 20, 32, 22 };
+const UCHAR TypeIndex_Port[] = { 21, 21, 21 };
+const UCHAR TypeIndex_WaitablePort[] = { 22, 22, 22 };
+const UCHAR TypeIndex_Adapter[] = { 23, 20, 25 };
+const UCHAR TypeIndex_Controller[] = { 24, 21, 26 };
+const UCHAR TypeIndex_Device[] = { 25, 22, 27 };
+const UCHAR TypeIndex_Driver[] = { 26, 23, 28 };
+const UCHAR TypeIndex_IoCompletion[] = { 27, 24, 29 };
+const UCHAR TypeIndex_File[] = { 28, 25, 30 };
+const UCHAR TypeIndex_WmiGuid[] = { 29, 34, 31 };
+const UCHAR TypeIndex_FilterConnectionPort[] = { 30, 36, 30 };
+const UCHAR TypeIndex_FilterCommunicationPort[] = { 31, 37, 31 };
 
 static
 ULONG
 GetNtDdiIndex(ULONG NtDdiVersion)
 {
-    /* ReactOS creates its object types in a fixed order, matching the first column */
+    /* Columns: Windows Server 2003, Vista, ReactOS with the Windows 10 identity. ReactOS creates its object types
+     * in a fixed order. It has types that Windows 10 lacks (EventPair, Port, WaitablePort) and lacks many that it has
+     * (Partition, UserApcReserve, IoCompletionReserve, ActivityReference, PsSiloContext*, WaitCompletionPacket, ...),
+     * so its indexes cannot match Windows 10 (Event 16, Section 42, Key 44, File 37: measured on Windows 10 22H2) */
     if (NtDdiVersion >= NTDDI_WIN10 && is_reactos())
-        return 0;
+        return 2;
 
     switch (NtDdiVersion)
     {

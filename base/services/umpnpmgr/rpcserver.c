@@ -1151,6 +1151,10 @@ PNP_ReportLogOn(
     if (hInstallEvent)
         SetEvent(hInstallEvent);
 
+    /* Wake the install thread: devices that waited for a user get the wizard */
+    if (hUserLogOnEvent)
+        SetEvent(hUserLogOnEvent);
+
     ReturnValue = CR_SUCCESS;
 
 cleanup:

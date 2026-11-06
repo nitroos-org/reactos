@@ -218,6 +218,27 @@ ExpDesktopDelete(PVOID DeletedObject)
                            &Parameters);
 }
 
+/* A window station has no open work of its own; the type needs an open or close procedure to keep the
+ * per-process handle counts (MaintainHandleCount), which Windows does for window stations and desktops */
+static
+NTSTATUS
+NTAPI
+ExpWindowStationOpen(IN OB_OPEN_REASON Reason,
+                     IN KPROCESSOR_MODE AccessMode,
+                     IN PEPROCESS Process OPTIONAL,
+                     IN PVOID ObjectBody,
+                     IN PACCESS_MASK GrantedAccess,
+                     IN ULONG HandleCount)
+{
+    UNREFERENCED_PARAMETER(Reason);
+    UNREFERENCED_PARAMETER(AccessMode);
+    UNREFERENCED_PARAMETER(Process);
+    UNREFERENCED_PARAMETER(ObjectBody);
+    UNREFERENCED_PARAMETER(GrantedAccess);
+    UNREFERENCED_PARAMETER(HandleCount);
+    return STATUS_SUCCESS;
+}
+
 static
 NTSTATUS
 NTAPI
@@ -283,6 +304,8 @@ ExpWin32kInit(VOID)
     ObjectTypeInitializer.ParseProcedure = ExpWinStaObjectParse;
     ObjectTypeInitializer.OkayToCloseProcedure = ExpWindowStationOkToClose;
     ObjectTypeInitializer.SecurityRequired = TRUE;
+    ObjectTypeInitializer.MaintainHandleCount = TRUE;
+    ObjectTypeInitializer.OpenProcedure = ExpWindowStationOpen;
     ObjectTypeInitializer.InvalidAttributes = OBJ_OPENLINK |
                                               OBJ_PERMANENT |
                                               OBJ_EXCLUSIVE;

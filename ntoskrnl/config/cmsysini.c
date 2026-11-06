@@ -1007,7 +1007,7 @@ CmpCreateObjectTypes(VOID)
     UNICODE_STRING Name;
     GENERIC_MAPPING CmpKeyMapping = {KEY_READ,
                                      KEY_WRITE,
-                                     KEY_EXECUTE,
+                                     KEY_EXECUTE | KEY_CREATE_LINK, /* 0x20039, as on Windows 10 */
                                      KEY_ALL_ACCESS};
     PAGED_CODE();
 
