@@ -16,119 +16,67 @@
 
 /**
  * @brief
- * Validates a list of object types passed from user mode,
- * ensuring the following conditions are met for a valid
- * list:
+ * Checks the level of an object type list entry, as captured,
+ * against the rules for a valid list:
  *
- * - The list must not be too big and it can be read
  * - Each object must have a valid level
- * - The level hierarchy between objects has to be consistent
- *   (e.g. a root cannot have a level 2 subordinate object)
  * - The list must have only one root and it must be in the
  *   first position
- * - Each object type GUID can be read and captured
+ * - The level hierarchy between objects has to be consistent
+ *   (e.g. a root cannot have a level 2 subordinate object)
  *
- * @param[in] ObjectTypeList
- * A pointer to an object type list of which the elements
- * are being validated.
+ * @param[in] ObjectTypeIndex
+ * The position of the entry in the list.
  *
- * @param[in] ObjectTypeListLength
- * The length of the list, representing the number of object
- * elements in that list.
+ * @param[in] Level
+ * The captured level of the entry.
+ *
+ * @param[in] PrevLevel
+ * The captured level of the previous entry (ignored for the first).
  *
  * @return
- * Returns STATUS_SUCCESS if the list has been validated and it
- * contains valid objects. STATUS_INVALID_PARAMETER is returned
- * if the list is not valid. Otherwise a NTSTATUS code is returned.
+ * Returns STATUS_SUCCESS if the level is valid, STATUS_INVALID_PARAMETER
+ * otherwise.
  */
 static
 NTSTATUS
-SepValidateObjectTypeList(
-    _In_reads_(ObjectTypeListLength) POBJECT_TYPE_LIST ObjectTypeList,
-    _In_ ULONG ObjectTypeListLength)
+SepCheckObjectTypeLevel(
+    _In_ ULONG ObjectTypeIndex,
+    _In_ USHORT Level,
+    _In_ USHORT PrevLevel)
 {
-    PGUID ObjectTypeGuid;
-    ULONG ObjectTypeIndex;
-    USHORT Level, PrevLevel;
-    SIZE_T Size;
-
-    /* Ensure we do not hit an integer overflow */
-    Size = ObjectTypeListLength * sizeof(OBJECT_TYPE_LIST);
-    if (Size == 0)
+    if (Level > ACCESS_MAX_LEVEL)
     {
-        DPRINT1("The object type list is too big, integer overflow alert!\n");
+        DPRINT1("Invalid object level found (level %u, at index %lu)\n", Level, ObjectTypeIndex);
         return STATUS_INVALID_PARAMETER;
     }
 
-    _SEH2_TRY
+    if (ObjectTypeIndex == 0)
     {
-        /* Ensure we can actually read from that list */
-        ProbeForRead(ObjectTypeList, Size, sizeof(ULONG));
-
-        /* Begin looping for each object from the list */
-        for (ObjectTypeIndex = 0;
-             ObjectTypeIndex < ObjectTypeListLength;
-             ObjectTypeIndex++)
+        /* This is the first position so the object must be the root */
+        if (Level != ACCESS_OBJECT_GUID)
         {
-            /* Get the level of this object and check for validity */
-            Level = ObjectTypeList[ObjectTypeIndex].Level;
-            if (Level > ACCESS_MAX_LEVEL)
-            {
-                DPRINT1("Invalid object level found (level %u, at index %lu)\n", Level, ObjectTypeIndex);
-                _SEH2_YIELD(return STATUS_INVALID_PARAMETER);
-            }
-
-            /* Are we past the first position in the list? */
-            if (ObjectTypeIndex != 0)
-            {
-                /* Ensure that we do not have two object roots */
-                if (Level == ACCESS_OBJECT_GUID)
-                {
-                    DPRINT1("This list has two roots (at index %lu)\n", ObjectTypeIndex);
-                    _SEH2_YIELD(return STATUS_INVALID_PARAMETER);
-                }
-
-                /*
-                 * Ensure the current level is consistent with the prior level.
-                 * That means, if the previous object is the root (denoted by the
-                 * level as ACCESS_OBJECT_GUID aka 0) the current object must
-                 * be a child of the parent which is the root (also called a
-                 * property set). Whereas a property is a sibling of the
-                 * child, the property set.
-                 */
-                if (Level > PrevLevel + 1)
-                {
-                    DPRINT1("The object levels are not consistent (current level %u, previous level %u, at index %lu)\n",
-                            Level, PrevLevel, ObjectTypeIndex);
-                    _SEH2_YIELD(return STATUS_INVALID_PARAMETER);
-                }
-            }
-            else
-            {
-                /* This is the first position so the object must be the root */
-                if (Level != ACCESS_OBJECT_GUID)
-                {
-                    DPRINT1("The object is not the root at first index!\n");
-                    _SEH2_YIELD(return STATUS_INVALID_PARAMETER);
-                }
-            }
-
-            /* Get the object type and check that we can read from it */
-            ObjectTypeGuid = ObjectTypeList[ObjectTypeIndex].ObjectType;
-            ProbeForRead(ObjectTypeGuid, sizeof(GUID), sizeof(ULONG));
-
-            /*
-             * Cache the level, we need it to ensure the levels between
-             * the previous and the next object are consistent with each other.
-             */
-            PrevLevel = Level;
+            DPRINT1("The object is not the root at first index!\n");
+            return STATUS_INVALID_PARAMETER;
         }
+
+        return STATUS_SUCCESS;
     }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+
+    /* Ensure that we do not have two object roots */
+    if (Level == ACCESS_OBJECT_GUID)
     {
-        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        DPRINT1("This list has two roots (at index %lu)\n", ObjectTypeIndex);
+        return STATUS_INVALID_PARAMETER;
     }
-    _SEH2_END;
+
+    /* A child is at most one level below the previous object */
+    if (Level > PrevLevel + 1)
+    {
+        DPRINT1("The object levels are not consistent (current level %u, previous level %u, at index %lu)\n",
+                Level, PrevLevel, ObjectTypeIndex);
+        return STATUS_INVALID_PARAMETER;
+    }
 
     return STATUS_SUCCESS;
 }
@@ -188,9 +136,22 @@ SepGetObjectTypeGuidFromAce(
     /* This Ace must not be NULL */
     ASSERT(Ace);
 
-    /* Grab the GUID based on the object type ACE header */
-    ObjectTypeGuid = IsAceDenied ? (PGUID)&((PACCESS_DENIED_OBJECT_ACE)Ace)->ObjectType :
-        (PGUID)&((PACCESS_ALLOWED_OBJECT_ACE)Ace)->ObjectType;
+    /*
+     * The object type is there only when the ACE says so; without it the
+     * field holds the inherited object type or the start of the SID.
+     * Grab the GUID based on the object type ACE header.
+     */
+    if (IsAceDenied)
+    {
+        if (((PACCESS_DENIED_OBJECT_ACE)Ace)->Flags & ACE_OBJECT_TYPE_PRESENT)
+            ObjectTypeGuid = &((PACCESS_DENIED_OBJECT_ACE)Ace)->ObjectType;
+    }
+    else
+    {
+        if (((PACCESS_ALLOWED_OBJECT_ACE)Ace)->Flags & ACE_OBJECT_TYPE_PRESENT)
+            ObjectTypeGuid = &((PACCESS_ALLOWED_OBJECT_ACE)Ace)->ObjectType;
+    }
+
     return ObjectTypeGuid;
 }
 
@@ -252,8 +213,8 @@ SepObjectTypeGuidInList(
 /**
  * @brief
  * Captures a list of object types and converts it to
- * an internal form for use by the kernel. The list
- * is validated before its data is copied.
+ * an internal form for use by the kernel. Each entry
+ * is read once and validated as it is copied.
  *
  * @param[in] ObjectTypeList
  * A pointer to a list of object types passed from
@@ -289,6 +250,7 @@ SeCaptureObjectTypeList(
     ULONG ObjectTypeIndex;
     SIZE_T Size;
     PGUID ObjectTypeGuid;
+    USHORT Level, PrevLevel = 0;
     POBJECT_TYPE_LIST_INTERNAL InternalTypeList;
 
     PAGED_CODE();
@@ -313,13 +275,29 @@ SeCaptureObjectTypeList(
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Validate that list before we copy contents from it */
-    Status = SepValidateObjectTypeList(ObjectTypeList, ObjectTypeListLength);
-    if (!NT_SUCCESS(Status))
+    /*
+     * The list is in caller memory, which other threads of the caller can
+     * change while we look at it: every entry is read once, checked as it
+     * was read and copied. The size of the captured list (the larger of the
+     * two) must not overflow; such a count cannot describe a list in user
+     * memory anyway.
+     */
+    if (ObjectTypeListLength > MAXULONG_PTR / sizeof(OBJECT_TYPE_LIST_INTERNAL))
     {
-        DPRINT1("SepValidateObjectTypeList failed (Status 0x%08lx)\n", Status);
-        return Status;
+        DPRINT1("The object type list is too big (%lu entries)\n", ObjectTypeListLength);
+        return STATUS_INVALID_PARAMETER;
     }
+
+    /* Ensure the list is in user memory before allocating room for it */
+    _SEH2_TRY
+    {
+        ProbeForRead(ObjectTypeList, ObjectTypeListLength * sizeof(OBJECT_TYPE_LIST), sizeof(ULONG));
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
 
     /* Allocate a new list */
     Size = ObjectTypeListLength * sizeof(OBJECT_TYPE_LIST_INTERNAL);
@@ -330,37 +308,50 @@ SeCaptureObjectTypeList(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
+    Status = STATUS_SUCCESS;
     _SEH2_TRY
     {
-        /* Loop for every object element, data was already probed */
         for (ObjectTypeIndex = 0;
              ObjectTypeIndex < ObjectTypeListLength;
              ObjectTypeIndex++)
         {
-            /* Copy the object type GUID */
-            ObjectTypeGuid = ObjectTypeList[ObjectTypeIndex].ObjectType;
-            InternalTypeList[ObjectTypeIndex].ObjectTypeGuid = *ObjectTypeGuid;
+            /* Read the level once and check it against the previous one */
+            Level = ObjectTypeList[ObjectTypeIndex].Level;
+            Status = SepCheckObjectTypeLevel(ObjectTypeIndex, Level, PrevLevel);
+            if (!NT_SUCCESS(Status))
+            {
+                break;
+            }
 
-            /* Copy the object hierarchy level */
-            InternalTypeList[ObjectTypeIndex].Level = ObjectTypeList[ObjectTypeIndex].Level;
+            /* Read the object type pointer once, probe and copy the GUID */
+            ObjectTypeGuid = ObjectTypeList[ObjectTypeIndex].ObjectType;
+            ProbeForRead(ObjectTypeGuid, sizeof(GUID), sizeof(ULONG));
+            InternalTypeList[ObjectTypeIndex].ObjectTypeGuid = *ObjectTypeGuid;
+            InternalTypeList[ObjectTypeIndex].Level = Level;
 
             /* Initialize the access check rights */
             InternalTypeList[ObjectTypeIndex].ObjectAccessRights.RemainingAccessRights = 0;
             InternalTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights = 0;
             InternalTypeList[ObjectTypeIndex].ObjectAccessRights.DeniedAccessRights = 0;
-        }
 
-        /* Give the captured list to caller */
-        *CapturedObjectTypeList = InternalTypeList;
+            PrevLevel = Level;
+        }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
-        ExFreePoolWithTag(InternalTypeList, TAG_SEPA);
-        InternalTypeList = NULL;
-        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        Status = _SEH2_GetExceptionCode();
     }
     _SEH2_END;
 
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Failed to capture the object type list (Status 0x%08lx)\n", Status);
+        ExFreePoolWithTag(InternalTypeList, TAG_SEPA);
+        return Status;
+    }
+
+    /* Give the captured list to caller */
+    *CapturedObjectTypeList = InternalTypeList;
     return STATUS_SUCCESS;
 }
 
