@@ -176,6 +176,7 @@
 @ cdecl _Strftime(ptr long str ptr ptr)
 @ cdecl _XcptFilter(long ptr)
 @ stdcall -arch=!i386 __C_specific_handler(ptr long ptr ptr) ntdll.__C_specific_handler
+@ stdcall -arch=arm64ec -norelay __C_specific_handler(ptr long ptr ptr)
 @ cdecl __CppXcptFilter(long ptr)
 # stub -version=0x600+ -arch=i386 __CxxCallUnwindDelDtor
 # stub -arch=i386 __CxxCallUnwindDtor
@@ -477,9 +478,11 @@
 @ varargs -version=0x600+ _fscanf_s_l(ptr str ptr)
 @ cdecl -version=0x600+ _fseeki64(ptr int64 long)
 @ cdecl _fsopen(str str long)
-@ cdecl _fstat(long ptr)
+@ cdecl -arch=win32 _fstat(long ptr) _fstat32
+@ cdecl -arch=win64 _fstat(long ptr) _fstat64i32
 @ cdecl _fstat64(long ptr)
-@ cdecl _fstati64(long ptr)
+@ cdecl -arch=win32 _fstati64(long ptr) _fstat32i64
+@ cdecl -arch=win64 _fstati64(long ptr) _fstat64
 @ cdecl -arch=win32 _ftime(ptr) _ftime32
 @ cdecl -arch=win64 _ftime(ptr) _ftime64
 @ cdecl -version=0x600+ _ftime32(ptr)
@@ -949,9 +952,11 @@
 @ varargs -version=0x600+ _sprintf_s_l(ptr long str ptr)
 @ varargs -version=0x600+ _sscanf_l(str str ptr)
 @ varargs -version=0x600+ _sscanf_s_l(str str ptr)
-@ cdecl _stat(str ptr)
+@ cdecl -arch=win32 _stat(str ptr) _stat32
+@ cdecl -arch=win64 _stat(str ptr) _stat64i32
 @ cdecl _stat64(str ptr)
-@ cdecl _stati64(str ptr)
+@ cdecl -arch=win32 _stati64(str ptr) _stat32i64
+@ cdecl -arch=win64 _stati64(str ptr) _stat64
 @ cdecl _statusfp()
 @ cdecl _strcmpi(str str) _stricmp
 @ cdecl -version=0x600+ _strcoll_l(str str ptr)
@@ -1084,17 +1089,17 @@
 @ cdecl -version=0x600+ _vsprintf_p(ptr long str ptr)
 @ cdecl -version=0x600+ _vsprintf_p_l(ptr long str ptr ptr)
 @ cdecl -version=0x600+ _vsprintf_s_l(ptr long str ptr ptr)
-@ cdecl -version=0x400-0x502 -impsym _vswprintf() vswprintf # Compatibility for pre NT6
 @ cdecl -version=0x600+ _vswprintf(ptr wstr ptr)
 @ cdecl -version=0x600+ _vswprintf_c(ptr long wstr ptr)
 @ cdecl -version=0x600+ _vswprintf_c_l(ptr long wstr ptr ptr)
 @ cdecl -version=0x600+ _vswprintf_l(ptr wstr ptr ptr)
 @ cdecl -version=0x600+ _vswprintf_p_l(ptr long wstr ptr ptr)
 @ cdecl -version=0x600+ _vswprintf_s_l(ptr long wstr ptr ptr)
-# stub -version=0x600+ _vwprintf_l(wstr ptr ptr)
+@ cdecl -version=0x600+ _vwprintf_l(wstr ptr ptr)
 # stub -version=0x600+ _vwprintf_p(wstr ptr)
 # stub -version=0x600+ _vwprintf_p_l(wstr ptr ptr)
 # stub -version=0x600+ _vwprintf_s_l(wstr ptr ptr)
+@ cdecl -version=0x400-0x502 -impsym _vswprintf() vswprintf # Compatibility for pre NT6
 @ cdecl _waccess(wstr long)
 @ cdecl -version=0x600+ _waccess_s(wstr long)
 @ cdecl _wasctime(ptr)
@@ -1196,7 +1201,7 @@
 @ cdecl _wperror(wstr)
 @ extern _wpgmptr MSVCRT__wpgmptr
 @ cdecl _wpopen (wstr wstr) _wpopen
-# stub -version=0x600+ _wprintf_l(wstr ptr)
+@ varargs -version=0x600+ _wprintf_l(wstr ptr)
 # stub -version=0x600+ _wprintf_p(wstr)
 # stub -version=0x600+ _wprintf_p_l(wstr ptr)
 # stub -version=0x600+ _wprintf_s_l(wstr ptr)
@@ -1223,9 +1228,11 @@
 @ cdecl _wspawnvpe(long wstr ptr ptr)
 @ cdecl _wsplitpath(wstr ptr ptr ptr ptr)
 @ cdecl -version=0x600+ _wsplitpath_s(wstr ptr long ptr long ptr long ptr long)
-@ cdecl _wstat(wstr ptr)
-@ cdecl _wstati64(wstr ptr)
+@ cdecl -arch=win32 _wstat(wstr ptr) _wstat32
+@ cdecl -arch=win64 _wstat(wstr ptr) _wstat64i32
 @ cdecl _wstat64(wstr ptr)
+@ cdecl -arch=win32 _wstati64(wstr ptr) _wstat32i64
+@ cdecl -arch=win64 _wstati64(wstr ptr) _wstat64
 @ cdecl _wstrdate(ptr)
 @ cdecl -version=0x600+ _wstrdate_s(ptr long)
 @ cdecl _wstrtime(ptr)
@@ -1384,11 +1391,14 @@
 @ cdecl mbtowc(ptr str long)
 @ cdecl memchr(ptr long long)
 @ cdecl memcmp(ptr ptr long)
-@ cdecl memcpy(ptr ptr long)
+@ cdecl -arch=!arm64ec memcpy(ptr ptr long)
+@ cdecl -arch=arm64ec -norelay memcpy(ptr ptr long)
 @ cdecl -version=0x600+ memcpy_s(ptr long ptr long)
-@ cdecl memmove(ptr ptr long)
+@ cdecl -arch=!arm64ec memmove(ptr ptr long)
+@ cdecl -arch=arm64ec -norelay memmove(ptr ptr long)
 @ cdecl -version=0x600+ memmove_s(ptr long ptr long)
-@ cdecl memset(ptr long long)
+@ cdecl -arch=!arm64ec memset(ptr long long)
+@ cdecl -arch=arm64ec -norelay memset(ptr long long)
 @ cdecl -arch=win32 mktime(ptr) _mktime32
 @ cdecl -arch=win64 mktime(ptr) _mktime64
 @ cdecl modf(double ptr)
