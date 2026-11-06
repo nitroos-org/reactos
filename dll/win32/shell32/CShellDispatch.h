@@ -18,6 +18,7 @@ class CShellDispatch:
     public IObjectWithSite
 {
 private:
+    CComPtr<IUnknown> m_pSite;
 
 public:
     CShellDispatch();
