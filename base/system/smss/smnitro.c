@@ -331,22 +331,26 @@ SmpNitroKillAndWait(
     DPRINT1("SMSS: NitroSessions: test kill of %s, Status=%lx\n", What, Status);
 }
 
-/* Detach SMSS from the session it is attached to, if any */
-static
-VOID
+/*
+ * Detach SMSS from the session it is attached to, if any. Returns the failure
+ * status when SMSS is still attached afterwards: the caller must not start
+ * anything meant to be in no session then.
+ */
+NTSTATUS
+NTAPI
 SmpNitroDetach(VOID)
 {
     NTSTATUS Status;
     PVOID State;
 
-    if (AttachedSessionId == -1) return;
+    if (AttachedSessionId == -1) return STATUS_SUCCESS;
 
     Status = SmpAcquirePrivilege(SE_LOAD_DRIVER_PRIVILEGE, &State);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("SMSS: NitroSessions: no privilege to detach from session %lu, Status=%lx\n",
                 AttachedSessionId, Status);
-        return;
+        return Status;
     }
 
     Status = NtSetSystemInformation(SystemSessionDetach,
@@ -357,6 +361,7 @@ SmpNitroDetach(VOID)
     if (NT_SUCCESS(Status)) AttachedSessionId = -1;
 
     SmpReleasePrivilege(State);
+    return Status;
 }
 
 /*
@@ -457,10 +462,17 @@ SmpStartNitroCsrSession(VOID)
     }
 
     /* Detach again; SMSS stays the leader of no session */
-    SmpNitroDetach();
+    Status2 = SmpNitroDetach();
+    ASSERT(NT_SUCCESS(Status2));
 
-    /* Created after the detach: a process in no session */
-    if (SmpNitroSessionsTestCommand0.Length)
+    /* Created after the detach: a process in no session. Not while SMSS is
+       still attached: the process would join the session instead */
+    if (!NT_SUCCESS(Status2))
+    {
+        DPRINT1("SMSS: NitroSessions: still attached to session %lu, no test command in no session\n",
+                AttachedSessionId);
+    }
+    else if (SmpNitroSessionsTestCommand0.Length)
     {
         Status2 = SmpExecuteCommand(&SmpNitroSessionsTestCommand0, 0, NULL, SMP_ASYNC_FLAG);
         DPRINT1("SMSS: NitroSessions: test command '%wZ' in no session, Status=%lx\n",
