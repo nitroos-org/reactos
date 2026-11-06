@@ -125,6 +125,7 @@ list(APPEND SOURCE
     UnicodeToAnsiMessage.c
     UpdateLayeredWindow.c
     UserHandleGrantAccess.c
+    UserSrvRegistration.c
     VirtualKey.c
     Win8User.c
     Wow64WinArguments.c

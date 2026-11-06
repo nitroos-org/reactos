@@ -125,6 +125,7 @@ extern void func_TrackPopupMenuEx(void);
 extern void func_UnicodeToAnsiMessage(void);
 extern void func_UpdateLayeredWindow(void);
 extern void func_UserHandleGrantAccess(void);
+extern void func_UserSrvRegistration(void);
 extern void func_VirtualKey(void);
 extern void func_Wow64WinArguments(void);
 extern void func_WinEventHook(void);
@@ -268,6 +269,7 @@ const struct test winetest_testlist[] =
     { "UnicodeToAnsiMessage", func_UnicodeToAnsiMessage },
     { "UpdateLayeredWindow", func_UpdateLayeredWindow },
     { "UserHandleGrantAccess", func_UserHandleGrantAccess },
+    { "UserSrvRegistration", func_UserSrvRegistration },
     { "VirtualKey", func_VirtualKey },
     { "Win8User", func_Win8User },
     { "PhysicalCoords", func_PhysicalCoords },

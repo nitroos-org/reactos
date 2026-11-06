@@ -426,6 +426,72 @@ START_TEST(LsaLogonSession)
 }
 
 static WCHAR NewPassword[] = L"Logon-User-New-2026!";
+static WCHAR BadOldPassword[] = L"Logon-User-Wrong-2026!";
+
+/*
+ * MsV1_0ChangePassword with an old password that is not right. Measured on Windows 10 22H2, a
+ * 64-bit and a 32-bit process alike: the call returns STATUS_SUCCESS and the protocol status is
+ * STATUS_WRONG_PASSWORD (it is the same for an account that does not exist). ReactOS changed
+ * nothing but answered STATUS_SUCCESS for both.
+ */
+static VOID ChangePasswordPackage(PCWSTR Computer, PCWSTR User)
+{
+    HMODULE Secur32 = LoadLibraryW(L"secur32.dll");
+    LSA_CONNECT Connect = Secur32 ? (LSA_CONNECT)GetProcAddress(Secur32, "LsaConnectUntrusted") : NULL;
+    LSA_LOOKUP Lookup = Secur32 ? (LSA_LOOKUP)GetProcAddress(Secur32, "LsaLookupAuthenticationPackage") : NULL;
+    LSA_CALL Call = Secur32 ? (LSA_CALL)GetProcAddress(Secur32, "LsaCallAuthenticationPackage") : NULL;
+    LSA_CLOSE Deregister = Secur32 ? (LSA_CLOSE)GetProcAddress(Secur32, "LsaDeregisterLogonProcess") : NULL;
+    LSA_CLOSE FreeBuffer = Secur32 ? (LSA_CLOSE)GetProcAddress(Secur32, "LsaFreeReturnBuffer") : NULL;
+    PMSV1_0_CHANGEPASSWORD_REQUEST Request;
+    UCHAR RequestBuffer[sizeof(MSV1_0_CHANGEPASSWORD_REQUEST) + 4 * 64 * sizeof(WCHAR)];
+    PWSTR Next;
+    LSA_STRING Name;
+    HANDLE Lsa;
+    ULONG Package, Length = 0;
+    PVOID Buffer = NULL;
+    NTSTATUS Status, ProtocolStatus;
+
+    if (!Connect || !Lookup || !Call || !Deregister || !FreeBuffer)
+    {
+        skip("secur32 has no LSA client functions\n");
+        return;
+    }
+    Status = Connect(&Lsa);
+    ok(Status == STATUS_SUCCESS, "LsaConnectUntrusted returned %08lx\n", Status);
+    if (!NT_SUCCESS(Status))
+        return;
+    RtlInitString((PSTRING)&Name, MSV1_0_PACKAGE_NAME);
+    Status = Lookup(Lsa, &Name, &Package);
+    ok(Status == STATUS_SUCCESS, "LsaLookupAuthenticationPackage returned %08lx\n", Status);
+    if (NT_SUCCESS(Status))
+    {
+        ZeroMemory(RequestBuffer, sizeof(RequestBuffer));
+        Request = (PMSV1_0_CHANGEPASSWORD_REQUEST)RequestBuffer;
+        Request->MessageType = MsV1_0ChangePassword;
+        Request->Impersonating = TRUE;
+        Next = (PWSTR)(Request + 1);
+#define PACK_STRING(Field, Text) \
+        do { \
+            StringCchCopyW(Next, 64, Text); \
+            RtlInitUnicodeString(&Request->Field, Next); \
+            Next += 64; \
+        } while (0)
+        PACK_STRING(DomainName, Computer);
+        PACK_STRING(AccountName, User);
+        PACK_STRING(OldPassword, BadOldPassword);
+        PACK_STRING(NewPassword, NewPassword);
+#undef PACK_STRING
+        ProtocolStatus = 0x12345678;
+        Status = Call(Lsa, Package, Request, sizeof(RequestBuffer), &Buffer, &Length, &ProtocolStatus);
+        ok(Status == STATUS_SUCCESS, "MsV1_0ChangePassword(wrong old password) returned %08lx\n", Status);
+        ok(ProtocolStatus == STATUS_WRONG_PASSWORD, "MsV1_0ChangePassword(wrong old password): protocol status %08lx\n",
+           ProtocolStatus);
+        if (Buffer)
+            FreeBuffer(Buffer);
+        SecureZeroMemory(RequestBuffer, sizeof(RequestBuffer));
+    }
+    Deregister(Lsa);
+}
 
 static VOID ChildChangePassword(PCSTR UserA)
 {
@@ -437,6 +503,18 @@ static VOID ChildChangePassword(PCSTR UserA)
 
     MultiByteToWideChar(CP_ACP, 0, UserA, -1, User, RTL_NUMBER_OF(User));
     ok(GetComputerNameW(Computer, &Size), "GetComputerNameW failed\n");
+
+    /* A wrong old password is refused and changes nothing; an unknown account gets the same answer */
+    Status = NetUserChangePassword(Computer, User, BadOldPassword, NewPassword);
+    ok(Status == ERROR_INVALID_PASSWORD, "NetUserChangePassword(wrong old password) returned %lu\n", Status);
+    Status = NetUserChangePassword(Computer, L"logon-user-no-such-1", BadOldPassword, NewPassword);
+    ok(Status == ERROR_INVALID_PASSWORD, "NetUserChangePassword(unknown account) returned %lu\n", Status);
+    ChangePasswordPackage(Computer, User);
+    Token = NULL;
+    Ok = LogonUserW(User, L".", TestPassword, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &Token);
+    ok(Ok, "LogonUserW with the unchanged password failed: %lu\n", GetLastError());
+    if (Ok)
+        CloseHandle(Token);
 
     Status = NetUserChangePassword(Computer, User, TestPassword, NewPassword);
     ok(Status == NERR_Success, "NetUserChangePassword returned %lu\n", Status);

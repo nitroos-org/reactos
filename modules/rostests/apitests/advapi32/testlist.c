@@ -35,6 +35,7 @@ extern void func_LogonUserServiceSecret(void);
 extern void func_LogonUserUserRights(void);
 extern void func_LsaLogonSession(void);
 extern void func_LsaLookupLeak(void);
+extern void func_LsaLookupNamesUnmapped(void);
 extern void func_LsassLeak(void);
 extern void func_LsaLogonUserS4U(void);
 extern void func_LsaManageSidNameMapping(void);
@@ -76,6 +77,7 @@ extern void func_RegSecurityMapping(void);
 extern void func_RegSecurityRoundTrip(void);
 extern void func_RegSecurityCreate(void);
 extern void func_RestrictedSidsCopy(void);
+extern void func_RestrictedTokenAccess(void);
 extern void func_RtlEncryptMemory(void);
 extern void func_SaferIdentifyLevel(void);
 extern void func_TokenDefaultDacl(void);
@@ -158,6 +160,7 @@ const struct test winetest_testlist[] =
     { "LogonUserUserRights", func_LogonUserUserRights },
     { "LsaLogonSession", func_LsaLogonSession },
     { "LsaLookupLeak", func_LsaLookupLeak },
+    { "LsaLookupNamesUnmapped", func_LsaLookupNamesUnmapped },
     { "LsassLeak", func_LsassLeak },
     { "LsaLogonUserS4U", func_LsaLogonUserS4U },
     { "LsaManageSidNameMapping", func_LsaManageSidNameMapping },
@@ -199,6 +202,7 @@ const struct test winetest_testlist[] =
     { "RegSecurityRoundTrip", func_RegSecurityRoundTrip },
     { "RegSecurityCreate", func_RegSecurityCreate },
     { "RestrictedSidsCopy", func_RestrictedSidsCopy },
+    { "RestrictedTokenAccess", func_RestrictedTokenAccess },
     { "RtlEncryptMemory", func_RtlEncryptMemory },
     { "SaferIdentifyLevel", func_SaferIdentifyLevel },
     { "TokenDefaultDacl", func_TokenDefaultDacl },

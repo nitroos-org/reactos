@@ -8128,17 +8128,22 @@ SamrChangePasswordUser(IN SAMPR_HANDLE UserHandle,
 
     if (Status == STATUS_WRONG_PASSWORD)
     {
+        NTSTATUS UpdateStatus;
+
         /* Update BadPasswordCount and LastBadPasswordTime */
         UserFixedData.BadPasswordCount++;
         UserFixedData.LastBadPasswordTime.QuadPart = SystemTime.QuadPart;
 
-        /* Set the fixed size user data */
+        /* Set the fixed size user data. The caller still gets STATUS_WRONG_PASSWORD:
+           returning the status of this write told it the password had been changed. */
         Length = sizeof(SAM_USER_FIXED_DATA);
-        Status = SampSetObjectAttribute(UserObject,
-                                        L"F",
-                                        REG_BINARY,
-                                        &UserFixedData,
-                                        Length);
+        UpdateStatus = SampSetObjectAttribute(UserObject,
+                                              L"F",
+                                              REG_BINARY,
+                                              &UserFixedData,
+                                              Length);
+        if (!NT_SUCCESS(UpdateStatus))
+            TRACE("SampSetObjectAttribute failed to update the bad password count (Status 0x%08lx)\n", UpdateStatus);
     }
 
 done:

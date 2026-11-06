@@ -1149,11 +1149,39 @@ SepAccessCheckWorker(
                                &AccessCheckRights);
 
         /*
-         * Perform further access checks if this token
-         * has restricted SIDs.
+         * A token with restricting SIDs gets only the rights that both the
+         * normal and the restricting SIDs are granted: the restricted pass
+         * gets rights of its own and the two sets are intersected (as for
+         * the regular check, which runs the passes one after the other).
+         * Adding the restricted pass to the same rights handed out the
+         * union, e.g. the rights of an allow ACE for a SID that is not
+         * in the restricting list (Windows 10 grants nothing there).
          */
         if (SeTokenIsRestricted(Token))
         {
+            ACCESS_CHECK_RIGHTS RestrictedRights = {0};
+            PACCESS_MASK NormalGranted = NULL;
+
+            if (ObjectTypeList && ObjectTypeListLength)
+            {
+                NormalGranted = ExAllocatePoolWithTag(PagedPool,
+                                                      ObjectTypeListLength * sizeof(ACCESS_MASK),
+                                                      TAG_SE);
+                if (NormalGranted == NULL)
+                {
+                    PreviouslyGrantedAccess = 0;
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                    goto ReturnCommonStatus;
+                }
+
+                for (ObjectTypeIndex = 0; ObjectTypeIndex < ObjectTypeListLength; ObjectTypeIndex++)
+                {
+                    NormalGranted[ObjectTypeIndex] = ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights;
+                    ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights = 0;
+                    ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.DeniedAccessRights = 0;
+                }
+            }
+
             SepAnalyzeAcesFromDacl(AccessCheckMaximum,
                                    0,
                                    Dacl,
@@ -1165,7 +1193,19 @@ SepAccessCheckWorker(
                                    ObjectTypeList,
                                    ObjectTypeListLength,
                                    UseResultList,
-                                   &AccessCheckRights);
+                                   &RestrictedRights);
+
+            AccessCheckRights.GrantedAccessRights &= RestrictedRights.GrantedAccessRights;
+
+            if (NormalGranted != NULL)
+            {
+                for (ObjectTypeIndex = 0; ObjectTypeIndex < ObjectTypeListLength; ObjectTypeIndex++)
+                {
+                    ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights &= NormalGranted[ObjectTypeIndex];
+                }
+
+                ExFreePoolWithTag(NormalGranted, TAG_SE);
+            }
         }
 
         /* The caller did not provide an object type list, check access only for that object */
