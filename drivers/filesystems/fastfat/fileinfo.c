@@ -2657,7 +2657,7 @@ Return Value:
 
             _SEH2_TRY {
 
-                if (!CcPinMappedData( Vcb->VirtualVolumeFile,
+                if (!FatCcPinMappedData( IrpContext, Vcb->VirtualVolumeFile,
                                       &FatLargeZero,
                                       BytesToMap,
                                       BooleanFlagOn(IrpContext->Flags, IRP_CONTEXT_FLAG_WAIT),

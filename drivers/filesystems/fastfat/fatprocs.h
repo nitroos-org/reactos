@@ -448,6 +448,42 @@ FatLogOf(
 //   Buffer control routines for data caching, implemented in CacheSup.c
 //
 
+//
+//  Cache pins and maps of metadata that wait for memory instead of failing, implemented in CacheSup.c
+//
+
+BOOLEAN
+FatCcMapData (
+    IN PIRP_CONTEXT IrpContext,
+    IN PFILE_OBJECT FileObject,
+    IN PLARGE_INTEGER FileOffset,
+    IN ULONG Length,
+    IN ULONG Flags,
+    OUT PVOID *Bcb,
+    OUT PVOID *Buffer
+    );
+
+BOOLEAN
+FatCcPinRead (
+    IN PIRP_CONTEXT IrpContext,
+    IN PFILE_OBJECT FileObject,
+    IN PLARGE_INTEGER FileOffset,
+    IN ULONG Length,
+    IN ULONG Flags,
+    OUT PVOID *Bcb,
+    OUT PVOID *Buffer
+    );
+
+BOOLEAN
+FatCcPinMappedData (
+    IN PIRP_CONTEXT IrpContext,
+    IN PFILE_OBJECT FileObject,
+    IN PLARGE_INTEGER FileOffset,
+    IN ULONG Length,
+    IN ULONG Flags,
+    OUT PVOID *Bcb
+    );
+
 VOID
 FatReadVolumeFile (
     IN PIRP_CONTEXT IrpContext,

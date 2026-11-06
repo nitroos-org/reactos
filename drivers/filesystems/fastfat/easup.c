@@ -3653,7 +3653,7 @@ Return Value:
             ByteCount = Length;
         }
 
-        if (!CcPinRead( VirtualEaFile,
+        if (!FatCcPinRead( IrpContext, VirtualEaFile,
                         &LargeVbo,
                         ByteCount,
                         BooleanFlagOn(IrpContext->Flags, IRP_CONTEXT_FLAG_WAIT),
