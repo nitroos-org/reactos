@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    AccessCheckObjectTypeList.c
     AddMandatoryAce.c
     AuditCategories.c
     CveEventWrite.c
