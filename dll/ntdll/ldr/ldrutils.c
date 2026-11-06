@@ -1095,6 +1095,15 @@ LdrpCorFixupIlOnlyImage(
     if (!(CorFlags & COMIMAGE_FLAGS_ILONLY) || (CorFlags & COMIMAGE_FLAGS_32BITREQUIRED))
         return FALSE;
 
+    /* A PE32 TLS directory is not converted, and the image does not start: Windows ends the process with
+       STATUS_INVALID_IMAGE_FORMAT before the loader's breakpoint, with or without callbacks */
+    if (Directories > IMAGE_DIRECTORY_ENTRY_TLS &&
+        Nt32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress &&
+        Nt32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].Size)
+    {
+        return FALSE;
+    }
+
     /* The wider headers must still fit in the header page, below the first section */
     Sections = IMAGE_FIRST_SECTION(Nt32);
     HeaderEnd = (ULONG_PTR)Nt64 + FIELD_OFFSET(IMAGE_NT_HEADERS64, OptionalHeader) + sizeof(IMAGE_OPTIONAL_HEADER64) +
@@ -1140,14 +1149,8 @@ LdrpCorFixupIlOnlyImage(
     Opt64.NumberOfRvaAndSizes = Directories;
     for (i = 0; i < Directories; i++)
         Opt64.DataDirectory[i] = Opt32.DataDirectory[i];
-    /* The loader reads these two with the PE32+ layouts from here on, and the PE32 structures that the file holds do
-       not have them: take them out, as the converted header has no use for them (a PE32 TLS directory read wide
-       sizes the TLS block from garbage and fails the process start). Not measured on Windows: see
-       DOTNET-anycpu-review-followups */
-    if (Directories > IMAGE_DIRECTORY_ENTRY_TLS)
-        RtlZeroMemory(&Opt64.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS], sizeof(IMAGE_DATA_DIRECTORY));
-    if (Directories > IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)
-        RtlZeroMemory(&Opt64.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG], sizeof(IMAGE_DATA_DIRECTORY));
+    /* The directories are copied as they are. Measured on Windows 10 22H2: the LOAD_CONFIG directory of such an image
+       stays as the file has it, and an image with a TLS directory does not start (see the check above). */
 
     /* The header page of an image view is read-only; the write makes it a private copy */
     ProtectBase = ViewBase;
