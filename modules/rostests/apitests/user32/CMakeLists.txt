@@ -52,6 +52,7 @@ list(APPEND SOURCE
     GetWindowPlacement.c
     GW_ENABLEDPOPUP.c
     Handle32.c
+    HookInputBatch.c
     HookChainUnhookUaf.c
     HookFamilies.c
     HungWindow.c

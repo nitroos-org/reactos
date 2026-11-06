@@ -45,7 +45,7 @@ UserRawInputMouseProcess(PINPUT_DEVICE_INFO pDeviceInfo, PMOUSE_INPUT_DATA mid)
     rm.lLastY = mid->LastY;
     rm.ulExtraInformation = mid->ExtraInformation;
 
-    UserRawInputDeliver(RIM_TYPEMOUSE, (HANDLE)pDeviceInfo, &rm, sizeof(rm));
+    UserRawInputDeliver(RIM_TYPEMOUSE, pDeviceInfo ? pDeviceInfo->hRawDevice : NULL, &rm, sizeof(rm));
 }
 
 /*
