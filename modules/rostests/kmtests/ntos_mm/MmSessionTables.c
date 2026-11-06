@@ -256,8 +256,10 @@ START_TEST(MmSessionTables)
               PsGetProcessId(Processes[i].Process));
         ViewCount++;
     }
-    if (ViewCount < 2)
-        trace("Only %lu session(s) with a member: no second session (NitroSessions 0)\n", ViewCount);
+    /* Needs a second session (NitroSessions 1 or 4): with one, nothing is
+       compared and the test would pass for nothing */
+    ok(ViewCount >= 2, "Only %lu session(s) with a member: no second session (NitroSessions 0?)\n",
+       ViewCount);
 
     /*
      * Every process against every session's view:
@@ -291,8 +293,22 @@ START_TEST(MmSessionTables)
                    "%s (pid %p, session %lu) does not see its session's view\n",
                    PsGetProcessImageFileName(Process), PsGetProcessId(Process), Session);
             }
-            else if (Views[v].Session != 0)
+            else if ((Views[v].Session != 0) || (Session == MAXULONG))
             {
+                /*
+                 * Session 0 view too, for a process in no session: on
+                 * amd64 those tables are shared by everyone, so only the
+                 * session ids other than 0 are compared there. On i386 a
+                 * session-less process must not have copied the session
+                 * PDEs of its creator.
+                 */
+#ifndef CHECK_PDES
+                if (Views[v].Session == 0)
+                {
+                    Checked++;
+                    continue;
+                }
+#endif
                 Sees = MmIsAddressValid(Views[v].Base) &&
                        (*(volatile ULONG *)Views[v].Base == Views[v].Pattern);
                 ok(!Sees, "%s (pid %p, session %ld) sees session %lu's view\n",
