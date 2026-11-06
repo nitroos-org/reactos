@@ -68,6 +68,7 @@ extern void func_Wow64ServiceArguments(void);
 extern void func_NtCreateDirectoryObject(void);
 extern void func_NtCreateFile(void);
 extern void func_NtCreateKey(void);
+extern void func_NtCreateLowBoxToken(void);
 extern void func_NtCreateProfile(void);
 extern void func_NtCreateSectionImage(void);
 extern void func_NtCreateSectionSize(void);
@@ -318,6 +319,7 @@ const struct test winetest_testlist[] =
     { "NtCreateDirectoryObject",        func_NtCreateDirectoryObject },
     { "NtCreateFile",                   func_NtCreateFile },
     { "NtCreateKey",                    func_NtCreateKey },
+    { "NtCreateLowBoxToken",            func_NtCreateLowBoxToken },
     { "NtCreateProfile",                func_NtCreateProfile },
     { "NtCreateSectionImage",           func_NtCreateSectionImage },
     { "NtCreateSectionSize",            func_NtCreateSectionSize },
