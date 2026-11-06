@@ -27,6 +27,7 @@ list(APPEND SOURCE
     DesktopHeapNonInteractive.c
     DesktopOtherThreadApis.c
     ClipboardFormatListener.c
+    ClipboardSetData.c
     ClipboardSynthBitmap.c
     ConsoleClipText.c
     EmptyClipboard.c
