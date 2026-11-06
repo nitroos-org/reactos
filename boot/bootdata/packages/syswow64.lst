@@ -196,6 +196,7 @@ SysWOW64/browseui.dll
 SysWOW64/devmgr.dll
 SysWOW64/fmifs.dll
 SysWOW64/ieframe.dll
+SysWOW64/iertutil.dll
 SysWOW64/iphlpapi.dll
 SysWOW64/jsproxy.dll
 SysWOW64/netapi32.dll
