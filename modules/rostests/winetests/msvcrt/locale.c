@@ -31,7 +31,9 @@ static int *(__cdecl *p__p___mb_cur_max)(void);
 static _locale_t(__cdecl *p_create_locale)(int, const char*);
 static void(__cdecl *p_free_locale)(_locale_t);
 static int (__cdecl *p_wcsicmp_l)(const wchar_t*, const wchar_t*, _locale_t);
-void* __cdecl _Gettnames(void);
+#ifdef __REACTOS__
+void* __cdecl _Gettnames(void); /* not declared by the ReactOS CRT headers used for the tests */
+#endif
 
 static void init(void)
 {

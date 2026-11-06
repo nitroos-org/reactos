@@ -24,7 +24,9 @@
 #include <stdarg.h>
 
 #include "ntstatus.h"
+#ifdef __REACTOS__
 #define WIN32_NO_STATUS
+#endif
 #include "windef.h"
 #include "winternl.h"
 #include "msvcrt.h"
