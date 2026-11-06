@@ -175,7 +175,7 @@
 @ stdcall -version=0x601+ CopySid(long ptr ptr) advapi32.CopySid
 # #@ stub CouldMultiUserAppsBehaviorBePossibleForPackage
 #@ stdcall CreateActCtxW(ptr)
-# #@ stub CreateAppContainerToken
+@ stdcall -version=0x600+ CreateAppContainerToken(ptr ptr ptr)
 #@ stdcall CreateBoundaryDescriptorW(wstr long)
 #@ stdcall CreateConsoleScreenBuffer(long long ptr long ptr)
 #@ stdcall CreateDirectoryA(str ptr)
