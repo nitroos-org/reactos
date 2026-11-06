@@ -21,6 +21,7 @@
 #include "jscript.h"
 #include "engine.h"
 
+#include "wine/rbtree.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(jscript);
@@ -108,7 +109,7 @@ static inline BOOL is_function_prop(dispex_prop_t *prop)
     return ret;
 }
 
-static DWORD get_flags(jsdisp_t *This, dispex_prop_t *prop)
+static BOOL is_enumerable(jsdisp_t *This, dispex_prop_t *prop)
 {
     if(prop->type == PROP_PROTREF) {
         dispex_prop_t *parent = NULL;
@@ -118,13 +119,13 @@ static DWORD get_flags(jsdisp_t *This, dispex_prop_t *prop)
 
         if(!parent || parent->type == PROP_DELETED) {
             prop->type = PROP_DELETED;
-            return 0;
+            return FALSE;
         }
 
-        return get_flags(This->prototype, parent);
+        return is_enumerable(This->prototype, parent);
     }
 
-    return prop->flags;
+    return !!(prop->flags & PROPF_ENUMERABLE);
 }
 
 static const builtin_prop_t *find_builtin_prop(jsdisp_t *This, const WCHAR *name, BOOL case_insens)
@@ -322,7 +323,7 @@ static HRESULT update_external_prop(jsdisp_t *obj, const WCHAR *name, dispex_pro
 
 static HRESULT find_external_prop(jsdisp_t *This, const WCHAR *name, BOOL case_insens, dispex_prop_t *prop, dispex_prop_t **ret)
 {
-    if(This->builtin_info->lookup_prop) {
+    if(This->has_volatile_props || (!prop && This->builtin_info->lookup_prop)) {
         struct property_info desc;
         HRESULT hres;
 
@@ -461,7 +462,7 @@ static HRESULT ensure_prop_name(jsdisp_t *This, const WCHAR *name, DWORD create_
                 return E_OUTOFMEMORY;
         }
 
-        if(This->builtin_info->lookup_prop) {
+        if(This->has_volatile_props) {
             struct property_info desc;
             hres = This->builtin_info->lookup_prop(This, name, fdexNameEnsure, &desc);
             if(hres == S_OK)
@@ -497,21 +498,6 @@ HRESULT jsdisp_index_lookup(jsdisp_t *obj, const WCHAR *name, unsigned length, s
         desc->flags |= PROPF_WRITABLE;
     desc->name = NULL;
     desc->index = idx;
-    desc->iid = 0;
-    return S_OK;
-}
-
-HRESULT jsdisp_next_index(jsdisp_t *obj, unsigned length, unsigned id, struct property_info *desc)
-{
-    if(id + 1 == length)
-        return S_FALSE;
-
-    desc->id = id + 1;
-    desc->flags = PROPF_ENUMERABLE;
-    if(obj->builtin_info->prop_put)
-        desc->flags |= PROPF_WRITABLE;
-    desc->name = NULL;
-    desc->index = desc->id;
     desc->iid = 0;
     return S_OK;
 }
@@ -633,6 +619,8 @@ static HRESULT prop_put(jsdisp_t *This, dispex_prop_t *prop, jsval_t val)
             TRACE("getter with no setter\n");
             return S_OK;
         }
+        if(!(prop->flags & PROPF_WRITABLE))
+            return S_OK;
         return prop->u.p->setter(This->ctx, This, val);
     case PROP_PROTREF:
     case PROP_DELETED:
@@ -659,6 +647,8 @@ static HRESULT prop_put(jsdisp_t *This, dispex_prop_t *prop, jsval_t val)
             TRACE("no prop_put\n");
             return S_OK;
         }
+        if(!(prop->flags & PROPF_WRITABLE))
+            return S_OK;
         hres = This->builtin_info->prop_put(This, prop->u.id, val);
         if(hres != S_FALSE)
             return hres;
@@ -748,34 +738,26 @@ static HRESULT fill_props(jsdisp_t *obj)
 {
     dispex_prop_t *prop;
     HRESULT hres;
+    DWORD i;
 
-    if(obj->builtin_info->next_prop) {
-        struct property_info desc;
-        unsigned id = ~0;
-        WCHAR buf[12];
+    if(obj->props_filled)
+        return S_OK;
 
-        for(;;) {
-            hres = obj->builtin_info->next_prop(obj, id, &desc);
-            if(FAILED(hres))
-                return hres;
-            if(hres == S_FALSE)
-                break;
+    for(i = 0; i < obj->builtin_info->props_cnt; i++) {
+        hres = find_prop_name(obj, string_hash(obj->builtin_info->props[i].name), obj->builtin_info->props[i].name, FALSE, NULL, &prop);
+        if(FAILED(hres))
+            return hres;
+    }
+    hres = S_OK;
 
-            if(!desc.name) {
-                swprintf(buf, ARRAYSIZE(buf), L"%u", desc.index);
-                desc.name = buf;
-            }
-
-            prop = lookup_dispex_prop(obj, string_hash(desc.name), desc.name, FALSE);
-            if(!prop) {
-                hres = update_external_prop(obj, desc.name, NULL, &desc, &prop);
-                if(FAILED(hres))
-                    return hres;
-            }
-            id = desc.id;
-        }
+    if(obj->builtin_info->fill_props) {
+        hres = obj->builtin_info->fill_props(obj);
+        if(FAILED(hres))
+            return hres;
     }
 
+    if(hres == S_OK)
+        obj->props_filled = TRUE;
     return S_OK;
 }
 
@@ -881,18 +863,42 @@ static void unlink_jsdisp(jsdisp_t *jsdisp)
  * has to be a balance between reclaiming dangling objects and performance.
  *
  */
+struct cc_native_obj
+{
+    void *obj;
+    void *participant;
+};
+
 struct gc_stack_chunk {
-    jsdisp_t *objects[1020];
+    void *objects[1020];
     struct gc_stack_chunk *prev;
+};
+
+struct cc_map_entry {
+    struct rb_entry entry;
+    ULONG ref;
+    struct cc_native_obj obj;
 };
 
 struct gc_ctx {
     struct gc_stack_chunk *chunk;
     struct gc_stack_chunk *next;
     unsigned idx;
+    struct cc_map_entry *cc_map_entry;
+    struct rb_tree cc_map;
 };
 
-static HRESULT gc_stack_push(struct gc_ctx *gc_ctx, jsdisp_t *obj)
+static inline struct cc_map_entry *cc_map_entry_from_stack_obj(void *obj)
+{
+    return CONTAINING_RECORD(obj, struct cc_map_entry, obj.obj);
+}
+
+static inline void *cc_map_entry_to_stack_obj(struct cc_map_entry *entry)
+{
+    return &entry->obj.obj;
+}
+
+static HRESULT gc_stack_push_impl(struct gc_ctx *gc_ctx, void *obj)
 {
     if(!gc_ctx->idx) {
         if(gc_ctx->next)
@@ -912,9 +918,24 @@ static HRESULT gc_stack_push(struct gc_ctx *gc_ctx, jsdisp_t *obj)
     return S_OK;
 }
 
-static jsdisp_t *gc_stack_pop(struct gc_ctx *gc_ctx)
+static inline HRESULT gc_stack_init(struct gc_ctx *gc_ctx)
 {
-    jsdisp_t *obj = gc_ctx->chunk->objects[gc_ctx->idx];
+    return gc_stack_push_impl(gc_ctx, NULL);
+}
+
+static inline HRESULT gc_stack_push(struct gc_ctx *gc_ctx, jsdisp_t *obj)
+{
+    return gc_stack_push_impl(gc_ctx, &obj->IWineJSDispatch_iface);
+}
+
+static inline HRESULT gc_stack_push_cc_obj(struct gc_ctx *gc_ctx, struct cc_map_entry *entry)
+{
+    return gc_stack_push_impl(gc_ctx, cc_map_entry_to_stack_obj(entry));
+}
+
+static void *gc_stack_pop(struct gc_ctx *gc_ctx)
+{
+    void *obj = gc_ctx->chunk->objects[gc_ctx->idx];
 
     if(++gc_ctx->idx == ARRAY_SIZE(gc_ctx->chunk->objects)) {
         free(gc_ctx->next);
@@ -925,7 +946,152 @@ static jsdisp_t *gc_stack_pop(struct gc_ctx *gc_ctx)
     return obj;
 }
 
-HRESULT gc_run(script_ctx_t *ctx)
+static struct cc_native_obj WINAPI canonicalize_cc_obj(IUnknown *obj)
+{
+    struct cc_native_obj cc_obj = { .obj = NULL, .participant = NULL };
+
+    /* These QI do not AddRef, so they are scan-safe */
+    if(IUnknown_QueryInterface(obj, &IID_IWineGetJSDispatch, (void**)&cc_obj.obj) == S_OK && cc_obj.obj)
+        return cc_obj;
+
+    if(IUnknown_QueryInterface(obj, &IID_nsCycleCollectionISupports, (void**)&cc_obj.obj) != S_OK) {
+        cc_obj.obj = obj;
+        return cc_obj;
+    }
+
+    IUnknown_QueryInterface((IUnknown*)cc_obj.obj, &IID_nsXPCOMCycleCollectionParticipant, (void**)&cc_obj.participant);
+    return cc_obj;
+}
+
+static HRESULT WINAPI cc_traverse_speculative_advise_ref_count(void *context, ULONG refcount)
+{
+    struct gc_ctx *gc_ctx = context;
+
+    /* Add to the existing accumulated (negative) refcount of edges we've already processed */
+    if(gc_ctx->cc_map_entry) {
+        gc_ctx->cc_map_entry->ref += refcount;
+        gc_ctx->cc_map_entry = NULL;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI cc_traverse_speculative_note_raw_edge(void *context, void *obj, void *participant)
+{
+    struct gc_ctx *gc_ctx = context;
+    struct rb_entry *rb_entry = rb_get(&gc_ctx->cc_map, obj);
+    struct cc_map_entry *entry;
+
+    if(rb_entry) {
+        /* Skip traversal if we already visited or will visit it, but do process the edge's ref */
+        WINE_RB_ENTRY_VALUE(rb_entry, struct cc_map_entry, entry)->ref--;
+        return S_OK;
+    }
+
+    if(!(entry = malloc(sizeof(*entry))))
+        return E_OUTOFMEMORY;
+    entry->obj.obj = obj;
+    entry->obj.participant = participant;
+    entry->ref = -1;  /* account for the edge's ref */
+    rb_put(&gc_ctx->cc_map, obj, &entry->entry);
+    return gc_stack_push_cc_obj(gc_ctx, entry);
+}
+
+static HRESULT WINAPI cc_traverse_speculative_note_edge(void *context, IUnknown *obj)
+{
+    struct gc_ctx *gc_ctx = context;
+    struct cc_native_obj cc_obj = canonicalize_cc_obj(obj);
+    jsdisp_t *jsdisp = to_jsdisp(cc_obj.obj);
+
+    /* If it's one of our own jscript objects, process the ref and don't traverse it further */
+    if(jsdisp) {
+        jsdisp->ref--;
+        return S_OK;
+    }
+
+    return cc_obj.participant ? cc_traverse_speculative_note_raw_edge(gc_ctx, cc_obj.obj, cc_obj.participant) : S_OK;
+}
+
+static const struct cc_traverse_ops cc_traverse_speculative_ops = {
+    cc_traverse_speculative_advise_ref_count,
+    cc_traverse_speculative_note_edge,
+    cc_traverse_speculative_note_raw_edge,
+};
+
+static HRESULT WINAPI cc_traverse_unmark_advise_ref_count(void *context, ULONG refcount)
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI cc_traverse_unmark_note_raw_edge(void *context, void *obj, void *participant)
+{
+    struct gc_ctx *gc_ctx = context;
+    struct rb_entry *rb_entry = rb_get(&gc_ctx->cc_map, obj);
+    struct cc_map_entry *entry;
+
+    assert(rb_entry != NULL);
+    entry = WINE_RB_ENTRY_VALUE(rb_entry, struct cc_map_entry, entry);
+
+    /* Check participant in the map entry itself, as we use it to mark those we've already visited. */
+    return entry->obj.participant ? gc_stack_push_cc_obj(gc_ctx, WINE_RB_ENTRY_VALUE(rb_entry, struct cc_map_entry, entry)) : S_OK;
+}
+
+static HRESULT WINAPI cc_traverse_unmark_note_edge(void *context, IUnknown *obj)
+{
+    struct gc_ctx *gc_ctx = context;
+    struct cc_native_obj cc_obj = canonicalize_cc_obj(obj);
+    jsdisp_t *jsdisp = to_jsdisp(cc_obj.obj);
+
+    if(jsdisp)
+        return jsdisp->gc_marked ? gc_stack_push(gc_ctx, jsdisp) : S_OK;
+
+    return cc_obj.participant ? cc_traverse_unmark_note_raw_edge(gc_ctx, cc_obj.obj, cc_obj.participant) : S_OK;
+}
+
+static const struct cc_traverse_ops cc_traverse_unmark_ops = {
+    cc_traverse_unmark_advise_ref_count,
+    cc_traverse_unmark_note_edge,
+    cc_traverse_unmark_note_raw_edge,
+};
+
+static HRESULT WINAPI cc_traverse_unmark_early_note_edge(void *context, IUnknown *obj)
+{
+    struct gc_ctx *gc_ctx = context;
+    struct cc_native_obj cc_obj = canonicalize_cc_obj(obj);
+    jsdisp_t *jsdisp = to_jsdisp(cc_obj.obj);
+
+    if(jsdisp) {
+        /* The temporary refcount itself doesn't matter by this point, just make sure it's not 0,
+         * as this will unmark it and all accessible objects from it later, since they're alive. */
+        jsdisp->ref = 1;
+        return S_OK;
+    }
+
+    return cc_obj.participant ? cc_traverse_unmark_note_raw_edge(gc_ctx, cc_obj.obj, cc_obj.participant) : S_OK;
+}
+
+static const struct cc_traverse_ops cc_traverse_unmark_early_ops = {
+    cc_traverse_unmark_advise_ref_count,
+    cc_traverse_unmark_early_note_edge,
+    cc_traverse_unmark_note_raw_edge,
+};
+
+static inline HRESULT process_edge_speculatively(struct gc_ctx *gc_ctx, IDispatch *edge)
+{
+    return cc_traverse_speculative_note_edge(gc_ctx, (IUnknown*)edge);
+}
+
+static inline HRESULT unmark_edge(struct gc_ctx *gc_ctx, IDispatch *edge)
+{
+    return cc_traverse_unmark_note_edge(gc_ctx, (IUnknown*)edge);
+}
+
+static int cc_map_compare(const void *k, const struct rb_entry *e)
+{
+    ULONG_PTR a = (ULONG_PTR)k, b = (ULONG_PTR)RB_ENTRY_VALUE(e, struct cc_map_entry, entry)->obj.obj;
+    return (a > b) - (a < b);
+}
+
+HRESULT gc_run(struct thread_data *thread_data)
 {
     /* Save original refcounts in a linked list of chunks */
     struct chunk
@@ -933,17 +1099,23 @@ HRESULT gc_run(script_ctx_t *ctx)
         struct chunk *next;
         LONG ref[1020];
     } *head, *chunk;
-    struct thread_data *thread_data = ctx->thread_data;
-    jsdisp_t *obj, *obj2, *link, *link2;
+    struct cc_map_entry *cc_map_iter, *cc_map_iter2;
     dispex_prop_t *prop, *props_end;
-    struct gc_ctx gc_ctx = { 0 };
     unsigned chunk_idx = 0;
+    jsdisp_t *obj, *obj2;
+    struct gc_ctx gc_ctx;
     HRESULT hres = S_OK;
     struct list *iter;
+    void *stack_obj;
 
     /* Prevent recursive calls from side-effects during unlinking (e.g. CollectGarbage from host object's Release) */
     if(thread_data->gc_is_unlinking)
         return S_OK;
+    gc_ctx.next = NULL;
+    gc_ctx.idx = 0;
+
+    /* We also scan for non-jscript (host) objects reachable from any jscript object, and store a map of them with their refs */
+    rb_init(&gc_ctx.cc_map, cc_map_compare);
 
     if(!(head = malloc(sizeof(*head))))
         return E_OUTOFMEMORY;
@@ -965,18 +1137,24 @@ HRESULT gc_run(script_ctx_t *ctx)
             chunk->next = NULL;
         }
         chunk->ref[chunk_idx++] = obj->ref;
+
+        /* Obtain actual refcount from host objects with external reference counter */
+        if(obj->builtin_info->get_host_disp)
+            obj->ref = IWineJSDispatchHost_GetRefCount(obj->builtin_info->get_host_disp(obj));
     }
     LIST_FOR_EACH_ENTRY(obj, &thread_data->objects, jsdisp_t, entry) {
-        /* Skip objects with external reference counter */
-        if(obj->builtin_info->addref) {
-            obj->gc_marked = FALSE;
-            continue;
-        }
+        hres = gc_stack_init(&gc_ctx);
+        if(FAILED(hres))
+            goto fail_init;
+
         for(prop = obj->props, props_end = prop + obj->prop_cnt; prop < props_end; prop++) {
             switch(prop->type) {
             case PROP_JSVAL:
-                if(is_object_instance(prop->u.val) && (link = to_jsdisp(get_object(prop->u.val))))
-                    link->ref--;
+                if(!is_object_instance(prop->u.val))
+                    break;
+                hres = process_edge_speculatively(&gc_ctx, get_object(prop->u.val));
+                if(FAILED(hres))
+                    goto fail;
                 break;
             case PROP_ACCESSOR:
                 if(prop->u.accessor.getter)
@@ -993,21 +1171,72 @@ HRESULT gc_run(script_ctx_t *ctx)
             obj->prototype->ref--;
         if(obj->builtin_info->gc_traverse)
             obj->builtin_info->gc_traverse(&gc_ctx, GC_TRAVERSE_SPECULATIVELY, obj);
+
+        for(;;) {
+            stack_obj = gc_stack_pop(&gc_ctx);
+            if(!stack_obj)
+                break;
+            if(thread_data->cc_participant) {
+                gc_ctx.cc_map_entry = cc_map_entry_from_stack_obj(stack_obj);
+                hres = IWineCCParticipant_Traverse(thread_data->cc_participant, gc_ctx.cc_map_entry->obj.obj, gc_ctx.cc_map_entry->obj.participant, &gc_ctx, &cc_traverse_speculative_ops);
+                if(FAILED(hres))
+                    goto fail;
+            }
+        }
+
         obj->gc_marked = TRUE;
     }
 
     /* 2. Clear mark on objects with non-zero "external refcount" and all objects accessible from them */
+    RB_FOR_EACH_ENTRY(cc_map_iter, &gc_ctx.cc_map, struct cc_map_entry, entry) {
+        if(!cc_map_iter->ref || !cc_map_iter->obj.participant)
+            continue;
+
+        hres = gc_stack_init(&gc_ctx);
+        if(FAILED(hres))
+            goto fail_init;
+
+        /* Traverse and flood all accessible objects from the native objects in the cc map,
+         * marking already-visited native objects in the map using a NULL participant. */
+        stack_obj = cc_map_entry_to_stack_obj(cc_map_iter);
+        do {
+            struct cc_native_obj cc_obj = cc_map_entry_from_stack_obj(stack_obj)->obj;
+
+            if(cc_obj.participant && thread_data->cc_participant) {
+                cc_map_entry_from_stack_obj(stack_obj)->obj.participant = NULL;
+                hres = IWineCCParticipant_Traverse(thread_data->cc_participant, cc_obj.obj, cc_obj.participant, &gc_ctx, &cc_traverse_unmark_early_ops);
+                if(FAILED(hres))
+                    goto fail;
+            }
+            stack_obj = gc_stack_pop(&gc_ctx);
+        } while(stack_obj);
+    }
+
     LIST_FOR_EACH_ENTRY(obj, &thread_data->objects, jsdisp_t, entry) {
         if(!obj->ref || !obj->gc_marked)
             continue;
 
-        hres = gc_stack_push(&gc_ctx, NULL);
+        hres = gc_stack_init(&gc_ctx);
         if(FAILED(hres))
-            break;
+            goto fail_init;
 
-        obj2 = obj;
+        stack_obj = &obj->IWineJSDispatch_iface;
         do
         {
+            if(!(obj2 = to_jsdisp(stack_obj))) {
+                struct cc_native_obj cc_obj = cc_map_entry_from_stack_obj(stack_obj)->obj;
+
+                if(cc_obj.participant && thread_data->cc_participant) {
+                    cc_map_entry_from_stack_obj(stack_obj)->obj.participant = NULL;
+                    hres = IWineCCParticipant_Traverse(thread_data->cc_participant, cc_obj.obj, cc_obj.participant, &gc_ctx, &cc_traverse_unmark_ops);
+                    if(FAILED(hres))
+                        goto fail;
+                }
+                continue;
+            }
+
+            if(!obj2->gc_marked)
+                continue;
             obj2->gc_marked = FALSE;
 
             for(prop = obj2->props, props_end = prop + obj2->prop_cnt; prop < props_end; prop++) {
@@ -1015,41 +1244,37 @@ HRESULT gc_run(script_ctx_t *ctx)
                 case PROP_JSVAL:
                     if(!is_object_instance(prop->u.val))
                         continue;
-                    link = to_jsdisp(get_object(prop->u.val));
-                    link2 = NULL;
+                    hres = unmark_edge(&gc_ctx, get_object(prop->u.val));
+                    if(FAILED(hres))
+                        goto fail;
                     break;
                 case PROP_ACCESSOR:
-                    link = prop->u.accessor.getter;
-                    link2 = prop->u.accessor.setter;
+                    if(prop->u.accessor.getter && prop->u.accessor.getter->gc_marked) {
+                        hres = gc_stack_push(&gc_ctx, prop->u.accessor.getter);
+                        if(FAILED(hres))
+                            goto fail;
+                    }
+                    if(prop->u.accessor.setter && prop->u.accessor.setter->gc_marked) {
+                        hres = gc_stack_push(&gc_ctx, prop->u.accessor.setter);
+                        if(FAILED(hres))
+                            goto fail;
+                    }
                     break;
                 default:
                     continue;
                 }
-                if(link && link->gc_marked) {
-                    hres = gc_stack_push(&gc_ctx, link);
-                    if(FAILED(hres))
-                        break;
-                }
-                if(link2 && link2->gc_marked) {
-                    hres = gc_stack_push(&gc_ctx, link2);
-                    if(FAILED(hres))
-                        break;
-                }
             }
-
-            if(FAILED(hres))
-                break;
 
             if(obj2->prototype && obj2->prototype->gc_marked) {
                 hres = gc_stack_push(&gc_ctx, obj2->prototype);
                 if(FAILED(hres))
-                    break;
+                    goto fail;
             }
 
             if(obj2->builtin_info->gc_traverse) {
                 hres = obj2->builtin_info->gc_traverse(&gc_ctx, GC_TRAVERSE, obj2);
                 if(FAILED(hres))
-                    break;
+                    goto fail;
             }
 
             /* For weak refs, traverse paths accessible from it via the WeakMaps, if the WeakMaps are alive at this point.
@@ -1059,26 +1284,24 @@ HRESULT gc_run(script_ctx_t *ctx)
                 struct weakmap_entry *entry;
 
                 LIST_FOR_EACH_ENTRY(entry, list, struct weakmap_entry, weak_refs_entry) {
-                    if(!entry->weakmap->gc_marked && is_object_instance(entry->value) && (link = to_jsdisp(get_object(entry->value)))) {
-                        hres = gc_stack_push(&gc_ctx, link);
+                    if(!entry->weakmap->gc_marked && is_object_instance(entry->value)) {
+                        hres = unmark_edge(&gc_ctx, get_object(entry->value));
                         if(FAILED(hres))
-                            break;
+                            goto fail;
                     }
                 }
-
-                if(FAILED(hres))
-                    break;
             }
-
-            do obj2 = gc_stack_pop(&gc_ctx); while(obj2 && !obj2->gc_marked);
-        } while(obj2);
-
-        if(FAILED(hres)) {
-            do obj2 = gc_stack_pop(&gc_ctx); while(obj2);
-            break;
-        }
+        } while((stack_obj = gc_stack_pop(&gc_ctx)));
     }
+
+fail:
+    if(FAILED(hres))
+        do stack_obj = gc_stack_pop(&gc_ctx); while(stack_obj);
     free(gc_ctx.next);
+
+fail_init:
+    RB_FOR_EACH_ENTRY_DESTRUCTOR(cc_map_iter, cc_map_iter2, &gc_ctx.cc_map, struct cc_map_entry, entry)
+        free(cc_map_iter);
 
     /* Restore */
     chunk = head; chunk_idx = 0;
@@ -1121,7 +1344,7 @@ HRESULT gc_run(script_ctx_t *ctx)
     return S_OK;
 }
 
-HRESULT gc_process_linked_obj(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsdisp_t *obj, jsdisp_t *link, void **unlink_ref)
+HRESULT gc_process_linked_obj(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsdisp_t *link, void **unlink_ref)
 {
     if(op == GC_TRAVERSE_UNLINK) {
         *unlink_ref = NULL;
@@ -1136,10 +1359,8 @@ HRESULT gc_process_linked_obj(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsd
     return S_OK;
 }
 
-HRESULT gc_process_linked_val(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsdisp_t *obj, jsval_t *link)
+HRESULT gc_process_linked_val(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsval_t *link)
 {
-    jsdisp_t *jsdisp;
-
     if(op == GC_TRAVERSE_UNLINK) {
         jsval_t val = *link;
         *link = jsval_undefined();
@@ -1147,13 +1368,43 @@ HRESULT gc_process_linked_val(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsd
         return S_OK;
     }
 
-    if(!is_object_instance(*link) || !(jsdisp = to_jsdisp(get_object(*link))))
+    if(!is_object_instance(*link))
         return S_OK;
     if(op == GC_TRAVERSE_SPECULATIVELY)
-        jsdisp->ref--;
-    else if(jsdisp->gc_marked)
-        return gc_stack_push(gc_ctx, jsdisp);
-    return S_OK;
+        return process_edge_speculatively(gc_ctx, get_object(*link));
+    return unmark_edge(gc_ctx, get_object(*link));
+}
+
+HRESULT gc_process_linked_raw_obj(struct gc_ctx *gc_ctx, enum gc_traverse_op op, IUnknown **raw_obj_ref)
+{
+    if(!*raw_obj_ref)
+        return S_OK;
+
+    if(op == GC_TRAVERSE_UNLINK) {
+        IUnknown *raw_obj = *raw_obj_ref;
+        *raw_obj_ref = NULL;
+        IUnknown_Release(raw_obj);
+        return S_OK;
+    }
+
+    if(op == GC_TRAVERSE_SPECULATIVELY)
+        return cc_traverse_speculative_note_edge(gc_ctx, *raw_obj_ref);
+    return cc_traverse_unmark_note_edge(gc_ctx, *raw_obj_ref);
+}
+
+HRESULT host_dispatch_gc_traverse(struct gc_ctx *gc_ctx, enum gc_traverse_op op, IWineJSDispatchHost *host_disp)
+{
+    if(op == GC_TRAVERSE_UNLINK) {
+        IWineJSDispatchHost_Unlink(host_disp);
+        return S_OK;
+    }
+
+    if(op == GC_TRAVERSE_SPECULATIVELY) {
+        gc_ctx->cc_map_entry = NULL;  /* traverse edges but don't track refcount on itself as we didn't arrive here from an edge */
+        return IWineJSDispatchHost_Traverse(host_disp, gc_ctx, &cc_traverse_speculative_ops);
+    }
+
+    return IWineJSDispatchHost_Traverse(host_disp, gc_ctx, &cc_traverse_unmark_ops);
 }
 
 
@@ -1901,8 +2152,8 @@ static void jsdisp_free(jsdisp_t *obj)
 
 jsdisp_t *jsdisp_addref(jsdisp_t *obj)
 {
-    if(obj->builtin_info->addref)
-        obj->builtin_info->addref(obj);
+    if(obj->builtin_info->get_host_disp)
+        IWineJSDispatchHost_AddRef(obj->builtin_info->get_host_disp(obj));
     else
         ++obj->ref;
     return obj;
@@ -1912,8 +2163,8 @@ ULONG jsdisp_release(jsdisp_t *obj)
 {
     ULONG ref;
 
-    if(obj->builtin_info->release)
-        return obj->builtin_info->release(obj);
+    if(obj->builtin_info->get_host_disp)
+        return IWineJSDispatchHost_Release(obj->builtin_info->get_host_disp(obj));
 
     ref = --obj->ref;
     if(!ref)
@@ -1955,8 +2206,8 @@ static HRESULT WINAPI DispatchEx_QueryInterface(IWineJSDispatch *iface, REFIID r
 static ULONG WINAPI DispatchEx_AddRef(IWineJSDispatch *iface)
 {
     jsdisp_t *This = impl_from_IWineJSDispatch(iface);
-    if(This->builtin_info->addref)
-        return This->builtin_info->addref(This);
+    if(This->builtin_info->get_host_disp)
+        return IWineJSDispatchHost_AddRef(This->builtin_info->get_host_disp(This));
     jsdisp_addref(This);
     return This->ref;
 }
@@ -2157,10 +2408,10 @@ static HRESULT WINAPI DispatchEx_InvokeEx(IWineJSDispatch *iface, DISPID id, LCI
     if(pspCaller)
         IServiceProvider_AddRef(pspCaller);
 
+    if(wFlags == (DISPATCH_METHOD | DISPATCH_PROPERTYGET))
+        wFlags = (This->ctx->version < SCRIPTLANGUAGEVERSION_ES5 || pdp->cArgs) ? DISPATCH_METHOD : DISPATCH_PROPERTYGET;
+
     switch(wFlags) {
-    case DISPATCH_METHOD|DISPATCH_PROPERTYGET:
-        wFlags = DISPATCH_METHOD;
-        /* fall through */
     case DISPATCH_METHOD:
     case DISPATCH_CONSTRUCT: {
         jsval_t *argv, buf[6], r;
@@ -2402,6 +2653,40 @@ static HRESULT WINAPI WineJSDispatch_GetPropertyFlags(IWineJSDispatch *iface, DI
     return S_OK;
 }
 
+static HRESULT WINAPI WineJSDispatch_DefineProperty(IWineJSDispatch *iface, const WCHAR *name, unsigned flags, VARIANT *v)
+{
+    jsdisp_t *This = impl_from_IWineJSDispatch(iface);
+    HRESULT hres;
+    jsval_t val;
+
+    hres = variant_to_jsval(This->ctx, v, &val);
+    if(FAILED(hres))
+        return hres;
+
+    hres = jsdisp_define_data_property(This, name, flags, val);
+    jsval_release(val);
+    return hres;
+}
+
+static HRESULT WINAPI WineJSDispatch_UpdateProperty(IWineJSDispatch *iface, struct property_info *desc)
+{
+    jsdisp_t *This = impl_from_IWineJSDispatch(iface);
+    const WCHAR *name = desc->name;
+    dispex_prop_t *prop;
+    HRESULT hres = S_OK;
+    WCHAR buf[12];
+
+    if(!name) {
+        swprintf(buf, ARRAYSIZE(buf), L"%u", desc->index);
+        name = buf;
+    }
+
+    if(!(prop = lookup_dispex_prop(This, string_hash(name), name, FALSE)))
+        hres = update_external_prop(This, name, NULL, desc, &prop);
+
+    return hres;
+}
+
 static HRESULT WINAPI WineJSDispatch_GetScriptGlobal(IWineJSDispatch *iface, IWineJSDispatchHost **ret)
 {
    jsdisp_t *This = impl_from_IWineJSDispatch(iface);
@@ -2415,6 +2700,13 @@ static HRESULT WINAPI WineJSDispatch_GetScriptGlobal(IWineJSDispatch *iface, IWi
 
    *ret = get_host_dispatch(disp);
    return S_OK;
+}
+
+static HRESULT WINAPI WineJSDispatch_GetRandomValues(IWineJSDispatch *iface)
+{
+    jsdisp_t *This = impl_from_IWineJSDispatch(iface);
+
+    return typed_array_get_random_values(This);
 }
 
 static IWineJSDispatchVtbl DispatchExVtbl = {
@@ -2435,7 +2727,10 @@ static IWineJSDispatchVtbl DispatchExVtbl = {
     DispatchEx_GetNameSpaceParent,
     WineJSDispatch_Free,
     WineJSDispatch_GetPropertyFlags,
+    WineJSDispatch_DefineProperty,
+    WineJSDispatch_UpdateProperty,
     WineJSDispatch_GetScriptGlobal,
+    WineJSDispatch_GetRandomValues,
 };
 
 jsdisp_t *as_jsdisp(IDispatch *disp)
@@ -2457,7 +2752,7 @@ HRESULT init_dispex(jsdisp_t *dispex, script_ctx_t *ctx, const builtin_info_t *b
 
     /* FIXME: Use better heuristics to decide when to run the GC */
     if(GetTickCount() - ctx->thread_data->gc_last_tick > 30000)
-        gc_run(ctx);
+        gc_run(ctx->thread_data);
 
     TRACE("%p (%p)\n", dispex, prototype);
 
@@ -2689,7 +2984,7 @@ HRESULT disp_call(script_ctx_t *ctx, IDispatch *disp, DISPID id, WORD flags, uns
         jsdisp_release(jsdisp);
 
     flags &= ~DISPATCH_JSCRIPT_INTERNAL_MASK;
-    if(ret && argc)
+    if(ret && argc && (!jsdisp || ctx->version < SCRIPTLANGUAGEVERSION_ES5))
         flags |= DISPATCH_PROPERTYGET;
 
     dp.cArgs = argc;
@@ -2960,6 +3255,35 @@ HRESULT jsdisp_propget_name(jsdisp_t *obj, const WCHAR *name, jsval_t *val)
     return prop_get(obj, to_disp(obj), prop, val);
 }
 
+HRESULT disp_propget_name(script_ctx_t *ctx, IDispatch *disp, const WCHAR *name, jsval_t *val)
+{
+    IDispatchEx *dispex;
+    jsdisp_t *jsdisp;
+    DISPID dispid;
+    HRESULT hres;
+    BSTR str;
+
+    jsdisp = to_jsdisp(disp);
+    if(jsdisp && jsdisp->ctx == ctx)
+        return jsdisp_propget_name(jsdisp, name, val);
+
+    if(!(str = SysAllocString(name)))
+        return E_OUTOFMEMORY;
+    hres = IDispatch_QueryInterface(disp, &IID_IDispatchEx, (void**)&dispex);
+    if(hres != S_OK)
+        hres = IDispatch_GetIDsOfNames(disp, &IID_NULL, &str, 1, 0, &dispid);
+    else {
+        hres = IDispatchEx_GetDispID(dispex, str, fdexNameCaseSensitive, &dispid);
+        IDispatchEx_Release(dispex);
+    }
+    SysFreeString(str);
+
+    if(SUCCEEDED(hres))
+        hres = disp_propget(ctx, disp, dispid, val);
+
+    return hres;
+}
+
 HRESULT jsdisp_get_idx(jsdisp_t *obj, DWORD idx, jsval_t *r)
 {
     WCHAR name[12];
@@ -2978,6 +3302,14 @@ HRESULT jsdisp_get_idx(jsdisp_t *obj, DWORD idx, jsval_t *r)
     }
 
     return prop_get(obj, to_disp(obj), prop, r);
+}
+
+HRESULT disp_propget_idx(script_ctx_t *ctx, IDispatch *disp, DWORD idx, jsval_t *r)
+{
+    WCHAR buf[12];
+
+    swprintf(buf, ARRAY_SIZE(buf), L"%u", idx);
+    return disp_propget_name(ctx, disp, buf, r);
 }
 
 HRESULT jsdisp_propget(jsdisp_t *jsdisp, DISPID id, jsval_t *val)
@@ -3070,6 +3402,27 @@ HRESULT disp_delete(IDispatch *disp, DISPID id, BOOL *ret)
     return S_OK;
 }
 
+HRESULT jsdisp_fill_indices(jsdisp_t *obj, unsigned length)
+{
+    struct property_info desc;
+    HRESULT hres;
+
+    desc.flags = PROPF_ENUMERABLE;
+    if(obj->builtin_info->prop_put)
+        desc.flags |= PROPF_WRITABLE;
+    desc.name = NULL;
+    desc.iid = 0;
+
+    for(desc.index = 0; desc.index < length; desc.index++) {
+        desc.id = desc.index;
+        hres = WineJSDispatch_UpdateProperty(&obj->IWineJSDispatch_iface, &desc);
+        if(FAILED(hres))
+            return hres;
+    }
+
+    return S_OK;
+}
+
 HRESULT jsdisp_next_prop(jsdisp_t *obj, DISPID id, enum jsdisp_enum_type enum_type, DISPID *ret)
 {
     dispex_prop_t *iter;
@@ -3097,7 +3450,7 @@ HRESULT jsdisp_next_prop(jsdisp_t *obj, DISPID id, enum jsdisp_enum_type enum_ty
             continue;
         if(enum_type != JSDISP_ENUM_ALL && iter->type == PROP_PROTREF)
             continue;
-        if(enum_type != JSDISP_ENUM_OWN && !(get_flags(obj, iter) & PROPF_ENUMERABLE))
+        if(enum_type != JSDISP_ENUM_OWN && !is_enumerable(obj, iter))
             continue;
         *ret = prop_to_id(obj, iter);
         return S_OK;
@@ -3353,6 +3706,21 @@ HRESULT jsdisp_define_data_property(jsdisp_t *obj, const WCHAR *name, unsigned f
     return jsdisp_define_property(obj, name, &prop_desc);
 }
 
+HRESULT jsdisp_replace_builtin_property(jsdisp_t *obj, const WCHAR *name, jsval_t value)
+{
+    dispex_prop_t *prop;
+    HRESULT hres;
+
+    hres = find_prop_name(obj, string_hash(name), name, FALSE, NULL, &prop);
+    if(FAILED(hres) || !prop || prop->type != PROP_BUILTIN)
+        return hres;
+
+    hres = jsval_copy(value, &prop->u.val);
+    if(SUCCEEDED(hres))
+        prop->type = PROP_JSVAL;
+    return hres;
+}
+
 HRESULT jsdisp_change_prototype(jsdisp_t *obj, jsdisp_t *proto)
 {
     jsdisp_t *iter;
@@ -3447,16 +3815,10 @@ static inline HostObject *HostObject_from_jsdisp(jsdisp_t *jsdisp)
     return CONTAINING_RECORD(jsdisp, HostObject, jsdisp);
 }
 
-static ULONG HostObject_addref(jsdisp_t *jsdisp)
+static IWineJSDispatchHost *HostObject_get_host_disp(jsdisp_t *jsdisp)
 {
     HostObject *This = HostObject_from_jsdisp(jsdisp);
-    return IWineJSDispatchHost_AddRef(This->host_iface);
-}
-
-static ULONG HostObject_release(jsdisp_t *jsdisp)
-{
-    HostObject *This = HostObject_from_jsdisp(jsdisp);
-    return IWineJSDispatchHost_Release(This->host_iface);
+    return This->host_iface;
 }
 
 static HRESULT HostObject_lookup_prop(jsdisp_t *jsdisp, const WCHAR *name, unsigned  flags, struct property_info *desc)
@@ -3505,13 +3867,6 @@ static HRESULT HostObject_prop_put(jsdisp_t *jsdisp, unsigned idx, jsval_t v)
     return hres;
 }
 
-static HRESULT HostObject_next_prop(jsdisp_t *jsdisp, unsigned id, struct property_info *desc)
-{
-    HostObject *This = HostObject_from_jsdisp(jsdisp);
-
-    return IWineJSDispatchHost_NextProperty(This->host_iface, id, desc);
-}
-
 static HRESULT HostObject_prop_delete(jsdisp_t *jsdisp, unsigned id)
 {
     HostObject *This = HostObject_from_jsdisp(jsdisp);
@@ -3524,6 +3879,13 @@ static HRESULT HostObject_prop_config(jsdisp_t *jsdisp, unsigned id, unsigned fl
     HostObject *This = HostObject_from_jsdisp(jsdisp);
 
     return IWineJSDispatchHost_ConfigureProperty(This->host_iface, id, flags);
+}
+
+static HRESULT HostObject_fill_props(jsdisp_t *jsdisp)
+{
+    HostObject *This = HostObject_from_jsdisp(jsdisp);
+
+    return IWineJSDispatchHost_FillProperties(This->host_iface);
 }
 
 static HRESULT HostObject_to_string(jsdisp_t *jsdisp, jsstr_t **ret)
@@ -3541,17 +3903,24 @@ static HRESULT HostObject_to_string(jsdisp_t *jsdisp, jsstr_t **ret)
     return *ret ? S_OK : E_OUTOFMEMORY;
 }
 
+static HRESULT HostObject_gc_traverse(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsdisp_t *jsdisp)
+{
+    HostObject *This = HostObject_from_jsdisp(jsdisp);
+
+    return host_dispatch_gc_traverse(gc_ctx, op, This->host_iface);
+}
+
 static const builtin_info_t HostObject_info = {
-    .class       = JSCLASS_HOST,
-    .addref      = HostObject_addref,
-    .release     = HostObject_release,
-    .lookup_prop = HostObject_lookup_prop,
-    .prop_get    = HostObject_prop_get,
-    .prop_put    = HostObject_prop_put,
-    .next_prop   = HostObject_next_prop,
-    .prop_delete = HostObject_prop_delete,
-    .prop_config = HostObject_prop_config,
-    .to_string   = HostObject_to_string,
+    .class         = JSCLASS_HOST,
+    .get_host_disp = HostObject_get_host_disp,
+    .lookup_prop   = HostObject_lookup_prop,
+    .prop_get      = HostObject_prop_get,
+    .prop_put      = HostObject_prop_put,
+    .prop_delete   = HostObject_prop_delete,
+    .prop_config   = HostObject_prop_config,
+    .fill_props    = HostObject_fill_props,
+    .to_string     = HostObject_to_string,
+    .gc_traverse   = HostObject_gc_traverse
 };
 
 HRESULT init_host_object(script_ctx_t *ctx, IWineJSDispatchHost *host_iface, IWineJSDispatch *prototype_iface,
@@ -3577,6 +3946,8 @@ HRESULT init_host_object(script_ctx_t *ctx, IWineJSDispatchHost *host_iface, IWi
     host_obj->host_iface = host_iface;
     if(flags & HOSTOBJ_CONSTRUCTOR)
         host_obj->jsdisp.is_constructor = TRUE;
+    if(flags & HOSTOBJ_VOLATILE_PROPS)
+        host_obj->jsdisp.has_volatile_props = TRUE;
     *ret = &host_obj->jsdisp.IWineJSDispatch_iface;
     return S_OK;
 }
@@ -3584,15 +3955,33 @@ HRESULT init_host_object(script_ctx_t *ctx, IWineJSDispatchHost *host_iface, IWi
 IWineJSDispatchHost *get_host_dispatch(IDispatch *disp)
 {
     IWineJSDispatchHost *ret;
-    HostObject *host_obj;
     jsdisp_t *jsdisp;
 
-    if(!(jsdisp = to_jsdisp(disp)))
-        return NULL;
-    if(jsdisp->builtin_info != &HostObject_info)
+    if(!(jsdisp = to_jsdisp(disp)) || !jsdisp->builtin_info->get_host_disp)
         return NULL;
 
-    host_obj = HostObject_from_jsdisp(jsdisp);
-    IWineJSDispatchHost_GetOuterDispatch(host_obj->host_iface, &ret);
+    IWineJSDispatchHost_GetOuterDispatch(jsdisp->builtin_info->get_host_disp(jsdisp), &ret);
     return ret;
+}
+
+HRESULT fill_globals(script_ctx_t *ctx, IWineJSDispatchHost *script_global)
+{
+    jsdisp_t *global = ctx->global;
+    DISPID id = DISPID_STARTENUM;
+    struct property_info desc;
+    HRESULT hres;
+
+    for(;;) {
+        hres = jsdisp_next_prop(global, id, JSDISP_ENUM_OWN, &id);
+        if(hres == S_FALSE)
+            break;
+        if(FAILED(hres))
+            return hres;
+
+        hres = IWineJSDispatchHost_LookupProperty(script_global, get_prop(global, id)->name, fdexNameCaseSensitive, &desc);
+        if(FAILED(hres))
+            return hres;
+    }
+
+    return S_OK;
 }
