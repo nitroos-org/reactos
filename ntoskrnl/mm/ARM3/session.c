@@ -398,7 +398,15 @@ MiDereferenceSession(VOID)
     {
         /* No more references left, kill the session completely */
         MiDereferenceSessionFinal();
-        return;
+
+        /*
+         * A process that is not the leader is exiting. The leader may be the
+         * last one out (NitroSessions: everything else in the session died
+         * before it detached): it must still drop its view, its reference to
+         * the session data page and its session bit, or it keeps a freed
+         * session and every process it creates later joins it.
+         */
+        if (!Process->Vm.Flags.SessionLeader) return;
     }
 
     /* Check if this is the session leader */
