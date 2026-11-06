@@ -7,6 +7,7 @@ list(APPEND SOURCE
     GetProfileDirs.c
     LegacyProfileJunctions.c
     LoadUserProfile.c
+    ProfileSecurity.c
     testlist.c)
 
 add_executable(userenv_apitest ${SOURCE})
