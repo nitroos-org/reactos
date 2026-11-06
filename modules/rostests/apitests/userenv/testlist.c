@@ -9,6 +9,7 @@ extern void func_DeriveAppContainerSid(void);
 extern void func_GetProfileDirs(void);
 extern void func_LegacyProfileJunctions(void);
 extern void func_LoadUserProfile(void);
+extern void func_ProfileSecurity(void);
 
 const struct test winetest_testlist[] =
 {
@@ -19,5 +20,6 @@ const struct test winetest_testlist[] =
     { "GetProfileDirs", func_GetProfileDirs },
     { "LegacyProfileJunctions", func_LegacyProfileJunctions },
     { "LoadUserProfile", func_LoadUserProfile },
+    { "ProfileSecurity", func_ProfileSecurity },
     { 0, 0 }
 };
