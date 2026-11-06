@@ -11,6 +11,7 @@ list(APPEND SOURCE
     RegWow64Review.c
     RegWow64RelativeView.c
     RestrictedSidsCopy.c
+    RestrictedTokenAccess.c
     CreateService.c
     CreateProcessAsUserToken.c
     CreateProcessWithLogon.c
@@ -34,6 +35,7 @@ list(APPEND SOURCE
     LogonUserServiceSecret.c
     LogonUserUserRights.c
     LsaLookupLeak.c
+    LsaLookupNamesUnmapped.c
     LsassLeak.c
     LsaLogonUserS4U.c
     LsaManageSidNameMapping.c

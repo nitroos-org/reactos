@@ -168,6 +168,15 @@ CSR_API(SrvLogon)
 {
     PUSER_LOGON LogonRequest = &((PUSER_API_MESSAGE)ApiMessage)->Data.LogonRequest;
 
+    /* Only the registered logon process reports a logon or logoff */
+    if (LogonProcessId == 0 ||
+        ApiMessage->Header.ClientId.UniqueProcess != UlongToHandle(LogonProcessId))
+    {
+        DPRINT1("USERSRV: UserpLogon from process 0x%p refused, the logon process is 0x%Ix\n",
+                ApiMessage->Header.ClientId.UniqueProcess, LogonProcessId);
+        return STATUS_ACCESS_DENIED;
+    }
+
     DPRINT1("We are logged %s\n", LogonRequest->IsLogon ? "on" : "off");
 
     /* Impersonate the caller in order to retrieve settings in its context */
