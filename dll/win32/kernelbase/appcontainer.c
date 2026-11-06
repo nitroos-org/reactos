@@ -10,9 +10,8 @@
  * AppContainer\Mappings\<SID>. Chrome registers the SIDs of its sandbox profiles here itself instead of calling
  * userenv!CreateAppContainerProfile, and checks that the functions exist.
  *
- * This is bookkeeping only. Nothing here creates an AppContainer token or grants or checks access: ReactOS has no
- * AppContainer (lowbox) tokens, and kernelbase does not export CreateAppContainerToken, so a caller that wants to
- * start a process in the AppContainer still fails at that step, cleanly.
+ * The registration is bookkeeping only. CreateAppContainerToken makes an AppContainer (lowbox) token with
+ * NtCreateLowBoxToken; nothing here grants or checks access.
  */
 
 #include <stdarg.h>
@@ -23,6 +22,11 @@
 #include <winreg.h>
 #include <winerror.h>
 #include <sddl.h>
+#include <winternl.h>
+
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(Status) ((NTSTATUS)(Status) >= 0)
+#endif
 
 #define APPCONTAINER_MAPPINGS \
     L"Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppContainer\\Mappings"
@@ -257,4 +261,73 @@ AppContainerFreeMemory(
     if (!Memory)
         return TRUE;
     return HeapFree(GetProcessHeap(), 0, Memory) != FALSE;
+}
+
+/* SECURITY_CAPABILITIES (winnt.h of Windows 8 and later; not in this tree's headers) */
+typedef struct _BASEP_SECURITY_CAPABILITIES
+{
+    PSID AppContainerSid;
+    PSID_AND_ATTRIBUTES Capabilities;
+    DWORD CapabilityCount;
+    DWORD Reserved;
+} BASEP_SECURITY_CAPABILITIES, *PBASEP_SECURITY_CAPABILITIES;
+
+/*
+ * @implemented
+ *
+ * Makes an AppContainer token: a copy of TokenHandle (of the process token when it is NULL) that belongs to the
+ * AppContainer SID of SecurityCapabilities and holds its capabilities (Chromium's sandbox builds its renderer
+ * tokens with it). The kernel checks the SIDs.
+ *
+ * Windows also creates the AppContainer's named object directory (\Sessions\<n>\AppContainerNamedObjects\<SID>)
+ * and its links and hands them to the token; that is not done here: AppContainer processes keep using the session's
+ * named objects, and no access is checked against the AppContainer (as before AppContainer tokens existed).
+ * The error codes for bad arguments are not measured on Windows.
+ */
+BOOL
+WINAPI
+CreateAppContainerToken(
+    _In_opt_ HANDLE TokenHandle,
+    _In_ PBASEP_SECURITY_CAPABILITIES SecurityCapabilities,
+    _Out_ PHANDLE OutToken)
+{
+    HANDLE Token = TokenHandle, OwnToken = NULL, NewToken = NULL;
+    NTSTATUS Status;
+
+    if (!SecurityCapabilities || !OutToken)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (!Token)
+    {
+        Status = NtOpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &OwnToken);
+        if (!NT_SUCCESS(Status))
+        {
+            SetLastError(RtlNtStatusToDosError(Status));
+            return FALSE;
+        }
+        Token = OwnToken;
+    }
+
+    Status = NtCreateLowBoxToken(&NewToken,
+                                 Token,
+                                 TOKEN_ALL_ACCESS,
+                                 NULL,
+                                 SecurityCapabilities->AppContainerSid,
+                                 SecurityCapabilities->CapabilityCount,
+                                 SecurityCapabilities->Capabilities,
+                                 0,
+                                 NULL);
+    if (OwnToken)
+        NtClose(OwnToken);
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastError(RtlNtStatusToDosError(Status));
+        return FALSE;
+    }
+
+    *OutToken = NewToken;
+    return TRUE;
 }

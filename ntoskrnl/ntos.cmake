@@ -289,6 +289,7 @@ list(APPEND SOURCE
     ${REACTOS_SOURCE_DIR}/ntoskrnl/se/acl.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/se/audit.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/se/client.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/se/lowbox.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/se/objtype.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/se/priv.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/se/sd.c
