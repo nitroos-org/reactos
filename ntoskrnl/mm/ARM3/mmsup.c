@@ -55,6 +55,10 @@ MmAdjustWorkingSetSize(IN SIZE_T WorkingSetMinimumInBytes,
     if ((WorkingSetMinimumInBytes == -1) &&
         (WorkingSetMaximumInBytes == -1))
     {
+        /* NitroPager: trim the current (attached) process's private pages and write the dirty ones */
+        if (MiNitroPagerMode != 0)
+            return MiEmptyProcessWorkingSet(PsGetCurrentProcess(), FALSE);
+
         UNIMPLEMENTED;
         return STATUS_NOT_IMPLEMENTED;
     }

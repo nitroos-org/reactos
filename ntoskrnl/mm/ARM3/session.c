@@ -860,15 +860,15 @@ MiSessionCreatePrivateTables(
 
     /* Grab the two pages; both are fully written below */
     OldIrql = MiAcquirePfnLock();
-    if (MiGetFreeOrZeroedPageCount() < 2)
+    if (MiGetUsablePageCount() < 2)
     {
         MiReleasePfnLock(OldIrql);
         return STATUS_NO_MEMORY;
     }
     MI_SET_USAGE(MI_USAGE_PAGE_DIRECTORY);
-    PdptPfn = MiRemoveAnyPage(MI_GET_NEXT_COLOR());
+    PdptPfn = MiRemoveAnyPageGated(MI_GET_NEXT_COLOR());
     MI_SET_USAGE(MI_USAGE_PAGE_DIRECTORY);
-    PdPfn = MiRemoveAnyPage(MI_GET_NEXT_COLOR());
+    PdPfn = MiRemoveAnyPageGated(MI_GET_NEXT_COLOR());
 
     /* The PFN entries. Neither page is freed today: session teardown is
        incomplete (P6), as for the other session pages */
