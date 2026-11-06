@@ -601,7 +601,7 @@ CsrParseServerCommandLine(IN ULONG ArgumentCount,
                    ObjectDirectory=\Windows means \Sessions\<id>\Windows */
                 UNICODE_STRING SessionDirectory;
                 WCHAR SessionPrefix[32];
-                USHORT Size;
+                ULONG Size;
 
                 _swprintf(SessionPrefix, L"%ws\\%lu", SESSION_ROOT, SessionId);
                 Status = RtlAnsiStringToUnicodeString(&SessionDirectory,
@@ -609,9 +609,11 @@ CsrParseServerCommandLine(IN ULONG ArgumentCount,
                                                       TRUE);
                 if (!NT_SUCCESS(Status)) return Status;
 
-                Size = (USHORT)(wcslen(SessionPrefix) * sizeof(WCHAR)) +
+                /* ULONG: the sum of two USHORT lengths cannot wrap, it is
+                   only too long for a UNICODE_STRING */
+                Size = (ULONG)(wcslen(SessionPrefix) * sizeof(WCHAR)) +
                        SessionDirectory.Length + sizeof(UNICODE_NULL);
-                if (Size < SessionDirectory.Length)
+                if (Size > MAXUSHORT)
                 {
                     RtlFreeUnicodeString(&SessionDirectory);
                     return STATUS_NAME_TOO_LONG;
@@ -623,7 +625,7 @@ CsrParseServerCommandLine(IN ULONG ArgumentCount,
                     return STATUS_NO_MEMORY;
                 }
                 CsrDirectoryName.Length = 0;
-                CsrDirectoryName.MaximumLength = Size;
+                CsrDirectoryName.MaximumLength = (USHORT)Size;
                 RtlAppendUnicodeToString(&CsrDirectoryName, SessionPrefix);
                 RtlAppendUnicodeStringToString(&CsrDirectoryName, &SessionDirectory);
                 RtlFreeUnicodeString(&SessionDirectory);

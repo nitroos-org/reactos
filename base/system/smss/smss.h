@@ -259,6 +259,10 @@ SmpUnhandledExceptionFilter(
 extern ULONG SmpNitroSessions;
 extern RTL_CRITICAL_SECTION SmpMuSessionLock;
 
+NTSTATUS
+NTAPI
+SmpNitroDetach(VOID);
+
 VOID
 NTAPI
 SmpReadNitroSessionsConfig(VOID);

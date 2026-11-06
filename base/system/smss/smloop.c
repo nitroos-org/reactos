@@ -268,14 +268,19 @@ SmpStartCsr(IN PSM_API_MSG SmApiMsg,
     HANDLE InitialCommandProcess, InitialCommandProcessId, WindowsSubSysProcessId;
     NTSTATUS Status;
 
-    /* One session create at a time (NitroSessions design 3.1) */
+    /*
+     * One session create at a time (NitroSessions design 3.1). SMSS stays
+     * attached to the new session until the initial command is started, so
+     * the lock covers that too, up to the detach.
+     */
     RtlEnterCriticalSection(&SmpMuSessionLock);
     Status = SmpLoadSubSystemsForMuSession(&SmStartCsr->MuSessionId,
                                            &WindowsSubSysProcessId,
                                            &InitialCommand);
-    RtlLeaveCriticalSection(&SmpMuSessionLock);
     if (!NT_SUCCESS(Status))
     {
+        if (SmpNitroSessions) SmpNitroDetach();
+        RtlLeaveCriticalSection(&SmpMuSessionLock);
         DPRINT1("SMSS: SmpLoadSubSystemsForMuSession failed with status 0x%08x\n", Status);
         return Status;
     }
@@ -290,6 +295,9 @@ SmpStartCsr(IN PSM_API_MSG SmApiMsg,
                                       &InitialCommand,
                                       &InitialCommandProcess,
                                       &InitialCommandProcessId);
+    /* A NitroSessions start leaves SMSS in no session; flag 0 is as before */
+    if (SmpNitroSessions) SmpNitroDetach();
+    RtlLeaveCriticalSection(&SmpMuSessionLock);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("SMSS: SmpExecuteInitialCommand failed with status 0x%08x\n", Status);
