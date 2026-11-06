@@ -534,8 +534,23 @@ MiDeletePteCommon(IN PMMPTE PointerPte,
     /* See if the PTE is valid */
     if (TempPte.u.Hard.Valid == 0)
     {
-        /* Prototype and paged out PTEs not supported yet */
+        /* Prototype PTEs not supported yet */
         ASSERT(TempPte.u.Soft.Prototype == 0);
+
+        /*
+         * NitroPager: a paged-out private page. The PTE, read here under the
+         * PFN lock, owns the slot: it goes with the PTE (owner checked). No
+         * page, and no page table reference (repurpose dropped it).
+         */
+        if (MI_IS_PAGEFILE_PTE(&TempPte))
+        {
+            ASSERT(MiNitroPagerMode != 0);
+            MiReleasePageFileSlot((ULONG)TempPte.u.Soft.PageFileLow,
+                                  MI_PAGEFILE_PTE_SLOT(&TempPte),
+                                  MiPagerOwnerTagForPte(PointerPte));
+            MI_ERASE_PTE(PointerPte);
+            return FALSE;
+        }
         ASSERT((TempPte.u.Soft.PageFileHigh == 0) || (TempPte.u.Soft.Transition == 1));
 
         if (TempPte.u.Soft.Transition)
@@ -574,11 +589,14 @@ MiDeletePteCommon(IN PMMPTE PointerPte,
             /* See if we must free it ourselves, or if it will be freed once I/O is over */
             if (Pfn1->u3.e2.ReferenceCount == 0)
             {
+                MMPTE OriginalPte = Pfn1->OriginalPte;
+
                 /* And it should be in standby or modified list */
                 ASSERT((Pfn1->u3.e1.PageLocation == ModifiedPageList) || (Pfn1->u3.e1.PageLocation == StandbyPageList));
 
-                /* Unlink it and set its reference count to one */
+                /* Unlink it and set its reference count to one; a clean copy's slot goes with the free (NitroPager) */
                 MiUnlinkPageFromList(Pfn1);
+                Pfn1->OriginalPte = OriginalPte;
                 Pfn1->u3.e2.ReferenceCount++;
 
                 /* This will put it back in free list and clean properly up */
@@ -3461,9 +3479,15 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
             DPRINT1("Fixme: Not checking for valid protection\n");
         }
 
-        /* This is a section, and this is not yet supported */
-        DPRINT1("Section protection not yet supported\n");
-        OldProtect = 0;
+        /*
+         * The change itself is not applied yet: a resident page of a prototype-backed view has no protection
+         * of its own, it takes the protection of the view (see the section view case in the query code),
+         * so there is nowhere to keep the new one. The call reports the old protection of the view, which
+         * is what a query of the first page shows (the oracle returns 0x40 for a view of a pagefile-backed
+         * section mapped executable read-write).
+         */
+        DPRINT("Section protection change not applied\n");
+        OldProtect = MmProtectToValue[Vad->u.VadFlags.Protection];
     }
     else
     {
@@ -3571,9 +3595,19 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                     PteContents.u.Hard.Valid = 0;
                     PteContents.u.Soft.Transition = 1;
                     PteContents.u.Trans.Protection = ProtectionMask;
-                    /* Write the PTE, and release the page only when no processor can still use it */
+                    /*
+                     * Write the PTE, and release the page only when no processor can still use it.
+                     * D8: exchange it, so that Dirty comes from the PTE as the processors last
+                     * wrote it, and keep it in the PFN (a clean copy in the paging file is stale)
+                     */
                     // FIXME: remove the page from the WS
-                    MI_WRITE_INVALID_PTE(PointerPte, PteContents);
+                    {
+                        MMPTE OldPte;
+
+                        OldPte.u.Long = InterlockedExchangePte(PointerPte, PteContents.u.Long);
+                        if (OldPte.u.Hard.Dirty)
+                            MiMarkPfnDirty(Pfn1);
+                    }
                     MiReleasePfnLock(OldIrql);
 
                     /* The working set lock keeps faults off the page until it is released */
@@ -3584,8 +3618,8 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                 }
                 else
                 {
-                    /* Write the protection mask, the TB is flushed with the list */
-                    Pfn1->OriginalPte.u.Soft.Protection = ProtectionMask;
+                    /* The TB is flushed with the list; OriginalPte.Protection is
+                       stored by MiFlushTbAndCapture under the PFN lock (F4) */
                     MiFlushTbAndCapture(Vad,
                                         PointerPte,
                                         ProtectionMask,
@@ -3600,9 +3634,25 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                 ASSERT(PteContents.u.Soft.Prototype == 0);
                 //ASSERT(PteContents.u.Soft.Transition == 0);
 
-                /* The PTE is already demand-zero, just update the protection mask */
-                PteContents.u.Soft.Protection = ProtectionMask;
-                MI_WRITE_INVALID_PTE(PointerPte, PteContents);
+                if (PteContents.u.Soft.Transition)
+                {
+                    /*
+                     * PTE-1: a transition PTE can become a page-file PTE under the PFN
+                     * lock alone (NitroPager repurpose): read and rewrite it under it.
+                     * The protection field is the same in both forms.
+                     */
+                    KIRQL OldIrql = MiAcquirePfnLock();
+                    PteContents = *PointerPte;
+                    PteContents.u.Soft.Protection = ProtectionMask;
+                    MI_WRITE_INVALID_PTE(PointerPte, PteContents);
+                    MiReleasePfnLock(OldIrql);
+                }
+                else
+                {
+                    /* Demand-zero or paged out: only the working set lock changes those */
+                    PteContents.u.Soft.Protection = ProtectionMask;
+                    MI_WRITE_INVALID_PTE(PointerPte, PteContents);
+                }
                 ASSERT(PointerPte->u.Long != 0);
             }
 
@@ -3897,11 +3947,14 @@ MiDecommitPages(IN PVOID StartingAddress,
                     ValidPteList[PteCount++] = PointerPte;
                 }
                 else if ((PteContents.u.Soft.Prototype == 0) &&
-                         (PteContents.u.Soft.Transition == 1))
+                         ((PteContents.u.Soft.Transition == 1) || MI_IS_PAGEFILE_PTE(&PteContents)))
                 {
                     //
                     // A page made PAGE_NOACCESS or PAGE_GUARD after it was
-                    // touched is in transition. Free it as MEM_RELEASE does,
+                    // touched is in transition, a page NitroPager trimmed is
+                    // in transition or paged out. Free it as MEM_RELEASE does
+                    // (MiDeletePte reads the PTE again under the PFN lock:
+                    // the transition PTE may have been repurposed meanwhile),
                     // then decommit the PTE.
                     //
                     KIRQL OldIrql = MiAcquirePfnLock();
@@ -6656,7 +6709,9 @@ RetryCommit:
             if (PointerPte->u.Soft.Valid == 0)
             {
                 ASSERT(PointerPte->u.Soft.Prototype == 0);
-                ASSERT((PointerPte->u.Soft.PageFileHigh == 0) || (PointerPte->u.Soft.Transition == 1));
+                ASSERT((PointerPte->u.Soft.PageFileHigh == 0) ||
+                       (PointerPte->u.Soft.Transition == 1) ||
+                       MI_IS_PAGEFILE_PTE(PointerPte));
             }
 
             //

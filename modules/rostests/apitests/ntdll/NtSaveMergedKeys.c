@@ -10,12 +10,12 @@
  * bucket; a save of one key on both sides asked for the same lock twice behind a queued creator.  The stress saves
  * in every order (and one key twice) while threads create and delete subkeys of both keys by the thousand.
  *
- * The saved hive is also checked for its content: it is the union of both keys, recursively; for a value of the
- * same name (compared without case) the data of the High key is kept, a subkey of the same name is merged in the same
- * way.  These rules are those of the Windows registry views (HKEY_CLASSES_ROOT: the user's key wins) and are NOT
- * measured on Windows 10: its NtSaveMergedKeys returned STATUS_INVALID_PARAMETER for the two keys of the SOFTWARE
- * hive that were tried (HKLM\Software\Microsoft\Windows\CurrentVersion and its WOW6432Node twin), so two keys of
- * one hive may not be accepted there; this test uses such a pair and is for ReactOS.
+ * The saved hive is also checked for its content, as measured on Windows 10 22H2: it is the union of both keys, recursively.
+ * The values of the High key come first, in its order; of the Low key's values only those of other names follow (names
+ * compared without case: the High key's value and spelling stay); a subkey of the same name is merged in the same way.
+ * Volatile subkeys are not in the result. Two keys of one hive are refused with STATUS_INVALID_PARAMETER (siblings,
+ * ancestor, descendant, the same key), so the two keys of this test live in different hives (the SOFTWARE hive and the
+ * default user's hive).
  */
 
 #include "precomp.h"
@@ -24,6 +24,7 @@
 #define REG_SZ 1
 #endif
 #define ROOT_PATH   L"\\Registry\\Machine\\Software\\NitroSaveMerged"
+#define Q_PATH      L"\\Registry\\User\\.Default\\NitroSaveMergedQ"
 #define WORKERS     4
 #define ROUNDS      120
 
@@ -209,6 +210,19 @@ OpenSub(HANDLE Parent, PCWSTR Name, BOOLEAN Create)
 }
 
 static
+HANDLE
+CreateVolatileSub(HANDLE Parent, PCWSTR Name)
+{
+    UNICODE_STRING SubName;
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Sub = NULL;
+
+    RtlInitUnicodeString(&SubName, Name);
+    InitializeObjectAttributes(&Attributes, &SubName, OBJ_CASE_INSENSITIVE, Parent, NULL);
+    return NT_SUCCESS(NtCreateKey(&Sub, KEY_ALL_ACCESS | DELETE, &Attributes, 0, NULL, REG_OPTION_VOLATILE, NULL)) ? Sub : NULL;
+}
+
+static
 void
 DeleteSub(HANDLE Parent, PCWSTR Name)
 {
@@ -251,6 +265,17 @@ MakeContent(void)
     if (L)
         NtClose(L);
 
+    /* Volatile subkeys of either key are not in the result */
+    H = CreateVolatileSub(KeyP, L"volatile_high");
+    if (H)
+        NtClose(H);
+    L = CreateVolatileSub(KeyQ, L"volatile_low");
+    if (L)
+    {
+        SetStringValue(L, L"v", L"l");
+        NtClose(L);
+    }
+
     /* A subkey of one key only, with a subkey of its own */
     H = OpenSub(KeyP, L"high_only_key", TRUE);
     if (H)
@@ -275,6 +300,8 @@ RemoveContent(void)
 {
     UNICODE_STRING Name;
 
+    DeleteSub(KeyP, L"volatile_high");
+    DeleteSub(KeyQ, L"volatile_low");
     DeleteSub(KeyP, L"high_only_key\\deep");
     DeleteSub(KeyP, L"high_only_key");
     DeleteSub(KeyP, L"shared");
@@ -286,12 +313,39 @@ RemoveContent(void)
     NtDeleteValueKey(KeyQ, &Name);
 }
 
+/* The names of the values, in the order they are enumerated */
+static
+void
+CheckValueOrder(HANDLE Key, PCWSTR const *Expected, ULONG Count)
+{
+    UCHAR Buffer[256];
+    PKEY_VALUE_BASIC_INFORMATION Info = (PKEY_VALUE_BASIC_INFORMATION)Buffer;
+    ULONG Index, Length;
+    NTSTATUS Status;
+    WCHAR Name[40];
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        Status = NtEnumerateValueKey(Key, Index, KeyValueBasicInformation, Buffer, sizeof(Buffer), &Length);
+        ok_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            return;
+        RtlCopyMemory(Name, Info->Name, Info->NameLength);
+        Name[Info->NameLength / sizeof(WCHAR)] = 0;
+        ok(!wcscmp(Name, Expected[Index]), "value %lu is \"%ls\", expected \"%ls\"\n", Index, Name, Expected[Index]);
+    }
+}
+
 static
 void
 CheckMergedContent(HANDLE Loaded)
 {
+    static PCWSTR const Order[] = { L"both", L"only_high", L"Mixed", L"only_low" };
     HANDLE Sub;
     ULONG Values, SubKeys;
+
+    /* High's values first, in its order, then the Low-only ones; High's spelling of the name stays */
+    CheckValueOrder(Loaded, Order, RTL_NUMBER_OF(Order));
 
     ok_string_value(Loaded, L"both", L"high");
     ok_string_value(Loaded, L"only_low", L"l");
@@ -351,6 +405,31 @@ TestResult(void)
     BOOLEAN Old;
 
     MakeContent();
+
+    /* Two keys of one hive are refused (Windows 10: STATUS_INVALID_PARAMETER): the same key, a subkey of it, siblings */
+    {
+        HANDLE Child = OpenSub(KeyP, L"shared", FALSE), Child2 = OpenSub(KeyP, L"high_only_key", FALSE);
+
+        Status = SaveMerged(KeyP, KeyP, L"nitro_merged.dat");
+        ok_hex(Status, STATUS_INVALID_PARAMETER);
+        if (Child)
+        {
+            Status = SaveMerged(KeyP, Child, L"nitro_merged.dat");
+            ok_hex(Status, STATUS_INVALID_PARAMETER);
+            Status = SaveMerged(Child, KeyP, L"nitro_merged.dat");
+            ok_hex(Status, STATUS_INVALID_PARAMETER);
+        }
+        if (Child && Child2)
+        {
+            Status = SaveMerged(Child2, Child, L"nitro_merged.dat");
+            ok_hex(Status, STATUS_INVALID_PARAMETER);
+        }
+        if (Child)
+            NtClose(Child);
+        if (Child2)
+            NtClose(Child2);
+        DeleteFileW(L"nitro_merged.dat");
+    }
 
     /* The saved file is a hive that loads */
     Status = SaveMerged(KeyP, KeyQ, L"nitro_merged.dat");
@@ -416,7 +495,7 @@ START_TEST(NtSaveMergedKeys)
     wcscpy(Name, ROOT_PATH L"\\P");
     Status = OpenKeyByPath(&KeyP, KEY_ALL_ACCESS | DELETE, Name, 0, NULL);
     ok_hex(Status, STATUS_SUCCESS);
-    wcscpy(Name, ROOT_PATH L"\\Q");
+    wcscpy(Name, Q_PATH);
     Status = OpenKeyByPath(&KeyQ, KEY_ALL_ACCESS | DELETE, Name, 0, NULL);
     ok_hex(Status, STATUS_SUCCESS);
     if (!KeyP || !KeyQ)
@@ -442,7 +521,8 @@ START_TEST(NtSaveMergedKeys)
         for (i = 0; i < 3; i++)
         {
             Status = SaveMerged(Order[i].High, Order[i].Low, L"nitro_merged_stress.dat");
-            if (!NT_SUCCESS(Status))
+            /* one key on both sides: refused, but only after both locks were taken */
+            if (Status != ((Order[i].High == Order[i].Low) ? STATUS_INVALID_PARAMETER : STATUS_SUCCESS))
                 Failures++;
             InterlockedIncrement(&Progress);
         }
@@ -468,7 +548,7 @@ START_TEST(NtSaveMergedKeys)
         NtDeleteKey(KeyP);
         NtClose(KeyP);
     }
-    wcscpy(Name, ROOT_PATH L"\\Q");
+    wcscpy(Name, Q_PATH);
     if (NT_SUCCESS(OpenKeyByPath(&KeyQ, DELETE, Name, 0, NULL)))
     {
         NtDeleteKey(KeyQ);

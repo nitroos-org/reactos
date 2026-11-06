@@ -628,7 +628,7 @@ NtGdiMaskBlt(
     PDC_ATTR pdcattr = NULL;
     SURFACE *BitmapDest, *BitmapSrc = NULL, *psurfMask = NULL;
     RECTL DestRect, SourceRect;
-    POINTL SourcePoint, MaskPoint;
+    POINTL SourcePoint, MaskPoint, BrushOrigin;
     BOOL Status = FALSE;
     EXLATEOBJ exlo;
     XLATEOBJ *XlateObj = NULL;
@@ -769,6 +769,10 @@ NtGdiMaskBlt(
     if (pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(DCDest);
 
+    /* The brush origin of the DC (SetBrushOrgEx) applies to a pattern ROP, as in IntPatBlt */
+    BrushOrigin.x = DCDest->dclevel.pbrFill->ptOrigin.x + DCDest->dclevel.ptlBrushOrigin.x + DCDest->ptlDCOrig.x;
+    BrushOrigin.y = DCDest->dclevel.pbrFill->ptOrigin.y + DCDest->dclevel.ptlBrushOrigin.y + DCDest->ptlDCOrig.y;
+
     /* Determine surfaces to be used in the bitblt */
     BitmapDest = DCDest->dclevel.pSurface;
     if (!BitmapDest)
@@ -830,7 +834,7 @@ NtGdiMaskBlt(
                                           &SourcePoint,
                                           &MaskPoint,
                                           &DCDest->eboFill.BrushObject,
-                                          &DCDest->dclevel.pbrFill->ptOrigin,
+                                          &BrushOrigin,
                                           rop4);
         if (psurfGlass)
             GlassBlendDone(psurfGlass);
@@ -846,7 +850,7 @@ NtGdiMaskBlt(
                               &SourcePoint,
                               &MaskPoint,
                               &DCDest->eboFill.BrushObject,
-                              &DCDest->dclevel.pbrFill->ptOrigin,
+                              &BrushOrigin,
                               rop4);
     }
 
@@ -1041,8 +1045,9 @@ GreStretchBltMask(
         SourceRect.bottom += DCSrc->ptlDCOrig.y;
     }
 
-    BrushOrigin.x = 0;
-    BrushOrigin.y = 0;
+    /* The DC brush origin (SetBrushOrgEx) applies to a pattern ROP, as in IntPatBlt */
+    BrushOrigin.x = DCDest->dclevel.ptlBrushOrigin.x;
+    BrushOrigin.y = DCDest->dclevel.ptlBrushOrigin.y;
 
     /* A copy that does not scale or flip is a BitBlt to IntEngStretchBlt and is split around the
      * pointer like one; a source on the screen can show the pointer, so only a memory source is split */

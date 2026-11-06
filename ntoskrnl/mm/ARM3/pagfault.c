@@ -330,6 +330,27 @@ MiAccessCheck(IN PMMPTE PointerPte,
         ASSERT(TempPte.u.Soft.Prototype == 0);
 
         /* Remove the guard page bit, and return a guard page violation */
+        if (TempPte.u.Soft.Transition)
+        {
+            /*
+             * PTE-1: a transition PTE (a resident page made PAGE_GUARD) can become a
+             * page-file PTE under the PFN lock alone (NitroPager repurpose), and the
+             * frame then belongs to someone else. Read it again under the PFN lock and
+             * change nothing but the protection, which is the same field in both forms.
+             * The working set lock the caller holds keeps it from becoming valid.
+             */
+            KIRQL OldIrql = MiAcquirePfnLock();
+
+            TempPte = *PointerPte;
+            ASSERT(TempPte.u.Hard.Valid == 0);
+            ASSERT(TempPte.u.Soft.Prototype == 0);
+            TempPte.u.Soft.Protection = ProtectionMask & ~MM_GUARDPAGE;
+            ASSERT(TempPte.u.Long != 0);
+            MI_WRITE_INVALID_PTE(PointerPte, TempPte);
+            MiReleasePfnLock(OldIrql);
+            return STATUS_GUARD_PAGE_VIOLATION;
+        }
+
         TempPte.u.Soft.Protection = ProtectionMask & ~MM_GUARDPAGE;
         ASSERT(TempPte.u.Long != 0);
         MI_WRITE_INVALID_PTE(PointerPte, TempPte);
@@ -1054,15 +1075,23 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     ULONG Color;
     PFN_NUMBER Page;
     NTSTATUS Status;
-    MMPTE TempPte = *PointerPte;
+    MMPTE PageFilePte = *PointerPte, TempPte;
     PMMPFN Pfn1;
-    ULONG PageFileIndex = TempPte.u.Soft.PageFileLow;
-    ULONG_PTR PageFileOffset = TempPte.u.Soft.PageFileHigh;
-    ULONG Protection = TempPte.u.Soft.Protection;
+    PKEVENT Event;
+    ULONG PageFileIndex = (ULONG)PageFilePte.u.Soft.PageFileLow;
+    ULONG_PTR Slot = MI_PAGEFILE_PTE_SLOT(&PageFilePte);
+    ULONG Protection = (ULONG)PageFilePte.u.Soft.Protection;
+    ULONG Owner, Found = 0;
+    BOOLEAN Resource;
 
-    /* Things we don't support yet */
+    /*
+     * NitroPager P0: a private page that was paged out. The working set lock
+     * is held across the read (no collided fault on a private PTE then);
+     * the PFN lock is held on entry and on return.
+     */
     ASSERT(CurrentProcess > HYDRA_PROCESS);
     ASSERT(*OldIrql != MM_NOIRQL);
+    ASSERT(MiNitroPagerMode != 0);
 
     MI_SET_USAGE(MI_USAGE_PAGE_FILE);
     MI_SET_PROCESS(CurrentProcess);
@@ -1071,9 +1100,25 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     MI_ASSERT_PFN_LOCK_HELD();
 
     /* Some sanity checks */
-    ASSERT(TempPte.u.Hard.Valid == 0);
-    ASSERT(TempPte.u.Soft.PageFileHigh != 0);
-    ASSERT(TempPte.u.Soft.PageFileHigh != MI_PTE_LOOKUP_NEEDED);
+    ASSERT(MI_IS_PAGEFILE_PTE(&PageFilePte));
+    ASSERT(MiIsUserPageTablePte(PointerPte));
+
+    /* A fault that can wait leaves the last pages to those that cannot (MmAccessFault waits and retries) */
+    if ((FaultingAddress <= MM_HIGHEST_USER_ADDRESS) &&
+        (MmAvailablePages < MI_DEMAND_ZERO_FAULT_RESERVE) &&
+        MiCanFaultWaitForPages())
+    {
+        return STATUS_NO_MEMORY;
+    }
+
+    /* The slot must hold this PTE's data: never return another owner's page, or an unwritten one */
+    Owner = MiPagerOwnerTagForPte(PointerPte);
+    if (MiPagerTakeInjection(MI_PAGER_INJECT_TAG_MISMATCH, FaultingAddress) ||
+        !MiCheckPageFileSlotTag(PageFileIndex, Slot, Owner, &Found))
+    {
+        MiPagerSlotProblem(MI_PAGER_TAG_MISMATCH_READ, PageFileIndex, Slot, Owner, Found);
+        return STATUS_IN_PAGE_ERROR;
+    }
 
     /* Get any page, it will be overwritten */
     Color = MI_GET_NEXT_PROCESS_COLOR(CurrentProcess);
@@ -1083,26 +1128,31 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
         return STATUS_NO_MEMORY;
     }
 
-    /* Initialize this PFN */
-    MiInitializePfn(Page, PointerPte, StoreInstruction);
+    /* Initialize this PFN: OriginalPte keeps the page-file PTE, the clean copy */
+    MiInitializePfn(Page, PointerPte, FALSE);
+    ASSERT(MI_IS_PAGEFILE_PTE(&MI_PFN_ELEMENT(Page)->OriginalPte));
 
     /* Sets the PFN as being in IO operation */
     Pfn1 = MI_PFN_ELEMENT(Page);
-    ASSERT(Pfn1->u1.Event == NULL);
     ASSERT(Pfn1->u3.e1.ReadInProgress == 0);
     ASSERT(Pfn1->u3.e1.WriteInProgress == 0);
+    Pfn1->u1.Event = NULL;
     Pfn1->u3.e1.ReadInProgress = 1;
 
     /* We must write the PTE now as the PFN lock will be released while performing the IO operation */
     MI_MAKE_TRANSITION_PTE(&TempPte, Page, Protection);
-
     MI_WRITE_INVALID_PTE(PointerPte, TempPte);
 
     /* Release the PFN lock while we proceed */
     MiReleasePfnLock(*OldIrql);
 
     /* Do the paging IO */
-    Status = MiReadPageFile(Page, PageFileIndex, PageFileOffset);
+    if (MiPagerTakeInjection(MI_PAGER_INJECT_READ_ERROR, FaultingAddress))
+        Status = STATUS_DEVICE_DATA_ERROR;
+    else if (MiPagerTakeInjection(MI_PAGER_INJECT_READ_RESOURCES, FaultingAddress))
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+    else
+        Status = MiReadPageFile(Page, PageFileIndex, Slot + 1);
 
     /* Lock the PFN database again */
     *OldIrql = MiAcquirePfnLock();
@@ -1110,28 +1160,70 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     /* Nobody should have changed that while we were not looking */
     ASSERT(Pfn1->u3.e1.ReadInProgress == 1);
     ASSERT(Pfn1->u3.e1.WriteInProgress == 0);
+    Pfn1->u3.e1.ReadInProgress = 0;
 
     if (!NT_SUCCESS(Status))
     {
-        /* Malheur! */
-        ASSERT(FALSE);
-        Pfn1->u4.InPageError = 1;
-        Pfn1->u1.ReadStatus = Status;
+        /*
+         * The data stays in the slot: the PTE names it again, and the page
+         * goes back without releasing it. A shortage (an IRP, pool) is waited
+         * for and retried; a device error is the faulting thread's in-page
+         * error. Faults that waited retry and do their own read.
+         */
+        Resource = (Status == STATUS_INSUFFICIENT_RESOURCES) || (Status == STATUS_NO_MEMORY);
+        if (!Resource)
+            Pfn1->u4.InPageError = 1;
+        MI_WRITE_INVALID_PTE(PointerPte, PageFilePte);
+
+        Event = Pfn1->u1.Event;
+        Pfn1->u1.Event = NULL;
+        if (Event != NULL)
+            KeSetEvent(Event, IO_NO_INCREMENT, FALSE);
+
+        /* The slot belongs to the PTE again, not to this page */
+        MI_MAKE_SOFTWARE_PTE(&Pfn1->OriginalPte, Protection);
+        MiDecrementShareCount(MiGetPfnEntry(Pfn1->u4.PteFrame), Pfn1->u4.PteFrame);
+        MI_SET_PFN_DELETED(Pfn1);
+        MiDecrementShareCount(Pfn1, Page);
+
+        if (Resource)
+        {
+            MiPagerCounters.InPageResourceRetries++;
+            return STATUS_NO_MEMORY;
+        }
+        MiPagerCounters.InPageErrors++;
+
+        /* The trap handler raises STATUS_IN_PAGE_ERROR with this status, unless it is one it maps otherwise */
+        if ((Status == STATUS_ACCESS_VIOLATION) ||
+            (Status == STATUS_GUARD_PAGE_VIOLATION) ||
+            (Status == STATUS_STACK_OVERFLOW))
+        {
+            Status = STATUS_IN_PAGE_ERROR;
+        }
+        return Status;
     }
 
     /* And the PTE can finally be valid */
-    MI_MAKE_HARDWARE_PTE(&TempPte, PointerPte, Protection, Page);
+    MI_MAKE_HARDWARE_PTE_USER(&TempPte, PointerPte, Protection, Page);
+    if (StoreInstruction && MI_IS_PAGE_WRITEABLE(&TempPte))
+    {
+        /* Written at once: the copy is stale */
+        MI_MAKE_DIRTY_PAGE(&TempPte);
+        MiMarkPfnDirty(Pfn1);
+    }
     MI_WRITE_VALID_PTE(PointerPte, TempPte);
+    MiPagerCounters.InPageReads++;
 
-    Pfn1->u3.e1.ReadInProgress = 0;
     /* Did someone start to wait on us while we proceeded ? */
-    if (Pfn1->u1.Event)
+    Event = Pfn1->u1.Event;
+    Pfn1->u1.Event = NULL;
+    if (Event != NULL)
     {
         /* Tell them we're done */
-        KeSetEvent(Pfn1->u1.Event, IO_NO_INCREMENT, FALSE);
+        KeSetEvent(Event, IO_NO_INCREMENT, FALSE);
     }
 
-    return Status;
+    return STATUS_PAGE_FAULT_PAGING_FILE;
 }
 
 /*
@@ -1180,11 +1272,20 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
     /* ARM3 doesn't support this path */
     ASSERT(OldIrql != MM_NOIRQL);
 
-    /* Capture the PTE and make sure it's in transition format */
+    /* Capture the PTE, now under the PFN lock */
     TempPte = *PointerPte;
-    ASSERT((TempPte.u.Soft.Valid == 0) &&
-           (TempPte.u.Soft.Prototype == 0) &&
-           (TempPte.u.Soft.Transition == 1));
+    if ((TempPte.u.Soft.Valid != 0) ||
+        (TempPte.u.Soft.Prototype != 0) ||
+        (TempPte.u.Soft.Transition == 0))
+    {
+        /*
+         * PTE-1 (NitroPager): the page was repurposed after the caller read
+         * the PTE, which is a page-file PTE now. The fault starts over.
+         */
+        ASSERT(MiNitroPagerMode != 0);
+        ASSERT(MI_IS_PAGEFILE_PTE(&TempPte));
+        return STATUS_SUCCESS;
+    }
 
     /* Get the PFN and the PFN entry */
     PageFrameIndex = TempPte.u.Trans.PageFrameNumber;
@@ -1194,8 +1295,12 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
     /* One more transition fault! */
     InterlockedIncrement(&KeGetCurrentPrcb()->MmTransitionCount);
 
-    /* This is from ARM3 -- Windows normally handles this here */
-    ASSERT(Pfn1->u4.InPageError == 0);
+    /* A page whose read failed is never left behind a transition PTE (the PTE is restored first): start over */
+    if (Pfn1->u4.InPageError != 0)
+    {
+        ASSERT(FALSE);
+        return STATUS_SUCCESS;
+    }
 
     /* See if we should wait before terminating the fault */
     if ((Pfn1->u3.e1.ReadInProgress == 1)
@@ -2505,7 +2610,7 @@ UserFault:
 
                 /* Allocate a new page and copy it */
                 PageFrameIndex = 0;
-                if (MiGetFreeOrZeroedPageCount() != 0)
+                if (MiGetUsablePageCount() != 0)
                     PageFrameIndex = MiRemoveAnyPage(MI_GET_NEXT_PROCESS_COLOR(CurrentProcess));
                 if (PageFrameIndex == 0)
                 {
@@ -2571,8 +2676,19 @@ UserFault:
             if (CurrentProcess->Pcb.Flags.ExecuteEnable)
             {
                 /* Fix up the PTE to be executable */
+#ifdef _M_AMD64
+                {
+                    /* Clear only that bit: a Dirty bit set meanwhile must not be lost (D8) */
+                    MMPTE Mask;
+
+                    Mask.u.Long = ~(ULONG64)0;
+                    Mask.u.Hard.NoExecute = 0;
+                    InterlockedAnd64((PLONG64)PointerPte, (LONG64)Mask.u.Long);
+                }
+#else
                 TempPte.u.Hard.NoExecute = 0;
                 MI_UPDATE_VALID_PTE(PointerPte, TempPte);
+#endif
                 MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
                 return STATUS_SUCCESS;
             }

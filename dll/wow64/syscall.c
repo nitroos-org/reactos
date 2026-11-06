@@ -1176,6 +1176,34 @@ static NTSTATUS FilterToken32(const ULONG *a, WOW64_CLEANUP *Cleanup)
     return ReturnHandle32(a[5], Status, Cleanup);
 }
 
+/* NtAccessCheckByType*: OBJECT_TYPE_LIST holds a GUID pointer, so an entry is 8 bytes in the guest
+ * and 16 natively. The guest list is read once into a native list in Cleanup->Buffer; the GUIDs stay
+ * in guest memory, where the kernel probes and captures them, and the kernel checks the count and
+ * the levels. A zero count or a NULL list goes through as it is (the kernel decides). */
+typedef struct { USHORT Level, Sbz; ULONG ObjectType; } WOW64_OBJECT_TYPE_LIST;
+
+static NTSTATUS ObjectTypeList32(ULONG Address, ULONG Count, POBJECT_TYPE_LIST *List, WOW64_CLEANUP *Cleanup)
+{
+    const WOW64_OBJECT_TYPE_LIST *From = PTR32(Address);
+    POBJECT_TYPE_LIST To;
+    ULONG i;
+
+    *List = PTR32(Address);
+    if (!Address || !Count) return STATUS_SUCCESS;
+    if (Count > WOW64_MAX_ARRAY_COUNT) return STATUS_INVALID_PARAMETER;
+    if (!GuestSpan(Address, (ULONG64)Count * sizeof(*From))) return STATUS_ACCESS_VIOLATION;
+    To = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, (SIZE_T)Count * sizeof(*To));
+    if (!To) return STATUS_NO_MEMORY;
+    for (i = 0; i < Count; ++i)
+    {
+        To[i].Level = From[i].Level;
+        To[i].Sbz = From[i].Sbz;
+        To[i].ObjectType = PTR32(From[i].ObjectType);
+    }
+    *List = To;
+    return STATUS_SUCCESS;
+}
+
 /* NtCreateLowBoxToken: the capabilities are 32-bit SID_AND_ATTRIBUTES whose SIDs stay in guest memory, where
  * the kernel captures them, and the handles are 4 bytes each. Both arrays are read once into native arrays in
  * Cleanup->Buffer; the counts go to the kernel as they are, which applies its own limits. */
@@ -3005,6 +3033,18 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         RETURN_HANDLE_AT(5);
     case W64_NtAccessCheck:
         return NtAccessCheck(Security32(&Descriptor, P(0)), H(1), a[2], P(3), P(4), P(5), P(6), P(7));
+    case W64_NtAccessCheckByType:
+    case W64_NtAccessCheckByTypeResultList:
+    {
+        POBJECT_TYPE_LIST List;
+        Status = ObjectTypeList32(a[4], a[5], &List, Cleanup);
+        if (!NT_SUCCESS(Status)) return Status;
+        if (Number == W64_NtAccessCheckByType)
+            return NtAccessCheckByType(Security32(&Descriptor, P(0)), P(1), H(2), a[3], List, a[5], P(6), P(7), P(8),
+                                       P(9), P(10));
+        return NtAccessCheckByTypeResultList(Security32(&Descriptor, P(0)), P(1), H(2), a[3], List, a[5], P(6), P(7),
+                                             P(8), P(9), P(10));
+    }
     case W64_NtSetSecurityObject:
         return NtSetSecurityObject(H(0), a[1], Security32(&Descriptor, P(2)));
     case W64_NtQuerySecurityObject:

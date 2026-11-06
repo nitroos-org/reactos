@@ -540,6 +540,13 @@ typedef struct _MMPAGING_FILE
     HANDLE FileHandle;
     /* Growing it failed once: it keeps its size until the next boot */
     BOOLEAN CannotGrow;
+    /* NitroPager: owner tag of every slot below SlotTagCount (0 = unwritten); NULL = no ARM3 slots here */
+    PULONG SlotTags;
+    PFN_NUMBER SlotTagCount;
+    /* While the tag array is being replaced by a larger one: tag writes go to it as well (slot lock) */
+    PULONG SlotTagsMirror;
+    /* Where the next ARM3 slot search starts */
+    ULONG SlotHint;
 }
 MMPAGING_FILE, *PMMPAGING_FILE;
 
@@ -825,6 +832,73 @@ MiReadPageFile(
     _In_ PFN_NUMBER Page,
     _In_ ULONG PageFileIndex,
     _In_ ULONG_PTR PageFileOffset);
+
+/* NitroPager slot layer (pagefile.c) and pager (ARM3/pager.c) */
+extern KSPIN_LOCK MiPagingFileSlotLock;
+extern ULONG MiNitroPagerMode;
+extern ULONG MiNitroPagerDebug;
+
+BOOLEAN
+NTAPI
+MiAllocatePageFileSlot(
+    _Out_ PULONG FileIndex,
+    _Out_ PULONG_PTR Slot);
+
+BOOLEAN
+NTAPI
+MiReleasePageFileSlot(
+    _In_ ULONG FileIndex,
+    _In_ ULONG_PTR Slot,
+    _In_ ULONG Owner);
+
+VOID
+NTAPI
+MiSetPageFileSlotTag(
+    _In_ ULONG FileIndex,
+    _In_ ULONG_PTR Slot,
+    _In_ ULONG Owner);
+
+BOOLEAN
+NTAPI
+MiCheckPageFileSlotTag(
+    _In_ ULONG FileIndex,
+    _In_ ULONG_PTR Slot,
+    _In_ ULONG Owner,
+    _Out_ PULONG Found);
+
+NTSTATUS
+NTAPI
+MiWritePageFileSlot(
+    _In_ PFN_NUMBER Page,
+    _In_ ULONG FileIndex,
+    _In_ ULONG_PTR Slot);
+
+/* What MiPagerSlotProblem reports (first bugcheck parameter is 0x50474E00 | code) */
+#define MI_PAGER_BAD_SLOT_FREE      1
+#define MI_PAGER_TAG_MISMATCH_FREE  2
+#define MI_PAGER_TAG_MISMATCH_READ  3
+#define MI_PAGER_BAD_REPURPOSE      4
+
+VOID
+NTAPI
+MiPagerSlotProblem(
+    _In_ ULONG Code,
+    _In_ ULONG FileIndex,
+    _In_ ULONG_PTR Slot,
+    _In_ ULONG Expected,
+    _In_ ULONG Found);
+
+NTSTATUS
+NTAPI
+MmSetMemoryListInformation(
+    _In_ ULONG Command,
+    _In_opt_ PVOID Address,
+    _In_ KPROCESSOR_MODE PreviousMode);
+
+NTSTATUS
+NTAPI
+MmQueryMemoryListInformation(
+    _Out_ PSYSTEM_MEMORY_LIST_INFORMATION Information);
 
 /* process.c ****************************************************************/
 

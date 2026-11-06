@@ -1379,6 +1379,22 @@ MmProbeAndLockPages(IN PMDL Mdl,
 
             /* This address should already exist and be fully valid */
             MiReferenceProbedPageAndBumpLockCount(Pfn1);
+
+            /*
+             * NitroPager: whatever the lock holder writes through the MDL does not
+             * reach the user PTE's Dirty bit, so a write lock dirties a private page
+             * now (D8): a clean copy in the paging file is stale
+             */
+            if ((MiNitroPagerMode != 0) &&
+                (Operation != IoReadAccess) &&
+                (CurrentProcess != NULL) &&
+                !MI_IS_ROS_PFN(Pfn1) &&
+                (Pfn1->u3.e1.PrototypePte == 0))
+            {
+                KIRQL PfnIrql = MiAcquirePfnLock();
+                MiMarkPfnDirty(Pfn1);
+                MiReleasePfnLock(PfnIrql);
+            }
         }
         else
         {

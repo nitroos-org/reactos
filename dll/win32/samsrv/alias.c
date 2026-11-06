@@ -55,11 +55,24 @@ SampAddMemberToAlias(IN PSAM_DB_OBJECT AliasObject,
 
     Status = SampRegCreateKey(AliasObject->KeyHandle,
                               L"Members",
-                              KEY_WRITE,
+                              KEY_WRITE | KEY_QUERY_VALUE,
                               &MembersKeyHandle);
     if (!NT_SUCCESS(Status))
     {
         TRACE("SampRegCreateKey failed with status 0x%08lx\n", Status);
+        goto done;
+    }
+
+    /* Adding a member twice fails, as on Windows (NetLocalGroupAddMembers: ERROR_MEMBER_IN_ALIAS) */
+    Status = SampRegQueryValue(MembersKeyHandle,
+                               MemberIdString,
+                               NULL,
+                               NULL,
+                               NULL);
+    if (NT_SUCCESS(Status))
+    {
+        TRACE("The SID is a member of the alias already\n");
+        Status = STATUS_MEMBER_IN_ALIAS;
         goto done;
     }
 
@@ -123,6 +136,11 @@ SampRemoveMemberFromAlias(IN PSAM_DB_OBJECT AliasObject,
     ConvertSidToStringSidW(MemberId, &MemberIdString);
     TRACE("Member SID: %S\n", MemberIdString);
 
+    /*
+     * A SID that is not a member of the alias has no value for the alias
+     * (or no key at all when it is in no alias of the domain): removing it
+     * fails as on Windows (NetLocalGroupDelMembers: ERROR_MEMBER_NOT_IN_ALIAS).
+     */
     Status = SampRegOpenKey(AliasObject->MembersKeyHandle,
                             MemberIdString,
                             KEY_WRITE | KEY_QUERY_VALUE,
@@ -130,6 +148,8 @@ SampRemoveMemberFromAlias(IN PSAM_DB_OBJECT AliasObject,
     if (!NT_SUCCESS(Status))
     {
         TRACE("SampRegOpenKey failed with status 0x%08lx\n", Status);
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            Status = STATUS_MEMBER_NOT_IN_ALIAS;
         goto done;
     }
 
@@ -138,6 +158,8 @@ SampRemoveMemberFromAlias(IN PSAM_DB_OBJECT AliasObject,
     if (!NT_SUCCESS(Status))
     {
         TRACE("SampRegDeleteValue failed with status 0x%08lx\n", Status);
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            Status = STATUS_MEMBER_NOT_IN_ALIAS;
         goto done;
     }
 
