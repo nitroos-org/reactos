@@ -1231,6 +1231,77 @@ TestNoChangeVads(void)
     ok_ntstatus(Status, STATUS_INVALID_PAGE_PROTECTION);
 }
 
+/* The old protection of a view of a pagefile-backed section is the protection of the view, not 0
+ * (Windows 10 22H2: 0x40 for a view mapped PAGE_EXECUTE_READWRITE, harness evidence nodev8-20261106) */
+static
+void
+TestPagefileViewOldProtection(void)
+{
+    NTSTATUS Status;
+    HANDLE SectionHandle;
+    LARGE_INTEGER MaximumSize;
+    PVOID BaseAddress, Address;
+    SIZE_T ViewSize, Size;
+    ULONG OldProtect;
+    static const ULONG NewProtect[] = { PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_EXECUTE_READWRITE };
+    ULONG i;
+
+    MaximumSize.QuadPart = 0x10000;
+    Status = NtCreateSection(&SectionHandle,
+                             SECTION_ALL_ACCESS,
+                             NULL,
+                             &MaximumSize,
+                             PAGE_EXECUTE_READWRITE,
+                             SEC_COMMIT,
+                             NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Failed to create a pagefile-backed section\n");
+        return;
+    }
+
+    BaseAddress = NULL;
+    ViewSize = 0;
+    Status = NtMapViewOfSection(SectionHandle,
+                                NtCurrentProcess(),
+                                &BaseAddress,
+                                0,
+                                0,
+                                NULL,
+                                &ViewSize,
+                                ViewShare,
+                                0,
+                                PAGE_EXECUTE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        skip("Failed to map a view\n");
+        NtClose(SectionHandle);
+        return;
+    }
+
+    for (i = 0; i < RTL_NUMBER_OF(NewProtect); i++)
+    {
+        /* Fresh for every protection: the first page of a view that was not changed */
+        Address = BaseAddress;
+        Size = PAGE_SIZE;
+        OldProtect = 0xDEAD;
+        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Address, &Size, NewProtect[i], &OldProtect);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+        ok_hex(OldProtect, PAGE_EXECUTE_READWRITE);
+
+        /* Put it back, so that the next one starts from the same view whatever the kernel keeps */
+        Address = BaseAddress;
+        Size = PAGE_SIZE;
+        Status = NtProtectVirtualMemory(NtCurrentProcess(), &Address, &Size, PAGE_EXECUTE_READWRITE, &OldProtect);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+    }
+
+    NtUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
+    NtClose(SectionHandle);
+}
+
 START_TEST(NtProtectVirtualMemory)
 {
     TestReadWrite();
@@ -1247,4 +1318,5 @@ START_TEST(NtProtectVirtualMemory)
     TestSectionMaxProtection();
     TestImageSectionMaxProtection();
     TestNoChangeVads();
+    TestPagefileViewOldProtection();
 }

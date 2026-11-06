@@ -3461,9 +3461,15 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
             DPRINT1("Fixme: Not checking for valid protection\n");
         }
 
-        /* This is a section, and this is not yet supported */
-        DPRINT1("Section protection not yet supported\n");
-        OldProtect = 0;
+        /*
+         * The change itself is not applied yet: a resident page of a prototype-backed view has no protection
+         * of its own, it takes the protection of the view (see the section view case in the query code),
+         * so there is nowhere to keep the new one. The call reports the old protection of the view, which
+         * is what a query of the first page shows (the oracle returns 0x40 for a view of a pagefile-backed
+         * section mapped executable read-write).
+         */
+        DPRINT("Section protection change not applied\n");
+        OldProtect = MmProtectToValue[Vad->u.VadFlags.Protection];
     }
     else
     {
