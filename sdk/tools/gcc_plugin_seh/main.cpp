@@ -119,7 +119,8 @@ mark_seh_function_noinline(void)
 /*
  * The scope table describes a try block as one address range, from its
  * begin label to its end label. Block reordering, jump threading and tail
- * merging can move code of the block past these labels, and a tail call
+ * merging can move code of the block past these labels (VRP threads jumps
+ * too, and puts the copied blocks behind the end of the function), and a tail call
  * leaves the frame: exceptions raised there bypass the handler. Handlers can
  * also run in the middle of the block, where GCC believes a variable that a
  * handler reads is dead and lets another one share its stack slot. Turn all
@@ -143,6 +144,7 @@ keep_seh_blocks_contiguous(void)
     opts.x_flag_reorder_blocks_and_partition = 0;
     opts.x_flag_thread_jumps = 0;
     opts.x_flag_tree_dom = 0;
+    opts.x_flag_tree_vrp = 0;
     opts.x_flag_crossjumping = 0;
     opts.x_flag_tree_tail_merge = 0;
     opts.x_flag_optimize_sibling_calls = 0;
