@@ -307,6 +307,9 @@ SysWOW64/mscms.dll
 SysWOW64/windowscodecsext.dll
 SysWOW64/hhctrl.ocx
 SysWOW64/mshtml.dll
+# The Wine 10.0 mshtml loads its public type library (mshtml.tlb, LIBID_MSHTML 4.0) for the first object it creates. It is
+# registered under System32; a 32-bit process reaches it through the file system redirection, so the i386 copy has to exist.
+SysWOW64/mshtml.tlb
 SysWOW64/compstui.dll
 SysWOW64/loadperf.dll
 SysWOW64/faultrep.dll
