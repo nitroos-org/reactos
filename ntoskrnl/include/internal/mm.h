@@ -547,6 +547,9 @@ typedef struct _MMPAGING_FILE
     PULONG SlotTagsMirror;
     /* Where the next ARM3 slot search starts */
     ULONG SlotHint;
+    /* NitroPager writer: failed cluster writes in a row; Retired = no new ARM3 slots from this file */
+    ULONG WriteFailuresInARow;
+    BOOLEAN Retired;
 }
 MMPAGING_FILE, *PMMPAGING_FILE;
 
@@ -872,6 +875,59 @@ MiWritePageFileSlot(
     _In_ PFN_NUMBER Page,
     _In_ ULONG FileIndex,
     _In_ ULONG_PTR Slot);
+
+/* NitroPager P1: cluster writes, slot runs, file retirement, the writer thread */
+#define MI_PAGER_CLUSTER_MAX 16
+
+ULONG
+NTAPI
+MiAllocatePageFileSlots(
+    _In_ ULONG Wanted,
+    _Out_ PULONG FileIndex,
+    _Out_ PULONG_PTR Slot);
+
+NTSTATUS
+NTAPI
+MiWritePageFileCluster(
+    _In_reads_(Count) PPFN_NUMBER Pages,
+    _In_ ULONG Count,
+    _In_ ULONG FileIndex,
+    _In_ ULONG_PTR FirstSlot);
+
+PFN_NUMBER
+NTAPI
+MiPagerFreeSlotCount(VOID);
+
+BOOLEAN
+NTAPI
+MiPagerPagingFileWriteResult(
+    _In_ ULONG FileIndex,
+    _In_ NTSTATUS Status);
+
+VOID
+NTAPI
+MiPagerStartWriter(VOID);
+
+VOID
+NTAPI
+MiPagerShutdownWriter(VOID);
+
+ULONG
+NTAPI
+MiPagerBalance(
+    _In_ ULONG LowWaterPages,
+    _In_ ULONG Target);
+
+BOOLEAN
+NTAPI
+MiPagerCanMakeProgress(
+    _Out_ PULONG_PTR WriterState);
+
+VOID
+NTAPI
+MiPagerWaitForProgress(VOID);
+
+extern volatile LONG MiPagingIoInFlight;
 
 /* What MiPagerSlotProblem reports (first bugcheck parameter is 0x50474E00 | code) */
 #define MI_PAGER_BAD_SLOT_FREE      1
