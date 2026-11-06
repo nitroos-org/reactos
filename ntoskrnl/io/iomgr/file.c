@@ -2578,6 +2578,88 @@ IopQueryNameInternal(IN PVOID ObjectBody,
     return Status;
 }
 
+static
+BOOLEAN
+IopThreadHasFileIrps(IN PETHREAD Thread,
+                     IN PFILE_OBJECT FileObject,
+                     IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL,
+                     IN BOOLEAN PortOnly);
+
+/* Does a thread of Process have a request in progress on FileObject? */
+static
+BOOLEAN
+IopProcessHasFileIrps(IN PEPROCESS Process,
+                      IN PFILE_OBJECT FileObject)
+{
+    PETHREAD Thread;
+
+    for (Thread = PsGetNextProcessThread(Process, NULL);
+         Thread != NULL;
+         Thread = PsGetNextProcessThread(Process, Thread))
+    {
+        if (IopThreadHasFileIrps(Thread, FileObject, NULL, FALSE))
+        {
+            ObDereferenceObject(Thread);
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static IO_COMPLETION_ROUTINE IopUnlockAllCompletion;
+
+static
+NTSTATUS
+NTAPI
+IopUnlockAllCompletion(IN PDEVICE_OBJECT DeviceObject,
+                       IN PIRP Irp,
+                       IN PVOID Context)
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(Irp);
+
+    /* The sender frees the IRP: no I/O completion, the file object is not touched */
+    KeSetEvent((PKEVENT)Context, IO_NO_INCREMENT, FALSE);
+    return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+/*
+ * Sends IRP_MN_UNLOCK_ALL for the current process without the file object
+ * lock. The request does not go through I/O completion, so it neither waits
+ * for nor disturbs a synchronous request in progress on the file object (its
+ * event and final status belong to the lock holder).
+ */
+static
+VOID
+IopUnlockAllWithoutFileObjectLock(IN PDEVICE_OBJECT DeviceObject,
+                                  IN PFILE_OBJECT FileObject)
+{
+    KEVENT Event;
+    PIRP Irp;
+    PIO_STACK_LOCATION StackPtr;
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp = IopAllocateIrpMustSucceed(DeviceObject->StackSize);
+    Irp->Tail.Overlay.Thread = PsGetCurrentThread();
+    Irp->Tail.Overlay.OriginalFileObject = FileObject;
+    Irp->RequestorMode = KernelMode;
+    Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+    Irp->IoStatus.Information = 0;
+
+    StackPtr = IoGetNextIrpStackLocation(Irp);
+    StackPtr->MajorFunction = IRP_MJ_LOCK_CONTROL;
+    StackPtr->MinorFunction = IRP_MN_UNLOCK_ALL;
+    StackPtr->FileObject = FileObject;
+    IoSetCompletionRoutine(Irp, IopUnlockAllCompletion, &Event, TRUE, TRUE, TRUE);
+
+    /* The completion routine always runs: wait for it whatever the driver returned */
+    (VOID)IoCallDriver(DeviceObject, Irp);
+    KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+
+    IoFreeIrp(Irp);
+}
+
 VOID
 NTAPI
 IopCloseFile(IN PEPROCESS Process OPTIONAL,
@@ -2594,6 +2676,7 @@ IopCloseFile(IN PEPROCESS Process OPTIONAL,
     PDEVICE_OBJECT DeviceObject;
     KIRQL OldIrql;
     IO_STATUS_BLOCK IoStatusBlock;
+    BOOLEAN LockedForSync;
     IOTRACE(IO_FILE_DEBUG, "ObjectBody: %p\n", ObjectBody);
 
     /* If this isn't the last handle for the current process, quit */
@@ -2614,8 +2697,21 @@ IopCloseFile(IN PEPROCESS Process OPTIONAL,
             DeviceObject = IoGetRelatedDeviceObject(FileObject);
         }
 
-        /* Check if this is a sync FO and lock it */
-        if (BooleanFlagOn(FileObject->Flags, FO_SYNCHRONOUS_IO))
+        /*
+         * Take the lock of a synchronous file object for the unlock-all only
+         * when this process has a request in progress on it, i.e. when one of
+         * its own threads can be the lock holder. Windows behaves the same
+         * way (oracle probe 2026-11-06, kernel32 FileCloseLockedDup): a
+         * process without requests on the file object closes its last handle
+         * at once and releases its own ranges, even while a (suspended)
+         * thread of another process holds the lock inside a synchronous
+         * request; a process whose own thread waits inside a request on it
+         * waits for that request. Edge's crash reporter suspends the browser
+         * and closes duplicates of its handles: it hung here forever.
+         */
+        LockedForSync = BooleanFlagOn(FileObject->Flags, FO_SYNCHRONOUS_IO) &&
+                        ((Process == NULL) || IopProcessHasFileIrps(Process, FileObject));
+        if (LockedForSync)
         {
             (VOID)IopLockFileObject(FileObject, KernelMode);
         }
@@ -2625,6 +2721,13 @@ IopCloseFile(IN PEPROCESS Process OPTIONAL,
             DeviceObject->DriverObject->FastIoDispatch->FastIoUnlockAll == NULL ||
             !DeviceObject->DriverObject->FastIoDispatch->FastIoUnlockAll(FileObject, PsGetCurrentProcess(), &IoStatusBlock, DeviceObject))
         {
+            if (BooleanFlagOn(FileObject->Flags, FO_SYNCHRONOUS_IO) && !LockedForSync)
+            {
+                /* The file object's event and status belong to the lock holder */
+                IopUnlockAllWithoutFileObjectLock(DeviceObject, FileObject);
+                goto UnlockAllDone;
+            }
+
             /* Clear and set up Events */
             KeClearEvent(&FileObject->Event);
             KeInitializeEvent(&Event, SynchronizationEvent, FALSE);
@@ -2661,9 +2764,10 @@ IopCloseFile(IN PEPROCESS Process OPTIONAL,
 
             /* IO will unqueue & free for us */
         }
+UnlockAllDone:
 
         /* Release the lock if we were holding it */
-        if (BooleanFlagOn(FileObject->Flags, FO_SYNCHRONOUS_IO))
+        if (LockedForSync)
         {
             IopUnlockFileObject(FileObject);
         }

@@ -3836,7 +3836,9 @@ IntSetThreadDesktop(IN HDESK hDesktop,
 
         if (pti->rpdesk == pdesk)
         {
-            /* Nothing to do */
+            /* The thread stays on its desktop, but the handle it is given is the one it has from
+               now on: its access is what hooks check (DESKTOP_HOOKCONTROL) */
+            pti->hdesk = hDesktop;
             ObDereferenceObject(pdesk);
             return TRUE;
         }
