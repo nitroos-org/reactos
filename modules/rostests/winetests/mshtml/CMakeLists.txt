@@ -55,6 +55,15 @@ list(APPEND mshtml_winetest_rc_deps
     ${CMAKE_CURRENT_SOURCE_DIR}/doc_with_prop_ie9.html
     ${CMAKE_CURRENT_SOURCE_DIR}/iframe.html
     ${CMAKE_CURRENT_SOURCE_DIR}/xhr_iframe.html
+    ${CMAKE_CURRENT_SOURCE_DIR}/event_iframe.html
+    ${CMAKE_CURRENT_SOURCE_DIR}/utf8.css
+    ${CMAKE_CURRENT_SOURCE_DIR}/utf16.css
+    ${CMAKE_CURRENT_SOURCE_DIR}/utf8_bom.css
+    ${CMAKE_CURRENT_SOURCE_DIR}/utf16_bom.css
+    ${CMAKE_CURRENT_SOURCE_DIR}/utf8.js
+    ${CMAKE_CURRENT_SOURCE_DIR}/utf16.js
+    ${CMAKE_CURRENT_SOURCE_DIR}/utf8_bom.js
+    ${CMAKE_CURRENT_SOURCE_DIR}/utf16_bom.js
     ${CMAKE_CURRENT_SOURCE_DIR}/img.png)
 
 set_source_files_properties(rsrc.rc PROPERTIES OBJECT_DEPENDS "${mshtml_winetest_rc_deps}")

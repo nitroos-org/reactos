@@ -1003,13 +1003,13 @@ typedef struct
 #define SID_HASH32_BYTES ((2 + SID_HASH_SIZE) * sizeof(ULONG))
 
 /* TokenAccessInformation: header, SID hash with its SIDs, restricted SID hash (with SIDs when there are any),
- * capability hash, privileges. A 32-bit result of the same token has the length Windows reports (1068 bytes for
- * 13 groups and 24 privileges). */
+ * capability hash (with its SIDs for a lowbox token), privileges, and a lowbox token's package SID. A 32-bit
+ * result of the same token has the length Windows reports (1068 bytes for 13 groups and 24 privileges). */
 static NTSTATUS TokenAccessInformation32(HANDLE Token, ULONG Buffer, ULONG Length, ULONG ReturnLength,
                                          WOW64_CLEANUP *Cleanup)
 {
     NATIVE_TOKEN_ACCESS_INFORMATION *Native;
-    ULONG SidLength, RestrictedLength = 0, PrivilegesLength, Needed, Offset, i;
+    ULONG SidLength, RestrictedLength = 0, CapabilitiesLength = 0, PackageLength = 0, PrivilegesLength, Needed, Offset, i;
     UCHAR *Guest;
     NTSTATUS Status;
 
@@ -1018,8 +1018,12 @@ static NTSTATUS TokenAccessInformation32(HANDLE Token, ULONG Buffer, ULONG Lengt
     SidLength = SidArray32Bytes(Native->SidHash->SidAttr, Native->SidHash->SidCount);
     if (Native->RestrictedSidHash->SidCount)
         RestrictedLength = SidArray32Bytes(Native->RestrictedSidHash->SidAttr, Native->RestrictedSidHash->SidCount);
+    if (Native->CapabilitiesHash->SidCount)
+        CapabilitiesLength = SidArray32Bytes(Native->CapabilitiesHash->SidAttr, Native->CapabilitiesHash->SidCount);
+    if (Native->PackageSid) PackageLength = (RtlLengthSid(Native->PackageSid) + 3) & ~3UL;
     PrivilegesLength = FIELD_OFFSET(TOKEN_PRIVILEGES, Privileges) + Native->Privileges->PrivilegeCount * sizeof(LUID_AND_ATTRIBUTES);
-    Needed = ACCESS_INFO32_HEADER + 3 * SID_HASH32_BYTES + SidLength + RestrictedLength + PrivilegesLength;
+    Needed = ACCESS_INFO32_HEADER + 3 * SID_HASH32_BYTES + SidLength + RestrictedLength + CapabilitiesLength +
+             PrivilegesLength + PackageLength;
     Status = TokenResult32(Buffer, Length, ReturnLength, Needed);
     if (!NT_SUCCESS(Status)) return Status;
 
@@ -1054,31 +1058,52 @@ static NTSTATUS TokenAccessInformation32(HANDLE Token, ULONG Buffer, ULONG Lengt
     }
     Offset += SID_HASH32_BYTES + RestrictedLength;
 
+    /* The capabilities of a lowbox token (none for others) */
     OUT32(11) = Buffer + Offset;
-    Offset += SID_HASH32_BYTES;
+    ((ULONG UNALIGNED *)(Guest + Offset))[0] = Native->CapabilitiesHash->SidCount;
+    for (i = 0; i < SID_HASH_SIZE; ++i)
+        ((ULONG UNALIGNED *)(Guest + Offset))[2 + i] = (ULONG)Native->CapabilitiesHash->Hash[i];
+    if (Native->CapabilitiesHash->SidCount)
+    {
+        ((ULONG UNALIGNED *)(Guest + Offset))[1] = Buffer + Offset + SID_HASH32_BYTES;
+        SidArray32Write(Buffer, Offset + SID_HASH32_BYTES, Native->CapabilitiesHash->SidAttr, Native->CapabilitiesHash->SidCount);
+    }
+    Offset += SID_HASH32_BYTES + CapabilitiesLength;
 
     OUT32(2) = Buffer + Offset;
     ((ULONG UNALIGNED *)(Guest + Offset))[0] = Native->Privileges->PrivilegeCount;
     RtlCopyMemory(Guest + Offset + sizeof(ULONG), Native->Privileges->Privileges,
                   Native->Privileges->PrivilegeCount * sizeof(LUID_AND_ATTRIBUTES));
+    Offset += PrivilegesLength;
+
+    /* The package SID of a lowbox token, after the privileges as in the native answer */
+    if (PackageLength)
+    {
+        OUT32(10) = Buffer + Offset;
+        RtlCopyMemory(Guest + Offset, Native->PackageSid, RtlLengthSid(Native->PackageSid));
+    }
 #undef OUT32
     return STATUS_SUCCESS;
 }
 
-/* A class whose result is one native pointer (a SID pointer that is NULL without an AppContainer or a
- * protected process): 4 bytes in the guest */
+/* A class whose result is one SID pointer, NULL without an AppContainer or a protected process, else
+ * followed by the SID (TOKEN_APPCONTAINER_INFORMATION of a lowbox token): a 4-byte pointer and the SID in the
+ * guest */
 static NTSTATUS TokenPointer32(HANDLE Token, TOKEN_INFORMATION_CLASS Class, ULONG Buffer, ULONG Length, ULONG ReturnLength)
 {
-    PVOID Native = NULL;
-    ULONG Bytes = 0;
+    union { PVOID Pointer; UCHAR Bytes[sizeof(PVOID) + SECURITY_MAX_SID_SIZE]; } Native;
+    ULONG Bytes = 0, SidLength = 0;
     NTSTATUS Status;
 
     if (!ReturnLength || !GuestSpan(ReturnLength, sizeof(ULONG))) return STATUS_ACCESS_VIOLATION;
+    Native.Pointer = NULL;
     Status = NtQueryInformationToken(Token, Class, &Native, sizeof(Native), &Bytes);
     if (!NT_SUCCESS(Status)) return Status;
-    Status = TokenResult32(Buffer, Length, ReturnLength, sizeof(ULONG));
+    if (Native.Pointer) SidLength = RtlLengthSid(Native.Pointer);
+    Status = TokenResult32(Buffer, Length, ReturnLength, sizeof(ULONG) + SidLength);
     if (!NT_SUCCESS(Status)) return Status;
-    *(ULONG UNALIGNED *)PTR32(Buffer) = (ULONG)(ULONG_PTR)Native;
+    if (SidLength) RtlCopyMemory((UCHAR *)PTR32(Buffer) + sizeof(ULONG), Native.Pointer, SidLength);
+    *(ULONG UNALIGNED *)PTR32(Buffer) = SidLength ? Buffer + sizeof(ULONG) : 0;
     return STATUS_SUCCESS;
 }
 
@@ -1149,6 +1174,50 @@ static NTSTATUS FilterToken32(const ULONG *a, WOW64_CLEANUP *Cleanup)
     if (Restrict == (PTOKEN_GROUPS)-1) return STATUS_ACCESS_VIOLATION;
     Status = NtFilterToken(HANDLE32(a[0]), a[1], Disable, PTR32(a[3]), Restrict, &Cleanup->Handle);
     return ReturnHandle32(a[5], Status, Cleanup);
+}
+
+/* NtCreateLowBoxToken: the capabilities are 32-bit SID_AND_ATTRIBUTES whose SIDs stay in guest memory, where
+ * the kernel captures them, and the handles are 4 bytes each. Both arrays are read once into native arrays in
+ * Cleanup->Buffer; the counts go to the kernel as they are, which applies its own limits. */
+static NTSTATUS LowBoxArrays32(ULONG Capabilities, ULONG CapabilityCount, ULONG Handles, ULONG HandleCount,
+                               WOW64_CLEANUP *Cleanup, PSID_AND_ATTRIBUTES *NativeCapabilities, HANDLE **NativeHandles)
+{
+    PSID_AND_ATTRIBUTES Native;
+    HANDLE *NativeHandle;
+    ULONG *Source, Sid, i;
+
+    *NativeCapabilities = CapabilityCount ? NULL : PTR32(Capabilities);
+    *NativeHandles = HandleCount ? NULL : PTR32(Handles);
+    if (CapabilityCount > WOW64_MAX_ARRAY_COUNT || HandleCount > WOW64_MAX_ARRAY_COUNT) return STATUS_INVALID_PARAMETER;
+    if (CapabilityCount && (!Capabilities || !GuestSpan(Capabilities, (ULONG64)CapabilityCount * 2 * sizeof(ULONG))))
+        return STATUS_ACCESS_VIOLATION;
+    if (HandleCount && (!Handles || !GuestSpan(Handles, (ULONG64)HandleCount * sizeof(ULONG))))
+        return STATUS_ACCESS_VIOLATION;
+    if (!CapabilityCount && !HandleCount) return STATUS_SUCCESS;
+
+    Native = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0,
+                                               (SIZE_T)CapabilityCount * sizeof(SID_AND_ATTRIBUTES) +
+                                               (SIZE_T)HandleCount * sizeof(HANDLE));
+    if (!Native) return STATUS_NO_MEMORY;
+    Source = PTR32(Capabilities);
+    for (i = 0; i < CapabilityCount; ++i)
+    {
+        Sid = Source[2 * i];
+        /* As GroupsFrom32: the SID must lie in the guest range; the kernel reads and validates it */
+        if (Sid && (!GuestSpan(Sid, FIELD_OFFSET(SID, SubAuthority)) ||
+                    !GuestSpan(Sid, FIELD_OFFSET(SID, SubAuthority) +
+                               (ULONG64)((SID *)PTR32(Sid))->SubAuthorityCount * sizeof(ULONG))))
+            return STATUS_ACCESS_VIOLATION;
+        Native[i].Sid = PTR32(Sid);
+        Native[i].Attributes = Source[2 * i + 1];
+    }
+    NativeHandle = (HANDLE *)&Native[CapabilityCount];
+    Source = PTR32(Handles);
+    for (i = 0; i < HandleCount; ++i)
+        NativeHandle[i] = HANDLE32(Source[i]);
+    if (CapabilityCount) *NativeCapabilities = Native;
+    if (HandleCount) *NativeHandles = NativeHandle;
+    return STATUS_SUCCESS;
 }
 
 /* A 32-bit process sees the 32-bit view unless it asks for the other one.
@@ -2958,6 +3027,17 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         RETURN_HANDLE_AT(4);
     case W64_NtFilterToken:
         return FilterToken32(a, Cleanup);
+    case W64_NtCreateLowBoxToken:
+    {
+        /* The package SID has the same layout in both ABIs and goes through as is */
+        PSID_AND_ATTRIBUTES Capabilities;
+        HANDLE *Handles;
+        PROBE(0); ATTR(3);
+        Status = LowBoxArrays32(a[6], a[5], a[8], a[7], Cleanup, &Capabilities, &Handles);
+        if (NT_SUCCESS(Status))
+            Status = NtCreateLowBoxToken(&Cleanup->Handle, H(1), a[2], OA(3), P(4), a[5], Capabilities, a[7], Handles);
+        RETURN_HANDLE_AT(0);
+    }
     case W64_NtImpersonateAnonymousToken:
         return NtImpersonateAnonymousToken(H(0));
     case W64_NtPrivilegeCheck:

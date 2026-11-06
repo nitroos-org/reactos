@@ -240,6 +240,22 @@ NtFilterToken(
     _In_opt_ PTOKEN_GROUPS RestrictedSids,
     _Out_ PHANDLE NewTokenHandle);
 
+_Must_inspect_result_
+__kernel_entry
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCreateLowBoxToken(
+    _Out_ PHANDLE TokenHandle,
+    _In_ HANDLE ExistingTokenHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ PSID PackageSid,
+    _In_ ULONG CapabilityCount,
+    _In_reads_opt_(CapabilityCount) PSID_AND_ATTRIBUTES Capabilities,
+    _In_ ULONG HandleCount,
+    _In_reads_opt_(HandleCount) HANDLE *Handles);
+
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -380,6 +396,21 @@ ZwAllocateUuids(
     _Out_ PULONG Range,
     _Out_ PULONG Sequence,
     _Out_ PUCHAR Seed);
+
+_Must_inspect_result_
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwCreateLowBoxToken(
+    _Out_ PHANDLE TokenHandle,
+    _In_ HANDLE ExistingTokenHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ PSID PackageSid,
+    _In_ ULONG CapabilityCount,
+    _In_reads_opt_(CapabilityCount) PSID_AND_ATTRIBUTES Capabilities,
+    _In_ ULONG HandleCount,
+    _In_reads_opt_(HandleCount) HANDLE *Handles);
 
 NTSYSAPI
 NTSTATUS

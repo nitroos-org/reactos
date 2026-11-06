@@ -250,6 +250,7 @@ typedef struct _TOKEN
     PSEP_LOGON_SESSION_REFERENCES LogonSession;       /* 0x98 */
     LUID OriginatingLogonSession;                     /* 0x9C */
     ULONG IntegrityLevel;                             /* RID of the mandatory level (S-1-16-RID) the token runs at */
+    struct _SEP_LOWBOX *Lowbox;                       /* AppContainer data of a lowbox token (TOKEN_LOWBOX), else NULL */
 #if DBG
     UCHAR ImageFileName[16];                          /* 0xA4 */
     HANDLE ProcessCid;                                /* 0xB4 */

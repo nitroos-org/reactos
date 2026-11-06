@@ -164,6 +164,7 @@ extern void func_MailslotRead(void);
 extern void func_MappedFileGrowth(void);
 extern void func_FileCloseLockedDup(void);
 extern void func_FileCutAfterClose(void);
+extern void func_FileLockCloseOther(void);
 extern void func_MappedViewEvict(void);
 extern void func_MultiByteToWideChar(void);
 extern void func_NamedPipeInstanceReuse(void);
@@ -413,6 +414,7 @@ const struct test winetest_testlist[] =
     { "MappedFileGrowth",            func_MappedFileGrowth },
     { "FileCloseLockedDup",          func_FileCloseLockedDup },
     { "FileCutAfterClose",           func_FileCutAfterClose },
+    { "FileLockCloseOther",          func_FileLockCloseOther },
     { "MappedViewEvict",            func_MappedViewEvict },
     { "MultiByteToWideChar",         func_MultiByteToWideChar },
     { "NamedPipeInstanceReuse",     func_NamedPipeInstanceReuse },

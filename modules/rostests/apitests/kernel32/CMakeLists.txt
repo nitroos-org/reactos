@@ -162,6 +162,7 @@ list(APPEND SOURCE
     MappedFileGrowth.c
     FileCloseLockedDup.c
     FileCutAfterClose.c
+    FileLockCloseOther.c
     MappedViewEvict.c
     MultiByteToWideChar.c
     NamedPipeInstanceReuse.c

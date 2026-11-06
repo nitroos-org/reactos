@@ -19,6 +19,7 @@ list(APPEND SOURCE
     domdoc.c
     domimpl.c
     element.c
+    entity.c
     entityref.c
     httprequest.c
     main.c
@@ -27,6 +28,7 @@ list(APPEND SOURCE
     node.c
     nodelist.c
     nodemap.c
+    notation.c
     parseerror.c
     pi.c
     reactos.c
@@ -37,21 +39,29 @@ list(APPEND SOURCE
     text.c
     xdr.c
     xmldoc.c
-    xmlelem.c
     xmlparser.c
-    xmlview.c)
-
-FLEX_TARGET(xslpattern_scanner xslpattern.l ${CMAKE_CURRENT_BINARY_DIR}/xslpattern.yy.c)
-BISON_TARGET(xslpattern_parser xslpattern.y ${CMAKE_CURRENT_BINARY_DIR}/xslpattern.tab.c COMPILE_FLAGS "-p xslpattern_")
-ADD_FLEX_BISON_DEPENDENCY(xslpattern_scanner xslpattern_parser)
+    xmlview.c
+    xpath.c)
 
 list(APPEND PCH_SKIP_SOURCE
     factory.c
-    uuid.c
-    ${FLEX_xslpattern_scanner_OUTPUTS}
-    ${BISON_xslpattern_parser_OUTPUTS})
+    uuid.c)
+
+# msxml.mc (error message table). add_message_headers() would emit msxml.h (shadows the PSDK msxml.h)
+# and a target named msxml, so run the steps here with a private name. ReactOS-only wiring.
+utf16le_convert(${CMAKE_CURRENT_SOURCE_DIR}/msxml.mc ${CMAKE_CURRENT_BINARY_DIR}/msxml3_msg.mc nobom)
+macro_mc(-U ${CMAKE_CURRENT_BINARY_DIR}/msxml3_msg.mc)
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/msxml3_msg.h ${CMAKE_CURRENT_BINARY_DIR}/msxml3_msg.rc
+    COMMAND ${COMMAND_MC}
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/msxml3_msg.mc)
+set_source_files_properties(
+    ${CMAKE_CURRENT_BINARY_DIR}/msxml3_msg.h ${CMAKE_CURRENT_BINARY_DIR}/msxml3_msg.rc
+    PROPERTIES GENERATED TRUE)
+add_custom_target(msxml3_msg DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/msxml3_msg.h ${CMAKE_CURRENT_BINARY_DIR}/msxml3_msg.rc)
 
 list(APPEND msxml3_rc_deps
+    ${CMAKE_CURRENT_BINARY_DIR}/msxml3_msg.rc
     ${CMAKE_CURRENT_SOURCE_DIR}/msxml3.manifest
     ${CMAKE_CURRENT_SOURCE_DIR}/msxml3_v1.rgs
     ${CMAKE_CURRENT_SOURCE_DIR}/xmlparser.rgs
@@ -68,6 +78,7 @@ add_library(msxml3 MODULE
 add_pch(msxml3 precomp.h "${PCH_SKIP_SOURCE}")
 
 add_idl_headers(xmlparser_idlheader xmlparser.idl)
+add_idl_headers(saxreader_extensions_idlheader saxreader_extensions.idl)
 set_module_type(msxml3 win32dll)
 target_link_libraries(msxml3 libxml2 iconv-static uuid wine wine_dll_register zlib)
 
@@ -88,6 +99,6 @@ if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
 endif()
 
 add_importlibs(msxml3 libxslt urlmon ws2_32 shlwapi oleaut32 ole32 user32 msvcrt kernel32 ntdll)
-add_dependencies(msxml3 xmlparser_idlheader stdole2) # msxml3_v1.tlb needs stdole2.tlb
+add_dependencies(msxml3 xmlparser_idlheader saxreader_extensions_idlheader msxml3_msg stdole2) # msxml3_v1.tlb needs stdole2.tlb
 add_cd_file(TARGET msxml3 DESTINATION reactos/system32 FOR all)
 set_wine_module_FIXME(msxml3) # CORE-5743: No ARRAY_SIZE and CONST_VTABLE
