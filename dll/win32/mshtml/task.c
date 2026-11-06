@@ -70,6 +70,7 @@ HRESULT push_task(task_t *task, task_proc_t proc, task_proc_t destr, LONG magic)
         /* nothing would run the task: the caller gets the error and the task is gone, as for a failed allocation */
         list_remove(&task->entry);
         task->destr(task);
+        free(task);
         return err ? HRESULT_FROM_WIN32(err) : E_FAIL;
     }
 #else
