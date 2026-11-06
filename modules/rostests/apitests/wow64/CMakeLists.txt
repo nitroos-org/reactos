@@ -44,7 +44,7 @@ add_wow64_apitest(ntdll StackOverflowDispatch NtRaiseHardErrorMode
     NtFlushVirtualMemory NtEaFile VolumeControlCodes IoctlAllowlist ScsiPassThrough NtTokenQueryParity)
 add_wow64_apitest(advapi32
     ServiceArgs QueryServiceConfig ServiceStructLayout SetSecurityInfoKey RegCreateKeyEx RegOpenKeyExW RegQueryValueExW RegEnumValueW RegWow64 RegWow64Unicode RegWow64Views RegWow64SharedCreate RegWow64Matrix RegWow64LongName RegWow64SharedLongName RegWow64Volatile RegWow64Aliases RegWow64RelativeView TokenLogonSid TokenQueryParity RestrictedSidsCopy TokenDefaultDacl LogonUser LsaLogonSession NetUserChangePassword
-    GetSecurityInfoSequence LsaLogonUserS4U LsaLookupNamesUnmapped)
+    GetSecurityInfoSequence LsaLogonUserS4U LsaLookupNamesUnmapped RestrictedTokenAccess)
 add_wow64_apitest(wintrust WTHelperGetFileHash)
 add_wow64_apitest(iphlpapi NeighborEntry2)
 add_wow64_apitest(secur32 SetCredentialsAttributes)

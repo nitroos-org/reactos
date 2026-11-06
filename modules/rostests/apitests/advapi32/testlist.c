@@ -77,6 +77,7 @@ extern void func_RegSecurityMapping(void);
 extern void func_RegSecurityRoundTrip(void);
 extern void func_RegSecurityCreate(void);
 extern void func_RestrictedSidsCopy(void);
+extern void func_RestrictedTokenAccess(void);
 extern void func_RtlEncryptMemory(void);
 extern void func_SaferIdentifyLevel(void);
 extern void func_TokenDefaultDacl(void);
@@ -201,6 +202,7 @@ const struct test winetest_testlist[] =
     { "RegSecurityRoundTrip", func_RegSecurityRoundTrip },
     { "RegSecurityCreate", func_RegSecurityCreate },
     { "RestrictedSidsCopy", func_RestrictedSidsCopy },
+    { "RestrictedTokenAccess", func_RestrictedTokenAccess },
     { "RtlEncryptMemory", func_RtlEncryptMemory },
     { "SaferIdentifyLevel", func_SaferIdentifyLevel },
     { "TokenDefaultDacl", func_TokenDefaultDacl },
