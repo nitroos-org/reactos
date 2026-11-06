@@ -13,8 +13,8 @@
  *    NtTokenQueryParity).
  *  - the token keeps the objects of the handles passed with it: a named object whose last handle is closed stays
  *    reachable by name while the token lives.
- * Not measured on Windows, checked as this implementation answers: a SID that is no package SID and more than 64
- * handles are STATUS_INVALID_PARAMETER, an invalid handle in the array is STATUS_INVALID_HANDLE, the AppContainer
+ * Not measured on Windows, checked as this implementation answers: a SID that is no package SID, more than 64
+ * handles and more than 0x1000 capabilities are STATUS_INVALID_PARAMETER, an invalid handle in the array is STATUS_INVALID_HANDLE, the AppContainer
  * number is the same for the same package and differs between packages.
  * Runs as a native and as a WoW64 (32-bit) process.
  */
@@ -103,7 +103,7 @@ static void TestParameters(void)
 {
     HANDLE Existing = OpenOwnToken(TOKEN_ALL_ACCESS), QueryOnly = OpenOwnToken(TOKEN_QUERY), Token;
     HANDLE Many[65], Bad = (HANDLE)(ULONG_PTR)0x7FFC;
-    SID_AND_ATTRIBUTES Capability;
+    SID_AND_ATTRIBUTES Capability, *Capabilities;
     UCHAR BadSid[sizeof(Package1)];
     NTSTATUS Status;
     ULONG i;
@@ -140,6 +140,28 @@ static void TestParameters(void)
     Capability.Sid = BadSid;
     Status = CreateLowBox(Existing, &Package1, 1, &Capability, 0, NULL, &Token);
     ok_hex(Status, STATUS_INVALID_SID);
+
+    /* Capability count: SE_MAXIMUM_GROUP_LIMIT (0x1000) is accepted, one more is not. The array is real in both
+       cases, so that the WoW64 thunk, which reads it before the kernel sees the count, treats them alike. */
+    Capability.Sid = &Capability1;
+    Capability.Attributes = SE_GROUP_ENABLED;
+    Capabilities = HeapAlloc(GetProcessHeap(), 0, 0x1001 * sizeof(*Capabilities));
+    ok(Capabilities != NULL, "HeapAlloc failed\n");
+    if (Capabilities)
+    {
+        for (i = 0; i < 0x1001; i++) Capabilities[i] = Capability;
+        Status = CreateLowBox(Existing, &Package1, 0x1001, Capabilities, 0, NULL, &Token);
+        ok_hex(Status, STATUS_INVALID_PARAMETER);
+        if (NT_SUCCESS(Status)) NtClose(Token);
+        Status = CreateLowBox(Existing, &Package1, 0x1000, Capabilities, 0, NULL, &Token);
+        ok_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            ok_long(QueryUlong(Token, TokenIsAppContainer_), 1);
+            NtClose(Token);
+        }
+        HeapFree(GetProcessHeap(), 0, Capabilities);
+    }
 
     /* The existing token: invalid, no token, no TOKEN_DUPLICATE */
     Status = CreateLowBox(NULL, &Package1, 0, NULL, 0, NULL, &Token);
@@ -329,6 +351,82 @@ static void TestHandles(void)
     NtClose(Existing);
 }
 
+/* A valid handle followed by an invalid one: the call fails and must not keep the first object alive */
+static void TestHalfwayFailure(void)
+{
+    HANDLE Existing = OpenOwnToken(TOKEN_ALL_ACCESS), Token, Event, Again, Handles[2];
+    WCHAR Name[64];
+    NTSTATUS Status;
+
+    StringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"Local\\LowBoxHalfway%lu", GetCurrentProcessId());
+    Event = CreateEventW(NULL, TRUE, FALSE, Name);
+    ok(Event != NULL, "CreateEventW failed: %lu\n", GetLastError());
+    if (!Event)
+    {
+        NtClose(Existing);
+        return;
+    }
+
+    Handles[0] = Event;
+    Handles[1] = (HANDLE)(ULONG_PTR)0x7FFC;
+    Status = CreateLowBox(Existing, &Package1, 0, NULL, 2, Handles, &Token);
+    ok_hex(Status, STATUS_INVALID_HANDLE);
+    if (NT_SUCCESS(Status)) NtClose(Token);
+    CloseHandle(Event);
+
+    /* the failed call took no kernel handle that still holds the name */
+    Again = OpenEventW(SYNCHRONIZE, FALSE, Name);
+    ok(Again == NULL, "event still reachable after the failed call leaked a handle\n");
+    ok_long(GetLastError(), ERROR_FILE_NOT_FOUND);
+    if (Again) CloseHandle(Again);
+    NtClose(Existing);
+}
+
+/* A copy of the token shares the kept handles: the name stays until the last token goes */
+static void TestDuplicateKeepsName(void)
+{
+    HANDLE Existing = OpenOwnToken(TOKEN_ALL_ACCESS), Token, Duplicate, Event, Again;
+    OBJECT_ATTRIBUTES Attributes;
+    WCHAR Name[64];
+    NTSTATUS Status;
+
+    StringCchPrintfW(Name, RTL_NUMBER_OF(Name), L"Local\\LowBoxDuplicate%lu", GetCurrentProcessId());
+    Event = CreateEventW(NULL, TRUE, FALSE, Name);
+    ok(Event != NULL, "CreateEventW failed: %lu\n", GetLastError());
+    if (!Event)
+    {
+        NtClose(Existing);
+        return;
+    }
+
+    Status = CreateLowBox(Existing, &Package1, 0, NULL, 1, &Event, &Token);
+    ok_hex(Status, STATUS_SUCCESS);
+    CloseHandle(Event);
+    NtClose(Existing);
+    if (!NT_SUCCESS(Status)) return;
+
+    InitializeObjectAttributes(&Attributes, NULL, 0, NULL, NULL);
+    Status = NtDuplicateToken(Token, TOKEN_QUERY, &Attributes, FALSE, TokenPrimary, &Duplicate);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        NtClose(Token);
+        return;
+    }
+
+    /* The original goes away; the duplicate still keeps the object by name */
+    NtClose(Token);
+    Again = OpenEventW(SYNCHRONIZE, FALSE, Name);
+    ok(Again != NULL, "event gone after the original token was closed: %lu\n", GetLastError());
+    if (Again) CloseHandle(Again);
+
+    NtClose(Duplicate);
+    Again = OpenEventW(SYNCHRONIZE, FALSE, Name);
+    ok(Again == NULL, "event still there after the last token was closed\n");
+    ok_long(GetLastError(), ERROR_FILE_NOT_FOUND);
+    if (Again) CloseHandle(Again);
+}
+
 /* Not every token class of a lowbox token: the access information carries the number, package and capabilities */
 static void TestAccessInformation(void)
 {
@@ -394,11 +492,10 @@ START_TEST(NtCreateLowBoxToken)
     HANDLE Token;
 
     pNtCreateLowBoxToken = (PFN_CreateLowBox)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCreateLowBoxToken");
+    /* A missing export is a failure, not a skip: a dropped export must not look green */
+    ok(pNtCreateLowBoxToken != NULL, "NtCreateLowBoxToken is not exported by ntdll\n");
     if (!pNtCreateLowBoxToken)
-    {
-        skip("NtCreateLowBoxToken is not exported\n");
         return;
-    }
 
     Token = OpenOwnToken(TOKEN_QUERY);
     CheckNotAppContainer(Token);
@@ -407,5 +504,7 @@ START_TEST(NtCreateLowBoxToken)
     TestParameters();
     TestRoundTrip();
     TestHandles();
+    TestHalfwayFailure();
+    TestDuplicateKeepsName();
     TestAccessInformation();
 }
