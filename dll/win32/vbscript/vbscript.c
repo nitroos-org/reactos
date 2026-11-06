@@ -1447,8 +1447,11 @@ static ULONG WINAPI AXSite_Release(IServiceProvider *iface)
 
     TRACE("(%p) ref=%ld\n", This, ref);
 
-    if(!ref)
+    if(!ref) {
+        if(This->sp)
+            IServiceProvider_Release(This->sp);
         free(This);
+    }
 
     return ref;
 }
@@ -1459,6 +1462,13 @@ static HRESULT WINAPI AXSite_QueryService(IServiceProvider *iface,
     AXSite *This = impl_from_IServiceProvider(iface);
 
     TRACE("(%p)->(%s %s %p)\n", This, debugstr_guid(guidService), debugstr_guid(riid), ppv);
+
+    /* The host is not required to offer services: a script host without IServiceProvider
+     * (cscript, wscript) must still let CreateObject hand a site to IObjectWithSite objects. */
+    if(!This->sp) {
+        *ppv = NULL;
+        return E_NOINTERFACE;
+    }
 
     return IServiceProvider_QueryService(This->sp, guidService, riid, ppv);
 }
@@ -1476,15 +1486,18 @@ IUnknown *create_ax_site(script_ctx_t *ctx)
     AXSite *ret;
     HRESULT hres;
 
+    /* Windows creates the site whether or not the host implements IServiceProvider; the
+     * services are then simply unavailable. */
     hres = IActiveScriptSite_QueryInterface(ctx->site, &IID_IServiceProvider, (void**)&sp);
     if(FAILED(hres)) {
-        ERR("Could not get IServiceProvider iface: %08lx\n", hres);
-        return NULL;
+        TRACE("Host has no IServiceProvider: %08lx\n", hres);
+        sp = NULL;
     }
 
     ret = malloc(sizeof(*ret));
     if(!ret) {
-        IServiceProvider_Release(sp);
+        if(sp)
+            IServiceProvider_Release(sp);
         return NULL;
     }
 

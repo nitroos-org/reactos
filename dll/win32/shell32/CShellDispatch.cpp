@@ -582,13 +582,20 @@ HRESULT STDMETHODCALLTYPE CShellDispatch::SetInterfaceSafetyOptions(REFIID riid,
 HRESULT STDMETHODCALLTYPE CShellDispatch::SetSite(IUnknown *pUnkSite)
 {
     TRACE("(%p, %p)\n", this, pUnkSite);
-    return E_NOTIMPL;
+    /* Script hosts (VBScript CreateObject) hand every IObjectWithSite object a site; keep it. */
+    m_pSite = pUnkSite;
+    return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE CShellDispatch::GetSite(REFIID riid, PVOID *ppvSite)
 {
     TRACE("(%p, %s, %p)\n", this, wine_dbgstr_guid(&riid), ppvSite);
-    return E_NOTIMPL;
+    if (!ppvSite)
+        return E_POINTER;
+    *ppvSite = NULL;
+    if (!m_pSite)
+        return E_FAIL;
+    return m_pSite->QueryInterface(riid, ppvSite);
 }
 
 HRESULT WINAPI CShellDispatch_Constructor(REFIID riid, LPVOID * ppvOut)
