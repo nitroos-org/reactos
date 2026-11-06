@@ -450,14 +450,14 @@ static void test_header(const struct HEADER_TYPE expect[], int num)
         hres = IHTMLXMLHttpRequest_getResponseHeader(xhr, key, &text);
         ok(hres == S_OK, "getResponseHeader failed, got %08lx\n", hres);
         ok(text != NULL, "text == NULL\n");
-        ok(!lstrcmpW(text, expect[i].value),
+        ok(text && !lstrcmpW(text, expect[i].value),
            "Expect %s: %s, got %s\n", wine_dbgstr_w(expect[i].key), wine_dbgstr_w(expect[i].value),
            wine_dbgstr_w(text));
         SysFreeString(key);
         SysFreeString(text);
 
         wsprintfW(buf, L"%s: %s", expect[i].key, expect[i].value);
-        ok(wcsstr(all, buf) != NULL, "AllResponseHeaders(%s) don't have expected substr(%s)\n",
+        ok(all && wcsstr(all, buf) != NULL, "AllResponseHeaders(%s) don't have expected substr(%s)\n",
            wine_dbgstr_w(all), wine_dbgstr_w(buf));
     }
 
@@ -586,7 +586,7 @@ static void _test_response_text(unsigned line, const WCHAR *expect_text)
     hres = IHTMLXMLHttpRequest_get_responseText(xhr, &text);
     ok(hres == S_OK, "get_responseText failed: %08lx\n", hres);
     ok(text != NULL, "test == NULL\n");
-    if(expect_text) {
+    if(expect_text && text) {
         unsigned len;
         /* Some recent version of IE strip trailing '\n' from post.php response, while others don't. */
         len = SysStringLen(text);
@@ -712,6 +712,11 @@ static void test_sync_xhr(IHTMLDocument2 *doc, const WCHAR *xml_url, const WCHAR
     loading_cnt = 0;
     hres = IHTMLXMLHttpRequest_send(xhr, vempty);
     ok(hres == S_OK, "send failed: %08lx\n", hres);
+    if(FAILED(hres)) {
+        IHTMLXMLHttpRequest_Release(xhr);
+        xhr = NULL;
+        return;
+    }
     CHECK_CALLED(xmlhttprequest_onreadystatechange_opened);
     CHECK_CALLED(xmlhttprequest_onreadystatechange_headers_received);
     CHECK_CALLED(xmlhttprequest_onreadystatechange_loading);
@@ -735,7 +740,7 @@ static void test_sync_xhr(IHTMLDocument2 *doc, const WCHAR *xml_url, const WCHAR
     hres = IHTMLXMLHttpRequest_get_statusText(xhr, &text);
     ok(hres == S_OK, "get_statusText failed: %08lx\n", hres);
     ok(text != NULL, "text == NULL\n");
-    ok(!lstrcmpW(text, L"OK"),
+    ok(text && !lstrcmpW(text, L"OK"),
         "Expected \"OK\", got %s\n", wine_dbgstr_w(text));
     SysFreeString(text);
 
@@ -894,7 +899,7 @@ static void test_async_xhr(IHTMLDocument2 *doc, const WCHAR *xml_url, const WCHA
     hres = IHTMLXMLHttpRequest_get_statusText(xhr, &text);
     ok(hres == S_OK, "get_statusText failed: %08lx\n", hres);
     ok(text != NULL, "text == NULL\n");
-    ok(!lstrcmpW(text, L"OK"), "Expected \"OK\", got %s\n", wine_dbgstr_w(text));
+    ok(text && !lstrcmpW(text, L"OK"), "Expected \"OK\", got %s\n", wine_dbgstr_w(text));
     SysFreeString(text);
 
     val = 0xdeadbeef;
