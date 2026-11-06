@@ -27,6 +27,8 @@ list(APPEND SOURCE
     DesktopHeapNonInteractive.c
     DesktopOtherThreadApis.c
     ClipboardFormatListener.c
+    ClipboardSetData.c
+    ClipboardMedBatch.c
     ClipboardSynthBitmap.c
     ConsoleClipText.c
     EmptyClipboard.c
@@ -50,6 +52,7 @@ list(APPEND SOURCE
     GetWindowPlacement.c
     GW_ENABLEDPOPUP.c
     Handle32.c
+    HookInputBatch.c
     HookChainUnhookUaf.c
     HookFamilies.c
     HungWindow.c
@@ -124,6 +127,7 @@ list(APPEND SOURCE
     UserHandleGrantAccess.c
     VirtualKey.c
     Win8User.c
+    Wow64WinArguments.c
     WinEventHook.c
     WindowStationLeak.c
     WmPrint.c

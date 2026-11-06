@@ -65,18 +65,72 @@ IntFreeElementData(PCLIP pElement)
     {
         if (pElement->fGlobalHandle)
             UserDeleteObject(pElement->hData, TYPE_CLIPDATA);
-        else if (pElement->fmt == CF_BITMAP          ||
+        else if (pElement->fOwned &&
+                 (pElement->fmt == CF_BITMAP          ||
                  pElement->fmt == CF_PALETTE         ||
                  pElement->fmt == CF_DSPBITMAP       ||
                  pElement->fmt == CF_METAFILEPICT    ||
                  pElement->fmt == CF_DSPMETAFILEPICT ||
                  pElement->fmt == CF_DSPENHMETAFILE  ||
-                 pElement->fmt == CF_ENHMETAFILE )
+                  pElement->fmt == CF_ENHMETAFILE))
         {
             GreSetObjectOwner(pElement->hData, GDI_OBJ_HMGR_POWNED);
             GreDeleteObject(pElement->hData);
         }
     }
+}
+
+/* The GDI object type (base type, derived types such as DIB sections masked off) a clipboard
+   format carries, 0 when the format is not one the clipboard owns as a GDI object */
+static ULONG FASTCALL
+IntClipboardGdiType(UINT fmt)
+{
+    switch (fmt)
+    {
+        case CF_BITMAP:
+        case CF_DSPBITMAP:
+            return GDILoObjType_LO_BITMAP_TYPE;
+        case CF_PALETTE:
+            return GDILoObjType_LO_PALETTE_TYPE;
+        /* gdi32 converts metafiles to server metafile objects before it hands them over */
+        case CF_METAFILEPICT:
+        case CF_DSPMETAFILEPICT:
+        case CF_ENHMETAFILE:
+        case CF_DSPENHMETAFILE:
+            return GDILoObjType_LO_META_TYPE;
+    }
+    return 0;
+}
+
+/* The clipboard deletes the GDI object of these formats when it drops them (IntFreeElementData).
+   Windows accepts any handle in SetClipboardData and a DC or a pen given as a bitmap stays alive
+   when the clipboard is emptied, so the handle is stored as given, but only an object that is
+   what the format carries and that the caller handed over (its own, or a server metafile, which
+   is public from its creation) is the clipboard's to delete. Anything else (a DC, a brush, a stale
+   or foreign handle, a public object of another process) is never owner-changed or deleted here.
+   The handle the format already holds keeps the state it was stored with. */
+static BOOL FASTCALL
+IntClipboardTakesObject(PWINSTATION_OBJECT pWinStaObj, UINT fmt, HANDLE hData)
+{
+    ULONG ulType = IntClipboardGdiType(fmt);
+    ULONG ulOwner;
+    PCLIP pElement;
+
+    if (!ulType || (ULONG_PTR)hData <= 2)
+        return FALSE;
+
+    pElement = IntGetFormatElement(pWinStaObj, fmt);
+    if (pElement && pElement->hData == hData && !pElement->fGlobalHandle)
+        return pElement->fOwned;
+
+    if ((GDI_HANDLE_GET_TYPE(hData) & 0x1f0000) != ulType)
+        return FALSE;
+
+    ulOwner = GreGetObjectOwner(hData);
+    if (ulOwner == GDI_OBJ_HMGR_POWNED)
+        return TRUE;
+
+    return ulOwner == GDI_OBJ_HMGR_PUBLIC && ulType == GDILoObjType_LO_META_TYPE;
 }
 
 /* Adds a new format and data to the clipboard */
@@ -123,11 +177,16 @@ IntAddFormatedData(PWINSTATION_OBJECT pWinStaObj, UINT fmt, HANDLE hData, BOOLEA
         pElement->fmt = fmt;
         pWinStaObj->cNumClipFormats++;
     }
-    else
+    else if (pElement->hData != hData || pElement->fGlobalHandle != fGlobalHandle)
+    {
+        /* Storing the handle the format already holds keeps it: freeing it first would leave
+           the clipboard with a handle that no longer exists */
         IntFreeElementData(pElement);
+    }
 
     pElement->hData = hData;
     pElement->fGlobalHandle = fGlobalHandle;
+    pElement->fOwned = FALSE;
 
     return pElement;
 }
@@ -340,9 +399,10 @@ IntSynthesizeBitmap(PWINSTATION_OBJECT pWinStaObj, PCLIP pBmEl)
 
     TRACE("IntSynthesizeBitmap(%p, %p)\n", pWinStaObj, pBmEl);
 
+    /* CF_BITMAP is synthesized from CF_DIB, but the clipboard is application-controlled:
+       there may be no CF_DIB (any more), or none with data of its own */
     pDibEl = IntGetFormatElement(pWinStaObj, CF_DIB);
-    ASSERT(pDibEl && !IS_DATA_SYNTHESIZED(pDibEl));
-    if (!pDibEl->fGlobalHandle)
+    if (!pDibEl || IS_DATA_DELAYED(pDibEl) || IS_DATA_SYNTHESIZED(pDibEl) || !pDibEl->fGlobalHandle)
         return;
 
     pMemObj = (PCLIPBOARDDATA)UserGetObject(gHandleTable, pDibEl->hData, TYPE_CLIPDATA);
@@ -383,6 +443,7 @@ IntSynthesizeBitmap(PWINSTATION_OBJECT pWinStaObj, PCLIP pBmEl)
     {
         GreSetObjectOwner(hBm, GDI_OBJ_HMGR_PUBLIC);
         pBmEl->hData = hBm;
+        pBmEl->fOwned = TRUE;
     }
 
 cleanup:
@@ -977,7 +1038,15 @@ NtUserGetPriorityClipboardFormat(UINT *paFormatPriorityList, INT cFormats)
     {
         _SEH2_TRY
         {
-            ProbeForRead(paFormatPriorityList, cFormats * sizeof(UINT), sizeof(UINT));
+            SIZE_T cbFormats;
+
+            /* The byte count must not wrap (it did on 32-bit, probing less than the loop reads):
+               a count that does not fit the address space is a range that is not in user space */
+            if (cFormats < 0 || (ULONGLONG)(UINT)cFormats * sizeof(UINT) > (SIZE_T)-1)
+                ExRaiseAccessViolation();
+            cbFormats = (SIZE_T)(UINT)cFormats * sizeof(UINT);
+
+            ProbeForRead(paFormatPriorityList, cbFormats, sizeof(UINT));
 
             iRet = -1;
 
@@ -992,6 +1061,8 @@ NtUserGetPriorityClipboardFormat(UINT *paFormatPriorityList, INT cFormats)
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
+            /* Windows: a list that cannot be read is an error, not "no match" (measured: 0 and ERROR_NOACCESS) */
+            iRet = 0;
             SetLastNtError(_SEH2_GetExceptionCode());
         }
         _SEH2_END;
@@ -1041,7 +1112,10 @@ NtUserGetClipboardData(UINT fmt, PGETCLIPBDATA pgcd)
 
     TRACE("NtUserGetClipboardData(%x, %p)\n", fmt, pgcd);
 
-    UserEnterShared();
+    /* Delayed rendering sends WM_RENDERFORMAT, which calls back into user mode (and the
+       owner's handler enters win32k again, exclusively): the shared lock cannot be held
+       across that, a thread cannot upgrade it */
+    UserEnterExclusive();
 
     pWinStaObj = IntGetWinStaForCbAccess();
     if (!pWinStaObj)
@@ -1069,12 +1143,12 @@ NtUserGetClipboardData(UINT fmt, PGETCLIPBDATA pgcd)
             case CF_OEMTEXT:
                 uSourceFmt = CF_UNICODETEXT;
                 pElement = IntGetFormatElement(pWinStaObj, uSourceFmt);
-                if (IS_DATA_SYNTHESIZED(pElement))
+                if (pElement && IS_DATA_SYNTHESIZED(pElement))
                 {
                     uSourceFmt = CF_TEXT;
                     pElement = IntGetFormatElement(pWinStaObj, uSourceFmt);
                 }
-                if (IS_DATA_SYNTHESIZED(pElement))
+                if (pElement && IS_DATA_SYNTHESIZED(pElement))
                 {
                     uSourceFmt = CF_OEMTEXT;
                     pElement = IntGetFormatElement(pWinStaObj, uSourceFmt);
@@ -1083,6 +1157,9 @@ NtUserGetClipboardData(UINT fmt, PGETCLIPBDATA pgcd)
 
             case CF_BITMAP:
                 IntSynthesizeBitmap(pWinStaObj, pElement);
+                /* No bitmap could be made: the marker is not a handle */
+                if (IS_DATA_SYNTHESIZED(pElement))
+                    goto cleanup;
                 break;
 
             case CF_METAFILEPICT:
@@ -1096,9 +1173,14 @@ NtUserGetClipboardData(UINT fmt, PGETCLIPBDATA pgcd)
                 break;
 
             default:
-                ASSERT(FALSE);
+                /* Not a format the kernel marks as synthesized: nothing to resolve */
+                break;
         }
     }
+
+    /* The source of a synthesized format that is itself only a marker has no data */
+    if (pElement && IS_DATA_SYNTHESIZED(pElement))
+        goto cleanup;
 
     if (pElement && IS_DATA_DELAYED(pElement) && pWinStaObj->spwndClipOwner)
     {
@@ -1185,8 +1267,11 @@ UserSetClipboardData(UINT fmt, HANDLE hData, PSETCLIPBDATA scd)
     /* Is it a delayed rendering? */
     if (hData)
     {
+        /* Does the clipboard take over a GDI object here (and delete it later)? */
+        BOOL fOwned = !scd->fGlobalHandle && IntClipboardTakesObject(pWinStaObj, fmt, hData);
+
         /* Is it a bitmap? */
-        if (fmt == CF_BITMAP)
+        if (fOwned && fmt == CF_BITMAP)
         {
             /* Make bitmap public */
             GreSetObjectOwner(hData, GDI_OBJ_HMGR_PUBLIC);
@@ -1194,6 +1279,8 @@ UserSetClipboardData(UINT fmt, HANDLE hData, PSETCLIPBDATA scd)
 
         /* Save data in the clipboard */
         pElement = IntAddFormatedData(pWinStaObj, fmt, hData, scd->fGlobalHandle, FALSE);
+        if (pElement)
+            pElement->fOwned = fOwned;
         TRACE("hData stored\n");
 
         /* Note: Synthesized formats are added in NtUserCloseClipboard */
@@ -1384,13 +1471,41 @@ NtUserCreateLocalMemHandle(
    DWORD *pcbData)
 {
     PCLIPBOARDDATA pMemObj;
+    PWINSTATION_OBJECT pWinStaObj = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
+    BOOL bHeld = FALSE;
+    DWORD i;
 
     UserEnterShared();
+
+    /* Like every other clipboard service: the caller's window station must grant clipboard access */
+    Status = IntValidateWindowStationHandle(UserGetProcessWindowStation(),
+                                            UserMode,
+                                            WINSTA_ACCESSCLIPBOARD,
+                                            &pWinStaObj,
+                                            0);
+    if (!NT_SUCCESS(Status))
+        goto cleanup;
 
     /* Get Clipboard data object */
     pMemObj = (PCLIPBOARDDATA)UserGetObject(gHandleTable, hMem, TYPE_CLIPDATA);
     if (!pMemObj)
+    {
+        Status = STATUS_INVALID_HANDLE;
+        goto cleanup;
+    }
+
+    /* The handle must be data of that window station's clipboard: clipboard data handles are
+       global, any value that happens to be one must not be readable through another station */
+    for (i = 0; i < pWinStaObj->cNumClipFormats; ++i)
+    {
+        if (pWinStaObj->pClipBase[i].fGlobalHandle && pWinStaObj->pClipBase[i].hData == hMem)
+        {
+            bHeld = TRUE;
+            break;
+        }
+    }
+    if (!bHeld)
     {
         Status = STATUS_INVALID_HANDLE;
         goto cleanup;
@@ -1419,6 +1534,9 @@ NtUserCreateLocalMemHandle(
     _SEH2_END;
 
 cleanup:
+    if (pWinStaObj)
+        ObDereferenceObject(pWinStaObj);
+
     UserLeave();
 
     return Status;

@@ -102,7 +102,7 @@ NtUserGetRawInputDeviceInfo(
     _SEH2_END;
 
     AcquireDeviceInfoListMutex();
-    for (DeviceInfo = gpInputDeviceInfo; DeviceInfo && DeviceInfo != hDevice; DeviceInfo = DeviceInfo->pNextDeviceInfo)
+    for (DeviceInfo = gpInputDeviceInfo; DeviceInfo && DeviceInfo->hRawDevice != hDevice; DeviceInfo = DeviceInfo->pNextDeviceInfo)
         ;
     if (!DeviceInfo)
     {
@@ -1111,7 +1111,7 @@ NtUserGetRawInputDeviceList(
         ProbeForWrite(pRawInputDeviceList, cDevices * sizeof(*pRawInputDeviceList), sizeof(PVOID));
         for (DeviceInfo = gpInputDeviceInfo, i = 0; DeviceInfo && i < cDevices; DeviceInfo = DeviceInfo->pNextDeviceInfo, i++)
         {
-            pRawInputDeviceList[i].hDevice = DeviceInfo;
+            pRawInputDeviceList[i].hDevice = DeviceInfo->hRawDevice;
             pRawInputDeviceList[i].dwType = DeviceInfo->DeviceType;
         }
         Ret = cDevices;
@@ -1424,7 +1424,7 @@ NtUserRegisterRawInputDevices(
                 (Device->usUsage != RawInputUsageFromType(DeviceInfo->DeviceType) && !(Device->dwFlags & RIDEV_PAGEONLY)))
                 continue;
 
-            UserPostMessage(Device->hwndTarget, WM_INPUT_DEVICE_CHANGE, GIDC_ARRIVAL, (LPARAM)DeviceInfo);
+            UserPostMessage(Device->hwndTarget, WM_INPUT_DEVICE_CHANGE, GIDC_ARRIVAL, (LPARAM)DeviceInfo->hRawDevice);
         }
     }
 

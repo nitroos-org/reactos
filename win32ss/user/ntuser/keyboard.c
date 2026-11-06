@@ -1422,7 +1422,7 @@ UserRawInputProcessKeyboardInput(
         kb.Flags |= RI_KEY_E0;
     kb.ExtraInformation = pKbdInputData->ExtraInformation;
 
-    UserRawInputDeliver(RIM_TYPEKEYBOARD, (HANDLE)pDeviceInfo, &kb, sizeof(kb));
+    UserRawInputDeliver(RIM_TYPEKEYBOARD, pDeviceInfo ? pDeviceInfo->hRawDevice : NULL, &kb, sizeof(kb));
 }
 
 /*
@@ -1738,6 +1738,9 @@ NtUserToUnicodeEx(
     INT i, iRet = 0;
     PKL pKl = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
+    WCHAR awchLocal[8];
+    INT cchLocal;
+    SIZE_T cbBuff;
 
     TRACE("Enter NtUserSetKeyboardState\n");
 
@@ -1768,13 +1771,19 @@ NtUserToUnicodeEx(
     }
     _SEH2_END;
 
-    pwszBuff = ExAllocatePoolWithTag(NonPagedPool, sizeof(WCHAR) * cchBuff, TAG_STRING);
-    if (!pwszBuff)
+    /* Windows: a buffer size below 1 is ERROR_INVALID_PARAMETER (measured) */
+    if (cchBuff < 1)
     {
-        ERR("ExAllocatePoolWithTag(%u) failed\n", sizeof(WCHAR) * cchBuff);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
-    RtlZeroMemory(pwszBuff, sizeof(WCHAR) * cchBuff);
+
+    /* The caller's buffer is cchBuff characters, and all of them are written (the translation, then
+       zeros), but cchBuff is caller-controlled: the translation itself is at most two characters, so
+       it is made in a small kernel buffer and only the zero fill follows the size of the caller's one */
+    cchLocal = min(cchBuff, (INT)RTL_NUMBER_OF(awchLocal));
+    pwszBuff = awchLocal;
+    RtlZeroMemory(awchLocal, sizeof(awchLocal));
 
     UserEnterExclusive(); // Note: We modify wchDead static variable
 
@@ -1793,13 +1802,26 @@ NtUserToUnicodeEx(
                             wScanCode,
                             afKeyState,
                             pwszBuff,
-                            cchBuff,
+                            cchLocal,
                             wFlags,
                             pKl->spkf->pKbdTbl);
 
         if (iRet)
         {
-            Status = MmCopyToCaller(pwszBuffUnsafe, pwszBuff, cchBuff * sizeof(WCHAR));
+            cbBuff = (SIZE_T)cchBuff * sizeof(WCHAR);
+            _SEH2_TRY
+            {
+                /* The whole buffer must be writable, as on Windows (a size that runs off it is ERROR_NOACCESS) */
+                ProbeForWrite(pwszBuffUnsafe, cbBuff, sizeof(WCHAR));
+                RtlCopyMemory(pwszBuffUnsafe, awchLocal, sizeof(WCHAR) * cchLocal);
+                if (cchBuff > cchLocal)
+                    RtlZeroMemory(pwszBuffUnsafe + cchLocal, (cchBuff - cchLocal) * sizeof(WCHAR));
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
         }
     }
     else
@@ -1807,8 +1829,6 @@ NtUserToUnicodeEx(
         ERR("No keyboard layout ?!\n");
         Status = STATUS_INVALID_HANDLE;
     }
-
-    ExFreePoolWithTag(pwszBuff, TAG_STRING);
 
     if (!NT_SUCCESS(Status))
     {
