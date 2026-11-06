@@ -942,8 +942,13 @@ static PFW_IMAGE FwImageOfCurrent(VOID)
     return FwImageFromHandle(NtCurrentProcess());
 }
 
-/* Image of the process with the given id, which need not be the caller; NULL if it is gone (PASSIVE_LEVEL) */
-static PFW_IMAGE FwImageOfPid(HANDLE Pid)
+/* Image of the process with the given id, which need not be the caller; NULL if it is gone (PASSIVE_LEVEL).
+   Creator is the process the address file was created by (FwCreator, only compared here, never used): the id must
+   still belong to it. The address file holds a reference to its creator, so the id of a creator that exited is
+   not handed to a new process while the address file lives; the lookup then finds the creator itself, exited,
+   and its image is resolved all the same. The comparison guards the case that must not happen: an id that
+   names another process would attribute the endpoint to a program that does not own it. */
+static PFW_IMAGE FwImageOfPid(HANDLE Pid, PVOID Creator)
 {
     PEPROCESS Process;
     HANDLE Handle;
@@ -951,6 +956,11 @@ static PFW_IMAGE FwImageOfPid(HANDLE Pid)
 
     if (!NT_SUCCESS(PsLookupProcessByProcessId(Pid, &Process)))
         return NULL;
+    if ((PVOID)Process != Creator)
+    {
+        ObDereferenceObject(Process);
+        return NULL;
+    }
     if (Process == PsInitialSystemProcess)
         Image = FwMakeSystemImage();
     else if (NT_SUCCESS(ObOpenObjectByPointer(Process, OBJ_KERNEL_HANDLE, NULL, PROCESS_QUERY_INFORMATION,
@@ -966,17 +976,19 @@ static PFW_IMAGE FwImageOfPid(HANDLE Pid)
 /* Attach Image (reference transferred) to the address file if it is still on the list and has none;
    otherwise release it. AddrFile is only compared, never dereferenced, unless found on the list; the
    creator id and creation time guard against the structure having been freed and reused meanwhile. */
-static VOID FwAttachImage(PADDRESS_FILE AddrFile, HANDLE Pid, LONGLONG Created, PFW_IMAGE Image)
+static VOID FwAttachImage(PADDRESS_FILE AddrFile, USHORT PortN, HANDLE Pid, LONGLONG Created, PFW_IMAGE Image)
 {
     KIRQL OldIrql;
-    PLIST_ENTRY Entry;
+    PLIST_ENTRY Head, Entry;
 
     if (!Image)
         return;
+    /* the port of an address file never changes: only its bucket needs a look */
+    Head = &AddressFilePortHash[ADDRESS_FILE_PORT_BUCKET(PortN)];
     TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
-    for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead; Entry = Entry->Flink)
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
     {
-        if (CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry) == AddrFile)
+        if (CONTAINING_RECORD(Entry, ADDRESS_FILE, FwPortEntry) == AddrFile)
         {
             if (!AddrFile->FwImage && AddrFile->ProcessId == Pid && AddrFile->CreationTime.QuadPart == Created)
             {
@@ -997,7 +1009,7 @@ VOID NitroFwAddressFileCreated(PADDRESS_FILE AddrFile)
 {
     if (FwKilled || KeGetCurrentIrql() != PASSIVE_LEVEL)
         return;
-    FwAttachImage(AddrFile, AddrFile->ProcessId, AddrFile->CreationTime.QuadPart, FwImageOfCurrent());
+    FwAttachImage(AddrFile, AddrFile->Port, AddrFile->ProcessId, AddrFile->CreationTime.QuadPart, FwImageOfCurrent());
 }
 
 /* Called after a policy that has program rules came into force: sockets opened before that (listeners
@@ -1011,6 +1023,8 @@ static VOID FwBackfillImages(VOID)
         PADDRESS_FILE Todo = NULL;
         HANDLE Pid = NULL;
         LONGLONG Created = 0;
+        USHORT PortN = 0;
+        PVOID Creator = NULL;
         PFW_IMAGE Image;
 
         TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
@@ -1023,6 +1037,8 @@ static VOID FwBackfillImages(VOID)
                 Todo = A;
                 Pid = A->ProcessId;
                 Created = A->CreationTime.QuadPart;
+                PortN = A->Port;
+                Creator = A->FwCreator;
                 break;
             }
         }
@@ -1030,8 +1046,8 @@ static VOID FwBackfillImages(VOID)
         if (!Todo)
             return;
 
-        Image = FwImageOfPid(Pid);
-        FwAttachImage(Todo, Pid, Created, Image);   /* Todo may be gone by now; it is looked up on the list again */
+        Image = FwImageOfPid(Pid, Creator);
+        FwAttachImage(Todo, PortN, Pid, Created, Image);   /* Todo may be gone by now; it is looked up on the list again */
     }
 }
 
@@ -1046,14 +1062,16 @@ VOID NitroFwReleaseImage(PVOID Image)
 static PFW_IMAGE FwFindOwner(UINT Protocol, USHORT PortN, PIP_ADDRESS Local)
 {
     KIRQL OldIrql;
-    PLIST_ENTRY Entry;
+    PLIST_ENTRY Head, Entry;
     PFW_IMAGE Found = NULL;
     BOOLEAN FoundListener = FALSE;
 
+    /* only the address files of this port bucket (same relative order as the global list) */
+    Head = &AddressFilePortHash[ADDRESS_FILE_PORT_BUCKET(PortN)];
     TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
-    for (Entry = AddressFileListHead.Flink; Entry != &AddressFileListHead; Entry = Entry->Flink)
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
     {
-        PADDRESS_FILE AddrFile = CONTAINING_RECORD(Entry, ADDRESS_FILE, ListEntry);
+        PADDRESS_FILE AddrFile = CONTAINING_RECORD(Entry, ADDRESS_FILE, FwPortEntry);
         BOOLEAN IsListener;
 
         if (AddrFile->Protocol != Protocol || AddrFile->Port != PortN || !AddrFile->FwImage)
@@ -1349,6 +1367,7 @@ static BOOLEAN FwIsOwnUnicast(PIP_ADDRESS Address)
 typedef struct _FW_PKT
 {
     UINT Protocol;
+    ULONG IfType;           /* NITROFW_IFTYPE_* bit of the interface the packet came in on */
     BOOLEAN HasPorts;       /* TCP or UDP */
     BOOLEAN IsIcmp;
     USHORT LocalPort;       /* host order */
@@ -1518,10 +1537,8 @@ static BOOLEAN FwRuleMatches(PNITROFW_RULE Rule, PFW_PKT Pkt)
 
     if (Rule->Protocol != NITROFW_PROTO_ANY && Rule->Protocol != Pkt->Protocol)
         return FALSE;
-    /* Interface types cannot be resolved yet: every interface counts as LAN. A rule that includes LAN
-       applies; a rule without it never matches if it Allows, but a Block rule applies anyway (fail
-       closed: a Block restricted to Wireless/RemoteAccess is not silently ignored). */
-    if (!(Rule->IfTypes & NITROFW_IFTYPE_LAN) && Rule->Action == NITROFW_ACTION_ALLOW)
+    /* a rule applies on the interface types it lists (NITROFW_IFTYPE_ALL = any) */
+    if (!(Rule->IfTypes & Pkt->IfType))
         return FALSE;
 
     if (Rule->LocalPortCount || Rule->RemotePortCount)
@@ -1607,6 +1624,7 @@ BOOLEAN NitroFwInboundAllowed(PIP_INTERFACE Interface, PIP_PACKET IPPacket, UINT
 
     RtlZeroMemory(&Pkt, sizeof(Pkt));
     Pkt.Protocol = Protocol;
+    Pkt.IfType = LANGetFwIfType(Interface);
     Pkt.RemoteAddr = FwNtohl(IPPacket->SrcAddr.Address.IPv4Address);
     Pkt.LocalAddr = FwNtohl(IPPacket->DstAddr.Address.IPv4Address);
     Pkt.Dst = &IPPacket->DstAddr;

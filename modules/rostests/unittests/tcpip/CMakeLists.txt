@@ -5,6 +5,7 @@ include_directories(${REACTOS_SOURCE_DIR}/modules/rostests/apitests/include)
 
 add_executable(tcpip_unittest
     reassembly.c
+    iftype.c
     ${REACTOS_SOURCE_DIR}/drivers/network/tcpip/ip/network/receive.c
     testlist.c)
 
