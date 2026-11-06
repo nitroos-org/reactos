@@ -179,8 +179,9 @@ CreateStandardProfile(
     StringCbCatW(szProfilePath, sizeof(szProfilePath), szBuffer);
 
     /* Attempt profile directory creation */
-    // FIXME: Security!
-    if (!CreateDirectoryW(szProfilePath, NULL))
+    if (!CreateSecuredProfileDir(szProfilePath,
+                                pProfileParams->bCommon ? ProfileDirPublic : ProfileDirUsers,
+                                NULL))
     {
         if (GetLastError() != ERROR_ALREADY_EXISTS)
         {
@@ -200,8 +201,9 @@ CreateStandardProfile(
         StringCbCatW(szProfilePath, sizeof(szProfilePath), L"\\");
         StringCbCatW(szProfilePath, sizeof(szProfilePath), szBuffer);
 
-        // FIXME: Security!
-        if (!CreateDirectoryW(szProfilePath, NULL))
+        if (!CreateSecuredProfileDir(szProfilePath,
+                                    pProfileParams->bCommon ? ProfileDirPublic : ProfileDirUsers,
+                                    NULL))
         {
             if (GetLastError() != ERROR_ALREADY_EXISTS)
             {
@@ -448,8 +450,7 @@ InitializeProfiles(VOID)
     }
 
     /* Create profiles directory */
-    // FIXME: Security!
-    if (!CreateDirectoryW(szProfilesPath, NULL))
+    if (!CreateSecuredProfileDir(szProfilesPath, ProfileDirUsers, NULL))
     {
         if (GetLastError() != ERROR_ALREADY_EXISTS)
         {
