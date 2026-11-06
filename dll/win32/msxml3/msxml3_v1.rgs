@@ -450,6 +450,12 @@ HKCR
             Version = s '3.0'
             VersionIndependentProgId = s 'Msxml2.FreeThreadedDOMDocument'
         }
+        '{ED8C108E-4349-11D2-91A4-00C04F7969E8}' = s 'XML HTTP Request'
+        {
+            InprocServer32 = s '%MODULE%' { val ThreadingModel = s 'Apartment' }
+            ProgId = s 'Microsoft.XMLHTTP.1.0'
+            VersionIndependentProgId = s 'Microsoft.XMLHTTP'
+        }
         '{F5078F35-C551-11D3-89B9-0000F81FE221}' = s 'XML HTTP 3.0'
         {
             InprocServer32 = s '%MODULE%' { val ThreadingModel = s 'Apartment' }
@@ -737,5 +743,14 @@ HKCR
     'MSXML.DOMDocument' = s 'XML DOM Document'
     {
         CLSID = s '{2933BF90-7B36-11D2-B20E-00C04F983E60}'
+    }
+    'Microsoft.XMLHTTP.1.0' = s 'XML HTTP Request'
+    {
+        CLSID = s '{ED8C108E-4349-11D2-91A4-00C04F7969E8}'
+    }
+    'Microsoft.XMLHTTP' = s 'XML HTTP Request'
+    {
+        CLSID = s '{ED8C108E-4349-11D2-91A4-00C04F7969E8}'
+        CurVer = s 'Microsoft.XMLHTTP.1.0'
     }
 }
