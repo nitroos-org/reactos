@@ -2176,6 +2176,9 @@ Arguments:
 
         BOOLEAN LockedBitMap = FALSE;
         BOOLEAN SelectNextContigWindow = FALSE;
+#ifdef __REACTOS__
+        ULONG IdleWindowSwitches = 0;
+#endif
 
         //
         //  Drop our shared lock on the ChangeBitMapResource,  and pick it up again
@@ -2387,6 +2390,24 @@ Arguments:
                     //  currently on a roll (allocating contiguously)
                     //
 
+#ifdef __REACTOS__
+                    //
+                    //  Every switch loads a window that its free count says has room.  If the loop goes
+                    //  round more often than there are windows without taking a cluster, the free counts
+                    //  disagree with the FAT and switching again will not help: fail the request rather
+                    //  than spin for ever with the volume locked.  This is a guard only: the counts are
+                    //  kept right by the code that updates them.
+                    //
+
+                    if (++IdleWindowSwitches > Vcb->NumberOfWindows + 2) {
+
+                        DbgPrint( "FATFS: FatAllocateDiskSpace: %lu window switches without a free cluster, free counts disagree with the FAT\n",
+                                  IdleWindowSwitches );
+
+                        FatRaiseStatus( IrpContext, STATUS_DISK_FULL );
+                    }
+#endif
+
                     SelectedWindow = FALSE;
 
                     if ( SelectNextContigWindow)  {
@@ -2475,6 +2496,10 @@ Arguments:
                     //
 
                     Window = Vcb->CurrentWindow;
+
+#ifdef __REACTOS__
+                    IdleWindowSwitches = 0;
+#endif
 
                     FatReserveClusters( IrpContext, Vcb, (Index + 2), ClustersFound );
 
