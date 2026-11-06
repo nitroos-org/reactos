@@ -26,6 +26,8 @@ extern void func_desktop(void);
 extern void func_DesktopHeapNonInteractive(void);
 extern void func_DesktopOtherThreadApis(void);
 extern void func_ClipboardFormatListener(void);
+extern void func_ClipboardSetData(void);
+extern void func_ClipboardMedBatch(void);
 extern void func_ClipboardSynthBitmap(void);
 extern void func_ConsoleClipText(void);
 extern void func_EmptyClipboard(void);
@@ -49,6 +51,7 @@ extern void func_GetUserObjectInformation(void);
 extern void func_GetWindowPlacement(void);
 extern void func_GW_ENABLEDPOPUP(void);
 extern void func_Handle32(void);
+extern void func_HookInputBatch(void);
 extern void func_HookChainUnhookUaf(void);
 extern void func_HookFamilies(void);
 extern void func_HungWindow(void);
@@ -123,6 +126,7 @@ extern void func_UnicodeToAnsiMessage(void);
 extern void func_UpdateLayeredWindow(void);
 extern void func_UserHandleGrantAccess(void);
 extern void func_VirtualKey(void);
+extern void func_Wow64WinArguments(void);
 extern void func_WinEventHook(void);
 extern void func_WindowStationLeak(void);
 extern void func_WmPrint(void);
@@ -165,6 +169,8 @@ const struct test winetest_testlist[] =
     { "DesktopHeapNonInteractive", func_DesktopHeapNonInteractive },
     { "DesktopOtherThreadApis", func_DesktopOtherThreadApis },
     { "ClipboardFormatListener", func_ClipboardFormatListener },
+    { "ClipboardSetData", func_ClipboardSetData },
+    { "ClipboardMedBatch", func_ClipboardMedBatch },
     { "ClipboardSynthBitmap", func_ClipboardSynthBitmap },
     { "ConsoleClipText", func_ConsoleClipText },
     { "EmptyClipboard", func_EmptyClipboard },
@@ -188,6 +194,7 @@ const struct test winetest_testlist[] =
     { "GetWindowPlacement", func_GetWindowPlacement },
     { "GW_ENABLEDPOPUP", func_GW_ENABLEDPOPUP },
     { "Handle32", func_Handle32 },
+    { "HookInputBatch", func_HookInputBatch },
     { "HookChainUnhookUaf", func_HookChainUnhookUaf },
     { "HookFamilies", func_HookFamilies },
     { "HungWindow", func_HungWindow },
@@ -272,6 +279,7 @@ const struct test winetest_testlist[] =
     { "DesktopWindowSiblings", func_DesktopWindowSiblings },
     { "ShutdownBlockReason", func_ShutdownBlockReason },
     { "PointerDeviceFunctions", func_PointerDeviceFunctions },
+    { "Wow64WinArguments", func_Wow64WinArguments },
     { "WinEventHook", func_WinEventHook },
     { "WindowStationLeak", func_WindowStationLeak },
     { "WmPrint", func_WmPrint },

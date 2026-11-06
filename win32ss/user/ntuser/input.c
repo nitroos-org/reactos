@@ -32,6 +32,7 @@ PATTACHINFO gpai = NULL;
 INT paiCount = 0;
 HANDLE ghKeyboardDevice = NULL;
 PINPUT_DEVICE_INFO gpInputDeviceInfo = NULL;
+static LONG gRawDeviceSerial = 0;
 PERESOURCE gpDeviceInfoListMutex = NULL;
 
 static DWORD LastInputTick = 0;
@@ -139,6 +140,7 @@ CreateInputDevice(
 
     RtlZeroMemory(DeviceInfo, sizeof(*DeviceInfo));
     DeviceInfo->DeviceType = DeviceType;
+    DeviceInfo->hRawDevice = UlongToHandle(0x10000 | ((InterlockedIncrement(&gRawDeviceSerial) & 0x3FFF) << 2) | 3);
     DeviceInfo->DeviceName.Buffer = (PWCH)(DeviceInfo + 1);
     DeviceInfo->DeviceName.MaximumLength = DeviceName->Length + sizeof(UNICODE_NULL);
     RtlCopyUnicodeString(&DeviceInfo->DeviceName, DeviceName);
@@ -675,6 +677,9 @@ IsRemoveAttachThread(PTHREADINFO pti)
 
        if (!pai && !ptiFrom && !ptiTo) break;
 
+       /* The thread is going away: all attaches of the pair end with it */
+       if (pai) pai->cAttach = 1;
+
        Status = UserAttachThreadInput(ptiFrom, ptiTo, FALSE);
        if (!NT_SUCCESS(Status)) Ret = FALSE;
 
@@ -706,15 +711,30 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
     /* If Attach set, allocate and link. */
     if (fAttach)
     {
-        pai = ExAllocatePoolWithTag(PagedPool, sizeof(ATTACHINFO), USERTAG_ATTACHINFO);
-        if (!pai) return STATUS_NO_MEMORY;
+        /* A pair that is attached already is counted, not stored a second time */
+        for (pai = gpai; pai; pai = pai->paiNext)
+        {
+            if (pai->pti1 == ptiFrom && pai->pti2 == ptiTo)
+                break;
+        }
+        if (pai)
+        {
+            if (pai->cAttach == MAXULONG) return STATUS_INVALID_PARAMETER;
+            pai->cAttach++;
+        }
+        else
+        {
+            pai = ExAllocatePoolWithTag(PagedPool, sizeof(ATTACHINFO), USERTAG_ATTACHINFO);
+            if (!pai) return STATUS_NO_MEMORY;
 
-        pai->paiNext = gpai;
-        pai->pti1 = ptiFrom;
-        pai->pti2 = ptiTo;
-        gpai = pai;
-        paiCount++;
-        ERR("Attach Allocated! ptiFrom 0x%p  ptiTo 0x%p paiCount %d\n",ptiFrom,ptiTo,paiCount);
+            pai->paiNext = gpai;
+            pai->pti1 = ptiFrom;
+            pai->pti2 = ptiTo;
+            pai->cAttach = 1;
+            gpai = pai;
+            paiCount++;
+            ERR("Attach Allocated! ptiFrom 0x%p  ptiTo 0x%p paiCount %d\n",ptiFrom,ptiTo,paiCount);
+        }
 
         if (ptiTo->MessageQueue != ptiFrom->MessageQueue)
         {
@@ -796,10 +816,18 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
            if ( (*ppai)->pti2 == ptiTo && (*ppai)->pti1 == ptiFrom )
            {
               pai = *ppai;
-              /* Remove it from the list */
-              *ppai = (*ppai)->paiNext;
-              ExFreePoolWithTag(pai, USERTAG_ATTACHINFO);
-              paiCount--;
+              if (pai->cAttach > 1)
+              {
+                 /* Attached more than once: this detach ends one of them */
+                 pai->cAttach--;
+              }
+              else
+              {
+                 /* Remove it from the list */
+                 *ppai = (*ppai)->paiNext;
+                 ExFreePoolWithTag(pai, USERTAG_ATTACHINFO);
+                 paiCount--;
+              }
               Hit = TRUE;
               break;
            }

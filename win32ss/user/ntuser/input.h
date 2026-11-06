@@ -44,6 +44,9 @@ typedef struct _ATTACHINFO
   struct _ATTACHINFO *paiNext;
   PTHREADINFO pti1;
   PTHREADINFO pti2;
+  /* AttachThreadInput counts: every attach of the same pair needs its own detach, but it
+     is one entry, so repeating the call does not allocate */
+  ULONG cAttach;
 } ATTACHINFO, *PATTACHINFO;
 
 extern PATTACHINFO gpai;
@@ -73,6 +76,8 @@ typedef struct _INPUT_DEVICE_INFO
     struct _INPUT_DEVICE_INFO *pNextDeviceInfo;
     UNICODE_STRING DeviceName;
     HANDLE Handle;
+    /* What applications see as hDevice: an opaque value, never the address of this structure */
+    HANDLE hRawDevice;
     IO_STATUS_BLOCK Iosb;
     NTSTATUS Status;
     ULONG DeviceType;
