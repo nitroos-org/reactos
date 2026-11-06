@@ -96,6 +96,7 @@ extern void func_SetEntriesInAclOld(void);
 extern void func_SetSecurityInfoKey(void);
 extern void func_SetNamedSecurityInfoInherit(void);
 extern void func_SddlRights(void);
+extern void func_SddlSids(void);
 
 extern void func_RegWow64(void);
 extern void func_RegWow64Unicode(void);
@@ -222,6 +223,7 @@ const struct test winetest_testlist[] =
     { "SetSecurityInfoKey", func_SetSecurityInfoKey },
     { "SetNamedSecurityInfoInherit", func_SetNamedSecurityInfoInherit },
     { "SddlRights", func_SddlRights },
+    { "SddlSids", func_SddlSids },
     { "ServiceProcess", func_ServiceProcess },
     { "ServiceStructLayout", func_ServiceStructLayout },
     { "ServiceTriggerPrivileges", func_ServiceTriggerPrivileges },
