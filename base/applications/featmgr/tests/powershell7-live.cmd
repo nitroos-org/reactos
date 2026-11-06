@@ -2,6 +2,8 @@
 rem FEATMGMT software tier: PowerShell 7 live proof (amd64 only; needs internet).
 rem   powershell7-live.cmd install     negative checksum test, then install powershell-7 and check it
 rem   powershell7-live.cmd uninstall   uninstall powershell-7 and check everything is gone
+rem I4-I6 expect pwsh NOT installed yet: on an image that preinstalls it, run uninstall first. The Start-menu checks use the real
+rem %ProgramData%\Microsoft\Windows\Start Menu path, not the %ALLUSERSPROFILE%\Start Menu junction (absent on a FAT volume).
 rem Run from a directory holding fixtures\fmt-ps7bad.ini (default: this script's
 rem directory). Result: %O%\ps7live.txt, last line PS7LIVE-RESULT: PASS|FAIL n
 setlocal
@@ -54,7 +56,7 @@ call :st powershell-7 Enabled "I8 Enabled after install"
 if exist "%PSDIR%\pwsh.exe" (call :pass "I9 pwsh.exe installed") else (call :fail "I9 pwsh.exe installed")
 reg query "%ENVKEY%" /v Path | find "PowerShell\7" >nul
 call :rc0 "I10 system PATH has the PowerShell 7 folder"
-if exist "%ALLUSERSPROFILE%\Start Menu\Programs\PowerShell\PowerShell 7 (x64).lnk" (call :pass "I11 Start-menu shortcut present") else (call :fail "I11 Start-menu shortcut present")
+if exist "%ProgramData%\Microsoft\Windows\Start Menu\Programs\PowerShell\PowerShell 7 (x64).lnk" (call :pass "I11 Start-menu shortcut present") else (call :fail "I11 Start-menu shortcut present")
 "%PSDIR%\pwsh.exe" -NoProfile -Command "$PSVersionTable.PSVersion.ToString()" > %O%\ver.txt 2>&1
 type %O%\ver.txt >> %LOG%
 find "7.6." %O%\ver.txt >nul
@@ -76,7 +78,7 @@ reg query "%ENVKEY%" /v Path | find "PowerShell\7" >nul
 call :rc1 "U4 PowerShell 7 folder gone from the system PATH"
 if exist "%PUBLIC%\Desktop\PowerShell.lnk" (call :fail "U6 PowerShell desktop shortcut removed") else (call :pass "U6 PowerShell desktop shortcut removed")
 if exist "%PUBLIC%\Desktop\Command Prompt.lnk" (call :pass "U7 Command Prompt is back on the desktop") else (call :fail "U7 Command Prompt is back on the desktop")
-if exist "%ALLUSERSPROFILE%\Start Menu\Programs\PowerShell\PowerShell 7 (x64).lnk" (call :fail "U5 Start-menu shortcut removed") else (call :pass "U5 Start-menu shortcut removed")
+if exist "%ProgramData%\Microsoft\Windows\Start Menu\Programs\PowerShell\PowerShell 7 (x64).lnk" (call :fail "U5 Start-menu shortcut removed") else (call :pass "U5 Start-menu shortcut removed")
 goto :end
 
 :end

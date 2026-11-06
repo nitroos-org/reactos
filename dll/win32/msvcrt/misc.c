@@ -160,15 +160,15 @@ void* CDECL _lsearch(const void* match, void* start,
 void* CDECL bsearch_s(const void *key, const void *base, size_t nmemb, size_t size,
                              int (__cdecl *compare)(void *, const void *, const void *), void *ctx)
 {
-    ssize_t min = 0;
-    ssize_t max = nmemb - 1;
+    SSIZE_T min = 0;
+    SSIZE_T max = nmemb - 1;
 
     if (!MSVCRT_CHECK_PMT(size != 0)) return NULL;
     if (!MSVCRT_CHECK_PMT(compare != NULL)) return NULL;
 
     while (min <= max)
     {
-        ssize_t cursor = min + (max - min) / 2;
+        SSIZE_T cursor = min + (max - min) / 2;
         int ret = compare(ctx, key,(const char *)base+(cursor*size));
         if (!ret)
             return (char*)base+(cursor*size);
@@ -217,8 +217,6 @@ void* CDECL bsearch(const void *key, const void *base, size_t nmemb,
  */
 #ifdef __i386__
 
-# if defined(__GNUC__) || defined(__clang__)
-
 __ASM_GLOBAL_FUNC(_chkesp,
                   "jnz 1f\n\t"
                   "ret\n"
@@ -245,16 +243,6 @@ void CDECL chkesp_fail(void)
   ERR("Stack pointer incorrect after last function call - Bad prototype/spec entry?\n");
   DebugBreak();
 }
-
-# else  /* __GNUC__ || __clang__ */
-
-/**********************************************************************/
-
-void CDECL _chkesp(void)
-{
-}
-
-# endif  /* __GNUC__ || __clang__ */
 
 #endif  /* __i386__ */
 
