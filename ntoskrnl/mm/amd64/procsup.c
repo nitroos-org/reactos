@@ -44,7 +44,7 @@ MiArchCreateProcessAddressSpace(
     OldIrql = MiAcquirePfnLock();
 
     /* Fail the process instead of using page 0 when no page is free */
-    if (MiGetFreeOrZeroedPageCount() < 2)
+    if (MiGetUsablePageCount() < 2)
     {
         MiReleasePfnLock(OldIrql);
         MiReleaseSystemPtes(SystemPte, 1, SystemPteSpace);
