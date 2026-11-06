@@ -101,9 +101,13 @@ SepApplyAceToObjectTypeList(
     _In_ BOOLEAN IsDenied)
 {
     PACCESS_CHECK_RIGHTS Rights;
-    ACCESS_MASK ChildrenGranted;
+    ACCESS_MASK ChildrenGranted, NewlyDenied;
     ULONG Index, ChildIndex, ParentIndex;
     USHORT Level = ObjectTypeList[ObjectTypeIndex].Level;
+
+    /* A deny ACE denies the entries above only what the entry itself is denied (Windows 10 22H2 measured):
+       a right the entry already holds is not taken from them */
+    NewlyDenied = AccessMask & ~ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights;
 
     /* The entry itself and every entry below it */
     for (Index = ObjectTypeIndex; Index < ObjectTypeListLength; Index++)
@@ -128,7 +132,7 @@ SepApplyAceToObjectTypeList(
 
         if (IsDenied)
         {
-            Rights->DeniedAccessRights |= (AccessMask & ~Rights->GrantedAccessRights);
+            Rights->DeniedAccessRights |= (NewlyDenied & ~Rights->GrantedAccessRights);
             continue;
         }
 

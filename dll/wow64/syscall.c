@@ -1190,6 +1190,7 @@ static NTSTATUS ObjectTypeList32(ULONG Address, ULONG Count, POBJECT_TYPE_LIST *
 
     *List = PTR32(Address);
     if (!Address || !Count) return STATUS_SUCCESS;
+    if (Count > WOW64_MAX_ARRAY_COUNT) return STATUS_INVALID_PARAMETER;
     if (!GuestSpan(Address, (ULONG64)Count * sizeof(*From))) return STATUS_ACCESS_VIOLATION;
     To = Cleanup->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, (SIZE_T)Count * sizeof(*To));
     if (!To) return STATUS_NO_MEMORY;
