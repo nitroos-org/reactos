@@ -33,6 +33,9 @@ IntFreeHookPack(PVOID Pack)
 {
     PHOOKPACK pHP = Pack;
 
+    /* The pack holds a reference on its hook (taken in co_IntCallLowLevelHook): the hook may be
+       unhooked while the call is still queued, and the receiver reads it when it dispatches */
+    if (pHP->pHk) UserDereferenceObject(pHP->pHk);
     if (pHP->pHookStructs) ExFreePoolWithTag(pHP->pHookStructs, TAG_HOOK);
     ExFreePoolWithTag(pHP, TAG_HOOK);
 }
@@ -285,6 +288,7 @@ co_IntCallLowLevelHook(PHOOK Hook,
     if (!pHP) return 0;
 
     pHP->pHk = Hook;
+    UserReferenceObject(Hook);
     pHP->lParam = lParam;
     pHP->pHookStructs = NULL;
 
@@ -318,7 +322,7 @@ co_IntCallLowLevelHook(PHOOK Hook,
        pHP->pHookStructs = ExAllocatePoolWithTag(NonPagedPool, Size, TAG_HOOK);
        if (!pHP->pHookStructs)
        {
-          ExFreePoolWithTag(pHP, TAG_HOOK);
+          IntFreeHookPack(pHP);
           return 0;
        }
        /* the buffer goes to user mode: padding included, nothing stale */
@@ -1387,8 +1391,12 @@ co_HOOK_CallHooks( INT HookId,
        for (;;)
        {
           BOOL Blocked = FALSE;
+          PHOOK SavePhkNext;
 
           UserRefObjectCo(Hook, &Ref);
+          /* The same hook can be running further out (its proc caused this call): its
+             successor snapshot is theirs, put it back when this call is done */
+          SavePhkNext = Hook->phkNext;
 
           /* Note: Setting pti->sphkCurrent will also lock the next hook to this
            *       hook ID. So, the CallNextHookEx will only call to that hook ID
@@ -1450,7 +1458,7 @@ co_HOOK_CallHooks( INT HookId,
           pti->sphkCurrent = SaveHook;
           /* The user lock is held from here to the next hook: the releases below cannot free NextToTry */
           NextToTry = Blocked ? IntGetNextHookToCall(Hook) : NULL;
-          Hook->phkNext = NULL;
+          Hook->phkNext = SavePhkNext;
           /* Release in reverse order of acquisition (UserDerefObjectCo is LIFO). */
           if (NextHook)
              UserDerefObjectCo(NextHook);
@@ -1670,13 +1678,14 @@ NtUserCallNextHookEx( int Code,
     {
        USER_REFERENCE_ENTRY Ref, RefNext;
        BOOL Blocked = FALSE;
-       PHOOK Following;
+       PHOOK Following, SavePhkNext;
 
        /* Snapshot the hook after NextObj, and keep BOTH NextObj and that
         * successor alive across the user-mode callback. co_UserCallNextHookEx
         * dereferences NextObj after the callback (e.g. Hook->HookId on the
         * WH_GETMESSAGE path), and a nested CallNextHookEx will fall back to this
         * snapshot if NextObj unhooks itself -- neither pointer may dangle. */
+       SavePhkNext = NextObj->phkNext;
        NextObj->phkNext = IntGetNextHook(NextObj);
        NextNext = NextObj->phkNext;
        UserRefObjectCo(NextObj, &Ref);
@@ -1687,6 +1696,11 @@ NtUserCallNextHookEx( int Code,
 
        /* Under the user lock until the references are released: Following cannot be freed meanwhile */
        Following = Blocked ? IntGetNextHookToCall(NextObj) : NULL;
+
+       /* The snapshot is only good while NextNext is referenced: leave what was there before
+          (a snapshot of an outer dispatch of this hook, which holds its own reference), not a
+          pointer that is about to be released */
+       NextObj->phkNext = SavePhkNext;
 
        /* Release in reverse order of acquisition (UserDerefObjectCo is LIFO). */
        if (NextNext)
@@ -1854,6 +1868,13 @@ NtUserSetWindowsHookEx( HINSTANCE Mod,
     else  /* System-global hook */
     {
        ptiHook = pti; // gptiCurrent;
+       /* The hook is linked into the chains of the thread's desktop: without one there is nothing to link it to */
+       if (!ptiHook->rpdesk || !ptiHook->rpdesk->pDeskInfo)
+       {
+          ERR("Global hook without a desktop HookId: %d\n",HookId);
+          EngSetLastError(ERROR_ACCESS_DENIED);
+          goto Cleanup; // Return NULL
+       }
        if ( !Mod &&
             (HookId == WH_GETMESSAGE ||
              HookId == WH_CALLWNDPROC ||
@@ -1883,6 +1904,21 @@ NtUserSetWindowsHookEx( HINSTANCE Mod,
        goto Cleanup; // Return NULL
     }
     ObDereferenceObject(WinStaObj);
+
+    /* The desktop handle of the calling thread has to grant DESKTOP_HOOKCONTROL for any hook:
+       Windows 10 answers ERROR_ACCESS_DENIED without it, for thread hooks too (measured) */
+    if (pti->hdesk)
+    {
+       PDESKTOP pdeskCheck;
+
+       Status = IntValidateDesktopHandle(pti->hdesk, UserMode, DESKTOP_HOOKCONTROL, &pdeskCheck);
+       if (!NT_SUCCESS(Status))
+       {
+          /* the last error is set */
+          goto Cleanup; // Return NULL
+       }
+       ObDereferenceObject(pdeskCheck);
+    }
 
     Hook = UserCreateObject(gHandleTable, NULL, ptiHook, (PHANDLE)&Handle, TYPE_HOOK, sizeof(HOOK));
 
@@ -1948,7 +1984,19 @@ NtUserSetWindowsHookEx( HINSTANCE Mod,
        //gptiCurrent->pDeskInfo->fsHooks |= HOOKID_TO_FLAG(HookId);
        ptiHook->rpdesk->pDeskInfo->fsHooks |= HOOKID_TO_FLAG(HookId);
        ptiHook->sphkCurrent = NULL;
-       ptiHook->pClientInfo->phkCurrent = NULL;
+       /* The client info is user memory (the TEB): it may be absent, and writing it may fault */
+       if (ptiHook->pClientInfo)
+       {
+          _SEH2_TRY
+          {
+             ptiHook->pClientInfo->phkCurrent = NULL;
+          }
+          _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+          {
+             ERR("Problem writing to ClientInfo!\n");
+          }
+          _SEH2_END;
+       }
     }
 
     RtlInitUnicodeString(&Hook->ModuleName, NULL);
