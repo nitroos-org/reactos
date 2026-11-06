@@ -4343,6 +4343,11 @@ NtProtectVirtualMemory(IN HANDLE ProcessHandle,
     PAGED_CODE();
 
     //
+    // The call target bit goes with an execute protection only, and has no effect here
+    //
+    if (!MiStripTargetsFlag(&NewAccessProtection)) return STATUS_INVALID_PAGE_PROTECTION;
+
+    //
     // Check for valid protection flags
     //
     Protection = NewAccessProtection & ~(PAGE_GUARD|PAGE_NOCACHE);
@@ -5846,6 +5851,9 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
     PMMPDE PointerPde;
     TABLE_SEARCH_RESULT Result;
     PAGED_CODE();
+
+    /* The call target bit goes with an execute protection only, and has no effect here */
+    if (!MiStripTargetsFlag(&Protect)) return STATUS_INVALID_PAGE_PROTECTION;
 
     /* Check for valid Zero bits */
     if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress) ||

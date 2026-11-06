@@ -135,6 +135,27 @@ MiIsProtectionCompatible(IN ULONG SectionPageProtection,
     return ((CompatibleMask | NewSectionPageProtection) == CompatibleMask);
 }
 
+/*
+ * Windows accepts the PAGE_TARGETS_INVALID / PAGE_TARGETS_NO_UPDATE bit (0x40000000) together with an execute
+ * protection, in allocations, protection changes and views, and reports the plain protection afterwards; it fails
+ * the call with STATUS_INVALID_PAGE_PROTECTION when the base protection has no execute right. There is no call
+ * target bitmap here, so the bit is only validated and dropped. V8 asks for it on every executable commit.
+ */
+BOOLEAN
+NTAPI
+MiStripTargetsFlag(_Inout_ PULONG Protect)
+{
+    ULONG Base;
+
+    if (!(*Protect & MI_PAGE_TARGETS_FLAG)) return TRUE;
+
+    Base = *Protect & ~MI_PAGE_TARGETS_FLAG;
+    if ((Base & 0xF) || !(Base & 0xF0)) return FALSE;
+
+    *Protect = Base;
+    return TRUE;
+}
+
 ULONG
 NTAPI
 MiMakeProtectionMask(IN ULONG Protect)
@@ -3824,6 +3845,7 @@ MiMapViewOfSectionCommon(
     }
 
     /* Convert the protection mask, and validate it */
+    if (!MiStripTargetsFlag(&Win32Protect)) return STATUS_INVALID_PAGE_PROTECTION;
     ProtectionMask = MiMakeProtectionMask(Win32Protect);
     if (ProtectionMask == MM_INVALID_PROTECTION)
     {
