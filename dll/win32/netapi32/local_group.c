@@ -270,7 +270,19 @@ BuildSidListFromDomainAndName(IN PUNICODE_STRING ServerName,
                             &Sids);
     if (!NT_SUCCESS(Status))
     {
-        ApiStatus = NetpNtStatusToApiStatus(Status);
+        /* Windows 10 reports a list that has no name mapped like one with a name that is not */
+        ApiStatus = (Status == STATUS_NONE_MAPPED) ? ERROR_NO_SUCH_MEMBER : NetpNtStatusToApiStatus(Status);
+        goto done;
+    }
+
+    /*
+     * STATUS_SOME_NOT_MAPPED is a success status: the entry of a name that is not mapped has no
+     * domain (DomainIndex -1). Windows 10 fails the call with ERROR_NO_SUCH_MEMBER for any such name,
+     * before it looks at the group.
+     */
+    if (Status == STATUS_SOME_NOT_MAPPED)
+    {
+        ApiStatus = ERROR_NO_SUCH_MEMBER;
         goto done;
     }
 
@@ -281,8 +293,17 @@ BuildSidListFromDomainAndName(IN PUNICODE_STRING ServerName,
         goto done;
     }
 
+    RtlZeroMemory(MemberBuffer, sizeof(LOCALGROUP_MEMBERS_INFO_0) * EntryCount);
+
     for (i = 0; i < EntryCount; i++)
     {
+        /* Defence in depth: a mapped entry always has a domain */
+        if ((ULONG)Sids[i].DomainIndex >= Domains->Entries)
+        {
+            ApiStatus = ERROR_NO_SUCH_MEMBER;
+            goto done;
+        }
+
         ApiStatus = BuildSidFromSidAndRid(Domains->Domains[Sids[i].DomainIndex].Sid,
                                           Sids[i].RelativeId,
                                           &MemberBuffer[i].lgrmi0_sid);
