@@ -9,6 +9,13 @@
  * High key sits in a higher bucket than its Low key closed a cycle with a creator whose subkey fell in the Low key's
  * bucket; a save of one key on both sides asked for the same lock twice behind a queued creator.  The stress saves
  * in every order (and one key twice) while threads create and delete subkeys of both keys by the thousand.
+ *
+ * The saved hive is also checked for its content: it is the union of both keys, recursively; for a value of the
+ * same name (compared without case) the data of the High key is kept, a subkey of the same name is merged in the same
+ * way.  These rules are those of the Windows registry views (HKEY_CLASSES_ROOT: the user's key wins) and are NOT
+ * measured on Windows 10: its NtSaveMergedKeys returned STATUS_INVALID_PARAMETER for the two keys of the SOFTWARE
+ * hive that were tried (HKLM\Software\Microsoft\Windows\CurrentVersion and its WOW6432Node twin), so two keys of
+ * one hive may not be accepted there; this test uses such a pair and is for ReactOS.
  */
 
 #include "precomp.h"
@@ -139,24 +146,220 @@ WatchdogThread(PVOID Context)
 }
 
 static
+BOOLEAN
+QueryString(HANDLE Key, PCWSTR Name, PWCHAR Out, ULONG OutChars)
+{
+    UNICODE_STRING ValueName;
+    UCHAR Buffer[256];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    ULONG Length;
+    NTSTATUS Status;
+
+    RtlInitUnicodeString(&ValueName, Name);
+    Status = NtQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Buffer, sizeof(Buffer), &Length);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+    if (Info->Type != REG_SZ || Info->DataLength / sizeof(WCHAR) > OutChars)
+        return FALSE;
+    memcpy(Out, Info->Data, Info->DataLength);
+    return TRUE;
+}
+
+/* The value must exist as a REG_SZ with exactly this data */
+#define ok_string_value(Key, Name, Expected) \
+    do { \
+        WCHAR Got_[32]; \
+        BOOLEAN Found_ = QueryString(Key, Name, Got_, RTL_NUMBER_OF(Got_)); \
+        ok(Found_, "%ls is missing\n", Name); \
+        if (Found_) \
+            ok(!wcscmp(Got_, Expected), "%ls is \"%ls\", expected \"%ls\"\n", Name, Got_, Expected); \
+    } while (0)
+
+static
+void
+CountChildren(HANDLE Key, PULONG Values, PULONG SubKeys)
+{
+    KEY_FULL_INFORMATION Info;
+    ULONG Length;
+    NTSTATUS Status;
+
+    Status = NtQueryKey(Key, KeyFullInformation, &Info, sizeof(Info), &Length);
+    /* the class name does not fit: the fixed part is still there */
+    ok(Status == STATUS_SUCCESS || Status == STATUS_BUFFER_OVERFLOW, "NtQueryKey returned 0x%08lx\n", Status);
+    *Values = Info.Values;
+    *SubKeys = Info.SubKeys;
+}
+
+static
+HANDLE
+OpenSub(HANDLE Parent, PCWSTR Name, BOOLEAN Create)
+{
+    UNICODE_STRING SubName;
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Sub = NULL;
+    NTSTATUS Status;
+
+    RtlInitUnicodeString(&SubName, Name);
+    InitializeObjectAttributes(&Attributes, &SubName, OBJ_CASE_INSENSITIVE, Parent, NULL);
+    if (Create)
+        Status = NtCreateKey(&Sub, KEY_ALL_ACCESS | DELETE, &Attributes, 0, NULL, 0, NULL);
+    else
+        Status = NtOpenKey(&Sub, KEY_READ, &Attributes);
+    return NT_SUCCESS(Status) ? Sub : NULL;
+}
+
+static
+void
+DeleteSub(HANDLE Parent, PCWSTR Name)
+{
+    UNICODE_STRING SubName;
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE Sub;
+
+    RtlInitUnicodeString(&SubName, Name);
+    InitializeObjectAttributes(&Attributes, &SubName, OBJ_CASE_INSENSITIVE, Parent, NULL);
+    if (NT_SUCCESS(NtOpenKey(&Sub, DELETE, &Attributes)))
+    {
+        NtDeleteKey(Sub);
+        NtClose(Sub);
+    }
+}
+
+/* The keys of the content check, below P and Q; the stress later runs on the bare keys */
+static
+void
+MakeContent(void)
+{
+    HANDLE H, L;
+
+    /* A value of the same name that differs in case only: one value in the result, the High data */
+    SetStringValue(KeyP, L"Mixed", L"high");
+    SetStringValue(KeyQ, L"MIXED", L"low");
+
+    /* A subkey of both: merged recursively */
+    H = OpenSub(KeyP, L"shared", TRUE);
+    L = OpenSub(KeyQ, L"SHARED", TRUE);
+    if (H && L)
+    {
+        SetStringValue(H, L"both", L"high");
+        SetStringValue(L, L"both", L"low");
+        SetStringValue(H, L"only_high", L"h");
+        SetStringValue(L, L"only_low", L"l");
+    }
+    if (H)
+        NtClose(H);
+    if (L)
+        NtClose(L);
+
+    /* A subkey of one key only, with a subkey of its own */
+    H = OpenSub(KeyP, L"high_only_key", TRUE);
+    if (H)
+    {
+        SetStringValue(H, L"v", L"h");
+        NtClose(H);
+        H = OpenSub(KeyP, L"high_only_key\\deep", TRUE);
+        if (H)
+            NtClose(H);
+    }
+    L = OpenSub(KeyQ, L"low_only_key", TRUE);
+    if (L)
+    {
+        SetStringValue(L, L"v", L"l");
+        NtClose(L);
+    }
+}
+
+static
+void
+RemoveContent(void)
+{
+    UNICODE_STRING Name;
+
+    DeleteSub(KeyP, L"high_only_key\\deep");
+    DeleteSub(KeyP, L"high_only_key");
+    DeleteSub(KeyP, L"shared");
+    DeleteSub(KeyQ, L"low_only_key");
+    DeleteSub(KeyQ, L"shared");
+    RtlInitUnicodeString(&Name, L"Mixed");
+    NtDeleteValueKey(KeyP, &Name);
+    RtlInitUnicodeString(&Name, L"MIXED");
+    NtDeleteValueKey(KeyQ, &Name);
+}
+
+static
+void
+CheckMergedContent(HANDLE Loaded)
+{
+    HANDLE Sub;
+    ULONG Values, SubKeys;
+
+    ok_string_value(Loaded, L"both", L"high");
+    ok_string_value(Loaded, L"only_low", L"l");
+    ok_string_value(Loaded, L"only_high", L"h");
+    ok_string_value(Loaded, L"mixed", L"high");
+    CountChildren(Loaded, &Values, &SubKeys);
+    /* both, only_low, only_high and mixed (once) */
+    ok_dec(Values, 4);
+    /* shared, high_only_key and low_only_key */
+    ok_dec(SubKeys, 3);
+
+    Sub = OpenSub(Loaded, L"shared", FALSE);
+    ok(Sub != NULL, "shared is missing\n");
+    if (Sub)
+    {
+        ok_string_value(Sub, L"both", L"high");
+        ok_string_value(Sub, L"only_low", L"l");
+        ok_string_value(Sub, L"only_high", L"h");
+        CountChildren(Sub, &Values, &SubKeys);
+        ok_dec(Values, 3);
+        NtClose(Sub);
+    }
+
+    Sub = OpenSub(Loaded, L"high_only_key", FALSE);
+    ok(Sub != NULL, "high_only_key is missing\n");
+    if (Sub)
+    {
+        HANDLE Deep;
+
+        ok_string_value(Sub, L"v", L"h");
+        Deep = OpenSub(Sub, L"deep", FALSE);
+        ok(Deep != NULL, "high_only_key\\deep is missing\n");
+        if (Deep)
+            NtClose(Deep);
+        NtClose(Sub);
+    }
+
+    Sub = OpenSub(Loaded, L"low_only_key", FALSE);
+    ok(Sub != NULL, "low_only_key is missing\n");
+    if (Sub)
+    {
+        ok_string_value(Sub, L"v", L"l");
+        NtClose(Sub);
+    }
+}
+
+static
 void
 TestResult(void)
 {
     static const WCHAR LoadedPath[] = L"\\Registry\\Machine\\NitroSaveMergedLoaded";
     NTSTATUS Status;
     HANDLE Loaded;
-    UNICODE_STRING Target, Source, ValueName;
+    UNICODE_STRING Target, Source;
     OBJECT_ATTRIBUTES TargetAttr, SourceAttr;
     WCHAR NtFile[MAX_PATH + 8], Full[MAX_PATH];
-    UCHAR Buffer[256];
-    ULONG Length;
     BOOLEAN Old;
+
+    MakeContent();
 
     /* The saved file is a hive that loads */
     Status = SaveMerged(KeyP, KeyQ, L"nitro_merged.dat");
     ok_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status))
+    {
+        RemoveContent();
         return;
+    }
 
     GetFullPathNameW(L"nitro_merged.dat", RTL_NUMBER_OF(Full), Full, NULL);
     wcscpy(NtFile, L"\\??\\");
@@ -169,25 +372,22 @@ TestResult(void)
     Status = NtLoadKey(&TargetAttr, &SourceAttr);
     ok_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status))
+    {
+        RemoveContent();
         return;
+    }
 
     Status = NtOpenKey(&Loaded, KEY_READ, &TargetAttr);
     ok_hex(Status, STATUS_SUCCESS);
     if (NT_SUCCESS(Status))
     {
-        /* The values are not asserted: which of two values of the same name wins is Windows behaviour still to be
-         * measured on the oracle (the High key should), and the merge of values is not what this test is about */
-        RtlInitUnicodeString(&ValueName, L"only_low");
-        Status = NtQueryValueKey(Loaded, &ValueName, KeyValuePartialInformation, Buffer, sizeof(Buffer), &Length);
-        trace("only_low: 0x%08lx, ", Status);
-        RtlInitUnicodeString(&ValueName, L"only_high");
-        Status = NtQueryValueKey(Loaded, &ValueName, KeyValuePartialInformation, Buffer, sizeof(Buffer), &Length);
-        trace("only_high: 0x%08lx\n", Status);
+        CheckMergedContent(Loaded);
         NtClose(Loaded);
     }
     Status = NtUnloadKey(&TargetAttr);
     ok_hex(Status, STATUS_SUCCESS);
     DeleteFileW(L"nitro_merged.dat");
+    RemoveContent();
 }
 
 START_TEST(NtSaveMergedKeys)
