@@ -62,6 +62,39 @@ static VOID ReportError(HWND hDlg, UINT fmtId, DWORD err)
     MessageBoxW(hDlg, msg, Str(IDS_CPLNAME), MB_OK | MB_ICONERROR);
 }
 
+/* The Domain section only exists when the machine is joined to a domain, as in Windows. */
+static BOOL g_DomainKnown, g_DomainJoined;
+
+static BOOL DomainJoined(VOID)
+{
+    typedef DWORD (WINAPI *PFN_GETJOIN)(LPCWSTR, LPWSTR *, PVOID);
+    typedef DWORD (WINAPI *PFN_FREE)(PVOID);
+    HMODULE h;
+    PFN_GETJOIN pGet;
+    PFN_FREE pFree;
+    LPWSTR name = NULL;
+    DWORD status = 0;   /* NETSETUP_JOIN_STATUS: 3 = NetSetupDomainName */
+
+    if (g_DomainKnown) return g_DomainJoined;
+    g_DomainKnown = TRUE;
+    h = LoadLibraryW(L"netapi32.dll");
+    if (!h) return FALSE;
+    pGet = (PFN_GETJOIN)GetProcAddress(h, "NetGetJoinInformation");
+    pFree = (PFN_FREE)GetProcAddress(h, "NetApiBufferFree");
+    if (pGet && pFree && pGet(NULL, &name, &status) == 0)
+    {
+        g_DomainJoined = (status == 3);
+        pFree(name);
+    }
+    FreeLibrary(h);
+    return g_DomainJoined;
+}
+
+static BOOL ProfVisible(INT p)
+{
+    return p != 0 || DomainJoined();
+}
+
 static INT ProfIndex(ULONG bit)
 {
     return bit == FWP_DOMAIN ? 0 : (bit == FWP_PRIVATE ? 1 : 2);
@@ -100,6 +133,13 @@ static VOID MainLayout(HWND hDlg)
     for (p = 0; p < NPROF; p++)
     {
         BOOL ex = (p == g_Expanded);
+        if (!ProfVisible(p))
+        {
+            INT k;
+            for (k = 0; k < 20; k++)
+                ShowWindow(GetDlgItem(hDlg, IDC_SEC(p, k)), SW_HIDE);
+            continue;
+        }
         PlaceDlu(hDlg, IDC_SEC(p, SEC_BAR), 128, y, 6, 16, TRUE);
         PlaceDlu(hDlg, IDC_SEC(p, SEC_TITLE), 142, y + 3, 190, 10, TRUE);
         PlaceDlu(hDlg, IDC_SEC(p, SEC_STATUS), 372, y + 3, 82, 10, TRUE);
@@ -288,6 +328,34 @@ static INT_PTR CALLBACK MainDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM 
 
 typedef struct { FW_PROFILE Orig[NPROF]; } CUSTOMIZE;
 
+/* Not joined: drop the Domain block (controls 0..7 of profile 0, 72 DLU tall) and close the gap. */
+static VOID CustomizeHideDomain(HWND hDlg)
+{
+    RECT rcStep = { 0, 0, 0, 72 }, rcWin;
+    INT dy, k;
+    HWND hc;
+    POINT pt;
+
+    MapDialogRect(hDlg, &rcStep);
+    dy = rcStep.bottom;
+    for (k = 0; k < 10; k++)
+        ShowWindow(GetDlgItem(hDlg, IDC_CS(0, k)), SW_HIDE);
+    for (hc = GetWindow(hDlg, GW_CHILD); hc; hc = GetWindow(hc, GW_HWNDNEXT))
+    {
+        UINT id = (UINT)GetDlgCtrlID(hc);
+        RECT rc;
+        if (id >= IDC_CS(0, 0) && id < IDC_CS(1, 0)) continue;
+        GetWindowRect(hc, &rc);
+        pt.x = rc.left; pt.y = rc.top;
+        ScreenToClient(hDlg, &pt);
+        if (id == IDC_C_TITLE || id == IDC_C_SUB) continue;
+        SetWindowPos(hc, NULL, pt.x, pt.y - dy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    GetWindowRect(hDlg, &rcWin);
+    SetWindowPos(hDlg, NULL, rcWin.left, rcWin.top + dy / 2, rcWin.right - rcWin.left,
+                 rcWin.bottom - rcWin.top - dy, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 static VOID CustomizeEnable(HWND hDlg, INT p)
 {
     BOOL on = IsDlgButtonChecked(hDlg, IDC_CS(p, CS_ON)) == BST_CHECKED;
@@ -317,6 +385,8 @@ static INT_PTR CALLBACK CustomizeDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LP
                 CheckDlgButton(hDlg, IDC_CS(p, CS_NOTIFY), c->Orig[p].DisableNotifications ? BST_UNCHECKED : BST_CHECKED);
                 CustomizeEnable(hDlg, p);
             }
+            if (!ProfVisible(0))
+                CustomizeHideDomain(hDlg);
             return TRUE;
         }
 
