@@ -12,6 +12,7 @@ list(APPEND SOURCE
     asptlb.idl
 #   asynot.idl
 #   asysta.idl
+    asyncinfo.idl
     atliface.idl
     audioclient.idl
     audiopolicy.idl
@@ -95,6 +96,7 @@ list(APPEND SOURCE
 #   dyngraph.idl
     emptyvc.idl
     endpointvolume.idl
+    eventtoken.idl
     evr.idl
     evr9.idl
     exdisp.idl
@@ -114,6 +116,7 @@ list(APPEND SOURCE
     inputscope.idl
     inseng.idl
     inspectable.idl
+    ivectorchangedeventargs.idl
     mediaobj.idl
     metahost.idl
     mfd3d12.idl
@@ -204,6 +207,9 @@ list(APPEND SOURCE
     wia_xp.idl
     wincodec.idl
     wincodecsdk.idl
+    windows.foundation.collections.idl
+    windows.foundation.idl
+    windowscontracts.idl
     winsxs.idl
     wmcodecdsp.idl
     wmdrmsdk.idl

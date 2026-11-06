@@ -2427,7 +2427,7 @@ static const WCHAR *Wow64CoreDlls[] =
      * used by installer UIs) and windowscodecs (PNG/JPEG decoders, so
      * GDI+ image load) are the ones that bit real installers. */
     L"browseui.dll", L"windowscodecs.dll", L"avifil32.dll", L"comdlg32.dll",
-    L"ieframe.dll", L"shdocvw.dll", L"mlang.dll", L"msctf.dll", L"msi.dll",
+    L"iertutil.dll", L"ieframe.dll", L"shdocvw.dll", L"mlang.dll", L"msctf.dll", L"msi.dll",
     L"msimtf.dll", L"oleacc.dll", L"olepro32.dll", L"propsys.dll",
     L"rpcrt4.dll", L"urlmon.dll",
     /* IServiceProvider proxy/stub: CoRegisterClassObject(CLSCTX_LOCAL_SERVER)
