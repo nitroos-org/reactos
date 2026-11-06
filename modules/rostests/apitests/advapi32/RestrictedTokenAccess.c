@@ -22,6 +22,13 @@
  *   with MAXIMUM_ALLOWED as with an explicit request, and a user owner gets no implicit rights
  *   (the user is not a restricting SID). ReactOS used to hand out the union of the two passes
  *   for MAXIMUM_ALLOWED.
+ * - Positive control, restricted to Everyone: allow(Everyone, read) + allow(User, read|write) grants
+ *   read (the intersection; MAXIMUM_ALLOWED and an explicit read) and denies write;
+ *   allow(Everyone, read|write) + allow(User, read) grants read | write (Everyone is a normal SID too);
+ *   allow(User, read) alone grants nothing (harness evidence g5fix-20261106).
+ *   Not covered: an object type list (AccessCheckByType). Windows 10 grants plain ACEs for a list; ReactOS
+ *   grants nothing for a list with a plain or an object ACE, restricted or not, and the WoW64 thunk
+ *   fails it, so the restricted branch for lists cannot be reached from a test yet.
  * - CheckTokenMembership with a primary token fails with ERROR_NO_IMPERSONATION_TOKEN.
  */
 
@@ -117,6 +124,47 @@ static void TestToken(HANDLE Primary, PCSTR What, BOOL RestrictedToEveryone)
     CloseHandle(Token);
 }
 
+static void Intersection(HANDLE Primary)
+{
+    BYTE Everyone[SECURITY_MAX_SID_SIZE], UserBuffer[512], AclBuffer[256];
+    DWORD Size = sizeof(Everyone), Length;
+    PSID User;
+    PACL Acl = (PACL)AclBuffer;
+    HANDLE Token;
+    static const PCSTR What = "restricted to Everyone, positive control";
+
+    CreateWellKnownSid(WinWorldSid, NULL, Everyone, &Size);
+    ok(GetTokenInformation(Primary, TokenUser, UserBuffer, sizeof(UserBuffer), &Length), "TokenUser failed\n");
+    User = ((PTOKEN_USER)UserBuffer)->User.Sid;
+    if (!DuplicateToken(Primary, SecurityImpersonation, &Token))
+    {
+        ok(0, "DuplicateToken failed: %lu\n", GetLastError());
+        return;
+    }
+
+    /* Both passes grant read, only the normal pass grants write: the intersection is read */
+    InitializeAcl(Acl, sizeof(AclBuffer), ACL_REVISION);
+    AddAccessAllowedAce(Acl, ACL_REVISION, FILE_GENERIC_READ, Everyone);
+    AddAccessAllowedAce(Acl, ACL_REVISION, FILE_GENERIC_READ | FILE_GENERIC_WRITE, User);
+    CHECK(Token, User, Acl, MAXIMUM_ALLOWED, FILE_GENERIC_READ);
+    CHECK(Token, User, Acl, FILE_GENERIC_READ, FILE_GENERIC_READ);
+    CHECK(Token, User, Acl, FILE_GENERIC_WRITE, 0);
+
+    /* Everyone is a normal SID of the user as well: read | write from both passes */
+    InitializeAcl(Acl, sizeof(AclBuffer), ACL_REVISION);
+    AddAccessAllowedAce(Acl, ACL_REVISION, FILE_GENERIC_READ | FILE_GENERIC_WRITE, Everyone);
+    AddAccessAllowedAce(Acl, ACL_REVISION, FILE_GENERIC_READ, User);
+    CHECK(Token, User, Acl, MAXIMUM_ALLOWED, FILE_GENERIC_READ | FILE_GENERIC_WRITE);
+    CHECK(Token, User, Acl, FILE_GENERIC_WRITE, FILE_GENERIC_WRITE);
+
+    /* Only the user is granted: the restricted pass grants nothing */
+    InitializeAcl(Acl, sizeof(AclBuffer), ACL_REVISION);
+    AddAccessAllowedAce(Acl, ACL_REVISION, FILE_GENERIC_READ, User);
+    CHECK(Token, User, Acl, MAXIMUM_ALLOWED, 0);
+
+    CloseHandle(Token);
+}
+
 START_TEST(RestrictedTokenAccess)
 {
     BYTE Admins[SECURITY_MAX_SID_SIZE], Everyone[SECURITY_MAX_SID_SIZE];
@@ -171,6 +219,7 @@ START_TEST(RestrictedTokenAccess)
     {
         /* Administrators stays enabled here, but is not a restricting SID */
         TestToken(Token, "restricted to Everyone", TRUE);
+        Intersection(Token);
         CloseHandle(Token);
     }
     else
