@@ -404,6 +404,35 @@ SepTokenIsOwner(
     _In_ PSECURITY_DESCRIPTOR SecurityDescriptor,
     _In_ BOOLEAN TokenLocked);
 
+/* Lowbox (AppContainer) tokens, lowbox.c */
+
+/*
+ * What NtCreateLowBoxToken gives a token, in one pool block. It never changes
+ * after the token is created; copies of the token (NtDuplicateToken,
+ * NtFilterToken, the impersonation and process copies) share it by reference.
+ */
+typedef struct _SEP_LOWBOX
+{
+    LONG References;
+    struct _SEP_LOWBOX_NUMBER *NumberEntry;     /* the AppContainer number of the package in the session */
+    ULONG Number;
+    PSID PackageSid;
+    ULONG CapabilityCount;
+    PSID_AND_ATTRIBUTES Capabilities;
+    ULONG HandleCount;                          /* kernel handles to the objects of the handles the creator passed */
+    HANDLE *Handles;
+} SEP_LOWBOX, *PSEP_LOWBOX;
+
+VOID
+NTAPI
+SepReferenceLowbox(
+    _In_ PSEP_LOWBOX Lowbox);
+
+VOID
+NTAPI
+SepDereferenceLowbox(
+    _In_ PSEP_LOWBOX Lowbox);
+
 /* Mandatory label of tokens */
 #define SEP_MANDATORY_LABEL_SID_LENGTH ((ULONG)FIELD_OFFSET(SID, SubAuthority[1]))
 
