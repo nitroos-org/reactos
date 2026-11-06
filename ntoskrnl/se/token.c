@@ -1629,6 +1629,10 @@ SepDeleteToken(
 
     DPRINT("SepDeleteToken()\n");
 
+    /* Drop the lowbox data of an AppContainer token */
+    if (AccessToken->Lowbox)
+        SepDereferenceLowbox(AccessToken->Lowbox);
+
     /* Remove the referenced logon session from token */
     if (AccessToken->LogonSession)
     {

@@ -317,4 +317,5 @@
     SVC_(AllocateVirtualMemoryEx, 7)
     SVC_(MapViewOfSectionEx, 9)
     SVC_(UnmapViewOfSectionEx, 3)
+    SVC_(CreateLowBoxToken, 9)
 #endif

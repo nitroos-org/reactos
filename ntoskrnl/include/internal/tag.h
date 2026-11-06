@@ -170,6 +170,7 @@
 #define TAG_SE_DIR_BUFFER       'bDeS'
 #define TAG_SE_PROXY_DATA       'dPoT'
 #define TAG_SE_TOKEN_LOCK       'lTeS'
+#define TAG_SE_LOWBOX           'bLeS'
 #define TAG_LOGON_SESSION       'sLeS'
 #define TAG_LOGON_NOTIFICATION  'nLeS'
 #define TAG_SID_AND_ATTRIBUTES  'aSeS'

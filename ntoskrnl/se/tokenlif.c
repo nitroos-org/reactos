@@ -558,6 +558,13 @@ SepDuplicateToken(
     /* A duplicate runs at the same level; its object gets the default label of that level */
     AccessToken->IntegrityLevel = Token->IntegrityLevel;
 
+    /* A copy of a lowbox token is one too (the delete procedure drops the reference) */
+    if (Token->Lowbox)
+    {
+        SepReferenceLowbox(Token->Lowbox);
+        AccessToken->Lowbox = Token->Lowbox;
+    }
+
     /* Reference the logon session */
     Status = SepRmReferenceLogonSession(&AccessToken->AuthenticationId);
     if (!NT_SUCCESS(Status))
@@ -1100,6 +1107,13 @@ SepPerformTokenFiltering(
 
     /* A filtered token runs at the same level; its object gets the default label of that level */
     AccessToken->IntegrityLevel = Token->IntegrityLevel;
+
+    /* A filtered lowbox token stays a lowbox token (the delete procedure drops the reference) */
+    if (Token->Lowbox)
+    {
+        SepReferenceLowbox(Token->Lowbox);
+        AccessToken->Lowbox = Token->Lowbox;
+    }
 
     /* Reference the logon session */
     Status = SepRmReferenceLogonSession(&AccessToken->AuthenticationId);
