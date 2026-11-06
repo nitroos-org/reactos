@@ -480,7 +480,7 @@ MmCreateKernelStack(IN BOOLEAN GuiStack,
     OldIrql = MiAcquirePfnLock();
 
     /* Fail the stack instead of using page 0 when no page is free */
-    if (MiGetFreeOrZeroedPageCount() < StackPages)
+    if (MiGetUsablePageCount() < StackPages)
     {
         MiReleasePfnLock(OldIrql);
         MiReleaseSystemPtes(StackPte, StackPtes + 1, SystemPteSpace);
@@ -584,7 +584,7 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
     OldIrql = MiAcquirePfnLock();
 
     /* Fail the growth instead of using page 0 when no page is free */
-    if (MiGetFreeOrZeroedPageCount() < NewPages)
+    if (MiGetUsablePageCount() < NewPages)
     {
         MiReleasePfnLock(OldIrql);
         MiReturnCommit(NewPages);
@@ -1384,7 +1384,7 @@ MmCreateProcessAddressSpace(IN ULONG MinWs,
     OldIrql = MiAcquirePfnLock();
 
     /* Fail the process instead of using page 0 when no page is free */
-    if (MiGetFreeOrZeroedPageCount() < 3)
+    if (MiGetUsablePageCount() < 3)
     {
         MiReleasePfnLock(OldIrql);
         return FALSE;

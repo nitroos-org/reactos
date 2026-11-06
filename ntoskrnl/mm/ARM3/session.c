@@ -860,7 +860,7 @@ MiSessionCreatePrivateTables(
 
     /* Grab the two pages; both are fully written below */
     OldIrql = MiAcquirePfnLock();
-    if (MiGetFreeOrZeroedPageCount() < 2)
+    if (MiGetUsablePageCount() < 2)
     {
         MiReleasePfnLock(OldIrql);
         return STATUS_NO_MEMORY;

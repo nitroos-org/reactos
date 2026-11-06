@@ -303,7 +303,7 @@ MiMakeSystemPpesValid(
         if (!PointerPpe->u.Hard.Valid)
         {
             /* Like other kernel page allocations, fail instead of taking page 0 */
-            if (MiGetFreeOrZeroedPageCount() == 0)
+            if (MiGetUsablePageCount() == 0)
             {
                 MiReleasePfnLock(OldIrql);
                 DPRINT1("No page for the page directory of system VA %p\n", MiPpeToAddress(PointerPpe));

@@ -226,6 +226,16 @@ MmInitSystem(IN ULONG Phase,
     /* Initialize the kernel address space */
     ASSERT(Phase == 1);
 
+    /*
+     * NitroPager, read once with the control vector (a change needs a reboot):
+     * 0 off, 1 private paging; 2 behaves as 1 until its commit ceiling exists.
+     * Any other value is off.
+     */
+    if (MiNitroPagerMode > 2)
+        MiNitroPagerMode = 0;
+    if (MiNitroPagerMode != 0)
+        DPRINT1("NitroPager %lu (test commands %s)\n", MiNitroPagerMode, MiNitroPagerDebug ? "on" : "off");
+
 #ifdef NEWCC
     InitializeListHead(&MiSegmentList);
     ExInitializeFastMutex(&MiGlobalPageOperation);

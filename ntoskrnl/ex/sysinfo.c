@@ -1659,6 +1659,46 @@ QSI_DEF(SystemFileCacheInformation)
 }
 
 /* Class 81 - File Cache Information Ex (same layout; used by GetSystemFileCacheSize) */
+/*
+ * Class 80 - Memory list information. NitroPager only: without it the class
+ * answers as it did before it existed (query: not implemented, set: invalid
+ * class). The set commands need SeProfileSingleProcessPrivilege.
+ */
+QSI_DEF(SystemMemoryListInformation)
+{
+    if (MiNitroPagerMode == 0)
+        return STATUS_NOT_IMPLEMENTED;
+
+    *ReqSize = sizeof(SYSTEM_MEMORY_LIST_INFORMATION);
+    if (Size < sizeof(SYSTEM_MEMORY_LIST_INFORMATION))
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    return MmQueryMemoryListInformation((PSYSTEM_MEMORY_LIST_INFORMATION)Buffer);
+}
+
+SSI_DEF(SystemMemoryListInformation)
+{
+    ULONG Command;
+    PVOID Address = NULL;
+
+    if (MiNitroPagerMode == 0)
+        return STATUS_INVALID_INFO_CLASS;
+
+    /* As Windows (oracle): less than the command is a length mismatch, more is accepted */
+    if (Size < sizeof(ULONG))
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    /* Probed by the caller, which also catches a fault here */
+    Command = *(volatile ULONG *)Buffer;
+    if ((Size == 2 * sizeof(ULONG64)) && (MiNitroPagerDebug != 0))
+    {
+        /* NitroPagerDebug test command: a command and the user page it is for */
+        Address = (PVOID)(ULONG_PTR)((volatile ULONG64 *)Buffer)[1];
+    }
+
+    return MmSetMemoryListInformation(Command, Address, ExGetPreviousMode());
+}
+
 QSI_DEF(SystemFileCacheInformationEx)
 {
     return ExpQueryFileCacheInformation((SYSTEM_FILECACHE_INFORMATION *)Buffer, Size, ReqSize);
@@ -3683,6 +3723,7 @@ CallQS[] =
 
     // Vista and later
     SI_QX(SystemModuleInformationEx),
+    SI_QS(SystemMemoryListInformation),
     SI_QX(SystemFileCacheInformationEx),
     SI_QX(SystemProcessorIdleCycleTimeInformation),
     SI_QX(SystemBootEnvironmentInformation),
