@@ -763,12 +763,23 @@ ConDllInitialize(IN ULONG Reason,
          * process that needs no console still starts there, without one.
          * Session 0's csrss always has the console server.
          */
-        if ((NtCurrentPeb()->SessionId != 0) && !ConnectInfo.IsConsoleApp)
+        if (!ConnectInfo.IsConsoleApp)
         {
-            DPRINT1("No console server in session %lu, starting without a console\n",
-                    NtCurrentPeb()->SessionId);
-            Parameters->ConsoleHandle = NULL;
-            return TRUE;
+            /* The session id of the kernel: the PEB copy is writable by the process */
+            PROCESS_SESSION_INFORMATION SessionInfo;
+
+            if (NT_SUCCESS(NtQueryInformationProcess(NtCurrentProcess(),
+                                                     ProcessSessionInformation,
+                                                     &SessionInfo,
+                                                     sizeof(SessionInfo),
+                                                     NULL)) &&
+                (SessionInfo.SessionId != 0))
+            {
+                DPRINT1("No console server in session %lu, starting without a console\n",
+                        SessionInfo.SessionId);
+                Parameters->ConsoleHandle = NULL;
+                return TRUE;
+            }
         }
 
         // DPRINT1("Failed to connect to the Console Server (Status %lx)\n", Status);
