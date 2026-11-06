@@ -161,6 +161,7 @@ list(APPEND SOURCE
     NtStartProfile.c
     NtUnloadDriver.c
     NtWriteFile.c
+    PagerBasic.c
     probelib.c
     RtlAllocateHeap.c
     RtlBitmap.c
