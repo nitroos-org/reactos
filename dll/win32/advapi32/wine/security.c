@@ -1924,7 +1924,15 @@ AccessCheckByTypeResultList(
 {
     NTSTATUS Status;
     DWORD ResultListIndex;
-    PNTSTATUS NtAccessStatus = NULL;
+    PNTSTATUS NtAccessStatus = (PNTSTATUS)AccessStatus;
+
+    /*
+     * The kernel writes an NTSTATUS for each entry. It goes to the caller's
+     * array, which has an element of the same size per entry, and each status
+     * is turned into its Win32 error code there (0 when access is granted),
+     * as Windows reports it.
+     */
+    C_ASSERT(sizeof(*AccessStatus) == sizeof(NTSTATUS));
 
     Status = NtAccessCheckByTypeResultList(pSecurityDescriptor,
                                            PrincipalSelfSid,
