@@ -406,6 +406,18 @@ HKCR
     }
     NoRemove CLSID
     {
+        '{2933BF90-7B36-11D2-B20E-00C04F983E60}' = s 'XML DOM Document'
+        {
+            InprocServer32 = s '%MODULE%' { val ThreadingModel = s 'Both' }
+            ProgId = s 'Microsoft.XMLDOM.1.0'
+            VersionIndependentProgId = s 'Microsoft.XMLDOM'
+        }
+        '{2933BF91-7B36-11D2-B20E-00C04F983E60}' = s 'Free Threaded XML DOM Document'
+        {
+            InprocServer32 = s '%MODULE%' { val ThreadingModel = s 'Both' }
+            ProgId = s 'Microsoft.FreeThreadedXMLDOM.1.0'
+            VersionIndependentProgId = s 'Microsoft.FreeThreadedXMLDOM'
+        }
         '{F5078F32-C551-11D3-89B9-0000F81FE221}' = s 'XML DOM Document 3.0'
         {
             InprocServer32 = s '%MODULE%' { val ThreadingModel = s 'Both' }
@@ -703,5 +715,27 @@ HKCR
     'Msxml2.SAXAttributes' = s 'SAXAttributes'
     {
         CLSID = s '{4DD441AD-526D-4A77-9F1B-9841ED802FB0}'
+    }
+    'Microsoft.XMLDOM.1.0' = s 'XML DOM Document'
+    {
+        CLSID = s '{2933BF90-7B36-11D2-B20E-00C04F983E60}'
+    }
+    'Microsoft.XMLDOM' = s 'XML DOM Document'
+    {
+        CLSID = s '{2933BF90-7B36-11D2-B20E-00C04F983E60}'
+        CurVer = s 'Microsoft.XMLDOM.1.0'
+    }
+    'Microsoft.FreeThreadedXMLDOM.1.0' = s 'Free Threaded XML DOM Document'
+    {
+        CLSID = s '{2933BF91-7B36-11D2-B20E-00C04F983E60}'
+    }
+    'Microsoft.FreeThreadedXMLDOM' = s 'Free Threaded XML DOM Document'
+    {
+        CLSID = s '{2933BF91-7B36-11D2-B20E-00C04F983E60}'
+        CurVer = s 'Microsoft.FreeThreadedXMLDOM.1.0'
+    }
+    'MSXML.DOMDocument' = s 'XML DOM Document'
+    {
+        CLSID = s '{2933BF90-7B36-11D2-B20E-00C04F983E60}'
     }
 }
