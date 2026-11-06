@@ -316,10 +316,21 @@ ULONG_PTR Wow64WinExtraService(ULONG Number, ULONG *a)
     case W64_NtUserGetKeyboardLayoutList:
     {
         HKL *List; INT Ret, i;
-        if ((LONG)a[0] <= 0 || !a[1]) return NtUserGetKeyboardLayoutList(a[0], NULL);
-        if (a[0] > MAXULONG / sizeof(HKL)) return 0;
+        /* A negative size is no size at all: the call fails, it must not answer with the count
+         * (Windows 10 x64 WoW64, measured: 0 with ERROR_NOT_ENOUGH_MEMORY, also for sizes no
+         * list of loaded layouts comes near: 64K entries is far beyond any) */
+        if ((LONG)a[0] < 0 || a[0] > 0x10000)
+        {
+            RtlSetLastWin32Error(ERROR_NOT_ENOUGH_MEMORY);
+            return 0;
+        }
+        if (!a[0] || !a[1]) return NtUserGetKeyboardLayoutList(a[0], NULL);
         List = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)a[0] * sizeof(HKL));
-        if (!List) return 0;
+        if (!List)
+        {
+            RtlSetLastWin32Error(ERROR_NOT_ENOUGH_MEMORY);
+            return 0;
+        }
         _SEH2_TRY
         {
             Ret = NtUserGetKeyboardLayoutList(a[0], List);
@@ -332,9 +343,12 @@ ULONG_PTR Wow64WinExtraService(ULONG Number, ULONG *a)
     case W64_NtUserSystemParametersInfo: return SystemParameters(a);
     case W64_NtUserSetCursorIconData:
     {
-        CURSORDATA Data, *Frames = NULL; UNICODE_STRING Module, Resource; BOOL Ret; ULONG i;
+        CURSORDATA Data, *Frames = NULL; UNICODE_STRING Module, Resource; BOOL Ret; ULONG i, FramesPtr;
         const CURSORDATA32 *Guest = P(3);
         CursorIn(&Data, Guest);
+        /* The guest record is read once for the frame table too: each frame is copied from the table
+         * this pointer named when the count was checked */
+        FramesPtr = ((const volatile CURSORDATA32 *)Guest)->aspcur;
         if (a[1]) StringIn(&Module, a[1]);
         if (a[2]) StringIn(&Resource, a[2]);
         if (Data.CURSORF_flags & CURSORF_ACON)
@@ -347,7 +361,7 @@ ULONG_PTR Wow64WinExtraService(ULONG Number, ULONG *a)
         {
             if (Frames)
             {
-                for (i = 0; i < Data.cpcur; ++i) CursorIn(&Frames[i], (CURSORDATA32 *)P32(Guest->aspcur) + i);
+                for (i = 0; i < Data.cpcur; ++i) CursorIn(&Frames[i], (CURSORDATA32 *)P32(FramesPtr) + i);
                 Data.aspcur = Frames;
             }
             Ret = NtUserSetCursorIconData(H(0), a[1] ? &Module : NULL, a[2] ? &Resource : NULL, &Data);
