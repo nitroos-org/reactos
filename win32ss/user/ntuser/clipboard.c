@@ -65,18 +65,72 @@ IntFreeElementData(PCLIP pElement)
     {
         if (pElement->fGlobalHandle)
             UserDeleteObject(pElement->hData, TYPE_CLIPDATA);
-        else if (pElement->fmt == CF_BITMAP          ||
+        else if (pElement->fOwned &&
+                 (pElement->fmt == CF_BITMAP          ||
                  pElement->fmt == CF_PALETTE         ||
                  pElement->fmt == CF_DSPBITMAP       ||
                  pElement->fmt == CF_METAFILEPICT    ||
                  pElement->fmt == CF_DSPMETAFILEPICT ||
                  pElement->fmt == CF_DSPENHMETAFILE  ||
-                 pElement->fmt == CF_ENHMETAFILE )
+                  pElement->fmt == CF_ENHMETAFILE))
         {
             GreSetObjectOwner(pElement->hData, GDI_OBJ_HMGR_POWNED);
             GreDeleteObject(pElement->hData);
         }
     }
+}
+
+/* The GDI object type (base type, derived types such as DIB sections masked off) a clipboard
+   format carries, 0 when the format is not one the clipboard owns as a GDI object */
+static ULONG FASTCALL
+IntClipboardGdiType(UINT fmt)
+{
+    switch (fmt)
+    {
+        case CF_BITMAP:
+        case CF_DSPBITMAP:
+            return GDILoObjType_LO_BITMAP_TYPE;
+        case CF_PALETTE:
+            return GDILoObjType_LO_PALETTE_TYPE;
+        /* gdi32 converts metafiles to server metafile objects before it hands them over */
+        case CF_METAFILEPICT:
+        case CF_DSPMETAFILEPICT:
+        case CF_ENHMETAFILE:
+        case CF_DSPENHMETAFILE:
+            return GDILoObjType_LO_META_TYPE;
+    }
+    return 0;
+}
+
+/* The clipboard deletes the GDI object of these formats when it drops them (IntFreeElementData).
+   Windows accepts any handle in SetClipboardData and a DC or a pen given as a bitmap stays alive
+   when the clipboard is emptied, so the handle is stored as given, but only an object that is
+   what the format carries and that the caller handed over (its own, or a server metafile, which
+   is public from its creation) is the clipboard's to delete. Anything else (a DC, a brush, a stale
+   or foreign handle, a public object of another process) is never owner-changed or deleted here.
+   The handle the format already holds keeps the state it was stored with. */
+static BOOL FASTCALL
+IntClipboardTakesObject(PWINSTATION_OBJECT pWinStaObj, UINT fmt, HANDLE hData)
+{
+    ULONG ulType = IntClipboardGdiType(fmt);
+    ULONG ulOwner;
+    PCLIP pElement;
+
+    if (!ulType || (ULONG_PTR)hData <= 2)
+        return FALSE;
+
+    pElement = IntGetFormatElement(pWinStaObj, fmt);
+    if (pElement && pElement->hData == hData && !pElement->fGlobalHandle)
+        return pElement->fOwned;
+
+    if ((GDI_HANDLE_GET_TYPE(hData) & 0x1f0000) != ulType)
+        return FALSE;
+
+    ulOwner = GreGetObjectOwner(hData);
+    if (ulOwner == GDI_OBJ_HMGR_POWNED)
+        return TRUE;
+
+    return ulOwner == GDI_OBJ_HMGR_PUBLIC && ulType == GDILoObjType_LO_META_TYPE;
 }
 
 /* Adds a new format and data to the clipboard */
@@ -128,6 +182,7 @@ IntAddFormatedData(PWINSTATION_OBJECT pWinStaObj, UINT fmt, HANDLE hData, BOOLEA
 
     pElement->hData = hData;
     pElement->fGlobalHandle = fGlobalHandle;
+    pElement->fOwned = FALSE;
 
     return pElement;
 }
@@ -383,6 +438,7 @@ IntSynthesizeBitmap(PWINSTATION_OBJECT pWinStaObj, PCLIP pBmEl)
     {
         GreSetObjectOwner(hBm, GDI_OBJ_HMGR_PUBLIC);
         pBmEl->hData = hBm;
+        pBmEl->fOwned = TRUE;
     }
 
 cleanup:
@@ -1185,8 +1241,11 @@ UserSetClipboardData(UINT fmt, HANDLE hData, PSETCLIPBDATA scd)
     /* Is it a delayed rendering? */
     if (hData)
     {
+        /* Does the clipboard take over a GDI object here (and delete it later)? */
+        BOOL fOwned = !scd->fGlobalHandle && IntClipboardTakesObject(pWinStaObj, fmt, hData);
+
         /* Is it a bitmap? */
-        if (fmt == CF_BITMAP)
+        if (fOwned && fmt == CF_BITMAP)
         {
             /* Make bitmap public */
             GreSetObjectOwner(hData, GDI_OBJ_HMGR_PUBLIC);
@@ -1194,6 +1253,8 @@ UserSetClipboardData(UINT fmt, HANDLE hData, PSETCLIPBDATA scd)
 
         /* Save data in the clipboard */
         pElement = IntAddFormatedData(pWinStaObj, fmt, hData, scd->fGlobalHandle, FALSE);
+        if (pElement)
+            pElement->fOwned = fOwned;
         TRACE("hData stored\n");
 
         /* Note: Synthesized formats are added in NtUserCloseClipboard */

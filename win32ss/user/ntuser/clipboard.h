@@ -5,6 +5,8 @@ typedef struct _CLIP
     UINT   fmt;
     HANDLE hData;
     BOOL   fGlobalHandle;
+    /* hData is a GDI object the clipboard took over (it deletes it when it drops the format) */
+    BOOL   fOwned;
 } CLIP, *PCLIP;
 
 UINT APIENTRY
