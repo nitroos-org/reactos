@@ -1058,6 +1058,84 @@ MI_MAKE_TRANSITION_PTE(_Out_ PMMPTE NewPte,
 }
 
 //
+// NitroPager: the ARM3 page-file PTE (Windows format): Valid 0, Prototype 0,
+// Transition 0, PageFileLow = paging file index, PageFileHigh = slot + 1,
+// Protection = the page's protection. Distinct from the legacy RosMm swap
+// PTE, which has Transition 1 and Protection 0 and only lives in RosMm views.
+//
+FORCEINLINE
+VOID
+MI_MAKE_PAGEFILE_PTE(_Out_ PMMPTE NewPte,
+                     _In_ ULONG FileIndex,
+                     _In_ ULONG_PTR PageFileHigh,
+                     _In_ ULONG Protection)
+{
+    ASSERT((PageFileHigh != 0) && (PageFileHigh < MI_PTE_LOOKUP_NEEDED));
+    ASSERT(Protection != 0);
+    NewPte->u.Long = 0;
+    NewPte->u.Soft.PageFileLow = FileIndex;
+    NewPte->u.Soft.Protection = Protection;
+    NewPte->u.Soft.PageFileHigh = PageFileHigh;
+}
+
+FORCEINLINE
+BOOLEAN
+MI_IS_PAGEFILE_PTE(_In_ PMMPTE Pte)
+{
+    return ((Pte->u.Soft.Valid == 0) &&
+            (Pte->u.Soft.Prototype == 0) &&
+            (Pte->u.Soft.Transition == 0) &&
+            (Pte->u.Soft.PageFileHigh != 0) &&
+            (Pte->u.Soft.PageFileHigh != MI_PTE_LOOKUP_NEEDED));
+}
+
+#define MI_PAGEFILE_PTE_SLOT(Pte) ((ULONG_PTR)(Pte)->u.Soft.PageFileHigh - 1)
+
+//
+// A PTE that maps a user address (in the page tables, below the system range)
+//
+FORCEINLINE
+BOOLEAN
+MiIsUserPageTablePte(_In_ PMMPTE PointerPte)
+{
+    PMMPTE Pte = (PMMPTE)((ULONG_PTR)PointerPte & ~(ULONG_PTR)1);
+    return ((Pte >= MiAddressToPte(NULL)) && (Pte <= MiHighestUserPte));
+}
+
+//
+// Owner tag of a page-file slot: a 32-bit mix of the physical address of the
+// PTE that owns the data (the page table frame and the byte offset in it). The
+// self-map gives every process the same virtual PTE address, so the physical
+// one is used. Never 0 (0 marks an unwritten slot).
+//
+FORCEINLINE
+ULONG
+MiPagerOwnerTag(_In_ PFN_NUMBER PteFrame,
+                _In_ PMMPTE PteAddress)
+{
+    ULONGLONG x;
+    ULONG Tag;
+
+    x = ((ULONGLONG)PteFrame << PAGE_SHIFT) |
+        ((ULONG_PTR)PteAddress & (PAGE_SIZE - 1) & ~(ULONG_PTR)1);
+    x ^= x >> 33;
+    x *= 0xFF51AFD7ED558CCDULL;
+    x ^= x >> 33;
+    x *= 0xC4CEB9FE1A85EC53ULL;
+    x ^= x >> 33;
+    Tag = (ULONG)x ^ (ULONG)(x >> 32);
+    return (Tag != 0) ? Tag : 1;
+}
+
+/* The tag for a PTE of the current process, reached through the self-map */
+#define MiPagerOwnerTagForPte(PointerPte) \
+    MiPagerOwnerTag(MiAddressToPte(PointerPte)->u.Hard.PageFrameNumber, (PointerPte))
+
+/* The tag for the PTE a PFN belongs to */
+#define MiPagerOwnerTagForPfn(Pfn) \
+    MiPagerOwnerTag((Pfn)->u4.PteFrame, (Pfn)->PteAddress)
+
+//
 // Returns if the page is physically resident (ie: a large page)
 // FIXFIX: CISC/x86 only?
 //
@@ -2471,6 +2549,12 @@ MiGetPreviousNode(
 
 PMMADDRESS_NODE
 NTAPI
+MiGetFirstNode(
+    IN PMM_AVL_TABLE Table
+);
+
+PMMADDRESS_NODE
+NTAPI
 MiGetNextNode(
     IN PMMADDRESS_NODE Node
 );
@@ -2640,6 +2724,118 @@ MiGetFreeOrZeroedPageCount(VOID)
 {
     return MmFreePageListHead.Total + MmZeroedPageListHead.Total;
 }
+
+//
+// NitroPager: private standby pages (MmTransitionPrivatePages) can be
+// repurposed by MiRemoveAnyPage/MiRemoveZeroPage when NitroPager is on, so the
+// early-out gates that need a page count them too. Flag 0: the same count as
+// MiGetFreeOrZeroedPageCount.
+//
+extern ULONG MmTransitionPrivatePages;
+
+/* Private standby pages go on this priority list, prototype pages stay on the default one (3) */
+#define MI_PAGER_PRIVATE_STANDBY_PRIORITY 2
+
+FORCEINLINE
+PFN_NUMBER
+MiGetUsablePageCount(VOID)
+{
+    PFN_NUMBER Count = MiGetFreeOrZeroedPageCount();
+
+    if (MiNitroPagerMode != 0)
+        Count += MmTransitionPrivatePages;
+    return Count;
+}
+
+/*
+ * Take a page after the caller's MiGetUsablePageCount gate passed (PFN lock held).
+ * The count includes every private standby page, but the repurpose scan is bounded
+ * and refuses a page whose state is not what a clean private page must have, so
+ * with NitroPager on a page can be missing although the count said it was there.
+ * That is a PFN database fault: stop, rather than hand PFN 0 on to the caller.
+ * Flag 0: the plain call (it never returned 0 after the gate).
+ */
+FORCEINLINE
+PFN_NUMBER
+MiRemoveAnyPageGated(IN ULONG Color)
+{
+    PFN_NUMBER PageFrameIndex = MiRemoveAnyPage(Color);
+
+    if ((PageFrameIndex == 0) && (MiNitroPagerMode != 0))
+        KeBugCheckEx(PFN_LIST_CORRUPT, 0x9C, MmAvailablePages, MiGetUsablePageCount(), 0);
+    return PageFrameIndex;
+}
+
+FORCEINLINE
+PFN_NUMBER
+MiRemoveZeroPageGated(IN ULONG Color)
+{
+    PFN_NUMBER PageFrameIndex = MiRemoveZeroPage(Color);
+
+    if ((PageFrameIndex == 0) && (MiNitroPagerMode != 0))
+        KeBugCheckEx(PFN_LIST_CORRUPT, 0x9D, MmAvailablePages, MiGetUsablePageCount(), 0);
+    return PageFrameIndex;
+}
+
+/* pager.c */
+VOID
+NTAPI
+MiMarkPfnDirty(
+    _Inout_ PMMPFN Pfn1);
+
+VOID
+NTAPI
+MiReleasePfnPageFileSlot(
+    _Inout_ PMMPFN Pfn1);
+
+PFN_NUMBER
+NTAPI
+MiRepurposeStandbyPage(VOID);
+
+NTSTATUS
+NTAPI
+MiEmptyProcessWorkingSet(
+    _In_ PEPROCESS Process,
+    _In_ BOOLEAN TryLockOnly);
+
+ULONG
+NTAPI
+MiWriteModifiedPrivatePages(
+    _In_ ULONG MaximumPages);
+
+/* Test hooks (NitroPagerDebug): TRUE once when the matching test command armed it */
+#define MI_PAGER_INJECT_READ_ERROR      0
+#define MI_PAGER_INJECT_WRITE_ERROR     1
+#define MI_PAGER_INJECT_TAG_MISMATCH    2
+#define MI_PAGER_INJECT_READ_RESOURCES  3
+#define MI_PAGER_INJECT_FREE_MISMATCH   4   /* the next release of the page's slot names the wrong owner */
+#define MI_PAGER_INJECT_WRITE_PAUSE     5   /* the writer waits (bounded) between the write and its completion */
+#define MI_PAGER_INJECT_MAX             6
+
+BOOLEAN
+NTAPI
+MiPagerTakeInjection(
+    _In_ ULONG Which,
+    _In_ PVOID Address);
+
+typedef struct _MI_PAGER_COUNTERS
+{
+    ULONG Trimmed;
+    ULONG TrimmedDirty;
+    ULONG Written;
+    ULONG WriteErrors;
+    ULONG WriteNoSlot;
+    ULONG Repurposed;
+    ULONG RepurposeSkipped;
+    ULONG InPageReads;
+    ULONG InPageErrors;
+    ULONG InPageResourceRetries;
+    ULONG TagMismatches;
+    ULONG SlotFreeRefused;
+    ULONG WsTryLockMisses;
+} MI_PAGER_COUNTERS;
+
+extern MI_PAGER_COUNTERS MiPagerCounters;
 
 //
 // MiRemoveZeroPage will use inline code to zero out the page manually if only

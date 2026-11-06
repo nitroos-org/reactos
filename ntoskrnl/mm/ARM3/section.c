@@ -1136,7 +1136,7 @@ MiSessionCommitPageTables(IN PVOID StartVa,
                 ASSERT(StartPde->u.Long == 0);
 
                 /* ReactOS check to avoid MiEnsureAvailablePageOrWait */
-                if (MiGetFreeOrZeroedPageCount() == 0)
+                if (MiGetUsablePageCount() == 0)
                 {
                     MiReleasePfnLock(OldIrql);
                     break;
@@ -1145,7 +1145,7 @@ MiSessionCommitPageTables(IN PVOID StartVa,
                 MI_SET_USAGE(MI_USAGE_PAGE_TABLE);
                 MI_SET_PROCESS2(PsGetCurrentProcess()->ImageFileName);
                 Color = (++MmSessionSpace->Color) & MmSecondaryColorMask;
-                PageFrameNumber = MiRemoveZeroPage(Color);
+                PageFrameNumber = MiRemoveZeroPageGated(Color);
                 TempPde.u.Hard.PageFrameNumber = PageFrameNumber;
                 MI_WRITE_VALID_PDE(StartPde, TempPde);
 
@@ -2290,6 +2290,13 @@ MiFlushTbAndCapture(IN PMMVAD FoundVad,
     ASSERT(Pfn1 != NULL);
 
     //
+    // The protection kept for the page after it is unmapped is stored under the
+    // PFN lock: the page writer completes a write of this page under it, and
+    // rebuilds OriginalPte from the protection it finds there
+    //
+    Pfn1->OriginalPte.u.Soft.Protection = ProtectionMask;
+
+    //
     // Make sure new protection mask doesn't get in conflict and fix it if it does
     //
     if (Pfn1->u3.e1.CacheAttribute == MiCached)
@@ -2338,14 +2345,23 @@ MiFlushTbAndCapture(IN PMMVAD FoundVad,
     //
     // Write the new PTE, making sure we are only changing the bits. The caller
     // flushes the TB for its whole range before it releases the working set.
+    // The exchange returns the PTE as the processors last wrote it: its Dirty
+    // bit is not lost with the rebuilt PTE.
     //
     ASSERT(PreviousPte.u.Hard.Valid == 1);
-    MI_UPDATE_VALID_PTE(PointerPte, TempPte);
+    ASSERT(PreviousPte.u.Hard.PageFrameNumber == TempPte.u.Hard.PageFrameNumber);
+    PreviousPte.u.Long = InterlockedExchangePte(PointerPte, TempPte.u.Long);
+    ASSERT(PreviousPte.u.Hard.Valid == 1);
 
     //
-    // Windows updates the relevant PFN1 information, we currently don't.
+    // A private page keeps its dirtiness in the PFN (D8): a clean copy in the
+    // paging file is stale (NitroPager). Prototype pages: P2.
     //
-    if (UpdateDirty && PreviousPte.u.Hard.Dirty)
+    if (PreviousPte.u.Hard.Dirty && (Pfn1->u3.e1.PrototypePte == 0))
+    {
+        MiMarkPfnDirty(Pfn1);
+    }
+    else if (UpdateDirty && PreviousPte.u.Hard.Dirty)
     {
         if (!Pfn1->u3.e1.Modified)
         {

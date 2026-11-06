@@ -289,9 +289,18 @@ MiUnlinkPageFromList(IN PMMPFN Pfn)
         /* Decrement number of available pages */
         MiDecrementAvailablePages();
 
-        /* Decrease transition page counter */
-        ASSERT(Pfn->u3.e1.PrototypePte == 1); /* Only supported ARM3 case */
-        MmTransitionSharedPages--;
+        /* Decrease transition page counter: prototype pages, or private pages with their copy (NitroPager) */
+        if ((Pfn->u3.e1.PrototypePte == 1) || (MiNitroPagerMode == 0))
+        {
+            ASSERT(Pfn->u3.e1.PrototypePte == 1); /* Only supported ARM3 case without NitroPager */
+            MmTransitionSharedPages--;
+        }
+        else
+        {
+            ASSERT(MI_IS_PAGEFILE_PTE(&Pfn->OriginalPte));
+            ASSERT(MmTransitionPrivatePages != 0);
+            MmTransitionPrivatePages--;
+        }
     }
     else if (ListHead == &MmModifiedPageListHead)
     {
@@ -505,6 +514,11 @@ MiRemoveAnyPage(IN ULONG Color)
                 ASSERT_LIST_INVARIANT(&MmZeroedPageListHead);
                 PageIndex = MmZeroedPageListHead.Flink;
                 Color = PageIndex & MmSecondaryColorMask;
+
+                /* NitroPager: the oldest private standby page, or none (0) */
+                if ((PageIndex == LIST_HEAD) && (MiNitroPagerMode != 0))
+                    return MiRepurposeStandbyPage();
+
                 ASSERT(PageIndex != LIST_HEAD);
                 if (PageIndex == LIST_HEAD)
                 {
@@ -569,6 +583,16 @@ MiRemoveZeroPage(IN ULONG Color)
                 ASSERT_LIST_INVARIANT(&MmFreePageListHead);
                 PageIndex = MmFreePageListHead.Flink;
                 Color = PageIndex & MmSecondaryColorMask;
+
+                /* NitroPager: the oldest private standby page, zeroed here, or none (0) */
+                if ((PageIndex == LIST_HEAD) && (MiNitroPagerMode != 0))
+                {
+                    PageIndex = MiRepurposeStandbyPage();
+                    if (PageIndex != 0)
+                        MiZeroPhysicalPage(PageIndex);
+                    return PageIndex;
+                }
+
                 ASSERT(PageIndex != LIST_HEAD);
                 if (PageIndex == LIST_HEAD)
                 {
@@ -632,6 +656,17 @@ MiInsertPageInFreeList(IN PFN_NUMBER PageFrameIndex)
     ASSERT(Pfn1->u3.e1.RemovalRequested == 0);
     ASSERT(Pfn1->u4.VerifierAllocation == 0);
     ASSERT(Pfn1->u3.e2.ReferenceCount == 0);
+
+    /* NitroPager: a private page freed with a clean copy in the paging file releases the slot */
+    if ((MiNitroPagerMode != 0) &&
+        !MI_IS_ROS_PFN(Pfn1) &&
+        (Pfn1->u3.e1.PrototypePte == 0) &&
+        (Pfn1->u3.e1.WriteInProgress == 0) &&
+        MI_IS_PAGEFILE_PTE(&Pfn1->OriginalPte) &&
+        MiIsUserPageTablePte(Pfn1->PteAddress))
+    {
+        MiReleasePfnPageFileSlot(Pfn1);
+    }
 
     /* Get the free page list and increment its count */
     ListHead = &MmFreePageListHead;
@@ -738,11 +773,29 @@ MiInsertStandbyListAtFront(IN PFN_NUMBER PageFrameIndex)
     Pfn1 = MI_PFN_ELEMENT(PageFrameIndex);
     ASSERT(Pfn1->u4.MustBeCached == 0);
     ASSERT(Pfn1->u3.e2.ReferenceCount == 0);
-    ASSERT(Pfn1->u3.e1.PrototypePte == 1);
     ASSERT(Pfn1->u3.e1.Rom != 1);
 
     /* One more transition page on a list */
-    MmTransitionSharedPages++;
+    if ((Pfn1->u3.e1.PrototypePte == 1) || (MiNitroPagerMode == 0))
+    {
+        ASSERT(Pfn1->u3.e1.PrototypePte == 1); /* Only supported ARM3 case without NitroPager */
+        MmTransitionSharedPages++;
+    }
+    else
+    {
+        /*
+         * NitroPager: a clean private page, whose copy is in the paging file
+         * (OriginalPte). It has a standby list of its own, which the
+         * repurpose scan reaches first.
+         */
+        if (!MI_IS_PAGEFILE_PTE(&Pfn1->OriginalPte))
+        {
+            KeBugCheckEx(MEMORY_MANAGEMENT, 0x50474E10, PageFrameIndex,
+                         Pfn1->OriginalPte.u.Long, (ULONG_PTR)Pfn1->PteAddress);
+        }
+        Pfn1->u4.Priority = MI_PAGER_PRIVATE_STANDBY_PRIORITY;
+        MmTransitionPrivatePages++;
+    }
 
     /* Get the standby page list and increment its count */
     ListHead = &MmStandbyPageListByPriority [Pfn1->u4.Priority];
