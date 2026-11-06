@@ -1,0 +1,9 @@
+# Wine test resources compared byte for byte (UTF-16 and BOM variants): no line-ending conversion
+utf8.css -text
+utf16.css -text
+utf8_bom.css -text
+utf16_bom.css -text
+utf8.js -text
+utf16.js -text
+utf8_bom.js -text
+utf16_bom.js -text
