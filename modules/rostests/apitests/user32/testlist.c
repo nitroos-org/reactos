@@ -126,6 +126,7 @@ extern void func_UnicodeToAnsiMessage(void);
 extern void func_UpdateLayeredWindow(void);
 extern void func_UserHandleGrantAccess(void);
 extern void func_VirtualKey(void);
+extern void func_Wow64WinArguments(void);
 extern void func_WinEventHook(void);
 extern void func_WindowStationLeak(void);
 extern void func_WmPrint(void);
@@ -278,6 +279,7 @@ const struct test winetest_testlist[] =
     { "DesktopWindowSiblings", func_DesktopWindowSiblings },
     { "ShutdownBlockReason", func_ShutdownBlockReason },
     { "PointerDeviceFunctions", func_PointerDeviceFunctions },
+    { "Wow64WinArguments", func_Wow64WinArguments },
     { "WinEventHook", func_WinEventHook },
     { "WindowStationLeak", func_WindowStationLeak },
     { "WmPrint", func_WmPrint },

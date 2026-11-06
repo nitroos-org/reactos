@@ -127,6 +127,7 @@ list(APPEND SOURCE
     UserHandleGrantAccess.c
     VirtualKey.c
     Win8User.c
+    Wow64WinArguments.c
     WinEventHook.c
     WindowStationLeak.c
     WmPrint.c
