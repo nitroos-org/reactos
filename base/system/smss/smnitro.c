@@ -28,8 +28,13 @@
  *    - once SMSS is detached again, NitroSessionsTestCommand0 (REG_SZ,
  *      optional) runs outside any session, a native image. It proves that a
  *      process created after the detach does not see session 1.
+ *    - NitroSessionsTestKill (DWORD, optional, test only): terminate every
+ *      process of session 1 (its csrss and the test command) and wait for
+ *      them to be gone before SMSS detaches, so that SMSS holds the last
+ *      reference to the session.
  */
 ULONG SmpNitroSessions;
+static ULONG SmpNitroSessionsTestKill;
 UNICODE_STRING SmpNitroSessionsTestCommand;
 UNICODE_STRING SmpNitroSessionsTestCommand0;
 
@@ -99,6 +104,7 @@ SmpReadNitroSessionsConfig(VOID)
     UCHAR Buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + sizeof(ULONG)];
 
     SmpNitroSessions = 0;
+    SmpNitroSessionsTestKill = 0;
     RtlInitEmptyUnicodeString(&SmpNitroSessionsTestCommand, NULL, 0);
     RtlInitEmptyUnicodeString(&SmpNitroSessionsTestCommand0, NULL, 0);
 
@@ -135,7 +141,23 @@ SmpReadNitroSessionsConfig(VOID)
         DPRINT1("SMSS: NitroSessions = %lu\n", SmpNitroSessions);
         SmpReadNitroString(KeyHandle, L"NitroSessionsTestCommand", &SmpNitroSessionsTestCommand);
         if (SmpNitroSessions == SMP_NITRO_SESSIONS_CSR)
+        {
             SmpReadNitroString(KeyHandle, L"NitroSessionsTestCommand0", &SmpNitroSessionsTestCommand0);
+
+            RtlInitUnicodeString(&ValueName, L"NitroSessionsTestKill");
+            Status = NtQueryValueKey(KeyHandle,
+                                     &ValueName,
+                                     KeyValuePartialInformation,
+                                     Info,
+                                     sizeof(Buffer),
+                                     &ResultLength);
+            if (NT_SUCCESS(Status) &&
+                (Info->Type == REG_DWORD) &&
+                (Info->DataLength == sizeof(ULONG)))
+            {
+                SmpNitroSessionsTestKill = *(PULONG)Info->Data;
+            }
+        }
     }
 
     NtClose(KeyHandle);
@@ -286,6 +308,29 @@ SmpBuildHeadlessCsrCommand(
     return STATUS_SUCCESS;
 }
 
+/*
+ * Test only (NitroSessionsTestKill): terminate a process of the test session
+ * and wait until it is gone. A process that is not waited for in full would
+ * still hold its reference when SMSS detaches.
+ */
+static
+VOID
+SmpNitroKillAndWait(
+    _In_ PCSTR What,
+    _In_ HANDLE Process)
+{
+    NTSTATUS Status;
+    LARGE_INTEGER Timeout;
+
+    Status = NtTerminateProcess(Process, STATUS_UNSUCCESSFUL);
+    if (NT_SUCCESS(Status))
+    {
+        Timeout.QuadPart = -10000000LL * 20;
+        Status = NtWaitForSingleObject(Process, FALSE, &Timeout);
+    }
+    DPRINT1("SMSS: NitroSessions: test kill of %s, Status=%lx\n", What, Status);
+}
+
 /* Detach SMSS from the session it is attached to, if any */
 static
 VOID
@@ -374,7 +419,41 @@ SmpStartNitroCsrSession(VOID)
                                            &TestProcessId);
         DPRINT1("SMSS: NitroSessions: test command '%wZ' in session %lu, pid %p, Status=%lx\n",
                 &SmpNitroSessionsTestCommand, MuSessionId, TestProcessId, Status2);
-        if (NT_SUCCESS(Status2) && TestProcess) NtClose(TestProcess);
+        if (NT_SUCCESS(Status2) && TestProcess)
+        {
+            if (SmpNitroSessionsTestKill) SmpNitroKillAndWait("the test command", TestProcess);
+            NtClose(TestProcess);
+        }
+    }
+
+    /* Test only: nothing may be left in the session when SMSS detaches */
+    if (NT_SUCCESS(Status) && SmpNitroSessionsTestKill && CsrProcessId)
+    {
+        OBJECT_ATTRIBUTES Attributes;
+        CLIENT_ID ClientId;
+        HANDLE CsrProcess;
+        LARGE_INTEGER Delay;
+
+        InitializeObjectAttributes(&Attributes, NULL, 0, NULL, NULL);
+        ClientId.UniqueProcess = CsrProcessId;
+        ClientId.UniqueThread = NULL;
+        Status2 = NtOpenProcess(&CsrProcess,
+                                PROCESS_TERMINATE | SYNCHRONIZE,
+                                &Attributes,
+                                &ClientId);
+        if (NT_SUCCESS(Status2))
+        {
+            SmpNitroKillAndWait("csrss", CsrProcess);
+            NtClose(CsrProcess);
+        }
+        else
+        {
+            DPRINT1("SMSS: NitroSessions: test kill: cannot open csrss, Status=%lx\n", Status2);
+        }
+
+        /* Let the exited processes finish dropping the session */
+        Delay.QuadPart = -10000000LL;
+        NtDelayExecution(FALSE, &Delay);
     }
 
     /* Detach again; SMSS stays the leader of no session */
