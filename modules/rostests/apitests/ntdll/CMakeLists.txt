@@ -88,6 +88,7 @@ list(APPEND SOURCE
     NtCreateDirectoryObject.c
     NtCreateFile.c
     NtCreateKey.c
+    NtCreateLowBoxToken.c
     NtCreateProfile.c
     NtCreateSectionImage.c
     NtCreateSectionSize.c
