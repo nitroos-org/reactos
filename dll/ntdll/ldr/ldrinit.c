@@ -2619,6 +2619,9 @@ LdrpInitializeProcess(IN PCONTEXT Context,
             if (!LdrpCorFixupIlOnlyImage(Peb->ImageBaseAddress, NtHeader))
             {
                 DPRINT1("LDR: %wZ is a 32-bit image in a 64-bit process\n", &ImagePathName);
+                /* Windows 10 ends such a process (an IL-only image with a TLS directory) with this status before the
+                   loader's breakpoint, and raises nothing: the failure path below would re-raise forever */
+                NtTerminateProcess(NtCurrentProcess(), STATUS_INVALID_IMAGE_FORMAT);
                 return STATUS_INVALID_IMAGE_FORMAT;
             }
             if (ShowSnaps)
