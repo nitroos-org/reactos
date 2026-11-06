@@ -139,6 +139,27 @@ LsarpFreeTranslatedSidsEx2(
 }
 
 
+/*
+ * The relative id of one LsarLookupNames(2) result, which returns a RID instead of the SID.
+ * Measured on Windows 10 22H2 with LsaLookupNames: a name that is not mapped (no SID) gets 0,
+ * a domain name (BUILTIN) gets 0xFFFFFFFF, any other name the last subauthority of its SID
+ * (Everyone 0, SYSTEM 18, Administrators 544). An unmapped name used to fault lsass here.
+ */
+static
+ULONG
+LsarpRelativeIdOfTranslatedSid(
+    PLSAPR_TRANSLATED_SID_EX2 TranslatedSid)
+{
+    if (TranslatedSid->Sid == NULL)
+        return 0;
+
+    if (TranslatedSid->Use == SidTypeDomain)
+        return 0xFFFFFFFF;
+
+    return LsapGetRelativeIdFromSid(TranslatedSid->Sid);
+}
+
+
 void
 __RPC_USER
 LSAPR_HANDLE_rundown(
@@ -1277,7 +1298,7 @@ LsarLookupNames(
     for (i = 0; i < TranslatedSidsEx2.Entries; i++)
     {
         TranslatedSids->Sids[i].Use = TranslatedSidsEx2.Sids[i].Use;
-        TranslatedSids->Sids[i].RelativeId = LsapGetRelativeIdFromSid(TranslatedSidsEx2.Sids[i].Sid);
+        TranslatedSids->Sids[i].RelativeId = LsarpRelativeIdOfTranslatedSid(&TranslatedSidsEx2.Sids[i]);
         TranslatedSids->Sids[i].DomainIndex = TranslatedSidsEx2.Sids[i].DomainIndex;
     }
 
@@ -1290,7 +1311,8 @@ LsarLookupNames(
 
     MIDL_user_free(TranslatedSidsEx2.Sids);
 
-    return STATUS_SUCCESS;
+    /* STATUS_SOME_NOT_MAPPED when a name is not mapped, as Windows */
+    return Status;
 }
 
 
@@ -4075,7 +4097,7 @@ LsarLookupNames2(
     for (i = 0; i < TranslatedSidsEx2.Entries; i++)
     {
         TranslatedSids->Sids[i].Use = TranslatedSidsEx2.Sids[i].Use;
-        TranslatedSids->Sids[i].RelativeId = LsapGetRelativeIdFromSid(TranslatedSidsEx2.Sids[i].Sid);
+        TranslatedSids->Sids[i].RelativeId = LsarpRelativeIdOfTranslatedSid(&TranslatedSidsEx2.Sids[i]);
         TranslatedSids->Sids[i].DomainIndex = TranslatedSidsEx2.Sids[i].DomainIndex;
         TranslatedSids->Sids[i].Flags = TranslatedSidsEx2.Sids[i].Flags;
     }
@@ -4089,7 +4111,8 @@ LsarLookupNames2(
 
     MIDL_user_free(TranslatedSidsEx2.Sids);
 
-    return STATUS_SUCCESS;
+    /* STATUS_SOME_NOT_MAPPED when a name is not mapped, as Windows */
+    return Status;
 }
 
 
