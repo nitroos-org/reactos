@@ -409,6 +409,11 @@ static const style_tbl_entry_t style_tbl[] = {
         ATTR_COMPAT_IE10
     },
     {
+        L"content",
+        DISPID_IHTMLCSSSTYLEDECLARATION_CONTENT,
+        DISPID_IHTMLSTYLE6_CONTENT
+    },
+    {
         L"cursor",
         DISPID_IHTMLCSSSTYLEDECLARATION_CURSOR,
         DISPID_A_CURSOR,
@@ -664,6 +669,11 @@ static const style_tbl_entry_t style_tbl[] = {
         DISPID_IHTMLCSSSTYLEDECLARATION_TEXTINDENT,
         DISPID_A_TEXTINDENT,
         ATTR_FIX_PX
+    },
+    {
+        L"text-overflow",
+        DISPID_IHTMLCSSSTYLEDECLARATION_TEXTOVERFLOW,
+        DISPID_A_TEXTOVERFLOW
     },
     {
         L"text-transform",
@@ -1103,7 +1113,6 @@ static HRESULT get_nsstyle_pos(HTMLStyle *This, styleid_t sid, float *p)
 
             if(*ptr && wcscmp(ptr, L"px"))
             {
-                nsAString_Finish(&str_value);
                 FIXME("only px values are currently supported\n");
                 hres = E_FAIL;
             }
@@ -4036,15 +4045,19 @@ DISPEX_IDISPATCH_IMPL(HTMLStyle4, IHTMLStyle4, impl_from_IHTMLStyle4(iface)->css
 static HRESULT WINAPI HTMLStyle4_put_textOverflow(IHTMLStyle4 *iface, BSTR v)
 {
     HTMLStyle *This = impl_from_IHTMLStyle4(iface);
-    FIXME("(%p)->(%s)\n", This, debugstr_w(v));
-    return E_NOTIMPL;
+
+    TRACE("(%p)->(%s)\n", This, debugstr_w(v));
+
+    return set_style_property(&This->css_style, STYLEID_TEXT_OVERFLOW, v);
 }
 
 static HRESULT WINAPI HTMLStyle4_get_textOverflow(IHTMLStyle4 *iface, BSTR *p)
 {
     HTMLStyle *This = impl_from_IHTMLStyle4(iface);
-    FIXME("(%p)->(%p)\n", This, p);
-    return E_NOTIMPL;
+
+    TRACE("(%p)->(%p)\n", This, p);
+
+    return get_style_property(&This->css_style, STYLEID_TEXT_OVERFLOW, p);
 }
 
 static HRESULT WINAPI HTMLStyle4_put_minHeight(IHTMLStyle4 *iface, VARIANT v)
@@ -4182,15 +4195,15 @@ DISPEX_IDISPATCH_IMPL(HTMLStyle6, IHTMLStyle6, impl_from_IHTMLStyle6(iface)->css
 static HRESULT WINAPI HTMLStyle6_put_content(IHTMLStyle6 *iface, BSTR v)
 {
     HTMLStyle *This = impl_from_IHTMLStyle6(iface);
-    FIXME("(%p)->(%s)\n", This, debugstr_w(v));
-    return E_NOTIMPL;
+    TRACE("(%p)->(%s)\n", This, debugstr_w(v));
+    return set_style_property(&This->css_style, STYLEID_CONTENT, v);
 }
 
 static HRESULT WINAPI HTMLStyle6_get_content(IHTMLStyle6 *iface, BSTR *p)
 {
     HTMLStyle *This = impl_from_IHTMLStyle6(iface);
-    FIXME("(%p)->(%p)\n", This, p);
-    return E_NOTIMPL;
+    TRACE("(%p)->(%p)\n", This, p);
+    return get_style_property(&This->css_style, STYLEID_CONTENT, p);
 }
 
 static HRESULT WINAPI HTMLStyle6_put_contentSide(IHTMLStyle6 *iface, BSTR v)
@@ -6415,15 +6428,15 @@ static HRESULT WINAPI HTMLCSSStyleDeclaration_get_textKashidaSpace(IHTMLCSSStyle
 static HRESULT WINAPI HTMLCSSStyleDeclaration_put_textOverflow(IHTMLCSSStyleDeclaration *iface, BSTR v)
 {
     CSSStyle *This = impl_from_IHTMLCSSStyleDeclaration(iface);
-    FIXME("(%p)->(%s)\n", This, debugstr_w(v));
-    return E_NOTIMPL;
+    TRACE("(%p)->(%s)\n", This, debugstr_w(v));
+    return set_style_property(This, STYLEID_TEXT_OVERFLOW, v);
 }
 
 static HRESULT WINAPI HTMLCSSStyleDeclaration_get_textOverflow(IHTMLCSSStyleDeclaration *iface, BSTR *p)
 {
     CSSStyle *This = impl_from_IHTMLCSSStyleDeclaration(iface);
-    FIXME("(%p)->(%p)\n", This, p);
-    return E_NOTIMPL;
+    TRACE("(%p)->(%p)\n", This, p);
+    return get_style_property(This, STYLEID_TEXT_OVERFLOW, p);
 }
 
 static HRESULT WINAPI HTMLCSSStyleDeclaration_put_minHeight(IHTMLCSSStyleDeclaration *iface, VARIANT v)
@@ -6499,15 +6512,15 @@ static HRESULT WINAPI HTMLCSSStyleDeclaration_get_maxWidth(IHTMLCSSStyleDeclarat
 static HRESULT WINAPI HTMLCSSStyleDeclaration_put_content(IHTMLCSSStyleDeclaration *iface, BSTR v)
 {
     CSSStyle *This = impl_from_IHTMLCSSStyleDeclaration(iface);
-    FIXME("(%p)->(%s)\n", This, debugstr_w(v));
-    return E_NOTIMPL;
+    TRACE("(%p)->(%s)\n", This, debugstr_w(v));
+    return set_style_property(This, STYLEID_CONTENT, v);
 }
 
 static HRESULT WINAPI HTMLCSSStyleDeclaration_get_content(IHTMLCSSStyleDeclaration *iface, BSTR *p)
 {
     CSSStyle *This = impl_from_IHTMLCSSStyleDeclaration(iface);
-    FIXME("(%p)->(%p)\n", This, p);
-    return E_NOTIMPL;
+    TRACE("(%p)->(%p)\n", This, p);
+    return get_style_property(This, STYLEID_CONTENT, p);
 }
 
 static HRESULT WINAPI HTMLCSSStyleDeclaration_put_captionSide(IHTMLCSSStyleDeclaration *iface, BSTR v)
@@ -9729,8 +9742,8 @@ void MSCSSProperties_init_dispex_info(dispex_data_t *info, compat_mode_t mode)
 }
 
 dispex_static_data_t MSCSSProperties_dispex = {
-    .id           = PROT_MSCSSProperties,
-    .prototype_id = PROT_CSSStyleDeclaration,
+    .id           = OBJID_MSCSSProperties,
+    .prototype_id = OBJID_CSSStyleDeclaration,
     .init_info    = MSCSSProperties_init_dispex_info,
 };
 
@@ -9772,12 +9785,13 @@ static const tid_t MSStyleCSSProperties_iface_tids[] = {
     0
 };
 dispex_static_data_t MSStyleCSSProperties_dispex = {
-    .id           = PROT_MSStyleCSSProperties,
-    .prototype_id = PROT_MSCSSProperties,
+    .id           = OBJID_MSStyleCSSProperties,
+    .prototype_id = OBJID_MSCSSProperties,
     .vtbl         = &MSStyleCSSProperties_dispex_vtbl,
     .disp_tid     = DispHTMLStyle_tid,
     .iface_tids   = MSStyleCSSProperties_iface_tids,
     .init_info    = MSStyleCSSProperties_init_dispex_info,
+    .js_flags     = HOSTOBJ_VOLATILE_PROPS
 };
 
 static HRESULT get_style_from_elem(HTMLElement *elem, nsIDOMCSSStyleDeclaration **ret)
@@ -9918,10 +9932,11 @@ static const dispex_static_data_vtbl_t CSSStyleDeclaration_dispex_vtbl = {
 };
 
 dispex_static_data_t CSSStyleDeclaration_dispex = {
-    .id        = PROT_CSSStyleDeclaration,
+    .id        = OBJID_CSSStyleDeclaration,
     .vtbl      = &CSSStyleDeclaration_dispex_vtbl,
     .disp_tid  = DispHTMLW3CComputedStyle_tid,
     .init_info = CSSStyleDeclaration_init_dispex_info,
+    .js_flags  = HOSTOBJ_VOLATILE_PROPS
 };
 
 HRESULT create_computed_style(nsIDOMCSSStyleDeclaration *nsstyle, DispatchEx *owner, IHTMLCSSStyleDeclaration **p)
