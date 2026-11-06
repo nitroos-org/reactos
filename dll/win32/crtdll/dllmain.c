@@ -94,11 +94,12 @@ void __GetMainArgs( int *argc, char ***argv, char ***envp, int expand_wildcards 
  */
 int CRTDLL__fstat(int fd, struct crtdll_stat* buf)
 {
-    extern int _fstat(int,struct _stat*);
+    /* Wine 11.21 file.c: msvcrt exports _fstat as an alias of _fstat32 on x86; the CRT header maps _fstat32 back to _fstat, so use the asm name */
+    extern int crtdll_fstat32(int,struct _stat*) __asm__("__fstat32");
     struct _stat st;
     int ret;
 
-    if (!(ret = _fstat( fd, &st ))) convert_struct_stat( buf, &st );
+    if (!(ret = crtdll_fstat32( fd, &st ))) convert_struct_stat( buf, &st );
     return ret;
 }
 
@@ -108,11 +109,12 @@ int CRTDLL__fstat(int fd, struct crtdll_stat* buf)
  */
 int CRTDLL__stat(const char* path, struct crtdll_stat * buf)
 {
-    extern int _stat(const char*,struct _stat*);
+    /* same for _stat / _stat32 */
+    extern int crtdll_stat32(const char*,struct _stat*) __asm__("__stat32");
     struct _stat st;
     int ret;
 
-    if (!(ret = _stat( path, &st ))) convert_struct_stat( buf, &st );
+    if (!(ret = crtdll_stat32( path, &st ))) convert_struct_stat( buf, &st );
     return ret;
 }
 
