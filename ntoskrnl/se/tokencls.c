@@ -272,8 +272,8 @@ SepBuildTokenAccessInformation(
     {
         if (Lowbox->CapabilityCount > 0)
         {
-            CapabilitiesSize = Lowbox->CapabilityCount * sizeof(SID_AND_ATTRIBUTES) +
-                               RtlLengthSidAndAttributes(Lowbox->CapabilityCount, Lowbox->Capabilities);
+            /* RtlLengthSidAndAttributes counts the array itself as well as the SIDs */
+            CapabilitiesSize = RtlLengthSidAndAttributes(Lowbox->CapabilityCount, Lowbox->Capabilities);
             CapabilitiesSize = ALIGN_UP_BY(CapabilitiesSize, sizeof(PVOID));
         }
         PackageSize = ALIGN_UP_BY(RtlLengthSid(Lowbox->PackageSid), sizeof(PVOID));
