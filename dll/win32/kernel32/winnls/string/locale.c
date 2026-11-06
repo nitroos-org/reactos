@@ -3103,6 +3103,23 @@ DWORD WINAPI VerLanguageNameW( DWORD wLang, LPWSTR szLang, DWORD nSize )
 }
 
 
+#include "ctype3_data.h"
+
+/* C3_NONSPACING, C3_DIACRITIC and C3_SYMBOL for characters above U+007F (see mkctype3.py) */
+static WORD get_ctype3_extra(WCHAR ch)
+{
+    int lo = 0, hi = ARRAYSIZE(ctype3_ranges) - 1;
+
+    while (lo <= hi)
+    {
+        int mid = (lo + hi) / 2;
+        if (ch < ctype3_ranges[mid].first) hi = mid - 1;
+        else if (ch > ctype3_ranges[mid].last) lo = mid + 1;
+        else return ctype3_ranges[mid].flags;
+    }
+    return 0;
+}
+
 /******************************************************************************
  *           GetStringTypeW    (KERNEL32.@)
  *
@@ -3181,6 +3198,9 @@ BOOL WINAPI GetStringTypeW( DWORD type, LPCWSTR src, INT count, LPWORD chartype 
             if ((c>=0xFF65)&&(c<=0xFF9F)) type3 |= C3_ALPHA;
             if ((c>=0xFFE8)&&(c<=0xFFEE)) type3 |= C3_HALFWIDTH;
             if ((c>=0xFFE8)&&(c<=0xFFEE)) type3 |= C3_SYMBOL;
+
+            /* nonspacing marks, diacritics and symbols by Unicode category; only for characters the ctype1 table knows */
+            if ((c>=0x80) && (type1 & C1_DEFINED)) type3 |= get_ctype3_extra(c);
             *chartype++ = type3;
         }
         break;
