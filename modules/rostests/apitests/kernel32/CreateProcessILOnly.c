@@ -74,7 +74,16 @@ typedef struct _IL_CASE
     UCHAR ImageFlags;   /* & IMAGE_FLAGS_COMPLUS; IL_FLAGS_ANY: not checked */
     BOOL Native;        /* a 64-bit process on a 64-bit system */
     ULONG Layout;
+    ULONG Extras;       /* IL_EXTRA_* */
 } IL_CASE;
+
+/* Directories the PE32 file carries besides the COM descriptor (layouts of the PE32 structures) */
+#define IL_EXTRA_LOADCFG    0x1
+#define IL_EXTRA_TLS        0x2
+#define IL_EXTRA_TLS_CB     0x4
+#define IL_LOADCFG_RVA      (IL_TEXT_RVA + 0x100)
+#define IL_LOADCFG_SIZE     0x40
+#define IL_TLS_RVA          (IL_TEXT_RVA + 0x180)
 
 /* Where the descriptor is. IL_LAYOUT_RAWTAIL: .text has 0x1200 bytes of file data for 0x100 bytes of virtual size,
  * and the descriptor is in the file bytes at RVA 0x2100, which the view maps as .reloc (not as .text's tail).
@@ -201,6 +210,33 @@ WriteIlExe(
     Import->OriginalFirstThunk = IL_ILT_RVA;
     Import->Name = IL_DLLNAME_RVA;
     Import->FirstThunk = IL_IAT_RVA;
+
+    if (Case->Extras & IL_EXTRA_LOADCFG)
+    {
+        /* IMAGE_LOAD_CONFIG_DIRECTORY32 of 0x40 bytes; GlobalFlagsSet = FLG_HEAP_ENABLE_TAIL_CHECK */
+        PDWORD Config = (PDWORD)IL_AT(IL_LOADCFG_RVA);
+        Config[0] = IL_LOADCFG_SIZE;
+        Config[4] = 0x10;
+        Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].VirtualAddress = IL_LOADCFG_RVA;
+        Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].Size = IL_LOADCFG_SIZE;
+    }
+    if (Case->Extras & IL_EXTRA_TLS)
+    {
+        /* IMAGE_TLS_DIRECTORY32: raw data [0x1200, 0x1210), index slot at 0x1090, callbacks at 0x11a0 (one: int3; ret) */
+        PDWORD Tls = (PDWORD)IL_AT(IL_TLS_RVA);
+        Tls[0] = IL_IMAGE_BASE + IL_TEXT_RVA + 0x200;
+        Tls[1] = IL_IMAGE_BASE + IL_TEXT_RVA + 0x210;
+        Tls[2] = IL_IMAGE_BASE + IL_TEXT_RVA + 0x90;
+        if (Case->Extras & IL_EXTRA_TLS_CB)
+        {
+            Tls[3] = IL_IMAGE_BASE + IL_TEXT_RVA + 0x1a0;
+            ((PDWORD)IL_AT(IL_TEXT_RVA + 0x1a0))[0] = IL_IMAGE_BASE + IL_TEXT_RVA + 0x1c0;
+            IL_AT(IL_TEXT_RVA + 0x1c0)[0] = 0xcc;
+            IL_AT(IL_TEXT_RVA + 0x1c0)[1] = 0xc3;
+        }
+        Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress = IL_TLS_RVA;
+        Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].Size = 24;
+    }
 
     Cor->cb = sizeof(*Cor);
     Cor->MajorRuntimeVersion = Case->MajorRuntimeVersion;
@@ -436,6 +472,110 @@ test_DebuggedNative(
 }
 #endif
 
+/* PE32 directories that the converted header carries on. Measured on Windows 10 22H2 x64 (the image otherwise as case 0):
+ * a LOAD_CONFIG directory stays in the converted header and the process reaches the loader's breakpoint; an image with a
+ * TLS directory, with or without callbacks, does not start: the process ends with STATUS_INVALID_IMAGE_FORMAT
+ * (0xC000007B) before the loader's breakpoint, so no callback runs */
+static const IL_CASE IlExtraCases[] =
+{
+    { IL_ILONLY, 2, 5, sizeof(IL_COR20_HEADER), 0x03, TRUE, IL_LAYOUT_NORMAL, IL_EXTRA_LOADCFG },
+    { IL_ILONLY, 2, 5, sizeof(IL_COR20_HEADER), 0x03, TRUE, IL_LAYOUT_NORMAL, IL_EXTRA_TLS },
+    { IL_ILONLY, 2, 5, sizeof(IL_COR20_HEADER), 0x03, TRUE, IL_LAYOUT_NORMAL, IL_EXTRA_TLS | IL_EXTRA_TLS_CB },
+    { IL_ILONLY, 2, 5, sizeof(IL_COR20_HEADER), 0x03, TRUE, IL_LAYOUT_NORMAL, IL_EXTRA_TLS | IL_EXTRA_TLS_CB | IL_EXTRA_LOADCFG },
+};
+
+#ifdef _WIN64
+static
+void
+test_ExtraDirectories(
+    _In_ PCWSTR Path,
+    _In_ const IL_CASE *Case,
+    _In_ ULONG Index)
+{
+    STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
+    PROCESS_INFORMATION ProcessInfo;
+    DEBUG_EVENT Event;
+    BYTE Headers[IL_FILE_ALIGN];
+    PIMAGE_NT_HEADERS64 Nt64 = (PIMAGE_NT_HEADERS64)(Headers + 0x80);
+    PVOID Base;
+    BOOL Breakpoint = FALSE, Exited = FALSE;
+    DWORD ExitCode = 0;
+    ULONG Events;
+
+    if (!CreateProcessW(Path, NULL, NULL, NULL, FALSE, DEBUG_ONLY_THIS_PROCESS | CREATE_NO_WINDOW, NULL, NULL,
+                        &StartupInfo, &ProcessInfo))
+    {
+        ok(0, "extra %lu: CreateProcessW (debug) failed, error %lu\n", Index, GetLastError());
+        return;
+    }
+    for (Events = 0; Events < 300 && !Exited; Events++)
+    {
+        DWORD Continue = DBG_CONTINUE;
+
+        if (!WaitForDebugEvent(&Event, 10000))
+        {
+            ok(0, "extra %lu: no debug event, error %lu\n", Index, GetLastError());
+            break;
+        }
+        if (Event.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT && Event.u.CreateProcessInfo.hFile)
+            CloseHandle(Event.u.CreateProcessInfo.hFile);
+        else if (Event.dwDebugEventCode == LOAD_DLL_DEBUG_EVENT && Event.u.LoadDll.hFile)
+            CloseHandle(Event.u.LoadDll.hFile);
+        else if (Event.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT)
+        {
+            Exited = TRUE;
+            ExitCode = Event.u.ExitProcess.dwExitCode;
+        }
+        else if (Event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT)
+        {
+            if (!Breakpoint && Event.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT)
+            {
+                Breakpoint = TRUE;
+                if (ReadRemoteHeaders(ProcessInfo.hProcess, &Base, Headers) &&
+                    Nt64->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+                {
+                    ok(Nt64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].VirtualAddress ==
+                           ((Case->Extras & IL_EXTRA_LOADCFG) ? IL_LOADCFG_RVA : 0),
+                       "extra %lu: LOAD_CONFIG at 0x%lx\n", Index,
+                       Nt64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].VirtualAddress);
+                    ok(Nt64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].Size ==
+                           ((Case->Extras & IL_EXTRA_LOADCFG) ? IL_LOADCFG_SIZE : 0),
+                       "extra %lu: LOAD_CONFIG size 0x%lx\n", Index,
+                       Nt64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].Size);
+                }
+                else
+                {
+                    ok(0, "extra %lu: no PE32+ headers at the breakpoint\n", Index);
+                }
+                TerminateProcess(ProcessInfo.hProcess, 1);
+            }
+            else if (Event.u.Exception.ExceptionRecord.ExceptionCode != EXCEPTION_BREAKPOINT)
+            {
+                Continue = DBG_EXCEPTION_NOT_HANDLED;
+            }
+        }
+        ContinueDebugEvent(Event.dwProcessId, Event.dwThreadId, Continue);
+    }
+    if (Case->Extras & IL_EXTRA_TLS)
+    {
+        ok(!Breakpoint, "extra %lu: the loader's breakpoint was reached\n", Index);
+        ok(Exited && ExitCode == STATUS_INVALID_IMAGE_FORMAT, "extra %lu: exited %d with 0x%08lx\n", Index, Exited, ExitCode);
+    }
+    else
+    {
+        ok(Breakpoint, "extra %lu: no loader breakpoint\n", Index);
+    }
+    if (!Exited)
+    {
+        TerminateProcess(ProcessInfo.hProcess, 1);
+        DebugActiveProcessStop(ProcessInfo.dwProcessId);
+    }
+    WaitForSingleObject(ProcessInfo.hProcess, 5000);
+    CloseHandle(ProcessInfo.hThread);
+    CloseHandle(ProcessInfo.hProcess);
+}
+#endif
+
 static
 BOOL
 HaveWow64(VOID)
@@ -534,4 +674,18 @@ START_TEST(CreateProcessILOnly)
 #endif
         DeleteIlExe(Path, i);
     }
+
+#ifdef _WIN64
+    for (i = 0; i < _countof(IlExtraCases); i++)
+    {
+        StringCchPrintfW(Path, _countof(Path), L"%silexe_%lu_x%lu.exe", Dir, GetCurrentProcessId(), i);
+        if (!WriteIlExe(Path, &IlExtraCases[i]))
+        {
+            ok(0, "extra %lu: cannot write %ls, error %lu\n", i, Path, GetLastError());
+            continue;
+        }
+        test_ExtraDirectories(Path, &IlExtraCases[i], i);
+        DeleteIlExe(Path, 100 + i);
+    }
+#endif
 }
