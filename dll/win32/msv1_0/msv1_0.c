@@ -605,6 +605,8 @@ MsvpChangePassword(IN PLSA_CLIENT_REQUEST ClientRequest,
 
     TRACE("MsvpChangePassword()\n");
 
+    *ProtocolStatus = STATUS_SUCCESS;
+
     /* Parameters validation */
 
     if (SubmitBufferLength < sizeof(MSV1_0_CHANGEPASSWORD_REQUEST))
@@ -697,7 +699,7 @@ MsvpChangePassword(IN PLSA_CLIENT_REQUEST ClientRequest,
     if (!NT_SUCCESS(Status))
     {
         TRACE("SamrLookupNamesInDomain failed (Status %08lx)\n", Status);
-        Status = STATUS_NO_SUCH_USER;
+        Status = STATUS_WRONG_PASSWORD;
         goto done;
     }
 
@@ -705,7 +707,7 @@ MsvpChangePassword(IN PLSA_CLIENT_REQUEST ClientRequest,
     if (Use.Element[0] != SidTypeUser)
     {
         TRACE("Account is not a user account!\n");
-        Status = STATUS_NO_SUCH_USER;
+        Status = STATUS_WRONG_PASSWORD;
         goto done;
     }
 
@@ -845,6 +847,18 @@ MsvpChangePassword(IN PLSA_CLIENT_REQUEST ClientRequest,
     }
 
 done:
+    /*
+     * Measured on Windows 10 22H2: a change that SAM refuses (a wrong old password, and an
+     * account that does not exist, which is not told apart from it) completes the call with
+     * STATUS_SUCCESS and returns the reason as the protocol status (STATUS_WRONG_PASSWORD);
+     * NetUserChangePassword gives ERROR_INVALID_PASSWORD for both.
+     */
+    if (!NT_SUCCESS(Status))
+    {
+        *ProtocolStatus = Status;
+        Status = STATUS_SUCCESS;
+    }
+
     if (UserHandle != NULL)
         SamrCloseHandle(&UserHandle);
 
