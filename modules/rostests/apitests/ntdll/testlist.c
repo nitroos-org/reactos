@@ -141,6 +141,7 @@ extern void func_NtStartProfile(void);
 extern void func_NtSystemInformation(void);
 extern void func_NtUnloadDriver(void);
 extern void func_NtWriteFile(void);
+extern void func_PagerBasic(void);
 extern void func_RtlAllocateHeap(void);
 extern void func_RtlBitmapApi(void);
 extern void func_RtlCaptureContext(void);
@@ -391,6 +392,7 @@ const struct test winetest_testlist[] =
     { "NtSystemInformation",            func_NtSystemInformation },
     { "NtUnloadDriver",                 func_NtUnloadDriver },
     { "NtWriteFile",                    func_NtWriteFile },
+    { "PagerBasic",                     func_PagerBasic },
     { "RtlAllocateHeap",                func_RtlAllocateHeap },
     { "RtlBitmapApi",                   func_RtlBitmapApi },
     { "RtlComputePrivatizedDllName_U",  func_RtlComputePrivatizedDllName_U },
