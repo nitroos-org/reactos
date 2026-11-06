@@ -79,9 +79,9 @@ static const INFORMATION_CLASS_INFO SeTokenInformationClass[] = {
     IQS_SAME(TOKEN_GROUPS, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenIsAppContainer */
     IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
-    /* TokenCapabilities: TOKEN_GROUPS, none without an AppContainer */
+    /* TokenCapabilities: TOKEN_GROUPS, the capabilities of a lowbox token, none for others */
     IQS_NO_TYPE_LENGTH(ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
-    /* TokenAppContainerSid: TOKEN_APPCONTAINER_INFORMATION, a SID pointer */
+    /* TokenAppContainerSid: TOKEN_APPCONTAINER_INFORMATION, a SID pointer (and the SID of a lowbox token) */
     IQS_SAME(PVOID, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
     /* TokenAppContainerNumber */
     IQS_SAME(ULONG, ULONG, ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE),
@@ -132,7 +132,7 @@ typedef struct _SEP_TOKEN_ACCESS_INFORMATION
 /* The TokenFlags Windows 10 reports in TOKEN_ACCESS_INFORMATION.Flags (measured: the privilege summary bits stay out; TOKEN_WRITE_RESTRICTED shares its value with this kernel's TOKEN_HAS_ADMIN_GROUP and is not reported) */
 #define SEP_ACCESS_INFORMATION_FLAGS \
     (TOKEN_IS_RESTRICTED | TOKEN_SANDBOX_INERT | TOKEN_VIRTUALIZE_ALLOWED | \
-     TOKEN_VIRTUALIZE_ENABLED | TOKEN_IS_FILTERED | TOKEN_UIACCESS | TOKEN_NOT_LOW)
+     TOKEN_VIRTUALIZE_ENABLED | TOKEN_IS_FILTERED | TOKEN_UIACCESS | TOKEN_NOT_LOW | TOKEN_LOWBOX)
 
 /* TOKEN_ELEVATION_TYPE values (the enum is declared in user-mode headers only) */
 #define SEP_ELEVATION_TYPE_DEFAULT  1 /* TokenElevationTypeDefault */
@@ -216,8 +216,10 @@ SepIsTokenElevated(
  *
  * Layout (measured on Windows 10 22H2, x64): the header, the SID hash of the
  * user and groups followed by their SID_AND_ATTRIBUTES array and SIDs, the
- * restricted SID hash (and its array and SIDs when there are any), the empty
- * capability SID hash, and the privileges. Every pointer in the answer is an
+ * restricted SID hash (and its array and SIDs when there are any), the
+ * capability SID hash (empty but for a lowbox token, with its array and SIDs
+ * then), and the privileges; a lowbox token's package SID follows them (where
+ * Windows puts that SID is not measured). Every pointer in the answer is an
  * address in the caller's buffer. The SID hashes are filled with all bits set:
  * Windows keeps a bloom filter there that nothing in user mode reads, and a
  * saturated filter is the one that is always safe (a reader falls back to
@@ -246,7 +248,8 @@ SepBuildTokenAccessInformation(
 {
     ULONG HeaderSize = ALIGN_UP_BY(sizeof(SEP_TOKEN_ACCESS_INFORMATION), sizeof(PVOID));
     ULONG HashSize = ALIGN_UP_BY(sizeof(SID_AND_ATTRIBUTES_HASH), sizeof(PVOID));
-    ULONG SidsSize, RestrictedSize = 0, PrivilegesSize, Total, Offset, i, j;
+    ULONG SidsSize, RestrictedSize = 0, CapabilitiesSize = 0, PackageSize = 0, PrivilegesSize, Total, Offset, i, j;
+    PSEP_LOWBOX Lowbox = Token->Lowbox;
     PUCHAR Kernel;
     PSEP_TOKEN_ACCESS_INFORMATION Info;
     PSID_AND_ATTRIBUTES_HASH Hash;
@@ -265,9 +268,20 @@ SepBuildTokenAccessInformation(
                          RtlLengthSidAndAttributes(Token->RestrictedSidCount, Token->RestrictedSids);
         RestrictedSize = ALIGN_UP_BY(RestrictedSize, sizeof(PVOID));
     }
+    if (Lowbox)
+    {
+        if (Lowbox->CapabilityCount > 0)
+        {
+            CapabilitiesSize = Lowbox->CapabilityCount * sizeof(SID_AND_ATTRIBUTES) +
+                               RtlLengthSidAndAttributes(Lowbox->CapabilityCount, Lowbox->Capabilities);
+            CapabilitiesSize = ALIGN_UP_BY(CapabilitiesSize, sizeof(PVOID));
+        }
+        PackageSize = ALIGN_UP_BY(RtlLengthSid(Lowbox->PackageSid), sizeof(PVOID));
+    }
     PrivilegesSize = ALIGN_UP_BY(FIELD_OFFSET(TOKEN_PRIVILEGES, Privileges[Token->PrivilegeCount]), sizeof(PVOID));
 
-    Total = HeaderSize + HashSize + SidsSize + HashSize + RestrictedSize + HashSize + PrivilegesSize;
+    Total = HeaderSize + HashSize + SidsSize + HashSize + RestrictedSize + HashSize + CapabilitiesSize +
+            PrivilegesSize + PackageSize;
     *Required = Total;
     if (UserBase == NULL || Length < Total)
         return STATUS_BUFFER_TOO_SMALL;
@@ -336,15 +350,45 @@ SepBuildTokenAccessInformation(
         Offset += RestrictedSize;
     }
 
-    /* No capabilities without an AppContainer */
+    /* The capabilities of a lowbox token; the hash exists even when there are none */
+    Hash = (PSID_AND_ATTRIBUTES_HASH)(Kernel + Offset);
     Info->CapabilitiesHash = (PSID_AND_ATTRIBUTES_HASH)(UserBase + Offset);
     Offset += HashSize;
+    if (CapabilitiesSize > 0)
+    {
+        Hash->SidCount = Lowbox->CapabilityCount;
+        Hash->SidAttr = (PSID_AND_ATTRIBUTES)(UserBase + Offset);
+        for (i = 0; i < SID_HASH_SIZE; i++)
+            Hash->Hash[i] = ~(SID_HASH_ENTRY)0;
+        Array = (PSID_AND_ATTRIBUTES)(Kernel + Offset);
+        Status = RtlCopySidAndAttributesArray(Lowbox->CapabilityCount,
+                                              Lowbox->Capabilities,
+                                              CapabilitiesSize - Lowbox->CapabilityCount * sizeof(SID_AND_ATTRIBUTES),
+                                              Array,
+                                              (PSID)&Array[Lowbox->CapabilityCount],
+                                              &SidEnd,
+                                              &Left);
+        if (!NT_SUCCESS(Status))
+            goto Fail;
+        for (j = 0; j < Lowbox->CapabilityCount; j++)
+            Array[j].Sid = (PSID)(UserBase + ((PUCHAR)Array[j].Sid - Kernel));
+        Offset += CapabilitiesSize;
+    }
 
     Info->Privileges = (PTOKEN_PRIVILEGES)(UserBase + Offset);
     ((PTOKEN_PRIVILEGES)(Kernel + Offset))->PrivilegeCount = Token->PrivilegeCount;
     RtlCopyMemory(((PTOKEN_PRIVILEGES)(Kernel + Offset))->Privileges,
                   Token->Privileges,
                   Token->PrivilegeCount * sizeof(LUID_AND_ATTRIBUTES));
+    Offset += PrivilegesSize;
+
+    /* The AppContainer of a lowbox token: its number and package SID (the SID after the privileges) */
+    if (Lowbox)
+    {
+        Info->AppContainerNumber = Lowbox->Number;
+        Info->PackageSid = (PSID)(UserBase + Offset);
+        RtlCopyMemory(Kernel + Offset, Lowbox->PackageSid, RtlLengthSid(Lowbox->PackageSid));
+    }
     *Blob = Kernel;
     return STATUS_SUCCESS;
 
@@ -1434,7 +1478,7 @@ NtQueryInformationToken(
              * Classes that report a single ULONG. Without UAC every token has the
              * default elevation type, UI access and virtualization are token
              * flags (never set here), the mandatory policy is the same for all
-             * tokens and no token belongs to an AppContainer.
+             * tokens and a lowbox token belongs to an AppContainer.
              */
             case TokenElevationType:
             case TokenElevation:
@@ -1467,6 +1511,9 @@ NtQueryInformationToken(
                         break;
                     case TokenMandatoryPolicy:
                         Value = SEP_MANDATORY_POLICY_DEFAULT;
+                        break;
+                    case TokenIsAppContainer:
+                        Value = (Token->Lowbox != NULL);
                         break;
                     default:
                         Value = FALSE;
@@ -1676,21 +1723,38 @@ NtQueryInformationToken(
                 break;
             }
 
-            /* No AppContainers here: no capabilities (a TOKEN_GROUPS with no group), no AppContainer SID or number */
+            /*
+             * The AppContainer classes answer from the lowbox data. Any other
+             * token has no capabilities (a TOKEN_GROUPS with no group; Windows
+             * writes the count only), a NULL AppContainer SID and number 0.
+             * TOKEN_APPCONTAINER_INFORMATION is a SID pointer followed by the
+             * SID it points to, like TOKEN_USER.
+             */
             case SepTokenCapabilities:
             case SepTokenAppContainerSid:
             case SepTokenAppContainerNumber:
             case SepTokenIsRestricted:
             case SepTokenProcessTrustLevel:
             {
+                PSEP_LOWBOX Lowbox = Token->Lowbox;
+
                 DPRINT("NtQueryInformationToken(%d)\n", TokenInformationClass);
 
                 switch (TokenInformationClass)
                 {
                     case SepTokenCapabilities:
                         RequiredLength = FIELD_OFFSET(TOKEN_GROUPS, Groups);
+                        if (Lowbox && Lowbox->CapabilityCount > 0)
+                        {
+                            RequiredLength += RtlLengthSidAndAttributes(Lowbox->CapabilityCount,
+                                                                        Lowbox->Capabilities);
+                        }
                         break;
                     case SepTokenAppContainerSid:
+                        RequiredLength = sizeof(PVOID);
+                        if (Lowbox)
+                            RequiredLength += RtlLengthSid(Lowbox->PackageSid);
+                        break;
                     case SepTokenProcessTrustLevel:
                         RequiredLength = sizeof(PVOID);
                         break;
@@ -1705,13 +1769,43 @@ NtQueryInformationToken(
                     {
                         switch (TokenInformationClass)
                         {
-                            /* Windows writes the group count only */
                             case SepTokenCapabilities:
-                                ((PTOKEN_GROUPS)TokenInformation)->GroupCount = 0;
+                            {
+                                PTOKEN_GROUPS Groups = (PTOKEN_GROUPS)TokenInformation;
+
+                                Groups->GroupCount = Lowbox ? Lowbox->CapabilityCount : 0;
+                                if (Lowbox && Lowbox->CapabilityCount > 0)
+                                {
+                                    ULONG ArrayLength = Lowbox->CapabilityCount * sizeof(SID_AND_ATTRIBUTES);
+
+                                    Status = RtlCopySidAndAttributesArray(Lowbox->CapabilityCount,
+                                                                          Lowbox->Capabilities,
+                                                                          RequiredLength - FIELD_OFFSET(TOKEN_GROUPS, Groups) - ArrayLength,
+                                                                          &Groups->Groups[0],
+                                                                          (PSID)((PUCHAR)&Groups->Groups[0] + ArrayLength),
+                                                                          &Unused.PSid,
+                                                                          &Unused.Ulong);
+                                }
                                 break;
+                            }
                             case SepTokenAppContainerSid:
+                                if (Lowbox)
+                                {
+                                    PSID Sid = (PSID)((PUCHAR)TokenInformation + sizeof(PVOID));
+
+                                    RtlCopyMemory(Sid, Lowbox->PackageSid, RtlLengthSid(Lowbox->PackageSid));
+                                    *(PVOID *)TokenInformation = Sid;
+                                }
+                                else
+                                {
+                                    *(PVOID *)TokenInformation = NULL;
+                                }
+                                break;
                             case SepTokenProcessTrustLevel:
                                 *(PVOID *)TokenInformation = NULL;
+                                break;
+                            case SepTokenAppContainerNumber:
+                                *(PULONG)TokenInformation = Lowbox ? Lowbox->Number : 0;
                                 break;
                             case SepTokenIsRestricted:
                                 *(PULONG)TokenInformation = !!(Token->TokenFlags & TOKEN_IS_RESTRICTED);
