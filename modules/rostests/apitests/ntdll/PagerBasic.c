@@ -238,6 +238,25 @@ TouchRange(
 }
 
 static
+NTSTATUS
+ReadUnderSeh(
+    _In_ PUCHAR Page)
+{
+    NTSTATUS Code = STATUS_SUCCESS;
+
+    _SEH2_TRY
+    {
+        (VOID)*(volatile UCHAR *)Page;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Code = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    return Code;
+}
+
+static
 PUCHAR
 AllocatePages(
     _In_ ULONG Pages,
@@ -493,6 +512,25 @@ START_TEST(PagerBasic)
         ok(Words[0] == 0 && Words[PageSize / sizeof(ULONG_PTR) - 1] == 0, "recommitted page %lu is not zero\n", i);
     }
     ok_int(CheckGen(Base, 64, TEST_PAGES - 64), 0);
+
+    /*
+     * 6b. PAGE_GUARD on dirty resident pages (made transition by the protection change, then
+     * paged out) and on paged-out pages: the first touch is the guard violation, the data is intact
+     */
+    PageOutEverything(TRUE);
+    TouchRange(Base, 64, 4);
+    FillRange(Base, 64, 4, 1, 6);
+    Address = Base + 64 * PageSize;
+    Size = 8 * PageSize;
+    ok_ntstatus(NtProtectVirtualMemory(NtCurrentProcess(), &Address, &Size, PAGE_READWRITE | PAGE_GUARD, &Old32), STATUS_SUCCESS);
+    ok_hex(Old32, PAGE_READWRITE);
+    PageOutEverything(TRUE);
+    for (i = 64; i < 72; i++)
+        ok_ntstatus(ReadUnderSeh(Base + i * PageSize), STATUS_GUARD_PAGE_VIOLATION);
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), Base + 66 * PageSize, MemoryBasicInformation, &Mbi, sizeof(Mbi), NULL);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok_hex(Mbi.Protect, PAGE_READWRITE);
+    ok_int(CheckGen(Base, 64, 8), 0);
 
     /* 7. VirtualLock pages stay resident */
     Locked = AllocatePages(4, PAGE_READWRITE);

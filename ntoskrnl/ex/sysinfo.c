@@ -1658,7 +1658,6 @@ QSI_DEF(SystemFileCacheInformation)
     return ExpQueryFileCacheInformation((SYSTEM_FILECACHE_INFORMATION *)Buffer, Size, ReqSize);
 }
 
-/* Class 81 - File Cache Information Ex (same layout; used by GetSystemFileCacheSize) */
 /*
  * Class 80 - Memory list information. NitroPager only: without it the class
  * answers as it did before it existed (query: not implemented, set: invalid
@@ -1699,6 +1698,7 @@ SSI_DEF(SystemMemoryListInformation)
     return MmSetMemoryListInformation(Command, Address, ExGetPreviousMode());
 }
 
+/* Class 81 - File Cache Information Ex (same layout; used by GetSystemFileCacheSize) */
 QSI_DEF(SystemFileCacheInformationEx)
 {
     return ExpQueryFileCacheInformation((SYSTEM_FILECACHE_INFORMATION *)Buffer, Size, ReqSize);

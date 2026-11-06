@@ -543,6 +543,8 @@ typedef struct _MMPAGING_FILE
     /* NitroPager: owner tag of every slot below SlotTagCount (0 = unwritten); NULL = no ARM3 slots here */
     PULONG SlotTags;
     PFN_NUMBER SlotTagCount;
+    /* While the tag array is being replaced by a larger one: tag writes go to it as well (slot lock) */
+    PULONG SlotTagsMirror;
     /* Where the next ARM3 slot search starts */
     ULONG SlotHint;
 }

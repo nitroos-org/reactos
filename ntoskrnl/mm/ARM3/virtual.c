@@ -3612,8 +3612,8 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                 }
                 else
                 {
-                    /* Write the protection mask, the TB is flushed with the list */
-                    Pfn1->OriginalPte.u.Soft.Protection = ProtectionMask;
+                    /* The TB is flushed with the list; OriginalPte.Protection is
+                       stored by MiFlushTbAndCapture under the PFN lock (F4) */
                     MiFlushTbAndCapture(Vad,
                                         PointerPte,
                                         ProtectionMask,

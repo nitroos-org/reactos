@@ -56,12 +56,12 @@ MiArchCreateProcessAddressSpace(
     HyperPdPfn = MiRemoveZeroPageSafe(PageColor);
     ZeroHyperPd = (HyperPdPfn == 0);
     if (ZeroHyperPd)
-        HyperPdPfn = MiRemoveAnyPage(PageColor);
+        HyperPdPfn = MiRemoveAnyPageGated(PageColor);
     PageColor = MI_GET_NEXT_PROCESS_COLOR(Process);
     HyperPtPfn = MiRemoveZeroPageSafe(PageColor);
     ZeroHyperPt = (HyperPtPfn == 0);
     if (ZeroHyperPt)
-        HyperPtPfn = MiRemoveAnyPage(PageColor);
+        HyperPtPfn = MiRemoveAnyPageGated(PageColor);
     MiReleasePfnLock(OldIrql);
 
     if (ZeroHyperPd) MiZeroPhysicalPage(HyperPdPfn);

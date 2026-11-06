@@ -330,6 +330,27 @@ MiAccessCheck(IN PMMPTE PointerPte,
         ASSERT(TempPte.u.Soft.Prototype == 0);
 
         /* Remove the guard page bit, and return a guard page violation */
+        if (TempPte.u.Soft.Transition)
+        {
+            /*
+             * PTE-1: a transition PTE (a resident page made PAGE_GUARD) can become a
+             * page-file PTE under the PFN lock alone (NitroPager repurpose), and the
+             * frame then belongs to someone else. Read it again under the PFN lock and
+             * change nothing but the protection, which is the same field in both forms.
+             * The working set lock the caller holds keeps it from becoming valid.
+             */
+            KIRQL OldIrql = MiAcquirePfnLock();
+
+            TempPte = *PointerPte;
+            ASSERT(TempPte.u.Hard.Valid == 0);
+            ASSERT(TempPte.u.Soft.Prototype == 0);
+            TempPte.u.Soft.Protection = ProtectionMask & ~MM_GUARDPAGE;
+            ASSERT(TempPte.u.Long != 0);
+            MI_WRITE_INVALID_PTE(PointerPte, TempPte);
+            MiReleasePfnLock(OldIrql);
+            return STATUS_GUARD_PAGE_VIOLATION;
+        }
+
         TempPte.u.Soft.Protection = ProtectionMask & ~MM_GUARDPAGE;
         ASSERT(TempPte.u.Long != 0);
         MI_WRITE_INVALID_PTE(PointerPte, TempPte);
