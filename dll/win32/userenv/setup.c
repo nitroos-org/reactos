@@ -411,7 +411,7 @@ InitializeProfiles(VOID)
         RegCloseKey(hKey);
         return FALSE;
     }
-    if (!CreateDirectoryW(szProgramDataPath, NULL))
+    if (!CreateSecuredProfileDir(szProgramDataPath, ProfileDirProgramData, NULL))
     {
         if (GetLastError() != ERROR_ALREADY_EXISTS)
         {
@@ -419,6 +419,9 @@ InitializeProfiles(VOID)
             RegCloseKey(hKey);
             return FALSE;
         }
+
+        /* One that was made before has the DACL of the volume root: give it the one of Windows */
+        SecureExistingProfileDirectory(szProgramDataPath, ProfileDirProgramData, NULL, TRUE);
     }
     SetFileAttributesW(szProgramDataPath, FILE_ATTRIBUTE_HIDDEN);
 

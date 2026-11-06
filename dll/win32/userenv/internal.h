@@ -54,6 +54,10 @@ typedef enum _PROFILE_DIR_KIND
 {
     ProfileDirUsers,    /* The profiles directory and the Default profile */
     ProfileDirPublic,
+    ProfileDirProgramData,  /* C:\ProgramData: Users read, and add files and directories */
+    ProfileDirSystem,       /* Windows, Program Files: Users and application packages read only */
+    ProfileDirTemp,         /* Windows\Temp */
+    ProfileDirRoot,         /* the root of the system volume */
     ProfileDirUser      /* The profile of a user: SYSTEM, Administrators and that user */
 } PROFILE_DIR_KIND;
 
@@ -62,6 +66,10 @@ CreateSecuredProfileDir(
     _In_ PCWSTR pszPath,
     _In_ PROFILE_DIR_KIND Kind,
     _In_opt_ PSID pUserSid);
+
+BOOL
+WINAPI
+SecureSystemDirectories(VOID);
 
 VOID
 SecureExistingProfileDirectory(
