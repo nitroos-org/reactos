@@ -167,6 +167,167 @@ Quickie:
     return Status;
 }
 
+/* One ACE of a DACL made by CsrBuildDacl */
+typedef struct _CSR_ACE_SPEC
+{
+    PSID Sid;
+    ACCESS_MASK Mask;
+    UCHAR Flags;
+} CSR_ACE_SPEC;
+
+/*++
+ * @name CsrBuildDacl
+ *
+ * Builds a DACL of access-allowed ACEs in the CSR heap and puts it in a
+ * security descriptor. The caller frees the DACL with CsrFreeDacl.
+ *
+ *--*/
+static
+NTSTATUS
+CsrBuildDacl(IN const CSR_ACE_SPEC *Aces,
+             IN ULONG Count,
+             OUT PSECURITY_DESCRIPTOR Sd)
+{
+    PACL Dacl;
+    ULONG AclLength = sizeof(ACL), i;
+    NTSTATUS Status;
+
+    for (i = 0; i < Count; i++)
+        AclLength += sizeof(ACCESS_ALLOWED_ACE) - sizeof(ULONG) + RtlLengthSid(Aces[i].Sid);
+
+    Dacl = RtlAllocateHeap(CsrHeap, 0, AclLength);
+    if (!Dacl) return STATUS_NO_MEMORY;
+
+    Status = RtlCreateAcl(Dacl, AclLength, ACL_REVISION2);
+    for (i = 0; NT_SUCCESS(Status) && i < Count; i++)
+    {
+        Status = RtlAddAccessAllowedAceEx(Dacl, ACL_REVISION2, Aces[i].Flags, Aces[i].Mask, Aces[i].Sid);
+    }
+    if (NT_SUCCESS(Status))
+        Status = RtlCreateSecurityDescriptor(Sd, SECURITY_DESCRIPTOR_REVISION);
+    if (NT_SUCCESS(Status))
+        Status = RtlSetDaclSecurityDescriptor(Sd, TRUE, Dacl, FALSE);
+    if (!NT_SUCCESS(Status))
+        RtlFreeHeap(CsrHeap, 0, Dacl);
+    return Status;
+}
+
+static
+VOID
+CsrFreeDacl(IN PSECURITY_DESCRIPTOR Sd)
+{
+    PACL Dacl;
+    BOOLEAN Present, Default;
+
+    if (NT_SUCCESS(RtlGetDaclSecurityDescriptor(Sd, &Present, &Dacl, &Default)) && Present && Dacl)
+        RtlFreeHeap(CsrHeap, 0, Dacl);
+}
+
+/*++
+ * @name CsrBuildSessionProtection
+ *
+ * The DACLs of the csrss objects of a session other than 0, as measured on
+ * Windows 10 22H2 (session 1, minus the entries made for the session's logon:
+ * the user, the logon SID and the Desktop Window Manager group, which logon
+ * adds, phase P3c/P4). Session 0's objects are left as they are.
+ *
+ * @param Kind
+ *        CSR_PROTECT_SESSION_DIR: \Sessions\<id>: SYSTEM and Administrators
+ *            have full access, the creator's children inherit full access,
+ *            the restricted code can traverse;
+ *        CSR_PROTECT_WINDOWS_DIR: \Sessions\<id>\Windows (csrss ports): the
+ *            world can only read, query and traverse, SYSTEM has full access;
+ *        CSR_PROTECT_BNOLINK: \Sessions\BNOLINKS\<id>: the world and the
+ *            restricted code can read/query, Administrators have full access;
+ *        CSR_PROTECT_WINDOWS_LINK: \Sessions\0\Windows: SYSTEM and
+ *            Administrators only.
+ *
+ *--*/
+#define CSR_PROTECT_SESSION_DIR     0
+#define CSR_PROTECT_WINDOWS_DIR     1
+#define CSR_PROTECT_BNOLINK         2
+#define CSR_PROTECT_WINDOWS_LINK    3
+
+static
+NTSTATUS
+CsrBuildSessionProtection(IN ULONG Kind,
+                          OUT PSECURITY_DESCRIPTOR Sd)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY CreatorAuthority = {SECURITY_CREATOR_SID_AUTHORITY};
+    PSID SystemSid = NULL, AdminSid = NULL, WorldSid = NULL, CreatorSid = NULL, RestrictedSid = NULL;
+    const UCHAR Inherit = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
+    NTSTATUS Status;
+
+    Status = RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID,
+                                         0, 0, 0, 0, 0, 0, 0, &SystemSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                             DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &AdminSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID,
+                                             0, 0, 0, 0, 0, 0, 0, &WorldSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAllocateAndInitializeSid(&CreatorAuthority, 1, SECURITY_CREATOR_OWNER_RID,
+                                             0, 0, 0, 0, 0, 0, 0, &CreatorSid);
+    if (NT_SUCCESS(Status))
+        Status = RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_RESTRICTED_CODE_RID,
+                                             0, 0, 0, 0, 0, 0, 0, &RestrictedSid);
+    if (NT_SUCCESS(Status))
+    {
+        const CSR_ACE_SPEC SessionDir[] =
+        {
+            { CreatorSid,    GENERIC_ALL,           Inherit },
+            { AdminSid,      DIRECTORY_ALL_ACCESS,  0 },
+            { SystemSid,     DIRECTORY_ALL_ACCESS,  0 },
+            { RestrictedSid, DIRECTORY_TRAVERSE,    0 },
+        };
+        const CSR_ACE_SPEC WindowsDir[] =
+        {
+            { WorldSid,      READ_CONTROL | DIRECTORY_QUERY | DIRECTORY_TRAVERSE, 0 },
+            { SystemSid,     DIRECTORY_ALL_ACCESS,  0 },
+        };
+        const CSR_ACE_SPEC BnoLink[] =
+        {
+            { WorldSid,      READ_CONTROL | SYMBOLIC_LINK_QUERY, 0 },
+            { RestrictedSid, READ_CONTROL | SYMBOLIC_LINK_QUERY, 0 },
+            { AdminSid,      SYMBOLIC_LINK_ALL_ACCESS, 0 },
+            { AdminSid,      SYMBOLIC_LINK_ALL_ACCESS, 0 }, /* Windows lists it twice */
+        };
+        const CSR_ACE_SPEC WindowsLink[] =
+        {
+            { SystemSid,     SYMBOLIC_LINK_ALL_ACCESS, 0 },
+            { AdminSid,      SYMBOLIC_LINK_ALL_ACCESS, 0 },
+            { AdminSid,      SYMBOLIC_LINK_ALL_ACCESS, 0 }, /* Windows lists it twice */
+        };
+
+        switch (Kind)
+        {
+            case CSR_PROTECT_SESSION_DIR:
+                Status = CsrBuildDacl(SessionDir, RTL_NUMBER_OF(SessionDir), Sd);
+                break;
+            case CSR_PROTECT_WINDOWS_DIR:
+                Status = CsrBuildDacl(WindowsDir, RTL_NUMBER_OF(WindowsDir), Sd);
+                break;
+            case CSR_PROTECT_BNOLINK:
+                Status = CsrBuildDacl(BnoLink, RTL_NUMBER_OF(BnoLink), Sd);
+                break;
+            default:
+                Status = CsrBuildDacl(WindowsLink, RTL_NUMBER_OF(WindowsLink), Sd);
+                break;
+        }
+    }
+
+    /* The DACL holds copies of the SIDs */
+    if (SystemSid) RtlFreeSid(SystemSid);
+    if (AdminSid) RtlFreeSid(AdminSid);
+    if (WorldSid) RtlFreeSid(WorldSid);
+    if (CreatorSid) RtlFreeSid(CreatorSid);
+    if (RestrictedSid) RtlFreeSid(RestrictedSid);
+    return Status;
+}
+
 /*++
  * @name CsrSetDirectorySecurity
  *
@@ -185,8 +346,25 @@ NTSTATUS
 NTAPI
 CsrSetDirectorySecurity(IN HANDLE ObjectDirectory)
 {
-    /* FIXME: Implement */
-    return STATUS_SUCCESS;
+    SECURITY_DESCRIPTOR Sd;
+    NTSTATUS Status;
+
+    /*
+     * Session 0 keeps the directory as it is (FIXME). A session other than
+     * 0 (NitroSessions) gets the DACL that Windows gives its \Sessions\<id>\Windows.
+     */
+    if (SessionId == 0) return STATUS_SUCCESS;
+
+    Status = CsrBuildSessionProtection(CSR_PROTECT_WINDOWS_DIR, &Sd);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = NtSetSecurityObject(ObjectDirectory, DACL_SECURITY_INFORMATION, &Sd);
+    CsrFreeDacl(&Sd);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("CSRSS: cannot protect the object directory of session %lu, Status=%lx\n",
+                SessionId, Status);
+    }
+    return Status;
 }
 
 /*++
@@ -427,7 +605,8 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
     UNICODE_STRING SessionString, BnoString;
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE BnoHandle;
-    SECURITY_DESCRIPTOR DosDevicesSd;
+    SECURITY_DESCRIPTOR DosDevicesSd, SessionSd, LinkSd;
+    BOOLEAN HaveSessionSd = FALSE, HaveLinkSd = FALSE;
     NTSTATUS Status;
 
     /* Generate the session BNOLINKS directory name */
@@ -466,15 +645,23 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
         /* Use the direct name */
         RtlInitUnicodeString(&BnoString, L"\\BaseNamedObjects");
     }
+    /* A session other than 0 (NitroSessions): the link has Windows' DACL */
+    if (Session != 0)
+    {
+        Status = CsrBuildSessionProtection(CSR_PROTECT_BNOLINK, &LinkSd);
+        if (!NT_SUCCESS(Status)) return Status;
+        HaveLinkSd = TRUE;
+    }
     InitializeObjectAttributes(&ObjectAttributes,
                                &SessionString,
                                OBJ_OPENIF | OBJ_CASE_INSENSITIVE,
                                BNOLinksDirectory,
-                               NULL);
+                               HaveLinkSd ? &LinkSd : NULL);
     Status = NtCreateSymbolicLinkObject(&BnoHandle,
                                         SYMBOLIC_LINK_ALL_ACCESS,
                                         &ObjectAttributes,
                                         &BnoString);
+    if (HaveLinkSd) CsrFreeDacl(&LinkSd);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("CSRSS: NtCreateSymbolicLinkObject failed in "
@@ -486,6 +673,18 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
     Status = GetDosDevicesProtection(&DosDevicesSd);
     if (!NT_SUCCESS(Status)) return Status;
 
+    /* A session other than 0: the session directory has Windows' DACL */
+    if (Session != 0)
+    {
+        Status = CsrBuildSessionProtection(CSR_PROTECT_SESSION_DIR, &SessionSd);
+        if (!NT_SUCCESS(Status))
+        {
+            FreeDosDevicesProtection(&DosDevicesSd);
+            return Status;
+        }
+        HaveSessionSd = TRUE;
+    }
+
     /* Now create a directory for this session */
     _swprintf(SessionBuffer, L"%ws\\%lu", SESSION_ROOT, Session);
     RtlInitUnicodeString(&SessionString, SessionBuffer);
@@ -495,10 +694,11 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
                                &SessionString,
                                OBJ_OPENIF | OBJ_CASE_INSENSITIVE,
                                0,
-                               &DosDevicesSd);
+                               HaveSessionSd ? &SessionSd : &DosDevicesSd);
     Status = NtCreateDirectoryObject(&SessionObjectDirectory,
                                      DIRECTORY_ALL_ACCESS,
                                      &ObjectAttributes);
+    if (HaveSessionSd) CsrFreeDacl(&SessionSd);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("CSRSS: NtCreateDirectoryObject failed in "
@@ -528,6 +728,76 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
 
     /* Return */
     return Status;
+}
+
+/*++
+ * @name CsrCreateSession0WindowsLink
+ *
+ * Windows has \Sessions\0\Windows, a symbolic link to \Windows, so that
+ * the csrss directory of every session, including session 0, can be reached
+ * as \Sessions\<id>\Windows. The fork's session 0 has \Windows only. The
+ * link is created when the session feature flag (NitroSessions) is not 0;
+ * without it, session 0 is as it always was.
+ *
+ * @param Target
+ *        The csrss object directory of session 0 (\Windows).
+ *
+ * @return None. A failure is logged and is not fatal.
+ *
+ * @remarks None.
+ *
+ *--*/
+VOID
+NTAPI
+CsrCreateSession0WindowsLink(IN PUNICODE_STRING Target)
+{
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(SM_REG_KEY);
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"NitroSessions");
+    UNICODE_STRING LinkName = RTL_CONSTANT_STRING(L"\\Sessions\\0\\Windows");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UCHAR KeyValueBuffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION KeyValuePartialInfo = (PVOID)KeyValueBuffer;
+    ULONG ResultLength;
+    SECURITY_DESCRIPTOR LinkSd;
+    HANDLE hKey, LinkHandle;
+    NTSTATUS Status;
+
+    /* Only when the flag is set to a non-zero DWORD */
+    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenKey(&hKey, KEY_QUERY_VALUE, &ObjectAttributes);
+    if (!NT_SUCCESS(Status)) return;
+    Status = NtQueryValueKey(hKey,
+                             &ValueName,
+                             KeyValuePartialInformation,
+                             KeyValueBuffer,
+                             sizeof(KeyValueBuffer),
+                             &ResultLength);
+    NtClose(hKey);
+    if (!NT_SUCCESS(Status) ||
+        (KeyValuePartialInfo->Type != REG_DWORD) ||
+        (KeyValuePartialInfo->DataLength != sizeof(ULONG)) ||
+        (*(PULONG)KeyValuePartialInfo->Data == 0))
+    {
+        return;
+    }
+
+    /* Windows: only SYSTEM and Administrators have access to the link */
+    Status = CsrBuildSessionProtection(CSR_PROTECT_WINDOWS_LINK, &LinkSd);
+    if (!NT_SUCCESS(Status)) return;
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &LinkName,
+                               OBJ_OPENIF | OBJ_CASE_INSENSITIVE | OBJ_PERMANENT,
+                               NULL,
+                               &LinkSd);
+    Status = NtCreateSymbolicLinkObject(&LinkHandle,
+                                        SYMBOLIC_LINK_ALL_ACCESS,
+                                        &ObjectAttributes,
+                                        Target);
+    CsrFreeDacl(&LinkSd);
+    if (NT_SUCCESS(Status))
+        NtClose(LinkHandle);
+    else
+        DPRINT1("CSRSS: cannot create %wZ, Status=%lx\n", &LinkName, Status);
 }
 
 /*++
@@ -655,6 +925,10 @@ CsrParseServerCommandLine(IN ULONG ArgumentCount,
             /* Secure it */
             Status = CsrSetDirectorySecurity(CsrObjectDirectory);
             if (!NT_SUCCESS(Status)) return Status;
+
+            /* Session 0: \Sessions\0\Windows -> \Windows, with the session flag */
+            if (SessionId == 0)
+                CsrCreateSession0WindowsLink(&CsrDirectoryName);
         }
         else if (_stricmp(ParameterName, "SubSystemType") == 0)
         {
