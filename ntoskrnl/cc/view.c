@@ -1813,6 +1813,35 @@ CcRosReferenceSharedCacheMap(
 }
 
 /*
+ * The valid data length Cc reads the file's views with (CcRosEnsureVacbResident): Mm reads a page of a
+ * cache view that it took away again the same way.  FALSE if the file is not cached.  The master lock
+ * keeps the map alive while it is read: a map is taken off the section object pointers under it before
+ * it is freed.
+ */
+BOOLEAN
+CcRosGetValidDataLength(
+    _In_ PSECTION_OBJECT_POINTERS SectionObjectPointers,
+    _Out_ PLARGE_INTEGER ValidDataLength)
+{
+    PROS_SHARED_CACHE_MAP SharedCacheMap;
+    BOOLEAN Found = FALSE;
+    KIRQL OldIrql;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    SharedCacheMap = SectionObjectPointers->SharedCacheMap;
+    if (SharedCacheMap)
+    {
+        KeAcquireSpinLockAtDpcLevel(&SharedCacheMap->CacheMapLock);
+        *ValidDataLength = SharedCacheMap->ValidDataLength;
+        KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
+        Found = TRUE;
+    }
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+
+    return Found;
+}
+
+/*
  * Drops a reference of CcRosReferenceSharedCacheMap.  A worker drops the last one: deleting the map
  * releases its file object, and the close that follows must not run here, where the caller may hold
  * file system locks.

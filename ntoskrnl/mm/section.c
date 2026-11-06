@@ -2159,6 +2159,8 @@ MiNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
 
         PFSRTL_COMMON_FCB_HEADER FcbHeader = Segment->FileObject->FsContext;
         PERESOURCE FileLock;
+        LARGE_INTEGER ValidDataLength, CacheValidDataLength;
+        PLARGE_INTEGER ReadLimit = NULL;
 
         /*
          * The data must be paged in, with the VDL held still while the read runs (see MiLockFileForPageIn).
@@ -2168,8 +2170,27 @@ MiNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
          */
         FileLock = MiLockFileForPageIn(Segment->FileObject);
 
-        Status = MmMakeSegmentResident(Segment, Offset.QuadPart, PAGE_SIZE,
-                                       FcbHeader ? &FcbHeader->ValidDataLength : NULL, FALSE, NULL);
+        /*
+         * The read stops at the valid data length; the rest of the page stays zero.  A page of a cache view
+         * (system space) was made resident by Cc with Cc's valid data length (CcRosEnsureVacbResident), and
+         * Mm may take it away again before the view touches it, if it is clean: read it back the same way.
+         * The file system's header is not enough there: Windows file systems need not keep a valid data
+         * length in it for their internal stream files (fastfat leaves it zero for its volume file, so a FAT
+         * page taken away under memory pressure came back as zeros, all its clusters free).
+         */
+        if (FcbHeader)
+        {
+            ValidDataLength = FcbHeader->ValidDataLength;
+            if (Process == NULL &&
+                CcRosGetValidDataLength(Segment->FileObject->SectionObjectPointer, &CacheValidDataLength) &&
+                CacheValidDataLength.QuadPart > ValidDataLength.QuadPart)
+            {
+                ValidDataLength = CacheValidDataLength;
+            }
+            ReadLimit = &ValidDataLength;
+        }
+
+        Status = MmMakeSegmentResident(Segment, Offset.QuadPart, PAGE_SIZE, ReadLimit, FALSE, NULL);
 
         MiUnlockFileForPageIn(FileLock);
 
