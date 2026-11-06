@@ -45,7 +45,7 @@
 #define MAX_SEEN     512
 #define MAX_HANDLED  1024
 
-typedef struct { WCHAR Path[MAX_PATH]; ULONG Bit; } SEEN;
+typedef struct { WCHAR Path[MAX_PATH]; ULONG Bit; BOOL Answered; } SEEN;   /* Answered: the answer is stored as rules */
 typedef struct { ULONG Pid; LONGLONG Created; USHORT Port; UCHAR Proto; } HANDLED;
 
 typedef struct _REQ
@@ -119,7 +119,19 @@ static VOID SeenAdd(PCWSTR path, ULONG bit)
         SEEN *e = (g_NSeen < MAX_SEEN) ? &g_Seen[g_NSeen++] : &g_Seen[g_SeenRing++ % MAX_SEEN];
         lstrcpynW(e->Path, path, MAX_PATH);
         e->Bit = bit;
+        e->Answered = FALSE;
     }
+    LeaveCriticalSection(&g_Lock);
+}
+
+/* the answer for (path, profile) is stored as rules: deleting those rules makes the program ask again */
+static VOID SeenAnswered(PCWSTR path, ULONG bit)
+{
+    ULONG i;
+    if (!SeenHas(path, bit)) SeenAdd(path, bit);
+    EnterCriticalSection(&g_Lock);
+    for (i = 0; i < g_NSeen; i++)
+        if (g_Seen[i].Bit == bit && !_wcsicmp(g_Seen[i].Path, path)) { g_Seen[i].Answered = TRUE; break; }
     LeaveCriticalSection(&g_Lock);
 }
 
@@ -348,12 +360,45 @@ static BOOL RuleCovers(const FW_RULE *r, PCWSTR path, ULONG proto, ULONG port, U
     return PortListHas(r->LPorts, port);
 }
 
+/* an inbound rule of the profile that names this program (the rules the prompt wrote, or the user's own) */
+static BOOL RuleNamesProgram(const FW_RULE *r, PCWSTR path, ULONG bit)
+{
+    WCHAR exp[MAX_PATH]; DWORD n;
+    if (r->Dir != 1 || !r->App || !*r->App || !wcscmp(r->App, L"*")) return FALSE;
+    if (r->Profiles != FWP_ANY_COM && !(r->Profiles & bit)) return FALSE;
+    n = ExpandEnvironmentStringsW(r->App, exp, MAX_PATH);
+    return n && n <= MAX_PATH && !_wcsicmp(exp, path);
+}
+
 static BOOL AnyRuleCovers(const FW_RULESET *rs, PCWSTR path, ULONG proto, ULONG port, ULONG bit)
 {
     ULONG i;
     for (i = 0; i < rs->N; i++)
         if (RuleCovers(&rs->R[i], path, proto, port, bit)) return TRUE;
     return FALSE;
+}
+
+/* The rules changed (called by the service after the store was written): a program whose answer was stored as rules
+ * and that has none left for a profile is asked again the next time it listens, as if it was new */
+VOID PromptRulesChanged(VOID)
+{
+    FW_RULESET rs; ULONG i, j, n = 0;
+    if (!g_Init) return;
+    EnterCriticalSection(&g_Lock);
+    for (i = 0; i < g_NSeen; i++) if (g_Seen[i].Answered) n++;
+    LeaveCriticalSection(&g_Lock);
+    if (!n || FwStoreLoad(&rs)) return;
+    EnterCriticalSection(&g_Lock);
+    for (i = 0; i < g_NSeen; )
+    {
+        BOOL named = FALSE;
+        if (g_Seen[i].Answered)
+            for (j = 0; j < rs.N && !named; j++)
+                named = RuleNamesProgram(&rs.R[j], g_Seen[i].Path, g_Seen[i].Bit);
+        if (g_Seen[i].Answered && !named) g_Seen[i] = g_Seen[--g_NSeen]; else i++;
+    }
+    LeaveCriticalSection(&g_Lock);
+    FwRuleSetFree(&rs);
 }
 
 static DWORD AddProgramRules(PCWSTR path, ULONG mask, BOOL allow)
@@ -381,13 +426,12 @@ static DWORD WINAPI Worker(LPVOID param)
 {
     REQ *rq = param; HANDLE tok, hs[2]; STARTUPINFOW si; PROCESS_INFORMATION pi;
     WCHAR sys[MAX_PATH], exe[MAX_PATH], cmd[2 * MAX_PATH + 64], desk[] = L"winsta0\\default";
-    DWORD code = 0, wait; BOOL started;
+    DWORD code = 0, wait; BOOL started; ULONG b;
 
     tok = SessionUserToken(rq->Session);
     if (!tok)
     {
         /* nobody to ask yet: forget the marks, ask again later */
-        ULONG b;
         for (b = 1; b <= 4; b <<= 1) if (rq->Bits & b) SeenRemove(rq->Path, b);
         HandledRemove(&rq->Key);
         g_NextTry = GetTickCount() + PROMPT_RETRY_MS;
@@ -413,10 +457,15 @@ static DWORD WINAPI Worker(LPVOID param)
         if (code & FWALERT_ALLOW)
         {
             ULONG mask = code & FWP_ALL;
-            if (mask) AddProgramRules(rq->Path, mask, TRUE);
+            if (mask && !AddProgramRules(rq->Path, mask, TRUE))
+                for (b = 1; b <= 4; b <<= 1) if (mask & b) SeenAnswered(rq->Path, b);
         }
         else if (code == 0)
-            AddProgramRules(rq->Path, rq->Bits, FALSE);   /* Cancel: block, as Windows does */
+        {
+            /* Cancel: block, as Windows does */
+            if (!AddProgramRules(rq->Path, rq->Bits, FALSE))
+                for (b = 1; b <= 4; b <<= 1) if (rq->Bits & b) SeenAnswered(rq->Path, b);
+        }
         /* anything else: the dialog crashed; no rule, the marks stay */
     }
     else

@@ -480,7 +480,7 @@ MmCreateKernelStack(IN BOOLEAN GuiStack,
     OldIrql = MiAcquirePfnLock();
 
     /* Fail the stack instead of using page 0 when no page is free */
-    if (MiGetFreeOrZeroedPageCount() < StackPages)
+    if (MiGetUsablePageCount() < StackPages)
     {
         MiReleasePfnLock(OldIrql);
         MiReleaseSystemPtes(StackPte, StackPtes + 1, SystemPteSpace);
@@ -501,7 +501,7 @@ MmCreateKernelStack(IN BOOLEAN GuiStack,
         /* Get a page and write the current invalid PTE */
         MI_SET_USAGE(MI_USAGE_KERNEL_STACK);
         MI_SET_PROCESS2(PsGetCurrentProcess()->ImageFileName);
-        PageFrameIndex = MiRemoveAnyPage(MI_GET_NEXT_COLOR());
+        PageFrameIndex = MiRemoveAnyPageGated(MI_GET_NEXT_COLOR());
         MI_WRITE_INVALID_PTE(PointerPte, InvalidPte);
 
         /* Initialize the PFN entry for this page */
@@ -584,7 +584,7 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
     OldIrql = MiAcquirePfnLock();
 
     /* Fail the growth instead of using page 0 when no page is free */
-    if (MiGetFreeOrZeroedPageCount() < NewPages)
+    if (MiGetUsablePageCount() < NewPages)
     {
         MiReleasePfnLock(OldIrql);
         MiReturnCommit(NewPages);
@@ -599,7 +599,7 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
         /* Get a page and write the current invalid PTE */
         MI_SET_USAGE(MI_USAGE_KERNEL_STACK_EXPANSION);
         MI_SET_PROCESS2(PsGetCurrentProcess()->ImageFileName);
-        PageFrameIndex = MiRemoveAnyPage(MI_GET_NEXT_COLOR());
+        PageFrameIndex = MiRemoveAnyPageGated(MI_GET_NEXT_COLOR());
         MI_WRITE_INVALID_PTE(LimitPte, InvalidPte);
 
         /* Initialize the PFN entry for this page */
@@ -1384,7 +1384,7 @@ MmCreateProcessAddressSpace(IN ULONG MinWs,
     OldIrql = MiAcquirePfnLock();
 
     /* Fail the process instead of using page 0 when no page is free */
-    if (MiGetFreeOrZeroedPageCount() < 3)
+    if (MiGetUsablePageCount() < 3)
     {
         MiReleasePfnLock(OldIrql);
         return FALSE;
@@ -1403,19 +1403,19 @@ MmCreateProcessAddressSpace(IN ULONG MinWs,
     TableBaseIndex = MiRemoveZeroPageSafe(Color);
     ZeroTableBase = (TableBaseIndex == 0);
     if (ZeroTableBase)
-        TableBaseIndex = MiRemoveAnyPage(Color);
+        TableBaseIndex = MiRemoveAnyPageGated(Color);
     MI_SET_USAGE(MI_USAGE_PAGE_DIRECTORY);
     Color = MI_GET_NEXT_PROCESS_COLOR(Process);
     HyperIndex = MiRemoveZeroPageSafe(Color);
     ZeroHyper = (HyperIndex == 0);
     if (ZeroHyper)
-        HyperIndex = MiRemoveAnyPage(Color);
+        HyperIndex = MiRemoveAnyPageGated(Color);
     MI_SET_USAGE(MI_USAGE_PAGE_TABLE);
     Color = MI_GET_NEXT_PROCESS_COLOR(Process);
     WsListIndex = MiRemoveZeroPageSafe(Color);
     ZeroWsList = (WsListIndex == 0);
     if (ZeroWsList)
-        WsListIndex = MiRemoveAnyPage(Color);
+        WsListIndex = MiRemoveAnyPageGated(Color);
     MiReleasePfnLock(OldIrql);
 
     if (ZeroTableBase) MiZeroPhysicalPage(TableBaseIndex);

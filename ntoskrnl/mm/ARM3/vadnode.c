@@ -624,6 +624,21 @@ MiGetPreviousNode(IN PMMADDRESS_NODE Node)
     return NULL;
 }
 
+/* The node with the lowest address, NULL for an empty table (NitroPager trimmer) */
+PMMADDRESS_NODE
+NTAPI
+MiGetFirstNode(IN PMM_AVL_TABLE Table)
+{
+    PMMADDRESS_NODE Node;
+
+    if (Table->NumberGenericTableElements == 0)
+        return NULL;
+
+    Node = Table->BalancedRoot.RightChild;
+    while (RtlLeftChildAvl(Node)) Node = RtlLeftChildAvl(Node);
+    return Node;
+}
+
 PMMADDRESS_NODE
 NTAPI
 MiGetNextNode(IN PMMADDRESS_NODE Node)

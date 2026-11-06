@@ -303,7 +303,7 @@ MiMakeSystemPpesValid(
         if (!PointerPpe->u.Hard.Valid)
         {
             /* Like other kernel page allocations, fail instead of taking page 0 */
-            if (MiGetFreeOrZeroedPageCount() == 0)
+            if (MiGetUsablePageCount() == 0)
             {
                 MiReleasePfnLock(OldIrql);
                 DPRINT1("No page for the page directory of system VA %p\n", MiPpeToAddress(PointerPpe));
@@ -312,7 +312,7 @@ MiMakeSystemPpesValid(
 
             MI_SET_USAGE(MI_USAGE_PAGE_DIRECTORY);
             MI_SET_PROCESS2("Kernel");
-            PageFrameIndex = MiRemoveZeroPage(MI_GET_NEXT_COLOR());
+            PageFrameIndex = MiRemoveZeroPageGated(MI_GET_NEXT_COLOR());
             MiInitializePfnForOtherProcess(PageFrameIndex,
                                            (PMMPTE)PointerPpe,
                                            PFN_FROM_PTE(MiAddressToPte(PointerPpe)));

@@ -1,7 +1,8 @@
 /*
  * PROJECT:     ReactOS netapi32.dll API Tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     NetLocalGroupAddMembers/DelMembers/SetMembers with member names that do not exist
+ * PURPOSE:     NetLocalGroupAddMembers/DelMembers/SetMembers with member names that do not exist,
+ *              members that are one already and non-members
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -19,8 +20,9 @@
  *   ERROR_NO_SUCH_MEMBER (1387), for Add and for Del;
  * - that error comes before the group is looked at: with a group that does not exist the
  *   list with an unknown name still gives 1387, while only mapped names give NERR_GroupNotFound (2220);
- * - (Mapped names only: Add of a member that is one already gives ERROR_MEMBER_IN_ALIAS (1378), Del of
- *   a non-member ERROR_MEMBER_NOT_IN_ALIAS (1377); ReactOS gives 0 and ERROR_FILE_NOT_FOUND, not tested.)
+ * - mapped names only: Add of a member that is one already gives ERROR_MEMBER_IN_ALIAS (1378), Del of
+ *   a non-member ERROR_MEMBER_NOT_IN_ALIAS (1377), Add to a group that does not exist NERR_GroupNotFound
+ *   (2220); ReactOS gave 0 and ERROR_FILE_NOT_FOUND for the first two (harness evidence g5fix-20261106).
  * NetLocalGroupSetMembers is a stub in ReactOS (it returns success without a lookup), so it is not tested.
  * ReactOS: LsaLookupNames returns STATUS_SOME_NOT_MAPPED for a list with some names mapped, and the
  * caller read the domain of the unmapped entry (DomainIndex -1), so the caller faulted.
@@ -74,6 +76,8 @@ START_TEST(NetLocalGroupUnknownMember)
     const WCHAR *UnknownMapped[] = { Unknown1, AuthUsers };
     const WCHAR *UnknownMappedUnknown[] = { Unknown1, AuthUsers, Unknown2 };
     const WCHAR *SystemUnknown[] = { System, Unknown1 };
+    const WCHAR *Member[] = { AuthUsers };
+    const WCHAR *NonMember[] = { System };
 
     /* Add: nothing can be added, every list has a name that does not exist */
     Expect(NetLocalGroupAddMembers, "Add Users, one unknown", L"Users", 1, One, ERROR_NO_SUCH_MEMBER);
@@ -88,4 +92,9 @@ START_TEST(NetLocalGroupUnknownMember)
     Expect(NetLocalGroupDelMembers, "Del Users, one unknown", L"Users", 1, One, ERROR_NO_SUCH_MEMBER);
     Expect(NetLocalGroupDelMembers, "Del Users, mapped + unknown", L"Users", 2, SystemUnknown, ERROR_NO_SUCH_MEMBER);
     Expect(NetLocalGroupDelMembers, "Del nogroup, one unknown", NoGroup, 1, One, ERROR_NO_SUCH_MEMBER);
+
+    /* Mapped names only; none of these changes a group */
+    Expect(NetLocalGroupAddMembers, "Add Users, a member already", L"Users", 1, Member, ERROR_MEMBER_IN_ALIAS);
+    Expect(NetLocalGroupDelMembers, "Del Users, not a member", L"Users", 1, NonMember, ERROR_MEMBER_NOT_IN_ALIAS);
+    Expect(NetLocalGroupAddMembers, "Add nogroup, mapped", NoGroup, 1, Member, NERR_GroupNotFound);
 }

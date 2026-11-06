@@ -2753,6 +2753,7 @@ CmpDeepCopyKeyInternal(IN PHHIVE SourceHive,
                        IN PHHIVE DestinationHive,
                        IN HCELL_INDEX Parent,
                        IN HSTORAGE_TYPE StorageType,
+                       IN BOOLEAN SkipVolatile,
                        OUT PHCELL_INDEX DestKeyCell OPTIONAL)
 {
     NTSTATUS Status;
@@ -2857,8 +2858,10 @@ CmpDeepCopyKeyInternal(IN PHHIVE SourceHive,
     DestNode->SubKeyCounts[Stable] = DestNode->SubKeyCounts[Volatile] = 0;
     DestNode->SubKeyLists[Stable] = DestNode->SubKeyLists[Volatile] = HCELL_NIL;
 
-    /* Calculate the total number of subkeys */
-    SubKeyCount = SrcNode->SubKeyCounts[Stable] + SrcNode->SubKeyCounts[Volatile];
+    /* Calculate the total number of subkeys (the stable ones come first in the index order) */
+    SubKeyCount = SrcNode->SubKeyCounts[Stable];
+    if (!SkipVolatile)
+        SubKeyCount += SrcNode->SubKeyCounts[Volatile];
 
     /* Loop through all the subkeys */
     for (Index = 0; Index < SubKeyCount; Index++)
@@ -2876,6 +2879,7 @@ CmpDeepCopyKeyInternal(IN PHHIVE SourceHive,
                                         DestinationHive,
                                         NewKeyCell,
                                         StorageType,
+                                        SkipVolatile,
                                         &NewSubKey);
         if (!NT_SUCCESS(Status))
             goto Cleanup;
@@ -2936,6 +2940,7 @@ CmpDeepCopyKey(IN PHHIVE SourceHive,
                                   DestinationHive,
                                   HCELL_NIL,
                                   StorageType,
+                                  FALSE,
                                   DestKeyCell);
 }
 
@@ -3061,8 +3066,8 @@ CmpMergeCellName(IN BOOLEAN Compressed,
 }
 
 /*
- * Merges the values of a source key into a destination key: a value of the same name (case-insensitive)
- * replaces the destination's value in place, any other value is appended.
+ * Adds the values of a source key to a destination key: a value of a name the destination already has (compared
+ * without case) stays as it is, any other value is appended in the source's order.
  */
 static
 NTSTATUS
@@ -3073,7 +3078,7 @@ CmpMergeKeyValues(IN PHHIVE SourceHive,
                   IN HSTORAGE_TYPE StorageType)
 {
     NTSTATUS Status = STATUS_SUCCESS;
-    PCELL_DATA SrcList, DestList;
+    PCELL_DATA SrcList;
     PCM_KEY_VALUE SrcValue;
     UNICODE_STRING Name;
     HCELL_INDEX OldValue, NewValue;
@@ -3105,6 +3110,10 @@ CmpMergeKeyValues(IN PHHIVE SourceHive,
         if (!NT_SUCCESS(Status))
             break;
 
+        /* The destination's value wins */
+        if (OldValue != HCELL_NIL)
+            continue;
+
         NewValue = CmpCopyValue(SourceHive, SrcList->u.KeyList[Index], DestinationHive, StorageType);
         if (NewValue == HCELL_NIL)
         {
@@ -3112,29 +3121,16 @@ CmpMergeKeyValues(IN PHHIVE SourceHive,
             break;
         }
 
-        if (OldValue != HCELL_NIL)
+        Status = CmpAddValueToList(DestinationHive,
+                                   NewValue,
+                                   DestNode->ValueList.Count,
+                                   StorageType,
+                                   &DestNode->ValueList);
+        if (!NT_SUCCESS(Status))
         {
-            /* The source value wins: it takes the place of the old one */
-            DestList = HvGetCell(DestinationHive, DestNode->ValueList.List);
-            ASSERT(DestList);
-            DestList->u.KeyList[Position] = NewValue;
-            HvReleaseCell(DestinationHive, DestNode->ValueList.List);
-            if (!CmpFreeValue(DestinationHive, OldValue))
-                HvFreeCell(DestinationHive, OldValue);
-        }
-        else
-        {
-            Status = CmpAddValueToList(DestinationHive,
-                                       NewValue,
-                                       DestNode->ValueList.Count,
-                                       StorageType,
-                                       &DestNode->ValueList);
-            if (!NT_SUCCESS(Status))
-            {
-                if (!CmpFreeValue(DestinationHive, NewValue))
-                    HvFreeCell(DestinationHive, NewValue);
-                break;
-            }
+            if (!CmpFreeValue(DestinationHive, NewValue))
+                HvFreeCell(DestinationHive, NewValue);
+            break;
         }
     }
 
@@ -3143,8 +3139,9 @@ CmpMergeKeyValues(IN PHHIVE SourceHive,
 }
 
 /*
- * Merges the source key into the destination key that is already in DestinationHive: values of the same
- * name are taken from the source, subkeys of the same name are merged recursively, the others are copied.
+ * Merges the source key into the destination key that is already in DestinationHive: the destination's values
+ * stay (the source adds the values of other names), subkeys of the same name are merged recursively, the others
+ * are copied. Volatile subkeys of the source are left out, as they are in the result on Windows.
  */
 static
 NTSTATUS
@@ -3171,7 +3168,7 @@ CmpMergeKeyInternal(IN PHHIVE SourceHive,
     if (!NT_SUCCESS(Status))
         goto Cleanup;
 
-    SubKeyCount = SrcNode->SubKeyCounts[Stable] + SrcNode->SubKeyCounts[Volatile];
+    SubKeyCount = SrcNode->SubKeyCounts[Stable];
     for (Index = 0; Index < SubKeyCount; Index++)
     {
         SubKey = CmpFindSubKeyByNumber(SourceHive, SrcNode, Index);
@@ -3197,7 +3194,7 @@ CmpMergeKeyInternal(IN PHHIVE SourceHive,
         }
         else
         {
-            Status = CmpDeepCopyKeyInternal(SourceHive, SubKey, DestinationHive, DestKeyCell, StorageType, &NewSubKey);
+            Status = CmpDeepCopyKeyInternal(SourceHive, SubKey, DestinationHive, DestKeyCell, StorageType, TRUE, &NewSubKey);
             if (NT_SUCCESS(Status) && !CmpAddSubKey(DestinationHive, DestKeyCell, NewSubKey))
             {
                 HvFreeCell(DestinationHive, NewSubKey);
@@ -3249,6 +3246,14 @@ CmSaveMergedKeys(IN PCM_KEY_CONTROL_BLOCK HighKcb,
         goto done;
     }
 
+    /* Windows refuses two keys of one hive (measured on Windows 10 22H2: siblings, ancestor and descendant in a user
+     * hive, and two keys of the SOFTWARE hive, all STATUS_INVALID_PARAMETER) */
+    if (HighKcb->KeyHive == LowKcb->KeyHive)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto done;
+    }
+
 #if DBG
     /* Make sure that both the high and low precedence hives are OK */
     CheckStatus = CmCheckRegistry(HighHiveToValidate, CM_CHECK_REGISTRY_DONT_PURGE_VOLATILES | CM_CHECK_REGISTRY_VALIDATE_HIVE);
@@ -3272,20 +3277,22 @@ CmSaveMergedKeys(IN PCM_KEY_CONTROL_BLOCK HighKcb,
     if (!NT_SUCCESS(Status))
         goto done;
 
-    /* Copy the low precedence key recursively into the new hive */
-    Status = CmpDeepCopyKey(LowKcb->KeyHive,
-                            LowKcb->KeyCell,
-                            &KeyHive->Hive,
-                            Stable,
-                            &KeyHive->Hive.BaseBlock->RootCell);
+    /* Copy the high precedence key into the new hive without its volatile subkeys. Its values come first in the
+     * result, in its order */
+    Status = CmpDeepCopyKeyInternal(HighKcb->KeyHive,
+                                    HighKcb->KeyCell,
+                                    &KeyHive->Hive,
+                                    HCELL_NIL,
+                                    Stable,
+                                    TRUE,
+                                    &KeyHive->Hive.BaseBlock->RootCell);
     if (!NT_SUCCESS(Status))
         goto done;
 
-    /* Merge the high precedence key into the copy of the low one: its values replace the values of the same
-     * name, its subkeys are merged with the subkeys of the same name (copying it over the root would drop
-     * everything the low key has) */
-    Status = CmpMergeKeyInternal(HighKcb->KeyHive,
-                                 HighKcb->KeyCell,
+    /* Merge the low precedence key into the copy: it adds the values of other names (compared without case, the
+     * high key's spelling stays) after those, and the subkeys the copy does not have; subkeys of both are merged */
+    Status = CmpMergeKeyInternal(LowKcb->KeyHive,
+                                 LowKcb->KeyCell,
                                  &KeyHive->Hive,
                                  KeyHive->Hive.BaseBlock->RootCell,
                                  Stable);

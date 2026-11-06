@@ -15,369 +15,343 @@
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
+/*
+ * Object type lists (NtAccessCheckByType and NtAccessCheckByTypeResultList).
+ *
+ * The list is a tree in pre-order: the object itself (the root, level 0) and its property sets and
+ * properties below it; it was validated when it was captured, so the first entry is the only root
+ * and each entry is at most one level below the one before it. Every entry has granted and denied
+ * rights of its own, worked out as for MAXIMUM_ALLOWED: an ACE grants the rights it allows that
+ * were not denied before it and denies the rights it denies that were not granted before it.
+ *
+ * Measured on Windows 10 22H2 (AccessCheckObjectTypeList apitest):
+ * - An ACE without an object type (a plain ACE, or an object ACE without ACE_OBJECT_TYPE_PRESENT)
+ *   applies to the root and so to the whole list.
+ * - An object ACE applies to the entry with its object type and to the entries below it; an object
+ *   type that is not in the list makes the ACE count for nothing.
+ * - An entry is also granted the rights that all of the entries directly below it are granted,
+ *   up to the root; a right denied to an entry is denied to the entries above it as well (when they
+ *   were not granted it already).
+ * - A token with restricting SIDs gets, per entry, the rights both passes grant.
+ * - NtAccessCheckByType reports the result for the root, NtAccessCheckByTypeResultList the result
+ *   of each entry.
+ * Without a list, an allowed object ACE with an object type grants nothing (see SepAnalyzeAcesFromDacl).
+ */
+
 /**
  * @brief
- * Denies access of a target object and the children objects
- * in an object type list.
+ * Finds the parent of a non-root entry of a captured object type list.
+ *
+ * @param[in] ObjectTypeList
+ * The captured (validated) object type list.
+ *
+ * @param[in] ObjectTypeIndex
+ * The index of an entry that is not the root.
+ *
+ * @return
+ * The index of the nearest entry before it with a lower level.
+ */
+static
+ULONG
+SepObjectTypeParent(
+    _In_ POBJECT_TYPE_LIST_INTERNAL ObjectTypeList,
+    _In_ ULONG ObjectTypeIndex)
+{
+    ULONG ParentIndex = ObjectTypeIndex;
+
+    ASSERT(ObjectTypeIndex != 0);
+    ASSERT(ObjectTypeList[ObjectTypeIndex].Level != ACCESS_OBJECT_GUID);
+
+    /* The root at index 0 has the lowest level, so this stops there at the latest */
+    do
+    {
+        ParentIndex--;
+    } while (ObjectTypeList[ParentIndex].Level >= ObjectTypeList[ObjectTypeIndex].Level);
+
+    return ParentIndex;
+}
+
+/**
+ * @brief
+ * Applies the rights of one ACE to an entry of an object type list,
+ * the entries below it and the entries above it.
  *
  * @param[in,out] ObjectTypeList
- * A pointer to an object type list where access is to be
- * denied for the target object and its children in the
- * hierarchy list.
+ * The captured (validated) object type list.
  *
  * @param[in] ObjectTypeListLength
- * The length of the object type list. This length represents
- * the number of object elements in the list.
+ * The number of entries in the list.
+ *
+ * @param[in] ObjectTypeIndex
+ * The entry the ACE is for (0, the root, for an ACE without an object type).
  *
  * @param[in] AccessMask
- * The access mask right that is to be denied for the object.
+ * The (mapped) rights of the ACE.
  *
- * @param[in] ObjectTypeGuid
- * A pointer to a object type GUID, that identifies the object.
- * This GUID is used to search for the target object in the list.
- * If this parameter is set to NULL, the function will deny access
- * starting from the object itself in the list (aka the root).
+ * @param[in] IsDenied
+ * TRUE for a deny ACE, FALSE for an allow ACE.
  */
 static
 VOID
-SepDenyAccessObjectTypeResultList(
+SepApplyAceToObjectTypeList(
     _Inout_ POBJECT_TYPE_LIST_INTERNAL ObjectTypeList,
     _In_ ULONG ObjectTypeListLength,
+    _In_ ULONG ObjectTypeIndex,
     _In_ ACCESS_MASK AccessMask,
-    _In_opt_ PGUID ObjectTypeGuid)
+    _In_ BOOLEAN IsDenied)
 {
+    PACCESS_CHECK_RIGHTS Rights;
+    ACCESS_MASK ChildrenGranted, NewlyDenied;
+    ULONG Index, ChildIndex, ParentIndex;
+    USHORT Level = ObjectTypeList[ObjectTypeIndex].Level;
+
+    /* A deny ACE denies the entries above only what the entry itself is denied (Windows 10 22H2 measured):
+       a right the entry already holds is not taken from them */
+    NewlyDenied = AccessMask & ~ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights;
+
+    /* The entry itself and every entry below it */
+    for (Index = ObjectTypeIndex; Index < ObjectTypeListLength; Index++)
+    {
+        if (Index != ObjectTypeIndex && ObjectTypeList[Index].Level <= Level)
+            break;
+
+        Rights = &ObjectTypeList[Index].ObjectAccessRights;
+        if (IsDenied)
+            Rights->DeniedAccessRights |= (AccessMask & ~Rights->GrantedAccessRights);
+        else
+            Rights->GrantedAccessRights |= (AccessMask & ~Rights->DeniedAccessRights);
+    }
+
+    /* The entries above it, up to the root */
+    for (ChildIndex = ObjectTypeIndex;
+         ObjectTypeList[ChildIndex].Level != ACCESS_OBJECT_GUID;
+         ChildIndex = ParentIndex)
+    {
+        ParentIndex = SepObjectTypeParent(ObjectTypeList, ChildIndex);
+        Rights = &ObjectTypeList[ParentIndex].ObjectAccessRights;
+
+        if (IsDenied)
+        {
+            Rights->DeniedAccessRights |= (NewlyDenied & ~Rights->GrantedAccessRights);
+            continue;
+        }
+
+        /* A parent is granted what all of its direct children are granted */
+        ChildrenGranted = ~(ACCESS_MASK)0;
+        for (Index = ParentIndex + 1;
+             Index < ObjectTypeListLength && ObjectTypeList[Index].Level > ObjectTypeList[ParentIndex].Level;
+             Index++)
+        {
+            if (ObjectTypeList[Index].Level == ObjectTypeList[ParentIndex].Level + 1)
+                ChildrenGranted &= ObjectTypeList[Index].ObjectAccessRights.GrantedAccessRights;
+        }
+
+        Rights->GrantedAccessRights |= (ChildrenGranted & ~Rights->DeniedAccessRights);
+    }
+}
+
+/**
+ * @brief
+ * Works out the granted and denied rights of every entry of an object
+ * type list from the ACEs of a DACL, for one pass (normal or restricting SIDs).
+ *
+ * @param[in] Dacl
+ * The DACL, with at least one ACE.
+ *
+ * @param[in] AccessToken
+ * The token whose SIDs are compared with the SIDs of the ACEs.
+ *
+ * @param[in] IsTokenRestricted
+ * TRUE to compare the restricting SIDs of the token, FALSE for its normal SIDs.
+ *
+ * @param[in] PrincipalSelfSid
+ * The SID that replaces the principal self SID in ACEs, if any.
+ *
+ * @param[in] GenericMapping
+ * The generic mapping for the rights of the ACEs.
+ *
+ * @param[in,out] ObjectTypeList
+ * The captured (validated) object type list; the rights of its entries must be clear.
+ *
+ * @param[in] ObjectTypeListLength
+ * The number of entries in the list.
+ */
+static
+VOID
+SepAnalyzeAcesForObjectTypeList(
+    _In_ PACL Dacl,
+    _In_ PACCESS_TOKEN AccessToken,
+    _In_ BOOLEAN IsTokenRestricted,
+    _In_opt_ PSID PrincipalSelfSid,
+    _In_ PGENERIC_MAPPING GenericMapping,
+    _Inout_ POBJECT_TYPE_LIST_INTERNAL ObjectTypeList,
+    _In_ ULONG ObjectTypeListLength)
+{
+    NTSTATUS Status;
+    PACE CurrentAce;
+    ULONG AceIndex;
     ULONG ObjectTypeIndex;
-    ULONG ReturnedObjectIndex;
-    USHORT Level;
+    PSID Sid;
+    PGUID ObjectTypeGuid;
+    ACCESS_MASK Access;
+    BOOLEAN IsDenied;
 
     PAGED_CODE();
 
-    DPRINT("Access rights 0x%08lx\n", AccessMask);
-
-    /*
-     * The object type of interest is the one that was supplied
-     * by the creator who made the ACE. If the object type was
-     * not supplied then we have no clear indication from where
-     * shall we start updating the access rights of objects on
-     * this list, so we have to begin from the root (aka the
-     * object itself).
-     */
-    if (!ObjectTypeGuid)
+    for (AceIndex = 0; AceIndex < Dacl->AceCount; AceIndex++)
     {
-        DPRINT("No object type provided, updating access rights from root\n");
-        ReturnedObjectIndex = 0;
-        goto LoopAndUpdateRightsObjects;
-    }
+        Status = RtlGetAce(Dacl, AceIndex, (PVOID*)&CurrentAce);
+        ASSERT(NT_SUCCESS(Status));
 
-    /* Check if that object exists in the list */
-    if (SepObjectTypeGuidInList(ObjectTypeList,
-                                ObjectTypeListLength,
-                                ObjectTypeGuid,
-                                &ReturnedObjectIndex))
-    {
-LoopAndUpdateRightsObjects:
-        /* Update the access rights of the target object */
-        ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.DeniedAccessRights |=
-            (AccessMask & ~ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.GrantedAccessRights);
-        DPRINT("Denied rights 0x%08lx of target object at index %lu\n",
-            ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.DeniedAccessRights, ReturnedObjectIndex);
+        if (CurrentAce->Header.AceFlags & INHERIT_ONLY_ACE)
+            continue;
 
-        /* And update the children of the target object */
-        for (ObjectTypeIndex = ReturnedObjectIndex + 1;
-             ObjectTypeIndex < ObjectTypeListLength;
-             ObjectTypeIndex++)
+        switch (CurrentAce->Header.AceType)
         {
-            /*
-             * Stop looking for children objects if we hit an object that has
-             * the same level as the target object or less.
-             */
-            Level = ObjectTypeList[ObjectTypeIndex].Level;
-            if (Level <= ObjectTypeList[ReturnedObjectIndex].Level)
-            {
-                DPRINT("We looked for all children objects, stop looking\n");
+            case ACCESS_ALLOWED_ACE_TYPE:
+                IsDenied = FALSE;
+                ObjectTypeGuid = NULL;
                 break;
-            }
 
-            /* Update the access right of the child */
-            ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.DeniedAccessRights |=
-                (AccessMask & ~ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights);
-            DPRINT("Denied rights 0x%08lx of child object at index %lu\n",
-                ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.DeniedAccessRights, ObjectTypeIndex);
-        }
-    }
-}
-
-/**
- * @brief
- * Allows access of a target object and the children objects
- * in an object type list.
- *
- * @param[in,out] ObjectTypeList
- * A pointer to an object type list where access is to be
- * allowed for the target object and its children in the
- * hierarchy list.
- *
- * @param[in] ObjectTypeListLength
- * The length of the object type list. This length represents
- * the number of object elements in the list.
- *
- * @param[in] AccessMask
- * The access mask right that is to be allowed for the object.
- *
- * @param[in] ObjectTypeGuid
- * A pointer to a object type GUID, that identifies the object.
- * This GUID is used to search for the target object in the list.
- * If this parameter is set to NULL, the function will allow access
- * starting from the object itself in the list (aka the root).
- */
-static
-VOID
-SepAllowAccessObjectTypeResultList(
-    _Inout_ POBJECT_TYPE_LIST_INTERNAL ObjectTypeList,
-    _In_ ULONG ObjectTypeListLength,
-    _In_ ACCESS_MASK AccessMask,
-    _In_opt_ PGUID ObjectTypeGuid)
-{
-    ULONG ObjectTypeIndex;
-    ULONG ReturnedObjectIndex;
-    USHORT Level;
-
-    PAGED_CODE();
-
-    DPRINT("Access rights 0x%08lx\n", AccessMask);
-
-    /*
-     * Begin updating the access rights from the root object
-     * (see comment in SepDenyAccessObjectTypeListMaximum).
-     */
-    if (!ObjectTypeGuid)
-    {
-        DPRINT("No object type provided, updating access rights from root\n");
-        ReturnedObjectIndex = 0;
-        goto LoopAndUpdateRightsObjects;
-    }
-
-    /* Check if that object exists in the list */
-    if (SepObjectTypeGuidInList(ObjectTypeList,
-                                ObjectTypeListLength,
-                                ObjectTypeGuid,
-                                &ReturnedObjectIndex))
-    {
-LoopAndUpdateRightsObjects:
-        /* Update the access rights of the target object */
-        ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.GrantedAccessRights |=
-            (AccessMask & ~ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.DeniedAccessRights);
-        DPRINT("Granted rights 0x%08lx of target object at index %lu\n",
-            ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.GrantedAccessRights, ReturnedObjectIndex);
-
-        /* And update the children of the target object */
-        for (ObjectTypeIndex = ReturnedObjectIndex + 1;
-             ObjectTypeIndex < ObjectTypeListLength;
-             ObjectTypeIndex++)
-        {
-            /*
-             * Stop looking for children objects if we hit an object that has
-             * the same level as the target object or less.
-             */
-            Level = ObjectTypeList[ObjectTypeIndex].Level;
-            if (Level <= ObjectTypeList[ReturnedObjectIndex].Level)
-            {
+            case ACCESS_DENIED_ACE_TYPE:
+                IsDenied = TRUE;
+                ObjectTypeGuid = NULL;
                 break;
-            }
 
-            /* Update the access right of the child */
-            ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights |=
-                (AccessMask & ~ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.DeniedAccessRights);
-            DPRINT("Granted rights 0x%08lx of child object at index %lu\n",
-                ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights, ObjectTypeIndex);
+            case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+                IsDenied = FALSE;
+                ObjectTypeGuid = SepGetObjectTypeGuidFromAce(CurrentAce, FALSE);
+                break;
+
+            case ACCESS_DENIED_OBJECT_ACE_TYPE:
+                IsDenied = TRUE;
+                ObjectTypeGuid = SepGetObjectTypeGuidFromAce(CurrentAce, TRUE);
+                break;
+
+            default:
+                DPRINT("Unsupported ACE type 0x%lx\n", CurrentAce->Header.AceType);
+                continue;
         }
+
+        Sid = SepGetSidFromAce(CurrentAce);
+        ASSERT(Sid);
+        if (!SepSidInTokenEx(AccessToken, PrincipalSelfSid, Sid, IsDenied, IsTokenRestricted))
+            continue;
+
+        /* An ACE without an object type is for the root; one with a type not in the list is for nothing */
+        if (ObjectTypeGuid == NULL)
+        {
+            ObjectTypeIndex = 0;
+        }
+        else if (!SepObjectTypeGuidInList(ObjectTypeList,
+                                          ObjectTypeListLength,
+                                          ObjectTypeGuid,
+                                          &ObjectTypeIndex))
+        {
+            continue;
+        }
+
+        Access = CurrentAce->AccessMask;
+        if ((Access & GENERIC_ACCESS) && GenericMapping)
+        {
+            RtlMapGenericMask(&Access, GenericMapping);
+        }
+
+        SepApplyAceToObjectTypeList(ObjectTypeList,
+                                    ObjectTypeListLength,
+                                    ObjectTypeIndex,
+                                    Access,
+                                    IsDenied);
     }
 }
 
 /**
  * @brief
- * Denies access of a target object in the object type
- * list. This access is denied for the whole hierarchy
- * in the list.
+ * Works out the granted rights of every entry of an object type list,
+ * including the restricting SIDs pass of a restricted token.
+ *
+ * @param[in] Dacl
+ * The DACL, with at least one ACE.
+ *
+ * @param[in] AccessToken
+ * The token the access check is for.
+ *
+ * @param[in] PrincipalSelfSid
+ * The SID that replaces the principal self SID in ACEs, if any.
+ *
+ * @param[in] GenericMapping
+ * The generic mapping for the rights of the ACEs.
  *
  * @param[in,out] ObjectTypeList
- * A pointer to an object type list where access is to be
- * denied for the target object. This operation applies
- * for the entire hierarchy of the object type list.
+ * The captured (validated) object type list. On success the granted
+ * rights of each entry are those the DACL grants the token.
  *
  * @param[in] ObjectTypeListLength
- * The length of the object type list. This length represents
- * the number of object elements in the list.
+ * The number of entries in the list.
  *
- * @param[in] AccessMask
- * The access mask right that is to be denied for the object.
- *
- * @param[in] ObjectTypeGuid
- * A pointer to a object type GUID, that identifies the object.
- * This GUID is used to search for the target object in the list.
- * If this parameter is set to NULL, the function will deny access
- * to the object itself in the list (aka the root).
- *
- * @param[out] BreakOnDeny
- * A pointer returned boolean value to the caller. The function
- * will return TRUE if the requested remaining right is denied
- * by the ACE, otherwise it returns FALSE.
+ * @return
+ * STATUS_SUCCESS, or STATUS_INSUFFICIENT_RESOURCES.
  */
 static
-VOID
-SepDenyAccessObjectTypeList(
+NTSTATUS
+SepAccessCheckObjectTypeList(
+    _In_ PACL Dacl,
+    _In_ PACCESS_TOKEN AccessToken,
+    _In_opt_ PSID PrincipalSelfSid,
+    _In_ PGENERIC_MAPPING GenericMapping,
     _Inout_ POBJECT_TYPE_LIST_INTERNAL ObjectTypeList,
-    _In_ ULONG ObjectTypeListLength,
-    _In_ ACCESS_MASK AccessMask,
-    _In_opt_ PGUID ObjectTypeGuid,
-    _Out_opt_ PBOOLEAN BreakOnDeny)
+    _In_ ULONG ObjectTypeListLength)
 {
-    ULONG ReturnedObjectIndex;
-    BOOLEAN MustBreak;
+    PACCESS_MASK NormalGranted;
+    ULONG Index;
 
     PAGED_CODE();
 
-    DPRINT("Access rights 0x%08lx\n", AccessMask);
-
-    /* Assume we do not want to break at first */
-    MustBreak = FALSE;
-
-    /*
-     * If no object type was supplied then tell the caller it has to break on
-     * searching for other ACEs if the requested remaining access right is
-     * denied by the deny ACE itself. Track down that denied right too.
-     */
-    if (!ObjectTypeGuid)
+    for (Index = 0; Index < ObjectTypeListLength; Index++)
     {
-        if (ObjectTypeList[0].ObjectAccessRights.RemainingAccessRights & AccessMask)
-        {
-            DPRINT("Root object requests remaining access right that is denied 0x%08lx\n", AccessMask);
-            MustBreak = TRUE;
-        }
-
-        ObjectTypeList[0].ObjectAccessRights.DeniedAccessRights |=
-            (AccessMask & ~ObjectTypeList[0].ObjectAccessRights.GrantedAccessRights);
-        DPRINT("Denied rights of root object 0x%08lx\n", ObjectTypeList[0].ObjectAccessRights.DeniedAccessRights);
-        goto Quit;
+        RtlZeroMemory(&ObjectTypeList[Index].ObjectAccessRights, sizeof(ACCESS_CHECK_RIGHTS));
     }
 
-    /*
-     * If the object exists tell the caller it has to break down if the requested
-     * remaining access right is denied by the ACE. Track down the denied right too.
-     */
-    if (SepObjectTypeGuidInList(ObjectTypeList,
-                                ObjectTypeListLength,
-                                ObjectTypeGuid,
-                                &ReturnedObjectIndex))
-    {
-        if (ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.RemainingAccessRights & AccessMask)
-        {
-            DPRINT("Object at index %lu requests remaining access right that is denied 0x%08lx\n", ReturnedObjectIndex, AccessMask);
-            MustBreak = TRUE;
-        }
+    SepAnalyzeAcesForObjectTypeList(Dacl,
+                                    AccessToken,
+                                    FALSE,
+                                    PrincipalSelfSid,
+                                    GenericMapping,
+                                    ObjectTypeList,
+                                    ObjectTypeListLength);
 
-        ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.DeniedAccessRights |=
-            (AccessMask & ~ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.GrantedAccessRights);
-        DPRINT("Denied rights 0x%08lx of object at index %lu\n",
-            ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.DeniedAccessRights, ReturnedObjectIndex);
+    if (!SeTokenIsRestricted(AccessToken))
+        return STATUS_SUCCESS;
+
+    /* The length was bounded when the list was captured */
+    NormalGranted = ExAllocatePoolWithTag(PagedPool,
+                                          ObjectTypeListLength * sizeof(ACCESS_MASK),
+                                          TAG_SE);
+    if (NormalGranted == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    for (Index = 0; Index < ObjectTypeListLength; Index++)
+    {
+        NormalGranted[Index] = ObjectTypeList[Index].ObjectAccessRights.GrantedAccessRights;
+        RtlZeroMemory(&ObjectTypeList[Index].ObjectAccessRights, sizeof(ACCESS_CHECK_RIGHTS));
     }
 
-Quit:
-    /* Signal the caller he has to break if he wants to */
-    if (BreakOnDeny)
+    SepAnalyzeAcesForObjectTypeList(Dacl,
+                                    AccessToken,
+                                    TRUE,
+                                    PrincipalSelfSid,
+                                    GenericMapping,
+                                    ObjectTypeList,
+                                    ObjectTypeListLength);
+
+    /* Only what both the normal and the restricting SIDs are granted */
+    for (Index = 0; Index < ObjectTypeListLength; Index++)
     {
-        *BreakOnDeny = MustBreak;
-    }
-}
-
-/**
- * @brief
- * Allows access of a target object in the object type
- * list. This access is allowed for the whole hierarchy
- * in the list.
- *
- * @param[in,out] ObjectTypeList
- * A pointer to an object type list where access is to be
- * allowed for the target object. This operation applies
- * for the entire hierarchy of the object type list.
- *
- * @param[in] ObjectTypeListLength
- * The length of the object type list. This length represents
- * the number of object elements in the list.
- *
- * @param[in] AccessMask
- * The access mask right that is to be allowed for the object.
- *
- * @param[in] RemoveRemainingRights
- * If set to TRUE, the function will remove the remaining rights
- * of a target object. It will also grant access of the said object.
- * Otherwise if set to FALSE, the function will only grant access.
- *
- * @param[in] ObjectTypeGuid
- * A pointer to a object type GUID, that identifies the object.
- * This GUID is used to search for the target object in the list.
- * If this parameter is set to NULL, the function will allow access
- * to the object itself in the list (aka the root).
- */
-static
-VOID
-SepAllowAccessObjectTypeList(
-    _Inout_ POBJECT_TYPE_LIST_INTERNAL ObjectTypeList,
-    _In_ ULONG ObjectTypeListLength,
-    _In_ ACCESS_MASK AccessMask,
-    _In_ BOOLEAN RemoveRemainingRights,
-    _In_opt_ PGUID ObjectTypeGuid)
-{
-    ULONG ReturnedObjectIndex;
-
-    PAGED_CODE();
-
-    DPRINT("Access rights 0x%08lx\n", AccessMask);
-
-    /*
-     * If no object type was supplied then remove the remaining rights
-     * of the object itself, the root. Track down that right to the
-     * granted rights as well.
-     */
-    if (!ObjectTypeGuid)
-    {
-        if (RemoveRemainingRights)
-        {
-            ObjectTypeList[0].ObjectAccessRights.RemainingAccessRights &= ~AccessMask;
-            DPRINT("Remaining rights of root object 0x%08lx\n", ObjectTypeList[0].ObjectAccessRights.RemainingAccessRights);
-        }
-
-        ObjectTypeList[0].ObjectAccessRights.GrantedAccessRights |=
-            (AccessMask & ~ObjectTypeList[0].ObjectAccessRights.DeniedAccessRights);
-        DPRINT("Granted rights of root object 0x%08lx\n", ObjectTypeList[0].ObjectAccessRights.GrantedAccessRights);
-        return;
+        ObjectTypeList[Index].ObjectAccessRights.GrantedAccessRights &= NormalGranted[Index];
     }
 
-    /*
-     * Grant access to the object if it exists by removing the remaining
-     * rights. Unlike the NtAccessCheckByTypeResultList variant we do not
-     * care about the children of the target object beccause NtAccessCheckByType
-     * will either grant or deny access to the entire hierarchy of the list.
-     */
-    if (SepObjectTypeGuidInList(ObjectTypeList,
-                                ObjectTypeListLength,
-                                ObjectTypeGuid,
-                                &ReturnedObjectIndex))
-    {
-        /* Remove the remaining rights of that object */
-        if (RemoveRemainingRights)
-        {
-            ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.RemainingAccessRights &= ~AccessMask;
-            DPRINT("Remaining rights of object 0x%08lx at index %lu\n",
-                ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.RemainingAccessRights, ReturnedObjectIndex);
-        }
-
-        /* And track it down to the granted access rights */
-        ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.GrantedAccessRights |=
-            (AccessMask & ~ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.DeniedAccessRights);
-        DPRINT("Granted rights of object 0x%08lx at index %lu\n",
-            ObjectTypeList[ReturnedObjectIndex].ObjectAccessRights.GrantedAccessRights, ReturnedObjectIndex);
-    }
+    ExFreePoolWithTag(NormalGranted, TAG_SE);
+    return STATUS_SUCCESS;
 }
 
 /**
@@ -385,7 +359,9 @@ SepAllowAccessObjectTypeList(
  * Analyzes an access control entry that is present in a discretionary
  * access control list (DACL) for access right masks of each entry with
  * the purpose to judge whether the calling thread can be warranted
- * access check to a certain object or not.
+ * access check to a certain object or not. This is for an access check
+ * without an object type list (see SepAccessCheckObjectTypeList for one
+ * with a list).
  *
  * @param[in] ActionType
  * The type of analysis to be done against an access entry. This type
@@ -431,29 +407,16 @@ SepAllowAccessObjectTypeList(
  * being checked for access. If certain set of desired access rights have
  * a generic access right, this parameter is needed to map generic rights.
  *
- * @param[in] ObjectTypeList
- * A pointer to a list array of object types. If such array is provided to the
- * function, the algorithm will perform a different approach by doing analysis
- * against ACEs each sub-object of an object of primary level (level 0) or sub-objects
- * of a sub-object of an object. If this parameter is NULL, the function will normally
- * analyze the ACEs of a DACL of the target object itself.
- *
- * @param[in] ObjectTypeListLength
- * The length of the object type list array, pointed by ObjectTypeList. This length in
- * question represents the number of elements in such array. This parameter must be 0
- * if no array list is provided.
- *
- * @param[in] UseResultList
- * This parameter is to used to determine how to perform an object type access check.
- * If set to TRUE, the function will either grant or deny access to the object and sub-objects
- * in the hierarchy list. If set to FALSE, the function will either grant or deny access to
- * the target that will affect the entire hierarchy of the list. This parameter is used
- * if the access action type is AccessCheckMaximum.
- *
  * @param[in,out] AccessCheckRights
  * A pointer to a structure that contains the access check rights. This function fills
  * up this structure with remaining, granted and denied rights to the caller for
  * access check. Henceforth, this parameter must not be NULL!
+ *
+ * @remarks
+ * Without an object type list, as on Windows 10 (measured with NtAccessCheckByType
+ * and no list, AccessCheckObjectTypeList apitest): an allowed object ACE with an
+ * object type grants nothing, one without (no ACE_OBJECT_TYPE_PRESENT) grants as an
+ * allow ACE; a denied object ACE denies as a deny ACE, with an object type or not.
  */
 static
 VOID
@@ -466,19 +429,14 @@ SepAnalyzeAcesFromDacl(
     _In_ BOOLEAN IsTokenRestricted,
     _In_opt_ PSID PrincipalSelfSid,
     _In_ PGENERIC_MAPPING GenericMapping,
-    _In_opt_ POBJECT_TYPE_LIST_INTERNAL ObjectTypeList,
-    _In_ ULONG ObjectTypeListLength,
-    _In_ BOOLEAN UseResultList,
     _Inout_ PACCESS_CHECK_RIGHTS AccessCheckRights)
 {
     NTSTATUS Status;
     PACE CurrentAce;
     ULONG AceIndex;
-    ULONG ObjectTypeIndex;
     PSID Sid;
-    PGUID ObjectTypeGuid;
     ACCESS_MASK Access;
-    BOOLEAN BreakOnDeny;
+    BOOLEAN IsDenied;
 
     PAGED_CODE();
 
@@ -489,378 +447,105 @@ SepAnalyzeAcesFromDacl(
     /* TODO: To be removed once we support compound ACEs handling in Se */
     DBG_UNREFERENCED_PARAMETER(PrimaryAccessToken);
 
-    /* Determine how we should analyze the ACEs */
-    switch (ActionType)
+    if (ActionType == AccessCheckRegular)
     {
-        /*
-         * We got the acknowledgement the calling thread desires
-         * maximum rights (as according to MAXIMUM_ALLOWED access
-         * mask). Analyze the ACE of the given DACL.
-         */
-        case AccessCheckMaximum:
+        /* Cache the remaining access rights to be addressed */
+        ASSERT(RemainingAccess != 0);
+        AccessCheckRights->RemainingAccessRights = RemainingAccess;
+    }
+
+    /* Loop over the DACL to retrieve ACEs */
+    for (AceIndex = 0; AceIndex < Dacl->AceCount; AceIndex++)
+    {
+        /* Obtain a ACE now */
+        Status = RtlGetAce(Dacl, AceIndex, (PVOID*)&CurrentAce);
+
+        /* Getting this ACE is important, otherwise something is seriously wrong */
+        ASSERT(NT_SUCCESS(Status));
+
+        if (CurrentAce->Header.AceFlags & INHERIT_ONLY_ACE)
+            continue;
+
+        switch (CurrentAce->Header.AceType)
         {
-            /* Loop over the DACL to retrieve ACEs */
-            for (AceIndex = 0; AceIndex < Dacl->AceCount; AceIndex++)
-            {
-                /* Obtain a ACE now */
-                Status = RtlGetAce(Dacl, AceIndex, (PVOID*)&CurrentAce);
+            case ACCESS_ALLOWED_ACE_TYPE:
+                IsDenied = FALSE;
+                break;
 
-                /* Getting this ACE is important, otherwise something is seriously wrong */
-                ASSERT(NT_SUCCESS(Status));
+            case ACCESS_DENIED_ACE_TYPE:
+                IsDenied = TRUE;
+                break;
 
-                /*
-                 * Now it's time to analyze it based upon the
-                 * type of this ACE we're being given.
-                 */
-                if (!(CurrentAce->Header.AceFlags & INHERIT_ONLY_ACE))
-                {
-                    if (CurrentAce->Header.AceType == ACCESS_DENIED_ACE_TYPE)
-                    {
-                        /* Get the SID from this ACE */
-                        Sid = SepGetSidFromAce(CurrentAce);
-                        ASSERT(Sid);
+            case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+                /* Only for the object types of a list */
+                if (SepGetObjectTypeGuidFromAce(CurrentAce, FALSE) != NULL)
+                    continue;
+                IsDenied = FALSE;
+                break;
 
-                        if (SepSidInTokenEx(AccessToken, PrincipalSelfSid, Sid, TRUE, IsTokenRestricted))
-                        {
-                            /* Get this access right from the ACE */
-                            Access = CurrentAce->AccessMask;
+            case ACCESS_DENIED_OBJECT_ACE_TYPE:
+                /* Denies, with an object type or not */
+                IsDenied = TRUE;
+                break;
 
-                            /* Map this access right if it has a generic mask right */
-                            if ((Access & GENERIC_ACCESS) && GenericMapping)
-                            {
-                                RtlMapGenericMask(&Access, GenericMapping);
-                            }
-
-                            /* Deny access rights that have not been granted yet */
-                            AccessCheckRights->DeniedAccessRights |= (Access & ~AccessCheckRights->GrantedAccessRights);
-                            DPRINT("DeniedAccessRights 0x%08lx\n", AccessCheckRights->DeniedAccessRights);
-                        }
-                    }
-                    else if (CurrentAce->Header.AceType == ACCESS_ALLOWED_ACE_TYPE)
-                    {
-                        /* Get the SID from this ACE */
-                        Sid = SepGetSidFromAce(CurrentAce);
-                        ASSERT(Sid);
-
-                        if (SepSidInTokenEx(AccessToken, PrincipalSelfSid, Sid, FALSE, IsTokenRestricted))
-                        {
-                            /* Get this access right from the ACE */
-                            Access = CurrentAce->AccessMask;
-
-                            /* Map this access right if it has a generic mask right */
-                            if ((Access & GENERIC_ACCESS) && GenericMapping)
-                            {
-                                RtlMapGenericMask(&Access, GenericMapping);
-                            }
-
-                            /* Grant access rights that have not been denied yet */
-                            AccessCheckRights->GrantedAccessRights |= (Access & ~AccessCheckRights->DeniedAccessRights);
-                            DPRINT("GrantedAccessRights 0x%08lx\n", AccessCheckRights->GrantedAccessRights);
-                        }
-                    }
-                    else if (CurrentAce->Header.AceType == ACCESS_DENIED_OBJECT_ACE_TYPE)
-                    {
-                        /* Get the SID and object type from this ACE */
-                        Sid = SepGetSidFromAce(CurrentAce);
-                        ObjectTypeGuid = SepGetObjectTypeGuidFromAce(CurrentAce, TRUE);
-                        ASSERT(Sid);
-
-                        if (SepSidInTokenEx(AccessToken, PrincipalSelfSid, Sid, TRUE, IsTokenRestricted))
-                        {
-                            /* Get this access right from the ACE */
-                            Access = CurrentAce->AccessMask;
-
-                            /* Map this access right if it has a generic mask right */
-                            if ((Access & GENERIC_ACCESS) && GenericMapping)
-                            {
-                                RtlMapGenericMask(&Access, GenericMapping);
-                            }
-
-                            /* If no list was passed treat this is as ACCESS_DENIED_ACE_TYPE */
-                            if (!ObjectTypeList && !ObjectTypeListLength)
-                            {
-                                AccessCheckRights->DeniedAccessRights |= (Access & ~AccessCheckRights->GrantedAccessRights);
-                                DPRINT("DeniedAccessRights 0x%08lx\n", AccessCheckRights->DeniedAccessRights);
-                            }
-                            else if (!UseResultList)
-                            {
-                                /*
-                                 * We have an object type list but the caller wants to deny access
-                                 * to the entire hierarchy list. Evaluate the rights of the object
-                                 * for the whole list. Ignore what the function tells us if we have
-                                 * to break on deny or not because we only want to keep track of
-                                 * denied rights.
-                                 */
-                               SepDenyAccessObjectTypeList(ObjectTypeList,
-                                                           ObjectTypeListLength,
-                                                           Access,
-                                                           ObjectTypeGuid,
-                                                           NULL);
-                            }
-                            else
-                            {
-                                /* Otherwise evaluate the access rights for each sub-object */
-                                SepDenyAccessObjectTypeResultList(ObjectTypeList,
-                                                                  ObjectTypeListLength,
-                                                                  Access,
-                                                                  ObjectTypeGuid);
-                            }
-                        }
-                    }
-                    else if (CurrentAce->Header.AceType == ACCESS_ALLOWED_OBJECT_ACE_TYPE)
-                    {
-                        /* Get the SID and object type from this ACE */
-                        Sid = SepGetSidFromAce(CurrentAce);
-                        ObjectTypeGuid = SepGetObjectTypeGuidFromAce(CurrentAce, FALSE);
-                        ASSERT(Sid);
-
-                        if (SepSidInTokenEx(AccessToken, PrincipalSelfSid, Sid, FALSE, IsTokenRestricted))
-                        {
-                            /* Get this access right from the ACE */
-                            Access = CurrentAce->AccessMask;
-
-                            /* Map this access right if it has a generic mask right */
-                            if ((Access & GENERIC_ACCESS) && GenericMapping)
-                            {
-                                RtlMapGenericMask(&Access, GenericMapping);
-                            }
-
-                            /* If no list was passed treat this is as ACCESS_ALLOWED_ACE_TYPE */
-                            if (!ObjectTypeList && !ObjectTypeListLength)
-                            {
-                                AccessCheckRights->GrantedAccessRights |= (Access & ~AccessCheckRights->DeniedAccessRights);
-                                DPRINT("GrantedAccessRights 0x%08lx\n", AccessCheckRights->GrantedAccessRights);
-                            }
-                            else if (!UseResultList)
-                            {
-                                /*
-                                 * We have an object type list but the caller wants to allow access
-                                 * to the entire hierarchy list. Evaluate the rights of the object
-                                 * for the whole list.
-                                 */
-                                SepAllowAccessObjectTypeList(ObjectTypeList,
-                                                             ObjectTypeListLength,
-                                                             Access,
-                                                             FALSE,
-                                                             ObjectTypeGuid);
-                            }
-                            else
-                            {
-                                /* Otherwise evaluate the access rights for each sub-object */
-                                SepAllowAccessObjectTypeResultList(ObjectTypeList,
-                                                                   ObjectTypeListLength,
-                                                                   Access,
-                                                                   ObjectTypeGuid);
-                            }
-                        }
-                    }
-                    else
-                    {
-                        DPRINT1("Unsupported ACE type 0x%lx\n", CurrentAce->Header.AceType);
-                    }
-                }
-            }
-
-            /* We're done here */
-            break;
+            default:
+                DPRINT1("Unsupported ACE type 0x%lx\n", CurrentAce->Header.AceType);
+                continue;
         }
 
-        /*
-         * We got the acknowledgement the calling thread desires
-         * only a subset of rights therefore we have to act a little
-         * different here.
-         */
-        case AccessCheckRegular:
+        /* Get the SID from this ACE */
+        Sid = SepGetSidFromAce(CurrentAce);
+        ASSERT(Sid);
+
+        if (!SepSidInTokenEx(AccessToken, PrincipalSelfSid, Sid, IsDenied, IsTokenRestricted))
+            continue;
+
+        /* Get this access right from the ACE and map it if it has a generic mask right */
+        Access = CurrentAce->AccessMask;
+        if ((Access & GENERIC_ACCESS) && GenericMapping)
         {
-            /* Cache the remaining access rights to be addressed */
-            ASSERT(RemainingAccess != 0);
-            AccessCheckRights->RemainingAccessRights = RemainingAccess;
-
-            /* Fill the remaining rights of each object in the list if we have one */
-            if (ObjectTypeList && (ObjectTypeListLength != 0))
-            {
-                for (ObjectTypeIndex = 0;
-                     ObjectTypeIndex < ObjectTypeListLength;
-                     ObjectTypeIndex++)
-                {
-                    ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.RemainingAccessRights = RemainingAccess;
-                }
-            }
-
-            /* Loop over the DACL to retrieve ACEs */
-            for (AceIndex = 0; AceIndex < Dacl->AceCount; AceIndex++)
-            {
-                /* Obtain a ACE now */
-                Status = RtlGetAce(Dacl, AceIndex, (PVOID*)&CurrentAce);
-
-                /* Getting this ACE is important, otherwise something is seriously wrong */
-                ASSERT(NT_SUCCESS(Status));
-
-                /*
-                 * Now it's time to analyze it based upon the
-                 * type of this ACE we're being given.
-                 */
-                if (!(CurrentAce->Header.AceFlags & INHERIT_ONLY_ACE))
-                {
-                    if (CurrentAce->Header.AceType == ACCESS_DENIED_ACE_TYPE)
-                    {
-                        /* Get the SID from this ACE */
-                        Sid = SepGetSidFromAce(CurrentAce);
-                        ASSERT(Sid);
-
-                        if (SepSidInTokenEx(AccessToken, PrincipalSelfSid, Sid, TRUE, IsTokenRestricted))
-                        {
-                            /* Get this access right from the ACE */
-                            Access = CurrentAce->AccessMask;
-
-                            /* Map this access right if it has a generic mask right */
-                            if ((Access & GENERIC_ACCESS) && GenericMapping)
-                            {
-                                RtlMapGenericMask(&Access, GenericMapping);
-                            }
-
-                            /*
-                             * The caller requests a right that cannot be
-                             * granted. Access is implicitly denied for
-                             * the calling thread. Track this access right.
-                             */
-                            if (AccessCheckRights->RemainingAccessRights & Access)
-                            {
-                                DPRINT("Refuted access 0x%08lx\n", Access);
-                                AccessCheckRights->DeniedAccessRights |= Access;
-                                break;
-                            }
-                        }
-                    }
-                    else if (CurrentAce->Header.AceType == ACCESS_ALLOWED_ACE_TYPE)
-                    {
-                        /* Get the SID from this ACE */
-                        Sid = SepGetSidFromAce(CurrentAce);
-                        ASSERT(Sid);
-
-                        if (SepSidInTokenEx(AccessToken, PrincipalSelfSid, Sid, FALSE, IsTokenRestricted))
-                        {
-                            /* Get this access right from the ACE */
-                            Access = CurrentAce->AccessMask;
-
-                            /* Map this access right if it has a generic mask right */
-                            if ((Access & GENERIC_ACCESS) && GenericMapping)
-                            {
-                                RtlMapGenericMask(&Access, GenericMapping);
-                            }
-
-                            /* Remove the remaining rights */
-                            DPRINT("RemainingAccessRights 0x%08lx  Access 0x%08lx\n", AccessCheckRights->RemainingAccessRights, Access);
-                            AccessCheckRights->RemainingAccessRights &= ~Access;
-                            DPRINT("RemainingAccessRights 0x%08lx\n", AccessCheckRights->RemainingAccessRights);
-
-                            /* Track the granted access right */
-                            AccessCheckRights->GrantedAccessRights |= Access;
-                        }
-                    }
-                    else if (CurrentAce->Header.AceType == ACCESS_DENIED_OBJECT_ACE_TYPE)
-                    {
-                        /* Get the SID and object type from this ACE */
-                        Sid = SepGetSidFromAce(CurrentAce);
-                        ObjectTypeGuid = SepGetObjectTypeGuidFromAce(CurrentAce, TRUE);
-                        ASSERT(Sid);
-
-                        if (SepSidInTokenEx(AccessToken, PrincipalSelfSid, Sid, TRUE, IsTokenRestricted))
-                        {
-                            /* Get this access right from the ACE */
-                            Access = CurrentAce->AccessMask;
-
-                            /* Map this access right if it has a generic mask right */
-                            if ((Access & GENERIC_ACCESS) && GenericMapping)
-                            {
-                                RtlMapGenericMask(&Access, GenericMapping);
-                            }
-
-                            /* If no list was passed treat this is as ACCESS_DENIED_ACE_TYPE */
-                            if (!ObjectTypeList && !ObjectTypeListLength)
-                            {
-                                if (AccessCheckRights->RemainingAccessRights & Access)
-                                {
-                                    DPRINT("Refuted access 0x%08lx\n", Access);
-                                    AccessCheckRights->DeniedAccessRights |= Access;
-                                    break;
-                                }
-                            }
-                            else
-                            {
-                                /*
-                                 * Otherwise evaluate the rights of the object for the entire list.
-                                 * The function will signal us if the caller requested a right that is
-                                 * denied by the ACE of an object in the list.
-                                 */
-                                SepDenyAccessObjectTypeList(ObjectTypeList,
-                                                            ObjectTypeListLength,
-                                                            Access,
-                                                            ObjectTypeGuid,
-                                                            &BreakOnDeny);
-
-                                /* We are acknowledged the caller requested a denied right */
-                                if (BreakOnDeny)
-                                {
-                                    DPRINT("Refuted access 0x%08lx\n", Access);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    else if (CurrentAce->Header.AceType == ACCESS_ALLOWED_OBJECT_ACE_TYPE)
-                    {
-                        /* Get the SID and object type from this ACE */
-                        Sid = SepGetSidFromAce(CurrentAce);
-                        ObjectTypeGuid = SepGetObjectTypeGuidFromAce(CurrentAce, FALSE);
-                        ASSERT(Sid);
-
-                        if (SepSidInTokenEx(AccessToken, PrincipalSelfSid, Sid, FALSE, IsTokenRestricted))
-                        {
-                            /* Get this access right from the ACE */
-                            Access = CurrentAce->AccessMask;
-
-                            /* Map this access right if it has a generic mask right */
-                            if ((Access & GENERIC_ACCESS) && GenericMapping)
-                            {
-                                RtlMapGenericMask(&Access, GenericMapping);
-                            }
-
-                            /* If no list was passed treat this is as ACCESS_ALLOWED_ACE_TYPE */
-                            if (!ObjectTypeList && !ObjectTypeListLength)
-                            {
-                                /* Remove the remaining rights */
-                                DPRINT("RemainingAccessRights 0x%08lx  Access 0x%08lx\n", AccessCheckRights->RemainingAccessRights, Access);
-                                AccessCheckRights->RemainingAccessRights &= ~Access;
-                                DPRINT("RemainingAccessRights 0x%08lx\n", AccessCheckRights->RemainingAccessRights);
-
-                                /* Track the granted access right */
-                                AccessCheckRights->GrantedAccessRights |= Access;
-                            }
-                            else
-                            {
-                                /* Otherwise evaluate the rights of the object for the entire list */
-                                SepAllowAccessObjectTypeList(ObjectTypeList,
-                                                             ObjectTypeListLength,
-                                                             Access,
-                                                             TRUE,
-                                                             ObjectTypeGuid);
-                            }
-                        }
-                    }
-                    else
-                    {
-                        DPRINT1("Unsupported ACE type 0x%lx\n", CurrentAce->Header.AceType);
-                    }
-                }
-            }
-
-            /* We're done here */
-            break;
+            RtlMapGenericMask(&Access, GenericMapping);
         }
 
-        /* We shouldn't reach here */
-        DEFAULT_UNREACHABLE;
+        if (ActionType == AccessCheckMaximum)
+        {
+            if (IsDenied)
+            {
+                /* Deny access rights that have not been granted yet */
+                AccessCheckRights->DeniedAccessRights |= (Access & ~AccessCheckRights->GrantedAccessRights);
+                DPRINT("DeniedAccessRights 0x%08lx\n", AccessCheckRights->DeniedAccessRights);
+            }
+            else
+            {
+                /* Grant access rights that have not been denied yet */
+                AccessCheckRights->GrantedAccessRights |= (Access & ~AccessCheckRights->DeniedAccessRights);
+                DPRINT("GrantedAccessRights 0x%08lx\n", AccessCheckRights->GrantedAccessRights);
+            }
+        }
+        else if (IsDenied)
+        {
+            /*
+             * The caller requests a right that cannot be
+             * granted. Access is implicitly denied for
+             * the calling thread. Track this access right.
+             */
+            if (AccessCheckRights->RemainingAccessRights & Access)
+            {
+                DPRINT("Refuted access 0x%08lx\n", Access);
+                AccessCheckRights->DeniedAccessRights |= Access;
+                break;
+            }
+        }
+        else
+        {
+            /* Remove the remaining rights */
+            DPRINT("RemainingAccessRights 0x%08lx  Access 0x%08lx\n", AccessCheckRights->RemainingAccessRights, Access);
+            AccessCheckRights->RemainingAccessRights &= ~Access;
+            DPRINT("RemainingAccessRights 0x%08lx\n", AccessCheckRights->RemainingAccessRights);
+
+            /* Track the granted access right */
+            AccessCheckRights->GrantedAccessRights |= Access;
+        }
     }
 }
 
@@ -965,7 +650,6 @@ SepAccessCheckWorker(
     BOOLEAN Present;
     BOOLEAN Defaulted;
     NTSTATUS Status;
-    BOOLEAN AccessIsGranted = FALSE;
     PACCESS_TOKEN Token = NULL;
     ACCESS_CHECK_RIGHTS AccessCheckRights = {0};
     BOOLEAN ResultListFilled = FALSE;
@@ -1128,11 +812,127 @@ SepAccessCheckWorker(
     }
 
     /*
-     * Determine the MAXIMUM_ALLOWED access rights according to the DACL.
-     * Or if the caller is supplying a list of object types then determine
-     * the rights of each object on that list.
+     * With an object type list, work out the rights of every entry in the
+     * list (SepAccessCheckObjectTypeList, for MAXIMUM_ALLOWED and explicit
+     * requests alike) and report them for the root or for each entry.
      */
-    if ((DesiredAccess & MAXIMUM_ALLOWED) || UseResultList)
+    if (ObjectTypeList && ObjectTypeListLength)
+    {
+        Status = SepAccessCheckObjectTypeList(Dacl,
+                                              Token,
+                                              PrincipalSelfSid,
+                                              GenericMapping,
+                                              ObjectTypeList,
+                                              ObjectTypeListLength);
+        if (!NT_SUCCESS(Status))
+        {
+            PreviouslyGrantedAccess = 0;
+            goto ReturnCommonStatus;
+        }
+
+        if (!UseResultList)
+        {
+            /*
+             * The caller wants to know if access can be granted to the
+             * object itself, that is the root of the list.
+             */
+            GrantedRights = ObjectTypeList[0].ObjectAccessRights.GrantedAccessRights;
+            if (RemainingAccess & ~(MAXIMUM_ALLOWED | GrantedRights))
+            {
+                DPRINT("Failed to grant access rights to the object of the list, access denied. RemainingAccess = 0x%08lx  DesiredAccess = 0x%08lx\n",
+                    RemainingAccess, DesiredAccess);
+                PreviouslyGrantedAccess = 0;
+                Status = STATUS_ACCESS_DENIED;
+                goto ReturnCommonStatus;
+            }
+
+            /* MAXIMUM_ALLOWED gets all the rights of the root, an explicit request what it asked for */
+            if (RemainingAccess & MAXIMUM_ALLOWED)
+                PreviouslyGrantedAccess |= GrantedRights;
+            else
+                PreviouslyGrantedAccess |= RemainingAccess;
+
+            if (PreviouslyGrantedAccess != 0)
+            {
+                Status = STATUS_SUCCESS;
+            }
+            else
+            {
+                DPRINT("Failed to grant access rights to the object of the list, access denied. PreviouslyGrantedAccess == 0  DesiredAccess = %08lx\n",
+                    DesiredAccess);
+                Status = STATUS_ACCESS_DENIED;
+            }
+
+            /* We are done here */
+            goto ReturnCommonStatus;
+        }
+
+        /*
+         * We have a list and the caller wants to know access for each
+         * sub-object in the list. Report the access status and granted
+         * rights for the object and each sub-object in the list (the
+         * granted rights are reported even when they are not all the
+         * rights asked for, as Windows does).
+         */
+        for (ObjectTypeIndex = 0;
+             ObjectTypeIndex < ObjectTypeListLength;
+             ObjectTypeIndex++)
+        {
+            /* Check if we have some rights */
+            GrantedRights = (ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights | PreviouslyGrantedAccess) & MaskDesired;
+            if (GrantedRights != 0)
+            {
+                /*
+                 * If we still have some remaining rights to grant the ultimate
+                 * conclusion is that the caller has no access to the object itself.
+                 */
+                RemainingAccess = (~GrantedRights & WantedRights);
+                if (RemainingAccess != 0)
+                {
+                    DPRINT("Failed to grant access rights at specific object at index %lu, access denied. RemainingAccess = 0x%08lx  DesiredAccess = 0x%08lx\n",
+                        ObjectTypeIndex, RemainingAccess, DesiredAccess);
+                    AccessStatusList[ObjectTypeIndex] = STATUS_ACCESS_DENIED;
+                }
+                else
+                {
+                    AccessStatusList[ObjectTypeIndex] = STATUS_SUCCESS;
+                }
+            }
+            else
+            {
+                /* No access is given */
+                DPRINT("Failed to grant access rights at specific object at index %lu. No access is given\n", ObjectTypeIndex);
+                AccessStatusList[ObjectTypeIndex] = STATUS_ACCESS_DENIED;
+            }
+
+            /* Return the access rights to the caller */
+            GrantedAccessList[ObjectTypeIndex] = GrantedRights;
+        }
+
+        /*
+         * We have built a list of access statuses for each object but
+         * we still need to figure out the common status for the
+         * function. The same status code will be used to check if
+         * we should report any security debug stuff once we are done.
+         */
+        Status = STATUS_SUCCESS;
+        for (ResultListIndex = 0; ResultListIndex < ObjectTypeListLength; ResultListIndex++)
+        {
+            /* There is at least one sub-object of which access cannot be granted */
+            if (AccessStatusList[ResultListIndex] == STATUS_ACCESS_DENIED)
+            {
+                Status = AccessStatusList[ResultListIndex];
+                break;
+            }
+        }
+
+        /* We are done here */
+        ResultListFilled = TRUE;
+        goto ReturnCommonStatus;
+    }
+
+    /* Determine the MAXIMUM_ALLOWED access rights according to the DACL */
+    if (DesiredAccess & MAXIMUM_ALLOWED)
     {
         /* Perform access checks against ACEs from this DACL */
         SepAnalyzeAcesFromDacl(AccessCheckMaximum,
@@ -1143,9 +943,6 @@ SepAccessCheckWorker(
                                FALSE,
                                PrincipalSelfSid,
                                GenericMapping,
-                               ObjectTypeList,
-                               ObjectTypeListLength,
-                               UseResultList,
                                &AccessCheckRights);
 
         /*
@@ -1160,27 +957,6 @@ SepAccessCheckWorker(
         if (SeTokenIsRestricted(Token))
         {
             ACCESS_CHECK_RIGHTS RestrictedRights = {0};
-            PACCESS_MASK NormalGranted = NULL;
-
-            if (ObjectTypeList && ObjectTypeListLength)
-            {
-                NormalGranted = ExAllocatePoolWithTag(PagedPool,
-                                                      ObjectTypeListLength * sizeof(ACCESS_MASK),
-                                                      TAG_SE);
-                if (NormalGranted == NULL)
-                {
-                    PreviouslyGrantedAccess = 0;
-                    Status = STATUS_INSUFFICIENT_RESOURCES;
-                    goto ReturnCommonStatus;
-                }
-
-                for (ObjectTypeIndex = 0; ObjectTypeIndex < ObjectTypeListLength; ObjectTypeIndex++)
-                {
-                    NormalGranted[ObjectTypeIndex] = ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights;
-                    ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights = 0;
-                    ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.DeniedAccessRights = 0;
-                }
-            }
 
             SepAnalyzeAcesFromDacl(AccessCheckMaximum,
                                    0,
@@ -1190,160 +966,35 @@ SepAccessCheckWorker(
                                    TRUE,
                                    PrincipalSelfSid,
                                    GenericMapping,
-                                   ObjectTypeList,
-                                   ObjectTypeListLength,
-                                   UseResultList,
                                    &RestrictedRights);
 
             AccessCheckRights.GrantedAccessRights &= RestrictedRights.GrantedAccessRights;
-
-            if (NormalGranted != NULL)
-            {
-                for (ObjectTypeIndex = 0; ObjectTypeIndex < ObjectTypeListLength; ObjectTypeIndex++)
-                {
-                    ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights &= NormalGranted[ObjectTypeIndex];
-                }
-
-                ExFreePoolWithTag(NormalGranted, TAG_SE);
-            }
         }
 
-        /* The caller did not provide an object type list, check access only for that object */
-        if (!ObjectTypeList && !ObjectTypeListLength)
+        /* Fail if some rights have not been granted */
+        RemainingAccess &= ~(MAXIMUM_ALLOWED | AccessCheckRights.GrantedAccessRights);
+        if (RemainingAccess != 0)
         {
-            /* Fail if some rights have not been granted */
-            RemainingAccess &= ~(MAXIMUM_ALLOWED | AccessCheckRights.GrantedAccessRights);
-            if (RemainingAccess != 0)
-            {
-                DPRINT("Failed to grant access rights, access denied. RemainingAccess = 0x%08lx  DesiredAccess = 0x%08lx\n", RemainingAccess, DesiredAccess);
-                PreviouslyGrantedAccess = 0;
-                Status = STATUS_ACCESS_DENIED;
-                goto ReturnCommonStatus;
-            }
-
-            /* Set granted access right and access status */
-            PreviouslyGrantedAccess |= AccessCheckRights.GrantedAccessRights;
-            if (PreviouslyGrantedAccess != 0)
-            {
-                Status = STATUS_SUCCESS;
-            }
-            else
-            {
-                DPRINT("Failed to grant access rights, access denied. PreviouslyGrantedAccess == 0  DesiredAccess = %08lx\n", DesiredAccess);
-                Status = STATUS_ACCESS_DENIED;
-            }
-
-            /* We are done here */
+            DPRINT("Failed to grant access rights, access denied. RemainingAccess = 0x%08lx  DesiredAccess = 0x%08lx\n", RemainingAccess, DesiredAccess);
+            PreviouslyGrantedAccess = 0;
+            Status = STATUS_ACCESS_DENIED;
             goto ReturnCommonStatus;
         }
-        else if (!UseResultList)
+
+        /* Set granted access right and access status */
+        PreviouslyGrantedAccess |= AccessCheckRights.GrantedAccessRights;
+        if (PreviouslyGrantedAccess != 0)
         {
-            /*
-             * We have a list but the caller wants to know if access can be granted
-             * to an object in the list. Access will either be granted or denied
-             * to the whole hierarchy of the list. Look for every object in the list
-             * that has granted access rights and collect them.
-             */
-            for (ObjectTypeIndex = 0;
-                 ObjectTypeIndex < ObjectTypeListLength;
-                 ObjectTypeIndex++)
-            {
-                if (ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights != 0)
-                {
-                    GrantedRights |= ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights;
-                }
-            }
-
-            /* Now check if acccess can be granted */
-            RemainingAccess &= ~(MAXIMUM_ALLOWED | GrantedRights);
-            if (RemainingAccess != 0)
-            {
-                DPRINT("Failed to grant access rights to the whole object hierarchy list, access denied. RemainingAccess = 0x%08lx  DesiredAccess = 0x%08lx\n",
-                    RemainingAccess, DesiredAccess);
-                PreviouslyGrantedAccess = 0;
-                Status = STATUS_ACCESS_DENIED;
-                goto ReturnCommonStatus;
-            }
-
-            /* Set granted access right and access status */
-            PreviouslyGrantedAccess |= GrantedRights;
-            if (PreviouslyGrantedAccess != 0)
-            {
-                Status = STATUS_SUCCESS;
-            }
-            else
-            {
-                DPRINT("Failed to grant access rights to the whole object hierarchy list, access denied. PreviouslyGrantedAccess == 0  DesiredAccess = %08lx\n",
-                    DesiredAccess);
-                Status = STATUS_ACCESS_DENIED;
-            }
-
-            /* We are done here */
-            goto ReturnCommonStatus;
+            Status = STATUS_SUCCESS;
         }
         else
         {
-            /*
-             * We have a list and the caller wants to know access for each
-             * sub-object in the list. Report the access status and granted
-             * rights for the object and each sub-object in the list.
-             */
-            for (ObjectTypeIndex = 0;
-                 ObjectTypeIndex < ObjectTypeListLength;
-                 ObjectTypeIndex++)
-            {
-                /* Check if we have some rights */
-                GrantedRights = (ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.GrantedAccessRights | PreviouslyGrantedAccess) & MaskDesired;
-                if (GrantedRights != 0)
-                {
-                    /*
-                     * If we still have some remaining rights to grant the ultimate
-                     * conclusion is that the caller has no access to the object itself.
-                     */
-                    RemainingAccess = (~GrantedRights & WantedRights);
-                    if (RemainingAccess != 0)
-                    {
-                        DPRINT("Failed to grant access rights at specific object at index %lu, access denied. RemainingAccess = 0x%08lx  DesiredAccess = 0x%08lx\n",
-                            ObjectTypeIndex, RemainingAccess, DesiredAccess);
-                        AccessStatusList[ObjectTypeIndex] = STATUS_ACCESS_DENIED;
-                    }
-                    else
-                    {
-                        AccessStatusList[ObjectTypeIndex] = STATUS_SUCCESS;
-                    }
-                }
-                else
-                {
-                    /* No access is given */
-                    DPRINT("Failed to grant access rights at specific object at index %lu. No access is given\n", ObjectTypeIndex);
-                    AccessStatusList[ObjectTypeIndex] = STATUS_ACCESS_DENIED;
-                }
-
-                /* Return the access rights to the caller */
-                GrantedAccessList[ObjectTypeIndex] = GrantedRights;
-            }
-
-            /*
-             * We have built a list of access statuses for each object but
-             * we still need to figure out the common status for the
-             * function. The same status code will be used to check if
-             * we should report any security debug stuff once we are done.
-             */
-            Status = STATUS_SUCCESS;
-            for (ResultListIndex = 0; ResultListIndex < ObjectTypeListLength; ResultListIndex++)
-            {
-                /* There is at least one sub-object of which access cannot be granted */
-                if (AccessStatusList[ResultListIndex] == STATUS_ACCESS_DENIED)
-                {
-                    Status = AccessStatusList[ResultListIndex];
-                    break;
-                }
-            }
-
-            /* We are done here */
-            ResultListFilled = TRUE;
-            goto ReturnCommonStatus;
+            DPRINT("Failed to grant access rights, access denied. PreviouslyGrantedAccess == 0  DesiredAccess = %08lx\n", DesiredAccess);
+            Status = STATUS_ACCESS_DENIED;
         }
+
+        /* We are done here */
+        goto ReturnCommonStatus;
     }
 
     /* Grant rights according to the DACL */
@@ -1355,47 +1006,15 @@ SepAccessCheckWorker(
                            FALSE,
                            PrincipalSelfSid,
                            GenericMapping,
-                           ObjectTypeList,
-                           ObjectTypeListLength,
-                           UseResultList,
                            &AccessCheckRights);
 
-    /* The caller did not provide an object type list, check access only for that object */
-    if (!ObjectTypeList && !ObjectTypeListLength)
+    /* Fail if some rights have not been granted */
+    if (AccessCheckRights.RemainingAccessRights != 0)
     {
-        /* Fail if some rights have not been granted */
-        if (AccessCheckRights.RemainingAccessRights != 0)
-        {
-            DPRINT("Failed to grant access rights, access denied. RemainingAccess = 0x%08lx  DesiredAccess = 0x%08lx\n", AccessCheckRights.RemainingAccessRights, DesiredAccess);
-            PreviouslyGrantedAccess = 0;
-            Status = STATUS_ACCESS_DENIED;
-            goto ReturnCommonStatus;
-        }
-    }
-    else
-    {
-        /*
-         * We have an object type list, look for the object of which
-         * remaining rights are all granted.
-         */
-        for (ObjectTypeIndex = 0;
-             ObjectTypeIndex < ObjectTypeListLength;
-             ObjectTypeIndex++)
-        {
-            if (ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.RemainingAccessRights == 0)
-            {
-                AccessIsGranted = TRUE;
-                break;
-            }
-        }
-
-        if (!AccessIsGranted)
-        {
-            DPRINT("Failed to grant access rights to the whole object hierarchy list, access denied. DesiredAccess = 0x%08lx\n", DesiredAccess);
-            PreviouslyGrantedAccess = 0;
-            Status = STATUS_ACCESS_DENIED;
-            goto ReturnCommonStatus;
-        }
+        DPRINT("Failed to grant access rights, access denied. RemainingAccess = 0x%08lx  DesiredAccess = 0x%08lx\n", AccessCheckRights.RemainingAccessRights, DesiredAccess);
+        PreviouslyGrantedAccess = 0;
+        Status = STATUS_ACCESS_DENIED;
+        goto ReturnCommonStatus;
     }
 
     /*
@@ -1412,51 +1031,15 @@ SepAccessCheckWorker(
                                TRUE,
                                PrincipalSelfSid,
                                GenericMapping,
-                               ObjectTypeList,
-                               ObjectTypeListLength,
-                               UseResultList,
                                &AccessCheckRights);
 
-        /* The caller did not provide an object type list, check access only for that object */
-        if (!ObjectTypeList && !ObjectTypeListLength)
+        /* Fail if some rights have not been granted */
+        if (AccessCheckRights.RemainingAccessRights != 0)
         {
-            /* Fail if some rights have not been granted */
-            if (AccessCheckRights.RemainingAccessRights != 0)
-            {
-                DPRINT("Failed to grant access rights, access denied. RemainingAccess = 0x%08lx  DesiredAccess = 0x%08lx\n", AccessCheckRights.RemainingAccessRights, DesiredAccess);
-                PreviouslyGrantedAccess = 0;
-                Status = STATUS_ACCESS_DENIED;
-                goto ReturnCommonStatus;
-            }
-        }
-        else
-        {
-            /*
-             * We have an object type list, look for the object of which remaining
-             * rights are all granted. The user may have access to the requested
-             * object but on a restricted token case the user is only granted partial
-             * access. If access is denied to restricted SIDs, the bottom line is that
-             * access is denied to the user.
-             */
-            AccessIsGranted = FALSE;
-            for (ObjectTypeIndex = 0;
-                 ObjectTypeIndex < ObjectTypeListLength;
-                 ObjectTypeIndex++)
-            {
-                if (ObjectTypeList[ObjectTypeIndex].ObjectAccessRights.RemainingAccessRights == 0)
-                {
-                    AccessIsGranted = TRUE;
-                    break;
-                }
-            }
-
-            if (!AccessIsGranted)
-            {
-                DPRINT("Failed to grant access rights to the whole object hierarchy list, access denied. DesiredAccess = 0x%08lx\n", DesiredAccess);
-                PreviouslyGrantedAccess = 0;
-                Status = STATUS_ACCESS_DENIED;
-                goto ReturnCommonStatus;
-            }
+            DPRINT("Failed to grant access rights, access denied. RemainingAccess = 0x%08lx  DesiredAccess = 0x%08lx\n", AccessCheckRights.RemainingAccessRights, DesiredAccess);
+            PreviouslyGrantedAccess = 0;
+            Status = STATUS_ACCESS_DENIED;
+            goto ReturnCommonStatus;
         }
     }
 

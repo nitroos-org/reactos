@@ -9345,6 +9345,9 @@ SamrRemoveMultipleMembersFromAlias(IN SAMPR_HANDLE AliasHandle,
         Status = SamrRemoveMemberFromAlias(AliasHandle,
                                            ((PSID *)MembersBuffer->Sids)[i]);
 
+        /* FIXME: this was copied from the Add function and never matches here (a removal reports
+         * STATUS_MEMBER_NOT_IN_ALIAS). Turning it into that code would make the batch skip non-members;
+         * whether Windows does is not measured, so a non-member stops the batch for now. */
         if (Status == STATUS_MEMBER_IN_ALIAS)
             Status = STATUS_SUCCESS;
 
