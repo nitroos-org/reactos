@@ -1271,8 +1271,10 @@ IntPatBlt(
     BrushOrigin.x = pbrush->ptOrigin.x + pdc->ptlDCOrig.x + XLeft;
     BrushOrigin.y = pbrush->ptOrigin.y + pdc->ptlDCOrig.y + YLeft;
 #else
-    BrushOrigin.x = pbrush->ptOrigin.x + pdc->ptlDCOrig.x;
-    BrushOrigin.y = pbrush->ptOrigin.y + pdc->ptlDCOrig.y;
+    /* The brush origin the app set with SetBrushOrgEx (a pattern brush aligned to the parent window by a
+     * WM_CTLCOLORSTATIC handler, for instance) applies to the fill; pbrush->ptOrigin is never set */
+    BrushOrigin.x = pbrush->ptOrigin.x + pdc->dclevel.ptlBrushOrigin.x + pdc->ptlDCOrig.x;
+    BrushOrigin.y = pbrush->ptOrigin.y + pdc->dclevel.ptlBrushOrigin.y + pdc->ptlDCOrig.y;
 #endif
 
     DC_vPrepareDCsForBlitEx(pdc, &DestRect, NULL, NULL, pdc->dctype == DCTYPE_DIRECT ? DCPREP_SPLIT_DEST : 0);
