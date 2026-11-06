@@ -50,7 +50,7 @@ static GUID Guids[] =
 typedef struct
 {
     char Type;      /* A allow, D deny, a allowed object, d denied object, n allowed object without a type */
-    char Sid;       /* U the token user, E Everyone */
+    char Sid;       /* U the token user, E Everyone, S the principal self SID */
     ACCESS_MASK Mask;
     int Guid;
 } ACE_SPEC;
@@ -81,6 +81,26 @@ static const DACL_SPEC Dacls[] =
     /* 19 */ {{ { 'A', 'E', 3, -1 }, { 'd', 'E', 2, G1 } }},
     /* 20 */ {{ { 'a', 'U', 1, G3 }, { 'a', 'U', 1, G2 } }},
     /* 21 */ {{ { 'a', 'U', 1, G1 }, { 'a', 'U', 1, G2 } }},
+    /* a deny object ACE for an entry that already holds the right, with the ancestors not yet granted it */
+    /* 22 */ {{ { 'a', 'U', 1, G1 }, { 'd', 'U', 1, G1 }, { 'A', 'U', 1, -1 } }},
+    /* 23 */ {{ { 'A', 'U', 1, -1 }, { 'd', 'U', 1, G1 } }},
+    /* 24 */ {{ { 'a', 'U', 1, G1 }, { 'd', 'U', 1, G1 }, { 'a', 'U', 1, G2 } }},
+    /* 25 */ {{ { 'a', 'U', 1, G3 }, { 'd', 'U', 1, G3 }, { 'A', 'U', 1, -1 } }},
+    /* 26 */ {{ { 'a', 'U', 1, G1 }, { 'd', 'U', 3, G1 }, { 'A', 'U', 3, -1 } }},
+    /* 27 */ {{ { 'a', 'U', 1, G1 }, { 'd', 'U', 1, G2 }, { 'A', 'U', 1, -1 } }},
+    /* 28 */ {{ { 'a', 'U', 1, G1 }, { 'A', 'U', 1, -1 }, { 'd', 'U', 1, G1 } }},
+    /* 29 */ {{ { 'a', 'U', 1, G1 }, { 'd', 'U', 1, G0 }, { 'A', 'U', 1, -1 } }},
+    /* 30 */ {{ { 'a', 'U', 3, G1 }, { 'd', 'U', 2, G1 }, { 'A', 'U', 2, -1 } }},
+    /* 31 */ {{ { 'a', 'U', 1, G1 }, { 'd', 'U', 1, G1 }, { 'a', 'U', 1, G0 } }},
+};
+
+/* The principal self SID cases: an ACE for SELF, with the principal self SID of the call the user or none */
+static const DACL_SPEC SelfDacls[] =
+{
+    /* 1 */ {{ { 'A', 'S', 3, -1 } }},
+    /* 2 */ {{ { 'a', 'S', 3, G1 } }},
+    /* 3 */ {{ { 'D', 'S', 2, -1 }, { 'A', 'U', 3, -1 } }},
+    /* 4 */ {{ { 'A', 'U', 1, -1 }, { 'd', 'S', 1, G1 } }},
 };
 
 /* Lists: '0' none, A = root, B = root with two children, C = B with a grandchild under the first child */
@@ -95,7 +115,7 @@ static const LIST_SPEC Lists[] =
 
 static const ACCESS_MASK Wants[] = { MAXIMUM_ALLOWED, 1, 3 };
 
-static BOOL BuildDacl(PACL Acl, DWORD Size, const DACL_SPEC *Spec, PSID User, PSID Everyone)
+static BOOL BuildDacl(PACL Acl, DWORD Size, const DACL_SPEC *Spec, PSID User, PSID Everyone, PSID Self)
 {
     int i;
 
@@ -104,7 +124,7 @@ static BOOL BuildDacl(PACL Acl, DWORD Size, const DACL_SPEC *Spec, PSID User, PS
     for (i = 0; i < MAX_ACES && Spec->Aces[i].Type; i++)
     {
         const ACE_SPEC *Ace = &Spec->Aces[i];
-        PSID Sid = Ace->Sid == 'E' ? Everyone : User;
+        PSID Sid = Ace->Sid == 'E' ? Everyone : Ace->Sid == 'S' ? Self : User;
         GUID *Guid = Ace->Guid >= 0 ? &Guids[Ace->Guid] : NULL;
         BOOL Ret;
 
@@ -125,7 +145,7 @@ static BOOL BuildDacl(PACL Acl, DWORD Size, const DACL_SPEC *Spec, PSID User, PS
 typedef void (*EMIT_LINE)(const char *Line);
 
 static void RunCase(EMIT_LINE Emit, HANDLE Token, char TokenName, int DaclIndex, PSECURITY_DESCRIPTOR Sd,
-                    const LIST_SPEC *List, ACCESS_MASK Want, BOOL ResultList)
+                    const LIST_SPEC *List, ACCESS_MASK Want, BOOL ResultList, PSID PrincipalSelf)
 {
     OBJECT_TYPE_LIST Otl[4];
     BYTE PrivilegeSet[256];
@@ -151,10 +171,10 @@ static void RunCase(EMIT_LINE Emit, HANDLE Token, char TokenName, int DaclIndex,
 
     SetLastError(0xdead);
     if (ResultList)
-        Ret = AccessCheckByTypeResultList(Sd, NULL, Token, Want, Otl, List->Count, &Mapping,
+        Ret = AccessCheckByTypeResultList(Sd, PrincipalSelf, Token, Want, Otl, List->Count, &Mapping,
                                           (PPRIVILEGE_SET)PrivilegeSet, &PrivilegeSetLength, Granted, (void *)Status);
     else
-        Ret = AccessCheckByType(Sd, NULL, Token, Want, List->Count ? Otl : NULL, List->Count, &Mapping,
+        Ret = AccessCheckByType(Sd, PrincipalSelf, Token, Want, List->Count ? Otl : NULL, List->Count, &Mapping,
                                 (PPRIVILEGE_SET)PrivilegeSet, &PrivilegeSetLength, Granted, Status);
     Error = GetLastError();
 
@@ -182,13 +202,20 @@ static void RunAll(EMIT_LINE Emit, void (*Fail)(const char *What, DWORD Error))
     union { ACL Acl; BYTE Buffer[512]; } AclBuffer;
     SECURITY_DESCRIPTOR Sd;
     SID_AND_ATTRIBUTES Restrict;
-    PSID Everyone = NULL, System = NULL, User;
-    HANDLE Process = NULL, Restricted = NULL, Tokens[2] = { NULL, NULL };
+    PSID Everyone = NULL, System = NULL, SelfSid = NULL, User;
+    HANDLE Process = NULL, Restricted = NULL, Tokens[2] = { NULL, NULL }, Privileged = NULL;
+    TOKEN_PRIVILEGES Privileges;
     DWORD Length;
-    int t, d, l, w, r;
+    int t, d, l, w, r, p;
+    static const ACCESS_MASK OwnerWants[] = { MAXIMUM_ALLOWED, READ_CONTROL, READ_CONTROL | WRITE_DAC | 1, WRITE_DAC | 2 };
+    static const int OwnerDacls[] = { 0, 2, 4, 8 };
+    static const ACCESS_MASK PrivWants[] = { MAXIMUM_ALLOWED, ACCESS_SYSTEM_SECURITY, WRITE_OWNER,
+                                             ACCESS_SYSTEM_SECURITY | 1, WRITE_OWNER | 3 };
+    static const int PrivDacls[] = { 0, 2, 8 };
 
     if (!AllocateAndInitializeSid(&World, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &Everyone) ||
-        !AllocateAndInitializeSid(&Nt, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &System))
+        !AllocateAndInitializeSid(&Nt, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &System) ||
+        !AllocateAndInitializeSid(&Nt, 1, SECURITY_PRINCIPAL_SELF_RID, 0, 0, 0, 0, 0, 0, 0, &SelfSid))
     {
         Fail("AllocateAndInitializeSid", GetLastError());
         goto Cleanup;
@@ -218,7 +245,7 @@ static void RunAll(EMIT_LINE Emit, void (*Fail)(const char *What, DWORD Error))
     {
         for (d = 0; d < (int)(sizeof(Dacls) / sizeof(Dacls[0])); d++)
         {
-            if (!BuildDacl(&AclBuffer.Acl, sizeof(AclBuffer), &Dacls[d], User, Everyone))
+            if (!BuildDacl(&AclBuffer.Acl, sizeof(AclBuffer), &Dacls[d], User, Everyone, NULL))
             {
                 Fail("BuildDacl", GetLastError());
                 goto Cleanup;
@@ -231,11 +258,97 @@ static void RunAll(EMIT_LINE Emit, void (*Fail)(const char *What, DWORD Error))
             for (l = 0; l < (int)(sizeof(Lists) / sizeof(Lists[0])); l++)
                 for (w = 0; w < (int)(sizeof(Wants) / sizeof(Wants[0])); w++)
                     for (r = 0; r < (Lists[l].Count ? 2 : 1); r++)
-                        RunCase(Emit, Tokens[t], t ? 'R' : 'U', d, &Sd, &Lists[l], Wants[w], r);
+                        RunCase(Emit, Tokens[t], t ? 'R' : 'U', d, &Sd, &Lists[l], Wants[w], r, NULL);
+        }
+    }
+
+    /* the token user owns the object: the implicit READ_CONTROL and WRITE_DAC, with and without a list */
+    for (d = 0; d < (int)(sizeof(OwnerDacls) / sizeof(OwnerDacls[0])); d++)
+    {
+        if (!BuildDacl(&AclBuffer.Acl, sizeof(AclBuffer), &Dacls[OwnerDacls[d]], User, Everyone, NULL))
+        {
+            Fail("BuildDacl", GetLastError());
+            goto Cleanup;
+        }
+        InitializeSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+        SetSecurityDescriptorOwner(&Sd, User, FALSE);
+        SetSecurityDescriptorGroup(&Sd, System, FALSE);
+        SetSecurityDescriptorDacl(&Sd, TRUE, &AclBuffer.Acl, FALSE);
+        for (l = 0; l < (int)(sizeof(Lists) / sizeof(Lists[0])); l += 2)
+            for (w = 0; w < (int)(sizeof(OwnerWants) / sizeof(OwnerWants[0])); w++)
+                for (r = 0; r < (Lists[l].Count ? 2 : 1); r++)
+                    RunCase(Emit, Tokens[0], 'O', OwnerDacls[d], &Sd, &Lists[l], OwnerWants[w], r, NULL);
+    }
+
+    /* ACEs for the principal self SID, with the user or nothing as the principal self SID of the call */
+    for (p = 0; p < 2; p++)
+    {
+        for (d = 0; d < (int)(sizeof(SelfDacls) / sizeof(SelfDacls[0])); d++)
+        {
+            if (!BuildDacl(&AclBuffer.Acl, sizeof(AclBuffer), &SelfDacls[d], User, Everyone, SelfSid))
+            {
+                Fail("BuildDacl", GetLastError());
+                goto Cleanup;
+            }
+            InitializeSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+            SetSecurityDescriptorOwner(&Sd, System, FALSE);
+            SetSecurityDescriptorGroup(&Sd, System, FALSE);
+            SetSecurityDescriptorDacl(&Sd, TRUE, &AclBuffer.Acl, FALSE);
+            for (l = 0; l < (int)(sizeof(Lists) / sizeof(Lists[0])); l += 2)
+                for (w = 0; w < (int)(sizeof(Wants) / sizeof(Wants[0])); w++)
+                    for (r = 0; r < (Lists[l].Count ? 2 : 1); r++)
+                        RunCase(Emit, Tokens[0], p ? 'N' : 'P', d, &Sd, &Lists[l], Wants[w], r, p ? NULL : User);
+        }
+    }
+
+    /* rights that need a privilege: the token as it is (W) and a copy with the privileges enabled (V) */
+    if (!DuplicateTokenEx(Process, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenImpersonation, &Privileged))
+    {
+        Fail("DuplicateToken", GetLastError());
+        goto Cleanup;
+    }
+    for (p = 0; p < 2; p++)
+    {
+        Privileges.PrivilegeCount = 1;
+        Privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (!LookupPrivilegeValueA(NULL, p ? "SeTakeOwnershipPrivilege" : "SeSecurityPrivilege",
+                                   &Privileges.Privileges[0].Luid) ||
+            !AdjustTokenPrivileges(Privileged, FALSE, &Privileges, 0, NULL, NULL) ||
+            GetLastError() != ERROR_SUCCESS)
+        {
+            Fail("AdjustTokenPrivileges", GetLastError());
+            goto Cleanup;
+        }
+    }
+    for (p = 0; p < 2; p++)
+    {
+#ifndef ACOTL_STANDALONE
+        /* W depends on which privileges the process token has enabled (the oracle's were), V does not */
+        if (!p)
+            continue;
+#endif
+        for (d = 0; d < (int)(sizeof(PrivDacls) / sizeof(PrivDacls[0])); d++)
+        {
+            if (!BuildDacl(&AclBuffer.Acl, sizeof(AclBuffer), &Dacls[PrivDacls[d]], User, Everyone, NULL))
+            {
+                Fail("BuildDacl", GetLastError());
+                goto Cleanup;
+            }
+            InitializeSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+            SetSecurityDescriptorOwner(&Sd, System, FALSE);
+            SetSecurityDescriptorGroup(&Sd, System, FALSE);
+            SetSecurityDescriptorDacl(&Sd, TRUE, &AclBuffer.Acl, FALSE);
+            for (l = 0; l < (int)(sizeof(Lists) / sizeof(Lists[0])); l += 2)
+                for (w = 0; w < (int)(sizeof(PrivWants) / sizeof(PrivWants[0])); w++)
+                    for (r = 0; r < (Lists[l].Count ? 2 : 1); r++)
+                        RunCase(Emit, p ? Privileged : Tokens[0], p ? 'V' : 'W', PrivDacls[d], &Sd, &Lists[l],
+                                PrivWants[w], r, NULL);
         }
     }
 
 Cleanup:
+    if (Privileged) CloseHandle(Privileged);
+    if (SelfSid) FreeSid(SelfSid);
     if (Tokens[0]) CloseHandle(Tokens[0]);
     if (Tokens[1]) CloseHandle(Tokens[1]);
     if (Restricted) CloseHandle(Restricted);
