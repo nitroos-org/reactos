@@ -596,7 +596,8 @@
 @ cdecl _fputchar(long)
 @ cdecl _fputwchar(long)
 @ cdecl _fsopen(str str long)
-@ cdecl _fstat(long ptr)
+@ cdecl -arch=win32 _fstat(long ptr) _fstat32
+@ cdecl -arch=win64 _fstat(long ptr) _fstat64i32
 @ cdecl -arch=win32 _ftime(ptr) _ftime32
 @ cdecl -arch=win64 _ftime(ptr) _ftime64
 @ cdecl -arch=i386 -ret64 _ftol()
@@ -788,7 +789,8 @@
 @ cdecl _spawnvp(long str ptr)
 @ cdecl _spawnvpe(long str ptr ptr)
 @ cdecl _splitpath(str ptr ptr ptr ptr)
-@ cdecl _stat(str ptr)
+@ cdecl -arch=win32 _stat(str ptr) _stat32
+@ cdecl -arch=win64 _stat(str ptr) _stat64i32
 @ cdecl _statusfp()
 @ cdecl _strcmpi(str str)
 @ cdecl _strdate(ptr)
@@ -923,7 +925,8 @@
 @ cdecl _wspawnvp(long wstr ptr)
 @ cdecl _wspawnvpe(long wstr ptr ptr)
 @ cdecl _wsplitpath(wstr ptr ptr ptr ptr)
-@ cdecl _wstat(wstr ptr)
+@ cdecl -arch=win32 _wstat(wstr ptr) _wstat32
+@ cdecl -arch=win64 _wstat(wstr ptr) _wstat64i32
 @ cdecl _wstrdate(ptr)
 @ cdecl _wstrtime(ptr)
 @ cdecl _wsystem(wstr)
