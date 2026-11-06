@@ -10,6 +10,7 @@ extern void func_GetProfileDirs(void);
 extern void func_LegacyProfileJunctions(void);
 extern void func_LoadUserProfile(void);
 extern void func_ProfileSecurity(void);
+extern void func_ProgramDataSecurity(void);
 
 const struct test winetest_testlist[] =
 {
@@ -21,5 +22,6 @@ const struct test winetest_testlist[] =
     { "LegacyProfileJunctions", func_LegacyProfileJunctions },
     { "LoadUserProfile", func_LoadUserProfile },
     { "ProfileSecurity", func_ProfileSecurity },
+    { "ProgramDataSecurity", func_ProgramDataSecurity },
     { 0, 0 }
 };

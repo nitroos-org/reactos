@@ -81,6 +81,7 @@ list(APPEND SOURCE
     SetSecurityInfoKey.c
     SetNamedSecurityInfoInherit.c
     SddlRights.c
+    SddlSids.c
     ServiceProcess.c
     PerfCounterValues.c
     PerfProvider.c
