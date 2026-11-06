@@ -154,7 +154,7 @@ dll/win32/inseng              # Synced to WineStaging-4.18
 dll/win32/iphlpapi            # Out of sync
 dll/win32/itircl              # Synced to Wine-10.0
 dll/win32/itss                # Synced to Wine-11.21
-dll/win32/jscript             # Synced to Wine-10.0
+dll/win32/jscript             # Synced to Wine-11.21
 dll/win32/jsproxy             # Synced to Wine-10.0
 dll/win32/ktmw32              # Synced to Wine-11.19
 dll/win32/l3codeca.acm        # Synced to Wine-10.0

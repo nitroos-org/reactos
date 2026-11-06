@@ -146,12 +146,24 @@ static HRESULT stack_pop_object(script_ctx_t *ctx, IDispatch **r)
 
 static inline HRESULT stack_pop_int(script_ctx_t *ctx, INT *r)
 {
-    return to_int32(ctx, stack_pop(ctx), r);
+    jsval_t v;
+    HRESULT hres;
+
+    v = stack_pop(ctx);
+    hres = to_int32(ctx, v, r);
+    jsval_release(v);
+    return hres;
 }
 
 static inline HRESULT stack_pop_uint(script_ctx_t *ctx, UINT32 *r)
 {
-    return to_uint32(ctx, stack_pop(ctx), r);
+    jsval_t v;
+    HRESULT hres;
+
+    v = stack_pop(ctx);
+    hres = to_uint32(ctx, v, r);
+    jsval_release(v);
+    return hres;
 }
 
 static inline unsigned local_off(call_frame_t *frame, int ref)
@@ -528,14 +540,14 @@ static HRESULT scope_gc_traverse(struct gc_ctx *gc_ctx, enum gc_traverse_op op, 
         unsigned i, cnt = vars->argc;
 
         for(i = 0; i < cnt; i++) {
-            hres = gc_process_linked_val(gc_ctx, op, dispex, &vars->var[i]);
+            hres = gc_process_linked_val(gc_ctx, op, &vars->var[i]);
             if(FAILED(hres))
                 return hres;
         }
     }
 
     if(scope->next) {
-        hres = gc_process_linked_obj(gc_ctx, op, dispex, &scope->next->dispex, (void**)&scope->next);
+        hres = gc_process_linked_obj(gc_ctx, op, &scope->next->dispex, (void**)&scope->next);
         if(FAILED(hres))
             return hres;
     }
@@ -549,7 +561,7 @@ static HRESULT scope_gc_traverse(struct gc_ctx *gc_ctx, enum gc_traverse_op op, 
         return S_OK;
     }
 
-    return scope->obj && (jsobj = to_jsdisp(scope->obj)) ? gc_process_linked_obj(gc_ctx, op, dispex, jsobj, (void**)&scope->obj) : S_OK;
+    return scope->obj && (jsobj = to_jsdisp(scope->obj)) ? gc_process_linked_obj(gc_ctx, op, jsobj, (void**)&scope->obj) : S_OK;
 }
 
 static const builtin_info_t scope_info = {
@@ -1026,7 +1038,16 @@ static HRESULT interp_forin(script_ctx_t *ctx)
     if(obj) {
         hres = IDispatch_QueryInterface(obj, &IID_IDispatchEx, (void**)&dispex);
         if(SUCCEEDED(hres)) {
-            hres = IDispatchEx_GetNextDispID(dispex, fdexEnumDefault, id, &id);
+            if (ctx->html_mode)
+            {
+                hres = IDispatchEx_GetNextDispID(dispex, make_grfdex(ctx, fdexEnumAll), id, &id);
+                if (FAILED(hres))
+                    hres = S_FALSE;
+            }
+            else
+            {
+                hres = IDispatchEx_GetNextDispID(dispex, make_grfdex(ctx, fdexEnumDefault), id, &id);
+            }
             if(hres == S_OK)
                 hres = IDispatchEx_GetMemberName(dispex, id, &name);
             IDispatchEx_Release(dispex);
@@ -1849,7 +1870,7 @@ static HRESULT interp_carray_set(script_ctx_t *ctx)
     array = stack_top(ctx);
     assert(is_object_instance(array));
 
-    hres = jsdisp_propput_idx(to_jsdisp(get_object(array)), index, value);
+    hres = jsdisp_propput_idx(as_jsdisp(get_object(array)), index, value);
     jsval_release(value);
     return hres;
 }
@@ -1896,7 +1917,7 @@ static HRESULT interp_obj_prop(script_ctx_t *ctx)
         jsdisp_t *func;
 
         assert(is_object_instance(val));
-        func = to_jsdisp(get_object(val));
+        func = as_jsdisp(get_object(val));
 
         desc.mask = desc.flags;
         if(type == PROPERTY_DEFINITION_GETTER) {
