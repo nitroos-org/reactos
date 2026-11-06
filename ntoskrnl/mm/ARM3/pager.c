@@ -88,6 +88,19 @@ static volatile LONG MiPagerExpectMismatch;
 #define MI_PAGER_TEST_MISMATCH_NEXT_READ            (MI_PAGER_TEST_COMMAND_BASE + 3)
 #define MI_PAGER_TEST_STARVE_NEXT_READ              (MI_PAGER_TEST_COMMAND_BASE + 4)
 #define MI_PAGER_TEST_PING                          (MI_PAGER_TEST_COMMAND_BASE + 5)
+#define MI_PAGER_TEST_MISMATCH_NEXT_FREE            (MI_PAGER_TEST_COMMAND_BASE + 6)
+#define MI_PAGER_TEST_PAUSE_NEXT_WRITE              (MI_PAGER_TEST_COMMAND_BASE + 7)
+#define MI_PAGER_TEST_RESUME_WRITE                  (MI_PAGER_TEST_COMMAND_BASE + 8)
+#define MI_PAGER_TEST_QUERY_PAUSED                  (MI_PAGER_TEST_COMMAND_BASE + 9)
+#define MI_PAGER_TEST_QUERY_FREE_REFUSED            (MI_PAGER_TEST_COMMAND_BASE + 10)
+#define MI_PAGER_TEST_LAST                          MI_PAGER_TEST_QUERY_FREE_REFUSED
+
+/* Writer pause (test): how long the writer waits for the resume command at most */
+#define MI_PAGER_TEST_PAUSE_SECONDS 30
+static KEVENT MiPagerPauseEvent;
+static volatile LONG MiPagerWriterPaused;
+static volatile LONG MiPagerPauseReady;
+static volatile ULONG MiPagerFreeRefusedBase;
 
 /* Writer batch: pages taken per PFN lock hold */
 #define MI_PAGER_WRITE_BATCH 16
@@ -121,7 +134,7 @@ MiPagerTakeInjection(
         return FALSE;
 
     /* The mismatch it makes the caller report is expected: no Debug bugcheck for it */
-    if (Which == MI_PAGER_INJECT_TAG_MISMATCH)
+    if ((Which == MI_PAGER_INJECT_TAG_MISMATCH) || (Which == MI_PAGER_INJECT_FREE_MISMATCH))
         InterlockedExchange(&MiPagerExpectMismatch, 1);
     return TRUE;
 }
@@ -184,7 +197,7 @@ NTAPI
 MiReleasePfnPageFileSlot(
     _Inout_ PMMPFN Pfn1)
 {
-    ULONG Protection;
+    ULONG Protection, Owner;
 
     MI_ASSERT_PFN_LOCK_HELD();
     ASSERT(MI_IS_PAGEFILE_PTE(&Pfn1->OriginalPte));
@@ -192,9 +205,17 @@ MiReleasePfnPageFileSlot(
     ASSERT(Pfn1->u3.e1.WriteInProgress == 0);
 
     Protection = (ULONG)Pfn1->OriginalPte.u.Soft.Protection;
+    Owner = MiPagerOwnerTagForPfn(Pfn1);
+    if (MiPagerTakeInjection(MI_PAGER_INJECT_FREE_MISMATCH, MiPteToAddress(Pfn1->PteAddress)))
+    {
+        /* Test: the free names another owner, it must be refused (the slot is leaked, never reused) */
+        Owner = ~Owner;
+        if (Owner == 0)
+            Owner = 1;
+    }
     MiReleasePageFileSlot((ULONG)Pfn1->OriginalPte.u.Soft.PageFileLow,
                           MI_PAGEFILE_PTE_SLOT(&Pfn1->OriginalPte),
-                          MiPagerOwnerTagForPfn(Pfn1));
+                          Owner);
     MI_MAKE_SOFTWARE_PTE(&Pfn1->OriginalPte, Protection);
 }
 
@@ -518,10 +539,23 @@ MiWriteModifiedPrivatePages(
         /* The I/O, without the PFN lock; the pages are referenced and off every list */
         for (i = 0; i < Count; i++)
         {
-            if (MiPagerTakeInjection(MI_PAGER_INJECT_WRITE_ERROR, MiPteToAddress(MI_PFN_ELEMENT(Batch[i])->PteAddress)))
+            PVOID PageAddress = MiPteToAddress(MI_PFN_ELEMENT(Batch[i])->PteAddress);
+
+            if (MiPagerTakeInjection(MI_PAGER_INJECT_WRITE_ERROR, PageAddress))
                 BatchStatus[i] = STATUS_DEVICE_DATA_ERROR;
             else
                 BatchStatus[i] = MiWritePageFileSlot(Batch[i], BatchFile[i], BatchSlot[i]);
+
+            /* Test: hold the completion of this page until the test says go (the page is written, referenced, off every list) */
+            if (MiPagerTakeInjection(MI_PAGER_INJECT_WRITE_PAUSE, PageAddress))
+            {
+                LARGE_INTEGER Timeout;
+
+                Timeout.QuadPart = -(LONGLONG)MI_PAGER_TEST_PAUSE_SECONDS * 10 * 1000 * 1000;
+                InterlockedExchange(&MiPagerWriterPaused, 1);
+                KeWaitForSingleObject(&MiPagerPauseEvent, Executive, KernelMode, FALSE, &Timeout);
+                InterlockedExchange(&MiPagerWriterPaused, 0);
+            }
         }
 
         OldIrql = MiAcquirePfnLock();
@@ -634,11 +668,17 @@ MiTrimPte(
         (Pfn1->u3.e2.ReferenceCount != 1) ||
         (Pfn1->u3.e1.ReadInProgress != 0) ||
         (Pfn1->u3.e1.WriteInProgress != 0) ||
+        (Pfn1->u3.e1.CacheAttribute != MiCached) ||
         Pfn1->Wsle.u1.e1.LockedInWs ||
         Pfn1->Wsle.u1.e1.LockedInMemory ||
         (Pfn1->OriginalPte.u.Soft.Protection == 0))
     {
-        /* Shared, locked (VirtualLock or an MDL), or not an ordinary private page */
+        /*
+         * Shared, locked (VirtualLock or an MDL), or not an ordinary private page.
+         * Non-cached and write-combined pages (PAGE_NOCACHE / PAGE_WRITECOMBINE
+         * mappings) are never trimmed: a repurposed page is reused as an ordinary
+         * cached page, and nothing here proves that is safe for them.
+         */
         MiReleasePfnLock(OldIrql);
         return;
     }
@@ -839,8 +879,12 @@ MmSetMemoryListInformation(
     /* Test hooks, only with NitroPagerDebug set: they name a user page of the caller */
     TestCommand = (MiNitroPagerDebug != 0) &&
                   (Command > MI_PAGER_TEST_COMMAND_BASE) &&
-                  (Command <= MI_PAGER_TEST_PING) &&
-                  ((Address != NULL) || (Command == MI_PAGER_TEST_PING)) &&
+                  (Command <= MI_PAGER_TEST_LAST) &&
+                  ((Address != NULL) ||
+                   (Command == MI_PAGER_TEST_PING) ||
+                   (Command == MI_PAGER_TEST_RESUME_WRITE) ||
+                   (Command == MI_PAGER_TEST_QUERY_PAUSED) ||
+                   (Command == MI_PAGER_TEST_QUERY_FREE_REFUSED)) &&
                   (Address <= MM_HIGHEST_USER_ADDRESS);
 
     if ((Command >= MI_MEMORY_COMMAND_MAX) && !TestCommand)
@@ -883,6 +927,23 @@ MmSetMemoryListInformation(
             MiPagerArmInjection(MI_PAGER_INJECT_READ_RESOURCES, Address);
             return STATUS_SUCCESS;
         case MI_PAGER_TEST_PING:
+            return STATUS_SUCCESS;
+        case MI_PAGER_TEST_MISMATCH_NEXT_FREE:
+            MiPagerFreeRefusedBase = MiPagerCounters.SlotFreeRefused;
+            MiPagerArmInjection(MI_PAGER_INJECT_FREE_MISMATCH, Address);
+            return STATUS_SUCCESS;
+        case MI_PAGER_TEST_QUERY_FREE_REFUSED:
+            return (MiPagerCounters.SlotFreeRefused > MiPagerFreeRefusedBase) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+        case MI_PAGER_TEST_PAUSE_NEXT_WRITE:
+            KeInitializeEvent(&MiPagerPauseEvent, NotificationEvent, FALSE);
+            MiPagerPauseReady = 1;
+            MiPagerArmInjection(MI_PAGER_INJECT_WRITE_PAUSE, Address);
+            return STATUS_SUCCESS;
+        case MI_PAGER_TEST_QUERY_PAUSED:
+            return MiPagerWriterPaused ? STATUS_SUCCESS : STATUS_PENDING;
+        case MI_PAGER_TEST_RESUME_WRITE:
+            if (MiPagerPauseReady)
+                KeSetEvent(&MiPagerPauseEvent, IO_NO_INCREMENT, FALSE);
             return STATUS_SUCCESS;
 
         default:

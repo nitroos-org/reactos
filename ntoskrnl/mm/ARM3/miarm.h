@@ -2747,6 +2747,36 @@ MiGetUsablePageCount(VOID)
     return Count;
 }
 
+/*
+ * Take a page after the caller's MiGetUsablePageCount gate passed (PFN lock held).
+ * The count includes every private standby page, but the repurpose scan is bounded
+ * and refuses a page whose state is not what a clean private page must have, so
+ * with NitroPager on a page can be missing although the count said it was there.
+ * That is a PFN database fault: stop, rather than hand PFN 0 on to the caller.
+ * Flag 0: the plain call (it never returned 0 after the gate).
+ */
+FORCEINLINE
+PFN_NUMBER
+MiRemoveAnyPageGated(IN ULONG Color)
+{
+    PFN_NUMBER PageFrameIndex = MiRemoveAnyPage(Color);
+
+    if ((PageFrameIndex == 0) && (MiNitroPagerMode != 0))
+        KeBugCheckEx(PFN_LIST_CORRUPT, 0x9C, MmAvailablePages, MiGetUsablePageCount(), 0);
+    return PageFrameIndex;
+}
+
+FORCEINLINE
+PFN_NUMBER
+MiRemoveZeroPageGated(IN ULONG Color)
+{
+    PFN_NUMBER PageFrameIndex = MiRemoveZeroPage(Color);
+
+    if ((PageFrameIndex == 0) && (MiNitroPagerMode != 0))
+        KeBugCheckEx(PFN_LIST_CORRUPT, 0x9D, MmAvailablePages, MiGetUsablePageCount(), 0);
+    return PageFrameIndex;
+}
+
 /* pager.c */
 VOID
 NTAPI
@@ -2778,7 +2808,9 @@ MiWriteModifiedPrivatePages(
 #define MI_PAGER_INJECT_WRITE_ERROR     1
 #define MI_PAGER_INJECT_TAG_MISMATCH    2
 #define MI_PAGER_INJECT_READ_RESOURCES  3
-#define MI_PAGER_INJECT_MAX             4
+#define MI_PAGER_INJECT_FREE_MISMATCH   4   /* the next release of the page's slot names the wrong owner */
+#define MI_PAGER_INJECT_WRITE_PAUSE     5   /* the writer waits (bounded) between the write and its completion */
+#define MI_PAGER_INJECT_MAX             6
 
 BOOLEAN
 NTAPI

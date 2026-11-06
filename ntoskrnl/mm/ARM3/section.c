@@ -1145,7 +1145,7 @@ MiSessionCommitPageTables(IN PVOID StartVa,
                 MI_SET_USAGE(MI_USAGE_PAGE_TABLE);
                 MI_SET_PROCESS2(PsGetCurrentProcess()->ImageFileName);
                 Color = (++MmSessionSpace->Color) & MmSecondaryColorMask;
-                PageFrameNumber = MiRemoveZeroPage(Color);
+                PageFrameNumber = MiRemoveZeroPageGated(Color);
                 TempPde.u.Hard.PageFrameNumber = PageFrameNumber;
                 MI_WRITE_VALID_PDE(StartPde, TempPde);
 
@@ -2288,6 +2288,13 @@ MiFlushTbAndCapture(IN PMMVAD FoundVad,
     // We don't support I/O mappings in this path yet
     //
     ASSERT(Pfn1 != NULL);
+
+    //
+    // The protection kept for the page after it is unmapped is stored under the
+    // PFN lock: the page writer completes a write of this page under it, and
+    // rebuilds OriginalPte from the protection it finds there
+    //
+    Pfn1->OriginalPte.u.Soft.Protection = ProtectionMask;
 
     //
     // Make sure new protection mask doesn't get in conflict and fix it if it does

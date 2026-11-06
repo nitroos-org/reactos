@@ -237,7 +237,7 @@ MiReadPageFile(
     IO_STATUS_BLOCK Iosb;
     NTSTATUS Status;
     KEVENT Event;
-    UCHAR MdlBase[sizeof(MDL) + sizeof(PFN_NUMBER)];
+    DECLSPEC_ALIGN(MEMORY_ALLOCATION_ALIGNMENT) UCHAR MdlBase[sizeof(MDL) + sizeof(PFN_NUMBER)];
     PMDL Mdl = (PMDL)MdlBase;
     PMMPAGING_FILE PagingFile;
 
@@ -283,6 +283,17 @@ MiReadPageFile(
     {
         MmUnmapLockedPages (Mdl->MappedSystemVa, Mdl);
     }
+    if (NT_SUCCESS(Status) && (MiNitroPagerMode != 0) && (Iosb.Information != PAGE_SIZE))
+    {
+        /*
+         * A short transfer leaves the rest of a page that came unzeroed from the free
+         * list, i.e. another process's old data: never hand that to the faulting
+         * process, it is an in-page error. (Flag 0 keeps the old behaviour.)
+         */
+        DPRINT1("Paging file read of slot %Iu: %Iu of %lu bytes\n",
+                PageFileOffset + 1, (SIZE_T)Iosb.Information, (ULONG)PAGE_SIZE);
+        Status = STATUS_IN_PAGE_ERROR;
+    }
     if (NT_SUCCESS(Status))
         MI_COUNT_PAGE_READ(1);
     return(Status);
@@ -325,6 +336,20 @@ MmInitPagingFile(VOID)
     MmNumberOfPagingFiles = 0;
 }
 
+/* Set a slot's owner tag. MiPagingFileSlotLock held, Slot < SlotTagCount, SlotTags not NULL */
+FORCEINLINE
+VOID
+MiStoreSlotTag(
+    _In_ PMMPAGING_FILE PagingFile,
+    _In_ ULONG_PTR Slot,
+    _In_ ULONG Tag)
+{
+    PagingFile->SlotTags[Slot] = Tag;
+    if (PagingFile->SlotTagsMirror != NULL)
+        PagingFile->SlotTagsMirror[Slot] = Tag;
+}
+
+
 VOID
 NTAPI
 MmFreeSwapPage(SWAPENTRY Entry)
@@ -360,7 +385,7 @@ MmFreeSwapPage(SWAPENTRY Entry)
 
     /* A legacy slot never has an owner tag; keep it that way for the next ARM3 user */
     if ((PagingFile->SlotTags != NULL) && (off < PagingFile->SlotTagCount))
-        PagingFile->SlotTags[off] = 0;
+        MiStoreSlotTag(PagingFile, off, 0);
 
     PagingFile->FreeSpace++;
     PagingFile->CurrentUsage--;
@@ -596,9 +621,13 @@ MiGrowPagingFiles(
         Growth = min(Growth, PagingFile->MaximumSize - OldSize);
         KeReleaseGuardedMutex(&MmPageFileCreationLock);
 
-        /* The owner tags grow with the file (nonpaged, one per slot); without them the file does not grow yet */
+        /*
+         * NitroPager only: the owner tags grow with the file (nonpaged, one per slot);
+         * without the pool for them the file does not grow yet. Flag 0 has no tags and
+         * grows as it always did.
+         */
         NewTags = NULL;
-        if (PagingFile->SlotTags != NULL)
+        if ((MiNitroPagerMode != 0) && (PagingFile->SlotTags != NULL))
         {
             NewTags = ExAllocatePoolZero(NonPagedPool, (OldSize + Growth) * sizeof(ULONG), TAG_MM);
             if (NewTags == NULL)
@@ -631,14 +660,37 @@ MiGrowPagingFiles(
             continue;
         }
 
-        /* The new slots exist: they back committed memory from now on */
-        KeAcquireGuardedMutex(&MmPageFileCreationLock);
-        KeAcquireSpinLock(&MiPagingFileSlotLock, &OldIrql);
+        /*
+         * Copy the tags in short pieces, each under the slot lock, with every tag
+         * write mirrored into the new array from before the first piece: no write is
+         * lost and the lock is never held for the whole array (1 MB per GB of file).
+         * Only this thread (one at a time) replaces the array.
+         */
         OldTags = PagingFile->SlotTags;
         if (NewTags != NULL)
         {
-            RtlCopyMemory(NewTags, OldTags, PagingFile->SlotTagCount * sizeof(ULONG));
+            PFN_NUMBER Done, Piece, Count = PagingFile->SlotTagCount;
+
+            KeAcquireSpinLock(&MiPagingFileSlotLock, &OldIrql);
+            PagingFile->SlotTagsMirror = NewTags;
+            KeReleaseSpinLock(&MiPagingFileSlotLock, OldIrql);
+
+            for (Done = 0; Done < Count; Done += Piece)
+            {
+                Piece = min(Count - Done, (PFN_NUMBER)1024);
+                KeAcquireSpinLock(&MiPagingFileSlotLock, &OldIrql);
+                RtlCopyMemory(NewTags + Done, OldTags + Done, Piece * sizeof(ULONG));
+                KeReleaseSpinLock(&MiPagingFileSlotLock, OldIrql);
+            }
+        }
+
+        /* The new slots exist: they back committed memory from now on */
+        KeAcquireGuardedMutex(&MmPageFileCreationLock);
+        KeAcquireSpinLock(&MiPagingFileSlotLock, &OldIrql);
+        if (NewTags != NULL)
+        {
             PagingFile->SlotTags = NewTags;
+            PagingFile->SlotTagsMirror = NULL;
             PagingFile->SlotTagCount = OldSize + Growth;
         }
         /* The slots beyond the old size were kept set: hand them out from now on */
@@ -1311,9 +1363,15 @@ EarlyQuit:
                    (ULONG)(PagingFile->MaximumSize - PagingFile->Size));
     }
 
-    /* NitroPager owner tags (1 MB per GB of file); without them ARM3 does not page to this file */
-    PagingFile->SlotTags = ExAllocatePoolZero(NonPagedPool, PagingFile->Size * sizeof(ULONG), TAG_MM);
-    PagingFile->SlotTagCount = (PagingFile->SlotTags != NULL) ? PagingFile->Size : 0;
+    /*
+     * NitroPager owner tags (1 MB per GB of file); without them ARM3 does not page to this
+     * file. Flag 0: no tags, nothing allocated (the pager is not used).
+     */
+    if (MiNitroPagerMode != 0)
+    {
+        PagingFile->SlotTags = ExAllocatePoolZero(NonPagedPool, PagingFile->Size * sizeof(ULONG), TAG_MM);
+        PagingFile->SlotTagCount = (PagingFile->SlotTags != NULL) ? PagingFile->Size : 0;
+    }
     PagingFile->SlotHint = 1;
 
     /* Insert the new paging file information into the list */
@@ -1398,7 +1456,7 @@ MiAllocatePageFileSlot(
         MiUsedSwapPages++;
         MiFreeSwapPages--;
         ASSERT(PagingFile->SlotTags[Offset] == 0);
-        PagingFile->SlotTags[Offset] = 0;
+        MiStoreSlotTag(PagingFile, Offset, 0);
 
         KeReleaseSpinLock(&MiPagingFileSlotLock, OldIrql);
         *FileIndex = i;
@@ -1446,7 +1504,7 @@ MiReleasePageFileSlot(
         return FALSE;
     }
 
-    PagingFile->SlotTags[Slot] = 0;
+    MiStoreSlotTag(PagingFile, Slot, 0);
     RtlClearBit(PagingFile->Bitmap, (ULONG)Slot);
     if (Slot < PagingFile->SlotHint)
         PagingFile->SlotHint = (ULONG)Slot;
@@ -1475,7 +1533,7 @@ MiSetPageFileSlotTag(
     ASSERT((PagingFile != NULL) && (Slot < PagingFile->SlotTagCount));
     ASSERT(RtlTestBit(PagingFile->Bitmap, (ULONG)Slot));
     ASSERT(PagingFile->SlotTags[Slot] == 0);
-    PagingFile->SlotTags[Slot] = Owner;
+    MiStoreSlotTag(PagingFile, Slot, Owner);
     KeReleaseSpinLock(&MiPagingFileSlotLock, OldIrql);
 }
 
@@ -1516,7 +1574,7 @@ MiWritePageFileSlot(
     _In_ ULONG FileIndex,
     _In_ ULONG_PTR Slot)
 {
-    UCHAR MdlBase[sizeof(MDL) + sizeof(PFN_NUMBER)];
+    DECLSPEC_ALIGN(MEMORY_ALLOCATION_ALIGNMENT) UCHAR MdlBase[sizeof(MDL) + sizeof(PFN_NUMBER)];
     PMDL Mdl = (PMDL)MdlBase;
     LARGE_INTEGER FileOffset;
     IO_STATUS_BLOCK Iosb;
@@ -1542,6 +1600,10 @@ MiWritePageFileSlot(
     }
     if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
         MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
+
+    /* A short write is a failed write: the slot must not be tagged as holding the page */
+    if (NT_SUCCESS(Status) && (Iosb.Information != PAGE_SIZE))
+        Status = STATUS_UNEXPECTED_IO_ERROR;
 
     if (NT_SUCCESS(Status))
     {

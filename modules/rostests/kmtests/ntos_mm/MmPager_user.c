@@ -2,9 +2,11 @@
  * PROJECT:     ReactOS kernel-mode tests
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     NitroPager P0: page list transitions, slot accounting, in-page
- *              error and resource paths (test commands), the owner tag check,
- *              and a race of protect/decommit/recommit/fault/process exit
- *              against EmptyWorkingSet, flush and purge
+ *              error and resource paths (test commands), the owner tag check
+ *              (read and free), a page dirtied or reactivated while it is being
+ *              written, an I/O read into paged-out memory (MDL write lock), and
+ *              a race of protect (incl. PAGE_GUARD)/decommit/recommit/fault/
+ *              process exit against EmptyWorkingSet, flush and purge
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
@@ -27,6 +29,11 @@
 #define PAGER_TEST_MISMATCH_NEXT_READ   0x4E500003
 #define PAGER_TEST_STARVE_NEXT_READ     0x4E500004
 #define PAGER_TEST_PING                 0x4E500005
+#define PAGER_TEST_MISMATCH_NEXT_FREE   0x4E500006
+#define PAGER_TEST_PAUSE_NEXT_WRITE     0x4E500007
+#define PAGER_TEST_RESUME_WRITE         0x4E500008
+#define PAGER_TEST_QUERY_PAUSED         0x4E500009
+#define PAGER_TEST_QUERY_FREE_REFUSED   0x4E50000A
 
 #define PRIVATE_STANDBY_PRIORITY 2
 
@@ -200,6 +207,43 @@ ResidentPages(
     return Count;
 }
 
+/* A read (or a write) of the first byte of a page under SEH: the exception code, STATUS_SUCCESS if none */
+static
+NTSTATUS
+TouchUnderSeh(
+    _In_ PUCHAR Page,
+    _In_ BOOLEAN Write)
+{
+    NTSTATUS Code = STATUS_SUCCESS;
+
+    _SEH2_TRY
+    {
+        if (Write)
+            *(volatile UCHAR *)Page = *(volatile UCHAR *)Page;
+        else
+            (VOID)*(volatile UCHAR *)Page;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Code = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    return Code;
+}
+
+static
+NTSTATUS
+ProtectPage(
+    _In_ PUCHAR Page,
+    _In_ ULONG Protection)
+{
+    PVOID Address = Page;
+    SIZE_T Size = PageSize;
+    ULONG Old;
+
+    return NtProtectVirtualMemory(NtCurrentProcess(), &Address, &Size, Protection, &Old);
+}
+
 /* A read of the page under SEH: the exception code and its third parameter (the I/O status) */
 static
 NTSTATUS
@@ -305,7 +349,7 @@ FaultThread(
     return 0;
 }
 
-/* Race thread 1: protection changes (NOACCESS and back, read-only and back) on a written region */
+/* Race thread 1: protection changes (read-only, NOACCESS and PAGE_GUARD, each and back) on a written region */
 static
 DWORD
 WINAPI
@@ -325,7 +369,23 @@ ProtectThread(
 
         Address = Base + First * PageSize;
         Size = 8 * PageSize;
-        NtProtectVirtualMemory(NtCurrentProcess(), &Address, &Size, (Round & 1) ? PAGE_NOACCESS : PAGE_READONLY, &Old);
+        NtProtectVirtualMemory(NtCurrentProcess(), &Address, &Size,
+                               ((Round % 3) == 2) ? (PAGE_READWRITE | PAGE_GUARD) :
+                               ((Round % 3) == 1) ? PAGE_NOACCESS : PAGE_READONLY, &Old);
+        if ((Round % 3) == 2)
+        {
+            /* The first touch of a guard page raises the violation and drops the guard (the fault path rewrites the PTE) */
+            for (i = First; i < First + 8; i++)
+            {
+                NTSTATUS Code = TouchUnderSeh(Base + i * PageSize, FALSE);
+
+                if (Code != STATUS_GUARD_PAGE_VIOLATION)
+                {
+                    InterlockedIncrement(&RaceErrors);
+                    trace("protect thread: guard page %lu touched: 0x%lx\n", i, Code);
+                }
+            }
+        }
         Address = Base + First * PageSize;
         Size = 8 * PageSize;
         NtProtectVirtualMemory(NtCurrentProcess(), &Address, &Size, PAGE_READWRITE, &Old);
@@ -575,6 +635,238 @@ TestInjection(VOID)
     Release(Base);
 }
 
+
+/* The writer's thread for the deterministic write-race tests: a flush that pauses on the armed page */
+static
+DWORD
+WINAPI
+FlushThread(
+    _In_ LPVOID Parameter)
+{
+    UNREFERENCED_PARAMETER(Parameter);
+    return (DWORD)MemoryListCommand(MemoryFlushModifiedList);
+}
+
+static
+BOOLEAN
+WaitWriterPaused(VOID)
+{
+    ULONG i;
+
+    for (i = 0; i < 1500; i++)
+    {
+        if (ArmTest(PAGER_TEST_QUERY_PAUSED, NULL) == STATUS_SUCCESS)
+            return TRUE;
+        Sleep(10);
+    }
+    return FALSE;
+}
+
+/* The page dirty and unmapped, on the modified list, with no copy: what the writer takes */
+static
+VOID
+MakeModifiedPage(
+    _In_ PUCHAR Page,
+    _In_ ULONG Generation)
+{
+    Fill(Page, Generation);
+    ok_eq_hex(ProtectPage(Page, PAGE_NOACCESS), STATUS_SUCCESS);
+    ok_eq_hex(ProtectPage(Page, PAGE_READWRITE), STATUS_SUCCESS);
+}
+
+/*
+ * Start the writer on the armed page and wait until it has written it and
+ * stopped before the completion: the page is referenced and on no list
+ */
+static
+HANDLE
+StartPausedWriter(
+    _In_ PUCHAR Page)
+{
+    HANDLE Thread;
+
+    ok_eq_hex(ArmTest(PAGER_TEST_PAUSE_NEXT_WRITE, Page), STATUS_SUCCESS);
+    Thread = CreateThread(NULL, 0, FlushThread, NULL, 0, NULL);
+    ok(Thread != NULL, "flush thread\n");
+    if (Thread && !WaitWriterPaused())
+    {
+        ok(FALSE, "the writer never reached the page\n");
+        ArmTest(PAGER_TEST_RESUME_WRITE, NULL);
+    }
+    return Thread;
+}
+
+static
+VOID
+FinishPausedWriter(
+    _In_ HANDLE Thread)
+{
+    ok_eq_hex(ArmTest(PAGER_TEST_RESUME_WRITE, NULL), STATUS_SUCCESS);
+    if (Thread)
+    {
+        ok_eq_ulong(WaitForSingleObject(Thread, 60000), WAIT_OBJECT_0);
+        CloseHandle(Thread);
+    }
+}
+
+static
+VOID
+TestWriteRaces(VOID)
+{
+    PUCHAR Base;
+    HANDLE Thread;
+
+    if (ArmTest(PAGER_TEST_PING, NULL) != STATUS_SUCCESS)
+    {
+        skip(FALSE, "NitroPager test commands are off\n");
+        return;
+    }
+
+    Base = Allocate(2);
+    ok(Base != NULL, "allocation failed\n");
+    if (!Base)
+        return;
+
+    /*
+     * A page that is faulted in again while it is being written (the fault does not
+     * wait for a read access) and made read-only meanwhile: the completion must give
+     * up the copy and keep the protection the page has now
+     */
+    PageOut();
+    MakeModifiedPage(Base, 31);
+    Thread = StartPausedWriter(Base);
+    ok(Check(Base, 31), "data of a page read while it is written\n");
+    ok_eq_hex(ProtectPage(Base, PAGE_READONLY), STATUS_SUCCESS);
+    FinishPausedWriter(Thread);
+    PageOut();
+    ok(Check(Base, 31), "data after the write was overtaken by a fault\n");
+    ok_eq_hex(TouchUnderSeh(Base, TRUE), STATUS_ACCESS_VIOLATION);
+    ok_eq_hex(ProtectPage(Base, PAGE_READWRITE), STATUS_SUCCESS);
+
+    /*
+     * A page dirtied while it is being written, and unmapped again before the write
+     * ends: it is clean-looking and unmapped at the completion, but it is Modified
+     */
+    PageOut();
+    MakeModifiedPage(Base, 41);
+    Thread = StartPausedWriter(Base);
+    ok(Check(Base, 41), "data of a page read while it is written\n");
+    Fill(Base, 42);
+    ok_eq_hex(ProtectPage(Base, PAGE_NOACCESS), STATUS_SUCCESS);
+    ok_eq_hex(ProtectPage(Base, PAGE_READWRITE), STATUS_SUCCESS);
+    FinishPausedWriter(Thread);
+    PageOut();
+    ok(Check(Base, 42), "the newer data after a write that missed it\n");
+
+    Release(Base);
+}
+
+static
+VOID
+TestFreeMismatch(VOID)
+{
+    PUCHAR Base;
+
+    if (ArmTest(PAGER_TEST_PING, NULL) != STATUS_SUCCESS)
+    {
+        skip(FALSE, "NitroPager test commands are off\n");
+        return;
+    }
+
+    Base = Allocate(1);
+    ok(Base != NULL, "allocation failed\n");
+    if (!Base)
+        return;
+
+    /* A clean page with its copy in the paging file, mapped again */
+    Fill(Base, 51);
+    ok_eq_hex(EmptyOwnWorkingSet(), STATUS_SUCCESS);
+    ok(Check(Base, 51), "soft fault data\n");
+
+    /* Its slot is released when the page is dirtied: the release names the wrong owner and is refused (a leaked slot, never a shared one) */
+    ok_eq_hex(ArmTest(PAGER_TEST_MISMATCH_NEXT_FREE, Base), STATUS_SUCCESS);
+    Fill(Base, 52);
+    ok_eq_hex(EmptyOwnWorkingSet(), STATUS_SUCCESS);
+    ok_eq_hex(ArmTest(PAGER_TEST_QUERY_FREE_REFUSED, NULL), STATUS_SUCCESS);
+
+    /* The page itself is fine: the newer data is written to a new slot and comes back */
+    PageOut();
+    ok(Check(Base, 52), "data after a refused slot release\n");
+    Release(Base);
+}
+
+/*
+ * An I/O read into memory that is paged out: the I/O manager locks the pages for
+ * write, the device fills them through its own mapping, and the page tables
+ * never see a store. The new data must survive the next page-out.
+ */
+#define MDL_PAGES 16
+
+static
+VOID
+TestMdlWriteLock(VOID)
+{
+    WCHAR Path[MAX_PATH];
+    PUCHAR Source, Buffer;
+    HANDLE File;
+    DWORD Done, Mode;
+    ULONG i;
+
+    Source = Allocate(MDL_PAGES);
+    Buffer = Allocate(MDL_PAGES);
+    ok(Source && Buffer, "allocation failed\n");
+    if (!Source || !Buffer)
+        goto Quit;
+
+    if (!GetTempPathW(RTL_NUMBER_OF(Path), Path))
+        wcscpy(Path, L"C:\\");
+    StringCbCatW(Path, sizeof(Path), L"pgmdl.tmp");
+
+    for (i = 0; i < MDL_PAGES; i++)
+        Fill(Source + i * PageSize, 500 + i);
+    File = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    ok(File != INVALID_HANDLE_VALUE, "create %ls: %lu\n", Path, GetLastError());
+    if (File == INVALID_HANDLE_VALUE)
+        goto Quit;
+    ok(WriteFile(File, Source, MDL_PAGES * PageSize, &Done, NULL) && (Done == MDL_PAGES * PageSize), "write\n");
+    FlushFileBuffers(File);
+    CloseHandle(File);
+
+    for (Mode = 0; Mode < 2; Mode++)
+    {
+        /* Mode 0 reads without the cache (the buffer itself is locked), mode 1 through it */
+        File = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                           Mode == 0 ? FILE_FLAG_NO_BUFFERING : FILE_ATTRIBUTE_NORMAL, NULL);
+        if (File == INVALID_HANDLE_VALUE)
+        {
+            skip(FALSE, "mode %lu: open: %lu\n", Mode, GetLastError());
+            continue;
+        }
+
+        /* The old data first, with a copy in the paging file, then out of memory */
+        for (i = 0; i < MDL_PAGES; i++)
+            Fill(Buffer + i * PageSize, 600 + i);
+        PageOut();
+        PageOut();
+        Done = 0;
+        ok(ReadFile(File, Buffer, MDL_PAGES * PageSize, &Done, NULL) && (Done == MDL_PAGES * PageSize),
+           "mode %lu: read %lu bytes: %lu\n", Mode, Done, GetLastError());
+        CloseHandle(File);
+
+        ok(!memcmp(Buffer, Source, MDL_PAGES * PageSize), "mode %lu: data right after the read\n", Mode);
+        PageOut();
+        PageOut();
+        ok(!memcmp(Buffer, Source, MDL_PAGES * PageSize), "mode %lu: data after the next page-out\n", Mode);
+    }
+    DeleteFileW(Path);
+
+Quit:
+    if (Source)
+        Release(Source);
+    if (Buffer)
+        Release(Buffer);
+}
+
 static
 VOID
 TestRace(VOID)
@@ -655,5 +947,8 @@ START_TEST(MmPager)
     TestTransitions();
     TestSlotAccounting();
     TestInjection();
+    TestWriteRaces();
+    TestFreeMismatch();
+    TestMdlWriteLock();
     TestRace();
 }
