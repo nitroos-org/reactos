@@ -104,6 +104,10 @@ static volatile LONG MiPagerWriterPaused;
 static volatile LONG MiPagerPauseReady;
 static volatile ULONG MiPagerFreeRefusedBase;
 
+/* NitroPagerDebug bits that inject write failures (any build; test commands need the value non-zero anyway) */
+#define MI_PAGER_DEBUG_FAIL_SOME_WRITES 0x10
+#define MI_PAGER_DEBUG_FAIL_ALL_WRITES  0x20
+
 /* Writer batch: pages taken per PFN lock hold */
 #define MI_PAGER_WRITE_BATCH 16
 
@@ -655,6 +659,21 @@ MiWriteModifiedPrivatePagesEx(
                 Status = STATUS_DEVICE_DATA_ERROR;
             if (MiPagerTakeInjection(MI_PAGER_INJECT_WRITE_PAUSE, PageAddress))
                 Pause = TRUE;
+        }
+
+        /*
+         * Test (NitroPagerDebug bits): 0x10 fails every 50th cluster write, 0x20 fails
+         * every cluster write (file retirement, the writer must stop, not loop)
+         */
+        if (NT_SUCCESS(Status) && (MiNitroPagerDebug & (MI_PAGER_DEBUG_FAIL_SOME_WRITES | MI_PAGER_DEBUG_FAIL_ALL_WRITES)))
+        {
+            static LONG ClusterNumber;
+
+            if ((MiNitroPagerDebug & MI_PAGER_DEBUG_FAIL_ALL_WRITES) ||
+                ((InterlockedIncrement(&ClusterNumber) % 50) == 0))
+            {
+                Status = STATUS_DEVICE_DATA_ERROR;
+            }
         }
 
         InterlockedIncrement(&MiPagingIoInFlight);
