@@ -67,6 +67,7 @@ static VOID Push(VOID)
 VOID PromptInit(HANDLE hStop);
 VOID PromptStop(VOID);
 VOID PromptPoll(VOID);
+VOID PromptRulesChanged(VOID);
 
 #define POLL_MS            1000   /* block prompt poll; the filter-device retry below runs every NITROFW_RETRY_SECONDS */
 
@@ -100,6 +101,7 @@ static VOID WINAPI ServiceMainImpl(DWORD argc, LPWSTR *argv)
             Sleep(200);   /* coalesce bursts (netsh writes several values) */
             RegNotifyChangeKeyValue(hKey, TRUE, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET, hChange, TRUE);
             Push();
+            PromptRulesChanged();   /* a program whose rules were deleted is asked again */
         }
         else if (wait == WAIT_TIMEOUT)
         {
