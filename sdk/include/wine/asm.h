@@ -55,6 +55,11 @@
 # define __ASM_FUNC_TYPE(name) ".type " name ",@function"
 #endif
 
+/* ReactOS: Wine 11 (msvcrt/cxx.h) needs __ASM_GLOBL; ReactOS is always a PE build, so the PE form is used */
+#ifndef __ASM_GLOBL
+# define __ASM_GLOBL(name) ".globl " name "\n" name ":"
+#endif
+
 #if !defined(__GNUC__) && !defined(__clang__)
 # define __ASM_BLOCK_BEGIN(name) void __asm_dummy_##name(void) {
 # define __ASM_BLOCK_END         }
