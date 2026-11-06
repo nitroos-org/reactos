@@ -1693,8 +1693,8 @@ static void extern_abort_task_destr(task_t *_task)
 {
     extern_abort_task_t *task = (extern_abort_task_t*)_task;
 
+    /* the task itself is freed by whoever ran or dropped it (hidden_proc, push_task, remove_target_tasks) */
     IBindStatusCallback_Release(&task->bsc->bsc.IBindStatusCallback_iface);
-    free(task);
 }
 
 /* The document reads no more of this binding (the browser downloads the content with a binding of its own), so it has
