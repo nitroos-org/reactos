@@ -120,7 +120,7 @@ dll/win32/comcat              # Synced to Wine-10.0
 dll/win32/comdlg32            # Synced to Wine-10.0
 dll/win32/coml2               # Synced to Wine-11.21
 dll/win32/compstui            # Synced to Wine-10.0
-dll/win32/concrt140           # Synced to Wine-10.0 (with dll/win32/msvcrt, compiles its concurrency.c and exception_ptr.c)
+dll/win32/concrt140           # Synced to Wine-11.21 (with dll/win32/msvcrt, compiles its concurrency.c and exception_ptr.c)
 dll/win32/credui              # Synced to Wine-10.0
 dll/win32/crypt32             # Synced to Wine-10.0
 dll/win32/cryptdlg            # Synced to Wine-10.0
