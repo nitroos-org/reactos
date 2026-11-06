@@ -2512,6 +2512,17 @@ MiMakeProtectionMask(
     IN ULONG Protect
 );
 
+/* PAGE_TARGETS_INVALID, which is PAGE_TARGETS_NO_UPDATE for a protection change (a Control Flow Guard call target hint) */
+#ifndef MI_PAGE_TARGETS_FLAG
+#define MI_PAGE_TARGETS_FLAG 0x40000000
+#endif
+
+BOOLEAN
+NTAPI
+MiStripTargetsFlag(
+    _Inout_ PULONG Protect
+);
+
 VOID
 NTAPI
 MiDeleteVirtualAddresses(
