@@ -34,7 +34,7 @@ static ULONG MiMinimumAvailablePages;
  * at a time, and metadata pins (which cannot wait for pages) failed with STATUS_NO_MEMORY half way
  * through a file system operation.
  */
-static ULONG MiLowWaterPages;
+ULONG MiLowWaterPages;
 static ULONG MiMinimumPagesPerRun;
 static CLIENT_ID MiBalancerThreadId;
 static HANDLE MiBalancerThreadHandle = NULL;
@@ -484,10 +484,39 @@ MiBalancerThread(PVOID Unused)
                     InitialTarget -= min(NrFreedPages, InitialTarget);
                 }
 
+                /* NitroPager: ARM3 private pages, after the clean cache (trimmed pages count as progress) */
+                if (MiNitroPagerMode != 0)
+                {
+                    NrFreedPages = MiPagerBalance(MiLowWaterPages, InitialTarget);
+                    InitialTarget -= min(NrFreedPages, InitialTarget);
+                }
+
                 /* No pages left to swap! */
                 if (InitialTarget != 0 &&
                     InitialTarget == OldTarget)
                 {
+                    ULONG_PTR WriterState;
+
+                    /*
+                     * NitroPager: not while paging I/O is in flight, a write completed in the
+                     * last seconds or the writer has pages it can write: end the pass and give
+                     * the writer a moment. Otherwise a bugcheck that says why: available pages,
+                     * modified pages, paging I/O in flight, what the writer is doing.
+                     */
+                    if (MiNitroPagerMode != 0)
+                    {
+                        if (MiPagerCanMakeProgress(&WriterState))
+                        {
+                            MiPagerWaitForProgress();
+                            break;
+                        }
+                        KeBugCheckEx(NO_PAGES_AVAILABLE,
+                                     MmAvailablePages,
+                                     MmModifiedPageListHead.Total,
+                                     (ULONG_PTR)MiPagingIoInFlight,
+                                     WriterState);
+                    }
+
                     /* Game over */
                     KeBugCheck(NO_PAGES_AVAILABLE);
                 }

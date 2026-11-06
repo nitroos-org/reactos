@@ -2803,6 +2803,18 @@ NTAPI
 MiWriteModifiedPrivatePages(
     _In_ ULONG MaximumPages);
 
+VOID
+NTAPI
+MiPagerWakeWriter(VOID);
+
+VOID
+NTAPI
+MiPagerModifiedPageQueued(VOID);
+
+VOID
+NTAPI
+MiPagerAvailableDropped(VOID);
+
 /* Test hooks (NitroPagerDebug): TRUE once when the matching test command armed it */
 #define MI_PAGER_INJECT_READ_ERROR      0
 #define MI_PAGER_INJECT_WRITE_ERROR     1
@@ -2833,6 +2845,16 @@ typedef struct _MI_PAGER_COUNTERS
     ULONG TagMismatches;
     ULONG SlotFreeRefused;
     ULONG WsTryLockMisses;
+    /* P1 */
+    ULONG Clusters;
+    ULONG TrimSkippedDirty;
+    ULONG Aged;
+    ULONG StarvationRounds;
+    ULONG SlotShortages;
+    ULONG SlotsReclaimed;
+    ULONG ReserveLowWater;
+    ULONG BalancerWaits;
+    ULONG BalancerTrimmed;
 } MI_PAGER_COUNTERS;
 
 extern MI_PAGER_COUNTERS MiPagerCounters;

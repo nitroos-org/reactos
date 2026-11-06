@@ -517,10 +517,16 @@ typedef struct _DEVICETREE_TRAVERSE_CONTEXT
 // Reserve IRP allocator
 // Used for read paging IOs in low-memory situations
 //
+//
+// Paging-file IRPs kept for when pool allocation fails: page reads of faulting
+// threads and the modified page writer's writes, several at once (NitroPager P1).
+//
+#define IOP_RESERVE_IRP_COUNT 4
+
 typedef struct _RESERVE_IRP_ALLOCATOR
 {
-    PIRP ReserveIrp;
-    volatile LONG ReserveIrpInUse;
+    PIRP ReserveIrp[IOP_RESERVE_IRP_COUNT];
+    volatile LONG ReserveIrpInUse[IOP_RESERVE_IRP_COUNT];
     KEVENT WaitEvent;
     CCHAR StackSize;
 } RESERVE_IRP_ALLOCATOR, *PRESERVE_IRP_ALLOCATOR;
@@ -987,6 +993,11 @@ BOOLEAN
 NTAPI
 IopInitializeReserveIrp(
     IN PRESERVE_IRP_ALLOCATOR ReserveIrpAllocator
+);
+
+BOOLEAN
+IopIsReserveIrp(
+    IN PIRP Irp
 );
 
 PIRP

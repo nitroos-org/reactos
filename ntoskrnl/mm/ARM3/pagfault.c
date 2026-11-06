@@ -734,6 +734,24 @@ MiCopyPfn(
  */
 #define MI_DEMAND_ZERO_FAULT_RESERVE 128
 
+/*
+ * NitroPager (flag >= 1): a waitable user fault also leaves this many pages
+ * to paging I/O (the writer's IRP, file system and miniport allocations,
+ * completion work), on top of the band above, and counts the pages that can
+ * really be handed out (free, zeroed, private standby). Start value, checked
+ * by the soak's reserve low-water counter (design 3.7).
+ */
+#define MI_PAGER_PAGING_RESERVE 128
+
+static
+BOOLEAN
+MiUserFaultMustLeavePages(VOID)
+{
+    if (MiNitroPagerMode == 0)
+        return (MmAvailablePages < MI_DEMAND_ZERO_FAULT_RESERVE);
+    return (MiGetUsablePageCount() < MI_DEMAND_ZERO_FAULT_RESERVE + MI_PAGER_PAGING_RESERVE);
+}
+
 static
 BOOLEAN
 MiCanFaultWaitForPages(VOID)
@@ -811,7 +829,7 @@ MiResolveDemandZeroFault(IN PVOID Address,
 
         /* A user page whose fault can wait leaves the last pages to those that cannot (MmAccessFault waits and retries) */
         if ((Address <= MM_HIGHEST_USER_ADDRESS) &&
-            (MmAvailablePages < MI_DEMAND_ZERO_FAULT_RESERVE) &&
+            MiUserFaultMustLeavePages() &&
             MiCanFaultWaitForPages())
         {
             MiReleasePfnLock(OldIrql);
@@ -1105,7 +1123,7 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
 
     /* A fault that can wait leaves the last pages to those that cannot (MmAccessFault waits and retries) */
     if ((FaultingAddress <= MM_HIGHEST_USER_ADDRESS) &&
-        (MmAvailablePages < MI_DEMAND_ZERO_FAULT_RESERVE) &&
+        MiUserFaultMustLeavePages() &&
         MiCanFaultWaitForPages())
     {
         return STATUS_NO_MEMORY;
@@ -1152,7 +1170,11 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     else if (MiPagerTakeInjection(MI_PAGER_INJECT_READ_RESOURCES, FaultingAddress))
         Status = STATUS_INSUFFICIENT_RESOURCES;
     else
+    {
+        InterlockedIncrement(&MiPagingIoInFlight);
         Status = MiReadPageFile(Page, PageFileIndex, Slot + 1);
+        InterlockedDecrement(&MiPagingIoInFlight);
+    }
 
     /* Lock the PFN database again */
     *OldIrql = MiAcquirePfnLock();
