@@ -108,6 +108,149 @@ Routine Description:
 #endif
 }
 
+
+//
+//  A metadata pin or map that cannot get a free page makes Cc raise STATUS_NO_MEMORY (or
+//  STATUS_INSUFFICIENT_RESOURCES).  Most of Fat is written on the assumption that a pin with Wait set does not
+//  fail (Windows blocks until memory is available), and many of its operations change the volume in several steps:
+//  a failure half way left acknowledged deletes undone, rewrites truncated, directories that could not be removed.
+//  These wrappers wait for memory instead, as Windows does: sleep, let the memory manager reclaim pages (the failed
+//  attempt has already asked its balancer to), and try again, for up to FAT_PIN_RETRY_MAXIMUM.  The status is raised
+//  as before when that time runs out, when the request must not wait, or when the thread is terminating.  A request
+//  that must not wait is one that cannot block, a paging write (the memory manager may hold locks that reclaim needs)
+//  and anything running in the lazy writer, a system thread or not in the file system process.
+//
+
+#define FAT_PIN_RETRY_MAXIMUM   (60 * 1000 * 10000LL)    // 60 s in 100 ns units
+#define FAT_PIN_RETRY_DELAY     (-50 * 10000LL)          // 50 ms
+
+static
+BOOLEAN
+FatMayWaitForMemory (
+    IN PIRP_CONTEXT IrpContext
+    )
+{
+    PIRP Irp;
+
+    if (!FlagOn(IrpContext->Flags, IRP_CONTEXT_FLAG_WAIT) ||
+        PsIsThreadTerminating( PsGetCurrentThread() ) ||
+        (IoGetTopLevelIrp() == (PIRP)FSRTL_CACHE_TOP_LEVEL_IRP) ||
+        (PsIsSystemThread( PsGetCurrentThread() ) && !FlagOn(IrpContext->Flags, IRP_CONTEXT_FLAG_IN_FSP))) {
+
+        return FALSE;
+    }
+
+    Irp = IrpContext->OriginatingIrp;
+
+    if ((Irp != NULL) &&
+        (IrpContext->MajorFunction == IRP_MJ_WRITE) &&
+        FlagOn(Irp->Flags, IRP_PAGING_IO)) {
+
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static
+BOOLEAN
+FatRetryForMemory (
+    IN PIRP_CONTEXT IrpContext,
+    IN NTSTATUS Status,
+    IN OUT PULONGLONG Start
+    )
+{
+    LARGE_INTEGER Delay;
+    ULONGLONG Now;
+
+    if (((Status != STATUS_NO_MEMORY) && (Status != STATUS_INSUFFICIENT_RESOURCES)) ||
+        !FatMayWaitForMemory( IrpContext )) {
+
+        return FALSE;
+    }
+
+    Now = KeQueryInterruptTime();
+
+    if (*Start == 0) {
+
+        *Start = Now;
+
+    } else if (Now - *Start >= FAT_PIN_RETRY_MAXIMUM) {
+
+        return FALSE;
+    }
+
+    Delay.QuadPart = FAT_PIN_RETRY_DELAY;
+    KeDelayExecutionThread( KernelMode, FALSE, &Delay );
+
+    return TRUE;
+}
+
+#define FAT_PIN_RETRY(Call)                                                              \
+    ULONGLONG Start = 0;                                                                 \
+    BOOLEAN Result = FALSE;                                                              \
+    NTSTATUS Status;                                                                     \
+                                                                                         \
+    for (;;) {                                                                           \
+        Status = STATUS_SUCCESS;                                                         \
+        _SEH2_TRY {                                                                      \
+            Result = Call;                                                               \
+        } _SEH2_EXCEPT( (_SEH2_GetExceptionCode() == STATUS_NO_MEMORY ||                 \
+                         _SEH2_GetExceptionCode() == STATUS_INSUFFICIENT_RESOURCES) ?    \
+                        EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH ) {        \
+            Status = _SEH2_GetExceptionCode();                                           \
+        } _SEH2_END;                                                                     \
+                                                                                         \
+        if (NT_SUCCESS(Status)) {                                                        \
+            return Result;                                                               \
+        }                                                                                \
+        if (!FatRetryForMemory( IrpContext, Status, &Start )) {                          \
+            ExRaiseStatus( Status );                                                     \
+        }                                                                                \
+    }
+
+BOOLEAN
+FatCcMapData (
+    IN PIRP_CONTEXT IrpContext,
+    IN PFILE_OBJECT FileObject,
+    IN PLARGE_INTEGER FileOffset,
+    IN ULONG Length,
+    IN ULONG Flags,
+    OUT PVOID *Bcb,
+    OUT PVOID *Buffer
+    )
+{
+    FAT_PIN_RETRY( CcMapData( FileObject, FileOffset, Length, Flags, Bcb, Buffer ) )
+}
+
+BOOLEAN
+FatCcPinRead (
+    IN PIRP_CONTEXT IrpContext,
+    IN PFILE_OBJECT FileObject,
+    IN PLARGE_INTEGER FileOffset,
+    IN ULONG Length,
+    IN ULONG Flags,
+    OUT PVOID *Bcb,
+    OUT PVOID *Buffer
+    )
+{
+    FAT_PIN_RETRY( CcPinRead( FileObject, FileOffset, Length, Flags, Bcb, Buffer ) )
+}
+
+BOOLEAN
+FatCcPinMappedData (
+    IN PIRP_CONTEXT IrpContext,
+    IN PFILE_OBJECT FileObject,
+    IN PLARGE_INTEGER FileOffset,
+    IN ULONG Length,
+    IN ULONG Flags,
+    OUT PVOID *Bcb
+    )
+{
+    FAT_PIN_RETRY( CcPinMappedData( FileObject, FileOffset, Length, Flags, Bcb ) )
+}
+
+
 VOID
 FatReadVolumeFile (
     IN PIRP_CONTEXT IrpContext,
@@ -170,7 +313,7 @@ Arguments:
 
     Vbo.QuadPart = StartingVbo;
 
-    if (!CcMapData( Vcb->VirtualVolumeFile,
+    if (!FatCcMapData( IrpContext, Vcb->VirtualVolumeFile,
                     &Vbo,
                     ByteCount,
                     BooleanFlagOn(IrpContext->Flags, IRP_CONTEXT_FLAG_WAIT),
@@ -268,7 +411,7 @@ Arguments:
 
     Vbo.QuadPart = StartingVbo;
 
-    if (!CcPinRead( Vcb->VirtualVolumeFile,
+    if (!FatCcPinRead( IrpContext, Vcb->VirtualVolumeFile,
                     &Vbo,
                     ByteCount,
                     BooleanFlagOn(IrpContext->Flags, IRP_CONTEXT_FLAG_WAIT),
@@ -422,7 +565,7 @@ Arguments:
 
     if (Pin ?
 
-        !CcPinRead( Dcb->Specific.Dcb.DirectoryFile,
+        !FatCcPinRead( IrpContext, Dcb->Specific.Dcb.DirectoryFile,
                     &Vbo,
                     ByteCount,
                     BooleanFlagOn(IrpContext->Flags, IRP_CONTEXT_FLAG_WAIT),
@@ -430,7 +573,7 @@ Arguments:
                     Buffer )
         :
 
-        !CcMapData( Dcb->Specific.Dcb.DirectoryFile,
+        !FatCcMapData( IrpContext, Dcb->Specific.Dcb.DirectoryFile,
                     &Vbo,
                     ByteCount,
                     BooleanFlagOn(IrpContext->Flags, IRP_CONTEXT_FLAG_WAIT),
@@ -623,7 +766,7 @@ Arguments:
                              ((ULONG)Vbo.QuadPart & (MappingGranularity - 1));
             }
 
-            if (!CcPinRead( Dcb->Specific.Dcb.DirectoryFile,
+            if (!FatCcPinRead( IrpContext, Dcb->Specific.Dcb.DirectoryFile,
                             &Vbo,
                             BytesToPin,
                             BooleanFlagOn(IrpContext->Flags, IRP_CONTEXT_FLAG_WAIT),
@@ -1915,7 +2058,7 @@ Arguments:
 
     Vbo.QuadPart = StartingVbo;
 
-    if (!CcPinMappedData( Dcb->Specific.Dcb.DirectoryFile,
+    if (!FatCcPinMappedData( IrpContext, Dcb->Specific.Dcb.DirectoryFile,
                           &Vbo,
                           ByteCount,
                           BooleanFlagOn(IrpContext->Flags, IRP_CONTEXT_FLAG_WAIT),
