@@ -159,6 +159,7 @@ list(APPEND SOURCE
     lstrlen.c
     Mailslot.c
     MappedFileGrowth.c
+    FileCloseLockedDup.c
     FileCutAfterClose.c
     MappedViewEvict.c
     MultiByteToWideChar.c
