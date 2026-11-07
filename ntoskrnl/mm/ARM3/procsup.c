@@ -1580,6 +1580,9 @@ MmCleanProcessAddressSpace(IN PEPROCESS Process)
     /* Nothing of the address space is charged any more */
     MiCheckProcessCommitReturned(Process);
 
+    /* The minimum working set was charged to the resident available pages */
+    MiReturnProcessWorkingSetMinimum(Process);
+
     /* Release the address space */
     MmUnlockAddressSpace(&Process->Vm);
 }

@@ -2798,6 +2798,15 @@ MiEmptyProcessWorkingSet(
     _In_ PEPROCESS Process,
     _In_ BOOLEAN TryLockOnly);
 
+VOID
+NTAPI
+MiInitializeWorkingSetLimits(VOID);
+
+VOID
+NTAPI
+MiReturnProcessWorkingSetMinimum(
+    _In_ PEPROCESS Process);
+
 ULONG
 NTAPI
 MiWriteModifiedPrivatePages(

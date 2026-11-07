@@ -42,6 +42,7 @@ typedef struct tagLOGOFF_SHUTDOWN_DATA
 {
     UINT Flags;
     PWLSESSION Session;
+    BOOL UserLogoff; /* the user asked to log off (not the logoff that starts a shutdown) */
 } LOGOFF_SHUTDOWN_DATA, *PLOGOFF_SHUTDOWN_DATA;
 
 static BOOL ExitReactOSInProgress = FALSE;
@@ -754,7 +755,9 @@ LogoffShutdownThread(
     // uFlags = EWX_INTERNAL_KILL_USER_APPS | (LSData->Flags & EWX_FLAGS_MASK) |
              // ((LSData->Flags & EWX_ACTION_MASK) == EWX_LOGOFF ? EWX_CALLER_WINLOGON_LOGOFF : 0);
 
-    uFlags = EWX_CALLER_WINLOGON | (LSData->Flags & 0x0F);
+    /* The windows are told ENDSESSION_LOGOFF for a logoff, not for the logoff that begins a shutdown */
+    uFlags = EWX_CALLER_WINLOGON | (LSData->Flags & 0x0F) |
+             (LSData->UserLogoff ? EWX_CALLER_WINLOGON_LOGOFF : 0);
 
     TRACE("In LogoffShutdownThread with uFlags == 0x%x; exit_in_progress == %s\n",
         uFlags, ExitReactOSInProgress ? "TRUE" : "FALSE");
@@ -779,7 +782,8 @@ NTSTATUS
 RunLogoffShutdownThread(
     _In_ PWLSESSION Session,
     _In_opt_ PSECURITY_ATTRIBUTES psa,
-    _In_ DWORD wlxAction)
+    _In_ DWORD wlxAction,
+    _In_ BOOL bUserLogoff)
 {
     PCSTR pDescName;
     PLOGOFF_SHUTDOWN_DATA LSData;
@@ -827,6 +831,7 @@ RunLogoffShutdownThread(
     }
 
     LSData->Session = Session;
+    LSData->UserLogoff = bUserLogoff;
 
     /* Run the logoff/shutdown thread */
     hThread = CreateThread(psa, 0, LogoffShutdownThread, LSData, 0, NULL);
@@ -1034,7 +1039,8 @@ HandleLogoff(
                                         ? wlxAction
                                         : (Session->ForceLogoff
                                             ? WLX_SAS_ACTION_FORCE_LOGOFF
-                                            : WLX_SAS_ACTION_LOGOFF));
+                                            : WLX_SAS_ACTION_LOGOFF),
+                                     WLX_LOGGINGOFF(wlxAction));
     if (!NT_SUCCESS(Status))
     {
         ERR("Failed to start the Logoff thread, Status 0x%08lx\n", Status);
@@ -1173,7 +1179,7 @@ HandleShutdown(
     Session->Gina.Functions.WlxShutdown(Session->Gina.Context, wlxAction);
 
     /* Run the shutdown thread. *IGNORE* all failures as we want to force shutting down! */
-    Status = RunLogoffShutdownThread(Session, NULL, wlxAction);
+    Status = RunLogoffShutdownThread(Session, NULL, wlxAction, FALSE);
     if (!NT_SUCCESS(Status))
         ERR("Failed to start the Shutdown thread, Status 0x%08lx\n", Status);
 
