@@ -279,6 +279,42 @@ static BOOLEAN GuestRange32(ULONG Address, ULONG64 Size)
     return (ULONG64)Address + Size <= (ULONG64)Wow64HighestUserAddress + 1;
 }
 
+/* A range a guest names for a memory service: it starts and ends inside the guest's address space. The
+ * memory above (the layer's own allocations, below 4 GiB for a process that is not large address aware)
+ * is not the guest's to allocate, free, protect, lock, map or unmap. */
+static BOOLEAN GuestMemoryRange(PVOID Base, ULONG64 Size)
+{
+    ULONG64 Start = (ULONG_PTR)Base;
+
+    return Start <= Wow64HighestUserAddress && Start + Size <= (ULONG64)Wow64HighestUserAddress + 1;
+}
+
+/*
+ * The status of a refused range, as Windows 10 22H2 gives it to a 32-bit process (measured, with and
+ * without large address awareness): a range that reaches into the memory above the highest address is
+ * a conflict with it for an allocation, a protection change, a free or a mapping, and a range that
+ * starts above is an invalid parameter for a protection change, a free in the 64 KiB that the layer
+ * reserves, and a mapping; it is a conflict for an allocation, an unallocated address for a free
+ * elsewhere above, a view that is not mapped for an unmap and an access violation for a lock.
+ */
+enum { GuestMemoryAlloc, GuestMemoryProtect, GuestMemoryFree, GuestMemoryLock, GuestMemoryMap, GuestMemoryUnmap };
+
+static NTSTATUS GuestMemoryRefused(ULONG Operation, PVOID Base)
+{
+    ULONG64 Start = (ULONG_PTR)Base;
+
+    if (Start <= Wow64HighestUserAddress) return STATUS_CONFLICTING_ADDRESSES;
+    switch (Operation)
+    {
+    case GuestMemoryAlloc: return STATUS_CONFLICTING_ADDRESSES;
+    case GuestMemoryFree:
+        return Start <= (ULONG64)Wow64HighestUserAddress + 0x10000 ? STATUS_INVALID_PARAMETER : STATUS_MEMORY_NOT_ALLOCATED;
+    case GuestMemoryLock: return STATUS_ACCESS_VIOLATION;
+    case GuestMemoryUnmap: return STATUS_NOT_MAPPED_VIEW;
+    default: return STATUS_INVALID_PARAMETER;
+    }
+}
+
 static NTSTATUS SetProcessTls32(HANDLE Process, ULONG Address, ULONG Length, WOW64_CLEANUP *Cleanup)
 {
     PROCESS_TLS_INFORMATION *Guest = PTR32(Address), *Native;
@@ -1852,6 +1888,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtAllocateVirtualMemory:
         PROBE(1); PROBE(3);
         Base = PTR32(U(1)); Size = U(3);
+        if (Base && !GuestMemoryRange(Base, Size)) return GuestMemoryRefused(GuestMemoryAlloc, Base);
         /* MEM_COMMIT with a null base also creates a new reservation. Existing
          * reservations stay owned by the caller and must never be released. */
         Cleanup->Process = H(0);
@@ -1873,6 +1910,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         ULONG Count;
         PROBE(1); PROBE(2);
         Base = PTR32(U(1)); Size = U(2);
+        if (Base && !GuestMemoryRange(Base, Size)) return GuestMemoryRefused(GuestMemoryAlloc, Base);
         /* Only a new allocation gets the 32-bit limit; an address excludes a requirement */
         Status = ExtendedParameters32(a[5], a[6], Base == NULL, Params, &Requirements, &Count);
         if (!NT_SUCCESS(Status)) return Status;
@@ -1894,6 +1932,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         /* VirtualLock/VirtualUnlock: the base and size come back rounded to pages, like NtProtectVirtualMemory's */
         PROBE(1); PROBE(2);
         Base = PTR32(U(1)); Size = U(2);
+        if (!GuestMemoryRange(Base, Size)) return GuestMemoryRefused(GuestMemoryLock, Base);
         Status = (Number == W64_NtLockVirtualMemory) ? NtLockVirtualMemory(H(0), &Base, &Size, a[3])
                                                      : NtUnlockVirtualMemory(H(0), &Base, &Size, a[3]);
         if (NT_SUCCESS(Status)) { U(1) = PtrToUlong(Base); U(2) = Size; }
@@ -1901,12 +1940,14 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtFreeVirtualMemory:
         PROBE(1); PROBE(2);
         Base = PTR32(U(1)); Size = U(2);
+        if (!GuestMemoryRange(Base, Size)) return GuestMemoryRefused(GuestMemoryFree, Base);
         Status = NtFreeVirtualMemory(H(0), &Base, &Size, a[3]);
         if (NT_SUCCESS(Status)) { U(1) = PtrToUlong(Base); U(2) = Size; }
         return Status;
     case W64_NtProtectVirtualMemory:
         PROBE(1); PROBE(2); PROBE(4);
         Base = PTR32(U(1)); Size = U(2);
+        if (!GuestMemoryRange(Base, Size)) return GuestMemoryRefused(GuestMemoryProtect, Base);
         Status = NtProtectVirtualMemory(H(0), &Base, &Size, a[3], P(4));
         if (NT_SUCCESS(Status)) { U(1) = PtrToUlong(Base); U(2) = Size; }
         return Status;
@@ -1915,6 +1956,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
          * the block describes the write that was started */
         PROBE(1); PROBE(2);
         Base = PTR32(U(1)); Size = U(2);
+        if (!GuestMemoryRange(Base, Size)) return GuestMemoryRefused(GuestMemoryProtect, Base);
         Status = NtFlushVirtualMemory(H(0), &Base, &Size, IoBegin(a[3], &Io));
         IoEnd(a[3], &Io);
         if (NT_SUCCESS(Status)) { U(1) = PtrToUlong(Base); U(2) = Size; }
@@ -2021,8 +2063,12 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         return Status;
     }
     case W64_NtFlushInstructionCache: return NtFlushInstructionCache(H(0), P(1), a[2]);
-    case W64_NtUnmapViewOfSection: return NtUnmapViewOfSection(H(0), P(1));
-    case W64_NtUnmapViewOfSectionEx: return NtUnmapViewOfSectionEx(H(0), P(1), a[2]);
+    case W64_NtUnmapViewOfSection:
+        if (!GuestMemoryRange(P(1), 0)) return GuestMemoryRefused(GuestMemoryUnmap, P(1));
+        return NtUnmapViewOfSection(H(0), P(1));
+    case W64_NtUnmapViewOfSectionEx:
+        if (!GuestMemoryRange(P(1), 0)) return GuestMemoryRefused(GuestMemoryUnmap, P(1));
+        return NtUnmapViewOfSectionEx(H(0), P(1), a[2]);
     case W64_NtMapViewOfSectionEx:
     {
         MEM_EXTENDED_PARAMETER Params[WOW64_MAX_EXTENDED_PARAMETERS];
@@ -2032,7 +2078,8 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         if (a[3]) ProbeOutput(a[3], sizeof(LARGE_INTEGER));
         Base = PTR32(U(2)); Size = U(4);
         /* AT_ROUND_TO_PAGE is not for WoW64; an address must be in the 32-bit user space */
-        if ((a[5] & 0x40000000 /* AT_ROUND_TO_PAGE */) || (U(2) > Wow64HighestUserAddress)) return STATUS_INVALID_PARAMETER;
+        if (a[5] & 0x40000000 /* AT_ROUND_TO_PAGE */) return STATUS_INVALID_PARAMETER;
+        if (!GuestMemoryRange(Base, Size)) return GuestMemoryRefused(GuestMemoryMap, Base);
         Cleanup->Process = H(1);
         Cleanup->Mapped = TRUE;
         if (!Base && !a[8])
@@ -2063,6 +2110,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         PROBE(2); PROBE(6);
         if (a[5]) ProbeOutput(a[5], sizeof(LARGE_INTEGER));
         Base = PTR32(U(2)); Size = U(6);
+        if (Base && !GuestMemoryRange(Base, Size)) return GuestMemoryRefused(GuestMemoryMap, Base);
         Cleanup->Process = H(1);
         Cleanup->Mapped = TRUE;
         {

@@ -510,10 +510,15 @@ CON_API(SrvReadConsoleOutput,
     NTSTATUS Status;
     PTEXTMODE_SCREEN_BUFFER Buffer;
     ULONG NumCells;
+    ULONGLONG NumCells64;
     PCHAR_INFO CharInfo;
 
-    NumCells = ConioRectWidth(&ReadOutputRequest->ReadRegion) *
-               ConioRectHeight(&ReadOutputRequest->ReadRegion);
+    /* The region is the client's: a product in 32 bits can wrap to "one cell" and pick the static buffer */
+    NumCells64 = (ULONGLONG)ConioRectWidth(&ReadOutputRequest->ReadRegion) *
+                 (ULONGLONG)ConioRectHeight(&ReadOutputRequest->ReadRegion);
+    if (NumCells64 > MAXULONG / sizeof(CHAR_INFO))
+        return STATUS_INVALID_PARAMETER;
+    NumCells = (ULONG)NumCells64;
 
     /*
      * For optimization purposes, Windows (and hence ReactOS, too, for
@@ -739,10 +744,15 @@ CON_API(SrvWriteConsoleOutput,
     // PCONSOLE_PROCESS_DATA ProcessData = ConsoleGetPerProcessData(Process);
     PTEXTMODE_SCREEN_BUFFER Buffer;
     ULONG NumCells;
+    ULONGLONG NumCells64;
     PCHAR_INFO CharInfo;
 
-    NumCells = ConioRectWidth(&WriteOutputRequest->WriteRegion) *
-               ConioRectHeight(&WriteOutputRequest->WriteRegion);
+    /* The region is the client's: a product in 32 bits can wrap to "one cell" and pick the static buffer */
+    NumCells64 = (ULONGLONG)ConioRectWidth(&WriteOutputRequest->WriteRegion) *
+                 (ULONGLONG)ConioRectHeight(&WriteOutputRequest->WriteRegion);
+    if (NumCells64 > MAXULONG / sizeof(CHAR_INFO))
+        return STATUS_INVALID_PARAMETER;
+    NumCells = (ULONG)NumCells64;
 
     Status = ConSrvGetTextModeBuffer(ProcessData,
                                      WriteOutputRequest->OutputHandle,
@@ -913,7 +923,7 @@ CON_API(SrvReadConsoleOutputString,
      * bytes are read. Otherwise a new buffer is used.
      * The client-side expects that we know this behaviour.
      */
-    if (ReadOutputCodeRequest->NumCodes * CodeSize <= sizeof(ReadOutputCodeRequest->CodeStaticBuffer))
+    if ((ULONGLONG)ReadOutputCodeRequest->NumCodes * CodeSize <= sizeof(ReadOutputCodeRequest->CodeStaticBuffer))
     {
         /*
          * Adjust the internal pointer, because its old value points to
@@ -1001,7 +1011,7 @@ CON_API(SrvWriteConsoleOutputString,
      * bytes are written. Otherwise a new buffer is used.
      * The client-side expects that we know this behaviour.
      */
-    if (WriteOutputCodeRequest->NumCodes * CodeSize <= sizeof(WriteOutputCodeRequest->CodeStaticBuffer))
+    if ((ULONGLONG)WriteOutputCodeRequest->NumCodes * CodeSize <= sizeof(WriteOutputCodeRequest->CodeStaticBuffer))
     {
         /*
          * Adjust the internal pointer, because its old value points to

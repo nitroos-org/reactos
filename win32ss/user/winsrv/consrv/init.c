@@ -597,6 +597,20 @@ ConSrvConnectInternal(IN PCSR_PROCESS CsrProcess,
     {
         DPRINT("ConSrvConnect - Reuse current (parent's) console\n");
 
+        /*
+         * The handle in the connect request comes from the process parameters,
+         * which whoever created the process wrote. The only console the process
+         * may join is the one its parent had when it created it, which
+         * ConSrvNewProcess recorded: any other handle names a console of another
+         * session or user.
+         */
+        if (!ProcessData->PendingConsoleHandle ||
+            ConnectInfo->ConsoleStartInfo.ConsoleHandle != ProcessData->PendingConsoleHandle)
+        {
+            DPRINT1("Console inheritance refused: not the console of the parent\n");
+            return STATUS_INVALID_HANDLE;
+        }
+
         /* Reuse our current console */
         Status = ConSrvInheritConsole(ProcessData,
                                       ConnectInfo->ConsoleStartInfo.ConsoleHandle,

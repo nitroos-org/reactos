@@ -650,6 +650,15 @@ CON_API(SrvReadConsole,
         }
     }
 
+    /*
+     * The characters are read into the static buffer or the capture buffer, of
+     * CaptureBufferSize bytes whatever NumBytes (a number from the client) says.
+     */
+    if (ReadConsoleRequest->NumBytes > ReadConsoleRequest->CaptureBufferSize)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
     if (ReadConsoleRequest->InitialNumBytes > ReadConsoleRequest->NumBytes)
     {
         return STATUS_INVALID_PARAMETER;
