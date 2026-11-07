@@ -34,6 +34,48 @@ static volatile LONG StopPressure;
 static ULONG Seed = 12345;
 static ULONG Fails, Printed;
 
+/* Per variant (and per kind of check) failure counts: only the first 40 failures are printed, the totals are not. */
+#define MAXTALLY 512
+static struct { CHAR Key[96]; ULONG Count; } Tally[MAXTALLY];
+static ULONG TallyUsed;
+/* Bytes in [S1, TailEnd) that a mapped view wrote past the end of the file, inside its last page.  Windows (checked on
+ * Windows 10 22H2, NTFS, with these very variants) leaves them in the resident page, so a read of the file after it
+ * grows returns them, while a page that left memory reads back zero: the range is undefined and either is accepted
+ * there (0xbb is the only non-zero value accepted).  Everything from the next page on must be zero. */
+#define TAIL_BYTE 0xbb
+static LONGLONG TailEnd;
+static volatile LONG SeqFails;    /* the mixed sequence runs on several threads: counted separately */
+
+static VOID CountFail(PCSTR Variant, PCSTR What)
+{
+    CHAR Key[96];
+    ULONG i;
+    _snprintf(Key, sizeof(Key) - 1, "%s / %s", Variant, What);
+    Key[sizeof(Key) - 1] = 0;
+    for (i = 0; i < TallyUsed; i++)
+    {
+        if (!strcmp(Tally[i].Key, Key))
+        {
+            Tally[i].Count++;
+            return;
+        }
+    }
+    if (TallyUsed < MAXTALLY)
+    {
+        strcpy(Tally[TallyUsed].Key, Key);
+        Tally[TallyUsed++].Count = 1;
+    }
+}
+
+static VOID PrintTally(VOID)
+{
+    ULONG i;
+    for (i = 0; i < TallyUsed; i++)
+        trace("FSREGROW-VARIANT [%s] failures=%lu\n", Tally[i].Key, Tally[i].Count);
+    if (SeqFails)
+        trace("FSREGROW-VARIANT [sequence] failures=%ld\n", SeqFails);
+}
+
 static ULONG Rnd(ULONG Mod)
 {
     Seed = Seed * 1103515245 + 12345;
@@ -68,6 +110,7 @@ static DWORD WINAPI PressureThread(PVOID Arg)
 static VOID Report(PCSTR What, PCSTR Variant, ULONG Round, LONGLONG S0, LONGLONG S1, LONGLONG S2, LONGLONG Off, UCHAR Got)
 {
     Fails++;
+    CountFail(Variant, What);
     if (Printed++ < 40)
         ok(0, "%s [%s r%lu sizes %I64d->%I64d->%I64d]: byte at %I64d is 0x%02x, expected 0x00\n", What, Variant, Round, S0, S1, S2, Off, Got);
 }
@@ -82,6 +125,8 @@ static VOID CheckBuf(PCSTR What, PCSTR Variant, ULONG Round, LONGLONG S0, LONGLO
         LONGLONG Off = Base + i;
         if (Off >= S1 && Off < S2 && Buf[i] != 0)
         {
+            if (Off < TailEnd && Buf[i] == TAIL_BYTE)
+                continue;
             Report(What, Variant, Round, S0, S1, S2, Off, Buf[i]);
             Bad = TRUE;
             break;
@@ -89,6 +134,7 @@ static VOID CheckBuf(PCSTR What, PCSTR Variant, ULONG Round, LONGLONG S0, LONGLO
         if (Off < S1 && Buf[i] != OLD_BYTE)
         {
             Fails++;
+            CountFail(Variant, What);
             if (Printed++ < 40)
                 ok(0, "%s [%s r%lu]: surviving byte at %I64d is 0x%02x, expected 0x%02x\n", What, Variant, Round, Off, Buf[i], OLD_BYTE);
             Bad = TRUE;
@@ -322,6 +368,7 @@ static VOID RoundMapBeyond(PCWSTR Path, ULONG Idx, BOOL SectionLarger, BOOL Flus
     else
         S1 = S1 & ~4095LL;
     Size = SectionLarger ? S1 + 4096 * (1 + Rnd(64)) : (S1 + 4095) & ~4095LL;
+    TailEnd = SectionLarger ? 0 : Size;
     S2 = Size + (Rnd(2) ? 0 : 4096 * Rnd(32));
     if (S2 <= S1)
         S2 = S1 + 1;
@@ -384,6 +431,7 @@ static VOID RoundMapBeyond(PCWSTR Path, ULONG Idx, BOOL SectionLarger, BOOL Flus
         CloseHandle(F);
     }
     DeleteFileW(Path);
+    TailEnd = 0;
 }
 
 
@@ -458,6 +506,7 @@ static BOOL SVerify(SEQ *q, ULONG Size, PCSTR After, PCSTR Last)
             if (Got != q->Exp[i])
             {
                 Fails++;
+                InterlockedIncrement(&SeqFails);
                 if (Printed++ < 40)
                     ok(0, "[t%lu %s] after %s (history %s): byte %lu is 0x%02x, expected 0x%02x (%s, file size %lu)\n", q->Id,
                        Mode ? "unbuffered" : "cached", After, Last, i, Got, q->Exp[i], q->Exp[i] ? "data" : "zero", Size);
@@ -752,6 +801,7 @@ START_TEST(FsRegrow)
         WaitForSingleObject(Thr, 10000);
         CloseHandle(Thr);
     }
+    PrintTally();
     trace("FSREGROW: dir=%ls iter=%lu pressure=%lu failures=%lu\n", Dir, Iter, Pressure, Fails);
     RemoveDirectoryW(Dir);
 }
