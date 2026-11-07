@@ -17,7 +17,8 @@ list(APPEND SOURCE
     tcpaccept.c
     outputprobe.c
     acceptstate.c
-    acceptname.c)
+    acceptname.c
+    g7lockbuf.c)
 
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)
