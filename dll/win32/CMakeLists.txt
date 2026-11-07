@@ -337,6 +337,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
     add_subdirectory(mfplat)
     add_subdirectory(mfplay)
     add_subdirectory(mfreadwrite)
+    add_subdirectory(twinapi_appcore)
 endif()
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x603)
