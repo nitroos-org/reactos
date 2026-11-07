@@ -98,7 +98,7 @@ static volatile LONG MiPagerExpectMismatch;
 #define MI_PAGER_TEST_QUERY_FREE_REFUSED            (MI_PAGER_TEST_COMMAND_BASE + 10)
 /* Exhaustion tests (pagerdef): hold every usable page above a floor for Address seconds (the caller waits) */
 #define MI_PAGER_TEST_HOLD_PAGES                    (MI_PAGER_TEST_COMMAND_BASE + 11)
-/* The writer's next cluster write never completes (a hung paging device), until the boot ends */
+/* The next cluster writes (writer thread or synchronous flush) never complete (a hung paging device), until the boot ends */
 #define MI_PAGER_TEST_HANG_WRITES                   (MI_PAGER_TEST_COMMAND_BASE + 12)
 #define MI_PAGER_TEST_LAST                          MI_PAGER_TEST_HANG_WRITES
 
@@ -145,7 +145,13 @@ static volatile ULONG MiPagerFreeRefusedBase;
 volatile LONG MiPagingIoInFlight;
 /* Interrupt time when paging I/O last started from idle or completed: in-flight I/O older than this window is stuck */
 static volatile ULONGLONG MiPagingIoLastEvent;
-/* Interrupt time when the writer thread's current cluster write started (0 = none in flight) */
+/*
+ * Cluster writes in flight (writer thread and synchronous flushes) and the interrupt
+ * time since which at least one has been in flight without any of them completing
+ * (0 = none in flight). A completion while others remain restarts the clock: their
+ * start is not known, so the age is never overestimated.
+ */
+static volatile LONG MiPagerClusterWrites;
 static volatile ULONGLONG MiPagerWriterIoStart;
 #define MI_PAGER_IO_STUCK_AFTER (120ULL * 10 * 1000 * 1000)
 /* Fourth NO_PAGES_AVAILABLE parameter: writer state, plus this flag when paging I/O was in flight but stuck */
@@ -713,22 +719,21 @@ MiWriteModifiedPrivatePagesEx(
         }
 
         MiPagingIoStart();
-        if (MiPagerIsWriterThread())
+        if (InterlockedIncrement(&MiPagerClusterWrites) == 1)
             MiPagerWriterIoStart = KeQueryInterruptTime();
-        if (MiPagerHangWrites && MiPagerIsWriterThread())
+        if (MiPagerHangWrites)
         {
             LARGE_INTEGER Forever;
 
             /* Test: a paging device that never completes the write (in flight until the boot ends) */
-            DbgPrint("NitroPager: test: the writer's cluster write hangs\n");
+            DbgPrint("NitroPager: test: a cluster write hangs (%s)\n", MiPagerIsWriterThread() ? "writer thread" : "synchronous flush");
             Forever.QuadPart = -3600LL * 10 * 1000 * 1000;
             for (;;)
                 KeDelayExecutionThread(KernelMode, FALSE, &Forever);
         }
         if (NT_SUCCESS(Status))
             Status = MiWritePageFileCluster(Batch, Taken, FileIndex, FirstSlot);
-        if (MiPagerIsWriterThread())
-            MiPagerWriterIoStart = 0;
+        MiPagerWriterIoStart = (InterlockedDecrement(&MiPagerClusterWrites) == 0) ? 0 : KeQueryInterruptTime();
         MiPagingIoDone();
 
         /* Test: hold the completion of this cluster until the test says go (written, referenced, off every list) */
@@ -1120,9 +1125,9 @@ MiPagingIoDone(VOID)
 
 /*
  * Paging I/O is stuck: in flight with nothing started from idle or completed
- * for MI_PAGER_IO_STUCK_AFTER (a hung device), or the writer's own cluster
- * write is older than that (page reads completing meanwhile do not make the
- * writer progress: its modified pages stay unwritten)
+ * for MI_PAGER_IO_STUCK_AFTER (a hung device), or a cluster write (writer
+ * thread or synchronous flush) has been in flight that long with no cluster
+ * completing (page reads completing meanwhile do not write modified pages)
  */
 static
 BOOLEAN
@@ -2271,7 +2276,7 @@ MmSetMemoryListInformation(
             /* Address = seconds */
             return MiPagerTestHoldPages((ULONG)(ULONG_PTR)Address);
         case MI_PAGER_TEST_HANG_WRITES:
-            DbgPrint("NitroPager: test: the writer's next cluster write will hang\n");
+            DbgPrint("NitroPager: test: the next cluster writes will hang\n");
             InterlockedExchange(&MiPagerHangWrites, 1);
             MiPagerWakeWriter();
             return STATUS_SUCCESS;
