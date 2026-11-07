@@ -2502,6 +2502,8 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
                              BOOLEAN Locked)
 {
     PVOID RmapEntry = NULL;
+    PEPROCESS Process = PsGetCurrentProcess();
+    BOOLEAN PageTableHeld = FALSE;
     NTSTATUS Status;
 
     /*
@@ -2509,17 +2511,18 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
      * that lock, and a page table that finds no free page waits for one (MiMakeSystemAddressValid) while the
      * lazy writer, which frees pages, waits for the segment lock (MmFlushSegment): a deadlock at low memory
      * (bugcheck 0x7A, STATUS_NO_MEMORY, after the wait ran out).
+     * The page table is held (counted as in use) until the fault is done: an uncounted valid page table
+     * breaks the two-level invariant (ASSERT in MiIsPageTablePresent, i386) and leaks when the fault maps
+     * nothing, and without the hold the last unmap in it could free it again before the mapping is made.
      */
-    if ((Address <= MM_HIGHEST_USER_ADDRESS) && (AddressSpace == &PsGetCurrentProcess()->Vm))
+    if ((Address <= MM_HIGHEST_USER_ADDRESS) && (AddressSpace == &Process->Vm))
     {
-        PEPROCESS Process = PsGetCurrentProcess();
-
-        MiLockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
-        MiMakePdeExistAndMakeValid(MiAddressToPde(Address), Process, MM_NOIRQL);
-        MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+        PageTableHeld = MmHoldPageTable(Process, Address);
     }
 
     Status = MiNotPresentFaultSectionView(AddressSpace, MemoryArea, Address, Locked, &RmapEntry);
+    if (PageTableHeld)
+        MmReleasePageTable(Process, Address);
     if (RmapEntry != NULL)
         MmFreeRmapEntry(RmapEntry);
     return Status;
