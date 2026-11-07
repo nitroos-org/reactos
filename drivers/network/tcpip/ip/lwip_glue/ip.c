@@ -9,6 +9,9 @@ sys_shutdown(void);
 VOID
 LibTCPFreeTimeWaitReopens(VOID);
 
+VOID
+LibTCPInitQueueLimits(VOID);
+
 void
 LibIPInsertPacket(void *ifarg,
                   const void *const data,
@@ -35,6 +38,8 @@ LibIPInsertPacket(void *ifarg,
 void
 LibIPInitialize(void)
 {
+    LibTCPInitQueueLimits();
+
     /* This completes asynchronously */
     tcpip_init(NULL, NULL);
 }

@@ -6,6 +6,8 @@
  */
 
 #include "ws2_32.h"
+#include <ndk/extypes.h>
+#include <ndk/exfuncs.h>
 
 /*
  * The child opens named pipe pairs with overlapped reads and a listen pending,
@@ -21,6 +23,70 @@
 #define KPI_MAX_DELAY_MS 300
 #define KPI_PIPES 8
 #define KPI_SOCKETS 8
+
+
+#define KPI_SYSTEM_POOLTAG_CLASS 22
+#define KPI_LWIP_TAG ('l' | ('w' << 8) | ('I' << 16) | ('P' << 24))
+#define KPI_POOL_SLACK (4 * 1024 * 1024)
+
+typedef LONG (WINAPI *PKPI_QUERY_SYSTEM_INFORMATION)(ULONG, PVOID, ULONG, PULONG);
+
+typedef struct _KPI_POOL_TAG_ENTRY
+{
+    ULONG TagUlong;
+    ULONG PagedAllocs;
+    ULONG PagedFrees;
+    SIZE_T PagedUsed;
+    ULONG NonPagedAllocs;
+    ULONG NonPagedFrees;
+    SIZE_T NonPagedUsed;
+} KPI_POOL_TAG_ENTRY;
+
+/* The non-paged pool bytes and outstanding allocations of one tag */
+static
+BOOL
+KpiQueryPool(ULONG Tag, SIZE_T *Bytes, LONG *Allocations)
+{
+    static PKPI_QUERY_SYSTEM_INFORMATION pQuery;
+    ULONG Size = 256 * 1024, Returned = 0, Count, i;
+    PUCHAR Buffer;
+    LONG Status;
+
+    if (!pQuery)
+        pQuery = (PKPI_QUERY_SYSTEM_INFORMATION)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQuerySystemInformation");
+    if (!pQuery)
+        return FALSE;
+    for (;;)
+    {
+        Buffer = HeapAlloc(GetProcessHeap(), 0, Size);
+        if (!Buffer)
+            return FALSE;
+        Status = pQuery(KPI_SYSTEM_POOLTAG_CLASS, Buffer, Size, &Returned);
+        if (Status != (LONG)0xC0000004 || Size >= 16 * 1024 * 1024)
+            break;
+        HeapFree(GetProcessHeap(), 0, Buffer);
+        Size *= 2;
+    }
+    if (Status < 0)
+    {
+        HeapFree(GetProcessHeap(), 0, Buffer);
+        return FALSE;
+    }
+    Count = *(PULONG)Buffer;
+    *Bytes = 0;
+    *Allocations = 0;
+    for (i = 0; i < Count; i++)
+    {
+        KPI_POOL_TAG_ENTRY *Entry = (KPI_POOL_TAG_ENTRY *)(Buffer + sizeof(SIZE_T) + i * sizeof(KPI_POOL_TAG_ENTRY));
+        if (Entry->TagUlong == Tag)
+        {
+            *Bytes += Entry->NonPagedUsed;
+            *Allocations += (LONG)(Entry->NonPagedAllocs - Entry->NonPagedFrees);
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Buffer);
+    return TRUE;
+}
 
 static HANDLE ChildPort;
 static SOCKET ListenSocket = INVALID_SOCKET;
@@ -234,14 +300,56 @@ AcceptorThread(LPVOID Parameter)
     return 0;
 }
 
+/* What the threads of a process that does not exit are waiting for */
+static
+void
+KpiTraceThreads(DWORD Pid)
+{
+    ULONG Size = 512 * 1024, Done;
+    PUCHAR Buffer = HeapAlloc(GetProcessHeap(), 0, Size);
+    PSYSTEM_PROCESS_INFORMATION Info;
+    ULONG i;
+
+    if (!Buffer)
+        return;
+    if (NT_SUCCESS(NtQuerySystemInformation(SystemProcessInformation, Buffer, Size, &Done)))
+    {
+        for (Info = (PSYSTEM_PROCESS_INFORMATION)Buffer; ; Info = (PSYSTEM_PROCESS_INFORMATION)((PUCHAR)Info + Info->NextEntryOffset))
+        {
+            if ((DWORD)(ULONG_PTR)Info->UniqueProcessId == Pid)
+            {
+                trace("process %lu: %lu threads\n", Pid, Info->NumberOfThreads);
+                for (i = 0; i < Info->NumberOfThreads; i++)
+                {
+                    PSYSTEM_THREAD_INFORMATION Thread = (PSYSTEM_THREAD_INFORMATION)(Info + 1) + i;
+
+                    trace("  thread %Iu: state %lu wait reason %lu\n", (ULONG_PTR)Thread->ClientId.UniqueThread,
+                          (ULONG)Thread->ThreadState, (ULONG)Thread->WaitReason);
+                }
+                break;
+            }
+            if (!Info->NextEntryOffset)
+                break;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Buffer);
+}
+
 static
 void
 KillChild(PROCESS_INFORMATION *Child, int *Killed)
 {
-    DWORD Wait;
+    DWORD Wait, Begin = GetTickCount();
 
     ok(TerminateProcess(Child->hProcess, 1), "TerminateProcess failed: %lu\n", GetLastError());
-    Wait = WaitForSingleObject(Child->hProcess, 30000);
+    Wait = WaitForSingleObject(Child->hProcess, 5000);
+    if (Wait != WAIT_OBJECT_0)
+    {
+        KpiTraceThreads(Child->dwProcessId);
+        Wait = WaitForSingleObject(Child->hProcess, 25000);
+    }
+    if (GetTickCount() - Begin > 2000)
+        trace("child %lu took %lu ms to exit\n", Child->dwProcessId, GetTickCount() - Begin);
     ok(Wait == WAIT_OBJECT_0, "Child %lu did not exit: %lu\n", Child->dwProcessId, Wait);
     CloseHandle(Child->hProcess);
     CloseHandle(Child->hThread);
@@ -356,6 +464,9 @@ START_TEST(killpendingio)
     HANDLE Acceptor;
     DWORD Start;
     int Argc, i, Slot, Killed = 0, Started = 0;
+    SIZE_T BytesBefore = 0, BytesAfter = 0, BytesPeak = 0, BytesNow;
+    LONG AllocsBefore = 0, AllocsAfter = 0, AllocsNow;
+    BOOL PoolOk;
 
     Argc = winetest_get_mainargs(&Argv);
     if (Argc >= 5 && !strcmp(Argv[2], "child"))
@@ -384,6 +495,7 @@ START_TEST(killpendingio)
     Acceptor = CreateThread(NULL, 0, AcceptorThread, NULL, 0, NULL);
     ok(Acceptor != NULL, "CreateThread failed: %lu\n", GetLastError());
 
+    PoolOk = KpiQueryPool(KPI_LWIP_TAG, &BytesBefore, &AllocsBefore);
     srand(GetTickCount());
     Start = GetTickCount();
     for (i = 0; i < KPI_ITERATIONS; i++)
@@ -393,6 +505,8 @@ START_TEST(killpendingio)
         Slot = i % KPI_CONCURRENT;
         if (Children[Slot].hProcess)
             KillChild(&Children[Slot], &Killed);
+        if (PoolOk && KpiQueryPool(KPI_LWIP_TAG, &BytesNow, &AllocsNow) && BytesNow > BytesPeak)
+            BytesPeak = BytesNow;
 
         sprintf(CommandLine, "\"%s\" killpendingio child %d %d", Argv[0], ntohs(Address.sin_port), i);
         if (!CreateProcessA(NULL, CommandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL,
@@ -420,6 +534,19 @@ START_TEST(killpendingio)
     {
         ok(WaitForSingleObject(Acceptor, 10000) == WAIT_OBJECT_0, "Acceptor thread did not exit\n");
         CloseHandle(Acceptor);
+    }
+
+    /* Every connection of a killed child is gone: what lwIP holds for them goes back to the pool */
+    if (PoolOk)
+    {
+        Sleep(5000);
+        if (KpiQueryPool(KPI_LWIP_TAG, &BytesAfter, &AllocsAfter))
+        {
+            trace("lwIP pool: before %Iu bytes / %ld allocations, peak %Iu bytes, after %Iu bytes / %ld allocations\n",
+                  BytesBefore, AllocsBefore, BytesPeak, BytesAfter, AllocsAfter);
+            ok(BytesAfter <= BytesBefore + KPI_POOL_SLACK,
+               "lwIP pool grew from %Iu to %Iu bytes after %d killed children\n", BytesBefore, BytesAfter, Killed);
+        }
     }
     WSACleanup();
 }
