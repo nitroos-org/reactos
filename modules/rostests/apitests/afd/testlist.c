@@ -20,6 +20,10 @@ extern void func_connectoptions(void);
 extern void func_acceptstate(void);
 extern void func_acceptname(void);
 
+extern void func_g7lockbuffers(void);
+
+extern void func_g7shortaddr(void);
+
 const struct test winetest_testlist[] =
 {
     { "select", func_select },
@@ -40,5 +44,7 @@ const struct test winetest_testlist[] =
     { "connectoptions", func_connectoptions },
     { "acceptstate", func_acceptstate },
     { "acceptname", func_acceptname },
+    { "g7lockbuffers", func_g7lockbuffers },
+    { "g7shortaddr", func_g7shortaddr },
     { 0, 0 }
 };

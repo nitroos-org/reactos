@@ -114,6 +114,12 @@ AfdBindSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if (FCB->SharedData.State != SOCKET_STATE_CREATED)
         return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
 
+    /* The address must be complete for its type, within what was supplied */
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < FIELD_OFFSET(AFD_BIND_DATA, Address) ||
+        !TaTransportAddressFits( &BindReq->Address,
+            IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_BIND_DATA, Address)))
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
+
     if (FCB->LocalAddress)
     {
         ExFreePoolWithTag(FCB->LocalAddress, TAG_AFD_TRANSPORT_ADDRESS);
