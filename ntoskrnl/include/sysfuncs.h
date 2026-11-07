@@ -318,4 +318,6 @@
     SVC_(MapViewOfSectionEx, 9)
     SVC_(UnmapViewOfSectionEx, 3)
     SVC_(CreateLowBoxToken, 9)
+    SVC_(AlertThreadByThreadId, 1)
+    SVC_(WaitForAlertByThreadId, 2)
 #endif
