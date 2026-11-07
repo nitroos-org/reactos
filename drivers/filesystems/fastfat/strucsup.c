@@ -305,6 +305,15 @@ Return Value:
         Vcb->VolumeFileHeader.NodeByteSize = sizeof(VCB);
 
         //
+        //  The volume file is cached up to FatMaxLarge, like the directory and EA
+        //  files. With a zero valid data length the fault path reads nothing of a
+        //  cache view page that was dropped before it was first touched, and the
+        //  FAT page comes back zero-filled.
+        //
+
+        Vcb->VolumeFileHeader.ValidDataLength = FatMaxLarge;
+
+        //
         //  Initialize the tunneling cache
         //
 
