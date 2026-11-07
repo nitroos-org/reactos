@@ -579,6 +579,10 @@ BOOLEAN
 CcRosDeferredBacklog(VOID);
 
 BOOLEAN
+CcRosIsDeleteFlushPending(
+    _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer);
+
+BOOLEAN
 CcRosHasLazyWritableData(VOID);
 
 BOOLEAN
