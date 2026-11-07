@@ -3046,6 +3046,11 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         StoreIo(a[2], &Io); return Status;
     case W64_NtCompareObjects:
         return NtCompareObjects(H(0), H(1));
+    case W64_NtAlertThreadByThreadId:
+        return NtAlertThreadByThreadId(H(0));
+    case W64_NtWaitForAlertByThreadId:
+        /* The address is not used; the timeout has the same layout in both ABIs */
+        return NtWaitForAlertByThreadId(P(0), (PLARGE_INTEGER)P(1));
     case W64_NtNotifyChangeDirectoryFile:
     {
         /* The kernel completes the request later: like NtReadFile it gets the
