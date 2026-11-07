@@ -1632,7 +1632,7 @@ NTAPI
 IoCancelThreadIo(IN PETHREAD Thread)
 {
     KIRQL OldIrql;
-    ULONG Retries = 3000;
+    LONGLONG Budget = 300 * 10000000LL;
     LARGE_INTEGER Interval;
     PLIST_ENTRY ListHead, NextEntry;
     PIRP Irp;
@@ -1670,10 +1670,13 @@ IoCancelThreadIo(IN PETHREAD Thread)
         IoCancelIrp(Irp);
     }
 
-     /* Wait 100 milliseconds */
-    Interval.QuadPart = -1000000;
-
-    /* Wait till all the IRPs are completed or cancelled. */
+    /*
+     * Wait till all the IRPs are completed or cancelled. Most are completed by the cancel itself or by the
+     * drivers a moment later: the first look comes after a millisecond (a clock tick) and the wait doubles up to
+     * 100 milliseconds, so that a thread (and with it a process) with pending I/O does not wait out 100 ms
+     * for each round.
+     */
+    Interval.QuadPart = -10000;
     while (!IsListEmpty(&Thread->IrpList))
     {
         /* Now we can lower */
@@ -1686,12 +1689,16 @@ IoCancelThreadIo(IN PETHREAD Thread)
          * Don't stay here forever if some broken driver doesn't complete
          * the IRP.
          */
-        if (!(Retries--))
+        Budget += Interval.QuadPart;
+        if (Budget <= 0)
         {
             /* Print out a message and remove the IRP */
             DPRINT1("Broken driver did not complete!\n");
             IopDisassociateThreadIrp();
+            Budget = 100000;
         }
+        if (Interval.QuadPart > -1000000)
+            Interval.QuadPart *= 2;
 
         /* Raise the IRQL Again */
         KeRaiseIrql(APC_LEVEL, &OldIrql);
