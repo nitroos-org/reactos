@@ -2403,6 +2403,85 @@ done:
 }
 
 
+/*
+ * NetUserChangePassword with a NULL domain or user name: the caller's own logon domain and
+ * account (the token of the thread if it impersonates, else of the process).
+ */
+static
+NET_API_STATUS
+GetCallerAccountNames(OUT LPWSTR *DomainName,
+                      OUT LPWSTR *UserName)
+{
+    HANDLE Token = NULL;
+    PTOKEN_USER UserInfo = NULL;
+    DWORD Length = 0, NameLength = 0, DomainLength = 0;
+    SID_NAME_USE Use;
+    LPWSTR Name = NULL, Domain = NULL;
+    NET_API_STATUS ApiStatus;
+
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &Token) &&
+        !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &Token))
+        return GetLastError();
+
+    GetTokenInformation(Token, TokenUser, NULL, 0, &Length);
+    if (Length == 0)
+    {
+        ApiStatus = GetLastError();
+        goto done;
+    }
+
+    UserInfo = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+    if (UserInfo == NULL)
+    {
+        ApiStatus = ERROR_NOT_ENOUGH_MEMORY;
+        goto done;
+    }
+
+    if (!GetTokenInformation(Token, TokenUser, UserInfo, Length, &Length))
+    {
+        ApiStatus = GetLastError();
+        goto done;
+    }
+
+    LookupAccountSidW(NULL, UserInfo->User.Sid, NULL, &NameLength, NULL, &DomainLength, &Use);
+    if (NameLength == 0 || DomainLength == 0)
+    {
+        ApiStatus = GetLastError();
+        goto done;
+    }
+
+    Name = RtlAllocateHeap(RtlGetProcessHeap(), 0, NameLength * sizeof(WCHAR));
+    Domain = RtlAllocateHeap(RtlGetProcessHeap(), 0, DomainLength * sizeof(WCHAR));
+    if (Name == NULL || Domain == NULL)
+    {
+        ApiStatus = ERROR_NOT_ENOUGH_MEMORY;
+        goto done;
+    }
+
+    if (!LookupAccountSidW(NULL, UserInfo->User.Sid, Name, &NameLength, Domain, &DomainLength, &Use))
+    {
+        ApiStatus = GetLastError();
+        goto done;
+    }
+
+    *UserName = Name;
+    *DomainName = Domain;
+    Name = Domain = NULL;
+    ApiStatus = NERR_Success;
+
+done:
+    if (Name != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Name);
+    if (Domain != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Domain);
+    if (UserInfo != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, UserInfo);
+    if (Token != NULL)
+        CloseHandle(Token);
+    return ApiStatus;
+}
+
+
 /******************************************************************************
  *                NetUserChangePassword  (NETAPI32.@)
  * PARAMS
@@ -2436,15 +2515,28 @@ NetUserChangePassword(LPCWSTR domainname,
     NET_API_STATUS ApiStatus = NERR_Success;
     NTSTATUS Status = STATUS_SUCCESS;
     NTSTATUS ProtocolStatus;
+    LPWSTR CallerDomain = NULL;
+    LPWSTR CallerUser = NULL;
 
     TRACE("(%s, %s, ..., ...)\n", debugstr_w(domainname), debugstr_w(username));
-
-    /* FIXME: handle null domain or user name */
 
     /* Check the parameters */
     if ((oldpassword == NULL) ||
         (newpassword == NULL))
         return ERROR_INVALID_PARAMETER;
+
+    /* A NULL domain or user name stands for the caller's own */
+    if ((domainname == NULL) || (username == NULL))
+    {
+        ApiStatus = GetCallerAccountNames(&CallerDomain, &CallerUser);
+        if (ApiStatus != NERR_Success)
+            return ApiStatus;
+
+        if (domainname == NULL)
+            domainname = CallerDomain;
+        if (username == NULL)
+            username = CallerUser;
+    }
 
     /* Connect to the LSA server */
     Status = LsaConnectUntrusted(&LsaHandle);
@@ -2546,6 +2638,12 @@ NetUserChangePassword(LPCWSTR domainname,
     }
 
 done:
+    if (CallerDomain != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, CallerDomain);
+
+    if (CallerUser != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, CallerUser);
+
     if (RequestBuffer != NULL)
         NetApiBufferFree(RequestBuffer);
 

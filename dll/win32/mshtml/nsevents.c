@@ -308,6 +308,58 @@ static void handle_docobj_load(HTMLDocumentObj *doc)
     }
 }
 
+#ifdef __REACTOS__
+/*
+ * DocumentComplete is sent from the message loop, not from inside Gecko's load event. A host
+ * (the .NET WebBrowser's DocumentText) loads the next document from its DocumentComplete handler,
+ * and a document loaded while Gecko is still dispatching the previous one's load event never
+ * gets its own load event, so its DocumentComplete was never sent.
+ */
+typedef struct {
+    task_t header;
+    HTMLDocumentObj *doc_obj;
+    HTMLOuterWindow *window;
+    HTMLInnerWindow *inner_window;
+} document_complete_task_t;
+
+static void document_complete_proc(task_t *_task)
+{
+    document_complete_task_t *task = (document_complete_task_t*)_task;
+
+    if(task->doc_obj->doc_object_service && task->window->base.inner_window == task->inner_window
+       && !is_detached_window(task->inner_window))
+        IDocObjectService_FireDocumentComplete(task->doc_obj->doc_object_service,
+                &task->window->base.IHTMLWindow2_iface, 0);
+}
+
+static void document_complete_task_destr(task_t *_task)
+{
+    document_complete_task_t *task = (document_complete_task_t*)_task;
+
+    IHTMLWindow2_Release(&task->inner_window->base.IHTMLWindow2_iface);
+    IHTMLWindow2_Release(&task->window->base.IHTMLWindow2_iface);
+    IUnknown_Release(task->doc_obj->outer_unk);
+}
+
+static void post_document_complete(HTMLDocumentObj *doc_obj, HTMLInnerWindow *inner_window)
+{
+    document_complete_task_t *task = malloc(sizeof(*task));
+
+    if(!task)
+        return;
+
+    task->doc_obj = doc_obj;
+    IUnknown_AddRef(doc_obj->outer_unk);
+    task->window = inner_window->base.outer_window;
+    IHTMLWindow2_AddRef(&task->window->base.IHTMLWindow2_iface);
+    task->inner_window = inner_window;
+    IHTMLWindow2_AddRef(&inner_window->base.IHTMLWindow2_iface);
+
+    /* on failure push_task has run the destructor and freed the task */
+    push_task(&task->header, document_complete_proc, document_complete_task_destr, doc_obj->task_magic);
+}
+#endif
+
 static nsresult handle_load(HTMLDocumentNode *doc, nsIDOMEvent *event)
 {
     HTMLDocumentObj *doc_obj = NULL;
@@ -339,9 +391,14 @@ static nsresult handle_load(HTMLDocumentNode *doc, nsIDOMEvent *event)
 
         update_title(doc_obj);
 
-        if(doc_obj->doc_object_service && !is_detached_window(doc->window) && !(doc->window->base.outer_window->load_flags & BINDING_REFRESH))
+        if(doc_obj->doc_object_service && !is_detached_window(doc->window) && !(doc->window->base.outer_window->load_flags & BINDING_REFRESH)) {
+#ifdef __REACTOS__
+            post_document_complete(doc_obj, doc->window);
+#else
             IDocObjectService_FireDocumentComplete(doc_obj->doc_object_service,
                     &doc->window->base.outer_window->base.IHTMLWindow2_iface, 0);
+#endif
+        }
 
         IUnknown_Release(doc_obj->outer_unk);
     }
