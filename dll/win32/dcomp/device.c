@@ -989,14 +989,6 @@ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID iid, void **obj)
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
-HRESULT WINAPI DllGetActivationFactory(void *classid, void **factory)
-{
-    FIXME("%p, %p.\n", classid, factory);
-
-    *factory = NULL;
-    return CLASS_E_CLASSNOTAVAILABLE;
-}
-
 HRESULT WINAPI DwmEnableMMCSS(BOOL enable)
 {
     FIXME("%d.\n", enable);
