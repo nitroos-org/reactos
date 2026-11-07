@@ -1740,6 +1740,9 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","wldap32",0x00
 
 ; Memory Management
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management",,0x00000012
+; NitroPager: 1 = ARM3 private memory is paged to the paging file (default; the kernel uses 1 when the value is
+; absent too), 0 = the old behaviour (private memory stays resident). Read once at boot: a change needs a reboot.
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management","NitroPager",0x00010001,1
 
 ; SubSystems
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems","Debug",0x00020002,""

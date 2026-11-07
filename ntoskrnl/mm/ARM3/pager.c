@@ -13,9 +13,10 @@
 
 /*
  * Design: harness process/PAGER-DESIGN.md rev 2, phases P0/P1. Everything here is
- * reached only when the NitroPager registry value (Session Manager\Memory
- * Management, read once at boot) is not 0. Value 0, the default, keeps the
- * behaviour the memory manager had before.
+ * reached only when the NitroPager mode (Session Manager\Memory Management
+ * value NitroPager, read once at boot) is not 0. The mode is 1 by default (the
+ * kernel's own value when the registry has none; setup writes 1 as well); 0
+ * keeps the behaviour the memory manager had before, the LiveCD sets it.
  *
  * States of a private page (PrototypePte == 0):
  *   valid                  PTE valid; OriginalPte = demand zero with the
@@ -53,8 +54,8 @@ extern MMPFNLIST MmModifiedPageListByColor[1];
 extern MMPFNLIST MmBadPageListHead;
 extern ULONG MmTotalPagesForPagingFile;
 
-/* NitroPager / NitroPagerDebug (CmControlVector, read once at boot) */
-ULONG MiNitroPagerMode;
+/* NitroPager / NitroPagerDebug (CmControlVector, read once at boot; an absent NitroPager value leaves the default 1) */
+ULONG MiNitroPagerMode = 1;
 ULONG MiNitroPagerDebug;
 
 /* Private pages on the standby lists: repurposable */

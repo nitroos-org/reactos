@@ -61,6 +61,8 @@ HKCU,"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer","StartMenuLog
 ;HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","USERPROFILE",0x00020000,"%SystemDrive%\Users\Default"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","ALLUSERSPROFILE",0x00020000,"%SystemDrive%\ProgramData"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management","PagingFiles",0x00000000,""
+; No paging file on the LiveCD: NitroPager off
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management","NitroPager",0x00010001,0
 
 ; Font Substitution
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\FontSubstitutes","Courier",0x00000000,"Courier New"
