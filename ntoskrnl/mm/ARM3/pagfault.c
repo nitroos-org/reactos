@@ -747,7 +747,8 @@ static
 BOOLEAN
 MiUserFaultMustLeavePages(VOID)
 {
-    if (MiNitroPagerMode == 0)
+    /* Without a paging file the pager frees nothing: the old test */
+    if ((MiNitroPagerMode == 0) || (MmNumberOfPagingFiles == 0))
         return (MmAvailablePages < MI_DEMAND_ZERO_FAULT_RESERVE);
     return (MiGetUsablePageCount() < MI_DEMAND_ZERO_FAULT_RESERVE + MI_PAGER_PAGING_RESERVE);
 }

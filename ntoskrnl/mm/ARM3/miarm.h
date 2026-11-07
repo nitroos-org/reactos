@@ -2865,6 +2865,8 @@ typedef struct _MI_PAGER_COUNTERS
     ULONG BalancerWaits;
     ULONG BalancerTrimmed;
     ULONG LegacyFreed;
+    ULONG LegacyAsked;
+    ULONG NoProgressPasses;
 } MI_PAGER_COUNTERS;
 
 extern MI_PAGER_COUNTERS MiPagerCounters;

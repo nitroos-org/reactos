@@ -1427,6 +1427,8 @@ EarlyQuit:
  * one slot. Returns the number of slots, 0 if no file has a free slot.
  * Callable at <= DISPATCH_LEVEL, also inside the PFN lock (slot lock = leaf).
  */
+static BOOLEAN MiPagerFileTakesSlots(_Inout_ PMMPAGING_FILE PagingFile);
+
 ULONG
 NTAPI
 MiAllocatePageFileSlots(
@@ -1446,7 +1448,7 @@ MiAllocatePageFileSlots(
         {
             PagingFile = MmPagingFile[i];
             if ((PagingFile == NULL) || (PagingFile->SlotTags == NULL) ||
-                PagingFile->Retired || (PagingFile->FreeSpace < Run))
+                (PagingFile->FreeSpace < Run) || !MiPagerFileTakesSlots(PagingFile))
             {
                 continue;
             }
@@ -1521,12 +1523,19 @@ MiPagerFreeSlotCount(VOID)
 
 /*
  * The writer's cluster write to a file ended with Status. A file the volume
- * refuses (STATUS_FILE_INVALID: wrong media, a volume that went away) or one
- * whose writes failed MI_PAGER_RETIRE_FAILURES times in a row takes no new
- * slots for the rest of the boot; its slots that hold data are still read.
+ * refuses (STATUS_FILE_INVALID: wrong media, a volume that went away) takes no
+ * new slots for the rest of the boot. Other errors retire it only when they
+ * persist: MI_PAGER_RETIRE_FAILURES failed writes in a row spread over at
+ * least MI_PAGER_RETIRE_SPAN (the writer backs off between them), because
+ * storport and atapi report a memory shortage on the paging path as a plain
+ * device error. Such a file is tried again MI_PAGER_RETRY_RETIRED after it was
+ * retired (MiAllocatePageFileSlots); one more failure retires it again.
+ * Shortage statuses never count. Slots that hold data are always read.
  * Returns TRUE when this call retired the file.
  */
 #define MI_PAGER_RETIRE_FAILURES 8
+#define MI_PAGER_RETIRE_SPAN (10ULL * 10 * 1000 * 1000)
+#define MI_PAGER_RETRY_RETIRED (60ULL * 10 * 1000 * 1000)
 BOOLEAN
 NTAPI
 MiPagerPagingFileWriteResult(
@@ -1535,6 +1544,7 @@ MiPagerPagingFileWriteResult(
 {
     PMMPAGING_FILE PagingFile;
     BOOLEAN Retired = FALSE;
+    ULONGLONG Now = KeQueryInterruptTime();
     KIRQL OldIrql;
 
     KeAcquireSpinLock(&MiPagingFileSlotLock, &OldIrql);
@@ -1549,21 +1559,50 @@ MiPagerPagingFileWriteResult(
         {
             /* A shortage (an IRP, pool) says nothing about the file: it passes */
         }
-        else if ((Status == STATUS_FILE_INVALID) ||
-                 (++PagingFile->WriteFailuresInARow >= MI_PAGER_RETIRE_FAILURES))
+        else if (Status == STATUS_FILE_INVALID)
         {
             PagingFile->Retired = TRUE;
+            PagingFile->RetiredForGood = TRUE;
             Retired = TRUE;
+        }
+        else
+        {
+            if (PagingFile->WriteFailuresInARow++ == 0)
+                PagingFile->FirstFailure = Now;
+            if ((PagingFile->WriteFailuresInARow >= MI_PAGER_RETIRE_FAILURES) &&
+                ((Now - PagingFile->FirstFailure) >= MI_PAGER_RETIRE_SPAN))
+            {
+                PagingFile->Retired = TRUE;
+                PagingFile->RetiredAt = Now;
+                Retired = TRUE;
+            }
         }
     }
     KeReleaseSpinLock(&MiPagingFileSlotLock, OldIrql);
 
     if (Retired)
     {
-        DPRINT1("NitroPager: paging file %lu retired after a failed write (0x%lx): no new pages go to it\n",
-                FileIndex, Status);
+        DPRINT1("NitroPager: paging file %lu retired after failed writes (0x%lx): no new pages go to it%s\n",
+                FileIndex, Status, (Status == STATUS_FILE_INVALID) ? "" : " for 60 s");
     }
     return Retired;
+}
+
+/* Slot lock held: a file retired for its errors (not for good) is tried again after a while */
+static
+BOOLEAN
+MiPagerFileTakesSlots(
+    _Inout_ PMMPAGING_FILE PagingFile)
+{
+    if (!PagingFile->Retired)
+        return TRUE;
+    if (PagingFile->RetiredForGood || ((KeQueryInterruptTime() - PagingFile->RetiredAt) < MI_PAGER_RETRY_RETIRED))
+        return FALSE;
+
+    /* One more failure retires it again at once (the streak and its start stay) */
+    PagingFile->Retired = FALSE;
+    PagingFile->WriteFailuresInARow = MI_PAGER_RETIRE_FAILURES - 1;
+    return TRUE;
 }
 
 /*

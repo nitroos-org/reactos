@@ -460,6 +460,9 @@ MiBalancerThread(PVOID Unused)
             ULONG InitialTarget = 0;
             ULONG Target;
             ULONG NrFreedPages;
+            /* NitroPager: what this pass freed (cache + pager) and the usable pages before it */
+            ULONG PagerPassFreed = 0;
+            PFN_NUMBER PagerUsableBefore = MiGetUsablePageCount();
 
             do
             {
@@ -482,46 +485,35 @@ MiBalancerThread(PVOID Unused)
                 {
                     CcRosTrimCache(Target, &NrFreedPages);
                     InitialTarget -= min(NrFreedPages, InitialTarget);
+                    PagerPassFreed += NrFreedPages;
                 }
 
-                /* NitroPager: ARM3 private pages, after the clean cache (trimmed pages count as progress) */
+                /*
+                 * NitroPager: ARM3 private pages (and the legacy share), after the clean cache.
+                 * Its own shortfall comes from the low-water mark: InitialTarget is 0 here (see
+                 * the note below), so it is not passed on.
+                 */
                 if (MiNitroPagerMode != 0)
-                {
-                    NrFreedPages = MiPagerBalance(MiLowWaterPages, InitialTarget);
-                    InitialTarget -= min(NrFreedPages, InitialTarget);
-                }
+                    PagerPassFreed += MiPagerBalance(MiLowWaterPages, 0);
 
-                /* No pages left to swap! */
+                /*
+                 * No pages left to swap! Note: InitialTarget starts at 0 and MiTrimMemoryConsumer
+                 * returns what is left of the target it was given, so this test is never true
+                 * (inherited; flag 0 keeps it untouched). With NitroPager on, the exhaustion
+                 * check is MiPagerBalancerPassDone after the pass.
+                 */
                 if (InitialTarget != 0 &&
                     InitialTarget == OldTarget)
                 {
-                    ULONG_PTR WriterState;
-
-                    /*
-                     * NitroPager: not while paging I/O is in flight, a write completed in the
-                     * last seconds or the writer has pages it can write: end the pass and give
-                     * the writer a moment. Otherwise a bugcheck that says why: available pages,
-                     * modified pages, paging I/O in flight, what the writer is doing.
-                     */
-                    if (MiNitroPagerMode != 0)
-                    {
-                        if (MiPagerCanMakeProgress(&WriterState))
-                        {
-                            MiPagerWaitForProgress();
-                            break;
-                        }
-                        KeBugCheckEx(NO_PAGES_AVAILABLE,
-                                     MmAvailablePages,
-                                     MmModifiedPageListHead.Total,
-                                     (ULONG_PTR)MiPagingIoInFlight,
-                                     WriterState);
-                    }
-
                     /* Game over */
                     KeBugCheck(NO_PAGES_AVAILABLE);
                 }
             }
             while (InitialTarget != 0);
+
+            /* NitroPager: did the pass make progress, can the writer, or is memory exhausted (bugcheck) */
+            if (MiNitroPagerMode != 0)
+                MiPagerBalancerPassDone(PagerUsableBefore, PagerPassFreed);
 
             if (Status == STATUS_WAIT_0)
             {
