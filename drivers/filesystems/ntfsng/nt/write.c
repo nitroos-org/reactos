@@ -481,8 +481,26 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
                 Sizes.FileSize = Fcb->Header.FileSize;
                 Sizes.ValidDataLength.QuadPart = OldSize;
                 CcSetFileSizes(FileObject, &Sizes);
-                /* Pages of the old data a failed purge left past the old size are cleared first: CcZeroData keeps what a resident page holds. */
-                NgZeroResidentFrom(Fcb, FileObject, OldSize);
+                /* Pages of the old data a failed purge left past the old size are cleared first: CcZeroData keeps what a resident page holds.
+                 * Zeroing runs to the end of the segment, so a file written by appends, with the pages of a longer old
+                 * one still resident, would zero them all again at every growth (an 8K write loop over a 100 MB file
+                 * cut to nothing spent 65 s in it). The pages past TailZeroFrom are zero: nothing to clear then, except the rest of the
+                 * page the old end is in: a mapped view can write there past the end of the file, and nothing sees it. */
+                if (OldSize < Fcb->TailZeroFrom)
+                {
+                    NgZeroResidentFrom(Fcb, FileObject, OldSize);
+                }
+                else if (OldSize & (PAGE_SIZE - 1))
+                {
+                    /* Only the rest of the page the old end is in can hold bytes (a mapped view writes there):
+                     * zero it through the cache, as far as the growth reaches */
+                    static const UCHAR ZeroPage[PAGE_SIZE];
+                    LARGE_INTEGER TailOff;
+                    ULONG TailLen = (ULONG)min(NewSize - OldSize, (LONGLONG)(PAGE_SIZE - (OldSize & (PAGE_SIZE - 1))));
+
+                    TailOff.QuadPart = OldSize;
+                    CcCopyWrite(FileObject, &TailOff, TailLen, TRUE, (PVOID)ZeroPage);
+                }
                 CcSetFileSizes(FileObject, &Sizes);
                 Li.QuadPart = OldSize;
                 Li2.QuadPart = NewSize;
@@ -518,10 +536,15 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         Status = _SEH2_GetExceptionCode();
+        Fcb->TailZeroFrom = MAXLONGLONG;
     }
     _SEH2_END;
     if (NT_SUCCESS(Status))
     {
+        /* Past the new end every resident page is zero: a cut dropped or zeroed them, a growth zeroed them or found
+         * them zero (nothing is written past the end of the stream) */
+        if (!Err)
+            Fcb->TailZeroFrom = NewSize;
         Fcb->Modified = TRUE;
         if (Fcb->LogicalVdl > NewSize)
             Fcb->LogicalVdl = NewSize;

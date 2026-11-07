@@ -1448,6 +1448,8 @@ walked:
     Fcb->Stat = St;
     NgFillStat(Fcb);
     Fcb->LogicalVdl = Fcb->Header.FileSize.QuadPart;
+    /* A new segment holds pages read from the stream, none past its end (a read past it is zero filled) */
+    Fcb->TailZeroFrom = Fcb->Header.FileSize.QuadPart;
     Found = NgInsertOrFindFcb(Vcb, Fcb);
     Opening = TRUE;
     if (Found != Fcb)

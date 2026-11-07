@@ -287,6 +287,7 @@ PNG_FCB NgAllocateFcb(PNG_VCB Vcb)
     if (!Fcb)
         return NULL;
     RtlZeroMemory(Fcb, sizeof(*Fcb));
+    Fcb->TailZeroFrom = MAXLONGLONG;
     Fcb->Header.NodeTypeCode = NG_NODE_FCB;
     Fcb->Header.NodeByteSize = sizeof(NG_FCB);
     Fcb->Header.Resource = &Fcb->MainResource;

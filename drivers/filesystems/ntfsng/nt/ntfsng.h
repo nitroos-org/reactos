@@ -184,6 +184,8 @@ typedef struct _NG_FCB
     SECTION_OBJECT_POINTERS SectionObjectPointers;
     LONGLONG CachedEnd;             /* highest AllocationSize the header has had: bounds Mm's pages */
     LONGLONG LogicalVdl;            /* valid data length as SetFileValidData sees it (writes raise it) */
+    LONGLONG TailZeroFrom;          /* every resident page of the data segment lying wholly at or past this offset is zero (MAXLONGLONG: unknown); NgSetFileSize.
+                                       The part of the last page past the end can be written through a mapped view: not covered */
     ERESOURCE MainResource;
     ERESOURCE PagingIoResource;
     ERESOURCE PagingWriteLock;      /* exclusive around every paging and non-cached data write of the stream (write.c) */
