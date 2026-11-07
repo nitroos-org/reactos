@@ -79,6 +79,16 @@ Modifications: two patches to softpipe (dll/3rdparty/mesa3d/patches). The shippe
                and public-domain files). Every licence text and copyright line is installed as
                system32\mesa3d-licenses.txt (dll/3rdparty/mesa3d/mesa3d-licenses.txt).
 
+Title: FFmpeg (libavcodec "aac" decoder and libavutil, AAC-LC only; hosted add-on, not in the image)
+Path: dll/3rdparty/nitro-aacdec
+Used Version: 9.0.2 (the release tarball is downloaded by build-aacdec.sh and checked against a pinned SHA-256; the sources are not in the tree)
+License: LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later.html)
+URL: https://ffmpeg.org/
+Modifications: ffmpeg-9.0.2-aac-lc-only.patch removes SBR, PS and USAC (HE-AAC, HE-AAC v2, xHE-AAC) and refuses every audio object
+               type but AAC-LC. Built by dll/3rdparty/nitro-aacdec/build-aacdec.sh into nitroaacdec.dll, which is NOT part of the
+               image: it is the downloaded payload of the optional feature "aac-lc" (featmgr). The complete source offer and
+               licence texts are installed with it as system32\aac-lc-licenses.
+
 Title: LLVM
 Path: dll/3rdparty/mesa3d
 Used Version: 19.1.7 (X86 target, built static by dll/3rdparty/mesa3d/build-llvm.sh; the sources are not in the tree)
