@@ -18,7 +18,6 @@ list(APPEND SOURCE
     button.c
     combo.c
     comboex.c
-    comctl32undoc.c
     commctrl.c
     datetime.c
     dpa.c
@@ -53,8 +52,22 @@ list(APPEND SOURCE
     treeview.c
     updown.c)
 
+# the v5 flavours of the controls that differ between comctl32 5.82 and 6.0, see comctl32.h
 list(APPEND PCH_SKIP_SOURCE
-    stubs.c)
+    stubs.c
+    v5/datetime.c
+    v5/header.c
+    v5/ipaddress.c
+    v5/listview.c
+    v5/monthcal.c
+    v5/progress.c
+    v5/rebar.c
+    v5/status.c
+    v5/tab.c
+    v5/trackbar.c
+    v5/treeview.c
+    v5/updown.c
+    v5/v5.c)
 
 add_library(comctl32 MODULE
     ${SOURCE}

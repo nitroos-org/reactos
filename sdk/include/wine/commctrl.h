@@ -12,7 +12,7 @@ extern "C" {
 #endif
 
 #undef DPA_GetPtr
-LPVOID WINAPI DPA_GetPtr(HDPA, INT);
+LPVOID WINAPI DPA_GetPtr(HDPA, INT_PTR);
 
 #undef FlatSB_SetScrollProp
 BOOL  WINAPI FlatSB_SetScrollProp(HWND, UINT, INT, BOOL);
@@ -50,6 +50,41 @@ static const WCHAR DRAGLISTMSGSTRINGW[] = { 'c','o','m','m','c','t','r','l',
 #else
 static const WCHAR FLATSB_CLASSW[] = { 'f','l','a','t','s','b','_',
   'c','l','a','s','s','3','2',0 };
+#endif
+
+/* Vista and later items that the ReactOS PSDK commctrl.h does not have yet */
+#ifndef LVM_GETNEXTITEMINDEX
+typedef struct tagLVITEMINDEX
+{
+    int iItem;
+    int iGroup;
+} LVITEMINDEX, *PLVITEMINDEX;
+#define LVM_GETNEXTITEMINDEX (LVM_FIRST + 211)
+#endif
+#ifndef TVN_ITEMCHANGINGW
+typedef struct tagNMTVITEMCHANGE
+{
+    NMHDR hdr;
+    UINT uChanged;
+    HTREEITEM hItem;
+    UINT uStateNew;
+    UINT uStateOld;
+    LPARAM lParam;
+} NMTVITEMCHANGE;
+#define TVN_ITEMCHANGINGA (TVN_FIRST - 16)
+#define TVN_ITEMCHANGINGW (TVN_FIRST - 17)
+#define TVN_ITEMCHANGEDA  (TVN_FIRST - 18)
+#define TVN_ITEMCHANGEDW  (TVN_FIRST - 19)
+#endif
+
+#ifndef ListView_GetItemTextA
+#define ListView_GetItemTextA(hwndLV, i, iSubItem_, pszText_, cchTextMax_) \
+  { LV_ITEMA _ms_lvi;\
+    _ms_lvi.iSubItem = iSubItem_;\
+    _ms_lvi.cchTextMax = cchTextMax_;\
+    _ms_lvi.pszText = pszText_;\
+    SNDMSGA((hwndLV), LVM_GETITEMTEXTA, (WPARAM)(i), (LPARAM)(LV_ITEMA *)&_ms_lvi);\
+  }
 #endif
 
 typedef TBSAVEPARAMSW *LPTBSAVEPARAMSW;
