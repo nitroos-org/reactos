@@ -38,6 +38,12 @@ static ULONG Fails, Printed;
 #define MAXTALLY 512
 static struct { CHAR Key[96]; ULONG Count; } Tally[MAXTALLY];
 static ULONG TallyUsed;
+/* Bytes in [S1, TailEnd) that a mapped view wrote past the end of the file, inside its last page.  Windows (checked on
+ * Windows 10 22H2, NTFS, with these very variants) leaves them in the resident page, so a read of the file after it
+ * grows returns them, while a page that left memory reads back zero: the range is undefined and either is accepted
+ * there (0xbb is the only non-zero value accepted).  Everything from the next page on must be zero. */
+#define TAIL_BYTE 0xbb
+static LONGLONG TailEnd;
 static volatile LONG SeqFails;    /* the mixed sequence runs on several threads: counted separately */
 
 static VOID CountFail(PCSTR Variant, PCSTR What)
@@ -119,6 +125,8 @@ static VOID CheckBuf(PCSTR What, PCSTR Variant, ULONG Round, LONGLONG S0, LONGLO
         LONGLONG Off = Base + i;
         if (Off >= S1 && Off < S2 && Buf[i] != 0)
         {
+            if (Off < TailEnd && Buf[i] == TAIL_BYTE)
+                continue;
             Report(What, Variant, Round, S0, S1, S2, Off, Buf[i]);
             Bad = TRUE;
             break;
@@ -360,6 +368,7 @@ static VOID RoundMapBeyond(PCWSTR Path, ULONG Idx, BOOL SectionLarger, BOOL Flus
     else
         S1 = S1 & ~4095LL;
     Size = SectionLarger ? S1 + 4096 * (1 + Rnd(64)) : (S1 + 4095) & ~4095LL;
+    TailEnd = SectionLarger ? 0 : Size;
     S2 = Size + (Rnd(2) ? 0 : 4096 * Rnd(32));
     if (S2 <= S1)
         S2 = S1 + 1;
@@ -422,6 +431,7 @@ static VOID RoundMapBeyond(PCWSTR Path, ULONG Idx, BOOL SectionLarger, BOOL Flus
         CloseHandle(F);
     }
     DeleteFileW(Path);
+    TailEnd = 0;
 }
 
 
