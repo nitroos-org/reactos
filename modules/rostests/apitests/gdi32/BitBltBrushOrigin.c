@@ -1,7 +1,9 @@
 /*
  * PROJECT:         ReactOS api tests
  * LICENSE:         GPL - See COPYING in the top level directory
- * PURPOSE:         A pattern ROP of BitBlt, StretchBlt and MaskBlt honours the DC brush origin (SetBrushOrgEx) like PatBlt
+ * PURPOSE:         A pattern ROP of BitBlt, StretchBlt and MaskBlt honours the DC brush origin (SetBrushOrgEx) like PatBlt,
+ *                  and the origin a DC reports is the one the pattern fills use after RestoreDC and after the DC went
+ *                  back to the cache (the Edge installer dialog painted blue boxes where its controls had been)
  */
 
 #include "precomp.h"
@@ -114,6 +116,73 @@ TestOrigin(int ox, int oy)
     SelectObject(ghdc, hOld);
 }
 
+
+/* a window DC and a memory DC: PatBlt must use the brush origin that GetBrushOrgEx reports */
+static void
+CheckWindowFill(HDC hdc, HBRUSH hbr, const char *name)
+{
+    POINT pt;
+    HGDIOBJ hOld;
+    int x, y, bad = 0, px, py;
+
+    GetBrushOrgEx(hdc, &pt);
+    hOld = SelectObject(hdc, hbr);
+    PatBlt(hdc, 0, 0, 32, 32, PATCOPY);
+    SelectObject(hdc, hOld);
+    for (y = 0; y < 32; y += 3)
+    {
+        for (x = 0; x < 32; x += 3)
+        {
+            px = ((x - pt.x) % PAT + PAT) % PAT;
+            py = ((y - pt.y) % PAT + PAT) % PAT;
+            if (GetPixel(hdc, x, y) != PatColor(px, py))
+                bad++;
+        }
+    }
+    ok(bad == 0, "%s (reported origin %ld,%ld): %d wrong pixels\n", name, pt.x, pt.y, bad);
+}
+
+static void
+TestStaleOrigin(void)
+{
+    HWND hwnd;
+    HDC hdc;
+    POINT pt;
+    int saved;
+
+    /* RestoreDC brings the saved origin back for the fills too */
+    SelectObject(ghdc, ghbmTarget);
+    SetBrushOrgEx(ghdc, 3, 5, NULL);
+    saved = SaveDC(ghdc);
+    SetBrushOrgEx(ghdc, 0, 0, NULL);
+    ok(RestoreDC(ghdc, saved), "RestoreDC failed\n");
+    GetBrushOrgEx(ghdc, &pt);
+    Clear();
+    SelectObject(ghdc, ghbrPat);
+    PatBlt(ghdc, 4, 3, 30, 25, PATCOPY);
+    CheckPattern("PatBlt after RestoreDC", pt.x, pt.y, 4, 3, 34, 28, FALSE);
+    SetBrushOrgEx(ghdc, 0, 0, NULL);
+
+    /* a window DC that was returned to the cache starts again at origin 0,0, for the fills as well */
+    hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"STATIC", NULL, WS_POPUP | WS_VISIBLE,
+                           0, 0, 40, 40, NULL, NULL, NULL, NULL);
+    if (!hwnd)
+    {
+        skip("no window\n");
+        return;
+    }
+    UpdateWindow(hwnd);
+    hdc = GetDC(hwnd);
+    SetBrushOrgEx(hdc, -303, -81, NULL);
+    ReleaseDC(hwnd, hdc);
+    hdc = GetDC(hwnd);
+    GetBrushOrgEx(hdc, &pt);
+    ok(pt.x == 0 && pt.y == 0, "brush origin of a fresh window DC is %ld,%ld\n", pt.x, pt.y);
+    CheckWindowFill(hdc, ghbrPat, "window DC after the cache reset");
+    ReleaseDC(hwnd, hdc);
+    DestroyWindow(hwnd);
+}
+
 START_TEST(BitBltBrushOrigin)
 {
     BITMAPINFO bmi = {{sizeof(BITMAPINFOHEADER), SIZE, -SIZE, 1, 32, BI_RGB}};
@@ -157,6 +226,7 @@ START_TEST(BitBltBrushOrigin)
     TestOrigin(3, 5);
     TestOrigin(-2, 7);
     TestOrigin(11, 13);
+    TestStaleOrigin();
 
     DeleteObject(ghbrPat);
     DeleteObject(hbmPat);
