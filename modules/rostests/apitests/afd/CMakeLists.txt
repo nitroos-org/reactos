@@ -20,7 +20,8 @@ list(APPEND SOURCE
     acceptname.c
     g7lockbuf.c
     g7accept.c
-    g7setip.c)
+    g7setip.c
+    g7setinfoex.c)
 
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)
