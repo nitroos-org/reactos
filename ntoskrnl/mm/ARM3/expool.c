@@ -430,6 +430,45 @@ ExpCheckPoolBlocks(IN PVOID Block)
 #define ExpCheckPoolBlocks(Block) ((void)0)
 #endif
 
+/*
+ * A pool call at an invalid IRQL ends in BAD_POOL_CALLER, whose parameters name the block but not the
+ * caller.  Print the call stack (with the module of each frame) first, so the next occurrence can be
+ * attributed from a serial log, also in a build without a kernel debugger.
+ */
+DECLSPEC_NOINLINE
+VOID
+ExpReportPoolIrqlViolation(IN POOL_TYPE PoolType,
+                           IN PVOID Entry)
+{
+    PVOID Frames[24];
+    ULONG Count, i;
+
+    DbgPrint("POOL: %s of %p (pool type 0x%x) at IRQL %u\n",
+             Entry ? "free" : "allocation", Entry, PoolType, KeGetCurrentIrql());
+    Count = RtlCaptureStackBackTrace(0, RTL_NUMBER_OF(Frames), Frames, NULL);
+    for (i = 0; i < Count; i++)
+    {
+        PLIST_ENTRY ListEntry;
+
+        for (ListEntry = PsLoadedModuleList.Flink;
+             ListEntry != &PsLoadedModuleList;
+             ListEntry = ListEntry->Flink)
+        {
+            PLDR_DATA_TABLE_ENTRY Module = CONTAINING_RECORD(ListEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+
+            if ((ULONG_PTR)Frames[i] >= (ULONG_PTR)Module->DllBase &&
+                (ULONG_PTR)Frames[i] < (ULONG_PTR)Module->DllBase + Module->SizeOfImage)
+            {
+                DbgPrint("POOL: #%u %p %wZ+0x%lx\n", i, Frames[i], &Module->BaseDllName,
+                         (ULONG)((ULONG_PTR)Frames[i] - (ULONG_PTR)Module->DllBase));
+                break;
+            }
+        }
+        if (ListEntry == &PsLoadedModuleList)
+            DbgPrint("POOL: #%u %p\n", i, Frames[i]);
+    }
+}
+
 FORCEINLINE
 VOID
 ExpCheckPoolIrqlLevel(IN POOL_TYPE PoolType,
@@ -444,6 +483,8 @@ ExpCheckPoolIrqlLevel(IN POOL_TYPE PoolType,
         (KeGetCurrentIrql() > APC_LEVEL) :
         (KeGetCurrentIrql() > DISPATCH_LEVEL))
     {
+        ExpReportPoolIrqlViolation(PoolType, Entry);
+
         //
         // Take the system down
         //
