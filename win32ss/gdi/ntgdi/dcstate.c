@@ -20,6 +20,14 @@ DC_vCopyState(PDC pdcSrc, PDC pdcDst, BOOL To)
     /* Copy full DC attribute */
     *pdcDst->pdcattr = *pdcSrc->pdcattr;
 
+    /*
+     * The brush origin is kept twice: in the DC attributes, copied just above, and in the DC level, which is
+     * what the pattern blits read. A DC that is cleaned up (returned to the cache by ReleaseDC) or restored
+     * must take the DC level origin along: the DC level origin of the last user (a control that aligned a
+     * pattern brush with SetBrushOrgEx) used to stay behind and shift the next pattern fill on the same DC.
+     */
+    DC_vSetBrushOrigin(pdcDst, pdcDst->pdcattr->ptlBrushOrigin.x, pdcDst->pdcattr->ptlBrushOrigin.y);
+
     /* Get/SetDCState() don't change hVisRgn field ("Undoc. Windows" p.559). */
     /* The VisRectRegion field needs to be set to a valid state */
 

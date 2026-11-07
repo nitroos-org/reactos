@@ -215,7 +215,7 @@ UserInitiateShutdown(IN PETHREAD Thread,
          * Here also, be sure there is no EWX_CALLER_WINLOGON flag
          * spuriously set (could be the sign of malicous app!).
          */
-        Flags &= ~EWX_CALLER_WINLOGON;
+        Flags &= ~(EWX_CALLER_WINLOGON | EWX_CALLER_WINLOGON_LOGOFF);
 
         *pFlags = Flags;
 

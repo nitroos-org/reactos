@@ -82,6 +82,53 @@ NonConsoleProcessShutdown(IN PCSR_PROCESS Process,
     return CsrShutdownCsrProcess;
 }
 
+static BOOL CALLBACK
+FindUnownedTopLevelWnd(IN HWND hWnd, IN LPARAM lParam)
+{
+    if (GetWindow(hWnd, GW_OWNER) == NULL)
+    {
+        *(PBOOL)lParam = TRUE;
+        return FALSE; /* one is enough */
+    }
+    return TRUE;
+}
+
+/*
+ * Whether a thread of the process owns a top-level window. A program linked as a console
+ * program that creates windows (a managed WinForms program built without /target:winexe, a
+ * Python or Tcl program with a window, ...) is a Windows application for the end of the session:
+ * documented for SetConsoleCtrlHandler, CTRL_LOGOFF_EVENT and CTRL_SHUTDOWN_EVENT are not sent to
+ * a process that loaded user32 or gdi32, its windows get WM_QUERYENDSESSION and WM_ENDSESSION.
+ */
+static BOOL
+ProcessHasTopLevelWindows(IN PCSR_PROCESS CsrProcess)
+{
+    PCSR_PROCESS Process;
+    PLIST_ENTRY NextEntry;
+    HANDLE ThreadIds[128];
+    ULONG Count = 0, i;
+    BOOL Found = FALSE;
+
+    if (!NT_SUCCESS(CsrLockProcessByClientId(CsrProcess->ClientId.UniqueProcess, &Process)))
+        return FALSE;
+
+    for (NextEntry = CsrProcess->ThreadList.Flink;
+         NextEntry != &CsrProcess->ThreadList && Count < RTL_NUMBER_OF(ThreadIds);
+         NextEntry = NextEntry->Flink)
+    {
+        PCSR_THREAD Thread = CONTAINING_RECORD(NextEntry, CSR_THREAD, Link);
+
+        if (!(Thread->Flags & CsrThreadTerminated))
+            ThreadIds[Count++] = Thread->ClientId.UniqueThread;
+    }
+    CsrUnlockProcess(Process);
+
+    for (i = 0; i < Count && !Found; i++)
+        EnumThreadWindows(HandleToUlong(ThreadIds[i]), FindUnownedTopLevelWnd, (LPARAM)&Found);
+
+    return Found;
+}
+
 // NOTE: See https://web.archive.org/web/20150629001832/http://blogs.msdn.com/b/ntdebugging/archive/2007/06/09/how-windows-shuts-down.aspx
 ULONG
 NTAPI
@@ -103,6 +150,19 @@ ConsoleClientShutdown(IN PCSR_PROCESS CsrProcess,
     if ( ProcessData->ConsoleHandle != NULL ||
          ProcessData->HandleTable   != NULL )
     {
+        /*
+         * On the first pass a program of the user that owns top-level windows is left to the GUI server,
+         * which sends the end-session messages to the windows. A system or other-context process is a
+         * service and keeps the console control event. When the GUI server finds nothing to notify,
+         * the second pass comes back here and the program is handled as a console process.
+         */
+        if (FirstPhase &&
+            !(CsrProcess->ShutdownFlags & (CsrShutdownSystem | CsrShutdownOther)) &&
+            ProcessHasTopLevelWindows(CsrProcess))
+        {
+            return CsrShutdownNonCsrProcess;
+        }
+
         NotifyConsoleProcessForShutdown(CsrProcess, ProcessData, Flags);
 
         /* We are done with the process itself */

@@ -17,9 +17,62 @@
 
 /* GLOBALS ********************************************************************/
 
-SIZE_T MmMinimumWorkingSetSize;
+/* Limits for the working set of a process, in pages. Windows 10 refuses a minimum below 20 pages (it raises it) */
+SIZE_T MmMinimumWorkingSetSize = 20;
 SIZE_T MmMaximumWorkingSetSize;
 SIZE_T MmPagesAboveWsMinimum;
+
+/* FUNCTIONS ******************************************************************/
+
+/*
+ * The largest working set size a process may ask for. Measured on Windows 10: a maximum of
+ * twice and four times the physical memory is accepted without any status, so the limit is not
+ * derived from the amount of RAM; the whole user address space is what a working set can never exceed.
+ */
+VOID
+NTAPI
+MiInitializeWorkingSetLimits(VOID)
+{
+    MmMaximumWorkingSetSize = (((SIZE_T)MM_HIGHEST_USER_ADDRESS) + 1) >> PAGE_SHIFT;
+}
+
+/*
+ * The minimum working set size of a process was charged to MmResidentAvailablePages
+ * when it was set (MmAdjustWorkingSetSize): give it back when the process ends.
+ */
+VOID
+NTAPI
+MiReturnProcessWorkingSetMinimum(IN PEPROCESS Process)
+{
+    /* The size is a ULONG count of pages */
+    ULONG Minimum = (ULONG)InterlockedExchange((PLONG)&Process->Vm.MinimumWorkingSetSize, 0);
+
+    if (Minimum != 0)
+        InterlockedExchangeAddSizeT(&MmResidentAvailablePages, (SIZE_T)Minimum);
+}
+
+/* Resident pages that a minimum working set must leave for the rest of the system */
+#define MI_WS_MINIMUM_RESERVE_PAGES 256
+
+static
+BOOLEAN
+MiChargeWorkingSetMinimum(IN SIZE_T Pages)
+{
+    PFN_NUMBER OldValue;
+
+    do
+    {
+        OldValue = MmResidentAvailablePages;
+        if ((OldValue <= MI_WS_MINIMUM_RESERVE_PAGES) ||
+            (Pages > (OldValue - MI_WS_MINIMUM_RESERVE_PAGES)))
+        {
+            return FALSE;
+        }
+    } while (InterlockedCompareExchangeSizeT(&MmResidentAvailablePages,
+                                             OldValue - Pages,
+                                             OldValue) != OldValue);
+    return TRUE;
+}
 
 /* PUBLIC FUNCTIONS ***********************************************************/
 
@@ -83,6 +136,13 @@ MmAdjustWorkingSetSize(IN SIZE_T WorkingSetMinimumInBytes,
         Status = STATUS_WORKING_SET_LIMIT_RANGE;
     }
 
+    /* A maximum below the global minimum is raised to it as well (Windows 10: 4096,8192 gives 20,20 pages) */
+    if (MaximumWorkingSetSize < MmMinimumWorkingSetSize)
+    {
+        MaximumWorkingSetSize = MmMinimumWorkingSetSize;
+        Status = STATUS_WORKING_SET_LIMIT_RANGE;
+    }
+
     /* Check if the new minimum is below the global minimum */
     if (MinimumWorkingSetSize < MmMinimumWorkingSetSize)
     {
@@ -111,27 +171,20 @@ MmAdjustWorkingSetSize(IN SIZE_T WorkingSetMinimumInBytes,
             goto Cleanup;
         }
 
-        /* Check if the number of available pages is large enough */
-        if (((SIZE_T)Delta / 1024) > (MmAvailablePages - 128))
-        {
-            DPRINT1("Not enough available pages\n");
-            Status = STATUS_INSUFFICIENT_RESOURCES;
-            goto Cleanup;
-        }
-
-        /* Check if there are enough resident available pages */
-        if ((SIZE_T)Delta >
-            (MmResidentAvailablePages - MmSystemLockPagesCount - 256))
+        /*
+         * Charge the increase to the resident available pages, and refuse it when it would
+         * take the pages the system needs to keep. Windows 10: STATUS_INSUFFICIENT_RESOURCES.
+         */
+        if (!MiChargeWorkingSetMinimum((SIZE_T)Delta))
         {
             DPRINT1("Not enough resident pages\n");
             Status = STATUS_INSUFFICIENT_RESOURCES;
             goto Cleanup;
         }
     }
-
-    /* Update resident available pages */
-    if (Delta != 0)
+    else if (Delta < 0)
     {
+        /* Give back what the lower minimum no longer holds */
         InterlockedExchangeAddSizeT(&MmResidentAvailablePages, -Delta);
     }
 

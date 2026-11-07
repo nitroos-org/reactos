@@ -232,6 +232,7 @@ extern void func_UnmapViewOfFileEx(void);
 extern void func_WaitOnAddress(void);
 extern void func_WaitQuantum(void);
 extern void func_WerFlags(void);
+extern void func_WorkingSetQuota(void);
 extern void func_WerRegisterMemoryFile(void);
 extern void func_WerRuntimeExceptionModule(void);
 extern void func_WideCharToMultiByte(void);
@@ -483,6 +484,7 @@ const struct test winetest_testlist[] =
     { "WaitOnAddress",               func_WaitOnAddress },
     { "WaitQuantum",                 func_WaitQuantum },
     { "WerFlags",                    func_WerFlags },
+    { "WorkingSetQuota",             func_WorkingSetQuota },
     { "WerRegisterMemoryFile",      func_WerRegisterMemoryFile },
     { "WerRuntimeExceptionModule",   func_WerRuntimeExceptionModule },
     { "WideCharToMultiByte",         func_WideCharToMultiByte },
