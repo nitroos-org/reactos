@@ -24,6 +24,8 @@ extern void func_g7lockbuffers(void);
 
 extern void func_g7shortaddr(void);
 
+extern void func_g7acceptlistening(void);
+
 const struct test winetest_testlist[] =
 {
     { "select", func_select },
@@ -46,5 +48,6 @@ const struct test winetest_testlist[] =
     { "acceptname", func_acceptname },
     { "g7lockbuffers", func_g7lockbuffers },
     { "g7shortaddr", func_g7shortaddr },
+    { "g7acceptlistening", func_g7acceptlistening },
     { 0, 0 }
 };
