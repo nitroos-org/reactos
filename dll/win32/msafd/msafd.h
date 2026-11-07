@@ -629,9 +629,8 @@ MsafdWaitForRequest(
     _In_ ULONG Timeout);
 
 /*
- * The blocking calls of a socket created without WSA_FLAG_OVERLAPPED do not time out (as on Windows), and neither do
- * those of a datagram socket, because AFD does not release the buffers of a cancelled datagram receive. Below 0x600
- * none does: ntdll has no per-request cancel there, and NtCancelIoFile would cancel the thread's other requests too.
+ * The blocking calls of a socket created without WSA_FLAG_OVERLAPPED do not time out (as on Windows). Below 0x600 none
+ * does: ntdll has no per-request cancel there, and NtCancelIoFile would cancel the thread's other requests too.
  */
 FORCEINLINE
 ULONG
@@ -641,8 +640,6 @@ MsafdSocketTimeout(
 {
 #if DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA
     if (!(Socket->SharedData->CreateFlags & WSA_FLAG_OVERLAPPED))
-        return 0;
-    if (Socket->SharedData->ServiceFlags1 & XP1_CONNECTIONLESS)
         return 0;
     return Timeout;
 #else
