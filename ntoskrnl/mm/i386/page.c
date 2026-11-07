@@ -222,6 +222,93 @@ MmGetPfnForProcess(PEPROCESS Process,
     return Page;
 }
 
+static
+USHORT
+MiPageTableUseCount(PVOID Address)
+{
+#if _MI_PAGING_LEVELS == 2
+    return MmWorkingSetList->UsedPageTableEntries[MiGetPdeOffset(Address)];
+#else
+    PMMPDE PointerPde = MiAddressToPde(Address);
+
+    ASSERT(PointerPde->u.Hard.Valid == 1);
+    return MiGetPfnEntry(PFN_FROM_PDE(PointerPde))->OriginalPte.u.Soft.UsedPageTableEntries;
+#endif
+}
+
+/**
+ * @brief Makes the page table of a user address of the current process valid and
+ * keeps it until MmReleasePageTable.
+ *
+ * The page table is counted as in use (UsedPageTableEntries) while it is held: a
+ * valid page table nobody counts breaks the two-level invariant (valid PDE <=>
+ * nonzero count, asserted by MiIsPageTablePresent), is invisible to the
+ * page-table-present tests and is never freed; and an uncounted page table can be
+ * freed by the last unmap in it while the caller still relies on it.
+ *
+ * @return TRUE if a reference was taken (only when nothing else counts the page table).
+ */
+BOOLEAN
+NTAPI
+MmHoldPageTable(
+    _In_ PEPROCESS Process,
+    _In_ PVOID Address)
+{
+    BOOLEAN Held = FALSE;
+
+    ASSERT(Process == PsGetCurrentProcess());
+    ASSERT(Address <= MM_HIGHEST_USER_ADDRESS);
+    ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);
+
+    MiLockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+
+    MiMakePdeExistAndMakeValid(MiAddressToPde(Address), Process, MM_NOIRQL);
+
+    /*
+     * Only a page table nobody counts needs the hold. A counted one already
+     * satisfies the invariant, and the hold's extra count could push it past
+     * PTE_PER_PAGE once the caller maps its entry (seen in setup: 1023 + hold +
+     * the new mapping). An unheld page table freed by another thread's last
+     * unmap is rebuilt by the mapping itself, as before the pre-fault.
+     */
+    if (MiPageTableUseCount(Address) == 0)
+    {
+        MiIncrementPageTableReferences(Address);
+        Held = TRUE;
+    }
+
+    MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+    return Held;
+}
+
+/**
+ * @brief Drops the reference MmHoldPageTable took and frees the page table if
+ * nothing else uses it.
+ */
+VOID
+NTAPI
+MmReleasePageTable(
+    _In_ PEPROCESS Process,
+    _In_ PVOID Address)
+{
+    ASSERT(Process == PsGetCurrentProcess());
+    ASSERT(Address <= MM_HIGHEST_USER_ADDRESS);
+    ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);
+
+    MiLockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+
+    /* A counted page table is never freed: the PDE still exists */
+    MiMakePdeExistAndMakeValid(MiAddressToPde(Address), Process, MM_NOIRQL);
+    if (MiDecrementPageTableReferences(Address) == 0)
+    {
+        KIRQL OldIrql = MiAcquirePfnLock();
+        MiDeletePde(MiAddressToPde(Address), Process);
+        MiReleasePfnLock(OldIrql);
+    }
+
+    MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+}
+
 /**
  * @brief Deletes the virtual mapping and optionally gives back the page & dirty bit.
  *
