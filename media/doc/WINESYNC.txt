@@ -45,7 +45,7 @@ The following libraries are shared with Wine.
 dll/directx/wine/amstream       # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/d2d1           # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/d3d10          # Synced to Wine-11.21
-dll/directx/wine/d3d10_1        # Synced to wine-10.1-dev (b00c7619f1b)
+dll/directx/wine/d3d10_1        # Synced to Wine-11.21
 dll/directx/wine/d3d10core      # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/d3d11          # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/d3d12          # Synced to wine-10.1-dev (b00c7619f1b)
