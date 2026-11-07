@@ -1655,6 +1655,22 @@ Return Value:
                     FileObject = CcGetFileObjectFromBcb( Repinned->Bcb[i] );
                 }
 
+                //
+                //  A pinned range is dirtied when it is pinned for writing (or
+                //  before a step that can fail, as FatAddFileAllocation does)
+                //  and modified afterwards, and the lazy writer may write the
+                //  page in between; Cc does not hold back the write of a pinned
+                //  range.  The write then takes the old bytes and clears the
+                //  dirty state, and the later changes (a directory entry that
+                //  never got its first cluster, a dirent that stayed deleted or
+                //  zero) are not written: the clusters of that file or directory
+                //  are allocated with no entry that owns them.  Every change of
+                //  the request is in the page now, so dirty the range again
+                //  before the pin is dropped.
+                //
+
+                CcSetDirtyPinnedData( Repinned->Bcb[i], NULL );
+
                 CcUnpinRepinnedBcb( Repinned->Bcb[i],
                                     WriteThroughToDisk,
                                     &Iosb );
