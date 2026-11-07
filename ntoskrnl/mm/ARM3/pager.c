@@ -1453,6 +1453,12 @@ MiPagerBalancerPassDone(
      * the test needs the higher mark to reach the check.
      */
     Starved = (MiNitroPagerDebug & MI_PAGER_DEBUG_TRIM_NOTHING) ? MiLowWaterPages : MI_PAGER_STARVED_PAGES;
+    if (MiNitroPagerDebug & MI_PAGER_DEBUG_TRIM_NOTHING)
+    {
+        /* Test: the cache and the legacy floor keep freeing a little; only the mark counts */
+        Freed = 0;
+        UsableBefore = Usable;
+    }
     if ((Usable >= Starved) || (Freed != 0) || (Usable > UsableBefore) || MiPagerShutdown)
     {
         NoProgressSince = 0;
