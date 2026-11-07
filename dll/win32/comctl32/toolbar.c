@@ -756,21 +756,6 @@ TOOLBAR_DrawPattern (const RECT *lpRect, const NMTBCUSTOMDRAW *tbcd)
 }
 
 
-#ifdef __REACTOS__
-/* Wine-11.21 asks the image list (imagelist_has_alpha). The image list of ReactOS is not in step with Wine yet, so the
- * toolbar asks the bitmap: a 32bpp image is drawn desaturated by TOOLBAR_DrawImage and never gets here, which makes
- * this FALSE for every image TOOLBAR_DrawMasked is called for, as before the sync. */
-static BOOL TOOLBAR_ImageHasAlpha(HIMAGELIST himl, int index)
-{
-    IMAGEINFO info = {0};
-    BITMAP bm = {0};
-
-    if (!ImageList_GetImageInfo(himl, index, &info) || !GetObjectW(info.hbmImage, sizeof(bm), &bm))
-        return FALSE;
-    return bm.bmBitsPixel == 32;
-}
-#define imagelist_has_alpha(himl, index) TOOLBAR_ImageHasAlpha(himl, index)
-#endif
 
 static void TOOLBAR_DrawMasked(HIMAGELIST himl, int index, HDC hdc, INT x, INT y, UINT draw_flags)
 {
