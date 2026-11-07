@@ -966,6 +966,7 @@ struct HTMLDocumentObj {
     HTMLDocumentNode *doc_node;
 
     IOleClientSite *client;
+    IUnknown *obj_site;
     IDocHostUIHandler *hostui;
     IOleCommandTarget *client_cmdtrg;
     BOOL custom_hostui;
