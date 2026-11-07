@@ -313,6 +313,91 @@ static VOID Round(PCWSTR Path, ULONG Idx, BOOL Mapped, BOOL Flush, BOOL Reopen, 
 }
 
 
+/* A mapped view writes bytes that no read can see: past the end of the file, in the last page (B), or in a section
+ * created larger than the file, which extends it (A); the file is then cut back and grown again, and the regrown range
+ * must read zeros.  File systems that remember "every cached page past the end is zero" must forget it here. */
+static VOID RoundMapBeyond(PCWSTR Path, ULONG Idx, BOOL SectionLarger, BOOL Flush, BOOL UseInfo, PUCHAR Buf, PUCHAR Fill)
+{
+    CHAR Variant[64];
+    LONGLONG S1, S2, Size;
+    HANDLE F, Map;
+    PUCHAR View;
+    DWORD N;
+    BOOL Ok;
+    LONGLONG Done = 0;
+
+    sprintf(Variant, "mapbeyond-%s%s%s", SectionLarger ? "section" : "lastpage", Flush ? ",flush" : "", UseInfo ? ",info" : ",seteof");
+    S1 = 65536 + Rnd(256 * 1024);
+    if (!SectionLarger)
+        S1 = (S1 & ~4095LL) + 1 + Rnd(4094);        /* not page aligned: there is a tail past the end */
+    else
+        S1 = S1 & ~4095LL;
+    Size = SectionLarger ? S1 + 4096 * (1 + Rnd(64)) : (S1 + 4095) & ~4095LL;
+    S2 = Size + (Rnd(2) ? 0 : 4096 * Rnd(32));
+    if (S2 <= S1)
+        S2 = S1 + 1;
+
+    F = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_ALWAYS, 0, NULL);
+    if (F == INVALID_HANDLE_VALUE)
+    {
+        ok(0, "Creating %ls failed: %lu\n", Path, GetLastError());
+        return;
+    }
+    while (Done < S1)
+    {
+        DWORD C = (DWORD)min(S1 - Done, 65536);
+        if (!WriteFile(F, Fill, C, &N, NULL) || N != C)
+        {
+            ok(0, "Write failed %lu\n", GetLastError());
+            break;
+        }
+        Done += C;
+    }
+    Map = CreateFileMappingW(F, NULL, PAGE_READWRITE, 0, (DWORD)(SectionLarger ? Size : S1), NULL);
+    View = Map ? MapViewOfFile(Map, FILE_MAP_WRITE, 0, 0, (SIZE_T)(SectionLarger ? Size : S1)) : NULL;
+    if (!View)
+    {
+        ok(0, "Mapping for the write beyond the end failed: %lu\n", GetLastError());
+        if (Map)
+            CloseHandle(Map);
+        CloseHandle(F);
+        DeleteFileW(Path);
+        return;
+    }
+    memset(View + S1, 0xbb, (SIZE_T)(Size - S1));
+    if (Flush)
+        FlushViewOfFile(View, 0);
+    UnmapViewOfFile(View);
+    CloseHandle(Map);
+
+    /* back to S1 (the section made the file longer in A), then grow */
+    ok(SetEof(F, S1, UseInfo), "Shrink to %I64d failed %lu\n", S1, GetLastError());
+    ok(SetEof(F, S2, UseInfo), "Regrow to %I64d failed %lu\n", S2, GetLastError());
+    ReadAll(F, Buf, S2, &Ok);
+    ok(Ok, "ReadFile failed %lu\n", GetLastError());
+    if (Ok)
+        CheckBuf("same handle", Variant, Idx, S1, S1, S2, Buf, 0, (ULONG)S2);
+    Map = CreateFileMappingW(F, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (Map && (View = MapViewOfFile(Map, FILE_MAP_READ, 0, 0, (SIZE_T)S2)))
+    {
+        CheckBuf("mapped view", Variant, Idx, S1, S1, S2, View, 0, (ULONG)S2);
+        UnmapViewOfFile(View);
+    }
+    if (Map)
+        CloseHandle(Map);
+    CloseHandle(F);
+    F = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+    if (F != INVALID_HANDLE_VALUE)
+    {
+        ReadAll(F, Buf, S2, &Ok);
+        if (Ok)
+            CheckBuf("fresh open", Variant, Idx, S1, S1, S2, Buf, 0, (ULONG)S2);
+        CloseHandle(F);
+    }
+    DeleteFileW(Path);
+}
+
+
 /* ---- the mixed sequence: the operations of a file under a data-path stress (rewrite, cached overwrite, append,
  * truncate/grow, mapped write), each thread on its own file, all bytes checked against a shadow copy ---- */
 #define BLK 65536
@@ -662,6 +747,12 @@ START_TEST(FsRegrow)
         for (v = 0; v < 32; v++)
             for (r = 0; r < Iter; r++)
                 Round(Path, r, v & 1, !!(v & 2), !!(v & 4), !!(v & 8), !!(v & 16), Buf, Fill);
+    }
+    if (!GetEnvironmentVariableW(L"FSREGROW_SEQ", Env, MAX_PATH) || _wtoi(Env) != 0)
+    {
+        for (v = 0; v < 8; v++)
+            for (r = 0; r < Iter; r++)
+                RoundMapBeyond(Path, r, v & 1, !!(v & 2), !!(v & 4), Buf, Fill);
     }
     if (GetEnvironmentVariableW(L"FSREGROW_SEQROUNDS", Env, MAX_PATH) && _wtoi(Env) > 0)
     {
