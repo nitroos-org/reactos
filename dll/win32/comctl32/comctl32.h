@@ -43,8 +43,54 @@
 #define COMCTL32_VERSION_MINOR 82
 #endif
 
-extern HMODULE COMCTL32_hModule DECLSPEC_HIDDEN;
-extern HBRUSH  COMCTL32_hPattern55AABrush DECLSPEC_HIDDEN;
+/* NitroOS/ReactOS: one binary serves both the v5 and the v6 (SxS) classes, with the
+ * theming of the v6 classes done by uxtheme at run time; the Wine code is built as v6 */
+#ifndef __WINE_COMCTL32_VERSION
+#define __WINE_COMCTL32_VERSION 6
+#endif
+
+#if __WINE_COMCTL32_VERSION == 6 || defined(__REACTOS__)
+#include "uxtheme.h"
+#include "vsstyle.h"
+#include "vssym32.h"
+#endif
+#if __WINE_COMCTL32_VERSION == 5 && defined(__REACTOS__)
+/* the v5 controls never have a theme (ReactOS's own theme code for them is dead code there) */
+#define GetWindowTheme(hwnd) ((HTHEME)NULL)
+#endif
+
+#ifdef __REACTOS__
+/* ReactOS ships one comctl32.dll that is both the v5 (5.82) and the v6 (SxS, themed) common controls, where
+ * Wine builds two DLLs from the same sources. The controls whose code differs between the two are compiled twice:
+ * v5/<control>.c defines __WINE_COMCTL32_VERSION as 5, renames the entry points below with the _v5 suffix and
+ * includes the ../<control>.c of the v6 build. commctrl.c registers the _v5 classes in the v5 activation context. */
+#if __WINE_COMCTL32_VERSION == 5
+#define COMCTL32_CloseThemeForWindow COMCTL32_CloseThemeForWindow_v5
+#define COMCTL32_IsThemed            COMCTL32_IsThemed_v5
+#define COMCTL32_NCPaint             COMCTL32_NCPaint_v5
+#define COMCTL32_OpenThemeForWindow  COMCTL32_OpenThemeForWindow_v5
+#define COMCTL32_SetVersion          COMCTL32_SetVersion_v5
+#define COMCTL32_ThemeChanged        COMCTL32_ThemeChanged_v5
+#define DATETIME_Register            DATETIME_Register_v5
+#define HEADER_Register              HEADER_Register_v5
+#define IPADDRESS_Register           IPADDRESS_Register_v5
+#define LISTVIEW_Register            LISTVIEW_Register_v5
+#define MONTHCAL_Register            MONTHCAL_Register_v5
+#define MONTHCAL_MonthLength         MONTHCAL_MonthLength_v5
+#define MONTHCAL_CalculateDayOfWeek  MONTHCAL_CalculateDayOfWeek_v5
+#define MONTHCAL_CompareSystemTime   MONTHCAL_CompareSystemTime_v5
+#define PROGRESS_Register            PROGRESS_Register_v5
+#define REBAR_Register               REBAR_Register_v5
+#define STATUS_Register              STATUS_Register_v5
+#define TAB_Register                 TAB_Register_v5
+#define TRACKBAR_Register            TRACKBAR_Register_v5
+#define TREEVIEW_Register            TREEVIEW_Register_v5
+#define UPDOWN_Register              UPDOWN_Register_v5
+#endif
+#endif /* __REACTOS__ */
+
+extern HMODULE COMCTL32_hModule;
+extern HBRUSH  COMCTL32_hPattern55AABrush;
 
 /* Property sheet / Wizard */
 #define IDD_PROPSHEET 1006
@@ -109,6 +155,9 @@ extern HBRUSH  COMCTL32_hPattern55AABrush DECLSPEC_HIDDEN;
 #define IDI_TT_INFO_SM                   22
 #define IDI_TT_WARN_SM                   25
 #define IDI_TT_ERROR_SM                  28
+#define IDI_TT_INFO_MD                   20
+#define IDI_TT_WARN_MD                   23
+#define IDI_TT_ERROR_MD                  26
 
 /* Taskdialog strings */
 #define IDS_BUTTON_YES    3000
@@ -164,7 +213,7 @@ typedef struct
    INT            visibleItems;
 } HEADCOMBO, *LPHEADCOMBO;
 
-extern BOOL COMBO_FlipListbox(HEADCOMBO *lphc, BOOL ok, BOOL bRedrawButton) DECLSPEC_HIDDEN;
+extern BOOL COMBO_FlipListbox(HEADCOMBO *lphc, BOOL ok, BOOL bRedrawButton);
 
 typedef struct
 {
@@ -187,23 +236,27 @@ typedef struct
     COLORREF clrInfoText;           /* COLOR_INFOTEXT                      */
 } COMCTL32_SysColor;
 
-extern COMCTL32_SysColor  comctl32_color DECLSPEC_HIDDEN;
+extern COMCTL32_SysColor  comctl32_color;
 
 /* Internal function */
-HWND COMCTL32_CreateToolTip (HWND) DECLSPEC_HIDDEN;
-VOID COMCTL32_RefreshSysColors(void) DECLSPEC_HIDDEN;
-void COMCTL32_DrawInsertMark(HDC hDC, const RECT *lpRect, COLORREF clrInsertMark, BOOL bHorizontal) DECLSPEC_HIDDEN;
-void COMCTL32_EnsureBitmapSize(HBITMAP *pBitmap, int cxMinWidth, int cyMinHeight, COLORREF crBackground) DECLSPEC_HIDDEN;
-void COMCTL32_GetFontMetrics(HFONT hFont, TEXTMETRICW *ptm) DECLSPEC_HIDDEN;
-BOOL COMCTL32_IsReflectedMessage(UINT uMsg) DECLSPEC_HIDDEN;
-INT  Str_GetPtrWtoA (LPCWSTR lpSrc, LPSTR lpDest, INT nMaxLen) DECLSPEC_HIDDEN;
-INT  Str_GetPtrAtoW (LPCSTR lpSrc, LPWSTR lpDest, INT nMaxLen) DECLSPEC_HIDDEN;
-BOOL Str_SetPtrAtoW (LPWSTR *lppDest, LPCSTR lpSrc) DECLSPEC_HIDDEN;
-BOOL Str_SetPtrWtoA (LPSTR *lppDest, LPCWSTR lpSrc) DECLSPEC_HIDDEN;
-
-#ifndef __REACTOS__
-#define COMCTL32_VERSION_MINOR 81
-#endif
+void COMCTL32_CloseThemeForWindow(HWND hwnd);
+HWND COMCTL32_CreateToolTip(HWND);
+void COMCTL32_DrawStatusText(HDC hdc, LPCRECT lprc, LPCWSTR text, UINT style, BOOL draw_background);
+void COMCTL32_OpenThemeForWindow(HWND hwnd, const WCHAR *theme_class);
+VOID COMCTL32_RefreshSysColors(void);
+void COMCTL32_DrawInsertMark(HDC hDC, const RECT *lpRect, COLORREF clrInsertMark, BOOL bHorizontal);
+void COMCTL32_EnsureBitmapSize(HBITMAP *pBitmap, int cxMinWidth, int cyMinHeight, COLORREF crBackground);
+void COMCTL32_GetFontMetrics(HFONT hFont, TEXTMETRICW *ptm);
+BOOL COMCTL32_IsReflectedMessage(UINT uMsg);
+BOOL COMCTL32_IsThemed(HWND hwnd);
+LRESULT COMCTL32_NCPaint(HWND hwnd, WPARAM wp, LPARAM lp, const WCHAR *theme_class);
+LRESULT COMCTL32_SetVersion(INT *current_version, INT new_version);
+LRESULT COMCTL32_ThemeChanged(HWND hwnd, const WCHAR *theme_class, BOOL invalidate, BOOL erase);
+INT  Str_GetPtrWtoA(LPCWSTR lpSrc, LPSTR lpDest, INT nMaxLen);
+INT  Str_GetPtrAtoW(LPCSTR lpSrc, LPWSTR lpDest, INT nMaxLen);
+BOOL Str_SetPtrAtoW(LPWSTR *lppDest, LPCSTR lpSrc);
+BOOL Str_SetPtrWtoA(LPSTR *lppDest, LPCWSTR lpSrc);
+BOOL imagelist_has_alpha(HIMAGELIST, UINT);
 
 /* Our internal stack structure of the window procedures to subclass */
 typedef struct _SUBCLASSPROCS {
@@ -218,14 +271,19 @@ typedef struct
    SUBCLASSPROCS *SubclassProcs;
    SUBCLASSPROCS *stackpos;
    WNDPROC origproc;
+   int is_unicode;
    int running;
 } SUBCLASS_INFO, *LPSUBCLASS_INFO;
 
+/* WM_NOTIFY unicode to ansi conversion and forwarding stuff */
+
+LRESULT COMCTL32_forward_notify_to_ansi_window(HWND hwnd_notify, NMHDR *hdr, WCHAR **unicode_buffer, DWORD *unicode_buffer_size);
+
 /* undocumented functions */
 
-LPVOID WINAPI Alloc (DWORD) __WINE_ALLOC_SIZE(1);
-LPVOID WINAPI ReAlloc (LPVOID, DWORD) __WINE_ALLOC_SIZE(2);
 BOOL   WINAPI Free (LPVOID);
+void * WINAPI Alloc (DWORD) __WINE_ALLOC_SIZE(1) __WINE_DEALLOC(Free) __WINE_MALLOC;
+void * WINAPI ReAlloc (void *, DWORD) __WINE_ALLOC_SIZE(2) __WINE_DEALLOC(Free);
 DWORD  WINAPI GetSize (LPVOID);
 
 INT  WINAPI Str_GetPtrA (LPCSTR, LPSTR, INT);
@@ -234,79 +292,101 @@ INT  WINAPI Str_GetPtrW (LPCWSTR, LPWSTR, INT);
 LRESULT WINAPI SetPathWordBreakProc(HWND hwnd, BOOL bSet);
 BOOL WINAPI MirrorIcon(HICON *phicon1, HICON *phicon2);
 
-HRGN set_control_clipping(HDC hdc, const RECT *rect) DECLSPEC_HIDDEN;
+HRGN set_control_clipping(HDC hdc, const RECT *rect);
 
-extern void ANIMATE_Register(void) DECLSPEC_HIDDEN;
-extern void ANIMATE_Unregister(void) DECLSPEC_HIDDEN;
-extern void BUTTON_Register(void) DECLSPEC_HIDDEN;
-extern void COMBO_Register(void) DECLSPEC_HIDDEN;
-extern void COMBOEX_Register(void) DECLSPEC_HIDDEN;
-extern void COMBOEX_Unregister(void) DECLSPEC_HIDDEN;
-extern void COMBOLBOX_Register(void) DECLSPEC_HIDDEN;
-extern void DATETIME_Register(void) DECLSPEC_HIDDEN;
-extern void DATETIME_Unregister(void) DECLSPEC_HIDDEN;
-extern void EDIT_Register(void) DECLSPEC_HIDDEN;
-extern void FLATSB_Register(void) DECLSPEC_HIDDEN;
-extern void FLATSB_Unregister(void) DECLSPEC_HIDDEN;
-extern void HEADER_Register(void) DECLSPEC_HIDDEN;
-extern void HEADER_Unregister(void) DECLSPEC_HIDDEN;
-extern void HOTKEY_Register(void) DECLSPEC_HIDDEN;
-extern void HOTKEY_Unregister(void) DECLSPEC_HIDDEN;
-extern void IPADDRESS_Register(void) DECLSPEC_HIDDEN;
-extern void IPADDRESS_Unregister(void) DECLSPEC_HIDDEN;
-extern void LISTBOX_Register(void) DECLSPEC_HIDDEN;
-extern void LISTVIEW_Register(void) DECLSPEC_HIDDEN;
-extern void LISTVIEW_Unregister(void) DECLSPEC_HIDDEN;
-extern void MONTHCAL_Register(void) DECLSPEC_HIDDEN;
-extern void MONTHCAL_Unregister(void) DECLSPEC_HIDDEN;
-extern void NATIVEFONT_Register(void) DECLSPEC_HIDDEN;
-extern void NATIVEFONT_Unregister(void) DECLSPEC_HIDDEN;
-extern void PAGER_Register(void) DECLSPEC_HIDDEN;
-extern void PAGER_Unregister(void) DECLSPEC_HIDDEN;
-extern void PROGRESS_Register(void) DECLSPEC_HIDDEN;
-extern void PROGRESS_Unregister(void) DECLSPEC_HIDDEN;
-extern void REBAR_Register(void) DECLSPEC_HIDDEN;
-extern void REBAR_Unregister(void) DECLSPEC_HIDDEN;
-extern void STATIC_Register(void) DECLSPEC_HIDDEN;
-extern void STATUS_Register(void) DECLSPEC_HIDDEN;
-extern void STATUS_Unregister(void) DECLSPEC_HIDDEN;
-extern void SYSLINK_Register(void) DECLSPEC_HIDDEN;
-extern void SYSLINK_Unregister(void) DECLSPEC_HIDDEN;
-extern void TAB_Register(void) DECLSPEC_HIDDEN;
-extern void TAB_Unregister(void) DECLSPEC_HIDDEN;
-extern void TOOLBAR_Register(void) DECLSPEC_HIDDEN;
-extern void TOOLBAR_Unregister(void) DECLSPEC_HIDDEN;
-extern void TOOLTIPS_Register(void) DECLSPEC_HIDDEN;
-extern void TOOLTIPS_Unregister(void) DECLSPEC_HIDDEN;
-extern void TRACKBAR_Register(void) DECLSPEC_HIDDEN;
-extern void TRACKBAR_Unregister(void) DECLSPEC_HIDDEN;
-extern void TREEVIEW_Register(void) DECLSPEC_HIDDEN;
-extern void TREEVIEW_Unregister(void) DECLSPEC_HIDDEN;
-extern void UPDOWN_Register(void) DECLSPEC_HIDDEN;
-extern void UPDOWN_Unregister(void) DECLSPEC_HIDDEN;
+#if __WINE_COMCTL32_VERSION == 6
+extern void BUTTON_Register(void);
+extern void COMBO_Register(void);
+extern void COMBOLBOX_Register(void);
+extern void EDIT_Register(void);
+extern void LISTBOX_Register(void);
+extern void SYSLINK_Register(void);
+extern void STATIC_Register(void);
+#endif
+extern void ANIMATE_Register(void);
+extern void COMBOEX_Register(void);
+extern void DATETIME_Register(void);
+extern void HEADER_Register(void);
+extern void HOTKEY_Register(void);
+extern void IPADDRESS_Register(void);
+extern void LISTVIEW_Register(void);
+extern void MONTHCAL_Register(void);
+extern void NATIVEFONT_Register(void);
+extern void PAGER_Register(void);
+extern void PROGRESS_Register(void);
+extern void REBAR_Register(void);
+extern void STATUS_Register(void);
+extern void TAB_Register(void);
+extern void TOOLBAR_Register(void);
+extern void TOOLTIPS_Register(void);
+extern void TRACKBAR_Register(void);
+extern void TREEVIEW_Register(void);
+extern void UPDOWN_Register(void);
 #ifdef __REACTOS__
-extern void BUTTON_Unregister(void) DECLSPEC_HIDDEN;
-extern void COMBO_Unregister(void) DECLSPEC_HIDDEN;
-extern void COMBOLBOX_Unregister(void) DECLSPEC_HIDDEN;
-extern void EDIT_Unregister(void) DECLSPEC_HIDDEN;
-extern void LISTBOX_Unregister(void) DECLSPEC_HIDDEN;
-extern void STATIC_Unregister(void) DECLSPEC_HIDDEN;
-extern void TOOLBARv6_Register(void) DECLSPEC_HIDDEN;
-extern void TOOLBARv6_Unregister(void) DECLSPEC_HIDDEN;
+/* the v5 (5.82) flavours of the controls compiled twice, see above */
+extern void DATETIME_Register_v5(void);
+extern void HEADER_Register_v5(void);
+extern void IPADDRESS_Register_v5(void);
+extern void LISTVIEW_Register_v5(void);
+extern void MONTHCAL_Register_v5(void);
+extern void PROGRESS_Register_v5(void);
+extern void REBAR_Register_v5(void);
+extern void STATUS_Register_v5(void);
+extern void TAB_Register_v5(void);
+extern void TRACKBAR_Register_v5(void);
+extern void TREEVIEW_Register_v5(void);
+extern void UPDOWN_Register_v5(void);
+/* classes whose code is ReactOS's own (not in step with Wine): unregistered one by one */
+extern void BUTTON_Unregister(void);
+extern void COMBO_Unregister(void);
+extern void COMBOLBOX_Unregister(void);
+extern void EDIT_Unregister(void);
+extern void LISTBOX_Unregister(void);
+extern void STATIC_Unregister(void);
+extern void SYSLINK_Unregister(void);
+extern void TOOLBARv6_Register(void);
+extern void TOOLBARv6_Unregister(void);
 #endif /* __REACTOS__ */
 
-int MONTHCAL_MonthLength(int month, int year) DECLSPEC_HIDDEN;
-int MONTHCAL_CalculateDayOfWeek(SYSTEMTIME *date, BOOL inplace) DECLSPEC_HIDDEN;
-LONG MONTHCAL_CompareSystemTime(const SYSTEMTIME *first, const SYSTEMTIME *second) DECLSPEC_HIDDEN;
-#ifdef __REACTOS__
-extern void THEMING_Initialize(HANDLE hActCtx5, HANDLE hActCtx6) DECLSPEC_HIDDEN;
-#else
-extern void THEMING_Initialize(void) DECLSPEC_HIDDEN;
-#endif
-extern void THEMING_Uninitialize(void) DECLSPEC_HIDDEN;
-extern LRESULT THEMING_CallOriginalClass(HWND, UINT, WPARAM, LPARAM) DECLSPEC_HIDDEN;
+int MONTHCAL_MonthLength(int month, int year);
+int MONTHCAL_CalculateDayOfWeek(SYSTEMTIME *date, BOOL inplace);
+LONG MONTHCAL_CompareSystemTime(const SYSTEMTIME *first, const SYSTEMTIME *second);
 
 #ifdef __REACTOS__
+extern void THEMING_Initialize(HANDLE hActCtx5, HANDLE hActCtx6);
+#else
+extern void THEMING_Initialize(void);
+#endif
+extern void THEMING_Uninitialize(void);
+extern LRESULT THEMING_CallOriginalClass(HWND, UINT, WPARAM, LPARAM);
+
+#ifdef __REACTOS__
+/* Items of newer Wine headers/uxtheme that the ReactOS PSDK headers and uxtheme.dll do not have */
+#define OpenThemeDataForDpi(hwnd, cls, dpi) OpenThemeData((hwnd), (cls))
+HDPA WINAPI DPA_Clone(const HDPA hdpa, HDPA hdpaNew);
+#ifndef LVM_GETNEXTITEMINDEX
+typedef struct tagLVITEMINDEX
+{
+    int iItem;
+    int iGroup;
+} LVITEMINDEX, *PLVITEMINDEX;
+#define LVM_GETNEXTITEMINDEX (LVM_FIRST + 211)
+#endif
+#ifndef TVN_ITEMCHANGINGW
+typedef struct tagNMTVITEMCHANGE
+{
+    NMHDR hdr;
+    UINT uChanged;
+    HTREEITEM hItem;
+    UINT uStateNew;
+    UINT uStateOld;
+    LPARAM lParam;
+} NMTVITEMCHANGE;
+#define TVN_ITEMCHANGINGA (TVN_FIRST - 16)
+#define TVN_ITEMCHANGINGW (TVN_FIRST - 17)
+#define TVN_ITEMCHANGEDA  (TVN_FIRST - 18)
+#define TVN_ITEMCHANGEDW  (TVN_FIRST - 19)
+#endif
 #define IDI_SHIELD  32518
 #define wcsnicmp _wcsnicmp
 #define GetDpiForWindow(PVOID) 96
