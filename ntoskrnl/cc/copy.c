@@ -483,9 +483,9 @@ CcpCheckInvalidUserBuffer(PEXCEPTION_POINTERS Except, PVOID Buffer, ULONG Length
 /*
  * @implemented
  */
+static
 BOOLEAN
-NTAPI
-CcCopyRead (
+CcpCopyRead (
     IN PFILE_OBJECT FileObject,
     IN PLARGE_INTEGER FileOffset,
     IN ULONG Length,
@@ -587,10 +587,45 @@ CcCopyRead (
 
 /*
  * @implemented
+ *
+ * Keeps the map alive through a file object without a private cache map, as CcCopyWrite does.
  */
 BOOLEAN
 NTAPI
-CcCopyWrite (
+CcCopyRead (
+    IN PFILE_OBJECT FileObject,
+    IN PLARGE_INTEGER FileOffset,
+    IN ULONG Length,
+    IN BOOLEAN Wait,
+    OUT PVOID Buffer,
+    OUT PIO_STATUS_BLOCK IoStatus)
+{
+    PROS_SHARED_CACHE_MAP Referenced = NULL;
+    BOOLEAN Result = FALSE;
+
+    if (!FileObject->PrivateCacheMap)
+        Referenced = CcRosReferenceSharedCacheMap(FileObject->SectionObjectPointer);
+
+    _SEH2_TRY
+    {
+        Result = CcpCopyRead(FileObject, FileOffset, Length, Wait, Buffer, IoStatus);
+    }
+    _SEH2_FINALLY
+    {
+        if (Referenced)
+            CcRosDereferenceSharedCacheMap(Referenced);
+    }
+    _SEH2_END;
+
+    return Result;
+}
+
+/*
+ * @implemented
+ */
+static
+BOOLEAN
+CcpCopyWrite (
     IN PFILE_OBJECT FileObject,
     IN PLARGE_INTEGER FileOffset,
     IN ULONG Length,
@@ -672,6 +707,45 @@ CcCopyWrite (
         CcFlushCache(FileObject->SectionObjectPointer, FileOffset, Length, NULL);
 
     return TRUE;
+}
+
+/*
+ * @implemented
+ *
+ * A file system may copy through a file object that holds no private cache map (a cut zeroing the tail of
+ * the old last page, say) while a map nobody has open is still alive: the lazy writer deletes such a map,
+ * with none of the file system's locks, once it wrote its dirty data.  Deleting it takes every view off the
+ * lists under the views the copy holds (a VACB the copy then marks dirty is no longer on the LRU list:
+ * bugcheck 0x139, corrupt list entry).  Such a copy keeps the map alive itself, as CcSetFileSizes and
+ * CcZeroData do; a file object with a private cache map has that already (its open count), and pays nothing.
+ */
+BOOLEAN
+NTAPI
+CcCopyWrite (
+    IN PFILE_OBJECT FileObject,
+    IN PLARGE_INTEGER FileOffset,
+    IN ULONG Length,
+    IN BOOLEAN Wait,
+    IN PVOID Buffer)
+{
+    PROS_SHARED_CACHE_MAP Referenced = NULL;
+    BOOLEAN Result = FALSE;
+
+    if (!FileObject->PrivateCacheMap)
+        Referenced = CcRosReferenceSharedCacheMap(FileObject->SectionObjectPointer);
+
+    _SEH2_TRY
+    {
+        Result = CcpCopyWrite(FileObject, FileOffset, Length, Wait, Buffer);
+    }
+    _SEH2_FINALLY
+    {
+        if (Referenced)
+            CcRosDereferenceSharedCacheMap(Referenced);
+    }
+    _SEH2_END;
+
+    return Result;
 }
 
 /*
