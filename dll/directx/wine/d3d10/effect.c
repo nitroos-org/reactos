@@ -331,6 +331,7 @@ static void pres_not(float **args, unsigned int n, const struct preshader_instr 
 
     for (i = 0; i < instr->comp_count; ++i)
     {
+        /* This is logically wrong, but it's what native does (see tests). */
         int v = ~arg1[0];
         retval[i] = *(float *)&v;
     }
@@ -655,6 +656,7 @@ static void pres_or(float **args, unsigned int n, const struct preshader_instr *
 
     for (i = 0; i < instr->comp_count; ++i)
     {
+        /* This is logically wrong, but it's what native does (see tests). */
         unsigned int v = arg1[0] | arg2[0];
         retval[i] = *(float *)&v;
     }
@@ -940,8 +942,13 @@ static HRESULT d3d10_effect_preshader_eval(struct d3d10_effect_preshader *p)
     for (i = 0; i < p->vars_count; ++i)
     {
         struct d3d10_ctab_var *v = &p->vars[i];
-        memcpy(dst + v->offset, v->v->buffer->u.buffer.local_buffer + v->v->buffer_offset,
-                v->length * sizeof(*dst));
+        size_t size;
+
+        /* Constant table variables are allocated at register granularity.
+           Corresponding constant buffer variables does not share same alignment,
+           overall buffer size alignment to 16 bytes also does not help. */
+        size = min(v->length * sizeof(*dst), v->v->type->size_unpacked);
+        memcpy(dst + v->offset, v->v->buffer->u.buffer.local_buffer + v->v->buffer_offset, size);
     }
 
     instr_count = *ip++;
@@ -2426,7 +2433,7 @@ static HRESULT parse_fx10_annotations(const char *data, size_t data_size, const 
             return hr;
     }
 
-    return hr;
+    return S_OK;
 }
 
 static HRESULT parse_fx10_anonymous_shader(struct d3d10_effect *e, D3D_SHADER_VARIABLE_TYPE basetype,
@@ -9097,6 +9104,8 @@ static HRESULT STDMETHODCALLTYPE d3d10_effect_blend_variable_GetBackingStore(ID3
     if (!(v = d3d10_get_state_variable(v, index, &v->effect->blend_states)))
         return E_FAIL;
 
+    d3d10_effect_update_dependent_props(&v->u.state.dependencies, &v->u.state.desc);
+
     *desc = v->u.state.desc.blend;
 
     return S_OK;
@@ -9577,6 +9586,8 @@ static HRESULT STDMETHODCALLTYPE d3d10_effect_rasterizer_variable_GetBackingStor
     if (!(v = d3d10_get_state_variable(v, index, &v->effect->rs_states)))
         return E_FAIL;
 
+    d3d10_effect_update_dependent_props(&v->u.state.dependencies, &v->u.state.desc);
+
     *desc = v->u.state.desc.rasterizer;
 
     return S_OK;
@@ -9815,6 +9826,8 @@ static HRESULT STDMETHODCALLTYPE d3d10_effect_sampler_variable_GetBackingStore(I
 
     if (!(v = d3d10_get_state_variable(v, index, &v->effect->samplers)))
         return E_FAIL;
+
+    d3d10_effect_update_dependent_props(&v->u.state.dependencies, &v->u.state.desc);
 
     *desc = v->u.state.desc.sampler.desc;
 

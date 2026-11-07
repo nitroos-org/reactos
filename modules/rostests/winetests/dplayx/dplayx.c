@@ -848,7 +848,7 @@ static HRESULT createPlayerAsyncWait( CreatePlayerParam *param, DWORD timeout )
     return hr;
 }
 
-#include "pshpack1.h"
+#pragma pack(push,1)
 
 typedef struct
 {
@@ -1018,7 +1018,7 @@ typedef struct
     DWORD dataOffset;
 } GroupDataChanged;
 
-#include "poppack.h"
+#pragma pack(pop)
 
 #define bindUdp( port ) bindUdp_( __LINE__, port )
 static SOCKET bindUdp_( int line, unsigned short port )
@@ -1264,14 +1264,14 @@ static void checkGameMessage_( int line, GameMessage *message, DPID expectedFrom
 static unsigned short receiveEnumSessionsRequest_( int line, SOCKET sock, const GUID *expectedAppGuid,
                                                    const WCHAR *expectedPassword, DWORD expectedFlags )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
         EnumSessionsRequest request;
         WCHAR password[ 256 ];
     } request;
-#include "poppack.h"
+#pragma pack(pop)
     DWORD expectedPasswordSize;
     unsigned short port;
     DWORD expectedSize;
@@ -1309,7 +1309,7 @@ static unsigned short receiveEnumSessionsRequest_( int line, SOCKET sock, const 
 #define sendEnumSessionsReply( sock, port, dpsd ) sendEnumSessionsReply_( __LINE__, sock, port, dpsd )
 static void sendEnumSessionsReply_( int line, SOCKET sock, unsigned short port, const DPSESSIONDESC2 *dpsd )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
@@ -1338,7 +1338,7 @@ static void sendEnumSessionsReply_( int line, SOCKET sock, unsigned short port, 
             .nameOffset = sizeof( reply.reply ),
         },
     };
-#include "poppack.h"
+#pragma pack(pop)
     DWORD passwordSize;
     int wsResult;
     DWORD size;
@@ -1358,13 +1358,13 @@ static void sendEnumSessionsReply_( int line, SOCKET sock, unsigned short port, 
 #define receiveRequestPlayerId( sock, expectedFlags ) receiveRequestPlayerId_( __LINE__, sock, expectedFlags )
 static unsigned short receiveRequestPlayerId_( int line, SOCKET sock, DWORD expectedFlags )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
         RequestPlayerId request;
     } request;
-#include "poppack.h"
+#pragma pack(pop)
     unsigned short port;
     int wsResult;
 
@@ -1381,7 +1381,7 @@ static unsigned short receiveRequestPlayerId_( int line, SOCKET sock, DWORD expe
 #define sendRequestPlayerReply( sock, port, id, result ) sendRequestPlayerReply_( __LINE__, sock, port, id, result )
 static void sendRequestPlayerReply_( int line, SOCKET sock, unsigned short port, DPID id, HRESULT result )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
@@ -1409,7 +1409,7 @@ static void sendRequestPlayerReply_( int line, SOCKET sock, unsigned short port,
             .result = result,
         },
     };
-#include "poppack.h"
+#pragma pack(pop)
     int wsResult;
 
     wsResult = send( sock, (char *) &reply, sizeof( reply ), 0 );
@@ -1422,13 +1422,13 @@ static unsigned short receiveAddForwardRequest_( int line, SOCKET sock, DPID exp
                                                  const WCHAR *expectedPassword, DWORD expectedTickCount,
                                                  unsigned short *udpPort )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
         AddForwardRequest request;
     } request;
-#include "poppack.h"
+#pragma pack(pop)
     DWORD expectedPasswordSize;
     WCHAR password[ 256 ];
     unsigned short port;
@@ -1477,7 +1477,7 @@ static void sendSuperEnumPlayersReply_( int line, SOCKET sock, unsigned short tc
 {
 #define SHORT_NAME L"short name"
 #define LONG_NAME L"long name"
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
@@ -1688,7 +1688,7 @@ static void sendSuperEnumPlayersReply_( int line, SOCKET sock, unsigned short tc
             .playerIds = { 0xd00de, },
         },
     };
-#include "poppack.h"
+#pragma pack(pop)
 #undef LONG_NAME
 #undef SHORT_NAME
     int wsResult;
@@ -1705,7 +1705,7 @@ static void sendSuperEnumPlayersReply_( int line, SOCKET sock, unsigned short tc
 #define sendAddForwardReply( sock, port, result ) sendAddForwardReply_( __LINE__, sock, port, result )
 static void sendAddForwardReply_( int line, SOCKET sock, unsigned short port, HRESULT result )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
@@ -1732,7 +1732,7 @@ static void sendAddForwardReply_( int line, SOCKET sock, unsigned short port, HR
             .result = result,
         },
     };
-#include "poppack.h"
+#pragma pack(pop)
     int wsResult;
 
     wsResult = send( sock, (char *) &reply, sizeof( reply ), 0 );
@@ -1742,7 +1742,7 @@ static void sendAddForwardReply_( int line, SOCKET sock, unsigned short port, HR
 #define sendAddForward( sock, port, tcpPort, udpPort ) sendAddForward_( __LINE__, sock, port, tcpPort, udpPort )
 static void sendAddForward_( int line, SOCKET sock, unsigned short port, unsigned short tcpPort, unsigned short udpPort )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
@@ -1800,7 +1800,7 @@ static void sendAddForward_( int line, SOCKET sock, unsigned short port, unsigne
             },
         },
     };
-#include "poppack.h"
+#pragma pack(pop)
 
     int wsResult;
 
@@ -1811,13 +1811,13 @@ static void sendAddForward_( int line, SOCKET sock, unsigned short port, unsigne
 #define receiveAddForwardAck( sock, expectedPlayerId ) receiveAddForwardAck_( __LINE__, sock, expectedPlayerId )
 static unsigned short receiveAddForwardAck_( int line, SOCKET sock, DPID expectedPlayerId )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
         AddForwardAck request;
     } request;
-#include "poppack.h"
+#pragma pack(pop)
     unsigned short port;
     int wsResult;
 
@@ -1838,13 +1838,13 @@ static unsigned short receiveCreatePlayer_( int line, SOCKET sock, DPID expected
                                             const WCHAR *expectedShortName, const WCHAR *expectedLongName,
                                             void *expectedPlayerData, DWORD expectedPlayerDataSize )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
         CreatePlayer request;
     } request;
-#include "poppack.h"
+#pragma pack(pop)
     DWORD expectedShortNameSize;
     DWORD expectedLongNameSize;
     WCHAR shortName[ 256 ];
@@ -1927,7 +1927,7 @@ static unsigned short receiveCreatePlayer_( int line, SOCKET sock, DPID expected
 static void sendCreatePlayer_( int line, SOCKET sock, unsigned short tcpPort, unsigned short udpPort,
                                const WCHAR *shortName, const WCHAR *longName, void *playerData, DWORD playerDataSize )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
@@ -1973,7 +1973,7 @@ static void sendCreatePlayer_( int line, SOCKET sock, unsigned short tcpPort, un
             },
         },
     };
-#include "poppack.h"
+#pragma pack(pop)
     SpData spData = {
         .tcpAddr.sin_family = AF_INET,
         .tcpAddr.sin_port = htons( tcpPort ),
@@ -2031,14 +2031,14 @@ static void sendCreatePlayer_( int line, SOCKET sock, unsigned short tcpPort, un
 static unsigned short receiveGuaranteedGameMessage_( int line, SOCKET sock, DPID expectedFromId, DPID expectedToId,
                                                      void *expectedData, DWORD expectedDataSize )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
         GameMessage request;
         BYTE data[ 256 ];
     } request;
-#include "poppack.h"
+#pragma pack(pop)
     unsigned short port;
     int wsResult;
 
@@ -2059,13 +2059,13 @@ static unsigned short receiveGuaranteedGameMessage_( int line, SOCKET sock, DPID
 static void receiveGameMessage_( int line, SOCKET sock, DPID expectedFromId, DPID expectedToId, void *expectedData,
                                  DWORD expectedDataSize )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         GameMessage request;
         BYTE data[ 256 ];
     } request;
-#include "poppack.h"
+#pragma pack(pop)
     int wsResult;
 
     DWORD expectedSize = sizeof( request.request ) + expectedDataSize;
@@ -2082,7 +2082,7 @@ static void receiveGameMessage_( int line, SOCKET sock, DPID expectedFromId, DPI
 static void sendGuaranteedGameMessage_( int line, SOCKET sock, unsigned short port, DPID fromId, DPID toId, void *data,
                                         DWORD dataSize )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
@@ -2104,7 +2104,7 @@ static void sendGuaranteedGameMessage_( int line, SOCKET sock, unsigned short po
             .toId = toId,
         }
     };
-#include "poppack.h"
+#pragma pack(pop)
     int wsResult;
 
     wsResult = send( sock, (char *) &request, sizeof( request ), 0 );
@@ -2118,7 +2118,7 @@ static void sendGuaranteedGameMessage_( int line, SOCKET sock, unsigned short po
         sendGameMessage_( __LINE__, sock, fromId, toId, data, dataSize )
 static void sendGameMessage_( int line, SOCKET sock, DPID fromId, DPID toId, void *data, DWORD dataSize )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         GameMessage request;
@@ -2131,7 +2131,7 @@ static void sendGameMessage_( int line, SOCKET sock, DPID fromId, DPID toId, voi
             .toId = toId,
         }
     };
-#include "poppack.h"
+#pragma pack(pop)
     int wsResult;
     DWORD size;
 
@@ -2147,7 +2147,7 @@ static void sendGameMessage_( int line, SOCKET sock, DPID fromId, DPID toId, voi
         sendPing_( __LINE__, sock, port, fromId, tickCount )
 static void sendPing_( int line, SOCKET sock, unsigned short port, DPID fromId, DWORD tickCount )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
@@ -2175,7 +2175,7 @@ static void sendPing_( int line, SOCKET sock, unsigned short port, DPID fromId, 
             .tickCount = tickCount,
         }
     };
-#include "poppack.h"
+#pragma pack(pop)
     int wsResult;
 
     wsResult = send( sock, (char *) &request, sizeof( request ), 0 );
@@ -2186,13 +2186,13 @@ static void sendPing_( int line, SOCKET sock, unsigned short port, DPID fromId, 
         receivePingReply_( __LINE__, sock, expectedFromId, expectedTickCount )
 static unsigned short receivePingReply_( int line, SOCKET sock, DPID expectedFromId, DWORD expectedTickCount )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
         Ping request;
     } request;
-#include "poppack.h"
+#pragma pack(pop)
     unsigned short port;
     int wsResult;
 
@@ -2212,13 +2212,13 @@ static unsigned short receivePingReply_( int line, SOCKET sock, DPID expectedFro
         receiveAddPlayerToGroup_( __LINE__, sock, expectedPlayerId, expectedGroupId )
 static unsigned short receiveAddPlayerToGroup_( int line, SOCKET sock, DPID expectedPlayerId, DPID expectedGroupId )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
         AddPlayerToGroup request;
     } request;
-#include "poppack.h"
+#pragma pack(pop)
     unsigned short port;
     int wsResult;
 
@@ -2243,7 +2243,7 @@ static unsigned short receiveAddPlayerToGroup_( int line, SOCKET sock, DPID expe
         sendGroupDataChanged_( __LINE__, sock, port, groupId, data, dataSize )
 static void sendGroupDataChanged_( int line, SOCKET sock, unsigned short port, DPID groupId, void *data, DWORD dataSize )
 {
-#include "pshpack1.h"
+#pragma pack(push,1)
     struct
     {
         SpHeader spHeader;
@@ -2274,7 +2274,7 @@ static void sendGroupDataChanged_( int line, SOCKET sock, unsigned short port, D
             .dataOffset = sizeof( request.request ),
         },
     };
-#include "poppack.h"
+#pragma pack(pop)
     int wsResult;
     int size;
 
