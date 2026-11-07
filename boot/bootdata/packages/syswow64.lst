@@ -611,6 +611,7 @@ SysWOW64/kernel.appcore.dll
 @0x600 SysWOW64/msvcp_win.dll
 @0x601 SysWOW64/dcomp.dll
 @0x601 SysWOW64/bcp47langs.dll
+@0x601 SysWOW64/twinapi.appcore.dll
 
 # The Windows 10 system ICU (icu.dll and the icuuc/icuin forwarders); the 32-bit set shares the data file
 # %SystemRoot%\Globalization\ICU\icudtl.dat with the 64-bit one. The 32-bit Windows Terminal / .NET import icu.dll.

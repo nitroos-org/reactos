@@ -102,6 +102,7 @@ extern void func_FindNLSStringEx(void);
 extern void func_FindStringOrdinal(void);
 extern void func_FlushProcessWriteBuffers(void);
 extern void func_FLS(void);
+extern void func_FlsGetValue2(void);
 extern void func_ForcedRelocation(void);
 extern void func_FormatMessage(void);
 extern void func_FormatMessageInsert(void);
@@ -355,6 +356,7 @@ const struct test winetest_testlist[] =
     { "FindStringOrdinal",           func_FindStringOrdinal },
     { "FlushProcessWriteBuffers",     func_FlushProcessWriteBuffers },
     { "FLS",                         func_FLS },
+    { "FlsGetValue2",                 func_FlsGetValue2 },
     { "ForcedRelocation",            func_ForcedRelocation },
     { "FormatMessage",               func_FormatMessage },
     { "FormatMessageInsert",          func_FormatMessageInsert },

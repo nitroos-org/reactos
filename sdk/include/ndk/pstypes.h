@@ -1526,6 +1526,8 @@ typedef struct _ETHREAD
 #ifndef _WIN64
     volatile ULONG CycleTimeHigh;
 #endif
+    /* NtAlertThreadByThreadId / NtWaitForAlertByThreadId: one pending alert (auto-reset) */
+    KEVENT AlertByThreadIdEvent;
 #endif
 } ETHREAD;
 

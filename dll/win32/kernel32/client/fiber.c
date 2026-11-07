@@ -527,6 +527,29 @@ FlsGetValue(DWORD dwFlsIndex)
 
 
 /*
+ * FlsGetValue2: like FlsGetValue, but it does not write the last error on success
+ * (FlsGetValue clears it). Windows 11 and later export it; Office looks it up.
+ *
+ * @implemented
+ */
+PVOID
+WINAPI
+FlsGetValue2(DWORD dwFlsIndex)
+{
+    PRTL_FLS_DATA pFlsData;
+
+    pFlsData = NtCurrentTeb()->FlsData;
+    if (!dwFlsIndex || dwFlsIndex >= FLS_MAXIMUM_AVAILABLE || !pFlsData)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    return pFlsData->Data[dwFlsIndex];
+}
+
+
+/*
  * @implemented
  */
 BOOL

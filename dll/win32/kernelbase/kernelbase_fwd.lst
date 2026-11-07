@@ -181,6 +181,7 @@
 @ FlsAlloc
 @ FlsFree
 @ FlsGetValue
+@ FlsGetValue2
 @ FlsSetValue
 @ FlushConsoleInputBuffer
 @ FlushFileBuffers
