@@ -1426,6 +1426,20 @@ MmSetPageProtect(
 
 BOOLEAN
 NTAPI
+MmHoldPageTable(
+    _In_ struct _EPROCESS* Process,
+    _In_ PVOID Address
+);
+
+VOID
+NTAPI
+MmReleasePageTable(
+    _In_ struct _EPROCESS* Process,
+    _In_ PVOID Address
+);
+
+BOOLEAN
+NTAPI
 MmIsPagePresent(
     struct _EPROCESS* Process,
     PVOID Address
