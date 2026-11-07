@@ -34,6 +34,42 @@ static volatile LONG StopPressure;
 static ULONG Seed = 12345;
 static ULONG Fails, Printed;
 
+/* Per variant (and per kind of check) failure counts: only the first 40 failures are printed, the totals are not. */
+#define MAXTALLY 512
+static struct { CHAR Key[96]; ULONG Count; } Tally[MAXTALLY];
+static ULONG TallyUsed;
+static volatile LONG SeqFails;    /* the mixed sequence runs on several threads: counted separately */
+
+static VOID CountFail(PCSTR Variant, PCSTR What)
+{
+    CHAR Key[96];
+    ULONG i;
+    _snprintf(Key, sizeof(Key) - 1, "%s / %s", Variant, What);
+    Key[sizeof(Key) - 1] = 0;
+    for (i = 0; i < TallyUsed; i++)
+    {
+        if (!strcmp(Tally[i].Key, Key))
+        {
+            Tally[i].Count++;
+            return;
+        }
+    }
+    if (TallyUsed < MAXTALLY)
+    {
+        strcpy(Tally[TallyUsed].Key, Key);
+        Tally[TallyUsed++].Count = 1;
+    }
+}
+
+static VOID PrintTally(VOID)
+{
+    ULONG i;
+    for (i = 0; i < TallyUsed; i++)
+        trace("FSREGROW-VARIANT [%s] failures=%lu\n", Tally[i].Key, Tally[i].Count);
+    if (SeqFails)
+        trace("FSREGROW-VARIANT [sequence] failures=%ld\n", SeqFails);
+}
+
 static ULONG Rnd(ULONG Mod)
 {
     Seed = Seed * 1103515245 + 12345;
@@ -68,6 +104,7 @@ static DWORD WINAPI PressureThread(PVOID Arg)
 static VOID Report(PCSTR What, PCSTR Variant, ULONG Round, LONGLONG S0, LONGLONG S1, LONGLONG S2, LONGLONG Off, UCHAR Got)
 {
     Fails++;
+    CountFail(Variant, What);
     if (Printed++ < 40)
         ok(0, "%s [%s r%lu sizes %I64d->%I64d->%I64d]: byte at %I64d is 0x%02x, expected 0x00\n", What, Variant, Round, S0, S1, S2, Off, Got);
 }
@@ -89,6 +126,7 @@ static VOID CheckBuf(PCSTR What, PCSTR Variant, ULONG Round, LONGLONG S0, LONGLO
         if (Off < S1 && Buf[i] != OLD_BYTE)
         {
             Fails++;
+            CountFail(Variant, What);
             if (Printed++ < 40)
                 ok(0, "%s [%s r%lu]: surviving byte at %I64d is 0x%02x, expected 0x%02x\n", What, Variant, Round, Off, Buf[i], OLD_BYTE);
             Bad = TRUE;
@@ -458,6 +496,7 @@ static BOOL SVerify(SEQ *q, ULONG Size, PCSTR After, PCSTR Last)
             if (Got != q->Exp[i])
             {
                 Fails++;
+                InterlockedIncrement(&SeqFails);
                 if (Printed++ < 40)
                     ok(0, "[t%lu %s] after %s (history %s): byte %lu is 0x%02x, expected 0x%02x (%s, file size %lu)\n", q->Id,
                        Mode ? "unbuffered" : "cached", After, Last, i, Got, q->Exp[i], q->Exp[i] ? "data" : "zero", Size);
@@ -752,6 +791,7 @@ START_TEST(FsRegrow)
         WaitForSingleObject(Thr, 10000);
         CloseHandle(Thr);
     }
+    PrintTally();
     trace("FSREGROW: dir=%ls iter=%lu pressure=%lu failures=%lu\n", Dir, Iter, Pressure, Fails);
     RemoveDirectoryW(Dir);
 }
