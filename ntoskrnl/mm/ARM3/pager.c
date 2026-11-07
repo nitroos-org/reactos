@@ -107,7 +107,7 @@ static volatile ULONG MiPagerFreeRefusedBase;
 /* NitroPagerDebug bits that inject write failures (any build; test commands need the value non-zero anyway) */
 #define MI_PAGER_DEBUG_FAIL_SOME_WRITES 0x10
 #define MI_PAGER_DEBUG_FAIL_ALL_WRITES  0x20
-/* Test of the exhaustion check: the trimmer frees nothing and the no-progress window is 15 s, not 60 s */
+/* Test of the exhaustion check: the trimmer frees nothing, starved means below the low-water mark, the window is 15 s */
 #define MI_PAGER_DEBUG_TRIM_NOTHING     0x40
 
 /* Writer batch: pages taken per PFN lock hold */
@@ -1445,8 +1445,15 @@ MiPagerBalancerPassDone(
     ULONGLONG Now = KeQueryInterruptTime(), Window;
     ULONG_PTR WriterState;
     LARGE_INTEGER Delay;
+    PFN_NUMBER Starved;
 
-    if ((Usable >= MI_PAGER_STARVED_PAGES) || (Freed != 0) || (Usable > UsableBefore) || MiPagerShutdown)
+    /*
+     * Test knob 0x40: starved below the low-water mark instead. At flag 1 the commit ceiling
+     * (RAM-bound until P4) keeps private memory from exhausting usable pages by itself, so
+     * the test needs the higher mark to reach the check.
+     */
+    Starved = (MiNitroPagerDebug & MI_PAGER_DEBUG_TRIM_NOTHING) ? MiLowWaterPages : MI_PAGER_STARVED_PAGES;
+    if ((Usable >= Starved) || (Freed != 0) || (Usable > UsableBefore) || MiPagerShutdown)
     {
         NoProgressSince = 0;
         return;
