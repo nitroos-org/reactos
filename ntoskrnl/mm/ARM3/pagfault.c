@@ -750,7 +750,8 @@ MiUserFaultMustLeavePages(VOID)
     /* Without a paging file the pager frees nothing: the old test */
     if ((MiNitroPagerMode == 0) || (MmNumberOfPagingFiles == 0))
         return (MmAvailablePages < MI_DEMAND_ZERO_FAULT_RESERVE);
-    return (MiGetUsablePageCount() < MI_DEMAND_ZERO_FAULT_RESERVE + MI_PAGER_PAGING_RESERVE);
+    C_ASSERT(MI_DEMAND_ZERO_FAULT_RESERVE + MI_PAGER_PAGING_RESERVE == MI_PAGER_WAITABLE_FLOOR);
+    return (MiGetUsablePageCount() < MI_PAGER_WAITABLE_FLOOR);
 }
 
 static
@@ -1172,9 +1173,9 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
         Status = STATUS_INSUFFICIENT_RESOURCES;
     else
     {
-        InterlockedIncrement(&MiPagingIoInFlight);
+        MiPagingIoStart();
         Status = MiReadPageFile(Page, PageFileIndex, Slot + 1);
-        InterlockedDecrement(&MiPagingIoInFlight);
+        MiPagingIoDone();
     }
 
     /* Lock the PFN database again */

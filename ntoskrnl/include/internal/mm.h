@@ -555,6 +555,9 @@ typedef struct _MMPAGING_FILE
     BOOLEAN RetiredForGood;
     ULONGLONG FirstFailure;
     ULONGLONG RetiredAt;
+    /* NitroPager slot runs (F8): no run of NoRunOf slots or more was found when FreeSpace was NoRunFree */
+    ULONG NoRunOf;
+    PFN_NUMBER NoRunFree;
 }
 MMPAGING_FILE, *PMMPAGING_FILE;
 
@@ -815,6 +818,12 @@ MmInitPagingFile(VOID);
 BOOLEAN
 NTAPI
 MmIsFileObjectAPagingFile(PFILE_OBJECT FileObject);
+
+/* NitroPagerDebug 0x80 (test): this IRP/MDL allocation for paging-file I/O is to fail (pager.c) */
+BOOLEAN
+NTAPI
+MmPagerInjectPagingAllocationFailure(
+    _In_ PFILE_OBJECT FileObject);
 
 NTSTATUS
 NTAPI

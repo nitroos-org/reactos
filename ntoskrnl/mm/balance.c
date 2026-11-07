@@ -404,6 +404,20 @@ MmRequestPageMemoryConsumer(ULONG Consumer, BOOLEAN CanWait,
     }
 
     /*
+     * NitroPager: while paging I/O is in flight and usable pages are below the waitable floor,
+     * a request that may wait leaves the last pages to that I/O for a bounded moment
+     * (MiPagerPaceRequest; never for the balancer, MC_SYSTEM or the writer)
+     */
+    if ((MiNitroPagerMode != 0) &&
+        CanWait &&
+        (Consumer != MC_SYSTEM) &&
+        (MiPagingIoInFlight > 0) &&
+        (PsGetCurrentThreadId() != MiBalancerThreadId.UniqueThread))
+    {
+        MiPagerPaceRequest();
+    }
+
+    /*
      * Start reclaiming before the free list is empty: a pass trims clean cache views up to the
      * low-water mark (MiBalancerThread), which is cheap, instead of paging out user pages once
      * everything is gone. Asynchronous, the caller does not wait here.

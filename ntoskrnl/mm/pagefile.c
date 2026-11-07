@@ -1428,6 +1428,14 @@ EarlyQuit:
  * Callable at <= DISPATCH_LEVEL, also inside the PFN lock (slot lock = leaf).
  */
 static BOOLEAN MiPagerFileTakesSlots(_Inout_ PMMPAGING_FILE PagingFile);
+static BOOLEAN MiPagerRetiredFileDue(_In_ PMMPAGING_FILE PagingFile);
+
+/*
+ * F8: a run size that failed is not searched for again (a full bitmap scan under
+ * the slot lock, inside the writer's PFN lock hold) until this many more slots
+ * are free in that file than when it failed
+ */
+#define MI_PAGER_RUN_RETRY_FREE 64
 
 ULONG
 NTAPI
@@ -1453,9 +1461,25 @@ MiAllocatePageFileSlots(
                 continue;
             }
 
+            /* A run this long was not there lately (F8) */
+            if ((Run > 1) && (PagingFile->NoRunOf != 0) && (Run >= PagingFile->NoRunOf) &&
+                (PagingFile->FreeSpace < PagingFile->NoRunFree + MI_PAGER_RUN_RETRY_FREE))
+            {
+                continue;
+            }
+
             Offset = RtlFindClearBitsAndSet(PagingFile->Bitmap, Run, PagingFile->SlotHint);
             if (Offset == 0xFFFFFFFF)
+            {
+                if ((Run > 1) && ((PagingFile->NoRunOf == 0) || (Run <= PagingFile->NoRunOf)))
+                {
+                    PagingFile->NoRunOf = Run;
+                    PagingFile->NoRunFree = PagingFile->FreeSpace;
+                }
                 continue;
+            }
+            if ((PagingFile->NoRunOf != 0) && (Run >= PagingFile->NoRunOf))
+                PagingFile->NoRunOf = 0;
 
             /* Beyond the tags (cannot be: those bits stay set) or the PTE's lookup marker: not usable */
             if ((Offset == 0) ||
@@ -1514,8 +1538,16 @@ MiPagerFreeSlotCount(VOID)
     KeAcquireSpinLock(&MiPagingFileSlotLock, &OldIrql);
     for (i = 0; i < MAX_PAGING_FILES; i++)
     {
-        if ((MmPagingFile[i] != NULL) && (MmPagingFile[i]->SlotTags != NULL) && !MmPagingFile[i]->Retired)
+        /*
+         * A retired file due for its probe counts (N2): otherwise, with no modified page
+         * left to probe it with, slots stay "short", trimming stays clean-only and the
+         * file never comes back although the disk recovered
+         */
+        if ((MmPagingFile[i] != NULL) && (MmPagingFile[i]->SlotTags != NULL) &&
+            (!MmPagingFile[i]->Retired || MiPagerRetiredFileDue(MmPagingFile[i])))
+        {
             Count += MmPagingFile[i]->FreeSpace;
+        }
     }
     KeReleaseSpinLock(&MiPagingFileSlotLock, OldIrql);
     return Count;
@@ -1588,6 +1620,16 @@ MiPagerPagingFileWriteResult(
     return Retired;
 }
 
+/* Slot lock held: a file retired for its errors (not for good) whose probe is due */
+static
+BOOLEAN
+MiPagerRetiredFileDue(
+    _In_ PMMPAGING_FILE PagingFile)
+{
+    return PagingFile->Retired && !PagingFile->RetiredForGood &&
+           ((KeQueryInterruptTime() - PagingFile->RetiredAt) >= MI_PAGER_RETRY_RETIRED);
+}
+
 /* Slot lock held: a file retired for its errors (not for good) is tried again after a while */
 static
 BOOLEAN
@@ -1596,7 +1638,7 @@ MiPagerFileTakesSlots(
 {
     if (!PagingFile->Retired)
         return TRUE;
-    if (PagingFile->RetiredForGood || ((KeQueryInterruptTime() - PagingFile->RetiredAt) < MI_PAGER_RETRY_RETIRED))
+    if (!MiPagerRetiredFileDue(PagingFile))
         return FALSE;
 
     /* One more failure retires it again at once (the streak and its start stay) */

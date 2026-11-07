@@ -1222,8 +1222,8 @@ IoSynchronousPageWrite(IN PFILE_OBJECT FileObject,
     /* Get the Device Object */
     DeviceObject = IoGetRelatedDeviceObject(FileObject);
 
-    /* Allocate IRP */
-    Irp = IoAllocateIrp(DeviceObject->StackSize, FALSE);
+    /* Allocate IRP (NitroPagerDebug 0x80, test: every third one for a paging file fails) */
+    Irp = MmPagerInjectPagingAllocationFailure(FileObject) ? NULL : IoAllocateIrp(DeviceObject->StackSize, FALSE);
     if (!Irp)
     {
         /*
@@ -1278,8 +1278,8 @@ IoPageRead(IN PFILE_OBJECT FileObject,
     /* Get the Device Object */
     DeviceObject = IoGetRelatedDeviceObject(FileObject);
 
-    /* Allocate IRP */
-    Irp = IoAllocateIrp(DeviceObject->StackSize, FALSE);
+    /* Allocate IRP (NitroPagerDebug 0x80, test: every third one for a paging file fails) */
+    Irp = MmPagerInjectPagingAllocationFailure(FileObject) ? NULL : IoAllocateIrp(DeviceObject->StackSize, FALSE);
     /* If allocation failed, try to see whether we can use
      * the reserve IRP
      */
