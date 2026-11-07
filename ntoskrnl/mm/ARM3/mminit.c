@@ -2542,6 +2542,9 @@ MmArmInitSystem(IN ULONG Phase,
         /* Set the initial resident page count */
         MmResidentAvailablePages = MmAvailablePages - 32;
 
+        /* Limits of SetProcessWorkingSetSize */
+        MiInitializeWorkingSetLimits();
+
         /* Initialize large page structures on PAE/x64, and MmProcessList on x86 */
         MiInitializeLargePageSupport();
 
