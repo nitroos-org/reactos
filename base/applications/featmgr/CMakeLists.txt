@@ -32,6 +32,9 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/gl-sw-pack.ini
             DESTINATION reactos/Featmgr/Catalog FOR all)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/lavapipe-pack.ini
             DESTINATION reactos/Featmgr/Catalog FOR all)
+# Optional AAC-LC decoder add-on (hosted payload: the DLLs are not in the image; dll/3rdparty/nitro-aacdec)
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/aac-lc.ini
+            DESTINATION reactos/Featmgr/Catalog FOR all)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/catalog/winfsp.ini
             DESTINATION reactos/Featmgr/Catalog FOR all)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/payload/gl-sw-pack/glsw-pack.txt

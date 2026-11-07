@@ -354,6 +354,16 @@ static BOOL LoadManifestEx(LPCWSTR path, FM_FEATURE *f, BOOL fast)
     if (!f->Id[0]) { IniClose(&ini); return FALSE; }
     IniGet(&ini, L"Feature", L"Name", f->Id, f->Name, FM_MAX_NAME);
     IniGet(&ini, L"Feature", L"Description", L"", f->Description, FM_MAX_DESC);
+    IniGet(&ini, L"Feature", L"Notice", L"", f->Notice, ARRAYSIZE(f->Notice));
+    {   /* "\n" (backslash, n) => line break */
+        WCHAR *r = f->Notice, *w = f->Notice;
+        for (; *r; r++)
+        {
+            if (r[0] == L'\\' && r[1] == L'n') { *w++ = L'\n'; r++; }
+            else *w++ = *r;
+        }
+        *w = L'\0';
+    }
     IniGet(&ini, L"Feature", L"Version", L"1.0.0", f->Version, FM_MAX_VER);
     IniGet(&ini, L"Feature", L"Dependencies", L"", f->Dependencies, FM_MAX_DEPS);
     IniGet(&ini, L"Feature", L"Group", L"", f->Group, ARRAYSIZE(f->Group));
@@ -981,8 +991,40 @@ static HRESULT ApplyPayloadFile(LPCWSTR payloadDir, LPCWSTR srcRel, LPCWSTR dest
     return S_OK;
 }
 
+/* hex text (two digits per byte, no separators) -> bytes; returns the byte count or -1 */
+static int HexToBytes(LPCWSTR hex, BYTE *out, int cap)
+{
+    int n = 0;
+    if (!hex) return 0;
+    while (hex[0] && hex[1])
+    {
+        int v = 0, i;
+        for (i = 0; i < 2; i++)
+        {
+            WCHAR c = hex[i];
+            int d = (c >= L'0' && c <= L'9') ? c - L'0' : (c >= L'a' && c <= L'f') ? c - L'a' + 10 :
+                    (c >= L'A' && c <= L'F') ? c - L'A' + 10 : -1;
+            if (d < 0) return -1;
+            v = v * 16 + d;
+        }
+        if (n >= cap) return -1;
+        out[n++] = (BYTE)v;
+        hex += 2;
+    }
+    return hex[0] ? -1 : n;
+}
+
+static void BytesToHex(const BYTE *b, DWORD cb, LPWSTR out)
+{
+    static const WCHAR digits[] = L"0123456789abcdef";
+    DWORD i;
+    for (i = 0; i < cb; i++) { out[i * 2] = digits[b[i] >> 4]; out[i * 2 + 1] = digits[b[i] & 15]; }
+    out[cb * 2] = L'\0';
+}
+
 /* Set one registry value, recording undo info. Value spec: HIVE|subkey|name|type|data
- * name "@" => default value. type REG_SZ or REG_DWORD. */
+ * name "@" => default value. type REG_SZ, REG_DWORD or REG_BINARY (data = hex digits, up to 512 bytes).
+ * type KEY (name empty, no data) only creates the key; when it did not exist, disable removes it again (if empty). */
 static HRESULT ApplyRegAction(LPCWSTR spec, HKEY state, FILE *log)
 {
     WCHAR buf[1024];
@@ -1018,16 +1060,36 @@ static HRESULT ApplyRegAction(LPCWSTR spec, HKEY state, FILE *log)
     if (!hive) { LOGF(log, L"  bad hive: %s\n", tok[0]); return E_INVALIDARG; }
     valName = (!wcscmp(tok[2], L"@")) ? L"" : tok[2];
 
-    if (RegCreateKeyExW(hive, tok[1], 0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &k, NULL)
-        != ERROR_SUCCESS)
     {
-        LOGF(log, L"  ERROR: open/create key %s failed\n", tok[1]);
-        return E_FAIL;
+        DWORD disp = 0;
+        if (RegCreateKeyExW(hive, tok[1], 0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &k, &disp)
+            != ERROR_SUCCESS)
+        {
+            LOGF(log, L"  ERROR: open/create key %s failed\n", tok[1]);
+            return E_FAIL;
+        }
+        if (!_wcsicmp(tok[3], L"KEY"))
+        {
+            if (disp == REG_CREATED_NEW_KEY)
+            {
+                StringCchPrintfW(undo, 1200, L"K|%s|%s", tok[0], tok[1]);
+                MultiSzAppend(state, L"RegUndo", undo);
+            }
+            LOGF(log, L"  reg: key %s\\%s (%s)\n", tok[0], tok[1], disp == REG_CREATED_NEW_KEY ? L"created" : L"existed");
+            RegCloseKey(k);
+            return S_OK;
+        }
     }
 
     /* record undo: existed? save prior; else mark for delete */
     r = RegQueryValueExW(k, valName, NULL, &prevType, (LPBYTE)prev, &prevCb);
-    if (r == ERROR_SUCCESS && prevType == REG_SZ)
+    if (r == ERROR_SUCCESS && prevType == REG_BINARY && prevCb <= 512)
+    {
+        WCHAR hex[1100];
+        BytesToHex((const BYTE *)prev, prevCb, hex);
+        StringCchPrintfW(undo, 1200, L"R|%s|%s|%s|REG_BINARY|%s", tok[0], tok[1], tok[2], hex);
+    }
+    else if (r == ERROR_SUCCESS && prevType == REG_SZ)
         StringCchPrintfW(undo, 1200, L"R|%s|%s|%s|REG_SZ|%s", tok[0], tok[1], tok[2], prev);
     else if (r == ERROR_SUCCESS && prevType == REG_DWORD)
         StringCchPrintfW(undo, 1200, L"R|%s|%s|%s|REG_DWORD|%lu", tok[0], tok[1], tok[2], *(DWORD*)prev);
@@ -1040,6 +1102,18 @@ static HRESULT ApplyRegAction(LPCWSTR spec, HKEY state, FILE *log)
     {
         DWORD d = (DWORD)_wtoi(tok[4] ? tok[4] : L"0");
         RegSetValueExW(k, valName, 0, REG_DWORD, (const BYTE *)&d, sizeof(d));
+    }
+    else if (!_wcsicmp(tok[3], L"REG_BINARY"))
+    {
+        BYTE bin[512];
+        int n = HexToBytes(tok[4], bin, sizeof(bin));
+        if (n < 0)
+        {
+            LOGF(log, L"  bad REG_BINARY data in: %s\n", spec);
+            RegCloseKey(k);
+            return E_INVALIDARG;
+        }
+        RegSetValueExW(k, valName, 0, REG_BINARY, bin, (DWORD)n);
     }
     else
     {
@@ -1076,6 +1150,23 @@ static void RevertRegUndo(LPCWSTR line, FILE *log)
     if (ti < 3) return;
     hive = HiveFromName(tok[1]);
     if (!hive) return;
+    if (!wcscmp(tok[0], L"K"))
+    {
+        /* a key this feature created: remove it when it is empty (RegDeleteKey refuses a key with subkeys; a value
+         * someone else added afterwards keeps the key too) */
+        if (RegOpenKeyExW(hive, tok[2], 0, KEY_READ, &k) == ERROR_SUCCESS)
+        {
+            DWORD nsub = 0, nval = 0;
+            RegQueryInfoKeyW(k, NULL, NULL, NULL, &nsub, NULL, NULL, &nval, NULL, NULL, NULL, NULL);
+            RegCloseKey(k);
+            if (!nsub && !nval)
+            {
+                LOGF(log, L"  reg-undo: delete key %s\\%s\n", tok[1], tok[2]);
+                RegDeleteKeyW(hive, tok[2]);
+            }
+        }
+        return;
+    }
     valName = (!wcscmp(tok[3] ? tok[3] : L"@", L"@")) ? L"" : tok[3];
 
     if (RegOpenKeyExW(hive, tok[2], 0, KEY_WRITE, &k) != ERROR_SUCCESS)
@@ -1093,6 +1184,12 @@ static void RevertRegUndo(LPCWSTR line, FILE *log)
         {
             DWORD d = (DWORD)_wtoi(tok[5]);
             RegSetValueExW(k, valName, 0, REG_DWORD, (const BYTE *)&d, sizeof(d));
+        }
+        else if (!_wcsicmp(tok[4], L"REG_BINARY"))
+        {
+            BYTE bin[512];
+            int n = HexToBytes(tok[5], bin, sizeof(bin));
+            if (n >= 0) RegSetValueExW(k, valName, 0, REG_BINARY, bin, (DWORD)n);
         }
         else
         {
@@ -3083,8 +3180,23 @@ static void RevertState(HKEY state, FILE *log)
     undo = MultiSzRead(state, L"RegUndo");
     if (undo)
     {
+        /* values first, then the keys this feature created, newest first (children before parents) */
         for (p = undo; *p; p += wcslen(p) + 1)
-            RevertRegUndo(p, log);
+            if (p[0] != L'K') RevertRegUndo(p, log);
+        {
+            WCHAR *last;
+            BOOL more = TRUE;
+            WCHAR *stop = NULL;
+            while (more)
+            {
+                last = NULL;
+                for (p = undo; *p && p != stop; p += wcslen(p) + 1)
+                    if (p[0] == L'K') last = p;
+                if (!last) break;
+                RevertRegUndo(last, log);
+                stop = last;
+            }
+        }
         HeapFree(GetProcessHeap(), 0, undo);
     }
 
