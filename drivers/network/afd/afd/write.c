@@ -967,6 +967,20 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
                                        Irp, 0 );
     }
 
+    /* A buffer that has a length but no address has no locked pages: the request names memory
+     * that does not exist, and nothing of it may be copied */
+    {
+        PAFD_MAPBUF LockedMap = (PAFD_MAPBUF)(SendReq->BufferArray + SendReq->BufferCount);
+
+        for( i = 0; i < SendReq->BufferCount; i++ ) {
+            if( SendReq->BufferArray[i].len != 0 && LockedMap[i].Mdl == NULL ) {
+                UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
+                return UnlockAndMaybeComplete( FCB, STATUS_ACCESS_VIOLATION,
+                                               Irp, 0 );
+            }
+        }
+    }
+
     AFD_DbgPrint(MID_TRACE,("Socket state %u\n", FCB->SharedData.State));
 
     if( FCB->SharedData.State != SOCKET_STATE_CONNECTED ) {
@@ -1047,23 +1061,51 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         }
     }
 
-    for ( i = 0; SpaceAvail > 0 && i < SendReq->BufferCount; i++ )
+    /* The caller's memory is read through the locked pages (what the refill of a queued send does too),
+     * not through the user address: another thread may unmap or free it while this one copies */
     {
-        BytesCopied = MIN(SendReq->BufferArray[i].len, SpaceAvail);
+        PAFD_MAPBUF CopyMap = (PAFD_MAPBUF)(SendReq->BufferArray + SendReq->BufferCount);
+        BOOLEAN MapFailed = FALSE;
 
-        AFD_DbgPrint(MID_TRACE,("Copying Buffer %u, %p:%u to %p\n",
-                                i,
-                                SendReq->BufferArray[i].buf,
-                                BytesCopied,
-                                FCB->Send.Window + FCB->Send.BytesUsed));
+        for ( i = 0; SpaceAvail > 0 && i < SendReq->BufferCount; i++ )
+        {
+            PVOID Mapped;
 
-        RtlCopyMemory(FCB->Send.Window + FCB->Send.BytesUsed,
-                      SendReq->BufferArray[i].buf,
-                      BytesCopied);
+            if (SendReq->BufferArray[i].len == 0 || CopyMap[i].Mdl == NULL)
+                continue;
 
-        TotalBytesCopied += BytesCopied;
-        SpaceAvail -= BytesCopied;
-        FCB->Send.BytesUsed += BytesCopied;
+            BytesCopied = MIN(SendReq->BufferArray[i].len, SpaceAvail);
+
+            AFD_DbgPrint(MID_TRACE,("Copying Buffer %u, %p:%u to %p\n",
+                                    i,
+                                    SendReq->BufferArray[i].buf,
+                                    BytesCopied,
+                                    FCB->Send.Window + FCB->Send.BytesUsed));
+
+            Mapped = MmMapLockedPagesSpecifyCache(CopyMap[i].Mdl, KernelMode, MmCached,
+                                                  NULL, FALSE, NormalPagePriority);
+            if (Mapped == NULL)
+            {
+                MapFailed = TRUE;
+                break;
+            }
+
+            RtlCopyMemory(FCB->Send.Window + FCB->Send.BytesUsed,
+                          Mapped,
+                          BytesCopied);
+            MmUnmapLockedPages(Mapped, CopyMap[i].Mdl);
+
+            TotalBytesCopied += BytesCopied;
+            SpaceAvail -= BytesCopied;
+            FCB->Send.BytesUsed += BytesCopied;
+        }
+
+        /* Out of resources before anything was taken: nothing is sent, nothing is queued */
+        if (MapFailed && TotalBytesCopied == 0)
+        {
+            UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
+            return UnlockAndMaybeComplete( FCB, STATUS_INSUFFICIENT_RESOURCES, Irp, 0 );
+        }
     }
 
     Irp->IoStatus.Information = TotalBytesCopied;

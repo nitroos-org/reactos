@@ -1701,6 +1701,13 @@ NTSTATUS DispTdiSetIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
     KIRQL OldIrql;
     IF_LIST_ITER(IF);
 
+    /* SystemBuffer is only as long as the caller said (NULL when it said 0) */
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(IP_SET_ADDRESS) ||
+        IpAddrChange == NULL) {
+        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+        return STATUS_INVALID_PARAMETER;
+    }
+
     TI_DbgPrint(MID_TRACE,("Setting IP Address for adapter %d\n",
 			   IpAddrChange->NteIndex));
 
@@ -1763,6 +1770,13 @@ NTSTATUS DispTdiDeleteIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
     PIP_INTERFACE Target = NULL;
     KIRQL OldIrql;
     IF_LIST_ITER(IF);
+
+    /* SystemBuffer is only as long as the caller said (NULL when it said 0); the index is a USHORT */
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(USHORT) ||
+        NteIndex == NULL) {
+        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+        return STATUS_INVALID_PARAMETER;
+    }
 
     /* As DispTdiSetIPAddress: the indexes are unique */
     TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);

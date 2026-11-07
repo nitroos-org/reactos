@@ -7968,6 +7968,15 @@ SamrChangePasswordUser(IN SAMPR_HANDLE UserHandle,
         }
     }
 
+    /*
+     * An account without a stored LM hash (NetUserAdd and the change path store none) cannot
+     * be checked against the LM half of the request, which a client always sends for an old
+     * password of up to 14 characters. Verify the NT hash alone then, and do not store an LM
+     * hash derived from a mismatching key.
+     */
+    if (LmPresent && StoredLmEmpty)
+        LmPresent = FALSE;
+
     /* Retrieve the fixed size user data */
     Length = sizeof(SAM_USER_FIXED_DATA);
     Status = SampGetObjectAttribute(UserObject,

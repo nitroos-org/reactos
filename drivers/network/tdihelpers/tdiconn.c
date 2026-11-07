@@ -115,19 +115,49 @@ PTRANSPORT_ADDRESS TaCopyTransportAddress( PTRANSPORT_ADDRESS OtherAddress ) {
  * AvailableLength is large enough to even hold the header we read the length
  * from. Returns NULL (handled by callers as a failure) on violation.
  */
+BOOLEAN TaTransportAddressFits( PTRANSPORT_ADDRESS Address,
+                                UINT AvailableLength ) {
+    UINT AddrLen, TypeLen;
+
+    /* Must at least cover TAAddressCount + AddressLength/AddressType before we
+     * trust Address[0].AddressLength computed by TaLengthOfTransportAddress. */
+    if (AvailableLength < sizeof(ULONG) + 2 * sizeof(USHORT))
+        return FALSE;
+
+    AddrLen = TaLengthOfTransportAddress( Address );
+    if (!AddrLen || AddrLen > AvailableLength)
+        return FALSE;
+
+    /* An address of a known type must hold all that type needs: TdiBuildConnectionInfo
+     * and the transport read the full by-type length however short the declared
+     * AddressLength is, which would run past the copy */
+    switch (Address->Address[0].AddressType) {
+    case TDI_ADDRESS_TYPE_IP:
+    case TDI_ADDRESS_TYPE_APPLETALK:
+    case TDI_ADDRESS_TYPE_NETBIOS:
+    case TDI_ADDRESS_TYPE_IPX:
+    case TDI_ADDRESS_TYPE_VNS:
+        TypeLen = TaLengthOfTransportAddressByType( Address->Address[0].AddressType );
+        if (TypeLen && AddrLen < TypeLen)
+            return FALSE;
+        break;
+    default:
+        /* Not an address type of ours: TdiBuildConnectionInfo refuses it */
+        break;
+    }
+
+    return TRUE;
+}
+
 PTRANSPORT_ADDRESS TaCopyTransportAddressBounded( PTRANSPORT_ADDRESS OtherAddress,
                                                   UINT AvailableLength ) {
     UINT AddrLen;
     PTRANSPORT_ADDRESS A;
 
-    /* Must at least cover TAAddressCount + AddressLength/AddressType before we
-     * trust Address[0].AddressLength computed by TaLengthOfTransportAddress. */
-    if (AvailableLength < sizeof(ULONG) + 2 * sizeof(USHORT))
+    if (!TaTransportAddressFits( OtherAddress, AvailableLength ))
         return NULL;
 
     AddrLen = TaLengthOfTransportAddress( OtherAddress );
-    if (!AddrLen || AddrLen > AvailableLength)
-        return NULL;
 
     A = ExAllocatePoolWithTag(NonPagedPool,
                               AddrLen,

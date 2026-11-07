@@ -1004,6 +1004,12 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if( IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(AFD_SUPER_ACCEPT_INFO) )
         return UnlockAndMaybeComplete( Fcb, STATUS_INVALID_PARAMETER, Irp, 0 );
 
+    /* AcceptEx works on a listening socket only: a socket that is not listening (not
+     * bound, bound, connected, closed) has no connections to hand out, and would pend a request
+     * that nothing completes. Windows answers WSAEINVAL. */
+    if( Fcb->SharedData.State != SOCKET_STATE_LISTENING )
+        return UnlockAndMaybeComplete( Fcb, STATUS_INVALID_PARAMETER, Irp, 0 );
+
     Fcb->EventSelectDisabled &= ~AFD_EVENT_ACCEPT;
 
     /* The output buffer holds the initial data, the local and the remote address area */

@@ -1709,15 +1709,25 @@ static ULONG WINAPI DocNodeObjectWithSite_Release(IObjectWithSite *iface)
 static HRESULT WINAPI DocNodeObjectWithSite_SetSite(IObjectWithSite *iface, IUnknown *pUnkSite)
 {
     HTMLDocumentNode *This = HTMLDocumentNode_from_IObjectWithSite(iface);
-    FIXME("(%p)->(%p)\n", This, pUnkSite);
-    return E_NOTIMPL;
+
+    TRACE("(%p)->(%p)\n", This, pUnkSite);
+
+    if(!This->doc_obj)
+        return E_UNEXPECTED;
+    return IObjectWithSite_SetSite(&This->doc_obj->IObjectWithSite_iface, pUnkSite);
 }
 
 static HRESULT WINAPI DocNodeObjectWithSite_GetSite(IObjectWithSite* iface, REFIID riid, PVOID *ppvSite)
 {
     HTMLDocumentNode *This = HTMLDocumentNode_from_IObjectWithSite(iface);
-    FIXME("(%p)->(%p)\n", This, ppvSite);
-    return E_NOTIMPL;
+
+    TRACE("(%p)->(%s %p)\n", This, debugstr_guid(riid), ppvSite);
+
+    if(!This->doc_obj) {
+        *ppvSite = NULL;
+        return E_UNEXPECTED;
+    }
+    return IObjectWithSite_GetSite(&This->doc_obj->IObjectWithSite_iface, riid, ppvSite);
 }
 
 static const IObjectWithSiteVtbl DocNodeObjectWithSiteVtbl = {
@@ -1754,15 +1764,30 @@ static ULONG WINAPI DocObjObjectWithSite_Release(IObjectWithSite *iface)
 static HRESULT WINAPI DocObjObjectWithSite_SetSite(IObjectWithSite *iface, IUnknown *pUnkSite)
 {
     HTMLDocumentObj *This = HTMLDocumentObj_from_IObjectWithSite(iface);
-    FIXME("(%p)->(%p)\n", This, pUnkSite);
-    return E_NOTIMPL;
+
+    TRACE("(%p)->(%p)\n", This, pUnkSite);
+
+    /* A script host (CreateObject("htmlfile") in VBScript) gives the object its site through this
+     * interface and fails the creation when it is refused. The site is only remembered. */
+    if(pUnkSite)
+        IUnknown_AddRef(pUnkSite);
+    if(This->obj_site)
+        IUnknown_Release(This->obj_site);
+    This->obj_site = pUnkSite;
+    return S_OK;
 }
 
 static HRESULT WINAPI DocObjObjectWithSite_GetSite(IObjectWithSite* iface, REFIID riid, PVOID *ppvSite)
 {
     HTMLDocumentObj *This = HTMLDocumentObj_from_IObjectWithSite(iface);
-    FIXME("(%p)->(%p)\n", This, ppvSite);
-    return E_NOTIMPL;
+
+    TRACE("(%p)->(%s %p)\n", This, debugstr_guid(riid), ppvSite);
+
+    if(!This->obj_site) {
+        *ppvSite = NULL;
+        return E_FAIL;
+    }
+    return IUnknown_QueryInterface(This->obj_site, riid, ppvSite);
 }
 
 static const IObjectWithSiteVtbl DocObjObjectWithSiteVtbl = {
@@ -3492,6 +3517,8 @@ static ULONG WINAPI HTMLDocumentObj_Release(IUnknown *iface)
             IAdviseSink_Release(This->view_sink);
         if(This->client)
             IOleObject_SetClientSite(&This->IOleObject_iface, NULL);
+        if(This->obj_site)
+            IUnknown_Release(This->obj_site);
         if(This->hostui)
             ICustomDoc_SetUIHandler(&This->ICustomDoc_iface, NULL);
         if(This->in_place_active)

@@ -131,6 +131,8 @@ void        LibTCPSetKeepAlive(PTCP_PCB pcb, BOOLEAN Set);
 void        LibTcpSetKeepAliveValues(PTCP_PCB pcb, u32_t KeepAliveTime, u32_t KeepAliveInterval);
 void        LibTCPGetSocketStatus(PTCP_PCB pcb, PULONG State);
 
+VOID        LibTCPInitQueueLimits(VOID);
+
 /* IP functions */
 void LibIPInsertPacket(void *ifarg, const void *const data, const u32_t size);
 void LibIPInitialize(void);
