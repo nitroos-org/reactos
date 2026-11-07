@@ -17,6 +17,7 @@ list(APPEND SOURCE
     shell32.c
     windows_storage.c
     winrt_packagemanager.c
+    winrt_composition.c
     winrt_profile.c
     winrt_ui.c
     zipfldr.c)

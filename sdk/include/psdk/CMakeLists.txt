@@ -208,7 +208,22 @@ list(APPEND SOURCE
     wincodec.idl
     wincodecsdk.idl
     windows.foundation.collections.idl
+    windows.devices.geolocation.idl
+    windows.devices.input.idl
     windows.foundation.idl
+    windows.foundation.numerics.idl
+    windows.graphics.directx.idl
+    windows.graphics.effects.idl
+    windows.storage.fileproperties.idl
+    windows.storage.idl
+    windows.storage.search.idl
+    windows.storage.streams.idl
+    windows.system.idl
+    windows.ui.composition.idl
+    windows.ui.composition.interop.idl
+    windows.ui.core.idl
+    windows.ui.idl
+    windows.ui.input.idl
     windowscontracts.idl
     winsxs.idl
     wmcodecdsp.idl
