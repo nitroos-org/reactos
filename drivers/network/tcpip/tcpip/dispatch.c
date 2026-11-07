@@ -1752,9 +1752,14 @@ NTSTATUS DispTdiSetIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
 
         IPAddInterfaceRoute( IF );
 
+        /* The answer is the buffer: NteIndex is the interface and Address its context (the index again).
+           Information is the number of bytes of the buffer that are valid, never a value: the I/O manager
+           copies that many bytes back to the caller's output buffer */
+        IpAddrChange->NteIndex = IF->Index;
         IpAddrChange->Address = IF->Index;
         Status = STATUS_SUCCESS;
-        Irp->IoStatus.Information = IF->Index;
+        Irp->IoStatus.Information = min(sizeof(IP_SET_ADDRESS),
+                                        IrpSp->Parameters.DeviceIoControl.OutputBufferLength);
         AddrChangeNotify();
 
         IPDereferenceInterface(Target);

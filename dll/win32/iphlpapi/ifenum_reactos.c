@@ -698,8 +698,9 @@ NTSTATUS addIPAddress( IPAddr Address, IPMask Mask, DWORD IfIndex,
   closeTcpFile( tcpFile );
 
   if( NT_SUCCESS(status) ) {
-      *NteContext = Iosb.Information;
-      *NteInstance = Data.NewAddress;
+      /* The driver answers in the buffer (the interface and its context), as many bytes as it filled */
+      *NteContext = Iosb.Information >= FIELD_OFFSET(IP_SET_DATA, NewAddress) ? Data.NteContext : IfIndex;
+      *NteInstance = Iosb.Information >= sizeof(Data.NteContext) + sizeof(Data.NewAddress) ? Data.NewAddress : IfIndex;
   }
 
   if (!NT_SUCCESS(status)) {
