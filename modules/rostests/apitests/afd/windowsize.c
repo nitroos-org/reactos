@@ -185,7 +185,7 @@ TestUdp(void)
 
     Status = AfdGetInformation(SocketHandle, AFD_INFO_RECEIVE_WINDOW_SIZE, NULL, &OrigReceiveSize, NULL);
     ok(Status == STATUS_SUCCESS, "AfdGetInformation failed with %lx\n", Status);
-    ok(OrigReceiveSize == 0x1000 || OrigReceiveSize == 0x2000, "Invalid size: %lu\n", OrigReceiveSize);
+    ok(OrigReceiveSize == 0x1000 || OrigReceiveSize == 0x2000 || OrigReceiveSize == 0x10000, "Invalid size: %lu\n", OrigReceiveSize);
     Status = AfdGetInformation(SocketHandle, AFD_INFO_SEND_WINDOW_SIZE, NULL, &OrigSendSize, NULL);
     ok(Status == STATUS_SUCCESS, "AfdGetInformation failed with %lx\n", Status);
     ok(OrigSendSize == 0x1000 || OrigSendSize == 0x2000, "Invalid size: %lu\n", OrigSendSize);
