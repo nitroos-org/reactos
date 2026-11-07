@@ -2855,6 +2855,7 @@ typedef struct _MI_PAGER_COUNTERS
     ULONG ReserveLowWater;
     ULONG BalancerWaits;
     ULONG BalancerTrimmed;
+    ULONG LegacyFreed;
 } MI_PAGER_COUNTERS;
 
 extern MI_PAGER_COUNTERS MiPagerCounters;
