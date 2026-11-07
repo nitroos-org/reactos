@@ -60,6 +60,14 @@ KSPIN_LOCK CcDeferredWriteSpinLock;
 LIST_ENTRY CcCleanSharedCacheMapList;
 
 /*
+ * Maps that CcRosDeleteFileCache is deleting (master lock): the map is already gone from its
+ * SectionObjectPointers (a file system that cuts or regrows the file meanwhile sees no cache map) but
+ * the dirty views are still being written and the file object is still held.  See
+ * CcRosIsDeleteFlushPending.
+ */
+static LIST_ENTRY CcDyingSharedCacheMapList;
+
+/*
  * Views of maps that were closed with dirty data and wait for the lazy writer (master lock).  Their
  * mappings are parked (CcRosParkViews), but each such file keeps its map, section, file object and the
  * file system's FCB until the lazy writer wrote it: past this many views a close writes its data itself,
@@ -315,6 +323,8 @@ CcRosDeleteFileCache (
     /* Make sure there is no trace anymore of this map */
     FileObject->SectionObjectPointer->SharedCacheMap = NULL;
     RemoveEntryList(&SharedCacheMap->SharedCacheMapLinks);
+    /* The map is gone for everybody else, but its dirty views are written below: stay visible to a cut */
+    InsertTailList(&CcDyingSharedCacheMapList, &SharedCacheMap->SharedCacheMapLinks);
     Discard = BooleanFlagOn(SharedCacheMap->Flags, SHARED_CACHE_MAP_DISCARD);
     Events = SharedCacheMap->UninitializeEvents;
     SharedCacheMap->UninitializeEvents = NULL;
@@ -376,6 +386,13 @@ CcRosDeleteFileCache (
 #else
         (void)RefCount;
 #endif
+    }
+
+    /* Written (or dropped): a cut no longer has anything to order itself against.  Before the file object goes. */
+    {
+        KIRQL DyingIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+        RemoveEntryList(&SharedCacheMap->SharedCacheMapLinks);
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, DyingIrql);
     }
 
     /* Release the references we own */
@@ -484,6 +501,36 @@ CcRosDeleteOrDeferFileCache(
 
     CcRosDeleteFileCache(SharedCacheMap->FileObject, SharedCacheMap, OldIrql);
     return TRUE;
+}
+
+/*
+ * Is CcRosDeleteFileCache still writing the dirty views of a map of this file, a map that is already gone
+ * from the SectionObjectPointers?  Its writes go through Mm without the file system's locks, so they can
+ * land after a cut of the file by a file system that sees no cache map, and after the file grew again.
+ */
+BOOLEAN
+CcRosIsDeleteFlushPending(
+    _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer)
+{
+    KIRQL OldIrql;
+    PLIST_ENTRY Entry;
+    BOOLEAN Pending = FALSE;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    for (Entry = CcDyingSharedCacheMapList.Flink; Entry != &CcDyingSharedCacheMapList; Entry = Entry->Flink)
+    {
+        PROS_SHARED_CACHE_MAP Dying = CONTAINING_RECORD(Entry, ROS_SHARED_CACHE_MAP, SharedCacheMapLinks);
+
+        /* The file object is held until the map leaves the list (under this lock) */
+        if (Dying->FileObject->SectionObjectPointer == SectionObjectPointer)
+        {
+            Pending = TRUE;
+            break;
+        }
+    }
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+
+    return Pending;
 }
 
 /* Are many closed files waiting for the lazy writer?  It then keeps writing (CcWriteBehind). */
@@ -2429,6 +2476,7 @@ CcInitView (
     InitializeListHead(&VacbLruListHead);
     InitializeListHead(&CcDeferredWrites);
     InitializeListHead(&CcCleanSharedCacheMapList);
+    InitializeListHead(&CcDyingSharedCacheMapList);
     KeInitializeSpinLock(&CcDeferredWriteSpinLock);
     ExInitializeNPagedLookasideList(&iBcbLookasideList,
                                     NULL,
