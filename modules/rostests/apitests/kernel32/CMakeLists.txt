@@ -30,6 +30,8 @@ list(APPEND SOURCE
     ConsoleCaret.c
     ConsoleCreateRace.c
     ConsoleOrphanChild.c
+    UnbufferedReadLimit.c
+    ConsoleInheritForeign.c
     ConsoleCloseTerminate.c
     ConsoleCsrRequests.c
     ConsoleCtrlEventRace.c

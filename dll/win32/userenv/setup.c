@@ -179,8 +179,9 @@ CreateStandardProfile(
     StringCbCatW(szProfilePath, sizeof(szProfilePath), szBuffer);
 
     /* Attempt profile directory creation */
-    // FIXME: Security!
-    if (!CreateDirectoryW(szProfilePath, NULL))
+    if (!CreateSecuredProfileDir(szProfilePath,
+                                pProfileParams->bCommon ? ProfileDirPublic : ProfileDirUsers,
+                                NULL))
     {
         if (GetLastError() != ERROR_ALREADY_EXISTS)
         {
@@ -200,8 +201,9 @@ CreateStandardProfile(
         StringCbCatW(szProfilePath, sizeof(szProfilePath), L"\\");
         StringCbCatW(szProfilePath, sizeof(szProfilePath), szBuffer);
 
-        // FIXME: Security!
-        if (!CreateDirectoryW(szProfilePath, NULL))
+        if (!CreateSecuredProfileDir(szProfilePath,
+                                    pProfileParams->bCommon ? ProfileDirPublic : ProfileDirUsers,
+                                    NULL))
         {
             if (GetLastError() != ERROR_ALREADY_EXISTS)
             {
@@ -409,7 +411,7 @@ InitializeProfiles(VOID)
         RegCloseKey(hKey);
         return FALSE;
     }
-    if (!CreateDirectoryW(szProgramDataPath, NULL))
+    if (!CreateSecuredProfileDir(szProgramDataPath, ProfileDirProgramData, NULL))
     {
         if (GetLastError() != ERROR_ALREADY_EXISTS)
         {
@@ -417,6 +419,9 @@ InitializeProfiles(VOID)
             RegCloseKey(hKey);
             return FALSE;
         }
+
+        /* One that was made before has the DACL of the volume root: give it the one of Windows */
+        SecureExistingProfileDirectory(szProgramDataPath, ProfileDirProgramData, NULL, TRUE);
     }
     SetFileAttributesW(szProgramDataPath, FILE_ATTRIBUTE_HIDDEN);
 
@@ -448,8 +453,7 @@ InitializeProfiles(VOID)
     }
 
     /* Create profiles directory */
-    // FIXME: Security!
-    if (!CreateDirectoryW(szProfilesPath, NULL))
+    if (!CreateSecuredProfileDir(szProfilesPath, ProfileDirUsers, NULL))
     {
         if (GetLastError() != ERROR_ALREADY_EXISTS)
         {

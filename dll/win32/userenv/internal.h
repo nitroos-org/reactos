@@ -49,6 +49,36 @@ CreateLegacyProgramDataJunctions(
     _In_ PCWSTR pszPublicPath,
     _In_ PCWSTR pszProfilesPath);
 
+/* profacl.c */
+typedef enum _PROFILE_DIR_KIND
+{
+    ProfileDirUsers,    /* The profiles directory and the Default profile */
+    ProfileDirPublic,
+    ProfileDirProgramData,  /* C:\ProgramData: Users read, and add files and directories */
+    ProfileDirSystem,       /* Windows, Program Files: Users and application packages read only */
+    ProfileDirTemp,         /* Windows\Temp */
+    ProfileDirRoot,         /* the root of the system volume */
+    ProfileDirConfig,       /* Windows\System32\config: SYSTEM and Administrators only */
+    ProfileDirUser      /* The profile of a user: SYSTEM, Administrators and that user */
+} PROFILE_DIR_KIND;
+
+BOOL
+CreateSecuredProfileDir(
+    _In_ PCWSTR pszPath,
+    _In_ PROFILE_DIR_KIND Kind,
+    _In_opt_ PSID pUserSid);
+
+BOOL
+WINAPI
+SecureSystemDirectories(VOID);
+
+VOID
+SecureExistingProfileDirectory(
+    _In_ PCWSTR pszPath,
+    _In_ PROFILE_DIR_KIND Kind,
+    _In_opt_ PSID pUserSid,
+    _In_ BOOL bRecurse);
+
 /* misc.c */
 
 extern SID_IDENTIFIER_AUTHORITY LocalSystemAuthority;

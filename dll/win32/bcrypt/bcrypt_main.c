@@ -3256,6 +3256,9 @@ static NTSTATUS import_ecc_key( enum alg_id alg, enum ecc_curve_id curve, const 
         }
     }
 
+    /* a public point from the caller (a peer's key) is checked for being on the curve; minimal validation skips that */
+    if (pub_size) set_flags &= ~SYMCRYPT_FLAG_KEY_MINIMAL_VALIDATION;
+
     if (SymCryptEckeySetValue( priv, priv_size, pub, pub_size, SYMCRYPT_NUMBER_FORMAT_MSB_FIRST,
                                SYMCRYPT_ECPOINT_FORMAT_XY, set_flags, key->a.ecc.handle ))
     {
