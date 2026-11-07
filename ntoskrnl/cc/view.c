@@ -2377,6 +2377,8 @@ CcRosInitializeFileCache (
             return Status;
         }
 
+        MmMarkCacheSection(SharedCacheMap->Section);
+
         OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
 
         InsertTailList(&CcCleanSharedCacheMapList, &SharedCacheMap->SharedCacheMapLinks);

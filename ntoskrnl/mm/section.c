@@ -2771,6 +2771,12 @@ MmpDeleteSection(PVOID ObjectBody)
 
         KIRQL OldIrql = MiAcquirePfnLock();
         Segment->SectionCount--;
+        if (Section->u.Flags.filler0)
+        {
+            /* The cache manager's section: leaves the cache count in the same step as the section count */
+            ASSERT(Segment->CacheSectionCount > 0);
+            Segment->CacheSectionCount--;
+        }
 
         /* MmDereferenceSegmentWithLock releases PFN lock */
         MmDereferenceSegmentWithLock(Segment, OldIrql);
@@ -3101,6 +3107,7 @@ grab_segment:
         Segment->ReferenceCount = &Segment->RefCount;
 
         Segment->SectionCount = 1;
+        Segment->CacheSectionCount = 0;
 
         ExInitializeFastMutex(&Segment->Lock);
         Segment->FileObject = FileObject;
@@ -5226,6 +5233,32 @@ MmMapViewOfSection(
 }
 
 /*
+ * Marks a data section as the cache manager's own (created by CcRosInitializeFileCache).  Such a section holds
+ * the file for the cache and is not a user mapping: MmCanFileBeTruncated does not count it, whether or not the
+ * file still has a cache map (CcRosDeleteFileCache clears the map first and drops the section after it wrote the
+ * dirty data, and for that time the file is not mapped by anyone else).
+ */
+VOID
+NTAPI
+MmMarkCacheSection(
+    _In_ PVOID SectionObject)
+{
+    PSECTION Section = SectionObject;
+    PMM_SECTION_SEGMENT Segment = (PMM_SECTION_SEGMENT)Section->Segment;
+    KIRQL OldIrql;
+
+    ASSERT(MiIsRosSectionObject(Section) && !Section->u.Flags.Image);
+
+    OldIrql = MiAcquirePfnLock();
+    if (!Section->u.Flags.filler0)
+    {
+        Section->u.Flags.filler0 = 1;
+        Segment->CacheSectionCount++;
+    }
+    MiReleasePfnLock(OldIrql);
+}
+
+/*
  * @unimplemented
  */
 BOOLEAN
@@ -5260,6 +5293,7 @@ MmCanFileBeTruncated(
         Ret = FALSE;
     }
     else if ((Segment->SectionCount == 0) ||
+             (Segment->SectionCount == Segment->CacheSectionCount) ||
              ((Segment->SectionCount == 1) && (SectionObjectPointer->SharedCacheMap != NULL)))
     {
         if (Segment->UserMapCount == 0)
