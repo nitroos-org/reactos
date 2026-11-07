@@ -18,6 +18,7 @@
 PIRP IopDeadIrp;
 KSPIN_LOCK IopThreadIrpListLocks[IOP_THREAD_IRP_LIST_LOCKS];
 RESERVE_IRP_ALLOCATOR IopReserveIrpAllocator;
+volatile LONG IopReserveIrpUses;
 
 /* PRIVATE FUNCTIONS  ********************************************************/
 
@@ -1102,6 +1103,7 @@ IopAllocateReserveIrp(IN CCHAR StackSize)
             {
                 /* It's ours! Initialize it */
                 IoInitializeIrp(IopReserveIrpAllocator.ReserveIrp[i], IoSizeOfIrp(StackSize), StackSize);
+                InterlockedIncrement(&IopReserveIrpUses);
 
                 /* And return it to the caller */
                 return IopReserveIrpAllocator.ReserveIrp[i];
