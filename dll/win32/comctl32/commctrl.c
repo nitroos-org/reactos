@@ -244,7 +244,7 @@ static void RegisterControls(BOOL bV6)
         TREEVIEW_Register_v5 ();
         UPDOWN_Register_v5 ();
 
-        TOOLBAR_Register ();
+        TOOLBAR_Register_v5 ();
     }
     else
     {
@@ -268,7 +268,7 @@ static void RegisterControls(BOOL bV6)
         LISTBOX_Register ();
         STATIC_Register ();
 
-        TOOLBARv6_Register();
+        TOOLBAR_Register ();
     }
 }
 
@@ -303,7 +303,7 @@ static void UnregisterControls(BOOL bV6)
         LISTBOX_Unregister ();
         STATIC_Unregister ();
 
-        TOOLBARv6_Unregister ();
+        UnregisterClassW(L"ToolbarWindow32", NULL);
     }
 
 }
