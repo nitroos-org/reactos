@@ -1,16 +1,18 @@
 /*
  * PROJECT:     ReactOS Kernel
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
- * PURPOSE:     NitroPager phase P0: page-out of ARM3 private memory on request.
+ * PURPOSE:     NitroPager phases P0 and P1: page-out of ARM3 private memory.
  *              Dirty capture and page-file slot ownership of private PFNs,
  *              standby repurpose, the explicit working set trim
- *              (EmptyWorkingSet), a synchronous modified page writer and the
- *              SystemMemoryListInformation commands
+ *              (EmptyWorkingSet), the modified page writer (synchronous core,
+ *              P1 thread with cluster writes), automatic trimming from the
+ *              balancer, slot reclaim and the SystemMemoryListInformation
+ *              commands
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  */
 
 /*
- * Design: harness process/PAGER-DESIGN.md rev 2, phase P0. Everything here is
+ * Design: harness process/PAGER-DESIGN.md rev 2, phases P0/P1. Everything here is
  * reached only when the NitroPager registry value (Session Manager\Memory
  * Management, read once at boot) is not 0. Value 0, the default, keeps the
  * behaviour the memory manager had before.
@@ -102,14 +104,90 @@ static volatile LONG MiPagerWriterPaused;
 static volatile LONG MiPagerPauseReady;
 static volatile ULONG MiPagerFreeRefusedBase;
 
+/* NitroPagerDebug bits that inject write failures (any build; test commands need the value non-zero anyway) */
+#define MI_PAGER_DEBUG_FAIL_SOME_WRITES 0x10
+#define MI_PAGER_DEBUG_FAIL_ALL_WRITES  0x20
+/* Test of the exhaustion check: the trimmer frees nothing, starved means below the low-water mark, the window is 15 s */
+#define MI_PAGER_DEBUG_TRIM_NOTHING     0x40
+
 /* Writer batch: pages taken per PFN lock hold */
 #define MI_PAGER_WRITE_BATCH 16
 
 /* Standby pages looked at per list for one repurpose */
 #define MI_PAGER_REPURPOSE_SCAN 64
 
+/* Modified list entries the writer looks at per PFN lock hold */
+#define MI_PAGER_SCAN_PER_HOLD 1024
+
 /* Consecutive write failures after which a flush stops */
 #define MI_PAGER_WRITE_FAILURE_LIMIT 8
+
+/*
+ * P1: the modified page writer thread, automatic trimming, slot reclaim.
+ */
+
+/* Paging I/O (writer clusters, page-file reads of faults) in flight: the "game over" check and the reserve watch it */
+volatile LONG MiPagingIoInFlight;
+
+/* Writer core instances inside a cluster write (shutdown waits for 0) */
+static volatile LONG MiPagerWritesActive;
+
+/* Set once by MiPagerShutdownWriter: no new writes, no more trimming */
+static volatile LONG MiPagerShutdown;
+
+/* Writer thread: 0 not started, 1 starting, 2 running */
+static volatile LONG MiPagerWriterStarted;
+static KEVENT MiPagerWriterEvent;
+static KEVENT MiPagerWriterStopped;
+static volatile LONG MiPagerWakePending;
+
+/* What the writer is doing (fourth parameter of a NO_PAGES_AVAILABLE bugcheck) */
+#define MI_WRITER_IDLE      0
+#define MI_WRITER_WRITING   1
+#define MI_WRITER_NO_SLOT   2
+#define MI_WRITER_BACKOFF   3
+#define MI_WRITER_STOPPED   4
+#define MI_WRITER_NOT_RUNNING 5
+static volatile LONG MiPagerWriterState = MI_WRITER_NOT_RUNNING;
+
+/* Interrupt time of the last completed cluster write */
+static volatile ULONGLONG MiPagerLastProgress;
+
+/* FALSE after a writer scan found no private page it could write, TRUE again when one is queued */
+static volatile BOOLEAN MiPagerWritable;
+/* Private pages queued on the modified list (wraps): an empty writer scan clears Writable only if none came meanwhile */
+static volatile LONG MiPagerQueued;
+
+/* Free ARM3 slots are short: trimming sends no dirty page to the modified list */
+static volatile BOOLEAN MiPagerSlotsShort;
+#define MI_PAGER_SLOT_LOW 512
+
+/* The writer runs at this many modified pages (1/16 of RAM, at least 256) or when available pages are low */
+static PFN_NUMBER MiPagerModifiedMaximum = 256;
+
+/* The balancer's low-water mark of free pages (balance.c) */
+extern ULONG MiLowWaterPages;
+
+/*
+ * Below an eighth of the low-water mark (at least 512 pages) the trimmer
+ * ignores the Accessed bit: with every resident page in use between two
+ * passes (a working set that walks all of its memory), aging alone never
+ * finds a page. Above it only pages unused since the last pass go: forcing
+ * there trims hot pages that fault straight back (a soak with a working set
+ * that fits RAM did 7000 trims/s at a threshold of half the mark, tuning).
+ */
+#define MI_PAGER_FORCE_TRIM_MINIMUM 512
+
+/* Trimmer budgets per process and balancer pass (tuning) */
+#define MI_TRIM_EXAMINE_BUDGET  16384
+#define MI_TRIM_PAGE_BUDGET     2048
+#define MI_TRIM_STARVE_LIMIT    3
+/* At least as many cursors as processes per pass: a lookup never evicts a cursor stamped in this pass */
+#define MI_TRIM_CURSORS         256
+#define MI_TRIM_PROCESSES       256
+
+/* How long the "game over" check counts a completed write as progress */
+#define MI_PAGER_PROGRESS_WINDOW (10ULL * 10 * 1000 * 1000)
 
 /* FUNCTIONS ******************************************************************/
 
@@ -446,34 +524,50 @@ MiCompletePageWrite(
 }
 
 /*
- * The synchronous core of the modified page writer (P0: runs in the caller
- * that asked for it, with no lock held; P1 gives it a thread). Writes up to
- * MaximumPages private modified pages, one slot each, and returns how many
- * reached standby. The writer takes no working set, address space, paging
- * file creation or file system lock.
+ * The core of the modified page writer: the P1 thread runs it, and so do the
+ * explicit requests (EmptyWorkingSet, the memory list flush command) in their
+ * own thread with no lock held. Writes up to MaximumPages private modified
+ * pages in clusters of up to MI_PAGER_CLUSTER_MAX consecutive slots (one
+ * paging write each) and returns how many reached standby. *Attempted gets
+ * the pages it took, *NoSlot is set when it stopped for lack of a slot,
+ * *Failing when writes kept failing. The writer takes no working set,
+ * address space, paging file creation or file system lock.
  */
+static
 ULONG
-NTAPI
-MiWriteModifiedPrivatePages(
-    _In_ ULONG MaximumPages)
+MiWriteModifiedPrivatePagesEx(
+    _In_ ULONG MaximumPages,
+    _Out_ PULONG Attempted,
+    _Out_ PBOOLEAN NoSlot,
+    _Out_ PBOOLEAN Failing)
 {
-    PFN_NUMBER Batch[MI_PAGER_WRITE_BATCH];
-    ULONG BatchFile[MI_PAGER_WRITE_BATCH];
-    ULONG_PTR BatchSlot[MI_PAGER_WRITE_BATCH];
-    NTSTATUS BatchStatus[MI_PAGER_WRITE_BATCH];
-    PFN_NUMBER PageFrameIndex, Next, Resume = LIST_HEAD;
-    ULONG Count, i, Done = 0, Attempts = 0, Failures = 0, FileIndex, Protection;
-    ULONG_PTR Slot;
+    PFN_NUMBER Candidates[MI_PAGER_CLUSTER_MAX];
+    PFN_NUMBER Batch[MI_PAGER_CLUSTER_MAX];
+    PFN_NUMBER PageFrameIndex, Next, Resume = LIST_HEAD, Scanned = 0;
+    ULONG Count, Taken, i, Done = 0, Attempts = 0, Failures = 0, FileIndex, Protection, Looked;
+    ULONG_PTR FirstSlot;
+    NTSTATUS Status;
     PMMPFN Pfn1;
     KIRQL OldIrql;
-    BOOLEAN NoSlot = FALSE;
+    BOOLEAN Pause;
 
+    *Attempted = 0;
+    *NoSlot = FALSE;
+    *Failing = FALSE;
     ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
     if ((MiNitroPagerMode == 0) || (MmNumberOfPagingFiles == 0))
         return 0;
 
-    while ((Attempts < MaximumPages) && !NoSlot && (Failures < MI_PAGER_WRITE_FAILURE_LIMIT))
+    while ((Attempts < MaximumPages) && (Failures < MI_PAGER_WRITE_FAILURE_LIMIT))
     {
+        /* Counted before the shutdown check: shutdown sets its flag, then waits for 0 */
+        InterlockedIncrement(&MiPagerWritesActive);
+        if (MiPagerShutdown)
+        {
+            InterlockedDecrement(&MiPagerWritesActive);
+            break;
+        }
+
         Count = 0;
         OldIrql = MiAcquirePfnLock();
 
@@ -486,14 +580,20 @@ MiWriteModifiedPrivatePages(
             PageFrameIndex = Resume;
         }
 
+        /*
+         * Private pages that are not being written and have no copy yet; PFN fields only,
+         * at most MI_PAGER_SCAN_PER_HOLD entries per PFN lock hold (pages the writer cannot
+         * take, prototype pages until P2, may fill the list)
+         */
+        Looked = 0;
         while ((PageFrameIndex != LIST_HEAD) &&
-               (Count < MI_PAGER_WRITE_BATCH) &&
-               (Attempts < MaximumPages))
+               (Count < MI_PAGER_CLUSTER_MAX) &&
+               (Attempts + Count < MaximumPages) &&
+               (Looked < MI_PAGER_SCAN_PER_HOLD))
         {
+            Looked++;
             Pfn1 = MI_PFN_ELEMENT(PageFrameIndex);
             Next = Pfn1->u1.Flink;
-
-            /* Private pages that are not being written and have no copy yet; PFN fields only */
             if ((Pfn1->u3.e1.PrototypePte == 0) &&
                 !MI_IS_ROS_PFN(Pfn1) &&
                 (Pfn1->u3.e2.ReferenceCount == 0) &&
@@ -505,79 +605,145 @@ MiWriteModifiedPrivatePages(
                 (Pfn1->OriginalPte.u.Soft.Transition == 0) &&
                 (Pfn1->OriginalPte.u.Soft.PageFileHigh == 0))
             {
-                if (!MiAllocatePageFileSlot(&FileIndex, &Slot))
-                {
-                    MiPagerCounters.WriteNoSlot++;
-                    NoSlot = TRUE;
-                    break;
-                }
-
-                /* The slot is recorded in the PFN before the lock goes: a delete meanwhile finds it */
-                Protection = (ULONG)Pfn1->OriginalPte.u.Soft.Protection;
-                MiUnlinkPageFromList(Pfn1);
-                MI_MAKE_PAGEFILE_PTE(&Pfn1->OriginalPte, FileIndex, Slot + 1, Protection);
-                Pfn1->u3.e1.PageLocation = TransitionPage;
-                Pfn1->u3.e1.WriteInProgress = 1;
-                Pfn1->u3.e1.Modified = 0;
-                Pfn1->u1.Event = NULL;
-                MiReferenceUnusedPageAndBumpLockCount(Pfn1);
-
-                Batch[Count] = PageFrameIndex;
-                BatchFile[Count] = FileIndex;
-                BatchSlot[Count] = Slot;
-                Count++;
-                Attempts++;
+                Candidates[Count++] = PageFrameIndex;
             }
             PageFrameIndex = Next;
         }
         Resume = PageFrameIndex;
-        MiReleasePfnLock(OldIrql);
+        Scanned += Looked;
 
         if (Count == 0)
+        {
+            MiReleasePfnLock(OldIrql);
+            InterlockedDecrement(&MiPagerWritesActive);
+
+            /* The end of the list, or a whole list's worth looked at: nothing to write */
+            if ((PageFrameIndex == LIST_HEAD) || (Scanned > MmModifiedPageListHead.Total))
+                break;
+            continue;
+        }
+
+        /* One run of consecutive slots for the cluster (slot lock nested, leaf); a shorter run takes fewer pages */
+        Taken = MiAllocatePageFileSlots(Count, &FileIndex, &FirstSlot);
+        if (Taken == 0)
+        {
+            MiReleasePfnLock(OldIrql);
+            InterlockedDecrement(&MiPagerWritesActive);
+            MiPagerCounters.WriteNoSlot++;
+            *NoSlot = TRUE;
             break;
+        }
+        if (Taken < Count)
+            Resume = Candidates[Taken];
+
+        for (i = 0; i < Taken; i++)
+        {
+            /* The slot is recorded in the PFN before the lock goes: a delete meanwhile finds it */
+            Pfn1 = MI_PFN_ELEMENT(Candidates[i]);
+            Protection = (ULONG)Pfn1->OriginalPte.u.Soft.Protection;
+            MiUnlinkPageFromList(Pfn1);
+            MI_MAKE_PAGEFILE_PTE(&Pfn1->OriginalPte, FileIndex, FirstSlot + i + 1, Protection);
+            Pfn1->u3.e1.PageLocation = TransitionPage;
+            Pfn1->u3.e1.WriteInProgress = 1;
+            Pfn1->u3.e1.Modified = 0;
+            Pfn1->u1.Event = NULL;
+            MiReferenceUnusedPageAndBumpLockCount(Pfn1);
+            Batch[i] = Candidates[i];
+        }
+        Attempts += Taken;
+        MiReleasePfnLock(OldIrql);
 
         /* The I/O, without the PFN lock; the pages are referenced and off every list */
-        for (i = 0; i < Count; i++)
+        Status = STATUS_SUCCESS;
+        Pause = FALSE;
+        for (i = 0; i < Taken; i++)
         {
             PVOID PageAddress = MiPteToAddress(MI_PFN_ELEMENT(Batch[i])->PteAddress);
 
             if (MiPagerTakeInjection(MI_PAGER_INJECT_WRITE_ERROR, PageAddress))
-                BatchStatus[i] = STATUS_DEVICE_DATA_ERROR;
-            else
-                BatchStatus[i] = MiWritePageFileSlot(Batch[i], BatchFile[i], BatchSlot[i]);
-
-            /* Test: hold the completion of this page until the test says go (the page is written, referenced, off every list) */
+                Status = STATUS_DEVICE_DATA_ERROR;
             if (MiPagerTakeInjection(MI_PAGER_INJECT_WRITE_PAUSE, PageAddress))
-            {
-                LARGE_INTEGER Timeout;
+                Pause = TRUE;
+        }
 
-                Timeout.QuadPart = -(LONGLONG)MI_PAGER_TEST_PAUSE_SECONDS * 10 * 1000 * 1000;
-                InterlockedExchange(&MiPagerWriterPaused, 1);
-                KeWaitForSingleObject(&MiPagerPauseEvent, Executive, KernelMode, FALSE, &Timeout);
-                InterlockedExchange(&MiPagerWriterPaused, 0);
+        /*
+         * Test (NitroPagerDebug bits): 0x10 fails every 50th cluster write, 0x20 fails
+         * every cluster write (file retirement, the writer must stop, not loop)
+         */
+        if (NT_SUCCESS(Status) && (MiNitroPagerDebug & (MI_PAGER_DEBUG_FAIL_SOME_WRITES | MI_PAGER_DEBUG_FAIL_ALL_WRITES)))
+        {
+            static LONG ClusterNumber;
+
+            if ((MiNitroPagerDebug & MI_PAGER_DEBUG_FAIL_ALL_WRITES) ||
+                ((InterlockedIncrement(&ClusterNumber) % 50) == 0))
+            {
+                Status = STATUS_DEVICE_DATA_ERROR;
             }
+        }
+
+        InterlockedIncrement(&MiPagingIoInFlight);
+        if (NT_SUCCESS(Status))
+            Status = MiWritePageFileCluster(Batch, Taken, FileIndex, FirstSlot);
+        InterlockedDecrement(&MiPagingIoInFlight);
+
+        /* Test: hold the completion of this cluster until the test says go (written, referenced, off every list) */
+        if (Pause)
+        {
+            LARGE_INTEGER Timeout;
+
+            Timeout.QuadPart = -(LONGLONG)MI_PAGER_TEST_PAUSE_SECONDS * 10 * 1000 * 1000;
+            InterlockedExchange(&MiPagerWriterPaused, 1);
+            KeWaitForSingleObject(&MiPagerPauseEvent, Executive, KernelMode, FALSE, &Timeout);
+            InterlockedExchange(&MiPagerWriterPaused, 0);
+        }
+
+        MiPagerPagingFileWriteResult(FileIndex, Status);
+        if (NT_SUCCESS(Status))
+        {
+            Failures = 0;
+            MiPagerCounters.Clusters++;
+            MiPagerLastProgress = KeQueryInterruptTime();
+        }
+        else
+        {
+            Failures++;
         }
 
         OldIrql = MiAcquirePfnLock();
-        for (i = 0; i < Count; i++)
+        for (i = 0; i < Taken; i++)
         {
             Pfn1 = MI_PFN_ELEMENT(Batch[i]);
-            if (NT_SUCCESS(BatchStatus[i]))
-            {
-                Failures = 0;
-                if (!MI_IS_PFN_DELETED(Pfn1) && (Pfn1->u3.e1.Modified == 0) && (Pfn1->u2.ShareCount == 0))
-                    Done++;
-            }
-            else
-            {
-                Failures++;
-            }
-            MiCompletePageWrite(Pfn1, BatchFile[i], BatchSlot[i], BatchStatus[i]);
+            if (NT_SUCCESS(Status) && !MI_IS_PFN_DELETED(Pfn1) && (Pfn1->u3.e1.Modified == 0) && (Pfn1->u2.ShareCount == 0))
+                Done++;
+            MiCompletePageWrite(Pfn1, FileIndex, FirstSlot + i, Status);
         }
         MiReleasePfnLock(OldIrql);
+        InterlockedDecrement(&MiPagerWritesActive);
+
+        /* Back off after a failed write (100 ms more per failure, at most 1 s): errors spread over time */
+        if (!NT_SUCCESS(Status))
+        {
+            LARGE_INTEGER Delay;
+
+            Delay.QuadPart = -(LONGLONG)min(Failures * 100, 1000) * 10000;
+            KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        }
     }
 
+    *Attempted = Attempts;
+    *Failing = (Failures >= MI_PAGER_WRITE_FAILURE_LIMIT);
     return Done;
+}
+
+ULONG
+NTAPI
+MiWriteModifiedPrivatePages(
+    _In_ ULONG MaximumPages)
+{
+    ULONG Attempted;
+    BOOLEAN NoSlot, Failing;
+
+    return MiWriteModifiedPrivatePagesEx(MaximumPages, &Attempted, &NoSlot, &Failing);
 }
 
 /* Exclusive working set lock if it is free now (MiLockProcessWorkingSet's bookkeeping) */
@@ -609,6 +775,9 @@ typedef struct _MI_TRIM_CONTEXT
     ULONG Count;
     ULONG Trimmed;
     ULONG Dirty;
+    /* P1: slots are short, leave pages that would go to the modified list */
+    BOOLEAN CleanOnly;
+    ULONG Aged;
 } MI_TRIM_CONTEXT, *PMI_TRIM_CONTEXT;
 
 /* No processor can reach the trimmed pages any more: their last share reference goes */
@@ -637,7 +806,7 @@ MiTrimFlush(
  * the share reference dropped after the TB flush.
  */
 static
-VOID
+BOOLEAN
 MiTrimPte(
     _In_ PMMPTE PointerPte,
     _In_ PVOID Address,
@@ -650,11 +819,11 @@ MiTrimPte(
 
     TempPte = *PointerPte;
     if (TempPte.u.Hard.Valid == 0)
-        return;
+        return FALSE;
     PageFrameIndex = PFN_FROM_PTE(&TempPte);
     Pfn1 = MiGetPfnEntry(PageFrameIndex);
     if (Pfn1 == NULL)
-        return;
+        return FALSE;
 
     OldIrql = MiAcquirePfnLock();
     TempPte = *PointerPte;
@@ -680,7 +849,15 @@ MiTrimPte(
          * cached page, and nothing here proves that is safe for them.
          */
         MiReleasePfnLock(OldIrql);
-        return;
+        return FALSE;
+    }
+
+    /* P1: no slot for a dirty page now, so it would only sit on the modified list */
+    if (Context->CleanOnly && (Pfn1->u3.e1.Modified || TempPte.u.Hard.Dirty))
+    {
+        MiReleasePfnLock(OldIrql);
+        MiPagerCounters.TrimSkippedDirty++;
+        return FALSE;
     }
 
     MI_MAKE_TRANSITION_PTE(&NewPte, PageFrameIndex, (ULONG)Pfn1->OriginalPte.u.Soft.Protection);
@@ -699,6 +876,7 @@ MiTrimPte(
     Context->Pages[Context->Count++] = Pfn1;
     if (Context->Count == RTL_NUMBER_OF(Context->Pages))
         MiTrimFlush(Context);
+    return TRUE;
 }
 
 /*
@@ -820,6 +998,8 @@ MiEmptyProcessWorkingSet(
     Context.Count = 0;
     Context.Trimmed = 0;
     Context.Dirty = 0;
+    Context.CleanOnly = FALSE;
+    Context.Aged = 0;
     MiTrimCurrentProcess(Process, &Context);
     MiTrimFlush(&Context);
 
@@ -857,6 +1037,877 @@ MiEmptyAllWorkingSets(VOID)
         KeLeaveGuardedRegion();
         KeUnstackDetachProcess(&ApcState);
     }
+}
+
+/* P1 ************************************************************************/
+
+/*
+ * Wake the writer thread. Any IRQL <= DISPATCH_LEVEL, also under the PFN lock
+ * (the dispatcher lock nests inside it, as for the low memory events).
+ */
+VOID
+NTAPI
+MiPagerWakeWriter(VOID)
+{
+    if (MiPagerWriterStarted != 2)
+        return;
+    if (InterlockedExchange(&MiPagerWakePending, 1) == 0)
+        KeSetEvent(&MiPagerWriterEvent, IO_NO_INCREMENT, FALSE);
+}
+
+/* A private page went to the modified list (PFN lock held) */
+VOID
+NTAPI
+MiPagerModifiedPageQueued(VOID)
+{
+    MiPagerWritable = TRUE;
+    InterlockedIncrement(&MiPagerQueued);
+    if (MmModifiedPageListHead.Total >= MiPagerModifiedMaximum)
+        MiPagerWakeWriter();
+}
+
+/*
+ * An available page was taken (PFN lock held). Watch how low usable pages go
+ * while paging I/O is in flight (the reserve measurement), and start the
+ * writer when available pages are low and modified pages wait.
+ */
+VOID
+NTAPI
+MiPagerAvailableDropped(VOID)
+{
+    PFN_NUMBER Usable = MiGetUsablePageCount();
+
+    if ((MiPagingIoInFlight > 0) && (Usable < MiPagerCounters.ReserveLowWater))
+        MiPagerCounters.ReserveLowWater = (ULONG)Usable;
+    if ((Usable < MiLowWaterPages) &&
+        (MmModifiedPageListHead.Total != 0) &&
+        MiPagerWritable &&
+        (MiPagerWakePending == 0))
+    {
+        MiPagerWakeWriter();
+    }
+}
+
+/*
+ * Slot reclaim: resident private pages that still hold a clean copy in the
+ * paging file give it up (MiMarkPfnDirty: Modified is set before the slot is
+ * released, so no trim can send such a page to standby without a copy). A
+ * cursor over the PFN database, 1024 entries per PFN lock hold.
+ */
+static
+ULONG
+MiPagerReclaimSlots(
+    _In_ ULONG Wanted)
+{
+    static PFN_NUMBER Cursor;
+    PFN_NUMBER Highest = MmHighestPhysicalPage, Scanned = 0;
+    ULONG Released = 0, Chunk;
+    PMMPFN Pfn1;
+    KIRQL OldIrql;
+
+    while ((Scanned <= Highest) && (Released < Wanted))
+    {
+        OldIrql = MiAcquirePfnLock();
+        for (Chunk = 0; (Chunk < 1024) && (Scanned <= Highest) && (Released < Wanted); Chunk++, Scanned++)
+        {
+            if (++Cursor > Highest)
+                Cursor = 0;
+            Pfn1 = MiGetPfnEntry(Cursor);
+            if ((Pfn1 == NULL) ||
+                MI_IS_ROS_PFN(Pfn1) ||
+                (Pfn1->u3.e1.PageLocation != ActiveAndValid) ||
+                (Pfn1->u3.e1.PrototypePte != 0) ||
+                (Pfn1->u3.e1.WriteInProgress != 0) ||
+                (Pfn1->u3.e1.ReadInProgress != 0) ||
+                (Pfn1->u3.e2.ReferenceCount == 0) ||
+                !MiIsUserPageTablePte(Pfn1->PteAddress) ||
+                !MI_IS_PAGEFILE_PTE(&Pfn1->OriginalPte))
+            {
+                continue;
+            }
+            MiMarkPfnDirty(Pfn1);
+            Released++;
+        }
+        MiReleasePfnLock(OldIrql);
+    }
+
+    MiPagerCounters.SlotsReclaimed += Released;
+    return Released;
+}
+
+/*
+ * Free slots are short (or gone): no dirty page goes to the modified list
+ * until there are slots again, the growth thread is asked for more (without
+ * waiting: it grows toward the file's maximum), and resident pages give back
+ * their clean copies.
+ */
+static
+VOID
+MiPagerCheckSlots(
+    _In_ BOOLEAN Exhausted)
+{
+    PFN_NUMBER Free = MiPagerFreeSlotCount();
+
+    if (!Exhausted && (Free >= MI_PAGER_SLOT_LOW))
+    {
+        MiPagerSlotsShort = FALSE;
+        return;
+    }
+
+    if (!MiPagerSlotsShort)
+        MiPagerCounters.SlotShortages++;
+    MiPagerSlotsShort = TRUE;
+    MiRequestPagingFileGrowth(max((SIZE_T)MmModifiedPageListHead.Total, (SIZE_T)4096));
+    MiPagerReclaimSlots(MI_PAGER_SLOT_LOW * 2);
+    if (MiPagerFreeSlotCount() >= MI_PAGER_SLOT_LOW)
+        MiPagerSlotsShort = FALSE;
+}
+
+/* One line of counters on the debug channel, at most once a minute and only when something moved */
+static
+VOID
+MiPagerReport(
+    _Inout_ PULONGLONG LastReport,
+    _Inout_ PULONG LastSum)
+{
+    ULONGLONG Now = KeQueryInterruptTime();
+    ULONG Sum;
+
+    if ((Now - *LastReport) < 60ULL * 10 * 1000 * 1000)
+        return;
+    *LastReport = Now;
+
+    Sum = MiPagerCounters.Trimmed + MiPagerCounters.Written + MiPagerCounters.Repurposed +
+          MiPagerCounters.InPageReads + MiPagerCounters.Aged + MiPagerCounters.WriteErrors;
+    if (Sum == *LastSum)
+        return;
+    *LastSum = Sum;
+
+    DbgPrint("NitroPager: trim %lu dirty %lu aged %lu skipdirty %lu | written %lu clusters %lu errors %lu noslot %lu | "
+            "repurposed %lu inpage %lu errors %lu retries %lu | tagmismatch %lu freerefused %lu | wsmiss %lu starved %lu | "
+            "slotshort %lu reclaimed %lu freeslots %Iu | modified %Iu privstandby %lu usable %Iu reserve-low %lu inflight %ld | "
+            "balancer trimmed %lu waits %lu | legacy user %lu system %lu available %Iu legacy-freed %lu asked %lu nopass %lu\n",
+            MiPagerCounters.Trimmed, MiPagerCounters.TrimmedDirty, MiPagerCounters.Aged, MiPagerCounters.TrimSkippedDirty,
+            MiPagerCounters.Written, MiPagerCounters.Clusters, MiPagerCounters.WriteErrors, MiPagerCounters.WriteNoSlot,
+            MiPagerCounters.Repurposed, MiPagerCounters.InPageReads, MiPagerCounters.InPageErrors,
+            MiPagerCounters.InPageResourceRetries, MiPagerCounters.TagMismatches, MiPagerCounters.SlotFreeRefused,
+            MiPagerCounters.WsTryLockMisses, MiPagerCounters.StarvationRounds, MiPagerCounters.SlotShortages,
+            MiPagerCounters.SlotsReclaimed, (SIZE_T)MiPagerFreeSlotCount(), (SIZE_T)MmModifiedPageListHead.Total,
+            MmTransitionPrivatePages, (SIZE_T)MiGetUsablePageCount(), MiPagerCounters.ReserveLowWater, MiPagingIoInFlight,
+            MiPagerCounters.BalancerTrimmed, MiPagerCounters.BalancerWaits,
+            MiMemoryConsumers[MC_USER].PagesUsed, MiMemoryConsumers[MC_SYSTEM].PagesUsed, (SIZE_T)MmAvailablePages,
+            MiPagerCounters.LegacyFreed, MiPagerCounters.LegacyAsked, MiPagerCounters.NoProgressPasses);
+}
+
+/*
+ * The modified page writer thread (P1, D3). Runs when the modified list
+ * holds MiPagerModifiedMaximum pages, when available pages are below the
+ * balancer's low-water mark with modified pages waiting, or when woken; then
+ * writes until the list is below half the maximum and the pressure is gone.
+ * It never takes a working set, address space, paging file creation, Cc or
+ * file system lock.
+ */
+static
+VOID
+NTAPI
+MiModifiedPageWriterThread(
+    _In_ PVOID Context)
+{
+    LARGE_INTEGER Timeout;
+    ULONGLONG LastReport = 0;
+    ULONG LastSum = 0, Attempted, Idle = 0;
+    LONG Queued;
+    BOOLEAN NoSlot, Failing, Pressure;
+    PFN_NUMBER Modified;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    for (;;)
+    {
+        Timeout.QuadPart = -10LL * 1000 * 1000;
+        KeWaitForSingleObject(&MiPagerWriterEvent, Executive, KernelMode, FALSE, &Timeout);
+        InterlockedExchange(&MiPagerWakePending, 0);
+        if (MiPagerShutdown)
+            break;
+
+        MiPagerReport(&LastReport, &LastSum);
+
+        /* A scan that found nothing is retried now and then, whatever the list does */
+        if (++Idle >= 10)
+        {
+            Idle = 0;
+            MiPagerWritable = TRUE;
+        }
+
+        if (MiPagerSlotsShort)
+            MiPagerCheckSlots(FALSE);
+
+        for (;;)
+        {
+            Modified = MmModifiedPageListHead.Total;
+            Pressure = (MiGetUsablePageCount() < MiLowWaterPages);
+            if (MiPagerShutdown ||
+                (Modified == 0) ||
+                !MiPagerWritable ||
+                (!Pressure && (Modified < MiPagerModifiedMaximum / 2)))
+            {
+                break;
+            }
+
+            MiPagerWriterState = MI_WRITER_WRITING;
+            Queued = MiPagerQueued;
+            MiWriteModifiedPrivatePagesEx(256, &Attempted, &NoSlot, &Failing);
+
+            if (NoSlot)
+            {
+                LARGE_INTEGER Delay;
+
+                MiPagerWriterState = MI_WRITER_NO_SLOT;
+                MiPagerCheckSlots(TRUE);
+                Delay.QuadPart = -250LL * 10000;
+                KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+                break;
+            }
+            if (Failing)
+            {
+                LARGE_INTEGER Delay;
+
+                MiPagerWriterState = MI_WRITER_BACKOFF;
+                Delay.QuadPart = -1000LL * 10000;
+                KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+                break;
+            }
+            if (Attempted == 0)
+            {
+                MiPagerWritable = FALSE;
+                /* A page queued during the scan sets it again (its store may have come before ours) */
+                if (MiPagerQueued != Queued)
+                    MiPagerWritable = TRUE;
+                break;
+            }
+            Idle = 0;
+
+            if (!MiPagerSlotsShort && (MiPagerFreeSlotCount() < MI_PAGER_SLOT_LOW))
+                MiPagerCheckSlots(FALSE);
+        }
+        MiPagerWriterState = MI_WRITER_IDLE;
+    }
+
+    MiPagerWriterState = MI_WRITER_STOPPED;
+    KeSetEvent(&MiPagerWriterStopped, IO_NO_INCREMENT, FALSE);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+/* Start the writer thread (NtCreatePagingFile, NitroPager on); a failed start is retried by the next file */
+VOID
+NTAPI
+MiPagerStartWriter(VOID)
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE ThreadHandle;
+    PETHREAD Thread;
+    NTSTATUS Status;
+
+    ASSERT(MiNitroPagerMode != 0);
+    if (InterlockedCompareExchange(&MiPagerWriterStarted, 1, 0) != 0)
+        return;
+
+    KeInitializeEvent(&MiPagerWriterEvent, SynchronizationEvent, FALSE);
+    KeInitializeEvent(&MiPagerWriterStopped, NotificationEvent, FALSE);
+    MiPagerCounters.ReserveLowWater = MAXULONG;
+    MiPagerModifiedMaximum = max(MmNumberOfPhysicalPages / 16, 256);
+    MiPagerWritable = TRUE;
+
+    InitializeObjectAttributes(&ObjectAttributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = PsCreateSystemThread(&ThreadHandle, THREAD_ALL_ACCESS, &ObjectAttributes, NULL, NULL,
+                                  MiModifiedPageWriterThread, NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("NitroPager: the modified page writer did not start: 0x%lx\n", Status);
+        InterlockedExchange(&MiPagerWriterStarted, 0);
+        return;
+    }
+
+    /* Above the threads that dirty memory (tuning, design 3.5) */
+    if (NT_SUCCESS(ObReferenceObjectByHandle(ThreadHandle, THREAD_ALL_ACCESS, PsThreadType,
+                                             KernelMode, (PVOID*)&Thread, NULL)))
+    {
+        KeSetPriorityThread(&Thread->Tcb, LOW_REALTIME_PRIORITY + 1);
+        ObDereferenceObject(Thread);
+    }
+    ZwClose(ThreadHandle);
+
+    MiPagerWriterState = MI_WRITER_IDLE;
+    InterlockedExchange(&MiPagerWriterStarted, 2);
+    DbgPrint("NitroPager: modified page writer started (runs at %Iu modified pages or below %lu available)\n",
+            (SIZE_T)MiPagerModifiedMaximum, MiLowWaterPages);
+}
+
+/*
+ * Shutdown (MiShutdownSystem, before the file systems shut down): the writer
+ * stops, a cluster that is being written finishes, no page is written to a
+ * paging file again in this boot and the trimmer stops. Private modified
+ * pages stay in memory and are discarded with it.
+ */
+VOID
+NTAPI
+MiPagerShutdownWriter(VOID)
+{
+    LARGE_INTEGER Timeout;
+    ULONG i;
+
+    if (MiNitroPagerMode == 0)
+        return;
+
+    InterlockedExchange(&MiPagerShutdown, 1);
+    if (MiPagerWriterStarted == 2)
+    {
+        KeSetEvent(&MiPagerWriterEvent, IO_NO_INCREMENT, FALSE);
+        Timeout.QuadPart = -30LL * 10 * 1000 * 1000;
+        if (KeWaitForSingleObject(&MiPagerWriterStopped, Executive, KernelMode, FALSE, &Timeout) == STATUS_TIMEOUT)
+            DPRINT1("NitroPager: the writer did not stop within 30 s\n");
+    }
+
+    /* A synchronous flush (memory list command, EmptyWorkingSet) finishes its cluster */
+    Timeout.QuadPart = -10LL * 10000;
+    for (i = 0; (i < 3000) && (MiPagerWritesActive != 0); i++)
+        KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+
+    DbgPrint("NitroPager: writer stopped for shutdown: %lu pages written in %lu clusters, %Iu modified pages stay in memory\n",
+            MiPagerCounters.Written, MiPagerCounters.Clusters, (SIZE_T)MmModifiedPageListHead.Total);
+}
+
+/*
+ * The balancer's "game over" check (no pass frees anything): with the pager
+ * on, waiting is right while paging I/O is in flight, a cluster completed in
+ * the last 10 s, or the writer has modified private pages it can write.
+ */
+BOOLEAN
+NTAPI
+MiPagerCanMakeProgress(
+    _Out_ PULONG_PTR WriterState)
+{
+    ULONGLONG Now = KeQueryInterruptTime(), Last = MiPagerLastProgress;
+
+    *WriterState = (ULONG_PTR)MiPagerWriterState;
+    if ((MiNitroPagerMode == 0) || MiPagerShutdown)
+        return FALSE;
+    if (MiPagingIoInFlight > 0)
+        return TRUE;
+    if ((Last != 0) && ((Now - Last) < MI_PAGER_PROGRESS_WINDOW))
+        return TRUE;
+    if ((MmModifiedPageListHead.Total != 0) &&
+        MiPagerWritable &&
+        (MiPagerWriterStarted == 2) &&
+        (MiPagerFreeSlotCount() != 0))
+    {
+        MiPagerWakeWriter();
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* The balancer gives the writer a moment before its next pass */
+VOID
+NTAPI
+MiPagerWaitForProgress(VOID)
+{
+    LARGE_INTEGER Delay;
+
+    MiPagerCounters.BalancerWaits++;
+    Delay.QuadPart = -50LL * 10000;
+    KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+}
+
+/*
+ * End of a balancer pass, NitroPager on (balance.c): the exhaustion check the
+ * inherited "game over" test cannot make (its target is always 0). Usable
+ * pages below MI_PAGER_STARVED_PAGES means waitable user faults are being
+ * refused (their floor is 256). Such a pass that freed nothing and did not
+ * raise usable pages is a no-progress pass; when the writer can still make
+ * progress (I/O in flight, a write completed in the last 10 s, writable
+ * modified pages and free slots) the balancer waits for it; otherwise, after
+ * 60 s of nothing but no-progress passes, the bugcheck says why:
+ * NO_PAGES_AVAILABLE(usable pages, modified pages, paging I/O in flight,
+ * writer state). Balancer thread only.
+ */
+#define MI_PAGER_STARVED_PAGES 512
+#define MI_PAGER_EXHAUSTED_AFTER (60ULL * 10 * 1000 * 1000)
+#define MI_PAGER_EXHAUSTED_AFTER_TEST (15ULL * 10 * 1000 * 1000)
+VOID
+NTAPI
+MiPagerBalancerPassDone(
+    _In_ PFN_NUMBER UsableBefore,
+    _In_ ULONG Freed)
+{
+    static ULONGLONG NoProgressSince;
+    PFN_NUMBER Usable = MiGetUsablePageCount();
+    ULONGLONG Now = KeQueryInterruptTime(), Window;
+    ULONG_PTR WriterState;
+    LARGE_INTEGER Delay;
+    PFN_NUMBER Starved;
+
+    /*
+     * Test knob 0x40: starved below the low-water mark instead. At flag 1 the commit ceiling
+     * (RAM-bound until P4) keeps private memory from exhausting usable pages by itself, so
+     * the test needs the higher mark to reach the check.
+     */
+    Starved = (MiNitroPagerDebug & MI_PAGER_DEBUG_TRIM_NOTHING) ? MiLowWaterPages : MI_PAGER_STARVED_PAGES;
+    if (MiNitroPagerDebug & MI_PAGER_DEBUG_TRIM_NOTHING)
+    {
+        /* Test: the cache and the legacy floor keep freeing a little; only the mark counts */
+        Freed = 0;
+        UsableBefore = Usable;
+    }
+    if ((Usable >= Starved) || (Freed != 0) || (Usable > UsableBefore) || MiPagerShutdown)
+    {
+        NoProgressSince = 0;
+        return;
+    }
+
+    MiPagerCounters.NoProgressPasses++;
+    if (MiPagerCanMakeProgress(&WriterState))
+    {
+        NoProgressSince = 0;
+        MiPagerWaitForProgress();
+        return;
+    }
+
+    if (NoProgressSince == 0)
+        NoProgressSince = Now;
+    Window = (MiNitroPagerDebug & MI_PAGER_DEBUG_TRIM_NOTHING) ? MI_PAGER_EXHAUSTED_AFTER_TEST : MI_PAGER_EXHAUSTED_AFTER;
+    if ((Now - NoProgressSince) >= Window)
+    {
+        KeBugCheckEx(NO_PAGES_AVAILABLE,
+                     Usable,
+                     MmModifiedPageListHead.Total,
+                     (ULONG_PTR)MiPagingIoInFlight,
+                     WriterState);
+    }
+
+    /* Not a busy loop of empty passes while waiting to decide */
+    Delay.QuadPart = -50LL * 10000;
+    KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+}
+
+/* Per-process trimmer state, keyed by process and id; the balancer thread is the only user */
+typedef struct _MI_TRIM_CURSOR
+{
+    PEPROCESS Process;
+    HANDLE ProcessId;
+    ULONG_PTR NextVa;
+    ULONG Resident;
+    ULONG SeenThisCycle;
+    ULONG Misses;
+    ULONG Stamp;
+} MI_TRIM_CURSOR, *PMI_TRIM_CURSOR;
+
+static MI_TRIM_CURSOR MiTrimCursors[MI_TRIM_CURSORS];
+static ULONG MiTrimStamp;
+static PEPROCESS MiTrimList[MI_TRIM_PROCESSES];
+static PMI_TRIM_CURSOR MiTrimListCursor[MI_TRIM_PROCESSES];
+
+static
+PMI_TRIM_CURSOR
+MiTrimFindCursor(
+    _In_ PEPROCESS Process)
+{
+    PMI_TRIM_CURSOR Cursor, Oldest = &MiTrimCursors[0];
+    ULONG i;
+
+    for (i = 0; i < MI_TRIM_CURSORS; i++)
+    {
+        Cursor = &MiTrimCursors[i];
+        if ((Cursor->Process == Process) && (Cursor->ProcessId == Process->UniqueProcessId))
+        {
+            Cursor->Stamp = MiTrimStamp;
+            return Cursor;
+        }
+        if ((LONG)(Cursor->Stamp - Oldest->Stamp) < 0)
+            Oldest = Cursor;
+    }
+
+    /* A process not seen lately: a fresh cursor, a middling size guess so it is looked at soon */
+    RtlZeroMemory(Oldest, sizeof(*Oldest));
+    Oldest->Process = Process;
+    Oldest->ProcessId = Process->UniqueProcessId;
+    Oldest->Resident = 0x4000;
+    Oldest->Stamp = MiTrimStamp;
+    return Oldest;
+}
+
+/* Clear the Accessed bit of a valid PTE without losing a Dirty bit a processor sets meanwhile */
+static
+BOOLEAN
+MiClearPteAccessed(
+    _In_ PMMPTE PointerPte)
+{
+    MMPTE OldPte, NewPte;
+    ULONG Tries;
+
+    for (Tries = 0; Tries < 4; Tries++)
+    {
+        OldPte = *PointerPte;
+        if ((OldPte.u.Hard.Valid == 0) || (OldPte.u.Hard.Accessed == 0))
+            return FALSE;
+        NewPte = OldPte;
+        NewPte.u.Hard.Accessed = 0;
+        if ((ULONG_PTR)InterlockedCompareExchangePte(PointerPte, NewPte.u.Long, OldPte.u.Long) == (ULONG_PTR)OldPte.u.Long)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* A private VAD the trimmer may look at (as MiTrimCurrentProcess) */
+static
+BOOLEAN
+MiIsTrimmableVad(
+    _In_ PMMVAD Vad)
+{
+    return !MI_IS_MEMORY_AREA_VAD(Vad) &&
+           (Vad->u.VadFlags.PrivateMemory != 0) &&
+           (Vad->u.VadFlags.VadType == VadNone) &&
+           (Vad->u.VadFlags.NoChange == 0);
+}
+
+/*
+ * The clock hand over one process (working set lock held, attached): from
+ * the cursor on, a valid private page whose Accessed bit is set loses it
+ * (it was used since the hand passed last); one whose bit is clear is
+ * trimmed. Force: trim without looking at the bit. Invalid upper levels are
+ * stepped over, each counted as one examined entry, so huge reservations
+ * cost a bounded amount per pass.
+ */
+static
+VOID
+MiTrimProcessClock(
+    _In_ PEPROCESS Process,
+    _Inout_ PMI_TRIM_CURSOR Cursor,
+    _In_ ULONG Want,
+    _In_ BOOLEAN Force,
+    _Inout_ PMI_TRIM_CONTEXT Context)
+{
+    PMMADDRESS_NODE Node;
+    PMMVAD Vad;
+    ULONG_PTR Va = Cursor->NextVa, Start, End;
+    ULONG Examined = 0, Limit = min(Want, (ULONG)MI_TRIM_PAGE_BUDGET);
+    BOOLEAN Wrapped = FALSE;
+    PMMPTE PointerPte;
+    PMMPDE PointerPde;
+
+    for (Node = MiGetFirstNode(&Process->VadRoot); Node != NULL; Node = MiGetNextNode(Node))
+    {
+        if (((PMMVAD)Node)->EndingVpn >= (Va >> PAGE_SHIFT))
+            break;
+    }
+
+    while ((Examined < MI_TRIM_EXAMINE_BUDGET) && (Context->Trimmed < Limit))
+    {
+        if (Node == NULL)
+        {
+            /* End of the address space: one turn of the hand is complete */
+            Cursor->Resident = Cursor->SeenThisCycle;
+            Cursor->SeenThisCycle = 0;
+            Va = 0;
+            if (Wrapped)
+                break;
+            Wrapped = TRUE;
+            Node = MiGetFirstNode(&Process->VadRoot);
+            continue;
+        }
+
+        Vad = (PMMVAD)Node;
+        Examined++;
+        Start = Vad->StartingVpn << PAGE_SHIFT;
+        End = (Vad->EndingVpn << PAGE_SHIFT) | (PAGE_SIZE - 1);
+        if (End > (ULONG_PTR)MM_HIGHEST_USER_ADDRESS)
+            End = (ULONG_PTR)MM_HIGHEST_USER_ADDRESS;
+        if (!MiIsTrimmableVad(Vad) || (Va > End))
+        {
+            Node = MiGetNextNode(Node);
+            continue;
+        }
+        if (Va < Start)
+            Va = Start;
+
+        while ((Va <= End) && (Examined < MI_TRIM_EXAMINE_BUDGET) && (Context->Trimmed < Limit))
+        {
+#if (_MI_PAGING_LEVELS >= 4)
+            PMMPXE PointerPxe = MiAddressToPxe((PVOID)Va);
+            if (!PointerPxe->u.Hard.Valid)
+            {
+                Examined++;
+                Va = (ULONG_PTR)MiPxeToAddress(PointerPxe + 1);
+                if (Va == 0)
+                    Va = End + 1;
+                continue;
+            }
+#endif
+#if (_MI_PAGING_LEVELS >= 3)
+            {
+                PMMPPE PointerPpe = MiAddressToPpe((PVOID)Va);
+                if (!PointerPpe->u.Hard.Valid)
+                {
+                    Examined++;
+                    Va = (ULONG_PTR)MiPpeToAddress(PointerPpe + 1);
+                    if (Va == 0)
+                        Va = End + 1;
+                    continue;
+                }
+            }
+#endif
+            PointerPde = MiAddressToPde((PVOID)Va);
+            if (!PointerPde->u.Hard.Valid || PointerPde->u.Hard.LargePage)
+            {
+                Examined++;
+                Va = (ULONG_PTR)MiPdeToAddress(PointerPde + 1);
+                if (Va == 0)
+                    Va = End + 1;
+                continue;
+            }
+
+            PointerPte = MiAddressToPte((PVOID)Va);
+            do
+            {
+                Examined++;
+                if (PointerPte->u.Hard.Valid)
+                {
+                    Cursor->SeenThisCycle++;
+                    if (!Force && PointerPte->u.Hard.Accessed)
+                    {
+                        if (MiClearPteAccessed(PointerPte))
+                        {
+                            Context->Aged++;
+                            MmAddToTbFlushList(&Context->FlushList, (PVOID)Va);
+                        }
+                    }
+                    else
+                    {
+                        MiTrimPte(PointerPte, (PVOID)Va, Context);
+                    }
+                }
+                PointerPte++;
+                Va += PAGE_SIZE;
+            } while ((Va <= End) && (Va != 0) && !MiIsPteOnPdeBoundary(PointerPte) &&
+                     (Examined < MI_TRIM_EXAMINE_BUDGET) && (Context->Trimmed < Limit));
+            if (Va == 0)
+                Va = End + 1;
+        }
+
+        if (Va > End)
+        {
+            Node = MiGetNextNode(Node);
+            if (Node == NULL)
+                Va = 0;
+        }
+    }
+
+    Cursor->NextVa = Va;
+}
+
+/* Trim results of one process */
+#define MI_TRIM_DONE    0
+#define MI_TRIM_MISSED  1
+#define MI_TRIM_SKIPPED 2
+
+/*
+ * Trim one process for the balancer: attach, try (never wait for) the
+ * address space lock and the working set lock, one clock pass with budgets.
+ */
+static
+ULONG
+MiTrimProcessForPressure(
+    _In_ PEPROCESS Process,
+    _Inout_ PMI_TRIM_CURSOR Cursor,
+    _In_ ULONG Want,
+    _In_ BOOLEAN Force,
+    _Out_ PULONG Trimmed)
+{
+    PETHREAD Thread = PsGetCurrentThread();
+    MI_TRIM_CONTEXT Context;
+    KAPC_STATE ApcState;
+    ULONG Result = MI_TRIM_DONE;
+
+    *Trimmed = 0;
+    if (!ExAcquireRundownProtection(&Process->RundownProtect))
+        return MI_TRIM_SKIPPED;
+
+    KeStackAttachProcess(&Process->Pcb, &ApcState);
+    if (!KeTryToAcquireGuardedMutex(&Process->AddressCreationLock))
+    {
+        Result = MI_TRIM_MISSED;
+    }
+    else if (Process->VmDeleted || (Process->AddressSpaceInitialized < 2))
+    {
+        KeReleaseGuardedMutex(&Process->AddressCreationLock);
+        Result = MI_TRIM_SKIPPED;
+    }
+    else if (!MiTryLockProcessWorkingSet(Process, Thread))
+    {
+        KeReleaseGuardedMutex(&Process->AddressCreationLock);
+        Result = MI_TRIM_MISSED;
+    }
+    else
+    {
+        /* User addresses: only the processors running this process cache them */
+        MmInitializeTbFlushList(&Context.FlushList, FALSE);
+        Context.Count = 0;
+        Context.Trimmed = 0;
+        Context.Dirty = 0;
+        Context.Aged = 0;
+        Context.CleanOnly = MiPagerSlotsShort;
+        MiTrimProcessClock(Process, Cursor, Want, Force, &Context);
+        MiTrimFlush(&Context);
+        MiPagerCounters.Aged += Context.Aged;
+
+        MiUnlockProcessWorkingSet(Process, Thread);
+        KeReleaseGuardedMutex(&Process->AddressCreationLock);
+        *Trimmed = Context.Trimmed;
+    }
+    KeUnstackDetachProcess(&ApcState);
+    ExReleaseRundownProtection(&Process->RundownProtect);
+
+    if (Result == MI_TRIM_MISSED)
+        MiPagerCounters.WsTryLockMisses++;
+    return Result;
+}
+
+/*
+ * Automatic trimming (P1), from the balancer thread after the clean cache
+ * trim: when usable pages (free, zeroed, private standby) are below the
+ * low-water mark (by the shortfall, or the balancer's target), private pages of user
+ * processes are trimmed, largest resident set first (last full turn of the
+ * clock), with the clock's Accessed-bit aging unless usable pages are nearly
+ * gone. Dirty pages go to the modified list and the writer is woken. If the
+ * largest process's locks stay busy, the others are trimmed without aging
+ * (starvation fallback, counted). Returns the pages trimmed.
+ */
+ULONG
+NTAPI
+MiPagerBalance(
+    _In_ ULONG LowWaterPages,
+    _In_ ULONG Target)
+{
+    PEPROCESS Process = NULL;
+    PMI_TRIM_CURSOR Cursor;
+    PFN_NUMBER Usable;
+    ULONG Need, Trimmed = 0, Got, Count = 0, i, j, Round, Rounds, Result;
+    BOOLEAN Force, Starved = FALSE;
+
+    if ((MiNitroPagerMode == 0) || MiPagerShutdown || (MmNumberOfPagingFiles == 0) ||
+        (MiNitroPagerDebug & MI_PAGER_DEBUG_TRIM_NOTHING))
+    {
+        return 0;
+    }
+
+    /* Only below the low-water mark: a consumer target alone (legacy pages over their share) is not ours to meet */
+    Usable = MiGetUsablePageCount();
+    if (Usable >= LowWaterPages)
+        return 0;
+    Need = max(Target, (ULONG)(LowWaterPages - Usable) + LowWaterPages / 4);
+    Force = (Usable < max(LowWaterPages / 8, MI_PAGER_FORCE_TRIM_MINIMUM));
+
+    /* The processes with an address space, referenced, largest first */
+    MiTrimStamp++;
+    while ((Process = PsGetNextProcess(Process)) != NULL)
+    {
+        if ((Process == PsInitialSystemProcess) ||
+            (Process == PsIdleProcess) ||
+            Process->VmDeleted ||
+            (Process->AddressSpaceInitialized < 2))
+        {
+            continue;
+        }
+        if (Count == MI_TRIM_PROCESSES)
+        {
+            ObDereferenceObject(Process);
+            break;
+        }
+        ObReferenceObject(Process);
+        Cursor = MiTrimFindCursor(Process);
+        for (j = Count; (j > 0) && (MiTrimListCursor[j - 1]->Resident < Cursor->Resident); j--)
+        {
+            MiTrimList[j] = MiTrimList[j - 1];
+            MiTrimListCursor[j] = MiTrimListCursor[j - 1];
+        }
+        MiTrimList[j] = Process;
+        MiTrimListCursor[j] = Cursor;
+        Count++;
+    }
+
+    /*
+     * Share the shortfall with the legacy user consumer (RosMm file data, image and
+     * section pages, up to half of RAM by its own target). Without this the trimmer
+     * kept usable pages just above the legacy floor (256 pages), the legacy pages were
+     * never paged out, and private working sets thrashed to feed the file cache: an
+     * MSI install took 8 min at flag 1 against 31 s at flag 0 on a 3 GB guest with
+     * 1.5 GB of private load, with 1.1 GB held by legacy pages (lane pagerp1, 11-07).
+     * The legacy part is in proportion to its size against the private resident
+     * pages (the clock's last full turns); legacy pages that were freed count.
+     */
+    {
+        ULONG Legacy = MiMemoryConsumers[MC_USER].PagesUsed, Private = 0, LegacyTarget, Freed = 0;
+        ULONGLONG Share;
+
+        for (i = 0; i < Count; i++)
+            Private += min(MiTrimListCursor[i]->Resident, 0x100000UL);
+
+        /*
+         * With aging (Priority FALSE: the legacy pass clears the accessed bits of the pages
+         * it looks at and pages out those not used since; it reports nothing freed, so the
+         * private share is trimmed in full), paging out the LRU directly (TRUE) only when
+         * usable pages are nearly gone, as Force does for private pages. Not while slots are
+         * short: legacy page-out of dirty pages takes slots too. At most MI_TRIM_PAGE_BUDGET
+         * pages per pass: this is the legacy path the balancer always ran, with its waits
+         * for working set and segment locks, so its share of a pass stays bounded.
+         */
+        if ((Legacy != 0) && MiMemoryConsumers[MC_USER].Trim && !MiPagerSlotsShort &&
+            !(MiNitroPagerDebug & MI_PAGER_DEBUG_TRIM_NOTHING))
+        {
+            Share = ((ULONGLONG)Need * Legacy) / ((ULONGLONG)Legacy + Private);
+            LegacyTarget = (ULONG)min(Share, (ULONGLONG)MI_TRIM_PAGE_BUDGET);
+            if (LegacyTarget != 0)
+            {
+                MiMemoryConsumers[MC_USER].Trim(LegacyTarget, Force, &Freed);
+                MiPagerCounters.LegacyFreed += Freed;
+                MiPagerCounters.LegacyAsked += LegacyTarget;
+                Trimmed += Freed;
+            }
+        }
+    }
+
+    /* A second round only when pages are nearly gone: the hand then trims what the first round aged */
+    Rounds = Force ? 2 : 1;
+    for (Round = 0; (Round < Rounds) && (Trimmed < Need) && !MiPagerShutdown; Round++)
+    {
+        for (i = 0; (i < Count) && (Trimmed < Need); i++)
+        {
+            Cursor = MiTrimListCursor[i];
+            Result = MiTrimProcessForPressure(MiTrimList[i], Cursor, Need - Trimmed, Force || Starved, &Got);
+            if (Result == MI_TRIM_MISSED)
+            {
+                /* The largest process stays busy: the others give more this pass */
+                if ((i == 0) && (++Cursor->Misses >= MI_TRIM_STARVE_LIMIT) && !Starved)
+                {
+                    Starved = TRUE;
+                    MiPagerCounters.StarvationRounds++;
+                }
+            }
+            else
+            {
+                Cursor->Misses = 0;
+            }
+            Trimmed += Got;
+        }
+    }
+
+    for (i = 0; i < Count; i++)
+        ObDereferenceObject(MiTrimList[i]);
+
+    if (MmModifiedPageListHead.Total != 0)
+        MiPagerWakeWriter();
+    MiPagerCounters.BalancerTrimmed += Trimmed;
+    return Trimmed;
 }
 
 /*

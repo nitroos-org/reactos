@@ -1224,7 +1224,16 @@ IoSynchronousPageWrite(IN PFILE_OBJECT FileObject,
 
     /* Allocate IRP */
     Irp = IoAllocateIrp(DeviceObject->StackSize, FALSE);
-    if (!Irp) return STATUS_INSUFFICIENT_RESOURCES;
+    if (!Irp)
+    {
+        /*
+         * A write to a paging file frees memory (the modified page writer, the
+         * legacy page-out): when pool is gone, use a reserve IRP, as page reads do
+         */
+        if (MmIsFileObjectAPagingFile(FileObject))
+            Irp = IopAllocateReserveIrp(DeviceObject->StackSize);
+        if (!Irp) return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     /* Get the Stack */
     StackPtr = IoGetNextIrpStackLocation(Irp);

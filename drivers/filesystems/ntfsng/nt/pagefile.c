@@ -12,6 +12,11 @@
 #define NDEBUG
 #include <debug.h>
 
+/* The largest paging transfer the volume's reserve IRP and MDL can carry (64 KB plus one page of offset) */
+#define NG_PAGING_RESERVE_PAGES 17
+
+static VOID NgPagingReserveInit(PNG_VCB Vcb);
+
 /* IO_DISK_INCREMENT for the waiter, as for the core's transfers (NgReadCompletion). */
 static NTSTATUS NTAPI NgPagingCompletion(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
 {
@@ -34,23 +39,49 @@ static NTSTATUS NgPagingDevIo(PNG_VCB Vcb, UCHAR Major, ULONGLONG Dev, PMDL Mdl,
     KEVENT Event;
     NTSTATUS Status;
     PIRP Irp;
+    BOOLEAN Reserve = FALSE;
 
     /* Paging I/O cannot wait for the core lock: a transfer issued before a verify completes still goes out. */
     if (Vcb->WrongMedia)
         return STATUS_FILE_INVALID;
     Irp = IoAllocateIrp(Target->StackSize, FALSE);
-    if (!Irp)
-        return STATUS_INSUFFICIENT_RESOURCES;
-    if (MdlOffset || Length != MmGetMdlByteCount(Mdl))
+    if (Irp && (MdlOffset || Length != MmGetMdlByteCount(Mdl)))
     {
         PCHAR Va = (PCHAR)MmGetMdlVirtualAddress(Mdl) + MdlOffset;
         Partial = IoAllocateMdl(Va, Length, FALSE, FALSE, NULL);
         if (!Partial)
         {
             IoFreeIrp(Irp);
-            return STATUS_INSUFFICIENT_RESOURCES;
+            Irp = NULL;
         }
-        IoBuildPartialMdl(Mdl, Partial, Va, Length);
+        else
+        {
+            IoBuildPartialMdl(Mdl, Partial, Va, Length);
+        }
+    }
+    if (!Irp)
+    {
+        /*
+         * No pool: this transfer may be the one that frees memory (a page written out). Wait for the
+         * volume's reserve IRP and partial MDL, if the transfer fits them; otherwise fail as before.
+         */
+        PCHAR Va = (PCHAR)MmGetMdlVirtualAddress(Mdl) + MdlOffset;
+
+        if (!Vcb->PagingReserveReady ||
+            Target->StackSize > Vcb->PagingReserveIrp->StackCount ||
+            ADDRESS_AND_SIZE_TO_SPAN_PAGES(Va, Length) > NG_PAGING_RESERVE_PAGES)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        KeWaitForSingleObject(&Vcb->PagingReserveFree, Executive, KernelMode, FALSE, NULL);
+        Reserve = TRUE;
+        InterlockedIncrement(&Vcb->PagingReserveUses);
+        Irp = Vcb->PagingReserveIrp;
+        IoInitializeIrp(Irp, IoSizeOfIrp(Target->StackSize), Target->StackSize);
+        if (MdlOffset || Length != MmGetMdlByteCount(Mdl))
+        {
+            Partial = Vcb->PagingReserveMdl;
+            MmInitializeMdl(Partial, Va, Length);
+            IoBuildPartialMdl(Mdl, Partial, Va, Length);
+        }
     }
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     Irp->MdlAddress = Partial ? Partial : Mdl;
@@ -69,10 +100,42 @@ static NTSTATUS NgPagingDevIo(PNG_VCB Vcb, UCHAR Major, ULONGLONG Dev, PMDL Mdl,
         KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
     Status = Irp->IoStatus.Status;
     Irp->MdlAddress = NULL;
+    if (Reserve)
+    {
+        if (Partial && (Partial->MdlFlags & MDL_PARTIAL_HAS_BEEN_MAPPED))
+            MmPrepareMdlForReuse(Partial);
+        KeSetEvent(&Vcb->PagingReserveFree, IO_NO_INCREMENT, FALSE);
+        return Status;
+    }
     IoFreeIrp(Irp);
     if (Partial)
         IoFreeMdl(Partial);
     return Status;
+}
+
+/* The volume's paging reserve (NgPagingDevIo), once, when a paging file is first mapped. Caller holds CoreLock. */
+static VOID NgPagingReserveInit(PNG_VCB Vcb)
+{
+    PDEVICE_OBJECT Target = Vcb->StorageDevice;
+
+    if (Vcb->PagingReserveReady)
+        return;
+    /* Room for a deeper stack than today's, should a filter be attached later */
+    Vcb->PagingReserveIrp = IoAllocateIrp((CCHAR)(Target->StackSize + 2), FALSE);
+    Vcb->PagingReserveMdl = IoAllocateMdl(NULL, NG_PAGING_RESERVE_PAGES * PAGE_SIZE, FALSE, FALSE, NULL);
+    if (!Vcb->PagingReserveIrp || !Vcb->PagingReserveMdl)
+    {
+        if (Vcb->PagingReserveIrp)
+            IoFreeIrp(Vcb->PagingReserveIrp);
+        if (Vcb->PagingReserveMdl)
+            IoFreeMdl(Vcb->PagingReserveMdl);
+        Vcb->PagingReserveIrp = NULL;
+        Vcb->PagingReserveMdl = NULL;
+        DPRINT1("ntfsng: no paging reserve for this volume (no pool now), tried again at the next map\n");
+        return;
+    }
+    KeInitializeEvent(&Vcb->PagingReserveFree, SynchronizationEvent, TRUE);
+    Vcb->PagingReserveReady = TRUE;
 }
 
 typedef struct
@@ -126,6 +189,7 @@ NTSTATUS NgPagingFileMap(PNG_FCB Fcb)
         DPRINT1("ntfsng: paging file map failed %d\n", Err);
         return NgErrnoToStatus(Err);
     }
+    NgPagingReserveInit(Fcb->Vcb);
     KeAcquireSpinLock(&Fcb->RunLock, &Irql);
     Old = Fcb->Runs;
     Fcb->Runs = B.Runs;

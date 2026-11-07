@@ -161,6 +161,13 @@ typedef struct _NG_VCB
     ULONG Syncs;
     ULONG NonCachedViaCache;            /* non-cached writes sent through Cc: a view could not be purged */
     LONG PagingFileReads, PagingFileWrites;
+    /* For a paging transfer when pool is gone: one device IRP and one partial MDL, set up when a paging
+       file is first mapped, never freed (the volume holds the paging file until shutdown) */
+    PIRP PagingReserveIrp;
+    PMDL PagingReserveMdl;
+    KEVENT PagingReserveFree;       /* signalled while the reserve is not in use; auto-reset */
+    BOOLEAN PagingReserveReady;
+    LONG PagingReserveUses;
     ULONG CoreDepth;                /* recursion depth of CoreLock held by its owner */
     UCHAR CoreCategory;             /* NG_LOCK_* of the outermost holder */
     LARGE_INTEGER CoreSince;        /* performance counter when the outermost holder got it */
