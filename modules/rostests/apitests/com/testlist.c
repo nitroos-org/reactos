@@ -16,6 +16,7 @@ extern void func_prnfldr(void);
 extern void func_shdocvw(void);
 extern void func_shell32(void);
 extern void func_windows_storage(void);
+extern void func_winrt_composition(void);
 extern void func_winrt_packagemanager(void);
 extern void func_winrt_profile(void);
 extern void func_winrt_ui(void);
@@ -37,6 +38,7 @@ const struct test winetest_testlist[] =
     { "shdocvw", func_shdocvw },
     { "shell32", func_shell32 },
     { "windows_storage", func_windows_storage },
+    { "winrt_composition", func_winrt_composition },
     { "winrt_packagemanager", func_winrt_packagemanager },
     { "winrt_profile", func_winrt_profile },
     { "winrt_ui", func_winrt_ui },
