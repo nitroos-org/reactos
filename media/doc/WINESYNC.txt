@@ -60,7 +60,7 @@ dll/directx/wine/d3dx11_42 => 43 # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/d3dx9_24 => 43 # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/d3dxof         # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/ddraw          # Synced to wine-10.1-dev (b00c7619f1b)
-dll/directx/wine/ddrawex        # Synced to wine-10.1-dev (b00c7619f1b)
+dll/directx/wine/ddrawex        # Synced to Wine-11.21
 dll/directx/wine/devenum        # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dinput         # Synced to WineStaging-4.18
 dll/directx/wine/dinput8        # Synced to WineStaging-4.18
