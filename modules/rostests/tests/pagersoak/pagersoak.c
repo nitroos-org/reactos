@@ -536,9 +536,17 @@ static int FckWrite(int f, int blk, const unsigned char *b)
     memset(&ov, 0, sizeof(ov)); ov.Offset = blk * PAGE;
     return WriteFile(gFh[f], b, PAGE, &wr, &ov) && wr == PAGE;
 }
-static void FckLog(int type, int f, int blk, u32 gen)
+/*
+ * Append one record. Returns 0 when the log is full: that is an error of the run (the
+ * offline check could not judge the writes that follow), so the file writers stop, the
+ * error is counted and said once, and the fck child fails (the supervisor's verdict
+ * is FAIL). Size the log with logmb= for long runs.
+ */
+static volatile LONG gLogFull;
+static int FckLog(int type, int f, int blk, u32 gen)
 {
     FREC r; OVERLAPPED ov; DWORD wr;
+    int ok = 1;
     EnterCriticalSection(&gLogCs);
     if (gLogH != INVALID_HANDLE_VALUE && gLogOff + FCK_LOGREC <= gLogMax)
     {
@@ -547,7 +555,18 @@ static void FckLog(int type, int f, int blk, u32 gen)
         if (!WriteFile(gLogH, &r, FCK_LOGREC, &wr, &ov) || wr != FCK_LOGREC) InterlockedIncrement(&gFErr);
         gLogOff += FCK_LOGREC;
     }
+    else
+    {
+        ok = 0;
+        if (InterlockedExchange(&gLogFull, 1) == 0)
+        {
+            InterlockedIncrement(&gFErr);
+            gFStop = 1;
+            Say("PAGERH:FCK ERROR log full at %lld bytes (logmb too small for this run): file writes stopped, the run FAILS", gLogOff);
+        }
+    }
     LeaveCriticalSection(&gLogCs);
+    return ok;
 }
 
 static DWORD WINAPI FckWriter(LPVOID a)
@@ -560,7 +579,14 @@ static DWORD WINAPI FckWriter(LPVOID a)
         int f = (int)((r = mix64(r)) % FCK_FILES), n = 1 + (int)(r >> 40) % 3, i, blk0 = (int)((r >> 8) % (FCK_BLOCKS - 4));
         u32 g[4];
         EnterCriticalSection(&gFcs[f]);
-        for (i = 0; i < n; i++) { g[i] = ++gFGen[f][blk0 + i]; FckLog(1, f, blk0 + i, g[i]); }
+        /* No intent record, no write: data is never newer than the log */
+        for (i = 0; i < n; i++)
+        {
+            if (!FckLog(1, f, blk0 + i, gFGen[f][blk0 + i] + 1)) break;
+            g[i] = ++gFGen[f][blk0 + i];
+        }
+        n = i;
+        if (n == 0) { LeaveCriticalSection(&gFcs[f]); break; }
         for (i = 0; i < n; i++)
         {
             FckFill(buf + i * PAGE, f, blk0 + i, g[i]);
@@ -712,6 +738,7 @@ static void MakeStop(void)
     h = CreateFileA(sp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
     if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
 }
+static long gLogMb = 64;
 static SECURITY_ATTRIBUTES gInh = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
 
 static int StartChild(CHILD *c, long secs)
@@ -725,7 +752,7 @@ static int StartChild(CHILD *c, long secs)
     else if (c->Kind <= 3)
         _snprintf(cmd, sizeof(cmd) - 1, "\"%s\" sect id=%d role=%s mb=%ld secs=%ld hb=%lu dir=%s", gExe, c->Id, c->Kind == 2 ? "w" : "r", c->Mb, secs, (unsigned long)(ULONG_PTR)gHbMap, gDir);
     else
-        _snprintf(cmd, sizeof(cmd) - 1, "\"%s\" fck id=%d secs=%ld hb=%lu dir=%s", gExe, c->Id, secs, (unsigned long)(ULONG_PTR)gHbMap, gDir);
+        _snprintf(cmd, sizeof(cmd) - 1, "\"%s\" fck id=%d secs=%ld logmb=%ld hb=%lu dir=%s", gExe, c->Id, secs, gLogMb, (unsigned long)(ULONG_PTR)gHbMap, gDir);
     cmd[sizeof(cmd) - 1] = 0;
     gMismAccum += gHb[c->Id].Mism;
     memset(&gHb[c->Id], 0, sizeof(HBSLOT));
@@ -849,6 +876,9 @@ static int SupMain(int argc, char **argv)
     double ratio = atof(Arg(argc, argv, "ratio", "1.6"));
     long nsteady = ArgL(argc, argv, "workers", 5), nchurn = ArgL(argc, argv, "churn", 2), life = ArgL(argc, argv, "life", 60);
     long sect = ArgL(argc, argv, "sect", 0), fck = ArgL(argc, argv, "fck", 1), counters = ArgL(argc, argv, "counters", 60);
+    /* fck log: about 12 MB per hour were used in an 8 h soak; 32 MB per started hour, at least 64 MB */
+    gLogMb = ArgL(argc, argv, "logmb", 0);
+    if (gLogMb <= 0) gLogMb = max(64L, ((ArgL(argc, argv, "secs", 600) + 3599) / 3600) * 32L);
     long stallsecs = ArgL(argc, argv, "stall", 180);
     long mbmax = ArgL(argc, argv, "mbmax", 0);   /* explicit total instead of ratio * RAM */
     const char *clamp = Arg(argc, argv, "commit", "clamp");   /* clamp: stay under the commit limit; none: ask for the ratio and count denials */
