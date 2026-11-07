@@ -145,6 +145,8 @@ static volatile ULONG MiPagerFreeRefusedBase;
 volatile LONG MiPagingIoInFlight;
 /* Interrupt time when paging I/O last started from idle or completed: in-flight I/O older than this window is stuck */
 static volatile ULONGLONG MiPagingIoLastEvent;
+/* Interrupt time when the writer thread's current cluster write started (0 = none in flight) */
+static volatile ULONGLONG MiPagerWriterIoStart;
 #define MI_PAGER_IO_STUCK_AFTER (120ULL * 10 * 1000 * 1000)
 /* Fourth NO_PAGES_AVAILABLE parameter: writer state, plus this flag when paging I/O was in flight but stuck */
 #define MI_WRITER_IO_STUCK 0x100
@@ -711,6 +713,8 @@ MiWriteModifiedPrivatePagesEx(
         }
 
         MiPagingIoStart();
+        if (MiPagerIsWriterThread())
+            MiPagerWriterIoStart = KeQueryInterruptTime();
         if (MiPagerHangWrites && MiPagerIsWriterThread())
         {
             LARGE_INTEGER Forever;
@@ -723,6 +727,8 @@ MiWriteModifiedPrivatePagesEx(
         }
         if (NT_SUCCESS(Status))
             Status = MiWritePageFileCluster(Batch, Taken, FileIndex, FirstSlot);
+        if (MiPagerIsWriterThread())
+            MiPagerWriterIoStart = 0;
         MiPagingIoDone();
 
         /* Test: hold the completion of this cluster until the test says go (written, referenced, off every list) */
@@ -1112,13 +1118,23 @@ MiPagingIoDone(VOID)
     InterlockedDecrement(&MiPagingIoInFlight);
 }
 
-/* Paging I/O is in flight and nothing started from idle or completed for MI_PAGER_IO_STUCK_AFTER: a hung device */
+/*
+ * Paging I/O is stuck: in flight with nothing started from idle or completed
+ * for MI_PAGER_IO_STUCK_AFTER (a hung device), or the writer's own cluster
+ * write is older than that (page reads completing meanwhile do not make the
+ * writer progress: its modified pages stay unwritten)
+ */
 static
 BOOLEAN
 MiPagingIoStuck(VOID)
 {
-    return (MiPagingIoInFlight > 0) &&
-           ((KeQueryInterruptTime() - MiPagingIoLastEvent) >= MI_PAGER_IO_STUCK_AFTER);
+    ULONGLONG Now = KeQueryInterruptTime(), WriteStart = MiPagerWriterIoStart;
+
+    if (MiPagingIoInFlight <= 0)
+        return FALSE;
+    if ((Now - MiPagingIoLastEvent) >= MI_PAGER_IO_STUCK_AFTER)
+        return TRUE;
+    return (WriteStart != 0) && (Now > WriteStart) && ((Now - WriteStart) >= MI_PAGER_IO_STUCK_AFTER);
 }
 
 BOOLEAN
