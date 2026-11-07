@@ -213,6 +213,7 @@ typedef struct _MM_SECTION_SEGMENT
     LARGE_INTEGER Length;			/* absolute length of the segment */
     PLONG64 ReferenceCount;
 	ULONG SectionCount;
+    ULONG CacheSectionCount; /* data segments: how many of SectionCount are the cache manager's own sections */
     LONG UserMapCount;      /* data segments: views mapped in process address spaces */
     ULONG Protection;
     PULONG Flags;
@@ -1957,6 +1958,11 @@ MmMapViewInSystemSpaceEx(
     _Inout_ PSIZE_T ViewSize,
     _Inout_ PLARGE_INTEGER SectionOffset,
     _In_ ULONG_PTR Flags);
+
+VOID
+NTAPI
+MmMarkCacheSection(
+    _In_ PVOID SectionObject);
 
 BOOLEAN
 NTAPI
