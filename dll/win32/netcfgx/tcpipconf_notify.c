@@ -4928,8 +4928,12 @@ ITcpipProperties_fnUnknown2(
     if (pAdapter->NewDhcpEnabled)
     {
         TRACE("DHCP\n");
-        pAdapter->NewIp->IpAddress = 0;
-        pAdapter->NewIp->u.SubnetMask = 0;
+        /* An adapter that is on DHCP has no static address list: nothing to clear */
+        if (pAdapter->NewIp)
+        {
+            pAdapter->NewIp->IpAddress = 0;
+            pAdapter->NewIp->u.SubnetMask = 0;
+        }
     }
     else
     {
@@ -5025,44 +5029,83 @@ ITcpipProperties_fnUnknown2(
         }
     }
 
-    pszDns = ExtractParameterValue(pProperties->pszParameters, L"DNS");
-    if (pszDns)
+    /* A "DNS=" key replaces the whole name server list; an empty value removes it (DHCP supplies the servers) */
+    if (pProperties->pszParameters && wcsstr(pProperties->pszParameters, L"DNS="))
     {
+        IP_ADDR *pList = NULL, *pLast = NULL, *pEntry;
+
+        pszDns = ExtractParameterValue(pProperties->pszParameters, L"DNS");
         TRACE("DNS: %S\n", pszDns);
-        if (wcslen(pszDns) == 0)
-        {
-            FIXME("Delete DNS!\n");
-        }
-        else
-        {
-            Status = RtlIpv4StringToAddressW((PCWSTR)pszDns,
-                                            TRUE,
-                                            &Term,
-                                            &Dns);
-            if (Status != 0 /*STATUS_SUCCESS*/)
-            {
-                hr = E_FAIL;
-                goto done;
-            }
 
-            TRACE("Dns: %u.%u.%u.%u\n",
-                  Dns.S_un.S_un_b.s_b1, Dns.S_un.S_un_b.s_b2, Dns.S_un.S_un_b.s_b3, Dns.S_un.S_un_b.s_b4);
+        if (pszDns != NULL)
+        {
+            PWSTR pStart = pszDns, pEnd;
 
-            TRACE("pAdapter->NewNs %p\n", pAdapter->NewNs);
-            if (pAdapter->NewNs == NULL)
+            for (;;)
             {
-                pAdapter->NewNs = CoTaskMemAlloc(sizeof(IP_ADDR));
-                if (pAdapter->NewNs == NULL)
+                pEnd = wcschr(pStart, L',');
+                if (pEnd)
+                    *pEnd = UNICODE_NULL;
+
+                if (*pStart == UNICODE_NULL)
                 {
-                    hr = E_OUTOFMEMORY;
-                    goto done;
+                    /* Skip an empty entry */
+                    if (pEnd == NULL)
+                        break;
+                    pStart = pEnd + 1;
+                    continue;
                 }
 
-                ZeroMemory(pAdapter->NewNs, sizeof(IP_ADDR));
-            }
+                Status = RtlIpv4StringToAddressW((PCWSTR)pStart,
+                                                 TRUE,
+                                                 &Term,
+                                                 &Dns);
+                if (Status != 0 /*STATUS_SUCCESS*/)
+                {
+                    hr = E_FAIL;
+                    break;
+                }
 
-            pAdapter->NewNs->IpAddress = ntohl(Dns.S_un.S_addr);
+                pEntry = CoTaskMemAlloc(sizeof(IP_ADDR));
+                if (pEntry == NULL)
+                {
+                    hr = E_OUTOFMEMORY;
+                    break;
+                }
+
+                ZeroMemory(pEntry, sizeof(IP_ADDR));
+                pEntry->IpAddress = ntohl(Dns.S_un.S_addr);
+                if (pLast)
+                    pLast->Next = pEntry;
+                else
+                    pList = pEntry;
+                pLast = pEntry;
+
+                if (pEnd == NULL)
+                    break;
+                pStart = pEnd + 1;
+            }
         }
+
+        if (FAILED(hr))
+        {
+            while (pList)
+            {
+                pEntry = pList->Next;
+                CoTaskMemFree(pList);
+                pList = pEntry;
+            }
+            goto done;
+        }
+
+        /* Replace the list */
+        while (pAdapter->NewNs)
+        {
+            pEntry = pAdapter->NewNs->Next;
+            CoTaskMemFree(pAdapter->NewNs);
+            pAdapter->NewNs = pEntry;
+        }
+        pAdapter->NewNs = pList;
     }
 
     /*

@@ -449,11 +449,20 @@ AppendParameterValue(
     if (pStart == NULL)
         return FALSE;
 
-    pEnd = pStart + wcslen(pszValue) + 1;
-    MoveMemory(pEnd, pStart, wcslen(pStart) * sizeof(WCHAR));
+    /* The first value of an empty list needs no separator */
+    if (*(pStart - 1) == L'=')
+    {
+        pEnd = pStart + wcslen(pszValue);
+        MoveMemory(pEnd, pStart, (wcslen(pStart) + 1) * sizeof(WCHAR));
+    }
+    else
+    {
+        pEnd = pStart + wcslen(pszValue) + 1;
+        MoveMemory(pEnd, pStart, (wcslen(pStart) + 1) * sizeof(WCHAR));
 
-    *pStart = L',';
-    pStart++;
+        *pStart = L',';
+        pStart++;
+    }
     CopyMemory(pStart, pszValue, wcslen(pszValue) * sizeof(WCHAR));
 
     return TRUE;
@@ -695,10 +704,12 @@ IpAddAddress(
         (!bHaveAddress && bHaveMask))
         return ERROR_INVALID_SYNTAX;
 
-    /* We need gateway and metric, or none of them */
-    if ((bHaveGateway && !bHaveMetric) ||
-        (!bHaveGateway && bHaveMetric))
+    /* A metric needs a gateway; the gateway metric is optional (0 = automatic) */
+    if (bHaveMetric && !bHaveGateway)
         return ERROR_INVALID_SYNTAX;
+
+    if (bHaveGateway && !bHaveMetric)
+        pszGwMetric = L"0";
 
     hr = GetInterfaceProperties(&InterfaceGUID, &pProperties);
     if (FAILED(hr))
@@ -947,7 +958,8 @@ IpAddDns(
     wcscpy(pszNewParameters, pProperties->pszParameters);
     AppendParameterValue(pszNewParameters, L"DNS", pszAddress);
 
-    NewProperties.dwDhcp = 0;
+    /* The DNS list does not change how the address is configured */
+    NewProperties.dwDhcp = pProperties->dwDhcp;
     NewProperties.pszIpAddress = pProperties->pszIpAddress;
     NewProperties.pszSubnetMask = pProperties->pszSubnetMask;
     NewProperties.pszParameters = pszNewParameters;
@@ -1475,7 +1487,7 @@ IpDeleteDns(
     wcscpy(pszNewParameters, pProperties->pszParameters);
     DeleteParameterValue(pszNewParameters, L"DNS", pszAddress);
 
-    NewProperties.dwDhcp = 0;
+    NewProperties.dwDhcp = pProperties->dwDhcp;
     NewProperties.pszIpAddress = pProperties->pszIpAddress;
     NewProperties.pszSubnetMask = pProperties->pszSubnetMask;
     NewProperties.pszParameters = pszNewParameters;
@@ -1727,10 +1739,12 @@ IpSetAddress(
     if (bHaveAddress && !bHaveSource)
         return ERROR_INVALID_SYNTAX;
 
-    /* We need gateway and metric, or none of them */
-    if ((bHaveGateway && !bHaveMetric) ||
-        (!bHaveGateway && bHaveMetric))
+    /* A metric needs a gateway; the gateway metric is optional (0 = automatic) */
+    if (bHaveMetric && !bHaveGateway)
         return ERROR_INVALID_SYNTAX;
+
+    if (bHaveGateway && !bHaveMetric)
+        pszGwMetric = L"0";
 
     /* If we have a static source, we need an address or a gateway */
     if ((dwSource == SOURCE_STATIC) && !bHaveAddress && !bHaveGateway)
@@ -1823,12 +1837,16 @@ IpSetDns(
     TAG_TYPE pttTags[] = {{L"name", NS_REQ_ZERO, FALSE},
                           {L"source", NS_REQ_ZERO, FALSE},
                           {L"addr", NS_REQ_ZERO, FALSE},
-                          {L"register", NS_REQ_ZERO, FALSE}};
+                          {L"register", NS_REQ_ZERO, FALSE},
+                          {L"validate", NS_REQ_ZERO, FALSE}};
     TOKEN_VALUE ptvSource[] = {{L"static", SOURCE_STATIC},
                                {L"dhcp", SOURCE_DHCP}};
     TOKEN_VALUE ptvRegister[] = {{L"none", REGISTER_NONE},
                                  {L"primary", REGISTER_PRIMARY},
                                  {L"both", REGISTER_BOTH}};
+    TOKEN_VALUE ptvValidate[] = {{L"no", 0},
+                                 {L"yes", 1}};
+    DWORD dwValidate;
     GUID InterfaceGUID;
     PDWORD pdwTagType = NULL;
     DWORD i, dwSource = SOURCE_UNCHANGED;
@@ -1919,6 +1937,13 @@ IpSetDns(
 
             case 2: /* addr */
                 DPRINT("Tag: addr (%S)\n", argv[i + dwCurrentIndex]);
+                if (_wcsicmp(argv[i + dwCurrentIndex], L"none") == 0)
+                {
+                    /* "none" removes the static servers */
+                    pszAddress = NULL;
+                    bHaveAddress = TRUE;
+                    break;
+                }
                 Status = RtlIpv4StringToAddressW(argv[i + dwCurrentIndex],
                                                  TRUE,
                                                  &Term,
@@ -1959,6 +1984,25 @@ IpSetDns(
                 }
                 DPRINT("Register: %lu\n", dwRegister);
 //                bHaveRegister = TRUE;
+                break;
+
+            case 4: /* validate */
+                DPRINT("Tag: validate (%S)\n", argv[i + dwCurrentIndex]);
+                dwError = MatchEnumTag(hDllInstance,
+                                       argv[i + dwCurrentIndex],
+                                       ARRAYSIZE(ptvValidate),
+                                       ptvValidate,
+                                       &dwValidate);
+                if (dwError != ERROR_SUCCESS)
+                {
+                    DPRINT("MatchEnumTag() failed (Error %lu)\n", dwError);
+                    PrintMessageFromModule(hDllInstance,
+                                           IDS_ERROR_BAD_VALUE,
+                                           argv[i + dwCurrentIndex],
+                                           pttTags[pdwTagType[i]].pwszTag);
+                    dwError = ERROR_SUPPRESS_OUTPUT;
+                    break;
+                }
                 break;
 
             default:
