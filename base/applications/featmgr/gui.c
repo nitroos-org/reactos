@@ -669,6 +669,14 @@ static void DoAction(HWND hwnd, ACTION act)
             return;
     }
 
+    if ((act == ACT_INSTALL || act == ACT_ENABLE) && g_arr[i].Notice[0] && g_arr[i].State != FM_STATE_ENABLED)
+    {
+        WCHAR msg[1024];
+        StringCchPrintfW(msg, ARRAYSIZE(msg), L"%s\n\nTurn on '%s'?", g_arr[i].Notice, g_arr[i].Name);
+        if (MessageBoxW(hwnd, msg, g_arr[i].Name, MB_OKCANCEL | MB_ICONINFORMATION) != IDOK)
+            return;
+    }
+
     c = (OPCTX *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*c));
     if (!c) return;
     c->op = act;
