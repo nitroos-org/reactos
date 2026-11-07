@@ -18,7 +18,8 @@ list(APPEND SOURCE
     outputprobe.c
     acceptstate.c
     acceptname.c
-    g7lockbuf.c)
+    g7lockbuf.c
+    g7accept.c)
 
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)
