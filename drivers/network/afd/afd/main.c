@@ -26,6 +26,9 @@ DWORD DebugTraceLevel = MIN_TRACE;
 /* FIXME: should depend on SystemSize */
 ULONG AfdReceiveWindowSize = 0x2000;
 ULONG AfdSendWindowSize = 0x2000;
+/* The receive buffer of a datagram socket: Windows 10 reads SO_RCVBUF as 64K and keeps datagrams until the
+ * queued bytes reach it (47 of 1400 bytes, 656 of 100 bytes). It is also the largest datagram AFD can take. */
+ULONG AfdDatagramReceiveWindowSize = 0x10000;
 
 void OskitDumpBuffer( PCHAR Data, UINT Len ) {
     unsigned int i;
@@ -503,7 +506,8 @@ AfdCreateSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     FCB->DeviceExt = DeviceExt;
     FCB->AddressFile.Handle = INVALID_HANDLE_VALUE;
     FCB->Connection.Handle = INVALID_HANDLE_VALUE;
-    FCB->Recv.Size = AfdReceiveWindowSize;
+    FCB->Recv.Size = (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) ? AfdDatagramReceiveWindowSize :
+                                                                 AfdReceiveWindowSize;
     FCB->Send.Size = AfdSendWindowSize;
 
     InitializeListHead( &FCB->SendGhosts );
