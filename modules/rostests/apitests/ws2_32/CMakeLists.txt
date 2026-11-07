@@ -37,6 +37,7 @@ list(APPEND SOURCE
     iocpskip.c
     ioctlsocket.c
     killpendingio.c
+    shortname.c
     listen.c
     udpconnreset.c
     manysockets.c

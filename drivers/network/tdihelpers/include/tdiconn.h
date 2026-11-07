@@ -3,6 +3,7 @@
 typedef VOID *PTDI_CONNECTION_INFO_PAIR;
 
 PTRANSPORT_ADDRESS TaCopyTransportAddress(PTRANSPORT_ADDRESS OtherAddress);
+BOOLEAN TaTransportAddressFits(PTRANSPORT_ADDRESS Address, UINT AvailableLength);
 PTRANSPORT_ADDRESS TaCopyTransportAddressBounded(PTRANSPORT_ADDRESS OtherAddress, UINT AvailableLength);
 PTRANSPORT_ADDRESS TaBuildNullTransportAddress(UINT AddressType);
 UINT TaLengthOfAddress(PTA_ADDRESS Addr);
