@@ -1171,7 +1171,7 @@ MiPagerReport(
     DbgPrint("NitroPager: trim %lu dirty %lu aged %lu skipdirty %lu | written %lu clusters %lu errors %lu noslot %lu | "
             "repurposed %lu inpage %lu errors %lu retries %lu | tagmismatch %lu freerefused %lu | wsmiss %lu starved %lu | "
             "slotshort %lu reclaimed %lu freeslots %Iu | modified %Iu privstandby %lu usable %Iu reserve-low %lu inflight %ld | "
-            "balancer trimmed %lu waits %lu\n",
+            "balancer trimmed %lu waits %lu | legacy user %lu system %lu available %Iu legacy-freed %lu\n",
             MiPagerCounters.Trimmed, MiPagerCounters.TrimmedDirty, MiPagerCounters.Aged, MiPagerCounters.TrimSkippedDirty,
             MiPagerCounters.Written, MiPagerCounters.Clusters, MiPagerCounters.WriteErrors, MiPagerCounters.WriteNoSlot,
             MiPagerCounters.Repurposed, MiPagerCounters.InPageReads, MiPagerCounters.InPageErrors,
@@ -1179,7 +1179,9 @@ MiPagerReport(
             MiPagerCounters.WsTryLockMisses, MiPagerCounters.StarvationRounds, MiPagerCounters.SlotShortages,
             MiPagerCounters.SlotsReclaimed, (SIZE_T)MiPagerFreeSlotCount(), (SIZE_T)MmModifiedPageListHead.Total,
             MmTransitionPrivatePages, (SIZE_T)MiGetUsablePageCount(), MiPagerCounters.ReserveLowWater, MiPagingIoInFlight,
-            MiPagerCounters.BalancerTrimmed, MiPagerCounters.BalancerWaits);
+            MiPagerCounters.BalancerTrimmed, MiPagerCounters.BalancerWaits,
+            MiMemoryConsumers[MC_USER].PagesUsed, MiMemoryConsumers[MC_SYSTEM].PagesUsed, (SIZE_T)MmAvailablePages,
+            MiPagerCounters.LegacyFreed);
 }
 
 /*
@@ -1737,6 +1739,35 @@ MiPagerBalance(
         MiTrimList[j] = Process;
         MiTrimListCursor[j] = Cursor;
         Count++;
+    }
+
+    /*
+     * Share the shortfall with the legacy user consumer (RosMm file data, image and
+     * section pages, up to half of RAM by its own target). Without this the trimmer
+     * kept usable pages just above the legacy floor (256 pages), the legacy pages were
+     * never paged out, and private working sets thrashed to feed the file cache: an
+     * MSI install took 8 min at flag 1 against 31 s at flag 0 on a 3 GB guest with
+     * 1.5 GB of private load, with 1.1 GB held by legacy pages (lane pagerp1, 11-07).
+     * The legacy part is in proportion to its size against the private resident
+     * pages (the clock's last full turns); legacy pages that were freed count.
+     */
+    {
+        ULONG Legacy = MiMemoryConsumers[MC_USER].PagesUsed, Private = 0, LegacyTarget, Freed = 0;
+        ULONGLONG Share;
+
+        for (i = 0; i < Count; i++)
+            Private += min(MiTrimListCursor[i]->Resident, 0x100000UL);
+        if ((Legacy != 0) && MiMemoryConsumers[MC_USER].Trim)
+        {
+            Share = ((ULONGLONG)Need * Legacy) / ((ULONGLONG)Legacy + Private);
+            LegacyTarget = (ULONG)Share;
+            if (LegacyTarget != 0)
+            {
+                MiMemoryConsumers[MC_USER].Trim(LegacyTarget, TRUE, &Freed);
+                MiPagerCounters.LegacyFreed += Freed;
+                Trimmed += Freed;
+            }
+        }
     }
 
     /* A second round only when pages are nearly gone: the hand then trims what the first round aged */
