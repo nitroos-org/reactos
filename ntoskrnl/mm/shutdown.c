@@ -312,6 +312,9 @@ MiShutdownSystem(VOID)
     PFN_NUMBER Page;
     BOOLEAN Dirty, Failed;
 
+    /* NitroPager: the modified page writer stops before the paging files are closed and the file systems shut down */
+    MiPagerShutdownWriter();
+
     /* Loop through all the paging files */
     for (i = 0; i < MmNumberOfPagingFiles; i++)
     {

@@ -34,7 +34,7 @@ static ULONG MiMinimumAvailablePages;
  * at a time, and metadata pins (which cannot wait for pages) failed with STATUS_NO_MEMORY half way
  * through a file system operation.
  */
-static ULONG MiLowWaterPages;
+ULONG MiLowWaterPages;
 static ULONG MiMinimumPagesPerRun;
 static CLIENT_ID MiBalancerThreadId;
 static HANDLE MiBalancerThreadHandle = NULL;
@@ -460,6 +460,9 @@ MiBalancerThread(PVOID Unused)
             ULONG InitialTarget = 0;
             ULONG Target;
             ULONG NrFreedPages;
+            /* NitroPager: what this pass freed (cache + pager) and the usable pages before it */
+            ULONG PagerPassFreed = 0;
+            PFN_NUMBER PagerUsableBefore = MiGetUsablePageCount();
 
             do
             {
@@ -482,9 +485,23 @@ MiBalancerThread(PVOID Unused)
                 {
                     CcRosTrimCache(Target, &NrFreedPages);
                     InitialTarget -= min(NrFreedPages, InitialTarget);
+                    PagerPassFreed += NrFreedPages;
                 }
 
-                /* No pages left to swap! */
+                /*
+                 * NitroPager: ARM3 private pages (and the legacy share), after the clean cache.
+                 * Its own shortfall comes from the low-water mark: InitialTarget is 0 here (see
+                 * the note below), so it is not passed on.
+                 */
+                if (MiNitroPagerMode != 0)
+                    PagerPassFreed += MiPagerBalance(MiLowWaterPages, 0);
+
+                /*
+                 * No pages left to swap! Note: InitialTarget starts at 0 and MiTrimMemoryConsumer
+                 * returns what is left of the target it was given, so this test is never true
+                 * (inherited; flag 0 keeps it untouched). With NitroPager on, the exhaustion
+                 * check is MiPagerBalancerPassDone after the pass.
+                 */
                 if (InitialTarget != 0 &&
                     InitialTarget == OldTarget)
                 {
@@ -493,6 +510,10 @@ MiBalancerThread(PVOID Unused)
                 }
             }
             while (InitialTarget != 0);
+
+            /* NitroPager: did the pass make progress, can the writer, or is memory exhausted (bugcheck) */
+            if (MiNitroPagerMode != 0)
+                MiPagerBalancerPassDone(PagerUsableBefore, PagerPassFreed);
 
             if (Status == STATUS_WAIT_0)
             {

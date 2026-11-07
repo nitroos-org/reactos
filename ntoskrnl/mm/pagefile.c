@@ -1398,6 +1398,10 @@ EarlyQuit:
     /* The thread that grows paging files toward their maximum */
     MiStartPagingFileGrowthThread();
 
+    /* NitroPager: the modified page writer thread, once there is a file to write to */
+    if (MiNitroPagerMode != 0)
+        MiPagerStartWriter();
+
     if (!MmSystemPageFileLocated && BooleanFlagOn(FileObject->DeviceObject->Flags, DO_SYSTEM_BOOT_PARTITION))
     {
         MmSystemPageFileLocated = IoInitializeCrashDump(FileHandle);
@@ -1417,54 +1421,188 @@ EarlyQuit:
  * or with another owner's tag never returns data, and a free with another
  * owner's tag is refused. Legacy (RosMm) slots never have a tag.
  */
+/*
+ * Allocate a run of up to Wanted consecutive ARM3 slots in one paging file
+ * (one cluster write covers them). Tries Wanted, then halves the run down to
+ * one slot. Returns the number of slots, 0 if no file has a free slot.
+ * Callable at <= DISPATCH_LEVEL, also inside the PFN lock (slot lock = leaf).
+ */
+static BOOLEAN MiPagerFileTakesSlots(_Inout_ PMMPAGING_FILE PagingFile);
+
+ULONG
+NTAPI
+MiAllocatePageFileSlots(
+    _In_ ULONG Wanted,
+    _Out_ PULONG FileIndex,
+    _Out_ PULONG_PTR Slot)
+{
+    PMMPAGING_FILE PagingFile;
+    KIRQL OldIrql;
+    ULONG i, Offset, Run, j;
+
+    ASSERT(Wanted != 0);
+    KeAcquireSpinLock(&MiPagingFileSlotLock, &OldIrql);
+    for (Run = Wanted; Run != 0; Run /= 2)
+    {
+        for (i = 0; i < MAX_PAGING_FILES; i++)
+        {
+            PagingFile = MmPagingFile[i];
+            if ((PagingFile == NULL) || (PagingFile->SlotTags == NULL) ||
+                (PagingFile->FreeSpace < Run) || !MiPagerFileTakesSlots(PagingFile))
+            {
+                continue;
+            }
+
+            Offset = RtlFindClearBitsAndSet(PagingFile->Bitmap, Run, PagingFile->SlotHint);
+            if (Offset == 0xFFFFFFFF)
+                continue;
+
+            /* Beyond the tags (cannot be: those bits stay set) or the PTE's lookup marker: not usable */
+            if ((Offset == 0) ||
+                ((ULONG_PTR)Offset + Run > PagingFile->SlotTagCount) ||
+                ((ULONG_PTR)Offset + Run >= MI_PAGEFILE_HIGH_LIMIT))
+            {
+                for (j = 0; j < Run; j++)
+                {
+                    if (Offset + j != 0)
+                        RtlClearBit(PagingFile->Bitmap, Offset + j);
+                }
+                continue;
+            }
+
+            PagingFile->SlotHint = Offset + Run;
+            PagingFile->FreeSpace -= Run;
+            PagingFile->CurrentUsage += Run;
+            if (PagingFile->CurrentUsage > PagingFile->PeakUsage)
+                PagingFile->PeakUsage = PagingFile->CurrentUsage;
+            MiUsedSwapPages += Run;
+            MiFreeSwapPages -= Run;
+            for (j = 0; j < Run; j++)
+            {
+                ASSERT(PagingFile->SlotTags[Offset + j] == 0);
+                MiStoreSlotTag(PagingFile, Offset + j, 0);
+            }
+
+            KeReleaseSpinLock(&MiPagingFileSlotLock, OldIrql);
+            *FileIndex = i;
+            *Slot = Offset;
+            return Run;
+        }
+    }
+    KeReleaseSpinLock(&MiPagingFileSlotLock, OldIrql);
+    return 0;
+}
+
 BOOLEAN
 NTAPI
 MiAllocatePageFileSlot(
     _Out_ PULONG FileIndex,
     _Out_ PULONG_PTR Slot)
 {
-    PMMPAGING_FILE PagingFile;
+    return MiAllocatePageFileSlots(1, FileIndex, Slot) == 1;
+}
+
+/* Free ARM3 slots in the files that still take new ones (a snapshot) */
+PFN_NUMBER
+NTAPI
+MiPagerFreeSlotCount(VOID)
+{
+    PFN_NUMBER Count = 0;
     KIRQL OldIrql;
-    ULONG i, Offset;
+    ULONG i;
 
     KeAcquireSpinLock(&MiPagingFileSlotLock, &OldIrql);
     for (i = 0; i < MAX_PAGING_FILES; i++)
     {
-        PagingFile = MmPagingFile[i];
-        if ((PagingFile == NULL) || (PagingFile->SlotTags == NULL) || (PagingFile->FreeSpace == 0))
-            continue;
-
-        Offset = RtlFindClearBitsAndSet(PagingFile->Bitmap, 1, PagingFile->SlotHint);
-        if (Offset == 0xFFFFFFFF)
-            continue;
-
-        /* Beyond the tags (cannot be: those bits stay set) or the PTE's lookup marker: not usable */
-        if ((Offset == 0) ||
-            (Offset >= PagingFile->SlotTagCount) ||
-            ((ULONG_PTR)Offset + 1 >= MI_PAGEFILE_HIGH_LIMIT))
-        {
-            if (Offset != 0)
-                RtlClearBit(PagingFile->Bitmap, Offset);
-            continue;
-        }
-
-        PagingFile->SlotHint = Offset + 1;
-        PagingFile->FreeSpace--;
-        PagingFile->CurrentUsage++;
-        if (PagingFile->CurrentUsage > PagingFile->PeakUsage)
-            PagingFile->PeakUsage = PagingFile->CurrentUsage;
-        MiUsedSwapPages++;
-        MiFreeSwapPages--;
-        ASSERT(PagingFile->SlotTags[Offset] == 0);
-        MiStoreSlotTag(PagingFile, Offset, 0);
-
-        KeReleaseSpinLock(&MiPagingFileSlotLock, OldIrql);
-        *FileIndex = i;
-        *Slot = Offset;
-        return TRUE;
+        if ((MmPagingFile[i] != NULL) && (MmPagingFile[i]->SlotTags != NULL) && !MmPagingFile[i]->Retired)
+            Count += MmPagingFile[i]->FreeSpace;
     }
     KeReleaseSpinLock(&MiPagingFileSlotLock, OldIrql);
-    return FALSE;
+    return Count;
+}
+
+/*
+ * The writer's cluster write to a file ended with Status. A file the volume
+ * refuses (STATUS_FILE_INVALID: wrong media, a volume that went away) takes no
+ * new slots for the rest of the boot. Other errors retire it only when they
+ * persist: MI_PAGER_RETIRE_FAILURES failed writes in a row spread over at
+ * least MI_PAGER_RETIRE_SPAN (the writer backs off between them), because
+ * storport and atapi report a memory shortage on the paging path as a plain
+ * device error. Such a file is tried again MI_PAGER_RETRY_RETIRED after it was
+ * retired (MiAllocatePageFileSlots); one more failure retires it again.
+ * Shortage statuses never count. Slots that hold data are always read.
+ * Returns TRUE when this call retired the file.
+ */
+#define MI_PAGER_RETIRE_FAILURES 8
+#define MI_PAGER_RETIRE_SPAN (10ULL * 10 * 1000 * 1000)
+#define MI_PAGER_RETRY_RETIRED (60ULL * 10 * 1000 * 1000)
+BOOLEAN
+NTAPI
+MiPagerPagingFileWriteResult(
+    _In_ ULONG FileIndex,
+    _In_ NTSTATUS Status)
+{
+    PMMPAGING_FILE PagingFile;
+    BOOLEAN Retired = FALSE;
+    ULONGLONG Now = KeQueryInterruptTime();
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&MiPagingFileSlotLock, &OldIrql);
+    PagingFile = (FileIndex < MAX_PAGING_FILES) ? MmPagingFile[FileIndex] : NULL;
+    if ((PagingFile != NULL) && !PagingFile->Retired)
+    {
+        if (NT_SUCCESS(Status))
+        {
+            PagingFile->WriteFailuresInARow = 0;
+        }
+        else if ((Status == STATUS_INSUFFICIENT_RESOURCES) || (Status == STATUS_NO_MEMORY))
+        {
+            /* A shortage (an IRP, pool) says nothing about the file: it passes */
+        }
+        else if (Status == STATUS_FILE_INVALID)
+        {
+            PagingFile->Retired = TRUE;
+            PagingFile->RetiredForGood = TRUE;
+            Retired = TRUE;
+        }
+        else
+        {
+            if (PagingFile->WriteFailuresInARow++ == 0)
+                PagingFile->FirstFailure = Now;
+            if ((PagingFile->WriteFailuresInARow >= MI_PAGER_RETIRE_FAILURES) &&
+                ((Now - PagingFile->FirstFailure) >= MI_PAGER_RETIRE_SPAN))
+            {
+                PagingFile->Retired = TRUE;
+                PagingFile->RetiredAt = Now;
+                Retired = TRUE;
+            }
+        }
+    }
+    KeReleaseSpinLock(&MiPagingFileSlotLock, OldIrql);
+
+    if (Retired)
+    {
+        DPRINT1("NitroPager: paging file %lu retired after failed writes (0x%lx): no new pages go to it%s\n",
+                FileIndex, Status, (Status == STATUS_FILE_INVALID) ? "" : " for 60 s");
+    }
+    return Retired;
+}
+
+/* Slot lock held: a file retired for its errors (not for good) is tried again after a while */
+static
+BOOLEAN
+MiPagerFileTakesSlots(
+    _Inout_ PMMPAGING_FILE PagingFile)
+{
+    if (!PagingFile->Retired)
+        return TRUE;
+    if (PagingFile->RetiredForGood || ((KeQueryInterruptTime() - PagingFile->RetiredAt) < MI_PAGER_RETRY_RETIRED))
+        return FALSE;
+
+    /* One more failure retires it again at once (the streak and its start stay) */
+    PagingFile->Retired = FALSE;
+    PagingFile->WriteFailuresInARow = MI_PAGER_RETIRE_FAILURES - 1;
+    return TRUE;
 }
 
 /*
@@ -1566,15 +1704,21 @@ MiCheckPageFileSlotTag(
     return Match;
 }
 
-/* Write one page to an ARM3 slot. Fails, never bugchecks, on a file that went away */
+/*
+ * Write Count pages (at most MI_PAGER_CLUSTER_MAX) to Count consecutive ARM3
+ * slots from FirstSlot, one paging write. Fails, never bugchecks, on a file
+ * that went away. The MDL lives on the stack: no pool on the writer's path
+ * above the I/O manager (whose IRP falls back to the reserve IRPs).
+ */
 NTSTATUS
 NTAPI
-MiWritePageFileSlot(
-    _In_ PFN_NUMBER Page,
+MiWritePageFileCluster(
+    _In_reads_(Count) PPFN_NUMBER Pages,
+    _In_ ULONG Count,
     _In_ ULONG FileIndex,
-    _In_ ULONG_PTR Slot)
+    _In_ ULONG_PTR FirstSlot)
 {
-    DECLSPEC_ALIGN(MEMORY_ALLOCATION_ALIGNMENT) UCHAR MdlBase[sizeof(MDL) + sizeof(PFN_NUMBER)];
+    DECLSPEC_ALIGN(MEMORY_ALLOCATION_ALIGNMENT) UCHAR MdlBase[sizeof(MDL) + MI_PAGER_CLUSTER_MAX * sizeof(PFN_NUMBER)];
     PMDL Mdl = (PMDL)MdlBase;
     LARGE_INTEGER FileOffset;
     IO_STATUS_BLOCK Iosb;
@@ -1582,15 +1726,16 @@ MiWritePageFileSlot(
     KEVENT Event;
     NTSTATUS Status;
 
+    ASSERT((Count != 0) && (Count <= MI_PAGER_CLUSTER_MAX));
     PagingFile = (FileIndex < MAX_PAGING_FILES) ? MmPagingFile[FileIndex] : NULL;
     if ((PagingFile == NULL) || (PagingFile->FileObject == NULL) || (PagingFile->FileObject->DeviceObject == NULL))
         return STATUS_FILE_INVALID;
 
-    MmInitializeMdl(Mdl, NULL, PAGE_SIZE);
-    MmBuildMdlFromPages(Mdl, &Page);
+    MmInitializeMdl(Mdl, NULL, Count * PAGE_SIZE);
+    RtlCopyMemory(MmGetMdlPfnArray(Mdl), Pages, Count * sizeof(PFN_NUMBER));
     Mdl->MdlFlags |= MDL_PAGES_LOCKED;
 
-    FileOffset.QuadPart = (LONGLONG)Slot * PAGE_SIZE;
+    FileOffset.QuadPart = (LONGLONG)FirstSlot * PAGE_SIZE;
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     Status = IoSynchronousPageWrite(PagingFile->FileObject, Mdl, &FileOffset, &Event, &Iosb);
     if (Status == STATUS_PENDING)
@@ -1601,16 +1746,27 @@ MiWritePageFileSlot(
     if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
         MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
 
-    /* A short write is a failed write: the slot must not be tagged as holding the page */
-    if (NT_SUCCESS(Status) && (Iosb.Information != PAGE_SIZE))
+    /* A short write is a failed write: no slot may be tagged as holding its page */
+    if (NT_SUCCESS(Status) && (Iosb.Information != (ULONG_PTR)Count * PAGE_SIZE))
         Status = STATUS_UNEXPECTED_IO_ERROR;
 
     if (NT_SUCCESS(Status))
     {
-        MI_PRCB_COUNT_ADD(MmDirtyPagesWriteCount, 1);
+        MI_PRCB_COUNT_ADD(MmDirtyPagesWriteCount, Count);
         MI_PRCB_COUNT_ADD(MmDirtyWriteIoCount, 1);
     }
     return Status;
+}
+
+/* Write one page to an ARM3 slot */
+NTSTATUS
+NTAPI
+MiWritePageFileSlot(
+    _In_ PFN_NUMBER Page,
+    _In_ ULONG FileIndex,
+    _In_ ULONG_PTR Slot)
+{
+    return MiWritePageFileCluster(&Page, 1, FileIndex, Slot);
 }
 
 /* EOF */

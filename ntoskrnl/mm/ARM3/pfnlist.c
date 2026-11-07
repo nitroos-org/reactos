@@ -115,6 +115,10 @@ MiDecrementAvailablePages(
         /* Call RosMm and see if it can release any pages for us */
         MmRebalanceMemoryConsumers();
     }
+
+    /* NitroPager: the reserve watch, and the writer when pages run low */
+    if (MiNitroPagerMode != 0)
+        MiPagerAvailableDropped();
 }
 
 VOID
@@ -1009,10 +1013,16 @@ MiInsertPageInList(IN PMMPFNLIST ListHead,
         /* One more transition page */
         MmTransitionSharedPages++;
 
-        /* Increment the number of per-process modified pages */
+        /*
+         * Increment the number of per-process modified pages. A trim runs attached
+         * to the page's process (EmptyWorkingSet, the balancer's trimmer), so for
+         * the pager's pages this is the owner.
+         */
         PsGetCurrentProcess()->ModifiedPageCount++;
 
-        /* FIXME: Wake up modified page writer if there are not enough free pages */
+        /* NitroPager: wake the modified page writer when the list is long enough */
+        if ((MiNitroPagerMode != 0) && (Pfn1->u3.e1.PrototypePte == 0))
+            MiPagerModifiedPageQueued();
     }
     else if (ListName == ModifiedNoWritePageList)
     {

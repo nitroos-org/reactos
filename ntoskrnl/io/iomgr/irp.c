@@ -1034,19 +1034,25 @@ BOOLEAN
 NTAPI
 IopInitializeReserveIrp(IN PRESERVE_IRP_ALLOCATOR ReserveIrpAllocator)
 {
+    ULONG i;
+
     /* Our allocated stack size */
     ReserveIrpAllocator->StackSize = 20;
 
-    /* Allocate the IRP now */
-    ReserveIrpAllocator->ReserveIrp = IoAllocateIrp(ReserveIrpAllocator->StackSize, FALSE);
-    /* If we cannot, abort system boot */
-    if (ReserveIrpAllocator->ReserveIrp == NULL)
+    /* Allocate the IRPs now */
+    for (i = 0; i < IOP_RESERVE_IRP_COUNT; i++)
     {
-        return FALSE;
+        ReserveIrpAllocator->ReserveIrp[i] = IoAllocateIrp(ReserveIrpAllocator->StackSize, FALSE);
+        /* If we cannot, abort system boot */
+        if (ReserveIrpAllocator->ReserveIrp[i] == NULL)
+        {
+            return FALSE;
+        }
+
+        /* It's not in use */
+        ReserveIrpAllocator->ReserveIrpInUse[i] = 0;
     }
 
-    /* It's not in use */
-    ReserveIrpAllocator->ReserveIrpInUse = 0;
     /* And init the event */
     KeInitializeEvent(&ReserveIrpAllocator->WaitEvent, SynchronizationEvent, FALSE);
 
@@ -1054,38 +1060,72 @@ IopInitializeReserveIrp(IN PRESERVE_IRP_ALLOCATOR ReserveIrpAllocator)
     return TRUE;
 }
 
+/* Index of a reserve IRP, or IOP_RESERVE_IRP_COUNT if Irp is not one */
+static
+ULONG
+IopReserveIrpIndex(IN PIRP Irp)
+{
+    ULONG i;
+
+    for (i = 0; i < IOP_RESERVE_IRP_COUNT; i++)
+    {
+        if (IopReserveIrpAllocator.ReserveIrp[i] == Irp)
+            return i;
+    }
+    return IOP_RESERVE_IRP_COUNT;
+}
+
+BOOLEAN
+IopIsReserveIrp(IN PIRP Irp)
+{
+    return IopReserveIrpIndex(Irp) < IOP_RESERVE_IRP_COUNT;
+}
+
 PIRP
 NTAPI
 IopAllocateReserveIrp(IN CCHAR StackSize)
 {
+    ULONG i;
+
     /* If we need a stack size higher than what was allocated, then fail */
     if (StackSize > IopReserveIrpAllocator.StackSize)
     {
         return NULL;
     }
 
-    /* Now, wait until the IRP becomes available and reserve it immediately */
-    while (InterlockedExchange(&IopReserveIrpAllocator.ReserveIrpInUse, 1) == 1)
+    /* Now, wait until one IRP becomes available and reserve it immediately */
+    for (;;)
     {
+        for (i = 0; i < IOP_RESERVE_IRP_COUNT; i++)
+        {
+            if (InterlockedCompareExchange(&IopReserveIrpAllocator.ReserveIrpInUse[i], 1, 0) == 0)
+            {
+                /* It's ours! Initialize it */
+                IoInitializeIrp(IopReserveIrpAllocator.ReserveIrp[i], IoSizeOfIrp(StackSize), StackSize);
+
+                /* And return it to the caller */
+                return IopReserveIrpAllocator.ReserveIrp[i];
+            }
+        }
+
         KeWaitForSingleObject(&IopReserveIrpAllocator.WaitEvent,
                               Executive,
                               KernelMode,
                               FALSE,
                               NULL);
     }
-
-    /* It's ours! Initialize it */
-    IoInitializeIrp(IopReserveIrpAllocator.ReserveIrp, IoSizeOfIrp(StackSize), StackSize);
-
-    /* And return it to the caller */
-    return IopReserveIrpAllocator.ReserveIrp;
 }
 
+static
 VOID
-IopFreeReserveIrp(IN CCHAR PriorityBoost)
+IopFreeReserveIrp(IN PIRP Irp, IN CCHAR PriorityBoost)
 {
+    ULONG i = IopReserveIrpIndex(Irp);
+
+    ASSERT(i < IOP_RESERVE_IRP_COUNT);
+
     /* Mark we don't use the IRP anymore */
-    InterlockedExchange(&IopReserveIrpAllocator.ReserveIrpInUse, 0);
+    InterlockedExchange(&IopReserveIrpAllocator.ReserveIrpInUse[i], 0);
 
     /* And set the event if someone is waiting on the IRP */
     KeSetEvent(&IopReserveIrpAllocator.WaitEvent, PriorityBoost, FALSE);
@@ -1991,9 +2031,9 @@ IofCompleteRequest(IN PIRP Irp,
                 /* If we were using the reserve IRP, then call the appropriate
                  * free function (to make the IRP available again)
                  */
-                if (Irp == IopReserveIrpAllocator.ReserveIrp)
+                if (IopIsReserveIrp(Irp))
                 {
-                    IopFreeReserveIrp(PriorityBoost);
+                    IopFreeReserveIrp(Irp, PriorityBoost);
                 }
                 /* Otherwise, free for real! */
                 else
