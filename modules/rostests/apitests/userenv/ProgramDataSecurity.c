@@ -8,6 +8,7 @@
 #include <apitest.h>
 #include <windows.h>
 #include <sddl.h>
+#include <aclapi.h>
 #include <lm.h>
 #include <userenv.h>
 #include <strsafe.h>
@@ -31,45 +32,121 @@ static const EXPECTED_ACE s_Expected[] =
     { WinBuiltinUsersSid, CONTAINER_INHERIT_ACE, FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES },
 };
 
+#define OI_CI (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)
+#define OI_CI_IO (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE)
+#define RX_MASK (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE)
+#define AAP L"S-1-15-2-1"
+#define ARAP L"S-1-15-2-2"
+
+/* An expected entry: a well-known SID or, when pszSid is set, a SID in the S-1-... form */
+typedef struct _EXPECTED_ACE_EX
+{
+    WELL_KNOWN_SID_TYPE Sid;
+    PCWSTR pszSid;
+    BYTE Flags;
+    DWORD Mask;
+} EXPECTED_ACE_EX;
+
+/* icacls of C:\Windows on Windows 10 22H2 (read-only probe); SYSTEM and Administrators have full control on the folder
+ * itself here, there Modify, and TrustedInstaller is not here */
+static const EXPECTED_ACE_EX s_ExpectedWindows[] =
+{
+    { WinLocalSystemSid, NULL, OI_CI, FILE_ALL_ACCESS },
+    { WinBuiltinAdministratorsSid, NULL, OI_CI, FILE_ALL_ACCESS },
+    { WinBuiltinUsersSid, NULL, 0, RX_MASK },
+    { WinBuiltinUsersSid, NULL, OI_CI_IO, GENERIC_READ | GENERIC_EXECUTE },
+    { WinCreatorOwnerSid, NULL, OI_CI_IO, FILE_ALL_ACCESS },
+    { WinNullSid, AAP, 0, RX_MASK },
+    { WinNullSid, AAP, OI_CI_IO, GENERIC_READ | GENERIC_EXECUTE },
+    { WinNullSid, ARAP, 0, RX_MASK },
+    { WinNullSid, ARAP, OI_CI_IO, GENERIC_READ | GENERIC_EXECUTE },
+};
+
+/* icacls of C:\Windows\System32\config on Windows 10 22H2, without TrustedInstaller */
+static const EXPECTED_ACE_EX s_ExpectedConfig[] =
+{
+    { WinLocalSystemSid, NULL, OI_CI, FILE_ALL_ACCESS },
+    { WinBuiltinAdministratorsSid, NULL, OI_CI, FILE_ALL_ACCESS },
+    { WinCreatorOwnerSid, NULL, OI_CI_IO, FILE_ALL_ACCESS },
+};
+
+/* The security descriptor (LocalFree) of the object itself: a junction is not followed */
+static PSECURITY_DESCRIPTOR
+GetObjectDacl(PCWSTR pszPath, PACL *ppAcl)
+{
+    PSECURITY_DESCRIPTOR pSd = NULL;
+    HANDLE hFile;
+    DWORD dwError;
+
+    *ppAcl = NULL;
+    hFile = CreateFileW(pszPath, READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    ok(hFile != INVALID_HANDLE_VALUE, "cannot open %ls (error %lu)\n", pszPath, GetLastError());
+    if (hFile == INVALID_HANDLE_VALUE)
+        return NULL;
+    dwError = GetSecurityInfo(hFile, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, ppAcl, NULL, &pSd);
+    ok(dwError == ERROR_SUCCESS, "no security for %ls (error %lu)\n", pszPath, dwError);
+    CloseHandle(hFile);
+    return dwError == ERROR_SUCCESS ? pSd : NULL;
+}
+
 static void
-CheckDacl(PCWSTR pszPath)
+CheckDaclEx(PCWSTR pszPath, const EXPECTED_ACE_EX *pExpected, UINT cExpected)
 {
     SECURITY_DESCRIPTOR_CONTROL Control;
     PSECURITY_DESCRIPTOR pSd;
     PACL pAcl = NULL;
-    BOOL bPresent, bDefaulted;
-    DWORD dwSize = 0, dwRev, i;
+    DWORD dwRev, i;
 
-    GetFileSecurityW(pszPath, DACL_SECURITY_INFORMATION, NULL, 0, &dwSize);
-    ok(dwSize != 0, "no security for %ls (error %lu)\n", pszPath, GetLastError());
-    if (!dwSize)
+    pSd = GetObjectDacl(pszPath, &pAcl);
+    if (!pSd)
         return;
-    pSd = LocalAlloc(LMEM_FIXED, dwSize);
-    ok(GetFileSecurityW(pszPath, DACL_SECURITY_INFORMATION, pSd, dwSize, &dwSize), "GetFileSecurity failed %lu\n", GetLastError());
     ok(GetSecurityDescriptorControl(pSd, &Control, &dwRev), "no control\n");
-    ok(GetSecurityDescriptorDacl(pSd, &bPresent, &pAcl, &bDefaulted) && bPresent && pAcl, "no DACL\n");
-    ok(!!(Control & SE_DACL_PROTECTED), "the DACL is not protected (0x%x)\n", Control);
+    ok(pAcl != NULL, "%ls: no DACL\n", pszPath);
+    ok(!!(Control & SE_DACL_PROTECTED), "%ls: the DACL is not protected (0x%x)\n", pszPath, Control);
 
     if (pAcl)
     {
-        ok(pAcl->AceCount == ARRAYSIZE(s_Expected), "%u ACEs, expected %u\n", pAcl->AceCount, (UINT)ARRAYSIZE(s_Expected));
-        for (i = 0; i < pAcl->AceCount && i < ARRAYSIZE(s_Expected); i++)
+        ok(pAcl->AceCount == cExpected, "%ls: %u ACEs, expected %u\n", pszPath, pAcl->AceCount, cExpected);
+        for (i = 0; i < pAcl->AceCount && i < cExpected; i++)
         {
             PACCESS_ALLOWED_ACE pAce = NULL;
             BYTE Buf[SECURITY_MAX_SID_SIZE];
             DWORD cb = sizeof(Buf);
+            PSID pSid = NULL;
 
             ok(GetAce(pAcl, i, (PVOID *)&pAce) && pAce, "no ACE %lu\n", i);
             if (!pAce)
                 continue;
-            ok(CreateWellKnownSid(s_Expected[i].Sid, NULL, Buf, &cb), "no SID for ACE %lu\n", i);
-            ok(pAce->Header.AceType == ACCESS_ALLOWED_ACE_TYPE, "ACE %lu: type %u\n", i, pAce->Header.AceType);
-            ok(pAce->Header.AceFlags == s_Expected[i].Flags, "ACE %lu: flags 0x%x, expected 0x%x\n", i, pAce->Header.AceFlags, s_Expected[i].Flags);
-            ok(pAce->Mask == s_Expected[i].Mask, "ACE %lu: mask 0x%08lx, expected 0x%08lx\n", i, pAce->Mask, s_Expected[i].Mask);
-            ok(EqualSid((PSID)&pAce->SidStart, Buf), "ACE %lu: wrong SID\n", i);
+            if (pExpected[i].pszSid)
+                ok(ConvertStringSidToSidW(pExpected[i].pszSid, &pSid), "no SID for ACE %lu\n", i);
+            else
+                ok(CreateWellKnownSid(pExpected[i].Sid, NULL, Buf, &cb), "no SID for ACE %lu\n", i);
+            ok(pAce->Header.AceType == ACCESS_ALLOWED_ACE_TYPE, "%ls ACE %lu: type %u\n", pszPath, i, pAce->Header.AceType);
+            ok(pAce->Header.AceFlags == pExpected[i].Flags, "%ls ACE %lu: flags 0x%x, expected 0x%x\n", pszPath, i, pAce->Header.AceFlags, pExpected[i].Flags);
+            ok(pAce->Mask == pExpected[i].Mask, "%ls ACE %lu: mask 0x%08lx, expected 0x%08lx\n", pszPath, i, pAce->Mask, pExpected[i].Mask);
+            ok(EqualSid((PSID)&pAce->SidStart, pSid ? pSid : Buf), "%ls ACE %lu: wrong SID\n", pszPath, i);
+            if (pSid)
+                LocalFree(pSid);
         }
     }
     LocalFree(pSd);
+}
+
+static void
+CheckDacl(PCWSTR pszPath)
+{
+    EXPECTED_ACE_EX Expected[ARRAYSIZE(s_Expected)];
+    UINT i;
+
+    for (i = 0; i < ARRAYSIZE(s_Expected); i++)
+    {
+        Expected[i].Sid = s_Expected[i].Sid;
+        Expected[i].pszSid = NULL;
+        Expected[i].Flags = s_Expected[i].Flags;
+        Expected[i].Mask = s_Expected[i].Mask;
+    }
+    CheckDaclEx(pszPath, Expected, ARRAYSIZE(Expected));
 }
 
 typedef struct _TESTUSER
@@ -218,6 +295,136 @@ done:
     CleanupUser(&User1);
 }
 
+/* No entry of the DACL of the object lets Users, Authenticated Users, Everyone or the application packages in at all */
+static void
+CheckNoUserAccess(PCWSTR pszPath)
+{
+    static const WELL_KNOWN_SID_TYPE Types[] = { WinBuiltinUsersSid, WinAuthenticatedUserSid, WinWorldSid };
+    PSECURITY_DESCRIPTOR pSd;
+    PACL pAcl = NULL;
+    DWORD i, j;
+
+    pSd = GetObjectDacl(pszPath, &pAcl);
+    if (!pSd || !pAcl)
+    {
+        LocalFree(pSd);
+        return;
+    }
+    for (i = 0; i < pAcl->AceCount; i++)
+    {
+        PACCESS_ALLOWED_ACE pAce;
+        BYTE Buf[SECURITY_MAX_SID_SIZE];
+        PSID pAap;
+
+        if (!GetAce(pAcl, i, (PVOID *)&pAce) || pAce->Header.AceType != ACCESS_ALLOWED_ACE_TYPE)
+            continue;
+        for (j = 0; j < ARRAYSIZE(Types); j++)
+        {
+            DWORD cb = sizeof(Buf);
+            if (CreateWellKnownSid(Types[j], NULL, Buf, &cb))
+                ok(!EqualSid((PSID)&pAce->SidStart, Buf), "%ls: entry %lu grants 0x%08lx to a user group (type %u)\n", pszPath, i, pAce->Mask, Types[j]);
+        }
+        if (ConvertStringSidToSidW(AAP, &pAap))
+        {
+            ok(!EqualSid((PSID)&pAce->SidStart, pAap), "%ls: entry %lu grants 0x%08lx to the application packages\n", pszPath, i, pAce->Mask);
+            LocalFree(pAap);
+        }
+    }
+    LocalFree(pSd);
+}
+
+/* Open the object itself (not what a junction points to) with the access, as the user: the error, 0 for success */
+static DWORD
+OpenObjectAs(HANDLE hToken, PCWSTR pszPath, DWORD dwAccess, BOOL bLink)
+{
+    HANDLE hFile;
+    DWORD dwError;
+
+    if (!ImpersonateLoggedOnUser(hToken))
+        return 0xdeadbeef;
+    hFile = CreateFileW(pszPath, dwAccess, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                        FILE_FLAG_BACKUP_SEMANTICS | (bLink ? FILE_FLAG_OPEN_REPARSE_POINT : 0), NULL);
+    dwError = (hFile == INVALID_HANDLE_VALUE) ? GetLastError() : 0;
+    if (hFile != INVALID_HANDLE_VALUE)
+        CloseHandle(hFile);
+    RevertToSelf();
+    return dwError;
+}
+
+/*
+ * C:\Windows, when that is a junction to the system directory: the junction object has the DACL of the Windows directory (the
+ * target was always given it, the junction kept the one it got from the volume root: any user could delete it and put another
+ * directory in its place), and the target was not touched through it. The registry hives are for SYSTEM and Administrators.
+ */
+static void
+CheckWindowsAndConfig(void)
+{
+    WCHAR szSystem[MAX_PATH], szLink[] = L"X:\\Windows", szConfig[MAX_PATH], szFile[MAX_PATH], szFind[MAX_PATH];
+    WIN32_FIND_DATAW Find;
+    HANDLE hFind;
+    TESTUSER User;
+    DWORD dwAttr, dwError;
+    BOOL bJunction;
+
+    if (!GetWindowsDirectoryW(szSystem, ARRAYSIZE(szSystem)) || szSystem[1] != L':')
+    {
+        skip("No Windows directory\n");
+        return;
+    }
+    szLink[0] = szSystem[0];
+    dwAttr = GetFileAttributesW(szLink);
+    bJunction = dwAttr != INVALID_FILE_ATTRIBUTES && (dwAttr & FILE_ATTRIBUTE_REPARSE_POINT) && _wcsicmp(szSystem, szLink);
+
+    CheckDaclEx(szSystem, s_ExpectedWindows, ARRAYSIZE(s_ExpectedWindows));
+    if (bJunction)
+        CheckDaclEx(szLink, s_ExpectedWindows, ARRAYSIZE(s_ExpectedWindows));
+    else
+        skip("%ls is not a junction\n", szLink);
+
+    StringCchPrintfW(szConfig, ARRAYSIZE(szConfig), L"%s\\system32\\config", szSystem);
+    CheckDaclEx(szConfig, s_ExpectedConfig, ARRAYSIZE(s_ExpectedConfig));
+    StringCchPrintfW(szFind, ARRAYSIZE(szFind), L"%s\\*", szConfig);
+    hFind = FindFirstFileW(szFind, &Find);
+    if (hFind != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if (!wcscmp(Find.cFileName, L".") || !wcscmp(Find.cFileName, L".."))
+                continue;
+            StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%s\\%s", szConfig, Find.cFileName);
+            CheckNoUserAccess(szFile);
+        } while (FindNextFileW(hFind, &Find));
+        FindClose(hFind);
+    }
+
+    if (!SetupUser(&User, L"pdsec3"))
+    {
+        skip("Cannot create and log on the test user (error %lu)\n", GetLastError());
+        CleanupUser(&User);
+        return;
+    }
+    if (bJunction)
+    {
+        /* Nothing is changed by opening it: what is checked is that the access is refused */
+        dwError = OpenObjectAs(User.hToken, szLink, DELETE, TRUE);
+        ok(dwError == ERROR_ACCESS_DENIED, "opening the junction to delete it as a user: error %lu, expected %u\n", dwError, ERROR_ACCESS_DENIED);
+        dwError = OpenObjectAs(User.hToken, szLink, WRITE_DAC, TRUE);
+        ok(dwError == ERROR_ACCESS_DENIED, "opening the junction to change its DACL as a user: error %lu, expected %u\n", dwError, ERROR_ACCESS_DENIED);
+        dwError = OpenObjectAs(User.hToken, szLink, FILE_WRITE_ATTRIBUTES | FILE_WRITE_DATA, TRUE);
+        ok(dwError == ERROR_ACCESS_DENIED, "opening the junction for writing as a user: error %lu, expected %u\n", dwError, ERROR_ACCESS_DENIED);
+        /* ...while a user can still go through it */
+        dwError = OpenObjectAs(User.hToken, szLink, FILE_LIST_DIRECTORY | SYNCHRONIZE, FALSE);
+        ok(dwError == 0, "opening C:\\Windows through the junction as a user: error %lu\n", dwError);
+    }
+    /* The hives: no read access for a user */
+    StringCchPrintfW(szFile, ARRAYSIZE(szFile), L"%s\\SYSTEM", szConfig);
+    dwError = OpenObjectAs(User.hToken, szFile, FILE_READ_DATA, FALSE);
+    ok(dwError == ERROR_ACCESS_DENIED, "reading the SYSTEM hive file as a user: error %lu, expected %u\n", dwError, ERROR_ACCESS_DENIED);
+    dwError = OpenObjectAs(User.hToken, szConfig, FILE_LIST_DIRECTORY, FALSE);
+    ok(dwError == ERROR_ACCESS_DENIED, "listing system32\\config as a user: error %lu, expected %u\n", dwError, ERROR_ACCESS_DENIED);
+    CleanupUser(&User);
+}
+
 START_TEST(ProgramDataSecurity)
 {
     WCHAR szPath[MAX_PATH];
@@ -230,4 +437,5 @@ START_TEST(ProgramDataSecurity)
     }
     CheckDacl(szPath);
     CheckUsers(szPath);
+    CheckWindowsAndConfig();
 }
