@@ -118,6 +118,17 @@ static const PROFILE_ACE RootAces[] =
     {WinAuthenticatedUserSid, FILE_ADD_SUBDIRECTORY, 0},
 };
 
+/*
+ * Windows\System32\config (the registry hives): SYSTEM and Administrators only, no Users (a read-only icacls of a Windows
+ * 10 machine). There the folder also has a TrustedInstaller entry, which cannot exist here.
+ */
+static const PROFILE_ACE ConfigAces[] =
+{
+    {WinLocalSystemSid, FILE_ALL_ACCESS, OI_CI},
+    {WinBuiltinAdministratorsSid, FILE_ALL_ACCESS, OI_CI},
+    {WinCreatorOwnerSid, FILE_ALL_ACCESS, OI_CI_IO},
+};
+
 /* A user profile: SYSTEM, Administrators and the user, full and inherited by all */
 static const PROFILE_ACE UserAces[] =
 {
@@ -214,6 +225,11 @@ BuildProfileDescriptor(
         case ProfileDirRoot:
             pAces = RootAces;
             cAces = ARRAYSIZE(RootAces);
+            break;
+
+        case ProfileDirConfig:
+            pAces = ConfigAces;
+            cAces = ARRAYSIZE(ConfigAces);
             break;
 
         case ProfileDirUser:
@@ -664,6 +680,65 @@ SecureExistingProfileDirectory(
         LocalFree(pLegacySd);
 }
 
+/*
+ * C:\Windows is a junction to the system directory when that is somewhere else (setup makes it). The junction object has a
+ * DACL of its own, which an older install left at what the volume root gave it (Authenticated Users: Modify): any user could
+ * delete it and put another directory in its place. It gets the DACL of the Windows directory. Only the object is opened, never
+ * what it points to (FILE_FLAG_OPEN_REPARSE_POINT, and the security is set through that handle), and nothing happens for
+ * a plain directory (another Windows on the volume) or for one that is protected already.
+ */
+static VOID
+SecureWindowsJunction(
+    _In_ PCWSTR pszSystemDirectory)
+{
+    WCHAR szLink[] = L"X:\\Windows";
+    BY_HANDLE_FILE_INFORMATION Info;
+    SECURITY_DESCRIPTOR_CONTROL Control;
+    PSECURITY_DESCRIPTOR pSd = NULL, pNewSd;
+    PACL pAcl = NULL;
+    BOOL bPresent, bDefaulted;
+    DWORD dwRevision, dwError;
+    HANDLE hLink;
+
+    if (pszSystemDirectory[1] != L':' || pszSystemDirectory[2] != L'\\')
+        return;
+    szLink[0] = pszSystemDirectory[0];
+    if (!_wcsicmp(pszSystemDirectory, szLink))
+        return;
+
+    hLink = CreateFileW(szLink, READ_CONTROL | WRITE_DAC, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (hLink == INVALID_HANDLE_VALUE)
+        return;
+
+    if (!GetFileInformationByHandle(hLink, &Info) || !(Info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+        goto done;
+
+    /* The DACL of the object itself: nothing to do when it is protected */
+    if (GetSecurityInfo(hLink, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &pAcl, NULL, &pSd) != ERROR_SUCCESS)
+        goto done;
+    if (!GetSecurityDescriptorControl(pSd, &Control, &dwRevision) || (Control & SE_DACL_PROTECTED))
+        goto done;
+
+    pNewSd = BuildProfileDescriptor(ProfileDirSystem, NULL);
+    if (pNewSd)
+    {
+        if (GetSecurityDescriptorDacl(pNewSd, &bPresent, &pAcl, &bDefaulted) && bPresent && pAcl)
+        {
+            dwError = SetSecurityInfo(hLink, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                      NULL, NULL, pAcl, NULL);
+            if (dwError != ERROR_SUCCESS)
+                DPRINT1("Failed to secure %S, error: %lu\n", szLink, dwError);
+        }
+        LocalFree(pNewSd);
+    }
+
+done:
+    if (pSd)
+        LocalFree(pSd);
+    CloseHandle(hLink);
+}
+
 /* The value of a registry string under HKLM, expanded; FALSE when it is not there */
 static BOOL
 ReadPathValue(
@@ -717,6 +792,13 @@ SecureSystemDirectories(VOID)
     {
         SecureExistingProfileDirectory(szPath, ProfileDirTemp, NULL, TRUE);
         SecureExistingProfileDirectory(szWindows, ProfileDirSystem, NULL, TRUE);
+
+        /* The registry hives are for SYSTEM and Administrators only; the pass above has left them what system32 gives */
+        if (SUCCEEDED(StringCchPrintfW(szPath, ARRAYSIZE(szPath), L"%s\\system32\\config", szWindows)))
+            SecureExistingProfileDirectory(szPath, ProfileDirConfig, NULL, TRUE);
+
+        /* The \Windows junction to it, itself */
+        SecureWindowsJunction(szWindows);
     }
 
     /* Program Files, and the 32-bit one */
