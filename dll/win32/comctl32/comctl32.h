@@ -83,6 +83,7 @@
 #define REBAR_Register               REBAR_Register_v5
 #define STATUS_Register              STATUS_Register_v5
 #define TAB_Register                 TAB_Register_v5
+#define TOOLBAR_Register             TOOLBAR_Register_v5
 #define TRACKBAR_Register            TRACKBAR_Register_v5
 #define TREEVIEW_Register            TREEVIEW_Register_v5
 #define UPDOWN_Register              UPDOWN_Register_v5
@@ -333,6 +334,7 @@ extern void PROGRESS_Register_v5(void);
 extern void REBAR_Register_v5(void);
 extern void STATUS_Register_v5(void);
 extern void TAB_Register_v5(void);
+extern void TOOLBAR_Register_v5(void);
 extern void TRACKBAR_Register_v5(void);
 extern void TREEVIEW_Register_v5(void);
 extern void UPDOWN_Register_v5(void);
@@ -344,8 +346,6 @@ extern void EDIT_Unregister(void);
 extern void LISTBOX_Unregister(void);
 extern void STATIC_Unregister(void);
 extern void SYSLINK_Unregister(void);
-extern void TOOLBARv6_Register(void);
-extern void TOOLBARv6_Unregister(void);
 #endif /* __REACTOS__ */
 
 int MONTHCAL_MonthLength(int month, int year);
