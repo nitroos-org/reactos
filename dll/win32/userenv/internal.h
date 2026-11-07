@@ -58,6 +58,7 @@ typedef enum _PROFILE_DIR_KIND
     ProfileDirSystem,       /* Windows, Program Files: Users and application packages read only */
     ProfileDirTemp,         /* Windows\Temp */
     ProfileDirRoot,         /* the root of the system volume */
+    ProfileDirConfig,       /* Windows\System32\config: SYSTEM and Administrators only */
     ProfileDirUser      /* The profile of a user: SYSTEM, Administrators and that user */
 } PROFILE_DIR_KIND;
 
