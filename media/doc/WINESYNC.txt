@@ -161,7 +161,7 @@ dll/win32/ktmw32              # Synced to Wine-11.21
 dll/win32/l3codeca.acm        # Synced to Wine-11.21
 dll/win32/loadperf            # Synced to Wine-11.21
 dll/win32/lz32                # Synced to Wine-10.0
-dll/win32/mapi32              # Synced to Wine-10.0
+dll/win32/mapi32              # Synced to Wine-11.21
 dll/win32/mciavi32            # Synced to Wine-11.21
 dll/win32/mcicda              # Synced to Wine-11.21
 dll/win32/mciqtz32            # Synced to Wine-10.0
