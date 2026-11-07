@@ -887,9 +887,9 @@ NtQueryInformationProcess(
 
             /* Get max/min working set sizes */
             QuotaLimits.MaximumWorkingSetSize =
-                Process->Vm.MaximumWorkingSetSize << PAGE_SHIFT;
+                (SIZE_T)Process->Vm.MaximumWorkingSetSize << PAGE_SHIFT;
             QuotaLimits.MinimumWorkingSetSize =
-                Process->Vm.MinimumWorkingSetSize << PAGE_SHIFT;
+                (SIZE_T)Process->Vm.MinimumWorkingSetSize << PAGE_SHIFT;
 
             /* Get default time limits */
             QuotaLimits.TimeLimit.QuadPart = -1LL;

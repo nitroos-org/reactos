@@ -576,6 +576,15 @@ TiDispatch(
                     Status = STATUS_INVALID_PARAMETER;
                     break;
                 }
+                /* The option bytes the handlers read are the ones the caller supplied: BufferSize names
+                 * them and must fit in the input */
+                if (((PTCP_REQUEST_SET_INFORMATION_EX)Irp->AssociatedIrp.SystemBuffer)->BufferSize >
+                    IrpSp->Parameters.DeviceIoControl.InputBufferLength -
+                    FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer))
+                {
+                    Status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
                 if (((PTCP_REQUEST_SET_INFORMATION_EX)Irp->AssociatedIrp.SystemBuffer)->ID.toi_type !=
                     INFO_TYPE_ADDRESS_OBJECT &&
                     ((PTCP_REQUEST_SET_INFORMATION_EX)Irp->AssociatedIrp.SystemBuffer)->ID.toi_type !=

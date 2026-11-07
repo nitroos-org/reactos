@@ -250,6 +250,20 @@ VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp )
     Irp->MdlAddress = NULL;
 }
 
+/* Releases the pages that LockBuffers locked for the first Count slots before a later slot failed:
+ * the caller gets no array back, so nothing else would ever unlock them */
+static VOID AfdUnlockBufferRange( PAFD_MAPBUF MapBuf, UINT Count ) {
+    UINT j;
+
+    for( j = 0; j < Count; j++ ) {
+        if( MapBuf[j].Mdl ) {
+            MmUnlockPages( MapBuf[j].Mdl );
+            IoFreeMdl( MapBuf[j].Mdl );
+            MapBuf[j].Mdl = NULL;
+        }
+    }
+}
+
 /* Note: We add EXTRA_LOCK_BUFFERS extra buffers if LockAddress is true.  This allows
  * us to treat the address buffer (and, for WSARecvMsg, the control buffer, its
  * length and the message flags: Msg) as ordinary client buffers.  They're only
@@ -369,10 +383,12 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
             AFD_DbgPrint(MIN_TRACE,("Failed to lock pages\n"));
                     IoFreeMdl( MapBuf[i].Mdl );
                     MapBuf[i].Mdl = NULL;
+                    AfdUnlockBufferRange( MapBuf, i );
                     ExFreePoolWithTag(NewBuf, TAG_AFD_WSA_BUFFER);
                     return NULL;
                 }
             } else {
+                AfdUnlockBufferRange( MapBuf, i );
                 ExFreePoolWithTag(NewBuf, TAG_AFD_WSA_BUFFER);
                 return NULL;
             }

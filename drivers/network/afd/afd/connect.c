@@ -662,6 +662,14 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress) + sizeof(ULONG) + 2 * sizeof(USHORT))
         return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
 
+    /* An address of the unspecified family (it ends a datagram association) carries no data;
+     * any other must be complete for its type */
+    if (!(ConnectReq->RemoteAddress.TAAddressCount >= 1 &&
+          ConnectReq->RemoteAddress.Address[0].AddressType == 0) &&
+        !TaTransportAddressFits( &ConnectReq->RemoteAddress,
+            IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress)))
+        return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
+
     AFD_DbgPrint(MID_TRACE,("Connect request:\n"));
 #if 0
     OskitDumpBuffer
@@ -901,6 +909,10 @@ AfdStreamSocketSuperConnect(
      * input before we read or copy it (bounds the address copies below). */
     if (IrpSp->Parameters.DeviceIoControl.InputBufferLength <
             FIELD_OFFSET(AFD_SUPER_CONNECT_INFO, RemoteAddress) + sizeof(ULONG) + 2 * sizeof(USHORT))
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
+
+    if (!TaTransportAddressFits( &ConnectReq->RemoteAddress,
+            IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(AFD_SUPER_CONNECT_INFO, RemoteAddress)))
         return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
 
     if (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)

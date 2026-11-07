@@ -228,6 +228,7 @@ list(APPEND SOURCE
     WaitOnAddress.c
     WaitQuantum.c
     WerFlags.c
+    WorkingSetQuota.c
     WerRegisterMemoryFile.c
     WerRuntimeExceptionModule.c
     WideCharToMultiByte.c

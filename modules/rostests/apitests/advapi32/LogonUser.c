@@ -427,6 +427,8 @@ START_TEST(LsaLogonSession)
 
 static WCHAR NewPassword[] = L"Logon-User-New-2026!";
 static WCHAR BadOldPassword[] = L"Logon-User-Wrong-2026!";
+static WCHAR ShortPassword1[] = L"Abc12345x";
+static WCHAR ShortPassword2[] = L"Def67890y";
 
 /*
  * MsV1_0ChangePassword with an old password that is not right. Measured on Windows 10 22H2, a
@@ -532,6 +534,23 @@ static VOID ChildChangePassword(PCSTR UserA)
     ok(GetLastError() == ERROR_LOGON_FAILURE, "LogonUserW with the old password: error %lu\n", GetLastError());
     if (Ok)
         CloseHandle(Token);
+
+    /* Passwords of up to 14 characters: the LM half of the request has no stored LM hash to match */
+    Status = NetUserChangePassword(Computer, User, NewPassword, ShortPassword1);
+    ok(Status == NERR_Success, "NetUserChangePassword(to a short password) returned %lu\n", Status);
+    Status = NetUserChangePassword(Computer, User, ShortPassword1, ShortPassword2);
+    ok(Status == NERR_Success, "NetUserChangePassword(short to short) returned %lu\n", Status);
+    Status = NetUserChangePassword(Computer, User, ShortPassword1, ShortPassword2);
+    ok(Status == ERROR_INVALID_PASSWORD, "NetUserChangePassword(stale short password) returned %lu\n", Status);
+    Token = NULL;
+    Ok = LogonUserW(User, L".", ShortPassword2, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &Token);
+    ok(Ok, "LogonUserW with the short password failed: %lu\n", GetLastError());
+    if (Ok)
+        CloseHandle(Token);
+
+    /* A NULL domain is the caller's logon domain; this used to fault. The caller is not the test user. */
+    Status = NetUserChangePassword(NULL, User, ShortPassword1, ShortPassword2);
+    ok(Status != NERR_Success, "NetUserChangePassword(NULL domain, wrong old password) returned %lu\n", Status);
 }
 
 START_TEST(NetUserChangePassword)
