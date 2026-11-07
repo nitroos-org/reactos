@@ -69,13 +69,11 @@ static LRESULT WINAPI shell_embedding_proc(HWND hwnd, UINT msg, WPARAM wParam, L
 {
     WebBrowser *This;
 
-    static const WCHAR wszTHIS[] = {'T','H','I','S',0};
-
     if(msg == WM_CREATE) {
         This = *(WebBrowser**)lParam;
-        SetPropW(hwnd, wszTHIS, This);
+        SetPropW(hwnd, L"THIS", This);
     }else {
-        This = GetPropW(hwnd, wszTHIS);
+        This = GetPropW(hwnd, L"THIS");
     }
 
     switch(msg) {
@@ -100,9 +98,6 @@ static void create_shell_embedding_hwnd(WebBrowser *This)
     HWND parent = NULL;
     HRESULT hres;
 
-    static const WCHAR wszShellEmbedding[] =
-        {'S','h','e','l','l',' ','E','m','b','e','d','d','i','n','g',0};
-
     if(!shell_embedding_atom) {
         static WNDCLASSEXW wndclass = {
             sizeof(wndclass),
@@ -110,7 +105,7 @@ static void create_shell_embedding_hwnd(WebBrowser *This)
             shell_embedding_proc,
             0, 0 /* native uses 8 */, NULL, NULL, NULL,
             (HBRUSH)(COLOR_WINDOW + 1), NULL,
-            wszShellEmbedding,
+            L"Shell Embedding",
             NULL
         };
         wndclass.hInstance = ieframe_instance;
@@ -126,7 +121,7 @@ static void create_shell_embedding_hwnd(WebBrowser *This)
 
     This->doc_host.frame_hwnd = This->shell_embedding_hwnd = CreateWindowExW(
             WS_EX_WINDOWEDGE,
-            wszShellEmbedding, wszShellEmbedding,
+            L"Shell Embedding", L"Shell Embedding",
             WS_CLIPSIBLINGS | WS_CLIPCHILDREN
             | (parent ? WS_CHILD | WS_TABSTOP : WS_POPUP | WS_MAXIMIZEBOX),
             0, 0, 0, 0, parent,
@@ -201,8 +196,6 @@ static HRESULT activate_ui(WebBrowser *This, IOleClientSite *active_site)
 {
     HRESULT hres;
 
-    static const WCHAR wszitem[] = {'i','t','e','m',0};
-
     if(This->inplace)
     {
         if(This->shell_embedding_hwnd)
@@ -220,9 +213,9 @@ static HRESULT activate_ui(WebBrowser *This, IOleClientSite *active_site)
     IOleInPlaceSiteEx_OnUIActivate(This->inplace);
 
     if(This->doc_host.frame)
-        IOleInPlaceFrame_SetActiveObject(This->doc_host.frame, &This->IOleInPlaceActiveObject_iface, wszitem);
+        IOleInPlaceFrame_SetActiveObject(This->doc_host.frame, &This->IOleInPlaceActiveObject_iface, L"item");
     if(This->uiwindow)
-        IOleInPlaceUIWindow_SetActiveObject(This->uiwindow, &This->IOleInPlaceActiveObject_iface, wszitem);
+        IOleInPlaceUIWindow_SetActiveObject(This->uiwindow, &This->IOleInPlaceActiveObject_iface, L"item");
 
     if(This->doc_host.frame)
         IOleInPlaceFrame_SetMenu(This->doc_host.frame, NULL, NULL, This->shell_embedding_hwnd);
@@ -273,6 +266,7 @@ static HRESULT on_offlineconnected_change(WebBrowser *This)
     else if(V_VT(&offline) != VT_EMPTY)
         WARN("wrong V_VT(silent) %d\n", V_VT(&offline));
 
+    VariantClear(&offline);
     return S_OK;
 }
 
@@ -287,6 +281,7 @@ static HRESULT on_silent_change(WebBrowser *This)
     else if(V_VT(&silent) != VT_EMPTY)
         WARN("wrong V_VT(silent) %d\n", V_VT(&silent));
 
+    VariantClear(&silent);
     return S_OK;
 }
 

@@ -143,8 +143,9 @@ dll/win32/hhctrl.ocx          # Synced to Wine-10.0
 dll/win32/hlink               # Synced to Wine-11.21
 dll/win32/hnetcfg             # Synced to Wine-10.0
 dll/win32/iccvid              # Synced to Wine-10.0
-dll/win32/ieframe             # Synced to Wine-10.0
+dll/win32/ieframe             # Synced to Wine-11.21
 dll/win32/ieproxy             # Synced to Wine-11.21
+dll/win32/iertutil            # Synced to Wine-11.21
 dll/win32/imaadp32.acm        # Synced to Wine-10.0
 dll/win32/imagehlp            # Synced to Wine-11.21
 dll/win32/inetcomm            # Synced to Wine-11.21
@@ -279,7 +280,7 @@ dll/win32/twain_32            # Synced to Wine-10.0
 dll/win32/uiautomationcore    # Synced to Wine-10.0
 dll/win32/updspapi            # Synced to Wine-10.0
 dll/win32/url                 # Synced to Wine-10.0
-dll/win32/urlmon              # Synced to Wine-10.0
+dll/win32/urlmon              # Synced to Wine-11.21
 dll/win32/usp10               # Synced to Wine-11.17
 dll/win32/uxtheme             # Forked
 dll/win32/vbscript            # Synced to Wine-11.21

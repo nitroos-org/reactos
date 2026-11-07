@@ -1,5 +1,6 @@
 
-add_definitions(-DUSE_WINE_TODOS -DWIN32_LEAN_AND_MEAN=)
+remove_definitions(-D_WIN32_WINNT=0x502 -DWINVER=0x502)
+add_definitions(-D_WIN32_WINNT=0x600 -DWINVER=0x600 -DUSE_WINE_TODOS -DWIN32_LEAN_AND_MEAN=)
 
 list(APPEND SOURCE
     ie.c
