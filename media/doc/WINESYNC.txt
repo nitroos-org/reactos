@@ -322,8 +322,23 @@ dll/win32/xolehlp             # Synced to Wine-10.0
 
 comctl32 -
   dll/win32/comctl32/button.c              # Forked at Wine-3.3
-  dll/win32/comctl32/datetime.c            # Synced to Wine-6.0
-  dll/win32/comctl32/*                     # Synced to Wine-5.0
+  dll/win32/comctl32/combo.c               # ReactOS v6 control copy, not in step with Wine (see button.c)
+  dll/win32/comctl32/edit.c                # ReactOS v6 control copy, not in step with Wine (see button.c)
+  dll/win32/comctl32/listbox.c             # ReactOS v6 control copy, not in step with Wine (see button.c)
+  dll/win32/comctl32/static.c              # ReactOS v6 control copy, not in step with Wine (see button.c)
+  dll/win32/comctl32/syslink.c             # Synced to Wine-5.0 (the v6 control, in Wine now comctl32_v6)
+  dll/win32/comctl32/taskdialog.c          # Synced to Wine-5.0 (the v6 control, in Wine now comctl32_v6)
+  dll/win32/comctl32/theme_scrollbar.c     # Synced to Wine-5.0 (Wine moved it to uxtheme)
+  dll/win32/comctl32/theming.c             # Forked at Wine-5.0 (Wine builds comctl32 v6 as a separate DLL)
+  dll/win32/comctl32/imagelist.c           # Synced to Wine-5.0 (ReactOS changes, not yet merged with Wine-11.21)
+  dll/win32/comctl32/propsheet.c           # Synced to Wine-5.0 (ReactOS changes, not yet merged with Wine-11.21)
+  dll/win32/comctl32/toolbar.c             # Synced to Wine-5.0 (ReactOS changes, not yet merged with Wine-11.21)
+  dll/win32/comctl32/string.c              # Synced to Wine-5.0 (Wine moved these functions to kernelbase)
+  dll/win32/comctl32/v5/                   # ReactOS: builds the sources of this directory a second time as the v5 (5.82) controls
+  dll/win32/comctl32/*                     # Synced to Wine-11.21
+modules/rostests/winetests/comctl32 -
+  button.c, combo.c, edit.c, imagelist.c, listbox.c, propsheet.c, static.c, syslink.c, toolbar.c  # Synced to Wine-5.0
+  *                                        # Synced to Wine-11.21
 
 dll/cpl/bthprops              # Synced to Wine-10.0
 dll/cpl/inetcpl               # Synced to WineStaging-4.18

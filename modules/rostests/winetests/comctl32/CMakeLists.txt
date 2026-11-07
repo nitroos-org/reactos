@@ -56,7 +56,7 @@ endif()
 target_compile_options(comctl32_winetest PRIVATE $<$<NOT:$<C_COMPILER_ID:MSVC>>:-Wno-format>)
 
 set_module_type(comctl32_winetest win32cui)
-add_importlibs(comctl32_winetest comctl32 ole32 user32 gdi32 advapi32 msvcrt kernel32)
+add_importlibs(comctl32_winetest comctl32 ole32 user32 gdi32 advapi32 uxtheme msvcrt kernel32)
 
 if(MSVC)
     add_importlibs(comctl32_winetest ntdll)
