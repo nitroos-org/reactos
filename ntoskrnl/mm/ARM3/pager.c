@@ -1321,24 +1321,39 @@ MiPagerCheckSlots(
 }
 
 /* One line of counters on the debug channel, at most once a minute and only when something moved */
+/*
+ * Called by the writer thread and the balancer's pass check: a writer stuck in
+ * a cluster write must not silence the counters (one caller at a time).
+ */
 static
 VOID
-MiPagerReport(
-    _Inout_ PULONGLONG LastReport,
-    _Inout_ PULONG LastSum)
+MiPagerReport(VOID)
 {
+    static ULONGLONG LastReportTime;
+    static ULONG LastSumValue;
+    static volatile LONG Busy;
+    PULONGLONG LastReport = &LastReportTime;
+    PULONG LastSum = &LastSumValue;
     ULONGLONG Now = KeQueryInterruptTime();
     ULONG Sum;
 
-    if ((Now - *LastReport) < 60ULL * 10 * 1000 * 1000)
+    if (InterlockedCompareExchange(&Busy, 1, 0) != 0)
         return;
+    if ((Now - *LastReport) < 60ULL * 10 * 1000 * 1000)
+    {
+        InterlockedExchange(&Busy, 0);
+        return;
+    }
     *LastReport = Now;
 
     Sum = MiPagerCounters.Trimmed + MiPagerCounters.Written + MiPagerCounters.Repurposed +
           MiPagerCounters.InPageReads + MiPagerCounters.Aged + MiPagerCounters.WriteErrors +
           MiPagerCounters.PacedRequests + MiPagerCounters.InjectedAllocFailures;
     if (Sum == *LastSum)
+    {
+        InterlockedExchange(&Busy, 0);
         return;
+    }
     *LastSum = Sum;
 
     DbgPrint("NitroPager: trim %lu dirty %lu aged %lu skipdirty %lu | written %lu clusters %lu errors %lu noslot %lu | "
@@ -1358,6 +1373,7 @@ MiPagerReport(
             MiPagerCounters.LegacyFreed, MiPagerCounters.LegacyAsked, MiPagerCounters.NoProgressPasses,
             MiPagerCounters.PacedRequests, MiPagerCounters.WsFloorSkips, MiPagerCounters.InjectedAllocFailures,
             IopReserveIrpUses);
+    InterlockedExchange(&Busy, 0);
 }
 
 /*
@@ -1375,8 +1391,7 @@ MiModifiedPageWriterThread(
     _In_ PVOID Context)
 {
     LARGE_INTEGER Timeout;
-    ULONGLONG LastReport = 0;
-    ULONG LastSum = 0, Attempted, Idle = 0;
+    ULONG Attempted, Idle = 0;
     LONG Queued;
     BOOLEAN NoSlot, Failing, Pressure;
     PFN_NUMBER Modified;
@@ -1391,7 +1406,7 @@ MiModifiedPageWriterThread(
         if (MiPagerShutdown)
             break;
 
-        MiPagerReport(&LastReport, &LastSum);
+        MiPagerReport();
 
         /* A scan that found nothing is retried now and then, whatever the list does */
         if (++Idle >= 10)
@@ -1619,6 +1634,9 @@ MiPagerBalancerPassDone(
     ULONG_PTR WriterState;
     LARGE_INTEGER Delay;
     PFN_NUMBER Starved;
+
+    if (MiPagerWriterStarted == 2)
+        MiPagerReport();
 
     /*
      * Test knob 0x40: starved below the low-water mark instead. At flag 1 the commit ceiling
