@@ -14,7 +14,7 @@
 #define NO_BYTES 0xdeadbeef
 
 /* msafd cancels only the timed out request through NtCancelIoFileEx, which ntdll exports from 0x600 on; below that the
- * time-out is not applied, and a datagram receive (recvfrom on UDP) is never timed out on ReactOS */
+ * time-out is not applied */
 #if DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA
 #define ROS_TIMEOUTS 1
 #else
@@ -472,11 +472,12 @@ Test_Udp(void)
     SOCKET Receiver, Sender;
     struct sockaddr_in Address;
     int Length = sizeof(Address);
+    int i, Result;
     RECV_JOB Job;
 
-    if (is_reactos())
+    if (!TIMEOUTS_APPLY())
     {
-        skip("ReactOS does not time out a datagram socket: AFD leaks the buffers of a cancelled datagram receive\n");
+        skip("ReactOS does not apply the time-out of a blocking receive below 0x600\n");
         return;
     }
 
@@ -506,6 +507,34 @@ Test_Udp(void)
 
     if (RunRecv(&Job, Receiver, ApiWsaRecvFrom, Sender, &Address, "WSARecvFrom"))
         CheckTimedOut(&Job, Timeout, "WSARecvFrom");
+
+    /* recv, WSARecv and a peek time out as well (recv on a datagram socket was the receive that hung) */
+    if (RunRecv(&Job, Receiver, ApiRecv, Sender, &Address, "recv on a datagram socket"))
+        CheckTimedOut(&Job, Timeout, "recv on a datagram socket");
+    if (RunRecv(&Job, Receiver, ApiWsaRecv, Sender, &Address, "WSARecv on a datagram socket"))
+        CheckTimedOut(&Job, Timeout, "WSARecv on a datagram socket");
+    if (RunRecv(&Job, Receiver, ApiRecvPeek, Sender, &Address, "recv MSG_PEEK on a datagram socket"))
+        CheckTimedOut(&Job, Timeout, "recv MSG_PEEK on a datagram socket");
+
+    /* the time-out leaves no stale request behind: many cancelled receives, then a datagram arrives intact */
+    SetTimeout(Receiver, SO_RCVTIMEO, 1);
+    for (i = 0; i < 300; i++)
+    {
+        char Dummy[64];
+
+        Result = recvfrom(Receiver, Dummy, sizeof(Dummy), 0, NULL, NULL);
+        if (Result != SOCKET_ERROR || WSAGetLastError() != WSAETIMEDOUT)
+        {
+            ok(0, "receive %d with a 1 ms time-out returned %d, error %d\n", i, Result, WSAGetLastError());
+            break;
+        }
+    }
+    ok(i == 300, "only %d of 300 short time-outs completed\n", i);
+    SetTimeout(Receiver, SO_RCVTIMEO, 5000);
+    ok(sendto(Sender, "again", 5, 0, (struct sockaddr *)&Address, sizeof(Address)) == 5, "sendto failed: %d\n", WSAGetLastError());
+    ok(RunRecv(&Job, Receiver, ApiRecvFrom, Sender, &Address, "recvfrom after the short time-outs"), "recvfrom did not return\n");
+    ok(Job.Result == 5, "recvfrom after the short time-outs returned %d, error %d\n", Job.Result, Job.Error);
+    ok(Job.Result != 5 || memcmp(Job.Buffer, "again", 5) == 0, "wrong datagram after the short time-outs\n");
 
 Done:
     if (Receiver != INVALID_SOCKET)
