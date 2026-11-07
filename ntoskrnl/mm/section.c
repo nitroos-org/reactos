@@ -2504,6 +2504,21 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
     PVOID RmapEntry = NULL;
     NTSTATUS Status;
 
+    /*
+     * The paging structures of the page come first, before the segment lock: the mapping is created under
+     * that lock, and a page table that finds no free page waits for one (MiMakeSystemAddressValid) while the
+     * lazy writer, which frees pages, waits for the segment lock (MmFlushSegment): a deadlock at low memory
+     * (bugcheck 0x7A, STATUS_NO_MEMORY, after the wait ran out).
+     */
+    if ((Address <= MM_HIGHEST_USER_ADDRESS) && (AddressSpace == &PsGetCurrentProcess()->Vm))
+    {
+        PEPROCESS Process = PsGetCurrentProcess();
+
+        MiLockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+        MiMakePdeExistAndMakeValid(MiAddressToPde(Address), Process, MM_NOIRQL);
+        MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+    }
+
     Status = MiNotPresentFaultSectionView(AddressSpace, MemoryArea, Address, Locked, &RmapEntry);
     if (RmapEntry != NULL)
         MmFreeRmapEntry(RmapEntry);
