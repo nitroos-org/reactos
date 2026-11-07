@@ -24,6 +24,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(urlmon);
 typedef struct {
     IBindStatusCallback IBindStatusCallback_iface;
     IServiceProvider    IServiceProvider_iface;
+    IHttpNegotiate      IHttpNegotiate_iface;
 
     LONG ref;
 
@@ -32,6 +33,8 @@ typedef struct {
     LPWSTR file_name;
     LPWSTR cache_file;
     DWORD bindf;
+    DWORD http_status;
+    HRESULT result;
 
     stop_cache_binding_proc_t onstop_proc;
     void *ctx;
@@ -45,6 +48,11 @@ static inline DownloadBSC *impl_from_IBindStatusCallback(IBindStatusCallback *if
 static inline DownloadBSC *impl_from_IServiceProvider(IServiceProvider *iface)
 {
     return CONTAINING_RECORD(iface, DownloadBSC, IServiceProvider_iface);
+}
+
+static inline DownloadBSC *impl_from_IHttpNegotiate(IHttpNegotiate *iface)
+{
+    return CONTAINING_RECORD(iface, DownloadBSC, IHttpNegotiate_iface);
 }
 
 static HRESULT WINAPI DownloadBSC_QueryInterface(IBindStatusCallback *iface,
@@ -63,6 +71,9 @@ static HRESULT WINAPI DownloadBSC_QueryInterface(IBindStatusCallback *iface,
     }else if(IsEqualGUID(&IID_IServiceProvider, riid)) {
         TRACE("(%p)->(IID_IServiceProvider, %p)\n", This, ppv);
         *ppv = &This->IServiceProvider_iface;
+    }else if(IsEqualGUID(&IID_IHttpNegotiate, riid)) {
+        TRACE("(%p)->(IID_IHttpNegotiate, %p)\n", This, ppv);
+        *ppv = &This->IHttpNegotiate_iface;
     }
 
     if(*ppv) {
@@ -197,7 +208,14 @@ static HRESULT WINAPI DownloadBSC_OnStopBinding(IBindStatusCallback *iface,
 
     TRACE("(%p)->(%08lx %s)\n", This, hresult, debugstr_w(szError));
 
-    if(This->file_name) {
+    /* An HTTP error status ends a download to a file with a failure and no file, as on Windows 10:
+     * 404 is INET_E_OBJECT_NOT_FOUND, the others (403, 500) INET_E_DOWNLOAD_FAILURE */
+    if(This->file_name && SUCCEEDED(hresult) && This->http_status >= 400) {
+        hresult = This->http_status == 404 ? INET_E_OBJECT_NOT_FOUND : INET_E_DOWNLOAD_FAILURE;
+        This->result = hresult;
+    }
+
+    if(This->file_name && SUCCEEDED(hresult)) {
         if(This->cache_file) {
             BOOL b;
 
@@ -263,6 +281,98 @@ static HRESULT WINAPI DownloadBSC_OnObjectAvailable(IBindStatusCallback *iface,
     FIXME("(%p)->(%s %p)\n", This, debugstr_guid(riid), punk);
     return E_NOTIMPL;
 }
+
+static HRESULT WINAPI DwlHttpNegotiate_QueryInterface(IHttpNegotiate *iface, REFIID riid, void **ppv)
+{
+    DownloadBSC *This = impl_from_IHttpNegotiate(iface);
+    return IBindStatusCallback_QueryInterface(&This->IBindStatusCallback_iface, riid, ppv);
+}
+
+static ULONG WINAPI DwlHttpNegotiate_AddRef(IHttpNegotiate *iface)
+{
+    DownloadBSC *This = impl_from_IHttpNegotiate(iface);
+    return IBindStatusCallback_AddRef(&This->IBindStatusCallback_iface);
+}
+
+static ULONG WINAPI DwlHttpNegotiate_Release(IHttpNegotiate *iface)
+{
+    DownloadBSC *This = impl_from_IHttpNegotiate(iface);
+    return IBindStatusCallback_Release(&This->IBindStatusCallback_iface);
+}
+
+/* The IHttpNegotiate of the caller's callback, if it has one */
+static IHttpNegotiate *get_caller_negotiate(DownloadBSC *This)
+{
+    IServiceProvider *serv_prov;
+    IHttpNegotiate *ret = NULL;
+    HRESULT hres;
+
+    if(!This->callback)
+        return NULL;
+
+    hres = IBindStatusCallback_QueryInterface(This->callback, &IID_IHttpNegotiate, (void**)&ret);
+    if(SUCCEEDED(hres))
+        return ret;
+
+    hres = IBindStatusCallback_QueryInterface(This->callback, &IID_IServiceProvider, (void**)&serv_prov);
+    if(SUCCEEDED(hres)) {
+        hres = IServiceProvider_QueryService(serv_prov, &IID_IHttpNegotiate, &IID_IHttpNegotiate, (void**)&ret);
+        IServiceProvider_Release(serv_prov);
+        if(SUCCEEDED(hres))
+            return ret;
+    }
+
+    return NULL;
+}
+
+static HRESULT WINAPI DwlHttpNegotiate_BeginningTransaction(IHttpNegotiate *iface, LPCWSTR szURL,
+        LPCWSTR szHeaders, DWORD dwReserved, LPWSTR *pszAdditionalHeaders)
+{
+    DownloadBSC *This = impl_from_IHttpNegotiate(iface);
+    IHttpNegotiate *negotiate = get_caller_negotiate(This);
+    HRESULT hres = S_OK;
+
+    TRACE("(%p)->(%s %s %ld %p)\n", This, debugstr_w(szURL), debugstr_w(szHeaders), dwReserved, pszAdditionalHeaders);
+
+    *pszAdditionalHeaders = NULL;
+    if(negotiate) {
+        hres = IHttpNegotiate_BeginningTransaction(negotiate, szURL, szHeaders, dwReserved, pszAdditionalHeaders);
+        IHttpNegotiate_Release(negotiate);
+    }
+
+    return hres;
+}
+
+static HRESULT WINAPI DwlHttpNegotiate_OnResponse(IHttpNegotiate *iface, DWORD dwResponseCode,
+        LPCWSTR szResponseHeaders, LPCWSTR szRequestHeaders, LPWSTR *pszAdditionalRequestHeaders)
+{
+    DownloadBSC *This = impl_from_IHttpNegotiate(iface);
+    IHttpNegotiate *negotiate = get_caller_negotiate(This);
+    HRESULT hres = S_OK;
+
+    TRACE("(%p)->(%ld %s %s %p)\n", This, dwResponseCode, debugstr_w(szResponseHeaders),
+          debugstr_w(szRequestHeaders), pszAdditionalRequestHeaders);
+
+    This->http_status = dwResponseCode;
+
+    if(pszAdditionalRequestHeaders)
+        *pszAdditionalRequestHeaders = NULL;
+    if(negotiate) {
+        hres = IHttpNegotiate_OnResponse(negotiate, dwResponseCode, szResponseHeaders, szRequestHeaders,
+                pszAdditionalRequestHeaders);
+        IHttpNegotiate_Release(negotiate);
+    }
+
+    return hres;
+}
+
+static const IHttpNegotiateVtbl HttpNegotiateVtbl = {
+    DwlHttpNegotiate_QueryInterface,
+    DwlHttpNegotiate_AddRef,
+    DwlHttpNegotiate_Release,
+    DwlHttpNegotiate_BeginningTransaction,
+    DwlHttpNegotiate_OnResponse
+};
 
 static const IBindStatusCallbackVtbl BindStatusCallbackVtbl = {
     DownloadBSC_QueryInterface,
@@ -340,6 +450,7 @@ static HRESULT DownloadBSC_Create(IBindStatusCallback *callback, LPCWSTR file_na
 
     ret->IBindStatusCallback_iface.lpVtbl = &BindStatusCallbackVtbl;
     ret->IServiceProvider_iface.lpVtbl = &ServiceProviderVtbl;
+    ret->IHttpNegotiate_iface.lpVtbl = &HttpNegotiateVtbl;
     ret->ref = 1;
 
     if(file_name) {
@@ -443,16 +554,19 @@ HRESULT WINAPI URLDownloadToFileW(LPUNKNOWN pCaller, LPCWSTR szURL, LPCWSTR szFi
         return hres;
 
     hres = CreateAsyncBindCtx(0, &callback->IBindStatusCallback_iface, NULL, &bindctx);
-    IBindStatusCallback_Release(&callback->IBindStatusCallback_iface);
-    if(FAILED(hres))
+    if(FAILED(hres)) {
+        IBindStatusCallback_Release(&callback->IBindStatusCallback_iface);
         return hres;
+    }
 
     hres = CreateURLMoniker(NULL, szURL, &mon);
     if(FAILED(hres)) {
         IBindCtx_Release(bindctx);
+        IBindStatusCallback_Release(&callback->IBindStatusCallback_iface);
         return hres;
     }
 
+    unk = NULL;
     hres = IMoniker_BindToStorage(mon, bindctx, NULL, &IID_IUnknown, (void**)&unk);
     IMoniker_Release(mon);
     IBindCtx_Release(bindctx);
@@ -460,7 +574,14 @@ HRESULT WINAPI URLDownloadToFileW(LPUNKNOWN pCaller, LPCWSTR szURL, LPCWSTR szFi
     if(unk)
         IUnknown_Release(unk);
 
-    return hres == MK_S_ASYNCHRONOUS ? S_OK : hres;
+    if(hres == MK_S_ASYNCHRONOUS)
+        hres = S_OK;
+    /* the download ended with an HTTP error status */
+    if(SUCCEEDED(hres) && FAILED(callback->result))
+        hres = callback->result;
+
+    IBindStatusCallback_Release(&callback->IBindStatusCallback_iface);
+    return hres;
 }
 
 /***********************************************************************

@@ -64,6 +64,7 @@ extern void func_udpbindretry(void);
 extern void func_udpcancel(void);
 extern void func_udpconnectname(void);
 extern void func_udpevents(void);
+extern void func_udpburst(void);
 extern void func_udprecv(void);
 extern void func_udpzerolen(void);
 extern void func_v6only(void);
@@ -146,6 +147,7 @@ const struct test winetest_testlist[] =
     { "udpcancel", func_udpcancel },
     { "udpconnectname", func_udpconnectname },
     { "udpevents", func_udpevents },
+    { "udpburst", func_udpburst },
     { "udprecv", func_udprecv },
     { "udpzerolen", func_udpzerolen },
     { "v6only", func_v6only },
