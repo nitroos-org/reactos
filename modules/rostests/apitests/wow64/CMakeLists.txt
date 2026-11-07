@@ -32,7 +32,7 @@ add_wow64_apitest(kernel32
     GetCurrentDirectory GetEnvironmentVariable GetDriveType GetCPInfo
     IsDBCSLeadByteEx lstrlen Wow64Environment Wow64ProgramFiles Wow64EnvironmentBlock Wow64ChildEnvironment Wow64SystemDlls DynamicTls HandleList JobObject JobList
     Wow64Console FindFirstStream ProcThreadMitigation RegisterWait QueueUserWorkItem ResolveDelayLoadedAPI InterlockedPushListSListEx
-    ConsoleCsrRequests ConsoleVirtualTerminal ConsoleCP ConsoleBufferSwitch ConsoleCreateRace ConsoleOrphanChild ConsoleInheritForeign ConsoleViewFollow
+    ConsoleCsrRequests ConsoleVirtualTerminal ConsoleCP ConsoleBufferSwitch ConsoleCreateRace ConsoleOrphanChild ConsoleInheritForeign UnbufferedReadLimit ConsoleViewFollow
     ConsoleWriteLatency SetConsoleWindowInfo WerRegisterMemoryFile
     CancelIoEx ReadDirectoryChanges)
 # ConsoleCaret, ConsoleCtrlEventRace, ConsoleCtrlHandler and ConsoleDisplayMode also call user32/gdi32: kernel32_apitest only

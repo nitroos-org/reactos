@@ -251,8 +251,120 @@ TestMmBuildMdlForNonPagedPool(VOID)
     ExFreePoolWithTag(Page, 'Test');
 }
 
+/*
+ * Locking the pages of a user buffer is charged against the resident available pages and given back by
+ * MmUnlockPages: a lock and unlock of 2 MB, 4096 times, locks 16 GB in all and needs every page returned.
+ * A request for all the physical memory is refused with STATUS_INSUFFICIENT_RESOURCES before any page is
+ * touched, so its buffer is only reserved (a probe of reserved memory would be an access violation).
+ */
+static
+NTSTATUS
+LockUserMdl(
+    _In_ PMDL Mdl)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    _SEH2_TRY
+    {
+        MmProbeAndLockPages(Mdl, UserMode, IoWriteAccess);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    return Status;
+}
+
+static
+VOID
+TestMmProbeAndLockPagesCharge(VOID)
+{
+    SYSTEM_BASIC_INFORMATION BasicInfo;
+    NTSTATUS Status, LockStatus = STATUS_SUCCESS;
+    PVOID Base = NULL;
+    SIZE_T Size = 2 * 1024 * 1024;
+    ULONGLONG Total;
+    PMDL Mdl;
+    ULONG i;
+
+    Status = ZwQuerySystemInformation(SystemBasicInformation, &BasicInfo, sizeof(BasicInfo), NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (skip(NT_SUCCESS(Status), "No system information\n"))
+        return;
+    Total = (ULONGLONG)BasicInfo.NumberOfPhysicalPages * BasicInfo.PageSize;
+
+    /* lock and unlock again and again */
+    Status = ZwAllocateVirtualMemory(ZwCurrentProcess(), &Base, 0, &Size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!skip(NT_SUCCESS(Status), "No buffer\n"))
+    {
+        Mdl = IoAllocateMdl(Base, (ULONG)Size, FALSE, FALSE, NULL);
+        ok(Mdl != NULL, "IoAllocateMdl failed\n");
+        if (!skip(Mdl != NULL, "No MDL\n"))
+        {
+            for (i = 0; i < 4096; i++)
+            {
+                LockStatus = LockUserMdl(Mdl);
+                if (!NT_SUCCESS(LockStatus))
+                    break;
+                MmUnlockPages(Mdl);
+            }
+            ok_eq_hex(LockStatus, STATUS_SUCCESS);
+            ok_eq_ulong(i, 4096UL);
+            IoFreeMdl(Mdl);
+        }
+        Size = 0;
+        ZwFreeVirtualMemory(ZwCurrentProcess(), &Base, &Size, MEM_RELEASE);
+    }
+
+    /* all the physical memory cannot be locked */
+    if (Total > 0x7FFFF000)
+    {
+        skip(FALSE, "More physical memory than an MDL describes\n");
+        return;
+    }
+    Base = NULL;
+    Size = (SIZE_T)Total;
+    Status = ZwAllocateVirtualMemory(ZwCurrentProcess(), &Base, 0, &Size, MEM_RESERVE, PAGE_READWRITE);
+    if (skip(NT_SUCCESS(Status), "No room to reserve all the physical memory (0x%lx)\n", Status))
+        return;
+    Mdl = IoAllocateMdl(Base, (ULONG)Size, FALSE, FALSE, NULL);
+    if (!skip(Mdl != NULL, "No MDL for all the physical memory\n"))
+    {
+        LockStatus = LockUserMdl(Mdl);
+        ok_eq_hex(LockStatus, STATUS_INSUFFICIENT_RESOURCES);
+        if (NT_SUCCESS(LockStatus))
+            MmUnlockPages(Mdl);
+        ok((Mdl->MdlFlags & MDL_PAGES_LOCKED) == 0, "MDL locked after the refusal\n");
+        IoFreeMdl(Mdl);
+    }
+    Size = 0;
+    ZwFreeVirtualMemory(ZwCurrentProcess(), &Base, &Size, MEM_RELEASE);
+
+    /* the refusal took nothing: locking works as before */
+    Base = NULL;
+    Size = 2 * 1024 * 1024;
+    Status = ZwAllocateVirtualMemory(ZwCurrentProcess(), &Base, 0, &Size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (NT_SUCCESS(Status))
+    {
+        Mdl = IoAllocateMdl(Base, (ULONG)Size, FALSE, FALSE, NULL);
+        if (Mdl)
+        {
+            LockStatus = LockUserMdl(Mdl);
+            ok_eq_hex(LockStatus, STATUS_SUCCESS);
+            if (NT_SUCCESS(LockStatus))
+                MmUnlockPages(Mdl);
+            IoFreeMdl(Mdl);
+        }
+        Size = 0;
+        ZwFreeVirtualMemory(ZwCurrentProcess(), &Base, &Size, MEM_RELEASE);
+    }
+}
+
 START_TEST(MmMdl)
 {
+    TestMmProbeAndLockPagesCharge();
     TestMmAllocatePagesForMdl();
     TestMmBuildMdlForNonPagedPool();
 }
