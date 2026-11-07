@@ -2616,6 +2616,13 @@ static DWORD ParseAclStringFlags(LPCWSTR* StringAcl)
     return flags;
 }
 
+#ifndef SDDL_OBJECT_ACCESS_ALLOWED
+#define SDDL_OBJECT_ACCESS_ALLOWED L"OA"
+#define SDDL_OBJECT_ACCESS_DENIED  L"OD"
+#define SDDL_OBJECT_ALARM          L"OL"
+#define SDDL_OBJECT_AUDIT          L"OU"
+#endif
+
 /******************************************************************************
  * ParseAceStringType
  */
@@ -2626,12 +2633,10 @@ static const ACEFLAG AceType[] =
     { SDDL_ACCESS_ALLOWED, ACCESS_ALLOWED_ACE_TYPE },
     { SDDL_ACCESS_DENIED,  ACCESS_DENIED_ACE_TYPE },
     { SDDL_MANDATORY_LABEL,SYSTEM_MANDATORY_LABEL_ACE_TYPE },
-    /*
     { SDDL_OBJECT_ACCESS_ALLOWED, ACCESS_ALLOWED_OBJECT_ACE_TYPE },
     { SDDL_OBJECT_ACCESS_DENIED,  ACCESS_DENIED_OBJECT_ACE_TYPE },
     { SDDL_OBJECT_ALARM,          SYSTEM_ALARM_OBJECT_ACE_TYPE },
     { SDDL_OBJECT_AUDIT,          SYSTEM_AUDIT_OBJECT_ACE_TYPE },
-    */
     { NULL, 0 },
 };
 
@@ -2820,6 +2825,69 @@ static DWORD ParseAceStringRights(LPCWSTR* StringAcl)
 }
 
 
+static BOOL IsObjectAceType(BYTE type)
+{
+    return type == ACCESS_ALLOWED_OBJECT_ACE_TYPE || type == ACCESS_DENIED_OBJECT_ACE_TYPE ||
+           type == SYSTEM_AUDIT_OBJECT_ACE_TYPE || type == SYSTEM_ALARM_OBJECT_ACE_TYPE;
+}
+
+static int HexDigitValue(WCHAR c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* The field of an object ACE that holds a GUID, written 8-4-4-4-12 (braces tolerated), or nothing.
+ * Stops at the ';' behind it. *present tells whether there was one. */
+static BOOL ParseAceStringGuid(LPCWSTR *StringAcl, GUID *guid, BOOL *present)
+{
+    LPCWSTR p = *StringAcl, end;
+    static const int offs[11] = { 0, 9, 14, 19, 21, 24, 26, 28, 30, 32, 34 };
+    static const int lens[11] = { 8, 4, 4, 2, 2, 2, 2, 2, 2, 2, 2 };
+    DWORD v[11];
+    int i, j;
+
+    *present = FALSE;
+    while (*p == ' ')
+        p++;
+    if (*p == ';')
+    {
+        *StringAcl = p;
+        return TRUE;
+    }
+
+    if (*p == '{')
+        p++;
+    end = p;
+    while (*end && *end != ';' && *end != '}' && *end != ')')
+        end++;
+    if (end - p != 36 || p[8] != '-' || p[13] != '-' || p[18] != '-' || p[23] != '-')
+        return FALSE;
+    for (i = 0; i < 11; i++)
+    {
+        v[i] = 0;
+        for (j = 0; j < lens[i]; j++)
+        {
+            int d = HexDigitValue(p[offs[i] + j]);
+            if (d < 0)
+                return FALSE;
+            v[i] = v[i] * 16 + d;
+        }
+    }
+    guid->Data1 = v[0];
+    guid->Data2 = (WORD)v[1];
+    guid->Data3 = (WORD)v[2];
+    for (i = 0; i < 8; i++)
+        guid->Data4[i] = (BYTE)v[3 + i];
+    if (*end == '}')
+        end++;
+    *StringAcl = end;
+    *present = TRUE;
+    return TRUE;
+}
+
 /******************************************************************************
  * ParseStringAclToAcl
  *
@@ -2834,6 +2902,8 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, LPDWORD lpdwFlags,
     DWORD acesize = 0;
     DWORD acecount = 0;
     PACCESS_ALLOWED_ACE pAce = NULL; /* pointer to current ACE */
+    BYTE aceType = 0;
+    BOOL hasObjectAce = FALSE;
     DWORD error = ERROR_INVALID_ACL;
 
     TRACE("%s\n", debugstr_w(StringAcl));
@@ -2854,6 +2924,7 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, LPDWORD lpdwFlags,
 
         /* Parse ACE type */
         val = ParseAceStringType(&StringAcl);
+        aceType = (BYTE) val;
 	if (pAce)
             pAce->Header.AceType = (BYTE) val;
         if (*StringAcl != ';')
@@ -2879,43 +2950,70 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, LPDWORD lpdwFlags,
             goto lerr;
         StringAcl++;
 
-        /* Parse ACE object guid */
-        while (*StringAcl == ' ')
-            StringAcl++;
-        if (*StringAcl != ';')
+        /* Parse the object GUID and the inherited object GUID: only object ACEs have them */
         {
-            FIXME("Support for *_OBJECT_ACE_TYPE not implemented\n");
-            goto lerr;
-        }
-        StringAcl++;
+            GUID guids[2];
+            BOOL present[2];
+            BOOL isObject = IsObjectAceType(pAce ? pAce->Header.AceType : aceType);
+            DWORD sidoff = 8, objflags = 0, k;
 
-        /* Parse ACE inherit object guid */
-        while (*StringAcl == ' ')
+            if (!ParseAceStringGuid(&StringAcl, &guids[0], &present[0]) || *StringAcl != ';')
+                goto lerr;
             StringAcl++;
-        if (*StringAcl != ';')
-        {
-            FIXME("Support for *_OBJECT_ACE_TYPE not implemented\n");
-            goto lerr;
-        }
-        StringAcl++;
+            if (!ParseAceStringGuid(&StringAcl, &guids[1], &present[1]) || *StringAcl != ';')
+                goto lerr;
+            StringAcl++;
 
-        /* Parse ACE account sid */
-        if (ParseStringSidToSid(StringAcl, pAce ? &pAce->SidStart : NULL, &sidlen))
-	{
+            if (!isObject && (present[0] || present[1]))
+                goto lerr;
+
+            if (isObject)
+            {
+                hasObjectAce = TRUE;
+                sidoff = 12;
+                if (present[0])
+                {
+                    objflags |= ACE_OBJECT_TYPE_PRESENT;
+                    sidoff += sizeof(GUID);
+                }
+                if (present[1])
+                {
+                    objflags |= ACE_INHERITED_OBJECT_TYPE_PRESENT;
+                    sidoff += sizeof(GUID);
+                }
+            }
+
+            /* Parse ACE account sid */
+            if (!ParseStringSidToSid(StringAcl, pAce ? (PSID)((LPBYTE)pAce + sidoff) : NULL, &sidlen))
+                goto lerr;
             while (*StringAcl && *StringAcl != ')')
                 StringAcl++;
-	}
 
-        if (*StringAcl != ')')
-            goto lerr;
-        StringAcl++;
+            if (*StringAcl != ')')
+                goto lerr;
+            StringAcl++;
 
-        acesize = sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + sidlen;
-        length += acesize;
-        if (pAce)
-        {
-            pAce->Header.AceSize = acesize;
-            pAce = (PACCESS_ALLOWED_ACE)((LPBYTE)pAce + acesize);
+            acesize = sidoff + sidlen;
+            length += acesize;
+            if (pAce)
+            {
+                if (isObject)
+                {
+                    LPBYTE q = (LPBYTE)pAce + 8;
+                    memcpy(q, &objflags, sizeof(DWORD));
+                    q += sizeof(DWORD);
+                    for (k = 0; k < 2; k++)
+                    {
+                        if (present[k])
+                        {
+                            memcpy(q, &guids[k], sizeof(GUID));
+                            q += sizeof(GUID);
+                        }
+                    }
+                }
+                pAce->Header.AceSize = acesize;
+                pAce = (PACCESS_ALLOWED_ACE)((LPBYTE)pAce + acesize);
+            }
         }
         acecount++;
     }
@@ -2930,7 +3028,7 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, LPDWORD lpdwFlags,
 
     if (pAcl)
     {
-        pAcl->AclRevision = ACL_REVISION;
+        pAcl->AclRevision = hasObjectAce ? ACL_REVISION_DS : ACL_REVISION;
         pAcl->Sbz1 = 0;
         pAcl->AclSize = length;
         pAcl->AceCount = acecount;
@@ -3330,13 +3428,54 @@ static BOOL DumpAce(LPVOID pace, WCHAR **pwptr, ULONG *plen)
     static const WCHAR closebr = ')';
     static const WCHAR semicolon = ';';
 
-    if (((PACE_HEADER)pace)->AceType > SYSTEM_ALARM_ACE_TYPE || ((PACE_HEADER)pace)->AceSize < sizeof(ACCESS_ALLOWED_ACE))
+    BYTE type = ((PACE_HEADER)pace)->AceType;
+    BOOL isObject = IsObjectAceType(type);
+    GUID guids[2];
+    BOOL present[2] = { FALSE, FALSE };
+    PSID sid;
+    DWORD k;
+
+    if ((type > SYSTEM_ALARM_ACE_TYPE && !isObject) || ((PACE_HEADER)pace)->AceSize < sizeof(ACCESS_ALLOWED_ACE))
     {
         SetLastError(ERROR_INVALID_ACL);
         return FALSE;
     }
 
     piace = pace;
+    sid = (PSID)&piace->SidStart;
+    if (isObject)
+    {
+        LPBYTE q = (LPBYTE)pace + 12;
+        DWORD objflags, size = ((PACE_HEADER)pace)->AceSize;
+
+        if (size < 12)
+        {
+            SetLastError(ERROR_INVALID_ACL);
+            return FALSE;
+        }
+        memcpy(&objflags, (LPBYTE)pace + 8, sizeof(DWORD));
+        present[0] = !!(objflags & ACE_OBJECT_TYPE_PRESENT);
+        present[1] = !!(objflags & ACE_INHERITED_OBJECT_TYPE_PRESENT);
+        for (k = 0; k < 2; k++)
+        {
+            if (!present[k])
+                continue;
+            if ((DWORD)(q - (LPBYTE)pace) + sizeof(GUID) > size)
+            {
+                SetLastError(ERROR_INVALID_ACL);
+                return FALSE;
+            }
+            memcpy(&guids[k], q, sizeof(GUID));
+            q += sizeof(GUID);
+        }
+        if ((DWORD)(q - (LPBYTE)pace) + 8 > size)
+        {
+            SetLastError(ERROR_INVALID_ACL);
+            return FALSE;
+        }
+        sid = (PSID)q;
+    }
+
     DumpString(&openbr, 1, pwptr, plen);
     switch (piace->Header.AceType)
     {
@@ -3351,6 +3490,18 @@ static BOOL DumpAce(LPVOID pace, WCHAR **pwptr, ULONG *plen)
             break;
         case SYSTEM_ALARM_ACE_TYPE:
             DumpString(SDDL_ALARM, -1, pwptr, plen);
+            break;
+        case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+            DumpString(SDDL_OBJECT_ACCESS_ALLOWED, -1, pwptr, plen);
+            break;
+        case ACCESS_DENIED_OBJECT_ACE_TYPE:
+            DumpString(SDDL_OBJECT_ACCESS_DENIED, -1, pwptr, plen);
+            break;
+        case SYSTEM_AUDIT_OBJECT_ACE_TYPE:
+            DumpString(SDDL_OBJECT_AUDIT, -1, pwptr, plen);
+            break;
+        case SYSTEM_ALARM_OBJECT_ACE_TYPE:
+            DumpString(SDDL_OBJECT_ALARM, -1, pwptr, plen);
             break;
     }
     DumpString(&semicolon, 1, pwptr, plen);
@@ -3372,11 +3523,32 @@ static BOOL DumpAce(LPVOID pace, WCHAR **pwptr, ULONG *plen)
     DumpString(&semicolon, 1, pwptr, plen);
     DumpRights(piace->Mask, pwptr, plen);
     DumpString(&semicolon, 1, pwptr, plen);
-    /* objects not supported */
-    DumpString(&semicolon, 1, pwptr, plen);
-    /* objects not supported */
-    DumpString(&semicolon, 1, pwptr, plen);
-    if (!DumpSid((PSID)&piace->SidStart, pwptr, plen))
+    for (k = 0; k < 2; k++)
+    {
+        if (present[k])
+        {
+            static const WCHAR hex[] = L"0123456789abcdef";
+            WCHAR buf[36];
+            BYTE raw[16];
+            int i, n = 0;
+
+            raw[0] = (BYTE)(guids[k].Data1 >> 24); raw[1] = (BYTE)(guids[k].Data1 >> 16);
+            raw[2] = (BYTE)(guids[k].Data1 >> 8);  raw[3] = (BYTE)guids[k].Data1;
+            raw[4] = (BYTE)(guids[k].Data2 >> 8);  raw[5] = (BYTE)guids[k].Data2;
+            raw[6] = (BYTE)(guids[k].Data3 >> 8);  raw[7] = (BYTE)guids[k].Data3;
+            memcpy(raw + 8, guids[k].Data4, 8);
+            for (i = 0; i < 16; i++)
+            {
+                if (i == 4 || i == 6 || i == 8 || i == 10)
+                    buf[n++] = '-';
+                buf[n++] = hex[raw[i] >> 4];
+                buf[n++] = hex[raw[i] & 15];
+            }
+            DumpString(buf, 36, pwptr, plen);
+        }
+        DumpString(&semicolon, 1, pwptr, plen);
+    }
+    if (!DumpSid(sid, pwptr, plen))
         return FALSE;
     DumpString(&closebr, 1, pwptr, plen);
     return TRUE;
@@ -4237,6 +4409,48 @@ static BOOL ParseStringSidToSid(LPCWSTR StringSid, PSID pSid, LPDWORD cBytes)
     if (!*StringSid)
         goto lend; /* ERROR_INVALID_SID */
 
+    if ((StringSid[0] == 'S' || StringSid[0] == 's') && StringSid[1] == '-') /* S-R-I-S-S */
+    {
+        /* The SID ends at the closing parenthesis of its ACE (or at a blank,
+         * or at the end of the string); it must not run on into the ACEs
+         * that follow it. */
+        DWORD len = 0, error;
+        WCHAR *tok;
+        PSID newSid = NULL;
+
+        while (StringSid[len] && StringSid[len] != ')' && StringSid[len] != ' ')
+            len++;
+
+        tok = heap_alloc((len + 1) * sizeof(WCHAR));
+        if (!tok)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        memcpy(tok, StringSid, len * sizeof(WCHAR));
+        tok[len] = 0;
+
+        error = ParseNumericStringSid(tok, &newSid);
+        heap_free(tok);
+        if (error != ERROR_SUCCESS)
+        {
+            SetLastError(error);
+            return FALSE;
+        }
+        if (((SID *)newSid)->Revision != SDDL_REVISION)
+        {
+            TRACE("Revision %d is unknown\n", ((SID *)newSid)->Revision);
+            LocalFree(newSid);
+            goto lend; /* ERROR_INVALID_SID */
+        }
+
+        *cBytes = GetLengthSid(newSid);
+        if (pisid)
+            memcpy(pisid, newSid, *cBytes);
+        LocalFree(newSid);
+        return TRUE;
+    }
+
     *cBytes = ComputeStringSidSize(StringSid);
     if (!pisid) /* Simply compute the size */
     {
@@ -4244,65 +4458,6 @@ static BOOL ParseStringSidToSid(LPCWSTR StringSid, PSID pSid, LPDWORD cBytes)
         return TRUE;
     }
 
-    if (StringSid[0] == 'S' && StringSid[1] == '-') /* S-R-I-S-S */
-    {
-        DWORD i = 0, identAuth;
-        DWORD csubauth = ((*cBytes - GetSidLengthRequired(0)) / sizeof(DWORD));
-
-        StringSid += 2; /* Advance to Revision */
-        pisid->Revision = atoiW(StringSid);
-
-        if (pisid->Revision != SDDL_REVISION)
-        {
-            TRACE("Revision %d is unknown\n", pisid->Revision);
-            goto lend; /* ERROR_INVALID_SID */
-        }
-        if (csubauth == 0)
-        {
-            TRACE("SubAuthorityCount is 0\n");
-            goto lend; /* ERROR_INVALID_SID */
-        }
-
-        pisid->SubAuthorityCount = csubauth;
-
-        /* Advance to identifier authority */
-        while (*StringSid && *StringSid != '-')
-            StringSid++;
-        if (*StringSid == '-')
-            StringSid++;
-
-        /* MS' implementation can't handle values greater than 2^32 - 1, so
-         * we don't either; assume most significant bytes are always 0
-         */
-        pisid->IdentifierAuthority.Value[0] = 0;
-        pisid->IdentifierAuthority.Value[1] = 0;
-        identAuth = atoiW(StringSid);
-        pisid->IdentifierAuthority.Value[5] = identAuth & 0xff;
-        pisid->IdentifierAuthority.Value[4] = (identAuth & 0xff00) >> 8;
-        pisid->IdentifierAuthority.Value[3] = (identAuth & 0xff0000) >> 16;
-        pisid->IdentifierAuthority.Value[2] = (identAuth & 0xff000000) >> 24;
-
-        /* Advance to first sub authority */
-        while (*StringSid && *StringSid != '-')
-            StringSid++;
-        if (*StringSid == '-')
-            StringSid++;
-
-        while (*StringSid)
-        {
-            pisid->SubAuthority[i++] = atoiW(StringSid);
-
-            while (*StringSid && *StringSid != '-')
-                StringSid++;
-            if (*StringSid == '-')
-                StringSid++;
-        }
-
-        if (i != pisid->SubAuthorityCount)
-            goto lend; /* ERROR_INVALID_SID */
-
-        bret = TRUE;
-    }
     else /* String constant format  - Only available in winxp and above */
     {
         unsigned int i;

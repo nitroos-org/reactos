@@ -355,6 +355,52 @@ BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start)
 }
 
 /*
+ * Zeroes the pages of the stream that are in memory from From on.  The purge after a cut can fail (a view or a page
+ * in use, a read in flight: it gives up at the first one and leaves every page after it), and CcZeroData leaves a
+ * page in memory as it is, so a page of the old data that survived would show through a later growth.  Lowering
+ * the cache map's file size makes the cache manager zero the resident pages past it; the real sizes come back at
+ * once (the caller holds MainResource exclusive, nothing reads in between).  A stream with no cache map gets one
+ * for this (the lazy writer deletes it again once nobody has the file open).
+ */
+static VOID NgZeroResidentFrom(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG From)
+{
+    CC_FILE_SIZES Sizes, Cur;
+
+    if (!FileObject || !Fcb->SectionObjectPointers.DataSectionObject)
+        return;
+    if (!Fcb->SectionObjectPointers.SharedCacheMap)
+    {
+        if (FileObject->PrivateCacheMap)
+            return;
+        CcInitializeCacheMap(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize, FALSE, &NgGlobal.CacheCallbacks, Fcb);
+        CcRosAllowLazyClose(FileObject);
+        if (!Fcb->SectionObjectPointers.SharedCacheMap)
+            return;
+    }
+    /*
+     * The cache manager zeroes only when the file size goes down.  If the map's size is already above From the
+     * lowering below is a decrease; otherwise raise it first, never above the allocation size (the contract of
+     * CcSetFileSizes: FileSize <= AllocationSize): when From + 1 does not fit, the allocation size is raised with it
+     * (the section is extended, and the restore below shrinks it again and purges what lies past it).
+     */
+    /* every caller has just set the map to the header sizes (or created it with them) */
+    Cur.FileSize = Fcb->Header.FileSize;
+    Sizes.AllocationSize = Fcb->Header.AllocationSize;
+    Sizes.ValidDataLength.QuadPart = min(Fcb->Header.ValidDataLength.QuadPart, From);
+    if (Cur.FileSize.QuadPart <= From)
+    {
+        Sizes.FileSize.QuadPart = From + 1;
+        if (Sizes.FileSize.QuadPart > Sizes.AllocationSize.QuadPart)
+            Sizes.AllocationSize.QuadPart = (Sizes.FileSize.QuadPart + PAGE_SIZE - 1) & ~(LONGLONG)(PAGE_SIZE - 1);
+        CcSetFileSizes(FileObject, &Sizes);
+        Sizes.AllocationSize = Fcb->Header.AllocationSize;
+    }
+    Sizes.FileSize.QuadPart = From;
+    CcSetFileSizes(FileObject, &Sizes);
+    CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
+}
+
+/*
  * EOF change.  Caller holds MainResource exclusive.  Core first, then the header, then Cc.
  * A shrink flushes Cc first so the core's on-disk view of the surviving bytes is current.
  */
@@ -435,6 +481,9 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
                 Sizes.FileSize = Fcb->Header.FileSize;
                 Sizes.ValidDataLength.QuadPart = OldSize;
                 CcSetFileSizes(FileObject, &Sizes);
+                /* Pages of the old data a failed purge left past the old size are cleared first: CcZeroData keeps what a resident page holds. */
+                NgZeroResidentFrom(Fcb, FileObject, OldSize);
+                CcSetFileSizes(FileObject, &Sizes);
                 Li.QuadPart = OldSize;
                 Li2.QuadPart = NewSize;
                 CcZeroData(FileObject, &Li, &Li2, TRUE);
@@ -449,7 +498,10 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
             Li.QuadPart = OldSize & ~(LONGLONG)(NG_VACB_SIZE - 1);
             CcFlushCache(&Fcb->SectionObjectPointers, &Li, (ULONG)(OldSize - Li.QuadPart) + PAGE_SIZE, &Iosb);
             if (!NgPurgeFrom(Fcb, Li.QuadPart))
+            {
                 DPRINT1("ntfsng: purge of %I64x from %I64d after a grow failed\n", Fcb->MftNo, Li.QuadPart);
+                NgZeroResidentFrom(Fcb, FileObject, OldSize);
+            }
         }
         if (NewSize < OldSize && NT_SUCCESS(Status) &&
             (Fcb->SectionObjectPointers.SharedCacheMap || Fcb->SectionObjectPointers.DataSectionObject))
@@ -457,7 +509,10 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
             /* Everything was flushed above, so purging from the view boundary loses nothing. */
             Li.QuadPart = NewSize & ~(LONGLONG)(NG_VACB_SIZE - 1);
             if (!NgPurgeFrom(Fcb, Li.QuadPart))
+            {
                 DPRINT1("ntfsng: purge of %I64x from %I64d after a shrink failed\n", Fcb->MftNo, Li.QuadPart);
+                NgZeroResidentFrom(Fcb, FileObject, NewSize);
+            }
         }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)

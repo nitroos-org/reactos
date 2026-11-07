@@ -36,6 +36,8 @@ extern void func_ConsoleBufferSwitch(void);
 extern void func_ConsoleCaret(void);
 extern void func_ConsoleCreateRace(void);
 extern void func_ConsoleOrphanChild(void);
+extern void func_UnbufferedReadLimit(void);
+extern void func_ConsoleInheritForeign(void);
 extern void func_ConsoleCloseTerminate(void);
 extern void func_ConsoleCsrRequests(void);
 extern void func_ConsoleCtrlEventRace(void);
@@ -286,6 +288,8 @@ const struct test winetest_testlist[] =
     { "ConsoleCaret",                func_ConsoleCaret },
     { "ConsoleCreateRace",           func_ConsoleCreateRace },
     { "ConsoleOrphanChild",          func_ConsoleOrphanChild },
+    { "UnbufferedReadLimit",         func_UnbufferedReadLimit },
+    { "ConsoleInheritForeign",       func_ConsoleInheritForeign },
     { "ConsoleCloseTerminate",      func_ConsoleCloseTerminate },
     { "ConsoleCsrRequests",          func_ConsoleCsrRequests },
     { "ConsoleCtrlEventRace",        func_ConsoleCtrlEventRace },

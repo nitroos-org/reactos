@@ -81,7 +81,8 @@ static INT QueryObject(ULONG *a)
         Guest.Bitmap.bmType = Native.dsBm.bmType; Guest.Bitmap.bmWidth = Native.dsBm.bmWidth;
         Guest.Bitmap.bmHeight = Native.dsBm.bmHeight; Guest.Bitmap.bmWidthBytes = Native.dsBm.bmWidthBytes;
         Guest.Bitmap.bmPlanes = Native.dsBm.bmPlanes; Guest.Bitmap.bmBitsPixel = Native.dsBm.bmBitsPixel;
-        Guest.Bitmap.bmBits = PtrToUlong(Native.dsBm.bmBits);
+        /* the bits of a section above 4 GiB have no address a guest could use */
+        Guest.Bitmap.bmBits = (ULONG_PTR)Native.dsBm.bmBits > MAXULONG ? 0 : PtrToUlong(Native.dsBm.bmBits);
         if (Ret == sizeof(DIBSECTION))
         {
             Guest.Header = Native.dsBmih; RtlCopyMemory(Guest.Masks, Native.dsBitfields, sizeof(Guest.Masks));
@@ -129,6 +130,13 @@ ULONG_PTR Wow64WinGdiService(ULONG Number, ULONG *a)
     {
         PVOID Bits = NULL; HBITMAP Bitmap;
         Bitmap = NtGdiCreateDIBSection(G(0), H(1), a[2], P(3), a[4], a[5], a[6], a[7], a[8] ? &Bits : NULL);
+        if (Bitmap && a[8] && (ULONG_PTR)Bits > MAXULONG)
+        {
+            /* bits above 4 GiB cannot be named by a guest: no bitmap, rather than a truncated address */
+            NtGdiDeleteObjectApp(Bitmap);
+            NtCurrentTeb()->LastErrorValue = ERROR_NOT_ENOUGH_MEMORY;
+            return 0;
+        }
         if (Bitmap && a[8]) *(ULONG *)P(8) = PtrToUlong(Bits);
         return (ULONG_PTR)Bitmap;
     }

@@ -23,7 +23,43 @@ SIZE_T MmSystemLockPagesCount;
 
 ULONG MiCacheOverride[MiNotMapped + 1];
 
+/* Resident available pages that locking user pages leaves for the rest of the system */
+#define MI_PROBE_LOCK_RESERVE_PAGES 256
+
 /* INTERNAL FUNCTIONS *********************************************************/
+
+/*
+ * Locking pages of a user process takes them out of what can be paged: charge them
+ * against the resident available pages, and fail when a request would take the
+ * pages the system needs to keep (a process can lock as much as it can commit).
+ */
+static
+BOOLEAN
+MiChargeProbeLockedPages(IN PFN_NUMBER Pages)
+{
+    PFN_NUMBER OldValue;
+
+    do
+    {
+        OldValue = MmResidentAvailablePages;
+        if ((OldValue <= MI_PROBE_LOCK_RESERVE_PAGES) ||
+            (Pages > (OldValue - MI_PROBE_LOCK_RESERVE_PAGES)))
+        {
+            return FALSE;
+        }
+    } while (InterlockedCompareExchangeSizeT(&MmResidentAvailablePages,
+                                             OldValue - Pages,
+                                             OldValue) != OldValue);
+    return TRUE;
+}
+
+static
+VOID
+MiReturnProbeLockedPages(IN PFN_NUMBER Pages)
+{
+    InterlockedExchangeAddSizeT(&MmResidentAvailablePages, Pages);
+}
+
 static
 PVOID
 NTAPI
@@ -982,6 +1018,7 @@ MmProbeAndLockPages(IN PMDL Mdl,
 #endif
     PFN_NUMBER PageFrameIndex;
     BOOLEAN UsePfnLock;
+    BOOLEAN Charged = FALSE;
     KIRQL OldIrql;
     PMMPFN Pfn1;
     DPRINT("Probing MDL: %p\n", Mdl);
@@ -1047,6 +1084,22 @@ MmProbeAndLockPages(IN PMDL Mdl,
 
     /* Large pages not supported */
     ASSERT(!MI_IS_PHYSICAL_ADDRESS(Address));
+
+    /*
+     * Pages of a user process are charged before anything is touched, so that a
+     * request for more than can be locked fails at once, without faulting the
+     * pages in. MmUnlockPages gives them back.
+     */
+    if (CurrentProcess != NULL)
+    {
+        if (!MiChargeProbeLockedPages(TotalPages))
+        {
+            *MdlPages = LIST_HEAD;
+            Mdl->Process = NULL;
+            ExRaiseStatus(STATUS_INSUFFICIENT_RESOURCES);
+        }
+        Charged = TRUE;
+    }
 
     //
     // Now probe them
@@ -1117,6 +1170,7 @@ MmProbeAndLockPages(IN PMDL Mdl,
         // Fail
         //
         DPRINT1("MDL PROBE FAILED!\n");
+        if (Charged) MiReturnProbeLockedPages(TotalPages);
         Mdl->Process = NULL;
         ExRaiseStatus(ProbeStatus);
     }
@@ -1574,6 +1628,7 @@ MmUnlockPages(IN PMDL Mdl)
             ASSERT(Process->NumberOfLockedPages > 0);
             InterlockedExchangeAddSizeT(&Process->NumberOfLockedPages,
                                         -(LONG_PTR)PageCount);
+            MiReturnProbeLockedPages(PageCount);
         }
 
         //
@@ -1595,6 +1650,7 @@ MmUnlockPages(IN PMDL Mdl)
         ASSERT(Process->NumberOfLockedPages > 0);
         InterlockedExchangeAddSizeT(&Process->NumberOfLockedPages,
                                     -(LONG_PTR)PageCount);
+        MiReturnProbeLockedPages(PageCount);
     }
 
     //

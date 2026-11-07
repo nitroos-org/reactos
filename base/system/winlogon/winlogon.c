@@ -17,6 +17,9 @@
 /* GLOBALS ******************************************************************/
 
 HINSTANCE hAppInstance;
+
+/* userenv private export (ordinal 300): gives the well-known folders of an older install the DACLs of Windows */
+BOOL WINAPI SecureSystemDirectories(VOID);
 PWLSESSION WLSession = NULL;
 
 /* FUNCTIONS *****************************************************************/
@@ -456,6 +459,9 @@ WinMain(
     /* Make us critical */
     RtlSetProcessIsCritical(TRUE, NULL, FALSE);
     RtlSetThreadIsCritical(TRUE, NULL, FALSE);
+
+    /* Installs from before the well-known folders had the DACLs of Windows get them now (nothing happens once they have) */
+    SecureSystemDirectories();
 
     /* Update the cached TCP/IP Information in the registry */
     UpdateTcpIpInformation();

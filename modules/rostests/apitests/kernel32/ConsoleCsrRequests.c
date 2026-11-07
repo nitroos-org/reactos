@@ -996,6 +996,197 @@ TestExtColorsRequests(VOID)
     HeapFree(GetProcessHeap(), 0, Cells);
 }
 
+/*
+ * Console server requests carry sizes of their own: the characters of ReadConsole are read into the
+ * buffer the request came with (80 bytes inline, otherwise the capture buffer), a region of cells is
+ * a width times a height, and a count of codes times the size of a code. Each is the client's number,
+ * and a request that does not agree with itself is refused whole (ReactOS' server; Windows' console
+ * host has no such request, so this is for ReactOS only). A request that does agree is served.
+ */
+#define RAW_READOUTPUT      ((2 << 16) | 515)   /* ConsolepReadConsoleOutput */
+#define RAW_WRITEOUTPUT     ((2 << 16) | 516)   /* ConsolepWriteConsoleOutput */
+#define RAW_READOUTPUTCODE  ((2 << 16) | 517)   /* ConsolepReadConsoleOutputString */
+#define RAW_WRITEOUTPUTCODE ((2 << 16) | 518)   /* ConsolepWriteConsoleOutputString */
+#define RAW_READCONSOLE     ((2 << 16) | 541)   /* ConsolepReadConsole */
+#define RAW_CODE_UNICODE    2
+
+typedef struct
+{
+    HANDLE ConsoleHandle;
+    HANDLE InputHandle;
+    USHORT ExeLength;
+    CHAR StaticBuffer[80];
+    PVOID Buffer;
+    ULONG NumBytes;
+    ULONG CaptureBufferSize;
+    ULONG InitialNumBytes;
+    ULONG CtrlWakeupMask;
+    ULONG ControlKeyState;
+    BOOLEAN Unicode;
+} RAW_READREQ;
+
+typedef struct
+{
+    HANDLE ConsoleHandle;
+    HANDLE OutputHandle;
+    COORD Coord;
+    ULONG CodeType;
+    CHAR CodeStaticBuffer[80];
+    PVOID pCode;
+    ULONG NumCodes;
+} RAW_OUTPUTCODE;
+
+typedef struct
+{
+    HANDLE ConsoleHandle;
+    HANDLE OutputHandle;
+    CHAR_INFO StaticBuffer;
+    PVOID CharInfo;
+    SMALL_RECT Region;
+    BOOLEAN Unicode;
+    BOOLEAN UseVirtualMemory;
+} RAW_OUTPUT;
+
+static
+VOID
+TestRawRequestSizes(VOID)
+{
+    RAW_READREQ Read;
+    RAW_OUTPUTCODE Code;
+    RAW_OUTPUT Cells;
+    COORD Origin = {0, 0};
+    DWORD Mode;
+    LONG Status;
+    BOOL IsWow64 = FALSE;
+    static const struct { ULONG NumCodes; } BadCodes[] = { { 0x80000028 }, { 0x80000014 }, { 0xFFFFFFFF } };
+    ULONG i;
+
+    pAllocCapture = (PVOID)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "CsrAllocateCaptureBuffer");
+    pAllocPointer = (PVOID)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "CsrAllocateMessagePointer");
+    pFreeCapture = (PVOID)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "CsrFreeCaptureBuffer");
+    pCall = (PVOID)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "CsrClientCallServer");
+    IsWow64Process(GetCurrentProcess(), &IsWow64);
+    if (!is_reactos() || IsWow64 || !pAllocCapture || !pAllocPointer || !pFreeCapture || !pCall)
+    {
+        skip("The raw request sizes are for the native ReactOS server\n");
+        return;
+    }
+
+    /* ReadConsole: more bytes than the 80 of the inline buffer, or than the capture buffer, are refused */
+    RtlZeroMemory(&Read, sizeof(Read));
+    Read.ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+    Read.InputHandle = hIn;
+    Read.Unicode = TRUE;
+    Read.NumBytes = 4000;
+    Read.CaptureBufferSize = 80;
+    Status = RawConsoleCall(RAW_READCONSOLE, &Read, sizeof(Read), FIELD_OFFSET(RAW_READREQ, Buffer), 0, NULL, 0);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "ReadConsole of 4000 bytes into 80 returned %08lx\n", Status);
+    Read.NumBytes = 100;
+    Read.CaptureBufferSize = 80;
+    Status = RawConsoleCall(RAW_READCONSOLE, &Read, sizeof(Read), FIELD_OFFSET(RAW_READREQ, Buffer), 0, NULL, 0);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "ReadConsole of 100 bytes into 80 returned %08lx\n", Status);
+    Read.NumBytes = 4000;
+    Read.CaptureBufferSize = 200;
+    Status = RawConsoleCall(RAW_READCONSOLE, &Read, sizeof(Read), FIELD_OFFSET(RAW_READREQ, Buffer), 200, NULL, 0);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "ReadConsole of 4000 bytes into a capture buffer of 200 returned %08lx\n", Status);
+
+    /* ...and one that agrees with itself is read: a line of input comes back in the inline buffer */
+    ok(GetConsoleMode(hIn, &Mode), "GetConsoleMode failed with %lu\n", GetLastError());
+    ok(SetConsoleMode(hIn, ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT),
+       "SetConsoleMode failed with %lu\n", GetLastError());
+    FlushConsoleInputBuffer(hIn);
+    WriteKeys("a\r");
+    RtlZeroMemory(&Read, sizeof(Read));
+    Read.ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+    Read.InputHandle = hIn;
+    Read.Unicode = TRUE;
+    Read.NumBytes = 80;
+    Read.CaptureBufferSize = 80;
+    Status = RawConsoleCall(RAW_READCONSOLE, &Read, sizeof(Read), FIELD_OFFSET(RAW_READREQ, Buffer), 0, NULL, 0);
+    ok(Status == 0, "ReadConsole of a line into 80 bytes returned %08lx\n", Status);
+    ok(Read.NumBytes == 3 * sizeof(WCHAR) && ((WCHAR *)Read.StaticBuffer)[0] == L'a' &&
+       ((WCHAR *)Read.StaticBuffer)[1] == L'\r',
+       "ReadConsole returned %lu bytes, %04x %04x\n", Read.NumBytes, ((WCHAR *)Read.StaticBuffer)[0],
+       ((WCHAR *)Read.StaticBuffer)[1]);
+    SetConsoleMode(hIn, Mode);
+
+    /* codes: a count whose size in bytes wraps 32 bits must not pick the inline buffer */
+    for (i = 0; i < _countof(BadCodes); ++i)
+    {
+        RtlZeroMemory(&Code, sizeof(Code));
+        Code.ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+        Code.OutputHandle = hOut;
+        Code.CodeType = RAW_CODE_UNICODE;
+        Code.NumCodes = BadCodes[i].NumCodes;
+        Status = RawConsoleCall(RAW_WRITEOUTPUTCODE, &Code, sizeof(Code), FIELD_OFFSET(RAW_OUTPUTCODE, pCode), 0, NULL, 0);
+        ok(Status == RAW_STATUS_INVALID_PARAMETER, "WriteConsoleOutputCharacter of %08lx codes returned %08lx\n",
+           BadCodes[i].NumCodes, Status);
+        RtlZeroMemory(&Code, sizeof(Code));
+        Code.ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+        Code.OutputHandle = hOut;
+        Code.CodeType = RAW_CODE_UNICODE;
+        Code.NumCodes = BadCodes[i].NumCodes;
+        Status = RawConsoleCall(RAW_READOUTPUTCODE, &Code, sizeof(Code), FIELD_OFFSET(RAW_OUTPUTCODE, pCode), 0, NULL, 0);
+        ok(Status == RAW_STATUS_INVALID_PARAMETER, "ReadConsoleOutputCharacter of %08lx codes returned %08lx\n",
+           BadCodes[i].NumCodes, Status);
+    }
+
+    /* ...three codes are written and read back through the inline buffer */
+    RtlZeroMemory(&Code, sizeof(Code));
+    Code.ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+    Code.OutputHandle = hOut;
+    Code.Coord = Origin;
+    Code.CodeType = RAW_CODE_UNICODE;
+    Code.NumCodes = 3;
+    RtlCopyMemory(Code.CodeStaticBuffer, L"ABC", 3 * sizeof(WCHAR));
+    Status = RawConsoleCall(RAW_WRITEOUTPUTCODE, &Code, sizeof(Code), FIELD_OFFSET(RAW_OUTPUTCODE, pCode), 0, NULL, 0);
+    ok(Status == 0 && Code.NumCodes == 3, "WriteConsoleOutputCharacter of 3 codes returned %08lx, %lu\n", Status,
+       Code.NumCodes);
+    RtlZeroMemory(&Code, sizeof(Code));
+    Code.ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+    Code.OutputHandle = hOut;
+    Code.Coord = Origin;
+    Code.CodeType = RAW_CODE_UNICODE;
+    Code.NumCodes = 3;
+    Status = RawConsoleCall(RAW_READOUTPUTCODE, &Code, sizeof(Code), FIELD_OFFSET(RAW_OUTPUTCODE, pCode), 0, NULL, 0);
+    ok(Status == 0 && Code.NumCodes == 3 && !memcmp(Code.CodeStaticBuffer, L"ABC", 3 * sizeof(WCHAR)),
+       "ReadConsoleOutputCharacter of 3 codes returned %08lx, %lu\n", Status, Code.NumCodes);
+
+    /* cells: a region whose width times height wraps 32 bits must not pick the one-cell inline buffer */
+    RtlZeroMemory(&Cells, sizeof(Cells));
+    Cells.ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+    Cells.OutputHandle = hOut;
+    Cells.Unicode = TRUE;
+    Cells.Region.Left = Cells.Region.Top = -32768;
+    Cells.Region.Right = Cells.Region.Bottom = 32767;
+    Status = RawConsoleCall(RAW_READOUTPUT, &Cells, sizeof(Cells), FIELD_OFFSET(RAW_OUTPUT, CharInfo), 0, NULL, 0);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "ReadConsoleOutput of 65536 x 65536 cells returned %08lx\n", Status);
+    Status = RawConsoleCall(RAW_WRITEOUTPUT, &Cells, sizeof(Cells), FIELD_OFFSET(RAW_OUTPUT, CharInfo), 0, NULL, 0);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "WriteConsoleOutput of 65536 x 65536 cells returned %08lx\n", Status);
+    Cells.UseVirtualMemory = TRUE;
+    Status = RawConsoleCall(RAW_WRITEOUTPUT, &Cells, sizeof(Cells), FIELD_OFFSET(RAW_OUTPUT, CharInfo), 0, NULL, 0);
+    ok(Status == RAW_STATUS_INVALID_PARAMETER, "WriteConsoleOutput of 65536 x 65536 cells from the heap returned %08lx\n",
+       Status);
+
+    /* ...one cell is written and read back through the inline buffer */
+    RtlZeroMemory(&Cells, sizeof(Cells));
+    Cells.ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+    Cells.OutputHandle = hOut;
+    Cells.Unicode = TRUE;
+    Cells.StaticBuffer.Char.UnicodeChar = L'Z';
+    Cells.StaticBuffer.Attributes = 0x1E;
+    Status = RawConsoleCall(RAW_WRITEOUTPUT, &Cells, sizeof(Cells), FIELD_OFFSET(RAW_OUTPUT, CharInfo), 0, NULL, 0);
+    ok(Status == 0, "WriteConsoleOutput of one cell returned %08lx\n", Status);
+    RtlZeroMemory(&Cells, sizeof(Cells));
+    Cells.ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+    Cells.OutputHandle = hOut;
+    Cells.Unicode = TRUE;
+    Status = RawConsoleCall(RAW_READOUTPUT, &Cells, sizeof(Cells), FIELD_OFFSET(RAW_OUTPUT, CharInfo), 0, NULL, 0);
+    ok(Status == 0 && Cells.StaticBuffer.Char.UnicodeChar == L'Z' && Cells.StaticBuffer.Attributes == 0x1E,
+       "ReadConsoleOutput of one cell returned %08lx, %04x %04x\n", Status, Cells.StaticBuffer.Char.UnicodeChar,
+       Cells.StaticBuffer.Attributes);
+}
+
 static
 VOID
 TestAllocConsole(VOID)
@@ -1045,6 +1236,7 @@ RunChild(VOID)
     TestBeep();
     TestBadApiNumbers();
     TestExtColorsRequests();
+    TestRawRequestSizes();
 
     ok(CloseHandle(hOut), "CloseHandle(screen buffer) failed with %lu\n", GetLastError());
     ok(CloseHandle(hIn), "CloseHandle(CONIN$) failed with %lu\n", GetLastError());
