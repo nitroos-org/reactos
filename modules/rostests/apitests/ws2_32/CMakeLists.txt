@@ -61,6 +61,7 @@ list(APPEND SOURCE
     udpcancel.c
     udpconnectname.c
     udpevents.c
+    udpburst.c
     udprecv.c
     udpzerolen.c
     v6only.c

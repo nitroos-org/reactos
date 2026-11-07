@@ -173,9 +173,8 @@ Test_LargeDatagram(void)
      * receive buffer may drop the next one (Windows Server 2008 R2 does) */
     Result = RecvWithTimeout(Receiver, Buffer, sizeof(Buffer), 1000);
     trace("Large datagram: recv returned %d\n", Result);
-    /* Windows delivers it; ReactOS drops a datagram larger than its 8 KB window */
-    if (!is_reactos())
-        ok(Result == LARGE_DATAGRAM, "recv returned %d\n", Result);
+    /* Windows delivers it (the default buffer of a UDP socket is 64 KB) */
+    ok(Result == LARGE_DATAGRAM, "recv returned %d\n", Result);
 
     /* Whether the large datagram was delivered or dropped, the next one must arrive */
     if (sendto(Sender, "AFTER-LARGE", 11, 0, (struct sockaddr *)&To, sizeof(To)) != 11)
