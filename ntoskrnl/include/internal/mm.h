@@ -547,9 +547,13 @@ typedef struct _MMPAGING_FILE
     PULONG SlotTagsMirror;
     /* Where the next ARM3 slot search starts */
     ULONG SlotHint;
-    /* NitroPager writer: failed cluster writes in a row; Retired = no new ARM3 slots from this file */
+    /* NitroPager writer: failed cluster writes in a row (since FirstFailure, interrupt time);
+       Retired = no new ARM3 slots from this file (since RetiredAt; for good when RetiredForGood) */
     ULONG WriteFailuresInARow;
     BOOLEAN Retired;
+    BOOLEAN RetiredForGood;
+    ULONGLONG FirstFailure;
+    ULONGLONG RetiredAt;
 }
 MMPAGING_FILE, *PMMPAGING_FILE;
 
@@ -926,6 +930,12 @@ MiPagerCanMakeProgress(
 VOID
 NTAPI
 MiPagerWaitForProgress(VOID);
+
+VOID
+NTAPI
+MiPagerBalancerPassDone(
+    _In_ PFN_NUMBER UsableBefore,
+    _In_ ULONG Freed);
 
 extern volatile LONG MiPagingIoInFlight;
 

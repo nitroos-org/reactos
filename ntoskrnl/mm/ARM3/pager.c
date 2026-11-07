@@ -107,6 +107,8 @@ static volatile ULONG MiPagerFreeRefusedBase;
 /* NitroPagerDebug bits that inject write failures (any build; test commands need the value non-zero anyway) */
 #define MI_PAGER_DEBUG_FAIL_SOME_WRITES 0x10
 #define MI_PAGER_DEBUG_FAIL_ALL_WRITES  0x20
+/* Test of the exhaustion check: the trimmer frees nothing and the no-progress window is 15 s, not 60 s */
+#define MI_PAGER_DEBUG_TRIM_NOTHING     0x40
 
 /* Writer batch: pages taken per PFN lock hold */
 #define MI_PAGER_WRITE_BATCH 16
@@ -153,6 +155,8 @@ static volatile ULONGLONG MiPagerLastProgress;
 
 /* FALSE after a writer scan found no private page it could write, TRUE again when one is queued */
 static volatile BOOLEAN MiPagerWritable;
+/* Private pages queued on the modified list (wraps): an empty writer scan clears Writable only if none came meanwhile */
+static volatile LONG MiPagerQueued;
 
 /* Free ARM3 slots are short: trimming sends no dirty page to the modified list */
 static volatile BOOLEAN MiPagerSlotsShort;
@@ -178,8 +182,9 @@ extern ULONG MiLowWaterPages;
 #define MI_TRIM_EXAMINE_BUDGET  16384
 #define MI_TRIM_PAGE_BUDGET     2048
 #define MI_TRIM_STARVE_LIMIT    3
-#define MI_TRIM_CURSORS         64
-#define MI_TRIM_PROCESSES       128
+/* At least as many cursors as processes per pass: a lookup never evicts a cursor stamped in this pass */
+#define MI_TRIM_CURSORS         256
+#define MI_TRIM_PROCESSES       256
 
 /* How long the "game over" check counts a completed write as progress */
 #define MI_PAGER_PROGRESS_WINDOW (10ULL * 10 * 1000 * 1000)
@@ -714,6 +719,15 @@ MiWriteModifiedPrivatePagesEx(
         }
         MiReleasePfnLock(OldIrql);
         InterlockedDecrement(&MiPagerWritesActive);
+
+        /* Back off after a failed write (100 ms more per failure, at most 1 s): errors spread over time */
+        if (!NT_SUCCESS(Status))
+        {
+            LARGE_INTEGER Delay;
+
+            Delay.QuadPart = -(LONGLONG)min(Failures * 100, 1000) * 10000;
+            KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        }
     }
 
     *Attempted = Attempts;
@@ -1047,6 +1061,7 @@ NTAPI
 MiPagerModifiedPageQueued(VOID)
 {
     MiPagerWritable = TRUE;
+    InterlockedIncrement(&MiPagerQueued);
     if (MmModifiedPageListHead.Total >= MiPagerModifiedMaximum)
         MiPagerWakeWriter();
 }
@@ -1171,7 +1186,7 @@ MiPagerReport(
     DbgPrint("NitroPager: trim %lu dirty %lu aged %lu skipdirty %lu | written %lu clusters %lu errors %lu noslot %lu | "
             "repurposed %lu inpage %lu errors %lu retries %lu | tagmismatch %lu freerefused %lu | wsmiss %lu starved %lu | "
             "slotshort %lu reclaimed %lu freeslots %Iu | modified %Iu privstandby %lu usable %Iu reserve-low %lu inflight %ld | "
-            "balancer trimmed %lu waits %lu | legacy user %lu system %lu available %Iu legacy-freed %lu\n",
+            "balancer trimmed %lu waits %lu | legacy user %lu system %lu available %Iu legacy-freed %lu asked %lu nopass %lu\n",
             MiPagerCounters.Trimmed, MiPagerCounters.TrimmedDirty, MiPagerCounters.Aged, MiPagerCounters.TrimSkippedDirty,
             MiPagerCounters.Written, MiPagerCounters.Clusters, MiPagerCounters.WriteErrors, MiPagerCounters.WriteNoSlot,
             MiPagerCounters.Repurposed, MiPagerCounters.InPageReads, MiPagerCounters.InPageErrors,
@@ -1181,7 +1196,7 @@ MiPagerReport(
             MmTransitionPrivatePages, (SIZE_T)MiGetUsablePageCount(), MiPagerCounters.ReserveLowWater, MiPagingIoInFlight,
             MiPagerCounters.BalancerTrimmed, MiPagerCounters.BalancerWaits,
             MiMemoryConsumers[MC_USER].PagesUsed, MiMemoryConsumers[MC_SYSTEM].PagesUsed, (SIZE_T)MmAvailablePages,
-            MiPagerCounters.LegacyFreed);
+            MiPagerCounters.LegacyFreed, MiPagerCounters.LegacyAsked, MiPagerCounters.NoProgressPasses);
 }
 
 /*
@@ -1201,6 +1216,7 @@ MiModifiedPageWriterThread(
     LARGE_INTEGER Timeout;
     ULONGLONG LastReport = 0;
     ULONG LastSum = 0, Attempted, Idle = 0;
+    LONG Queued;
     BOOLEAN NoSlot, Failing, Pressure;
     PFN_NUMBER Modified;
 
@@ -1239,6 +1255,7 @@ MiModifiedPageWriterThread(
             }
 
             MiPagerWriterState = MI_WRITER_WRITING;
+            Queued = MiPagerQueued;
             MiWriteModifiedPrivatePagesEx(256, &Attempted, &NoSlot, &Failing);
 
             if (NoSlot)
@@ -1263,6 +1280,9 @@ MiModifiedPageWriterThread(
             if (Attempted == 0)
             {
                 MiPagerWritable = FALSE;
+                /* A page queued during the scan sets it again (its store may have come before ours) */
+                if (MiPagerQueued != Queued)
+                    MiPagerWritable = TRUE;
                 break;
             }
             Idle = 0;
@@ -1395,6 +1415,64 @@ MiPagerWaitForProgress(VOID)
     LARGE_INTEGER Delay;
 
     MiPagerCounters.BalancerWaits++;
+    Delay.QuadPart = -50LL * 10000;
+    KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+}
+
+/*
+ * End of a balancer pass, NitroPager on (balance.c): the exhaustion check the
+ * inherited "game over" test cannot make (its target is always 0). Usable
+ * pages below MI_PAGER_STARVED_PAGES means waitable user faults are being
+ * refused (their floor is 256). Such a pass that freed nothing and did not
+ * raise usable pages is a no-progress pass; when the writer can still make
+ * progress (I/O in flight, a write completed in the last 10 s, writable
+ * modified pages and free slots) the balancer waits for it; otherwise, after
+ * 60 s of nothing but no-progress passes, the bugcheck says why:
+ * NO_PAGES_AVAILABLE(usable pages, modified pages, paging I/O in flight,
+ * writer state). Balancer thread only.
+ */
+#define MI_PAGER_STARVED_PAGES 512
+#define MI_PAGER_EXHAUSTED_AFTER (60ULL * 10 * 1000 * 1000)
+#define MI_PAGER_EXHAUSTED_AFTER_TEST (15ULL * 10 * 1000 * 1000)
+VOID
+NTAPI
+MiPagerBalancerPassDone(
+    _In_ PFN_NUMBER UsableBefore,
+    _In_ ULONG Freed)
+{
+    static ULONGLONG NoProgressSince;
+    PFN_NUMBER Usable = MiGetUsablePageCount();
+    ULONGLONG Now = KeQueryInterruptTime(), Window;
+    ULONG_PTR WriterState;
+    LARGE_INTEGER Delay;
+
+    if ((Usable >= MI_PAGER_STARVED_PAGES) || (Freed != 0) || (Usable > UsableBefore) || MiPagerShutdown)
+    {
+        NoProgressSince = 0;
+        return;
+    }
+
+    MiPagerCounters.NoProgressPasses++;
+    if (MiPagerCanMakeProgress(&WriterState))
+    {
+        NoProgressSince = 0;
+        MiPagerWaitForProgress();
+        return;
+    }
+
+    if (NoProgressSince == 0)
+        NoProgressSince = Now;
+    Window = (MiNitroPagerDebug & MI_PAGER_DEBUG_TRIM_NOTHING) ? MI_PAGER_EXHAUSTED_AFTER_TEST : MI_PAGER_EXHAUSTED_AFTER;
+    if ((Now - NoProgressSince) >= Window)
+    {
+        KeBugCheckEx(NO_PAGES_AVAILABLE,
+                     Usable,
+                     MmModifiedPageListHead.Total,
+                     (ULONG_PTR)MiPagingIoInFlight,
+                     WriterState);
+    }
+
+    /* Not a busy loop of empty passes while waiting to decide */
     Delay.QuadPart = -50LL * 10000;
     KeDelayExecutionThread(KernelMode, FALSE, &Delay);
 }
@@ -1703,8 +1781,11 @@ MiPagerBalance(
     ULONG Need, Trimmed = 0, Got, Count = 0, i, j, Round, Rounds, Result;
     BOOLEAN Force, Starved = FALSE;
 
-    if ((MiNitroPagerMode == 0) || MiPagerShutdown || (MmNumberOfPagingFiles == 0))
+    if ((MiNitroPagerMode == 0) || MiPagerShutdown || (MmNumberOfPagingFiles == 0) ||
+        (MiNitroPagerDebug & MI_PAGER_DEBUG_TRIM_NOTHING))
+    {
         return 0;
+    }
 
     /* Only below the low-water mark: a consumer target alone (legacy pages over their share) is not ours to meet */
     Usable = MiGetUsablePageCount();
@@ -1757,14 +1838,26 @@ MiPagerBalance(
 
         for (i = 0; i < Count; i++)
             Private += min(MiTrimListCursor[i]->Resident, 0x100000UL);
-        if ((Legacy != 0) && MiMemoryConsumers[MC_USER].Trim)
+
+        /*
+         * With aging (Priority FALSE: the legacy pass clears the accessed bits of the pages
+         * it looks at and pages out those not used since; it reports nothing freed, so the
+         * private share is trimmed in full), paging out the LRU directly (TRUE) only when
+         * usable pages are nearly gone, as Force does for private pages. Not while slots are
+         * short: legacy page-out of dirty pages takes slots too. At most MI_TRIM_PAGE_BUDGET
+         * pages per pass: this is the legacy path the balancer always ran, with its waits
+         * for working set and segment locks, so its share of a pass stays bounded.
+         */
+        if ((Legacy != 0) && MiMemoryConsumers[MC_USER].Trim && !MiPagerSlotsShort &&
+            !(MiNitroPagerDebug & MI_PAGER_DEBUG_TRIM_NOTHING))
         {
             Share = ((ULONGLONG)Need * Legacy) / ((ULONGLONG)Legacy + Private);
-            LegacyTarget = (ULONG)Share;
+            LegacyTarget = (ULONG)min(Share, (ULONGLONG)MI_TRIM_PAGE_BUDGET);
             if (LegacyTarget != 0)
             {
-                MiMemoryConsumers[MC_USER].Trim(LegacyTarget, TRUE, &Freed);
+                MiMemoryConsumers[MC_USER].Trim(LegacyTarget, Force, &Freed);
                 MiPagerCounters.LegacyFreed += Freed;
+                MiPagerCounters.LegacyAsked += LegacyTarget;
                 Trimmed += Freed;
             }
         }
