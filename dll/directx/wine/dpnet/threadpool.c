@@ -36,8 +36,6 @@
 WINE_DEFAULT_DEBUG_CHANNEL(dpnet);
 
 static PFNDPNMESSAGEHANDLER threadpool_msghandler = NULL;
-static DWORD threadpool_flags       = 0;
-static void *threadpool_usercontext = NULL;
 
 static inline IDirectPlay8ThreadPoolImpl *impl_from_IDirectPlay8ThreadPool(IDirectPlay8ThreadPool *iface)
 {
@@ -93,8 +91,6 @@ static HRESULT WINAPI IDirectPlay8ThreadPoolImpl_Initialize(IDirectPlay8ThreadPo
         return DPNERR_ALREADYINITIALIZED;
 
     threadpool_msghandler  = pfn;
-    threadpool_flags       = dwFlags;
-    threadpool_usercontext = pvUserContext;
 
     return DPN_OK;
 }
@@ -154,7 +150,7 @@ static const IDirectPlay8ThreadPoolVtbl DirectPlay8ThreadPool_Vtbl =
     IDirectPlay8ThreadPoolImpl_DoWork
 };
 
-HRESULT DPNET_CreateDirectPlay8ThreadPool(LPCLASSFACTORY iface, LPUNKNOWN punkOuter, REFIID riid, LPVOID *ppobj)
+HRESULT DPNET_CreateDirectPlay8ThreadPool(REFIID riid, LPVOID *ppobj)
 {
     IDirectPlay8ThreadPoolImpl* Client;
 
