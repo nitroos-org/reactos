@@ -73,7 +73,7 @@ dll/directx/wine/dmstyle        # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dmusic         # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dmusic32       # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dplay          # Synced to wine-10.1-dev (b00c7619f1b)
-dll/directx/wine/dplayx         # Synced to wine-10.1-dev (b00c7619f1b)
+dll/directx/wine/dplayx         # Synced to Wine-11.21
 dll/directx/wine/dpnaddr        # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dpnet          # Synced to wine-10.1-dev (b00c7619f1b)
 dll/directx/wine/dpnhpast       # Synced to wine-10.1-dev (b00c7619f1b)
