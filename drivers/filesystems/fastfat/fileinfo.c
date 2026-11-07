@@ -151,6 +151,16 @@ FatSetAllocationInfo (
     );
 
 _Requires_lock_held_(_Global_critical_region_)
+VOID
+FatZeroSectorTail (
+    IN PIRP_CONTEXT IrpContext,
+    IN PVCB Vcb,
+    IN PFILE_OBJECT FileObject,
+    IN PFCB Fcb,
+    IN ULONG NewFileSize
+    );
+
+_Requires_lock_held_(_Global_critical_region_)
 NTSTATUS
 FatSetEndOfFileInfo (
     IN PIRP_CONTEXT IrpContext,
@@ -197,6 +207,7 @@ FatRenameEAs (
 #pragma alloc_text(PAGE, FatSetBasicInfo)
 #pragma alloc_text(PAGE, FatSetDispositionInfo)
 #pragma alloc_text(PAGE, FatSetEndOfFileInfo)
+#pragma alloc_text(PAGE, FatZeroSectorTail)
 #pragma alloc_text(PAGE, FatSetValidDataLengthInfo)
 #pragma alloc_text(PAGE, FatSetPositionInfo)
 #pragma alloc_text(PAGE, FatSetRenameInfo)
@@ -4407,6 +4418,8 @@ Return Value:
                 } _SEH2_END;
 #endif
 
+                FatZeroSectorTail( IrpContext, Fcb->Vcb, FileObject, Fcb, NewAllocationSize );
+
                 NT_ASSERT( FileObject->DeleteAccess || FileObject->WriteAccess );
 
                 //
@@ -4479,6 +4492,102 @@ Return Value:
 //
 //  Internal Support Routine
 //
+
+_Requires_lock_held_(_Global_critical_region_)
+VOID
+FatZeroSectorTail (
+    IN PIRP_CONTEXT IrpContext,
+    IN PVCB Vcb,
+    IN PFILE_OBJECT FileObject,
+    IN PFCB Fcb,
+    IN ULONG NewFileSize
+    )
+
+/*++
+
+Routine Description:
+
+    Called after a file was cut to NewFileSize.  The bytes of the last sector past the new end of file are still
+    the old data on the disk, and nothing zeroes them later: FatZeroData only clears whole sectors, from the one
+    after the valid data length, and the cache zeroes the tail of a resident page without dirtying it.  A file
+    that grows again, is closed (the cleanup raises the valid data length over the gap) and is opened again would
+    read the old bytes back from the tail of that sector.  So write zeros over the tail: through the cache, which
+    reads the straddling page first so the bytes below the new end survive, and leaves it dirty.
+
+    The caller holds the Fcb exclusive and the paging resource; the file sizes in the Fcb are already the new ones.
+
+--*/
+
+{
+    LARGE_INTEGER ZeroStart = {{0,0}};
+    LARGE_INTEGER ZeroEnd = {{0,0}};
+    ULONG SectorSize;
+    BOOLEAN CacheMapInitialized = FALSE;
+
+    PAGED_CODE();
+
+    SectorSize = (ULONG)Vcb->Bpb.BytesPerSector;
+
+    //
+    //  Drop the pages wholly past the new end of file from the cache (CcSetFileSizes only zeroes
+    //  them, and purges past the allocation size, which a cut leaves alone until the close): data
+    //  past the end of file is dead, and a page kept dirty there would be written when the file
+    //  grows again.  A page that is in use stays, zeroed.
+    //
+
+    if (FileObject->SectionObjectPointer->SharedCacheMap != NULL) {
+
+        LARGE_INTEGER PurgeStart;
+
+        PurgeStart.QuadPart = ((ULONGLONG)NewFileSize + (PAGE_SIZE - 1)) & ~((ULONGLONG)PAGE_SIZE - 1);
+
+        (VOID)CcPurgeCacheSection( FileObject->SectionObjectPointer,
+                                   &PurgeStart,
+                                   0,
+                                   FALSE );
+    }
+
+    ZeroStart.QuadPart = NewFileSize;
+    ZeroEnd.QuadPart = ((ULONGLONG)NewFileSize + (SectorSize - 1)) & ~((ULONGLONG)SectorSize - 1);
+
+    if (ZeroStart.QuadPart == ZeroEnd.QuadPart ||
+        ZeroEnd.QuadPart > Fcb->Header.AllocationSize.QuadPart ||
+        FlagOn( Fcb->FcbState, FCB_STATE_PAGING_FILE )) {
+
+        return;
+    }
+
+    //
+    //  A file that is not cached yet gets a cache map for the duration, as CcZeroData would otherwise
+    //  write whole sectors only.
+    //
+
+    if (FileObject->SectionObjectPointer->SharedCacheMap == NULL) {
+
+        FatInitializeCacheMap( FileObject,
+                               (PCC_FILE_SIZES)&Fcb->Header.AllocationSize,
+                               FALSE,
+                               &FatData.CacheManagerCallbacks,
+                               Fcb );
+
+        CacheMapInitialized = TRUE;
+    }
+
+    _SEH2_TRY {
+
+        (VOID)CcZeroData( FileObject,
+                          &ZeroStart,
+                          &ZeroEnd,
+                          TRUE );
+
+    } _SEH2_FINALLY {
+
+        if (CacheMapInitialized) {
+
+            CcUninitializeCacheMap( FileObject, NULL, NULL );
+        }
+    } _SEH2_END;
+}
 
 _Requires_lock_held_(_Global_critical_region_)
 NTSTATUS
@@ -4786,6 +4895,11 @@ Return Value:
 
             CcSetFileSizes( FileObject,
                             (PCC_FILE_SIZES)&Fcb->Header.AllocationSize );
+
+            if (NewFileSize < InitialFileSize) {
+
+                FatZeroSectorTail( IrpContext, Vcb, FileObject, Fcb, NewFileSize );
+            }
 
             FatSetFileSizeInDirent( IrpContext, Fcb, NULL );
 
