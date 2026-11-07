@@ -64,6 +64,7 @@ list(APPEND PCH_SKIP_SOURCE
     v5/rebar.c
     v5/status.c
     v5/tab.c
+    v5/toolbar.c
     v5/trackbar.c
     v5/treeview.c
     v5/updown.c
