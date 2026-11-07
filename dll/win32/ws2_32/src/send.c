@@ -101,6 +101,14 @@ sendto(IN SOCKET s,
         /* Get the Socket Context */
         if ((Socket = WsSockGetSocket(s)))
         {
+            /* A destination shorter than the generic sockaddr cannot hold an address (WSAEFAULT on Windows) */
+            if (to && tolen < (INT)sizeof(struct sockaddr))
+            {
+                WsSockDereference(Socket);
+                SetLastError(WSAEFAULT);
+                return SOCKET_ERROR;
+            }
+
             /* Setup the buffers */
             Buffers.buf = (PCHAR)buf;
             Buffers.len = len;
@@ -886,6 +894,14 @@ WSASendTo(IN SOCKET s,
         /* Get the Socket Context */
         if ((Socket = WsSockGetSocket(s)))
         {
+            /* A destination shorter than the generic sockaddr cannot hold an address (WSAEFAULT on Windows) */
+            if (lpTo && iToLen < (INT)sizeof(struct sockaddr))
+            {
+                WsSockDereference(Socket);
+                SetLastError(WSAEFAULT);
+                return SOCKET_ERROR;
+            }
+
             /* Make the call */
             Status = Socket->Provider->Service.lpWSPSendTo(s,
                                                            lpBuffers,

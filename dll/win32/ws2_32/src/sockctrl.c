@@ -39,7 +39,8 @@ connect(IN SOCKET s,
         /* Get the Socket Context */
         if ((Socket = WsSockGetSocket(s)))
         {
-            if (!IsBadReadPtr(name, sizeof(struct sockaddr)))
+            /* A name shorter than the generic sockaddr cannot hold an address (WSAEFAULT on Windows) */
+            if (name && namelen >= (INT)sizeof(struct sockaddr) && !IsBadReadPtr(name, sizeof(struct sockaddr)))
             {
                 while (TRUE)
                 {
@@ -565,6 +566,14 @@ WSAConnect(IN SOCKET s,
         /* Get the Socket Context */
         if ((Socket = WsSockGetSocket(s)))
         {
+            /* A name shorter than the generic sockaddr cannot hold an address (WSAEFAULT on Windows) */
+            if (!name || namelen < (INT)sizeof(struct sockaddr))
+            {
+                WsSockDereference(Socket);
+                SetLastError(WSAEFAULT);
+                return SOCKET_ERROR;
+            }
+
             /* Make the call */
             Status = Socket->Provider->Service.lpWSPConnect(s,
                                                             name,

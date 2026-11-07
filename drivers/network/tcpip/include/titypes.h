@@ -291,6 +291,8 @@ typedef struct _CONNECTION_ENDPOINT {
 
     /* Receive window (lwip_glue/tcp.c): bytes read from the queue that lwIP was not told yet (object lock) */
     ULONG RecvCredit;
+    /* Bytes of received segments waiting in PacketQueue (the queue counted in lwip_glue/tcp.c) */
+    LONG QueuedBytes;
     /* The receive window as the lwIP side last saw it, and its largest size (core lock; read by readers
        without it): a reader does not take the core lock while the window is mostly open */
     ULONG RecvWndNow, RecvWndMax;

@@ -56,6 +56,63 @@ LibTCPDumpPcb(PVOID SocketContext)
     pcb->remote_port);
 }
 
+/* Received segments that owners have not read are held in non-paged pool, and the receive windows allow
+ * megabytes of them per connection: connections whose owners do not read could take all of the pool (it
+ * is 128 MB at most on a 32-bit system) and leave the rest of the system unable to allocate. The segments
+ * waiting to be read are therefore counted over all connections:
+ * - past a quarter of physical memory (24 MB at most on a 32-bit system) windows are not widened
+ *   (autotuning) and a connection that sets up its window starts at 64K instead of 2 MB, so the normal
+ *   growth of the queue stops by itself, with the usual flow control and nothing dropped;
+ * - past half of it (96 MB at most on a 32-bit system) a connection that already holds 64K is refused
+ *   further segments (lwIP keeps one and the peer retransmits, as for a full window): the last resort
+ *   against windows set by the owners (SO_RCVBUF).
+ * A connection with less than 64K queued is never starved by the others. Normal use stays far below. */
+static volatile LONG LibTCPQueueGrowLimit = 24 * 1024 * 1024;
+static volatile LONG LibTCPQueueCap = 96 * 1024 * 1024;
+#define LIBTCP_QUEUE_GROW_LIMIT LibTCPQueueGrowLimit
+#define LIBTCP_QUEUE_BUDGET LibTCPQueueCap
+
+/* Sets the limits from the physical memory (PASSIVE_LEVEL, at start) */
+VOID
+LibTCPInitQueueLimits(VOID)
+{
+    PPHYSICAL_MEMORY_RANGE Ranges = MmGetPhysicalMemoryRanges();
+    ULONGLONG Bytes = 0, Grow, Cap;
+    ULONG i;
+
+    if (Ranges)
+    {
+        for (i = 0; Ranges[i].BaseAddress.QuadPart || Ranges[i].NumberOfBytes.QuadPart; i++)
+            Bytes += Ranges[i].NumberOfBytes.QuadPart;
+        ExFreePool(Ranges);
+    }
+    if (!Bytes)
+        return; /* unknown: the 32-bit values stay */
+
+    Grow = Bytes / 4;
+    Cap = Bytes / 2;
+#ifdef _WIN64
+    Grow = min(Grow, 512ULL * 1024 * 1024);
+    Cap = min(Cap, 1024ULL * 1024 * 1024);
+#else
+    Grow = min(Grow, 24ULL * 1024 * 1024);
+    Cap = min(Cap, 96ULL * 1024 * 1024);
+#endif
+    LibTCPQueueGrowLimit = (LONG)Grow;
+    LibTCPQueueCap = (LONG)Cap;
+}
+
+static volatile LONG LibTCPQueuedBytes;
+
+/* The segment leaves the queue: its bytes are no longer waiting */
+static
+VOID
+LibTCPQueueRelease(PCONNECTION_ENDPOINT Connection, struct pbuf *p)
+{
+    InterlockedExchangeAdd(&LibTCPQueuedBytes, -(LONG)p->tot_len);
+    InterlockedExchangeAdd(&Connection->QueuedBytes, -(LONG)p->tot_len);
+}
+
 static
 void
 LibTCPEmptyQueue(PCONNECTION_ENDPOINT Connection)
@@ -71,6 +128,7 @@ LibTCPEmptyQueue(PCONNECTION_ENDPOINT Connection)
         qp = CONTAINING_RECORD(Entry, QUEUE_ENTRY, ListEntry);
 
         /* We're in the tcpip thread here so this is safe */
+        LibTCPQueueRelease(Connection, qp->p);
         pbuf_free(qp->p);
 
         ExFreeToNPagedLookasideList(&QueueEntryLookasideList, qp);
@@ -89,6 +147,16 @@ err_t LibTCPEnqueuePacket(PCONNECTION_ENDPOINT Connection, struct pbuf *p)
 
     qp->p = p;
     qp->Offset = 0;
+
+    /* Counted before the segment is visible to readers, which release what they take */
+    if (InterlockedExchangeAdd(&LibTCPQueuedBytes, (LONG)p->tot_len) + (LONG)p->tot_len > LIBTCP_QUEUE_BUDGET &&
+        Connection->QueuedBytes >= TCP_WND_DEFAULT)
+    {
+        InterlockedExchangeAdd(&LibTCPQueuedBytes, -(LONG)p->tot_len);
+        ExFreeToNPagedLookasideList(&QueueEntryLookasideList, qp);
+        return ERR_MEM;
+    }
+    InterlockedExchangeAdd(&Connection->QueuedBytes, (LONG)p->tot_len);
 
     LockObject(Connection);
     InsertTailList(&Connection->PacketQueue, &qp->ListEntry);
@@ -158,6 +226,7 @@ NTSTATUS LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PUCHA
             {
                 /* lwIP's memory functions may be called from any thread (SYS_LIGHTWEIGHT_PROT);
                  * the segment is ours since the receive callback took it */
+                LibTCPQueueRelease(Connection, qp->p);
                 pbuf_free(qp->p);
 
                 ExFreeToNPagedLookasideList(&QueueEntryLookasideList, qp);
@@ -332,7 +401,7 @@ LibTCPSetReceiveWindow(PCONNECTION_ENDPOINT Connection, ULONG Size)
 
     Connection->AutoTune = (Size == 0);
     if (Size == 0)
-        Size = LIBTCP_DEFAULT_WINDOW;
+        Size = (LibTCPQueuedBytes < LIBTCP_QUEUE_GROW_LIMIT) ? LIBTCP_DEFAULT_WINDOW : LIBTCP_MIN_WINDOW;
     else if (Size < LIBTCP_MIN_WINDOW)
         Size = LIBTCP_MIN_WINDOW;
     if (Size > TCP_WND)
@@ -445,7 +514,8 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
          * without limit: a 200 MB download ran 30% slower with a 2 MB window and as fast as before with a
          * 32 MB one. An owner that does not read gets no more. A SO_RCVBUF is kept as asked, as on Windows. */
         if (Connection->AutoTune && (pcb->flags & TF_WND_SCALE) && pcb->rcv_wnd < 2 * TCP_MSS &&
-            Connection->Consumed != Connection->AutoSeen && pcb->rcv_wnd_max < TCP_WND)
+            Connection->Consumed != Connection->AutoSeen && pcb->rcv_wnd_max < TCP_WND &&
+            LibTCPQueuedBytes < LIBTCP_QUEUE_GROW_LIMIT)
         {
             ULONG Old = pcb->rcv_wnd_max;
 
