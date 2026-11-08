@@ -5690,7 +5690,7 @@ Return Value:
         //  If we finished the scan, then we know about all the possible bad clusters.
         //
 
-        SetFlag( Vcb->VcbState, VCB_STATE_FLAG_BAD_BLOCKS_POPULATED);
+        FatSetVcbFlag( Vcb, VCB_STATE_FLAG_BAD_BLOCKS_POPULATED );
 
         //
         //  Now we have to record the final run we encountered

@@ -2264,7 +2264,7 @@ Return Value:
                         }
                     }
 
-                    SetFlag(Vcb->VcbState, VCB_STATE_FLAG_BOOT_OR_PAGING_FILE);
+                    FatSetVcbFlag( Vcb, VCB_STATE_FLAG_BOOT_OR_PAGING_FILE );
 
                     if (FlagOn(Vcb->VcbState, VCB_STATE_FLAG_REMOVABLE_MEDIA)) {
 
@@ -2427,7 +2427,7 @@ Return Value:
             //  Lock the volume
             //
 
-            Vcb->VcbState |= VCB_STATE_FLAG_LOCKED;
+            FatSetVcbFlag( Vcb, VCB_STATE_FLAG_LOCKED );
             Vcb->FileObjectWithVcbLocked = FileObject;
             UnwindVolumeLock = TRUE;
 
@@ -2475,7 +2475,7 @@ Return Value:
 #else
             FatMarkVolume( IrpContext, Vcb, VolumeClean );
 #endif
-            ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+            FatClearVcbFlag( Vcb, VCB_STATE_FLAG_VOLUME_DIRTY );
 
             //
             //  Unlock the volume if it is removable.
@@ -2575,7 +2575,7 @@ Return Value:
             }
             if (UnwindCcb != NULL) { FatDeleteCcb( IrpContext, &UnwindCcb ); }
             if (UnwindShareAccess) { IoRemoveShareAccess( FileObject, &Vcb->ShareAccess ); }
-            if (UnwindVolumeLock) { Vcb->VcbState &= ~VCB_STATE_FLAG_LOCKED; }
+            if (UnwindVolumeLock) { FatClearVcbFlag( Vcb, VCB_STATE_FLAG_LOCKED ); }
         }
 
         DebugTrace(-1, Dbg, "FatOpenVolume -> Iosb.Status = %08lx\n", Status);
@@ -3634,7 +3634,7 @@ Return Value:
             (Fcb->NonPaged->SectionObjectPointers.DataSectionObject != NULL) &&
             !FlagOn( Fcb->FcbState, FCB_STATE_PAGING_FILE )) {
 
-            SetFlag(Fcb->Vcb->VcbState, VCB_STATE_FLAG_CREATE_IN_PROGRESS);
+            FatSetVcbFlag( Fcb->Vcb, VCB_STATE_FLAG_CREATE_IN_PROGRESS );
 
 #ifdef __REACTOS__
             //
@@ -3666,10 +3666,10 @@ Return Value:
 #ifdef __REACTOS__
             } _SEH2_FINALLY {
 
-                ClearFlag(Fcb->Vcb->VcbState, VCB_STATE_FLAG_CREATE_IN_PROGRESS);
+                FatClearVcbFlag( Fcb->Vcb, VCB_STATE_FLAG_CREATE_IN_PROGRESS );
             } _SEH2_END;
 #else
-            ClearFlag(Fcb->Vcb->VcbState, VCB_STATE_FLAG_CREATE_IN_PROGRESS);
+            FatClearVcbFlag( Fcb->Vcb, VCB_STATE_FLAG_CREATE_IN_PROGRESS );
 #endif
         }
 
@@ -6495,7 +6495,7 @@ Return Value:
         //  to prevent the Fcb from going away out from underneath us.
         //
 
-        SetFlag(Fcb->Vcb->VcbState, VCB_STATE_FLAG_CREATE_IN_PROGRESS);
+        FatSetVcbFlag( Fcb->Vcb, VCB_STATE_FLAG_CREATE_IN_PROGRESS );
 
         CcPurgeCacheSection( &Fcb->NonPaged->SectionObjectPointers, NULL, 0, FALSE );
 
@@ -6732,7 +6732,7 @@ Return Value:
 
         FatUnpinBcb( IrpContext, DirentBcb );
 
-        ClearFlag(Fcb->Vcb->VcbState, VCB_STATE_FLAG_CREATE_IN_PROGRESS);
+        FatClearVcbFlag( Fcb->Vcb, VCB_STATE_FLAG_CREATE_IN_PROGRESS );
 
         DebugTrace(-1, Dbg, "FatSupersedeOrOverwriteFile -> Iosb.Status = %08lx\n", Iosb.Status);
     } _SEH2_END;
