@@ -1,0 +1,14 @@
+Patent notice: AAC audio decoder (AAC-LC, HE-AAC, HE-AAC v2)
+
+This optional feature installs a full AAC audio decoder (a Media Foundation transform built from FFmpeg's native
+"aac" decoder, LGPL-2.1-or-later, unmodified). It decodes AAC-LC, HE-AAC (AAC-LC with spectral band replication, SBR)
+and HE-AAC v2 (HE-AAC with parametric stereo, PS). It replaces the AAC-LC-only feature "aac-lc" if that is on.
+
+AAC, including HE-AAC and HE-AAC v2, is covered by patents in some countries (the Via Licensing AAC patent pool).
+Neither NitroOS nor the FFmpeg licence grants you a patent licence. Many of the core AAC-LC patents are reported to
+have expired; the HE-AAC and HE-AAC v2 tools were standardised later, so the position for them may differ. Whether
+you need a licence depends on your country and your use. This is not legal advice: check for yourself before you
+turn the feature on. It is off by default and you can turn it off again at any time (Optional Features, or
+featmgr /disable aac). If you only need AAC-LC, the smaller feature "aac-lc" leaves HE-AAC and HE-AAC v2 out.
+
+The licence texts and the written source offer are installed in %SystemRoot%\System32\aac-licenses.

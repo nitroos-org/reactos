@@ -58,6 +58,22 @@ the feature is turned on: the Optional Features GUI asks OK/Cancel, `featmgr /en
 - Tests: `tests\aaclc-live.cmd` (turn on, notice, files, both registry views, decoder via `mfplat_apitest MftAac` and `mfttest`
   against FFmpeg's own decode, HE-AAC refused, turn off removes everything, turn on again).
 
+### Full AAC (AAC-LC, HE-AAC, HE-AAC v2): entry `aac`
+
+Entry `aac` (`catalog/aac.ini`, amd64) is the same decoder built from the UNPATCHED FFmpeg 9.0.2 native `aac` decoder (SBR and PS
+included, as in Fedora's ffmpeg-free; `AAC_VARIANT=full` in `build-aacdec.sh` / `tools/stage-aac-lc-payload.sh`): the same
+`nitroaacdec.dll` names, the same CLSID and the same registry keys as `aac-lc`, licence texts in `System32\aac-licenses`, a notice that
+names HE-AAC and HE-AAC v2. It is a separate feature id, not a new version of `aac-lc`: the published `aac-lc` pack (and its pins) stay
+valid. Because both write the same files and keys they exclude each other, with two catalog keys in `[Feature]`:
+
+- `Replaces=aac-lc` (in `aac.ini`): turning `aac` on first turns `aac-lc` off when it is on (its files and keys are removed, or what it
+  backed up is restored), after the pack of `aac` is downloaded and verified (a failed download leaves `aac-lc` in place), then installs
+  the full decoder. A removal that has to wait for a reboot (files in use) stops the upgrade with a message instead of mixing the two.
+- `Conflicts=aac` (in `aac-lc.ini`): `aac-lc` refuses to turn on while `aac` is on.
+
+Turning `aac` off removes everything; `aac-lc` stays off (it is not restored). Tests: `tests\aac-live.cmd` (A: turn on, notice, files, both
+views, decoder LC/HE-AAC/HE-AAC v2, off, on again; upgrade from `aac-lc`; `aac-lc` refused while `aac` is on).
+
 ## Wine Gecko 2.47.4 (the mshtml engine), on demand
 
 Entry `wine-gecko` (`catalog/wine-gecko.ini`, i386 and amd64; Provider=component, recipe in `catalog/components.ini`). Gecko is not
