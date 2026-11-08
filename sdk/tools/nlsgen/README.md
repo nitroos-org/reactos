@@ -30,7 +30,7 @@ does not carry: LANGUAGE/SUBLANG, the LCID name, default ANSI/OEM/MAC/EBCDIC cod
 three-letter abbreviations (`SABBREVLANGNAME`, `SABBREVCTRYNAME`), OpenType language tag, sort name, font signature and the
 localized language-group names. They are read from the locale files as they were BEFORE any Windows measurement (the parent of
 afb57812d6b, the Wine 6.7 sync). The LCID is recomputed from the LANGUAGE/SUBLANG macros of the tree, the calling codes of
-seven locales and the Welsh ANSI code page are corrected from public facts (ITU-T E.164, MS-LCID); see `extract_skeleton.py`.
+six locales and the Welsh ANSI code page are corrected from public facts (ITU-T E.164, MS-LCID); see `extract_skeleton.py`.
 `data/iso639-2.json`: the ISO 639-2/T three-letter language codes (ISO 639-2, Library of Congress).
 
 ## Fields CLDR lacks: documented defaults and derivations
