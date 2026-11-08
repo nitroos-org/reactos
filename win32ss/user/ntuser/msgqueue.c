@@ -1181,6 +1181,8 @@ Exit:
    return Ret;
 }
 
+BOOL FASTCALL IntMsgLParamIsBufferPointer(UINT Msg);
+
 BOOL FASTCALL
 co_MsqSendMessageAsync(PTHREADINFO ptiReceiver,
                        HWND hwnd,
@@ -1343,8 +1345,10 @@ co_MsqSendMessage(PTHREADINFO ptirec,
        // Unless we are dying and need to tell our parents.
        // Not a hook call: the caller frees its hook pack when this fails.
        if (pti->TIF_flags & TIF_INCLEANUP && !(ptirec->TIF_flags & TIF_INCLEANUP) &&
-           HookMessage != MSQ_ISHOOK)
+           HookMessage != MSQ_ISHOOK && !IntMsgLParamIsBufferPointer(Msg))
        {
+           /* (a message whose lParam points into the dying sender's memory is dropped: the receiver would
+              read it after it is freed) */
            // Parent notify is the big one. Fire and forget!
            TRACE("Send message from dying thread %u\n", Msg);
            co_MsqSendMessageAsync(ptirec, Wnd, Msg, wParam, lParam, NULL, 0, FALSE, HookMessage);
