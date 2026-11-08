@@ -26,6 +26,11 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/hivevcrt_${ARCH}.inf)
     add_registry_inf(hivevcrt_${ARCH}.inf)
 endif()
 
+# System hive values of the architecture (NitroPager default)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/hivesys_${ARCH}.inf)
+    add_registry_inf(hivesys_${ARCH}.inf)
+endif()
+
 # Software hive keys of the architecture (amd64: the 32-bit view of system registrations)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/hivesft_${ARCH}.inf)
     add_registry_inf(hivesft_${ARCH}.inf)
