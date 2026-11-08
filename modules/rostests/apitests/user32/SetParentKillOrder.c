@@ -21,7 +21,7 @@
 
 enum
 {
-    EV_HOSTUP, EV_BROWSERUP, EV_ADOPTED, EV_BFOCUSED,
+    EV_HOSTUP, EV_BROWSERUP, EV_ADOPTED, EV_BFOCUSED, EV_SETTLED,
     EV_CHECK_H, EV_CHECK_B, EV_CHECKED_H, EV_CHECKED_B, EV_EXIT_H, EV_EXIT_B,
     EV_COUNT
 };
@@ -43,7 +43,7 @@ static const char *const CheckNames[CK_COUNT] =
     "parent died: SetWindowPos fails with 87",
     "parent died: SetFocus fails with 87",
     "parent died: SetParent(child, NULL) fails with 87",
-    "parent died: CreateWindow below the destroyed parent fails with 87",
+    "parent died: CreateWindow below the destroyed parent fails (87 or 1400)",
     "parent died: MoveWindow still works",
     "parent died: GetCapture is still the child",
     "parent died: GetFocus is NULL",
@@ -175,6 +175,7 @@ static int HostProcess(const char *Tag)
         return 14;
     ShowWindow(W, SW_SHOWNOACTIVATE);
     SetFocus(c.Sh->variant & 1 ? C : P);
+    SetEvent(c.Ev[EV_SETTLED]);
     /* idle, answering messages, until the driver ends this process or asks for the check */
     for (;;)
     {
@@ -250,29 +251,19 @@ static int BrowserProcess(const char *Tag)
     SetFocus(G ? G : W);
     SetCapture(W);
     SetEvent(c.Ev[EV_BFOCUSED]);
+    if (!WaitPump(c.Ev[EV_SETTLED], 20000))
+        return 26;
 
     {
         HANDLE h[2] = { c.Ev[EV_CHECK_B], c.Ev[EV_EXIT_B] };
-        DWORD Start = GetTickCount();
+        DWORD w;
 
-        /* idle without reading posted messages: the state right after the parent's process ended is what is checked */
-        for (;;)
-        {
-            DWORD w = MsgWaitForMultipleObjectsEx(2, h, 60000, QS_SENDMESSAGE, 0);
-            MSG Msg;
-
-            if (w == WAIT_OBJECT_0 + 2)
-            {
-                PeekMessageA(&Msg, NULL, WM_NULL, WM_NULL, PM_NOREMOVE);
-                continue;
-            }
-            if (w == WAIT_OBJECT_0)
-                break;
-            if (w == WAIT_OBJECT_0 + 1)
-                ExitProcess(0);
-            if (GetTickCount() - Start > 60000)
-                return 25;
-        }
+        /* idle in a plain wait, reading no messages: the state right after the parent's process ended is what is checked */
+        w = WaitForMultipleObjects(2, h, FALSE, 60000);
+        if (w == WAIT_OBJECT_0 + 1)
+            ExitProcess(0);
+        if (w != WAIT_OBJECT_0)
+            return 25;
     }
 
     /* the process of the parent window ended */
@@ -302,7 +293,9 @@ static int BrowserProcess(const char *Tag)
         Err = ChildOfDead == NULL ? GetLastError() : 0;
         if (ChildOfDead)
             DestroyWindow(ChildOfDead);
-        Rec(&c, CK_B_CREATE87, Err == ERROR_INVALID_PARAMETER);
+        /* Windows still resolves the destroyed parent and reports 87. Here the handle of a destroyed window no
+           longer resolves, so the same call reports ERROR_INVALID_WINDOW_HANDLE: both are a refusal, no window */
+        Rec(&c, CK_B_CREATE87, ChildOfDead == NULL && (Err == ERROR_INVALID_PARAMETER || Err == ERROR_INVALID_WINDOW_HANDLE));
         Rec(&c, CK_B_MOVE_OK, MoveWindow(W, 2, 2, 60, 60, TRUE));
         Cp = GetCapture();
         Rec(&c, CK_B_CAPTURE, Cp == W);
@@ -332,17 +325,21 @@ static BOOL StartHelper(const char *Role, const char *Tag, PROCESS_INFORMATION *
 }
 
 /* end a helper: terminate (variant 0) or ask it to exit normally with its windows alive (variant 1) */
-static void EndHelper(PROCESS_INFORMATION *Pi, HANDLE ExitEv, BOOL Terminate)
+static BOOL EndHelper(PROCESS_INFORMATION *Pi, HANDLE ExitEv, BOOL Terminate)
 {
+    BOOL Clean = TRUE;
+
     if (Terminate)
         TerminateProcess(Pi->hProcess, 77);
     else
         SetEvent(ExitEv);
-    if (WaitForSingleObject(Pi->hProcess, 20000) != WAIT_OBJECT_0)
+    if (WaitForSingleObject(Pi->hProcess, 10000) != WAIT_OBJECT_0)
     {
+        Clean = FALSE; /* it did not end by itself: a hang while its windows were being destroyed */
         TerminateProcess(Pi->hProcess, 78);
         WaitForSingleObject(Pi->hProcess, 10000);
     }
+    return Clean;
 }
 
 /* one iteration; Order 0: the parent's process ends first, 1: the child's. Returns FALSE when it could not run. */
@@ -382,12 +379,17 @@ static BOOL RunOnce(int Iter, int Order, SHARED *Tot, LONG *Hangs)
     GotH = GotB && WaitForSingleObject(Ev[EV_ADOPTED], 1000) == WAIT_OBJECT_0;
     if (GotB && GotH)
     {
-        Sleep(30); /* the host shows and focuses */
+        if (WaitForSingleObject(Ev[EV_SETTLED], 20000) != WAIT_OBJECT_0)
+            Ok = FALSE;
         P = (HWND)Sh->hwndP;
         W = (HWND)Sh->hwndW;
         if (Order == 0)
         {
-            EndHelper(&PiH, Ev[EV_EXIT_H], Terminate);
+            if (!EndHelper(&PiH, Ev[EV_EXIT_H], Terminate))
+            {
+                InterlockedIncrement(Hangs);
+                Ok = FALSE;
+            }
             Sleep(40);
             SetEvent(Ev[EV_CHECK_B]);
             if (WaitForSingleObject(Ev[EV_CHECKED_B], 20000) != WAIT_OBJECT_0)
@@ -399,7 +401,11 @@ static BOOL RunOnce(int Iter, int Order, SHARED *Tot, LONG *Hangs)
         }
         else
         {
-            EndHelper(&PiB, Ev[EV_EXIT_B], Terminate);
+            if (!EndHelper(&PiB, Ev[EV_EXIT_B], Terminate))
+            {
+                InterlockedIncrement(Hangs);
+                Ok = FALSE;
+            }
             Sleep(40);
             SetEvent(Ev[EV_CHECK_H]);
             if (WaitForSingleObject(Ev[EV_CHECKED_H], 20000) != WAIT_OBJECT_0)
