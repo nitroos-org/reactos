@@ -20,7 +20,9 @@ set SHA_FULL=bdd8a373f28f3f21094f40b20d07bce459075b04278ba3cdd06f19652af31b59
 mkdir %O% 2>nul
 echo AAC (full) featmgr live test %date% %time%> %LOG%
 
-rem ---- both features off, clean system
+rem ---- both features off, clean system (a state record left by an earlier run is removed first)
+%FM% /uninstall aac > nul 2>&1
+%FM% /uninstall aac-lc > nul 2>&1
 %FM% /state aac > %O%\s.txt 2>&1
 call :st aac NotInstalled "B1 aac NotInstalled before"
 call :st aac-lc NotInstalled "B2 aac-lc NotInstalled before"
@@ -46,12 +48,12 @@ call :mftcmp mfttest64.exe - lc-st.aac raw lc-st.ref.f32 - "C10 x64 AAC-LC throu
 call :mftcmp mfttest32.exe - lc-st.aac raw lc-st.ref.f32 - "C11 x86 AAC-LC through CoCreateInstance 32-bit registry view"
 call :mftcmp mfttest64.exe %SystemRoot%\System32\nitroaacdec.dll he-sbr.aac adts he-sbr.ref.f32 - "C12 x64 HE-AAC SBR stream equals FFmpeg's decode"
 call :mftcmp mfttest32.exe - he-sbr.aac adts he-sbr.ref.f32 - "C13 x86 HE-AAC SBR stream equals FFmpeg's decode"
-call :mftcmp mfttest64.exe - he-sbr.aac raw he-sbr.ref.f32 asc=131056e598 "C14 x64 HE-AAC with the explicit AudioSpecificConfig of an MP4"
-call :mftcmp mfttest32.exe - he-sbr.aac raw he-sbr.ref.f32 asc=131056e598 "C15 x86 HE-AAC with the explicit AudioSpecificConfig of an MP4"
+call :mftcmp mfttest64.exe - he-sbr.aac raw he-sbr.ref.f32 131056e598 "C14 x64 HE-AAC with the explicit AudioSpecificConfig of an MP4"
+call :mftcmp mfttest32.exe - he-sbr.aac raw he-sbr.ref.f32 131056e598 "C15 x86 HE-AAC with the explicit AudioSpecificConfig of an MP4"
 call :mftcmp mfttest64.exe - he-ps.aac adts he-ps.ref.f32 - "C16 x64 HE-AAC v2 PS stream equals FFmpeg's decode"
 call :mftcmp mfttest32.exe - he-ps.aac adts he-ps.ref.f32 - "C17 x86 HE-AAC v2 PS stream equals FFmpeg's decode"
-call :mftcmp mfttest64.exe - he-ps.aac raw he-ps.ref.f32 asc=140006040000000056e5a8 "C18 x64 HE-AAC v2 with the AudioSpecificConfig of an MP4"
-call :mftcmp mfttest32.exe - he-ps.aac raw he-ps.ref.f32 asc=140006040000000056e5a8 "C19 x86 HE-AAC v2 with the AudioSpecificConfig of an MP4"
+call :mftcmp mfttest64.exe - he-ps.aac raw he-ps.ref.f32 140006040000000056e5a8 "C18 x64 HE-AAC v2 with the AudioSpecificConfig of an MP4"
+call :mftcmp mfttest32.exe - he-ps.aac raw he-ps.ref.f32 140006040000000056e5a8 "C19 x86 HE-AAC v2 with the AudioSpecificConfig of an MP4"
 
 rem ---- turn aac-lc on while aac is on: refused
 %FM% /enable aac-lc > %O%\en-lc.txt 2>&1
@@ -125,7 +127,8 @@ exit /b 0
 
 :sha
 set GOT=
-for /f %%H in ('"%ProgramFiles%\PowerShell\7\pwsh.exe" -NoProfile -Command "(Get-FileHash %SystemRoot%\System32\nitroaacdec.dll -Algorithm SHA256).Hash"') do set GOT=%%H
+"%ProgramFiles%\PowerShell\7\pwsh.exe" -NoProfile -Command "(Get-FileHash %SystemRoot%\System32\nitroaacdec.dll -Algorithm SHA256).Hash" > %O%\h.txt 2>&1
+set /p GOT=<%O%\h.txt
 if /i "%GOT%"=="%~1" (echo PASS %~2>> %LOG%) else (echo FAIL %~2: got %GOT%>> %LOG% & set /a FAILS+=1)
 exit /b 0
 
@@ -158,14 +161,18 @@ exit /b 0
 :apit
 mfplat_apitest.exe MftAac > %O%\apit.txt 2>&1
 type %O%\apit.txt >> %LOG%
-if "%1"=="skip" (find "CLSID_CMSAACDecMFT is not registered" %O%\apit.txt >nul) else (find "skipped" %O%\apit.txt | find "not registered" >nul && exit /b 1)
-set RC=%ERRORLEVEL%
-find ", 0 failures)" %O%\apit.txt >nul || set RC=1
+set RC=0
+find "is not registered" %O%\apit.txt >nul
+if "%1"=="skip" (if errorlevel 1 set RC=1) else (if not errorlevel 1 set RC=1)
+find ", 0 failures)" %O%\apit.txt >nul
+if errorlevel 1 set RC=1
 if "%RC%"=="0" (echo PASS %~2>> %LOG%) else (echo FAIL %~2>> %LOG% & set /a FAILS+=1)
 exit /b 0
 
 :mftcmp
-%~1 %~2 %~3 %O%\m.raw %~4 float - %~6 > %O%\m.txt 2>&1
+set AS=
+if not "%~6"=="-" set AS=asc=%~6
+%~1 %~2 %~3 %O%\m.raw %~4 float - %AS% > %O%\m.txt 2>&1
 type %O%\m.txt >> %LOG%
 find "firsterr=0x00000000 setinput=0x00000000" %O%\m.txt >nul
 if errorlevel 1 (echo FAIL %~7: the decoder reported an error>> %LOG% & set /a FAILS+=1 & exit /b 0)
