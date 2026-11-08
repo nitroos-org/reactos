@@ -391,11 +391,15 @@ typedef struct _USBPORT_DEVICE_EXTENSION {
   ULONG Bandwidth[32];
   KSPIN_LOCK TtSpinLock;
 
+  /* A USBPORT_MapTransfer request owns the DMA adapter channel and the FDO's one WCB
+     (taken from the padding below: the size of this structure must not change) */
+  LONG MapTransferBusy;
+
   /* Miniport extension should be aligned on 0x100 */
 #if !defined(_M_X64)
-  ULONG Padded[64];
+  ULONG Padded[63];
 #else
-  ULONG Padded[30];
+  ULONG Padded[29];
 #endif
 
 } USBPORT_DEVICE_EXTENSION, *PUSBPORT_DEVICE_EXTENSION;
