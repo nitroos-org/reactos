@@ -102,27 +102,6 @@ static BOOL WaitPump(HANDLE h, DWORD ms)
     }
 }
 
-/* wait for an event, answering only messages SENT to this thread (no posted ones, no timers) */
-static BOOL WaitSentOnly(HANDLE h, DWORD ms)
-{
-    DWORD Start = GetTickCount(), El, w;
-    MSG Msg;
-
-    for (;;)
-    {
-        El = GetTickCount() - Start;
-        if (El >= ms)
-            return FALSE;
-        w = MsgWaitForMultipleObjectsEx(1, &h, ms - El, QS_SENDMESSAGE, 0);
-        if (w == WAIT_OBJECT_0)
-            return TRUE;
-        if (w == WAIT_OBJECT_0 + 1)
-            PeekMessageA(&Msg, NULL, WM_NULL, WM_NULL, PM_NOREMOVE);
-        else
-            return FALSE;
-    }
-}
-
 static void Rec(CTX *c, int Id, BOOL Cond)
 {
     InterlockedIncrement(Cond ? &c->Sh->pass[Id] : &c->Sh->fail[Id]);
