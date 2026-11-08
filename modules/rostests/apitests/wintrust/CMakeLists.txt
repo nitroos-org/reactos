@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     SignatureTimeStamp.c
+    SpcIndirectData.c
     WTHelperGetFileHash.c
     testlist.c)
 

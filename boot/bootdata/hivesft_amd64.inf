@@ -28,6 +28,23 @@ HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.M
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager","DllPath",0x00020000,"%SystemRoot%\SysWOW64\AppXDeploymentClient.dll"
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager","Threading",0x00010001,0
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager","TrustLevel",0x00010001,1
+; The 32-bit view of the WinRT classes Word 16 activates (see hivesft.inf).
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.Connectivity.NetworkInformation","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.Connectivity.NetworkInformation","DllPath",0x00020000,"%SystemRoot%\SysWOW64\Windows.Networking.Connectivity.dll"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.Connectivity.NetworkInformation","Threading",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.Connectivity.NetworkInformation","TrustLevel",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator","DllPath",0x00020000,"%SystemRoot%\SysWOW64\Windows.Security.Authentication.OnlineId.dll"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator","Threading",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator","TrustLevel",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdServiceTicketRequest","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdServiceTicketRequest","DllPath",0x00020000,"%SystemRoot%\SysWOW64\Windows.Security.Authentication.OnlineId.dll"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdServiceTicketRequest","Threading",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdServiceTicketRequest","TrustLevel",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Globalization.Language","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Globalization.Language","DllPath",0x00020000,"%SystemRoot%\SysWOW64\Windows.Globalization.dll"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Globalization.Language","Threading",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Globalization.Language","TrustLevel",0x00010001,0
 
 ; The 32-bit view of the DispatcherQueue WinRT classes (CreateDispatcherQueueController, Windows.System.DispatcherQueue*): SysWOW64\CoreMessaging.dll.
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueue","ActivationType",0x00010001,0
