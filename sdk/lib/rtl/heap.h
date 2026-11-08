@@ -375,6 +375,47 @@ RtlpEnumerateHeap(_In_opt_ PRTLP_HEAP_READ_ROUTINE Read,
                   _In_opt_ PVOID CallbackContext,
                   _Out_opt_ PULONG HeapFlags);
 
+/* heapfe.c: small-block front end of user-mode heaps (reported as the low-fragmentation heap, type 2) */
+#define HEAP_FRONTEND_CACHE     2
+#define HEAP_FE_NOT_HANDLED     0
+#define HEAP_FE_CACHED          1
+#define HEAP_FE_INVALID         2
+/* A serialized heap that its own lock made wait this often gets the front end */
+#define HEAP_FE_AUTO_THRESHOLD  16
+
+BOOLEAN NTAPI
+RtlpHeapFeEnable(PHEAP Heap);
+
+VOID NTAPI
+RtlpHeapFeDestroy(PHEAP Heap);
+
+PHEAP_ENTRY NTAPI
+RtlpHeapFeAlloc(PHEAP Heap,
+                SIZE_T Index,
+                SIZE_T AllocationSize,
+                SIZE_T Size);
+
+ULONG NTAPI
+RtlpHeapFeFree(PHEAP Heap,
+               PHEAP_ENTRY Entry);
+
+BOOLEAN NTAPI
+RtlpHeapFeIsCached(PHEAP_ENTRY Entry);
+
+ULONG NTAPI
+RtlpHeapFeFlush(PHEAP Heap);
+
+ULONG NTAPI
+RtlpHeapFeLock(PHEAP Heap);
+
+VOID NTAPI
+RtlpHeapFeUnlock(PHEAP Heap);
+
+/* heap.c: give an in-use block back to the heap proper (heap lock held) */
+VOID NTAPI
+RtlpFreeBlockLocked(PHEAP Heap,
+                    PHEAP_ENTRY HeapEntry);
+
 /* heapdbg.c */
 NTSYSAPI
 HANDLE NTAPI
