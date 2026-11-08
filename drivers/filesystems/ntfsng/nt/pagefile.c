@@ -17,28 +17,6 @@
 
 static VOID NgPagingReserveInit(PNG_VCB Vcb);
 
-/*
- * Test (NitroPagerDebug 0x80 in Session Manager\Memory Management, read once by DriverEntry, before any
- * volume or CoreLock exists: no registry access on the paging path): every third IRP or partial MDL
- * allocation of NgPagingDevIo fails, so that the reserve IRP and MDL carry real paging I/O (the kernel
- * does the same for its own paging IRPs).
- */
-#define NG_PAGING_DEBUG_FAIL_ALLOC 0x80
-static ULONG NgPagingDebug;
-static LONG NgPagingAllocCalls;
-
-VOID NgPagingSetDebug(ULONG Value)
-{
-    NgPagingDebug = Value;
-    if (NgPagingDebug & NG_PAGING_DEBUG_FAIL_ALLOC)
-        DbgPrint("ntfsng: test: every third paging IRP/MDL allocation fails\n");
-}
-
-static BOOLEAN NgPagingInjectFailure(VOID)
-{
-    return (NgPagingDebug & NG_PAGING_DEBUG_FAIL_ALLOC) && ((InterlockedIncrement(&NgPagingAllocCalls) % 3) == 0);
-}
-
 /* IO_DISK_INCREMENT for the waiter, as for the core's transfers (NgReadCompletion). */
 static NTSTATUS NTAPI NgPagingCompletion(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
 {
@@ -49,11 +27,17 @@ static NTSTATUS NTAPI NgPagingCompletion(PDEVICE_OBJECT DeviceObject, PIRP Irp, 
 }
 
 /*
+ * Test (NitroPagerDebug 0x80): every third IRP or partial MDL allocation of NgPagingDevIo fails, so that the
+ * reserve IRP and MDL carry real paging I/O. The kernel decides (MmPagerInjectPagingAllocationFailure: the
+ * value, and on free builds the /NITROPAGERDEBUG boot option) and counts the injected failures; ntfsng reads
+ * no registry value for it.
+ */
+/*
  * One device transfer of a piece of Mm's MDL.  The pages are already locked and may be in the
  * middle of being paged out, so they are described by the caller's MDL (or a partial MDL of it)
  * and never probed and locked again.
  */
-static NTSTATUS NgPagingDevIo(PNG_VCB Vcb, UCHAR Major, ULONGLONG Dev, PMDL Mdl, ULONG MdlOffset, ULONG Length)
+static NTSTATUS NgPagingDevIo(PNG_VCB Vcb, PFILE_OBJECT PagingFile, UCHAR Major, ULONGLONG Dev, PMDL Mdl, ULONG MdlOffset, ULONG Length)
 {
     PDEVICE_OBJECT Target = Vcb->StorageDevice;
     PIO_STACK_LOCATION Next;
@@ -66,11 +50,11 @@ static NTSTATUS NgPagingDevIo(PNG_VCB Vcb, UCHAR Major, ULONGLONG Dev, PMDL Mdl,
     /* Paging I/O cannot wait for the core lock: a transfer issued before a verify completes still goes out. */
     if (Vcb->WrongMedia)
         return STATUS_FILE_INVALID;
-    Irp = NgPagingInjectFailure() ? NULL : IoAllocateIrp(Target->StackSize, FALSE);
+    Irp = MmPagerInjectPagingAllocationFailure(PagingFile) ? NULL : IoAllocateIrp(Target->StackSize, FALSE);
     if (Irp && (MdlOffset || Length != MmGetMdlByteCount(Mdl)))
     {
         PCHAR Va = (PCHAR)MmGetMdlVirtualAddress(Mdl) + MdlOffset;
-        Partial = NgPagingInjectFailure() ? NULL : IoAllocateMdl(Va, Length, FALSE, FALSE, NULL);
+        Partial = MmPagerInjectPagingAllocationFailure(PagingFile) ? NULL : IoAllocateMdl(Va, Length, FALSE, FALSE, NULL);
         if (!Partial)
         {
             IoFreeIrp(Irp);
@@ -282,7 +266,7 @@ NTSTATUS NgPagingFileIo(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, BOOLEAN Write, LONGL
             return STATUS_UNEXPECTED_IO_ERROR;
         }
         N = (ULONG)min((ULONGLONG)(Length - Done), Avail);
-        Status = NgPagingDevIo(Vcb, Write ? IRP_MJ_WRITE : IRP_MJ_READ, Dev, Irp->MdlAddress, Done, N);
+        Status = NgPagingDevIo(Vcb, IoGetCurrentIrpStackLocation(Irp)->FileObject, Write ? IRP_MJ_WRITE : IRP_MJ_READ, Dev, Irp->MdlAddress, Done, N);
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("ntfsng: paging file %s at %I64d failed 0x%lx\n", Write ? "write" : "read", Offset + Done, Status);

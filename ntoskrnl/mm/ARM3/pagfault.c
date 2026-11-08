@@ -746,8 +746,11 @@ MiCopyPfn(
 BOOLEAN
 MiUserFaultMustLeavePages(VOID)
 {
-    /* Without a paging file the pager frees nothing: the old test */
-    if ((MiNitroPagerMode == 0) || (MmNumberOfPagingFiles == 0))
+    /*
+     * Without a paging file the pager frees nothing: the old test. NitroPagerDebug 0x800 (A/B tests of the
+     * fault floor): the old test with the pager on as well
+     */
+    if ((MiNitroPagerMode == 0) || (MmNumberOfPagingFiles == 0) || (MiNitroPagerDebug & 0x800))
         return (MmAvailablePages < MI_DEMAND_ZERO_FAULT_RESERVE);
     C_ASSERT(MI_DEMAND_ZERO_FAULT_RESERVE + MI_PAGER_PAGING_RESERVE == MI_PAGER_WAITABLE_FLOOR);
     return (MiGetUsablePageCount() < MI_PAGER_WAITABLE_FLOOR);
