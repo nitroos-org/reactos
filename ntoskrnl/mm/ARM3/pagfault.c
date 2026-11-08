@@ -743,7 +743,6 @@ MiCopyPfn(
  */
 #define MI_PAGER_PAGING_RESERVE 128
 
-static
 BOOLEAN
 MiUserFaultMustLeavePages(VOID)
 {
@@ -753,7 +752,6 @@ MiUserFaultMustLeavePages(VOID)
     return (MiGetUsablePageCount() < MI_DEMAND_ZERO_FAULT_RESERVE + MI_PAGER_PAGING_RESERVE);
 }
 
-static
 BOOLEAN
 MiCanFaultWaitForPages(VOID)
 {
