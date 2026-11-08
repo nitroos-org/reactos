@@ -2,7 +2,8 @@
  * PROJECT:     NitroOS
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     MFTRegister / MFTEnumEx registration of an AAC decoder transform, and, when the optional
- *              "AAC audio decoder (AAC-LC)" feature is turned on, the behaviour of CLSID_CMSAACDecMFT
+ *              "AAC audio decoder" feature (aac-lc: LC only, or aac: LC + HE-AAC + HE-AAC v2) is turned on, the
+ *              behaviour of CLSID_CMSAACDecMFT
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * Part 1 always runs: it registers a throw-away transform the way the AAC feature registers its own (category
@@ -10,7 +11,9 @@
  * MFTEnumEx finds it for the AAC input type and not for others, and that MFTUnregister removes it.
  * Part 2 runs when MFTEnumEx lists CLSID_CMSAACDecMFT (the feature is on): the documented behaviour of the Windows AAC
  * decoder MFT for the attributes Firefox sets (MF_MT_AAC_PAYLOAD_TYPE, MF_MT_USER_DATA = HEAACWAVEINFO tail + ASC),
- * one silent AAC-LC frame, and that a HE-AAC (SBR) AudioSpecificConfig is refused.
+ * one silent AAC-LC frame, and that HE-AAC (SBR, audioObjectType 5) and HE-AAC v2 (PS, 29) AudioSpecificConfigs are
+ * refused by the aac-lc feature and accepted by the aac feature (told apart by the registered class name); AAC Main
+ * (1) is refused by both.
  * Not measured on Windows (the oracle was not used for this test): expectations come from the Microsoft documentation.
  */
 
@@ -117,12 +120,33 @@ static IMFMediaType *AacType(const BYTE *UserData, UINT32 UserDataLen, UINT32 Pa
     return Type;
 }
 
+/* TRUE when the registered decoder is the full-AAC one (class name "... (NitroOS AAC)", not "... (NitroOS AAC-LC)") */
+static BOOL IsFullAac(void)
+{
+    WCHAR Name[128];
+    DWORD Size = sizeof(Name) - sizeof(WCHAR), Type;
+    HKEY Key;
+    BOOL Full = FALSE;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\CLSID\\{32D186A7-218F-4C75-8876-DD77273A8999}", 0, KEY_READ, &Key) != ERROR_SUCCESS)
+        return FALSE;
+    ZeroMemory(Name, sizeof(Name));
+    if (RegQueryValueExW(Key, NULL, NULL, &Type, (LPBYTE)Name, &Size) == ERROR_SUCCESS && Type == REG_SZ)
+        Full = wcsstr(Name, L"(NitroOS AAC)") != NULL;
+    RegCloseKey(Key);
+    return Full;
+}
+
 static void TestDecoder(void)
 {
     /* HEAACWAVEINFO tail (payload 0, level 0x29, struct type 0, 0, 0) + AudioSpecificConfig: AAC-LC, 44100 Hz, mono */
     static const BYTE UserLc[] = { 0, 0, 0x29, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12, 0x08 };
-    /* the same with audioObjectType 5 (SBR): explicit HE-AAC signalling */
-    static const BYTE UserHe[] = { 0, 0, 0x29, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2a, 0x12, 0x08 };
+    /* explicit HE-AAC signalling: audioObjectType 5 (SBR), core 24000 Hz mono, extension 48000 Hz, then AAC-LC */
+    static const BYTE UserHe[] = { 0, 0, 0x29, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2b, 0x09, 0x88 };
+    /* the same as HE-AAC v2: audioObjectType 29 (PS) */
+    static const BYTE UserHe2[] = { 0, 0, 0x29, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xeb, 0x09, 0x88 };
+    /* AAC Main (audioObjectType 1), 44100 Hz mono */
+    static const BYTE UserMain[] = { 0, 0, 0x29, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0a, 0x08 };
     /* one raw_data_block: a mono SCE with max_sfb 0 = 1024 samples of silence */
     static const BYTE Silence[] = { 0x00, 0x00, 0x00, 0x07 };
     IMFTransform *Mft = NULL;
@@ -133,6 +157,7 @@ static void TestDecoder(void)
     GUID Sub;
     UINT32 Val;
     HRESULT hr;
+    BOOL Full;
     int i;
 
     hr = CoCreateInstance(&CLSID_AacDecoder, NULL, CLSCTX_INPROC_SERVER, &IID_IMFTransform, (void **)&Mft);
@@ -160,12 +185,38 @@ static void TestDecoder(void)
     hr = IMFTransform_GetInputCurrentType(Mft, 0, &Cur);
     ok(hr == MF_E_TRANSFORM_TYPE_NOT_SET, "GetInputCurrentType before SetInputType returned %08lx\n", hr);
 
-    /* HE-AAC (audioObjectType 5) and AAC Main (1), ADIF (payload 2) are refused, also as a test */
-    Type = AacType(UserHe, sizeof(UserHe), 0, 2, 44100);
+    /* HE-AAC (audioObjectType 5) and HE-AAC v2 (29): refused by the LC-only feature, accepted by the full one;
+     * AAC Main (1) and ADIF (payload 2) are refused by both, also as a test */
+    Full = IsFullAac();
+    trace("decoder under test: %s\n", Full ? "full AAC (LC, HE-AAC, HE-AAC v2)" : "AAC-LC only");
+    for (i = 0; i < 2; i++)
+    {
+        Type = AacType(i ? UserHe2 : UserHe, sizeof(UserHe), 0, 0, 0);
+        hr = IMFTransform_SetInputType(Mft, 0, Type, MFT_SET_TYPE_TEST_ONLY);
+        ok(hr == (Full ? S_OK : MF_E_INVALIDMEDIATYPE), "SetInputType(test, %s) returned %08lx\n", i ? "HE-AAC v2" : "HE-AAC", hr);
+        hr = IMFTransform_SetInputType(Mft, 0, Type, 0);
+        ok(hr == (Full ? S_OK : MF_E_INVALIDMEDIATYPE), "SetInputType(%s) returned %08lx\n", i ? "HE-AAC v2" : "HE-AAC", hr);
+        if (Full && hr == S_OK)
+        {
+            /* the output type of HE-AAC is at the SBR rate (48000 Hz); HE-AAC v2 is stereo */
+            IMFMediaType *Out0 = NULL;
+            hr = IMFTransform_GetOutputAvailableType(Mft, 0, 0, &Out0);
+            ok(hr == S_OK, "GetOutputAvailableType(%s) returned %08lx\n", i ? "HE-AAC v2" : "HE-AAC", hr);
+            if (Out0)
+            {
+                UINT32 V = 0;
+                hr = IMFMediaType_GetUINT32(Out0, &MF_MT_AUDIO_SAMPLES_PER_SECOND, &V);
+                ok(hr == S_OK && V == 48000, "%s output rate %u (%08lx), expected 48000\n", i ? "HE-AAC v2" : "HE-AAC", V, hr);
+                hr = IMFMediaType_GetUINT32(Out0, &MF_MT_AUDIO_NUM_CHANNELS, &V);
+                ok(hr == S_OK && V == (i ? 2u : 1u), "%s output channels %u (%08lx)\n", i ? "HE-AAC v2" : "HE-AAC", V, hr);
+                IMFMediaType_Release(Out0);
+            }
+        }
+        IMFMediaType_Release(Type);
+    }
+    Type = AacType(UserMain, sizeof(UserMain), 0, 0, 0);
     hr = IMFTransform_SetInputType(Mft, 0, Type, MFT_SET_TYPE_TEST_ONLY);
-    ok(hr == MF_E_INVALIDMEDIATYPE, "SetInputType(test, HE-AAC) returned %08lx\n", hr);
-    hr = IMFTransform_SetInputType(Mft, 0, Type, 0);
-    ok(hr == MF_E_INVALIDMEDIATYPE, "SetInputType(HE-AAC) returned %08lx\n", hr);
+    ok(hr == MF_E_INVALIDMEDIATYPE, "SetInputType(test, AAC Main) returned %08lx\n", hr);
     IMFMediaType_Release(Type);
     Type = AacType(UserLc, sizeof(UserLc), 2, 1, 44100);
     hr = IMFTransform_SetInputType(Mft, 0, Type, 0);

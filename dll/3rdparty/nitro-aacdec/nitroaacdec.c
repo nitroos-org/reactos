@@ -1,7 +1,9 @@
 /*
  * PROJECT:     NitroOS
- * LICENSE:     LGPL-2.1-or-later (links FFmpeg's libavcodec "aac" decoder, LGPL-2.1-or-later, AAC-LC only build)
- * PURPOSE:     AAC decoder Media Foundation transform (CLSID_CMSAACDecMFT): AAC-LC only
+ * LICENSE:     LGPL-2.1-or-later (links FFmpeg's libavcodec "aac" decoder, LGPL-2.1-or-later)
+ * PURPOSE:     AAC decoder Media Foundation transform (CLSID_CMSAACDecMFT): AAC-LC (feature aac-lc, built with
+ *              -DNITRO_AAC_LC_ONLY against the SBR/PS-free FFmpeg) or full AAC: LC + HE-AAC (SBR) + HE-AAC v2 (PS)
+ *              (feature aac, unpatched FFmpeg)
  *
  * A synchronous IMFTransform that decodes raw (payload type 0) or ADTS (payload type 1) AAC-LC to 16-bit PCM or
  * 32-bit float. Behaviour follows the public documentation of the Windows AAC decoder MFT
@@ -10,8 +12,11 @@
  *           MF_MT_USER_DATA = the tail of HEAACWAVEINFO (12 bytes) followed by the AudioSpecificConfig,
  *           MF_MT_AUDIO_NUM_CHANNELS / SAMPLES_PER_SECOND / MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION (optional)
  *   output  MFAudioFormat_PCM (16 bit) or MFAudioFormat_Float (32 bit), interleaved, one 1024-frame sample per AAC frame
- * HE-AAC (SBR) and HE-AAC v2 (PS) are not supported: the decoder is built without them (see README.md) and the
- * input type is refused (MF_E_INVALIDMEDIATYPE) when the AudioSpecificConfig signals them.
+ * LC-only build: HE-AAC (SBR) and HE-AAC v2 (PS) are not supported: the decoder is built without them (see README.md)
+ * and the input type is refused (MF_E_INVALIDMEDIATYPE) when the AudioSpecificConfig signals them.
+ * Full build: audioObjectType 2 (LC), 5 (SBR, HE-AAC) and 29 (PS, HE-AAC v2) are accepted, as the Windows decoder does;
+ * HE-AAC output has 2048 frames per input frame and twice the core sample rate (implicit signalling: the format change
+ * is reported at the first frame, MF_E_TRANSFORM_STREAM_CHANGE).
  */
 #define COBJMACROS
 #define WIN32_LEAN_AND_MEAN
@@ -33,9 +38,22 @@
 #include <libavutil/error.h>
 #include <libavutil/log.h>
 
+#ifdef NITRO_AAC_LC_ONLY
 #define NITRO_MFT_NAME L"AAC Decoder MFT (NitroOS AAC-LC)"
+#else
+#define NITRO_MFT_NAME L"AAC Decoder MFT (NitroOS AAC)"
+#endif
 #define MAX_CH 8
+#ifdef NITRO_AAC_LC_ONLY
+#define AOT_SUPPORTED "only 2 = AAC-LC is supported"
+#else
+#define AOT_SUPPORTED "only 2 = AAC-LC, 5 = SBR and 29 = PS are supported"
+#endif
+#ifdef NITRO_AAC_LC_ONLY
 #define FRAME_LEN 1024
+#else
+#define FRAME_LEN 2048                  /* HE-AAC: SBR doubles the 1024-sample core frame */
+#endif
 
 static HINSTANCE g_inst;
 static LONG g_objects, g_locks;
@@ -172,9 +190,13 @@ static HRESULT parse_input_type(IMFMediaType *type, struct aac_config *cfg)
     {
         /* audioObjectType (5 bits; 31 = escape) must be 2 (AAC-LC); 5 (SBR), 29 (PS) and the rest are not supported */
         int aot = cfg->asc[0] >> 3;
+#ifdef NITRO_AAC_LC_ONLY
         if (aot != 2 || cfg->asc_len < 2)
+#else
+        if ((aot != 2 && aot != 5 && aot != 29) || cfg->asc_len < 2)
+#endif
         {
-            dbg("input type refused: audioObjectType %d (only 2 = AAC-LC is supported), %u bytes of config", aot, cfg->asc_len);
+            dbg("input type refused: audioObjectType %d (" AOT_SUPPORTED "), %u bytes of config", aot, cfg->asc_len);
             return MF_E_INVALIDMEDIATYPE;
         }
         {   /* samplingFrequencyIndex (4 bits) and channelConfiguration (4 bits) are authoritative */
