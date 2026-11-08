@@ -275,7 +275,8 @@ InstallDriverProc(
     BOOL res;
 
     DevInstData = (PDEVINSTDATA)lpParam;
-    res = InstallCurrentDriver(DevInstData);
+    /* The wizard picked the driver; the Plug and Play service installs it (as SYSTEM) */
+    res = InstallSelectedDriver(DevInstData, PNP_INSTALL_ORIGIN_WIZARD);
     PostMessage(DevInstData->hDialog, WM_INSTALL_FINISHED, res ? 0 : 1, 0);
     return 0;
 }

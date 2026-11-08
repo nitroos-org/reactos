@@ -272,6 +272,16 @@ ServiceMain(DWORD argc, LPTSTR *argv)
 
     UpdateServiceStatus(SERVICE_START_PENDING, 3);
 
+    /* Installs of a driver a user picked (wizard, Update Driver), run service-side */
+    hThread = CreateThread(NULL,
+                           0,
+                           InstallRequestThread,
+                           NULL,
+                           0,
+                           &dwThreadId);
+    if (hThread != NULL)
+        CloseHandle(hThread);
+
     hThread = CreateThread(NULL,
                            0,
                            DeviceInstallThread,
@@ -347,6 +357,7 @@ InitializePnPManager(VOID)
 
     /* Before the RPC server and the install thread start: both use it */
     InitializeCriticalSection(&UserTokenLock);
+    InitializeCriticalSection(&DrvInstLock);
 
     /* Query the SuppressUI registry value and cache it for our whole lifetime */
     GetBooleanRegValue(HKEY_LOCAL_MACHINE,
