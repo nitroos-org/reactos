@@ -48,6 +48,7 @@ six locales and the Welsh ANSI code page are corrected from public facts (ITU-T 
 | `LOCALE_SSCRIPTS` | the likely script; the composite codes (Jpan, Hans, Hant, Kore) are listed with the scripts they combine (ISO 15924) |
 | `LOCALE_IDIGITSUBSTITUTION` | 1 (none) for Latin digits, 2 (national) when CLDR's default numbering system is not Latin |
 | `LOCALE_SSHORTESTDAYNAME1-7` | the CLDR stand-alone `short` day names, without a trailing abbreviation period; the `narrow` ones where `short` is longer than 3 characters |
+| `LOCALE_S1159`, `LOCALE_S2359` | empty when neither `LOCALE_STIMEFORMAT` nor `LOCALE_SSHORTTIME` has a day-period field (`tt`) |
 | `LOCALE_SRELATIVELONGDATE` | CLDR `MMMMEd` with the long weekday |
 | `LOCALE_SSHORTDATE` | the CLDR short date with a four-digit year (CLDR's two-digit year is ambiguous) |
 | patterns, names | a narrow no-break space (U+202F) in a CLDR date or time pattern becomes a space, in any other value a no-break space (U+00A0); the `-alt-ascii` CLDR time formats are not used (in en-GB that variant is a 12-hour format) |
@@ -62,3 +63,15 @@ six locales and the Welsh ANSI code page are corrected from public facts (ITU-T 
 filtered by `dll/3rdparty/icu/data/build-filtered-data.sh` from the upstream ICU 64.2 source and data zip (sha256 of the
 tarball in the script) for the locale names in `nls-locales.txt`. That list is the set of locales kernel32's tables know, so it
 does not change with the CLDR regeneration. See `dll/3rdparty/icu/README.ReactOS`, "Data file".
+
+## Mapping rules tried and rejected (round 2, measured against the Windows 10 dump of 10 locales)
+Each alternative was scored by the number of LCTYPE values (of 10 locales) that differ from Windows; no value is copied.
+| Rule tried | Differences, current -> alternative | Result |
+|---|---|---|
+| `INEGCURR` from the CLDR `accounting` pattern when `standard` has no negative part | 2 -> 4 (fixes en-US; breaks en-GB, fr-FR, ja-JP, zh-CN, whose accounting pattern has parentheses) | not consistent, not used |
+| `SLONGDATE` from CLDR `long` instead of `full` | 6 -> 8 (breaks en-US, cs-CZ, de-DE, fr-FR, es-ES, fixes ja, zh; en-US would lose the weekday that the CalendarInfo apitest and Get-Date -DisplayHint Date expect) | not used |
+| abbreviated month names: format instead of stand-alone form | 37 -> 48 | not used |
+| abbreviated day names: format instead of stand-alone form | 15 -> 22 | not used |
+| CLDR `contextTransforms` (titlecase-firstword of stand-alone names; ru and es both ask for it) | 178 -> 190..224 total | not used |
+| shortest day names: `narrow`, or `short` unchanged | 23 -> 42, 35 | not used |
+Not changed, documented: ar-SA default calendar (CLDR calendarPreferenceData for SA lists gregorian first) and the full-width yen of ja-JP (CLDR `ja` currency symbol for JPY).

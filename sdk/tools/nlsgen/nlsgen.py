@@ -639,6 +639,9 @@ def build_locale(cldr, name, sk):
     pm = gdf("dayPeriods", "format", "abbreviated", "pm") or "PM"
     v["LOCALE_S1159"] = am
     v["LOCALE_S2359"] = pm
+    # LOCALE_S1159/S2359 are the markers of the time pattern: a locale whose time patterns have no day-period field has none
+    if "tt" not in v["LOCALE_STIMEFORMAT"] + v["LOCALE_SSHORTTIME"]:
+        v["LOCALE_S1159"] = v["LOCALE_S2359"] = ""
     v["LOCALE_SSHORTESTAM"] = gdf("dayPeriods", "format", "narrow", "am") or am[:1]
     v["LOCALE_SSHORTESTPM"] = gdf("dayPeriods", "format", "narrow", "pm") or pm[:1]
     # duration
