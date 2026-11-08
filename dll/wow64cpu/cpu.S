@@ -61,7 +61,9 @@ PUBLIC Wow64CpuDispatch
      * a context switch reloads FS, the kernel's entries restore DS and ES). SS is not: the
      * kernel's SYSRET leaves a stack segment whose hidden attributes the processor does not
      * accept for 32-bit code (without this load a thread returning here fails at random),
-     * so it is loaded again. Interrupts are held off for the instruction after it. */
+     * so it is loaded again. Interrupts are held off for the instruction after it.
+     * Seen on an AMD EPYC 9254 under KVM; not yet checked on an Intel processor (the load is
+     * harmless there). */
     cmp byte ptr [r11 + 57], 0
     jne .Lfullfp
     movups xmm0, [r11 + 224]
