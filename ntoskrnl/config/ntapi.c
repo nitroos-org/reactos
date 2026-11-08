@@ -1950,8 +1950,71 @@ NtSetInformationKey(IN HANDLE KeyHandle,
                     IN PVOID KeyInformation,
                     IN ULONG KeyInformationLength)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    KPROCESSOR_MODE PreviousMode;
+    PCM_KEY_BODY KeyObject;
+    ULONG ExpectedLength;
+    union
+    {
+        LARGE_INTEGER WriteTime;
+        ULONG Flags;
+    } Captured;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    PreviousMode = ExGetPreviousMode();
+
+    /* The class and the length decide what is read from the buffer */
+    switch ((ULONG)KeyInformationClass)
+    {
+        case KeyWriteTimeInformation:
+            ExpectedLength = sizeof(KEY_WRITE_TIME_INFORMATION);
+            break;
+        case KeyWow64FlagsInformation:
+        case KeyControlFlagsInformation:
+        case KeySetVirtualizationInformation:
+        case KeySetDebugInformation:
+        case KeySetHandleTagsInformation:
+            ExpectedLength = sizeof(ULONG);
+            break;
+        default:
+            return STATUS_INVALID_INFO_CLASS;
+    }
+    if (KeyInformationLength != ExpectedLength)
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    /* Verify that the handle is valid and is a registry key. The handle tags
+     * belong to the handle: Windows takes them on a handle with no write
+     * access (measured); every other class needs KEY_SET_VALUE (measured) */
+    Status = ObReferenceObjectByHandle(KeyHandle,
+                                       (KeyInformationClass == KeySetHandleTagsInformation) ?
+                                           0 : KEY_SET_VALUE,
+                                       CmpKeyObjectType,
+                                       PreviousMode,
+                                       (PVOID*)&KeyObject,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* Capture the buffer: it is the caller's memory. Windows takes a
+     * misaligned buffer (measured), so the probe has no alignment */
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode)
+            ProbeForRead(KeyInformation, ExpectedLength, 1);
+        RtlCopyMemory(&Captured, KeyInformation, ExpectedLength);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    if (NT_SUCCESS(Status))
+        Status = CmSetKeyInformation(KeyObject, KeyInformationClass, &Captured);
+
+    ObDereferenceObject(KeyObject);
+    return Status;
 }
 
 NTSTATUS
