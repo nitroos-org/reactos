@@ -187,6 +187,14 @@ FindMsgMemory(UINT Msg)
     return NULL;
 }
 
+/* TRUE when lParam of the message is a pointer to a buffer of the sender (kernel or user memory that dies with
+   the sender): such a message must not be queued on for a receiver after its sender is gone */
+BOOL FASTCALL
+IntMsgLParamIsBufferPointer(UINT Msg)
+{
+    return FindMsgMemory(Msg) != NULL;
+}
+
 static UINT FASTCALL
 MsgMemorySize(PMSGMEMORY MsgMemoryEntry, WPARAM wParam, LPARAM lParam)
 {

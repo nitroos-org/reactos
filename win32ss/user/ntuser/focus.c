@@ -1004,6 +1004,11 @@ co_IntSetForegroundAndFocusWindow(
 
    TRACE("SetForegroundAndFocusWindow(%x, %s)\n", hWnd, (MouseActivate ? "TRUE" : "FALSE"));
 
+   /* A destroyed window (the top-level window above a child of another process that outlived it)
+      is not activated: its thread is gone */
+   if (Wnd && (Wnd->state & WNDS_DESTROYED))
+      return FALSE;
+
    PrevForegroundQueue = IntGetFocusMessageQueue(); // Use this active desktop.
    pti = PsGetCurrentThreadWin32Thread();
 
@@ -1417,6 +1422,15 @@ co_UserSetFocus(PWND Window)
          if (pwndTop->spwndParent == NULL) break;
       }
       ////
+      /* A window below a destroyed parent of another thread (process) takes no focus, and its
+         destroyed top-level window cannot be activated (Windows: user32 winetest win.c
+         test_thread_exit_destroy, the focus stays where it was) */
+      if (!pwndTop || (pwndTop->state & WNDS_DESTROYED) || IntIsWindowOrphaned(Window))
+      {
+         ERR("SetFocus: %p is below a destroyed window\n", UserHMGetHandle(Window));
+         EngSetLastError(ERROR_INVALID_PARAMETER); /* Windows 10 22H2, oracle 2026-11-04 */
+         return 0;
+      }
       if (co_HOOK_CallHooks( WH_CBT, HCBT_SETFOCUS, (WPARAM)UserHMGetHandle(Window), (LPARAM)hWndPrev))
       {
          ERR("SetFocus 1 WH_CBT Call Hook return!\n");

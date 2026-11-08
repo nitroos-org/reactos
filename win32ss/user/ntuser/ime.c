@@ -518,8 +518,13 @@ IntGetTopLevelWindow(_In_ PWND pwnd)
     if (!pwnd)
         return NULL;
 
-    while (pwnd->style & WS_CHILD)
+    while (pwnd && (pwnd->style & WS_CHILD))
         pwnd = pwnd->spwndParent;
+
+    /* NULL, or a destroyed window: the chain of a child of another process stops at a parent that its
+       own thread destroyed (no parent, no class any more) */
+    if (pwnd && (pwnd->state & WNDS_DESTROYED))
+        return NULL;
 
     return pwnd;
 }
@@ -1483,6 +1488,12 @@ NtUserSetImeOwnerWindow(
 
         for (pwndNode = pwndTopLevel; pwndNode; pwndNode = pwndNode->spwndOwner)
         {
+            /* a destroyed owner (a child window of another thread can be an owner) has no class */
+            if (pwndNode->state & WNDS_DESTROYED)
+            {
+                pwndTopLevel = NULL;
+                break;
+            }
             if (pwndNode->pcls->atomClassName == gpsi->atomSysClass[ICLS_IME])
             {
                 pwndTopLevel = NULL;
@@ -2170,6 +2181,10 @@ IntImeCanDestroyDefIMEforChild(
     for (pwndNode = pwndTarget; pwndNode; pwndNode = pwndNode->spwndParent)
     {
         if (pwndNode == pwndNode->head.rpdesk->pDeskInfo->spwnd)
+            break;
+
+        /* the chain of a child of another process can end at a parent destroyed by its own thread */
+        if (!pwndNode->spwndParent)
             break;
 
         if (IntFindNonImeRelatedWndOfSameThread(pwndNode->spwndParent, pwndTarget))
