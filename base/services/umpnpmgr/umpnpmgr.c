@@ -357,7 +357,13 @@ InitializePnPManager(VOID)
 
     /* Before the RPC server and the install thread start: both use it */
     InitializeCriticalSection(&UserTokenLock);
-    InitializeCriticalSection(&DrvInstLock);
+    hDrvInstLock = CreateMutexW(NULL, FALSE, NULL);
+    if (hDrvInstLock == NULL)
+    {
+        dwError = GetLastError();
+        DPRINT1("Could not create the install lock! (Error %lu)\n", dwError);
+        return dwError;
+    }
 
     /* Query the SuppressUI registry value and cache it for our whole lifetime */
     GetBooleanRegValue(HKEY_LOCAL_MACHINE,
