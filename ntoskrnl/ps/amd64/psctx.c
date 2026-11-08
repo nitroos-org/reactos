@@ -207,6 +207,15 @@ PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
             {
                 ProbeForRead(Cpu, sizeof(*Cpu), 16);
                 Wow64CpuToContext(&Request->Context, Cpu);
+                /* A plain service keeps the guest's x87/SSE registers where they are: the thread's
+                 * current state, captured above, is the guest's */
+                if (!Cpu->FpSaved)
+                {
+                    /* (XMM0-XMM5 the service entry saved: the native code may have used them since) */
+                    RtlCopyMemory(Request->Context.ExtendedRegisters, &Native->FltSave, 512);
+                    RtlCopyMemory(Request->Context.ExtendedRegisters + 160, Cpu->ExtendedRegisters + 160, 6 * 16);
+                    Wow64FloatToLegacy(&Request->Context);
+                }
                 Request->Context.Dr0 = Native->Dr0; Request->Context.Dr1 = Native->Dr1;
                 Request->Context.Dr2 = Native->Dr2; Request->Context.Dr3 = Native->Dr3;
                 Request->Context.Dr6 = Native->Dr6; Request->Context.Dr7 = Native->Dr7;

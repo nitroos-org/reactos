@@ -67,7 +67,14 @@ typedef struct DECLSPEC_ALIGN(16) _WOW64_CPU_STATE
      * set throughout return, guest execution and the next gate entry. */
     volatile LONG InTransition;
     BOOLEAN ContextEaxChanged;
-    UCHAR Reserved[7];
+    /* Set while ExtendedRegisters hold the guest's x87/SSE state and the return restores them: a
+     * service that can change the registers saves them at entry (fastsvc.c), a context change
+     * names them. Clear while the registers still hold the guest's own state (the plain services
+     * change only XMM0-XMM5, which the entry saves in ExtendedRegisters and the return loads): a
+     * reader then takes the thread's current state instead, with those six from the area. */
+    BOOLEAN FpSaved;
+    /* The far pointer of the return to the guest: Eip, then the code selector (cpu.S) */
+    UCHAR GuestReturn[6];
     UCHAR ExtendedRegisters[512];
     ULONG Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;
     PVOID ApcFrame;
@@ -88,6 +95,8 @@ C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Ebp) == 36);
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Ecx) == 44);
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, Edx) == 48);
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, InTransition) == 52);
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, FpSaved) == 57);
+C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, GuestReturn) == 58);
 C_ASSERT(FIELD_OFFSET(WOW64_CPU_STATE, ExtendedRegisters) == 64);
 
 typedef NTSTATUS (NTAPI *WOW64_SERVICE)(ULONG Number, ULONG *Arguments);
