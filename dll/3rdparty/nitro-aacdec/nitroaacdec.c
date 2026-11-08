@@ -132,9 +132,68 @@ static int rate_index(UINT32 rate)
     return -1;
 }
 
+#ifndef NITRO_AAC_LC_ONLY
+/* Output rate / PS of an explicitly signalled HE-AAC AudioSpecificConfig (the FFmpeg decoder only knows the doubled rate
+ * after its first frame): audioObjectType 5 or 29 (extension sampling frequency right after the channel configuration), or
+ * AAC-LC with the backward-compatible SBR (sync 0x2b7) / PS (sync 0x548) extension after the GASpecificConfig. Anything
+ * not understood leaves *ext_rate 0 (the format change at the first frame then publishes the real format). */
+struct bitrd { const BYTE *p; UINT32 nbits, pos; };
+
+static UINT32 getbits(struct bitrd *b, UINT32 n)
+{
+    UINT32 v = 0;
+    while (n--)
+    {
+        v <<= 1;
+        if (b->pos < b->nbits) v |= (b->p[b->pos >> 3] >> (7 - (b->pos & 7))) & 1;
+        b->pos++;
+    }
+    return v;
+}
+
+static UINT32 freq_field(struct bitrd *b)
+{
+    UINT32 i = getbits(b, 4);
+    if (i == 15) return getbits(b, 24);
+    return i < 13 ? (UINT32)rate_table[i] : 0;
+}
+
+static void asc_extension(const BYTE *asc, UINT32 len, UINT32 *ext_rate, int *ps)
+{
+    struct bitrd b = { asc, len * 8, 0 };
+    UINT32 aot = getbits(&b, 5), cc, depends;
+
+    *ext_rate = 0;
+    *ps = 0;
+    if (aot == 31) aot = 32 + getbits(&b, 6);
+    freq_field(&b);
+    cc = getbits(&b, 4);
+    if (aot == 5 || aot == 29)
+    {
+        *ext_rate = freq_field(&b);
+        *ps = (aot == 29);
+        return;
+    }
+    if (aot != 2 || !cc) return;
+    getbits(&b, 1);                         /* frameLengthFlag */
+    depends = getbits(&b, 1);               /* dependsOnCoreCoder */
+    if (depends) getbits(&b, 14);
+    getbits(&b, 1);                         /* extensionFlag */
+    if (b.nbits - b.pos >= 16 && getbits(&b, 11) == 0x2b7)
+    {
+        if (getbits(&b, 5) == 5 && getbits(&b, 1)) *ext_rate = freq_field(&b);
+        if (b.nbits - b.pos >= 12 && getbits(&b, 11) == 0x548) *ps = (int)getbits(&b, 1);
+    }
+}
+#endif
+
 struct aac_config
 {
     UINT32 payload_type, channels, rate;
+#ifndef NITRO_AAC_LC_ONLY
+    UINT32 ext_rate;                /* output rate of an explicit HE-AAC config, 0 = unknown */
+    int ps;
+#endif
     BYTE asc[64];
     UINT32 asc_len;
 };
@@ -206,6 +265,9 @@ static HRESULT parse_input_type(IMFMediaType *type, struct aac_config *cfg)
             if (cc >= 1 && cc <= 6) cfg->channels = cc;
             else if (cc == 7) cfg->channels = 8;
         }
+#ifndef NITRO_AAC_LC_ONLY
+        asc_extension(cfg->asc, cfg->asc_len, &cfg->ext_rate, &cfg->ps);
+#endif
     }
     return S_OK;
 }
@@ -444,6 +506,15 @@ static HRESULT WINAPI dec_SetInputType(IMFTransform *iface, DWORD id, IMFMediaTy
     d->rate = d->avctx->sample_rate;
     if (!d->channels && cfg.channels) d->channels = cfg.channels;
     if (!d->rate && cfg.rate) d->rate = cfg.rate;
+#ifndef NITRO_AAC_LC_ONLY
+    if (cfg.ext_rate && cfg.channels)
+    {   /* explicit HE-AAC: the output is at the SBR rate, stereo with PS (FFmpeg only learns that at the first frame) */
+        d->rate = cfg.ext_rate;
+        d->channels = cfg.ps ? 2 : cfg.channels;
+    }
+    else if (!d->channels && cfg.payload_type == 1 && cfg.rate)
+        d->channels = 2;            /* ADTS with the channel configuration in a PCE: the first frame says */
+#endif
     if (d->channels > MAX_CH || !d->channels || !d->rate)
     {
         dbg("input type refused: %u channels, %u Hz", d->channels, d->rate);
@@ -453,6 +524,9 @@ static HRESULT WINAPI dec_SetInputType(IMFTransform *iface, DWORD id, IMFMediaTy
     }
     d->channel_mask = (d->avctx->ch_layout.order == AV_CHANNEL_ORDER_NATIVE) ? (DWORD)d->avctx->ch_layout.u.mask : default_mask(d->channels);
     if (!d->channel_mask) d->channel_mask = default_mask(d->channels);
+#ifndef NITRO_AAC_LC_ONLY
+    if (cfg.ext_rate && cfg.channels) d->channel_mask = default_mask(d->channels);
+#endif
     if (d->input_type) IMFMediaType_Release(d->input_type);
     d->input_type = type;
     IMFMediaType_AddRef(type);
