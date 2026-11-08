@@ -920,7 +920,8 @@ IntDefWindowProc(
       case WM_HELP:
       {
          PWND Parent = IntGetParent(Wnd);
-         co_IntSendMessage(UserHMGetHandle(Parent), Msg, wParam, lParam);
+         if (Parent && !(Parent->state & WNDS_DESTROYED))
+            co_IntSendMessage(UserHMGetHandle(Parent), Msg, wParam, lParam);
          break;
       }
 
