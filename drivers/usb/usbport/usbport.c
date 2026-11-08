@@ -2539,8 +2539,15 @@ USBPORT_FlushMapTransfers(IN PDEVICE_OBJECT FdoDevice)
     {
         MapTransferList = &FdoExtension->MapTransferList;
 
-        if (IsListEmpty(&FdoExtension->MapTransferList))
+        /* MapTransferList is filled under MapTransferSpinLock (USBPORT_QueueActiveUrbToEndpoint).
+           Take the same lock to look at and pop the head: two CPUs flushing at once (one per endpoint)
+           would otherwise pop the same transfer, map it twice and insert it twice into the endpoint's
+           TransferList, which leaves its TransferLink pointing at itself and spins the walkers forever. */
+        KeAcquireSpinLockAtDpcLevel(&FdoExtension->MapTransferSpinLock);
+
+        if (IsListEmpty(MapTransferList))
         {
+            KeReleaseSpinLockFromDpcLevel(&FdoExtension->MapTransferSpinLock);
             KeLowerIrql(OldIrql);
             return;
         }
@@ -2550,6 +2557,8 @@ USBPORT_FlushMapTransfers(IN PDEVICE_OBJECT FdoDevice)
                                      TransferLink);
 
         RemoveHeadList(MapTransferList);
+
+        KeReleaseSpinLockFromDpcLevel(&FdoExtension->MapTransferSpinLock);
 
         Mdl = Transfer->Urb->UrbControlTransfer.TransferBufferMDL;
         TransferBufferLength = Transfer->TransferParameters.TransferBufferLength;
