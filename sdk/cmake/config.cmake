@@ -129,3 +129,5 @@ endif()
 cmake_dependent_option(SYSWOW64 "Whether to build the i386 user-mode files into SysWOW64 (nested i386 build)." ${_syswow64_default}
                        "ARCH STREQUAL amd64" OFF)
 unset(_syswow64_default)
+cmake_dependent_option(SYSWOW64_BOOTCD_LOOSE "Also put the SysWOW64 files, loose, on the BootCD (they are in its cab anyway): about 180 MB more, only needed to run 32-bit programs in the BootCD's live environment." OFF
+                       "SYSWOW64" OFF)
