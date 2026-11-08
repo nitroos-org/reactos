@@ -14,10 +14,13 @@
  *    STATUS_INVALID_CID.
  *  - A user APC queued to a thread that waits is not delivered by the wait (it is not alertable) and does not end it;
  *    the APC runs at the next alertable wait. A pending APC does not end a poll either.
- * Not measured (the probe could not read the answer): the alert of a thread of another process.
+ *  - A thread of ANOTHER process is STATUS_ACCESS_DENIED: a suspended and a running child of the same user (same
+ *    token, High integrity), and the first thread of services.exe, lsass.exe, wininit.exe and winlogon.exe (SYSTEM).
+ *    A thread id that does not exist stays STATUS_INVALID_CID.
  */
 
 #include "precomp.h"
+#include <tlhelp32.h>
 
 typedef NTSTATUS (NTAPI *PFN_ALERT)(HANDLE);
 typedef NTSTATUS (NTAPI *PFN_WAIT)(PVOID, PLARGE_INTEGER);
@@ -121,6 +124,80 @@ static void Test_InvalidIds(void)
     ok_hex(Status, STATUS_TIMEOUT);
 }
 
+static void Test_OtherProcess(void)
+{
+    WCHAR Cmd[MAX_PATH + 32];
+    STARTUPINFOW Si;
+    PROCESS_INFORMATION Pi;
+    HANDLE Snap;
+    PROCESSENTRY32W Pe;
+    THREADENTRY32 Te;
+    DWORD ServicesPid = 0;
+    LARGE_INTEGER Zero;
+    NTSTATUS Status;
+
+    Zero.QuadPart = 0;
+
+    /* a child of the same user, first suspended, then running */
+    GetSystemDirectoryW(Cmd, MAX_PATH);
+    StringCchCatW(Cmd, _countof(Cmd), L"\\cmd.exe /c pause");
+    ZeroMemory(&Si, sizeof(Si));
+    Si.cb = sizeof(Si);
+    if (CreateProcessW(NULL, Cmd, NULL, NULL, FALSE, CREATE_SUSPENDED | CREATE_NO_WINDOW, NULL, NULL, &Si, &Pi))
+    {
+        Status = pAlert((HANDLE)(ULONG_PTR)Pi.dwThreadId);
+        ok_hex(Status, STATUS_ACCESS_DENIED);
+        ResumeThread(Pi.hThread);
+        Sleep(300);
+        Status = pAlert((HANDLE)(ULONG_PTR)Pi.dwThreadId);
+        ok_hex(Status, STATUS_ACCESS_DENIED);
+        TerminateProcess(Pi.hProcess, 0);
+        WaitForSingleObject(Pi.hProcess, 10000);
+        CloseHandle(Pi.hThread);
+        CloseHandle(Pi.hProcess);
+    }
+    else
+    {
+        skip("CreateProcess failed: %lu\n", GetLastError());
+    }
+
+    /* the first thread of services.exe */
+    Snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS | TH32CS_SNAPTHREAD, 0);
+    if (Snap != INVALID_HANDLE_VALUE)
+    {
+        Pe.dwSize = sizeof(Pe);
+        if (Process32FirstW(Snap, &Pe))
+        {
+            do
+            {
+                if (!_wcsicmp(Pe.szExeFile, L"services.exe")) { ServicesPid = Pe.th32ProcessID; break; }
+            } while (Process32NextW(Snap, &Pe));
+        }
+        Te.dwSize = sizeof(Te);
+        if (ServicesPid && Thread32First(Snap, &Te))
+        {
+            do
+            {
+                if (Te.th32OwnerProcessID == ServicesPid)
+                {
+                    Status = pAlert((HANDLE)(ULONG_PTR)Te.th32ThreadID);
+                    ok_hex(Status, STATUS_ACCESS_DENIED);
+                    break;
+                }
+            } while (Thread32Next(Snap, &Te));
+        }
+        else
+        {
+            skip("services.exe not found\n");
+        }
+        CloseHandle(Snap);
+    }
+
+    /* the refused alerts did not set the flag of this thread */
+    Status = pWait(NULL, &Zero);
+    ok_hex(Status, STATUS_TIMEOUT);
+}
+
 static void Test_Waiter(void)
 {
     HANDLE Thread;
@@ -197,6 +274,7 @@ START_TEST(NtAlertThreadByThreadId)
     Test_Flag();
     Test_Timeout();
     Test_InvalidIds();
+    Test_OtherProcess();
     Test_Waiter();
     Test_PendingApc();
 }

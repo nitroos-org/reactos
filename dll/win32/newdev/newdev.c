@@ -24,6 +24,7 @@
 
 #include <stdio.h>
 #include <winnls.h>
+#include <cfgmgr32.h>
 
 /* Global variables */
 HINSTANCE hDllInstance;
@@ -33,6 +34,234 @@ SearchDriver(
     IN PDEVINSTDATA DevInstData,
     IN LPCWSTR Directory OPTIONAL,
     IN LPCWSTR InfFile OPTIONAL);
+
+/* Does this thread act as SYSTEM? Then an install writes as SYSTEM anyway, and runs here */
+static BOOL
+IsSystemContext(VOID)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    BYTE Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    PSID SystemSid;
+    HANDLE hToken;
+    DWORD Size;
+    BOOL Result = FALSE;
+
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &hToken) &&
+        !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
+    {
+        return FALSE;
+    }
+
+    if (GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &Size) &&
+        AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &SystemSid))
+    {
+        Result = EqualSid(((PTOKEN_USER)Buffer)->User.Sid, SystemSid);
+        FreeSid(SystemSid);
+    }
+
+    CloseHandle(hToken);
+    return Result;
+}
+
+/*
+ * Sends one install to the Plug and Play service (see PNP_INSTALL_REQUEST_PIPE) and waits
+ * for its result. Returns a Win32 error code.
+ */
+static DWORD
+SendInstallRequest(
+    IN LPCWSTR DeviceId,
+    IN LPCWSTR InfPath,
+    IN DWORD Origin,
+    OUT PBOOL NeedRestart)
+{
+    PNP_INSTALL_REQUEST Request;
+    PNP_INSTALL_REPLY Reply;
+    HANDLE hPipe;
+    PBYTE Message;
+    DWORD MessageSize, Done, Total, Error;
+    ULONG Tries;
+
+    *NeedRestart = FALSE;
+
+    Request.Magic = PNP_INSTALL_REQUEST_MAGIC;
+    Request.Version = PNP_INSTALL_REQUEST_VERSION;
+    Request.Origin = Origin;
+    Request.Flags = 0;
+    Request.DeviceIdBytes = (wcslen(DeviceId) + 1) * sizeof(WCHAR);
+    Request.InfPathBytes = (wcslen(InfPath) + 1) * sizeof(WCHAR);
+    if (Request.DeviceIdBytes > PNP_INSTALL_MAX_DEVICE_ID_BYTES ||
+        Request.InfPathBytes > MAX_PATH * sizeof(WCHAR))
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    /* Identification only: whoever serves this pipe can see who we are, never act as us */
+    for (Tries = 0; ; Tries++)
+    {
+        hPipe = CreateFileW(PNP_INSTALL_REQUEST_PIPE,
+                            GENERIC_READ | GENERIC_WRITE,
+                            0,
+                            NULL,
+                            OPEN_EXISTING,
+                            SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                            NULL);
+        if (hPipe != INVALID_HANDLE_VALUE)
+            break;
+
+        Error = GetLastError();
+        if (Error == ERROR_PIPE_BUSY && Tries < 10)
+        {
+            WaitNamedPipeW(PNP_INSTALL_REQUEST_PIPE, 10000);
+            continue;
+        }
+        ERR("Cannot open the install request pipe, error %lu\n", Error);
+        /* Only administrators can open it */
+        if (Error == ERROR_ACCESS_DENIED)
+            return ERROR_ACCESS_DENIED;
+        if (Error == ERROR_FILE_NOT_FOUND || Error == ERROR_PATH_NOT_FOUND)
+            return ERROR_SERVICE_NOT_ACTIVE;
+        return Error;
+    }
+
+    MessageSize = sizeof(Request) + Request.DeviceIdBytes + Request.InfPathBytes;
+    Message = HeapAlloc(GetProcessHeap(), 0, MessageSize);
+    if (!Message)
+    {
+        CloseHandle(hPipe);
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    CopyMemory(Message, &Request, sizeof(Request));
+    CopyMemory(Message + sizeof(Request), DeviceId, Request.DeviceIdBytes);
+    CopyMemory(Message + sizeof(Request) + Request.DeviceIdBytes, InfPath, Request.InfPathBytes);
+
+    Error = ERROR_SUCCESS;
+    if (!WriteFile(hPipe, Message, MessageSize, &Done, NULL) || Done != MessageSize)
+        Error = GetLastError() ? GetLastError() : ERROR_WRITE_FAULT;
+    HeapFree(GetProcessHeap(), 0, Message);
+
+    /* The service answers when drvinst.exe is done */
+    for (Total = 0; Error == ERROR_SUCCESS && Total < sizeof(Reply); Total += Done)
+    {
+        if (!ReadFile(hPipe, (PBYTE)&Reply + Total, sizeof(Reply) - Total, &Done, NULL) || Done == 0)
+            Error = ERROR_BROKEN_PIPE;
+    }
+    CloseHandle(hPipe);
+
+    if (Error != ERROR_SUCCESS)
+    {
+        ERR("The install request failed, error %lu\n", Error);
+        return Error;
+    }
+    if (Reply.Magic != PNP_INSTALL_REPLY_MAGIC)
+        return ERROR_INVALID_DATA;
+
+    *NeedRestart = (Error == ERROR_SUCCESS && Reply.Error == ERROR_SUCCESS && Reply.NeedRestart);
+    return Reply.Error;
+}
+
+/*
+ * The install of the driver the user picked (the best one of the driver list) goes to the
+ * Plug and Play service, which runs it in drvinst.exe as SYSTEM: the driver package copy to
+ * %SystemRoot%\inf, the class installers, and the Enum, Control\Class and Services writes.
+ */
+static BOOL
+InstallDriverServiceSide(
+    IN PDEVINSTDATA DevInstData,
+    IN DWORD Origin)
+{
+    WCHAR DeviceId[MAX_DEVICE_ID_LEN];
+    WCHAR InfPath[MAX_PATH];
+    WCHAR StagedInf[MAX_PATH];
+    WCHAR StageDirectory[MAX_PATH];
+    SP_DRVINFO_DATA_W DrvInfoData;
+    PSP_DRVINFO_DETAIL_DATA_W Detail = NULL;
+    SP_DEVINSTALL_PARAMS_W InstallParams;
+    DWORD Size = 0, Length, Error;
+    BOOL NeedRestart = FALSE;
+
+    if (!SetupDiGetDeviceInstanceIdW(DevInstData->hDevInfo, &DevInstData->devInfoData,
+                                     DeviceId, ARRAYSIZE(DeviceId), NULL))
+    {
+        return FALSE;
+    }
+
+    /* The driver list is sorted by rank: the first entry is the one an install selects */
+    DrvInfoData.cbSize = sizeof(DrvInfoData);
+    if (!SetupDiEnumDriverInfoW(DevInstData->hDevInfo, &DevInstData->devInfoData,
+                                SPDIT_COMPATDRIVER, 0, &DrvInfoData))
+    {
+        SetLastError(ERROR_NO_DRIVER_SELECTED);
+        return FALSE;
+    }
+    SetupDiGetDriverInfoDetailW(DevInstData->hDevInfo, &DevInstData->devInfoData, &DrvInfoData, NULL, 0, &Size);
+    if (Size < sizeof(SP_DRVINFO_DETAIL_DATA_W))
+        Size = sizeof(SP_DRVINFO_DETAIL_DATA_W);
+    Detail = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size);
+    if (!Detail)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    Detail->cbSize = sizeof(SP_DRVINFO_DETAIL_DATA_W);
+    if (!SetupDiGetDriverInfoDetailW(DevInstData->hDevInfo, &DevInstData->devInfoData, &DrvInfoData, Detail, Size, NULL))
+    {
+        Error = GetLastError();
+        HeapFree(GetProcessHeap(), 0, Detail);
+        SetLastError(Error);
+        return FALSE;
+    }
+
+    /* The service has another current directory: send the full path */
+    Length = GetFullPathNameW(Detail->InfFileName, ARRAYSIZE(InfPath), InfPath, NULL);
+    HeapFree(GetProcessHeap(), 0, Detail);
+    if (Length == 0 || Length >= ARRAYSIZE(InfPath))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* The pages show the driver that is installed */
+    DevInstData->drvInfoData = DrvInfoData;
+
+    /* The service reads the package from a protected copy only: this process (an administrator
+       who can read the source, wherever it is) makes that copy, and removes it afterwards */
+    StageDirectory[0] = UNICODE_NULL;
+    if (!IsStagedOrSystemInf(InfPath))
+    {
+        Error = StageDriverPackage(InfPath, StagedInf, StageDirectory);
+        if (Error != ERROR_SUCCESS)
+        {
+            ERR("Cannot stage the driver package of %s, error %lu\n", debugstr_w(InfPath), Error);
+            SetLastError(Error);
+            return FALSE;
+        }
+        wcscpy(InfPath, StagedInf);
+    }
+
+    TRACE("Installing %s from %s service-side\n", debugstr_w(DeviceId), debugstr_w(InfPath));
+    Error = SendInstallRequest(DeviceId, InfPath, Origin, &NeedRestart);
+    if (StageDirectory[0] != UNICODE_NULL)
+        RemoveStagedPackage(StageDirectory);
+    if (Error != ERROR_SUCCESS)
+    {
+        SetLastError(Error);
+        return FALSE;
+    }
+
+    /* The callers read a needed restart from the install parameters, as after an install here */
+    if (NeedRestart)
+    {
+        InstallParams.cbSize = sizeof(InstallParams);
+        if (SetupDiGetDeviceInstallParamsW(DevInstData->hDevInfo, &DevInstData->devInfoData, &InstallParams))
+        {
+            InstallParams.Flags |= DI_NEEDRESTART;
+            SetupDiSetDeviceInstallParamsW(DevInstData->hDevInfo, &DevInstData->devInfoData, &InstallParams);
+        }
+    }
+
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
 
 /*
 * @implemented
@@ -55,8 +284,12 @@ UpdateDriverForPlugAndPlayDevicesW(
     BOOL FoundHardwareId, FoundAtLeastOneDevice = FALSE;
     BOOL RebootRequired = FALSE;
     BOOL ret = FALSE;
+    DWORD LastError;
+    WCHAR StagedInf[MAX_PATH];
+    WCHAR StageDirectory[MAX_PATH];
 
     DevInstData.hDevInfo = INVALID_HANDLE_VALUE;
+    StageDirectory[0] = UNICODE_NULL;
 
     TRACE("UpdateDriverForPlugAndPlayDevicesW(%p %s %s 0x%x %p)\n",
         hwndParent, debugstr_w(HardwareId), debugstr_w(FullInfPath), InstallFlags, bRebootRequired);
@@ -67,6 +300,37 @@ UpdateDriverForPlugAndPlayDevicesW(
         TRACE("Unknown flags: 0x%08lx\n", InstallFlags & ~(INSTALLFLAG_FORCE | INSTALLFLAG_READONLY | INSTALLFLAG_NONINTERACTIVE));
         SetLastError(ERROR_INVALID_FLAGS);
         goto cleanup;
+    }
+
+    if (!HardwareId || !FullInfPath)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        goto cleanup;
+    }
+
+    /* Installing a driver package needs an administrator (the Plug and Play service checks it
+       again: only it installs, see InstallSelectedDriver) */
+    if (!IsSystemContext() && !IsUserAdmin())
+    {
+        TRACE("The caller is not an administrator\n");
+        SetLastError(ERROR_ACCESS_DENIED);
+        goto cleanup;
+    }
+
+    /* The service installs from a protected copy of the package, never from where the caller
+       points (a UNC path, a mapped drive, a long path, a folder others can write): copy it once
+       for every device that matches, and remove the copy at the end */
+    if (!IsSystemContext() && !IsStagedOrSystemInf(FullInfPath))
+    {
+        DWORD StageError = StageDriverPackage(FullInfPath, StagedInf, StageDirectory);
+
+        if (StageError != ERROR_SUCCESS)
+        {
+            TRACE("Cannot stage the driver package, error %lu\n", StageError);
+            SetLastError(StageError);
+            goto cleanup;
+        }
+        FullInfPath = StagedInf;
     }
 
     /* Enumerate all devices of the system */
@@ -180,10 +444,13 @@ UpdateDriverForPlugAndPlayDevicesW(
         }
 
         /* FIXME: HACK! We shouldn't check of ERROR_PRIVILEGE_NOT_HELD */
-        //if (!InstallCurrentDriver(&DevInstData))
-        if (!InstallCurrentDriver(&DevInstData) && GetLastError() != ERROR_PRIVILEGE_NOT_HELD)
+        //if (!InstallSelectedDriver(&DevInstData, PNP_INSTALL_ORIGIN_UPDATEDRIVER))
+        if (!InstallSelectedDriver(&DevInstData, PNP_INSTALL_ORIGIN_UPDATEDRIVER) && GetLastError() != ERROR_PRIVILEGE_NOT_HELD)
         {
-            TRACE("InstallCurrentDriver() failed with error 0x%x\n", GetLastError());
+            TRACE("InstallSelectedDriver() failed with error 0x%x\n", GetLastError());
+            /* Not about this device: the other devices would fail the same way */
+            if (GetLastError() == ERROR_ACCESS_DENIED || GetLastError() == ERROR_SERVICE_NOT_ACTIVE)
+                goto cleanup;
             continue;
         }
 
@@ -215,9 +482,13 @@ UpdateDriverForPlugAndPlayDevicesW(
     }
 
 cleanup:
+    LastError = GetLastError();
     if (DevInstData.hDevInfo != INVALID_HANDLE_VALUE)
         SetupDiDestroyDeviceInfoList(DevInstData.hDevInfo);
+    if (StageDirectory[0] != UNICODE_NULL)
+        RemoveStagedPackage(StageDirectory);
     HeapFree(GetProcessHeap(), 0, Buffer);
+    SetLastError(LastError);
     return ret;
 }
 
@@ -664,6 +935,22 @@ InstallCurrentDriver(
 }
 
 /*
+ * Installs the best driver of the device's driver list. In a SYSTEM context (drvinst.exe,
+ * setup) the install runs here. Anywhere else this process only picked the driver: the
+ * Plug and Play service installs it as SYSTEM, for an administrator only, as on Windows.
+ */
+BOOL
+InstallSelectedDriver(
+    IN PDEVINSTDATA DevInstData,
+    IN DWORD Origin)
+{
+    if (IsSystemContext())
+        return InstallCurrentDriver(DevInstData);
+
+    return InstallDriverServiceSide(DevInstData, Origin);
+}
+
+/*
 * @implemented
 */
 BOOL WINAPI
@@ -786,8 +1073,8 @@ DevInstallW(
     if (ScanFoldersForDriver(DevInstData))
     {
         /* Driver found ; install it */
-        retval = InstallCurrentDriver(DevInstData);
-        TRACE("InstallCurrentDriver() returned %d\n", retval);
+        retval = InstallSelectedDriver(DevInstData, PNP_INSTALL_ORIGIN_DEVINSTALL);
+        TRACE("InstallSelectedDriver() returned %d\n", retval);
         if (retval)
         {
             /* Should we display the 'Need to reboot' page? */
@@ -845,6 +1132,102 @@ cleanup:
 
     if (retval && NeedRestart)
         SetLastError(ERROR_SUCCESS_REBOOT_REQUIRED);
+
+    return retval;
+}
+
+
+/*
+ * drvinst.exe's half of an install an administrator asked for (the wizard, Update Driver,
+ * UpdateDriverForPlugAndPlayDevices): the Plug and Play service checked the caller and the
+ * INF path; this installs the best driver of that INF on the device, without UI. It runs
+ * in a SYSTEM context only, so that it is never an install from the caller's process.
+ */
+BOOL
+WINAPI
+DevInstallFromInfW(
+    IN LPCWSTR InstanceId,
+    IN LPCWSTR InfPath,
+    IN DWORD Flags)
+{
+    PDEVINSTDATA DevInstData = NULL;
+    SP_DEVINSTALL_PARAMS_W InstallParams;
+    BOOL retval = FALSE;
+    BOOL NeedRestart = FALSE;
+    DWORD Error = ERROR_GEN_FAILURE;
+
+    TRACE("(%s, %s, 0x%lx)\n", debugstr_w(InstanceId), debugstr_w(InfPath), Flags);
+
+    if (!InstanceId || !InfPath || Flags != 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!IsSystemContext())
+    {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
+
+    DevInstData = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DEVINSTDATA));
+    if (!DevInstData)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    DevInstData->bUpdate = TRUE;
+
+    DevInstData->hDevInfo = SetupDiCreateDeviceInfoListExW(NULL, NULL, NULL, NULL);
+    if (DevInstData->hDevInfo == INVALID_HANDLE_VALUE)
+    {
+        Error = GetLastError();
+        goto cleanup;
+    }
+
+    DevInstData->devInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+    if (!SetupDiOpenDeviceInfoW(DevInstData->hDevInfo, InstanceId, NULL, 0, &DevInstData->devInfoData))
+    {
+        Error = GetLastError();
+        TRACE("SetupDiOpenDeviceInfoW() failed with error 0x%lx (InstanceId %s)\n", Error, debugstr_w(InstanceId));
+        DevInstData->devInfoData.cbSize = 0;
+        goto cleanup;
+    }
+
+    /* The drivers of this INF only, read from where it is, so that the install copies the
+       driver files from there (setupapi stages the INF itself into %SystemRoot%\inf) */
+    if (!SearchDriver(DevInstData, NULL, InfPath))
+    {
+        Error = ERROR_NO_COMPAT_DRIVERS;
+        TRACE("No driver for %s in %s\n", debugstr_w(InstanceId), debugstr_w(InfPath));
+        goto cleanup;
+    }
+
+    retval = InstallCurrentDriver(DevInstData);
+    if (!retval)
+    {
+        Error = GetLastError();
+        TRACE("InstallCurrentDriver() failed with error 0x%lx\n", Error);
+        goto cleanup;
+    }
+
+    InstallParams.cbSize = sizeof(InstallParams);
+    if (SetupDiGetDeviceInstallParamsW(DevInstData->hDevInfo, &DevInstData->devInfoData, &InstallParams) &&
+        (InstallParams.Flags & (DI_NEEDRESTART | DI_NEEDREBOOT)))
+    {
+        NeedRestart = TRUE;
+    }
+
+cleanup:
+    if (DevInstData->devInfoData.cbSize != 0)
+        SetupDiDestroyDriverInfoList(DevInstData->hDevInfo, &DevInstData->devInfoData, SPDIT_COMPATDRIVER);
+    if (DevInstData->hDevInfo != INVALID_HANDLE_VALUE && DevInstData->hDevInfo != NULL)
+        SetupDiDestroyDeviceInfoList(DevInstData->hDevInfo);
+    HeapFree(GetProcessHeap(), 0, DevInstData);
+
+    if (retval)
+        SetLastError(NeedRestart ? ERROR_SUCCESS_REBOOT_REQUIRED : ERROR_SUCCESS);
+    else
+        SetLastError(Error ? Error : ERROR_GEN_FAILURE);
 
     return retval;
 }
