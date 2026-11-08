@@ -30,6 +30,14 @@ extern "C" {
  *
  * Request: PNP_INSTALL_REQUEST, then DeviceIdBytes of device instance ID and InfPathBytes of
  * full INF path, both UTF-16 and NUL-terminated (the counts include the NUL).
+ *
+ * The INF is never read from where the user picked it (a UNC path, a mapped drive, a folder
+ * other users can write): the requester copies the driver package (the INF, every file it
+ * copies, its catalog) into a protected per-request directory under %SystemRoot%\PnpStage that
+ * only SYSTEM and Administrators can write, and sends the path of the INF in that copy. The
+ * service refuses any other INF path (except an INF already in %SystemRoot%\inf) and installs
+ * from the copy only. The requester removes the copy when the install is done; the service
+ * removes leftovers when it starts.
  * Reply: PNP_INSTALL_REPLY. Error is a Win32 error code; NeedRestart is TRUE when the install
  * succeeded and the device needs a restart.
  */
@@ -37,6 +45,15 @@ extern "C" {
 #define PNP_INSTALL_REQUEST_MAGIC       0x52494E50  /* "PNIR" */
 #define PNP_INSTALL_REPLY_MAGIC         0x50524E50  /* "PNRP" */
 #define PNP_INSTALL_REQUEST_VERSION     1
+
+/* One limit for the device instance ID everywhere (requester, service, drvinst): the
+   bytes including the NUL; MAX_DEVICE_ID_LEN counts the NUL */
+#define PNP_INSTALL_MAX_DEVICE_ID_BYTES (200 * sizeof(WCHAR))
+
+/* Staging: %SystemRoot%\PnpStage\<request directory>\<name>.inf. The directories are created
+   with this DACL (no inheritance from the parent): SYSTEM and Administrators only */
+#define PNP_INSTALL_STAGE_ROOT          L"PnpStage"
+#define PNP_INSTALL_STAGE_SDDL          L"D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)"
 
 /* PNP_INSTALL_REQUEST.Origin: who asked, for the device install log */
 #define PNP_INSTALL_ORIGIN_WIZARD       1   /* the newdev wizard (new device, Update Driver) */

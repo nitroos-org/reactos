@@ -89,7 +89,7 @@ SendInstallRequest(
     Request.Flags = 0;
     Request.DeviceIdBytes = (wcslen(DeviceId) + 1) * sizeof(WCHAR);
     Request.InfPathBytes = (wcslen(InfPath) + 1) * sizeof(WCHAR);
-    if (Request.DeviceIdBytes > (MAX_DEVICE_ID_LEN + 1) * sizeof(WCHAR) ||
+    if (Request.DeviceIdBytes > PNP_INSTALL_MAX_DEVICE_ID_BYTES ||
         Request.InfPathBytes > MAX_PATH * sizeof(WCHAR))
     {
         return ERROR_INVALID_PARAMETER;
@@ -169,8 +169,10 @@ InstallDriverServiceSide(
     IN PDEVINSTDATA DevInstData,
     IN DWORD Origin)
 {
-    WCHAR DeviceId[MAX_DEVICE_ID_LEN + 1];
+    WCHAR DeviceId[MAX_DEVICE_ID_LEN];
     WCHAR InfPath[MAX_PATH];
+    WCHAR StagedInf[MAX_PATH];
+    WCHAR StageDirectory[MAX_PATH];
     SP_DRVINFO_DATA_W DrvInfoData;
     PSP_DRVINFO_DETAIL_DATA_W Detail = NULL;
     SP_DEVINSTALL_PARAMS_W InstallParams;
@@ -221,8 +223,25 @@ InstallDriverServiceSide(
     /* The pages show the driver that is installed */
     DevInstData->drvInfoData = DrvInfoData;
 
+    /* The service reads the package from a protected copy only: this process (an administrator
+       who can read the source, wherever it is) makes that copy, and removes it afterwards */
+    StageDirectory[0] = UNICODE_NULL;
+    if (!IsStagedOrSystemInf(InfPath))
+    {
+        Error = StageDriverPackage(InfPath, StagedInf, StageDirectory);
+        if (Error != ERROR_SUCCESS)
+        {
+            ERR("Cannot stage the driver package of %s, error %lu\n", debugstr_w(InfPath), Error);
+            SetLastError(Error);
+            return FALSE;
+        }
+        wcscpy(InfPath, StagedInf);
+    }
+
     TRACE("Installing %s from %s service-side\n", debugstr_w(DeviceId), debugstr_w(InfPath));
     Error = SendInstallRequest(DeviceId, InfPath, Origin, &NeedRestart);
+    if (StageDirectory[0] != UNICODE_NULL)
+        RemoveStagedPackage(StageDirectory);
     if (Error != ERROR_SUCCESS)
     {
         SetLastError(Error);
@@ -266,8 +285,11 @@ UpdateDriverForPlugAndPlayDevicesW(
     BOOL RebootRequired = FALSE;
     BOOL ret = FALSE;
     DWORD LastError;
+    WCHAR StagedInf[MAX_PATH];
+    WCHAR StageDirectory[MAX_PATH];
 
     DevInstData.hDevInfo = INVALID_HANDLE_VALUE;
+    StageDirectory[0] = UNICODE_NULL;
 
     TRACE("UpdateDriverForPlugAndPlayDevicesW(%p %s %s 0x%x %p)\n",
         hwndParent, debugstr_w(HardwareId), debugstr_w(FullInfPath), InstallFlags, bRebootRequired);
@@ -293,6 +315,22 @@ UpdateDriverForPlugAndPlayDevicesW(
         TRACE("The caller is not an administrator\n");
         SetLastError(ERROR_ACCESS_DENIED);
         goto cleanup;
+    }
+
+    /* The service installs from a protected copy of the package, never from where the caller
+       points (a UNC path, a mapped drive, a long path, a folder others can write): copy it once
+       for every device that matches, and remove the copy at the end */
+    if (!IsSystemContext() && !IsStagedOrSystemInf(FullInfPath))
+    {
+        DWORD StageError = StageDriverPackage(FullInfPath, StagedInf, StageDirectory);
+
+        if (StageError != ERROR_SUCCESS)
+        {
+            TRACE("Cannot stage the driver package, error %lu\n", StageError);
+            SetLastError(StageError);
+            goto cleanup;
+        }
+        FullInfPath = StagedInf;
     }
 
     /* Enumerate all devices of the system */
@@ -447,6 +485,8 @@ cleanup:
     LastError = GetLastError();
     if (DevInstData.hDevInfo != INVALID_HANDLE_VALUE)
         SetupDiDestroyDeviceInfoList(DevInstData.hDevInfo);
+    if (StageDirectory[0] != UNICODE_NULL)
+        RemoveStagedPackage(StageDirectory);
     HeapFree(GetProcessHeap(), 0, Buffer);
     SetLastError(LastError);
     return ret;

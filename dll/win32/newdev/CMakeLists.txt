@@ -3,6 +3,7 @@ spec2def(newdev.dll newdev.spec ADD_IMPORTLIB)
 
 list(APPEND SOURCE
     newdev.c
+    stage.c
     stubs.c
     wizard.c
     newdev_private.h
