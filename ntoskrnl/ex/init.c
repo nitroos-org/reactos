@@ -1097,6 +1097,14 @@ ExpInitializeExecutive(IN ULONG Cpu,
     /* Setup initial system settings */
     CmGetSystemControlValues(LoaderBlock->RegistryBase, CmControlVector);
 
+    /*
+     * NitroPager: 0 off, 1 private paging, 2 behaves as 1 until its commit ceiling exists; any other
+     * value is off. Clamped here, before MmArmInitSystem phase 0 reads it (the value is in the SYSTEM
+     * hive, which any user can write until registry ACLs are enforced).
+     */
+    if (MiNitroPagerMode > 2)
+        MiNitroPagerMode = 0;
+
     /* Set the Service Pack Number and add it to the CSD Version number if needed */
     CmNtSpBuildNumber = VER_PRODUCTBUILD_QFE;
     if (((CmNtCSDVersion & 0xFFFF0000) == 0) && (CmNtCSDReleaseType == 1))
