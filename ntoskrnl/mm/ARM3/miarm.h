@@ -2876,6 +2876,7 @@ typedef struct _MI_PAGER_COUNTERS
     ULONG NoProgressPasses;
     /* pagerdef */
     ULONG PacedRequests;
+    ULONG PaceBudgetSpent;
     ULONG WsFloorSkips;
     ULONG InjectedAllocFailures;
 } MI_PAGER_COUNTERS;

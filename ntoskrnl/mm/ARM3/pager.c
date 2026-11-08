@@ -14,9 +14,10 @@
 /*
  * Design: harness process/PAGER-DESIGN.md rev 2, phases P0/P1. Everything here is
  * reached only when the NitroPager mode (Session Manager\Memory Management
- * value NitroPager, read once at boot) is not 0. The mode is 1 by default (the
- * kernel's own value when the registry has none; setup writes 1 as well); 0
- * keeps the behaviour the memory manager had before, the LiveCD sets it.
+ * value NitroPager, read once at boot) is not 0. The default (the kernel's own
+ * value when the registry has none, and what setup writes) is 1 on amd64 and 0
+ * on other architectures (MI_NITRO_PAGER_DEFAULT); 0 keeps the behaviour the
+ * memory manager had before, the LiveCD sets it.
  *
  * States of a private page (PrototypePte == 0):
  *   valid                  PTE valid; OriginalPte = demand zero with the
@@ -54,8 +55,17 @@ extern MMPFNLIST MmModifiedPageListByColor[1];
 extern MMPFNLIST MmBadPageListHead;
 extern ULONG MmTotalPagesForPagingFile;
 
-/* NitroPager / NitroPagerDebug (CmControlVector, read once at boot; an absent NitroPager value leaves the default 1) */
-ULONG MiNitroPagerMode = 1;
+/*
+ * NitroPager / NitroPagerDebug (CmControlVector, read once at boot; an absent NitroPager value leaves the
+ * default). The default is 1 on amd64 (2026.11-1) and 0 elsewhere: i386 has not passed its gate yet (the
+ * 2 h soak at 512 MB, review rvpagerdef). Setup writes the same value per architecture (hivesys_ARCH.inf).
+ */
+#if defined(_M_AMD64)
+#define MI_NITRO_PAGER_DEFAULT 1
+#else
+#define MI_NITRO_PAGER_DEFAULT 0
+#endif
+ULONG MiNitroPagerMode = MI_NITRO_PAGER_DEFAULT;
 ULONG MiNitroPagerDebug;
 
 /* Private pages on the standby lists: repurposable */
@@ -123,6 +133,8 @@ static volatile ULONG MiPagerFreeRefusedBase;
 #define MI_PAGER_DEBUG_FAIL_PAGING_ALLOC 0x80
 /* Every cluster write fails during the first 300 s after the writer starts, then the disk "recovers" */
 #define MI_PAGER_DEBUG_FAIL_WRITES_EARLY 0x200
+/* No pacing of RosMm page requests (MiPagerPaceRequest): A/B tests */
+#define MI_PAGER_DEBUG_NO_PACING         0x400
 #define MI_PAGER_FAIL_EARLY_SECONDS      300
 
 /* Writer batch: pages taken per PFN lock hold */
@@ -153,6 +165,29 @@ static volatile ULONGLONG MiPagingIoLastEvent;
  */
 static volatile LONG MiPagerClusterWrites;
 static volatile ULONGLONG MiPagerWriterIoStart;
+
+/* 64-bit interrupt-time stamps read and written whole, also on i386 (no torn value across a 2^32 boundary) */
+FORCEINLINE
+ULONGLONG
+MiPagerReadStamp(
+    _In_ volatile ULONGLONG *Stamp)
+{
+    return (ULONGLONG)InterlockedCompareExchange64((volatile LONGLONG *)Stamp, 0, 0);
+}
+
+FORCEINLINE
+VOID
+MiPagerWriteStamp(
+    _Inout_ volatile ULONGLONG *Stamp,
+    _In_ ULONGLONG Value)
+{
+    LONGLONG Old;
+
+    do
+    {
+        Old = *(volatile LONGLONG *)Stamp;
+    } while (InterlockedCompareExchange64((volatile LONGLONG *)Stamp, (LONGLONG)Value, Old) != Old);
+}
 #define MI_PAGER_IO_STUCK_AFTER (120ULL * 10 * 1000 * 1000)
 /* Fourth NO_PAGES_AVAILABLE parameter: writer state, plus this flag when paging I/O was in flight but stuck */
 #define MI_WRITER_IO_STUCK 0x100
@@ -720,7 +755,7 @@ MiWriteModifiedPrivatePagesEx(
 
         MiPagingIoStart();
         if (InterlockedIncrement(&MiPagerClusterWrites) == 1)
-            MiPagerWriterIoStart = KeQueryInterruptTime();
+            MiPagerWriteStamp(&MiPagerWriterIoStart, KeQueryInterruptTime());
         if (MiPagerHangWrites)
         {
             LARGE_INTEGER Forever;
@@ -733,7 +768,7 @@ MiWriteModifiedPrivatePagesEx(
         }
         if (NT_SUCCESS(Status))
             Status = MiWritePageFileCluster(Batch, Taken, FileIndex, FirstSlot);
-        MiPagerWriterIoStart = (InterlockedDecrement(&MiPagerClusterWrites) == 0) ? 0 : KeQueryInterruptTime();
+        MiPagerWriteStamp(&MiPagerWriterIoStart, (InterlockedDecrement(&MiPagerClusterWrites) == 0) ? 0 : KeQueryInterruptTime());
         MiPagingIoDone();
 
         /* Test: hold the completion of this cluster until the test says go (written, referenced, off every list) */
@@ -1110,8 +1145,10 @@ VOID
 NTAPI
 MiPagingIoStart(VOID)
 {
-    if (InterlockedIncrement(&MiPagingIoInFlight) == 1)
-        MiPagingIoLastEvent = KeQueryInterruptTime();
+    /* The stamp first: a reader that sees the count up never pairs it with an old idle-time stamp */
+    if (MiPagingIoInFlight == 0)
+        MiPagerWriteStamp(&MiPagingIoLastEvent, KeQueryInterruptTime());
+    InterlockedIncrement(&MiPagingIoInFlight);
 }
 
 /* Paging I/O completed: in-flight I/O made progress now */
@@ -1119,7 +1156,7 @@ VOID
 NTAPI
 MiPagingIoDone(VOID)
 {
-    MiPagingIoLastEvent = KeQueryInterruptTime();
+    MiPagerWriteStamp(&MiPagingIoLastEvent, KeQueryInterruptTime());
     InterlockedDecrement(&MiPagingIoInFlight);
 }
 
@@ -1133,13 +1170,16 @@ static
 BOOLEAN
 MiPagingIoStuck(VOID)
 {
-    ULONGLONG Now = KeQueryInterruptTime(), WriteStart = MiPagerWriterIoStart;
+    ULONGLONG Now = KeQueryInterruptTime(), WriteStart = MiPagerReadStamp(&MiPagerWriterIoStart);
+    ULONGLONG LastEvent = MiPagerReadStamp(&MiPagingIoLastEvent);
 
     if (MiPagingIoInFlight <= 0)
         return FALSE;
-    if ((Now - MiPagingIoLastEvent) >= MI_PAGER_IO_STUCK_AFTER)
+    if ((Now > LastEvent) && ((Now - LastEvent) >= MI_PAGER_IO_STUCK_AFTER))
         return TRUE;
-    return (WriteStart != 0) && (Now > WriteStart) && ((Now - WriteStart) >= MI_PAGER_IO_STUCK_AFTER);
+    /* The write branch only while a cluster write really is in flight (a start left by racing completions is stale) */
+    return (MiPagerClusterWrites > 0) && (WriteStart != 0) && (Now > WriteStart) &&
+           ((Now - WriteStart) >= MI_PAGER_IO_STUCK_AFTER);
 }
 
 BOOLEAN
@@ -1153,35 +1193,72 @@ MiPagerIsWriterThread(VOID)
  * N6 (pagerdef): a RosMm page request that may wait (Cc views, section and
  * image pages: MmRequestPageMemoryConsumer with CanWait, not MC_SYSTEM) while
  * paging I/O is in flight and usable pages are below the waitable floor waits
- * here a little, bounded (at most 10 x 10 ms), so that the writer's and the
+ * here a little, so that the writer's and the
  * in-page reads' own allocations (IRPs, SRB extensions, S/G lists, work items)
- * find the last pages first. It never waits for the balancer or for a lock:
+ * find the last pages first, within a per-thread budget (below). It never waits for the balancer or for a lock:
  * the caller may hold file system or segment locks the balancer needs, and a
  * bounded delay cannot deadlock with them. The balancer and the writer never
  * pace (they are the ones freeing pages).
  */
+/*
+ * Pacing budget (review rvpagerdef: bounded per call is not bounded per operation; a view fill or a
+ * process start asks for hundreds of pages): a thread is paced for at most MI_PAGER_PACE_BUDGET_MS in any
+ * MI_PAGER_PACE_WINDOW. Kept in a small table hashed by thread; two threads sharing a slot reset each
+ * other's window, which only paces one of them a little more or less (heuristic, no lock).
+ */
+#define MI_PAGER_PACE_SLOTS      64
+#define MI_PAGER_PACE_BUDGET_MS  100
+#define MI_PAGER_PACE_STEP_MS    10
+#define MI_PAGER_PACE_WINDOW     (10ULL * 1000 * 1000)
+typedef struct _MI_PAGER_PACE_SLOT
+{
+    PETHREAD Thread;
+    ULONGLONG WindowStart;
+    ULONG UsedMs;
+} MI_PAGER_PACE_SLOT;
+static MI_PAGER_PACE_SLOT MiPagerPaceSlots[MI_PAGER_PACE_SLOTS];
+
 VOID
 NTAPI
 MiPagerPaceRequest(VOID)
 {
+    PETHREAD Thread = PsGetCurrentThread();
+    MI_PAGER_PACE_SLOT *Slot;
     LARGE_INTEGER Delay;
-    ULONG i;
+    ULONGLONG Now;
 
     if ((MiNitroPagerMode == 0) || (MmNumberOfPagingFiles == 0) || MiPagerShutdown ||
+        (MiNitroPagerDebug & MI_PAGER_DEBUG_NO_PACING) ||
         (KeGetCurrentIrql() > APC_LEVEL) || MiPagerIsWriterThread())
     {
         return;
     }
+    if ((MiPagingIoInFlight <= 0) || (MiGetUsablePageCount() >= MI_PAGER_WAITABLE_FLOOR))
+        return;
 
-    Delay.QuadPart = -10LL * 10000;
-    for (i = 0; i < 10; i++)
+    Slot = &MiPagerPaceSlots[((ULONG_PTR)Thread >> 6) % MI_PAGER_PACE_SLOTS];
+    Now = KeQueryInterruptTime();
+    if ((Slot->Thread != Thread) || ((Now - Slot->WindowStart) >= MI_PAGER_PACE_WINDOW))
     {
-        if ((MiPagingIoInFlight <= 0) || (MiGetUsablePageCount() >= MI_PAGER_WAITABLE_FLOOR))
-            break;
-        if (i == 0)
-            InterlockedIncrement((PLONG)&MiPagerCounters.PacedRequests);
+        Slot->Thread = Thread;
+        Slot->WindowStart = Now;
+        Slot->UsedMs = 0;
+    }
+    if (Slot->UsedMs >= MI_PAGER_PACE_BUDGET_MS)
+    {
+        InterlockedIncrement((PLONG)&MiPagerCounters.PaceBudgetSpent);
+        return;
+    }
+
+    InterlockedIncrement((PLONG)&MiPagerCounters.PacedRequests);
+    Delay.QuadPart = -(LONGLONG)MI_PAGER_PACE_STEP_MS * 10000;
+    while ((Slot->UsedMs < MI_PAGER_PACE_BUDGET_MS) &&
+           (MiPagingIoInFlight > 0) &&
+           (MiGetUsablePageCount() < MI_PAGER_WAITABLE_FLOOR))
+    {
         MmRebalanceMemoryConsumers();
         KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        Slot->UsedMs += MI_PAGER_PACE_STEP_MS;
     }
 }
 
@@ -1365,7 +1442,7 @@ MiPagerReport(VOID)
             "repurposed %lu inpage %lu errors %lu retries %lu | tagmismatch %lu freerefused %lu | wsmiss %lu starved %lu | "
             "slotshort %lu reclaimed %lu freeslots %Iu | modified %Iu privstandby %lu usable %Iu reserve-low %lu inflight %ld | "
             "balancer trimmed %lu waits %lu | legacy user %lu system %lu available %Iu legacy-freed %lu asked %lu nopass %lu | "
-            "paced %lu wsfloor %lu injected %lu ioreserve %ld\n",
+            "paced %lu pacebudget %lu wsfloor %lu injected %lu ioreserve %ld\n",
             MiPagerCounters.Trimmed, MiPagerCounters.TrimmedDirty, MiPagerCounters.Aged, MiPagerCounters.TrimSkippedDirty,
             MiPagerCounters.Written, MiPagerCounters.Clusters, MiPagerCounters.WriteErrors, MiPagerCounters.WriteNoSlot,
             MiPagerCounters.Repurposed, MiPagerCounters.InPageReads, MiPagerCounters.InPageErrors,
@@ -1376,7 +1453,7 @@ MiPagerReport(VOID)
             MiPagerCounters.BalancerTrimmed, MiPagerCounters.BalancerWaits,
             MiMemoryConsumers[MC_USER].PagesUsed, MiMemoryConsumers[MC_SYSTEM].PagesUsed, (SIZE_T)MmAvailablePages,
             MiPagerCounters.LegacyFreed, MiPagerCounters.LegacyAsked, MiPagerCounters.NoProgressPasses,
-            MiPagerCounters.PacedRequests, MiPagerCounters.WsFloorSkips, MiPagerCounters.InjectedAllocFailures,
+            MiPagerCounters.PacedRequests, MiPagerCounters.PaceBudgetSpent, MiPagerCounters.WsFloorSkips, MiPagerCounters.InjectedAllocFailures,
             IopReserveIrpUses);
     InterlockedExchange(&Busy, 0);
 }
@@ -2095,12 +2172,14 @@ MiPagerBalance(
             {
                 SIZE_T Minimum = MiTrimList[i]->Vm.MinimumWorkingSetSize;
 
-                if (Cursor->Resident <= Minimum)
+                /* Every 8th pass a skipped process gets an aging turn anyway: its Resident is refreshed by turns only */
+                if ((Cursor->Resident <= Minimum) && ((MiTrimStamp & 7) != 0))
                 {
                     MiPagerCounters.WsFloorSkips++;
                     continue;
                 }
-                Want = (ULONG)min((SIZE_T)Want, Cursor->Resident - Minimum);
+                if (Cursor->Resident > Minimum)
+                    Want = (ULONG)min((SIZE_T)Want, Cursor->Resident - Minimum);
             }
 
             Result = MiTrimProcessForPressure(MiTrimList[i], Cursor, Want, Force || Starved, &Got);

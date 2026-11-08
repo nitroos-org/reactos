@@ -433,6 +433,7 @@ NTSTATUS NgCheckDeleteEntry(PSECURITY_DESCRIPTOR Sd, PSECURITY_DESCRIPTOR DirSd)
 
 /* pagefile.c */
 NTSTATUS NgPagingFileMap(PNG_FCB Fcb);
+VOID NgPagingSetDebug(ULONG Value);
 NTSTATUS NgPagingFileIo(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, BOOLEAN Write, LONGLONG Offset, ULONG Length);
 VOID NgAfterChange(PNG_VCB Vcb);
 NTSTATUS NgCheckMedium(PNG_VCB Vcb);

@@ -18,13 +18,21 @@
 static VOID NgPagingReserveInit(PNG_VCB Vcb);
 
 /*
- * Test (NitroPagerDebug 0x80 in Session Manager\Memory Management, read when the first paging file
- * is mapped): every third IRP or partial MDL allocation of NgPagingDevIo fails, so that the reserve
- * IRP and MDL carry real paging I/O (the kernel does the same for its own paging IRPs).
+ * Test (NitroPagerDebug 0x80 in Session Manager\Memory Management, read once by DriverEntry, before any
+ * volume or CoreLock exists: no registry access on the paging path): every third IRP or partial MDL
+ * allocation of NgPagingDevIo fails, so that the reserve IRP and MDL carry real paging I/O (the kernel
+ * does the same for its own paging IRPs).
  */
 #define NG_PAGING_DEBUG_FAIL_ALLOC 0x80
 static ULONG NgPagingDebug;
 static LONG NgPagingAllocCalls;
+
+VOID NgPagingSetDebug(ULONG Value)
+{
+    NgPagingDebug = Value;
+    if (NgPagingDebug & NG_PAGING_DEBUG_FAIL_ALLOC)
+        DbgPrint("ntfsng: test: every third paging IRP/MDL allocation fails\n");
+}
 
 static BOOLEAN NgPagingInjectFailure(VOID)
 {
@@ -140,27 +148,6 @@ static NTSTATUS NgPagingDevIo(PNG_VCB Vcb, UCHAR Major, ULONGLONG Dev, PMDL Mdl,
 static VOID NgPagingReserveInit(PNG_VCB Vcb)
 {
     PDEVICE_OBJECT Target = Vcb->StorageDevice;
-    static BOOLEAN DebugRead;
-
-    if (!DebugRead)
-    {
-        RTL_QUERY_REGISTRY_TABLE Query[2];
-        ULONG Value = 0;
-
-        DebugRead = TRUE;
-        RtlZeroMemory(Query, sizeof(Query));
-        Query[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
-        Query[0].Name = L"NitroPagerDebug";
-        Query[0].EntryContext = &Value;
-        Query[0].DefaultType = REG_NONE;
-        if (NT_SUCCESS(RtlQueryRegistryValues(RTL_REGISTRY_CONTROL, L"Session Manager\\Memory Management",
-                                              Query, NULL, NULL)))
-        {
-            NgPagingDebug = Value;
-        }
-        if (NgPagingDebug & NG_PAGING_DEBUG_FAIL_ALLOC)
-            DbgPrint("ntfsng: test: every third paging IRP/MDL allocation fails\n");
-    }
 
     if (Vcb->PagingReserveReady)
         return;
