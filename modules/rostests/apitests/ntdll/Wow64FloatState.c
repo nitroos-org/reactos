@@ -74,16 +74,16 @@ static void TestPreserved(PCSTR Name, void *Fn, int Count, const ULONG *Args)
 static HANDLE g_Event, g_Ready;
 static volatile LONG g_Done;
 static UCHAR g_In[128] __attribute__((aligned(16))), g_Out[128] __attribute__((aligned(16)));
+static ULONG g_ControlIn[2] = { 0x27f, 0x1f80 }, g_ControlOut[2];
 static void *g_Fn;
 static int g_Count;
 static ULONG g_Args[6];
 
 static DWORD WINAPI BlockedThread(LPVOID Param)
 {
-    ULONG Control[2] = { 0x27f, 0x1f80 }, ControlOut[2];
     UNREFERENCED_PARAMETER(Param);
     SetEvent(g_Ready);
-    xmm_call(g_Fn, g_In, g_Out, Control, ControlOut, g_Count, g_Args);
+    xmm_call(g_Fn, g_In, g_Out, g_ControlIn, g_ControlOut, g_Count, g_Args);
     g_Done = 1;
     return 0;
 }
@@ -134,27 +134,39 @@ static void TestBlocked(PCSTR Name, void *Fn, int Count, const ULONG *Args)
 }
 
 static volatile LONG g_ApcRan;
+
+/* An APC routine that uses every register the thread it interrupts could be using */
 static VOID CALLBACK ApcRoutine(ULONG_PTR Param)
 {
+    ULONG Control[2] = { 0x37f, 0x1f80 | 0x6000 };
     UNREFERENCED_PARAMETER(Param);
+    __asm__ __volatile__(
+        "fldcw %0\n\tldmxcsr %1\n\t"
+        "pcmpeqd %%xmm0,%%xmm0\n\tpcmpeqd %%xmm1,%%xmm1\n\tpxor %%xmm2,%%xmm2\n\tpcmpeqd %%xmm3,%%xmm3\n\t"
+        "pxor %%xmm4,%%xmm4\n\tpcmpeqd %%xmm5,%%xmm5\n\tpxor %%xmm6,%%xmm6\n\tpcmpeqd %%xmm7,%%xmm7\n\t"
+        "fld1\n\tfstp %%st(0)"
+        : : "m"(Control[0]), "m"(Control[1])
+        : "st", "st(1)");
     g_ApcRan++;
 }
 
+static HANDLE g_Gate;
+static BOOL g_WaitFirst;
+
 static DWORD WINAPI ApcThread(LPVOID Param)
 {
-    ULONG Control[2] = { 0x27f, 0x1f80 }, ControlOut[2];
-    ULONG Args[3];
     UNREFERENCED_PARAMETER(Param);
-    Args[0] = (ULONG)(ULONG_PTR)g_Event;
-    Args[1] = TRUE;     /* alertable */
-    Args[2] = 0;        /* infinite */
     SetEvent(g_Ready);
-    xmm_call(g_Fn, g_In, g_Out, Control, ControlOut, 3, Args);
+    if (g_WaitFirst) WaitForSingleObject(g_Gate, 10000);
+    xmm_call(g_Fn, g_In, g_Out, g_ControlIn, g_ControlOut, g_Count, g_Args);
     g_Done = 1;
     return 0;
 }
 
-static void TestApc(void *Wait)
+/* The service is called with non-default x87/SSE state and is interrupted by a user APC that changes all of it:
+ * after the service returns the thread must have the state it had. WaitFirst: the APC is queued while the thread
+ * waits outside the service, and the service (NtTestAlert) delivers it. */
+static void TestApc(PCSTR Name, void *Fn, int Count, const ULONG *Args, BOOL WaitFirst)
 {
     UCHAR Pattern[128];
     HANDLE Thread;
@@ -162,11 +174,17 @@ static void TestApc(void *Wait)
     FillPattern(g_In, 0x55);
     memcpy(Pattern, g_In, 128);
     memset(g_Out, 0, sizeof(g_Out));
-    g_Fn = Wait;
+    g_ControlIn[0] = 0x23f;
+    g_ControlIn[1] = 0x1fa0;
+    g_Fn = Fn;
+    g_Count = Count;
+    memcpy(g_Args, Args, sizeof(ULONG) * Count);
     g_Done = 0;
     g_ApcRan = 0;
+    g_WaitFirst = WaitFirst;
     ResetEvent(g_Event);
     ResetEvent(g_Ready);
+    ResetEvent(g_Gate);
     Thread = CreateThread(NULL, 0, ApcThread, NULL, 0, NULL);
     ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
     if (!Thread) return;
@@ -174,12 +192,61 @@ static void TestApc(void *Wait)
     Sleep(200);
     QueueUserAPC(ApcRoutine, Thread, 0);
     Sleep(200);
-    ok(g_ApcRan == 1, "the APC ran %ld times\n", g_ApcRan);
+    if (WaitFirst) SetEvent(g_Gate);
+    else if (Count == 3) SetEvent(g_Event);
+    WaitForSingleObject(Thread, 10000);
+    ok(g_Done == 1, "%s: the thread did not finish\n", Name);
+    ok(g_ApcRan == 1, "%s: the APC ran %ld times\n", Name, g_ApcRan);
+    {
+        int Reg;
+        for (Reg = 0; Reg < 8; Reg++)
+            ok(memcmp(g_Out + Reg * 16, Pattern + Reg * 16, 16) == 0, "%s: XMM%d changed across a service interrupted by a user APC\n", Name, Reg);
+    }
+    ok((g_ControlOut[0] & 0xff3f) == (0x23f & 0xff3f), "%s: x87 control word %04lx after the APC\n", Name, g_ControlOut[0]);
+    ok((g_ControlOut[1] & 0xffff) == 0x1fa0, "%s: MXCSR %08lx after the APC\n", Name, g_ControlOut[1]);
+    g_ControlIn[0] = 0x27f;
+    g_ControlIn[1] = 0x1f80;
+    CloseHandle(Thread);
+    RestoreControl();
+}
+
+/* A write of the x87 registers alone (CONTEXT_FLOATING_POINT) to a thread suspended in a service: the new
+ * control word is in force after the service returns and the XMM registers are not disturbed */
+static void TestSetX87(PCSTR Name, void *Fn, int Count, const ULONG *Args)
+{
+    UCHAR Pattern[128];
+    CONTEXT Context;
+    HANDLE Thread;
+
+    FillPattern(g_In, 0x42);
+    memcpy(Pattern, g_In, 128);
+    memset(g_Out, 0, sizeof(g_Out));
+    g_Done = 0;
+    g_Fn = Fn;
+    g_Count = Count;
+    memcpy(g_Args, Args, sizeof(ULONG) * Count);
+    ResetEvent(g_Event);
+    ResetEvent(g_Ready);
+    Thread = CreateThread(NULL, 0, BlockedThread, NULL, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (!Thread) return;
+    WaitForSingleObject(g_Ready, 5000);
+    Sleep(300);
+    SuspendThread(Thread);
+    memset(&Context, 0, sizeof(Context));
+    Context.ContextFlags = CONTEXT_FLOATING_POINT;
+    ok(GetThreadContext(Thread, &Context), "%s: GetThreadContext failed: %lu\n", Name, GetLastError());
+    ok((Context.FloatSave.ControlWord & 0xff3f) == (0x27f & 0xff3f), "%s: control word %04lx\n", Name, Context.FloatSave.ControlWord);
+    Context.FloatSave.ControlWord = 0x37f;
+    ok(SetThreadContext(Thread, &Context), "%s: SetThreadContext failed: %lu\n", Name, GetLastError());
+    ResumeThread(Thread);
     SetEvent(g_Event);
     WaitForSingleObject(Thread, 10000);
-    ok(g_Done == 1, "the thread did not finish\n");
-    ok(memcmp(g_Out, Pattern, 128) == 0, "the XMM registers changed across a service interrupted by a user APC\n");
+    ok(g_Done == 1, "%s: the thread did not finish\n", Name);
+    ok(memcmp(g_Out, Pattern, 128) == 0, "%s: the XMM registers changed by a write of the x87 registers\n", Name);
+    ok((g_ControlOut[0] & 0xff3f) == (0x37f & 0xff3f), "%s: control word %04lx after the write\n", Name, g_ControlOut[0]);
     CloseHandle(Thread);
+    RestoreControl();
 }
 
 #endif /* __GNUC__ && _M_IX86 */
@@ -196,7 +263,9 @@ START_TEST(Wow64FloatState)
         (PVOID)GetProcAddress(Ntdll, "NtQueryInformationProcess");
     BOOL (WINAPI *pIsWow64Process)(HANDLE, PBOOL) = (PVOID)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process");
     HANDLE Signaled;
-    LARGE_INTEGER Time, Zero = {{0, 0}};
+    LARGE_INTEGER Time, Zero = {{0, 0}}, Interval;
+    NTSTATUS (NTAPI *pNtDelayExecution)(BOOLEAN, PLARGE_INTEGER) = (PVOID)GetProcAddress(Ntdll, "NtDelayExecution");
+    NTSTATUS (NTAPI *pNtTestAlert)(VOID) = (PVOID)GetProcAddress(Ntdll, "NtTestAlert");
     ULONG Args[5];
     HANDLE Handles[1];
     UCHAR Buffer[64];
@@ -207,7 +276,7 @@ START_TEST(Wow64FloatState)
         skip("Not a WoW64 process\n");
         return;
     }
-    if (!pNtQuerySystemTime || !pNtWaitForSingleObject || !pNtWaitForMultipleObjects || !pNtQueryInformationProcess)
+    if (!pNtDelayExecution || !pNtTestAlert || !pNtQuerySystemTime || !pNtWaitForSingleObject || !pNtWaitForMultipleObjects || !pNtQueryInformationProcess)
     {
         skip("Missing ntdll exports\n");
         return;
@@ -215,6 +284,7 @@ START_TEST(Wow64FloatState)
 
     g_Event = CreateEventW(NULL, TRUE, FALSE, NULL);
     g_Ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g_Gate = CreateEventW(NULL, TRUE, FALSE, NULL);
     Signaled = CreateEventW(NULL, TRUE, TRUE, NULL);
 
     /* a translated service, a service the layer answers itself, and one with a pointer to translate */
@@ -232,9 +302,23 @@ START_TEST(Wow64FloatState)
     Args[0] = 1; Args[1] = (ULONG)(ULONG_PTR)Handles; Args[2] = 1 /* WaitAny */; Args[3] = FALSE; Args[4] = 0;
     TestBlocked("NtWaitForMultipleObjects (blocked)", pNtWaitForMultipleObjects, 5, Args);
 
-    TestApc(pNtWaitForSingleObject);
+    /* user APCs in alertable waits, in a delay, and delivered by NtTestAlert */
+    Args[0] = (ULONG)(ULONG_PTR)g_Event; Args[1] = TRUE; Args[2] = 0;
+    TestApc("NtWaitForSingleObject (alertable)", pNtWaitForSingleObject, 3, Args, FALSE);
+    Interval.QuadPart = -100000000LL;
+    Args[0] = TRUE; Args[1] = (ULONG)(ULONG_PTR)&Interval;
+    TestApc("NtDelayExecution (alertable)", pNtDelayExecution, 2, Args, FALSE);
+    TestApc("NtTestAlert", pNtTestAlert, 0, Args, TRUE);
+
+    /* a write of the x87 registers to a thread in a service */
+    Args[0] = (ULONG)(ULONG_PTR)g_Event; Args[1] = FALSE; Args[2] = 0;
+    TestSetX87("NtWaitForSingleObject (blocked)", pNtWaitForSingleObject, 3, Args);
+    Handles[0] = g_Event;
+    Args[0] = 1; Args[1] = (ULONG)(ULONG_PTR)Handles; Args[2] = 1; Args[3] = FALSE; Args[4] = 0;
+    TestSetX87("NtWaitForMultipleObjects (blocked)", pNtWaitForMultipleObjects, 5, Args);
 
     CloseHandle(Signaled);
+    CloseHandle(g_Gate);
     CloseHandle(g_Ready);
     CloseHandle(g_Event);
 #else
