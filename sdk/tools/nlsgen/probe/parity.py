@@ -56,18 +56,21 @@ for loc in ora:
         if k not in o and k not in keys: keys.append(k)
     db = [k for k in keys if o.get(k) != b.get(k)]
     da = [k for k in keys if o.get(k) != a.get(k)]
-    summ.append((loc, len(keys), len(db), len(da)))
-    out.append("\n## %s: %d fields compared; differs from Windows: before %d, after %d\n" % (loc, len(keys), len(db), len(da)))
+    new = [k for k in da if o.get(k) == b.get(k)]       # equal to Windows before, different now
+    fixed = [k for k in db if o.get(k) == a.get(k)]     # different before, equal to Windows now
+    summ.append((loc, len(keys), len(db), len(da), len(new), len(fixed)))
+    out.append("\n## %s: %d fields compared; differs from Windows: before %d, after %d (%d new, %d repaired)\n" % (loc, len(keys), len(db), len(da), len(new), len(fixed)))
     out.append("| field | Windows | before | after |\n|---|---|---|---|")
     for k in da:
         f = lambda s: ("`%s`" % s.replace("|", "\\|")) if s is not None else "(absent)"
         out.append("| %s | %s | %s | %s |" % (label(k), f(o.get(k)), f(b.get(k)) if b.get(k) != a.get(k) else "same as after", f(a.get(k))))
         tsv.append("\t".join([loc, label(k), o.get(k) or "", b.get(k) or "", a.get(k) or ""]))
-hdr = ["\n## Summary\n", "| locale | fields | differ before | differ after (accepted cost) |", "|---|---|---|---|"]
-tot = [0, 0, 0]
-for loc, n, db_, da_ in summ:
-    hdr.append("| %s | %d | %d | %d |" % (loc, n, db_, da_)); tot = [tot[0] + n, tot[1] + db_, tot[2] + da_]
-hdr.append("| total | %d | %d | %d |" % tuple(tot))
+hdr = ["\n## Summary\n", "`before` = the Windows-derived tables, `after` = CLDR. `new` = equal to Windows before, different now (the accepted cost); `repaired` = different before, equal to Windows now. The rows that differ both before and after (for example calendar names that Windows does not have, LCTYPE 0 and the font signature) are not caused by the data.\n",
+       "| locale | fields | differ before | differ after | new | repaired |", "|---|---|---|---|---|---|"]
+tot = [0, 0, 0, 0, 0]
+for loc, n, db_, da_, nw_, fx_ in summ:
+    hdr.append("| %s | %d | %d | %d | %d | %d |" % (loc, n, db_, da_, nw_, fx_)); tot = [tot[0] + n, tot[1] + db_, tot[2] + da_, tot[3] + nw_, tot[4] + fx_]
+hdr.append("| total | %d | %d | %d | %d | %d |" % tuple(tot))
 out = out[:3] + hdr + out[3:]
 open(sys.argv[5], "w", encoding="utf-8").write("\n".join(out) + "\n")
 if len(sys.argv) > 6:
