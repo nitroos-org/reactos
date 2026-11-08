@@ -4,6 +4,8 @@ spec2def(dcomp.dll dcomp.spec ADD_IMPORTLIB)
 list(APPEND SOURCE
     device.c
     winrt.c
+    composition.c
+    compgfx.c
     ${CMAKE_CURRENT_BINARY_DIR}/dcomp_stubs.c)
 
 add_library(dcomp MODULE

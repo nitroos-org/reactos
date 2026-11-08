@@ -8,10 +8,12 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_Composition(void);
 extern void func_DCompositionCreateDevice(void);
 
 const struct test winetest_testlist[] =
 {
+    { "Composition", func_Composition },
     { "DCompositionCreateDevice", func_DCompositionCreateDevice },
 
     { 0, 0 }
