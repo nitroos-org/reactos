@@ -133,6 +133,7 @@ list(APPEND SOURCE
     NtQueryInformationThread.c
     NtQueryInformationToken.c
     NtQueryKey.c
+    NtSetInformationKey.c
     NtQueryObject.c
     NtQueryOpenSubKeys.c
     NtQuerySecurityObject.c
