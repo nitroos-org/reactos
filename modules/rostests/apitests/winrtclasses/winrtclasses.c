@@ -163,6 +163,176 @@ START_TEST(NetworkInformation)
 
 /* ---- OnlineIdSystemAuthenticator ---- */
 
+/* ---- GetTicketAsync ---- */
+
+DEFINE_GUID(IID_IOnlineIdSystemTicketResult_, 0xdb0a5ff8, 0xb098, 0x4acd, 0x9d, 0x13, 0x9e, 0x64, 0x06, 0x52, 0xb5, 0xb6);
+/* IAsyncOperation<OnlineIdSystemTicketResult*> as the WinRT pinterface algorithm computes it from its public signature */
+DEFINE_GUID(IID_IAsyncOperation_TicketResult_, 0x162f5870, 0x5a4a, 0x503c, 0x98, 0x7f, 0xa0, 0x5a, 0x13, 0x12, 0xd8, 0xe4);
+DEFINE_GUID(IID_IAsyncInfo_, 0x00000036, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+
+typedef struct
+{
+    void **vtbl;
+    LONG ref;
+    LONG called;
+    int status;
+    void *operation;
+} COMPLETION_HANDLER;
+
+static HRESULT STDMETHODCALLTYPE Handler_QI(void *This, REFIID riid, void **out)
+{
+    /* the IID of AsyncOperationCompletedHandler<OnlineIdSystemTicketResult*> is not needed: the handler answers
+     * what the object asks (IUnknown, IAgileObject) and, as the test only passes it in, nothing else */
+    if (IsEqualGUID(riid, &IID_IUnknown) || IsEqualGUID(riid, &IID_IAgile))
+    {
+        *out = This;
+        InterlockedIncrement(&((COMPLETION_HANDLER *)This)->ref);
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE Handler_AddRef(void *This) { return InterlockedIncrement(&((COMPLETION_HANDLER *)This)->ref); }
+static ULONG STDMETHODCALLTYPE Handler_Release(void *This) { return InterlockedDecrement(&((COMPLETION_HANDLER *)This)->ref); }
+static HRESULT STDMETHODCALLTYPE Handler_Invoke(void *This, void *operation, int status)
+{
+    COMPLETION_HANDLER *h = This;
+    h->operation = operation;
+    h->status = status;
+    InterlockedIncrement(&h->called);
+    return S_OK;
+}
+static void *HandlerVtbl[] = { Handler_QI, Handler_AddRef, Handler_Release, Handler_Invoke };
+
+static void TestGetTicketAsync(void *statics)
+{
+    static const WCHAR FactoryCls[] = L"Windows.Security.Authentication.OnlineId.OnlineIdServiceTicketRequest";
+    static const GUID Id = {0x11223344, 0x5566, 0x7788, {0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00}};
+    void *authenticator = NULL, *factory, *request = NULL, *operation = (void *)1, *info = NULL, *same = NULL, *result = NULL, *iresult = NULL;
+    COMPLETION_HANDLER handler, handler2;
+    HRESULT hr;
+    HSTRING service, policy;
+    int status;
+    UINT32 id;
+    void *identity = (void *)1;
+
+    /* a fresh authenticator: its ApplicationId is still the default */
+    hr = ((PFN_OUT)VTBL(statics)[6])(statics, &authenticator);
+    ok(hr == S_OK && authenticator, "Default returned 0x%08lx\n", hr);
+    if (!authenticator)
+        return;
+    factory = GetFactory(FactoryCls, &IID_IOnlineIdServiceTicketRequestFactory_, &hr);
+    if (!factory)
+    {
+        RELEASE(authenticator);
+        return;
+    }
+    service = Str(L"http://example.com/service");
+    policy = Str(L"MBI_SSL");
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, HSTRING, HSTRING, void **))VTBL(factory)[6])(factory, service, policy, &request);
+    ok(hr == S_OK && request, "CreateOnlineIdServiceTicketRequest returned 0x%08lx\n", hr);
+    pWindowsDeleteString(service);
+    pWindowsDeleteString(policy);
+    RELEASE(factory);
+    if (!request)
+    {
+        RELEASE(authenticator);
+        return;
+    }
+
+    /* IOnlineIdSystemAuthenticatorForUser::GetTicketAsync is slot 6. Measured on Windows 10 22H2 (local account): a
+     * NULL request is E_POINTER and leaves the out pointer alone; a valid request with the ApplicationId still all
+     * zeros is E_INVALIDARG with a NULL operation. */
+    hr = ((PFN_HSTR_OUT)VTBL(authenticator)[6])(authenticator, NULL, &operation);
+    ok(hr == E_POINTER, "GetTicketAsync(NULL) returned 0x%08lx\n", hr);
+    ok(operation == (void *)1, "GetTicketAsync(NULL) wrote the operation %p\n", operation);
+    operation = (void *)1;
+    hr = ((PFN_HSTR_OUT)VTBL(authenticator)[6])(authenticator, request, &operation);
+    ok(hr == E_INVALIDARG, "GetTicketAsync without an ApplicationId returned 0x%08lx\n", hr);
+    ok(operation == NULL, "GetTicketAsync without an ApplicationId returned the operation %p\n", operation);
+
+    /* With an ApplicationId set the behaviour on Windows was not measured; here the operation is completed at once
+     * (no Microsoft account) with no identity and a status other than Success. */
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, GUID))VTBL(authenticator)[7])(authenticator, Id);
+    ok(hr == S_OK, "put_ApplicationId returned 0x%08lx\n", hr);
+    operation = NULL;
+    hr = ((PFN_HSTR_OUT)VTBL(authenticator)[6])(authenticator, request, &operation);
+    ok(hr == S_OK && operation, "GetTicketAsync returned 0x%08lx, operation %p\n", hr, operation);
+    if (hr == S_OK && operation)
+    {
+        hr = QI(operation, &IID_IAsyncOperation_TicketResult_, &same);
+        ok(hr == S_OK && same == operation, "QI(IAsyncOperation) returned 0x%08lx\n", hr);
+        if (same) RELEASE(same);
+        hr = QI(operation, &IID_IAsyncInfo_, &info);
+        ok(hr == S_OK && info, "QI(IAsyncInfo) returned 0x%08lx\n", hr);
+        if (info)
+        {
+            /* IAsyncInfo: Id (6), Status (7), ErrorCode (8) */
+            status = -1;
+            hr = ((PFN_OUT)VTBL(info)[7])(info, &status);
+            ok(hr == S_OK && status == 1, "IAsyncInfo.Status returned 0x%08lx, %d (Completed is 1)\n", hr, status);
+            id = 0;
+            hr = ((PFN_OUT)VTBL(info)[6])(info, &id);
+            ok(hr == S_OK && id != 0, "IAsyncInfo.Id returned 0x%08lx, %lu\n", hr, (unsigned long)id);
+            hr = ((PFN_OUT)VTBL(info)[8])(info, &status);
+            ok(hr == S_OK && status == 0, "IAsyncInfo.ErrorCode returned 0x%08lx, 0x%08x\n", hr, status);
+        }
+
+        /* IAsyncOperation: put_Completed (6), get_Completed (7), GetResults (8). A completed operation runs the handler
+         * when it is set; a second handler is E_ILLEGAL_DELEGATE_ASSIGNMENT */
+        memset(&handler, 0, sizeof(handler));
+        handler.vtbl = HandlerVtbl;
+        handler.ref = 1;
+        hr = ((PFN_OUT)VTBL(operation)[6])(operation, &handler);
+        ok(hr == S_OK, "put_Completed returned 0x%08lx\n", hr);
+        ok(handler.called == 1 && handler.status == 1 && handler.operation == operation,
+           "handler: called %ld, status %d, operation %p\n", handler.called, handler.status, handler.operation);
+        memset(&handler2, 0, sizeof(handler2));
+        handler2.vtbl = HandlerVtbl;
+        handler2.ref = 1;
+        hr = ((PFN_OUT)VTBL(operation)[6])(operation, &handler2);
+        ok(hr == (HRESULT)0x80000018, "second put_Completed returned 0x%08lx\n", hr);
+        ok(handler2.called == 0, "the second handler was called\n");
+
+        hr = ((PFN_OUT)VTBL(operation)[8])(operation, &result);
+        ok(hr == S_OK && result, "GetResults returned 0x%08lx, %p\n", hr, result);
+        if (result)
+        {
+            hr = QI(result, &IID_IOnlineIdSystemTicketResult_, &iresult);
+            ok(hr == S_OK && iresult, "QI(IOnlineIdSystemTicketResult) returned 0x%08lx\n", hr);
+            if (iresult)
+            {
+                /* IOnlineIdSystemTicketResult: Identity (6), Status (7), ExtendedError (8) */
+                hr = ((PFN_OUT)VTBL(iresult)[6])(iresult, &identity);
+                ok(hr == S_OK && identity == NULL, "Identity returned 0x%08lx, %p\n", hr, identity);
+                status = -1;
+                hr = ((PFN_OUT)VTBL(iresult)[7])(iresult, &status);
+                ok(hr == S_OK && (status == 1 || status == 2), "Status returned 0x%08lx, %d\n", hr, status);
+                hr = ((PFN_OUT)VTBL(iresult)[8])(iresult, &status);
+                ok(hr == S_OK && status < 0, "ExtendedError returned 0x%08lx, 0x%08x\n", hr, status);
+                RELEASE(iresult);
+            }
+            RELEASE(result);
+        }
+        if (info)
+        {
+            /* IAsyncInfo: Close (10); after it the operation is closed (status 4) and GetResults is E_ILLEGAL_METHOD_CALL */
+            hr = ((HRESULT (STDMETHODCALLTYPE *)(void *))VTBL(info)[10])(info);
+            ok(hr == S_OK, "IAsyncInfo.Close returned 0x%08lx\n", hr);
+            status = -1;
+            hr = ((PFN_OUT)VTBL(info)[7])(info, &status);
+            ok(hr == S_OK && status == 4, "Status after Close returned 0x%08lx, %d\n", hr, status);
+            result = (void *)1;
+            hr = ((PFN_OUT)VTBL(operation)[8])(operation, &result);
+            ok(hr == E_ILLEGAL_METHOD_CALL, "GetResults after Close returned 0x%08lx\n", hr);
+            RELEASE(info);
+        }
+        RELEASE(operation);
+    }
+    RELEASE(request);
+    RELEASE(authenticator);
+}
+
 START_TEST(OnlineIdSystemAuthenticator)
 {
     static const WCHAR Cls[] = L"Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator";
@@ -193,6 +363,7 @@ START_TEST(OnlineIdSystemAuthenticator)
         hr = ((PFN_OUT)VTBL(def)[9])(def, &user);
         ok(hr == S_OK, "get_User returned 0x%08lx\n", hr);
         ok(user == NULL, "no user is signed in, but get_User returned %p\n", user);
+        TestGetTicketAsync(statics);
         RELEASE(def);
     }
     RELEASE(statics);
