@@ -66,11 +66,13 @@ IntValidateParents(PWND Child, BOOL Recurse)
    PWND ParentWnd = Child;
    PREGION Rgn = NULL;
 
-   if (ParentWnd->style & WS_CHILD)
+   /* The top-level window. The walk can end at NULL: the chain of a child of another process
+      stops at a parent destroyed by its own thread (it has no parent any more). */
+   while (ParentWnd->style & WS_CHILD)
    {
-      do
-         ParentWnd = ParentWnd->spwndParent;
-      while (ParentWnd->style & WS_CHILD);
+      if (!ParentWnd->spwndParent)
+         break;
+      ParentWnd = ParentWnd->spwndParent;
    }
 
    // No pending nonclient paints.

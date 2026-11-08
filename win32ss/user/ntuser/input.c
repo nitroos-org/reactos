@@ -681,7 +681,26 @@ IsRemoveAttachThread(PTHREADINFO pti)
        if (pai) pai->cAttach = 1;
 
        Status = UserAttachThreadInput(ptiFrom, ptiTo, FALSE);
-       if (!NT_SUCCESS(Status)) Ret = FALSE;
+       if (!NT_SUCCESS(Status))
+       {
+          /* The detach was refused (the other thread is dying too, or is on another desktop now).
+             The entry must still go: it names this thread, which is about to be freed, and the next
+             IsRemoveAttachThread of the other thread would read the freed THREADINFO. */
+          PATTACHINFO *ppai;
+
+          Ret = FALSE;
+          for (ppai = &gpai; *ppai; ppai = &(*ppai)->paiNext)
+          {
+             if (*ppai == pai)
+             {
+                *ppai = pai->paiNext;
+                ExFreePoolWithTag(pai, USERTAG_ATTACHINFO);
+                paiCount--;
+                Ret = TRUE; /* keep going with the other entries of this thread */
+                break;
+             }
+          }
+       }
 
     } while (Ret);
 
@@ -874,6 +893,37 @@ UserAttachThreadInput(PTHREADINFO ptiFrom, PTHREADINFO ptiTo, BOOL fAttach)
               {
                  ptiFrom->MessageQueue->spwndFocus = spwndFocus;
                  ptiTo->MessageQueue->spwndFocus = 0;
+              }
+           }
+           /* The capture, the previous active window and the caret go with their window too. The
+              shared queue holds them as plain pointers and only the queue of a window's own thread is
+              cleaned when it is destroyed: left behind, a child of another process that had the
+              capture (SetParent attaches the queues) stays the capture window of the other thread's
+              queue after its process is killed, and mouse input dereferences the freed window.
+              Windows keeps the capture with the thread of the window (user32 winetest win.c
+              test_thread_exit_destroy: GetCapture() is still the child after the parent's thread exited). */
+           if (ptiTo->MessageQueue->spwndCapture &&
+               ptiTo->MessageQueue->spwndCapture->head.pti == ptiFrom)
+           {
+              ptiFrom->MessageQueue->spwndCapture = ptiTo->MessageQueue->spwndCapture;
+              ptiTo->MessageQueue->spwndCapture = NULL;
+              ptiTo->MessageQueue->QF_flags &= ~QF_CAPTURELOCKED;
+           }
+           if (ptiTo->MessageQueue->spwndActivePrev &&
+               ptiTo->MessageQueue->spwndActivePrev->head.pti == ptiFrom)
+           {
+              ptiFrom->MessageQueue->spwndActivePrev = ptiTo->MessageQueue->spwndActivePrev;
+              ptiTo->MessageQueue->spwndActivePrev = NULL;
+           }
+           if (ptiTo->MessageQueue->CaretInfo.hWnd)
+           {
+              PWND pwndCaret = ValidateHwndNoErr(ptiTo->MessageQueue->CaretInfo.hWnd);
+              if (pwndCaret && pwndCaret->head.pti == ptiFrom)
+              {
+                 RtlCopyMemory(&ptiFrom->MessageQueue->CaretInfo,
+                               &ptiTo->MessageQueue->CaretInfo,
+                               sizeof(ptiFrom->MessageQueue->CaretInfo));
+                 RtlZeroMemory(&ptiTo->MessageQueue->CaretInfo, sizeof(ptiTo->MessageQueue->CaretInfo));
               }
            }
            ptiTo->MessageQueue->iCursorLevel -= ptiFrom->iCursorLevel;

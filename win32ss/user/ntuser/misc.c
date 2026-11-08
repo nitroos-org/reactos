@@ -158,7 +158,8 @@ GetControlColor(
 {
     HBRUSH hBrush;
 
-    if (!pwndParent) pwndParent = pwnd;
+    /* no parent, or a parent that its own thread destroyed (a child of another process that outlived it) */
+    if (!pwndParent || (pwndParent->state & WNDS_DESTROYED)) pwndParent = pwnd;
 
     if ( pwndParent->head.pti->ppi != PsGetCurrentProcessWin32Process())
     {
