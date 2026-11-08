@@ -40,7 +40,9 @@ static BOOL
 IsSystemContext(VOID)
 {
     SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
-    BYTE Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    /* The kernel probes the output buffer for ULONG alignment: a plain BYTE array on the stack
+       is not aligned, and a Debug build's stack layout made GetTokenInformation fail */
+    union { TOKEN_USER User; BYTE Bytes[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE]; } Buffer;
     PSID SystemSid;
     HANDLE hToken;
     DWORD Size;
@@ -52,10 +54,10 @@ IsSystemContext(VOID)
         return FALSE;
     }
 
-    if (GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &Size) &&
+    if (GetTokenInformation(hToken, TokenUser, &Buffer, sizeof(Buffer), &Size) &&
         AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &SystemSid))
     {
-        Result = EqualSid(((PTOKEN_USER)Buffer)->User.Sid, SystemSid);
+        Result = EqualSid(Buffer.User.User.Sid, SystemSid);
         FreeSid(SystemSid);
     }
 

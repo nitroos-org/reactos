@@ -3922,6 +3922,8 @@ Exit:
 /*
  * @implemented
  */
+static BOOL IntUserSetWindowPos(HWND, HWND, int, int, int, int, UINT, BOOL);
+
 BOOL APIENTRY
 NtUserMoveWindow(
    HWND hWnd,
@@ -3931,9 +3933,11 @@ NtUserMoveWindow(
    int nHeight,
    BOOL bRepaint)
 {
-   return NtUserSetWindowPos(hWnd, 0, X, Y, nWidth, nHeight,
-                             (bRepaint ? SWP_NOZORDER | SWP_NOACTIVATE :
-                              SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW));
+   /* MoveWindow works on a window below a destroyed parent, SetWindowPos does not (Windows 10 22H2,
+      oracle 2026-11-04) */
+   return IntUserSetWindowPos(hWnd, 0, X, Y, nWidth, nHeight,
+                              (bRepaint ? SWP_NOZORDER | SWP_NOACTIVATE :
+                               SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW), FALSE);
 }
 
 /*
@@ -3959,15 +3963,16 @@ NtUserRealChildWindowFromPoint(HWND Parent,
 /*
  * @implemented
  */
-BOOL APIENTRY
-NtUserSetWindowPos(
+static BOOL
+IntUserSetWindowPos(
    HWND hWnd,
    HWND hWndInsertAfter,
    int X,
    int Y,
    int cx,
    int cy,
-   UINT uFlags)
+   UINT uFlags,
+   BOOL bRefuseOrphan)
 {
    PWND Window, pWndIA;
    BOOL ret = FALSE;
@@ -3989,6 +3994,14 @@ NtUserSetWindowPos(
         UserIsDesktopWindow(Window) || UserIsMessageWindow(Window))
    {
       ERR("NtUserSetWindowPos bad window handle!\n");
+      goto Exit; // Return FALSE
+   }
+
+   /* A window whose parent of another thread (process) was destroyed: Windows fails with
+      ERROR_INVALID_PARAMETER (oracle 2026-11-04; user32 winetest win.c test_thread_exit_destroy) */
+   if (bRefuseOrphan && IntIsWindowOrphaned(Window))
+   {
+      EngSetLastError(ERROR_INVALID_PARAMETER);
       goto Exit; // Return FALSE
    }
 
@@ -4029,6 +4042,22 @@ Exit:
    TRACE("Leave NtUserSetWindowPos, ret=%i\n", ret);
    UserLeave();
    return ret;
+}
+
+/*
+ * @implemented
+ */
+BOOL APIENTRY
+NtUserSetWindowPos(
+   HWND hWnd,
+   HWND hWndInsertAfter,
+   int X,
+   int Y,
+   int cx,
+   int cy,
+   UINT uFlags)
+{
+   return IntUserSetWindowPos(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags, TRUE);
 }
 
 /*
@@ -4281,7 +4310,9 @@ NtUserShowWindow(HWND hWnd, LONG nCmdShow)
       goto Exit; // Return FALSE
    }
 
-   if ( nCmdShow > SW_MAX || Window->state2 & WNDS2_INDESTROY)
+   /* also a window whose parent of another thread (process) was destroyed (Windows 10 22H2, oracle
+      2026-11-04: ShowWindow fails with ERROR_INVALID_PARAMETER) */
+   if ( nCmdShow > SW_MAX || Window->state2 & WNDS2_INDESTROY || IntIsWindowOrphaned(Window))
    {
       EngSetLastError(ERROR_INVALID_PARAMETER);
       goto Exit; // Return FALSE

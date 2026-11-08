@@ -50,7 +50,9 @@ static BOOL
 IsSystemProcess(VOID)
 {
     SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
-    BYTE Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    /* The kernel probes the output buffer for ULONG alignment: a plain BYTE array on the stack
+       is not aligned, and a Debug build's stack layout made GetTokenInformation fail */
+    union { TOKEN_USER User; BYTE Bytes[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE]; } Buffer;
     PSID SystemSid;
     HANDLE hToken;
     DWORD Size;
@@ -58,10 +60,10 @@ IsSystemProcess(VOID)
 
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
         return FALSE;
-    if (GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &Size) &&
+    if (GetTokenInformation(hToken, TokenUser, &Buffer, sizeof(Buffer), &Size) &&
         AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &SystemSid))
     {
-        Result = EqualSid(((PTOKEN_USER)Buffer)->User.Sid, SystemSid);
+        Result = EqualSid(Buffer.User.User.Sid, SystemSid);
         FreeSid(SystemSid);
     }
     CloseHandle(hToken);
@@ -161,8 +163,8 @@ static VOID
 LogAccount(VOID)
 {
     HANDLE hToken;
-    BYTE Buffer[256];
-    PTOKEN_USER User = (PTOKEN_USER)Buffer;
+    union { TOKEN_USER User; BYTE Bytes[256]; } Buffer; /* ULONG aligned: the kernel probes it */
+    PTOKEN_USER User = &Buffer.User;
     DWORD Size;
     WCHAR Name[64], Domain[64];
     DWORD NameLength = _countof(Name), DomainLength = _countof(Domain);
@@ -171,7 +173,7 @@ LogAccount(VOID)
 
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
         return;
-    if (GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &Size))
+    if (GetTokenInformation(hToken, TokenUser, &Buffer, sizeof(Buffer), &Size))
     {
         if (!LookupAccountSidW(NULL, User->User.Sid, Name, &NameLength, Domain, &DomainLength, &Use))
         {
