@@ -10,10 +10,12 @@
 
 extern void func_DOMDocument(void);
 extern void func_SchemaCache(void);
+extern void func_XPathFunc(void);
 
 const struct test winetest_testlist[] =
 {
     { "DOMDocument", func_DOMDocument },
     { "SchemaCache", func_SchemaCache },
+    { "XPathFunc", func_XPathFunc },
     { 0, 0 }
 };
