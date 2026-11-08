@@ -78,6 +78,7 @@ extern CRITICAL_SECTION UserTokenLock;
 extern HANDLE hInstallEvent;
 extern HANDLE hNoPendingInstalls;
 extern HANDLE hUserLogOnEvent;
+extern CRITICAL_SECTION DrvInstLock;
 
 /* Device-install event list */
 extern HANDLE hDeviceInstallListMutex;
@@ -90,6 +91,11 @@ SetupIsActive(VOID);
 DWORD
 WINAPI
 DeviceInstallThread(
+    LPVOID lpParameter);
+
+DWORD
+WINAPI
+InstallRequestThread(
     LPVOID lpParameter);
 
 
