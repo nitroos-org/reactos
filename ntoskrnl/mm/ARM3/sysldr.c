@@ -73,6 +73,13 @@ MiCacheImageSymbols(IN PVOID BaseAddress)
     return DebugDirectory;
 }
 
+BOOLEAN
+NTAPI
+MmRebalanceMemoryConsumersAndWait(VOID);
+
+/* Rounds an image load waits for free pages before it fails (each is a balancer pass or at least 10 ms) */
+#define MI_IMAGE_PAGE_WAITS 1000
+
 NTSTATUS
 NTAPI
 MiLoadImageSection(_Inout_ PSECTION *SectionPtr,
@@ -95,6 +102,7 @@ MiLoadImageSection(_Inout_ PSECTION *SectionPtr,
     MMPTE TempPte;
     KIRQL OldIrql;
     PFN_NUMBER PageFrameIndex;
+    ULONG Retry;
     PAGED_CODE();
 
     /* Detect session load */
@@ -169,8 +177,45 @@ MiLoadImageSection(_Inout_ PSECTION *SectionPtr,
     *ImageBase = DriverBase;
     DPRINT1("Loading: %wZ at %p with %lx pages\n", FileName, DriverBase, PteCount);
 
-    /* Lock the PFN database */
-    OldIrql = MiAcquirePfnLock();
+    /*
+     * Every page of the image must come from the free lists: MiRemoveAnyPage
+     * returns page 0 when none is left, and a valid PTE for page 0 (with a
+     * PFN update of a page that is not ours) is corrupt: freeing the image
+     * later dereferenced a NULL PFN entry. The count is checked with the PFN
+     * lock held, and the lock stays held until the last page is taken. When
+     * the system is out of free pages (a writer fills memory faster than the
+     * balancer frees it) wait for the balancer, as a kernel stack does, and
+     * fail the load only when the wait is exhausted.
+     */
+    for (Retry = 0; ; Retry++)
+    {
+        OldIrql = MiAcquirePfnLock();
+        if (MiGetUsablePageCount() >= PteCount)
+            break;
+
+        MiReleasePfnLock(OldIrql);
+        if (Retry >= MI_IMAGE_PAGE_WAITS)
+        {
+            DPRINT1("Out of pages to load %wZ: %lx needed, %Iu available\n",
+                    FileName, PteCount, MiGetUsablePageCount());
+            *ImageBase = NULL;
+            MiReleaseSystemPtes(LastPte - PteCount, PteCount, SystemPteSpace);
+            Status = MmUnmapViewOfSection(Process, Base);
+            ASSERT(NT_SUCCESS(Status));
+            KeUnstackDetachProcess(&ApcState);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        /* A pass ran (TRUE), or the wait was a short delay (FALSE) */
+        if (MmRebalanceMemoryConsumersAndWait() && (MiGetUsablePageCount() < PteCount))
+        {
+            LARGE_INTEGER Delay;
+
+            /* The pass freed nothing: give the lazy writer a moment, do not spin on passes */
+            Delay.QuadPart = -10 * 10000;
+            KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        }
+    }
 
     /* Loop the new driver PTEs */
     TempPte = ValidKernelPte;
@@ -185,8 +230,8 @@ MiLoadImageSection(_Inout_ PSECTION *SectionPtr,
         MI_SET_PROCESS_USTR(FileName);
 #endif
 
-        /* Grab a page */
-        PageFrameIndex = MiRemoveAnyPage(MI_GET_NEXT_COLOR());
+        /* Grab a page: the count above covers all of them */
+        PageFrameIndex = MiRemoveAnyPageGated(MI_GET_NEXT_COLOR());
 
         /* Initialize its PFN entry */
         MiInitializePfn(PageFrameIndex, PointerPte, TRUE);
