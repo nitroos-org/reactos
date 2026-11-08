@@ -253,7 +253,7 @@ Return Value:
         //  Flag this to avoid the VPB spinlock in future passes.
         //
 
-        SetFlag( Vcb->VcbState, VCB_STATE_VPB_NOT_ON_DEVICE);
+        FatSetVcbFlag( Vcb, VCB_STATE_VPB_NOT_ON_DEVICE );
     }
 
 #ifdef _MSC_VER
@@ -607,7 +607,7 @@ Return Value:
 
                     LARGE_INTEGER TwoSecondsFromNow;
 
-                    SetFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+                    FatSetVcbFlag( Vcb, VCB_STATE_FLAG_VOLUME_DIRTY );
                     MarkDirty = TRUE;
 
                     TwoSecondsFromNow.QuadPart = (LONG)-2*1000*1000*10;
@@ -769,7 +769,7 @@ Return Value:
         //  Clear the dirty flag now since we cannot synchronize after this point.
         //
 
-        ClearFlag( Packet->Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+        FatClearVcbFlag( Packet->Vcb, VCB_STATE_FLAG_VOLUME_DIRTY );
 
         ExInitializeWorkItem( &Packet->Item, &FatDeferredCleanVolume, Packet );
 
@@ -1254,7 +1254,7 @@ Return Value:
 
     _SEH2_TRY {
 
-        SetFlag( Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY );
+        FatSetVcbFlag( Vcb, VCB_STATE_FLAG_MOUNTED_DIRTY );
 
         FatMarkVolume( &IrpContext, Vcb, VolumeDirtyWithSurfaceTest );
 
@@ -1371,7 +1371,7 @@ Return Value:
                            "FASTFAT: WARNING! Mounting Dirty Volume %Z\n",
                            &VolumeLabel));
 
-                SetFlag( Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY );
+                FatSetVcbFlag( Vcb, VCB_STATE_FLAG_MOUNTED_DIRTY );
             }
 
         } else {
@@ -1383,7 +1383,7 @@ Return Value:
                            "FASTFAT: Volume %Z has been cleaned.\n",
                            &VolumeLabel));
 
-                ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY );
+                FatClearVcbFlag( Vcb, VCB_STATE_FLAG_MOUNTED_DIRTY );
 
             } else {
 

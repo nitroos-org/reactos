@@ -963,7 +963,7 @@ Return Value:
     } else {
 
 
-        SetFlag(Vcb->VcbState, VCB_STATE_FLAG_CLOSE_IN_PROGRESS);
+        FatSetVcbFlag( Vcb, VCB_STATE_FLAG_CLOSE_IN_PROGRESS );
         RecursiveClose = FALSE;
 
         //
@@ -1126,7 +1126,7 @@ Return Value:
 
             ParentDcb = Fcb->ParentDcb;
 
-            SetFlag( Vcb->VcbState, VCB_STATE_FLAG_DELETED_FCB );
+            FatSetVcbFlag( Vcb, VCB_STATE_FLAG_DELETED_FCB );
 
             FatDeleteFcb( &IrpContext, &Fcb );
 
@@ -1166,7 +1166,7 @@ Return Value:
                     CurrentDcb = ParentDcb;
                     ParentDcb = CurrentDcb->ParentDcb;
 
-                    SetFlag( Vcb->VcbState, VCB_STATE_FLAG_DELETED_FCB );
+                    FatSetVcbFlag( Vcb, VCB_STATE_FLAG_DELETED_FCB );
 
                     FatDeleteFcb( &IrpContext, &CurrentDcb );
 
@@ -1268,7 +1268,7 @@ Return Value:
 
             if (!LocalVcbDeleted) {
 
-                ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_CLOSE_IN_PROGRESS );
+                FatClearVcbFlag( Vcb, VCB_STATE_FLAG_CLOSE_IN_PROGRESS );
             }
         }
 

@@ -1727,6 +1727,21 @@ FatFilterCallbackAcquireForCreateSection (
     ExReleaseResourceLite( &(FatData.Resource) );       \
     }
 
+//
+//  VcbState is written by threads that do not hold the Vcb exclusive (the lazy writer, flush, the
+//  clean-volume worker, close, shutdown ...) as well as by create/rename under it: a plain
+//  read-modify-write ("SetFlag"/"ClearFlag") lets one thread undo another's update. Every write goes
+//  through these two (atomic) so a bit can only be changed by the thread that asked for it.
+//
+
+#ifdef __REACTOS__
+#define FatSetVcbFlag(V,F)    ((VOID)InterlockedOr( (volatile LONG *)&(V)->VcbState, (LONG)(F) ))
+#define FatClearVcbFlag(V,F)  ((VOID)InterlockedAnd( (volatile LONG *)&(V)->VcbState, ~(LONG)(F) ))
+#else
+#define FatSetVcbFlag(V,F)    SetFlag( (V)->VcbState, (F) )
+#define FatClearVcbFlag(V,F)  ClearFlag( (V)->VcbState, (F) )
+#endif
+
 #define FatReleaseVcb(IRPCONTEXT,Vcb) {                 \
     ExReleaseResourceLite( &((Vcb)->Resource) );        \
     }

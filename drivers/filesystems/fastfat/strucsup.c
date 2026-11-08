@@ -373,7 +373,7 @@ Return Value:
 
             if (HotplugInfo.MediaRemovable) {
 
-                SetFlag( Vcb->VcbState, VCB_STATE_FLAG_REMOVABLE_MEDIA );
+                FatSetVcbFlag( Vcb, VCB_STATE_FLAG_REMOVABLE_MEDIA );
             }
 
             //
@@ -382,7 +382,7 @@ Return Value:
 
             if (HotplugInfo.MediaHotplug || HotplugInfo.DeviceHotplug) {
 
-                SetFlag( Vcb->VcbState, VCB_STATE_FLAG_HOTPLUGGABLE );
+                FatSetVcbFlag( Vcb, VCB_STATE_FLAG_HOTPLUGGABLE );
             }
 
             if (!HotplugInfo.WriteCacheEnableOverride) {
@@ -396,7 +396,7 @@ Return Value:
 
                     NT_ASSERT( FlagOn( Vcb->VcbState, VCB_STATE_FLAG_HOTPLUGGABLE ));
 
-                    SetFlag( Vcb->VcbState, VCB_STATE_FLAG_DEFERRED_FLUSH );
+                    FatSetVcbFlag( Vcb, VCB_STATE_FLAG_DEFERRED_FLUSH );
 
                 //
                 //  Now, for removables that claim to be lockable, lob a lock
@@ -412,7 +412,7 @@ Return Value:
 
                     if (!NT_SUCCESS( Status )) {
 
-                        SetFlag( Vcb->VcbState, VCB_STATE_FLAG_DEFERRED_FLUSH );
+                        FatSetVcbFlag( Vcb, VCB_STATE_FLAG_DEFERRED_FLUSH );
 
                     }
 
@@ -423,7 +423,7 @@ Return Value:
 
         if (FlagOn(Vpb->RealDevice->Characteristics, FILE_REMOVABLE_MEDIA)) {
 
-            SetFlag( Vcb->VcbState, VCB_STATE_FLAG_REMOVABLE_MEDIA );
+            FatSetVcbFlag( Vcb, VCB_STATE_FLAG_REMOVABLE_MEDIA );
         }
 
         //
@@ -433,7 +433,7 @@ Return Value:
 
         if (FlagOn(Vpb->RealDevice->Characteristics, FILE_FLOPPY_DISKETTE)) {
 
-            SetFlag( Vcb->VcbState, VCB_STATE_FLAG_DEFERRED_FLUSH );
+            FatSetVcbFlag( Vcb, VCB_STATE_FLAG_DEFERRED_FLUSH );
         }
 
         //
@@ -2870,7 +2870,7 @@ Return Value:
 
         Vcb->SwapVpb = NULL;
         FatSetVcbCondition( Vcb, VcbBad);
-        SetFlag( Vcb->VcbState, VCB_STATE_FLAG_VPB_MUST_BE_FREED );
+        FatSetVcbFlag( Vcb, VCB_STATE_FLAG_VPB_MUST_BE_FREED );
 
         Result = TRUE;
     }
@@ -2985,7 +2985,7 @@ Return Value:
         //
 
         NT_ASSERT( !FlagOn( Vcb->VcbState, VCB_STATE_FLAG_DISMOUNT_IN_PROGRESS ) );
-        SetFlag( Vcb->VcbState, VCB_STATE_FLAG_DISMOUNT_IN_PROGRESS );
+        FatSetVcbFlag( Vcb, VCB_STATE_FLAG_DISMOUNT_IN_PROGRESS );
 
         //
         //  Close down our internal opens.
@@ -3030,7 +3030,7 @@ Return Value:
             IoReleaseVpbSpinLock( SavedIrql );
 
             NT_ASSERT( FlagOn( Vcb->VcbState, VCB_STATE_FLAG_DISMOUNT_IN_PROGRESS ) );
-            ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_DISMOUNT_IN_PROGRESS );
+            FatClearVcbFlag( Vcb, VCB_STATE_FLAG_DISMOUNT_IN_PROGRESS );
         }
 
     } else if (Force) {
