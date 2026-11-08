@@ -2958,7 +2958,7 @@ static HRESULT ResolveSupersededFeatures(const FM_FEATURE *f, FILE *log)
 
     for (pass = 0; pass < 2; pass++)       /* 0: Conflicts (refuse), 1: Replaces (turn off) */
     {
-        list[0] = L0;
+        list[0] = L'\0';
         GetPrivateProfileStringW(L"Feature", pass ? L"Replaces" : L"Conflicts", L"", list, FM_MAX_DEPS, f->ManifestPath);
         ctx = NULL;
         for (d = wcstok_s(list, L",; ", &ctx); d; d = wcstok_s(NULL, L",; ", &ctx))
@@ -2968,17 +2968,17 @@ static HRESULT ResolveSupersededFeatures(const FM_FEATURE *f, FILE *log)
             if (!d[0] || !_wcsicmp(d, f->Id) || FmGetState(d) != FM_STATE_ENABLED) continue;
             if (!pass)
             {
-                LOGF(log, L"error: cannot turn on %s while %s is on (they install the same files); turn %s off first\n", f->Id, d, d);
-                SetLastMsg(L"Cannot turn on %s while %s is on: they install the same files. Turn %s off first.", f->Name, d, d);
+                LOGF(log, L"error: cannot turn on '%s' while '%s' is on (they install the same files); turn '%s' off first\n", f->Id, d, d);
+                SetLastMsg(L"Cannot turn on '%s' while '%s' is on: they install the same files. Turn '%s' off first.", f->Name, d, d);
                 return HRESULT_FROM_WIN32(ERROR_BUSY);
             }
-            LOGF(log, L"replacing %s with %s: turning %s off first\n", d, f->Id, d);
+            LOGF(log, L"replacing '%s' with '%s': turning '%s' off first\n", d, f->Id, d);
             hr = FmDisableEx(d, 0, log);
             if (FAILED(hr)) return hr;
             if (FmFindFeature(d, &o) && o.PendingReboot)
             {
-                LOGF(log, L"error: %s is still being removed (files in use); reboot, then turn %s on again\n", d, f->Id);
-                SetLastMsg(L"%s could not be removed completely while its files are in use (close the programs that play media), then turn %s on again.", d, f->Name);
+                LOGF(log, L"error: '%s' is still being removed (files in use); reboot, then turn '%s' on again\n", d, f->Id);
+                SetLastMsg(L"'%s' could not be removed completely while its files are in use (close the programs that play media), then turn '%s' on again.", d, f->Name);
                 return HRESULT_FROM_WIN32(ERROR_SUCCESS_REBOOT_REQUIRED);
             }
         }
