@@ -300,7 +300,19 @@ VOID NTAPI Wow64PrepareForApc(PVOID Arg1, PVOID Arg2, PVOID Arg3, PCONTEXT Nativ
     Apc.PreviousTransition = InterlockedExchange(&Previous->InTransition, 1);
     Cpu = *Previous;
     if (Native->SegCs == 0x23) Wow64NativeToContext(&Context, Native);
-    else Wow64CpuToContext(&Context, Previous);
+    else
+    {
+        Wow64CpuToContext(&Context, Previous);
+        /* Interrupted in a plain service: the guest's x87/SSE registers are the interrupted context's */
+        if (!Previous->FpSaved)
+        {
+            /* (XMM0-XMM5 the service entry saved: the native code may have used them since) */
+            RtlCopyMemory(Cpu.ExtendedRegisters, &Native->FltSave, 512);
+            RtlCopyMemory(Cpu.ExtendedRegisters + 160, Previous->ExtendedRegisters + 160, 6 * 16);
+            RtlCopyMemory(Context.ExtendedRegisters, Cpu.ExtendedRegisters, 512);
+            Wow64FloatToLegacy(&Context);
+        }
+    }
     /* Carve the APC frame from the guest ESP. Validate ESP against the guest
      * stack in 32-bit arithmetic before forming the pointer (ProbeForWrite is
      * kernel-only here), so a tiny or wild ESP cannot wrap the subtraction or

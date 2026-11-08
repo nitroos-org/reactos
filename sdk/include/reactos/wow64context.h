@@ -85,6 +85,8 @@ static __inline VOID Wow64ContextToCpu(WOW64_CPU_STATE *To, const WOW64_CONTEXT 
     if (Flags & 32) RtlCopyMemory(To->ExtendedRegisters, From->ExtendedRegisters, 512);
     else if (Flags & 8)
         Wow64LegacyToFloat((XMM_SAVE_AREA32 *)To->ExtendedRegisters, &From->FloatSave);
+    /* The registers are given: the return loads them */
+    if (Flags & (8 | 32)) To->FpSaved = TRUE;
     *(ULONG *)(To->ExtendedRegisters + 24) &= 0xffbf;
     To->EFlags = (To->EFlags & WOW64_EFLAGS_USER_SANITIZE) | 0x202;
 }
