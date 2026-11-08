@@ -2736,6 +2736,13 @@ extern ULONG MmTransitionPrivatePages;
 /* Private standby pages go on this priority list, prototype pages stay on the default one (3) */
 #define MI_PAGER_PRIVATE_STANDBY_PRIORITY 2
 
+/* pagfault.c: below the reserve, a user fault that can wait for the balancer waits instead of taking a page */
+BOOLEAN
+MiUserFaultMustLeavePages(VOID);
+
+BOOLEAN
+MiCanFaultWaitForPages(VOID);
+
 FORCEINLINE
 PFN_NUMBER
 MiGetUsablePageCount(VOID)

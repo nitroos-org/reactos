@@ -386,6 +386,13 @@ MmDeleteKernelStack(IN PVOID StackBase,
     MiReleaseSystemPtes(PointerPte, StackPages + 1, SystemPteSpace);
 }
 
+BOOLEAN
+NTAPI
+MmRebalanceMemoryConsumersAndWait(VOID);
+
+/* Rounds a stack waits for free pages before it fails (each is a balancer pass or at least 10 ms) */
+#define MI_KERNEL_STACK_PAGE_WAITS 1000
+
 PVOID
 NTAPI
 MmCreateKernelStack(IN BOOLEAN GuiStack,
@@ -397,7 +404,7 @@ MmCreateKernelStack(IN BOOLEAN GuiStack,
     MMPTE TempPte, InvalidPte;
     KIRQL OldIrql;
     PFN_NUMBER PageFrameIndex;
-    ULONG i;
+    ULONG i, Retry;
     PSLIST_ENTRY SListEntry;
 
     //
@@ -477,15 +484,42 @@ MmCreateKernelStack(IN BOOLEAN GuiStack,
     //
     // Acquire the PFN DB lock
     //
-    OldIrql = MiAcquirePfnLock();
-
-    /* Fail the stack instead of using page 0 when no page is free */
-    if (MiGetUsablePageCount() < StackPages)
+    for (Retry = 0; ; Retry++)
     {
+        OldIrql = MiAcquirePfnLock();
+
+        /* The pages are there */
+        if (MiGetUsablePageCount() >= StackPages)
+            break;
+
+        /*
+         * No free page, which the file cache and other consumers cause
+         * regularly while a writer fills memory faster than the balancer
+         * frees it. A stack is not a page fault, which waits for the
+         * balancer in this case: failing it fails the thread, and for the
+         * first call of a process into win32k (PsConvertToGuiThread) it
+         * fails the DllMain of user32, so that the process does not start
+         * (0xC0000142). Let the balancer free pages and try again. The wait
+         * is bounded, for a thread that cannot wait for the balancer and for
+         * memory that cannot be freed; the page 0 case stays a failure.
+         */
         MiReleasePfnLock(OldIrql);
-        MiReleaseSystemPtes(StackPte, StackPtes + 1, SystemPteSpace);
-        MiReturnCommit(StackPages);
-        return NULL;
+        if ((Retry >= MI_KERNEL_STACK_PAGE_WAITS) || (KeGetCurrentIrql() >= DISPATCH_LEVEL))
+        {
+            MiReleaseSystemPtes(StackPte, StackPtes + 1, SystemPteSpace);
+            MiReturnCommit(StackPages);
+            return NULL;
+        }
+
+        /* A pass ran (TRUE), or the wait was a short delay (FALSE) */
+        if (MmRebalanceMemoryConsumersAndWait() && (MiGetUsablePageCount() < StackPages))
+        {
+            LARGE_INTEGER Delay;
+
+            /* The pass freed nothing: give the lazy writer a moment, do not spin on passes */
+            Delay.QuadPart = -10 * 10000;
+            KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        }
     }
 
     //
