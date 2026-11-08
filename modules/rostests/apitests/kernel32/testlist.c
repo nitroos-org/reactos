@@ -21,6 +21,7 @@ extern void func_BindIoCompletionCallback(void);
 extern void func_CancelIoEx(void);
 extern void func_IocpCancelStatus(void);
 extern void func_IocpThreadExit(void);
+extern void func_TerminateProcessWait(void);
 extern void func_ApplicationRestart(void);
 extern void func_AppModel(void);
 extern void func_AppPolicy(void);
@@ -274,6 +275,7 @@ const struct test winetest_testlist[] =
     { "CancelIoEx",                  func_CancelIoEx },
     { "IocpCancelStatus",            func_IocpCancelStatus },
     { "IocpThreadExit",              func_IocpThreadExit },
+    { "TerminateProcessWait",        func_TerminateProcessWait },
     { "ApplicationRestart",          func_ApplicationRestart },
     { "AppModel",                    func_AppModel },
     { "AppPolicy", func_AppPolicy },

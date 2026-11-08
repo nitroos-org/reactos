@@ -19,6 +19,7 @@ list(APPEND SOURCE
     CancelIoEx.c
     IocpCancelStatus.c
     IocpThreadExit.c
+    TerminateProcessWait.c
     ApplicationRestart.c
     AppModel.c
     CalendarInfo.c
