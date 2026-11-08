@@ -212,6 +212,11 @@ list(APPEND SOURCE
     windows.devices.input.idl
     windows.foundation.idl
     windows.foundation.numerics.idl
+    windows.globalization.idl
+    windows.networking.connectivity.idl
+    windows.networking.idl
+    windows.security.authentication.onlineid.idl
+    windows.system.userprofile.idl
     windows.graphics.directx.idl
     windows.graphics.effects.idl
     windows.storage.fileproperties.idl

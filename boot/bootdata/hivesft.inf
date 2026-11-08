@@ -258,6 +258,23 @@ HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.De
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager","DllPath",0x00020000,"%SystemRoot%\system32\AppXDeploymentClient.dll"
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager","Threading",0x00010001,0
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager","TrustLevel",0x00010001,1
+; WinRT classes Word 16 activates whose interfaces are in the public Windows Runtime IDL of Wine (host DLLs as registered on Windows 10 22H2, measured 2026-11-08).
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.Connectivity.NetworkInformation","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.Connectivity.NetworkInformation","DllPath",0x00020000,"%SystemRoot%\system32\Windows.Networking.Connectivity.dll"
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.Connectivity.NetworkInformation","Threading",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.Connectivity.NetworkInformation","TrustLevel",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator","DllPath",0x00020000,"%SystemRoot%\system32\Windows.Security.Authentication.OnlineId.dll"
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator","Threading",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator","TrustLevel",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdServiceTicketRequest","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdServiceTicketRequest","DllPath",0x00020000,"%SystemRoot%\system32\Windows.Security.Authentication.OnlineId.dll"
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdServiceTicketRequest","Threading",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.OnlineId.OnlineIdServiceTicketRequest","TrustLevel",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Globalization.Language","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Globalization.Language","DllPath",0x00020000,"%SystemRoot%\system32\Windows.Globalization.dll"
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Globalization.Language","Threading",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Globalization.Language","TrustLevel",0x00010001,0
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Applets",,0x00000012
 
 ; default shell
