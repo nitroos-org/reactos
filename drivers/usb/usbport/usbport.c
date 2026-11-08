@@ -832,6 +832,7 @@ USBPORT_TransferFlushDpc(IN PRKDPC Dpc,
     DPRINT_CORE("USBPORT_TransferFlushDpc: ...\n");
     FdoDevice = DeferredContext;
     USBPORT_FlushDoneTransfers(FdoDevice);
+    USBPORT_FlushMapTransfers(FdoDevice);
 }
 
 BOOLEAN
@@ -2510,6 +2511,15 @@ USBPORT_MapTransfer(IN PDEVICE_OBJECT FdoDevice,
                                           INVALIDATE_ENDPOINT_WORKER_THREAD);
     }
 
+    /* The request is done with the FDO's WCB: let the next transfer have the adapter channel. The
+       transfers queued meanwhile (USBPORT_FlushMapTransfers backed off) are picked up by TransferFlushDpc. */
+    InterlockedExchange(&FdoExtension->MapTransferBusy, 0);
+
+    if (!IsListEmpty(&FdoExtension->MapTransferList))
+    {
+        KeInsertQueueDpc(&FdoExtension->TransferFlushDpc, NULL, NULL);
+    }
+
     return DeallocateObjectKeepRegisters;
 }
 
@@ -2552,6 +2562,19 @@ USBPORT_FlushMapTransfers(IN PDEVICE_OBJECT FdoDevice)
             return;
         }
 
+        /* One request at a time: IoAllocateAdapterChannel keeps its wait context block in the FDO
+           (DeviceObject->Queue.Wcb), so a second call from another CPU before USBPORT_MapTransfer has
+           run (or while the first one waits for map registers) overwrites the first one's DeviceContext.
+           The same transfer is then mapped twice, and the other one never: it ends up twice in the
+           endpoint's TransferList (a self-linked entry that spins the list walkers forever). The
+           callback frees the channel and has TransferFlushDpc flush what is left. */
+        if (InterlockedCompareExchange(&FdoExtension->MapTransferBusy, 1, 0) != 0)
+        {
+            KeReleaseSpinLockFromDpcLevel(&FdoExtension->MapTransferSpinLock);
+            KeLowerIrql(OldIrql);
+            return;
+        }
+
         Transfer = CONTAINING_RECORD(MapTransferList->Flink,
                                      USBPORT_TRANSFER,
                                      TransferLink);
@@ -2576,7 +2599,11 @@ USBPORT_FlushMapTransfers(IN PDEVICE_OBJECT FdoDevice)
                                                        Transfer);
 
         if (!NT_SUCCESS(Status))
+        {
+            /* The callback will not run: do not keep the channel busy for ever */
+            InterlockedExchange(&FdoExtension->MapTransferBusy, 0);
             ASSERT(FALSE);
+        }
     }
 
     KeLowerIrql(OldIrql);
