@@ -1430,9 +1430,9 @@ Return Value:
 
             if ( !FlagOn(Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY)) {
 
-                SetFlag( Vcb->VcbState, VCB_STATE_FLAG_MOUNT_IN_PROGRESS );
+                FatSetVcbFlag( Vcb, VCB_STATE_FLAG_MOUNT_IN_PROGRESS );
                 FatMarkVolume( IrpContext, Vcb, VolumeDirty );
-                ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_MOUNT_IN_PROGRESS );
+                FatClearVcbFlag( Vcb, VCB_STATE_FLAG_MOUNT_IN_PROGRESS );
             }
 
             //
@@ -1584,7 +1584,7 @@ Return Value:
 
             FatSetVcbCondition( OldVcb, VcbGood);
             OldVpb->RealDevice = Vpb->RealDevice;
-            ClearFlag( OldVcb->VcbState, VCB_STATE_VPB_NOT_ON_DEVICE);
+            FatClearVcbFlag( OldVcb, VCB_STATE_VPB_NOT_ON_DEVICE );
 
 #ifdef _MSC_VER
 #pragma prefast( suppress: 28175, "touching Vpb is ok for a filesystem" )
@@ -1617,7 +1617,7 @@ Return Value:
             NT_ASSERT( Vcb->Vpb == Vpb );
 
             Vpb = NULL;
-            SetFlag( Vcb->VcbState, VCB_STATE_FLAG_VPB_MUST_BE_FREED );
+            FatSetVcbFlag( Vcb, VCB_STATE_FLAG_VPB_MUST_BE_FREED );
             FatSetVcbCondition( Vcb, VcbBad );
 
             //
@@ -1657,11 +1657,11 @@ Return Value:
 
                 if (FatIsMediaWriteProtected(IrpContext, TargetDeviceObject)) {
 
-                    SetFlag( OldVcb->VcbState, VCB_STATE_FLAG_WRITE_PROTECTED );
+                    FatSetVcbFlag( OldVcb, VCB_STATE_FLAG_WRITE_PROTECTED );
 
                 } else {
 
-                    ClearFlag( OldVcb->VcbState, VCB_STATE_FLAG_WRITE_PROTECTED );
+                    FatClearVcbFlag( OldVcb, VCB_STATE_FLAG_WRITE_PROTECTED );
                 }
             }
 
@@ -1721,11 +1721,11 @@ Return Value:
 
         if (FatIsMediaWriteProtected(IrpContext, TargetDeviceObject)) {
 
-            SetFlag( Vcb->VcbState, VCB_STATE_FLAG_WRITE_PROTECTED );
+            FatSetVcbFlag( Vcb, VCB_STATE_FLAG_WRITE_PROTECTED );
 
         } else {
 
-            ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_WRITE_PROTECTED );
+            FatClearVcbFlag( Vcb, VCB_STATE_FLAG_WRITE_PROTECTED );
         }
 
 
@@ -1735,7 +1735,7 @@ Return Value:
 
         if (FlagOn(RealDevice->Flags, DO_SYSTEM_BOOT_PARTITION)) {
 
-            SetFlag(Vcb->VcbState, VCB_STATE_FLAG_BOOT_OR_PAGING_FILE);
+            FatSetVcbFlag( Vcb, VCB_STATE_FLAG_BOOT_OR_PAGING_FILE );
 
             if (FlagOn(Vcb->VcbState, VCB_STATE_FLAG_REMOVABLE_MEDIA)) {
 
@@ -2481,11 +2481,11 @@ Return Value:
 
             if (FatIsMediaWriteProtected(IrpContext, Vcb->TargetDeviceObject)) {
 
-                SetFlag( Vcb->VcbState, VCB_STATE_FLAG_WRITE_PROTECTED );
+                FatSetVcbFlag( Vcb, VCB_STATE_FLAG_WRITE_PROTECTED );
 
             } else {
 
-                ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_WRITE_PROTECTED );
+                FatClearVcbFlag( Vcb, VCB_STATE_FLAG_WRITE_PROTECTED );
             }
 
             ClearVerify = TRUE;
@@ -3603,7 +3603,7 @@ Return Value:
         (Vcb->OpenFileCount == (CLONG)( FileObject? 1: 0 ))) {
 
         SetFlag(Vcb->Vpb->Flags, (VPB_LOCKED | VPB_DIRECT_WRITES_ALLOWED));
-        SetFlag(Vcb->VcbState, VCB_STATE_FLAG_LOCKED);
+        FatSetVcbFlag( Vcb, VCB_STATE_FLAG_LOCKED );
         Vcb->FileObjectWithVcbLocked = FileObject;
 
     } else {
@@ -3630,7 +3630,7 @@ Return Value:
 #else
         FatMarkVolume( IrpContext, Vcb, VolumeClean );
 #endif
-        ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+        FatClearVcbFlag( Vcb, VCB_STATE_FLAG_VOLUME_DIRTY );
     }
 
     NT_ASSERT( !NT_SUCCESS(Status) || (Vcb->OpenFileCount == (CLONG)( FileObject? 1: 0 )));
@@ -3684,7 +3684,7 @@ Return Value:
         //
 
         ClearFlag( Vcb->Vpb->Flags, (VPB_LOCKED | VPB_DIRECT_WRITES_ALLOWED) );
-        ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_LOCKED );
+        FatClearVcbFlag( Vcb, VCB_STATE_FLAG_LOCKED );
         Vcb->FileObjectWithVcbLocked = NULL;
 
         Status = STATUS_SUCCESS;
@@ -3859,7 +3859,7 @@ Return Value:
 
         FatSetVcbCondition( Vcb, VcbBad);
 
-        SetFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DISMOUNTED );
+        FatSetVcbFlag( Vcb, VCB_STATE_FLAG_VOLUME_DISMOUNTED );
 
         //
         //  Set a flag in the VPB to let others know that direct volume access is allowed.
@@ -3987,7 +3987,7 @@ Return Value:
 
     FatVerifyVcb( IrpContext, Vcb );
 
-    SetFlag( Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY );
+    FatSetVcbFlag( Vcb, VCB_STATE_FLAG_MOUNTED_DIRTY );
 
     FatMarkVolume( IrpContext, Vcb, VolumeDirty );
 
@@ -5109,7 +5109,7 @@ Return Value:
 
                     NewVpb = ExistingVcb->SwapVpb;
                     ExistingVcb->SwapVpb = NULL;
-                    SetFlag( ExistingVcb->VcbState, VCB_STATE_FLAG_VPB_MUST_BE_FREED );
+                    FatSetVcbFlag( ExistingVcb, VCB_STATE_FLAG_VPB_MUST_BE_FREED );
 
                     RtlZeroMemory( NewVpb, sizeof( VPB ) );
                     NewVpb->Type = IO_TYPE_VPB;
@@ -8279,7 +8279,7 @@ Return Value:
 
                 FatMarkVolume( IrpContext, Vcb, VolumeClean );
 #endif
-                ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+                FatClearVcbFlag( Vcb, VCB_STATE_FLAG_VOLUME_DIRTY );
             }
 
             //
@@ -8304,7 +8304,7 @@ Return Value:
     if ((FlushType != NoFlush) && !MarkedClean && FatIsFatDirty( Vcb )) {
 
         FatMarkVolume( IrpContext, Vcb, VolumeDirty );
-        SetFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+        FatSetVcbFlag( Vcb, VCB_STATE_FLAG_VOLUME_DIRTY );
     }
 #endif
 }

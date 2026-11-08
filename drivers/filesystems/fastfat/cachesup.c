@@ -1438,7 +1438,7 @@ Return Value:
                     FatMarkVolume( IrpContext, Vcb, VolumeDirty );
                 }
 
-                SetFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+                FatSetVcbFlag( Vcb, VCB_STATE_FLAG_VOLUME_DIRTY );
 
                 //
                 //  Lock the volume if it is removable.

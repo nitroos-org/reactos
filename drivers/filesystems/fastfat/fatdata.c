@@ -696,7 +696,7 @@ Return Value:
             NT_ASSERT( NodeType(Vcb) == FAT_NTC_VCB );
             NT_ASSERT( !FlagOn( IrpContext->Flags, IRP_CONTEXT_FLAG_RECURSIVE_CALL));
 
-            SetFlag( Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY );
+            FatSetVcbFlag( Vcb, VCB_STATE_FLAG_MOUNTED_DIRTY );
             SetFlag( IrpContext->Flags, IRP_CONTEXT_FLAG_WAIT);
 
             //
