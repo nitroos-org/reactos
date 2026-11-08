@@ -1,0 +1,10 @@
+[Version]
+Signature = "$Windows NT$"
+
+[AddReg]
+
+; NitroPager: 0 on i386 for 2026.11-1 (the i386 gate is not met yet; the kernel default is 0 here too).
+; To turn it on by default later: write 1 here and change MI_NITRO_PAGER_DEFAULT in ntoskrnl/mm/ARM3/pager.c.
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management","NitroPager",0x00010001,0
+
+; EOF

@@ -2874,9 +2874,40 @@ typedef struct _MI_PAGER_COUNTERS
     ULONG LegacyFreed;
     ULONG LegacyAsked;
     ULONG NoProgressPasses;
+    /* pagerdef */
+    ULONG PacedRequests;
+    ULONG PaceBudgetSpent;
+    ULONG WsFloorSkips;
+    ULONG InjectedAllocFailures;
 } MI_PAGER_COUNTERS;
 
 extern MI_PAGER_COUNTERS MiPagerCounters;
+
+/*
+ * Usable pages (free, zeroed, private standby) that waitable requests leave to
+ * paging I/O at NitroPager >= 1: a waitable user fault (pagfault.c: the 128-page
+ * demand-zero band plus a 128-page paging reserve) and, while paging I/O is in
+ * flight, a waitable RosMm request (MiPagerPaceRequest) stop here.
+ */
+#define MI_PAGER_WAITABLE_FLOOR 256
+
+/* Paging I/O (writer clusters, page-file reads of faults) starts and ends: the reserve and the stuck-I/O check watch it */
+VOID
+NTAPI
+MiPagingIoStart(VOID);
+
+VOID
+NTAPI
+MiPagingIoDone(VOID);
+
+/* A waitable RosMm page request (MmRequestPageMemoryConsumer) while paging I/O is in flight: bounded pacing */
+VOID
+NTAPI
+MiPagerPaceRequest(VOID);
+
+BOOLEAN
+NTAPI
+MiPagerIsWriterThread(VOID);
 
 //
 // MiRemoveZeroPage will use inline code to zero out the page manually if only
@@ -2924,6 +2955,15 @@ MiSynchronizeSystemPde(PMMPDE PointerPde)
 }
 #endif
 
+/*
+ * MmHoldPageTable (mm/i386/page.c) counts a page table it keeps valid across a
+ * section-view fault on top of its used entries: each faulting thread holds one
+ * count, so the count may exceed PTE_PER_PAGE by the number of concurrent holders.
+ * Both counters have room for it (USHORT on two-level paging, 10 bits for 512
+ * entries otherwise); the bound only keeps the Debug check meaningful.
+ */
+#define MI_PAGE_TABLE_HOLD_SLACK 64
+
 #if _MI_PAGING_LEVELS == 2
 FORCEINLINE
 USHORT
@@ -2934,7 +2974,7 @@ MiIncrementPageTableReferences(IN PVOID Address)
     RefCount = &MmWorkingSetList->UsedPageTableEntries[MiGetPdeOffset(Address)];
 
     *RefCount += 1;
-    ASSERT(*RefCount <= PTE_PER_PAGE);
+    ASSERT(*RefCount <= PTE_PER_PAGE + MI_PAGE_TABLE_HOLD_SLACK);
     return *RefCount;
 }
 
@@ -2946,8 +2986,9 @@ MiDecrementPageTableReferences(IN PVOID Address)
 
     RefCount = &MmWorkingSetList->UsedPageTableEntries[MiGetPdeOffset(Address)];
 
+    ASSERT(*RefCount != 0);
     *RefCount -= 1;
-    ASSERT(*RefCount < PTE_PER_PAGE);
+    ASSERT(*RefCount < PTE_PER_PAGE + MI_PAGE_TABLE_HOLD_SLACK);
     return *RefCount;
 }
 #else
@@ -2972,7 +3013,7 @@ MiIncrementPageTableReferences(IN PVOID Address)
     Pfn = MiGetPfnEntry(PFN_FROM_PDE(PointerPde));
     Pfn->OriginalPte.u.Soft.UsedPageTableEntries++;
 
-    ASSERT(Pfn->OriginalPte.u.Soft.UsedPageTableEntries <= PTE_PER_PAGE);
+    ASSERT(Pfn->OriginalPte.u.Soft.UsedPageTableEntries <= PTE_PER_PAGE + MI_PAGE_TABLE_HOLD_SLACK);
 
     return Pfn->OriginalPte.u.Soft.UsedPageTableEntries;
 }
@@ -3001,7 +3042,7 @@ MiDecrementPageTableReferences(IN PVOID Address)
     ASSERT(Pfn->OriginalPte.u.Soft.UsedPageTableEntries != 0);
     Pfn->OriginalPte.u.Soft.UsedPageTableEntries--;
 
-    ASSERT(Pfn->OriginalPte.u.Soft.UsedPageTableEntries < PTE_PER_PAGE);
+    ASSERT(Pfn->OriginalPte.u.Soft.UsedPageTableEntries < PTE_PER_PAGE + MI_PAGE_TABLE_HOLD_SLACK);
 
     return Pfn->OriginalPte.u.Soft.UsedPageTableEntries;
 }

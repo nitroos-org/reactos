@@ -878,6 +878,11 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         UNICODE_STRING Fs = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\FileSystem");
         NgGlobal.Disable8dot3 = NgReadDword(&Fs, L"NtfsDisable8dot3NameCreation") == 1;
     }
+    {
+        /* NitroPager test knob (0x80: paging IRP/MDL allocation failures), read here: never under CoreLock */
+        UNICODE_STRING Mm = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager\\Memory Management");
+        NgPagingSetDebug(NgReadDword(&Mm, L"NitroPagerDebug"));
+    }
     DPRINT1("ntfsng: ReadOnly=%lu\n", NgGlobal.ForceReadOnly);
 #if DBG
     i = NgReadDword(RegistryPath, L"JournalFault");

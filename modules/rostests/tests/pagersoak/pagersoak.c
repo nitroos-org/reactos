@@ -1033,11 +1033,30 @@ static int SupMain(int argc, char **argv)
     return fails || stalls ? 1 : 0;
 }
 
+/* mlcmd cmd=N [addr=N]: one SystemMemoryListInformation set command (NitroPager test commands take addr; 16-byte form) */
+static int MlCmdMain(int argc, char **argv)
+{
+    ULONG64 buf[2];
+    LONG st;
+    HMODULE nt = GetModuleHandleA("ntdll.dll");
+    PFN_NTSSI ssi = (PFN_NTSSI)GetProcAddress(nt, "NtSetSystemInformation");
+    DWORD t0 = GetTickCount();
+    buf[0] = (ULONG64)strtoul(Arg(argc, argv, "cmd", "0"), NULL, 0);
+    buf[1] = (ULONG64)strtoul(Arg(argc, argv, "addr", "0"), NULL, 0);
+    EnablePriv("SeProfileSingleProcessPrivilege");
+    if (!ssi) return 9;
+    st = buf[1] ? ssi(80, buf, sizeof(buf)) : ssi(80, buf, sizeof(ULONG));
+    printf("PAGERH:MLCMD cmd=0x%lx addr=%lu status=0x%08lx secs=%lu\n", (unsigned long)buf[0], (unsigned long)buf[1],
+           (unsigned long)st, (unsigned long)((GetTickCount() - t0) / 1000));
+    return st < 0 ? 1 : 0;
+}
+
 static int Usage(void)
 {
     puts("pagersoak.exe sup [secs=N ratio=1.6 workers=5 churn=2 life=60 trim=MS sect=MB fck=1 commit=clamp|none counters=60 dir=C:\\pagerh label=X flag=N hook=CMD memlist=1 cmdempty=2 cmdflush=3 cmdpurge=4]\n"
          "pagersoak.exe wrk|sect|fck ... (started by sup)\n"
-         "pagersoak.exe stop   create the stop file so that sup ends early");
+         "pagersoak.exe stop   create the stop file so that sup ends early\n"
+         "pagersoak.exe mlcmd cmd=N [addr=N]   one memory list (NitroPager test) command");
     return 9;
 }
 
@@ -1048,6 +1067,7 @@ int main(int argc, char **argv)
     if (!strcmp(argv[1], "wrk")) return WorkerMain(argc, argv);
     if (!strcmp(argv[1], "sect")) return SectMain(argc, argv);
     if (!strcmp(argv[1], "fck")) return FckMain(argc, argv);
+    if (!strcmp(argv[1], "mlcmd")) return MlCmdMain(argc, argv);
     if (!strcmp(argv[1], "stop"))
     {
         strncpy(gDir, Arg(argc, argv, "dir", gDir), sizeof(gDir) - 1);

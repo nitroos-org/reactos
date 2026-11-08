@@ -523,6 +523,9 @@ typedef struct _DEVICETREE_TRAVERSE_CONTEXT
 //
 #define IOP_RESERVE_IRP_COUNT 4
 
+/* Reserve IRPs handed out since boot (the NitroPager counter line shows it) */
+extern volatile LONG IopReserveIrpUses;
+
 typedef struct _RESERVE_IRP_ALLOCATOR
 {
     PIRP ReserveIrp[IOP_RESERVE_IRP_COUNT];
