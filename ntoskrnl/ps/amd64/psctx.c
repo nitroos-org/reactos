@@ -194,6 +194,17 @@ PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
                 if ((Flags & (WOW64_CONTEXT_INTEGER & ~WOW64_CONTEXT_i386)) &&
                     Request->Context.Eax != Cpu->Eax)
                     Cpu->ContextEaxChanged = TRUE;
+                /* A write of the x87/SSE registers lands in the area, which the return then loads whole. In a
+                 * plain service the area holds only XMM0-XMM5: bring the rest of it to the thread's current state
+                 * first, or a write of the x87 registers alone would load stale XMM6-XMM15. */
+                if (!Cpu->FpSaved && (Flags & ((WOW64_CONTEXT_FLOATING_POINT | WOW64_CONTEXT_EXTENDED_REGISTERS) &
+                                               ~WOW64_CONTEXT_i386)))
+                {
+                    UCHAR Xmm[6 * 16];
+                    RtlCopyMemory(Xmm, Cpu->ExtendedRegisters + 160, sizeof(Xmm));
+                    RtlCopyMemory(Cpu->ExtendedRegisters, &Native->FltSave, 512);
+                    RtlCopyMemory(Cpu->ExtendedRegisters + 160, Xmm, sizeof(Xmm));
+                }
                 Wow64ContextToCpu(Cpu, &Request->Context);
                 /* Hardware debug state also governs the next guest return. */
                 if (Flags & (WOW64_CONTEXT_DEBUG_REGISTERS & ~WOW64_CONTEXT_i386))
