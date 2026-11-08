@@ -508,6 +508,74 @@ AtaLegacyReleaseHardwareResources(
     IoReportResourceForDetection(DriverObject, NULL, 0, NULL, NULL, 0, &Dummy);
 }
 
+/*
+ * A PCI IDE controller in compatibility mode owns the legacy I/O ports and IRQ of its channel
+ * (PIIX3: 1F0/IRQ 14 and 170/IRQ 15), and pciide drives them with bus master DMA once PnP starts it.
+ * This driver loads before that happens, so a legacy channel claimed on top of it holds the
+ * port range and the non-shared IRQ and pins the controller to PIO (the PCI function's channel
+ * cannot connect the interrupt and is removed). The resource claim does not reveal the PCI
+ * controller, its resources are not reported yet: look for it in the PCI configuration space.
+ */
+static
+CODE_SEG("INIT")
+BOOLEAN
+AtaLegacyChannelOwnedByPciController(
+    _In_ ULONG IoBase)
+{
+    PCI_SLOT_NUMBER Slot;
+    PCI_COMMON_CONFIG Config;
+    ULONG Device, Function, Length;
+    UCHAR NativeModeBit;
+
+    if (IoBase == 0x1F0)
+        NativeModeBit = 0x01;
+    else if (IoBase == 0x170)
+        NativeModeBit = 0x04;
+    else
+        return FALSE;
+
+    Slot.u.AsULONG = 0;
+    for (Device = 0; Device < PCI_MAX_DEVICES; ++Device)
+    {
+        Slot.u.bits.DeviceNumber = Device;
+
+        for (Function = 0; Function < PCI_MAX_FUNCTION; ++Function)
+        {
+            Slot.u.bits.FunctionNumber = Function;
+
+            Length = HalGetBusDataByOffset(PCIConfiguration,
+                                           0,
+                                           Slot.u.AsULONG,
+                                           &Config,
+                                           0,
+                                           FIELD_OFFSET(PCI_COMMON_CONFIG, HeaderType) + sizeof(UCHAR));
+            if (Length < FIELD_OFFSET(PCI_COMMON_CONFIG, HeaderType) + sizeof(UCHAR) ||
+                Config.VendorID == PCI_INVALID_VENDORID)
+            {
+                /* A missing function 0 means no device at all */
+                if (Function == 0)
+                    break;
+                continue;
+            }
+
+            if (Config.BaseClass == PCI_CLASS_MASS_STORAGE_CTLR &&
+                Config.SubClass == PCI_SUBCLASS_MSC_IDE_CTLR &&
+                !(Config.ProgIf & NativeModeBit))
+            {
+                DPRINT1("PCI IDE controller %04x:%04x at %lu.%lu serves the legacy channel 0x%lx\n",
+                        Config.VendorID, Config.DeviceID, Device, Function, IoBase);
+                return TRUE;
+            }
+
+            /* Single function device */
+            if (Function == 0 && !(Config.HeaderType & PCI_MULTIFUNCTION))
+                break;
+        }
+    }
+
+    return FALSE;
+}
+
 static
 CODE_SEG("INIT")
 BOOLEAN
@@ -526,6 +594,12 @@ AtaLegacyDetectChannel(
     ULONG Spare;
 
     DPRINT("IDE Channel IO %lx, Irq %lu\n", LegacyChannel->IoBase, LegacyChannel->Irq);
+
+    if (!IsNEC_98 && AtaLegacyChannelOwnedByPciController(LegacyChannel->IoBase))
+    {
+        DPRINT("The channel belongs to a PCI IDE controller\n");
+        return FALSE;
+    }
 
     if (!AtaLegacyChannelBuildResources(LegacyChannel, ResourceList))
     {
