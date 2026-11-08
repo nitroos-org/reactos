@@ -618,6 +618,8 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
                     USBPORT_TransferFlushDpc,
                     FdoDevice);
 
+    FdoExtension->MapTransferBusy = 0;
+
     KeInitializeDpc(&FdoExtension->WorkerRequestDpc,
                     USBPORT_WorkerRequestDpc,
                     FdoDevice);
