@@ -194,6 +194,17 @@ PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
                 if ((Flags & (WOW64_CONTEXT_INTEGER & ~WOW64_CONTEXT_i386)) &&
                     Request->Context.Eax != Cpu->Eax)
                     Cpu->ContextEaxChanged = TRUE;
+                /* A write of the x87/SSE registers lands in the area, which the return then loads whole. In a
+                 * plain service the area holds only XMM0-XMM5: bring the rest of it to the thread's current state
+                 * first, or a write of the x87 registers alone would load stale XMM6-XMM15. */
+                if (!Cpu->FpSaved && (Flags & ((WOW64_CONTEXT_FLOATING_POINT | WOW64_CONTEXT_EXTENDED_REGISTERS) &
+                                               ~WOW64_CONTEXT_i386)))
+                {
+                    UCHAR Xmm[6 * 16];
+                    RtlCopyMemory(Xmm, Cpu->ExtendedRegisters + 160, sizeof(Xmm));
+                    RtlCopyMemory(Cpu->ExtendedRegisters, &Native->FltSave, 512);
+                    RtlCopyMemory(Cpu->ExtendedRegisters + 160, Xmm, sizeof(Xmm));
+                }
                 Wow64ContextToCpu(Cpu, &Request->Context);
                 /* Hardware debug state also governs the next guest return. */
                 if (Flags & (WOW64_CONTEXT_DEBUG_REGISTERS & ~WOW64_CONTEXT_i386))
@@ -207,6 +218,15 @@ PspWow64ContextApc(PKAPC Apc, PKNORMAL_ROUTINE *Routine, PVOID *NormalContext,
             {
                 ProbeForRead(Cpu, sizeof(*Cpu), 16);
                 Wow64CpuToContext(&Request->Context, Cpu);
+                /* A plain service keeps the guest's x87/SSE registers where they are: the thread's
+                 * current state, captured above, is the guest's */
+                if (!Cpu->FpSaved)
+                {
+                    /* (XMM0-XMM5 the service entry saved: the native code may have used them since) */
+                    RtlCopyMemory(Request->Context.ExtendedRegisters, &Native->FltSave, 512);
+                    RtlCopyMemory(Request->Context.ExtendedRegisters + 160, Cpu->ExtendedRegisters + 160, 6 * 16);
+                    Wow64FloatToLegacy(&Request->Context);
+                }
                 Request->Context.Dr0 = Native->Dr0; Request->Context.Dr1 = Native->Dr1;
                 Request->Context.Dr2 = Native->Dr2; Request->Context.Dr3 = Native->Dr3;
                 Request->Context.Dr6 = Native->Dr6; Request->Context.Dr7 = Native->Dr7;
@@ -449,6 +469,8 @@ PspWow64StageMainThread(VOID)
         Cpu->EFlags = 0x202;
         *(USHORT *)Cpu->ExtendedRegisters = 0x27f;
         *(ULONG *)(Cpu->ExtendedRegisters + 24) = 0x1f80;
+        /* The registers of a thread that has not run are the area's, which the first return loads */
+        Cpu->FpSaved = TRUE;
         Teb->NtTib.StackBase = Cpu;
         if (Trap->Rsp > ((ULONG_PTR)Cpu & ~(ULONG_PTR)15) - 0x28)
             Trap->Rsp = ((ULONG_PTR)Cpu & ~(ULONG_PTR)15) - 0x28;

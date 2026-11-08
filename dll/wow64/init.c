@@ -531,6 +531,8 @@ ThreadReady:
     ((ULONG *)(ULONG_PTR)State.Esp)[2] = PtrToUlong(GuestContext);
     *(USHORT *)(State.ExtendedRegisters) = 0x27f;
     *(ULONG *)(State.ExtendedRegisters + 24) = 0x1f80;
+    /* The registers of a thread that has not run are the area's, which the first return loads */
+    State.FpSaved = TRUE;
     State.Eip = PtrToUlong(Entry);
     State.EFlags = 0x202;
 #if DBG

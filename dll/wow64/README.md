@@ -55,6 +55,26 @@ Raw compatibility-mode CSTAR calls continue to return
 `STATUS_INVALID_SYSTEM_SERVICE`. The gate does not depend on AMD's
 compatibility-mode SYSCALL instruction.
 
+The cost of a call is the two mode switches plus what the layer adds around
+them, which is kept small. `Wow64CpuDispatch` saves the integer registers and
+XMM0-XMM5 (the kernel and native ntdll use those six) and calls
+`Wow64SystemService` (`fastsvc.c`, built with `-mgeneral-regs-only`). It
+answers the services whose native call takes what the guest passed (handles
+sign-extended, pointers and counts zero-extended: the list is `fastlist.inc`)
+itself, without the argument copy and the cleanup bookkeeping of the full
+translator, and without touching the guest's x87/SSE state; `NtQuerySystemTime`
+reads the shared user data page as the kernel does. Any other service saves
+the whole FXSAVE area first and sets `FpSaved`, and the return restores it. A
+context read of a thread inside a plain service returns its current x87/SSE
+registers (and the saved XMM0-XMM5); a context write names the registers and
+sets `FpSaved`. The usual return is a far jump back to the compatibility code
+segment (the general return, used to start a thread and to leave a callback,
+APC or `NtContinue`, is `IRETQ` and reloads every selector). SS is loaded
+before the far jump: the kernel's SYSRET leaves a stack segment the processor
+does not accept for 32-bit code, and a thread returning without that load
+fails at random. `InTransition` is written with plain stores: its readers
+run in the thread itself (the context APC) or with the thread suspended.
+
 The service IDs come from the generated NT mapping, not a copied Windows
 or Wine numbering table. Each implemented service has an explicit typed
 case; equal argument counts never authorize generic forwarding. Pointer

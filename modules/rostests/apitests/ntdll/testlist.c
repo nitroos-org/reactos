@@ -65,6 +65,8 @@ extern void func_RtlWin10Helpers(void);
 extern void func_RtlConvertDeviceFamilyInfo(void);
 extern void func_Wow64Continue(void);
 extern void func_Wow64ServiceArguments(void);
+extern void func_Wow64FloatState(void);
+extern void func_Wow64QuerySystemTime(void);
 extern void func_NtCreateDirectoryObject(void);
 extern void func_NtCreateFile(void);
 extern void func_NtCreateKey(void);
@@ -320,6 +322,8 @@ const struct test winetest_testlist[] =
     { "RtlConvertDeviceFamilyInfo",     func_RtlConvertDeviceFamilyInfo },
     { "Wow64Continue",                  func_Wow64Continue },
     { "Wow64ServiceArguments",          func_Wow64ServiceArguments },
+    { "Wow64FloatState",                func_Wow64FloatState },
+    { "Wow64QuerySystemTime",           func_Wow64QuerySystemTime },
     { "NtCreateDirectoryObject",        func_NtCreateDirectoryObject },
     { "NtCreateFile",                   func_NtCreateFile },
     { "NtCreateKey",                    func_NtCreateKey },
