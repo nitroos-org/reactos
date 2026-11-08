@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS DirectComposition
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
- * PURPOSE:     Windows.UI.Composition WinRT classes: activation, Compositor and CompositorController (stage 1)
+ * PURPOSE:     Windows.UI.Composition WinRT classes: activation, Compositor and CompositorController (stages 1-3)
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * Windows registers Windows.UI.Composition.Compositor and Windows.UI.Composition.Core.CompositorController
@@ -10,7 +10,9 @@
  * in the mingw-w64 headers). Both classes are agile and free-threaded (documented: marshaling_behavior(agile),
  * threading(both)).
  *
- * This is the shell only. Every member of ICompositor and ICompositorInterop returns E_NOTIMPL and logs a FIXME
+ * The Compositor creates the stage 2 object model (composition.c: ContainerVisual, SpriteVisual, brushes, InsetClip)
+ * and, through ICompositorInterop::CreateGraphicsDevice, the stage 3 graphics device and drawing surfaces
+ * (compgfx.c). Every other member of ICompositor and ICompositorInterop returns E_NOTIMPL and logs a FIXME
  * naming interface and member. An interface that has no clean public source for its IID stays a FIXME as well:
  * QueryInterface for an IID the object does not know logs it by value, so the log shows which interface a
  * caller asks for next. Known gaps (no IID or vtable from learn.microsoft.com, Wine or mingw-w64):
@@ -34,6 +36,7 @@
 #include <windows.foundation.h>
 #include <windows.ui.composition.h>
 #include <windows.ui.composition.interop.h>
+#include "comp_private.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
@@ -52,7 +55,9 @@ typedef __x_ABI_CWindows_CFoundation_CIClosableVtbl IClosableVtbl;
 static const WCHAR name_compositor[] = L"Windows.UI.Composition.Compositor";
 static const WCHAR name_controller[] = L"Windows.UI.Composition.Core.CompositorController";
 
-/* ---- ICompositor shell: every member E_NOTIMPL ---- */
+static IUnknown *comp_identity(ICompositor *i);
+static IUnknown *interop_identity(ICompositorInterop *i);
+/* ---- ICompositor: the object model members are real (stage 2), the rest E_NOTIMPL ---- */
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateColorKeyFrameAnimation(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CIColorKeyFrameAnimation **result)
 {
@@ -63,23 +68,20 @@ static HRESULT STDMETHODCALLTYPE compositor_CreateColorKeyFrameAnimation(__x_ABI
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateColorBrush(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush **result)
 {
-    FIXME("ICompositor::CreateColorBrush: not implemented\n");
-    if (result) *result = NULL;
-    return E_NOTIMPL;
+    return comp_new_object(comp_identity(This), K_COLORBRUSH, &IID___x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush, (void **)result);
 }
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateColorBrushWithColor(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CColor color, __x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush **result)
 {
-    FIXME("ICompositor::CreateColorBrushWithColor: not implemented\n");
-    if (result) *result = NULL;
-    return E_NOTIMPL;
+    HRESULT hr = comp_new_object(comp_identity(This), K_COLORBRUSH,
+            &IID___x_ABI_CWindows_CUI_CComposition_CICompositionColorBrush, (void **)result);
+    if (SUCCEEDED(hr)) CONTAINING_RECORD(*result, struct cobj, colorbrush)->color = color;
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateContainerVisual(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CIContainerVisual **result)
 {
-    FIXME("ICompositor::CreateContainerVisual: not implemented\n");
-    if (result) *result = NULL;
-    return E_NOTIMPL;
+    return comp_new_object(comp_identity(This), K_CONTAINER, &IID___x_ABI_CWindows_CUI_CComposition_CIContainerVisual, (void **)result);
 }
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateCubicBezierEasingFunction(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CFoundation_CNumerics_CVector2 point1, __x_ABI_CWindows_CFoundation_CNumerics_CVector2 point2, __x_ABI_CWindows_CUI_CComposition_CICubicBezierEasingFunction **result)
@@ -119,16 +121,19 @@ static HRESULT STDMETHODCALLTYPE compositor_CreateExpressionAnimationWithExpress
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateInsetClip(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CIInsetClip **result)
 {
-    FIXME("ICompositor::CreateInsetClip: not implemented\n");
-    if (result) *result = NULL;
-    return E_NOTIMPL;
+    return comp_new_object(comp_identity(This), K_INSETCLIP, &IID___x_ABI_CWindows_CUI_CComposition_CIInsetClip, (void **)result);
 }
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateInsetClipWithInsets(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, FLOAT left, FLOAT top, FLOAT right, FLOAT bottom, __x_ABI_CWindows_CUI_CComposition_CIInsetClip **result)
 {
-    FIXME("ICompositor::CreateInsetClipWithInsets: not implemented\n");
-    if (result) *result = NULL;
-    return E_NOTIMPL;
+    HRESULT hr = comp_new_object(comp_identity(This), K_INSETCLIP,
+            &IID___x_ABI_CWindows_CUI_CComposition_CIInsetClip, (void **)result);
+    if (SUCCEEDED(hr))
+    {
+        struct cobj *c = CONTAINING_RECORD(*result, struct cobj, inset);
+        c->inset_l = left; c->inset_t = top; c->inset_r = right; c->inset_b = bottom;
+    }
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateLinearEasingFunction(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CILinearEasingFunction **result)
@@ -168,23 +173,24 @@ static HRESULT STDMETHODCALLTYPE compositor_CreateScopedBatch(__x_ABI_CWindows_C
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateSpriteVisual(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CISpriteVisual **result)
 {
-    FIXME("ICompositor::CreateSpriteVisual: not implemented\n");
-    if (result) *result = NULL;
-    return E_NOTIMPL;
+    return comp_new_object(comp_identity(This), K_SPRITE, &IID___x_ABI_CWindows_CUI_CComposition_CISpriteVisual, (void **)result);
 }
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateSurfaceBrush(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CICompositionSurfaceBrush **result)
 {
-    FIXME("ICompositor::CreateSurfaceBrush: not implemented\n");
-    if (result) *result = NULL;
-    return E_NOTIMPL;
+    return comp_new_object(comp_identity(This), K_SURFBRUSH, &IID___x_ABI_CWindows_CUI_CComposition_CICompositionSurfaceBrush, (void **)result);
 }
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateSurfaceBrushWithSurface(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CICompositionSurface *surface, __x_ABI_CWindows_CUI_CComposition_CICompositionSurfaceBrush **result)
 {
-    FIXME("ICompositor::CreateSurfaceBrushWithSurface: not implemented\n");
-    if (result) *result = NULL;
-    return E_NOTIMPL;
+    HRESULT hr = comp_new_object(comp_identity(This), K_SURFBRUSH,
+            &IID___x_ABI_CWindows_CUI_CComposition_CICompositionSurfaceBrush, (void **)result);
+    if (SUCCEEDED(hr) && FAILED(hr = comp_surface_brush_set_surface(CONTAINING_RECORD(*result, struct cobj, surfbrush), surface)))
+    {
+        __x_ABI_CWindows_CUI_CComposition_CICompositionSurfaceBrush_Release(*result);
+        *result = NULL;
+    }
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE compositor_CreateTargetForCurrentView(__x_ABI_CWindows_CUI_CComposition_CICompositor *This, __x_ABI_CWindows_CUI_CComposition_CICompositionTarget **result)
@@ -241,9 +247,8 @@ static HRESULT STDMETHODCALLTYPE interop_CreateCompositionSurfaceForSwapChain(__
 
 static HRESULT STDMETHODCALLTYPE interop_CreateGraphicsDevice(__x_ABI_CWindows_CUI_CComposition_CICompositorInterop *This, IUnknown *device, __x_ABI_CWindows_CUI_CComposition_CICompositionGraphicsDevice **result)
 {
-    FIXME("ICompositorInterop::CreateGraphicsDevice: not implemented\n");
-    if (result) *result = NULL;
-    return E_NOTIMPL;
+    TRACE("%p, %p, %p\n", This, device, result);
+    return comp_new_graphics_device(interop_identity(This), device, result);
 }
 
 
@@ -397,6 +402,11 @@ static HRESULT STDMETHODCALLTYPE prefix##_GetRuntimeClassName(T *iface, HSTRING 
 { return IInspectable_GetRuntimeClassName(&from(iface)->ident, name); } \
 static HRESULT STDMETHODCALLTYPE prefix##_GetTrustLevel(T *iface, TrustLevel *level) \
 { return IInspectable_GetTrustLevel(&from(iface)->ident, level); }
+
+static IUnknown *comp_identity(ICompositor *i)
+{ return (IUnknown *)&impl_from_ICompositor(i)->IInspectable_iface; }
+static IUnknown *interop_identity(ICompositorInterop *i)
+{ return (IUnknown *)&comp_from_interop(i)->IInspectable_iface; }
 
 FWD_UNKNOWN(compositor, ICompositor, impl_from_ICompositor, IInspectable_iface)
 
