@@ -5,6 +5,9 @@
  *              service, in the service's own (SYSTEM) context, as DrvInst.exe
  *              does on Windows. No user interface: when no driver is found,
  *              the service hands the device to the wizard in the user's session.
+ *              It also installs the driver an administrator picked (wizard,
+ *              Update Driver, UpdateDriverForPlugAndPlayDevices): the service
+ *              passes the INF path it checked, and the install runs here.
  */
 
 #define WIN32_NO_STATUS
@@ -22,7 +25,9 @@
 
 /* The pipe protocol is the one umpnpmgr uses for newdev!ClientSideInstallW */
 #define MAX_EVENT_NAME_BYTES    (128 * sizeof(WCHAR))
-#define MAX_DEVICE_ID_BYTES     ((MAX_DEVICE_ID_LEN + 1) * sizeof(WCHAR))
+#define MAX_DEVICE_ID_BYTES     PNP_INSTALL_MAX_DEVICE_ID_BYTES
+#define MAX_INF_PATH_BYTES      (MAX_PATH * sizeof(WCHAR))
+#define MAX_REQUESTER_BYTES     (256 * sizeof(WCHAR))
 
 static HANDLE hLog = INVALID_HANDLE_VALUE;
 
@@ -37,6 +42,30 @@ HasControlChars(_In_ PCWSTR String)
             return TRUE;
     }
     return FALSE;
+}
+
+/* Does this process run as SYSTEM? An install of an administrator's driver does only there:
+   run by anyone else, drvinst.exe must not stage or install anything */
+static BOOL
+IsSystemProcess(VOID)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    BYTE Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    PSID SystemSid;
+    HANDLE hToken;
+    DWORD Size;
+    BOOL Result = FALSE;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
+        return FALSE;
+    if (GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &Size) &&
+        AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &SystemSid))
+    {
+        Result = EqualSid(((PTOKEN_USER)Buffer)->User.Sid, SystemSid);
+        FreeSid(SystemSid);
+    }
+    CloseHandle(hToken);
+    return Result;
 }
 
 static VOID
@@ -159,6 +188,72 @@ LogAccount(VOID)
     CloseHandle(hToken);
 }
 
+/* Header of the device install log section, by who asked for the install */
+static PCSTR
+SectionTitle(_In_ DWORD UiMode, _In_ DWORD Origin)
+{
+    if (UiMode != NEWDEV_UI_INSTALL_INF)
+        return "Hardware initiated";
+    switch (Origin)
+    {
+        case PNP_INSTALL_ORIGIN_WIZARD:       return "Wizard selected driver";
+        case PNP_INSTALL_ORIGIN_UPDATEDRIVER: return "UpdateDriverForPlugAndPlayDevices";
+        default:                              return "DevInstall selected driver";
+    }
+}
+
+/* Is the INF in %SystemRoot%\inf already? Then there is nothing to stage */
+static BOOL
+IsSystemInf(_In_ PCWSTR InfPath)
+{
+    WCHAR InfDir[MAX_PATH];
+    PCWSTR FileName;
+    UINT Length;
+
+    Length = GetSystemWindowsDirectoryW(InfDir, _countof(InfDir));
+    if (Length == 0 || Length + 5 >= _countof(InfDir))
+        return FALSE;
+    wcscat(InfDir, L"\\inf\\");
+    FileName = wcsrchr(InfPath, L'\\');
+    if (!FileName)
+        return FALSE;
+    FileName++;
+    return ((SIZE_T)(FileName - InfPath) == wcslen(InfDir) &&
+            _wcsnicmp(InfPath, InfDir, FileName - InfPath) == 0);
+}
+
+/* Stages the driver package (the INF) into %SystemRoot%\inf as oemN.inf, as SYSTEM */
+static BOOL
+StageDriverPackage(_In_ PCWSTR InfPath)
+{
+    WCHAR OemInf[MAX_PATH];
+    DWORD Error;
+
+    if (IsSystemInf(InfPath))
+    {
+        LogPrint("     sto: %ls is a system INF, nothing to stage", InfPath);
+        return TRUE;
+    }
+
+    OemInf[0] = UNICODE_NULL;
+    if (SetupCopyOEMInfW(InfPath, NULL, SPOST_NONE, SP_COPY_NOOVERWRITE, OemInf, _countof(OemInf), NULL, NULL))
+    {
+        LogPrint("     sto: Driver package %ls staged as %ls", InfPath, OemInf);
+        return TRUE;
+    }
+
+    Error = GetLastError();
+    if (Error == ERROR_FILE_EXISTS)
+    {
+        LogPrint("     sto: Driver package %ls is staged already as %ls", InfPath, OemInf);
+        return TRUE;
+    }
+
+    LogPrint("     sto: Cannot stage %ls, error 0x%08lx", InfPath, Error);
+    SetLastError(Error);
+    return FALSE;
+}
+
 static BOOL
 ReadPipe(_In_ HANDLE hPipe, _Out_writes_bytes_(Size) PVOID Buffer, _In_ DWORD Size)
 {
@@ -193,10 +288,11 @@ int WINAPI
 wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nShowCmd)
 {
     HANDLE hPipe, hEvent;
-    PWSTR EventName = NULL, DeviceInstance = NULL;
+    PWSTR EventName = NULL, DeviceInstance = NULL, InfPath = NULL, Requester = NULL;
     BOOL Installed = FALSE, NeedRestart = FALSE;
-    DWORD UiMode, Error = ERROR_SUCCESS;
+    DWORD UiMode, Origin = 0, Error = ERROR_SUCCESS;
     CHAR Time[32];
+    PWSTR Text;
 
     UNREFERENCED_PARAMETER(hInstance);
     UNREFERENCED_PARAMETER(hPrevInstance);
@@ -225,19 +321,62 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nSh
         goto Quit;
     }
 
+    /* An install an administrator asked for: the INF, who asked for it, and from where */
+    if (UiMode == NEWDEV_UI_INSTALL_INF)
+    {
+        /* Before anything is read, logged or staged */
+        if (!IsSystemProcess())
+        {
+            Error = ERROR_ACCESS_DENIED;
+            goto Quit;
+        }
+        InfPath = ReadPipeString(hPipe, MAX_INF_PATH_BYTES);
+        if (!InfPath || HasControlChars(InfPath) || !ReadPipe(hPipe, &Origin, sizeof(Origin)))
+        {
+            Error = ERROR_INVALID_DATA;
+            goto Quit;
+        }
+        Requester = ReadPipeString(hPipe, MAX_REQUESTER_BYTES);
+        if (!Requester)
+        {
+            Error = ERROR_INVALID_DATA;
+            goto Quit;
+        }
+        /* The account name goes into the log: no control characters (no fake log lines) */
+        for (Text = Requester; *Text != UNICODE_NULL; Text++)
+        {
+            if (*Text < L' ' || *Text == 0x7f)
+                *Text = L'?';
+        }
+    }
+
     OpenDeviceLog();
     LogPrint("");
-    LogPrint(">>>  [Device Install (Hardware initiated) - %ls]", DeviceInstance);
+    LogPrint(">>>  [Device Install (%s) - %ls]", SectionTitle(UiMode, Origin), DeviceInstance);
     LogTime(Time, sizeof(Time), TRUE);
     LogPrint(">>>  Section start %s", Time);
     LogPrint("      cmd: %ls", GetCommandLineW());
     LogAccount();
     LogTime(Time, sizeof(Time), FALSE);
+    if (InfPath)
+    {
+        LogPrint("     ndv: Requested by %ls", Requester);
+        LogPrint("     ndv: INF: %ls", InfPath);
+    }
     LogPrint("     ndv: {Install Device: %ls} %s", DeviceInstance, Time);
 
-    /* Driver search in the system INF directory and install, without UI */
     SetLastError(ERROR_SUCCESS);
-    Installed = DevInstallW(NULL, NULL, DeviceInstance, SW_HIDE);
+    if (InfPath)
+    {
+        /* The driver the administrator picked: stage its package, then install it, without UI */
+        Installed = StageDriverPackage(InfPath) &&
+                    DevInstallFromInfW(DeviceInstance, InfPath, 0);
+    }
+    else
+    {
+        /* Driver search in the system INF directory and install, without UI */
+        Installed = DevInstallW(NULL, NULL, DeviceInstance, SW_HIDE);
+    }
     if (!Installed)
     {
         Error = GetLastError();
@@ -288,6 +427,10 @@ Quit:
         HeapFree(GetProcessHeap(), 0, EventName);
     if (DeviceInstance)
         HeapFree(GetProcessHeap(), 0, DeviceInstance);
+    if (InfPath)
+        HeapFree(GetProcessHeap(), 0, InfPath);
+    if (Requester)
+        HeapFree(GetProcessHeap(), 0, Requester);
     /* The Plug and Play service shows the restart page in the user's session */
     if (Installed)
         return NeedRestart ? ERROR_SUCCESS_REBOOT_REQUIRED : ERROR_SUCCESS;

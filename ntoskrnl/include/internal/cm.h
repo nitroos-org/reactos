@@ -224,6 +224,10 @@ typedef struct _CM_KEY_BODY
     /* ReactOS specific -- the WoW64 view (KEY_WOW64_32KEY, KEY_WOW64_64KEY or 0)
      * the key was opened in. A relative open that names no view uses it. */
     ULONG Wow64View;
+
+    /* ReactOS specific -- KeySetHandleTagsInformation: the tags the caller
+     * set on this handle (per handle, not per key; nothing here reads them) */
+    ULONG HandleTags;
 } CM_KEY_BODY, *PCM_KEY_BODY;
 
 //
@@ -1351,6 +1355,13 @@ CmSetValueKey(
     IN ULONG Type,
     IN PVOID Data,
     IN ULONG DataSize);
+
+NTSTATUS
+NTAPI
+CmSetKeyInformation(
+    _In_ PCM_KEY_BODY KeyBody,
+    _In_ KEY_SET_INFORMATION_CLASS KeySetInformationClass,
+    _In_ PVOID KeySetInformation);
 
 NTSTATUS
 NTAPI

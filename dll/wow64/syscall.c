@@ -2298,6 +2298,8 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtRenameKey: return NtRenameKey(H(0), String32(&Name, P(1)));
     case W64_NtDeleteValueKey: return NtDeleteValueKey(H(0), String32(&Name, P(1)));
     case W64_NtFlushKey: return NtFlushKey(H(0));
+    /* KEY_WRITE_TIME_INFORMATION is a LARGE_INTEGER and every other class a ULONG: the same bytes in both ABIs. */
+    case W64_NtSetInformationKey: return NtSetInformationKey(H(0), a[1], P(2), a[3]);
     case W64_NtCreateJobObject:
         PROBE(0); ATTR(2);
         Status = NtCreateJobObject(&Cleanup->Handle, a[1], OA(2));
@@ -3926,7 +3928,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         switch (Number)
         {
         case W64_NtQueryInformationJobObject: case W64_NtQueryInformationPort:
-        case W64_NtSetInformationKey: Length = a[1]; break;
+            Length = a[1]; break;
         default: Length = 0; break;
         }
         UNSUPPORTED(SERVICE, Length);

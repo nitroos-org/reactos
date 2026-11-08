@@ -1193,7 +1193,9 @@ static xmlDocPtr create_xmldoc_for_text(BSTR xml)
     xmlChar *str = xmlchar_from_wchar(xml);
     xmlDocPtr doc;
 
-    doc = xmlParseMemory((const char *)str, xmlStrlen(str));
+    /* The text is UTF-8 here whatever its XML declaration says: IXMLDOMDocument::xml keeps the declaration
+       of the loaded text (e.g. encoding="utf-16"), which must not make libxml2 re-decode UTF-8 bytes. */
+    doc = xmlReadMemory((const char *)str, xmlStrlen(str), NULL, "UTF-8", XML_PARSE_IGNORE_ENC);
     free(str);
     return doc;
 }
