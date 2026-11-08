@@ -1,11 +1,13 @@
 /*
  * mfttest: feeds an ADTS AAC file through an AAC decoder MFT and writes the decoded audio, for the checks of the
  * "AAC audio decoder (AAC-LC)" feature (compare with FFmpeg's own decode of the same file, refuse HE-AAC / non-LC).
- *   mfttest <dll|-> <in.aac> <out.raw> <adts|raw> [pcm16|float] [mainflip]
+ *   mfttest <dll|-> <in.aac> <out.raw> <adts|raw> [pcm16|float] [mainflip|-] [asc=<hex>]
  *     dll       load this DLL and call its DllGetClassObject (no registration needed); "-" = CoCreateInstance(CLSID)
  *     adts      MF_MT_AAC_PAYLOAD_TYPE 1: the frames go in with their ADTS headers
  *     raw       payload type 0: headers stripped, MF_MT_USER_DATA = 12 byte HEAACWAVEINFO tail + AudioSpecificConfig (as Firefox)
- *     mainflip  rewrite the ADTS profile of every frame to 0 (AAC Main) first: the MFT must refuse it
+ *     mainflip  rewrite the ADTS profile of every frame to 0 (AAC Main) first: the MFT must refuse it ("-" = no)
+ *     asc=<hex> raw only: use this AudioSpecificConfig (e.g. an explicit HE-AAC one taken from an MP4) instead of the
+ *               one built from the ADTS header
  * Prints one line: RESULT in=<frames> out=<frames> bytes=<n> firsterr=<hr> setinput=<hr>.  Mingw build, see build-tests.sh.
  * LICENSE: LGPL-2.1-or-later
  */
@@ -29,7 +31,8 @@ int main(int argc, char **argv)
     FILE *f, *o;
     unsigned char *buf;
     long size, pos = 0;
-    int raw, flt, flip, in = 0, out = 0;
+    int raw, flt, flip, in = 0, out = 0, ascn = 0;
+    unsigned char asc[64];
     HRESULT hr, first = S_OK, seti = S_OK;
     IMFTransform *mft = NULL;
     IMFMediaType *t, *ot;
@@ -41,6 +44,11 @@ int main(int argc, char **argv)
     raw = !strcmp(argv[4], "raw");
     flt = argc > 5 && !strcmp(argv[5], "float");
     flip = argc > 6 && !strcmp(argv[6], "mainflip");
+    if (argc > 7 && !strncmp(argv[7], "asc=", 4))
+    {
+        const char *h = argv[7] + 4;
+        for (; h[0] && h[1] && ascn < 60; h += 2) { unsigned v; sscanf(h, "%2x", &v); asc[ascn++] = (unsigned char)v; }
+    }
     f = fopen(argv[2], "rb");
     if (!f) { perror("in"); return 2; }
     fseek(f, 0, SEEK_END); size = ftell(f); fseek(f, 0, SEEK_SET);
@@ -74,11 +82,13 @@ int main(int argc, char **argv)
     IMFMediaType_SetUINT32(t, &MF_MT_AAC_PAYLOAD_TYPE, raw ? 0 : 1);
     if (raw)
     {
-        BYTE ud[14] = { 0, 0, 0x29, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        BYTE ud[12 + 64] = { 0, 0, 0x29, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        DWORD udn = 14;
         unsigned prof = ((buf[2] >> 6) & 3) + 1, sf = (buf[2] >> 2) & 15, cc = ((buf[2] & 1) << 2) | (buf[3] >> 6);
         unsigned v = (prof << 11) | (sf << 7) | (cc << 3);
         ud[12] = v >> 8; ud[13] = v & 0xff;
-        IMFMediaType_SetBlob(t, &MF_MT_USER_DATA, ud, sizeof(ud));
+        if (ascn) { memcpy(ud + 12, asc, ascn); udn = 12 + ascn; }
+        IMFMediaType_SetBlob(t, &MF_MT_USER_DATA, ud, udn);
     }
     else
     {
