@@ -9,9 +9,11 @@
 #include <apitest.h>
 
 extern void func_DOMDocument(void);
+extern void func_SchemaCache(void);
 
 const struct test winetest_testlist[] =
 {
     { "DOMDocument", func_DOMDocument },
+    { "SchemaCache", func_SchemaCache },
     { 0, 0 }
 };
