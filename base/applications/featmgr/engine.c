@@ -2947,6 +2947,45 @@ static void DropFetched(WCHAR *fetched, LPCWSTR id, FILE *log)
     if (FmGetPayloadDir(id, dir, MAX_PATH)) RemoveDirectoryW(dir);
 }
 
+/* [Feature] Conflicts=<id,...> and Replaces=<id,...>: features that own the same files/keys as this one (a newer
+ * variant of an add-on). An enabled Replaces feature is turned off first (its files and keys are removed or its backups
+ * restored, then this one is applied); an enabled Conflicts feature refuses the enable. Called after the payload is
+ * staged, so a failed download leaves the old feature in place. */
+static HRESULT ResolveSupersededFeatures(const FM_FEATURE *f, FILE *log)
+{
+    WCHAR list[FM_MAX_DEPS], *ctx, *d;
+    int pass;
+
+    for (pass = 0; pass < 2; pass++)       /* 0: Conflicts (refuse), 1: Replaces (turn off) */
+    {
+        list[0] = L0;
+        GetPrivateProfileStringW(L"Feature", pass ? L"Replaces" : L"Conflicts", L"", list, FM_MAX_DEPS, f->ManifestPath);
+        ctx = NULL;
+        for (d = wcstok_s(list, L",; ", &ctx); d; d = wcstok_s(NULL, L",; ", &ctx))
+        {
+            FM_FEATURE o;
+            HRESULT hr;
+            if (!d[0] || !_wcsicmp(d, f->Id) || FmGetState(d) != FM_STATE_ENABLED) continue;
+            if (!pass)
+            {
+                LOGF(log, L"error: cannot turn on %s while %s is on (they install the same files); turn %s off first\n", f->Id, d, d);
+                SetLastMsg(L"Cannot turn on %s while %s is on: they install the same files. Turn %s off first.", f->Name, d, d);
+                return HRESULT_FROM_WIN32(ERROR_BUSY);
+            }
+            LOGF(log, L"replacing %s with %s: turning %s off first\n", d, f->Id, d);
+            hr = FmDisableEx(d, 0, log);
+            if (FAILED(hr)) return hr;
+            if (FmFindFeature(d, &o) && o.PendingReboot)
+            {
+                LOGF(log, L"error: %s is still being removed (files in use); reboot, then turn %s on again\n", d, f->Id);
+                SetLastMsg(L"%s could not be removed completely while its files are in use (close the programs that play media), then turn %s on again.", d, f->Name);
+                return HRESULT_FROM_WIN32(ERROR_SUCCESS_REBOOT_REQUIRED);
+            }
+        }
+    }
+    return S_OK;
+}
+
 HRESULT FmEnable(LPCWSTR id, FILE *log)
 {
     HRESULT result;
@@ -3024,6 +3063,13 @@ static HRESULT FmEnableInner(LPCWSTR id, FILE *log)
     if (FAILED(hr))
     {
         LOGF(log, L"enable FAILED (0x%08lx): the payload could not be fetched; nothing was changed\n", hr);
+        if (fetched) HeapFree(GetProcessHeap(), 0, fetched);      /* verified copies stay for the next try */
+        return hr;
+    }
+
+    hr = ResolveSupersededFeatures(&f, log);
+    if (FAILED(hr))
+    {
         if (fetched) HeapFree(GetProcessHeap(), 0, fetched);      /* verified copies stay for the next try */
         return hr;
     }
