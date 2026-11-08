@@ -142,6 +142,7 @@ static const char *ngc_mount_check(struct ngc_vol *v, struct ntfs_volume *vol, s
 #define NGC_PREALLOC_FREE (256LL << 20)
 
 #define NGC_BOUNCE (64 * 1024)
+#define NGC_DIRECT_MAX (1024 * 1024)
 
 static DEFINE_MUTEX(ngc_mount_lock);
 static int ngc_inited;
@@ -1942,12 +1943,24 @@ static int ngc_dev_write(struct ngc_vol *v, u64 off, const u8 *buf, u64 len)
 	int err = 0;
 	v->bdev->kshim_direct++;
 	while (len && !err) {
-		size_t n = (size_t)min_t(u64, len, NGC_BOUNCE);
-		if (buf)
-			memcpy(v->bounce, buf, n);
-		else
-			memset(v->bounce, 0, n);
-		err = kshim_dev_rw(v->bdev, 1, off, v->bounce, n);
+		size_t n;
+		if (buf && !((uintptr_t)buf & 3)) {
+			/*
+			 * A word-aligned caller buffer goes to the device as it is, up to NGC_DIRECT_MAX per request: the
+			 * storage stack splits it at the limit of the adapter and keeps the pieces in flight together,
+			 * where a 64 KB bounce made one synchronous round trip per piece.  An unaligned buffer is
+			 * bounced below the block layer (kshim_dev_rw).
+			 */
+			n = (size_t)min_t(u64, len, NGC_DIRECT_MAX);
+			err = kshim_dev_rw(v->bdev, 1, off, (void *)buf, n);
+		} else {
+			n = (size_t)min_t(u64, len, NGC_BOUNCE);
+			if (buf)
+				memcpy(v->bounce, buf, n);
+			else
+				memset(v->bounce, 0, n);
+			err = kshim_dev_rw(v->bdev, 1, off, v->bounce, n);
+		}
 		off += n;
 		len -= n;
 		if (buf)
