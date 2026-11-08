@@ -78,7 +78,7 @@ extern CRITICAL_SECTION UserTokenLock;
 extern HANDLE hInstallEvent;
 extern HANDLE hNoPendingInstalls;
 extern HANDLE hUserLogOnEvent;
-extern CRITICAL_SECTION DrvInstLock;
+extern HANDLE hDrvInstLock;
 
 /* Device-install event list */
 extern HANDLE hDeviceInstallListMutex;
