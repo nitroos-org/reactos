@@ -151,13 +151,21 @@ if(WRITTEN)
 endif()
 write_if_different("${OUT}/syswow64-livecd.lst" "${_livecd}")
 
+# The BootCD installs SysWOW64 from the cab (wow64-* entries of syswow64.dff) like every other
+# file of the system, so a loose copy next to it only doubles the size of the ISO (177 MB of 32-bit
+# files, 73 MB of them libgallium_wgl.dll). BOOTCD_LOOSE=ON keeps it, for the 32-bit files in the
+# BootCD's own live environment; the LiveCD image always has it.
 foreach(_cd LIVECD BOOTCD)
     if(DEFINED ${_cd}_IN)
         file(READ "${${_cd}_IN}" _base)
         if(NOT _base MATCHES "\n$")
             string(APPEND _base "\n")
         endif()
-        write_if_different("${${_cd}_OUT}" "${_base}${_livecd}")
+        if(_cd STREQUAL "BOOTCD" AND NOT BOOTCD_LOOSE)
+            write_if_different("${${_cd}_OUT}" "${_base}")
+        else()
+            write_if_different("${${_cd}_OUT}" "${_base}${_livecd}")
+        endif()
     endif()
 endforeach()
 

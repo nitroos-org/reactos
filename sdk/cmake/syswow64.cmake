@@ -194,6 +194,7 @@ function(setup_syswow64)
             -D MANIFEST=${_manifest}
             -D LIST=${SYSWOW64_LIST}
             -D DLL_EXPORT_VERSION=${DLL_EXPORT_VERSION}
+            -D BOOTCD_LOOSE=${SYSWOW64_BOOTCD_LOOSE}
             -D OUT=${_out}
             -D LIVECD_IN=${_boot}/livecd.${_cfg}.lst
             -D LIVECD_OUT=${_out}/livecd.${_cfg}.lst
