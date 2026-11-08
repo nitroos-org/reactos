@@ -41,7 +41,7 @@ CRITICAL_SECTION UserTokenLock; /* guards hUserToken: PNP_ReportLogOn writes it,
 HANDLE hInstallEvent = NULL;
 HANDLE hNoPendingInstalls = NULL;
 HANDLE hUserLogOnEvent = NULL; /* auto-reset: set by PNP_ReportLogOn, wakes the install thread */
-CRITICAL_SECTION DrvInstLock;  /* one service-side install (drvinst.exe) at a time: the queue's and the requested ones */
+HANDLE hDrvInstLock = NULL;    /* one service-side install (drvinst.exe) at a time: the queue's and the requested ones */
 
 /* Device-install event list */
 HANDLE hDeviceInstallListMutex;
@@ -156,14 +156,14 @@ static PSECURITY_DESCRIPTOR
 CreateUserPipeSecurity(
     _In_ HANDLE hToken)
 {
-    BYTE Buffer[256];
-    PTOKEN_USER User = (PTOKEN_USER)Buffer;
+    union { TOKEN_USER User; BYTE Bytes[256]; } Buffer; /* ULONG aligned: the kernel probes it */
+    PTOKEN_USER User = &Buffer.User;
     DWORD Size;
     LPWSTR SidString = NULL;
     WCHAR Sddl[160];
     PSECURITY_DESCRIPTOR Sd = NULL;
 
-    if (!GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &Size) ||
+    if (!GetTokenInformation(hToken, TokenUser, &Buffer, sizeof(Buffer), &Size) ||
         !ConvertSidToStringSidW(User->User.Sid, &SidString))
     {
         DPRINT1("Cannot get the user of the token, error %lu\n", GetLastError());
@@ -490,6 +490,32 @@ cleanup:
 }
 
 
+/*
+ * DrvInstLock is held for a whole drvinst.exe run (minutes, with driver copies and class
+ * installers), so it is a mutex waited on with INFINITE, not a critical section: a debug
+ * build breaks into the debugger (killing the service during setup) when a critical
+ * section wait outlasts CriticalSectionTimeout.
+ */
+static
+BOOL
+DrvInstLockEnter(VOID)
+{
+    DWORD Wait;
+
+    if (hDrvInstLock == NULL)
+        return FALSE;
+    Wait = WaitForSingleObject(hDrvInstLock, INFINITE);
+    /* An abandoned mutex (a thread died inside an install) is still ours */
+    return (Wait == WAIT_OBJECT_0 || Wait == WAIT_ABANDONED);
+}
+
+static
+VOID
+DrvInstLockLeave(VOID)
+{
+    ReleaseMutex(hDrvInstLock);
+}
+
 static BOOL
 UserIsLoggedOn(VOID)
 {
@@ -580,9 +606,16 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard, PBOOL NeedWizard)
     /* As on Windows: the install itself (driver search in the system INF
        directory, class installers, registry and file writes) runs here in the
        service context, as SYSTEM, for administrators and standard users alike. */
-    EnterCriticalSection(&DrvInstLock);
-    DeviceInstalled = RunInstallProcess(DeviceInstance, NULL, UiMode, &ExitCode, NULL, 0, NULL);
-    LeaveCriticalSection(&DrvInstLock);
+    if (DrvInstLockEnter())
+    {
+        DeviceInstalled = RunInstallProcess(DeviceInstance, NULL, UiMode, &ExitCode, NULL, 0, NULL);
+        DrvInstLockLeave();
+    }
+    else
+    {
+        DPRINT1("Cannot take the install lock, error %lu\n", GetLastError());
+        DeviceInstalled = FALSE;
+    }
 
     if (DeviceInstalled)
     {
@@ -1076,8 +1109,9 @@ IsRequestCallerAdmin(
 {
     SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
     PSID AdminSid = NULL, SystemSid = NULL;
-    BYTE Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
-    PTOKEN_USER User = (PTOKEN_USER)Buffer;
+    /* ULONG aligned: the kernel probes the buffer's alignment */
+    union { TOKEN_USER User; BYTE Bytes[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE]; } Buffer;
+    PTOKEN_USER User = &Buffer.User;
     WCHAR Name[64], Domain[64];
     DWORD NameLength = _countof(Name), DomainLength = _countof(Domain), Size;
     SID_NAME_USE Use;
@@ -1124,7 +1158,7 @@ IsRequestCallerAdmin(
     if (SystemSid)
         FreeSid(SystemSid);
 
-    if (GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &Size))
+    if (GetTokenInformation(hToken, TokenUser, &Buffer, sizeof(Buffer), &Size))
     {
         if (!LookupAccountSidW(NULL, User->User.Sid, Name, &NameLength, Domain, &DomainLength, &Use))
         {
@@ -1546,9 +1580,16 @@ HandleInstallRequest(
 
     DPRINT1("Install request from %S: '%S' with '%S'\n", Requester, DeviceId, InfPath);
 
-    EnterCriticalSection(&DrvInstLock);
-    Installed = RunInstallProcess(DeviceId, NULL, NEWDEV_UI_INSTALL_INF, &ExitCode, InfPath, Request.Origin, Requester);
-    LeaveCriticalSection(&DrvInstLock);
+    if (DrvInstLockEnter())
+    {
+        Installed = RunInstallProcess(DeviceId, NULL, NEWDEV_UI_INSTALL_INF, &ExitCode, InfPath, Request.Origin, Requester);
+        DrvInstLockLeave();
+    }
+    else
+    {
+        DPRINT1("Cannot take the install lock, error %lu\n", GetLastError());
+        Installed = FALSE;
+    }
 
     if (Installed)
     {
