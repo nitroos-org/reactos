@@ -105,6 +105,6 @@ else
     SRCTAR=nitroaacdec-full-src-$FFVER-$PACK.tar.xz
     FILES="./README.md ./build-aacdec.sh ./nitroaacdec.c ./nitroaacdec.def ./aac-source-offer.txt ./aac-patent-notice.txt"
 fi
-( cd "$HERE" && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --transform 's,^\./,nitro-aacdec/,' \
+( cd "$HERE" && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode=u=rwX,go=rX --transform 's,^\./,nitro-aacdec/,' \
     -cf - $FILES | xz -9e > "$OUT/$SRCTAR" )
 echo "built in $OUT: $(ls "$OUT" | tr '\n' ' ')"
