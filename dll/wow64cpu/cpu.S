@@ -79,10 +79,16 @@ PUBLIC Wow64CpuDispatch
     mov r12, gs:[HEX(30)]
     mov r13, r11
     mov r14, rsp
+    /* The flags: TF, DF and AC are the guest's to keep; the status flags are clobbered by a call in
+     * both ABIs, and every other flag the system call left as the guest had it. POPFQ is slow, so
+     * it is only done when one of those three is set (the general return below always does it). */
     mov eax, [r11 + 16]
+    test eax, HEX(40500)
+    jz .Lflagsdone
     and eax, HEX(240fd7)
     push rax
     popfq
+.Lflagsdone:
     mov ebx, [r11 + 24]
     mov esi, [r11 + 28]
     mov edi, [r11 + 32]
