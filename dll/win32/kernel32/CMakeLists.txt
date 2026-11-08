@@ -234,3 +234,5 @@ add_importlibs(kernel32 ntdll)
 add_pch(kernel32 k32.h SOURCE)
 add_dependencies(kernel32 psdk errcodes asm)
 add_cd_file(TARGET kernel32 DESTINATION reactos/system32 FOR all)
+# The locale tables (winnls/nls) are generated from Unicode CLDR data: its licence notice ships with them
+add_cd_file(FILE ${REACTOS_SOURCE_DIR}/sdk/tools/nlsgen/LICENSE-CLDR DESTINATION reactos/3rdParty NAME_ON_CD Unicode-CLDR-LICENSE.txt FOR all)
