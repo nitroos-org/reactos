@@ -1146,6 +1146,21 @@ PspTerminateThreadByPointer(IN PETHREAD Thread,
              */
             KeForceResumeThread(&Thread->Tcb);
             KeAlertThread(&Thread->Tcb, KernelMode);
+
+            /*
+             * A terminating thread only has its kernel exit path left to run
+             * (the exit APC, handle and address space teardown), but it can
+             * run it only when the scheduler gives it a CPU. A thread of an
+             * idle or background priority class (Firefox runs its content
+             * processes that way) that is ready while normal-priority threads
+             * keep every CPU busy waits in its ready queue for the balance
+             * set manager, which boosts a few threads per CPU per scan, so
+             * TerminateProcess on a process with many such threads could leave
+             * it alive for minutes. Raise the thread to the lowest real-time
+             * priority so that it exits promptly; it does not decay, and the
+             * thread never returns to user mode.
+             */
+            KeSetPriorityThread(&Thread->Tcb, LOW_REALTIME_PRIORITY);
             return Status;
         }
     }
