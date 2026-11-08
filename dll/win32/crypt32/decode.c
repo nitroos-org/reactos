@@ -7000,13 +7000,6 @@ BOOL WINAPI CryptDecodeObjectEx(DWORD dwCertEncodingType, LPCSTR lpszStructType,
          debugstr_a(lpszStructType));
         decodeFunc = CRYPT_LoadDecoderExFunc(dwCertEncodingType, lpszStructType,
          &hFunc);
-        if (!decodeFunc)
-        {
-            if (IS_INTOID(lpszStructType))
-                FIXME("Unimplemented decoder for lpszStructType OID %d\n", LOWORD(lpszStructType));
-            else
-                FIXME("Unsupported decoder for lpszStructType %s\n", lpszStructType);
-        }
     }
     if (decodeFunc)
         ret = decodeFunc(dwCertEncodingType, lpszStructType, pbEncoded,
@@ -7038,6 +7031,16 @@ BOOL WINAPI CryptDecodeObjectEx(DWORD dwCertEncodingType, LPCSTR lpszStructType,
             else
                 ret = pCryptDecodeObject(dwCertEncodingType, lpszStructType,
                  pbEncoded, cbEncoded, dwFlags, pvStructInfo, pcbStructInfo);
+        }
+        else
+        {
+            /* Neither a builtin decoder nor a registered CryptDllDecodeObjectEx or CryptDllDecodeObject function:
+             * wintrust, for one, registers the SPC_* decoders with the non-Ex function, so this is only reached
+             * (and only reported) when no decoder is registered at all. */
+            if (IS_INTOID(lpszStructType))
+                FIXME("Unimplemented decoder for lpszStructType OID %d\n", LOWORD(lpszStructType));
+            else
+                FIXME("Unsupported decoder for lpszStructType %s\n", lpszStructType);
         }
     }
     if (hFunc)

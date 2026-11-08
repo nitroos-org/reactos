@@ -48,6 +48,10 @@ SysWOW64/appxdeploymentclient.dll
 SysWOW64/coremessaging.dll
 # Qt 6.8 (32-bit) activates Windows.UI.ViewManagement.UISettings for its platform theme (registered for 32-bit in hivesft_amd64.inf).
 SysWOW64/windows.ui.dll
+# Word 16 (and other 32-bit callers) activate these Windows.* classes (registered for 32-bit in hivesft_amd64.inf).
+@0x600 SysWOW64/windows.globalization.dll
+@0x600 SysWOW64/windows.networking.connectivity.dll
+@0x600 SysWOW64/windows.security.authentication.onlineid.dll
 # Qt 5.15 (32-bit) creates the Network List Manager (registered for 32-bit in hivesft_amd64.inf).
 SysWOW64/netprofm.dll
 # DirectWrite and its user32 forwarder (Firefox renders text with it)
