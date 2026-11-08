@@ -23,6 +23,7 @@ static BOOLEAN IsPlainService(ULONG Number)
 {
     switch (Number)
     {
+    case W64_NtQuerySystemTime:
 #define FAST_SERVICE(Name, Call) case W64_##Name:
 #include "fastlist.inc"
 #undef FAST_SERVICE
@@ -32,6 +33,18 @@ static BOOLEAN IsPlainService(ULONG Number)
     }
 }
 
+/* NtQuerySystemTime: the kernel (KeQuerySystemTime) reads the system time from the shared user data page
+ * and stores it, so the thunk does the same without entering the kernel. Same checks, same stores: the
+ * output is probed as the kernel's ProbeForWriteLargeInteger does (read and write back; there is no
+ * alignment test), and a fault is the status the kernel's SEH would have returned. */
+static NTSTATUS QuerySystemTime32(ULONG Address)
+{
+    volatile ULONGLONG *Time = (volatile ULONGLONG *)PTR32(Address);
+    *Time = *Time;
+    *Time = *(volatile ULONGLONG *)&SharedUserData->SystemTime;
+    return STATUS_SUCCESS;
+}
+
 /* The guest's argument list is on its stack, where other guest threads can change it: each
  * argument is read once, by the call that takes it. */
 static NTSTATUS PlainService(ULONG Number, const ULONG *Arguments)
@@ -39,6 +52,7 @@ static NTSTATUS PlainService(ULONG Number, const ULONG *Arguments)
 #define A(i) (((volatile const ULONG *)Arguments)[i])
     switch (Number)
     {
+    case W64_NtQuerySystemTime: return QuerySystemTime32(A(0));
 #define FAST_SERVICE(Name, Call) case W64_##Name: return Call;
 #include "fastlist.inc"
 #undef FAST_SERVICE
