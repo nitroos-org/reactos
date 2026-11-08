@@ -68,6 +68,8 @@ typedef struct _FM_FEATURE
     BOOL    BuiltIn;             /* OS tier: the image itself carries it ([Feature] BuiltInFile=), no featmgr record:
                                   * shown Enabled, not removable here */
     WCHAR   Unavailable[256];    /* !PayloadAvailable: why, for the UI ("" = the payload is simply not staged) */
+    WCHAR   Notice[768];         /* [Feature] Notice=: text shown before the feature is turned on (GUI: OK/Cancel box,
+                                  * CLI/log: printed first); "\n" in the manifest is a line break. "" = none */
 } FM_FEATURE;
 
 /* Catalog / layout helpers. featmgr root = %SystemRoot%\Featmgr */

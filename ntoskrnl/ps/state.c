@@ -186,6 +186,69 @@ PsSuspendProcess(IN PEPROCESS Process)
 /* PUBLIC FUNCTIONS **********************************************************/
 
 /*
+ * @name NtAlertThreadByThreadId
+ *
+ *    Windows 8 and later. Sets the thread-id alert of the thread with this
+ *    thread id: a thread blocked in NtWaitForAlertByThreadId returns
+ *    STATUS_ALERTED, and a thread that is not waiting returns from its next
+ *    wait at once. One alert is remembered (they do not add up).
+ */
+NTSTATUS
+NTAPI
+NtAlertThreadByThreadId(IN HANDLE ThreadId)
+{
+    PETHREAD Thread;
+    NTSTATUS Status;
+
+    Status = PsLookupThreadByThreadId(ThreadId, &Thread);
+    if (!NT_SUCCESS(Status)) return STATUS_INVALID_CID;
+
+    KeSetEvent(&Thread->AlertByThreadIdEvent, IO_NO_INCREMENT, FALSE);
+    ObDereferenceObject(Thread);
+    return STATUS_SUCCESS;
+}
+
+/*
+ * @name NtWaitForAlertByThreadId
+ *
+ *    Windows 8 and later. Blocks the calling thread until NtAlertThreadByThreadId
+ *    is called for it (STATUS_ALERTED, which consumes the alert) or the timeout
+ *    (relative if negative, absolute otherwise; NULL: forever) is over
+ *    (STATUS_TIMEOUT). Address is only a hint for the caller (Windows uses it
+ *    for its own bookkeeping) and is not used.
+ */
+NTSTATUS
+NTAPI
+NtWaitForAlertByThreadId(IN PVOID Address OPTIONAL,
+                         IN PLARGE_INTEGER Timeout OPTIONAL)
+{
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    LARGE_INTEGER SafeTimeout;
+    NTSTATUS Status;
+
+    if (Timeout)
+    {
+        _SEH2_TRY
+        {
+            if (PreviousMode != KernelMode) ProbeForReadLargeInteger(Timeout);
+            SafeTimeout = *Timeout;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+
+    Status = KeWaitForSingleObject(&PsGetCurrentThread()->AlertByThreadIdEvent,
+                                   UserRequest,
+                                   PreviousMode,
+                                   FALSE,
+                                   Timeout ? &SafeTimeout : NULL);
+    return (Status == STATUS_SUCCESS) ? STATUS_ALERTED : Status;
+}
+
+/*
  * @implemented
  */
 NTSTATUS

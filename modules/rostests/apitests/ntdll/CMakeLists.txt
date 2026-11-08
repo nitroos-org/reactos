@@ -49,6 +49,7 @@ list(APPEND SOURCE
     RtlFlsValue.c
     RtlUtf8String.c
     NtQueryWnfStateData.c
+    NtAlertThreadByThreadId.c
     RtlWin10Helpers.c
     RtlConvertDeviceFamilyInfo.c
     ZeroBits.c

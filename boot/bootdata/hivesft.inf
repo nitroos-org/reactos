@@ -241,6 +241,15 @@ HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Dispat
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueueController","DllPath",0x00020000,"%SystemRoot%\system32\CoreMessaging.dll"
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueueController","Threading",0x00010001,0
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueueController","TrustLevel",0x00010001,0
+; Windows.UI.Composition.Compositor and .Core.CompositorController are served by dcomp.dll (Windows 10 22H2 registers the same).
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Compositor","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Compositor","DllPath",0x00020000,"%SystemRoot%\system32\dcomp.dll"
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Compositor","Threading",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Compositor","TrustLevel",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Core.CompositorController","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Core.CompositorController","DllPath",0x00020000,"%SystemRoot%\system32\dcomp.dll"
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Core.CompositorController","Threading",0x00010001,0
+HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Core.CompositorController","TrustLevel",0x00010001,0
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings","ActivationType",0x00010001,0
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings","DllPath",0x00020000,"%SystemRoot%\system32\Windows.UI.dll"
 HKLM,"SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings","Threading",0x00010001,0

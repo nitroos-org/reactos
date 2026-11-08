@@ -1,0 +1,26 @@
+Written offer of source code: AAC audio decoder (AAC-LC) feature of NitroOS
+
+The file nitroaacdec.dll (System32 and SysWOW64) contains FFmpeg 9.0.2 (libavcodec and libavutil, LGPL-2.1-or-later),
+patched to remove SBR, PS and USAC, statically linked together with the Media Foundation wrapper (nitroaacdec.c,
+LGPL-2.1-or-later).
+
+You may have the complete corresponding source code, and everything needed to rebuild and relink the DLL:
+
+ 1. The FFmpeg 9.0.2 release tarball, unchanged:
+      https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
+      SHA-256 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
+ 2. Our changes and build: nitroaacdec-src-9.0.2-1.tar.xz (the wrapper source, the FFmpeg patch
+    ffmpeg-9.0.2-aac-lc-only.patch, build-aacdec.sh, README.md and these notices). It is published at the address the
+    feature downloads from, in the same folder as the DLLs:
+      https://repo.nitroos.org/featmgr/aac-lc/<version>-<hash>/nitroaacdec-src-9.0.2-1.tar.xz
+    (the folder is recorded in the featmgr log of the installation), and in the NitroOS source tree under
+    dll/3rdparty/nitro-aacdec.
+ 3. On a CD or other medium, at the cost of the copying: write to the NitroOS maintainers at the address given on
+    https://repo.nitroos.org.
+
+Rebuild: build-aacdec.sh <outdir> (mingw-w64 GCC for x86_64 and i686, make, patch, xz). To use a modified decoder, turn the
+feature off and replace System32\nitroaacdec.dll and SysWOW64\nitroaacdec.dll (the CLSID is registered under
+HKLM\SOFTWARE\Classes\CLSID\{32D186A7-218F-4C75-8876-DD77273A8999}), or register your own build there.
+
+This offer is valid for at least three years from the date you downloaded the feature, and for as long as NitroOS offers
+the feature.

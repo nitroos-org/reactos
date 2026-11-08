@@ -481,6 +481,11 @@ int wmain(int argc, WCHAR **argv)
         WCHAR rid[FM_MAX_ID];
         if (!ResolveInstallId(argv[2], rid, ARRAYSIZE(rid)))
         { Out(L"error: unknown feature '%s'\n", argv[2]); return 3; }
+        {
+            FM_FEATURE nf;
+            if (FmFindFeature(rid, &nf) && nf.State != FM_STATE_ENABLED && nf.Notice[0])
+                Out(L"NOTICE (%s):\n%s\n\n", nf.Name, nf.Notice);
+        }
         hr = FmEnable(rid, stdout);
         if (SUCCEEDED(hr)) PrintPathHint();
         return SUCCEEDED(hr) ? 0 : 3;

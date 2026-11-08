@@ -100,6 +100,7 @@ list(APPEND SOURCE
     FindStringOrdinal.c
     FlushProcessWriteBuffers.c
     FLS.c
+    FlsGetValue2.c
     ForcedRelocation.c
     FormatMessage.c
     FormatMessageInsert.c
