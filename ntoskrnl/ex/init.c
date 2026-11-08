@@ -926,6 +926,40 @@ ExBurnMemory(IN PLOADER_PARAMETER_BLOCK LoaderBlock,
     }
 }
 
+#if !DBG
+/*
+ * TRUE if the (upcased) load options contain Name as a whole option: an exact token, optionally led
+ * by '/', not a substring of another option or of an option's value (/NITROPAGERDEBUGX, /X=NITROPAGERDEBUG).
+ */
+CODE_SEG("INIT")
+static
+BOOLEAN
+ExpLoadOptionIsPresent(
+    _In_opt_ PCSTR Options,
+    _In_ PCSTR Name)
+{
+    SIZE_T Length = strlen(Name);
+    PCSTR p = Options;
+
+    if (p == NULL)
+        return FALSE;
+    while (*p != ANSI_NULL)
+    {
+        while ((*p == ' ') || (*p == '\t') || (*p == '/'))
+            p++;
+        if ((strncmp(p, Name, Length) == 0) &&
+            ((p[Length] == ANSI_NULL) || (p[Length] == ' ') || (p[Length] == '\t') || (p[Length] == '/')))
+        {
+            return TRUE;
+        }
+        /* Next option */
+        while ((*p != ANSI_NULL) && (*p != ' ') && (*p != '\t') && (*p != '/'))
+            p++;
+    }
+    return FALSE;
+}
+#endif
+
 CODE_SEG("INIT")
 VOID
 NTAPI
@@ -1113,7 +1147,7 @@ ExpInitializeExecutive(IN ULONG Cpu,
      * (it reads SystemStartOptions). The load options were upcased above.
      */
 #if !DBG
-    if ((LoaderBlock->LoadOptions == NULL) || (strstr(LoaderBlock->LoadOptions, "NITROPAGERDEBUG") == NULL))
+    if (!ExpLoadOptionIsPresent(LoaderBlock->LoadOptions, "NITROPAGERDEBUG"))
         MiNitroPagerDebug = 0;
 #endif
 

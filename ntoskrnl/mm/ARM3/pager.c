@@ -135,6 +135,8 @@ static volatile ULONG MiPagerFreeRefusedBase;
 #define MI_PAGER_DEBUG_FAIL_WRITES_EARLY 0x200
 /* No pacing of RosMm page requests (MiPagerPaceRequest): A/B tests */
 #define MI_PAGER_DEBUG_NO_PACING         0x400
+/* Waitable faults use the flag-0 floor (MmAvailablePages < 128, pagfault.c) instead of 256 usable pages: A/B tests */
+#define MI_PAGER_DEBUG_OLD_FAULT_FLOOR   0x800
 #define MI_PAGER_FAIL_EARLY_SECONDS      300
 
 /* Writer batch: pages taken per PFN lock hold */
@@ -247,6 +249,8 @@ extern ULONG MiLowWaterPages;
 #define MI_TRIM_EXAMINE_BUDGET  16384
 #define MI_TRIM_PAGE_BUDGET     2048
 #define MI_TRIM_STARVE_LIMIT    3
+/* Pages a process at its working set minimum may lose in its every-8th-pass probe turn */
+#define MI_TRIM_PROBE_PAGES     64
 /* At least as many cursors as processes per pass: a lookup never evicts a cursor stamped in this pass */
 #define MI_TRIM_CURSORS         256
 #define MI_TRIM_PROCESSES       256
@@ -754,8 +758,10 @@ MiWriteModifiedPrivatePagesEx(
         }
 
         MiPagingIoStart();
-        if (InterlockedIncrement(&MiPagerClusterWrites) == 1)
+        /* Stamp first, then count: a reader that sees the count up never pairs it with an older stamp */
+        if (MiPagerClusterWrites == 0)
             MiPagerWriteStamp(&MiPagerWriterIoStart, KeQueryInterruptTime());
+        InterlockedIncrement(&MiPagerClusterWrites);
         if (MiPagerHangWrites)
         {
             LARGE_INTEGER Forever;
@@ -768,7 +774,12 @@ MiWriteModifiedPrivatePagesEx(
         }
         if (NT_SUCCESS(Status))
             Status = MiWritePageFileCluster(Batch, Taken, FileIndex, FirstSlot);
-        MiPagerWriteStamp(&MiPagerWriterIoStart, (InterlockedDecrement(&MiPagerClusterWrites) == 0) ? 0 : KeQueryInterruptTime());
+        /*
+         * A completion restarts the age for the writes still in flight: stamp first, then count down. The
+         * stamp is not cleared at 0 (the stuck check needs a write in flight; the next start restamps)
+         */
+        MiPagerWriteStamp(&MiPagerWriterIoStart, KeQueryInterruptTime());
+        InterlockedDecrement(&MiPagerClusterWrites);
         MiPagingIoDone();
 
         /* Test: hold the completion of this cluster until the test says go (written, referenced, off every list) */
@@ -1203,18 +1214,19 @@ MiPagerIsWriterThread(VOID)
 /*
  * Pacing budget (review rvpagerdef: bounded per call is not bounded per operation; a view fill or a
  * process start asks for hundreds of pages): a thread is paced for at most MI_PAGER_PACE_BUDGET_MS in any
- * MI_PAGER_PACE_WINDOW. Kept in a small table hashed by thread; two threads sharing a slot reset each
- * other's window, which only paces one of them a little more or less (heuristic, no lock).
+ * MI_PAGER_PACE_WINDOW, charged with the time the sleeps really took. Kept in a small table hashed by
+ * thread; a slot held by another thread in its live window is not taken: that request is not paced
+ * (heuristic, no lock; a racing take can only pace a thread a little less).
  */
 #define MI_PAGER_PACE_SLOTS      64
-#define MI_PAGER_PACE_BUDGET_MS  100
+#define MI_PAGER_PACE_BUDGET     (100ULL * 10000)        /* 100 ms, in interrupt-time units */
 #define MI_PAGER_PACE_STEP_MS    10
-#define MI_PAGER_PACE_WINDOW     (10ULL * 1000 * 1000)
+#define MI_PAGER_PACE_WINDOW     (10ULL * 1000 * 1000)   /* 1 s */
 typedef struct _MI_PAGER_PACE_SLOT
 {
     PETHREAD Thread;
     ULONGLONG WindowStart;
-    ULONG UsedMs;
+    ULONGLONG Used;                                       /* pacing time charged in this window (elapsed) */
 } MI_PAGER_PACE_SLOT;
 static MI_PAGER_PACE_SLOT MiPagerPaceSlots[MI_PAGER_PACE_SLOTS];
 
@@ -1238,13 +1250,28 @@ MiPagerPaceRequest(VOID)
 
     Slot = &MiPagerPaceSlots[((ULONG_PTR)Thread >> 6) % MI_PAGER_PACE_SLOTS];
     Now = KeQueryInterruptTime();
-    if ((Slot->Thread != Thread) || ((Now - Slot->WindowStart) >= MI_PAGER_PACE_WINDOW))
+    if (Slot->Thread != Thread)
     {
+        /*
+         * Another thread's slot: take it only once that thread's window is over. A live slot is never
+         * stolen (the owner would get a fresh budget back on its next request); this request is not
+         * paced instead (counted)
+         */
+        if ((Slot->Thread != NULL) && ((Now - Slot->WindowStart) < MI_PAGER_PACE_WINDOW))
+        {
+            InterlockedIncrement((PLONG)&MiPagerCounters.PaceSlotBusy);
+            return;
+        }
         Slot->Thread = Thread;
         Slot->WindowStart = Now;
-        Slot->UsedMs = 0;
+        Slot->Used = 0;
     }
-    if (Slot->UsedMs >= MI_PAGER_PACE_BUDGET_MS)
+    else if ((Now - Slot->WindowStart) >= MI_PAGER_PACE_WINDOW)
+    {
+        Slot->WindowStart = Now;
+        Slot->Used = 0;
+    }
+    if (Slot->Used >= MI_PAGER_PACE_BUDGET)
     {
         InterlockedIncrement((PLONG)&MiPagerCounters.PaceBudgetSpent);
         return;
@@ -1252,21 +1279,25 @@ MiPagerPaceRequest(VOID)
 
     InterlockedIncrement((PLONG)&MiPagerCounters.PacedRequests);
     Delay.QuadPart = -(LONGLONG)MI_PAGER_PACE_STEP_MS * 10000;
-    while ((Slot->UsedMs < MI_PAGER_PACE_BUDGET_MS) &&
+    while ((Slot->Thread == Thread) &&
+           (Slot->Used < MI_PAGER_PACE_BUDGET) &&
            (MiPagingIoInFlight > 0) &&
            (MiGetUsablePageCount() < MI_PAGER_WAITABLE_FLOOR))
     {
+        ULONGLONG Before = KeQueryInterruptTime();
+
         MmRebalanceMemoryConsumers();
         KeDelayExecutionThread(KernelMode, FALSE, &Delay);
-        Slot->UsedMs += MI_PAGER_PACE_STEP_MS;
+        /* Charge what the sleep really took (a timer tick may be 10-16 ms or more) */
+        Slot->Used += KeQueryInterruptTime() - Before;
     }
 }
 
 /*
  * N1 test knob (NitroPagerDebug 0x80): every third IRP or MDL allocation for
  * I/O to a paging file "fails", so that the reserve paths run (Io's reserve
- * IRPs for page reads and writes; NTFS-NG reads the same value for its own
- * reserve IRP and partial MDL). Io calls this before IoAllocateIrp.
+ * IRPs for page reads and writes; NTFS-NG calls this too, for its own reserve
+ * IRP and partial MDL: exported). Io calls this before IoAllocateIrp.
  */
 BOOLEAN
 NTAPI
@@ -1442,7 +1473,7 @@ MiPagerReport(VOID)
             "repurposed %lu inpage %lu errors %lu retries %lu | tagmismatch %lu freerefused %lu | wsmiss %lu starved %lu | "
             "slotshort %lu reclaimed %lu freeslots %Iu | modified %Iu privstandby %lu usable %Iu reserve-low %lu inflight %ld | "
             "balancer trimmed %lu waits %lu | legacy user %lu system %lu available %Iu legacy-freed %lu asked %lu nopass %lu | "
-            "paced %lu pacebudget %lu wsfloor %lu injected %lu ioreserve %ld\n",
+            "paced %lu pacebudget %lu paceslotbusy %lu wsfloor %lu injected %lu ioreserve %ld\n",
             MiPagerCounters.Trimmed, MiPagerCounters.TrimmedDirty, MiPagerCounters.Aged, MiPagerCounters.TrimSkippedDirty,
             MiPagerCounters.Written, MiPagerCounters.Clusters, MiPagerCounters.WriteErrors, MiPagerCounters.WriteNoSlot,
             MiPagerCounters.Repurposed, MiPagerCounters.InPageReads, MiPagerCounters.InPageErrors,
@@ -1453,7 +1484,7 @@ MiPagerReport(VOID)
             MiPagerCounters.BalancerTrimmed, MiPagerCounters.BalancerWaits,
             MiMemoryConsumers[MC_USER].PagesUsed, MiMemoryConsumers[MC_SYSTEM].PagesUsed, (SIZE_T)MmAvailablePages,
             MiPagerCounters.LegacyFreed, MiPagerCounters.LegacyAsked, MiPagerCounters.NoProgressPasses,
-            MiPagerCounters.PacedRequests, MiPagerCounters.PaceBudgetSpent, MiPagerCounters.WsFloorSkips, MiPagerCounters.InjectedAllocFailures,
+            MiPagerCounters.PacedRequests, MiPagerCounters.PaceBudgetSpent, MiPagerCounters.PaceSlotBusy, MiPagerCounters.WsFloorSkips, MiPagerCounters.InjectedAllocFailures,
             IopReserveIrpUses);
     InterlockedExchange(&Busy, 0);
 }
@@ -2180,6 +2211,8 @@ MiPagerBalance(
                 }
                 if (Cursor->Resident > Minimum)
                     Want = (ULONG)min((SIZE_T)Want, Cursor->Resident - Minimum);
+                else
+                    Want = min(Want, MI_TRIM_PROBE_PAGES);   /* the probe turn: refresh Resident, trim little */
             }
 
             Result = MiTrimProcessForPressure(MiTrimList[i], Cursor, Want, Force || Starved, &Got);
