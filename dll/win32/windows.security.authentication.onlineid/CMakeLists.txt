@@ -7,6 +7,7 @@ list(APPEND SOURCE
     main.c
     authenticator.c
     ticket.c
+    async.c
     ${CMAKE_CURRENT_BINARY_DIR}/windows.security.authentication.onlineid_stubs.c
     ${CMAKE_CURRENT_BINARY_DIR}/windows.security.authentication.onlineid.def)
 

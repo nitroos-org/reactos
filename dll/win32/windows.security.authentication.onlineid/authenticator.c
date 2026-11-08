@@ -197,8 +197,20 @@ static HRESULT WINAPI authenticator_GetTrustLevel( IOnlineIdSystemAuthenticatorF
 static HRESULT WINAPI authenticator_GetTicketAsync( IOnlineIdSystemAuthenticatorForUser *iface, IOnlineIdServiceTicketRequest *request,
                                                     IAsyncOperation_OnlineIdSystemTicketResult **operation )
 {
-    FIXME( "iface %p, request %p, operation %p stub!\n", iface, request, operation );
-    return E_NOTIMPL;
+    struct authenticator *impl = impl_from_IOnlineIdSystemAuthenticatorForUser( iface );
+
+    TRACE( "iface %p, request %p, operation %p\n", iface, request, operation );
+
+    /* Measured on Windows 10 22H2 (local account, no Microsoft account): a NULL request is E_POINTER and the operation
+     * pointer is left unwritten; a valid request while the ApplicationId of the authenticator is still its default
+     * (all zeros) is E_INVALIDARG and the operation is NULL. */
+    if (!request || !operation) return E_POINTER;
+    *operation = NULL;
+    if (IsEqualGUID( &impl->application_id, &GUID_NULL )) return E_INVALIDARG;
+
+    /* TODO(oracle): what Windows returns once an ApplicationId is set is not measured (the one probe was spent on the
+     * default). No Microsoft account is signed in here, so the operation completes with no identity. */
+    return create_ticket_async( OnlineIdSystemTicketStatus_Error, E_FAIL, operation );
 }
 
 static HRESULT WINAPI authenticator_put_ApplicationId( IOnlineIdSystemAuthenticatorForUser *iface, GUID value )
