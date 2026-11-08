@@ -178,7 +178,19 @@ static ULONG GetFreeWsleIndex(PMMWSL WsList)
             {
                 ntoskrnl::MiPfnLockGuard PfnLock;
 
-                TempPte.u.Hard.PageFrameNumber = MiRemoveAnyPage(GetNextPageColorForWsList(WsList));
+                /*
+                 * Never page 0 as a page of the list: MiRemoveAnyPage returns 0 when no page is
+                 * usable. Not reachable today (MiInitializeWorkingSetList inserts at most five entries
+                 * into the first page; nothing else inserts), and the working set lock held here rules
+                 * out waiting for the balancer: stop cleanly instead of corrupting memory. A future
+                 * user of the list (P5) must make this a wait or a failure its caller handles.
+                 */
+                PFN_NUMBER PageFrameIndex = MiRemoveAnyPage(GetNextPageColorForWsList(WsList));
+                if (PageFrameIndex == 0)
+                {
+                    KeBugCheckEx(NO_PAGES_AVAILABLE, MiGetUsablePageCount(), 0x5A000000 | MI_ZERO_WAIT_WS_LIST, Index, 0);
+                }
+                TempPte.u.Hard.PageFrameNumber = PageFrameIndex;
                 MiInitializePfnAndMakePteValid(TempPte.u.Hard.PageFrameNumber, PointerPte, TempPte);
             }
 

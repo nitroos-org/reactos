@@ -523,8 +523,8 @@ MiFillSystemPageDirectory(IN PVOID Base,
             /* Grab a page for it */
             MI_SET_USAGE(MI_USAGE_PAGE_TABLE);
             MI_SET_PROCESS2(PsGetCurrentProcess()->ImageFileName);
-            PageFrameIndex = MiRemoveZeroPage(MI_GET_NEXT_COLOR());
-            ASSERT(PageFrameIndex);
+            /* Never page 0: waits for the balancer (the PFN lock may be dropped), stops the system if none comes */
+            PageFrameIndex = MiRemoveZeroPageOrWait(MI_GET_NEXT_COLOR(), &OldIrql, MI_ZERO_WAIT_SYSTEM_PDE);
             TempPde.u.Hard.PageFrameNumber = PageFrameIndex;
 
 #if (_MI_PAGING_LEVELS == 2)
@@ -1145,7 +1145,13 @@ MiSessionCommitPageTables(IN PVOID StartVa,
                 MI_SET_USAGE(MI_USAGE_PAGE_TABLE);
                 MI_SET_PROCESS2(PsGetCurrentProcess()->ImageFileName);
                 Color = (++MmSessionSpace->Color) & MmSecondaryColorMask;
-                PageFrameNumber = MiRemoveZeroPageGated(Color);
+                /* The count can include private standby pages the bounded repurpose scan misses: 0 is a failure here */
+                PageFrameNumber = MiRemoveZeroPage(Color);
+                if (PageFrameNumber == 0)
+                {
+                    MiReleasePfnLock(OldIrql);
+                    break;
+                }
                 TempPde.u.Hard.PageFrameNumber = PageFrameNumber;
                 MI_WRITE_VALID_PDE(StartPde, TempPde);
 
@@ -1206,15 +1212,21 @@ MiSessionCommitPageTables(IN PVOID StartVa,
             /* We don't, so the PDE shouldn't be ready yet */
             ASSERT(StartPde->u.Hard.Valid == 0);
 
-            /* ReactOS check to avoid MiEnsureAvailablePageOrWait */
-            ASSERT(MmAvailablePages >= 32);
-
-            /* Acquire the PFN lock and grab a zero page */
+            /*
+             * Acquire the PFN lock and grab a zero page. No page (none usable, or the bounded
+             * repurpose scan missed): stop, the caller gets STATUS_NO_MEMORY (page 0 used to be
+             * mapped here as a page table in Release builds: the check was an ASSERT)
+             */
             OldIrql = MiAcquirePfnLock();
             MI_SET_USAGE(MI_USAGE_PAGE_TABLE);
             MI_SET_PROCESS2(PsGetCurrentProcess()->ImageFileName);
             Color = (++MmSessionSpace->Color) & MmSecondaryColorMask;
-            PageFrameNumber = MiRemoveZeroPage(Color);
+            PageFrameNumber = (MiGetUsablePageCount() != 0) ? MiRemoveZeroPage(Color) : 0;
+            if (PageFrameNumber == 0)
+            {
+                MiReleasePfnLock(OldIrql);
+                break;
+            }
             TempPde.u.Hard.PageFrameNumber = PageFrameNumber;
             MI_WRITE_VALID_PDE(StartPde, TempPde);
 
@@ -1261,7 +1273,8 @@ MiSessionCommitPageTables(IN PVOID StartVa,
     }
 
     /* Return status */
-    return STATUS_SUCCESS;
+    /* Every PDE of the range must be there now (the loop stops at the first page it could not get) */
+    return (StartPde > EndPde) ? STATUS_SUCCESS : STATUS_NO_MEMORY;
 }
 
 NTSTATUS
