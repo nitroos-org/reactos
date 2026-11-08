@@ -192,6 +192,8 @@ PsSuspendProcess(IN PEPROCESS Process)
  *    thread id: a thread blocked in NtWaitForAlertByThreadId returns
  *    STATUS_ALERTED, and a thread that is not waiting returns from its next
  *    wait at once. One alert is remembered (they do not add up).
+ *    A thread of another process is STATUS_ACCESS_DENIED, also for a process of
+ *    the same user and for a service (measured on Windows 10 22H2).
  */
 NTSTATUS
 NTAPI
@@ -202,6 +204,12 @@ NtAlertThreadByThreadId(IN HANDLE ThreadId)
 
     Status = PsLookupThreadByThreadId(ThreadId, &Thread);
     if (!NT_SUCCESS(Status)) return STATUS_INVALID_CID;
+
+    if (Thread->ThreadsProcess != PsGetCurrentProcess())
+    {
+        ObDereferenceObject(Thread);
+        return STATUS_ACCESS_DENIED;
+    }
 
     KeSetEvent(&Thread->AlertByThreadIdEvent, IO_NO_INCREMENT, FALSE);
     ObDereferenceObject(Thread);

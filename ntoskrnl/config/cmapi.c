@@ -1601,6 +1601,146 @@ CmpQueryNameInformation(
 }
 
 
+/*
+ * NtSetInformationKey, after the caller's buffer has been captured and its
+ * length checked. KeySetInformation is a kernel-mode copy.
+ *
+ * What is stored:
+ *  - KeyWriteTimeInformation: the key's last write time, in the hive (it is
+ *    what NtQueryKey and RegQueryInfoKey return and what the hive keeps).
+ *  - Windows also moves the key's last write time to "now" when one of
+ *    KeyWow64FlagsInformation, KeyControlFlagsInformation,
+ *    KeySetVirtualizationInformation or KeySetDebugInformation is set, even
+ *    with the value the key has (measured: after a run of those calls with
+ *    unchanged values the key's write time was the time of the run; which of
+ *    the four does it was not isolated, so all four do here).
+ *  - KeyWow64FlagsInformation: the key's user flags (4 bits), kept in the
+ *    key control block, where KeyFlagsInformation reads them. They are not
+ *    written to the hive: they last while the key is open, and a hive that
+ *    is saved and loaded again does not carry them.
+ *  - KeyControlFlagsInformation: the virtualization control flags (4 bits),
+ *    kept in the key control block. There is no registry virtualization, so
+ *    nothing acts on them.
+ *  - KeySetVirtualizationInformation: accepted, nothing is stored; there is
+ *    no registry virtualization to mark the key for.
+ *  - KeySetDebugInformation: the 8 debug bits, kept in the key control
+ *    block; nothing reads them (no debug filters).
+ *  - KeySetHandleTagsInformation: the tags of this handle (the key body).
+ */
+NTSTATUS
+NTAPI
+CmSetKeyInformation(
+    _In_ PCM_KEY_BODY KeyBody,
+    _In_ KEY_SET_INFORMATION_CLASS KeySetInformationClass,
+    _In_ PVOID KeySetInformation)
+{
+    PCM_KEY_CONTROL_BLOCK Kcb = KeyBody->KeyControlBlock;
+    NTSTATUS Status = STATUS_SUCCESS;
+    PCM_KEY_NODE Node;
+    PHHIVE Hive;
+    ULONG Value;
+
+    PAGED_CODE();
+
+    /* The handle tags belong to the handle, not to the key */
+    if (KeySetInformationClass == KeySetHandleTagsInformation)
+    {
+        InterlockedExchange((PLONG)&KeyBody->HandleTags,
+                            (LONG)*(PULONG)KeySetInformation);
+        return STATUS_SUCCESS;
+    }
+
+    /* Validate the values before taking any lock */
+    Value = *(PULONG)KeySetInformation;
+    switch (KeySetInformationClass)
+    {
+        case KeyWriteTimeInformation:
+            Value = 0;
+            break;
+
+        case KeyWow64FlagsInformation:
+            /* KcbUserFlags is 4 bits wide */
+            if (Value & ~0xFUL) return STATUS_INVALID_PARAMETER;
+            break;
+
+        case KeyControlFlagsInformation:
+            /* REG_KEY_DONT_VIRTUALIZE, REG_KEY_DONT_SILENT_FAIL, REG_KEY_RECURSE_FLAG */
+            if (Value & ~0xEUL) return STATUS_INVALID_PARAMETER;
+            break;
+
+        case KeySetVirtualizationInformation:
+            /* VirtualTarget, VirtualStore, VirtualSource; Reserved must be 0 */
+            if (Value & ~0x7UL) return STATUS_INVALID_PARAMETER;
+            break;
+
+        case KeySetDebugInformation:
+            if (Value & ~0xFFUL) return STATUS_INVALID_PARAMETER;
+            break;
+
+        default:
+            return STATUS_INVALID_INFO_CLASS;
+    }
+
+    /* Acquire the registry and the KCB, exclusive: the KCB is modified */
+    CmpLockRegistry();
+    CmpAcquireKcbLockExclusive(Kcb);
+
+    /* Don't touch deleted keys */
+    if (Kcb->Delete)
+    {
+        Status = STATUS_KEY_DELETED;
+        goto Quickie;
+    }
+
+    /* Lock flushes, then change the key node in the hive: every class here
+     * moves the key's write time */
+    Hive = Kcb->KeyHive;
+    CmpLockHiveFlusherShared((PCMHIVE)Hive);
+
+    Node = (PCM_KEY_NODE)HvGetCell(Hive, Kcb->KeyCell);
+    ASSERT(Node);
+    if (!HvMarkCellDirty(Hive, Kcb->KeyCell, FALSE))
+    {
+        Status = STATUS_NO_LOG_SPACE;
+    }
+    else
+    {
+        if (KeySetInformationClass == KeyWriteTimeInformation)
+            Node->LastWriteTime = *(PLARGE_INTEGER)KeySetInformation;
+        else
+            KeQuerySystemTime(&Node->LastWriteTime);
+        Kcb->KcbLastWriteTime = Node->LastWriteTime;
+
+        switch (KeySetInformationClass)
+        {
+            case KeyWow64FlagsInformation:
+                Kcb->KcbUserFlags = Value;
+                break;
+
+            case KeyControlFlagsInformation:
+                Kcb->KcbVirtControlFlags = Value;
+                break;
+
+            case KeySetDebugInformation:
+                Kcb->KcbDebug = Value;
+                break;
+
+            default:
+                /* KeyWriteTimeInformation (done), and
+                 * KeySetVirtualizationInformation: no registry
+                 * virtualization here, nothing to mark */
+                break;
+        }
+    }
+    HvReleaseCell(Hive, Kcb->KeyCell);
+    CmpUnlockHiveFlusher((PCMHIVE)Hive);
+
+Quickie:
+    CmpReleaseKcbLock(Kcb);
+    CmpUnlockRegistry();
+    return Status;
+}
+
 NTSTATUS
 NTAPI
 CmQueryKey(_In_ PCM_KEY_CONTROL_BLOCK Kcb,
