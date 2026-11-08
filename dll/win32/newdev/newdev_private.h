@@ -61,6 +61,26 @@ BOOL
 InstallCurrentDriver(
 	IN PDEVINSTDATA DevInstData);
 
+/* stage.c */
+
+/* An INF that needs no staging: in %SystemRoot%\inf already, or a staged copy */
+BOOL
+IsStagedOrSystemInf(
+    IN LPCWSTR InfPath);
+
+/* Copies the driver package of SourceInf (a path this process can read: local, UNC, a mapped
+   drive, longer than MAX_PATH) into a new protected directory below %SystemRoot%\PnpStage;
+   Win32 error code. StagedInf and StageDirectory are MAX_PATH characters. */
+DWORD
+StageDriverPackage(
+    IN LPCWSTR SourceInf,
+    OUT PWSTR StagedInf,
+    OUT PWSTR StageDirectory);
+
+VOID
+RemoveStagedPackage(
+    IN LPCWSTR StageDirectory);
+
 BOOL
 InstallSelectedDriver(
 	IN PDEVINSTDATA DevInstData,

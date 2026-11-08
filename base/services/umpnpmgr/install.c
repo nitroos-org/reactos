@@ -1096,7 +1096,8 @@ IsRequestCallerAdmin(
     GotToken = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &hToken);
     if (!RevertToSelf())
     {
-        /* Never go on in the client's context */
+        /* Never go on in the client's context: the caller ends this thread. It is a worker
+           thread of its own (HandleInstallRequest never runs on the accept thread). */
         DPRINT1("RevertToSelf failed, error %lu\n", GetLastError());
         if (GotToken)
             CloseHandle(hToken);
@@ -1180,19 +1181,146 @@ ReadRequestString(
     return String;
 }
 
+/* The write-type access rights: an ACE that gives any of them to anybody but SYSTEM or
+   Administrators makes a directory unprotected */
+#define STAGE_WRITE_MASK (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA | \
+                          FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | FILE_DELETE_CHILD | \
+                          DELETE | WRITE_DAC | WRITE_OWNER)
+
 /*
- * The INF path must be a full, canonical path to an .inf file on a local drive that the
- * service sees (no UNC, \\?\ or \\.\ paths, no relative parts, no network drive, which a
- * SYSTEM process may not have).
+ * Can only SYSTEM and Administrators change this directory? A volume that keeps no ACLs
+ * (FAT, or a file system that refuses the query) has nothing to check, and nothing protects the
+ * rest of that volume either. (The volume's FILE_PERSISTENT_ACLS flag is not used: the NTFS
+ * driver does not set it, though it keeps ACLs.)
+ */
+static BOOL
+IsDirectoryProtected(
+    _In_ PCWSTR Path)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID AdminSid = NULL, SystemSid = NULL;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    PACL Dacl;
+    PACE_HEADER Ace;
+    PACCESS_ALLOWED_ACE Allowed;
+    WCHAR Root[4], FsName[32];
+    DWORD Size = 0, Error, i;
+    BOOL Present, Defaulted, Result = FALSE;
+
+    /* The FAT family has no ACLs: nothing to check (nor any protection on that volume) */
+    Root[0] = Path[0];
+    Root[1] = L':';
+    Root[2] = L'\\';
+    Root[3] = UNICODE_NULL;
+    if (GetVolumeInformationW(Root, NULL, 0, NULL, NULL, NULL, FsName, _countof(FsName)) &&
+        _wcsnicmp(FsName, L"FAT", 3) == 0)
+    {
+        return TRUE;
+    }
+
+    if (!GetFileSecurityW(Path, DACL_SECURITY_INFORMATION, NULL, 0, &Size))
+    {
+        Error = GetLastError();
+        if (Error == ERROR_NOT_SUPPORTED || Error == ERROR_INVALID_FUNCTION || Error == ERROR_CALL_NOT_IMPLEMENTED)
+            return TRUE;
+    }
+    if (Size == 0)
+        return FALSE;
+    Sd = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (!Sd)
+        return FALSE;
+    if (!GetFileSecurityW(Path, DACL_SECURITY_INFORMATION, Sd, Size, &Size) ||
+        !GetSecurityDescriptorDacl(Sd, &Present, &Dacl, &Defaulted))
+    {
+        goto Quit;
+    }
+    /* No DACL at all is access for everybody */
+    if (!Present || Dacl == NULL)
+        goto Quit;
+
+    if (!AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+                                  0, 0, 0, 0, 0, 0, &AdminSid) ||
+        !AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID,
+                                  0, 0, 0, 0, 0, 0, 0, &SystemSid))
+    {
+        goto Quit;
+    }
+
+    Result = TRUE;
+    for (i = 0; i < Dacl->AceCount && Result; i++)
+    {
+        if (!GetAce(Dacl, i, (PVOID*)&Ace))
+        {
+            Result = FALSE;
+            break;
+        }
+        if (Ace->AceType == ACCESS_DENIED_ACE_TYPE)
+            continue;
+        if (Ace->AceType != ACCESS_ALLOWED_ACE_TYPE)
+        {
+            /* Callback, object, compound ACEs: not something this check understands */
+            Result = FALSE;
+            break;
+        }
+        Allowed = (PACCESS_ALLOWED_ACE)Ace;
+        if ((Allowed->Mask & STAGE_WRITE_MASK) &&
+            !EqualSid((PSID)&Allowed->SidStart, AdminSid) &&
+            !EqualSid((PSID)&Allowed->SidStart, SystemSid))
+        {
+            Result = FALSE;
+        }
+    }
+
+Quit:
+    if (AdminSid)
+        FreeSid(AdminSid);
+    if (SystemSid)
+        FreeSid(SystemSid);
+    HeapFree(GetProcessHeap(), 0, Sd);
+    return Result;
+}
+
+/* Is Name a plain request directory name: 1 to 64 of [0-9A-Za-z_-]? */
+static BOOL
+IsStageDirName(
+    _In_reads_(Length) PCWSTR Name,
+    _In_ SIZE_T Length)
+{
+    SIZE_T i;
+
+    if (Length == 0 || Length > 64)
+        return FALSE;
+    for (i = 0; i < Length; i++)
+    {
+        WCHAR c = Name[i];
+
+        if (!((c >= L'0' && c <= L'9') || (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') ||
+              c == L'_' || c == L'-'))
+        {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/*
+ * The INF path must be a full, canonical, local path to an .inf file, and one of
+ *  - a file of %SystemRoot%\inf (already a system INF), or
+ *  - %SystemRoot%\PnpStage\<request directory>\<name>.inf, a staged copy (the requester
+ *    copied the whole driver package there): both the PnpStage directory and the request
+ *    directory must be protected (only SYSTEM and Administrators can write them).
+ * Nothing else is read: not a UNC or network path, not a folder a user can write.
  */
 static DWORD
 CheckRequestInfPath(
     _In_ PCWSTR InfPath)
 {
     WCHAR FullPath[MAX_PATH];
-    WCHAR Root[4];
+    WCHAR Dir[MAX_PATH];
+    WCHAR WinDir[MAX_PATH];
+    PCWSTR Rest, Slash;
     DWORD Length, Attributes;
-    UINT DriveType;
+    SIZE_T WinLength, InfLength;
 
     Length = GetFullPathNameW(InfPath, _countof(FullPath), FullPath, NULL);
     if (Length == 0 || Length >= _countof(FullPath) || _wcsicmp(FullPath, InfPath) != 0)
@@ -1201,27 +1329,156 @@ CheckRequestInfPath(
     if (!iswalpha(InfPath[0]) || InfPath[1] != L':' || InfPath[2] != L'\\')
         return ERROR_INVALID_PARAMETER;
 
-    if (Length < 7 || _wcsicmp(&InfPath[Length - 4], L".inf") != 0)
+    /* Only the drive letter has a colon (no alternate data stream, no device) */
+    if (wcschr(&InfPath[2], L':') != NULL)
         return ERROR_INVALID_PARAMETER;
 
-    Root[0] = InfPath[0];
-    Root[1] = L':';
-    Root[2] = L'\\';
-    Root[3] = UNICODE_NULL;
-    DriveType = GetDriveTypeW(Root);
-    if (DriveType != DRIVE_FIXED && DriveType != DRIVE_REMOVABLE &&
-        DriveType != DRIVE_CDROM && DriveType != DRIVE_RAMDISK)
+    InfLength = wcslen(InfPath);
+    if (InfLength < 7 || _wcsicmp(&InfPath[InfLength - 4], L".inf") != 0)
+        return ERROR_INVALID_PARAMETER;
+
+    WinLength = GetSystemWindowsDirectoryW(WinDir, _countof(WinDir) - 32);
+    if (WinLength == 0 || WinLength >= _countof(WinDir) - 32)
+        return ERROR_PATH_NOT_FOUND;
+    if (WinDir[WinLength - 1] == L'\\')
+        WinDir[--WinLength] = UNICODE_NULL;
+
+    if (_wcsnicmp(InfPath, WinDir, WinLength) != 0 || InfPath[WinLength] != L'\\')
+        return ERROR_INVALID_PARAMETER;
+    Rest = &InfPath[WinLength + 1];
+
+    if (_wcsnicmp(Rest, L"inf\\", 4) == 0)
     {
-        return (DriveType == DRIVE_REMOTE) ? ERROR_NOT_SUPPORTED : ERROR_PATH_NOT_FOUND;
+        /* %SystemRoot%\inf\<name>.inf */
+        if (wcschr(Rest + 4, L'\\') != NULL)
+            return ERROR_INVALID_PARAMETER;
+    }
+    else
+    {
+        SIZE_T StageLength = wcslen(PNP_INSTALL_STAGE_ROOT);
+
+        /* %SystemRoot%\PnpStage\<request directory>\<name>.inf */
+        if (_wcsnicmp(Rest, PNP_INSTALL_STAGE_ROOT, StageLength) != 0 || Rest[StageLength] != L'\\')
+            return ERROR_INVALID_PARAMETER;
+        Rest += StageLength + 1;
+        Slash = wcschr(Rest, L'\\');
+        if (!Slash || !IsStageDirName(Rest, Slash - Rest))
+            return ERROR_INVALID_PARAMETER;
+        if (wcschr(Slash + 1, L'\\') != NULL)
+            return ERROR_INVALID_PARAMETER;
+
+        /* The staging root, then the request directory */
+        wcscpy(Dir, WinDir);
+        wcscat(Dir, L"\\");
+        wcscat(Dir, PNP_INSTALL_STAGE_ROOT);
+        if (!IsDirectoryProtected(Dir))
+        {
+            DPRINT1("Staging directory '%S' is not protected\n", Dir);
+            return ERROR_ACCESS_DENIED;
+        }
+        Length = (DWORD)wcslen(Dir);
+        Dir[Length++] = L'\\';
+        wcsncpy(&Dir[Length], Rest, Slash - Rest);
+        Dir[Length + (Slash - Rest)] = UNICODE_NULL;
+        if (!IsDirectoryProtected(Dir))
+        {
+            DPRINT1("Staging directory '%S' is not protected\n", Dir);
+            return ERROR_ACCESS_DENIED;
+        }
     }
 
     Attributes = GetFileAttributesW(InfPath);
     if (Attributes == INVALID_FILE_ATTRIBUTES)
         return GetLastError() ? GetLastError() : ERROR_FILE_NOT_FOUND;
-    if (Attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE))
+    if (Attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE | FILE_ATTRIBUTE_REPARSE_POINT))
         return ERROR_INVALID_PARAMETER;
 
     return ERROR_SUCCESS;
+}
+
+/* Removes a directory tree (the staging root's leftovers). Reparse points are removed, never followed. */
+static VOID
+RemoveDirectoryTree(
+    _In_ PCWSTR Path,
+    _In_ ULONG Depth)
+{
+    WCHAR Pattern[MAX_PATH];
+    WCHAR Child[MAX_PATH];
+    WIN32_FIND_DATAW Find;
+    HANDLE hFind;
+    SIZE_T Length = wcslen(Path);
+
+    if (Length + 3 >= _countof(Pattern) || Depth > 16)
+        return;
+    wcscpy(Pattern, Path);
+    wcscat(Pattern, L"\\*");
+    hFind = FindFirstFileW(Pattern, &Find);
+    if (hFind != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if (wcscmp(Find.cFileName, L".") == 0 || wcscmp(Find.cFileName, L"..") == 0)
+                continue;
+            if (Length + 1 + wcslen(Find.cFileName) >= _countof(Child))
+                continue;
+            wcscpy(Child, Path);
+            wcscat(Child, L"\\");
+            wcscat(Child, Find.cFileName);
+            if ((Find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                !(Find.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            {
+                RemoveDirectoryTree(Child, Depth + 1);
+            }
+            else if (Find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            {
+                RemoveDirectoryW(Child);
+            }
+            else
+            {
+                SetFileAttributesW(Child, FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(Child);
+            }
+        } while (FindNextFileW(hFind, &Find));
+        FindClose(hFind);
+    }
+    RemoveDirectoryW(Path);
+}
+
+/* Staged packages of requests that never finished (a crashed requester) go when the service starts */
+static VOID
+RemoveStagedLeftovers(VOID)
+{
+    WCHAR Root[MAX_PATH];
+    WCHAR Pattern[MAX_PATH];
+    WCHAR Child[MAX_PATH];
+    WIN32_FIND_DATAW Find;
+    HANDLE hFind;
+    UINT Length;
+
+    Length = GetSystemWindowsDirectoryW(Root, _countof(Root) - 64);
+    if (Length == 0 || Length >= _countof(Root) - 64)
+        return;
+    wcscat(Root, L"\\" PNP_INSTALL_STAGE_ROOT);
+    wcscpy(Pattern, Root);
+    wcscat(Pattern, L"\\*");
+    hFind = FindFirstFileW(Pattern, &Find);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return;
+    do
+    {
+        if (wcscmp(Find.cFileName, L".") == 0 || wcscmp(Find.cFileName, L"..") == 0)
+            continue;
+        if (!IsStageDirName(Find.cFileName, wcslen(Find.cFileName)))
+            continue;
+        wcscpy(Child, Root);
+        wcscat(Child, L"\\");
+        wcscat(Child, Find.cFileName);
+        if (Find.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+            RemoveDirectoryW(Child);
+        else if (Find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            RemoveDirectoryTree(Child, 0);
+    } while (FindNextFileW(hFind, &Find));
+    FindClose(hFind);
 }
 
 /* Serves one connected request pipe instance, then closes it */
@@ -1270,7 +1527,7 @@ HandleInstallRequest(
         goto SendReply;
     }
 
-    DeviceId = ReadRequestString(hPipe, hEvent, Request.DeviceIdBytes, MAX_DEVICE_ID_LEN * sizeof(WCHAR));
+    DeviceId = ReadRequestString(hPipe, hEvent, Request.DeviceIdBytes, PNP_INSTALL_MAX_DEVICE_ID_BYTES);
     InfPath = DeviceId ? ReadRequestString(hPipe, hEvent, Request.InfPathBytes, MAX_PATH * sizeof(WCHAR)) : NULL;
     if (!DeviceId || !InfPath)
         goto SendReply;
@@ -1322,7 +1579,28 @@ Done:
     return 0;
 }
 
-/* Accepts install requests; each connection is served by its own thread */
+#ifndef PIPE_REJECT_REMOTE_CLIENTS
+#define PIPE_REJECT_REMOTE_CLIENTS 0x00000008
+#endif
+
+static HANDLE
+CreateRequestPipeInstance(
+    _In_ PSECURITY_ATTRIBUTES Attributes,
+    _In_ BOOL First)
+{
+    return CreateNamedPipeW(PNP_INSTALL_REQUEST_PIPE,
+                            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (First ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
+                            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                            PNP_REQUEST_MAX_INSTANCES,
+                            512, 512, 0, Attributes);
+}
+
+/*
+ * Accepts install requests; each connection is served by its own thread. There is always at
+ * least one instance of the pipe: the next one is created before a connected one is handed to
+ * its thread, and a failed connection's instance is reused, never closed, so the name is never
+ * free for somebody else to create.
+ */
 DWORD
 WINAPI
 InstallRequestThread(
@@ -1331,11 +1609,13 @@ InstallRequestThread(
     PSECURITY_DESCRIPTOR Sd = NULL;
     SECURITY_ATTRIBUTES Attributes;
     OVERLAPPED Overlapped;
-    HANDLE hPipe, hEvent, hWorker;
-    BOOL First = TRUE;
+    HANDLE hPipe, hNext, hEvent, hWorker;
     DWORD Bytes;
 
     UNREFERENCED_PARAMETER(lpParameter);
+
+    /* A crashed requester's staged package */
+    RemoveStagedLeftovers();
 
     /* SYSTEM and administrators: nobody else can connect, or create an instance of the name */
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;GRGW;;;BA)",
@@ -1355,25 +1635,18 @@ InstallRequestThread(
         return 0;
     }
 
+    /* The name belongs to somebody else if this fails: never serve it */
+    hPipe = CreateRequestPipeInstance(&Attributes, TRUE);
+    if (hPipe == INVALID_HANDLE_VALUE)
+    {
+        DPRINT1("CreateNamedPipeW(install request) failed, error %lu\n", GetLastError());
+        CloseHandle(hEvent);
+        LocalFree(Sd);
+        return 0;
+    }
+
     for (;;)
     {
-        hPipe = CreateNamedPipeW(PNP_INSTALL_REQUEST_PIPE,
-                                 PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (First ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
-                                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                                 PNP_REQUEST_MAX_INSTANCES,
-                                 512, 512, 0, &Attributes);
-        if (hPipe == INVALID_HANDLE_VALUE)
-        {
-            DPRINT1("CreateNamedPipeW(install request) failed, error %lu\n", GetLastError());
-            /* The name belongs to somebody else: never serve it */
-            if (First)
-                break;
-            /* All instances busy: try again later */
-            Sleep(1000);
-            continue;
-        }
-        First = FALSE;
-
         ZeroMemory(&Overlapped, sizeof(Overlapped));
         Overlapped.hEvent = hEvent;
         ResetEvent(hEvent);
@@ -1395,19 +1668,42 @@ InstallRequestThread(
             if (Error != ERROR_SUCCESS)
             {
                 DPRINT1("ConnectNamedPipe(install request) failed, error %lu\n", Error);
-                CloseHandle(hPipe);
+                /* Keep this instance (it holds the name) and listen on it again */
+                DisconnectNamedPipe(hPipe);
+                Sleep(100);
                 continue;
             }
         }
 
+        /* Next listener first, then the worker takes the connected one */
+        hNext = CreateRequestPipeInstance(&Attributes, FALSE);
+
         hWorker = CreateThread(NULL, 0, HandleInstallRequest, hPipe, 0, NULL);
         if (hWorker)
+        {
             CloseHandle(hWorker);
+        }
+        else if (hNext != INVALID_HANDLE_VALUE)
+        {
+            /* No thread: the request is dropped (the client sees a broken pipe) */
+            DisconnectNamedPipe(hPipe);
+            CloseHandle(hPipe);
+        }
         else
-            HandleInstallRequest(hPipe);
+        {
+            /* No thread and no spare instance: reuse this one */
+            DisconnectNamedPipe(hPipe);
+            hNext = hPipe;
+        }
+
+        /* All instances busy (the connected ones keep the name): wait for one to end */
+        while (hNext == INVALID_HANDLE_VALUE)
+        {
+            Sleep(50);
+            hNext = CreateRequestPipeInstance(&Attributes, FALSE);
+        }
+        hPipe = hNext;
     }
 
-    CloseHandle(hEvent);
-    LocalFree(Sd);
-    return 0;
+    /* Not reached */
 }

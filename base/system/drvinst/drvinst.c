@@ -25,7 +25,7 @@
 
 /* The pipe protocol is the one umpnpmgr uses for newdev!ClientSideInstallW */
 #define MAX_EVENT_NAME_BYTES    (128 * sizeof(WCHAR))
-#define MAX_DEVICE_ID_BYTES     ((MAX_DEVICE_ID_LEN + 1) * sizeof(WCHAR))
+#define MAX_DEVICE_ID_BYTES     PNP_INSTALL_MAX_DEVICE_ID_BYTES
 #define MAX_INF_PATH_BYTES      (MAX_PATH * sizeof(WCHAR))
 #define MAX_REQUESTER_BYTES     (256 * sizeof(WCHAR))
 
@@ -42,6 +42,30 @@ HasControlChars(_In_ PCWSTR String)
             return TRUE;
     }
     return FALSE;
+}
+
+/* Does this process run as SYSTEM? An install of an administrator's driver does only there:
+   run by anyone else, drvinst.exe must not stage or install anything */
+static BOOL
+IsSystemProcess(VOID)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    BYTE Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    PSID SystemSid;
+    HANDLE hToken;
+    DWORD Size;
+    BOOL Result = FALSE;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
+        return FALSE;
+    if (GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &Size) &&
+        AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &SystemSid))
+    {
+        Result = EqualSid(((PTOKEN_USER)Buffer)->User.Sid, SystemSid);
+        FreeSid(SystemSid);
+    }
+    CloseHandle(hToken);
+    return Result;
 }
 
 static VOID
@@ -268,6 +292,7 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nSh
     BOOL Installed = FALSE, NeedRestart = FALSE;
     DWORD UiMode, Origin = 0, Error = ERROR_SUCCESS;
     CHAR Time[32];
+    PWSTR Text;
 
     UNREFERENCED_PARAMETER(hInstance);
     UNREFERENCED_PARAMETER(hPrevInstance);
@@ -299,6 +324,12 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nSh
     /* An install an administrator asked for: the INF, who asked for it, and from where */
     if (UiMode == NEWDEV_UI_INSTALL_INF)
     {
+        /* Before anything is read, logged or staged */
+        if (!IsSystemProcess())
+        {
+            Error = ERROR_ACCESS_DENIED;
+            goto Quit;
+        }
         InfPath = ReadPipeString(hPipe, MAX_INF_PATH_BYTES);
         if (!InfPath || HasControlChars(InfPath) || !ReadPipe(hPipe, &Origin, sizeof(Origin)))
         {
@@ -310,6 +341,12 @@ wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nSh
         {
             Error = ERROR_INVALID_DATA;
             goto Quit;
+        }
+        /* The account name goes into the log: no control characters (no fake log lines) */
+        for (Text = Requester; *Text != UNICODE_NULL; Text++)
+        {
+            if (*Text < L' ' || *Text == 0x7f)
+                *Text = L'?';
         }
     }
 
