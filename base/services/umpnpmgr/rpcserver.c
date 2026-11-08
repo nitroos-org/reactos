@@ -958,10 +958,11 @@ CallerMayReportLogOn(
     _In_ handle_t hBinding,
     _In_ HANDLE hProcessToken)
 {
-    BYTE CallerUserBuffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
-    BYTE ProcessUserBuffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
-    PTOKEN_USER pCallerUser = (PTOKEN_USER)CallerUserBuffer;
-    PTOKEN_USER pProcessUser = (PTOKEN_USER)ProcessUserBuffer;
+    /* ULONG aligned: the kernel probes the buffer's alignment */
+    union { TOKEN_USER User; BYTE Bytes[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE]; } CallerUserBuffer;
+    union { TOKEN_USER User; BYTE Bytes[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE]; } ProcessUserBuffer;
+    PTOKEN_USER pCallerUser = &CallerUserBuffer.User;
+    PTOKEN_USER pProcessUser = &ProcessUserBuffer.User;
     DWORD CallerSession = 0, ProcessSession = 0, dwSize;
     HANDLE hCallerToken;
     BOOL bResult = FALSE, bCallerToken = FALSE;

@@ -156,14 +156,14 @@ static PSECURITY_DESCRIPTOR
 CreateUserPipeSecurity(
     _In_ HANDLE hToken)
 {
-    BYTE Buffer[256];
-    PTOKEN_USER User = (PTOKEN_USER)Buffer;
+    union { TOKEN_USER User; BYTE Bytes[256]; } Buffer; /* ULONG aligned: the kernel probes it */
+    PTOKEN_USER User = &Buffer.User;
     DWORD Size;
     LPWSTR SidString = NULL;
     WCHAR Sddl[160];
     PSECURITY_DESCRIPTOR Sd = NULL;
 
-    if (!GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &Size) ||
+    if (!GetTokenInformation(hToken, TokenUser, &Buffer, sizeof(Buffer), &Size) ||
         !ConvertSidToStringSidW(User->User.Sid, &SidString))
     {
         DPRINT1("Cannot get the user of the token, error %lu\n", GetLastError());
@@ -1109,8 +1109,9 @@ IsRequestCallerAdmin(
 {
     SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
     PSID AdminSid = NULL, SystemSid = NULL;
-    BYTE Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
-    PTOKEN_USER User = (PTOKEN_USER)Buffer;
+    /* ULONG aligned: the kernel probes the buffer's alignment */
+    union { TOKEN_USER User; BYTE Bytes[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE]; } Buffer;
+    PTOKEN_USER User = &Buffer.User;
     WCHAR Name[64], Domain[64];
     DWORD NameLength = _countof(Name), DomainLength = _countof(Domain), Size;
     SID_NAME_USE Use;
@@ -1157,7 +1158,7 @@ IsRequestCallerAdmin(
     if (SystemSid)
         FreeSid(SystemSid);
 
-    if (GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &Size))
+    if (GetTokenInformation(hToken, TokenUser, &Buffer, sizeof(Buffer), &Size))
     {
         if (!LookupAccountSidW(NULL, User->User.Sid, Name, &NameLength, Domain, &DomainLength, &Use))
         {
