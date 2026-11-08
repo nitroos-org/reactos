@@ -61,6 +61,7 @@ extern void func_OwnerZOrderNotice(void);
 extern void func_NcPaintLayered(void);
 extern void func_SetWindowPosFlags(void);
 extern void func_SetParentCrossProcess(void);
+extern void func_SetParentKillOrder(void);
 extern void func_WmCancelModeLastError(void);
 extern void func_InitializeLpkHooks(void);
 extern void func_IsDialogMessage(void);
@@ -206,6 +207,7 @@ const struct test winetest_testlist[] =
     { "NcPaintLayered", func_NcPaintLayered },
     { "SetWindowPosFlags", func_SetWindowPosFlags },
     { "SetParentCrossProcess", func_SetParentCrossProcess },
+    { "SetParentKillOrder", func_SetParentKillOrder },
     { "WmCancelModeLastError", func_WmCancelModeLastError },
     { "InitializeLpkHooks", func_InitializeLpkHooks },
     { "IsDialogMessage", func_IsDialogMessage },
