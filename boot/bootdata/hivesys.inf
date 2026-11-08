@@ -1740,6 +1740,7 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","wldap32",0x00
 
 ; Memory Management
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management",,0x00000012
+; NitroPager (pager mode) is written per architecture: hivesys_amd64.inf, hivesys_i386.inf
 
 ; SubSystems
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems","Debug",0x00020002,""

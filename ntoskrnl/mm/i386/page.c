@@ -246,7 +246,15 @@ MiPageTableUseCount(PVOID Address)
  * page-table-present tests and is never freed; and an uncounted page table can be
  * freed by the last unmap in it while the caller still relies on it.
  *
- * @return TRUE if a reference was taken (only when nothing else counts the page table).
+ * The hold is taken whatever the count is: a page table kept valid only by
+ * other entries (another thread's mapping, or the faulting address's own swap
+ * entry, which the section fault deletes and recreates) could otherwise be freed
+ * by their unmap during the fault and rebuilt under the segment lock, which is
+ * the low-memory lock order the pre-fault exists to avoid (ng7a). The extra
+ * count may take the counter past PTE_PER_PAGE by the number of concurrent
+ * holders (MI_PAGE_TABLE_HOLD_SLACK in miarm.h).
+ *
+ * @return TRUE (a reference was taken; MmReleasePageTable drops it).
  */
 BOOLEAN
 NTAPI
@@ -254,31 +262,15 @@ MmHoldPageTable(
     _In_ PEPROCESS Process,
     _In_ PVOID Address)
 {
-    BOOLEAN Held = FALSE;
-
     ASSERT(Process == PsGetCurrentProcess());
     ASSERT(Address <= MM_HIGHEST_USER_ADDRESS);
     ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);
 
     MiLockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
-
     MiMakePdeExistAndMakeValid(MiAddressToPde(Address), Process, MM_NOIRQL);
-
-    /*
-     * Only a page table nobody counts needs the hold. A counted one already
-     * satisfies the invariant, and the hold's extra count could push it past
-     * PTE_PER_PAGE once the caller maps its entry (seen in setup: 1023 + hold +
-     * the new mapping). An unheld page table freed by another thread's last
-     * unmap is rebuilt by the mapping itself, as before the pre-fault.
-     */
-    if (MiPageTableUseCount(Address) == 0)
-    {
-        MiIncrementPageTableReferences(Address);
-        Held = TRUE;
-    }
-
+    MiIncrementPageTableReferences(Address);
     MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
-    return Held;
+    return TRUE;
 }
 
 /**
@@ -297,8 +289,9 @@ MmReleasePageTable(
 
     MiLockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
 
-    /* A counted page table is never freed: the PDE still exists */
-    MiMakePdeExistAndMakeValid(MiAddressToPde(Address), Process, MM_NOIRQL);
+    /* The hold keeps the count above 0, so the page table (and its PDE) is still there */
+    ASSERT(MiAddressToPde(Address)->u.Hard.Valid != 0);
+    ASSERT(MiPageTableUseCount(Address) != 0);
     if (MiDecrementPageTableReferences(Address) == 0)
     {
         KIRQL OldIrql = MiAcquirePfnLock();

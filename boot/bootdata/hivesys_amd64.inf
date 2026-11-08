@@ -1,0 +1,10 @@
+[Version]
+Signature = "$Windows NT$"
+
+[AddReg]
+
+; NitroPager: 1 = ARM3 private memory is paged to the paging file (default on amd64 since 2026.11-1; the kernel
+; uses the same default when the value is absent), 0 = the old behaviour. Read once at boot: a change needs a reboot.
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management","NitroPager",0x00010001,1
+
+; EOF
