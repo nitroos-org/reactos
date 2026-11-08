@@ -1105,6 +1105,18 @@ ExpInitializeExecutive(IN ULONG Cpu,
     if (MiNitroPagerMode > 2)
         MiNitroPagerMode = 0;
 
+    /*
+     * NitroPagerDebug (fault injection, test commands) is a test value: a free build honours it only
+     * when booted with the /NITROPAGERDEBUG option, so that a value planted in the SYSTEM hive (writable
+     * by any user until registry ACLs are enforced) cannot make every paging write fail or force a
+     * NO_PAGES_AVAILABLE at the next boot. Checked builds always honour it. NTFS-NG applies the same rule
+     * (it reads SystemStartOptions). The load options were upcased above.
+     */
+#if !DBG
+    if ((LoaderBlock->LoadOptions == NULL) || (strstr(LoaderBlock->LoadOptions, "NITROPAGERDEBUG") == NULL))
+        MiNitroPagerDebug = 0;
+#endif
+
     /* Set the Service Pack Number and add it to the CSD Version number if needed */
     CmNtSpBuildNumber = VER_PRODUCTBUILD_QFE;
     if (((CmNtCSDVersion & 0xFFFF0000) == 0) && (CmNtCSDReleaseType == 1))
