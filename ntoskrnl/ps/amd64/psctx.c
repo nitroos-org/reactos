@@ -458,6 +458,8 @@ PspWow64StageMainThread(VOID)
         Cpu->EFlags = 0x202;
         *(USHORT *)Cpu->ExtendedRegisters = 0x27f;
         *(ULONG *)(Cpu->ExtendedRegisters + 24) = 0x1f80;
+        /* The registers of a thread that has not run are the area's, which the first return loads */
+        Cpu->FpSaved = TRUE;
         Teb->NtTib.StackBase = Cpu;
         if (Trap->Rsp > ((ULONG_PTR)Cpu & ~(ULONG_PTR)15) - 0x28)
             Trap->Rsp = ((ULONG_PTR)Cpu & ~(ULONG_PTR)15) - 0x28;
