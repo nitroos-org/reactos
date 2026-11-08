@@ -59,6 +59,7 @@ list(APPEND SOURCE
     heap.c
     heapdbg.c
     heappage.c
+    heapfe.c
     heapuser.c
     image.c
     interlck.c

@@ -2866,6 +2866,13 @@ LdrpInitializeProcess(IN PCONTEXT Context,
         return STATUS_NO_MEMORY;
     }
 
+    /* As on Windows Vista and later, the process heap gets the low-fragmentation (front end) heap from the start */
+    {
+        ULONG HeapFrontEnd = 2;
+
+        RtlSetHeapInformation(Peb->ProcessHeap, HeapCompatibilityInformation, &HeapFrontEnd, sizeof(HeapFrontEnd));
+    }
+
     Status = RtlpInitializeLocaleTable();
     if (!NT_SUCCESS(Status))
     {

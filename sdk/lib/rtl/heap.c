@@ -197,6 +197,12 @@ RtlpInitializeHeap(OUT PHEAP Heap,
     Heap->MaximumAllocationSize = Parameters->MaximumAllocationSize;
     Heap->CommitRoutine = Parameters->CommitRoutine;
 
+    /* No front end yet (the memory of a heap given by its creator is not necessarily zero) */
+    Heap->FrontEndHeap = NULL;
+    Heap->FrontEndHeapType = 0;
+    Heap->FrontHeapLockCount = 0;
+    Heap->Counters.LockCollisions = 0;
+
     /* Initialise the Heap validation info */
     Heap->HeaderValidateCopy = NULL;
     Heap->HeaderValidateLength = (USHORT)HeaderSize;
@@ -1809,6 +1815,9 @@ RtlDestroyHeap(HANDLE HeapPtr) /* [in] Handle of heap */
         RtlpRemoveHeapFromProcessList(Heap);
     }
 
+    /* Release the front end, if any */
+    RtlpHeapFeDestroy(Heap);
+
     /* Delete the heap lock */
     if (!(Heap->Flags & HEAP_NO_SERIALIZE))
     {
@@ -1988,6 +1997,57 @@ RtlpSplitEntry(PHEAP Heap,
     return InUseEntry;
 }
 
+/* Gives an in-use block back to the heap proper: coalesce, decommit or insert. The heap lock is held. */
+VOID NTAPI
+RtlpFreeBlockLocked(PHEAP Heap,
+                    PHEAP_ENTRY HeapEntry)
+{
+    SIZE_T BlockSize = HeapEntry->Size;
+
+    /* Coalesce in kernel mode, and in usermode if it's not disabled */
+    if (RtlpGetMode() == KernelMode ||
+        (RtlpGetMode() == UserMode && !(Heap->Flags & HEAP_DISABLE_COALESCE_ON_FREE)))
+    {
+        HeapEntry = (PHEAP_ENTRY)RtlpCoalesceFreeBlocks(Heap,
+                                                       (PHEAP_FREE_ENTRY)HeapEntry,
+                                                       &BlockSize,
+                                                       FALSE);
+    }
+
+    /* See if we should decommit this block */
+    if ((BlockSize >= Heap->DeCommitFreeBlockThreshold) ||
+        (Heap->TotalFreeSize + BlockSize >= Heap->DeCommitTotalFreeThreshold))
+    {
+        RtlpDeCommitFreeBlock(Heap, (PHEAP_FREE_ENTRY)HeapEntry, BlockSize);
+    }
+    else
+    {
+        /* Insert into the free list */
+        RtlpInsertFreeBlock(Heap, (PHEAP_FREE_ENTRY)HeapEntry, BlockSize);
+    }
+}
+
+/* Takes the lock of a serialized heap. A user-mode heap that made this wait
+   often enough gets the front end, as the caller of the first wait holds the lock. */
+static
+VOID
+RtlpHeapEnterLock(PHEAP Heap)
+{
+    if (Heap->FrontEndHeapType == 0 &&
+        Heap->Counters.LockCollisions < HEAP_FE_AUTO_THRESHOLD)
+    {
+        if (!RtlTryEnterHeapLock(Heap->LockVariable, TRUE))
+        {
+            RtlEnterHeapLock(Heap->LockVariable, TRUE);
+            if (++Heap->Counters.LockCollisions >= HEAP_FE_AUTO_THRESHOLD)
+                RtlpHeapFeEnable(Heap);
+        }
+        return;
+    }
+
+    RtlEnterHeapLock(Heap->LockVariable, TRUE);
+}
+
 static
 PVOID
 RtlpAllocateNonDedicated(PHEAP Heap,
@@ -2002,6 +2062,24 @@ RtlpAllocateNonDedicated(PHEAP Heap,
     /* The entries in the list must be too small for us */
     ASSERT(IsListEmpty(&Heap->FreeLists) ||
            (CONTAINING_RECORD(Heap->FreeLists.Blink, HEAP_FREE_ENTRY, FreeList)->Size < Index));
+
+    /* Blocks parked in the front end may make room: give them back and try the heap again */
+    if (Heap->FrontEndHeapType == HEAP_FRONTEND_CACHE)
+    {
+        /* While the front end is held out, nothing is parked behind our back */
+        ULONG Flushed = RtlpHeapFeLock(Heap);
+
+        if (Flushed)
+        {
+            PVOID Block = RtlAllocateHeap(Heap, Flags | HEAP_NO_SERIALIZE, Size);
+
+            RtlpHeapFeUnlock(Heap);
+            if (HeapLocked) RtlLeaveHeapLock(Heap->LockVariable);
+            return Block;
+        }
+
+        RtlpHeapFeUnlock(Heap);
+    }
 
     /* Extend the heap */
     FreeBlock = RtlpExtendHeap(Heap, AllocationSize);
@@ -2142,10 +2220,26 @@ RtlAllocateHeap(IN PVOID HeapPtr,
 
     Index = AllocationSize >> HEAP_ENTRY_SHIFT;
 
+    /* Small blocks of a heap with a front end: take a cached one, without the heap lock */
+    if (Heap->FrontEndHeapType == HEAP_FRONTEND_CACHE &&
+        EntryFlags == HEAP_ENTRY_BUSY &&
+        !(Flags & HEAP_NO_SERIALIZE))
+    {
+        PHEAP_ENTRY CachedEntry = RtlpHeapFeAlloc(Heap, Index, AllocationSize, Size);
+
+        if (CachedEntry)
+        {
+            if (Flags & HEAP_ZERO_MEMORY)
+                RtlZeroMemory(CachedEntry + 1, Size);
+
+            return CachedEntry + 1;
+        }
+    }
+
     /* Acquire the lock if necessary */
     if (!(Flags & HEAP_NO_SERIALIZE))
     {
-        RtlEnterHeapLock(Heap->LockVariable, TRUE);
+        RtlpHeapEnterLock(Heap);
         HeapLocked = TRUE;
     }
 
@@ -2308,7 +2402,6 @@ BOOLEAN NTAPI RtlFreeHeap(
 {
     PHEAP Heap;
     PHEAP_ENTRY HeapEntry;
-    USHORT TagIndex = 0;
     SIZE_T BlockSize;
     PHEAP_VIRTUAL_ALLOC_ENTRY VirtualEntry;
     BOOLEAN Locked = FALSE;
@@ -2351,10 +2444,28 @@ BOOLEAN NTAPI RtlFreeHeap(
     }
     _SEH2_END;
 
+    /* A heap with a front end parks small blocks instead of freeing them, without the heap lock */
+    if (Heap->FrontEndHeapType == HEAP_FRONTEND_CACHE &&
+        !(Flags & HEAP_NO_SERIALIZE))
+    {
+        ULONG Result = RtlpHeapFeFree(Heap, HeapEntry);
+
+        if (Result == HEAP_FE_CACHED)
+            return TRUE;
+
+        if (Result == HEAP_FE_INVALID)
+        {
+            /* Freed twice */
+            DPRINT1("HEAP: Trying to free an already freed block %p!\n", Ptr);
+            RtlSetLastWin32ErrorAndNtStatusFromNtStatus(STATUS_INVALID_PARAMETER);
+            return FALSE;
+        }
+    }
+
     /* Lock if necessary */
     if (!(Flags & HEAP_NO_SERIALIZE))
     {
-        RtlEnterHeapLock(Heap->LockVariable, TRUE);
+        RtlpHeapEnterLock(Heap);
         Locked = TRUE;
     }
 
@@ -2384,38 +2495,9 @@ BOOLEAN NTAPI RtlFreeHeap(
     else
     {
         /* Normal allocation */
-        BlockSize = HeapEntry->Size;
-
         // TODO: Tagging
 
-        /* Coalesce in kernel mode, and in usermode if it's not disabled */
-        if (RtlpGetMode() == KernelMode ||
-            (RtlpGetMode() == UserMode && !(Heap->Flags & HEAP_DISABLE_COALESCE_ON_FREE)))
-        {
-            HeapEntry = (PHEAP_ENTRY)RtlpCoalesceFreeBlocks(Heap,
-                                                           (PHEAP_FREE_ENTRY)HeapEntry,
-                                                           &BlockSize,
-                                                           FALSE);
-        }
-
-        /* See if we should decommit this block */
-        if ((BlockSize >= Heap->DeCommitFreeBlockThreshold) ||
-            (Heap->TotalFreeSize + BlockSize >= Heap->DeCommitTotalFreeThreshold))
-        {
-            RtlpDeCommitFreeBlock(Heap, (PHEAP_FREE_ENTRY)HeapEntry, BlockSize);
-        }
-        else
-        {
-            /* Insert into the free list */
-            RtlpInsertFreeBlock(Heap, (PHEAP_FREE_ENTRY)HeapEntry, BlockSize);
-
-            if (RtlpGetMode() == UserMode &&
-                TagIndex != 0)
-            {
-                // FIXME: Tagging
-                UNIMPLEMENTED;
-            }
-        }
+        RtlpFreeBlockLocked(Heap, HeapEntry);
     }
 
     /* Release the heap lock */
@@ -2770,7 +2852,8 @@ RtlReAllocateHeap(HANDLE HeapPtr,
     InUseEntry = (PHEAP_ENTRY)Ptr - 1;
 
     /* If that entry is not really in-use, we have a problem */
-    if (!(InUseEntry->Flags & HEAP_ENTRY_BUSY))
+    if (!(InUseEntry->Flags & HEAP_ENTRY_BUSY) ||
+        (Heap->FrontEndHeapType == HEAP_FRONTEND_CACHE && RtlpHeapFeIsCached(InUseEntry)))
     {
         RtlSetLastWin32ErrorAndNtStatusFromNtStatus(STATUS_INVALID_PARAMETER);
 
@@ -3156,6 +3239,9 @@ RtlLockHeap(IN HANDLE HeapPtr)
     if (!(Heap->Flags & HEAP_NO_SERIALIZE))
     {
         RtlEnterHeapLock(Heap->LockVariable, TRUE);
+
+        /* The holder of the lock excludes all allocations, so keep the front end out of it */
+        RtlpHeapFeLock(Heap);
     }
 
     return TRUE;
@@ -3192,6 +3278,7 @@ RtlUnlockHeap(HANDLE HeapPtr)
     /* Unlock if it's lockable */
     if (!(Heap->Flags & HEAP_NO_SERIALIZE))
     {
+        RtlpHeapFeUnlock(Heap);
         RtlLeaveHeapLock(Heap->LockVariable);
     }
 
@@ -3240,8 +3327,9 @@ RtlSizeHeap(
     /* Get the heap entry pointer */
     HeapEntry = (PHEAP_ENTRY)Ptr - 1;
 
-    /* Return -1 if that entry is free */
-    if (!(HeapEntry->Flags & HEAP_ENTRY_BUSY))
+    /* Return -1 if that entry is free (a block parked in the front end is free for the caller) */
+    if (!(HeapEntry->Flags & HEAP_ENTRY_BUSY) ||
+        (Heap->FrontEndHeapType == HEAP_FRONTEND_CACHE && RtlpHeapFeIsCached(HeapEntry)))
     {
         RtlSetLastWin32ErrorAndNtStatusFromNtStatus(STATUS_INVALID_PARAMETER);
         return (SIZE_T)-1;
@@ -3314,6 +3402,7 @@ RtlpValidateHeapEntry(
     if (!HeapEntry) goto invalid_entry;
     if ((ULONG_PTR)HeapEntry & (HEAP_ENTRY_SIZE - 1)) goto invalid_entry;
     if (!(HeapEntry->Flags & HEAP_ENTRY_BUSY)) goto invalid_entry;
+    if (Heap->FrontEndHeapType == HEAP_FRONTEND_CACHE && RtlpHeapFeIsCached(HeapEntry)) goto invalid_entry;
 
     BigAllocation = HeapEntry->Flags & HEAP_ENTRY_VIRTUAL_ALLOC;
     Segment = Heap->Segments[HeapEntry->SegmentOffset];
@@ -4689,6 +4778,7 @@ RtlpHeapWalkLock(
             PHEAP_LOCK HeapLock = Heap->LockVariable;
 
             RtlEnterHeapLock(HeapLock, TRUE);
+            RtlpHeapFeLock(Heap);
             *Lock = HeapLock;
         }
     }
@@ -4704,10 +4794,12 @@ RtlpHeapWalkLock(
 static
 VOID
 RtlpHeapWalkUnlock(
+    _In_ PHEAP Heap,
     _In_ PHEAP_LOCK Lock)
 {
     _SEH2_TRY
     {
+        RtlpHeapFeUnlock(Heap);
         RtlLeaveHeapLock(Lock);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
@@ -4769,7 +4861,7 @@ RtlpEnumerateHeap(
     }
 
     if (Lock)
-        RtlpHeapWalkUnlock(Lock);
+        RtlpHeapWalkUnlock((PHEAP)HeapAddress, Lock);
 
     return Status;
 }
@@ -4805,7 +4897,7 @@ RtlWalkHeap(IN HANDLE HeapHandle,
         Status = RtlpHeapWalkNext(&Walker, &Entry);
 
     if (Lock)
-        RtlpHeapWalkUnlock(Lock);
+        RtlpHeapWalkUnlock(Heap, Lock);
 
     /* The entry is left alone when there is nothing more to report */
     if (NT_SUCCESS(Status))
@@ -4840,6 +4932,9 @@ RtlSetHeapInformation(IN HANDLE HeapHandle OPTIONAL,
                       IN PVOID HeapInformation,
                       IN SIZE_T HeapInformationLength)
 {
+    PHEAP Heap = (PHEAP)HeapHandle;
+    NTSTATUS Status;
+
     /* Setting heap information is not really supported except for enabling LFH */
     if (HeapInformationClass == HeapCompatibilityInformation)
     {
@@ -4856,8 +4951,25 @@ RtlSetHeapInformation(IN HANDLE HeapHandle OPTIONAL,
             return STATUS_UNSUCCESSFUL;
         }
 
-        DPRINT1("RtlSetHeapInformation() needs to enable LFH\n");
-        return STATUS_SUCCESS;
+        /* No heap, nothing to enable (the call was always accepted) */
+        if (!Heap)
+            return STATUS_SUCCESS;
+
+        /* Turn the front end on. As on Windows, a heap without a lock, a fixed size one
+           and a checking or page heap cannot have it: the request is refused (ERROR_INVALID_PARAMETER) */
+        if (Heap->Signature != HEAP_SIGNATURE ||
+            (Heap->ForceFlags & HEAP_FLAG_PAGE_ALLOCS) ||
+            (Heap->Flags & HEAP_NO_SERIALIZE) ||
+            !Heap->LockVariable)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        RtlEnterHeapLock(Heap->LockVariable, TRUE);
+        Status = RtlpHeapFeEnable(Heap) ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+        RtlLeaveHeapLock(Heap->LockVariable);
+
+        return Status;
     }
 
     return STATUS_SUCCESS;
