@@ -86,6 +86,8 @@ list(APPEND SOURCE
     ThreadDebugRegisters.c
     Wow64Continue.c
     Wow64ServiceArguments.c
+    Wow64FloatState.c
+    Wow64QuerySystemTime.c
     NtCreateDirectoryObject.c
     NtCreateFile.c
     NtCreateKey.c
