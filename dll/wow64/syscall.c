@@ -400,7 +400,7 @@ static VOID StoreNullHandle32(ULONG Address)
 }
 
 /* Hand the handle a native call created to the guest, or NULL when the call failed. A fault while
- * storing a created handle leaves it in Cleanup, so Wow64SystemService closes it. */
+ * storing a created handle leaves it in Cleanup, so Wow64SystemServiceFull closes it. */
 static NTSTATUS ReturnHandle32(ULONG Address, NTSTATUS Status, WOW64_CLEANUP *Cleanup)
 {
     if (NT_SUCCESS(Status))
@@ -1579,10 +1579,6 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     if (NativeSystemInformation) Number = W64_NtQuerySystemInformation;
     switch (Number)
     {
-    case W64_NtAddAtom: return NtAddAtom(P(0), a[1], P(2));
-    case W64_NtFindAtom: return NtFindAtom(P(0), a[1], P(2));
-    case W64_NtDeleteAtom: return NtDeleteAtom(a[0]);
-    case W64_NtQueryInformationAtom: return NtQueryInformationAtom(a[0], a[1], P(2), a[3], P(4));
     case W64_NtCallbackReturn: return Wow64WinCallbackReturn(P(0), a[1], a[2]);
     case W64_NtCreateThread:
     {
@@ -1650,19 +1646,12 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         if (NT_SUCCESS(Status) && (a[6] & DUPLICATE_CLOSE_SOURCE) && IsCurrentProcess(H(0))) Wow64LpcForget(a[1]);
         if (a[3]) { RETURN_HANDLE_AT(3); }
         return Status;
-    case W64_NtSuspendThread: return NtSuspendThread(H(0), P(1));
-    case W64_NtSuspendProcess: return NtSuspendProcess(H(0));
-    case W64_NtResumeProcess: return NtResumeProcess(H(0));
-    case W64_NtResumeThread: return NtResumeThread(H(0), P(1));
-    case W64_NtAlertThread: return NtAlertThread(H(0));
-    case W64_NtAlertResumeThread: return NtAlertResumeThread(H(0), P(1));
     case W64_NtQueryInformationThread:
         /* The native service does not fail with STATUS_NOT_SUPPORTED for the classes
          * Wow64QueryThread forwards, so this status means an untranslated class */
         Status = Wow64QueryThread(H(0), a[1], P(2), a[3], P(4));
         if (Status == STATUS_NOT_SUPPORTED) UNSUPPORTED(CLASS, a[1]);
         return Status;
-    case W64_NtAreMappedFilesTheSame: return NtAreMappedFilesTheSame(P(0), P(1));
     case W64_NtReadVirtualMemory:
     case W64_NtWriteVirtualMemory:
     {
@@ -1675,12 +1664,6 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         if (a[4]) U(4) = (ULONG)Bytes;
         return Status;
     }
-    case W64_NtSignalAndWaitForSingleObject: return NtSignalAndWaitForSingleObject(H(0), H(1), a[2], P(3));
-    case W64_NtPulseEvent: return NtPulseEvent(H(0), P(1));
-    case W64_NtClearEvent: return NtClearEvent(H(0));
-    case W64_NtQueryEvent: return NtQueryEvent(H(0), a[1], P(2), a[3], P(4));
-    case W64_NtQuerySemaphore: return NtQuerySemaphore(H(0), a[1], P(2), a[3], P(4));
-    case W64_NtQueryMutant: return NtQueryMutant(H(0), a[1], P(2), a[3], P(4));
     case W64_NtOpenSemaphore:
         PROBE(0); ATTR(2); Status = NtOpenSemaphore(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
     case W64_NtOpenMutant:
@@ -1828,8 +1811,6 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         Teb->HardErrorMode = OldMode;
         return Status;
     }
-    case W64_NtTestAlert: return NtTestAlert();
-    case W64_NtYieldExecution: return NtYieldExecution();
     case W64_NtGetCurrentProcessorNumber:
         /* The result is the processor number, not an NTSTATUS. The thunk runs on the guest thread's own
          * native thread, so this is the processor the guest code was running on. */
@@ -1852,28 +1833,13 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         _SEH2_END;
         return STATUS_SUCCESS;
     }
-    case W64_NtFlushProcessWriteBuffers: return NtFlushProcessWriteBuffers();
-    case W64_NtIsProcessInJob: return NtIsProcessInJob(H(0), H(1));
-    case W64_NtTerminateProcess: return NtTerminateProcess(H(0), a[1]);
-    case W64_NtTerminateThread: return NtTerminateThread(H(0), a[1]);
-    case W64_NtQueryDebugFilterState: return NtQueryDebugFilterState(a[0], a[1]);
     /* User-mode debugging: debug.c converts the client ID and the wait state change */
     case W64_NtCreateDebugObject:
         PROBE(0); ATTR(2); Status = NtCreateDebugObject(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
-    case W64_NtDebugActiveProcess: return NtDebugActiveProcess(H(0), H(1));
-    case W64_NtRemoveProcessDebug: return NtRemoveProcessDebug(H(0), H(1));
     case W64_NtDebugContinue: return Wow64DebugContinue(a);
     case W64_NtWaitForDebugEvent: return Wow64WaitForDebugEvent(a);
     case W64_NtSetInformationDebugObject: /* the one class is a ULONG, ReturnLength too */
         return NtSetInformationDebugObject(H(0), a[1], P(2), a[3], P(4));
-    case W64_NtQueryPerformanceCounter: return NtQueryPerformanceCounter(P(0), P(1));
-    case W64_NtAllocateLocallyUniqueId: return NtAllocateLocallyUniqueId(P(0));
-    case W64_NtQuerySystemTime: return NtQuerySystemTime(P(0));
-    case W64_NtQueryDefaultLocale: return NtQueryDefaultLocale(a[0], P(1));
-    case W64_NtQueryDefaultUILanguage: return NtQueryDefaultUILanguage(P(0));
-    case W64_NtQueryInstallUILanguage: return NtQueryInstallUILanguage(P(0));
-    case W64_NtDelayExecution: return NtDelayExecution(a[0], P(1));
-    case W64_NtWaitForSingleObject: return NtWaitForSingleObject(H(0), a[1], P(2));
     /* NtWaitForMultipleObjects32 (0x127) has no thunk on purpose: the guest ntdll calls 0x118 for
      * NtWaitForMultipleObjects and nothing in this tree uses the 0x127 export, so a direct call is "unsupported". */
     case W64_NtWaitForMultipleObjects:
@@ -2062,7 +2028,6 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         }
         return Status;
     }
-    case W64_NtFlushInstructionCache: return NtFlushInstructionCache(H(0), P(1), a[2]);
     case W64_NtUnmapViewOfSection:
         if (!GuestMemoryRange(P(1), 0)) return GuestMemoryRefused(GuestMemoryUnmap, P(1));
         return NtUnmapViewOfSection(H(0), P(1));
@@ -2289,17 +2254,10 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     }
     case W64_NtQueryValueKey:
         return NtQueryValueKey(H(0), String32(&Name, P(1)), a[2], P(3), a[4], P(5));
-    case W64_NtQueryKey: return NtQueryKey(H(0), a[1], P(2), a[3], P(4));
-    case W64_NtEnumerateKey: return NtEnumerateKey(H(0), a[1], a[2], P(3), a[4], P(5));
-    case W64_NtEnumerateValueKey: return NtEnumerateValueKey(H(0), a[1], a[2], P(3), a[4], P(5));
     case W64_NtSetValueKey:
         return NtSetValueKey(H(0), String32(&Name, P(1)), a[2], a[3], P(4), a[5]);
-    case W64_NtDeleteKey: return NtDeleteKey(H(0));
     case W64_NtRenameKey: return NtRenameKey(H(0), String32(&Name, P(1)));
     case W64_NtDeleteValueKey: return NtDeleteValueKey(H(0), String32(&Name, P(1)));
-    case W64_NtFlushKey: return NtFlushKey(H(0));
-    /* KEY_WRITE_TIME_INFORMATION is a LARGE_INTEGER and every other class a ULONG: the same bytes in both ABIs. */
-    case W64_NtSetInformationKey: return NtSetInformationKey(H(0), a[1], P(2), a[3]);
     case W64_NtCreateJobObject:
         PROBE(0); ATTR(2);
         Status = NtCreateJobObject(&Cleanup->Handle, a[1], OA(2));
@@ -2308,8 +2266,6 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         PROBE(0); ATTR(2);
         Status = NtOpenJobObject(&Cleanup->Handle, a[1], OA(2));
         RETURN_HANDLE();
-    case W64_NtAssignProcessToJobObject: return NtAssignProcessToJobObject(H(0), H(1));
-    case W64_NtTerminateJobObject: return NtTerminateJobObject(H(0), a[1]);
     case W64_NtSetInformationJobObject:
         if (a[1] == JobObjectBasicLimitInformation || a[1] == JobObjectExtendedLimitInformation)
         {
@@ -2446,16 +2402,12 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtOpenEvent:
         PROBE(0);
         ATTR(2); Status = NtOpenEvent(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
-    case W64_NtSetEvent: return NtSetEvent(H(0), P(1));
-    case W64_NtResetEvent: return NtResetEvent(H(0), P(1));
     case W64_NtCreateSemaphore:
         PROBE(0);
         ATTR(2); Status = NtCreateSemaphore(&Cleanup->Handle, a[1], OA(2), a[3], a[4]); RETURN_HANDLE();
-    case W64_NtReleaseSemaphore: return NtReleaseSemaphore(H(0), a[1], P(2));
     case W64_NtCreateMutant:
         PROBE(0);
         ATTR(2); Status = NtCreateMutant(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
-    case W64_NtReleaseMutant: return NtReleaseMutant(H(0), P(1));
     case W64_NtCreateTimer:
         PROBE(0);
         ATTR(2); Status = NtCreateTimer(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
@@ -2465,8 +2417,6 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtSetTimer:
         return NtSetTimer(H(0), P(1), a[2] ? (PTIMER_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL,
                           P(3), a[4], a[5], P(6));
-    case W64_NtCancelTimer: return NtCancelTimer(H(0), P(1));
-    case W64_NtQueryTimer: return NtQueryTimer(H(0), a[1], P(2), a[3], P(4));
     case W64_NtCreateTimer2:
         /* Object attributes are refused by the service; translated anyway so it sees what the caller passed */
         PROBE(0);
@@ -2474,7 +2424,6 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtSetTimer2:
         /* LARGE_INTEGERs and T2_SET_PARAMETERS (ULONG, ULONG, LONGLONG) have the same layout in both ABIs */
         return NtSetTimer2(H(0), P(1), P(2), P(3));
-    case W64_NtCancelTimer2: return NtCancelTimer2(H(0), P(1));
     case W64_NtSetTimerEx:
     {
         /* TIMER_SET_COALESCABLE_TIMER_INFO holds pointers: 32 bytes here, 48 natively. Windows' WOW64
@@ -2568,8 +2517,6 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     case W64_NtCreateKeyedEvent:
         PROBE(0);
         ATTR(2); Status = NtCreateKeyedEvent(&Cleanup->Handle, a[1], OA(2), a[3]); RETURN_HANDLE();
-    case W64_NtWaitForKeyedEvent: return NtWaitForKeyedEvent(H(0), P(1), a[2], P(3));
-    case W64_NtReleaseKeyedEvent: return NtReleaseKeyedEvent(H(0), P(1), a[2], P(3));
     case W64_NtOpenFile:
         PROBE(0); ProbeOutput(a[3], sizeof(WOW64_IOSB));
         FILEATTR(2);
@@ -3935,7 +3882,7 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
     }
 }
 
-NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
+NTSTATUS NTAPI Wow64SystemServiceFull(ULONG Number, ULONG *Arguments)
 {
     NTSTATUS Status;
     WOW64_CLEANUP Cleanup = {0};
@@ -3948,7 +3895,8 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
      * flag set outside this routine: that also covers the low-address gate,
      * the instructions following CALL and the final IRET itself. */
     Cpu->ContextEaxChanged = FALSE;
-    InterlockedExchange(&Cpu->InTransition, 0);
+    Cpu->InTransition = 0;
+    _ReadWriteBarrier();
     /* All pointer expansion occurs in user mode. Faulting captures become
      * NT errors; no untyped 32-bit argument list is sent to the kernel. */
     _SEH2_TRY
@@ -3990,7 +3938,9 @@ NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments)
         !(Number >= 0x1000 && Number < 0x2000))
         DbgPrint("WoW64: service %lx returned %08lx\n", Number, Status);
 #endif
-    InterlockedExchange(&Cpu->InTransition, 1);
+    _ReadWriteBarrier();
+    Cpu->InTransition = 1;
+    _ReadWriteBarrier();
     if (!Cpu->ContextEaxChanged) Cpu->Eax = Status;
     return Status;
 }

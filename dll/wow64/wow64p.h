@@ -36,6 +36,8 @@ typedef struct
 } WOW64_PARAMETERS;
 
 NTSTATUS NTAPI Wow64SystemService(ULONG Number, ULONG *Arguments);
+/* syscall.c: every service; fastsvc.c (Wow64SystemService) answers the plain ones itself */
+NTSTATUS NTAPI Wow64SystemServiceFull(ULONG Number, ULONG *Arguments);
 
 /* Requests this layer does not translate. Wow64Unsupported prints one debug line
  * per process for each (service, kind, value), sets *Reported so that
