@@ -1755,6 +1755,25 @@ static WCHAR * xpath_scan_name(struct xpath_parser_context *ctxt)
    return xpath_strndup(ctxt, start, len);
 }
 
+/* Scans a Name as libxml2's xmlXPathScanName does: NCName characters plus ':', so that a prefixed
+ * function name such as ms:string-compare is seen as one token (and "axis::" is detected). */
+static WCHAR * xpath_scan_qname(struct xpath_parser_context *ctxt)
+{
+   const WCHAR *start = ctxt->cur;
+   int len = 0;
+
+   if (!xml_is_ncname_startchar(*ctxt->cur))
+       return NULL;
+
+   do
+   {
+       ++len;
+   }
+   while (xml_is_ncnamechar(ctxt->cur[len]) || ctxt->cur[len] == ':');
+
+   return xpath_strndup(ctxt, start, len);
+}
+
 /**
  *  [38]   NodeType ::=   'comment'
  *                    | 'text'
@@ -1811,7 +1830,7 @@ static void xpath_compile_path_expr(struct xpath_parser_context *ctxt)
          *   - a element name
          */
         xpath_parse_skipspaces(ctxt);
-        name = xpath_scan_name(ctxt);
+        name = xpath_scan_qname(ctxt);
         if (name && wcsstr(name, L"::"))
         {
             location_path = true;
@@ -4982,7 +5001,8 @@ static xpath_function_ptr xpath_lookup_function(struct xpath_context *ctxt, cons
     for (size_t i = 0; i < ctxt->functions.count; ++i)
     {
         if (wcscmp(ctxt->functions.entries[i].name, name)) continue;
-        if (uri && wcscmp(ctxt->functions.entries[i].uri, uri)) continue;
+        if (!uri && ctxt->functions.entries[i].uri) continue;
+        if (uri && (!ctxt->functions.entries[i].uri || wcscmp(ctxt->functions.entries[i].uri, uri))) continue;
         return ctxt->functions.entries[i].func;
     }
 
@@ -6632,6 +6652,57 @@ static void xpath_builtin_substringbefore(struct xpath_parser_context *ctxt, int
     xpath_object_release(ctxt->context, find);
 }
 
+/* MSXML extension ms:string-compare(string1, string2 [, language [, options]]) in urn:schemas-microsoft-com:xslt:
+ * returns -1, 0 or 1; the option "i" selects a case-insensitive comparison. The language argument is accepted
+ * and ignored (an empty language means the default). */
+static void xpath_ms_string_compare(struct xpath_parser_context *ctxt, int nargs)
+{
+    struct xpath_object *str1, *str2, *opt = NULL;
+    bool icase = false;
+    int ret;
+
+    if (nargs < 2 || nargs > 4)
+    {
+        xpath_parser_context_set_error(ctxt, XPATH_INVALID_ARITY);
+        return;
+    }
+
+    if (nargs == 4)
+    {
+        xpath_arg_cast_to_string(ctxt);
+        if (!xpath_check_type(ctxt, _XPATH_STRING))
+            return;
+        opt = xpath_pop_value(ctxt);
+        icase = wcschr(opt->stringval, L'i') != NULL;
+    }
+    if (nargs >= 3)
+    {
+        struct xpath_object *lang;
+
+        xpath_arg_cast_to_string(ctxt);
+        if (!xpath_check_type(ctxt, _XPATH_STRING))
+            return;
+        lang = xpath_pop_value(ctxt);
+        xpath_object_release(ctxt->context, lang);
+    }
+
+    xpath_arg_cast_to_string(ctxt);
+    if (!xpath_check_type(ctxt, _XPATH_STRING))
+        return;
+    str2 = xpath_pop_value(ctxt);
+    xpath_arg_cast_to_string(ctxt);
+    if (!xpath_check_type(ctxt, _XPATH_STRING))
+        return;
+    str1 = xpath_pop_value(ctxt);
+
+    ret = icase ? wcsicmp(str1->stringval, str2->stringval) : wcscmp(str1->stringval, str2->stringval);
+    xpath_push_value(ctxt, xpath_new_number(ctxt, ret < 0 ? -1.0 : ret > 0 ? 1.0 : 0.0));
+
+    xpath_object_release(ctxt->context, str1);
+    xpath_object_release(ctxt->context, str2);
+    if (opt) xpath_object_release(ctxt->context, opt);
+}
+
 static void xpath_builtin_substringafter(struct xpath_parser_context *ctxt, int nargs)
 {
     struct xpath_object *str, *find;
@@ -7692,6 +7763,7 @@ static void xpath_register_xpath_functions(struct xpath_context *ctxt)
     xpath_register_func(ctxt, L"substring-after", xpath_builtin_substringafter);
     xpath_register_func(ctxt, L"sum", xpath_builtin_sum);
     xpath_register_func(ctxt, L"true", xpath_builtin_true);
+    xpath_register_func_uri(ctxt, L"string-compare", L"urn:schemas-microsoft-com:xslt", xpath_ms_string_compare);
     xpath_register_func(ctxt, L"translate", xpath_builtin_translate);
 }
 
@@ -7701,6 +7773,7 @@ static void xpath_register_xslpattern_functions(struct xpath_context *ctxt)
     xpath_register_func(ctxt, L"end", xslpattern_builtin_end);
     xpath_register_func(ctxt, L"nodeType", xslpattern_builtin_node_type);
     xpath_register_func(ctxt, L"nodeName", xslpattern_builtin_node_name);
+    xpath_register_func_uri(ctxt, L"string-compare", L"urn:schemas-microsoft-com:xslt", xpath_ms_string_compare);
 }
 
 struct xpath_context * xpath_create_context(bool xpath, struct domnode *node)

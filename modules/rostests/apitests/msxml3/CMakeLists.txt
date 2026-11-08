@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     DOMDocument.c
     SchemaCache.c
+    XPathFunc.c
     testlist.c)
 
 add_executable(msxml3_apitest ${SOURCE})
