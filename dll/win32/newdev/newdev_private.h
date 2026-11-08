@@ -62,6 +62,11 @@ InstallCurrentDriver(
 	IN PDEVINSTDATA DevInstData);
 
 BOOL
+InstallSelectedDriver(
+	IN PDEVINSTDATA DevInstData,
+	IN DWORD Origin);
+
+BOOL
 CheckBestDriver(
     _In_ PDEVINSTDATA DevInstData,
     _In_ PCWSTR pszDir);

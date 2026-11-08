@@ -41,6 +41,7 @@ CRITICAL_SECTION UserTokenLock; /* guards hUserToken: PNP_ReportLogOn writes it,
 HANDLE hInstallEvent = NULL;
 HANDLE hNoPendingInstalls = NULL;
 HANDLE hUserLogOnEvent = NULL; /* auto-reset: set by PNP_ReportLogOn, wakes the install thread */
+CRITICAL_SECTION DrvInstLock;  /* one service-side install (drvinst.exe) at a time: the queue's and the requested ones */
 
 /* Device-install event list */
 HANDLE hDeviceInstallListMutex;
@@ -54,6 +55,13 @@ CreatePnpInstallEventSecurity(
 /* Bounds, so that an install process that dies or hangs cannot block the install queue forever */
 #define PNP_PIPE_CONNECT_TIMEOUT    (60 * 1000)         /* the process must connect within 60 s */
 #define PNP_DRVINST_TIMEOUT         (10 * 60 * 1000)    /* the service-side install gets 10 min */
+#define PNP_REQUEST_IO_TIMEOUT      (30 * 1000)         /* a requester must send and read within 30 s */
+#define PNP_REQUEST_MAX_INSTANCES   8
+
+/* The setupapi error (setupapi.h) UpdateDriverForPlugAndPlayDevices reports for an unknown device */
+#ifndef ERROR_NO_SUCH_DEVINST
+#define ERROR_NO_SUCH_DEVINST       (APPLICATION_ERROR_MASK | ERROR_SEVERITY_ERROR | 0x20B)
+#endif
 
 /* The things of an install process that outlive RunInstallProcess (the restart page) */
 typedef struct _PNP_DETACHED_INSTALL
@@ -184,14 +192,20 @@ CreateUserPipeSecurity(
  * and every registry and file write of the install. Otherwise it is the
  * newdev.dll wizard (ClientSideInstall) in the user's session, as that user.
  * Both read the device and the UI mode (NEWDEV_UI_*) from the same pipe and
- * signal the event on success.
+ * signal the event on success. With NEWDEV_UI_INSTALL_INF (drvinst only) the
+ * INF an administrator picked, the origin of the request and the requester
+ * follow on the pipe; the caller checked them (HandleInstallRequest).
+ * The caller of a drvinst run holds DrvInstLock.
  */
 static BOOL
 RunInstallProcess(
     _In_ PCWSTR DeviceInstance,
     _In_opt_ HANDLE hToken,
     _In_ DWORD UiMode,
-    _Out_opt_ PDWORD ExitCode)
+    _Out_opt_ PDWORD ExitCode,
+    _In_opt_ PCWSTR InfPath,
+    _In_ DWORD Origin,
+    _In_opt_ PCWSTR Requester)
 {
     BOOL DeviceInstalled = FALSE;
     DWORD Value;
@@ -362,6 +376,27 @@ RunInstallProcess(
         Value = (wcslen(DeviceInstance) + 1) * sizeof(WCHAR);
         PassedAll = WritePipeTimeout(hPipe, hIoEvent, ProcessInfo.hProcess, &Value, sizeof(Value)) &&
                     WritePipeTimeout(hPipe, hIoEvent, ProcessInfo.hProcess, DeviceInstance, Value);
+    }
+    if (PassedAll && UiMode == NEWDEV_UI_INSTALL_INF)
+    {
+        if (hToken || !InfPath || !Requester)
+        {
+            PassedAll = FALSE;
+            SetLastError(ERROR_INVALID_PARAMETER);
+        }
+        else
+        {
+            Value = (wcslen(InfPath) + 1) * sizeof(WCHAR);
+            PassedAll = WritePipeTimeout(hPipe, hIoEvent, ProcessInfo.hProcess, &Value, sizeof(Value)) &&
+                        WritePipeTimeout(hPipe, hIoEvent, ProcessInfo.hProcess, InfPath, Value) &&
+                        WritePipeTimeout(hPipe, hIoEvent, ProcessInfo.hProcess, &Origin, sizeof(Origin));
+            if (PassedAll)
+            {
+                Value = (wcslen(Requester) + 1) * sizeof(WCHAR);
+                PassedAll = WritePipeTimeout(hPipe, hIoEvent, ProcessInfo.hProcess, &Value, sizeof(Value)) &&
+                            WritePipeTimeout(hPipe, hIoEvent, ProcessInfo.hProcess, Requester, Value);
+            }
+        }
     }
     if (!PassedAll)
     {
@@ -545,20 +580,24 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard, PBOOL NeedWizard)
     /* As on Windows: the install itself (driver search in the system INF
        directory, class installers, registry and file writes) runs here in the
        service context, as SYSTEM, for administrators and standard users alike. */
-    DeviceInstalled = RunInstallProcess(DeviceInstance, NULL, UiMode, &ExitCode);
+    EnterCriticalSection(&DrvInstLock);
+    DeviceInstalled = RunInstallProcess(DeviceInstance, NULL, UiMode, &ExitCode, NULL, 0, NULL);
+    LeaveCriticalSection(&DrvInstLock);
 
     if (DeviceInstalled)
     {
         /* The UI of the install stays in the user's session: the restart page */
         if (ExitCode == ERROR_SUCCESS_REBOOT_REQUIRED && UiMode != NEWDEV_UI_HIDDEN)
-            RunInstallProcess(DeviceInstance, hToken, NEWDEV_UI_RESTART_PAGE, NULL);
+            RunInstallProcess(DeviceInstance, hToken, NEWDEV_UI_RESTART_PAGE, NULL, NULL, 0, NULL);
     }
     else if (UiMode == NEWDEV_UI_WIZARD)
     {
         /* No driver found: the wizard lets the user point to one, in the user's
-           session and as the user. newdev.dll allows that to administrators only. */
+           session and as the user. newdev.dll allows that to administrators only,
+           and the install of the driver picked there comes back here (install
+           request pipe) to run in drvinst.exe. */
         DPRINT1("No driver installed for '%ws', starting the wizard\n", DeviceInstance);
-        DeviceInstalled = RunInstallProcess(DeviceInstance, hToken, NEWDEV_UI_WIZARD, NULL);
+        DeviceInstalled = RunInstallProcess(DeviceInstance, hToken, NEWDEV_UI_WIZARD, NULL, NULL, 0, NULL);
     }
     else if (ShowWizard && NeedWizard)
     {
@@ -962,5 +1001,413 @@ Step2:
         }
     }
 
+    return 0;
+}
+
+
+/* INSTALL REQUESTS *********************************************************/
+
+/*
+ * The install of a driver a user picked (the newdev wizard, Device Manager's Update Driver,
+ * UpdateDriverForPlugAndPlayDevices) comes here: those processes only pick the driver, and
+ * the install runs in drvinst.exe as SYSTEM, as Windows hands it to DrvInst.exe. Staging a
+ * driver package needs an administrator, so only administrators and SYSTEM can open the
+ * pipe, and the caller's token (never a field of the request) is checked again here.
+ */
+
+/* One read or write on an overlapped request pipe, bounded by Timeout */
+static BOOL
+RequestPipeIo(
+    _In_ HANDLE hPipe,
+    _In_ HANDLE hEvent,
+    _In_ BOOL Write,
+    _Inout_updates_bytes_(Size) PVOID Buffer,
+    _In_ DWORD Size,
+    _In_ DWORD Timeout)
+{
+    OVERLAPPED Overlapped;
+    DWORD Done, Total = 0;
+    BOOL Ok;
+
+    while (Total < Size)
+    {
+        ZeroMemory(&Overlapped, sizeof(Overlapped));
+        Overlapped.hEvent = hEvent;
+        ResetEvent(hEvent);
+        if (Write)
+            Ok = WriteFile(hPipe, (PBYTE)Buffer + Total, Size - Total, NULL, &Overlapped);
+        else
+            Ok = ReadFile(hPipe, (PBYTE)Buffer + Total, Size - Total, NULL, &Overlapped);
+        if (!Ok)
+        {
+            if (GetLastError() != ERROR_IO_PENDING)
+                return FALSE;
+            if (WaitForSingleObject(hEvent, Timeout) != WAIT_OBJECT_0)
+            {
+                CancelIo(hPipe);
+                GetOverlappedResult(hPipe, &Overlapped, &Done, TRUE);
+                SetLastError(ERROR_TIMEOUT);
+                return FALSE;
+            }
+        }
+        if (!GetOverlappedResult(hPipe, &Overlapped, &Done, FALSE))
+            return FALSE;
+        if (Done == 0)
+        {
+            SetLastError(ERROR_BROKEN_PIPE);
+            return FALSE;
+        }
+        Total += Done;
+    }
+
+    return TRUE;
+}
+
+/*
+ * Who is on the other end of the request pipe: an administrator (or SYSTEM)? The answer
+ * comes from the client's token, which the pipe gives at identification level. Also
+ * formats "DOMAIN\name (SID)" for the device install log.
+ */
+static BOOL
+IsRequestCallerAdmin(
+    _In_ HANDLE hPipe,
+    _Out_writes_(RequesterChars) PWSTR Requester,
+    _In_ DWORD RequesterChars)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    PSID AdminSid = NULL, SystemSid = NULL;
+    BYTE Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    PTOKEN_USER User = (PTOKEN_USER)Buffer;
+    WCHAR Name[64], Domain[64];
+    DWORD NameLength = _countof(Name), DomainLength = _countof(Domain), Size;
+    SID_NAME_USE Use;
+    LPWSTR SidString = NULL;
+    HANDLE hToken = NULL;
+    BOOL IsMember, IsAdmin = FALSE, GotToken;
+
+    _snwprintf(Requester, RequesterChars, L"?");
+    Requester[RequesterChars - 1] = UNICODE_NULL;
+
+    if (!ImpersonateNamedPipeClient(hPipe))
+    {
+        DPRINT1("ImpersonateNamedPipeClient failed, error %lu\n", GetLastError());
+        return FALSE;
+    }
+    GotToken = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &hToken);
+    if (!RevertToSelf())
+    {
+        /* Never go on in the client's context */
+        DPRINT1("RevertToSelf failed, error %lu\n", GetLastError());
+        if (GotToken)
+            CloseHandle(hToken);
+        ExitThread(ERROR_ACCESS_DENIED);
+    }
+    if (!GotToken)
+    {
+        DPRINT1("OpenThreadToken failed, error %lu\n", GetLastError());
+        return FALSE;
+    }
+
+    if (AllocateAndInitializeSid(&NtAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+                                 0, 0, 0, 0, 0, 0, &AdminSid) &&
+        AllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID,
+                                 0, 0, 0, 0, 0, 0, 0, &SystemSid))
+    {
+        if (CheckTokenMembership(hToken, AdminSid, &IsMember) && IsMember)
+            IsAdmin = TRUE;
+        else if (CheckTokenMembership(hToken, SystemSid, &IsMember) && IsMember)
+            IsAdmin = TRUE;
+    }
+    if (AdminSid)
+        FreeSid(AdminSid);
+    if (SystemSid)
+        FreeSid(SystemSid);
+
+    if (GetTokenInformation(hToken, TokenUser, Buffer, sizeof(Buffer), &Size))
+    {
+        if (!LookupAccountSidW(NULL, User->User.Sid, Name, &NameLength, Domain, &DomainLength, &Use))
+        {
+            wcscpy(Name, L"?");
+            Domain[0] = UNICODE_NULL;
+        }
+        ConvertSidToStringSidW(User->User.Sid, &SidString);
+        _snwprintf(Requester, RequesterChars, L"%s%s%s (%s)%s", Domain, Domain[0] ? L"\\" : L"", Name,
+                   SidString ? SidString : L"?", IsAdmin ? L"" : L", not an administrator");
+        Requester[RequesterChars - 1] = UNICODE_NULL;
+        if (SidString)
+            LocalFree(SidString);
+    }
+
+    CloseHandle(hToken);
+    return IsAdmin;
+}
+
+static BOOL
+HasControlChars(
+    _In_ PCWSTR String)
+{
+    for (; *String != UNICODE_NULL; String++)
+    {
+        if (*String < L' ' || *String == 0x7f)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* Reads a counted string of the request: Bytes includes the NUL, which must be its only one */
+static PWSTR
+ReadRequestString(
+    _In_ HANDLE hPipe,
+    _In_ HANDLE hEvent,
+    _In_ DWORD Bytes,
+    _In_ DWORD MaxBytes)
+{
+    PWSTR String;
+
+    if (Bytes < 2 * sizeof(WCHAR) || Bytes > MaxBytes || (Bytes % sizeof(WCHAR)) != 0)
+        return NULL;
+    String = HeapAlloc(GetProcessHeap(), 0, Bytes);
+    if (!String)
+        return NULL;
+    if (!RequestPipeIo(hPipe, hEvent, FALSE, String, Bytes, PNP_REQUEST_IO_TIMEOUT) ||
+        String[Bytes / sizeof(WCHAR) - 1] != UNICODE_NULL ||
+        wcslen(String) != Bytes / sizeof(WCHAR) - 1 ||
+        HasControlChars(String))
+    {
+        HeapFree(GetProcessHeap(), 0, String);
+        return NULL;
+    }
+    return String;
+}
+
+/*
+ * The INF path must be a full, canonical path to an .inf file on a local drive that the
+ * service sees (no UNC, \\?\ or \\.\ paths, no relative parts, no network drive, which a
+ * SYSTEM process may not have).
+ */
+static DWORD
+CheckRequestInfPath(
+    _In_ PCWSTR InfPath)
+{
+    WCHAR FullPath[MAX_PATH];
+    WCHAR Root[4];
+    DWORD Length, Attributes;
+    UINT DriveType;
+
+    Length = GetFullPathNameW(InfPath, _countof(FullPath), FullPath, NULL);
+    if (Length == 0 || Length >= _countof(FullPath) || _wcsicmp(FullPath, InfPath) != 0)
+        return ERROR_INVALID_PARAMETER;
+
+    if (!iswalpha(InfPath[0]) || InfPath[1] != L':' || InfPath[2] != L'\\')
+        return ERROR_INVALID_PARAMETER;
+
+    if (Length < 7 || _wcsicmp(&InfPath[Length - 4], L".inf") != 0)
+        return ERROR_INVALID_PARAMETER;
+
+    Root[0] = InfPath[0];
+    Root[1] = L':';
+    Root[2] = L'\\';
+    Root[3] = UNICODE_NULL;
+    DriveType = GetDriveTypeW(Root);
+    if (DriveType != DRIVE_FIXED && DriveType != DRIVE_REMOVABLE &&
+        DriveType != DRIVE_CDROM && DriveType != DRIVE_RAMDISK)
+    {
+        return (DriveType == DRIVE_REMOTE) ? ERROR_NOT_SUPPORTED : ERROR_PATH_NOT_FOUND;
+    }
+
+    Attributes = GetFileAttributesW(InfPath);
+    if (Attributes == INVALID_FILE_ATTRIBUTES)
+        return GetLastError() ? GetLastError() : ERROR_FILE_NOT_FOUND;
+    if (Attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE))
+        return ERROR_INVALID_PARAMETER;
+
+    return ERROR_SUCCESS;
+}
+
+/* Serves one connected request pipe instance, then closes it */
+static DWORD
+WINAPI
+HandleInstallRequest(
+    _In_ LPVOID lpParameter)
+{
+    HANDLE hPipe = (HANDLE)lpParameter;
+    HANDLE hEvent;
+    PNP_INSTALL_REQUEST Request;
+    PNP_INSTALL_REPLY Reply;
+    PWSTR DeviceId = NULL, InfPath = NULL;
+    WCHAR Requester[192];
+    DWORD Status, Problem, ExitCode = ERROR_GEN_FAILURE;
+    BYTE Byte;
+    BOOL Installed;
+
+    Reply.Magic = PNP_INSTALL_REPLY_MAGIC;
+    Reply.Error = ERROR_INVALID_PARAMETER;
+    Reply.NeedRestart = FALSE;
+
+    hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!hEvent)
+    {
+        CloseHandle(hPipe);
+        return 0;
+    }
+
+    /* The client's token can be had only once it has written something */
+    if (!RequestPipeIo(hPipe, hEvent, FALSE, &Request, sizeof(Request), PNP_REQUEST_IO_TIMEOUT))
+        goto Done;
+
+    if (!IsRequestCallerAdmin(hPipe, Requester, _countof(Requester)))
+    {
+        DPRINT1("Install request refused: %S is not an administrator\n", Requester);
+        Reply.Error = ERROR_ACCESS_DENIED;
+        goto SendReply;
+    }
+
+    if (Request.Magic != PNP_INSTALL_REQUEST_MAGIC ||
+        Request.Version != PNP_INSTALL_REQUEST_VERSION ||
+        Request.Origin == 0 || Request.Origin > PNP_INSTALL_ORIGIN_MAX ||
+        Request.Flags != 0)
+    {
+        goto SendReply;
+    }
+
+    DeviceId = ReadRequestString(hPipe, hEvent, Request.DeviceIdBytes, MAX_DEVICE_ID_LEN * sizeof(WCHAR));
+    InfPath = DeviceId ? ReadRequestString(hPipe, hEvent, Request.InfPathBytes, MAX_PATH * sizeof(WCHAR)) : NULL;
+    if (!DeviceId || !InfPath)
+        goto SendReply;
+
+    /* An existing device, not the root */
+    if (_wcsicmp(DeviceId, L"HTREE\\ROOT\\0") == 0 ||
+        PNP_GetDeviceStatus(NULL, DeviceId, &Status, &Problem, 0) != CR_SUCCESS)
+    {
+        Reply.Error = ERROR_NO_SUCH_DEVINST;
+        goto SendReply;
+    }
+
+    Reply.Error = CheckRequestInfPath(InfPath);
+    if (Reply.Error != ERROR_SUCCESS)
+        goto SendReply;
+
+    DPRINT1("Install request from %S: '%S' with '%S'\n", Requester, DeviceId, InfPath);
+
+    EnterCriticalSection(&DrvInstLock);
+    Installed = RunInstallProcess(DeviceId, NULL, NEWDEV_UI_INSTALL_INF, &ExitCode, InfPath, Request.Origin, Requester);
+    LeaveCriticalSection(&DrvInstLock);
+
+    if (Installed)
+    {
+        Reply.Error = ERROR_SUCCESS;
+        Reply.NeedRestart = (ExitCode == ERROR_SUCCESS_REBOOT_REQUIRED);
+    }
+    else
+    {
+        Reply.Error = (ExitCode != ERROR_SUCCESS) ? ExitCode : ERROR_GEN_FAILURE;
+    }
+    DPRINT1("Install request for '%S': error 0x%lx, restart %lu\n", DeviceId, Reply.Error, Reply.NeedRestart);
+
+SendReply:
+    /* A requester that has gone away does not stop the install; its reply is just lost */
+    if (RequestPipeIo(hPipe, hEvent, TRUE, &Reply, sizeof(Reply), PNP_REQUEST_IO_TIMEOUT))
+    {
+        /* Wait until the client has read the reply and closed its end */
+        RequestPipeIo(hPipe, hEvent, FALSE, &Byte, sizeof(Byte), PNP_REQUEST_IO_TIMEOUT);
+    }
+
+Done:
+    if (DeviceId)
+        HeapFree(GetProcessHeap(), 0, DeviceId);
+    if (InfPath)
+        HeapFree(GetProcessHeap(), 0, InfPath);
+    CloseHandle(hEvent);
+    CloseHandle(hPipe);
+    return 0;
+}
+
+/* Accepts install requests; each connection is served by its own thread */
+DWORD
+WINAPI
+InstallRequestThread(
+    _In_ LPVOID lpParameter)
+{
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    SECURITY_ATTRIBUTES Attributes;
+    OVERLAPPED Overlapped;
+    HANDLE hPipe, hEvent, hWorker;
+    BOOL First = TRUE;
+    DWORD Bytes;
+
+    UNREFERENCED_PARAMETER(lpParameter);
+
+    /* SYSTEM and administrators: nobody else can connect, or create an instance of the name */
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;GRGW;;;BA)",
+                                                              SDDL_REVISION_1, &Sd, NULL))
+    {
+        DPRINT1("Cannot build the install request pipe's security, error %lu\n", GetLastError());
+        return 0;
+    }
+    Attributes.nLength = sizeof(Attributes);
+    Attributes.lpSecurityDescriptor = Sd;
+    Attributes.bInheritHandle = FALSE;
+
+    hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!hEvent)
+    {
+        LocalFree(Sd);
+        return 0;
+    }
+
+    for (;;)
+    {
+        hPipe = CreateNamedPipeW(PNP_INSTALL_REQUEST_PIPE,
+                                 PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (First ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
+                                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                                 PNP_REQUEST_MAX_INSTANCES,
+                                 512, 512, 0, &Attributes);
+        if (hPipe == INVALID_HANDLE_VALUE)
+        {
+            DPRINT1("CreateNamedPipeW(install request) failed, error %lu\n", GetLastError());
+            /* The name belongs to somebody else: never serve it */
+            if (First)
+                break;
+            /* All instances busy: try again later */
+            Sleep(1000);
+            continue;
+        }
+        First = FALSE;
+
+        ZeroMemory(&Overlapped, sizeof(Overlapped));
+        Overlapped.hEvent = hEvent;
+        ResetEvent(hEvent);
+        if (!ConnectNamedPipe(hPipe, &Overlapped))
+        {
+            DWORD Error = GetLastError();
+
+            if (Error == ERROR_IO_PENDING)
+            {
+                if (!GetOverlappedResult(hPipe, &Overlapped, &Bytes, TRUE))
+                    Error = GetLastError();
+                else
+                    Error = ERROR_SUCCESS;
+            }
+            else if (Error == ERROR_PIPE_CONNECTED)
+            {
+                Error = ERROR_SUCCESS;
+            }
+            if (Error != ERROR_SUCCESS)
+            {
+                DPRINT1("ConnectNamedPipe(install request) failed, error %lu\n", Error);
+                CloseHandle(hPipe);
+                continue;
+            }
+        }
+
+        hWorker = CreateThread(NULL, 0, HandleInstallRequest, hPipe, 0, NULL);
+        if (hWorker)
+            CloseHandle(hWorker);
+        else
+            HandleInstallRequest(hPipe);
+    }
+
+    CloseHandle(hEvent);
+    LocalFree(Sd);
     return 0;
 }
