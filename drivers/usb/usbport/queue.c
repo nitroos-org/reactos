@@ -979,8 +979,17 @@ USBPORT_QueuePendingUrbToEndpoint(IN PUSBPORT_ENDPOINT Endpoint,
 
     Transfer = Urb->UrbControlTransfer.hca.Reserved8[0];
     //FIXME USBPORT_ResetEndpointIdle();
+
+    /* PendingTransferList is walked and popped under EndpointSpinLock (USBPORT_FlushPendingTransfers,
+       USBPORT_AbortEndpoint): the insert needs it too, or it can race with the pop and lose the entry. */
+    KeAcquireSpinLock(&Endpoint->EndpointSpinLock,
+                      &Endpoint->EndpointOldIrql);
+
     InsertTailList(&Endpoint->PendingTransferList, &Transfer->TransferLink);
     Urb->UrbHeader.Status = USBD_STATUS_PENDING;
+
+    KeReleaseSpinLock(&Endpoint->EndpointSpinLock,
+                      Endpoint->EndpointOldIrql);
 }
 
 BOOLEAN
