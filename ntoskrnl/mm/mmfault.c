@@ -462,6 +462,22 @@ Again:
         /* Call access fault */
         Status = MmpAccessFault(Mode, (ULONG_PTR)Address, TrapInformation ? FALSE : TRUE, FaultCode);
     }
+    else if ((Mode == UserMode) && (Address <= MM_HIGHEST_USER_ADDRESS) &&
+             MiUserFaultMustLeavePages() && MiCanFaultWaitForPages())
+    {
+        /*
+         * A fault of user mode code on a page of a section (a mapped file, an image, shared memory) takes a
+         * page frame as well. Below the reserve it waits for the balancer like a demand zero fault
+         * (MiResolveDemandZeroFault), before the address space lock. The reserve is what the requests that
+         * cannot wait take their pages from (pool, the stack of a thread, the structures of win32k): without
+         * it, processes that map files take every free page between two balancer passes, and a new process
+         * fails to start (0xC0000142: its first call into win32k cannot get its stack or its thread
+         * information). A fault of kernel code on a user buffer does not wait: the file system that reads
+         * it may hold what the balancer or the lazy writer needs. Retried below.
+         */
+        MmRebalanceMemoryConsumers();
+        Status = STATUS_NO_MEMORY;
+    }
     else
     {
         /* Call not present */

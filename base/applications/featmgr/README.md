@@ -39,6 +39,25 @@ the original replaces it at the next boot (a reboot-delete is never queued for t
   `[Download]` plus `SHA256SUMS`); they are published at `https://repo.nitroos.org/featmgr/lavapipe-pack/26.2.4-6ab3d0fe/`. Copying them into the payload
   folder instead makes the pack installable offline (they are still verified). Offline tests: `tests\roundtrip.cmd` (H1-H29).
 
+## AAC audio decoder (AAC-LC), opt-in add-on
+
+Entry `aac-lc` (`catalog/aac-lc.ini`, amd64): a hosted pack (see above) that installs `nitroaacdec.dll`, an AAC-LC decoder Media
+Foundation transform (`CLSID_CMSAACDecMFT`, the CLSID Firefox's WMF path creates for `audio/mp4a-latm`), into System32 and, for 32-bit
+programs, SysWOW64, with the licence texts and the written source offer in `System32\aac-lc-licenses`. It is NOT in the image:
+real MP4 files carry AAC audio and without a decoder Firefox refuses the whole file ("no decoder found for audio/mp4a-latm").
+The decoder is FFmpeg's native `aac` decoder (LGPL-2.1-or-later) built AAC-LC only (SBR, PS and USAC removed by
+`dll/3rdparty/nitro-aacdec/ffmpeg-9.0.2-aac-lc-only.patch`), the way Fedora keeps HE-AAC out of fdk-aac-free; see
+`dll/3rdparty/nitro-aacdec/README.md` for what Fedora does exactly. Because AAC has a patent pool, `[Feature] Notice=` is shown before
+the feature is turned on: the Optional Features GUI asks OK/Cancel, `featmgr /enable aac-lc` prints it first.
+
+- Registration is `[Registry]` only (no regsvr32): the CLSID/InprocServer32 keys and the `MediaFoundation\Transforms` entries for the
+  64-bit view and for `Classes\Wow6432Node`. New value type `REG_BINARY` (hex digits) and the pseudo-type `KEY`
+  (`HKLM|subkey||KEY`: creates the key, and turning the feature off deletes it again when this enable created it and it is empty).
+- Files: `tools/stage-aac-lc-payload.sh <dir>` builds them (reproducibly, `build-aacdec.sh`), checks the pins of the catalog and writes
+  `SHA256SUMS` and the source tarball; the folder is published at `https://repo.nitroos.org/featmgr/aac-lc/<version>-<hash>/`.
+- Tests: `tests\aaclc-live.cmd` (turn on, notice, files, both registry views, decoder via `mfplat_apitest MftAac` and `mfttest`
+  against FFmpeg's own decode, HE-AAC refused, turn off removes everything, turn on again).
+
 ## Wine Gecko 2.47.4 (the mshtml engine), on demand
 
 Entry `wine-gecko` (`catalog/wine-gecko.ini`, i386 and amd64; Provider=component, recipe in `catalog/components.ini`). Gecko is not

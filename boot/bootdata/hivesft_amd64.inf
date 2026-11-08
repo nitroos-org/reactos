@@ -45,6 +45,16 @@ HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.U
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings","Threading",0x00010001,0
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.ViewManagement.UISettings","TrustLevel",0x00010001,0
 
+; The 32-bit view of the Windows.UI.Composition classes (Compositor, CompositorController): SysWOW64\dcomp.dll, as on Windows.
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Compositor","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Compositor","DllPath",0x00020000,"%SystemRoot%\SysWOW64\dcomp.dll"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Compositor","Threading",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Compositor","TrustLevel",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Core.CompositorController","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Core.CompositorController","DllPath",0x00020000,"%SystemRoot%\SysWOW64\dcomp.dll"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Core.CompositorController","Threading",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Core.CompositorController","TrustLevel",0x00010001,0
+
 ; Web browser registrations name the 64-bit Internet Explorer through %ProgramW6432%. hivesft.inf and hivecls.inf use
 ; %ProgramFiles%, which a 32-bit process expands to "Program Files (x86)", where this system has no iexplore.exe:
 ; ShellExecute of a URL or .html from a 32-bit program (an OAuth login that opens the system browser, such as KROS

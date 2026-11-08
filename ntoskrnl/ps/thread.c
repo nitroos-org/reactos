@@ -329,6 +329,9 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
     /* Initialize the LPC Reply Semaphore */
     KeInitializeSemaphore(&Thread->LpcReplySemaphore, 0, 1);
 
+    /* Initialize the thread-id alert */
+    KeInitializeEvent(&Thread->AlertByThreadIdEvent, SynchronizationEvent, FALSE);
+
     /* Initialize the list heads and locks */
     InitializeListHead(&Thread->LpcReplyChain);
     InitializeListHead(&Thread->IrpList);
