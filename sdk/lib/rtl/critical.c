@@ -500,33 +500,63 @@ NTAPI
 RtlEnterCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
 {
     HANDLE Thread = (HANDLE)NtCurrentTeb()->ClientId.UniqueThread;
+    ULONG_PTR Spin;
 
-    /* Try to lock it */
-    if (InterlockedIncrement(&CriticalSection->LockCount) != 0)
+    /* Fast path: an unowned section (LockCount == -1) is taken in one step */
+    if (InterlockedCompareExchange(&CriticalSection->LockCount, 0, -1) != -1)
     {
-        /* We've failed to lock it! Does this thread actually own it? */
+        /* Does this thread already own it? Only the owner ever stores its own id here. */
         if (Thread == CriticalSection->OwningThread)
         {
             /*
-             * You own it, so you'll get it when you're done with it! No need to
-             * use the interlocked functions as only the thread who already owns
-             * the lock can modify this data.
+             * You own it, so you'll get it when you're done with it! No need
+             * to use the interlocked functions for the recursion count as only
+             * the thread who already owns the lock can modify this data, but
+             * LockCount must be bumped, as Leave drops it again.
              */
+            InterlockedIncrement(&CriticalSection->LockCount);
             CriticalSection->RecursionCount++;
             return STATUS_SUCCESS;
         }
 
-        /* NOTE - CriticalSection->OwningThread can be NULL here because changing
-                  this information is not serialized. This happens when thread a
-                  acquires the lock (LockCount == 0) and thread b tries to
-                  acquire it as well (LockCount == 1) but thread a hasn't had a
-                  chance to set the OwningThread! So it's not an error when
-                  OwningThread is NULL here! */
+        /*
+         * Somebody else owns it. On a multiprocessor the owner is usually
+         * about to leave (short hold times), so poll for the release for up
+         * to the section's spin count before paying for a kernel wait and
+         * wake-up. A spinner does not touch LockCount, so Leave is unchanged
+         * and the waiters already queued on the event keep their turn: the
+         * section is only taken here when it is free with nobody waiting.
+         * The spin count is zero on a uniprocessor.
+         */
+        Spin = CriticalSection->SpinCount & ~RTL_CRITICAL_SECTION_ALL_FLAG_BITS;
+        while (Spin)
+        {
+            if ((CriticalSection->LockCount == -1) &&
+                (InterlockedCompareExchange(&CriticalSection->LockCount, 0, -1) == -1))
+            {
+                goto Owned;
+            }
+            YieldProcessor();
+            Spin--;
+        }
 
-        /* We don't own it, so we must wait for it */
-        RtlpWaitForCriticalSection(CriticalSection);
+        /* Register as a waiter; if the owner left meanwhile this takes the lock */
+        if (InterlockedIncrement(&CriticalSection->LockCount) != 0)
+        {
+            /* NOTE - CriticalSection->OwningThread can be NULL here because
+                      changing this information is not serialized. This
+                      happens when thread a acquires the lock (LockCount == 0)
+                      and thread b tries to acquire it as well (LockCount == 1)
+                      but thread a hasn't had a chance to set the
+                      OwningThread! So it's not an error when OwningThread is
+                      NULL here! */
+
+            /* We don't own it, so we must wait for it */
+            RtlpWaitForCriticalSection(CriticalSection);
+        }
     }
 
+Owned:
     /*
      * Lock successful. Changing this information has not to be serialized
      * because only one thread at a time can actually change it (the one who
