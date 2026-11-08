@@ -1,4 +1,17 @@
-# nitro-aacdec: AAC-LC decoder MFT (optional feature `aac-lc`, NOT in the image)
+# nitro-aacdec: AAC decoder MFT (optional features `aac-lc` and `aac`, NOT in the image)
+
+Two variants are built from this directory (`AAC_VARIANT=lc|full`, default `lc`):
+
+| | feature | FFmpeg | wrapper | decodes |
+|---|---|---|---|---|
+| `lc` | `aac-lc` (catalog `aac-lc.ini`, published `featmgr/aac-lc/9.0.2-47608676`) | 9.0.2 + `ffmpeg-9.0.2-aac-lc-only.patch` | `-DNITRO_AAC_LC_ONLY` | AAC-LC |
+| `full` | `aac` (catalog `aac.ini`) | 9.0.2, **unmodified** | default | AAC-LC, HE-AAC (SBR), HE-AAC v2 (PS) |
+
+Both register the same CLSID and install the same file names, so they exclude each other: `aac.ini` has `Replaces=aac-lc`
+(turning `aac` on turns `aac-lc` off first, then installs the full decoder; turning `aac` off removes everything), and
+`aac-lc.ini` has `Conflicts=aac` (it refuses to turn on while `aac` is on). The full variant accepts audioObjectType 2, 5 and
+29 only (what the Windows decoder documents; AAC Main/LTP/SSR/ER/USAC are refused); HE-AAC output is 2048 frames per input frame
+at twice the core rate. The rest of this file describes the LC-only variant unless it says "full".
 
 `nitroaacdec.dll` is a synchronous Media Foundation transform registered as `CLSID_CMSAACDecMFT`
 ({32D186A7-218F-4C75-8876-DD77273A8999}), the CLSID Firefox's WMF path creates for `audio/mp4a-latm`.
@@ -41,9 +54,20 @@ https://src.fedoraproject.org/rpms/fdk-aac-free (fdk-aac-free.spec), https://wta
 (SHA-256 2dc6952b70283888994ae6e551a79039781f0a64c67fb637bffd5a8f483c34c5). Full report: the ticket
 `releases/2026.11/backlog/MEDIA-aac-decoder-missing.md`.
 
+## The full variant and Fedora (re-verified 2026-11-08)
+
+Fedora's `ffmpeg-free` ships the native `aac` decoder unmodified, SBR and PS included: rawhide `ffmpeg.spec` (FFmpeg 9.0.2,
+https://src.fedoraproject.org/rpms/ffmpeg, commit b40bf995d001927f649f67775bcd6e3c21e4127b, 2026-10-30) has Source0 = the
+pristine upstream tarball, `--disable-decoders` then `--enable-decoder=` the list in `enable_decoders` (line 2 `aac`, line 4
+`libfdk_aac # fdk-aac-free`), and its patches (codec-choice, allow-fdk-aac-free, allow-decklink, vapoursynth-lib-rename,
+openh264 flush callback, streamcopy pts, chromium) do not touch `libavcodec/aac*`. The patent-motivated stripping is only in
+`fdk-aac-free` (https://src.fedoraproject.org/rpms/fdk-aac-free, commit 827a29f5cca86bb4549951b29dc7bf70c76b0810). The full
+variant is therefore the same decoder Fedora ships, built from the same upstream tarball. Full report: the ticket
+`releases/2026.11/backlog/MEDIA-aac-full-he-aac-addon.md`.
+
 ## Known limits
 
-- HE-AAC with implicit (backward-compatible) signalling carries SBR in a fill element of each frame: the frame is
+- (lc only) HE-AAC with implicit (backward-compatible) signalling carries SBR in a fill element of each frame: the frame is
   refused (`MF_E_INVALID_STREAM_DATA` from `ProcessInput`), so the player reports a decode error rather than playing the
   band-limited core at half the sample rate.
 - No ICodecAPI, no `GetAttributes`, no 32-bit-float-only or 24-bit output; channel configurations 1-7 (up to 7.1).
