@@ -920,7 +920,8 @@ IntDefWindowProc(
       case WM_HELP:
       {
          PWND Parent = IntGetParent(Wnd);
-         co_IntSendMessage(UserHMGetHandle(Parent), Msg, wParam, lParam);
+         if (Parent && !(Parent->state & WNDS_DESTROYED))
+            co_IntSendMessage(UserHMGetHandle(Parent), Msg, wParam, lParam);
          break;
       }
 
@@ -1055,13 +1056,16 @@ IntDefWindowProc(
                 if (wParam == VK_F4) /* Try to close the window */
                 {
                    PWND top = UserGetAncestor(Wnd, GA_ROOT);
-                   if (!(top->pcls->style & CS_NOCLOSE))
+                   /* the root of a child of another process can be a destroyed window (no class) */
+                   if (top && top->pcls && !(top->state & WNDS_DESTROYED) &&
+                       !(top->pcls->style & CS_NOCLOSE))
                       UserPostMessage(UserHMGetHandle(top), WM_SYSCOMMAND, SC_CLOSE, 0);
                 }
                 else if (wParam == VK_SNAPSHOT) // Alt-VK_SNAPSHOT?
                 {
                    PWND pwnd = Wnd;
-                   while (IntGetParent(pwnd) != NULL)
+                   /* stop below a destroyed parent (a child of another process that outlived it) */
+                   while (IntGetParent(pwnd) != NULL && !(IntGetParent(pwnd)->state & WNDS_DESTROYED))
                    {
                        pwnd = IntGetParent(pwnd);
                    }

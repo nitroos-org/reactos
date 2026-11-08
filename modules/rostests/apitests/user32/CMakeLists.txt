@@ -61,6 +61,8 @@ list(APPEND SOURCE
     OwnerZOrderNotice.c
     NcPaintLayered.c
     SetWindowPosFlags.c
+    SetParentCrossProcess.c
+    SetParentKillOrder.c
     WmCancelModeLastError.c
     InitializeLpkHooks.c
     IsDialogMessage.c
