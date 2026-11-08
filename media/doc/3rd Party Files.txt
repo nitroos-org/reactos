@@ -31,7 +31,7 @@ Path: dll/3rdparty/icu
 Used Version: 64.2 (the version of the Windows 10 1903 - 22H2 system icu.dll)
 License: Unicode License (ICU 58 and later, https://www.unicode.org/copyright.html; see dll/3rdparty/icu/LICENSE)
 URL: https://icu.unicode.org/ (https://github.com/unicode-org/icu/releases/tag/release-64-2)
-Modifications: only source/common, source/i18n (.cpp/.h) and stubdata.cpp are vendored; umutex.h/.cpp use Win32 SRW locks instead of std::mutex (win32 thread model); added .spec files, icu_main.cpp (maps the data file), icu_compat.h. data/icudtl.dat is the unmodified upstream icudt64l.dat data package of the same release. See dll/3rdparty/icu/README.ReactOS.
+Modifications: only source/common, source/i18n (.cpp/.h) and stubdata.cpp are vendored; umutex.h/.cpp use Win32 SRW locks instead of std::mutex (win32 thread model); added .spec files, icu_main.cpp (maps the data file), icu_compat.h. data/icudtl.dat is the upstream ICU 64.2 data package filtered to the locales of the ReactOS NLS (data/build-filtered-data.sh, data/nls-locales.txt). See dll/3rdparty/icu/README.ReactOS.
 
 Title: libjpeg
 Path: dll/3rdparty/libjpeg
@@ -392,3 +392,54 @@ Path: base/applications/featmgr/payload/powershell-7 (stage-powershell7.sh downl
 Used Version: 7.6.9
 License: MIT (https://spdx.org/licenses/MIT.html); the third-party components of PowerShell are listed in ThirdPartyNotices.txt
 URL: https://github.com/PowerShell/PowerShell
+
+Title: Unicode CLDR (Common Locale Data Repository), cldr-json "full" package
+Path: dll/win32/kernel32/winnls/nls (generated, except ast, cor, eoa, eox, gdv, ivl, wal)
+Path: dll/win32/kernel32/winnls/string/calendar_data.c (generated)
+Path: sdk/tools/nlsgen (the generator, which downloads the release below and checks its sha256)
+Used Version: 49.0.0 (cldr-49.0.0-json-full.zip, sha256 3b1f5d684d29c541d3acf91fe834b3fe36ae0f34775e3ee50e93558bf14ca174)
+License: Unicode-3.0 (UNICODE LICENSE V3, https://spdx.org/licenses/Unicode-3.0.html), text below
+URL: https://cldr.unicode.org/ (https://github.com/unicode-org/cldr-json/releases/tag/49.0.0)
+Modifications: the locale data of kernel32 is generated from CLDR by sdk/tools/nlsgen/nlsgen.py (README.md there lists the mapping and the fields CLDR lacks); nothing of it is taken from Windows.
+
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 2015-2024 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+
+SPDX-License-Identifier: Unicode-3.0
