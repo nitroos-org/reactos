@@ -304,7 +304,7 @@ Return Value:
                   FatResetExceptionState( IrpContext );
             } _SEH2_END;
 
-            SetFlag( Vcb->VcbState, VCB_STATE_FLAG_SHUTDOWN );
+            FatSetVcbFlag( Vcb, VCB_STATE_FLAG_SHUTDOWN );
 
             //
             //  Attempt to punch the volume down.

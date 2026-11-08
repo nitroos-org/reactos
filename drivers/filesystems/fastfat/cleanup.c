@@ -1180,7 +1180,7 @@ FatAutoUnlock (
 
     ClearFlag( Vcb->Vpb->Flags, (VPB_LOCKED | VPB_DIRECT_WRITES_ALLOWED) );
 
-    Vcb->VcbState &= ~VCB_STATE_FLAG_LOCKED;
+    FatClearVcbFlag( Vcb, VCB_STATE_FLAG_LOCKED );
     Vcb->FileObjectWithVcbLocked = NULL;
 
     IoReleaseVpbSpinLock( SavedIrql );

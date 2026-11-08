@@ -438,7 +438,7 @@ Return Value:
 
                     FatMarkVolume( IrpContext, Vcb, VolumeClean );
 #endif
-                    ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_VOLUME_DIRTY );
+                    FatClearVcbFlag( Vcb, VCB_STATE_FLAG_VOLUME_DIRTY );
                 }
 
                 //
@@ -618,7 +618,7 @@ Return Value:
 
             (VOID)FatAcquireExclusiveFcb( IrpContext, Fcb );
 
-            ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_DELETED_FCB );
+            FatClearVcbFlag( Vcb, VCB_STATE_FLAG_DELETED_FCB );
 
             //
             //  Exception handler to catch and commute errors encountered

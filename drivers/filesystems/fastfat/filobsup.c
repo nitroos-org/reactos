@@ -506,7 +506,7 @@ Return Value:
 
     SetFlag( Fcb->FcbState, FCB_STATE_FORCE_MISS_IN_PROGRESS );
 
-    ClearFlag( Vcb->VcbState, VCB_STATE_FLAG_DELETED_FCB );
+    FatClearVcbFlag( Vcb, VCB_STATE_FLAG_DELETED_FCB );
 
     _SEH2_TRY {
 
