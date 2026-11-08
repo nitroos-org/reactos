@@ -3636,6 +3636,17 @@ Return Value:
 
             SetFlag(Fcb->Vcb->VcbState, VCB_STATE_FLAG_CREATE_IN_PROGRESS);
 
+#ifdef __REACTOS__
+            //
+            //  Any of these calls can raise (a resource owner table or a wait block
+            //  that cannot be allocated, a failed flush): the flag must not stay set
+            //  when that unwinds, or the next create or rename on the volume
+            //  bugchecks in its recursion check (FAT_FILE_SYSTEM 0x60330 / 0x100365).
+            //
+
+            _SEH2_TRY {
+
+#endif
             CcFlushCache( &Fcb->NonPaged->SectionObjectPointers, NULL, 0, NULL );
 
             //
@@ -3652,7 +3663,14 @@ Return Value:
                                  0,
                                  FALSE );
 
+#ifdef __REACTOS__
+            } _SEH2_FINALLY {
+
+                ClearFlag(Fcb->Vcb->VcbState, VCB_STATE_FLAG_CREATE_IN_PROGRESS);
+            } _SEH2_END;
+#else
             ClearFlag(Fcb->Vcb->VcbState, VCB_STATE_FLAG_CREATE_IN_PROGRESS);
+#endif
         }
 
         //
