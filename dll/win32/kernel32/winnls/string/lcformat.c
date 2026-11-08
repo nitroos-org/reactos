@@ -2278,15 +2278,17 @@ BOOL NLS_EnumCalendarInfo(const struct enumcalendar_context *ctxt)
         if (GetLocaleInfoW(ctxt->lcid, LOCALE_IOPTIONALCALENDAR, opt, optSz))
         {
           /* NUL-separated decimal numbers; 0 means none */
-          for (iter = opt; *iter && numCalendars < ARRAY_SIZE(calendars); )
+          /* the list ends with the NUL of its last number: stop at its size (a one-number list was read one
+           * character past the end, a stray value there was ERROR_BADDB) */
+          for (iter = opt; iter < opt + optSz && *iter && numCalendars < ARRAY_SIZE(calendars); )
           {
             CALID id = 0;
             UINT known;
 
-            while ((*iter >= '0') && (*iter <= '9'))
+            while (iter < opt + optSz && (*iter >= '0') && (*iter <= '9'))
               id = id * 10 + *iter++ - '0';
 
-            if (*iter++ != 0)
+            if (iter >= opt + optSz || *iter++ != 0)
             {
               SetLastError(ERROR_BADDB);
               goto cleanup;
