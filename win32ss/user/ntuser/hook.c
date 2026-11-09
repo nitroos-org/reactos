@@ -123,6 +123,11 @@ IntHookModuleUnloaded(PDESKTOP pdesk, int iHookID, HHOOK hHook)
 
     TRACE("IntHookModuleUnloaded: iHookID=%d\n", iHookID);
 
+    /* The caller's thread may have no desktop (it can be the thread of a process that is
+       going away): there is no thread list to notify */
+    if (!pdesk)
+        return FALSE;
+
     ppiCsr = PsGetProcessWin32Process(gpepCSRSS);
 
     ListEntry = pdesk->PtiList.Flink;
@@ -1216,14 +1221,17 @@ IntRemoveHook(PVOID Object)
             KAPC_STATE ApcState;
 
             ptiHook->fsHooks &= ~HOOKID_TO_FLAG(HookId);
-            bOtherProcess = (ptiHook->ppi != pti->ppi);
+            /* A hook freed while its owner is cleaned up can be removed by a thread that has
+               no win32k thread info (then it is certainly another process' client info) */
+            bOtherProcess = (!pti || ptiHook->ppi != pti->ppi);
 
             if (bOtherProcess)
                 KeStackAttachProcess(&ptiHook->ppi->peProcess->Pcb, &ApcState);
 
             _SEH2_TRY
             {
-                ptiHook->pClientInfo->fsHooks = ptiHook->fsHooks;
+                if (ptiHook->pClientInfo)
+                    ptiHook->pClientInfo->fsHooks = ptiHook->fsHooks;
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
