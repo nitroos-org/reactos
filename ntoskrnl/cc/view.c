@@ -203,6 +203,51 @@ CcRosRaiseValidDataLength(
     KeReleaseSpinLock(&SharedCacheMap->CacheMapLock, OldIrql);
 }
 
+/*
+ * Write-back goes to the disk in requests of up to CC_FLUSH_CLUSTER_VACBS views (1 MB): the dirty views that directly
+ * follow the one being flushed, in the same file, are unmarked and written with it, in one MmFlushSegment range.
+ * Each is referenced for the flush (returned in Group, Max at most) and marked dirty again if the write fails.
+ * Returns how many followed.
+ */
+#define CC_FLUSH_CLUSTER_VACBS 4
+
+static
+ULONG
+CcRosTakeDirtyFollowers(
+    _In_ PROS_VACB Vacb,
+    _Out_writes_(Max) PROS_VACB *Group,
+    _In_ ULONG Max)
+{
+    PROS_SHARED_CACHE_MAP SharedCacheMap = Vacb->SharedCacheMap;
+    LONGLONG Next = Vacb->FileOffset.QuadPart + VACB_MAPPING_GRANULARITY;
+    PLIST_ENTRY Entry;
+    ULONG Count = 0;
+    KIRQL OldIrql;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    KeAcquireSpinLockAtDpcLevel(&SharedCacheMap->CacheMapLock);
+
+    for (Entry = Vacb->CacheMapVacbListEntry.Flink;
+         (Count < Max) && (Entry != &SharedCacheMap->CacheMapVacbListHead);
+         Entry = Entry->Flink)
+    {
+        PROS_VACB Follower = CONTAINING_RECORD(Entry, ROS_VACB, CacheMapVacbListEntry);
+
+        if ((Follower->FileOffset.QuadPart != Next) || !Follower->Dirty)
+            break;
+
+        CcRosVacbIncRefCount(Follower);
+        CcRosUnmarkDirtyVacb(Follower, FALSE);
+        Group[Count++] = Follower;
+        Next += VACB_MAPPING_GRANULARITY;
+    }
+
+    KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+
+    return Count;
+}
+
 NTSTATUS
 CcRosFlushVacb (
     _In_ PROS_VACB Vacb,
@@ -212,6 +257,8 @@ CcRosFlushVacb (
     BOOLEAN HaveLock = FALSE;
     BOOLEAN WasMarked;
     PROS_SHARED_CACHE_MAP SharedCacheMap = Vacb->SharedCacheMap;
+    PROS_VACB Group[CC_FLUSH_CLUSTER_VACBS - 1];
+    ULONG Followers = 0, i;
 
     /*
      * Remove the VACB from the dirty list before flushing. The return value
@@ -225,6 +272,10 @@ CcRosFlushVacb (
      */
     WasMarked = CcRosUnmarkDirtyVacb(Vacb, TRUE);
 
+    /* The dirty views that follow are written in the same request (only when this thread unmarked the first one) */
+    if (WasMarked)
+        Followers = CcRosTakeDirtyFollowers(Vacb, Group, RTL_NUMBER_OF(Group));
+
     /* Lock for flush, if we are not already the top-level */
     if (IoGetTopLevelIrp() != (PIRP)FSRTL_CACHE_TOP_LEVEL_IRP)
     {
@@ -236,7 +287,7 @@ CcRosFlushVacb (
 
     Status = MmFlushSegment(SharedCacheMap->FileObject->SectionObjectPointer,
                             &Vacb->FileOffset,
-                            VACB_MAPPING_GRANULARITY,
+                            VACB_MAPPING_GRANULARITY * (1 + Followers),
                             Iosb);
 
     if (HaveLock)
@@ -256,11 +307,18 @@ quit:
          */
         if (WasMarked)
             CcRosMarkDirtyVacb(Vacb);
+        for (i = 0; i < Followers; i++)
+            CcRosMarkDirtyVacb(Group[i]);
     }
     else
     {
-        CcRosRaiseValidDataLength(SharedCacheMap, Vacb->FileOffset.QuadPart + VACB_MAPPING_GRANULARITY);
+        CcRosRaiseValidDataLength(SharedCacheMap,
+                                  Vacb->FileOffset.QuadPart + VACB_MAPPING_GRANULARITY * (1 + Followers));
     }
+
+    /* Dropped last, outside any lock: the last reference may free a view */
+    for (i = 0; i < Followers; i++)
+        CcRosVacbDecRefCount(Group[i]);
 
     return Status;
 }
@@ -1357,6 +1415,7 @@ CcRosMarkDirtyVacb (
     {
         CcScheduleLazyWriteScan(FALSE);
     }
+    CcKickStreamingWriteBehind();
     KeReleaseQueuedSpinLock(LockQueueMasterLock, oldIrql);
 }
 
