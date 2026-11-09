@@ -67,8 +67,12 @@ endif()
 
 set_module_type(rpcrt4 win32dll)
 target_link_libraries(rpcrt4 wine wine_dll_register uuid ${PSEH_LIB} oldnames)
-add_delay_importlibs(rpcrt4 iphlpapi wininet secur32 user32 ole32 oleaut32)
-add_importlibs(rpcrt4 advapi32 advapi32_vista kernel32_vista ws2_32 msvcrt kernel32 ntdll)
+# ws2_32 (and with it user32, gdi32, lpk, usp10, imm32) is only needed by the TCP/IP transports: as on Windows, a process
+# that loads rpcrt4 with advapi32 does not map them.
+# The delay import library has no import address table entry to call through: declare the socket functions without dllimport.
+add_definitions(-DWINSOCK_API_LINKAGE=)
+add_delay_importlibs(rpcrt4 ws2_32 iphlpapi wininet secur32 user32 ole32 oleaut32)
+add_importlibs(rpcrt4 advapi32 advapi32_vista kernel32_vista msvcrt kernel32 ntdll)
 add_dependencies(rpcrt4 ndr_types_header)
 add_pch(rpcrt4 precomp.h "${PCH_SKIP_SOURCE}")
 add_cd_file(TARGET rpcrt4 DESTINATION reactos/system32 FOR all)
