@@ -116,14 +116,32 @@ CcScanDpc(
 }
 
 /*
- * Dirty pages the lazy writer brings the cache down to when it is over this: a quarter of the threshold
- * at which writers are throttled, where Mm starts pacing page requests (MmRequestPageMemoryConsumer).
+ * Streaming write-behind: dirty data beyond a few megabytes is not left to the one-eighth-a-second scans (or
+ * to the first scan, three seconds after the first dirty page): a writer that produces more than that starts a
+ * run at once, and the run brings the cache down to the low mark, so the disk is busy while the writer runs and
+ * the data that is left for a flush at the end is small.  Both marks are at most a quarter / an eighth of the
+ * threshold at which writers are throttled, where Mm starts pacing page requests (MmRequestPageMemoryConsumer).
  */
+#define CC_STREAM_START_PAGES (32 * 1024 * 1024 / PAGE_SIZE)
+#define CC_STREAM_LOW_PAGES   (16 * 1024 * 1024 / PAGE_SIZE)
+static volatile LONG CcStreamingKicked = 0;
+
 static
 ULONG
 CcpDirtyPageTarget(VOID)
 {
-    return CcDirtyPageThreshold / 4;
+    return min(CcDirtyPageThreshold / 8, (ULONG)CC_STREAM_LOW_PAGES);
+}
+
+/* Called with the master lock held when a view became dirty. */
+VOID
+CcKickStreamingWriteBehind(VOID)
+{
+    if ((CcTotalDirtyPages > min(CcDirtyPageThreshold / 4, (ULONG)CC_STREAM_START_PAGES)) &&
+        (InterlockedCompareExchange(&CcStreamingKicked, 1, 0) == 0))
+    {
+        CcScheduleLazyWriteScan(TRUE);
+    }
 }
 
 VOID
@@ -177,6 +195,7 @@ CcWriteBehind(VOID)
 
     /* A scan may queue the next run */
     InterlockedExchange(&CcWriteBehindPending, 0);
+    InterlockedExchange(&CcStreamingKicked, 0);
 
     /* Make sure we're not throttling writes after this */
     while (MmAvailablePages < MmThrottleTop)
