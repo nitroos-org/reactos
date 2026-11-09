@@ -22,7 +22,11 @@ START_TEST(slc)
     {
         "SLOpen", "SLClose", "SLInstallLicense", "SLUninstallLicense", "SLGetLicense", "SLGetSLIDList",
         "SLGetLicensingStatusInformation", "SLGetWindowsInformationDWORD", "SLGetPolicyInformationDWORD",
-        "SLConsumeRight", "SLInstallProofOfPurchase",
+        "SLConsumeRight", "SLInstallProofOfPurchase", "SLGetPolicyInformation", "SLGetServiceInformation",
+        "SLGetProductSkuInformation", "SLGenerateOfflineInstallationId", "SLDepositOfflineConfirmationId",
+#ifdef _WIN64
+        "SLGetPKeyId", "SLLoadApplicationPolicies", "SLGetApplicationPolicy",
+#endif
     };
     HMODULE hSlc = LoadLibraryW(L"slc.dll");
     HMODULE hSppc = LoadLibraryW(L"sppc.dll");

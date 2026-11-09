@@ -16,8 +16,13 @@
  * file again yields the same id and replaces the copy. The license information of a license
  * is the table in its <r:otherInfo>: licenseType, productSkuId, applicationId, ...
  *
- * Nothing here checks a signature, installs a product key, grants a right or reports a
- * licensing status: the status queries answer "nothing installed".
+ * Nothing here checks a signature, installs a product key or grants a right. The status
+ * query reports every SKU of an application whose license is installed as unlicensed (no
+ * product key is ever installed). The entry points that only the service can serve (offline
+ * activation, plug-ins, application policies, caller authentication, re-arm) answer
+ * SL_E_NOT_SUPPORTED: they exist so that a client that resolves the whole table by name
+ * (Office does, and refuses to run when one name is missing) gets the answer of a platform
+ * that cannot do it, not ERROR_PROC_NOT_FOUND.
  */
 
 #include <windef.h>
@@ -1206,6 +1211,9 @@ SLGetLicenseInformation(_In_ HSLC hSLC,
 
 /* ---- status and key queries: the store never holds a product key or a granted right ---- */
 
+/* Windows 10 22H2 answers a status query with neither application nor SKU id with this code (measured) */
+#define SL_E_STATUS_QUERY_NO_ID ((HRESULT)0xC004F002L)
+
 HRESULT
 WINAPI
 SLGetLicensingStatusInformation(_In_ HSLC hSLC,
@@ -1215,12 +1223,48 @@ SLGetLicensingStatusInformation(_In_ HSLC hSLC,
                                 _Inout_ UINT *pnStatusCount,
                                 _Outptr_result_buffer_maybenull_(*pnStatusCount) SL_LICENSING_STATUS **ppLicensingStatus)
 {
+    SLID *Skus = NULL;
+    SL_LICENSING_STATUS *Status;
+    UINT Count = 0, i;
+    HRESULT hr;
+
     if (!IsValidHandle(hSLC))
         return E_HANDLE;
     if (!pnStatusCount || !ppLicensingStatus)
         return E_INVALIDARG;
     *pnStatusCount = 0;
     *ppLicensingStatus = NULL;
+
+    if (!pAppID && !pProductSkuId)
+        return SL_E_STATUS_QUERY_NO_ID;
+
+    /* The SKUs the installed licenses name for the application (or the one SKU asked for) */
+    if (pAppID)
+        hr = SLGetSLIDListImpl(hSLC, SL_ID_APPLICATION, pAppID, SL_ID_PRODUCT_SKU, &Count, &Skus);
+    else
+        hr = SLGetSLIDListImpl(hSLC, SL_ID_PRODUCT_SKU, pProductSkuId, SL_ID_PRODUCT_SKU, &Count, &Skus);
+    if (FAILED(hr))
+        return hr;
+    /* Windows (measured): an application none of whose licenses is installed is SL_E_PRODUCT_SKU_NOT_INSTALLED */
+    if (!Count)
+        return SL_E_PRODUCT_SKU_NOT_INSTALLED;
+
+    Status = LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, Count * sizeof(*Status));
+    if (!Status)
+    {
+        LocalFree(Skus);
+        return E_OUTOFMEMORY;
+    }
+    for (i = 0; i < Count; i++)
+    {
+        Status[i].SkuId = Skus[i];
+        Status[i].eStatus = SL_LICENSING_STATUS_UNLICENSED;
+        /* TODO(oracle): the reason code Windows reports for an installed SKU without a key */
+        Status[i].hrReason = SL_E_PKEY_NOT_INSTALLED;
+    }
+    LocalFree(Skus);
+    *pnStatusCount = Count;
+    *ppLicensingStatus = Status;
     return S_OK;
 }
 
@@ -1386,3 +1430,121 @@ DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID lpReserved)
         DisableThreadLibraryCalls(hInstance);
     return TRUE;
 }
+
+/* ---- entry points of the service: this client has no service ---- */
+
+HRESULT
+WINAPI
+SLGetPolicyInformation(_In_ HSLC hSLC,
+                       _In_ PCWSTR pwszValueName,
+                       _Out_opt_ SLDATATYPE *peDataType,
+                       _Out_ UINT *pcbValue,
+                       _Outptr_result_bytebuffer_maybenull_(*pcbValue) PBYTE *ppbValue)
+{
+    if (!IsValidHandle(hSLC))
+        return E_HANDLE;
+    if (!pwszValueName || !pcbValue || !ppbValue)
+        return E_INVALIDARG;
+    *pcbValue = 0;
+    *ppbValue = NULL;
+    return SL_E_VALUE_NOT_FOUND;
+}
+
+HRESULT
+WINAPI
+SLGetServiceInformation(_In_ HSLC hSLC,
+                        _In_ PCWSTR pwszValueName,
+                        _Out_opt_ SLDATATYPE *peDataType,
+                        _Out_ UINT *pcbValue,
+                        _Outptr_result_bytebuffer_maybenull_(*pcbValue) PBYTE *ppbValue)
+{
+    if (!IsValidHandle(hSLC))
+        return E_HANDLE;
+    if (!pwszValueName || !pcbValue || !ppbValue)
+        return E_INVALIDARG;
+    *pcbValue = 0;
+    *ppbValue = NULL;
+    return SL_E_VALUE_NOT_FOUND;
+}
+
+HRESULT
+WINAPI
+SLGetProductSkuInformation(_In_ HSLC hSLC,
+                           _In_ const SLID *pProductSkuId,
+                           _In_ PCWSTR pwszValueName,
+                           _Out_opt_ SLDATATYPE *peDataType,
+                           _Out_ UINT *pcbValue,
+                           _Outptr_result_bytebuffer_maybenull_(*pcbValue) PBYTE *ppbValue)
+{
+    SLID *Licenses = NULL;
+    UINT Count = 0;
+    HRESULT hr;
+
+    if (!IsValidHandle(hSLC))
+        return E_HANDLE;
+    if (!pProductSkuId || !pwszValueName || !pcbValue || !ppbValue)
+        return E_INVALIDARG;
+    *pcbValue = 0;
+    *ppbValue = NULL;
+
+    hr = SLGetSLIDListImpl(hSLC, SL_ID_PRODUCT_SKU, pProductSkuId, SL_ID_LICENSE, &Count, &Licenses);
+    if (Licenses)
+        LocalFree(Licenses);
+    if (FAILED(hr))
+        return hr;
+    return Count ? SL_E_VALUE_NOT_FOUND : SL_E_PRODUCT_SKU_NOT_INSTALLED;
+}
+
+HRESULT
+WINAPI
+SLGenerateOfflineInstallationId(_In_ HSLC hSLC,
+                                _In_ const SLID *pProductSkuId,
+                                _Out_ PWSTR *ppwszInstallationId)
+{
+    if (!IsValidHandle(hSLC))
+        return E_HANDLE;
+    if (!pProductSkuId || !ppwszInstallationId)
+        return E_INVALIDARG;
+    *ppwszInstallationId = NULL;
+    return SL_E_NOT_SUPPORTED;
+}
+
+HRESULT
+WINAPI
+SLDepositOfflineConfirmationId(_In_ HSLC hSLC,
+                               _In_ const SLID *pProductSkuId,
+                               _In_ PCWSTR pwszInstallationId,
+                               _In_ PCWSTR pwszConfirmationId)
+{
+    if (!IsValidHandle(hSLC))
+        return E_HANDLE;
+    if (!pProductSkuId || !pwszInstallationId || !pwszConfirmationId)
+        return E_INVALIDARG;
+    return SL_E_NOT_SUPPORTED;
+}
+
+/*
+ * The entry points below are not in the public header and their signatures are not documented:
+ * they exist on the 64-bit client only (Office 64-bit resolves them by name), take pointer sized
+ * arguments that are never read, and answer that the platform cannot do it.
+ */
+
+HRESULT
+WINAPI
+SLGetPKeyId(_In_ HSLC hSLC,
+            _In_ PCWSTR pwszPKeyAlgorithm,
+            _In_ UINT cbPKeyData,
+            _In_reads_bytes_(cbPKeyData) const BYTE *pbPKeyData,
+            _Out_ SLID *pPKeyId)
+{
+    /* No product key algorithm is implemented: a key cannot be identified */
+    return SL_E_NOT_SUPPORTED;
+}
+
+HRESULT WINAPI SLReArm(PVOID a0, PVOID a1, PVOID a2, PVOID a3) { return SL_E_NOT_SUPPORTED; }
+HRESULT WINAPI SLRegisterPlugin(PVOID a0, PVOID a1, PVOID a2, PVOID a3) { return SL_E_NOT_SUPPORTED; }
+HRESULT WINAPI SLSetAuthenticationData(PVOID a0, PVOID a1, PVOID a2, PVOID a3) { return SL_E_NOT_SUPPORTED; }
+HRESULT WINAPI SLGetAuthenticationResult(PVOID a0, PVOID a1, PVOID a2, PVOID a3) { return SL_E_NOT_SUPPORTED; }
+HRESULT WINAPI SLLoadApplicationPolicies(PVOID a0, PVOID a1, PVOID a2, PVOID a3, PVOID a4) { return SL_E_NOT_SUPPORTED; }
+HRESULT WINAPI SLUnloadApplicationPolicies(PVOID a0, PVOID a1) { return SL_E_NOT_SUPPORTED; }
+HRESULT WINAPI SLGetApplicationPolicy(PVOID a0, PVOID a1, PVOID a2, PVOID a3, PVOID a4) { return SL_E_NOT_SUPPORTED; }
