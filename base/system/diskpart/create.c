@@ -435,6 +435,15 @@ CreateExtendedPartition(
         return EXIT_SUCCESS;
     }
 
+    /* The new extended partition is the container of the logical partitions: make it known, with its free space, so
+     * that "create partition logical" finds room in it without a rescan. */
+    if (CurrentDisk->ExtendedPartition == NULL && CurrentPartition != NULL)
+    {
+        CurrentDisk->ExtendedPartition = CurrentPartition;
+        if (IsListEmpty(&CurrentDisk->LogicalPartListHead))
+            AddEmptyLogicalSpace(CurrentDisk);
+    }
+
     ConResPuts(StdOut, IDS_CREATE_PARTITION_SUCCESS);
 
     return EXIT_SUCCESS;
