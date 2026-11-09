@@ -7,10 +7,12 @@
  */
 
 #include "ntfsng.h"
+#include "../shim/include/ngos.h"
 
 /* ngos_nt.c */
 int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len);
 int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int len);
+int ngos_dev_write_v(void *dev, const struct ngos_iov *iov, unsigned int n);
 
 /* Cc maps files in views of this size (VACB_MAPPING_GRANULARITY). */
 #define NG_VACB_SIZE (256 * 1024)
@@ -409,6 +411,16 @@ static VOID NgZeroResidentFrom(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG Fr
  */
 NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
 {
+    return NgSetFileSizeForWrite(Fcb, FileObject, NewSize, MAXLONGLONG);
+}
+
+/*
+ * As NgSetFileSize, for a growth made by a write that starts at DataFrom and covers the file up to NewSize: the cached
+ * zero fill of the growth stops at DataFrom (the write overwrites the rest, a 1 MB append no longer zeroes 1 MB of cache
+ * for the copy to overwrite).  Zeros are still written below DataFrom, so a write past the end finds its gap zero.
+ */
+NTSTATUS NgSetFileSizeForWrite(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize, LONGLONG DataFrom)
+{
     PNG_VCB Vcb = Fcb->Vcb;
     LONGLONG OldSize = Fcb->Header.FileSize.QuadPart;
     LARGE_INTEGER Li, Li2;
@@ -506,8 +518,9 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize)
                 }
                 CcSetFileSizes(FileObject, &Sizes);
                 Li.QuadPart = OldSize;
-                Li2.QuadPart = NewSize;
-                CcZeroData(FileObject, &Li, &Li2, TRUE);
+                Li2.QuadPart = min(NewSize, max(DataFrom, OldSize));
+                if (Li2.QuadPart > Li.QuadPart)
+                    CcZeroData(FileObject, &Li, &Li2, TRUE);
             }
             CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
         }
@@ -607,9 +620,48 @@ BOOLEAN NgDropIfDiscardable(PNG_VCB Vcb, PIRP Irp, PNTSTATUS Status)
  * The device part of an unlocked paging write (no CoreLock): each run through a bounce buffer, as the
  * core's own data writes go (ngc_dev_write), with the same device request (ngos_dev_write).
  */
-static int NgDioTransfer(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Buffer, PUCHAR Bounce)
+static int NgDioTransfer(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Buffer, PUCHAR Bounce, PMDL Mdl)
 {
     ULONG r, Done;
+
+    /*
+     * The pages of the write are locked (the paging write's MDL), so the runs go to the device from them: no copy through
+     * a bounce buffer, in requests of up to NG_DIO_DIRECT_MAX, every request of the transfer (a fragmented stream has
+     * several runs) in flight at once.  Not possible when a piece does not start on a page, or the device takes no MDL:
+     * the bounce path below.
+     */
+    if (Mdl)
+    {
+        NG_PAGE_WRITE Pw[NG_DIO_IOV];
+        ULONG n = 0;
+        int Ret = 0;
+
+        for (r = 0; r < Dio->nruns && !Ret; r++)
+        {
+            for (Done = 0; Done < Dio->run[r].len; )
+            {
+                ULONG Piece = min(Dio->run[r].len - Done, (ULONG)NG_DIO_DIRECT_MAX);
+
+                if (n == RTL_NUMBER_OF(Pw))
+                {
+                    Ret = NgDevWritePagesV(Vcb->StorageDevice, Mdl, Pw, n);
+                    if (Ret)
+                        break;
+                    n = 0;
+                }
+                Pw[n].Off = Dio->run[r].dev + Done;
+                Pw[n].SrcOff = Dio->run[r].boff + Done;
+                Pw[n].Len = Piece;
+                n++;
+                Done += Piece;
+            }
+        }
+        if (!Ret && n)
+            Ret = NgDevWritePagesV(Vcb->StorageDevice, Mdl, Pw, n);
+        /* Unsupported: the bounce path writes the whole transfer again (the same bytes, whatever a first group wrote) */
+        if (Ret != NG_DEV_UNSUPPORTED)
+            return Ret ? -1 : 0;
+    }
     for (r = 0; r < Dio->nruns; r++)
     {
         for (Done = 0; Done < Dio->run[r].len; )
@@ -801,7 +853,7 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     {
         NgDataIoBegin(Vcb);
 
-        IoErr = NgDioTransfer(Vcb, &Dio, Buffer, Bounce);
+        IoErr = NgDioTransfer(Vcb, &Dio, Buffer, Bounce, Irp->MdlAddress);
 
         NgDataIoTransferred(Vcb);
         Done = ngc_dio_end(Vcb->Core, &Dio, Buffer, IoErr);
@@ -1183,7 +1235,7 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     OldSize = Fcb->Header.FileSize.QuadPart;
     if (End > Fcb->Header.FileSize.QuadPart)
     {
-        Status = NgSetFileSize(Fcb, FileObject, End);
+        Status = NgSetFileSizeForWrite(Fcb, FileObject, End, Offset.QuadPart);
         if (!NT_SUCCESS(Status))
             goto out_unlock;
     }
