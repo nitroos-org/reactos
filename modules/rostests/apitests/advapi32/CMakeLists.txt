@@ -26,6 +26,7 @@ list(APPEND SOURCE
     EventProvider.c
     EventSetInformation.c
     GetSecurityInfoSequence.c
+    ObjectLockStress.c
     Hash.c
     HKEY_CLASSES_ROOT.c
     IsTextUnicode.c
