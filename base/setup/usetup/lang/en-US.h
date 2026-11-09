@@ -2270,7 +2270,7 @@ MUI_STRING enUSStrings[] =
     {STRING_REBOOTPROGRESSBAR,
     " Your computer will reboot in %li second(s)... "},
     {STRING_BRAND_NOTICE,
-    BRAND_PRODUCT_NAME " is an unofficial build based on ReactOS.\nReactOS is a trademark of the ReactOS project.\nDo not report issues from this build to the ReactOS project."},
+    BRAND_PRODUCT_NAME " is based on ReactOS, a trademark of the ReactOS\nproject, and is not affiliated with it.\nDo not report issues from this build to the ReactOS project."},
     {STRING_CONSOLEFAIL1,
     "Unable to open the console\r\n\r\n"},
     {STRING_CONSOLEFAIL2,

@@ -25,7 +25,7 @@
 #define REACTOS_DLL_VERSION_RC      "@DLL_VERSION_STR@\0"
 #define REACTOS_DLL_VERSION_STR     "@DLL_VERSION_STR@"
 
-/* Product name and version shown to users (NitroOS, an unofficial build based on ReactOS) */
+/* Product name and version shown to users (NitroOS, based on ReactOS) */
 #define BRAND_PRODUCT_NAME          "@NITRO_NAME@"
 /* The OS identity text for the display surfaces that show a Windows-style caption (WMI Win32_OperatingSystem.Caption,
  * systeminfo "OS Name", cmd ver, dxdiag). "Windows 10" stays inside so scripts that match it keep working.
