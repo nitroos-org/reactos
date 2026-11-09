@@ -135,24 +135,34 @@ ApphelpCacheReleaseLock(VOID)
     KeLeaveCriticalRegion();
 }
 
-VOID
+/*
+ * Copy a counted string into a pool block of its own. The length of a string that comes from the caller or
+ * from the registry is a USHORT count of bytes: one that is odd, or too long for the terminator to fit in
+ * the count, is refused (the terminator made MaximumLength wrap, and the copy overflowed the block).
+ */
+NTSTATUS
 ApphelpDuplicateUnicodeString(
     _Out_ PUNICODE_STRING Destination,
     _In_ PCUNICODE_STRING Source)
 {
-    Destination->Length = Source->Length;
-    if (Destination->Length)
+    USHORT Length = Source->Length;
+
+    Destination->Length = 0;
+    Destination->MaximumLength = 0;
+    Destination->Buffer = NULL;
+    if ((Length & (sizeof(WCHAR) - 1)) || Length > (UNICODE_STRING_MAX_BYTES - sizeof(WCHAR)))
+        return STATUS_INVALID_PARAMETER;
+    if (Length)
     {
-        Destination->MaximumLength = Destination->Length + sizeof(WCHAR);
-        Destination->Buffer = ApphelpAlloc(Destination->MaximumLength);
-        RtlCopyMemory(Destination->Buffer, Source->Buffer, Destination->Length);
-        Destination->Buffer[Destination->Length / sizeof(WCHAR)] = UNICODE_NULL;
+        Destination->Buffer = ApphelpAlloc(Length + sizeof(WCHAR));
+        if (!Destination->Buffer)
+            return STATUS_NO_MEMORY;
+        Destination->MaximumLength = Length + sizeof(WCHAR);
+        RtlCopyMemory(Destination->Buffer, Source->Buffer, Length);
+        Destination->Buffer[Length / sizeof(WCHAR)] = UNICODE_NULL;
+        Destination->Length = Length;
     }
-    else
-    {
-        Destination->MaximumLength = 0;
-        Destination->Buffer = NULL;
-    }
+    return STATUS_SUCCESS;
 }
 
 VOID
@@ -177,7 +187,25 @@ ApphelpCacheQueryInfo(
     IO_STATUS_BLOCK IoStatusBlock;
     FILE_BASIC_INFORMATION FileBasic;
     FILE_STANDARD_INFORMATION FileStandard;
+    PFILE_OBJECT FileObject;
     NTSTATUS Status;
+
+    /* The handle is the caller's: the file information is for a caller that may read it, not more
+     * (the query below runs in kernel mode and would not check the access of the handle) */
+    if (ExGetPreviousMode() != KernelMode)
+    {
+        Status = ObReferenceObjectByHandle(ImageHandle,
+                                           FILE_READ_ATTRIBUTES,
+                                           IoFileObjectType,
+                                           UserMode,
+                                           (PVOID*)&FileObject,
+                                           NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            return Status;
+        }
+        ObDereferenceObject(FileObject);
+    }
 
     Status = ZwQueryInformationFile(ImageHandle,
                                     &IoStatusBlock,
@@ -271,6 +299,12 @@ ApphelpCacheParse(
     }
 
     NumEntries = Header->NumEntries;
+    /* The entry table has to lie inside the data */
+    if ((ULONG64)NumEntries * SHIM_PERSISTENT_CACHE_ENTRY_SIZE > DataLength - SHIM_CACHE_HEADER_SIZE)
+    {
+        DPRINT1("SHIMS: ApphelpCacheParse more entries (%u) than data\n", NumEntries);
+        return STATUS_INVALID_PARAMETER;
+    }
     DPRINT("SHIMS: ApphelpCacheParse walking %d entries\n", NumEntries);
     for (Cur = 0; Cur < NumEntries; ++Cur)
     {
@@ -284,7 +318,14 @@ ApphelpCacheParse(
 
         /* Now we copy all data to a local buffer, that can be safely duplicated by RtlInsert */
         Entry.Persistent = *Persistent;
-        ApphelpDuplicateUnicodeString(&Entry.Persistent.ImageName, &String);
+        /* The name has to lie inside the data */
+        if ((ULONG_PTR)Persistent->ImageName.Buffer > DataLength ||
+            Persistent->ImageName.Length > DataLength - (ULONG_PTR)Persistent->ImageName.Buffer ||
+            !NT_SUCCESS(ApphelpDuplicateUnicodeString(&Entry.Persistent.ImageName, &String)))
+        {
+            DPRINT1("SHIMS: ApphelpCacheParse invalid image name\n");
+            return STATUS_INVALID_PARAMETER;
+        }
         Result = RtlInsertElementGenericTableAvl(&ApphelpShimCache,
                                                  &Entry,
                                                  sizeof(Entry),
@@ -300,6 +341,8 @@ ApphelpCacheParse(
     return STATUS_SUCCESS;
 }
 
+NTSTATUS ApphelpCacheFlush(VOID);
+
 BOOLEAN
 ApphelpCacheRead(VOID)
 {
@@ -312,8 +355,9 @@ ApphelpCacheRead(VOID)
     Status = ZwOpenKey(&KeyHandle, KEY_QUERY_VALUE, &AppCompatKeyAttributes);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("SHIMS: ApphelpCacheRead could not even open Session Manager\\AppCompatCache (0x%x)\n", Status);
-        return FALSE;
+        /* A system that never shut down with the cache enabled has no key yet: start with an empty cache */
+        DPRINT("SHIMS: ApphelpCacheRead could not open Session Manager\\AppCompatCache (0x%x)\n", Status);
+        return (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_OBJECT_PATH_NOT_FOUND);
     }
 
     Status = ZwQueryValueKey(KeyHandle,
@@ -341,10 +385,18 @@ ApphelpCacheRead(VOID)
     {
         Status = ApphelpCacheParse(KeyValueInformation->Data,
                                    KeyValueInformation->DataLength);
+        if (!NT_SUCCESS(Status))
+        {
+            /* Data of another format or damaged: whatever was taken from it is dropped, the cache starts empty */
+            ApphelpCacheFlush();
+            Status = STATUS_SUCCESS;
+        }
     }
     else
     {
-        DPRINT1("SHIMS: ApphelpCacheRead not loaded from registry (0x%x)\n", Status);
+        DPRINT("SHIMS: ApphelpCacheRead not loaded from registry (0x%x)\n", Status);
+        /* No value yet: an empty cache */
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND) Status = STATUS_SUCCESS;
     }
 
     if (KeyValueInformation != &KeyValueObject && KeyValueInformation != NULL)
@@ -410,7 +462,7 @@ ApphelpCacheWrite(VOID)
     }
     ApphelpCacheReleaseLock();
 
-    Status = ZwOpenKey(&KeyHandle, KEY_SET_VALUE, &AppCompatKeyAttributes);
+    Status = ZwCreateKey(&KeyHandle, KEY_SET_VALUE, &AppCompatKeyAttributes, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
     if (NT_SUCCESS(Status))
     {
         Status = ZwSetValueKey(KeyHandle,
@@ -489,10 +541,9 @@ ApphelpValidateData(
             if (LocalImageName.Length && LocalImageName.Buffer)
             {
                 ProbeForRead(LocalImageName.Buffer,
-                             LocalImageName.Length * sizeof(WCHAR),
+                             LocalImageName.Length,
                              1);
-                ApphelpDuplicateUnicodeString(ImageName, &LocalImageName);
-                Status = STATUS_SUCCESS;
+                Status = ApphelpDuplicateUnicodeString(ImageName, &LocalImageName);
             }
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
@@ -585,11 +636,14 @@ NTSTATUS
 ApphelpCacheRemoveEntry(
     _In_ PUNICODE_STRING ImageName)
 {
+    SHIM_CACHE_ENTRY Lookup = EMPTY_SHIM_ENTRY;
     PSHIM_CACHE_ENTRY Entry;
     NTSTATUS Status;
 
+    /* The table compares whole entries: look up by an entry that carries the name */
+    Lookup.Persistent.ImageName = *ImageName;
     ApphelpCacheAcquireLock();
-    Entry = RtlLookupElementGenericTableAvl(&ApphelpShimCache, ImageName);
+    Entry = RtlLookupElementGenericTableAvl(&ApphelpShimCache, &Lookup);
     Status = ApphelpCacheRemoveEntryNolock(Entry);
     ApphelpCacheReleaseLock();
     return Status;
@@ -651,14 +705,16 @@ ApphelpCacheUpdateEntry(
     {
         DPRINT("SHIMS: ApphelpCacheUpdateEntry: Inserting new Entry\n");
         /* Insert a new entry, with its own copy of the ImageName */
-        ApphelpDuplicateUnicodeString(&Entry.Persistent.ImageName, ImageName);
-        Lookup = RtlInsertElementGenericTableFullAvl(&ApphelpShimCache,
-                                                     &Entry,
-                                                     sizeof(Entry),
-                                                     0,
-                                                     NodeOrParent,
-                                                     SearchResult);
-        if (!Lookup)
+        Status = ApphelpDuplicateUnicodeString(&Entry.Persistent.ImageName, ImageName);
+        Lookup = NULL;
+        if (NT_SUCCESS(Status))
+            Lookup = RtlInsertElementGenericTableFullAvl(&ApphelpShimCache,
+                                                         &Entry,
+                                                         sizeof(Entry),
+                                                         0,
+                                                         NodeOrParent,
+                                                         SearchResult);
+        if (NT_SUCCESS(Status) && !Lookup)
         {
             ApphelpFreeUnicodeString(&Entry.Persistent.ImageName);
             Status = STATUS_NO_MEMORY;
@@ -687,7 +743,7 @@ ApphelpCacheFlush(VOID)
 {
     PVOID p;
 
-    DPRINT1("SHIMS: ApphelpCacheFlush\n");
+    DPRINT("SHIMS: ApphelpCacheFlush\n");
     ApphelpCacheAcquireLock();
     while ((p = RtlEnumerateGenericTableAvl(&ApphelpShimCache, TRUE)))
     {
