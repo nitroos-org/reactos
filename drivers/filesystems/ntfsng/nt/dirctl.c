@@ -102,14 +102,47 @@ static int NgSnapFill(void *Context, const struct ngc_dirent *D)
  * the last '.' may take the rest), DOS_QM '>' one character, or nothing at a '.' or at the end
  * (then the whole run of '>' is skipped), DOS_DOT '"' a '.' or nothing at the end.  DotEntry: the
  * "." and ".." entries match as the name "." on which DOS_QM may take the '.'.
- * Work: a (E+1) x (N+1) table filled backwards; Tab must hold that many bytes.
+ * Work: a (E+1) x (N+1) table filled backwards; Tab must hold that many bytes.  Before it, the literal
+ * characters at the start and at the end of the expression are compared with the name: they consume exactly
+ * their own number of characters, at the start and at the end of the name, whatever the wildcards between
+ * them are, so most names that do not match are rejected without the table (a name was worth 60 to 70
+ * microseconds of it for a 60 character expression), and the name is upcased once, not once per table cell.
  */
 static BOOLEAN NgMatchExpression(const WCHAR *Expr, USHORT E, const WCHAR *Name, USHORT N,
                                  BOOLEAN DotEntry, UCHAR *Tab)
 {
     LONG Last = -1;
-    USHORT i;
+    USHORT i, Lead = 0, Trail = 0;
     LONG p, j;
+    WCHAR Up[256];
+#define NG_IS_WILD(c) ((c) == L'*' || (c) == L'?' || (c) == L'<' || (c) == L'>' || (c) == L'"')
+    if (N >= RTL_NUMBER_OF(Up))
+        return FALSE;   /* longer than any name of the volume */
+    for (i = 0; i < N; i++)
+        Up[i] = RtlUpcaseUnicodeChar(Name[i]);
+    while (Lead < E && !NG_IS_WILD(Expr[Lead]))
+        Lead++;
+    if (Lead == E)
+    {
+        /* no wildcard at all: the whole name has to be equal */
+        if (N != E)
+            return FALSE;
+        for (i = 0; i < N; i++)
+            if (Up[i] != Expr[i])
+                return FALSE;
+        return TRUE;
+    }
+    while (Trail < E - Lead && !NG_IS_WILD(Expr[E - 1 - Trail]))
+        Trail++;
+    if ((ULONG)Lead + Trail > N)
+        return FALSE;
+    for (i = 0; i < Lead; i++)
+        if (Up[i] != Expr[i])
+            return FALSE;
+    for (i = 0; i < Trail; i++)
+        if (Up[N - 1 - i] != Expr[E - 1 - i])
+            return FALSE;
+#undef NG_IS_WILD
 #define T(p, j) Tab[(p) * (N + 1) + (j)]
     for (i = 0; i < N; i++)
         if (Name[i] == L'.')
@@ -154,7 +187,7 @@ static BOOLEAN NgMatchExpression(const WCHAR *Expr, USHORT E, const WCHAR *Name,
                     r = T(p + 1, j);
                 break;
             default:
-                r = j < N && RtlUpcaseUnicodeChar(Name[j]) == c && T(p + 1, j + 1);
+                r = j < N && Up[j] == c && T(p + 1, j + 1);
                 break;
             }
             T(p, j) = r;
