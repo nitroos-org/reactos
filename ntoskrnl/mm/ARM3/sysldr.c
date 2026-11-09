@@ -1126,6 +1126,382 @@ Done:
     return STATUS_SUCCESS;
 }
 
+/*
+ * MISSING DRIVER IMPORT LOG
+ *
+ * MiResolveImageReferences stops at the first import it cannot resolve and
+ * hands back only that one, so a driver built against a newer kernel that
+ * misses a dozen exports reports a single name, and on a Release build not
+ * even that (DPRINT1 is compiled out). When a driver fails to load for a
+ * missing import, the scan below walks the whole import table again,
+ * read-only, and records EVERY import that the loaded modules do not export.
+ * The load itself still fails with the same status as before.
+ *
+ * The record goes to the debugger (DbgPrintEx, also on Release), to the
+ * registry (HKLM\SYSTEM\CurrentControlSet\Control\NitroOS\MissingDriverImports,
+ * a REG_MULTI_SZ value named after the driver) and to the System event log
+ * (source NitroLoader). Registry and event log are written from a worker
+ * item: the loader runs under MmSystemLoadLock and must not wait on them.
+ */
+#define MI_MISSING_IMPORT_MAX_ENTRIES   256
+#define MI_MISSING_IMPORT_CHARS         12288 /* capacity of the multi-sz, in WCHARs */
+#define MI_MISSING_IMPORT_NAME_CHARS    64
+
+typedef struct _MI_MISSING_IMPORT_LOG
+{
+    WORK_QUEUE_ITEM WorkItem;
+    NTSTATUS Status;
+    ULONG Count;        /* entries stored in Strings */
+    ULONG Dropped;      /* entries that did not fit */
+    ULONG Used;         /* WCHARs used in Strings, excluding the final terminator */
+    WCHAR DriverName[MI_MISSING_IMPORT_NAME_CHARS];
+    WCHAR Strings[MI_MISSING_IMPORT_CHARS + 1];
+} MI_MISSING_IMPORT_LOG, *PMI_MISSING_IMPORT_LOG;
+
+static
+VOID
+MiMissingLogAdd(IN PMI_MISSING_IMPORT_LOG Log,
+                IN PCSTR Module,
+                IN PCSTR Name OPTIONAL,
+                IN ULONG Ordinal)
+{
+    ULONG Start = Log->Used, Pos = Log->Used;
+    CHAR Digits[12];
+    ULONG n = 0, i;
+    PCSTR p;
+
+    if (Log->Count >= MI_MISSING_IMPORT_MAX_ENTRIES)
+    {
+        Log->Dropped++;
+        return;
+    }
+
+    /* module!name, module!#ordinal, or just the module when Name is NULL and Ordinal is MAXULONG */
+    for (p = Module; *p && Pos < MI_MISSING_IMPORT_CHARS - 1; p++)
+        Log->Strings[Pos++] = (WCHAR)(UCHAR)*p;
+    if (Name || Ordinal != MAXULONG)
+    {
+        if (Pos < MI_MISSING_IMPORT_CHARS - 1) Log->Strings[Pos++] = L'!';
+        if (Name)
+        {
+            for (p = Name; *p && Pos < MI_MISSING_IMPORT_CHARS - 1; p++)
+                Log->Strings[Pos++] = (WCHAR)(UCHAR)*p;
+        }
+        else
+        {
+            if (Pos < MI_MISSING_IMPORT_CHARS - 1) Log->Strings[Pos++] = L'#';
+            do
+            {
+                Digits[n++] = (CHAR)('0' + (Ordinal % 10));
+                Ordinal /= 10;
+            } while (Ordinal && n < sizeof(Digits));
+            for (i = n; i && Pos < MI_MISSING_IMPORT_CHARS - 1; i--)
+                Log->Strings[Pos++] = (WCHAR)(UCHAR)Digits[i - 1];
+        }
+    }
+
+    /* Out of room: keep what we have and count the entry as dropped */
+    if (Pos >= MI_MISSING_IMPORT_CHARS - 1)
+    {
+        Log->Dropped++;
+        return;
+    }
+    Log->Strings[Pos++] = UNICODE_NULL;
+    Log->Strings[Pos] = UNICODE_NULL; /* multi-sz terminator */
+    Log->Used = Pos;
+    Log->Count++;
+
+    DbgPrintEx(DPFLTR_SYSTEM_ID, DPFLTR_ERROR_LEVEL,
+               "NITRO: %ws: unresolved import %ws\n",
+               Log->DriverName, &Log->Strings[Start]);
+}
+
+static
+NTSTATUS
+MiMissingLogOpenKey(OUT PHANDLE KeyHandle)
+{
+    static const PCWSTR Paths[] =
+    {
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\NitroOS",
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\NitroOS\\MissingDriverImports"
+    };
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Key = NULL;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    ULONG i, Disposition;
+
+    for (i = 0; i < RTL_NUMBER_OF(Paths); i++)
+    {
+        RtlInitUnicodeString(&Name, Paths[i]);
+        InitializeObjectAttributes(&ObjectAttributes, &Name,
+                                   OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                                   NULL, NULL);
+        Status = ZwCreateKey(&Key, KEY_ALL_ACCESS, &ObjectAttributes, 0, NULL,
+                             REG_OPTION_NON_VOLATILE, &Disposition);
+        if (!NT_SUCCESS(Status)) return Status;
+        if (i + 1 < RTL_NUMBER_OF(Paths)) ZwClose(Key);
+    }
+
+    *KeyHandle = Key;
+    return Status;
+}
+
+static
+VOID
+MiMissingLogWriteEvent(IN PMI_MISSING_IMPORT_LOG Log)
+{
+    WCHAR Count[12];
+    PWCHAR List, Src, Dest, PrevModule = L"ntoskrnl.exe"; /* the usual module: not named in the (short) event text */
+    ULONG Value = Log->Count + Log->Dropped, n = 0, i, Len, ModuleLen, PrevModuleLen = 12;
+
+    /* %2: how many, in decimal */
+    do
+    {
+        Count[n++] = (WCHAR)(L'0' + (Value % 10));
+        Value /= 10;
+    } while (Value && n < RTL_NUMBER_OF(Count) - 1);
+    for (i = 0; i < n / 2; i++)
+    {
+        WCHAR Swap = Count[i];
+        Count[i] = Count[n - 1 - i];
+        Count[n - 1 - i] = Swap;
+    }
+    Count[n] = UNICODE_NULL;
+
+    /* %3: "ntoskrnl.exe!A, B, hal.dll!C" with a module named when it changes */
+    List = ExAllocatePoolWithTag(PagedPool, (Log->Used + 2 * Log->Count + 1) * sizeof(WCHAR), TAG_LDR_WSTR);
+    if (!List) return;
+    Dest = List;
+    Src = Log->Strings;
+    for (i = 0; i < Log->Count; i++)
+    {
+        PWCHAR Bang = wcschr(Src, L'!'), Text = Src;
+
+        Len = (ULONG)wcslen(Src);
+        ModuleLen = Bang ? (ULONG)(Bang - Src) : Len;
+        if (Bang && (ModuleLen == PrevModuleLen) && !_wcsnicmp(Src, PrevModule, ModuleLen))
+        {
+            Text = Bang + 1;
+            Len -= ModuleLen + 1;
+        }
+        PrevModule = Src;
+        PrevModuleLen = ModuleLen;
+
+        if (i)
+        {
+            *Dest++ = L',';
+            *Dest++ = L' ';
+        }
+        RtlCopyMemory(Dest, Text, Len * sizeof(WCHAR));
+        Dest += Len;
+        Src += wcslen(Src) + 1;
+    }
+    *Dest = UNICODE_NULL;
+
+    IopLogNitroEvent(NITRO_ERR_DRIVER_MISSING_IMPORTS, Log->Status, Log->DriverName, Count, List);
+    ExFreePoolWithTag(List, TAG_LDR_WSTR);
+}
+
+static
+VOID
+NTAPI
+MiMissingLogWorker(IN PVOID Context)
+{
+    PMI_MISSING_IMPORT_LOG Log = Context;
+    UNICODE_STRING ValueName;
+    HANDLE Key;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    /* Best effort: a registry that is not up yet only costs the persistent copy */
+    Status = MiMissingLogOpenKey(&Key);
+    if (NT_SUCCESS(Status))
+    {
+        RtlInitUnicodeString(&ValueName, Log->DriverName);
+        Status = ZwSetValueKey(Key, &ValueName, 0, REG_MULTI_SZ, Log->Strings,
+                               (Log->Used + 1) * sizeof(WCHAR));
+        ZwClose(Key);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        DbgPrintEx(DPFLTR_SYSTEM_ID, DPFLTR_ERROR_LEVEL,
+                   "NITRO: %ws: could not record the missing imports in the registry (0x%08lx)\n",
+                   Log->DriverName, Status);
+    }
+
+    MiMissingLogWriteEvent(Log);
+    ExFreePoolWithTag(Log, TAG_LDR_WSTR);
+}
+
+/*
+ * Walk every import of ImageBase again and record each one the loaded
+ * modules do not export. FailedModule is the dependency that could not be
+ * loaded at all (recorded as a whole), or NULL. A module that is simply not
+ * loaded (yet) is skipped, it is not known to be missing. Read-only on the
+ * export side; the import name tables are in whatever state the failed
+ * resolution left them (by-name entries before the failure point were
+ * rebased to pointers, the rest are still RVAs).
+ */
+static
+VOID
+MiLogMissingImports(IN PVOID ImageBase,
+                    IN NTSTATUS FailStatus,
+                    IN PCSTR FailedModule OPTIONAL)
+{
+    PMI_MISSING_IMPORT_LOG Log;
+    PLDR_DATA_TABLE_ENTRY Self = NULL, Entry;
+    PLIST_ENTRY NextEntry;
+    PIMAGE_IMPORT_DESCRIPTOR Descriptor;
+    ULONG ImportSize, ExportSize, i, ImageSize;
+    PIMAGE_NT_HEADERS NtHeaders;
+
+    PAGED_CODE();
+
+    NtHeaders = RtlImageNtHeader(ImageBase);
+    Descriptor = RtlImageDirectoryEntryToData(ImageBase, TRUE,
+                                              IMAGE_DIRECTORY_ENTRY_IMPORT,
+                                              &ImportSize);
+    if (!NtHeaders || !Descriptor) return;
+    ImageSize = NtHeaders->OptionalHeader.SizeOfImage;
+
+    Log = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Log), TAG_LDR_WSTR);
+    if (!Log) return;
+    RtlZeroMemory(Log, sizeof(*Log) - sizeof(Log->Strings) + 2 * sizeof(WCHAR));
+    Log->Status = FailStatus;
+
+    /* Our own name */
+    for (NextEntry = PsLoadedModuleList.Flink;
+         NextEntry != &PsLoadedModuleList;
+         NextEntry = NextEntry->Flink)
+    {
+        Entry = CONTAINING_RECORD(NextEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+        if (Entry->DllBase == ImageBase) { Self = Entry; break; }
+    }
+    if (Self && Self->BaseDllName.Buffer)
+    {
+        i = min(Self->BaseDllName.Length / sizeof(WCHAR), MI_MISSING_IMPORT_NAME_CHARS - 1);
+        RtlCopyMemory(Log->DriverName, Self->BaseDllName.Buffer, i * sizeof(WCHAR));
+        Log->DriverName[i] = UNICODE_NULL;
+    }
+    else
+    {
+        RtlCopyMemory(Log->DriverName, L"(unknown)", sizeof(L"(unknown)"));
+    }
+
+    for (; Descriptor->Name && Descriptor->OriginalFirstThunk; Descriptor++)
+    {
+        PCSTR ModName = (PCSTR)((ULONG_PTR)ImageBase + Descriptor->Name);
+        WCHAR WideName[MI_MISSING_IMPORT_NAME_CHARS];
+        UNICODE_STRING ModUnicode;
+        PVOID DllBase = NULL;
+        PIMAGE_EXPORT_DIRECTORY Exports;
+        PIMAGE_THUNK_DATA Thunk;
+        PULONG NameTable, FuncTable;
+        PUSHORT OrdinalTable;
+        ULONG Len = 0;
+
+        while (ModName[Len] && Len < MI_MISSING_IMPORT_NAME_CHARS - 1)
+        {
+            WideName[Len] = (WCHAR)(UCHAR)ModName[Len];
+            Len++;
+        }
+        if (ModName[Len]) continue; /* name too long for anything we load */
+        WideName[Len] = UNICODE_NULL;
+        RtlInitUnicodeString(&ModUnicode, WideName);
+
+        for (NextEntry = PsLoadedModuleList.Flink;
+             NextEntry != &PsLoadedModuleList;
+             NextEntry = NextEntry->Flink)
+        {
+            Entry = CONTAINING_RECORD(NextEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+            if (RtlEqualUnicodeString(&ModUnicode, &Entry->BaseDllName, TRUE))
+            {
+                DllBase = Entry->DllBase;
+                break;
+            }
+        }
+
+        if (!DllBase)
+        {
+            /* Only the dependency the loader itself gave up on is known to be missing */
+            if (FailedModule && !_stricmp(ModName, FailedModule))
+                MiMissingLogAdd(Log, ModName, NULL, MAXULONG);
+            continue;
+        }
+
+        Exports = RtlImageDirectoryEntryToData(DllBase, TRUE,
+                                               IMAGE_DIRECTORY_ENTRY_EXPORT,
+                                               &ExportSize);
+        if (!Exports)
+        {
+            MiMissingLogAdd(Log, ModName, "*", 0);
+            continue;
+        }
+        NameTable = (PULONG)RVA(DllBase, Exports->AddressOfNames);
+        OrdinalTable = (PUSHORT)RVA(DllBase, Exports->AddressOfNameOrdinals);
+        FuncTable = (PULONG)RVA(DllBase, Exports->AddressOfFunctions);
+
+        for (Thunk = (PIMAGE_THUNK_DATA)((ULONG_PTR)ImageBase + Descriptor->OriginalFirstThunk);
+             Thunk->u1.AddressOfData;
+             Thunk++)
+        {
+            /*
+             * A by-name entry the loader already processed holds a pointer into
+             * the image (with the top bit set on a high image base, which an
+             * ordinal import also has): that is a name, not an ordinal.
+             */
+            if (IMAGE_SNAP_BY_ORDINAL(Thunk->u1.Ordinal) &&
+                !(((ULONG_PTR)Thunk->u1.AddressOfData >= (ULONG_PTR)ImageBase) &&
+                  ((ULONG_PTR)Thunk->u1.AddressOfData < (ULONG_PTR)ImageBase + ImageSize)))
+            {
+                ULONG Ord = IMAGE_ORDINAL(Thunk->u1.Ordinal);
+                if ((Ord < Exports->Base) ||
+                    ((Ord - Exports->Base) >= Exports->NumberOfFunctions) ||
+                    !FuncTable[Ord - Exports->Base])
+                {
+                    MiMissingLogAdd(Log, ModName, NULL, Ord);
+                }
+            }
+            else
+            {
+                ULONG_PTR Data = Thunk->u1.AddressOfData;
+                PIMAGE_IMPORT_BY_NAME ByName;
+                USHORT Ordinal;
+
+                /* Entries before the failure point were already rebased by the loader */
+                if (Data < (ULONG_PTR)ImageBase) Data += (ULONG_PTR)ImageBase;
+                ByName = (PIMAGE_IMPORT_BY_NAME)Data;
+
+                Ordinal = NameToOrdinal((PCSTR)ByName->Name, DllBase,
+                                        Exports->NumberOfNames, NameTable,
+                                        OrdinalTable);
+                if ((Ordinal == (USHORT)-1) ||
+                    (Ordinal >= Exports->NumberOfFunctions) ||
+                    !FuncTable[Ordinal])
+                {
+                    MiMissingLogAdd(Log, ModName, (PCSTR)ByName->Name, 0);
+                }
+            }
+        }
+    }
+
+    if (!Log->Count && !Log->Dropped)
+    {
+        ExFreePoolWithTag(Log, TAG_LDR_WSTR);
+        return;
+    }
+
+    DbgPrintEx(DPFLTR_SYSTEM_ID, DPFLTR_ERROR_LEVEL,
+               "NITRO: %ws failed to load (0x%08lx): %lu unresolved import(s)%s\n",
+               Log->DriverName, FailStatus, Log->Count + Log->Dropped,
+               Log->Dropped ? ", list truncated" : "");
+
+    ExInitializeWorkItem(&Log->WorkItem, MiMissingLogWorker, Log);
+    ExQueueWorkItem(&Log->WorkItem, DelayedWorkQueue);
+}
+
 NTSTATUS
 NTAPI
 MiResolveImageReferences(IN PVOID ImageBase,
@@ -1151,6 +1527,8 @@ MiResolveImageReferences(IN PVOID ImageBase,
     PIMAGE_EXPORT_DIRECTORY ExportDirectory;
     NTSTATUS Status;
     PIMAGE_THUNK_DATA OrigThunk, FirstThunk;
+    BOOLEAN LogMissing = FALSE;
+    PCSTR FailedModuleName = NULL;
 
     PAGED_CODE();
 
@@ -1420,6 +1798,10 @@ CheckDllState:
 
                 DPRINT1("Failed to load dependency: %wZ\n", &DllName);
 
+                /* Record this and every other missing import of the driver */
+                LogMissing = TRUE;
+                FailedModuleName = ImportName;
+
                 /* Don't free the name */
                 DllName.Buffer = NULL;
 
@@ -1477,6 +1859,7 @@ CheckDllState:
             /* Cleanup and return */
             DPRINT1("Warning: Driver failed to load, %S not found\n", *MissingDriver);
             Status = STATUS_DRIVER_ENTRYPOINT_NOT_FOUND;
+            LogMissing = TRUE;
             goto Failure;
         }
 
@@ -1503,6 +1886,13 @@ CheckDllState:
                                      MissingApi);
                 if (!NT_SUCCESS(Status))
                 {
+                    /* Record this and every other missing import of the driver */
+                    if ((Status == STATUS_DRIVER_ENTRYPOINT_NOT_FOUND) ||
+                        (Status == STATUS_DRIVER_ORDINAL_NOT_FOUND))
+                    {
+                        LogMissing = TRUE;
+                    }
+
                     /* Cleanup and return */
                     goto Failure;
                 }
@@ -1583,6 +1973,9 @@ CheckDllState:
     return STATUS_SUCCESS;
 
 Failure:
+
+    /* The dependencies are still loaded here: list everything that is missing */
+    if (LogMissing) MiLogMissingImports(ImageBase, Status, FailedModuleName);
 
     /* Cleanup and return */
     RtlFreeUnicodeString(&NameString);

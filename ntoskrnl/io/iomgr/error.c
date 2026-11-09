@@ -735,3 +735,103 @@ IoSetThreadHardErrorMode(IN BOOLEAN HardErrorEnabled)
     Thread->HardErrorsAreDisabled = !HardErrorEnabled;
     return OldMode;
 }
+
+/* NITRO EVENTS ***************************************************************/
+
+static
+NTSTATUS
+NTAPI
+IopNitroKernelDriverEntry(IN PDRIVER_OBJECT DriverObject,
+                          IN PUNICODE_STRING RegistryPath)
+{
+    UNREFERENCED_PARAMETER(DriverObject);
+    UNREFERENCED_PARAMETER(RegistryPath);
+    return STATUS_SUCCESS;
+}
+
+/*
+ * A System event log entry of source NitroKernel (messages in IoLogMsg.dll)
+ * for the kernel itself, which has no driver object to log through. Up to
+ * three insertion strings; the packet is small, so the last ones are cut
+ * ("...") to what fits. Passive level, best effort.
+ */
+VOID
+NTAPI
+IopLogNitroEvent(IN NTSTATUS ErrorCode,
+                 IN NTSTATUS FinalStatus,
+                 IN PCWSTR String1,
+                 IN PCWSTR String2 OPTIONAL,
+                 IN PCWSTR String3 OPTIONAL)
+{
+    static UNICODE_STRING SourceName = RTL_CONSTANT_STRING(L"\\Driver\\NitroKernel");
+    PCWSTR Strings[3];
+    PDRIVER_OBJECT DriverObject = NULL;
+    PIO_ERROR_LOG_PACKET Packet;
+    PWCHAR Dest;
+    NTSTATUS Status;
+    ULONG MaxChars, Count = 0, Pos = 0, i, Len, Room;
+
+    PAGED_CODE();
+
+    Strings[0] = String1;
+    Strings[1] = String2;
+    Strings[2] = String3;
+    while (Count < RTL_NUMBER_OF(Strings) && Strings[Count]) Count++;
+
+    Status = ObReferenceObjectByName(&SourceName, OBJ_CASE_INSENSITIVE, NULL, 0,
+                                     IoDriverObjectType, KernelMode, NULL,
+                                     (PVOID*)&DriverObject);
+    if (!NT_SUCCESS(Status))
+    {
+        /* First event of the boot: the source object does not exist yet */
+        IoCreateDriver(&SourceName, IopNitroKernelDriverEntry);
+        Status = ObReferenceObjectByName(&SourceName, OBJ_CASE_INSENSITIVE, NULL, 0,
+                                         IoDriverObjectType, KernelMode, NULL,
+                                         (PVOID*)&DriverObject);
+        if (!NT_SUCCESS(Status)) return;
+    }
+
+    Packet = IoAllocateErrorLogEntry(DriverObject, ERROR_LOG_MAXIMUM_SIZE);
+    if (Packet)
+    {
+        MaxChars = (ERROR_LOG_MAXIMUM_SIZE - sizeof(IO_ERROR_LOG_PACKET)) / sizeof(WCHAR);
+        RtlZeroMemory(Packet, ERROR_LOG_MAXIMUM_SIZE);
+        Packet->ErrorCode = ErrorCode;
+        Packet->FinalStatus = FinalStatus;
+        Packet->NumberOfStrings = (USHORT)Count;
+        Packet->StringOffset = sizeof(IO_ERROR_LOG_PACKET);
+        Dest = (PWCHAR)((PUCHAR)Packet + sizeof(IO_ERROR_LOG_PACKET));
+
+        for (i = 0; i < Count; i++)
+        {
+            Len = (ULONG)wcslen(Strings[i]);
+            /* This string's terminator and one for each string after it stay free */
+            Room = MaxChars - Pos - 1 - (Count - 1 - i);
+            if ((LONG)Room < 0) Room = 0;
+            if (Len > Room)
+            {
+                if (Room > 3)
+                {
+                    RtlCopyMemory(&Dest[Pos], Strings[i], (Room - 3) * sizeof(WCHAR));
+                    Dest[Pos + Room - 3] = L'.';
+                    Dest[Pos + Room - 2] = L'.';
+                    Dest[Pos + Room - 1] = L'.';
+                }
+                else if (Room)
+                {
+                    RtlCopyMemory(&Dest[Pos], Strings[i], Room * sizeof(WCHAR));
+                }
+                Len = Room;
+            }
+            else
+            {
+                RtlCopyMemory(&Dest[Pos], Strings[i], Len * sizeof(WCHAR));
+            }
+            Dest[Pos + Len] = UNICODE_NULL;
+            Pos += Len + 1;
+        }
+        IoWriteErrorLogEntry(Packet);
+    }
+
+    ObDereferenceObject(DriverObject);
+}
