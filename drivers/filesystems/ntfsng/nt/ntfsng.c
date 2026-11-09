@@ -814,35 +814,6 @@ out:
 }
 
 /* Reads a REG_DWORD from the service key; 0 if it is absent. */
-#if !DBG
-/*
- * TRUE if the boot options (Control\SystemStartOptions, written by the kernel at every boot before boot
- * drivers start, so a value planted in the hive is overwritten) contain Option (upper case).
- */
-static BOOLEAN NgStartOptionSet(PCWSTR Option)
-{
-    WCHAR Buffer[512];
-    UNICODE_STRING Value;
-    RTL_QUERY_REGISTRY_TABLE Query[2];
-    ULONG i;
-
-    RtlZeroMemory(Buffer, sizeof(Buffer));
-    Value.Buffer = Buffer;
-    Value.Length = 0;
-    Value.MaximumLength = sizeof(Buffer) - sizeof(WCHAR);
-    RtlZeroMemory(Query, sizeof(Query));
-    Query[0].Flags = RTL_QUERY_REGISTRY_DIRECT | RTL_QUERY_REGISTRY_REQUIRED;
-    Query[0].Name = L"SystemStartOptions";
-    Query[0].EntryContext = &Value;
-    if (!NT_SUCCESS(RtlQueryRegistryValues(RTL_REGISTRY_CONTROL, L"", Query, NULL, NULL)))
-        return FALSE;
-    for (i = 0; i < Value.Length / sizeof(WCHAR); i++)
-        Buffer[i] = RtlUpcaseUnicodeChar(Buffer[i]);
-    Buffer[Value.Length / sizeof(WCHAR)] = 0;
-    return wcsstr(Buffer, Option) != NULL;
-}
-#endif
-
 ULONG NgReadDword(PUNICODE_STRING KeyPath, PCWSTR Name)
 {
     OBJECT_ATTRIBUTES Oa;
@@ -906,17 +877,6 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         /* The system-wide NTFS switch for short names (0 = create them, as on Windows). */
         UNICODE_STRING Fs = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\FileSystem");
         NgGlobal.Disable8dot3 = NgReadDword(&Fs, L"NtfsDisable8dot3NameCreation") == 1;
-    }
-    {
-        /* NitroPager test knob (0x80: paging IRP/MDL allocation failures), read here: never under CoreLock */
-        UNICODE_STRING Mm = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager\\Memory Management");
-        ULONG Debug = NgReadDword(&Mm, L"NitroPagerDebug");
-#if !DBG
-        /* As the kernel: a free build honours the test value only when booted with /NITROPAGERDEBUG */
-        if (Debug && !NgStartOptionSet(L"NITROPAGERDEBUG"))
-            Debug = 0;
-#endif
-        NgPagingSetDebug(Debug);
     }
     DPRINT1("ntfsng: ReadOnly=%lu\n", NgGlobal.ForceReadOnly);
 #if DBG
