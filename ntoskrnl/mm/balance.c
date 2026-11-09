@@ -381,19 +381,22 @@ MmRequestPageMemoryConsumer(ULONG Consumer, BOOLEAN CanWait,
 
     /*
      * Pace the requests with one tick every Pace-th request (CORE-17624). While pages are short,
-     * every hundredth, as this function always did. While dirty cache data exceeds a quarter of
-     * the dirty page threshold, every hundredth at first and more often as it grows, up to every
-     * fourth at three eighths, so that a writer cannot fill the cache views with dirty data
-     * faster than the lazy writer cleans them. With free pages and a clean cache nothing waits.
+     * every hundredth, as this function always did.
+     *
+     * Dirty cache data is paced by the lazy writer, not by a clock, and only past the dirty page
+     * threshold: a file system asks CcCanIWrite before it takes its locks (the Windows contract; a
+     * writer is held there, with nothing locked, while the dirty pages are over the threshold), so this
+     * is the net for a writer that does not ask, and for the dirty data it makes beyond the threshold.
+     * It waits, once every Interval page requests, for the lazy writer to finish a chunk
+     * (CcWriteBehindProgress; at most one tick).  Interval goes from 256 requests (1 MB) at the
+     * threshold down to 16 (64 KB) a quarter above it.  (Waiting from a quarter of the threshold, a tick
+     * every 4th..100th page request, held a writer to 10-25 MB/s whatever the disk could do, and
+     * a sleep inside a page request of a file system call that holds the file's paging resource also
+     * kept the lazy writer, which needs it, from writing.)  With free pages and dirty data below the
+     * threshold nothing waits.
      */
     if (MmAvailablePages < MiMinimumAvailablePages)
         Pace = 100;
-
-    Dirty = CcTotalDirtyPages;
-    Low = CcDirtyPageThreshold / 4;
-    Range = max(CcDirtyPageThreshold / 8, 1);
-    if (Dirty > Low)
-        Pace = (Dirty - Low >= Range) ? 4 : 100 - (ULONG)((ULONGLONG)96 * (Dirty - Low) / Range);
 
     if ((Pace != 0) &&
         (PsGetCurrentThreadId() != MiBalancerThreadId.UniqueThread) &&
@@ -401,6 +404,22 @@ MmRequestPageMemoryConsumer(ULONG Consumer, BOOLEAN CanWait,
         ((ULONG)InterlockedIncrement(&Requests) % Pace == 0))
     {
         KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
+    }
+
+    Dirty = CcTotalDirtyPages;
+    Low = CcDirtyPageThreshold;
+    Range = max(CcDirtyPageThreshold / 4, 1);
+    if ((Dirty > Low) &&
+        (PsGetCurrentThreadId() != MiBalancerThreadId.UniqueThread) &&
+        (KeGetCurrentIrql() < DISPATCH_LEVEL))
+    {
+        static LONG DirtyRequests;
+        ULONG Interval = (Dirty - Low >= Range) ? 16 : 256 - (ULONG)((ULONGLONG)240 * (Dirty - Low) / Range);
+
+        if ((ULONG)InterlockedIncrement(&DirtyRequests) % Interval == 0)
+        {
+            KeWaitForSingleObject(&CcWriteBehindProgress, Executive, KernelMode, FALSE, &TinyTime);
+        }
     }
 
     /*

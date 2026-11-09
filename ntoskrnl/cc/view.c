@@ -55,6 +55,7 @@ static NPAGED_LOOKASIDE_LIST VacbLookasideList;
  */
 ULONG CcDirtyPageThreshold = 0;
 ULONG CcTotalDirtyPages = 0;
+KEVENT CcWriteBehindProgress;
 LIST_ENTRY CcDeferredWrites;
 KSPIN_LOCK CcDeferredWriteSpinLock;
 LIST_ENTRY CcCleanSharedCacheMapList;

@@ -160,6 +160,8 @@ CcWriteBehind(VOID)
 
         if (!IsListEmpty(&CcDeferredWrites))
             CcPostDeferredWrites();
+        /* Writers paced by the amount of dirty data (MmRequestPageMemoryConsumer) go on after each chunk */
+        KePulseEvent(&CcWriteBehindProgress, IO_NO_INCREMENT, FALSE);
 
         /* Nothing could be written (all busy or failing): the next scan tries again */
         if (Count == 0)

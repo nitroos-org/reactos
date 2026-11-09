@@ -43,6 +43,8 @@ extern ULONG CcRosTraceLevel;
 extern LIST_ENTRY DirtyVacbListHead;
 extern ULONG CcDirtyPageThreshold;
 extern ULONG CcTotalDirtyPages;
+/* Pulsed by the lazy writer after each chunk it wrote: a writer above the dirty pace limit waits for it (MmRequestPageMemoryConsumer) */
+extern KEVENT CcWriteBehindProgress;
 extern LIST_ENTRY CcDeferredWrites;
 extern KSPIN_LOCK CcDeferredWriteSpinLock;
 extern ULONG CcNumberWorkerThreads;
