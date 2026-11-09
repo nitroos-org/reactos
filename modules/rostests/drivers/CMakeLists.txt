@@ -5,5 +5,6 @@
 add_subdirectory(tcpip)
 add_subdirectory(afdstub)
 add_subdirectory(missimp)
+add_subdirectory(obcbtest)
 add_subdirectory(fakemp)
 add_subdirectory(fakebus)
