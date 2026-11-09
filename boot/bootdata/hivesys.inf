@@ -2334,6 +2334,13 @@ HKLM,"SYSTEM\CurrentControlSet\Services\SamSs","Start",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\SamSs","Type",0x00010001,0x00000020
 
 ; Scheduler service
+HKLM,"SYSTEM\CurrentControlSet\Services\NitroExpand","Description",0x00000000,"Grows the system volume to fill the disk once, on the first boot of an enlarged disk image (only when HKLM\SOFTWARE\Nitro\Setup\ExpandStorage is 1)."
+HKLM,"SYSTEM\CurrentControlSet\Services\NitroExpand","DisplayName",0x00000000,"NitroOS First-Boot Disk Expand"
+HKLM,"SYSTEM\CurrentControlSet\Services\NitroExpand","ErrorControl",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\NitroExpand","ImagePath",0x00020000,"%SystemRoot%\system32\nitro-expand.exe /service"
+HKLM,"SYSTEM\CurrentControlSet\Services\NitroExpand","ObjectName",0x00000000,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\NitroExpand","Start",0x00010001,0x00000002
+HKLM,"SYSTEM\CurrentControlSet\Services\NitroExpand","Type",0x00010001,0x00000010
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","DependOnService",0x00010000,"RPCSS"
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","Description",0x00000000,%SCHEDULE_SERVICE_DESCRIPTION%
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","DisplayName",0x00000000,%SCHEDULE_SERVICE%
