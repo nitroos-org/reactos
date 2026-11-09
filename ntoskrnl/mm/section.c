@@ -2517,7 +2517,11 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
      */
     if ((Address <= MM_HIGHEST_USER_ADDRESS) && (AddressSpace == &Process->Vm))
     {
-        PageTableHeld = MmHoldPageTable(Process, Address);
+        /* No page for the page table: fail like any fault that finds no page, MmAccessFault waits without the lock */
+        Status = MmHoldPageTable(Process, Address);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        PageTableHeld = TRUE;
     }
 
     Status = MiNotPresentFaultSectionView(AddressSpace, MemoryArea, Address, Locked, &RmapEntry);
