@@ -305,6 +305,7 @@ NtGdiGetTextCharsetInfo(
         if (!NT_SUCCESS(Status))
         {
             SetLastNtError(Status);
+            DC_UnlockDc(Dc);
             return DEFAULT_CHARSET;
         }
     }
@@ -554,8 +555,13 @@ NtGdiGetTextFaceW(
     hFont = pdcattr->hlfntNew;
     DC_UnlockDc(Dc);
 
+    /* hlfntNew is in the user-writable DC_ATTR: it may name nothing, or a font that cannot be realized */
     TextObj = RealizeFontInit(hFont);
-    ASSERT(TextObj != NULL);
+    if (TextObj == NULL)
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        return 0;
+    }
     fLen = wcslen(TextObj->TextFace) + 1;
 
     if (FaceName != NULL)
@@ -571,7 +577,14 @@ NtGdiGetTextFaceW(
         /* Terminate if we copied only part of the font name */
         if (Count > 0 && Count < fLen)
         {
-            FaceName[Count - 1] = '\0';
+            WCHAR wchNul = L'\0';
+            Status = MmCopyToCaller(&FaceName[Count - 1], &wchNul, sizeof(wchNul));
+            if (!NT_SUCCESS(Status))
+            {
+                TEXTOBJ_UnlockText(TextObj);
+                SetLastNtError(Status);
+                return 0;
+            }
         }
         ret = Count;
     }
