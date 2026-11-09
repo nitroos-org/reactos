@@ -35,6 +35,12 @@ static ULONG HalpNextInterruptTarget;
 /* Message vectors whose interrupt was disconnected; a new message reuses them */
 static BOOLEAN HalpMessageVectorUnused[256];
 
+/* The IRQL each I/O APIC input was given when its vector was allocated. On x86 several IRQLs
+   share one vector class (HalpIRQLtoTPR), so HalpVectorToIrql cannot give it back: a second
+   translation of a shared input has to report the same DIRQL as the first, or the devices
+   sharing the vector connect their interrupt objects at different IRQLs. */
+static KIRQL HalpVectorDirql[256];
+
 #ifndef _M_AMD64
 const UCHAR
 HalpIRQLtoTPR[32] =
@@ -691,9 +697,9 @@ HalpGetRootInterruptVectorLocked(
     /* Check if it's used; every device of a shared input gets its processor */
     if (Vector != APIC_FREE_VECTOR)
     {
-        /* Calculate IRQL */
+        /* Report the IRQL the vector was allocated with */
         NT_ASSERT(HalpVectorToIndex[Vector] == BusInterruptLevel);
-        *OutIrql = HalpVectorToIrql(Vector);
+        *OutIrql = HalpVectorDirql[Vector] ? HalpVectorDirql[Vector] : HalpVectorToIrql(Vector);
     }
     else
     {
@@ -708,6 +714,7 @@ HalpGetRootInterruptVectorLocked(
         }
 
         Vector = HalpAllocateSystemInterrupt(BusInterruptLevel, Vector);
+        HalpVectorDirql[Vector] = Irql;
         *OutIrql = Irql;
 
         /* The input goes to one processor, chosen in turn */
