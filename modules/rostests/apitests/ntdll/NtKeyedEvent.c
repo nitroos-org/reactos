@@ -310,6 +310,53 @@ Test_Stress(void)
         CloseHandle(Threads[Index]);
 }
 
+/* The NULL handle is the system's default keyed event (what condition variables and critical sections use): it pairs a
+   wait with a release, and is not the event a handle names. */
+static LONG g_NullKey;
+static NTSTATUS g_NullWaitStatus;
+
+static
+DWORD
+WINAPI
+NullWaitThread(PVOID Context)
+{
+    LARGE_INTEGER Timeout;
+    Timeout.QuadPart = -50000000LL; /* 5 s */
+    g_NullWaitStatus = NtWaitForKeyedEvent(NULL, &g_NullKey, FALSE, &Timeout);
+    return 0;
+}
+
+static
+void
+Test_NullHandle(void)
+{
+    LARGE_INTEGER Timeout, Zero;
+    NTSTATUS Status;
+    HANDLE Thread;
+
+    Zero.QuadPart = 0;
+    Status = NtWaitForKeyedEvent(NULL, &g_NullKey, FALSE, &Zero);
+    ok(Status == STATUS_TIMEOUT, "wait on the default event, nobody there: 0x%08lx\n", (ULONG)Status);
+    Status = NtReleaseKeyedEvent(NULL, &g_NullKey, FALSE, &Zero);
+    ok(Status == STATUS_TIMEOUT, "release on the default event, nobody there: 0x%08lx\n", (ULONG)Status);
+
+    g_NullWaitStatus = STATUS_PENDING;
+    Thread = CreateThread(NULL, 0, NullWaitThread, NULL, 0, NULL);
+    ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    if (Thread == NULL)
+        return;
+    Sleep(100);
+    /* The event a handle names is another one: the waiter there is not released from here. */
+    Status = NtReleaseKeyedEvent(g_KeyedEvent, &g_NullKey, FALSE, &Zero);
+    ok(Status == STATUS_TIMEOUT, "release on a created event, waiter on the default one: 0x%08lx\n", (ULONG)Status);
+    Timeout.QuadPart = -50000000LL;
+    Status = NtReleaseKeyedEvent(NULL, &g_NullKey, FALSE, &Timeout);
+    ok(Status == STATUS_SUCCESS, "release on the default event: 0x%08lx\n", (ULONG)Status);
+    ok(WaitForSingleObject(Thread, 10000) == WAIT_OBJECT_0, "waiter did not finish\n");
+    ok(g_NullWaitStatus == STATUS_SUCCESS, "wait on the default event: 0x%08lx\n", (ULONG)g_NullWaitStatus);
+    CloseHandle(Thread);
+}
+
 START_TEST(NtKeyedEvent)
 {
     NTSTATUS Status;
@@ -321,6 +368,7 @@ START_TEST(NtKeyedEvent)
         return;
     }
 
+    Test_NullHandle();
     Test_TimeoutRacesRelease();
     Test_Stress();
 

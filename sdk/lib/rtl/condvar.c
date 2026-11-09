@@ -56,7 +56,11 @@ typedef struct _COND_VAR_WAIT_ENTRY
 
 /* GLOBALS *******************************************************************/
 
-static HANDLE CondVarKeyedEventHandle = NULL;
+/* Condition variables wait on the system's default keyed event: the NULL handle of NtWaitForKeyedEvent/NtReleaseKeyedEvent, as Windows
+   and the critical sections here do.  It needs no per-process object, so a wake or a wait works before RtlpInitializeKeyedEvent ran: a
+   program's own code can run inside the loader (hooks on NtMapViewOfSection, TLS callbacks) before ntdll finished initializing.  The
+   kernel pairs the two sides by the calling process and the key, so no other process sees these keys. */
+#define CondVarKeyedEventHandle ((HANDLE)NULL)
 
 /* INTERNAL FUNCTIONS ********************************************************/
 
@@ -149,8 +153,6 @@ InternalWake(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
     PCOND_VAR_WAIT_ENTRY Entry;
     NTSTATUS Status;
 
-    ASSERT(CondVarKeyedEventHandle != NULL);
-
     /* There is noone there to wake up if the list is empty. In this case do nothing and
        return immediately. We don't stockpile wake-ups. */
     if (((ULONG_PTR)ConditionVariable->Ptr & COND_VAR_ADDRESS_MASK) == 0)
@@ -237,7 +239,6 @@ InternalSleep(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
     ULONG Spins;
     BOOLEAN Claimed;
 
-    ASSERT(CondVarKeyedEventHandle != NULL);
     ASSERT((CriticalSection == NULL) != (SRWLock == NULL));
 
     RtlZeroMemory(&OwnEntry, sizeof(OwnEntry));
@@ -359,17 +360,14 @@ VOID
 NTAPI
 RtlpInitializeKeyedEvent(VOID)
 {
-    ASSERT(CondVarKeyedEventHandle == NULL);
-    NtCreateKeyedEvent(&CondVarKeyedEventHandle, EVENT_ALL_ACCESS, NULL, 0);
+    /* Nothing to create: see CondVarKeyedEventHandle */
 }
 
 VOID
 NTAPI
 RtlpCloseKeyedEvent(VOID)
 {
-    ASSERT(CondVarKeyedEventHandle != NULL);
-    NtClose(CondVarKeyedEventHandle);
-    CondVarKeyedEventHandle = NULL;
+    /* Nothing to close: see CondVarKeyedEventHandle */
 }
 
 /* EXPORTED FUNCTIONS ********************************************************/
