@@ -1021,6 +1021,21 @@ L"<?xml version='1.0'?>                                                         
     </Inputs>                                                                     \
   </Effect>";
 
+static const WCHAR _3d_transform_description[] =
+L"<?xml version='1.0'?>                                                           \
+  <Effect>                                                                        \
+    <Property name='DisplayName' type='string' value='3D Transform'/>             \
+    <Property name='Author'      type='string' value='The Wine Project'/>         \
+    <Property name='Category'    type='string' value='Stub'/>                     \
+    <Property name='Description' type='string' value='3D Transform'/>             \
+    <Inputs>                                                                      \
+      <Input name='Source'/>                                                      \
+    </Inputs>                                                                     \
+    <Property name='InterpolationMode' type='enum' value='1'/>                    \
+    <Property name='BorderMode'        type='enum' value='0'/>                    \
+    <Property name='TransformMatrix'   type='matrix4x4' value='(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)'/> \
+  </Effect>";
+
 static const WCHAR composite_description[] =
 L"<?xml version='1.0'?>                                                   \
   <Effect>                                                                \
@@ -1071,6 +1086,58 @@ L"<?xml version='1.0'?>                                                   \
     </Inputs>                                                             \
   </Effect>";
 
+/* Built-in effects without an implementation: the effect can be created and configured, as on Windows. Drawing it
+ * is not implemented, see d2d_device_context_DrawImage(). */
+#define D2D_STUB_EFFECT_HEAD(name) \
+    L"<?xml version='1.0'?><Effect>" \
+    L"<Property name='DisplayName' type='string' value='" name L"'/>" \
+    L"<Property name='Author'      type='string' value='The Wine Project'/>" \
+    L"<Property name='Category'    type='string' value='Stub'/>" \
+    L"<Property name='Description' type='string' value='" name L"'/>"
+#define D2D_STUB_INPUT1 L"<Inputs><Input name='Source'/></Inputs>"
+#define D2D_STUB_INPUT2 L"<Inputs><Input name='Source1'/><Input name='Source2'/></Inputs>"
+#define D2D_STUB_INPUT0 L"<Inputs minimum='0' maximum='0'></Inputs>"
+#define D2D_STUB_EFFECT(var, name, inputs) \
+    static const WCHAR var[] = D2D_STUB_EFFECT_HEAD(name) inputs L"</Effect>"
+
+D2D_STUB_EFFECT(arithmetic_composite_description, L"Arithmetic Composite", D2D_STUB_INPUT2);
+static const WCHAR atlas_description[] = D2D_STUB_EFFECT_HEAD(L"Atlas") D2D_STUB_INPUT1
+        L"<Property name='InputRect' type='vector4' value='(0,0,16777216,16777216)'/>"
+        L"<Property name='InputPaddingRect' type='vector4' value='(0,0,0,0)'/></Effect>";
+D2D_STUB_EFFECT(bitmap_source_description, L"Bitmap Source", D2D_STUB_INPUT0);
+D2D_STUB_EFFECT(blend_description, L"Blend", D2D_STUB_INPUT2);
+D2D_STUB_EFFECT(border_description, L"Border", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(brightness_description, L"Brightness", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(color_management_description, L"Color Management", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(color_matrix_description, L"Color Matrix", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(convolve_matrix_description, L"Convolve Matrix", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(directional_blur_description, L"Directional Blur", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(discrete_transfer_description, L"Discrete Transfer", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(displacement_map_description, L"Displacement Map", D2D_STUB_INPUT2);
+D2D_STUB_EFFECT(distant_diffuse_description, L"Distant Diffuse", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(distant_specular_description, L"Distant Specular", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(dpi_compensation_description, L"DPI Compensation", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(flood_description, L"Flood", D2D_STUB_INPUT0);
+D2D_STUB_EFFECT(gamma_transfer_description, L"Gamma Transfer", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(gaussian_blur_description, L"Gaussian Blur", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(scale_description, L"Scale", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(histogram_description, L"Histogram", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(hue_rotation_description, L"Hue Rotation", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(linear_transfer_description, L"Linear Transfer", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(luminance_to_alpha_description, L"Luminance To Alpha", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(morphology_description, L"Morphology", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(opacity_metadata_description, L"Opacity Metadata", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(point_diffuse_description, L"Point Diffuse", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(point_specular_description, L"Point Specular", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(premultiply_description, L"Premultiply", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(saturation_description, L"Saturation", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(spot_diffuse_description, L"Spot Diffuse", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(spot_specular_description, L"Spot Specular", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(table_transfer_description, L"Table Transfer", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(tile_description, L"Tile", D2D_STUB_INPUT1);
+D2D_STUB_EFFECT(turbulence_description, L"Turbulence", D2D_STUB_INPUT0);
+D2D_STUB_EFFECT(unpremultiply_description, L"Unpremultiply", D2D_STUB_INPUT1);
+
 void d2d_effects_init_builtins(struct d2d_factory *factory)
 {
     static const struct builtin_description
@@ -1082,6 +1149,42 @@ void d2d_effects_init_builtins(struct d2d_factory *factory)
     {
         { &CLSID_D2D12DAffineTransform, _2d_affine_transform_description },
         { &CLSID_D2D13DPerspectiveTransform, _3d_perspective_transform_description},
+        { &CLSID_D2D13DTransform, _3d_transform_description },
+        { &CLSID_D2D1ArithmeticComposite, arithmetic_composite_description },
+        { &CLSID_D2D1Atlas, atlas_description },
+        { &CLSID_D2D1BitmapSource, bitmap_source_description },
+        { &CLSID_D2D1Blend, blend_description },
+        { &CLSID_D2D1Border, border_description },
+        { &CLSID_D2D1Brightness, brightness_description },
+        { &CLSID_D2D1ColorManagement, color_management_description },
+        { &CLSID_D2D1ColorMatrix, color_matrix_description },
+        { &CLSID_D2D1ConvolveMatrix, convolve_matrix_description },
+        { &CLSID_D2D1DirectionalBlur, directional_blur_description },
+        { &CLSID_D2D1DiscreteTransfer, discrete_transfer_description },
+        { &CLSID_D2D1DisplacementMap, displacement_map_description },
+        { &CLSID_D2D1DistantDiffuse, distant_diffuse_description },
+        { &CLSID_D2D1DistantSpecular, distant_specular_description },
+        { &CLSID_D2D1DpiCompensation, dpi_compensation_description },
+        { &CLSID_D2D1Flood, flood_description },
+        { &CLSID_D2D1GammaTransfer, gamma_transfer_description },
+        { &CLSID_D2D1GaussianBlur, gaussian_blur_description },
+        { &CLSID_D2D1Scale, scale_description },
+        { &CLSID_D2D1Histogram, histogram_description },
+        { &CLSID_D2D1HueRotation, hue_rotation_description },
+        { &CLSID_D2D1LinearTransfer, linear_transfer_description },
+        { &CLSID_D2D1LuminanceToAlpha, luminance_to_alpha_description },
+        { &CLSID_D2D1Morphology, morphology_description },
+        { &CLSID_D2D1OpacityMetadata, opacity_metadata_description },
+        { &CLSID_D2D1PointDiffuse, point_diffuse_description },
+        { &CLSID_D2D1PointSpecular, point_specular_description },
+        { &CLSID_D2D1Premultiply, premultiply_description },
+        { &CLSID_D2D1Saturation, saturation_description },
+        { &CLSID_D2D1SpotDiffuse, spot_diffuse_description },
+        { &CLSID_D2D1SpotSpecular, spot_specular_description },
+        { &CLSID_D2D1TableTransfer, table_transfer_description },
+        { &CLSID_D2D1Tile, tile_description },
+        { &CLSID_D2D1Turbulence, turbulence_description },
+        { &CLSID_D2D1UnPremultiply, unpremultiply_description },
         { &CLSID_D2D1Composite, composite_description },
         { &CLSID_D2D1Crop, crop_description },
         { &CLSID_D2D1Shadow, shadow_description },
@@ -2048,7 +2151,9 @@ static void STDMETHODCALLTYPE d2d_effect_SetInput(ID2D1Effect *iface, UINT32 ind
     if (index >= effect->input_count)
         return;
 
-    ID2D1Image_AddRef(input);
+    /* A NULL input clears the input, as on Windows. */
+    if (input)
+        ID2D1Image_AddRef(input);
     if (effect->inputs[index])
         ID2D1Image_Release(effect->inputs[index]);
     effect->inputs[index] = input;
@@ -2649,8 +2754,9 @@ static HRESULT d2d_effect_transform_graph_initialize_nodes(struct d2d_transform_
         }
         else
         {
+            /* Source, compute and the stock transform nodes have no renderer here yet; the effect can still be
+             * created and configured, as an application expects. */
             FIXME("Unsupported node %p.\n", node);
-            return E_NOTIMPL;
         }
     }
 
