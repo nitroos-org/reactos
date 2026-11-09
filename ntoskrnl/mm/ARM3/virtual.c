@@ -5885,6 +5885,8 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
                         IN PVOID CapturedBase,
                         IN SIZE_T CapturedSize)
 {
+    MI_COMMIT_TIER CommitTier = MiCommitUser;
+    BOOLEAN PagerCommit = FALSE;
     PEPROCESS Process;
     PMMVAD Vad = NULL, FoundVad;
     NTSTATUS Status;
@@ -6164,11 +6166,16 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
         EndingAddress = ((ULONG_PTR)PBaseAddress + PRegionSize - 1) | (PAGE_SIZE - 1);
         PRegionSize = EndingAddress - StartingAddress + 1;
 
-        /* A committed replacement is charged before anything changes */
+        /*
+         * A committed replacement is charged before anything changes. A placeholder is
+         * private memory with no charge: it is charged as pageable when the pager backs
+         * commitment now, and marked so below (P4)
+         */
         if (AllocationType & MEM_COMMIT)
         {
             CommitPages = BYTES_TO_PAGES(PRegionSize);
-            if (!MiChargeCommitWithGrowth(CommitPages))
+            PagerCommit = MiPagerBacksCommit();
+            if (!MiChargeCommitWithGrowthEx(CommitPages, PagerCommit ? MiCommitUserPrivate : MiCommitUser))
             {
                 Status = STATUS_COMMITMENT_LIMIT;
                 goto FailPathNoLock;
@@ -6203,6 +6210,8 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
             FoundVad->u.VadFlags.Protection = ProtectionMask;
             if (AllocationType & MEM_COMMIT)
             {
+                ASSERT(FoundVad->u.VadFlags.CommitCharge == 0);
+                FoundVad->u2.VadFlags2.PagerCommit = PagerCommit;
                 FoundVad->u.VadFlags.MemCommit = 1;
                 FoundVad->u.VadFlags.CommitCharge = CommitPages;
                 MiAddProcessCommit(Process, CommitPages);
@@ -6214,6 +6223,8 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
         MmUnlockAddressSpace(AddressSpace);
 
         /* What was charged for a replacement that did not happen goes back */
+        if (PagerCommit)
+            MiReturnPrivateCommitCredit(CommitPages);
         MiReturnCommit(CommitPages);
 
         /* On success the exit path writes StartingAddress and PRegionSize back to the caller */
@@ -6302,8 +6313,10 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
         //
         if (AllocationType & MEM_COMMIT)
         {
+            /* A new private VAD (VadNone): its commitment is pageable when the pager backs it now (P4) */
             CommitPages = BYTES_TO_PAGES(PRegionSize);
-            if (!MiChargeCommitWithGrowth(CommitPages))
+            MI_DECIDE_PAGER_COMMIT_VAD(Vad);
+            if (!MiChargeCommitWithGrowthEx(CommitPages, MI_VAD_COMMIT_TIER(Vad)))
             {
                 DPRINT1("Commit limit reached for %Iu pages\n", CommitPages);
                 ExFreePoolWithTag(Vad, 'SdaV');
@@ -6326,6 +6339,8 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("Failed to insert the VAD!\n");
+            if (MI_IS_PAGER_COMMIT_VAD(Vad))
+                MiReturnPrivateCommitCredit(CommitPages);
             MiReturnCommit(CommitPages);
             ExFreePoolWithTag(Vad, 'SdaV');
             goto FailPathNoLock;
@@ -6637,11 +6652,18 @@ RetryCommit:
     //
     CommitPages = BYTES_TO_PAGES(PRegionSize) -
                   MiCalculatePageCommitment(StartingAddress, EndingAddress, FoundVad, Process);
-    if (!MiChargeCommit(CommitPages, MiCommitUser))
+    /*
+     * P4: a VAD with no charge yet (reserved, or decommitted in full) is pageable when the
+     * pager backs commitment now; a VAD with a charge keeps how that was charged
+     */
+    if (FoundVad->u.VadFlags.CommitCharge == 0)
+        MI_DECIDE_PAGER_COMMIT_VAD(FoundVad);
+    CommitTier = MI_VAD_COMMIT_TIER(FoundVad);
+    if (!MiChargeCommit(CommitPages, CommitTier))
     {
         MiUnlockProcessWorkingSetUnsafe(Process, CurrentThread);
         MmUnlockAddressSpace(AddressSpace);
-        if ((GrowthRounds++ < 4) && !KeAreAllApcsDisabled() && MiWaitForCommitGrowth(CommitPages))
+        if ((GrowthRounds++ < 4) && !KeAreAllApcsDisabled() && MiWaitForCommitGrowthEx(CommitPages, CommitTier))
             goto RetryCommit;
 
         DPRINT1("Commit limit reached for %Iu pages\n", CommitPages);
@@ -6734,6 +6756,8 @@ RetryCommit:
     // loop committed; give the difference back.
     //
     ASSERT(QuotaCharge <= CommitPages);
+    if (CommitTier == MiCommitUserPrivate)
+        MiReturnPrivateCommitCredit(CommitPages - QuotaCharge);
     MiReturnCommit(CommitPages - QuotaCharge);
     FoundVad->u.VadFlags.CommitCharge += QuotaCharge;
     MiAddProcessCommit(Process, QuotaCharge);
@@ -7059,6 +7083,7 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
                     IN PSIZE_T URegionSize,
                     IN ULONG FreeType)
 {
+    BOOLEAN PageableVad = FALSE;
     SIZE_T PRegionSize;
     PVOID PBaseAddress;
     LONG_PTR AlreadyDecommitted, CommitReduction = 0;
@@ -7333,6 +7358,9 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
         }
     }
 
+    /* What this VAD gives back was counted as pageable when it was charged (P4) */
+    PageableVad = MI_IS_PAGER_COMMIT_VAD(Vad);
+
     //
     //  Now we can try the operation. First check if this is a RELEASE or a DECOMMIT
     //
@@ -7499,6 +7527,7 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
                     NewVad->u.VadFlags.CommitCharge = 0;
                     NewVad->u2.VadFlags2.Placeholder = Vad->u2.VadFlags2.Placeholder;
                     NewVad->u2.VadFlags2.FromPlaceholder = Vad->u2.VadFlags2.FromPlaceholder;
+                    NewVad->u2.VadFlags2.PagerCommit = Vad->u2.VadFlags2.PagerCommit;
                     ASSERT(NewVad->EndingVpn >= NewVad->StartingVpn);
 
                     //
@@ -7631,6 +7660,8 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
     // Update the process counters (a placeholder keeps the address space)
     //
     PRegionSize = EndingAddress - StartingAddress + 1;
+    if (PageableVad)
+        MiReturnPrivateCommitCredit(CommitReduction);
     MiReturnProcessCommit(Process, CommitReduction);
     if ((FreeType & MEM_RELEASE) && !(FreeType & MEM_PRESERVE_PLACEHOLDER)) Process->VirtualSize -= PRegionSize;
 

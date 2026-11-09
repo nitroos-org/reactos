@@ -781,7 +781,8 @@ typedef struct _MMVAD_FLAGS
 //
 typedef struct _MMVAD_FLAGS2
 {
-    ULONG FileOffset:22;
+    ULONG FileOffset:21;
+    ULONG PagerCommit:1;        // private VAD: its CommitCharge counts as pageable (paging-file backed) commitment
     ULONG Placeholder:1;        // a free placeholder (private, reserved, no access)
     ULONG FromPlaceholder:1;    // replaced a placeholder: MEM_PRESERVE_PLACEHOLDER turns it back into one
     ULONG SecNoChange:1;
