@@ -2892,6 +2892,9 @@ extern MI_PAGER_COUNTERS MiPagerCounters;
  */
 #define MI_PAGER_WAITABLE_FLOOR 256
 
+/* NitroPagerDebug 0x800 (A/B tests): waitable faults use the flag-0 floor (MmAvailablePages < 128) instead */
+#define MI_PAGER_DEBUG_OLD_FAULT_FLOOR 0x800
+
 /* Paging I/O (writer clusters, page-file reads of faults) starts and ends: the reserve and the stuck-I/O check watch it */
 VOID
 NTAPI
