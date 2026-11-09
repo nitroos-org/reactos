@@ -843,6 +843,7 @@
 @ stdcall MmMarkPhysicalMemoryAsBad(ptr ptr)
 @ stdcall MmMarkPhysicalMemoryAsGood(ptr ptr)
 @ stdcall MmPageEntireDriver(ptr)
+@ stdcall MmPagerInjectPagingAllocationFailure(ptr)
 @ stdcall MmPrefetchPages(long ptr)
 @ stdcall MmProbeAndLockPages(ptr long long)
 @ stdcall MmProbeAndLockProcessPages(ptr ptr long long)
