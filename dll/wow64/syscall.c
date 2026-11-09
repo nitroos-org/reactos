@@ -2258,6 +2258,20 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         return NtSetValueKey(H(0), String32(&Name, P(1)), a[2], a[3], P(4), a[5]);
     case W64_NtRenameKey: return NtRenameKey(H(0), String32(&Name, P(1)));
     case W64_NtDeleteValueKey: return NtDeleteValueKey(H(0), String32(&Name, P(1)));
+    case W64_NtApphelpCacheControl:
+        /* Lookup, Remove and Update take an APPHELP_CACHE_SERVICE_LOOKUP { UNICODE_STRING ImageName; HANDLE ImageHandle; };
+         * the other services take no data. Read once; the kernel probes the name. */
+        if (a[0] <= ApphelpCacheServiceUpdate)
+        {
+            const struct { WOW64_STRING ImageName; ULONG ImageHandle; } *From = P(1);
+            APPHELP_CACHE_SERVICE_LOOKUP To;
+
+            if (!From) return NtApphelpCacheControl(a[0], NULL);
+            String32(&To.ImageName, &From->ImageName);
+            To.ImageHandle = HANDLE32(From->ImageHandle);
+            return NtApphelpCacheControl(a[0], &To);
+        }
+        return NtApphelpCacheControl(a[0], NULL);
     case W64_NtCreateJobObject:
         PROBE(0); ATTR(2);
         Status = NtCreateJobObject(&Cleanup->Handle, a[1], OA(2));

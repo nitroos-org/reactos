@@ -7,6 +7,7 @@ add_definitions(
 
 list(APPEND SOURCE
     apphelp.c
+    appcache.c
     data.c
     db.cpp
     env.c

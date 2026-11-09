@@ -49,6 +49,7 @@ typedef enum _BASESRV_API_NUMBER
     BasepDebugProcessStop, // Alias to BasepDebugProcess, deprecated
     BasepRegisterThread,
     BasepNlsGetUserInfo,
+    BasepUpdateAppcompatCache,
 
     BasepMaxApiNumber
 } BASESRV_API_NUMBER, *PBASESRV_API_NUMBER;
@@ -275,6 +276,19 @@ typedef struct _BASE_NLS_GET_USER_INFO
     ULONG Size;
 } BASE_NLS_GET_USER_INFO, *PBASE_NLS_GET_USER_INFO;
 
+/*
+ * Insert an executable the shim database has no entry for into the kernel application compatibility
+ * cache. The kernel accepts an update from a caller that holds SeTcbPrivilege only (as Windows does),
+ * so the client asks the server. ImageHandle is a handle of the client with FILE_READ_ATTRIBUTES;
+ * the server verifies that it is the file ImageName names. ImageName is the NT path CreateProcess uses (\??\C:\dir\image.exe) in the capture buffer.
+ */
+typedef struct _BASE_APPCOMPAT_CACHE_UPDATE
+{
+    HANDLE ImageHandle;
+    ULONG ImageNameLength;  /* in bytes, without a terminator */
+    PWSTR ImageName;
+} BASE_APPCOMPAT_CACHE_UPDATE, *PBASE_APPCOMPAT_CACHE_UPDATE;
+
 typedef struct _BASE_API_MESSAGE
 {
     PORT_MESSAGE Header;
@@ -305,6 +319,7 @@ typedef struct _BASE_API_MESSAGE
         BASE_DEFINE_DOS_DEVICE DefineDosDeviceRequest;
         BASE_NLS_CREATE_SECTION NlsCreateSection;
         BASE_NLS_GET_USER_INFO NlsGetUserInfo;
+        BASE_APPCOMPAT_CACHE_UPDATE AppcompatCacheUpdate;
     } Data;
 } BASE_API_MESSAGE, *PBASE_API_MESSAGE;
 
