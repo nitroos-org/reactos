@@ -223,6 +223,29 @@ UserClampWheelDelta(DWORD mouseData)
     return (SHORT)lDelta;
 }
 
+/* The distance of a mouse_event / SendInput move is caller-controlled: it must not
+   wrap the position (signed overflow) */
+static LONG
+UserSaturateAdd(LONG lPos, LONG lDelta)
+{
+    LONGLONG llSum = (LONGLONG)lPos + lDelta;
+
+    if (llSum > MAXLONG)
+        return MAXLONG;
+    /* (MINLONG is unsigned) */
+    if (llSum < -(LONGLONG)MAXLONG - 1)
+        return -MAXLONG - 1;
+    return (LONG)llSum;
+}
+
+/* Absolute coordinates are 0..65535 over the screen; a value outside that range is scaled
+   in 64 bits, as 32 bits wrap */
+static LONG
+UserScaleAbsolute(LONG lCoord, int cScreen)
+{
+    return (LONG)(((LONGLONG)lCoord * cScreen) >> 16);
+}
+
 /*
  * UserSendMouseInput
  *
@@ -256,20 +279,20 @@ UserSendMouseInput(MOUSEINPUT *pmi, BOOL bInjected)
         if (!(pmi->dwFlags & MOUSEEVENTF_ABSOLUTE))
         {
             /* Relative move */
-            ptCursor.x += pmi->dx;
-            ptCursor.y += pmi->dy;
+            ptCursor.x = UserSaturateAdd(ptCursor.x, pmi->dx);
+            ptCursor.y = UserSaturateAdd(ptCursor.y, pmi->dy);
         }
         else if (pmi->dwFlags & MOUSEEVENTF_VIRTUALDESK)
         {
             /* Absolute move in virtual screen units */
-            ptCursor.x = pmi->dx * UserGetSystemMetrics(SM_CXVIRTUALSCREEN) >> 16;
-            ptCursor.y = pmi->dy * UserGetSystemMetrics(SM_CYVIRTUALSCREEN) >> 16;
+            ptCursor.x = UserScaleAbsolute(pmi->dx, UserGetSystemMetrics(SM_CXVIRTUALSCREEN));
+            ptCursor.y = UserScaleAbsolute(pmi->dy, UserGetSystemMetrics(SM_CYVIRTUALSCREEN));
         }
         else
         {
             /* Absolute move in primary monitor units */
-            ptCursor.x = pmi->dx * UserGetSystemMetrics(SM_CXSCREEN) >> 16;
-            ptCursor.y = pmi->dy * UserGetSystemMetrics(SM_CYSCREEN) >> 16;
+            ptCursor.x = UserScaleAbsolute(pmi->dx, UserGetSystemMetrics(SM_CXSCREEN));
+            ptCursor.y = UserScaleAbsolute(pmi->dy, UserGetSystemMetrics(SM_CYSCREEN));
         }
     }
 

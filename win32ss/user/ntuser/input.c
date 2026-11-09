@@ -1055,10 +1055,12 @@ NtUserSendInput(
                     uRet++;
                 break;
             case INPUT_HARDWARE:
-                FIXME("INPUT_HARDWARE not supported!\n");
+                /* Not a message of ours to log: the caller supplies as many of these as it likes,
+                   each one would be a line on the debug port while the USER lock is held */
+                TRACE("INPUT_HARDWARE not supported!\n");
                 break;
             default:
-                ERR("SendInput(): Invalid input type: 0x%x\n", SafeInput.type);
+                TRACE("SendInput(): Invalid input type: 0x%x\n", SafeInput.type);
                 break;
         }
     }
