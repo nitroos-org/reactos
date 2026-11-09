@@ -1526,6 +1526,24 @@ MiAllocatePageFileSlot(
     return MiAllocatePageFileSlots(1, FileIndex, Slot) == 1;
 }
 
+/* A paging file takes ARM3 slots and is not retired for good (P4: private commitment may use the paging files) */
+BOOLEAN
+NTAPI
+MiPagerHasSlotFile(VOID)
+{
+    ULONG i;
+
+    /* Unlocked: files are never removed, SlotTags and RetiredForGood only change once */
+    for (i = 0; i < MAX_PAGING_FILES; i++)
+    {
+        PMMPAGING_FILE PagingFile = MmPagingFile[i];
+
+        if ((PagingFile != NULL) && (PagingFile->SlotTags != NULL) && !PagingFile->RetiredForGood)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /* Free ARM3 slots in the files that still take new ones (a snapshot) */
 PFN_NUMBER
 NTAPI

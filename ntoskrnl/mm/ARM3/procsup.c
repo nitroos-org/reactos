@@ -1589,7 +1589,9 @@ MmCleanProcessAddressSpace(IN PEPROCESS Process)
             /* Release the working set */
             MiUnlockProcessWorkingSetUnsafe(Process, Thread);
 
-            /* Give back what the VAD was charged */
+            /* Give back what the VAD was charged (and its pageable part, P4) */
+            if (MI_IS_PAGEABLE_COMMIT_VAD(Vad))
+                MiReturnPrivateCommitCredit(Vad->u.VadFlags.CommitCharge);
             MiReturnProcessCommit(Process, Vad->u.VadFlags.CommitCharge);
         }
 
