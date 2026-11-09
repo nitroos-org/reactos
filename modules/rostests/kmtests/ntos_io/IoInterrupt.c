@@ -120,6 +120,94 @@ TestConnectInterrupt(VOID)
     ok_eq_pointer(InterruptObject, NULL);
 }
 
+/* --- Shared interrupt line: one DIRQL per vector ---------------------------- */
+
+static
+BOOLEAN
+NTAPI
+SharedLineIsr(
+    IN PKINTERRUPT Interrupt,
+    IN PVOID Context)
+{
+    UNREFERENCED_PARAMETER(Interrupt);
+    UNREFERENCED_PARAMETER(Context);
+    return FALSE;
+}
+
+static
+BOOLEAN
+NTAPI
+SharedLineSynchronize(
+    IN PVOID Context)
+{
+    PTEST_CONTEXT TestContext = Context;
+
+    /* KeSynchronizeExecution raises to the object's SynchronizeIrql: that is the DIRQL of the
+       vector only if the object was connected with the DIRQL the HAL reports for the line */
+    ok_irql(TestContext->ExpectedIrql);
+    return TRUE;
+}
+
+static
+VOID
+TestSharedLineIrql(VOID)
+{
+    /* The HAL must report the same vector and DIRQL every time one interrupt line is translated:
+       drivers sharing the line connect with what they are told, and an interrupt object connected
+       at a lower IRQL than its vector is not excluded from the ISR by KeSynchronizeExecution */
+    ULONG Line;
+    ULONG Vector1, Vector2, Vector3;
+    KIRQL Irql1 = 0, Irql2 = 0, Irql3 = 0;
+    KAFFINITY Affinity1 = 0, Affinity2 = 0, Affinity3 = 0;
+    PKINTERRUPT Interrupt1 = NULL, Interrupt2 = NULL;
+    TEST_CONTEXT TestContext;
+    NTSTATUS Status;
+    BOOLEAN Ret;
+
+    /* Lines the HAL has not allocated a vector for yet: the first translation allocates it. Use the
+       last I/O APIC inputs, no device has them; the last one gets the chained connection below */
+    for (Line = 20; Line < 23; Line++)
+    {
+        Vector1 = HalGetInterruptVector(Isa, 0, Line, Line, &Irql1, &Affinity1);
+        Vector2 = HalGetInterruptVector(Isa, 0, Line, Line, &Irql2, &Affinity2);
+        if (Vector1 == 0)
+            continue;
+        ok_eq_ulong(Vector2, Vector1);
+        ok_eq_int(Irql2, Irql1);
+    }
+
+    Line = 23;
+    Vector1 = HalGetInterruptVector(Isa, 0, Line, Line, &Irql1, &Affinity1);
+    Vector2 = HalGetInterruptVector(Isa, 0, Line, Line, &Irql2, &Affinity2);
+    Vector3 = HalGetInterruptVector(Isa, 0, Line, Line, &Irql3, &Affinity3);
+    if (skip(Vector1 != 0, "Cannot translate line %lu\n", Line))
+        return;
+
+    ok_eq_ulong(Vector2, Vector1);
+    ok_eq_ulong(Vector3, Vector1);
+    ok_eq_int(Irql2, Irql1);
+    ok_eq_int(Irql3, Irql1);
+    ok_eq_ulongptr(Affinity2, Affinity1);
+
+    Status = IoConnectInterrupt(&Interrupt1, SharedLineIsr, NULL, NULL, Vector1, Irql1, Irql1,
+                                LevelSensitive, TRUE, Affinity1, FALSE);
+    if (skip(NT_SUCCESS(Status), "Cannot connect to line %lu: %lx\n", Line, Status))
+        return;
+
+    Status = IoConnectInterrupt(&Interrupt2, SharedLineIsr, NULL, NULL, Vector2, Irql2, Irql2,
+                                LevelSensitive, TRUE, Affinity2, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        TestContext.ExpectedIrql = Irql1;
+        Ret = KeSynchronizeExecution(Interrupt2, SharedLineSynchronize, &TestContext);
+        ok_eq_int(Ret, TRUE);
+        ok_irql(PASSIVE_LEVEL);
+        IoDisconnectInterrupt(Interrupt2);
+    }
+    IoDisconnectInterrupt(Interrupt1);
+}
+
 /* --- IoConnectInterruptEx / IoDisconnectInterruptEx ------------------------ */
 
 #define TAG_INTEX 'xInK'
@@ -526,5 +614,6 @@ START_TEST(IoInterrupt)
 {
     TestSynchronizeExecution();
     TestConnectInterrupt();
+    TestSharedLineIrql();
     TestExConnect();
 }
