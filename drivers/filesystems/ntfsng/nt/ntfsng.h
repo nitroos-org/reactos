@@ -393,7 +393,7 @@ NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize);
 int NgFlushVolume(PNG_VCB Vcb);
 VOID NgFlushStream(PNG_FCB Fcb, PIO_STATUS_BLOCK Iosb);
 NTSTATUS NgDropPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, ULONG Length);
-#define NG_DIO_BOUNCE (64 * 1024)
+#define NG_DIO_BOUNCE (256 * 1024)
 VOID NgInitDataIo(PNG_VCB Vcb);
 VOID NgDrainDataIoCallback(PVOID Context);
 VOID NgWaitDataIoIdle(PNG_VCB Vcb);

@@ -1162,6 +1162,15 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         }
     }
 
+    /*
+     * The write throttle of the Windows file system contract: a cached write waits here, before the file's
+     * resources are taken, while the cache holds too many dirty pages (the lazy writer posts the deferred
+     * writes after each chunk it wrote).  The dispatch routine blocks on its resources anyway, so a
+     * caller that cannot wait is held up the same way (CcCanIWrite with Wait).
+     */
+    if (!NonCached && !WriteThrough && KeGetCurrentIrql() == PASSIVE_LEVEL)
+        CcCanIWrite(FileObject, Length, TRUE, FALSE);
+
     ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
     if (Append)
         Offset.QuadPart = Fcb->Header.FileSize.QuadPart;
