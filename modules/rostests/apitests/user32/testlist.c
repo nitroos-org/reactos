@@ -52,6 +52,7 @@ extern void func_GetWindowPlacement(void);
 extern void func_GW_ENABLEDPOPUP(void);
 extern void func_Handle32(void);
 extern void func_HookInputBatch(void);
+extern void func_UserLowsBatch(void);
 extern void func_HookChainUnhookUaf(void);
 extern void func_HookFamilies(void);
 extern void func_HungWindow(void);
@@ -198,6 +199,7 @@ const struct test winetest_testlist[] =
     { "GW_ENABLEDPOPUP", func_GW_ENABLEDPOPUP },
     { "Handle32", func_Handle32 },
     { "HookInputBatch", func_HookInputBatch },
+    { "UserLowsBatch", func_UserLowsBatch },
     { "HookChainUnhookUaf", func_HookChainUnhookUaf },
     { "HookFamilies", func_HookFamilies },
     { "HungWindow", func_HungWindow },

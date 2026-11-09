@@ -53,6 +53,7 @@ list(APPEND SOURCE
     GW_ENABLEDPOPUP.c
     Handle32.c
     HookInputBatch.c
+    UserLowsBatch.c
     HookChainUnhookUaf.c
     HookFamilies.c
     HungWindow.c
