@@ -1866,7 +1866,8 @@ NtUserGetKeyNameText(LONG lParam, LPWSTR lpString, int cchSize)
 
     /* Get current keyboard layout */
     pti = PsGetCurrentThreadWin32Thread();
-    pKbdTbl = pti ? pti->KeyboardLayout->spkf->pKbdTbl : NULL;
+    pKbdTbl = (pti && pti->KeyboardLayout && pti->KeyboardLayout->spkf) ?
+              pti->KeyboardLayout->spkf->pKbdTbl : NULL;
 
     if (!pKbdTbl || cchSize < 1)
     {
@@ -1890,7 +1891,8 @@ NtUserGetKeyNameText(LONG lParam, LPWSTR lpString, int cchSize)
     else
         pKeyNames = pKbdTbl->pKeyNames;
 
-    for (i = 0; pKeyNames[i].pwsz; i++)
+    /* A layout does not have to name its keys (or its extended ones) */
+    for (i = 0; pKeyNames && pKeyNames[i].pwsz; i++)
     {
         if (pKeyNames[i].vsc == wScanCode)
         {
