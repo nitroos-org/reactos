@@ -369,6 +369,35 @@ ObDuplicateObject(
     IN KPROCESSOR_MODE PreviousMode
 );
 
+/* ObRegisterCallbacks dispatch (obcallbk.c): handle creation/duplication of processes and threads */
+struct _OBP_CALLBACK_CALL;
+typedef struct _OBP_CALLBACK_CALL *POBP_CALLBACK_CALL;
+extern volatile LONG ObpCallbackCount;
+
+#define ObpMayHaveCallbacks(Type) \
+    ((ObpCallbackCount != 0) && (((Type) == PsProcessType) || ((Type) == PsThreadType)))
+
+VOID
+NTAPI
+ObpCallPreOperation(
+    IN OB_OPERATION Operation,
+    IN PVOID Object,
+    IN POBJECT_TYPE ObjectType,
+    IN BOOLEAN KernelHandle,
+    IN OUT PACCESS_MASK DesiredAccess,
+    IN PEPROCESS SourceProcess OPTIONAL,
+    IN PEPROCESS TargetProcess OPTIONAL,
+    OUT POBP_CALLBACK_CALL *Call
+);
+
+VOID
+NTAPI
+ObpCallPostOperation(
+    IN POBP_CALLBACK_CALL Call,
+    IN NTSTATUS ReturnStatus,
+    IN ACCESS_MASK GrantedAccess
+);
+
 VOID
 NTAPI
 ObFreeObjectCreateInfoBuffer(
