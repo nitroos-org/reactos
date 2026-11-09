@@ -1570,7 +1570,7 @@ MmSetPageProtect(
     ULONG flProtect
 );
 
-BOOLEAN
+NTSTATUS
 NTAPI
 MmHoldPageTable(
     _In_ struct _EPROCESS* Process,

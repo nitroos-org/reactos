@@ -236,6 +236,77 @@ MiPageTableUseCount(PVOID Address)
 #endif
 }
 
+/*
+ * The page table of a user address is valid when every level above it is. Used without the working set lock
+ * to decide whether a fault in the page table (MiTryMakePageTableValid) is still needed, and with it to decide
+ * that the page table is there to be counted.
+ */
+static
+BOOLEAN
+MiIsPageTableChainValid(
+    _In_ PMMPDE PointerPde)
+{
+#if _MI_PAGING_LEVELS == 4
+    if (!MiPdeToPxe(PointerPde)->u.Hard.Valid)
+        return FALSE;
+#endif
+#if _MI_PAGING_LEVELS >= 3
+    if (!MiPdeToPpe(PointerPde)->u.Hard.Valid)
+        return FALSE;
+#endif
+    return PointerPde->u.Hard.Valid != 0;
+}
+
+static
+NTSTATUS
+MiTouchPagingStructure(
+    _In_ PVOID Address)
+{
+    if (MmIsAddressValid(Address))
+        return STATUS_SUCCESS;
+    return MmAccessFault(FALSE, Address, KernelMode, NULL);
+}
+
+/*
+ * Faults the paging structures of a user address in, one level at a time and top down (the fault of a level
+ * needs the level above valid), like MiMakePdeExistAndMakeValid, but a page that cannot be had is an error
+ * the caller can handle instead of a bugcheck (0x7A, STATUS_NO_MEMORY). The caller holds the address space
+ * lock of a fault that cannot wait for the balancer: it gives the lock back and the fault waits and retries
+ * (MmAccessFault). The working set lock is not held.
+ */
+static
+NTSTATUS
+MiTryMakePageTableValid(
+    _In_ PVOID Address)
+{
+    PMMPDE PointerPde = MiAddressToPde(Address);
+    NTSTATUS Status;
+
+#if _MI_PAGING_LEVELS == 4
+    if (!MiPdeToPxe(PointerPde)->u.Hard.Valid)
+    {
+        Status = MiTouchPagingStructure(MiPdeToPpe(PointerPde));
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+#endif
+#if _MI_PAGING_LEVELS >= 3
+    if (!MiPdeToPpe(PointerPde)->u.Hard.Valid)
+    {
+        Status = MiTouchPagingStructure(PointerPde);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+#endif
+    if (!PointerPde->u.Hard.Valid)
+    {
+        Status = MiTouchPagingStructure(MiPteToAddress(PointerPde));
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+    return STATUS_SUCCESS;
+}
+
 /**
  * @brief Makes the page table of a user address of the current process valid and
  * keeps it until MmReleasePageTable.
@@ -254,9 +325,12 @@ MiPageTableUseCount(PVOID Address)
  * count may take the counter past PTE_PER_PAGE by the number of concurrent
  * holders (MI_PAGE_TABLE_HOLD_SLACK in miarm.h).
  *
- * @return TRUE (a reference was taken; MmReleasePageTable drops it).
+ * @return STATUS_SUCCESS (a reference was taken; MmReleasePageTable drops it), or STATUS_NO_MEMORY when a
+ * page for the page table (or a level above it) cannot be had now. The caller, a fault that holds the address
+ * space lock and so cannot wait for the balancer itself, fails with it: MmAccessFault releases the lock, waits
+ * for the balancer and retries (ng7a2: the bugcheck 0x7A of MiMakeSystemAddressValid at 512 MB).
  */
-BOOLEAN
+NTSTATUS
 NTAPI
 MmHoldPageTable(
     _In_ PEPROCESS Process,
@@ -266,11 +340,37 @@ MmHoldPageTable(
     ASSERT(Address <= MM_HIGHEST_USER_ADDRESS);
     ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);
 
+    ULONG Tries;
+    NTSTATUS Status;
+
+    for (Tries = 0; Tries < 16; Tries++)
+    {
+        Status = MiTryMakePageTableValid(Address);
+        if (!NT_SUCCESS(Status))
+        {
+            if ((Status == STATUS_NO_MEMORY) || (Status == STATUS_INSUFFICIENT_RESOURCES))
+                return STATUS_NO_MEMORY;
+            break;
+        }
+
+        MiLockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+        if (MiIsPageTableChainValid(MiAddressToPde(Address)))
+        {
+            MiIncrementPageTableReferences(Address);
+            MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+            return STATUS_SUCCESS;
+        }
+
+        /* Trimmed again between the fault and the lock: once more */
+        MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
+    }
+
+    /* Out of tries (or an error that is no shortage): the old way, which waits under the lock and may bugcheck */
     MiLockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
     MiMakePdeExistAndMakeValid(MiAddressToPde(Address), Process, MM_NOIRQL);
     MiIncrementPageTableReferences(Address);
     MiUnlockProcessWorkingSetUnsafe(Process, PsGetCurrentThread());
-    return TRUE;
+    return STATUS_SUCCESS;
 }
 
 /**
