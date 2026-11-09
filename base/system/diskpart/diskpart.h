@@ -702,6 +702,10 @@ UpdateVolumeInfo(
     _In_ PVOLENTRY VolumeEntry);
 
 VOID
+AddEmptyLogicalSpace(
+    _In_ PDISKENTRY DiskEntry);
+
+VOID
 ScanForUnpartitionedMbrDiskSpace(
     PDISKENTRY DiskEntry);
 
