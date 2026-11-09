@@ -75,6 +75,7 @@ static LIST_ENTRY CcDyingSharedCacheMapList;
  * as before.  From a quarter of it on the lazy writer keeps writing (CcRosDeferredBacklog).
  */
 static ULONG CcDeferredVacbs = 0;
+#define CC_LAZY_MIN_AGE (3LL * 10000000)    /* 100 ns units */
 #ifdef _WIN64
 #define CC_MAX_DEFERRED_VACBS 16384
 #else
@@ -592,6 +593,13 @@ CcRosIsDeleteFlushPending(
     return Pending;
 }
 
+/* Are the closed files waiting for the lazy writer near the limit past which a close writes its data itself? */
+BOOLEAN
+CcRosDeferredBacklogHigh(VOID)
+{
+    return CcDeferredVacbs > CC_MAX_DEFERRED_VACBS / 4 * 3;
+}
+
 /* Are many closed files waiting for the lazy writer?  It then keeps writing (CcWriteBehind). */
 BOOLEAN
 CcRosDeferredBacklog(VOID)
@@ -798,6 +806,14 @@ CcRosFlushDirtyPages (
         current_entry = current_entry->Flink;
 
         CcRosVacbIncRefCount(current);
+
+        /* Younger dirty data is left to a later scan (the list is in the order the views became dirty) */
+        if (CalledFromLazy && !FlushAll && !CcLazyUnderPressure() &&
+            KeQueryInterruptTime() - current->DirtySince < CC_LAZY_MIN_AGE)
+        {
+            CcRosVacbDecRefCount(current);
+            break;
+        }
 
         SharedCacheMap = current->SharedCacheMap;
 
@@ -1397,6 +1413,7 @@ CcRosMarkDirtyVacb (
     }
 
     InsertTailList(&DirtyVacbListHead, &Vacb->DirtyVacbListEntry);
+    Vacb->DirtySince = KeQueryInterruptTime();
     Vacb->DirtyPagesCharged = CcRosVacbFilePages(Vacb);
     CcTotalDirtyPages += Vacb->DirtyPagesCharged;
     Vacb->SharedCacheMap->DirtyPages += Vacb->DirtyPagesCharged;
@@ -1415,7 +1432,7 @@ CcRosMarkDirtyVacb (
     {
         CcScheduleLazyWriteScan(FALSE);
     }
-    CcKickStreamingWriteBehind();
+    CcKickStreamingWriteBehind(Vacb->SharedCacheMap->DirtyPages);
     KeReleaseQueuedSpinLock(LockQueueMasterLock, oldIrql);
 }
 
