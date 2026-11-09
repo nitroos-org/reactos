@@ -476,7 +476,7 @@
 @ stdcall NtQuerySystemEnvironmentValueEx(ptr ptr ptr ptr ptr)
 @ stdcall NtQuerySystemInformation(long long long long)
 @ stdcall -version=0x601+ NtQuerySystemInformationEx(long ptr long ptr long ptr)
-@ stdcall NtQuerySystemTime(ptr)
+@ stdcall NtQuerySystemTime(ptr) RtlpQuerySystemTimeUser
 @ stdcall NtQueryTimer(ptr long ptr long ptr)
 @ stdcall NtQueryTimerResolution(long long long)
 @ stdcall NtQueryValueKey(long long long long long long)
