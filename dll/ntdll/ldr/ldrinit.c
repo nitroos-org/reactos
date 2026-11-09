@@ -3130,7 +3130,15 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     InsertHeadList(&Peb->Ldr->InInitializationOrderModuleList,
                    &LdrpNtDllDataTableEntry->InInitializationOrderLinks);
 
-    /* Initialize Wine's active context implementation for the current process */
+    /* Initialize Wine's active context implementation for the current process.
+     * The native side of a WoW64 process only runs ntdll, wow64.dll and its helpers: they are never redirected and
+     * there is no window on the native side, so neither the manifest of the image nor the system compatible one is of
+     * any use there. The 32-bit ntdll creates the contexts and the compatibility data from the PEB32 copy of the shim
+     * data in the guest. Creating them here as well read and parsed the manifests of the native assemblies for nothing
+     * at every start of a 32-bit process. */
+#ifdef BUILD_WOW64_ENABLED
+    if (!IsWow64)
+#endif
     RtlpInitializeActCtx(&OldShimData);
 
     /* Set the current directory */
