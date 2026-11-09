@@ -550,6 +550,86 @@ MiRemoveAnyPage(IN ULONG Color)
     return PageIndex;
 }
 
+BOOLEAN
+NTAPI
+MmRebalanceMemoryConsumersAndWait(VOID);
+
+/* Rounds a must-succeed page waits before the system stops (each is a balancer pass or at least 10 ms). */
+/* Rare paths that stop the system otherwise: wait longer than a kernel stack does (at least a minute) */
+#define MI_MUST_SUCCEED_PAGE_WAITS 6000
+
+/*
+ * A zeroed page for a path that has no failure handling (session creation, the
+ * system page directory fill, the working set list): MiRemoveZeroPage and
+ * MiRemoveAnyPage return page 0 when no page is usable, and these callers used
+ * to map it as a real page (a valid PTE for page 0: the 0x7E class fixed for
+ * driver loads in 0511536af8a). The PFN lock is held on entry and on exit; it
+ * is dropped while the balancer frees pages (bounded, as MmCreateKernelStack
+ * waits), and if no page comes the system stops with NO_PAGES_AVAILABLE
+ * (usable pages, 0x5A000000 | Caller, retries, 0) rather than corrupt memory.
+ */
+PFN_NUMBER
+NTAPI
+MiRemoveZeroPageOrWait(
+    _In_ ULONG Color,
+    _Inout_ PKIRQL OldIrql,
+    _In_ ULONG Caller)
+{
+    PFN_NUMBER PageFrameIndex;
+    ULONG Retry;
+
+    MI_ASSERT_PFN_LOCK_HELD();
+    for (Retry = 0; ; Retry++)
+    {
+        /*
+         * Test (NitroPagerDebug 0x1000; free builds need /NITROPAGERDEBUG): the first attempt of every
+         * second call acts as if no page were usable, so that the wait below runs on a healthy system
+         */
+        static LONG InjectCalls, Injected;
+        BOOLEAN Inject = (Retry == 0) && (*OldIrql < DISPATCH_LEVEL) && (MiNitroPagerDebug & 0x1000) && ((InterlockedIncrement(&InjectCalls) % 2) == 0);
+
+        if (Inject && (InterlockedIncrement(&Injected) % 16 == 1))
+            DbgPrint("MiRemoveZeroPageOrWait: test: no page for caller %lu (%ld injected)\n", Caller, Injected);
+        if (!Inject && (MiGetUsablePageCount() != 0))
+        {
+            PageFrameIndex = MiRemoveZeroPageSafe(Color);
+            if (PageFrameIndex != 0)
+                return PageFrameIndex;
+
+            /* No zeroed page: take a free one (or repurpose) and zero it outside the PFN lock */
+            PageFrameIndex = MiRemoveAnyPage(Color);
+            if (PageFrameIndex != 0)
+            {
+                MiReleasePfnLock(*OldIrql);
+                MiZeroPhysicalPage(PageFrameIndex);
+                *OldIrql = MiAcquirePfnLock();
+                return PageFrameIndex;
+            }
+        }
+
+        if ((Retry >= MI_MUST_SUCCEED_PAGE_WAITS) || (*OldIrql >= DISPATCH_LEVEL))
+        {
+            KeBugCheckEx(NO_PAGES_AVAILABLE,
+                         MiGetUsablePageCount(),
+                         0x5A000000 | Caller,
+                         Retry,
+                         0);
+        }
+
+        /* Let the balancer free pages: a pass ran (TRUE), or the wait was a short delay (FALSE) */
+        MiReleasePfnLock(*OldIrql);
+        if (MmRebalanceMemoryConsumersAndWait() && (MiGetUsablePageCount() == 0))
+        {
+            LARGE_INTEGER Delay;
+
+            /* The pass freed nothing: give the lazy writer a moment, do not spin on passes */
+            Delay.QuadPart = -10 * 10000;
+            KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        }
+        *OldIrql = MiAcquirePfnLock();
+    }
+}
+
 PFN_NUMBER
 NTAPI
 MiRemoveZeroPage(IN ULONG Color)

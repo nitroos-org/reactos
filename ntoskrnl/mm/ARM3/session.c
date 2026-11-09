@@ -554,17 +554,8 @@ MiSessionInitializeWorkingSetList(VOID)
         /* Get a zeroed colored zero page */
         MI_SET_USAGE(MI_USAGE_INIT_MEMORY);
         Color = MI_GET_NEXT_COLOR();
-        PageFrameIndex = MiRemoveZeroPageSafe(Color);
-        if (!PageFrameIndex)
-        {
-            /* No zero pages, grab a free one */
-            PageFrameIndex = MiRemoveAnyPage(Color);
-
-            /* Zero it outside the PFN lock */
-            MiReleasePfnLock(OldIrql);
-            MiZeroPhysicalPage(PageFrameIndex);
-            OldIrql = MiAcquirePfnLock();
-        }
+        /* Never page 0: waits for the balancer (the PFN lock may be dropped), stops the system if none comes */
+        PageFrameIndex = MiRemoveZeroPageOrWait(Color, &OldIrql, MI_ZERO_WAIT_SESSION_WS_PT);
 
         /* Write a valid PDE for it */
         TempPde = ValidKernelPdeLocal;
@@ -586,17 +577,8 @@ MiSessionInitializeWorkingSetList(VOID)
     /* Get a zeroed colored zero page */
     MI_SET_USAGE(MI_USAGE_INIT_MEMORY);
     Color = MI_GET_NEXT_COLOR();
-    PageFrameIndex = MiRemoveZeroPageSafe(Color);
-    if (!PageFrameIndex)
-    {
-        /* No zero pages, grab a free one */
-        PageFrameIndex = MiRemoveAnyPage(Color);
-
-        /* Zero it outside the PFN lock */
-        MiReleasePfnLock(OldIrql);
-        MiZeroPhysicalPage(PageFrameIndex);
-        OldIrql = MiAcquirePfnLock();
-    }
+    /* Never page 0: waits for the balancer (the PFN lock may be dropped), stops the system if none comes */
+    PageFrameIndex = MiRemoveZeroPageOrWait(Color, &OldIrql, MI_ZERO_WAIT_SESSION_WS);
 
     /* Write a valid PTE for it */
     TempPte = ValidKernelPteLocal;
@@ -1047,17 +1029,8 @@ MiSessionCreateInternal(OUT PULONG SessionId)
         /* Get a zeroed colored zero page */
         MI_SET_USAGE(MI_USAGE_INIT_MEMORY);
         Color = MI_GET_NEXT_COLOR();
-        DataPage[i] = MiRemoveZeroPageSafe(Color);
-        if (!DataPage[i])
-        {
-            /* No zero pages, grab a free one */
-            DataPage[i] = MiRemoveAnyPage(Color);
-
-            /* Zero it outside the PFN lock */
-            MiReleasePfnLock(OldIrql);
-            MiZeroPhysicalPage(DataPage[i]);
-            OldIrql = MiAcquirePfnLock();
-        }
+        /* Never page 0: waits for the balancer (the PFN lock may be dropped), stops the system if none comes */
+        DataPage[i] = MiRemoveZeroPageOrWait(Color, &OldIrql, MI_ZERO_WAIT_SESSION_DATA);
 
         /* Fill the PTE out */
         TempPte.u.Hard.PageFrameNumber = DataPage[i];
@@ -1070,17 +1043,8 @@ MiSessionCreateInternal(OUT PULONG SessionId)
     /* Get a zeroed colored zero page */
     MI_SET_USAGE(MI_USAGE_INIT_MEMORY);
     Color = MI_GET_NEXT_COLOR();
-    SessionPageDirIndex = MiRemoveZeroPageSafe(Color);
-    if (!SessionPageDirIndex)
-    {
-        /* No zero pages, grab a free one */
-        SessionPageDirIndex = MiRemoveAnyPage(Color);
-
-        /* Zero it outside the PFN lock */
-        MiReleasePfnLock(OldIrql);
-        MiZeroPhysicalPage(SessionPageDirIndex);
-        OldIrql = MiAcquirePfnLock();
-    }
+    /* Never page 0: waits for the balancer (the PFN lock may be dropped), stops the system if none comes */
+    SessionPageDirIndex = MiRemoveZeroPageOrWait(Color, &OldIrql, MI_ZERO_WAIT_SESSION_DIR);
 
     /* Fill the PTE out */
     TempPde = ValidKernelPdeLocal;
@@ -1112,17 +1076,8 @@ MiSessionCreateInternal(OUT PULONG SessionId)
         /* Grab a zeroed colored page */
         MI_SET_USAGE(MI_USAGE_INIT_MEMORY);
         Color = MI_GET_NEXT_COLOR();
-        TagPage[i] = MiRemoveZeroPageSafe(Color);
-        if (!TagPage[i])
-        {
-            /* No zero pages, grab a free one */
-            TagPage[i] = MiRemoveAnyPage(Color);
-
-            /* Zero it outside the PFN lock */
-            MiReleasePfnLock(OldIrql);
-            MiZeroPhysicalPage(TagPage[i]);
-            OldIrql = MiAcquirePfnLock();
-        }
+        /* Never page 0: waits for the balancer (the PFN lock may be dropped), stops the system if none comes */
+        TagPage[i] = MiRemoveZeroPageOrWait(Color, &OldIrql, MI_ZERO_WAIT_SESSION_TAG);
 
         /* Fill the PTE out */
         TempPte.u.Hard.PageFrameNumber = TagPage[i];
