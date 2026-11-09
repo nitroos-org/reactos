@@ -110,12 +110,15 @@ static volatile LONG MiPagerExpectMismatch;
 #define MI_PAGER_TEST_HOLD_PAGES                    (MI_PAGER_TEST_COMMAND_BASE + 11)
 /* The next cluster writes (writer thread or synchronous flush) never complete (a hung paging device), until the boot ends */
 #define MI_PAGER_TEST_HANG_WRITES                   (MI_PAGER_TEST_COMMAND_BASE + 12)
-#define MI_PAGER_TEST_LAST                          MI_PAGER_TEST_HANG_WRITES
+/* From now on every cluster write reports STATUS_FILE_INVALID: the files it reaches retire for good (P4 test) */
+#define MI_PAGER_TEST_INVALIDATE_WRITES             (MI_PAGER_TEST_COMMAND_BASE + 13)
+#define MI_PAGER_TEST_LAST                          MI_PAGER_TEST_INVALIDATE_WRITES
 
 /* MI_PAGER_TEST_HOLD_PAGES: the pages it leaves (above the waitable floor, below the balancer's starved mark) */
 #define MI_PAGER_TEST_HOLD_FLOOR    (MI_PAGER_WAITABLE_FLOOR + 64)
 #define MI_PAGER_TEST_HOLD_SECONDS  1800
 static volatile LONG MiPagerHangWrites;
+static volatile LONG MiPagerInvalidateWrites;
 
 /* Writer pause (test): how long the writer waits for the resume command at most */
 #define MI_PAGER_TEST_PAUSE_SECONDS 30
@@ -745,6 +748,10 @@ MiWriteModifiedPrivatePagesEx(
                 Status = STATUS_DEVICE_DATA_ERROR;
             }
         }
+
+        /* Test command: the paging file went away (wrong media), so it retires for good */
+        if (NT_SUCCESS(Status) && MiPagerInvalidateWrites)
+            Status = STATUS_FILE_INVALID;
 
         /* Test: the disk fails every write for a while after boot, then recovers (retirement and its probe) */
         if (NT_SUCCESS(Status) && (MiNitroPagerDebug & MI_PAGER_DEBUG_FAIL_WRITES_EARLY) &&
@@ -2288,7 +2295,8 @@ MmSetMemoryListInformation(
                    (Command == MI_PAGER_TEST_RESUME_WRITE) ||
                    (Command == MI_PAGER_TEST_QUERY_PAUSED) ||
                    (Command == MI_PAGER_TEST_QUERY_FREE_REFUSED) ||
-                   (Command == MI_PAGER_TEST_HANG_WRITES)) &&
+                   (Command == MI_PAGER_TEST_HANG_WRITES) ||
+                   (Command == MI_PAGER_TEST_INVALIDATE_WRITES)) &&
                   (Address <= MM_HIGHEST_USER_ADDRESS);
 
     if ((Command >= MI_MEMORY_COMMAND_MAX) && !TestCommand)
@@ -2355,6 +2363,11 @@ MmSetMemoryListInformation(
         case MI_PAGER_TEST_HANG_WRITES:
             DbgPrint("NitroPager: test: the next cluster writes will hang\n");
             InterlockedExchange(&MiPagerHangWrites, 1);
+            MiPagerWakeWriter();
+            return STATUS_SUCCESS;
+        case MI_PAGER_TEST_INVALIDATE_WRITES:
+            DbgPrint("NitroPager: test: cluster writes report STATUS_FILE_INVALID from now on\n");
+            InterlockedExchange(&MiPagerInvalidateWrites, 1);
             MiPagerWakeWriter();
             return STATUS_SUCCESS;
 

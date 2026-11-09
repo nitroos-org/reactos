@@ -1512,6 +1512,15 @@ MiCheckProcessCommitReturned(
          */
         DPRINT1("MM: pageable commitment counter at %Iu pages, may be skewed by up to %Iu\n",
                 MiGetPageableCommittedPages(), min(Residue, MiGetPageableCommittedPages()));
+        /*
+         * P4: whether the residue was counted as pageable private commitment is not
+         * known any more. Take it out of that count too (clamped): a count too low
+         * only makes the RAM-bound tiers stricter, one too high would let them commit
+         * more than RAM can hold.
+         */
+        DPRINT1("MM: pageable private commitment at %Iu pages, residue taken out of it\n",
+                MiGetPrivatePageableCommit());
+        MiReturnPrivateCommitCredit(Residue);
         MiReturnProcessCommit(Process, Residue);
     }
 }
@@ -1589,8 +1598,8 @@ MmCleanProcessAddressSpace(IN PEPROCESS Process)
             /* Release the working set */
             MiUnlockProcessWorkingSetUnsafe(Process, Thread);
 
-            /* Give back what the VAD was charged (and its pageable part, P4) */
-            if (MI_IS_PAGEABLE_COMMIT_VAD(Vad))
+            /* Give back what the VAD was charged (and its pageable count, P4) */
+            if (MI_IS_PAGER_COMMIT_VAD(Vad))
                 MiReturnPrivateCommitCredit(Vad->u.VadFlags.CommitCharge);
             MiReturnProcessCommit(Process, Vad->u.VadFlags.CommitCharge);
         }

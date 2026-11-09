@@ -281,18 +281,37 @@ typedef struct _MEMORY_AREA
 
 #define MI_SET_MEMORY_AREA_VAD(Vad) do { (Vad)->u.VadFlags.Spare |= 1; } while (0)
 #define MI_IS_MEMORY_AREA_VAD(Vad) (((Vad)->u.VadFlags.Spare & 1) != 0)
+#define MI_SET_ROSMM_VAD(Vad) do { (Vad)->u.VadFlags.Spare |= 2; } while (0)
+#define MI_IS_ROSMM_VAD(Vad) (((Vad)->u.VadFlags.Spare & 2) != 0)
 
 /*
- * A private VAD whose committed pages the NitroPager trimmer may page out (its
- * MiIsTrimmableVad), so whose commitment may use the paging files (P4).
+ * P4. A private VAD whose committed pages the NitroPager trimmer may page out
+ * (MiIsTrimmableVad), so whose commitment may use the paging files. Such a VAD
+ * is always an MMVAD_LONG (NtAllocateVirtualMemory, placeholders).
  */
 #define MI_IS_PAGEABLE_COMMIT_VAD(Vad) \
     (!MI_IS_MEMORY_AREA_VAD(Vad) && \
      ((Vad)->u.VadFlags.PrivateMemory != 0) && \
      ((Vad)->u.VadFlags.VadType == VadNone) && \
      ((Vad)->u.VadFlags.NoChange == 0))
-#define MI_SET_ROSMM_VAD(Vad) do { (Vad)->u.VadFlags.Spare |= 2; } while (0)
-#define MI_IS_ROSMM_VAD(Vad) (((Vad)->u.VadFlags.Spare & 2) != 0)
+
+/*
+ * P4. A pageable VAD whose whole CommitCharge was charged as MiCommitUserPrivate
+ * and so counts in the pageable private count. The mark is decided only while
+ * the CommitCharge of the VAD is 0 (MI_DECIDE_PAGER_COMMIT_VAD); every return of
+ * that CommitCharge then gives the private count back as well, so credits mirror
+ * charges exactly.
+ */
+#define MI_IS_PAGER_COMMIT_VAD(Vad) \
+    (MI_IS_PAGEABLE_COMMIT_VAD(Vad) && ((Vad)->u2.VadFlags2.PagerCommit != 0))
+#define MI_VAD_COMMIT_TIER(Vad) \
+    (MI_IS_PAGER_COMMIT_VAD(Vad) ? MiCommitUserPrivate : MiCommitUser)
+#define MI_DECIDE_PAGER_COMMIT_VAD(Vad) \
+    do { \
+        ASSERT((Vad)->u.VadFlags.CommitCharge == 0); \
+        if (MI_IS_PAGEABLE_COMMIT_VAD(Vad)) \
+            (Vad)->u2.VadFlags2.PagerCommit = MiPagerBacksCommit() ? 1 : 0; \
+    } while (0)
 
 typedef struct _MM_RMAP_ENTRY
 {
@@ -1134,12 +1153,11 @@ typedef enum _MI_COMMIT_TIER
     /* Fails above the commit limit only (pool, kernel stack growth) */
     MiCommitKernel,
     /*
-     * ARM3 private memory the NitroPager trimmer pages out (MiIsPageableCommitVad).
-     * With the pager on and an ARM3 paging file (MiPagerBacksCommit, P4) it may use
-     * the paging files: fails above RAM plus paging files less the resident headroom
-     * and the kernel reserve, and counts as pageable for the other tiers. Otherwise
-     * exactly MiCommitUser. Return it as plain commitment plus
-     * MiReturnPrivateCommitCredit when the VAD is pageable.
+     * P4. Private memory of a VAD marked PagerCommit (MI_IS_PAGER_COMMIT_VAD). It
+     * always counts in the pageable private count. While the pager backs
+     * commitment (MiPagerBacksCommit) it fails above RAM plus paging files less
+     * the resident headroom and the kernel reserve, otherwise where MiCommitUser
+     * fails. Return it as plain commitment plus MiReturnPrivateCommitCredit.
      */
     MiCommitUserPrivate
 } MI_COMMIT_TIER;
@@ -1224,18 +1242,23 @@ MiChargeCommitWithGrowthEx(
     _In_ SIZE_T Pages,
     _In_ MI_COMMIT_TIER Tier);
 
-/* P4: private commitment returned from a pageable VAD leaves the pageable count (clamped at 0) */
+/* P4: what a PagerCommit VAD gives back leaves the pageable private count (clamped at 0) */
 VOID
 NTAPI
 MiReturnPrivateCommitCredit(
     _In_ SIZE_T Pages);
+
+/* P4: the pageable private count (diagnostics) */
+SIZE_T
+NTAPI
+MiGetPrivatePageableCommit(VOID);
 
 /* P4: NitroPager on and an ARM3 paging file present: private commitment may use the paging files */
 BOOLEAN
 NTAPI
 MiPagerBacksCommit(VOID);
 
-/* P4: ARM3 paging files that take slots (not retired for good) */
+/* P4: an ARM3 paging file takes slots and is not retired for good (cached by pagefile.c) */
 BOOLEAN
 NTAPI
 MiPagerHasSlotFile(VOID);
