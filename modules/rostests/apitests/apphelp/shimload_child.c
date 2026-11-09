@@ -9,5 +9,8 @@
 
 int main(void)
 {
-    return GetModuleHandleW(L"acgenral.dll") ? 37 : 38;
+    if (GetModuleHandleW(L"acgenral.dll"))
+        return 37;
+    /* a compatibility layer (appcache test) */
+    return GetModuleHandleW(L"aclayers.dll") ? 39 : 38;
 }
