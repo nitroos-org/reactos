@@ -1242,7 +1242,7 @@ MiChargeCommitWithGrowthEx(
     _In_ SIZE_T Pages,
     _In_ MI_COMMIT_TIER Tier);
 
-/* P4: what a PagerCommit VAD gives back leaves the pageable private count (clamped at 0) */
+/* P4: what a PagerCommit VAD gives back leaves the pageable private count (a return above the count is ignored) */
 VOID
 NTAPI
 MiReturnPrivateCommitCredit(
