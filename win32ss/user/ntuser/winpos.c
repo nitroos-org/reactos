@@ -2157,6 +2157,8 @@ co_WinPosSetWindowPosEx(
 
       Window->style &= ~WS_VISIBLE; //IntSetStyle( Window, 0, WS_VISIBLE );
       Window->head.pti->cVisWindows--;
+      /* A hidden window keeps no surface (shown again, it is painted again) */
+      UserRedirDetachWindow(Window);
       IntNotifyWinEvent(EVENT_OBJECT_HIDE, Window, OBJID_WINDOW, CHILDID_SELF, WEF_SETBYWNDPTI);
    }
    else if (WinPos.flags & SWP_SHOWWINDOW)
@@ -2308,6 +2310,14 @@ co_WinPosSetWindowPosEx(
             /* Nothing to copy, clean up */
             REGION_Delete(CopyRgn);
             CopyRgn = NULL;
+         }
+         else if ( gRedirLevel &&
+                   (OldWindowRect.left != NewWindowRect.left || OldWindowRect.top != NewWindowRect.top) &&
+                   !(WinPos.flags & SWP_FRAMECHANGED) &&
+                   UserRedirRootFor(Window) == Window && UserRedirGet(Window) )
+         {
+             /* Redirected: the surface keeps the content, nothing to copy; it is presented below */
+             IntValidateParent(Window, CopyRgn);
          }
          else if ( OldWindowRect.left != NewWindowRect.left ||
                    OldWindowRect.top != NewWindowRect.top ||
@@ -2596,6 +2606,10 @@ co_WinPosSetWindowPosEx(
            UserSyncAndPaintWindows( Window, RDW_ERASENOW);
        }
    }
+
+   /* A redirected window that moved shows its content (kept in its surface) where it is now */
+   if (gRedirLevel && (OldWindowRect.left != NewWindowRect.left || OldWindowRect.top != NewWindowRect.top))
+      UserRedirWindowMoved(Window);
 
    /* And last, send the WM_WINDOWPOSCHANGED message */
 
