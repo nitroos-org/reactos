@@ -656,6 +656,38 @@ AddGptPartitionToDisk(
 }
 
 
+/* Adds the free-space entry that stands for an extended partition without logical partitions. */
+VOID
+AddEmptyLogicalSpace(
+    _In_ PDISKENTRY DiskEntry)
+{
+    PPARTENTRY NewPartEntry;
+
+    /* Create a partition table entry that represents the empty extended partition */
+    NewPartEntry = RtlAllocateHeap(RtlGetProcessHeap(),
+                                   HEAP_ZERO_MEMORY,
+                                   sizeof(PARTENTRY));
+    if (NewPartEntry == NULL)
+        return;
+
+    NewPartEntry->DiskEntry = DiskEntry;
+    NewPartEntry->LogicalPartition = TRUE;
+
+    NewPartEntry->IsPartitioned = FALSE;
+    NewPartEntry->StartSector.QuadPart = DiskEntry->ExtendedPartition->StartSector.QuadPart + (ULONGLONG)DiskEntry->SectorAlignment;
+    NewPartEntry->SectorCount.QuadPart = DiskEntry->ExtendedPartition->SectorCount.QuadPart - (ULONGLONG)DiskEntry->SectorAlignment;
+
+    DPRINT1("First Sector: %I64u\n", NewPartEntry->StartSector.QuadPart);
+    DPRINT1("Last Sector: %I64u\n", NewPartEntry->StartSector.QuadPart + NewPartEntry->SectorCount.QuadPart - 1);
+    DPRINT1("Total Sectors: %I64u\n", NewPartEntry->SectorCount.QuadPart);
+
+    NewPartEntry->FormatState = Unformatted;
+
+    InsertTailList(&DiskEntry->LogicalPartListHead,
+                   &NewPartEntry->ListEntry);
+}
+
+
 VOID
 ScanForUnpartitionedMbrDiskSpace(
     PDISKENTRY DiskEntry)
@@ -797,29 +829,7 @@ ScanForUnpartitionedMbrDiskSpace(
         {
             DPRINT1("No logical partition!\n");
 
-            /* Create a partition table entry that represents the empty extended partition */
-            NewPartEntry = RtlAllocateHeap(RtlGetProcessHeap(),
-                                           HEAP_ZERO_MEMORY,
-                                           sizeof(PARTENTRY));
-            if (NewPartEntry == NULL)
-                return;
-
-            NewPartEntry->DiskEntry = DiskEntry;
-            NewPartEntry->LogicalPartition = TRUE;
-
-            NewPartEntry->IsPartitioned = FALSE;
-            NewPartEntry->StartSector.QuadPart = DiskEntry->ExtendedPartition->StartSector.QuadPart + (ULONGLONG)DiskEntry->SectorAlignment;
-            NewPartEntry->SectorCount.QuadPart = DiskEntry->ExtendedPartition->SectorCount.QuadPart - (ULONGLONG)DiskEntry->SectorAlignment;
-
-            DPRINT1("First Sector: %I64u\n", NewPartEntry->StartSector.QuadPart);
-            DPRINT1("Last Sector: %I64u\n", NewPartEntry->StartSector.QuadPart + NewPartEntry->SectorCount.QuadPart - 1);
-            DPRINT1("Total Sectors: %I64u\n", NewPartEntry->SectorCount.QuadPart);
-
-            NewPartEntry->FormatState = Unformatted;
-
-            InsertTailList(&DiskEntry->LogicalPartListHead,
-                           &NewPartEntry->ListEntry);
-
+            AddEmptyLogicalSpace(DiskEntry);
             return;
         }
 
