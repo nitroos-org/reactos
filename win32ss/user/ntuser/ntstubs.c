@@ -808,7 +808,11 @@ NtUserSetInformationThread(IN HANDLE ThreadHandle,
                 break;
             }
 
-            hdesk = IntGetDesktopObjectHandle(gpdeskInputDesktop);
+            /* No input desktop (not yet, or no more), or no handle for it: the thread goes back
+               to its own desktop, as for a NULL handle. IntGetDesktopObjectHandle does not take
+               NULL, and the call must not fail for it: CSRSS and winlogon carry on with the
+               desktop they have. */
+            hdesk = gpdeskInputDesktop ? IntGetDesktopObjectHandle(gpdeskInputDesktop) : NULL;
             IntSetThreadDesktop(hdesk, FALSE);
 
             break;
