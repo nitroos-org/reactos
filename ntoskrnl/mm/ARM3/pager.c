@@ -135,8 +135,6 @@ static volatile ULONG MiPagerFreeRefusedBase;
 #define MI_PAGER_DEBUG_FAIL_WRITES_EARLY 0x200
 /* No pacing of RosMm page requests (MiPagerPaceRequest): A/B tests */
 #define MI_PAGER_DEBUG_NO_PACING         0x400
-/* Waitable faults use the flag-0 floor (MmAvailablePages < 128, pagfault.c) instead of 256 usable pages: A/B tests */
-#define MI_PAGER_DEBUG_OLD_FAULT_FLOOR   0x800
 #define MI_PAGER_FAIL_EARLY_SECONDS      300
 
 /* Writer batch: pages taken per PFN lock hold */
@@ -1181,15 +1179,27 @@ static
 BOOLEAN
 MiPagingIoStuck(VOID)
 {
-    ULONGLONG Now = KeQueryInterruptTime(), WriteStart = MiPagerReadStamp(&MiPagerWriterIoStart);
-    ULONGLONG LastEvent = MiPagerReadStamp(&MiPagingIoLastEvent);
+    LONG InFlight, ClusterWrites;
+    ULONGLONG Now, WriteStart, LastEvent;
 
-    if (MiPagingIoInFlight <= 0)
+    /*
+     * Counts first, then the stamps (the writers store the stamp before they raise a count):
+     * a count seen raised is never paired with a stamp older than its rise. The stamps are
+     * not cleared at 0, so the other order could pair a fresh count with a stale stamp.
+     */
+    InFlight = MiPagingIoInFlight;
+    ClusterWrites = MiPagerClusterWrites;
+    KeMemoryBarrier();
+    WriteStart = MiPagerReadStamp(&MiPagerWriterIoStart);
+    LastEvent = MiPagerReadStamp(&MiPagingIoLastEvent);
+    Now = KeQueryInterruptTime();
+
+    if (InFlight <= 0)
         return FALSE;
     if ((Now > LastEvent) && ((Now - LastEvent) >= MI_PAGER_IO_STUCK_AFTER))
         return TRUE;
     /* The write branch only while a cluster write really is in flight (a start left by racing completions is stale) */
-    return (MiPagerClusterWrites > 0) && (WriteStart != 0) && (Now > WriteStart) &&
+    return (ClusterWrites > 0) && (WriteStart != 0) && (Now > WriteStart) &&
            ((Now - WriteStart) >= MI_PAGER_IO_STUCK_AFTER);
 }
 
@@ -1248,7 +1258,8 @@ MiPagerPaceRequest(VOID)
     if ((MiPagingIoInFlight <= 0) || (MiGetUsablePageCount() >= MI_PAGER_WAITABLE_FLOOR))
         return;
 
-    Slot = &MiPagerPaceSlots[((ULONG_PTR)Thread >> 6) % MI_PAGER_PACE_SLOTS];
+    /* Thread ids spread over the slots (ETHREAD addresses have a large fixed stride) */
+    Slot = &MiPagerPaceSlots[((ULONG_PTR)PsGetCurrentThreadId() >> 2) % MI_PAGER_PACE_SLOTS];
     Now = KeQueryInterruptTime();
     if (Slot->Thread != Thread)
     {
