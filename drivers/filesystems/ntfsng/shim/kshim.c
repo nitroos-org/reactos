@@ -1204,7 +1204,17 @@ void kshim_mapping_update(struct address_space *m, loff_t pos, const void *buf, 
  * evicting one inode in the middle of an operation on another would re-enter
  * the file system (what GFP_NOFS prevents in Linux).
  */
-#define KSHIM_ICACHE_UNUSED 4096
+/* Unused inodes kept: 4096, more on a larger machine (a 10,000-file directory listing and the files read after it must fit). */
+#define KSHIM_ICACHE_UNUSED kshim_icache_unused_limit()
+static unsigned long kshim_icache_unused_limit(void)
+{
+	static unsigned long lim;
+	if (!lim) {
+		unsigned long l = ngos_physical_pages() / 64;
+		lim = l > 32768 ? 32768 : l < 4096 ? 4096 : l;
+	}
+	return lim;
+}
 /* Folio pages (nonpaged pool) before unused inodes are evicted: 96 MB, or 1/16 of memory if less. */
 #define KSHIM_PC_PAGES_SOFT kshim_pc_soft_limit()
 unsigned long kshim_pc_soft_limit(void)
