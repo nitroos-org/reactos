@@ -397,10 +397,13 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgSetFileSize(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize);
+NTSTATUS NgSetFileSizeForWrite(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG NewSize, LONGLONG DataFrom);
 int NgFlushVolume(PNG_VCB Vcb);
 VOID NgFlushStream(PNG_FCB Fcb, PIO_STATUS_BLOCK Iosb);
 NTSTATUS NgDropPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, ULONG Length);
 #define NG_DIO_BOUNCE (256 * 1024)
+#define NG_DIO_DIRECT_MAX (1024 * 1024)     /* one device request of a paging write sent from the caller's pages */
+#define NG_DIO_IOV 16                       /* requests of one transfer gathered before they are sent */
 VOID NgInitDataIo(PNG_VCB Vcb);
 VOID NgDrainDataIoCallback(PVOID Context);
 VOID NgWaitDataIoIdle(PNG_VCB Vcb);
@@ -448,6 +451,14 @@ VOID NgAfterChange(PNG_VCB Vcb);
 NTSTATUS NgCheckMedium(PNG_VCB Vcb);
 VOID NgSetFlushOptional(PDEVICE_OBJECT Device);
 #define NG_DEV_NOT_SENT (-2)          /* NgDevWriteDurable: no request reached the device */
+#define NG_DEV_UNSUPPORTED (-3)       /* NgDevWritePagesV: not possible for this device or MDL, nothing was sent */
+typedef struct _NG_PAGE_WRITE
+{
+    ULONGLONG Off;                    /* device offset */
+    ULONG SrcOff;                     /* offset in the MDL: on a page */
+    ULONG Len;
+} NG_PAGE_WRITE;
+int NgDevWritePagesV(PDEVICE_OBJECT Dev, PMDL Src, const NG_PAGE_WRITE *Pw, ULONG N);
 int NgDevWriteDurable(PDEVICE_OBJECT Device, unsigned long long off, void *buf, unsigned int len);
 int NgDevFlushDurable(PDEVICE_OBJECT Device);
 VOID NgApplyModified(PNG_FCB Fcb);

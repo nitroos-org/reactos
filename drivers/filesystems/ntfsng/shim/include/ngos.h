@@ -39,6 +39,14 @@ int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len
 int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int len);
 int ngos_dev_flush(void *dev);
 
+/* Several writes of one transfer, all sent before any is waited for (queue depth > 1); 0, or -1 if any failed. */
+struct ngos_iov {
+	unsigned long long off;
+	void *buf;
+	unsigned int len;
+};
+int ngos_dev_write_v(void *dev, const struct ngos_iov *iov, unsigned int n);
+
 /* Time per stage (diagnostics, FSCTL_NG_PROFILE): ngos_prof adds the ticks since @since to stage @id. */
 enum {
 	NGP_DEV_READ, NGP_DEV_WRITE, NGP_DEV_FLUSH, NGP_COMMIT, NGP_WRITEBACK, NGP_JNL_COMMIT,
