@@ -554,8 +554,9 @@ BOOLEAN
 NTAPI
 MmRebalanceMemoryConsumersAndWait(VOID);
 
-/* Rounds a must-succeed page waits before the system stops (each is a balancer pass or at least 10 ms) */
-#define MI_MUST_SUCCEED_PAGE_WAITS 1000
+/* Rounds a must-succeed page waits before the system stops (each is a balancer pass or at least 10 ms). */
+/* Rare paths that stop the system otherwise: wait longer than a kernel stack does (at least a minute) */
+#define MI_MUST_SUCCEED_PAGE_WAITS 6000
 
 /*
  * A zeroed page for a path that has no failure handling (session creation, the
