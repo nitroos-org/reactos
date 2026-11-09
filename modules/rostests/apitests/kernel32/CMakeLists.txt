@@ -184,6 +184,7 @@ list(APPEND SOURCE
     ProcessorNumber.c
     ProcessInformation.c
     ProcessMitigationPolicy.c
+    AdvapiModules.c
     ProcThreadMitigation.c
     QueryCycleTime.c
     QueryUnbiasedInterruptTime.c
@@ -270,6 +271,12 @@ set_module_type(win32klock_child win32cui ENTRYPOINT mainCRTStartup)
 add_importlibs(win32klock_child kernel32)
 add_dependencies(kernel32_apitest win32klock_child)
 add_rostests_file(TARGET win32klock_child)
+
+add_executable(advapi32_modules_child advapi32_modules_child.c)
+set_module_type(advapi32_modules_child win32cui ENTRYPOINT mainCRTStartup)
+add_importlibs(advapi32_modules_child advapi32 kernel32)
+add_dependencies(kernel32_apitest advapi32_modules_child)
+add_rostests_file(TARGET advapi32_modules_child)
 
 add_executable(wow64_native wow64_native.c)
 set_module_type(wow64_native win32cui ENTRYPOINT mainCRTStartup)
