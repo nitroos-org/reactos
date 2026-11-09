@@ -37,6 +37,32 @@ RtlQueryPerformanceCounter(
 }
 
 /*
+ * NtQuerySystemTime without a system call: the kernel's service stores the system time of the shared user data page
+ * (read with its High1Time/High2Time protocol) and nothing else, so this does the same load and store. A bad output
+ * pointer gives the status the service returned through its exception handler (an access violation for a null,
+ * kernel or unwritable address; there is no alignment test), as on Windows 10 22H2.
+ */
+NTSTATUS
+NTAPI
+RtlpQuerySystemTimeUser(
+    _Out_ PLARGE_INTEGER SystemTime)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    _SEH2_TRY
+    {
+        SystemTime->QuadPart = KiReadSystemTime(&SharedUserData->SystemTime).QuadPart;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return Status;
+}
+
+/*
  * @implemented
  */
 BOOL

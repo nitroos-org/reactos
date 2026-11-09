@@ -21,7 +21,7 @@ Test_ProcessTimes(void)
     KERNEL_USER_TIMES Times1;
     KERNEL_USER_TIMES Times2;
     ULONG Length;
-    LARGE_INTEGER Time1, Time2;
+    LARGE_INTEGER Time1, Time2, Counter;
 
     /* Everything is NULL */
     Status = NtQueryInformationProcess(NULL,
@@ -103,6 +103,10 @@ Test_ProcessTimes(void)
     /* Do some busy waiting to increase UserTime */
     do
     {
+        /* A system call per round: reading the system time does not enter the kernel (the time is in the
+           shared user data), and the kernel time that the checks below expect is charged at clock ticks
+           that find the thread in the kernel */
+        NtQueryPerformanceCounter(&Counter, NULL);
         Status = NtQuerySystemTime(&Time2);
         if (!NT_SUCCESS(Status))
         {
@@ -135,6 +139,10 @@ Test_ProcessTimes(void)
     /* Do some busy waiting to increase UserTime */
     do
     {
+        /* A system call per round: reading the system time does not enter the kernel (the time is in the
+           shared user data), and the kernel time that the checks below expect is charged at clock ticks
+           that find the thread in the kernel */
+        NtQueryPerformanceCounter(&Counter, NULL);
         Status = NtQuerySystemTime(&Time2);
         if (!NT_SUCCESS(Status))
         {
