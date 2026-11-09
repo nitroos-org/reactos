@@ -309,6 +309,8 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     ExInitializeFastMutex(&Vcb->FcbListLock);
     InitializeListHead(&Vcb->FcbList);
     InitializeListHead(&Vcb->IdleList);
+    InitializeListHead(&Vcb->PurgeList);
+    KeInitializeEvent(&Vcb->PurgeKick, SynchronizationEvent, FALSE);
     for (ULONG b = 0; b < NG_FCB_HASH; b++)
         InitializeListHead(&Vcb->FcbHash[b]);
     InitializeListHead(&Vcb->DirNotifyList);
