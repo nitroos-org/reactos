@@ -60,6 +60,7 @@ extern void func_NtUserBuildHwndList(void);
 //extern void func_NtUserCallNoParam(void);
 //extern void func_NtUserCallOneParam(void);
 extern void func_NtUserClipboardHandles(void);
+extern void func_NtUserLowsBatch(void);
 extern void func_NtUserConvertMemHandle(void);
 extern void func_NtUserCountClipboardFormats(void);
 extern void func_NtUserCreateAcceleratorTable(void);
@@ -164,6 +165,7 @@ const struct test winetest_testlist[] =
     //{ "NtUserCallNoParam", func_NtUserCallNoParam },
     //{ "NtUserCallOneParam", func_NtUserCallOneParam },
     { "NtUserClipboardHandles", func_NtUserClipboardHandles },
+    { "NtUserLowsBatch", func_NtUserLowsBatch },
     { "NtUserConvertMemHandle", func_NtUserConvertMemHandle },
     { "NtUserCountClipboardFormats", func_NtUserCountClipboardFormats },
     { "NtUserCreateAcceleratorTable", func_NtUserCreateAcceleratorTable },
