@@ -1636,6 +1636,7 @@ ObpCreateHandle(IN OB_OPEN_REASON OpenReason,
     NTSTATUS Status;
     ACCESS_MASK GrantedAccess;
     PAUX_ACCESS_DATA AuxData;
+    POBP_CALLBACK_CALL CallbackCall = NULL;
     PAGED_CODE();
 
     /* Get the object header and type */
@@ -1701,6 +1702,22 @@ ObpCreateHandle(IN OB_OPEN_REASON OpenReason,
         return Status;
     }
 
+    /* Drivers that registered object callbacks (ObRegisterCallbacks) can take access away */
+    if (ObpMayHaveCallbacks(ObjectType))
+    {
+        ACCESS_MASK CallbackAccess = GrantedAccess;
+
+        ObpCallPreOperation(OB_OPERATION_HANDLE_CREATE,
+                            Object,
+                            ObjectType,
+                            KernelHandle,
+                            &CallbackAccess,
+                            NULL,
+                            NULL,
+                            &CallbackCall);
+        GrantedAccess &= CallbackAccess;
+    }
+
     /* Check if we are doing audits on close */
     if (AccessState->GenerateOnClose)
     {
@@ -1741,6 +1758,14 @@ ObpCreateHandle(IN OB_OPEN_REASON OpenReason,
             __FUNCTION__,
             NewEntry.Object, NewEntry.ObAttributes & 3, NewEntry.GrantedAccess);
     Handle = ExCreateHandle(HandleTable, &NewEntry);
+
+    /* The post operation callbacks see the result */
+    if (CallbackCall)
+    {
+        ObpCallPostOperation(CallbackCall,
+                             Handle ? STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES,
+                             Handle ? GrantedAccess : 0);
+    }
 
     /* Make sure we got a handle */
     if (Handle)
@@ -2362,6 +2387,7 @@ ObDuplicateObject(IN PEPROCESS SourceProcess,
     ACCESS_MASK TargetAccess, SourceAccess;
     ACCESS_STATE AccessState;
     PACCESS_STATE PassedAccessState = NULL;
+    POBP_CALLBACK_CALL CallbackCall = NULL;
     AUX_ACCESS_DATA AuxData;
     PHANDLE_TABLE HandleTable;
     OBJECT_HANDLE_INFORMATION HandleInformation;
@@ -2588,6 +2614,22 @@ ObDuplicateObject(IN PEPROCESS SourceProcess,
         return Status;
     }
 
+    /* Drivers that registered object callbacks (ObRegisterCallbacks) can take access away */
+    if (ObpMayHaveCallbacks(ObjectType))
+    {
+        ACCESS_MASK CallbackAccess = NewHandleEntry.GrantedAccess;
+
+        ObpCallPreOperation(OB_OPERATION_HANDLE_DUPLICATE,
+                            SourceObject,
+                            ObjectType,
+                            KernelHandle,
+                            &CallbackAccess,
+                            SourceProcess,
+                            TargetProcess,
+                            &CallbackCall);
+        NewHandleEntry.GrantedAccess &= CallbackAccess;
+    }
+
     if (NewHandleEntry.ObAttributes & OBJ_PROTECT_CLOSE)
     {
         NewHandleEntry.ObAttributes &= ~OBJ_PROTECT_CLOSE;
@@ -2596,6 +2638,12 @@ ObDuplicateObject(IN PEPROCESS SourceProcess,
 
     /* Now create the handle */
     NewHandle = ExCreateHandle(HandleTable, &NewHandleEntry);
+    if (CallbackCall)
+    {
+        ObpCallPostOperation(CallbackCall,
+                             NewHandle ? STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES,
+                             NewHandle ? NewHandleEntry.GrantedAccess : 0);
+    }
     if (!NewHandle)
     {
         /* Undo the increment */

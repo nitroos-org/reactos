@@ -363,3 +363,20 @@ Language=English
 The system has encounted an error rebuilding the user disk quota
 information on device %1 with label "%2".
 .
+
+MessageId=0x7000
+Severity=Error
+Facility=IO
+SymbolicName=NITRO_ERR_DRIVER_MISSING_IMPORTS
+Language=English
+The driver %1 could not be loaded because it uses %2 function(s) that this system does not provide, among them: %3
+The complete list is the value %1 under HKLM\SYSTEM\CurrentControlSet\Control\NitroOS\MissingDriverImports.
+.
+
+MessageId=0x7001
+Severity=Warning
+Facility=IO
+SymbolicName=NITRO_WARN_OB_CALLBACKS_NO_INTEGRITY
+Language=English
+The driver %1 registered object callbacks (ObRegisterCallbacks) but is not linked with the integrity check flag. Windows would refuse this; this system allows it for now.
+.
