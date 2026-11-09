@@ -466,6 +466,21 @@ KeWaitForSingleObject(IN PVOID Object,
                (KeGetCurrentIrql() == DISPATCH_LEVEL &&
                 Timeout && Timeout->QuadPart == 0));
 
+    /*
+     * A notification event that is signaled satisfies the wait and changes nothing (no reset, no
+     * count, no owner), so the dispatcher lock, the raise to SYNCH_LEVEL and the exit from the
+     * dispatcher have nothing to protect: the answer is the signal state at the moment it was read,
+     * as if the wait had run just before a concurrent reset. A thread with a kernel APC pending
+     * takes the full path, which delivers the APC when the lock is released.
+     */
+    if (!Thread->WaitNext &&
+        CurrentObject->Header.Type == EventNotificationObject &&
+        CurrentObject->Header.SignalState > 0 &&
+        !Thread->ApcState.KernelApcPending)
+    {
+        return STATUS_WAIT_0;
+    }
+
     /* Check if the lock is already held */
     if (!Thread->WaitNext) goto WaitStart;
 
