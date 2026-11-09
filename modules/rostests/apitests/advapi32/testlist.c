@@ -25,6 +25,7 @@ extern void func_EventProvider(void);
 extern void func_EventSetInformation(void);
 extern void func_EventSetInformationFault(void);
 extern void func_GetSecurityInfoSequence(void);
+extern void func_ObjectLockStress(void);
 extern void func_Hash(void);
 extern void func_HKEY_CLASSES_ROOT(void);
 extern void func_IsTextUnicode(void);
@@ -152,6 +153,7 @@ const struct test winetest_testlist[] =
     { "EventSetInformation", func_EventSetInformation },
     { "EventSetInformationFault", func_EventSetInformationFault },
     { "GetSecurityInfoSequence", func_GetSecurityInfoSequence },
+    { "ObjectLockStress", func_ObjectLockStress },
     { "Hash", func_Hash },
     { "HKEY_CLASSES_ROOT", func_HKEY_CLASSES_ROOT },
     { "IsTextUnicode" , func_IsTextUnicode },
