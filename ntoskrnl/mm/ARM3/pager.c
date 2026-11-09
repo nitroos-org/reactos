@@ -1838,10 +1838,8 @@ BOOLEAN
 MiIsTrimmableVad(
     _In_ PMMVAD Vad)
 {
-    return !MI_IS_MEMORY_AREA_VAD(Vad) &&
-           (Vad->u.VadFlags.PrivateMemory != 0) &&
-           (Vad->u.VadFlags.VadType == VadNone) &&
-           (Vad->u.VadFlags.NoChange == 0);
+    /* The same test decides whether its commitment may use the paging files (P4) */
+    return MI_IS_PAGEABLE_COMMIT_VAD(Vad);
 }
 
 /*

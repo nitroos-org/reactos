@@ -281,6 +281,16 @@ typedef struct _MEMORY_AREA
 
 #define MI_SET_MEMORY_AREA_VAD(Vad) do { (Vad)->u.VadFlags.Spare |= 1; } while (0)
 #define MI_IS_MEMORY_AREA_VAD(Vad) (((Vad)->u.VadFlags.Spare & 1) != 0)
+
+/*
+ * A private VAD whose committed pages the NitroPager trimmer may page out (its
+ * MiIsTrimmableVad), so whose commitment may use the paging files (P4).
+ */
+#define MI_IS_PAGEABLE_COMMIT_VAD(Vad) \
+    (!MI_IS_MEMORY_AREA_VAD(Vad) && \
+     ((Vad)->u.VadFlags.PrivateMemory != 0) && \
+     ((Vad)->u.VadFlags.VadType == VadNone) && \
+     ((Vad)->u.VadFlags.NoChange == 0))
 #define MI_SET_ROSMM_VAD(Vad) do { (Vad)->u.VadFlags.Spare |= 2; } while (0)
 #define MI_IS_ROSMM_VAD(Vad) (((Vad)->u.VadFlags.Spare & 2) != 0)
 
@@ -1122,7 +1132,16 @@ typedef enum _MI_COMMIT_TIER
      */
     MiCommitUserPageable,
     /* Fails above the commit limit only (pool, kernel stack growth) */
-    MiCommitKernel
+    MiCommitKernel,
+    /*
+     * ARM3 private memory the NitroPager trimmer pages out (MiIsPageableCommitVad).
+     * With the pager on and an ARM3 paging file (MiPagerBacksCommit, P4) it may use
+     * the paging files: fails above RAM plus paging files less the resident headroom
+     * and the kernel reserve, and counts as pageable for the other tiers. Otherwise
+     * exactly MiCommitUser. Return it as plain commitment plus
+     * MiReturnPrivateCommitCredit when the VAD is pageable.
+     */
+    MiCommitUserPrivate
 } MI_COMMIT_TIER;
 
 extern SIZE_T MiCommitReserve;
@@ -1191,6 +1210,35 @@ BOOLEAN
 NTAPI
 MiChargeCommitWithGrowth(
     _In_ SIZE_T Pages);
+
+/* P4: the same with a tier (MiCommitUser or MiCommitUserPrivate) */
+BOOLEAN
+NTAPI
+MiWaitForCommitGrowthEx(
+    _In_ SIZE_T Pages,
+    _In_ MI_COMMIT_TIER Tier);
+
+BOOLEAN
+NTAPI
+MiChargeCommitWithGrowthEx(
+    _In_ SIZE_T Pages,
+    _In_ MI_COMMIT_TIER Tier);
+
+/* P4: private commitment returned from a pageable VAD leaves the pageable count (clamped at 0) */
+VOID
+NTAPI
+MiReturnPrivateCommitCredit(
+    _In_ SIZE_T Pages);
+
+/* P4: NitroPager on and an ARM3 paging file present: private commitment may use the paging files */
+BOOLEAN
+NTAPI
+MiPagerBacksCommit(VOID);
+
+/* P4: ARM3 paging files that take slots (not retired for good) */
+BOOLEAN
+NTAPI
+MiPagerHasSlotFile(VOID);
 
 VOID
 NTAPI
