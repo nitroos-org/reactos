@@ -188,6 +188,7 @@ extern void func_PrivMoveFileIdentityW(void);
 extern void func_ProcessAffinity(void);
 extern void func_ProcessorNumber(void);
 extern void func_ProcessInformation(void);
+extern void func_AdvapiModules(void);
 extern void func_ProcessMitigationPolicy(void);
 extern void func_PssSnapshot(void);
 extern void func_ProcThreadMitigation(void);
@@ -440,6 +441,7 @@ const struct test winetest_testlist[] =
     { "MoveFileReparse",             func_MoveFileReparse },
     { "ReparseFollow",               func_ReparseFollow },
     { "PrivMoveFileIdentityW",       func_PrivMoveFileIdentityW },
+    { "AdvapiModules",               func_AdvapiModules },
     { "ProcessMitigationPolicy",     func_ProcessMitigationPolicy },
     { "PssSnapshot",                 func_PssSnapshot },
     { "ProcThreadMitigation",        func_ProcThreadMitigation },
