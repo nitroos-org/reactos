@@ -16,6 +16,22 @@ VIS_ComputeVisibleRegion(
    BOOLEAN ClipChildren,
    BOOLEAN ClipSiblings)
 {
+   return VIS_ComputeVisibleRegionEx(Wnd, ClientArea, ClipChildren, ClipSiblings, NULL);
+}
+
+/*
+ * With Root (a redirected top-level window, redir.c), the region is the one inside Root's surface:
+ * the walk stops at Root, so neither the screen nor the other top-level windows clip it. Screen
+ * coordinates still; the caller moves it to the surface.
+ */
+PREGION FASTCALL
+VIS_ComputeVisibleRegionEx(
+   PWND Wnd,
+   BOOLEAN ClientArea,
+   BOOLEAN ClipChildren,
+   BOOLEAN ClipSiblings,
+   PWND Root)
+{
    PREGION VisRgn, ClipRgn;
    PWND PreviousWindow, CurrentWindow, CurrentSibling;
 
@@ -50,6 +66,9 @@ VIS_ComputeVisibleRegion(
    CurrentWindow = Wnd->spwndParent;
    while (CurrentWindow)
    {
+      if (Root && PreviousWindow == Root)
+         break;
+
       if (!VerifyWnd(CurrentWindow))
       {
          ERR("ATM the Current Window or Parent is dead! %p\n",CurrentWindow);

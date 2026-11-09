@@ -133,6 +133,7 @@ list(APPEND SOURCE
     user/ntuser/keyboard.c
     user/ntuser/kbdlayout.c
     user/ntuser/layered.c
+    user/ntuser/redir.c
     user/ntuser/menu.c
     user/ntuser/message.c
     user/ntuser/metric.c
@@ -169,6 +170,7 @@ list(APPEND SOURCE
     gdi/ntgdi/bezier.c
     gdi/ntgdi/bitblt.c
     gdi/ntgdi/glassblt.c
+    gdi/ntgdi/redirgdi.c
     gdi/ntgdi/bitmaps.c
     gdi/ntgdi/cliprgn.c
     gdi/ntgdi/coord.c

@@ -69,13 +69,14 @@ DceGetDceFromDC(HDC hdc)
 
 static
 PREGION FASTCALL
-DceGetVisRgn(PWND Window, ULONG Flags, HWND hWndChild, ULONG CFlags)
+DceGetVisRgn(PWND Window, ULONG Flags, HWND hWndChild, ULONG CFlags, PWND Root)
 {
     PREGION Rgn;
-    Rgn = VIS_ComputeVisibleRegion( Window,
-                                    0 == (Flags & DCX_WINDOW),
-                                    0 != (Flags & DCX_CLIPCHILDREN),
-                                    0 != (Flags & DCX_CLIPSIBLINGS));
+    Rgn = VIS_ComputeVisibleRegionEx( Window,
+                                      0 == (Flags & DCX_WINDOW),
+                                      0 != (Flags & DCX_CLIPCHILDREN),
+                                      0 != (Flags & DCX_CLIPSIBLINGS),
+                                      Root);
     /* Caller expects a non-null region */
     if (!Rgn)
         Rgn = IntSysCreateRectpRgn(0, 0, 0, 0);
@@ -107,6 +108,7 @@ DceAllocDCE(PWND Window OPTIONAL, DCE_TYPE Type)
   pDce->hrgnSavedVis = NULL;
   pDce->ppiOwner = NULL;
   pDce->bGlass = FALSE;
+  pDce->pRedir = NULL;
 
   InsertTailList(&LEDce, &pDce->List);
 
@@ -146,7 +148,8 @@ static VOID APIENTRY
 DceSetDrawable( PWND Window OPTIONAL,
                 HDC hDC,
                 ULONG Flags,
-                BOOL SetClipOrigin)
+                BOOL SetClipOrigin,
+                PWND Root OPTIONAL)
 {
   RECTL rect = {0,0,0,0};
 
@@ -161,6 +164,10 @@ DceSetDrawable( PWND Window OPTIONAL,
          rect = Window->rcClient;
       }
   }
+
+  /* A redirected window draws into its top-level window's surface, in window coordinates */
+  if (Root)
+      RECTL_vOffsetRect(&rect, -Root->rcWindow.left, -Root->rcWindow.top);
 
   /* Set DC Origin and Window Rectangle */
   GreSetDCOrg( hDC, rect.left, rect.top, &rect);
@@ -223,6 +230,7 @@ DceUpdateVisRgn(DCE *Dce, PWND Window, ULONG Flags)
    PREGION RgnVisible = NULL;
    ULONG DcxFlags;
    PWND DesktopWindow = NULL;
+   PWND Root = Dce->pRedir ? UserRedirWindow(Dce->pRedir) : NULL;
 
    if (Flags & DCX_PARENTCLIP)
    {
@@ -244,7 +252,7 @@ DceUpdateVisRgn(DCE *Dce, PWND Window, ULONG Flags)
       {
          DcxFlags = Flags & ~(DCX_CLIPSIBLINGS | DCX_CLIPCHILDREN | DCX_WINDOW);
       }
-      RgnVisible = DceGetVisRgn(Parent, DcxFlags, UserHMGetHandle(Window), Flags);
+      RgnVisible = DceGetVisRgn(Parent, DcxFlags, UserHMGetHandle(Window), Flags, Root);
    }
    else if (Window == NULL)
    {
@@ -260,7 +268,7 @@ DceUpdateVisRgn(DCE *Dce, PWND Window, ULONG Flags)
    }
    else
    {
-      RgnVisible = DceGetVisRgn(Window, Flags, 0, 0);
+      RgnVisible = DceGetVisRgn(Window, Flags, 0, 0, Root);
    }
 
 noparent:
@@ -297,6 +305,10 @@ noparent:
        }
    }
 
+   /* Clip regions are in screen coordinates; the DC of a redirected window draws in its surface's */
+   if (Root && RgnVisible)
+      REGION_bOffsetRgn(RgnVisible, -Root->rcWindow.left, -Root->rcWindow.top);
+
    /* A failed allocation must not select the whole surface: select the empty default region */
    if (!RgnVisible && (Window || DesktopWindow))
       RgnVisible = prgnDefault;
@@ -313,12 +325,85 @@ noparent:
    }
 }
 
+/* Binds the DCE's DC to a redirection record (its window's surface) or, with NULL, back to the screen */
+static VOID
+DceRedirBind(PDCE Dce, PVOID pRedir)
+{
+   PVOID pvOld;
+
+   if (Dce->pRedir == pRedir)
+      return;
+   if (!GreRedirBindDC(Dce->hDC, pRedir, pRedir ? UserRedirSurface(pRedir) : NULL, &pvOld))
+      return;
+   if (pRedir)
+      UserRedirAddRef(pRedir);
+   if (Dce->pRedir)
+      UserRedirRelease(Dce->pRedir);
+   Dce->pRedir = pRedir;
+}
+
+/* The record's window lets go of its surface: every DC on it draws on the screen again */
+VOID
+FASTCALL
+DceRedirUnbindAll(PVOID pRedir)
+{
+   PLIST_ENTRY ListEntry;
+   PDCE Dce;
+
+   for (ListEntry = LEDce.Flink; ListEntry != &LEDce; )
+   {
+      Dce = CONTAINING_RECORD(ListEntry, DCE, List);
+      ListEntry = ListEntry->Flink;
+      if (Dce->pRedir != pRedir)
+         continue;
+      DceRedirBind(Dce, NULL);
+      /* A DC in use keeps drawing: give it its screen origin and visible region now */
+      if (!Dce->pRedir && (Dce->DCXFlags & DCX_DCEBUSY) && Dce->pwndOrg)
+      {
+         DceSetDrawable(Dce->pwndOrg, Dce->hDC, Dce->DCXFlags, TRUE, NULL);
+         DceUpdateVisRgn(Dce, Dce->pwndOrg, Dce->DCXFlags);
+      }
+   }
+}
+
+/* The record has a new surface (the window was resized): every DC on it moves there */
+VOID
+FASTCALL
+DceRedirRebindAll(PVOID pRedir, HBITMAP hbmSurface)
+{
+   PLIST_ENTRY ListEntry;
+   PDCE Dce;
+   PVOID pvOld;
+
+   for (ListEntry = LEDce.Flink; ListEntry != &LEDce; )
+   {
+      Dce = CONTAINING_RECORD(ListEntry, DCE, List);
+      ListEntry = ListEntry->Flink;
+      if (Dce->pRedir != pRedir)
+         continue;
+      if (!GreRedirBindDC(Dce->hDC, pRedir, hbmSurface, &pvOld))
+      {
+         /* The DC is gone: it no longer holds the record */
+         UserRedirRelease(pRedir);
+         Dce->pRedir = NULL;
+      }
+   }
+}
+
 static INT FASTCALL
 DceReleaseDC(DCE* dce, BOOL EndPaint)
 {
    if (DCX_DCEBUSY != (dce->DCXFlags & (DCX_INDESTROY | DCX_DCEEMPTY | DCX_DCEBUSY)))
    {
       return 0;
+   }
+
+   /* What a redirected window drew goes to the screen now; a cache DC lets go of its surface */
+   if (dce->pRedir)
+   {
+      UserRedirReleased(dce->pRedir, EndPaint);
+      if (dce->DCXFlags & DCX_CACHE)
+         DceRedirBind(dce, NULL);
    }
 
    /* Restore previous visible region */
@@ -634,7 +719,20 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
 
    if (IntGdiSetHookFlags(Dce->hDC, DCHF_VALIDATEVISRGN)) bUpdateVisRgn = TRUE;
 
-   DceSetDrawable(Wnd, Dce->hDC, Flags, UpdateClipOrigin);
+   /* NitroRedirection: a DC of a redirected window draws into its top-level window's surface */
+   if (gRedirLevel || Dce->pRedir)
+   {
+      PWND RedirRoot = UserRedirRootFor(Wnd);
+      PVOID pRedir = RedirRoot ? UserRedirGet(RedirRoot) : NULL;
+
+      if (Dce->pRedir != pRedir)
+      {
+         DceRedirBind(Dce, pRedir);
+         bUpdateVisRgn = TRUE;
+      }
+   }
+
+   DceSetDrawable(Wnd, Dce->hDC, Flags, UpdateClipOrigin, Dce->pRedir ? UserRedirWindow(Dce->pRedir) : NULL);
 
    if (bUpdateVisRgn) DceUpdateVisRgn(Dce, Wnd, Flags);
 
@@ -716,6 +814,17 @@ DceFreeDCE(PDCE pdce, BOOLEAN Force)
   {
      if (GreGetObjectOwner(pdce->hDC) == GDI_OBJ_HMGR_PUBLIC)
         GreSetDCOwner(pdce->hDC, GDI_OBJ_HMGR_POWNED);
+  }
+
+  if (pdce->pRedir)
+  {
+     if (!Hit)
+        DceRedirBind(pdce, NULL);
+     if (pdce->pRedir)
+     {
+        UserRedirRelease(pdce->pRedir);
+        pdce->pRedir = NULL;
+     }
   }
 
   if (!Hit) IntGdiDeleteDC(pdce->hDC, TRUE);
@@ -878,6 +987,8 @@ DceResetActiveDCEs(PWND Window)
    INT DeltaX;
    INT DeltaY;
    PLIST_ENTRY ListEntry;
+   PWND Root;
+   LONG RootX, RootY;
 
    if (NULL == Window)
    {
@@ -907,6 +1018,13 @@ DceResetActiveDCEs(PWND Window)
             }
          }
 
+         /* A record whose window let go of its surface: this DC draws on the screen again */
+         if (pDCE->pRedir && !UserRedirWindow(pDCE->pRedir))
+            DceRedirBind(pDCE, NULL);
+         Root = pDCE->pRedir ? UserRedirWindow(pDCE->pRedir) : NULL;
+         RootX = Root ? Root->rcWindow.left : 0;
+         RootY = Root ? Root->rcWindow.top : 0;
+
          /* A DC that another process is using right now is owned by that process.
           * Its visible region must follow this window as well, or the process paints
           * over the window that moved over it. DC_LockDcAnyOwner also tells a handle
@@ -919,17 +1037,17 @@ DceResetActiveDCEs(PWND Window)
          {
             if (pDCE->DCXFlags & DCX_WINDOW)
             {
-               DeltaX = CurrentWindow->rcWindow.left - dc->ptlDCOrig.x;
-               DeltaY = CurrentWindow->rcWindow.top - dc->ptlDCOrig.y;
-               dc->ptlDCOrig.x = CurrentWindow->rcWindow.left;
-               dc->ptlDCOrig.y = CurrentWindow->rcWindow.top;
+               DeltaX = CurrentWindow->rcWindow.left - RootX - dc->ptlDCOrig.x;
+               DeltaY = CurrentWindow->rcWindow.top - RootY - dc->ptlDCOrig.y;
+               dc->ptlDCOrig.x = CurrentWindow->rcWindow.left - RootX;
+               dc->ptlDCOrig.y = CurrentWindow->rcWindow.top - RootY;
             }
             else
             {
-               DeltaX = CurrentWindow->rcClient.left - dc->ptlDCOrig.x;
-               DeltaY = CurrentWindow->rcClient.top - dc->ptlDCOrig.y;
-               dc->ptlDCOrig.x = CurrentWindow->rcClient.left;
-               dc->ptlDCOrig.y = CurrentWindow->rcClient.top;
+               DeltaX = CurrentWindow->rcClient.left - RootX - dc->ptlDCOrig.x;
+               DeltaY = CurrentWindow->rcClient.top - RootY - dc->ptlDCOrig.y;
+               dc->ptlDCOrig.x = CurrentWindow->rcClient.left - RootX;
+               dc->ptlDCOrig.y = CurrentWindow->rcClient.top - RootY;
             }
 
             if (NULL != dc->dclevel.prgnClip)

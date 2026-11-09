@@ -136,7 +136,22 @@ typedef struct _DC
   POINTL      ptlDoBanding;
   HWND        hwndGlass;  /* the window of a DC that draws to a glass window (glassblt.c), else NULL */
   RECTL       rclGlass;   /* that window's rectangle on the screen */
+  PVOID       pvRedir;    /* while fs & DC_REDIRECTION: the redirection record of the window (ntuser/redir.c) */
 } DC;
+
+/*
+ * A window DC of a redirected window (NitroRedirection, ntuser/redir.c) stays DCTYPE_DIRECT but draws
+ * into the window's redirection surface instead of the screen: no pointer exclusion, no device lock,
+ * no re-selection of the primary surface. DC_IS_SCREEN tells the DCs that really draw on the screen.
+ */
+#define DC_IS_SCREEN(pdc) ((pdc)->dctype == DCTYPE_DIRECT && !((pdc)->fs & DC_REDIRECTION))
+
+/* redirgdi.c */
+BOOL NTAPI GreRedirBindDC(_In_ HDC hdc, _In_opt_ PVOID pvRedir, _In_opt_ HBITMAP hbmSurface, _Out_ PVOID *ppvOld);
+HBITMAP NTAPI GreRedirCreateSurface(_In_ LONG cx, _In_ LONG cy, _In_opt_ HBITMAP hbmOld);
+BOOL NTAPI GreRedirPresent(_In_ HBITMAP hbmSurface, _In_ struct _REGION *prgnScreen, _In_ LONG xWnd, _In_ LONG yWnd);
+/* ntuser/redir.c */
+VOID FASTCALL UserRedirMarkDirty(_In_ PVOID pvRedir);
 // typedef struct _DC *PDC;
 
 extern PDC defaultDCstate;

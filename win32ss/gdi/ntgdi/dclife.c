@@ -611,6 +611,10 @@ DC_vPrepareDCsForBlitEx(
     const RECT *prcFirst, *prcSecond;
     BOOL bFirstIsDest = TRUE;
 
+    /* A redirected window DC draws into its window's surface: the compositor presents it */
+    if ((pdcDest->fs & DC_REDIRECTION) && pdcDest->pvRedir)
+        UserRedirMarkDirty(pdcDest->pvRedir);
+
     /* Update brushes */
     if (pdcDest->pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(pdcDest);
@@ -651,7 +655,7 @@ DC_vPrepareDCsForBlitEx(
         CLIPPING_UpdateGCRegion(pdcDest);
 
     /* Lock and update first DC */
-    if (pdcFirst->dctype == DCTYPE_DIRECT)
+    if (DC_IS_SCREEN(pdcFirst))
     {
         EngAcquireSemaphore(pdcFirst->ppdev->hsemDevLock);
 
@@ -664,7 +668,7 @@ DC_vPrepareDCsForBlitEx(
         }
     }
 
-    if (pdcFirst->dctype == DCTYPE_DIRECT)
+    if (DC_IS_SCREEN(pdcFirst))
     {
         DC_vMouseSafetyStart(pdcFirst, prcFirst, (fl & DCPREP_SPLIT_DEST) && bFirstIsDest, (fl & DCPREP_CLIP_MASK) && bFirstIsDest ? (fl & DCPREP_CLIP_MASK) : 0);
     }
@@ -677,7 +681,7 @@ DC_vPrepareDCsForBlitEx(
         return;
 
     /* Lock and update second DC */
-    if (pdcSecond->dctype == DCTYPE_DIRECT)
+    if (DC_IS_SCREEN(pdcSecond))
     {
         EngAcquireSemaphore(pdcSecond->ppdev->hsemDevLock);
 
@@ -690,7 +694,7 @@ DC_vPrepareDCsForBlitEx(
         }
     }
 
-    if (pdcSecond->dctype == DCTYPE_DIRECT)
+    if (DC_IS_SCREEN(pdcSecond))
     {
         DC_vMouseSafetyStart(pdcSecond, prcSecond, (fl & DCPREP_SPLIT_DEST) && !bFirstIsDest, (fl & DCPREP_CLIP_MASK) && !bFirstIsDest ? (fl & DCPREP_CLIP_MASK) : 0);
     }
@@ -705,7 +709,7 @@ VOID
 FASTCALL
 DC_vFinishBlit(PDC pdc1, PDC pdc2)
 {
-    if (pdc1->dctype == DCTYPE_DIRECT)
+    if (DC_IS_SCREEN(pdc1))
     {
         MouseSafetyOnDrawEnd(pdc1->ppdev);
         EngReleaseSemaphore(pdc1->ppdev->hsemDevLock);
@@ -716,7 +720,7 @@ DC_vFinishBlit(PDC pdc1, PDC pdc2)
 
     if (pdc2)
     {
-        if (pdc2->dctype == DCTYPE_DIRECT)
+        if (DC_IS_SCREEN(pdc2))
         {
             MouseSafetyOnDrawEnd(pdc2->ppdev);
             EngReleaseSemaphore(pdc2->ppdev->hsemDevLock);
@@ -1179,5 +1183,62 @@ IntGdiCreateDisplayDC(HDEV hDev, ULONG DcType, BOOL EmptyDC)
         hDC = IntGdiCreateDC(NULL, NULL, NULL, NULL, (DcType == DCTYPE_INFO));
 
     return hDC;
+}
+
+/*
+ * Binds a window DC to a redirection surface (ntuser/redir.c), or with hbmSurface NULL back to the
+ * screen. pvRedir is USER's record for the window; *ppvOld gets the record the DC had (USER keeps the
+ * references). The DC stays DCTYPE_DIRECT; DC_REDIRECTION makes it draw like a memory DC into the surface.
+ */
+BOOL
+NTAPI
+GreRedirBindDC(
+    _In_ HDC hdc,
+    _In_opt_ PVOID pvRedir,
+    _In_opt_ HBITMAP hbmSurface,
+    _Out_ PVOID *ppvOld)
+{
+    PDC pdc;
+    PSURFACE psurf = NULL;
+
+    *ppvOld = NULL;
+    pdc = DC_LockDcAnyOwner(hdc);
+    if (!pdc)
+        return FALSE;
+    if (pdc->dctype != DCTYPE_DIRECT)
+    {
+        DC_UnlockDc(pdc);
+        return FALSE;
+    }
+
+    if (hbmSurface)
+    {
+        psurf = SURFACE_ShareLockSurface(hbmSurface);
+        if (!psurf)
+        {
+            DC_UnlockDc(pdc);
+            return FALSE;
+        }
+    }
+
+    *ppvOld = (pdc->fs & DC_REDIRECTION) ? pdc->pvRedir : NULL;
+    if (psurf)
+    {
+        /* The DC takes its own reference on the surface */
+        DC_vSelectSurface(pdc, psurf);
+        SURFACE_ShareUnlockSurface(psurf);
+        pdc->dclevel.sizl = pdc->dclevel.pSurface->SurfObj.sizlBitmap;
+        pdc->fs |= DC_REDIRECTION | DC_DIRTY_RAO;
+        pdc->pvRedir = pvRedir;
+    }
+    else if (pdc->fs & DC_REDIRECTION)
+    {
+        pdc->fs &= ~DC_REDIRECTION;
+        pdc->pvRedir = NULL;
+        /* The screen again (DC_vUpdateDC drops the DC's reference on the surface) */
+        DC_vUpdateDC(pdc);
+    }
+    DC_UnlockDc(pdc);
+    return TRUE;
 }
 

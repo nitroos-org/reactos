@@ -73,6 +73,7 @@ typedef struct _DC *PDC;
 #include "user/ntuser/msgqueue.h"
 #include "user/ntuser/desktop.h"
 #include "user/ntuser/dce.h"
+#include "user/ntuser/redir.h"
 #include "user/ntuser/focus.h"
 #include "user/ntuser/hotkey.h"
 #include "user/ntuser/input.h"

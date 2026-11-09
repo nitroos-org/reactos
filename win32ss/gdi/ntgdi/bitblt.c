@@ -369,7 +369,7 @@ NtGdiAlphaBlend(
     }
 
     /* A blend that does not scale is drawn in pieces around the pointer; a source on the screen can show it */
-    bSplit = (DCDest->dctype == DCTYPE_DIRECT) && (DCSrc->dctype != DCTYPE_DIRECT) &&
+    bSplit = DC_IS_SCREEN(DCDest) && !DC_IS_SCREEN(DCSrc) &&
              (DestRect.right > DestRect.left) && (DestRect.bottom > DestRect.top) &&
              (SourceRect.right - SourceRect.left == DestRect.right - DestRect.left) &&
              (SourceRect.bottom - SourceRect.top == DestRect.bottom - DestRect.top) &&
@@ -554,7 +554,7 @@ NtGdiTransparentBlt(
     }
 
     /* A copy that does not scale or flip is drawn in pieces around the pointer; a source on the screen can show it */
-    bSplit = (DCDest->dctype == DCTYPE_DIRECT) && (DCSrc->dctype != DCTYPE_DIRECT) &&
+    bSplit = DC_IS_SCREEN(DCDest) && !DC_IS_SCREEN(DCSrc) &&
              (rcDest.right > rcDest.left) && (rcDest.bottom > rcDest.top) &&
              (rcSrc.right - rcSrc.left == rcDest.right - rcDest.left) &&
              (rcSrc.bottom - rcSrc.top == rcDest.bottom - rcDest.top) &&
@@ -763,7 +763,7 @@ NtGdiMaskBlt(
     }
 
     /* Prepare blit; a source on the screen can show the pointer, so only a memory source is split */
-    bSplit = (DCDest->dctype == DCTYPE_DIRECT) && (!UsesSource || DCSrc->dctype != DCTYPE_DIRECT);
+    bSplit = DC_IS_SCREEN(DCDest) && (!UsesSource || !DC_IS_SCREEN(DCSrc));
     DC_vPrepareDCsForBlitEx(DCDest, &DestRect, DCSrc, &SourceRect, bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_BITBLT);
 
     if (pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
@@ -1051,8 +1051,8 @@ GreStretchBltMask(
 
     /* A copy that does not scale or flip is a BitBlt to IntEngStretchBlt and is split around the
      * pointer like one; a source on the screen can show the pointer, so only a memory source is split */
-    bSplit = (DCDest->dctype == DCTYPE_DIRECT) &&
-             (!UsesSource || DCSrc->dctype != DCTYPE_DIRECT) &&
+    bSplit = DC_IS_SCREEN(DCDest) &&
+             (!UsesSource || !DC_IS_SCREEN(DCSrc)) &&
              (DestRect.right > DestRect.left) && (DestRect.bottom > DestRect.top) &&
              (SourceRect.right - SourceRect.left == DestRect.right - DestRect.left) &&
              (SourceRect.bottom - SourceRect.top == DestRect.bottom - DestRect.top);
@@ -1282,11 +1282,11 @@ IntPatBlt(
     BrushOrigin.y = pbrush->ptOrigin.y + pdc->dclevel.ptlBrushOrigin.y + pdc->ptlDCOrig.y;
 #endif
 
-    DC_vPrepareDCsForBlitEx(pdc, &DestRect, NULL, NULL, pdc->dctype == DCTYPE_DIRECT ? DCPREP_SPLIT_DEST : 0);
+    DC_vPrepareDCsForBlitEx(pdc, &DestRect, NULL, NULL, DC_IS_SCREEN(pdc) ? DCPREP_SPLIT_DEST : 0);
 
     psurf = pdc->dclevel.pSurface;
 
-    if (pdc->dctype == DCTYPE_DIRECT)
+    if (DC_IS_SCREEN(pdc))
     {
         ret = IntEngBitBltAvoidPointer(pdc,
                                        &psurf->SurfObj,

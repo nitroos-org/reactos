@@ -30,6 +30,7 @@ typedef struct tagDCE
     PPROCESSINFO ppiOwner;
     struct _MONITOR* pMonitor;
     BOOL         bGlass;     /* the DC was last set up for a glass window (glassblt.c) */
+    PVOID        pRedir;     /* redirection record the DC is bound to (redir.c), or NULL */
 } DCE, *PDCE;
 
 /* internal DCX flags, see psdk/winuser.h for the rest */
