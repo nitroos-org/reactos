@@ -2315,6 +2315,22 @@ MiRemoveZeroPage(
     IN ULONG Color
 );
 
+/* A zeroed page for a path without failure handling: waits for the balancer, stops the system if none comes (pfnlist.c) */
+PFN_NUMBER
+NTAPI
+MiRemoveZeroPageOrWait(
+    _In_ ULONG Color,
+    _Inout_ PKIRQL OldIrql,
+    _In_ ULONG Caller);
+
+#define MI_ZERO_WAIT_SESSION_WS_PT      1
+#define MI_ZERO_WAIT_SESSION_WS         2
+#define MI_ZERO_WAIT_SESSION_DATA       3
+#define MI_ZERO_WAIT_SESSION_DIR        4
+#define MI_ZERO_WAIT_SESSION_TAG        5
+#define MI_ZERO_WAIT_SYSTEM_PDE         6
+#define MI_ZERO_WAIT_WS_LIST            7
+
 VOID
 NTAPI
 MiZeroPhysicalPage(
