@@ -1606,6 +1606,7 @@ MiMapViewOfDataSection(
     Vad->ControlArea = ControlArea;
     Vad->u.VadFlags.CommitCharge = 0;
     Vad->u.VadFlags.Protection = ProtectionMask;
+    /* 21 bits (the next bit is PagerCommit, P4); nothing reads FileOffset back */
     Vad->u2.VadFlags2.FileOffset = (ULONG)(SectionOffset->QuadPart >> 16);
     Vad->u2.VadFlags2.Inherit = (InheritDisposition == ViewShare);
     if ((AllocationType & SEC_NO_CHANGE) || (Section->u.Flags.NoChange))

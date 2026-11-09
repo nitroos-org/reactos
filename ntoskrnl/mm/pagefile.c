@@ -300,6 +300,9 @@ MiReadPageFile(
 }
 
 /* Paging file growth (see MiWaitForPagingFileGrowth) */
+/* P4: cached "an ARM3 paging file takes slots" (MiPagerHasSlotFile) */
+static VOID MiUpdatePagerSlotFileState(VOID);
+
 static KEVENT MiPagingFileGrowthRequestEvent;
 static KEVENT MiPagingFileGrowthDoneEvent;
 static volatile SIZE_T MiPagingFileGrowthShortfall;
@@ -692,6 +695,7 @@ MiGrowPagingFiles(
             PagingFile->SlotTags = NewTags;
             PagingFile->SlotTagsMirror = NULL;
             PagingFile->SlotTagCount = OldSize + Growth;
+            MiUpdatePagerSlotFileState();
         }
         /* The slots beyond the old size were kept set: hand them out from now on */
         RtlClearBits(PagingFile->Bitmap, (ULONG)OldSize, (ULONG)Growth);
@@ -1382,6 +1386,7 @@ EarlyQuit:
     MmPagingFile[MmNumberOfPagingFiles] = PagingFile;
     MmNumberOfPagingFiles++;
     MiFreeSwapPages = MiFreeSwapPages + PagingFile->FreeSpace;
+    MiUpdatePagerSlotFileState();
     KeReleaseSpinLock(&MiPagingFileSlotLock, OldIrql);
 
     /* Its slots back committed memory from now on */
@@ -1526,6 +1531,46 @@ MiAllocatePageFileSlot(
     return MiAllocatePageFileSlots(1, FileIndex, Slot) == 1;
 }
 
+/*
+ * P4: a paging file takes ARM3 slots and is not retired for good, so private
+ * commitment may use the paging files. Asked on every private charge: cached,
+ * and recomputed with MiPagingFileSlotLock held wherever a file gains slot
+ * tags (creation, growth) or is retired for good.
+ */
+static volatile BOOLEAN MiPagerSlotFilePresent;
+
+static
+VOID
+MiUpdatePagerSlotFileState(VOID)
+{
+    BOOLEAN Present = FALSE;
+    ULONG i;
+
+    for (i = 0; i < MAX_PAGING_FILES; i++)
+    {
+        PMMPAGING_FILE PagingFile = MmPagingFile[i];
+
+        if ((PagingFile != NULL) && (PagingFile->SlotTags != NULL) && !PagingFile->RetiredForGood)
+        {
+            Present = TRUE;
+            break;
+        }
+    }
+    if (Present != MiPagerSlotFilePresent)
+    {
+        DPRINT1("NitroPager: paging files %s private commitment (pageable private %Iu pages)\n",
+                Present ? "back" : "no longer back", MiGetPrivatePageableCommit());
+    }
+    MiPagerSlotFilePresent = Present;
+}
+
+BOOLEAN
+NTAPI
+MiPagerHasSlotFile(VOID)
+{
+    return MiPagerSlotFilePresent;
+}
+
 /* Free ARM3 slots in the files that still take new ones (a snapshot) */
 PFN_NUMBER
 NTAPI
@@ -1595,6 +1640,7 @@ MiPagerPagingFileWriteResult(
         {
             PagingFile->Retired = TRUE;
             PagingFile->RetiredForGood = TRUE;
+            MiUpdatePagerSlotFileState();
             Retired = TRUE;
         }
         else
