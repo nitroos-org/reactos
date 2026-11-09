@@ -158,6 +158,25 @@ BIDI = "‎‏؜"
 SPACES = "    "
 
 
+def fullwidth(s):
+    """Fullwidth ASCII and fullwidth currency signs (U+FF01-FF5E, U+FFE0-FFE6) to their compatibility forms (Unicode NFKC): the
+    legacy ANSI code pages have no fullwidth yen or parenthesis. Halfwidth katakana and Hangul are left alone."""
+    return "".join(unicodedata.normalize("NFKC", c) if (0xff01 <= ord(c) <= 0xff5e or 0xffe0 <= ord(c) <= 0xffe6) else c for c in s)
+
+
+def strip_bidi(s):
+    if s is None:
+        return None
+    for c in BIDI:
+        s = s.replace(c, "")
+    return s
+
+
+def sym_latn_ok(N):
+    """The locale chain (or root) has Latin-numbering-system symbols."""
+    return N("symbols-numberSystem-latn", "decimal") is not None
+
+
 def nospace(s):
     for c in SPACES:
         s = s.replace(c, " ")
@@ -167,6 +186,8 @@ def nospace(s):
 def ldml_to_win(p, era_year=False):
     """An LDML date/time pattern in the pattern letters GetDateFormat/GetTimeFormat know."""
     p = p.replace("\u202f", " ")      # CLDR uses a narrow no-break space in some patterns; consoles and old fonts have no glyph
+    for c in BIDI:                    # RLM/LRM/ALM are display controls, not part of the pattern
+        p = p.replace(c, "")
     out = []
     i = 0
     n = len(p)
@@ -235,7 +256,7 @@ def ldml_to_win(p, era_year=False):
 def pattern_order(p):
     """IDATE style: 0 month-day-year, 1 day-month-year, 2 year-month-day, from the first appearance in the pattern."""
     seen = []
-    for m in re.finditer(r"'[^']*'|([dMy])", p):
+    for m in re.finditer(r"'[^']*'|d{3,}|([dMy])", p):       # 'ddd'/'dddd' is the weekday, not the day of the month
         if m.group(1) and m.group(1) not in seen:
             seen.append(m.group(1))
     s = "".join(seen)
@@ -386,7 +407,8 @@ def names12(cldr, tag, ch, cal, kind, width, standalone, n):
                     break
             if val is not None:
                 break
-        out.append(val)
+        # Rule NAME-NBSP: the words of a multi-word month or day name are joined by a no-break space (the name stays on one line)
+        out.append(val.replace(" ", "\u00a0") if val else val)
     return out
 
 
@@ -433,9 +455,12 @@ def time_format(cldr, ch, w):
     return cldr.get("cldr-dates-full", "ca-gregorian", "", "dates", "calendars", "gregorian", "timeFormats", w, skip_root=True, chain=ch)
 
 
-def display_name(cldr, tag, ch_en, ch_loc, with_script):
-    """'German (Germany)' in the language of ch_loc (the CLDR localePattern rule)."""
+def display_name(cldr, tag, ch_en, ch_loc, with_script, force_script=False):
+    """'German (Germany)' in the language of ch_loc (the CLDR localePattern rule); force_script names the script that the
+    tag leaves implicit ('Chinese (Simplified, China)')."""
     lang, script, eff_script, region, lt_script = cldr.canonical(tag)
+    if force_script and script is None:
+        script = eff_script
     lname = cldr.get("cldr-localenames-full", "languages", tag, "localeDisplayNames", "languages", lang, chain=ch_loc) \
         or cldr.get("cldr-localenames-full", "languages", tag, "localeDisplayNames", "languages", lang, chain=ch_en) or lang
     extras = []
@@ -454,6 +479,18 @@ def display_name(cldr, tag, ch_en, ch_loc, with_script):
     for e in extras[1:]:
         joined = sep.replace("{0}", joined).replace("{1}", e)
     return pat.get("localePattern", "{0} ({1})").replace("{0}", lname).replace("{1}", joined)
+
+
+# Mapping-rule selections of ANOTHER CLDR field for a language (see README.md, "Measured field selections"). Each entry picks a
+# different pattern of the same locale's own CLDR data; no value is written here.
+#  LONG_DATE_NO_WEEKDAY: the long date is CLDR dateFormats `long` (no weekday) instead of `full`.
+#  SHORT_DATE_ISO: the short date is the locale's ISO 8601 calendar short date (ca-generic, iso8601) instead of `short`.
+LONG_DATE_NO_WEEKDAY = {"ja", "zh", "ru"}
+SHORT_DATE_ISO = {"ko"}
+
+
+def iso_short_date(cldr, ch):
+    return cldr.get("cldr-dates-full", "ca-generic", "", "dates", "calendars", "iso8601", "dateFormats", "short", skip_root=True, chain=ch)
 
 
 def build_locale(cldr, name, sk):
@@ -494,20 +531,24 @@ def build_locale(cldr, name, sk):
     v["LOCALE_SPARENT"] = par
     scr = eff_script or ""
     v["LOCALE_SSCRIPTS"] = "".join(s + ";" for s in SCRIPT_EXPAND.get(scr, scr).split(";") if s)
-    v["LOCALE_SCONSOLEFALLBACKNAME"] = sname if scr in ("Latn", "Cyrl", "Grek") else "en-US"
+    v["LOCALE_SCONSOLEFALLBACKNAME"] = sname if scr in ("Latn", "Cyrl", "Grek", "Hani", "Hans", "Hant", "Jpan", "Kore") else "en-US"
 
     # ---- names --------------------------------------------------------------------------------------------------
     cm = lambda c: c
     v["LOCALE_SENGLANGUAGE"] = cldr.get("cldr-localenames-full", "languages", tag, "localeDisplayNames", "languages", lang, chain=ch_en) or lang
     v["LOCALE_SNATIVELANGNAME"] = G("cldr-localenames-full", "languages", "localeDisplayNames", "languages", lang) or v["LOCALE_SENGLANGUAGE"]
     v["LOCALE_SLOCALIZEDLANGUAGENAME"] = v["LOCALE_SENGLANGUAGE"]
+    if lang in MULTI_SCRIPT_LANGS and eff_script:
+        # a language written in several scripts is named with its script ("Chinese (Simplified)"), CLDR localePattern
+        v["LOCALE_SNATIVELANGNAME"] = display_name(cldr, lang + "-" + eff_script, ch_en, ch, True, False)
+        v["LOCALE_SLOCALIZEDLANGUAGENAME"] = display_name(cldr, lang + "-" + eff_script, ch_en, ch_en, True, False)
     rtag = [p for p in tag.split("-")[1:] if len(p) == 2 or (len(p) == 3 and p.isdigit())]
     rcode = rtag[0].upper() if rtag else region
     terr = lambda code, chain: terr_name(cldr, tag, code, chain, ch_en)
     v["LOCALE_SENGCOUNTRY"] = terr(rcode, ch_en) or rcode
     v["LOCALE_SCOUNTRY"] = v["LOCALE_SENGCOUNTRY"]
     v["LOCALE_SNATIVECTRYNAME"] = terr(rcode, ch) or v["LOCALE_SENGCOUNTRY"]
-    v["LOCALE_SENGLISHDISPLAYNAME"] = display_name(cldr, tag, ch_en, ch_en, True)
+    v["LOCALE_SENGLISHDISPLAYNAME"] = display_name(cldr, tag, ch_en, ch_en, True, lang in MULTI_SCRIPT_LANGS)
     v["LOCALE_SLANGUAGE"] = v["LOCALE_SENGLISHDISPLAYNAME"]
     v["LOCALE_SNATIVEDISPLAYNAME"] = display_name(cldr, tag, ch_en, ch, True)
 
@@ -523,15 +564,25 @@ def build_locale(cldr, name, sk):
     def N(*path):
         return cldr.get("cldr-numbers-full", "numbers", tag, "numbers", *path, chain=ch)
 
-    sym = lambda k: N("symbols-numberSystem-" + nsys, k)
-    if sym("decimal") is None:
-        nsys, digits = "latn", "0123456789"
+    # Rule NUM-LATN: the separators and the number/currency/percent patterns are those of the Latin numbering system, the
+    # digits shown to the user are the default numbering system's (LOCALE_SNATIVEDIGITS, LOCALE_IDIGITSUBSTITUTION): the
+    # Control Panel format of an ar or fa locale is "1,234.56" with national digit shaping, not "١٬٢٣٤٫٥٦".
+    # The bidi controls of the CLDR symbols (ALM, RLM, LRM) are display hints, not part of the value.
+    if sym_latn_ok(N):
+        psys = "latn"
+    else:
+        psys = nsys
+    sym = lambda k: strip_bidi(N("symbols-numberSystem-" + psys, k))
+    if N("symbols-numberSystem-" + nsys, "decimal") is None:
+        nsys, digits, psys = "latn", "0123456789", "latn"
     v["LOCALE_SNATIVEDIGITS"] = digits
     v["LOCALE_IDIGITSUBSTITUTION"] = "1" if digits == "0123456789" else "2"
     v["LOCALE_SDECIMAL"] = sym("decimal") or "."
     # a narrow no-break space as the group separator (fr, ...) is a no-break space: it converts to every ANSI code page
     v["LOCALE_STHOUSAND"] = (sym("group") or ",").replace("\u202f", "\u00a0")
-    v["LOCALE_SLIST"] = sym("list") or ";"
+    # Rule LIST-CSV: CLDR's `list` symbol is the separator of a list of numbers in running text (";" nearly everywhere).
+    # LOCALE_SLIST is the separator of tabular data (CSV): a comma, unless the comma is the decimal separator.
+    v["LOCALE_SLIST"] = ";" if v["LOCALE_SDECIMAL"] == "," else ","
     v["LOCALE_SPERCENT"] = sym("percentSign") or "%"
     v["LOCALE_SPERMILLE"] = sym("perMille") or "‰"
     v["LOCALE_SNEGATIVESIGN"] = sym("minusSign") or "-"
@@ -540,7 +591,7 @@ def build_locale(cldr, name, sk):
     v["LOCALE_SPOSINFINITY"] = sym("infinity") or "∞"
     v["LOCALE_SNEGINFINITY"] = v["LOCALE_SNEGATIVESIGN"] + v["LOCALE_SPOSINFINITY"]
     v["LOCALE_STIME"] = sym("timeSeparator") or ":"
-    dfmt = N("decimalFormats-numberSystem-" + nsys, "standard") or "#,##0.###"
+    dfmt = N("decimalFormats-numberSystem-" + psys, "standard") or "#,##0.###"
     v["LOCALE_SGROUPING"] = grouping(dfmt)
     v["LOCALE_IDIGITS"] = "2"          # CLDR gives a maximum of fraction digits only; the control-panel default is 2
     v["LOCALE_ILZERO"] = "1"
@@ -548,7 +599,7 @@ def build_locale(cldr, name, sk):
     neg = dfmt.split(";")[1] if ";" in dfmt else "-" + dfmt.split(";")[0]
     nneg = canon_money(neg, "$").replace("-", "-")
     v["LOCALE_INEGNUMBER"] = str(NEGNUM.index(nneg)) if nneg in NEGNUM else "1"
-    pct = N("percentFormats-numberSystem-" + nsys, "standard") or "#,##0%"
+    pct = N("percentFormats-numberSystem-" + psys, "standard") or "#,##0%"
     pp, pn = split_pattern(pct)
     pc = canon_pct(pp)
     v["LOCALE_IPOSITIVEPERCENT"] = str(POSPCT.get(pc, 1))
@@ -567,13 +618,13 @@ def build_locale(cldr, name, sk):
     cur = cur or "USD"
     v["LOCALE_SINTLSYMBOL"] = cur
     csym = N("currencies", cur, "symbol") if False else cldr.get("cldr-numbers-full", "currencies", tag, "numbers", "currencies", cur, "symbol", chain=ch)
-    v["LOCALE_SCURRENCY"] = csym or cur
+    v["LOCALE_SCURRENCY"] = fullwidth(csym or cur)
     v["LOCALE_SENGCURRNAME"] = cldr.get("cldr-numbers-full", "currencies", tag, "numbers", "currencies", cur, "displayName", chain=ch_en) or cur
     v["LOCALE_SNATIVECURRNAME"] = cldr.get("cldr-numbers-full", "currencies", tag, "numbers", "currencies", cur, "displayName", chain=ch) or v["LOCALE_SENGCURRNAME"]
     fr = cldr.curdata["fractions"].get(cur, cldr.curdata["fractions"]["DEFAULT"])
     v["LOCALE_ICURRDIGITS"] = fr["_digits"]
     v["LOCALE_IINTLCURRDIGITS"] = fr["_digits"]
-    cpat = N("currencyFormats-numberSystem-" + nsys, "standard") or "¤#,##0.00"
+    cpat = N("currencyFormats-numberSystem-" + psys, "standard") or "¤#,##0.00"
     cp, cn = split_pattern(cpat)
     v["LOCALE_SMONGROUPING"] = grouping(cp)
     cdec = sym("currencyDecimal") or v["LOCALE_SDECIMAL"]
@@ -588,12 +639,16 @@ def build_locale(cldr, name, sk):
     pbefore = pcan.find("$") < pcan.find("1.1")
     v["LOCALE_IPOSSYMPRECEDES"] = "1" if pbefore else "0"
     v["LOCALE_IPOSSEPBYSPACE"] = "1" if re.search(r"\$ 1\.1|1\.1 \$", pcan) else "0"
-    v["LOCALE_IPOSSIGNPOSN"] = "1"
+    # Rule SIGNPOSN: the sign sits "immediately before the currency symbol" (3) when the symbol leads the amount, and "before
+    # the whole string" (1) when the amount leads; a trailing sign is 2, a sign after the symbol 4, parentheses 0.
+    v["LOCALE_IPOSSIGNPOSN"] = "3" if pbefore else "1"
     nbefore = ncan.find("$") < ncan.find("1.1")
     v["LOCALE_INEGSYMPRECEDES"] = "1" if nbefore else "0"
     v["LOCALE_INEGSEPBYSPACE"] = "1" if re.search(r"\$ [-]?1\.1|1\.1[-]? \$", ncan) else "0"
     if ncan.startswith("("):
         sp = "0"
+    elif ncan.startswith("-$"):
+        sp = "3"
     elif ncan.startswith("-"):
         sp = "1"
     elif ncan.endswith("-"):
@@ -610,9 +665,11 @@ def build_locale(cldr, name, sk):
     tfm = lambda w: ldml_to_win(time_format(cldr, ch, w) or "")
     avail = lambda k: gdf("dateTimeFormats", "availableFormats", k) or ""
     short = dfm("short")
+    if lang in SHORT_DATE_ISO and iso_short_date(cldr, ch):
+        short = ldml_to_win(iso_short_date(cldr, ch))
     # CLDR short dates have a two-digit year, Windows short dates a four-digit one (an ambiguous short year is a regression)
     short = re.sub(r"(?<![y'])yy(?![y'])", "yyyy", short)
-    longd = dfm("full")
+    longd = dfm("long") if (lang in LONG_DATE_NO_WEEKDAY and dfm("long")) else dfm("full")
     v["LOCALE_SSHORTDATE"] = short
     v["LOCALE_SLONGDATE"] = longd
     v["LOCALE_SYEARMONTH"] = ldml_to_win(avail("yMMMM"))
@@ -639,8 +696,11 @@ def build_locale(cldr, name, sk):
     pm = gdf("dayPeriods", "format", "abbreviated", "pm") or "PM"
     v["LOCALE_S1159"] = am
     v["LOCALE_S2359"] = pm
-    # LOCALE_S1159/S2359 are the markers of the time pattern: a locale whose time patterns have no day-period field has none
-    if "tt" not in v["LOCALE_STIMEFORMAT"] + v["LOCALE_SSHORTTIME"]:
+    # Rule AMPM: a locale whose time patterns have no day-period field and whose CLDR marker is only the default ("AM", "PM" of
+    # the CLDR root/English data: not localized) has no marker; a locale with its own marker (cs "dop.", ja, zh, tr) keeps it.
+    ram = cldr.get("cldr-dates-full", "ca-gregorian", "", "dates", "calendars", "gregorian", "dayPeriods", "format", "abbreviated", "am", chain=ch_en) or "AM"
+    rpm = cldr.get("cldr-dates-full", "ca-gregorian", "", "dates", "calendars", "gregorian", "dayPeriods", "format", "abbreviated", "pm", chain=ch_en) or "PM"
+    if "tt" not in v["LOCALE_STIMEFORMAT"] + v["LOCALE_SSHORTTIME"] and am == ram and pm == rpm:
         v["LOCALE_S1159"] = v["LOCALE_S2359"] = ""
     v["LOCALE_SSHORTESTAM"] = gdf("dayPeriods", "format", "narrow", "am") or am[:1]
     v["LOCALE_SSHORTESTPM"] = gdf("dayPeriods", "format", "narrow", "pm") or pm[:1]
@@ -695,6 +755,10 @@ def build_locale(cldr, name, sk):
 
     # ---- calendars ------------------------------------------------------------------------------------------------
     pref = cldr.region_value(cldr.calpref, region) or ["gregorian"]
+    # Rule CAL-UMALQURA: CLDR lists the business calendar (gregorian) first for Saudi Arabia but also names Umm al-Qura, the
+    # official civil calendar of the kingdom (the only territory with that variant): it is the default calendar there.
+    if pref and pref[0] == "gregorian" and "islamic-umalqura" in pref:
+        pref = ["islamic-umalqura"] + [c for c in pref if c != "islamic-umalqura"]
     cals = []
     for c in pref:
         w = WINCAL.get(c)
@@ -705,6 +769,8 @@ def build_locale(cldr, name, sk):
     v["LOCALE_ICALENDARTYPE"] = str(cals[0])
     opts = [c for c in cals[1:]]
     v["LOCALE_IOPTIONALCALENDAR"] = "\0".join(str(c) for c in opts) if opts else "0"
+    for k in ("LOCALE_SNATIVELANGNAME", "LOCALE_SNATIVECTRYNAME", "LOCALE_SNATIVEDISPLAYNAME", "LOCALE_SNATIVECURRNAME"):
+        v[k] = fullwidth(v[k])
     # no narrow no-break space (U+202F) in any value: it has no glyph in console fonts and becomes '?' in an ANSI code page
     for k in v:
         if v[k] and "\u202f" in v[k]:
@@ -827,8 +893,12 @@ def build_calendar_rows(cldr, tag, ch, cals, gv):
                 if s and s not in out:
                     out.append(s)
             return out
-        sd = uniq([re.sub(r"(?<![y'])yy(?![y'])", "yyyy", f("d", "short")), f("d", "medium")])
-        ld = uniq([f("d", "full"), f("d", "long")])
+        lang = cldr.canonical(tag)[0]
+        shortf = f("d", "short")
+        if c == 1 and lang in SHORT_DATE_ISO and iso_short_date(cldr, ch):
+            shortf = ldml_to_win(iso_short_date(cldr, ch))
+        sd = uniq([re.sub(r"(?<![y'])yy(?![y'])", "yyyy", shortf), f("d", "medium")])
+        ld = uniq([f("d", "long"), f("d", "full")] if (c == 1 and lang in LONG_DATE_NO_WEEKDAY) else [f("d", "full"), f("d", "long")])
         md = uniq([avail("MMMMd"), avail("Md")])
         ym = uniq([avail("yMMMM")])
         # the values of the default Gregorian calendar are those of the locale data (LOCALE_SSHORTDATE...): no rows

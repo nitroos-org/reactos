@@ -48,7 +48,7 @@ six locales and the Welsh ANSI code page are corrected from public facts (ITU-T 
 | `LOCALE_SSCRIPTS` | the likely script; the composite codes (Jpan, Hans, Hant, Kore) are listed with the scripts they combine (ISO 15924) |
 | `LOCALE_IDIGITSUBSTITUTION` | 1 (none) for Latin digits, 2 (national) when CLDR's default numbering system is not Latin |
 | `LOCALE_SSHORTESTDAYNAME1-7` | the CLDR stand-alone `short` day names, without a trailing abbreviation period; the `narrow` ones where `short` is longer than 3 characters |
-| `LOCALE_S1159`, `LOCALE_S2359` | empty when neither `LOCALE_STIMEFORMAT` nor `LOCALE_SSHORTTIME` has a day-period field (`tt`) |
+| `LOCALE_S1159`, `LOCALE_S2359` | rule AMPM (round 3): empty only when neither `LOCALE_STIMEFORMAT` nor `LOCALE_SSHORTTIME` has a day-period field (`tt`) AND the CLDR marker is just the default `AM`/`PM` (not localized, as in de, fr, ru, pt); a 24-hour locale with its own marker (cs `dop.`, ja, zh, tr, ...) keeps it |
 | `LOCALE_SRELATIVELONGDATE` | CLDR `MMMMEd` with the long weekday |
 | `LOCALE_SSHORTDATE` | the CLDR short date with a four-digit year (CLDR's two-digit year is ambiguous) |
 | patterns, names | a narrow no-break space (U+202F) in a CLDR date or time pattern becomes a space, in any other value a no-break space (U+00A0); the `-alt-ascii` CLDR time formats are not used (in en-GB that variant is a 12-hour format) |
@@ -74,4 +74,31 @@ Each alternative was scored by the number of LCTYPE values (of 10 locales) that 
 | abbreviated day names: format instead of stand-alone form | 15 -> 22 | not used |
 | CLDR `contextTransforms` (titlecase-firstword of stand-alone names; ru and es both ask for it) | 178 -> 190..224 total | not used |
 | shortest day names: `narrow`, or `short` unchanged | 23 -> 42, 35 | not used |
-Not changed, documented: ar-SA default calendar (CLDR calendarPreferenceData for SA lists gregorian first) and the full-width yen of ja-JP (CLDR `ja` currency symbol for JPY).
+Round 2 left the ar-SA default calendar and the full-width yen of ja-JP; round 3 changes both (below).
+
+## Round 3 (2026.11-2, lane cldr2): mapping rules scored against the Windows dumps
+Data rule unchanged: every value comes from CLDR through a rule below. The Windows dumps (the sweep11 .NET culture test output and
+the lcprobe dump of 10 locales) were used only to count matches of a candidate rule (`scoring`: `score.py` of the evidence, which
+builds the locales with this generator, models the .NET test from the generated values, and compares). No Windows value is in this tree.
+Score = .NET culture lines identical to Windows (20 cultures) and LCTYPE values of the 10 probe locales that differ (1120 compared).
+
+| Rule | What it does | Effect |
+|---|---|---|
+| NUM-LATN | separators (`SDECIMAL`, `STHOUSAND`, `SMONDECIMALSEP`, `SMONTHOUSANDSEP`, `SPERCENT`, `SPERMILLE`, signs) and the number/currency/percent patterns come from CLDR's `latn` numbering system; `SNATIVEDIGITS` and `IDIGITSUBSTITUTION` still come from the default numbering system. The bidi controls (ALM/RLM/LRM) of those symbols and of date/time patterns are dropped (display hints) | ar-SA and fa-IR show `1,234,567.89` with national digit shaping instead of Arabic-Indic digits and separators in every format string |
+| LIST-CSV | `SLIST` is `,` unless the decimal separator is `,` (then `;`); CLDR's `list` symbol is the separator of numbers in running text (`;` for almost every locale) | en-US, en-GB, ja-JP, zh-CN fixed (ar-SA stays different) |
+| AMPM | see the table above | cs, ja, zh, tr keep their markers; de, fr, ru, pt stay empty |
+| SIGNPOSN | `IPOSSIGNPOSN` 3 when the currency symbol leads the amount (1 when the amount leads); `INEGSIGNPOSN` 3 for `-$1.1` (sign directly before the symbol) | en-US, en-GB, ja-JP |
+| ILDATE fix | weekday letters (`dddd`) no longer count as the day when ordering the long date | en-US `ILDATE` |
+| FULLWIDTH | fullwidth forms (U+FF01-FF5E, U+FFE0-FFE6) of the currency symbol and of the native names become their NFKC forms (Unicode compatibility mapping; the ANSI code pages have no fullwidth yen) | ja-JP `¥`; zh-CN `中文(中国)` |
+| LANG-SCRIPT | a language written in several scripts (zh, sr, uz, ...) is named with its script by the CLDR `localePattern` in `SENGLISHDISPLAYNAME`/`SLANGUAGE`, `SNATIVELANGNAME`, `SLOCALIZEDLANGUAGENAME` (`Chinese (Simplified, China)`); `SNATIVEDISPLAYNAME` keeps the region-only form | zh-CN |
+| CONSOLE | `SCONSOLEFALLBACKNAME` is the locale itself for Han, Kana and Hangul locales too (the console falls back to a CJK font) | ja-JP, zh-CN |
+| CAL-UMALQURA | CLDR calendarPreferenceData lists `gregorian` first for SA but also names `islamic-umalqura`, the civil calendar of the kingdom; when a territory's list has both, Umm al-Qura is the default calendar | ar-SA calendar (short/long date, month names in Um al-Qura) |
+| NAME-NBSP | the words of a multi-word month or day name are joined by a no-break space | he-IL day names, ar-SA month names |
+| Measured field selections | `LONG_DATE_NO_WEEKDAY = {ja, zh, ru}`: `SLONGDATE` (and the first long date of the calendar enumeration) is CLDR `dateFormats/long` instead of `full`; `SHORT_DATE_ISO = {ko}`: `SSHORTDATE` is the locale's `ca-generic` ISO 8601 short date (`y-MM-dd`) instead of `short`. Both pick ANOTHER pattern of the same locale's CLDR data; they are language lists chosen by score, not derived from CLDR, and are the one judgment call of round 3 (delete the two sets to drop them) | ja-JP, zh-CN, ko-KR .NET lines |
+
+Scored and NOT adopted (round 3): `SDURATION` with a two-digit hour when the time pattern has `HH` (fixes en-GB, de, fr; breaks zh, ru: net +1, no principle);
+`SSHORTESTAM/PM` of English when the locale's narrow marker is longer than one character (fixes cs, de, es; would break fr, ru); contextTransforms for months
+(ru and es carry identical rules, Windows capitalizes one of them); `th` and `hi` long dates (CLDR `long` of th carries an era, hi has no padded day).
+Not reachable from CLDR (no CLDR field carries the value): zero-padded short dates of es/pl/he/hi (CLDR short dates are `d/M/y`), `dd MMMM yyyy` of en-GB, `AM/PM` upper case of en-GB,
+the U+2019 group separator of de-CH (CLDR has the ASCII apostrophe only), `Sep`/`Mrz` abbreviations, he-IL and fa-IR currency/time layout, es-ES `alfabetizacion internacional`,
+the NitroOS culture count (CLDR full names 148 cultures, Windows 859), cs-CZ `ch` collation.
