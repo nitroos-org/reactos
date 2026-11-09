@@ -250,6 +250,9 @@ ApphelpCheckRunAppEx(
 }
 
 
+/* kernel32.dll */
+BOOL WINAPI BaseFlushAppcompatCache(VOID);
+
 /**
  * @name SdbRegisterDatabaseEx
  * Register an application compatibility database
@@ -375,6 +378,10 @@ BOOL WINAPI SdbRegisterDatabaseEx(
 
     SdbCloseDatabase(pdb);
 
+    /* The kernel cache of executables without a database entry was built without this database */
+    if (NT_SUCCESS(Status))
+        BaseFlushAppcompatCache();
+
     return NT_SUCCESS(Status);
 }
 
@@ -435,13 +442,16 @@ BOOL WINAPI SdbUnregisterDatabase(_In_ const GUID *pguidDB)
         SHIM_ERR("Unable to delete %wZ\n", &KeyName);
 
     NtClose(DbKey);
+
+    if (NT_SUCCESS(Status))
+        BaseFlushAppcompatCache();
+
     return NT_SUCCESS(Status);
 }
 
 
 /* kernel32.dll */
 BOOL WINAPI BaseDumpAppcompatCache(VOID);
-BOOL WINAPI BaseFlushAppcompatCache(VOID);
 
 
 /**

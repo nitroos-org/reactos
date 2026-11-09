@@ -22,7 +22,7 @@ static const char *BaseApiNames[] =
     "BasepRegisterWowExec", "BasepSoundSentryNotification", "BasepRefreshIniFileMapping",
     "BasepDefineDosDevice", "BasepSetTermsrvAppInstallMode", "BasepNlsUpdateCacheCount",
     "BasepSetTermsrvClientTimeZone", "BasepSxsCreateActivationContext", "BasepDebugProcessStop",
-    "BasepRegisterThread", "BasepNlsGetUserInfo",
+    "BasepRegisterThread", "BasepNlsGetUserInfo", "BasepUpdateAppcompatCache",
 };
 static const char *ConsoleApiNames[] =
 {
@@ -426,6 +426,8 @@ MEMBERS(InvalidateDIBits) = { H(CONSOLE_INVALIDATEDIBITS, ConsoleHandle), H(CONS
 MEMBERS(HardwareState) = { H(CONSOLE_GETSETHWSTATE, ConsoleHandle), H(CONSOLE_GETSETHWSTATE, OutputHandle),
     V(CONSOLE_GETSETHWSTATE, Flags), V(CONSOLE_GETSETHWSTATE, State) };
 MEMBERS(SoundSentry) = { V(BASE_SOUND_SENTRY, VideoMode) };
+MEMBERS(UpdateAppcompatCache) = { H(BASE_APPCOMPAT_CACHE_UPDATE, ImageHandle),
+    B(IN, BASE_APPCOMPAT_CACHE_UPDATE, ImageName, ImageNameLength, 1) };
 MEMBERS(EndTask) = { V(USER_END_TASK, LastError), H(USER_END_TASK, WndHandle), V(USER_END_TASK, Force),
     V(USER_END_TASK, Success) };
 MEMBERS(FillOutput) = { H(CONSOLE_FILLOUTPUTCODE, ConsoleHandle), H(CONSOLE_FILLOUTPUTCODE, OutputHandle),
@@ -435,8 +437,8 @@ MEMBERS(FillOutput) = { H(CONSOLE_FILLOUTPUTCODE, ConsoleHandle), H(CONSOLE_FILL
 #define SERVER_REQUEST(Server, Api, T, Name) { CSR_CREATE_API_NUMBER(Server, Api), \
     sizeof(WOW64_##T), sizeof(T), RTL_NUMBER_OF(Name##Members), Name##Members }
 #define REQUEST(Api, T, Name) SERVER_REQUEST(CONSRV_SERVERDLL_INDEX, Consolep##Api, T, Name)
-/* The last two entries are a base and a user server request, as small as the console ones: values and
- * handles only. Not translated (they end in UnsupportedApi): VDM requests, the console IME (conime.exe
+/* The last three entries are two base and a user server request, as small as the console ones: values,
+ * handles and (the appcompat cache update) one captured string. Not translated (they end in UnsupportedApi): VDM requests, the console IME (conime.exe
  * registers it), graphics screen buffers (a bitmap section), UserpDeviceEvent (the server only returns
  * STATUS_NOT_IMPLEMENTED, and its DEV_BROADCAST_HANDLE data is pointer-sized), the logon and service
  * registrations (winlogon and services only), and every request no client library sends. */
@@ -495,6 +497,7 @@ static const WOW64_CSR_REQUEST MemberRequests[] =
     REQUEST(GetHardwareState, CONSOLE_GETSETHWSTATE, HardwareState),
     REQUEST(SetHardwareState, CONSOLE_GETSETHWSTATE, HardwareState),
     SERVER_REQUEST(BASESRV_SERVERDLL_INDEX, BasepSoundSentryNotification, BASE_SOUND_SENTRY, SoundSentry),
+    SERVER_REQUEST(BASESRV_SERVERDLL_INDEX, BasepUpdateAppcompatCache, BASE_APPCOMPAT_CACHE_UPDATE, UpdateAppcompatCache),
     SERVER_REQUEST(USERSRV_SERVERDLL_INDEX, UserpEndTask, USER_END_TASK, EndTask),
 };
 #undef REQUEST
