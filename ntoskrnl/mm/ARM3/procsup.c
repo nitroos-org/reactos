@@ -1520,7 +1520,7 @@ MiCheckProcessCommitReturned(
          */
         DPRINT1("MM: pageable private commitment at %Iu pages, residue taken out of it\n",
                 MiGetPrivatePageableCommit());
-        MiReturnPrivateCommitCredit(Residue);
+        MiReturnPrivateCommitCredit(min(Residue, MiGetPrivatePageableCommit()));
         MiReturnProcessCommit(Process, Residue);
     }
 }

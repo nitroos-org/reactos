@@ -53,8 +53,8 @@ static volatile SIZE_T MiPageableCommittedPages;
  *
  * Only VADs marked PagerCommit charge here, for their whole CommitCharge, and
  * they give exactly that back (MI_IS_PAGER_COMMIT_VAD), so the count matches
- * what is charged. Returns are still clamped at 0 (an accounting defect only
- * makes the RAM-bound side stricter).
+ * what is charged. A return the count cannot match is an accounting defect: it
+ * is reported and ignored (MiReturnPrivateCommitCredit).
  */
 static volatile SIZE_T MiPrivatePageableCommit;
 
@@ -287,7 +287,7 @@ MiGetPrivatePageableCommit(VOID)
 
 /*
  * Private commitment of a pageable VAD went back (decommit, release, process
- * exit): it leaves the pageable count. Clamped at 0 (see MiPrivatePageableCommit).
+ * exit): it leaves the pageable count. A return above the count is ignored.
  * The plain commitment is returned by the caller as before.
  */
 VOID
@@ -300,11 +300,17 @@ MiReturnPrivateCommitCredit(
     if (Pages == 0)
         return;
 
-    /* A negative count (a VAD charge that went below 0) is an accounting defect: do not wipe the count with it */
-    if ((LONG_PTR)Pages < 0)
+    /*
+     * Every return matches a charge counted here before it, so it can never exceed
+     * the count. One that does is an accounting defect: a negative count, or a VAD
+     * CommitCharge (an unsigned bitfield) that wrapped below 0 and reads as a huge
+     * one. Do not wipe the count with it (that would make every other tier
+     * stricter for no reason): report it and leave the count alone.
+     */
+    if (((LONG_PTR)Pages < 0) || (Pages > *(volatile SIZE_T *)&MmTotalCommittedPages))
     {
-        DPRINT1("MiReturnPrivateCommitCredit: negative return %Id ignored (count %Iu)\n",
-                (LONG_PTR)Pages, MiPrivatePageableCommit);
+        DPRINT1("MiReturnPrivateCommitCredit: return of %Iu pages ignored (count %Iu, committed %Iu)\n",
+                Pages, MiPrivatePageableCommit, MmTotalCommittedPages);
         ASSERT(FALSE);
         return;
     }
@@ -312,9 +318,13 @@ MiReturnPrivateCommitCredit(
     do
     {
         Old = *(volatile SIZE_T *)&MiPrivatePageableCommit;
-        if (Old == 0)
+        if (Pages > Old)
+        {
+            DPRINT1("MiReturnPrivateCommitCredit: return of %Iu pages ignored, only %Iu counted\n", Pages, Old);
+            ASSERT(FALSE);
             return;
-        New = (Old > Pages) ? (Old - Pages) : 0;
+        }
+        New = Old - Pages;
     } while (InterlockedCompareExchangeSizeT(&MiPrivatePageableCommit, New, Old) != Old);
 }
 
