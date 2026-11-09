@@ -1579,6 +1579,20 @@ extern ULONG IopNumTriageDumpDataBlocks;
 extern PVOID IopTriageDumpDataBlocks[64];
 extern IO_BUS_TYPE_GUID_LIST PnpBusTypeGuidList;
 extern PDRIVER_OBJECT IopRootDriverObject;
+
+/* Nitro-private event ids of the IoLogMsg message table (IO facility, ids 0x7000 and up) */
+#define NITRO_ERR_DRIVER_MISSING_IMPORTS         ((NTSTATUS)0xC0047000L)
+#define NITRO_WARN_OB_CALLBACKS_NO_INTEGRITY     ((NTSTATUS)0x80047001L)
+
+/* System event log entry of source NitroKernel (error.c) */
+VOID
+NTAPI
+IopLogNitroEvent(
+    _In_ NTSTATUS ErrorCode,
+    _In_ NTSTATUS FinalStatus,
+    _In_ PCWSTR String1,
+    _In_opt_ PCWSTR String2,
+    _In_opt_ PCWSTR String3);
 extern KSPIN_LOCK IopDeviceActionLock;
 extern LIST_ENTRY IopDeviceActionRequestList;
 extern RESERVE_IRP_ALLOCATOR IopReserveIrpAllocator;
