@@ -223,6 +223,7 @@ struct address_space {
 	unsigned long flags;
 	unsigned int kshim_eager_wb;	/* write dirty folios back as soon as the mapping is full (block device) */
 	unsigned long kshim_pc_max;	/* folios kept before clean ones are dropped; 0: KSHIM_PC_MAX */
+	unsigned int kshim_dirty_hint;	/* set when a folio of the mapping was marked dirty; cleared by a scan that finds none (kshim_mapping_dirty) */
 };
 static inline gfp_t mapping_gfp_mask(struct address_space *m) { return m->gfp_mask; }
 static inline void mapping_set_gfp_mask(struct address_space *m, gfp_t g) { m->gfp_mask = g; }

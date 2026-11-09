@@ -101,12 +101,21 @@ bool is_subdir(struct dentry *a, struct dentry *b)
 	}
 }
 
+/*
+ * Whether a folio of @m is dirty.  A folio becomes dirty only through folio_mark_dirty, which sets the hint, so a mapping
+ * whose hint is clear has none (the scan below walks every cached folio of the mapping, and the metadata flush asks this
+ * of every inode, several times, for each commit); a scan that finds none clears the hint.  Callers hold the volume lock,
+ * which also orders the writers of the mapping.
+ */
 bool kshim_mapping_dirty(struct address_space *m)
 {
+	if (!m->kshim_dirty_hint)
+		return false;
 	for (int b = 0; b < KSHIM_PC_BUCKETS; b++)
 		for (struct folio *x = m->pc[b]; x; x = x->hnext)
 			if (folio_test_dirty(x))
 				return true;
+	m->kshim_dirty_hint = 0;
 	return false;
 }
 

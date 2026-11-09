@@ -642,21 +642,51 @@ static int cmp_ent(const void *a, const void *b)
 	return x < y ? -1 : x > y;
 }
 
-/* Writes to consecutive device offsets in transfers of up to KJ_BATCH bytes, an ATA command's maximum (buf NULL: one by one). */
+/*
+ * Writes of the journal I/O gathered into requests of up to KJ_BATCH bytes (an ATA command's maximum) to consecutive device
+ * offsets, and sent KJ_SEGS requests at a time, all in flight together (a pass of several runs, such as the in-place pass
+ * over scattered metadata pages, takes the time of its slowest request, not the sum).  Nothing in a pass depends on the
+ * order its requests complete: every pass is followed by a device flush, and the caller waits for the whole pass first.
+ * buf NULL: one request per call, one by one (no memory).
+ */
 #define KJ_BATCH (128 * 1024)
+#define KJ_BATCH_BUF (512 * 1024)
+#define KJ_SEGS 8
 struct kj_batch {
 	struct block_device *b;
 	u8 *buf;
-	u64 dev;
-	size_t len;
+	size_t cap;			/* bytes of buf */
+	size_t used;			/* bytes of buf filled by the segments */
+	unsigned int nseg;
+	struct { u64 dev; size_t off, len; } seg[KJ_SEGS];
 	int err;
 };
 
+static void kj_batch_init(struct kj_batch *w, struct block_device *b, unsigned long pages)
+{
+	size_t want = (size_t)pages * KJ_PAGE, cap = want < KJ_BATCH_BUF ? want : KJ_BATCH_BUF;
+	memset(w, 0, sizeof(*w));
+	w->b = b;
+	if (cap < KJ_BATCH)
+		cap = KJ_BATCH;
+	w->buf = kmalloc(cap, GFP_NOFS);
+	w->cap = w->buf ? cap : 0;
+}
+
 static void kj_batch_flush(struct kj_batch *w)
 {
-	if (w->len && !w->err && kj_dev_write(w->b, w->dev, w->buf, (unsigned int)w->len))
-		w->err = -EIO;
-	w->len = 0;
+	if (w->nseg && !w->err) {
+		struct ngos_iov iov[KJ_SEGS];
+		for (unsigned int i = 0; i < w->nseg; i++) {
+			iov[i].off = w->seg[i].dev;
+			iov[i].buf = w->buf + w->seg[i].off;
+			iov[i].len = (unsigned int)w->seg[i].len;
+		}
+		if (w->b->kshim_gone || w->b->kshim_frozen || ngos_dev_write_v(w->b->osdev, iov, w->nseg))
+			w->err = -EIO;
+	}
+	w->nseg = 0;
+	w->used = 0;
 }
 
 static void kj_batch_add(struct kj_batch *w, u64 dev, const void *data, size_t len)
@@ -668,12 +698,23 @@ static void kj_batch_add(struct kj_batch *w, u64 dev, const void *data, size_t l
 			w->err = -EIO;
 		return;
 	}
-	if (w->len && (w->dev + w->len != dev || w->len + len > KJ_BATCH))
+	if (w->nseg && w->seg[w->nseg - 1].dev + w->seg[w->nseg - 1].len == dev &&
+	    w->seg[w->nseg - 1].len + len <= KJ_BATCH && w->used + len <= w->cap) {
+		memcpy(w->buf + w->used, data, len);
+		w->seg[w->nseg - 1].len += len;
+		w->used += len;
+		return;
+	}
+	if (w->nseg == KJ_SEGS || w->used + len > w->cap)
 		kj_batch_flush(w);
-	if (!w->len)
-		w->dev = dev;
-	memcpy(w->buf + w->len, data, len);
-	w->len += len;
+	if (w->err)
+		return;
+	w->seg[w->nseg].dev = dev;
+	w->seg[w->nseg].off = w->used;
+	w->seg[w->nseg].len = len;
+	w->nseg++;
+	memcpy(w->buf + w->used, data, len);
+	w->used += len;
 }
 
 static void kj_apply_ent(struct kj_batch *w, struct kj_ent *e)
@@ -697,7 +738,8 @@ static void kj_apply_ent(struct kj_batch *w, struct kj_ent *e)
 /* In place, in block order (v sorted), adjacent pages in one transfer. */
 static int kj_apply(struct block_device *b, struct kj_ent **v, unsigned long n)
 {
-	struct kj_batch w = { b, kmalloc(KJ_BATCH, GFP_NOFS), 0, 0, 0 };
+	struct kj_batch w;
+	kj_batch_init(&w, b, n);
 	for (unsigned long i = 0; i < n && !w.err; i++)
 		kj_apply_ent(&w, v[i]);
 	kj_batch_flush(&w);
@@ -708,7 +750,7 @@ static int kj_apply(struct block_device *b, struct kj_ent **v, unsigned long n)
 /* In place without allocating (the out-of-memory fallback). */
 static int kj_apply_buckets(struct block_device *b, struct kshim_jnl *j)
 {
-	struct kj_batch w = { b, NULL, 0, 0, 0 };
+	struct kj_batch w = { .b = b };
 	for (int i = 0; i < KJ_BUCKETS && !w.err; i++)
 		for (struct kj_ent *e = j->hash[i]; e && !w.err; e = e->next)
 			kj_apply_ent(&w, e);
@@ -778,7 +820,8 @@ static int kj_run_tx(struct block_device *b, struct kshim_jnl *j, struct kj_ent 
 		return -ENOMEM;
 	{
 		/* Descriptor and data slots, adjacent slots in one transfer. */
-		struct kj_batch w = { b, kmalloc(KJ_BATCH, GFP_NOFS), 0, 0, 0 };
+		struct kj_batch w;
+		kj_batch_init(&w, b, ndesc + n);
 		for (unsigned long p = 0; p < ndesc && !w.err; p++) {
 			u64 dev;
 			memset(d, 0, KJ_PAGE);

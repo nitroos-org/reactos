@@ -1073,6 +1073,8 @@ unsigned long kshim_counter_dirty;
 bool folio_mark_dirty(struct folio *f)
 {
 	kshim_counter_dirty++;
+	if (f->mapping)
+		f->mapping->kshim_dirty_hint = 1;
 	if (f->mapping && f->mapping->host)
 		f->mapping->host->i_state |= I_DIRTY_PAGES;
 	return !test_and_set_bit(PG_dirty, &f->flags);
@@ -1443,7 +1445,11 @@ struct inode *find_inode_nowait(struct super_block *sb, unsigned long hashval,
 	mutex_unlock(&kshim_inode_lock);
 	return ret;
 }
-/* References every live, hashed inode of @sb into a new array (for the sync loop); returns the count. */
+/*
+ * References every live, hashed inode of @sb that has unwritten changes (dirty state or a dirty folio) into a new array
+ * (for the sync loop and its dirty test); returns the count.  The loop wrote every inode of the volume's cache back
+ * into this array and dropped the references again, a thousand inodes and more, for each commit.
+ */
 int kshim_inodes_snapshot(struct super_block *sb, struct inode ***out)
 {
 	struct inode **v;
@@ -1455,6 +1461,8 @@ int kshim_inodes_snapshot(struct super_block *sb, struct inode ***out)
 	if (v) {
 		for (struct inode *i = sb->kshim_inodes; i && n < cap; i = i->kshim_next) {
 			if (i->i_state & (I_FREEING | I_NEW))
+				continue;
+			if (!(i->i_state & I_DIRTY) && !kshim_mapping_dirty(i->i_mapping))
 				continue;
 			atomic_inc(&i->i_count);
 			v[n++] = i;
