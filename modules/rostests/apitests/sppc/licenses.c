@@ -81,7 +81,14 @@ START_TEST(licenses)
         "SLGetLicense", "SLGetLicenseFileId", "SLGetLicenseInformation", "SLGetLicensingStatusInformation",
         "SLGetPKeyInformation", "SLGetPolicyInformationDWORD", "SLGetSLIDList", "SLGetWindowsInformationDWORD",
         "SLInstallLicense", "SLInstallProofOfPurchase", "SLOpen", "SLPersistApplicationPolicies",
-        "SLPersistRTSPayloadOverride", "SLUninstallLicense", "SLUninstallProofOfPurchase"
+        "SLPersistRTSPayloadOverride", "SLUninstallLicense", "SLUninstallProofOfPurchase",
+        "SLGetPolicyInformation", "SLGetServiceInformation", "SLGetProductSkuInformation",
+        "SLGenerateOfflineInstallationId", "SLDepositOfflineConfirmationId",
+#ifdef _WIN64
+        /* Office 64-bit resolves the whole table by name and does not run when one is missing */
+        "SLGetPKeyId", "SLReArm", "SLRegisterPlugin", "SLSetAuthenticationData", "SLGetAuthenticationResult",
+        "SLLoadApplicationPolicies", "SLUnloadApplicationPolicies", "SLGetApplicationPolicy",
+#endif
     };
     UINT i;
 
@@ -233,6 +240,78 @@ START_TEST(licenses)
     if (Blob)
         LocalFree(Blob);
 
+    /* The status query (measured on Windows 10 22H2: no id, and an application without a license) */
+    {
+        typedef HRESULT (WINAPI *PFN_STATUS)(HSLC, const SLID *, const SLID *, PCWSTR, UINT *, SL_LICENSING_STATUS **);
+        typedef HRESULT (WINAPI *PFN_INFO5)(HSLC, PCWSTR, SLDATATYPE *, UINT *, PBYTE *);
+        typedef HRESULT (WINAPI *PFN_SKUINFO)(HSLC, const SLID *, PCWSTR, SLDATATYPE *, UINT *, PBYTE *);
+        typedef HRESULT (WINAPI *PFN_GENID)(HSLC, const SLID *, PWSTR *);
+        typedef HRESULT (WINAPI *PFN_DEPOSIT)(HSLC, const SLID *, PCWSTR, PCWSTR);
+        PFN_STATUS pStatus = (PFN_STATUS)GetProcAddress(Sppc, "SLGetLicensingStatusInformation");
+        PFN_INFO5 pPolicy = (PFN_INFO5)GetProcAddress(Sppc, "SLGetPolicyInformation");
+        PFN_INFO5 pService = (PFN_INFO5)GetProcAddress(Sppc, "SLGetServiceInformation");
+        PFN_SKUINFO pSkuInfo = (PFN_SKUINFO)GetProcAddress(Sppc, "SLGetProductSkuInformation");
+        PFN_GENID pGenId = (PFN_GENID)GetProcAddress(Sppc, "SLGenerateOfflineInstallationId");
+        PFN_DEPOSIT pDeposit = (PFN_DEPOSIT)GetProcAddress(Sppc, "SLDepositOfflineConfirmationId");
+        SL_LICENSING_STATUS *Status = NULL;
+        PWSTR Text = (PWSTR)1;
+        UINT cnt = 77;
+
+        hr = pStatus(Slc, NULL, NULL, NULL, &cnt, &Status);
+        ok(hr == (HRESULT)0xC004F002L && cnt == 0 && Status == NULL, "status without ids: 0x%lx count %u\n", hr, cnt);
+        hr = pStatus(Slc, &Zero, NULL, NULL, &cnt, &Status);
+        ok(hr == SL_E_PRODUCT_SKU_NOT_INSTALLED && cnt == 0 && Status == NULL, "status of an application without license: 0x%lx count %u\n", hr, cnt);
+        hr = pStatus(NULL, &g_App, NULL, NULL, &cnt, &Status);
+        ok(hr == E_HANDLE, "status with no handle: 0x%lx\n", hr);
+        hr = pStatus(Slc, &g_App, NULL, NULL, NULL, &Status);
+        ok(hr == E_INVALIDARG, "status without a count: 0x%lx\n", hr);
+        /* other licenses of the same application may be installed (Office): the SKU is one of the entries */
+        hr = pStatus(Slc, &g_App, NULL, NULL, &cnt, &Status);
+        ok(hr == S_OK && cnt >= 1 && Status != NULL, "status of the installed application: 0x%lx count %u\n", hr, cnt);
+        if (hr == S_OK && Status)
+        {
+            UINT k;
+            BOOL Found = FALSE;
+
+            for (k = 0; k < cnt; k++)
+            {
+                ok(Status[k].eStatus == SL_LICENSING_STATUS_UNLICENSED, "status %d: no product key was ever installed\n", Status[k].eStatus);
+                if (IsEqualGUID(&Status[k].SkuId, &g_Sku))
+                    Found = TRUE;
+            }
+            ok(Found, "the installed SKU is not in the status list\n");
+        }
+        if (Status)
+            LocalFree(Status);
+        Status = NULL;
+        hr = pStatus(Slc, NULL, &g_Sku, NULL, &cnt, &Status);
+        ok(hr == S_OK && cnt == 1 && Status && IsEqualGUID(&Status[0].SkuId, &g_Sku), "status of the SKU: 0x%lx count %u\n", hr, cnt);
+        if (Status)
+            LocalFree(Status);
+
+        /* The entry points of the service */
+        Blob = (PBYTE)1; cb = 9;
+        hr = pPolicy(Slc, L"Office-NoSuchPolicy", &Type, &cb, &Blob);
+        ok(hr == SL_E_VALUE_NOT_FOUND && cb == 0 && Blob == NULL, "SLGetPolicyInformation: 0x%lx\n", hr);
+        hr = pPolicy(NULL, L"x", &Type, &cb, &Blob);
+        ok(hr == E_HANDLE, "SLGetPolicyInformation with no handle: 0x%lx\n", hr);
+        hr = pPolicy(Slc, NULL, &Type, &cb, &Blob);
+        ok(hr == E_INVALIDARG, "SLGetPolicyInformation without a name: 0x%lx\n", hr);
+        Blob = (PBYTE)1; cb = 9;
+        hr = pService(Slc, L"ActivePlugins", &Type, &cb, &Blob);
+        ok(hr == SL_E_VALUE_NOT_FOUND && cb == 0 && Blob == NULL, "SLGetServiceInformation: 0x%lx\n", hr);
+        hr = pService(Slc, L"ActivePlugins", &Type, NULL, &Blob);
+        ok(hr == E_INVALIDARG, "SLGetServiceInformation without a size: 0x%lx\n", hr);
+        hr = pSkuInfo(Slc, &g_Sku, L"Name", &Type, &cb, &Blob);
+        ok(hr == SL_E_VALUE_NOT_FOUND, "SLGetProductSkuInformation of an installed SKU: 0x%lx\n", hr);
+        hr = pSkuInfo(Slc, &Zero, L"Name", &Type, &cb, &Blob);
+        ok(hr == SL_E_PRODUCT_SKU_NOT_INSTALLED, "SLGetProductSkuInformation of an unknown SKU: 0x%lx\n", hr);
+        hr = pGenId(Slc, &g_Sku, &Text);
+        ok(hr == SL_E_NOT_SUPPORTED && Text == NULL, "SLGenerateOfflineInstallationId: 0x%lx\n", hr);
+        hr = pDeposit(Slc, &g_Sku, L"1", L"2");
+        ok(hr == SL_E_NOT_SUPPORTED, "SLDepositOfflineConfirmationId: 0x%lx\n", hr);
+    }
+
     /* Uninstall: the file and its licenses are gone */
     hr = pUninstall(Slc, &File);
     ok(hr == S_OK, "SLUninstallLicense returned 0x%lx\n", hr);
@@ -253,6 +332,15 @@ START_TEST(licenses)
     Blob = NULL;
     hr = pGetInfo(Slc, &g_IdA, L"licenseType", NULL, &cb, &Blob);
     ok(hr == SL_E_VALUE_NOT_FOUND, "information of an uninstalled license: 0x%lx\n", hr);
+
+    {
+        typedef HRESULT (WINAPI *PFN_STATUS)(HSLC, const SLID *, const SLID *, PCWSTR, UINT *, SL_LICENSING_STATUS **);
+        SL_LICENSING_STATUS *Status = NULL;
+        UINT cnt = 5;
+
+        hr = ((PFN_STATUS)GetProcAddress(Sppc, "SLGetLicensingStatusInformation"))(Slc, NULL, &g_Sku, NULL, &cnt, &Status);
+        ok(hr == SL_E_PRODUCT_SKU_NOT_INSTALLED && cnt == 0, "status of the SKU after the uninstall: 0x%lx count %u\n", hr, cnt);
+    }
 
     /* Closed handle */
     hr = pClose(Slc);
