@@ -194,6 +194,211 @@ IopConnectInterruptExFullySpecific(
     return Status;
 }
 
+/*
+ * Scan the translated resources allocated to a device for its interrupts.
+ * Returns the number of line-based descriptors in *LineCount, the number of
+ * message-signaled ones in *MessageCount and, when there is at least one
+ * line-based descriptor, a copy of the first one in *FirstLine.
+ */
+static
+NTSTATUS
+IopScanTranslatedInterrupts(
+    _In_ PDEVICE_OBJECT PhysicalDeviceObject,
+    _Out_ PULONG LineCount,
+    _Out_ PULONG MessageCount,
+    _Out_ PCM_PARTIAL_RESOURCE_DESCRIPTOR FirstLine)
+{
+    PDEVICE_NODE DeviceNode;
+    PCM_RESOURCE_LIST List;
+    PCM_FULL_RESOURCE_DESCRIPTOR Full;
+    ULONG i, j;
+
+    PAGED_CODE();
+
+    *LineCount = 0;
+    *MessageCount = 0;
+
+    if (!PhysicalDeviceObject || !PhysicalDeviceObject->DeviceObjectExtension)
+        return STATUS_INVALID_PARAMETER;
+
+    DeviceNode = IopGetDeviceNode(PhysicalDeviceObject);
+    if (!DeviceNode)
+        return STATUS_INVALID_PARAMETER;
+
+    /* No resources assigned (not started or none needed): nothing to connect */
+    List = DeviceNode->ResourceListTranslated;
+    if (!List)
+        return STATUS_SUCCESS;
+
+    Full = &List->List[0];
+    for (i = 0; i < List->Count; i++)
+    {
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR Desc = Full->PartialResourceList.PartialDescriptors;
+
+        for (j = 0; j < Full->PartialResourceList.Count; j++)
+        {
+            if (Desc->Type == CmResourceTypeInterrupt)
+            {
+                if (Desc->Flags & CM_RESOURCE_INTERRUPT_MESSAGE)
+                {
+                    (*MessageCount)++;
+                }
+                else
+                {
+                    if (*LineCount == 0)
+                        *FirstLine = *Desc;
+                    (*LineCount)++;
+                }
+            }
+
+            /* Descriptors are variable-sized only when they carry device data */
+            if (Desc->Type == CmResourceTypeDeviceSpecific)
+                Desc = (PCM_PARTIAL_RESOURCE_DESCRIPTOR)
+                       ((ULONG_PTR)(Desc + 1) + Desc->u.DeviceSpecificData.DataSize);
+            else
+                Desc++;
+        }
+
+        Full = (PCM_FULL_RESOURCE_DESCRIPTOR)Desc;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/*
+ * Connect the (single) line-based translated interrupt of a device.
+ * Windows behaviour not covered here, to be verified on the oracle: devices
+ * with more than one line-based interrupt, and the exact status for a device
+ * without any (we return STATUS_NOT_FOUND / STATUS_NOT_SUPPORTED).
+ */
+static
+NTSTATUS
+IopConnectInterruptLineBased(
+    _In_ PDEVICE_OBJECT PhysicalDeviceObject,
+    _Out_ PKINTERRUPT *InterruptObject,
+    _In_ PKSERVICE_ROUTINE ServiceRoutine,
+    _In_ PVOID ServiceContext,
+    _In_opt_ PKSPIN_LOCK SpinLock,
+    _In_ KIRQL SynchronizeIrql,
+    _In_ BOOLEAN FloatingSave)
+{
+    CM_PARTIAL_RESOURCE_DESCRIPTOR Desc;
+    ULONG LineCount, MessageCount;
+    KIRQL Irql;
+    KAFFINITY Affinity;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    *InterruptObject = NULL;
+
+    if (!ServiceRoutine)
+        return STATUS_INVALID_PARAMETER;
+
+    Status = IopScanTranslatedInterrupts(PhysicalDeviceObject, &LineCount, &MessageCount, &Desc);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (LineCount == 0)
+    {
+        DPRINT1("IoConnectInterruptEx: device has no line-based interrupt resource (%lu message)\n",
+                MessageCount);
+        return STATUS_NOT_FOUND;
+    }
+
+    if (LineCount > 1)
+    {
+        /* Multiple line interrupts are not supported yet: refuse rather than guess */
+        DPRINT1("IoConnectInterruptEx: %lu line-based interrupts, only one is supported\n", LineCount);
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    Irql = (KIRQL)Desc.u.Interrupt.Level;
+    if (SynchronizeIrql < Irql)
+        SynchronizeIrql = Irql;
+
+    Affinity = Desc.u.Interrupt.Affinity;
+    if (!Affinity)
+        Affinity = (KAFFINITY)-1;
+
+    Status = IoConnectInterrupt(InterruptObject,
+                                ServiceRoutine,
+                                ServiceContext,
+                                SpinLock,
+                                Desc.u.Interrupt.Vector,
+                                Irql,
+                                SynchronizeIrql,
+                                (Desc.Flags & CM_RESOURCE_INTERRUPT_LATCHED) ? Latched : LevelSensitive,
+                                Desc.ShareDisposition == CmResourceShareShared,
+                                Affinity,
+                                FloatingSave);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("IoConnectInterruptEx: line-based IoConnectInterrupt failed 0x%lx\n", Status);
+    return Status;
+}
+
+static
+NTSTATUS
+IopConnectInterruptExMessageBased(
+    _Inout_ PIO_CONNECT_INTERRUPT_PARAMETERS Parameters)
+{
+    PDEVICE_OBJECT Pdo = Parameters->MessageBased.PhysicalDeviceObject;
+    PKSERVICE_ROUTINE Fallback = Parameters->MessageBased.FallBackServiceRoutine;
+    PVOID Context = Parameters->MessageBased.ServiceContext;
+    PKSPIN_LOCK SpinLock = Parameters->MessageBased.SpinLock;
+    KIRQL SyncIrql = Parameters->MessageBased.SynchronizeIrql;
+    BOOLEAN Floating = Parameters->MessageBased.FloatingSave;
+    PVOID *Out = Parameters->MessageBased.ConnectionContext.Generic;
+    PKINTERRUPT Interrupt;
+    CM_PARTIAL_RESOURCE_DESCRIPTOR Desc;
+    ULONG LineCount, MessageCount;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (!Out || !Parameters->MessageBased.MessageServiceRoutine)
+        return STATUS_INVALID_PARAMETER;
+
+    *Out = NULL;
+
+    Status = IopScanTranslatedInterrupts(Pdo, &LineCount, &MessageCount, &Desc);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (MessageCount != 0)
+    {
+        /*
+         * The device was given message-signaled interrupts. Connecting them
+         * (IO_INTERRUPT_MESSAGE_INFO table, per-message vectors) is not
+         * implemented: report that instead of claiming a connection.
+         */
+        DPRINT1("IoConnectInterruptEx: message-based connection is not implemented\n");
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    /* No message resources: documented fallback to the line-based interrupt */
+    if (!Fallback)
+    {
+        DPRINT1("IoConnectInterruptEx: no message resources and no fallback routine\n");
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    Status = IopConnectInterruptLineBased(Pdo,
+                                          &Interrupt,
+                                          Fallback,
+                                          Context,
+                                          SpinLock,
+                                          SyncIrql,
+                                          Floating);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* ConnectionContext shares its offset with LineBased.InterruptObject */
+    Parameters->Version = CONNECT_LINE_BASED;
+    *Out = Interrupt;
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS
 NTAPI
 IoConnectInterruptEx(
@@ -209,14 +414,21 @@ IoConnectInterruptEx(
             //TODO: We don't do anything for the group type
             return IopConnectInterruptExFullySpecific(Parameters);
         case CONNECT_MESSAGE_BASED:
-            DPRINT1("FIXME: Message based interrupts are UNIMPLEMENTED\n");
-            break;
+            return IopConnectInterruptExMessageBased(Parameters);
         case CONNECT_LINE_BASED:
-            DPRINT1("FIXME: Line based interrupts are UNIMPLEMENTED\n");
-            break;
+            if (!Parameters->LineBased.InterruptObject)
+                return STATUS_INVALID_PARAMETER;
+            return IopConnectInterruptLineBased(Parameters->LineBased.PhysicalDeviceObject,
+                                                Parameters->LineBased.InterruptObject,
+                                                Parameters->LineBased.ServiceRoutine,
+                                                Parameters->LineBased.ServiceContext,
+                                                Parameters->LineBased.SpinLock,
+                                                Parameters->LineBased.SynchronizeIrql,
+                                                Parameters->LineBased.FloatingSave);
     }
 
-    return STATUS_SUCCESS;
+    DPRINT1("IoConnectInterruptEx: unknown Version %lu\n", Parameters->Version);
+    return STATUS_INVALID_PARAMETER;
 }
 
 VOID
@@ -226,9 +438,30 @@ IoDisconnectInterruptEx(
 {
     PAGED_CODE();
 
-    //FIXME: This eventually will need to handle more cases
-    if (Parameters->ConnectionContext.InterruptObject)
-        IoDisconnectInterrupt(Parameters->ConnectionContext.InterruptObject);
+    switch (Parameters->Version)
+    {
+        case CONNECT_FULLY_SPECIFIED:
+        case CONNECT_FULLY_SPECIFIED_GROUP:
+        case CONNECT_LINE_BASED:
+            /* All three are plain KINTERRUPT connections made by IoConnectInterrupt */
+            if (Parameters->ConnectionContext.InterruptObject)
+                IoDisconnectInterrupt(Parameters->ConnectionContext.InterruptObject);
+            break;
+
+        case CONNECT_MESSAGE_BASED:
+            /*
+             * IoConnectInterruptEx never hands out a message table yet, so
+             * ConnectionContext.InterruptMessageTable (which aliases
+             * InterruptObject) cannot be one of ours: do not misread it as a
+             * KINTERRUPT.
+             */
+            DPRINT1("IoDisconnectInterruptEx: message-based disconnect without a connection\n");
+            break;
+
+        default:
+            DPRINT1("IoDisconnectInterruptEx: unknown Version %lu\n", Parameters->Version);
+            break;
+    }
 }
 
 /* EOF */
