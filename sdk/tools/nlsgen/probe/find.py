@@ -25,7 +25,6 @@ for l in ch:
             for p, v in walk(d, []):
                 if not isinstance(v, str):
                     continue
-                if "ca-gregorian" in n and "/dayPeriods/" in "/".join(p) and False: pass
                 for t in targets:
                     if v == t or g.ldml_to_win(v) == t or v.replace(" ", " ").replace(" ", " ") == t:
                         print(l, n.split("/")[0].replace("cldr-", ""), "/".join(p[2:]), "=", repr(v))
