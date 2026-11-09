@@ -77,7 +77,12 @@ void __seh2_scope_exit(volatile struct __seh2_scope* Scope)
     __label__ __seh2$$end_try__;                                                    \
     __label__ __seh2$$setup__;                                                      \
     volatile struct __seh2_scope __seh2$$scope__                                    \
-        __attribute__((cleanup(__seh2_scope_exit))) = {0, __builtin_frame_address(0), 0}; \
+        __attribute__((cleanup(__seh2_scope_exit)));                                \
+    /* Member by member: an aggregate initializer is built in a temporary and       \
+       copied with a 16-byte load of two just-stored words (a failed store          \
+       forward, about 12 cycles, on every system call that has a try block) */      \
+    __seh2$$scope__.Handler = 0;                                                    \
+    __seh2$$scope__.Frame = __builtin_frame_address(0);                             \
     __asm__ __volatile__("mov %%rsp, %0" : "=m"(__seh2$$scope__.Stack));              \
     goto __seh2$$setup__;                                                          \
     /*                                                                              \
