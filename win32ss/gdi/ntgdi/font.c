@@ -795,7 +795,8 @@ NtGdiGetFontUnicodeRanges(
      ExFreePoolWithTag(pgsSafe, GDITAG_TEXT);
   }
 Exit:
-  TEXTOBJ_UnlockText(TextObj);
+  if (TextObj)
+     TEXTOBJ_UnlockText(TextObj);
   DC_UnlockDc(pDc);
   return Size;
 }
@@ -1200,12 +1201,18 @@ NtGdiGetRealizationInfo(
   }
   pdcattr = pDc->pdcattr;
   pTextObj = RealizeFontInit(pdcattr->hlfntNew);
-  ASSERT(pTextObj != NULL);
-  pFontGdi = ObjToGDI(pTextObj->Font, FONT);
-  TEXTOBJ_UnlockText(pTextObj);
   DC_UnlockDc(pDc);
+  if (pTextObj == NULL)
+  {
+     /* hlfntNew is in the user-writable DC_ATTR: it may name nothing */
+     EngSetLastError(ERROR_INVALID_HANDLE);
+     return FALSE;
+  }
 
+  /* The realization stays locked, and with it the font it holds, while the font is read */
+  pFontGdi = ObjToGDI(pTextObj->Font, FONT);
   Ret = ftGdiRealizationInfo(pFontGdi, &ri);
+  TEXTOBJ_UnlockText(pTextObj);
   if (Ret)
   {
      if (pri)
