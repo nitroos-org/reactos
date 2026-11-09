@@ -170,8 +170,9 @@ NtUserGetRawInputDeviceInfo(
                 ProbeForRead(&prdi->cbSize, sizeof(prdi->cbSize), sizeof(DWORD));
                 if (prdi->cbSize != cbRequiredSize)
                 {
+                    /* A failure: breaking out of the switch would fall into the success result */
                     EngSetLastError(ERROR_INVALID_PARAMETER);
-                    _SEH2_YIELD(break);
+                    _SEH2_LEAVE;
                 }
 
                 ProbeForWrite(prdi, sizeof(*prdi), sizeof(DWORD));
