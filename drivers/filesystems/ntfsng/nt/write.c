@@ -309,7 +309,10 @@ VOID NgApplyModified(PNG_FCB Fcb)
 static LONGLONG NgCachedLimit(PNG_FCB Fcb)
 {
     LONGLONG End = max(Fcb->CachedEnd, Fcb->Header.AllocationSize.QuadPart);
-    return ((End + NG_VACB_SIZE - 1) & ~(LONGLONG)(NG_VACB_SIZE - 1)) + NG_VACB_SIZE;
+    /* The section is no larger than the allocation, so no page lies past it; the range is not padded by a view or two:
+     * Mm visits every page of a named range (about 1 us each), and 128 of them made every delete and flush of a small
+     * cached file cost 100 us. */
+    return (End + PAGE_SIZE - 1) & ~(LONGLONG)(PAGE_SIZE - 1);
 }
 
 VOID NgFlushStream(PNG_FCB Fcb, PIO_STATUS_BLOCK Iosb)
@@ -348,7 +351,7 @@ BOOLEAN NgPurgeFrom(PNG_FCB Fcb, LONGLONG Start)
     /* Cc's views first (its view walk handles an open end correctly), then Mm's pages by range. */
     Li.QuadPart = Start;
     Ok = CcPurgeCacheSection(&Fcb->SectionObjectPointers, &Li, 0, FALSE);
-    for (; Ok && Li.QuadPart < End; Li.QuadPart += NG_RANGE_CHUNK)
+    for (; Ok && Fcb->SectionObjectPointers.DataSectionObject && Li.QuadPart < End; Li.QuadPart += NG_RANGE_CHUNK)
         Ok = CcPurgeCacheSection(&Fcb->SectionObjectPointers, &Li,
                                  (ULONG)min(End - Li.QuadPart, (LONGLONG)NG_RANGE_CHUNK), FALSE);
     return Ok;

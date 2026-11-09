@@ -908,7 +908,11 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
      * (comparison, fallback: every FCB whose data Mm caches lives until Mm lets the pages go). */
     NgGlobal.FcbCacheMax = NgReadDword(RegistryPath, L"FcbCacheMax");
     if (!NgGlobal.FcbCacheMax)
-        NgGlobal.FcbCacheMax = NG_FCB_CACHE_DEFAULT;
+    {
+        /* 1024 on a small machine; more with memory (about one per 256 KB of RAM, up to 32768). */
+        ULONG Scaled = (ULONG)(ngos_physical_pages() / 64);
+        NgGlobal.FcbCacheMax = Scaled > 32768 ? 32768 : Scaled < NG_FCB_CACHE_DEFAULT ? NG_FCB_CACHE_DEFAULT : Scaled;
+    }
     if (NgReadDword(RegistryPath, L"NoFcbTrim"))
         NgGlobal.FcbCacheMax = MAXULONG;
     /* NoUnlockedCommit=1: every commit is synchronous under CoreLock, as before the journal I/O left it (comparison, fallback). */
