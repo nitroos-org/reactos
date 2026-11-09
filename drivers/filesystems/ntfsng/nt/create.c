@@ -1973,7 +1973,7 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PNG_FCB Fcb = FileObject->FsContext;
     PNG_CCB Ccb = FileObject->FsContext2;
     PNG_VCB Vcb = DeviceObject->DeviceExtension;
-    BOOLEAN Last, Delete, Posix = FALSE;
+    BOOLEAN Last, Delete, Posix = FALSE, DeferPurge = FALSE;
 
     if (Fcb->IsDirectory && Vcb->NotifySync && Ccb)
         FsRtlNotifyCleanup(Vcb->NotifySync, &Vcb->DirNotifyList, Ccb);
@@ -2056,7 +2056,14 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             {
                 CcUninitializeCacheMap(FileObject, &Zero, NULL);
                 if (Fcb->SectionObjectPointers.SharedCacheMap || Fcb->SectionObjectPointers.DataSectionObject)
-                    NgPurgeFrom(Fcb, 0);
+                {
+                    /* The data of a deleted file is dropped by the flusher thread, once the file is gone (below):
+                     * tearing the segment down is a third of the delete. */
+                    if (NgCanQueueDeletedPurge(Vcb))
+                        DeferPurge = TRUE;
+                    else
+                        NgPurgeFrom(Fcb, 0);
+                }
             }
         }
         else
@@ -2070,6 +2077,8 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     if (Delete)
     {
         NgDeleteNow(Fcb, FALSE);
+        if (DeferPurge && !NgQueueDeletedPurge(Fcb))
+            NgPurgeFrom(Fcb, 0);
     }
     else if (Fcb->Modified && Fcb->HasNode)
     {

@@ -47,6 +47,7 @@ CcInitializeCacheManager(VOID)
     ULONG Thread;
 
     CcInitView();
+    KeInitializeEvent(&CcWriteBehindProgress, NotificationEvent, FALSE);
 
     /* Initialize lazy-writer lists */
     InitializeListHead(&CcIdleWorkerThreadList);

@@ -268,7 +268,7 @@ static GENERIC_MAPPING MmpSectionMapping =
 
 
 /* Adjacent dirty pages of a data file that one flush writes with one paging write (64 KB) */
-#define MM_FLUSH_CLUSTER_PAGES 16
+#define MM_FLUSH_CLUSTER_PAGES 64
 
 static
 NTSTATUS
