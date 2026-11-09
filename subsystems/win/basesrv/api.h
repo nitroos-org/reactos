@@ -10,6 +10,8 @@
 
 /* appcompat.c */
 CSR_API(BaseSrvCheckApplicationCompatibility);
+CSR_API(BaseSrvUpdateAppcompatCache);
+VOID BaseSrvValidateAppcompatCache(VOID);
 
 /* dosdev.c */
 VOID BaseInitDefineDosDevice(VOID);

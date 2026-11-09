@@ -351,10 +351,12 @@ typedef struct { ULONG ConsoleHandle, OutputHandle; ULONG CmdIdLow, CmdIdHigh; U
 typedef struct { ULONG ConsoleHandle, OutputHandle; SMALL_RECT Region; } WOW64_CONSOLE_INVALIDATEDIBITS;
 typedef struct { ULONG ConsoleHandle, OutputHandle; ULONG Flags, State; } WOW64_CONSOLE_GETSETHWSTATE;
 typedef struct { ULONG VideoMode; } WOW64_BASE_SOUND_SENTRY;
+typedef struct { ULONG ImageHandle; ULONG ImageNameLength; ULONG ImageName; } WOW64_BASE_APPCOMPAT_CACHE_UPDATE;
 typedef struct { DWORD LastError; ULONG WndHandle; BOOL Force, Success; } WOW64_USER_END_TASK;
 C_ASSERT(sizeof(WOW64_CONSOLE_SETICON) == 8 && sizeof(WOW64_CONSOLE_SETCURSOR) == 12);
 C_ASSERT(sizeof(WOW64_CONSOLE_SETPALETTE) == 16 && sizeof(WOW64_CONSOLE_MENUCONTROL) == 20);
 C_ASSERT(sizeof(WOW64_CONSOLE_INVALIDATEDIBITS) == 16 && sizeof(WOW64_CONSOLE_GETSETHWSTATE) == 16);
+C_ASSERT(sizeof(WOW64_BASE_APPCOMPAT_CACHE_UPDATE) == 12);
 C_ASSERT(sizeof(WOW64_BASE_SOUND_SENTRY) == 4 && sizeof(WOW64_USER_END_TASK) == 16);
 
 C_ASSERT(sizeof(WOW64_USER_EXIT_REACTOS) == sizeof(USER_EXIT_REACTOS));
