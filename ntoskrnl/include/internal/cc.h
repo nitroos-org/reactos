@@ -485,6 +485,9 @@ VOID
 CcScheduleLazyWriteScan(BOOLEAN NoDelay);
 
 VOID
+CcKickStreamingWriteBehind(VOID);
+
+VOID
 CcPostDeferredWrites(VOID);
 
 VOID

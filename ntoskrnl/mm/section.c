@@ -267,8 +267,21 @@ static GENERIC_MAPPING MmpSectionMapping =
 
 
 
-/* Adjacent dirty pages of a data file that one flush writes with one paging write (64 KB) */
-#define MM_FLUSH_CLUSTER_PAGES 64
+/*
+ * Adjacent dirty pages of a data file that one flush writes with one paging write (1 MB: a disk request costs
+ * the same fixed time whatever its size, so write-back in 256 KB requests ran at about 2/3 of what a 1 MB one
+ * reaches).  The page list and the MDL are pool memory; when pool is short the cluster is MM_FLUSH_STACK_PAGES (64 KB).
+ */
+#define MM_FLUSH_CLUSTER_PAGES 256
+#define MM_FLUSH_STACK_PAGES 16
+#define MM_FLUSH_MDL_WORDS(n) ((sizeof(MDL) + sizeof(PFN_NUMBER) - 1) / sizeof(PFN_NUMBER) + (n))
+#define TAG_MM_FLUSH 'lFmM'
+
+typedef struct _MM_FLUSH_BUFFER
+{
+    PFN_NUMBER Pages[MM_FLUSH_CLUSTER_PAGES];
+    PFN_NUMBER MdlBuffer[MM_FLUSH_MDL_WORDS(MM_FLUSH_CLUSTER_PAGES)];
+} MM_FLUSH_BUFFER;
 
 static
 NTSTATUS
@@ -276,21 +289,22 @@ MiWritePages(
     _In_ PMM_SECTION_SEGMENT Segment,
     _In_ LONGLONG SegOffset,
     _In_reads_(Count) PPFN_NUMBER Pages,
-    _In_ ULONG Count)
+    _In_ ULONG Count,
+    _Inout_updates_(MdlWords) PPFN_NUMBER MdlBuffer,
+    _In_ ULONG MdlWords)
 {
     NTSTATUS Status;
     IO_STATUS_BLOCK IoStatus;
     KEVENT Event;
-    PFN_NUMBER MdlBuffer[(sizeof(MDL) + sizeof(PFN_NUMBER) - 1) / sizeof(PFN_NUMBER) + MM_FLUSH_CLUSTER_PAGES];
     PMDL Mdl = (PMDL)MdlBuffer;
     PFILE_OBJECT FileObject = Segment->FileObject;
     LARGE_INTEGER FileOffset;
 
-    ASSERT((Count != 0) && (Count <= MM_FLUSH_CLUSTER_PAGES));
+    ASSERT((Count != 0) && (MM_FLUSH_MDL_WORDS(Count) <= MdlWords));
 
     FileOffset.QuadPart = Segment->Image.FileOffset + SegOffset;
 
-    RtlZeroMemory(MdlBuffer, sizeof(MdlBuffer));
+    RtlZeroMemory(MdlBuffer, MM_FLUSH_MDL_WORDS(Count) * sizeof(PFN_NUMBER));
     MmInitializeMdl(Mdl, NULL, Count * PAGE_SIZE);
     MmBuildMdlFromPages(Mdl, Pages);
     Mdl->MdlFlags |= MDL_PAGES_LOCKED;
@@ -330,7 +344,9 @@ MiWritePage(PMM_SECTION_SEGMENT Segment,
  *       Page - Page which contains the data to write.
  */
 {
-    return MiWritePages(Segment, SegOffset, &Page, 1);
+    PFN_NUMBER MdlBuffer[MM_FLUSH_MDL_WORDS(1)];
+
+    return MiWritePages(Segment, SegOffset, &Page, 1, MdlBuffer, RTL_NUMBER_OF(MdlBuffer));
 }
 
 
@@ -6563,7 +6579,11 @@ MiFlushDirtyCluster(
     _In_ PLARGE_INTEGER Start,
     _In_ LONGLONG End)
 {
-    PFN_NUMBER Pages[MM_FLUSH_CLUSTER_PAGES];
+    PFN_NUMBER StackPages[MM_FLUSH_STACK_PAGES];
+    PFN_NUMBER StackMdl[MM_FLUSH_MDL_WORDS(MM_FLUSH_STACK_PAGES)];
+    MM_FLUSH_BUFFER *Buffer = NULL;
+    PPFN_NUMBER Pages = StackPages, MdlBuffer = StackMdl;
+    ULONG MdlWords = RTL_NUMBER_OF(StackMdl), MaxPages = MM_FLUSH_STACK_PAGES;
     LARGE_INTEGER Offset = *Start;
     ULONG_PTR Entry;
     NTSTATUS Status;
@@ -6572,7 +6592,23 @@ MiFlushDirtyCluster(
     ASSERT(Segment->Locked);
     ASSERT(FlagOn(*Segment->Flags, MM_DATAFILE_SEGMENT));
 
-    while ((Count < MM_FLUSH_CLUSTER_PAGES) && (Offset.QuadPart < End))
+    /* Pool only when a second dirty page follows: a lone page needs none */
+    if (MiIsClusterableDirtyEntry(MmGetPageEntrySectionSegment(Segment, &Offset)))
+    {
+        Offset.QuadPart += PAGE_SIZE;
+        if ((Offset.QuadPart < End) && MiIsClusterableDirtyEntry(MmGetPageEntrySectionSegment(Segment, &Offset)))
+            Buffer = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Buffer), TAG_MM_FLUSH);
+        Offset = *Start;
+    }
+    if (Buffer)
+    {
+        Pages = Buffer->Pages;
+        MdlBuffer = Buffer->MdlBuffer;
+        MdlWords = RTL_NUMBER_OF(Buffer->MdlBuffer);
+        MaxPages = MM_FLUSH_CLUSTER_PAGES;
+    }
+
+    while ((Count < MaxPages) && (Offset.QuadPart < End))
     {
         Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
         if (!MiIsClusterableDirtyEntry(Entry))
@@ -6584,6 +6620,8 @@ MiFlushDirtyCluster(
     /* A lone page, or one already being written: the single page path, as before */
     if (Count <= 1)
     {
+        if (Buffer)
+            ExFreePoolWithTag(Buffer, TAG_MM_FLUSH);
         MmCheckDirtySegment(Segment, Start, FALSE, FALSE);
         return 1;
     }
@@ -6597,7 +6635,7 @@ MiFlushDirtyCluster(
     }
 
     MmUnlockSectionSegment(Segment);
-    Status = MiWritePages(Segment, Start->QuadPart, Pages, Count);
+    Status = MiWritePages(Segment, Start->QuadPart, Pages, Count, MdlBuffer, MdlWords);
     MmLockSectionSegment(Segment);
 
     if (!NT_SUCCESS(Status))
@@ -6616,6 +6654,9 @@ MiFlushDirtyCluster(
             Entry = DIRTY_SSE(Entry);
         MmSetPageEntrySectionSegment(Segment, &Offset, Entry);
     }
+
+    if (Buffer)
+        ExFreePoolWithTag(Buffer, TAG_MM_FLUSH);
 
     return Count;
 }
