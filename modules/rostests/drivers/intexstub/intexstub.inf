@@ -1,0 +1,39 @@
+; Test INF for the kmtest IoInterrupt (NitroOS). Written for this test. Binds a pass-through driver to
+; QEMU's "edu" PCI test device so that the PnP manager assigns it resources. intexstub.sys is staged into
+; system32\drivers by the test (no CopyFiles). Not part of a product install.
+[Version]
+Signature="$Windows NT$"
+Class=System
+ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider=%Prov%
+DriverVer=11/09/2026,1.0.0.0
+
+[Manufacturer]
+%Mfg%=Models,NTamd64
+
+[Models]
+%Desc%=Inst,PCI\VEN_1234&DEV_11E8
+
+[Models.NTamd64]
+%Desc%=Inst,PCI\VEN_1234&DEV_11E8
+
+[Inst]
+AddReg=Drv_AddReg
+
+[Inst.Services]
+AddService=intexstub,0x00000002,Svc
+
+[Svc]
+DisplayName=%Desc%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\intexstub.sys
+
+[Drv_AddReg]
+HKR,,IntExStub,0x00000000,"1"
+
+[Strings]
+Prov="NitroOS test"
+Mfg="NitroOS test"
+Desc="QEMU edu pass-through (IoInterrupt test)"
