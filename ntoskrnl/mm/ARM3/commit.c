@@ -44,12 +44,17 @@ static volatile SIZE_T MiPageableCommittedPages;
  * P4 (NitroPager on, ARM3 paging file present): ARM3 private memory is paged
  * out by the pager's trimmer and modified page writer, so its commitment
  * (MiCommitUserPrivate) may use the paging files as on Windows: the limit for
- * it is RAM plus paging files. What it charges this way counts here and, like
- * the legacy pageable commitment above, raises the ceiling of the commitments
- * that stay RAM-bound (sections and their views until P2, PEB/TEB, stacks,
- * kernel), so those still never exceed what RAM can hold. Returns are clamped
- * at 0: a return the count cannot match (memory charged before the paging file
- * existed) only makes the RAM-bound side stricter, never looser.
+ * it is RAM plus paging files. What it charges this way counts here and, while
+ * the pager backs commitment, raises the ceiling of the commitments that stay
+ * RAM-bound (sections and their views until P2, PEB/TEB, stacks, kernel) like
+ * the legacy pageable commitment above, so those still never exceed what RAM
+ * can hold. When no paging file can take the pages any more (the last one
+ * retired for good), it raises nothing: everything committed is RAM-bound again.
+ *
+ * Only VADs marked PagerCommit charge here, for their whole CommitCharge, and
+ * they give exactly that back (MI_IS_PAGER_COMMIT_VAD), so the count matches
+ * what is charged. Returns are still clamped at 0 (an accounting defect only
+ * makes the RAM-bound side stricter).
  */
 static volatile SIZE_T MiPrivatePageableCommit;
 
@@ -86,7 +91,11 @@ SIZE_T
 MiGetBackedCeiling(
     _In_ SIZE_T Headroom)
 {
-    SIZE_T Backed = MmNumberOfPhysicalPages + MiPageableCommittedPages + MiPrivatePageableCommit;
+    SIZE_T Backed = MmNumberOfPhysicalPages + MiPageableCommittedPages;
+
+    /* Private commitment is backed by the paging files only while one takes its pages (P4) */
+    if (MiPagerBacksCommit())
+        Backed += *(volatile SIZE_T *)&MiPrivatePageableCommit;
 
     return (Backed > Headroom) ? (Backed - Headroom) : 0;
 }
@@ -182,19 +191,24 @@ MiChargeCommit(
     _In_ MI_COMMIT_TIER Tier)
 {
     SIZE_T OldCommitted, NewCommitted, Ceiling, Headroom;
+    BOOLEAN PagerBacked;
 
     if (Pages == 0)
         return TRUE;
 
-    /* Private memory is pageable only when the pager can write it out; otherwise it is plain user commitment */
-    if ((Tier == MiCommitUserPrivate) && !MiPagerBacksCommit())
-        Tier = MiCommitUser;
+    /*
+     * P4: a PagerCommit VAD always counts its charge as private (so its returns
+     * match), but may use the paging files only while the pager can write it out
+     */
+    PagerBacked = (Tier == MiCommitUserPrivate) && MiPagerBacksCommit();
 
     /*
      * Critical tier: the System process and critical processes (csrss, lsass,
      * winlogon...) do not give up the resident headroom. When an application
      * fills the cap, these must still be able to allocate, or the system dies
-     * (bugcheck 0xF4 when a critical process cannot continue).
+     * (bugcheck 0xF4 when a critical process cannot continue). User charges
+     * are taken attached to the target process (MiAllocateVirtualMemory
+     * attaches before it charges), so this is the process being charged.
      */
     Headroom = MiResidentHeadroom;
     if ((Tier == MiCommitKernel) || MiIsCriticalProcess(PsGetCurrentProcess()))
@@ -212,7 +226,7 @@ MiChargeCommit(
         {
             Ceiling = *(volatile SIZE_T *)&MmTotalCommitLimit;
         }
-        else if (Tier == MiCommitUserPrivate)
+        else if (PagerBacked)
         {
             /*
              * RAM plus paging files, less the headroom RAM keeps for what is resident but
@@ -260,7 +274,15 @@ BOOLEAN
 NTAPI
 MiPagerBacksCommit(VOID)
 {
-    return (MiNitroPagerMode != 0) && (MmNumberOfPagingFiles != 0) && MiPagerHasSlotFile();
+    /* A cached flag: this is asked on every private charge, with the address space and working set locked */
+    return (MiNitroPagerMode != 0) && MiPagerHasSlotFile();
+}
+
+SIZE_T
+NTAPI
+MiGetPrivatePageableCommit(VOID)
+{
+    return *(volatile SIZE_T *)&MiPrivatePageableCommit;
 }
 
 /*
@@ -277,6 +299,16 @@ MiReturnPrivateCommitCredit(
 
     if (Pages == 0)
         return;
+
+    /* A negative count (a VAD charge that went below 0) is an accounting defect: do not wipe the count with it */
+    if ((LONG_PTR)Pages < 0)
+    {
+        DPRINT1("MiReturnPrivateCommitCredit: negative return %Id ignored (count %Iu)\n",
+                (LONG_PTR)Pages, MiPrivatePageableCommit);
+        ASSERT(FALSE);
+        return;
+    }
+
     do
     {
         Old = *(volatile SIZE_T *)&MiPrivatePageableCommit;
