@@ -38,6 +38,7 @@ list(APPEND SOURCE
     ExtCreateRegion.c
     FontCharsetFallback.c
     FontLinkCJK.c
+    FontNullLifetime.c
     FontRequestState.c
     FontSizeRace.c
     FrameRgn.c

@@ -5625,7 +5625,6 @@ ftGdiGetTextCharsetInfo(
     DWORD dwFlags)
 {
     PDC_ATTR pdcattr;
-    UINT Ret = DEFAULT_CHARSET;
     INT i;
     HFONT hFont;
     PTEXTOBJ TextObj;
@@ -5643,14 +5642,18 @@ ftGdiGetTextCharsetInfo(
 
     if (!TextObj)
     {
+        /* The caller takes the charset from the high word */
         EngSetLastError(ERROR_INVALID_HANDLE);
-        return Ret;
+        return MAKELONG(0, DEFAULT_CHARSET);
     }
+    /* The realization stays locked until the end: it holds the font whose face is read */
     FontGdi = ObjToGDI(TextObj->Font, FONT);
     Face = FontGdi->SharedFace->Face;
-    TEXTOBJ_UnlockText(TextObj);
 
     memset(&fs, 0, sizeof(FONTSIGNATURE));
+    /* No charset is found unless one of the translations below finds it */
+    RtlZeroMemory(&csi, sizeof(csi));
+    csi.ciCharset = DEFAULT_CHARSET;
     IntLockFreeType();
     pOS2 = FT_Get_Sfnt_Table(Face, ft_sfnt_os2);
     if (NULL != pOS2)
@@ -5704,7 +5707,6 @@ ftGdiGetTextCharsetInfo(
         if (csi.fs.fsCsb[0] & fs.fsCsb[0])
         {
             DPRINT("Hit 1\n");
-            Ret = csi.ciCharset;
             goto Exit;
         }
 
@@ -5717,7 +5719,6 @@ ftGdiGetTextCharsetInfo(
             {
                 // *cp = csi.ciACP;
                 DPRINT("Hit 2\n");
-                Ret = csi.ciCharset;
                 goto Exit;
             }
             else
@@ -5725,6 +5726,7 @@ ftGdiGetTextCharsetInfo(
         }
     }
 Exit:
+    TEXTOBJ_UnlockText(TextObj);
     DPRINT("CharSet %u CodePage %u\n", csi.ciCharset, csi.ciACP);
     return (MAKELONG(csi.ciACP, csi.ciCharset));
 }

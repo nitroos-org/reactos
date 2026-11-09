@@ -37,6 +37,7 @@ extern void func_ExtCreatePen(void);
 extern void func_ExtCreateRegion(void);
 extern void func_FontCharsetFallback(void);
 extern void func_FontLinkCJK(void);
+extern void func_FontNullLifetime(void);
 extern void func_FontRequestState(void);
 extern void func_FontSizeRace(void);
 extern void func_FrameRgn(void);
@@ -141,6 +142,7 @@ const struct test winetest_testlist[] =
     { "ExtCreateRegion", func_ExtCreateRegion },
     { "FontCharsetFallback", func_FontCharsetFallback },
     { "FontLinkCJK", func_FontLinkCJK },
+    { "FontNullLifetime", func_FontNullLifetime },
     { "FontRequestState", func_FontRequestState },
     { "FontSizeRace", func_FontSizeRace },
     { "FrameRgn", func_FrameRgn },
