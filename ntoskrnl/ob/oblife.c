@@ -1363,7 +1363,7 @@ ObCreateObjectType(IN PUNICODE_STRING TypeName,
     for (i = 0; i < 4; i++)
     {
         /* Initialize the object locks */
-        ExInitializeResourceLite(&LocalObjectType->ObjectLocks[i]);
+        ObpInitializeObjectLock((POBP_OBJECT_LOCK)&LocalObjectType->ObjectLocks[i]);
     }
     InitializeListHead(&LocalObjectType->TypeList);
 
@@ -1443,16 +1443,9 @@ VOID
 NTAPI
 ObpDeleteObjectType(IN PVOID Object)
 {
-    ULONG i;
     POBJECT_TYPE ObjectType = (PVOID)Object;
 
-    /* Loop our locks */
-    for (i = 0; i < 4; i++)
-    {
-        /* Delete each one */
-        ExDeleteResourceLite(&ObjectType->ObjectLocks[i]);
-    }
-
+    /* The object locks are push locks: nothing to delete */
     /* Delete our main mutex */
     ExDeleteResourceLite(&ObjectType->Mutex);
 }

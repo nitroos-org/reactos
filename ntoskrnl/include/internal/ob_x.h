@@ -89,54 +89,91 @@ ObpSelectObjectLockSlot(IN POBJECT_HEADER ObjectHeader)
     return (((ULONG_PTR)ObjectHeader) >> 8) & 3;
 }
 
+/*
+ * The object locks of a type are push locks that a thread may take again while it holds one, whatever
+ * the object and whether it asks shared or exclusive (the resources they were before allowed it, and a
+ * slot is shared by every object of the type that hashes to it). They live in the storage of the
+ * ObjectLocks array: a resource costs two queued spin lock round trips (four IRQL changes, each a CR8
+ * access) for every acquire and release, a push lock one atomic operation.
+ *
+ * Every acquisition is exclusive. A shared push lock acquired while an exclusive waiter is queued waits
+ * behind it, which would deadlock a thread that already holds a shared acquisition of the slot and
+ * asks again for another object that hashes to it (the resource granted that). With one owner thread
+ * and a recursion count no thread ever waits for a slot it holds, so the only possible wait is
+ * for another thread that holds a slot and does not wait for this one. The one shared user
+ * (ObpReferenceSecurityDescriptor) holds the lock for a few instructions. Audit of the callers while
+ * a slot is held: kfast-20261109 NOTES; none takes the slot of another object.
+ */
+typedef struct _OBP_OBJECT_LOCK
+{
+    EX_PUSH_LOCK PushLock;
+    PKTHREAD Owner;         /* the thread that holds it exclusively */
+    ULONG Recursion;        /* exclusive acquisitions by Owner */
+} OBP_OBJECT_LOCK, *POBP_OBJECT_LOCK;
+
+C_ASSERT(sizeof(OBP_OBJECT_LOCK) <= sizeof(ERESOURCE));
+
+FORCEINLINE
+POBP_OBJECT_LOCK
+ObpGetObjectLock(IN POBJECT_HEADER ObjectHeader)
+{
+    return (POBP_OBJECT_LOCK)&ObjectHeader->Type->ObjectLocks[ObpSelectObjectLockSlot(ObjectHeader)];
+}
+
+FORCEINLINE
+VOID
+ObpInitializeObjectLock(IN POBP_OBJECT_LOCK Lock)
+{
+    ExInitializePushLock(&Lock->PushLock);
+    Lock->Owner = NULL;
+    Lock->Recursion = 0;
+}
+
 FORCEINLINE
 VOID
 ObpAcquireObjectLock(IN POBJECT_HEADER ObjectHeader)
 {
-    ULONG Slot;
-    POBJECT_TYPE ObjectType = ObjectHeader->Type;
+    POBP_OBJECT_LOCK Lock = ObpGetObjectLock(ObjectHeader);
+    PKTHREAD Thread = KeGetCurrentThread();
 
     /* Sanity check */
     ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
 
-    /* Pick a slot */
-    Slot = ObpSelectObjectLockSlot(ObjectHeader);
-
-    /* Enter a critical region and acquire the resource */
+    /* Enter a critical region, then take the lock unless this thread holds it */
     KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(&ObjectType->ObjectLocks[Slot], TRUE);
+    if (Lock->Owner == Thread)
+    {
+        Lock->Recursion++;
+        return;
+    }
+
+    ExAcquirePushLockExclusive(&Lock->PushLock);
+    Lock->Owner = Thread;
+    Lock->Recursion = 1;
 }
 
 FORCEINLINE
 VOID
 ObpAcquireObjectLockShared(IN POBJECT_HEADER ObjectHeader)
 {
-    ULONG Slot;
-    POBJECT_TYPE ObjectType = ObjectHeader->Type;
-
-    /* Sanity check */
-    ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
-
-    /* Pick a slot */
-    Slot = ObpSelectObjectLockSlot(ObjectHeader);
-
-    /* Enter a critical region and acquire the resource */
-    KeEnterCriticalRegion();
-    ExAcquireResourceSharedLite(&ObjectType->ObjectLocks[Slot], TRUE);
+    /* Exclusive and re-enterable, see above */
+    ObpAcquireObjectLock(ObjectHeader);
 }
 
 FORCEINLINE
 VOID
 ObpReleaseObjectLock(IN POBJECT_HEADER ObjectHeader)
 {
-    ULONG Slot;
-    POBJECT_TYPE ObjectType = ObjectHeader->Type;
+    POBP_OBJECT_LOCK Lock = ObpGetObjectLock(ObjectHeader);
 
-    /* Pick a slot */
-    Slot = ObpSelectObjectLockSlot(ObjectHeader);
+    ASSERT(Lock->Owner == KeGetCurrentThread());
+    if (--Lock->Recursion == 0)
+    {
+        Lock->Owner = NULL;
+        ExReleasePushLockExclusive(&Lock->PushLock);
+    }
 
-    /* Release the resource and leave a critical region */
-    ExReleaseResourceLite(&ObjectType->ObjectLocks[Slot]);
+    /* Leave the critical region */
     KeLeaveCriticalRegion();
 
     /* Sanity check */
