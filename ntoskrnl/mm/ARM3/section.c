@@ -525,6 +525,16 @@ MiFillSystemPageDirectory(IN PVOID Base,
             MI_SET_PROCESS2(PsGetCurrentProcess()->ImageFileName);
             /* Never page 0: waits for the balancer (the PFN lock may be dropped), stops the system if none comes */
             PageFrameIndex = MiRemoveZeroPageOrWait(MI_GET_NEXT_COLOR(), &OldIrql, MI_ZERO_WAIT_SYSTEM_PDE);
+
+            /* The PFN lock may have been dropped meanwhile: another CPU may have made this PDE valid */
+            if (SystemMapPde->u.Hard.Valid != 0)
+            {
+                MiInsertPageInFreeList(PageFrameIndex);
+                MiReleasePfnLock(OldIrql);
+                SystemMapPde++;
+                PointerPde++;
+                continue;
+            }
             TempPde.u.Hard.PageFrameNumber = PageFrameIndex;
 
 #if (_MI_PAGING_LEVELS == 2)
