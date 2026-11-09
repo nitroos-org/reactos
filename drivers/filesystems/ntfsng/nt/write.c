@@ -1455,6 +1455,62 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 }
 
 /*
+ * Hands the purge of a deleted file's cached data to the flusher thread (cleanup of the last handle, MainResource held, the cache
+ * map uninitialized with a cut to 0).  The queue holds a reference on the FCB.  Nothing writes the data meanwhile: a paging write
+ * of a deleted stream is dropped (NgPagingWrite), and the file is out of the namespace.  FALSE (the caller purges itself): no
+ * flusher (read-only mount, shutdown), the volume dismounting, or the file not deleted.
+ */
+BOOLEAN NgCanQueueDeletedPurge(PNG_VCB Vcb)
+{
+    return Vcb->Flusher && !Vcb->Dismounted && !Vcb->WrongMedia;
+}
+
+BOOLEAN NgQueueDeletedPurge(PNG_FCB Fcb)
+{
+    PNG_VCB Vcb = Fcb->Vcb;
+    BOOLEAN Queued = FALSE;
+
+    if (!Fcb->Deleted || !NgCanQueueDeletedPurge(Vcb))
+        return FALSE;
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    if (!Fcb->PurgeLinks.Flink && Vcb->Flusher && !Vcb->Dismounted)
+    {
+        InterlockedIncrement(&Fcb->RefCount);
+        InsertTailList(&Vcb->PurgeList, &Fcb->PurgeLinks);
+        Queued = TRUE;
+    }
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    if (Queued)
+        KeSetEvent(&Vcb->PurgeKick, IO_NO_INCREMENT, FALSE);
+    return Queued;
+}
+
+/* The flusher thread, with no lock held: purges the queued deleted FCBs and drops the queue references. */
+static VOID NgPurgeDeletedQueue(PNG_VCB Vcb)
+{
+    for (;;)
+    {
+        PNG_FCB Fcb;
+        ExAcquireFastMutex(&Vcb->FcbListLock);
+        if (IsListEmpty(&Vcb->PurgeList))
+        {
+            ExReleaseFastMutex(&Vcb->FcbListLock);
+            return;
+        }
+        Fcb = CONTAINING_RECORD(RemoveHeadList(&Vcb->PurgeList), NG_FCB, PurgeLinks);
+        Fcb->PurgeLinks.Flink = Fcb->PurgeLinks.Blink = NULL;
+        ExReleaseFastMutex(&Vcb->FcbListLock);
+        if (Fcb->SectionObjectPointers.SharedCacheMap || Fcb->SectionObjectPointers.DataSectionObject)
+        {
+            ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
+            NgPurgeFrom(Fcb, 0);
+            ExReleaseResourceLite(&Fcb->MainResource);
+        }
+        NgDereferenceFcb(Fcb);
+    }
+}
+
+/*
  * Linux's flusher stand-in: writes back dirty core metadata every NG_FLUSH_PERIOD_MS.  It runs at the
  * priority of the critical work queue (13), where Windows runs the lazy writer and the NTFS checkpoint:
  * it holds CoreLock while it writes back and seals the overlay (the journal I/O of a commit is outside it, NgCommit), and at
@@ -1465,17 +1521,27 @@ static VOID NTAPI NgFlusherThread(PVOID Context)
 {
     PNG_VCB Vcb = Context;
     LARGE_INTEGER Period;
-    PVOID Objects[2];
+    PVOID Objects[3];
     NTSTATUS Wait;
     KeSetBasePriorityThread(KeGetCurrentThread(), NG_FLUSHER_PRIORITY_INCREMENT);
     Period.QuadPart = -10000LL * NG_FLUSH_PERIOD_MS;
     Objects[0] = &Vcb->FlusherStop;
     Objects[1] = &Vcb->CommitKick;
+    Objects[2] = &Vcb->PurgeKick;
     for (;;)
     {
-        Wait = KeWaitForMultipleObjects(2, Objects, WaitAny, Executive, KernelMode, FALSE, &Period, NULL);
+        Wait = KeWaitForMultipleObjects(3, Objects, WaitAny, Executive, KernelMode, FALSE, &Period, NULL);
         if (Wait == STATUS_WAIT_0)
+        {
+            /* Nothing queued stays behind: the dismount waits for this thread, and each entry holds an FCB reference. */
+            NgPurgeDeletedQueue(Vcb);
             break;
+        }
+        if (Wait == STATUS_WAIT_2)
+        {
+            NgPurgeDeletedQueue(Vcb);
+            continue;
+        }
         NgAcquireCore(Vcb);
         if (Wait == STATUS_WAIT_1)
         {

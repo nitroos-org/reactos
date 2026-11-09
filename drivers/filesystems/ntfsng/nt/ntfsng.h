@@ -118,6 +118,10 @@ typedef struct _NG_VCB
      * NgGlobal.FcbCacheMax entries by flushing and purging the oldest, which lets the last close free them. */
     LIST_ENTRY IdleList;
     LONG IdleCount;
+    /* Deleted FCBs whose cached data the flusher thread still purges (NgQueueDeletedPurge; FcbListLock): the purge of a
+     * deleted file's data section, which frees the segment, was ~32 us in every delete's cleanup. */
+    LIST_ENTRY PurgeList;
+    KEVENT PurgeKick;               /* auto-reset: PurgeList is not empty */
     struct _NG_FCB *VolumeFcb;
     struct ngc_volinfo Info;
     ULONG SectorSize;
@@ -199,6 +203,7 @@ typedef struct _NG_FCB
     LIST_ENTRY VcbLinks;
     LIST_ENTRY HashLinks;           /* in Vcb->FcbHash[NgFcbBucket(MftNo)] while listed (VcbLinks.Flink is not NULL) */
     LIST_ENTRY IdleLinks;           /* in Vcb->IdleList while Flink is not NULL (FcbListLock) */
+    LIST_ENTRY PurgeLinks;          /* in Vcb->PurgeList while queued by NgQueueDeletedPurge (FcbListLock; the queue holds a reference) */
     PNG_VCB Vcb;
     LONG RefCount;                  /* file objects not yet closed */
     LONG OpenHandles;               /* file objects not yet cleaned up */
@@ -360,6 +365,8 @@ BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Reti
 VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self);
 VOID NgFcbRemoveLocked(PNG_FCB Fcb);
 VOID NgFcbIdle(PNG_FCB Fcb);
+BOOLEAN NgQueueDeletedPurge(PNG_FCB Fcb);
+BOOLEAN NgCanQueueDeletedPurge(PNG_VCB Vcb);
 BOOLEAN NgMarkDeletePending(PNG_VCB Vcb, PNG_FCB Fcb, BOOLEAN CheckStreams);
 BOOLEAN NgNodeGone(ngc_node *Node);
 VOID NgSetDeletePending(PNG_FCB Fcb, PNG_CCB Ccb);
