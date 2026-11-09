@@ -69,6 +69,7 @@ PCSR_API_ROUTINE BaseServerApiDispatchTable[BasepMaxApiNumber - BASESRV_FIRST_AP
     BaseSrvDebugProcess,
     BaseSrvRegisterThread,
     BaseSrvNlsGetUserInfo,
+    BaseSrvUpdateAppcompatCache,
 };
 
 BOOLEAN BaseServerApiServerValidTable[BasepMaxApiNumber - BASESRV_FIRST_API_NUMBER] =
@@ -104,6 +105,7 @@ BOOLEAN BaseServerApiServerValidTable[BasepMaxApiNumber - BASESRV_FIRST_API_NUMB
     FALSE,  // BaseSrvDebugProcess
     TRUE,   // BaseSrvRegisterThread
     TRUE,   // BaseSrvNlsGetUserInfo
+    TRUE,   // BaseSrvUpdateAppcompatCache
 };
 
 /*
@@ -144,6 +146,7 @@ PCHAR BaseServerApiNameTable[BasepMaxApiNumber - BASESRV_FIRST_API_NUMBER] =
     "BaseSrvDebugProcessStop",
     "BaseRegisterThread",
     "BaseNlsGetUserInfo",
+    "BaseUpdateAppcompatCache",
 };
 #endif
 
@@ -968,6 +971,9 @@ CSR_SERVER_DLL_INIT(ServerDllInitialization)
 
     /* Initialize VDM support */
     BaseInitializeVDM();
+
+    /* The shim cache the kernel loaded is only good for the shim database it was built with */
+    BaseSrvValidateAppcompatCache();
 
     /* All done */
     return STATUS_SUCCESS;

@@ -135,8 +135,58 @@ IsShimInfrastructureDisabled(VOID)
     return g_ShimsDisabled ? TRUE : FALSE;
 }
 
+/* apphelp reads the Layers keys of the 64-bit view from a 32-bit process on WoW64; so does the check here */
+static
+ACCESS_MASK
+BasepWow64KeyFlag(VOID)
+{
+    static LONG Flag = -1;
+    LONG Value = Flag;
+
+    if (Value == -1)
+    {
+        ULONG_PTR Wow64Information = 0;
+        NTSTATUS Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessWow64Information,
+                                                    &Wow64Information, sizeof(Wow64Information), NULL);
+        Value = (NT_SUCCESS(Status) && Wow64Information) ? KEY_WOW64_64KEY : 0;
+        Flag = Value;
+    }
+    return (ACCESS_MASK)Value;
+}
+
 /*
- * @unimplemented
+ * Is the registry layer value of this file set in the Layers key under Root?
+ * Any failure but "no such key or value" answers TRUE: the cache must not be trusted then.
+ */
+static
+BOOLEAN
+BasepLayerValueSet(
+    _In_opt_ HANDLE Root,
+    _In_ PCUNICODE_STRING KeyPath,
+    _In_ PUNICODE_STRING ValueName)
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    KEY_VALUE_PARTIAL_INFORMATION Info;
+    ULONG Length;
+    HANDLE KeyHandle;
+    NTSTATUS Status;
+
+    InitializeObjectAttributes(&ObjectAttributes, (PUNICODE_STRING)KeyPath, OBJ_CASE_INSENSITIVE, Root, NULL);
+    Status = NtOpenKey(&KeyHandle, KEY_QUERY_VALUE | BasepWow64KeyFlag(), &ObjectAttributes);
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_OBJECT_PATH_NOT_FOUND) return FALSE;
+    if (!NT_SUCCESS(Status)) return TRUE;
+    Status = NtQueryValueKey(KeyHandle, ValueName, KeyValuePartialInformation, &Info, sizeof(Info), &Length);
+    NtClose(KeyHandle);
+    return Status != STATUS_OBJECT_NAME_NOT_FOUND;
+}
+
+/*
+ * The shim cache answers "the database has nothing for this image", for any caller. Two inputs of that
+ * answer are not the image's: the __COMPAT_LAYER of the environment, and the layers set for the file in
+ * the Layers keys of the machine and of the user. When either may apply the cache is bypassed (the
+ * caller then runs the full check, whose result is not entered into the cache): a layer must be applied
+ * whatever another user or launch found earlier.
+ * Whether the real Windows bypasses for exactly these inputs: verify on oracle.
  */
 BOOL
 BasepShimCacheCheckBypass(
@@ -146,9 +196,64 @@ BasepShimCacheCheckBypass(
     _In_ BOOL bUnknown,
     _Out_opt_ PULONG pdwReason)
 {
-    DPRINT("fixme:(%S, %p, %S, %d, %p)\n", ApplicationName, FileHandle, Environment, bUnknown,
-           pdwReason);
-    return FALSE;
+    static const UNICODE_STRING EnvName = RTL_CONSTANT_STRING(L"__COMPAT_LAYER");
+    static const UNICODE_STRING MachineKey = RTL_CONSTANT_STRING(
+        L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers");
+    static const UNICODE_STRING UserKey = RTL_CONSTANT_STRING(
+        L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers");
+    UNICODE_STRING Value, Name;
+    WCHAR Buffer[1], LongName[MAX_PATH], DosName[MAX_PATH];
+    DWORD Length;
+    NTSTATUS Status;
+    HANDLE UserRoot;
+    BOOLEAN Set;
+    PCWSTR p;
+
+    UNREFERENCED_PARAMETER(FileHandle);
+    UNREFERENCED_PARAMETER(bUnknown);
+    UNREFERENCED_PARAMETER(pdwReason);
+
+    RtlInitEmptyUnicodeString(&Value, Buffer, 0);
+    Status = RtlQueryEnvironmentVariable_U((PWSTR)Environment, (PUNICODE_STRING)&EnvName, &Value);
+    if (Status != STATUS_VARIABLE_NOT_FOUND) return TRUE;
+
+    /*
+     * CreateProcess names the image by an NT path (\??\C:\dir\image.exe); the value of a layer is named by
+     * the long DOS path. A path of another form, or one with a short (8.3) component that cannot be resolved,
+     * is not looked up: the cache is bypassed.
+     */
+    p = ApplicationName;
+    if (!_wcsnicmp(p, L"\\??\\UNC\\", 8))
+    {
+        DosName[0] = L'\\';
+        if (wcslen(p + 7) >= RTL_NUMBER_OF(DosName) - 1) return TRUE;
+        wcscpy(DosName + 1, p + 7);
+        p = DosName;
+    }
+    else
+    {
+        if (!_wcsnicmp(p, L"\\??\\", 4)) p += 4;
+        if (!((p[0] >= L'A' && p[0] <= L'Z') || (p[0] >= L'a' && p[0] <= L'z')) || p[1] != L':') return TRUE;
+    }
+    RtlInitUnicodeString(&Name, p);
+    for (; *p; ++p)
+    {
+        if (*p == L'~')
+        {
+            Length = GetLongPathNameW(Name.Buffer, LongName, RTL_NUMBER_OF(LongName));
+            if (!Length || Length >= RTL_NUMBER_OF(LongName)) return TRUE;
+            RtlInitUnicodeString(&Name, LongName);
+            break;
+        }
+    }
+
+    if (BasepLayerValueSet(NULL, &MachineKey, &Name)) return TRUE;
+
+    Status = RtlOpenCurrentUser(KEY_QUERY_VALUE, &UserRoot);
+    if (!NT_SUCCESS(Status)) return TRUE;
+    Set = BasepLayerValueSet(UserRoot, &UserKey, &Name);
+    NtClose(UserRoot);
+    return Set;
 }
 
 /*
@@ -166,7 +271,7 @@ BasepShimCacheSearch(
 }
 
 /*
- * @unimplemented
+ * Is the image on the exclusion list of the cache? Windows keeps one; none is known here, nothing is excluded.
  */
 BOOL
 BasepCheckCacheExcludeList(
@@ -176,7 +281,7 @@ BasepCheckCacheExcludeList(
 }
 
 /*
- * @unimplemented
+ * Is the image excluded by a custom list? Same as above.
  */
 BOOL
 BasepCheckCacheExcludeCustom(
@@ -199,26 +304,54 @@ BasepShimCacheRemoveEntry(
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 BasepShimCacheLookup(
     _In_ PCWSTR ApplicationName,
     _In_ HANDLE FileHandle)
 {
-    DPRINT("fixme:(%S, %p)\n", ApplicationName, FileHandle);
-
     if (!BasepShimCacheSearch(ApplicationName, FileHandle))
         return FALSE;
 
-    if (!BasepCheckCacheExcludeList(ApplicationName) ||
-        !BasepCheckCacheExcludeCustom(ApplicationName))
+    /* A hit on an excluded image is not trusted: drop the entry and check */
+    if (BasepCheckCacheExcludeList(ApplicationName) ||
+        BasepCheckCacheExcludeCustom(ApplicationName))
     {
         BasepShimCacheRemoveEntry(ApplicationName);
         return FALSE;
     }
 
     return TRUE;
+}
+
+/*
+ * Enter an image the shim database has nothing for into the kernel cache. The kernel accepts that from
+ * SeTcbPrivilege only, so the base server does it for us (BaseSrvUpdateAppcompatCache); it takes the file
+ * time and size from our handle. Failing is harmless: the image is checked again next time.
+ */
+static
+VOID
+BasepShimCacheUpdate(
+    _In_ PCWSTR ApplicationName,
+    _In_ HANDLE FileHandle)
+{
+    BASE_API_MESSAGE ApiMessage;
+    PBASE_APPCOMPAT_CACHE_UPDATE Request = &ApiMessage.Data.AppcompatCacheUpdate;
+    PCSR_CAPTURE_BUFFER CaptureBuffer;
+    SIZE_T Length = wcslen(ApplicationName) * sizeof(WCHAR);
+
+    if (!Length || Length > 0x7FFE) return;
+    CaptureBuffer = CsrAllocateCaptureBuffer(1, (ULONG)Length);
+    if (!CaptureBuffer) return;
+    CsrCaptureMessageBuffer(CaptureBuffer, (PVOID)ApplicationName, (ULONG)Length, (PVOID*)&Request->ImageName);
+    Request->ImageNameLength = (ULONG)Length;
+    Request->ImageHandle = FileHandle;
+    CsrClientCallServer((PCSR_API_MESSAGE)&ApiMessage,
+                        CaptureBuffer,
+                        CSR_CREATE_API_NUMBER(BASESRV_SERVERDLL_INDEX, BasepUpdateAppcompatCache),
+                        sizeof(*Request));
+    CsrFreeCaptureBuffer(CaptureBuffer);
 }
 
 /*
@@ -398,10 +531,21 @@ BasepCheckBadapp(IN HANDLE FileHandle,
                                      Environment,
                                      &Reason))
         {
+            /* Bit 2: the cache was bypassed. That is not for apphelp (it would not return its result), but
+             * it means the result must not be entered into the cache either. */
+            BOOL Bypassed = (Reason & 2) != 0;
+            Reason &= ~2;
             if (!BaseCheckRunApp(FileHandle, ApplicationName, Environment, ExeType, &Reason,
                                 SdbQueryAppCompatData, SdbQueryAppCompatDataSize, SxsData, SxsDataSize, FusionFlags))
             {
                 Status = STATUS_ACCESS_DENIED;
+            }
+            else if (!Bypassed &&
+                     (Reason & (APPHELP_VALID_RESULT | APPHELP_RESULT_FOUND | APPHELP_RESULT_NOTFOUND)) ==
+                     (APPHELP_VALID_RESULT | APPHELP_RESULT_NOTFOUND))
+            {
+                /* The database has no entry, no layer and no message for it: remember that */
+                BasepShimCacheUpdate(ApplicationName, FileHandle);
             }
         }
     }
