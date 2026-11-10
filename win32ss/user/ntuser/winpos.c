@@ -1938,6 +1938,7 @@ co_WinPosSetWindowPosEx(
    PREGION VisBefore = NULL;
    PREGION VisBeforeJustClient = NULL;
    PREGION VisAfter = NULL;
+   BOOL bRedirKeep = FALSE;
    PREGION CopyRgn = NULL;
    ULONG WvrFlags = 0;
    RECTL OldWindowRect, OldClientRect;
@@ -2263,6 +2264,15 @@ co_WinPosSetWindowPosEx(
        * class need to be completely repainted on (horizontal/vertical) size
        * change.
        */
+
+      /* A redirected window that keeps its size keeps its content in its surface: what it shows now is
+         not painted again, also where it was covered or off the screen before (W1, redir.c) */
+      bRedirKeep = gRedirLevel && VisAfter != NULL &&
+                   (WinPos.flags & (SWP_NOSIZE | SWP_NOCLIENTSIZE)) == (SWP_NOSIZE | SWP_NOCLIENTSIZE) &&
+                   !(WinPos.flags & (SWP_NOCOPYBITS | SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_HIDEWINDOW)) &&
+                   !(WvrFlags & WVR_REDRAW) &&
+                   UserRedirHasSurface(Window);
+
       if (VisBefore != NULL &&
           VisAfter != NULL &&
           !(WvrFlags & WVR_REDRAW) &&
@@ -2407,7 +2417,8 @@ co_WinPosSetWindowPosEx(
                    IntInvalidateWindows( Parent, DirtyRgn, RDW_ERASE | RDW_INVALIDATE);
                    co_IntPaintWindows(Parent, RDW_NOCHILDREN, FALSE);
                 }
-                IntInvalidateWindows(Window, DirtyRgn, RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN);
+                if (!bRedirKeep)
+                   IntInvalidateWindows(Window, DirtyRgn, RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN);
              }
              else if (RgnType != ERROR && RgnType == NULLREGION) // Must be the same. See CORE-7166 & CORE-15934, NC HACK fix.
              {
@@ -2607,8 +2618,8 @@ co_WinPosSetWindowPosEx(
        }
    }
 
-   /* A redirected window that moved shows its content (kept in its surface) where it is now */
-   if (gRedirLevel && (OldWindowRect.left != NewWindowRect.left || OldWindowRect.top != NewWindowRect.top))
+   /* A redirected window that moved or came up in the z-order shows its content (kept in its surface) */
+   if (gRedirLevel && (bRedirKeep || OldWindowRect.left != NewWindowRect.left || OldWindowRect.top != NewWindowRect.top))
       UserRedirWindowMoved(Window);
 
    /* And last, send the WM_WINDOWPOSCHANGED message */

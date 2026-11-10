@@ -617,3 +617,72 @@ UserRedirPresentPending(VOID)
         RedirArmTimer(REDIR_RETRY_100NS);
     UserLeave();
 }
+
+/*
+ * Part of the screen of the desktop window DesktopWnd was uncovered (RgnScreen, screen coordinates).
+ * Every redirected top-level window shows its part from its surface, without WM_PAINT, as on Windows
+ * with DWM; what it still has to paint (its update region) is left out. Those parts leave RgnScreen:
+ * what is left is painted as always (the desktop, windows that are not redirected).
+ */
+VOID
+FASTCALL
+UserRedirExpose(PWND DesktopWnd, PREGION RgnScreen)
+{
+    PWND Child;
+
+    if (!gRedirLevel || !DesktopWnd || !RgnScreen || DesktopWnd->head.rpdesk != gpdeskInputDesktop)
+        return;
+
+    for (Child = DesktopWnd->spwndChild; Child; Child = Child->spwndNext)
+    {
+        PREDIR r;
+        PREGION Vis, Part;
+        RECTL rcBox;
+
+        if (REGION_GetRgnBox(RgnScreen, &rcBox) == NULLREGION)
+            break;
+        if (!(Child->style & WS_VISIBLE) || !RECTL_bIntersectRect(&rcBox, &rcBox, &Child->rcWindow))
+            continue;
+        if (!UserRedirHasSurface(Child) || Child->hrgnUpdate == HRGN_WINDOW)
+            continue;
+        r = UserGetProp(Child, AtomRedir, TRUE);
+
+        Vis = VIS_ComputeVisibleRegion(Child, FALSE, FALSE, TRUE);
+        if (!Vis)
+            continue;
+        Part = IntSysCreateRectpRgn(0, 0, 0, 0);
+        if (Part && IntGdiCombineRgn(Part, Vis, RgnScreen, RGN_AND) > NULLREGION)
+        {
+            if (Child->hrgnUpdate)
+            {
+                PREGION RgnUpdate = REGION_LockRgn(Child->hrgnUpdate);
+                if (RgnUpdate)
+                {
+                    IntGdiCombineRgn(Part, Part, RgnUpdate, RGN_DIFF);
+                    REGION_UnlockRgn(RgnUpdate);
+                }
+            }
+            if (REGION_Complexity(Part) > NULLREGION)
+            {
+                GreRedirPresent(r->psurf, Part, Child->rcWindow.left, Child->rcWindow.top);
+                IntGdiCombineRgn(RgnScreen, RgnScreen, Part, RGN_DIFF);
+                gRedirPresents++;
+            }
+        }
+        if (Part)
+            REGION_Delete(Part);
+        REGION_Delete(Vis);
+    }
+}
+
+/* PrintWindow: copies cx x cy of the window's surface at xSrc, ySrc (window coordinates) to hdc at 0, 0 */
+BOOL
+FASTCALL
+UserRedirCopyToDC(PWND Wnd, HDC hdc, LONG xSrc, LONG ySrc, LONG cx, LONG cy)
+{
+    PREDIR r = UserGetProp(Wnd, AtomRedir, TRUE);
+
+    if (!r || !r->psurf)
+        return FALSE;
+    return GreRedirCopyToDC(r->psurf, hdc, xSrc, ySrc, cx, cy);
+}
