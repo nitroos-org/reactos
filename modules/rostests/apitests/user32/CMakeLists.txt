@@ -65,6 +65,7 @@ list(APPEND SOURCE
     SetParentCrossProcess.c
     SetParentKillOrder.c
     WmCancelModeLastError.c
+    WmGetDlgCode.c
     InitializeLpkHooks.c
     IsDialogMessage.c
     IsServerSideWindow.c

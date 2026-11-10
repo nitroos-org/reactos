@@ -1,14 +1,11 @@
 /* Generated from message catalogue. */
-case 0x0028: /* WM_NEXTDLGCTL */
 case 0x002d: /* WM_DELETEITEM */
 case 0x0039: /* WM_COMPAREITEM */
 case 0x0049: /* WM_COPYGLOBALDATA */
 case 0x004e: /* WM_NOTIFY */
 case 0x0053: /* WM_HELP */
-case 0x0087: /* WM_GETDLGCODE */
 case 0x0124: /* WM_MENUGETOBJECT */
 case 0x0164: /* CB_GETCOMBOBOXINFO */
-case 0x0210: /* WM_PARENTNOTIFY */
 case 0x0213: /* WM_NEXTMENU */
 case 0x0218: /* WM_POWERBROADCAST */
 case 0x0219: /* WM_DEVICECHANGE */

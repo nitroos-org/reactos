@@ -125,9 +125,31 @@ static ULONG_PTR MessageCall(ULONG *a)
         }
         Param = (LPARAM)P(3);
     }
+    else if (a[1] == WM_GETDLGCODE)
+    {
+        /* lParam is NULL or the MSG the dialog manager is about to handle. The
+         * kernel does not inspect it and the window procedure reads the guest
+         * layout, so on the calling thread it travels as the guest pointer
+         * (zero-extended: a pointer above 2 GB is not a negative number). */
+        if (a[3])
+        {
+            if (NtUserQueryWindow(H(0), QUERY_WINDOW_UNIQUE_THREAD_ID) !=
+                (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread)
+            {
+                RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED);
+                return FALSE;
+            }
+            Param = (LPARAM)P(3);
+        }
+    }
     else switch (a[1])
     {
 #include "messages-unsupported.inc"
+        /* A NULL lParam has no guest layout to translate: the message travels
+         * as it is (the 32-bit user32 sends such a message to DefWindowProc and
+         * to the SCROLLBAR window procedure, e.g. WM_HELP or WM_MDICREATE
+         * with nothing attached). */
+        if (!a[3]) break;
         RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED); return FALSE;
     default: break;
     }
