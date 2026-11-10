@@ -19,6 +19,7 @@ list(APPEND SOURCE
     device.c
     inputlayout.c
     shader.c
+    shared.c
     state.c
     texture.c
     utils.c

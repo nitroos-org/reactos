@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     CreateSwapChainForComposition.c
     EnumWarpAdapter.c
+    SharedResource.c
     testlist.c)
 
 add_executable(dxgi_apitest ${SOURCE})
