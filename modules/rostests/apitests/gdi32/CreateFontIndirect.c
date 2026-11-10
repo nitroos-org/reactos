@@ -111,7 +111,8 @@ Test_CreateFontIndirectExA(void)
 
     ret = GetObjectW(hFont, sizeof(elfedvw), &elfedvw);
     ok(ret == sizeof(ENUMLOGFONTEXW) + 2*sizeof(DWORD), "\n");
-    ok(elfedvw.elfEnumLogfontEx.elfLogFont.lfFaceName[LF_FACESIZE-1] == 0, "\n");
+    ok(elfedvw.elfEnumLogfontEx.elfLogFont.lfFaceName[LF_FACESIZE-1] == 0,
+       "face terminator %#x\n", elfedvw.elfEnumLogfontEx.elfLogFont.lfFaceName[LF_FACESIZE-1]);
     ok(elfedvw.elfEnumLogfontEx.elfFullName[LF_FULLFACESIZE-1] == 0, "\n");
 
     memset(&elfedva2, 0, sizeof(elfedva2));
