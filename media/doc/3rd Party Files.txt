@@ -68,7 +68,7 @@ URL: https://tls.mbed.org/
 
 Title: Mesa3D (softpipe, llvmpipe and lavapipe drivers, prebuilt)
 Path: dll/3rdparty/mesa3d
-Used Version: 26.2.4
+Used Version: 26.3.0
 License: MIT (https://spdx.org/licenses/MIT.html)
 URL: https://www.mesa3d.org/
 Modifications: two patches to softpipe (dll/3rdparty/mesa3d/patches). The shipped files (libgallium_wgl.dll, vulkan_lvp.dll,
