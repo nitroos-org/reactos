@@ -14,6 +14,7 @@
 #define KJ_PAGE 4096
 #define KJ_MAGIC "NTFSNGJ1"
 #define KJ_VERSION 2
+#define KJ_VERSION_AREA 3		/* a COMMITTED header of a retained transaction (slot areas, see below): an older driver must not replay it */
 #define KJ_HDR_PAGE 3			/* $LogFile page of the header: never a power of two */
 #define KJ_FIRST_SLOT_PAGE 5
 
@@ -21,6 +22,18 @@ enum { KJ_ST_ACTIVE = 1, KJ_ST_COMMITTED = 2, KJ_ST_UNJOURNALED = 3, KJ_ST_ERROR
 /* Header flags: the core reported errors in this session (kept by every later header, COMMITTED included). */
 #define KJ_FL_ERRORS 1
 #define KJ_FL_KEEP 2	/* the volume was marked dirty on request (fsutil dirty set, a failed check): the flag is real, not the mounted marker */
+#define KJ_FL_AREA1 4	/* version KJ_VERSION_AREA: the slots are in the second area, not the first */
+/*
+ * Retained transactions (see the top of kshim_jnl.c).  A small transaction (at most KJ_RET_MAX pages) is committed into one of
+ * two slot areas of KJ_AREA_SLOTS slots (alternating) and its pages are not written in place until a later checkpoint;
+ * each such commit carries every page not yet in place, so the newest transaction alone is what replay has to install.
+ * The areas start at slot KJ_AREA_BASE and KJ_AREA_BASE + KJ_AREA_SLOTS: (in $LogFile pages) 138.. and 202.., neither crosses
+ * a power-of-two page for a transaction of KJ_RET_MAX pages, so one request writes a whole transaction.  An ordinary (not
+ * retained) transaction starts at slot 0.
+ */
+#define KJ_AREA_BASE 128
+#define KJ_AREA_SLOTS 64
+#define KJ_RET_MAX 32
 
 struct kj_hdr {
 	char magic[8];
@@ -87,8 +100,10 @@ int kshim_jnl_commit(struct block_device *b, u64 aux);
  * The commit in three steps, the middle one without the volume lock (see the comment at the top of kshim_jnl.c):
  * kshim_jnl_seal (lock) 1 -> kshim_jnl_io (no lock, same thread) -> kshim_jnl_reap (lock).
  * seal: 0 nothing pending, -EBUSY another commit's I/O is running (kshim_jnl_wait, then again), -ENOSYS use kshim_jnl_commit.
+ * @retain_ok: the caller waits for the transaction to be durable (write-through, a flush): a small one may be committed without
+ * putting its pages in place (retained, see kshim_jnl.c); 0 (the flusher): the retained pages are put in place, then it commits.
  */
-int kshim_jnl_seal(struct block_device *b, u64 aux);
+int kshim_jnl_seal(struct block_device *b, u64 aux, int retain_ok);
 int kshim_jnl_io(struct block_device *b);
 void kshim_jnl_reap(struct block_device *b);
 int kshim_jnl_busy(struct block_device *b);
@@ -96,6 +111,7 @@ void kshim_jnl_wait(struct block_device *b);
 void kshim_jnl_settle(struct block_device *b);	/* wait for the I/O in flight and release a finished sealed transaction */
 void kshim_jnl_quiesce(struct block_device *b);	/* wait for the I/O in flight */
 unsigned long kshim_jnl_unsettled(struct block_device *b);	/* live + sealed pages */
+unsigned long kshim_jnl_retained(struct block_device *b);	/* pages committed (durable in the journal) and not in place yet */
 u64 kshim_jnl_aux_done(struct block_device *b);
 void kshim_jnl_set_aux(struct block_device *b, u64 aux);
 void kshim_jnl_mark_errors(struct block_device *b);

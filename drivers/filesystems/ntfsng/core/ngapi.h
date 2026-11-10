@@ -125,9 +125,10 @@ int ngc_commit_now(ngc_vol *v);
 #define NGC_COMMIT_IO 1
 #define NGC_COMMIT_BUSY (-1000)
 extern int ngc_unlocked_commit;		/* 0: every commit is synchronous (registry NoUnlockedCommit=1) */
+void ngc_set_no_retain(int off);	/* 1: no retained transactions (registry NoRetainedCommit=1): every commit is in place when it returns */
 /* The core calls fn(ctx) (under the volume lock, never blocking) when the overlay is past its threshold and a commit is wanted. */
 void ngc_set_commit_kick(ngc_vol *v, void (*fn)(void *ctx), void *ctx);
-int ngc_commit_begin(ngc_vol *v);
+int ngc_commit_begin(ngc_vol *v, int retain);	/* retain: the caller waits for durability, a small commit may stay out of place (kshim_jnl.c) */
 int ngc_commit_io(ngc_vol *v);
 void ngc_commit_end(ngc_vol *v);
 void ngc_commit_wait(ngc_vol *v);
