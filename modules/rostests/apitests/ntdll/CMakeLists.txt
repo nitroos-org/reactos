@@ -219,6 +219,7 @@ list(APPEND SOURCE
     RtlMemoryStream.c
     RtlMultipleAllocateHeap.c
     RtlNtPathNameToDosPathName.c
+    RtlNtStatusToDosError.c
     RtlpApplyLengthFunction.c
     RtlpEnsureBufferSize.c
     RtlQueryEnvironmentVariable.c

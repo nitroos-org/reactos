@@ -10,6 +10,7 @@
 
 extern void func_NtfsAccess(void);
 extern void func_NtfsAllInformation(void);
+extern void func_NtfsArchiveAttribute(void);
 extern void func_NtfsBackup(void);
 extern void func_NtfsCreate(void);
 extern void func_NtfsCreateDeletePool(void);
@@ -44,6 +45,7 @@ const struct test winetest_testlist[] =
 {
     { "NtfsAccess", func_NtfsAccess },
     { "NtfsAllInformation", func_NtfsAllInformation },
+    { "NtfsArchiveAttribute", func_NtfsArchiveAttribute },
     { "NtfsBackup", func_NtfsBackup },
     { "NtfsCreate", func_NtfsCreate },
     { "NtfsCreateDeletePool", func_NtfsCreateDeletePool },

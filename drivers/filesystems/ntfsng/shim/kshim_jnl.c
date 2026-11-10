@@ -180,6 +180,15 @@ u64 kj_slot_page(u64 slot)
 	return p;
 }
 
+/*
+ * The volume stopped accepting writes (a device write of the journal failed): leave a record in the system event log,
+ * once per volume. Not only a debugger message: a Release system has none. err is a negative errno.
+ */
+void kshim_log_volume_failed(struct block_device *b, int err)
+{
+	ngos_volume_failed(b->osdev, err);
+}
+
 /* The journal's own device I/O: nothing reaches a medium that replaced the volume's. */
 static int kj_dev_read(struct block_device *b, u64 off, void *buf, unsigned int len)
 {
@@ -1066,6 +1075,8 @@ static int kj_tx_apply(struct block_device *b, struct kshim_jnl *j, struct kj_en
 		 * may reach the device until then (a later commit would overwrite its slots, and a header
 		 * saying UNJOURNALED would throw the replay away).
 		 */
+		if (!j->failed)
+			kshim_log_volume_failed(b, err);
 		j->failed = 1;
 		printk(KERN_ERR "journal: the in-place pass of seq %llu failed: no further writes until the next "
 		       "mount, which replays it\n", (unsigned long long)j->seq);
@@ -1117,6 +1128,8 @@ static int kj_ckpt_io(struct kshim_jnl *j)
 		if (!err && kj_dev_flush(b))
 			err = -EIO;
 		if (err) {
+			if (!j->failed)
+				kshim_log_volume_failed(b, err);
 			j->failed = 1;
 			printk(KERN_ERR "journal: the in-place pass of seq %llu failed: no further writes until the next "
 			       "mount, which replays it\n", (unsigned long long)j->seq);
@@ -1420,6 +1433,8 @@ int kshim_jnl_io(struct block_device *b)
 			 * slots of the retained transaction, which the header page no longer points to.  Nothing more is written
 			 * until the next mount, which replays whichever transaction the medium holds.
 			 */
+			if (!j->failed)
+				kshim_log_volume_failed(b, err);
 			j->failed = 1;
 			printk(KERN_ERR "journal: the commit header of seq %llu may be on the medium but was not made durable: "
 			       "no further writes until the next mount, which replays it\n", (unsigned long long)j->seq);
