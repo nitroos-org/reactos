@@ -1104,6 +1104,8 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     ULONG Protection = (ULONG)PageFilePte.u.Soft.Protection;
     ULONG Owner, Found = 0;
     BOOLEAN Resource;
+    PFN_NUMBER Pages[MI_PAGER_READ_CLUSTER_MAX];
+    ULONG Count = 1, i;
 
     /*
      * NitroPager P0: a private page that was paged out. The working set lock
@@ -1163,6 +1165,55 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     /* We must write the PTE now as the PFN lock will be released while performing the IO operation */
     MI_MAKE_TRANSITION_PTE(&TempPte, Page, Protection);
     MI_WRITE_INVALID_PTE(PointerPte, TempPte);
+    Pages[0] = Page;
+
+    /*
+     * Read-ahead: the following PTEs of this page table whose copies are the next slots of this paging
+     * file, with this protection and their own owner tag, are read in the same request (the writer gives
+     * a cluster of pages consecutive slots, so pages written together come back together). They get
+     * transition PTEs and pages being read, as this one; the working set lock, held across the read,
+     * keeps the process's other faults, trims and frees away from them. Only with pages to spare.
+     */
+    if (!(MiNitroPagerDebug & MI_PAGER_DEBUG_NO_READAHEAD))
+    {
+        PMMPTE NextPte = PointerPte + 1;
+        MMPTE NextPagePte;
+        PFN_NUMBER NextPage;
+        PMMPFN NextPfn;
+
+        /*
+         * Each page read ahead keeps the floor: the usable pages (free, zeroed, private standby) never drop
+         * below the waitable floor plus the margin for it, whatever other faults do at the same time (all
+         * under the PFN lock), so the pages a process creation, a paging write (its IRP and MDL) or a
+         * fault that cannot wait needs are never taken for read-ahead.
+         */
+        while ((Count < MI_PAGER_READ_CLUSTER_MAX) &&
+               !MiIsPteOnPdeBoundary(NextPte) &&
+               (MiGetUsablePageCount() > MI_PAGER_WAITABLE_FLOOR + MI_PAGER_READAHEAD_MARGIN))
+        {
+            NextPagePte = *NextPte;
+            if (!MI_IS_PAGEFILE_PTE(&NextPagePte) ||
+                ((ULONG)NextPagePte.u.Soft.PageFileLow != PageFileIndex) ||
+                (MI_PAGEFILE_PTE_SLOT(&NextPagePte) != Slot + Count) ||
+                ((ULONG)NextPagePte.u.Soft.Protection != Protection) ||
+                !MiCheckPageFileSlotTag(PageFileIndex, Slot + Count, MiPagerOwnerTagForPte(NextPte), &Found))
+            {
+                break;
+            }
+            NextPage = MiRemoveAnyPage(MI_GET_NEXT_PROCESS_COLOR(CurrentProcess));
+            if (NextPage == 0)
+                break;
+            MiInitializePfn(NextPage, NextPte, FALSE);
+            NextPfn = MI_PFN_ELEMENT(NextPage);
+            ASSERT(MI_IS_PAGEFILE_PTE(&NextPfn->OriginalPte));
+            NextPfn->u1.Event = NULL;
+            NextPfn->u3.e1.ReadInProgress = 1;
+            MI_MAKE_TRANSITION_PTE(&TempPte, NextPage, Protection);
+            MI_WRITE_INVALID_PTE(NextPte, TempPte);
+            Pages[Count++] = NextPage;
+            NextPte++;
+        }
+    }
 
     /* Release the PFN lock while we proceed */
     MiReleasePfnLock(*OldIrql);
@@ -1175,12 +1226,45 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     else
     {
         MiPagingIoStart();
-        Status = MiReadPageFile(Page, PageFileIndex, Slot + 1);
+        if (Count == 1)
+            Status = MiReadPageFile(Page, PageFileIndex, Slot + 1);
+        else
+            Status = MiReadPageFileCluster(Pages, Count, PageFileIndex, Slot);
         MiPagingIoDone();
     }
 
     /* Lock the PFN database again */
     *OldIrql = MiAcquirePfnLock();
+
+    /*
+     * The pages read ahead: on success they are clean pages in transition, as a page the writer wrote
+     * and trimmed, and go to standby (a later fault is a transition fault). On failure their PTEs name
+     * their slots again and the pages go back. Nobody waited for them (working set lock).
+     */
+    for (i = 1; i < Count; i++)
+    {
+        PMMPFN NextPfn = MI_PFN_ELEMENT(Pages[i]);
+        PMMPTE NextPte = NextPfn->PteAddress;
+
+        ASSERT(NextPfn->u3.e1.ReadInProgress == 1);
+        ASSERT(NextPfn->u1.Event == NULL);
+        NextPfn->u3.e1.ReadInProgress = 0;
+        if (NT_SUCCESS(Status))
+        {
+            MiDecrementShareCount(NextPfn, Pages[i]);
+            continue;
+        }
+        MI_WRITE_INVALID_PTE(NextPte, NextPfn->OriginalPte);
+        MI_MAKE_SOFTWARE_PTE(&NextPfn->OriginalPte, Protection);
+        MiDecrementShareCount(MiGetPfnEntry(NextPfn->u4.PteFrame), NextPfn->u4.PteFrame);
+        MI_SET_PFN_DELETED(NextPfn);
+        MiDecrementShareCount(NextPfn, Pages[i]);
+    }
+    if (NT_SUCCESS(Status) && (Count > 1))
+    {
+        MiPagerCounters.InPageClusterReads++;
+        MiPagerCounters.InPagePrefetched += Count - 1;
+    }
 
     /* Nobody should have changed that while we were not looking */
     ASSERT(Pfn1->u3.e1.ReadInProgress == 1);

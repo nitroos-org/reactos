@@ -2896,6 +2896,9 @@ typedef struct _MI_PAGER_COUNTERS
     ULONG PaceSlotBusy;
     ULONG WsFloorSkips;
     ULONG InjectedAllocFailures;
+    /* read-ahead */
+    ULONG InPageClusterReads;
+    ULONG InPagePrefetched;
 } MI_PAGER_COUNTERS;
 
 extern MI_PAGER_COUNTERS MiPagerCounters;
@@ -2910,6 +2913,17 @@ extern MI_PAGER_COUNTERS MiPagerCounters;
 
 /* NitroPagerDebug 0x800 (A/B tests): waitable faults use the flag-0 floor (MmAvailablePages < 128) instead */
 #define MI_PAGER_DEBUG_OLD_FAULT_FLOOR 0x800
+
+/* NitroPagerDebug 0x4000 (A/B tests): a page-file fault reads only its own page */
+#define MI_PAGER_DEBUG_NO_READAHEAD 0x4000
+
+/*
+ * Read-ahead of a page-file fault: the faulting page and up to MI_PAGER_READ_CLUSTER_MAX - 1 following
+ * pages of the same page table whose copies are the next slots of the same paging file, in one read.
+ * Only while this many usable pages are left above the waitable floor.
+ */
+#define MI_PAGER_READ_CLUSTER_MAX MI_PAGER_CLUSTER_MAX
+#define MI_PAGER_READAHEAD_MARGIN 512
 
 /* Paging I/O (writer clusters, page-file reads of faults) starts and ends: the reserve and the stuck-I/O check watch it */
 VOID
