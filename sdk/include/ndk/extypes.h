@@ -55,6 +55,16 @@ extern "C" {
 //
 typedef USHORT RTL_ATOM, *PRTL_ATOM;
 
+//
+// Memory reserve objects (NtAllocateReserveObject)
+//
+typedef enum _MEMORY_RESERVE_TYPE
+{
+    MemoryReserveObjectTypeUserApc,
+    MemoryReserveObjectTypeIoCompletion,
+    MemoryReserveObjectTypeMax
+} MEMORY_RESERVE_TYPE;
+
 #ifndef NTOS_MODE_USER
 
 //
