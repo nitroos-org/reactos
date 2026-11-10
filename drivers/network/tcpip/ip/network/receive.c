@@ -13,6 +13,13 @@
 #include "precomp.h"
 
 LIST_ENTRY ReassemblyListHead;
+
+/* Datagrams being reassembled, and the fragments one of them holds, are bounded: the fragments
+   keep the miniport's packets, and the sender decides how many datagrams it starts. A fragment
+   that would go past a bound is dropped (the datagram is lost, as when a fragment is lost). */
+#define IP_MAX_REASSEMBLIES        256
+#define IP_MAX_FRAGMENTS_PER_DGRAM 512
+static volatile LONG ReassemblyCount;
 KSPIN_LOCK ReassemblyListLock;
 NPAGED_LOOKASIDE_LIST IPDRList;
 NPAGED_LOOKASIDE_LIST IPFragmentList;
@@ -134,6 +141,7 @@ VOID RemoveIPDR(
 
   TcpipAcquireSpinLock(&ReassemblyListLock, &OldIrql);
   RemoveEntryList(&IPDR->ListEntry);
+  InterlockedDecrement(&ReassemblyCount);
   TcpipReleaseSpinLock(&ReassemblyListLock, OldIrql);
 }
 
@@ -370,17 +378,32 @@ VOID ProcessFragment(
     TI_DbgPrint(DEBUG_IP, ("Continueing assembly.\n"));
     /* We have a reassembly structure, locked */
 
-    /* Reset the timeout since we received a fragment */
-    IPDR->TimeoutCount = 0;
+    /* The timeout runs from the first fragment: a fragment does not restart it, or a sender
+       that keeps sending could hold the datagram, and the packets in it, for ever */
     IPDR->AllFromOwnLink &= IPPacket->FromOwnLink;
+
+    if (IPDR->FragmentCount >= IP_MAX_FRAGMENTS_PER_DGRAM)
+    {
+      TcpipReleaseSpinLock(&IPDR->Lock, OldIrql);
+      return;
+    }
   } else {
     TI_DbgPrint(DEBUG_IP, ("Starting new assembly.\n"));
 
-    /* We don't have a reassembly structure, create one */
+    /* We don't have a reassembly structure, create one (unless this many are being assembled) */
+    if (InterlockedIncrement(&ReassemblyCount) > IP_MAX_REASSEMBLIES)
+    {
+      InterlockedDecrement(&ReassemblyCount);
+      return;
+    }
+
     IPDR = ExAllocateFromNPagedLookasideList(&IPDRList);
     if (!IPDR)
+    {
       /* We don't have the resources to process this packet, discard it */
+      InterlockedDecrement(&ReassemblyCount);
       return;
+    }
 
     /* A reused structure still holds the freed header of its last datagram, which
        only the first fragment replaces */
@@ -393,6 +416,7 @@ VOID ProcessFragment(
     if (!Hole) {
       /* We don't have the resources to process this packet, discard it */
       ExFreeToNPagedLookasideList(&IPDRList, IPDR);
+      InterlockedDecrement(&ReassemblyCount);
       return;
     }
     AddrInitIPv4(&IPDR->SrcAddr, IPv4Header->SrcAddr);
@@ -538,6 +562,7 @@ VOID ProcessFragment(
 
     /* Put the fragment in the list */
     InsertTailList(&IPDR->FragmentListHead, &Fragment->ListEntry);
+    IPDR->FragmentCount++;
   }
 
   TI_DbgPrint(DEBUG_IP, ("Done searching for hole descriptor.\n"));
@@ -608,6 +633,7 @@ VOID IPFreeReassemblyList(
 
     /* Unlink it from the list */
     RemoveEntryList(CurrentEntry);
+    InterlockedDecrement(&ReassemblyCount);
 
     /* And free the descriptor */
     FreeIPDR(Current);
@@ -652,6 +678,7 @@ VOID IPDatagramReassemblyTimeout(
        {
            TcpipReleaseSpinLockFromDpcLevel(&CurrentIPDR->Lock);
            RemoveEntryList(CurrentEntry);
+           InterlockedDecrement(&ReassemblyCount);
            FreeIPDR(CurrentIPDR);
        }
        else

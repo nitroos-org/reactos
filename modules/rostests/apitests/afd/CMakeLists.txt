@@ -21,7 +21,8 @@ list(APPEND SOURCE
     g7lockbuf.c
     g7accept.c
     g7setip.c
-    g7setinfoex.c)
+    g7setinfoex.c
+    g8net.c)
 
 list(APPEND PCH_SKIP_SOURCE
     testlist.c)
