@@ -220,8 +220,16 @@ struct ngc_dio {
 	unsigned int zero;               /* the transfer writes zeros (ngc_dio_zero_begin): the buffer is not used */
 	struct ngc_dio_run run[NGC_DIO_RUNS];
 };
-int ngc_dio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, unsigned int cap, struct ngc_dio *d);
+int ngc_dio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, unsigned int cap, struct ngc_dio *d,
+		  unsigned long long init_ahead);
 long ngc_dio_end(ngc_vol *v, struct ngc_dio *d, const void *buf, int io_err);
+/* A pinned transfer that is given up without writing anything or touching the sizes (ngc_dio_end without the work). */
+void ngc_dio_abandon(ngc_vol *v, struct ngc_dio *d);
+/*
+ * @init_ahead of ngc_dio_begin: the end of the transfers of this stream that are in flight and reach from the initialized
+ * size up to there without a gap (their ngc_dio_end raises the initialized size in order, the glue sees to that).  A write
+ * that starts at or below max(initialized size, init_ahead) needs no zero fill.  0: none in flight.
+ */
 /*
  * The zero fill between the initialized size and the start of a write, in pieces of at most NGC_ZERO_CHUNK bytes, each
  * a dio of zeros (ngc_dio_zero_begin, the caller writes zeros to the runs, ngc_dio_end raises the initialized size)

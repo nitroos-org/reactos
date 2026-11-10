@@ -2292,7 +2292,8 @@ static int ngc_dio_map(struct ngc_vol *v, struct ntfs_inode *ni, u64 off, u32 le
 	return err;
 }
 
-int ngc_dio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, unsigned int cap, struct ngc_dio *d)
+int ngc_dio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int len, unsigned int cap, struct ngc_dio *d,
+		  unsigned long long init_ahead)
 {
 	struct inode *vi = (struct inode *)n;
 	struct ntfs_inode *ni = NTFS_I(vi);
@@ -2306,8 +2307,8 @@ int ngc_dio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int 
 	if (off + len > (u64)size)
 		len = (unsigned int)(size - off);
 	if (!ngc_is_data_inode(vi) || !NInoNonResident(ni) || NInoCompressed(ni) || NInoEncrypted(ni) || NInoWofCompressed(ni) ||
-	    NInoSparse(ni) || (loff_t)off > ni->initialized_size || v->bdev->kshim_gone || v->bdev->kshim_frozen ||
-	    (v->bdev->jnl && kshim_jnl_failed(v->bdev)))
+	    NInoSparse(ni) || ((loff_t)off > ni->initialized_size && off > init_ahead) || v->bdev->kshim_gone ||
+	    v->bdev->kshim_frozen || (v->bdev->jnl && kshim_jnl_failed(v->bdev)))
 		return -EAGAIN;
 	/* As ngc_write: VOLUME_IS_DIRTY is on the medium before the change (here: the initialized size). */
 	err = ngc_mark_dirty(v);
@@ -2375,6 +2376,15 @@ long ngc_dio_end(ngc_vol *v, struct ngc_dio *d, const void *buf, int io_err)
 	iput(vi);
 	d->n = NULL;
 	return ret;
+}
+
+void ngc_dio_abandon(ngc_vol *v, struct ngc_dio *d)
+{
+	(void)v;
+	if (d->n) {
+		iput((struct inode *)d->n);
+		d->n = NULL;
+	}
 }
 
 /*
