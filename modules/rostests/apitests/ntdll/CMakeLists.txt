@@ -115,6 +115,7 @@ list(APPEND SOURCE
     NtNotifyChangeDirectoryFile.c
     NtNotifyChangeMultipleKeys.c
     NtOpenKey.c
+    NtOpenKeyTransacted.c
     NtOpenKeyConcurrent.c
     NtOpenKeyEx.c
     NtOpenProcess.c
