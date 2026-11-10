@@ -168,6 +168,34 @@ typedef struct
     CCHAR NumberOfProcessors;
 } NG_SYSTEM_BASIC_INFORMATION;
 
+/*
+ * The Mm low-memory condition (\\KernelObjects\\LowMemoryCondition): set while the free pages are below the
+ * system's low-memory threshold (24-64 MB by RAM size), cleared above it.  Opened once by ngos_low_memory_init and
+ * never released (the driver does not unload).  Reading its state takes no lock.
+ */
+static PKEVENT NgLowMemoryEvent;
+
+VOID ngos_low_memory_init(VOID)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\KernelObjects\\LowMemoryCondition");
+    OBJECT_ATTRIBUTES Attr;
+    HANDLE Handle;
+    PKEVENT Event;
+
+    InitializeObjectAttributes(&Attr, &Name, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(ZwOpenEvent(&Handle, SYNCHRONIZE | EVENT_QUERY_STATE, &Attr)))
+        return;
+    if (NT_SUCCESS(ObReferenceObjectByHandle(Handle, EVENT_QUERY_STATE, *ExEventObjectType, KernelMode,
+                                             (PVOID *)&Event, NULL)))
+        NgLowMemoryEvent = Event;
+    ZwClose(Handle);
+}
+
+int ngos_low_memory(void)
+{
+    return NgLowMemoryEvent && KeReadStateEvent(NgLowMemoryEvent) != 0;
+}
+
 unsigned long ngos_physical_pages(void)
 {
     static ULONG Pages;
