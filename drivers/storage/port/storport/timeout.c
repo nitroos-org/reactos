@@ -182,36 +182,20 @@ PortCallAdapterControl(
 
 
 /**
- * @brief Asks the miniport which HwAdapterControl operations it supports. Called once it is up.
+ * @brief Which HwAdapterControl operations the miniport supports (the bitmap MiniportQueryAdapterControl filled in).
  */
 VOID
 PortQueryAdapterControlTypes(
     _In_ PFDO_DEVICE_EXTENSION FdoExtension)
 {
-    /* SCSI_SUPPORTED_CONTROL_TYPE_LIST (srb.h; storport.h has no definition) with its room */
-    struct
-    {
-        ULONG MaxControlType;
-        BOOLEAN SupportedTypeList[ScsiAdapterControlMax];
-    } Query;
-    PHW_INITIALIZATION_DATA HwInitData = FdoExtension->Miniport.InitData;
     ULONG i;
 
-    RtlZeroMemory(FdoExtension->AdapterControlSupported, sizeof(FdoExtension->AdapterControlSupported));
-    if (HwInitData == NULL || HwInitData->HwAdapterControl == NULL)
-        return;
-
-    RtlZeroMemory(&Query, sizeof(Query));
-    Query.MaxControlType = ScsiAdapterControlMax;
-    if (HwInitData->HwAdapterControl(&FdoExtension->Miniport.MiniportExtension->HwDeviceExtension,
-                                     ScsiQuerySupportedControlTypes,
-                                     &Query) != ScsiAdapterControlSuccess)
-    {
-        return;
-    }
-
+    /* MiniportQueryAdapterControl asked the miniport once it was found */
     for (i = 0; i < ScsiAdapterControlMax; i++)
-        FdoExtension->AdapterControlSupported[i] = Query.SupportedTypeList[i];
+    {
+        FdoExtension->AdapterControlSupported[i] =
+            (FdoExtension->Miniport.AdapterControlSupportedBitmap & (1UL << i)) != 0;
+    }
 
     DPRINT1("Miniport adapter control: stop %u restart %u\n",
             FdoExtension->AdapterControlSupported[ScsiStopAdapter],
@@ -351,7 +335,7 @@ PortRestartAdapter(
             continue;
 
         FdoExtension->SweptSrbs[Slot].Restart = FdoExtension->AdapterRestarts;
-        InterlockedExchangePointer(&FdoExtension->SweptSrbs[Slot].Srb, RequestReference->Srb);
+        InterlockedExchangePointer(&FdoExtension->SweptSrbs[Slot].Srb, StorpMiniportSrb(RequestReference));
         InterlockedIncrement(&FdoExtension->SweptSrbCount);
 
         RequestReference->Srb->SrbStatus = (RequestReference->TimeoutCounter == 0) ?

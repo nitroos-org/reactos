@@ -163,6 +163,8 @@ classes[] =
 #define ARCH L"x86"
 #elif defined __x86_64__
 #define ARCH L"amd64"
+#elif defined __aarch64__
+#define ARCH L"arm64"
 #else
 #define ARCH L"none"
 #endif

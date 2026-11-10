@@ -186,6 +186,10 @@ HalpInitializeClock(VOID)
     RegisterB = HalpReadCmos(RTC_REGISTER_B);
     HalpWriteCmos(RTC_REGISTER_B, RegisterB | RTC_REG_B_PI);
 
+    /* Don't leave already pending */
+    HalpReadCmos(RTC_REGISTER_C);
+    HalpReadCmos(RTC_REGISTER_D);
+
     /* Release CMOS lock */
     HalpReleaseCmosSpinLock();
 
@@ -206,8 +210,7 @@ HalpInitializeClock(VOID)
     /* Enable the timer interrupt */
     HalEnableSystemInterrupt(APIC_CLOCK_VECTOR, CLOCK_LEVEL, Latched);
 
-    /* A periodic interrupt raised while the pin was masked is lost: read
-       register C so that the RTC can raise the next one */
+    /* The pin is edge triggered */
     HalpAcquireCmosSpinLock();
     HalpReadCmos(RTC_REGISTER_C);
     HalpReleaseCmosSpinLock();

@@ -1916,7 +1916,7 @@
 @ cdecl -arch=i386 -ret64 _aullrem(double double)
 @ cdecl -arch=i386 _aullshr()
 @ extern -arch=i386 _chkstk
-@ cdecl -arch=i386,x86_64,arm _fltused()
+@ cdecl -arch=i386,x86_64,arm,arm64 _fltused()
 @ cdecl -arch=i386 -ret64 _ftol()
 @ cdecl _i64toa(double ptr long)
 @ cdecl -version=0x601+ _i64toa_s(int64 ptr long long)
