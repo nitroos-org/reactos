@@ -441,6 +441,7 @@ struct super_block {
 	struct inode *kshim_lru_head, *kshim_lru_tail;	/* unused inodes, oldest first */
 	unsigned long kshim_lru_count;
 	int kshim_no_icache;			/* unmounting: evict at the last reference */
+	void *kshim_priv;			/* the file system glue's volume (kshim_icache_evicting / kshim_icache_added find it here) */
 	const struct dentry_operations *s_d_op;
 	struct user_namespace *s_user_ns;
 	u8 s_uuid[16];

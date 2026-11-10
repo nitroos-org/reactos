@@ -1231,6 +1231,13 @@ unsigned long kshim_pc_soft_limit(void)
 unsigned long kshim_inodes_live, kshim_icache_hits, kshim_icache_evicted;
 extern bool (*kshim_is_data_inode)(struct inode *i);
 bool (*kshim_icache_ok)(struct inode *i);
+/*
+ * Both run under the inode-cache lock.  kshim_icache_evicting: an unused inode was taken to be evicted (nothing else can
+ * change it any more): the file system may remember what it needs of it (the glue's compact stat cache).
+ * kshim_icache_added: a new inode for a record number was hashed: whatever was remembered of that number is void.
+ */
+void (*kshim_icache_evicting)(struct inode *i);
+void (*kshim_icache_added)(struct inode *i);
 static struct inode *kshim_lru_take(struct super_block *sb, bool more);
 static void kshim_lru_evict(struct inode *v);
 static void ihash_add_locked(struct inode *i)
@@ -1242,6 +1249,8 @@ static void ihash_add_locked(struct inode *i)
 	i->kshim_hnext = sb->kshim_ihash[b];
 	sb->kshim_ihash[b] = i;
 	i->kshim_hashed = 1;
+	if (kshim_icache_added)
+		kshim_icache_added(i);
 }
 static void ihash_del_locked(struct inode *i)
 {
@@ -1620,6 +1629,8 @@ static void kshim_lru_evict(struct inode *v)
 		return;
 	}
 	v->i_state |= I_FREEING;
+	if (kshim_icache_evicting && v->i_nlink)
+		kshim_icache_evicting(v);
 	mutex_unlock(&kshim_inode_lock);
 	kshim_icache_evicted++;
 	kshim_evict(v);
