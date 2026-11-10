@@ -613,7 +613,10 @@ EngEraseSurface(
 SURFOBJ * APIENTRY
 NtGdiEngLockSurface(IN HSURF hsurf)
 {
-    return EngLockSurface(hsurf);
+    /* For a user-mode printer driver, which gets a user-mode copy of the SURFOBJ. There is no UMPD
+       support: never hand a kernel SURFOBJ address (and a reference nothing would release) to user mode */
+    UNREFERENCED_PARAMETER(hsurf);
+    return NULL;
 }
 
 
@@ -633,8 +636,8 @@ APIENTRY
 NtGdiEngUnlockSurface(
     _In_ SURFOBJ *pso)
 {
-    UNIMPLEMENTED;
-    ASSERT(FALSE);
+    /* NtGdiEngLockSurface locks nothing, so there is nothing to unlock (and user mode can reach this) */
+    UNREFERENCED_PARAMETER(pso);
     return STATUS_NOT_IMPLEMENTED;
 }
 

@@ -59,12 +59,15 @@ NtGdiCreateServerMetaFile(
 {
     BOOL Pass = TRUE;
     PMETATYPEOBJ pmto;
+    ULONG cjObject;
 
     if ( ( iType == GDITAG_TYPE_EMF || iType == GDITAG_TYPE_MFP ) &&
         cjData &&
-        pjData )
+        pjData &&
+        /* The object size is a ULONG: it has to hold the header and all of the data */
+        NT_SUCCESS(RtlULongAdd(sizeof(METATYPEOBJ), cjData, &cjObject)) )
     {
-        pmto = (PMETATYPEOBJ)GDIOBJ_AllocObjWithHandle(GDILoObjType_LO_META_TYPE, sizeof(METATYPEOBJ) + cjData);
+        pmto = (PMETATYPEOBJ)GDIOBJ_AllocObjWithHandle(GDILoObjType_LO_META_TYPE, cjObject);
         if ( pmto )
         {
             pmto->iType  = iType;

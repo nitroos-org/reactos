@@ -501,14 +501,12 @@ NtGdiAddFontResourceW(
     if (!SafeFileName.Buffer)
         return 0;
 
+    /* Copy the whole buffer once (the names and the terminating NUL), then check the copy: user mode can
+       change its buffer after a check */
     _SEH2_TRY
     {
         ProbeForRead(pwcFiles, cwc * sizeof(WCHAR), sizeof(WCHAR));
-
-        if (!IntCheckFontPathNames(pwcFiles, cFiles, cwc))
-            return 0;
- 
-        RtlCopyMemory(SafeFileName.Buffer, pwcFiles, SafeFileName.Length);
+        RtlCopyMemory(SafeFileName.Buffer, pwcFiles, cwc * sizeof(WCHAR));
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -517,7 +515,11 @@ NtGdiAddFontResourceW(
     }
     _SEH2_END;
 
-    SafeFileName.Buffer[SafeFileName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+    if (!IntCheckFontPathNames(SafeFileName.Buffer, cFiles, cwc))
+    {
+        ExFreePoolWithTag(SafeFileName.Buffer, TAG_STRING);
+        return 0;
+    }
 
     Ret = IntGdiAddFontResourceEx(&SafeFileName, cFiles, fl, 0);
 
@@ -555,14 +557,12 @@ NtGdiRemoveFontResourceW(
     if (!SafeFileName.Buffer)
         return FALSE;
 
+    /* Copy the whole buffer once (the names and the terminating NUL), then check the copy: user mode can
+       change its buffer after a check */
     _SEH2_TRY
     {
         ProbeForRead(pwszFiles, cwc * sizeof(WCHAR), sizeof(WCHAR));
-
-        if (!IntCheckFontPathNames(pwszFiles, cFiles, cwc))
-            return FALSE;
-
-        RtlCopyMemory(SafeFileName.Buffer, pwszFiles, SafeFileName.Length);
+        RtlCopyMemory(SafeFileName.Buffer, pwszFiles, cwc * sizeof(WCHAR));
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -571,7 +571,11 @@ NtGdiRemoveFontResourceW(
     }
     _SEH2_END;
 
-    SafeFileName.Buffer[SafeFileName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+    if (!IntCheckFontPathNames(SafeFileName.Buffer, cFiles, cwc))
+    {
+        ExFreePoolWithTag(SafeFileName.Buffer, TAG_STRING);
+        return FALSE;
+    }
 
     Ret = IntGdiRemoveFontResource(&SafeFileName, cFiles, fl);
 
@@ -684,22 +688,6 @@ NtGdiGetFontData(
   PTEXTOBJ TextObj;
   PFONTGDI FontGdi;
   DWORD Result = GDI_ERROR;
-  NTSTATUS Status = STATUS_SUCCESS;
-
-  if (Buffer && Size)
-  {
-     _SEH2_TRY
-     {
-         ProbeForRead(Buffer, Size, 1);
-     }
-     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-     {
-         Status = _SEH2_GetExceptionCode();
-     }
-     _SEH2_END
-  }
-
-  if (!NT_SUCCESS(Status)) return Result;
 
   Dc = DC_LockDc(hDC);
   if (Dc == NULL)
@@ -721,7 +709,57 @@ NtGdiGetFontData(
 
   FontGdi = ObjToGDI(TextObj->Font, FONT);
 
-  Result = ftGdiGetFontData(FontGdi, Table, Offset, Buffer, Size);
+  if (!Buffer || !Size)
+  {
+     /* Size query */
+     Result = ftGdiGetFontData(FontGdi, Table, Offset, NULL, 0);
+  }
+  else
+  {
+     DWORD cjTable, cjCopy;
+     PVOID pvSafe;
+
+     /* FreeType writes the table into a kernel buffer, while it holds its lock; the caller's buffer is
+        written afterwards, under SEH. The kernel buffer needs no more than the table. */
+     cjTable = ftGdiGetFontData(FontGdi, Table, Offset, NULL, 0);
+     if (cjTable == GDI_ERROR)
+     {
+        Result = GDI_ERROR;
+     }
+     else
+     {
+        cjCopy = min(Size, cjTable);
+        pvSafe = cjCopy ? ExAllocatePoolWithTag(PagedPool, cjCopy, GDITAG_TEXT) : NULL;
+        if (cjCopy && !pvSafe)
+        {
+           EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+           Result = GDI_ERROR;
+        }
+        else
+        {
+           Result = ftGdiGetFontData(FontGdi, Table, Offset, pvSafe, cjCopy);
+           if (Result != GDI_ERROR && Result > cjCopy)
+           {
+              /* Never more than the kernel buffer holds */
+              Result = GDI_ERROR;
+           }
+           if (Result != GDI_ERROR && Result != 0)
+           {
+              _SEH2_TRY
+              {
+                  ProbeForWrite(Buffer, Result, 1);
+                  RtlCopyMemory(Buffer, pvSafe, Result);
+              }
+              _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+              {
+                  Result = GDI_ERROR;
+              }
+              _SEH2_END
+           }
+           if (pvSafe) ExFreePoolWithTag(pvSafe, GDITAG_TEXT);
+        }
+     }
+  }
 
   TEXTOBJ_UnlockText(TextObj);
 
@@ -817,7 +855,30 @@ NtGdiGetGlyphOutline(
   PDC dc;
   PVOID pvBuf = NULL;
   GLYPHMETRICS gm;
+  MAT2 mat2Safe;
   NTSTATUS Status = STATUS_SUCCESS;
+
+  /* The matrix is read once, into a kernel copy */
+  if (pmat2)
+  {
+     _SEH2_TRY
+     {
+         ProbeForRead(pmat2, sizeof(MAT2), 1);
+         RtlCopyMemory(&mat2Safe, pmat2, sizeof(MAT2));
+     }
+     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+     {
+         Status = _SEH2_GetExceptionCode();
+     }
+     _SEH2_END
+
+     if (!NT_SUCCESS(Status))
+     {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return GDI_ERROR;
+     }
+     pmat2 = &mat2Safe;
+  }
 
   dc = DC_LockDc(hdc);
   if (!dc)

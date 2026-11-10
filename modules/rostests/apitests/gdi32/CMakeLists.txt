@@ -50,6 +50,8 @@ list(APPEND SOURCE
     GdiConvertRegion.c
     GdiDeleteLocalDC.c
     GdiDrawStream.c
+    GdiInputContracts.c
+    GdiPrinterFile.c
     GdiGetCharDimensions.c
     GdiGetLocalBrush.c
     GdiGetLocalDC.c
