@@ -536,6 +536,9 @@ static HRESULT STDMETHODCALLTYPE d3d11_texture2d_QueryInterface(ID3D11Texture2D 
         return S_OK;
     }
 
+    if (d3d_texture2d_shared_query_interface(texture, riid, object))
+        return S_OK;
+
     TRACE("Forwarding to dxgi resource.\n");
 
     if (FAILED(hr = IUnknown_QueryInterface(texture->dxgi_resource, riid, object)))
@@ -575,6 +578,7 @@ static ULONG STDMETHODCALLTYPE d3d11_texture2d_Release(ID3D11Texture2D *iface)
     if (!refcount)
     {
         ID3D11Device2 *device = texture->device;
+        d3d_texture2d_shared_destroy(texture);
         if (texture->swapchain)
             wined3d_swapchain_decref(texture->swapchain);
         /* Releasing the texture may free the d3d11 object, so do not access it
@@ -950,6 +954,26 @@ static BOOL validate_texture2d_desc(const D3D11_TEXTURE2D_DESC *desc, D3D_FEATUR
         return FALSE;
     }
 
+    /* measured on Windows 10: SHARED_NTHANDLE needs SHARED or SHARED_KEYEDMUTEX, SHARED and
+     * SHARED_KEYEDMUTEX do not combine, and a dynamic texture cannot be shared */
+    if ((desc->MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE)
+            && !(desc->MiscFlags & (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX)))
+    {
+        WARN("SHARED_NTHANDLE without SHARED or SHARED_KEYEDMUTEX.\n");
+        return FALSE;
+    }
+    if ((desc->MiscFlags & D3D11_RESOURCE_MISC_SHARED) && (desc->MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX))
+    {
+        WARN("SHARED combined with SHARED_KEYEDMUTEX.\n");
+        return FALSE;
+    }
+    if ((desc->MiscFlags & (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX))
+            && desc->Usage == D3D11_USAGE_DYNAMIC)
+    {
+        WARN("Dynamic shared texture.\n");
+        return FALSE;
+    }
+
     if (desc->MiscFlags & D3D11_RESOURCE_MISC_GENERATE_MIPS
             && (~desc->BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE)))
     {
@@ -961,8 +985,9 @@ static BOOL validate_texture2d_desc(const D3D11_TEXTURE2D_DESC *desc, D3D_FEATUR
     return TRUE;
 }
 
-HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DESC *desc,
-        struct wined3d_texture *wined3d_texture, const D3D11_SUBRESOURCE_DATA *data, struct d3d_texture2d **out)
+static HRESULT d3d_texture2d_create_ex(struct d3d_device *device, const D3D11_TEXTURE2D_DESC *desc,
+        struct wined3d_texture *wined3d_texture, const D3D11_SUBRESOURCE_DATA *data,
+        struct d3d_shared_open *open, struct d3d_texture2d **out)
 {
     struct d3d_texture2d *texture;
     BOOL needs_surface;
@@ -980,6 +1005,7 @@ HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DE
 
     texture->ID3D11Texture2D_iface.lpVtbl = &d3d11_texture2d_vtbl;
     texture->ID3D10Texture2D_iface.lpVtbl = &d3d10_texture2d_vtbl;
+    d3d_texture2d_init_dxgi_resource1(texture);
     texture->refcount = 1;
     wined3d_mutex_lock();
     texture->desc = *desc;
@@ -1048,10 +1074,30 @@ HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DE
 
     ID3D11Device2_AddRef(texture->device = &device->ID3D11Device2_iface);
 
+    if (FAILED(hr = d3d_texture2d_shared_attach(device, texture, open)))
+    {
+        WARN("Failed to set up the shared resource, hr %#lx.\n", hr);
+        ID3D11Texture2D_Release(&texture->ID3D11Texture2D_iface);
+        return hr;
+    }
+    d3d_texture2d_shared_created(texture, data != NULL && !open);
+
     TRACE("Created texture %p.\n", texture);
     *out = texture;
 
     return S_OK;
+}
+
+HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DESC *desc,
+        struct wined3d_texture *wined3d_texture, const D3D11_SUBRESOURCE_DATA *data, struct d3d_texture2d **out)
+{
+    return d3d_texture2d_create_ex(device, desc, wined3d_texture, data, NULL, out);
+}
+
+HRESULT d3d_texture2d_create_shared_open(struct d3d_device *device, const D3D11_TEXTURE2D_DESC *desc,
+        struct d3d_shared_open *open, struct d3d_texture2d **out)
+{
+    return d3d_texture2d_create_ex(device, desc, NULL, NULL, open, out);
 }
 
 /* ID3D11Texture3D methods */
