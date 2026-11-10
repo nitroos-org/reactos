@@ -372,6 +372,7 @@ extern HRESULT get_fontsig_from_font(IDWriteFont*,FONTSIGNATURE*);
 extern HRESULT get_fontsig_from_fontface(IDWriteFontFace*,FONTSIGNATURE*);
 extern HRESULT create_gdiinterop(IDWriteFactory7 *factory, IDWriteGdiInterop1 **interop);
 extern void fontface_detach_from_cache(IDWriteFontFace5 *fontface);
+extern BOOL dwrite_fontface_is_installed_font(IDWriteFontFace5 *fontface);
 extern void factory_lock(IDWriteFactory7 *factory);
 extern void factory_unlock(IDWriteFactory7 *factory);
 extern HRESULT create_inmemory_fileloader(IDWriteInMemoryFontFileLoader **loader);
