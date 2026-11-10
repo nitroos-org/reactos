@@ -3725,16 +3725,15 @@ void rpcrt4_conn_release_and_wait(RpcConnection *connection)
     }
 }
 
-/* TRUE if the client of a server connection runs on this machine. ncalrpc is local by definition. A named pipe
- * has no other clients here (there is no file server to carry a pipe over the network; if one is added, ask the
- * pipe for the client's computer name instead). A TCP client is local when its address is loopback or ours;
- * anything else, and every transport not listed, is remote. */
+/* TRUE if the client of a server connection counts as local for RPC_IF_ALLOW_LOCAL_ONLY. ncalrpc is local by
+ * definition. A named pipe has no other clients here (there is no file server to carry a pipe over the network; if
+ * one is added, ask the pipe for the client's computer name instead). A TCP client never is, as on Windows 10
+ * (measured: a client on the loopback address or the machine's own address is refused too); every transport not
+ * listed is remote. */
 BOOL RPCRT4_IsLocalClient(RpcConnection *conn)
 {
     if (!conn || !conn->ops || !conn->ops->name) return FALSE;
-    if (!strcmp(conn->ops->name, "ncalrpc") || !strcmp(conn->ops->name, "ncacn_np")) return TRUE;
-    if (!strcmp(conn->ops->name, "ncacn_ip_tcp")) return ((RpcConnection_tcp *)conn)->peer_local;
-    return FALSE;
+    return !strcmp(conn->ops->name, "ncalrpc") || !strcmp(conn->ops->name, "ncacn_np");
 }
 
 RpcConnection *RPCRT4_GrabConnection(RpcConnection *connection)

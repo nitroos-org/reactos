@@ -67,11 +67,13 @@ static void WINAPI dispatch(PRPC_MESSAGE msg)
 
 static RPC_STATUS CALLBACK if_callback(RPC_IF_HANDLE iface, void *context)
 {
-    const RPC_SERVER_INTERFACE *sif = iface;
+    /* Windows passes a pointer to the interface's RPC_SYNTAX_IDENTIFIER (measured), not the RPC_SERVER_INTERFACE */
+    const RPC_SYNTAX_IDENTIFIER *id = iface;
     int i;
 
     for (i = 0; i < IF_COUNT; i++)
-        if (!memcmp(&sif->InterfaceId.SyntaxGUID, &server_if[i].InterfaceId.SyntaxGUID, sizeof(GUID)))
+        if (!memcmp(&id->SyntaxGUID, &server_if[i].InterfaceId.SyntaxGUID, sizeof(GUID)) &&
+            id->SyntaxVersion.MajorVersion == 1 && id->SyntaxVersion.MinorVersion == 0)
             break;
     if (i == IF_COUNT)
     {
@@ -157,6 +159,8 @@ struct transport
     const char *address;
     const char *endpoint;
     BOOL usable;
+    BOOL local;       /* counts as local for RPC_IF_ALLOW_LOCAL_ONLY */
+    BOOL cached;      /* the callback verdict is kept for the connection (unauthenticated callers: ncalrpc only) */
 };
 
 static void reset_counts(void)
@@ -187,14 +191,15 @@ static void test_transport(struct transport *t)
     ok_eq_long(callback_count[IF_PLAIN], 0);
     RpcBindingFree(&binding);
 
-    /* a local-only interface serves the clients of this machine */
+    /* a local-only interface serves ncalrpc and local named pipe clients; a TCP client is refused, also over
+     * the loopback address (measured on Windows 10) */
     binding = make_binding(t->protseq, t->address, t->endpoint);
     status = do_call(binding, IF_LOCAL, 0, &result);
-    ok_eq_hex(status, RPC_S_OK);
-    ok_eq_int(result, 42);
+    ok_eq_hex(status, t->local ? RPC_S_OK : RPC_S_ACCESS_DENIED);
+    ok_eq_int(result, t->local ? 42 : -1);
     RpcBindingFree(&binding);
 
-    /* the callback allows: the call is served, the callback ran once for two calls on the binding, got the
+    /* the callback allows: the call is served, the callback ran once for two calls on the binding (twice for a named pipe or TCP caller that set no authentication, as on Windows), got the
      * interface it belongs to and a binding handle */
     reset_counts();
     binding = make_binding(t->protseq, t->address, t->endpoint);
@@ -204,7 +209,7 @@ static void test_transport(struct transport *t)
     status = do_call(binding, IF_ALLOW, 0, &result);
     ok_eq_hex(status, RPC_S_OK);
     ok_eq_int(result, 42);
-    ok_eq_long(callback_count[IF_ALLOW], 1);
+    ok_eq_long(callback_count[IF_ALLOW], t->cached ? 1 : 2);
     ok_eq_long(callback_null_context[IF_ALLOW], 0);
     ok_eq_long(dispatch_count[IF_ALLOW], 2);
     RpcBindingFree(&binding);
@@ -268,7 +273,7 @@ static void test_transport(struct transport *t)
 START_TEST(interface_access)
 {
     RPC_STATUS status;
-    struct transport transports[3];
+    struct transport transports[3] = {{0}};
     int i, count = 0;
     DWORD pid = GetCurrentProcessId();
 
@@ -283,6 +288,8 @@ START_TEST(interface_access)
     transports[count].protseq = "ncalrpc";
     transports[count].address = NULL;
     transports[count].endpoint = lrpc_endpoint;
+    transports[count].local = TRUE;
+    transports[count].cached = TRUE;
     count++;
 
     status = RpcServerUseProtseqEpA((RPC_CSTR)"ncacn_np", RPC_C_PROTSEQ_MAX_REQS_DEFAULT, (RPC_CSTR)pipe_endpoint, NULL);
@@ -291,6 +298,7 @@ START_TEST(interface_access)
     transports[count].protseq = "ncacn_np";
     transports[count].address = NULL;
     transports[count].endpoint = pipe_endpoint;
+    transports[count].local = TRUE;
     count++;
 
     status = RpcServerUseProtseqEpA((RPC_CSTR)"ncacn_ip_tcp", RPC_C_PROTSEQ_MAX_REQS_DEFAULT, (RPC_CSTR)tcp_endpoint, NULL);
