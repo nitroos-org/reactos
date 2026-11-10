@@ -170,7 +170,9 @@ for row in rows:
 # application; catalogue control protocols must not block another class's
 # scalar message with the same number.
 converted = {'WM_CREATE','WM_NCCREATE','WM_NCCALCSIZE','WM_WINDOWPOSCHANGING','WM_WINDOWPOSCHANGED',
-             'WM_MEASUREITEM','WM_DRAWITEM','WM_COPYDATA'}
+             'WM_MEASUREITEM','WM_DRAWITEM','WM_COPYDATA',
+             # reviewed in user.c: scalar handles, or (GETDLGCODE) a raw same-thread MSG pointer
+             'WM_GETDLGCODE','WM_NEXTDLGCTL','WM_PARENTNOTIFY'}
 blocked = {}
 for row in csv.DictReader((HERE/'catalog/messages.tsv').open(),delimiter='\t'):
     if row['class'] in ('C','D') and row['message'] not in converted:

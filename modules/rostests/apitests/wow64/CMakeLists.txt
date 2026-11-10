@@ -54,6 +54,10 @@ add_wow64_apitest(gdi32 D3DKMTCreateDCFromMemory D3DKMTWow64Thunks)
 target_include_directories(gdi32_wow64_apitest PRIVATE ${REACTOS_SOURCE_DIR}/win32ss)
 add_importlibs(gdi32_wow64_apitest gdi32 user32)
 
+# WM_GETDLGCODE and friends reach win32k through the 32-bit message thunk
+add_wow64_apitest(user32 WmGetDlgCode)
+add_importlibs(user32_wow64_apitest user32)
+
 target_sources(advapi32_wow64_apitest PRIVATE ../advapi32/RegWow64Review.c)
 # LogonUser creates its test user through the SAM
 add_importlibs(advapi32_wow64_apitest netapi32)
