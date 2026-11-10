@@ -920,6 +920,8 @@ NtUserCallHwndParam(
                     ret = TRUE;
                 }
                 GlassBackdropDrop(hWnd);
+                /* Glass or not any more: a redirection surface does not hold what the window shows now */
+                UserRedirDetachWindow(pWnd);
             }
             UserLeave();
             return ret;

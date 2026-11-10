@@ -137,6 +137,7 @@ typedef struct _DC
   HWND        hwndGlass;  /* the window of a DC that draws to a glass window (glassblt.c), else NULL */
   RECTL       rclGlass;   /* that window's rectangle on the screen */
   PVOID       pvRedir;    /* while fs & DC_REDIRECTION: the redirection record of the window (ntuser/redir.c) */
+  RECTL       rclRedirDraw; /* device rectangle of the primitive being drawn into that surface */
 } DC;
 
 /*
@@ -146,12 +147,14 @@ typedef struct _DC
  */
 #define DC_IS_SCREEN(pdc) ((pdc)->dctype == DCTYPE_DIRECT && !((pdc)->fs & DC_REDIRECTION))
 
-/* redirgdi.c */
-BOOL NTAPI GreRedirBindDC(_In_ HDC hdc, _In_opt_ PVOID pvRedir, _In_opt_ HBITMAP hbmSurface, _Out_ PVOID *ppvOld);
-HBITMAP NTAPI GreRedirCreateSurface(_In_ LONG cx, _In_ LONG cy, _In_opt_ HBITMAP hbmOld);
-BOOL NTAPI GreRedirPresent(_In_ HBITMAP hbmSurface, _In_ struct _REGION *prgnScreen, _In_ LONG xWnd, _In_ LONG yWnd);
+/* redirgdi.c (surfaces are used by pointer: their handles have no owner a process can match) */
+BOOL NTAPI GreRedirBindDC(_In_ HDC hdc, _In_opt_ PVOID pvRedir, _In_opt_ struct _SURFACE *psurf, _Out_ PVOID *ppvOld);
+struct _SURFACE *NTAPI GreRedirCreateSurface(_In_ LONG cx, _In_ LONG cy, _In_opt_ struct _SURFACE *psurfOld);
+VOID NTAPI GreRedirDeleteSurface(_In_ struct _SURFACE *psurf);
+BOOL NTAPI GreRedirPresent(_In_ struct _SURFACE *psurf, _In_ struct _REGION *prgnScreen, _In_ LONG xWnd, _In_ LONG yWnd);
+BOOL NTAPI GreRedirSeedFromScreen(_In_ struct _SURFACE *psurf, _In_ struct _REGION *prgnScreen, _In_ LONG xWnd, _In_ LONG yWnd);
 /* ntuser/redir.c */
-VOID FASTCALL UserRedirMarkDirty(_In_ PVOID pvRedir);
+VOID FASTCALL UserRedirMarkDirty(_In_ PVOID pvRedir, _In_opt_ const RECTL *prcl);
 // typedef struct _DC *PDC;
 
 extern PDC defaultDCstate;

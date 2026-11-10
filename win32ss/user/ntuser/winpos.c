@@ -2314,7 +2314,7 @@ co_WinPosSetWindowPosEx(
          else if ( gRedirLevel &&
                    (OldWindowRect.left != NewWindowRect.left || OldWindowRect.top != NewWindowRect.top) &&
                    !(WinPos.flags & SWP_FRAMECHANGED) &&
-                   UserRedirRootFor(Window) == Window && UserRedirGet(Window) )
+                   UserRedirHasSurface(Window) )
          {
              /* Redirected: the surface keeps the content, nothing to copy; it is presented below */
              IntValidateParent(Window, CopyRgn);
