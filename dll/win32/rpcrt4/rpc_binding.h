@@ -59,6 +59,14 @@ typedef struct _RpcQualityOfService
 
 struct connection_ops;
 
+struct rpc_if_cb_result
+{
+  struct rpc_if_cb_result *next;
+  const void *If;       /* interface the callback belongs to */
+  const void *Fn;       /* ... and the callback that produced the result */
+  RPC_STATUS status;
+};
+
 typedef struct _RpcConnection
 {
   LONG ref;
@@ -94,6 +102,8 @@ typedef struct _RpcConnection
   struct list protseq_entry;
   struct _RpcServerProtseq *protseq;
   struct _RpcBinding *server_binding;
+  /* results of the interface security callbacks for this client (guarded by the server lock) */
+  struct rpc_if_cb_result *if_cb_cache;
 } RpcConnection;
 
 struct connection_ops {
@@ -160,6 +170,7 @@ RPC_STATUS RPCRT4_CreateConnection(RpcConnection** Connection, BOOL server, LPCS
     RpcQualityOfService *QOS, LPCWSTR CookieAuth);
 RpcConnection *RPCRT4_GrabConnection( RpcConnection *conn );
 void RPCRT4_ReleaseConnection(RpcConnection* Connection);
+BOOL RPCRT4_IsLocalClient(RpcConnection *conn);
 RPC_STATUS RPCRT4_OpenClientConnection(RpcConnection* Connection);
 RPC_STATUS RPCRT4_CloseConnection(RpcConnection* Connection);
 RPC_STATUS RPCRT4_IsServerListening(const char *protseq, const char *endpoint);

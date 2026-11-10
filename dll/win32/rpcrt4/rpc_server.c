@@ -360,6 +360,63 @@ static RPC_STATUS process_bind_packet(RpcConnection *conn, RpcPktBindHdr *hdr,
 }
 
 
+/* Enforce what the interface was registered with, as Windows does for a call that reaches it:
+ * RPC_IF_ALLOW_LOCAL_ONLY refuses a client that is not on this machine, and the interface security callback
+ * decides each client (the binding handle of the call is its argument); a verdict other than RPC_S_OK refuses
+ * the call with RPC_S_ACCESS_DENIED. The verdict is kept for the life of the client's connection unless the
+ * interface was registered with RPC_IF_SEC_NO_CACHE. */
+static RPC_STATUS check_interface_access(RpcConnection *conn, RpcServerInterface *sif, RPC_BINDING_HANDLE binding)
+{
+  RPC_IF_CALLBACK_FN *fn = sif->IfCallbackFn;
+  const void *iface = sif->If;
+  RPC_STATUS verdict = RPC_S_OK;
+  struct rpc_if_cb_result *r;
+
+  if ((sif->Flags & RPC_IF_ALLOW_LOCAL_ONLY) && !RPCRT4_IsLocalClient(conn))
+  {
+    WARN("remote client refused by a local-only interface %s\n", debugstr_guid(&sif->If->InterfaceId.SyntaxGUID));
+    return RPC_S_ACCESS_DENIED;
+  }
+  if (!fn) return RPC_S_OK;
+
+  if (!(sif->Flags & RPC_IF_SEC_NO_CACHE))
+  {
+    EnterCriticalSection(&server_cs);
+    for (r = conn->if_cb_cache; r; r = r->next)
+      if (r->If == iface && r->Fn == (const void *)fn) break;
+    if (r) verdict = r->status;
+    LeaveCriticalSection(&server_cs);
+    if (r) return verdict == RPC_S_OK ? RPC_S_OK : RPC_S_ACCESS_DENIED;
+  }
+
+  /* the callback may ask about the caller (RpcBindingInqAuthClient, RpcImpersonateClient) */
+  RPCRT4_SetThreadCurrentCallHandle(binding);
+  __TRY {
+    verdict = fn((RPC_IF_HANDLE)iface, binding);
+  } __EXCEPT_ALL {
+    WARN("exception in the security callback of %s\n", debugstr_guid(&sif->If->InterfaceId.SyntaxGUID));
+    verdict = RPC_S_ACCESS_DENIED;
+  } __ENDTRY
+  RPCRT4_SetThreadCurrentCallHandle(NULL);
+  if (verdict != RPC_S_OK) verdict = RPC_S_ACCESS_DENIED;
+
+  if (!(sif->Flags & RPC_IF_SEC_NO_CACHE))
+  {
+    struct rpc_if_cb_result *n = malloc(sizeof(*n));
+    if (n)
+    {
+      n->If = iface;
+      n->Fn = (const void *)fn;
+      n->status = verdict;
+      EnterCriticalSection(&server_cs);
+      n->next = conn->if_cb_cache;
+      conn->if_cb_cache = n;
+      LeaveCriticalSection(&server_cs);
+    }
+  }
+  return verdict;
+}
+
 static RPC_STATUS process_request_packet(RpcConnection *conn, RpcPktRequestHdr *hdr, RPC_MESSAGE *msg)
 {
   RPC_STATUS status;
@@ -398,6 +455,16 @@ static RPC_STATUS process_request_packet(RpcConnection *conn, RpcPktRequestHdr *
     free(response);
     return RPC_S_OK;
   }
+  status = check_interface_access(conn, sif, msg->Handle);
+  if (status != RPC_S_OK) {
+    response = RPCRT4_BuildFaultHeader(NDR_LOCAL_DATA_REPRESENTATION,
+                                       RPC2NCA_STATUS(status));
+
+    RPCRT4_Send(conn, response, NULL, 0);
+    free(response);
+    RPCRT4_release_server_interface(sif);
+    return RPC_S_OK;
+  }
   msg->RpcInterfaceInformation = sif->If;
   /* copy the endpoint vector from sif to msg so that midl-generated code will use it */
   msg->ManagerEpv = sif->MgrEpv;
@@ -419,6 +486,9 @@ static RPC_STATUS process_request_packet(RpcConnection *conn, RpcPktRequestHdr *
 
       RPCRT4_Send(conn, response, NULL, 0);
       free(response);
+      msg->RpcInterfaceInformation = NULL;
+      RPCRT4_release_server_interface(sif);
+      return RPC_S_OK;
     }
     func = sif->If->DispatchTable->DispatchTable[msg->ProcNum];
   }

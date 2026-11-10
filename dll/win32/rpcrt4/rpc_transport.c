@@ -1390,6 +1390,7 @@ typedef struct _RpcConnection_tcp
   int sock;
   HANDLE sock_event;
   HANDLE cancel_event;
+  BOOL peer_local; /* server side: the client's address is a loopback address or one of this host's */
 } RpcConnection_tcp;
 
 static BOOL rpcrt4_sock_wait_init(RpcConnection_tcp *tcpc)
@@ -1729,7 +1730,21 @@ static RPC_STATUS rpcrt4_conn_tcp_handoff(RpcConnection *old_conn, RpcConnection
     return RPC_S_OUT_OF_RESOURCES;
   }
 
-  TRACE("Accepted a new TCP connection from %s\n", client->common.NetworkAddr);
+  /* the client is local when it comes from 127.0.0.0/8, or from the address it connected to (our own) */
+  client->peer_local = FALSE;
+  if (address.sin_family == AF_INET)
+  {
+    struct sockaddr_in self;
+    socklen_t selfsize = sizeof(self);
+
+    if ((ntohl(address.sin_addr.s_addr) >> 24) == 127)
+      client->peer_local = TRUE;
+    else if (!getsockname(client->sock, (struct sockaddr *)&self, &selfsize) && self.sin_family == AF_INET &&
+             self.sin_addr.s_addr == address.sin_addr.s_addr)
+      client->peer_local = TRUE;
+  }
+
+  TRACE("Accepted a new TCP connection from %s (local %d)\n", client->common.NetworkAddr, client->peer_local);
   return RPC_S_OK;
 }
 
@@ -3710,6 +3725,18 @@ void rpcrt4_conn_release_and_wait(RpcConnection *connection)
     }
 }
 
+/* TRUE if the client of a server connection runs on this machine. ncalrpc is local by definition. A named pipe
+ * has no other clients here (there is no file server to carry a pipe over the network; if one is added, ask the
+ * pipe for the client's computer name instead). A TCP client is local when its address is loopback or ours;
+ * anything else, and every transport not listed, is remote. */
+BOOL RPCRT4_IsLocalClient(RpcConnection *conn)
+{
+    if (!conn || !conn->ops || !conn->ops->name) return FALSE;
+    if (!strcmp(conn->ops->name, "ncalrpc") || !strcmp(conn->ops->name, "ncacn_np")) return TRUE;
+    if (!strcmp(conn->ops->name, "ncacn_ip_tcp")) return ((RpcConnection_tcp *)conn)->peer_local;
+    return FALSE;
+}
+
 RpcConnection *RPCRT4_GrabConnection(RpcConnection *connection)
 {
     LONG ref = InterlockedIncrement(&connection->ref);
@@ -3751,6 +3778,12 @@ void RPCRT4_ReleaseConnection(RpcConnection *connection)
         if (connection->QOS) RpcQualityOfService_Release(connection->QOS);
 
         /* server-only */
+        while (connection->if_cb_cache)
+        {
+            struct rpc_if_cb_result *r = connection->if_cb_cache;
+            connection->if_cb_cache = r->next;
+            free(r);
+        }
         if (connection->server_binding) RPCRT4_ReleaseBinding(connection->server_binding);
         else if (connection->assoc) RpcAssoc_ConnectionReleased(connection->assoc);
 
