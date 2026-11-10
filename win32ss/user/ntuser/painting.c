@@ -7,6 +7,9 @@
  */
 
 #include <win32k.h>
+
+/* PrintWindow flag (winuser.h, Windows 8.1+); not in our SDK headers */
+#define NITRO_PW_RENDERFULLCONTENT 0x00000002
 DBG_DEFAULT_CHANNEL(UserPainting);
 
 BOOL UserExtTextOutW(HDC hdc, INT x, INT y, UINT flags, PRECTL lprc,
@@ -1676,6 +1679,30 @@ IntPrintWindow(
     PPRINTWINDOW_REQUEST Request;
     BOOL Ret = TRUE;
 
+    /*
+     * A redirected window (redir.c): its surface holds its content, also where it is covered. As on
+     * Windows with DWM, flags 0 repaints it once (one WM_PAINT) and copies it; PW_RENDERFULLCONTENT
+     * copies it with no message.
+     */
+    if (UserRedirHasSurface(pwnd))
+    {
+        RECTL rc = (nFlags & PW_CLIENTONLY) ? pwnd->rcClient : pwnd->rcWindow;
+
+        /* A full repaint (erase, then WM_PAINT); the oracle measured the one WM_PAINT, the erase is not measured */
+        if (!(nFlags & NITRO_PW_RENDERFULLCONTENT))
+            co_UserRedrawWindow(pwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+        if (UserRedirHasSurface(pwnd))
+        {
+            if (!hdcBlt)
+                return TRUE;
+            return UserRedirCopyToDC(pwnd, hdcBlt,
+                                     rc.left - pwnd->rcWindow.left, rc.top - pwnd->rcWindow.top,
+                                     rc.right - rc.left, rc.bottom - rc.top);
+        }
+        if (nFlags & NITRO_PW_RENDERFULLCONTENT)
+            return FALSE;
+    }
+
     if (pwnd->head.pti == PsGetCurrentThreadWin32Thread())
     {
         pImage = IntPrintWindowRender(pwnd, nFlags);
@@ -3005,7 +3032,9 @@ NtUserPrintWindow(
        if ( Window )
        {
           /* Validate flags and check it as a mask for 0 or 1. */
-          if ( (nFlags & PW_CLIENTONLY) == nFlags)
+          /* PW_RENDERFULLCONTENT is known only for a redirected window (its surface holds the content) */
+          if ( (nFlags & PW_CLIENTONLY) == nFlags ||
+               ((nFlags & ~PW_CLIENTONLY) == NITRO_PW_RENDERFULLCONTENT && UserRedirHasSurface(Window)) )
           {
              USER_REFERENCE_ENTRY Ref;
              UserRefObjectCo(Window, &Ref);

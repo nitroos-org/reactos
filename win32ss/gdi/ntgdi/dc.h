@@ -158,6 +158,7 @@ struct _SURFACE *NTAPI GreRedirCreateSurface(_In_ LONG cx, _In_ LONG cy, _In_opt
 VOID NTAPI GreRedirDeleteSurface(_In_ struct _SURFACE *psurf);
 BOOL NTAPI GreRedirPresent(_In_ struct _SURFACE *psurf, _In_ struct _REGION *prgnScreen, _In_ LONG xWnd, _In_ LONG yWnd);
 BOOL NTAPI GreRedirSeedFromScreen(_In_ struct _SURFACE *psurf, _In_ struct _REGION *prgnScreen, _In_ LONG xWnd, _In_ LONG yWnd);
+BOOL NTAPI GreRedirCopyToDC(_In_ struct _SURFACE *psurf, _In_ HDC hdcDest, _In_ LONG xSrc, _In_ LONG ySrc, _In_ LONG cx, _In_ LONG cy);
 /* ntuser/redir.c */
 VOID FASTCALL UserRedirMarkDirty(_In_ PVOID pvRedir, _In_opt_ const RECTL *prcl);
 // typedef struct _DC *PDC;
