@@ -2124,6 +2124,12 @@ NTAPI
 MmMarkCacheSection(
     _In_ PVOID SectionObject);
 
+VOID
+NTAPI
+MmMapResidentSystemViewPages(
+    _In_ PVOID Address,
+    _In_ SIZE_T Length);
+
 BOOLEAN
 NTAPI
 MmIsDataSectionResident(

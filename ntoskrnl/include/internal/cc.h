@@ -218,6 +218,7 @@ typedef struct _ROS_SHARED_CACHE_MAP
 
     /* ROS specific */
     LIST_ENTRY CacheMapVacbListHead;
+    struct _ROS_VACB *LastVacb; /* the view the last lookup found, where the next starts (both locks; cleared when a view leaves CacheMapVacbListHead) */
     BOOLEAN PinAccess;
     KSPIN_LOCK CacheMapLock;
     KGUARDED_MUTEX FlushCacheLock;

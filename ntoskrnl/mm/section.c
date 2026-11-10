@@ -6386,6 +6386,88 @@ MmPurgeSegment(
     return Success;
 }
 
+/*
+ * Maps the pages of a range of a view in system space (a view of Cc) that are in the section's memory and not
+ * mapped yet, all in one pass under the locks.  What a copy from the view would fault in one page at a time
+ * (a trap, the address space lock and the segment lock for each page: 1.3 us of 1.5 us per page of a cached
+ * read after the view was mapped).  A page that is not resident, or is being read or written, is left to the
+ * fault, as is everything this does not map: the result is the mapping the fault makes (MiNotPresentFaultSectionView,
+ * the branch of a page the segment has), only earlier.  Only for data views that are not copy-on-write.
+ */
+VOID
+NTAPI
+MmMapResidentSystemViewPages(
+    _In_ PVOID Address,
+    _In_ SIZE_T Length)
+{
+    PMMSUPPORT AddressSpace = MmGetKernelAddressSpace();
+    PMEMORY_AREA MemoryArea;
+    PMM_SECTION_SEGMENT Segment;
+    PMM_REGION Region;
+    ULONG_PTR Start, End, Page;
+    LARGE_INTEGER Offset;
+
+    if (Length == 0)
+        return;
+    Start = (ULONG_PTR)PAGE_ALIGN(Address);
+    End = (ULONG_PTR)ROUND_UP((ULONG_PTR)Address + Length, PAGE_SIZE);
+
+    /* Mapped already (a view that stayed mapped): no lock */
+    for (Page = Start; Page < End; Page += PAGE_SIZE)
+    {
+        if (!MmIsPagePresent(NULL, (PVOID)Page))
+            break;
+    }
+    if (Page == End)
+        return;
+
+    MmLockAddressSpace(AddressSpace);
+    MemoryArea = MmLocateMemoryAreaByAddress(AddressSpace, (PVOID)Start);
+    if (MemoryArea == NULL || MemoryArea->DeleteInProgress || MemoryArea->Type != MEMORY_AREA_SECTION_VIEW ||
+        End > (ULONG_PTR)MA_GetEndingAddress(MemoryArea))
+    {
+        MmUnlockAddressSpace(AddressSpace);
+        return;
+    }
+
+    Segment = MemoryArea->SectionData.Segment;
+    if (Segment->WriteCopy || ((*Segment->Flags) & MM_PHYSICALMEMORY_SEGMENT) || MemoryArea->VadNode.u.VadFlags.VadType == VadImageMap)
+    {
+        MmUnlockAddressSpace(AddressSpace);
+        return;
+    }
+
+    MmLockSectionSegment(Segment);
+    for (; Page < End; Page += PAGE_SIZE)
+    {
+        ULONG_PTR Entry;
+        PFN_NUMBER Pfn;
+
+        if (MmIsPagePresent(NULL, (PVOID)Page))
+            continue;
+        if (MmIsPageSwapEntry(NULL, (PVOID)Page) || MmIsDisabledPage(NULL, (PVOID)Page))
+            continue;
+
+        Region = MmFindRegion((PVOID)MA_GetStartingAddress(MemoryArea),
+                              &MemoryArea->SectionData.RegionListHead,
+                              (PVOID)Page, NULL);
+        if (Region == NULL || (Region->Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+            break;
+
+        Offset.QuadPart = Page - MA_GetStartingAddress(MemoryArea) + MemoryArea->SectionData.ViewOffset;
+        Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
+        if (Entry == 0 || IS_SWAP_FROM_SSE(Entry))
+            continue;
+
+        Pfn = PFN_FROM_SSE(Entry);
+        if (!NT_SUCCESS(MmCreateVirtualMapping(NULL, (PVOID)Page, Region->Protect, Pfn)))
+            break;
+        MmSharePageEntrySectionSegment(Segment, &Offset);
+    }
+    MmUnlockSectionSegment(Segment);
+    MmUnlockAddressSpace(AddressSpace);
+}
+
 BOOLEAN
 NTAPI
 MmIsDataSectionResident(
