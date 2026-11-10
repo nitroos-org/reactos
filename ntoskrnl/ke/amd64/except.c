@@ -792,6 +792,51 @@ KiGeneralProtectionFaultUserMode(
     return Status;
 }
 
+/*
+ * A kernel-mode #GP that is not explained here ends in KMODE_EXCEPTION_NOT_HANDLED with STATUS_UNSUCCESSFUL,
+ * which tells nothing about the cause (a non-canonical address, a bad selector or descriptor, an XSAVE area
+ * fault...). Print what the trap knows on the debug port first, in every build: the faulting instruction
+ * (bytes at RIP), the error code (a selector, or 0), the selectors and the registers the trap saved.
+ */
+static
+VOID
+KiReportKernelGeneralProtectionFault(
+    _In_ PKTRAP_FRAME TrapFrame,
+    _In_ PCSTR Why)
+{
+    PUCHAR Rip = (PUCHAR)TrapFrame->Rip;
+    UCHAR Bytes[16];
+    ULONG i;
+    BOOLEAN Readable;
+
+    DbgPrint("KE-GP: unexplained kernel #GP (%s): rip %p err %I64x cs %04x ss %04x rsp %p efl %08lx irql %u cpu %u "
+             "thread %p (%.16s)\n",
+             Why, Rip, TrapFrame->ErrorCode, TrapFrame->SegCs, TrapFrame->SegSs, (PVOID)TrapFrame->Rsp,
+             TrapFrame->EFlags, KeGetCurrentIrql(), KeGetCurrentProcessorNumber(), KeGetCurrentThread(),
+             PsGetCurrentProcess()->ImageFileName);
+    DbgPrint("KE-GP: rax %p rcx %p rdx %p r8 %p r9 %p r10 %p r11 %p\n",
+             (PVOID)TrapFrame->Rax, (PVOID)TrapFrame->Rcx, (PVOID)TrapFrame->Rdx, (PVOID)TrapFrame->R8,
+             (PVOID)TrapFrame->R9, (PVOID)TrapFrame->R10, (PVOID)TrapFrame->R11);
+    DbgPrint("KE-GP: rbx %p rsi %p rdi %p rbp %p ds %04x es %04x fs %04x gs %04x\n",
+             (PVOID)TrapFrame->Rbx, (PVOID)TrapFrame->Rsi, (PVOID)TrapFrame->Rdi, (PVOID)TrapFrame->Rbp,
+             TrapFrame->SegDs, TrapFrame->SegEs, TrapFrame->SegFs, TrapFrame->SegGs);
+
+    /* The instruction: only if both ends are mapped (a fault here would hide the first one) */
+    Readable = MmIsAddressValid(Rip) && MmIsAddressValid(Rip + sizeof(Bytes) - 1);
+    if (Readable)
+    {
+        RtlCopyMemory(Bytes, Rip, sizeof(Bytes));
+        DbgPrint("KE-GP: bytes at rip:");
+        for (i = 0; i < sizeof(Bytes); i++)
+            DbgPrint(" %02x", Bytes[i]);
+        DbgPrint("\n");
+    }
+    else
+    {
+        DbgPrint("KE-GP: rip not mapped\n");
+    }
+}
+
 NTSTATUS
 NTAPI
 KiGeneralProtectionFaultHandler(
@@ -827,6 +872,7 @@ KiGeneralProtectionFaultHandler(
     {
         /* Not implemented */
         UNIMPLEMENTED;
+        KiReportKernelGeneralProtectionFault(TrapFrame, "iretq");
         ASSERT(FALSE);
     }
 
@@ -839,6 +885,7 @@ KiGeneralProtectionFaultHandler(
         return STATUS_ACCESS_VIOLATION;
     }
 
+    KiReportKernelGeneralProtectionFault(TrapFrame, "unknown");
     ASSERT(FALSE);
     return STATUS_UNSUCCESSFUL;
 }

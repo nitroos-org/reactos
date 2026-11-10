@@ -462,6 +462,12 @@ FUNC KiGeneralProtectionFault
     /* We have an error code */
     EnterTrap (TF_HAS_ERROR_CODE OR TF_SAVE_ALL)
 
+    /* Keep the interrupted rbx, rdi and rsi in the trap frame (not used by this trap otherwise): the
+       report of an unexplained kernel #GP prints them with the volatile registers */
+    mov [rbp + KTRAP_FRAME_Rbx], rbx
+    mov [rbp + KTRAP_FRAME_Rdi], rdi
+    mov [rbp + KTRAP_FRAME_Rsi], rsi
+
     /* Enable interrupts if the interrupted code had them enabled */
     EnableInterruptsIfEnabledBefore
 
