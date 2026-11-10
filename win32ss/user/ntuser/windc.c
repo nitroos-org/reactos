@@ -342,7 +342,7 @@ DceRedirSetRetry(PDCE Dce, BOOL bRetry)
    }
    else if (!bRetry && (Dce->RedirFlags & DCE_REDIR_RETRY))
    {
-      Dce->RedirFlags &= ~DCE_REDIR_RETRY;
+      Dce->RedirFlags &= ~(DCE_REDIR_RETRY | DCE_REDIR_TRIED);
       UserRedirRetryCount(-1);
    }
 }
@@ -433,28 +433,46 @@ DceRedirRebindAll(PVOID pRedir, PSURFACE psurf)
    }
 }
 
-/* The frame timer: DCs whose binding could not be changed are tried again */
+/*
+ * The frame timer: DCs whose binding could not be changed are tried again. Each try of a DC that is still
+ * busy waits a little (GDIOBJ_LockObjectEx) with the USER lock held, so a pass tries at most *plBudget of
+ * them, round robin (DCE_REDIR_TRIED): the others get their turn at the next tick.
+ */
 VOID
 FASTCALL
-DceRedirRetryAll(VOID)
+DceRedirRetryAll(_Inout_ PLONG plBudget)
 {
    PLIST_ENTRY ListEntry;
    PDCE Dce;
    PVOID Target;
+   ULONG Round;
 
-   for (ListEntry = LEDce.Flink; ListEntry != &LEDce; )
+   for (Round = 0; Round < 2; Round++)
    {
-      Dce = CONTAINING_RECORD(ListEntry, DCE, List);
-      ListEntry = ListEntry->Flink;
-      if (!(Dce->RedirFlags & DCE_REDIR_RETRY))
-         continue;
-      /* Its record if the window still has it (a new surface after a resize), else the screen */
-      Target = (Dce->pRedir && UserRedirWindow(Dce->pRedir)) ? Dce->pRedir : NULL;
-      if (DceRedirBind(Dce, Target) && !Dce->pRedir && (Dce->DCXFlags & DCX_DCEBUSY) && Dce->pwndOrg)
+      if (Round)
       {
-         DceRedirSetScreenDrawable(Dce);
-         DceUpdateVisRgn(Dce, Dce->pwndOrg, Dce->DCXFlags);
-         Dce->RedirFlags &= ~DCE_REDIR_VISSTALE;
+         /* Every DC waiting had its turn in this round: a new round with what is left of the budget */
+         for (ListEntry = LEDce.Flink; ListEntry != &LEDce; ListEntry = ListEntry->Flink)
+            CONTAINING_RECORD(ListEntry, DCE, List)->RedirFlags &= ~DCE_REDIR_TRIED;
+      }
+      for (ListEntry = LEDce.Flink; ListEntry != &LEDce; )
+      {
+         Dce = CONTAINING_RECORD(ListEntry, DCE, List);
+         ListEntry = ListEntry->Flink;
+         if (!(Dce->RedirFlags & DCE_REDIR_RETRY) || (Dce->RedirFlags & DCE_REDIR_TRIED))
+            continue;
+         if (*plBudget <= 0)
+            return;
+         (*plBudget)--;
+         Dce->RedirFlags |= DCE_REDIR_TRIED;
+         /* Its record if the window still has it (a new surface after a resize), else the screen */
+         Target = (Dce->pRedir && UserRedirWindow(Dce->pRedir)) ? Dce->pRedir : NULL;
+         if (DceRedirBind(Dce, Target) && !Dce->pRedir && (Dce->DCXFlags & DCX_DCEBUSY) && Dce->pwndOrg)
+         {
+            DceRedirSetScreenDrawable(Dce);
+            DceUpdateVisRgn(Dce, Dce->pwndOrg, Dce->DCXFlags);
+            Dce->RedirFlags &= ~DCE_REDIR_VISSTALE;
+         }
       }
    }
 }

@@ -12,7 +12,6 @@
 #include <debug.h>
 
 // FIXME: Windows uses 0x0012009f
-#define DIRTY_DEFAULT DIRTY_CHARSET|DIRTY_BACKGROUND|DIRTY_TEXT|DIRTY_LINE|DIRTY_FILL
 
 PSURFACE psurfDefaultBitmap = NULL;
 PBRUSH pbrDefaultBrush = NULL;

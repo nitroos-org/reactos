@@ -37,6 +37,7 @@ typedef struct tagDCE
 /* RedirFlags: the binding could not be changed yet (try again); the visible region is not for the current binding */
 #define DCE_REDIR_RETRY     0x0001
 #define DCE_REDIR_VISSTALE  0x0002
+#define DCE_REDIR_TRIED     0x0004  /* tried by the frame timer in this round (DceRedirRetryAll) */
 
 /* internal DCX flags, see psdk/winuser.h for the rest */
 #define DCX_DCEEMPTY        0x00000800
