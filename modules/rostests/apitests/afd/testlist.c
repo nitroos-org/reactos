@@ -30,6 +30,13 @@ extern void func_g7setip(void);
 
 extern void func_g7setinfoex(void);
 
+extern void func_g8ndisstats(void);
+extern void func_g8dgramqueue(void);
+extern void func_g8dgramcancel(void);
+extern void func_g8icmp(void);
+extern void func_g8hwquery(void);
+extern void func_g8tableinfo(void);
+
 const struct test winetest_testlist[] =
 {
     { "select", func_select },
@@ -55,5 +62,11 @@ const struct test winetest_testlist[] =
     { "g7acceptlistening", func_g7acceptlistening },
     { "g7setip", func_g7setip },
     { "g7setinfoex", func_g7setinfoex },
+    { "g8ndisstats", func_g8ndisstats },
+    { "g8dgramqueue", func_g8dgramqueue },
+    { "g8dgramcancel", func_g8dgramcancel },
+    { "g8icmp", func_g8icmp },
+    { "g8hwquery", func_g8hwquery },
+    { "g8tableinfo", func_g8tableinfo },
     { 0, 0 }
 };
