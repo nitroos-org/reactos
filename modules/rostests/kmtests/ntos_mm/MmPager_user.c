@@ -31,6 +31,7 @@
 #define PAGER_TEST_PING                 0x4E500005
 #define PAGER_TEST_MISMATCH_NEXT_FREE   0x4E500006
 #define PAGER_TEST_PAUSE_NEXT_WRITE     0x4E500007
+#define PAGER_TEST_FAIL_NEXT_READAHEAD  0x4E50000E
 #define PAGER_TEST_RESUME_WRITE         0x4E500008
 #define PAGER_TEST_QUERY_PAUSED         0x4E500009
 #define PAGER_TEST_QUERY_FREE_REFUSED   0x4E50000A
@@ -613,6 +614,20 @@ TestInjection(VOID)
     Code = ReadUnderSeh(Base + 2 * PageSize, 21, &IoStatus, &Correct);
     ok_eq_hex(Code, STATUS_SUCCESS);
     ok(Correct, "data after the starved read\n");
+
+    /*
+     * A bad slot of a page read ahead (page 5, read with page 4's fault: pages 4 to 7 went out in one
+     * cluster and were not read since) fails that read, not page 4: it is read again alone. Then page 5
+     * reads fine with its own fault.
+     */
+    PageOut();
+    ok_eq_hex(ArmTest(PAGER_TEST_FAIL_NEXT_READAHEAD, Base + 5 * PageSize), STATUS_SUCCESS);
+    Code = ReadUnderSeh(Base + 4 * PageSize, 21, &IoStatus, &Correct);
+    ok_eq_hex(Code, STATUS_SUCCESS);
+    ok(Correct, "data of the faulting page after a failed read-ahead\n");
+    Code = ReadUnderSeh(Base + 5 * PageSize, 21, &IoStatus, &Correct);
+    ok_eq_hex(Code, STATUS_SUCCESS);
+    ok(Correct, "data of the page whose read-ahead failed\n");
 
     /* Owner tag mismatch: the read is refused, nothing is returned; the real owner then reads fine */
     PageOut();
