@@ -256,6 +256,13 @@ MiReadPageFile(
 
     PagingFile = MmPagingFile[PageFileIndex];
 
+    /* NitroPager: a paging file that went away (retired) fails the read, as MiReadPageFileCluster does */
+    if ((MiNitroPagerMode != 0) &&
+        ((PagingFile == NULL) || (PagingFile->FileObject == NULL) || (PagingFile->FileObject->DeviceObject == NULL)))
+    {
+        DPRINT1("Paging file %u is gone: read of slot %Iu fails\n", PageFileIndex, PageFileOffset + 1);
+        return STATUS_FILE_INVALID;
+    }
     if (PagingFile->FileObject == NULL || PagingFile->FileObject->DeviceObject == NULL)
     {
         DPRINT1("Bad paging file %u\n", PageFileIndex);
