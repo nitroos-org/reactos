@@ -228,6 +228,47 @@ static BOOLEAN NgFlushUsable(PDEVICE_OBJECT Target)
     return TRUE;
 }
 
+/*
+ * Force Unit Access is usable when the disk's write cache is volatile (write-back, enabled) and the stack says a write
+ * that asks for write-through is on the medium when it completes (StorageDeviceWriteCacheProperty: WriteThroughSupported,
+ * which disk.sys takes from the drive's own report: IDENTIFY word 84 bit 6 for ATA, the mode page for SCSI/NVMe).  Anything
+ * else, including a stack that does not answer: no FUA, the journal keeps its flushes.
+ */
+static BOOLEAN NgFuaUsable(PDEVICE_OBJECT Target)
+{
+    STORAGE_PROPERTY_QUERY Query;
+    STORAGE_WRITE_CACHE_PROPERTY Cache;
+    IO_STATUS_BLOCK Iosb;
+    KEVENT Event;
+    NTSTATUS Status;
+    PIRP Irp;
+
+    if (NgGlobal.NoFua)
+        return FALSE;
+    RtlZeroMemory(&Query, sizeof(Query));
+    RtlZeroMemory(&Cache, sizeof(Cache));
+    Query.PropertyId = StorageDeviceWriteCacheProperty;
+    Query.QueryType = PropertyStandardQuery;
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp = IoBuildDeviceIoControlRequest(IOCTL_STORAGE_QUERY_PROPERTY, Target, &Query, sizeof(Query), &Cache, sizeof(Cache),
+                                        FALSE, &Event, &Iosb);
+    if (!Irp)
+        return FALSE;
+    IoGetNextIrpStackLocation(Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
+    Status = IoCallDriver(Target, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = Iosb.Status;
+    }
+    if (!NT_SUCCESS(Status) || Iosb.Information < RTL_SIZEOF_THROUGH_FIELD(STORAGE_WRITE_CACHE_PROPERTY, WriteThroughSupported))
+        return FALSE;
+    DPRINT1("ntfsng: write cache type %lu enabled %lu write-through %lu\n", (ULONG)Cache.WriteCacheType,
+            (ULONG)Cache.WriteCacheEnabled, (ULONG)Cache.WriteThroughSupported);
+    return Cache.WriteCacheType == WriteCacheTypeWriteBack && Cache.WriteCacheEnabled == WriteCacheEnabled &&
+           Cache.WriteThroughSupported == WriteThroughSupported;
+}
+
 static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -322,6 +363,13 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
     NgAcquireCore(Vcb);
     NoFlush = !NgGlobal.ForceReadOnly && !Removable && !NgFlushUsable(Target);
+    {
+        /* BootSectors: the file system's own size; a partition that holds it and FuaAliasMB more is a test disk (see NgDevSetFua) */
+        ULONGLONG Alias = (ULONGLONG)NgGlobal.FuaAliasMB << 20;
+        BOOLEAN Test = Alias && Size >= Alias + (BootSectors + 1) * SectorSize;
+
+        NgDevSetFua(Target, !NoFlush && !Removable && (Test || NgFuaUsable(Target)), Test ? Alias : 0);
+    }
     Err = ngc_mount(Target, Size, SectorSize, !NgGlobal.ForceReadOnly && !Removable && !NoFlush, &Vcb->Core, &WhyRo);
     if (!Err && Removable && !NgGlobal.ForceReadOnly)
         WhyRo = "removable media";
@@ -334,6 +382,7 @@ static NTSTATUS NgMountVolume(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         Vcb->MajorVersion = Vcb->Info.major;
         Vcb->Serial = Vcb->Info.serial;
         ngc_set_dio_drain(Vcb->Core, NgDrainDataIoCallback, Vcb);
+        ngc_set_fua(Vcb->Core, ngos_dev_fua(Target));
         ngc_set_commit_kick(Vcb->Core, NgCommitKickCallback, Vcb);
         if (!Vcb->Info.read_only)
         {

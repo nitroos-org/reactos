@@ -125,6 +125,11 @@ int ngc_commit_now(ngc_vol *v);
 #define NGC_COMMIT_IO 1
 #define NGC_COMMIT_BUSY (-1000)
 extern int ngc_unlocked_commit;		/* 0: every commit is synchronous (registry NoUnlockedCommit=1) */
+void ngc_set_fua(ngc_vol *v, int on);	/* the device honours FUA (glue, at mount): the journal uses it in place of flushes where it can */
+void ngc_set_data_fua(ngc_vol *v, int on);	/* under the volume lock, around a write-through write: its file data is written with FUA */
+void ngc_set_defer(ngc_vol *v, int on);	/* under the volume lock, around a write-through write: its direct data writes are sent and waited for later */
+int ngc_drain_data(ngc_vol *v);	/* waits for them (the calling thread's); -EIO if one failed */
+void ngc_commit_prestart(ngc_vol *v);	/* after ngc_commit_begin returned NGC_COMMIT_IO, still under the lock: slot writes in flight with the data writes, both waited for */
 void ngc_set_no_retain(int off);	/* 1: no retained transactions (registry NoRetainedCommit=1): every commit is in place when it returns */
 /* The core calls fn(ctx) (under the volume lock, never blocking) when the overlay is past its threshold and a commit is wanted. */
 void ngc_set_commit_kick(ngc_vol *v, void (*fn)(void *ctx), void *ctx);

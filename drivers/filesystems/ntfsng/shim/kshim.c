@@ -584,6 +584,11 @@ unsigned long kshim_counter_reads, kshim_counter_refused_writes, kshim_counter_w
 unsigned long long kshim_counter_write_bytes;
 int blk_status_to_errno(blk_status_t s) { return s ? -EIO : 0; }
 #define KSHIM_RMW_CHUNK (64 * 1024)
+/* File data of a write-through write goes to the device with FUA (kshim_wt_fua, only set when the device honours it). */
+static inline int kshim_dw(struct block_device *b, u64 off, void *buf, unsigned int len)
+{
+	return b->kshim_wt_fua ? ngos_dev_write_fua(b->osdev, off, buf, len) : ngos_dev_write(b->osdev, off, buf, len);
+}
 /* Sector-granular read-modify-write for a write that does not start or end on a sector boundary. */
 static int kshim_dev_write_rmw(struct block_device *b, u64 off, const u8 *buf, size_t len)
 {
@@ -601,7 +606,7 @@ static int kshim_dev_write_rmw(struct block_device *b, u64 off, const u8 *buf, s
 			if (!err) {
 				kshim_jnl_patch(b, 0, base, sec, bs);
 				memcpy(sec + in, buf, n);
-				err = ngos_dev_write(b->osdev, base, sec, bs) ? -EIO : 0;
+				err = kshim_dw(b, base, sec, bs) ? -EIO : 0;
 			}
 		} else {
 			/* The storage stack needs a word-aligned buffer (IDE DMA): bounce the middle part. */
@@ -613,7 +618,7 @@ static int kshim_dev_write_rmw(struct block_device *b, u64 off, const u8 *buf, s
 				break;
 			}
 			memcpy(mid, buf, n);
-			err = ngos_dev_write(b->osdev, off, mid, (unsigned int)n) ? -EIO : 0;
+			err = kshim_dw(b, off, mid, (unsigned int)n) ? -EIO : 0;
 		}
 		off += n; buf += n; len -= n;
 	}
@@ -687,7 +692,13 @@ static int kshim_dev_rw_do(struct block_device *b, int write, u64 off, void *buf
 			kshim_jnl_patch(b, 1, off, buf, len);
 		if (((off | len) & (b->logical_block_size - 1)) || ((uintptr_t)buf & 3))
 			return kshim_dev_write_rmw(b, off, buf, len);
-		return ngos_dev_write(b->osdev, off, buf, (unsigned int)len) ? -EIO : 0;
+		if (b->kshim_defer_now) {
+			/* Sent now, waited for before any flush or journal header (and before the volume lock is let go): see ngc_set_defer. */
+			int r = ngos_dev_write_start(b->osdev, off, buf, (unsigned int)len, b->kshim_wt_fua, 1);
+			if (r <= 0)
+				return r ? -EIO : 0;
+		}
+		return kshim_dw(b, off, buf, (unsigned int)len) ? -EIO : 0;
 	}
 	kshim_counter_reads++;
 	if (off >= b->size) {
