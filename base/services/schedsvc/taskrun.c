@@ -1708,7 +1708,7 @@ BOOL schedsvc_binding_is_local(RPC_BINDING_HANDLE binding)
     return local;
 }
 
-/* the security callback of the interface (this rpcrt4 does not call it, so every call checks too) */
+/* the security callback of the interface (every call checks the transport as well) */
 RPC_STATUS CALLBACK schedsvc_if_callback(RPC_IF_HANDLE iface, void *context)
 {
     return schedsvc_binding_is_local(context) ? RPC_S_OK : RPC_S_ACCESS_DENIED;

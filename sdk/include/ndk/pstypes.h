@@ -1732,6 +1732,8 @@ typedef struct _EPROCESS
 #if defined(__REACTOS__)
     // Temp HACK until we switch to NTDDI_VISTA, when this moves to KPROCESS
     ULONGLONG CycleTime;
+    /* PS_PROTECTION: type in bits 0-2, signer in bits 4-7 (0: not protected) */
+    UCHAR Protection;
 #endif // ]
 } EPROCESS;
 
