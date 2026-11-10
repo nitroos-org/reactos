@@ -2645,7 +2645,9 @@ SendMessageCallbackA(
   if (IntCopyDataParamBad(Msg, lParam))
      return FALSE;
 
-  if (is_pointer_message(Msg, wParam))
+  /* WM_ASKCBFORMATNAME is left to win32k: it answers ERROR_INVALID_PARAMETER to a window of another process
+     (measured on Windows 10), and ERROR_MESSAGE_SYNC_ONLY itself to one of this process */
+  if (Msg != WM_ASKCBFORMATNAME && is_pointer_message(Msg, wParam))
   {
      SetLastError( ERROR_MESSAGE_SYNC_ONLY );
      return FALSE;
@@ -2698,11 +2700,9 @@ SendMessageCallbackW(
   if (IntCopyDataParamBad(Msg, lParam))
      return FALSE;
 
-  if (is_pointer_message(Msg, wParam))
-  {
-     SetLastError( ERROR_MESSAGE_SYNC_ONLY );
-     return FALSE;
-  }
+  /* No pointer-message check here: win32k makes it (ERROR_MESSAGE_SYNC_ONLY) after the checks that depend on the
+     window, which Windows 10 answers differently for a window of another process (access denied, invalid
+     parameter, or nothing at all) */
 
   CallBackInfo.CallBack = lpCallBack;
   CallBackInfo.Context = dwData;
@@ -2867,7 +2867,9 @@ SendNotifyMessageA(
   if (IntCopyDataParamBad(Msg, lParam))
      return FALSE;
 
-  if (is_pointer_message(Msg, wParam))
+  /* WM_ASKCBFORMATNAME is left to win32k: it answers ERROR_INVALID_PARAMETER to a window of another process
+     (measured on Windows 10), and ERROR_MESSAGE_SYNC_ONLY itself to one of this process */
+  if (Msg != WM_ASKCBFORMATNAME && is_pointer_message(Msg, wParam))
   {
      SetLastError( ERROR_MESSAGE_SYNC_ONLY );
      return FALSE;
@@ -2907,11 +2909,9 @@ SendNotifyMessageW(
   if (IntCopyDataParamBad(Msg, lParam))
      return FALSE;
 
-  if (is_pointer_message(Msg, wParam))
-  {
-     SetLastError( ERROR_MESSAGE_SYNC_ONLY );
-     return FALSE;
-  }
+  /* No pointer-message check here: win32k makes it (ERROR_MESSAGE_SYNC_ONLY) after the checks that depend on the
+     window, which Windows 10 answers differently for a window of another process (access denied, invalid
+     parameter, or nothing at all) */
 
   Result = NtUserMessageCall( hWnd,
                               Msg,

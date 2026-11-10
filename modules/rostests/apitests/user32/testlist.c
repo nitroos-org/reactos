@@ -134,6 +134,7 @@ extern void func_VirtualKey(void);
 extern void func_Wow64WinArguments(void);
 extern void func_WinEventHook(void);
 extern void func_WinEventInContext(void);
+extern void func_XprocMessages(void);
 extern void func_WindowStationLeak(void);
 extern void func_WmPrint(void);
 extern void func_WndProc(void);
@@ -293,6 +294,7 @@ const struct test winetest_testlist[] =
     { "Wow64WinArguments", func_Wow64WinArguments },
     { "WinEventHook", func_WinEventHook },
     { "WinEventInContext", func_WinEventInContext },
+    { "XprocMessages", func_XprocMessages },
     { "WindowStationLeak", func_WindowStationLeak },
     { "WmPrint", func_WmPrint },
     { "WndProc", func_WndProc },
