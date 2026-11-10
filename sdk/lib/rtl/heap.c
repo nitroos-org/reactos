@@ -2063,8 +2063,12 @@ RtlpAllocateNonDedicated(PHEAP Heap,
     ASSERT(IsListEmpty(&Heap->FreeLists) ||
            (CONTAINING_RECORD(Heap->FreeLists.Blink, HEAP_FREE_ENTRY, FreeList)->Size < Index));
 
-    /* Blocks parked in the front end may make room: give them back and try the heap again */
-    if (Heap->FrontEndHeapType == HEAP_FRONTEND_CACHE)
+    /* Blocks parked in the front end may make room: give them back and try the heap again.
+       Only when a lot is parked (they are bounded per slot, so growing first keeps the size
+       classes warm; flushing at every growth would empty the classes the next requests look in)
+       or when the heap cannot grow. */
+    if (Heap->FrontEndHeapType == HEAP_FRONTEND_CACHE &&
+        RtlpHeapFeParked(Heap) > HEAP_FE_FLUSH_LIMIT)
     {
         /* While the front end is held out, nothing is parked behind our back */
         ULONG Flushed = RtlpHeapFeLock(Heap);
@@ -2083,6 +2087,23 @@ RtlpAllocateNonDedicated(PHEAP Heap,
 
     /* Extend the heap */
     FreeBlock = RtlpExtendHeap(Heap, AllocationSize);
+
+    if (!FreeBlock &&
+        Heap->FrontEndHeapType == HEAP_FRONTEND_CACHE)
+    {
+        ULONG Flushed = RtlpHeapFeLock(Heap);
+
+        if (Flushed)
+        {
+            PVOID Block = RtlAllocateHeap(Heap, Flags | HEAP_NO_SERIALIZE, Size);
+
+            RtlpHeapFeUnlock(Heap);
+            if (HeapLocked) RtlLeaveHeapLock(Heap->LockVariable);
+            return Block;
+        }
+
+        RtlpHeapFeUnlock(Heap);
+    }
 
     /* Use the new biggest entry we've got */
     if (FreeBlock)
@@ -2233,6 +2254,14 @@ RtlAllocateHeap(IN PVOID HeapPtr,
                 RtlZeroMemory(CachedEntry + 1, Size);
 
             return CachedEntry + 1;
+        }
+
+        /* Nothing cached: the heap serves a block of the size class, so that it files under the
+           class a later request like this one looks in when it is freed */
+        if (RtlpHeapFeRoundIndex(Index) < HEAP_FE_UNITS)
+        {
+            Index = RtlpHeapFeRoundIndex(Index);
+            AllocationSize = Index << HEAP_ENTRY_SHIFT;
         }
     }
 
