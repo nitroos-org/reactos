@@ -733,6 +733,13 @@ ExpInitSystemPhase1(VOID)
         return FALSE;
     }
 
+    /* Initialize the memory reserve object types */
+    if (ExpInitializeReserveObjectImplementation() == FALSE)
+    {
+        DPRINT1("Executive: Reserve object initialization failed\n");
+        return FALSE;
+    }
+
     /* Initialize Win32K */
     if (ExpWin32kInit() == FALSE)
     {
