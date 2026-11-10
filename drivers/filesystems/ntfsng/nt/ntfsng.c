@@ -921,6 +921,12 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         ngc_unlocked_commit = 0;
         DPRINT1("ntfsng: NoUnlockedCommit: commits run under CoreLock\n");
     }
+    /* NoRetainedCommit=1: every commit puts its pages in place before it returns (comparison, fallback). */
+    if (NgReadDword(RegistryPath, L"NoRetainedCommit"))
+    {
+        ngc_set_no_retain(1);
+        DPRINT1("ntfsng: NoRetainedCommit: commits put their pages in place at once\n");
+    }
 #if DBG
     i = NgReadDword(RegistryPath, L"DioFault");
     if (i)
