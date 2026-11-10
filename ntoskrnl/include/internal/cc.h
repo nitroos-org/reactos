@@ -263,6 +263,8 @@ typedef struct _ROS_VACB
     PROS_SHARED_CACHE_MAP SharedCacheMap;
     /* Pages counted in CcTotalDirtyPages and the map's DirtyPages while Dirty (CcRosMarkDirtyVacb) */
     ULONG DirtyPagesCharged;
+    /* KeQueryInterruptTime when the view became dirty (CcRosMarkDirtyVacb); the dirty list is in this order */
+    ULONGLONG DirtySince;
     /* Pointer to the next VACB in a chain. */
 } ROS_VACB, *PROS_VACB;
 
@@ -485,7 +487,13 @@ VOID
 CcScheduleLazyWriteScan(BOOLEAN NoDelay);
 
 VOID
-CcKickStreamingWriteBehind(VOID);
+CcKickStreamingWriteBehind(ULONG FileDirtyPages);
+
+BOOLEAN
+CcLazyUnderPressure(VOID);
+
+BOOLEAN
+CcRosDeferredBacklogHigh(VOID);
 
 VOID
 CcPostDeferredWrites(VOID);

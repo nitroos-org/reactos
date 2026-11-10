@@ -443,11 +443,22 @@ CcUninitializeCacheMap (
         }
         KeReleaseSpinLock(&SharedCacheMap->CacheMapLock, OldIrql);
         /* The purge keeps pages it cannot drop; they must not show the old bytes if the file grows again */
-        MmZeroResidentSegmentRange(FileObject->SectionObjectPointer, TruncateSize->QuadPart, MAXLONGLONG);
-        CcPurgeCacheSection(FileObject->SectionObjectPointer,
-                            TruncateSize,
-                            0,
-                            FALSE);
+        if (TruncateSize->QuadPart != 0)
+        {
+            MmZeroResidentSegmentRange(FileObject->SectionObjectPointer, TruncateSize->QuadPart, MAXLONGLONG);
+            CcPurgeCacheSection(FileObject->SectionObjectPointer,
+                                TruncateSize,
+                                0,
+                                FALSE);
+        }
+        else if (!CcPurgeCacheSection(FileObject->SectionObjectPointer,
+                                      TruncateSize,
+                                      0,
+                                      FALSE))
+        {
+            /* To zero (a delete): the purge drops every page, zeroing them first only cost a mapping of each; zero what it kept */
+            MmZeroResidentSegmentRange(FileObject->SectionObjectPointer, 0, MAXLONGLONG);
+        }
         CcRosDereferenceSharedCacheMap(SharedCacheMap);
     }
 
