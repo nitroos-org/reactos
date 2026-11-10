@@ -1233,6 +1233,8 @@ NtGdiExtFloodFill(
     Pt.y = YStart;
     IntLPtoDP(dc, (LPPOINT)&Pt, 1);
 
+    /* The fill can reach the whole DC */
+    RECTL_vSetRect(&DestRect, 0, 0, dc->dclevel.sizl.cx, dc->dclevel.sizl.cy);
     DC_vPrepareDCsForBlit(dc, &DestRect, NULL, NULL);
 
     psurf = dc->dclevel.pSurface;
