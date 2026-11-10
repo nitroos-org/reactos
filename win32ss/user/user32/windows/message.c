@@ -366,6 +366,62 @@ map_wparam_AtoW( UINT message, WPARAM wparam )
     return wparam;
 }
 
+/* TRUE when [p, p + size) is committed memory this process can read. Looks at the page protections instead of
+   touching the memory, so that a bad pointer raises no exception at all (a vectored exception handler of the
+   program would see one even where the code catches it) */
+static BOOL FASTCALL
+IntRangeReadable(LPCVOID p, SIZE_T size)
+{
+  MEMORY_BASIC_INFORMATION mbi;
+  ULONG_PTR cur = (ULONG_PTR)p, end;
+
+  if (!p)
+      return FALSE;
+  if (!size)
+      return TRUE;
+  end = cur + size;
+  if (end < cur)
+      return FALSE;
+  while (cur < end)
+  {
+      if (!VirtualQuery((LPCVOID)cur, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+          (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
+          !(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+                           PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
+          return FALSE;
+      cur = (ULONG_PTR)mbi.BaseAddress + mbi.RegionSize;
+  }
+  return TRUE;
+}
+
+/* WM_COPYDATA / WM_COPYGLOBALDATA with a NULL or unreadable parameter: Windows 10 checks the parameter before
+   it looks at the message type, so SendNotifyMessage and SendMessageCallback fail with 0 and no error (not
+   ERROR_MESSAGE_SYNC_ONLY, which a valid COPYDATASTRUCT gets) */
+static BOOL FASTCALL
+IntCopyDataParamBad(UINT Msg, LPARAM lParam)
+{
+  COPYDATASTRUCT Cds;
+  BOOL Bad = FALSE;
+
+  if (Msg == WM_COPYGLOBALDATA)
+      return lParam == 0;
+  if (Msg != WM_COPYDATA)
+      return FALSE;
+  if (!IntRangeReadable((LPCVOID)lParam, sizeof(COPYDATASTRUCT)))
+      return TRUE;
+  _SEH2_TRY
+  {
+      Cds = *(PCOPYDATASTRUCT)lParam;
+      (void)Cds;
+  }
+  _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+  {
+      Bad = TRUE;
+  }
+  _SEH2_END;
+  return Bad;
+}
+
 static
 BOOL FASTCALL
 MsgiUMToKMMessage(PMSG UMMsg, PMSG KMMsg, BOOL Posted)
@@ -378,19 +434,61 @@ MsgiUMToKMMessage(PMSG UMMsg, PMSG KMMsg, BOOL Posted)
         {
           PCOPYDATASTRUCT pUMCopyData = (PCOPYDATASTRUCT)UMMsg->lParam;
           PCOPYDATASTRUCT pKMCopyData;
+          COPYDATASTRUCT Cds;
+          BOOL Ok = FALSE;
 
-          pKMCopyData = HeapAlloc(GetProcessHeap(), 0, sizeof(COPYDATASTRUCT) + pUMCopyData->cbData);
+          /* As on Windows 10 a NULL or unreadable COPYDATASTRUCT (or a lpData that cannot be read for cbData
+             bytes) makes the send fail: nothing is delivered, the result is 0 and the last error is not touched */
+          if (!IntRangeReadable(pUMCopyData, sizeof(COPYDATASTRUCT)))
+              return FALSE;
+          _SEH2_TRY
+          {
+              Cds = *pUMCopyData;
+              Ok = TRUE;
+          }
+          _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+          {
+          }
+          _SEH2_END;
+          if (!Ok)
+              return FALSE;
+
+          pKMCopyData = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(COPYDATASTRUCT) + Cds.cbData);
           if (!pKMCopyData)
           {
               SetLastError(ERROR_OUTOFMEMORY);
               return FALSE;
           }
 
-          pKMCopyData->dwData = pUMCopyData->dwData;
-          pKMCopyData->cbData = pUMCopyData->cbData;
-          pKMCopyData->lpData = pKMCopyData + 1;
+          if (Cds.lpData && !IntRangeReadable(Cds.lpData, Cds.cbData))
+          {
+              HeapFree(GetProcessHeap(), 0, pKMCopyData);
+              return FALSE;
+          }
 
-          RtlCopyMemory(pKMCopyData + 1, pUMCopyData->lpData, pUMCopyData->cbData);
+          pKMCopyData->dwData = Cds.dwData;
+          pKMCopyData->cbData = Cds.cbData;
+          /* A NULL lpData stays NULL for the receiver (measured on Windows 10), whatever cbData says */
+          pKMCopyData->lpData = Cds.lpData ? pKMCopyData + 1 : NULL;
+
+          if (Cds.lpData && Cds.cbData)
+          {
+              Ok = FALSE;
+              _SEH2_TRY
+              {
+                  RtlCopyMemory(pKMCopyData + 1, Cds.lpData, Cds.cbData);
+                  Ok = TRUE;
+              }
+              _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+              {
+              }
+              _SEH2_END;
+              if (!Ok)
+              {
+                  HeapFree(GetProcessHeap(), 0, pKMCopyData);
+                  return FALSE;
+              }
+          }
 
           KMMsg->lParam = (LPARAM)pKMCopyData;
         }
@@ -398,8 +496,16 @@ MsgiUMToKMMessage(PMSG UMMsg, PMSG KMMsg, BOOL Posted)
 
       case WM_COPYGLOBALDATA:
         {
-           KMMsg->lParam = (LPARAM)GlobalLock((HGLOBAL)UMMsg->lParam);;
+           /* A NULL (or unlockable) handle fails the send as on Windows 10: not delivered, result 0, the last
+              error as it was before the call */
+           DWORD dwOldError = GetLastError();
+           KMMsg->lParam = (LPARAM)GlobalLock((HGLOBAL)UMMsg->lParam);
            TRACE("WM_COPYGLOBALDATA get data ptr %p\n",KMMsg->lParam);
+           if (!KMMsg->lParam)
+           {
+               SetLastError(dwOldError);
+               return FALSE;
+           }
         }
         break;
 
@@ -464,7 +570,9 @@ MsgiKMToUMMessage(PMSG KMMsg, PMSG UMMsg)
       case WM_COPYDATA:
         {
           PCOPYDATASTRUCT pKMCopyData = (PCOPYDATASTRUCT)KMMsg->lParam;
-          pKMCopyData->lpData = pKMCopyData + 1;
+          /* the sender's NULL lpData arrives as NULL */
+          if (pKMCopyData->lpData)
+              pKMCopyData->lpData = pKMCopyData + 1;
         }
         break;
 
@@ -2534,6 +2642,9 @@ SendMessageCallbackA(
   MSG AnsiMsg, UcMsg;
   CALL_BACK_INFO CallBackInfo;
 
+  if (IntCopyDataParamBad(Msg, lParam))
+     return FALSE;
+
   if (is_pointer_message(Msg, wParam))
   {
      SetLastError( ERROR_MESSAGE_SYNC_ONLY );
@@ -2583,6 +2694,9 @@ SendMessageCallbackW(
   ULONG_PTR dwData)
 {
   CALL_BACK_INFO CallBackInfo;
+
+  if (IntCopyDataParamBad(Msg, lParam))
+     return FALSE;
 
   if (is_pointer_message(Msg, wParam))
   {
@@ -2750,6 +2864,9 @@ SendNotifyMessageA(
   BOOL Ret;
   MSG AnsiMsg, UcMsg;
 
+  if (IntCopyDataParamBad(Msg, lParam))
+     return FALSE;
+
   if (is_pointer_message(Msg, wParam))
   {
      SetLastError( ERROR_MESSAGE_SYNC_ONLY );
@@ -2786,6 +2903,9 @@ SendNotifyMessageW(
   LPARAM lParam)
 {
   LRESULT Result;
+
+  if (IntCopyDataParamBad(Msg, lParam))
+     return FALSE;
 
   if (is_pointer_message(Msg, wParam))
   {

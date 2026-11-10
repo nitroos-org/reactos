@@ -104,6 +104,7 @@ extern void func_ScrollWindowEx(void);
 extern void func_SendMessageCallbackSenderDied(void);
 extern void func_SendMessageSenderDied(void);
 extern void func_SendMessageTimeout(void);
+extern void func_SendMessageCopyData(void);
 extern void func_SetActiveWindow(void);
 extern void func_SetCoalescableTimer(void);
 extern void func_SetCursorPos(void);
@@ -251,6 +252,7 @@ const struct test winetest_testlist[] =
     { "SendMessageCallbackSenderDied", func_SendMessageCallbackSenderDied },
     { "SendMessageSenderDied", func_SendMessageSenderDied },
     { "SendMessageTimeout", func_SendMessageTimeout },
+    { "SendMessageCopyData", func_SendMessageCopyData },
     { "SetActiveWindow", func_SetActiveWindow },
     { "SetCoalescableTimer", func_SetCoalescableTimer },
     { "SetCursorPos", func_SetCursorPos },
