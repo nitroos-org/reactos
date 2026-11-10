@@ -63,31 +63,24 @@ SynchronizeDriver(FLONG Flags)
 }
 
 //
-// Process the batch.
+// Process one batch record.
 //
-ULONG
+// pHdr is a kernel copy of the record, cjRecord its validated size (at least a GDIBATCHHDR, and within the
+// batch). Each command checks that the record holds its structure, and that the counts inside it stay within
+// the record, before it uses the record.
+//
+static
+VOID
 FASTCALL
-GdiFlushUserBatch(PDC dc, PGDIBATCHHDR pHdr)
+GdiFlushUserBatch(PDC dc, PGDIBATCHHDR pHdr, ULONG cjRecord)
 {
-  ULONG Cmd = 0, Size = 0;
+  ULONG Cmd = (USHORT)pHdr->Cmd;
   PDC_ATTR pdcattr = NULL;
 
   if (dc)
   {
      pdcattr = dc->pdcattr;
   }
-
-  _SEH2_TRY
-  {
-     Cmd = pHdr->Cmd;
-     Size = pHdr->Size; // Return the full size of the structure.
-  }
-  _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-  {
-     DPRINT1("WARNING! GdiBatch Fault!\n");
-     _SEH2_YIELD(return 0;)
-  }
-  _SEH2_END;
 
   switch(Cmd)
   {
@@ -98,7 +91,7 @@ GdiFlushUserBatch(PDC dc, PGDIBATCHHDR pHdr)
         HBRUSH hOrgBrush;
         COLORREF crColor, crBkColor, crBrushClr;
         ULONG ulForegroundClr, ulBackgroundClr, ulBrushClr;
-        if (!dc) break;
+        if (!dc || cjRecord < sizeof(GDIBSPATBLT)) break;
         pgDPB = (PGDIBSPATBLT) pHdr;
         /* Convert the ROP3 to a ROP4 */
         dwRop = pgDPB->dwRop;
@@ -159,12 +152,15 @@ GdiFlushUserBatch(PDC dc, PGDIBATCHHDR pHdr)
         EBRUSHOBJ eboFill;
         PBRUSH pbrush;
         PPATRECT pRects;
-        INT i;
+        ULONG i, cMaxRects;
         DWORD dwRop, flags;
         COLORREF crColor, crBkColor, crBrushClr;
         ULONG ulForegroundClr, ulBackgroundClr, ulBrushClr;
-        if (!dc) break;
+        if (!dc || cjRecord < FIELD_OFFSET(GDIBSPPATBLT, pRect)) break;
         pgDPB = (PGDIBSPPATBLT) pHdr;
+        /* The rectangles have to be inside the record */
+        cMaxRects = (cjRecord - FIELD_OFFSET(GDIBSPPATBLT, pRect)) / sizeof(pgDPB->pRect[0]);
+        if (pgDPB->Count > cMaxRects) break;
         /* Convert the ROP3 to a ROP4 */
         dwRop = pgDPB->rop4;
         dwRop = MAKEROP4(dwRop & 0xFF0000, dwRop);
@@ -201,7 +197,6 @@ GdiFlushUserBatch(PDC dc, PGDIBATCHHDR pHdr)
         if (pdcattr->ulDirty_ & DIRTY_BACKGROUND)
             DC_vUpdateBackgroundBrush(dc);
 
-        DPRINT1("GdiBCPolyPatBlt Testing\n");
         pRects = &pgDPB->pRect[0];
 
         for (i = 0; i < pgDPB->Count; i++)
@@ -253,8 +248,17 @@ GdiFlushUserBatch(PDC dc, PGDIBATCHHDR pHdr)
         USHORT jBkMode;
         LONG lBkMode;
         POINTL ptlViewportOrg;
-        if (!dc) break;
+        ULONG cjBody, cDx;
+        if (!dc || cjRecord < FIELD_OFFSET(GDIBSTEXTOUT, String)) break;
         pgO = (PGDIBSTEXTOUT) pHdr;
+
+        /* The record holds Size bytes of Dx values, then cbCount characters: both have to be inside it,
+           and the Dx values have to cover every character (two values each with ETO_PDY) */
+        cjBody = cjRecord - FIELD_OFFSET(GDIBSTEXTOUT, String);
+        if (pgO->Size > cjBody || (pgO->Size % sizeof(INT)) != 0) break;
+        if (pgO->cbCount > (cjBody - pgO->Size) / sizeof(WCHAR)) break;
+        cDx = (pgO->Options & ETO_PDY) ? pgO->cbCount * 2 : pgO->cbCount;
+        if (pgO->Size != 0 && pgO->Size < cDx * sizeof(INT)) break;
 
         // Save current attributes, flags and Set the attribute snapshots
         saveflags = dc->pdcattr->ulDirty_ & (DIRTY_BACKGROUND|DIRTY_LINE|DIRTY_TEXT|DIRTY_FILL|DC_BRUSH_DIRTY|DIRTY_CHARSET);
@@ -361,7 +365,7 @@ GdiFlushUserBatch(PDC dc, PGDIBATCHHDR pHdr)
         ULONG ulBackgroundClr;
         POINTL ptlViewportOrg;
         DWORD flags = 0, flXform = 0, saveflags, saveflXform = 0;
-        if (!dc) break;
+        if (!dc || cjRecord < sizeof(GDIBSEXTTEXTOUT)) break;
         pgO = (PGDIBSEXTTEXTOUT) pHdr;
 
         saveflags = dc->pdcattr->ulDirty_ & (DIRTY_BACKGROUND|DIRTY_TEXT|DIRTY_FILL|DC_BRUSH_DIRTY|DIRTY_CHARSET);
@@ -416,7 +420,7 @@ GdiFlushUserBatch(PDC dc, PGDIBATCHHDR pHdr)
      case GdiBCSetBrushOrg:
      {
         PGDIBSSETBRHORG pgSBO;
-        if (!dc) break;
+        if (!dc || cjRecord < sizeof(GDIBSSETBRHORG)) break;
         pgSBO = (PGDIBSSETBRHORG) pHdr;
         pdcattr->ptlBrushOrigin = pgSBO->ptlBrushOrigin;
         DC_vSetBrushOrigin(dc, pgSBO->ptlBrushOrigin.x, pgSBO->ptlBrushOrigin.y);
@@ -426,7 +430,7 @@ GdiFlushUserBatch(PDC dc, PGDIBATCHHDR pHdr)
      case GdiBCExtSelClipRgn:
      {
         PGDIBSEXTSELCLPRGN pgO;
-        if (!dc) break;
+        if (!dc || cjRecord < sizeof(GDIBSEXTSELCLPRGN)) break;
         pgO = (PGDIBSEXTSELCLPRGN) pHdr;
         IntGdiExtSelectClipRect( dc, &pgO->rcl, pgO->fnMode);
         break;
@@ -436,7 +440,7 @@ GdiFlushUserBatch(PDC dc, PGDIBATCHHDR pHdr)
      {
         PGDIBSOBJECT pgO;
 
-        if (!dc) break;
+        if (!dc || cjRecord < sizeof(GDIBSOBJECT)) break;
         pgO = (PGDIBSOBJECT) pHdr;
 
         DC_hSelectFont(dc, (HFONT)pgO->hgdiobj);
@@ -449,6 +453,10 @@ GdiFlushUserBatch(PDC dc, PGDIBATCHHDR pHdr)
      case GdiBCDelObj:
      {
         PGDIBSOBJECT pgO = (PGDIBSOBJECT) pHdr;
+        if (cjRecord < sizeof(GDIBSOBJECT)) break;
+        /* gdi32 batches the deletion of brushes, pens and regions only. A DC is deleted through
+           NtGdiDeleteObjectApp, which runs the DC's own teardown. */
+        if (GDI_HANDLE_GET_TYPE(pgO->hgdiobj) == GDI_OBJECT_TYPE_DC) break;
         GreDeleteObject( pgO->hgdiobj );
         break;
      }
@@ -456,8 +464,6 @@ GdiFlushUserBatch(PDC dc, PGDIBATCHHDR pHdr)
      default:
         break;
   }
-
-  return Size;
 }
 
 /*
@@ -487,46 +493,91 @@ APIENTRY
 NtGdiFlushUserBatch(VOID)
 {
   PTEB pTeb = NtCurrentTeb();
-  ULONG GdiBatchCount = pTeb->GdiBatchCount;
+  ULONG GdiBatchCount, cjBatch, cjOffset, cjRecord;
+  HDC hDC;
+  PUCHAR pjBatch, pjRecord;
+  PDC pDC = NULL;
 
-  if( (GdiBatchCount > 0) && (GdiBatchCount <= (GDIBATCHBUFSIZE/4)))
+  /* The batch is in the TEB, which user mode can change at any time. Read the count, the DC and the
+     length once, under SEH. */
+  _SEH2_TRY
   {
-    HDC hDC = (HDC) pTeb->GdiTebBatch.HDC;
-
-    /*  If hDC is zero and the buffer fills up with delete objects we need
-        to run anyway.
-     */
-    if (hDC || GdiBatchCount)
-    {
-      PCHAR pHdr = (PCHAR)&pTeb->GdiTebBatch.Buffer[0];
-      PDC pDC = NULL;
-
-      if (GDI_HANDLE_GET_TYPE(hDC) == GDILoObjType_LO_DC_TYPE && GreIsHandleValid(hDC))
-      {
-          pDC = DC_LockDc(hDC);
-      }
-
-       // No need to init anything, just go!
-       for (; GdiBatchCount > 0; GdiBatchCount--)
-       {
-           ULONG Size;
-           // Process Gdi Batch!
-           Size = GdiFlushUserBatch(pDC, (PGDIBATCHHDR) pHdr);
-           if (!Size) break;
-           pHdr += Size;
-       }
-
-       if (pDC)
-       {
-           DC_UnlockDc(pDC);
-       }
-
-       // Exit and clear out for the next round.
-       pTeb->GdiTebBatch.Offset = 0;
-       pTeb->GdiBatchCount = 0;
-       pTeb->GdiTebBatch.HDC = 0;
-    }
+    GdiBatchCount = pTeb->GdiBatchCount;
+    hDC = (HDC) pTeb->GdiTebBatch.HDC;
+    cjBatch = pTeb->GdiTebBatch.Offset;
   }
+  _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+  {
+    _SEH2_YIELD(return STATUS_SUCCESS;)
+  }
+  _SEH2_END;
+
+  if ((GdiBatchCount == 0) || (GdiBatchCount > (GDIBATCHBUFSIZE/4)))
+  {
+    // FIXME: On Windows XP the function returns &pTeb->RealClientId, maybe VOID?
+    return STATUS_SUCCESS;
+  }
+
+  /* Only the bytes gdi32 filled can hold records, and never more than the buffer */
+  if (cjBatch > GDIBATCHBUFSIZE) cjBatch = GDIBATCHBUFSIZE;
+
+  /* One block: the snapshot of the batch, then room for one record at an aligned address */
+  pjBatch = NULL;
+  if (cjBatch >= sizeof(GDIBATCHHDR))
+  {
+    pjBatch = ExAllocatePoolWithTag(PagedPool, 2 * ALIGN_UP_BY(cjBatch, 16), GDITAG_TEMP);
+  }
+
+  /* Take the records into kernel memory, then empty the batch, so that a flush started while one of
+     these records runs (a callback to user mode returns through a flush) sees an empty batch */
+  _SEH2_TRY
+  {
+    if (pjBatch)
+    {
+      RtlCopyMemory(pjBatch, (PVOID)&pTeb->GdiTebBatch.Buffer[0], cjBatch);
+    }
+    pTeb->GdiTebBatch.Offset = 0;
+    pTeb->GdiBatchCount = 0;
+    pTeb->GdiTebBatch.HDC = 0;
+  }
+  _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+  {
+    if (pjBatch) ExFreePoolWithTag(pjBatch, GDITAG_TEMP);
+    _SEH2_YIELD(return STATUS_SUCCESS;)
+  }
+  _SEH2_END;
+
+  if (!pjBatch)
+  {
+    return STATUS_SUCCESS;
+  }
+  pjRecord = pjBatch + ALIGN_UP_BY(cjBatch, 16);
+
+  if (GDI_HANDLE_GET_TYPE(hDC) == GDILoObjType_LO_DC_TYPE && GreIsHandleValid(hDC))
+  {
+    pDC = DC_LockDc(hDC);
+  }
+
+  /* Walk the copy. Each record must hold at least its header and end inside the batch; the first one
+     that does not ends the walk. */
+  for (cjOffset = 0; GdiBatchCount > 0; GdiBatchCount--)
+  {
+    if (cjBatch - cjOffset < sizeof(GDIBATCHHDR)) break;
+    cjRecord = (USHORT)((PGDIBATCHHDR)(pjBatch + cjOffset))->Size;
+    if (cjRecord < sizeof(GDIBATCHHDR) || cjRecord > cjBatch - cjOffset) break;
+
+    /* Process Gdi Batch! */
+    RtlCopyMemory(pjRecord, pjBatch + cjOffset, cjRecord);
+    GdiFlushUserBatch(pDC, (PGDIBATCHHDR) pjRecord, cjRecord);
+    cjOffset += cjRecord;
+  }
+
+  if (pDC)
+  {
+    DC_UnlockDc(pDC);
+  }
+
+  ExFreePoolWithTag(pjBatch, GDITAG_TEMP);
 
   // FIXME: On Windows XP the function returns &pTeb->RealClientId, maybe VOID?
   return STATUS_SUCCESS;
