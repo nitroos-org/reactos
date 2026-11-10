@@ -1755,9 +1755,20 @@ CreateFontIndirectExA(const ENUMLOGFONTEXDVA *elfexd)
     if (elfexd)
     {
         ENUMLOGFONTEXDVW Logfont;
+        const ENUMLOGFONTEXA *fontA = &elfexd->elfEnumLogfontEx;
+        ENUMLOGFONTEXW *fontW = &Logfont.elfEnumLogfontEx;
 
-        EnumLogFontExW2A( (LPENUMLOGFONTEXA) elfexd,
-                          &Logfont.elfEnumLogfontEx );
+        RtlZeroMemory(&Logfont, sizeof(Logfont));
+        LogFontA2W(&fontW->elfLogFont, &fontA->elfLogFont);
+        MultiByteToWideChar(CP_THREAD_ACP, 0, (LPCSTR)fontA->elfFullName, LF_FULLFACESIZE,
+                            fontW->elfFullName, LF_FULLFACESIZE);
+        fontW->elfFullName[LF_FULLFACESIZE - 1] = 0;
+        MultiByteToWideChar(CP_THREAD_ACP, 0, (LPCSTR)fontA->elfStyle, LF_FACESIZE,
+                            fontW->elfStyle, LF_FACESIZE);
+        fontW->elfStyle[LF_FACESIZE - 1] = 0;
+        MultiByteToWideChar(CP_THREAD_ACP, 0, (LPCSTR)fontA->elfScript, LF_FACESIZE,
+                            fontW->elfScript, LF_FACESIZE);
+        fontW->elfScript[LF_FACESIZE - 1] = 0;
 
         RtlCopyMemory( &Logfont.elfDesignVector,
                        &elfexd->elfDesignVector,
