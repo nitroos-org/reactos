@@ -38,7 +38,306 @@ $if (_WDMDDK_)
     } \
 }
 
-#if !defined(_M_AMD64)
+#if defined(_M_ARM64)
+
+/* There are no I/O ports, registers and ports are memory mapped and every access completes earlier memory accesses first */
+
+FORCEINLINE
+UCHAR
+READ_REGISTER_UCHAR(
+  _In_ volatile UCHAR *Register)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  return *Register;
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_UCHAR(
+  _In_ volatile UCHAR *Register,
+  _In_ UCHAR Value)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  *Register = Value;
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_BUFFER_UCHAR(
+  _In_ volatile UCHAR *Register,
+  _Out_writes_all_(Count) PUCHAR Buffer,
+  _In_ ULONG Count)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  while (Count--)
+    *Buffer++ = *Register++;
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_BUFFER_UCHAR(
+  _In_ volatile UCHAR *Register,
+  _In_reads_(Count) PUCHAR Buffer,
+  _In_ ULONG Count)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  while (Count--)
+    *Register++ = *Buffer++;
+}
+
+FORCEINLINE
+USHORT
+READ_REGISTER_USHORT(
+  _In_ volatile USHORT *Register)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  return *Register;
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_USHORT(
+  _In_ volatile USHORT *Register,
+  _In_ USHORT Value)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  *Register = Value;
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_BUFFER_USHORT(
+  _In_ volatile USHORT *Register,
+  _Out_writes_all_(Count) PUSHORT Buffer,
+  _In_ ULONG Count)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  while (Count--)
+    *Buffer++ = *Register++;
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_BUFFER_USHORT(
+  _In_ volatile USHORT *Register,
+  _In_reads_(Count) PUSHORT Buffer,
+  _In_ ULONG Count)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  while (Count--)
+    *Register++ = *Buffer++;
+}
+
+FORCEINLINE
+ULONG
+READ_REGISTER_ULONG(
+  _In_ volatile ULONG *Register)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  return *Register;
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_ULONG(
+  _In_ volatile ULONG *Register,
+  _In_ ULONG Value)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  *Register = Value;
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_BUFFER_ULONG(
+  _In_ volatile ULONG *Register,
+  _Out_writes_all_(Count) PULONG Buffer,
+  _In_ ULONG Count)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  while (Count--)
+    *Buffer++ = *Register++;
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_BUFFER_ULONG(
+  _In_ volatile ULONG *Register,
+  _In_reads_(Count) PULONG Buffer,
+  _In_ ULONG Count)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  while (Count--)
+    *Register++ = *Buffer++;
+}
+
+FORCEINLINE
+ULONG64
+READ_REGISTER_ULONG64(
+  _In_ volatile ULONG64 *Register)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  return *Register;
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_ULONG64(
+  _In_ volatile ULONG64 *Register,
+  _In_ ULONG64 Value)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  *Register = Value;
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_BUFFER_ULONG64(
+  _In_ volatile ULONG64 *Register,
+  _Out_writes_all_(Count) PULONG64 Buffer,
+  _In_ ULONG Count)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  while (Count--)
+    *Buffer++ = *Register++;
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_BUFFER_ULONG64(
+  _In_ volatile ULONG64 *Register,
+  _In_reads_(Count) PULONG64 Buffer,
+  _In_ ULONG Count)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  while (Count--)
+    *Register++ = *Buffer++;
+}
+
+FORCEINLINE
+UCHAR
+READ_PORT_UCHAR(
+  _In_ PUCHAR Port)
+{
+  return READ_REGISTER_UCHAR(Port);
+}
+
+FORCEINLINE
+VOID
+WRITE_PORT_UCHAR(
+  _In_ PUCHAR Port,
+  _In_ UCHAR Value)
+{
+  WRITE_REGISTER_UCHAR(Port, Value);
+}
+
+FORCEINLINE
+VOID
+READ_PORT_BUFFER_UCHAR(
+  _In_ PUCHAR Port,
+  _Out_writes_all_(Count) PUCHAR Buffer,
+  _In_ ULONG Count)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  while (Count--)
+    *Buffer++ = *(volatile UCHAR *)Port;
+}
+
+FORCEINLINE
+VOID
+WRITE_PORT_BUFFER_UCHAR(
+  _In_ PUCHAR Port,
+  _In_reads_(Count) PUCHAR Buffer,
+  _In_ ULONG Count)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  while (Count--)
+    *(volatile UCHAR *)Port = *Buffer++;
+}
+
+FORCEINLINE
+USHORT
+READ_PORT_USHORT(
+  _In_ PUSHORT Port)
+{
+  return READ_REGISTER_USHORT(Port);
+}
+
+FORCEINLINE
+VOID
+WRITE_PORT_USHORT(
+  _In_ PUSHORT Port,
+  _In_ USHORT Value)
+{
+  WRITE_REGISTER_USHORT(Port, Value);
+}
+
+FORCEINLINE
+VOID
+READ_PORT_BUFFER_USHORT(
+  _In_ PUSHORT Port,
+  _Out_writes_all_(Count) PUSHORT Buffer,
+  _In_ ULONG Count)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  while (Count--)
+    *Buffer++ = *(volatile USHORT *)Port;
+}
+
+FORCEINLINE
+VOID
+WRITE_PORT_BUFFER_USHORT(
+  _In_ PUSHORT Port,
+  _In_reads_(Count) PUSHORT Buffer,
+  _In_ ULONG Count)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  while (Count--)
+    *(volatile USHORT *)Port = *Buffer++;
+}
+
+FORCEINLINE
+ULONG
+READ_PORT_ULONG(
+  _In_ PULONG Port)
+{
+  return READ_REGISTER_ULONG(Port);
+}
+
+FORCEINLINE
+VOID
+WRITE_PORT_ULONG(
+  _In_ PULONG Port,
+  _In_ ULONG Value)
+{
+  WRITE_REGISTER_ULONG(Port, Value);
+}
+
+FORCEINLINE
+VOID
+READ_PORT_BUFFER_ULONG(
+  _In_ PULONG Port,
+  _Out_writes_all_(Count) PULONG Buffer,
+  _In_ ULONG Count)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  while (Count--)
+    *Buffer++ = *(volatile ULONG *)Port;
+}
+
+FORCEINLINE
+VOID
+WRITE_PORT_BUFFER_ULONG(
+  _In_ PULONG Port,
+  _In_reads_(Count) PULONG Buffer,
+  _In_ ULONG Count)
+{
+  __dsb(_ARM64_BARRIER_SY);
+  while (Count--)
+    *(volatile ULONG *)Port = *Buffer++;
+}
+
+#elif !defined(_M_AMD64)
 NTHALAPI
 VOID
 NTAPI
@@ -273,30 +572,30 @@ FORCEINLINE
 VOID
 READ_REGISTER_BUFFER_UCHAR(
   IN PUCHAR Register,
-  IN PUCHAR Buffer,
+  _Out_writes_all_(Count) PUCHAR Buffer,
   IN ULONG Count)
 {
-  __movsb(Register, Buffer, Count);
+  __movsb(Buffer, Register, Count);
 }
 
 FORCEINLINE
 VOID
 READ_REGISTER_BUFFER_ULONG(
   IN PULONG Register,
-  IN PULONG Buffer,
+  _Out_writes_all_(Count) PULONG Buffer,
   IN ULONG Count)
 {
-  __movsd(Register, Buffer, Count);
+  __movsd(Buffer, Register, Count);
 }
 
 FORCEINLINE
 VOID
 READ_REGISTER_BUFFER_USHORT(
   IN PUSHORT Register,
-  IN PUSHORT Buffer,
+  _Out_writes_all_(Count) PUSHORT Buffer,
   IN ULONG Count)
 {
-  __movsw(Register, Buffer, Count);
+  __movsw(Buffer, Register, Count);
 }
 
 FORCEINLINE
@@ -311,6 +610,14 @@ FORCEINLINE
 ULONG
 READ_REGISTER_ULONG(
   IN volatile ULONG *Register)
+{
+  return *Register;
+}
+
+FORCEINLINE
+ULONG64
+READ_REGISTER_ULONG64(
+  IN volatile ULONG64 *Register)
 {
   return *Register;
 }
@@ -432,6 +739,17 @@ VOID
 WRITE_REGISTER_ULONG(
   IN volatile ULONG *Register,
   IN ULONG Value)
+{
+  LONG Synch;
+  *Register = Value;
+  InterlockedOr(&Synch, 1);
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_ULONG64(
+  IN volatile ULONG64 *Register,
+  IN ULONG64 Value)
 {
   LONG Synch;
   *Register = Value;

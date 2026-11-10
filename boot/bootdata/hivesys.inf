@@ -49,6 +49,12 @@ HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0C0310","Cl
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0C0320","Service",0x00000000,"usbehci"
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0C0320","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
 
+; NITRO: the imported USB3 stack (usbxhci/ucx01000/usbhub3) is not bound by default: it bugchecks 0xCA with an xHCI controller
+; (USB-xhci-0xCA-bugcheck-upstream-stack). Files stay on the CD; re-enable these four groups once upstream fixes it.
+;HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0C0330","Service",0x00000000,"usbxhci"
+;HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0C0330","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
+;HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0C0330\Device Parameters\Interrupt Management\MessageSignaledInterruptProperties","MSISupported",0x00010001,0x00000001
+
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#Class_08&SubClass_06&Prot_50","Service",0x00000000,"usbstor"
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#Class_08&SubClass_06&Prot_50","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
 
@@ -91,6 +97,15 @@ HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_010802","Cl
 
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0600","Service",0x00000000,"atapi"
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0600","ClassGUID",0x00000000,"{4D36E96A-E325-11CE-BFC1-08002BE10318}"
+
+;HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#ROOT_HUB30","Service",0x00000000,"usbhub3"
+;HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#ROOT_HUB30","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
+
+;HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#USB20_HUB","Service",0x00000000,"usbhub3"
+;HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#USB20_HUB","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
+
+;HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#USB30_HUB","Service",0x00000000,"usbhub3"
+;HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#USB30_HUB","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
 
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\GenCdRom","Service",0x00000000,"cdrom"
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\GenCdRom","ClassGUID",0x00000000,"{4D36E965-E325-11CE-BFC1-08002BE10318}"
@@ -546,6 +561,15 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00010405","Layout Displa
 HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000406","Layout File",0x00000000,"kbdda.dll"
 HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000406","Layout Text",0x00000000,%DANISH%
 HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000406","Layout Display Name",0x00000000,"@%SystemRoot%\system32\input.dll,-5007"
+
+HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000429","Layout File",0x00000000,"kbdfa.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000429","Layout Text",0x00000000,%PERSIAN%
+HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000429","Layout Display Name",0x00000000,"@%SystemRoot%\system32\input.dll,-5124"
+
+HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00050429","Layout File",0x00000000,"kbdfar.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00050429","Layout Id",  0x00000000,"003a"
+HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00050429","Layout Text",0x00000000,%PERSIAN_STANDARD%
+HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00050429","Layout Display Name",0x00000000,"@%SystemRoot%\system32\input.dll,-5213"
 
 HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00060407","Layout File",0x00000000,"kbdgerg.dll"
 HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00060407","Layout Text",0x00000000,%GERMAN_ERGO%
@@ -2724,6 +2748,8 @@ LITHUANIAN = "Lithuanian"
 MACEDONIAN = "Macedonian (FYRO)"
 MALAYALAM = "Malayalam"
 NORWEGIAN = "Norwegian"
+PERSIAN = "Persian"
+PERSIAN_STANDARD = "Persian (Standard)"
 POLISH_214 = "Polish (214)"
 POLISH_PROGRAMMERS = "Polish (Programmers)"
 PORTUGESE = "Portuguese (Portugal)"
@@ -2884,6 +2910,8 @@ LITHUANIAN = "Lituano"
 MACEDONIAN = "Macedonia (FYRO)"
 MALAYALAM = "Malabari"
 NORWEGIAN = "Noruego"
+PERSIAN = "Persian"
+PERSIAN_STANDARD = "Persian (Standard)"
 POLISH_214 = "Polaco (214)"
 POLISH_PROGRAMMERS = "Polaco (Programmers)"
 PORTUGESE = "Portugués (Portugal)"
@@ -3044,6 +3072,8 @@ LITHUANIAN = "Litewski"
 MACEDONIAN = "Macedoński (FYRO)"
 MALAYALAM = "Malajalam"
 NORWEGIAN = "Norweski"
+PERSIAN = "Persian"
+PERSIAN_STANDARD = "Persian (Standard)"
 POLISH_214 = "Polski (214)"
 POLISH_PROGRAMMERS = "Polski (Programisty)"
 PORTUGESE = "Portugalski"
@@ -3204,6 +3234,8 @@ LITHUANIAN = "Lituano"
 MACEDONIAN = "Macedonia (FYRO)"
 MALAYALAM = "Malabari"
 NORWEGIAN = "Norueguês"
+PERSIAN = "Persian"
+PERSIAN_STANDARD = "Persian (Standard)"
 POLISH_214 = "Polaco (214)"
 POLISH_PROGRAMMERS = "Polaco (Programmers)"
 PORTUGESE = "Português (Portugal)"
@@ -3361,6 +3393,8 @@ LITHUANIAN = "Lituaniană"
 MACEDONIAN = "Macedonă (FYRO)"
 MALAYALAM = "Malayalam"
 NORWEGIAN = "Norvegiană"
+PERSIAN = "Persian"
+PERSIAN_STANDARD = "Persian (Standard)"
 POLISH_214 = "Poloneză (214)"
 POLISH_PROGRAMMERS = "Poloneză (programatori)"
 PORTUGESE = "Portugheză (Portugalia)"
@@ -3521,6 +3555,8 @@ LITHUANIAN = "Литовская"
 MACEDONIAN = "Македонская (FYROM)"
 MALAYALAM = "Малаялам"
 NORWEGIAN = "Норвежская"
+PERSIAN = "Персидская"
+PERSIAN_STANDARD = "Персидская (стандартная)"
 POLISH_214 = "Польская (214)"
 POLISH_PROGRAMMERS = "Польская (программистская)"
 PORTUGESE = "Португальская (Португалия)"
@@ -3681,6 +3717,8 @@ LITHUANIAN = "Litvcanyaca"
 MACEDONIAN = "Makedonca (FYRO)"
 MALAYALAM = "Malayalam"
 NORWEGIAN = "Norveççe"
+PERSIAN = "Persian"
+PERSIAN_STANDARD = "Persian (Standard)"
 POLISH_214 = "Polonezce (214)"
 POLISH_PROGRAMMERS = "Polonezce (Programcılar)"
 PORTUGESE = "Portekizce (Portekiz)"

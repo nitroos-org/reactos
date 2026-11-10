@@ -3799,6 +3799,7 @@ typedef struct
     INT         height;         /* Window height */
     VOID       *items;          /* Array of items */
     INT         nb_items;       /* Number of items */
+    UINT        items_size;     /* Total number of allocated items in the array */
     INT         top_item;       /* Top visible item */
     INT         selected_item;  /* Selected item */
     INT         focus_item;     /* Item that has the focus */

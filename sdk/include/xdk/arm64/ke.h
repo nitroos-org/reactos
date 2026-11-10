@@ -15,10 +15,12 @@ $if (_WDMDDK_)
 
 #define KI_USER_SHARED_DATA     0xFFFFF78000000000ULL
 #define SharedUserData          ((KUSER_SHARED_DATA * const)KI_USER_SHARED_DATA)
+#define SharedTickCount         (KI_USER_SHARED_DATA + 0x320)
 
 #define PAGE_SIZE               0x1000
 #define PAGE_SHIFT              12L
 
+#define YieldProcessor __yield
 #define PAUSE_PROCESSOR YieldProcessor();
 
 /* FIXME: Based on AMD64 but needed to compile apps */
@@ -31,10 +33,123 @@ $if (_WDMDDK_)
 #define EXCEPTION_WRITE_FAULT   1
 #define EXCEPTION_EXECUTE_FAULT 8
 
-NTSYSAPI
-PKTHREAD
+#define KeQueryTickCount(CurrentCount) \
+    *(ULONG64*)(CurrentCount) = *(volatile ULONG64*)SharedTickCount
+
+FORCEINLINE
+VOID
+KeMemoryBarrier(
+    VOID)
+{
+    _ReadWriteBarrier();
+    MemoryBarrier();
+}
+
+#define KeMemoryBarrierWithoutFence() _ReadWriteBarrier()
+
+/* The kernel keeps the FP and SIMD state of every thread, nothing to save */
+typedef struct _KFLOATING_SAVE
+{
+    ULONG Dummy;
+} KFLOATING_SAVE, *PKFLOATING_SAVE;
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_Kernel_float_saved_
+_At_(*FloatSave, _Kernel_requires_resource_not_held_(FloatState) _Kernel_acquires_resource_(FloatState))
+FORCEINLINE
+NTSTATUS
+KeSaveFloatingPointState(
+    _Out_ PKFLOATING_SAVE FloatSave)
+{
+    UNREFERENCED_PARAMETER(FloatSave);
+    return STATUS_SUCCESS;
+}
+
+_Success_(1)
+_Kernel_float_restored_
+_At_(*FloatSave, _Kernel_requires_resource_held_(FloatState) _Kernel_releases_resource_(FloatState))
+FORCEINLINE
+NTSTATUS
+KeRestoreFloatingPointState(
+    _In_ PKFLOATING_SAVE FloatSave)
+{
+    UNREFERENCED_PARAMETER(FloatSave);
+    return STATUS_SUCCESS;
+}
+
+_IRQL_requires_max_(HIGH_LEVEL)
+_IRQL_saves_
+NTHALAPI
+KIRQL
 NTAPI
-KeGetCurrentThread(VOID);
+KeGetCurrentIrql(
+    VOID);
+
+_IRQL_requires_max_(HIGH_LEVEL)
+NTHALAPI
+VOID
+FASTCALL
+KfLowerIrql(
+    _In_ _IRQL_restores_ _Notliteral_ KIRQL NewIrql);
+#define KeLowerIrql(a) KfLowerIrql(a)
+
+_IRQL_requires_max_(HIGH_LEVEL)
+_IRQL_raises_(NewIrql)
+_IRQL_saves_
+NTHALAPI
+KIRQL
+FASTCALL
+KfRaiseIrql(
+    _In_ KIRQL NewIrql);
+#define KeRaiseIrql(a,b) *(b) = KfRaiseIrql(a)
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_IRQL_saves_
+_IRQL_raises_(DISPATCH_LEVEL)
+FORCEINLINE
+KIRQL
+KeRaiseIrqlToDpcLevel(
+    VOID)
+{
+    return KfRaiseIrql(DISPATCH_LEVEL);
+}
+
+FORCEINLINE
+KIRQL
+KeRaiseIrqlToSynchLevel(VOID)
+{
+#ifdef CONFIG_SMP
+    return KfRaiseIrql(12); // SYNCH_LEVEL = IPI_LEVEL - 2
+#else
+    return KfRaiseIrql(2); // SYNCH_LEVEL = DISPATCH_LEVEL
+#endif
+}
+
+/* KPRCB::CurrentThread */
+FORCEINLINE
+struct _KTHREAD *
+KeGetCurrentThread(VOID)
+{
+    return (struct _KTHREAD *)__readx18qword(0x988);
+}
+
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+/* KPRCB::Number, the PRCB starts at PCR offset 0x980 */
+FORCEINLINE
+ULONG
+KeGetCurrentProcessorIndex(VOID)
+{
+    return __readx18dword(0x9a4);
+}
+#endif
+
+NTKERNELAPI
+VOID
+NTAPI
+KeFlushIoBuffers(
+    _In_ PMDL Mdl,
+    _In_ BOOLEAN ReadOperation,
+    _In_ BOOLEAN DmaOperation);
 
 #define DbgRaiseAssertionFailure() __break(0xf001)
 
@@ -51,6 +166,7 @@ $if (_NTDDK_)
 #define CONTEXT_DEBUG_REGISTERS (CONTEXT_ARM64 | 0x00000008L)
 #define CONTEXT_X18             (CONTEXT_ARM64 | 0x00000010L)
 #define CONTEXT_FULL            (CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT)
+#define CONTEXT_ALL             (CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS | CONTEXT_X18)
 
 typedef union NEON128 {
     struct {
@@ -64,7 +180,7 @@ typedef union NEON128 {
 } NEON128, *PNEON128;
 typedef NEON128 NEON128, *PNEON128;
 
-typedef struct _CONTEXT {
+typedef struct DECLSPEC_ALIGN(16) _CONTEXT {
 
     //
     // Control flags.
@@ -135,4 +251,96 @@ typedef struct _CONTEXT {
     ULONG64 Wvr[ARM64_MAX_WATCHPOINTS];
 
 } CONTEXT, *PCONTEXT;
+
+#define PCR_MINOR_VERSION 1
+#define PCR_MAJOR_VERSION 1
+
+typedef struct _KPCR
+{
+    _ANONYMOUS_UNION union
+    {
+        NT_TIB NtTib;
+        _ANONYMOUS_STRUCT struct
+        {
+            PVOID TibPad0[2];
+            PVOID Spare1;
+            struct _KPCR *Self;
+            PVOID PcrReserved0;
+            PKSPIN_LOCK_QUEUE LockArray;
+            PVOID Used_Self;
+        };
+    };
+    KIRQL CurrentIrql;
+    UCHAR SecondLevelCacheAssociativity;
+    UCHAR Pad1[2];
+    USHORT MajorVersion;
+    USHORT MinorVersion;
+    ULONG StallScaleFactor;
+    ULONG SecondLevelCacheSize;
+    _ANONYMOUS_UNION union
+    {
+        USHORT SoftwareInterruptPending;
+        _ANONYMOUS_STRUCT struct
+        {
+            UCHAR ApcInterrupt;
+            UCHAR DispatchInterrupt;
+        };
+    };
+    USHORT InterruptPad;
+    _ANONYMOUS_UNION union
+    {
+        UCHAR BtiMitigation;
+        _ANONYMOUS_STRUCT struct
+        {
+            UCHAR KvaVbar:1;
+            UCHAR BtiVbar:3;
+            UCHAR BtiCswapHvc:1;
+            UCHAR BtiCswapSmc:1;
+        };
+    };
+    _ANONYMOUS_UNION union
+    {
+        UCHAR SsbMitigationFlags;
+        _ANONYMOUS_STRUCT struct
+        {
+            UCHAR SsbMitigationFirmware:1;
+            UCHAR SsbMitigationDynamic:1;
+            UCHAR SsbMitigationKernel:1;
+            UCHAR SsbMitigationUser:1;
+            UCHAR SsbMitigationReserved:4;
+        };
+    };
+    UCHAR BhbMitigation;
+    _ANONYMOUS_UNION union
+    {
+        UCHAR CachePrefetcherMitigationFlags;
+        _ANONYMOUS_STRUCT struct
+        {
+            UCHAR CachePrefetcherMitigation:1;
+            UCHAR Pad2:7;
+        };
+    };
+    ULONG64 PanicStorage[6];
+    PVOID KdVersionBlock;
+    PVOID HalReserved[14];
+    PVOID KvaUserModeTtbr1;
+} KPCR, *PKPCR;
+
+/* x18 holds the PCR address in kernel mode */
+FORCEINLINE
+PKPCR
+KeGetPcr(VOID)
+{
+    return (PKPCR)__getReg(18);
+}
+
+#if (NTDDI_VERSION < NTDDI_WIN7) || !defined(NT_PROCESSOR_GROUPS)
+FORCEINLINE
+ULONG
+KeGetCurrentProcessorNumber(VOID)
+{
+    return __readx18dword(0x9a4);
+}
+#endif /* (NTDDI_VERSION < NTDDI_WIN7) || !defined(NT_PROCESSOR_GROUPS) */
+
 $endif
