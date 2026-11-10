@@ -104,6 +104,7 @@ list(APPEND SOURCE
     SendMessageCallbackSenderDied.c
     SendMessageSenderDied.c
     SendMessageTimeout.c
+    SendMessageCopyData.c
     SetActiveWindow.c
     SetCoalescableTimer.c
     SetCursorPos.c
