@@ -50,6 +50,7 @@ extern void func_GdiConvertRegion(void);
 extern void func_GdiDeleteLocalDC(void);
 extern void func_GdiDrawStream(void);
 extern void func_GdiInputContracts(void);
+extern void func_GdiPrinterFile(void);
 extern void func_GdiGetCharDimensions(void);
 extern void func_GdiGetLocalBrush(void);
 extern void func_GdiGetLocalDC(void);
@@ -156,6 +157,7 @@ const struct test winetest_testlist[] =
     { "GdiDeleteLocalDC", func_GdiDeleteLocalDC },
     { "GdiDrawStream", func_GdiDrawStream },
     { "GdiInputContracts", func_GdiInputContracts },
+    { "GdiPrinterFile", func_GdiPrinterFile },
     { "GdiGetCharDimensions", func_GdiGetCharDimensions },
     { "GdiGetLocalBrush", func_GdiGetLocalBrush },
     { "GdiGetLocalDC", func_GdiGetLocalDC },
