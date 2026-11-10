@@ -1431,6 +1431,29 @@ MiCopyFromUserPage(PFN_NUMBER DestPage, const VOID *SrcAddress)
     return STATUS_SUCCESS;
 }
 
+/*
+ * A paging read of a data file takes up to this much in one request: the missing pages of what a caller asked
+ * for (the cache makes a view's range resident, up to 256 KB) are read together, where each 64 KB chunk of it
+ * was a request of its own, one after the other.  What is read beyond what was asked stays within 64 KB.
+ */
+#define MM_READ_BATCH (256 * 1024)
+
+static
+ULONG
+MiLowestSetBit64(
+    _In_ ULONGLONG Value)
+{
+    ULONG Bit = 0;
+
+    ASSERT(Value != 0);
+    while (!(Value & 1))
+    {
+        Value >>= 1;
+        Bit++;
+    }
+    return Bit;
+}
+
 static
 NTSTATUS
 NTAPI
@@ -1477,11 +1500,11 @@ MmMakeSegmentResident(
     }
 
     /* Let's gooooooooo */
-    for ( ; RangeStart < RangeEnd; RangeStart += _64K)
+    for ( ; RangeStart < RangeEnd; RangeStart += MM_READ_BATCH)
     {
         /* First take a look at where we miss pages */
-        ULONG ToReadPageBits = 0;
-        LONGLONG ChunkEnd = RangeStart + _64K;
+        ULONGLONG ToReadPageBits = 0;
+        LONGLONG ChunkEnd = RangeStart + MM_READ_BATCH;
 
         if (ChunkEnd > RangeEnd)
             ChunkEnd = RangeEnd;
@@ -1515,7 +1538,7 @@ MmMakeSegmentResident(
                 continue;
             }
 
-            ToReadPageBits |= 1UL << ((ChunkOffset - RangeStart) >> PAGE_SHIFT);
+            ToReadPageBits |= 1ULL << ((ChunkOffset - RangeStart) >> PAGE_SHIFT);
 
             /* Put a wait entry here */
             Status = MmSetPageEntrySectionSegment(Segment, &CurrentOffset, MAKE_SWAP_SSE(MM_WAIT_ENTRY));
@@ -1553,20 +1576,21 @@ MmMakeSegmentResident(
         {
             /* Move forward if there is a hole */
             ULONG BitSet;
-            if (!_BitScanForward(&BitSet, ToReadPageBits))
+            if (ToReadPageBits == 0)
             {
                 /* Nothing more to read */
                 break;
             }
+            BitSet = MiLowestSetBit64(ToReadPageBits);
             ToReadPageBits >>= BitSet;
             ChunkOffset += BitSet * PAGE_SIZE;
             ASSERT(ChunkOffset < ChunkEnd);
 
             /* Get the range we have to read */
-            _BitScanForward(&BitSet, ~ToReadPageBits);
+            BitSet = (~ToReadPageBits != 0) ? MiLowestSetBit64(~ToReadPageBits) : 64;
             ULONG ReadLength = BitSet * PAGE_SIZE;
 
-            ASSERT(ReadLength <= _64K);
+            ASSERT(ReadLength <= MM_READ_BATCH);
 
             /* Clamp (This is for image mappings */
             if ((ChunkOffset + ReadLength) > ChunkEnd)
@@ -1731,7 +1755,7 @@ AssignPagesToSegment:
             MmUnlockSectionSegment(Segment);
 
             IoFreeMdl(Mdl);
-            ToReadPageBits >>= BitSet;
+            ToReadPageBits = (BitSet >= 64) ? 0 : (ToReadPageBits >> BitSet);
             ChunkOffset += BitSet * PAGE_SIZE;
         }
     }
