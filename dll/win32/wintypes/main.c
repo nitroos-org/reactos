@@ -429,14 +429,21 @@ HRESULT WINAPI RoIsApiContractMajorVersionPresent(const WCHAR *name, UINT16 majo
     return RoIsApiContractPresent(name, major, 0, present);
 }
 
+HRESULT pv_get_activation_factory(HSTRING classid, IActivationFactory **out);
+
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **factory)
 {
-    FIXME("(%s, %p): no activatable classes\n", debugstr_hstring(classid), factory);
+    HRESULT hr;
+
+    TRACE("(%s, %p)\n", debugstr_hstring(classid), factory);
 
     if (!factory)
         return E_POINTER;
     *factory = NULL;
-    return CLASS_E_CLASSNOTAVAILABLE;
+    hr = pv_get_activation_factory(classid, factory);
+    if (hr == CLASS_E_CLASSNOTAVAILABLE)
+        FIXME("%s: no such activatable class\n", debugstr_hstring(classid));
+    return hr;
 }
 
 HRESULT WINAPI DllCanUnloadNow(void)
