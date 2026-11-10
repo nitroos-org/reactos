@@ -18,9 +18,11 @@
  *
  * Nothing here checks a signature, installs a product key or grants a right. The status
  * query reports every SKU of an application whose license is installed as unlicensed (no
- * product key is ever installed). The entry points that only the service can serve (offline
- * activation, plug-ins, application policies, caller authentication, re-arm) answer
- * SL_E_NOT_SUPPORTED: they exist so that a client that resolves the whole table by name
+ * product key is ever installed). SLConsumeRight binds an application to the handle (as
+ * Windows does), and application authentication data is accepted unverified as a hint that the
+ * caller is Office (see SLSetAuthenticationData). The entry points that only the service can
+ * serve (offline activation, application policies, re-arm) answer SL_E_NOT_SUPPORTED or the
+ * measured refusal: they exist so that a client that resolves the whole table by name
  * (Office does, and refuses to run when one name is missing) gets the answer of a platform
  * that cannot do it, not ERROR_PROC_NOT_FOUND.
  */
@@ -38,9 +40,18 @@
 #define MAX_LICENSE_FILE (16 * 1024 * 1024)
 #define MAX_LICENSES_PER_FILE 256
 
+/* What SLSetAuthenticationData was given on this handle */
+#define SLC_AUTH_NONE       0 /* nothing (or an empty call) */
+#define SLC_AUTH_ACCEPTED   1 /* 0x20 bytes or more of application authentication data: accepted, NOT verified */
+
 typedef struct _SLC
 {
     DWORD Magic;
+    DWORD AuthState;
+    BOOL Bound;        /* an application is bound to the handle: by SLConsumeRight, or by accepted authentication data */
+    BOOL HasBoundSku;  /* ... and one SKU of it */
+    SLID BoundApp;
+    SLID BoundSku;
 } SLC, *PSLC;
 
 typedef struct _LICREC
@@ -742,7 +753,7 @@ SLOpen(_Out_ HSLC *phSLC)
     if (!phSLC)
         return E_INVALIDARG;
     *phSLC = NULL;
-    Slc = HeapAlloc(GetProcessHeap(), 0, sizeof(*Slc));
+    Slc = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Slc));
     if (!Slc)
         return E_OUTOFMEMORY;
     Slc->Magic = SLC_MAGIC;
@@ -1249,10 +1260,39 @@ SLGetLicenseInformation(_In_ HSLC hSLC,
     return hr;
 }
 
-/* ---- status and key queries: the store never holds a product key or a granted right ---- */
+/* ---- status and key queries ---- */
 
 /* Windows 10 22H2 answers a status query with neither application nor SKU id with this code (measured) */
 #define SL_E_STATUS_QUERY_NO_ID ((HRESULT)0xC004F002L)
+
+/* Measured on Windows 10 22H2 (19045.2006) with Office installed, never activated (disposable copy, 2026-11-10) */
+#define SL_E_CALLER_NOT_AUTHENTICATED ((HRESULT)0xC004F072L) /* SLLoadApplicationPolicies from an ordinary process */
+#define SL_E_AUTHN_DATA_NOT_SET       ((HRESULT)0xC004F079L) /* SLGetAuthenticationResult: no authentication data given */
+#define SL_E_AUTHN_DATA_UNVERIFIED    ((HRESULT)0xC004F07AL) /* SLGetAuthenticationResult: data given that cannot be verified */
+
+/* The Office application id (public: Office deployment documentation) */
+static const SLID OfficeAppId = {0x0ff1ce15, 0xa989, 0x479d, {0xaf, 0x46, 0xf2, 0x75, 0xc6, 0x37, 0x06, 0x63}};
+
+/* The licensing state of one SKU: unlicensed (reason: no product key installed) unless the store says otherwise */
+typedef struct _SKUSTATE
+{
+    SLLICENSINGSTATUS Status;
+    DWORD GraceMinutes;
+    DWORD TotalGraceDays;
+    HRESULT Reason;
+    UINT64 Validity;
+} SKUSTATE;
+
+static
+void
+GetSkuState(const SLID *Sku, SKUSTATE *State)
+{
+    memset(State, 0, sizeof(*State));
+    State->Status = SL_LICENSING_STATUS_UNLICENSED;
+    /* Windows 10 with Office installed and never activated (measured): status Unlicensed, no grace,
+     * no validity, reason 0xC004F014 = no product key installed */
+    State->Reason = SL_E_PKEY_NOT_INSTALLED;
+}
 
 HRESULT
 WINAPI
@@ -1278,7 +1318,15 @@ SLGetLicensingStatusInformation(_In_ HSLC hSLC,
     *ppLicensingStatus = NULL;
 
     if (!pAppID && !pProductSkuId)
-        return SL_E_STATUS_QUERY_NO_ID;
+    {
+        /* Windows 10 (measured): an unbound handle is 0xC004F002; after SLConsumeRight bound an application (and SKU)
+         * to the handle, the same query answers for that application (that SKU only) */
+        if (!((PSLC)hSLC)->Bound)
+            return SL_E_STATUS_QUERY_NO_ID;
+        pAppID = &((PSLC)hSLC)->BoundApp;
+        if (((PSLC)hSLC)->HasBoundSku)
+            pProductSkuId = &((PSLC)hSLC)->BoundSku;
+    }
 
     /* The SKUs the installed licenses name for the application (or the one SKU asked for) */
     Entered = StoreEnter(&Old);
@@ -1316,11 +1364,15 @@ SLGetLicensingStatusInformation(_In_ HSLC hSLC,
     }
     for (i = 0; i < Count; i++)
     {
+        SKUSTATE State;
+
+        GetSkuState(&Skus[i], &State);
         Status[i].SkuId = Skus[i];
-        Status[i].eStatus = SL_LICENSING_STATUS_UNLICENSED;
-        /* Windows 10 with Office installed and never activated (measured): status Unlicensed, no grace,
-         * no validity, reason 0xC004F014 = no product key installed */
-        Status[i].hrReason = SL_E_PKEY_NOT_INSTALLED;
+        Status[i].eStatus = State.Status;
+        Status[i].dwGraceTime = State.GraceMinutes;
+        Status[i].dwTotalGraceDays = State.TotalGraceDays;
+        Status[i].hrReason = State.Reason;
+        Status[i].qwValidityExpiration = State.Validity;
     }
     LocalFree(Skus);
     *pnStatusCount = Count;
@@ -1410,12 +1462,53 @@ SLConsumeRight(_In_ HSLC hSLC,
                _In_opt_ PCWSTR pwszRightName,
                _In_opt_ PVOID pvReserved)
 {
+    PSLC Slc = (PSLC)hSLC;
+    SLID *Skus = NULL;
+    UINT Count = 0, i;
+    HRESULT hr;
+    PVOID Old;
+    BOOL Entered, Granted = FALSE, SkuOfApp = FALSE;
+
     if (!IsValidHandle(hSLC))
         return E_HANDLE;
-    /* Windows 10 (measured): no application id is E_INVALIDARG. Nothing is consumed here: no license grants a right. */
+    /* Windows 10 (measured): no application id is E_INVALIDARG */
     if (!pAppId)
         return E_INVALIDARG;
-    return SL_E_RIGHT_NOT_GRANTED;
+
+    /* Windows 10 (measured): an application or SKU that is not installed is 0xC004F015 and binds nothing */
+    Entered = StoreEnter(&Old);
+    hr = SLGetSLIDListImpl(hSLC, SL_ID_APPLICATION, pAppId, SL_ID_PRODUCT_SKU, &Count, &Skus);
+    StoreLeave(Entered, Old);
+    if (FAILED(hr) || !Count)
+    {
+        if (Skus)
+            LocalFree(Skus);
+        return SL_E_PRODUCT_SKU_NOT_INSTALLED;
+    }
+    for (i = 0; i < Count; i++)
+    {
+        SKUSTATE State;
+
+        if (pProductSkuId && !IsEqualGUID(&Skus[i], pProductSkuId))
+            continue;
+        SkuOfApp = TRUE;
+        GetSkuState(&Skus[i], &State);
+        if (State.Status == SL_LICENSING_STATUS_LICENSED || State.Status == SL_LICENSING_STATUS_IN_GRACE_PERIOD)
+            Granted = TRUE;
+    }
+    LocalFree(Skus);
+    if (pProductSkuId && !SkuOfApp)
+        return SL_E_PRODUCT_SKU_NOT_INSTALLED;
+
+    /* Windows 10 (measured): the call binds the application (and the SKU) to the handle, whatever it returns; the status
+     * query without ids then answers for it, and so do the policy queries once a SKU of it is in grace. It returns
+     * 0xC004F013 while no SKU of it is licensed or in grace: no right is ever granted that the state does not grant. */
+    Slc->Bound = TRUE;
+    Slc->BoundApp = *pAppId;
+    Slc->HasBoundSku = pProductSkuId != NULL;
+    if (pProductSkuId)
+        Slc->BoundSku = *pProductSkuId;
+    return Granted ? S_OK : SL_E_RIGHT_NOT_GRANTED;
 }
 
 HRESULT
@@ -1530,6 +1623,8 @@ SLGetPolicyInformation(_In_ HSLC hSLC,
     return SL_E_RIGHT_NOT_GRANTED; /* as SLGetPolicyInformationDWORD */
 }
 
+static WCHAR *DupWide(const WCHAR *Text);
+
 HRESULT
 WINAPI
 SLGetServiceInformation(_In_ HSLC hSLC,
@@ -1544,6 +1639,58 @@ SLGetServiceInformation(_In_ HSLC hSLC,
         return E_INVALIDARG;
     *pcbValue = 0;
     *ppbValue = NULL;
+    /* Windows 10 (measured): "ActivePlugins" is the multi-string of the plug-in modules the service has loaded (installing
+     * Office adds none) and "Version" the service version as a string; any other name is not found */
+    if (!wcscmp(pwszValueName, L"ActivePlugins"))
+    {
+        static const WCHAR *Plugins[] = { L"sppwinob.dll", L"sppobjs.dll" };
+        WCHAR Dir[MAX_PATH], *Out, *p;
+        UINT DirLen, i, Chars = 1;
+
+        DirLen = GetSystemDirectoryW(Dir, ARRAYSIZE(Dir));
+        if (!DirLen || DirLen >= ARRAYSIZE(Dir) - 16)
+            return E_FAIL;
+        for (i = 0; i < ARRAYSIZE(Plugins); i++)
+            Chars += DirLen + 1 + (UINT)wcslen(Plugins[i]) + 1;
+        Out = LocalAlloc(LMEM_FIXED, Chars * sizeof(WCHAR));
+        if (!Out)
+            return E_OUTOFMEMORY;
+        for (p = Out, i = 0; i < ARRAYSIZE(Plugins); i++)
+        {
+            memcpy(p, Dir, DirLen * sizeof(WCHAR));
+            p += DirLen;
+            *p++ = L'\\';
+            wcscpy(p, Plugins[i]);
+            p += wcslen(Plugins[i]) + 1;
+        }
+        *p = 0;
+        *pcbValue = Chars * sizeof(WCHAR);
+        *ppbValue = (PBYTE)Out;
+        if (peDataType)
+            *peDataType = SL_DATA_MULTI_SZ;
+        return S_OK;
+    }
+    if (!wcscmp(pwszValueName, L"Version"))
+    {
+        OSVERSIONINFOW Ver;
+        WCHAR Text[64];
+        WCHAR *Out;
+
+        memset(&Ver, 0, sizeof(Ver));
+        Ver.dwOSVersionInfoSize = sizeof(Ver);
+        if (!GetVersionExW(&Ver))
+            return E_FAIL;
+        /* major.minor.build.revision; the update revision is not tracked here */
+        _snwprintf(Text, ARRAYSIZE(Text), L"%lu.%lu.%lu.0", Ver.dwMajorVersion, Ver.dwMinorVersion, Ver.dwBuildNumber);
+        Out = DupWide(Text);
+        if (!Out)
+            return E_OUTOFMEMORY;
+        *pcbValue = (UINT)((wcslen(Text) + 1) * sizeof(WCHAR));
+        *ppbValue = (PBYTE)Out;
+        if (peDataType)
+            *peDataType = SL_DATA_SZ;
+        return S_OK;
+    }
     return SL_E_VALUE_NOT_FOUND;
 }
 
@@ -1558,6 +1705,9 @@ SkuValueToInfoName(PCWSTR Name)
         { L"Description", L"productDescription" },
         { L"Family", L"Family" },
         { L"Author", L"productAuthor" },
+        /* The bit set of the Office applications the SKU licenses: the string of the EUL's ApplicationBitmap information
+         * (Word asks for it of every SKU once it has the status; without it Word stops with a licensing error) */
+        { L"ApplicationBitmap", L"ApplicationBitmap" },
     };
     UINT i;
 
@@ -1760,8 +1910,89 @@ SLGetPKeyId(_In_ HSLC hSLC,
 
 HRESULT WINAPI SLReArm(PVOID a0, PVOID a1, PVOID a2, PVOID a3) { return SL_E_NOT_SUPPORTED; }
 HRESULT WINAPI SLRegisterPlugin(PVOID a0, PVOID a1, PVOID a2, PVOID a3) { return SL_E_NOT_SUPPORTED; }
-HRESULT WINAPI SLSetAuthenticationData(PVOID a0, PVOID a1, PVOID a2, PVOID a3) { return SL_E_NOT_SUPPORTED; }
-HRESULT WINAPI SLGetAuthenticationResult(PVOID a0, PVOID a1, PVOID a2, PVOID a3) { return SL_E_NOT_SUPPORTED; }
-HRESULT WINAPI SLLoadApplicationPolicies(PVOID a0, PVOID a1, PVOID a2, PVOID a3, PVOID a4) { return SL_E_NOT_SUPPORTED; }
+
+/*
+ * Application authentication data. On Windows the Software Protection service verifies the blob an application hands
+ * in (Office passes 0x120 bytes) and thereby learns which application the caller is. The verification needs material
+ * that exists only in Microsoft's binaries, so it cannot be done here: the blob is ACCEPTED WITHOUT BEING VERIFIED, as
+ * a hint that the caller is Office, which binds the Office application to the handle. Everything that is then answered
+ * for that caller is the licensing state of the installed licenses (unlicensed or in grace, as Windows reports it for
+ * an Office that was never activated): nothing here fakes an activation, nor grants more than that state grants.
+ *
+ * Measured on Windows 10 22H2 with a blob that cannot be verified (header 0x120,1,0x10000,0x10c and filler):
+ * SLSetAuthenticationData is S_OK for 0 bytes (NULL) and for 0x120 bytes, 0x8007000D (invalid data) for 0x10 bytes;
+ * SLGetAuthenticationResult then is 0xC004F07A (cannot be verified) after the 0x120 bytes and 0xC004F079 (not set)
+ * after the empty call; SLGetAuthenticationResult(h, NULL, NULL, NULL) is E_INVALIDARG.
+ */
+HRESULT
+WINAPI
+SLSetAuthenticationData(_In_ HSLC hSLC,
+                        _In_ UINT cbData,
+                        _In_reads_bytes_opt_(cbData) const BYTE *pbData,
+                        _In_opt_ PVOID pvReserved1,
+                        _In_opt_ PVOID pvReserved2)
+{
+    PSLC Slc = (PSLC)hSLC;
+    BOOL Readable = TRUE;
+
+    if (!IsValidHandle(hSLC))
+        return E_HANDLE;
+    if (!cbData && !pbData)
+    {
+        Slc->AuthState = SLC_AUTH_NONE;
+        return S_OK;
+    }
+    if (!pbData)
+        return E_INVALIDARG;
+    if (cbData < 0x20)
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    _SEH2_TRY
+    {
+        volatile BYTE Probe = pbData[0] | pbData[cbData - 1];
+
+        (void)Probe;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Readable = FALSE;
+    }
+    _SEH2_END;
+    if (!Readable)
+        return E_POINTER;
+
+    Slc->AuthState = SLC_AUTH_ACCEPTED;
+    Slc->Bound = TRUE;
+    Slc->BoundApp = OfficeAppId;
+    Slc->HasBoundSku = FALSE;
+    return S_OK;
+}
+
+HRESULT
+WINAPI
+SLGetAuthenticationResult(_In_ HSLC hSLC, _In_opt_ PVOID pvA, _In_opt_ PVOID pvB, _In_opt_ PVOID pvC)
+{
+    PSLC Slc = (PSLC)hSLC;
+
+    if (!IsValidHandle(hSLC))
+        return E_HANDLE;
+    if (!pvA && !pvB && !pvC)
+        return E_INVALIDARG;
+    if (Slc->AuthState == SLC_AUTH_NONE)
+        return SL_E_AUTHN_DATA_NOT_SET;
+    /* The data was accepted as the caller's hint (see above): the result is a success without output */
+    return S_OK;
+}
+
+/* Measured: every application and SKU id, from a caller that has not authenticated, is 0xC004F072 and yields no handle */
+HRESULT
+WINAPI
+SLLoadApplicationPolicies(_In_ const SLID *pAppId, _In_opt_ PVOID pvReserved1, _In_opt_ PVOID pvReserved2, _Out_ HSLC *phPolicies, _In_ UINT uFlags)
+{
+    if (phPolicies)
+        *phPolicies = NULL;
+    if (!pAppId)
+        return E_INVALIDARG;
+    return SL_E_CALLER_NOT_AUTHENTICATED;
+}
 HRESULT WINAPI SLUnloadApplicationPolicies(PVOID a0, PVOID a1) { return SL_E_NOT_SUPPORTED; }
 HRESULT WINAPI SLGetApplicationPolicy(PVOID a0, PVOID a1, PVOID a2, PVOID a3, PVOID a4) { return SL_E_NOT_SUPPORTED; }
