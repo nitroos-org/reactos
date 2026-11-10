@@ -1308,7 +1308,8 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         if (Done >= 0)
         {
             NgAfterChange(Vcb);
-            if (WriteThrough && ngc_commit_now(Vcb->Core))
+            /* Between core operations: the journal I/O runs without CoreLock. */
+            if (WriteThrough && NgCommitEx(Vcb, TRUE))
                 Done = -NGC_EIO;
         }
         NgReleaseCore(Vcb);
