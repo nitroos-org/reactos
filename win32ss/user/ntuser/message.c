@@ -13,6 +13,33 @@ DBG_DEFAULT_CHANNEL(UserMsg);
 
 #define PM_BADMSGFLAGS ~(PM_QS_SENDMESSAGE|PM_QS_PAINT|PM_QS_POSTMESSAGE|PM_QS_INPUT|PM_NOYIELD|PM_REMOVE)
 
+#include "xprocmsg.h"
+
+/* 0: let the call go on. Otherwise the call is over: with the last error set, or (XPROC_SILENT) with none, and
+   the result to return in *pRet (may be NULL when the caller returns 0 anyway). hWnd belongs to another process and the message is one Windows refuses to carry.
+   User-initiated calls only. Not inlined: the send path recurses (nested sends), its frame should not grow. */
+static DECLSPEC_NOINLINE DWORD FASTCALL
+IntRefuseXprocMessage(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam, UINT Kind, PBOOL pRet)
+{
+    PWND Window;
+    DWORD Error;
+
+    if (pRet)
+        *pRet = FALSE;
+    if (!hWnd || hWnd == HWND_BROADCAST || hWnd == HWND_TOPMOST)
+        return 0;
+    Window = UserGetWindowObject(hWnd);
+    if (!Window)
+        return 0;
+    Error = IntXprocMsgRefusal(Window->head.pti, Msg, wParam, lParam, Kind, pRet);
+    if (!Error)
+        return 0;
+    TRACE("Refused message 0x%x (kind %u) to window %p of another process: error 0x%lx\n", Msg, Kind, hWnd, Error);
+    if (Error != XPROC_SILENT)
+        EngSetLastError(Error);
+    return Error;
+}
+
 /* Strings that are OK to pass between user and kernel mode.
  * There may be other strings needed that can easily be added here. */
 WCHAR StrUserKernel[3][20] = {{L"intl"}, {L"Environment"}, {L"Policy"}};
@@ -2147,6 +2174,10 @@ co_IntDoSendMessage( HWND hWnd,
         {
             return 0;
         }
+        if (IntRefuseXprocMessage(hWnd, Msg, wParam, lParam, XPROC_SEND, NULL))
+        {
+            return 0;
+        }
     }
 
     /* Check for an exiting window. */
@@ -2417,6 +2448,12 @@ NtUserPostMessage(HWND hWnd,
         return FALSE;
     }
 
+    if (IntRefuseXprocMessage(hWnd, Msg, wParam, lParam, XPROC_POST, &ret))
+    {
+        UserLeave();
+        return ret;
+    }
+
     ret = UserPostMessage(hWnd, Msg, wParam, lParam);
 
     UserLeave();
@@ -2434,6 +2471,7 @@ NtUserPostThreadMessage(DWORD idThread,
     PETHREAD peThread;
     PTHREADINFO pThread;
     NTSTATUS Status;
+    DWORD Error;
 
     UserEnterExclusive();
 
@@ -2456,6 +2494,14 @@ NtUserPostThreadMessage(DWORD idThread,
             !pThread->MessageQueue ||
             (pThread->TIF_flags & TIF_INCLEANUP))
         {
+            ObDereferenceObject( peThread );
+            goto exit;
+        }
+        Error = IntXprocMsgRefusal(pThread, Msg, wParam, lParam, XPROC_THREAD, &ret);
+        if (Error)
+        {
+            if (Error != XPROC_SILENT)
+                EngSetLastError(Error);
             ObDereferenceObject( peThread );
             goto exit;
         }
@@ -2846,6 +2892,8 @@ NtUserMessageCall( HWND hWnd,
             UserDerefObjectCo(Window);
         break;
     case FNID_SENDNOTIFYMESSAGE:
+        if (IntRefuseXprocMessage(hWnd, Msg, wParam, lParam, XPROC_NOTIFY, &Ret))
+            break;
         Ret = UserSendNotifyMessage(hWnd, Msg, wParam, lParam);
         break;
     case FNID_BROADCASTSYSTEMMESSAGE:
@@ -3174,6 +3222,9 @@ NtUserMessageCall( HWND hWnd,
                 _SEH2_YIELD(break);
             }
             _SEH2_END;
+
+            if (IntRefuseXprocMessage(hWnd, Msg, wParam, lParam, XPROC_CALLBACK, &Ret))
+               break;
 
             if (is_pointer_message(Msg, wParam))
             {

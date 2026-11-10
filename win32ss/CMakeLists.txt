@@ -135,6 +135,7 @@ list(APPEND SOURCE
     user/ntuser/layered.c
     user/ntuser/menu.c
     user/ntuser/message.c
+    user/ntuser/xprocmsg.c
     user/ntuser/metric.c
     user/ntuser/misc.c
     user/ntuser/monitor.c
