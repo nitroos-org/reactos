@@ -205,12 +205,12 @@ CcRosRaiseValidDataLength(
 }
 
 /*
- * Write-back goes to the disk in requests of up to CC_FLUSH_CLUSTER_VACBS views (1 MB): the dirty views that directly
+ * Write-back goes to the disk in requests of up to CC_FLUSH_CLUSTER_VACBS views (2 MB): the dirty views that directly
  * follow the one being flushed, in the same file, are unmarked and written with it, in one MmFlushSegment range.
  * Each is referenced for the flush (returned in Group, Max at most) and marked dirty again if the write fails.
  * Returns how many followed.
  */
-#define CC_FLUSH_CLUSTER_VACBS 4
+#define CC_FLUSH_CLUSTER_VACBS 8
 
 static
 ULONG
@@ -710,6 +710,19 @@ CcRosCopyFileName(
     }
 }
 
+/* A lazy writer is done with the map (master lock held): its claim goes, and the flag when it was the last */
+static
+VOID
+CcpEndLazyWrite(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap,
+    _In_ LONG ClaimSlot)
+{
+    if (ClaimSlot >= 0)
+        SharedCacheMap->LazyClaim[ClaimSlot].Used = FALSE;
+    if (--SharedCacheMap->LazyWriteActive == 0)
+        SharedCacheMap->Flags &= ~SHARED_CACHE_MAP_IN_LAZYWRITE;
+}
+
 NTSTATUS
 CcRosFlushDirtyPages (
     ULONG Target,
@@ -728,6 +741,7 @@ CcRosFlushDirtyPages (
     ULONG BusyCount = 0;
     ULONG LapFlushed = 0;
     ULONG BusyWaits = 0;
+    LONG ClaimSlot;
     ULONG TotalWaits = 0;
     ULONG DirtyAtLastWait = MAXULONG;
     BOOLEAN LapBusy = FALSE;
@@ -862,14 +876,51 @@ CcRosFlushDirtyPages (
             continue;
         }
 
-        /* Do not lazy-write the same file concurrently. Fastfat ASSERTS on that */
+        /*
+         * Do not lazy-write the same file concurrently. Fastfat ASSERTS on that.  A map that allows it (CcRosAllowLazyClose:
+         * the file system orders the transfers of a stream itself) takes a second worker, which writes other views: the
+         * views the first worker has claimed (its cluster, from the view it started with) are not taken again.
+         */
+        ClaimSlot = -1;
         if (SharedCacheMap->Flags & SHARED_CACHE_MAP_IN_LAZYWRITE)
         {
-            LapBusy = TRUE;
-            CcRosVacbDecRefCount(current);
-            continue;
+            if (!(SharedCacheMap->Flags & SHARED_CACHE_MAP_LAZY_CLOSE) ||
+                SharedCacheMap->LazyWriteActive >= CC_LAZY_WRITERS_PER_MAP)
+            {
+                LapBusy = TRUE;
+                CcRosVacbDecRefCount(current);
+                continue;
+            }
+            for (i = 0; i < CC_LAZY_WRITERS_PER_MAP; i++)
+            {
+                if (SharedCacheMap->LazyClaim[i].Used &&
+                    current->FileOffset.QuadPart >= SharedCacheMap->LazyClaim[i].Start &&
+                    current->FileOffset.QuadPart < SharedCacheMap->LazyClaim[i].End)
+                    break;
+            }
+            if (i < CC_LAZY_WRITERS_PER_MAP)
+            {
+                LapBusy = TRUE;
+                CcRosVacbDecRefCount(current);
+                continue;
+            }
         }
-
+        if (SharedCacheMap->Flags & SHARED_CACHE_MAP_LAZY_CLOSE)
+        {
+            for (i = 0; i < CC_LAZY_WRITERS_PER_MAP; i++)
+            {
+                if (!SharedCacheMap->LazyClaim[i].Used)
+                {
+                    ClaimSlot = (LONG)i;
+                    SharedCacheMap->LazyClaim[i].Start = current->FileOffset.QuadPart;
+                    SharedCacheMap->LazyClaim[i].End = current->FileOffset.QuadPart +
+                                                       (LONGLONG)CC_FLUSH_CLUSTER_VACBS * VACB_MAPPING_GRANULARITY;
+                    SharedCacheMap->LazyClaim[i].Used = TRUE;
+                    break;
+                }
+            }
+        }
+        SharedCacheMap->LazyWriteActive++;
         SharedCacheMap->Flags |= SHARED_CACHE_MAP_IN_LAZYWRITE;
 
         /* Keep a ref on the shared cache map */
@@ -898,7 +949,7 @@ CcRosFlushDirtyPages (
             /* The cache map still holds the view, so this is not its last reference */
             CcRosVacbDecRefCount(current);
 
-            SharedCacheMap->Flags &= ~SHARED_CACHE_MAP_IN_LAZYWRITE;
+            CcpEndLazyWrite(SharedCacheMap, ClaimSlot);
 
             /* Compared as a pointer only; with the array full the map is tried again view by view */
             if (BusyCount < CC_FLUSH_FAILED_MAPS)
@@ -935,7 +986,7 @@ CcRosFlushDirtyPages (
 
         OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
 
-        SharedCacheMap->Flags &= ~SHARED_CACHE_MAP_IN_LAZYWRITE;
+        CcpEndLazyWrite(SharedCacheMap, ClaimSlot);
 
         /*
          * The data is dropped only if the map is still closed, decided here under the master lock.  A
@@ -1343,13 +1394,71 @@ CcRosReleaseVacb (
     return STATUS_SUCCESS;
 }
 
+/*
+ * The view of the map that holds FileOffset, or NULL; the list is sorted by file offset.  *Previous is the last view that
+ * starts before FileOffset (and does not hold it), for the sorted insert of a new view.  The walk starts from the end of
+ * the list that is nearer: a writer that appends (or a reader at the end) finds the position at once, where a walk from
+ * the head took as many steps as the file has views (4096 for a 1 GB file), under the master lock.  Both locks held.
+ */
+static
+PROS_VACB
+CcRosFindVacbLocked(
+    _In_ PROS_SHARED_CACHE_MAP SharedCacheMap,
+    _In_ LONGLONG FileOffset,
+    _Out_opt_ PROS_VACB *Previous)
+{
+    PLIST_ENTRY Head = &SharedCacheMap->CacheMapVacbListHead, Entry;
+    PROS_VACB Current, Prev = NULL;
+
+    if (Previous)
+        *Previous = NULL;
+    if (IsListEmpty(Head))
+        return NULL;
+
+    Current = CONTAINING_RECORD(Head->Blink, ROS_VACB, CacheMapVacbListEntry);
+    {
+        PROS_VACB First = CONTAINING_RECORD(Head->Flink, ROS_VACB, CacheMapVacbListEntry);
+
+        if (FileOffset - First->FileOffset.QuadPart > Current->FileOffset.QuadPart - FileOffset)
+        {
+            /* Nearer the tail: the last view that starts at or before FileOffset */
+            for (Entry = Head->Blink; Entry != Head; Entry = Entry->Blink)
+            {
+                Current = CONTAINING_RECORD(Entry, ROS_VACB, CacheMapVacbListEntry);
+                if (Current->FileOffset.QuadPart <= FileOffset)
+                {
+                    if (IsPointInRange(Current->FileOffset.QuadPart, VACB_MAPPING_GRANULARITY, FileOffset))
+                        return Current;
+                    if (Previous)
+                        *Previous = Current;
+                    return NULL;
+                }
+            }
+            return NULL;
+        }
+    }
+
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
+    {
+        Current = CONTAINING_RECORD(Entry, ROS_VACB, CacheMapVacbListEntry);
+        if (IsPointInRange(Current->FileOffset.QuadPart, VACB_MAPPING_GRANULARITY, FileOffset))
+            return Current;
+        if (Current->FileOffset.QuadPart < FileOffset)
+            Prev = Current;
+        if (Current->FileOffset.QuadPart > FileOffset)
+            break;
+    }
+    if (Previous)
+        *Previous = Prev;
+    return NULL;
+}
+
 /* Returns with VACB Lock Held! */
 PROS_VACB
 CcRosLookupVacb (
     PROS_SHARED_CACHE_MAP SharedCacheMap,
     LONGLONG FileOffset)
 {
-    PLIST_ENTRY current_entry;
     PROS_VACB current;
     KIRQL oldIrql;
 
@@ -1361,24 +1470,13 @@ CcRosLookupVacb (
     oldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
     KeAcquireSpinLockAtDpcLevel(&SharedCacheMap->CacheMapLock);
 
-    current_entry = SharedCacheMap->CacheMapVacbListHead.Flink;
-    while (current_entry != &SharedCacheMap->CacheMapVacbListHead)
+    current = CcRosFindVacbLocked(SharedCacheMap, FileOffset, NULL);
+    if (current != NULL)
     {
-        current = CONTAINING_RECORD(current_entry,
-                                    ROS_VACB,
-                                    CacheMapVacbListEntry);
-        if (IsPointInRange(current->FileOffset.QuadPart,
-                           VACB_MAPPING_GRANULARITY,
-                           FileOffset))
-        {
-            CcRosVacbIncRefCount(current);
-            KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
-            KeReleaseQueuedSpinLock(LockQueueMasterLock, oldIrql);
-            return current;
-        }
-        if (current->FileOffset.QuadPart > FileOffset)
-            break;
-        current_entry = current_entry->Flink;
+        CcRosVacbIncRefCount(current);
+        KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, oldIrql);
+        return current;
     }
 
     KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
@@ -1555,7 +1653,6 @@ CcRosCreateVacb (
 {
     PROS_VACB current;
     PROS_VACB previous;
-    PLIST_ENTRY current_entry;
     NTSTATUS Status;
     KIRQL oldIrql;
     ULONG Refs;
@@ -1621,45 +1718,27 @@ CcRosCreateVacb (
      * our newly created VACB and return the existing one.
      */
     KeAcquireSpinLockAtDpcLevel(&SharedCacheMap->CacheMapLock);
-    current_entry = SharedCacheMap->CacheMapVacbListHead.Flink;
-    previous = NULL;
-    while (current_entry != &SharedCacheMap->CacheMapVacbListHead)
+    current = CcRosFindVacbLocked(SharedCacheMap, FileOffset, &previous);
+    if (current != NULL)
     {
-        current = CONTAINING_RECORD(current_entry,
-                                    ROS_VACB,
-                                    CacheMapVacbListEntry);
-        if (IsPointInRange(current->FileOffset.QuadPart,
-                           VACB_MAPPING_GRANULARITY,
-                           FileOffset))
-        {
-            CcRosVacbIncRefCount(current);
-            KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
+        CcRosVacbIncRefCount(current);
+        KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
 #if DBG
-            if (SharedCacheMap->Trace)
-            {
-                DPRINT1("CacheMap 0x%p: deleting newly created VACB 0x%p ( found existing one 0x%p )\n",
-                        SharedCacheMap,
-                        (*Vacb),
-                        current);
-            }
-#endif
-            KeReleaseQueuedSpinLock(LockQueueMasterLock, oldIrql);
-
-            Refs = CcRosVacbDecRefCount(*Vacb);
-            ASSERT(Refs == 0);
-
-            *Vacb = current;
-            return STATUS_SUCCESS;
-        }
-        if (current->FileOffset.QuadPart < FileOffset)
+        if (SharedCacheMap->Trace)
         {
-            ASSERT(previous == NULL ||
-                   previous->FileOffset.QuadPart < current->FileOffset.QuadPart);
-            previous = current;
+            DPRINT1("CacheMap 0x%p: deleting newly created VACB 0x%p ( found existing one 0x%p )\n",
+                    SharedCacheMap,
+                    (*Vacb),
+                    current);
         }
-        if (current->FileOffset.QuadPart > FileOffset)
-            break;
-        current_entry = current_entry->Flink;
+#endif
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, oldIrql);
+
+        Refs = CcRosVacbDecRefCount(*Vacb);
+        ASSERT(Refs == 0);
+
+        *Vacb = current;
+        return STATUS_SUCCESS;
     }
     /* There was no existing VACB. */
     current = *Vacb;

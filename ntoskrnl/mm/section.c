@@ -268,11 +268,13 @@ static GENERIC_MAPPING MmpSectionMapping =
 
 
 /*
- * Adjacent dirty pages of a data file that one flush writes with one paging write (1 MB: a disk request costs
+ * Adjacent dirty pages of a data file that one flush writes with one paging write (2 MB: a disk request costs
  * the same fixed time whatever its size, so write-back in 256 KB requests ran at about 2/3 of what a 1 MB one
- * reaches).  The page list and the MDL are pool memory; when pool is short the cluster is MM_FLUSH_STACK_PAGES (64 KB).
+ * reaches; with two lazy writers on a stream, 1 MB, 2 MB and 4 MB requests measured the same within 3 %, 8 MB was
+ * slower: the last request of a flush is longer).  The page list and the MDL are pool memory; when pool is short the
+ * cluster is MM_FLUSH_STACK_PAGES (64 KB).
  */
-#define MM_FLUSH_CLUSTER_PAGES 256
+#define MM_FLUSH_CLUSTER_PAGES 512
 #define MM_FLUSH_STACK_PAGES 16
 #define MM_FLUSH_MDL_WORDS(n) ((sizeof(MDL) + sizeof(PFN_NUMBER) - 1) / sizeof(PFN_NUMBER) + (n))
 #define TAG_MM_FLUSH 'lFmM'
