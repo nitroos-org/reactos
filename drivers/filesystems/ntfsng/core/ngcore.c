@@ -2518,8 +2518,9 @@ int ngc_rdio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int
 	if (!len || v->bdev->kshim_gone || !v->bdev->kshim_drain)
 		return -EAGAIN;
 	/* Not the system files ($MFT, $Bitmap, ...): their sectors change through the journal overlay at any commit. */
+	/* The offset must be sector aligned; the length need not be (a paging read of the last page of a file ends at EOF). */
 	if (!ngc_is_data_inode(vi) || !NInoNonResident(ni) || NInoCompressed(ni) || NInoEncrypted(ni) ||
-	    NInoWofCompressed(ni) || ((uintptr_t)buf & 3) || ((off | len) & (bs - 1)) || kshim_mapping_dirty(vi->i_mapping))
+	    NInoWofCompressed(ni) || ((uintptr_t)buf & 3) || (off & (bs - 1)) || kshim_mapping_dirty(vi->i_mapping))
 		return -EAGAIN;
 	data_end = min_t(u64, end, (u64)min_t(loff_t, ni->initialized_size, i_size_read(vi)));
 	mutex_lock(&ni->mrec_lock);
@@ -2528,7 +2529,7 @@ int ngc_rdio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int
 	rl = ni->runlist.rl;
 	while (!err && pos < data_end) {
 		s64 vcn = (s64)(pos >> vol->cluster_size_bits);
-		u64 run_end, run_dev_end, cnt, dev, io;
+		u64 run_end, run_dev_end, cnt, dev, io, iou;
 		struct ngc_dio_run *r = &d->run[d->nruns];
 		while (rl && rl->length && rl->vcn + rl->length <= vcn)
 			rl++;
@@ -2550,8 +2551,14 @@ int ngc_rdio_begin(ngc_vol *v, ngc_node *n, unsigned long long off, unsigned int
 			dev = ((u64)rl->lcn << vol->cluster_size_bits) + (pos - ((u64)rl->vcn << vol->cluster_size_bits));
 			/* Whole sectors: a tail past the initialized size is zeroed by the run after it. */
 			io = min_t(u64, (cnt + bs - 1) & ~(u64)(bs - 1), end - pos);
-			if ((dev & (bs - 1)) || dev + io > run_dev_end || dev + io > v->bdev->size || io > 0x7fffffff ||
-			    kshim_jnl_holds(v->bdev, dev, io)) {
+			/*
+			 * @io is a whole number of sectors except for a last run that ends at an unaligned @end: the transfer
+			 * (NgRdioTransfer) reads the sector that holds the tail through a bounce buffer and copies only @io
+			 * bytes, so the sectors that are checked and read are those of @io rounded up.
+			 */
+			iou = (io + bs - 1) & ~(u64)(bs - 1);
+			if ((dev & (bs - 1)) || dev + iou > run_dev_end || dev + iou > v->bdev->size || io > 0x7fffffff ||
+			    kshim_jnl_holds(v->bdev, dev, iou)) {
 				err = -EAGAIN;
 				break;
 			}
