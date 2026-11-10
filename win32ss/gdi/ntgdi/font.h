@@ -56,6 +56,7 @@ typedef struct _FONT_CACHE_HASHED
 typedef struct _FONT_CACHE_ENTRY
 {
     LIST_ENTRY ListEntry;
+    struct _FONT_CACHE_ENTRY *HashNext; /* next entry of the same lookup bucket, see g_FontCacheBuckets */
     FT_BitmapGlyph BitmapGlyph;
     DWORD dwHash;
     FONT_CACHE_HASHED Hashed;
