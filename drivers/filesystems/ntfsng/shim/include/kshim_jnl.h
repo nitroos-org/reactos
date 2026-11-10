@@ -72,6 +72,9 @@ struct kj_ext { u64 page; u64 npages; u64 dev; };
 
 struct kshim_jnl;
 
+/* Record in the system event log that the volume stopped accepting writes (err: a negative errno). */
+void kshim_log_volume_failed(struct block_device *b, int err);
+
 u32 kj_crc32(u32 crc, const void *p, size_t n);
 u64 kj_slot_page(u64 slot);
 int kj_rec_usn(const u8 *rec, size_t avail, u16 *usn);

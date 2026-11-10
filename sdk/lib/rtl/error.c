@@ -694,7 +694,7 @@ static const DWORD table_c0000001[411] =
    ERROR_GENERIC_NOT_MAPPED,               /* c00000e6 (STATUS_GENERIC_NOT_MAPPED) */
    ERROR_BAD_DESCRIPTOR_FORMAT,            /* c00000e7 (STATUS_BAD_DESCRIPTOR_FORMAT) */
    ERROR_INVALID_USER_BUFFER,              /* c00000e8 (STATUS_INVALID_USER_BUFFER) */
-   0,                                      /* c00000e9 (STATUS_UNEXPECTED_IO_ERROR) */
+   ERROR_IO_DEVICE,                        /* c00000e9 (STATUS_UNEXPECTED_IO_ERROR) */
    0,                                      /* c00000ea (STATUS_UNEXPECTED_MM_CREATE_ERR) */
    0,                                      /* c00000eb (STATUS_UNEXPECTED_MM_MAP_ERROR) */
    0,                                      /* c00000ec (STATUS_UNEXPECTED_MM_EXTEND_ERR) */

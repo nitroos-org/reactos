@@ -1643,6 +1643,8 @@ static int ngc_writeback_failed(struct ngc_vol *v, int err)
 		return -EIO;
 	if (!later) {
 		/* Sticky: the uncommitted changes can never be committed, so no later flush may succeed. */
+		if (!v->failed)
+			kshim_log_volume_failed(v->bdev, err);
 		v->failed = 1;
 		NVolSetErrors(vol);
 		kshim_jnl_mark_errors(v->bdev);
@@ -3145,6 +3147,8 @@ static int ngc_resize_failed(struct ngc_vol *v, int err)
 	}
 	printk(KERN_ERR "ngc: volume resize failed %d; the disk keeps the last committed state, "
 	       "nothing is written until the next mount\n", err);
+	if (!v->failed)
+		kshim_log_volume_failed(v->bdev, err);
 	v->failed = 1;
 	v->sb->s_flags |= SB_RDONLY;
 	return err;

@@ -1950,6 +1950,8 @@ HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\System\Service Control Manager"
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\System\Service Control Manager","TypesSupported",0x00010003,0x00000007
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\System\NitroKernel","EventMessageFile",0x00020000,"%SystemRoot%\system32\IoLogMsg.dll"
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\System\NitroKernel","TypesSupported",0x00010003,0x00000007
+HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\System\Ntfs","EventMessageFile",0x00020000,"%SystemRoot%\system32\IoLogMsg.dll"
+HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\System\Ntfs","TypesSupported",0x00010003,0x00000007
 
 ; Filesystem recognizer driver
 HKLM,"SYSTEM\CurrentControlSet\Services\Fs_Rec","ErrorControl",0x00010001,0x00000000
