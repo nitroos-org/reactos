@@ -33,6 +33,7 @@ KMT_TESTFUNC Test_IoIs32bitProcess;
 KMT_TESTFUNC Test_IoReadWrite;
 KMT_TESTFUNC Test_MmMapLockedPagesProcessExit;
 KMT_TESTFUNC Test_MmMapLockedPagesSpecifyCache;
+KMT_TESTFUNC Test_MmContiguousStandby;
 KMT_TESTFUNC Test_MmPager;
 KMT_TESTFUNC Test_MmSpecialPoolUser;
 KMT_TESTFUNC Test_NtCreateSection;
@@ -83,6 +84,7 @@ const KMT_TEST TestList[] =
     { "KeSystemCall32",               Test_KeSystemCall32 },
     { "MmMapLockedPagesProcessExit",  Test_MmMapLockedPagesProcessExit },
     { "MmMapLockedPagesSpecifyCache", Test_MmMapLockedPagesSpecifyCache },
+    { "MmContiguousStandby",          Test_MmContiguousStandby },
     { "MmPager",                      Test_MmPager },
     { "MmSpecialPoolUser",            Test_MmSpecialPoolUser },
     { "NtCreateSection",              Test_NtCreateSection },
