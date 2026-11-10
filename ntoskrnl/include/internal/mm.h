@@ -891,6 +891,7 @@ MiReadPageFileCluster(
 extern KSPIN_LOCK MiPagingFileSlotLock;
 extern ULONG MiNitroPagerMode;
 extern ULONG MiNitroPagerDebug;
+extern ULONG MmNitroSessions;
 
 BOOLEAN
 NTAPI
