@@ -320,4 +320,10 @@
     SVC_(CreateLowBoxToken, 9)
     SVC_(AlertThreadByThreadId, 1)
     SVC_(WaitForAlertByThreadId, 2)
+    SVC_(AllocateReserveObject, 3)
+    SVC_(QueueApcThreadEx, 6)
+    SVC_(SetIoCompletionEx, 6)
+    SVC_(CreateWaitCompletionPacket, 3)
+    SVC_(AssociateWaitCompletionPacket, 8)
+    SVC_(CancelWaitCompletionPacket, 2)
 #endif

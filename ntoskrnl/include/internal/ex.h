@@ -358,6 +358,22 @@ ExpInitializeKeyedEventImplementation(VOID);
 CODE_SEG("INIT")
 BOOLEAN
 NTAPI
+ExpInitializeReserveObjectImplementation(VOID);
+
+/* NtAllocateReserveObject: the body of a UserApcReserve / IoCompletionReserve object. The APC storage of the
+ * reserve is used by NtQueueApcThreadEx; InUse is 1 from the queueing until the APC was delivered or rundown. */
+typedef struct _EX_RESERVE_OBJECT
+{
+    KAPC Apc;
+    volatile LONG InUse;
+} EX_RESERVE_OBJECT, *PEX_RESERVE_OBJECT;
+
+extern POBJECT_TYPE ExUserApcReserveObjectType;
+extern POBJECT_TYPE ExIoCompletionReserveObjectType;
+
+CODE_SEG("INIT")
+BOOLEAN
+NTAPI
 ExpInitializeEventPairImplementation(VOID);
 
 CODE_SEG("INIT")

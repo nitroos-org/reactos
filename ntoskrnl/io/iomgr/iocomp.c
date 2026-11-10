@@ -738,3 +738,42 @@ NtSetIoCompletion(IN HANDLE IoCompletionPortHandle,
     /* Return status */
     return Status;
 }
+
+/*
+ * @name NtSetIoCompletionEx
+ *
+ *    Windows 7 and later: NtSetIoCompletion with the storage of the packet taken from an IoCompletionReserve object
+ *    (NtAllocateReserveObject type 1). Not measured against Windows yet: a handle of another type is rejected, the
+ *    reserve is otherwise only checked, never marked in use, and the packet is allocated as for NtSetIoCompletion.
+ */
+NTSTATUS
+NTAPI
+NtSetIoCompletionEx(IN HANDLE IoCompletionPortHandle,
+                    IN HANDLE IoCompletionPacketHandle OPTIONAL,
+                    IN PVOID CompletionKey,
+                    IN PVOID CompletionContext,
+                    IN NTSTATUS CompletionStatus,
+                    IN ULONG_PTR CompletionInformation)
+{
+    NTSTATUS Status;
+    PVOID Reserve;
+    PAGED_CODE();
+
+    if (IoCompletionPacketHandle)
+    {
+        Status = ObReferenceObjectByHandle(IoCompletionPacketHandle,
+                                           0,
+                                           ExIoCompletionReserveObjectType,
+                                           ExGetPreviousMode(),
+                                           &Reserve,
+                                           NULL);
+        if (!NT_SUCCESS(Status)) return Status;
+        ObDereferenceObject(Reserve);
+    }
+
+    return NtSetIoCompletion(IoCompletionPortHandle,
+                             CompletionKey,
+                             CompletionContext,
+                             CompletionStatus,
+                             (ULONG)CompletionInformation);
+}

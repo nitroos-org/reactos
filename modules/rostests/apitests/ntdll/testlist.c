@@ -118,6 +118,7 @@ extern void func_NtQueryObject(void);
 extern void func_NtQueryOpenSubKeys(void);
 extern void func_NtQueryWnfStateData(void);
 extern void func_NtAlertThreadByThreadId(void);
+extern void func_NtAllocateReserveObject(void);
 extern void func_NtQuerySecurityObject(void);
 extern void func_NtQuerySection(void);
 extern void func_NtQuerySystemEnvironmentValue(void);
@@ -377,6 +378,7 @@ const struct test winetest_testlist[] =
     { "NtQueryOpenSubKeys",             func_NtQueryOpenSubKeys },
     { "NtQueryWnfStateData",           func_NtQueryWnfStateData },
     { "NtAlertThreadByThreadId",       func_NtAlertThreadByThreadId },
+    { "NtAllocateReserveObject",       func_NtAllocateReserveObject },
     { "NtQuerySecurityObject", func_NtQuerySecurityObject },
     { "NtQuerySection",                 func_NtQuerySection },
     { "NtQuerySystemEnvironmentValue",  func_NtQuerySystemEnvironmentValue },
