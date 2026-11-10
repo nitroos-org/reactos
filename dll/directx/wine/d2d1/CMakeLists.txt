@@ -14,6 +14,7 @@ list(APPEND SOURCE
 	dc_render_target.c
 	device.c
 	effect.c
+	effect_render.c
 	factory.c
 	geometry.c
 	hwnd_render_target.c

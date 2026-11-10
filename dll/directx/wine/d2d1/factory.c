@@ -992,6 +992,7 @@ static HRESULT d2d_factory_register_effect_from_stream(struct d2d_factory *facto
     }
     d2d_effect_init_properties(NULL, effect->properties);
     effect->builtin = builtin;
+    effect->properties->builtin = builtin;
 
     hr = parse_effect_xml(reader, effect);
     IXmlReader_Release(reader);

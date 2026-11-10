@@ -997,95 +997,6 @@ static HRESULT STDMETHODCALLTYPE builtin_factory_stub(IUnknown **effect_impl)
     return S_OK;
 }
 
-static const WCHAR _2d_affine_transform_description[] =
-L"<?xml version='1.0'?>                                                      \
-  <Effect>                                                                   \
-    <Property name='DisplayName' type='string' value='2D Affine Transform'/> \
-    <Property name='Author'      type='string' value='The Wine Project'/>    \
-    <Property name='Category'    type='string' value='Stub'/>                \
-    <Property name='Description' type='string' value='2D Affine Transform'/> \
-    <Inputs>                                                                 \
-      <Input name='Source'/>                                                 \
-    </Inputs>                                                                \
-  </Effect>";
-
-static const WCHAR _3d_perspective_transform_description[] =
-L"<?xml version='1.0'?>                                                           \
-  <Effect>                                                                        \
-    <Property name='DisplayName' type='string' value='3D Perspective Transform'/> \
-    <Property name='Author'      type='string' value='The Wine Project'/>         \
-    <Property name='Category'    type='string' value='Stub'/>                     \
-    <Property name='Description' type='string' value='3D Perspective Transform'/> \
-    <Inputs>                                                                      \
-      <Input name='Source'/>                                                      \
-    </Inputs>                                                                     \
-  </Effect>";
-
-static const WCHAR _3d_transform_description[] =
-L"<?xml version='1.0'?>                                                           \
-  <Effect>                                                                        \
-    <Property name='DisplayName' type='string' value='3D Transform'/>             \
-    <Property name='Author'      type='string' value='The Wine Project'/>         \
-    <Property name='Category'    type='string' value='Stub'/>                     \
-    <Property name='Description' type='string' value='3D Transform'/>             \
-    <Inputs>                                                                      \
-      <Input name='Source'/>                                                      \
-    </Inputs>                                                                     \
-    <Property name='InterpolationMode' type='enum' value='1'/>                    \
-    <Property name='BorderMode'        type='enum' value='0'/>                    \
-    <Property name='TransformMatrix'   type='matrix4x4' value='(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)'/> \
-  </Effect>";
-
-static const WCHAR composite_description[] =
-L"<?xml version='1.0'?>                                                   \
-  <Effect>                                                                \
-    <Property name='DisplayName' type='string' value='Composite'/>        \
-    <Property name='Author'      type='string' value='The Wine Project'/> \
-    <Property name='Category'    type='string' value='Stub'/>             \
-    <Property name='Description' type='string' value='Composite'/>        \
-    <Inputs minimum='1' maximum='0xffffffff' >                            \
-      <Input name='Source1'/>                                             \
-      <Input name='Source2'/>                                             \
-    </Inputs>                                                             \
-  </Effect>";
-
-static const WCHAR crop_description[] =
-L"<?xml version='1.0'?>                                                   \
-  <Effect>                                                                \
-    <Property name='DisplayName' type='string' value='Crop'/>             \
-    <Property name='Author'      type='string' value='The Wine Project'/> \
-    <Property name='Category'    type='string' value='Stub'/>             \
-    <Property name='Description' type='string' value='Crop'/>             \
-    <Inputs >                                                             \
-      <Input name='Source'/>                                              \
-    </Inputs>                                                             \
-    <Property name='Rect' type='vector4' />                               \
-  </Effect>";
-
-static const WCHAR shadow_description[] =
-L"<?xml version='1.0'?>                                                   \
-  <Effect>                                                                \
-    <Property name='DisplayName' type='string' value='Shadow'/>           \
-    <Property name='Author'      type='string' value='The Wine Project'/> \
-    <Property name='Category'    type='string' value='Stub'/>             \
-    <Property name='Description' type='string' value='Shadow'/>           \
-    <Inputs >                                                             \
-      <Input name='Source'/>                                              \
-    </Inputs>                                                             \
-  </Effect>";
-
-static const WCHAR grayscale_description[] =
-L"<?xml version='1.0'?>                                                   \
-  <Effect>                                                                \
-    <Property name='DisplayName' type='string' value='Grayscale'/>        \
-    <Property name='Author'      type='string' value='The Wine Project'/> \
-    <Property name='Category'    type='string' value='Stub'/>             \
-    <Property name='Description' type='string' value='Grayscale'/>        \
-    <Inputs >                                                             \
-      <Input name='Source'/>                                              \
-    </Inputs>                                                             \
-  </Effect>";
-
 /* Built-in effects without an implementation: the effect can be created and configured, as on Windows. Drawing it
  * is not implemented, see d2d_device_context_DrawImage(). */
 #define D2D_STUB_EFFECT_HEAD(name) \
@@ -1100,43 +1011,334 @@ L"<?xml version='1.0'?>                                                   \
 #define D2D_STUB_EFFECT(var, name, inputs) \
     static const WCHAR var[] = D2D_STUB_EFFECT_HEAD(name) inputs L"</Effect>"
 
-D2D_STUB_EFFECT(arithmetic_composite_description, L"Arithmetic Composite", D2D_STUB_INPUT2);
+/* Built-in effects: property names, types and defaults as documented. Properties of effects that are not drawn
+ * are stored but have no effect. */
+static const WCHAR _2d_affine_transform_description[] = D2D_STUB_EFFECT_HEAD(L"2D Affine Transform") D2D_STUB_INPUT1
+        L"<Property name='InterpolationMode' type='enum' value='1'/>"
+        L"<Property name='BorderMode' type='enum' value='0'/>"
+        L"<Property name='TransformMatrix' type='matrix3x2' value='(1,0,0,1,0,0)'/>"
+        L"<Property name='Sharpness' type='float' value='0'/>"
+        L"</Effect>";
+
+static const WCHAR _3d_perspective_transform_description[] = D2D_STUB_EFFECT_HEAD(L"3D Perspective Transform") D2D_STUB_INPUT1
+        L"<Property name='InterpolationMode' type='enum' value='1'/>"
+        L"<Property name='BorderMode' type='enum' value='0'/>"
+        L"<Property name='Depth' type='float' value='1000'/>"
+        L"<Property name='PerspectiveOrigin' type='vector2' value='(0,0)'/>"
+        L"<Property name='LocalOffset' type='vector3' value='(0,0,0)'/>"
+        L"<Property name='GlobalOffset' type='vector3' value='(0,0,0)'/>"
+        L"<Property name='RotationOrigin' type='vector3' value='(0,0,0)'/>"
+        L"<Property name='Rotation' type='vector3' value='(0,0,0)'/>"
+        L"</Effect>";
+
+static const WCHAR _3d_transform_description[] = D2D_STUB_EFFECT_HEAD(L"3D Transform") D2D_STUB_INPUT1
+        L"<Property name='InterpolationMode' type='enum' value='1'/>"
+        L"<Property name='BorderMode' type='enum' value='0'/>"
+        L"<Property name='TransformMatrix' type='matrix4x4' value='(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)'/>"
+        L"</Effect>";
+
+static const WCHAR arithmetic_composite_description[] = D2D_STUB_EFFECT_HEAD(L"Arithmetic Composite") D2D_STUB_INPUT2
+        L"<Property name='Coefficients' type='vector4' value='(1,0,0,0)'/>"
+        L"<Property name='ClampOutput' type='bool' value='false'/>"
+        L"</Effect>";
+
 static const WCHAR atlas_description[] = D2D_STUB_EFFECT_HEAD(L"Atlas") D2D_STUB_INPUT1
-        L"<Property name='InputRect' type='vector4' value='(0,0,16777216,16777216)'/>"
-        L"<Property name='InputPaddingRect' type='vector4' value='(0,0,0,0)'/></Effect>";
-D2D_STUB_EFFECT(bitmap_source_description, L"Bitmap Source", D2D_STUB_INPUT0);
-D2D_STUB_EFFECT(blend_description, L"Blend", D2D_STUB_INPUT2);
-D2D_STUB_EFFECT(border_description, L"Border", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(brightness_description, L"Brightness", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(color_management_description, L"Color Management", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(color_matrix_description, L"Color Matrix", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(convolve_matrix_description, L"Convolve Matrix", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(directional_blur_description, L"Directional Blur", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(discrete_transfer_description, L"Discrete Transfer", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(displacement_map_description, L"Displacement Map", D2D_STUB_INPUT2);
-D2D_STUB_EFFECT(distant_diffuse_description, L"Distant Diffuse", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(distant_specular_description, L"Distant Specular", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(dpi_compensation_description, L"DPI Compensation", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(flood_description, L"Flood", D2D_STUB_INPUT0);
-D2D_STUB_EFFECT(gamma_transfer_description, L"Gamma Transfer", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(gaussian_blur_description, L"Gaussian Blur", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(scale_description, L"Scale", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(histogram_description, L"Histogram", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(hue_rotation_description, L"Hue Rotation", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(linear_transfer_description, L"Linear Transfer", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(luminance_to_alpha_description, L"Luminance To Alpha", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(morphology_description, L"Morphology", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(opacity_metadata_description, L"Opacity Metadata", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(point_diffuse_description, L"Point Diffuse", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(point_specular_description, L"Point Specular", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(premultiply_description, L"Premultiply", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(saturation_description, L"Saturation", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(spot_diffuse_description, L"Spot Diffuse", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(spot_specular_description, L"Spot Specular", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(table_transfer_description, L"Table Transfer", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(tile_description, L"Tile", D2D_STUB_INPUT1);
-D2D_STUB_EFFECT(turbulence_description, L"Turbulence", D2D_STUB_INPUT0);
-D2D_STUB_EFFECT(unpremultiply_description, L"Unpremultiply", D2D_STUB_INPUT1);
+        L"<Property name='InputRect' type='vector4' value='(0,0,inf,inf)'/>"
+        L"<Property name='InputPaddingRect' type='vector4' value='(0,0,inf,inf)'/>"
+        L"</Effect>";
+
+static const WCHAR bitmap_source_description[] = D2D_STUB_EFFECT_HEAD(L"Bitmap Source") D2D_STUB_INPUT0
+        L"<Property name='WicBitmapSource' type='iunknown'/>"
+        L"<Property name='Scale' type='vector2' value='(1,1)'/>"
+        L"<Property name='InterpolationMode' type='enum' value='1'/>"
+        L"<Property name='EnableDPICorrection' type='bool' value='false'/>"
+        L"<Property name='AlphaMode' type='enum' value='1'/>"
+        L"<Property name='Orientation' type='enum' value='1'/>"
+        L"</Effect>";
+
+static const WCHAR blend_description[] = D2D_STUB_EFFECT_HEAD(L"Blend") D2D_STUB_INPUT2
+        L"<Property name='Mode' type='enum' value='0'/>"
+        L"</Effect>";
+
+static const WCHAR border_description[] = D2D_STUB_EFFECT_HEAD(L"Border") D2D_STUB_INPUT1
+        L"<Property name='EdgeModeX' type='enum' value='0'/>"
+        L"<Property name='EdgeModeY' type='enum' value='0'/>"
+        L"</Effect>";
+
+static const WCHAR brightness_description[] = D2D_STUB_EFFECT_HEAD(L"Brightness") D2D_STUB_INPUT1
+        L"<Property name='WhitePoint' type='vector2' value='(1,1)'/>"
+        L"<Property name='BlackPoint' type='vector2' value='(0,0)'/>"
+        L"</Effect>";
+
+static const WCHAR color_management_description[] = D2D_STUB_EFFECT_HEAD(L"Color Management") D2D_STUB_INPUT1
+        L"<Property name='SourceColorContext' type='colorcontext'/>"
+        L"<Property name='SourceRenderingIntent' type='enum' value='0'/>"
+        L"<Property name='DestinationColorContext' type='colorcontext'/>"
+        L"<Property name='DestinationRenderingIntent' type='enum' value='0'/>"
+        L"<Property name='AlphaMode' type='enum' value='1'/>"
+        L"<Property name='Quality' type='enum' value='1'/>"
+        L"</Effect>";
+
+static const WCHAR color_matrix_description[] = D2D_STUB_EFFECT_HEAD(L"Color Matrix") D2D_STUB_INPUT1
+        L"<Property name='ColorMatrix' type='matrix5x4' value='(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0)'/>"
+        L"<Property name='AlphaMode' type='enum' value='1'/>"
+        L"<Property name='ClampOutput' type='bool' value='false'/>"
+        L"</Effect>";
+
+static const WCHAR convolve_matrix_description[] = D2D_STUB_EFFECT_HEAD(L"Convolve Matrix") D2D_STUB_INPUT1
+        L"<Property name='KernelUnitLength' type='vector2' value='(1,1)'/>"
+        L"<Property name='ScaleMode' type='enum' value='1'/>"
+        L"<Property name='KernelSizeX' type='uint32' value='3'/>"
+        L"<Property name='KernelSizeY' type='uint32' value='3'/>"
+        L"<Property name='KernelMatrix' type='blob'/>"
+        L"<Property name='Divisor' type='float' value='1'/>"
+        L"<Property name='Bias' type='float' value='0'/>"
+        L"<Property name='KernelOffset' type='vector2' value='(0,0)'/>"
+        L"<Property name='PreserveAlpha' type='bool' value='false'/>"
+        L"<Property name='BorderMode' type='enum' value='0'/>"
+        L"<Property name='ClampOutput' type='bool' value='false'/>"
+        L"</Effect>";
+
+static const WCHAR directional_blur_description[] = D2D_STUB_EFFECT_HEAD(L"Directional Blur") D2D_STUB_INPUT1
+        L"<Property name='StandardDeviation' type='float' value='3'/>"
+        L"<Property name='Angle' type='float' value='0'/>"
+        L"<Property name='Optimization' type='enum' value='1'/>"
+        L"<Property name='BorderMode' type='enum' value='0'/>"
+        L"</Effect>";
+
+static const WCHAR discrete_transfer_description[] = D2D_STUB_EFFECT_HEAD(L"Discrete Transfer") D2D_STUB_INPUT1
+        L"<Property name='RedTable' type='blob'/>"
+        L"<Property name='RedDisable' type='bool' value='false'/>"
+        L"<Property name='GreenTable' type='blob'/>"
+        L"<Property name='GreenDisable' type='bool' value='false'/>"
+        L"<Property name='BlueTable' type='blob'/>"
+        L"<Property name='BlueDisable' type='bool' value='false'/>"
+        L"<Property name='AlphaTable' type='blob'/>"
+        L"<Property name='AlphaDisable' type='bool' value='false'/>"
+        L"<Property name='ClampOutput' type='bool' value='false'/>"
+        L"</Effect>";
+
+static const WCHAR displacement_map_description[] = D2D_STUB_EFFECT_HEAD(L"Displacement Map") D2D_STUB_INPUT2
+        L"<Property name='Scale' type='float' value='0'/>"
+        L"<Property name='XChannelSelect' type='enum' value='3'/>"
+        L"<Property name='YChannelSelect' type='enum' value='3'/>"
+        L"</Effect>";
+
+static const WCHAR distant_diffuse_description[] = D2D_STUB_EFFECT_HEAD(L"Distant Diffuse") D2D_STUB_INPUT1
+        L"<Property name='Azimuth' type='float' value='0'/>"
+        L"<Property name='Elevation' type='float' value='0'/>"
+        L"<Property name='DiffuseConstant' type='float' value='1'/>"
+        L"<Property name='SurfaceScale' type='float' value='1'/>"
+        L"<Property name='Color' type='vector3' value='(1,1,1)'/>"
+        L"<Property name='KernelUnitLength' type='vector2' value='(1,1)'/>"
+        L"<Property name='ScaleMode' type='enum' value='1'/>"
+        L"</Effect>";
+
+static const WCHAR distant_specular_description[] = D2D_STUB_EFFECT_HEAD(L"Distant Specular") D2D_STUB_INPUT1
+        L"<Property name='Azimuth' type='float' value='0'/>"
+        L"<Property name='Elevation' type='float' value='0'/>"
+        L"<Property name='SpecularExponent' type='float' value='1'/>"
+        L"<Property name='SpecularConstant' type='float' value='1'/>"
+        L"<Property name='SurfaceScale' type='float' value='1'/>"
+        L"<Property name='Color' type='vector3' value='(1,1,1)'/>"
+        L"<Property name='KernelUnitLength' type='vector2' value='(1,1)'/>"
+        L"<Property name='ScaleMode' type='enum' value='1'/>"
+        L"</Effect>";
+
+static const WCHAR dpi_compensation_description[] = D2D_STUB_EFFECT_HEAD(L"DPI Compensation") D2D_STUB_INPUT1
+        L"<Property name='InterpolationMode' type='enum' value='1'/>"
+        L"<Property name='BorderMode' type='enum' value='0'/>"
+        L"<Property name='InputDpi' type='vector2' value='(96,96)'/>"
+        L"</Effect>";
+
+static const WCHAR flood_description[] = D2D_STUB_EFFECT_HEAD(L"Flood") D2D_STUB_INPUT0
+        L"<Property name='Color' type='vector4' value='(0,0,0,1)'/>"
+        L"</Effect>";
+
+static const WCHAR gamma_transfer_description[] = D2D_STUB_EFFECT_HEAD(L"Gamma Transfer") D2D_STUB_INPUT1
+        L"<Property name='RedAmplitude' type='float' value='1'/>"
+        L"<Property name='RedExponent' type='float' value='1'/>"
+        L"<Property name='RedOffset' type='float' value='0'/>"
+        L"<Property name='RedDisable' type='bool' value='false'/>"
+        L"<Property name='GreenAmplitude' type='float' value='1'/>"
+        L"<Property name='GreenExponent' type='float' value='1'/>"
+        L"<Property name='GreenOffset' type='float' value='0'/>"
+        L"<Property name='GreenDisable' type='bool' value='false'/>"
+        L"<Property name='BlueAmplitude' type='float' value='1'/>"
+        L"<Property name='BlueExponent' type='float' value='1'/>"
+        L"<Property name='BlueOffset' type='float' value='0'/>"
+        L"<Property name='BlueDisable' type='bool' value='false'/>"
+        L"<Property name='AlphaAmplitude' type='float' value='1'/>"
+        L"<Property name='AlphaExponent' type='float' value='1'/>"
+        L"<Property name='AlphaOffset' type='float' value='0'/>"
+        L"<Property name='AlphaDisable' type='bool' value='false'/>"
+        L"<Property name='ClampOutput' type='bool' value='false'/>"
+        L"</Effect>";
+
+static const WCHAR gaussian_blur_description[] = D2D_STUB_EFFECT_HEAD(L"Gaussian Blur") D2D_STUB_INPUT1
+        L"<Property name='StandardDeviation' type='float' value='3'/>"
+        L"<Property name='Optimization' type='enum' value='1'/>"
+        L"<Property name='BorderMode' type='enum' value='0'/>"
+        L"</Effect>";
+
+static const WCHAR scale_description[] = D2D_STUB_EFFECT_HEAD(L"Scale") D2D_STUB_INPUT1
+        L"<Property name='Scale' type='vector2' value='(1,1)'/>"
+        L"<Property name='CenterPoint' type='vector2' value='(0,0)'/>"
+        L"<Property name='InterpolationMode' type='enum' value='1'/>"
+        L"<Property name='BorderMode' type='enum' value='0'/>"
+        L"<Property name='Sharpness' type='float' value='0'/>"
+        L"</Effect>";
+
+static const WCHAR histogram_description[] = D2D_STUB_EFFECT_HEAD(L"Histogram") D2D_STUB_INPUT1
+        L"<Property name='NumBins' type='uint32' value='256'/>"
+        L"<Property name='ChannelSelect' type='enum' value='0'/>"
+        L"<Property name='HistogramOutput' type='blob'/>"
+        L"</Effect>";
+
+static const WCHAR hue_rotation_description[] = D2D_STUB_EFFECT_HEAD(L"Hue Rotation") D2D_STUB_INPUT1
+        L"<Property name='Angle' type='float' value='0'/>"
+        L"</Effect>";
+
+static const WCHAR linear_transfer_description[] = D2D_STUB_EFFECT_HEAD(L"Linear Transfer") D2D_STUB_INPUT1
+        L"<Property name='RedYIntercept' type='float' value='0'/>"
+        L"<Property name='RedSlope' type='float' value='1'/>"
+        L"<Property name='RedDisable' type='bool' value='false'/>"
+        L"<Property name='GreenYIntercept' type='float' value='0'/>"
+        L"<Property name='GreenSlope' type='float' value='1'/>"
+        L"<Property name='GreenDisable' type='bool' value='false'/>"
+        L"<Property name='BlueYIntercept' type='float' value='0'/>"
+        L"<Property name='BlueSlope' type='float' value='1'/>"
+        L"<Property name='BlueDisable' type='bool' value='false'/>"
+        L"<Property name='AlphaYIntercept' type='float' value='0'/>"
+        L"<Property name='AlphaSlope' type='float' value='1'/>"
+        L"<Property name='AlphaDisable' type='bool' value='false'/>"
+        L"<Property name='ClampOutput' type='bool' value='false'/>"
+        L"</Effect>";
+
+static const WCHAR luminance_to_alpha_description[] = D2D_STUB_EFFECT_HEAD(L"Luminance To Alpha") D2D_STUB_INPUT1
+        L"</Effect>";
+
+static const WCHAR morphology_description[] = D2D_STUB_EFFECT_HEAD(L"Morphology") D2D_STUB_INPUT1
+        L"<Property name='Mode' type='enum' value='0'/>"
+        L"<Property name='Width' type='uint32' value='1'/>"
+        L"<Property name='Height' type='uint32' value='1'/>"
+        L"</Effect>";
+
+static const WCHAR opacity_metadata_description[] = D2D_STUB_EFFECT_HEAD(L"Opacity Metadata") D2D_STUB_INPUT1
+        L"<Property name='InputOpaqueRect' type='vector4' value='(-inf,-inf,inf,inf)'/>"
+        L"</Effect>";
+
+static const WCHAR point_diffuse_description[] = D2D_STUB_EFFECT_HEAD(L"Point Diffuse") D2D_STUB_INPUT1
+        L"<Property name='LightPosition' type='vector3' value='(0,0,0)'/>"
+        L"<Property name='DiffuseConstant' type='float' value='1'/>"
+        L"<Property name='SurfaceScale' type='float' value='1'/>"
+        L"<Property name='Color' type='vector3' value='(1,1,1)'/>"
+        L"<Property name='KernelUnitLength' type='vector2' value='(1,1)'/>"
+        L"<Property name='ScaleMode' type='enum' value='1'/>"
+        L"</Effect>";
+
+static const WCHAR point_specular_description[] = D2D_STUB_EFFECT_HEAD(L"Point Specular") D2D_STUB_INPUT1
+        L"<Property name='LightPosition' type='vector3' value='(0,0,0)'/>"
+        L"<Property name='SpecularExponent' type='float' value='1'/>"
+        L"<Property name='SpecularConstant' type='float' value='1'/>"
+        L"<Property name='SurfaceScale' type='float' value='1'/>"
+        L"<Property name='Color' type='vector3' value='(1,1,1)'/>"
+        L"<Property name='KernelUnitLength' type='vector2' value='(1,1)'/>"
+        L"<Property name='ScaleMode' type='enum' value='1'/>"
+        L"</Effect>";
+
+static const WCHAR premultiply_description[] = D2D_STUB_EFFECT_HEAD(L"Premultiply") D2D_STUB_INPUT1
+        L"</Effect>";
+
+static const WCHAR saturation_description[] = D2D_STUB_EFFECT_HEAD(L"Saturation") D2D_STUB_INPUT1
+        L"<Property name='Saturation' type='float' value='0.5'/>"
+        L"</Effect>";
+
+static const WCHAR spot_diffuse_description[] = D2D_STUB_EFFECT_HEAD(L"Spot Diffuse") D2D_STUB_INPUT1
+        L"<Property name='LightPosition' type='vector3' value='(0,0,0)'/>"
+        L"<Property name='PointsAt' type='vector3' value='(0,0,0)'/>"
+        L"<Property name='Focus' type='float' value='1'/>"
+        L"<Property name='LimitingConeAngle' type='float' value='90'/>"
+        L"<Property name='DiffuseConstant' type='float' value='1'/>"
+        L"<Property name='SurfaceScale' type='float' value='1'/>"
+        L"<Property name='Color' type='vector3' value='(1,1,1)'/>"
+        L"<Property name='KernelUnitLength' type='vector2' value='(1,1)'/>"
+        L"<Property name='ScaleMode' type='enum' value='1'/>"
+        L"</Effect>";
+
+static const WCHAR spot_specular_description[] = D2D_STUB_EFFECT_HEAD(L"Spot Specular") D2D_STUB_INPUT1
+        L"<Property name='LightPosition' type='vector3' value='(0,0,0)'/>"
+        L"<Property name='PointsAt' type='vector3' value='(0,0,0)'/>"
+        L"<Property name='Focus' type='float' value='1'/>"
+        L"<Property name='LimitingConeAngle' type='float' value='90'/>"
+        L"<Property name='SpecularExponent' type='float' value='1'/>"
+        L"<Property name='SpecularConstant' type='float' value='1'/>"
+        L"<Property name='SurfaceScale' type='float' value='1'/>"
+        L"<Property name='Color' type='vector3' value='(1,1,1)'/>"
+        L"<Property name='KernelUnitLength' type='vector2' value='(1,1)'/>"
+        L"<Property name='ScaleMode' type='enum' value='1'/>"
+        L"</Effect>";
+
+static const WCHAR table_transfer_description[] = D2D_STUB_EFFECT_HEAD(L"Table Transfer") D2D_STUB_INPUT1
+        L"<Property name='RedTable' type='blob'/>"
+        L"<Property name='RedDisable' type='bool' value='false'/>"
+        L"<Property name='GreenTable' type='blob'/>"
+        L"<Property name='GreenDisable' type='bool' value='false'/>"
+        L"<Property name='BlueTable' type='blob'/>"
+        L"<Property name='BlueDisable' type='bool' value='false'/>"
+        L"<Property name='AlphaTable' type='blob'/>"
+        L"<Property name='AlphaDisable' type='bool' value='false'/>"
+        L"<Property name='ClampOutput' type='bool' value='false'/>"
+        L"</Effect>";
+
+static const WCHAR tile_description[] = D2D_STUB_EFFECT_HEAD(L"Tile") D2D_STUB_INPUT1
+        L"<Property name='Rect' type='vector4' value='(0,0,100,100)'/>"
+        L"</Effect>";
+
+static const WCHAR turbulence_description[] = D2D_STUB_EFFECT_HEAD(L"Turbulence") D2D_STUB_INPUT0
+        L"<Property name='Offset' type='vector2' value='(0,0)'/>"
+        L"<Property name='Size' type='vector2' value='(512,512)'/>"
+        L"<Property name='BaseFrequency' type='vector2' value='(0.00999999978,0.00999999978)'/>"
+        L"<Property name='NumOctaves' type='uint32' value='1'/>"
+        L"<Property name='Seed' type='int32' value='0'/>"
+        L"<Property name='Noise' type='enum' value='0'/>"
+        L"<Property name='Stitchable' type='bool' value='false'/>"
+        L"</Effect>";
+
+static const WCHAR unpremultiply_description[] = D2D_STUB_EFFECT_HEAD(L"Unpremultiply") D2D_STUB_INPUT1
+        L"</Effect>";
+
+static const WCHAR composite_description[] = D2D_STUB_EFFECT_HEAD(L"Composite") L"<Inputs minimum='1' maximum='0xffffffff'><Input name='Source1'/><Input name='Source2'/></Inputs>"
+        L"<Property name='Mode' type='enum' value='0'/>"
+        L"</Effect>";
+
+static const WCHAR crop_description[] = D2D_STUB_EFFECT_HEAD(L"Crop") D2D_STUB_INPUT1
+        L"<Property name='Rect' type='vector4' value='(-inf,-inf,inf,inf)'/>"
+        L"<Property name='BorderMode' type='enum' value='0'/>"
+        L"</Effect>";
+
+static const WCHAR shadow_description[] = D2D_STUB_EFFECT_HEAD(L"Shadow") D2D_STUB_INPUT1
+        L"<Property name='BlurStandardDeviation' type='float' value='3'/>"
+        L"<Property name='Color' type='vector4' value='(0,0,0,1)'/>"
+        L"<Property name='Optimization' type='enum' value='1'/>"
+        L"</Effect>";
+
+static const WCHAR grayscale_description[] = D2D_STUB_EFFECT_HEAD(L"Grayscale") D2D_STUB_INPUT1
+        L"</Effect>";
+
+static const WCHAR highlights_shadows_description[] = D2D_STUB_EFFECT_HEAD(L"Highlights And Shadows") D2D_STUB_INPUT1
+        L"<Property name='Highlights' type='float' value='0'/>"
+        L"<Property name='Shadows' type='float' value='0'/>"
+        L"<Property name='Clarity' type='float' value='0'/>"
+        L"<Property name='InputGamma' type='enum' value='1'/>"
+        L"<Property name='MaskBlurRadius' type='float' value='1.25'/>"
+        L"</Effect>";
+
+static const WCHAR ycbcr_description[] = D2D_STUB_EFFECT_HEAD(L"YCbCr") D2D_STUB_INPUT2
+        L"<Property name='ChromaSubsampling' type='enum' value='0'/>"
+        L"<Property name='TransformMatrix' type='matrix3x2' value='(1,0,0,1,0,0)'/>"
+        L"<Property name='InterpolationMode' type='enum' value='1'/>"
+        L"</Effect>";
 
 void d2d_effects_init_builtins(struct d2d_factory *factory)
 {
@@ -1189,6 +1391,8 @@ void d2d_effects_init_builtins(struct d2d_factory *factory)
         { &CLSID_D2D1Crop, crop_description },
         { &CLSID_D2D1Shadow, shadow_description },
         { &CLSID_D2D1Grayscale, grayscale_description },
+        { &CLSID_D2D1HighlightsShadows, highlights_shadows_description },
+        { &CLSID_D2D1YCbCr, ycbcr_description },
     };
     unsigned int i;
     HRESULT hr;
@@ -1340,6 +1544,10 @@ static HRESULT d2d_effect_properties_internal_add(struct d2d_effect_properties *
                     _uint32 = wcstoul(value, NULL, 10);
                     src = &_uint32;
                     break;
+                case D2D1_PROPERTY_TYPE_FLOAT:
+                    _vec[0] = wcstof(value, NULL);
+                    src = _vec;
+                    break;
                 case D2D1_PROPERTY_TYPE_BOOL:
                     if (!wcscmp(value, L"true")) _bool = TRUE;
                     else if (!wcscmp(value, L"false")) _bool = FALSE;
@@ -1401,6 +1609,7 @@ static HRESULT d2d_effect_duplicate_properties(struct d2d_effect *effect,
 
     *dst = *src;
     dst->effect = effect;
+    dst->builtin = FALSE;
 
     if (!(dst->data.ptr = malloc(dst->data.size)))
         return E_OUTOFMEMORY;
@@ -1504,6 +1713,10 @@ static HRESULT d2d_effect_property_get_value(const struct d2d_effect_properties 
         return E_INVALIDARG;
     }
 
+    /* The registration of a built-in effect has no values, they read as zero. */
+    if (!effect && properties->builtin && prop->index < 0x80000000 && prop->type != D2D1_PROPERTY_TYPE_STRING)
+        return S_OK;
+
     if (prop->get_function)
         return prop->get_function((IUnknown *)effect->impl, value, size, &actual_size);
 
@@ -1529,14 +1742,76 @@ HRESULT d2d_effect_property_get_uint32_value(const struct d2d_effect_properties 
             (BYTE *)value, sizeof(*value));
 }
 
+/* Value checks of the properties of built-in effects. Enumerations outside their range are rejected with
+ * E_INVALIDARG and the value stays; the standard deviation of the blurs is clamped to [0, 250]. Measured on Windows
+ * for Gaussian blur, Blend, Composite, Color matrix, Crop and Shadow; the other enumerations use the documented
+ * ranges. */
+static HRESULT d2d_builtin_effect_validate(const CLSID *id, UINT32 index, D2D1_PROPERTY_TYPE type, BYTE *value)
+{
+    static const struct
+    {
+        const CLSID *id;
+        UINT32 index;
+        UINT32 min, max;
+    }
+    enums[] =
+    {
+        { &CLSID_D2D12DAffineTransform, 0, 0, 5 },
+        { &CLSID_D2D12DAffineTransform, 1, 0, 1 },
+        { &CLSID_D2D13DPerspectiveTransform, 0, 0, 4 },
+        { &CLSID_D2D13DPerspectiveTransform, 1, 0, 1 },
+        { &CLSID_D2D13DTransform, 0, 0, 4 },
+        { &CLSID_D2D13DTransform, 1, 0, 1 },
+        { &CLSID_D2D1Blend, 0, 0, 25 },
+        { &CLSID_D2D1Composite, 0, 0, 12 },
+        { &CLSID_D2D1ColorMatrix, 1, 1, 2 },
+        { &CLSID_D2D1Crop, 1, 0, 1 },
+        { &CLSID_D2D1GaussianBlur, 1, 0, 2 },
+        { &CLSID_D2D1GaussianBlur, 2, 0, 1 },
+        { &CLSID_D2D1Shadow, 2, 0, 2 },
+        { &CLSID_D2D1Scale, 2, 0, 5 },
+        { &CLSID_D2D1Scale, 3, 0, 1 },
+    };
+    unsigned int i;
+
+    if (type == D2D1_PROPERTY_TYPE_ENUM)
+    {
+        UINT32 v;
+
+        memcpy(&v, value, sizeof(v));
+        for (i = 0; i < ARRAY_SIZE(enums); ++i)
+        {
+            if (IsEqualGUID(id, enums[i].id) && index == enums[i].index)
+                return v >= enums[i].min && v <= enums[i].max ? S_OK : E_INVALIDARG;
+        }
+    }
+    else if (type == D2D1_PROPERTY_TYPE_FLOAT && index == 0
+            && (IsEqualGUID(id, &CLSID_D2D1GaussianBlur) || IsEqualGUID(id, &CLSID_D2D1Shadow)
+            || IsEqualGUID(id, &CLSID_D2D1DirectionalBlur)))
+    {
+        float v;
+
+        memcpy(&v, value, sizeof(v));
+        if (!(v >= 0.0f)) v = 0.0f;
+        if (v > 250.0f) v = 250.0f;
+        memcpy(value, &v, sizeof(v));
+    }
+
+    return S_OK;
+}
+
 static HRESULT d2d_effect_property_set_value(struct d2d_effect_properties *properties,
         struct d2d_effect_property *prop, D2D1_PROPERTY_TYPE type, const BYTE *value, UINT32 size)
 {
     struct d2d_effect *effect = properties->effect;
+    BYTE buffer[80];
+    HRESULT hr;
+
     if (prop->readonly || !effect) return E_INVALIDARG;
     if (type != D2D1_PROPERTY_TYPE_UNKNOWN && prop->type != type) return E_INVALIDARG;
     if (prop->get_function && !prop->set_function) return E_INVALIDARG;
-    if (prop->index < 0x80000000 && !prop->set_function) return E_INVALIDARG;
+    /* Properties of built-in effects have no binding functions, the value is stored. */
+    if (prop->index < 0x80000000 && !prop->set_function && !effect->builtin) return E_INVALIDARG;
 
     if (prop->set_function)
         return prop->set_function((IUnknown *)effect->impl, value, size);
@@ -1547,8 +1822,21 @@ static HRESULT d2d_effect_property_set_value(struct d2d_effect_properties *prope
     {
         case D2D1_PROPERTY_TYPE_BOOL:
         case D2D1_PROPERTY_TYPE_UINT32:
+        case D2D1_PROPERTY_TYPE_INT32:
         case D2D1_PROPERTY_TYPE_ENUM:
-            memcpy(properties->data.ptr + prop->data.offset, value, size);
+        case D2D1_PROPERTY_TYPE_FLOAT:
+        case D2D1_PROPERTY_TYPE_VECTOR2:
+        case D2D1_PROPERTY_TYPE_VECTOR3:
+        case D2D1_PROPERTY_TYPE_VECTOR4:
+        case D2D1_PROPERTY_TYPE_MATRIX_3X2:
+        case D2D1_PROPERTY_TYPE_MATRIX_4X3:
+        case D2D1_PROPERTY_TYPE_MATRIX_4X4:
+        case D2D1_PROPERTY_TYPE_MATRIX_5X4:
+            if (size > sizeof(buffer)) return E_INVALIDARG;
+            memcpy(buffer, value, size);
+            if (effect->builtin && FAILED(hr = d2d_builtin_effect_validate(&effect->id, prop->index, prop->type, buffer)))
+                return hr;
+            memcpy(properties->data.ptr + prop->data.offset, buffer, size);
             break;
         default:
             FIXME("Unhandled type %u.\n", prop->type);
@@ -2280,6 +2568,34 @@ static inline struct d2d_effect *impl_from_ID2D1Image(ID2D1Image *iface)
     return CONTAINING_RECORD(iface, struct d2d_effect, ID2D1Image_iface);
 }
 
+static const ID2D1ImageVtbl d2d_effect_image_vtbl;
+
+struct d2d_effect *unsafe_impl_from_ID2D1Image(ID2D1Image *iface)
+{
+    if (!iface || iface->lpVtbl != &d2d_effect_image_vtbl)
+        return NULL;
+    return impl_from_ID2D1Image(iface);
+}
+
+BOOL d2d_effect_get_builtin_value(const struct d2d_effect *effect, UINT32 index, void *value, UINT32 size)
+{
+    const struct d2d_effect_properties *props = &effect->properties;
+    unsigned int i;
+
+    for (i = 0; i < props->count; ++i)
+    {
+        const struct d2d_effect_property *prop = &props->properties[i];
+
+        if (prop->index != index || prop->type == D2D1_PROPERTY_TYPE_STRING || prop->type == D2D1_PROPERTY_TYPE_BLOB
+                || prop->get_function || prop->size != size)
+            continue;
+        memcpy(value, props->data.ptr + prop->data.offset, size);
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
 static HRESULT STDMETHODCALLTYPE d2d_effect_image_QueryInterface(ID2D1Image *iface, REFIID iid, void **out)
 {
     struct d2d_effect *effect = impl_from_ID2D1Image(iface);
@@ -2793,6 +3109,8 @@ HRESULT d2d_effect_create(struct d2d_device_context *context, const CLSID *effec
     object->ID2D1Image_iface.lpVtbl = &d2d_effect_image_vtbl;
     object->refcount = 1;
     object->effect_context = effect_context;
+    object->id = *effect_id;
+    object->builtin = reg->builtin;
 
     /* Create properties */
     d2d_effect_duplicate_properties(object, &object->properties, reg->properties);
