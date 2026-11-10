@@ -73,5 +73,6 @@ target_include_directories(usbhub3 PRIVATE ${REACTOS_SOURCE_DIR}/sdk/include/ucx
 target_link_libraries(usbhub3 usbdex ntoskrnl_vista libcntpr ${PSEH_LIB})
 add_importlibs(usbhub3 wdfldr usbd ntoskrnl hal)
 add_cd_file(TARGET usbhub3 DESTINATION reactos/system32/drivers NO_CAB FOR all)
-add_driver_inf(usbhub3 usbhub3.inf)
+# NITRO: INF not installed, see boot/bootdata/hivesys.inf (USB-xhci-0xCA-bugcheck-upstream-stack)
+#add_driver_inf(usbhub3 usbhub3.inf)
 add_registry_inf(usbhub3_reg.inf)
