@@ -162,8 +162,15 @@ BOOLEAN
 NTAPI
 MiIsPfnFree(IN PMMPFN Pfn1)
 {
-    /* Must be a free or zero page, with no references, linked */
-    return ((Pfn1->u3.e1.PageLocation <= StandbyPageList) &&
+    /*
+     * Must be a free or zero page, with no references, linked. Not a standby page: with NitroPager the
+     * standby lists hold clean private pages that a transition PTE of their process still names; only the
+     * repurpose paths may take one (they give the PTE its page-file copy back). Taken here, the page went
+     * to a driver while its process could still fault it back, and MiUnlinkFreeOrZeroedPage, which knows
+     * only the free and zeroed lists, indexed MmFreePagesByColor past its end and followed the page's
+     * OriginalPte as a page number: a stray write, or a kernel #GP on a non-canonical address.
+     */
+    return ((Pfn1->u3.e1.PageLocation <= FreePageList) &&
             (Pfn1->u1.Flink) &&
             (Pfn1->u2.Blink) &&
             !(Pfn1->u3.e2.ReferenceCount));
@@ -246,6 +253,18 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
     // This is where the page array starts....
     //
     MdlPage = (PPFN_NUMBER)(Mdl + 1);
+
+    /*
+     * NitroPager: a search of a physical range takes free and zeroed pages only (MiIsPfnFree), and memory
+     * can be short of them because clean private pages wait on standby: those go back to the free list
+     * first (their data is in the paging file). The whole range is served by MiRemoveAnyPage below.
+     */
+    if (((LowPage != 0) || (HighPage != MmHighestPhysicalPage)) &&
+        (MiNitroPagerMode != 0) && (MmTransitionPrivatePages != 0) &&
+        (MiGetFreeOrZeroedPageCount() < PageCount))
+    {
+        MiPurgePrivateStandbyPages();
+    }
 
     //
     // Lock the PFN database

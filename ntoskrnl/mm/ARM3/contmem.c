@@ -450,6 +450,21 @@ MiAllocateContiguousMemory(IN SIZE_T NumberOfBytes,
                                          BoundaryPfn,
                                          SizeInPages,
                                          CacheType);
+
+    /*
+     * NitroPager: the search takes free and zeroed pages only, and memory can be short of them because
+     * clean private pages wait on standby. Those go back to the free list (their data is in the paging
+     * file) and the search runs once more.
+     */
+    if (!BaseAddress && (MiNitroPagerMode != 0) && (MmTransitionPrivatePages != 0))
+    {
+        MiPurgePrivateStandbyPages();
+        BaseAddress = MiFindContiguousMemory(LowestAcceptablePfn,
+                                             HighestAcceptablePfn,
+                                             BoundaryPfn,
+                                             SizeInPages,
+                                             CacheType);
+    }
     if (!BaseAddress)
     {
         DPRINT1("Unable to allocate contiguous memory for %d bytes (%d pages), out of memory!\n", NumberOfBytes, SizeInPages);

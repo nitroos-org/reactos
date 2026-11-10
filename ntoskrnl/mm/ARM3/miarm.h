@@ -2749,6 +2749,11 @@ MiGetFreeOrZeroedPageCount(VOID)
 //
 extern ULONG MmTransitionPrivatePages;
 
+/* pager.c: every private standby page goes to the free list (its PTE gets its page-file copy back) */
+ULONG
+NTAPI
+MiPurgePrivateStandbyPages(VOID);
+
 /* Private standby pages go on this priority list, prototype pages stay on the default one (3) */
 #define MI_PAGER_PRIVATE_STANDBY_PRIORITY 2
 

@@ -511,8 +511,8 @@ MiRepurposeStandbyPage(VOID)
 }
 
 /* Purge: every private standby page is repurposed and goes to the free list */
-static
 ULONG
+NTAPI
 MiPurgePrivateStandbyPages(VOID)
 {
     PFN_NUMBER PageFrameIndex;
