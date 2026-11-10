@@ -6,6 +6,7 @@
  */
 
 #include "precomp.h"
+#include <winreg.h>
 
 #ifndef PW_CLIENTONLY
 #define PW_CLIENTONLY 1
@@ -646,16 +647,37 @@ static BOOL print_window(int w, UINT flags, int off)
     return ret;
 }
 
+/* NitroRedirection >= 1: win32k keeps window content in redirection surfaces, as Windows with DWM */
+static BOOL nitro_redirected(void)
+{
+    static int r = -1;
+    HKEY hKey;
+    DWORD v = 0, cb = sizeof(v);
+
+    if (r < 0)
+    {
+        r = 0;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+        {
+            if (RegQueryValueExW(hKey, L"NitroRedirection", NULL, NULL, (BYTE *)&v, &cb) == ERROR_SUCCESS && v != 0)
+                r = 1;
+            RegCloseKey(hKey);
+        }
+    }
+    return r;
+}
+
 /* a pixel of window w's own content: what WM_PAINT draws, as Windows' redirection gives */
 static void check_content(int w, int x, int y, BOOL offscreen, const char *what)
 {
     COLORREF c = pixel(x, y);
     if (offscreen)
     {
-        /* ReactOS has no redirection: off the screen, the image is the window's WM_PRINT output */
+        /* Without redirection (NitroRedirection 0): off the screen, the image is the window's WM_PRINT output */
         ok(c == color(w, COL_PAINT) || c == color(w, COL_PRINT) || (g_paintonly[w] && c == color(w, COL_ERASE)),
            "%s: %06lx is not the window's content\n", what, c);
-        todo_ros ok(c == color(w, COL_PAINT), "%s: %06lx, expected the WM_PAINT colour %06lx\n", what, c, color(w, COL_PAINT));
+        todo_ros_if(!nitro_redirected())
+        ok(c == color(w, COL_PAINT), "%s: %06lx, expected the WM_PAINT colour %06lx\n", what, c, color(w, COL_PAINT));
     }
     else
     {

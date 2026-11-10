@@ -1296,3 +1296,52 @@ GreRedirBindDC(
     return REDIRBIND_OK;
 }
 
+/* Copies cx x cy of a redirection surface, from xSrc, ySrc, to hdcDest at 0, 0 (PrintWindow) */
+BOOL
+NTAPI
+GreRedirCopyToDC(
+    _In_ PSURFACE psurf,
+    _In_ HDC hdcDest,
+    _In_ LONG xSrc,
+    _In_ LONG ySrc,
+    _In_ LONG cx,
+    _In_ LONG cy)
+{
+    HDC hdcMem;
+    PDC pdc;
+    PREGION prgn;
+    BOOL bRet = FALSE;
+
+    hdcMem = GreCreateCompatibleDC(NULL, FALSE);
+    if (!hdcMem)
+        return FALSE;
+
+    /* By pointer: the surface handle has no owner a process matches */
+    pdc = psurf ? DC_LockDc(hdcMem) : NULL;
+    if (pdc)
+    {
+        /* A reference of its own, without the one-DC mark of a selected bitmap */
+        DC_vSelectSurface(pdc, psurf);
+        pdc->dclevel.sizl = psurf->SurfObj.sizlBitmap;
+        pdc->fs |= DC_DIRTY_RAO;
+        DC_UnlockDc(pdc);
+
+        prgn = IntSysCreateRectpRgn(0, 0, psurf->SurfObj.sizlBitmap.cx, psurf->SurfObj.sizlBitmap.cy);
+        if (prgn)
+        {
+            GdiSelectVisRgn(hdcMem, prgn);
+            REGION_Delete(prgn);
+            bRet = NtGdiBitBlt(hdcDest, 0, 0, cx, cy, hdcMem, xSrc, ySrc, SRCCOPY, CLR_INVALID, 0);
+        }
+
+        pdc = DC_LockDc(hdcMem);
+        if (pdc)
+        {
+            DC_vSelectSurface(pdc, NULL);
+            DC_UnlockDc(pdc);
+        }
+    }
+    IntGdiDeleteDC(hdcMem, TRUE);
+    return bRet;
+}
+
