@@ -772,6 +772,10 @@ struct block_device { void *osdev; u64 size; unsigned int logical_block_size; st
 	int kshim_remounting; /* set by the adapter while the core switches the volume read-write */
 	struct kshim_jnl *jnl; /* metadata journal (kshim_jnl.c) while active */
 	int kshim_direct; /* nonzero while file data is written: bypasses the journal */
+	int kshim_fua; /* the device honours FUA (ngos_dev_fua): the journal's slots and COMMITTED header are written with it, in place of flushes */
+	int kshim_defer; /* set by the glue (under the volume lock) around a write-through write: a caller's buffer written directly is sent and waited for later (ngos_dev_drain) */
+	int kshim_defer_now; /* kshim_defer, for the one direct write the core is making now (a bounce buffer is never sent that way) */
+	int kshim_wt_fua; /* set by the glue (under the volume lock) while a write-through write runs: its file data goes to the device with FUA */
 	int kshim_wb_err; /* first failed write of an asynchronous bio (its completion cannot report it) */
 	unsigned long kshim_wr_failed; /* device writes that failed, all paths (unmount: commit nothing after one) */
 	int kshim_gone; /* the medium was replaced: every device read and write fails */

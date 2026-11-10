@@ -175,6 +175,8 @@ int NgCommitEx(PNG_VCB Vcb, BOOLEAN Retain)
         int R = ngc_commit_begin(Vcb->Core, Retain);
         if (R == NGC_COMMIT_IO)
         {
+            /* The slot writes go out now, in flight with the file data of the write-through write that is committed; both are waited for before the lock goes. */
+            ngc_commit_prestart(Vcb->Core);
             if (Unlock)
             {
                 NgPinUnlocked(Vcb);
@@ -190,6 +192,9 @@ int NgCommitEx(PNG_VCB Vcb, BOOLEAN Retain)
         }
         if (R != NGC_COMMIT_BUSY)
             return R;
+        /* The lock is let go: file data this thread sent must be on its way done first (readers take the lock). */
+        if (ngc_drain_data(Vcb->Core))
+            return -NGC_EIO;
         if (Unlock)
         {
             NgPinUnlocked(Vcb);
@@ -1487,7 +1492,18 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             if (Err == NG_ZGAP_DELETED || Err == NG_ZGAP_DROP)
                 Err = -NGC_EIO;
         }
+        /* The data of a write-through write goes to the device with FUA when it honours it (the journal commit that follows then needs no flush for it). */
+        if (WriteThrough)
+        {
+            ngc_set_data_fua(Vcb->Core, 1);
+            ngc_set_defer(Vcb->Core, 1);	/* the data is sent and waited for in NgCommitEx (in flight with the journal slots), or below */
+        }
         Done = Err ? Err : ngc_write(Vcb->Core, Fcb->Node, Offset.QuadPart, Length, Buffer);
+        if (WriteThrough)
+        {
+            ngc_set_defer(Vcb->Core, 0);
+            ngc_set_data_fua(Vcb->Core, 0);
+        }
         if (Done >= 0)
         {
             NgAfterChange(Vcb);
@@ -1495,6 +1511,9 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             if (WriteThrough && NgCommitEx(Vcb, TRUE))
                 Done = -NGC_EIO;
         }
+        /* Nothing sent for this write may be in flight when the lock is let go or the buffer is given back. */
+        if (WriteThrough && ngc_drain_data(Vcb->Core) && Done >= 0)
+            Done = -NGC_EIO;
         NgReleaseCore(Vcb);
         ExReleaseResourceLite(&Fcb->PagingWriteLock);
         if (ZBounce)

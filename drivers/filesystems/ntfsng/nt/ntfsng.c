@@ -871,6 +871,8 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
 #endif
     NgGlobal.PermissiveOpen = NgReadDword(RegistryPath, L"PermissiveOpen");
     NgGlobal.ForceReadOnly = NgReadDword(RegistryPath, L"ReadOnly");
+    NgGlobal.NoFua = NgReadDword(RegistryPath, L"NoFua");
+    NgGlobal.FuaAliasMB = NgReadDword(RegistryPath, L"FuaAliasMB");
     NgGlobal.Verbose = NgReadDword(RegistryPath, L"Verbose");
     /* "MountCheck": 0 or absent = after an unclean shutdown and for small MFTs, 1 = always, 2 = never. */
     i = NgReadDword(RegistryPath, L"MountCheck");

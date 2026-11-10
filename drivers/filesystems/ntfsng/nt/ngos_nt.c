@@ -267,6 +267,234 @@ static VOID NgDevIoFree(PIRP Irp, UCHAR Major, void *buf, unsigned int len, BOOL
 }
 
 /*
+ * What this driver knows about the write cache of a volume's device (nobufw2).  Fua: the device has a volatile write cache and
+ * the stack honours FUA, so a write sent with SL_WRITE_THROUGH is on the medium when it completes.  Dirty counts the plain
+ * (not FUA) writes that completed; Flushed is Dirty as it was when the newest successful flush started: every plain write
+ * that completed before that flush started is durable.  Dirty == Flushed: nothing plain is waiting for a flush.  A write
+ * still in flight is neither: it is not covered by a flush that started before it completed, and one that completes later
+ * makes Dirty move.  Entries are never removed (a mount sets its entry again); a full table means no FUA and never clean.
+ */
+#define NG_PEND_MAX 16
+struct _NG_PEND;
+
+typedef struct _NG_DEVST
+{
+    PDEVICE_OBJECT Dev;
+    volatile LONG Fua;
+    ULONGLONG Alias;            /* test only (registry FuaAliasMB): a FUA write goes to this offset above its own, see NgDevSetFua */
+    volatile LONG Dirty;
+    volatile LONG Flushed;
+    volatile LONG NPend;        /* writes started and not yet drained (all threads) */
+    volatile LONG DeferFailed;  /* a file-data write that completed later failed: the volume takes no more writes until the next mount */
+    struct _NG_PEND *Pend[NG_PEND_MAX];
+} NG_DEVST;
+
+static NG_DEVST NgDevSt[32];
+static KSPIN_LOCK NgDevStLock;
+
+static NG_DEVST *NgDevStFind(PDEVICE_OBJECT Device, BOOLEAN Create)
+{
+    KIRQL Irql;
+    ULONG i;
+    NG_DEVST *St = NULL;
+
+    for (i = 0; i < RTL_NUMBER_OF(NgDevSt); i++)
+        if (NgDevSt[i].Dev == Device)
+            return &NgDevSt[i];
+    if (!Create)
+        return NULL;
+    KeAcquireSpinLock(&NgDevStLock, &Irql);
+    for (i = 0; i < RTL_NUMBER_OF(NgDevSt) && !St; i++)
+        if (NgDevSt[i].Dev == Device)
+            St = &NgDevSt[i];
+    for (i = 0; i < RTL_NUMBER_OF(NgDevSt) && !St; i++)
+        if (!NgDevSt[i].Dev)
+        {
+            NgDevSt[i].Dev = Device;
+            St = &NgDevSt[i];
+        }
+    KeReleaseSpinLock(&NgDevStLock, Irql);
+    return St;
+}
+
+/* At mount: the device's FUA capability; the next barrier flushes (whatever was written before this mount is not known to be durable). */
+/*
+ * Alias (test only, registry FuaAliasMB, only for a volume whose partition is larger than its file system by at least that much):
+ * emulated FUA for a test disk behind an NBD server that models a volatile write cache.  QEMU 8.2 delivers FUA to the backend
+ * neither from AHCI (queued FUA ignored, WRITE DMA FUA EXT aborted) nor from NVMe, so the server could not tell a FUA write from
+ * a plain one.  A write that asks for FUA is sent as a plain write Alias bytes above its place instead (inside the partition,
+ * outside the file system), and the server treats a write in that range as a FUA write of the offset below.
+ */
+VOID NgDevSetFua(PDEVICE_OBJECT Device, BOOLEAN Fua, ULONGLONG Alias)
+{
+    NG_DEVST *St = NgDevStFind(Device, TRUE);
+
+    if (!St)
+        return;
+    St->Alias = Fua ? Alias : 0;
+    InterlockedExchange(&St->Flushed, 0);
+    InterlockedExchange(&St->Dirty, 1);
+    InterlockedExchange(&St->Fua, Fua ? 1 : 0);
+    InterlockedExchange(&St->DeferFailed, 0);
+}
+
+int ngos_dev_fua(void *dev)
+{
+    NG_DEVST *St = NgDevStFind(dev, FALSE);
+
+    return St && St->Fua;
+}
+
+int ngos_dev_clean(void *dev)
+{
+    NG_DEVST *St = NgDevStFind(dev, FALSE);
+
+    return St && St->Dirty == St->Flushed;
+}
+
+/* A write completed (successfully): plain ones are what a flush has to cover. */
+static VOID NgDevNoteWrite(NG_DEVST *St, BOOLEAN Fua)
+{
+    if (St && !Fua)
+        InterlockedIncrement(&St->Dirty);
+}
+
+/* A flush that started when Dirty was Start finished successfully. */
+static VOID NgDevNoteFlush(NG_DEVST *St, LONG Start)
+{
+    LONG Old;
+
+    if (!St)
+        return;
+    do
+    {
+        Old = St->Flushed;
+        if ((LONG)(Start - Old) <= 0)
+            return;
+    } while (InterlockedCompareExchange(&St->Flushed, Start, Old) != Old);
+}
+
+/* A write started with ngos_dev_write_start, until its owner drains it. */
+typedef struct _NG_PEND
+{
+    PIRP Irp;
+    KEVENT Event;
+    PVOID Buf;
+    ULONG Len;
+    ULONGLONG Off;
+    IO_STATUS_BLOCK Iosb;
+    PKTHREAD Owner;
+    BOOLEAN Fua;
+    BOOLEAN Data;
+} NG_PEND;
+
+static int NgDevDrainOwn(NG_DEVST *St)
+{
+    PKTHREAD Me = KeGetCurrentThread();
+    int Err = 0;
+
+    if (!St)
+        return 0;
+    while (St->NPend)
+    {
+        NG_PEND *P = NULL;
+        KIRQL Irql;
+        ULONG i;
+        NTSTATUS Status;
+
+        KeAcquireSpinLock(&NgDevStLock, &Irql);
+        for (i = 0; i < NG_PEND_MAX && !P; i++)
+            if (St->Pend[i] && St->Pend[i]->Owner == Me)
+            {
+                P = St->Pend[i];
+                St->Pend[i] = NULL;
+            }
+        KeReleaseSpinLock(&NgDevStLock, Irql);
+        if (!P)
+            break;
+        KeWaitForSingleObject(&P->Event, Executive, KernelMode, FALSE, NULL);
+        Status = P->Irp->IoStatus.Status;
+        NgDevIoFree(P->Irp, IRP_MJ_WRITE, P->Buf, P->Len, TRUE);
+        if (NT_SUCCESS(Status))
+        {
+            NgDevNoteWrite(St, P->Fua);
+        }
+        else
+        {
+            DPRINT1("ntfsng: device write at %I64u len %lu failed 0x%lx\n", P->Off, P->Len, Status);
+            Err = -1;
+            if (P->Data)
+                InterlockedExchange(&St->DeferFailed, 1);
+        }
+        InterlockedDecrement(&St->NPend);
+        ExFreePoolWithTag(P, TAG_NTFSNG);
+    }
+    return Err;
+}
+
+int ngos_dev_drain(void *dev)
+{
+    return NgDevDrainOwn(NgDevStFind(dev, FALSE));
+}
+
+int ngos_dev_defer_failed(void *dev)
+{
+    NG_DEVST *St = NgDevStFind(dev, FALSE);
+
+    return St && St->DeferFailed;
+}
+
+int ngos_dev_write_start(void *dev, unsigned long long off, void *buf, unsigned int len, int fua, int data)
+{
+    PDEVICE_OBJECT Device = dev;
+    NG_DEVST *St = NgDevStFind(Device, FALSE);
+    NG_PEND *P;
+    LARGE_INTEGER Offset;
+    KIRQL Irql;
+    ULONG i;
+    BOOLEAN Fua = fua && St && St->Fua;
+
+    if (!St)
+        return 1;
+    P = ExAllocatePoolWithTag(NonPagedPool, sizeof(*P), TAG_NTFSNG);
+    if (!P)
+        return 1;
+    KeInitializeEvent(&P->Event, NotificationEvent, FALSE);
+    P->Buf = buf;
+    P->Len = len;
+    P->Off = off;
+    P->Owner = KeGetCurrentThread();
+    P->Fua = Fua;
+    P->Data = data != 0;
+    Offset.QuadPart = (LONGLONG)off + (Fua ? (LONGLONG)St->Alias : 0);
+    P->Irp = IoBuildAsynchronousFsdRequest(IRP_MJ_WRITE, Device, buf, len, &Offset, &P->Iosb);
+    if (!P->Irp)
+    {
+        ExFreePoolWithTag(P, TAG_NTFSNG);
+        return 1;
+    }
+    IoGetNextIrpStackLocation(P->Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME | (Fua && !St->Alias ? SL_WRITE_THROUGH : 0);
+    IoSetCompletionRoutine(P->Irp, NgReadCompletion, &P->Event, TRUE, TRUE, TRUE);
+    KeAcquireSpinLock(&NgDevStLock, &Irql);
+    for (i = 0; i < NG_PEND_MAX && St->Pend[i]; i++)
+        ;
+    if (i < NG_PEND_MAX)
+    {
+        St->Pend[i] = P;
+        InterlockedIncrement(&St->NPend);
+    }
+    KeReleaseSpinLock(&NgDevStLock, Irql);
+    if (i == NG_PEND_MAX)
+    {
+        NgDevIoFree(P->Irp, IRP_MJ_WRITE, buf, len, TRUE);
+        ExFreePoolWithTag(P, TAG_NTFSNG);
+        return 1;
+    }
+    IoCallDriver(Device, P->Irp);
+    return 0;
+}
+
+/*
  * Transfers to or from the volume's storage device.  The IRP is freed here rather than
  * by the I/O manager, so completion needs no APC: core I/O can happen on a paging-I/O
  * path entered at APC_LEVEL, where IoBuildSynchronousFsdRequest's APC-based completion
@@ -274,6 +502,7 @@ static VOID NgDevIoFree(PIRP Irp, UCHAR Major, void *buf, unsigned int len, BOOL
  */
 #define NG_IO_WRITE_THROUGH 1   /* SL_WRITE_THROUGH on the write */
 #define NG_IO_REFUSAL_OK    2   /* a flush the stack does not implement counts as done */
+#define NG_IO_FUA           4   /* SL_WRITE_THROUGH when the device honours FUA (then the write is durable when it completes) */
 static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, void *buf, unsigned int len, ULONG Flags)
 {
     LARGE_INTEGER Offset;
@@ -281,12 +510,20 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
     KEVENT Event;
     PIRP Irp;
     NTSTATUS Status;
+    NG_DEVST *St = Major == IRP_MJ_READ ? NULL : NgDevStFind(Device, FALSE);
+    LONG FlushStart;
+    BOOLEAN Fua = (Flags & NG_IO_FUA) && St && St->Fua;
 #if DBG
     ULONGLONG T0 = __rdtsc();
 #endif
 
+    /* Writes this thread started and did not wait for come first: a flush or a journal header must not overtake them. */
+    if (St && St->NPend && NgDevDrainOwn(St))
+        return -1;
+    FlushStart = St ? St->Dirty : 0;
+
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
-    Offset.QuadPart = (LONGLONG)off;
+    Offset.QuadPart = (LONGLONG)off + (Fua ? (LONGLONG)St->Alias : 0);
     Irp = IoBuildAsynchronousFsdRequest(Major, Device, Major == IRP_MJ_FLUSH_BUFFERS ? NULL : buf,
                                         Major == IRP_MJ_FLUSH_BUFFERS ? 0 : len,
                                         Major == IRP_MJ_FLUSH_BUFFERS ? NULL : &Offset, &Iosb);
@@ -294,7 +531,7 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
         return NG_DEV_NOT_SENT;
     /* No SL_WRITE_THROUGH: durability comes from the flushes at each commit (and FUA is not honoured everywhere). */
     IoGetNextIrpStackLocation(Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
-    if (Flags & NG_IO_WRITE_THROUGH)
+    if ((Flags & NG_IO_WRITE_THROUGH) || (Fua && !St->Alias))
         IoGetNextIrpStackLocation(Irp)->Flags |= SL_WRITE_THROUGH;
     IoSetCompletionRoutine(Irp, NgReadCompletion, &Event, TRUE, TRUE, TRUE);
     Status = IoCallDriver(Device, Irp);
@@ -307,7 +544,14 @@ static int NgDevIo(UCHAR Major, PDEVICE_OBJECT Device, unsigned long long off, v
               Major == IRP_MJ_FLUSH_BUFFERS ? 0 : len);
     NgStackSample();
 #endif
-    if (!NT_SUCCESS(Status))
+    if (NT_SUCCESS(Status))
+    {
+        if (Major == IRP_MJ_WRITE)
+            NgDevNoteWrite(St, Fua);
+        else if (Major == IRP_MJ_FLUSH_BUFFERS)
+            NgDevNoteFlush(St, FlushStart);
+    }
+    else
     {
         /*
          * A disk without a write cache may not implement flush.  On any other disk a refused flush is
@@ -333,6 +577,11 @@ int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int le
     return NgDevIo(IRP_MJ_WRITE, dev, off, buf, len, 0);
 }
 
+int ngos_dev_write_fua(void *dev, unsigned long long off, void *buf, unsigned int len)
+{
+    return NgDevIo(IRP_MJ_WRITE, dev, off, buf, len, NG_IO_FUA);
+}
+
 /*
  * Writes of one transfer with all their requests in flight together: the storage stack and the disk see a queue
  * deeper than one (NCQ), and the transfer takes the time of the slowest request, not the sum.  Waves of
@@ -351,7 +600,7 @@ typedef struct _NG_WR
     ULONG Len;
 } NG_WR;
 
-static int NgDevWriteWave(PDEVICE_OBJECT Dev, const NG_WR *W, ULONG N)
+static int NgDevWriteWave(PDEVICE_OBJECT Dev, const NG_WR *W, ULONG N, BOOLEAN WantFua)
 {
     struct
     {
@@ -361,10 +610,14 @@ static int NgDevWriteWave(PDEVICE_OBJECT Dev, const NG_WR *W, ULONG N)
     } Req[NG_IOV_WAVE];
     ULONG Base, Count, i;
     int Err = 0;
+    NG_DEVST *St = NgDevStFind(Dev, FALSE);
+    BOOLEAN Fua = WantFua && St && St->Fua;
 #if DBG
     ULONGLONG T0 = __rdtsc();
 #endif
 
+    if (St && St->NPend && NgDevDrainOwn(St))
+        return -1;
     for (Base = 0; Base < N && !Err; Base += Count)
     {
         Count = min(N - Base, (ULONG)NG_IOV_WAVE);
@@ -373,7 +626,7 @@ static int NgDevWriteWave(PDEVICE_OBJECT Dev, const NG_WR *W, ULONG N)
             const NG_WR *R = &W[Base + i];
             LARGE_INTEGER Offset;
 
-            Offset.QuadPart = (LONGLONG)R->Off;
+            Offset.QuadPart = (LONGLONG)R->Off + (Fua ? (LONGLONG)St->Alias : 0);
             KeInitializeEvent(&Req[i].Event, NotificationEvent, FALSE);
             if (!R->Src)
             {
@@ -411,7 +664,7 @@ static int NgDevWriteWave(PDEVICE_OBJECT Dev, const NG_WR *W, ULONG N)
                 Err = NG_DEV_NOT_SENT;
                 break;
             }
-            IoGetNextIrpStackLocation(Req[i].Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
+            IoGetNextIrpStackLocation(Req[i].Irp)->Flags |= SL_OVERRIDE_VERIFY_VOLUME | (Fua && !St->Alias ? SL_WRITE_THROUGH : 0);
             IoSetCompletionRoutine(Req[i].Irp, NgReadCompletion, &Req[i].Event, TRUE, TRUE, TRUE);
         }
         Count = i;
@@ -433,12 +686,16 @@ static int NgDevWriteWave(PDEVICE_OBJECT Dev, const NG_WR *W, ULONG N)
                 DPRINT1("ntfsng: device write at %I64u len %lu failed 0x%lx\n", R->Off, R->Len, Status);
                 Err = -1;
             }
+            else
+            {
+                NgDevNoteWrite(St, Fua);
+            }
         }
     }
     return Err ? -1 : 0;
 }
 
-int ngos_dev_write_v(void *dev, const struct ngos_iov *iov, unsigned int n)
+static int NgDevWriteV(void *dev, const struct ngos_iov *iov, unsigned int n, BOOLEAN Fua)
 {
     NG_WR W[NG_IOV_WAVE];
     unsigned int Base, Count, i;
@@ -454,10 +711,20 @@ int ngos_dev_write_v(void *dev, const struct ngos_iov *iov, unsigned int n)
             W[i].SrcOff = 0;
             W[i].Len = iov[Base + i].len;
         }
-        if (NgDevWriteWave(dev, W, Count))
+        if (NgDevWriteWave(dev, W, Count, Fua))
             return -1;
     }
     return 0;
+}
+
+int ngos_dev_write_v(void *dev, const struct ngos_iov *iov, unsigned int n)
+{
+    return NgDevWriteV(dev, iov, n, FALSE);
+}
+
+int ngos_dev_write_v_fua(void *dev, const struct ngos_iov *iov, unsigned int n)
+{
+    return NgDevWriteV(dev, iov, n, TRUE);
 }
 
 /*
@@ -486,7 +753,7 @@ int NgDevWritePagesV(PDEVICE_OBJECT Dev, PMDL Src, const NG_PAGE_WRITE *Pw, ULON
             W[i].SrcOff = Pw[Base + i].SrcOff;
             W[i].Len = Pw[Base + i].Len;
         }
-        if (NgDevWriteWave(Dev, W, Count))
+        if (NgDevWriteWave(Dev, W, Count, FALSE))
             return -1;
     }
     return 0;

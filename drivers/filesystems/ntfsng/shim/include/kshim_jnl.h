@@ -108,6 +108,8 @@ int kshim_jnl_commit(struct block_device *b, u64 aux);
  */
 int kshim_jnl_seal(struct block_device *b, u64 aux, int retain_ok);
 int kshim_jnl_io(struct block_device *b);
+void kshim_jnl_pre_fail(struct block_device *b);	/* the writes in flight with the slot writes failed: the sealed transaction writes nothing more and fails */
+int kshim_jnl_slots_start(struct block_device *b);	/* lock held, right after a seal that returned 1: starts the slot writes of a retained transaction (nobufw2) */
 void kshim_jnl_reap(struct block_device *b);
 int kshim_jnl_busy(struct block_device *b);
 void kshim_jnl_wait(struct block_device *b);
