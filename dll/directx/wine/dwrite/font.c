@@ -53,6 +53,9 @@ struct cache_key
     float size;
     unsigned short glyph;
     unsigned short mode;
+    /* Sub-pixel pen position in 1/64 pixel (the unit FreeType places the outline in), 0 for a whole pixel. */
+    short dx;
+    short dy;
 };
 
 struct cache_entry
@@ -205,6 +208,24 @@ static unsigned short glyph_cache_mode(BOOL lcd, unsigned int rendering_mode)
     return mode;
 }
 
+/* Whether the glyph can be cached: an unscaled one, at a whole or sub-pixel position. FreeType places the outline at
+   lroundf(position * 64) in 26.6 units, so that rounded value is the key and a hit is the same glyph the uncached
+   path would draw. A glyph transformed by a matrix is not cached. */
+static BOOL glyph_cache_subpixel(const struct dwrite_glyphbitmap *bitmap, const MATRIX_2X2 *m, struct cache_key *key)
+{
+    float dx = bitmap->dx * 64.0f, dy = bitmap->dy * 64.0f;
+
+    if (memcmp(m, &identity_2x2, sizeof(*m)))
+        return FALSE;
+    /* Sub-pixel offsets are fractions of a pixel; a value out of range is not one of them. */
+    if (!(dx > -0x7000 && dx < 0x7000 && dy > -0x7000 && dy < 0x7000))
+        return FALSE;
+
+    key->dx = (short)lroundf(dx);
+    key->dy = (short)lroundf(dy);
+    return TRUE;
+}
+
 void dwrite_fontface_get_glyph_bbox(IDWriteFontFace *iface, struct dwrite_glyphbitmap *bitmap)
 {
     struct cache_key key = { .size = bitmap->emsize, .glyph = bitmap->glyph, .mode = glyph_cache_mode(FALSE, bitmap->mode) };
@@ -222,8 +243,8 @@ void dwrite_fontface_get_glyph_bbox(IDWriteFontFace *iface, struct dwrite_glyphb
     matrix_2x2_from_dwrite_matrix(&params.m, bitmap->m ? bitmap->m : &identity);
 
     EnterCriticalSection(&fontface->cs);
-    /* For now bypass cache for transformed and subpixel-shifted cases. */
-    if ((bitmap->m && memcmp(&params.m, &identity_2x2, sizeof(params.m))) || bitmap->dx != 0.0f || bitmap->dy != 0.0f)
+    /* Bypass the cache for transformed cases. */
+    if (!glyph_cache_subpixel(bitmap, &params.m, &key))
     {
         params.bbox = &bitmap->bbox;
         UNIX_CALL(get_glyph_bbox, &params);
@@ -297,8 +318,8 @@ static HRESULT dwrite_fontface_get_glyph_bitmap(struct dwrite_fontface *fontface
     matrix_2x2_from_dwrite_matrix(&params.m, bitmap->m ? bitmap->m : &identity);
 
     EnterCriticalSection(&fontface->cs);
-    /* For now bypass cache for transformed and subpixel-shifted cases. */
-    if ((bitmap->m && memcmp(&params.m, &identity_2x2, sizeof(params.m))) || bitmap->dx != 0.0f || bitmap->dy != 0.0f)
+    /* Bypass the cache for transformed cases. */
+    if (!glyph_cache_subpixel(bitmap, &params.m, &key))
     {
         UNIX_CALL(get_glyph_bitmap, &params);
     }
@@ -336,14 +357,15 @@ static int fontface_cache_compare(const void *k, const struct wine_rb_entry *e)
     if (key->size != key2->size) return key->size < key2->size ? -1 : 1;
     if (key->glyph != key2->glyph) return (int)key->glyph - (int)key2->glyph;
     if (key->mode != key2->mode) return (int)key->mode - (int)key2->mode;
-    return 0;
+    if (key->dx != key2->dx) return (int)key->dx - (int)key2->dx;
+    return (int)key->dy - (int)key2->dy;
 }
 
 static void fontface_cache_init(struct dwrite_fontface *fontface)
 {
     wine_rb_init(&fontface->cache.tree, fontface_cache_compare);
     list_init(&fontface->cache.mru);
-    fontface->cache.max_size = 0x8000;
+    fontface->cache.max_size = 0x80000;
 }
 
 static void fontface_cache_clear(struct dwrite_fontface *fontface)
@@ -6082,6 +6104,54 @@ void init_local_fontfile_loader(void)
 IDWriteFontFileLoader *get_local_fontfile_loader(void)
 {
     return (IDWriteFontFileLoader *)&local_fontfile_loader.IDWriteLocalFontFileLoader_iface;
+}
+
+/* Whether the face was loaded from a file in the system font directory (a font of the installation, as opposed to
+   one an application brought along and may delete again). */
+BOOL dwrite_fontface_is_installed_font(IDWriteFontFace5 *iface)
+{
+    static WCHAR fonts_dir[MAX_PATH];
+    static LONG fonts_dir_len = -1;
+    IDWriteFontFile *file = NULL;
+    const WCHAR *name;
+    const void *key;
+    UINT32 key_size, count = 1;
+    BOOL ret = FALSE;
+
+    if (fonts_dir_len < 0)
+    {
+        UINT len = GetWindowsDirectoryW(fonts_dir, ARRAY_SIZE(fonts_dir) - 8);
+        if (len && len < ARRAY_SIZE(fonts_dir) - 8)
+        {
+            wcscpy(fonts_dir + len, L"\\Fonts\\");
+            InterlockedExchange(&fonts_dir_len, len + 7);
+        }
+        else
+            InterlockedExchange(&fonts_dir_len, 0);
+    }
+    if (!fonts_dir_len)
+        return FALSE;
+
+    if (FAILED(IDWriteFontFace5_GetFiles(iface, &count, &file)) || !file)
+        return FALSE;
+
+    if (SUCCEEDED(IDWriteFontFile_GetReferenceKey(file, &key, &key_size)))
+    {
+        IDWriteFontFileLoader *loader;
+
+        /* Only the local loader's reference keys are a time stamp followed by the path. */
+        if (SUCCEEDED(IDWriteFontFile_GetLoader(file, &loader)))
+        {
+            if (loader == get_local_fontfile_loader() && key_size > FIELD_OFFSET(struct local_refkey, name))
+            {
+                name = ((const struct local_refkey *)key)->name;
+                ret = !_wcsnicmp(name, fonts_dir, fonts_dir_len);
+            }
+            IDWriteFontFileLoader_Release(loader);
+        }
+    }
+    IDWriteFontFile_Release(file);
+    return ret;
 }
 
 HRESULT get_local_refkey(const WCHAR *path, const FILETIME *writetime, void **key, UINT32 *size)

@@ -78,6 +78,8 @@ static void test_run(IDWriteFactory2 *factory, IDWriteFontFace *face, float x, D
     float advances[GLYPHS];
     DWRITE_GLYPH_RUN run;
     SIZE_T before, after;
+    BYTE *first = NULL;
+    RECT first_bounds = {0};
     unsigned int i, j, nonzero = 0;
     HRESULT hr;
 
@@ -122,11 +124,23 @@ static void test_run(IDWriteFactory2 *factory, IDWriteFontFace *face, float x, D
             for (j = 0; j < size; j++)
                 nonzero += texture[j] != 0;
             ok(nonzero > 0, "%s: the texture is empty.\n", name);
+            first = texture;
+            first_bounds = bounds;
+            texture = NULL;
+        }
+        else
+        {
+            /* Glyphs come from a cache after the first run: they must be the glyphs a fresh render gives. */
+            ok(EqualRect(&bounds, &first_bounds), "%s: run %u: bounds (%ld,%ld)-(%ld,%ld), expected (%ld,%ld)-(%ld,%ld).\n",
+                    name, i, bounds.left, bounds.top, bounds.right, bounds.bottom,
+                    first_bounds.left, first_bounds.top, first_bounds.right, first_bounds.bottom);
+            ok(!memcmp(texture, first, size), "%s: run %u: the texture differs from the first run.\n", name, i);
         }
         free(texture);
         IDWriteGlyphRunAnalysis_Release(analysis);
     }
     after = private_bytes();
+    free(first);
 
     ok(after < before + ALLOWED_GROWTH, "%s: %u runs of %u glyphs grew the process by %lu bytes.\n",
             name, RUNS, GLYPHS, (unsigned long)(after - before));
