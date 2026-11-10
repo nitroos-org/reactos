@@ -60,6 +60,31 @@ void ngos_print(const char *s)
     DbgPrint("%s", s);
 }
 
+/* Message in sdk/include/reactos/mc/ntiologc.mc (iologmsg.dll); the event source is this driver, "Ntfs". */
+#define NG_ERR_VOLUME_WRITE_BLOCKED ((NTSTATUS)0xC0047002L)
+
+/*
+ * The volume stopped accepting writes after a failed device write: a system event log entry (a Release build has no
+ * other record).  The device status of the failure is not at hand here: the final status is the one the writers get.
+ */
+void ngos_volume_failed(void *dev, int err)
+{
+    PIO_ERROR_LOG_PACKET Packet;
+    PDEVICE_OBJECT Source = NgGlobal.ControlDevice;
+
+    UNREFERENCED_PARAMETER(dev);
+    if (!Source)
+        return;
+    Packet = IoAllocateErrorLogEntry(Source, sizeof(IO_ERROR_LOG_PACKET));
+    if (!Packet)
+        return;
+    RtlZeroMemory(Packet, sizeof(*Packet));
+    Packet->ErrorCode = NG_ERR_VOLUME_WRITE_BLOCKED;
+    Packet->FinalStatus = NgErrnoToStatus(err);
+    Packet->UniqueErrorValue = (ULONG)-err;
+    IoWriteErrorLogEntry(Packet);
+}
+
 void ngos_bugcheck(const char *what, const char *file, int line)
 {
     DbgPrint("ntfsng: fatal: %s (%s:%d)\n", what, file, line);
