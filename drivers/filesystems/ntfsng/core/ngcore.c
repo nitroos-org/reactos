@@ -68,6 +68,8 @@ extern unsigned long kshim_counter_writes, kshim_counter_syncs, kshim_counter_di
 extern unsigned long long kshim_counter_write_bytes;
 extern bool (*kshim_is_data_inode)(struct inode *i);
 extern bool (*kshim_icache_ok)(struct inode *i);
+extern void (*kshim_icache_evicting)(struct inode *i);
+extern void (*kshim_icache_added)(struct inode *i);
 unsigned long kshim_pc_soft_limit(void);
 
 #define NGC_SDC_N 16
@@ -100,9 +102,22 @@ struct ngc_vol {
 		void *sd;
 	} sdc[NGC_SDC_N];
 	unsigned int sdc_next;
+	/*
+	 * What a directory listing shows of files whose inode was evicted (kshim_icache_evicting): the stat of the
+	 * file as it was when its inode left the cache, direct-mapped by record number (consecutive numbers use
+	 * consecutive slots), ~72 bytes a file instead of the ~2 KB of a cached inode.  Under the inode-cache lock
+	 * (the hooks run under it, and so does the listing's look-up).  Void when a new inode for the number is hashed:
+	 * the inode in memory is the only writer of the record, so a kept stat is current while there is none.
+	 */
+	struct ngc_stat *stc;
+	unsigned int stc_mask;
+	unsigned long stc_hits, stc_stores;
 };
 
 static void ngc_sdc_drop(struct ngc_vol *v, unsigned long long mft_no);
+static void ngc_stc_evicting(struct inode *i);
+static void ngc_stc_added(struct inode *i);
+static void ngc_stc_free(struct ngc_vol *v);
 static void ngc_sdc_flush(struct ngc_vol *v);
 
 /* Mount-time consistency check: 0 never, 1 after an unclean shutdown or when $MFT is at most 64 MB, 2 always. */
@@ -296,6 +311,8 @@ int ngc_init(void)
 			ngc_inited = 1;
 		kshim_is_data_inode = ngc_is_data_inode;
 		kshim_icache_ok = ngc_icache_ok;
+		kshim_icache_evicting = ngc_stc_evicting;
+		kshim_icache_added = ngc_stc_added;
 		kshim_core_error = ngc_core_error;
 	}
 	mutex_unlock(&ngc_mount_lock);
@@ -399,6 +416,7 @@ static int ngc_mount_pass(void *osdev, unsigned long long size, unsigned int sec
 	if (err)
 		goto fail_fc;
 	v->sb = fc->kshim_sb;
+	v->sb->kshim_priv = v;
 	v->bdev = b;
 	b->bd_super = v->sb;
 	v->sb->s_flags |= SB_ACTIVE;
@@ -607,6 +625,7 @@ void ngc_umount(ngc_vol *v, int discard)
 		kshim_jnl_retire(v->bdev);
 	if (v->watched)
 		kshim_watch_del(v->watched);
+	ngc_stc_free(v);
 	ngc_sdc_flush(v);
 	kfree(v->jv);
 	kfree(v->bounce);
@@ -1111,6 +1130,73 @@ static bool ngc_stat_lite(struct inode *vi, struct ngc_stat *st)
 	return true;
 }
 
+/* The compact stat cache (struct ngc_vol): slots by record number, a power of two between 16384 and 65536 by memory size. */
+static struct ngc_stat *ngc_stc_slot(struct ngc_vol *v, u64 mft_no)
+{
+	return v->stc ? &v->stc[mft_no & v->stc_mask] : NULL;
+}
+
+/* Inode-cache lock held; the inode was taken off the unused list and nothing references it. */
+static void ngc_stc_evicting(struct inode *i)
+{
+	struct ngc_vol *v = i->i_sb->kshim_priv;
+	struct ntfs_inode *ni = NTFS_I(i);
+	struct ngc_stat *slot;
+	struct ngc_stat st;
+	if (!v || NInoAttr(ni) || ni->mft_no < FILE_first_user || (i->i_state & I_DIRTY))
+		return;
+	if (!v->stc) {
+		unsigned long n = ngos_physical_pages() / 8;
+		n = n > 65536 ? 65536 : n < 16384 ? 16384 : n;
+		n = 1UL << ilog2(n);
+		v->stc = kvzalloc(n * sizeof(*v->stc), GFP_NOFS);
+		if (!v->stc)
+			return;
+		v->stc_mask = n - 1;
+	}
+	memset(&st, 0, sizeof(st));
+	if (!ngc_stat_lite(i, &st))
+		return;
+	slot = ngc_stc_slot(v, ni->mft_no);
+	*slot = st;
+	v->stc_stores++;
+}
+
+/* Inode-cache lock held; the number is the one the inode is hashed by (the record number, also of an attribute inode). */
+static void ngc_stc_added(struct inode *i)
+{
+	struct ngc_vol *v = i->i_sb->kshim_priv;
+	struct ngc_stat *slot;
+	u64 no = (u64)(uintptr_t)i->kshim_test_data;
+	if (!v || !v->stc)
+		return;
+	slot = ngc_stc_slot(v, no);
+	if ((slot->mft_ref & 0xffffffffffffULL) == no)
+		slot->mft_ref = 0;
+}
+
+/* Inode-cache lock held: the kept stat of the file of an index entry (record number and sequence number as in @mref), or false. */
+static bool ngc_stc_lookup(struct ngc_vol *v, u64 mref, struct ngc_stat *st)
+{
+	struct ngc_stat *slot = ngc_stc_slot(v, mref & 0xffffffffffffULL);
+	if (!slot || slot->mft_ref != mref)
+		return false;
+	*st = *slot;
+	v->stc_hits++;
+	return true;
+}
+
+static void ngc_stc_free(struct ngc_vol *v)
+{
+	struct ngc_stat *t;
+	kshim_icache_lock();
+	t = v->stc;
+	v->stc = NULL;
+	v->sb->kshim_priv = NULL;
+	kshim_icache_unlock();
+	kvfree(t);
+}
+
 struct ngc_rawent {
 	u64 mref;
 	u32 name_off, attrs, tag, dos;
@@ -1318,7 +1404,7 @@ static int ngc_readdir_full_impl(ngc_vol *v, ngc_node *dirn, ngc_dirent_t fn, vo
 		na.name_len = 0;
 		kshim_icache_lock();
 		child = kshim_icache_peek(dir->i_sb, na.mft_no, ntfs_test_inode, &na);
-		done = child && ngc_stat_lite(child, &e.st);
+		done = child ? ngc_stat_lite(child, &e.st) : ngc_stc_lookup(v, x->mref, &e.st);
 		kshim_icache_unlock();
 		if (!done && !ngc_iget(v, na.mft_no, &cn)) {
 			ngc_stat(cn, &e.st);
