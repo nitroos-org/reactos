@@ -326,4 +326,7 @@
     SVC_(CreateWaitCompletionPacket, 3)
     SVC_(AssociateWaitCompletionPacket, 8)
     SVC_(CancelWaitCompletionPacket, 2)
+    SVC_(CreateKeyTransacted, 8)
+    SVC_(OpenKeyTransacted, 4)
+    SVC_(OpenKeyTransactedEx, 5)
 #endif
