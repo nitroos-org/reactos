@@ -29,7 +29,7 @@ StorpSrbInitRequestReference(
     _In_ PPDO_DEVICE_EXTENSION PdoExtension)
 {
     /* Both the lookaside entries and the reserve are recycled, so they need zeroing */
-    RtlZeroMemory(RequestReference, sizeof(*RequestReference));
+    RtlZeroMemory(RequestReference, FIELD_OFFSET(QUEUED_REQUEST_REFERENCE, Ex));
 
     Srb->OriginalRequest = (PVOID)RequestReference;
     RequestReference->Irp = Irp;
@@ -37,6 +37,12 @@ StorpSrbInitRequestReference(
     RequestReference->TimeoutCounter = Srb->TimeOutValue;
 
     RequestReference->PdoExtension = PdoExtension;
+
+    if (PdoExtension->FdoExtension->Miniport.PortConfig.SrbType == SRB_TYPE_STORAGE_REQUEST_BLOCK)
+    {
+        RequestReference->ExtendedRequest = &RequestReference->Ex;
+        RtlZeroMemory(RequestReference->ExtendedRequest, sizeof(*RequestReference->ExtendedRequest));
+    }
 }
 
 /**
@@ -176,6 +182,7 @@ PortHandRequestToMiniport(
     PVOID MiniportExtension = &FdoExtension->Miniport.MiniportExtension->HwDeviceExtension;
     PHW_INITIALIZATION_DATA HwInitData = FdoExtension->HwInitData;
     PSCSI_REQUEST_BLOCK Srb = RequestReference->Srb;
+    PSCSI_REQUEST_BLOCK MiniportSrb = StorpMiniportSrb(RequestReference);
     ULONG Generation;
 
     /*
@@ -184,10 +191,10 @@ PortHandRequestToMiniport(
      * old command must still be recognised (and ignored) rather than claim the new packet.
      * From here on the packet is scheduled and counted, and HwBuildIo may complete it.
      */
-    PortForgetSweptSrb(FdoExtension, Srb);
+    PortForgetSweptSrb(FdoExtension, MiniportSrb);
 
     /* BuildIo may complete the request itself, and then says so */
-    if (HwInitData->HwBuildIo && !HwInitData->HwBuildIo(MiniportExtension, Srb))
+    if (HwInitData->HwBuildIo && !HwInitData->HwBuildIo(MiniportExtension, MiniportSrb))
         return;
 
     /*
@@ -210,7 +217,7 @@ PortHandRequestToMiniport(
     }
 #endif
 
-    HwInitData->HwStartIo(MiniportExtension, Srb);
+    HwInitData->HwStartIo(MiniportExtension, MiniportSrb);
 
     PortTimeoutStartIoReturned(FdoExtension, Generation);
 }
@@ -274,6 +281,10 @@ PortPdoAfterBuildingScatterGatherList(
 
     RequestReference = (PQUEUED_REQUEST_REFERENCE)Context;
     FdoExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+
+    /* Translate last, once the tag and SRB extension are final */
+    if (RequestReference->ExtendedRequest != NULL)
+        StorpBuildExtendedSrb(RequestReference->Srb, RequestReference->ExtendedRequest);
 
     /* BuildIo and StartIo are called on DISPATCH_LEVEL */
     OldIrql = KfRaiseIrql(DISPATCH_LEVEL);
@@ -361,7 +372,7 @@ PortPdoSrbAllocatePrivateContexts(
     _In_ PFDO_DEVICE_EXTENSION FdoExtension)
 {
     PQUEUED_REQUEST_REFERENCE RequestReference;
-    ULONG SrbExtensionSize = FdoExtension->HwInitData->SrbExtensionSize;
+    ULONG SrbExtensionSize = FdoExtension->Miniport.PortConfig.SrbExtensionSize;
     PIRP Irp;
 
     Irp = (PIRP)Srb->OriginalRequest;
@@ -386,6 +397,7 @@ PortPdoSrbAllocatePrivateContexts(
 
     if (RequestReference->FromReserve)
     {
+        NT_ASSERT(FdoExtension->ReservedSrbExtension != NULL);
         Srb->SrbExtension = FdoExtension->ReservedSrbExtension;
         RtlZeroMemory(Srb->SrbExtension, SrbExtensionSize);
         return STATUS_SUCCESS;
@@ -399,6 +411,8 @@ PortPdoSrbAllocatePrivateContexts(
         StorpSrbFreeRequestReference(Srb);
         return PortPdoStarveRequest(FdoExtension, Srb, Irp);
     }
+
+    RtlZeroMemory(Srb->SrbExtension, SrbExtensionSize);
 
     return STATUS_SUCCESS;
 }
@@ -565,6 +579,19 @@ PortPdoIssueRequest(
                 (PUCHAR)SystemVa + ((PUCHAR)TransferVa - (PUCHAR)MmGetMdlVirtualAddress(Irp->MdlAddress));
         }
 
+        RequestReference->WriteToDevice =
+            TEST_FLAG(RequestReference->Srb->SrbFlags, SRB_FLAGS_DATA_OUT);
+
+        /* A virtual miniport has no DMA adapter and moves the buffer itself through the MDL */
+        if (FdoExtension->Miniport.IsVirtual)
+        {
+            PortPdoAfterBuildingScatterGatherList(FdoExtension->Device,
+                                                  RequestReference->Irp,
+                                                  NULL,
+                                                  RequestReference);
+            return STATUS_PENDING;
+        }
+
         /* Following call requires DISPATCH_LEVEL. */
         OldIrql = KfRaiseIrql(DISPATCH_LEVEL);
 
@@ -572,8 +599,6 @@ PortPdoIssueRequest(
         /* FIXME: I don't know if we actually hit it */
         NT_ASSERT((RequestReference->Srb->SrbFlags & SRB_FLAGS_UNSPECIFIED_DIRECTION) !=
                   SRB_FLAGS_UNSPECIFIED_DIRECTION);
-        RequestReference->WriteToDevice =
-            TEST_FLAG(RequestReference->Srb->SrbFlags, SRB_FLAGS_DATA_OUT);
 
         Status = FdoExtension->DmaAdapter->DmaOperations->
             GetScatterGatherList(FdoExtension->DmaAdapter,
@@ -767,7 +792,6 @@ PortPdoScsi(
     PPDO_DEVICE_EXTENSION PdoExtension;
     PFDO_DEVICE_EXTENSION FdoExtension;
     PMINIPORT Miniport;
-    PHW_INITIALIZATION_DATA HwInitData;
 
     DPRINT("PortPdoScsi(%p %p)\n", DeviceObject, Irp);
 
@@ -791,7 +815,6 @@ PortPdoScsi(
     FdoExtension = PdoExtension->FdoExtension;
     NT_ASSERT(FdoExtension);
     Miniport = &FdoExtension->Miniport;
-    HwInitData = Miniport->InitData;
 
     switch (Srb->Function) {
         /* Both of these should be sent to device and let themselves process this */
@@ -818,7 +841,7 @@ PortPdoScsi(
             DPRINT("New request (%d:%d:%d) ReqRef %p Srb %p Irp %p Tag %x SrbExt %p(%d)\n",
                     Srb->PathId, Srb->TargetId, Srb->Lun,
                     RequestReference, Srb, Irp, Srb->QueueTag,
-                    Srb->SrbExtension, HwInitData->SrbExtensionSize);
+                    Srb->SrbExtension, Miniport->PortConfig.SrbExtensionSize);
 
             /*
              * Do the scheduling. If returns TRUE, we should issue this request to the hardware.
@@ -867,7 +890,7 @@ PortPdoScsi(
             PortPdoScheduleRequestNoFlowControl(FdoExtension, RequestReference);
 
             /* Fire up the request immediately */
-            PortPdoIssueRequest(PdoExtension, RequestReference);
+            Status = PortPdoIssueRequest(PdoExtension, RequestReference);
 
             break;
         }
@@ -1031,10 +1054,10 @@ PortCompleteRequest(
                                  (PSCATTER_GATHER_LIST)RequestReference->ScatterGatherList,
                                  RequestReference->WriteToDevice);
         RequestReference->ScatterGatherList = NULL;
-
     }
 
-    /* Unlock the pages locked for DMA, also when no list could be built for them */
+    /* Unlock the pages locked for DMA, also when no list could be built for them
+       (a virtual miniport never built one) */
     if (RequestReference->MappedSystemVa)
     {
         MmUnlockPages(RequestReference->Irp->MdlAddress);
