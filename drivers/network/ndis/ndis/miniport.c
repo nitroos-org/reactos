@@ -3411,13 +3411,42 @@ NdisIDeviceIoControl(
   switch (ControlCode)
   {
     case IOCTL_NDIS_QUERY_GLOBAL_STATS:
+    {
+      PVOID OutputBuffer = NULL;
+
+      /* The OID is read from the input buffer and the answer goes to the output buffer's pages */
+      if (Stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(NDIS_OID) ||
+          Irp->AssociatedIrp.SystemBuffer == NULL)
+      {
+        Status = STATUS_INVALID_PARAMETER;
+        break;
+      }
+
+      if (Stack->Parameters.DeviceIoControl.OutputBufferLength != 0)
+      {
+        if (Irp->MdlAddress == NULL)
+        {
+          Status = STATUS_INVALID_PARAMETER;
+          break;
+        }
+
+        OutputBuffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+        if (OutputBuffer == NULL)
+        {
+          Status = STATUS_INSUFFICIENT_RESOURCES;
+          break;
+        }
+      }
+
+      Written = 0;
       Status = MiniQueryInformation(Adapter,
                                     *(PNDIS_OID)Irp->AssociatedIrp.SystemBuffer,
                                     Stack->Parameters.DeviceIoControl.OutputBufferLength,
-                                    MmGetSystemAddressForMdl(Irp->MdlAddress),
+                                    OutputBuffer,
                                     &Written);
       Irp->IoStatus.Information = Written;
       break;
+    }
 
     case IOCTL_NDIS_RESERVED7:
       NDIS_DbgPrint(MIN_TRACE, ("NdisIDeviceIoControl: IOCTL_NDIS_RESERVED7 UNIMPLEMENTED (CORE-13831)\n"));

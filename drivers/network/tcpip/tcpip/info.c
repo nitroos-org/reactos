@@ -239,6 +239,35 @@ ReferenceAddressFileByEntity(TDIEntityID ID)
     return AddrFile;
 }
 
+/* The TCP and UDP connection tables answer for the address file the entity names. The caller picks the
+ * entity, so the address file is referenced (not taken from GetContext) while its row is read: a close
+ * cannot free it meanwhile. An entity that is not a transport entity, or whose address file is closing,
+ * is refused. */
+static
+TDI_STATUS
+QueryConnectionTableByEntity(
+    TDIEntityID ID,
+    BOOLEAN Tcp,
+    PNDIS_BUFFER Buffer,
+    PUINT BufferSize,
+    TDI_TCPUDP_CLASS_INFO Class)
+{
+    PADDRESS_FILE AddrFile;
+    TDI_STATUS Status;
+
+    AddrFile = ReferenceAddressFileByEntity(ID);
+    if (AddrFile == NULL)
+        return TDI_INVALID_PARAMETER;
+
+    if (Tcp)
+        Status = InfoTdiQueryGetConnectionTcpTable(AddrFile, Buffer, BufferSize, Class);
+    else
+        Status = InfoTdiQueryGetConnectionUdpTable(AddrFile, Buffer, BufferSize, Class);
+
+    DereferenceObject(AddrFile);
+    return Status;
+}
+
 /* The interface of an interface entity (IF, AT, CL_NL, CO_NL), referenced for the caller
  * (IPDereferenceInterface), or NULL. IPDestroyInterface removes the entities under
  * EntityListLock before it drops the interface's own reference, so an interface found
@@ -420,7 +449,6 @@ TDI_STATUS InfoTdiQueryInformationEx(
  *   Status of operation
  */
 {
-    PVOID EntityListContext;
     PIP_INTERFACE IF;
     TDI_STATUS InfoStatus;
 
@@ -513,15 +541,9 @@ TDI_STATUS InfoTdiQueryInformationEx(
                      ID->toi_entity.tei_entity == CO_NL_ENTITY)
                     return InfoTdiQueryGetAddrTable(ID->toi_entity, Buffer, BufferSize);
                 else if (ID->toi_entity.tei_entity == CO_TL_ENTITY)
-                     if ((EntityListContext = GetContext(ID->toi_entity)))
-                         return InfoTdiQueryGetConnectionTcpTable(EntityListContext, Buffer, BufferSize, TcpUdpClassOwnerPid);
-                     else
-                         return TDI_INVALID_PARAMETER;
+                     return QueryConnectionTableByEntity(ID->toi_entity, TRUE, Buffer, BufferSize, TcpUdpClassOwnerPid);
                 else if (ID->toi_entity.tei_entity == CL_TL_ENTITY)
-                     if ((EntityListContext = GetContext(ID->toi_entity)))
-                         return InfoTdiQueryGetConnectionUdpTable(EntityListContext, Buffer, BufferSize, TcpUdpClassOwnerPid);
-                     else
-                         return TDI_INVALID_PARAMETER;
+                     return QueryConnectionTableByEntity(ID->toi_entity, FALSE, Buffer, BufferSize, TcpUdpClassOwnerPid);
                 else
                     return TDI_INVALID_PARAMETER;
 
@@ -550,15 +572,9 @@ TDI_STATUS InfoTdiQueryInformationEx(
                      else
                          return TDI_INVALID_PARAMETER;
                  else if (ID->toi_entity.tei_entity == CO_TL_ENTITY)
-                     if ((EntityListContext = GetContext(ID->toi_entity)))
-                         return InfoTdiQueryGetConnectionTcpTable(EntityListContext, Buffer, BufferSize, TcpUdpClassBasic);
-                     else
-                         return TDI_INVALID_PARAMETER;
+                     return QueryConnectionTableByEntity(ID->toi_entity, TRUE, Buffer, BufferSize, TcpUdpClassBasic);
                  else if (ID->toi_entity.tei_entity == CL_TL_ENTITY)
-                     if ((EntityListContext = GetContext(ID->toi_entity)))
-                         return InfoTdiQueryGetConnectionUdpTable(EntityListContext, Buffer, BufferSize, TcpUdpClassBasic);
-                     else
-                         return TDI_INVALID_PARAMETER;
+                     return QueryConnectionTableByEntity(ID->toi_entity, FALSE, Buffer, BufferSize, TcpUdpClassBasic);
                  else
                      return TDI_INVALID_PARAMETER;
 
@@ -567,15 +583,9 @@ TDI_STATUS InfoTdiQueryInformationEx(
                      return TDI_INVALID_PARAMETER;
 
                  if (ID->toi_entity.tei_entity == CO_TL_ENTITY)
-                     if ((EntityListContext = GetContext(ID->toi_entity)))
-                         return InfoTdiQueryGetConnectionTcpTable(EntityListContext, Buffer, BufferSize, TcpUdpClassOwner);
-                     else
-                         return TDI_INVALID_PARAMETER;
+                     return QueryConnectionTableByEntity(ID->toi_entity, TRUE, Buffer, BufferSize, TcpUdpClassOwner);
                  else if (ID->toi_entity.tei_entity == CL_TL_ENTITY)
-                     if ((EntityListContext = GetContext(ID->toi_entity)))
-                         return InfoTdiQueryGetConnectionUdpTable(EntityListContext, Buffer, BufferSize, TcpUdpClassOwner);
-                     else
-                         return TDI_INVALID_PARAMETER;
+                     return QueryConnectionTableByEntity(ID->toi_entity, FALSE, Buffer, BufferSize, TcpUdpClassOwner);
                  else
                      return TDI_INVALID_PARAMETER;
 
