@@ -42,33 +42,10 @@
 
 /* DEFINITIONS **************************************************************/
 
-#define HEAP_FE_SLOTS           16
-#define HEAP_FE_MAX_BLOCK       4096    /* bytes, header included */
-#define HEAP_FE_SLOT_BUDGET     (256 * 1024)    /* cached bytes per slot */
+#define HEAP_FE_SLOTS           64
+#define HEAP_FE_SLOT_BUDGET     (512 * 1024)   /* cached bytes per slot */
 #define HEAP_FE_MARK            0xCE
 #define HEAP_FE_SIGNATURE       0x31454648  /* 'HFE1' */
-
-/*
- * Size classes, in heap units (HEAP_ENTRY_SIZE bytes): exact up to HEAP_FE_EXACT, then one class
- * per HEAP_FE_STEP units (64 bytes). A freed block is filed under the largest class boundary it
- * reaches, a request looks in the smallest class boundary that covers it, so a block served is
- * never smaller than the request and is less than two steps larger (HeapSize still reports the
- * requested size: the surplus is kept in UnusedBytes, which holds up to 255).
- */
-#define HEAP_FE_UNITS           (HEAP_FE_MAX_BLOCK >> HEAP_ENTRY_SHIFT)
-#define HEAP_FE_EXACT           16
-#ifdef _WIN64
-#define HEAP_FE_STEP            4
-#define HEAP_FE_CLASSES         80      /* >= 16 + (255 - 16) / 4 + 1, a multiple of 8 */
-#else
-#define HEAP_FE_STEP            8
-#define HEAP_FE_CLASSES         80      /* >= 16 + (511 - 16) / 8 + 1, a multiple of 16 */
-#endif
-
-#define HEAP_FE_CLASS_FOR_ALLOC(Units) \
-    (((Units) <= HEAP_FE_EXACT) ? (Units) : HEAP_FE_EXACT + (((Units) - HEAP_FE_EXACT + HEAP_FE_STEP - 1) / HEAP_FE_STEP))
-#define HEAP_FE_CLASS_FOR_FREE(Units) \
-    (((Units) <= HEAP_FE_EXACT) ? (Units) : HEAP_FE_EXACT + (((Units) - HEAP_FE_EXACT) / HEAP_FE_STEP))
 
 typedef struct _HEAP_FE_SLOT
 {
@@ -87,7 +64,8 @@ typedef struct _HEAP_FE
     ULONG_PTR Cookie;
     volatile LONG Disabled;
     ULONG Signature;
-    UCHAR Pad[64 - sizeof(ULONG_PTR) - 2 * sizeof(ULONG)];
+    ULONG SlotCount;
+    UCHAR Pad[64 - sizeof(ULONG_PTR) - 3 * sizeof(ULONG)];
     HEAP_FE_SLOT Slots[HEAP_FE_SLOTS];
 } HEAP_FE, *PHEAP_FE;
 
@@ -164,6 +142,7 @@ RtlpHeapFeEnable(PHEAP Heap)
         return FALSE;
 
     Fe->Signature = HEAP_FE_SIGNATURE;
+    Fe->SlotCount = HEAP_FE_SLOTS;
     Fe->Cookie = (ULONG_PTR)__rdtsc() ^ ((ULONG_PTR)Fe << 8) ^
                  ((ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread << 20) ^
                  (ULONG_PTR)0x5bd1e995a3c6f1b7ULL;
@@ -200,7 +179,6 @@ RtlpHeapFeAlloc(PHEAP Heap,
     PHEAP_FE Fe = Heap->FrontEndHeap;
     PHEAP_FE_SLOT Slot;
     PHEAP_ENTRY Entry;
-
     ULONG Class;
 
     if (Index >= HEAP_FE_UNITS || Fe->Disabled)
@@ -208,15 +186,25 @@ RtlpHeapFeAlloc(PHEAP Heap,
 
     Class = HEAP_FE_CLASS_FOR_ALLOC((ULONG)Index);
     Slot = RtlpHeapFeSlot(Fe);
-    if (!Slot->Heads[Class])
+
+    /* Nothing of this class or the next one: let the heap serve it */
+    if (!Slot->Heads[Class] && !Slot->Heads[Class + 1])
     {
         Slot->AllocMiss++;
         return NULL;
     }
+
+    /* A busy slot (another thread of the same slot) is not waited for */
     if (Slot->Lock || InterlockedCompareExchange(&Slot->Lock, 1, 0))
         return NULL;
 
     Entry = Slot->Heads[Class];
+    if (!Entry)
+    {
+        /* The next class is at most one step (64 bytes) bigger; the surplus fits UnusedBytes */
+        Class++;
+        Entry = Slot->Heads[Class];
+    }
     if (Entry)
     {
         Slot->Heads[Class] = RtlpHeapFeNext(Fe, Entry);
@@ -227,7 +215,10 @@ RtlpHeapFeAlloc(PHEAP Heap,
     Slot->Lock = 0;
 
     if (!Entry)
+    {
+        Slot->AllocMiss++;
         return NULL;
+    }
 
     Slot->AllocHit++;
 
@@ -326,6 +317,21 @@ RtlpHeapFeFlush(PHEAP Heap)
     }
 
     return Count;
+}
+
+SIZE_T
+NTAPI
+RtlpHeapFeParked(PHEAP Heap)
+{
+    PHEAP_FE Fe = Heap->FrontEndHeap;
+    SIZE_T Total = 0;
+    ULONG Slots;
+
+    /* Racy by design: a size estimate to decide whether to give the blocks back */
+    for (Slots = 0; Slots < Fe->SlotCount; Slots++)
+        Total += Fe->Slots[Slots].Bytes;
+
+    return Total;
 }
 
 ULONG
