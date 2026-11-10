@@ -33,6 +33,9 @@ void *ngos_current_thread(void);
 void ngos_sleep_ms(unsigned int ms);
 unsigned long ngos_jiffies(void);
 unsigned long ngos_physical_pages(void);
+/* True while the system is short of free pages (the Mm low-memory condition is signalled). Lock-free, any IRQL. */
+int ngos_low_memory(void);
+void ngos_low_memory_init(void);	/* once, at PASSIVE_LEVEL, from DriverEntry */
 void ngos_time(long long *sec, long *nsec);
 
 int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len);
