@@ -481,7 +481,7 @@ GreSetDCOwner(HDC hdc, ULONG ulOwner)
 
 static
 void
-DC_vUpdateDC(PDC pdc)
+DC_vUpdateDCSurface(PDC pdc)
 {
     // PREGION VisRgn ;
     PPDEVOBJ ppdev = pdc->ppdev;
@@ -504,6 +504,13 @@ DC_vUpdateDC(PDC pdc)
 
     pdc->flGraphicsCaps = ppdev->devinfo.flGraphicsCaps;
     pdc->flGraphicsCaps2 = ppdev->devinfo.flGraphicsCaps2;
+}
+
+static
+void
+DC_vUpdateDC(PDC pdc)
+{
+    DC_vUpdateDCSurface(pdc);
 
     /* Mark EBRUSHOBJs as dirty */
     pdc->pdcattr->ulDirty_ |= DIRTY_DEFAULT ;
@@ -611,7 +618,8 @@ DC_vPrepareDCsForBlitEx(
     const RECT *prcFirst, *prcSecond;
     BOOL bFirstIsDest = TRUE;
 
-    /* Update brushes */
+    /* Update brushes (a DC locked with others did not pass DC_LockDc) */
+    DC_vApplyRedirAttrDirty(pdcDest);
     if (pdcDest->pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(pdcDest);
     if (pdcDest->pdcattr->ulDirty_ & (DIRTY_LINE | DC_PEN_DIRTY))
@@ -650,8 +658,35 @@ DC_vPrepareDCsForBlitEx(
     if (pdcDest->fs & DC_DIRTY_RAO)
         CLIPPING_UpdateGCRegion(pdcDest);
 
+    /*
+     * A redirected window DC draws into its window's surface: where it draws is presented (marked again in
+     * DC_vFinishBlit). Only blit-class callers give the exact rectangle they write (DCPREP_EXACT_DEST); for every
+     * other primitive the whole clip bounds count as drawn (a horizontal line has an empty bounding box, a
+     * rectangle's border and wide pens reach past it).
+     */
+    if ((pdcDest->fs & DC_REDIRECTION) && pdcDest->pvRedir)
+    {
+        if (fl & DCPREP_READ_ONLY)
+        {
+            RECTL_vSetEmptyRect(&pdcDest->rclRedirDraw);
+        }
+        else if (rcDest && (fl & DCPREP_EXACT_DEST))
+        {
+            pdcDest->rclRedirDraw = *(const RECTL *)rcDest;
+            RECTL_vMakeWellOrdered(&pdcDest->rclRedirDraw);
+            if (!RECTL_bIntersectRect(&pdcDest->rclRedirDraw, &pdcDest->rclRedirDraw, &pdcDest->erclClip))
+                RECTL_vSetEmptyRect(&pdcDest->rclRedirDraw);
+        }
+        else
+        {
+            pdcDest->rclRedirDraw = pdcDest->erclClip;
+        }
+        if (!RECTL_bIsEmptyRect(&pdcDest->rclRedirDraw))
+            UserRedirMarkDirty(pdcDest->pvRedir, &pdcDest->rclRedirDraw);
+    }
+
     /* Lock and update first DC */
-    if (pdcFirst->dctype == DCTYPE_DIRECT)
+    if (DC_IS_SCREEN(pdcFirst))
     {
         EngAcquireSemaphore(pdcFirst->ppdev->hsemDevLock);
 
@@ -664,7 +699,7 @@ DC_vPrepareDCsForBlitEx(
         }
     }
 
-    if (pdcFirst->dctype == DCTYPE_DIRECT)
+    if (DC_IS_SCREEN(pdcFirst))
     {
         DC_vMouseSafetyStart(pdcFirst, prcFirst, (fl & DCPREP_SPLIT_DEST) && bFirstIsDest, (fl & DCPREP_CLIP_MASK) && bFirstIsDest ? (fl & DCPREP_CLIP_MASK) : 0);
     }
@@ -677,7 +712,7 @@ DC_vPrepareDCsForBlitEx(
         return;
 
     /* Lock and update second DC */
-    if (pdcSecond->dctype == DCTYPE_DIRECT)
+    if (DC_IS_SCREEN(pdcSecond))
     {
         EngAcquireSemaphore(pdcSecond->ppdev->hsemDevLock);
 
@@ -690,7 +725,7 @@ DC_vPrepareDCsForBlitEx(
         }
     }
 
-    if (pdcSecond->dctype == DCTYPE_DIRECT)
+    if (DC_IS_SCREEN(pdcSecond))
     {
         DC_vMouseSafetyStart(pdcSecond, prcSecond, (fl & DCPREP_SPLIT_DEST) && !bFirstIsDest, (fl & DCPREP_CLIP_MASK) && !bFirstIsDest ? (fl & DCPREP_CLIP_MASK) : 0);
     }
@@ -705,7 +740,11 @@ VOID
 FASTCALL
 DC_vFinishBlit(PDC pdc1, PDC pdc2)
 {
-    if (pdc1->dctype == DCTYPE_DIRECT)
+    /* Drawn: a present that ran meanwhile may have taken the mark of DC_vPrepareDCsForBlitEx */
+    if ((pdc1->fs & DC_REDIRECTION) && pdc1->pvRedir && !RECTL_bIsEmptyRect(&pdc1->rclRedirDraw))
+        UserRedirMarkDirty(pdc1->pvRedir, &pdc1->rclRedirDraw);
+
+    if (DC_IS_SCREEN(pdc1))
     {
         MouseSafetyOnDrawEnd(pdc1->ppdev);
         EngReleaseSemaphore(pdc1->ppdev->hsemDevLock);
@@ -716,7 +755,7 @@ DC_vFinishBlit(PDC pdc1, PDC pdc2)
 
     if (pdc2)
     {
-        if (pdc2->dctype == DCTYPE_DIRECT)
+        if (DC_IS_SCREEN(pdc2))
         {
             MouseSafetyOnDrawEnd(pdc2->ppdev);
             EngReleaseSemaphore(pdc2->ppdev->hsemDevLock);
@@ -1179,5 +1218,81 @@ IntGdiCreateDisplayDC(HDEV hDev, ULONG DcType, BOOL EmptyDC)
         hDC = IntGdiCreateDC(NULL, NULL, NULL, NULL, (DcType == DCTYPE_INFO));
 
     return hDC;
+}
+
+/*
+ * GreSetDCOrg for a window DC whose binding USER changed: from another process or the frame timer, which
+ * DC_LockDc refuses for a DC that a process owns. Only kernel fields of the DC are set.
+ */
+BOOL
+NTAPI
+GreRedirSetDCOrg(
+    _In_ HDC hdc,
+    _In_ LONG x,
+    _In_ LONG y,
+    _In_opt_ PRECTL prcl)
+{
+    PDC pdc = DC_LockDcAnyOwner(hdc);
+
+    if (!pdc)
+        return FALSE;
+    pdc->ptlDCOrig.x = x;
+    pdc->ptlDCOrig.y = y;
+    pdc->ptlFillOrigin.x = pdc->dclevel.ptlBrushOrigin.x + x;
+    pdc->ptlFillOrigin.y = pdc->dclevel.ptlBrushOrigin.y + y;
+    if (prcl)
+        pdc->erclWindow = *prcl;
+    DC_UnlockDc(pdc);
+    return TRUE;
+}
+
+/*
+ * Binds a window DC to a redirection surface (ntuser/redir.c), or with psurf NULL back to the screen.
+ * pvRedir is USER's record for the window; *ppvOld gets the record the DC had (USER keeps the
+ * references). The DC stays DCTYPE_DIRECT; DC_REDIRECTION makes it draw like a memory DC into the surface.
+ * Called from any process and from the frame timer: the DC's user-mode attributes (pdcattr, memory of
+ * the process that owns the DC) are not touched here (DC_REDIR_ATTRDIRTY, applied by DC_LockDc).
+ */
+ULONG
+NTAPI
+GreRedirBindDC(
+    _In_ HDC hdc,
+    _In_opt_ PVOID pvRedir,
+    _In_opt_ PSURFACE psurf,
+    _Out_ PVOID *ppvOld)
+{
+    PDC pdc;
+
+    *ppvOld = NULL;
+    /* Fails for a DC another process holds locked for long: the caller keeps the binding and tries again */
+    pdc = DC_LockDcAnyOwner(hdc);
+    if (!pdc)
+        return GreIsHandleValidAnyOwner(hdc) ? REDIRBIND_BUSY : REDIRBIND_GONE;
+    if (pdc->dctype != DCTYPE_DIRECT)
+    {
+        DC_UnlockDc(pdc);
+        return REDIRBIND_GONE;
+    }
+
+    *ppvOld = (pdc->fs & DC_REDIRECTION) ? pdc->pvRedir : NULL;
+    RECTL_vSetEmptyRect(&pdc->rclRedirDraw);
+    if (psurf)
+    {
+        /* The DC takes its own reference on the surface (by pointer: the handle has no owner) */
+        DC_vSelectSurface(pdc, psurf);
+        pdc->dclevel.sizl = pdc->dclevel.pSurface->SurfObj.sizlBitmap;
+        pdc->fs |= DC_REDIRECTION | DC_DIRTY_RAO | DC_REDIR_ATTRDIRTY;
+        pdc->pvRedir = pvRedir;
+    }
+    else if (pdc->fs & DC_REDIRECTION)
+    {
+        pdc->fs &= ~DC_REDIRECTION;
+        pdc->fs |= DC_REDIR_ATTRDIRTY;
+        pdc->pvRedir = NULL;
+        /* The screen again (drops the DC's reference on the surface) */
+        DC_vUpdateDCSurface(pdc);
+    }
+    DC_UnlockDc(pdc);
+    return REDIRBIND_OK;
 }
 

@@ -444,7 +444,8 @@ RawInputThreadMain(VOID)
     PINPUT_DEVICE_INFO DeviceInfo;
     NTSTATUS Status;
     //LARGE_INTEGER WaitTimeout;
-    PVOID WaitObjects[3], pSignaledObject = NULL;
+    PVOID WaitObjects[4], pSignaledObject = NULL;
+    ULONG cWaitObjects;
     KWAIT_BLOCK WaitBlockArray[RTL_NUMBER_OF(WaitObjects)];
     PVOID ShutdownEvent;
     HWINSTA hWinSta;
@@ -509,8 +510,11 @@ RawInputThreadMain(VOID)
         WaitObjects[0] = ShutdownEvent;
         WaitObjects[1] = MasterTimer;
         WaitObjects[2] = gDeviceListChangedEvent;
+        /* Redirected windows (redir.c): presents of DCs that stay in use */
+        WaitObjects[3] = gRedirTimer;
+        cWaitObjects = gRedirTimer ? 4 : 3;
 
-        Status = KeWaitForMultipleObjects(RTL_NUMBER_OF(WaitObjects),
+        Status = KeWaitForMultipleObjects(cWaitObjects,
                                           WaitObjects,
                                           WaitAny,
                                           UserRequest,
@@ -520,7 +524,7 @@ RawInputThreadMain(VOID)
                                           WaitBlockArray);
 
         if ((Status >= STATUS_WAIT_0) &&
-            (Status < (STATUS_WAIT_0 + RTL_NUMBER_OF(WaitObjects))))
+            (Status < (STATUS_WAIT_0 + cWaitObjects)))
         {
             /* Some device has finished reading */
             pSignaledObject = WaitObjects[Status - STATUS_WAIT_0];
@@ -532,6 +536,10 @@ RawInputThreadMain(VOID)
             else if (pSignaledObject == MasterTimer)
             {
                 ProcessTimers();
+            }
+            else if (gRedirTimer && pSignaledObject == gRedirTimer)
+            {
+                UserRedirPresentPending();
             }
             else if (pSignaledObject == ShutdownEvent)
             {
