@@ -147,8 +147,8 @@ BOOL WINAPI RegisterClientPFN(VOID)
 
   KSET(&pfnClientA, pfnScrollBarWndProc, ScrollBarWndProcA);
   KSET(&pfnClientW, pfnScrollBarWndProc, ScrollBarWndProcW);
-  KSET(&pfnClientA, pfnTitleWndProc, IconTitleWndProc);
-  KSET(&pfnClientW, pfnTitleWndProc, IconTitleWndProc);
+  KSET(&pfnClientA, pfnTitleWndProc, IconTitleWndProcA);
+  KSET(&pfnClientW, pfnTitleWndProc, IconTitleWndProcW);
   KSET(&pfnClientA, pfnMenuWndProc, PopupMenuWndProcA);
   KSET(&pfnClientW, pfnMenuWndProc, PopupMenuWndProcW);
   KSET(&pfnClientA, pfnDesktopWndProc, DesktopWndProcA);
@@ -239,6 +239,6 @@ BOOL WINAPI RegisterClientPFN(VOID)
                                             &pfnClientW,
                                             &pfnClientWorker,
                                             User32Instance);
-  
+
   return NT_SUCCESS(Status) ? TRUE : FALSE;
 }
