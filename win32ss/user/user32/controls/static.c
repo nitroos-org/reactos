@@ -362,7 +362,14 @@ LRESULT WINAPI StaticWndProc_common( HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
     LONG style = full_style & SS_TYPEMASK;
 
     if (!IsWindow( hwnd )) return 0;
+#ifdef __REACTOS__
+    /* ReactOS: win32k rejects a second FNID assignment with ERROR_INVALID_PARAMETER, so set it only once,
+     * on WM_NCCREATE (like button/edit). Doing it on every message leaked last error 87 out of EnableWindow
+     * and SetWindowLong(GWL_STYLE) on a STATIC window; Windows leaves the last error untouched. */
+    if (uMsg == WM_NCCREATE) NtUserSetWindowFNID( hwnd, MAKE_FNID(NTUSER_WNDPROC_STATIC) );
+#else
     NtUserSetWindowFNID( hwnd, MAKE_FNID(NTUSER_WNDPROC_STATIC) );
+#endif
 
     switch (uMsg)
     {
@@ -420,7 +427,13 @@ LRESULT WINAPI StaticWndProc_common( HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
 
     case WM_ENABLE:
         STATIC_TryPaintFcn( hwnd, full_style );
+#ifdef __REACTOS__
+        /* ReactOS: no parent/owner means no notification; SendMessageW(NULL) would leave ERROR_INVALID_WINDOW_HANDLE (1400) as the
+         * last error where Windows leaves it untouched (enwin87 oracle probe) */
+        if ((full_style & SS_NOTIFY) && GetParent(hwnd)) {
+#else
         if (full_style & SS_NOTIFY) {
+#endif
             if (wParam) {
                 SendMessageW( GetParent(hwnd), WM_COMMAND,
                               MAKEWPARAM( GetWindowLongPtrW(hwnd,GWLP_ID), STN_ENABLE ), (LPARAM)hwnd);
