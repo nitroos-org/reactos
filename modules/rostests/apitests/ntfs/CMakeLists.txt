@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     access.c
+    attrs.c
     delete.c
     inherit.c
     notify.c
