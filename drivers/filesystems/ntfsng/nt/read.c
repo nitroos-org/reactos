@@ -114,7 +114,7 @@ static int NgRdioTransfer(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Buffer)
  * transfer of such a write no longer holds CoreLock, which used to make the reader wait; so a read could return
  * the clusters before that write reached them or raised the initialized size (zeros, seen by pwchk).  A lazy writer holds
  * PagingIoResource shared from before it marks the view clean until its write is done: taking it exclusive waits
- * for that; a paging or non-cached write holds PagingWriteLock exclusive throughout, up to ngc_dio_end.  Both are
+ * for that (every paging write transfer holds it shared until its ngc_dio_end); a non-cached write holds PagingWriteLock exclusive throughout.  Both are
  * taken one after the other and dropped at once, with nothing else held (MainResource was released after the flush).
  */
 static VOID NgWaitStreamWrites(PNG_FCB Fcb)

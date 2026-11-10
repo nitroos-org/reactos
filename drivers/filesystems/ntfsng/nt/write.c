@@ -19,7 +19,8 @@ int ngos_dev_write_v(void *dev, const struct ngos_iov *iov, unsigned int n);
 
 /*
  * Lock order: FCB MainResource -> FCB PagingIoResource -> Vcb->CoreLock -> core mutexes, and
- * FCB MainResource -> FCB PagingWriteLock -> Vcb->CoreLock -> Vcb->DataIoGate.
+ * FCB MainResource -> FCB PagingWriteLock -> Vcb->CoreLock -> Vcb->DataIoGate.  PagingWriteLock covers the START of a paging
+ * write (see the comment above NgDioSlotBegin): the transfers of one stream overlap, the initialized size is raised in order.
  * CoreLock is never held across a Cc or Mm call or while touching unlocked user memory.  Paging writes
  * take PagingWriteLock (the lazy writer comes with PagingIoResource shared), then PagingIoResource only
  * by a try that never waits, then CoreLock; nobody holding PagingWriteLock waits for PagingIoResource or
@@ -284,7 +285,7 @@ static VOID NgSizesFromCore(PNG_FCB Fcb)
     Fcb->Header.AllocationSize.QuadPart = Alloc;
     if (Alloc > Fcb->CachedEnd)
         Fcb->CachedEnd = Alloc;
-    Fcb->Header.FileSize.QuadPart = Fcb->Stat.size;
+    NgWriteSize(&Fcb->Header.FileSize.QuadPart, Fcb->Stat.size);
     Fcb->Header.ValidDataLength.QuadPart = Fcb->Stat.size;
 }
 
@@ -435,6 +436,7 @@ NTSTATUS NgSetFileSizeForWrite(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG Ne
     LARGE_INTEGER Li, Li2;
     IO_STATUS_BLOCK Iosb;
     NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN GrowShared;
     int Err;
 
     if (NewSize < 0)
@@ -450,7 +452,22 @@ NTSTATUS NgSetFileSizeForWrite(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG Ne
             return STATUS_USER_MAPPED_FILE;
         NgFlushStream(Fcb, &Iosb);
     }
-    ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
+    /*
+     * A pure growth of a stream that is already large and in clusters (the append of a streaming writer) takes
+     * PagingIoResource SHARED, like the lazy writer, and does not wait behind its write-back of the same stream
+     * (a 1 MB append waited for a whole write-back request each time: the writer ran at the pace of the
+     * write-back and the write-back found one append's worth of dirty data).  What the exclusive mode keeps out
+     * is a size change that races with a paging write; growth cannot hurt one: paging writes read the size once
+     * (NgReadSize), clip to it, and no dirty page exists beyond a size that was not published yet (the size is
+     * published under CoreLock before the data is copied); the clusters and the initialized size change only under
+     * CoreLock, and an unlocked transfer checks its mapping again at its end (ngc_dio_end).  Everything else
+     * (a shrink, a small or resident stream, the paging file) keeps the exclusive mode.
+     */
+    GrowShared = NewSize > OldSize && DataFrom != MAXLONGLONG && OldSize >= NG_GROW_SHARED_MIN && !Fcb->IsPagingFile && !Fcb->IsVolume;
+    if (GrowShared)
+        ExAcquireResourceSharedLite(Fcb->Header.PagingIoResource, TRUE);
+    else
+        ExAcquireResourceExclusiveLite(Fcb->Header.PagingIoResource, TRUE);
     NgAcquireCore(Vcb);
     /*
      * A growth that may allocate waits for the commit of what a free left uncommitted (ngc_before_alloc), and a
@@ -774,6 +791,122 @@ static long NgZeroGap(PNG_VCB Vcb, PNG_FCB Fcb, LONGLONG Offset, PUCHAR Bounce)
 }
 
 /*
+ * Unlocked paging write transfers of ONE stream in flight together (the lazy writer's workers and a flushing thread write
+ * different ranges of a stream at the same time: one request at a time left the disk idle during each request's set-up and
+ * completion, 35 % of the time at 1 MB .. 4 MB requests).  PagingWriteLock is held only for the start of a write (checks,
+ * zero fill of a gap, ngc_dio_begin, registering the transfer in DioSlot), not for the transfer.  What keeps it correct:
+ *  - A transfer that starts while others are in flight is taken only when it starts exactly where they end (DioChainEnd:
+ *    the chain reaches up from the initialized size, so no gap needs zeros); any other write waits until none is in flight,
+ *    and then runs as it always did.  The zero fill of a gap, non-cached writes and everything that took PagingWriteLock
+ *    for the whole of a write wait for DioInflight == 0 once they hold it (new transfers need that lock to start).
+ *  - The initialized size is raised by ngc_dio_end, which only needs the data of ITS range on the device.  A transfer ends
+ *    (ngc_dio_end) only after every transfer that started before it has ended, so the initialized size moves up in order and
+ *    never past a range that is not on the device.  A transfer whose predecessor failed does not raise it (NgDioSlotPoisoned):
+ *    its data is on the device above the initialized size, unreachable, and the pages stay dirty.
+ *  - Every transfer holds PagingIoResource shared until it has ended, as before, so size changes, truncation and non-cached
+ *    reads (NgWaitStreamWrites) still wait for all of them.
+ *  - A waiting transfer holds no CoreLock and no DataIoGate (released right after its device transfer): the predecessor
+ *    needs CoreLock to end, and a cluster free holds CoreLock while it waits for the gate.
+ */
+static LONG NgDioSlotBegin(PNG_FCB Fcb, LONGLONG Start, LONGLONG End)
+{
+    KIRQL Irql;
+    LONG i, Slot = -1;
+
+    KeAcquireSpinLock(&Fcb->DioLock, &Irql);
+    for (i = 0; i < NG_DIO_SLOTS; i++)
+    {
+        if (!Fcb->DioSlot[i].Used)
+        {
+            Slot = i;
+            break;
+        }
+    }
+    ASSERT(Slot >= 0);
+    Fcb->DioSlot[Slot].Start = Start;
+    Fcb->DioSlot[Slot].End = End;
+    Fcb->DioSlot[Slot].Poisoned = FALSE;
+    Fcb->DioSlot[Slot].Used = TRUE;
+    if (Fcb->DioInflight++ == 0 || End > Fcb->DioChainEnd)
+        Fcb->DioChainEnd = End;
+    KeReleaseSpinLock(&Fcb->DioLock, Irql);
+    return Slot;
+}
+
+/* With PagingWriteLock held, before CoreLock: may the next write at Offset join the transfers in flight?  If not, waits until none is. */
+static BOOLEAN NgDioChainOrIdle(PNG_FCB Fcb, LONGLONG Offset)
+{
+    KIRQL Irql;
+    BOOLEAN Chain, Idle;
+
+    for (;;)
+    {
+        KeAcquireSpinLock(&Fcb->DioLock, &Irql);
+        Idle = Fcb->DioInflight == 0;
+        Chain = !Idle && Fcb->DioInflight < NG_DIO_SLOTS && Fcb->DioChainEnd == Offset;
+        if (!Idle && !Chain)
+            KeResetEvent(&Fcb->DioEvent);
+        KeReleaseSpinLock(&Fcb->DioLock, Irql);
+        if (Idle || Chain)
+            return Chain;
+        KeWaitForSingleObject(&Fcb->DioEvent, Executive, KernelMode, FALSE, NULL);
+    }
+}
+
+/* With PagingWriteLock held (no transfer can start), before CoreLock: waits for the transfers in flight to end. */
+VOID NgDioWaitIdle(PNG_FCB Fcb)
+{
+    (VOID)NgDioChainOrIdle(Fcb, -1);
+}
+
+/* After the device transfer: waits until every transfer that started before this slot's has ended; TRUE if one of them failed. */
+static BOOLEAN NgDioWaitPredecessors(PNG_FCB Fcb, LONG Slot)
+{
+    KIRQL Irql;
+    BOOLEAN Wait;
+    LONG i;
+
+    for (;;)
+    {
+        KeAcquireSpinLock(&Fcb->DioLock, &Irql);
+        Wait = FALSE;
+        for (i = 0; i < NG_DIO_SLOTS; i++)
+        {
+            if (i != Slot && Fcb->DioSlot[i].Used && Fcb->DioSlot[i].Start < Fcb->DioSlot[Slot].Start)
+                Wait = TRUE;
+        }
+        if (Wait)
+            KeResetEvent(&Fcb->DioEvent);
+        KeReleaseSpinLock(&Fcb->DioLock, Irql);
+        if (!Wait)
+            return Fcb->DioSlot[Slot].Poisoned;
+        KeWaitForSingleObject(&Fcb->DioEvent, Executive, KernelMode, FALSE, NULL);
+    }
+}
+
+/* The transfer has ended (its initialized size raised, or not): the slot goes, the later ones learn whether it failed. */
+static VOID NgDioSlotEnd(PNG_FCB Fcb, LONG Slot, BOOLEAN Failed)
+{
+    KIRQL Irql;
+    LONG i;
+
+    KeAcquireSpinLock(&Fcb->DioLock, &Irql);
+    if (Failed)
+    {
+        for (i = 0; i < NG_DIO_SLOTS; i++)
+        {
+            if (Fcb->DioSlot[i].Used && Fcb->DioSlot[i].Start > Fcb->DioSlot[Slot].Start)
+                Fcb->DioSlot[i].Poisoned = TRUE;
+        }
+    }
+    Fcb->DioSlot[Slot].Used = FALSE;
+    if (--Fcb->DioInflight == 0)
+        Fcb->DioChainEnd = 0;
+    KeSetEvent(&Fcb->DioEvent, IO_NO_INCREMENT, FALSE);
+    KeReleaseSpinLock(&Fcb->DioLock, Irql);
+}
+
+/*
  * Paging write from the lazy writer or Mm.  It holds the FCB's PagingWriteLock exclusive (one data write
  * of the stream at a time: no zero fill or initialized-size change of another write overlaps it) and,
  * if a try gets it, its PagingIoResource shared (no size change meanwhile; the lazy writer holds it
@@ -793,11 +926,12 @@ static long NgZeroGap(PNG_VCB Vcb, PNG_FCB Fcb, LONGLONG Offset, PUCHAR Bounce)
  */
 static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offset, ULONG Length)
 {
-    LONGLONG FileSize = Fcb->Header.FileSize.QuadPart;
+    LONGLONG FileSize = NgReadSize(&Fcb->Header.FileSize.QuadPart);
     PVOID Buffer;
     PUCHAR Bounce = NULL;
     ULONG Clipped;
-    BOOLEAN PagingShared, Unlocked = FALSE, Drop = FALSE;
+    BOOLEAN PagingShared, Unlocked = FALSE, Drop = FALSE, Chain = FALSE, WriteLockHeld = TRUE, Poisoned = FALSE;
+    LONG Slot = -1;
     struct ngc_dio Dio;
     long Done = 0;
     int IoErr;
@@ -816,6 +950,10 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     PagingShared = ExAcquireResourceSharedLite(Fcb->Header.PagingIoResource, FALSE);
     if (PagingShared && !Vcb->WriteThrough)
         Bounce = ExAllocateFromNPagedLookasideList(&Vcb->DioBounce);
+    /* Transfers of this stream in flight: join them (this write starts where they end), or wait until there are none */
+    Chain = NgDioChainOrIdle(Fcb, Offset) && Bounce != NULL;
+    if (!Chain)
+        NgDioWaitIdle(Fcb);
     NgAcquireCore(Vcb);
     /* Deleted under CoreLock: a page writer that raced with the last cleanup's delete drops its data. */
     if (Fcb->Deleted)
@@ -832,7 +970,7 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
         goto out;
     }
     Done = NgEnsureNode(Fcb);
-    if (!Done && Bounce && Vcb->CoreDepth == 1 && !Vcb->Dismounted && !Vcb->WriteThrough)
+    if (!Done && Bounce && !Chain && Vcb->CoreDepth == 1 && !Vcb->Dismounted && !Vcb->WriteThrough)
     {
         /* A write past the initialized size: zero the gap in pieces without CoreLock first (then ngc_dio_begin below). */
         Done = NgZeroGap(Vcb, Fcb, Offset, Bounce);
@@ -852,7 +990,8 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     }
     if (!Done && Bounce && Vcb->CoreDepth == 1 && !Vcb->Dismounted && !Vcb->WriteThrough)
     {
-        Done = ngc_dio_begin(Vcb->Core, Fcb->Node, Offset, Clipped, Length, &Dio);
+        /* Joining transfers in flight: the chain's end is the initialized size to be (read under PagingWriteLock: nothing starts or ends the chain meanwhile but an end, which can only lower it to none) */
+        Done = ngc_dio_begin(Vcb->Core, Fcb->Node, Offset, Clipped, Length, &Dio, Chain ? (unsigned long long)Offset : 0);
         if (!Done)
             Unlocked = TRUE;
         else if (Done == -NGC_EAGAIN)
@@ -860,12 +999,28 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     }
     if (Unlocked)
     {
+        Slot = NgDioSlotBegin(Fcb, Offset, Offset + Dio.len);
         NgDataIoBegin(Vcb);
+        /* CoreLock is dropped: the next write of the stream may start (its ngc_dio_begin takes CoreLock) */
+        ExReleaseResourceLite(&Fcb->PagingWriteLock);
+        WriteLockHeld = FALSE;
 
         IoErr = NgDioTransfer(Vcb, &Dio, Buffer, Bounce, Irp->MdlAddress);
 
-        NgDataIoTransferred(Vcb);
-        Done = ngc_dio_end(Vcb->Core, &Dio, Buffer, IoErr);
+        /* The gate is not needed any more; the transfers that started before this one end first (no CoreLock, no gate held) */
+        ExReleaseResourceLite(&Vcb->DataIoGate);
+        Poisoned = NgDioWaitPredecessors(Fcb, Slot);
+        NgAcquireCore(Vcb);
+        if (Poisoned)
+        {
+            /* An earlier range failed: the initialized size must not move past it.  The data of this one is on the device, above it. */
+            ngc_dio_abandon(Vcb->Core, &Dio);
+            Done = -NGC_EIO;
+        }
+        else
+        {
+            Done = ngc_dio_end(Vcb->Core, &Dio, Buffer, IoErr);
+        }
         NgDataIoDone(Vcb);
         if (Done >= 0)
             Vcb->DioWrites++;
@@ -881,20 +1036,46 @@ static NTSTATUS NgPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, LONGLONG Offse
     }
     else if (!Done)
     {
-        Vcb->DioFallbacks++;
-        Done = ngc_write(Vcb->Core, Fcb->Node, Offset, Clipped, Buffer);
+        if (Chain)
+        {
+            /*
+             * Written under the lock after all, with transfers of the stream still in flight below this range: ngc_write would
+             * zero the gap up to Offset, over their data.  PagingWriteLock is held (no new one starts) and CoreLock is not
+             * held up the stack (it is never held across a Cc or Mm call), so the others can end while this waits.
+             */
+            ASSERT(Vcb->CoreDepth == 1);
+            NgReleaseCore(Vcb);
+            NgDioWaitIdle(Fcb);
+            NgAcquireCore(Vcb);
+            Done = Fcb->Deleted ? 0 : NgEnsureNode(Fcb);
+            if (!Done && Vcb->RawWritten)
+            {
+                NgReleaseCore(Vcb);
+                Drop = TRUE;
+                goto out;
+            }
+        }
+        if (!Done && !Fcb->Deleted)
+        {
+            Vcb->DioFallbacks++;
+            Done = ngc_write(Vcb->Core, Fcb->Node, Offset, Clipped, Buffer);
+        }
     }
     if (Done >= 0)
         NgAfterChange(Vcb);
     if (Fcb->OpenHandles == 0)
         NgParkNode(Fcb);
     NgReleaseCore(Vcb);
+    /* The initialized size (or the failure) is published: the slot goes and the next transfers may end */
+    if (Slot >= 0)
+        NgDioSlotEnd(Fcb, Slot, Done < 0);
 out:
     if (Bounce)
         ExFreeToNPagedLookasideList(&Vcb->DioBounce, Bounce);
     if (PagingShared)
         ExReleaseResourceLite(Fcb->Header.PagingIoResource);
-    ExReleaseResourceLite(&Fcb->PagingWriteLock);
+    if (WriteLockHeld)
+        ExReleaseResourceLite(&Fcb->PagingWriteLock);
     if (Drop)
         return NgDropPagingWrite(Vcb, Fcb, Irp, Length);
     if (Done < 0)
@@ -1295,6 +1476,8 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         PUCHAR ZBounce = Vcb->WriteThrough ? NULL : ExAllocateFromNPagedLookasideList(&Vcb->DioBounce);
 
         ExAcquireResourceExclusiveLite(&Fcb->PagingWriteLock, TRUE);
+        /* Paging write transfers in flight (they do not hold PagingWriteLock while they run): their initialized size and data come first */
+        NgDioWaitIdle(Fcb);
         NgAcquireCore(Vcb);
         Err = NgEnsureNode(Fcb);
         /* MainResource (held) keeps size changes out; the gap below Offset is zeroed without CoreLock, then written here. */

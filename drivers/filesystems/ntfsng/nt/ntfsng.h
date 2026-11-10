@@ -189,6 +189,16 @@ typedef struct _NG_RUN
 } NG_RUN, *PNG_RUN;
 
 /* File control block: one per (MFT record, stream) open on a volume. */
+/* An unlocked paging write transfer of a stream that is in flight (NgPagingWrite): written to the device in parallel with the next one's start */
+#define NG_DIO_SLOTS 4
+typedef struct _NG_DIO_SLOT
+{
+    LONGLONG Start;
+    LONGLONG End;
+    UCHAR Used;
+    UCHAR Poisoned;                 /* a transfer that started before this one failed: this one must not raise the initialized size */
+} NG_DIO_SLOT;
+
 typedef struct _NG_FCB
 {
     FSRTL_COMMON_FCB_HEADER Header; /* must be first: FsContext */
@@ -199,7 +209,12 @@ typedef struct _NG_FCB
                                        The part of the last page past the end can be written through a mapped view: not covered */
     ERESOURCE MainResource;
     ERESOURCE PagingIoResource;
-    ERESOURCE PagingWriteLock;      /* exclusive around every paging and non-cached data write of the stream (write.c) */
+    ERESOURCE PagingWriteLock;      /* exclusive around the start (checks, zero fill, ngc_dio_begin) of every paging and non-cached data write of the stream, and around the whole of the others (write.c) */
+    KSPIN_LOCK DioLock;             /* the unlocked paging write transfers in flight (DioSlot, DioInflight, DioChainEnd) */
+    KEVENT DioEvent;                /* a transfer ended (notification; reset under DioLock by a waiter that finds its condition false) */
+    LONG DioInflight;               /* DioSlot entries in use */
+    LONGLONG DioChainEnd;           /* while DioInflight > 0: the end of the transfers in flight, which reach up from the initialized size without a gap */
+    NG_DIO_SLOT DioSlot[NG_DIO_SLOTS];
     LIST_ENTRY VcbLinks;
     LIST_ENTRY HashLinks;           /* in Vcb->FcbHash[NgFcbBucket(MftNo)] while listed (VcbLinks.Flink is not NULL) */
     LIST_ENTRY IdleLinks;           /* in Vcb->IdleList while Flink is not NULL (FcbListLock) */
@@ -401,6 +416,16 @@ NTSTATUS NgSetFileSizeForWrite(PNG_FCB Fcb, PFILE_OBJECT FileObject, LONGLONG Ne
 int NgFlushVolume(PNG_VCB Vcb);
 VOID NgFlushStream(PNG_FCB Fcb, PIO_STATUS_BLOCK Iosb);
 NTSTATUS NgDropPagingWrite(PNG_VCB Vcb, PNG_FCB Fcb, PIRP Irp, ULONG Length);
+/* A cached extending write takes PagingIoResource shared (not exclusive) for a stream at least this long (NgSetFileSizeForWrite) */
+#define NG_GROW_SHARED_MIN (1024 * 1024)
+/* One 64-bit size read that cannot tear against a growth made under another lock (i386 reads two halves otherwise) */
+#ifdef _WIN64
+#define NgReadSize(p) (*(volatile LONGLONG *)(p))
+#define NgWriteSize(p, v) (*(volatile LONGLONG *)(p) = (v))
+#else
+#define NgReadSize(p) InterlockedCompareExchange64((volatile LONGLONG *)(p), 0, 0)
+#define NgWriteSize(p, v) ((VOID)InterlockedExchange64((volatile LONGLONG *)(p), (v)))
+#endif
 #define NG_DIO_BOUNCE (256 * 1024)
 #define NG_DIO_DIRECT_MAX (1024 * 1024)     /* one device request of a paging write sent from the caller's pages */
 #define NG_DIO_IOV 16                       /* requests of one transfer gathered before they are sent */

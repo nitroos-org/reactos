@@ -295,6 +295,8 @@ PNG_FCB NgAllocateFcb(PNG_VCB Vcb)
     ExInitializeResourceLite(&Fcb->MainResource);
     ExInitializeResourceLite(&Fcb->PagingIoResource);
     ExInitializeResourceLite(&Fcb->PagingWriteLock);
+    KeInitializeSpinLock(&Fcb->DioLock);
+    KeInitializeEvent(&Fcb->DioEvent, NotificationEvent, FALSE);
     FsRtlInitializeFileLock(&Fcb->FileLock, NULL, NULL);
     KeInitializeSpinLock(&Fcb->RunLock);
     InitializeListHead(&Fcb->CcbList);
