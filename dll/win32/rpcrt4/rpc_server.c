@@ -360,26 +360,38 @@ static RPC_STATUS process_bind_packet(RpcConnection *conn, RpcPktBindHdr *hdr,
 }
 
 
-/* Enforce what the interface was registered with, as Windows does for a call that reaches it:
- * RPC_IF_ALLOW_LOCAL_ONLY refuses a client that is not on this machine, and the interface security callback
- * decides each client (the binding handle of the call is its argument); a verdict other than RPC_S_OK refuses
- * the call with RPC_S_ACCESS_DENIED. The verdict is kept for the life of the client's connection unless the
- * interface was registered with RPC_IF_SEC_NO_CACHE. */
+/* Enforce what the interface was registered with, as Windows 10 does for a call that reaches it (measured on the
+ * oracle, evidence/rpcverify-20261110):
+ * - RPC_IF_ALLOW_LOCAL_ONLY: ncalrpc and a local named pipe are local; a TCP client is not, not even over the
+ *   loopback address or the machine's own address.
+ * - NOT done: Windows refuses a caller that set no authentication over TCP (unless the interface has
+ *   RPC_IF_ALLOW_CALLBACKS_WITH_NO_AUTH) and over a named pipe for RPC_IF_ALLOW_SECURE_ONLY interfaces and interfaces
+ *   with a callback but without that flag. Ours has no security package for RPC_C_AUTHN_WINNT yet
+ *   (RpcBindingSetAuthInfo fails with RPC_S_UNKNOWN_AUTHN_SERVICE), so no client could ever authenticate and the
+ *   refusal would make such interfaces unreachable; add it together with an NTLM client.
+ * - The interface security callback decides each client when the first call of a connection reaches the interface (not
+ *   at bind). Its first argument points to the interface's RPC_SYNTAX_IDENTIFIER (UUID and version); the second is the
+ *   binding handle of the call. A verdict other than RPC_S_OK refuses the call with RPC_S_ACCESS_DENIED.
+ * - The verdict is kept for the life of the client's connection unless the interface was registered with
+ *   RPC_IF_SEC_NO_CACHE; for a caller that set no authentication over a named pipe or TCP it is asked for every call. */
 static RPC_STATUS check_interface_access(RpcConnection *conn, RpcServerInterface *sif, RPC_BINDING_HANDLE binding)
 {
   RPC_IF_CALLBACK_FN *fn = sif->IfCallbackFn;
   const void *iface = sif->If;
   RPC_STATUS verdict = RPC_S_OK;
   struct rpc_if_cb_result *r;
+  BOOL cacheable = !(sif->Flags & RPC_IF_SEC_NO_CACHE);
 
   if ((sif->Flags & RPC_IF_ALLOW_LOCAL_ONLY) && !RPCRT4_IsLocalClient(conn))
   {
     WARN("remote client refused by a local-only interface %s\n", debugstr_guid(&sif->If->InterfaceId.SyntaxGUID));
     return RPC_S_ACCESS_DENIED;
   }
+  /* a caller that set no authentication over a named pipe or TCP: the verdict is not kept (Windows asks for every call) */
+  if (!conn->AuthInfo && strcmp(rpcrt4_conn_get_name(conn), "ncalrpc")) cacheable = FALSE;
   if (!fn) return RPC_S_OK;
 
-  if (!(sif->Flags & RPC_IF_SEC_NO_CACHE))
+  if (cacheable)
   {
     EnterCriticalSection(&server_cs);
     for (r = conn->if_cb_cache; r; r = r->next)
@@ -392,7 +404,7 @@ static RPC_STATUS check_interface_access(RpcConnection *conn, RpcServerInterface
   /* the callback may ask about the caller (RpcBindingInqAuthClient, RpcImpersonateClient) */
   RPCRT4_SetThreadCurrentCallHandle(binding);
   __TRY {
-    verdict = fn((RPC_IF_HANDLE)iface, binding);
+    verdict = fn((RPC_IF_HANDLE)&sif->If->InterfaceId, binding);
   } __EXCEPT_ALL {
     WARN("exception in the security callback of %s\n", debugstr_guid(&sif->If->InterfaceId.SyntaxGUID));
     verdict = RPC_S_ACCESS_DENIED;
@@ -400,7 +412,7 @@ static RPC_STATUS check_interface_access(RpcConnection *conn, RpcServerInterface
   RPCRT4_SetThreadCurrentCallHandle(NULL);
   if (verdict != RPC_S_OK) verdict = RPC_S_ACCESS_DENIED;
 
-  if (!(sif->Flags & RPC_IF_SEC_NO_CACHE))
+  if (cacheable)
   {
     struct rpc_if_cb_result *n = malloc(sizeof(*n));
     if (n)
