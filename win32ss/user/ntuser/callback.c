@@ -1054,15 +1054,21 @@ co_IntCallEventProc(HWINEVENTHOOK hook,
                    DWORD dwmsEventTime,
                      WINEVENTPROC Proc,
                                INT_PTR Mod,
-                     ULONG_PTR offPfn)
+                     ULONG_PTR offPfn,
+                     PUNICODE_STRING ModuleName)
 {
    LRESULT Result = 0;
    NTSTATUS Status;
    PEVENTPROC_CALLBACK_ARGUMENTS Common;
-   ULONG ArgumentLength, ResultLength;
+   ULONG ArgumentLength, ResultLength, NameLength = 0;
    PVOID Argument, ResultPointer;
 
-   ArgumentLength = sizeof(EVENTPROC_CALLBACK_ARGUMENTS);
+   /* An in-context hook runs in a process that may not have the DLL loaded: its path follows the arguments
+      as a NUL-terminated string, for user32 to load it by name */
+   if (ModuleName && ModuleName->Buffer && ModuleName->Length)
+      NameLength = ModuleName->Length + sizeof(WCHAR);
+
+   ArgumentLength = sizeof(EVENTPROC_CALLBACK_ARGUMENTS) + NameLength;
 
    Argument = IntCbAllocateMemory(ArgumentLength);
    if (NULL == Argument)
@@ -1081,6 +1087,12 @@ co_IntCallEventProc(HWINEVENTHOOK hook,
    Common->Proc = Proc;
    Common->Mod = Mod;
    Common->offPfn = offPfn;
+   if (NameLength)
+   {
+      PWCHAR Name = (PWCHAR)(Common + 1);
+      RtlCopyMemory(Name, ModuleName->Buffer, ModuleName->Length);
+      Name[ModuleName->Length / sizeof(WCHAR)] = UNICODE_NULL;
+   }
 
    ResultPointer = NULL;
    ResultLength = sizeof(LRESULT);

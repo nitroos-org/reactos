@@ -104,6 +104,7 @@ list(APPEND SOURCE
     SendMessageCallbackSenderDied.c
     SendMessageSenderDied.c
     SendMessageTimeout.c
+    SendMessageCopyData.c
     SetActiveWindow.c
     SetCoalescableTimer.c
     SetCursorPos.c
@@ -133,6 +134,8 @@ list(APPEND SOURCE
     Win8User.c
     Wow64WinArguments.c
     WinEventHook.c
+    XprocMessages.c
+    WinEventInContext.c
     WindowStationLeak.c
     WmPrint.c
     WndProc.c
@@ -160,7 +163,7 @@ target_link_libraries(user32_apitest wine ${PSEH_LIB})
 set_module_type(user32_apitest win32cui)
 add_importlibs(user32_apitest advapi32 imm32 gdi32 user32 msvcrt kernel32 ntdll)
 add_pch(user32_apitest precomp.h "${PCH_SKIP_SOURCE}")
-add_dependencies(user32_apitest user32_wevhook1 user32_wevhook2)
+add_dependencies(user32_apitest user32_wevhook1 user32_wevhook2 user32_wevhooklog)
 add_rostests_file(TARGET user32_apitest)
 add_dependencies(user32_apitest user32_mousehook)
 
