@@ -380,3 +380,11 @@ SymbolicName=NITRO_WARN_OB_CALLBACKS_NO_INTEGRITY
 Language=English
 The driver %1 registered object callbacks (ObRegisterCallbacks) but is not linked with the integrity check flag. Windows would refuse this; this system allows it for now.
 .
+
+MessageId=0x7002
+Severity=Error
+Facility=IO
+SymbolicName=NITRO_ERR_VOLUME_WRITE_BLOCKED
+Language=English
+A write to an NTFS volume failed. The file system accepts no further writes to that volume until it is mounted again. What was committed is intact, and the change that was interrupted is completed when the volume is mounted. The error code is in the data.
+.

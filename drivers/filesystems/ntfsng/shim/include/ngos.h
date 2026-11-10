@@ -39,6 +39,9 @@ int ngos_dev_read(void *dev, unsigned long long off, void *buf, unsigned int len
 int ngos_dev_write(void *dev, unsigned long long off, void *buf, unsigned int len);
 int ngos_dev_flush(void *dev);
 
+/* The volume on storage device dev stopped accepting writes after a failed device write: write an event log entry (err: a negative errno). */
+void ngos_volume_failed(void *dev, int err);
+
 /* Several writes of one transfer, all sent before any is waited for (queue depth > 1); 0, or -1 if any failed. */
 struct ngos_iov {
 	unsigned long long off;
