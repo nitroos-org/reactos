@@ -383,13 +383,17 @@ NtGdiTransformPoints(
         return FALSE;
     }
 
+    /* The byte count has to fit in a ULONG: a wrapped size would give a buffer smaller than Count points */
+    if (!NT_SUCCESS(RtlULongMult((ULONG)Count, sizeof(POINT), &Size)))
+    {
+        return FALSE;
+    }
+
     pdc = DC_LockDc(hDC);
     if (!pdc)
     {
         return FALSE;
     }
-
-    Size = Count * sizeof(POINT);
 
     // FIXME: It would be wise to have a small stack buffer as optimization
     Points = ExAllocatePoolWithTag(PagedPool, Size, GDITAG_TEMP);
