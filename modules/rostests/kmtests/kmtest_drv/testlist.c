@@ -75,7 +75,6 @@ KMT_TESTFUNC Test_KeDeviceQueue;
 KMT_TESTFUNC Test_KeDpc;
 KMT_TESTFUNC Test_KeEvent;
 KMT_TESTFUNC Test_KeFastFail;
-KMT_TESTFUNC Test_MmContiguousStandby;
 KMT_TESTFUNC Test_KeGeneralProtection;
 KMT_TESTFUNC Test_KeFloatPointState;
 KMT_TESTFUNC Test_KeGenericCallDpc;
@@ -95,6 +94,7 @@ KMT_TESTFUNC Test_KeDelayExecution;
 KMT_TESTFUNC Test_KernelType;
 KMT_TESTFUNC Test_MmMdl;
 KMT_TESTFUNC Test_MmCommitKernelFail;
+KMT_TESTFUNC Test_MmContiguousStandby;
 KMT_TESTFUNC Test_MmFaultFileHeld;
 KMT_TESTFUNC Test_MmOomRetry;
 KMT_TESTFUNC Test_MmSection;
@@ -218,7 +218,6 @@ const KMT_TEST TestList[] =
     { "KeDpc",                              Test_KeDpc },
     { "KeEvent",                            Test_KeEvent },
     { "-KeFastFail",                        Test_KeFastFail },
-    { "-MmContiguousStandby",               Test_MmContiguousStandby },
     { "-KeGeneralProtection",               Test_KeGeneralProtection },
     { "KeFloatPointState",                  Test_KeFloatPointState },
     { "KeGenericCallDpc",                   Test_KeGenericCallDpc },
@@ -241,6 +240,7 @@ const KMT_TEST TestList[] =
     { "-KernelType",                        Test_KernelType },
     { "MmMdl",                              Test_MmMdl },
     { "-MmCommitKernelFail",                Test_MmCommitKernelFail },
+    { "-MmContiguousStandby",               Test_MmContiguousStandby },
     { "MmFaultFileHeld",                    Test_MmFaultFileHeld },
     { "MmOomRetry",                         Test_MmOomRetry },
     { "MmSection",                          Test_MmSection },
