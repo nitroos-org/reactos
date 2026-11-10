@@ -131,6 +131,15 @@ SURFACE_AllocSurface(
     _In_opt_ ULONG cjBits,
     _In_opt_ PVOID pvBits);
 
+VOID
+NTAPI
+SURFACE_vSetCallerBits(
+    _Inout_ SURFOBJ *pso,
+    _In_ ULONG cx,
+    _In_ ULONG cy,
+    _In_ ULONG cjWidth,
+    _In_ PVOID pvBits);
+
 FORCEINLINE
 VOID
 SURFACE_vSetPalette(
