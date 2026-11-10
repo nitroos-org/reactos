@@ -475,16 +475,19 @@ DceReleaseDC(DCE* dce, BOOL EndPaint)
          DceRedirBind(dce, NULL);
    }
 
-   /* Restore previous visible region */
-   if (EndPaint)
-   {
-      DceUpdateVisRgn(dce, dce->pwndOrg, dce->DCXFlags);
-   }
-
+   /* The clip region (the update region of a paint) goes first: the visible region restored below must not keep
+    * it, or what the owner draws through a held CS_OWNDC / CS_CLASSDC DC after a paint reaches only the part
+    * that was invalid (a window that grew, a part that was painted) */
    if ((dce->DCXFlags & (DCX_INTERSECTRGN | DCX_EXCLUDERGN)) &&
          ((dce->DCXFlags & DCX_CACHE) || EndPaint))
    {
       DceDeleteClipRgn(dce);
+   }
+
+   /* Restore previous visible region */
+   if (EndPaint)
+   {
+      DceUpdateVisRgn(dce, dce->pwndOrg, dce->DCXFlags);
    }
 
    if (dce->DCXFlags & DCX_CACHE)
