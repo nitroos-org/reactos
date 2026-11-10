@@ -135,6 +135,11 @@ IntRemoveEvent(PVOID Object)
       RemoveEntryList(&pEH->Chain);
       GlobalEvents->Counts--;
       if (!GlobalEvents->Counts) gpsi->dwInstalledEventHooks = 0;
+      if (pEH->ModuleName.Buffer)
+      {
+         ExFreePoolWithTag(pEH->ModuleName.Buffer, TAG_HOOK);
+         pEH->ModuleName.Buffer = NULL;
+      }
       UserDeleteObject(UserHMGetHandle(pEH), TYPE_WINEVENTHOOK);
       KeLeaveCriticalRegion();
       return TRUE;
@@ -169,10 +174,33 @@ co_EVENT_CallEvents( DWORD event,
                                  EngGetTickCount32(),
                                  pEH->Proc,
                                  pEH->ihmod,
-                                 pEH->offPfn);
+                                 pEH->offPfn,
+                                 NULL);
 
    ExFreePoolWithTag(pEP, TAG_HOOK);
    return Result;
+}
+
+/* In-context hooks run the hook procedure, and so load the hook DLL, in the thread that raises the event. Windows
+   never does that in csrss or in a protected process, nor in a process of another session than the hook's owner.
+   (Same rule as the hook DLL injection of IntHookModuleUnloaded: system processes and csrss are skipped.) */
+static
+BOOL
+FASTCALL
+IntEventInContextAllowed(PEVENTHOOK pEH, PTHREADINFO ptiCurrent)
+{
+   PPROCESSINFO ppiCsr = PsGetProcessWin32Process(gpepCSRSS);
+   PEPROCESS peCur = ptiCurrent->ppi->peProcess;
+
+   /* a hook on the events of its own process loads nothing anywhere */
+   if (pEH->head.pti->ppi == ptiCurrent->ppi)
+      return TRUE;
+
+   if (PsIsSystemProcess(peCur) || ptiCurrent->ppi == ppiCsr || ((PEPROCESS)peCur)->Protection != 0)
+      return FALSE;
+   if (PsGetProcessSessionId(peCur) != PsGetProcessSessionId(pEH->head.pti->ppi->peProcess))
+      return FALSE;
+   return TRUE;
 }
 
 VOID
@@ -223,6 +251,11 @@ IntNotifyWinEvent(
            UserRefObjectCo(pEH, &Ref);
            if (pEH->Flags & WINEVENT_INCONTEXT)
            {
+              if (!IntEventInContextAllowed(pEH, ptiCurrent))
+              {
+                 UserDerefObjectCo(pEH);
+                 continue;
+              }
               TRACE("In       Event 0x%x, idObject %d hwnd %p\n", Event, idObject, pWnd ? UserHMGetHandle(pWnd) : NULL);
               co_IntCallEventProc( UserHMGetHandle(pEH),
                                    Event,
@@ -233,7 +266,8 @@ IntNotifyWinEvent(
                                    EngGetTickCount32(),
                                    pEH->Proc,
                                    pEH->ihmod,
-                                   pEH->offPfn);
+                                   pEH->offPfn,
+                                   &pEH->ModuleName);
            }
            else
            {
@@ -300,6 +334,7 @@ NtUserSetWinEventHook(
    NTSTATUS Status;
    HANDLE Handle;
    PTHREADINFO pti;
+   UNICODE_STRING ModuleName = { 0, 0, NULL };
 
    TRACE("NtUserSetWinEventHook hmod %p, pfn %p\n", hmodWinEventProc, lpfnWinEventProc);
 
@@ -342,6 +377,43 @@ NtUserSetWinEventHook(
          ERR("Dll not found\n");
          EngSetLastError(ERROR_DLL_NOT_FOUND);
          goto SetEventExit;
+      }
+
+      /* The DLL path is what lets the process the events happen in load the DLL (the hook procedure is called
+         there, where the module of the process that installed the hook is not mapped). Capture it. */
+      {
+         UNICODE_STRING Captured;
+
+         Status = MmCopyFromCaller(&Captured, puString, sizeof(UNICODE_STRING));
+         if (!NT_SUCCESS(Status))
+         {
+            SetLastNtError(Status);
+            goto SetEventExit;
+         }
+         /* Reject a counted string that does not fit its buffer, or a path the callback cannot carry */
+         if (!Captured.Buffer || !Captured.Length || Captured.Length > Captured.MaximumLength ||
+             (Captured.Length & 1) || Captured.Length > (MAX_PATH - 1) * sizeof(WCHAR))
+         {
+            EngSetLastError(ERROR_INVALID_PARAMETER);
+            goto SetEventExit;
+         }
+         ModuleName.Buffer = ExAllocatePoolWithTag(PagedPool, Captured.Length + sizeof(WCHAR), TAG_HOOK);
+         if (!ModuleName.Buffer)
+         {
+            EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            goto SetEventExit;
+         }
+         Status = MmCopyFromCaller(ModuleName.Buffer, Captured.Buffer, Captured.Length);
+         if (!NT_SUCCESS(Status))
+         {
+            ExFreePoolWithTag(ModuleName.Buffer, TAG_HOOK);
+            ModuleName.Buffer = NULL;
+            SetLastNtError(Status);
+            goto SetEventExit;
+         }
+         ModuleName.Buffer[Captured.Length / sizeof(WCHAR)] = UNICODE_NULL;
+         ModuleName.Length = Captured.Length;
+         ModuleName.MaximumLength = Captured.Length + sizeof(WCHAR);
       }
    }
    else
@@ -399,6 +471,10 @@ NtUserSetWinEventHook(
          pEH->ihmod = (INT_PTR)hmodWinEventProc;
       }
 
+      /* The hook owns the captured path now */
+      pEH->ModuleName = ModuleName;
+      ModuleName.Buffer = NULL;
+
       UserDereferenceObject(pEH);
 
       Ret = Handle;
@@ -406,6 +482,8 @@ NtUserSetWinEventHook(
    }
 
 SetEventExit:
+   if (ModuleName.Buffer)
+      ExFreePoolWithTag(ModuleName.Buffer, TAG_HOOK);
    UserLeave();
    return Ret;
 }

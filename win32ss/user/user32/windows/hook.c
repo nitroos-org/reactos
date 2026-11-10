@@ -864,57 +864,94 @@ User32CallHookProcFromKernel(PVOID Arguments, ULONG ArgumentLength)
   return ZwCallbackReturn(Arguments, ArgumentLength, Status);
 }
 
+/* TRUE when Proc is Mod's offPfn into the module loaded here under the path the hook was set with */
+static BOOL
+User32EventProcIsInModule(PEVENTPROC_CALLBACK_ARGUMENTS Common, LPCWSTR ModuleName)
+{
+    HMODULE hMod;
+    WCHAR szPath[MAX_PATH];
+    DWORD cch;
+
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)Common->Proc, &hMod))
+        return FALSE;
+
+    if ((ULONG_PTR)hMod + Common->offPfn != (ULONG_PTR)Common->Proc)
+        return FALSE;
+
+    cch = GetModuleFileNameW(hMod, szPath, _countof(szPath));
+    if (!cch || cch >= _countof(szPath))
+        return FALSE;
+
+    return (_wcsicmp(szPath, ModuleName) == 0);
+}
+
 NTSTATUS WINAPI
 User32CallEventProcFromKernel(PVOID Arguments, ULONG ArgumentLength)
 {
   PEVENTPROC_CALLBACK_ARGUMENTS Common;
   WINEVENTPROC Proc;
-  WCHAR module[MAX_PATH];
-  DWORD len;
+  LPCWSTR ModuleName = NULL;
   HMODULE mod = NULL;
-  BOOL Loaded = FALSE;
+  BOOL Skip = FALSE;
 
   Common = (PEVENTPROC_CALLBACK_ARGUMENTS) Arguments;
 
   Proc = Common->Proc;
 
-  if (Common->offPfn && Common->Mod)
-  {  // Validate the module again.
-     if (!(len = GetModuleFileNameW((HINSTANCE)Common->Mod, module, MAX_PATH)) || len >= MAX_PATH)
-     {
-        ERR("Error check for module!\n");
-        Common->Mod = 0;
-     }
+  /* The kernel sends the path of the hook's DLL after the arguments (NUL terminated) */
+  if (ArgumentLength > sizeof(*Common))
+  {
+     ULONG Chars = (ArgumentLength - sizeof(*Common)) / sizeof(WCHAR), n = 0;
+     LPCWSTR Name = (LPCWSTR)(Common + 1);
 
-     if (Common->Mod && !(mod = GetModuleHandleW(module)))
+     while (n < Chars && Name[n]) n++;
+     if (n && n < Chars)
+        ModuleName = Name;
+  }
+
+  if (ModuleName || (Common->offPfn && Common->Mod))
+  {
+     if (!ModuleName)
      {
-        TRACE("Reloading Event Module.\n");
-        if (!(mod = LoadLibraryExW(module, NULL, LOAD_WITH_ALTERED_SEARCH_PATH)))
+        /* No path: only a hook procedure of this process can be called */
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                (LPCWSTR)Common->Proc, &mod))
         {
-           ERR("Failed to load Event Module.\n");
+           ERR("WinEvent procedure %p is in no module of this process\n", Common->Proc);
+           Skip = TRUE;
+        }
+     }
+     else if (!User32EventProcIsInModule(Common, ModuleName))
+     {
+        /* The hook was set by another process: the address means nothing here. Load the DLL by its path (it
+           stays mapped, as it does on Windows), and call the procedure at the same offset in it. */
+        if (!(mod = GetModuleHandleW(ModuleName)) &&
+            !(mod = LoadLibraryExW(ModuleName, NULL, LOAD_WITH_ALTERED_SEARCH_PATH)))
+        {
+           /* e.g. the DLL has another bitness than this process: no event for this process */
+           ERR("Failed to load WinEvent module %S: %lu\n", ModuleName, GetLastError());
+           Skip = TRUE;
         }
         else
         {
-           Loaded = TRUE; // Free it only when loaded.
+           Proc = (WINEVENTPROC)((char *)mod + Common->offPfn);
         }
-     }
-
-     if (mod)
-     {
-        TRACE("Loading Event Module. %S\n",module);
-        Proc = (WINEVENTPROC)((char *)mod + Common->offPfn);
      }
   }
 
-  Proc(Common->hook,
-       Common->event,
-       Common->hwnd,
-       Common->idObject,
-       Common->idChild,
-       Common->dwEventThread,
-       Common->dwmsEventTime);
-
-  if (Loaded) FreeLibrary(mod);
+  if (!Skip)
+  {
+     Proc(Common->hook,
+          Common->event,
+          Common->hwnd,
+          Common->idObject,
+          Common->idChild,
+          Common->dwEventThread,
+          Common->dwmsEventTime);
+  }
 
   return ZwCallbackReturn(NULL, 0, STATUS_SUCCESS);
 }

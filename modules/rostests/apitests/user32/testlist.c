@@ -104,6 +104,7 @@ extern void func_ScrollWindowEx(void);
 extern void func_SendMessageCallbackSenderDied(void);
 extern void func_SendMessageSenderDied(void);
 extern void func_SendMessageTimeout(void);
+extern void func_SendMessageCopyData(void);
 extern void func_SetActiveWindow(void);
 extern void func_SetCoalescableTimer(void);
 extern void func_SetCursorPos(void);
@@ -132,6 +133,8 @@ extern void func_UserSrvRegistration(void);
 extern void func_VirtualKey(void);
 extern void func_Wow64WinArguments(void);
 extern void func_WinEventHook(void);
+extern void func_WinEventInContext(void);
+extern void func_XprocMessages(void);
 extern void func_WindowStationLeak(void);
 extern void func_WmPrint(void);
 extern void func_WndProc(void);
@@ -251,6 +254,7 @@ const struct test winetest_testlist[] =
     { "SendMessageCallbackSenderDied", func_SendMessageCallbackSenderDied },
     { "SendMessageSenderDied", func_SendMessageSenderDied },
     { "SendMessageTimeout", func_SendMessageTimeout },
+    { "SendMessageCopyData", func_SendMessageCopyData },
     { "SetActiveWindow", func_SetActiveWindow },
     { "SetCoalescableTimer", func_SetCoalescableTimer },
     { "SetCursorPos", func_SetCursorPos },
@@ -289,6 +293,8 @@ const struct test winetest_testlist[] =
     { "PointerDeviceFunctions", func_PointerDeviceFunctions },
     { "Wow64WinArguments", func_Wow64WinArguments },
     { "WinEventHook", func_WinEventHook },
+    { "WinEventInContext", func_WinEventInContext },
+    { "XprocMessages", func_XprocMessages },
     { "WindowStationLeak", func_WindowStationLeak },
     { "WmPrint", func_WmPrint },
     { "WndProc", func_WndProc },
