@@ -793,8 +793,21 @@ struct runlist_element *ntfs_mapping_pairs_decompress(const struct ntfs_volume *
 
 	/* Current position in runlist array. */
 	rlpos = 0;
-	/* Allocate first page and set current runlist size to one page. */
-	rl = kvzalloc(rlsize = PAGE_SIZE, GFP_NOFS);
+	/*
+	 * Size the array to the mapping pairs present (plus the unmapped start, the not-mapped and the terminating
+	 * element) instead of a whole page: a one-extent file took a 4 KB runlist, which with the allocation header is
+	 * 8 KB of nonpaged pool per cached inode.
+	 */
+	{
+		const u8 *p = buf;
+		size_t pairs = 0;
+
+		while (p < attr_end && *p) {
+			p += (*p & 0xf) + ((*p >> 4) & 0xf) + 1;
+			pairs++;
+		}
+		rl = kvzalloc(rlsize = (pairs + 3) * sizeof(*rl), GFP_NOFS);
+	}
 	if (unlikely(!rl))
 		return ERR_PTR(-ENOMEM);
 	/* Insert unmapped starting element if necessary. */
@@ -807,8 +820,8 @@ struct runlist_element *ntfs_mapping_pairs_decompress(const struct ntfs_volume *
 	while (buf < attr_end && *buf) {
 		/*
 		 * Allocate more memory if needed, including space for the
-		 * not-mapped and terminator elements. kvzalloc()
-		 * operates on whole pages only.
+		 * not-mapped and terminator elements.  The array was sized
+		 * from the pairs present, so this only guards the walk.
 		 */
 		if (((rlpos + 3) * sizeof(*rl)) > rlsize) {
 			struct runlist_element *rl2;
