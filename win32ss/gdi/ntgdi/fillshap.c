@@ -1125,7 +1125,8 @@ NtGdiGradientFill(
     BOOL bRet;
     PTRIVERTEX SafeVertex;
     PVOID SafeMesh;
-    ULONG cbVertex, cbMesh;
+    ULONG cbVertex, cbMesh, cbTotal;
+    NTSTATUS Status;
 
     /* Validate parameters */
     if (!pVertex || !nVertex || !pMesh || !nMesh)
@@ -1138,25 +1139,28 @@ NtGdiGradientFill(
     {
         case GRADIENT_FILL_RECT_H:
         case GRADIENT_FILL_RECT_V:
-            cbMesh = nMesh * sizeof(GRADIENT_RECT);
+            Status = RtlULongMult(nMesh, sizeof(GRADIENT_RECT), &cbMesh);
             break;
         case GRADIENT_FILL_TRIANGLE:
-            cbMesh = nMesh * sizeof(GRADIENT_TRIANGLE);
+            Status = RtlULongMult(nMesh, sizeof(GRADIENT_TRIANGLE), &cbMesh);
             break;
         default:
             EngSetLastError(ERROR_INVALID_PARAMETER);
             return FALSE;
     }
 
-    cbVertex = nVertex * sizeof(TRIVERTEX) ;
-    if(cbVertex + cbMesh <= cbVertex)
+    /* Each size, and their sum, has to fit in a ULONG: GreGradientFill walks nVertex and nMesh entries
+       of the copy */
+    if (!NT_SUCCESS(Status) ||
+        !NT_SUCCESS(RtlULongMult(nVertex, sizeof(TRIVERTEX), &cbVertex)) ||
+        !NT_SUCCESS(RtlULongAdd(cbVertex, cbMesh, &cbTotal)))
     {
-        /* Overflow */
-        return FALSE ;
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
     }
 
     /* Allocate a kernel mode buffer */
-    SafeVertex = ExAllocatePoolWithTag(PagedPool, cbVertex + cbMesh, TAG_SHAPE);
+    SafeVertex = ExAllocatePoolWithTag(PagedPool, cbTotal, TAG_SHAPE);
     if(!SafeVertex)
     {
         EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);

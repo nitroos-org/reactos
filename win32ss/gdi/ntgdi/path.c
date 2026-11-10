@@ -2782,10 +2782,20 @@ NtGdiGetPath(
     INT ret = -1;
     PPATH pPath;
     DC *dc;
+    ULONG cjPoints;
+
+    /* A negative count, or one whose byte size does not fit in a ULONG, would make the probe below
+       check fewer bytes than are written */
+    if (nSize < 0 ||
+        !NT_SUCCESS(RtlULongMult((ULONG)nSize, sizeof(*Points), &cjPoints)))
+    {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return -1;
+    }
 
     _SEH2_TRY
     {
-        ProbeForWrite(Points, nSize * sizeof(*Points), sizeof(ULONG));
+        ProbeForWrite(Points, cjPoints, sizeof(ULONG));
         ProbeForWrite(Types, nSize, 1);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)

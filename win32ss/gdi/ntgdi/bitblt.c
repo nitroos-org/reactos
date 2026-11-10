@@ -1441,10 +1441,18 @@ NtGdiPolyPatBlt(
     PPATRECT rb = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
     BOOL Ret;
+    ULONG cjRects = 0;
 
     if (cRects > 0)
     {
-        rb = ExAllocatePoolWithTag(PagedPool, sizeof(PATRECT) * cRects, GDITAG_PLGBLT_DATA);
+        /* The byte count has to fit in a ULONG: IntGdiPolyPatBlt walks cRects entries of the copy */
+        if (!NT_SUCCESS(RtlULongMult(cRects, sizeof(PATRECT), &cjRects)))
+        {
+            EngSetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+
+        rb = ExAllocatePoolWithTag(PagedPool, cjRects, GDITAG_PLGBLT_DATA);
         if (!rb)
         {
             EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
@@ -1452,12 +1460,8 @@ NtGdiPolyPatBlt(
         }
         _SEH2_TRY
         {
-            ProbeForRead(pRects,
-                cRects * sizeof(PATRECT),
-                1);
-            RtlCopyMemory(rb,
-                pRects,
-                cRects * sizeof(PATRECT));
+            ProbeForRead(pRects, cjRects, 1);
+            RtlCopyMemory(rb, pRects, cjRects);
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
