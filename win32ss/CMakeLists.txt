@@ -270,3 +270,14 @@ add_asm_files(win32ksys_asm sys-stubs.S)
 add_library(win32ksys ${win32ksys_asm})
 set_target_properties(win32ksys PROPERTIES LINKER_LANGUAGE "C")
 add_dependencies(win32ksys asm)
+
+# The images loaded into session image space must fit in it (NitroSessions; i386 has 8 MB of it)
+if(ARCH STREQUAL "i386")
+    add_custom_target(session_image_budget ALL
+        COMMAND ${CMAKE_COMMAND}
+            "-DIMAGES=$<TARGET_FILE:win32k>;$<TARGET_FILE:framebuf>;$<TARGET_FILE:vgaddi>;$<TARGET_FILE:dxg>;$<TARGET_FILE:dxgthk>"
+            -DLIMIT=6291456
+            -P ${REACTOS_SOURCE_DIR}/sdk/cmake/session_image_budget.cmake
+        DEPENDS win32k framebuf vgaddi dxg dxgthk
+        VERBATIM)
+endif()
