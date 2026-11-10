@@ -655,11 +655,17 @@ AtaReqScsiReadWrite(
         Request->Flags |= REQUEST_FLAG_DATA_IN;
 
     /*
-     * Without NCQ the FUA bit is not used here (FUA EXT commands are not issued, and disk.sys asks
-     * for FUA whatever the drive supports).  A FUA write must still be on the medium when it
-     * completes, so when the drive caches writes it is followed by a cache flush first.
+     * Force Unit Access.  A write with FUA must be on the medium when it completes.  The FUA bit of a queued
+     * write is sent only when the drive advertises FUA (IDENTIFY word 84 bit 6): a drive that does not may
+     * ignore the bit (QEMU's AHCI does, advertised or not), and the write would be lost with the drive's cache.
+     * Without NCQ the FUA bit is not used here (FUA EXT commands are not issued, and disk.sys asks for FUA
+     * whatever the drive supports).  In both cases the write is followed by a cache flush when the drive caches
+     * writes.  FUA on a read does nothing.
      */
-    if (!(DevExt->Device.DeviceFlags & DEVICE_NCQ) && (Request->Flags & REQUEST_FLAG_FUA))
+    if ((Request->Flags & REQUEST_FLAG_FUA) &&
+        (!(DevExt->Device.DeviceFlags & DEVICE_NCQ) ||
+         !(DevExt->Device.DeviceFlags & DEVICE_HAS_FUA) ||
+         (Request->Flags & REQUEST_FLAG_DATA_IN)))
     {
         Request->Flags &= ~REQUEST_FLAG_FUA;
 

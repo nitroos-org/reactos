@@ -327,6 +327,8 @@ typedef struct _NG_GLOBAL
     ULONG FcbCacheMax;              /* idle FCBs with cached data kept per volume; MAXULONG = no trimming ("FcbCacheMax", "NoFcbTrim") */
     LONG Opens;
     ULONG PermissiveOpen;           /* diagnostic: grant write access at open, refuse the modification itself */
+    ULONG FuaAliasMB;               /* test only: "FuaAliasMB" DWORD, see NgDevSetFua */
+    ULONG NoFua;                    /* "NoFua" DWORD in the service key: never use Force Unit Access, keep the flushes of the journal */
     ULONG ForceReadOnly;            /* "ReadOnly" DWORD in the service key: mount every volume read-only */
     ULONG Verbose;                  /* "Verbose" DWORD: request log (NGDIAG) and periodic core dumps on the debug port */
     BOOLEAN Disable8dot3;           /* NtfsDisable8dot3NameCreation == 1: no short names for new names */
@@ -335,6 +337,7 @@ typedef struct _NG_GLOBAL
 } NG_GLOBAL;
 
 extern NG_GLOBAL NgGlobal;
+VOID NgDevSetFua(PDEVICE_OBJECT Device, BOOLEAN Fua, ULONGLONG Alias);
 
 /* ntoskrnl (ReactOS): the last close of a file may leave its dirty data to the lazy writer.  Safe here: the
  * FCB (SectionObjectPointers, lazy write context) lives until the cached file object is closed, which the
