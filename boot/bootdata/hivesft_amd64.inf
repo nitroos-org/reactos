@@ -46,6 +46,13 @@ HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.G
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Globalization.Language","Threading",0x00010001,0
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Globalization.Language","TrustLevel",0x00010001,0
 
+; The 32-bit view of the PropertyValue WinRT class (see hivesft.inf): SysWOW64\wintypes.dll.
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Foundation.PropertyValue","ActivationType",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Foundation.PropertyValue","CLSID",0x00000000,"{3A03BAEB-EC6E-4E52-A463-D23B7D761EC2}"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Foundation.PropertyValue","DllPath",0x00020000,"%SystemRoot%\SysWOW64\wintypes.dll"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Foundation.PropertyValue","Threading",0x00010001,0
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Foundation.PropertyValue","TrustLevel",0x00010001,0
+
 ; The 32-bit view of the DispatcherQueue WinRT classes (CreateDispatcherQueueController, Windows.System.DispatcherQueue*): SysWOW64\CoreMessaging.dll.
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueue","ActivationType",0x00010001,0
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.DispatcherQueue","DllPath",0x00020000,"%SystemRoot%\SysWOW64\CoreMessaging.dll"
