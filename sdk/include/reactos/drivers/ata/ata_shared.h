@@ -24,6 +24,15 @@
 #define ATA_MIN_SECTOR_SIZE           512
 #define ATA_MAX_SECTORS_PER_IO        0x100
 #define ATA_MAX_TRANSFER_LENGTH       (ATA_MAX_SECTORS_PER_IO * ATA_MIN_SECTOR_SIZE) // 0x20000
+
+/**
+ * @brief 1024 sectors of 512 bytes (512 kB): the transfer of one command of an ATA disk that has 48-bit LBA, on an AHCI
+ * channel (a 16-bit sector count; the PRDT takes the pages).  A command costs the same fixed time whatever its size
+ * (QEMU's AHCI: about 100 us of the guest's interrupt processor), so four times the size is a bit under four times the
+ * throughput of large requests.  Channels that are not AHCI, devices without 48-bit LBA and ATAPI devices keep the 128 kB.
+ */
+#define ATA_MAX_SECTORS_PER_IO_LBA48  0x400
+#define ATA_MAX_TRANSFER_LENGTH_LBA48 (ATA_MAX_SECTORS_PER_IO_LBA48 * ATA_MIN_SECTOR_SIZE) // 0x80000
 /*@}*/
 
 /** Minimum DMA buffer alignment because of the reserved PRDT byte 0 */
