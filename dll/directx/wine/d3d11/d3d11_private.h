@@ -37,6 +37,7 @@
 #include "wine/wined3d.h"
 #include "wine/winedxgi.h"
 #include "wine/rbtree.h"
+#include "wine/list.h"
 
 struct d3d_device;
 
@@ -141,6 +142,9 @@ struct d3d_texture2d
     struct wined3d_swapchain *swapchain;
     D3D11_TEXTURE2D_DESC desc;
     ID3D11Device2 *device;
+
+    struct d3d_shared *shared;
+    IDXGIResource1 IDXGIResource1_iface;
 };
 
 static inline struct d3d_texture2d *impl_from_ID3D11Texture2D(ID3D11Texture2D *iface)
@@ -152,6 +156,28 @@ HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DE
         struct wined3d_texture *wined3d_texture,
         const D3D11_SUBRESOURCE_DATA *data, struct d3d_texture2d **out);
 struct d3d_texture2d *unsafe_impl_from_ID3D11Texture2D(ID3D11Texture2D *iface);
+
+/* shared resources (shared.c) */
+struct d3d_shared;
+struct d3d_shared_open;
+enum { D3D_OPEN_LEGACY, D3D_OPEN_NT, D3D_OPEN_NAME };
+HRESULT d3d_texture2d_create_shared_open(struct d3d_device *device, const D3D11_TEXTURE2D_DESC *desc,
+        struct d3d_shared_open *open, struct d3d_texture2d **out);
+void d3d_texture2d_init_dxgi_resource1(struct d3d_texture2d *texture);
+BOOL d3d_texture2d_shared_query_interface(struct d3d_texture2d *texture, REFIID iid, void **out);
+HRESULT d3d_texture2d_shared_attach(struct d3d_device *device, struct d3d_texture2d *texture,
+        struct d3d_shared_open *open);
+void d3d_texture2d_shared_created(struct d3d_texture2d *texture, BOOL has_initial_data);
+void d3d_texture2d_shared_destroy(struct d3d_texture2d *texture);
+HRESULT d3d_device_open_shared(struct d3d_device *device, HANDLE handle, const WCHAR *name, int mode,
+        REFIID iid, void **out);
+void d3d_device_shared_init(struct d3d_device *device);
+void d3d_device_shared_cleanup(struct d3d_device *device);
+void d3d_device_shared_flush(struct d3d_device *device);
+void d3d_shared_resource_read(ID3D11Resource *resource);
+void d3d_shared_resource_written(ID3D11Resource *resource, BOOL bound_as_target);
+void d3d_shared_view_resource_read(ID3D11ShaderResourceView *view);
+void d3d_shared_view_resource_written(ID3D11RenderTargetView *view, BOOL bound_as_target);
 struct d3d_texture2d *unsafe_impl_from_ID3D10Texture2D(ID3D10Texture2D *iface);
 
 /* ID3D11Texture3D, ID3D10Texture3D */
@@ -587,6 +613,10 @@ struct d3d_device
     struct d3d_device_context_state **context_states;
     SIZE_T context_states_size;
     SIZE_T context_state_count;
+
+    struct list shared_list;
+    CRITICAL_SECTION shared_cs;
+    BOOL shared_activity;
 };
 
 struct d3d11_command_list
