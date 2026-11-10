@@ -4,14 +4,14 @@
 #   amd64:       vulkan_lvp.dll + lvp_icd.json, the lavapipe Vulkan ICD; both amd64 drivers JIT-compile with a static
 #                LLVM that build-llvm.sh makes first (AMD64_LLVM=0 builds amd64 like i386: softpipe only, no Vulkan driver)
 # Host: Ubuntu 24.04 with gcc-mingw-w64-{i686,x86-64}-win32, g++-mingw-w64-{i686,x86-64}-win32,
-# python3-venv, ninja-build, bison, flex, curl, xz-utils, patch. Needs network for the pinned downloads.
+# python3-venv, ninja-build, bison, flex, curl, xz-utils, patch (llvmpipe/lavapipe builds also cmake and glslang-tools, which Mesa 26.3 needs for lavapipe). Needs network for the pinned downloads.
 # Usage: build-mesa.sh [WORKDIR]   Output: WORKDIR/out/{i386,amd64}/libgallium_wgl.dll, out/amd64/{vulkan_lvp.dll,lvp_icd.json},
 #                                  mesa3d-licenses.txt, llvm-licenses.txt, SHA256SUMS
 set -euo pipefail
 
-MESA_VERSION=26.2.4
+MESA_VERSION=26.3.0
 MESA_URL=https://archive.mesa3d.org/mesa-${MESA_VERSION}.tar.xz
-MESA_SHA256=bce5f7fbebb934373b86c999a064d52fb5065878dc57f287f95346648ec832e9
+MESA_SHA256=91d729aa68bb89e4ec857841300bbe922bcb3e52b1f97566ca83930d3b28343a
 PIP_PINS="meson==1.12.1 mako==1.4.3 MarkupSafe==3.0.4 PyYAML==6.0.3 packaging==26.3 ply==3.11"
 GALLIUM_DRIVERS=${GALLIUM_DRIVERS:-softpipe}
 AMD64_LLVM=${AMD64_LLVM:-1}
