@@ -206,6 +206,11 @@ DGDeliverData(
 
                 LockObject(AddrFile);
                 DereferenceObject(AddrFile);
+
+                /* A datagram is delivered to one receive. The lock was dropped for the
+                   completion: the entry saved before it may have been cancelled and freed
+                   since, so the walk does not continue */
+                break;
             }
         }
 
@@ -237,6 +242,9 @@ DGDeliverData(
         }
 
         ReferenceObject(AddrFile);
+        /* Counted under the lock the handler was read under: whoever clears the handler
+           and then owns its context waits for the count to drop before freeing it */
+        InterlockedIncrement(&AddrFile->ReceiveHandlersActive);
         UnlockObject(AddrFile);
 
         TI_DbgPrint(MIN_TRACE, ("OptionsSize %d DataSize: %u\n", OptionsSize, DataSize));
@@ -256,6 +264,7 @@ DGDeliverData(
         if (STATUS_SUCCESS != Status)
             TI_DbgPrint(MAX_TRACE, ("receive handler signaled failure with Status 0x%x\n", Status));
 
+        InterlockedDecrement(&AddrFile->ReceiveHandlersActive);
         DereferenceObject(AddrFile);
     }
     else
