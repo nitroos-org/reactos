@@ -1081,13 +1081,24 @@ static void MDI_UpdateFrameText( HWND frame, HWND hClient, BOOL repaint, LPCWSTR
 /**********************************************************************
  *		MDIClientWndProc_common
  */
+#ifdef __REACTOS__
+static LRESULT MDIClientWndProc_impl( HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, BOOL unicode )
+#else
 LRESULT WINAPI MDIClientWndProc_common( HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, BOOL unicode )
+#endif
 {
     MDICLIENTINFO *ci = NULL;
 
     TRACE("%p %04x (%s) %08Ix %08Ix\n", hwnd, message, SPY_GetMsgName(message, hwnd), wParam, lParam);
 
+#ifdef __REACTOS__
+    /* ReactOS: win32k rejects a second FNID assignment with ERROR_INVALID_PARAMETER, so set it only once, on
+     * WM_NCCREATE (like button/edit/static). Doing it on every message leaked last error 87 out of EnableWindow
+     * and other calls on an MDICLIENT window. */
+    if (message == WM_NCCREATE) NtUserSetWindowFNID( hwnd, MAKE_FNID(NTUSER_WNDPROC_MDICLIENT) );
+#else
     NtUserSetWindowFNID( hwnd, MAKE_FNID(NTUSER_WNDPROC_MDICLIENT) );
+#endif
 
     if (!(ci = get_client_info( hwnd )))
     {
@@ -1326,6 +1337,29 @@ LRESULT WINAPI MDIClientWndProc_common( HWND hwnd, UINT message, WPARAM wParam, 
     return unicode ? DefWindowProcW( hwnd, message, wParam, lParam ) :
                      DefWindowProcA( hwnd, message, wParam, lParam );
 }
+
+#ifdef __REACTOS__
+/* ReactOS: Windows 10 (measured) leaves the last error untouched on WM_MDINEXT, WM_MDITILE, WM_MDICASCADE and
+ * WM_MDIDESTROY; our implementation leaves ERROR_INVALID_WINDOW_HANDLE or NO_ERROR behind, so keep the caller's. */
+LRESULT WINAPI MDIClientWndProc_common( HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, BOOL unicode )
+{
+    DWORD dwLastError;
+    LRESULT ret;
+
+    switch (message)
+    {
+        case WM_MDINEXT:
+        case WM_MDITILE:
+        case WM_MDICASCADE:
+        case WM_MDIDESTROY:
+            dwLastError = GetLastError();
+            ret = MDIClientWndProc_impl( hwnd, message, wParam, lParam, unicode );
+            SetLastError( dwLastError );
+            return ret;
+    }
+    return MDIClientWndProc_impl( hwnd, message, wParam, lParam, unicode );
+}
+#endif
 
 /***********************************************************************
  *		MDIClientWndProcA
