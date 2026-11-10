@@ -4,6 +4,7 @@
 @ stdcall SLDepositMigrationBlob(ptr long ptr ptr ptr) sppc.SLDepositMigrationBlob
 @ stdcall SLDepositOfflineConfirmationId(ptr ptr wstr wstr) sppc.SLDepositOfflineConfirmationId
 @ stdcall SLGenerateOfflineInstallationId(ptr ptr ptr) sppc.SLGenerateOfflineInstallationId
+@ stdcall SLGetApplicationInformation(ptr ptr wstr ptr ptr ptr) sppc.SLGetApplicationInformation
 @ stdcall -arch=win64 SLGetApplicationPolicy(ptr ptr ptr ptr ptr) sppc.SLGetApplicationPolicy
 @ stdcall -arch=win64 SLGetAuthenticationResult(ptr ptr ptr ptr) sppc.SLGetAuthenticationResult
 @ stdcall SLGetInstalledProductKeyIds(ptr ptr ptr ptr) sppc.SLGetInstalledProductKeyIds
