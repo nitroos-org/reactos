@@ -347,6 +347,15 @@ DceRedirSetRetry(PDCE Dce, BOOL bRetry)
    }
 }
 
+/* A DC in use that draws on the screen again: its screen origin, also when another process owns it */
+static VOID
+DceRedirSetScreenDrawable(PDCE Dce)
+{
+   RECTL rect = (Dce->DCXFlags & DCX_WINDOW) ? Dce->pwndOrg->rcWindow : Dce->pwndOrg->rcClient;
+
+   GreRedirSetDCOrg(Dce->hDC, rect.left, rect.top, &rect);
+}
+
 static BOOL
 DceRedirBind(PDCE Dce, PVOID pRedir)
 {
@@ -398,7 +407,7 @@ DceRedirUnbindAll(PVOID pRedir)
       /* A DC in use keeps drawing: its screen origin and visible region now (the others at their next GetDC) */
       if ((Dce->DCXFlags & DCX_DCEBUSY) && Dce->pwndOrg)
       {
-         DceSetDrawable(Dce->pwndOrg, Dce->hDC, Dce->DCXFlags, TRUE, NULL);
+         DceRedirSetScreenDrawable(Dce);
          DceUpdateVisRgn(Dce, Dce->pwndOrg, Dce->DCXFlags);
          Dce->RedirFlags &= ~DCE_REDIR_VISSTALE;
       }
@@ -443,7 +452,7 @@ DceRedirRetryAll(VOID)
       Target = (Dce->pRedir && UserRedirWindow(Dce->pRedir)) ? Dce->pRedir : NULL;
       if (DceRedirBind(Dce, Target) && !Dce->pRedir && (Dce->DCXFlags & DCX_DCEBUSY) && Dce->pwndOrg)
       {
-         DceSetDrawable(Dce->pwndOrg, Dce->hDC, Dce->DCXFlags, TRUE, NULL);
+         DceRedirSetScreenDrawable(Dce);
          DceUpdateVisRgn(Dce, Dce->pwndOrg, Dce->DCXFlags);
          Dce->RedirFlags &= ~DCE_REDIR_VISSTALE;
       }
