@@ -1303,7 +1303,11 @@ static inline void text_buffer_changed(EDITSTATE *es)
  * EDIT_LockBuffer
  *
  */
+#ifdef __REACTOS__
+static void EDIT_LockBufferImpl(EDITSTATE *es)
+#else
 static void EDIT_LockBuffer(EDITSTATE *es)
+#endif
 {
 	if (!es->text) {
 
@@ -1366,7 +1370,11 @@ static void EDIT_LockBuffer(EDITSTATE *es)
  *	EDIT_UnlockBuffer
  *
  */
+#ifdef __REACTOS__
+static void EDIT_UnlockBufferImpl(EDITSTATE *es, BOOL force)
+#else
 static void EDIT_UnlockBuffer(EDITSTATE *es, BOOL force)
+#endif
 {
 	/* Edit window might be already destroyed */
 	if(!IsWindow(es->hwndSelf))
@@ -1424,6 +1432,25 @@ static void EDIT_UnlockBuffer(EDITSTATE *es, BOOL force)
 	}
 	es->lock_count--;
 }
+
+#ifdef __REACTOS__
+/* ReactOS: LocalLock/LocalUnlock (used for the text buffer) reset the last error to NO_ERROR when the lock count
+ * drops to zero, so every edit message handler cleared the last error of the caller (e.g. EnableWindow on an EDIT
+ * window set it to 0). Windows leaves the last error untouched; keep it across the buffer lock/unlock. */
+static void EDIT_LockBuffer(EDITSTATE *es)
+{
+	DWORD dwLastError = GetLastError();
+	EDIT_LockBufferImpl(es);
+	SetLastError(dwLastError);
+}
+
+static void EDIT_UnlockBuffer(EDITSTATE *es, BOOL force)
+{
+	DWORD dwLastError = GetLastError();
+	EDIT_UnlockBufferImpl(es, force);
+	SetLastError(dwLastError);
+}
+#endif
 
 
 /*********************************************************************
@@ -5224,6 +5251,11 @@ LRESULT WINAPI EditWndProc_common( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 
 	case WM_GETTEXTLENGTH:
                 if (unicode) result = get_text_length(es);
+#ifdef __REACTOS__
+                /* ReactOS: WideCharToMultiByte fails with ERROR_INVALID_PARAMETER for an empty string, which leaked
+                 * last error 87 out of SendMessageA(WM_GETTEXTLENGTH) on an empty edit control (Windows leaves it). */
+                else if (!get_text_length(es)) result = 0;
+#endif
                 else result = WideCharToMultiByte( CP_ACP, 0, es->text, get_text_length(es),
                                                    NULL, 0, NULL, NULL );
 		break;
@@ -5452,6 +5484,12 @@ LRESULT WINAPI EditWndProc_common( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         if (IsWindow(hwnd) && es && msg != EM_GETHANDLE)
 #endif
             EDIT_UnlockBuffer(es, FALSE);
+
+#ifdef __REACTOS__
+        /* Windows 10 (measured): these two reset the last error to 0, every other message leaves it untouched */
+        if (msg == WM_GETTEXT || msg == EM_GETLINE)
+            SetLastError(0);
+#endif
 
         TRACE("hwnd=%p msg=%x (%s) -- 0x%08Ix\n", hwnd, msg, SPY_GetMsgName(msg, hwnd), result);
 
