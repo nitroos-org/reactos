@@ -54,6 +54,7 @@
 #include <kshim_jnl.h>
 
 #define KJ_BUCKETS 1024
+#define KJ_SEGS_PRE 8	/* requests of the slot writes started under the lock (kshim_jnl_slots_start) */
 #define KJ_SECT 512
 
 struct kj_ent {
@@ -122,6 +123,10 @@ struct kshim_jnl {
 	int cur_area;			/* the slot area of the COMMITTED header being written, -1: not a retained transaction */
 	int hdr_tried;			/* the sealed transaction's COMMITTED header may be on the medium */
 	unsigned long retained_commits, checkpoints;
+	/* The slot writes of the sealed (retained) transaction were started under the lock, in flight with the file data (kshim_jnl_slots_start) */
+	int pre_started, pre_fua, pre_err;
+	u32 pre_crc;
+	u8 *pre_buf;
 };
 
 enum { KJ_S_NONE = 0, KJ_S_RUNNING = 1, KJ_S_DONE = 2 };
@@ -198,6 +203,10 @@ static int kj_dev_write(struct block_device *b, u64 off, void *buf, unsigned int
 {
 	return b->kshim_gone || b->kshim_frozen || ngos_dev_write(b->osdev, off, buf, len);
 }
+static int kj_dev_write_fua(struct block_device *b, u64 off, void *buf, unsigned int len)
+{
+	return b->kshim_gone || b->kshim_frozen || ngos_dev_write_fua(b->osdev, off, buf, len);
+}
 static int kj_dev_flush(struct block_device *b)
 {
 	return b->kshim_gone || ngos_dev_flush(b->osdev);
@@ -269,7 +278,19 @@ static int kj_resync_vol_usn(struct block_device *b, struct kshim_jnl *j)
 
 int kshim_jnl_failed(struct block_device *b)
 {
-	return b->jnl && b->jnl->failed;
+	struct kshim_jnl *j = b->jnl;
+	if (!j)
+		return 0;
+	/*
+	 * A file-data write that completed later failed (ngos_dev_drain): its initialized size is in the overlay and must never
+	 * reach the medium.  Same policy as every other failed device write of the journal: j->failed (no further write until the
+	 * next mount) and one event log entry (kshim_log_volume_failed).
+	 */
+	if (!j->failed && ngos_dev_defer_failed(b->osdev)) {
+		kshim_log_volume_failed(b, -EIO);
+		j->failed = 1;
+	}
+	return j->failed;
 }
 
 int kshim_jnl_in_place(struct block_device *b)
@@ -547,6 +568,17 @@ static int kj_hdr_write(struct block_device *b, struct kshim_jnl *j, u32 state, 
 	h->vol_usn_new = usn_new;
 	h->flags = (j->errors ? KJ_FL_ERRORS : 0) | (j->keep ? KJ_FL_KEEP : 0) | (ret && j->cur_area ? KJ_FL_AREA1 : 0);
 	h->hdr_crc = kj_crc32(0, h, offsetof(struct kj_hdr, hdr_crc));
+	/*
+	 * A COMMITTED header that has to be durable goes out with FUA when the device honours it: durable when it
+	 * completes, no flush after it.  (What the header needs to be durable before it, the slots and the file
+	 * data, is the caller's: kj_tx_commit.  Other headers keep their flush.)
+	 */
+	if (flush && state == KJ_ST_COMMITTED && b->kshim_fua) {
+		if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || kj_dev_write_fua(b, dev, j->hdrpage, KJ_PAGE))
+			return -EIO;
+		j->retired = 0;
+		return 0;
+	}
 	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || kj_dev_write(b, dev, j->hdrpage, KJ_PAGE))
 		return -EIO;
 	j->retired = 0;
@@ -831,6 +863,7 @@ struct kj_batch {
 	unsigned int nseg;
 	struct { u64 dev; size_t off, len; } seg[KJ_SEGS];
 	int err;
+	int fua;			/* the transfers go out with FUA (the device honours it) */
 };
 
 static void kj_batch_init(struct kj_batch *w, struct block_device *b, unsigned long pages)
@@ -853,7 +886,8 @@ static void kj_batch_flush(struct kj_batch *w)
 			iov[i].buf = w->buf + w->seg[i].off;
 			iov[i].len = (unsigned int)w->seg[i].len;
 		}
-		if (w->b->kshim_gone || w->b->kshim_frozen || ngos_dev_write_v(w->b->osdev, iov, w->nseg))
+		if (w->b->kshim_gone || w->b->kshim_frozen ||
+		    (w->fua ? ngos_dev_write_v_fua(w->b->osdev, iov, w->nseg) : ngos_dev_write_v(w->b->osdev, iov, w->nseg)))
 			w->err = -EIO;
 	}
 	w->nseg = 0;
@@ -865,7 +899,7 @@ static void kj_batch_add(struct kj_batch *w, u64 dev, const void *data, size_t l
 	if (w->err)
 		return;
 	if (!w->buf) {
-		if (kj_dev_write(w->b, dev, (void *)data, (unsigned int)len))
+		if (w->fua ? kj_dev_write_fua(w->b, dev, (void *)data, (unsigned int)len) : kj_dev_write(w->b, dev, (void *)data, (unsigned int)len))
 			w->err = -EIO;
 		return;
 	}
@@ -990,14 +1024,21 @@ static int kj_tx_commit(struct block_device *b, struct kshim_jnl *j, struct kj_e
 {
 	struct kj_desc *d;
 	u32 crc = 0;
-	int err = 0;
+	int err = 0, slot_fua = 0;
 	d = kmalloc(KJ_PAGE, GFP_NOFS);
 	if (!d)
 		return -ENOMEM;
-	{
+	if (j->pre_started) {
+		/* The slot writes were started under the volume lock and waited for with the file data (kshim_jnl_slots_start). */
+		crc = j->pre_crc;
+		slot_fua = j->pre_fua;
+	} else {
 		/* Descriptor and data slots, adjacent slots in one transfer. */
 		struct kj_batch w;
 		kj_batch_init(&w, b, ndesc + n);
+		/* Slots with FUA when nothing plain is waiting for a flush anyway (then the flush below can go too). */
+		w.fua = b->kshim_fua && ngos_dev_clean(b->osdev);
+		slot_fua = w.fua;
 		for (unsigned long p = 0; p < ndesc && !w.err; p++) {
 			u64 dev;
 			memset(d, 0, KJ_PAGE);
@@ -1028,9 +1069,12 @@ static int kj_tx_commit(struct block_device *b, struct kshim_jnl *j, struct kj_e
 	/*
 	 * The file data written in place since the last commit and the slots just written must be on
 	 * the medium before the record that makes replay install the metadata pointing at them: a
-	 * volatile write cache may otherwise keep the header and lose them.
+	 * volatile write cache may otherwise keep the header and lose them.  With FUA (slots written with it,
+	 * and no plain write completed since the last flush: the file data of a write-through write went out
+	 * with FUA too) they already are, and the flush is not needed; the COMMITTED header then goes out with
+	 * FUA as well (kj_hdr_write).
 	 */
-	if (!err && kj_dev_flush(b))
+	if (!err && !(slot_fua && ngos_dev_clean(b->osdev)) && kj_dev_flush(b))
 		err = -EIO;
 	if (err)
 		goto out;
@@ -1392,6 +1436,95 @@ void kshim_jnl_wait(struct block_device *b)
 }
 
 /*
+ * A retained transaction's slot writes, started right after the seal (volume lock held) so that they are in flight together with the
+ * file data of the write-through write that is being committed (ngos_dev_write_start); the caller then waits for all of it
+ * (ngos_dev_drain) before the lock is let go, and kshim_jnl_io goes on with the flush, the COMMITTED header and the flush.  Same
+ * bytes, same slots, same order against the flush and the header as kj_tx_commit writes them; only the data write no longer
+ * completes before they are sent.  0: not started (kj_tx_commit writes them as always), 1: started.
+ */
+int kshim_jnl_slots_start(struct block_device *b)
+{
+	struct kshim_jnl *j = b->jnl;
+	unsigned long n, ndesc;
+	u64 base, rdev[KJ_SEGS_PRE];
+	size_t rlen[KJ_SEGS_PRE], roff[KJ_SEGS_PRE], bytes;
+	unsigned int nr = 0;
+	struct kj_desc *d;
+	u32 crc = 0;
+	u8 *buf;
+	int fua;
+	if (!j || !j->sretain || j->sckpt || j->pre_started || j->failed || __atomic_load_n(&j->sstate, __ATOMIC_ACQUIRE) != KJ_S_RUNNING ||
+	    b->kshim_gone || b->kshim_frozen || !j->snpages)
+		return 0;
+	n = j->snpages;
+	ndesc = (n + KJ_DESC_PER_PAGE - 1) / KJ_DESC_PER_PAGE;
+	base = KJ_AREA_BASE + (u64)j->sarea * KJ_AREA_SLOTS;
+	bytes = (size_t)(ndesc + n) * KJ_PAGE;
+	kj_sort(j->sv, j->stmp, n);
+	buf = kmalloc(bytes, GFP_NOFS);
+	if (!buf)
+		return 0;
+	d = (struct kj_desc *)buf;
+	for (unsigned long p = 0; p < ndesc; p++, d = (struct kj_desc *)((u8 *)d + KJ_PAGE)) {
+		memset(d, 0, KJ_PAGE);
+		for (unsigned long q = 0; q < KJ_DESC_PER_PAGE && p * KJ_DESC_PER_PAGE + q < n; q++) {
+			struct kj_ent *e = j->sv[p * KJ_DESC_PER_PAGE + q];
+			d[q].blk = e->blk;
+			d[q].mask = e->mask;
+			d[q].crc = kj_crc32(0, e->data, KJ_PAGE);
+		}
+		crc = kj_crc32(crc, d, KJ_PAGE);
+	}
+	for (unsigned long i = 0; i < n; i++) {
+		memcpy(buf + (ndesc + i) * KJ_PAGE, j->sv[i]->data, KJ_PAGE);
+		crc = kj_crc32(crc, buf + (ndesc + i) * KJ_PAGE, KJ_PAGE);
+	}
+	/* The slots' places on the device, adjacent ones in one request (at most KJ_SEGS_PRE requests, else not started). */
+	for (unsigned long i = 0; i < ndesc + n; i++) {
+		u64 dev;
+		if (kj_page_dev(j->ext, j->next, kj_slot_page(base + i), &dev)) {
+			kfree(buf);
+			return 0;
+		}
+		if (nr && rdev[nr - 1] + rlen[nr - 1] == dev && rlen[nr - 1] + KJ_PAGE <= KJ_BATCH) {
+			rlen[nr - 1] += KJ_PAGE;
+			continue;
+		}
+		if (nr == KJ_SEGS_PRE) {
+			kfree(buf);
+			return 0;
+		}
+		rdev[nr] = dev;
+		roff[nr] = i * KJ_PAGE;
+		rlen[nr] = KJ_PAGE;
+		nr++;
+	}
+	/* FUA for the slots when nothing plain is waiting for a flush anyway (as kj_tx_commit; the file data is accounted when it is waited for). */
+	fua = b->kshim_fua && ngos_dev_clean(b->osdev);
+	for (unsigned int i = 0; i < nr; i++) {
+		if (ngos_dev_write_start(b->osdev, rdev[i], buf + roff[i], (unsigned int)rlen[i], fua, 0)) {
+			/* not sent: what was started is waited for and the slots are written as always */
+			ngos_dev_drain(b->osdev);
+			kfree(buf);
+			return 0;
+		}
+	}
+	j->pre_buf = buf;
+	j->pre_crc = crc;
+	j->pre_fua = fua;
+	j->pre_started = 1;
+	return 1;
+}
+
+/* The writes in flight with the slots failed (the file data, or a slot): this sealed transaction goes no further. */
+void kshim_jnl_pre_fail(struct block_device *b)
+{
+	struct kshim_jnl *j = b->jnl;
+	if (j && __atomic_load_n(&j->sstate, __ATOMIC_ACQUIRE) == KJ_S_RUNNING)
+		j->pre_err = -EIO;
+}
+
+/*
  * The journal I/O of the sealed transaction.  NO volume lock: the caller sealed it under the lock, released the lock and
  * returns to it afterwards, and the device, the journal and this struct stay valid meanwhile (the glue counts the
  * thread as an unlocked I/O, so no dismount frees them).  Returns the result; the transaction stays sealed (readable)
@@ -1423,6 +1556,8 @@ int kshim_jnl_io(struct block_device *b)
 	}
 	if (err) {
 		/* nothing of this transaction was written */
+	} else if (j->pre_err) {
+		err = j->pre_err;	/* the file data or the slots, written in flight with each other, failed: no header */
 	} else if (j->sretain) {
 		/* Durable in a slot area; the pages stay in memory as the retained transaction (kj_reap) until a checkpoint. */
 		j->cur_area = j->sarea;
@@ -1447,6 +1582,9 @@ int kshim_jnl_io(struct block_device *b)
 	kfree(j->sv);
 	kfree(j->stmp);
 	j->sv = j->stmp = NULL;
+	kfree(j->pre_buf);
+	j->pre_buf = NULL;
+	j->pre_started = j->pre_err = 0;
 	j->serr = err;
 #if DBG
 	j->io_us += (unsigned long)((ngos_ticks() - t0) / 2000);	/* ticks are TSC: ~2 GHz, only an estimate */

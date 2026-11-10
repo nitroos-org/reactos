@@ -1736,6 +1736,41 @@ static int ngc_commit(struct ngc_vol *v)
  */
 int ngc_unlocked_commit = 1;
 
+void ngc_set_fua(ngc_vol *v, int on)
+{
+	v->bdev->kshim_fua = on;
+}
+
+void ngc_set_data_fua(ngc_vol *v, int on)
+{
+	v->bdev->kshim_wt_fua = on && v->bdev->kshim_fua;
+}
+
+void ngc_set_defer(ngc_vol *v, int on)
+{
+	v->bdev->kshim_defer = on;
+}
+
+int ngc_drain_data(ngc_vol *v)
+{
+	int r = ngos_dev_drain(v->bdev->osdev) ? -EIO : 0;
+	if (r && v->bdev->jnl)
+		kshim_jnl_failed(v->bdev);	/* latches a failed data write as the volume's failed-write state, with its event */
+	return r;
+}
+
+void ngc_commit_prestart(ngc_vol *v)
+{
+	struct block_device *b = v->bdev;
+	if (b->jnl)
+		kshim_jnl_slots_start(b);
+	/* the data writes of this thread, and the slots just started: a failure fails this commit before any header is written */
+	if (ngos_dev_drain(b->osdev) && b->jnl) {
+		kshim_jnl_pre_fail(b);
+		kshim_jnl_failed(b);
+	}
+}
+
 /* NoRetainedCommit=1: commits put their pages in place before they return, as before retained transactions (comparison, fallback). */
 extern int kshim_jnl_noret;
 void ngc_set_no_retain(int off)
@@ -2070,7 +2105,9 @@ static int ngc_dev_write(struct ngc_vol *v, u64 off, const u8 *buf, u64 len)
 			 * bounced below the block layer (kshim_dev_rw).
 			 */
 			n = (size_t)min_t(u64, len, NGC_DIRECT_MAX);
+			v->bdev->kshim_defer_now = v->bdev->kshim_defer;
 			err = kshim_dev_rw(v->bdev, 1, off, (void *)buf, n);
+			v->bdev->kshim_defer_now = 0;
 		} else {
 			n = (size_t)min_t(u64, len, NGC_BOUNCE);
 			if (buf)
