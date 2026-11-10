@@ -18,3 +18,13 @@ foreach(N 1 2)
     add_importlibs(user32_wevhook${N} user32 msvcrt kernel32)
     add_rostests_file(TARGET user32_wevhook${N})
 endforeach()
+
+# The same hook procedure, logging the processes that load the DLL (WinEventInContext)
+spec2def(user32_wevhooklog.dll wevhook.spec)
+add_library(user32_wevhooklog MODULE
+    wevhooklog.c
+    ${CMAKE_CURRENT_BINARY_DIR}/user32_wevhooklog_stubs.c
+    ${CMAKE_CURRENT_BINARY_DIR}/user32_wevhooklog.def)
+set_module_type(user32_wevhooklog win32dll)
+add_importlibs(user32_wevhooklog user32 msvcrt kernel32)
+add_rostests_file(TARGET user32_wevhooklog)
