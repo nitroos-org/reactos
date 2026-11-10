@@ -456,6 +456,9 @@ NTSTATUS NTAPI ReceiveComplete
 
 static IO_WORKITEM_ROUTINE RelaunchPacketReceiveWorker;
 
+/* Datagrams of no data that one datagram socket keeps waiting for a read */
+#define AFD_MAX_QUEUED_EMPTY_DATAGRAMS 1024
+
 /* Called with the socket state lock held */
 static VOID
 RelaunchPacketReceive(PAFD_FCB FCB)
@@ -913,6 +916,28 @@ PacketSocketRecvComplete(
     {
         SocketStateUnlock(FCB);
         return STATUS_FILE_CLOSED;
+    }
+
+    /* A datagram without data takes nothing from the receive window, but each one still costs a
+     * non-paged allocation: past a number of waiting datagrams it is dropped, as one that does not
+     * fit the window is. (Only an empty datagram needs the count; the others fill the window.) */
+    if( Irp->IoStatus.Information == 0 )
+    {
+        UINT Waiting = 0;
+
+        for( ListEntry = FCB->DatagramList.Flink;
+             ListEntry != &FCB->DatagramList && Waiting < AFD_MAX_QUEUED_EMPTY_DATAGRAMS;
+             ListEntry = ListEntry->Flink )
+        {
+            Waiting++;
+        }
+
+        if( Waiting >= AFD_MAX_QUEUED_EMPTY_DATAGRAMS )
+        {
+            RelaunchPacketReceive(FCB);
+            SocketStateUnlock( FCB );
+            return STATUS_SUCCESS;
+        }
     }
 
     DatagramRecv = ExAllocatePoolWithTag(NonPagedPool,

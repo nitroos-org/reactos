@@ -1817,6 +1817,11 @@ NTSTATUS DispTdiDeleteIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
     return Status;
 }
 
+/* Each query waits (up to ten seconds) on a system worker thread: the number of them at a time is bounded, so
+ * callers cannot take every worker of the system */
+#define MAX_PENDING_HW_QUERIES 8
+static volatile LONG PendingHwQueries;
+
 VOID NTAPI
 WaitForHwAddress ( PDEVICE_OBJECT DeviceObject, PVOID Context) {
     PQUERY_HW_WORK_ITEM WorkItem = (PQUERY_HW_WORK_ITEM)Context;
@@ -1862,6 +1867,7 @@ WaitForHwAddress ( PDEVICE_OBJECT DeviceObject, PVOID Context) {
     /* DispTdiQueryIpHwAddress referenced it for this */
     IPDereferenceInterface(WorkItem->Interface);
     ExFreePoolWithTag(WorkItem, QUERY_CONTEXT_TAG);
+    InterlockedDecrement(&PendingHwQueries);
     if (Irp->Flags & IRP_SYNCHRONOUS_API) {
         Irp->IoStatus.Status = Status;
     } else {
@@ -1933,6 +1939,13 @@ NTSTATUS DispTdiQueryIpHwAddress( PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STA
         }
     }
 
+    /* The answer may have to wait for the network: only so many queries wait at a time */
+    if (PendingHwQueries >= MAX_PENDING_HW_QUERIES) {
+        IPDereferenceInterface(Interface);
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Exit;
+    }
+
     WorkItem = ExAllocatePoolWithTag(PagedPool, sizeof(QUERY_HW_WORK_ITEM), QUERY_CONTEXT_TAG);
     if (WorkItem == NULL) {
         IPDereferenceInterface(Interface);
@@ -1989,6 +2002,9 @@ NTSTATUS DispTdiQueryIpHwAddress( PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STA
         Status = STATUS_UNSUCCESSFUL;
         goto Exit;
     }
+
+    /* WaitForHwAddress gives it back */
+    InterlockedIncrement(&PendingHwQueries);
 
     if (Irp->Flags & IRP_SYNCHRONOUS_API) {
         WaitForHwAddress(DeviceObject, WorkItem);
