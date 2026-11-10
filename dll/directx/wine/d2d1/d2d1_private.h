@@ -658,6 +658,7 @@ struct d2d_effect_properties
     ID2D1Properties ID2D1Properties_iface;
     LONG refcount;
     struct d2d_effect *effect;
+    BOOL builtin; /* the properties of the registration of a built-in effect */
 
     struct d2d_effect_property *properties;
     size_t offset;
@@ -791,6 +792,8 @@ struct d2d_effect
     LONG refcount;
 
     ID2D1EffectImpl *impl;
+    CLSID id;
+    BOOL builtin;
     struct d2d_effect_properties properties;
     struct d2d_effect_context *effect_context;
     struct d2d_transform_graph *graph;
@@ -801,6 +804,14 @@ struct d2d_effect
 
 HRESULT d2d_effect_create(struct d2d_device_context *context, const CLSID *effect_id,
         ID2D1Effect **effect);
+struct d2d_effect *unsafe_impl_from_ID2D1Image(ID2D1Image *iface);
+BOOL d2d_device_context_get_effect_bounds(struct d2d_device_context *context, ID2D1Image *image, D2D1_RECT_F *bounds);
+BOOL d2d_effect_get_builtin_value(const struct d2d_effect *effect, UINT32 index, void *value, UINT32 size);
+BOOL d2d_device_context_draw_effect(struct d2d_device_context *context, ID2D1Image *image,
+        const D2D1_POINT_2F *target_offset, const D2D1_RECT_F *image_rect, D2D1_INTERPOLATION_MODE interpolation_mode,
+        D2D1_COMPOSITE_MODE composite_mode);
+void d2d_device_context_draw_bitmap_at(struct d2d_device_context *context, ID2D1Bitmap *bitmap,
+        D2D1_INTERPOLATION_MODE interpolation_mode, const D2D1_POINT_2F *offset);
 void d2d_effect_init_properties(struct d2d_effect *effect, struct d2d_effect_properties *properties);
 HRESULT d2d_effect_properties_add(struct d2d_effect_properties *props, const WCHAR *name,
         UINT32 index, D2D1_PROPERTY_TYPE type, const WCHAR *value);

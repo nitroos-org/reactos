@@ -1207,6 +1207,12 @@ static void d2d_device_context_draw_bitmap(struct d2d_device_context *context, I
     ID2D1Brush_Release(&brush->ID2D1Brush_iface);
 }
 
+void d2d_device_context_draw_bitmap_at(struct d2d_device_context *context, ID2D1Bitmap *bitmap,
+        D2D1_INTERPOLATION_MODE interpolation_mode, const D2D1_POINT_2F *offset)
+{
+    d2d_device_context_draw_bitmap(context, bitmap, NULL, 1.0f, interpolation_mode, NULL, offset, NULL);
+}
+
 static void STDMETHODCALLTYPE d2d_device_context_DrawBitmap(ID2D1DeviceContext6 *iface,
         ID2D1Bitmap *bitmap, const D2D1_RECT_F *dst_rect, float opacity,
         D2D1_BITMAP_INTERPOLATION_MODE interpolation_mode, const D2D1_RECT_F *src_rect)
@@ -2329,6 +2335,10 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_GetImageLocalBounds(ID2D1Dev
 
         return S_OK;
     }
+    else if (d2d_device_context_get_effect_bounds(context, image, local_bounds))
+    {
+        return S_OK;
+    }
     else
     {
         FIXME("Unable to get local bounds of image %p.\n", image);
@@ -2556,6 +2566,9 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
                 interpolation_mode, composite_mode);
         return;
     }
+
+    if (d2d_device_context_draw_effect(context, image, target_offset, image_rect, interpolation_mode, composite_mode))
+        return;
 
     if (composite_mode != D2D1_COMPOSITE_MODE_SOURCE_OVER)
         FIXME("Unhandled composite mode %#x.\n", composite_mode);
