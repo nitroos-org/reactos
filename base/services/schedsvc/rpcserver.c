@@ -66,8 +66,8 @@ RpcThreadRoutine(
     if (Status != RPC_S_OK)
         ERR("RpcServerUseProtseqEpW(ncalrpc) failed (Status %lx)\n", Status);
 
-    /* local only; this rpcrt4 does not call the callback or check the flag, so every entry point
-       of the interface checks its transport as well (schedsvc_begin_call) */
+    /* local only: rpcrt4 checks the flag and calls the callback; every entry point of the interface
+       checks its transport as well (schedsvc_begin_call) */
     Status = RpcServerRegisterIfEx(ITaskSchedulerService_v1_0_s_ifspec, NULL, NULL,
                                    RPC_IF_ALLOW_LOCAL_ONLY, RPC_C_LISTEN_MAX_CALLS_DEFAULT,
                                    schedsvc_if_callback);
