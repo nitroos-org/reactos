@@ -347,8 +347,28 @@ START_TEST(licenses)
         hr = pPolicy(Slc, NULL, &Type, &cb, &Blob);
         ok(hr == E_INVALIDARG, "SLGetPolicyInformation without a name: 0x%lx\n", hr);
         Blob = (PBYTE)1; cb = 9;
+        /* Windows 10 (measured): the plug-in modules as a multi-string (installing Office adds none), the version as a string */
         hr = pService(Slc, L"ActivePlugins", &Type, &cb, &Blob);
-        ok(hr == SL_E_VALUE_NOT_FOUND && cb == 0 && Blob == NULL, "SLGetServiceInformation: 0x%lx\n", hr);
+        ok(hr == S_OK && Type == SL_DATA_MULTI_SZ && Blob && cb > 4 * sizeof(WCHAR), "SLGetServiceInformation(ActivePlugins): 0x%lx type %d cb %u\n", hr, Type, cb);
+        if (hr == S_OK && Blob)
+        {
+            const WCHAR *p = (const WCHAR *)Blob;
+            UINT n2 = 0;
+
+            for (; *p; p += wcslen(p) + 1)
+                n2++;
+            ok(n2 == 2, "ActivePlugins holds %u entries\n", n2);
+            ok(p + 1 == (const WCHAR *)(Blob + cb), "ActivePlugins size %u does not end at the terminator\n", cb);
+            LocalFree(Blob);
+        }
+        Blob = NULL;
+        hr = pService(Slc, L"Version", &Type, &cb, &Blob);
+        ok(hr == S_OK && Type == SL_DATA_SZ && Blob && wcschr((WCHAR *)Blob, L'.'), "SLGetServiceInformation(Version): 0x%lx\n", hr);
+        if (Blob)
+            LocalFree(Blob);
+        Blob = (PBYTE)1; cb = 9;
+        hr = pService(Slc, L"NoSuchName", &Type, &cb, &Blob);
+        ok(hr == SL_E_VALUE_NOT_FOUND && cb == 0 && Blob == NULL, "SLGetServiceInformation of an unknown name: 0x%lx\n", hr);
         hr = pService(Slc, L"ActivePlugins", &Type, NULL, &Blob);
         ok(hr == E_INVALIDARG, "SLGetServiceInformation without a size: 0x%lx\n", hr);
         /* an installed SKU without an end-user license has no name; g_Sku is the id of a real Office SKU, whose
@@ -484,6 +504,105 @@ START_TEST(licenses)
         ok(hr == E_INVALIDARG, "SLConsumeRight without an application: 0x%lx\n", hr);
         hr = pConsume(Slc, &g_App, NULL, NULL, NULL);
         ok(hr == SL_E_RIGHT_NOT_GRANTED, "SLConsumeRight of the application: 0x%lx\n", hr);
+
+        /* Windows 10 (measured): consuming binds the application to the handle (the status query without ids then answers
+         * for it, on that handle only); an application or SKU that is not installed is 0xC004F015 and binds nothing */
+        {
+            typedef HRESULT (WINAPI *PFN_STATUS2)(HSLC, const SLID *, const SLID *, PCWSTR, UINT *, SL_LICENSING_STATUS **);
+            PFN_STATUS2 pSt = (PFN_STATUS2)GetProcAddress(Sppc, "SLGetLicensingStatusInformation");
+            SL_LICENSING_STATUS *St = NULL;
+            HSLC Slc2 = NULL;
+            UINT c2 = 0;
+
+            hr = pSt(Slc, NULL, NULL, NULL, &c2, &St);
+            ok(hr == S_OK && c2 >= 2 && St, "status without ids on the bound handle: 0x%lx count %u\n", hr, c2);
+            if (St)
+            {
+                UINT q;
+
+                for (q = 0; q < c2; q++)
+                    ok(St[q].eStatus == SL_LICENSING_STATUS_UNLICENSED && St[q].hrReason == (HRESULT)0xC004F014L, "bound status %u: %d 0x%lx\n", q, St[q].eStatus, St[q].hrReason);
+                LocalFree(St);
+            }
+            ok(pOpen(&Slc2) == S_OK, "second SLOpen\n");
+            St = NULL; c2 = 5;
+            hr = pSt(Slc2, NULL, NULL, NULL, &c2, &St);
+            ok(hr == (HRESULT)0xC004F002L && c2 == 0, "status without ids on a fresh handle: 0x%lx\n", hr);
+            hr = pConsume(Slc2, &Zero, NULL, NULL, NULL);
+            ok(hr == SL_E_PRODUCT_SKU_NOT_INSTALLED, "SLConsumeRight of an unknown application: 0x%lx\n", hr);
+            hr = pConsume(Slc2, &g_App, &Zero, NULL, NULL);
+            ok(hr == SL_E_PRODUCT_SKU_NOT_INSTALLED, "SLConsumeRight of an unknown SKU: 0x%lx\n", hr);
+            hr = pSt(Slc2, NULL, NULL, NULL, &c2, &St);
+            ok(hr == (HRESULT)0xC004F002L, "the failed consumes bound something: 0x%lx\n", hr);
+            hr = pConsume(Slc2, &g_App, &g_Sku2, NULL, NULL);
+            ok(hr == SL_E_RIGHT_NOT_GRANTED, "SLConsumeRight of a SKU: 0x%lx\n", hr);
+            c2 = 0;
+            hr = pSt(Slc2, NULL, NULL, NULL, &c2, &St);
+            ok(hr == S_OK && c2 == 1 && St && IsEqualGUID(&St[0].SkuId, &g_Sku2), "status on a handle bound to a SKU: 0x%lx count %u\n", hr, c2);
+            if (St)
+                LocalFree(St);
+            pClose(Slc2);
+        }
+#ifdef _WIN64
+        /* Application authentication data: accepted without being verified (the Office caller hint), as Windows' answers for a
+         * blob that cannot be verified; the policy handle is refused for a caller that has not authenticated (measured) */
+        {
+            typedef HRESULT (WINAPI *PFN_SETAUTH)(HSLC, UINT, const BYTE *, PVOID, PVOID);
+            typedef HRESULT (WINAPI *PFN_GETAUTH)(HSLC, PVOID, PVOID, PVOID);
+            typedef HRESULT (WINAPI *PFN_LOADPOL)(const SLID *, PVOID, PVOID, HSLC *, UINT);
+            PFN_SETAUTH pSet = (PFN_SETAUTH)GetProcAddress(Sppc, "SLSetAuthenticationData");
+            PFN_GETAUTH pGetAuth = (PFN_GETAUTH)GetProcAddress(Sppc, "SLGetAuthenticationResult");
+            PFN_LOADPOL pLoad = (PFN_LOADPOL)GetProcAddress(Sppc, "SLLoadApplicationPolicies");
+            typedef HRESULT (WINAPI *PFN_STATUS3)(HSLC, const SLID *, const SLID *, PCWSTR, UINT *, SL_LICENSING_STATUS **);
+            PFN_STATUS3 pSt = (PFN_STATUS3)GetProcAddress(Sppc, "SLGetLicensingStatusInformation");
+            SL_LICENSING_STATUS *St = NULL;
+            BYTE Blob2[0x120];
+            HSLC H = NULL, HP = (HSLC)1;
+            UINT c3 = 0, cbo = 0x200;
+            PVOID pp = NULL;
+
+            ok(pSet && pGetAuth && pLoad, "authentication exports missing\n");
+            if (pSet && pGetAuth && pLoad)
+            {
+                memset(Blob2, 0x5A, sizeof(Blob2));
+                ok(pOpen(&H) == S_OK, "SLOpen\n");
+                hr = pGetAuth(H, NULL, NULL, NULL);
+                ok(hr == E_INVALIDARG, "SLGetAuthenticationResult without arguments: 0x%lx\n", hr);
+                hr = pGetAuth(H, &cbo, &pp, NULL);
+                ok(hr == (HRESULT)0xC004F079L, "SLGetAuthenticationResult before any data: 0x%lx\n", hr);
+                hr = pSet(H, 0, NULL, NULL, NULL);
+                ok(hr == S_OK, "SLSetAuthenticationData(0, NULL): 0x%lx\n", hr);
+                hr = pGetAuth(H, &cbo, &pp, NULL);
+                ok(hr == (HRESULT)0xC004F079L, "SLGetAuthenticationResult after an empty call: 0x%lx\n", hr);
+                hr = pSet(H, 0x10, Blob2, NULL, NULL);
+                ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA), "SLSetAuthenticationData(0x10 bytes): 0x%lx\n", hr);
+                hr = pSet(H, 0x120, NULL, NULL, NULL);
+                ok(hr == E_INVALIDARG, "SLSetAuthenticationData(0x120, NULL): 0x%lx\n", hr);
+                hr = pSet(H, 0x120, Blob2, NULL, NULL);
+                ok(hr == S_OK, "SLSetAuthenticationData(0x120 bytes): 0x%lx\n", hr);
+                hr = pGetAuth(H, &cbo, &pp, NULL);
+                ok(hr == S_OK, "SLGetAuthenticationResult after accepted data: 0x%lx\n", hr);
+                /* the accepted data binds the Office application: the status query without ids answers for it; here the
+                 * Office application has no license installed, which is the answer for an application that is not installed */
+                hr = pSt(H, NULL, NULL, NULL, &c3, &St);
+                ok(hr == SL_E_PRODUCT_SKU_NOT_INSTALLED || (hr == S_OK && c3 && St), "status after accepted data: 0x%lx\n", hr);
+                if (hr == S_OK && St)
+                {
+                    UINT q;
+
+                    for (q = 0; q < c3; q++)
+                        ok(St[q].eStatus != SL_LICENSING_STATUS_LICENSED, "the accepted data reported a licensed SKU\n");
+                    LocalFree(St);
+                }
+                pClose(H);
+
+                hr = pLoad(&g_App, NULL, NULL, &HP, 2);
+                ok(hr == (HRESULT)0xC004F072L && HP == NULL, "SLLoadApplicationPolicies: 0x%lx handle %p\n", hr, HP);
+                hr = pLoad(NULL, NULL, NULL, &HP, 2);
+                ok(hr == E_INVALIDARG, "SLLoadApplicationPolicies without an id: 0x%lx\n", hr);
+            }
+        }
+#endif
         if (pAppInfo)
         {
             Blob = (PBYTE)1; cb = 9;

@@ -23,13 +23,13 @@
 @ stdcall SLGetWindowsInformationDWORD(wstr ptr) sppc.SLGetWindowsInformationDWORD
 @ stdcall SLInstallLicense(ptr long ptr ptr) sppc.SLInstallLicense
 @ stdcall SLInstallProofOfPurchase(ptr wstr wstr long ptr ptr) sppc.SLInstallProofOfPurchase
-@ stdcall -arch=win64 SLLoadApplicationPolicies(ptr ptr ptr ptr ptr) sppc.SLLoadApplicationPolicies
+@ stdcall -arch=win64 SLLoadApplicationPolicies(ptr ptr ptr ptr long) sppc.SLLoadApplicationPolicies
 @ stdcall SLOpen(ptr) sppc.SLOpen
 @ stdcall SLPersistApplicationPolicies(ptr ptr ptr) sppc.SLPersistApplicationPolicies
 @ stdcall SLPersistRTSPayloadOverride(ptr ptr wstr) sppc.SLPersistRTSPayloadOverride
 @ stdcall -arch=win64 SLReArm(ptr ptr ptr ptr) sppc.SLReArm
 @ stdcall -arch=win64 SLRegisterPlugin(ptr ptr ptr ptr) sppc.SLRegisterPlugin
-@ stdcall -arch=win64 SLSetAuthenticationData(ptr ptr ptr ptr) sppc.SLSetAuthenticationData
+@ stdcall -arch=win64 SLSetAuthenticationData(ptr long ptr ptr ptr) sppc.SLSetAuthenticationData
 @ stdcall SLUninstallLicense(ptr ptr) sppc.SLUninstallLicense
 @ stdcall SLUninstallProofOfPurchase(ptr ptr) sppc.SLUninstallProofOfPurchase
 @ stdcall -arch=win64 SLUnloadApplicationPolicies(ptr ptr) sppc.SLUnloadApplicationPolicies
