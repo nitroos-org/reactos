@@ -37,6 +37,11 @@ GreRedirCreateSurface(
         return NULL;
 
     /*
+     * Deliberately no API_BITMAP (EngCreateBitmap sets it): NtGdiSelectBitmap, GetBitmapBits and SetBitmapBits
+     * refuse a surface without it. Part of what keeps window pixels away from other processes; do not add it.
+     */
+
+    /*
      * No process may reach it through its handle: owned by the System process, which no caller of the
      * user-mode GDI calls is (GDI_OBJ_HMGR_NONE would turn into PUBLIC). The reference stays with the caller.
      */
@@ -64,9 +69,15 @@ NTAPI
 GreRedirDeleteSurface(
     _In_ PSURFACE psurf)
 {
-    /* Public again for the free (process-owned objects are counted against the freeing process); the handle dies here */
-    GDIOBJ_vSetObjectOwner(&psurf->BaseObject, GDI_OBJ_HMGR_PUBLIC);
+    /*
+     * The handle dies first (GDIOBJ_vDeleteObject clears its valid bit, so no lookup succeeds any more), and
+     * only then is the object public again (process-owned objects are counted against the process that frees
+     * them). An extra reference keeps it alive for that step.
+     */
+    GDIOBJ_vReferenceObjectByPointer(&psurf->BaseObject);
     GDIOBJ_vDeleteObject(&psurf->BaseObject);
+    GDIOBJ_vSetObjectOwner(&psurf->BaseObject, GDI_OBJ_HMGR_PUBLIC);
+    GDIOBJ_vDereferenceObject(&psurf->BaseObject);
 }
 
 /* Copies between the screen and a window surface through prgnScreen (screen coordinates); bToScreen: present, else seed */

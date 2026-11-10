@@ -148,7 +148,10 @@ typedef struct _DC
 #define DC_IS_SCREEN(pdc) ((pdc)->dctype == DCTYPE_DIRECT && !((pdc)->fs & DC_REDIRECTION))
 
 /* redirgdi.c (surfaces are used by pointer: their handles have no owner a process can match) */
-BOOL NTAPI GreRedirBindDC(_In_ HDC hdc, _In_opt_ PVOID pvRedir, _In_opt_ struct _SURFACE *psurf, _Out_ PVOID *ppvOld);
+#define REDIRBIND_OK    0   /* bound as asked */
+#define REDIRBIND_BUSY  1   /* the DC is locked by another process for now: binding unchanged */
+#define REDIRBIND_GONE  2   /* the DC handle is no longer valid (or not a window DC) */
+ULONG NTAPI GreRedirBindDC(_In_ HDC hdc, _In_opt_ PVOID pvRedir, _In_opt_ struct _SURFACE *psurf, _Out_ PVOID *ppvOld);
 struct _SURFACE *NTAPI GreRedirCreateSurface(_In_ LONG cx, _In_ LONG cy, _In_opt_ struct _SURFACE *psurfOld);
 VOID NTAPI GreRedirDeleteSurface(_In_ struct _SURFACE *psurf);
 BOOL NTAPI GreRedirPresent(_In_ struct _SURFACE *psurf, _In_ struct _REGION *prgnScreen, _In_ LONG xWnd, _In_ LONG yWnd);
@@ -233,6 +236,11 @@ VOID FASTCALL DC_vPrepareDCsForBlit(PDC pdcDest, const RECT* rcDest, PDC pdcSrc,
 #define DCPREP_CLIP_ALPHA      0x04
 #define DCPREP_CLIP_NOTRIVIAL  0x08
 #define DCPREP_CLIP_MASK       0x0E
+/* rcDest is exactly what the primitive writes (blits, fills of rectangles and regions, DIB copies): a redirected
+   window presents only that; without it the DC's clip bounds count as drawn (lines, shapes, text: they draw past
+   their bounding rectangles). DCPREP_READ_ONLY: the destination is only read (GetPixel). */
+#define DCPREP_EXACT_DEST      0x10
+#define DCPREP_READ_ONLY       0x20
 VOID FASTCALL DC_vPrepareDCsForBlitEx(PDC pdcDest, const RECT* rcDest, PDC pdcSrc, const RECT* rcSrc, FLONG fl);
 typedef enum _CLIPLIMIT
 {

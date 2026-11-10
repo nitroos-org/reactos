@@ -762,7 +762,7 @@ NtGdiSetDIBitsToDeviceInternal(
     }
 
     /* This is actually a blit */
-    DC_vPrepareDCsForBlit(pDC, &rcDest, NULL, NULL);
+    DC_vPrepareDCsForBlitEx(pDC, &rcDest, NULL, NULL, DCPREP_EXACT_DEST);
     pSurf = pDC->dclevel.pSurface;
     if (!pSurf)
     {
@@ -1620,7 +1620,7 @@ NtGdiStretchDIBitsInternal(
         }
 
         /* Prepare DC for blit */
-        DC_vPrepareDCsForBlit(pdc, &rcDst, NULL, NULL);
+        DC_vPrepareDCsForBlitEx(pdc, &rcDst, NULL, NULL, DCPREP_EXACT_DEST);
 
         psurfDst = pdc->dclevel.pSurface;
 

@@ -120,6 +120,11 @@ GDIOBJ_AllocateObject(
     ULONG cjSize,
     FLONG fl);
 
+BOOL
+NTAPI
+GreIsHandleValidAnyOwner(
+    HGDIOBJ hobj);
+
 VOID
 NTAPI
 GDIOBJ_vDeleteObject(

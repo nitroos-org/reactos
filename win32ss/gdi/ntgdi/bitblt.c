@@ -377,7 +377,7 @@ NtGdiAlphaBlend(
 
     /* Prepare DCs for blit */
     TRACE("Preparing DCs for blit\n");
-    DC_vPrepareDCsForBlitEx(DCDest, &DestRect, DCSrc, &SourceRect, bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_ALPHA);
+    DC_vPrepareDCsForBlitEx(DCDest, &DestRect, DCSrc, &SourceRect, (bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_ALPHA) | DCPREP_EXACT_DEST);
 
     /* Determine surfaces to be used in the bitblt */
     BitmapDest = DCDest->dclevel.pSurface;
@@ -561,7 +561,7 @@ NtGdiTransparentBlt(
              IntSourceInSurface(DCSrc, &rcSrc);
 
     /* Prepare for blit */
-    DC_vPrepareDCsForBlitEx(DCDest, &rcDest, DCSrc, &rcSrc, bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_NOTRIVIAL);
+    DC_vPrepareDCsForBlitEx(DCDest, &rcDest, DCSrc, &rcSrc, (bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_NOTRIVIAL) | DCPREP_EXACT_DEST);
 
     BitmapDest = DCDest->dclevel.pSurface;
     if (!BitmapDest)
@@ -764,7 +764,7 @@ NtGdiMaskBlt(
 
     /* Prepare blit; a source on the screen can show the pointer, so only a memory source is split */
     bSplit = DC_IS_SCREEN(DCDest) && (!UsesSource || !DC_IS_SCREEN(DCSrc));
-    DC_vPrepareDCsForBlitEx(DCDest, &DestRect, DCSrc, &SourceRect, bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_BITBLT);
+    DC_vPrepareDCsForBlitEx(DCDest, &DestRect, DCSrc, &SourceRect, (bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_BITBLT) | DCPREP_EXACT_DEST);
 
     if (pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(DCDest);
@@ -1060,7 +1060,7 @@ GreStretchBltMask(
     /* Only prepare Source and Dest, hdcMask represents a DIB. IntEngStretchBlt moves the destination of a flipped
      * stretch by a pixel (stretchblt.c), so the hazard of the unsplit call is the destination wider by that pixel. */
     IntStretchHazard(&DestRect, &SourceRect, &rcHazard);
-    DC_vPrepareDCsForBlitEx(DCDest, bSplit ? &DestRect : &rcHazard, DCSrc, &SourceRect, bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_NOTRIVIAL);
+    DC_vPrepareDCsForBlitEx(DCDest, bSplit ? &DestRect : &rcHazard, DCSrc, &SourceRect, (bSplit ? DCPREP_SPLIT_DEST : DCPREP_CLIP_NOTRIVIAL) | DCPREP_EXACT_DEST);
 
     if (pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(DCDest);
@@ -1282,7 +1282,7 @@ IntPatBlt(
     BrushOrigin.y = pbrush->ptOrigin.y + pdc->dclevel.ptlBrushOrigin.y + pdc->ptlDCOrig.y;
 #endif
 
-    DC_vPrepareDCsForBlitEx(pdc, &DestRect, NULL, NULL, DC_IS_SCREEN(pdc) ? DCPREP_SPLIT_DEST : 0);
+    DC_vPrepareDCsForBlitEx(pdc, &DestRect, NULL, NULL, (DC_IS_SCREEN(pdc) ? DCPREP_SPLIT_DEST : 0) | DCPREP_EXACT_DEST);
 
     psurf = pdc->dclevel.pSurface;
 
@@ -1550,7 +1550,7 @@ IntGdiBitBltRgn(
     }
 
     /* Prepare the DC */
-    DC_vPrepareDCsForBlit(pdc, &prgnClip->rdh.rcBound, NULL, NULL);
+    DC_vPrepareDCsForBlitEx(pdc, &prgnClip->rdh.rcBound, NULL, NULL, DCPREP_EXACT_DEST);
 
     /* Initialize a clip object */
     IntEngInitClipObj(&xcoClip);
@@ -1645,7 +1645,7 @@ IntGdiFillRgn(
     mix = rop2Fg | (pdc->pdcattr->jBkMode == OPAQUE ? rop2Fg : R2_NOP) << 8;
 
     /* Prepare DC for blit */
-    DC_vPrepareDCsForBlit(pdc, &prgnClip->rdh.rcBound, NULL, NULL);
+    DC_vPrepareDCsForBlitEx(pdc, &prgnClip->rdh.rcBound, NULL, NULL, DCPREP_EXACT_DEST);
 
     /* Check if we have a fill brush */
     if (pbrFill != NULL)
@@ -1948,7 +1948,7 @@ NtGdiGetPixel(
     rcDest.bottom = ptlSrc.y + 1;
 
     /* Prepare DC for blit */
-    DC_vPrepareDCsForBlit(pdc, &rcDest, NULL, NULL);
+    DC_vPrepareDCsForBlitEx(pdc, &rcDest, NULL, NULL, DCPREP_READ_ONLY);
 
     /* Check if the pixel is outside the surface */
     psurfSrc = pdc->dclevel.pSurface;

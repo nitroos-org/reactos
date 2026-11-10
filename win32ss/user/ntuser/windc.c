@@ -332,19 +332,40 @@ noparent:
  * record (DCE_REDIR_RETRY), and is bound again at its next GetDC, release or move. A record is never
  * released while a DC may still draw into it.
  */
+static VOID
+DceRedirSetRetry(PDCE Dce, BOOL bRetry)
+{
+   if (bRetry && !(Dce->RedirFlags & DCE_REDIR_RETRY))
+   {
+      Dce->RedirFlags |= DCE_REDIR_RETRY;
+      UserRedirRetryCount(1);
+   }
+   else if (!bRetry && (Dce->RedirFlags & DCE_REDIR_RETRY))
+   {
+      Dce->RedirFlags &= ~DCE_REDIR_RETRY;
+      UserRedirRetryCount(-1);
+   }
+}
+
 static BOOL
 DceRedirBind(PDCE Dce, PVOID pRedir)
 {
    PVOID pvOld;
+   ULONG Status;
 
    if (Dce->pRedir == pRedir && !(Dce->RedirFlags & DCE_REDIR_RETRY))
       return TRUE;
-   if (!GreRedirBindDC(Dce->hDC, pRedir, pRedir ? UserRedirSurface(pRedir) : NULL, &pvOld))
+   Status = GreRedirBindDC(Dce->hDC, pRedir, pRedir ? UserRedirSurface(pRedir) : NULL, &pvOld);
+   /* A DC that is gone draws nothing: unbinding it is done */
+   if (Status == REDIRBIND_GONE && !pRedir)
+      Status = REDIRBIND_OK;
+   if (Status != REDIRBIND_OK)
    {
-      Dce->RedirFlags |= DCE_REDIR_RETRY;
+      /* Tried again at its next GetDC, release or move, and from the frame timer */
+      DceRedirSetRetry(Dce, TRUE);
       return FALSE;
    }
-   Dce->RedirFlags &= ~DCE_REDIR_RETRY;
+   DceRedirSetRetry(Dce, FALSE);
    if (Dce->pRedir != pRedir)
    {
       if (pRedir)
@@ -399,10 +420,33 @@ DceRedirRebindAll(PVOID pRedir, PSURFACE psurf)
       ListEntry = ListEntry->Flink;
       if (Dce->pRedir != pRedir)
          continue;
-      if (GreRedirBindDC(Dce->hDC, pRedir, psurf, &pvOld))
-         Dce->RedirFlags &= ~DCE_REDIR_RETRY;
-      else
-         Dce->RedirFlags |= DCE_REDIR_RETRY;
+      DceRedirSetRetry(Dce, GreRedirBindDC(Dce->hDC, pRedir, psurf, &pvOld) != REDIRBIND_OK);
+   }
+}
+
+/* The frame timer: DCs whose binding could not be changed are tried again */
+VOID
+FASTCALL
+DceRedirRetryAll(VOID)
+{
+   PLIST_ENTRY ListEntry;
+   PDCE Dce;
+   PVOID Target;
+
+   for (ListEntry = LEDce.Flink; ListEntry != &LEDce; )
+   {
+      Dce = CONTAINING_RECORD(ListEntry, DCE, List);
+      ListEntry = ListEntry->Flink;
+      if (!(Dce->RedirFlags & DCE_REDIR_RETRY))
+         continue;
+      /* Its record if the window still has it (a new surface after a resize), else the screen */
+      Target = (Dce->pRedir && UserRedirWindow(Dce->pRedir)) ? Dce->pRedir : NULL;
+      if (DceRedirBind(Dce, Target) && !Dce->pRedir && (Dce->DCXFlags & DCX_DCEBUSY) && Dce->pwndOrg)
+      {
+         DceSetDrawable(Dce->pwndOrg, Dce->hDC, Dce->DCXFlags, TRUE, NULL);
+         DceUpdateVisRgn(Dce, Dce->pwndOrg, Dce->DCXFlags);
+         Dce->RedirFlags &= ~DCE_REDIR_VISSTALE;
+      }
    }
 }
 
@@ -488,6 +532,7 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
    DCE* Dce = NULL;
    BOOL UpdateClipOrigin = FALSE;
    BOOL bUpdateVisRgn = TRUE;
+   BOOL bRedirLost = FALSE;
    HDC hDC = NULL;
    PPROCESSINFO ppi;
    PLIST_ENTRY ListEntry;
@@ -750,8 +795,12 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
          UserRedirDetachWindow(Top);
       }
 
-      if (Dce->pRedir != pRedir || (Dce->RedirFlags & DCE_REDIR_RETRY))
-         DceRedirBind(Dce, pRedir);
+      /* Still bound to another surface (its DC is held elsewhere): it draws nothing this time, not at a wrong place */
+      if ((Dce->pRedir != pRedir || (Dce->RedirFlags & DCE_REDIR_RETRY)) &&
+          !DceRedirBind(Dce, pRedir) && Dce->pRedir != pRedir)
+      {
+         bRedirLost = TRUE;
+      }
       /* Bound otherwise since its region was computed (here or when its window let go of its surface) */
       if (Dce->RedirFlags & DCE_REDIR_VISSTALE)
       {
@@ -763,6 +812,17 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
    DceSetDrawable(Wnd, Dce->hDC, Flags, UpdateClipOrigin, Dce->pRedir ? UserRedirWindow(Dce->pRedir) : NULL);
 
    if (bUpdateVisRgn) DceUpdateVisRgn(Dce, Wnd, Flags);
+
+   if (bRedirLost)
+   {
+      PREGION RgnEmpty = IntSysCreateRectpRgn(0, 0, 0, 0);
+      if (RgnEmpty)
+      {
+         GdiSelectVisRgn(Dce->hDC, RgnEmpty);
+         REGION_Delete(RgnEmpty);
+      }
+      Dce->RedirFlags |= DCE_REDIR_VISSTALE;
+   }
 
    /* A window marked as glass (HWNDPARAM_ROUTINE_ROS_SETGLASS): its DC blends 32 bpp DIB copies with alpha */
    {
@@ -848,11 +908,12 @@ DceFreeDCE(PDCE pdce, BOOLEAN Force)
   {
      if (Hit || !DceRedirBind(pdce, NULL))
      {
-        /* The DC may still draw (and mark the record) while it goes: the record keeps this reference for good */
-        ERR("DCE %p freed while its DC is still bound to a redirection record\n", pdce);
+        /* The DC may still draw (and mark the record) while it goes: the timer releases the record once it is gone or unbound */
+        UserRedirOrphan(pdce->hDC, pdce->pRedir);
         pdce->pRedir = NULL;
      }
   }
+  DceRedirSetRetry(pdce, FALSE);
 
   if (!Hit) IntGdiDeleteDC(pdce->hDC, TRUE);
 
