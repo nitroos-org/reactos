@@ -453,7 +453,7 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 		goto out;
 	res = NGJ_NONE;
 	memcpy(&h, pg, sizeof(h));
-	if (memcmp(h.magic, KJ_MAGIC, 8) || h.version != KJ_VERSION ||
+	if (memcmp(h.magic, KJ_MAGIC, 8) || (h.version != KJ_VERSION && h.version != KJ_VERSION_AREA) ||
 	    h.hdr_crc != kj_crc32(0, &h, offsetof(struct kj_hdr, hdr_crc)) ||
 	    ((u64)h.serial_hi << 32 | h.serial_lo) != jv->serial || h.page_size != KJ_PAGE)
 		goto out;
@@ -489,12 +489,14 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 	res = NGJ_CLEAN;
 	jv->keep = !!(h.flags & KJ_FL_KEEP);
 	if (h.state == KJ_ST_COMMITTED) {
+		/* A retained transaction sits in the second slot area (version 3 only: an older driver would read the first). */
+		u64 base = h.version == KJ_VERSION_AREA ? KJ_AREA_BASE + ((h.flags & KJ_FL_AREA1) ? KJ_AREA_SLOTS : 0) : 0;
 		u32 crc = 0, total = h.ndesc + h.npages, i;
 		int ok = h.npages && h.npages < (1u << 24) &&
 			 h.ndesc == (h.npages + KJ_DESC_PER_PAGE - 1) / KJ_DESC_PER_PAGE &&
-			 kj_slot_page(total - 1) < jv->lf_pages;
+			 kj_slot_page(base + total - 1) < jv->lf_pages;
 		for (i = 0; ok && i < total; i++) {
-			if (lf_read(jv, kj_slot_page(i), pg)) {
+			if (lf_read(jv, kj_slot_page(base + i), pg)) {
 				/* Unreadable, not torn: the transaction may be half in place, keep the evidence. */
 				res = NGJ_REPAIR;
 				goto out;
@@ -504,8 +506,8 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 		if (ok && crc == h.payload_crc) {
 			for (i = 0; i < h.npages; i++) {
 				const struct kj_desc *d = (const struct kj_desc *)dp + i % KJ_DESC_PER_PAGE;
-				if ((i % KJ_DESC_PER_PAGE == 0 && lf_read(jv, kj_slot_page(i / KJ_DESC_PER_PAGE), dp)) ||
-				    lf_read(jv, kj_slot_page(h.ndesc + i), pg) || kj_crc32(0, pg, KJ_PAGE) != d->crc) {
+				if ((i % KJ_DESC_PER_PAGE == 0 && lf_read(jv, kj_slot_page(base + i / KJ_DESC_PER_PAGE), dp)) ||
+				    lf_read(jv, kj_slot_page(base + h.ndesc + i), pg) || kj_crc32(0, pg, KJ_PAGE) != d->crc) {
 					res = NGJ_REPAIR;
 					goto out;
 				}
@@ -566,6 +568,8 @@ int ngj_recover(struct ngj_vol *jv, struct block_device *b, int write, u64 *seq)
 		if (was) {
 			struct kj_hdr a = h;
 			a.state = KJ_ST_ACTIVE;
+			a.version = KJ_VERSION;
+			a.flags &= ~KJ_FL_AREA1;
 			a.npages = a.ndesc = a.payload_crc = 0;
 			a.vol_usn_old = vp.usn_old;
 			a.vol_usn_new = vp.usn_new;

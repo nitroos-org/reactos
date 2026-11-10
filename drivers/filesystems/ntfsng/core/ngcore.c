@@ -17,6 +17,8 @@
  *     Every other user of those waits for it with the lock held (the I/O needs none): kshim_jnl_settle before the
  *     synchronous commit, before an allocation that follows a free (ngc_before_alloc), at retire, degrade, strict
  *     mode (a resize), deactivate, and when the medium goes or writes stop (kshim_jnl_quiesce).
+ *     A commit of few pages is "retained": durable when it returns (slots, flush, COMMITTED header, flush), its pages not in
+ *     place yet; kshim_jnl_settle (and so ngc_sync, retire, an allocation after a free) puts them there (shim/kshim_jnl.c).
  *   - A core operation never starts the unlocked commit and never drops the lock: ngc_mark_dirty past the overlay
  *     threshold only asks the glue (kshim_kick) and commits itself past a hard limit.
  * Frees: a cluster freed by an uncommitted transaction must not receive data before that transaction is in place.
@@ -73,7 +75,7 @@ unsigned long kshim_pc_soft_limit(void);
 struct ngc_vol {
 	struct super_block *sb;
 	struct block_device *bdev;
-	u8 *bounce;                     /* NGC_BOUNCE bytes of pool: device writes never touch caller memory */
+	u8 *bounce;                     /* NGC_BOUNCE bytes of pool: a partial or unaligned device write goes through this copy, an aligned buffer straight to the device (ngc_dev_write) */
 	struct ngj_vol *jv;             /* raw $LogFile location while the metadata journal is in use */
 	atomic64_t *watched;            /* the core's free-cluster count, watched for frees */
 	/* its increments at the last complete commit: kshim_jnl_aux_done (a commit's journal I/O may run without the volume lock) */
@@ -1646,7 +1648,14 @@ static int ngc_commit(struct ngc_vol *v)
  */
 int ngc_unlocked_commit = 1;
 
-int ngc_commit_begin(ngc_vol *v)
+/* NoRetainedCommit=1: commits put their pages in place before they return, as before retained transactions (comparison, fallback). */
+extern int kshim_jnl_noret;
+void ngc_set_no_retain(int off)
+{
+	kshim_jnl_noret = off;
+}
+
+int ngc_commit_begin(ngc_vol *v, int retain)
 {
 	unsigned long long t0 = ngos_ticks();
 	struct block_device *b = v->bdev;
@@ -1668,7 +1677,7 @@ int ngc_commit_begin(ngc_vol *v)
 	if (!b->jnl)
 		err = blkdev_issue_flush(b);
 	else {
-		r = kshim_jnl_seal(b, ngc_aux(v));
+		r = kshim_jnl_seal(b, ngc_aux(v), retain);
 		if (r == 1) {
 			ngos_prof(NGP_COMMIT, t0, 0);
 			return NGC_COMMIT_IO;
@@ -1899,6 +1908,7 @@ int ngc_dirty(ngc_vol *v)
 		return 0;
 	/* Also errors not yet marked on disk, and a clean volume whose header is still to be retired. */
 	return kshim_sb_dirty(v->sb) || ((vol->vol_flags & VOLUME_IS_DIRTY) && !vol->keep_dirty) || kshim_jnl_unsettled(v->bdev) ||
+	       kshim_jnl_retained(v->bdev) ||	/* durable in the journal, not in place: the next quiet flusher pass checkpoints it */
 	       (NVolErrors(vol) && !(vol->vol_flags & VOLUME_IS_DIRTY)) || kshim_jnl_retire_pending(v->bdev) ||
 	       kshim_jnl_errors_pending(v->bdev);
 }

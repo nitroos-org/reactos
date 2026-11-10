@@ -48,7 +48,10 @@ int ngos_dev_write_v(void *dev, const struct ngos_iov *iov, unsigned int n);
  *
  * The journal commit (NgCommit, below) runs its journal I/O without CoreLock.  The thread that commits seals the metadata
  * overlay under CoreLock (after the writeback), drops CoreLock, writes the journal, the COMMITTED header, the pages in
- * place and the ACTIVE header (with three device flushes), and takes CoreLock again to release the sealed overlay.  New
+ * place and the ACTIVE header (with three device flushes), and takes CoreLock again to release the sealed overlay.  A commit
+ * of few pages stops after the COMMITTED header and its flush (the transaction is durable and replayable): its pages stay
+ * in memory as the retained transaction and go in place later, with the next checkpoint (kshim_jnl_settle: the quiet flusher
+ * pass, an allocation after a free, a commit too large to retain, a clean unmount).  New
  * lock rules, none of them a new lock:
  *   - NgCommit drops CoreLock only at CoreDepth 1 and not once a dismount began.  It is called between core operations
  *     (the flusher, FlushFileBuffers and write-through, and NgSetFileSize before a growth), never from inside one.
@@ -163,12 +166,12 @@ static VOID NgPinUnlocked(PNG_VCB Vcb)
         KeClearEvent(&Vcb->DioIdle);
 }
 
-int NgCommit(PNG_VCB Vcb)
+int NgCommitEx(PNG_VCB Vcb, BOOLEAN Retain)
 {
     for (;;)
     {
         BOOLEAN Unlock = Vcb->CoreDepth == 1 && !Vcb->Dismounted;
-        int R = ngc_commit_begin(Vcb->Core);
+        int R = ngc_commit_begin(Vcb->Core, Retain);
         if (R == NGC_COMMIT_IO)
         {
             if (Unlock)
@@ -197,6 +200,12 @@ int NgCommit(PNG_VCB Vcb)
         else
             ngc_commit_wait(Vcb->Core);
     }
+}
+
+/* The flusher and the size changes: nobody waits for the transaction to be durable. */
+int NgCommit(PNG_VCB Vcb)
+{
+    return NgCommitEx(Vcb, FALSE);
 }
 
 BOOLEAN NTAPI NgAcquireForLazyWrite(PVOID Context, BOOLEAN Wait)
@@ -256,7 +265,7 @@ static NTSTATUS NgCommitWriteThrough(PNG_VCB Vcb)
 {
     int Err;
     NgAcquireCore(Vcb);
-    Err = NgCommit(Vcb);
+    Err = NgCommitEx(Vcb, TRUE);
     Vcb->Syncs++;
     NgReleaseCore(Vcb);
     if (Err)
@@ -1299,7 +1308,8 @@ NTSTATUS NgWrite(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         if (Done >= 0)
         {
             NgAfterChange(Vcb);
-            if (WriteThrough && ngc_commit_now(Vcb->Core))
+            /* Between core operations: the journal I/O runs without CoreLock. */
+            if (WriteThrough && NgCommitEx(Vcb, TRUE))
                 Done = -NGC_EIO;
         }
         NgReleaseCore(Vcb);
@@ -1416,7 +1426,7 @@ NTSTATUS NgFlushBuffers(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     NgApplyModified(Fcb);
     NgAcquireCore(Vcb);
-    Err = NgCommit(Vcb);
+    Err = NgCommitEx(Vcb, TRUE);
     Vcb->Syncs++;
     NgReleaseCore(Vcb);
     if (Err)
