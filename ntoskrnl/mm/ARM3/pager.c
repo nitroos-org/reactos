@@ -1491,7 +1491,8 @@ MiPagerReport(VOID)
             "repurposed %lu inpage %lu errors %lu retries %lu | tagmismatch %lu freerefused %lu | wsmiss %lu starved %lu | "
             "slotshort %lu reclaimed %lu freeslots %Iu | modified %Iu privstandby %lu usable %Iu reserve-low %lu inflight %ld | "
             "balancer trimmed %lu waits %lu | legacy user %lu system %lu available %Iu legacy-freed %lu asked %lu nopass %lu | "
-            "paced %lu pacebudget %lu paceslotbusy %lu wsfloor %lu injected %lu ioreserve %ld\n",
+            "paced %lu pacebudget %lu paceslotbusy %lu wsfloor %lu injected %lu ioreserve %ld | "
+            "readahead %lu reads %lu pages\n",
             MiPagerCounters.Trimmed, MiPagerCounters.TrimmedDirty, MiPagerCounters.Aged, MiPagerCounters.TrimSkippedDirty,
             MiPagerCounters.Written, MiPagerCounters.Clusters, MiPagerCounters.WriteErrors, MiPagerCounters.WriteNoSlot,
             MiPagerCounters.Repurposed, MiPagerCounters.InPageReads, MiPagerCounters.InPageErrors,
@@ -1503,7 +1504,7 @@ MiPagerReport(VOID)
             MiMemoryConsumers[MC_USER].PagesUsed, MiMemoryConsumers[MC_SYSTEM].PagesUsed, (SIZE_T)MmAvailablePages,
             MiPagerCounters.LegacyFreed, MiPagerCounters.LegacyAsked, MiPagerCounters.NoProgressPasses,
             MiPagerCounters.PacedRequests, MiPagerCounters.PaceBudgetSpent, MiPagerCounters.PaceSlotBusy, MiPagerCounters.WsFloorSkips, MiPagerCounters.InjectedAllocFailures,
-            IopReserveIrpUses);
+            IopReserveIrpUses, MiPagerCounters.InPageClusterReads, MiPagerCounters.InPagePrefetched);
     InterlockedExchange(&Busy, 0);
 }
 

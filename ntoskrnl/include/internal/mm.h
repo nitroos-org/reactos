@@ -879,6 +879,14 @@ MiReadPageFile(
     _In_ ULONG PageFileIndex,
     _In_ ULONG_PTR PageFileOffset);
 
+NTSTATUS
+NTAPI
+MiReadPageFileCluster(
+    _In_reads_(Count) PPFN_NUMBER Pages,
+    _In_ ULONG Count,
+    _In_ ULONG FileIndex,
+    _In_ ULONG_PTR FirstSlot);
+
 /* NitroPager slot layer (pagefile.c) and pager (ARM3/pager.c) */
 extern KSPIN_LOCK MiPagingFileSlotLock;
 extern ULONG MiNitroPagerMode;

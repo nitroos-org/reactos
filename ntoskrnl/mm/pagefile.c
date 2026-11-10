@@ -1846,6 +1846,57 @@ MiWritePageFileCluster(
     return Status;
 }
 
+/*
+ * Read Count pages (at most MI_PAGER_CLUSTER_MAX) from Count consecutive ARM3 slots from FirstSlot
+ * (zero based), one paging read. A short transfer is a failed read: a page that came unzeroed from
+ * the free list must never reach a process half filled.
+ */
+NTSTATUS
+NTAPI
+MiReadPageFileCluster(
+    _In_reads_(Count) PPFN_NUMBER Pages,
+    _In_ ULONG Count,
+    _In_ ULONG FileIndex,
+    _In_ ULONG_PTR FirstSlot)
+{
+    DECLSPEC_ALIGN(MEMORY_ALLOCATION_ALIGNMENT) UCHAR MdlBase[sizeof(MDL) + MI_PAGER_CLUSTER_MAX * sizeof(PFN_NUMBER)];
+    PMDL Mdl = (PMDL)MdlBase;
+    LARGE_INTEGER FileOffset;
+    IO_STATUS_BLOCK Iosb;
+    PMMPAGING_FILE PagingFile;
+    KEVENT Event;
+    NTSTATUS Status;
+
+    ASSERT((Count != 0) && (Count <= MI_PAGER_CLUSTER_MAX));
+    PagingFile = (FileIndex < MAX_PAGING_FILES) ? MmPagingFile[FileIndex] : NULL;
+    if ((PagingFile == NULL) || (PagingFile->FileObject == NULL) || (PagingFile->FileObject->DeviceObject == NULL))
+        return STATUS_FILE_INVALID;
+
+    MmInitializeMdl(Mdl, NULL, Count * PAGE_SIZE);
+    RtlCopyMemory(MmGetMdlPfnArray(Mdl), Pages, Count * sizeof(PFN_NUMBER));
+    Mdl->MdlFlags |= MDL_PAGES_LOCKED | MDL_IO_PAGE_READ;
+
+    FileOffset.QuadPart = (LONGLONG)FirstSlot * PAGE_SIZE;
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Status = IoPageRead(PagingFile->FileObject, Mdl, &FileOffset, &Event, &Iosb);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = Iosb.Status;
+    }
+    if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
+        MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
+
+    if (NT_SUCCESS(Status) && (Iosb.Information != (ULONG_PTR)Count * PAGE_SIZE))
+    {
+        DPRINT1("Paging file read of %lu slots from %Iu: %Iu bytes\n", Count, FirstSlot + 1, (SIZE_T)Iosb.Information);
+        Status = STATUS_IN_PAGE_ERROR;
+    }
+    if (NT_SUCCESS(Status))
+        MI_COUNT_PAGE_READ(Count);
+    return Status;
+}
+
 /* Write one page to an ARM3 slot */
 NTSTATUS
 NTAPI
