@@ -14,6 +14,7 @@ typedef struct _ICMP_PACKET_CONTEXT
     KDPC TimeoutDpc;
     KEVENT InitializationFinishedEvent;
     KEVENT DatagramProcessedEvent;
+    FAST_MUTEX ReplyLock;           /* One reply at a time updates the reply buffer and the counters */
     LARGE_INTEGER TimerResolution;
     INT64 StartTicks;
     PIRP Irp;
@@ -227,6 +228,23 @@ ClearReceiveHandler(
     UnlockObject(AddrFile);
 }
 
+/*
+ * After ClearReceiveHandler no new indication starts, but one that began earlier may still run
+ * with the request's context: the context is freed only when none is left (the address file counts
+ * them from the moment it reads the handler)
+ */
+static
+VOID
+WaitForReceiveHandlers(
+    _In_ PADDRESS_FILE AddrFile)
+{
+    LARGE_INTEGER Delay;
+
+    Delay.QuadPart = -10000;
+    while (AddrFile->ReceiveHandlersActive != 0)
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+}
+
 IO_WORKITEM_ROUTINE EndRequestHandler;
 
 VOID
@@ -242,6 +260,10 @@ EndRequestHandler(
     KIRQL OldIrql;
 
     ClearReceiveHandler((PADDRESS_FILE)Context->TdiRequest.Handle.AddressHandle);
+
+    /* An indication that is still waiting for the request to be set up must not wait any longer */
+    KeSetEvent(&Context->InitializationFinishedEvent, IO_NO_INCREMENT, FALSE);
+    WaitForReceiveHandlers((PADDRESS_FILE)Context->TdiRequest.Handle.AddressHandle);
 
     KeWaitForSingleObject(&Context->DatagramProcessedEvent, Executive, KernelMode, FALSE, NULL);
 
@@ -324,6 +346,7 @@ ReceiveDatagram(
     }
 
     KeWaitForSingleObject(&Context->InitializationFinishedEvent, Executive, KernelMode, FALSE, NULL);
+    ExAcquireFastMutex(&Context->ReplyLock);
     KeClearEvent(&Context->DatagramProcessedEvent);
 
     ASSERT(SourceAddressLength == sizeof(IPAddr));
@@ -339,6 +362,7 @@ ReceiveDatagram(
     {
         /* No room for another reply: the request is about to finish. */
         KeSetEvent(&Context->DatagramProcessedEvent, IO_NO_INCREMENT, FALSE);
+        ExReleaseFastMutex(&Context->ReplyLock);
         return STATUS_SUCCESS;
     }
 
@@ -409,6 +433,7 @@ ReceiveDatagram(
     }
 
     KeSetEvent(&Context->DatagramProcessedEvent, IO_NO_INCREMENT, FALSE);
+    ExReleaseFastMutex(&Context->ReplyLock);
     return STATUS_SUCCESS;
 }
 
@@ -530,6 +555,7 @@ DispEchoRequest(
     SendContext->nReplies = 0;
     KeInitializeEvent(&SendContext->InitializationFinishedEvent, NotificationEvent, FALSE);
     KeInitializeEvent(&SendContext->DatagramProcessedEvent, NotificationEvent, TRUE);
+    ExInitializeFastMutex(&SendContext->ReplyLock);
 
     KeInitializeDpc(&SendContext->TimeoutDpc, &TimeoutHandler, SendContext);
     KeInitializeTimerEx(&SendContext->TimeoutTimer, SynchronizationTimer);
@@ -592,6 +618,9 @@ DispEchoRequest(
         NTSTATUS _Status;
 
         ClearReceiveHandler(AddrFile);
+        /* A reply that arrived while the send failed is waiting for the request: let it go, then wait for it */
+        KeSetEvent(&SendContext->InitializationFinishedEvent, IO_NO_INCREMENT, FALSE);
+        WaitForReceiveHandlers(AddrFile);
         _Status = FileCloseAddress(&SendContext->TdiRequest);
         ASSERT(NT_SUCCESS(_Status));
 

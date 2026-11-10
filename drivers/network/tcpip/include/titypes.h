@@ -175,6 +175,7 @@ typedef struct _ADDRESS_FILE {
     /* Receive datagram indication handler */
     PTDI_IND_RECEIVE_DATAGRAM ReceiveDatagramHandler;
     PVOID ReceiveDatagramHandlerContext;
+    volatile LONG ReceiveHandlersActive;  /* Receive datagram handler calls in progress (under the object lock when started) */
     BOOLEAN RegisteredReceiveDatagramHandler;
     /* Expedited receive indication handler */
     PTDI_IND_RECEIVE_EXPEDITED ExpeditedReceiveHandler;
