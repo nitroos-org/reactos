@@ -2853,6 +2853,20 @@ static void shader_glsl_fixup_scalar_register_variable(struct wined3d_string_buf
         string_buffer_sprintf(register_name, "ivec2(%s, 0)", glsl_variable);
 }
 
+/* Number of vertices of a geometry shader input primitive, 0 if unknown. */
+static unsigned int shader_glsl_gs_input_vertex_count(enum wined3d_primitive_type type)
+{
+    switch (type)
+    {
+        case WINED3D_PT_POINTLIST: return 1;
+        case WINED3D_PT_LINELIST: return 2;
+        case WINED3D_PT_TRIANGLELIST: return 3;
+        case WINED3D_PT_LINELIST_ADJ: return 4;
+        case WINED3D_PT_TRIANGLELIST_ADJ: return 6;
+        default: return 0;
+    }
+}
+
 /** Writes the GLSL variable name that corresponds to the register that the
  * DX opcode parameter is trying to access */
 static void shader_glsl_get_register_name(const struct wined3d_shader_register *reg,
@@ -2909,6 +2923,39 @@ static void shader_glsl_get_register_name(const struct wined3d_shader_register *
                     || version->type == WINED3D_SHADER_TYPE_DOMAIN
                     || version->type == WINED3D_SHADER_TYPE_GEOMETRY)
             {
+                if (reg->idx[0].rel_addr && version->type == WINED3D_SHADER_TYPE_GEOMETRY
+                        && shader_glsl_gs_input_vertex_count(shader->u.gs.input_type))
+                {
+                    /* llvmpipe's geometry shader JIT reads wrong data (zeroes, or memory far beyond the input
+                     * array) when the vertex of a per-vertex input is chosen at run time, shader_in[expr].reg[n].
+                     * Choose the vertex with constant indices instead. */
+                    unsigned int vertex_count = shader_glsl_gs_input_vertex_count(shader->u.gs.input_type);
+                    char select[2048], elem[256];
+                    unsigned int v, len = 0;
+
+                    select[0] = 0;
+                    for (v = 0; v < vertex_count; ++v)
+                    {
+                        if (reg->idx[1].rel_addr)
+                            snprintf(elem, sizeof(elem), "shader_in[%u].reg[%s + %u]", v,
+                                    rel_param1.param_str, reg->idx[1].offset);
+                        else
+                            snprintf(elem, sizeof(elem), "shader_in[%u].reg[%u]", v, reg->idx[1].offset);
+
+                        if (v + 1 < vertex_count)
+                            len += snprintf(select + len, sizeof(select) - len, "(%s + %u) == %u ? %s : ",
+                                    rel_param0.param_str, reg->idx[0].offset, v, elem);
+                        else
+                            len += snprintf(select + len, sizeof(select) - len, "%s", elem);
+                        if (len >= sizeof(select))
+                            break;
+                    }
+                    if (len < sizeof(select))
+                    {
+                        string_buffer_sprintf(register_name, "(%s)", select);
+                        break;
+                    }
+                }
                 if (reg->idx[0].rel_addr)
                 {
                     if (reg->idx[1].rel_addr)
