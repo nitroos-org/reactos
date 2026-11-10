@@ -798,16 +798,42 @@ KiGeneralProtectionFaultUserMode(
  * fault...). Print what the trap knows on the debug port first, in every build: the faulting instruction
  * (bytes at RIP), the error code (a selector, or 0), the selectors and the registers the trap saved.
  */
+/* A canonical address with both ends of Length bytes mapped: readable here without a nested fault */
+static
+BOOLEAN
+KiIsKernelRangeReadable(
+    _In_ PUCHAR Address,
+    _In_ ULONG Length)
+{
+    LONG64 First = (LONG64)(ULONG_PTR)Address, Last = (LONG64)(ULONG_PTR)(Address + Length - 1);
+
+    if (((First >> 47) != 0 && (First >> 47) != -1) || ((Last >> 47) != 0 && (Last >> 47) != -1))
+        return FALSE;
+    return MmIsAddressValid(Address) && MmIsAddressValid(Address + Length - 1);
+}
+
+/* At most this many reports per boot: kernel #GPs that a handler catches must not flood the debug port */
+#define KI_GP_REPORT_LIMIT 32
+
 static
 VOID
 KiReportKernelGeneralProtectionFault(
     _In_ PKTRAP_FRAME TrapFrame,
     _In_ PCSTR Why)
 {
+    static LONG Reports;
     PUCHAR Rip = (PUCHAR)TrapFrame->Rip;
     UCHAR Bytes[16];
     ULONG i;
-    BOOLEAN Readable;
+    LONG Number;
+
+    Number = InterlockedIncrement(&Reports);
+    if (Number > KI_GP_REPORT_LIMIT)
+    {
+        if (Number == KI_GP_REPORT_LIMIT + 1)
+            DbgPrint("KE-GP: more unexplained kernel #GPs, no more reports\n");
+        return;
+    }
 
     DbgPrint("KE-GP: unexplained kernel #GP (%s): rip %p err %I64x cs %04x ss %04x rsp %p efl %08lx irql %u cpu %u "
              "thread %p (%.16s)\n",
@@ -821,9 +847,8 @@ KiReportKernelGeneralProtectionFault(
              (PVOID)TrapFrame->Rbx, (PVOID)TrapFrame->Rsi, (PVOID)TrapFrame->Rdi, (PVOID)TrapFrame->Rbp,
              TrapFrame->SegDs, TrapFrame->SegEs, TrapFrame->SegFs, TrapFrame->SegGs);
 
-    /* The instruction: only if both ends are mapped (a fault here would hide the first one) */
-    Readable = MmIsAddressValid(Rip) && MmIsAddressValid(Rip + sizeof(Bytes) - 1);
-    if (Readable)
+    /* The instruction: only if canonical and mapped at both ends (a fault here would hide the first one) */
+    if (KiIsKernelRangeReadable(Rip, sizeof(Bytes)))
     {
         RtlCopyMemory(Bytes, Rip, sizeof(Bytes));
         DbgPrint("KE-GP: bytes at rip:");
@@ -867,6 +892,14 @@ KiGeneralProtectionFaultHandler(
     /* Get Instruction Pointer */
     Instructions = (PUCHAR)TrapFrame->Rip;
 
+    /* Its first two bytes are looked at below: a RIP that cannot be read is reported as it is */
+    if (!KiIsKernelRangeReadable(Instructions, 2))
+    {
+        KiReportKernelGeneralProtectionFault(TrapFrame, "rip not readable");
+        ASSERT(FALSE);
+        return STATUS_UNSUCCESSFUL;
+    }
+
     /* Check for IRET */
     if (Instructions[0] == 0x48 && Instructions[1] == 0xCF)
     {
@@ -874,6 +907,7 @@ KiGeneralProtectionFaultHandler(
         UNIMPLEMENTED;
         KiReportKernelGeneralProtectionFault(TrapFrame, "iretq");
         ASSERT(FALSE);
+        return STATUS_UNSUCCESSFUL;
     }
 
     /* Check for RDMSR/WRMSR */
