@@ -526,6 +526,12 @@ NtGdiFlushUserBatch(VOID)
   if (cjBatch >= sizeof(GDIBATCHHDR))
   {
     pjBatch = ExAllocatePoolWithTag(PagedPool, 2 * ALIGN_UP_BY(cjBatch, 16), GDITAG_TEMP);
+
+    /* No memory for the snapshot now: the batch stays in the TEB, the next flush runs it */
+    if (!pjBatch)
+    {
+      return STATUS_SUCCESS;
+    }
   }
 
   /* Take the records into kernel memory, then empty the batch, so that a flush started while one of
