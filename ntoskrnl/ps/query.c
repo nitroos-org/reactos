@@ -772,6 +772,41 @@ NtQueryInformationProcess(
         return STATUS_INVALID_INFO_CLASS;
     }
 
+    /* ProcessProtectionInformation (61), Windows 8.1 and later (this system presents Windows 10): one
+     * PS_PROTECTION byte, PROCESS_QUERY_LIMITED_INFORMATION */
+    if ((ULONG)ProcessInformationClass == 61)
+    {
+        UCHAR Protection;
+
+        if (ProcessInformationLength != sizeof(UCHAR)) return STATUS_INFO_LENGTH_MISMATCH;
+        Status = ObReferenceObjectByHandle(ProcessHandle,
+                                           PROCESS_QUERY_LIMITED_INFORMATION,
+                                           PsProcessType,
+                                           PreviousMode,
+                                           (PVOID*)&Process,
+                                           NULL);
+        if (!NT_SUCCESS(Status)) return Status;
+        Protection = Process->Protection;
+        ObDereferenceObject(Process);
+
+        _SEH2_TRY
+        {
+            if (PreviousMode != KernelMode)
+            {
+                ProbeForWrite(ProcessInformation, sizeof(UCHAR), sizeof(UCHAR));
+                if (ReturnLength) ProbeForWriteUlong(ReturnLength);
+            }
+            *(PUCHAR)ProcessInformation = Protection;
+            if (ReturnLength) *ReturnLength = sizeof(UCHAR);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        return Status;
+    }
+
     /* Validate the information class */
     Status = DefaultQueryInfoBufferCheck(ProcessInformationClass,
                                          PsProcessInfoClass,

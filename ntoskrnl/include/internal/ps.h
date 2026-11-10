@@ -381,6 +381,36 @@ PspDeleteProcess(
     IN PVOID ObjectBody
 );
 
+/* protected system processes: what a caller outside the protection may ask for (see PspProtectedOpenDenied) */
+#define PS_PROTECTION(Type, Signer)   ((UCHAR)((Type) | ((Signer) << 4)))
+#define PS_PROTECTION_TYPE(Prot)      ((Prot) & 7)
+#define PS_PROTECTION_SIGNER(Prot)    ((Prot) >> 4)
+#define PS_PROTECTED_TYPE_LIGHT       1
+#define PS_PROTECTED_TYPE_PROTECTED   2
+#define PS_PROTECTED_SIGNER_WINTCB    6
+#define PS_PROTECTED_SIGNER_SYSTEM    7
+#ifndef PROCESS_SET_LIMITED_INFORMATION
+#define PROCESS_SET_LIMITED_INFORMATION 0x2000
+#endif
+#define PS_PROTECTED_PROCESS_ALLOWED_ACCESS \
+    (SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_LIMITED_INFORMATION | PROCESS_SUSPEND_RESUME)
+#define PS_PROTECTED_THREAD_ALLOWED_ACCESS \
+    (SYNCHRONIZE | THREAD_QUERY_LIMITED_INFORMATION | THREAD_SET_LIMITED_INFORMATION | THREAD_SUSPEND_RESUME)
+
+BOOLEAN
+NTAPI
+PspProtectedOpenDenied(
+    _In_ PEPROCESS Target,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ PGENERIC_MAPPING GenericMapping,
+    _In_ ACCESS_MASK AllowedAccess);
+
+VOID
+NTAPI
+PspInheritProcessProtection(
+    _In_ PEPROCESS Process,
+    _In_opt_ PEPROCESS Parent);
+
 NTSTATUS
 NTAPI
 PspProcessOpen(

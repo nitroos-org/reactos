@@ -1245,6 +1245,18 @@ NtOpenThread(OUT PHANDLE ThreadHandle,
             return Status;
         }
 
+        /* The threads of a protected process give a caller outside the protection only the limited rights */
+        if (PreviousMode != KernelMode &&
+            PspProtectedOpenDenied(Thread->ThreadsProcess,
+                                   DesiredAccess,
+                                   &PsThreadType->TypeInfo.GenericMapping,
+                                   PS_PROTECTED_THREAD_ALLOWED_ACCESS))
+        {
+            SeDeleteAccessState(&AccessState);
+            ObDereferenceObject(Thread);
+            return STATUS_ACCESS_DENIED;
+        }
+
         /* Open the Thread Object */
         Status = ObOpenObjectByPointer(Thread,
                                        Attributes,

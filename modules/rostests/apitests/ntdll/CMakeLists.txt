@@ -117,6 +117,7 @@ list(APPEND SOURCE
     NtOpenKeyConcurrent.c
     NtOpenKeyEx.c
     NtOpenProcess.c
+    NtOpenProcessProtected.c
     NtOpenProcessToken.c
     NtOpenThreadToken.c
     NtProtectVirtualMemory.c

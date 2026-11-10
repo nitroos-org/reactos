@@ -679,6 +679,9 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
                                                  ImageFileName);
         if (!NT_SUCCESS(Status)) goto CleanupWithRef;
 
+        /* The image is known now: protected when it is one of the protected system images started by one */
+        PspInheritProcessProtection(Process, Parent);
+
         //
         // We need a PEB
         //
@@ -1655,6 +1658,123 @@ NtCreateProcess(OUT PHANDLE ProcessHandle,
 }
 
 /*
+ * Protected system processes. System, smss, csrss, wininit and services are protected, as on Windows 10: a
+ * caller that is not itself protected (as strongly) gets only the limited rights, whatever its token and
+ * privileges say; PROCESS_QUERY_INFORMATION, VM access, handle duplication, thread creation, termination,
+ * the security descriptor and MAXIMUM_ALLOWED are refused (measured on Windows 10 22H2, protection levels
+ * 0x72 for System and 0x61 for the others; the process rights granted there are SYNCHRONIZE,
+ * PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_LIMITED_INFORMATION and PROCESS_SUSPEND_RESUME).
+ *
+ * There is no image signing here, so a process is protected when it descends from a protected process (the
+ * System process is the root) or from winlogon, and runs one of these images from a system32 directory.
+ * Callers running as LocalSystem are not held back (Windows holds them back too): the services of this
+ * system, such as the LSA server opening its clients and debuggers run as SYSTEM, open these processes with
+ * wider rights. Windows is stricter here; this is the one place where the behaviour is deliberately looser.
+ */
+extern LUID SeSystemAuthenticationId;
+
+static const WCHAR PspProtectedImages[][13] =
+{
+    L"smss.exe", L"csrss.exe", L"wininit.exe", L"services.exe"
+};
+
+/* TRUE if the image of Process is one of Names from a system32 directory */
+static BOOLEAN
+PspIsSystem32Image(
+    _In_ PEPROCESS Process,
+    _In_ const WCHAR (*Names)[13],
+    _In_ ULONG Count)
+{
+    PUNICODE_STRING Name;
+    USHORT Length, Chars;
+    PWSTR Leaf;
+    ULONG i;
+
+    if (!Process->SeAuditProcessCreationInfo.ImageFileName) return FALSE;
+    Name = &Process->SeAuditProcessCreationInfo.ImageFileName->Name;
+    Length = Name->Length / sizeof(WCHAR);
+    if (!Name->Buffer || !Length) return FALSE;
+
+    /* the leaf, and the directory before it must be system32 */
+    for (Leaf = Name->Buffer + Length; Leaf > Name->Buffer && Leaf[-1] != L'\\'; Leaf--);
+    Chars = (USHORT)(Name->Buffer + Length - Leaf);
+    if (Leaf == Name->Buffer || (Leaf - Name->Buffer) < 10) return FALSE;
+    if (_wcsnicmp(Leaf - 10, L"\\system32\\", 10) != 0) return FALSE;
+
+    for (i = 0; i < Count; i++)
+    {
+        if (Chars == wcslen(Names[i]) && !_wcsnicmp(Leaf, Names[i], Chars))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* TRUE if the primary token of Process is LocalSystem's */
+static BOOLEAN
+PspIsLocalSystemProcess(
+    _In_ PEPROCESS Process)
+{
+    PACCESS_TOKEN Token = PsReferencePrimaryToken(Process);
+    LUID Luid;
+    BOOLEAN Result = FALSE;
+
+    if (NT_SUCCESS(SeQueryAuthenticationIdToken(Token, &Luid)) &&
+        RtlEqualLuid(&Luid, &SeSystemAuthenticationId))
+        Result = TRUE;
+    PsDereferencePrimaryToken(Token);
+    return Result;
+}
+
+VOID
+NTAPI
+PspInheritProcessProtection(
+    _In_ PEPROCESS Process,
+    _In_opt_ PEPROCESS Parent)
+{
+    static const WCHAR Winlogon[1][13] = { L"winlogon.exe" };
+
+    if (!Parent) return;
+
+    /* the protected processes start others; so does winlogon, which starts services.exe here (wininit
+     * does on Windows) and is not protected itself, as on Windows */
+    if (!Parent->Protection &&
+        !(PspIsSystem32Image(Parent, Winlogon, 1) && PspIsLocalSystemProcess(Parent)))
+        return;
+
+    if (PspIsSystem32Image(Process, PspProtectedImages, RTL_NUMBER_OF(PspProtectedImages)))
+        Process->Protection = PS_PROTECTION(PS_PROTECTED_TYPE_LIGHT, PS_PROTECTED_SIGNER_WINTCB);
+}
+
+/* TRUE if the caller may not open Target with DesiredAccess (the open then fails with access denied) */
+BOOLEAN
+NTAPI
+PspProtectedOpenDenied(
+    _In_ PEPROCESS Target,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ PGENERIC_MAPPING GenericMapping,
+    _In_ ACCESS_MASK AllowedAccess)
+{
+    PEPROCESS Caller = PsGetCurrentProcess();
+    UCHAR Own, Prot = Target->Protection;
+
+    if (!Prot || Target == Caller) return FALSE;
+
+    /* a caller protected as strongly (smss opening csrss) is not held back */
+    Own = Caller->Protection;
+    if (Own &&
+        PS_PROTECTION_TYPE(Own) >= PS_PROTECTION_TYPE(Prot) &&
+        PS_PROTECTION_SIGNER(Own) >= PS_PROTECTION_SIGNER(Prot))
+        return FALSE;
+
+    /* LocalSystem: see above */
+    if (PspIsLocalSystemProcess(Caller)) return FALSE;
+
+    if (DesiredAccess & MAXIMUM_ALLOWED) return TRUE;
+    RtlMapGenericMask(&DesiredAccess, GenericMapping);
+    return (DesiredAccess & ~AllowedAccess) != 0;
+}
+
+/*
  * @implemented
  */
 NTSTATUS
@@ -1794,6 +1914,19 @@ NtOpenProcess(OUT PHANDLE ProcessHandle,
             /* Get rid of the access state and return */
             SeDeleteAccessState(&AccessState);
             return Status;
+        }
+
+        /* A protected process gives a caller outside the protection only the limited rights */
+        if (PreviousMode != KernelMode &&
+            PspProtectedOpenDenied(Process,
+                                   DesiredAccess,
+                                   &PsProcessType->TypeInfo.GenericMapping,
+                                   PS_PROTECTED_PROCESS_ALLOWED_ACCESS))
+        {
+            SeDeleteAccessState(&AccessState);
+            if (Thread) ObDereferenceObject(Thread);
+            ObDereferenceObject(Process);
+            return STATUS_ACCESS_DENIED;
         }
 
         /* Open the Process Object */
