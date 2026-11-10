@@ -200,6 +200,7 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
     PMMPFN Pfn1;
     INT LookForZeroedPages;
     ULONG Attempt;
+    BOOLEAN Zeroed;
 
     ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
     DPRINT("ARM3-DEBUG: Being called with %I64x %I64x %I64x %lx %d %lu\n", LowAddress, HighAddress, SkipBytes, TotalBytes, CacheAttribute, MdlFlags);
@@ -274,10 +275,21 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
             MI_SET_USAGE(MI_USAGE_MDL);
             MI_SET_PROCESS2("Kernel");
 
-            /* FIXME: This check should be smarter */
+            /*
+             * A zeroed page if there is one, else any page, which is zeroed below: MiRemoveAnyPage leaves
+             * every page it takes marked as on the zeroed list (its flags are cleared), whatever list it
+             * came from, so the page is marked here for the zeroing loop below. Without it, pages of free,
+             * modified-then-written and standby memory reached the caller with their old contents.
+             */
             Page = 0;
+            Zeroed = FALSE;
             if (MmAvailablePages != 0)
-                Page = MiRemoveAnyPage(0);
+            {
+                Page = MiRemoveZeroPageSafe(0);
+                Zeroed = (Page != 0);
+                if (!Zeroed)
+                    Page = MiRemoveAnyPage(0);
+            }
 
             if (Page == 0)
             {
@@ -288,6 +300,7 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
 
             /* Grab the page entry for it */
             Pfn1 = MiGetPfnEntry(Page);
+            Pfn1->u3.e1.PageLocation = Zeroed ? ZeroedPageList : FreePageList;
 
             //
             // Make sure it's really free
@@ -437,7 +450,9 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
         //
         Pfn1 = MiGetPfnEntry(Page);
         ASSERT(Pfn1);
-        if (Pfn1->u3.e1.PageLocation != ZeroedPageList) MiZeroPhysicalPage(Page);
+        /* A caller that asked for unzeroed pages (MM_DONT_ZERO_ALLOCATION) gets them as they are */
+        if ((Pfn1->u3.e1.PageLocation != ZeroedPageList) && !(MdlFlags & MM_DONT_ZERO_ALLOCATION))
+            MiZeroPhysicalPage(Page);
         Pfn1->u3.e1.PageLocation = ActiveAndValid;
     }
 

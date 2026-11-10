@@ -362,9 +362,91 @@ TestMmProbeAndLockPagesCharge(VOID)
     }
 }
 
+/*
+ * MmAllocatePagesForMdl returns zero-filled pages: pages just written and freed must not come back with
+ * their contents, from the whole physical range or from a part of it. Rounds of 64 MB: write a pattern
+ * into pages of an MDL, free them, allocate again at once, every page must read as zeros.
+ */
+#define ZERO_TEST_BYTES (64 * 1024 * 1024)
+#define ZERO_TEST_ROUNDS 4
+
+static
+ULONG
+CountNonZeroPages(
+    _In_ PMDL Mdl,
+    _In_ BOOLEAN Fill)
+{
+    PFN_NUMBER Pages = MmGetMdlByteCount(Mdl) >> PAGE_SHIFT, i;
+    ULONG NonZero = 0, j;
+    PUCHAR Va;
+
+    Va = MmMapLockedPagesSpecifyCache(Mdl, KernelMode, MmCached, NULL, FALSE, NormalPagePriority);
+    ok(Va != NULL, "mapping %Iu pages failed\n", (SIZE_T)Pages);
+    if (!Va)
+        return 0;
+    for (i = 0; i < Pages; i++)
+    {
+        PULONG_PTR Words = (PULONG_PTR)(Va + i * PAGE_SIZE);
+        if (Fill)
+        {
+            for (j = 0; j < PAGE_SIZE / sizeof(ULONG_PTR); j++)
+                Words[j] = (ULONG_PTR)0xA5A5A5A5A5A5A5A5ULL ^ j;
+            continue;
+        }
+        for (j = 0; j < PAGE_SIZE / sizeof(ULONG_PTR); j++)
+        {
+            if (Words[j] != 0)
+            {
+                NonZero++;
+                break;
+            }
+        }
+    }
+    MmUnmapLockedPages(Va, Mdl);
+    return NonZero;
+}
+
+static
+VOID
+TestMmAllocatePagesForMdlZeroed(VOID)
+{
+    PHYSICAL_ADDRESS Low, High, Skip;
+    ULONG Round, Range, NonZero;
+    PMDL Mdl;
+
+    High.QuadPart = MAXLONGLONG;
+    Skip.QuadPart = 0;
+    for (Range = 0; Range < 2; Range++)
+    {
+        /* The whole range, then a part of it (a low limit of 1 MB): the two searches of MiAllocatePagesForMdl */
+        Low.QuadPart = Range ? 1024 * 1024 : 0;
+        NonZero = 0;
+        for (Round = 0; Round < ZERO_TEST_ROUNDS; Round++)
+        {
+            Mdl = MmAllocatePagesForMdl(Low, High, Skip, ZERO_TEST_BYTES);
+            if (!Mdl)
+                continue;
+            CountNonZeroPages(Mdl, TRUE);
+            MmFreePagesFromMdl(Mdl);
+            ExFreePoolWithTag(Mdl, 0);
+
+            Mdl = MmAllocatePagesForMdl(Low, High, Skip, ZERO_TEST_BYTES);
+            ok(Mdl != NULL, "MmAllocatePagesForMdl failed\n");
+            if (!Mdl)
+                continue;
+            NonZero += CountNonZeroPages(Mdl, FALSE);
+            MmFreePagesFromMdl(Mdl);
+            ExFreePoolWithTag(Mdl, 0);
+        }
+        ok(NonZero == 0, "%s range: %lu pages not zeroed\n", Range ? "partial" : "whole", NonZero);
+        DbgPrint("MmMdl: %s range: %lu pages not zeroed in %u rounds of 64 MB\n", Range ? "partial" : "whole", NonZero, ZERO_TEST_ROUNDS);
+    }
+}
+
 START_TEST(MmMdl)
 {
     TestMmProbeAndLockPagesCharge();
     TestMmAllocatePagesForMdl();
+    TestMmAllocatePagesForMdlZeroed();
     TestMmBuildMdlForNonPagedPool();
 }
