@@ -226,6 +226,14 @@ typedef struct _ROS_SHARED_CACHE_MAP
     ULONG DeferredVacbs; /* views counted in CcDeferredVacbs while SHARED_CACHE_MAP_DEFERRED */
     ULONG LazyWriteFailures; /* consecutive failed writes of a view of this map (CcRosFlushDirtyPages) */
     ULONGLONG FirstLazyWriteFailure; /* interrupt time of the first of them */
+    /*
+     * Lazy writers at work on this map (CcRosFlushDirtyPages).  A map the file system lets the lazy writer close
+     * (SHARED_CACHE_MAP_LAZY_CLOSE: NTFS-NG, which orders the transfers of one stream itself) is written by up to
+     * CC_LAZY_WRITERS_PER_MAP workers at once, each claiming the range of views it flushes (LazyClaim) so that no
+     * view is taken twice; the others get one at a time (SHARED_CACHE_MAP_IN_LAZYWRITE).
+     */
+    LONG LazyWriteActive;
+    struct { LONGLONG Start; LONGLONG End; BOOLEAN Used; } LazyClaim[2];
 #if DBG
     BOOLEAN Trace; /* enable extra trace output for this cache map and it's VACBs */
 #endif
@@ -235,6 +243,7 @@ typedef struct _ROS_SHARED_CACHE_MAP
 #define WRITEBEHIND_DISABLED 0x2
 #define SHARED_CACHE_MAP_IN_CREATION 0x4
 #define SHARED_CACHE_MAP_IN_LAZYWRITE 0x8
+#define CC_LAZY_WRITERS_PER_MAP 2
 #define SHARED_CACHE_MAP_DEFERRED 0x10 /* closed with dirty data, left to the lazy writer (CcRosDeleteOrDeferFileCache) */
 #define SHARED_CACHE_MAP_LAZY_CLOSE 0x20 /* the file system allows it (CcRosAllowLazyClose): without, the last close writes and deletes the map */
 #define SHARED_CACHE_MAP_SYNC_DELETE 0x40 /* somebody waits for the deletion (UninitializeCompleteEvent): never deferred */

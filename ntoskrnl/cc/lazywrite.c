@@ -35,7 +35,13 @@ ULONG CcLazyWriteIos = 0;
  * - Number of worker threads
  */
 LAZY_WRITER LazyWriter;
-/* A write-behind run is queued or running: a scan does not queue another (set by CcLazyWriteScan, cleared by CcWriteBehind) */
+/*
+ * Write-behind runs queued or running: a scan does not queue more than CcWriteBehindMax (counted up by CcLazyWriteScan,
+ * down by CcWriteBehind).  One at a time normally; two when much dirty data is waiting: the disk was idle for the part of
+ * each request that the writer spends on the set-up and the completion of the request, and with two runs writing different
+ * parts of a stream (NTFS-NG orders those transfers itself) the next request is on its way while the last one is on the disk.
+ */
+#define CC_WRITEBEHIND_RUNS 2
 static volatile LONG CcWriteBehindPending = 0;
 NPAGED_LOOKASIDE_LIST CcTwilightLookasideList;
 LIST_ENTRY CcExpressWorkQueue;
@@ -217,7 +223,7 @@ CcWriteBehind(VOID)
     }
 
     /* A scan may queue the next run */
-    InterlockedExchange(&CcWriteBehindPending, 0);
+    InterlockedDecrement(&CcWriteBehindPending);
     InterlockedExchange(&CcStreamingKicked, 0);
 
     /* Make sure we're not throttling writes after this */
@@ -264,21 +270,28 @@ CcLazyWriteScan(VOID)
      * And a run takes longer than a scan period when the disk is slow: a scan queues the next one only
      * when the last has ended, they would otherwise pile up (and all rescan the same maps).
      */
-    if (Target != 0 && CcRosHasLazyWritableData() &&
-        InterlockedCompareExchange(&CcWriteBehindPending, 1, 0) == 0)
+    if (Target != 0 && CcRosHasLazyWritableData())
     {
-        /* There is stuff to flush, schedule a write-behind operation */
+        LONG Runs = (CcStreamingKicked != 0 || CcTotalDirtyPages > CcpDirtyPageTarget()) ? CC_WRITEBEHIND_RUNS : 1, n;
 
-        /* Allocate a work item */
-        WorkItem = ExAllocateFromNPagedLookasideList(&CcTwilightLookasideList);
-        if (WorkItem != NULL)
+        /* There is stuff to flush, schedule write-behind operations (up to Runs at once) */
+        for (n = 0; n < Runs; n++)
         {
+            if (InterlockedIncrement(&CcWriteBehindPending) > Runs)
+            {
+                InterlockedDecrement(&CcWriteBehindPending);
+                break;
+            }
+
+            /* Allocate a work item */
+            WorkItem = ExAllocateFromNPagedLookasideList(&CcTwilightLookasideList);
+            if (WorkItem == NULL)
+            {
+                InterlockedDecrement(&CcWriteBehindPending);
+                break;
+            }
             WorkItem->Function = WriteBehind;
             CcPostWorkQueue(WorkItem, &CcRegularWorkQueue);
-        }
-        else
-        {
-            InterlockedExchange(&CcWriteBehindPending, 0);
         }
     }
 
