@@ -1251,6 +1251,8 @@ void (*kshim_icache_evicting)(struct inode *i);
 void (*kshim_icache_added)(struct inode *i);
 static struct inode *kshim_lru_take(struct super_block *sb, bool more);
 static void kshim_lru_evict(struct inode *v);
+static void kshim_icache_trim_pressure(struct super_block *sb);
+unsigned long kshim_icache_pressure_evicted;
 static void ihash_add_locked(struct inode *i)
 {
 	struct super_block *sb = i->i_sb;
@@ -1551,6 +1553,32 @@ static bool kshim_icache_keep(struct inode *i)
 	return kept;
 }
 
+/*
+ * Memory pressure (the Mm low-memory condition is signalled): this cache is nonpaged pool, which the memory manager
+ * cannot take back, so it is given back here, down to a floor of a quarter of the normal limits (never below 1024
+ * inodes / 256 pages).  The oldest unused inodes go first; each is written back before it is evicted (as in every
+ * eviction: kshim_lru_evict), one whose writeback fails stays.  Inodes in use are never touched.  Stops as soon as the
+ * condition clears, re-read every 32 evictions, and takes at most 2048 inodes per call so a call stays short.
+ * Called from kshim_icache_trim, i.e. from CoreLock release at depth 1 (every file system operation, and the flusher's
+ * 2 s pass when the volume is idle): the same context and locks as the trim above; no lock is taken here, the
+ * low-memory test only reads an event's state.
+ */
+static void kshim_icache_trim_pressure(struct super_block *sb)
+{
+	unsigned long inode_floor = KSHIM_ICACHE_UNUSED / 4, page_floor = KSHIM_PC_PAGES_SOFT / 4;
+	long tries = sb->kshim_lru_count + 64;
+	int budget = 2048, n = 0;
+	struct inode *v;
+	if (inode_floor < 1024) inode_floor = 1024;
+	if (page_floor < 256) page_floor = 256;
+	while (tries-- > 0 && budget-- > 0 && (n++ % 32 || ngos_low_memory()) &&
+	       (v = kshim_lru_take(sb, (unsigned long)sb->kshim_lru_count > inode_floor ||
+				   (sb->kshim_lru_count && kshim_pc_pages > page_floor)))) {
+		kshim_lru_evict(v);
+		kshim_icache_pressure_evicted++;
+	}
+}
+
 /* Evicts the oldest unused inodes beyond the limits.  The caller holds no file system lock. */
 void kshim_icache_trim(struct super_block *sb)
 {
@@ -1560,6 +1588,7 @@ void kshim_icache_trim(struct super_block *sb)
 	while (tries-- > 0 && (v = kshim_lru_take(sb, sb->kshim_lru_count > KSHIM_ICACHE_UNUSED ||
 				   (sb->kshim_lru_count && kshim_pc_pages > KSHIM_PC_PAGES_SOFT && budget-- > 0))))
 		kshim_lru_evict(v);
+	kshim_icache_trim_pressure(sb);
 }
 
 /*
