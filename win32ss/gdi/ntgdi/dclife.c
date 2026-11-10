@@ -650,10 +650,19 @@ DC_vPrepareDCsForBlitEx(
     if (pdcDest->fs & DC_DIRTY_RAO)
         CLIPPING_UpdateGCRegion(pdcDest);
 
-    /* A redirected window DC draws into its window's surface: where it draws is presented (marked again in DC_vFinishBlit) */
+    /*
+     * A redirected window DC draws into its window's surface: where it draws is presented (marked again in
+     * DC_vFinishBlit). Only blit-class callers give the exact rectangle they write (DCPREP_EXACT_DEST); for every
+     * other primitive the whole clip bounds count as drawn (a horizontal line has an empty bounding box, a
+     * rectangle's border and wide pens reach past it).
+     */
     if ((pdcDest->fs & DC_REDIRECTION) && pdcDest->pvRedir)
     {
-        if (rcDest)
+        if (fl & DCPREP_READ_ONLY)
+        {
+            RECTL_vSetEmptyRect(&pdcDest->rclRedirDraw);
+        }
+        else if (rcDest && (fl & DCPREP_EXACT_DEST))
         {
             pdcDest->rclRedirDraw = *(const RECTL *)rcDest;
             RECTL_vMakeWellOrdered(&pdcDest->rclRedirDraw);
@@ -664,7 +673,8 @@ DC_vPrepareDCsForBlitEx(
         {
             pdcDest->rclRedirDraw = pdcDest->erclClip;
         }
-        UserRedirMarkDirty(pdcDest->pvRedir, &pdcDest->rclRedirDraw);
+        if (!RECTL_bIsEmptyRect(&pdcDest->rclRedirDraw))
+            UserRedirMarkDirty(pdcDest->pvRedir, &pdcDest->rclRedirDraw);
     }
 
     /* Lock and update first DC */
@@ -723,7 +733,7 @@ FASTCALL
 DC_vFinishBlit(PDC pdc1, PDC pdc2)
 {
     /* Drawn: a present that ran meanwhile may have taken the mark of DC_vPrepareDCsForBlitEx */
-    if ((pdc1->fs & DC_REDIRECTION) && pdc1->pvRedir)
+    if ((pdc1->fs & DC_REDIRECTION) && pdc1->pvRedir && !RECTL_bIsEmptyRect(&pdc1->rclRedirDraw))
         UserRedirMarkDirty(pdc1->pvRedir, &pdc1->rclRedirDraw);
 
     if (DC_IS_SCREEN(pdc1))
@@ -1207,7 +1217,7 @@ IntGdiCreateDisplayDC(HDEV hDev, ULONG DcType, BOOL EmptyDC)
  * screen. pvRedir is USER's record for the window; *ppvOld gets the record the DC had (USER keeps the
  * references). The DC stays DCTYPE_DIRECT; DC_REDIRECTION makes it draw like a memory DC into the surface.
  */
-BOOL
+ULONG
 NTAPI
 GreRedirBindDC(
     _In_ HDC hdc,
@@ -1221,11 +1231,11 @@ GreRedirBindDC(
     /* Fails for a DC another process holds locked for long: the caller keeps the binding and tries again */
     pdc = DC_LockDcAnyOwner(hdc);
     if (!pdc)
-        return FALSE;
+        return GreIsHandleValidAnyOwner(hdc) ? REDIRBIND_BUSY : REDIRBIND_GONE;
     if (pdc->dctype != DCTYPE_DIRECT)
     {
         DC_UnlockDc(pdc);
-        return FALSE;
+        return REDIRBIND_GONE;
     }
 
     *ppvOld = (pdc->fs & DC_REDIRECTION) ? pdc->pvRedir : NULL;
@@ -1246,6 +1256,6 @@ GreRedirBindDC(
         DC_vUpdateDC(pdc);
     }
     DC_UnlockDc(pdc);
-    return TRUE;
+    return REDIRBIND_OK;
 }
 

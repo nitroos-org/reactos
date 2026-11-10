@@ -12,7 +12,9 @@ VOID FASTCALL UserRedirAddRef(PVOID pvRedir);
 VOID FASTCALL UserRedirRelease(PVOID pvRedir);
 struct _SURFACE *FASTCALL UserRedirSurface(PVOID pvRedir);
 PWND FASTCALL UserRedirWindow(PVOID pvRedir);
-VOID FASTCALL UserRedirReleased(PVOID pvRedir, BOOL bForce);
+VOID FASTCALL UserRedirReleased(PVOID pvRedir, BOOL bEndPaint);
+VOID FASTCALL UserRedirRetryCount(LONG Delta);
+VOID FASTCALL UserRedirOrphan(HDC hdc, PVOID pvRedir);
 VOID FASTCALL UserRedirWindowMoved(PWND Wnd);
 VOID FASTCALL UserRedirPresentPending(VOID);
 BOOL FASTCALL UserRedirHasSurface(PWND Wnd);
@@ -20,3 +22,4 @@ BOOL FASTCALL UserRedirHasSurface(PWND Wnd);
 /* windc.c */
 VOID FASTCALL DceRedirUnbindAll(PVOID pvRedir);
 VOID FASTCALL DceRedirRebindAll(PVOID pvRedir, struct _SURFACE *psurf);
+VOID FASTCALL DceRedirRetryAll(VOID);

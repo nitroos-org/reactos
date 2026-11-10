@@ -50,9 +50,32 @@ static ATOM AtomRedir;
 static volatile LONG gRedirTimerArmed;
 static volatile LONG gRedirDirtyCount;   /* records with Dirty set: the timer takes the USER lock only then */
 static ULONG gRedirCreated, gRedirRefused, gRedirPresents;
+static volatile LONG gRedirRetries;     /* DCEs with DCE_REDIR_RETRY (windc.c) */
+
+/* A DC that could not be unbound when its DCE was freed: its reference to the record waits here */
+typedef struct _REDIR_ORPHAN
+{
+    LIST_ENTRY Link;
+    HDC hdc;
+    struct _REDIR *r;
+} REDIR_ORPHAN, *PREDIR_ORPHAN;
+static LIST_ENTRY gRedirOrphans = { &gRedirOrphans, &gRedirOrphans };
 
 #define REDIR_MAX_SIDE      16384
 #define REDIR_FRAME_100NS   (16 * 10000)
+#define REDIR_RETRY_100NS   (100 * 10000)
+
+static VOID
+RedirArmTimer(LONGLONG Due100ns)
+{
+    if (gRedirTimer && InterlockedExchange(&gRedirTimerArmed, 1) == 0)
+    {
+        LARGE_INTEGER Due;
+
+        Due.QuadPart = -Due100ns;
+        KeSetTimer(gRedirTimer, Due, NULL);
+    }
+}
 
 #ifdef _M_AMD64
 /* Whether the loader options (rewritten by the kernel at every boot) carry the token NOREDIRECTION */
@@ -502,12 +525,55 @@ UserRedirMarkDirty(PVOID pv, const RECTL *prcl)
     if (InterlockedExchange(&r->Dirty, 1) != 0)
         return;
     InterlockedIncrement(&gRedirDirtyCount);
-    if (InterlockedExchange(&gRedirTimerArmed, 1) == 0)
-    {
-        LARGE_INTEGER Due;
+    RedirArmTimer(REDIR_FRAME_100NS);
+}
 
-        Due.QuadPart = -REDIR_FRAME_100NS;
-        KeSetTimer(gRedirTimer, Due, NULL);
+/* windc.c: a DCE starts or stops waiting for a binding (USER lock) */
+VOID
+FASTCALL
+UserRedirRetryCount(LONG Delta)
+{
+    InterlockedExchangeAdd(&gRedirRetries, Delta);
+    if (Delta > 0)
+        RedirArmTimer(REDIR_RETRY_100NS);
+}
+
+/* windc.c: a DCE is freed while its DC still holds the record (busy or being deleted); USER lock */
+VOID
+FASTCALL
+UserRedirOrphan(HDC hdc, PVOID pvRedir)
+{
+    PREDIR_ORPHAN o = ExAllocatePoolWithTag(NonPagedPool, sizeof(*o), USERTAG_REDIRSURF);
+
+    if (!o)
+    {
+        /* Without memory to wait: keep the reference for good, never free under a DC */
+        ERR("Redirection: DC %p keeps record %p for good\n", hdc, pvRedir);
+        return;
+    }
+    o->hdc = hdc;
+    o->r = pvRedir;
+    InsertTailList(&gRedirOrphans, &o->Link);
+    RedirArmTimer(REDIR_RETRY_100NS);
+}
+
+/* Orphans whose DC is gone or now unbound release their record */
+static VOID
+RedirReapOrphans(VOID)
+{
+    PLIST_ENTRY Entry;
+    PVOID pvOld;
+
+    for (Entry = gRedirOrphans.Flink; Entry != &gRedirOrphans; )
+    {
+        PREDIR_ORPHAN o = CONTAINING_RECORD(Entry, REDIR_ORPHAN, Link);
+
+        Entry = Entry->Flink;
+        if (GreRedirBindDC(o->hdc, NULL, NULL, &pvOld) == REDIRBIND_BUSY)
+            continue;
+        RemoveEntryList(&o->Link);
+        RedirRelease(o->r);
+        ExFreePoolWithTag(o, USERTAG_REDIRSURF);
     }
 }
 
@@ -520,7 +586,7 @@ UserRedirPresentPending(VOID)
 
     InterlockedExchange(&gRedirTimerArmed, 0);
     /* Released DCs present at once: usually nothing is left, and the USER lock is not taken for nothing */
-    if (gRedirDirtyCount == 0)
+    if (gRedirDirtyCount == 0 && gRedirRetries == 0 && IsListEmpty(&gRedirOrphans))
         return;
     UserEnterExclusive();
     for (Entry = gRedirList.Flink; Entry != &gRedirList; )
@@ -542,5 +608,12 @@ UserRedirPresentPending(VOID)
             RedirTakeDirty(r, &rc);
         }
     }
+    /* Bindings that could not be changed, and DCs of freed DCEs, are tried again */
+    if (gRedirRetries)
+        DceRedirRetryAll();
+    if (!IsListEmpty(&gRedirOrphans))
+        RedirReapOrphans();
+    if (gRedirRetries || !IsListEmpty(&gRedirOrphans))
+        RedirArmTimer(REDIR_RETRY_100NS);
     UserLeave();
 }
