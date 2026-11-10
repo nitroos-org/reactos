@@ -68,6 +68,8 @@ extern bool (*kshim_is_data_inode)(struct inode *i);
 extern bool (*kshim_icache_ok)(struct inode *i);
 unsigned long kshim_pc_soft_limit(void);
 
+#define NGC_SDC_N 16
+#define NGC_SDC_MAX 2048
 struct ngc_vol {
 	struct super_block *sb;
 	struct block_device *bdev;
@@ -82,7 +84,24 @@ struct ngc_vol {
 	int label_read;                 /* label holds $VOLUME_NAME as on disk */
 	unsigned int label_len;         /* in UTF-16 units */
 	unsigned short label[NGC_LABEL_MAX];
+	/*
+	 * Security descriptors of directories read lately (ngc_get_security): the parent directory of a create is read again for every
+	 * create, and a directory whose index grew keeps its descriptor in a non-resident attribute, which costs a device
+	 * read of a 4 KB cluster each time.  An entry is keyed by the record number and sequence number of the base record
+	 * and dropped when the descriptor is set or the record is unlinked or created again.
+	 */
+	struct mutex sdc_lock;
+	struct ngc_sdc {
+		unsigned long long mft_no;
+		unsigned short seq_no;
+		unsigned int len;
+		void *sd;
+	} sdc[NGC_SDC_N];
+	unsigned int sdc_next;
 };
+
+static void ngc_sdc_drop(struct ngc_vol *v, unsigned long long mft_no);
+static void ngc_sdc_flush(struct ngc_vol *v);
 
 /* Mount-time consistency check: 0 never, 1 after an unclean shutdown or when $MFT is at most 64 MB, 2 always. */
 int ngc_check_policy = 1;
@@ -586,6 +605,7 @@ void ngc_umount(ngc_vol *v, int discard)
 		kshim_jnl_retire(v->bdev);
 	if (v->watched)
 		kshim_watch_del(v->watched);
+	ngc_sdc_flush(v);
 	kfree(v->jv);
 	kfree(v->bounce);
 	kfree(sb);
@@ -2651,7 +2671,92 @@ static __le16 ngc_sds[] = { cpu_to_le16('$'), cpu_to_le16('S'), cpu_to_le16('D')
  * $SECURITY_DESCRIPTOR attribute, or else the $Secure entry its $STANDARD_INFORMATION names.
  * *out stays NULL when the file has neither.
  */
+/* Drops the cached descriptor of record @mft_no (every sequence number). */
+static void ngc_sdc_drop(ngc_vol *v, unsigned long long mft_no)
+{
+	unsigned int i;
+	mutex_lock(&v->sdc_lock);
+	for (i = 0; i < NGC_SDC_N; i++) {
+		if (v->sdc[i].sd && v->sdc[i].mft_no == mft_no) {
+			kfree(v->sdc[i].sd);
+			v->sdc[i].sd = NULL;
+		}
+	}
+	mutex_unlock(&v->sdc_lock);
+}
+
+static void ngc_sdc_flush(ngc_vol *v)
+{
+	unsigned int i;
+	for (i = 0; i < NGC_SDC_N; i++) {
+		kfree(v->sdc[i].sd);
+		v->sdc[i].sd = NULL;
+	}
+}
+
+static int ngc_get_security_uncached(ngc_vol *v, ngc_node *n, void **out, unsigned int *len);
+
 static int ngc_get_security_impl(ngc_vol *v, ngc_node *n, void **out, unsigned int *len)
+{
+	struct ntfs_inode *ni = NTFS_I((struct inode *)n);
+	unsigned long long mft_no;
+	unsigned short seq;
+	unsigned int i;
+	int err;
+
+	if (NInoAttr(ni))
+		ni = ni->ext.base_ntfs_ino;
+	/*
+	 * Directories only: a directory is read again for every create and open below it; the descriptor of a file is read
+	 * about once per open of that file, and keeping every one of them would only add a lock and two copies to each open.
+	 */
+	if (!S_ISDIR(VFS_I(ni)->i_mode) && !S_ISLNK(VFS_I(ni)->i_mode))
+		return ngc_get_security_uncached(v, n, out, len);
+	mft_no = ni->mft_no;
+	seq = ni->seq_no;
+	mutex_lock(&v->sdc_lock);
+	for (i = 0; i < NGC_SDC_N; i++) {
+		struct ngc_sdc *e = &v->sdc[i];
+		if (e->sd && e->mft_no == mft_no && e->seq_no == seq) {
+			void *c = kmalloc(e->len, GFP_NOFS);
+			if (c) {
+				memcpy(c, e->sd, e->len);
+				*out = c;
+				*len = e->len;
+				mutex_unlock(&v->sdc_lock);
+				return 0;
+			}
+			break;
+		}
+	}
+	mutex_unlock(&v->sdc_lock);
+	err = ngc_get_security_uncached(v, n, out, len);
+	if (!err && *out && *len && *len <= NGC_SDC_MAX) {
+		void *c = kmalloc(*len, GFP_NOFS);
+		if (c) {
+			struct ngc_sdc *e;
+			memcpy(c, *out, *len);
+			mutex_lock(&v->sdc_lock);
+			/* a copy made meanwhile (another reader) is replaced, not duplicated */
+			for (i = 0; i < NGC_SDC_N; i++) {
+				if (v->sdc[i].sd && v->sdc[i].mft_no == mft_no) {
+					kfree(v->sdc[i].sd);
+					v->sdc[i].sd = NULL;
+				}
+			}
+			e = &v->sdc[v->sdc_next++ % NGC_SDC_N];
+			kfree(e->sd);
+			e->mft_no = mft_no;
+			e->seq_no = seq;
+			e->len = *len;
+			e->sd = c;
+			mutex_unlock(&v->sdc_lock);
+		}
+	}
+	return err;
+}
+
+static int ngc_get_security_uncached(ngc_vol *v, ngc_node *n, void **out, unsigned int *len)
 {
 	struct ntfs_inode *ni = NTFS_I((struct inode *)n), *sni;
 	struct ntfs_volume *vol = NTFS_SB(v->sb);
@@ -2754,6 +2859,7 @@ static int ngc_set_security_impl(ngc_vol *v, ngc_node *n, const void *sd, unsign
 	err = ngc_mark_dirty(v);
 	if (err)
 		return err;
+	ngc_sdc_drop(v, ni->mft_no);
 	mutex_lock(&ni->mrec_lock);
 	if (ntfs_attr_exist(ni, AT_SECURITY_DESCRIPTOR, AT_UNNAMED, 0))
 		err = ntfs_attr_remove(ni, AT_SECURITY_DESCRIPTOR, AT_UNNAMED, 0);
@@ -2774,6 +2880,7 @@ static int ngc_set_security_impl(ngc_vol *v, ngc_node *n, const void *sd, unsign
 			ntfs_attr_put_search_ctx(ctx);
 	}
 	mutex_unlock(&ni->mrec_lock);
+	ngc_sdc_drop(v, ni->mft_no);
 	if (!err)
 		mark_inode_dirty(VFS_I(ni));
 	return err;
@@ -3952,6 +4059,8 @@ static int ngc_create_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *nam
 	}
 	if (!err && !d->d_inode)
 		err = -EIO;
+	if (!err && d->d_inode)
+		ngc_sdc_drop(v, NTFS_I(d->d_inode)->mft_no);
 	if (!err) {
 		ngc_strip_wsl_eas(d->d_inode);
 		*out = (ngc_node *)d->d_inode;	/* the new inode's reference from new_inode() */
@@ -3997,6 +4106,7 @@ static int ngc_unlink_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *nam
 		return PTR_ERR(d);
 	err = S_ISDIR(vi->i_mode) ? dir->i_op->rmdir(dir, d) : dir->i_op->unlink(dir, d);
 	ngc_freedentry(d);
+	ngc_sdc_drop(v, NTFS_I(vi)->mft_no);
 	if (!err) {
 		/*
 		 * A directory with a reparse point is typed as a link (ngc_fix_type), so the core's
@@ -4044,6 +4154,9 @@ static int ngc_rename_impl(ngc_vol *v, ngc_node *odirn, const unsigned short *on
 	err = odir->i_op->rename(&nop_mnt_idmap, odir, od, ndir, nd, 0);
 	ngc_freedentry(od);
 	ngc_freedentry(nd);
+	ngc_sdc_drop(v, NTFS_I((struct inode *)n)->mft_no);
+	if (target)
+		ngc_sdc_drop(v, NTFS_I((struct inode *)target)->mft_no);
 	return ngc_index_errno(err);
 }
 

@@ -395,11 +395,86 @@ static VOID TestAutoInherited(VOID)
 #undef AUTO_PATH
 }
 
+/*
+ * The descriptor a create inherits is the directory's CURRENT one: NTFS-NG keeps the descriptors it read lately, and
+ * a change of the directory's descriptor (NtSetSecurityObject), or a directory that is deleted and made again, must
+ * not leave the old one behind for the next create.
+ */
+static VOID TestInheritAfterChange(PCWSTR Base)
+{
+    WCHAR Dir[MAX_PATH], F1[MAX_PATH], F2[MAX_PATH], F3[MAX_PATH], F4[MAX_PATH];
+    WCHAR Name[64];
+    NT_ACE Aces[2];
+    PSECURITY_DESCRIPTOR Sd;
+    PACL Dacl;
+    CHAR Text[1024];
+    HANDLE H;
+    const BYTE AllFlags = 0x1f;
+    ULONG i;
+
+#define CHG_SUB(Var, Rel) (_snwprintf(Name, RTL_NUMBER_OF(Name) - 1, L"%ls-chg\\%ls", Base, Rel), Name[RTL_NUMBER_OF(Name) - 1] = 0, NtPath(Var, Name))
+    CHG_SUB(Dir, L"");
+    Dir[wcslen(Dir) - 1] = 0;
+    CHG_SUB(F1, L"f1.txt");
+    CHG_SUB(F2, L"f2.txt");
+    CHG_SUB(F3, L"f3.txt");
+    CHG_SUB(F4, L"f4.txt");
+    Aces[0].Sid = SidAdmins; Aces[0].Mask = FILE_ALL_ACCESS; Aces[0].Flags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE; Aces[0].Deny = FALSE;
+    Aces[1].Sid = SidUser; Aces[1].Mask = FILE_GENERIC_READ; Aces[1].Flags = OBJECT_INHERIT_ACE; Aces[1].Deny = FALSE;
+    ok_hex(NtMakeDirControl(Dir, Aces, 2, SE_DACL_PROTECTED), STATUS_SUCCESS);
+    /* several creates: the directory's descriptor is read for each of them */
+    for (i = 0; i < 3; i++)
+    {
+        ok_hex(NtMakeFile(F1, NULL, 0, FALSE, "x"), STATUS_SUCCESS);
+        NtRemove(F1);
+    }
+    ok_hex(NtMakeFile(F1, NULL, 0, FALSE, "x"), STATUS_SUCCESS);
+    Dacl = NtGetDacl(F1, Text, sizeof(Text), &Sd);
+    ok(NtFindAce(Dacl, SidUser, FILE_GENERIC_READ, AllFlags, 0, FALSE) >= 0, "f1: no user ACE\n");
+    if (Sd)
+        LocalFree(Sd);
+
+    /* another descriptor on the directory: Everyone instead of the user */
+    Aces[1].Sid = SidEveryone;
+    Sd = NtMakeSd(Aces, 2, TRUE);
+    ok(Sd != NULL, "No descriptor\n");
+    ok_hex(NtOpen(Dir, WRITE_DAC, SHARE_ALL, FILE_OPEN, FILE_OPEN_FOR_BACKUP_INTENT, NULL, &H), STATUS_SUCCESS);
+    ok_hex(NtSetSecurityObject(H, DACL_SECURITY_INFORMATION | 0x80000000 /* PROTECTED_DACL_SECURITY_INFORMATION */, Sd), STATUS_SUCCESS);
+    NtClose(H);
+    if (Sd)
+        LocalFree(Sd);
+    ok_hex(NtMakeFile(F2, NULL, 0, FALSE, "x"), STATUS_SUCCESS);
+    Dacl = NtGetDacl(F2, Text, sizeof(Text), &Sd);
+    trace("f2: %s\n", Text);
+    ok(NtFindAce(Dacl, SidEveryone, FILE_GENERIC_READ, AllFlags, 0, FALSE) >= 0, "f2: no Everyone ACE after the change\n");
+    ok(NtFindAce(Dacl, SidUser, FILE_GENERIC_READ, AllFlags, 0, FALSE) < 0, "f2: the old user ACE is inherited\n");
+    if (Sd)
+        LocalFree(Sd);
+
+    /* the directory deleted and made again with the first descriptor */
+    NtRemove(F1);
+    NtRemove(F2);
+    NtRemove(Dir);
+    Aces[1].Sid = SidUser;
+    ok_hex(NtMakeDirControl(Dir, Aces, 2, SE_DACL_PROTECTED), STATUS_SUCCESS);
+    ok_hex(NtMakeFile(F3, NULL, 0, FALSE, "x"), STATUS_SUCCESS);
+    Dacl = NtGetDacl(F3, Text, sizeof(Text), &Sd);
+    ok(NtFindAce(Dacl, SidUser, FILE_GENERIC_READ, AllFlags, 0, FALSE) >= 0, "f3: no user ACE in the new directory\n");
+    ok(NtFindAce(Dacl, SidEveryone, FILE_GENERIC_READ, AllFlags, 0, FALSE) < 0, "f3: Everyone ACE of the old directory\n");
+    if (Sd)
+        LocalFree(Sd);
+    NtRemove(F3);
+    NtRemove(F4);
+    NtRemove(Dir);
+#undef CHG_SUB
+}
+
 START_TEST(NtfsInherit)
 {
     if (!NtInit("NtfsInherit") || !NtHaveUser())
         return;
     TestInherit(L"legacy");
+    TestInheritAfterChange(L"legacy");
     TestAutoInherited();
     NtCleanup();
 }

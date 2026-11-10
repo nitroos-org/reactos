@@ -124,6 +124,7 @@ CcScanDpc(
  */
 #define CC_STREAM_START_PAGES (32 * 1024 * 1024 / PAGE_SIZE)
 #define CC_STREAM_LOW_PAGES   (16 * 1024 * 1024 / PAGE_SIZE)
+#define CC_STREAM_FILE_PAGES  (1024 * 1024 / PAGE_SIZE)     /* dirty data of one file that makes a writer a stream */
 static volatile LONG CcStreamingKicked = 0;
 
 static
@@ -133,11 +134,33 @@ CcpDirtyPageTarget(VOID)
     return min(CcDirtyPageThreshold / 8, (ULONG)CC_STREAM_LOW_PAGES);
 }
 
-/* Called with the master lock held when a view became dirty. */
-VOID
-CcKickStreamingWriteBehind(VOID)
+/*
+ * The lazy writer leaves dirty data alone that is younger than CC_LAZY_MIN_AGE (the first scan comes three seconds after
+ * the first dirty page anyway): files created, read back and deleted within that time are never written, and a writer of
+ * many small files does not share the volume with the lazy writer.  Not under pressure: a stream (a writer that makes
+ * much dirty data of one file), writers paced by the amount of dirty data (a quarter of the throttle threshold), or
+ * closed files waiting in numbers that near the limit past which a close writes its data itself.  Master lock held.
+ */
+BOOLEAN
+CcLazyUnderPressure(VOID)
 {
-    if ((CcTotalDirtyPages > min(CcDirtyPageThreshold / 4, (ULONG)CC_STREAM_START_PAGES)) &&
+    return CcStreamingKicked != 0 ||
+           CcTotalDirtyPages > CcDirtyPageThreshold / 4 ||
+           CcRosDeferredBacklogHigh();
+}
+
+/*
+ * Called with the master lock held when a view became dirty; @FileDirtyPages is what the file of that view has dirty.
+ * A stream is a writer that keeps producing dirty data of ONE file: the data of many small files that are created and
+ * soon read back or deleted (a build, an unpacking) is left to the lazy writer's normal schedule, which writes it only
+ * if it is still dirty after the first scan delay, as Windows does; writing it out at once only competes with the
+ * creating thread for the volume (an NTFS-NG create takes the file system lock for every write-back request).
+ */
+VOID
+CcKickStreamingWriteBehind(ULONG FileDirtyPages)
+{
+    if ((FileDirtyPages >= CC_STREAM_FILE_PAGES) &&
+        (CcTotalDirtyPages > min(CcDirtyPageThreshold / 4, (ULONG)CC_STREAM_START_PAGES)) &&
         (InterlockedCompareExchange(&CcStreamingKicked, 1, 0) == 0))
     {
         CcScheduleLazyWriteScan(TRUE);
