@@ -851,6 +851,7 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     DPRINT1("ntfsng: NTFS on the Linux fs/ntfs core (v7.3-rc6), loading\n");
     /* Queried once here, at PASSIVE_LEVEL: later callers may hold a spin lock. */
     ngos_physical_pages();
+    ngos_low_memory_init();
     ExInitializeFastMutex(&NgGlobal.VcbListLock);
     InitializeListHead(&NgGlobal.VcbList);
 #if DBG
