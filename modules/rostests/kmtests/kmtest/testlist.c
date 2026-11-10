@@ -31,9 +31,9 @@ KMT_TESTFUNC Test_IoCreateFileEx;
 KMT_TESTFUNC Test_IoDeviceObject;
 KMT_TESTFUNC Test_IoIs32bitProcess;
 KMT_TESTFUNC Test_IoReadWrite;
+KMT_TESTFUNC Test_MmContiguousStandby;
 KMT_TESTFUNC Test_MmMapLockedPagesProcessExit;
 KMT_TESTFUNC Test_MmMapLockedPagesSpecifyCache;
-KMT_TESTFUNC Test_MmContiguousStandby;
 KMT_TESTFUNC Test_MmPager;
 KMT_TESTFUNC Test_MmSpecialPoolUser;
 KMT_TESTFUNC Test_NtCreateSection;
@@ -82,9 +82,9 @@ const KMT_TEST TestList[] =
     { "KeTrapFrame",                  Test_KeTrapFrame },
     { "KeProfile",                    Test_KeProfile },
     { "KeSystemCall32",               Test_KeSystemCall32 },
+    { "MmContiguousStandby",          Test_MmContiguousStandby },
     { "MmMapLockedPagesProcessExit",  Test_MmMapLockedPagesProcessExit },
     { "MmMapLockedPagesSpecifyCache", Test_MmMapLockedPagesSpecifyCache },
-    { "MmContiguousStandby",          Test_MmContiguousStandby },
     { "MmPager",                      Test_MmPager },
     { "MmSpecialPoolUser",            Test_MmSpecialPoolUser },
     { "NtCreateSection",              Test_NtCreateSection },
