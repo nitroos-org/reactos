@@ -637,6 +637,7 @@ static void d3d11_device_context_set_shader_resource_views(ID3D11DeviceContext1 
         struct d3d_shader_resource_view *view = unsafe_impl_from_ID3D11ShaderResourceView(views[i]);
 
         wined3d_views[i] = view ? view->wined3d_view : NULL;
+        d3d_shared_view_resource_read(views[i]);
     }
 
     wined3d_device_context_set_shader_resource_views(context->wined3d_context,
@@ -774,6 +775,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_DrawIndexed(ID3D11DeviceConte
     TRACE("iface %p, index_count %u, start_index_location %u, base_vertex_location %d.\n",
             iface, index_count, start_index_location, base_vertex_location);
 
+    context->device->shared_activity = TRUE;
     wined3d_device_context_draw_indexed(context->wined3d_context,
             base_vertex_location, start_index_location, index_count, 0, 0);
 }
@@ -786,6 +788,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_Draw(ID3D11DeviceContext1 *if
     TRACE("iface %p, vertex_count %u, start_vertex_location %u.\n",
             iface, vertex_count, start_vertex_location);
 
+    context->device->shared_activity = TRUE;
     wined3d_device_context_draw(context->wined3d_context, start_vertex_location, vertex_count, 0, 0);
 }
 
@@ -832,6 +835,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_Unmap(ID3D11DeviceContext1 *i
 
     wined3d_resource = wined3d_resource_from_d3d11_resource(resource);
 
+    d3d_shared_resource_written(resource, FALSE);
     wined3d_device_context_unmap(context->wined3d_context, wined3d_resource, subresource_idx);
 }
 
@@ -911,6 +915,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_DrawIndexedInstanced(ID3D11De
             iface, instance_index_count, instance_count, start_index_location,
             base_vertex_location, start_instance_location);
 
+    context->device->shared_activity = TRUE;
     wined3d_device_context_draw_indexed(context->wined3d_context, base_vertex_location,
             start_index_location, instance_index_count, start_instance_location, instance_count);
 }
@@ -925,6 +930,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_DrawInstanced(ID3D11DeviceCon
             iface, instance_vertex_count, instance_count, start_vertex_location,
             start_instance_location);
 
+    context->device->shared_activity = TRUE;
     wined3d_device_context_draw(context->wined3d_context, start_vertex_location,
             instance_vertex_count, start_instance_location, instance_count);
 }
@@ -1095,6 +1101,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_OMSetRenderTargets(ID3D11Devi
         struct d3d_rendertarget_view *rtv = unsafe_impl_from_ID3D11RenderTargetView(rtvs[i]);
 
         wined3d_rtvs[i] = rtv ? rtv->wined3d_view : NULL;
+        d3d_shared_view_resource_written(rtvs[i], TRUE);
     }
 
     dsv = unsafe_impl_from_ID3D11DepthStencilView(depth_stencil_view);
@@ -1135,6 +1142,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_OMSetRenderTargetsAndUnordere
             struct d3d_rendertarget_view *rtv = unsafe_impl_from_ID3D11RenderTargetView(render_target_views[i]);
 
             wined3d_rtvs[i] = rtv ? rtv->wined3d_view : NULL;
+            d3d_shared_view_resource_written(render_target_views[i], TRUE);
         }
     }
 
@@ -1241,6 +1249,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_DrawIndexedInstancedIndirect(
 
     d3d_buffer = unsafe_impl_from_ID3D11Buffer(buffer);
 
+    context->device->shared_activity = TRUE;
     wined3d_device_context_draw_indirect(context->wined3d_context, d3d_buffer->wined3d_buffer, offset, true);
 }
 
@@ -1254,6 +1263,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_DrawInstancedIndirect(ID3D11D
 
     d3d_buffer = unsafe_impl_from_ID3D11Buffer(buffer);
 
+    context->device->shared_activity = TRUE;
     wined3d_device_context_draw_indirect(context->wined3d_context, d3d_buffer->wined3d_buffer, offset, false);
 }
 
@@ -1265,6 +1275,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_Dispatch(ID3D11DeviceContext1
     TRACE("iface %p, thread_group_count_x %u, thread_group_count_y %u, thread_group_count_z %u.\n",
             iface, thread_group_count_x, thread_group_count_y, thread_group_count_z);
 
+    context->device->shared_activity = TRUE;
     wined3d_device_context_dispatch(context->wined3d_context,
             thread_group_count_x, thread_group_count_y, thread_group_count_z);
 }
@@ -1279,6 +1290,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_DispatchIndirect(ID3D11Device
 
     buffer_impl = unsafe_impl_from_ID3D11Buffer(buffer);
 
+    context->device->shared_activity = TRUE;
     wined3d_device_context_dispatch_indirect(context->wined3d_context, buffer_impl->wined3d_buffer, offset);
 }
 
@@ -1353,6 +1365,8 @@ static void STDMETHODCALLTYPE d3d11_device_context_CopySubresourceRegion(ID3D11D
         wined3d_box_set(&wined3d_src_box, src_box->left, src_box->top,
                 src_box->right, src_box->bottom, src_box->front, src_box->back);
 
+    d3d_shared_resource_read(src_resource);
+    d3d_shared_resource_written(dst_resource, FALSE);
     wined3d_dst_resource = wined3d_resource_from_d3d11_resource(dst_resource);
     wined3d_src_resource = wined3d_resource_from_d3d11_resource(src_resource);
     wined3d_device_context_copy_sub_resource_region(context->wined3d_context, wined3d_dst_resource, dst_subresource_idx,
@@ -1367,6 +1381,8 @@ static void STDMETHODCALLTYPE d3d11_device_context_CopyResource(ID3D11DeviceCont
 
     TRACE("iface %p, dst_resource %p, src_resource %p.\n", iface, dst_resource, src_resource);
 
+    d3d_shared_resource_read(src_resource);
+    d3d_shared_resource_written(dst_resource, FALSE);
     wined3d_dst_resource = wined3d_resource_from_d3d11_resource(dst_resource);
     wined3d_src_resource = wined3d_resource_from_d3d11_resource(src_resource);
     wined3d_device_context_copy_resource(context->wined3d_context, wined3d_dst_resource, wined3d_src_resource);
@@ -1386,6 +1402,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_UpdateSubresource(ID3D11Devic
     if (box)
         wined3d_box_set(&wined3d_box, box->left, box->top, box->right, box->bottom, box->front, box->back);
 
+    d3d_shared_resource_written(resource, FALSE);
     wined3d_resource = wined3d_resource_from_d3d11_resource(resource);
     wined3d_device_context_update_sub_resource(context->wined3d_context, wined3d_resource,
             subresource_idx, box ? &wined3d_box : NULL, data, row_pitch, depth_pitch, 0);
@@ -1422,6 +1439,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_ClearRenderTargetView(ID3D11D
     if (!view)
         return;
 
+    d3d_shared_view_resource_written(render_target_view, FALSE);
     if (FAILED(hr = wined3d_device_context_clear_rendertarget_view(context->wined3d_context, view->wined3d_view, NULL,
             WINED3DCLEAR_TARGET, &color, 0.0f, 0)))
         ERR("Failed to clear view, hr %#lx.\n", hr);
@@ -1515,6 +1533,8 @@ static void STDMETHODCALLTYPE d3d11_device_context_ResolveSubresource(ID3D11Devi
             iface, dst_resource, dst_subresource_idx,
             src_resource, src_subresource_idx, debug_dxgi_format(format));
 
+    d3d_shared_resource_read(src_resource);
+    d3d_shared_resource_written(dst_resource, FALSE);
     wined3d_dst_resource = wined3d_resource_from_d3d11_resource(dst_resource);
     wined3d_src_resource = wined3d_resource_from_d3d11_resource(src_resource);
     wined3d_format = wined3dformat_from_dxgi_format(format);
@@ -2674,6 +2694,8 @@ static void STDMETHODCALLTYPE d3d11_device_context_Flush(ID3D11DeviceContext1 *i
 
     TRACE("iface %p.\n", iface);
 
+    if (context->type == D3D11_DEVICE_CONTEXT_IMMEDIATE)
+        d3d_device_shared_flush(context->device);
     wined3d_device_context_flush(context->wined3d_context);
 }
 
@@ -2752,6 +2774,8 @@ static void STDMETHODCALLTYPE d3d11_device_context_CopySubresourceRegion1(ID3D11
         wined3d_box_set(&wined3d_src_box, src_box->left, src_box->top,
                 src_box->right, src_box->bottom, src_box->front, src_box->back);
 
+    d3d_shared_resource_read(src_resource);
+    d3d_shared_resource_written(dst_resource, FALSE);
     wined3d_dst_resource = wined3d_resource_from_d3d11_resource(dst_resource);
     wined3d_src_resource = wined3d_resource_from_d3d11_resource(src_resource);
     wined3d_device_context_copy_sub_resource_region(context->wined3d_context, wined3d_dst_resource, dst_subresource_idx,
@@ -2773,6 +2797,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_UpdateSubresource1(ID3D11Devi
         wined3d_box_set(&wined3d_box, box->left, box->top, box->right, box->bottom,
                 box->front, box->back);
 
+    d3d_shared_resource_written(resource, FALSE);
     wined3d_resource = wined3d_resource_from_d3d11_resource(resource);
     wined3d_device_context_update_sub_resource(context->wined3d_context, wined3d_resource, subresource_idx,
             box ? &wined3d_box : NULL, data, row_pitch, depth_pitch, flags);
@@ -4394,9 +4419,11 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CreateDeferredContext(ID3D11Device
 static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedResource(ID3D11Device2 *iface, HANDLE resource, REFIID iid,
         void **out)
 {
-    FIXME("iface %p, resource %p, iid %s, out %p stub!\n", iface, resource, debugstr_guid(iid), out);
+    struct d3d_device *device = impl_from_ID3D11Device2(iface);
 
-    return E_NOTIMPL;
+    TRACE("iface %p, resource %p, iid %s, out %p.\n", iface, resource, debugstr_guid(iid), out);
+
+    return d3d_device_open_shared(device, resource, NULL, D3D_OPEN_LEGACY, iid, out);
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_device_CheckFormatSupport(ID3D11Device2 *iface, DXGI_FORMAT format,
@@ -5004,18 +5031,22 @@ fail:
 static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedResource1(ID3D11Device2 *iface, HANDLE handle,
         REFIID iid, void **resource)
 {
-    FIXME("iface %p, handle %p, iid %s, resource %p stub!\n", iface, handle, debugstr_guid(iid), resource);
+    struct d3d_device *device = impl_from_ID3D11Device2(iface);
 
-    return E_NOTIMPL;
+    TRACE("iface %p, handle %p, iid %s, resource %p.\n", iface, handle, debugstr_guid(iid), resource);
+
+    return d3d_device_open_shared(device, handle, NULL, D3D_OPEN_NT, iid, resource);
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedResourceByName(ID3D11Device2 *iface, const WCHAR *name,
         DWORD access, REFIID iid, void **resource)
 {
-    FIXME("iface %p, name %s, access %#lx, iid %s, resource %p stub!\n", iface, debugstr_w(name), access,
+    struct d3d_device *device = impl_from_ID3D11Device2(iface);
+
+    TRACE("iface %p, name %s, access %#lx, iid %s, resource %p.\n", iface, debugstr_w(name), access,
             debugstr_guid(iid), resource);
 
-    return E_NOTIMPL;
+    return d3d_device_open_shared(device, NULL, name, D3D_OPEN_NAME, iid, resource);
 }
 
 static void STDMETHODCALLTYPE d3d11_device_GetImmediateContext2(ID3D11Device2 *iface,
@@ -5199,6 +5230,7 @@ static ULONG STDMETHODCALLTYPE d3d_device_inner_Release(IUnknown *iface)
         wine_rb_destroy(&device->rasterizer_states, NULL, NULL);
         wine_rb_destroy(&device->depthstencil_states, NULL, NULL);
         wine_rb_destroy(&device->blend_states, NULL, NULL);
+        d3d_device_shared_cleanup(device);
     }
 
     return refcount;
@@ -5389,6 +5421,7 @@ static void STDMETHODCALLTYPE d3d10_device_DrawIndexed(ID3D10Device1 *iface, UIN
     TRACE("iface %p, index_count %u, start_index_location %u, base_vertex_location %d.\n",
             iface, index_count, start_index_location, base_vertex_location);
 
+    device->shared_activity = TRUE;
     wined3d_device_context_draw_indexed(device->immediate_context.wined3d_context,
             base_vertex_location, start_index_location, index_count, 0, 0);
 }
@@ -5401,6 +5434,7 @@ static void STDMETHODCALLTYPE d3d10_device_Draw(ID3D10Device1 *iface, UINT verte
     TRACE("iface %p, vertex_count %u, start_vertex_location %u\n",
             iface, vertex_count, start_vertex_location);
 
+    device->shared_activity = TRUE;
     wined3d_device_context_draw(device->immediate_context.wined3d_context, start_vertex_location, vertex_count, 0, 0);
 }
 
@@ -5482,6 +5516,7 @@ static void STDMETHODCALLTYPE d3d10_device_DrawIndexedInstanced(ID3D10Device1 *i
             iface, instance_index_count, instance_count, start_index_location,
             base_vertex_location, start_instance_location);
 
+    device->shared_activity = TRUE;
     wined3d_device_context_draw_indexed(device->immediate_context.wined3d_context, base_vertex_location,
             start_index_location, instance_index_count, start_instance_location, instance_count);
 }
@@ -5496,6 +5531,7 @@ static void STDMETHODCALLTYPE d3d10_device_DrawInstanced(ID3D10Device1 *iface,
             "start_instance_location %u.\n", iface, instance_vertex_count, instance_count,
             start_vertex_location, start_instance_location);
 
+    device->shared_activity = TRUE;
     wined3d_device_context_draw(device->immediate_context.wined3d_context, start_vertex_location,
             instance_vertex_count, start_instance_location, instance_count);
 }
@@ -7105,10 +7141,12 @@ static UINT STDMETHODCALLTYPE d3d10_device_GetCreationFlags(ID3D10Device1 *iface
 static HRESULT STDMETHODCALLTYPE d3d10_device_OpenSharedResource(ID3D10Device1 *iface,
         HANDLE resource_handle, REFIID guid, void **resource)
 {
-    FIXME("iface %p, resource_handle %p, guid %s, resource %p stub!\n",
+    struct d3d_device *device = impl_from_ID3D10Device(iface);
+
+    TRACE("iface %p, resource_handle %p, guid %s, resource %p.\n",
             iface, resource_handle, debugstr_guid(guid), resource);
 
-    return E_NOTIMPL;
+    return d3d_device_open_shared(device, resource_handle, NULL, D3D_OPEN_LEGACY, guid, resource);
 }
 
 static void STDMETHODCALLTYPE d3d10_device_SetTextFilterSize(ID3D10Device1 *iface, UINT width, UINT height)
@@ -7775,4 +7813,6 @@ void d3d_device_init(struct d3d_device *device, void *outer_unknown)
     wine_rb_init(&device->depthstencil_states, d3d_depthstencil_state_compare);
     wine_rb_init(&device->rasterizer_states, d3d_rasterizer_state_compare);
     wine_rb_init(&device->sampler_states, d3d_sampler_state_compare);
+
+    d3d_device_shared_init(device);
 }
