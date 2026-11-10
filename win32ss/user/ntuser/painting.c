@@ -1686,13 +1686,15 @@ IntPrintWindow(
      */
     if (UserRedirHasSurface(pwnd))
     {
-        RECTL rc = (nFlags & PW_CLIENTONLY) ? pwnd->rcClient : pwnd->rcWindow;
+        RECTL rc;
 
         /* A full repaint (erase, then WM_PAINT); the oracle measured the one WM_PAINT, the erase is not measured */
         if (!(nFlags & NITRO_PW_RENDERFULLCONTENT))
             co_UserRedrawWindow(pwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
         if (UserRedirHasSurface(pwnd))
         {
+            /* After the repaint, which can move or size the window (its surface with it) */
+            rc = (nFlags & PW_CLIENTONLY) ? pwnd->rcClient : pwnd->rcWindow;
             if (!hdcBlt)
                 return TRUE;
             return UserRedirCopyToDC(pwnd, hdcBlt,

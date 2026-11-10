@@ -1363,7 +1363,7 @@ NtGdiStretchDIBitsInternal(
     IN HANDLE hcmXform)
 {
     SIZEL sizel;
-    RECTL rcSrc, rcDst;
+    RECTL rcSrc, rcDst, rcHazard;
     PDC pdc;
     HBITMAP hbmTmp = 0;
     PSURFACE psurfTmp = 0, psurfDst = 0;
@@ -1619,8 +1619,9 @@ NtGdiStretchDIBitsInternal(
             goto cleanup;
         }
 
-        /* Prepare DC for blit */
-        DC_vPrepareDCsForBlitEx(pdc, &rcDst, NULL, NULL, DCPREP_EXACT_DEST);
+        /* Prepare DC for blit. A flipped stretch writes a pixel beside rcDst (stretchblt.c), as in GreStretchBltMask. */
+        IntStretchHazard(&rcDst, &rcSrc, &rcHazard);
+        DC_vPrepareDCsForBlitEx(pdc, &rcHazard, NULL, NULL, DCPREP_EXACT_DEST);
 
         psurfDst = pdc->dclevel.pSurface;
 
