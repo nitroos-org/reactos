@@ -566,12 +566,56 @@ MiInsertBasedSection(IN PSECTION Section)
     MiInsertNode(&MmSectionBasedRoot, &Section->Address, Parent, Result);
 }
 
+/*
+ * Where the search for a free range of the kernel table resumes.  A range is taken at the lowest free gap, and
+ * the walk from the lowest node to that gap is linear in the number of areas: 4096 for the views of a 1 GB file
+ * in the cache, each new view walks them all (27 us per view).  For a request of a size and alignment the walk
+ * leaves a node, and below it no gap fits that request; the next request of the same class starts there.  The
+ * address space lock (kernel) serializes the searches and removals.  When an area is removed, a gap appears
+ * where it was: the hints at or above it go back to the node below it (nothing below that node changed), or to
+ * a full walk when it was the lowest.  Inserting an area only fills gaps.
+ */
+#define MI_KERNEL_GAP_HINTS 4
+static struct
+{
+    PMMADDRESS_NODE Node;       /* resume at this node (NULL: unused entry) */
+    ULONG_PTR PageCount;
+    ULONG_PTR AlignmentVpn;
+    ULONG Age;
+} MiKernelGapHints[MI_KERNEL_GAP_HINTS];
+static ULONG MiKernelGapHintClock;
+
+static
+VOID
+MiMoveKernelGapHints(
+    _In_ PMMADDRESS_NODE Removed)
+{
+    PMMADDRESS_NODE Previous = NULL;
+    ULONG i;
+
+    for (i = 0; i < MI_KERNEL_GAP_HINTS; i++)
+    {
+        if (MiKernelGapHints[i].Node == NULL)
+            continue;
+        if (MiKernelGapHints[i].Node != Removed &&
+            MiKernelGapHints[i].Node->StartingVpn < Removed->StartingVpn)
+            continue;
+        if (Previous == NULL)
+            Previous = MiGetPreviousNode(Removed);
+        MiKernelGapHints[i].Node = Previous;
+    }
+}
+
 VOID
 NTAPI
 MiRemoveNode(IN PMMADDRESS_NODE Node,
              IN PMM_AVL_TABLE Table)
 {
     ASSERT_LOCKED_FOR_WRITE(Table);
+
+    /* The kernel table keeps where its gap searches resume (MiFindEmptyAddressRangeInTreeEx) */
+    if (Table->Unused == 1)
+        MiMoveKernelGapHints(Node);
 
     /* Call the AVL code */
     RtlpDeleteAvlTreeNode(Table, Node);
@@ -685,6 +729,8 @@ MiFindEmptyAddressRangeInTreeEx(IN SIZE_T Length,
 {
     PMMADDRESS_NODE Node, PreviousNode;
     ULONG_PTR PageCount, AlignmentVpn, LowVpn, HighestVpn;
+    LONG Hint;
+    ULONG i;
     ASSERT(Length != 0);
 
     ASSERT_LOCKED_FOR_READ(Table);
@@ -714,6 +760,43 @@ MiFindEmptyAddressRangeInTreeEx(IN SIZE_T Length,
 
     /* Start a search to find a gap */
     PreviousNode = NULL;
+    Hint = -1;
+    if (Table->Unused == 1)
+    {
+        /* A search of this class (size, alignment) left a node: below it no gap fits (MiKernelGapHints) */
+        for (i = 0; i < MI_KERNEL_GAP_HINTS; i++)
+        {
+            if (MiKernelGapHints[i].Node != NULL &&
+                MiKernelGapHints[i].PageCount == PageCount &&
+                MiKernelGapHints[i].AlignmentVpn == AlignmentVpn)
+            {
+                Hint = (LONG)i;
+                break;
+            }
+        }
+        if (Hint >= 0)
+        {
+            Node = MiKernelGapHints[Hint].Node;
+            PreviousNode = MiGetPreviousNode(Node);
+            if (PreviousNode != NULL && PreviousNode->EndingVpn >= LowVpn)
+                LowVpn = ALIGN_UP_BY(PreviousNode->EndingVpn + 1, AlignmentVpn);
+        }
+        else
+        {
+            /* The least recently used entry takes this class */
+            Hint = 0;
+            for (i = 1; i < MI_KERNEL_GAP_HINTS; i++)
+            {
+                if (MiKernelGapHints[i].Node == NULL ||
+                    (MiKernelGapHints[Hint].Node != NULL && MiKernelGapHints[i].Age < MiKernelGapHints[Hint].Age))
+                    Hint = (LONG)i;
+            }
+            MiKernelGapHints[Hint].Node = NULL;
+            MiKernelGapHints[Hint].PageCount = PageCount;
+            MiKernelGapHints[Hint].AlignmentVpn = AlignmentVpn;
+        }
+        MiKernelGapHints[Hint].Age = ++MiKernelGapHintClock;
+    }
     while (Node != NULL)
     {
         /* Check if the gap below the current node is suitable */
@@ -721,6 +804,8 @@ MiFindEmptyAddressRangeInTreeEx(IN SIZE_T Length,
         {
             /* There is enough space to add our node */
             *Base = LowVpn << PAGE_SHIFT;
+            if (Hint >= 0)
+                MiKernelGapHints[Hint].Node = Node;
 
             /* Can we use the current node as parent? */
             if (RtlLeftChildAvl(Node) == NULL)
@@ -765,6 +850,8 @@ MiFindEmptyAddressRangeInTreeEx(IN SIZE_T Length,
         /* Yes! Use this VAD to store the allocation */
         *PreviousVad = PreviousNode;
         *Base = LowVpn << PAGE_SHIFT;
+        if (Hint >= 0)
+            MiKernelGapHints[Hint].Node = PreviousNode;
         return TableInsertAsRight;
     }
 
