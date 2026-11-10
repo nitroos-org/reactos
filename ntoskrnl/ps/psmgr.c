@@ -716,6 +716,9 @@ PspInitPhase0(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                   SeAuditProcessCreationInfo.ImageFileName,
                   sizeof(OBJECT_NAME_INFORMATION));
 
+    /* The System process is where the protected processes start from */
+    PsInitialSystemProcess->Protection = PS_PROTECTION(PS_PROTECTED_TYPE_PROTECTED, PS_PROTECTED_SIGNER_SYSTEM);
+
     /* Setup the system initialization thread */
     Status = PsCreateSystemThread(&SysThreadHandle,
                                   THREAD_ALL_ACCESS,
