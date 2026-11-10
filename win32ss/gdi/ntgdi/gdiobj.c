@@ -1189,6 +1189,19 @@ GDIOBJ_vDeleteObject(POBJ pobj)
     GDIOBJ_vDereferenceObject(pobj);
 }
 
+/* Whether a handle still names an object, whoever owns it (GreIsHandleValid checks the owner) */
+BOOL
+NTAPI
+GreIsHandleValidAnyOwner(HGDIOBJ hobj)
+{
+    PENTRY pentry;
+
+    pentry = ENTRY_ReferenceEntryByHandle(hobj, GDIOBJFLAG_IGNOREPID);
+    if (!pentry) return FALSE;
+    GDIOBJ_vDereferenceObject(pentry->einfo.pobj);
+    return TRUE;
+}
+
 BOOL
 NTAPI
 GreIsHandleValid(HGDIOBJ hobj)

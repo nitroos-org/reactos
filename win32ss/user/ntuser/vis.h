@@ -10,6 +10,7 @@
 #pragma once
 
 PREGION FASTCALL VIS_ComputeVisibleRegion(PWND Window, BOOLEAN ClientArea, BOOLEAN ClipChildren, BOOLEAN ClipSiblings);
+PREGION FASTCALL VIS_ComputeVisibleRegionEx(PWND Window, BOOLEAN ClientArea, BOOLEAN ClipChildren, BOOLEAN ClipSiblings, PWND Root);
 VOID FASTCALL co_VIS_WindowLayoutChanged(PWND Window, PREGION UncoveredRgn);
 
 /* EOF */
