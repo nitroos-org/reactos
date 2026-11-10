@@ -216,6 +216,40 @@ ParseBracedGuid(const char *Text, SLID *Id)
 }
 
 static
+int
+CompareIds(const SLID *A, const SLID *B)
+{
+    int i;
+
+    if (A->Data1 != B->Data1)
+        return A->Data1 < B->Data1 ? -1 : 1;
+    if (A->Data2 != B->Data2)
+        return A->Data2 < B->Data2 ? -1 : 1;
+    if (A->Data3 != B->Data3)
+        return A->Data3 < B->Data3 ? -1 : 1;
+    for (i = 0; i < 8; i++)
+        if (A->Data4[i] != B->Data4[i])
+            return A->Data4[i] < B->Data4[i] ? -1 : 1;
+    return 0;
+}
+
+static
+void
+SortIds(SLID *Ids, UINT Count)
+{
+    UINT i, j;
+
+    for (i = 1; i < Count; i++)
+    {
+        SLID Key = Ids[i];
+
+        for (j = i; j > 0 && CompareIds(&Ids[j - 1], &Key) > 0; j--)
+            Ids[j] = Ids[j - 1];
+        Ids[j] = Key;
+    }
+}
+
+static
 BOOL
 IdListAdd(IDLIST *List, const SLID *Id, BOOL Unique)
 {
@@ -1031,8 +1065,14 @@ SLGetSLIDListImpl(_In_ HSLC hSLC,
     if (FAILED(hr) || List.Count == 0)
     {
         HeapFree(GetProcessHeap(), 0, List.Ids);
+        /* Windows 10 (measured for an installed SKU; an unknown SKU is not measured): no product key id is value not found */
+        if (SUCCEEDED(hr) && eReturnIdType == SL_ID_PKEY && eQueryIdType == SL_ID_PRODUCT_SKU)
+            return SL_E_VALUE_NOT_FOUND;
         return hr;
     }
+    /* Windows 10 (measured): ids of a SKU or application query come back in ascending order */
+    if (eQueryIdType == SL_ID_PRODUCT_SKU || eQueryIdType == SL_ID_APPLICATION)
+        SortIds(List.Ids, List.Count);
     /* The caller frees with LocalFree */
     {
         SLID *Result = LocalAlloc(LMEM_FIXED, List.Count * sizeof(SLID));
@@ -1227,6 +1267,8 @@ SLGetLicensingStatusInformation(_In_ HSLC hSLC,
     SL_LICENSING_STATUS *Status;
     UINT Count = 0, i;
     HRESULT hr;
+    PVOID Old;
+    BOOL Entered;
 
     if (!IsValidHandle(hSLC))
         return E_HANDLE;
@@ -1239,15 +1281,32 @@ SLGetLicensingStatusInformation(_In_ HSLC hSLC,
         return SL_E_STATUS_QUERY_NO_ID;
 
     /* The SKUs the installed licenses name for the application (or the one SKU asked for) */
+    Entered = StoreEnter(&Old);
     if (pAppID)
         hr = SLGetSLIDListImpl(hSLC, SL_ID_APPLICATION, pAppID, SL_ID_PRODUCT_SKU, &Count, &Skus);
     else
         hr = SLGetSLIDListImpl(hSLC, SL_ID_PRODUCT_SKU, pProductSkuId, SL_ID_PRODUCT_SKU, &Count, &Skus);
+    StoreLeave(Entered, Old);
     if (FAILED(hr))
         return hr;
+    /* Windows 10 (measured): a query naming a SKU reports that SKU only (and only when it belongs to the application) */
+    if (pAppID && pProductSkuId && Count)
+    {
+        UINT Kept = 0;
+
+        for (i = 0; i < Count; i++)
+        {
+            if (IsEqualGUID(&Skus[i], pProductSkuId))
+                Skus[Kept++] = Skus[i];
+        }
+        Count = Kept;
+    }
     /* Windows (measured): an application none of whose licenses is installed is SL_E_PRODUCT_SKU_NOT_INSTALLED */
     if (!Count)
+    {
+        LocalFree(Skus);
         return SL_E_PRODUCT_SKU_NOT_INSTALLED;
+    }
 
     Status = LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, Count * sizeof(*Status));
     if (!Status)
@@ -1259,7 +1318,8 @@ SLGetLicensingStatusInformation(_In_ HSLC hSLC,
     {
         Status[i].SkuId = Skus[i];
         Status[i].eStatus = SL_LICENSING_STATUS_UNLICENSED;
-        /* TODO(oracle): the reason code Windows reports for an installed SKU without a key */
+        /* Windows 10 with Office installed and never activated (measured): status Unlicensed, no grace,
+         * no validity, reason 0xC004F014 = no product key installed */
         Status[i].hrReason = SL_E_PKEY_NOT_INSTALLED;
     }
     LocalFree(Skus);
@@ -1281,6 +1341,22 @@ SLGetInstalledProductKeyIds(_In_ HSLC hSLC,
         return E_INVALIDARG;
     *pnProductKeyIds = 0;
     *ppProductKeyIds = NULL;
+    /* Windows 10 (measured): an installed SKU that holds no product key is SL_E_VALUE_NOT_FOUND */
+    if (pProductSkuId)
+    {
+        SLID *Licenses = NULL;
+        UINT Count = 0;
+        HRESULT hr;
+        PVOID Old;
+        BOOL Entered = StoreEnter(&Old);
+
+        hr = SLGetSLIDListImpl(hSLC, SL_ID_PRODUCT_SKU, pProductSkuId, SL_ID_LICENSE, &Count, &Licenses);
+        StoreLeave(Entered, Old);
+        if (Licenses)
+            LocalFree(Licenses);
+        if (SUCCEEDED(hr) && Count)
+            return SL_E_VALUE_NOT_FOUND;
+    }
     return S_OK;
 }
 
@@ -1312,7 +1388,8 @@ SLGetPolicyInformationDWORD(_In_ HSLC hSLC,
         return E_HANDLE;
     if (!pwszValueName || !pdwValue)
         return E_INVALIDARG;
-    return SL_E_VALUE_NOT_FOUND;
+    /* Windows 10 (measured, three unknown names): SL_E_RIGHT_NOT_GRANTED. No policy is ever granted here. */
+    return SL_E_RIGHT_NOT_GRANTED;
 }
 
 HRESULT
@@ -1335,6 +1412,9 @@ SLConsumeRight(_In_ HSLC hSLC,
 {
     if (!IsValidHandle(hSLC))
         return E_HANDLE;
+    /* Windows 10 (measured): no application id is E_INVALIDARG. Nothing is consumed here: no license grants a right. */
+    if (!pAppId)
+        return E_INVALIDARG;
     return SL_E_RIGHT_NOT_GRANTED;
 }
 
@@ -1447,7 +1527,7 @@ SLGetPolicyInformation(_In_ HSLC hSLC,
         return E_INVALIDARG;
     *pcbValue = 0;
     *ppbValue = NULL;
-    return SL_E_VALUE_NOT_FOUND;
+    return SL_E_RIGHT_NOT_GRANTED; /* as SLGetPolicyInformationDWORD */
 }
 
 HRESULT
@@ -1467,6 +1547,125 @@ SLGetServiceInformation(_In_ HSLC hSLC,
     return SL_E_VALUE_NOT_FOUND;
 }
 
+/* The value names of a SKU that Windows 10 answers (measured) and the information of the SKU's license they come from */
+static
+const WCHAR *
+SkuValueToInfoName(PCWSTR Name)
+{
+    static const struct { const WCHAR *Name; const WCHAR *Info; } Map[] =
+    {
+        { L"Name", L"productName" },
+        { L"Description", L"productDescription" },
+        { L"Family", L"Family" },
+        { L"Author", L"productAuthor" },
+    };
+    UINT i;
+
+    for (i = 0; i < ARRAYSIZE(Map); i++)
+        if (!wcscmp(Name, Map[i].Name))
+            return Map[i].Info;
+    return NULL;
+}
+
+/* The end-user license of a SKU is the one whose licenseType is msft:sl/EUL/<kind>/PUBLIC */
+static
+BOOL
+IsPublicEulType(PCWSTR Type)
+{
+    SIZE_T Len = wcslen(Type);
+
+    return !wcsncmp(Type, L"msft:sl/EUL/", 12) && Len > 12 + 7 && !wcscmp(Type + Len - 7, L"/PUBLIC");
+}
+
+static
+WCHAR *
+DupWide(const WCHAR *Text)
+{
+    SIZE_T Bytes = (wcslen(Text) + 1) * sizeof(WCHAR);
+    WCHAR *Out = LocalAlloc(LMEM_FIXED, Bytes);
+
+    if (Out)
+        memcpy(Out, Text, Bytes);
+    return Out;
+}
+
+static
+HRESULT
+SLGetProductSkuInformationImpl(_In_ HSLC hSLC,
+                               _In_ const SLID *pProductSkuId,
+                               _In_ PCWSTR pwszValueName,
+                               _Out_opt_ SLDATATYPE *peDataType,
+                               _Out_ UINT *pcbValue,
+                               _Outptr_result_bytebuffer_maybenull_(*pcbValue) PBYTE *ppbValue)
+{
+    SLID *Licenses = NULL;
+    UINT Count = 0, i;
+    HRESULT hr;
+    const WCHAR *Info;
+    BOOL IsFileId = !wcscmp(pwszValueName, L"fileId");
+    BOOL IsTypeName = wcsncmp(pwszValueName, L"msft:sl/", 8) == 0;
+    SLID Found;
+    BOOL HaveFound = FALSE;
+    WCHAR Text[64];
+    BYTE *Type;
+    UINT cbType;
+
+    hr = SLGetSLIDListImpl(hSLC, SL_ID_PRODUCT_SKU, pProductSkuId, SL_ID_LICENSE, &Count, &Licenses);
+    if (FAILED(hr))
+        return hr;
+    if (!Count)
+        return SL_E_PRODUCT_SKU_NOT_INSTALLED;
+    Info = SkuValueToInfoName(pwszValueName);
+    if (!Info && !IsFileId && !IsTypeName)
+    {
+        LocalFree(Licenses);
+        return SL_E_VALUE_NOT_FOUND;
+    }
+
+    /* Find the license that answers: the SKU's end-user license, or (for a license type name) the license of that type */
+    for (i = 0; i < Count && !HaveFound; i++)
+    {
+        Type = NULL;
+        cbType = 0;
+        if (FAILED(SLGetLicenseInformationImpl(hSLC, &Licenses[i], L"licenseType", NULL, &cbType, &Type)) || !Type)
+            continue;
+        if (IsTypeName ? !wcscmp((WCHAR *)Type, pwszValueName) : IsPublicEulType((WCHAR *)Type))
+        {
+            Found = Licenses[i];
+            HaveFound = TRUE;
+        }
+        LocalFree(Type);
+    }
+    LocalFree(Licenses);
+    if (!HaveFound)
+        return SL_E_VALUE_NOT_FOUND;
+
+    if (Info)
+        return SLGetLicenseInformationImpl(hSLC, &Found, Info, peDataType, pcbValue, ppbValue);
+
+    if (IsFileId)
+    {
+        INDEXREC Rec;
+
+        if (!ReadIndex(&Found, &Rec))
+            return SL_E_VALUE_NOT_FOUND;
+        FormatGuid(&Rec.File, Text);
+    }
+    else
+        FormatGuid(&Found, Text);
+    /* Windows prints these ids in lower case (measured) */
+    for (i = 0; Text[i]; i++)
+        if (Text[i] >= L'A' && Text[i] <= L'F')
+            Text[i] += L'a' - L'A';
+    *ppbValue = (PBYTE)DupWide(Text);
+    if (!*ppbValue)
+        return E_OUTOFMEMORY;
+    *pcbValue = (UINT)((wcslen(Text) + 1) * sizeof(WCHAR));
+    if (peDataType)
+        *peDataType = SL_DATA_SZ;
+    return S_OK;
+}
+
 HRESULT
 WINAPI
 SLGetProductSkuInformation(_In_ HSLC hSLC,
@@ -1476,8 +1675,8 @@ SLGetProductSkuInformation(_In_ HSLC hSLC,
                            _Out_ UINT *pcbValue,
                            _Outptr_result_bytebuffer_maybenull_(*pcbValue) PBYTE *ppbValue)
 {
-    SLID *Licenses = NULL;
-    UINT Count = 0;
+    PVOID Old;
+    BOOL Entered;
     HRESULT hr;
 
     if (!IsValidHandle(hSLC))
@@ -1487,12 +1686,30 @@ SLGetProductSkuInformation(_In_ HSLC hSLC,
     *pcbValue = 0;
     *ppbValue = NULL;
 
-    hr = SLGetSLIDListImpl(hSLC, SL_ID_PRODUCT_SKU, pProductSkuId, SL_ID_LICENSE, &Count, &Licenses);
-    if (Licenses)
-        LocalFree(Licenses);
-    if (FAILED(hr))
-        return hr;
-    return Count ? SL_E_VALUE_NOT_FOUND : SL_E_PRODUCT_SKU_NOT_INSTALLED;
+    Entered = StoreEnter(&Old);
+    hr = SLGetProductSkuInformationImpl(hSLC, pProductSkuId, pwszValueName, peDataType, pcbValue, ppbValue);
+    StoreLeave(Entered, Old);
+    return hr;
+}
+
+/* SLGetApplicationInformation is declared in the Windows SDK's slpublic.h, not in this tree's copy */
+HRESULT
+WINAPI
+SLGetApplicationInformation(_In_ HSLC hSLC,
+                            _In_ const SLID *pApplicationId,
+                            _In_ PCWSTR pwszValueName,
+                            _Out_opt_ SLDATATYPE *peDataType,
+                            _Out_ UINT *pcbValue,
+                            _Outptr_result_bytebuffer_maybenull_(*pcbValue) PBYTE *ppbValue)
+{
+    if (!IsValidHandle(hSLC))
+        return E_HANDLE;
+    if (!pApplicationId || !pwszValueName || !pcbValue || !ppbValue)
+        return E_INVALIDARG;
+    *pcbValue = 0;
+    *ppbValue = NULL;
+    /* Windows 10 (measured: Name, Description, Version, GenuineState of the Windows and the Office application) */
+    return SL_E_VALUE_NOT_FOUND;
 }
 
 HRESULT

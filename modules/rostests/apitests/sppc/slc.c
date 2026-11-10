@@ -24,6 +24,7 @@ START_TEST(slc)
         "SLGetLicensingStatusInformation", "SLGetWindowsInformationDWORD", "SLGetPolicyInformationDWORD",
         "SLConsumeRight", "SLInstallProofOfPurchase", "SLGetPolicyInformation", "SLGetServiceInformation",
         "SLGetProductSkuInformation", "SLGenerateOfflineInstallationId", "SLDepositOfflineConfirmationId",
+        "SLGetApplicationInformation",
 #ifdef _WIN64
         "SLGetPKeyId", "SLLoadApplicationPolicies", "SLGetApplicationPolicy",
 #endif
