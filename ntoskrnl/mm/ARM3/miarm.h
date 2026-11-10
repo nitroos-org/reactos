@@ -2854,7 +2854,8 @@ MiPagerAvailableDropped(VOID);
 #define MI_PAGER_INJECT_READ_RESOURCES  3
 #define MI_PAGER_INJECT_FREE_MISMATCH   4   /* the next release of the page's slot names the wrong owner */
 #define MI_PAGER_INJECT_WRITE_PAUSE     5   /* the writer waits (bounded) between the write and its completion */
-#define MI_PAGER_INJECT_MAX             6
+#define MI_PAGER_INJECT_READAHEAD_ERROR 6   /* a read that reads this page ahead of another fails (a bad slot) */
+#define MI_PAGER_INJECT_MAX             7
 
 BOOLEAN
 NTAPI
@@ -2899,6 +2900,7 @@ typedef struct _MI_PAGER_COUNTERS
     /* read-ahead */
     ULONG InPageClusterReads;
     ULONG InPagePrefetched;
+    ULONG ReadAheadRetries;
 } MI_PAGER_COUNTERS;
 
 extern MI_PAGER_COUNTERS MiPagerCounters;

@@ -1106,6 +1106,7 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     BOOLEAN Resource;
     PFN_NUMBER Pages[MI_PAGER_READ_CLUSTER_MAX];
     ULONG Count = 1, i;
+    BOOLEAN FaultInjected = FALSE;
 
     /*
      * NitroPager P0: a private page that was paged out. The working set lock
@@ -1218,9 +1219,12 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     /* Release the PFN lock while we proceed */
     MiReleasePfnLock(*OldIrql);
 
-    /* Do the paging IO */
+    /* Do the paging IO (test errors on the faulting page stand for a bad slot of its own) */
     if (MiPagerTakeInjection(MI_PAGER_INJECT_READ_ERROR, FaultingAddress))
+    {
         Status = STATUS_DEVICE_DATA_ERROR;
+        FaultInjected = TRUE;
+    }
     else if (MiPagerTakeInjection(MI_PAGER_INJECT_READ_RESOURCES, FaultingAddress))
         Status = STATUS_INSUFFICIENT_RESOURCES;
     else
@@ -1229,7 +1233,20 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
         if (Count == 1)
             Status = MiReadPageFile(Page, PageFileIndex, Slot + 1);
         else
-            Status = MiReadPageFileCluster(Pages, Count, PageFileIndex, Slot);
+        {
+            /* Test: a bad slot among the pages read ahead fails the whole cluster read */
+            Status = STATUS_SUCCESS;
+            for (i = 1; i < Count; i++)
+            {
+                if (MiPagerTakeInjection(MI_PAGER_INJECT_READAHEAD_ERROR,
+                                         MiPteToAddress(MI_PFN_ELEMENT(Pages[i])->PteAddress)))
+                {
+                    Status = STATUS_DEVICE_DATA_ERROR;
+                }
+            }
+            if (NT_SUCCESS(Status))
+                Status = MiReadPageFileCluster(Pages, Count, PageFileIndex, Slot);
+        }
         MiPagingIoDone();
     }
 
@@ -1239,7 +1256,8 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     /*
      * The pages read ahead: on success they are clean pages in transition, as a page the writer wrote
      * and trimmed, and go to standby (a later fault is a transition fault). On failure their PTEs name
-     * their slots again and the pages go back. Nobody waited for them (working set lock).
+     * their slots again and the pages go back. A fault that waited on one of them (none can, while this
+     * fault holds the working set lock, but as for the faulting page) is told, and starts over.
      */
     for (i = 1; i < Count; i++)
     {
@@ -1247,18 +1265,40 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
         PMMPTE NextPte = NextPfn->PteAddress;
 
         ASSERT(NextPfn->u3.e1.ReadInProgress == 1);
-        ASSERT(NextPfn->u1.Event == NULL);
         NextPfn->u3.e1.ReadInProgress = 0;
+        Event = NextPfn->u1.Event;
+        NextPfn->u1.Event = NULL;
         if (NT_SUCCESS(Status))
         {
             MiDecrementShareCount(NextPfn, Pages[i]);
-            continue;
         }
-        MI_WRITE_INVALID_PTE(NextPte, NextPfn->OriginalPte);
-        MI_MAKE_SOFTWARE_PTE(&NextPfn->OriginalPte, Protection);
-        MiDecrementShareCount(MiGetPfnEntry(NextPfn->u4.PteFrame), NextPfn->u4.PteFrame);
-        MI_SET_PFN_DELETED(NextPfn);
-        MiDecrementShareCount(NextPfn, Pages[i]);
+        else
+        {
+            MI_WRITE_INVALID_PTE(NextPte, NextPfn->OriginalPte);
+            MI_MAKE_SOFTWARE_PTE(&NextPfn->OriginalPte, Protection);
+            MiDecrementShareCount(MiGetPfnEntry(NextPfn->u4.PteFrame), NextPfn->u4.PteFrame);
+            MI_SET_PFN_DELETED(NextPfn);
+            MiDecrementShareCount(NextPfn, Pages[i]);
+        }
+        if (Event != NULL)
+            KeSetEvent(Event, IO_NO_INCREMENT, FALSE);
+    }
+
+    /*
+     * A failed cluster read does not tell which slot is bad: the faulting page alone is read again, so a
+     * bad slot of a page read ahead never becomes the faulting thread's in-page error (the pages read ahead
+     * are paged in by their own faults). Not for a shortage, which the fault waits for and retries, nor
+     * for a test error on the faulting page itself.
+     */
+    if (!NT_SUCCESS(Status) && (Count > 1) && !FaultInjected &&
+        (Status != STATUS_INSUFFICIENT_RESOURCES) && (Status != STATUS_NO_MEMORY))
+    {
+        MiReleasePfnLock(*OldIrql);
+        MiPagingIoStart();
+        Status = MiReadPageFile(Page, PageFileIndex, Slot + 1);
+        MiPagingIoDone();
+        *OldIrql = MiAcquirePfnLock();
+        MiPagerCounters.ReadAheadRetries++;
     }
     if (NT_SUCCESS(Status) && (Count > 1))
     {
