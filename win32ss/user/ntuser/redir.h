@@ -18,6 +18,8 @@ VOID FASTCALL UserRedirOrphan(HDC hdc, PVOID pvRedir);
 VOID FASTCALL UserRedirWindowMoved(PWND Wnd);
 VOID FASTCALL UserRedirPresentPending(VOID);
 BOOL FASTCALL UserRedirHasSurface(PWND Wnd);
+VOID FASTCALL UserRedirExpose(PWND DesktopWnd, PREGION RgnScreen);
+BOOL FASTCALL UserRedirCopyToDC(PWND Wnd, HDC hdc, LONG xSrc, LONG ySrc, LONG cx, LONG cy);
 
 /* windc.c */
 VOID FASTCALL DceRedirUnbindAll(PVOID pvRedir);
