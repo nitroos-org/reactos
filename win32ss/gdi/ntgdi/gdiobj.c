@@ -626,6 +626,35 @@ GDIOBJ_vFreeObject(POBJ pobj)
     }
 }
 
+/*
+ * The last reference of a deleted handle is gone: the entry goes back to the free list and the object is
+ * freed, by whichever thread dropped that reference (the deleter, or a thread that held the object then).
+ */
+static
+VOID
+GDIOBJ_vFreeDeletedHandle(
+    _In_ POBJ pobj,
+    _In_ ULONG ulIndex)
+{
+    /* Make sure it's ok to delete the object */
+    ASSERT(pobj->BaseFlags & BASEFLAG_READY_TO_DIE);
+
+    /* A handle still charged to a process (a delete that did not charge it back): the process's own count */
+    if (gpentHmgr[ulIndex].ObjectOwner.ulObj != GDI_OBJ_HMGR_PUBLIC &&
+        gpentHmgr[ulIndex].ObjectOwner.ulObj != GDI_OBJ_HMGR_NONE)
+    {
+        ASSERT(gpentHmgr[ulIndex].ObjectOwner.ulObj ==
+               HandleToUlong(PsGetCurrentProcessId()));
+        DecrementCurrentProcessGdiHandleCount();
+    }
+
+    /* Push entry to the free list */
+    ENTRY_vPushFreeEntry(&gpentHmgr[ulIndex]);
+
+    /* Free the object */
+    GDIOBJ_vFreeObject(pobj);
+}
+
 VOID
 NTAPI
 GDIOBJ_vDereferenceObject(POBJ pobj)
@@ -649,26 +678,7 @@ GDIOBJ_vDereferenceObject(POBJ pobj)
 
         /* Check if we reached 0 and handle bit is not set */
         if ((cRefs & REF_MASK_INUSE) == 0)
-        {
-            /* Make sure it's ok to delete the object */
-            ASSERT(pobj->BaseFlags & BASEFLAG_READY_TO_DIE);
-
-            /* Check if the handle was process owned */
-            if (gpentHmgr[ulIndex].ObjectOwner.ulObj != GDI_OBJ_HMGR_PUBLIC &&
-                gpentHmgr[ulIndex].ObjectOwner.ulObj != GDI_OBJ_HMGR_NONE)
-            {
-                /* Decrement the process handle count */
-                ASSERT(gpentHmgr[ulIndex].ObjectOwner.ulObj ==
-                       HandleToUlong(PsGetCurrentProcessId()));
-                DecrementCurrentProcessGdiHandleCount();
-            }
-
-            /* Push entry to the free list */
-            ENTRY_vPushFreeEntry(&gpentHmgr[ulIndex]);
-
-            /* Free the object */
-            GDIOBJ_vFreeObject(pobj);
-        }
+            GDIOBJ_vFreeDeletedHandle(pobj, ulIndex);
     }
     else
     {
@@ -891,14 +901,9 @@ GDIOBJ_LockObjectEx(
             {
                 if (--cTries == 0)
                 {
-                    ULONG cRefs, ulIndex;
-
-                    /* Still locked. Clean up and leave, as GDIOBJ_TryLockObject does. */
+                    /* Still locked. Clean up and leave (the reference may be the last of a deleted handle) */
                     KeLeaveCriticalRegion();
-                    ulIndex = GDI_HANDLE_GET_INDEX(pobj->hHmgr);
-                    ASSERT((gpaulRefCount[ulIndex] & REF_MASK_COUNT) > 0);
-                    cRefs = InterlockedDecrement((LONG*)&gpaulRefCount[ulIndex]);
-                    ASSERT(cRefs & REF_MASK_VALID);
+                    GDIOBJ_vDereferenceObject(pobj);
                     return NULL;
                 }
                 KeStallExecutionProcessor(FOREIGN_LOCK_STALL_US);
@@ -907,6 +912,23 @@ GDIOBJ_LockObjectEx(
         else
         {
             ExAcquirePushLockExclusive(&pobj->pushlock);
+
+            /*
+             * The owner was checked before the wait, and the object may have changed hands meanwhile (a class
+             * DC that went to the DC cache when its window was destroyed, then handed to another process: its
+             * attribute is that process's memory) or been deleted. Not this process's or public any more, or
+             * deleted: no lock.
+             */
+            if (!(fl & GDIOBJFLAG_IGNOREPID) &&
+                (((pentry->ObjectOwner.ulObj != GDI_OBJ_HMGR_PUBLIC) &&
+                  (pentry->ObjectOwner.ulObj != PtrToUlong(PsGetCurrentProcessId()))) ||
+                 !(gpaulRefCount[GDI_HANDLE_GET_INDEX(hobj)] & REF_MASK_VALID)))
+            {
+                ExReleasePushLockExclusive(&pobj->pushlock);
+                KeLeaveCriticalRegion();
+                GDIOBJ_vDereferenceObject(pobj);
+                return NULL;
+            }
         }
 
         /* Set us as lock owner */
@@ -952,7 +974,14 @@ GDIOBJ_vUnlockObject(POBJ pobj)
     /* Decrement reference count */
     ASSERT((gpaulRefCount[ulIndex] & REF_MASK_COUNT) > 0);
     cRefs = InterlockedDecrement((LONG*)&gpaulRefCount[ulIndex]);
-    ASSERT(cRefs & REF_MASK_VALID);
+
+    /*
+     * The handle was deleted while this thread held the object, and this was its last reference: free it
+     * here, after the lock is released (GDIOBJ_vDeleteObject leaves an object that a thread of its process
+     * holds to that thread)
+     */
+    if ((cRefs & REF_MASK_INUSE) == 0)
+        GDIOBJ_vFreeDeletedHandle(pobj, ulIndex);
 }
 
 HGDIOBJ
@@ -1154,11 +1183,27 @@ GDIOBJ_vSetObjectAttr(POBJ pobj, PVOID pvObjAttr)
     gpentHmgr[ulIndex].pUser = pvObjAttr;
 }
 
+/* Whether the thread with this id belongs to the current process (a thread that is gone: no) */
+static
+BOOLEAN
+GDIOBJ_bHolderInProcess(
+    _In_ ULONG dwThreadId)
+{
+    PETHREAD Thread;
+    BOOLEAN InProcess;
+
+    if (!NT_SUCCESS(PsLookupThreadByThreadId(UlongToHandle(dwThreadId), &Thread)))
+        return FALSE;
+    InProcess = (PsGetThreadProcess(Thread) == PsGetCurrentProcess());
+    ObDereferenceObject(Thread);
+    return InProcess;
+}
+
 VOID
 NTAPI
 GDIOBJ_vDeleteObject(POBJ pobj)
 {
-    ULONG ulIndex;
+    ULONG ulIndex, dwHolder, ulOwner;
 
     /* Set the object's delete flag */
     InterlockedOr16((SHORT*)&pobj->BaseFlags, BASEFLAG_READY_TO_DIE);
@@ -1171,10 +1216,22 @@ GDIOBJ_vDeleteObject(POBJ pobj)
         /* Reset the handle valid bit */
         InterlockedAnd((LONG*)&gpaulRefCount[ulIndex], ~REF_MASK_VALID);
 
-        /* Check if the object is exclusively locked */
-        if (pobj->cExclusiveLock != 0)
+        /*
+         * The handle no longer counts against its process: charged back now, in the owner's context (a delete
+         * runs as the owner, or the object is public). The object may be freed later by another thread.
+         */
+        ulOwner = gpentHmgr[ulIndex].ObjectOwner.ulObj;
+        if (ulOwner == HandleToUlong(PsGetCurrentProcessId()))
         {
-            /* Reset lock owner and lock count */
+            DecrementCurrentProcessGdiHandleCount();
+            gpentHmgr[ulIndex].ObjectOwner.ulObj = GDI_OBJ_HMGR_NONE;
+        }
+
+        /* Check if the object is exclusively locked */
+        dwHolder = pobj->dwThreadId;
+        if ((pobj->cExclusiveLock != 0) && (dwHolder == PtrToUlong(PsGetCurrentThreadId())))
+        {
+            /* By this thread: its own lock goes */
             pobj->dwThreadId = 0;
             pobj->cExclusiveLock = 0;
 
@@ -1183,6 +1240,26 @@ GDIOBJ_vDeleteObject(POBJ pobj)
             KeLeaveCriticalRegion();
             DECREASE_THREAD_LOCK_COUNT(pobj->hHmgr);
         }
+        else if ((pobj->cExclusiveLock != 0) && (dwHolder != 0) &&
+                 (ulOwner != GDI_OBJ_HMGR_PUBLIC) && (ulOwner != GDI_OBJ_HMGR_NONE) &&
+                 !GDIOBJ_bHolderInProcess(dwHolder))
+        {
+            /*
+             * An object of a process (it may have a user attribute, which only that process may free), held by
+             * a thread of another process (window management locking a DC it handed out: it touches no user
+             * attribute, never waits for the DC's owner, and runs under the USER lock, so a deleter that holds
+             * the USER lock never meets it): wait until it lets go, then free as usual here.
+             */
+            KeEnterCriticalRegion();
+            ExAcquirePushLockExclusive(&pobj->pushlock);
+            ExReleasePushLockExclusive(&pobj->pushlock);
+            KeLeaveCriticalRegion();
+        }
+        /*
+         * Else by another thread of this process, or the object is public (kernel attributes only): its lock
+         * is never taken from it. It finishes what it does with the object, and its last unlock, the last
+         * reference, frees the object, in this process (so a user attribute goes back into this process's pool).
+         */
     }
 
     /* Dereference the object (will take care of deletion) */
@@ -1669,7 +1746,7 @@ GDI_CleanupForProcess(struct _EPROCESS *Process)
         /* Check if the object is owned by the process */
         if (pentry->ObjectOwner.ulObj == dwProcessId)
         {
-            ASSERT(pentry->einfo.pobj->cExclusiveLock == 0);
+            /* Another process can hold it now (window management): GDIOBJ_vDeleteObject waits for it */
 
             /* Reference the object and delete it */
             InterlockedIncrement((LONG*)&gpaulRefCount[ulIndex]);

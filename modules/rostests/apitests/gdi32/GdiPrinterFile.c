@@ -9,12 +9,12 @@
 
 START_TEST(GdiPrinterFile)
 {
-    WCHAR output[MAX_PATH];
+    WCHAR directory[MAX_PATH], output[MAX_PATH];
     static const WCHAR text[] = L"GDI printer contract";
     DOCINFOW document = { sizeof(document), L"GDI printer contract", NULL, NULL, 0 };
     HDC printer;
-    HANDLE file;
-    DWORD size;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    DWORD size = 0;
     unsigned int attempt;
     WCHAR printer_name[256];
 
@@ -28,21 +28,23 @@ START_TEST(GdiPrinterFile)
         return;
     }
 
-    /* The job goes to a file in the temporary directory */
-    size = GetTempPathW(ARRAYSIZE(output), output);
-    if (size == 0 || size + 20 >= ARRAYSIZE(output))
+    /* The job goes to a file of its own in the temporary directory, which the job creates */
+    size = GetTempPathW(ARRAYSIZE(directory), directory);
+    if (size == 0 || size >= ARRAYSIZE(directory) ||
+        !GetTempFileNameW(directory, L"gpf", 0, output))
     {
-        skip("No temporary directory\n");
+        skip("No temporary file name: %lu\n", GetLastError());
         return;
     }
-    lstrcatW(output, L"gdi-printer.prn");
-    document.lpszOutput = output;
     DeleteFileW(output);
+    document.lpszOutput = output;
+
     printer = CreateDCW(L"WINSPOOL", printer_name, NULL, NULL);
     if (!printer)
     {
         skip("Printer %s is unavailable: %lu\n",
              wine_dbgstr_w(printer_name), GetLastError());
+        DeleteFileW(output);
         return;
     }
 
@@ -50,6 +52,7 @@ START_TEST(GdiPrinterFile)
     {
         ok(0, "StartDocW failed: %lu\n", GetLastError());
         DeleteDC(printer);
+        DeleteFileW(output);
         return;
     }
 
@@ -60,20 +63,23 @@ START_TEST(GdiPrinterFile)
     ok(EndDoc(printer) > 0, "EndDoc failed: %lu\n", GetLastError());
     DeleteDC(printer);
 
+    /* The spooler may write the file after EndDoc: wait for it to have content */
     for (attempt = 0; attempt < 50; attempt++)
     {
         file = CreateFileW(output, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (file != INVALID_HANDLE_VALUE)
-            break;
+        {
+            size = GetFileSize(file, NULL);
+            if (size != INVALID_FILE_SIZE && size != 0)
+                break;
+            CloseHandle(file);
+            file = INVALID_HANDLE_VALUE;
+        }
         Sleep(100);
     }
     ok(file != INVALID_HANDLE_VALUE, "Printed output was not written to the file\n");
     if (file != INVALID_HANDLE_VALUE)
-    {
-        size = GetFileSize(file, NULL);
-        ok(size != INVALID_FILE_SIZE && size != 0, "Printed file is empty\n");
         CloseHandle(file);
-    }
     DeleteFileW(output);
 }
