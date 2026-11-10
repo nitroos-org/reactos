@@ -75,6 +75,7 @@ KMT_TESTFUNC Test_KeDeviceQueue;
 KMT_TESTFUNC Test_KeDpc;
 KMT_TESTFUNC Test_KeEvent;
 KMT_TESTFUNC Test_KeFastFail;
+KMT_TESTFUNC Test_MmContiguousStandby;
 KMT_TESTFUNC Test_KeGeneralProtection;
 KMT_TESTFUNC Test_KeFloatPointState;
 KMT_TESTFUNC Test_KeGenericCallDpc;
@@ -217,6 +218,7 @@ const KMT_TEST TestList[] =
     { "KeDpc",                              Test_KeDpc },
     { "KeEvent",                            Test_KeEvent },
     { "-KeFastFail",                        Test_KeFastFail },
+    { "-MmContiguousStandby",               Test_MmContiguousStandby },
     { "-KeGeneralProtection",               Test_KeGeneralProtection },
     { "KeFloatPointState",                  Test_KeFloatPointState },
     { "KeGenericCallDpc",                   Test_KeGenericCallDpc },

@@ -129,6 +129,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_mm/MmMapViewAligned.c
     ntos_mm/MmMdl.c
     ntos_mm/MmCommitKernelFail.c
+    ntos_mm/MmContiguousStandby.c
     ntos_mm/MmFaultFileHeld.c
     ntos_mm/MmOomRetry.c
     ntos_mm/MmReservedMapping.c
@@ -228,6 +229,7 @@ list(APPEND KMTEST_SOURCE
     ntos_ke/KeProfile_user.c
     ntos_ke/KeTrapFrame/KeTrapFrame_user.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
+    ntos_mm/MmContiguousStandby_user.c
     ntos_mm/MmPager_user.c
     ntos_mm/MmSpecialPool_user.c
     ntos_mm/NtCreateSection_user.c
