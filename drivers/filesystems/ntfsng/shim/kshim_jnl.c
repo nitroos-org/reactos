@@ -26,6 +26,29 @@
  *     in-place passes keep their order and a journal slot is never overwritten while it is still needed.
  *   - The caller's "aux" value (the free-cluster count) at the seal becomes aux_done when the transaction
  *     is complete: an allocation that follows a free needs aux_done to have caught up with it.
+ *
+ * Retained transactions (an unlocked commit of few pages).  The in-place pass, its flush and the ACTIVE header (three of the
+ * seven serial device operations of a commit, and the ones a write-through writer waits for without gaining anything: the
+ * transaction is durable, and replayable, once its COMMITTED header is) are left to a later checkpoint.  Rules:
+ *   - A commit whose pages (the new ones and the retained ones) are at most KJ_RET_MAX is "retained": its transaction is the
+ *     union, each page once with its newest bytes, written to the slot area that the retained transaction R is not in
+ *     (two areas of KJ_AREA_SLOTS slots, alternating; the header says which, version KJ_VERSION_AREA), then flush, COMMITTED
+ *     header, flush: durable.  Its pages are not written in place.  When it ends R is replaced by it: the next commit's slots go
+ *     to the other area, so R's slots and header stay valid until the new header is on the medium, and replay of the newest
+ *     header installs everything that is not in place.  A failure before the header changes nothing that matters (R and its
+ *     header are intact); one at or after it sets j->failed (the header may name the new area; a retry into either area could
+ *     overwrite what replay needs) when R exists.
+ *   - Retained pages are memory the journal keeps: reads see them (retained, then sealed, then live pages), and the sealed set
+ *     of the next commit starts as a copy of them.  A commit that would carry more than KJ_RET_MAX pages (-ENOSYS from the
+ *     seal) goes through the synchronous commit, which first puts the retained pages in place.
+ *   - kj_checkpoint puts the retained pages in place (sorted, one pass, a flush, the ACTIVE header).  It runs from kj_settle,
+ *     i.e. at the quiet flusher pass (ngc_sync), retire, deactivate, degrade, a resize, an allocation that follows a free
+ *     (ngc_before_alloc: aux_done follows the checkpoint, not the commit, because replay of retained pages must not land on a
+ *     cluster that has been given to file data since), a direct write over retained sectors (kshim_jnl_patch), and a
+ *     synchronous commit.  So everything that expects a clean, in-place volume (dismount, the lock holder's direct writes, a
+ *     check, shutdown) gets it through ngc_sync.
+ *   - The header page belongs to the retained transaction (COMMITTED) until the checkpoint: nobody writes another header over
+ *     it before (kshim_jnl_mark_errors waits; the headers of later commits and of the checkpoint carry the errors mark).
  */
 #include <kshim.h>
 #include <kshim_jnl.h>
@@ -81,31 +104,70 @@ struct kshim_jnl {
 	u64 aux_done;			/* the caller's value at the last commit that is complete (all changes before it are committed) */
 	struct ngos_ev idle;		/* signalled while no I/O is in flight */
 	unsigned long unlocked_commits, io_us;
+	/*
+	 * The retained transaction R: the newest commit that is durable in a journal slot area but whose pages are not in place
+	 * (kj_checkpoint puts them there later).  It carries every page changed since the last checkpoint, so replaying the
+	 * newest header alone is enough.  Readers see R's pages (oldest), then the sealed ones, then the live ones.
+	 */
+	struct block_device *bdev;
+	struct kj_ent *rhash[KJ_BUCKETS];
+	unsigned long rnpages;
+	int rarea;			/* the slot area R is in (0 or 1) */
+	u16 rusn_new;			/* $Volume's number once R is in place */
+	u64 raux;			/* the caller's value at R's seal: aux_done when R is in place (frees are covered only then) */
+	int ret_ok;			/* the journal area holds two slot areas and retention is not switched off */
+	int sretain, sarea;		/* the sealed transaction is committed as a retained one, into this slot area */
+	int sckpt;			/* the I/O of the sealed (not retained) transaction first puts the retained pages in place */
+	int r_applied;			/* that has been done: reap frees the retained pages */
+	int cur_area;			/* the slot area of the COMMITTED header being written, -1: not a retained transaction */
+	int hdr_tried;			/* the sealed transaction's COMMITTED header may be on the medium */
+	unsigned long retained_commits, checkpoints;
 };
 
 enum { KJ_S_NONE = 0, KJ_S_RUNNING = 1, KJ_S_DONE = 2 };
 
-static u32 kj_crc_table[256];
+/* CRC-32 (the usual, reflected 0xedb88320) eight bytes per step: every page of a commit is checksummed twice (descriptor, payload). */
+static u32 kj_crc_t[8][256];
+static int kj_crc_ready;
+int kshim_jnl_noret;		/* registry NoRetainedCommit=1: every commit puts its pages in place before it returns (comparison, fallback) */
 #if DBG
 unsigned long kshim_jnl_fault;
 unsigned long kshim_jnl_fault_stage;	/* where in the commit the fault stops it: 0 half way through the in-place pass, 1 before the COMMITTED header, 2 after it, 3 after the in-place pass */
 unsigned long kshim_jnl_stall_ms;	/* the journal I/O of a sealed transaction sleeps this long between its phases */
 #endif
 
+static void kj_crc_init(void)
+{
+	for (u32 i = 0; i < 256; i++) {
+		u32 c = i;
+		for (int k = 0; k < 8; k++)
+			c = c & 1 ? 0xedb88320u ^ (c >> 1) : c >> 1;
+		kj_crc_t[0][i] = c;
+	}
+	for (u32 i = 0; i < 256; i++)
+		for (int k = 1; k < 8; k++)
+			kj_crc_t[k][i] = (kj_crc_t[k - 1][i] >> 8) ^ kj_crc_t[0][kj_crc_t[k - 1][i] & 0xff];
+	__atomic_store_n(&kj_crc_ready, 1, __ATOMIC_RELEASE);
+}
+
 u32 kj_crc32(u32 crc, const void *p, size_t n)
 {
 	const u8 *s = p;
-	if (!kj_crc_table[1]) {
-		for (u32 i = 0; i < 256; i++) {
-			u32 c = i;
-			for (int k = 0; k < 8; k++)
-				c = c & 1 ? 0xedb88320u ^ (c >> 1) : c >> 1;
-			kj_crc_table[i] = c;
-		}
-	}
+	if (!__atomic_load_n(&kj_crc_ready, __ATOMIC_ACQUIRE))
+		kj_crc_init();
 	crc = ~crc;
+	while (n >= 8) {
+		u32 a, b;
+		memcpy(&a, s, 4);
+		memcpy(&b, s + 4, 4);
+		a ^= crc;
+		crc = kj_crc_t[7][a & 0xff] ^ kj_crc_t[6][(a >> 8) & 0xff] ^ kj_crc_t[5][(a >> 16) & 0xff] ^ kj_crc_t[4][a >> 24] ^
+		      kj_crc_t[3][b & 0xff] ^ kj_crc_t[2][(b >> 8) & 0xff] ^ kj_crc_t[1][(b >> 16) & 0xff] ^ kj_crc_t[0][b >> 24];
+		s += 8;
+		n -= 8;
+	}
 	while (n--)
-		crc = kj_crc_table[(crc ^ *s++) & 0xff] ^ (crc >> 8);
+		crc = kj_crc_t[0][(crc ^ *s++) & 0xff] ^ (crc >> 8);
 	return ~crc;
 }
 
@@ -169,16 +231,21 @@ static int kj_read_vol_usn(struct block_device *b, u64 off, u16 *usn, u8 *buf)
 static struct kj_ent *kj_find(struct kshim_jnl *j, u64 blk);
 static void kj_wait_io(struct kshim_jnl *j);
 static void kj_settle(struct kshim_jnl *j);
+static int kj_checkpoint(struct kshim_jnl *j);
 
 /* $Volume's number once the overlay is in place: from the overlay when it holds the record's first sector. */
-static u16 kj_vol_usn_after(struct kshim_jnl *j)
+static u16 kj_vol_usn_ent(struct kshim_jnl *j, struct kj_ent *e)
 {
-	struct kj_ent *e = kj_find(j, j->vol_rec_off / KJ_PAGE);
 	size_t in = (size_t)(j->vol_rec_off % KJ_PAGE);
 	u16 usn;
 	if (e && (e->mask & (1u << (in / KJ_SECT))) && !kj_rec_usn(e->data + in, KJ_SECT - in % KJ_SECT, &usn))
 		return usn;
 	return j->vol_usn;
+}
+
+static u16 kj_vol_usn_after(struct kshim_jnl *j)
+{
+	return kj_vol_usn_ent(j, kj_find(j, j->vol_rec_off / KJ_PAGE));
 }
 
 /*
@@ -238,7 +305,7 @@ void kshim_jnl_strict(struct block_device *b, int on)
 int kshim_jnl_retire_pending(struct block_device *b)
 {
 	struct kshim_jnl *j = b->jnl;
-	return j && !j->readonly && !j->retired && !j->npages && !j->snpages && !j->degraded && !j->errors && !j->failed;
+	return j && !j->readonly && !j->retired && !j->npages && !j->snpages && !j->rnpages && !j->degraded && !j->errors && !j->failed;
 }
 
 static int kj_in_area(struct kshim_jnl *j, u64 off, size_t len)
@@ -259,14 +326,19 @@ static struct kj_ent *kj_find(struct kshim_jnl *j, u64 blk)
 	return NULL;
 }
 
-static struct kj_ent *kj_find_s(struct kshim_jnl *j, u64 blk)
+static struct kj_ent *kj_find_in(struct kj_ent **hash, u64 blk)
 {
-	if (!j->snpages)
-		return NULL;
-	for (struct kj_ent *e = j->shash[blk % KJ_BUCKETS]; e; e = e->next)
+	for (struct kj_ent *e = hash[blk % KJ_BUCKETS]; e; e = e->next)
 		if (e->blk == blk)
 			return e;
 	return NULL;
+}
+
+/* The newest copy below the live overlay: the sealed page, else the retained one. */
+static struct kj_ent *kj_find_s(struct kshim_jnl *j, u64 blk)
+{
+	struct kj_ent *e = j->snpages ? kj_find_in(j->shash, blk) : NULL;
+	return e ? e : j->rnpages ? kj_find_in(j->rhash, blk) : NULL;
 }
 
 static void kj_wait_io(struct kshim_jnl *j)
@@ -275,18 +347,55 @@ static void kj_wait_io(struct kshim_jnl *j)
 		ngos_ev_wait(&j->idle);
 }
 
-static void kj_free_sealed(struct kshim_jnl *j)
+static void kj_free_h(struct kj_ent **hash)
 {
 	for (int i = 0; i < KJ_BUCKETS; i++) {
-		struct kj_ent *e = j->shash[i], *n;
+		struct kj_ent *e = hash[i], *n;
 		for (; e; e = n) {
 			n = e->next;
 			kfree(e->data);
 			kfree(e);
 		}
-		j->shash[i] = NULL;
+		hash[i] = NULL;
 	}
+}
+
+static void kj_free_sealed(struct kshim_jnl *j)
+{
+	kj_free_h(j->shash);
 	j->snpages = 0;
+}
+
+static void kj_free_retained(struct kshim_jnl *j)
+{
+	kj_free_h(j->rhash);
+	j->rnpages = 0;
+}
+
+/* A copy of every page of @src into @dst (empty); -ENOMEM leaves @dst empty. */
+static int kj_copy_h(struct kj_ent **dst, struct kj_ent **src, unsigned long *count)
+{
+	unsigned long n = 0;
+	for (int i = 0; i < KJ_BUCKETS; i++)
+		for (struct kj_ent *e = src[i]; e; e = e->next) {
+			struct kj_ent *c = kzalloc(sizeof(*c), GFP_NOFS);
+			if (c)
+				c->data = kmalloc(KJ_PAGE, GFP_NOFS);
+			if (!c || !c->data) {
+				kfree(c);
+				kj_free_h(dst);
+				*count = 0;
+				return -ENOMEM;
+			}
+			memcpy(c->data, e->data, KJ_PAGE);
+			c->blk = e->blk;
+			c->mask = e->mask;
+			c->next = dst[e->blk % KJ_BUCKETS];
+			dst[e->blk % KJ_BUCKETS] = c;
+			n++;
+		}
+	*count = n;
+	return 0;
 }
 
 /* A transaction that failed before it was in place: its sectors go back to the live overlay (the live copy is newer). */
@@ -321,23 +430,55 @@ static void kj_reap(struct kshim_jnl *j)
 {
 	if (__atomic_load_n(&j->sstate, __ATOMIC_ACQUIRE) != KJ_S_DONE)
 		return;
+	if (j->r_applied) {
+		/* The I/O put the retained pages in place before it committed the sealed ones (whatever became of those). */
+		kj_free_retained(j);
+		j->aux_done = j->raux;
+		j->checkpoints++;
+		j->r_applied = 0;
+	}
 	if (!j->serr) {
 		j->commits++;
 		j->committed_pages += j->snpages;
 		if (j->snpages > j->max_tx)
 			j->max_tx = j->snpages;
-		j->aux_done = j->saux;
-		kj_free_sealed(j);
+		if (j->sretain) {
+			/*
+			 * Durable in a slot area, not in place: the sealed pages (which carry the older retained ones too) become the
+			 * retained transaction.  The frees it covers count as committed only when it is in place (aux_done, kj_checkpoint):
+			 * a cluster freed here must not receive file data while replay could still write old metadata over it.
+			 */
+			kj_free_retained(j);
+			memcpy(j->rhash, j->shash, sizeof(j->rhash));
+			memset(j->shash, 0, sizeof(j->shash));
+			j->rnpages = j->snpages;
+			j->snpages = 0;
+			j->rarea = j->sarea;
+			j->rusn_new = j->susn_new;
+			j->raux = j->saux;
+			j->retained_commits++;
+		} else {
+			j->aux_done = j->saux;
+			kj_free_sealed(j);
+		}
 	} else {
 		kj_merge_back(j);
 	}
 	__atomic_store_n(&j->sstate, KJ_S_NONE, __ATOMIC_RELEASE);
 }
 
-static void kj_settle(struct kshim_jnl *j)
+/* The I/O of the sealed transaction has ended and a finished one is released; the retained pages stay where they are. */
+static void kj_wait_reap(struct kshim_jnl *j)
 {
 	kj_wait_io(j);
 	kj_reap(j);
+}
+
+/* Everything committed is in place when this returns (the journal I/O ended, retained pages written) unless a write failed. */
+static void kj_settle(struct kshim_jnl *j)
+{
+	kj_wait_reap(j);
+	kj_checkpoint(j);
 }
 
 /* Any sector of [off, off+len) held by the entries of @hash. */
@@ -375,6 +516,7 @@ static int kj_hdr_write(struct block_device *b, struct kshim_jnl *j, u32 state, 
 		u32 pcrc, int flush, u16 usn_new)
 {
 	struct kj_hdr *h = (struct kj_hdr *)j->hdrpage;
+	int ret = state == KJ_ST_COMMITTED && j->cur_area >= 0;	/* a retained transaction: slot area cur_area */
 	u64 dev;
 	if (j->readonly)
 		return -EROFS;
@@ -382,7 +524,7 @@ static int kj_hdr_write(struct block_device *b, struct kshim_jnl *j, u32 state, 
 		state = KJ_ST_ERRORS;
 	memset(j->hdrpage, 0, KJ_PAGE);
 	memcpy(h->magic, KJ_MAGIC, 8);
-	h->version = KJ_VERSION;
+	h->version = ret ? KJ_VERSION_AREA : KJ_VERSION;
 	h->state = state;
 	h->seq = j->seq;
 	h->npages = npages;
@@ -394,7 +536,7 @@ static int kj_hdr_write(struct block_device *b, struct kshim_jnl *j, u32 state, 
 	h->hwm = j->hwm;
 	h->vol_usn_old = j->vol_usn;
 	h->vol_usn_new = usn_new;
-	h->flags = (j->errors ? KJ_FL_ERRORS : 0) | (j->keep ? KJ_FL_KEEP : 0);
+	h->flags = (j->errors ? KJ_FL_ERRORS : 0) | (j->keep ? KJ_FL_KEEP : 0) | (ret && j->cur_area ? KJ_FL_AREA1 : 0);
 	h->hdr_crc = kj_crc32(0, h, offsetof(struct kj_hdr, hdr_crc));
 	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || kj_dev_write(b, dev, j->hdrpage, KJ_PAGE))
 		return -EIO;
@@ -416,7 +558,7 @@ int kshim_jnl_retire(struct block_device *b)
 	if (!j || j->readonly)
 		return 0;
 	kj_settle(j);
-	if (j->retired || j->npages || j->snpages || j->degraded || j->errors || j->keep || j->failed)
+	if (j->retired || j->npages || j->snpages || j->rnpages || j->degraded || j->errors || j->keep || j->failed)
 		return 0;
 	memset(j->hdrpage, 0xff, KJ_PAGE);
 	if (kj_page_dev(j->ext, j->next, KJ_HDR_PAGE, &dev) || kj_dev_write(b, dev, j->hdrpage, KJ_PAGE) ||
@@ -448,6 +590,7 @@ int kshim_jnl_activate(struct block_device *b, const struct kj_ext *ext, int nex
 	}
 	memcpy(j->ext, ext, next * sizeof(*ext));
 	ngos_ev_init(&j->idle, 0, 1);
+	j->bdev = b;
 	j->next = next;
 	j->lf_pages = lf_pages;
 	j->serial = serial;
@@ -455,6 +598,8 @@ int kshim_jnl_activate(struct block_device *b, const struct kj_ext *ext, int nex
 	j->vol_rec_off = vol_rec_off;
 	while (kj_slot_page(j->capacity) < lf_pages)
 		j->capacity++;
+	/* Two slot areas must fit in $LogFile for retained transactions. */
+	j->ret_ok = !kshim_jnl_noret && j->capacity >= KJ_AREA_BASE + 2 * KJ_AREA_SLOTS;
 	/*
 	 * The volume is clean at activation (recovery cleared the dirty flag, or the mount refused a dirty
 	 * one), so no header is left on the medium: the first commit writes one.
@@ -485,6 +630,7 @@ void kshim_jnl_deactivate(struct block_device *b)
 		return;
 	kj_settle(j);
 	kj_free_sealed(j);
+	kj_free_retained(j);
 	kj_drop_all(j);
 	b->jnl = NULL;
 	kfree(j->ext);
@@ -504,7 +650,13 @@ unsigned long kshim_jnl_unsettled(struct block_device *b)
 	return b->jnl ? b->jnl->npages + b->jnl->snpages : 0;
 }
 
-/* Waits until no journal I/O is in flight and releases a finished sealed transaction. */
+/* Pages that are durable in the journal and not in place yet (nothing to commit for them, a checkpoint is due). */
+unsigned long kshim_jnl_retained(struct block_device *b)
+{
+	return b->jnl ? b->jnl->rnpages : 0;
+}
+
+/* Waits until no journal I/O is in flight, releases a finished sealed transaction and puts retained pages in place. */
 void kshim_jnl_settle(struct block_device *b)
 {
 	if (b->jnl)
@@ -594,17 +746,25 @@ int kshim_jnl_capture(struct block_device *b, u64 off, const u8 *buf, size_t len
 int kshim_jnl_holds(struct block_device *b, u64 off, u64 len)
 {
 	struct kshim_jnl *j = b->jnl;
-	if (!j || (!j->npages && !j->snpages) || !len)
+	if (!j || (!j->npages && !j->snpages && !j->rnpages) || !len)
 		return 0;
-	return (j->npages && kj_holds_h(j->hash, off, len)) || (j->snpages && kj_holds_h(j->shash, off, len));
+	return (j->npages && kj_holds_h(j->hash, off, len)) || (j->snpages && kj_holds_h(j->shash, off, len)) ||
+	       (j->rnpages && kj_holds_h(j->rhash, off, len));
 }
 
 /* to_overlay 0: copy held sectors over a buffer read from the device; 1: update held sectors from a direct write. */
 void kshim_jnl_patch(struct block_device *b, int to_overlay, u64 off, u8 *buf, size_t len)
 {
 	struct kshim_jnl *j = b->jnl;
-	if (!j || (!j->npages && !j->snpages))
+	if (!j || (!j->npages && !j->snpages && !j->rnpages))
 		return;
+	/*
+	 * A direct write over sectors that are durable in the journal but not in place: they go in place first, so that a replay
+	 * of the journal can never put older bytes over this write.  (File data and metadata share no sectors unless a cluster
+	 * changed owner, which ngc_before_alloc settles first; this is the guard for the rest.)
+	 */
+	if (to_overlay && j->rnpages && kj_holds_h(j->rhash, off, len))
+		kj_settle(j);
 	/* A sealed entry is read by the journal I/O until it ends: a write over one of its sectors waits for that. */
 	if (to_overlay && j->snpages && __atomic_load_n(&j->sstate, __ATOMIC_ACQUIRE) == KJ_S_RUNNING &&
 	    kj_holds_h(j->shash, off, len))
@@ -612,9 +772,11 @@ void kshim_jnl_patch(struct block_device *b, int to_overlay, u64 off, u8 *buf, s
 	while (len) {
 		u64 blk = off / KJ_PAGE;
 		size_t in = off % KJ_PAGE, n = min_t(size_t, len, KJ_PAGE - in);
-		/* Sealed first, then the live overlay, which is newer. */
-		struct kj_ent *es[2] = { kj_find_s(j, blk), j->npages ? kj_find(j, blk) : NULL };
-		for (int k = 0; k < 2; k++) {
+		/* Retained first, then the sealed, then the live overlay, which is newest. */
+		struct kj_ent *es[3] = { j->rnpages ? kj_find_in(j->rhash, blk) : NULL,
+					 j->snpages ? kj_find_in(j->shash, blk) : NULL,
+					 j->npages ? kj_find(j, blk) : NULL };
+		for (int k = 0; k < 3; k++) {
 			struct kj_ent *e = es[k];
 			if (!e)
 				continue;
@@ -808,9 +970,14 @@ static void kj_stall(void)
  * without it (kshim_jnl_io); it touches only @v, the journal area, the header page and the volume number, which
  * nobody else touches meanwhile.  0, or an error: before the COMMITTED header nothing was changed on the
  * medium that matters (the caller keeps the pages); after it j->failed is set when the in-place pass fails.
+ *
+ * Two halves.  kj_tx_commit (slots, flush, COMMITTED header, flush) ends with the transaction durable: replay at the next
+ * mount installs it whatever happens after.  kj_tx_apply (in place, flush, ACTIVE header) moves its pages to their places.
+ * A retained transaction (the top of this file) runs only the first half, into the slot area @base, and its pages go in place
+ * with the next checkpoint (kj_checkpoint, which is kj_tx_apply for the retained pages).
  */
-static int kj_run_tx(struct block_device *b, struct kshim_jnl *j, struct kj_ent **v, unsigned long n,
-		unsigned long ndesc, u16 usn_new)
+static int kj_tx_commit(struct block_device *b, struct kshim_jnl *j, struct kj_ent **v, unsigned long n,
+		unsigned long ndesc, u16 usn_new, u64 base)
 {
 	struct kj_desc *d;
 	u32 crc = 0;
@@ -832,7 +999,7 @@ static int kj_run_tx(struct block_device *b, struct kshim_jnl *j, struct kj_ent 
 				d[q].crc = kj_crc32(0, e->data, KJ_PAGE);
 			}
 			crc = kj_crc32(crc, d, KJ_PAGE);
-			if (kj_page_dev(j->ext, j->next, kj_slot_page(p), &dev))
+			if (kj_page_dev(j->ext, j->next, kj_slot_page(base + p), &dev))
 				w.err = -EIO;
 			else
 				kj_batch_add(&w, dev, d, KJ_PAGE);
@@ -840,7 +1007,7 @@ static int kj_run_tx(struct block_device *b, struct kshim_jnl *j, struct kj_ent 
 		for (unsigned long i = 0; i < n && !w.err; i++) {
 			u64 dev;
 			crc = kj_crc32(crc, v[i]->data, KJ_PAGE);
-			if (kj_page_dev(j->ext, j->next, kj_slot_page(ndesc + i), &dev))
+			if (kj_page_dev(j->ext, j->next, kj_slot_page(base + ndesc + i), &dev))
 				w.err = -EIO;
 			else
 				kj_batch_add(&w, dev, v[i]->data, KJ_PAGE);
@@ -863,9 +1030,17 @@ static int kj_run_tx(struct block_device *b, struct kshim_jnl *j, struct kj_ent 
 	j->seq++;
 	if (ndesc + n > j->hwm)
 		j->hwm = ndesc + n;
+	j->hdr_tried = 1;
 	err = kj_hdr_write(b, j, KJ_ST_COMMITTED, (u32)n, (u32)ndesc, crc, 1, usn_new);
-	if (err)
-		goto out;
+out:
+	kfree(d);
+	return err;
+}
+
+/* In place, flush, ACTIVE header: the second half of the sequence (see kj_tx_commit). */
+static int kj_tx_apply(struct block_device *b, struct kshim_jnl *j, struct kj_ent **v, unsigned long n, u16 usn_new)
+{
+	int err = 0;
 	kj_stall();
 	kj_fault_at(b, j, 2, v, n);
 	kj_fault_at(b, j, 0, v, n);
@@ -894,14 +1069,83 @@ static int kj_run_tx(struct block_device *b, struct kshim_jnl *j, struct kj_ent 
 		j->failed = 1;
 		printk(KERN_ERR "journal: the in-place pass of seq %llu failed: no further writes until the next "
 		       "mount, which replays it\n", (unsigned long long)j->seq);
-		goto out;
+		return err;
 	}
 	kj_fault_at(b, j, 3, v, n);
 	j->vol_usn = usn_new;
-	err = kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 0, j->vol_usn);
-out:
-	kfree(d);
-	return err;
+	return kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 0, j->vol_usn);
+}
+
+static int kj_run_tx(struct block_device *b, struct kshim_jnl *j, struct kj_ent **v, unsigned long n,
+		unsigned long ndesc, u16 usn_new)
+{
+	int err;
+	j->cur_area = -1;	/* not retained: from slot 0, version KJ_VERSION */
+	err = kj_tx_commit(b, j, v, n, ndesc, usn_new, 0);
+	return err ? err : kj_tx_apply(b, j, v, n, usn_new);
+}
+
+/*
+ * The retained transaction goes in place: its pages, a flush, the ACTIVE header (kj_ckpt_io: also called by the journal I/O of
+ * a sealed transaction, without the volume lock, which leaves freeing the retained pages to kj_reap).  kj_checkpoint, for
+ * callers that hold the volume lock with no journal I/O running (kj_settle), frees them and lets the frees they covered count
+ * as committed (aux_done).  A failed in-place pass leaves the COMMITTED header on the medium (replay at the next mount
+ * finishes it) and j->failed set, the retained pages in memory.
+ */
+static int kj_ckpt_io(struct kshim_jnl *j)
+{
+	struct block_device *b = j->bdev;
+	struct kj_ent **v = NULL, **tmp = NULL;
+	unsigned long n = j->rnpages, k = 0;
+	int err;
+	v = kmalloc_array(n, sizeof(*v), GFP_NOFS);
+	tmp = kmalloc_array(n, sizeof(*v), GFP_NOFS);
+	if (v && tmp) {
+		for (int i = 0; i < KJ_BUCKETS; i++)
+			for (struct kj_ent *e = j->rhash[i]; e; e = e->next)
+				v[k++] = e;
+		kj_sort(v, tmp, n);
+		err = kj_tx_apply(b, j, v, n, j->rusn_new);
+	} else {
+		/* No memory for the sorted list: the same writes in bucket order, without allocating. */
+		struct kj_batch w = { .b = b };
+		for (int i = 0; i < KJ_BUCKETS && !w.err; i++)
+			for (struct kj_ent *e = j->rhash[i]; e && !w.err; e = e->next)
+				kj_apply_ent(&w, e);
+		kj_batch_flush(&w);
+		err = w.err;
+		if (!err && kj_dev_flush(b))
+			err = -EIO;
+		if (err) {
+			j->failed = 1;
+			printk(KERN_ERR "journal: the in-place pass of seq %llu failed: no further writes until the next "
+			       "mount, which replays it\n", (unsigned long long)j->seq);
+		} else {
+			j->vol_usn = j->rusn_new;
+			err = kj_hdr_write(b, j, KJ_ST_ACTIVE, 0, 0, 0, 0, j->vol_usn);
+		}
+	}
+	kfree(v);
+	kfree(tmp);
+	if (j->failed)
+		return err ? err : -EIO;
+	return 0;	/* in place (a failed ACTIVE header write only leaves a COMMITTED header whose replay is harmless) */
+}
+
+static int kj_checkpoint(struct kshim_jnl *j)
+{
+	int err;
+	if (!j->rnpages)
+		return 0;
+	if (j->failed || j->readonly)
+		return j->failed ? -EIO : 0;
+	err = kj_ckpt_io(j);
+	if (err)
+		return err;
+	j->aux_done = j->raux;
+	kj_free_retained(j);
+	j->checkpoints++;
+	return 0;
 }
 
 /*
@@ -991,6 +1235,7 @@ int kshim_jnl_commit(struct block_device *b, u64 aux)
 		}
 		goto done;
 	}
+	j->hdr_tried = 0;
 	err = kj_run_tx(b, j, v, n, ndesc, usn_new);
 done:
 	if (!err) {
@@ -1016,11 +1261,12 @@ out:
  * again; -ENOSYS: not possible now (degraded, resize running, no memory, does not fit in the journal): use
  * kshim_jnl_commit.
  */
-int kshim_jnl_seal(struct block_device *b, u64 aux)
+int kshim_jnl_seal(struct block_device *b, u64 aux, int retain_ok)
 {
 	struct kshim_jnl *j = b->jnl;
 	struct kj_ent **v, **tmp;
-	unsigned long n, k = 0;
+	unsigned long n, k = 0, total, extra = 0;
+	int retain, ckpt = 0;
 	if (!j)
 		return 0;
 	if (j->failed)
@@ -1033,32 +1279,86 @@ int kshim_jnl_seal(struct block_device *b, u64 aux)
 	if (j->failed)
 		return -EIO;
 	if (!j->npages && !j->degraded) {
-		j->aux_done = aux;
+		/* Retained pages are durable: all there is to commit is committed.  Their frees count when they are in place. */
+		if (!j->rnpages)
+			j->aux_done = aux;
 		return 0;
 	}
 	n = j->npages;
-	if (j->degraded || j->strict || (n + (n + KJ_DESC_PER_PAGE - 1) / KJ_DESC_PER_PAGE) > j->capacity)
+	if (j->degraded || j->strict)
 		return -ENOSYS;
-	v = kmalloc_array(n, sizeof(*v), GFP_NOFS);
-	tmp = kmalloc_array(n, sizeof(*v), GFP_NOFS);
+	if (j->rnpages) {
+		/*
+		 * The transaction carries the retained pages too (each page once).  When the caller does not wait for durability
+		 * (@retain_ok 0: the flusher) or that is too many, the retained pages go in place first (the I/O of this
+		 * transaction does it before its own slots: the sealed set is then only the live pages and is not retained).
+		 */
+		for (int i = 0; i < KJ_BUCKETS; i++)
+			for (struct kj_ent *e = j->hash[i]; e; e = e->next)
+				if (!kj_find_in(j->rhash, e->blk))
+					extra++;
+		total = j->rnpages + extra;
+		if (retain_ok && total <= KJ_RET_MAX) {
+			retain = 1;
+		} else {
+			retain = 0;
+			ckpt = 1;
+			total = n;
+		}
+	} else {
+		total = n;
+		retain = retain_ok && j->ret_ok && n <= KJ_RET_MAX;
+	}
+	if (!retain && (total + (total + KJ_DESC_PER_PAGE - 1) / KJ_DESC_PER_PAGE) > j->capacity)
+		return -ENOSYS;
+	v = kmalloc_array(total, sizeof(*v), GFP_NOFS);
+	tmp = kmalloc_array(total, sizeof(*v), GFP_NOFS);
 	if (!v || !tmp) {
 		kfree(v);
 		kfree(tmp);
 		return -ENOSYS;
 	}
-	j->susn_new = kj_vol_usn_after(j);	/* what $Volume's number is once this transaction is in place (before the overlay moves) */
+	j->sarea = retain && j->rnpages ? j->rarea ^ 1 : 0;
+	if (retain && j->rnpages && kj_copy_h(j->shash, j->rhash, &j->snpages)) {
+		kfree(v);
+		kfree(tmp);
+		return -ENOSYS;
+	}
+	/* The live pages move into the sealed set, over the copies of the retained ones (the live ones are newer). */
 	for (int i = 0; i < KJ_BUCKETS; i++) {
-		j->shash[i] = j->hash[i];
-		for (struct kj_ent *e = j->hash[i]; e; e = e->next)
-			v[k++] = e;
+		struct kj_ent *e = j->hash[i], *nx;
+		for (; e; e = nx) {
+			struct kj_ent *c = j->snpages ? kj_find_in(j->shash, e->blk) : NULL;
+			nx = e->next;
+			if (c) {
+				for (int s = 0; s < 8; s++)
+					if (e->mask & (1u << s))
+						memcpy(c->data + s * KJ_SECT, e->data + s * KJ_SECT, KJ_SECT);
+				c->mask |= e->mask;
+				kfree(e->data);
+				kfree(e);
+			} else {
+				e->next = j->shash[e->blk % KJ_BUCKETS];
+				j->shash[e->blk % KJ_BUCKETS] = e;
+				j->snpages++;
+			}
+		}
 		j->hash[i] = NULL;
 	}
-	j->snpages = n;
+	for (int i = 0; i < KJ_BUCKETS; i++)
+		for (struct kj_ent *e = j->shash[i]; e; e = e->next)
+			v[k++] = e;
+	/* What $Volume's number is once this transaction is in place (from the sealed pages, which hold everything not in place). */
+	j->susn_new = kj_vol_usn_ent(j, kj_find_in(j->shash, j->vol_rec_off / KJ_PAGE));
 	j->npages = 0;
 	j->sv = v;
 	j->stmp = tmp;
 	j->saux = aux;
 	j->serr = 0;
+	j->sretain = retain;
+	j->sckpt = ckpt;
+	j->r_applied = 0;
+	j->hdr_tried = 0;
 	j->unlocked_commits++;
 	ngos_ev_clear(&j->idle);
 	__atomic_store_n(&j->sstate, KJ_S_RUNNING, __ATOMIC_RELEASE);
@@ -1091,7 +1391,42 @@ int kshim_jnl_io(struct block_device *b)
 	unsigned long long t0 = ngos_ticks();
 	int err;
 	kj_sort(j->sv, j->stmp, n);
-	err = kj_run_tx(b, j, j->sv, n, ndesc, j->susn_new);
+	if (j->sckpt) {
+		/*
+		 * The retained pages first: in place, flush, ACTIVE header.  This transaction's slots (from slot 0) may then overwrite
+		 * the slot areas (a crash in between finds the header COMMITTED or ACTIVE: either way the retained transaction is in
+		 * place and flushed, and a header whose slots were overwritten is ignored as torn).  They stay readable until kj_reap.
+		 */
+		err = kj_ckpt_io(j);
+		if (!err) {
+			j->r_applied = 1;
+			/* $Volume's number is what the retained pages made it (j->vol_usn now), unless this transaction changes it again. */
+			j->susn_new = kj_vol_usn_ent(j, kj_find_in(j->shash, j->vol_rec_off / KJ_PAGE));
+		} else {
+			printk(KERN_ERR "journal: the checkpoint before a commit failed %d\n", err);
+		}
+	} else {
+		err = 0;
+	}
+	if (err) {
+		/* nothing of this transaction was written */
+	} else if (j->sretain) {
+		/* Durable in a slot area; the pages stay in memory as the retained transaction (kj_reap) until a checkpoint. */
+		j->cur_area = j->sarea;
+		err = kj_tx_commit(b, j, j->sv, n, ndesc, j->susn_new, KJ_AREA_BASE + (u64)j->sarea * KJ_AREA_SLOTS);
+		if (err && j->hdr_tried && j->rnpages) {
+			/*
+			 * The header may be on the medium and names this area: a retry into the other area would overwrite the
+			 * slots of the retained transaction, which the header page no longer points to.  Nothing more is written
+			 * until the next mount, which replays whichever transaction the medium holds.
+			 */
+			j->failed = 1;
+			printk(KERN_ERR "journal: the commit header of seq %llu may be on the medium but was not made durable: "
+			       "no further writes until the next mount, which replays it\n", (unsigned long long)j->seq);
+		}
+	} else {
+		err = kj_run_tx(b, j, j->sv, n, ndesc, j->susn_new);
+	}
 	if (err)
 		printk(KERN_ERR "journal: commit of %lu pages failed %d\n", n, err);
 	kfree(j->sv);
@@ -1129,9 +1464,9 @@ void kshim_jnl_report(struct block_device *b)
 	struct kshim_jnl *j = b->jnl;
 	if (!j)
 		return;
-	printk(KERN_WARNING "journal: %lu commits, %lu pages, largest %lu, %lu in-place fallbacks (%lu overflowed the journal), %lu dropped, seq %llu, pending %lu, %lu unlocked commits\n",
+	printk(KERN_WARNING "journal: %lu commits, %lu pages, largest %lu, %lu in-place fallbacks (%lu overflowed the journal), %lu dropped, seq %llu, pending %lu, %lu unlocked commits, %lu retained, %lu checkpoints\n",
 	       j->commits, j->committed_pages, j->max_tx, j->fallbacks, j->overflows, j->dropped, (unsigned long long)j->seq,
-	       j->npages + j->snpages, j->unlocked_commits);
+	       j->npages + j->snpages + j->rnpages, j->unlocked_commits, j->retained_commits, j->checkpoints);
 #if DBG
 	printk(KERN_WARNING "journal: unlocked journal I/O about %lu ms in total\n", j->io_us / 1000);
 #endif
@@ -1198,7 +1533,7 @@ void kshim_jnl_mark_errors(struct block_device *b)
 	 * (errors_writing).  Until errors_durable is set, kshim_jnl_errors_pending keeps ngc_dirty true, so the flusher
 	 * calls this again.
 	 */
-	if (j->failed || j->errors_durable || __atomic_load_n(&j->sstate, __ATOMIC_ACQUIRE) == KJ_S_RUNNING ||
+	if (j->failed || j->errors_durable || j->rnpages || __atomic_load_n(&j->sstate, __ATOMIC_ACQUIRE) == KJ_S_RUNNING ||
 	    __atomic_exchange_n(&j->errors_writing, 1, __ATOMIC_SEQ_CST))
 		return;
 	if (!kj_hdr_write(b, j, KJ_ST_ERRORS, 0, 0, 0, 1, j->vol_usn))

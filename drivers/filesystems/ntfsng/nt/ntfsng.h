@@ -408,6 +408,7 @@ VOID NgInitDataIo(PNG_VCB Vcb);
 VOID NgDrainDataIoCallback(PVOID Context);
 VOID NgWaitDataIoIdle(PNG_VCB Vcb);
 int NgCommit(PNG_VCB Vcb);
+int NgCommitEx(PNG_VCB Vcb, BOOLEAN Retain);
 VOID NgCommitKickCallback(PVOID Context);
 VOID NgDataIoBegin(PNG_VCB Vcb);
 VOID NgDataIoTransferred(PNG_VCB Vcb);
