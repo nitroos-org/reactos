@@ -307,7 +307,14 @@ NTSTATUS NgQueryInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return Status;
 }
 
-static NTSTATUS NgSetBasic(PNG_FCB Fcb, PFILE_BASIC_INFORMATION B)
+/*
+ * HandleWrote: the handle wrote data (FO_FILE_MODIFIED).  Windows 10 (measured, 2026-11-10) sets the archive attribute
+ * of a file when a basic-information request that sets no attributes arrives on such a handle, even after the attribute
+ * was cleared before and whatever times the request sets (write, SetFileAttributes(NORMAL) through another handle,
+ * SetFileTime on the writing handle: ARCHIVE, at once and after the close).  A handle that did not write leaves it alone
+ * (SetFileAttributes(NORMAL) then SetFileTime on a fresh handle: NORMAL stays).
+ */
+static NTSTATUS NgSetBasic(PNG_FCB Fcb, PFILE_BASIC_INFORMATION B, BOOLEAN HandleWrote)
 {
     PNG_VCB Vcb = Fcb->Vcb;
     long long Times[4];
@@ -328,6 +335,11 @@ static NTSTATUS NgSetBasic(PNG_FCB Fcb, PFILE_BASIC_INFORMATION B)
         Attrs = B->FileAttributes & ~(FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_DIRECTORY);
         Mask = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE |
                FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+    }
+    else if (HandleWrote && !Fcb->IsDirectory)
+    {
+        Attrs = FILE_ATTRIBUTE_ARCHIVE;
+        Mask = FILE_ATTRIBUTE_ARCHIVE;
     }
     if (!Times[0] && !Times[1] && !Times[2] && !Times[3] && !Mask)
         return STATUS_SUCCESS;
@@ -997,6 +1009,9 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         NgMakeShortName(Vcb, NewDir, Fcb->Node, NewName.Buffer, NewName.Length / sizeof(WCHAR));
         if (!Fcb->IsDirectory)
         {
+            /* Windows 10 (measured): renaming a file sets its archive attribute (also after SetFileAttributes(NORMAL)). */
+            static const long long NoTimes[4] = { 0, 0, 0, 0 };
+            ngc_set_info(Vcb->Core, Fcb->Node, NoTimes, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_ARCHIVE);
             /* The old name leaves its creation time behind; the new name may take one over. */
             LONGLONG Crtime = Fcb->Stat.crtime;
             NgTunnelApply(Vcb, NewDir, Fcb->Node, &NewName);
@@ -1133,7 +1148,7 @@ NTSTATUS NgSetInformation(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             if (Length < sizeof(FILE_BASIC_INFORMATION))
                 return STATUS_INVALID_PARAMETER;
             ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
-            Status = NgSetBasic(Fcb, Buffer);
+            Status = NgSetBasic(Fcb, Buffer, (FileObject->Flags & FO_FILE_MODIFIED) != 0);
             ExReleaseResourceLite(Fcb->Header.Resource);
             return Status;
         case FileEndOfFileInformation:
