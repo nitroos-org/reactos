@@ -112,7 +112,9 @@ static volatile LONG MiPagerExpectMismatch;
 #define MI_PAGER_TEST_HANG_WRITES                   (MI_PAGER_TEST_COMMAND_BASE + 12)
 /* From now on every cluster write reports STATUS_FILE_INVALID: the files it reaches retire for good (P4 test) */
 #define MI_PAGER_TEST_INVALIDATE_WRITES             (MI_PAGER_TEST_COMMAND_BASE + 13)
-#define MI_PAGER_TEST_LAST                          MI_PAGER_TEST_INVALIDATE_WRITES
+/* The next read that reads the named page ahead of the faulting one fails (a bad slot next to a good one) */
+#define MI_PAGER_TEST_FAIL_NEXT_READAHEAD           (MI_PAGER_TEST_COMMAND_BASE + 14)
+#define MI_PAGER_TEST_LAST                          MI_PAGER_TEST_FAIL_NEXT_READAHEAD
 
 /* MI_PAGER_TEST_HOLD_PAGES: the pages it leaves (above the waitable floor, below the balancer's starved mark) */
 #define MI_PAGER_TEST_HOLD_FLOOR    (MI_PAGER_WAITABLE_FLOOR + 64)
@@ -1492,7 +1494,7 @@ MiPagerReport(VOID)
             "slotshort %lu reclaimed %lu freeslots %Iu | modified %Iu privstandby %lu usable %Iu reserve-low %lu inflight %ld | "
             "balancer trimmed %lu waits %lu | legacy user %lu system %lu available %Iu legacy-freed %lu asked %lu nopass %lu | "
             "paced %lu pacebudget %lu paceslotbusy %lu wsfloor %lu injected %lu ioreserve %ld | "
-            "readahead %lu reads %lu pages\n",
+            "readahead %lu reads %lu pages %lu retries\n",
             MiPagerCounters.Trimmed, MiPagerCounters.TrimmedDirty, MiPagerCounters.Aged, MiPagerCounters.TrimSkippedDirty,
             MiPagerCounters.Written, MiPagerCounters.Clusters, MiPagerCounters.WriteErrors, MiPagerCounters.WriteNoSlot,
             MiPagerCounters.Repurposed, MiPagerCounters.InPageReads, MiPagerCounters.InPageErrors,
@@ -1504,7 +1506,8 @@ MiPagerReport(VOID)
             MiMemoryConsumers[MC_USER].PagesUsed, MiMemoryConsumers[MC_SYSTEM].PagesUsed, (SIZE_T)MmAvailablePages,
             MiPagerCounters.LegacyFreed, MiPagerCounters.LegacyAsked, MiPagerCounters.NoProgressPasses,
             MiPagerCounters.PacedRequests, MiPagerCounters.PaceBudgetSpent, MiPagerCounters.PaceSlotBusy, MiPagerCounters.WsFloorSkips, MiPagerCounters.InjectedAllocFailures,
-            IopReserveIrpUses, MiPagerCounters.InPageClusterReads, MiPagerCounters.InPagePrefetched);
+            IopReserveIrpUses, MiPagerCounters.InPageClusterReads, MiPagerCounters.InPagePrefetched,
+            MiPagerCounters.ReadAheadRetries);
     InterlockedExchange(&Busy, 0);
 }
 
@@ -2382,6 +2385,9 @@ MmSetMemoryListInformation(
             return STATUS_SUCCESS;
         case MI_PAGER_TEST_STARVE_NEXT_READ:
             MiPagerArmInjection(MI_PAGER_INJECT_READ_RESOURCES, Address);
+            return STATUS_SUCCESS;
+        case MI_PAGER_TEST_FAIL_NEXT_READAHEAD:
+            MiPagerArmInjection(MI_PAGER_INJECT_READAHEAD_ERROR, Address);
             return STATUS_SUCCESS;
         case MI_PAGER_TEST_PING:
             return STATUS_SUCCESS;
