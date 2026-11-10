@@ -249,6 +249,13 @@ AtaDeviceSetAddressingMode(
 
     DevExt->Device.TotalSectors = TotalSectors;
 
+    /* The port takes the larger commands only for a device that has the 16-bit sector count (48-bit LBA) */
+    if (!(DevExt->Device.DeviceFlags & DEVICE_LBA48) &&
+        DevExt->Device.PortData->MaximumTransferLength > ATA_MAX_TRANSFER_LENGTH)
+    {
+        DevExt->Device.PortData->MaximumTransferLength = ATA_MAX_TRANSFER_LENGTH;
+    }
+
     DevExt->Device.SectorSize = AtaDevBytesPerLogicalSector(IdentifyData);
     ASSERT(DevExt->Device.SectorSize >= ATA_MIN_SECTOR_SIZE);
     DevExt->Device.SectorSize = max(DevExt->Device.SectorSize, ATA_MIN_SECTOR_SIZE);
