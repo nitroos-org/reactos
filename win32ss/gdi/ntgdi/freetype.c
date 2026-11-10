@@ -5100,8 +5100,11 @@ ftGdiGetGlyphOutline(
     {
         width = gm.gmBlackBoxX;
         height = gm.gmBlackBoxY;
+        if (width > MAXULONG - 31)
+            goto Fail;
         pitch = ((width + 31) >> 5) << 2;
-        needed = pitch * height;
+        if (!NT_SUCCESS(RtlULongMult(pitch, height, &needed)))
+            goto Fail;
 
         if (!pvBuf || !cjBuf) break;
         if (!needed) goto Fail;  /* empty glyph */
@@ -5160,8 +5163,11 @@ ftGdiGetGlyphOutline(
 
         width = gm.gmBlackBoxX;
         height = gm.gmBlackBoxY;
+        if (width > MAXULONG - 3)
+            goto Fail;
         pitch = (width + 3) / 4 * 4;
-        needed = pitch * height;
+        if (!NT_SUCCESS(RtlULongMult(pitch, height, &needed)))
+            goto Fail;
 
         if (!pvBuf || !cjBuf) break;
         if (!needed) goto Fail;  /* empty glyph */

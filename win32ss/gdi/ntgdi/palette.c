@@ -379,6 +379,38 @@ ColorCorrection(PPALETTE PalGDI, PPALETTEENTRY PaletteEntry, ULONG Colors)
 /*
  * @implemented
  */
+static
+HPALETTE
+IntEngCreatePalette(
+    ULONG iMode,
+    ULONG cColors,
+    ULONG *pulColors,
+    ULONG flRed,
+    ULONG flGreen,
+    ULONG flBlue,
+    ULONG ulOwner)
+{
+    PPALETTE ppal;
+    HPALETTE hpal;
+
+    ppal = PALETTE_AllocPalette(iMode, cColors, (PPALETTEENTRY)pulColors, flRed, flGreen, flBlue);
+    if (!ppal) return NULL;
+
+    hpal = GDIOBJ_hInsertObject(&ppal->BaseObject, ulOwner);
+    if (!hpal)
+    {
+        DPRINT1("Could not insert palette into handle table.\n");
+        GDIOBJ_vFreeObject(&ppal->BaseObject);
+        return NULL;
+    }
+
+    PALETTE_UnlockPalette(ppal);
+    return hpal;
+}
+
+/*
+ * @implemented
+ */
 HPALETTE
 APIENTRY
 EngCreatePalette(
@@ -389,22 +421,8 @@ EngCreatePalette(
     ULONG flGreen,
     ULONG flBlue)
 {
-    PPALETTE ppal;
-    HPALETTE hpal;
-
-    ppal = PALETTE_AllocPalette(iMode, cColors, (PPALETTEENTRY)pulColors, flRed, flGreen, flBlue);
-    if (!ppal) return NULL;
-
-    hpal = GDIOBJ_hInsertObject(&ppal->BaseObject, GDI_OBJ_HMGR_PUBLIC);
-    if (!hpal)
-    {
-        DPRINT1("Could not insert palette into handle table.\n");
-        GDIOBJ_vFreeObject(&ppal->BaseObject);
-        return NULL;
-    }
-
-    PALETTE_UnlockPalette(ppal);
-    return hpal;
+    /* A palette for a display or printer driver: no process owns it */
+    return IntEngCreatePalette(iMode, cColors, pulColors, flRed, flGreen, flBlue, GDI_OBJ_HMGR_PUBLIC);
 }
 
 /*
@@ -1302,6 +1320,11 @@ NtGdiEngCreatePalette(
     else
     {
         pulcSafe = ExAllocatePoolWithTag(PagedPool, cColors * sizeof(ULONG), GDITAG_UMPD );
+        if (!pulcSafe)
+        {
+            EngSetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return NULL;
+        }
     }
 
         _SEH2_TRY
@@ -1317,7 +1340,8 @@ NtGdiEngCreatePalette(
     }
     _SEH2_END;
 
-    hPal = EngCreatePalette( iMode/*|PAL_SETPOWNER*/, cColors, pulcSafe, flRed, flGreen, flBlue );
+    /* The palette belongs to the calling process: it can delete it, and it goes away with the process */
+    hPal = IntEngCreatePalette(iMode, cColors, pulcSafe, flRed, flGreen, flBlue, GDI_OBJ_HMGR_POWNED);
 
     if ( cColors > WINDDI_MAXSETPALETTECOLORS ) ExFreePoolWithTag( pulcSafe, GDITAG_UMPD );
 
@@ -1330,6 +1354,15 @@ APIENTRY
 NtGdiEngDeletePalette(
     _In_ HPALETTE hPal)
 {
+    /* User mode deletes only a palette of its own: never a stock or public palette (the default
+       palette, a device's palette), nor another process's */
+    if (GDI_HANDLE_GET_TYPE(hPal) != GDI_OBJECT_TYPE_PALETTE ||
+        GDI_HANDLE_IS_STOCKOBJ(hPal) ||
+        GreGetObjectOwner(hPal) != GDI_OBJ_HMGR_POWNED)
+    {
+        return FALSE;
+    }
+
     return EngDeletePalette(hPal);
 }
 
