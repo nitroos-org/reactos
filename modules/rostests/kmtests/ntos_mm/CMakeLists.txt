@@ -44,3 +44,18 @@ target_link_libraries(mmspecialpool_drv kmtest_printf ${PSEH_LIB})
 add_importlibs(mmspecialpool_drv ntoskrnl hal)
 target_compile_definitions(mmspecialpool_drv PRIVATE KMT_STANDALONE_DRIVER)
 add_rostests_file(TARGET mmspecialpool_drv)
+
+#
+# Session images (MmSessionImage): sesstst_a, and sesstst_b which imports it
+#
+spec2def(sesstst_a.sys sesstst_a.spec ADD_IMPORTLIB)
+add_library(sesstst_a MODULE sesstst_a.c ${CMAKE_CURRENT_BINARY_DIR}/sesstst_a.def)
+set_module_type(sesstst_a kernelmodedriver)
+add_importlibs(sesstst_a ntoskrnl)
+add_rostests_file(TARGET sesstst_a)
+
+spec2def(sesstst_b.sys sesstst_b.spec)
+add_library(sesstst_b MODULE sesstst_b.c ${CMAKE_CURRENT_BINARY_DIR}/sesstst_b.def)
+set_module_type(sesstst_b kernelmodedriver)
+add_importlibs(sesstst_b sesstst_a ntoskrnl)
+add_rostests_file(TARGET sesstst_b)

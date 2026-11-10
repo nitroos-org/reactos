@@ -1107,8 +1107,8 @@ MiRemoveFromSystemSpace(IN PMMSESSION Session,
                         IN PVOID Base,
                         OUT PCONTROL_AREA *ControlArea);
 
-static
 NTSTATUS
+NTAPI
 MiSessionCommitPageTables(IN PVOID StartVa,
                           IN PVOID EndVa)
 {
