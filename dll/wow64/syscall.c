@@ -1638,6 +1638,20 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         return Wow64GetSetContextThread(H(0), P(1), TRUE);
     case W64_NtQueueApcThread:
         return NtQueueApcThread(H(0), (PKNORMAL_ROUTINE)(ULONG_PTR)(-((LONG64)a[1] << 2)), P(2), P(3), P(4));
+    case W64_NtQueueApcThreadEx:
+        return NtQueueApcThreadEx(H(0), H(1), (PKNORMAL_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)), P(3), P(4), P(5));
+    case W64_NtSetIoCompletionEx:
+        return NtSetIoCompletionEx(H(0), H(1), P(2), P(3), a[4], a[5]);
+    case W64_NtCreateWaitCompletionPacket:
+        PROBE(0);
+        ATTR(2); Status = NtCreateWaitCompletionPacket(&Cleanup->Handle, a[1], OA(2)); RETURN_HANDLE();
+    case W64_NtAssociateWaitCompletionPacket:
+        return NtAssociateWaitCompletionPacket(H(0), H(1), H(2), P(3), P(4), a[5], a[6], (PBOOLEAN)P(7));
+    case W64_NtCancelWaitCompletionPacket:
+        return NtCancelWaitCompletionPacket(H(0), (BOOLEAN)a[1]);
+    case W64_NtAllocateReserveObject:
+        PROBE(0);
+        ATTR(1); Status = NtAllocateReserveObject(&Cleanup->Handle, OA(1), a[2]); RETURN_HANDLE();
     case W64_NtDuplicateObject:
         if (a[3]) PROBE(3);
         Cleanup->HandleProcess = H(2);

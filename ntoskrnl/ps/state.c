@@ -27,6 +27,32 @@ PspQueueApcSpecialApc(IN PKAPC Apc,
     ExFreePool(Apc);
 }
 
+/* The kernel routine of an APC that lives in a reserve object (NtQueueApcThreadEx with a UserApcReserve handle): the
+ * storage is not freed, the reserve becomes usable again and the reference that the queueing took goes away. */
+VOID
+NTAPI
+PspReserveApcSpecialApc(IN PKAPC Apc,
+                        IN OUT PKNORMAL_ROUTINE* NormalRoutine,
+                        IN OUT PVOID* NormalContext,
+                        IN OUT PVOID* SystemArgument1,
+                        IN OUT PVOID* SystemArgument2)
+{
+    PEX_RESERVE_OBJECT Reserve = CONTAINING_RECORD(Apc, EX_RESERVE_OBJECT, Apc);
+
+    InterlockedExchange(&Reserve->InUse, 0);
+    ObDereferenceObject(Reserve);
+}
+
+VOID
+NTAPI
+PspReserveApcRundown(IN PKAPC Apc)
+{
+    PEX_RESERVE_OBJECT Reserve = CONTAINING_RECORD(Apc, EX_RESERVE_OBJECT, Apc);
+
+    InterlockedExchange(&Reserve->InUse, 0);
+    ObDereferenceObject(Reserve);
+}
+
 NTSTATUS
 NTAPI
 PsResumeThread(IN PETHREAD Thread,
@@ -581,6 +607,7 @@ NtQueueApcThreadEx(IN HANDLE ThreadHandle,
 {
     PKAPC Apc;
     PETHREAD Thread;
+    PEX_RESERVE_OBJECT Reserve = NULL;
     NTSTATUS Status = STATUS_SUCCESS;
     PAGED_CODE();
 
@@ -601,27 +628,59 @@ NtQueueApcThreadEx(IN HANDLE ThreadHandle,
         goto Quit;
     }
 
-    /* Allocate an APC */
-    Apc = ExAllocatePoolWithQuotaTag(NonPagedPool |
-                                     POOL_QUOTA_FAIL_INSTEAD_OF_RAISE,
-                                     sizeof(KAPC),
-                                     TAG_PS_APC);
-    if (!Apc)
+    /* Use the storage of a reserve object when the caller has one: a handle of another type is a type mismatch, one
+     * that is still queued is STATUS_INVALID_PARAMETER_2 (both as measured on Windows 10) */
+    if (UserApcReserveHandle)
     {
-        /* Fail */
-        Status = STATUS_NO_MEMORY;
-        goto Quit;
-    }
+        Status = ObReferenceObjectByHandle(UserApcReserveHandle,
+                                           0,
+                                           ExUserApcReserveObjectType,
+                                           ExGetPreviousMode(),
+                                           (PVOID*)&Reserve,
+                                           NULL);
+        if (!NT_SUCCESS(Status)) goto Quit;
 
-    /* Initialize the APC */
-    KeInitializeApc(Apc,
-                    &Thread->Tcb,
-                    OriginalApcEnvironment,
-                    PspQueueApcSpecialApc,
-                    NULL,
-                    ApcRoutine,
-                    UserMode,
-                    NormalContext);
+        if (InterlockedCompareExchange(&Reserve->InUse, 1, 0) != 0)
+        {
+            ObDereferenceObject(Reserve);
+            Status = STATUS_INVALID_PARAMETER_2;
+            goto Quit;
+        }
+
+        Apc = &Reserve->Apc;
+        KeInitializeApc(Apc,
+                        &Thread->Tcb,
+                        OriginalApcEnvironment,
+                        PspReserveApcSpecialApc,
+                        PspReserveApcRundown,
+                        ApcRoutine,
+                        UserMode,
+                        NormalContext);
+    }
+    else
+    {
+        /* Allocate an APC */
+        Apc = ExAllocatePoolWithQuotaTag(NonPagedPool |
+                                         POOL_QUOTA_FAIL_INSTEAD_OF_RAISE,
+                                         sizeof(KAPC),
+                                         TAG_PS_APC);
+        if (!Apc)
+        {
+            /* Fail */
+            Status = STATUS_NO_MEMORY;
+            goto Quit;
+        }
+
+        /* Initialize the APC */
+        KeInitializeApc(Apc,
+                        &Thread->Tcb,
+                        OriginalApcEnvironment,
+                        PspQueueApcSpecialApc,
+                        NULL,
+                        ApcRoutine,
+                        UserMode,
+                        NormalContext);
+    }
 
     /* Queue it */
     if (!KeInsertQueueApc(Apc,
@@ -629,8 +688,16 @@ NtQueueApcThreadEx(IN HANDLE ThreadHandle,
                           SystemArgument2,
                           IO_NO_INCREMENT))
     {
-        /* We failed, free it */
-        ExFreePool(Apc);
+        /* We failed, give it back */
+        if (Reserve)
+        {
+            InterlockedExchange(&Reserve->InUse, 0);
+            ObDereferenceObject(Reserve);
+        }
+        else
+        {
+            ExFreePool(Apc);
+        }
         Status = STATUS_UNSUCCESSFUL;
     }
 
