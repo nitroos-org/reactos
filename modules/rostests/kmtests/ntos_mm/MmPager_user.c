@@ -32,6 +32,7 @@
 #define PAGER_TEST_MISMATCH_NEXT_FREE   0x4E500006
 #define PAGER_TEST_PAUSE_NEXT_WRITE     0x4E500007
 #define PAGER_TEST_FAIL_NEXT_READAHEAD  0x4E50000E
+#define PAGER_TEST_QUERY_READAHEAD_RETRIED 0x4E50000F
 #define PAGER_TEST_RESUME_WRITE         0x4E500008
 #define PAGER_TEST_QUERY_PAUSED         0x4E500009
 #define PAGER_TEST_QUERY_FREE_REFUSED   0x4E50000A
@@ -625,6 +626,8 @@ TestInjection(VOID)
     Code = ReadUnderSeh(Base + 4 * PageSize, 21, &IoStatus, &Correct);
     ok_eq_hex(Code, STATUS_SUCCESS);
     ok(Correct, "data of the faulting page after a failed read-ahead\n");
+    /* The read-ahead failed and page 4 was read again alone (else the case above proved nothing) */
+    ok_eq_hex(ArmTest(PAGER_TEST_QUERY_READAHEAD_RETRIED, NULL), STATUS_SUCCESS);
     Code = ReadUnderSeh(Base + 5 * PageSize, 21, &IoStatus, &Correct);
     ok_eq_hex(Code, STATUS_SUCCESS);
     ok(Correct, "data of the page whose read-ahead failed\n");

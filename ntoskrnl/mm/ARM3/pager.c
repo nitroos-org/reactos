@@ -114,7 +114,9 @@ static volatile LONG MiPagerExpectMismatch;
 #define MI_PAGER_TEST_INVALIDATE_WRITES             (MI_PAGER_TEST_COMMAND_BASE + 13)
 /* The next read that reads the named page ahead of the faulting one fails (a bad slot next to a good one) */
 #define MI_PAGER_TEST_FAIL_NEXT_READAHEAD           (MI_PAGER_TEST_COMMAND_BASE + 14)
-#define MI_PAGER_TEST_LAST                          MI_PAGER_TEST_FAIL_NEXT_READAHEAD
+/* STATUS_SUCCESS if a failed read-ahead was read again alone since the last FAIL_NEXT_READAHEAD */
+#define MI_PAGER_TEST_QUERY_READAHEAD_RETRIED       (MI_PAGER_TEST_COMMAND_BASE + 15)
+#define MI_PAGER_TEST_LAST                          MI_PAGER_TEST_QUERY_READAHEAD_RETRIED
 
 /* MI_PAGER_TEST_HOLD_PAGES: the pages it leaves (above the waitable floor, below the balancer's starved mark) */
 #define MI_PAGER_TEST_HOLD_FLOOR    (MI_PAGER_WAITABLE_FLOOR + 64)
@@ -128,6 +130,7 @@ static KEVENT MiPagerPauseEvent;
 static volatile LONG MiPagerWriterPaused;
 static volatile LONG MiPagerPauseReady;
 static volatile ULONG MiPagerFreeRefusedBase;
+static volatile ULONG MiPagerReadAheadRetriesBase;
 
 /* NitroPagerDebug bits that inject write failures (any build; test commands need the value non-zero anyway) */
 #define MI_PAGER_DEBUG_FAIL_SOME_WRITES 0x10
@@ -2343,6 +2346,7 @@ MmSetMemoryListInformation(
                    (Command == MI_PAGER_TEST_RESUME_WRITE) ||
                    (Command == MI_PAGER_TEST_QUERY_PAUSED) ||
                    (Command == MI_PAGER_TEST_QUERY_FREE_REFUSED) ||
+                   (Command == MI_PAGER_TEST_QUERY_READAHEAD_RETRIED) ||
                    (Command == MI_PAGER_TEST_HANG_WRITES) ||
                    (Command == MI_PAGER_TEST_INVALIDATE_WRITES)) &&
                   (Address <= MM_HIGHEST_USER_ADDRESS);
@@ -2387,8 +2391,11 @@ MmSetMemoryListInformation(
             MiPagerArmInjection(MI_PAGER_INJECT_READ_RESOURCES, Address);
             return STATUS_SUCCESS;
         case MI_PAGER_TEST_FAIL_NEXT_READAHEAD:
+            MiPagerReadAheadRetriesBase = MiPagerCounters.ReadAheadRetries;
             MiPagerArmInjection(MI_PAGER_INJECT_READAHEAD_ERROR, Address);
             return STATUS_SUCCESS;
+        case MI_PAGER_TEST_QUERY_READAHEAD_RETRIED:
+            return (MiPagerCounters.ReadAheadRetries > MiPagerReadAheadRetriesBase) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
         case MI_PAGER_TEST_PING:
             return STATUS_SUCCESS;
         case MI_PAGER_TEST_MISMATCH_NEXT_FREE:
