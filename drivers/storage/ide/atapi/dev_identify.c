@@ -329,6 +329,10 @@ AtaPortIdentifyDevice(
     {
         DevExt->Device.TransportFlags |= DEVICE_IS_ATAPI;
 
+        /* Packet devices keep the 128 kB commands */
+        if (DevExt->Device.PortData->MaximumTransferLength > ATA_MAX_TRANSFER_LENGTH)
+            DevExt->Device.PortData->MaximumTransferLength = ATA_MAX_TRANSFER_LENGTH;
+
         DevExt->Device.CdbSize = AtaDevCdbSizeInWords(&DevExt->IdentifyPacketData);
         TRACE("Device has CDB size of %u bytes\n", DevExt->Device.CdbSize * 2);
 

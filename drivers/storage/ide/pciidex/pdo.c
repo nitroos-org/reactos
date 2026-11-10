@@ -99,7 +99,11 @@ PciIdeXPdoStartDevice(
 
     /* Init default values */
     if (ChanData->MaximumTransferLength == 0)
-        ChanData->MaximumTransferLength = ATA_MAX_TRANSFER_LENGTH;
+    {
+        /* AHCI: the 48-bit LBA devices take larger commands (atapi lowers it for a port whose device does not, see AtaDeviceSetAddressingMode) */
+        ChanData->MaximumTransferLength = (Controller->Flags & CTRL_FLAG_IS_AHCI) ? ATA_MAX_TRANSFER_LENGTH_LBA48
+                                                                                   : ATA_MAX_TRANSFER_LENGTH;
+    }
     ChanData->Current.MaximumTransferLength = ChanData->MaximumTransferLength;
     ChanData->Current.TransferModeSupported = ChanData->TransferModeSupported;
 

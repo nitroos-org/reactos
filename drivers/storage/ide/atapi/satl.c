@@ -425,6 +425,15 @@ AtaReqBuildReadLogTaskFile(
     TaskFile->Command = IDE_COMMAND_READ_LOG_EXT;
 }
 
+/* The most sectors one command of this device takes (what the port allows is PortData->MaximumTransferLength) */
+static
+ULONG
+AtaMaxSectorsPerIo(
+    _In_ PATAPORT_DEVICE_EXTENSION DevExt)
+{
+    return (DevExt->Device.DeviceFlags & DEVICE_LBA48) ? ATA_MAX_SECTORS_PER_IO_LBA48 : ATA_MAX_SECTORS_PER_IO;
+}
+
 static
 BOOLEAN
 AtaReqBuildLbaTaskFile(
@@ -437,9 +446,9 @@ AtaReqBuildLbaTaskFile(
     UCHAR DriveSelect;
 
     /* Sector count must not exceed the maximum transfer length */
-    ASSERT(SectorCount <= ATA_MAX_SECTORS_PER_IO);
+    ASSERT(SectorCount <= AtaMaxSectorsPerIo(DevExt));
 
-    if (SectorCount > ATA_MAX_SECTORS_PER_IO)
+    if (SectorCount > AtaMaxSectorsPerIo(DevExt))
         return FALSE;
 
     Request->Flags |= REQUEST_FLAG_SET_DEVICE_REGISTER;
@@ -524,9 +533,9 @@ AtaReqBuildNcqReadWriteTaskFile(
     ASSERT(!(DevExt->Device.DeviceFlags & DEVICE_PIO_ONLY));
 
     /* Sector count must not exceed the maximum transfer length */
-    ASSERT(SectorCount <= ATA_MAX_SECTORS_PER_IO);
+    ASSERT(SectorCount <= AtaMaxSectorsPerIo(DevExt));
 
-    if (SectorCount > ATA_MAX_SECTORS_PER_IO)
+    if (SectorCount > AtaMaxSectorsPerIo(DevExt))
         return FALSE;
 
     if ((Lba + SectorCount) > ATA_MAX_LBA_48)
