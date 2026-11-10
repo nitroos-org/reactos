@@ -46,13 +46,14 @@ START_TEST(MmContiguousStandby)
     }
     /*
      * The physical-range search of MmAllocatePagesForMdl (a low limit of 1 MB): chunks of 32 MB, the first
-     * word of each page written through a mapping, up to 45 percent of the physical memory (more than is free
-     * after the user part: the range reaches the standby pages), kept until the end
+     * word of each page written through a mapping, up to 35 percent of the physical memory (with the third the
+     * user part holds and the blocks below, about 80 percent: the range reaches the standby pages and a
+     * reserve stays free), kept until the end
      */
     MdlCount = 0;
     MdlLow.QuadPart = 1024 * 1024;
     while (MdlCount < RTL_NUMBER_OF(Mdls) &&
-           (ULONGLONG)(MdlCount + 1) * MDL_CHUNK <= (ULONGLONG)Info.NumberOfPhysicalPages * PAGE_SIZE * 45 / 100)
+           (ULONGLONG)(MdlCount + 1) * MDL_CHUNK <= (ULONGLONG)Info.NumberOfPhysicalPages * PAGE_SIZE * 35 / 100)
     {
         PMDL Mdl = MmAllocatePagesForMdl(MdlLow, High, Boundary, MDL_CHUNK);
         PUCHAR Va;
