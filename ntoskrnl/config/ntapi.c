@@ -459,6 +459,71 @@ NtOpenKeyEx(OUT PHANDLE KeyHandle,
                               OpenOptions);
 }
 
+/*
+ * Transacted registry access. There is no kernel transaction manager here, so no
+ * transaction object can exist: like Windows (measured, Windows 10 22H2) the
+ * transaction handle is validated before anything else is looked at, a handle
+ * that is NULL, invalid or closed is STATUS_INVALID_HANDLE, and a handle to any
+ * other kind of object (event, process, ...) is STATUS_OBJECT_TYPE_MISMATCH.
+ */
+static
+NTSTATUS
+CmpCheckTransactionHandle(IN HANDLE TransactionHandle)
+{
+    PVOID Object;
+    NTSTATUS Status;
+
+    Status = ObReferenceObjectByHandle(TransactionHandle,
+                                       0,
+                                       NULL,
+                                       ExGetPreviousMode(),
+                                       &Object,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    ObDereferenceObject(Object);
+    return STATUS_OBJECT_TYPE_MISMATCH;
+}
+
+NTSTATUS
+NTAPI
+NtOpenKeyTransacted(OUT PHANDLE KeyHandle,
+                    IN ACCESS_MASK DesiredAccess,
+                    IN POBJECT_ATTRIBUTES ObjectAttributes,
+                    IN HANDLE TransactionHandle)
+{
+    PAGED_CODE();
+    return CmpCheckTransactionHandle(TransactionHandle);
+}
+
+NTSTATUS
+NTAPI
+NtOpenKeyTransactedEx(OUT PHANDLE KeyHandle,
+                      IN ACCESS_MASK DesiredAccess,
+                      IN POBJECT_ATTRIBUTES ObjectAttributes,
+                      IN ULONG OpenOptions,
+                      IN HANDLE TransactionHandle)
+{
+    PAGED_CODE();
+    return CmpCheckTransactionHandle(TransactionHandle);
+}
+
+NTSTATUS
+NTAPI
+NtCreateKeyTransacted(OUT PHANDLE KeyHandle,
+                      IN ACCESS_MASK DesiredAccess,
+                      IN POBJECT_ATTRIBUTES ObjectAttributes,
+                      IN ULONG TitleIndex,
+                      IN PUNICODE_STRING Class OPTIONAL,
+                      IN ULONG CreateOptions,
+                      IN HANDLE TransactionHandle,
+                      OUT PULONG Disposition OPTIONAL)
+{
+    PAGED_CODE();
+    return CmpCheckTransactionHandle(TransactionHandle);
+}
+
 
 NTSTATUS
 NTAPI

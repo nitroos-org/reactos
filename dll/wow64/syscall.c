@@ -2238,6 +2238,42 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         ATTR(2);
         KeyAccess = KeyViewAccess(OA(2), a[1]);
         Status = NtOpenKeyEx(&Cleanup->Handle, KeyAccess, OA(2), a[3]); RETURN_HANDLE();
+    /* Transacted registry access: the kernel looks at the transaction handle first (invalid handle, wrong type) and
+     * no transaction can exist. Measured on Windows 10 22H2 for a 32-bit caller: an invalid transaction handle is
+     * STATUS_INVALID_HANDLE whatever the other arguments are (also a NULL output pointer or attributes), and only
+     * with a handle that exists a NULL attributes pointer, an attributes block with no name or an output
+     * pointer that cannot be written (a NULL one is fine) is STATUS_ACCESS_VIOLATION. */
+    case W64_NtOpenKeyTransacted:
+        Status = NtOpenKeyTransacted(&Cleanup->Handle, a[1], NULL, H(3));
+        if (Status == STATUS_INVALID_HANDLE) return Status;
+        if (!a[2]) return STATUS_ACCESS_VIOLATION;
+        ATTR(2);
+        if (!Attributes.ObjectName) return STATUS_ACCESS_VIOLATION;
+        if (a[0]) PROBE(0);
+        KeyAccess = KeyViewAccess(OA(2), a[1]);
+        Status = NtOpenKeyTransacted(&Cleanup->Handle, KeyAccess, OA(2), H(3)); RETURN_HANDLE();
+    case W64_NtOpenKeyTransactedEx:
+        Status = NtOpenKeyTransactedEx(&Cleanup->Handle, a[1], NULL, a[3], H(4));
+        if (Status == STATUS_INVALID_HANDLE) return Status;
+        if (!a[2]) return STATUS_ACCESS_VIOLATION;
+        ATTR(2);
+        if (!Attributes.ObjectName) return STATUS_ACCESS_VIOLATION;
+        if (a[0]) PROBE(0);
+        KeyAccess = KeyViewAccess(OA(2), a[1]);
+        Status = NtOpenKeyTransactedEx(&Cleanup->Handle, KeyAccess, OA(2), a[3], H(4)); RETURN_HANDLE();
+    case W64_NtCreateKeyTransacted:
+    {
+        UNICODE_STRING Class;
+        Status = NtCreateKeyTransacted(&Cleanup->Handle, a[1], NULL, a[3], NULL, a[5], H(6), NULL);
+        if (Status == STATUS_INVALID_HANDLE) return Status;
+        if (!a[2]) return STATUS_ACCESS_VIOLATION;
+        ATTR(2);
+        if (!Attributes.ObjectName) return STATUS_ACCESS_VIOLATION;
+        if (a[0]) PROBE(0);
+        KeyAccess = KeyViewAccess(OA(2), a[1]);
+        Status = NtCreateKeyTransacted(&Cleanup->Handle, KeyAccess, OA(2), a[3], String32(&Class, P(4)), a[5], H(6), P(7));
+        RETURN_HANDLE();
+    }
     case W64_NtCreateKey:
     {
         UNICODE_STRING Class;
