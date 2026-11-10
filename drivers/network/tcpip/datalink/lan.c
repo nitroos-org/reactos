@@ -29,6 +29,11 @@ UINT TransferDataCompleteCalled = 0;
    receive buffers do not run out while the worker is busy */
 #define LAN_MAX_HELD_PACKETS 32
 
+/* Frames other than TCP segments each get a work item of their own: a flood of them must not queue
+   work (and hold the miniport's packets) without end. Past this many in flight a frame is dropped,
+   as a full receive queue of a network card drops it */
+#define LAN_MAX_PENDING_FRAMES 512
+
 /* One NDIS request and its own completion. NDIS completes a pending request
    through ProtocolRequestComplete with that request, so the waiter is found
    from it: several requests can be pending on one adapter at a time. */
@@ -674,8 +679,11 @@ BOOLEAN LanSubmitReceiveWork(
     if (Tcp) {
         Queued = ChewSerialInsert(&Adapter->ReceiveQueue, &WQItem->ListEntry);
     } else {
-        InterlockedIncrement(&Adapter->ReceiveWorkItems);
-        Queued = ChewCreate(LanReceiveWorkItem, WQItem);
+        if (InterlockedIncrement(&Adapter->ReceiveWorkItems) > LAN_MAX_PENDING_FRAMES) {
+            Queued = FALSE;
+        } else {
+            Queued = ChewCreate(LanReceiveWorkItem, WQItem);
+        }
         if (!Queued)
             InterlockedDecrement(&Adapter->ReceiveWorkItems);
     }
