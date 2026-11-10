@@ -563,7 +563,23 @@ AtaDeviceNcqRecovery(
     return STATUS_SUCCESS;
 
 Failure:
-    /* A port reset is required to abort all outstanding queued commands */
+    /*
+     * The failed command could not be identified. A port reset is required to abort all
+     * outstanding queued commands, and every one of them is requeued, the failed one included.
+     * Nothing charges a retry to a request that is requeued this way, so with a command that
+     * keeps failing (a bad sector, a device without the error log page) the same sequence
+     * (error, failed log read, port reset, requeue) would repeat forever and the I/O never
+     * completes. Stop using NCQ: the requeued commands are then issued as non-queued commands,
+     * whose errors are attributed to the failing request, counted against its retry limit and
+     * reported to the class driver.
+     */
+    if (DevExt->Device.DeviceFlags & DEVICE_NCQ)
+    {
+        DevExt->Device.DeviceFlags &= ~DEVICE_NCQ;
+
+        ERR("NCQ disabled for '%s' after a failed NCQ error recovery\n", DevExt->FriendlyName);
+        AtaDeviceLogEvent(DevExt, EVENT_CODE_NCQ_DISABLE);
+    }
     _InterlockedOr(&PortData->Worker.EventsPending, ACTION_PORT_RESET);
     return STATUS_SUCCESS;
 }
