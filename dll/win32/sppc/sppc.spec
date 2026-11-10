@@ -4,6 +4,7 @@
 @ stdcall SLDepositMigrationBlob(ptr long ptr ptr ptr)
 @ stdcall SLDepositOfflineConfirmationId(ptr ptr wstr wstr)
 @ stdcall SLGenerateOfflineInstallationId(ptr ptr ptr)
+@ stdcall SLGetApplicationInformation(ptr ptr wstr ptr ptr ptr)
 @ stdcall -arch=win64 SLGetApplicationPolicy(ptr ptr ptr ptr ptr)
 @ stdcall -arch=win64 SLGetAuthenticationResult(ptr ptr ptr ptr)
 @ stdcall SLGetInstalledProductKeyIds(ptr ptr ptr ptr)
