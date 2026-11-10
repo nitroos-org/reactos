@@ -121,13 +121,55 @@ Exit:
 }
 
 
+/*
+ * The DC lock is not held while the USER lock is taken or the driver is called (which may take the USER
+ * lock itself, EngCreateWnd/EngDeleteWnd): window management locks a window's DCs with the USER lock held
+ * (moves, size changes, hide/show, redirection bindings), also DCs of the calling process. A thread that held
+ * its DC while waiting for the USER lock deadlocked with a thread of its process that changes the window.
+ * As NtGdiExtEscape: the PDEV is referenced, the DC is released first.
+ */
+static
+PPDEVOBJ
+IntGetDCPdevForWindow(
+    _In_ HDC hdc,
+    _In_ BOOL bCheckFormat,
+    _In_ INT ipfd)
+{
+    PDC pdc;
+    PPDEVOBJ ppdev = NULL;
+
+    pdc = DC_LockDc(hdc);
+    if (!pdc)
+    {
+        EngSetLastError(ERROR_INVALID_HANDLE);
+        return NULL;
+    }
+
+    if (bCheckFormat)
+    {
+        if (!pdc->ipfdDevMax)
+            IntGetipfdDevMax(pdc);
+
+        if (ipfd < 1 || ipfd > pdc->ipfdDevMax)
+        {
+            EngSetLastError(ERROR_INVALID_PARAMETER);
+            DC_UnlockDc(pdc);
+            return NULL;
+        }
+    }
+
+    ppdev = pdc->ppdev;
+    PDEVOBJ_vReference(ppdev);
+    DC_UnlockDc(pdc);
+    return ppdev;
+}
+
 BOOL
 APIENTRY
 NtGdiSetPixelFormat(
     _In_ HDC hdc,
     _In_ INT ipfd)
 {
-    PDC pdc;
     PPDEVOBJ ppdev;
     HWND hWnd;
     PWNDOBJ pWndObj;
@@ -136,22 +178,9 @@ NtGdiSetPixelFormat(
 
     DPRINT1("Setting pixel format from win32k!\n");
 
-    pdc = DC_LockDc(hdc);
-    if (!pdc)
-    {
-        EngSetLastError(ERROR_INVALID_HANDLE);
+    ppdev = IntGetDCPdevForWindow(hdc, TRUE, ipfd);
+    if (!ppdev)
         return FALSE;
-    }
-
-    if (!pdc->ipfdDevMax)
-        IntGetipfdDevMax(pdc);
-
-    if ( ipfd < 1 ||
-        ipfd > pdc->ipfdDevMax )
-    {
-        EngSetLastError(ERROR_INVALID_PARAMETER);
-        goto Exit;
-    }
 
     UserEnterExclusive();
     hWnd = UserGethWnd(hdc, &pWndObj);
@@ -162,8 +191,6 @@ NtGdiSetPixelFormat(
         EngSetLastError(ERROR_INVALID_WINDOW_STYLE);
         goto Exit;
     }
-
-    ppdev = pdc->ppdev;
 
     /*
         WndObj is needed so exit on NULL pointer.
@@ -191,7 +218,7 @@ NtGdiSetPixelFormat(
     }
 
 Exit:
-    DC_UnlockDc(pdc);
+    PDEVOBJ_vRelease(ppdev);
     return Ret;
 }
 
@@ -200,19 +227,15 @@ APIENTRY
 NtGdiSwapBuffers(
     _In_ HDC hdc)
 {
-    PDC pdc;
     PPDEVOBJ ppdev;
     HWND hWnd;
     PWNDOBJ pWndObj;
     SURFOBJ *pso = NULL;
     BOOL Ret = FALSE;
 
-    pdc = DC_LockDc(hdc);
-    if (!pdc)
-    {
-        EngSetLastError(ERROR_INVALID_HANDLE);
+    ppdev = IntGetDCPdevForWindow(hdc, FALSE, 0);
+    if (!ppdev)
         return FALSE;
-    }
 
     UserEnterExclusive();
     hWnd = UserGethWnd(hdc, &pWndObj);
@@ -223,8 +246,6 @@ NtGdiSwapBuffers(
         EngSetLastError(ERROR_INVALID_WINDOW_STYLE);
         goto Exit;
     }
-
-    ppdev = pdc->ppdev;
 
     /*
         WndObj is needed so exit on NULL pointer.
@@ -249,7 +270,7 @@ NtGdiSwapBuffers(
     }
 
 Exit:
-    DC_UnlockDc(pdc);
+    PDEVOBJ_vRelease(ppdev);
     return Ret;
 }
 
