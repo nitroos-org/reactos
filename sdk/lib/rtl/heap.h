@@ -380,8 +380,45 @@ RtlpEnumerateHeap(_In_opt_ PRTLP_HEAP_READ_ROUTINE Read,
 #define HEAP_FE_NOT_HANDLED     0
 #define HEAP_FE_CACHED          1
 #define HEAP_FE_INVALID         2
+/* Parked bytes (all slots) above which a heap that needs room gives them back before it grows */
+#define HEAP_FE_FLUSH_LIMIT     (1024 * 1024)
 /* A serialized heap that its own lock made wait this often gets the front end */
 #define HEAP_FE_AUTO_THRESHOLD  16
+
+/*
+ * Size classes, in heap units (HEAP_ENTRY_SIZE bytes): exact up to HEAP_FE_EXACT, then one class
+ * per HEAP_FE_STEP units (64 bytes). A freed block is filed under the largest class boundary it
+ * reaches, a request looks in the smallest class boundary that covers it, so a block served is
+ * never smaller than the request and is less than three steps (192 bytes) larger (HeapSize still reports the
+ * requested size: the surplus is kept in UnusedBytes, which holds up to 255).
+ */
+#define HEAP_FE_MAX_BLOCK       4096    /* bytes, header included */
+#define HEAP_FE_UNITS           (HEAP_FE_MAX_BLOCK >> HEAP_ENTRY_SHIFT)
+#define HEAP_FE_EXACT           16
+#ifdef _WIN64
+#define HEAP_FE_STEP            4
+#define HEAP_FE_CLASSES         80      /* >= 16 + (255 - 16) / 4 + 1, a multiple of 8 */
+#else
+#define HEAP_FE_STEP            8
+#define HEAP_FE_CLASSES         80      /* >= 16 + (511 - 16) / 8 + 1, a multiple of 16 */
+#endif
+
+#define HEAP_FE_CLASS_FOR_ALLOC(Units) \
+    (((Units) <= HEAP_FE_EXACT) ? (Units) : HEAP_FE_EXACT + (((Units) - HEAP_FE_EXACT + HEAP_FE_STEP - 1) / HEAP_FE_STEP))
+#define HEAP_FE_CLASS_FOR_FREE(Units) \
+    (((Units) <= HEAP_FE_EXACT) ? (Units) : HEAP_FE_EXACT + (((Units) - HEAP_FE_EXACT) / HEAP_FE_STEP))
+
+
+/* The units of the block that serves a request of Index units: the boundary of its class, so that
+   every block the heap hands out for a small request files under exactly the class a later request
+   of the same class looks in (blocks of other sizes would pile up in classes nobody asks for) */
+FORCEINLINE
+SIZE_T
+RtlpHeapFeRoundIndex(SIZE_T Index)
+{
+    return (Index <= HEAP_FE_EXACT) ? Index :
+           HEAP_FE_EXACT + (((Index - HEAP_FE_EXACT + HEAP_FE_STEP - 1) / HEAP_FE_STEP) * HEAP_FE_STEP);
+}
 
 BOOLEAN NTAPI
 RtlpHeapFeEnable(PHEAP Heap);
@@ -404,6 +441,9 @@ RtlpHeapFeIsCached(PHEAP_ENTRY Entry);
 
 ULONG NTAPI
 RtlpHeapFeFlush(PHEAP Heap);
+
+SIZE_T NTAPI
+RtlpHeapFeParked(PHEAP Heap);
 
 ULONG NTAPI
 RtlpHeapFeLock(PHEAP Heap);
