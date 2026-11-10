@@ -105,4 +105,10 @@
 /**
  * TCP_DEBUG: Enable debugging for TCP.
  */
+/* The debug checks walk every TCP control block on each segment and each removal (tcp_pcbs_sane);
+ * with thousands of connections in TIME-WAIT they slowed the connect rate of a loop to a fifth */
+#if DBG
 #define TCP_DEBUG                       LWIP_DBG_ON
+#else
+#define TCP_DEBUG                       LWIP_DBG_OFF
+#endif
