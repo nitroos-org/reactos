@@ -278,14 +278,21 @@ DC_vSetBrushOrigin(PDC pdc, LONG x, LONG y);
  * It leaves DC_REDIR_ATTRDIRTY; the brushes are marked for realizing again here, where the DC is locked
  * by its owner (or is public, with its attributes in the kernel).
  */
+#define DIRTY_DEFAULT (DIRTY_CHARSET | DIRTY_BACKGROUND | DIRTY_TEXT | DIRTY_LINE | DIRTY_FILL)
+
 FORCEINLINE
 VOID
 DC_vApplyRedirAttrDirty(PDC pdc)
 {
     if (pdc->fs & DC_REDIR_ATTRDIRTY)
     {
+        /* The lock checks the owner before it waits: the DC may belong to another process by now
+         * (GreSetDCOwner while this thread waited). Its owner applies the mark then. */
+        if (pdc->pdcattr != &pdc->dcattr && GreGetObjectOwner(pdc->BaseObject.hHmgr) != GDI_OBJ_HMGR_POWNED)
+            return;
         pdc->fs &= ~DC_REDIR_ATTRDIRTY;
-        pdc->pdcattr->ulDirty_ |= DIRTY_FILL | DIRTY_LINE | DIRTY_TEXT | DIRTY_BACKGROUND;
+        /* As DC_vUpdateDC did for a surface change */
+        pdc->pdcattr->ulDirty_ |= DIRTY_DEFAULT;
     }
 }
 

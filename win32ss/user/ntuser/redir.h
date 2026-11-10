@@ -24,4 +24,4 @@ BOOL FASTCALL UserRedirCopyToDC(PWND Wnd, HDC hdc, LONG xSrc, LONG ySrc, LONG cx
 /* windc.c */
 VOID FASTCALL DceRedirUnbindAll(PVOID pvRedir);
 VOID FASTCALL DceRedirRebindAll(PVOID pvRedir, struct _SURFACE *psurf);
-VOID FASTCALL DceRedirRetryAll(VOID);
+VOID FASTCALL DceRedirRetryAll(_Inout_ PLONG plBudget);

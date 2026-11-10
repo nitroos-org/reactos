@@ -15,8 +15,8 @@ DBG_DEFAULT_CHANNEL(GdiBlt);
  * by the signs of the destination and source sizes as in stretchblt.c), so the destination is made wider on those edges only.
  * At the end of the coordinate range the engine's pixel wraps, see below.
  */
-static
 VOID
+FASTCALL
 IntStretchHazard(
     const RECTL *prclDest,
     const RECTL *prclSrc,
