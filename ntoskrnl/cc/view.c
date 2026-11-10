@@ -379,6 +379,7 @@ CcRosDeleteFileCache (
         RemoveEntryList(&Vacb->CacheMapVacbListEntry);
         InsertTailList(&LocalVacbList, &Vacb->CacheMapVacbListEntry);
     }
+    SharedCacheMap->LastVacb = NULL;
 
     /* Make sure there is no trace anymore of this map */
     FileObject->SectionObjectPointer->SharedCacheMap = NULL;
@@ -1254,6 +1255,8 @@ retry:
             ASSERT(!current->MappedCount);
             ASSERT(Refs == 1);
 
+            if (current->SharedCacheMap->LastVacb == current)
+                current->SharedCacheMap->LastVacb = NULL;
             RemoveEntryList(&current->CacheMapVacbListEntry);
             RemoveEntryList(&current->VacbLruListEntry);
             InitializeListHead(&current->VacbLruListEntry);
@@ -1396,9 +1399,10 @@ CcRosReleaseVacb (
 
 /*
  * The view of the map that holds FileOffset, or NULL; the list is sorted by file offset.  *Previous is the last view that
- * starts before FileOffset (and does not hold it), for the sorted insert of a new view.  The walk starts from the end of
- * the list that is nearer: a writer that appends (or a reader at the end) finds the position at once, where a walk from
- * the head took as many steps as the file has views (4096 for a 1 GB file), under the master lock.  Both locks held.
+ * starts before FileOffset (and does not hold it), for the sorted insert of a new view.  The walk starts at the nearest
+ * of the head, the tail and the view the last lookup found (a reader or writer that goes on finds the next view at
+ * once, where a walk from the head took as many steps as the file has views: 4096 for a 1 GB file), under the master
+ * lock.  Both locks held.
  */
 static
 PROS_VACB
@@ -1408,48 +1412,72 @@ CcRosFindVacbLocked(
     _Out_opt_ PROS_VACB *Previous)
 {
     PLIST_ENTRY Head = &SharedCacheMap->CacheMapVacbListHead, Entry;
-    PROS_VACB Current, Prev = NULL;
+    PROS_VACB Current, Next, Start;
+    LONGLONG Dist, D;
 
     if (Previous)
         *Previous = NULL;
     if (IsListEmpty(Head))
         return NULL;
 
+    /* Start at the nearest of the first view, the last view and the last hit */
+    Start = CONTAINING_RECORD(Head->Flink, ROS_VACB, CacheMapVacbListEntry);
+    Dist = FileOffset - Start->FileOffset.QuadPart;
+    if (Dist < 0)
+        Dist = -Dist;
     Current = CONTAINING_RECORD(Head->Blink, ROS_VACB, CacheMapVacbListEntry);
+    D = FileOffset - Current->FileOffset.QuadPart;
+    if (D < 0)
+        D = -D;
+    if (D < Dist)
     {
-        PROS_VACB First = CONTAINING_RECORD(Head->Flink, ROS_VACB, CacheMapVacbListEntry);
+        Start = Current;
+        Dist = D;
+    }
+    if (SharedCacheMap->LastVacb != NULL)
+    {
+        D = FileOffset - SharedCacheMap->LastVacb->FileOffset.QuadPart;
+        if (D < 0)
+            D = -D;
+        if (D <= Dist)
+            Start = SharedCacheMap->LastVacb;
+    }
 
-        if (FileOffset - First->FileOffset.QuadPart > Current->FileOffset.QuadPart - FileOffset)
+    /* Find the last view that starts at or before FileOffset */
+    Current = Start;
+    if (Current->FileOffset.QuadPart <= FileOffset)
+    {
+        for (Entry = Current->CacheMapVacbListEntry.Flink; Entry != Head; Entry = Entry->Flink)
         {
-            /* Nearer the tail: the last view that starts at or before FileOffset */
-            for (Entry = Head->Blink; Entry != Head; Entry = Entry->Blink)
-            {
-                Current = CONTAINING_RECORD(Entry, ROS_VACB, CacheMapVacbListEntry);
-                if (Current->FileOffset.QuadPart <= FileOffset)
-                {
-                    if (IsPointInRange(Current->FileOffset.QuadPart, VACB_MAPPING_GRANULARITY, FileOffset))
-                        return Current;
-                    if (Previous)
-                        *Previous = Current;
-                    return NULL;
-                }
-            }
-            return NULL;
+            Next = CONTAINING_RECORD(Entry, ROS_VACB, CacheMapVacbListEntry);
+            if (Next->FileOffset.QuadPart > FileOffset)
+                break;
+            Current = Next;
         }
     }
-
-    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
+    else
     {
-        Current = CONTAINING_RECORD(Entry, ROS_VACB, CacheMapVacbListEntry);
-        if (IsPointInRange(Current->FileOffset.QuadPart, VACB_MAPPING_GRANULARITY, FileOffset))
-            return Current;
-        if (Current->FileOffset.QuadPart < FileOffset)
-            Prev = Current;
-        if (Current->FileOffset.QuadPart > FileOffset)
-            break;
+        Current = NULL;
+        for (Entry = Start->CacheMapVacbListEntry.Blink; Entry != Head; Entry = Entry->Blink)
+        {
+            Next = CONTAINING_RECORD(Entry, ROS_VACB, CacheMapVacbListEntry);
+            if (Next->FileOffset.QuadPart <= FileOffset)
+            {
+                Current = Next;
+                break;
+            }
+        }
+        if (Current == NULL)
+            return NULL;
+    }
+
+    if (IsPointInRange(Current->FileOffset.QuadPart, VACB_MAPPING_GRANULARITY, FileOffset))
+    {
+        SharedCacheMap->LastVacb = Current;
+        return Current;
     }
     if (Previous)
-        *Previous = Prev;
+        *Previous = Current;
     return NULL;
 }
 
@@ -1617,6 +1645,8 @@ CcRosFreeOneUnusedVacb(
             ASSERT(Refs == 1);
 
             /* Reset it, this is the one we want to free */
+            if (current->SharedCacheMap->LastVacb == current)
+                current->SharedCacheMap->LastVacb = NULL;
             RemoveEntryList(&current->CacheMapVacbListEntry);
             InitializeListHead(&current->CacheMapVacbListEntry);
             RemoveEntryList(&current->VacbLruListEntry);
@@ -1752,6 +1782,7 @@ CcRosCreateVacb (
     }
     KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
     InsertTailList(&VacbLruListHead, &current->VacbLruListEntry);
+    SharedCacheMap->LastVacb = current;
 
     /* Reference it to allow release */
     CcRosVacbIncRefCount(current);
@@ -1804,6 +1835,10 @@ CcRosEnsureVacbResident(
                 ExRaiseStatus(Status);
         }
     }
+
+    /* The pages the caller goes on to touch: map them in one pass, instead of a fault each */
+    if (Vacb->BaseAddress != NULL && Length >= PAGE_SIZE && KeGetCurrentIrql() <= APC_LEVEL)
+        MmMapResidentSystemViewPages((PUCHAR)Vacb->BaseAddress + Offset, Length);
 
     return TRUE;
 }

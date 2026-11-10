@@ -1431,6 +1431,29 @@ MiCopyFromUserPage(PFN_NUMBER DestPage, const VOID *SrcAddress)
     return STATUS_SUCCESS;
 }
 
+/*
+ * A paging read of a data file takes up to this much in one request: the missing pages of what a caller asked
+ * for (the cache makes a view's range resident, up to 256 KB) are read together, where each 64 KB chunk of it
+ * was a request of its own, one after the other.  What is read beyond what was asked stays within 64 KB.
+ */
+#define MM_READ_BATCH (256 * 1024)
+
+static
+ULONG
+MiLowestSetBit64(
+    _In_ ULONGLONG Value)
+{
+    ULONG Bit = 0;
+
+    ASSERT(Value != 0);
+    while (!(Value & 1))
+    {
+        Value >>= 1;
+        Bit++;
+    }
+    return Bit;
+}
+
 static
 NTSTATUS
 NTAPI
@@ -1477,11 +1500,11 @@ MmMakeSegmentResident(
     }
 
     /* Let's gooooooooo */
-    for ( ; RangeStart < RangeEnd; RangeStart += _64K)
+    for ( ; RangeStart < RangeEnd; RangeStart += MM_READ_BATCH)
     {
         /* First take a look at where we miss pages */
-        ULONG ToReadPageBits = 0;
-        LONGLONG ChunkEnd = RangeStart + _64K;
+        ULONGLONG ToReadPageBits = 0;
+        LONGLONG ChunkEnd = RangeStart + MM_READ_BATCH;
 
         if (ChunkEnd > RangeEnd)
             ChunkEnd = RangeEnd;
@@ -1515,7 +1538,7 @@ MmMakeSegmentResident(
                 continue;
             }
 
-            ToReadPageBits |= 1UL << ((ChunkOffset - RangeStart) >> PAGE_SHIFT);
+            ToReadPageBits |= 1ULL << ((ChunkOffset - RangeStart) >> PAGE_SHIFT);
 
             /* Put a wait entry here */
             Status = MmSetPageEntrySectionSegment(Segment, &CurrentOffset, MAKE_SWAP_SSE(MM_WAIT_ENTRY));
@@ -1553,20 +1576,21 @@ MmMakeSegmentResident(
         {
             /* Move forward if there is a hole */
             ULONG BitSet;
-            if (!_BitScanForward(&BitSet, ToReadPageBits))
+            if (ToReadPageBits == 0)
             {
                 /* Nothing more to read */
                 break;
             }
+            BitSet = MiLowestSetBit64(ToReadPageBits);
             ToReadPageBits >>= BitSet;
             ChunkOffset += BitSet * PAGE_SIZE;
             ASSERT(ChunkOffset < ChunkEnd);
 
             /* Get the range we have to read */
-            _BitScanForward(&BitSet, ~ToReadPageBits);
+            BitSet = (~ToReadPageBits != 0) ? MiLowestSetBit64(~ToReadPageBits) : 64;
             ULONG ReadLength = BitSet * PAGE_SIZE;
 
-            ASSERT(ReadLength <= _64K);
+            ASSERT(ReadLength <= MM_READ_BATCH);
 
             /* Clamp (This is for image mappings */
             if ((ChunkOffset + ReadLength) > ChunkEnd)
@@ -1731,7 +1755,7 @@ AssignPagesToSegment:
             MmUnlockSectionSegment(Segment);
 
             IoFreeMdl(Mdl);
-            ToReadPageBits >>= BitSet;
+            ToReadPageBits = (BitSet >= 64) ? 0 : (ToReadPageBits >> BitSet);
             ChunkOffset += BitSet * PAGE_SIZE;
         }
     }
@@ -6384,6 +6408,88 @@ MmPurgeSegment(
     MmUnlockSectionSegment(Segment);
     MmDereferenceSegment(Segment);
     return Success;
+}
+
+/*
+ * Maps the pages of a range of a view in system space (a view of Cc) that are in the section's memory and not
+ * mapped yet, all in one pass under the locks.  What a copy from the view would fault in one page at a time
+ * (a trap, the address space lock and the segment lock for each page: 1.3 us of 1.5 us per page of a cached
+ * read after the view was mapped).  A page that is not resident, or is being read or written, is left to the
+ * fault, as is everything this does not map: the result is the mapping the fault makes (MiNotPresentFaultSectionView,
+ * the branch of a page the segment has), only earlier.  Only for data views that are not copy-on-write.
+ */
+VOID
+NTAPI
+MmMapResidentSystemViewPages(
+    _In_ PVOID Address,
+    _In_ SIZE_T Length)
+{
+    PMMSUPPORT AddressSpace = MmGetKernelAddressSpace();
+    PMEMORY_AREA MemoryArea;
+    PMM_SECTION_SEGMENT Segment;
+    PMM_REGION Region;
+    ULONG_PTR Start, End, Page;
+    LARGE_INTEGER Offset;
+
+    if (Length == 0)
+        return;
+    Start = (ULONG_PTR)PAGE_ALIGN(Address);
+    End = (ULONG_PTR)ROUND_UP((ULONG_PTR)Address + Length, PAGE_SIZE);
+
+    /* Mapped already (a view that stayed mapped): no lock */
+    for (Page = Start; Page < End; Page += PAGE_SIZE)
+    {
+        if (!MmIsPagePresent(NULL, (PVOID)Page))
+            break;
+    }
+    if (Page == End)
+        return;
+
+    MmLockAddressSpace(AddressSpace);
+    MemoryArea = MmLocateMemoryAreaByAddress(AddressSpace, (PVOID)Start);
+    if (MemoryArea == NULL || MemoryArea->DeleteInProgress || MemoryArea->Type != MEMORY_AREA_SECTION_VIEW ||
+        End > (ULONG_PTR)MA_GetEndingAddress(MemoryArea))
+    {
+        MmUnlockAddressSpace(AddressSpace);
+        return;
+    }
+
+    Segment = MemoryArea->SectionData.Segment;
+    if (Segment->WriteCopy || ((*Segment->Flags) & MM_PHYSICALMEMORY_SEGMENT) || MemoryArea->VadNode.u.VadFlags.VadType == VadImageMap)
+    {
+        MmUnlockAddressSpace(AddressSpace);
+        return;
+    }
+
+    MmLockSectionSegment(Segment);
+    for (; Page < End; Page += PAGE_SIZE)
+    {
+        ULONG_PTR Entry;
+        PFN_NUMBER Pfn;
+
+        if (MmIsPagePresent(NULL, (PVOID)Page))
+            continue;
+        if (MmIsPageSwapEntry(NULL, (PVOID)Page) || MmIsDisabledPage(NULL, (PVOID)Page))
+            continue;
+
+        Region = MmFindRegion((PVOID)MA_GetStartingAddress(MemoryArea),
+                              &MemoryArea->SectionData.RegionListHead,
+                              (PVOID)Page, NULL);
+        if (Region == NULL || (Region->Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+            break;
+
+        Offset.QuadPart = Page - MA_GetStartingAddress(MemoryArea) + MemoryArea->SectionData.ViewOffset;
+        Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
+        if (Entry == 0 || IS_SWAP_FROM_SSE(Entry))
+            continue;
+
+        Pfn = PFN_FROM_SSE(Entry);
+        if (!NT_SUCCESS(MmCreateVirtualMapping(NULL, (PVOID)Page, Region->Protect, Pfn)))
+            break;
+        MmSharePageEntrySectionSegment(Segment, &Offset);
+    }
+    MmUnlockSectionSegment(Segment);
+    MmUnlockAddressSpace(AddressSpace);
 }
 
 BOOLEAN

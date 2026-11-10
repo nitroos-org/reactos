@@ -286,6 +286,8 @@ CcPurgeCacheSection (
         {
             CcRosUnmarkDirtyVacb(Vacb, FALSE);
         }
+        if (SharedCacheMap->LastVacb == Vacb)
+            SharedCacheMap->LastVacb = NULL;
         RemoveEntryList(&Vacb->CacheMapVacbListEntry);
         InsertHeadList(&FreeList, &Vacb->CacheMapVacbListEntry);
     }
