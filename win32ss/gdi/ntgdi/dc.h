@@ -31,6 +31,7 @@ typedef enum _DCFLAGS
     DC_IN_CLONEPDEV      = 0x1000,
     DC_REDIRECTION       = 0x2000,
     DC_SHAREACCESS       = 0x4000,
+    DC_REDIR_ATTRDIRTY   = 0x10000, /* NitroOS: the surface changed (GreRedirBindDC); brushes to realize again */
 #if DBG
     DC_PREPARED          = 0x8000
 #endif
@@ -151,6 +152,7 @@ typedef struct _DC
 #define REDIRBIND_OK    0   /* bound as asked */
 #define REDIRBIND_BUSY  1   /* the DC is locked by another process for now: binding unchanged */
 #define REDIRBIND_GONE  2   /* the DC handle is no longer valid (or not a window DC) */
+BOOL NTAPI GreRedirSetDCOrg(_In_ HDC hdc, _In_ LONG x, _In_ LONG y, _In_opt_ PRECTL prcl);
 ULONG NTAPI GreRedirBindDC(_In_ HDC hdc, _In_opt_ PVOID pvRedir, _In_opt_ struct _SURFACE *psurf, _Out_ PVOID *ppvOld);
 struct _SURFACE *NTAPI GreRedirCreateSurface(_In_ LONG cx, _In_ LONG cy, _In_opt_ struct _SURFACE *psurfOld);
 VOID NTAPI GreRedirDeleteSurface(_In_ struct _SURFACE *psurf);
@@ -269,6 +271,23 @@ VOID
 NTAPI
 DC_vSetBrushOrigin(PDC pdc, LONG x, LONG y);
 
+/*
+ * GreRedirBindDC changes the surface of a window DC from any process (and from the frame timer), where
+ * the DC's attributes (pdcattr: user-mode memory of the process that owns the DC) must not be touched.
+ * It leaves DC_REDIR_ATTRDIRTY; the brushes are marked for realizing again here, where the DC is locked
+ * by its owner (or is public, with its attributes in the kernel).
+ */
+FORCEINLINE
+VOID
+DC_vApplyRedirAttrDirty(PDC pdc)
+{
+    if (pdc->fs & DC_REDIR_ATTRDIRTY)
+    {
+        pdc->fs &= ~DC_REDIR_ATTRDIRTY;
+        pdc->pdcattr->ulDirty_ |= DIRTY_FILL | DIRTY_LINE | DIRTY_TEXT | DIRTY_BACKGROUND;
+    }
+}
+
 FORCEINLINE
 PDC
 DC_LockDc(HDC hdc)
@@ -282,6 +301,7 @@ DC_LockDc(HDC hdc)
                (GDI_HANDLE_GET_TYPE(pdc->BaseObject.hHmgr) == GDILoObjType_LO_ALTDC_TYPE));
         ASSERT(pdc->dclevel.plfnt != NULL);
         ASSERT(GDI_HANDLE_GET_TYPE(((POBJ)pdc->dclevel.plfnt)->hHmgr) == GDILoObjType_LO_FONT_TYPE);
+        DC_vApplyRedirAttrDirty(pdc);
     }
 
     return pdc;

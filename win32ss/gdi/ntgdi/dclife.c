@@ -481,7 +481,7 @@ GreSetDCOwner(HDC hdc, ULONG ulOwner)
 
 static
 void
-DC_vUpdateDC(PDC pdc)
+DC_vUpdateDCSurface(PDC pdc)
 {
     // PREGION VisRgn ;
     PPDEVOBJ ppdev = pdc->ppdev;
@@ -504,6 +504,13 @@ DC_vUpdateDC(PDC pdc)
 
     pdc->flGraphicsCaps = ppdev->devinfo.flGraphicsCaps;
     pdc->flGraphicsCaps2 = ppdev->devinfo.flGraphicsCaps2;
+}
+
+static
+void
+DC_vUpdateDC(PDC pdc)
+{
+    DC_vUpdateDCSurface(pdc);
 
     /* Mark EBRUSHOBJs as dirty */
     pdc->pdcattr->ulDirty_ |= DIRTY_DEFAULT ;
@@ -611,7 +618,8 @@ DC_vPrepareDCsForBlitEx(
     const RECT *prcFirst, *prcSecond;
     BOOL bFirstIsDest = TRUE;
 
-    /* Update brushes */
+    /* Update brushes (a DC locked with others did not pass DC_LockDc) */
+    DC_vApplyRedirAttrDirty(pdcDest);
     if (pdcDest->pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(pdcDest);
     if (pdcDest->pdcattr->ulDirty_ & (DIRTY_LINE | DC_PEN_DIRTY))
@@ -1213,9 +1221,37 @@ IntGdiCreateDisplayDC(HDEV hDev, ULONG DcType, BOOL EmptyDC)
 }
 
 /*
- * Binds a window DC to a redirection surface (ntuser/redir.c), or with hbmSurface NULL back to the
- * screen. pvRedir is USER's record for the window; *ppvOld gets the record the DC had (USER keeps the
+ * GreSetDCOrg for a window DC whose binding USER changed: from another process or the frame timer, which
+ * DC_LockDc refuses for a DC that a process owns. Only kernel fields of the DC are set.
+ */
+BOOL
+NTAPI
+GreRedirSetDCOrg(
+    _In_ HDC hdc,
+    _In_ LONG x,
+    _In_ LONG y,
+    _In_opt_ PRECTL prcl)
+{
+    PDC pdc = DC_LockDcAnyOwner(hdc);
+
+    if (!pdc)
+        return FALSE;
+    pdc->ptlDCOrig.x = x;
+    pdc->ptlDCOrig.y = y;
+    pdc->ptlFillOrigin.x = pdc->dclevel.ptlBrushOrigin.x + x;
+    pdc->ptlFillOrigin.y = pdc->dclevel.ptlBrushOrigin.y + y;
+    if (prcl)
+        pdc->erclWindow = *prcl;
+    DC_UnlockDc(pdc);
+    return TRUE;
+}
+
+/*
+ * Binds a window DC to a redirection surface (ntuser/redir.c), or with psurf NULL back to the screen.
+ * pvRedir is USER's record for the window; *ppvOld gets the record the DC had (USER keeps the
  * references). The DC stays DCTYPE_DIRECT; DC_REDIRECTION makes it draw like a memory DC into the surface.
+ * Called from any process and from the frame timer: the DC's user-mode attributes (pdcattr, memory of
+ * the process that owns the DC) are not touched here (DC_REDIR_ATTRDIRTY, applied by DC_LockDc).
  */
 ULONG
 NTAPI
@@ -1245,15 +1281,16 @@ GreRedirBindDC(
         /* The DC takes its own reference on the surface (by pointer: the handle has no owner) */
         DC_vSelectSurface(pdc, psurf);
         pdc->dclevel.sizl = pdc->dclevel.pSurface->SurfObj.sizlBitmap;
-        pdc->fs |= DC_REDIRECTION | DC_DIRTY_RAO;
+        pdc->fs |= DC_REDIRECTION | DC_DIRTY_RAO | DC_REDIR_ATTRDIRTY;
         pdc->pvRedir = pvRedir;
     }
     else if (pdc->fs & DC_REDIRECTION)
     {
         pdc->fs &= ~DC_REDIRECTION;
+        pdc->fs |= DC_REDIR_ATTRDIRTY;
         pdc->pvRedir = NULL;
-        /* The screen again (DC_vUpdateDC drops the DC's reference on the surface) */
-        DC_vUpdateDC(pdc);
+        /* The screen again (drops the DC's reference on the surface) */
+        DC_vUpdateDCSurface(pdc);
     }
     DC_UnlockDc(pdc);
     return REDIRBIND_OK;
