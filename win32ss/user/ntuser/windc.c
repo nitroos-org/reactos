@@ -109,6 +109,7 @@ DceAllocDCE(PWND Window OPTIONAL, DCE_TYPE Type)
   pDce->ppiOwner = NULL;
   pDce->bGlass = FALSE;
   pDce->pRedir = NULL;
+  pDce->RedirFlags = 0;
 
   InsertTailList(&LEDce, &pDce->List);
 
@@ -325,21 +326,36 @@ noparent:
    }
 }
 
-/* Binds the DCE's DC to a redirection record (its window's surface) or, with NULL, back to the screen */
-static VOID
+/*
+ * Binds the DCE's DC to a redirection record (its window's surface) or, with NULL, back to the screen.
+ * FALSE: the DC is held by another process for now; the DCE keeps its binding and its reference to the
+ * record (DCE_REDIR_RETRY), and is bound again at its next GetDC, release or move. A record is never
+ * released while a DC may still draw into it.
+ */
+static BOOL
 DceRedirBind(PDCE Dce, PVOID pRedir)
 {
    PVOID pvOld;
 
-   if (Dce->pRedir == pRedir)
-      return;
+   if (Dce->pRedir == pRedir && !(Dce->RedirFlags & DCE_REDIR_RETRY))
+      return TRUE;
    if (!GreRedirBindDC(Dce->hDC, pRedir, pRedir ? UserRedirSurface(pRedir) : NULL, &pvOld))
-      return;
-   if (pRedir)
-      UserRedirAddRef(pRedir);
-   if (Dce->pRedir)
-      UserRedirRelease(Dce->pRedir);
-   Dce->pRedir = pRedir;
+   {
+      Dce->RedirFlags |= DCE_REDIR_RETRY;
+      return FALSE;
+   }
+   Dce->RedirFlags &= ~DCE_REDIR_RETRY;
+   if (Dce->pRedir != pRedir)
+   {
+      if (pRedir)
+         UserRedirAddRef(pRedir);
+      if (Dce->pRedir)
+         UserRedirRelease(Dce->pRedir);
+      Dce->pRedir = pRedir;
+      /* Its visible region and origin were for the other binding */
+      Dce->RedirFlags |= DCE_REDIR_VISSTALE;
+   }
+   return TRUE;
 }
 
 /* The record's window lets go of its surface: every DC on it draws on the screen again */
@@ -356,20 +372,22 @@ DceRedirUnbindAll(PVOID pRedir)
       ListEntry = ListEntry->Flink;
       if (Dce->pRedir != pRedir)
          continue;
-      DceRedirBind(Dce, NULL);
-      /* A DC in use keeps drawing: give it its screen origin and visible region now */
-      if (!Dce->pRedir && (Dce->DCXFlags & DCX_DCEBUSY) && Dce->pwndOrg)
+      if (!DceRedirBind(Dce, NULL))
+         continue;
+      /* A DC in use keeps drawing: its screen origin and visible region now (the others at their next GetDC) */
+      if ((Dce->DCXFlags & DCX_DCEBUSY) && Dce->pwndOrg)
       {
          DceSetDrawable(Dce->pwndOrg, Dce->hDC, Dce->DCXFlags, TRUE, NULL);
          DceUpdateVisRgn(Dce, Dce->pwndOrg, Dce->DCXFlags);
+         Dce->RedirFlags &= ~DCE_REDIR_VISSTALE;
       }
    }
 }
 
-/* The record has a new surface (the window was resized): every DC on it moves there */
+/* The record has a new surface (the window was resized): every DC on it moves there, or keeps the old one until it can */
 VOID
 FASTCALL
-DceRedirRebindAll(PVOID pRedir, HBITMAP hbmSurface)
+DceRedirRebindAll(PVOID pRedir, PSURFACE psurf)
 {
    PLIST_ENTRY ListEntry;
    PDCE Dce;
@@ -381,12 +399,10 @@ DceRedirRebindAll(PVOID pRedir, HBITMAP hbmSurface)
       ListEntry = ListEntry->Flink;
       if (Dce->pRedir != pRedir)
          continue;
-      if (!GreRedirBindDC(Dce->hDC, pRedir, hbmSurface, &pvOld))
-      {
-         /* The DC is gone: it no longer holds the record */
-         UserRedirRelease(pRedir);
-         Dce->pRedir = NULL;
-      }
+      if (GreRedirBindDC(Dce->hDC, pRedir, psurf, &pvOld))
+         Dce->RedirFlags &= ~DCE_REDIR_RETRY;
+      else
+         Dce->RedirFlags |= DCE_REDIR_RETRY;
    }
 }
 
@@ -725,9 +741,21 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
       PWND RedirRoot = UserRedirRootFor(Wnd);
       PVOID pRedir = RedirRoot ? UserRedirGet(RedirRoot) : NULL;
 
-      if (Dce->pRedir != pRedir)
+      /* Not eligible now (hidden, layered, glass): a surface it had no longer holds what it shows */
+      if (!RedirRoot && Wnd)
       {
+         PWND Top = Wnd;
+         while (Top->spwndParent && !UserIsDesktopWindow(Top->spwndParent))
+            Top = Top->spwndParent;
+         UserRedirDetachWindow(Top);
+      }
+
+      if (Dce->pRedir != pRedir || (Dce->RedirFlags & DCE_REDIR_RETRY))
          DceRedirBind(Dce, pRedir);
+      /* Bound otherwise since its region was computed (here or when its window let go of its surface) */
+      if (Dce->RedirFlags & DCE_REDIR_VISSTALE)
+      {
+         Dce->RedirFlags &= ~DCE_REDIR_VISSTALE;
          bUpdateVisRgn = TRUE;
       }
    }
@@ -818,11 +846,10 @@ DceFreeDCE(PDCE pdce, BOOLEAN Force)
 
   if (pdce->pRedir)
   {
-     if (!Hit)
-        DceRedirBind(pdce, NULL);
-     if (pdce->pRedir)
+     if (Hit || !DceRedirBind(pdce, NULL))
      {
-        UserRedirRelease(pdce->pRedir);
+        /* The DC may still draw (and mark the record) while it goes: the record keeps this reference for good */
+        ERR("DCE %p freed while its DC is still bound to a redirection record\n", pdce);
         pdce->pRedir = NULL;
      }
   }
@@ -1018,9 +1045,11 @@ DceResetActiveDCEs(PWND Window)
             }
          }
 
-         /* A record whose window let go of its surface: this DC draws on the screen again */
+         /* A record whose window let go of its surface: this DC draws on the screen again; a pending binding is tried again */
          if (pDCE->pRedir && !UserRedirWindow(pDCE->pRedir))
             DceRedirBind(pDCE, NULL);
+         else if (pDCE->RedirFlags & DCE_REDIR_RETRY)
+            DceRedirBind(pDCE, pDCE->pRedir);
          Root = pDCE->pRedir ? UserRedirWindow(pDCE->pRedir) : NULL;
          RootX = Root ? Root->rcWindow.left : 0;
          RootY = Root ? Root->rcWindow.top : 0;

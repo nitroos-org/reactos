@@ -6,29 +6,40 @@
  *
  * HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\NitroRedirection (DWORD, amd64 only):
  * 0 (default) = windows draw on the screen as always; 1 = every eligible top-level window draws into a
- * surface of its own (its DCs and its children's DCs select it, in window coordinates), and that
- * surface is copied onto the screen through the window's visible region when the window has drawn
- * (released DC, EndPaint, or within a frame for DCs that stay in use) and when it moved. Covered
- * content is kept: GetDC/GetWindowDC of a covered window reads it. Level 2 (translucency) is not
- * implemented yet and behaves as 1. The boot option /NOREDIRECTION forces 0.
+ * surface of its own (its DCs and its children's DCs select it, in window coordinates), and what it drew
+ * there is copied onto the screen through the window's visible region when a DC is released or ends a
+ * paint, within a frame for DCs that stay in use, and all of it when the window moved. Covered content
+ * is kept: GetDC/GetWindowDC of a covered window reads it. Level 2 (translucency) is not implemented
+ * yet and behaves as 1. The boot option /NOREDIRECTION forces 0.
  *
  * Not redirected: the desktop window, message-only windows, layered windows, glass windows
  * (NitroSetWindowGlass), hidden windows, windows past the memory budget. They draw as always.
  * R0 keeps USER's painting rules (WM_PAINT on uncover); R1 changes them.
+ *
+ * Lifetime: a record lives while its window has it or a DCE is bound to it (cRefs, USER lock). A DC
+ * whose binding could not be changed (another process draws with it) keeps its binding and the
+ * reference, and is bound again later (windc.c, DCE_REDIR_RETRY): a record is never freed while a DC
+ * can still mark it dirty. The surface has no owner a process could match: only win32k reaches it,
+ * by the pointer held here.
  */
 
 #include <win32k.h>
 DBG_DEFAULT_CHANNEL(UserPainting);
 
+#define REDIR_MAGIC 0x52444952 /* "RIDR" */
+
 typedef struct _REDIR
 {
+    ULONG Magic;
     LIST_ENTRY Link;
     LONG cRefs;             /* the window's while attached, plus one per bound DCE (USER lock) */
     PWND pwnd;              /* the top-level window; NULL once detached */
-    HBITMAP hbm;            /* 32 bpp surface the size of the window rectangle */
+    PSURFACE psurf;         /* 32 bpp surface the size of the window rectangle; our reference */
     LONG cx, cy;
     SIZE_T cjBits;
-    volatile LONG Dirty;    /* a bound DC drew (GDI, any thread) */
+    KSPIN_LOCK DirtyLock;
+    RECTL rcDirty;          /* what DCs drew since the last present (surface coordinates), DirtyLock */
+    volatile LONG Dirty;    /* rcDirty is not empty (counted in gRedirDirtyCount) */
 } REDIR, *PREDIR;
 
 ULONG gRedirLevel = 0;
@@ -98,7 +109,10 @@ UserRedirInit(VOID)
         ZwClose(hKey);
     }
     if (gRedirLevel > 2)
+    {
+        DbgPrint("win32k: NitroRedirection %lu is not a level (0, 1, 2): window redirection off\n", gRedirLevel);
         gRedirLevel = 0;
+    }
     if (gRedirLevel && RedirBootOptionOff())
     {
         DbgPrint("win32k: window redirection off (/NOREDIRECTION)\n");
@@ -116,7 +130,7 @@ UserRedirInit(VOID)
             gRedirBudget = Quarter;
     }
 
-    gRedirTimer = ExAllocatePoolWithTag(NonPagedPool, sizeof(KTIMER), USERTAG_REDIRECT);
+    gRedirTimer = ExAllocatePoolWithTag(NonPagedPool, sizeof(KTIMER), USERTAG_REDIRSURF);
     AtomRedir = IntAddGlobalAtom(L"NitroRedir", TRUE);
     if (!gRedirTimer || !AtomRedir)
     {
@@ -124,7 +138,8 @@ UserRedirInit(VOID)
         gRedirLevel = 0;
         return;
     }
-    KeInitializeTimer(gRedirTimer);
+    /* A synchronization timer: the wait of the raw input thread resets it (a notification timer stays signaled) */
+    KeInitializeTimerEx(gRedirTimer, SynchronizationTimer);
     DbgPrint("win32k: window redirection level %lu (NitroRedirection%s), surface budget %Iu MB\n",
              gRedirLevel, gRedirLevel == 2 ? ", level 2 not implemented: composed as 1" : "", gRedirBudget >> 20);
 #endif
@@ -152,25 +167,43 @@ UserRedirRootFor(PWND Wnd)
     return Root;
 }
 
+/* Takes what was drawn since the last present (FALSE: nothing) */
+static BOOL
+RedirTakeDirty(PREDIR r, PRECTL prc)
+{
+    KIRQL OldIrql;
+
+    /* The flag first: a draw that comes after it counts again and is presented again */
+    if (InterlockedExchange(&r->Dirty, 0))
+        InterlockedDecrement(&gRedirDirtyCount);
+    KeAcquireSpinLock(&r->DirtyLock, &OldIrql);
+    *prc = r->rcDirty;
+    RECTL_vSetEmptyRect(&r->rcDirty);
+    KeReleaseSpinLock(&r->DirtyLock, OldIrql);
+    return !RECTL_bIsEmptyRect(prc);
+}
+
 static VOID
 RedirRelease(PREDIR r)
 {
+    RECTL rc;
+
     ASSERT(r->cRefs > 0);
     if (--r->cRefs > 0)
         return;
     ASSERT(r->pwnd == NULL);
-    if (InterlockedExchange(&r->Dirty, 0))
-        InterlockedDecrement(&gRedirDirtyCount);
+    RedirTakeDirty(r, &rc);
     RemoveEntryList(&r->Link);
     gRedirBytes -= r->cjBits;
-    if (r->hbm)
-        EngDeleteSurface((HSURF)r->hbm);
-    ExFreePoolWithTag(r, USERTAG_REDIRECT);
+    if (r->psurf)
+        GreRedirDeleteSurface(r->psurf);
+    r->Magic = 0;
+    ExFreePoolWithTag(r, USERTAG_REDIRSURF);
 }
 
 VOID FASTCALL UserRedirAddRef(PVOID pv) { ((PREDIR)pv)->cRefs++; }
 VOID FASTCALL UserRedirRelease(PVOID pv) { RedirRelease((PREDIR)pv); }
-HBITMAP FASTCALL UserRedirSurface(PVOID pv) { return ((PREDIR)pv)->hbm; }
+PSURFACE FASTCALL UserRedirSurface(PVOID pv) { return ((PREDIR)pv)->psurf; }
 PWND FASTCALL UserRedirWindow(PVOID pv) { return ((PREDIR)pv)->pwnd; }
 
 /* The window no longer has a surface (hidden, destroyed, no longer eligible): its DCs draw on the screen again */
@@ -186,9 +219,83 @@ UserRedirDetachWindow(PWND Wnd)
     if (!r)
         return;
     UserRemoveProp(Wnd, AtomRedir, TRUE);
+    /* A DC that cannot be unbound now keeps the record (and the surface) until it is bound again */
     DceRedirUnbindAll(r);
     r->pwnd = NULL;
     RedirRelease(r);
+}
+
+/* The window is redirected and has a surface of its window size (no new surface is made) */
+BOOL
+FASTCALL
+UserRedirHasSurface(PWND Wnd)
+{
+    PREDIR r;
+
+    if (!gRedirLevel || !Wnd)
+        return FALSE;
+    r = UserGetProp(Wnd, AtomRedir, TRUE);
+    if (!r || !r->psurf ||
+        r->cx != Wnd->rcWindow.right - Wnd->rcWindow.left ||
+        r->cy != Wnd->rcWindow.bottom - Wnd->rcWindow.top)
+    {
+        return FALSE;
+    }
+    return UserRedirRootFor(Wnd) == Wnd;
+}
+
+/*
+ * A new surface for a window that is already on the screen and is not about to paint all of itself
+ * (it became eligible again, or its first DC is not its first paint): what the screen shows of it is
+ * copied in, and the rest of the window is invalidated, so no part of the surface is shown before the
+ * window drew it.
+ */
+static VOID
+RedirSeed(PREDIR r, PWND Root)
+{
+    PREGION Vis = NULL, Rest;
+    BOOL bWhole = FALSE;
+
+    if (Root->hrgnUpdate == HRGN_WINDOW)
+    {
+        bWhole = TRUE;
+    }
+    else if (Root->hrgnUpdate)
+    {
+        PREGION RgnUpdate = REGION_LockRgn(Root->hrgnUpdate);
+        RECTL rcBox;
+
+        if (RgnUpdate)
+        {
+            if (REGION_GetRgnBox(RgnUpdate, &rcBox) == SIMPLEREGION &&
+                rcBox.left <= Root->rcWindow.left && rcBox.top <= Root->rcWindow.top &&
+                rcBox.right >= Root->rcWindow.right && rcBox.bottom >= Root->rcWindow.bottom)
+            {
+                bWhole = TRUE;
+            }
+            REGION_UnlockRgn(RgnUpdate);
+        }
+    }
+    if (bWhole)
+        return;
+
+    if (Root->head.rpdesk == gpdeskInputDesktop)
+    {
+        Vis = VIS_ComputeVisibleRegion(Root, FALSE, FALSE, TRUE);
+        if (Vis)
+            GreRedirSeedFromScreen(r->psurf, Vis, Root->rcWindow.left, Root->rcWindow.top);
+    }
+    Rest = IntSysCreateRectpRgnIndirect(&Root->rcWindow);
+    if (Rest)
+    {
+        if (Vis)
+            IntGdiCombineRgn(Rest, Rest, Vis, RGN_DIFF);
+        if (REGION_Complexity(Rest) > NULLREGION)
+            IntInvalidateWindows(Root, Rest, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+        REGION_Delete(Rest);
+    }
+    if (Vis)
+        REGION_Delete(Vis);
 }
 
 /*
@@ -203,7 +310,7 @@ UserRedirGet(PWND Root)
     LONG cx = Root->rcWindow.right - Root->rcWindow.left;
     LONG cy = Root->rcWindow.bottom - Root->rcWindow.top;
     SIZE_T cjNew;
-    HBITMAP hbm;
+    PSURFACE psurf;
 
     if (r && r->cx == cx && r->cy == cy)
         return r;
@@ -219,8 +326,8 @@ UserRedirGet(PWND Root)
         return NULL;
     }
 
-    hbm = GreRedirCreateSurface(cx, cy, r ? r->hbm : NULL);
-    if (!hbm)
+    psurf = GreRedirCreateSurface(cx, cy, r ? r->psurf : NULL);
+    if (!psurf)
     {
         gRedirRefused++;
         if (r)
@@ -230,55 +337,59 @@ UserRedirGet(PWND Root)
 
     if (r)
     {
-        HBITMAP hbmOld = r->hbm;
+        PSURFACE psurfOld = r->psurf;
 
         gRedirBytes += cjNew - r->cjBits;
-        r->hbm = hbm;
+        r->psurf = psurf;
         r->cx = cx;
         r->cy = cy;
         r->cjBits = cjNew;
-        /* Every DC still on the old surface moves to the new one, then the old one can go */
-        DceRedirRebindAll(r, hbm);
-        EngDeleteSurface((HSURF)hbmOld);
+        /* Every DC on the old surface moves to the new one; one that cannot yet keeps its own reference to the old one */
+        DceRedirRebindAll(r, psurf);
+        GreRedirDeleteSurface(psurfOld);
         return r;
     }
 
-    r = ExAllocatePoolWithTag(PagedPool, sizeof(REDIR), USERTAG_REDIRECT);
+    r = ExAllocatePoolWithTag(NonPagedPool, sizeof(REDIR), USERTAG_REDIRSURF);
     if (!r)
     {
-        EngDeleteSurface((HSURF)hbm);
+        GreRedirDeleteSurface(psurf);
         gRedirRefused++;
         return NULL;
     }
     RtlZeroMemory(r, sizeof(REDIR));
+    r->Magic = REDIR_MAGIC;
     r->cRefs = 1;
     r->pwnd = Root;
-    r->hbm = hbm;
+    r->psurf = psurf;
     r->cx = cx;
     r->cy = cy;
     r->cjBits = cjNew;
+    KeInitializeSpinLock(&r->DirtyLock);
+    RECTL_vSetEmptyRect(&r->rcDirty);
     if (!UserSetProp(Root, AtomRedir, r, TRUE))
     {
-        EngDeleteSurface((HSURF)hbm);
-        ExFreePoolWithTag(r, USERTAG_REDIRECT);
+        GreRedirDeleteSurface(psurf);
+        r->Magic = 0;
+        ExFreePoolWithTag(r, USERTAG_REDIRSURF);
         gRedirRefused++;
         return NULL;
     }
     InsertTailList(&gRedirList, &r->Link);
     gRedirBytes += cjNew;
     gRedirCreated++;
+    RedirSeed(r, Root);
     return r;
 }
 
-/* Copies the window's surface onto the screen through its visible region (USER lock held) */
+/* Copies prcSurf (surface coordinates; NULL: all) of the window's surface onto the screen through its visible region */
 static VOID
-RedirPresent(PREDIR r)
+RedirPresentRect(PREDIR r, const RECTL *prcSurf)
 {
     PWND Root = r->pwnd;
-    PREGION Rgn;
+    PREGION Rgn, Clip;
+    RECTL rc;
 
-    if (InterlockedExchange(&r->Dirty, 0))
-        InterlockedDecrement(&gRedirDirtyCount);
     if (!Root || Root->head.rpdesk != gpdeskInputDesktop)
         return;
     if (UserRedirRootFor(Root) != Root)
@@ -290,42 +401,103 @@ RedirPresent(PREDIR r)
     Rgn = VIS_ComputeVisibleRegion(Root, FALSE, FALSE, TRUE);
     if (!Rgn)
         return;
-    GreRedirPresent(r->hbm, Rgn, Root->rcWindow.left, Root->rcWindow.top);
+    if (prcSurf)
+    {
+        rc = *prcSurf;
+        RECTL_vOffsetRect(&rc, Root->rcWindow.left, Root->rcWindow.top);
+        Clip = IntSysCreateRectpRgnIndirect(&rc);
+        if (Clip)
+        {
+            IntGdiCombineRgn(Rgn, Rgn, Clip, RGN_AND);
+            REGION_Delete(Clip);
+        }
+    }
+    GreRedirPresent(r->psurf, Rgn, Root->rcWindow.left, Root->rcWindow.top);
     REGION_Delete(Rgn);
     gRedirPresents++;
 }
 
-/* A DC bound to the record is released (EndPaint: always present, the window painted) */
+/* What was drawn goes to the screen (bWholeIfClean: an EndPaint that drew through no tracked primitive presents all) */
+static VOID
+RedirPresentDirty(PREDIR r, BOOL bWholeIfClean)
+{
+    RECTL rc;
+
+    if (RedirTakeDirty(r, &rc))
+        RedirPresentRect(r, &rc);
+    else if (bWholeIfClean)
+        RedirPresentRect(r, NULL);
+}
+
+/* A DC bound to the record is released (EndPaint: the window painted) */
 VOID
 FASTCALL
-UserRedirReleased(PVOID pv, BOOL bForce)
+UserRedirReleased(PVOID pv, BOOL bEndPaint)
 {
     PREDIR r = pv;
 
-    if (r->pwnd && (bForce || r->Dirty))
-        RedirPresent(r);
+    if (r->pwnd)
+        RedirPresentDirty(r, bEndPaint);
 }
 
-/* The window moved or its z-order or visibility changed: show its content where it is now */
+/* The window moved: all of its content goes to its new place */
 VOID
 FASTCALL
 UserRedirWindowMoved(PWND Wnd)
 {
     PREDIR r;
+    RECTL rc;
 
     if (!gRedirLevel || !Wnd)
         return;
     r = UserGetProp(Wnd, AtomRedir, TRUE);
     if (r)
-        RedirPresent(r);
+    {
+        RedirTakeDirty(r, &rc);
+        RedirPresentRect(r, NULL);
+    }
 }
 
-/* GDI: a DC bound to the record drew (any thread, DC locked, no USER lock): present within a frame */
+/*
+ * GDI: a DC bound to the record draws, or finished drawing, into prcl (device = surface coordinates).
+ * Any thread, the DC is locked, no USER lock. Marked at the start and at the end of a primitive, so a
+ * present that runs in between never loses the end of it. Presented within a frame if nothing else does.
+ */
 VOID
 FASTCALL
-UserRedirMarkDirty(PVOID pv)
+UserRedirMarkDirty(PVOID pv, const RECTL *prcl)
 {
     PREDIR r = pv;
+    RECTL rc;
+    KIRQL OldIrql;
+
+    if (!r || r->Magic != REDIR_MAGIC)
+    {
+        ASSERT(FALSE);
+        return;
+    }
+    if (prcl)
+    {
+        rc = *prcl;
+        RECTL_vMakeWellOrdered(&rc);
+        rc.left = max(rc.left, 0);
+        rc.top = max(rc.top, 0);
+        rc.right = min(rc.right, r->cx);
+        rc.bottom = min(rc.bottom, r->cy);
+        if (rc.left >= rc.right || rc.top >= rc.bottom)
+            return;
+    }
+    else
+    {
+        RECTL_vSetRect(&rc, 0, 0, r->cx, r->cy);
+    }
+
+    KeAcquireSpinLock(&r->DirtyLock, &OldIrql);
+    if (RECTL_bIsEmptyRect(&r->rcDirty))
+        r->rcDirty = rc;
+    else
+        RECTL_bUnionRect(&r->rcDirty, &r->rcDirty, &rc);
+    KeReleaseSpinLock(&r->DirtyLock, OldIrql);
 
     if (InterlockedExchange(&r->Dirty, 1) != 0)
         return;
@@ -358,10 +530,16 @@ UserRedirPresentPending(VOID)
         Entry = Entry->Flink;
         if (r->Dirty && r->pwnd)
         {
-            /* RedirPresent may detach r; the next entry was taken first, and r stays alive while a DC holds it */
+            /* RedirPresentDirty may detach r; the next entry was taken first, and r stays alive while a DC holds it */
             r->cRefs++;
-            RedirPresent(r);
+            RedirPresentDirty(r, FALSE);
             RedirRelease(r);
+        }
+        else if (r->Dirty)
+        {
+            /* Detached, still held by a DC not unbound yet: nothing to show */
+            RECTL rc;
+            RedirTakeDirty(r, &rc);
         }
     }
     UserLeave();

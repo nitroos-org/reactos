@@ -611,10 +611,6 @@ DC_vPrepareDCsForBlitEx(
     const RECT *prcFirst, *prcSecond;
     BOOL bFirstIsDest = TRUE;
 
-    /* A redirected window DC draws into its window's surface: the compositor presents it */
-    if ((pdcDest->fs & DC_REDIRECTION) && pdcDest->pvRedir)
-        UserRedirMarkDirty(pdcDest->pvRedir);
-
     /* Update brushes */
     if (pdcDest->pdcattr->ulDirty_ & (DIRTY_FILL | DC_BRUSH_DIRTY))
         DC_vUpdateFillBrush(pdcDest);
@@ -653,6 +649,23 @@ DC_vPrepareDCsForBlitEx(
 
     if (pdcDest->fs & DC_DIRTY_RAO)
         CLIPPING_UpdateGCRegion(pdcDest);
+
+    /* A redirected window DC draws into its window's surface: where it draws is presented (marked again in DC_vFinishBlit) */
+    if ((pdcDest->fs & DC_REDIRECTION) && pdcDest->pvRedir)
+    {
+        if (rcDest)
+        {
+            pdcDest->rclRedirDraw = *(const RECTL *)rcDest;
+            RECTL_vMakeWellOrdered(&pdcDest->rclRedirDraw);
+            if (!RECTL_bIntersectRect(&pdcDest->rclRedirDraw, &pdcDest->rclRedirDraw, &pdcDest->erclClip))
+                RECTL_vSetEmptyRect(&pdcDest->rclRedirDraw);
+        }
+        else
+        {
+            pdcDest->rclRedirDraw = pdcDest->erclClip;
+        }
+        UserRedirMarkDirty(pdcDest->pvRedir, &pdcDest->rclRedirDraw);
+    }
 
     /* Lock and update first DC */
     if (DC_IS_SCREEN(pdcFirst))
@@ -709,6 +722,10 @@ VOID
 FASTCALL
 DC_vFinishBlit(PDC pdc1, PDC pdc2)
 {
+    /* Drawn: a present that ran meanwhile may have taken the mark of DC_vPrepareDCsForBlitEx */
+    if ((pdc1->fs & DC_REDIRECTION) && pdc1->pvRedir)
+        UserRedirMarkDirty(pdc1->pvRedir, &pdc1->rclRedirDraw);
+
     if (DC_IS_SCREEN(pdc1))
     {
         MouseSafetyOnDrawEnd(pdc1->ppdev);
@@ -1195,13 +1212,13 @@ NTAPI
 GreRedirBindDC(
     _In_ HDC hdc,
     _In_opt_ PVOID pvRedir,
-    _In_opt_ HBITMAP hbmSurface,
+    _In_opt_ PSURFACE psurf,
     _Out_ PVOID *ppvOld)
 {
     PDC pdc;
-    PSURFACE psurf = NULL;
 
     *ppvOld = NULL;
+    /* Fails for a DC another process holds locked for long: the caller keeps the binding and tries again */
     pdc = DC_LockDcAnyOwner(hdc);
     if (!pdc)
         return FALSE;
@@ -1211,22 +1228,12 @@ GreRedirBindDC(
         return FALSE;
     }
 
-    if (hbmSurface)
-    {
-        psurf = SURFACE_ShareLockSurface(hbmSurface);
-        if (!psurf)
-        {
-            DC_UnlockDc(pdc);
-            return FALSE;
-        }
-    }
-
     *ppvOld = (pdc->fs & DC_REDIRECTION) ? pdc->pvRedir : NULL;
+    RECTL_vSetEmptyRect(&pdc->rclRedirDraw);
     if (psurf)
     {
-        /* The DC takes its own reference on the surface */
+        /* The DC takes its own reference on the surface (by pointer: the handle has no owner) */
         DC_vSelectSurface(pdc, psurf);
-        SURFACE_ShareUnlockSurface(psurf);
         pdc->dclevel.sizl = pdc->dclevel.pSurface->SurfObj.sizlBitmap;
         pdc->fs |= DC_REDIRECTION | DC_DIRTY_RAO;
         pdc->pvRedir = pvRedir;

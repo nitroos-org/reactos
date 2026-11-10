@@ -31,7 +31,12 @@ typedef struct tagDCE
     struct _MONITOR* pMonitor;
     BOOL         bGlass;     /* the DC was last set up for a glass window (glassblt.c) */
     PVOID        pRedir;     /* redirection record the DC is bound to (redir.c), or NULL */
+    ULONG        RedirFlags; /* DCE_REDIR_* */
 } DCE, *PDCE;
+
+/* RedirFlags: the binding could not be changed yet (try again); the visible region is not for the current binding */
+#define DCE_REDIR_RETRY     0x0001
+#define DCE_REDIR_VISSTALE  0x0002
 
 /* internal DCX flags, see psdk/winuser.h for the rest */
 #define DCX_DCEEMPTY        0x00000800
