@@ -250,7 +250,8 @@ int ngc_dio_zero_begin(ngc_vol *v, ngc_node *n, unsigned long long upto, struct 
  * (locked) maps the clusters of [off, off+len) into runs and pins the node; the caller then fills the
  * buffer without the volume lock: a run with dev == NGC_DIO_ZERO is zeroed (hole, past the initialized size or
  * EOF), any other is read from the device (dev = device offset, len = bytes, boff = offset in the buffer; runs
- * are in buffer order and a later run may overwrite the tail of an earlier one); ngc_rdio_end (locked) unpins.
+ * are in buffer order and a later run may overwrite the tail of an earlier one; only the last run's len can be
+ * unaligned, when the request's is: the caller reads that last sector through a bounce buffer); ngc_rdio_end (locked) unpins.
  * ngc_rdio_begin returns 0 (pinned: ngc_rdio_end must follow) or -NGC_EAGAIN (use ngc_read_direct / ngc_read
  * instead, nothing changed).  The data is what the stream held when ngc_rdio_begin ran (the clusters cannot be
  * freed meanwhile: see the drain below).
