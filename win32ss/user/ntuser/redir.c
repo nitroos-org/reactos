@@ -64,6 +64,7 @@ static LIST_ENTRY gRedirOrphans = { &gRedirOrphans, &gRedirOrphans };
 #define REDIR_MAX_SIDE      16384
 #define REDIR_FRAME_100NS   (16 * 10000)
 #define REDIR_RETRY_100NS   (100 * 10000)
+#define REDIR_RETRY_BUDGET  8               /* busy DCs (retries and orphans) tried per frame-timer pass */
 
 static VOID
 RedirArmTimer(LONGLONG Due100ns)
@@ -557,21 +558,26 @@ UserRedirOrphan(HDC hdc, PVOID pvRedir)
     RedirArmTimer(REDIR_RETRY_100NS);
 }
 
-/* Orphans whose DC is gone or now unbound release their record */
+/* Orphans whose DC is gone or now unbound release their record; at most *plBudget tries, a busy one goes to the end */
 static VOID
-RedirReapOrphans(VOID)
+RedirReapOrphans(_Inout_ PLONG plBudget)
 {
     PLIST_ENTRY Entry;
     PVOID pvOld;
+    ULONG Count = 0;
 
-    for (Entry = gRedirOrphans.Flink; Entry != &gRedirOrphans; )
+    for (Entry = gRedirOrphans.Flink; Entry != &gRedirOrphans; Entry = Entry->Flink)
+        Count++;
+    while (Count-- && *plBudget > 0)
     {
-        PREDIR_ORPHAN o = CONTAINING_RECORD(Entry, REDIR_ORPHAN, Link);
+        PREDIR_ORPHAN o = CONTAINING_RECORD(RemoveHeadList(&gRedirOrphans), REDIR_ORPHAN, Link);
 
-        Entry = Entry->Flink;
+        (*plBudget)--;
         if (GreRedirBindDC(o->hdc, NULL, NULL, &pvOld) == REDIRBIND_BUSY)
+        {
+            InsertTailList(&gRedirOrphans, &o->Link);
             continue;
-        RemoveEntryList(&o->Link);
+        }
         RedirRelease(o->r);
         ExFreePoolWithTag(o, USERTAG_REDIRSURF);
     }
@@ -583,6 +589,8 @@ FASTCALL
 UserRedirPresentPending(VOID)
 {
     PLIST_ENTRY Entry;
+    /* Busy DCs tried per pass: each try can wait about 1 ms with the USER lock held (rvr0c 3) */
+    LONG lBudget = REDIR_RETRY_BUDGET;
 
     InterlockedExchange(&gRedirTimerArmed, 0);
     /* Released DCs present at once: usually nothing is left, and the USER lock is not taken for nothing */
@@ -610,9 +618,9 @@ UserRedirPresentPending(VOID)
     }
     /* Bindings that could not be changed, and DCs of freed DCEs, are tried again */
     if (gRedirRetries)
-        DceRedirRetryAll();
+        DceRedirRetryAll(&lBudget);
     if (!IsListEmpty(&gRedirOrphans))
-        RedirReapOrphans();
+        RedirReapOrphans(&lBudget);
     if (gRedirRetries || !IsListEmpty(&gRedirOrphans))
         RedirArmTimer(REDIR_RETRY_100NS);
     UserLeave();
