@@ -3,6 +3,7 @@ spec2def(wintypes.dll wintypes.spec)
 
 list(APPEND SOURCE
     main.c
+    propertyvalue.c
     ${CMAKE_CURRENT_BINARY_DIR}/wintypes_stubs.c
     ${CMAKE_CURRENT_BINARY_DIR}/wintypes.def)
 
