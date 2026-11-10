@@ -150,8 +150,70 @@ static void test_eng(void)
         skip("EngCreatePalette is unavailable\n");
 }
 
+static void test_process_lifetime(void)
+{
+    CHAR executable[MAX_PATH], command[MAX_PATH + 64];
+    STARTUPINFOA startup = { sizeof(startup) };
+    PROCESS_INFORMATION process;
+    DWORD exit_code = 0;
+    HDC dc;
+    HRGN region;
+    HBRUSH brush;
+    RECT bounds;
+
+    if (!GetModuleFileNameA(NULL, executable, sizeof(executable)))
+    {
+        skip("Cannot find the test executable\n");
+        return;
+    }
+
+    wsprintfA(command, "\"%s\" GdiInputContracts process-child", executable);
+    if (!CreateProcessA(executable, command, NULL, NULL, FALSE, 0,
+                        NULL, NULL, &startup, &process))
+    {
+        skip("Cannot start the GDI owner process: %lu\n", GetLastError());
+        return;
+    }
+
+    ok(WaitForSingleObject(process.hProcess, 30000) == WAIT_OBJECT_0,
+       "GDI owner process did not exit\n");
+    ok(GetExitCodeProcess(process.hProcess, &exit_code) && exit_code == 0,
+       "GDI owner process exited with %lu\n", exit_code);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+
+    dc = CreateCompatibleDC(NULL);
+    region = CreateRectRgn(0, 0, 8, 8);
+    brush = CreateSolidBrush(RGB(10, 20, 30));
+    ok(dc && region && brush, "GDI creation failed after owner exit\n");
+    if (dc && region && brush)
+    {
+        ok(FillRgn(dc, region, brush), "GDI drawing failed after owner exit\n");
+        ok(GetRgnBox(region, &bounds) == SIMPLEREGION,
+           "GDI region failed after owner exit\n");
+    }
+    if (brush) DeleteObject(brush);
+    if (region) DeleteObject(region);
+    if (dc) DeleteDC(dc);
+}
+
 START_TEST(GdiInputContracts)
 {
+    char **argv;
+    int argc = winetest_get_mainargs(&argv);
+    unsigned int index;
+
+    if (argc > 2 && !strcmp(argv[2], "process-child"))
+    {
+        for (index = 0; index < 64; index++)
+        {
+            CreateCompatibleDC(NULL);
+            CreateRectRgn(0, 0, 8, 8);
+            CreateSolidBrush(RGB(10, 20, 30));
+        }
+        return;
+    }
+
     HDC dc = CreateCompatibleDC(NULL);
     HFONT font = CreateFontW(16, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
                              0, 0, 0, 0, L"Tahoma");
@@ -169,6 +231,7 @@ START_TEST(GdiInputContracts)
     test_fonts(dc);
     test_batch(dc);
     test_eng();
+    test_process_lifetime();
     SelectObject(dc, old_font);
     DeleteObject(font);
     DeleteDC(dc);
