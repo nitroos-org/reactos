@@ -1106,7 +1106,7 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     BOOLEAN Resource;
     PFN_NUMBER Pages[MI_PAGER_READ_CLUSTER_MAX];
     ULONG Count = 1, i;
-    BOOLEAN FaultInjected = FALSE;
+    BOOLEAN FaultInjected = FALSE, Retried = FALSE;
 
     /*
      * NitroPager P0: a private page that was paged out. The working set lock
@@ -1287,11 +1287,13 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     /*
      * A failed cluster read does not tell which slot is bad: the faulting page alone is read again, so a
      * bad slot of a page read ahead never becomes the faulting thread's in-page error (the pages read ahead
-     * are paged in by their own faults). Not for a shortage, which the fault waits for and retries, nor
-     * for a test error on the faulting page itself.
+     * are paged in by their own faults). Not for a shortage, which the fault waits for and retries, not
+     * for a paging file that went away (no read of it can succeed), nor for a test error on the faulting
+     * page itself.
      */
     if (!NT_SUCCESS(Status) && (Count > 1) && !FaultInjected &&
-        (Status != STATUS_INSUFFICIENT_RESOURCES) && (Status != STATUS_NO_MEMORY))
+        (Status != STATUS_INSUFFICIENT_RESOURCES) && (Status != STATUS_NO_MEMORY) &&
+        (Status != STATUS_FILE_INVALID))
     {
         MiReleasePfnLock(*OldIrql);
         MiPagingIoStart();
@@ -1299,8 +1301,11 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
         MiPagingIoDone();
         *OldIrql = MiAcquirePfnLock();
         MiPagerCounters.ReadAheadRetries++;
+        Retried = TRUE;
     }
-    if (NT_SUCCESS(Status) && (Count > 1))
+
+    /* Only a cluster read that brought its pages in counts as read-ahead */
+    if (NT_SUCCESS(Status) && (Count > 1) && !Retried)
     {
         MiPagerCounters.InPageClusterReads++;
         MiPagerCounters.InPagePrefetched += Count - 1;
