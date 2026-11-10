@@ -135,6 +135,106 @@ TestBlocks(HANDLE Heap, PCSTR Name)
     ok(!Ret, "%s: freeing a block twice succeeded\n", Name);
 }
 
+/* Size classes: every size around the class boundaries is served whole, is reused for the same size, and
+   a block moved between classes by HeapReAlloc keeps its contents */
+static void
+TestClasses(HANDLE Heap, PCSTR Name)
+{
+    ULONG Size, Pass, Bad = 0, BadReuse = 0, BadRealloc = 0, Reused = 0, Tries = 0;
+    SIZE_T Cur;
+    PUCHAR Block, Block2, Other;
+    ULONG k;
+
+    for (Pass = 0; Pass < 3; Pass++)
+    {
+        for (Size = 0; Size <= 4200; Size++)
+        {
+            Block = HeapAlloc(Heap, Pass == 2 ? HEAP_ZERO_MEMORY : 0, Size);
+            if (!Block || HeapSize(Heap, 0, Block) != Size || !HeapValidate(Heap, 0, Block))
+            {
+                Bad++;
+                if (Block)
+                    HeapFree(Heap, 0, Block);
+                continue;
+            }
+            if (Pass == 2)
+            {
+                for (k = 0; k < Size; k++)
+                    if (Block[k])
+                    {
+                        Bad++;
+                        break;
+                    }
+            }
+            memset(Block, (UCHAR)Size, Size);
+
+            /* A neighbour of the same size must not overlap */
+            Other = HeapAlloc(Heap, 0, Size);
+            if (!Other || Other == Block ||
+                (Other < Block + Size && Block < Other + Size))
+                Bad++;
+            if (Other)
+            {
+                memset(Other, 0x55, Size);
+                HeapFree(Heap, 0, Other);
+            }
+            for (k = 0; k < Size; k++)
+                if (Block[k] != (UCHAR)Size)
+                {
+                    Bad++;
+                    break;
+                }
+
+            /* Resize up and down: contents survive, sizes are as asked */
+            Cur = Size;
+            for (k = 0; k < 3; k++)
+            {
+                static const LONG Delta[3] = { 1, 70, -63 };
+                SIZE_T NewSize = ((LONG)Cur + Delta[k] < 0) ? 0 : Cur + Delta[k];
+                SIZE_T Keep = min(Cur, NewSize), j;
+
+                Block2 = HeapReAlloc(Heap, 0, Block, NewSize);
+                if (!Block2)
+                {
+                    BadRealloc++;
+                    break;
+                }
+                Block = Block2;
+                if (HeapSize(Heap, 0, Block) != NewSize)
+                    BadRealloc++;
+                for (j = 0; j < Keep; j++)
+                    if (Block[j] != (UCHAR)Size)
+                    {
+                        BadRealloc++;
+                        break;
+                    }
+                memset(Block, (UCHAR)Size, NewSize);
+                Cur = NewSize;
+            }
+            HeapFree(Heap, 0, Block);
+        }
+    }
+
+    /* A block freed and asked for again at the same size comes back (the heap keeps it for that size) */
+    for (Size = 24; Size <= 3000; Size += 37)
+    {
+        Block = HeapAlloc(Heap, 0, Size);
+        HeapFree(Heap, 0, Block);
+        Block2 = HeapAlloc(Heap, 0, Size);
+        Tries++;
+        if (Block2 == Block)
+            Reused++;
+        else if (Block2 && Size)
+            BadReuse += HeapSize(Heap, 0, Block2) != Size;
+        HeapFree(Heap, 0, Block2);
+    }
+    ok(Bad == 0, "%s: %lu size/overlap/contents errors over the sizes 0..4200\n", Name, Bad);
+    ok(BadRealloc == 0, "%s: %lu HeapReAlloc errors\n", Name, BadRealloc);
+    ok(BadReuse == 0, "%s: %lu reused blocks of a wrong size\n", Name, BadReuse);
+    if (QueryFrontEnd(Heap) == 2)
+        ok(Reused * 4 >= Tries * 3, "%s: only %lu of %lu same-size blocks came back\n", Name, Reused, Tries);
+}
+
 static int
 CountBusy(HANDLE Heap)
 {
@@ -350,11 +450,13 @@ START_TEST(RtlHeapFrontEnd)
     Heap = HeapCreate(0, 0, 0);
     SetFrontEnd(Heap, 2);
     TestBlocks(Heap, "front end heap");
+    TestClasses(Heap, "front end heap");
     TestStress(Heap, "front end heap");
     HeapDestroy(Heap);
 
     Heap = HeapCreate(0, 0, 0);
     TestBlocks(Heap, "plain heap");
+    TestClasses(Heap, "plain heap");
     HeapDestroy(Heap);
 
     TestBlocks(GetProcessHeap(), "process heap");
