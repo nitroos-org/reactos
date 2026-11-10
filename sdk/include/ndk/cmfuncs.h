@@ -217,6 +217,41 @@ NtOpenKeyEx(
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
+NtOpenKeyTransacted(
+    _Out_ PHANDLE KeyHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ HANDLE TransactionHandle
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtOpenKeyTransactedEx(
+    _Out_ PHANDLE KeyHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ ULONG OpenOptions,
+    _In_ HANDLE TransactionHandle
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCreateKeyTransacted(
+    _Out_ PHANDLE KeyHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ ULONG TitleIndex,
+    _In_opt_ PUNICODE_STRING Class,
+    _In_ ULONG CreateOptions,
+    _In_ HANDLE TransactionHandle,
+    _Out_opt_ PULONG Disposition
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
 NtPlugPlayControl(
     _In_ PLUGPLAY_CONTROL_CLASS PlugPlayControlClass,
     _Inout_ PVOID Buffer,
