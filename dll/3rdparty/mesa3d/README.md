@@ -29,9 +29,9 @@ what it must produce.
 
 ## Version and build
 
-* Mesa 26.2.4, `https://archive.mesa3d.org/mesa-26.2.4.tar.xz`, SHA-256
-  `bce5f7fbebb934373b86c999a064d52fb5065878dc57f287f95346648ec832e9` (Mesa publishes no hash
-  file; this value was computed from the download).
+* Mesa 26.3.0, `https://archive.mesa3d.org/mesa-26.3.0.tar.xz`, SHA-256
+  `91d729aa68bb89e4ec857841300bbe922bcb3e52b1f97566ca83930d3b28343a` (the value Mesa publishes in
+  `docs/relnotes/26.3.0.rst`; the download was checked against it).
 * zlib 1.3.1 is fetched by meson through Mesa's own wrap file, which pins its hash, and is linked
   statically. The C++ and GCC runtimes are linked statically, so the DLL imports only
   `kernel32`, `user32`, `gdi32` and `msvcrt`.
@@ -126,13 +126,13 @@ Vulkan ICD) so the build never breaks. Set `LAVAPIPE_ARTIFACT=<local tar>` to st
   rendering list then disables GPU compositing, so they composite in software and present with GDI. No per-app
   `Wine\AppDefaults\<app>.exe\Direct3D renderer=no3d` key is needed any more.
 
-Checksums of the artifacts of the amd64 build (Mesa 26.2.4, LLVM 19.1.7, Ubuntu 24.04 mingw-w64 GCC 13-win32):
+Checksums of the artifacts of the amd64 build (Mesa 26.3.0, LLVM 19.1.7, Ubuntu 24.04 mingw-w64 GCC 13-win32):
 
 ```
-203b01379fb67dfd5fb44ef5902c2474b116664eda332313d88d7c940a9edf35  amd64-llvm/libgallium_wgl.dll
-4d29b2a6671f1cce55f490d543c9fccd9c243d378ec95f79639b556d3282b65e  amd64-llvm/vulkan_lvp.dll
-f977a5cde4a9022f263f4c2d78e89ade8e2ede726e91b860fc9e0a019bd941f6  amd64-llvm/lvp_icd.json
-e25fe82b9d310b74f2b9c979d4f5ae8c7915324d37428a6a72e058dbca29d406  amd64-llvm/mesa3d-licenses.txt
+7fc352df8044a1c7dbdde79fd78be34f8a73842328d7a5ebbaf7bfb7eb63783a  amd64-llvm/libgallium_wgl.dll
+cf934392fd0b14692fd950b68b4a776dae266adb2a387c33eecf1ef07cdbcde7  amd64-llvm/vulkan_lvp.dll
+feb96dd7f1e2b183b080d215d6c676ce8e3a40925a01196e38cecddd4a29ec06  amd64-llvm/lvp_icd.json
+8176f74c4065731f80ca230308c633b961203af6c60a78a06c187fa244a76fab  amd64-llvm/mesa3d-licenses.txt
 8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee  amd64-llvm/llvm-licenses.txt
 ```
 
@@ -150,7 +150,7 @@ pack in a temporary directory next to the target and move it into place, so a fa
 `amd64-llvm/` or `i386-llvm/`; the pinned artifact hash is stored in `.artifact-sha256` in the staged directory, and a
 changed pin in the script stages the new pack again. CMake accepts the directory only with every DLL, both licence files
 and `SHA256SUMS`. `rclone` runs with `--contimeout 15s --timeout 60s --retries 2`. At the end of the configure there is
-one line per architecture, `Mesa3D amd64: llvmpipe (artifact 6ab3d0fe)` or
+one line per architecture, `Mesa3D amd64: llvmpipe (artifact beed97f8)` or
 `Mesa3D amd64: softpipe fallback (<reason>)` (and the same for i386 in the SysWOW64 guest configure), so a silent fall
 back to OpenGL 3.3 is visible.
 
@@ -176,9 +176,9 @@ i386 softpipe driver in SysWOW64. The pack is `ARCHES=i386 I386_LLVM=1 ./build-m
 rebuilt to the same DLL twice); its size is 73 MB installed, 18.6 MB compressed.
 
 ```
-c1e739e70ae73d6617814cf54555c7620e735b94cd1e87a4c393df99df2a6fab  wow64-llvmpipe-i386-artifacts.tar.xz
-511f46e304d15230d269542a1bb3bc52e111c4f66a5295b7ca9e16ecd53f563a  i386-llvm/libgallium_wgl.dll
-5d8f01c41af2c53e3652ac82e9a42cf7990016e58a3073769034372adf162dea  i386-llvm/mesa3d-licenses.txt
+ffbe26e2d376134d6380b08872a712b565597b30f4ce232da9aac85ca0d5c98b  wow64-llvmpipe-i386-artifacts.tar.xz
+05f636f3dfb6923cf75e1861022093f5b8677b67e5be96e14a01833690bacd83  i386-llvm/libgallium_wgl.dll
+e8261a3c1111986357368c0187823b5854d4cc0415d287232ef8d8566874802d  i386-llvm/mesa3d-licenses.txt
 ```
 
 Under WoW64 (amd64 Release, 4 vCPUs) the 32-bit driver gave the gear scene 776 frames per second for 120 s and the

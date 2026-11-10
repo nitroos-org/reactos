@@ -36,7 +36,7 @@ the original replaces it at the next boot (a reboot-delete is never queued for t
 - `[Feature] BuiltInFile=<path>`: when the image already carries the pack (that file exists) and featmgr has no record of
   it, the entry shows Enabled, "included in this image", and cannot be turned off there.
 - The hosted files of `lavapipe-pack` are produced by `tools/stage-lavapipe-payload.sh <dir>` (the six files of
-  `[Download]` plus `SHA256SUMS`); they are published at `https://repo.nitroos.org/featmgr/lavapipe-pack/26.2.4-6ab3d0fe/`. Copying them into the payload
+  `[Download]` plus `SHA256SUMS`); they are published at `https://repo.nitroos.org/featmgr/lavapipe-pack/26.3.0-beed97f8/`. Copying them into the payload
   folder instead makes the pack installable offline (they are still verified). Offline tests: `tests\roundtrip.cmd` (H1-H29).
 
 ## AAC audio decoder (AAC-LC), opt-in add-on

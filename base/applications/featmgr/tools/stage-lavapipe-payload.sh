@@ -6,7 +6,7 @@
 #
 # Use:
 #  - hosting: upload the six files (SHA256SUMS too, for people who check by hand) to
-#      <PayloadBaseUrl>/<[Source] Path>/        e.g. https://<domain>/featmgr/lavapipe-pack/26.2.4-6ab3d0fe/
+#      <PayloadBaseUrl>/<[Source] Path>/        e.g. https://<domain>/featmgr/lavapipe-pack/26.3.0-beed97f8/
 #    featmgr fetches <base>/<Path>/<file> over https when the pack is turned on.
 #  - offline target: copy them to %SystemRoot%\Featmgr\Payload\lavapipe-pack\ ; featmgr then verifies and uses
 #    them without a download.
