@@ -457,9 +457,8 @@ CsrFreeUnusedNtSession(IN PCSR_NT_SESSION NtSession)
 
 /*
  * Drops a reference on an NT session without telling SMSS when it was the last one. Used by the Sb thread
- * while SMSS waits for its reply to a forwarded registration: SmSessionComplete from here would need a
- * second SMSS API thread, and with forwards in flight there may be none (deadlock). SMSS deletes its
- * session record itself when the registration fails.
+ * for a forwarded registration that failed: SMSS deletes its session record itself then, and the Sb thread
+ * never calls SMSS while SMSS waits for its answer (see SmpForwardProcessRegistration).
  */
 static
 VOID
@@ -483,8 +482,13 @@ CsrDereferenceNtSessionQuietly(IN PCSR_NT_SESSION NtSession)
  * request names the process and its first thread by id only. Every check
  * fails closed, and nothing is changed before all of them passed:
  * - the thread belongs to the process;
- * - the process is in our session, as the kernel reports it;
+ * - the process is still alive and in our session, as the kernel reports it;
  * - it is not csrss itself and not registered yet.
+ * Known limit, as for a process registered by CsrCreateProcess in its own
+ * session: if the creator kills the process after the alive check and
+ * before it connected to our API port, the records stay (nothing watches a
+ * process that never connected). It needs SeTcbPrivilege to create into
+ * this session; one record per such process.
  */
 static
 NTSTATUS
@@ -690,8 +694,20 @@ CsrCreateRemoteProcess(IN ULONG SmSessionId,
     CsrProcess->InheritStatus = STATUS_SUCCESS;
     CsrInsertProcess(NULL, CsrProcess);
     Status = CsrProcess->InheritStatus;
+    if (NT_SUCCESS(Status))
+    {
+        /*
+         * Registered. Drop our reference while the Process Lock still keeps the process, and with it
+         * its own reference, from going: once the lock is released the process can connect and exit at
+         * once, and ours must not be the last one then (SMSS keeps the record of a registration that
+         * succeeded until SmSessionComplete).
+         */
+        CsrDereferenceNtSessionQuietly(NtSessionHeld);
+        CsrReleaseProcessLock();
+        return Status;
+    }
     CsrReleaseProcessLock();
-    if (!NT_SUCCESS(Status)) CsrDestroyProcess(ClientId, Status);
+    CsrDestroyProcess(ClientId, Status);
     CsrDereferenceNtSessionQuietly(NtSessionHeld);
     return Status;
 
@@ -736,9 +752,17 @@ CsrSbCreateRemoteProcess(IN PSB_API_MSG ApiMessage)
                                                      CreateRemote->MuSessionId,
                                                      &ClientId,
                                                      CreateRemote->Flags);
-    DPRINT1("CSRSS: SbCreateRemoteProcess %lx.%lx in session %lu, Status=%lx\n",
-            ClientId.UniqueProcess, ClientId.UniqueThread,
-            CreateRemote->MuSessionId, ApiMessage->ReturnValue);
+    if (!NT_SUCCESS(ApiMessage->ReturnValue))
+    {
+        DPRINT1("CSRSS: SbCreateRemoteProcess %lx.%lx in session %lu failed: %lx\n",
+                ClientId.UniqueProcess, ClientId.UniqueThread,
+                CreateRemote->MuSessionId, ApiMessage->ReturnValue);
+    }
+    else
+    {
+        DPRINT("CSRSS: SbCreateRemoteProcess %lx.%lx in session %lu\n",
+               ClientId.UniqueProcess, ClientId.UniqueThread, CreateRemote->MuSessionId);
+    }
     return TRUE;
 }
 

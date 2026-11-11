@@ -213,8 +213,19 @@ SmSendMsgToSm(
  * An NT status code for the termination.
  *
  * @return
- * Success status as handed by the SM reply; otherwise a failure
- * status code.
+ * The status of sending the message. The SM does not reply: this is
+ * a datagram, see the remarks.
+ *
+ * @remarks
+ * NitroOS. A subsystem server calls this when the last process of a
+ * session goes, from whatever thread and with whatever locks of its
+ * own it holds then. If it waited for the SM, it would need a free SM
+ * API thread, and the SM API threads can all be waiting for that same
+ * server (a forwarded registration, SmForwardProcessRegistration, waits
+ * for the target csrss's Sb thread, and that thread can need a lock the
+ * caller holds): a deadlock of the whole SM API. As a datagram the
+ * message is queued and the caller goes on. The server has nothing to
+ * do with the answer anyway.
  **/
 NTSTATUS
 NTAPI
@@ -238,9 +249,13 @@ SmSessionComplete(
     SessionComplete->SessionId = SessionId;
     SessionComplete->SessionStatus = SessionStatus;
 
-    /* Send the message and wait for a reply */
+    /* Send the message as a datagram, as SmSendMsgToSm sizes it; no reply */
     SmApiMsg.ApiNumber = SmpSessionCompleteApi;
-    return SmSendMsgToSm(SmApiPort, &SmApiMsg);
+    SmApiMsg.h.u2.ZeroInit = 0;
+    SmApiMsg.h.u1.s1.DataLength = (CSHORT)sizeof(SM_SESSION_COMPLETE_MSG) +
+        FIELD_OFFSET(SM_API_MSG, u) - sizeof(SmApiMsg.h);
+    SmApiMsg.h.u1.s1.TotalLength = SmApiMsg.h.u1.s1.DataLength + sizeof(SmApiMsg.h);
+    return NtRequestPort(SmApiPort, &SmApiMsg.h);
 }
 
 /**
