@@ -622,6 +622,11 @@ static HANDLE get_admin_token(void)
 static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch)
 {
     WCHAR path[MAX_PATH], cmdline[MAX_PATH + 23];
+#ifdef __REACTOS__
+    WCHAR cur_dir[MAX_PATH];
+#else
+    const WCHAR *cur_dir = NULL;
+#endif
     PROCESS_INFORMATION pi = {0};
     STARTUPINFOW si = {0};
     WCHAR buffer[24];
@@ -648,16 +653,24 @@ static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch)
     lstrcatW(path, L"\\msiexec.exe");
     swprintf(cmdline, ARRAY_SIZE(cmdline), L"%s -Embedding %d", path, GetCurrentProcessId());
 
+#ifdef __REACTOS__
+    /* The custom action server runs from the system directory. That is the directory the Installer service starts
+     * it in on Windows (inferred from Oracle XE's installer working there, not measured). It would otherwise inherit the directory of the client, and an action that starts a program by a bare
+     * name given as the application (Oracle XE's port check starts "cmd.exe" that way, which is looked for in the
+     * current directory only) would not find it unless the client was started in the system directory. */
+    GetSystemDirectoryW(cur_dir, ARRAY_SIZE(cur_dir));
+#endif
+
     token = get_admin_token();
 
     if (is_wow64 && arch == SCS_64BIT_BINARY)
     {
         Wow64DisableWow64FsRedirection(&cookie);
-        started = CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+        started = CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, cur_dir, &si, &pi);
         Wow64RevertWow64FsRedirection(cookie);
     }
     else
-        started = CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+        started = CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, cur_dir, &si, &pi);
 
     if (token) CloseHandle(token);
 

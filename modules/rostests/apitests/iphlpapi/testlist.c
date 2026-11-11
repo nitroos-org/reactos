@@ -19,6 +19,7 @@ extern void func_IfStatistics(void);
 extern void func_IpInterface(void);
 extern void func_IpTables2(void);
 extern void func_NeighborEntry2(void);
+extern void func_NetstatOutput(void);
 extern void func_NotifyAddrChange(void);
 extern void func_NotifyChanges(void);
 extern void func_NotifyIpInterfaceChange(void);
@@ -46,6 +47,7 @@ const struct test winetest_testlist[] =
     { "IpInterface",               func_IpInterface },
     { "IpTables2",                  func_IpTables2 },
     { "NeighborEntry2",             func_NeighborEntry2 },
+    { "NetstatOutput",              func_NetstatOutput },
     { "NotifyAddrChange",          func_NotifyAddrChange },
     { "NotifyChanges",              func_NotifyChanges },
     { "NotifyIpInterfaceChange",    func_NotifyIpInterfaceChange },

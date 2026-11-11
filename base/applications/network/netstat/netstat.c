@@ -448,8 +448,17 @@ BOOL ShowTcpTable(VOID)
                 PID[0] = 0;
             }
 
-            ConPrintf(StdOut, L"  %-6s %-22S %-22S %-11s %S\n", L"TCP",
-                      Host, Remote, TcpState[tcpTable->table[i].dwState], PID);
+            /* Windows pads the state to 16 characters before the PID with -o and leaves the line unpadded without it */
+            if (bDoShowProcessId)
+            {
+                ConPrintf(StdOut, L"  %-6s %-22S %-22S %-15s %S\n", L"TCP",
+                          Host, Remote, TcpState[tcpTable->table[i].dwState], PID);
+            }
+            else
+            {
+                ConPrintf(StdOut, L"  %-6s %-22S %-22S %s\n", L"TCP",
+                          Host, Remote, TcpState[tcpTable->table[i].dwState]);
+            }
         }
     }
 
@@ -503,7 +512,11 @@ BOOL ShowUdpTable(VOID)
             PID[0] = 0;
         }
 
-        ConPrintf(StdOut, L"  %-6s %-22S %-34s %S\n", L"UDP", Host, L"*:*", PID);
+        /* As on Windows: "*:*" fills the foreign address and state columns, which end where the PID starts */
+        if (bDoShowProcessId)
+            ConPrintf(StdOut, L"  %-6s %-22S %-38s %S\n", L"UDP", Host, L"*:*", PID);
+        else
+            ConPrintf(StdOut, L"  %-6s %-22S %-23s\n", L"UDP", Host, L"*:*");
     }
 
     HeapFree(GetProcessHeap(), 0, udpTable);

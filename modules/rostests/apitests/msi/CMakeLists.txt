@@ -1,5 +1,10 @@
+spec2def(msi_cadir.dll msi_cadir.spec)
+add_library(msi_cadir MODULE msi_cadir.c ${CMAKE_CURRENT_BINARY_DIR}/msi_cadir.def)
+set_module_type(msi_cadir win32dll)
+add_importlibs(msi_cadir msi msvcrt kernel32)
+add_rostests_file(TARGET msi_cadir)
 
-add_executable(msi_apitest RefusedPackageLog.c Wow64Folders.c testlist.c)
+add_executable(msi_apitest CustomActionDir.c RefusedPackageLog.c Wow64Folders.c testlist.c)
 set_module_type(msi_apitest win32cui)
 add_importlibs(msi_apitest msi msvcrt kernel32)
 add_rostests_file(TARGET msi_apitest)
