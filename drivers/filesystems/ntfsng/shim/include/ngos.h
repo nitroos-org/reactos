@@ -80,6 +80,10 @@ enum {
 	NGP_COMMIT_FULL, NGP_COMMIT_ALLOC, NGP_SYNC, NGP_LOOKUP, NGP_CREATE, NGP_UNLINK, NGP_RENAME,
 	NGP_READDIR, NGP_IGET, NGP_PUT, NGP_STAT, NGP_READ, NGP_WRITE, NGP_SET_SIZE, NGP_SET_INFO,
 	NGP_SHORT_NAME, NGP_ADD_SHORT_NAME, NGP_SECURITY, NGP_DIR_EMPTY, NGP_LINK, NGP_DIRWALK,
+	NGP_SKIP_TAKEN,		/* checked builds: kshim_sync skipped its scan (count) */
+	NGP_SKIP_CHECKED,	/* ... and the verifying scan found nothing dirty, as it must (count) */
+	NGP_SKIP_WRONG,		/* ... and the verifying scan found something dirty while no dirtying was announced: a missed bump (count) */
+	NGP_SKIP_RACED,		/* ... verifying scan found dirt but a dirtier announced itself meanwhile: inconclusive (count) */
 	NGP_IRP = 32,		/* + the IRP major function */
 	NGP_STAGES = 64
 };

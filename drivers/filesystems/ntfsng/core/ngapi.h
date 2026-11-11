@@ -280,7 +280,7 @@ int ngc_dir_empty(ngc_vol *v, ngc_node *dir);
  */
 int ngc_deleted_dir(ngc_vol *v, int create, ngc_node **out);
 int ngc_purge_deleted(ngc_vol *v, unsigned int *count);
-void ngc_write_stats(unsigned long *writes, unsigned long long *bytes, unsigned long *syncs, unsigned long *dirties);
+void ngc_write_stats(unsigned long *writes, unsigned long long *bytes, unsigned long *syncs, unsigned long *skips, unsigned long *dirties);
 /* Prints shim memory accounting (live allocations by call site, cache pages, inodes). */
 void ngc_debug_dump(void);
 

@@ -243,18 +243,27 @@ PciIdeDmaStart(
     ATA_WRITE(ChanData->Regs.Dma + PCIIDE_DMA_COMMAND, Command, ChanData, MRES_DMA);
 }
 
+/* Stop the engine and clear the interrupt bit; the caller has just accessed the controller (one PIO transfer cycle) */
+static
 VOID
-PciIdeDmaStop(
+PciIdeDmaStopEngine(
     _In_ PCHANNEL_DATA_PATA ChanData)
 {
     PUCHAR IoBase = ChanData->Regs.Dma;
 
-    /* Wait one PIO transfer cycle */
-    (VOID)ATA_READ(IoBase + PCIIDE_DMA_STATUS, ChanData, MRES_DMA);
-
     /* Clear the interrupt bit in the status register */
     ATA_WRITE(IoBase + PCIIDE_DMA_COMMAND, PCIIDE_DMA_COMMAND_STOP, ChanData, MRES_DMA);
     ATA_WRITE(IoBase + PCIIDE_DMA_STATUS, PCIIDE_DMA_STATUS_INTERRUPT, ChanData, MRES_DMA);
+}
+
+VOID
+PciIdeDmaStop(
+    _In_ PCHANNEL_DATA_PATA ChanData)
+{
+    /* Wait one PIO transfer cycle */
+    (VOID)ATA_READ(ChanData->Regs.Dma + PCIIDE_DMA_STATUS, ChanData, MRES_DMA);
+
+    PciIdeDmaStopEngine(ChanData);
 }
 
 static
@@ -1065,15 +1074,29 @@ PciIdeChannelIsr(
 
     UNREFERENCED_PARAMETER(Interrupt);
 
-    if (ChanData->CheckInterrupt && !(ChanData->CheckInterrupt(ChanData)))
-        return FALSE;
+    /*
+     * Read the bus master status once. Where the DMA interrupt bit follows the IDE interrupt pin
+     * (PciIdeCheckInterrupt), the same read tells whether the interrupt is ours.
+     * Each port access is a trap to the hypervisor on emulated hardware.
+     */
+    if (ChanData->CheckInterrupt == PciIdeCheckInterrupt)
+    {
+        DmaStatus = PciIdeDmaReadStatus(ChanData);
+        if (!(DmaStatus & PCIIDE_DMA_STATUS_INTERRUPT))
+            return FALSE;
+    }
+    else
+    {
+        if (ChanData->CheckInterrupt && !(ChanData->CheckInterrupt(ChanData)))
+            return FALSE;
 
-    DmaStatus = PciIdeDmaReadStatus(ChanData);
+        DmaStatus = PciIdeDmaReadStatus(ChanData);
+    }
     if (DmaStatus & PCIIDE_DMA_STATUS_INTERRUPT)
     {
         /* Always clear the DMA interrupt, even when the current command is a PIO command */
         if ((ChanData->CommandFlags & CMD_FLAG_TRANSFER_MASK) == CMD_FLAG_DMA_TRANSFER)
-            PciIdeDmaStop(ChanData);
+            PciIdeDmaStopEngine(ChanData);
         else
             PciIdeDmaClearInterrupt(ChanData, DmaStatus);
 
