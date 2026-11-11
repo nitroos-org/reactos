@@ -38,6 +38,10 @@ ULONG CsrSubSystemType; // Known as SessionFirstProcessImageType in Windows 7+
 ULONG CsrMaxApiRequestThreads;
 ULONG CsrTotalPerProcessDataLength;
 ULONG SessionId;
+/* The SMSS that started us: the only client of the Sb port */
+HANDLE CsrSmssProcess = NULL;
+HANDLE CsrSmssProcessId = NULL;
+LARGE_INTEGER CsrSmssCreateTime;
 HANDLE BNOLinksDirectory;
 HANDLE SessionObjectDirectory;
 HANDLE DosDevicesDirectory;
@@ -1202,6 +1206,69 @@ Quit:
 }
 
 /*++
+ * @name CsrRecordSessionManager
+ *
+ * The Sb port serves only the Session Manager. SMSS starts every csrss, so
+ * it is our parent. Keep a handle to it, so that its pid cannot name another
+ * process while we run, and its create time, which must not be later than
+ * ours. On any failure nothing is recorded and every Sb client is refused.
+ *
+ *--*/
+static
+VOID
+CsrRecordSessionManager(VOID)
+{
+    NTSTATUS Status;
+    PROCESS_BASIC_INFORMATION BasicInfo;
+    KERNEL_USER_TIMES OwnTimes, ParentTimes;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    CLIENT_ID ClientId;
+    HANDLE Parent;
+
+    Status = NtQueryInformationProcess(NtCurrentProcess(),
+                                       ProcessBasicInformation,
+                                       &BasicInfo,
+                                       sizeof(BasicInfo),
+                                       NULL);
+    if (!NT_SUCCESS(Status)) return;
+    Status = NtQueryInformationProcess(NtCurrentProcess(),
+                                       ProcessTimes,
+                                       &OwnTimes,
+                                       sizeof(OwnTimes),
+                                       NULL);
+    if (!NT_SUCCESS(Status)) return;
+
+    ClientId.UniqueProcess = (HANDLE)BasicInfo.InheritedFromUniqueProcessId;
+    ClientId.UniqueThread = NULL;
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    Status = NtOpenProcess(&Parent,
+                           PROCESS_QUERY_INFORMATION | SYNCHRONIZE,
+                           &ObjectAttributes,
+                           &ClientId);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("CSRSRV: cannot open the Session Manager (pid %p), Status=%lx\n",
+                ClientId.UniqueProcess, Status);
+        return;
+    }
+    Status = NtQueryInformationProcess(Parent,
+                                       ProcessTimes,
+                                       &ParentTimes,
+                                       sizeof(ParentTimes),
+                                       NULL);
+    if (!NT_SUCCESS(Status) ||
+        (ParentTimes.CreateTime.QuadPart > OwnTimes.CreateTime.QuadPart))
+    {
+        NtClose(Parent);
+        return;
+    }
+
+    CsrSmssProcess = Parent;
+    CsrSmssProcessId = ClientId.UniqueProcess;
+    CsrSmssCreateTime = ParentTimes.CreateTime;
+}
+
+/*++
  * @name CsrSbApiPortInitialize
  *
  * The CsrSbApiPortInitialize routine initializes the LPC Port used for
@@ -1390,6 +1457,9 @@ CsrServerInitialization(IN ULONG ArgumentCount,
     if (CsrSubSystemType != IMAGE_SUBSYSTEM_UNKNOWN)
     {
 #endif
+    /* Who may use the Sb port */
+    CsrRecordSessionManager();
+
     /* Initialize the API Port for SM communication */
     Status = CsrSbApiPortInitialize();
     if (!NT_SUCCESS(Status))

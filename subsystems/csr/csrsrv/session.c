@@ -416,6 +416,32 @@ CsrSbCreateProcess(IN PSB_API_MSG ApiMessage)
     return TRUE;
 }
 
+/* The sender of an Sb message or connection is the Session Manager that started us */
+static
+BOOLEAN
+CsrIsSessionManagerClient(IN PCLIENT_ID Sender)
+{
+    NTSTATUS Status;
+    LARGE_INTEGER Timeout;
+    KERNEL_USER_TIMES Times;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE SenderProcess;
+
+    if (!CsrSmssProcess || (Sender->UniqueProcess != CsrSmssProcessId)) return FALSE;
+
+    /* Still alive (we hold a handle, so its pid has not been reused) */
+    Timeout.QuadPart = 0;
+    if (NtWaitForSingleObject(CsrSmssProcess, FALSE, &Timeout) != STATUS_TIMEOUT) return FALSE;
+
+    /* The sender, by the client id the kernel stamped (its thread waits for the reply) */
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    Status = NtOpenProcess(&SenderProcess, PROCESS_QUERY_INFORMATION, &ObjectAttributes, Sender);
+    if (!NT_SUCCESS(Status)) return FALSE;
+    Status = NtQueryInformationProcess(SenderProcess, ProcessTimes, &Times, sizeof(Times), NULL);
+    NtClose(SenderProcess);
+    return NT_SUCCESS(Status) && (Times.CreateTime.QuadPart == CsrSmssCreateTime.QuadPart);
+}
+
 /*++
  * @name CsrSbApiHandleConnectionRequest
  *
@@ -442,6 +468,15 @@ CsrSbApiHandleConnectionRequest(IN PSB_API_MSG Message)
 
     /* Set the Port View Structure Length */
     RemotePortView.Length = sizeof(REMOTE_PORT_VIEW);
+
+    /* Only the Session Manager that started us; everyone else is refused */
+    if (!CsrIsSessionManagerClient(&Message->h.ClientId))
+    {
+        DPRINT1("CSRSS: Sb connection refused: %lx.%lx is not the Session Manager\n",
+                Message->h.ClientId.UniqueProcess, Message->h.ClientId.UniqueThread);
+        NtAcceptConnectPort(&hPort, NULL, &Message->h, FALSE, NULL, NULL);
+        return STATUS_ACCESS_DENIED;
+    }
 
     /* Accept the connection */
     Status = NtAcceptConnectPort(&hPort,
@@ -552,8 +587,15 @@ CsrSbApiRequestThread(
         /* Reuse the message */
         ReplyMsg = &ReceiveMsg;
 
+        /* Every request comes from the Session Manager (defence in depth: only it can connect) */
+        if (!CsrIsSessionManagerClient(&ReceiveMsg.h.ClientId))
+        {
+            DPRINT1("CSRSS: Sb request refused: %lx.%lx is not the Session Manager\n",
+                    ReceiveMsg.h.ClientId.UniqueProcess, ReceiveMsg.h.ClientId.UniqueThread);
+            ReplyMsg->ReturnValue = STATUS_ACCESS_DENIED;
+        }
         /* Make sure that the API is supported */
-        if (ReceiveMsg.ApiNumber < SbpMaxApiNumber)
+        else if (ReceiveMsg.ApiNumber < SbpMaxApiNumber)
         {
             /* Call the API */
             if (!CsrServerSbApiDispatch[ReceiveMsg.ApiNumber](&ReceiveMsg))
