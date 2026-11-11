@@ -17,11 +17,29 @@ static CHEW_SERIAL_QUEUE LoopQueue;
 
 #define LOOP_QUEUE_LIMIT 1024
 
+/* TCP fast path (Tcpip\Parameters NitroLoopbackFastPath, REG_DWORD, read when the adapter registers;
+   absent = LOOP_FAST_PATH_DEFAULT, 0 = off): a TCP datagram lwIP sends to the loopback netif is copied
+   once into a pbuf and goes on LoopQueue as it is. The worker gives it to lwIP, without the two NDIS
+   packets, the neighbour queue, the IP layer's receive path and the two further copies of the other
+   path. Everything the IP layer would do on the way is nothing for loopback: the firewall passes it by
+   interface, loopback has no counters, and lwIP checks the header it built itself. Same queue, same
+   worker, so the order of looped segments and datagrams does not change */
+#define LOOP_FAST_PATH_DEFAULT 1
+#define LOOP_FAST_PATH_VALUE L"NitroLoopbackFastPath"
+
+BOOLEAN LoopFastPath = FALSE;
+
+/* Pbuf is NULL for an IP packet of the NDIS path; a fast-path item ends before IPPacket */
 typedef struct _LOOP_ITEM
 {
   LIST_ENTRY ListEntry;
+  struct pbuf *Pbuf;
   IP_PACKET IPPacket;
 } LOOP_ITEM, *PLOOP_ITEM;
+
+static NPAGED_LOOKASIDE_LIST LoopPbufItems;
+static BOOLEAN LoopPbufItemsReady;
+static volatile BOOLEAN LoopClosing;
 
 VOID LoopPassiveWorkItem(
   PVOID Context)
@@ -34,10 +52,91 @@ VOID LoopPassiveWorkItem(
   ExFreePool(Item);
 }
 
+/* On the worker: a fast-path datagram enters lwIP as LibIPInsertPacket would put it there */
+static VOID LoopInputPbuf(
+  PLOOP_ITEM Item)
+{
+  struct pbuf *p = Item->Pbuf;
+  struct netif *netif = Loopback ? Loopback->TCPContext : NULL;
+
+  ExFreeToNPagedLookasideList(&LoopPbufItems, Item);
+
+  if (LoopClosing || !netif || netif->input(p, netif) != ERR_OK)
+    pbuf_free(p);
+}
+
 VOID LoopPassiveWorker(
   PLIST_ENTRY Entry)
 {
-  LoopPassiveWorkItem(CONTAINING_RECORD(Entry, LOOP_ITEM, ListEntry));
+  PLOOP_ITEM Item = CONTAINING_RECORD(Entry, LOOP_ITEM, ListEntry);
+
+  if (Item->Pbuf)
+    LoopInputPbuf(Item);
+  else
+    LoopPassiveWorkItem(Item);
+}
+
+BOOLEAN LoopTransmitPbuf(
+  struct pbuf *p)
+/*
+ * FUNCTION: Loops a TCP datagram from lwIP back to lwIP (the fast path)
+ * ARGUMENTS:
+ *   p = The complete datagram, IP header first; it stays the caller's
+ * RETURNS:
+ *   FALSE if the copy could not be allocated (the caller tries again later),
+ *   TRUE when it is queued, or dropped as LoopTransmit drops a packet when
+ *   the queue is full
+ * NOTES:
+ *   Under the lwIP core lock (lwIP's output). lwIP keeps p for retransmission
+ *   and ip4_input moves the payload of what it is given, so it gets a copy
+ */
+{
+  struct pbuf *q;
+  PLOOP_ITEM Item;
+
+  q = pbuf_clone(PBUF_RAW, PBUF_RAM, p);
+  if (!q)
+    return FALSE;
+
+  Item = ExAllocateFromNPagedLookasideList(&LoopPbufItems);
+  if (!Item)
+  {
+    pbuf_free(q);
+    return TRUE;
+  }
+
+  Item->Pbuf = q;
+  if (!ChewSerialInsert(&LoopQueue, &Item->ListEntry))
+  {
+    pbuf_free(q);
+    ExFreeToNPagedLookasideList(&LoopPbufItems, Item);
+  }
+
+  return TRUE;
+}
+
+static BOOLEAN LoopReadFastPathSwitch(VOID)
+{
+  UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Tcpip\\Parameters");
+  UNICODE_STRING ValueName = RTL_CONSTANT_STRING(LOOP_FAST_PATH_VALUE);
+  OBJECT_ATTRIBUTES Attributes;
+  UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+  PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+  HANDLE Key;
+  ULONG Length;
+  NTSTATUS Status;
+  BOOLEAN Enabled = LOOP_FAST_PATH_DEFAULT;
+
+  InitializeObjectAttributes(&Attributes, &KeyName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+  if (!NT_SUCCESS(ZwOpenKey(&Key, KEY_QUERY_VALUE, &Attributes)))
+    return Enabled;
+
+  Status = ZwQueryValueKey(Key, &ValueName, KeyValuePartialInformation, Info, sizeof(Buffer), &Length);
+  if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+    Enabled = (*(PULONG)Info->Data != 0);
+
+  ZwClose(Key);
+  return Enabled;
 }
 
 VOID LoopTransmit(
@@ -85,6 +184,7 @@ VOID LoopTransmit(
         Item = ExAllocatePool(NonPagedPool, sizeof(LOOP_ITEM));
         if (Item)
         {
+            Item->Pbuf = NULL;
             IPInitializePacket(&Item->IPPacket, 0);
 
             Item->IPPacket.NdisPacket = XmitPacket;
@@ -143,6 +243,11 @@ NDIS_STATUS LoopRegisterAdapter(
   if (!ChewSerialInit(&LoopQueue, LoopPassiveWorker, LOOP_QUEUE_LIMIT))
     return NDIS_STATUS_RESOURCES;
 
+  ExInitializeNPagedLookasideList(&LoopPbufItems, NULL, NULL, 0,
+                                  FIELD_OFFSET(LOOP_ITEM, IPPacket), 'pLoL', 0);
+  LoopPbufItemsReady = TRUE;
+  LoopClosing = FALSE;
+
   /* Bind the adapter to network (IP) layer */
   BindInfo.Context = NULL;
   BindInfo.HeaderSize = 0;
@@ -155,6 +260,8 @@ NDIS_STATUS LoopRegisterAdapter(
   Loopback = IPCreateInterface(&BindInfo);
   if (!Loopback) {
     ChewSerialRundown(&LoopQueue);
+    ExDeleteNPagedLookasideList(&LoopPbufItems);
+    LoopPbufItemsReady = FALSE;
     return NDIS_STATUS_RESOURCES;
   }
 
@@ -171,6 +278,10 @@ NDIS_STATUS LoopRegisterAdapter(
   IPRegisterInterface(Loopback);
 
   IPAddInterfaceRoute(Loopback);
+
+  /* Last: the fast path needs the interface's netif */
+  LoopFastPath = LoopReadFastPathSwitch();
+  DbgPrint("TCPIP: loopback fast path %s\n", LoopFastPath ? "on" : "off");
 
   TI_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 
@@ -194,8 +305,17 @@ NDIS_STATUS LoopUnregisterAdapter(
 
   if (Loopback != NULL)
     {
+      /* A fast-path datagram queued from now on is freed by the worker, or refused by the closed queue */
+      LoopFastPath = FALSE;
+      LoopClosing = TRUE;
+
       IPUnregisterInterface(Loopback);
       ChewSerialRundown(&LoopQueue);
+      if (LoopPbufItemsReady)
+      {
+        ExDeleteNPagedLookasideList(&LoopPbufItems);
+        LoopPbufItemsReady = FALSE;
+      }
       IPDestroyInterface(Loopback);
       Loopback = NULL;
     }

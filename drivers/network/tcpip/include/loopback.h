@@ -11,6 +11,11 @@
 
 extern PIP_INTERFACE Loopback;
 
+/* TCP datagrams from lwIP to the loopback netif skip the NDIS packets and the IP layer (loopback.c) */
+struct pbuf;
+extern BOOLEAN LoopFastPath;
+BOOLEAN LoopTransmitPbuf(struct pbuf *p);
+
 NDIS_STATUS LoopRegisterAdapter(
     PNDIS_STRING AdapterName,
     PLAN_ADAPTER *Adapter);
