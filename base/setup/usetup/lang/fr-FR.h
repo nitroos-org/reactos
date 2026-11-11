@@ -154,14 +154,14 @@ static MUI_ENTRY frFRWelcomePageEntries[] =
     {
         6,
         23,
-        "Pour plus d'informations sur ReactOS, veuiller visiter :",
+        "Pour plus d'informations sur " BRAND_PRODUCT_NAME ", veuiller visiter :",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

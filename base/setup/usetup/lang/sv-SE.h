@@ -160,14 +160,14 @@ static MUI_ENTRY svSEWelcomePageEntries[] =
     {
         6,
         23,
-        "F\224r mer information om ReactOS, bes\224k:",
+        "F\224r mer information om " BRAND_PRODUCT_NAME ", bes\224k:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

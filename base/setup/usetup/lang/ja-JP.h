@@ -154,14 +154,14 @@ static MUI_ENTRY jaJPWelcomePageEntries[] =
     {
         6,
         23,
-        "ReactOS \311 \274\256\263\273\262\305 \274\336\256\263\316\263\306 \266\335\274\303\312 \262\266\246 \272\336\327\335 \270\300\336\273\262:",
+        "" BRAND_PRODUCT_NAME " \311 \274\256\263\273\262\305 \274\336\256\263\316\263\306 \266\335\274\303\312 \262\266\246 \272\336\327\335 \270\300\336\273\262:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

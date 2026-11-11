@@ -14,6 +14,7 @@
 #include <apphelp.h>
 #include <windowsx.h>
 #include <sfc.h>
+#include <reactos/buildno.h>
 
 const GUID CLSID_CLayerUIPropPage = { 0x513D916F, 0x2A8E, 0x4F51, { 0xAE, 0xAB, 0x0C, 0xBC, 0x76, 0xFB, 0x1A, 0xF8 } };
 
@@ -414,7 +415,7 @@ LRESULT CLayerUIPropPage::OnEditModes(WORD wNotifyCode, WORD wID, HWND hWndCtl, 
 LRESULT CLayerUIPropPage::OnClickNotify(INT uCode, LPNMHDR hdr, BOOL& bHandled)
 {
     if (hdr->idFrom == IDC_INFOLINK)
-        ShellExecute(NULL, L"open", L"https://reactos.org/forum/viewforum.php?f=4", NULL, NULL, SW_SHOW);
+        ShellExecute(NULL, L"open", BRAND_WIDEN(BRAND_SUPPORT_URL), NULL, NULL, SW_SHOW);
     return 0;
 }
 

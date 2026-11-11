@@ -152,14 +152,14 @@ static MUI_ENTRY enUSWelcomePageEntries[] =
     {
         6,
         23,
-        "For more information on ReactOS, please visit:",
+        "For more information on " BRAND_PRODUCT_NAME ", please visit:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

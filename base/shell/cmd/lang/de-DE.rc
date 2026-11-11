@@ -411,9 +411,9 @@ VER [/C][/R][/W]\n\n\
  und/oder unter den Bedingungnen der GNU General Public License, von der\n\
  Free Software Foundation entweder in Version 2 oder\n\
  (nach eigenem Belieben) jeder höheren Version veröffentlicht, verändern."
-    STRING_VERSION_HELP5 "\nSenden Sie Fehlerberichte an <ros-dev@reactos.org>.\n\
-Updates sind auf der offiziellen ReactOS-Webseite verfügbar:\n\
-https://reactos.org"
+    STRING_VERSION_HELP5 "\nSenden Sie Fehlerberichte an " BRAND_ISSUES_URL ".\n\
+Updates sind auf der " BRAND_PRODUCT_NAME "-Webseite verfügbar:\n\
+" BRAND_SUPPORT_URL
     STRING_VERSION_HELP6 "\nFreeDOS-Version programmiert von:\n"
     STRING_VERSION_HELP7 "\nReactOS-Version programmiert von:\n"
     STRING_VOL_HELP1 " Datenträger im Laufwerk %c ist %s\n"
