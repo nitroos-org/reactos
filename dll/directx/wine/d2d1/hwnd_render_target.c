@@ -808,6 +808,7 @@ static const struct ID2D1HwndRenderTargetVtbl d2d_hwnd_render_target_vtbl =
 static const struct d2d_device_context_ops d2d_hwnd_render_target_ops =
 {
     d2d_hwnd_render_target_present,
+    TRUE,
 };
 
 HRESULT d2d_hwnd_render_target_init(struct d2d_hwnd_render_target *render_target, ID2D1Factory1 *factory,
