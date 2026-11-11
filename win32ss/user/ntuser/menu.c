@@ -19,6 +19,8 @@ C_ASSERT(FIELD_OFFSET(ROSMENUITEMINFO, Rect) >= sizeof(MENUITEMINFOW));
 /* INTERNAL ******************************************************************/
 
 BOOL FASTCALL UITOOLS95_DrawFrameMenu(HDC dc, LPRECT r, UINT uFlags); /* draw.c */
+HFONT FASTCALL IntGetCachedFont(const LOGFONTW *plf); /* draw.c */
+VOID FASTCALL IntReleaseCachedFont(HFONT hFont); /* draw.c */
 
 HFONT ghMenuFont = NULL;
 HFONT ghMenuFontBold = NULL;
@@ -1502,7 +1504,7 @@ MENU_DrawPopupGlyph(HDC dc, LPRECT r, INT_PTR popupMagic, BOOL inactive, BOOL hi
   lf.lfWeight = FW_NORMAL;
   lf.lfCharSet = DEFAULT_CHARSET;
   RtlCopyMemory(lf.lfFaceName, L"Marlett", sizeof(L"Marlett"));
-  hFont = GreCreateFontIndirectW(&lf);
+  hFont = IntGetCachedFont(&lf);
   /* save font and text color */
   hOldFont = NtGdiSelectFont(dc, hFont);
   clrsave = GreGetTextColor(dc);
@@ -1525,7 +1527,7 @@ MENU_DrawPopupGlyph(HDC dc, LPRECT r, INT_PTR popupMagic, BOOL inactive, BOOL hi
   IntGdiSetTextColor(dc, clrsave);
   NtGdiSelectFont(dc, hOldFont);
   IntGdiSetBkMode(dc, bkmode);
-  GreDeleteObject(hFont);
+  IntReleaseCachedFont(hFont);
 }
 
 /***********************************************************************
