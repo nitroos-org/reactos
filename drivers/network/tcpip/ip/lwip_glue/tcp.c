@@ -425,10 +425,12 @@ LibTCPSetReceiveWindow(PCONNECTION_ENDPOINT Connection, ULONG Size)
         {
             LibTCPOpenWindow(Connection, pcb, New - Old);
         }
-        else if (New < Old && pcb->rcv_wnd > New)
-        {
-            pcb->rcv_wnd = New;
-        }
+        /* A smaller SO_RCVBUF does not take back what was announced: the peer has data in flight inside
+         * the window it was given, and a segment that no longer fits is dropped and comes back only by
+         * retransmission with backed-off timeouts (a transfer that stalled for 20 s). The window shrinks
+         * as segments arrive and is given back only up to the new limit (LibTCPOpenWindow) */
+        Connection->RecvWndNow = pcb->rcv_wnd;
+        Connection->RecvWndMax = TCP_WND_MAX(pcb);
 
         Status = STATUS_SUCCESS;
     }
@@ -1566,10 +1568,13 @@ LibTCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
     return NULL;
 }
 
+/* The most tcp_write is given at a time (its length is 16 bits) */
+#define LIBTCP_WRITE_PIECE 0x8000
+
 /* Called with the core lock held */
 static
 err_t
-LibTCPSendLocked(PCONNECTION_ENDPOINT Connection, void *Data, u16_t DataLength, PTDI_BUCKET Bucket, u32_t *Information)
+LibTCPSendLocked(PCONNECTION_ENDPOINT Connection, void *Data, u32_t DataLength, PTDI_BUCKET Bucket, u32_t *Information)
 {
     PTCP_PCB pcb = Connection->SocketContext;
     ULONG SendLength;
@@ -1599,12 +1604,33 @@ LibTCPSendLocked(PCONNECTION_ENDPOINT Connection, void *Data, u16_t DataLength, 
             SendFlags |= TCP_WRITE_FLAG_MORE;
         }
 
-        Error = tcp_write(pcb, Data, SendLength, SendFlags);
-        if (Error == ERR_OK)
+        /* tcp_write takes a 16 bit length: a long request is written in pieces, and only the last piece
+         * of a request that fits is written without the "more follows" flag */
+        u32_t Written = 0;
+
+        Error = ERR_OK;
+        while (Written < SendLength)
         {
-            /* Queued successfully so try to send it */
+            u32_t Piece = SendLength - Written;
+            UCHAR PieceFlags = SendFlags;
+
+            if (Piece > LIBTCP_WRITE_PIECE)
+                Piece = LIBTCP_WRITE_PIECE;
+            if (Written + Piece < SendLength)
+                PieceFlags |= TCP_WRITE_FLAG_MORE;
+
+            Error = tcp_write(pcb, (PUCHAR)Data + Written, (u16_t)Piece, PieceFlags);
+            if (Error != ERR_OK)
+                break;
+            Written += Piece;
+        }
+
+        if (Written != 0)
+        {
+            /* Queued: try to send it. What was not written stays with the caller, who sends it again */
             tcp_output(pcb);
-            *Information = SendLength;
+            *Information = Written;
+            Error = ERR_OK;
         }
         else if (Error == ERR_MEM)
         {
@@ -1647,7 +1673,7 @@ LibTCPSendCallback(void *arg)
 
 /* Bucket, if not NULL, is queued as a waiting send request if the data cannot be sent now */
 err_t
-LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len, ULONG *sent, const int safe, PTDI_BUCKET Bucket)
+LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u32_t len, ULONG *sent, const int safe, PTDI_BUCKET Bucket)
 {
     err_t ret;
     u32_t Information = 0;
