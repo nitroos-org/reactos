@@ -1594,7 +1594,12 @@ ExInitializeResourceLite(IN PERESOURCE Resource)
     /* Initialize the lock */
     KeInitializeSpinLock(&Resource->SpinLock);
 
-    /* Add it into the system list */
+    /* Add it into the system list, which any process can walk: not a resource in session space (NitroSessions) */
+    if (MmIsSessionAddress(Resource))
+    {
+        InitializeListHead(&Resource->SystemResourcesList);
+        return STATUS_SUCCESS;
+    }
     KeAcquireInStackQueuedSpinLock(&ExpResourceSpinLock, &LockHandle);
     InsertTailList(&ExpSystemResourcesList, &Resource->SystemResourcesList);
     KeReleaseInStackQueuedSpinLock(&LockHandle);

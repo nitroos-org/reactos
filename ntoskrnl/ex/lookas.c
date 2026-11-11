@@ -409,7 +409,15 @@ ExInitializeNPagedLookasideList(IN PNPAGED_LOOKASIDE_LIST Lookaside,
         Lookaside->L.Free = ExFreePool;
     }
 
-    /* Insert it into the list */
+    /*
+     * Insert it into the list, which system threads walk to tune the depths. Not a list in session space
+     * (a session image's, NitroSessions): it is reachable only from its session, and keeps its depth
+     */
+    if (MmIsSessionAddress(Lookaside))
+    {
+        InitializeListHead(&Lookaside->L.ListEntry);
+        return;
+    }
     ExInterlockedInsertTailList(&ExpNonPagedLookasideListHead,
                                 &Lookaside->L.ListEntry,
                                 &ExpNonPagedLookasideListLock);
@@ -468,7 +476,12 @@ ExInitializePagedLookasideList(IN PPAGED_LOOKASIDE_LIST Lookaside,
         Lookaside->L.Free = ExFreePool;
     }
 
-    /* Insert it into the list */
+    /* Insert it into the list (not one in session space, as for the nonpaged lists) */
+    if (MmIsSessionAddress(Lookaside))
+    {
+        InitializeListHead(&Lookaside->L.ListEntry);
+        return;
+    }
     ExInterlockedInsertTailList(&ExpPagedLookasideListHead,
                                 &Lookaside->L.ListEntry,
                                 &ExpPagedLookasideListLock);
