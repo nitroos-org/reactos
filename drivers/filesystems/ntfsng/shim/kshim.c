@@ -1081,17 +1081,48 @@ struct page *read_mapping_page(struct address_space *m, pgoff_t idx, struct file
 	return IS_ERR(f) ? (struct page *)f : &f->page;
 }
 unsigned long kshim_counter_dirty;
+/*
+ * Bumped after anything becomes dirty that kshim_sync writes back: a folio, an inode, an inode the
+ * sync could not see (I_NEW) becoming visible.  A sync that finds nothing dirty records the value it
+ * read before its scan; while the value is unchanged, the next sync would find nothing either and
+ * skips the scan of every cached inode and folio.  (In a checked build the skip also runs the scan and
+ * checks it finds nothing: kshim_check_skip.)
+ *
+ * The dirtying is set first, the bump follows (sequentially consistent), so a scan that read the value
+ * before it started sees every dirtying that was announced before that read, and one that came later
+ * changes the value.  EVERY way to make something dirty that kshim_sync would write must go through one of
+ * the funnels below (a new one needs a bump, or FlushFileBuffers skips the data):
+ *   - folio_mark_dirty (all folio dirtying: filemap_dirty_folio, folio_redirty_for_writepage,
+ *     iomap_dirty_folio; it also sets I_DIRTY_PAGES on the host inode)
+ *   - __mark_inode_dirty (every mark_inode_dirty* wrapper) and inode_state_set/clear with an I_DIRTY bit
+ *   - unlock_new_inode (the scan skips I_NEW inodes: one dirtied while new becomes visible here)
+ *   - the two places that put I_DIRTY_PAGES back after a failed or incomplete writeback: kshim_writeback_last
+ *     (eviction) and write_inode_now (kshim_wb.c)
+ * The counter is 64 bit: a false "clean" needs the counter to return to the recorded value.
+ */
+unsigned long long kshim_dirty_gen __attribute__((aligned(8)));
+void kshim_dirty_bump(void)
+{
+	__atomic_add_fetch(&kshim_dirty_gen, 1, __ATOMIC_SEQ_CST);
+}
 bool folio_mark_dirty(struct folio *f)
 {
+	bool was_clean;
 	kshim_counter_dirty++;
 	if (f->mapping)
 		f->mapping->kshim_dirty_hint = 1;
 	if (f->mapping && f->mapping->host)
 		f->mapping->host->i_state |= I_DIRTY_PAGES;
-	return !test_and_set_bit(PG_dirty, &f->flags);
+	was_clean = !test_and_set_bit(PG_dirty, &f->flags);
+	kshim_dirty_bump();
+	return was_clean;
 }
 bool filemap_dirty_folio(struct address_space *m, struct folio *f) { (void)m; return folio_mark_dirty(f); }
-void __mark_inode_dirty(struct inode *i, int flags) { i->i_state |= flags; }
+void __mark_inode_dirty(struct inode *i, int flags)
+{
+	i->i_state |= flags;
+	kshim_dirty_bump();
+}
 void file_ra_state_init(struct file_ra_state *ra, struct address_space *m) { (void)m; ra->ra_pages = 32; }
 void page_cache_sync_readahead(struct address_space *m, void *ra, struct file *f, pgoff_t i, unsigned long n)
 { (void)m; (void)ra; (void)f; (void)i; (void)n; }
@@ -1511,7 +1542,48 @@ int kshim_inodes_snapshot(struct super_block *sb, struct inode ***out)
 	*out = v;
 	return v ? n : -ENOMEM;
 }
-void unlock_new_inode(struct inode *i) { i->i_state &= ~I_NEW; }
+#if DBG
+/*
+ * Checked builds: whether @sb has anything dirty, read from the folios and inode states themselves (not from
+ * the dirty hints), for the check of a skipped sync (kshim_check_skip).  Callers hold the volume lock.
+ */
+bool kshim_sb_dirty_full(struct super_block *sb)
+{
+	bool d = false;
+	mutex_lock(&kshim_inode_lock);
+	for (struct inode *i = sb->kshim_inodes; i && !d; i = i->kshim_next) {
+		struct address_space *m = i->i_mapping;
+		if (i->i_state & (I_FREEING | I_NEW))
+			continue;
+		if (i->i_state & I_DIRTY) {
+			d = true;
+			break;
+		}
+		for (int b = 0; m && b < KSHIM_PC_BUCKETS && !d; b++)
+			for (struct folio *x = m->pc[b]; x; x = x->hnext)
+				if (folio_test_dirty(x)) {
+					d = true;
+					break;
+				}
+	}
+	mutex_unlock(&kshim_inode_lock);
+	if (!d && sb->s_bdev && sb->s_bdev->bd_mapping) {
+		struct address_space *m = sb->s_bdev->bd_mapping;
+		for (int b = 0; b < KSHIM_PC_BUCKETS && !d; b++)
+			for (struct folio *x = m->pc[b]; x; x = x->hnext)
+				if (folio_test_dirty(x)) {
+					d = true;
+					break;
+				}
+	}
+	return d;
+}
+#endif
+void unlock_new_inode(struct inode *i)
+{
+	i->i_state &= ~I_NEW;
+	kshim_dirty_bump();	/* a sync skips I_NEW inodes: one made dirty while new is visible now */
+}
 void discard_new_inode(struct inode *i)
 {
 	mutex_lock(&kshim_inode_lock);
@@ -1628,6 +1700,7 @@ static bool kshim_writeback_last(struct inode *i)
 				printk(KERN_ERR "writeback of ino %llu failed %d: kept in memory\n",
 				       (unsigned long long)i->i_ino, err);
 			i->i_state |= I_DIRTY_PAGES;
+			kshim_dirty_bump();
 			mutex_lock(&kshim_inode_lock);
 			if (atomic_dec_and_test(&i->i_count) && i->i_hash.pprev && !(i->i_state & (I_FREEING | I_NEW)))
 				lru_add_locked(i);
