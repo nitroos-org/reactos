@@ -140,7 +140,7 @@ SmpReadNitroSessionsConfig(VOID)
     {
         DPRINT1("SMSS: NitroSessions = %lu\n", SmpNitroSessions);
         SmpReadNitroString(KeyHandle, L"NitroSessionsTestCommand", &SmpNitroSessionsTestCommand);
-        if (SmpNitroSessions == SMP_NITRO_SESSIONS_CSR)
+        if (SMP_NITRO_SESSIONS_CSR_START(SmpNitroSessions))
         {
             SmpReadNitroString(KeyHandle, L"NitroSessionsTestCommand0", &SmpNitroSessionsTestCommand0);
 
@@ -288,7 +288,9 @@ SmpBuildHeadlessCsrCommand(
             {
                 NameChars++;
             }
-            Keep = (NameChars == 7) && !_wcsnicmp(DllName, L"basesrv", 7);
+            /* With a win32k of its own (flag 5), the session keeps every server */
+            Keep = (SmpNitroSessions == SMP_NITRO_SESSIONS_WIN32K) ||
+                   ((NameChars == 7) && !_wcsnicmp(DllName, L"basesrv", 7));
         }
         if (!Keep) continue;
 
@@ -379,7 +381,7 @@ SmpStartNitroCsrSession(VOID)
     UNICODE_STRING CsrCommand;
     HANDLE CsrProcessId = NULL, TestProcess = NULL, TestProcessId = NULL;
 
-    if (SmpNitroSessions != SMP_NITRO_SESSIONS_CSR) return STATUS_SUCCESS;
+    if (!SMP_NITRO_SESSIONS_CSR_START(SmpNitroSessions)) return STATUS_SUCCESS;
 
     Status = SmpBuildHeadlessCsrCommand(&CsrCommand);
     if (!NT_SUCCESS(Status))
@@ -403,11 +405,25 @@ SmpStartNitroCsrSession(VOID)
     Status = NtSetSystemInformation(SystemSessionCreate,
                                     &MuSessionId,
                                     sizeof(MuSessionId));
-    SmpReleasePrivilege(State);
     DPRINT1("SMSS: NitroSessions: SystemSessionCreate Status=%lx SessionId=%lu\n",
             Status, MuSessionId);
-    if (!NT_SUCCESS(Status)) goto Quit;
+    if (!NT_SUCCESS(Status))
+    {
+        SmpReleasePrivilege(State);
+        goto Quit;
+    }
     AttachedSessionId = MuSessionId;
+
+    /* Flag 5: the session's own win32k (a session image), loaded while SMSS is attached to it */
+    if (SmpNitroSessions == SMP_NITRO_SESSIONS_WIN32K)
+    {
+        UNICODE_STRING Win32k = RTL_CONSTANT_STRING(L"\\SystemRoot\\System32\\win32k.sys");
+
+        Status = NtSetSystemInformation(SystemExtendServiceTableInformation, &Win32k, sizeof(Win32k));
+        DPRINT1("SMSS: NitroSessions: win32k of session %lu, Status=%lx\n", MuSessionId, Status);
+    }
+    SmpReleasePrivilege(State);
+    if (!NT_SUCCESS(Status)) goto Quit;
 
     /* The session's csrss. SmpLoadSubSystem waits up to 60 s for it to
        connect, and on any failure detaches and terminates it */
