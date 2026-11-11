@@ -1,0 +1,2 @@
+@ stdcall SessTestBIncrement()
+@ stdcall SessTestBImportTarget()
