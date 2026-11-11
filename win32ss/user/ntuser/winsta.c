@@ -685,6 +685,57 @@ Quit:
  * Status
  *    @implemented
  */
+/*
+ * A new window station goes only into this session's WindowStations directory. An explicit path (or a
+ * directory handle) could name another session's directory, whose objects this session's win32k would never
+ * be allowed to use (and whose names it must not squat). Checked on the name and root directory the object
+ * manager captured, before the object is inserted.
+ */
+static
+NTSTATUS
+IntCheckWindowStationDirectory(
+    _In_ PWINSTATION_OBJECT WindowStation,
+    _In_ KPROCESSOR_MODE AccessMode)
+{
+    POBJECT_HEADER Header = OBJECT_TO_OBJECT_HEADER(WindowStation);
+    POBJECT_HEADER_NAME_INFO NameInfo = OBJECT_HEADER_TO_NAME_INFO(Header);
+    HANDLE Root = Header->ObjectCreateInfo ? Header->ObjectCreateInfo->RootDirectory : NULL;
+    UNICODE_STRING Name, Dir;
+    PVOID RootObject, OwnDirectory;
+    NTSTATUS Status;
+
+    /* Unnamed: not inserted in any directory */
+    if (!NameInfo || !NameInfo->Name.Length) return STATUS_SUCCESS;
+    Name = NameInfo->Name;
+
+    if (Root)
+    {
+        /* The root is our directory (a deeper name fails in the object manager, as before) */
+        if (!ghWinStaDir) return STATUS_ACCESS_DENIED;
+        Status = ObReferenceObjectByHandle(Root, 0, NULL, AccessMode, &RootObject, NULL);
+        if (!NT_SUCCESS(Status)) return Status;
+        Status = ObReferenceObjectByHandle(ghWinStaDir, 0, NULL, KernelMode, &OwnDirectory, NULL);
+        if (NT_SUCCESS(Status))
+        {
+            if (RootObject != OwnDirectory) Status = STATUS_ACCESS_DENIED;
+            ObDereferenceObject(OwnDirectory);
+        }
+        ObDereferenceObject(RootObject);
+        return Status;
+    }
+
+    /* A full path: our directory, a separator and a leaf name */
+    Dir = gustrWindowStationsDir;
+    if ((Name.Length <= Dir.Length + sizeof(WCHAR)) ||
+        (Name.Buffer[Dir.Length / sizeof(WCHAR)] != OBJ_NAME_PATH_SEPARATOR))
+    {
+        return STATUS_ACCESS_DENIED;
+    }
+    Name.Length = Dir.Length;
+    if (!RtlEqualUnicodeString(&Name, &Dir, TRUE)) return STATUS_ACCESS_DENIED;
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS
 FASTCALL
 IntCreateWindowStation(
@@ -702,6 +753,7 @@ IntCreateWindowStation(
     NTSTATUS Status;
     HWINSTA hWinSta;
     PWINSTATION_OBJECT WindowStation;
+    BOOLEAN Interactive = FALSE;
 
     TRACE("IntCreateWindowStation called\n");
 
@@ -761,18 +813,35 @@ IntCreateWindowStation(
         return Status;
     }
 
+    /* Only in this session's WindowStations directory (checked once the object can be deleted cleanly) */
+    Status = IntCheckWindowStationDirectory(WindowStation, AccessMode);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("Window station '%wZ' refused outside the session's directory, Status 0x%08lx\n",
+            ObjectAttributes->ObjectName, Status);
+        ObDereferenceObject(WindowStation);
+        SetLastNtError(Status);
+        return Status;
+    }
+
     if (InputWindowStation == NULL)
     {
         /*
          * The first window station of a session is the interactive one, and its creation starts the
          * desktop and raw input threads that every desktop of the session needs. Only Winlogon creates
-         * it; in a session without the console (NitroSessions), which has no Winlogon yet, its csrss
-         * or a caller holding SeTcbPrivilege may. Anyone else is refused until it exists.
+         * it. A session without the console (NitroSessions) has no Winlogon yet: there only its csrss or
+         * a caller with SeTcbPrivilege enabled may, and the logon process registration does not count
+         * (any process of the session can register itself while there is no Winlogon).
+         * Anyone else is refused until it exists.
          */
-        if (!((gpidLogon == PsGetCurrentProcessId()) ||
-              (gbHeadlessSession &&
-               ((PsGetCurrentProcess() == gpepCSRSS) ||
-                SeSinglePrivilegeCheck(SeExports->SeTcbPrivilege, UserMode)))))
+        BOOLEAN Allowed;
+
+        if (gbHeadlessSession)
+            Allowed = (PsGetCurrentProcess() == gpepCSRSS) ||
+                      SeSinglePrivilegeCheck(SeExports->SeTcbPrivilege, UserMode);
+        else
+            Allowed = (gpidLogon == PsGetCurrentProcessId());
+        if (!Allowed)
         {
             ERR("Process %p may not create the interactive window station\n", PsGetCurrentProcessId());
             ObDereferenceObject(WindowStation);
@@ -780,7 +849,8 @@ IntCreateWindowStation(
             return STATUS_ACCESS_DENIED;
         }
 
-        InputWindowStation = WindowStation;
+        /* It becomes the interactive one once it is inserted (a failed insert must not leave it behind) */
+        Interactive = TRUE;
         WindowStation->Flags &= ~WSS_NOIO;
     }
     else
@@ -790,7 +860,7 @@ IntCreateWindowStation(
 
     /* Create the global WinSta0_DesktopSwitch event
      * only when creating the interactive WinSta0 */
-    if (InputWindowStation == WindowStation)
+    if (Interactive)
     {
         Status = IntCreateDesktopSwitchEvent();
         if (!NT_SUCCESS(Status))
@@ -817,8 +887,9 @@ IntCreateWindowStation(
 
     // FIXME! TODO: Add this new window station to a linked list
 
-    if (InputWindowStation == WindowStation)
+    if (Interactive)
     {
+        InputWindowStation = WindowStation;
         ERR("Initializing input window station\n");
 
         InitCursorImpl();
