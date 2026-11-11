@@ -275,7 +275,7 @@ DriverEntry(
     Characteristics.SetInformationHandler = MiniportSetInformation;
     Characteristics.TransferDataHandler = NULL;
     Characteristics.ReturnPacketHandler = NULL;
-    Characteristics.SendPacketsHandler = NULL;
+    Characteristics.SendPacketsHandler = MiniportSendPackets;
     Characteristics.AllocateCompleteHandler = NULL;
 
     NdisMInitializeWrapper(&WrapperHandle, DriverObject, RegistryPath, NULL);

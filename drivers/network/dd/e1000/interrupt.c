@@ -78,15 +78,18 @@ MiniportHandleInterrupt(
         PETH_HEADER EthHeader;
         ULONG BufferOffset;
         BOOLEAN bGotAny = FALSE;
-        ULONG RxDescHead, RxDescTail, CurrRxDesc;
+        ULONG RxDescTail, CurrRxDesc;
 
         /* Clear out these interrupts */
         InterruptPending &= ~(E1000_IMS_RXDMT0 | E1000_IMS_RXT0);
 
-        E1000ReadUlong(Adapter, E1000_REG_RDH, &RxDescHead);
-        E1000ReadUlong(Adapter, E1000_REG_RDT, &RxDescTail);
+        /* Neither the head nor the tail register is read (each read is a VM exit): the
+           driver is the only writer of the tail, and the descriptors the adapter has
+           filled, from the one after the tail on, have DD set. A descriptor is given back
+           with its status cleared, so the first one without DD is where the adapter is. */
+        RxDescTail = Adapter->ReceiveTail;
 
-        while (((RxDescTail + 1) % NUM_RECEIVE_DESCRIPTORS) != RxDescHead)
+        for (;;)
         {
             CurrRxDesc = (RxDescTail + 1) % NUM_RECEIVE_DESCRIPTORS;
             BufferOffset = CurrRxDesc * Adapter->ReceiveBufferEntrySize;
@@ -139,19 +142,27 @@ NextReceiveDescriptor:
             RxDescTail = CurrRxDesc;
         }
 
+        Adapter->ReceiveTail = RxDescTail;
+
+        /* Write back the new tail value when a batch of descriptors is back: the adapter has the
+           rest of the ring meanwhile (at most RX_TAIL_BATCH - 1 descriptors wait here) */
+        if (((RxDescTail + NUM_RECEIVE_DESCRIPTORS - Adapter->ReceiveTailWritten) % NUM_RECEIVE_DESCRIPTORS) >= RX_TAIL_BATCH)
+        {
+            E1000WriteUlong(Adapter, E1000_REG_RDT, RxDescTail);
+            Adapter->ReceiveTailWritten = RxDescTail;
+
+            NDIS_DbgPrint(MAX_TRACE, ("Rx done (RDT: %u)\n", RxDescTail));
+        }
+
         if (bGotAny)
         {
-            /* Write back new tail value */
-            E1000WriteUlong(Adapter, E1000_REG_RDT, RxDescTail);
-
-            NDIS_DbgPrint(MAX_TRACE, ("Rx done (RDH: %u, RDT: %u)\n", RxDescHead, RxDescTail));
-
             NdisMEthIndicateReceiveComplete(Adapter->AdapterHandle);
         }
     }
 
     /* Handling transmit interrupts */
-    if (InterruptPending & (E1000_IMS_TXD_LOW | E1000_IMS_TXDW | E1000_IMS_TXQE))
+    if ((InterruptPending & (E1000_IMS_TXD_LOW | E1000_IMS_TXDW | E1000_IMS_TXQE)) ||
+        Adapter->TxFull || Adapter->LastTxDesc != Adapter->CurrentTxDesc)
     {
         PNDIS_PACKET AckPackets[40] = {0};
         ULONG NumPackets, i;
