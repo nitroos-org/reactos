@@ -326,6 +326,8 @@ typedef struct _NG_GLOBAL
     LONG FcbLive;
     ULONG FcbCacheMax;              /* idle FCBs with cached data kept per volume; MAXULONG = no trimming ("FcbCacheMax", "NoFcbTrim") */
     LONG Opens;
+    ULONG NoFastQueryOpen;          /* "NoFastQueryOpen" DWORD: no FastIoQueryOpen (comparison, fallback) */
+    LONG FastQueryHits, FastQueryMisses;   /* FastIoQueryOpen answered / left to the ordinary open */
     ULONG PermissiveOpen;           /* diagnostic: grant write access at open, refuse the modification itself */
     ULONG FuaAliasMB;               /* test only: "FuaAliasMB" DWORD, see NgDevSetFua */
     ULONG NoFua;                    /* "NoFua" DWORD in the service key: never use Force Unit Access, keep the flushes of the journal */
@@ -383,6 +385,7 @@ BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Reti
 VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self);
 VOID NgFcbRemoveLocked(PNG_FCB Fcb);
 VOID NgFcbIdle(PNG_FCB Fcb);
+BOOLEAN NTAPI NgFastQueryOpen(PIRP Irp, PFILE_NETWORK_OPEN_INFORMATION Query, PDEVICE_OBJECT DeviceObject);
 VOID NgSetStat(PNG_FCB Fcb, const struct ngc_stat *St);
 BOOLEAN NgQueueDeletedPurge(PNG_FCB Fcb);
 BOOLEAN NgCanQueueDeletedPurge(PNG_VCB Vcb);
