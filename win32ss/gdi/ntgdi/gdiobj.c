@@ -973,6 +973,13 @@ GDIOBJ_vUnlockObject(POBJ pobj)
     /* Calculate the index */
     ulIndex = GDI_HANDLE_GET_INDEX(pobj->hHmgr);
 
+    /* An object without a handle counts its references itself */
+    if (ulIndex == 0)
+    {
+        GDIOBJ_vDereferenceObject(pobj);
+        return;
+    }
+
     /* Decrement reference count */
     ASSERT((gpaulRefCount[ulIndex] & REF_MASK_COUNT) > 0);
     cRefs = InterlockedDecrement((LONG*)&gpaulRefCount[ulIndex]);
@@ -1201,11 +1208,67 @@ GDIOBJ_bHolderInProcess(
     return InProcess;
 }
 
+/*
+ * A deleted object of the current process that has a user attribute (DCs and regions; a thread of another
+ * process can lock them, window management under the USER lock): the attribute goes back into this
+ * process's pool now, under the object's lock, so that the later free, wherever the last reference is
+ * dropped, finds none. The lock is taken whatever its fields say: a holder lets go of the lock (and clears
+ * them) before it drops its reference.
+ * - A holder in this process is not waited for: it frees the object, and the attribute, here.
+ * - A holder of another process is waited for: it touches no user attribute and never waits for this
+ *   process (window management, under the USER lock that a deleter of a window DC holds).
+ * Its handle no longer valid, the object cannot be locked again; once the lock is taken here, no thread
+ * uses the attribute any more.
+ */
+static
+VOID
+GDIOBJ_vFreeOwnerAttr(
+    _In_ POBJ pobj)
+{
+    UCHAR objt = ((ULONG_PTR)pobj->hHmgr >> 16) & 0x1f;
+    ULONG dwHolder, Try;
+
+    if ((objt != GDIObjType_DC_TYPE) && (objt != GDIObjType_RGN_TYPE))
+        return;
+
+    KeEnterCriticalRegion();
+    for (Try = 0; ; Try++)
+    {
+        if (ExTryAcquirePushLockExclusive(&pobj->pushlock))
+            break;
+
+        dwHolder = *(volatile ULONG *)&pobj->dwThreadId;
+        if ((dwHolder != 0) && GDIOBJ_bHolderInProcess(dwHolder))
+        {
+            /* A thread of this process: its last unlock frees the object here */
+            KeLeaveCriticalRegion();
+            return;
+        }
+
+        /* A holder of another process, or one that is taking or letting go of the lock right now */
+        if ((dwHolder != 0) || (Try >= 64))
+        {
+            ExAcquirePushLockExclusive(&pobj->pushlock);
+            break;
+        }
+        YieldProcessor();
+    }
+
+    if (objt == GDIObjType_DC_TYPE)
+        DC_vFreeDcAttr((PDC)pobj);
+    else
+        REGION_vFreeRgnAttr((PREGION)pobj);
+
+    ExReleasePushLockExclusive(&pobj->pushlock);
+    KeLeaveCriticalRegion();
+}
+
 VOID
 NTAPI
 GDIOBJ_vDeleteObject(POBJ pobj)
 {
     ULONG ulIndex, dwHolder, ulOwner;
+    USHORT cLocks;
 
     /* Set the object's delete flag */
     InterlockedOr16((SHORT*)&pobj->BaseFlags, BASEFLAG_READY_TO_DIE);
@@ -1229,13 +1292,10 @@ GDIOBJ_vDeleteObject(POBJ pobj)
             gpentHmgr[ulIndex].ObjectOwner.ulObj = GDI_OBJ_HMGR_NONE;
         }
 
-        /*
-         * Check if the object is exclusively locked. The lock fields are read without the lock: a lock taken
-         * meanwhile by another thread sees the handle invalid and gives the object up (GDIOBJ_LockObjectEx),
-         * and a stale holder only makes the foreign case below wait for a lock that is already free.
-         */
+        /* The lock fields, read once without the lock */
         dwHolder = *(volatile ULONG *)&pobj->dwThreadId;
-        if ((*(volatile USHORT *)&pobj->cExclusiveLock != 0) && (dwHolder == PtrToUlong(PsGetCurrentThreadId())))
+        cLocks = *(volatile USHORT *)&pobj->cExclusiveLock;
+        if ((cLocks != 0) && (dwHolder == PtrToUlong(PsGetCurrentThreadId())))
         {
             /* By this thread: its own lock goes */
             pobj->dwThreadId = 0;
@@ -1246,38 +1306,18 @@ GDIOBJ_vDeleteObject(POBJ pobj)
             KeLeaveCriticalRegion();
             DECREASE_THREAD_LOCK_COUNT(pobj->hHmgr);
         }
-        else if ((*(volatile USHORT *)&pobj->cExclusiveLock != 0) && (dwHolder != 0) &&
-                 (ulOwner != GDI_OBJ_HMGR_PUBLIC) && (ulOwner != GDI_OBJ_HMGR_NONE) &&
-                 !GDIOBJ_bHolderInProcess(dwHolder))
+        else if (ulOwner == HandleToUlong(PsGetCurrentProcessId()))
         {
             /*
-             * An object of a process (it may have a user attribute, which only that process may free), held by
-             * a thread of another process (window management locking a DC it handed out: it touches no user
-             * attribute, never waits for the DC's owner, and runs under the USER lock, so a deleter that holds
-             * the USER lock never meets it): wait until it lets go. The deleter is the owner here:
-             * GreDeleteObject deletes only objects of the calling process, and window DCs are deleted under
-             * the USER lock (IntGdiDeleteDC), so this wait is not expected to happen; it is kept as a guard.
-             *
-             * It lets go of the lock before it drops its reference, so its reference can still be the last
-             * one and the object be freed in its process. The user attribute goes back into this process's
-             * pool now, while this thread holds the lock: no thread uses the object any more (its handle is
-             * no longer valid, so it cannot be locked again), and the later free finds no user attribute.
-             * Only DCs are locked by other processes.
+             * An object of this process (the deleter is the owner: GreDeleteObject deletes only objects of
+             * the calling process). Its user attribute goes back into this process's pool now, whoever
+             * drops the last reference later (GDIOBJ_vFreeOwnerAttr).
              */
-            KeEnterCriticalRegion();
-            ExAcquirePushLockExclusive(&pobj->pushlock);
-            if ((((ULONG_PTR)pobj->hHmgr >> 16) & 0x1f) == GDIObjType_DC_TYPE)
-                DC_vFreeDcAttr((PDC)pobj);
-            else
-                DPRINT1("Object %p of type %lu held by another process when deleted\n",
-                        pobj->hHmgr, (ULONG)(((ULONG_PTR)pobj->hHmgr >> 16) & 0x1f));
-            ExReleasePushLockExclusive(&pobj->pushlock);
-            KeLeaveCriticalRegion();
+            GDIOBJ_vFreeOwnerAttr(pobj);
         }
         /*
-         * Else by another thread of this process, or the object is public (kernel attributes only): its lock
-         * is never taken from it. It finishes what it does with the object, and its last unlock, the last
-         * reference, frees the object, in this process (so a user attribute goes back into this process's pool).
+         * Else the object is public (kernel attributes only). A thread that still holds it finishes what it
+         * does with it, and the last reference frees it.
          */
     }
 
