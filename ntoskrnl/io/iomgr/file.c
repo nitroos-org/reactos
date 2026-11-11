@@ -1290,6 +1290,56 @@ IopParseDevice(IN PVOID ParseObject,
         KeInitializeEvent(&FileObject->Event, NotificationEvent, FALSE);
         OpenPacket->FileObject = FileObject;
 
+        /*
+         * A file system that answers FastIoQueryOpen reads the attributes of an existing file straight from the create
+         * request, with no file object left behind (so no cleanup and close follow, and the file system need not
+         * keep an FCB): NtQueryFullAttributesFile, GetFileAttributes, every stat of a program that scans a tree.  The
+         * routine gets the IRP with its current stack location on the create parameters; TRUE with a failure status is
+         * a definite answer too (the name is not there).  FALSE (a stream, a reparse
+         * point, a file that is being deleted, a failed check) leaves everything as it was
+         * and the open goes on the ordinary way.
+         */
+        if (OpenPacket->QueryOnly && OpenPacket->FullAttributes && UseDummyFile &&
+            OpenPacket->CreateFileType == CreateFileTypeNone && DeviceObject->DriverObject &&
+            DeviceObject->DriverObject->FastIoDispatch &&
+            DeviceObject->DriverObject->FastIoDispatch->SizeOfFastIoDispatch >=
+                FIELD_OFFSET(FAST_IO_DISPATCH, FastIoQueryOpen) + sizeof(PFAST_IO_QUERY_OPEN) &&
+            DeviceObject->DriverObject->FastIoDispatch->FastIoQueryOpen)
+        {
+            BOOLEAN FastDone;
+
+            IoSetNextIrpStackLocation(Irp);
+            FastDone = DeviceObject->DriverObject->FastIoDispatch->FastIoQueryOpen(Irp,
+                                                                                    OpenPacket->NetworkInformation,
+                                                                                    DeviceObject);
+            /* The location the IRP had: the ordinary open sets it up for the driver, and a freed IRP must be whole */
+            Irp->CurrentLocation++;
+            Irp->Tail.Overlay.CurrentStackLocation++;
+            if (FastDone)
+            {
+                Status = Irp->IoStatus.Status;
+
+                /* The answer is in the open packet; undo what was set up for the request */
+                if (FileObject->FileName.Length)
+                {
+                    ExFreePoolWithTag(FileObject->FileName.Buffer, 0);
+                    FileObject->FileName.Buffer = NULL;
+                    FileObject->FileName.Length = 0;
+                }
+                FileObject->DeviceObject = NULL;
+                OpenPacket->FileObject = NULL;
+                IoFreeIrp(Irp);
+                IopDereferenceDeviceObject(OriginalDeviceObject, FALSE);
+                if (Vpb) IopDereferenceVpbAndFree(Vpb);
+
+                OpenPacket->Information = 0;
+                OpenPacket->FinalStatus = Status;
+                /* As the driver's failure to create does: only a success is the I/O status (see IopQueryAttributesFile) */
+                if (NT_SUCCESS(Status)) OpenPacket->ParseCheck = TRUE;
+                return Status;
+            }
+        }
+
         /* Queue the IRP and call the driver */
         IopQueueIrpToThread(Irp);
         Status = IoCallDriver(DeviceObject, Irp);
