@@ -383,6 +383,7 @@ BOOLEAN NgRetireStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self, BOOLEAN Reti
 VOID NgDeleteStreams(PNG_VCB Vcb, ULONGLONG MftNo, PNG_FCB Self);
 VOID NgFcbRemoveLocked(PNG_FCB Fcb);
 VOID NgFcbIdle(PNG_FCB Fcb);
+VOID NgSetStat(PNG_FCB Fcb, const struct ngc_stat *St);
 BOOLEAN NgQueueDeletedPurge(PNG_FCB Fcb);
 BOOLEAN NgCanQueueDeletedPurge(PNG_VCB Vcb);
 BOOLEAN NgMarkDeletePending(PNG_VCB Vcb, PNG_FCB Fcb, BOOLEAN CheckStreams);

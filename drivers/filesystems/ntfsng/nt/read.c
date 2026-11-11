@@ -100,10 +100,34 @@ static int NgRdioTransfer(PNG_VCB Vcb, const struct ngc_dio *Dio, PUCHAR Buffer)
     ULONG r;
     for (r = 0; r < Dio->nruns; r++)
     {
-        if (Dio->run[r].dev == NGC_DIO_ZERO)
-            RtlZeroMemory(Buffer + Dio->run[r].boff, Dio->run[r].len);
-        else if (ngos_dev_read(Vcb->StorageDevice, Dio->run[r].dev, Buffer + Dio->run[r].boff, Dio->run[r].len))
+        const struct ngc_dio_run *Run = &Dio->run[r];
+        ULONG Whole = Run->len & ~(Vcb->SectorSize - 1), Tail = Run->len & (Vcb->SectorSize - 1);
+        if (Run->dev == NGC_DIO_ZERO)
+        {
+            RtlZeroMemory(Buffer + Run->boff, Run->len);
+            continue;
+        }
+        if (Whole && ngos_dev_read(Vcb->StorageDevice, Run->dev, Buffer + Run->boff, Whole))
             return -1;
+        if (Tail)
+        {
+            /*
+             * The last run of a paging read at the end of a file is not a whole number of sectors.  The device takes
+             * whole sectors only and the buffer has room for @Tail more bytes, not for a sector: the sector comes
+             * through a pool buffer (ngc_rdio_begin has checked that it lies inside the run's clusters and is not
+             * held by the journal) and only the bytes the request asked for are copied.
+             */
+            PUCHAR Bounce = ExAllocatePoolWithTag(NonPagedPool, Vcb->SectorSize, TAG_NTFSNG);
+            int Failed;
+            if (!Bounce)
+                return -2;
+            Failed = ngos_dev_read(Vcb->StorageDevice, Run->dev + Whole, Bounce, Vcb->SectorSize);
+            if (!Failed)
+                RtlCopyMemory(Buffer + Run->boff + Whole, Bounce, Tail);
+            ExFreePoolWithTag(Bounce, TAG_NTFSNG);
+            if (Failed)
+                return -1;
+        }
     }
     return 0;
 }
@@ -253,7 +277,7 @@ NTSTATUS NgRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             ngc_rdio_end(Vcb->Core, &Dio);
             NgDataIoDone(Vcb);
             Vcb->DioReads++;
-            Done = IoErr ? -NGC_EIO : (long)Length;
+            Done = IoErr ? (IoErr == -2 ? -NGC_ENOMEM : -NGC_EIO) : (long)Length;
         }
         else if (!Done)
         {

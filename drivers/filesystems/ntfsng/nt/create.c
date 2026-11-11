@@ -743,35 +743,53 @@ static NTSTATUS NgMountPointReparse(PNG_VCB Vcb, ngc_node *Node, PIRP Irp, PFILE
 }
 
 /*
- * Access check of an open of an existing Node (Parent: the directory it was found in, or NULL);
- * Implied: rights the disposition needs beyond the desired access.  The directory's descriptor is
- * read only when it can grant something (MAXIMUM_ALLOWED, or a refused DELETE or
- * FILE_READ_ATTRIBUTES).  Node and Parent stay referenced by the caller.
+ * The descriptor of a directory by its record number, under the volume lock (for the rare open that needs the
+ * descriptor of the directory it found its file in; the open does not keep that directory referenced).
  */
-static NTSTATUS NgCheckOpen(PNG_VCB Vcb, PACCESS_STATE As, ngc_node *Node, ngc_node *Parent, ACCESS_MASK Implied)
+static NTSTATUS NgReadSecurityByNo(PNG_VCB Vcb, ULONGLONG MftNo, PSECURITY_DESCRIPTOR *Out)
 {
-    PSECURITY_DESCRIPTOR Sd = NULL, ParentSd = NULL;
-    ACCESS_MASK Desired = As->RemainingDesiredAccess;
     NG_SHARED_HOLD Hold;
+    ngc_node *Dir;
     NTSTATUS Status;
+    int Err;
 
+    *Out = NULL;
     NgAcquireCoreShared(Vcb, &Hold);
-    Status = NgReadSecurity(Vcb, Node, &Sd);
-    if (NT_SUCCESS(Status) && Parent && ((Desired & MAXIMUM_ALLOWED) || (Implied & DELETE)))
-        Status = NgReadSecurity(Vcb, Parent, &ParentSd);
+    Err = ngc_iget(Vcb->Core, MftNo, &Dir);
+    if (Err)
+    {
+        NgReleaseCoreShared(Vcb, &Hold);
+        return NgErrnoToStatus(Err);
+    }
+    Status = NgReadSecurity(Vcb, Dir, Out);
+    ngc_put(Dir);
     NgReleaseCoreShared(Vcb, &Hold);
+    return Status;
+}
+
+/*
+ * Access check of an open of an existing Node.  Sd / SdStatus: the descriptor of Node and the status of reading it,
+ * read by the caller under the lock of its walk; ParentNo: the record of the directory it was found in, or 0;
+ * Implied: rights the disposition needs beyond the desired access.  The directory's descriptor is read only when it
+ * can grant something (MAXIMUM_ALLOWED, or a refused DELETE or FILE_READ_ATTRIBUTES), and then by taking the lock again.
+ */
+static NTSTATUS NgCheckOpen(PNG_VCB Vcb, PACCESS_STATE As, PSECURITY_DESCRIPTOR Sd, NTSTATUS SdStatus,
+                            ULONGLONG ParentNo, ACCESS_MASK Implied)
+{
+    PSECURITY_DESCRIPTOR ParentSd = NULL;
+    ACCESS_MASK Desired = As->RemainingDesiredAccess;
+    NTSTATUS Status = SdStatus;
+
+    if (NT_SUCCESS(Status) && ParentNo && ((Desired & MAXIMUM_ALLOWED) || (Implied & DELETE)))
+        Status = NgReadSecurityByNo(Vcb, ParentNo, &ParentSd);
     if (NT_SUCCESS(Status))
         Status = NgCheckExistingAccess(As, Sd, ParentSd, Implied);
-    if (Status == STATUS_ACCESS_DENIED && Parent && !ParentSd && (Desired & (DELETE | FILE_READ_ATTRIBUTES)))
+    if (Status == STATUS_ACCESS_DENIED && ParentNo && !ParentSd && (Desired & (DELETE | FILE_READ_ATTRIBUTES)))
     {
-        NgAcquireCoreShared(Vcb, &Hold);
-        Status = NgReadSecurity(Vcb, Parent, &ParentSd);
-        NgReleaseCoreShared(Vcb, &Hold);
+        Status = NgReadSecurityByNo(Vcb, ParentNo, &ParentSd);
         if (NT_SUCCESS(Status))
             Status = NgCheckExistingAccess(As, Sd, ParentSd, Implied);
     }
-    if (Sd)
-        ExFreePoolWithTag(Sd, TAG_NTFSNG);
     if (ParentSd)
         ExFreePoolWithTag(ParentSd, TAG_NTFSNG);
     return Status;
@@ -847,6 +865,9 @@ static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PACCESS_STATE As = Stack->Parameters.Create.SecurityContext->AccessState;
     BOOLEAN Check = NgCreateChecksAccess(Irp, Stack), Traverse;
     PSECURITY_DESCRIPTOR ParentSd = NULL;
+    PSECURITY_DESCRIPTOR OpenSd = NULL;     /* descriptor of the file of an open of an existing file, read by the walk */
+    NTSTATUS OpenSdStatus = STATUS_SUCCESS;
+    ULONGLONG ParentNo = 0;                 /* record of the directory the file was found in (not kept referenced) */
     ULONG RelatedChars = 0;
     ULONGLONG RelatedParent = 0;
     USHORT RelatedNameLength = 0;
@@ -1275,6 +1296,20 @@ walked:
         ngc_stat(Parent, &PSt);
     else
         PSt.mft_ref = 5;    /* the root is its own parent */
+    /*
+     * An open of an existing file reads the file's descriptor here, while this walk holds the lock, and lets go of the
+     * directory the file was found in (its record number is kept for the rare open that has to read the directory's
+     * descriptor as well).  The open took the lock three times more for that: to read the descriptor, to refresh the
+     * state it had just read, and to put the directory.
+     */
+    if (NT_SUCCESS(Status) && Check && !CreatedNode && !StreamChecked)
+        OpenSdStatus = NgReadSecurity(Vcb, Node, &OpenSd);
+    if (Parent)
+    {
+        ParentNo = PSt.mft_ref & 0xffffffffffffULL;
+        ngc_put(Parent);
+        Parent = NULL;
+    }
     if (Exclusive)
         NgReleaseCore(Vcb);
     else
@@ -1386,7 +1421,7 @@ walked:
             Implied = DELETE;
         else if (Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF)
             Implied = FILE_WRITE_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
-        Status = NgCheckOpen(Vcb, As, Node, Name == &FileObject->FileName ? Parent : NULL, Implied);
+        Status = NgCheckOpen(Vcb, As, OpenSd, OpenSdStatus, Name == &FileObject->FileName ? ParentNo : 0, Implied);
         if (!NT_SUCCESS(Status))
             goto out;
     }
@@ -1445,8 +1480,7 @@ walked:
     Fcb->IsRoot = (Full.Length == sizeof(WCHAR));
     RtlInitEmptyUnicodeString(&Fcb->Stream, Fcb->StreamBuffer, sizeof(Fcb->StreamBuffer));
     RtlCopyUnicodeString(&Fcb->Stream, &Stream);
-    Fcb->Stat = St;
-    NgFillStat(Fcb);
+    NgSetStat(Fcb, &St);    /* the state the walk read under the lock: this FCB is not shared yet */
     Fcb->LogicalVdl = Fcb->Header.FileSize.QuadPart;
     /* A new segment holds pages read from the stream, none past its end (a read past it is zero filled) */
     Fcb->TailZeroFrom = Fcb->Header.FileSize.QuadPart;
@@ -1677,6 +1711,8 @@ out:
         NgFreeCcb(Ccb);
     if (ParentSd)
         ExFreePoolWithTag(ParentSd, TAG_NTFSNG);
+    if (OpenSd)
+        ExFreePoolWithTag(OpenSd, TAG_NTFSNG);
     ExFreePoolWithTag(Real, TAG_NTFSNG);
     ExFreePoolWithTag(Full.Buffer, TAG_NTFSNG);
     if (ById.Buffer)
