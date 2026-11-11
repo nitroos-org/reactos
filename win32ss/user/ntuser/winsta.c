@@ -755,8 +755,11 @@ IntCreateWindowStation(
     {
         ERR("Initializing input window station\n");
 
-        /* Only Winlogon can create the interactive window station */
-        ASSERT(gpidLogon == PsGetCurrentProcessId());
+        /*
+         * Only Winlogon can create the interactive window station. A session without the console
+         * (NitroSessions) has no Winlogon yet: its first window station is the interactive one
+         */
+        ASSERT((gpidLogon == PsGetCurrentProcessId()) || gbHeadlessSession);
 
         InputWindowStation = WindowStation;
         WindowStation->Flags &= ~WSS_NOIO;
