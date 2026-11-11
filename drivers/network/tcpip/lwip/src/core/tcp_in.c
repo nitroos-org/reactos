@@ -283,6 +283,25 @@ tcp_input(struct pbuf *p, struct netif *inp)
   if (pcb == NULL) {
     /* If it did not go to an active connection, we check the connections
        in the TIME-WAIT state. */
+#if LWIP_TCP_TW_HASH
+    /* The TIME-WAIT PCBs are found through the hash of their 4-tuple. The netif check is the same as
+       for the active PCBs. */
+    pcb = tcp_tw_find(ip_current_dest_addr(), tcphdr->dest, ip_current_src_addr(), tcphdr->src,
+                      netif_get_index(ip_data.current_input_netif));
+    if (pcb != NULL) {
+      LWIP_ASSERT("tcp_input: TIME-WAIT pcb->state == TIME-WAIT", pcb->state == TIME_WAIT);
+      LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_input: packed for TIME_WAITing connection.\n"));
+#ifdef LWIP_HOOK_TCP_INPACKET_PCB
+      if (LWIP_HOOK_TCP_INPACKET_PCB(pcb, tcphdr, tcphdr_optlen, tcphdr_opt1len,
+                                     tcphdr_opt2, p) == ERR_OK)
+#endif
+      {
+        tcp_timewait_input(pcb);
+      }
+      pbuf_free(p);
+      return;
+    }
+#else /* LWIP_TCP_TW_HASH */
     for (pcb = tcp_tw_pcbs; pcb != NULL; pcb = pcb->next) {
       LWIP_ASSERT("tcp_input: TIME-WAIT pcb->state == TIME-WAIT", pcb->state == TIME_WAIT);
 
@@ -311,6 +330,7 @@ tcp_input(struct pbuf *p, struct netif *inp)
         return;
       }
     }
+#endif /* LWIP_TCP_TW_HASH */
 
     /* Finally, if we still did not get a match, we check all PCBs that
        are LISTENing for incoming connections. */
@@ -1009,7 +1029,7 @@ tcp_process(struct tcp_pcb *pcb)
           tcp_pcb_purge(pcb);
           TCP_RMV_ACTIVE(pcb);
           pcb->state = TIME_WAIT;
-          TCP_REG(&tcp_tw_pcbs, pcb);
+          TCP_REG_TW(pcb);
         } else {
           tcp_ack_now(pcb);
           pcb->state = CLOSING;
@@ -1027,7 +1047,7 @@ tcp_process(struct tcp_pcb *pcb)
         tcp_pcb_purge(pcb);
         TCP_RMV_ACTIVE(pcb);
         pcb->state = TIME_WAIT;
-        TCP_REG(&tcp_tw_pcbs, pcb);
+        TCP_REG_TW(pcb);
       }
       break;
     case CLOSING:
@@ -1037,7 +1057,7 @@ tcp_process(struct tcp_pcb *pcb)
         tcp_pcb_purge(pcb);
         TCP_RMV_ACTIVE(pcb);
         pcb->state = TIME_WAIT;
-        TCP_REG(&tcp_tw_pcbs, pcb);
+        TCP_REG_TW(pcb);
       }
       break;
     case LAST_ACK:

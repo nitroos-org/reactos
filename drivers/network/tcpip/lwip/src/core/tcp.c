@@ -1130,7 +1130,15 @@ tcp_connect(struct tcp_pcb *pcb, const ip_addr_t *ipaddr, u16_t port,
       struct tcp_pcb *cpcb;
       int i;
       /* Don't check listen- and bound-PCBs, check active- and TIME-WAIT PCBs. */
+#if LWIP_TCP_TW_HASH
+      /* TIME-WAIT PCBs: one hash lookup (any netif) instead of a walk of tcp_tw_pcbs */
+      if (tcp_tw_find(&pcb->local_ip, pcb->local_port, ipaddr, port, NETIF_NO_INDEX) != NULL) {
+        return ERR_USE;
+      }
+      for (i = 2; i < NUM_TCP_PCB_LISTS_NO_TIME_WAIT; i++) {
+#else
       for (i = 2; i < NUM_TCP_PCB_LISTS; i++) {
+#endif
         for (cpcb = *tcp_pcb_lists[i]; cpcb != NULL; cpcb = cpcb->next) {
           if ((cpcb->local_port == pcb->local_port) &&
               (cpcb->remote_port == port) &&
@@ -1454,6 +1462,9 @@ tcp_slowtmr_start:
     if (pcb_remove) {
       struct tcp_pcb *pcb2;
       tcp_pcb_purge(pcb);
+#if LWIP_TCP_TW_HASH
+      tcp_tw_hash_remove(pcb);
+#endif /* LWIP_TCP_TW_HASH */
       /* Remove PCB from tcp_tw_pcbs list. */
       if (prev != NULL) {
         LWIP_ASSERT("tcp_slowtmr: middle tcp != tcp_tw_pcbs", pcb != tcp_tw_pcbs);
@@ -1779,6 +1790,93 @@ tcp_kill_state(enum tcp_state state)
     tcp_abandon(inactive, 0);
   }
 }
+
+#if LWIP_TCP_TW_HASH
+/* The TIME-WAIT hash: buckets chained through tcp_pcb.tw_next, newest first (as tcp_tw_pcbs is, so a
+   lookup finds the same PCB the list walk would), and the number of TIME-WAIT PCBs per local port. */
+static struct tcp_pcb *tcp_tw_hash[LWIP_TCP_TW_HASH_SIZE];
+static u16_t tcp_tw_ports[0x10000];
+
+static u16_t
+tcp_tw_hash_index(u16_t local_port, u16_t remote_port, const ip_addr_t *remote_ip)
+{
+  u32_t h = (((u32_t)local_port << 16) | remote_port) * 2654435761UL;
+#if LWIP_IPV4
+  h ^= ip4_addr_get_u32(ip_2_ip4(remote_ip));
+#else
+  LWIP_UNUSED_ARG(remote_ip);
+#endif
+  h ^= h >> 16;
+  return (u16_t)(h & (LWIP_TCP_TW_HASH_SIZE - 1));
+}
+
+/** Registers a PCB that was just put on tcp_tw_pcbs. */
+void
+tcp_tw_hash_add(struct tcp_pcb *pcb)
+{
+  struct tcp_pcb **bucket = &tcp_tw_hash[tcp_tw_hash_index(pcb->local_port, pcb->remote_port, &pcb->remote_ip)];
+
+  pcb->tw_next = *bucket;
+  *bucket = pcb;
+  /* a counter that reaches 0xFFFF stays there: the port then reads as used for good, which is safe */
+  if (tcp_tw_ports[pcb->local_port] != 0xFFFF) {
+    tcp_tw_ports[pcb->local_port]++;
+  }
+}
+
+/** Unregisters a PCB that is about to leave tcp_tw_pcbs (its 4-tuple must be unchanged). */
+void
+tcp_tw_hash_remove(struct tcp_pcb *pcb)
+{
+  struct tcp_pcb **link = &tcp_tw_hash[tcp_tw_hash_index(pcb->local_port, pcb->remote_port, &pcb->remote_ip)];
+
+  while (*link != NULL) {
+    if (*link == pcb) {
+      *link = pcb->tw_next;
+      pcb->tw_next = NULL;
+      LWIP_ASSERT("tcp_tw_hash_remove: port count", tcp_tw_ports[pcb->local_port] > 0);
+      if (tcp_tw_ports[pcb->local_port] != 0xFFFF) {
+        tcp_tw_ports[pcb->local_port]--;
+      }
+      return;
+    }
+    link = &(*link)->tw_next;
+  }
+  LWIP_ASSERT("tcp_tw_hash_remove: pcb not in the hash", 0);
+}
+
+/**
+ * Finds the first TIME-WAIT PCB of a 4-tuple. A PCB bound to a netif only matches that netif;
+ * netif_idx NETIF_NO_INDEX matches every PCB.
+ */
+struct tcp_pcb *
+tcp_tw_find(const ip_addr_t *local_ip, u16_t local_port,
+            const ip_addr_t *remote_ip, u16_t remote_port, u8_t netif_idx)
+{
+  struct tcp_pcb *pcb;
+
+  for (pcb = tcp_tw_hash[tcp_tw_hash_index(local_port, remote_port, remote_ip)]; pcb != NULL; pcb = pcb->tw_next) {
+    if ((netif_idx != NETIF_NO_INDEX) && (pcb->netif_idx != NETIF_NO_INDEX) &&
+        (pcb->netif_idx != netif_idx)) {
+      continue;
+    }
+    if (pcb->remote_port == remote_port &&
+        pcb->local_port == local_port &&
+        ip_addr_eq(&pcb->remote_ip, remote_ip) &&
+        ip_addr_eq(&pcb->local_ip, local_ip)) {
+      return pcb;
+    }
+  }
+  return NULL;
+}
+
+/** Whether a PCB in TIME-WAIT uses this local port. */
+u8_t
+tcp_tw_port_used(u16_t port)
+{
+  return tcp_tw_ports[port] != 0;
+}
+#endif /* LWIP_TCP_TW_HASH */
 
 /**
  * Kills the oldest connection that is in TIME_WAIT state.
@@ -2190,6 +2288,11 @@ tcp_pcb_remove(struct tcp_pcb **pcblist, struct tcp_pcb *pcb)
   LWIP_ASSERT("tcp_pcb_remove: invalid pcb", pcb != NULL);
   LWIP_ASSERT("tcp_pcb_remove: invalid pcblist", pcblist != NULL);
 
+#if LWIP_TCP_TW_HASH
+  if (pcblist == &tcp_tw_pcbs) {
+    tcp_tw_hash_remove(pcb);
+  }
+#endif /* LWIP_TCP_TW_HASH */
   TCP_RMV(pcblist, pcb);
 
   tcp_pcb_purge(pcb);
