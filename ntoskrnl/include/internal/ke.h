@@ -753,6 +753,13 @@ VOID
 NTAPI
 KiCheckForKernelApcDelivery(VOID);
 
+BOOLEAN
+NTAPI
+KeRemoveEntryQueue(
+    _In_ PKQUEUE Queue,
+    _In_ PLIST_ENTRY Entry
+);
+
 LONG
 NTAPI
 KiInsertQueue(
