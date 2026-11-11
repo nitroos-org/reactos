@@ -139,6 +139,25 @@ static PNG_FCB NgFindFcbForOpen(PNG_VCB Vcb, ULONGLONG MftNo)
     return Found;
 }
 
+/* TRUE when the FCB of (MftNo, unnamed stream) says an open of the file fails or waits (delete pending, the paging file); CoreLock held. */
+static BOOLEAN NgFcbBlocksQuery(PNG_VCB Vcb, ULONGLONG MftNo)
+{
+    PLIST_ENTRY Entry, Head = NgFcbBucket(Vcb, MftNo);
+    BOOLEAN Blocks = FALSE;
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
+    {
+        PNG_FCB Fcb = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
+        if (Fcb->MftNo == MftNo && Fcb->Stream.Length == 0)
+        {
+            Blocks = Fcb->Deleted || Fcb->DeletePending || Fcb->IsPagingFile || Fcb->Orphan;
+            break;
+        }
+    }
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    return Blocks;
+}
+
 /* SeManageVolumePrivilege, enabled, in the security context of a user-mode open. */
 static BOOLEAN NgHasManageVolumePrivilege(PACCESS_STATE As)
 {
@@ -867,7 +886,13 @@ static NTSTATUS NgRelatedNode(PNG_VCB Vcb, PNG_FCB Fcb, ngc_node **Out)
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+/*
+ * Query is NULL for a create.  Otherwise this is FastIoQueryOpen (NgFastQueryOpen): the attributes of an existing file are
+ * read, with the checks an open for FILE_READ_ATTRIBUTES makes, into *Query, and no FCB, CCB or file object is made.
+ * Anything that is not a plain open of an existing file (a stream, a reparse point in the path, a failed check, a file
+ * with a delete pending) fails here and the I/O manager makes the ordinary open; a name that is not there is answered.
+ */
+static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp, PFILE_NETWORK_OPEN_INFORMATION Query)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
     PFILE_OBJECT FileObject = Stack->FileObject;
@@ -914,6 +939,9 @@ static NTSTATUS NgCreateLocked(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     if (Vcb->LockedBy)
         return STATUS_ACCESS_DENIED;
+    if (Query && (Related || (Options & FILE_OPEN_BY_FILE_ID) || Disposition != FILE_OPEN || OpenTarget ||
+                  (Stack->Flags & SL_OPEN_PAGING_FILE) || Stack->Parameters.Create.EaLength || !Name->Length))
+        return STATUS_NOT_SUPPORTED;
     Status = NgCheckMedium(Vcb);
     if (Status == STATUS_WRONG_VOLUME && !Related)
     {
@@ -1137,8 +1165,18 @@ walk:
                 Status = STATUS_OBJECT_PATH_NOT_FOUND;   /* a file used as a directory */
             break;
         }
-        if (Name == &FileObject->FileName && (!LastComp || (!(Options & FILE_OPEN_REPARSE_POINT) &&
-                                                           Disposition != FILE_CREATE)))
+        if (Query)
+        {
+            /* A junction or link that is followed needs the I/O manager (a new name, a new device): the ordinary open. */
+            if (ngc_is_reparse(Next) && (!LastComp || !(Options & FILE_OPEN_REPARSE_POINT)))
+            {
+                ngc_put(Next);
+                Status = STATUS_REPARSE_POINT_ENCOUNTERED;
+                break;
+            }
+        }
+        else if (Name == &FileObject->FileName && (!LastComp || (!(Options & FILE_OPEN_REPARSE_POINT) &&
+                                                                 Disposition != FILE_CREATE)))
         {
             Status = NgMountPointReparse(Vcb, Next, Irp, FileObject,
                                          FullLength - (ULONG)(Comp.Buffer + Comp.Length / sizeof(WCHAR) - Full.Buffer) * sizeof(WCHAR),
@@ -1342,13 +1380,21 @@ walked:
         ngc_put(Parent);
         Parent = NULL;
     }
+    if (Query && NT_SUCCESS(Status) && Node)
+    {
+        /* No FCB for a query: the node goes now, and a file whose FCB says it cannot be opened (or a stream) is left to the open. */
+        if (Stream.Length || Missing || NgFcbBlocksQuery(Vcb, St.mft_ref & 0xffffffffffffULL))
+            Status = STATUS_NOT_SUPPORTED;
+        ngc_put(Node);
+        Node = NULL;
+    }
     /*
      * An open of a file that has an FCB already (one a handle keeps, or one Mm and Cc keep alive after the last handle)
      * takes that FCB here and lets go of the node the walk found, in this hold: a candidate FCB made first and thrown
      * away when the insertion finds the old one had to put its node under the lock again.  The FCB found is counted
      * in Opening from here; every exit below goes through out:, which gives it back.
      */
-    if (NT_SUCCESS(Status) && !Created && !Stream.Length && !OpenTarget && Node)
+    else if (NT_SUCCESS(Status) && !Created && !Stream.Length && !OpenTarget && Node)
     {
         Fcb = NgFindFcbForOpen(Vcb, St.mft_ref & 0xffffffffffffULL);
         if (Fcb)
@@ -1371,7 +1417,7 @@ walked:
         goto out;
     }
     IsDir = St.is_dir ? TRUE : FALSE;
-    if (!Created && !Stream.Length && !(Stack->Flags & SL_OPEN_PAGING_FILE))
+    if (!Created && !Stream.Length && !(Stack->Flags & SL_OPEN_PAGING_FILE) && !Query)
     {
         /* The active paging file refuses every other open with a sharing violation, before the
          * attribute checks of an overwrite could answer access denied (as Windows does).  The
@@ -1472,6 +1518,22 @@ walked:
         Status = NgCheckOpen(Vcb, As, OpenSd, OpenSdStatus, Name == &FileObject->FileName ? ParentNo : 0, Implied);
         if (!NT_SUCCESS(Status))
             goto out;
+    }
+
+    if (Query)
+    {
+        /* What NgQueryInformation answers for FileNetworkOpenInformation, from the state the walk read.  Zeroed first: the
+         * structure has padding, and the buffer is the I/O manager's stack, which it copies to the caller whole. */
+        RtlZeroMemory(Query, sizeof(*Query));
+        Query->CreationTime.QuadPart = St.crtime;
+        Query->LastAccessTime.QuadPart = St.atime;
+        Query->LastWriteTime.QuadPart = St.mtime;
+        Query->ChangeTime.QuadPart = St.ctime;
+        Query->AllocationSize.QuadPart = IsDir ? 0 : St.alloc;
+        Query->EndOfFile.QuadPart = IsDir ? 0 : St.size;
+        Query->FileAttributes = NgFileAttributes(NULL, &St);
+        Status = STATUS_SUCCESS;
+        goto out;
     }
 
     /* The access the handle actually holds, after the check: MAXIMUM_ALLOWED and backup/restore are
@@ -1944,9 +2006,63 @@ NTSTATUS NgCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     else if (Vcb->RemovePending)
         Status = STATUS_ACCESS_DENIED;
     else
-        Status = NgCreateLocked(DeviceObject, Irp);
+        Status = NgCreateLocked(DeviceObject, Irp, NULL);
     ExReleaseResourceLite(&Vcb->CreateGate);
     return Status;
+}
+
+/*
+ * FastIoQueryOpen: NtQueryAttributesFile / NtQueryFullAttributesFile (GetFileAttributes, every stat of a program that
+ * scans a tree) without a file object, and so without the cleanup and close that follow an open, or the FCB.  The I/O
+ * manager passes the create IRP it would send; TRUE means the answer is in *Query, FALSE that the ordinary open runs.
+ * Only for a fixed volume that is mounted (a removable medium is verified by the ordinary path).
+ * The locks are those of NgDispatch and NgCreate: the create gate shared, then NgCreateLocked takes CoreLock for the walk.
+ */
+BOOLEAN NTAPI NgFastQueryOpen(PIRP Irp, PFILE_NETWORK_OPEN_INFORMATION Query, PDEVICE_OBJECT DeviceObject)
+{
+    PNG_VCB Vcb;
+    NTSTATUS Status;
+    BOOLEAN TopLevel = FALSE;
+
+    if (NgGlobal.NoFastQueryOpen || DeviceObject == NgGlobal.ControlDevice)
+        return FALSE;
+    Vcb = DeviceObject->DeviceExtension;
+    if (Vcb->Dismounted || Vcb->WrongMedia || Vcb->Removable || Vcb->RemovePending)
+        return FALSE;
+    FsRtlEnterFileSystem();
+    if (!IoGetTopLevelIrp())
+    {
+        IoSetTopLevelIrp(Irp);
+        TopLevel = TRUE;
+    }
+    ExAcquireResourceSharedLite(&Vcb->CreateGate, TRUE);
+    if (Vcb->Dismounted || Vcb->RemovePending)
+        Status = STATUS_VOLUME_DISMOUNTED;
+    else
+        Status = NgCreateLocked(DeviceObject, Irp, Query);
+    ExReleaseResourceLite(&Vcb->CreateGate);
+    if (TopLevel)
+        IoSetTopLevelIrp(NULL);
+    FsRtlExitFileSystem();
+    if (NT_SUCCESS(Status))
+    {
+        InterlockedIncrement(&NgGlobal.FastQueryHits);
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = 0;
+        return TRUE;
+    }
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_OBJECT_PATH_NOT_FOUND)
+    {
+        /* The walk's own answer for a name that is not there (every create of a new name looks first): the ordinary
+         * open would walk again to say the same. */
+        InterlockedIncrement(&NgGlobal.FastQueryHits);
+        Irp->IoStatus.Status = Status;
+        Irp->IoStatus.Information = 0;
+        return TRUE;
+    }
+    InterlockedIncrement(&NgGlobal.FastQueryMisses);
+    /* Nothing of this attempt stays: the ordinary open fills the IRP's fields again. */
+    return FALSE;
 }
 
 /*
