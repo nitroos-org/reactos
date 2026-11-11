@@ -1914,48 +1914,89 @@ void CDECL wined3d_device_context_reset_state(struct wined3d_device_context *con
 
 void CDECL wined3d_device_context_set_state(struct wined3d_device_context *context, struct wined3d_state *state)
 {
+    struct wined3d_state *prev;
+    bool full;
     unsigned int i;
 
     TRACE("context %p, state %p.\n", context, state);
 
     wined3d_device_context_lock(context);
+    prev = context->state;
     context->state = state;
-    wined3d_device_context_emit_set_feature_level(context, state->feature_level);
 
-    wined3d_device_context_emit_set_rendertarget_views(context, 0,
-            ARRAY_SIZE(state->fb.render_targets), state->fb.render_targets);
+    /* The command stream's copy of the state equals the previous state of the
+     * immediate context (every set_* call updates both), so only what differs
+     * between the two states has to be sent. Deferred contexts record commands
+     * that replay on a different state, and re-setting the current state
+     * restores the command stream after a command list ran: both send all. */
+    full = !prev || prev == state || context != &context->device->cs->c;
 
-    wined3d_device_context_emit_set_depth_stencil_view(context, state->fb.depth_stencil);
-    wined3d_device_context_emit_set_vertex_declaration(context, state->vertex_declaration);
+#define DIFFERS(field) (full || memcmp(&prev->field, &state->field, sizeof(state->field)))
 
-    wined3d_device_context_emit_set_stream_outputs(context, state->stream_output);
+    if (full || prev->feature_level != state->feature_level)
+        wined3d_device_context_emit_set_feature_level(context, state->feature_level);
 
-    wined3d_device_context_emit_set_stream_sources(context, 0, WINED3D_MAX_STREAMS, state->streams);
+    if (DIFFERS(fb.render_targets))
+        wined3d_device_context_emit_set_rendertarget_views(context, 0,
+                ARRAY_SIZE(state->fb.render_targets), state->fb.render_targets);
 
-    wined3d_device_context_emit_set_index_buffer(context, state->index_buffer,
-            state->index_format, state->index_offset);
+    if (full || prev->fb.depth_stencil != state->fb.depth_stencil)
+        wined3d_device_context_emit_set_depth_stencil_view(context, state->fb.depth_stencil);
+    if (full || prev->vertex_declaration != state->vertex_declaration)
+        wined3d_device_context_emit_set_vertex_declaration(context, state->vertex_declaration);
 
-    wined3d_device_context_emit_set_predication(context, state->predicate, state->predicate_value);
+    if (DIFFERS(stream_output))
+        wined3d_device_context_emit_set_stream_outputs(context, state->stream_output);
+
+    if (DIFFERS(streams))
+        wined3d_device_context_emit_set_stream_sources(context, 0, WINED3D_MAX_STREAMS, state->streams);
+
+    if (full || prev->index_buffer != state->index_buffer || prev->index_format != state->index_format
+            || prev->index_offset != state->index_offset)
+        wined3d_device_context_emit_set_index_buffer(context, state->index_buffer,
+                state->index_format, state->index_offset);
+
+    if (full || prev->predicate != state->predicate || prev->predicate_value != state->predicate_value)
+        wined3d_device_context_emit_set_predication(context, state->predicate, state->predicate_value);
 
     for (i = 0; i < WINED3D_SHADER_TYPE_COUNT; ++i)
     {
-        wined3d_device_context_emit_set_shader(context, i, state->shader[i]);
-        wined3d_device_context_emit_set_constant_buffers(context, i, 0, MAX_CONSTANT_BUFFERS, state->cb[i]);
-        wined3d_device_context_emit_set_samplers(context, i, 0, MAX_SAMPLER_OBJECTS, state->sampler[i]);
-        wined3d_device_context_emit_set_shader_resource_views(context, i, 0,
-                MAX_SHADER_RESOURCE_VIEWS, state->shader_resource_view[i]);
+        if (full || prev->shader[i] != state->shader[i])
+            wined3d_device_context_emit_set_shader(context, i, state->shader[i]);
+        if (DIFFERS(cb[i]))
+            wined3d_device_context_emit_set_constant_buffers(context, i, 0, MAX_CONSTANT_BUFFERS, state->cb[i]);
+        if (DIFFERS(sampler[i]))
+            wined3d_device_context_emit_set_samplers(context, i, 0, MAX_SAMPLER_OBJECTS, state->sampler[i]);
+        if (DIFFERS(shader_resource_view[i]))
+            wined3d_device_context_emit_set_shader_resource_views(context, i, 0,
+                    MAX_SHADER_RESOURCE_VIEWS, state->shader_resource_view[i]);
     }
 
     for (i = 0; i < WINED3D_PIPELINE_COUNT; ++i)
-        wined3d_device_context_emit_set_unordered_access_views(context, i, 0, MAX_UNORDERED_ACCESS_VIEWS,
-                state->unordered_access_view[i], NULL);
+    {
+        if (DIFFERS(unordered_access_view[i]))
+            wined3d_device_context_emit_set_unordered_access_views(context, i, 0, MAX_UNORDERED_ACCESS_VIEWS,
+                    state->unordered_access_view[i], NULL);
+    }
 
-    wined3d_device_context_emit_set_viewports(context, state->viewport_count, state->viewports);
-    wined3d_device_context_emit_set_scissor_rects(context, state->scissor_rect_count, state->scissor_rects);
+    if (full || prev->viewport_count != state->viewport_count
+            || memcmp(prev->viewports, state->viewports, state->viewport_count * sizeof(*state->viewports)))
+        wined3d_device_context_emit_set_viewports(context, state->viewport_count, state->viewports);
+    if (full || prev->scissor_rect_count != state->scissor_rect_count
+            || memcmp(prev->scissor_rects, state->scissor_rects,
+            state->scissor_rect_count * sizeof(*state->scissor_rects)))
+        wined3d_device_context_emit_set_scissor_rects(context, state->scissor_rect_count, state->scissor_rects);
 
-    wined3d_device_context_emit_set_blend_state(context, state->blend_state, &state->blend_factor, state->sample_mask);
-    wined3d_device_context_emit_set_depth_stencil_state(context, state->depth_stencil_state, state->stencil_ref);
-    wined3d_device_context_emit_set_rasterizer_state(context, state->rasterizer_state);
+    if (full || prev->blend_state != state->blend_state || prev->sample_mask != state->sample_mask
+            || memcmp(&prev->blend_factor, &state->blend_factor, sizeof(state->blend_factor)))
+        wined3d_device_context_emit_set_blend_state(context, state->blend_state,
+                &state->blend_factor, state->sample_mask);
+    if (full || prev->depth_stencil_state != state->depth_stencil_state || prev->stencil_ref != state->stencil_ref)
+        wined3d_device_context_emit_set_depth_stencil_state(context, state->depth_stencil_state, state->stencil_ref);
+    if (full || prev->rasterizer_state != state->rasterizer_state)
+        wined3d_device_context_emit_set_rasterizer_state(context, state->rasterizer_state);
+
+#undef DIFFERS
     wined3d_device_context_unlock(context);
 }
 

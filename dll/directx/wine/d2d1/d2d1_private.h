@@ -144,6 +144,9 @@ struct d2d_vs_cb
 struct d2d_device_context_ops
 {
     HRESULT (*device_context_present)(IUnknown *outer_unknown);
+    /* The render target is presented or read back only at EndDraw: draws of
+     * plain fills may be held back and issued together. */
+    BOOL batch_fills;
 };
 
 enum d2d_device_context_sampler_limits
@@ -221,6 +224,21 @@ struct d2d_device_context
     struct d2d_clip_stack clip_stack;
 
     struct d2d_indexed_objects vertex_buffers;
+
+    /* Fills with a solid brush that are held back until something else
+     * is drawn, or the target is read: same constants, one draw call. */
+    struct
+    {
+        BOOL active;
+        struct d2d_vs_cb vs_cb;
+        struct d2d_ps_cb ps_cb;
+        D2D1_POINT_2F *vertices;
+        size_t vertices_size;
+        size_t vertex_count;
+        struct d2d_face *faces;
+        size_t faces_size;
+        size_t face_count;
+    } fill_batch;
 };
 
 HRESULT d2d_d3d_create_render_target(struct d2d_device *device, IDXGISurface *surface, IUnknown *outer_unknown,
