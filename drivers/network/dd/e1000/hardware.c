@@ -366,7 +366,7 @@ NICAllocateIoResources(
 
     NdisMAllocateSharedMemory(Adapter->AdapterHandle,
                               Adapter->ReceiveBufferEntrySize * NUM_RECEIVE_DESCRIPTORS,
-                              FALSE,
+                              TRUE,
                               (PVOID*)&Adapter->ReceiveBuffer,
                               &Adapter->ReceiveBufferPa);
 
@@ -457,7 +457,7 @@ NICReleaseIoResources(
     {
         NdisMFreeSharedMemory(Adapter->AdapterHandle,
                               Adapter->ReceiveBufferEntrySize * NUM_RECEIVE_DESCRIPTORS,
-                              FALSE,
+                              TRUE,
                               Adapter->ReceiveBuffer,
                               Adapter->ReceiveBufferPa);
 
