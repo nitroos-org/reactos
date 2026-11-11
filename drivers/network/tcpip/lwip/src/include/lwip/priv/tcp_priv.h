@@ -346,6 +346,16 @@ extern struct tcp_pcb *tcp_active_pcbs;  /* List of all TCP PCBs that are in a
               data. */
 extern struct tcp_pcb *tcp_tw_pcbs;      /* List of all TCP PCBs in TIME-WAIT. */
 
+#if LWIP_TCP_TW_HASH
+/* TIME-WAIT PCBs are also chained in a hash table keyed by the 4-tuple, so that tcp_input and tcp_connect
+   do not walk tcp_tw_pcbs (which can hold thousands of PCBs); tcp_tw_pcbs stays the master list. */
+struct tcp_pcb *tcp_tw_find(const ip_addr_t *local_ip, u16_t local_port,
+                            const ip_addr_t *remote_ip, u16_t remote_port, u8_t netif_idx);
+u8_t tcp_tw_port_used(u16_t port);
+void tcp_tw_hash_add(struct tcp_pcb *pcb);
+void tcp_tw_hash_remove(struct tcp_pcb *pcb);
+#endif /* LWIP_TCP_TW_HASH */
+
 #define NUM_TCP_PCB_LISTS_NO_TIME_WAIT  3
 #define NUM_TCP_PCB_LISTS               4
 extern struct tcp_pcb ** const tcp_pcb_lists[NUM_TCP_PCB_LISTS];
@@ -423,6 +433,16 @@ extern struct tcp_pcb ** const tcp_pcb_lists[NUM_TCP_PCB_LISTS];
   } while(0)
 
 #endif /* LWIP_DEBUG */
+
+#if LWIP_TCP_TW_HASH
+#define TCP_REG_TW(npcb)                           \
+  do {                                             \
+    TCP_REG(&tcp_tw_pcbs, npcb);                   \
+    tcp_tw_hash_add(npcb);                         \
+  } while (0)
+#else
+#define TCP_REG_TW(npcb) TCP_REG(&tcp_tw_pcbs, npcb)
+#endif
 
 #define TCP_REG_ACTIVE(npcb)                       \
   do {                                             \

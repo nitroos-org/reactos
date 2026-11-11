@@ -279,6 +279,10 @@ struct tcp_pcb {
   u8_t polltmr, pollinterval;
   u8_t last_timer;
   u32_t tmr;
+#if LWIP_TCP_TW_HASH
+  /* next PCB in the same TIME-WAIT hash bucket (only used in TIME-WAIT) */
+  struct tcp_pcb *tw_next;
+#endif
 
   /* receiver variables */
   u32_t rcv_nxt;   /* next seqno expected */
