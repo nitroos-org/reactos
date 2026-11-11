@@ -353,8 +353,25 @@ void simple_inode_init_ts(struct inode *i);
 #define inode_set_iversion(i, v) ((i)->i_version = (v))
 #define inode_query_iversion(i) ((i)->i_version)
 static inline unsigned long inode_state_read_once(struct inode *i) { return i->i_state; }
-static inline void inode_state_set(struct inode *i, unsigned long f) { i->i_state |= f; }
-static inline void inode_state_clear(struct inode *i, unsigned long f) { i->i_state &= ~f; }
+/*
+ * kshim_sync skips its scan while the dirty generation (kshim_dirty_bump) is unchanged since a scan found
+ * everything clean, so every way of making an inode dirty must bump it.  Setting or clearing any I_DIRTY
+ * bit here does, so a caller cannot make FlushFileBuffers skip an inode by going through these helpers
+ * (clearing cannot hide dirtiness; it bumps anyway to keep the rule simple).
+ */
+void kshim_dirty_bump(void);
+static inline void inode_state_set(struct inode *i, unsigned long f)
+{
+	i->i_state |= f;
+	if (f & I_DIRTY)
+		kshim_dirty_bump();
+}
+static inline void inode_state_clear(struct inode *i, unsigned long f)
+{
+	i->i_state &= ~f;
+	if (f & I_DIRTY)
+		kshim_dirty_bump();
+}
 static inline bool inode_unhashed(struct inode *i) { (void)i; return false; }
 void inode_init_once(struct inode *i);
 void inode_init_owner(struct mnt_idmap *idmap, struct inode *i, const struct inode *dir, umode_t mode);
@@ -444,6 +461,8 @@ struct super_block {
 	unsigned long kshim_lru_bytes;		/* sum of kshim_lru_bytes of the unused inodes */
 	int kshim_no_icache;			/* unmounting: evict at the last reference */
 	void *kshim_priv;			/* the file system glue's volume (kshim_icache_evicting / kshim_icache_added find it here) */
+	unsigned long long kshim_clean_gen;	/* kshim_dirty_gen when a sync last found nothing dirty */
+	int kshim_clean_valid;
 	const struct dentry_operations *s_d_op;
 	struct user_namespace *s_user_ns;
 	u8 s_uuid[16];

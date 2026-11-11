@@ -1646,7 +1646,7 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PLIST_ENTRY Entry;
     PNG_VCB Local[16], *Vcbs = Local, *Heap = NULL;
     ULONG Count = 0, Cap = RTL_NUMBER_OF(Local), Live = 0, Skipped = 0, i;
-    unsigned long Writes, Syncs, Dirties;
+    unsigned long Writes, Syncs, Skips, Dirties;
     unsigned long long Bytes;
     UNREFERENCED_PARAMETER(DeviceObject);
     UNREFERENCED_PARAMETER(Irp);
@@ -1712,9 +1712,9 @@ NTSTATUS NgShutdown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
     if (Heap)
         ExFreePoolWithTag(Heap, TAG_NTFSNG);
-    ngc_write_stats(&Writes, &Bytes, &Syncs, &Dirties);
-    DPRINT1("ntfsng: shutdown: %lu device writes, %I64u bytes, %lu core syncs, %lu folio dirties, stack max %lu (IRP_MJ 0x%x), core at device %lu\n",
-            Writes, Bytes, Syncs, Dirties, NgGlobal.MaxStackUsed, NgGlobal.MaxStackMajor, NgGlobal.MaxStackAtIo);
+    ngc_write_stats(&Writes, &Bytes, &Syncs, &Skips, &Dirties);
+    DPRINT1("ntfsng: shutdown: %lu device writes, %I64u bytes, %lu core syncs (%lu skipped: nothing dirty), %lu folio dirties, stack max %lu (IRP_MJ 0x%x), core at device %lu\n",
+            Writes, Bytes, Syncs, Skips, Dirties, NgGlobal.MaxStackUsed, NgGlobal.MaxStackMajor, NgGlobal.MaxStackAtIo);
     return STATUS_SUCCESS;
 }
 
