@@ -745,10 +745,13 @@ CsrCreateThread(IN PCSR_PROCESS CsrProcess,
     if (!NT_SUCCESS(Status))
     {
         /*
-         * Bail out. This function took only the process lock (no process reference; a caller that locked
-         * CsrProcess releases that itself), so release only the lock, and give the handle back unprotected:
-         * on failure it stays the caller's to close.
+         * Bail out. This function took the process lock and, in CsrAllocateThread, a reference on the process
+         * for the thread it now frees: give back both (a caller that locked CsrProcess releases its own lock
+         * and reference itself), and give the handle back unprotected: on failure it stays the caller's to close.
+         * Without this the process keeps a reference for good, and csrss keeps its process and port handles
+         * after the process has exited.
          */
+        CsrLockedDereferenceProcess(CsrProcess);
         CsrReleaseProcessLock();
         UnProtectHandle(hThread);
         CsrDeallocateThread(CsrThread);
