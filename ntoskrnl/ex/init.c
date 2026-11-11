@@ -1329,12 +1329,18 @@ ExpInitializeExecutive(IN ULONG Cpu,
         KeBugCheckEx(PHASE0_INITIALIZATION_FAILED, Status, 0, 0, 0);
     }
 
-    /* Add our version */
+    /* Add our version. This is the registry value CurrentVersion: Windows 10 keeps "6.3" there
+       (the real version is in CurrentMajorVersionNumber/CurrentMinorVersionNumber), and installers
+       compare the string, so "10.0" makes them see a version older than Windows 8.1 */
+#if VER_PRODUCTMAJORVERSION >= 10
+    Status = RtlStringCbPrintfA(VersionBuffer, sizeof(VersionBuffer), "%u.%u", 6, 3);
+#else
     Status = RtlStringCbPrintfA(VersionBuffer,
                                 sizeof(VersionBuffer),
                                 "%u.%u",
                                 VER_PRODUCTMAJORVERSION,
                                 VER_PRODUCTMINORVERSION);
+#endif
     if (!NT_SUCCESS(Status))
     {
         /* Fail */

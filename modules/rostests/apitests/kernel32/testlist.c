@@ -101,6 +101,7 @@ extern void func_FindFirstStream(void);
 extern void func_FindNextBoundary(void);
 extern void func_FindNLSStringEx(void);
 extern void func_FindStringOrdinal(void);
+extern void func_RegCurrentVersion(void);
 extern void func_FlushProcessWriteBuffers(void);
 extern void func_FLS(void);
 extern void func_FlsGetValue2(void);
@@ -358,6 +359,7 @@ const struct test winetest_testlist[] =
     { "FindNextBoundary",            func_FindNextBoundary },
     { "FindNLSStringEx",             func_FindNLSStringEx },
     { "FindStringOrdinal",           func_FindStringOrdinal },
+    { "RegCurrentVersion",           func_RegCurrentVersion },
     { "FlushProcessWriteBuffers",     func_FlushProcessWriteBuffers },
     { "FLS",                         func_FLS },
     { "FlsGetValue2",                 func_FlsGetValue2 },

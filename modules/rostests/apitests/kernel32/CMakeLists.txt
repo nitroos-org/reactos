@@ -100,6 +100,7 @@ list(APPEND SOURCE
     FindNLSStringEx.c
     FindStringOrdinal.c
     FlushProcessWriteBuffers.c
+    RegCurrentVersion.c
     FLS.c
     FlsGetValue2.c
     ForcedRelocation.c
