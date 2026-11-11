@@ -38,20 +38,67 @@ NTSTATUS
 InitCsrApiPort(IN HANDLE CsrPortHandle)
 {
     NTSTATUS Status;
+    PVOID Port, OldPort;
 
     Status = ObReferenceObjectByHandle(CsrPortHandle,
                                        0,
                                        /* * */LpcPortObjectType, // or NULL,
                                        UserMode,
-                                       &CsrApiPort,
+                                       &Port,
                                        NULL);
     if (!NT_SUCCESS(Status))
     {
-        CsrApiPort = NULL;
         ERR("Failed to set CSR API Port.\n");
+        return Status;
     }
 
+    /* A session other than 0 may have taken the port by name already: drop that reference */
+    OldPort = InterlockedExchangePointer((PVOID *)&CsrApiPort, Port);
+    if (OldPort) ObDereferenceObject(OldPort);
+
     return Status;
+}
+
+/*
+ * A session other than session 0 (NitroSessions): the API port of the session's csrss, by its name, when
+ * win32k needs it before any client has connected to winsrv (which hands it over, see UserClientConnect).
+ * The port is created by that csrss in its session's directory, which only SYSTEM can create objects in.
+ * Session 0 keeps getting it from winsrv.
+ */
+static
+VOID
+CsrReferenceApiPortOfSession(VOID)
+{
+    WCHAR Buffer[64];
+    UNICODE_STRING Name;
+    ULONG SessionId = PsGetCurrentProcessSessionId();
+    PVOID Port;
+    NTSTATUS Status;
+
+    if (SessionId == 0)
+        return;
+
+    Status = RtlStringCbPrintfW(Buffer, sizeof(Buffer), L"\\Sessions\\%lu\\Windows\\ApiPort", SessionId);
+    if (!NT_SUCCESS(Status))
+        return;
+    RtlInitUnicodeString(&Name, Buffer);
+
+    Status = ObReferenceObjectByName(&Name,
+                                     OBJ_CASE_INSENSITIVE,
+                                     NULL,
+                                     0,
+                                     LpcPortObjectType,
+                                     KernelMode,
+                                     NULL,
+                                     &Port);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("No CSR API port for session %lu: 0x%lx\n", SessionId, Status);
+        return;
+    }
+
+    if (InterlockedCompareExchangePointer((PVOID *)&CsrApiPort, Port, NULL) != NULL)
+        ObDereferenceObject(Port);
 }
 
 VOID
@@ -83,6 +130,8 @@ CsrClientCallServer(IN OUT PCSR_API_MESSAGE ApiMessage,
 #endif
 
     /* Do we have a connection to CSR yet? */
+    if (!CsrApiPort)
+        CsrReferenceApiPortOfSession();
     if (!CsrApiPort)
         return STATUS_INVALID_PORT_HANDLE;
 

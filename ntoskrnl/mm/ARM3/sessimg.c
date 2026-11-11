@@ -70,6 +70,13 @@ typedef struct _MI_SESSION_IMAGE
 /* NitroSessions (Session Manager key): 0 = one session as before, session images are not loaded */
 ULONG MmNitroSessions;
 
+/* win32k, when it is a session image */
+static PLDR_DATA_TABLE_ENTRY MiWin32kSessionImage;
+
+/* Set once win32k was loaded as a session image, never cleared: its callouts stay registered after the
+   last instance goes, so the GUI-thread guard must keep refusing sessions without win32k */
+static BOOLEAN MiWin32kWasSessionImage;
+
 static LIST_ENTRY MiSessionImageList = { &MiSessionImageList, &MiSessionImageList };
 static RTL_BITMAP MiSessionImageBitmap;
 static PULONG MiSessionImageBitmapBuffer;
@@ -558,6 +565,7 @@ MiDereferenceSessionImage(
         ASSERT(Instance->LoadCount != 0);
         if (--Instance->LoadCount == 0)
         {
+            if (LdrEntry == MiWin32kSessionImage) MmSessionSpace->u.Flags.Win32kLoaded = 0;
             MiUnmapSessionImagePages(Image->Base, Image->PageCount);
             RemoveEntryList(&Instance->Links);
             ExFreePoolWithTag(Instance, TAG_SESSION_IMAGE);
@@ -568,6 +576,7 @@ MiDereferenceSessionImage(
     if ((LdrEntry->LoadCount != 0) || !IsListEmpty(&Image->Instances)) return FALSE;
 
     /* Nothing holds it: the address range and the copy go */
+    if (LdrEntry == MiWin32kSessionImage) MiWin32kSessionImage = NULL;
     MiReleaseSessionImageVa(Image->Base, Image->PageCount);
     RemoveEntryList(&Image->Links);
 
@@ -678,26 +687,48 @@ MmIsSessionImage(
     return MiIsSessionImage(ImageHandle);
 }
 
-/* Whether the current process's session has the session image loaded (pages of its own) */
-BOOLEAN
+PVOID
 NTAPI
-MmIsSessionImageLoadedInCurrentSession(
+MmGetWin32kSessionImage(VOID)
+{
+    return MiWin32kSessionImage;
+}
+
+/* Called with the image just loaded, before its DriverEntry: GDI drivers it loads are session images too */
+VOID
+NTAPI
+MmSetWin32kSessionImage(
     _In_ PVOID ImageHandle)
 {
-    PMI_SESSION_IMAGE Image;
-    BOOLEAN Loaded = FALSE;
+    if (MiIsSessionImage(ImageHandle))
+    {
+        MiWin32kSessionImage = ImageHandle;
+        MiWin32kWasSessionImage = TRUE;
+    }
+}
 
-    PAGED_CODE();
+BOOLEAN
+NTAPI
+MmIsWin32kASessionImage(VOID)
+{
+    return MiWin32kWasSessionImage;
+}
+
+/* win32k's DriverEntry succeeded in the current session */
+VOID
+NTAPI
+MmSetWin32kLoadedInCurrentSession(VOID)
+{
+    if (PsGetCurrentProcess()->ProcessInSession) MmSessionSpace->u.Flags.Win32kLoaded = 1;
+}
+
+/* Whether the current process's session has a win32k of its own, ready (the GUI-thread guard) */
+BOOLEAN
+NTAPI
+MmIsWin32kLoadedInCurrentSession(VOID)
+{
     if (!PsGetCurrentProcess()->ProcessInSession) return FALSE;
-
-    KeEnterCriticalRegion();
-    KeWaitForSingleObject(&MmSystemLoadLock, WrVirtualMemory, KernelMode, FALSE, NULL);
-    Image = MiFindSessionImage(ImageHandle);
-    if (Image && MiFindSessionImageInstance(Image, MiCurrentSessionId()))
-        Loaded = TRUE;
-    KeReleaseMutant(&MmSystemLoadLock, MUTANT_INCREMENT, FALSE, FALSE);
-    KeLeaveCriticalRegion();
-    return Loaded;
+    return MmSessionSpace->u.Flags.Win32kLoaded ? TRUE : FALSE;
 }
 
 /*

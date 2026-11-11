@@ -332,6 +332,34 @@ START_TEST(MmSessionImage)
     CheckProtections(Member1, A1.Base);
 #endif
 
+    /* A session image stays resident: MmPageEntireDriver gives its base and pages nothing */
+    {
+        PVOID Routine;
+
+        KeStackAttachProcess((PKPROCESS)Member1, &ApcState);
+        Routine = FindExport(A1.Base, "SessTestIncrement");
+        Pointer = Routine ? MmPageEntireDriver(Routine) : NULL;
+        KeUnstackDetachProcess(&ApcState);
+        ok_eq_pointer(Pointer, A1.Base);
+        Value = Call(Member1, A1.Base, "SessTestGetCounter", 1);
+        ok_eq_long(Value, 5L);
+    }
+
+    /* A lookaside list and a resource in session space stay off the global lists; in this global driver not */
+    Value = Call(Member1, A1.Base, "SessTestListsOffGlobal", 1);
+    ok_eq_long(Value & 0xFF, 1L);
+    {
+        static PAGED_LOOKASIDE_LIST GlobalLookaside;
+        static ERESOURCE GlobalResource;
+
+        ExInitializePagedLookasideList(&GlobalLookaside, NULL, NULL, 0, 64, 'tSeS', 0);
+        ExInitializeResourceLite(&GlobalResource);
+        ok(GlobalLookaside.L.ListEntry.Flink != &GlobalLookaside.L.ListEntry, "global lookaside list not linked\n");
+        ok(GlobalResource.SystemResourcesList.Flink != &GlobalResource.SystemResourcesList, "global resource not linked\n");
+        ExDeleteResourceLite(&GlobalResource);
+        ExDeletePagedLookasideList(&GlobalLookaside);
+    }
+
     /* R2: a global image cannot import a session image, nor be loaded under its name */
     Section = NULL;
     Status = GlobalLoad(&NameB, &Section);
@@ -488,4 +516,22 @@ START_TEST(MmSessionImageBugCheck)
     if (NT_SUCCESS(Status))
         Call(Member1, A1.Base, "SessTestBugCheck", 1);
     ObDereferenceObject(Member1);
+}
+
+/*
+ * A different system service table in the used win32k slot is refused, as is a slot that does not exist.
+ * The same table again is accepted: every session's win32k registers its table, at the same address (seen
+ * with NitroSessions 5: win32k's DriverEntry succeeds in session 1).
+ */
+static ULONG_PTR TestServiceTable[1];
+static UCHAR TestArgumentTable[1];
+
+START_TEST(KeServiceTableAgain)
+{
+    BOOLEAN Result;
+
+    Result = KeAddSystemServiceTable(TestServiceTable, NULL, 1, TestArgumentTable, 1);
+    ok_eq_bool(Result, FALSE);
+    Result = KeAddSystemServiceTable(TestServiceTable, NULL, 1, TestArgumentTable, 2); /* SSDT_MAX_ENTRIES */
+    ok_eq_bool(Result, FALSE);
 }

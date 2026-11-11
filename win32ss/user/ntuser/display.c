@@ -155,6 +155,9 @@ InitVideo(VOID)
 
     TRACE("----------------------------- InitVideo() -------------------------------\n");
 
+    /* A session other than the console's (NitroSessions) gets no display device of its own */
+    gbHeadlessSession = (PsGetCurrentProcessSessionId() != SharedUserData->ActiveConsoleId);
+
     /* Check if VGA mode is requested, by finding the special volatile key created by VIDEOPRT */
     Status = RegOpenKey(L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\GraphicsDrivers\\BaseVideo", &hkey);
     if (NT_SUCCESS(Status))

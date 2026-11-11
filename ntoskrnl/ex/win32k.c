@@ -109,6 +109,33 @@ ExpWin32SessionCallout(
     return Status;
 }
 
+/*
+ * A window station or desktop lives in one session (its pointers are that
+ * session's session space). A handle to it goes only to a process of that
+ * session; any other process would hand it to its own session's win32k.
+ * Kernel handles (the System process) and processes in no session are not
+ * limited. Checked when a handle is created (open, create, duplicate,
+ * inherit) and when a name is parsed through a window station.
+ */
+static
+NTSTATUS
+ExpCheckWin32ObjectSession(
+    _In_opt_ PEPROCESS Process,
+    _In_ PVOID Object)
+{
+    PWIN32_KERNEL_OBJECT_HEADER Win32ObjectHeader = Object;
+
+    if (!Process) Process = PsGetCurrentProcess();
+    if (!Process->ProcessInSession) return STATUS_SUCCESS;
+    if (PsGetProcessSessionId(Process) != Win32ObjectHeader->SessionId)
+    {
+        DPRINT1("Win32 object %p of session %lu refused to process %p of session %lu\n",
+                Object, Win32ObjectHeader->SessionId, Process, PsGetProcessSessionId(Process));
+        return STATUS_ACCESS_DENIED;
+    }
+    return STATUS_SUCCESS;
+}
+
 static
 BOOLEAN
 NTAPI
@@ -185,6 +212,12 @@ ExpWinStaObjectParse(IN PVOID ParseObject,
                      OUT PVOID *Object)
 {
     WIN32_PARSEMETHOD_PARAMETERS Parameters;
+    NTSTATUS Status;
+
+    /* Names below a window station of another session are not ours to open or create */
+    *Object = NULL;
+    Status = ExpCheckWin32ObjectSession(NULL, ParseObject);
+    if (!NT_SUCCESS(Status)) return Status;
 
     /* Fill out the callback structure */
     Parameters.ParseObject = ParseObject;
@@ -232,11 +265,9 @@ ExpWindowStationOpen(IN OB_OPEN_REASON Reason,
 {
     UNREFERENCED_PARAMETER(Reason);
     UNREFERENCED_PARAMETER(AccessMode);
-    UNREFERENCED_PARAMETER(Process);
-    UNREFERENCED_PARAMETER(ObjectBody);
     UNREFERENCED_PARAMETER(GrantedAccess);
     UNREFERENCED_PARAMETER(HandleCount);
-    return STATUS_SUCCESS;
+    return ExpCheckWin32ObjectSession(Process, ObjectBody);
 }
 
 static
@@ -250,6 +281,10 @@ ExpDesktopOpen(IN OB_OPEN_REASON Reason,
                IN ULONG HandleCount)
 {
     WIN32_OPENMETHOD_PARAMETERS Parameters;
+    NTSTATUS Status;
+
+    Status = ExpCheckWin32ObjectSession(Process, ObjectBody);
+    if (!NT_SUCCESS(Status)) return Status;
 
     Parameters.OpenReason = Reason;
     Parameters.Process = Process;

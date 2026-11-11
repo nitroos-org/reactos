@@ -1509,6 +1509,16 @@ IntValidateDesktopHandle(
                                        (PVOID*)Object,
                                        NULL);
 
+    /* Only a desktop of the caller's session (its heap and windows are that session's) */
+    if (NT_SUCCESS(Status) && ((*Object)->dwSessionId != PsGetCurrentProcessSessionId()))
+    {
+        ERR("Desktop of session %lu used from session %lu\n",
+            (*Object)->dwSessionId, PsGetCurrentProcessSessionId());
+        ObDereferenceObject(*Object);
+        *Object = NULL;
+        Status = STATUS_ACCESS_DENIED;
+    }
+
     TRACE("IntValidateDesktopHandle: handle:0x%p obj:0x%p access:0x%x Status:0x%lx\n",
           Desktop, *Object, DesiredAccess, Status);
 
