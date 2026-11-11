@@ -159,6 +159,7 @@ SmSendMsgToSm(
         sizeof(SM_LOAD_DEFERED_SUBSYSTEM_MSG),
         sizeof(SM_START_CSR_MSG),
         sizeof(SM_STOP_CSR_MSG),
+        sizeof(SM_FORWARD_PROCESS_REGISTRATION_MSG),
     };
 
     NTSTATUS Status;
@@ -212,8 +213,19 @@ SmSendMsgToSm(
  * An NT status code for the termination.
  *
  * @return
- * Success status as handed by the SM reply; otherwise a failure
- * status code.
+ * The status of sending the message. The SM does not reply: this is
+ * a datagram, see the remarks.
+ *
+ * @remarks
+ * NitroOS. A subsystem server calls this when the last process of a
+ * session goes, from whatever thread and with whatever locks of its
+ * own it holds then. If it waited for the SM, it would need a free SM
+ * API thread, and the SM API threads can all be waiting for that same
+ * server (a forwarded registration, SmForwardProcessRegistration, waits
+ * for the target csrss's Sb thread, and that thread can need a lock the
+ * caller holds): a deadlock of the whole SM API. As a datagram the
+ * message is queued and the caller goes on. The server has nothing to
+ * do with the answer anyway.
  **/
 NTSTATUS
 NTAPI
@@ -237,9 +249,13 @@ SmSessionComplete(
     SessionComplete->SessionId = SessionId;
     SessionComplete->SessionStatus = SessionStatus;
 
-    /* Send the message and wait for a reply */
+    /* Send the message as a datagram, as SmSendMsgToSm sizes it; no reply */
     SmApiMsg.ApiNumber = SmpSessionCompleteApi;
-    return SmSendMsgToSm(SmApiPort, &SmApiMsg);
+    SmApiMsg.h.u2.ZeroInit = 0;
+    SmApiMsg.h.u1.s1.DataLength = (CSHORT)sizeof(SM_SESSION_COMPLETE_MSG) +
+        FIELD_OFFSET(SM_API_MSG, u) - sizeof(SmApiMsg.h);
+    SmApiMsg.h.u1.s1.TotalLength = SmApiMsg.h.u1.s1.DataLength + sizeof(SmApiMsg.h);
+    return NtRequestPort(SmApiPort, &SmApiMsg.h);
 }
 
 /**
@@ -461,5 +477,44 @@ SmStopCsr(
 
     /* Send the message and wait for a reply */
     SmApiMsg.ApiNumber = SmpStopCsrApi;
+    return SmSendMsgToSm(SmApiPort, &SmApiMsg);
+}
+
+/**
+ * @brief
+ * NitroOS: asks SMSS to register a process created into another session
+ * with the csrss of that session. SMSS serves it only for a csrss it
+ * started itself.
+ *
+ * @param[in]   SmApiPort
+ * The SM API port handle of the calling csrss.
+ *
+ * @param[in]   ClientId
+ * The new process and its first thread.
+ *
+ * @param[in]   MuSessionId
+ * The session the process is in.
+ *
+ * @param[in]   Flags
+ * SM_REMOTE_PROCESS_* flags.
+ *
+ * @return
+ * The status of the registration in the target csrss.
+ **/
+NTSTATUS
+NTAPI
+SmForwardProcessRegistration(
+    _In_ HANDLE SmApiPort,
+    _In_ PCLIENT_ID ClientId,
+    _In_ ULONG MuSessionId,
+    _In_ ULONG Flags)
+{
+    SM_API_MSG SmApiMsg = {0};
+
+    SmApiMsg.u.ForwardRegistration.ClientId = *ClientId;
+    SmApiMsg.u.ForwardRegistration.MuSessionId = MuSessionId;
+    SmApiMsg.u.ForwardRegistration.Flags = Flags;
+
+    SmApiMsg.ApiNumber = SmpForwardProcessRegistrationApi;
     return SmSendMsgToSm(SmApiPort, &SmApiMsg);
 }

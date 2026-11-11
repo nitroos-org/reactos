@@ -56,6 +56,7 @@ extern ULONG CsrMaxApiRequestThreads;
 extern HANDLE CsrSmssProcess;
 extern HANDLE CsrSmssProcessId;
 extern LARGE_INTEGER CsrSmssCreateTime;
+extern ULONG CsrKernelSessionId;
 
 /****************************************************/
 extern UNICODE_STRING CsrSbApiPortName;
@@ -238,6 +239,10 @@ CsrSbForeignSessionComplete(IN PSB_API_MSG ApiMessage);
 BOOLEAN
 NTAPI
 CsrSbCreateProcess(IN PSB_API_MSG ApiMessage);
+
+BOOLEAN
+NTAPI
+CsrSbCreateRemoteProcess(IN PSB_API_MSG ApiMessage);
 
 NTSTATUS
 NTAPI
