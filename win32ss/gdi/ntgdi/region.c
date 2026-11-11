@@ -2514,6 +2514,23 @@ IntSysCreateRectpRgn(
     return prgn;
 }
 
+/* The user attribute goes back into the current process's pool; the region keeps a kernel one */
+VOID
+NTAPI
+REGION_vFreeRgnAttr(PREGION prgn)
+{
+    PPROCESSINFO ppi;
+
+    if (prgn->prgnattr == &prgn->rgnattr)
+        return;
+
+    GDIOBJ_vSetObjectAttr(&prgn->BaseObject, NULL);
+    ppi = PsGetCurrentProcessWin32Process();
+    ASSERT(ppi);
+    GdiPoolFree(ppi->pPoolRgnAttr, prgn->prgnattr);
+    prgn->prgnattr = &prgn->rgnattr;
+}
+
 VOID
 NTAPI
 REGION_vCleanup(PVOID ObjectBody)
