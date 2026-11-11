@@ -1815,6 +1815,14 @@ static int __cdecl cmap_header_compare(const void *a, const void *b)
     return 0;
 }
 
+static CRITICAL_SECTION cmap_cs;
+static CRITICAL_SECTION_DEBUG cmap_cs_debug =
+{
+    0, 0, &cmap_cs, { &cmap_cs_debug.ProcessLocksList, &cmap_cs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": cmap_cs") }
+};
+static CRITICAL_SECTION cmap_cs = { &cmap_cs_debug, -1, 0, 0, 0, 0 };
+
 void dwrite_cmap_init(struct dwrite_cmap *cmap, IDWriteFontFile *file, unsigned int face_index,
         DWRITE_FONT_FACE_TYPE face_type)
 {
@@ -1832,6 +1840,8 @@ void dwrite_cmap_init(struct dwrite_cmap *cmap, IDWriteFontFile *file, unsigned 
     };
     const struct cmap_encoding_record *records, *found_record = NULL;
     unsigned int length, offset, format, count, f, i, num_records;
+    IDWriteFontFileStream *stream;
+    const void *data = NULL;
     struct file_stream_desc stream_desc;
     struct dwrite_fonttable table;
     const UINT16 *pair = NULL;
@@ -1839,12 +1849,23 @@ void dwrite_cmap_init(struct dwrite_cmap *cmap, IDWriteFontFile *file, unsigned 
 
     if (cmap->data) return;
 
-    /* For fontface stream is already available and preset. */
-    if (!cmap->stream && FAILED(hr = get_filestream_from_file(file, &cmap->stream)))
+    /* Several threads may ask for the map of a font at once. It is built by one of them, under a lock, and
+     * published by setting the data pointer last: nobody uses a map that is not complete, and the stream is
+     * not overwritten while another thread reads from it. */
+    EnterCriticalSection(&cmap_cs);
+    if (cmap->data)
     {
-        WARN("Failed to get file stream, hr %#lx.\n", hr);
+        LeaveCriticalSection(&cmap_cs);
+        return;
+    }
+
+    /* For fontface stream is already available and preset. */
+    if (!(stream = cmap->stream) && (!file || FAILED(hr = get_filestream_from_file(file, &stream))))
+    {
+        WARN("Failed to get file stream.\n");
         goto failed;
     }
+    cmap->stream = stream;
 
     stream_desc.stream = cmap->stream;
     stream_desc.face_type = face_type;
@@ -1880,7 +1901,7 @@ void dwrite_cmap_init(struct dwrite_cmap *cmap, IDWriteFontFile *file, unsigned 
     switch (format)
     {
         case 0:
-            cmap->data = table_read_ensure(&table, offset + 6, 256);
+            data = table_read_ensure(&table, offset + 6, 256);
             cmap->get_glyph = opentype_cmap_format0_get_glyph;
             cmap->get_ranges = opentype_cmap_format0_get_ranges;
             break;
@@ -1891,7 +1912,7 @@ void dwrite_cmap_init(struct dwrite_cmap *cmap, IDWriteFontFile *file, unsigned 
             cmap->u.format4.starts = cmap->u.format4.ends + count + 1;
             cmap->u.format4.id_delta = cmap->u.format4.starts + count;
             cmap->u.format4.id_range_offset = cmap->u.format4.id_delta + count;
-            cmap->u.format4.glyph_id_array = cmap->data = cmap->u.format4.id_range_offset + count;
+            cmap->u.format4.glyph_id_array = data = cmap->u.format4.id_range_offset + count;
             cmap->u.format4.glyph_id_array_len = (length - 16 - 8 * count) / 2;
             cmap->get_glyph = opentype_cmap_format4_get_glyph;
             cmap->get_ranges = opentype_cmap_format4_get_ranges;
@@ -1903,14 +1924,14 @@ void dwrite_cmap_init(struct dwrite_cmap *cmap, IDWriteFontFile *file, unsigned 
             cmap->u.format6_10.first = table_read_be_word(&table, offset + f * 6);
             count = table_read_be_word(&table, offset + f * 8);
             cmap->u.format6_10.last = cmap->u.format6_10.first + count;
-            cmap->data = table_read_ensure(&table, offset + f * 10, count * 2);
+            data = table_read_ensure(&table, offset + f * 10, count * 2);
             cmap->get_glyph = opentype_cmap_format6_10_get_glyph;
             cmap->get_ranges = opentype_cmap_format6_10_get_ranges;
             break;
         case 12:
         case 13:
             cmap->u.format12_13.group_count = count = table_read_be_dword(&table, offset + 12);
-            cmap->data = table_read_ensure(&table, offset + 16, count * 3 * 4);
+            data = table_read_ensure(&table, offset + 16, count * 3 * 4);
             cmap->get_glyph = format == 12 ? opentype_cmap_format12_get_glyph : opentype_cmap_format13_get_glyph;
             cmap->get_ranges = opentype_cmap_format12_13_get_ranges;
             break;
@@ -1920,13 +1941,16 @@ void dwrite_cmap_init(struct dwrite_cmap *cmap, IDWriteFontFile *file, unsigned 
 
 failed:
 
-    if (!cmap->data)
+    if (!data)
     {
         /* Dummy implementation, returns 0 unconditionally. */
-        cmap->data = cmap;
+        data = cmap;
         cmap->get_glyph = opentype_cmap_dummy_get_glyph;
         cmap->get_ranges = opentype_cmap_dummy_get_ranges;
     }
+    MemoryBarrier();
+    cmap->data = data;
+    LeaveCriticalSection(&cmap_cs);
 }
 
 void dwrite_cmap_release(struct dwrite_cmap *cmap)
