@@ -60,6 +60,10 @@
  * fine for now but it does need to be fixed later when we
  * add support for other transport mediums */
 #define TCP_MSS                         1460
+/* The loopback interface has an MTU of 16384: its connections use segments of 16344 bytes instead of
+ * 11 segments of 1460 (each one a packet, a work item and an acknowledgement). An Ethernet connection
+ * is still cut to its MTU (tcp_eff_send_mss_netif) */
+#define TCP_MSS_LIMIT                   16344
 
 /* The receive window is per connection (tcp_pcb.rcv_wnd_max). A connection starts with
  * TCP_WND_DEFAULT (what the SYN can announce); once AFD owns it, LibTCPSetReceiveWindow gives it the
@@ -101,4 +105,10 @@
 /**
  * TCP_DEBUG: Enable debugging for TCP.
  */
+/* The debug checks walk every TCP control block on each segment and each removal (tcp_pcbs_sane);
+ * with thousands of connections in TIME-WAIT they slowed the connect rate of a loop to a fifth */
+#if DBG
 #define TCP_DEBUG                       LWIP_DBG_ON
+#else
+#define TCP_DEBUG                       LWIP_DBG_OFF
+#endif

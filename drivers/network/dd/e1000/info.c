@@ -124,8 +124,13 @@ MiniportQueryInformation(
     case OID_GEN_TRANSMIT_BLOCK_SIZE:
     case OID_GEN_CURRENT_LOOKAHEAD:
     case OID_GEN_MAXIMUM_LOOKAHEAD:
-    case OID_GEN_MAXIMUM_FRAME_SIZE:
         GenericInfo.Ulong = MAXIMUM_FRAME_SIZE - sizeof(ETH_HEADER);
+        break;
+
+    case OID_GEN_MAXIMUM_FRAME_SIZE:
+        /* The largest network-layer packet: 1500 for Ethernet. MAXIMUM_FRAME_SIZE (1522) is the whole
+           frame with a VLAN tag, so subtracting the 14 byte header gave 1508 and TCP announced MSS 1468 */
+        GenericInfo.Ulong = 1500;
         break;
 
     case OID_802_3_MULTICAST_LIST:
