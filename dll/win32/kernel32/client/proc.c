@@ -11,6 +11,7 @@
 /* INCLUDES ****************************************************************/
 
 #include <k32.h>
+#include <ndk/sefuncs.h>
 #include "pseudoconsole.h"
 #ifdef SYSWOW64_GUEST
 #include <reactos/wow64process.h>
@@ -2937,7 +2938,13 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     PBASE_PSEUDOCONSOLE PseudoConsole = NULL;
     PHANDLE KernelHandleList = NULL, ConsoleHandleList = NULL;
     SIZE_T KernelHandleCount = 0, ConsoleHandleCount = 0;
-    ROS_PS_ATTRIBUTE_LIST NativeAttributes;
+    struct
+    {
+        SIZE_T TotalLength;
+        ROS_PS_ATTRIBUTE Attributes[ROS_PS_MAX_ATTRIBUTES];
+    } NativeAttributes;
+    ULONG NativeAttributeCount = 0, TokenSession = 0, TokenSessionLength;
+    BOOLEAN UseTokenSession = FALSE;
     PRTL_USER_PROCESS_PARAMETERS ProcessParameters;
     UNICODE_STRING DebuggerString;
     BOOL Result;
@@ -4744,12 +4751,32 @@ StartScan:
                 goto Quickie;
             }
         }
-        NativeAttributes.TotalLength = sizeof(NativeAttributes);
         NativeAttributes.Attributes[0].Attribute = ROS_PS_ATTRIBUTE_HANDLE_LIST;
         NativeAttributes.Attributes[0].Size = KernelHandleCount * sizeof(HANDLE);
         NativeAttributes.Attributes[0].ValuePtr = KernelHandleList;
         NativeAttributes.Attributes[0].ReturnLength = NULL;
+        NativeAttributeCount = 1;
     }
+
+    /*
+     * A user token of another session than ours (CreateProcessAsUser): the process is created in that
+     * session. The kernel allows it only to a caller holding SeTcbPrivilege; for any other caller the
+     * process is created in our session, as before.
+     */
+    if (hUserToken &&
+        NT_SUCCESS(NtQueryInformationToken(hUserToken, TokenSessionId, &TokenSession,
+                                           sizeof(TokenSession), &TokenSessionLength)) &&
+        (TokenSession != NtCurrentPeb()->SessionId))
+    {
+        NativeAttributes.Attributes[NativeAttributeCount].Attribute = ROS_PS_ATTRIBUTE_SESSION_ID;
+        NativeAttributes.Attributes[NativeAttributeCount].Size = sizeof(TokenSession);
+        NativeAttributes.Attributes[NativeAttributeCount].ValuePtr = &TokenSession;
+        NativeAttributes.Attributes[NativeAttributeCount].ReturnLength = NULL;
+        NativeAttributeCount++;
+        UseTokenSession = TRUE;
+    }
+    NativeAttributes.TotalLength = FIELD_OFFSET(ROS_PS_ATTRIBUTE_LIST, Attributes) +
+                                   NativeAttributeCount * sizeof(ROS_PS_ATTRIBUTE);
 
     /* Check if the process should be created with large pages */
     HavePrivilege = FALSE;
@@ -4769,12 +4796,41 @@ StartScan:
     /* Save the current TIB value since kernel overwrites it to store PEB */
     TibValue = Teb->NtTib.ArbitraryUserPointer;
 
-    if (KernelHandleList)
+    if (NativeAttributeCount)
     {
         Status = NtCreateProcessWithAttributes(&ProcessHandle, PROCESS_ALL_ACCESS_NT6,
                                                ObjectAttributes, NtCurrentProcess(),
                                                Flags, SectionHandle, DebugHandle,
-                                               NULL, InJob, &NativeAttributes);
+                                               NULL, InJob,
+                                               (PROS_PS_ATTRIBUTE_LIST)&NativeAttributes);
+
+        /* Not allowed to pick the session: in ours, as before (without the session attribute) */
+        if ((Status == STATUS_PRIVILEGE_NOT_HELD) && UseTokenSession)
+        {
+            NativeAttributeCount--;
+            if (NativeAttributeCount)
+            {
+                NativeAttributes.TotalLength = FIELD_OFFSET(ROS_PS_ATTRIBUTE_LIST, Attributes) +
+                                               NativeAttributeCount * sizeof(ROS_PS_ATTRIBUTE);
+                Status = NtCreateProcessWithAttributes(&ProcessHandle, PROCESS_ALL_ACCESS_NT6,
+                                                       ObjectAttributes, NtCurrentProcess(),
+                                                       Flags, SectionHandle, DebugHandle,
+                                                       NULL, InJob,
+                                                       (PROS_PS_ATTRIBUTE_LIST)&NativeAttributes);
+            }
+            else
+            {
+                Status = NtCreateProcessEx(&ProcessHandle,
+                                           PROCESS_ALL_ACCESS_NT6,
+                                           ObjectAttributes,
+                                           NtCurrentProcess(),
+                                           Flags,
+                                           SectionHandle,
+                                           DebugHandle,
+                                           NULL,
+                                           InJob);
+            }
+        }
     }
     else
     {

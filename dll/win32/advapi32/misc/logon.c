@@ -9,6 +9,18 @@
 #include <advapi32.h>
 WINE_DEFAULT_DEBUG_CHANNEL(advapi);
 
+/* kernel32 */
+BOOL WINAPI CreateProcessInternalA(HANDLE hUserToken, LPCSTR lpApplicationName, LPSTR lpCommandLine,
+                                   LPSECURITY_ATTRIBUTES lpProcessAttributes, LPSECURITY_ATTRIBUTES lpThreadAttributes,
+                                   BOOL bInheritHandles, DWORD dwCreationFlags, LPVOID lpEnvironment,
+                                   LPCSTR lpCurrentDirectory, LPSTARTUPINFOA lpStartupInfo,
+                                   LPPROCESS_INFORMATION lpProcessInformation, PHANDLE hNewToken);
+BOOL WINAPI CreateProcessInternalW(HANDLE hUserToken, LPCWSTR lpApplicationName, LPWSTR lpCommandLine,
+                                   LPSECURITY_ATTRIBUTES lpProcessAttributes, LPSECURITY_ATTRIBUTES lpThreadAttributes,
+                                   BOOL bInheritHandles, DWORD dwCreationFlags, LPVOID lpEnvironment,
+                                   LPCWSTR lpCurrentDirectory, LPSTARTUPINFOW lpStartupInfo,
+                                   LPPROCESS_INFORMATION lpProcessInformation, PHANDLE hNewToken);
+
 /* GLOBALS *****************************************************************/
 
 static const CHAR AdvapiTokenSourceName[] = "Advapi  ";
@@ -1148,19 +1160,21 @@ CreateProcessAsUserA(
         debugstr_a(lpCommandLine), lpProcessAttributes, lpThreadAttributes, bInheritHandles,
         dwCreationFlags, lpEnvironment, debugstr_a(lpCurrentDirectory), lpStartupInfo, lpProcessInformation);
 
-    /* Create the process with a suspended main thread */
-    if (!CreateProcessA(lpApplicationName,
-                        lpCommandLine,
-                        lpProcessAttributes,
-                        lpThreadAttributes,
-                        bInheritHandles,
-                        dwCreationFlags | CREATE_SUSPENDED,
-                        lpEnvironment,
-                        lpCurrentDirectory,
-                        lpStartupInfo,
-                        lpProcessInformation))
+    /* Create the process with a suspended main thread, in the token's session (see CreateProcessAsUserW) */
+    if (!CreateProcessInternalA(hToken,
+                                lpApplicationName,
+                                lpCommandLine,
+                                lpProcessAttributes,
+                                lpThreadAttributes,
+                                bInheritHandles,
+                                dwCreationFlags | CREATE_SUSPENDED,
+                                lpEnvironment,
+                                lpCurrentDirectory,
+                                lpStartupInfo,
+                                lpProcessInformation,
+                                NULL))
     {
-        ERR("CreateProcessA failed, last error: %d\n", GetLastError());
+        ERR("CreateProcessInternalA failed, last error: %d\n", GetLastError());
         return FALSE;
     }
 
@@ -1196,19 +1210,24 @@ CreateProcessAsUserW(
         debugstr_w(lpCommandLine), lpProcessAttributes, lpThreadAttributes, bInheritHandles,
         dwCreationFlags, lpEnvironment, debugstr_w(lpCurrentDirectory), lpStartupInfo, lpProcessInformation);
 
-    /* Create the process with a suspended main thread */
-    if (!CreateProcessW(lpApplicationName,
-                        lpCommandLine,
-                        lpProcessAttributes,
-                        lpThreadAttributes,
-                        bInheritHandles,
-                        dwCreationFlags | CREATE_SUSPENDED,
-                        lpEnvironment,
-                        lpCurrentDirectory,
-                        lpStartupInfo,
-                        lpProcessInformation))
+    /*
+     * Create the process with a suspended main thread. The token goes to kernel32 so that the process is
+     * created in the token's session (NitroSessions); it is given the token below.
+     */
+    if (!CreateProcessInternalW(hToken,
+                                lpApplicationName,
+                                lpCommandLine,
+                                lpProcessAttributes,
+                                lpThreadAttributes,
+                                bInheritHandles,
+                                dwCreationFlags | CREATE_SUSPENDED,
+                                lpEnvironment,
+                                lpCurrentDirectory,
+                                lpStartupInfo,
+                                lpProcessInformation,
+                                NULL))
     {
-        ERR("CreateProcessW failed, last error: %d\n", GetLastError());
+        ERR("CreateProcessInternalW failed, last error: %d\n", GetLastError());
         return FALSE;
     }
 
