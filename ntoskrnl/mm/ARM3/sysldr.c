@@ -2999,6 +2999,17 @@ MiSetSystemCodeProtection(
 
         /* Update the protection */
         TempPte.u.Hard.Write = BooleanFlagOn(Protection, IMAGE_SCN_MEM_WRITE);
+#if defined(_M_IX86) || defined(_M_AMD64)
+        /* On an SMP kernel Write is a software bit: the CPU follows the hardware one */
+        if (Protection & IMAGE_SCN_MEM_WRITE)
+        {
+            MI_MAKE_WRITE_PAGE(&TempPte);
+        }
+        else
+        {
+            MI_MAKE_READ_ONLY_PAGE(&TempPte);
+        }
+#endif
 #if _MI_HAS_NO_EXECUTE
         TempPte.u.Hard.NoExecute = !BooleanFlagOn(Protection, IMAGE_SCN_MEM_EXECUTE);
 #endif

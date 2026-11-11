@@ -116,6 +116,12 @@
 #else
 #define MI_MAKE_WRITE_PAGE(x)      ((x)->u.Hard.Writable = 1)
 #endif
+/* Clears the bit the CPU checks (on an SMP kernel Write is a software bit) */
+#if !defined(CONFIG_SMP)
+#define MI_MAKE_READ_ONLY_PAGE(x)  ((x)->u.Hard.Write = 0)
+#else
+#define MI_MAKE_READ_ONLY_PAGE(x)  ((x)->u.Hard.Writable = 0)
+#endif
 
 /* Macros to identify the page fault reason from the error code */
 #define MI_IS_NOT_PRESENT_FAULT(FaultCode)  !BooleanFlagOn(FaultCode, 0x00000001)

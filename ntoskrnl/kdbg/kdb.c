@@ -200,13 +200,21 @@ KdbpOverwriteInstruction(
     PEPROCESS CurrentProcess = PsGetCurrentProcess();
     KAPC_STATE ApcState;
 
-    /* Get the protection for the address. */
-    Protect = MmGetPageProtect(Process, (PVOID)PAGE_ROUND_DOWN(Address));
+    /* Get the protection for the address (kernel addresses belong to no process). */
+    Protect = MmGetPageProtect((Address >= (ULONG_PTR)MmSystemRangeStart) ? NULL : Process,
+                               (PVOID)PAGE_ROUND_DOWN(Address));
 
     /* Return if that page isn't present. */
     if (Protect & PAGE_NOACCESS)
     {
         return STATUS_MEMORY_NOT_ALLOCATED;
+    }
+
+    /* Kernel code is write-protected in hardware and MmSetPageProtect only handles user pages:
+     * leave the protection alone, KdbpSafeWriteMemory writes through a physical alias. */
+    if (Address >= (ULONG_PTR)MmSystemRangeStart)
+    {
+        Protect &= ~(PAGE_READONLY|PAGE_EXECUTE|PAGE_EXECUTE_READ);
     }
 
     /* Attach to the process */
