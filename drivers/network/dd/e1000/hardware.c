@@ -617,6 +617,8 @@ NICEnableTxRx(
     /* Receive descriptor tail / head */
     E1000WriteUlong(Adapter, E1000_REG_RDH, 0);
     E1000WriteUlong(Adapter, E1000_REG_RDT, NUM_RECEIVE_DESCRIPTORS - 1);
+    Adapter->ReceiveTail = NUM_RECEIVE_DESCRIPTORS - 1;
+    Adapter->ReceiveTailWritten = NUM_RECEIVE_DESCRIPTORS - 1;
 
     /* Set up interrupt timers */
     E1000WriteUlong(Adapter, E1000_REG_RADV, 96);
