@@ -1336,6 +1336,15 @@
 #endif
 
 /**
+ * TCP_MSS_LIMIT: the largest MSS a connection may use or announce (default is TCP_MSS).
+ * tcp_eff_send_mss_netif() still cuts it to the MTU of the interface a connection uses,
+ * so only an interface with an MTU above TCP_MSS + 40 gets segments above TCP_MSS.
+ */
+#if !defined TCP_MSS_LIMIT || defined __DOXYGEN__
+#define TCP_MSS_LIMIT                   TCP_MSS
+#endif
+
+/**
  * TCP_CALCULATE_EFF_SEND_MSS: "The maximum size of a segment that TCP really
  * sends, the 'effective send MSS,' MUST be the smaller of the send MSS (which
  * reflects the available reassembly buffer size at the remote host) and the
