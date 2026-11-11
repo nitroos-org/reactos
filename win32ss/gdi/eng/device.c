@@ -13,6 +13,8 @@
 DBG_DEFAULT_CHANNEL(EngDev);
 
 static PGRAPHICS_DEVICE gpPrimaryGraphicsDevice;
+BOOLEAN gbHeadlessSession;
+PGRAPHICS_DEVICE gpHeadlessGraphicsDevice;
 static PGRAPHICS_DEVICE gpVgaGraphicsDevice;
 
 static PGRAPHICS_DEVICE gpGraphicsDeviceFirst = NULL;
@@ -96,6 +98,66 @@ EngpHasVgaDriver(
 
     /* Device is using VGA driver if service name is 'VGASave' (case insensitive) */
     return (_wcsicmp(awcServiceName, L"VGASave") == 0);
+}
+
+static VOID EngpLinkGraphicsDevice(_In_ PGRAPHICS_DEVICE pToAdd);
+
+/*
+ * The virtual graphics device of a session without the console (NitroSessions): no device object, the
+ * built-in headless driver, one mode. It is the primary device of the session.
+ */
+static
+NTSTATUS
+EngpRegisterHeadlessGraphicsDevice(VOID)
+{
+    static const WCHAR Drivers[] = L"headless\0";
+    static const WCHAR Description[] = L"Headless display";
+    PGRAPHICS_DEVICE pGraphicsDevice;
+    PDEVMODEINFO pdminfo;
+    PWSTR pwsz;
+
+    if (gpHeadlessGraphicsDevice)
+        return STATUS_SUCCESS;
+
+    pGraphicsDevice = ExAllocatePoolZero(PagedPool, sizeof(GRAPHICS_DEVICE), GDITAG_GDEVICE);
+    pwsz = ExAllocatePoolWithTag(PagedPool, sizeof(Drivers) + sizeof(Description), GDITAG_DRVSUP);
+    pdminfo = ExAllocatePoolZero(PagedPool, FIELD_OFFSET(DEVMODEINFO, adevmode) + sizeof(DEVMODEW), GDITAG_DEVMODE);
+    if (pGraphicsDevice) pGraphicsDevice->pDevModeList = ExAllocatePoolZero(PagedPool, sizeof(DEVMODEENTRY), GDITAG_GDEVICE);
+    if (!pGraphicsDevice || !pwsz || !pdminfo || !pGraphicsDevice->pDevModeList)
+    {
+        if (pGraphicsDevice && pGraphicsDevice->pDevModeList) ExFreePoolWithTag(pGraphicsDevice->pDevModeList, GDITAG_GDEVICE);
+        if (pGraphicsDevice) ExFreePoolWithTag(pGraphicsDevice, GDITAG_GDEVICE);
+        if (pwsz) ExFreePoolWithTag(pwsz, GDITAG_DRVSUP);
+        if (pdminfo) ExFreePoolWithTag(pdminfo, GDITAG_DEVMODE);
+        return STATUS_NO_MEMORY;
+    }
+
+    RtlStringCbCopyW(pGraphicsDevice->szNtDeviceName, sizeof(pGraphicsDevice->szNtDeviceName), L"\\Device\\Headless");
+    RtlStringCbPrintfW(pGraphicsDevice->szWinDeviceName, sizeof(pGraphicsDevice->szWinDeviceName),
+                       L"\\\\.\\DISPLAY%d", (int)giDevNum);
+    RtlCopyMemory(pwsz, Drivers, sizeof(Drivers));
+    RtlCopyMemory(pwsz + RTL_NUMBER_OF(Drivers), Description, sizeof(Description));
+    pGraphicsDevice->pDiplayDrivers = pwsz;
+    pGraphicsDevice->pwszDescription = pwsz + RTL_NUMBER_OF(Drivers);
+
+    /* The mode list: one mode, no driver to ask */
+    pdminfo->cbdevmode = sizeof(DEVMODEW);
+    HeadlessFillMode(pdminfo->adevmode);
+    pGraphicsDevice->pdevmodeInfo = pdminfo;
+    pGraphicsDevice->cDevModes = 1;
+    pGraphicsDevice->pDevModeList[0].pdm = pdminfo->adevmode;
+    pGraphicsDevice->StateFlags = DISPLAY_DEVICE_PRIMARY_DEVICE;
+
+    EngAcquireSemaphore(ghsemGraphicsDeviceList);
+    EngpLinkGraphicsDevice(pGraphicsDevice);
+    giDevNum++;
+    gpPrimaryGraphicsDevice = pGraphicsDevice;
+    gpHeadlessGraphicsDevice = pGraphicsDevice;
+    EngReleaseSemaphore(ghsemGraphicsDeviceList);
+
+    ERR("Session %lu has no console: display in memory (%ux%u)\n",
+        PsGetCurrentProcessSessionId(), pdminfo->adevmode->dmPelsWidth, pdminfo->adevmode->dmPelsHeight);
+    return STATUS_SUCCESS;
 }
 
 /*
@@ -189,6 +251,10 @@ EngpUpdateGraphicsDeviceList(VOID)
     PGRAPHICS_DEVICE pGraphicsDevice, pNewPrimaryGraphicsDevice = NULL;
     ULONG cbValue;
     HKEY hkey;
+
+    /* A session without the console: one virtual device, and no video device */
+    if (gbHeadlessSession)
+        return EngpRegisterHeadlessGraphicsDevice();
 
     /* Open the key for the adapters */
     Status = RegOpenKey(L"\\Registry\\Machine\\HARDWARE\\DEVICEMAP\\VIDEO", &hkey);

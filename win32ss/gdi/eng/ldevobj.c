@@ -751,6 +751,18 @@ LDEVOBJ_bProbeAndCaptureDevmode(
     if (!LDEVOBJ_bBuildDevmodeList(pGraphicsDevice))
         return FALSE;
 
+    /* The headless device has one mode and no registry settings */
+    if (pGraphicsDevice == gpHeadlessGraphicsDevice)
+    {
+        pdmSelected = pGraphicsDevice->pDevModeList[0].pdm;
+        pdm = ExAllocatePoolZero(PagedPool, pdmSelected->dmSize + pdmSelected->dmDriverExtra, GDITAG_DEVMODE);
+        if (!pdm)
+            return FALSE;
+        RtlCopyMemory(pdm, pdmSelected, pdmSelected->dmSize + pdmSelected->dmDriverExtra);
+        *pSelectedMode = pdm;
+        return TRUE;
+    }
+
     /* At first, load information from registry */
     RtlZeroMemory(&dmSearch, sizeof(dmSearch));
     Status = EngpGetDisplayDriverParameters(pGraphicsDevice, &dmSearch);

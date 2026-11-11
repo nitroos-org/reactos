@@ -347,7 +347,8 @@ ProcessDeviceChanges(
     AcquireDeviceInfoListMutex();
     for (DeviceInfo = gpInputDeviceInfo; DeviceInfo; DeviceInfo = DeviceInfo->pNextDeviceInfo)
     {
-        if (!DeviceInfo->Handle)
+        /* A session without the console reads no keyboard or mouse */
+        if (!DeviceInfo->Handle && !gbHeadlessSession)
         {
             Status = OpenInputDevice(DeviceInfo);
             if (NT_SUCCESS(Status))
@@ -554,7 +555,9 @@ RawInputThreadMain(VOID)
     {
         DeviceInfo = gpInputDeviceInfo;
         gpInputDeviceInfo = DeviceInfo->pNextDeviceInfo;
-        CloseInputDevice(DeviceInfo);
+        /* A device is not opened in a session without the console */
+        if (DeviceInfo->Handle)
+            CloseInputDevice(DeviceInfo);
         ExFreePoolWithTag(DeviceInfo, USERTAG_PNP);
     }
     gpInputDeviceInfo = NULL;
