@@ -65,7 +65,7 @@ bool kshim_sb_dirty(struct super_block *sb);
 int kshim_mapping_writeback(struct address_space *m);
 bool kshim_mapping_dirty(struct address_space *m);
 void kshim_mapping_update(struct address_space *m, loff_t pos, const void *buf, size_t len);
-extern unsigned long kshim_counter_writes, kshim_counter_syncs, kshim_counter_dirty;
+extern unsigned long kshim_counter_writes, kshim_counter_syncs, kshim_counter_sync_skips, kshim_counter_dirty;
 extern unsigned long long kshim_counter_write_bytes;
 extern bool (*kshim_is_data_inode)(struct inode *i);
 extern bool (*kshim_icache_ok)(struct inode *i);
@@ -2995,11 +2995,12 @@ static int ngc_set_info_impl(ngc_vol *v, ngc_node *n, const long long times[4], 
 	return 0;
 }
 
-void ngc_write_stats(unsigned long *writes, unsigned long long *bytes, unsigned long *syncs, unsigned long *dirties)
+void ngc_write_stats(unsigned long *writes, unsigned long long *bytes, unsigned long *syncs, unsigned long *skips, unsigned long *dirties)
 {
 	*writes = kshim_counter_writes;
 	*bytes = kshim_counter_write_bytes;
 	*syncs = kshim_counter_syncs;
+	*skips = kshim_counter_sync_skips;
 	*dirties = kshim_counter_dirty;
 }
 

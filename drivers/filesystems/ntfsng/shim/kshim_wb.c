@@ -10,6 +10,51 @@
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len);
 int kshim_inodes_snapshot(struct super_block *sb, struct inode ***out);
 bool kshim_sb_dirty(struct super_block *sb);
+extern unsigned long long kshim_dirty_gen;
+bool kshim_sb_dirty_full(struct super_block *sb);
+
+static unsigned long long kshim_dirty_gen_read(void)
+{
+	return __atomic_load_n(&kshim_dirty_gen, __ATOMIC_SEQ_CST);
+}
+
+/* True when nothing was made dirty since a scan of @sb found everything clean. */
+static bool kshim_sb_known_clean(struct super_block *sb)
+{
+	return sb->kshim_clean_valid && sb->kshim_clean_gen == kshim_dirty_gen_read();
+}
+
+#if DBG
+/*
+ * Checked builds: a sync that skips its scan must be right.  Run the scan anyway (kshim_sb_dirty_full, which
+ * reads the folios and inode states, not the hints) and require it to find nothing.  Dirt found while the
+ * dirty generation is still the recorded one is a dirtying that never announced itself: that is the bug this
+ * check exists for (stage NGP_SKIP_WRONG, then BUG).  A short wait lets a dirtier that is between setting the
+ * state and bumping finish; if the generation moved, the dirtying was announced after the skip decision:
+ * the skip was correct at its linearisation point, counted as NGP_SKIP_RACED.
+ */
+static void kshim_check_skip(struct super_block *sb)
+{
+	unsigned long long g = sb->kshim_clean_gen;
+	ngos_prof(NGP_SKIP_TAKEN, ngos_ticks(), 0);
+	if (!kshim_sb_dirty_full(sb)) {
+		ngos_prof(NGP_SKIP_CHECKED, ngos_ticks(), 0);
+		return;
+	}
+	for (int k = 0; k < 100000; k++) {
+		if (kshim_dirty_gen_read() != g) {
+			ngos_prof(NGP_SKIP_RACED, ngos_ticks(), 0);
+			return;
+		}
+		__asm__ __volatile__("pause" ::: "memory");
+	}
+	ngos_prof(NGP_SKIP_WRONG, ngos_ticks(), 0);
+	printk(KERN_ERR "kshim_sync skipped its scan (generation %llu) but something is dirty: a dirtying did not bump the generation\n", g);
+	BUG();
+}
+#else
+#define kshim_check_skip(sb) do { } while (0)
+#endif
 
 static int cmp_folio(const void *a, const void *b)
 {
@@ -140,8 +185,10 @@ int write_inode_now(struct inode *i, int sync)
 	struct writeback_control wbc = { .sync_mode = sync ? WB_SYNC_ALL : WB_SYNC_NONE };
 	int err = kshim_mapping_writeback(i->i_mapping), e2;
 	i->i_state &= ~I_DIRTY_PAGES;
-	if (kshim_mapping_dirty(i->i_mapping))
+	if (kshim_mapping_dirty(i->i_mapping)) {
 		i->i_state |= I_DIRTY_PAGES;
+		kshim_dirty_bump();
+	}
 	if (i->i_state & (I_DIRTY_SYNC | I_DIRTY_DATASYNC)) {
 		i->i_state &= ~(I_DIRTY_SYNC | I_DIRTY_DATASYNC);
 		if (i->i_sb->s_op->write_inode) {
@@ -178,13 +225,19 @@ int kshim_blkdev_writepages(struct address_space *m, struct writeback_control *w
  * pass finds nothing (writing one inode can dirty another: index entries, bitmaps, $MFT).
  * Returns the first writeback error, or -EAGAIN when 8 passes still found work.
  */
-unsigned long kshim_counter_syncs;
+unsigned long kshim_counter_syncs, kshim_counter_sync_skips;
 int kshim_sync(struct super_block *sb)
 {
 	int pass, err = 0, any = 1;
 	kshim_counter_syncs++;
+	if (kshim_sb_known_clean(sb)) {
+		kshim_counter_sync_skips++;
+		kshim_check_skip(sb);
+		return 0;
+	}
 	for (pass = 0; pass < 8 && any; pass++) {
 		struct inode **v;
+		unsigned long long gen = kshim_dirty_gen_read();
 		int n = kshim_inodes_snapshot(sb, &v);
 		any = 0;
 		if (n < 0)
@@ -209,6 +262,11 @@ int kshim_sync(struct super_block *sb)
 		}
 		if (err)
 			break;
+		if (!any) {
+			/* This pass found nothing dirty: so would every sync until something is dirtied again. */
+			sb->kshim_clean_gen = gen;
+			sb->kshim_clean_valid = 1;
+		}
 	}
 	if (!err && any && kshim_sb_dirty(sb))
 		err = -EAGAIN;
@@ -220,7 +278,13 @@ bool kshim_sb_dirty(struct super_block *sb)
 {
 	struct inode **v;
 	bool d = false;
-	int n = kshim_inodes_snapshot(sb, &v);
+	unsigned long long gen = kshim_dirty_gen_read();
+	int n;
+	if (kshim_sb_known_clean(sb)) {
+		kshim_check_skip(sb);
+		return false;
+	}
+	n = kshim_inodes_snapshot(sb, &v);
 	if (n < 0)
 		return true;
 	for (int k = 0; k < n; k++)
@@ -229,7 +293,12 @@ bool kshim_sb_dirty(struct super_block *sb)
 	for (int k = 0; k < n; k++)
 		iput(v[k]);
 	kfree(v);
-	return d || kshim_mapping_dirty(sb->s_bdev->bd_mapping);
+	d = d || kshim_mapping_dirty(sb->s_bdev->bd_mapping);
+	if (!d) {
+		sb->kshim_clean_gen = gen;
+		sb->kshim_clean_valid = 1;
+	}
+	return d;
 }
 
 void sync_inodes_sb(struct super_block *sb) { kshim_sync(sb); }

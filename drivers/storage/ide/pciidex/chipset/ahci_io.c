@@ -338,23 +338,37 @@ AtaAhciPortCompleteCommands(
     }
 }
 
+/*
+ * The events of a successful command: register or Set Device Bits FIS received, PIO setup, DMA setup,
+ * descriptor processed. Any other bit is an error or a port status change, and may come with SError bits set.
+ */
+#define AHCI_PXIRQ_COMMAND_EVENTS \
+    (AHCI_PXIRQ_DHRS | AHCI_PXIRQ_PSS | AHCI_PXIRQ_DSS | AHCI_PXIRQ_SDBS | AHCI_PXIRQ_DPS)
+
 static
 VOID
-AtaAhciPortHandleInterrupt(
-    _In_ PCHANNEL_DATA_AHCI ChanData)
+AtaAhciPortHandleEvents(
+    _In_ PCHANNEL_DATA_AHCI ChanData,
+    _In_ ULONG InterruptStatus)
 {
-    ULONG InterruptStatus, CommandsIssued, CommandsCompleted;
+    ULONG CommandsIssued, CommandsCompleted;
     AHCI_PORT_REGISTER CommandRegister;
 
     /* Clear all pending events */
-    InterruptStatus = AHCI_PORT_READ(ChanData->IoBase, PxInterruptStatus);
     AHCI_PORT_WRITE(ChanData->IoBase, PxInterruptStatus, InterruptStatus);
 
     TRACE("CH %lu: Intr %08lx\n", ChanData->Channel, InterruptStatus);
 
-    /* Clear interface errors */
-    AHCI_PORT_WRITE(ChanData->IoBase, PxSataError,
-                    AHCI_PORT_READ(ChanData->IoBase, PxSataError));
+    /*
+     * Clear interface errors. The SError bits that raise an interrupt come with a port status or error bit
+     * (PCS is DIAG.X, PRCS is DIAG.N), so a plain command completion does not need the two register accesses.
+     * Errors that raise no interrupt stay recorded until the next error or status event clears them.
+     */
+    if (InterruptStatus & ~AHCI_PXIRQ_COMMAND_EVENTS)
+    {
+        AHCI_PORT_WRITE(ChanData->IoBase, PxSataError,
+                        AHCI_PORT_READ(ChanData->IoBase, PxSataError));
+    }
 
     /* Determine commands that have completed */
     if (ChanData->ActiveQueuedSlotsBitmap != 0)
@@ -374,8 +388,12 @@ AtaAhciPortHandleInterrupt(
         ChanData->PortNotification(AtaRequestComplete, ChanData->PortContext, CommandsCompleted);
     }
 
-    /* Asynchronous notification received */
-    if (InterruptStatus & AHCI_PXIRQ_SDBS)
+    /*
+     * Asynchronous notification received. PxSNTF is a reserved register when the HBA does not
+     * advertise it, so a Set Device Bits FIS (every NCQ completion) needs no access to it then.
+     */
+    if ((InterruptStatus & AHCI_PXIRQ_SDBS) &&
+        (ChanData->Controller->AhciCapabilities & AHCI_CAP_SSNTF))
     {
         ULONG Message = AHCI_PORT_READ(ChanData->IoBase, PxSataNotification);
 
@@ -401,6 +419,14 @@ AtaAhciPortHandleInterrupt(
     }
 }
 
+static
+VOID
+AtaAhciPortHandleInterrupt(
+    _In_ PCHANNEL_DATA_AHCI ChanData)
+{
+    AtaAhciPortHandleEvents(ChanData, AHCI_PORT_READ(ChanData->IoBase, PxInterruptStatus));
+}
+
 BOOLEAN
 NTAPI
 AtaAhciHbaIsr(
@@ -409,6 +435,51 @@ AtaAhciHbaIsr(
 {
     PATA_CONTROLLER Controller = Context;
     ULONG Port, InterruptStatus, PortInterruptBitmap;
+
+    /*
+     * Fast path for a level-triggered line: when exactly one port has commands in flight, look at
+     * that port's interrupt status first. If it has events, handle them and clear only its bit of the HBA
+     * interrupt status. A pending bit of any other port keeps the line asserted, so the ISR runs again
+     * and takes the full path below. This saves the read of the HBA interrupt status register,
+     * which is a trap to the hypervisor on emulated hardware.
+     *
+     * This relies on the line being level-triggered. pciidex connects the interrupt as level-sensitive
+     * and has no message-signalled (MSI) support today, so this test is enough. A message-signalled
+     * (edge) interrupt does not re-fire for another port's bit left pending in the HBA status, so
+     * when MSI is added to pciidex, this test must exclude it too.
+     */
+    if (!(Controller->InterruptDesc.Flags & CM_RESOURCE_INTERRUPT_LATCHED))
+    {
+        PCHANNEL_DATA_AHCI ActiveChanData = NULL;
+        ULONG ActivePort = 0, ActivePorts = 0;
+
+        PortInterruptBitmap = Controller->ChannelBitmap;
+        while (_BitScanForward(&Port, PortInterruptBitmap) != 0)
+        {
+            PCHANNEL_DATA_AHCI ChanData = Controller->Channels[Port];
+
+            PortInterruptBitmap &= ~(1 << Port);
+
+            if (ChanData && ChanData->ActiveSlotsBitmap != 0)
+            {
+                ActiveChanData = ChanData;
+                ActivePort = Port;
+                ++ActivePorts;
+            }
+        }
+
+        if (ActivePorts == 1)
+        {
+            InterruptStatus = AHCI_PORT_READ(ActiveChanData->IoBase, PxInterruptStatus);
+            if (InterruptStatus != 0)
+            {
+                AtaAhciPortHandleEvents(ActiveChanData, InterruptStatus);
+
+                AHCI_HBA_WRITE(Controller->IoBase, HbaInterruptStatus, 1 << ActivePort);
+                return TRUE;
+            }
+        }
+    }
 
     InterruptStatus = AHCI_HBA_READ(Controller->IoBase, HbaInterruptStatus);
     if (InterruptStatus == 0)
