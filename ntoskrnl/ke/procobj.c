@@ -952,6 +952,17 @@ KeAddSystemServiceTable(IN PULONG_PTR Base,
         (KeServiceDescriptorTable[Index].Base) ||
         (KeServiceDescriptorTableShadow[Index].Base))
     {
+        /* The same table again is fine: win32k of another session, at the same address in every session */
+        if ((Index <= SSDT_MAX_ENTRIES - 1) &&
+            (KeServiceDescriptorTable[Index].Base == NULL) &&
+            (KeServiceDescriptorTableShadow[Index].Base == Base) &&
+            (KeServiceDescriptorTableShadow[Index].Limit == Limit) &&
+            (KeServiceDescriptorTableShadow[Index].Number == Number) &&
+            (KeServiceDescriptorTableShadow[Index].Count == Count))
+        {
+            return TRUE;
+        }
+
         /* It's not, fail */
         return FALSE;
     }

@@ -893,6 +893,10 @@ extern ULONG MiNitroPagerMode;
 extern ULONG MiNitroPagerDebug;
 extern ULONG MmNitroSessions;
 
+/* Session images (NitroSessions) */
+BOOLEAN NTAPI MmIsSessionImage(_In_ PVOID ImageHandle);
+BOOLEAN NTAPI MmIsSessionImageLoadedInCurrentSession(_In_ PVOID ImageHandle);
+
 BOOLEAN
 NTAPI
 MiAllocatePageFileSlot(

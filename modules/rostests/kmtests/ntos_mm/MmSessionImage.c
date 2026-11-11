@@ -240,7 +240,10 @@ CheckProtections(
 }
 #endif
 
-/* A global load (as a GDI driver, in system space) */
+/*
+ * A global load (as a GDI driver, in system space). From the System process, which is in no session: with
+ * win32k a session image, a GDI driver load from a session is a session load
+ */
 static
 NTSTATUS
 GlobalLoad(
@@ -249,10 +252,13 @@ GlobalLoad(
 {
     SYSTEM_GDI_DRIVER_INFORMATION Info;
     NTSTATUS Status;
+    KAPC_STATE ApcState;
 
     RtlZeroMemory(&Info, sizeof(Info));
     Info.DriverName = *Name;
+    KeStackAttachProcess((PKPROCESS)PsInitialSystemProcess, &ApcState);
     Status = ZwSetSystemInformation(SystemLoadGdiDriverInformation, &Info, sizeof(Info));
+    KeUnstackDetachProcess(&ApcState);
     *Section = Info.SectionPointer;
     return Status;
 }
