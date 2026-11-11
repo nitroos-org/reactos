@@ -62,6 +62,9 @@ typedef struct _MI_SESSION_IMAGE
     PFN_COUNT PageCount;
     PVOID Template;
     LIST_ENTRY Instances;
+    ULONG EntryReferences;                  /* references of the session images that import it */
+    ULONG SessionImportCount;               /* the session images it imports (not in LoadedImports) */
+    PLDR_DATA_TABLE_ENTRY *SessionImports;
 } MI_SESSION_IMAGE, *PMI_SESSION_IMAGE;
 
 /* NitroSessions (Session Manager key): 0 = one session as before, session images are not loaded */
@@ -142,6 +145,10 @@ MiFindSessionImageInstance(
     }
     return NULL;
 }
+
+static PLOAD_IMPORTS MiTakeSessionImports(_In_ PLOAD_IMPORTS Imports, _In_ BOOLEAN Release,
+                                          _Out_opt_ PLDR_DATA_TABLE_ENTRY *Taken, _Out_opt_ PULONG TakenCount);
+static ULONG MiImportListCount(_In_ PLOAD_IMPORTS Imports);
 
 /* Whether the image is a session image (its address is in session image space) */
 BOOLEAN
@@ -309,6 +316,45 @@ MiCreateSessionImage(
         goto Fail;
     RtlCopyMemory(Image->Template, LdrEntry->DllBase, (SIZE_T)PageCount << PAGE_SHIFT);
 
+    /* The session images it imports are referenced per session: they leave the loader entry's list */
+    Image->SessionImportCount = 0;
+    Image->SessionImports = NULL;
+    if (MiImportListCount(LdrEntry->LoadedImports))
+    {
+        Image->SessionImports = ExAllocatePoolWithTag(PagedPool,
+                                                      MiImportListCount(LdrEntry->LoadedImports) * sizeof(PVOID),
+                                                      TAG_SESSION_IMAGE);
+        if (!Image->SessionImports)
+        {
+            ExFreePoolWithTag(Image->Template, TAG_SESSION_IMAGE);
+            goto Fail;
+        }
+        LdrEntry->LoadedImports = MiTakeSessionImports(LdrEntry->LoadedImports, FALSE,
+                                                       Image->SessionImports, &Image->SessionImportCount);
+    }
+
+    /*
+     * One reference on the entry of each of them as long as this image exists: a session that loads this
+     * image later finds them (their pages in a session go with their loads in it)
+     */
+    {
+        ULONG i;
+        PMI_SESSION_IMAGE Imported;
+        for (i = 0; i < Image->SessionImportCount; i++)
+        {
+            Imported = MiFindSessionImage(Image->SessionImports[i]);
+            ASSERT(Imported != NULL);
+            if (!Imported)
+            {
+                Image->SessionImports[i] = NULL;
+                continue;
+            }
+            Imported->EntryReferences++;
+            Image->SessionImports[i]->LoadCount++;
+        }
+    }
+
+    Image->EntryReferences = 0;
     Image->LdrEntry = LdrEntry;
     Image->Base = LdrEntry->DllBase;
     Image->PageCount = PageCount;
@@ -326,39 +372,27 @@ Fail:
     return STATUS_INSUFFICIENT_RESOURCES;
 }
 
-/* References (or dereferences) in the current session each import of the list that is a session image */
+/*
+ * References (or dereferences) in the current session the session images of an array. A dereference is a
+ * whole unload: the entry of an image that nothing holds any more goes too (so it is never read again
+ * through the array: the caller drops the array, or its entry is not visited again)
+ */
 static
 NTSTATUS
 MiForEachSessionImport(
-    _In_ PLOAD_IMPORTS Imports,
+    _In_reads_(Count) PLDR_DATA_TABLE_ENTRY *Entries,
+    _In_ ULONG Count,
     _In_ BOOLEAN Reference,
     _In_ ULONG StopAt,
     _Out_opt_ PULONG Done)
 {
-    PLDR_DATA_TABLE_ENTRY Single;
-    PLDR_DATA_TABLE_ENTRY *Entries;
-    ULONG Count, i;
+    ULONG i;
     NTSTATUS Status;
 
     if (Done) *Done = 0;
-    if (!Imports || (Imports == MM_SYSLDR_NO_IMPORTS) || (Imports == MM_SYSLDR_BOOT_LOADED))
-        return STATUS_SUCCESS;
-
-    if ((ULONG_PTR)Imports & MM_SYSLDR_SINGLE_ENTRY)
-    {
-        Single = (PVOID)((ULONG_PTR)Imports & ~MM_SYSLDR_SINGLE_ENTRY);
-        Entries = &Single;
-        Count = 1;
-    }
-    else
-    {
-        Entries = (PLDR_DATA_TABLE_ENTRY *)Imports->Entry;
-        Count = (ULONG)Imports->Count;
-    }
-
     for (i = 0; (i < Count) && (i < StopAt); i++)
     {
-        if (!Entries[i] || !MiIsSessionImage(Entries[i])) continue;
+        if (!Entries[i]) continue;
         if (Reference)
         {
             Status = MiReferenceSessionImage(Entries[i]);
@@ -367,7 +401,7 @@ MiForEachSessionImport(
         }
         else
         {
-            MiDereferenceSessionImage(Entries[i]);
+            MmUnloadSystemImage(Entries[i]);
         }
         if (Done) *Done = i + 1;
     }
@@ -412,7 +446,7 @@ MiReferenceSessionImage(
     if (!Instance) return STATUS_INSUFFICIENT_RESOURCES;
 
     /* Its session imports first: its import thunks point into them */
-    Status = MiForEachSessionImport(LdrEntry->LoadedImports, TRUE, MAXULONG, &Done);
+    Status = MiForEachSessionImport(Image->SessionImports, Image->SessionImportCount, TRUE, MAXULONG, &Done);
     if (!NT_SUCCESS(Status))
         goto UndoImports;
 
@@ -432,7 +466,7 @@ MiReferenceSessionImage(
     return STATUS_SUCCESS;
 
 UndoImports:
-    MiForEachSessionImport(LdrEntry->LoadedImports, FALSE, Done, NULL);
+    MiForEachSessionImport(Image->SessionImports, Image->SessionImportCount, FALSE, Done, NULL);
     ExFreePoolWithTag(Instance, TAG_SESSION_IMAGE);
     return Status;
 }
@@ -447,8 +481,10 @@ UndoImports:
 BOOLEAN
 NTAPI
 MiDereferenceSessionImage(
-    _In_ PLDR_DATA_TABLE_ENTRY LdrEntry)
+    _In_ PLDR_DATA_TABLE_ENTRY LdrEntry,
+    _In_ BOOLEAN EntryReference)
 {
+    ULONG i;
     PMI_SESSION_IMAGE Image;
     PMI_SESSION_IMAGE_INSTANCE Instance = NULL;
 
@@ -459,12 +495,32 @@ MiDereferenceSessionImage(
         return FALSE;
     }
 
-    if (PsGetCurrentProcess()->ProcessInSession)
+    if (!EntryReference && PsGetCurrentProcess()->ProcessInSession)
         Instance = MiFindSessionImageInstance(Image, MiCurrentSessionId());
+
+    /* Without an instance here, only a reference that is not a session load may go (never another session's) */
+    if (!Instance && !EntryReference)
+    {
+        PLIST_ENTRY Entry;
+        ULONG Loads = 0;
+
+        for (Entry = Image->Instances.Flink; Entry != &Image->Instances; Entry = Entry->Flink)
+            Loads += CONTAINING_RECORD(Entry, MI_SESSION_IMAGE_INSTANCE, Links)->LoadCount;
+        if (LdrEntry->LoadCount <= Loads + Image->EntryReferences)
+        {
+            DPRINT1("Session image %wZ is not loaded in this session: unload refused\n", &LdrEntry->BaseDllName);
+            return FALSE;
+        }
+    }
 
     ASSERT(LdrEntry->LoadCount != 0);
     if (LdrEntry->LoadCount == 0) return FALSE;
     LdrEntry->LoadCount--;
+    if (EntryReference)
+    {
+        ASSERT(Image->EntryReferences != 0);
+        Image->EntryReferences--;
+    }
 
     if (Instance)
     {
@@ -474,7 +530,7 @@ MiDereferenceSessionImage(
             MiUnmapSessionImagePages(Image->Base, Image->PageCount);
             RemoveEntryList(&Instance->Links);
             ExFreePoolWithTag(Instance, TAG_SESSION_IMAGE);
-            MiForEachSessionImport(LdrEntry->LoadedImports, FALSE, MAXULONG, NULL);
+            MiForEachSessionImport(Image->SessionImports, Image->SessionImportCount, FALSE, MAXULONG, NULL);
         }
     }
 
@@ -483,18 +539,107 @@ MiDereferenceSessionImage(
     /* Nothing holds it: the address range and the copy go */
     MiReleaseSessionImageVa(Image->Base, Image->PageCount);
     RemoveEntryList(&Image->Links);
+
+    /* The references on the entries of the session images it imports (taken when it was first loaded) */
+    for (i = 0; i < Image->SessionImportCount; i++)
+    {
+        if (Image->SessionImports[i])
+            MiUnloadSystemImageEx(Image->SessionImports[i], TRUE);
+    }
+    if (Image->SessionImports) ExFreePoolWithTag(Image->SessionImports, TAG_SESSION_IMAGE);
     ExFreePoolWithTag(Image->Template, TAG_SESSION_IMAGE);
     ExFreePoolWithTag(Image, TAG_SESSION_IMAGE);
     return TRUE;
 }
 
-/* Drops the current session's references to the session images of an import list (a failed load) */
-VOID
+/*
+ * Takes the session images out of an import list, which then holds global images only (the list stays
+ * allocated with a shorter run of entries, or is replaced). With Release, the current session's
+ * references to them go (a failed load); otherwise their entries go to *Taken (Count in *TakenCount).
+ */
+static
+PLOAD_IMPORTS
+MiTakeSessionImports(
+    _In_ PLOAD_IMPORTS Imports,
+    _In_ BOOLEAN Release,
+    _Out_opt_ PLDR_DATA_TABLE_ENTRY *Taken,
+    _Out_opt_ PULONG TakenCount)
+{
+    PLDR_DATA_TABLE_ENTRY Single;
+    ULONG i, j, Count;
+
+    if (TakenCount) *TakenCount = 0;
+    if (!Imports || (Imports == MM_SYSLDR_NO_IMPORTS) || (Imports == MM_SYSLDR_BOOT_LOADED))
+        return Imports;
+
+    if ((ULONG_PTR)Imports & MM_SYSLDR_SINGLE_ENTRY)
+    {
+        Single = (PVOID)((ULONG_PTR)Imports & ~MM_SYSLDR_SINGLE_ENTRY);
+        if (!MiIsSessionImage(Single))
+            return Imports;
+        if (Release)
+            MmUnloadSystemImage(Single);
+        else if (Taken)
+        {
+            Taken[0] = Single;
+            *TakenCount = 1;
+        }
+        return MM_SYSLDR_NO_IMPORTS;
+    }
+
+    /* Every entry is read before any is released: a release can free entries */
+    Count = (ULONG)Imports->Count;
+    for (i = 0, j = 0; i < Count; i++)
+    {
+        Single = Imports->Entry[i];
+        if (!Single) break;
+        Imports->Entry[i] = NULL;
+        if (MiIsSessionImage(Single))
+        {
+            if (Taken) Taken[(*TakenCount)++] = Single;
+        }
+        else
+        {
+            Imports->Entry[j++] = Single;
+        }
+    }
+    return Imports;
+}
+
+/* The count of entries of an import list, for the array MiTakeSessionImports fills */
+static
+ULONG
+MiImportListCount(
+    _In_ PLOAD_IMPORTS Imports)
+{
+    if (!Imports || (Imports == MM_SYSLDR_NO_IMPORTS) || (Imports == MM_SYSLDR_BOOT_LOADED))
+        return 0;
+    if ((ULONG_PTR)Imports & MM_SYSLDR_SINGLE_ENTRY)
+        return 1;
+    return (ULONG)Imports->Count;
+}
+
+/* A failed load: the current session's references to the session images of its import list go */
+PLOAD_IMPORTS
 NTAPI
 MiReleaseSessionImports(
     _In_ PLOAD_IMPORTS Imports)
 {
-    MiForEachSessionImport(Imports, FALSE, MAXULONG, NULL);
+    PLDR_DATA_TABLE_ENTRY *Taken;
+    ULONG Count = MiImportListCount(Imports), TakenCount;
+
+    if (!Count) return Imports;
+    Taken = ExAllocatePoolWithTag(PagedPool, Count * sizeof(PVOID), TAG_SESSION_IMAGE);
+    if (!Taken)
+    {
+        /* Without memory the references stay (the images stay loaded): no entry is read after a release */
+        DPRINT1("Session imports kept: no memory\n");
+        return MiTakeSessionImports(Imports, FALSE, NULL, NULL);
+    }
+    Imports = MiTakeSessionImports(Imports, FALSE, Taken, &TakenCount);
+    MiForEachSessionImport(Taken, TakenCount, FALSE, MAXULONG, NULL);
+    ExFreePoolWithTag(Taken, TAG_SESSION_IMAGE);
+    return Imports;
 }
 
 /*
