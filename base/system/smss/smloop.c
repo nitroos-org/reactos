@@ -33,8 +33,9 @@ NTSTATUS
 
 volatile LONG SmTotalApiThreads;
 
-/* One forwarded registration at a time (SmpForwardProcessRegistration) */
-RTL_CRITICAL_SECTION SmpForwardLock;
+/* The LPC message type, without the flag bits the kernel adds above it */
+#define SMP_LPC_TYPE(Msg) ((Msg)->h.u2.s2.Type & 0xFF)
+
 HANDLE SmUniqueProcessId;
 
 /*
@@ -525,15 +526,29 @@ SmpForwardProcessRegistration(
     }
 
     /*
-     * One forward at a time: a forward holds this API thread until the target csrss answers, so with one
-     * in flight the other API thread stays free for everything else (the target never calls SMSS back
-     * while it answers, see CsrDereferenceNtSessionQuietly in csrsrv).
+     * The forward holds this API thread until the target csrss's Sb thread answers, and any number of
+     * forwards may do so at once, up to every API thread. That cannot deadlock because nothing the Sb
+     * thread waits for while it answers ever waits for SMSS:
+     * - the Sb thread itself never calls SMSS (on failure it drops the NT session quietly, and SMSS
+     *   deletes the session record below);
+     * - SmSessionComplete, the only SMSS call a csrss makes while it may hold a lock (the last process
+     *   of an NT session goes), is a datagram: it is queued, nobody waits for an API thread;
+     * - the other SMSS call of a running csrss is this forward, from a basesrv API thread that holds no
+     *   CSR lock while it waits.
+     * So the Sb thread only waits for csrss locks held by threads that make progress, each forward
+     * ends, and its API thread comes back.
      */
-    RtlEnterCriticalSection(&SmpForwardLock);
     Status = SmpSbCreateRemoteProcessEx(&ClientId, MuSessionId, MuSessionId, Flags);
-    RtlLeaveCriticalSection(&SmpForwardLock);
-    DPRINT1("SMSS: Forwarded registration of %lx.%lx from session %lu to session %lu, Status=%lx\n",
-            ClientId.UniqueProcess, ClientId.UniqueThread, SenderSessionId, MuSessionId, Status);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("SMSS: Forwarded registration of %lx.%lx from session %lu to session %lu failed: %lx\n",
+                ClientId.UniqueProcess, ClientId.UniqueThread, SenderSessionId, MuSessionId, Status);
+    }
+    else
+    {
+        DPRINT("SMSS: Forwarded registration of %lx.%lx from session %lu to session %lu\n",
+               ClientId.UniqueProcess, ClientId.UniqueThread, SenderSessionId, MuSessionId);
+    }
     return Status;
 }
 
@@ -784,6 +799,43 @@ SmpApiLoop(
                 if (!ClientContext)
                 {
                     ReplyMsg = NULL;
+                    break;
+                }
+
+                /*
+                 * Only a request has a sender waiting for the reply. Replying to anything else fails
+                 * (no thread waits for that message id) without receiving, and this loop would serve
+                 * the same message again and again. A datagram is accepted for SmSessionComplete only,
+                 * which subsystems send without waiting (see SmSessionComplete in smlib).
+                 */
+                if (SMP_LPC_TYPE(&RequestMsg) != LPC_REQUEST)
+                {
+                    ReplyMsg = NULL;
+                    if ((SMP_LPC_TYPE(&RequestMsg) != LPC_DATAGRAM) ||
+                        (RequestMsg.ApiNumber != SmpSessionCompleteApi))
+                    {
+                        DPRINT1("SMSS: Ignoring message type %x, Api %lu from %lx.%lx\n",
+                                RequestMsg.h.u2.s2.Type, RequestMsg.ApiNumber,
+                                RequestMsg.h.ClientId.UniqueProcess,
+                                RequestMsg.h.ClientId.UniqueThread);
+                        break;
+                    }
+                    _SEH2_TRY
+                    {
+                        Status = SmpApiDispatch[SmpSessionCompleteApi](&RequestMsg, ClientContext, SmApiPort);
+                        if (!NT_SUCCESS(Status) && (Status != STATUS_NOT_FOUND))
+                        {
+                            DPRINT1("SMSS: SmSessionComplete(%lu) from %lx.%lx: %lx\n",
+                                    RequestMsg.u.SessionComplete.SessionId,
+                                    RequestMsg.h.ClientId.UniqueProcess,
+                                    RequestMsg.h.ClientId.UniqueThread, Status);
+                        }
+                    }
+                    _SEH2_EXCEPT(SmpUnhandledExceptionFilter(_SEH2_GetExceptionInformation()))
+                    {
+                        _SEH2_YIELD(break);
+                    }
+                    _SEH2_END;
                     break;
                 }
 

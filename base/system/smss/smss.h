@@ -194,8 +194,6 @@ SmpCompleteSession(
     _In_ ULONG SessionId,
     _In_ PSMP_SUBSYSTEM Subsystem);
 
-extern RTL_CRITICAL_SECTION SmpForwardLock;
-
 ULONG
 NTAPI
 SmpAllocateSessionId(
