@@ -714,6 +714,9 @@ MiRemoveZeroPage(IN ULONG Color)
     return PageIndex;
 }
 
+/* Set when boot is done with the free lists (the zero page thread starts): freed pages go to the head */
+BOOLEAN MiFreeListLifo;
+
 VOID
 NTAPI
 MiInsertPageInFreeList(IN PFN_NUMBER PageFrameIndex)
@@ -757,6 +760,27 @@ MiInsertPageInFreeList(IN PFN_NUMBER PageFrameIndex)
     ASSERT_LIST_INVARIANT(ListHead);
     ListHead->Total++;
 
+    /*
+     * After boot a freed page goes to the head of the free lists (global and colored), as zeroed pages
+     * already do: the page used next is the one used last. Its memory is warm (in the caches, and in a
+     * virtual machine backed by the host), where the tail holds memory that was never touched since
+     * boot. Boot itself appends, so that the first pages handed out keep the boot order.
+     */
+    if (MiFreeListLifo)
+    {
+        PFN_NUMBER Flink = ListHead->Flink;
+
+        ListHead->Flink = PageFrameIndex;
+        Pfn1->u1.Flink = Flink;
+        Pfn1->u2.Blink = LIST_HEAD;
+        if (Flink != LIST_HEAD)
+            MI_PFN_ELEMENT(Flink)->u2.Blink = PageFrameIndex;
+        else
+            ListHead->Blink = PageFrameIndex;
+        ASSERT_LIST_INVARIANT(ListHead);
+        goto ListLinked;
+    }
+
     /* Get the last page on the list */
     LastPage = ListHead->Blink;
     if (LastPage != LIST_HEAD)
@@ -778,6 +802,7 @@ MiInsertPageInFreeList(IN PFN_NUMBER PageFrameIndex)
     Pfn1->u1.Flink = LIST_HEAD;
     Pfn1->u2.Blink = LastPage;
 
+ListLinked:
     /* Set the list name and default priority */
     Pfn1->u3.e1.PageLocation = FreePageList;
     Pfn1->u4.Priority = 3;
@@ -797,6 +822,21 @@ MiInsertPageInFreeList(IN PFN_NUMBER PageFrameIndex)
 
     /* Get the first page on the color list */
     ColorTable = &MmFreePagesByColor[FreePageList][Color];
+    if (MiFreeListLifo)
+    {
+        /* At the head, as on the global list (the zero page thread expects the same first page on both) */
+        PFN_NUMBER Flink = ColorTable->Flink;
+
+        Pfn1->OriginalPte.u.Long = Flink;
+        Pfn1->u4.PteFrame = COLORED_LIST_HEAD;
+        ColorTable->Flink = PageFrameIndex;
+        if (Flink != LIST_HEAD)
+            MI_PFN_ELEMENT(Flink)->u4.PteFrame = PageFrameIndex;
+        else
+            ColorTable->Blink = Pfn1;
+        ColorTable->Count++;
+        goto ColorLinked;
+    }
     if (ColorTable->Flink == LIST_HEAD)
     {
         /* The list is empty, so we are the first page */
@@ -822,6 +862,7 @@ MiInsertPageInFreeList(IN PFN_NUMBER PageFrameIndex)
     /* And increase the count in the colored list */
     ColorTable->Count++;
 
+ColorLinked:
     /* Notify zero page thread if enough pages are on the free list now */
     if (ListHead->Total >= 8)
     {

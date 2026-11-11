@@ -48,6 +48,13 @@ MmZeroPageThread(VOID)
     if (StartAddress) MiFreeInitializationCode(StartAddress, EndAddress);
     DPRINT("Free pages: %lx\n", MmAvailablePages);
 
+    /* Boot is done with the free lists: from now on a freed page is the next one used (pfnlist.c) */
+    {
+        KIRQL Irql = MiAcquirePfnLock();
+        MiFreeListLifo = TRUE;
+        MiReleasePfnLock(Irql);
+    }
+
     /* Set our priority to 0 */
     Thread->BasePriority = 0;
     KeSetPriorityThread(Thread, 0);
