@@ -102,6 +102,72 @@ static void CheckTcpQuery(void)
     CloseHandle(Handle);
 }
 
+/* A fresh socket of each type bound to each loopback/wildcard address, then a UDP exchange.
+ * The 32-bit WSHNotify(WSH_NOTIFY_BIND) of wshtcpip asks the TCP driver for its entity list
+ * through the WoW64 query path, so a TCP/IP driver that does not know the 32-bit layout
+ * makes every bind fail with WSAEINVAL while 64-bit callers still work. */
+static void CheckDatagram(void)
+{
+    static const ULONG Addresses[2] = {INADDR_ANY, INADDR_LOOPBACK};
+    static const int Types[2] = {SOCK_STREAM, SOCK_DGRAM};
+    struct sockaddr_in Address, Local, From;
+    SOCKET Receiver, Sender, Connected;
+    char Buffer[16] = {0};
+    DWORD Timeout = 2000;
+    int Length, FromLength, Count, i, j;
+
+    for (i = 0; i < 2; i++)
+    {
+        for (j = 0; j < 2; j++)
+        {
+            SOCKET Socket = socket(AF_INET, Types[i], 0);
+            CHECK(Socket != INVALID_SOCKET);
+            if (Socket == INVALID_SOCKET) continue;
+            memset(&Address, 0, sizeof(Address));
+            Address.sin_family = AF_INET;
+            Address.sin_addr.s_addr = htonl(Addresses[j]);
+            CHECK(bind(Socket, (struct sockaddr *)&Address, sizeof(Address)) == 0);
+            Length = sizeof(Local);
+            CHECK(getsockname(Socket, (struct sockaddr *)&Local, &Length) == 0 && Local.sin_port != 0);
+            CHECK(closesocket(Socket) == 0);
+        }
+    }
+
+    Receiver = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    Sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    Connected = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    CHECK(Receiver != INVALID_SOCKET && Sender != INVALID_SOCKET && Connected != INVALID_SOCKET);
+    if (Receiver == INVALID_SOCKET || Sender == INVALID_SOCKET || Connected == INVALID_SOCKET) goto Done;
+    memset(&Address, 0, sizeof(Address));
+    Address.sin_family = AF_INET;
+    Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    CHECK(bind(Receiver, (struct sockaddr *)&Address, sizeof(Address)) == 0);
+    Length = sizeof(Address);
+    CHECK(getsockname(Receiver, (struct sockaddr *)&Address, &Length) == 0 && Address.sin_port != 0);
+    CHECK(setsockopt(Receiver, SOL_SOCKET, SO_RCVTIMEO, (char *)&Timeout, sizeof(Timeout)) == 0);
+    /* sendto binds the sender implicitly */
+    CHECK(sendto(Sender, "WoW64", 5, 0, (struct sockaddr *)&Address, sizeof(Address)) == 5);
+    FromLength = sizeof(From);
+    Count = recvfrom(Receiver, Buffer, sizeof(Buffer), 0, (struct sockaddr *)&From, &FromLength);
+    CHECK(Count == 5 && !memcmp(Buffer, "WoW64", 5));
+    CHECK(FromLength == sizeof(From) && From.sin_family == AF_INET && From.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+    /* a connected datagram socket (connect binds implicitly) and the reply */
+    CHECK(connect(Connected, (struct sockaddr *)&Address, sizeof(Address)) == 0);
+    CHECK(send(Connected, "again", 5, 0) == 5);
+    FromLength = sizeof(From);
+    memset(Buffer, 0, sizeof(Buffer));
+    Count = recvfrom(Receiver, Buffer, sizeof(Buffer), 0, (struct sockaddr *)&From, &FromLength);
+    CHECK(Count == 5 && !memcmp(Buffer, "again", 5));
+    CHECK(sendto(Receiver, "reply", 5, 0, (struct sockaddr *)&From, FromLength) == 5);
+    CHECK(setsockopt(Connected, SOL_SOCKET, SO_RCVTIMEO, (char *)&Timeout, sizeof(Timeout)) == 0);
+    memset(Buffer, 0, sizeof(Buffer));
+    CHECK(recv(Connected, Buffer, sizeof(Buffer), 0) == 5 && !memcmp(Buffer, "reply", 5));
+Done:
+    if (Receiver != INVALID_SOCKET) closesocket(Receiver);
+    if (Sender != INVALID_SOCKET) closesocket(Sender);
+    if (Connected != INVALID_SOCKET) closesocket(Connected);
+}
+
 static void CheckHttp(void)
 {
     static const char Request[] = "GET / HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n";
@@ -313,6 +379,11 @@ int main(int argc, char **argv)
     if (argc == 2 && !strcmp(argv[1], "--http"))
     {
         CheckHttp();
+        goto End;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--datagram"))
+    {
+        CheckDatagram();
         goto End;
     }
     Listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
