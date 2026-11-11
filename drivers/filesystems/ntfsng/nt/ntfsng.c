@@ -183,6 +183,8 @@ VOID NgReleaseCoreShared(PNG_VCB Vcb, NG_SHARED_HOLD *Hold)
 VOID NgPrintLockStats(PNG_VCB Vcb)
 {
     ULONG i;
+    DPRINT1("ntfsng: FastIoQueryOpen: %ld answered, %ld left to the ordinary open%s\n", NgGlobal.FastQueryHits, NgGlobal.FastQueryMisses,
+            NgGlobal.NoFastQueryOpen ? " (NoFastQueryOpen)" : "");
     DPRINT1("ntfsng: paging writes: %lu with the transfer outside CoreLock, %lu under it, %lu written again\n",
             Vcb->DioWrites, Vcb->DioFallbacks, Vcb->DioRedone);
     DPRINT1("ntfsng: gap zero fill: %lu pieces written outside CoreLock\n", Vcb->DioZeroPieces);
@@ -958,6 +960,9 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         ngc_unlocked_commit = 0;
         DPRINT1("ntfsng: NoUnlockedCommit: commits run under CoreLock\n");
     }
+    /* NoFastQueryOpen=1: attribute queries by name take the ordinary open (comparison, fallback). */
+    if (NgReadDword(RegistryPath, L"NoFastQueryOpen"))
+        NgGlobal.NoFastQueryOpen = 1;
     /* NoNameCache=1: no cache of looked-up names (comparison, fallback); NameCacheVerify=1: every hit is checked against the directory (test). */
     if (NgReadDword(RegistryPath, L"NoNameCache"))
         ngc_set_namecache(0);
@@ -1022,6 +1027,7 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     NgFastIoDispatch.FastIoCheckIfPossible = NgFastIoCheckIfPossible;
     NgFastIoDispatch.FastIoRead = FsRtlCopyRead;
     NgFastIoDispatch.FastIoWrite = NgFastIoWrite;
+    NgFastIoDispatch.FastIoQueryOpen = NgFastQueryOpen;
     DriverObject->FastIoDispatch = &NgFastIoDispatch;
 
     NgGlobal.CacheCallbacks.AcquireForLazyWrite = NgAcquireForLazyWrite;
