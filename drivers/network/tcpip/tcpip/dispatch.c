@@ -683,7 +683,9 @@ NTSTATUS DispTdiListen(
 	    Connection->AddressFile->Listener,
 	    Connection,
 	    DispDataRequestComplete,
-	    Irp );
+	    Irp,
+	    /* AFD states in the upper 16 bits of the flags how many connections it has room for */
+	    Parameters->RequestFlags >> 16 );
   }
 
   UnlockObject(Connection->AddressFile);

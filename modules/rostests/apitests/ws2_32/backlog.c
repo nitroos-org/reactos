@@ -145,20 +145,35 @@ Listen(int Backlog, USHORT Port, struct sockaddr_in *Addr)
     return Server;
 }
 
-/* Connect a client with a blocking connect */
+/* Connect a client. A listener without room for it does not answer, and the connect fails with
+ * WSAECONNREFUSED about two seconds later, as on Windows; the test gives up on it after one second */
 static SOCKET
 Connect(const struct sockaddr_in *Addr)
 {
     SOCKET Client;
+    u_long Mode = 1;
+    fd_set WriteSet, ExceptSet;
+    struct timeval Timeout = { 1, 0 };
 
     Client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (Client == INVALID_SOCKET)
         return INVALID_SOCKET;
+    ioctlsocket(Client, FIONBIO, &Mode);
     if (connect(Client, (const struct sockaddr *)Addr, sizeof(*Addr)) != 0)
     {
-        closesocket(Client);
-        return INVALID_SOCKET;
+        FD_ZERO(&WriteSet);
+        FD_ZERO(&ExceptSet);
+        FD_SET(Client, &WriteSet);
+        FD_SET(Client, &ExceptSet);
+        if (WSAGetLastError() != WSAEWOULDBLOCK ||
+            select(0, NULL, &WriteSet, &ExceptSet, &Timeout) != 1 || !FD_ISSET(Client, &WriteSet))
+        {
+            closesocket(Client);
+            return INVALID_SOCKET;
+        }
     }
+    Mode = 0;
+    ioctlsocket(Client, FIONBIO, &Mode);
     return Client;
 }
 

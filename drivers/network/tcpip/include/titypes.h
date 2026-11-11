@@ -279,6 +279,11 @@ typedef struct _CONNECTION_ENDPOINT {
     LIST_ENTRY PendingAccepts;
     ULONG PendingAcceptCount;
 
+    /* Connections the owner of a listener (AFD) has room for, stated by a listen request;
+       the lwIP thread takes it and then admits no more than that (0: none stated) */
+    volatile LONG ListenRoom;
+    BOOLEAN RoomManaged;
+
     /* Disconnect Timer */
     KTIMER DisconnectTimer;
     KDPC DisconnectDpc;
