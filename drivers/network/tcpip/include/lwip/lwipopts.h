@@ -86,6 +86,9 @@
 
 #define TCP_LISTEN_BACKLOG              1
 
+/* thousands of connections sit in TIME-WAIT while a client loop runs: find them by hash, not by walking the list */
+#define LWIP_TCP_TW_HASH                1
+
 #define LWIP_TCP_TIMESTAMPS             1
 
 #define LWIP_SOCKET                     0

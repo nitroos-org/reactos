@@ -574,6 +574,7 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
 typedef struct _TIME_WAIT_REOPEN
 {
     LIST_ENTRY ListEntry;
+    struct _TIME_WAIT_REOPEN *HashNext;
     ip4_addr_t LocalIp;
     ip4_addr_t RemoteIp;
     u16_t LocalPort;
@@ -588,43 +589,86 @@ typedef struct _TIME_WAIT_REOPEN
 /* Beyond this, a SYN finds the TIME-WAIT as before */
 #define MAX_TIME_WAIT_REOPENS 4096
 
+/* ListEntry orders the records by creation; the hash finds the record of a 4-tuple without a walk */
+#define REOPEN_HASH_SIZE 256
+
 static LIST_ENTRY TimeWaitReopens = { &TimeWaitReopens, &TimeWaitReopens };
+static PTIME_WAIT_REOPEN TimeWaitReopenHash[REOPEN_HASH_SIZE];
 static ULONG TimeWaitReopenCount;
+
+static
+PTIME_WAIT_REOPEN *
+LibTCPReopenBucket(const ip4_addr_t *RemoteIp, u16_t LocalPort, u16_t RemotePort)
+{
+    u32_t h = (((u32_t)LocalPort << 16) | RemotePort) * 2654435761UL;
+
+    h ^= ip4_addr_get_u32(RemoteIp);
+    h ^= h >> 16;
+    return &TimeWaitReopenHash[h & (REOPEN_HASH_SIZE - 1)];
+}
 
 static
 VOID
 LibTCPFreeReopen(PTIME_WAIT_REOPEN Reopen)
 {
+    PTIME_WAIT_REOPEN *Link = LibTCPReopenBucket(&Reopen->RemoteIp, Reopen->LocalPort, Reopen->RemotePort);
+
+    while (*Link != Reopen)
+        Link = &(*Link)->HashNext;
+    *Link = Reopen->HashNext;
     RemoveEntryList(&Reopen->ListEntry);
     TimeWaitReopenCount--;
     ExFreePoolWithTag(Reopen, LWIP_REOPEN_TAG);
 }
 
-/* The record of a 4-tuple; frees the records whose time has passed */
+/* Frees records whose time has passed, oldest first. The records are in creation order and their
+   times are close to that order, so a few at the head are enough on each call; All frees every one
+   (used when the table is full) */
 static
-PTIME_WAIT_REOPEN
-LibTCPFindReopen(const ip4_addr_t *LocalIp, u16_t LocalPort, const ip4_addr_t *RemoteIp, u16_t RemotePort)
+VOID
+LibTCPExpireReopens(ULONGLONG Now, BOOLEAN All)
 {
     PLIST_ENTRY Entry, Next;
-    PTIME_WAIT_REOPEN Reopen, Found = NULL;
-    ULONGLONG Now = KeQueryInterruptTime();
+    PTIME_WAIT_REOPEN Reopen;
+    ULONG Budget = 8;
 
     for (Entry = TimeWaitReopens.Flink; Entry != &TimeWaitReopens; Entry = Next)
     {
         Next = Entry->Flink;
         Reopen = CONTAINING_RECORD(Entry, TIME_WAIT_REOPEN, ListEntry);
         if (Now >= Reopen->Expires)
+            LibTCPFreeReopen(Reopen);
+        else if (!All)
+            break;
+        if (!All && --Budget == 0)
+            break;
+    }
+}
+
+/* The record of a 4-tuple, if its time has not passed; frees the records whose time has */
+static
+PTIME_WAIT_REOPEN
+LibTCPFindReopen(const ip4_addr_t *LocalIp, u16_t LocalPort, const ip4_addr_t *RemoteIp, u16_t RemotePort)
+{
+    PTIME_WAIT_REOPEN *Link, Reopen;
+    ULONGLONG Now = KeQueryInterruptTime();
+
+    LibTCPExpireReopens(Now, FALSE);
+    for (Link = LibTCPReopenBucket(RemoteIp, LocalPort, RemotePort); (Reopen = *Link) != NULL; )
+    {
+        if (Now >= Reopen->Expires)
         {
             LibTCPFreeReopen(Reopen);
             continue;
         }
-        if (!Found && Reopen->LocalPort == LocalPort && Reopen->RemotePort == RemotePort &&
+        if (Reopen->LocalPort == LocalPort && Reopen->RemotePort == RemotePort &&
             ip4_addr_eq(&Reopen->LocalIp, LocalIp) && ip4_addr_eq(&Reopen->RemoteIp, RemoteIp))
         {
-            Found = Reopen;
+            return Reopen;
         }
+        Link = &Reopen->HashNext;
     }
-    return Found;
+    return NULL;
 }
 
 /* Called by LibIPShutdown once lwIP has stopped */
@@ -688,8 +732,9 @@ LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp)
     const struct ip_hdr *IpHeader = p->payload;
     const struct tcp_hdr *TcpHeader;
     struct tcp_pcb *pcb;
-    PTIME_WAIT_REOPEN Reopen;
+    PTIME_WAIT_REOPEN Reopen, *Link;
     ip4_addr_t Src, Dest;
+    ip_addr_t SrcAddr, DestAddr;
     u16_t IpHeaderLength, IpLength, TcpHeaderLength, SrcPort, DestPort;
     u32_t SeqNo, Age;
     ULONGLONG Expires;
@@ -723,17 +768,9 @@ LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp)
     Reopen = LibTCPFindReopen(&Dest, DestPort, &Src, SrcPort);
 
     /* The same match as tcp_input's */
-    for (pcb = tcp_tw_pcbs; pcb != NULL; pcb = pcb->next)
-    {
-        if (pcb->netif_idx != NETIF_NO_INDEX && pcb->netif_idx != netif_get_index(inp))
-            continue;
-        if (pcb->remote_port == SrcPort && pcb->local_port == DestPort &&
-            IP_IS_V4_VAL(pcb->remote_ip) && ip4_addr_eq(ip_2_ip4(&pcb->remote_ip), &Src) &&
-            ip4_addr_eq(ip_2_ip4(&pcb->local_ip), &Dest))
-        {
-            break;
-        }
-    }
+    ip_addr_copy_from_ip4(SrcAddr, Src);
+    ip_addr_copy_from_ip4(DestAddr, Dest);
+    pcb = tcp_tw_find(&DestAddr, DestPort, &SrcAddr, SrcPort, netif_get_index(inp));
     if (!pcb)
     {
         /* RFC 6191 drops a SYN that may not reopen the connection */
@@ -787,6 +824,8 @@ LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp)
     if (!Reopen)
     {
         if (TimeWaitReopenCount >= MAX_TIME_WAIT_REOPENS)
+            LibTCPExpireReopens(KeQueryInterruptTime(), TRUE);
+        if (TimeWaitReopenCount >= MAX_TIME_WAIT_REOPENS)
             return 0;
         Reopen = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Reopen), LWIP_REOPEN_TAG);
         if (!Reopen)
@@ -799,6 +838,9 @@ LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp)
         Reopen->IssFloor = pcb->snd_nxt;
         Reopen->Expires = Expires;
         InsertTailList(&TimeWaitReopens, &Reopen->ListEntry);
+        Link = LibTCPReopenBucket(&Src, DestPort, SrcPort);
+        Reopen->HashNext = *Link;
+        *Link = Reopen;
         TimeWaitReopenCount++;
     }
     else
@@ -1188,8 +1230,9 @@ void LibTCPFreeSocket(PTCP_PCB pcb)
 }
 
 
-/* Local ports any PCB uses, TIME-WAIT included; rebuilt for each ephemeral
-   allocation and only touched with the core lock held */
+/* Local ports the PCBs of the listen, bound and active lists use; rebuilt for each ephemeral
+   allocation and only touched with the core lock held. The TIME-WAIT PCBs (thousands in a connect
+   loop) are asked through tcp_tw_port_used instead of walked */
 static ULONG LibTCPUsedPorts[65536 / 32];
 
 /* Called with the core lock held (and the port lock): is this port (host order) marked? */
@@ -1197,7 +1240,8 @@ static
 BOOLEAN
 LibTCPLocalPortUsed(ULONG Port)
 {
-    return (LibTCPUsedPorts[(Port & 0xFFFF) / 32] & (1UL << (Port % 32))) != 0;
+    return (LibTCPUsedPorts[(Port & 0xFFFF) / 32] & (1UL << (Port % 32))) != 0 ||
+           tcp_tw_port_used((u16_t)(Port & 0xFFFF));
 }
 
 /* Called with the core lock held: one pass over the PCB lists marks every used
@@ -1210,7 +1254,7 @@ LibTCPAllocateEphemeralPortLocked(VOID)
     u8_t i;
 
     RtlZeroMemory(LibTCPUsedPorts, sizeof(LibTCPUsedPorts));
-    for (i = 0; i < NUM_TCP_PCB_LISTS; i++)
+    for (i = 0; i < NUM_TCP_PCB_LISTS_NO_TIME_WAIT; i++)
     {
         for (pcb = *tcp_pcb_lists[i]; pcb != NULL; pcb = pcb->next)
             LibTCPUsedPorts[pcb->local_port / 32] |= 1UL << (pcb->local_port % 32);
