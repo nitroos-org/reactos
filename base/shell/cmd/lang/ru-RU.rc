@@ -429,8 +429,8 @@ GNU General Public License для получения дополнительно�
 в соответствиями с условиями лицензии GNU General Public License, опубликованной\n\
 организацией Free Software Foundation, версии 2 или\n\
 (по вашему выбору) любой более поздней версии.\n"
-    STRING_VERSION_HELP5 "\nПосылайте отчеты об ошибках на <ros-dev@reactos.org>.\n\
-Обновления доступны по адресу: https://reactos.org"
+    STRING_VERSION_HELP5 "\nПосылайте отчеты об ошибках на " BRAND_ISSUES_URL ".\n\
+Обновления доступны по адресу: " BRAND_SUPPORT_URL
     STRING_VERSION_HELP6 "\nFreeDOS версия написана:\n"
     STRING_VERSION_HELP7 "\nReactOS версия написана:\n"
     STRING_VOL_HELP1 " Том в устройстве %c имеет метку %s\n"

@@ -154,14 +154,14 @@ static MUI_ENTRY daDKWelcomePageEntries[] =
     {
         6,
         23,
-        "For at f\206 mere infomation om ReactOS, g\206 ind p\206:",
+        "For at f\206 mere infomation om " BRAND_PRODUCT_NAME ", g\206 ind p\206:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

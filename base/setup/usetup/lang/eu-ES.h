@@ -153,14 +153,14 @@ static MUI_ENTRY euESWelcomePageEntries[] =
     {
         6,
         23,
-        "ReactOS agirbide gehiago nahi baduzun, webgune hau ikusi:",
+        "" BRAND_PRODUCT_NAME " agirbide gehiago nahi baduzun, webgune hau ikusi:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

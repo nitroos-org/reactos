@@ -174,8 +174,8 @@ BEGIN
     IDS_APPTITLE "ReactOS-Anwendungsmanager"
     IDS_APP_AUTHORS "Copyright 2009 Dmitry Chapyshev"
     IDS_WELCOME_TITLE "Willkommen im ReactOS-Anwendungsmanager!"
-    IDS_WELCOME_TEXT "Wählen Sie links eine Kategorie und dann eine Anwendung um sie zu installieren oder zu deinstallieren.\nReactOS-Webseite: "
-    IDS_WELCOME_URL "https://reactos.org"
+    IDS_WELCOME_TEXT "Wählen Sie links eine Kategorie und dann eine Anwendung um sie zu installieren oder zu deinstallieren.\n" BRAND_PRODUCT_NAME "-Webseite: "
+    IDS_WELCOME_URL BRAND_SUPPORT_URL
 
     IDS_APPWIZ_TITLE "Add/Remove Programs"
     IDS_APPWIZ_TEXT1 "Choose ""Applications"" or ""Updates"" to view the list of applications or updates installed on your system."

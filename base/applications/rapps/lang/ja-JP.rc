@@ -173,8 +173,8 @@ BEGIN
     IDS_APPTITLE "ReactOS アプリ マネージャ"
     IDS_APP_AUTHORS "Copyright 2009 Dmitry Chapyshev"
     IDS_WELCOME_TITLE "ReactOS アプリ マネージャへようこそ!"
-    IDS_WELCOME_TEXT "左側からカテゴリを選択し、インストールまたはアンインストールするアプリを選んでください。\nReactOS ウェブ サイト: "
-    IDS_WELCOME_URL "https://reactos.org"
+    IDS_WELCOME_TEXT "左側からカテゴリを選択し、インストールまたはアンインストールするアプリを選んでください。\n" BRAND_PRODUCT_NAME " ウェブ サイト: "
+    IDS_WELCOME_URL BRAND_SUPPORT_URL
 
     IDS_APPWIZ_TITLE "プログラムの追加と削除"
     IDS_APPWIZ_TEXT1 "「アプリケーション」または「更新」を選択すると、システムにインストールされているアプリケーションまたは更新内容の一覧が表示されます。"

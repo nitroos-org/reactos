@@ -440,8 +440,8 @@ lista de créditos. "
  sob os termos da GNU General Public License conforme publicada pela\n\
  Fundação para o Software Livre; a versão 2 da Licença ou\n\
  (à sua escolha) qualquer versão posterior.\n"
-    STRING_VERSION_HELP5 "\nEnvie relatórios de bug para <ros-dev@reactos.org>.\n\
-As atualizações estão disponíveis em: http://www.reactos.org"
+    STRING_VERSION_HELP5 "\nEnvie relatórios de bug para " BRAND_ISSUES_URL ".\n\
+As atualizações estão disponíveis em: " BRAND_SUPPORT_URL
     STRING_VERSION_HELP6 "\nVersão do FreeDOS escrita por:\n"
     STRING_VERSION_HELP7 "\nReactOS versão escrita por:\n"
     STRING_VOL_HELP1 "O volume na unidade %c é %s\n"

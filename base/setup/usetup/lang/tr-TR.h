@@ -163,7 +163,7 @@ static MUI_ENTRY trTRWelcomePageEntries[] =
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

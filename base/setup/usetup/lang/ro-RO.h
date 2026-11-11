@@ -170,14 +170,14 @@ static MUI_ENTRY roROWelcomePageEntries[] =
     {
         6,
         26,
-        "Pentru mai multe informa\376ii despre ReactOS, vizita\376i:",
+        "Pentru mai multe informa\376ii despre " BRAND_PRODUCT_NAME ", vizita\376i:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         27,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },
