@@ -23,7 +23,7 @@ NETSTAT [-a] [-b] [-e] [-n] [-o] [-p proto] [-r] [-s] [-t] [-v] [interval]\n\n\
                 Press CTRL+C to stop redisplaying. By default netstat will\n\
                 print the current information only once.\n"
     IDS_DISPLAY_THEADER "\n  Proto  Local Address          Foreign Address        State"
-    IDS_DISPLAY_PROCESS "       Process\n"
+    IDS_DISPLAY_PROCESS "           PID\n"
     IDS_ACTIVE_CONNECT "\nActive Connections\n"
 END
 
