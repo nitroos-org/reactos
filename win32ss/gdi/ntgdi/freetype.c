@@ -439,6 +439,8 @@ SharedFaceCache_Init(PSHARED_FACE_CACHE Cache)
     Cache->OutlineRequiredSize = 0;
     RtlInitUnicodeString(&Cache->FontFamily, NULL);
     RtlInitUnicodeString(&Cache->FullName, NULL);
+    RtlInitUnicodeString(&Cache->StyleName, NULL);
+    RtlInitUnicodeString(&Cache->UniqueName, NULL);
 }
 
 static PSHARED_FACE
@@ -559,6 +561,8 @@ SharedFaceCache_Release(PSHARED_FACE_CACHE Cache)
 {
     RtlFreeUnicodeString(&Cache->FontFamily);
     RtlFreeUnicodeString(&Cache->FullName);
+    RtlFreeUnicodeString(&Cache->StyleName);
+    RtlFreeUnicodeString(&Cache->UniqueName);
 }
 
 static void
@@ -3624,6 +3628,10 @@ IntGetFontLocalizedName(PUNICODE_STRING pNameW, PSHARED_FACE SharedFace,
         return IntDuplicateUnicodeString(&Cache->FontFamily, pNameW);
     if (NameID == TT_NAME_ID_FULL_NAME && Cache->FullName.Buffer)
         return IntDuplicateUnicodeString(&Cache->FullName, pNameW);
+    if (NameID == TT_NAME_ID_FONT_SUBFAMILY && Cache->StyleName.Buffer)
+        return IntDuplicateUnicodeString(&Cache->StyleName, pNameW);
+    if (NameID == TT_NAME_ID_UNIQUE_ID && Cache->UniqueName.Buffer)
+        return IntDuplicateUnicodeString(&Cache->UniqueName, pNameW);
 
     BestIndex = -1;
     BestScore = 0;
@@ -3737,6 +3745,18 @@ IntGetFontLocalizedName(PUNICODE_STRING pNameW, PSHARED_FACE SharedFace,
             ASSERT_FREETYPE_LOCK_HELD();
             if (!Cache->FullName.Buffer)
                 IntDuplicateUnicodeString(pNameW, &Cache->FullName);
+        }
+        else if (NameID == TT_NAME_ID_FONT_SUBFAMILY)
+        {
+            ASSERT_FREETYPE_LOCK_HELD();
+            if (!Cache->StyleName.Buffer)
+                IntDuplicateUnicodeString(pNameW, &Cache->StyleName);
+        }
+        else if (NameID == TT_NAME_ID_UNIQUE_ID)
+        {
+            ASSERT_FREETYPE_LOCK_HELD();
+            if (!Cache->UniqueName.Buffer)
+                IntDuplicateUnicodeString(pNameW, &Cache->UniqueName);
         }
     }
 
