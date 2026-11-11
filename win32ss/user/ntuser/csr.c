@@ -38,18 +38,23 @@ NTSTATUS
 InitCsrApiPort(IN HANDLE CsrPortHandle)
 {
     NTSTATUS Status;
+    PVOID Port, OldPort;
 
     Status = ObReferenceObjectByHandle(CsrPortHandle,
                                        0,
                                        /* * */LpcPortObjectType, // or NULL,
                                        UserMode,
-                                       &CsrApiPort,
+                                       &Port,
                                        NULL);
     if (!NT_SUCCESS(Status))
     {
-        CsrApiPort = NULL;
         ERR("Failed to set CSR API Port.\n");
+        return Status;
     }
+
+    /* A session other than 0 may have taken the port by name already: drop that reference */
+    OldPort = InterlockedExchangePointer((PVOID *)&CsrApiPort, Port);
+    if (OldPort) ObDereferenceObject(OldPort);
 
     return Status;
 }
