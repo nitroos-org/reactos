@@ -616,6 +616,11 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
                 Created = MmCreateProcessAddressSpace(MinWs, Process, DirectoryTableBase);
                 MmDetachSession(SessionMember, &SessionApcState);
             }
+            else
+            {
+                /* The session went away since it was looked up: as for one that does not exist */
+                Status = STATUS_ACCESS_DENIED;
+            }
             if (!Created)
             {
                 if (NT_SUCCESS(Status)) Status = STATUS_INSUFFICIENT_RESOURCES;
