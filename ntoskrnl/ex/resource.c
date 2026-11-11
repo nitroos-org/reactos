@@ -1471,8 +1471,9 @@ ExDeleteResourceLite(IN PERESOURCE Resource)
     /* Lock the resource */
     KeAcquireInStackQueuedSpinLock(&ExpResourceSpinLock, &LockHandle);
 
-    /* Remove the resource */
-    RemoveEntryList(&Resource->SystemResourcesList);
+    /* Remove the resource (one in session space was never linked, see ExInitializeResourceLite) */
+    if (!IsListEmpty(&Resource->SystemResourcesList))
+        RemoveEntryList(&Resource->SystemResourcesList);
 
     /* Release the lock */
     KeReleaseInStackQueuedSpinLock(&LockHandle);

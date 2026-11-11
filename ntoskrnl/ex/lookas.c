@@ -328,7 +328,9 @@ ExDeleteNPagedLookasideList(IN PNPAGED_LOOKASIDE_LIST Lookaside)
 
     /* Remove from list */
     KeAcquireSpinLock(&ExpNonPagedLookasideListLock, &OldIrql);
-    RemoveEntryList(&Lookaside->L.ListEntry);
+    /* A list in session space was never linked (ExInitialize*LookasideList) */
+    if (!IsListEmpty(&Lookaside->L.ListEntry))
+        RemoveEntryList(&Lookaside->L.ListEntry);
     KeReleaseSpinLock(&ExpNonPagedLookasideListLock, OldIrql);
 }
 
@@ -352,7 +354,9 @@ ExDeletePagedLookasideList(IN PPAGED_LOOKASIDE_LIST Lookaside)
 
     /* Remove from list */
     KeAcquireSpinLock(&ExpPagedLookasideListLock, &OldIrql);
-    RemoveEntryList(&Lookaside->L.ListEntry);
+    /* A list in session space was never linked (ExInitialize*LookasideList) */
+    if (!IsListEmpty(&Lookaside->L.ListEntry))
+        RemoveEntryList(&Lookaside->L.ListEntry);
     KeReleaseSpinLock(&ExpPagedLookasideListLock, OldIrql);
 }
 
