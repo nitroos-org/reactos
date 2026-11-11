@@ -282,6 +282,36 @@ CSR_API(BaseSrvCreateProcess)
     return Status;
 }
 
+/*
+ * The thread the client registers (CreateThread, CreateRemoteThread) must be the thread of the handle it
+ * passes: process and thread ids read from the handle (ThreadBasicInformation) must equal the request's.
+ * CsrCreateThread stores the request's ids, and a remote registration locks the process the request names,
+ * so without this a client could add a thread with ids of its choice to any registered process. A thread of
+ * another process is still accepted when the client really holds a handle to it (CreateRemoteThread).
+ *
+ * ThreadHandle is the server's own duplicate: the client's handle value is fetched once, and the ids are
+ * checked on that duplicate, which is also the handle CsrCreateThread keeps (the client can change what
+ * its handle value refers to between two fetches).
+ */
+static
+NTSTATUS
+BaseSrvCheckNewThread(IN HANDLE ThreadHandle,
+                      IN PBASE_CREATE_THREAD Request)
+{
+    NTSTATUS Status;
+    THREAD_BASIC_INFORMATION ThreadInfo;
+
+    Status = NtQueryInformationThread(ThreadHandle, ThreadBasicInformation,
+                                      &ThreadInfo, sizeof(ThreadInfo), NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    if ((ThreadInfo.ClientId.UniqueProcess != Request->ClientId.UniqueProcess) ||
+        (ThreadInfo.ClientId.UniqueThread != Request->ClientId.UniqueThread))
+    {
+        return STATUS_INVALID_CID;
+    }
+    return STATUS_SUCCESS;
+}
+
 CSR_API(BaseSrvCreateThread)
 {
     NTSTATUS Status;
@@ -300,6 +330,27 @@ CSR_API(BaseSrvCreateThread)
         return STATUS_SUCCESS; // server-to-server
     }
 
+    /* Duplicate the thread handle so we can own it (the only fetch of the client's handle value) */
+    Status = NtDuplicateObject(CurrentThread->Process->ProcessHandle,
+                               CreateThreadRequest->ThreadHandle,
+                               NtCurrentProcess(),
+                               &ThreadHandle,
+                               0,
+                               0,
+                               DUPLICATE_SAME_ACCESS);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    /* The ids must be those of the thread this handle names (CsrCreateThread stores them) */
+    Status = BaseSrvCheckNewThread(ThreadHandle, CreateThreadRequest);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("BASESRV: thread %lx.%lx refused: %lx\n",
+                CreateThreadRequest->ClientId.UniqueProcess,
+                CreateThreadRequest->ClientId.UniqueThread, Status);
+        NtClose(ThreadHandle);
+        return Status;
+    }
+
     /* Get the CSR Process for this request */
     CsrProcess = CurrentThread->Process;
     if (CsrProcess->ClientId.UniqueProcess !=
@@ -309,31 +360,26 @@ CSR_API(BaseSrvCreateThread)
         if (CreateThreadRequest->ClientId.UniqueProcess == NtCurrentTeb()->ClientId.UniqueProcess)
         {
             /* Accept this without any further work */
+            NtClose(ThreadHandle);
             return STATUS_SUCCESS;
         }
 
         /* Get the real CSR Process for the remote thread's process */
         Status = CsrLockProcessByClientId(CreateThreadRequest->ClientId.UniqueProcess,
                                           &CsrProcess);
-        if (!NT_SUCCESS(Status)) return Status;
+        if (!NT_SUCCESS(Status))
+        {
+            NtClose(ThreadHandle);
+            return Status;
+        }
     }
 
-    /* Duplicate the thread handle so we can own it */
-    Status = NtDuplicateObject(CurrentThread->Process->ProcessHandle,
-                               CreateThreadRequest->ThreadHandle,
-                               NtCurrentProcess(),
-                               &ThreadHandle,
-                               0,
-                               0,
-                               DUPLICATE_SAME_ACCESS);
-    if (NT_SUCCESS(Status))
-    {
-        /* Call CSRSRV to tell it about the new thread */
-        Status = CsrCreateThread(CsrProcess,
-                                 ThreadHandle,
-                                 &CreateThreadRequest->ClientId,
-                                 TRUE);
-    }
+    /* Call CSRSRV to tell it about the new thread; it keeps the handle on success only */
+    Status = CsrCreateThread(CsrProcess,
+                             ThreadHandle,
+                             &CreateThreadRequest->ClientId,
+                             TRUE);
+    if (!NT_SUCCESS(Status)) NtClose(ThreadHandle);
 
     /* Unlock the process and return */
     if (CsrProcess != CurrentThread->Process) CsrUnlockProcess(CsrProcess);
