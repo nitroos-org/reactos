@@ -118,6 +118,28 @@ SmpDeleteSession(IN ULONG SessionId)
     }
 }
 
+/* Deletes the session record SessionId if it was allocated for Subsystem */
+NTSTATUS
+NTAPI
+SmpCompleteSession(
+    _In_ ULONG SessionId,
+    _In_ PSMP_SUBSYSTEM Subsystem)
+{
+    PSMP_SESSION Session;
+
+    RtlEnterCriticalSection(&SmpSessionListLock);
+    Session = SmpSessionIdToSession(SessionId);
+    if (!Session || (Session->Subsystem != Subsystem))
+    {
+        RtlLeaveCriticalSection(&SmpSessionListLock);
+        return Session ? STATUS_ACCESS_DENIED : STATUS_NOT_FOUND;
+    }
+    RemoveEntryList(&Session->Entry);
+    RtlLeaveCriticalSection(&SmpSessionListLock);
+    RtlFreeHeap(SmpHeap, 0, Session);
+    return STATUS_SUCCESS;
+}
+
 ULONG
 NTAPI
 SmpAllocateSessionId(IN PSMP_SUBSYSTEM Subsystem,
