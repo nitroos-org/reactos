@@ -4292,6 +4292,156 @@ error:
     RemoveDirectoryA("Al Same Long Name");
 }
 
+/* An administrative image holds every feature, whatever its Level (a package can mark features 32767 so that
+ * a normal install selects them by a property): the components of a Level 32767 feature land too, while a
+ * component whose condition is false does not. */
+static const CHAR alv_directory_dat[] = "Directory\tDirectory_Parent\tDefaultDir\n"
+                                        "s72\tS72\tl255\n"
+                                        "Directory\tDirectory\n"
+                                        "TARGETDIR\t\tSourceDir\n"
+                                        "ALVBIN\tTARGETDIR\tbin\n";
+
+static const CHAR alv_component_dat[] = "Component\tComponentId\tDirectory_\tAttributes\tCondition\tKeyPath\n"
+                                        "s72\tS38\ts72\ti2\tS255\tS72\n"
+                                        "Component\tComponent\n"
+                                        "clow\t{22222222-0000-0000-0000-00000000000A}\tALVBIN\t0\t\tflow\n"
+                                        "chigh\t{22222222-0000-0000-0000-00000000000B}\tALVBIN\t0\t\tfhigh\n"
+                                        "ccfg\t{22222222-0000-0000-0000-00000000000C}\tALVBIN\t0\t\tfcfg\n"
+                                        "cchild\t{22222222-0000-0000-0000-00000000000D}\tALVBIN\t0\t\tfchild\n"
+                                        "cnever\t{22222222-0000-0000-0000-00000000000E}\tALVBIN\t0\tALVNEVER = \"1\"\tfnever\n";
+
+static const CHAR alv_feature_dat[] = "Feature\tFeature_Parent\tTitle\tDescription\tDisplay\tLevel\tDirectory_\tAttributes\n"
+                                      "s38\tS38\tL64\tL255\tI2\ti2\tS72\ti2\n"
+                                      "Feature\tFeature\n"
+                                      "alow\t\tLow\tLow\t2\t1\tTARGETDIR\t0\n"
+                                      "ahigh\talow\tHigh\tHigh\t0\t32767\tTARGETDIR\t0\n"
+                                      "achild\tahigh\tChild\tChild\t0\t32767\tTARGETDIR\t0\n";
+
+static const CHAR alv_feature_comp_dat[] = "Feature_\tComponent_\n"
+                                           "s38\ts72\n"
+                                           "FeatureComponents\tFeature_\tComponent_\n"
+                                           "alow\tclow\n"
+                                           "ahigh\tchigh\n"
+                                           "ahigh\tccfg\n"
+                                           "achild\tcchild\n"
+                                           "alow\tcnever\n";
+
+static const CHAR alv_file_dat[] = "File\tComponent_\tFileName\tFileSize\tVersion\tLanguage\tAttributes\tSequence\n"
+                                   "s72\ts72\tl255\ti4\tS72\tS20\tI2\ti2\n"
+                                   "File\tFile\n"
+                                   "flow\tclow\tlow.txt\t500\t\t\t0\t1\n"
+                                   "fhigh\tchigh\thigh.txt\t500\t\t\t0\t2\n"
+                                   "fcfg\tccfg\thigh.cfg\t500\t\t\t0\t3\n"
+                                   "fchild\tcchild\tchild.txt\t500\t\t\t0\t4\n"
+                                   "fnever\tcnever\tnever.txt\t500\t\t\t0\t5\n";
+
+static const CHAR alv_media_dat[] = "DiskId\tLastSequence\tDiskPrompt\tCabinet\tVolumeLabel\tSource\n"
+                                    "i2\ti4\tL64\tS255\tS32\tS72\n"
+                                    "Media\tDiskId\n"
+                                    "1\t5\t\t\t\t\n"
+                                    "2\t6\t\t#alv.cab\t\t\n";
+
+static const msi_table alv_tables[] =
+{
+    ADD_TABLE(alv_directory),
+    ADD_TABLE(alv_component),
+    ADD_TABLE(alv_feature),
+    ADD_TABLE(alv_feature_comp),
+    ADD_TABLE(alv_file),
+    ADD_TABLE(alv_media),
+    ADD_TABLE(property),
+    ADD_TABLE(al_admin_exec_seq),
+};
+
+static void test_admin_levels(void)
+{
+    static const char *files[] = { "low.txt", "high.txt", "high.cfg", "child.txt", "never.txt" };
+    char image[MAX_PATH], props[2 * MAX_PATH], path[MAX_PATH];
+    MSIHANDLE hdb, view, rec;
+    UINT r;
+    int i;
+
+    CreateDirectoryA("bin", NULL);
+    for (i = 0; i < ARRAY_SIZE(files); i++)
+    {
+        sprintf(path, "bin\\%s", files[i]);
+        create_file(path, 500);
+    }
+    /* a second disk whose cabinet is embedded in the package (no file is on it, so it is never read) */
+    create_file("alv.cab", 100000);
+
+    create_database(msifile, alv_tables, ARRAY_SIZE(alv_tables));
+
+    r = MsiOpenDatabaseA(msifile, (const char *)MSIDBOPEN_TRANSACT, &hdb);
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+    r = MsiDatabaseOpenViewA(hdb, "INSERT INTO `_Streams` ( `Name`, `Data` ) VALUES ( ?, ? )", &view);
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+    rec = MsiCreateRecord(2);
+    MsiRecordSetStringA(rec, 1, "alv.cab");
+    r = MsiRecordSetStreamA(rec, 2, "alv.cab");
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+    r = MsiViewExecute(view, rec);
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+    MsiCloseHandle(rec);
+    MsiViewClose(view);
+    MsiCloseHandle(view);
+    r = MsiDatabaseCommit(hdb);
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+    MsiCloseHandle(hdb);
+    DeleteFileA("alv.cab");
+
+    sprintf(image, "%s\\admlevels", CURR_DIR);
+    CreateDirectoryA(image, NULL);
+    MsiSetInternalUI(INSTALLUILEVEL_NONE, NULL);
+    sprintf(props, "ACTION=ADMIN TARGETDIR=\"%s\"", image);
+    r = MsiInstallProductA(msifile, props);
+    if (r == ERROR_INSTALL_PACKAGE_REJECTED)
+    {
+        skip("Not enough rights to perform tests\n");
+        goto error;
+    }
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+
+    for (i = 0; i < ARRAY_SIZE(files); i++)
+    {
+        BOOL expect = strcmp(files[i], "never.txt") != 0;
+        sprintf(path, "%s\\bin\\%s", image, files[i]);
+        ok((GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) == expect,
+           "%s: expected %s in the admin image\n", files[i], expect ? "present" : "absent");
+        DeleteFileA(path);
+    }
+
+    /* the copy of the package has lost the embedded cabinet stream */
+    sprintf(path, "%s\\msitest.msi", image);
+    r = MsiOpenDatabaseA(path, (const char *)MSIDBOPEN_READONLY, &hdb);
+    ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+    if (!r)
+    {
+        r = MsiDatabaseOpenViewA(hdb, "SELECT `Name` FROM `_Streams` WHERE `Name` = 'alv.cab'", &view);
+        ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+        r = MsiViewExecute(view, 0);
+        ok(r == ERROR_SUCCESS, "Expected ERROR_SUCCESS, got %u\n", r);
+        r = MsiViewFetch(view, &rec);
+        ok(r == ERROR_NO_MORE_ITEMS, "the cabinet stream is still in the image: %u\n", r);
+        if (!r) MsiCloseHandle(rec);
+        MsiViewClose(view);
+        MsiCloseHandle(view);
+        MsiCloseHandle(hdb);
+    }
+    delete_image(image, "msitest.msi", TRUE);
+    delete_image(image, "bin", FALSE);
+    RemoveDirectoryA(image);
+
+error:
+    DeleteFileA(msifile);
+    for (i = 0; i < ARRAY_SIZE(files); i++)
+    {
+        sprintf(path, "bin\\%s", files[i]);
+        DeleteFileA(path);
+    }
+    RemoveDirectoryA("bin");
+}
+
 /* An administrative image of a product that is installed: no error, no change to the installed
    product or its cached package, and the image is made from the package given. */
 static void test_admin_installed(void)
@@ -6858,6 +7008,7 @@ START_TEST(install)
     test_currentworkingdir();
     test_admin();
     test_admin_layout();
+    test_admin_levels();
     test_admin_installed();
     test_adminprops();
     test_missingcab();
