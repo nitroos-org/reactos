@@ -92,6 +92,8 @@ static LONG PayloadSize(UINT Msg, WPARAM Wparam, LONG Size)
         return Size == sizeof(MEASUREITEMSTRUCT) ? sizeof(MEASUREITEM32) : -2;
     case WM_DRAWITEM:
         return Size == sizeof(DRAWITEMSTRUCT) ? sizeof(DRAWITEM32) : -2;
+    case WM_HELP:
+        return Size == sizeof(HELPINFO) ? sizeof(HELPINFO32) : -2;
     case WM_COPYDATA:
         /* The record is followed by its cbData bytes */
         return Size >= sizeof(COPYDATASTRUCT) ? Size - sizeof(COPYDATASTRUCT) + sizeof(COPYDATA32) : -2;
@@ -144,6 +146,8 @@ static VOID PackPayload(PVOID To, const PVOID From, UINT Msg, WPARAM Wparam, ULO
         Guest->rcItem = Native->rcItem; Guest->itemData = (ULONG)Native->itemData;
         break;
     }
+    case WM_HELP:
+        HelpNativeTo32(To, From); break;
     case WM_COPYDATA:
     {
         const COPYDATASTRUCT *Native = From;
@@ -206,6 +210,9 @@ static VOID UnpackPayload(PVOID To, const PVOID From, UINT Msg, WPARAM Wparam, U
         if (Guest->itemData != (ULONG)Native->itemData) Native->itemData = Guest->itemData;
         break;
     }
+    case WM_HELP:
+        /* the whole record is the reply, as win32k copies it back */
+        Help32ToNative(To, From); break;
     case WM_GETMINMAXINFO: case WM_GETTEXT: case WM_STYLECHANGING: case WM_SIZING: case WM_MOVING:
         RtlCopyMemory(To, From, Size); break;
     }

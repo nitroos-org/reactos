@@ -77,6 +77,8 @@ typedef struct
     UINT CtlType, CtlID, itemID, itemAction, itemState;
     ULONG hwndItem, hDC; RECT rcItem; ULONG itemData;
 } DRAWITEM32;
+typedef struct { UINT cbSize; INT iContextType, iCtrlId; ULONG hItemHandle, dwContextId; POINT MousePos; } HELPINFO32;
+C_ASSERT(sizeof(HELPINFO32) == 28);
 C_ASSERT(sizeof(STRING32) == 8);
 C_ASSERT(sizeof(MSG32) == 28);
 C_ASSERT(sizeof(PAINT32) == 64);
@@ -97,6 +99,8 @@ VOID Create32ToNative(CREATESTRUCTW *To, const CREATE32 *From);
 VOID CreateNativeTo32(CREATE32 *To, const CREATESTRUCTW *From);
 VOID WindowPos32ToNative(WINDOWPOS *To, const WINDOWPOS32 *From);
 VOID WindowPosNativeTo32(WINDOWPOS32 *To, const WINDOWPOS *From);
+VOID Help32ToNative(HELPINFO *To, const HELPINFO32 *From);
+VOID HelpNativeTo32(HELPINFO32 *To, const HELPINFO *From);
 ULONG_PTR Wow64WinUserService(ULONG Number, ULONG *a);
 ULONG_PTR Wow64WinExtraService(ULONG Number, ULONG *a);
 ULONG_PTR Wow64WinGdiService(ULONG Number, ULONG *a);

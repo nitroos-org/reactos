@@ -65,6 +65,7 @@ extern void func_SetParentCrossProcess(void);
 extern void func_SetParentKillOrder(void);
 extern void func_WmCancelModeLastError(void);
 extern void func_WmGetDlgCode(void);
+extern void func_WmPointerMessages(void);
 extern void func_InitializeLpkHooks(void);
 extern void func_IsDialogMessage(void);
 extern void func_IsServerSideWindow(void);
@@ -218,6 +219,7 @@ const struct test winetest_testlist[] =
     { "SetParentKillOrder", func_SetParentKillOrder },
     { "WmCancelModeLastError", func_WmCancelModeLastError },
     { "WmGetDlgCode", func_WmGetDlgCode },
+    { "WmPointerMessages", func_WmPointerMessages },
     { "InitializeLpkHooks", func_InitializeLpkHooks },
     { "IsDialogMessage", func_IsDialogMessage },
     { "IsServerSideWindow", func_IsServerSideWindow },

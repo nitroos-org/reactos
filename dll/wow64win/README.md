@@ -39,6 +39,14 @@ removal remains with the i386 unwinder. Callback allocation touches guest
 stack pages in order to grow the guard page, preserving the reserved stack
 guarantee. Normal returns preserve changes to x87 and MXCSR control state.
 
+System messages with a pointer lParam: WM_CREATE, WM_NCCREATE, WM_NCCALCSIZE, WM_WINDOWPOS*, WM_MEASUREITEM,
+WM_DRAWITEM, WM_COPYDATA and WM_HELP (HELPINFO, 28/40 bytes) are translated in both directions, including the
+kernel-to-window callbacks. win32k keeps no size for WM_COMPAREITEM, WM_DELETEITEM, WM_MDICREATE, WM_MENUGETOBJECT and
+CB_GETCOMBOBOXINFO and hands the pointer to the window procedure unread, so a guest pointer travels as it is
+(zero-extended) when the receiver is a window of this process and the send waits for it; a window of another process,
+SendNotifyMessage and callback sends are refused. Still unsupported with a non-NULL lParam: WM_NEXTMENU, WM_DRAG*,
+WM_DROPOBJECT, IME and DDE messages, WM_COPYGLOBALDATA.
+
 Current limits include hooks on threads of other processes, journal hooks,
 DDE conversation callbacks, IME callbacks,
 remaining private structures, printer driver pointers, and unconverted
