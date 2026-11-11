@@ -37,6 +37,16 @@ NTSTATUS TdiListen(
     PIO_COMPLETION_ROUTINE CompletionRoutine,
     PVOID CompletionContext);
 
+/* The same with TDI request flags; AFD states in the upper 16 bits how many connections it has room for */
+NTSTATUS TdiListenEx(
+    PIRP * Irp,
+    PFILE_OBJECT ConnectionObject,
+    PTDI_CONNECTION_INFORMATION * RequestConnectionInfo,
+    PTDI_CONNECTION_INFORMATION * ReturnConnectionInfo,
+    PIO_COMPLETION_ROUTINE CompletionRoutine,
+    PVOID CompletionContext,
+    ULONG Flags);
+
 NTSTATUS TdiAccept(
     PIRP * Irp,
     PFILE_OBJECT AcceptConnectionObject,
