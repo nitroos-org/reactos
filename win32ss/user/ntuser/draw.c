@@ -14,6 +14,59 @@
 #include <win32k.h>
 DBG_DEFAULT_CHANNEL(UserDefwnd);
 
+/*
+ * Fonts of the frame controls (Marlett glyphs for caption, scroll, menu and check marks).
+ * A frame control used to create a logical font for every button it drew; realizing it
+ * (choosing the best installed face) costs more than drawing the glyph, and a window shown
+ * or a scroll bar repainted draws several. The few distinct requests (the sizes follow
+ * the system metrics) keep their font in a small table, owned by the system. The
+ * table is only used with the USER lock held, like the callers. When it is full,
+ * further requests behave as before: a font created and deleted per use.
+ */
+#define MAX_CACHED_FONTS 16
+static struct
+{
+    LOGFONTW lf;
+    HFONT hFont;
+} gCachedFonts[MAX_CACHED_FONTS];
+static UINT gcCachedFonts = 0;
+
+HFONT FASTCALL
+IntGetCachedFont(const LOGFONTW *plf)
+{
+    UINT i;
+    HFONT hFont;
+
+    for (i = 0; i < gcCachedFonts; i++)
+    {
+        if (RtlEqualMemory(&gCachedFonts[i].lf, plf, sizeof(LOGFONTW)))
+            return gCachedFonts[i].hFont;
+    }
+
+    hFont = GreCreateFontIndirectW(plf);
+    if (hFont && gcCachedFonts < MAX_CACHED_FONTS)
+    {
+        GreSetObjectOwner(hFont, GDI_OBJ_HMGR_PUBLIC);
+        gCachedFonts[gcCachedFonts].lf = *plf;
+        gCachedFonts[gcCachedFonts].hFont = hFont;
+        gcCachedFonts++;
+    }
+    return hFont;
+}
+
+VOID FASTCALL
+IntReleaseCachedFont(HFONT hFont)
+{
+    UINT i;
+
+    for (i = 0; i < gcCachedFonts; i++)
+    {
+        if (gCachedFonts[i].hFont == hFont)
+            return;
+    }
+    GreDeleteObject(hFont);
+}
+
 /* These tables are used in:
  * UITOOLS_DrawDiagEdge()
  * UITOOLS_DrawRectEdge()
@@ -693,7 +746,7 @@ BOOL FASTCALL UITOOLS95_DFC_ButtonCheckRadio(HDC dc, LPRECT r, UINT uFlags, BOOL
     lf.lfWeight = FW_NORMAL;
     lf.lfCharSet = DEFAULT_CHARSET;
     RtlCopyMemory(lf.lfFaceName, L"Marlett", sizeof(L"Marlett"));
-    hFont = GreCreateFontIndirectW(&lf);
+    hFont = IntGetCachedFont(&lf);
     hOldFont = NtGdiSelectFont(dc, hFont);
 
     nBkMode = GreGetBkMode(dc);
@@ -749,7 +802,7 @@ BOOL FASTCALL UITOOLS95_DFC_ButtonCheckRadio(HDC dc, LPRECT r, UINT uFlags, BOOL
 
     IntGdiSetTextColor(dc, IntGetSysColor(COLOR_WINDOWTEXT));
     NtGdiSelectFont(dc, hOldFont);
-    GreDeleteObject(hFont);
+    IntReleaseCachedFont(hFont);
     IntGdiSetBkMode(dc, nBkMode);
 
     return TRUE;
@@ -829,7 +882,7 @@ BOOL FASTCALL UITOOLS95_DrawFrameCaption(HDC dc, LPRECT r, UINT uFlags)
     lf.lfCharSet = DEFAULT_CHARSET;
     lf.lfQuality = NONANTIALIASED_QUALITY;
     RtlCopyMemory(lf.lfFaceName, L"Marlett", sizeof(L"Marlett"));
-    hFont = GreCreateFontIndirectW(&lf);
+    hFont = IntGetCachedFont(&lf);
     /* save font and text color */
     hOldFont = NtGdiSelectFont(dc, hFont);
     clrsave = GreGetTextColor(dc);
@@ -849,7 +902,7 @@ BOOL FASTCALL UITOOLS95_DrawFrameCaption(HDC dc, LPRECT r, UINT uFlags)
     IntGdiSetTextColor(dc, clrsave);
     NtGdiSelectFont(dc, hOldFont);
     IntGdiSetBkMode(dc, bkmode);
-    GreDeleteObject(hFont);
+    IntReleaseCachedFont(hFont);
     return TRUE;
 }
 
@@ -889,7 +942,7 @@ BOOL FASTCALL UITOOLS95_DrawFrameScroll(HDC dc, LPRECT r, UINT uFlags)
 		lf.lfWeight = FW_NORMAL;
 		lf.lfCharSet = DEFAULT_CHARSET;
 		RtlCopyMemory(lf.lfFaceName, L"Marlett", sizeof(L"Marlett"));
-		hFont = GreCreateFontIndirectW(&lf);
+		hFont = IntGetCachedFont(&lf);
 		/* save font and text color */
 		hOldFont = NtGdiSelectFont(dc, hFont);
 		clrsave = GreGetTextColor(dc);
@@ -912,7 +965,7 @@ BOOL FASTCALL UITOOLS95_DrawFrameScroll(HDC dc, LPRECT r, UINT uFlags)
 		IntGdiSetTextColor(dc, clrsave);
 		NtGdiSelectFont(dc, hOldFont);
 		IntGdiSetBkMode(dc, bkmode);
-		GreDeleteObject(hFont);
+		IntReleaseCachedFont(hFont);
             return TRUE;
 	default:
 	    ERR("Invalid scroll; flags=0x%04x\n", uFlags);
@@ -932,7 +985,7 @@ BOOL FASTCALL UITOOLS95_DrawFrameScroll(HDC dc, LPRECT r, UINT uFlags)
     lf.lfWeight = FW_NORMAL;
     lf.lfCharSet = DEFAULT_CHARSET;
     RtlCopyMemory(lf.lfFaceName, L"Marlett", sizeof(L"Marlett"));
-    hFont = GreCreateFontIndirectW(&lf);
+    hFont = IntGetCachedFont(&lf);
     /* save font and text color */
     hOldFont = NtGdiSelectFont(dc, hFont);
     clrsave = GreGetTextColor(dc);
@@ -952,7 +1005,7 @@ BOOL FASTCALL UITOOLS95_DrawFrameScroll(HDC dc, LPRECT r, UINT uFlags)
     IntGdiSetTextColor(dc, clrsave);
     NtGdiSelectFont(dc, hOldFont);
     IntGdiSetBkMode(dc, bkmode);
-    GreDeleteObject(hFont);
+    IntReleaseCachedFont(hFont);
     return TRUE;
 }
 
@@ -1002,7 +1055,7 @@ BOOL FASTCALL UITOOLS95_DrawFrameMenu(HDC dc, LPRECT r, UINT uFlags)
     lf.lfWeight = FW_NORMAL;
     lf.lfCharSet = DEFAULT_CHARSET;
     RtlCopyMemory(lf.lfFaceName, L"Marlett", sizeof(L"Marlett"));
-    hFont = GreCreateFontIndirectW(&lf);
+    hFont = IntGetCachedFont(&lf);
     /* save font */
     hOldFont = NtGdiSelectFont(dc, hFont);
 
@@ -1023,7 +1076,7 @@ BOOL FASTCALL UITOOLS95_DrawFrameMenu(HDC dc, LPRECT r, UINT uFlags)
     GreTextOutW(dc, myr.left, myr.top, &Symbol, 1);
     /* restore previous settings */
     NtGdiSelectFont(dc, hOldFont);
-    GreDeleteObject(hFont);
+    IntReleaseCachedFont(hFont);
     return TRUE;
 }
 
