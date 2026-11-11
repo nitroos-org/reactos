@@ -104,6 +104,7 @@ extern void func_ScrollBarWndExtra(void);
 extern void func_ScrollDC(void);
 extern void func_ScrollWindowEx(void);
 extern void func_SendMessageCallbackSenderDied(void);
+extern void func_SendMessageCallbackReceiverExit(void);
 extern void func_SendMessageSenderDied(void);
 extern void func_SendMessageTimeout(void);
 extern void func_SendMessageCopyData(void);
@@ -256,6 +257,7 @@ const struct test winetest_testlist[] =
     { "ScrollDC", func_ScrollDC },
     { "ScrollWindowEx", func_ScrollWindowEx },
     { "SendMessageCallbackSenderDied", func_SendMessageCallbackSenderDied },
+    { "SendMessageCallbackReceiverExit", func_SendMessageCallbackReceiverExit },
     { "SendMessageSenderDied", func_SendMessageSenderDied },
     { "SendMessageTimeout", func_SendMessageTimeout },
     { "SendMessageCopyData", func_SendMessageCopyData },

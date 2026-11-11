@@ -104,6 +104,7 @@ list(APPEND SOURCE
     ScrollDC.c
     ScrollWindowEx.c
     SendMessageCallbackSenderDied.c
+    SendMessageCallbackReceiverExit.c
     SendMessageSenderDied.c
     SendMessageTimeout.c
     SendMessageCopyData.c
