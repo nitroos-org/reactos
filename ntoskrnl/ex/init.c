@@ -740,6 +740,13 @@ ExpInitSystemPhase1(VOID)
         return FALSE;
     }
 
+    /* Initialize the wait completion packet object type */
+    if (ExpInitializeWaitCompletionPacketImplementation() == FALSE)
+    {
+        DPRINT1("Executive: Wait completion packet initialization failed\n");
+        return FALSE;
+    }
+
     /* Initialize Win32K */
     if (ExpWin32kInit() == FALSE)
     {

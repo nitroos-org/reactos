@@ -51,6 +51,7 @@ list(APPEND SOURCE
     NtQueryWnfStateData.c
     NtAlertThreadByThreadId.c
     NtAllocateReserveObject.c
+    NtWaitCompletionPacket.c
     RtlWin10Helpers.c
     RtlConvertDeviceFamilyInfo.c
     ZeroBits.c

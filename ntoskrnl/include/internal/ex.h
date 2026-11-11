@@ -360,6 +360,14 @@ BOOLEAN
 NTAPI
 ExpInitializeReserveObjectImplementation(VOID);
 
+CODE_SEG("INIT")
+BOOLEAN
+NTAPI
+ExpInitializeWaitCompletionPacketImplementation(VOID);
+
+/* The object type of NtCreateTimer2 timers (ex/timer.c) */
+extern POBJECT_TYPE ExpIRTimerType;
+
 /* NtAllocateReserveObject: the body of a UserApcReserve / IoCompletionReserve object. The APC storage of the
  * reserve is used by NtQueueApcThreadEx; InUse is 1 from the queueing until the APC was delivered or rundown. */
 typedef struct _EX_RESERVE_OBJECT
