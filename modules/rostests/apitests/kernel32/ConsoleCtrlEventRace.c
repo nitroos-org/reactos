@@ -31,6 +31,7 @@
  * the cap-refusal path itself is bounded in code, not forced at runtime here.
  */
 #define RACE_MS             15000
+#define MAX_UNHANDLED       64
 #define SPAWNERS            2
 #define ATTACHERS           2
 #define CHILD_TIMEOUT_MS    (RACE_MS + 60000)
@@ -45,7 +46,7 @@
 
 static WCHAR FileName[MAX_PATH];
 static volatile LONG Stop;
-static LONG Events, Spawned, Handled, HandledC, HandledBreak;
+static LONG Events, Sent, Spawned, Handled, HandledC, HandledBreak;
 
 static
 BOOL
@@ -86,11 +87,26 @@ EventThread(
 {
     UNREFERENCED_PARAMETER(Parameter);
 
-    /* A target that exits meanwhile can make the call fail; only a hang counts here */
+    /*
+     * A target that exits meanwhile can make the call fail; only a hang counts here.
+     * The console server starts a thread, with a stack of its own, in every process on the
+     * console for every event. A process that is not running yet (one just created, one
+     * that is attaching) cannot run the threads as fast as events come: events sent in a
+     * tight loop pile up a thousand threads in it, each with a 1 MB stack, and a 32-bit
+     * process is out of address space (a debug build, which prints from every handler,
+     * gets there in seconds). The race is between the events and the creation, attach and
+     * exit of processes, not the rate: send an event every timer tick, and not more while
+     * this process has many it has not handled.
+     */
     while (!Stop)
     {
-        GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0);
-        InterlockedIncrement(&Events);
+        if (Sent - Handled <= MAX_UNHANDLED)
+        {
+            if (GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0))
+                InterlockedIncrement(&Sent);
+            InterlockedIncrement(&Events);
+        }
+        Sleep(1);
     }
     return 0;
 }
