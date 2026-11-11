@@ -896,6 +896,7 @@ extern ULONG MmNitroSessions;
 /* Session images (NitroSessions) */
 BOOLEAN NTAPI MmIsSessionImage(_In_ PVOID ImageHandle);
 PVOID NTAPI MmGetWin32kSessionImage(VOID);
+BOOLEAN NTAPI MmIsWin32kASessionImage(VOID);
 VOID NTAPI MmSetWin32kSessionImage(_In_ PVOID ImageHandle);
 VOID NTAPI MmSetWin32kLoadedInCurrentSession(VOID);
 BOOLEAN NTAPI MmIsWin32kLoadedInCurrentSession(VOID);

@@ -73,6 +73,10 @@ ULONG MmNitroSessions;
 /* win32k, when it is a session image */
 static PLDR_DATA_TABLE_ENTRY MiWin32kSessionImage;
 
+/* Set once win32k was loaded as a session image, never cleared: its callouts stay registered after the
+   last instance goes, so the GUI-thread guard must keep refusing sessions without win32k */
+static BOOLEAN MiWin32kWasSessionImage;
+
 static LIST_ENTRY MiSessionImageList = { &MiSessionImageList, &MiSessionImageList };
 static RTL_BITMAP MiSessionImageBitmap;
 static PULONG MiSessionImageBitmapBuffer;
@@ -696,7 +700,18 @@ NTAPI
 MmSetWin32kSessionImage(
     _In_ PVOID ImageHandle)
 {
-    if (MiIsSessionImage(ImageHandle)) MiWin32kSessionImage = ImageHandle;
+    if (MiIsSessionImage(ImageHandle))
+    {
+        MiWin32kSessionImage = ImageHandle;
+        MiWin32kWasSessionImage = TRUE;
+    }
+}
+
+BOOLEAN
+NTAPI
+MmIsWin32kASessionImage(VOID)
+{
+    return MiWin32kWasSessionImage;
 }
 
 /* win32k's DriverEntry succeeded in the current session */
