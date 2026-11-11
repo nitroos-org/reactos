@@ -159,6 +159,7 @@ SmSendMsgToSm(
         sizeof(SM_LOAD_DEFERED_SUBSYSTEM_MSG),
         sizeof(SM_START_CSR_MSG),
         sizeof(SM_STOP_CSR_MSG),
+        sizeof(SM_FORWARD_PROCESS_REGISTRATION_MSG),
     };
 
     NTSTATUS Status;
@@ -461,5 +462,44 @@ SmStopCsr(
 
     /* Send the message and wait for a reply */
     SmApiMsg.ApiNumber = SmpStopCsrApi;
+    return SmSendMsgToSm(SmApiPort, &SmApiMsg);
+}
+
+/**
+ * @brief
+ * NitroOS: asks SMSS to register a process created into another session
+ * with the csrss of that session. SMSS serves it only for a csrss it
+ * started itself.
+ *
+ * @param[in]   SmApiPort
+ * The SM API port handle of the calling csrss.
+ *
+ * @param[in]   ClientId
+ * The new process and its first thread.
+ *
+ * @param[in]   MuSessionId
+ * The session the process is in.
+ *
+ * @param[in]   Flags
+ * SM_REMOTE_PROCESS_* flags.
+ *
+ * @return
+ * The status of the registration in the target csrss.
+ **/
+NTSTATUS
+NTAPI
+SmForwardProcessRegistration(
+    _In_ HANDLE SmApiPort,
+    _In_ PCLIENT_ID ClientId,
+    _In_ ULONG MuSessionId,
+    _In_ ULONG Flags)
+{
+    SM_API_MSG SmApiMsg = {0};
+
+    SmApiMsg.u.ForwardRegistration.ClientId = *ClientId;
+    SmApiMsg.u.ForwardRegistration.MuSessionId = MuSessionId;
+    SmApiMsg.u.ForwardRegistration.Flags = Flags;
+
+    SmApiMsg.ApiNumber = SmpForwardProcessRegistrationApi;
     return SmSendMsgToSm(SmApiPort, &SmApiMsg);
 }

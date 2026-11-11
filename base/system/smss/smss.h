@@ -259,6 +259,14 @@ SmpUnhandledExceptionFilter(
 #define SMP_NITRO_SESSIONS_CSR_START(f) (((f) == SMP_NITRO_SESSIONS_CSR) || ((f) == SMP_NITRO_SESSIONS_WIN32K))
 
 extern ULONG SmpNitroSessions;
+
+NTSTATUS
+NTAPI
+SmpSbCreateRemoteProcessEx(
+    _In_ PCLIENT_ID ClientId,
+    _In_ ULONG TargetSessionId,
+    _In_ ULONG MuSessionId,
+    _In_ ULONG Flags);
 extern RTL_CRITICAL_SECTION SmpMuSessionLock;
 
 NTSTATUS

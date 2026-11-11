@@ -35,6 +35,7 @@
  */
 ULONG SmpNitroSessions;
 static ULONG SmpNitroSessionsTestKill;
+static ULONG SmpNitroSessionsTestForward;
 UNICODE_STRING SmpNitroSessionsTestCommand;
 UNICODE_STRING SmpNitroSessionsTestCommand0;
 
@@ -105,6 +106,7 @@ SmpReadNitroSessionsConfig(VOID)
 
     SmpNitroSessions = 0;
     SmpNitroSessionsTestKill = 0;
+    SmpNitroSessionsTestForward = 0;
     RtlInitEmptyUnicodeString(&SmpNitroSessionsTestCommand, NULL, 0);
     RtlInitEmptyUnicodeString(&SmpNitroSessionsTestCommand0, NULL, 0);
 
@@ -156,6 +158,21 @@ SmpReadNitroSessionsConfig(VOID)
                 (Info->DataLength == sizeof(ULONG)))
             {
                 SmpNitroSessionsTestKill = *(PULONG)Info->Data;
+            }
+
+            /* Test only: SMSS checks that session 1's csrss refuses bad SbCreateRemoteProcess requests */
+            RtlInitUnicodeString(&ValueName, L"NitroSessionsTestForward");
+            Status = NtQueryValueKey(KeyHandle,
+                                     &ValueName,
+                                     KeyValuePartialInformation,
+                                     Info,
+                                     sizeof(Buffer),
+                                     &ResultLength);
+            if (NT_SUCCESS(Status) &&
+                (Info->Type == REG_DWORD) &&
+                (Info->DataLength == sizeof(ULONG)))
+            {
+                SmpNitroSessionsTestForward = *(PULONG)Info->Data;
             }
         }
     }
@@ -367,6 +384,119 @@ SmpNitroDetach(VOID)
 }
 
 /*
+ * Test only (NitroSessionsTestForward = 1 with NitroSessions 4 or 5): the
+ * target csrss's own checks of SbCreateRemoteProcess. Only SMSS can send it,
+ * so SMSS sends the bad requests that a correct basesrv never forwards:
+ * - a process of another session (SMSS itself, which is in none);
+ * - a thread that is not one of the process's;
+ * - another session in the request than the csrss's;
+ * - unknown flags;
+ * - csrss itself;
+ * - a process that is registered already (the test command).
+ * Each must be refused with its own status, and nothing is registered.
+ */
+
+/* A thread of the process, from the system process list */
+static
+HANDLE
+SmpNitroThreadOf(
+    _In_ HANDLE ProcessId)
+{
+    NTSTATUS Status;
+    ULONG Size = 0x20000;
+    PUCHAR Buffer;
+    PSYSTEM_PROCESS_INFORMATION Info;
+    PSYSTEM_THREAD_INFORMATION Threads;
+    HANDLE ThreadId = NULL;
+
+    for (;;)
+    {
+        Buffer = RtlAllocateHeap(SmpHeap, 0, Size);
+        if (!Buffer) return NULL;
+        Status = NtQuerySystemInformation(SystemProcessInformation, Buffer, Size, NULL);
+        if (Status != STATUS_INFO_LENGTH_MISMATCH) break;
+        RtlFreeHeap(SmpHeap, 0, Buffer);
+        Size *= 2;
+        if (Size > 0x1000000) return NULL;
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        Info = (PSYSTEM_PROCESS_INFORMATION)Buffer;
+        for (;;)
+        {
+            if ((Info->UniqueProcessId == ProcessId) && Info->NumberOfThreads)
+            {
+                Threads = (PSYSTEM_THREAD_INFORMATION)(Info + 1);
+                ThreadId = Threads[0].ClientId.UniqueThread;
+                break;
+            }
+            if (!Info->NextEntryOffset) break;
+            Info = (PSYSTEM_PROCESS_INFORMATION)((PUCHAR)Info + Info->NextEntryOffset);
+        }
+    }
+    RtlFreeHeap(SmpHeap, 0, Buffer);
+    return ThreadId;
+}
+
+static
+VOID
+SmpNitroForwardCase(
+    _In_ PCSTR Name,
+    _In_ HANDLE ProcessId,
+    _In_ HANDLE ThreadId,
+    _In_ ULONG TargetSessionId,
+    _In_ ULONG MessageSessionId,
+    _In_ ULONG Flags,
+    _In_ NTSTATUS Expected)
+{
+    CLIENT_ID ClientId;
+    NTSTATUS Status;
+
+    ClientId.UniqueProcess = ProcessId;
+    ClientId.UniqueThread = ThreadId;
+    Status = SmpSbCreateRemoteProcessEx(&ClientId, TargetSessionId, MessageSessionId, Flags);
+    DPRINT1("SMSS: NitroSessions: forward self-test %s (%p.%p) Status=%lx expect=%lx %s\n",
+            Name, ProcessId, ThreadId, Status, Expected,
+            (Status == Expected) ? "PASS" : "FAIL");
+}
+
+static
+VOID
+SmpNitroForwardSelfTest(
+    _In_ ULONG MuSessionId,
+    _In_ HANDLE CsrProcessId,
+    _In_ HANDLE TestProcessId)
+{
+    HANDLE SmssProcessId = NtCurrentTeb()->ClientId.UniqueProcess;
+    HANDLE SmssThreadId = NtCurrentTeb()->ClientId.UniqueThread;
+    HANDLE TestThreadId = SmpNitroThreadOf(TestProcessId);
+    HANDLE CsrThreadId = SmpNitroThreadOf(CsrProcessId);
+
+    DPRINT1("SMSS: NitroSessions: forward self-test, session %lu, test command %p.%p, csrss %p.%p\n",
+            MuSessionId, TestProcessId, TestThreadId, CsrProcessId, CsrThreadId);
+    if (!TestThreadId || !CsrThreadId)
+    {
+        DPRINT1("SMSS: NitroSessions: forward self-test FAIL (no thread ids)\n");
+        return;
+    }
+
+    SmpNitroForwardCase("process-of-another-session", SmssProcessId, SmssThreadId,
+                        MuSessionId, MuSessionId, 0, STATUS_ACCESS_DENIED);
+    SmpNitroForwardCase("thread-of-another-process", TestProcessId, SmssThreadId,
+                        MuSessionId, MuSessionId, 0, STATUS_INVALID_CID);
+    SmpNitroForwardCase("other-session-in-request", TestProcessId, TestThreadId,
+                        MuSessionId, 0, 0, STATUS_INVALID_PARAMETER);
+    SmpNitroForwardCase("unknown-flags", TestProcessId, TestThreadId,
+                        MuSessionId, MuSessionId, 0x80, STATUS_INVALID_PARAMETER);
+    SmpNitroForwardCase("csrss-itself", CsrProcessId, CsrThreadId,
+                        MuSessionId, MuSessionId, 0, STATUS_ACCESS_DENIED);
+    SmpNitroForwardCase("already-registered", TestProcessId, TestThreadId,
+                        MuSessionId, MuSessionId, 0, STATUS_OBJECT_NAME_COLLISION);
+}
+
+/*
+
  * Flag 4 (phase P2): session 1 with its own csrss. Runs once, from the main
  * thread, after session 0's initial command is started and SMSS has detached
  * from session 0. Every step runs under SmpMuSessionLock.
@@ -488,7 +618,12 @@ SmpStartNitroCsrSession(VOID)
         DPRINT1("SMSS: NitroSessions: still attached to session %lu, no test command in no session\n",
                 AttachedSessionId);
     }
-    else if (SmpNitroSessionsTestCommand0.Length)
+    else if (SmpNitroSessionsTestForward && !SmpNitroSessionsTestKill && TestProcessId && CsrProcessId)
+    {
+        /* SMSS is in no session again, so it is a process of another session */
+        SmpNitroForwardSelfTest(MuSessionId, CsrProcessId, TestProcessId);
+    }
+    if (NT_SUCCESS(Status2) && SmpNitroSessionsTestCommand0.Length)
     {
         Status2 = SmpExecuteCommand(&SmpNitroSessionsTestCommand0, 0, NULL, SMP_ASYNC_FLAG);
         DPRINT1("SMSS: NitroSessions: test command '%wZ' in no session, Status=%lx\n",

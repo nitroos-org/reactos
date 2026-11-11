@@ -305,6 +305,13 @@ CsrCreateProcessWithHandleList(IN HANDLE hProcess,
                  IN ULONG HandleCount,
                  IN HANDLE PseudoConsoleProcessId);
 
+/* NitroOS: register a process the client created into another session with that session's csrss */
+NTSTATUS
+NTAPI
+CsrForwardProcessRegistration(IN PCLIENT_ID ClientId,
+                              IN ULONG MuSessionId,
+                              IN ULONG Flags);
+
 NTSTATUS
 NTAPI
 CsrCreateRemoteThread(IN HANDLE hThread,
