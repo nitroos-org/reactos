@@ -2945,6 +2945,7 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     } NativeAttributes;
     ULONG NativeAttributeCount = 0, TokenSession = 0, TokenSessionLength;
     BOOLEAN UseTokenSession = FALSE;
+    DWORD CrossSessionConsole = 0;
     PRTL_USER_PROCESS_PARAMETERS ProcessParameters;
     UNICODE_STRING DebuggerString;
     BOOL Result;
@@ -4807,6 +4808,7 @@ StartScan:
         /* Not allowed to pick the session: in ours, as before (without the session attribute) */
         if ((Status == STATUS_PRIVILEGE_NOT_HELD) && UseTokenSession)
         {
+            UseTokenSession = FALSE;
             NativeAttributeCount--;
             if (NativeAttributeCount)
             {
@@ -5072,6 +5074,17 @@ StartScan:
     /* Set the new command-line if needed */
     if ((QuotesNeeded) || (CmdLineIsAppName)) lpCommandLine = QuotedCmdLine;
 
+    /*
+     * A process in another session cannot share our console: that session's
+     * console server registers it (sessions design 3.5). A console process
+     * gets a new console there, unless the caller chose detached or no window.
+     */
+    if (UseTokenSession && !PseudoConsole &&
+        !(dwCreationFlags & (DETACHED_PROCESS | CREATE_NEW_CONSOLE | CREATE_NO_WINDOW)))
+    {
+        CrossSessionConsole = CREATE_NEW_CONSOLE;
+    }
+
     /* Call the helper function in charge of RTL_USER_PROCESS_PARAMETERS */
     Result = BasePushProcessParameters(ParameterFlags,
                                        ProcessHandle,
@@ -5081,7 +5094,7 @@ StartScan:
                                        lpCommandLine,
                                        lpEnvironment,
                                        &StartupInfo,
-                                       dwCreationFlags | NoWindow,
+                                       dwCreationFlags | NoWindow | CrossSessionConsole,
                                        bInheritHandles,
                                        IsWowApp ? IMAGE_SUBSYSTEM_WINDOWS_GUI: 0,
                                        AppCompatData,
