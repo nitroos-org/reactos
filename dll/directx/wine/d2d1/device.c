@@ -116,6 +116,11 @@ static void d2d_clip_stack_pop(struct d2d_clip_stack *stack)
     --stack->count;
 }
 
+static void d2d_device_context_flush_fill_batch(struct d2d_device_context *context);
+static BOOL d2d_device_context_batch_fill(struct d2d_device_context *context, struct d2d_brush *brush,
+        const D2D_MATRIX_3X2_F *geometry_transform, const D2D1_POINT_2F *vertices, size_t vertex_count,
+        const struct d2d_face *faces, size_t face_count);
+
 static void d2d_device_context_draw(struct d2d_device_context *render_target, enum d2d_shape_type shape_type,
         ID3D11Buffer *ib, unsigned int index_count, ID3D11Buffer *vb, unsigned int vb_stride,
         struct d2d_brush *brush, struct d2d_brush *opacity_brush)
@@ -128,6 +133,8 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
     D3D11_RECT scissor_rect;
     unsigned int offset;
     D3D11_VIEWPORT vp;
+
+    d2d_device_context_flush_fill_batch(render_target);
 
     vp.TopLeftX = 0;
     vp.TopLeftY = 0;
@@ -270,6 +277,8 @@ static ULONG STDMETHODCALLTYPE d2d_device_context_inner_Release(IUnknown *iface)
         unsigned int i, j, k;
 
         d2d_clip_stack_cleanup(&context->clip_stack);
+        free(context->fill_batch.vertices);
+        free(context->fill_batch.faces);
         IDWriteRenderingParams_Release(context->default_text_rendering_params);
         if (context->text_rendering_params)
             IDWriteRenderingParams_Release(context->text_rendering_params);
@@ -657,6 +666,24 @@ static void STDMETHODCALLTYPE d2d_device_context_FillRectangle(ID2D1DeviceContex
         return;
     }
 
+    if (context->ops && context->ops->batch_fills && brush && SUCCEEDED(context->error.code))
+    {
+        /* The vertices and faces of a rectangle geometry, without making one. */
+        static const D2D_MATRIX_3X2_F identity_matrix = {{{1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f}}};
+        static const struct d2d_face faces[] = {{{1, 2, 0}}, {{0, 2, 3}}};
+        float l = min(rect->left, rect->right), r = max(rect->left, rect->right);
+        float t = min(rect->top, rect->bottom), b = max(rect->top, rect->bottom);
+        D2D1_POINT_2F v[4];
+
+        v[0].x = l; v[0].y = t;
+        v[1].x = l; v[1].y = b;
+        v[2].x = r; v[2].y = b;
+        v[3].x = r; v[3].y = t;
+
+        if (d2d_device_context_batch_fill(context, unsafe_impl_from_ID2D1Brush(brush), &identity_matrix, v, 4, faces, 2))
+            return;
+    }
+
     if (FAILED(hr = ID2D1Factory_CreateRectangleGeometry(context->factory, rect, &geometry)))
     {
         ERR("Failed to create geometry, hr %#lx.\n", hr);
@@ -745,13 +772,27 @@ static void STDMETHODCALLTYPE d2d_device_context_FillEllipse(ID2D1DeviceContext6
     ID2D1EllipseGeometry_Release(geometry);
 }
 
+static void d2d_device_context_fill_ps_cb_data(struct d2d_brush *brush, struct d2d_brush *opacity_brush,
+        BOOL outline, BOOL is_arc, struct d2d_ps_cb *cb_data)
+{
+    cb_data->outline = outline;
+    cb_data->is_arc = is_arc;
+    cb_data->pad[0] = 0;
+    cb_data->pad[1] = 0;
+    if (!d2d_brush_fill_cb(brush, &cb_data->colour_brush))
+        WARN("Failed to initialize colour brush buffer.\n");
+    if (!d2d_brush_fill_cb(opacity_brush, &cb_data->opacity_brush))
+        WARN("Failed to initialize opacity brush buffer.\n");
+}
+
 static HRESULT d2d_device_context_update_ps_cb(struct d2d_device_context *context,
         struct d2d_brush *brush, struct d2d_brush *opacity_brush, BOOL outline, BOOL is_arc)
 {
     D3D11_MAPPED_SUBRESOURCE map_desc;
     ID3D11DeviceContext *d3d_context;
-    struct d2d_ps_cb *cb_data;
     HRESULT hr;
+
+    d2d_device_context_flush_fill_batch(context);
 
     ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_context);
 
@@ -763,15 +804,7 @@ static HRESULT d2d_device_context_update_ps_cb(struct d2d_device_context *contex
         return hr;
     }
 
-    cb_data = map_desc.pData;
-    cb_data->outline = outline;
-    cb_data->is_arc = is_arc;
-    cb_data->pad[0] = 0;
-    cb_data->pad[1] = 0;
-    if (!d2d_brush_fill_cb(brush, &cb_data->colour_brush))
-        WARN("Failed to initialize colour brush buffer.\n");
-    if (!d2d_brush_fill_cb(opacity_brush, &cb_data->opacity_brush))
-        WARN("Failed to initialize opacity brush buffer.\n");
+    d2d_device_context_fill_ps_cb_data(brush, opacity_brush, outline, is_arc, map_desc.pData);
 
     ID3D11DeviceContext_Unmap(d3d_context, (ID3D11Resource *)context->ps_cb, 0);
     ID3D11DeviceContext_Release(d3d_context);
@@ -779,27 +812,12 @@ static HRESULT d2d_device_context_update_ps_cb(struct d2d_device_context *contex
     return hr;
 }
 
-static HRESULT d2d_device_context_update_vs_cb(struct d2d_device_context *context,
-        const D2D_MATRIX_3X2_F *geometry_transform, float stroke_width)
+static void d2d_device_context_fill_vs_cb_data(const struct d2d_device_context *context,
+        const D2D_MATRIX_3X2_F *geometry_transform, float stroke_width, struct d2d_vs_cb *cb_data)
 {
-    D3D11_MAPPED_SUBRESOURCE map_desc;
-    ID3D11DeviceContext *d3d_context;
     const D2D1_MATRIX_3X2_F *w;
-    struct d2d_vs_cb *cb_data;
     float tmp_x, tmp_y;
-    HRESULT hr;
 
-    ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_context);
-
-    if (FAILED(hr = ID3D11DeviceContext_Map(d3d_context, (ID3D11Resource *)context->vs_cb,
-            0, D3D11_MAP_WRITE_DISCARD, 0, &map_desc)))
-    {
-        WARN("Failed to map constant buffer, hr %#lx.\n", hr);
-        ID3D11DeviceContext_Release(d3d_context);
-        return hr;
-    }
-
-    cb_data = map_desc.pData;
     cb_data->transform_geometry._11 = geometry_transform->_11;
     cb_data->transform_geometry._21 = geometry_transform->_21;
     cb_data->transform_geometry._31 = geometry_transform->_31;
@@ -822,11 +840,167 @@ static HRESULT d2d_device_context_update_vs_cb(struct d2d_device_context *contex
     cb_data->transform_rty.y = w->_22 * tmp_y;
     cb_data->transform_rty.z = w->_32 * tmp_y;
     cb_data->transform_rty.w = -2.0f / context->pixel_size.height;
+}
+
+static HRESULT d2d_device_context_update_vs_cb(struct d2d_device_context *context,
+        const D2D_MATRIX_3X2_F *geometry_transform, float stroke_width)
+{
+    D3D11_MAPPED_SUBRESOURCE map_desc;
+    ID3D11DeviceContext *d3d_context;
+    HRESULT hr;
+
+    d2d_device_context_flush_fill_batch(context);
+
+    ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_context);
+
+    if (FAILED(hr = ID3D11DeviceContext_Map(d3d_context, (ID3D11Resource *)context->vs_cb,
+            0, D3D11_MAP_WRITE_DISCARD, 0, &map_desc)))
+    {
+        WARN("Failed to map constant buffer, hr %#lx.\n", hr);
+        ID3D11DeviceContext_Release(d3d_context);
+        return hr;
+    }
+
+    d2d_device_context_fill_vs_cb_data(context, geometry_transform, stroke_width, map_desc.pData);
 
     ID3D11DeviceContext_Unmap(d3d_context, (ID3D11Resource *)context->vs_cb, 0);
     ID3D11DeviceContext_Release(d3d_context);
 
     return S_OK;
+}
+
+/* Issues the held back fills as one draw call. The constants and the vertices
+ * are those the individual draws would have used, in the same order. */
+static void d2d_device_context_flush_fill_batch(struct d2d_device_context *context)
+{
+    static struct d2d_brush solid_brush = {.type = D2D_BRUSH_TYPE_SOLID};
+    D3D11_MAPPED_SUBRESOURCE map_desc;
+    D3D11_SUBRESOURCE_DATA buffer_data;
+    ID3D11DeviceContext *d3d_context;
+    D3D11_BUFFER_DESC buffer_desc;
+    ID3D11Buffer *ib, *vb;
+    HRESULT hr;
+
+    if (!context->fill_batch.active)
+        return;
+    context->fill_batch.active = FALSE;
+
+    ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_context);
+
+    if (FAILED(hr = ID3D11DeviceContext_Map(d3d_context, (ID3D11Resource *)context->vs_cb,
+            0, D3D11_MAP_WRITE_DISCARD, 0, &map_desc)))
+    {
+        WARN("Failed to map constant buffer, hr %#lx.\n", hr);
+        ID3D11DeviceContext_Release(d3d_context);
+        return;
+    }
+    memcpy(map_desc.pData, &context->fill_batch.vs_cb, sizeof(context->fill_batch.vs_cb));
+    ID3D11DeviceContext_Unmap(d3d_context, (ID3D11Resource *)context->vs_cb, 0);
+
+    if (FAILED(hr = ID3D11DeviceContext_Map(d3d_context, (ID3D11Resource *)context->ps_cb,
+            0, D3D11_MAP_WRITE_DISCARD, 0, &map_desc)))
+    {
+        WARN("Failed to map constant buffer, hr %#lx.\n", hr);
+        ID3D11DeviceContext_Release(d3d_context);
+        return;
+    }
+    memcpy(map_desc.pData, &context->fill_batch.ps_cb, sizeof(context->fill_batch.ps_cb));
+    ID3D11DeviceContext_Unmap(d3d_context, (ID3D11Resource *)context->ps_cb, 0);
+    ID3D11DeviceContext_Release(d3d_context);
+
+    buffer_desc.Usage = D3D11_USAGE_DEFAULT;
+    buffer_desc.CPUAccessFlags = 0;
+    buffer_desc.MiscFlags = 0;
+    buffer_data.SysMemPitch = 0;
+    buffer_data.SysMemSlicePitch = 0;
+
+    buffer_desc.ByteWidth = context->fill_batch.face_count * sizeof(*context->fill_batch.faces);
+    buffer_desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+    buffer_data.pSysMem = context->fill_batch.faces;
+    if (FAILED(hr = ID3D11Device1_CreateBuffer(context->d3d_device, &buffer_desc, &buffer_data, &ib)))
+    {
+        WARN("Failed to create index buffer, hr %#lx.\n", hr);
+        return;
+    }
+
+    buffer_desc.ByteWidth = context->fill_batch.vertex_count * sizeof(*context->fill_batch.vertices);
+    buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    buffer_data.pSysMem = context->fill_batch.vertices;
+    if (FAILED(hr = ID3D11Device1_CreateBuffer(context->d3d_device, &buffer_desc, &buffer_data, &vb)))
+    {
+        ERR("Failed to create vertex buffer, hr %#lx.\n", hr);
+        ID3D11Buffer_Release(ib);
+        return;
+    }
+
+    d2d_device_context_draw(context, D2D_SHAPE_TYPE_TRIANGLE, ib, 3 * context->fill_batch.face_count, vb,
+            sizeof(*context->fill_batch.vertices), &solid_brush, NULL);
+
+    ID3D11Buffer_Release(vb);
+    ID3D11Buffer_Release(ib);
+}
+
+/* Adds a triangle list to the held back fills, or draws it right away when
+ * it can not be held back. Returns FALSE when the caller has to draw it. */
+static BOOL d2d_device_context_batch_fill(struct d2d_device_context *context, struct d2d_brush *brush,
+        const D2D_MATRIX_3X2_F *geometry_transform, const D2D1_POINT_2F *vertices, size_t vertex_count,
+        const struct d2d_face *faces, size_t face_count)
+{
+    struct d2d_vs_cb vs_cb;
+    struct d2d_ps_cb ps_cb;
+    size_t base, i;
+
+    if (!context->ops || !context->ops->batch_fills || !brush || brush->type != D2D_BRUSH_TYPE_SOLID
+            || context->target.type != D2D_TARGET_BITMAP || !vertex_count || !face_count
+            || vertex_count > 0x4000 || context->pixel_size.width == 0 || context->pixel_size.height == 0)
+        return FALSE;
+
+    memset(&vs_cb, 0, sizeof(vs_cb));
+    memset(&ps_cb, 0, sizeof(ps_cb));
+    d2d_device_context_fill_vs_cb_data(context, geometry_transform, 0.0f, &vs_cb);
+    d2d_device_context_fill_ps_cb_data(brush, NULL, FALSE, FALSE, &ps_cb);
+
+    if (context->fill_batch.active)
+    {
+        if (memcmp(&vs_cb, &context->fill_batch.vs_cb, sizeof(vs_cb))
+                || memcmp(&ps_cb, &context->fill_batch.ps_cb, sizeof(ps_cb))
+                || context->fill_batch.vertex_count + vertex_count > 0xffff
+                || context->fill_batch.face_count > 0x7fff)
+            d2d_device_context_flush_fill_batch(context);
+    }
+
+    if (!context->fill_batch.active)
+    {
+        context->fill_batch.vs_cb = vs_cb;
+        context->fill_batch.ps_cb = ps_cb;
+        context->fill_batch.vertex_count = 0;
+        context->fill_batch.face_count = 0;
+    }
+
+    if (!d2d_array_reserve((void **)&context->fill_batch.vertices, &context->fill_batch.vertices_size,
+            context->fill_batch.vertex_count + vertex_count, sizeof(*context->fill_batch.vertices))
+            || !d2d_array_reserve((void **)&context->fill_batch.faces, &context->fill_batch.faces_size,
+            context->fill_batch.face_count + face_count, sizeof(*context->fill_batch.faces)))
+    {
+        d2d_device_context_flush_fill_batch(context);
+        return FALSE;
+    }
+
+    base = context->fill_batch.vertex_count;
+    memcpy(&context->fill_batch.vertices[base], vertices, vertex_count * sizeof(*vertices));
+    for (i = 0; i < face_count; ++i)
+    {
+        struct d2d_face *f = &context->fill_batch.faces[context->fill_batch.face_count + i];
+
+        f->v[0] = faces[i].v[0] + base;
+        f->v[1] = faces[i].v[1] + base;
+        f->v[2] = faces[i].v[2] + base;
+    }
+    context->fill_batch.vertex_count += vertex_count;
+    context->fill_batch.face_count += face_count;
+    context->fill_batch.active = TRUE;
+
+    return TRUE;
 }
 
 static void d2d_device_context_draw_geometry(struct d2d_device_context *render_target,
@@ -994,6 +1168,11 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
 
     buffer_data.SysMemPitch = 0;
     buffer_data.SysMemSlicePitch = 0;
+
+    if (!opacity_brush && !geometry->fill.bezier_vertex_count && !geometry->fill.arc_vertex_count
+            && d2d_device_context_batch_fill(render_target, brush, &geometry->transform, geometry->fill.vertices,
+            geometry->fill.vertex_count, geometry->fill.faces, geometry->fill.face_count))
+        return;
 
     if (FAILED(hr = d2d_device_context_update_vs_cb(render_target, &geometry->transform, 0.0f)))
     {
@@ -1725,6 +1904,8 @@ static void STDMETHODCALLTYPE d2d_device_context_PushLayer(ID2D1DeviceContext6 *
 
     FIXME("iface %p, layer_parameters %p, layer %p stub!\n", iface, layer_parameters, layer);
 
+    d2d_device_context_flush_fill_batch(context);
+
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
     {
         D2D1_LAYER_PARAMETERS1 parameters;
@@ -1741,6 +1922,8 @@ static void STDMETHODCALLTYPE d2d_device_context_PopLayer(ID2D1DeviceContext6 *i
 
     FIXME("iface %p stub!\n", iface);
 
+    d2d_device_context_flush_fill_batch(context);
+
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_pop_layer(context->target.command_list);
 }
@@ -1750,6 +1933,8 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_Flush(ID2D1DeviceContext6 *i
     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
 
     FIXME("iface %p, tag1 %p, tag2 %p stub!\n", iface, tag1, tag2);
+
+    d2d_device_context_flush_fill_batch(context);
 
     if (context->ops && context->ops->device_context_present)
         context->ops->device_context_present(context->outer_unknown);
@@ -1815,6 +2000,8 @@ static void STDMETHODCALLTYPE d2d_device_context_PushAxisAlignedClip(ID2D1Device
 
     TRACE("iface %p, clip_rect %s, antialias_mode %#x.\n", iface, debug_d2d_rect_f(clip_rect), antialias_mode);
 
+    d2d_device_context_flush_fill_batch(context);
+
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_push_clip(context->target.command_list, clip_rect, antialias_mode);
 
@@ -1846,6 +2033,8 @@ static void STDMETHODCALLTYPE d2d_device_context_PopAxisAlignedClip(ID2D1DeviceC
 
     TRACE("iface %p.\n", iface);
 
+    d2d_device_context_flush_fill_batch(context);
+
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_pop_clip(context->target.command_list);
 
@@ -1863,6 +2052,8 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
     HRESULT hr;
 
     TRACE("iface %p, colour %p.\n", iface, colour);
+
+    d2d_device_context_flush_fill_batch(context);
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
     {
@@ -1948,6 +2139,8 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6 
     HRESULT hr;
 
     TRACE("iface %p, tag1 %p, tag2 %p.\n", iface, tag1, tag2);
+
+    d2d_device_context_flush_fill_batch(context);
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
     {
@@ -2377,6 +2570,8 @@ static void STDMETHODCALLTYPE d2d_device_context_GetDevice(ID2D1DeviceContext6 *
 
 static void d2d_device_context_reset_target(struct d2d_device_context *context)
 {
+    d2d_device_context_flush_fill_batch(context);
+
     if (!context->target.object)
         return;
 
@@ -3420,6 +3615,8 @@ static HRESULT STDMETHODCALLTYPE d2d_gdi_interop_render_target_GetDC(ID2D1GdiInt
 
     if (render_target->target.hdc)
         return D2DERR_WRONG_STATE;
+
+    d2d_device_context_flush_fill_batch(render_target);
 
     if (FAILED(hr = d2d_gdi_interop_get_surface(render_target, &surface)))
         return hr;
