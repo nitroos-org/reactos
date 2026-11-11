@@ -198,6 +198,7 @@ extern void func_ProcessToken(void);
 extern void func_ProcessorGroups(void);
 extern void func_QueueUserAPC(void);
 extern void func_QueueUserWorkItem(void);
+extern void func_QueueUserWorkItemStream(void);
 extern void func_RaiseFailFastException(void);
 extern void func_ReadDirectoryChanges(void);
 extern void func_ReadDirectoryChangesRename(void);
@@ -454,6 +455,7 @@ const struct test winetest_testlist[] =
     { "ProcessorGroups",             func_ProcessorGroups },
     { "QueueUserAPC",                func_QueueUserAPC },
     { "QueueUserWorkItem",           func_QueueUserWorkItem },
+    { "QueueUserWorkItemStream",     func_QueueUserWorkItemStream },
     { "RaiseFailFastException",      func_RaiseFailFastException },
     { "ReadDirectoryChanges",       func_ReadDirectoryChanges },
     { "ReadDirectoryChangesRename", func_ReadDirectoryChangesRename },
