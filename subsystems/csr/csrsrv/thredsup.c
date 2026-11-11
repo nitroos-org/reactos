@@ -744,8 +744,13 @@ CsrCreateThread(IN PCSR_PROCESS CsrProcess,
     Status = CsrInsertThread(CsrProcess, CsrThread);
     if (!NT_SUCCESS(Status))
     {
-        /* Bail out */
-        CsrUnlockProcess(CsrProcess);
+        /*
+         * Bail out. This function took only the process lock (no process reference; a caller that locked
+         * CsrProcess releases that itself), so release only the lock, and give the handle back unprotected:
+         * on failure it stays the caller's to close.
+         */
+        CsrReleaseProcessLock();
+        UnProtectHandle(hThread);
         CsrDeallocateThread(CsrThread);
         return Status;
     }
