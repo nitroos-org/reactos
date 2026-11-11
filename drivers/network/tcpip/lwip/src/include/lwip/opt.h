@@ -1454,6 +1454,23 @@
 #endif
 
 /**
+ * LWIP_TCP_TW_HASH: Chain the PCBs in TIME-WAIT in a hash table keyed by the 4-tuple, so that
+ * demultiplexing a segment and the address-in-use check of tcp_connect do not walk the whole
+ * TIME-WAIT list. Costs one pointer per tcp_pcb, LWIP_TCP_TW_HASH_SIZE pointers and a 64K-entry
+ * table of u16_t counters (the local ports in TIME-WAIT, see tcp_tw_port_used).
+ */
+#if !defined LWIP_TCP_TW_HASH || defined __DOXYGEN__
+#define LWIP_TCP_TW_HASH                0
+#endif
+
+/**
+ * LWIP_TCP_TW_HASH_SIZE: Number of buckets of the TIME-WAIT hash table. Must be a power of 2.
+ */
+#if !defined LWIP_TCP_TW_HASH_SIZE || defined __DOXYGEN__
+#define LWIP_TCP_TW_HASH_SIZE           1024
+#endif
+
+/**
  * The maximum allowed backlog for TCP listen netconns.
  * This backlog is used unless another is explicitly specified.
  * 0xff is the maximum (u8_t).
