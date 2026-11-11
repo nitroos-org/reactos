@@ -274,6 +274,16 @@ IntValidateWindowStationHandle(
                                        (PVOID*)Object,
                                        pObjectHandleInfo);
 
+    /* Only a window station of the caller's session (its data is that session's) */
+    if (NT_SUCCESS(Status) && ((*Object)->dwSessionId != PsGetCurrentProcessSessionId()))
+    {
+        ERR("Window station of session %lu used from session %lu\n",
+            (*Object)->dwSessionId, PsGetCurrentProcessSessionId());
+        ObDereferenceObject(*Object);
+        *Object = NULL;
+        Status = STATUS_ACCESS_DENIED;
+    }
+
     if (!NT_SUCCESS(Status))
         SetLastNtError(Status);
 
