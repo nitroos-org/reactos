@@ -1067,6 +1067,8 @@ IntGdiDeleteDC(HDC hDC, BOOL Force)
             /* The DCE list and window DCs belong to window management: work on them under the USER lock */
             if (!UserIsEnteredExclusive())
             {
+                /* Not held shared either: a shared hold cannot become exclusive */
+                ASSERT(!UserIsEntered());
                 UserEnterExclusive();
                 Entered = TRUE;
             }
