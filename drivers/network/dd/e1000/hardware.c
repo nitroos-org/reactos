@@ -333,7 +333,7 @@ NICAllocateIoResources(
 
     NdisMAllocateSharedMemory(Adapter->AdapterHandle,
                               sizeof(E1000_TRANSMIT_DESCRIPTOR) * NUM_TRANSMIT_DESCRIPTORS,
-                              FALSE,
+                              TRUE,
                               (PVOID*)&Adapter->TransmitDescriptors,
                               &Adapter->TransmitDescriptorsPa);
     if (Adapter->TransmitDescriptors == NULL)
@@ -351,7 +351,7 @@ NICAllocateIoResources(
 
     NdisMAllocateSharedMemory(Adapter->AdapterHandle,
                               sizeof(E1000_RECEIVE_DESCRIPTOR) * NUM_RECEIVE_DESCRIPTORS,
-                              FALSE,
+                              TRUE,
                               (PVOID*)&Adapter->ReceiveDescriptors,
                               &Adapter->ReceiveDescriptorsPa);
     if (Adapter->ReceiveDescriptors == NULL)
@@ -366,7 +366,7 @@ NICAllocateIoResources(
 
     NdisMAllocateSharedMemory(Adapter->AdapterHandle,
                               Adapter->ReceiveBufferEntrySize * NUM_RECEIVE_DESCRIPTORS,
-                              FALSE,
+                              TRUE,
                               (PVOID*)&Adapter->ReceiveBuffer,
                               &Adapter->ReceiveBufferPa);
 
@@ -446,7 +446,7 @@ NICReleaseIoResources(
 
         NdisMFreeSharedMemory(Adapter->AdapterHandle,
                               sizeof(E1000_RECEIVE_DESCRIPTOR) * NUM_RECEIVE_DESCRIPTORS,
-                              FALSE,
+                              TRUE,
                               Adapter->ReceiveDescriptors,
                               Adapter->ReceiveDescriptorsPa);
 
@@ -457,7 +457,7 @@ NICReleaseIoResources(
     {
         NdisMFreeSharedMemory(Adapter->AdapterHandle,
                               Adapter->ReceiveBufferEntrySize * NUM_RECEIVE_DESCRIPTORS,
-                              FALSE,
+                              TRUE,
                               Adapter->ReceiveBuffer,
                               Adapter->ReceiveBufferPa);
 
@@ -477,7 +477,7 @@ NICReleaseIoResources(
 
         NdisMFreeSharedMemory(Adapter->AdapterHandle,
                               sizeof(E1000_TRANSMIT_DESCRIPTOR) * NUM_TRANSMIT_DESCRIPTORS,
-                              FALSE,
+                              TRUE,
                               Adapter->TransmitDescriptors,
                               Adapter->TransmitDescriptorsPa);
 
