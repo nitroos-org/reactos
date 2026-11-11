@@ -1276,6 +1276,10 @@ MiniLeaveSerialized(
     PVOID WorkItemContext;
     PNDIS_PACKET Packets[MINI_SEND_BATCH];
     UINT Count;
+    /* Only a miniport with a SendPackets handler takes an array; the others are sent one at a
+       time as they always were */
+    UINT MaxBatch = Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendPacketsHandler ?
+                    MINI_SEND_BATCH : 1;
     ULONG Budget = ((Adapter->Stopping && (Caller != MiniLeaveWorkerTurn)) ||
                     ((Caller == MiniLeaveInterruptDpc) && Adapter->SendThread)) ? 0 : 64;
 
@@ -1298,7 +1302,7 @@ MiniLeaveSerialized(
         Count = 1;
 
         /* The sends that queued up behind it go in the same call, under the same limits */
-        while (Budget && (Count < MINI_SEND_BATCH) &&
+        while (Budget && (Count < MaxBatch) &&
                !Adapter->NdisMiniportBlock.FirstPendingPacket &&
                Adapter->WorkQueueHead &&
                (Adapter->WorkQueueHead->WorkItemType == NdisWorkItemSend) &&
