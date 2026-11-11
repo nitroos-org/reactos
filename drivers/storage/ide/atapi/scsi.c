@@ -1687,6 +1687,26 @@ AtaPdoDispatchScsi(
             break;
         }
 
+        case SRB_FUNCTION_SHUTDOWN:
+        case SRB_FUNCTION_FLUSH:
+        {
+            /*
+             * There is no adapter cache to flush or shut down. The class driver sends
+             * SYNCHRONIZE CACHE for the drive's write cache before this request,
+             * so complete it here rather than through the device queue and the completion DPC.
+             * A frozen or busy queue keeps the queued path, as before.
+             */
+            if (!(ReadNoFence((volatile LONG*)&DevExt->Device.QueueFlags) & QUEUE_FLAGS_FROZEN))
+            {
+                Srb->SrbStatus = SRB_STATUS_SUCCESS;
+                Irp->IoStatus.Information = 0;
+                Status = STATUS_SUCCESS;
+                break;
+            }
+
+            goto QueueRequest;
+        }
+
         case SRB_FUNCTION_IO_CONTROL:
         {
             if (AtaPdoHandleIoControl(DevExt, Srb, &Status))
@@ -1694,9 +1714,8 @@ AtaPdoDispatchScsi(
 
             __fallthrough;
         }
-        case SRB_FUNCTION_SHUTDOWN:
-        case SRB_FUNCTION_FLUSH:
         case SRB_FUNCTION_EXECUTE_SCSI:
+QueueRequest:
         {
             ATA_SCSI_ADDRESS AtaScsiAddress;
 
