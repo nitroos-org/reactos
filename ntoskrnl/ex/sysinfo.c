@@ -1807,6 +1807,9 @@ QSI_DEF(SystemFullMemoryInformation)
     return STATUS_SUCCESS;
 }
 
+/* win32k, when it is loaded as a session image (NitroSessions) */
+PLDR_DATA_TABLE_ENTRY ExpWin32kSessionImage;
+
 /* Class 26 - Load Image */
 SSI_DEF(SystemLoadGdiDriverInformation)
 {
@@ -1829,12 +1832,12 @@ SSI_DEF(SystemLoadGdiDriverInformation)
     /* Only kernel mode can call this function */
     if (ExGetPreviousMode() != KernelMode) return STATUS_PRIVILEGE_NOT_HELD;
 
-    /* Load the driver */
+    /* Load the driver: a session image of the caller's session when win32k is one (it binds to that win32k) */
     ImageName = DriverInfo->DriverName;
     Status = MmLoadSystemImage(&ImageName,
                                NULL,
                                NULL,
-                               0,
+                               (ExpWin32kSessionImage && PsGetCurrentProcess()->ProcessInSession) ? 1 : 0,
                                &SectionPointer,
                                &ImageBase);
     if (!NT_SUCCESS(Status)) return Status;
@@ -2178,15 +2181,19 @@ SSI_DEF(SystemExtendServiceTableInformation)
                                       sizeof(Win32kName));
     }
 
-    /* Load the image */
+    /*
+     * Load the image: with NitroSessions, as a session image of the caller's session (smss, attached to the
+     * session it starts), so that every session has a win32k of its own at the same address
+     */
     Status = MmLoadSystemImage((PUNICODE_STRING)Buffer,
                                NULL,
                                NULL,
-                               0,
+                               (MmNitroSessions && PsGetCurrentProcess()->ProcessInSession) ? 1 : 0,
                                (PVOID)&ModuleObject,
                                &ImageBase);
 
     if (!NT_SUCCESS(Status)) return Status;
+    if (MmIsSessionImage(ModuleObject)) ExpWin32kSessionImage = ModuleObject;
 
     /* Get the headers */
     NtHeader = RtlImageNtHeader(ImageBase);

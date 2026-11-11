@@ -670,6 +670,36 @@ MiReleaseSessionImports(
     return Imports;
 }
 
+BOOLEAN
+NTAPI
+MmIsSessionImage(
+    _In_ PVOID ImageHandle)
+{
+    return MiIsSessionImage(ImageHandle);
+}
+
+/* Whether the current process's session has the session image loaded (pages of its own) */
+BOOLEAN
+NTAPI
+MmIsSessionImageLoadedInCurrentSession(
+    _In_ PVOID ImageHandle)
+{
+    PMI_SESSION_IMAGE Image;
+    BOOLEAN Loaded = FALSE;
+
+    PAGED_CODE();
+    if (!PsGetCurrentProcess()->ProcessInSession) return FALSE;
+
+    KeEnterCriticalRegion();
+    KeWaitForSingleObject(&MmSystemLoadLock, WrVirtualMemory, KernelMode, FALSE, NULL);
+    Image = MiFindSessionImage(ImageHandle);
+    if (Image && MiFindSessionImageInstance(Image, MiCurrentSessionId()))
+        Loaded = TRUE;
+    KeReleaseMutant(&MmSystemLoadLock, MUTANT_INCREMENT, FALSE, FALSE);
+    KeLeaveCriticalRegion();
+    return Loaded;
+}
+
 /*
  * Test hook for kernel tests (an export, found through MmGetSystemRoutineAddress): loads an image of
  * \SystemRoot\ as a session image in the current session, or drops one load of it.

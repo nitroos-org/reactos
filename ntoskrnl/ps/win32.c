@@ -19,6 +19,7 @@ PKWIN32_PROCESS_CALLOUT PspW32ProcessCallout = NULL;
 PKWIN32_THREAD_CALLOUT PspW32ThreadCallout = NULL;
 PKWIN32_JOB_CALLOUT PspW32JobCallout = NULL;
 PGDI_BATCHFLUSH_ROUTINE KeGdiFlushUserBatch = NULL;
+extern PLDR_DATA_TABLE_ENTRY ExpWin32kSessionImage;
 extern PKWIN32_SESSION_CALLOUT ExpWindowStationObjectParse;
 extern PKWIN32_SESSION_CALLOUT ExpWindowStationObjectDelete;
 extern PKWIN32_SESSION_CALLOUT ExpWindowStationObjectOkToClose;
@@ -49,6 +50,10 @@ PsConvertToGuiThread(VOID)
 
     /* Make sure win32k is here */
     if (!PspW32ProcessCallout) return STATUS_ACCESS_DENIED;
+
+    /* A session image (NitroSessions): it must be loaded in this process's session */
+    if (ExpWin32kSessionImage && !MmIsSessionImageLoadedInCurrentSession(ExpWin32kSessionImage))
+        return STATUS_ACCESS_DENIED;
 
     /* Make sure it's not already win32 */
     if (Thread->Tcb.ServiceTable != KeServiceDescriptorTable)
