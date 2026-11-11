@@ -14,7 +14,7 @@ struct _SURFACE *FASTCALL UserRedirSurface(PVOID pvRedir);
 PWND FASTCALL UserRedirWindow(PVOID pvRedir);
 VOID FASTCALL UserRedirReleased(PVOID pvRedir, BOOL bEndPaint);
 VOID FASTCALL UserRedirRetryCount(LONG Delta);
-VOID FASTCALL UserRedirOrphan(HDC hdc, PVOID pvRedir);
+VOID FASTCALL UserRedirDcRelease(PVOID pvRedir);
 VOID FASTCALL UserRedirWindowMoved(PWND Wnd);
 VOID FASTCALL UserRedirPresentPending(VOID);
 BOOL FASTCALL UserRedirHasSurface(PWND Wnd);

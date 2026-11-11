@@ -364,6 +364,13 @@ DC_vCleanup(PVOID ObjectBody)
     /* Free DC_ATTR */
     DC_vFreeDcAttr(pdc);
 
+    /* A redirected DC lets go of its window's redirection record */
+    if ((pdc->fs & DC_REDIRECTION) && pdc->pvRedir)
+    {
+        UserRedirDcRelease(pdc->pvRedir);
+        pdc->pvRedir = NULL;
+    }
+
     /* Delete saved DCs */
     DC_vRestoreDC(pdc, 1);
 
@@ -1281,12 +1288,23 @@ GreRedirBindDC(
         DC_vSelectSurface(pdc, psurf);
         pdc->dclevel.sizl = pdc->dclevel.pSurface->SurfObj.sizlBitmap;
         pdc->fs |= DC_REDIRECTION | DC_DIRTY_RAO | DC_REDIR_ATTRDIRTY;
+
+        /* And on the record, which it marks dirty until it is bound elsewhere or freed */
+        if (pvRedir != *ppvOld)
+        {
+            if (pvRedir)
+                UserRedirAddRef(pvRedir);
+            if (*ppvOld)
+                UserRedirDcRelease(*ppvOld);
+        }
         pdc->pvRedir = pvRedir;
     }
     else if (pdc->fs & DC_REDIRECTION)
     {
         pdc->fs &= ~DC_REDIRECTION;
         pdc->fs |= DC_REDIR_ATTRDIRTY;
+        if (pdc->pvRedir)
+            UserRedirDcRelease(pdc->pvRedir);
         pdc->pvRedir = NULL;
         /* The screen again (drops the DC's reference on the surface) */
         DC_vUpdateDCSurface(pdc);

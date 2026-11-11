@@ -16,10 +16,13 @@
  * (NitroSetWindowGlass), hidden windows, windows past the memory budget. They draw as always.
  * R0 keeps USER's painting rules (WM_PAINT on uncover); R1 changes them.
  *
- * Lifetime: a record lives while its window has it or a DCE is bound to it (cRefs, USER lock). A DC
- * whose binding could not be changed (another process draws with it) keeps its binding and the
- * reference, and is bound again later (windc.c, DCE_REDIR_RETRY): a record is never freed while a DC
- * can still mark it dirty. The surface has no owner a process could match: only win32k reaches it,
+ * Lifetime: a record lives while its window has it, a DCE is bound to it, or a DC object is bound to
+ * it (cRefs). A DC holds a reference of its own from its binding until it is bound elsewhere or freed,
+ * so a record is never freed while a DC can still mark it dirty, also after the DC's handle is gone (a
+ * thread that still holds the DC frees it at its last unlock). A DC whose binding could not be changed
+ * (another process draws with it) keeps its binding and is bound again later (windc.c,
+ * DCE_REDIR_RETRY). The count changes atomically; a record is freed under the USER lock (when a DC
+ * freed without it drops the last reference, the frame timer frees the record). The surface has no owner a process could match: only win32k reaches it,
  * by the pointer held here.
  */
 
@@ -32,7 +35,8 @@ typedef struct _REDIR
 {
     ULONG Magic;
     LIST_ENTRY Link;
-    LONG cRefs;             /* the window's while attached, plus one per bound DCE (USER lock) */
+    volatile LONG cRefs;    /* the window's while attached, one per bound DCE, one per bound DC object */
+    LIST_ENTRY DeferLink;   /* in gRedirDeferred: the last reference went without the USER lock */
     PWND pwnd;              /* the top-level window; NULL once detached */
     PSURFACE psurf;         /* 32 bpp surface the size of the window rectangle; our reference */
     LONG cx, cy;
@@ -52,19 +56,14 @@ static volatile LONG gRedirDirtyCount;   /* records with Dirty set: the timer ta
 static ULONG gRedirCreated, gRedirRefused, gRedirPresents;
 static volatile LONG gRedirRetries;     /* DCEs with DCE_REDIR_RETRY (windc.c) */
 
-/* A DC that could not be unbound when its DCE was freed: its reference to the record waits here */
-typedef struct _REDIR_ORPHAN
-{
-    LIST_ENTRY Link;
-    HDC hdc;
-    struct _REDIR *r;
-} REDIR_ORPHAN, *PREDIR_ORPHAN;
-static LIST_ENTRY gRedirOrphans = { &gRedirOrphans, &gRedirOrphans };
+/* Records whose last reference a DC dropped without the USER lock: the frame timer frees them */
+static LIST_ENTRY gRedirDeferred = { &gRedirDeferred, &gRedirDeferred };
+static KSPIN_LOCK gRedirDeferLock;
 
 #define REDIR_MAX_SIDE      16384
 #define REDIR_FRAME_100NS   (16 * 10000)
 #define REDIR_RETRY_100NS   (100 * 10000)
-#define REDIR_RETRY_BUDGET  8               /* busy DCs (retries and orphans) tried per frame-timer pass */
+#define REDIR_RETRY_BUDGET  8               /* busy DCs tried per frame-timer pass */
 
 static VOID
 RedirArmTimer(LONGLONG Due100ns)
@@ -207,14 +206,13 @@ RedirTakeDirty(PREDIR r, PRECTL prc)
     return !RECTL_bIsEmptyRect(prc);
 }
 
+/* No reference is left: the record goes (USER lock) */
 static VOID
-RedirRelease(PREDIR r)
+RedirFree(PREDIR r)
 {
     RECTL rc;
 
-    ASSERT(r->cRefs > 0);
-    if (--r->cRefs > 0)
-        return;
+    ASSERT(r->cRefs == 0);
     ASSERT(r->pwnd == NULL);
     RedirTakeDirty(r, &rc);
     RemoveEntryList(&r->Link);
@@ -225,8 +223,61 @@ RedirRelease(PREDIR r)
     ExFreePoolWithTag(r, USERTAG_REDIRSURF);
 }
 
-VOID FASTCALL UserRedirAddRef(PVOID pv) { ((PREDIR)pv)->cRefs++; }
+/* USER lock held */
+static VOID
+RedirRelease(PREDIR r)
+{
+    ASSERT(r->cRefs > 0);
+    if (InterlockedDecrement(&r->cRefs) == 0)
+        RedirFree(r);
+}
+
+VOID FASTCALL UserRedirAddRef(PVOID pv) { InterlockedIncrement(&((PREDIR)pv)->cRefs); }
 VOID FASTCALL UserRedirRelease(PVOID pv) { RedirRelease((PREDIR)pv); }
+
+/*
+ * A DC object lets go of the record it was bound to (GreRedirBindDC, or the DC is freed), with or without
+ * the USER lock: without it, a last reference leaves the record to the frame timer.
+ */
+VOID
+FASTCALL
+UserRedirDcRelease(PVOID pv)
+{
+    PREDIR r = pv;
+    KIRQL OldIrql;
+
+    ASSERT(r->Magic == REDIR_MAGIC);
+    ASSERT(r->cRefs > 0);
+    if (InterlockedDecrement(&r->cRefs) != 0)
+        return;
+    if (UserIsEnteredExclusive())
+    {
+        RedirFree(r);
+        return;
+    }
+    KeAcquireSpinLock(&gRedirDeferLock, &OldIrql);
+    InsertTailList(&gRedirDeferred, &r->DeferLink);
+    KeReleaseSpinLock(&gRedirDeferLock, OldIrql);
+    RedirArmTimer(REDIR_RETRY_100NS);
+}
+
+/* The frame timer, USER lock held: records whose last reference went without it */
+static VOID
+RedirFreeDeferred(VOID)
+{
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+
+    for (;;)
+    {
+        KeAcquireSpinLock(&gRedirDeferLock, &OldIrql);
+        Entry = IsListEmpty(&gRedirDeferred) ? NULL : RemoveHeadList(&gRedirDeferred);
+        KeReleaseSpinLock(&gRedirDeferLock, OldIrql);
+        if (!Entry)
+            break;
+        RedirFree(CONTAINING_RECORD(Entry, REDIR, DeferLink));
+    }
+}
 PSURFACE FASTCALL UserRedirSurface(PVOID pv) { return ((PREDIR)pv)->psurf; }
 PWND FASTCALL UserRedirWindow(PVOID pv) { return ((PREDIR)pv)->pwnd; }
 
@@ -539,50 +590,6 @@ UserRedirRetryCount(LONG Delta)
         RedirArmTimer(REDIR_RETRY_100NS);
 }
 
-/* windc.c: a DCE is freed while its DC still holds the record (busy or being deleted); USER lock */
-VOID
-FASTCALL
-UserRedirOrphan(HDC hdc, PVOID pvRedir)
-{
-    PREDIR_ORPHAN o = ExAllocatePoolWithTag(NonPagedPool, sizeof(*o), USERTAG_REDIRSURF);
-
-    if (!o)
-    {
-        /* Without memory to wait: keep the reference for good, never free under a DC */
-        ERR("Redirection: DC %p keeps record %p for good\n", hdc, pvRedir);
-        return;
-    }
-    o->hdc = hdc;
-    o->r = pvRedir;
-    InsertTailList(&gRedirOrphans, &o->Link);
-    RedirArmTimer(REDIR_RETRY_100NS);
-}
-
-/* Orphans whose DC is gone or now unbound release their record; at most *plBudget tries, a busy one goes to the end */
-static VOID
-RedirReapOrphans(_Inout_ PLONG plBudget)
-{
-    PLIST_ENTRY Entry;
-    PVOID pvOld;
-    ULONG Count = 0;
-
-    for (Entry = gRedirOrphans.Flink; Entry != &gRedirOrphans; Entry = Entry->Flink)
-        Count++;
-    while (Count-- && *plBudget > 0)
-    {
-        PREDIR_ORPHAN o = CONTAINING_RECORD(RemoveHeadList(&gRedirOrphans), REDIR_ORPHAN, Link);
-
-        (*plBudget)--;
-        if (GreRedirBindDC(o->hdc, NULL, NULL, &pvOld) == REDIRBIND_BUSY)
-        {
-            InsertTailList(&gRedirOrphans, &o->Link);
-            continue;
-        }
-        RedirRelease(o->r);
-        ExFreePoolWithTag(o, USERTAG_REDIRSURF);
-    }
-}
-
 /* The raw input thread, when gRedirTimer fired: present what DCs still in use drew */
 VOID
 FASTCALL
@@ -594,9 +601,10 @@ UserRedirPresentPending(VOID)
 
     InterlockedExchange(&gRedirTimerArmed, 0);
     /* Released DCs present at once: usually nothing is left, and the USER lock is not taken for nothing */
-    if (gRedirDirtyCount == 0 && gRedirRetries == 0 && IsListEmpty(&gRedirOrphans))
+    if (gRedirDirtyCount == 0 && gRedirRetries == 0 && IsListEmpty(&gRedirDeferred))
         return;
     UserEnterExclusive();
+    RedirFreeDeferred();
     for (Entry = gRedirList.Flink; Entry != &gRedirList; )
     {
         PREDIR r = CONTAINING_RECORD(Entry, REDIR, Link);
@@ -605,7 +613,7 @@ UserRedirPresentPending(VOID)
         if (r->Dirty && r->pwnd)
         {
             /* RedirPresentDirty may detach r; the next entry was taken first, and r stays alive while a DC holds it */
-            r->cRefs++;
+            InterlockedIncrement(&r->cRefs);
             RedirPresentDirty(r, FALSE);
             RedirRelease(r);
         }
@@ -619,9 +627,7 @@ UserRedirPresentPending(VOID)
     /* Bindings that could not be changed, and DCs of freed DCEs, are tried again */
     if (gRedirRetries)
         DceRedirRetryAll(&lBudget);
-    if (!IsListEmpty(&gRedirOrphans))
-        RedirReapOrphans(&lBudget);
-    if (gRedirRetries || !IsListEmpty(&gRedirOrphans))
+    if (gRedirRetries)
         RedirArmTimer(REDIR_RETRY_100NS);
     UserLeave();
 }
