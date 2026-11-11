@@ -60,6 +60,9 @@ CmpFreeKeyControlBlock(IN PCM_KEY_CONTROL_BLOCK Kcb)
     ASSERT(IsListEmpty(&Kcb->KeyBodyListHead) == TRUE);
     for (i = 0; i < 4; i++) ASSERT(Kcb->KeyBodyArray[i] == NULL);
 
+    /* Drop the value name table */
+    CmpFreeKcbValueIndex(Kcb);
+
     /* Check if it wasn't privately allocated */
     if (!Kcb->PrivateAlloc)
     {
@@ -147,6 +150,10 @@ SearchKcbList:
             /* Release the allocation lock */
             KeReleaseGuardedMutex(&CmpAllocBucketLock);
 
+            /* No value name table yet */
+            CurrentKcb->ValueIndex = NULL;
+            CurrentKcb->ValueIndexMisses = 0;
+
             /* Return the KCB */
             return CurrentKcb;
         }
@@ -188,6 +195,8 @@ SearchKcbList:
         /* Set it up */
         CurrentKcb->PrivateAlloc = 0;
         CurrentKcb->DelayCloseEntry = NULL;
+        CurrentKcb->ValueIndex = NULL;
+        CurrentKcb->ValueIndexMisses = 0;
     }
 
     /* Return it */

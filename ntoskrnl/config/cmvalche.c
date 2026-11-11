@@ -68,13 +68,10 @@ CmpGetValueListFromCache(IN PCM_KEY_CONTROL_BLOCK Kcb,
     }
     else
     {
-        /* Make sure the KCB is locked exclusive */
-        if (!CmpIsKcbLockedExclusive(Kcb) &&
-            !CmpTryToConvertKcbSharedToExclusive(Kcb))
-        {
-            /* We need the exclusive lock */
-            return SearchNeedExclusiveLock;
-        }
+        /*
+         * Nothing is cached in the KCB and this only reads the hive, so the shared KCB lock is enough (the
+         * lists are changed only with the lock held exclusive).
+         */
 
         /* Select the value list as our cell, and get the actual list array */
         CellToRelease = ChildList->ValueList;
@@ -189,6 +186,321 @@ CmpGetValueDataFromCache(IN PCM_KEY_CONTROL_BLOCK Kcb,
     return SearchSuccess;
 }
 
+/* VALUE NAME TABLE **********************************************************/
+
+/*
+ * A key with thousands of values makes a lookup by name read thousands of cells. The table maps the hash of a
+ * name (letters in upper case, as the comparison does) to the places in the list that have it; a candidate is
+ * always compared again with the name itself, and a table that does not describe the list as it is now (another
+ * count, another list cell) is not used. The hive is not touched.
+ *
+ * Locking: the table of a KCB is read and may be published (compare-exchange) by whoever holds the KCB lock
+ * shared; it is freed, and changed, only with the KCB lock exclusive, which is what every change of a value list
+ * holds.
+ */
+/* Pool tag of the tables, so that a leak shows up under its own name */
+#define TAG_CM_VALUE_INDEX              'xiVC'
+#define CM_VALUE_INDEX_MIN_COUNT        16
+#define CM_VALUE_INDEX_MAX_COUNT        (1UL << 17)
+#define CM_VALUE_INDEX_BUILD_AFTER      3
+
+typedef struct _CM_VALUE_INDEX_SLOT
+{
+    ULONG Hash;
+    ULONG Position1;    /* position in the list plus one, 0 for a free slot */
+} CM_VALUE_INDEX_SLOT;
+
+typedef struct _CM_VALUE_INDEX
+{
+    ULONG Count;        /* values described */
+    HCELL_INDEX List;   /* the value list cell it was made from */
+    ULONG Mask;         /* slots - 1 */
+    ULONG Reserved;
+    CM_VALUE_INDEX_SLOT Slots[1];
+} CM_VALUE_INDEX, *PCM_VALUE_INDEX;
+
+FORCEINLINE
+ULONG
+CmpValueNameHashChar(IN ULONG Hash, IN WCHAR Char)
+{
+    return (Hash ^ (ULONG)RtlUpcaseUnicodeChar(Char)) * 16777619UL;
+}
+
+static
+ULONG
+CmpValueNameHash(IN PCM_KEY_VALUE Value)
+{
+    ULONG Hash = 2166136261UL, i;
+
+    if (Value->Flags & VALUE_COMP_NAME)
+    {
+        PUCHAR Name = (PUCHAR)Value->Name;
+        for (i = 0; i < Value->NameLength; i++)
+            Hash = CmpValueNameHashChar(Hash, (WCHAR)Name[i]);
+    }
+    else
+    {
+        for (i = 0; i < Value->NameLength / sizeof(WCHAR); i++)
+            Hash = CmpValueNameHashChar(Hash, Value->Name[i]);
+    }
+    return Hash;
+}
+
+static
+ULONG
+CmpSearchNameHash(IN PCUNICODE_STRING Name)
+{
+    ULONG Hash = 2166136261UL, i;
+
+    for (i = 0; i < Name->Length / sizeof(WCHAR); i++)
+        Hash = CmpValueNameHashChar(Hash, Name->Buffer[i]);
+    return Hash;
+}
+
+static
+BOOLEAN
+CmpValueNameMatches(IN PCM_KEY_VALUE KeyValue, IN PCUNICODE_STRING Name)
+{
+    UNICODE_STRING SearchName;
+
+    if (KeyValue->Flags & VALUE_COMP_NAME)
+    {
+        return CmpCompareCompressedName(Name, KeyValue->Name, KeyValue->NameLength) == 0;
+    }
+
+    SearchName.Length = KeyValue->NameLength;
+    SearchName.MaximumLength = SearchName.Length;
+    SearchName.Buffer = KeyValue->Name;
+    return RtlCompareUnicodeString(Name, &SearchName, TRUE) == 0;
+}
+
+static
+VOID
+CmpValueIndexInsert(IN PCM_VALUE_INDEX Index, IN ULONG Hash, IN ULONG Position)
+{
+    ULONG Slot = Hash & Index->Mask;
+
+    while (Index->Slots[Slot].Position1 != 0)
+        Slot = (Slot + 1) & Index->Mask;
+    Index->Slots[Slot].Hash = Hash;
+    Index->Slots[Slot].Position1 = Position + 1;
+}
+
+VOID
+NTAPI
+CmpFreeKcbValueIndex(IN PCM_KEY_CONTROL_BLOCK Kcb)
+{
+    PCM_VALUE_INDEX Index = Kcb->ValueIndex;
+
+    Kcb->ValueIndex = NULL;
+    Kcb->ValueIndexMisses = 0;
+    if (Index) CmpFree(Index, 0);
+}
+
+VOID
+NTAPI
+CmpAppendKcbValueIndex(IN PCM_KEY_CONTROL_BLOCK Kcb,
+                       IN PCUNICODE_STRING Name,
+                       IN ULONG Position)
+{
+    PCM_VALUE_INDEX Index = Kcb->ValueIndex;
+
+    if (!Index) return;
+
+    /* The table has to describe the list as it was, and have room (at most three slots in four used) */
+    if ((Index->Count != Position) ||
+        ((Position + 1) > ((Index->Mask + 1) / 4 * 3)))
+    {
+        CmpFreeKcbValueIndex(Kcb);
+        return;
+    }
+
+    CmpValueIndexInsert(Index, CmpSearchNameHash(Name), Position);
+    Index->Count = Position + 1;
+    Index->List = Kcb->ValueCache.ValueList;
+}
+
+static
+PCM_VALUE_INDEX
+CmpBuildValueIndex(IN PCM_KEY_CONTROL_BLOCK Kcb,
+                   IN PCELL_DATA ValueList)
+{
+    PHHIVE Hive = Kcb->KeyHive;
+    PCM_VALUE_INDEX Index;
+    PCM_KEY_VALUE KeyValue;
+    ULONG Count = Kcb->ValueCache.Count, Slots = 32, i;
+    SIZE_T Size;
+
+    while (Slots < Count * 2) Slots <<= 1;
+    Size = FIELD_OFFSET(CM_VALUE_INDEX, Slots) + (SIZE_T)Slots * sizeof(CM_VALUE_INDEX_SLOT);
+    Index = CmpAllocate(Size, TRUE, TAG_CM_VALUE_INDEX);
+    if (!Index) return NULL;
+    RtlZeroMemory(Index, Size);
+    Index->Count = Count;
+    Index->List = Kcb->ValueCache.ValueList;
+    Index->Mask = Slots - 1;
+
+    for (i = 0; i < Count; i++)
+    {
+        KeyValue = (PCM_KEY_VALUE)HvGetCell(Hive, ValueList->u.KeyList[i]);
+        if (!KeyValue)
+        {
+            CmpFree(Index, 0);
+            return NULL;
+        }
+        CmpValueIndexInsert(Index, CmpValueNameHash(KeyValue), i);
+        HvReleaseCell(Hive, ValueList->u.KeyList[i]);
+    }
+    return Index;
+}
+
+typedef enum _CM_VALUE_INDEX_RESULT
+{
+    CmValueIndexUnusable,   /* search the list */
+    CmValueIndexFound,
+    CmValueIndexAbsent
+} CM_VALUE_INDEX_RESULT;
+
+/*
+ * Searches the table of the KCB (making it first if the key has been searched often enough). ValueList is the
+ * value list cell data. On CmValueIndexFound the value and its cell to release are returned.
+ */
+static
+CM_VALUE_INDEX_RESULT
+CmpSearchValueIndex(IN PCM_KEY_CONTROL_BLOCK Kcb,
+                    IN PCELL_DATA ValueList,
+                    IN PCUNICODE_STRING Name,
+                    OUT PULONG Position,
+                    OUT PCM_KEY_VALUE *Value,
+                    OUT PHCELL_INDEX CellToRelease)
+{
+    PHHIVE Hive = Kcb->KeyHive;
+    PCM_VALUE_INDEX Index, Built;
+    PCM_KEY_VALUE KeyValue, Best = NULL;
+    HCELL_INDEX BestCell = HCELL_NIL, Cell;
+    ULONG Hash, Slot, Pos, BestPos = MAXULONG;
+
+    if ((Kcb->ValueCache.Count < CM_VALUE_INDEX_MIN_COUNT) ||
+        (Kcb->ValueCache.Count > CM_VALUE_INDEX_MAX_COUNT))
+    {
+        return CmValueIndexUnusable;
+    }
+
+    Index = Kcb->ValueIndex;
+    if (!Index)
+    {
+        /* Make one once the key has been searched a few times */
+        if (InterlockedIncrement(&Kcb->ValueIndexMisses) < CM_VALUE_INDEX_BUILD_AFTER)
+            return CmValueIndexUnusable;
+        InterlockedExchange(&Kcb->ValueIndexMisses, 0);
+
+        Built = CmpBuildValueIndex(Kcb, ValueList);
+        if (!Built) return CmValueIndexUnusable;
+        Index = InterlockedCompareExchangePointer((PVOID*)&Kcb->ValueIndex, Built, NULL);
+        if (Index)
+        {
+            /* Somebody else was first */
+            CmpFree(Built, 0);
+        }
+        else
+        {
+            Index = Built;
+        }
+    }
+
+    /* It has to describe this very list */
+    if ((Index->Count != Kcb->ValueCache.Count) || (Index->List != Kcb->ValueCache.ValueList))
+        return CmValueIndexUnusable;
+
+    Hash = CmpSearchNameHash(Name);
+    for (Slot = Hash & Index->Mask; Index->Slots[Slot].Position1 != 0; Slot = (Slot + 1) & Index->Mask)
+    {
+        if (Index->Slots[Slot].Hash != Hash) continue;
+
+        /* The first of several of one name wins, as in the search of the list */
+        Pos = Index->Slots[Slot].Position1 - 1;
+        if ((Pos >= Index->Count) || (Pos >= BestPos)) continue;
+
+        Cell = ValueList->u.KeyList[Pos];
+        KeyValue = (PCM_KEY_VALUE)HvGetCell(Hive, Cell);
+        if (!KeyValue)
+        {
+            /* Let the search of the list say what is wrong */
+            if (Best) HvReleaseCell(Hive, BestCell);
+            return CmValueIndexUnusable;
+        }
+
+        if (CmpValueNameMatches(KeyValue, Name))
+        {
+            if (Best) HvReleaseCell(Hive, BestCell);
+            Best = KeyValue;
+            BestCell = Cell;
+            BestPos = Pos;
+        }
+        else
+        {
+            HvReleaseCell(Hive, Cell);
+        }
+    }
+
+    if (Best)
+    {
+        *Position = BestPos;
+        *Value = Best;
+        *CellToRelease = BestCell;
+        return CmValueIndexFound;
+    }
+    return CmValueIndexAbsent;
+}
+
+BOOLEAN
+NTAPI
+CmpFindNameInKcbValueList(IN PCM_KEY_CONTROL_BLOCK Kcb,
+                          IN PCUNICODE_STRING Name,
+                          OUT PULONG ChildIndex,
+                          OUT PHCELL_INDEX CellIndex)
+{
+    PHHIVE Hive = Kcb->KeyHive;
+    PCELL_DATA ValueList;
+    PCM_KEY_VALUE Value;
+    HCELL_INDEX CellToRelease;
+    CM_VALUE_INDEX_RESULT Result;
+    ULONG Position;
+
+    /* The list of the KCB, not the one in the hive's key node, is what the table describes */
+    if (!(Kcb->Flags & KEY_SYM_LINK) &&
+        (Kcb->ValueCache.Count >= CM_VALUE_INDEX_MIN_COUNT) &&
+        !CMP_IS_CELL_CACHED(Kcb->ValueCache.ValueList))
+    {
+        ValueList = (PCELL_DATA)HvGetCell(Hive, Kcb->ValueCache.ValueList);
+        if (ValueList)
+        {
+            /* Do not make a table for this: only use the one that is there */
+            Result = Kcb->ValueIndex ?
+                     CmpSearchValueIndex(Kcb, ValueList, Name, &Position, &Value, &CellToRelease) :
+                     CmValueIndexUnusable;
+            if (Result == CmValueIndexFound)
+            {
+                *ChildIndex = Position;
+                *CellIndex = CellToRelease;
+                HvReleaseCell(Hive, CellToRelease);
+                HvReleaseCell(Hive, Kcb->ValueCache.ValueList);
+                return TRUE;
+            }
+            if (Result == CmValueIndexAbsent)
+            {
+                HvReleaseCell(Hive, Kcb->ValueCache.ValueList);
+                *ChildIndex = Kcb->ValueCache.Count;
+                *CellIndex = HCELL_NIL;
+                return TRUE;
+            }
+            HvReleaseCell(Hive, Kcb->ValueCache.ValueList);
+        }
+    }
+
+    return FALSE;
+}
+
 VALUE_SEARCH_RETURN_TYPE
 NTAPI
 CmpFindValueByNameFromCache(IN PCM_KEY_CONTROL_BLOCK Kcb,
@@ -236,6 +548,26 @@ CmpFindValueByNameFromCache(IN PCM_KEY_CONTROL_BLOCK Kcb,
 
         /* The index shouldn't be cached right now */
         if (IndexIsCached) ASSERT_VALUE_CACHE();
+
+        /* A key with many values that is searched often has a table of the names */
+        if (!IndexIsCached)
+        {
+            switch (CmpSearchValueIndex(Kcb, CellData, Name, Index, Value, CellToRelease))
+            {
+                case CmValueIndexFound:
+                    *ValueIsCached = FALSE;
+                    SearchResult = SearchSuccess;
+                    goto Quickie;
+
+                case CmValueIndexAbsent:
+                    *Value = NULL;
+                    SearchResult = SearchFail;
+                    goto Quickie;
+
+                default:
+                    break;
+            }
+        }
 
         /* Loop every value */
         while (TRUE)

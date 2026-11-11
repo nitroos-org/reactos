@@ -3023,13 +3023,12 @@ Cleanup:
 }
 
 
-/************************************************************************
- *  RegEnumValueA
- *
- * @implemented
+/*
+ * The general RegEnumValueA: it asks for the size of the longest value name, then lists the value twice (the first
+ * time for its type). It serves the keys the quick one below does not (HKEY_CLASSES_ROOT and the performance data).
  */
-LONG WINAPI
-RegEnumValueA(
+static LONG
+RegEnumValueAGeneral(
     _In_ HKEY hKey,
     _In_ DWORD dwIndex,
     _Out_ LPSTR lpName,
@@ -3168,6 +3167,146 @@ Exit:
         RtlFreeHeap(RtlGetProcessHeap(), 0, NameBuffer);
 
     return ErrorCode;
+}
+
+
+/************************************************************************
+ *  RegEnumValueA
+ *
+ * @implemented
+ *
+ * One system call for the value (name, type and data come together), where the general function above needs
+ * three. The results, the error codes and what is written to the caller's buffers are those of the general one.
+ */
+LONG WINAPI
+RegEnumValueA(
+    _In_ HKEY hKey,
+    _In_ DWORD dwIndex,
+    _Out_ LPSTR lpName,
+    _Inout_ LPDWORD lpcbName,
+    _Reserved_ LPDWORD lpdwReserved,
+    _Out_opt_ LPDWORD lpdwType,
+    _Out_opt_ LPBYTE lpData,
+    _Inout_opt_ LPDWORD lpcbData)
+{
+    HANDLE KeyHandle;
+    NTSTATUS Status;
+    ULONG TotalSize;
+    char Buffer[256], *BufPtr = Buffer;
+    KEY_VALUE_FULL_INFORMATION *Info = (KEY_VALUE_FULL_INFORMATION *)Buffer;
+    static const int InfoSize = FIELD_OFFSET(KEY_VALUE_FULL_INFORMATION, Name);
+    LONG ErrorCode;
+    BOOL NameOverflow;
+    DWORD NameChars, DataBytes;
+    PWCHAR DataW;
+
+    /* Do parameter checks now, once and for all. */
+    if (!lpName || !lpcbName)
+        return ERROR_INVALID_PARAMETER;
+
+    if ((lpData && !lpcbData) || lpdwReserved)
+        return ERROR_INVALID_PARAMETER;
+
+    /* The performance data and the classes root have their own ways */
+    if (hKey == HKEY_PERFORMANCE_DATA)
+        goto General;
+
+    Status = MapDefaultKey(&KeyHandle, hKey);
+    if (!NT_SUCCESS(Status))
+        return RtlNtStatusToDosError(Status);
+
+    if (IsHKCRKey(KeyHandle))
+    {
+        ClosePredefKey(KeyHandle);
+        goto General;
+    }
+
+    /* The name, the type and a small value fit the buffer; anything bigger is asked for again */
+    TotalSize = InfoSize + (MAX_PATH + 1) * sizeof(WCHAR);
+    if (lpData && lpcbData) TotalSize += *lpcbData * sizeof(WCHAR);
+    TotalSize = min(sizeof(Buffer), TotalSize);
+
+    Status = NtEnumerateValueKey(KeyHandle, dwIndex, KeyValueFullInformation, Buffer, TotalSize, &TotalSize);
+    while ((Status == STATUS_BUFFER_OVERFLOW) || (Status == STATUS_BUFFER_TOO_SMALL))
+    {
+        if (BufPtr != Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, BufPtr);
+        BufPtr = RtlAllocateHeap(RtlGetProcessHeap(), 0, TotalSize);
+        if (!BufPtr)
+        {
+            ClosePredefKey(KeyHandle);
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        Info = (KEY_VALUE_FULL_INFORMATION *)BufPtr;
+        Status = NtEnumerateValueKey(KeyHandle, dwIndex, KeyValueFullInformation, BufPtr, TotalSize, &TotalSize);
+    }
+    ClosePredefKey(KeyHandle);
+
+    if (!NT_SUCCESS(Status))
+    {
+        ErrorCode = RtlNtStatusToDosError(Status);
+        goto Exit;
+    }
+
+    NameChars = Info->NameLength / sizeof(WCHAR);
+    NameOverflow = (NameChars >= *lpcbName);
+    DataW = (PWCHAR)(BufPtr + Info->DataOffset);
+
+    if (is_string(Info->Type) && lpcbData)
+    {
+        /* The caller counts the data in characters */
+        DWORD DataLength = *lpcbData;
+
+        if (lpdwType) *lpdwType = Info->Type;
+        DataBytes = Info->DataLength;
+        *lpcbData = DataBytes / sizeof(WCHAR);
+
+        if (lpData)
+        {
+            if (DataBytes > DataLength * sizeof(WCHAR))
+            {
+                ErrorCode = ERROR_MORE_DATA;
+                goto Exit;
+            }
+
+            RtlUnicodeToMultiByteN((LPSTR)lpData, DataLength, 0, DataW, DataBytes);
+            /* NULL-terminate if there is enough room */
+            if ((DataLength > *lpcbData) && (*lpcbData > 0) && (lpData[*lpcbData - 1] != '\0'))
+                lpData[*lpcbData] = '\0';
+        }
+    }
+    else
+    {
+        if (lpdwType) *lpdwType = Info->Type;
+        if (lpData)
+        {
+            if (Info->DataLength > *lpcbData)
+            {
+                *lpcbData = Info->DataLength;
+                ErrorCode = ERROR_MORE_DATA;
+                goto Exit;
+            }
+            RtlCopyMemory(lpData, DataW, Info->DataLength);
+        }
+        if (lpcbData) *lpcbData = Info->DataLength;
+    }
+
+    if (NameOverflow)
+    {
+        ErrorCode = ERROR_MORE_DATA;
+        goto Exit;
+    }
+
+    /* Convert the name string */
+    RtlUnicodeToMultiByteN(lpName, *lpcbName, lpcbName, Info->Name, Info->NameLength);
+    lpName[*lpcbName] = ANSI_NULL;
+    ErrorCode = ERROR_SUCCESS;
+
+Exit:
+    if (BufPtr != Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, BufPtr);
+    return ErrorCode;
+
+General:
+    return RegEnumValueAGeneral(hKey, dwIndex, lpName, lpcbName, lpdwReserved, lpdwType, lpData, lpcbData);
 }
 
 

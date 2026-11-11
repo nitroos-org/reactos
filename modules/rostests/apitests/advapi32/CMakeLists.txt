@@ -52,6 +52,7 @@ list(APPEND SOURCE
     RegEnumKey.c
     RegEnumKeyClass.c
     RegEnumValueW.c
+    RegValueLookup.c
     RegFlushKey.c
     RegNotifyChangeKeyValue.c
     RegNotifyLeak.c
