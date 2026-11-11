@@ -164,14 +164,14 @@ static MUI_ENTRY plPLWelcomePageEntries[] =
     {
         6,
         23,
-        "Wi\251cej informacji o systemie ReactOS mo\276na znale\253\206 na stronie:",
+        "Wi\251cej informacji o systemie " BRAND_PRODUCT_NAME " mo\276na znale\253\206 na stronie:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

@@ -155,14 +155,14 @@ static MUI_ENTRY hrHRWelcomePageEntries[] =
     {
         6,
         23,
-        "Za vi\347e informacija o ReactOS-a, posjetite:",
+        "Za vi\347e informacija o " BRAND_PRODUCT_NAME "-a, posjetite:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

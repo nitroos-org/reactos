@@ -406,8 +406,8 @@ Gépelje be a `ver /c'-t a készítők listájáért."
  a GNU General Public License feltételei szerint,\n\
  ahogy a Free Software Foundation közölte; akár a Licenc 2-es\n\
  verziója, akár (választása alapján) bármely későbbi verzió szerint.\n"
-    STRING_VERSION_HELP5 "\nHibákról e-maileket ide küldhet: <ros-dev@reactos.org>.\n\
-Frissítések és egyéb információk: https://reactos.org"
+    STRING_VERSION_HELP5 "\nHibákról e-maileket ide küldhet: " BRAND_ISSUES_URL ".\n\
+Frissítések és egyéb információk: " BRAND_SUPPORT_URL
     STRING_VERSION_HELP6 "\nA FreeDOS verzió készítői:\n"
     STRING_VERSION_HELP7 "\nA ReactOS verzió készítői:\n"
     STRING_VOL_HELP1 " A %c meghajtóban lévő kötet: %s\n"

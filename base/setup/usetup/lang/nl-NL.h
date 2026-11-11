@@ -166,14 +166,14 @@ static MUI_ENTRY nlNLWelcomePageEntries[] =
     {
         6,
         24,
-        "Voor meer informatie over ReactOS bezoekt u:",
+        "Voor meer informatie over " BRAND_PRODUCT_NAME " bezoekt u:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         25,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

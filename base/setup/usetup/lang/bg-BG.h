@@ -161,14 +161,14 @@ static MUI_ENTRY bgBGWelcomePageEntries[] =
     {
         6,
         24,
-        "\207\240 \257\256\242\245\347\245 \250\255\344\256\340\254\240\346\250\357 \256\342\255\256\341\255\256 ReactOS \257\256\341\245\342\245\342\245:",
+        "\207\240 \257\256\242\245\347\245 \250\255\344\256\340\254\240\346\250\357 \256\342\255\256\341\255\256 " BRAND_PRODUCT_NAME " \257\256\341\245\342\245\342\245:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         25,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

@@ -79,6 +79,12 @@ set(NITRO_VERSION "dev" CACHE STRING "nitro release version shown in the OS UI")
 # (e.g. https://<host>/<org>/<repo>/releases/tag). It is the Caption of the Win32_QuickFixEngineering row of a release
 # build; empty (the default) gives an empty Caption. Set it with -DNITRO_RELEASE_URL_BASE=... when cutting a release.
 set(NITRO_RELEASE_URL_BASE "" CACHE STRING "base URL of the nitro release pages (the version is appended), Caption of the release QFE row")
+# Where users are sent for help and for reporting problems (Start menu Help and Support, cmd "ver /?", System Properties,
+# Applications Manager, setup). Every user-visible help/support/bug-report link reads these two, never a literal.
+# NITRO_ISSUES_URL is the public nitroos-org repo that has issues enabled (checked 2026-11-11: nitroos-org/releases).
+# iexplore.inf (default start page) is parsed at run time and cannot use macros: media/branding/check-help-links.py keeps its literal in step.
+set(NITRO_SUPPORT_URL "https://nitroos.org/" CACHE STRING "help and support web page shown in the OS UI")
+set(NITRO_ISSUES_URL "https://github.com/nitroos-org/releases/issues" CACHE STRING "bug report page shown in the OS UI")
 set(NITRO_UPSTREAM_SHA "unknown" CACHE STRING "short SHA of the ReactOS upstream base, shown in About/winver")
 set(NITRO_SHA "" CACHE STRING "nitro short git SHA shown in the OS UI (default: HEAD of the source tree)")
 if(NITRO_SHA STREQUAL "")
@@ -173,7 +179,7 @@ set(BRAND_VERSION "${NITRO_ID}")
 set(BRAND_VERSION_MAIN "${NITRO_ID}")
 set(BRAND_VERSION_DETAIL "based on ReactOS")
 # every NITRO_* string ends up inside a C string literal in buildno.h: printable ASCII only, no quotes or backslashes
-foreach(_nitro_var NITRO_NAME NITRO_VERSION NITRO_SHA NITRO_UPSTREAM_SHA NITRO_RELEASE_URL NITRO_TITLE_TEMPLATE NITRO_TITLE NITRO_NOTICE)
+foreach(_nitro_var NITRO_NAME NITRO_SUPPORT_URL NITRO_ISSUES_URL NITRO_VERSION NITRO_SHA NITRO_UPSTREAM_SHA NITRO_RELEASE_URL NITRO_TITLE_TEMPLATE NITRO_TITLE NITRO_NOTICE)
     string(LENGTH "${${_nitro_var}}" _nitro_len)
     if(_nitro_len GREATER 256 OR "${${_nitro_var}}" MATCHES "[^ -~]" OR "${${_nitro_var}}" MATCHES "[\"\\\\]")
         message(FATAL_ERROR "${_nitro_var} must be at most 256 printable ASCII characters without quotes or backslashes")

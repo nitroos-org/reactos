@@ -429,8 +429,8 @@ listing of credits."
  it under the terms of the GNU General Public License as published by\n\
  the Free Software Foundation; either version 2 of the License, or\n\
  (at your option) any later version.\n"
-    STRING_VERSION_HELP5 "\nEnvoyer les rapports d'erreur à <ros-dev@reactos.org>.\n\
-Les mises à jour sont disponibles à : https://reactos.org"
+    STRING_VERSION_HELP5 "\nEnvoyer les rapports d'erreur à " BRAND_ISSUES_URL ".\n\
+Les mises à jour sont disponibles à : " BRAND_SUPPORT_URL
     STRING_VERSION_HELP6 "\nVersion FreeDOS écrite par:\n"
     STRING_VERSION_HELP7 "\nVersion ReactOS écrite par:\n"
     STRING_VOL_HELP1 " Le nom de volume du lecteur %c est %s\n"

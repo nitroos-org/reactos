@@ -172,8 +172,8 @@ BEGIN
     IDS_APPTITLE "ReactOS Správce aplikací"
     IDS_APP_AUTHORS "Copyright 2009 Dmitry Chapyshev"
     IDS_WELCOME_TITLE "Vítejte v ReactOS Správci aplikací!"
-    IDS_WELCOME_TEXT "Na levé straně zvolte kategorii, pak vpravo zvolte aplikaci, která bude nainstalována nebo odinstalována.\nWebová stránka ReactOS: "
-    IDS_WELCOME_URL "https://reactos.org"
+    IDS_WELCOME_TEXT "Na levé straně zvolte kategorii, pak vpravo zvolte aplikaci, která bude nainstalována nebo odinstalována.\nWebová stránka " BRAND_PRODUCT_NAME ": "
+    IDS_WELCOME_URL BRAND_SUPPORT_URL
 
     IDS_APPWIZ_TITLE "Přidat/Odebrat programy"
     IDS_APPWIZ_TEXT1 "Vyberte ""Aplikace"" nebo ""Aktualizace"" pro zobrazení seznamu aplikací nebo aktualizací nainstalovaných na vašem systému."

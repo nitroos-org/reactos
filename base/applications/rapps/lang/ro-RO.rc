@@ -173,8 +173,8 @@ BEGIN
     IDS_APPTITLE "Managerul de aplicații ReactOS"
     IDS_APP_AUTHORS "Marcă înregistrată 2009 Dmitry Chapyshev"
     IDS_WELCOME_TITLE "Bun venit la Managerul de aplicații ReactOS!"
-    IDS_WELCOME_TEXT "Alegeți o categorie din stânga, apoi alegeți o aplicație pentru a o instala sau dezinstala.\nArdesa web ReactOS: "
-    IDS_WELCOME_URL "https://reactos.org"
+    IDS_WELCOME_TEXT "Alegeți o categorie din stânga, apoi alegeți o aplicație pentru a o instala sau dezinstala.\nArdesa web " BRAND_PRODUCT_NAME ": "
+    IDS_WELCOME_URL BRAND_SUPPORT_URL
 
     IDS_APPWIZ_TITLE "Adăugare/Eliminare de programe"
     IDS_APPWIZ_TEXT1 "Alegeți ""Aplicații"" sau ""Actualizări"" pentru a vedea lista aplicațiilor sau a actualizărilor instalate pe sistem."

@@ -158,14 +158,14 @@ static MUI_ENTRY sqALWelcomePageEntries[] =
     {
         6,
         23,
-        "P\211r m\211 shum\211 informacione mbi ReactOS, ju lutem vizitoni:",
+        "P\211r m\211 shum\211 informacione mbi " BRAND_PRODUCT_NAME ", ju lutem vizitoni:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

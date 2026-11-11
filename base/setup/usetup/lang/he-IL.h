@@ -156,14 +156,14 @@ static MUI_ENTRY heILWelcomePageEntries[] =
     {
         6,
         23,
-        ":\230\232\200\201 \230\227\201\214 \217\232\211\220 ,ReactOS \211\201\202\214 \222\203\211\216 \230\232\205\211\214",
+        ":\230\232\200\201 \230\227\201\214 \217\232\211\220 ," BRAND_PRODUCT_NAME " \211\201\202\214 \222\203\211\216 \230\232\205\211\214",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },
