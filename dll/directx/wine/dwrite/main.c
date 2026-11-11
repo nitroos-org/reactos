@@ -592,6 +592,8 @@ struct fileloader
     IDWriteFontFileLoader *loader;
 };
 
+#define PINNED_FACES 16
+
 struct dwritefactory
 {
     IDWriteFactory7 IDWriteFactory7_iface;
@@ -607,6 +609,13 @@ struct dwritefactory
 
     struct list collection_loaders;
     struct list file_loaders;
+
+    /* Faces of installed fonts that the shared factory keeps alive after the last user lets go. A face owns its
+       glyph cache, and a text layout used once and released (every ID2D1RenderTarget::DrawText) held the only
+       reference, so each call opened the font again and rendered every glyph again. */
+    IDWriteFontFace5 *pinned[PINNED_FACES];
+    unsigned int pinned_next;
+    BOOL shared;
 
     CRITICAL_SECTION cs;
 };
@@ -640,6 +649,12 @@ static void release_dwritefactory(struct dwritefactory *factory)
     struct fileloader *fileloader, *fileloader2;
     struct collectionloader *loader, *loader2;
     unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(factory->pinned); ++i)
+    {
+        if (factory->pinned[i])
+            IDWriteFontFace5_Release(factory->pinned[i]);
+    }
 
     EnterCriticalSection(&factory->cs);
     release_fontface_cache(&factory->localfontfaces);
@@ -1013,6 +1028,20 @@ struct fontfacecached *factory_cache_fontface(IDWriteFactory7 *iface, struct lis
     EnterCriticalSection(&factory->cs);
     list_add_tail(fontfaces, &cached->entry);
     LeaveCriticalSection(&factory->cs);
+
+    if (factory->shared && fontfaces == &factory->localfontfaces && dwrite_fontface_is_installed_font(fontface))
+    {
+        IDWriteFontFace5 *old;
+
+        IDWriteFontFace5_AddRef(fontface);
+        EnterCriticalSection(&factory->cs);
+        old = factory->pinned[factory->pinned_next];
+        factory->pinned[factory->pinned_next] = fontface;
+        factory->pinned_next = (factory->pinned_next + 1) % ARRAY_SIZE(factory->pinned);
+        LeaveCriticalSection(&factory->cs);
+        if (old)
+            IDWriteFontFace5_Release(old);
+    }
 
     return cached;
 }
@@ -2085,6 +2114,7 @@ static void init_dwritefactory(struct dwritefactory *factory, DWRITE_FACTORY_TYP
     factory->IDWriteFactory7_iface.lpVtbl = type == DWRITE_FACTORY_TYPE_SHARED ?
             &shareddwritefactoryvtbl : &dwritefactoryvtbl;
     factory->refcount = 1;
+    factory->shared = type == DWRITE_FACTORY_TYPE_SHARED;
     factory->localfontfileloader = get_local_fontfile_loader();
 
     list_init(&factory->collection_loaders);
