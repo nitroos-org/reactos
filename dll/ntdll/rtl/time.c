@@ -41,7 +41,13 @@ RtlQueryPerformanceCounter(
  * (read with its High1Time/High2Time protocol) and nothing else, so this does the same load and store. A bad output
  * pointer gives the status the service returned through its exception handler (an access violation for a null,
  * kernel or unwritable address; there is no alignment test), as on Windows 10 22H2.
+ *
+ * On x64 the function is assembly (rtl/amd64/systime.S): a try block of the C compiler's exception support makes the
+ * compiler save every register in a frame, which cost twice the time of the call that the system call was replaced
+ * with. The load and the store need no frame; the handler next to it gives a fault the same result.
  */
+#ifndef _M_AMD64
+
 NTSTATUS
 NTAPI
 RtlpQuerySystemTimeUser(
@@ -61,6 +67,8 @@ RtlpQuerySystemTimeUser(
 
     return Status;
 }
+
+#endif
 
 /*
  * @implemented

@@ -146,6 +146,7 @@ list(APPEND SOURCE
     NtQuerySection.c
     NtQuerySystemEnvironmentValue.c
     NtQuerySystemInformation.c
+    NtQuerySystemTime.c
     NtQuerySystemProcessorPerformance.c
     NtQuerySystemProcessInformationTail.c
     NtQueryValueKey.c

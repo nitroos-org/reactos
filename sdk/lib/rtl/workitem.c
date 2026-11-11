@@ -58,11 +58,20 @@ PRTL_EXIT_POOL_THREAD RtlpExitThreadFunc = RtlpExitThread;
  *   never exits.
  * Blocked callbacks keep the queue from draining, so the injection keeps adding threads
  * up to MAX_WORKERTHREADS: items that wait for other items still get a thread.
+ *
+ * Work items wait in a list under ThreadPoolLock, in the order they were queued, and the
+ * workers take them from it. The completion port is where idle workers sleep: queuing an
+ * item posts a wake-up there only when a worker sleeps that no wake-up is on its way to
+ * (a worker that is running looks at the list before it sleeps again), so a stream of
+ * items costs the queuer no system call and no inter-processor interrupt while the
+ * workers keep up. Completions of files bound to the pool (RtlSetIoCompletionCallback)
+ * arrive in the same port and wake a sleeping worker as before.
  */
 #define MAX_WORKERTHREADS           0x100
 #define WORKER_INJECT_INTERVAL_MS   160
 #define WORKER_STALL_MS             15
 #define WORKER_MONITOR_IDLE_CHECKS  16  /* checks without backlog before the monitor exits */
+#define WORKER_SPIN_COUNT           1000 /* polls of the queue by the spinning worker before it sleeps */
 
 typedef struct _RTLP_WORKITEM
 {
@@ -80,7 +89,12 @@ static LONG ThreadPoolMinThreads;
 static LONG ThreadPoolWorkerThreads;            /* worker threads started and not exited */
 static LONG ThreadPoolWorkerThreadsRequests;    /* work items queued or running */
 static LONG ThreadPoolWorkerThreadsLongRequests;
-static LONG ThreadPoolWorkerThreadsQueued;      /* work items not dequeued yet */
+static LONG ThreadPoolWorkerThreadsQueued;      /* work items in ThreadPoolQueue, not taken yet */
+static LIST_ENTRY ThreadPoolQueue;              /* the work items waiting for a worker, oldest first */
+static LONG ThreadPoolIdleWorkers;              /* workers that sleep in the port or are about to */
+static LONG ThreadPoolWakeups;                  /* wake-ups posted to the port and not yet taken */
+static volatile LONG ThreadPoolSpinners;        /* 1 while a worker polls the queue before it sleeps */
+static BOOLEAN ThreadPoolSpinEnabled;           /* more than one processor */
 static LONG ThreadPoolWorkerThreadsBusy;        /* workers running a callback */
 static volatile ULONG ThreadPoolLastDequeue;    /* interrupt time in ms */
 static BOOLEAN ThreadPoolMonitorRunning;
@@ -88,6 +102,11 @@ static BOOLEAN ThreadPoolMonitorRunning;
 static LIST_ENTRY PersistentThreadQueue;
 static HANDLE PersistentThreadEvent;
 static BOOLEAN PersistentThreadStarted;
+
+/* Spare work items: a stream of items would otherwise allocate in the queuer and free in a worker,
+   two threads on two processors using the heap lock and its free lists for every item */
+#define WORKITEM_CACHE_DEPTH 256
+static SLIST_HEADER WorkItemCache;
 
 #define IsThreadPoolInitialized() (*((volatile LONG*)&ThreadPoolInitialized) == 1)
 
@@ -105,6 +124,26 @@ RtlpPoolTimeMs(VOID)
     return (ULONG)(Time.QuadPart / 10000);
 }
 
+static PRTLP_WORKITEM
+RtlpAllocateWorkItem(VOID)
+{
+    PSLIST_ENTRY Entry = RtlInterlockedPopEntrySList(&WorkItemCache);
+
+    if (Entry != NULL)
+        return CONTAINING_RECORD(Entry, RTLP_WORKITEM, ListEntry);
+
+    return RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(RTLP_WORKITEM));
+}
+
+static VOID
+RtlpFreeWorkItem(IN PRTLP_WORKITEM WorkItem)
+{
+    if (RtlQueryDepthSList(&WorkItemCache) < WORKITEM_CACHE_DEPTH)
+        RtlInterlockedPushEntrySList(&WorkItemCache, (PSLIST_ENTRY)&WorkItem->ListEntry);
+    else
+        RtlFreeHeap(RtlGetProcessHeap(), 0, WorkItem);
+}
+
 static NTSTATUS
 RtlpInitializeThreadPool(VOID)
 {
@@ -120,7 +159,13 @@ RtlpInitializeThreadPool(VOID)
         {
             /* We're the first thread to initialize the thread pool */
 
+            RtlInitializeSListHead(&WorkItemCache);
             InitializeListHead(&PersistentThreadQueue);
+            InitializeListHead(&ThreadPoolQueue);
+            ThreadPoolIdleWorkers = 0;
+            ThreadPoolWakeups = 0;
+            ThreadPoolSpinners = 0;
+            ThreadPoolSpinEnabled = (NtCurrentPeb()->NumberOfProcessors > 1);
             PersistentThreadEvent = NULL;
             PersistentThreadStarted = FALSE;
 
@@ -138,7 +183,7 @@ RtlpInitializeThreadPool(VOID)
                 ThreadPoolMinThreads = MAX_WORKERTHREADS;
 
             /* Initialize the lock */
-            Status = RtlInitializeCriticalSection(&ThreadPoolLock);
+            Status = RtlInitializeCriticalSectionAndSpinCount(&ThreadPoolLock, 4000);
             if (!NT_SUCCESS(Status))
                 goto Finish;
 
@@ -263,9 +308,7 @@ RtlpRunWorkItem(IN PRTLP_WORKITEM QueuedItem)
     BOOLEAN Impersonated = FALSE;
     RTLP_WORKITEM WorkItem = *(volatile RTLP_WORKITEM *)QueuedItem;
 
-    RtlFreeHeap(RtlGetProcessHeap(),
-                0,
-                QueuedItem);
+    RtlpFreeWorkItem(QueuedItem);
 
     if (WorkItem.TokenHandle != NULL)
     {
@@ -311,52 +354,67 @@ RtlpRunWorkItem(IN PRTLP_WORKITEM QueuedItem)
     return WorkItem.Flags;
 }
 
+/* Posted to the port to wake a sleeping worker; the address marks the completion */
 static VOID
 NTAPI
-RtlpExecuteWorkItem(IN OUT PVOID NormalContext,
-                    IN OUT PVOID SystemArgument1,
-                    IN OUT PVOID SystemArgument2)
+RtlpWorkerWakeup(IN OUT PVOID NormalContext,
+                 IN OUT PVOID SystemArgument1,
+                 IN OUT PVOID SystemArgument2)
 {
-    ULONG Flags = RtlpRunWorkItem((PRTLP_WORKITEM)SystemArgument2);
+}
 
-    /* update the requests counter */
-    InterlockedDecrement(&ThreadPoolWorkerThreadsRequests);
+/* Called with ThreadPoolLock held: wake a worker that sleeps in the port if items wait and no
+   wake-up is on its way to it. A worker that polls the queue (ThreadPoolSpinners) is awake and
+   takes the item itself; the worker that takes an item does this again for the items left. */
+static NTSTATUS
+RtlpWakeIdleWorker(VOID)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
 
-    if (Flags & WT_EXECUTELONGFUNCTION)
+    if (ThreadPoolSpinners == 0 && ThreadPoolIdleWorkers > ThreadPoolWakeups)
     {
-        InterlockedDecrement(&ThreadPoolWorkerThreadsLongRequests);
+        Status = NtSetIoCompletion(ThreadPoolCompletionPort,
+                                   RtlpWorkerWakeup,
+                                   NULL,
+                                   STATUS_SUCCESS,
+                                   0);
+        if (NT_SUCCESS(Status))
+            ThreadPoolWakeups++;
     }
+
+    return Status;
 }
 
 /* Called with ThreadPoolLock held */
 static NTSTATUS
 RtlpQueueWorkerThread(IN OUT PRTLP_WORKITEM WorkItem)
 {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_SUCCESS;
 
-    InterlockedIncrement(&ThreadPoolWorkerThreadsRequests);
-    InterlockedIncrement(&ThreadPoolWorkerThreadsQueued);
+    ThreadPoolWorkerThreadsRequests++;
+    ThreadPoolWorkerThreadsQueued++;
 
     if (WorkItem->Flags & WT_EXECUTELONGFUNCTION)
     {
-        InterlockedIncrement(&ThreadPoolWorkerThreadsLongRequests);
+        ThreadPoolWorkerThreadsLongRequests++;
     }
 
-    /* Queue an IO completion message */
-    Status = NtSetIoCompletion(ThreadPoolCompletionPort,
-                               RtlpExecuteWorkItem,
-                               WorkItem,
-                               STATUS_SUCCESS,
-                               0);
+    InsertTailList(&ThreadPoolQueue, &WorkItem->ListEntry);
+
+    /* The workers that are running look at the queue before they sleep */
+    Status = RtlpWakeIdleWorker();
 
     if (!NT_SUCCESS(Status))
     {
-        InterlockedDecrement(&ThreadPoolWorkerThreadsRequests);
-        InterlockedDecrement(&ThreadPoolWorkerThreadsQueued);
+        /* The item is the last in the queue: take it out again */
+        RemoveEntryList(&WorkItem->ListEntry);
+
+        ThreadPoolWorkerThreadsRequests--;
+        ThreadPoolWorkerThreadsQueued--;
 
         if (WorkItem->Flags & WT_EXECUTELONGFUNCTION)
         {
-            InterlockedDecrement(&ThreadPoolWorkerThreadsLongRequests);
+            ThreadPoolWorkerThreadsLongRequests--;
         }
     }
 
@@ -492,16 +550,17 @@ RtlpWorkerMonitorThreadProc(IN PVOID Parameter)
         if (!NT_SUCCESS(RtlEnterCriticalSection(&ThreadPoolLock)))
             continue;
 
-        /* Completions waiting in the port: work items and bound I/O completions */
+        /* Work items waiting in the queue, and completions of bound files waiting in the port
+           (wake-ups posted to the port are not work) */
         Status = NtQueryIoCompletion(ThreadPoolCompletionPort,
                                      IoCompletionBasicInformation,
                                      &Info,
                                      sizeof(Info),
                                      NULL);
         if (!NT_SUCCESS(Status))
-            Info.Depth = *((volatile LONG*)&ThreadPoolWorkerThreadsQueued);
+            Info.Depth = ThreadPoolWakeups;
 
-        if (Info.Depth > 0)
+        if (ThreadPoolWorkerThreadsQueued > 0 || (LONG)Info.Depth > ThreadPoolWakeups)
         {
             IdleChecks = 0;
 
@@ -534,16 +593,109 @@ RtlpWorkerThreadProc(IN PVOID Parameter)
 {
     LARGE_INTEGER Timeout;
     BOOLEAN Terminate;
+    BOOLEAN Idle = FALSE;       /* counted in ThreadPoolIdleWorkers */
     FILE_IO_COMPLETION_INFORMATION Completion;
     ULONG Removed;
     ULONG TimeoutCount = 0;
     PKNORMAL_ROUTINE ApcRoutine;
+    PRTLP_WORKITEM WorkItem;
+    BOOLEAN Spun = FALSE;               /* this worker polled the queue since it last ran an item */
+    ULONG Spin;
+    volatile BOOLEAN Running = FALSE;   /* an item ran whose counters are not settled yet */
+    volatile ULONG RunFlags = 0;
+    BOOLEAN Counted;                    /* a bound file's callback is counted in ThreadPoolWorkerThreadsBusy */
     NTSTATUS Status = STATUS_SUCCESS;
 
     /* ThreadPoolWorkerThreads was incremented by RtlpStartWorkerThread */
 
     for (;;)
     {
+        /* Run the queued work items before sleeping. The queuer wakes only a worker that
+           sleeps (is counted idle), so this worker leaves the idle count in the same
+           critical section that takes the item, and joins it in the one that finds none.
+           The counters of the item that just ran are settled in that critical section
+           too: they change only with the lock held. */
+        for (;;)
+        {
+            if (!NT_SUCCESS(RtlEnterCriticalSection(&ThreadPoolLock)))
+                break;
+
+            if (Running)
+            {
+                Running = FALSE;
+                ThreadPoolWorkerThreadsBusy--;
+                ThreadPoolWorkerThreadsRequests--;
+                if (RunFlags & WT_EXECUTELONGFUNCTION)
+                    ThreadPoolWorkerThreadsLongRequests--;
+            }
+
+            if (IsListEmpty(&ThreadPoolQueue))
+            {
+                if (ThreadPoolSpinEnabled && !Idle && !Spun && ThreadPoolSpinners == 0)
+                {
+                    /* Poll for the next item a moment, one worker at a time: in a stream of items
+                       this keeps the queuer from waking a sleeping worker for each of them, and
+                       keeps the other workers asleep and off the lock */
+                    ThreadPoolSpinners = 1;
+                    RtlLeaveCriticalSection(&ThreadPoolLock);
+
+                    for (Spin = 0;
+                         Spin < WORKER_SPIN_COUNT && *((volatile LONG*)&ThreadPoolWorkerThreadsQueued) == 0;
+                         Spin++)
+                    {
+                        YieldProcessor();
+                    }
+
+                    /* Not a spinner any more before the queue is looked at again: an item queued
+                       from here on wakes a sleeper, one queued before is seen by this worker */
+                    InterlockedDecrement(&ThreadPoolSpinners);
+                    Spun = TRUE;
+                    continue;
+                }
+
+                if (!Idle)
+                {
+                    Idle = TRUE;
+                    ThreadPoolIdleWorkers++;
+                }
+                RtlLeaveCriticalSection(&ThreadPoolLock);
+                break;
+            }
+
+            WorkItem = CONTAINING_RECORD(RemoveHeadList(&ThreadPoolQueue), RTLP_WORKITEM, ListEntry);
+            ThreadPoolWorkerThreadsQueued--;
+            if (Idle)
+            {
+                Idle = FALSE;
+                ThreadPoolIdleWorkers--;
+            }
+            TimeoutCount = 0;
+            ThreadPoolLastDequeue = RtlpPoolTimeMs();
+
+            /* The last free worker takes a callback: have the monitor watch the queue */
+            if (++ThreadPoolWorkerThreadsBusy >= ThreadPoolWorkerThreads)
+                RtlpStartWorkerMonitor();
+
+            /* Items are left: wake another worker for them */
+            if (!IsListEmpty(&ThreadPoolQueue))
+                RtlpWakeIdleWorker();
+
+            RtlLeaveCriticalSection(&ThreadPoolLock);
+
+            Spun = FALSE;
+            Running = TRUE;
+            RunFlags = WorkItem->Flags;
+            _SEH2_TRY
+            {
+                RtlpRunWorkItem(WorkItem);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                (void)0;
+            }
+            _SEH2_END;
+        }
+
         Timeout.QuadPart = -50000000LL; /* Wait for 5 seconds by default */
 
         /* Dequeue a completion message. Wait alertably, as the I/O worker threads
@@ -561,26 +713,40 @@ RtlpWorkerThreadProc(IN PVOID Parameter)
             TimeoutCount = 0;
 
             ApcRoutine = (PKNORMAL_ROUTINE)Completion.KeyContext;
+            Counted = FALSE;
 
-            ThreadPoolLastDequeue = RtlpPoolTimeMs();
-            if (ApcRoutine == (PKNORMAL_ROUTINE)RtlpExecuteWorkItem)
-                InterlockedDecrement(&ThreadPoolWorkerThreadsQueued);
-
-            /* The last free worker takes a callback: have the monitor watch the queue.
-               This also covers the completions of files bound to the pool. */
-            if (InterlockedIncrement(&ThreadPoolWorkerThreadsBusy) >= *((volatile LONG*)&ThreadPoolWorkerThreads) &&
-                !*((volatile BOOLEAN*)&ThreadPoolMonitorRunning) &&
-                NT_SUCCESS(RtlEnterCriticalSection(&ThreadPoolLock)))
+            /* Awake: leave the idle count, and settle the wake-up this was. A completion
+               of a bound file counts as a running callback; the last free worker taking
+               one has the monitor watch the queue. */
+            if (NT_SUCCESS(RtlEnterCriticalSection(&ThreadPoolLock)))
             {
-                RtlpStartWorkerMonitor();
+                if (Idle)
+                {
+                    Idle = FALSE;
+                    ThreadPoolIdleWorkers--;
+                }
+                if (ApcRoutine == (PKNORMAL_ROUTINE)RtlpWorkerWakeup)
+                {
+                    ThreadPoolWakeups--;
+                }
+                else
+                {
+                    ThreadPoolLastDequeue = RtlpPoolTimeMs();
+                    if (++ThreadPoolWorkerThreadsBusy >= ThreadPoolWorkerThreads)
+                        RtlpStartWorkerMonitor();
+                    Counted = TRUE;
+                }
                 RtlLeaveCriticalSection(&ThreadPoolLock);
             }
 
+            /* A wake-up: the queue is looked at on the next round */
+            if (ApcRoutine == (PKNORMAL_ROUTINE)RtlpWorkerWakeup)
+                continue;
+
             _SEH2_TRY
             {
-                /* Call the APC routine. An I/O completion callback takes the
-                   Win32 error code of the I/O as its first argument; work
-                   items are queued with STATUS_SUCCESS and ignore it. */
+                /* Call the APC routine of a completion of a bound file: it takes the
+                   Win32 error code of the I/O as its first argument. */
                 ApcRoutine((PVOID)(ULONG_PTR)RtlNtStatusToDosErrorNoTeb(Completion.IoStatusBlock.Status),
                            (PVOID)Completion.IoStatusBlock.Information,
                            Completion.ApcContext);
@@ -591,12 +757,16 @@ RtlpWorkerThreadProc(IN PVOID Parameter)
             }
             _SEH2_END;
 
-            InterlockedDecrement(&ThreadPoolWorkerThreadsBusy);
+            if (Counted && NT_SUCCESS(RtlEnterCriticalSection(&ThreadPoolLock)))
+            {
+                ThreadPoolWorkerThreadsBusy--;
+                RtlLeaveCriticalSection(&ThreadPoolLock);
+            }
         }
         else if (Status == STATUS_USER_APC || Status == STATUS_ALERTED ||
                  Status == STATUS_SUCCESS)
         {
-            /* An APC ran, wait again */
+            /* An APC ran, look at the queue and wait again */
             continue;
         }
         else
@@ -629,7 +799,14 @@ RtlpWorkerThreadProc(IN PVOID Parameter)
 
             /* Leave the pool under the lock that guards the check above */
             if (Terminate)
+            {
                 InterlockedDecrement(&ThreadPoolWorkerThreads);
+                if (Idle)
+                {
+                    Idle = FALSE;
+                    ThreadPoolIdleWorkers--;
+                }
+            }
 
             RtlLeaveCriticalSection(&ThreadPoolLock);
 
@@ -671,9 +848,7 @@ RtlQueueWorkItem(IN WORKERCALLBACKFUNC Function,
     }
 
     /* Allocate a work item */
-    WorkItem = RtlAllocateHeap(RtlGetProcessHeap(),
-                               0,
-                               sizeof(RTLP_WORKITEM));
+    WorkItem = RtlpAllocateWorkItem();
     if (WorkItem == NULL)
         return STATUS_NO_MEMORY;
 
@@ -743,9 +918,7 @@ RtlQueueWorkItem(IN WORKERCALLBACKFUNC Function,
         }
 
 Cleanup:
-        RtlFreeHeap(RtlGetProcessHeap(),
-                    0,
-                    WorkItem);
+        RtlpFreeWorkItem(WorkItem);
     }
 
     return Status;
