@@ -395,6 +395,80 @@ DeadThreadTests(VOID)
 }
 
 /*
+ * A failed thread registration must not keep the process: CsrCreateThread's insert-failure branch gives
+ * back the process reference CsrAllocateThread took. With that reference left behind, a process that
+ * once registered a dead thread (its own, or a remote one through the process lock) stays in csrss
+ * after it exits: its process handle and its port handle are never closed (2 handles per process).
+ * Count the csrss handles around 20 such processes; readable in the LocalSystem service run only. The
+ * children have no console: a console of their own would add a handle per child to csrss that has
+ * nothing to do with thread registration.
+ */
+#define LEAK_CHILDREN 20
+
+static
+VOID
+ProcessLeakTests(VOID)
+{
+    WCHAR Self[MAX_PATH], CommandLine[MAX_PATH + 16];
+    STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
+    PROCESS_INFORMATION ProcessInfo;
+    LPTHREAD_START_ROUTINE Exit = (LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "ExitThread");
+    DWORD Before, After, I, Code, Bad = 0;
+
+    Before = CsrssHandleCount();
+    if (!Before)
+    {
+        Log("CSRIDS deadthread-own-process-gone: csrss handle count not readable SKIP\n");
+        Log("CSRIDS deadthread-remote-process-gone: csrss handle count not readable SKIP\n");
+        return;
+    }
+
+    /* Own: each child registers a dead thread of its own, then exits */
+    GetModuleFileNameW(NULL, Self, MAX_PATH);
+    _snwprintf(CommandLine, RTL_NUMBER_OF(CommandLine), L"\"%s\" deadself", Self);
+    for (I = 0; I < LEAK_CHILDREN; I++)
+    {
+        if (!CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, DETACHED_PROCESS, NULL, NULL, &StartupInfo, &ProcessInfo)) { Bad++; continue; }
+        Code = 0;
+        WaitForSingleObject(ProcessInfo.hProcess, 20000);
+        GetExitCodeProcess(ProcessInfo.hProcess, &Code);
+        if (Code != CHILD_OK) Bad++;
+        CloseHandle(ProcessInfo.hProcess);
+        CloseHandle(ProcessInfo.hThread);
+    }
+    Sleep(1000);
+    After = CsrssHandleCount();
+    Log("CSRIDS deadthread-own-process-gone: %lu children, %lu failed; csrss handles %lu -> %lu\n", (DWORD)LEAK_CHILDREN, Bad, Before, After);
+    Check("deadthread-own-process-gone", (!Bad && After <= Before + 8) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL, STATUS_SUCCESS);
+
+    /* Remote: we register a dead thread of each child (named with the child's ids), then end the child */
+    _snwprintf(CommandLine, RTL_NUMBER_OF(CommandLine), L"\"%s\" childwait", Self);
+    Before = CsrssHandleCount();
+    Bad = 0;
+    for (I = 0; I < LEAK_CHILDREN; I++)
+    {
+        HANDLE RemoteDead;
+        CLIENT_ID RemoteIds;
+
+        if (!CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, DETACHED_PROCESS, NULL, NULL, &StartupInfo, &ProcessInfo)) { Bad++; continue; }
+        Sleep(100);
+        RemoteDead = CreateRemoteThread(ProcessInfo.hProcess, NULL, 0, Exit, (LPVOID)0x5E55, 0, NULL);
+        if (!RemoteDead || WaitForSingleObject(RemoteDead, 10000) != WAIT_OBJECT_0 || !IdsOfThread(RemoteDead, &RemoteIds) ||
+            CallBaseCreateThread(RemoteDead, &RemoteIds) != STATUS_THREAD_IS_TERMINATING)
+            Bad++;
+        if (RemoteDead) CloseHandle(RemoteDead);
+        TerminateProcess(ProcessInfo.hProcess, 0);
+        WaitForSingleObject(ProcessInfo.hProcess, 10000);
+        CloseHandle(ProcessInfo.hProcess);
+        CloseHandle(ProcessInfo.hThread);
+    }
+    Sleep(1000);
+    After = CsrssHandleCount();
+    Log("CSRIDS deadthread-remote-process-gone: %lu children, %lu failed; csrss handles %lu -> %lu\n", (DWORD)LEAK_CHILDREN, Bad, Before, After);
+    Check("deadthread-remote-process-gone", (!Bad && After <= Before + 8) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL, STATUS_SUCCESS);
+}
+
+/*
  * rvcsrss 2: the create-time branch of BaseSrvCheckNewProcess. A spawner process creates an unregistered
  * child and exits; once its pid is free we create processes until one gets that pid. That process names the
  * orphan as its new process: the parent pid matches, but the orphan is older than it: refused.
@@ -587,6 +661,7 @@ Tests(BOOL System)
     BaseTests();
     ThreadTests();
     DeadThreadTests();
+    ProcessLeakTests();
     PidReuseTest();
     if (System) SbTests();
     Log("CSRIDS done failures=%lu\n", Failures);
@@ -618,6 +693,17 @@ wmain(int argc, wchar_t *argv[])
 {
     if ((argc > 1) && !_wcsicmp(argv[1], L"child")) return CHILD_OK;
     if ((argc > 1) && !_wcsicmp(argv[1], L"childwait")) { Sleep(30000); return 0; }
+    if ((argc > 1) && !_wcsicmp(argv[1], L"deadself"))
+    {
+        /* Register a thread of ours that is already dead (refused), then end */
+        HANDLE Dead = CreateThread(NULL, 0, Quick, NULL, 0, NULL);
+        CLIENT_ID Ids;
+
+        if (!Dead || WaitForSingleObject(Dead, 10000) != WAIT_OBJECT_0 || !IdsOfThread(Dead, &Ids)) return 1;
+        if (CallBaseCreateThread(Dead, &Ids) != STATUS_THREAD_IS_TERMINATING) return 2;
+        CloseHandle(Dead);
+        return CHILD_OK;
+    }
     if ((argc > 1) && !_wcsicmp(argv[1], L"spawner"))
     {
         /* An unregistered child of ours; our exit code is its pid */
@@ -650,6 +736,7 @@ wmain(int argc, wchar_t *argv[])
         Log("CSRIDS start pid=%lu threads-only %s\n", GetCurrentProcessId(), sizeof(void *) == 4 ? "32-bit" : "64-bit");
         ThreadTests();
         DeadThreadTests();
+        ProcessLeakTests();
         Log("CSRIDS done failures=%lu\n", Failures);
         if (Out) fclose(Out);
         return Failures ? 1 : 0;
