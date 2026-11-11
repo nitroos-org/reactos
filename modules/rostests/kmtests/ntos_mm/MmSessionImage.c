@@ -38,6 +38,7 @@ static PLOAD_SESSION_IMAGE LoadSessionImage;
 static PUNLOAD_SESSION_IMAGE UnloadSessionImage;
 static UNICODE_STRING NameA = RTL_CONSTANT_STRING(L"\\SystemRoot\\bin\\sesstst_a.sys");
 static UNICODE_STRING NameB = RTL_CONSTANT_STRING(L"\\SystemRoot\\bin\\sesstst_b.sys");
+static UNICODE_STRING NameC = RTL_CONSTANT_STRING(L"\\SystemRoot\\bin\\sesstst_c.sys");
 
 /* The page table entry of an address, for the protection bits */
 /*
@@ -389,6 +390,65 @@ UnloadA0:
     {
         Value = Call(Member1, A1.Base, "SessTestGetCounter", 1);
         ok_eq_long(Value, 0L);
+        Result = Unload(Member1, &A1);
+        ok_eq_hex(Result, STATUS_SUCCESS);
+    }
+
+    /*
+     * B alone: A comes in as its import, and goes with it. A later load of A is a load of its own (a fresh
+     * copy), and B loads again
+     */
+    Status = Load(Member1, &NameB, &B1);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Value = Call(Member1, B1.Base, "SessTestBIncrement", 2);
+        ok_eq_long(Value, 2L);
+        Result = Unload(Member1, &B1);
+        ok_eq_hex(Result, STATUS_SUCCESS);
+
+        Status = Load(Member1, &NameA, &A1);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            Value = Call(Member1, A1.Base, "SessTestGetCounter", 1);
+            ok_eq_long(Value, 0L);
+            Result = Unload(Member1, &A1);
+            ok_eq_hex(Result, STATUS_SUCCESS);
+        }
+
+        Status = Load(Member1, &NameB, &B1);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            Value = Call(Member1, B1.Base, "SessTestBIncrement", 1);
+            ok_eq_long(Value, 1L);
+            Result = Unload(Member1, &B1);
+            ok_eq_hex(Result, STATUS_SUCCESS);
+        }
+    }
+
+    /* C imports a routine A does not export: its load fails, and the A it loaded goes with it */
+    Status = Load(Member1, &NameC, &B1);
+    ok(!NT_SUCCESS(Status), "Load of sesstst_c: 0x%lx\n", Status);
+    Status = Load(Member1, &NameA, &A1);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Value = Call(Member1, A1.Base, "SessTestGetCounter", 1);
+        ok_eq_long(Value, 0L);
+
+#ifndef _M_IX86
+        /*
+         * An unload from a session that has no load of it takes nothing from session 1 (not on i386, where the
+         * kernel debugger may still hold a reference of its own for the symbols, which such an unload drops)
+         */
+        Result = Unload(Member0, &A1);
+        ok_eq_hex(Result, STATUS_SUCCESS);
+        Value = Call(Member1, A1.Base, "SessTestIncrement", 1);
+        ok_eq_long(Value, 1L);
+#endif
+
         Result = Unload(Member1, &A1);
         ok_eq_hex(Result, STATUS_SUCCESS);
     }

@@ -59,3 +59,12 @@ add_library(sesstst_b MODULE sesstst_b.c ${CMAKE_CURRENT_BINARY_DIR}/sesstst_b.d
 set_module_type(sesstst_b kernelmodedriver)
 add_importlibs(sesstst_b sesstst_a ntoskrnl)
 add_rostests_file(TARGET sesstst_b)
+
+# sesstst_c imports from sesstst_a a routine it does not export (an import library made for that)
+generate_import_lib(libsesstst_ax sesstst_a.sys sesstst_ax.spec "" "")
+spec2def(sesstst_c.sys sesstst_c.spec)
+add_library(sesstst_c MODULE sesstst_c.c ${CMAKE_CURRENT_BINARY_DIR}/sesstst_c.def)
+set_module_type(sesstst_c kernelmodedriver)
+target_link_libraries(sesstst_c libsesstst_ax)
+add_importlibs(sesstst_c ntoskrnl)
+add_rostests_file(TARGET sesstst_c)

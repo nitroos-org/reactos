@@ -102,6 +102,7 @@ MiLoadSessionImageSection(
     Size = (SIZE_T)PageCount << PAGE_SHIFT;
     Copy = ExAllocatePoolWithTag(PagedPool, Size, TAG_LDR_WSTR);
     if (!Copy) return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(Copy, Size);
 
     /* Read the image */
     KeStackAttachProcess(&PsInitialSystemProcess->Pcb, &ApcState);
@@ -1093,9 +1094,15 @@ MiSnapThunk(IN PVOID DllBase,
     return Status;
 }
 
+/*
+ * EntryReference: for a session image, the reference to drop is one on the entry (an importer's), not a
+ * load in the current session
+ */
 NTSTATUS
 NTAPI
-MmUnloadSystemImage(IN PVOID ImageHandle)
+MiUnloadSystemImageEx(
+    _In_ PVOID ImageHandle,
+    _In_ BOOLEAN EntryReference)
 {
     PLDR_DATA_TABLE_ENTRY LdrEntry = ImageHandle;
     PVOID BaseAddress = LdrEntry->DllBase;
@@ -1117,7 +1124,7 @@ MmUnloadSystemImage(IN PVOID ImageHandle)
     /* A session image: one load fewer in this session; the entry goes when no session has it */
     if (MiIsSessionImage(LdrEntry))
     {
-        if (!MiDereferenceSessionImage(LdrEntry)) goto Done;
+        if (!MiDereferenceSessionImage(LdrEntry, EntryReference)) goto Done;
     }
     else
     {
@@ -1203,6 +1210,13 @@ Done:
     KeReleaseMutant(&MmSystemLoadLock, MUTANT_INCREMENT, FALSE, FALSE);
     KeLeaveCriticalRegion();
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+MmUnloadSystemImage(IN PVOID ImageHandle)
+{
+    return MiUnloadSystemImageEx(ImageHandle, FALSE);
 }
 
 /*
@@ -1651,6 +1665,11 @@ MiResolveImageReferences(IN PVOID ImageBase,
             RtlZeroMemory(LoadedImports, LoadedImportsSize);
             LoadedImports->Count = ImportCount;
         }
+        else if (MI_IS_SESSION_IMAGE_ADDRESS(ImageBase))
+        {
+            /* A session image records every session reference it takes: no list, no load */
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
     }
     else
     {
@@ -1944,7 +1963,8 @@ CheckDllState:
         }
 
         /* Check if we're support to reference this import */
-        if ((ReferenceNeeded) && (LoadedImports))
+        /* A session image is always recorded: its reference is per session and goes with the importer */
+        if ((ReferenceNeeded || MiIsSessionImage(LdrEntry)) && (LoadedImports))
         {
             /* Make sure we're not already loading */
             if (!(LdrEntry->Flags & LDRP_LOAD_IN_PROGRESS))
@@ -2092,7 +2112,7 @@ Failure:
 
     if (LoadedImports)
     {
-        if (MI_IS_SESSION_IMAGE_ADDRESS(ImageBase)) MiReleaseSessionImports(LoadedImports);
+        if (MI_IS_SESSION_IMAGE_ADDRESS(ImageBase)) LoadedImports = MiReleaseSessionImports(LoadedImports);
         MiDereferenceImports(LoadedImports);
         ExFreePoolWithTag(LoadedImports, TAG_LDR_IMPORTS);
     }
@@ -4097,8 +4117,8 @@ LoaderScan:
         Status = MiCreateSessionImage(LdrEntry, BYTES_TO_PAGES(DriverSize));
         if (!NT_SUCCESS(Status))
         {
-            MiReleaseSessionImports(LoadedImports);
-            MiDereferenceImports(LoadedImports);
+            LdrEntry->LoadedImports = MiReleaseSessionImports(LdrEntry->LoadedImports);
+            MiDereferenceImports(LdrEntry->LoadedImports);
             MiProcessLoaderEntry(LdrEntry, FALSE);
             MiClearImports(LdrEntry);
             if (LdrEntry->FullDllName.Buffer)
