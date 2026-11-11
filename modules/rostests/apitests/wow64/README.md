@@ -68,9 +68,16 @@ fixture on native i386 and WoW64; their counts differ for these private checks.
 The `--http` mode requires QEMU user networking and a host loopback HTTP server
 on port 18463. Serve a page containing `Local HTTP page loaded.` and wait for
 guest DHCP before launching it. The fixture requires an HTTP 200 response,
-the page marker and EOF. All modes print a summary, return nonzero on failure
-and have a 15-second watchdog. These tests do not cover the remaining datagram,
-event-select or extended accept/connect translations.
+the page marker and EOF. The `--datagram` mode binds a fresh TCP and a UDP socket
+to the wildcard and the loopback address, then runs a UDP sendto/recvfrom and a
+connected-UDP exchange on loopback. It guards 32-bit `bind()`: wshtcpip's bind
+notification queries the TCP driver through the 32-bit TCP query layout, so a
+tcpip.sys built without `BUILD_WOW64_ENABLED` (for instance a driver swapped into a
+WoW64 image from a default amd64 build) fails every x86 bind with WSAEINVAL while
+x64 passes. Build any driver swapped into a WoW64 image with the same WoW64 options.
+All modes print a summary, return nonzero on failure and have a 15-second watchdog.
+These tests do not cover the remaining event-select or extended accept/connect
+translations.
 
 ## System root-store lifetime
 
