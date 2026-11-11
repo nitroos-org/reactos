@@ -107,6 +107,8 @@ sys_unlock_tcpip_core(void)
     PKTHREAD Thread = KeGetCurrentThread();
     u32_t SleepTime;
     BOOLEAN Wake = FALSE;
+    LIST_ENTRY Completions;
+    BOOLEAN HaveCompletions;
 
     ASSERT(CoreLockOwner == Thread);
 
@@ -126,6 +128,9 @@ sys_unlock_tcpip_core(void)
         Wake = TRUE;
     }
 
+    /* TDI completions made under the lock wait until it is released */
+    HaveCompletions = TCPTakeDeferredCompletions(&Completions);
+
     CoreLockOwner = NULL;
     InterlockedExchange(&CoreLockHeld, 0);
     if (CoreLockWaiters)
@@ -136,6 +141,9 @@ sys_unlock_tcpip_core(void)
         KeSetEvent(&TimeoutChanged, IO_NO_INCREMENT, FALSE);
 
     KeLeaveCriticalRegion();
+
+    if (HaveCompletions)
+        TCPRunDeferredCompletions(&Completions, Thread == TcpipThread);
 }
 
 BOOLEAN
@@ -459,6 +467,8 @@ sys_init(void)
     KeQuerySystemTime(&StartTime);
 
     KeInitializeEvent(&TerminationEvent, NotificationEvent, FALSE);
+
+    TCPInitDeferredCompletions();
 
     KeInitializeEvent(&CoreLockReleased, SynchronizationEvent, FALSE);
     KeInitializeEvent(&TimeoutChanged, SynchronizationEvent, FALSE);

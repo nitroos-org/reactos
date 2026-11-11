@@ -48,7 +48,7 @@ struct lwip_callback_msg
         struct {
             PCONNECTION_ENDPOINT Connection;
             void *Data;
-            u16_t DataLength;
+            u32_t DataLength;
             PTDI_BUCKET Bucket;
         } Send;
         struct {
@@ -99,6 +99,11 @@ NTSTATUS    LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PU
 VOID        LibTCPReturnReceiveCredit(PCONNECTION_ENDPOINT Connection);
 NTSTATUS    LibTCPSetReceiveWindow(PCONNECTION_ENDPOINT Connection, ULONG Size);
 
+/* Completions made under the core lock (transport/tcp/event.c) */
+extern VOID TCPInitDeferredCompletions(VOID);
+extern BOOLEAN TCPTakeDeferredCompletions(PLIST_ENTRY Taken);
+extern VOID TCPRunDeferredCompletions(PLIST_ENTRY Taken, BOOLEAN TcpipThread);
+
 /* External TCP event handlers */
 extern void TCPConnectEventHandler(void *arg, const err_t err);
 extern void TCPAcceptEventHandler(void *arg, PTCP_PCB newpcb);
@@ -117,7 +122,7 @@ err_t       LibTCPBind(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr
 UINT        LibTCPAllocateEphemeralPort(VOID);
 PTCP_PCB    LibTCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog);
 VOID        LibTCPClaimPendingAccept(PCONNECTION_ENDPOINT Listener);
-err_t       LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len, ULONG *sent, const int safe, PTDI_BUCKET Bucket);
+err_t       LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u32_t len, ULONG *sent, const int safe, PTDI_BUCKET Bucket);
 err_t       LibTCPConnect(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port);
 err_t       LibTCPShutdown(PCONNECTION_ENDPOINT Connection, const int shut_rx, const int shut_tx);
 err_t       LibTCPAbort(PCONNECTION_ENDPOINT Connection);

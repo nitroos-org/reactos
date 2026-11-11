@@ -232,6 +232,13 @@ FlushAllQueues(PCONNECTION_ENDPOINT Connection, NTSTATUS Status);
 
 VOID CompleteBucket(PCONNECTION_ENDPOINT Connection, PTDI_BUCKET Bucket, const BOOLEAN Synchronous);
 
+/* Around the receive worker's input of a packet: its TDI completions go to work items */
+/* Around work that holds no AFD or TDI lock (the loopback worker): its completions run inline */
+VOID TCPEnterInlineContext(VOID);
+VOID TCPLeaveInlineContext(VOID);
+VOID TCPEnterReceiveWorker(VOID);
+VOID TCPLeaveReceiveWorker(VOID);
+
 void
 LibTCPDumpPcb(PVOID SocketContext);
 

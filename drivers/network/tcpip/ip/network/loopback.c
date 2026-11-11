@@ -70,10 +70,13 @@ VOID LoopPassiveWorker(
 {
   PLOOP_ITEM Item = CONTAINING_RECORD(Entry, LOOP_ITEM, ListEntry);
 
+  /* Holds no lock: the TDI completions the segment causes run on this thread (CompleteBucket) */
+  TCPEnterInlineContext();
   if (Item->Pbuf)
     LoopInputPbuf(Item);
   else
     LoopPassiveWorkItem(Item);
+  TCPLeaveInlineContext();
 }
 
 BOOLEAN LoopTransmitPbuf(
