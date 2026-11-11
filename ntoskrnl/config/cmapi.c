@@ -735,12 +735,22 @@ DoAgain:
         Found = FALSE;
         if (Count > 0)
         {
-            /* Try to find the existing name */
-            Result = CmpFindNameInList(Hive,
-                                       &Parent->ValueList,
-                                       ValueName,
-                                       &ChildIndex,
-                                       &CurrentChild);
+            /* Try to find the existing name, through the KCB's table of the names when it has one */
+            if (Kcb->ValueIndex &&
+                (Kcb->ValueCache.Count == Count) &&
+                (Kcb->ValueCache.ValueList == Parent->ValueList.List) &&
+                CmpFindNameInKcbValueList(Kcb, ValueName, &ChildIndex, &CurrentChild))
+            {
+                Result = TRUE;
+            }
+            else
+            {
+                Result = CmpFindNameInList(Hive,
+                                           &Parent->ValueList,
+                                           ValueName,
+                                           &ChildIndex,
+                                           &CurrentChild);
+            }
             if (!Result)
             {
                 /* Fail */
@@ -885,6 +895,9 @@ DoAgain:
             /* Set the value cache */
             Kcb->ValueCache.Count = Parent->ValueList.Count;
             Kcb->ValueCache.ValueList = Parent->ValueList.List;
+
+            /* A new value went to the end of the list; the table of the names (if any) takes it in */
+            if (!Found) CmpAppendKcbValueIndex(Kcb, ValueName, ChildIndex);
         }
 
         /* Notify registered callbacks */
@@ -991,6 +1004,9 @@ CmDeleteValueKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
         /* Sanity checks */
         ASSERT(HvIsCellDirty(Hive, Parent->ValueList.List));
         ASSERT(HvIsCellDirty(Hive, ChildCell));
+
+        /* The places in the list change: drop the table of the names */
+        CmpFreeKcbValueIndex(Kcb);
 
         /* Remove the value from the child list */
         Status = CmpRemoveValueFromList(Hive, ChildIndex, ChildList);
