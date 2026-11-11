@@ -316,6 +316,37 @@ SURFACE_AllocSurface(
     return psurf;
 }
 
+/*
+ * Points a top-down STYPE_BITMAP that was made around a caller provided buffer (EngCreateBitmap with
+ * pvBits and BMF_TOPDOWN) at another buffer of the same format, with the size and the width in bytes
+ * that SURFACE_AllocSurface would have made of the same arguments. The caller owns the surface, it must
+ * not be in use by anyone else. Drawing a string of glyphs uses it to make one surface for the whole
+ * string instead of one per glyph.
+ */
+VOID
+NTAPI
+SURFACE_vSetCallerBits(
+    _Inout_ SURFOBJ *pso,
+    _In_ ULONG cx,
+    _In_ ULONG cy,
+    _In_ ULONG cjWidth,
+    _In_ PVOID pvBits)
+{
+    ULONG cBitsPixel = gajBitsPerFormat[pso->iBitmapFormat];
+
+    ASSERT(pso->iType == STYPE_BITMAP);
+    ASSERT(pso->iBitmapFormat <= BMF_32BPP);
+
+    cjWidth = WIDTH_BYTES_ALIGN32((cjWidth << 3) / cBitsPixel, cBitsPixel);
+
+    pso->sizlBitmap.cx = cx;
+    pso->sizlBitmap.cy = cy;
+    pso->cjBits = cjWidth * cy;
+    pso->pvBits = pvBits;
+    pso->pvScan0 = pvBits;
+    pso->lDelta = cjWidth;
+}
+
 HBITMAP
 APIENTRY
 EngCreateBitmap(
