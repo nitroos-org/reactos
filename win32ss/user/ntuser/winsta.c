@@ -763,13 +763,22 @@ IntCreateWindowStation(
 
     if (InputWindowStation == NULL)
     {
-        ERR("Initializing input window station\n");
-
         /*
-         * Only Winlogon can create the interactive window station. A session without the console
-         * (NitroSessions) has no Winlogon yet: its first window station is the interactive one
+         * The first window station of a session is the interactive one, and its creation starts the
+         * desktop and raw input threads that every desktop of the session needs. Only Winlogon creates
+         * it; in a session without the console (NitroSessions), which has no Winlogon yet, its csrss
+         * or a caller holding SeTcbPrivilege may. Anyone else is refused until it exists.
          */
-        ASSERT((gpidLogon == PsGetCurrentProcessId()) || gbHeadlessSession);
+        if (!((gpidLogon == PsGetCurrentProcessId()) ||
+              (gbHeadlessSession &&
+               ((PsGetCurrentProcess() == gpepCSRSS) ||
+                SeSinglePrivilegeCheck(SeExports->SeTcbPrivilege, UserMode)))))
+        {
+            ERR("Process %p may not create the interactive window station\n", PsGetCurrentProcessId());
+            ObDereferenceObject(WindowStation);
+            SetLastNtError(STATUS_ACCESS_DENIED);
+            return STATUS_ACCESS_DENIED;
+        }
 
         InputWindowStation = WindowStation;
         WindowStation->Flags &= ~WSS_NOIO;
