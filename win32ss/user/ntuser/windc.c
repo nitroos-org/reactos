@@ -938,8 +938,8 @@ DceFreeDCE(PDCE pdce, BOOLEAN Force)
   {
      if (Hit || !DceRedirBind(pdce, NULL))
      {
-        /* The DC may still draw (and mark the record) while it goes: the timer releases the record once it is gone or unbound */
-        UserRedirOrphan(pdce->hDC, pdce->pRedir);
+        /* The DC may still draw (and mark the record) while it goes: it holds a reference of its own until it is freed */
+        UserRedirRelease(pdce->pRedir);
         pdce->pRedir = NULL;
      }
   }
