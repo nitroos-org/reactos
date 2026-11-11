@@ -259,6 +259,22 @@ static UINT g_FontCacheNumEntries;
 static PFONT_CACHE_ENTRY g_FontCacheBuckets[FONT_CACHE_BUCKETS];
 #define FONT_CACHE_BUCKET(dwHash) (((dwHash) ^ ((dwHash) >> 8) ^ ((dwHash) >> 16)) % FONT_CACHE_BUCKETS)
 
+/* Advances of glyphs that were measured but never drawn have no bitmap in the cache above, and measuring them
+ * loaded (hinted) every glyph again on every call: a text measure of the alphabet by the edit control took a
+ * TrueType bytecode run for each uppercase letter of a line that only has lowercase ones. The advances
+ * IntLoadGlyphAdvance returned are kept here, by the same key as the glyph cache (direct mapped, the FreeType
+ * lock protects it, the entries of a face are dropped with it). */
+#define ADVANCE_CACHE_SLOTS 1024
+typedef struct _ADVANCE_CACHE_ENTRY
+{
+    BOOL bValid;
+    DWORD dwHash;
+    FONT_CACHE_HASHED Hashed;
+    FT_Pos AdvanceX;
+    FT_Pos AdvanceY;
+} ADVANCE_CACHE_ENTRY;
+static ADVANCE_CACHE_ENTRY g_AdvanceCache[ADVANCE_CACHE_SLOTS];
+
 static PWCHAR g_ElfScripts[32] =   /* These are in the order of the fsCsb[0] bits */
 {
     L"Western", /* 00 */
@@ -439,6 +455,8 @@ SharedFaceCache_Init(PSHARED_FACE_CACHE Cache)
     Cache->OutlineRequiredSize = 0;
     RtlInitUnicodeString(&Cache->FontFamily, NULL);
     RtlInitUnicodeString(&Cache->FullName, NULL);
+    RtlInitUnicodeString(&Cache->StyleName, NULL);
+    RtlInitUnicodeString(&Cache->UniqueName, NULL);
 }
 
 static PSHARED_FACE
@@ -514,8 +532,15 @@ RemoveCacheEntries(FT_Face Face)
 {
     PLIST_ENTRY CurrentEntry, NextEntry;
     PFONT_CACHE_ENTRY FontEntry;
+    UINT i;
 
     ASSERT_FREETYPE_LOCK_HELD();
+
+    for (i = 0; i < ADVANCE_CACHE_SLOTS; i++)
+    {
+        if (g_AdvanceCache[i].bValid && g_AdvanceCache[i].Hashed.Face == Face)
+            g_AdvanceCache[i].bValid = FALSE;
+    }
 
     for (CurrentEntry = g_FontCacheListHead.Flink;
          CurrentEntry != &g_FontCacheListHead;
@@ -559,6 +584,8 @@ SharedFaceCache_Release(PSHARED_FACE_CACHE Cache)
 {
     RtlFreeUnicodeString(&Cache->FontFamily);
     RtlFreeUnicodeString(&Cache->FullName);
+    RtlFreeUnicodeString(&Cache->StyleName);
+    RtlFreeUnicodeString(&Cache->UniqueName);
 }
 
 static void
@@ -3624,6 +3651,10 @@ IntGetFontLocalizedName(PUNICODE_STRING pNameW, PSHARED_FACE SharedFace,
         return IntDuplicateUnicodeString(&Cache->FontFamily, pNameW);
     if (NameID == TT_NAME_ID_FULL_NAME && Cache->FullName.Buffer)
         return IntDuplicateUnicodeString(&Cache->FullName, pNameW);
+    if (NameID == TT_NAME_ID_FONT_SUBFAMILY && Cache->StyleName.Buffer)
+        return IntDuplicateUnicodeString(&Cache->StyleName, pNameW);
+    if (NameID == TT_NAME_ID_UNIQUE_ID && Cache->UniqueName.Buffer)
+        return IntDuplicateUnicodeString(&Cache->UniqueName, pNameW);
 
     BestIndex = -1;
     BestScore = 0;
@@ -3737,6 +3768,18 @@ IntGetFontLocalizedName(PUNICODE_STRING pNameW, PSHARED_FACE SharedFace,
             ASSERT_FREETYPE_LOCK_HELD();
             if (!Cache->FullName.Buffer)
                 IntDuplicateUnicodeString(pNameW, &Cache->FullName);
+        }
+        else if (NameID == TT_NAME_ID_FONT_SUBFAMILY)
+        {
+            ASSERT_FREETYPE_LOCK_HELD();
+            if (!Cache->StyleName.Buffer)
+                IntDuplicateUnicodeString(pNameW, &Cache->StyleName);
+        }
+        else if (NameID == TT_NAME_ID_UNIQUE_ID)
+        {
+            ASSERT_FREETYPE_LOCK_HELD();
+            if (!Cache->UniqueName.Buffer)
+                IntDuplicateUnicodeString(pNameW, &Cache->UniqueName);
         }
     }
 
@@ -5391,7 +5434,35 @@ IntGetGlyphAdvance(
         return FT_Err_Ok;
     }
 
-    return IntLoadGlyphAdvance(Cache, pAdvanceX, pAdvanceY);
+    {
+        ADVANCE_CACHE_ENTRY *pEntry = &g_AdvanceCache[Cache->dwHash % ADVANCE_CACHE_SLOTS];
+        FT_Error error;
+
+        if (pEntry->bValid &&
+            pEntry->dwHash == Cache->dwHash &&
+            pEntry->Hashed.GlyphIndex == Cache->Hashed.GlyphIndex &&
+            pEntry->Hashed.Face == Cache->Hashed.Face &&
+            pEntry->Hashed.lfHeight == Cache->Hashed.lfHeight &&
+            pEntry->Hashed.lfWidth == Cache->Hashed.lfWidth &&
+            pEntry->Hashed.AspectValue == Cache->Hashed.AspectValue &&
+            memcmp(&pEntry->Hashed.matTransform, &Cache->Hashed.matTransform, sizeof(FT_Matrix)) == 0)
+        {
+            *pAdvanceX = pEntry->AdvanceX;
+            *pAdvanceY = pEntry->AdvanceY;
+            return FT_Err_Ok;
+        }
+
+        error = IntLoadGlyphAdvance(Cache, pAdvanceX, pAdvanceY);
+        if (error == FT_Err_Ok)
+        {
+            pEntry->bValid = TRUE;
+            pEntry->dwHash = Cache->dwHash;
+            pEntry->Hashed = Cache->Hashed;
+            pEntry->AdvanceX = *pAdvanceX;
+            pEntry->AdvanceY = *pAdvanceY;
+        }
+        return error;
+    }
 }
 
 /* A failed measurement sets the error the caller reads: memory for a pool failure, a general failure otherwise */

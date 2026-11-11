@@ -86,6 +86,11 @@ typedef struct tagLINEDEF {
 	struct tagLINEDEF *next;
 } LINEDEF;
 
+typedef struct tagLINEPTR {
+	LINEDEF *def;			/* line definition */
+	INT start;			/* sum of the lengths of the lines before it */
+} LINEPTR;
+
 typedef struct
 {
 	BOOL is_unicode;		/* how the control was created */
@@ -134,6 +139,10 @@ typedef struct
 	INT tabs_count;
 	LPINT tabs;
 	LINEDEF *first_line_def;	/* linked list of (soft) linebreaks */
+	struct tagLINEPTR *line_ptrs;	/* the same list as an array, built when a line is looked up */
+	INT line_ptrs_count;		/* lines in the array */
+	INT line_ptrs_size;		/* entries allocated */
+	BOOL line_ptrs_valid;		/* the array matches the list (the list is only changed by EDIT_BuildLineDefs_ML) */
 	HLOCAL hloc32W;			/* our unicode local memory block */
 	HLOCAL hloc32A;			/* alias for ANSI control receiving EM_GETHANDLE
 				   	   or EM_SETHANDLE */
@@ -383,6 +392,122 @@ static inline void EDIT_InvalidateUniscribeData_linedef(LINEDEF *line_def)
 	}
 }
 
+/*********************************************************************
+ *
+ *	Line lookup
+ *
+ *	The lines are a singly linked list, and a lookup by line number or by
+ *	character position walked it from the first line. Painting a page asks
+ *	for every visible line several times, so the cost grew with the number
+ *	of lines before the page (20000 lines: tens of milliseconds per page).
+ *	The list is copied into an array (with the start of every line) the
+ *	first time a line is looked up after the list was changed. The results
+ *	are the ones of the walks they replace; when the array cannot be
+ *	allocated the walks run as before.
+ *
+ */
+static BOOL EDIT_BuildLinePtrs(EDITSTATE *es)
+{
+	LINEDEF *line_def;
+	INT n = 0, start = 0;
+
+	if (es->line_ptrs_valid)
+		return TRUE;
+	for (line_def = es->first_line_def; line_def; line_def = line_def->next)
+		n++;
+	if (n > es->line_ptrs_size)
+	{
+		LINEPTR *p;
+		INT size = n + n / 4 + 16;
+		if (es->line_ptrs)
+			p = HeapReAlloc(GetProcessHeap(), 0, es->line_ptrs, size * sizeof(LINEPTR));
+		else
+			p = HeapAlloc(GetProcessHeap(), 0, size * sizeof(LINEPTR));
+		if (!p)
+			return FALSE;
+		es->line_ptrs = p;
+		es->line_ptrs_size = size;
+	}
+	n = 0;
+	for (line_def = es->first_line_def; line_def; line_def = line_def->next)
+	{
+		es->line_ptrs[n].def = line_def;
+		es->line_ptrs[n].start = start;
+		start += line_def->length;
+		n++;
+	}
+	es->line_ptrs_count = n;
+	es->line_ptrs_valid = TRUE;
+	return TRUE;
+}
+
+/* The line "line" (counted from 0) and the start of it; NULL when the list is shorter */
+static LINEDEF *EDIT_GetLineDef(EDITSTATE *es, INT line, INT *start)
+{
+	LINEDEF *line_def;
+	INT line_index = 0;
+
+	if (line >= 0 && EDIT_BuildLinePtrs(es))
+	{
+		if (line >= es->line_ptrs_count)
+			return NULL;
+		if (start)
+			*start = es->line_ptrs[line].start;
+		return es->line_ptrs[line].def;
+	}
+
+	line_def = es->first_line_def;
+	while (line_def && line > 0)
+	{
+		line_index += line_def->length;
+		line_def = line_def->next;
+		line--;
+	}
+	if (start)
+		*start = line_index;
+	return line_def;
+}
+
+/* The line a character position (>= 0) is in, the last line when it is past the text,
+   and the start of the line */
+static INT EDIT_FindLineByChar(EDITSTATE *es, INT index, LINEDEF **pdef, INT *pstart)
+{
+	LINEDEF *line_def;
+	INT line = 0, line_index = 0;
+
+	if (EDIT_BuildLinePtrs(es))
+	{
+		INT lo = 0, hi = es->line_ptrs_count - 1;
+		while (lo < hi)
+		{
+			INT mid = (lo + hi) / 2;
+			if (index < es->line_ptrs[mid].start + es->line_ptrs[mid].def->length)
+				hi = mid;
+			else
+				lo = mid + 1;
+		}
+		if (pdef)
+			*pdef = es->line_ptrs[lo].def;
+		if (pstart)
+			*pstart = es->line_ptrs[lo].start;
+		return lo;
+	}
+
+	line_def = es->first_line_def;
+	index -= line_def->length;
+	while ((index >= 0) && line_def->next) {
+		line++;
+		line_index += line_def->length;
+		line_def = line_def->next;
+		index -= line_def->length;
+	}
+	if (pdef)
+		*pdef = line_def;
+	if (pstart)
+		*pstart = line_index;
+	return line;
+}
+
 static inline void EDIT_InvalidateUniscribeData(EDITSTATE *es)
 {
 	LINEDEF *line_def = es->first_line_def;
@@ -498,12 +623,7 @@ static SCRIPT_STRING_ANALYSIS EDIT_UpdateUniscribeData(EDITSTATE *es, HDC dc, IN
 	}
 	else
 	{
-		line_def = es->first_line_def;
-		while (line_def && line)
-		{
-			line_def = line_def->next;
-			line--;
-		}
+		line_def = EDIT_GetLineDef(es, line, NULL);
 
 		return EDIT_UpdateUniscribeData_linedef(es,dc,line_def);
 	}
@@ -524,7 +644,7 @@ static inline INT get_vertical_line_count(EDITSTATE *es)
  *	a soft return '\r\r\n' or a hard return '\r\n'
  *
  */
-static void EDIT_BuildLineDefs_ML(EDITSTATE *es, INT istart, INT iend, INT delta, HRGN hrgn)
+static void EDIT_BuildLineDefs_ML_list(EDITSTATE *es, INT istart, INT iend, INT delta, HRGN hrgn)
 {
 	LPWSTR current_position, cp;
 	INT fw;
@@ -856,6 +976,14 @@ static void EDIT_BuildLineDefs_ML(EDITSTATE *es, INT istart, INT iend, INT delta
 	}
 }
 
+static void EDIT_BuildLineDefs_ML(EDITSTATE *es, INT istart, INT iend, INT delta, HRGN hrgn)
+{
+	/* the list changes in there: the line array is built again when needed */
+	es->line_ptrs_valid = FALSE;
+	EDIT_BuildLineDefs_ML_list(es, istart, iend, delta, hrgn);
+	es->line_ptrs_valid = FALSE;
+}
+
 /*********************************************************************
  *
  *	EDIT_CalcLineWidth_SL
@@ -894,6 +1022,11 @@ static INT EDIT_CharFromPos(EDITSTATE *es, INT x, INT y, LPBOOL after_wrap)
 		INT line_index = 0;
 		LINEDEF *line_def = es->first_line_def;
 		EDIT_UpdateUniscribeData(es, NULL, line);
+		if (EDIT_BuildLinePtrs(es)) {
+			INT l = min(max(line, 0), es->line_ptrs_count - 1);
+			line_def = es->line_ptrs[l].def;
+			line_index = es->line_ptrs[l].start;
+		} else
 		while ((line > 0) && line_def->next) {
 			line_index += line_def->length;
 			line_def = line_def->next;
@@ -1015,9 +1148,6 @@ static void EDIT_ConfinePoint(const EDITSTATE *es, LPINT x, LPINT y)
  */
 static INT EDIT_EM_LineFromChar(EDITSTATE *es, INT index)
 {
-	INT line;
-	LINEDEF *line_def;
-
 	if (!(es->style & ES_MULTILINE))
 		return 0;
 	if (index > (INT)get_text_length(es))
@@ -1025,15 +1155,7 @@ static INT EDIT_EM_LineFromChar(EDITSTATE *es, INT index)
 	if (index == -1)
 		index = min(es->selection_start, es->selection_end);
 
-	line = 0;
-	line_def = es->first_line_def;
-	index -= line_def->length;
-	while ((index >= 0) && line_def->next) {
-		line++;
-		line_def = line_def->next;
-		index -= line_def->length;
-	}
-	return line;
+	return EDIT_FindLineByChar(es, index, NULL, NULL);
 }
 
 
@@ -1042,32 +1164,19 @@ static INT EDIT_EM_LineFromChar(EDITSTATE *es, INT index)
  *	EM_LINEINDEX
  *
  */
-static INT EDIT_EM_LineIndex(const EDITSTATE *es, INT line)
+static INT EDIT_EM_LineIndex(EDITSTATE *es, INT line)
 {
-	INT line_index;
-	const LINEDEF *line_def;
+	INT line_index = 0;
 
 	if (!(es->style & ES_MULTILINE))
 		return 0;
 	if (line >= es->line_count)
 		return -1;
 
-	line_index = 0;
-	line_def = es->first_line_def;
-	if (line == -1) {
-		INT index = es->selection_end - line_def->length;
-		while ((index >= 0) && line_def->next) {
-			line_index += line_def->length;
-			line_def = line_def->next;
-			index -= line_def->length;
-		}
-	} else {
-		while (line > 0) {
-			line_index += line_def->length;
-			line_def = line_def->next;
-			line--;
-		}
-	}
+	if (line == -1)
+		EDIT_FindLineByChar(es, es->selection_end, NULL, &line_index);
+	else
+		EDIT_GetLineDef(es, line, &line_index);
 	return line_index;
 }
 
@@ -1132,12 +1241,7 @@ static LRESULT EDIT_EM_PosFromChar(EDITSTATE *es, INT index, BOOL after_wrap)
 		y = (l - es->y_offset) * es->line_height;
 		li = EDIT_EM_LineIndex(es, l);
 		if (after_wrap && (li == index) && l) {
-			INT l2 = l - 1;
-			line_def = es->first_line_def;
-			while (l2) {
-				line_def = line_def->next;
-				l2--;
-			}
+			line_def = EDIT_GetLineDef(es, l - 1, NULL);
 			if (line_def->ending == END_WRAP) {
 				l--;
 				y -= es->line_height;
@@ -1145,9 +1249,13 @@ static LRESULT EDIT_EM_PosFromChar(EDITSTATE *es, INT index, BOOL after_wrap)
 			}
 		}
 
-		line_def = es->first_line_def;
-		while (line_def->index != li)
-			line_def = line_def->next;
+		line_def = EDIT_GetLineDef(es, l, NULL);
+		if (!line_def || line_def->index != li)
+		{
+			line_def = es->first_line_def;
+			while (line_def->index != li)
+				line_def = line_def->next;
+		}
 
 		lw = line_def->width;
 		w = es->format_rect.right - es->format_rect.left;
@@ -1252,20 +1360,15 @@ static void EDIT_GetLineRect(EDITSTATE *es, INT line, INT scol, INT ecol, LPRECT
 		if (line >= es->line_count)
 			return;
 
-		line_def = es->first_line_def;
-		if (line == -1) {
-			INT index = es->selection_end - line_def->length;
-			while ((index >= 0) && line_def->next) {
-				line_index += line_def->length;
-				line_def = line_def->next;
-				index -= line_def->length;
-			}
-		} else {
-			while (line > 0) {
-				line_index += line_def->length;
-				line_def = line_def->next;
-				line--;
-			}
+		{
+			LINEDEF *found = NULL;
+			if (line == -1)
+				EDIT_FindLineByChar(es, es->selection_end, &found, &line_index);
+			else
+				found = EDIT_GetLineDef(es, line, &line_index);
+			if (!found)
+				return;
+			line_def = found;
 		}
 		ssa = line_def->ssa;
 	}
@@ -2389,14 +2492,9 @@ static void EDIT_PaintLine(EDITSTATE *es, HDC dc, INT line, BOOL rev)
 		x =  -es->x_offset;
 		if (es->style & ES_RIGHT || es->style & ES_CENTER)
 		{
-			LINEDEF *line_def = es->first_line_def;
+			LINEDEF *line_def = EDIT_GetLineDef(es, line_idx, NULL);
 			int w, lw;
 
-			while (line_def && line_idx)
-			{
-				line_def = line_def->next;
-				line_idx--;
-			}
 			w = es->format_rect.right - es->format_rect.left;
 			lw = line_def->width;
 
@@ -4739,6 +4837,7 @@ cleanup:
 	set_control_state( es->hwndSelf, NULL );
 	EDIT_InvalidateUniscribeData(es);
 	HeapFree(GetProcessHeap(), 0, es->first_line_def);
+	HeapFree(GetProcessHeap(), 0, es->line_ptrs);
 	HeapFree(GetProcessHeap(), 0, es->undo_text);
 	if (es->hloc32W) LocalFree(es->hloc32W);
 	HeapFree(GetProcessHeap(), 0, es->logAttr);
@@ -4814,6 +4913,7 @@ static LRESULT EDIT_WM_NCDestroy(EDITSTATE *es)
 		LocalFree(es->hloc32A);
 	}
 	EDIT_InvalidateUniscribeData(es);
+	HeapFree(GetProcessHeap(), 0, es->line_ptrs);
 	pc = es->first_line_def;
 	while (pc)
 	{
