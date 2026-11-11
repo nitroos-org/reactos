@@ -305,6 +305,14 @@ typedef struct _CM_KEY_CONTROL_BLOCK
          ULONG Flags : 16;
     };
     ULONG InDelayClose;
+
+    /*
+     * Lookup table from a value name to its place in the key's value list. It is built when a key with many
+     * values is searched again and again, kept in step with the list by the code that changes the list (it is
+     * not part of the hive) and freed with the KCB. Readers hold the KCB lock shared and may publish it.
+     */
+    struct _CM_VALUE_INDEX *ValueIndex;
+    LONG ValueIndexMisses;
 } CM_KEY_CONTROL_BLOCK, *PCM_KEY_CONTROL_BLOCK;
 
 //
@@ -1032,6 +1040,32 @@ VOID
 NTAPI
 CmpCleanUpKcbValueCache(
     IN PCM_KEY_CONTROL_BLOCK Kcb
+);
+
+/* Drops the value name table of a KCB (the value list is about to change, or has changed in a way other than an append) */
+VOID
+NTAPI
+CmpFreeKcbValueIndex(
+    IN PCM_KEY_CONTROL_BLOCK Kcb
+);
+
+/* A value was appended at Position of the list (the KCB is locked exclusive, the list is already updated) */
+VOID
+NTAPI
+CmpAppendKcbValueIndex(
+    IN PCM_KEY_CONTROL_BLOCK Kcb,
+    IN PCUNICODE_STRING Name,
+    IN ULONG Position
+);
+
+/* Finds a value by name through the table of the KCB, if it has one (or it is worth making one) */
+BOOLEAN
+NTAPI
+CmpFindNameInKcbValueList(
+    IN PCM_KEY_CONTROL_BLOCK Kcb,
+    IN PCUNICODE_STRING Name,
+    OUT PULONG ChildIndex,
+    OUT PHCELL_INDEX CellIndex
 );
 
 VOID

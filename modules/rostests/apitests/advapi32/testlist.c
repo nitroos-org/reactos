@@ -53,6 +53,7 @@ extern void func_RegDeleteTreeOpenHandles(void);
 extern void func_RegEnumKey(void);
 extern void func_RegEnumKeyClass(void);
 extern void func_RegEnumValueW(void);
+extern void func_RegValueLookup(void);
 extern void func_RegFlushKey(void);
 extern void func_RegNotifyChangeKeyValue(void);
 extern void func_RegNotifyLeak(void);
@@ -181,6 +182,7 @@ const struct test winetest_testlist[] =
     { "RegEnumKey", func_RegEnumKey },
     { "RegEnumKeyClass", func_RegEnumKeyClass },
     { "RegEnumValueW", func_RegEnumValueW },
+    { "RegValueLookup", func_RegValueLookup },
     { "RegFlushKey", func_RegFlushKey },
     { "RegNotifyChangeKeyValue", func_RegNotifyChangeKeyValue },
     { "RegNotifyLeak", func_RegNotifyLeak },
