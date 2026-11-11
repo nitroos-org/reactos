@@ -385,7 +385,6 @@ VOID NgFillStat(PNG_FCB Fcb)
 
 static VOID NgFillStatLocked(PNG_FCB Fcb)
 {
-    LONGLONG Alloc;
     NG_SHARED_HOLD Hold;
     struct ngc_stat St;
     if (!Fcb->HasNode)
@@ -399,7 +398,14 @@ static VOID NgFillStatLocked(PNG_FCB Fcb)
     /* Filled in a local: another shared holder may be reading or filling Fcb->Stat. */
     ngc_stat(Fcb->Node, &St);
     NgReleaseCoreShared(Fcb->Vcb, &Hold);
-    Fcb->Stat = St;
+    NgSetStat(Fcb, &St);
+}
+
+/* Takes @St as the file's state: Fcb->Stat and what the cache manager reads from the header.  No lock of the core. */
+VOID NgSetStat(PNG_FCB Fcb, const struct ngc_stat *St)
+{
+    LONGLONG Alloc;
+    Fcb->Stat = *St;
     if (Fcb->SectionObjectPointers.SharedCacheMap && Fcb->Header.FileSize.QuadPart != (LONGLONG)Fcb->Stat.size)
         DPRINT1("ntfsng: BUG: cached %I64x header size %I64d, core size %I64u\n", Fcb->MftNo,
                 Fcb->Header.FileSize.QuadPart, Fcb->Stat.size);
