@@ -2,3 +2,4 @@
 @ stdcall SessTestGetCounter()
 @ stdcall SessTestCounterAddress()
 @ stdcall SessTestBugCheck()
+@ stdcall SessTestListsOffGlobal()

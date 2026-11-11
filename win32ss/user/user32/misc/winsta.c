@@ -11,6 +11,28 @@
 WINE_DEFAULT_DEBUG_CHANNEL(winsta);
 
 /*
+ * The WindowStations directory of the caller's session (see ntuser\winsta.c!UserCreateWinstaDirectory):
+ * \Windows\WindowStations in session 0, \Sessions\<n>\Windows\WindowStations in another one.
+ * Only the name to open is chosen here; access to it is checked by the object manager.
+ */
+static
+VOID
+UserGetWindowStationsDir(
+    _Out_ PUNICODE_STRING Dir,
+    _Out_writes_bytes_(cbBuffer) PWCHAR Buffer,
+    _In_ SIZE_T cbBuffer)
+{
+    ULONG SessionId = NtCurrentPeb()->SessionId;
+
+    if (SessionId == 0)
+        _snwprintf(Buffer, cbBuffer / sizeof(WCHAR), L"\\Windows\\WindowStations");
+    else
+        _snwprintf(Buffer, cbBuffer / sizeof(WCHAR), L"\\Sessions\\%lu\\Windows\\WindowStations", SessionId);
+    Buffer[cbBuffer / sizeof(WCHAR) - 1] = UNICODE_NULL;
+    RtlInitUnicodeString(Dir, Buffer);
+}
+
+/*
  * @implemented
  */
 HWINSTA
@@ -60,10 +82,12 @@ CreateWindowStationW(
     NTSTATUS Status;
     HWINSTA hWinSta;
     UNICODE_STRING WindowStationName;
-    // FIXME: We should cache a per-session directory (see ntuser\winsta.c!UserCreateWinstaDirectory).
-    UNICODE_STRING WindowStationsDir = RTL_CONSTANT_STRING(L"\\Windows\\WindowStations");
+    WCHAR WindowStationsDirBuffer[64];
+    UNICODE_STRING WindowStationsDir;
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE hWindowStationsDir;
+
+    UserGetWindowStationsDir(&WindowStationsDir, WindowStationsDirBuffer, sizeof(WindowStationsDirBuffer));
 
     /*
      * If provided, the window station name is always relative to the
@@ -367,10 +391,12 @@ OpenWindowStationW(
     NTSTATUS Status;
     HWINSTA hWinSta;
     UNICODE_STRING WindowStationName;
-    // FIXME: We should cache a per-session directory (see ntuser\winsta.c!UserCreateWinstaDirectory).
-    UNICODE_STRING WindowStationsDir = RTL_CONSTANT_STRING(L"\\Windows\\WindowStations");
+    WCHAR WindowStationsDirBuffer[64];
+    UNICODE_STRING WindowStationsDir;
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE hWindowStationsDir;
+
+    UserGetWindowStationsDir(&WindowStationsDir, WindowStationsDirBuffer, sizeof(WindowStationsDirBuffer));
 
     /* Open WindowStations directory */
     InitializeObjectAttributes(&ObjectAttributes,

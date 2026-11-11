@@ -255,6 +255,8 @@ SmpUnhandledExceptionFilter(
 /* NitroSessions values (HKLM\...\Session Manager\NitroSessions) */
 #define SMP_NITRO_SESSIONS_TEST     1   /* P0: session 1 with a native test command, no csrss */
 #define SMP_NITRO_SESSIONS_CSR      4   /* P2: session 1 with its own csrss (basesrv only) */
+#define SMP_NITRO_SESSIONS_WIN32K   5   /* P3b: session 1 with its own win32k and a full csrss */
+#define SMP_NITRO_SESSIONS_CSR_START(f) (((f) == SMP_NITRO_SESSIONS_CSR) || ((f) == SMP_NITRO_SESSIONS_WIN32K))
 
 extern ULONG SmpNitroSessions;
 extern RTL_CRITICAL_SECTION SmpMuSessionLock;

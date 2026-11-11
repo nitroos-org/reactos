@@ -545,7 +545,7 @@ _main(IN INT argc,
            second session with its own csrss */
         if (SmpNitroSessions == SMP_NITRO_SESSIONS_TEST)
             SmpStartNitroTestSession();
-        else if (SmpNitroSessions == SMP_NITRO_SESSIONS_CSR)
+        else if (SMP_NITRO_SESSIONS_CSR_START(SmpNitroSessions))
             SmpStartNitroCsrSession();
 
         /* Wait on either CSRSS or the initial command to die */

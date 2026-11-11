@@ -1807,9 +1807,6 @@ QSI_DEF(SystemFullMemoryInformation)
     return STATUS_SUCCESS;
 }
 
-/* win32k, when it is loaded as a session image (NitroSessions) */
-PLDR_DATA_TABLE_ENTRY ExpWin32kSessionImage;
-
 /* Class 26 - Load Image */
 SSI_DEF(SystemLoadGdiDriverInformation)
 {
@@ -1837,7 +1834,7 @@ SSI_DEF(SystemLoadGdiDriverInformation)
     Status = MmLoadSystemImage(&ImageName,
                                NULL,
                                NULL,
-                               (ExpWin32kSessionImage && PsGetCurrentProcess()->ProcessInSession) ? 1 : 0,
+                               (MmGetWin32kSessionImage() && PsGetCurrentProcess()->ProcessInSession) ? 1 : 0,
                                &SectionPointer,
                                &ImageBase);
     if (!NT_SUCCESS(Status)) return Status;
@@ -2193,7 +2190,7 @@ SSI_DEF(SystemExtendServiceTableInformation)
                                &ImageBase);
 
     if (!NT_SUCCESS(Status)) return Status;
-    if (MmIsSessionImage(ModuleObject)) ExpWin32kSessionImage = ModuleObject;
+    MmSetWin32kSessionImage(ModuleObject);
 
     /* Get the headers */
     NtHeader = RtlImageNtHeader(ImageBase);
@@ -2220,6 +2217,7 @@ SSI_DEF(SystemExtendServiceTableInformation)
 
     /* Unload if we failed */
     if (!NT_SUCCESS(Status)) MmUnloadSystemImage(ModuleObject);
+    else if (MmIsSessionImage(ModuleObject)) MmSetWin32kLoadedInCurrentSession();
     return Status;
 }
 
