@@ -1083,6 +1083,11 @@ co_MsqDispatchOneSentMessage(
    {   /* Call the callback routine */
       if (Message->QS_Flags & QS_SMRESULT)
       {
+         /* The receiver is done with it and may exit while the callback runs (the USER lock
+            is dropped): its thread cleanup frees every message on the trouble list that it
+            received, and this thread would free the message a second time after the callback.
+            From here on this thread is the one that holds it. */
+         Message->ptiReceiver = pti;
          co_IntCallSentMessageCallback(Message->CompletionCallback,
                                        Message->Msg.hwnd,
                                        Message->Msg.message,
