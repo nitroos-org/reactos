@@ -1503,6 +1503,17 @@ static void ACTION_GetFeatureInstallStates(MSIPACKAGE *package)
     }
 }
 
+static BOOL is_admin_install( MSIPACKAGE *package );
+
+/* An administrative installation copies every feature of the package, whatever its Level: the install
+ * level only gates the other kinds of installation (a package may mark its server features 32767 so
+ * that a normal install picks them by a property, and its admin image must still hold them). */
+static INT get_install_level( MSIPACKAGE *package )
+{
+    if (is_admin_install( package )) return INSTALLLEVEL_MAXIMUM;
+    return msi_get_property_int( package->db, L"INSTALLLEVEL", 1 );
+}
+
 static inline BOOL is_feature_selected( MSIFEATURE *feature, INT level )
 {
     return (feature->Level > 0 && feature->Level <= level);
@@ -1713,7 +1724,7 @@ UINT MSI_SetFeatureStates(MSIPACKAGE *package)
 
     TRACE("Checking Install Level\n");
 
-    level = msi_get_property_int(package->db, L"INSTALLLEVEL", 1);
+    level = get_install_level( package );
 
     if (msi_get_property_int( package->db, L"Preselected", 0 ))
     {
@@ -2399,7 +2410,7 @@ static UINT ACTION_CostFinalize(MSIPACKAGE *package)
     ACTION_GetComponentInstallStates(package);
     ACTION_GetFeatureInstallStates(package);
 
-    if (!process_overrides( package, msi_get_property_int( package->db, L"INSTALLLEVEL", 1 ) ))
+    if (!process_overrides( package, get_install_level( package ) ))
     {
         TRACE("Evaluating feature conditions\n");
 
@@ -7684,39 +7695,36 @@ static UINT ACTION_DisableRollback( MSIPACKAGE *package )
     return ERROR_SUCCESS;
 }
 
-static UINT admin_remove_cabinet_streams( MSIDATABASE *db )
+/* The cabinets embedded in the package ("#name" in the Media table) are not part of an administrative image:
+ * the files are on disk, so the stream is dropped from the copy of the package (Windows' image of a 925 MB
+ * package is 2 MB). The stream name is the encoded cabinet name, whatever it is. */
+static UINT ITERATE_AdminRemoveCabinet( MSIRECORD *row, void *param )
 {
-    WCHAR decoded[MAX_STREAM_NAME_LEN + 1];
-    IEnumSTATSTG *iter = NULL;
-    STATSTG stat;
-    ULONG count;
-    UINT r = ERROR_SUCCESS;
+    MSIDATABASE *db = param;
+    const WCHAR *cabinet = MSI_RecordGetString( row, 1 );
+    WCHAR *name;
     HRESULT hr;
 
-    hr = IStorage_EnumElements( db->storage, 0, NULL, 0, &iter );
-    if (FAILED( hr )) return ERROR_FUNCTION_FAILED;
+    if (!cabinet || cabinet[0] != '#') return ERROR_SUCCESS;
 
-    for (;;)
-    {
-        count = 0;
-        hr = IEnumSTATSTG_Next( iter, 1, &stat, &count );
-        if (FAILED( hr ) || !count) break;
+    if (!(name = encode_streamname( FALSE, cabinet + 1 ))) return ERROR_OUTOFMEMORY;
+    TRACE( "removing cabinet stream %s\n", debugstr_w(cabinet + 1) );
+    hr = IStorage_DestroyElement( db->storage, name );
+    if (FAILED( hr )) WARN( "failed to remove stream %s: %08lx\n", debugstr_w(cabinet + 1), hr );
+    free( name );
+    return ERROR_SUCCESS;
+}
 
-        if (stat.type != STGTY_STREAM || *stat.pwcsName != 0x4176)
-        {
-            CoTaskMemFree( stat.pwcsName );
-            continue;
-        }
+static UINT admin_remove_cabinet_streams( MSIDATABASE *db )
+{
+    MSIQUERY *view;
+    UINT r;
 
-        decode_streamname( stat.pwcsName, decoded );
-        TRACE( "removing cabinet stream %s\n", debugstr_w(decoded) );
+    r = MSI_DatabaseOpenViewW( db, L"SELECT `Cabinet` FROM `Media`", &view );
+    if (r != ERROR_SUCCESS) return ERROR_SUCCESS; /* no Media table: nothing embedded */
 
-        hr = IStorage_DestroyElement( db->storage, stat.pwcsName );
-        if (FAILED( hr )) WARN( "failed to remove stream %08lx\n", hr );
-        CoTaskMemFree( stat.pwcsName );
-    }
-
-    IEnumSTATSTG_Release( iter );
+    r = MSI_IterateRecords( view, NULL, ITERATE_AdminRemoveCabinet, db );
+    msiobj_release( &view->hdr );
     return r;
 }
 
