@@ -2172,15 +2172,18 @@ static HRESULT SoftwareInstallPiece(const FM_FEATURE *f, HKEY state, FILE *log, 
     BOOL comp = !_wcsicmp(f->Provider, L"component") || nat;
     BOOL keepFile = FALSE;                 /* the file is the image's own payload: never deleted */
     WCHAR *pathBefore = NULL;
+    FM_COMPONENT c;                        /* the component list entry (comp, not nat): its detect rule is checked after the install */
+    BOOL missing = FALSE;                  /* the installer said success but the detect rule does not hold */
+    BOOL restart = FALSE;                  /* the installer asked for a restart (3010 / 1641) */
 
     compFile[0] = L'\0';
+    ZeroMemory(&c, sizeof(c));
     FmOpPhase(FM_PHASE_SEARCH);
     hr = BuildSoftwareCommands(f, inst, uninst, ARRAYSIZE(inst), log);
     if (FAILED(hr)) return hr;
     if (comp)
     {
         /* the component list's own download: progress, SHA-256, cancel; the partial file never stays behind */
-        FM_COMPONENT c;
         hr = CheckSoftwareDiskSpace(f, log, FALSE);
         if (FAILED(hr)) return hr;
         if (nat ? !FmNativePlan(f, &c) : !FmCompLoad(f->Id, &c)) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
@@ -2234,10 +2237,17 @@ static HRESULT SoftwareInstallPiece(const FM_FEATURE *f, HKEY state, FILE *log, 
     }
     if (comp)
     {
+        restart = SUCCEEDED(hr) && (code == 3010 || code == 1641);
+        /* An exit code of 0 is not proof: an installer can report success and install nothing (a Windows Installer
+         * custom action that could not start, say). "Installed" means the component's detect rule holds, so a
+         * rule that does not hold after a success is a failure. Not checked after a restart request (3010 / 1641:
+         * the files can be put in place at the restart) and not for the native providers (no rule of their own). */
+        if (!nat && SUCCEEDED(hr) && code == 0 && (c.DetectReg[0] || c.DetectFile[0]) && !FmCompDetectOne(&c))
+            missing = TRUE;
         /* success and cancel leave no copy of the download behind; a failed installer keeps the verified file for the retry */
-        if (!keepFile && (SUCCEEDED(hr) ? (code == 0 || code == 3010 || code == 1641) : hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)))
+        if (!keepFile && !missing && (SUCCEEDED(hr) ? (code == 0 || code == 3010 || code == 1641) : hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)))
             DeleteFileW(compFile);
-        if (SUCCEEDED(hr) && (code == 3010 || code == 1641))
+        if (restart)
         {
             LOGF(log, L"  installer finished, a restart is needed (exit code %lu)\n", code);
             InterlockedExchange(&g_RebootNeeded, 1);
@@ -2272,6 +2282,15 @@ static HRESULT SoftwareInstallPiece(const FM_FEATURE *f, HKEY state, FILE *log, 
         SetLastMsg(L"%s", why);
     }
     if (FAILED(hr)) { if (pathBefore) HeapFree(GetProcessHeap(), 0, pathBefore); return hr; }
+    if (missing)
+    {
+        if (pathBefore) HeapFree(GetProcessHeap(), 0, pathBefore);
+        LOGF(log, L"error: installer for '%s' reported success (exit code 0) but it is not installed: %s %s not found\n",
+             f->Id, c.DetectFile[0] ? L"file" : L"registry value", c.DetectFile[0] ? c.DetectFile : c.DetectReg);
+        SetLastMsg(L"The installer for '%s' finished without an error but did not install it (%s not found).%s%s",
+                   f->Id, c.DetectFile[0] ? c.DetectFile : c.DetectReg, g_Tail[0] ? L"\n\n" : L"", g_Tail);
+        return HRESULT_FROM_WIN32(ERROR_INSTALL_FAILURE);
+    }
     if (code != 0)
     {
         if (pathBefore) HeapFree(GetProcessHeap(), 0, pathBefore);

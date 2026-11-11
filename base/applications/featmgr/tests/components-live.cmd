@@ -24,7 +24,7 @@ goto netwait
 :netup
 echo network wait: %N% tries>> %LOG%
 
-for %%i in (fmt-comp fmt-compbad fmt-comphttp fmt-compnosha fmt-compreg fmt-compchain fmt-compchainbad) do copy /y %FX%\%%i.ini %R%\Catalog\ >nul
+for %%i in (fmt-comp fmt-compbad fmt-comphttp fmt-compnosha fmt-compreg fmt-compchain fmt-compchainbad fmt-compghost fmt-compghostreboot) do copy /y %FX%\%%i.ini %R%\Catalog\ >nul
 set FEATMGR_COMPONENTS=%FX%\fmt-comp.components.ini
 
 %FM% /query fmt-comp > %O%\q.txt 2>&1
@@ -107,8 +107,20 @@ call :ex %R%\fmt-chainbadA.out 0 "C43 chain: the first package was rolled back"
 call :ex %R%\fmt-chainbadB.out 0 "C44 chain: the failing package did not install"
 call :st fmt-compchainbad NotInstalled "C45 chain: left NotInstalled"
 
+rem ===== an installer that exits 0 without installing is a failure: "installed" means the detect rule holds =====
+%FM% /install fmt-compghost > %O%\gh1.txt 2>&1
+call :rc1 "C46 exit 0 but the detect rule does not hold: the install fails"
+type %O%\gh1.txt >> %LOG%
+find "not installed" %O%\gh1.txt >nul
+call :rc0 "C47 ...and the log says it is not installed"
+call :st fmt-compghost NotInstalled "C48 left NotInstalled (no record written)"
+%FM% /install fmt-compghostreboot > %O%\gh2.txt 2>&1
+call :rc0 "C49 exit 3010 with the rule not yet true: counts as installed (restart needed)"
+type %O%\gh2.txt >> %LOG%
+reg delete "HKLM\SOFTWARE\ReactOS\Nitro\OptionalFeatures\fmt-compghostreboot" /f >nul 2>&1
+
 set FEATMGR_COMPONENTS=
-for %%i in (fmt-comp fmt-compbad fmt-comphttp fmt-compnosha fmt-compreg fmt-compchain fmt-compchainbad) do del /q %R%\Catalog\%%i.ini 2>nul
+for %%i in (fmt-comp fmt-compbad fmt-comphttp fmt-compnosha fmt-compreg fmt-compchain fmt-compchainbad fmt-compghost fmt-compghostreboot) do del /q %R%\Catalog\%%i.ini 2>nul
 if "%FAILS%"=="0" (echo COMPLIVE-RESULT: PASS>> %LOG%) else (echo COMPLIVE-RESULT: FAIL %FAILS%>> %LOG%)
 goto :eof
 
