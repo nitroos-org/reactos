@@ -685,7 +685,7 @@ PspInitPhase0(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                               0,
                               0,
                               0,
-                              FALSE, NULL, 0);
+                              FALSE, NULL, 0, NULL);
     if (!NT_SUCCESS(Status)) return FALSE;
 
     /* Get a reference to it */
