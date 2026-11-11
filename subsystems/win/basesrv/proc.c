@@ -64,6 +64,53 @@ CSR_API(BaseSrvGetTempFile)
     return GetTempFile->UniqueID;
 }
 
+/*
+ * The process and thread the request names must be those of the handles the
+ * client gave, and the process must be a child the client created (created
+ * after it: the parent pid alone could name an earlier process with the same
+ * id). Otherwise the client could have csrss register, set the exception port
+ * of and later act for a process it only holds a handle to, under ids it
+ * chose. kernel32 always sends its own new child with its ids.
+ */
+static
+NTSTATUS
+BaseSrvCheckNewProcess(IN PCSR_PROCESS Creator,
+                       IN HANDLE ProcessHandle,
+                       IN HANDLE ThreadHandle,
+                       IN PCLIENT_ID ClientId)
+{
+    NTSTATUS Status;
+    PROCESS_BASIC_INFORMATION ProcessInfo;
+    THREAD_BASIC_INFORMATION ThreadInfo;
+    KERNEL_USER_TIMES ChildTimes, CreatorTimes;
+
+    Status = NtQueryInformationProcess(ProcessHandle, ProcessBasicInformation,
+                                       &ProcessInfo, sizeof(ProcessInfo), NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = NtQueryInformationThread(ThreadHandle, ThreadBasicInformation,
+                                      &ThreadInfo, sizeof(ThreadInfo), NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (((HANDLE)ProcessInfo.UniqueProcessId != ClientId->UniqueProcess) ||
+        (ThreadInfo.ClientId.UniqueProcess != ClientId->UniqueProcess) ||
+        (ThreadInfo.ClientId.UniqueThread != ClientId->UniqueThread))
+    {
+        return STATUS_INVALID_CID;
+    }
+
+    if ((HANDLE)ProcessInfo.InheritedFromUniqueProcessId != Creator->ClientId.UniqueProcess)
+        return STATUS_ACCESS_DENIED;
+    Status = NtQueryInformationProcess(ProcessHandle, ProcessTimes,
+                                       &ChildTimes, sizeof(ChildTimes), NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = NtQueryInformationProcess(Creator->ProcessHandle, ProcessTimes,
+                                       &CreatorTimes, sizeof(CreatorTimes), NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (ChildTimes.CreateTime.QuadPart < CreatorTimes.CreateTime.QuadPart)
+        return STATUS_ACCESS_DENIED;
+
+    return STATUS_SUCCESS;
+}
+
 CSR_API(BaseSrvCreateProcess)
 {
     NTSTATUS Status;
@@ -124,6 +171,19 @@ CSR_API(BaseSrvCreateProcess)
     {
         DPRINT1("Failed to duplicate thread handle: %lx\n", Status);
         NtClose(ProcessHandle);
+        return Status;
+    }
+
+    /* The ids are those of the handles, and the process is the client's child */
+    Status = BaseSrvCheckNewProcess(Process, ProcessHandle, ThreadHandle,
+                                    &CreateProcessRequest->ClientId);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("BASESRV: process %lx.%lx refused: %lx\n",
+                CreateProcessRequest->ClientId.UniqueProcess,
+                CreateProcessRequest->ClientId.UniqueThread, Status);
+        NtClose(ProcessHandle);
+        NtClose(ThreadHandle);
         return Status;
     }
 
