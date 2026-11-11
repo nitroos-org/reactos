@@ -1053,7 +1053,17 @@ IntGdiDeleteDC(HDC hDC, BOOL Force)
          * See NtGdiDeleteObjectApp test for details */
         if (DCToDelete->fs & DC_PERMANANT)
         {
+            BOOL Entered = FALSE, Ret;
+
             DC_UnlockDc(DCToDelete);
+
+            /* The DCE list and window DCs belong to window management: work on them under the USER lock */
+            if (!UserIsEnteredExclusive())
+            {
+                UserEnterExclusive();
+                Entered = TRUE;
+            }
+
             if(UserReleaseDC(NULL, hDC, FALSE))
             {
                 /* ReactOS feature: Call UserReleaseDC
@@ -1061,14 +1071,17 @@ IntGdiDeleteDC(HDC hDC, BOOL Force)
                  * Still, complain, no one should ever call DeleteDC
                  * on a window DC */
                  DPRINT1("No, you naughty application!\n");
-                 return TRUE;
+                 Ret = TRUE;
             }
             else
             {
                 /* This is not a window owned DC.
                  * Force its deletion */
-                return IntGdiDeleteDC(hDC, TRUE);
+                Ret = IntGdiDeleteDC(hDC, TRUE);
             }
+
+            if (Entered) UserLeave();
+            return Ret;
         }
     }
 
