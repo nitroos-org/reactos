@@ -183,6 +183,8 @@ VOID NgReleaseCoreShared(PNG_VCB Vcb, NG_SHARED_HOLD *Hold)
 VOID NgPrintLockStats(PNG_VCB Vcb)
 {
     ULONG i;
+    DPRINT1("ntfsng: FastIoQueryOpen: %ld answered, %ld left to the ordinary open%s\n", NgGlobal.FastQueryHits, NgGlobal.FastQueryMisses,
+            NgGlobal.NoFastQueryOpen ? " (NoFastQueryOpen)" : "");
     DPRINT1("ntfsng: paging writes: %lu with the transfer outside CoreLock, %lu under it, %lu written again\n",
             Vcb->DioWrites, Vcb->DioFallbacks, Vcb->DioRedone);
     DPRINT1("ntfsng: gap zero fill: %lu pieces written outside CoreLock\n", Vcb->DioZeroPieces);
@@ -314,12 +316,11 @@ PNG_FCB NgAllocateFcb(PNG_VCB Vcb)
  * Both run under the core lock, by a caller that holds a counted reference to
  * the FCB (NgDereferenceFcb relies on it).
  */
-int NgEnsureNode(PNG_FCB Fcb)
+/* The node of a parked FCB's file or stream, got by record number: a counted reference for the caller. */
+static int NgGetParkedNode(PNG_FCB Fcb, ngc_node **Out)
 {
     ngc_node *Base, *Stream;
     int Err;
-    if (Fcb->Node || !Fcb->HasNode)
-        return Fcb->Node ? 0 : -NGC_EINVAL;
     if (Fcb->Deleted)
         return -NGC_ENOENT;
     Err = ngc_iget(Fcb->Vcb->Core, Fcb->MftNo, &Base);
@@ -344,6 +345,19 @@ int NgEnsureNode(PNG_FCB Fcb)
             return Err;
         Base = Stream;
     }
+    *Out = Base;
+    return 0;
+}
+
+int NgEnsureNode(PNG_FCB Fcb)
+{
+    ngc_node *Base;
+    int Err;
+    if (Fcb->Node || !Fcb->HasNode)
+        return Fcb->Node ? 0 : -NGC_EINVAL;
+    Err = NgGetParkedNode(Fcb, &Base);
+    if (Err)
+        return Err;
     /* Two shared holders may get here at once: the first node stays. */
     if (InterlockedCompareExchangePointer((PVOID *)&Fcb->Node, Base, NULL) != NULL)
         ngc_put(Base);
@@ -390,13 +404,27 @@ static VOID NgFillStatLocked(PNG_FCB Fcb)
     if (!Fcb->HasNode)
         return;
     NgAcquireCoreShared(Fcb->Vcb, &Hold);
-    if (NgEnsureNode(Fcb))
+    if (Fcb->Node)
     {
-        NgReleaseCoreShared(Fcb->Vcb, &Hold);
-        return;
+        /* Filled in a local: another shared holder may be reading or filling Fcb->Stat. */
+        ngc_stat(Fcb->Node, &St);
     }
-    /* Filled in a local: another shared holder may be reading or filling Fcb->Stat. */
-    ngc_stat(Fcb->Node, &St);
+    else
+    {
+        /*
+         * A parked FCB (no handle had a use for the node yet): read through a node got and put back in this hold.
+         * Keeping it would make the last cleanup of the handle take CoreLock again to park it.  CoreLock is held, so
+         * nobody parks or attaches a node meanwhile (both run under it).
+         */
+        ngc_node *Tmp;
+        if (!Fcb->HasNode || NgGetParkedNode(Fcb, &Tmp))
+        {
+            NgReleaseCoreShared(Fcb->Vcb, &Hold);
+            return;
+        }
+        ngc_stat(Tmp, &St);
+        ngc_put(Tmp);
+    }
     NgReleaseCoreShared(Fcb->Vcb, &Hold);
     NgSetStat(Fcb, &St);
 }
@@ -932,6 +960,9 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
         ngc_unlocked_commit = 0;
         DPRINT1("ntfsng: NoUnlockedCommit: commits run under CoreLock\n");
     }
+    /* NoFastQueryOpen=1: attribute queries by name take the ordinary open (comparison, fallback). */
+    if (NgReadDword(RegistryPath, L"NoFastQueryOpen"))
+        NgGlobal.NoFastQueryOpen = 1;
     /* NoNameCache=1: no cache of looked-up names (comparison, fallback); NameCacheVerify=1: every hit is checked against the directory (test). */
     if (NgReadDword(RegistryPath, L"NoNameCache"))
         ngc_set_namecache(0);
@@ -996,6 +1027,7 @@ NTSTATUS NTAPI DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING Registry
     NgFastIoDispatch.FastIoCheckIfPossible = NgFastIoCheckIfPossible;
     NgFastIoDispatch.FastIoRead = FsRtlCopyRead;
     NgFastIoDispatch.FastIoWrite = NgFastIoWrite;
+    NgFastIoDispatch.FastIoQueryOpen = NgFastQueryOpen;
     DriverObject->FastIoDispatch = &NgFastIoDispatch;
 
     NgGlobal.CacheCallbacks.AcquireForLazyWrite = NgAcquireForLazyWrite;
