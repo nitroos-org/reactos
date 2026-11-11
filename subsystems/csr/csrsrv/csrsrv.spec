@@ -14,6 +14,7 @@
 @ stdcall CsrDestroyProcess(ptr long)
 @ stdcall CsrDestroyThread(ptr)
 @ stdcall CsrExecServerThread(ptr long)
+@ stdcall CsrForwardProcessRegistration(ptr long long)
 @ stdcall CsrGetProcessLuid(ptr ptr)
 @ stdcall CsrImpersonateClient(ptr)
 @ stdcall CsrLockProcessByClientId(ptr ptr)
