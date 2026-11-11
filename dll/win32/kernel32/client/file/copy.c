@@ -42,6 +42,9 @@ BasepCopyChunkSize(
     return 0x100000;
 }
 
+/* Streams up to this size are read through the file cache by BasepCopyFileExW, bigger ones without buffering */
+#define BASEP_COPY_BUFFERED_MAX 0x400000
+
 typedef struct _BASEP_COPY_STATE
 {
     LPPROGRESS_ROUTINE ProgressRoutine;
@@ -309,13 +312,16 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
         goto Quit;
     }
 
-    /* The source is opened first: a name that is not there is reported before anything about the new one */
+    /* The source is opened first: a name that is not there is reported before anything about the new one.
+       It is read through the file cache (a file that was read or written recently is not read from the disk again, a
+       tree copied twice reads its source once); a stream of more than BASEP_COPY_BUFFERED_MAX bytes is opened again
+       without buffering below, so that a big file does not fill the cache. */
     FileHandleSource = CreateFileW(lpExistingFileName,
                                    GENERIC_READ,
                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
                                    NULL,
                                    OPEN_EXISTING,
-                                   FILE_ATTRIBUTE_NORMAL|FILE_FLAG_NO_BUFFERING,
+                                   FILE_ATTRIBUTE_NORMAL|FILE_FLAG_SEQUENTIAL_SCAN,
                                    NULL);
     if (INVALID_HANDLE_VALUE == FileHandleSource)
     {
@@ -356,6 +362,45 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
         TRACE("Status 0x%08x obtaining FileStandardInformation for source\n", errCode);
         BaseSetLastNTError(errCode);
         goto CloseSource;
+    }
+
+    if (FileStandard.EndOfFile.QuadPart > BASEP_COPY_BUFFERED_MAX)
+    {
+        /* Without buffering as before; if it cannot be opened that way the cached handle does the job */
+        HANDLE Unbuffered = CreateFileW(lpExistingFileName,
+                                        GENERIC_READ,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                        NULL,
+                                        OPEN_EXISTING,
+                                        FILE_ATTRIBUTE_NORMAL|FILE_FLAG_NO_BUFFERING,
+                                        NULL);
+        if (Unbuffered != INVALID_HANDLE_VALUE)
+        {
+            errCode = NtQueryInformationFile(Unbuffered,
+                                             &IoStatusBlock,
+                                             &FileStandard,
+                                             sizeof(FILE_STANDARD_INFORMATION),
+                                             FileStandardInformation);
+            if (NT_SUCCESS(errCode))
+            {
+                NtClose(FileHandleSource);
+                FileHandleSource = Unbuffered;
+            }
+            else
+            {
+                NtClose(Unbuffered);
+                errCode = NtQueryInformationFile(FileHandleSource,
+                                                 &IoStatusBlock,
+                                                 &FileStandard,
+                                                 sizeof(FILE_STANDARD_INFORMATION),
+                                                 FileStandardInformation);
+            }
+            if (!NT_SUCCESS(errCode))
+            {
+                BaseSetLastNTError(errCode);
+                goto CloseSource;
+            }
+        }
     }
 
     errCode = NtQueryInformationFile(FileHandleSource,
