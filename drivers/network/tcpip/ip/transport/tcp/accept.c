@@ -127,7 +127,8 @@ NTSTATUS TCPAccept ( PTDI_REQUEST Request,
                      PCONNECTION_ENDPOINT Listener,
                      PCONNECTION_ENDPOINT Connection,
                      PTCP_COMPLETION_ROUTINE Complete,
-                     PVOID Context )
+                     PVOID Context,
+                     ULONG Room )
 {
     NTSTATUS Status;
     PTDI_BUCKET Bucket;
@@ -153,7 +154,12 @@ NTSTATUS TCPAccept ( PTDI_REQUEST Request,
 
     /* A connection may have been established while no listen request was queued */
     if (Status == STATUS_PENDING)
+    {
+        /* The owner states how many more connections it has room for */
+        if (Room)
+            InterlockedExchange(&Listener->ListenRoom, (LONG)Room);
         LibTCPClaimPendingAccept(Listener);
+    }
 
     return Status;
 }

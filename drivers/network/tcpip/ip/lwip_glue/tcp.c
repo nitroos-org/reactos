@@ -696,8 +696,8 @@ LibTCPSegmentChecksum(const ip4_addr_t *Src, const ip4_addr_t *Dest, const void 
 
 /* Whether the listener that tcp_input would choose can take a new connection */
 static
-BOOLEAN
-LibTCPListenerHasRoom(const ip4_addr_t *Dest, u16_t Port, struct netif *inp)
+struct tcp_pcb_listen *
+LibTCPFindListener(const ip4_addr_t *Dest, u16_t Port, struct netif *inp)
 {
     struct tcp_pcb_listen *lpcb, *Any = NULL;
 
@@ -715,6 +715,15 @@ LibTCPListenerHasRoom(const ip4_addr_t *Dest, u16_t Port, struct netif *inp)
     }
     if (!lpcb)
         lpcb = Any;
+    return lpcb;
+}
+
+static
+BOOLEAN
+LibTCPListenerHasRoom(const ip4_addr_t *Dest, u16_t Port, struct netif *inp)
+{
+    struct tcp_pcb_listen *lpcb = LibTCPFindListener(Dest, Port, inp);
+
     if (!lpcb)
         return FALSE;
 #if TCP_LISTEN_BACKLOG
@@ -722,6 +731,135 @@ LibTCPListenerHasRoom(const ip4_addr_t *Dest, u16_t Port, struct netif *inp)
 #else
     return TRUE;
 #endif
+}
+
+/* A SYN that a listener without room drops: lwIP would drop it too, silently, and the peer sends it
+   again. Windows ends a loopback connect that finds the backlog full with WSAECONNREFUSED after its
+   retries, so a loopback SYN that comes again from the same peer port is answered with a reset.
+   Other peers keep retrying until their own timeout. Under the core lock */
+#define MAX_DROPPED_SYNS 128
+#define DROPPED_SYN_LIFETIME (10LL * 1000 * 10000)
+
+static struct
+{
+    ip4_addr_t Src;
+    u16_t SrcPort, DestPort;
+    ULONGLONG Expires;
+} DroppedSyns[MAX_DROPPED_SYNS];
+static ULONG DroppedSynCount;
+
+/* Takes the record out when it is there; FALSE when this peer port was not dropped before */
+static
+BOOLEAN
+LibTCPTakeDroppedSyn(const ip4_addr_t *Src, u16_t SrcPort, u16_t DestPort, ULONGLONG Now)
+{
+    ULONG i;
+    BOOLEAN Found = FALSE;
+
+    for (i = 0; i < MAX_DROPPED_SYNS && DroppedSynCount; i++)
+    {
+        if (!DroppedSyns[i].Expires)
+            continue;
+        if (DroppedSyns[i].Expires < Now)
+        {
+            DroppedSyns[i].Expires = 0;
+            DroppedSynCount--;
+        }
+        else if (DroppedSyns[i].SrcPort == SrcPort && DroppedSyns[i].DestPort == DestPort &&
+                 ip4_addr_eq(&DroppedSyns[i].Src, Src))
+        {
+            DroppedSyns[i].Expires = 0;
+            DroppedSynCount--;
+            Found = TRUE;
+        }
+    }
+    return Found;
+}
+
+static
+VOID
+LibTCPRememberDroppedSyn(const ip4_addr_t *Src, u16_t SrcPort, u16_t DestPort, ULONGLONG Now)
+{
+    ULONG i;
+
+    for (i = 0; i < MAX_DROPPED_SYNS; i++)
+    {
+        if (!DroppedSyns[i].Expires || DroppedSyns[i].Expires < Now)
+        {
+            if (DroppedSyns[i].Expires)
+                DroppedSynCount--;
+            ip4_addr_copy(DroppedSyns[i].Src, *Src);
+            DroppedSyns[i].SrcPort = SrcPort;
+            DroppedSyns[i].DestPort = DestPort;
+            DroppedSyns[i].Expires = Now + DROPPED_SYN_LIFETIME;
+            DroppedSynCount++;
+            return;
+        }
+    }
+}
+
+/* A plain SYN for a listener that has no room is consumed: dropped, or refused when it is a retry */
+static
+int
+LibTCPFullListenerSyn(struct pbuf *p, struct netif *inp, const ip4_addr_t *Src, const ip4_addr_t *Dest,
+                      u16_t SrcPort, u16_t DestPort, u32_t SeqNo, u8_t Flags)
+{
+    struct tcp_pcb_listen *lpcb;
+    struct tcp_pcb *Active;
+    ULONGLONG Now;
+    BOOLEAN Loopback;
+
+    /* Only a plain SYN that ip4_input delivers on this interface */
+    if (Flags != TCP_SYN || !netif_is_up(inp) ||
+        (!ip4_addr_eq(Dest, netif_ip4_addr(inp)) &&
+         !(ip4_addr_isloopback(Dest) && ip4_addr_isloopback(netif_ip4_addr(inp)))) ||
+        ip4_addr_isbroadcast(Src, inp) || ip4_addr_ismulticast(Src))
+    {
+        return 0;
+    }
+
+    lpcb = LibTCPFindListener(Dest, DestPort, inp);
+    if (!lpcb)
+        return 0;
+
+    Now = KeQueryInterruptTime();
+    if (lpcb->accepts_pending < lpcb->backlog)
+    {
+        /* This peer found room: nothing is left to refuse */
+        if (DroppedSynCount)
+            LibTCPTakeDroppedSyn(Src, SrcPort, DestPort, Now);
+        return 0;
+    }
+
+    /* A SYN sent again by a peer whose connection is being set up answers with its SYN-ACK, as lwIP does */
+    for (Active = tcp_active_pcbs; Active != NULL; Active = Active->next)
+    {
+        if (Active->remote_port == SrcPort && Active->local_port == DestPort &&
+            IP_IS_V4_VAL(Active->remote_ip) && ip4_addr_eq(ip_2_ip4(&Active->remote_ip), Src))
+        {
+            return 0;
+        }
+    }
+
+    Loopback = ip4_addr_isloopback(Dest) || ip4_addr_eq(Src, Dest);
+    if (Loopback)
+    {
+        if (LibTCPTakeDroppedSyn(Src, SrcPort, DestPort, Now))
+        {
+            ip_addr_t SrcAddr, DestAddr;
+
+            ip_addr_copy_from_ip4(SrcAddr, *Src);
+            ip_addr_copy_from_ip4(DestAddr, *Dest);
+            /* What tcp_input answers a SYN for a port nobody listens on */
+            tcp_rst_netif(inp, 0, SeqNo + 1, &DestAddr, &SrcAddr, DestPort, SrcPort);
+        }
+        else
+        {
+            LibTCPRememberDroppedSyn(Src, SrcPort, DestPort, Now);
+        }
+    }
+    pbuf_free(p);
+    return 1;
 }
 
 /* LWIP_HOOK_IP4_INPUT: runs under the core lock before lwIP looks at the packet; consumes only a SYN
@@ -779,7 +917,7 @@ LibTCPReopenTimeWait(struct pbuf *p, struct netif *inp)
             pbuf_free(p);
             return 1;
         }
-        return 0;
+        return LibTCPFullListenerSyn(p, inp, &Src, &Dest, SrcPort, DestPort, SeqNo, Flags);
     }
 
     /* Only a plain SYN that ip4_input delivers on this interface (to its address, from a unicast
@@ -979,6 +1117,10 @@ LibTCPQueuePendingAccept(PCONNECTION_ENDPOINT Listener, PTCP_PCB pcb)
     tcp_err(pcb, InternalPendingErrorEventHandler);
     tcp_sent(pcb, NULL);
 
+    /* A waiting connection counts against the listen backlog, as a SYN_RCVD one does, until it is
+       claimed: lwIP drops the SYN that would be one too many, before it answers */
+    tcp_backlog_delayed(pcb);
+
     return TRUE;
 }
 
@@ -1059,6 +1201,15 @@ LibTCPClaimPendingAcceptCallback(void *arg)
     PPENDING_ACCEPT Pending;
     PTCP_PCB pcb;
     BOOLEAN PeerClosed;
+    LONG Room;
+
+    /* The owner of the listener states what it has room for; the SYNs lwIP takes from now on fit it */
+    Room = InterlockedExchange(&Listener->ListenRoom, 0);
+    if (Room && Listener->SocketContext)
+    {
+        Listener->RoomManaged = TRUE;
+        ((struct tcp_pcb_listen *)Listener->SocketContext)->backlog = (u8_t)min(Room, 0xFF);
+    }
 
     /* A closed listener has already aborted its pending connections */
     while (Listener->SocketContext && !IsListEmpty(&Listener->PendingAccepts))
@@ -1075,6 +1226,7 @@ LibTCPClaimPendingAcceptCallback(void *arg)
             break;
         }
 
+        tcp_backlog_accepted(pcb);
         RemoveEntryList(&Pending->ListEntry);
         Listener->PendingAcceptCount--;
         PeerClosed = Pending->PeerClosed;
@@ -1884,6 +2036,14 @@ LibTCPAccept(PTCP_PCB pcb, struct tcp_pcb *listen_pcb, void *arg)
     tcp_sent(pcb, InternalSendEventHandler);
     tcp_err(pcb, InternalErrorEventHandler);
     tcp_arg(pcb, arg);
+
+    /* The room the owner stated shrinks with each connection handed over; its next listen request
+       states what is left */
+    if (listen_pcb && listen_pcb->callback_arg && ((PCONNECTION_ENDPOINT)listen_pcb->callback_arg)->RoomManaged &&
+        ((struct tcp_pcb_listen *)listen_pcb)->backlog)
+    {
+        ((struct tcp_pcb_listen *)listen_pcb)->backlog--;
+    }
 
     tcp_accepted(listen_pcb);
 }
