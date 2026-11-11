@@ -456,6 +456,28 @@ CsrFreeUnusedNtSession(IN PCSR_NT_SESSION NtSession)
 }
 
 /*
+ * Drops a reference on an NT session without telling SMSS when it was the last one. Used by the Sb thread
+ * while SMSS waits for its reply to a forwarded registration: SmSessionComplete from here would need a
+ * second SMSS API thread, and with forwards in flight there may be none (deadlock). SMSS deletes its
+ * session record itself when the registration fails.
+ */
+static
+VOID
+CsrDereferenceNtSessionQuietly(IN PCSR_NT_SESSION NtSession)
+{
+    CsrAcquireNtSessionLock();
+    ASSERT(NtSession->ReferenceCount != 0);
+    if (--NtSession->ReferenceCount == 0)
+    {
+        RemoveEntryList(&NtSession->SessionLink);
+        CsrReleaseNtSessionLock();
+        RtlFreeHeap(CsrHeap, 0, NtSession);
+        return;
+    }
+    CsrReleaseNtSessionLock();
+}
+
+/*
  * Registers a process of our session that was created by a process of
  * another session (CreateProcessAsUser from a service, for instance). The
  * request names the process and its first thread by id only. Every check
@@ -479,7 +501,7 @@ CsrCreateRemoteProcess(IN ULONG SmSessionId,
     THREAD_BASIC_INFORMATION ThreadInfo;
     KERNEL_USER_TIMES ProcTimes, ThrTimes, EntryTimes;
     ULONG ProcessSessionId;
-    PCSR_NT_SESSION NtSession = NULL;
+    PCSR_NT_SESSION NtSession = NULL, NtSessionHeld;
     PCSR_PROCESS CsrProcess, Entry;
     PCSR_THREAD CsrThread;
     PCSR_SERVER_DLL ServerDll;
@@ -524,6 +546,18 @@ CsrCreateRemoteProcess(IN ULONG SmSessionId,
     {
         Status = STATUS_INVALID_CID;
         goto Quit;
+    }
+
+    /* The process must still be alive (its creator may have killed it already) */
+    {
+        LARGE_INTEGER Timeout;
+
+        Timeout.QuadPart = 0;
+        if (NtWaitForSingleObject(hProcess, FALSE, &Timeout) != STATUS_TIMEOUT)
+        {
+            Status = STATUS_PROCESS_IS_TERMINATING;
+            goto Quit;
+        }
     }
 
     /* The process must be in our session (the kernel's view, not its PEB) */
@@ -645,11 +679,20 @@ CsrCreateRemoteProcess(IN ULONG SmSessionId,
         }
     }
 
+    /*
+     * Our own reference on the NT session while we may still destroy the process: if a server's
+     * new-process callback fails, the process's reference goes with it, and ours is then dropped
+     * without SmSessionComplete (see CsrDereferenceNtSessionQuietly).
+     */
+    CsrReferenceNtSession(CsrProcess->NtSession);
+    NtSessionHeld = CsrProcess->NtSession;
+
     CsrProcess->InheritStatus = STATUS_SUCCESS;
     CsrInsertProcess(NULL, CsrProcess);
     Status = CsrProcess->InheritStatus;
     CsrReleaseProcessLock();
     if (!NT_SUCCESS(Status)) CsrDestroyProcess(ClientId, Status);
+    CsrDereferenceNtSessionQuietly(NtSessionHeld);
     return Status;
 
 QuitLocked:

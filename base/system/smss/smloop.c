@@ -32,6 +32,9 @@ NTSTATUS
     _In_ HANDLE SmApiPort);
 
 volatile LONG SmTotalApiThreads;
+
+/* One forwarded registration at a time (SmpForwardProcessRegistration) */
+RTL_CRITICAL_SECTION SmpForwardLock;
 HANDLE SmUniqueProcessId;
 
 /*
@@ -109,8 +112,13 @@ SmpSessionComplete(IN PSM_API_MSG SmApiMsg,
                    IN PSMP_CLIENT_CONTEXT ClientContext,
                    IN HANDLE SmApiPort)
 {
-    DPRINT1("%s is not yet implemented\n", __FUNCTION__);
-    return STATUS_NOT_IMPLEMENTED;
+    /*
+     * A subsystem tells SMSS that the last process of one of its sessions is gone: drop the record SMSS
+     * allocated for it (one per SbCreateSession and per forwarded registration). Only the subsystem the
+     * session was given to may complete it.
+     */
+    if (!ClientContext->Subsystem) return STATUS_ACCESS_DENIED;
+    return SmpCompleteSession(SmApiMsg->u.SessionComplete.SessionId, ClientContext->Subsystem);
 }
 
 NTSTATUS
@@ -516,7 +524,14 @@ SmpForwardProcessRegistration(
         return STATUS_INVALID_PARAMETER;
     }
 
+    /*
+     * One forward at a time: a forward holds this API thread until the target csrss answers, so with one
+     * in flight the other API thread stays free for everything else (the target never calls SMSS back
+     * while it answers, see CsrDereferenceNtSessionQuietly in csrsrv).
+     */
+    RtlEnterCriticalSection(&SmpForwardLock);
     Status = SmpSbCreateRemoteProcessEx(&ClientId, MuSessionId, MuSessionId, Flags);
+    RtlLeaveCriticalSection(&SmpForwardLock);
     DPRINT1("SMSS: Forwarded registration of %lx.%lx from session %lu to session %lu, Status=%lx\n",
             ClientId.UniqueProcess, ClientId.UniqueThread, SenderSessionId, MuSessionId, Status);
     return Status;
