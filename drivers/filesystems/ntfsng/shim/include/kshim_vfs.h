@@ -321,6 +321,7 @@ struct inode {
 	struct inode *kshim_hnext;		/* hash chain (sb->kshim_ihash) while hashed */
 	struct inode *kshim_lru_prev, *kshim_lru_next;	/* unused-inode list while kshim_in_lru */
 	unsigned char kshim_hashed, kshim_in_lru;
+	unsigned int kshim_lru_bytes;		/* what kshim_icache_cost said it holds when it joined the unused list (void while not kshim_in_lru) */
 };
 static inline loff_t i_size_read(const struct inode *i) { return i->i_size; }
 static inline void i_size_write(struct inode *i, loff_t s) { i->i_size = s; }
@@ -440,6 +441,7 @@ struct super_block {
 	struct inode *kshim_ihash[KSHIM_IHASH];
 	struct inode *kshim_lru_head, *kshim_lru_tail;	/* unused inodes, oldest first */
 	unsigned long kshim_lru_count;
+	unsigned long kshim_lru_bytes;		/* sum of kshim_lru_bytes of the unused inodes */
 	int kshim_no_icache;			/* unmounting: evict at the last reference */
 	void *kshim_priv;			/* the file system glue's volume (kshim_icache_evicting / kshim_icache_added find it here) */
 	const struct dentry_operations *s_d_op;
