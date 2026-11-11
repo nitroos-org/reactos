@@ -80,6 +80,76 @@ MmRebalanceMemoryConsumersAndWait(VOID);
 /* Rounds an image load waits for free pages before it fails (each is a balancer pass or at least 10 ms) */
 #define MI_IMAGE_PAGE_WAITS 1000
 
+/*
+ * A session image: the image is read through a view in the System process, then copied into pages
+ * of the current session at an address reserved for it in every session
+ */
+static
+NTSTATUS
+MiLoadSessionImageSection(
+    _In_ PSECTION Section,
+    _Out_ PVOID *ImageBase,
+    _In_ PUNICODE_STRING FileName)
+{
+    KAPC_STATE ApcState;
+    LARGE_INTEGER SectionOffset = {{0, 0}};
+    SIZE_T ViewSize = 0, Size;
+    PVOID View = NULL, Copy, Base;
+    PFN_COUNT PageCount;
+    NTSTATUS Status;
+
+    PageCount = ROUND_TO_PAGES(((PMM_IMAGE_SECTION_OBJECT)Section->Segment)->ImageInformation.ImageFileSize) >> PAGE_SHIFT;
+    Size = (SIZE_T)PageCount << PAGE_SHIFT;
+    Copy = ExAllocatePoolWithTag(PagedPool, Size, TAG_LDR_WSTR);
+    if (!Copy) return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(Copy, Size);
+
+    /* Read the image */
+    KeStackAttachProcess(&PsInitialSystemProcess->Pcb, &ApcState);
+    Status = MmMapViewOfSection(Section,
+                                PsGetCurrentProcess(),
+                                &View,
+                                0,
+                                0,
+                                &SectionOffset,
+                                &ViewSize,
+                                ViewUnmap,
+                                0,
+                                PAGE_EXECUTE);
+    if (Status == STATUS_IMAGE_MACHINE_TYPE_MISMATCH) Status = STATUS_INVALID_IMAGE_FORMAT;
+    if (NT_SUCCESS(Status))
+    {
+        RtlCopyMemory(Copy, View, min(Size, ViewSize));
+        MmUnmapViewOfSection(PsGetCurrentProcess(), View);
+    }
+    KeUnstackDetachProcess(&ApcState);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("MmMapViewOfSection failed for %wZ: 0x%lx\n", FileName, Status);
+        ExFreePoolWithTag(Copy, TAG_LDR_WSTR);
+        return Status;
+    }
+
+    /* Into the current session */
+    Status = MiReserveSessionImageVa(PageCount, &Base);
+    if (NT_SUCCESS(Status))
+    {
+        Status = MiMapSessionImagePages(Base, PageCount);
+        if (NT_SUCCESS(Status))
+        {
+            RtlCopyMemory(Base, Copy, Size);
+            *ImageBase = Base;
+            DPRINT1("Loading: %wZ in session space at %p with %lx pages\n", FileName, Base, PageCount);
+        }
+        else
+        {
+            MiReleaseSessionImageVa(Base, PageCount);
+        }
+    }
+    ExFreePoolWithTag(Copy, TAG_LDR_WSTR);
+    return Status;
+}
+
 NTSTATUS
 NTAPI
 MiLoadImageSection(_Inout_ PSECTION *SectionPtr,
@@ -108,9 +178,8 @@ MiLoadImageSection(_Inout_ PSECTION *SectionPtr,
     /* Detect session load */
     if (SessionLoad)
     {
-        /* Fail */
-        UNIMPLEMENTED_DBGBREAK("Session loading not yet supported!\n");
-        return STATUS_NOT_IMPLEMENTED;
+        ASSERT(LdrEntry == NULL);
+        return MiLoadSessionImageSection(Section, ImageBase, FileName);
     }
 
     /* Not session load, shouldn't have an entry */
@@ -644,6 +713,9 @@ MiDereferenceImports(IN PLOAD_IMPORTS ImportList)
         /* Skip boot loaded images */
         if (LdrEntry->LoadedImports == MM_SYSLDR_BOOT_LOADED) continue;
 
+        /* Session images are referenced per session (MiDereferenceSessionImage) */
+        if (MiIsSessionImage(LdrEntry)) continue;
+
         /* Dereference the entry */
         ASSERT(LdrEntry->LoadCount >= 1);
         if (!--LdrEntry->LoadCount)
@@ -1022,9 +1094,15 @@ MiSnapThunk(IN PVOID DllBase,
     return Status;
 }
 
+/*
+ * EntryReference: for a session image, the reference to drop is one on the entry (an importer's), not a
+ * load in the current session
+ */
 NTSTATUS
 NTAPI
-MmUnloadSystemImage(IN PVOID ImageHandle)
+MiUnloadSystemImageEx(
+    _In_ PVOID ImageHandle,
+    _In_ BOOLEAN EntryReference)
 {
     PLDR_DATA_TABLE_ENTRY LdrEntry = ImageHandle;
     PVOID BaseAddress = LdrEntry->DllBase;
@@ -1043,12 +1121,20 @@ MmUnloadSystemImage(IN PVOID ImageHandle)
     /* Check if this driver was loaded at boot and didn't get imports parsed */
     if (LdrEntry->LoadedImports == MM_SYSLDR_BOOT_LOADED) goto Done;
 
-    /* We should still be alive */
-    ASSERT(LdrEntry->LoadCount != 0);
-    LdrEntry->LoadCount--;
+    /* A session image: one load fewer in this session; the entry goes when no session has it */
+    if (MiIsSessionImage(LdrEntry))
+    {
+        if (!MiDereferenceSessionImage(LdrEntry, EntryReference)) goto Done;
+    }
+    else
+    {
+        /* We should still be alive */
+        ASSERT(LdrEntry->LoadCount != 0);
+        LdrEntry->LoadCount--;
 
-    /* Check if we're still loaded */
-    if (LdrEntry->LoadCount) goto Done;
+        /* Check if we're still loaded */
+        if (LdrEntry->LoadCount) goto Done;
+    }
 
     /* We should cleanup... are symbols loaded */
     if (LdrEntry->Flags & LDRP_DEBUG_SYMBOLS_LOADED)
@@ -1081,7 +1167,7 @@ MmUnloadSystemImage(IN PVOID ImageHandle)
         if (!(LdrEntry->Flags & LDRP_MM_LOADED))
             MiReturnBootCommit(PagesFreed);
     }
-    else
+    else if (!MiIsSessionImage(LdrEntry))
     {
         DPRINT1("Leaking non system-mapped image: %wZ\n", &LdrEntry->BaseDllName);
     }
@@ -1124,6 +1210,13 @@ Done:
     KeReleaseMutant(&MmSystemLoadLock, MUTANT_INCREMENT, FALSE, FALSE);
     KeLeaveCriticalRegion();
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+MmUnloadSystemImage(IN PVOID ImageHandle)
+{
+    return MiUnloadSystemImageEx(ImageHandle, FALSE);
 }
 
 /*
@@ -1516,6 +1609,7 @@ MiResolveImageReferences(IN PVOID ImageBase,
     PIMAGE_IMPORT_DESCRIPTOR ImportDescriptor, CurrentImport;
     ULONG ImportSize, ImportCount = 0, LoadedImportsSize, ExportSize;
     PLOAD_IMPORTS LoadedImports, NewImports;
+    PLDR_DATA_TABLE_ENTRY SessionLoaded = NULL;
     ULONG i;
     BOOLEAN GdiLink, NormalLink;
     BOOLEAN ReferenceNeeded, Loaded;
@@ -1570,6 +1664,11 @@ MiResolveImageReferences(IN PVOID ImageBase,
             /* Zero it */
             RtlZeroMemory(LoadedImports, LoadedImportsSize);
             LoadedImports->Count = ImportCount;
+        }
+        else if (MI_IS_SESSION_IMAGE_ADDRESS(ImageBase))
+        {
+            /* A session image records every session reference it takes: no list, no load */
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
     }
     else
@@ -1644,6 +1743,9 @@ MiResolveImageReferences(IN PVOID ImageBase,
         /* We don't support name prefixes yet */
         if (NamePrefix) DPRINT1("Name Prefix not yet supported!\n");
 
+        /* No session image loaded for this import yet */
+        SessionLoaded = NULL;
+
         /* Remember that we haven't loaded the import at this point */
 CheckDllState:
         Loaded = FALSE;
@@ -1664,8 +1766,34 @@ CheckDllState:
                 /* Get the base address */
                 ImportBase = LdrEntry->DllBase;
 
+                /*
+                 * A session image can be imported only by a session image, which binds to the copy
+                 * in its own session (the same address in every session)
+                 */
+                if (MiIsSessionImage(LdrEntry))
+                {
+                    if (!MI_IS_SESSION_IMAGE_ADDRESS(ImageBase))
+                    {
+                        DPRINT1("A global image imports the session image %wZ: refused\n",
+                                &LdrEntry->BaseDllName);
+                        RtlFreeUnicodeString(&NameString);
+                        Status = STATUS_INVALID_IMAGE_FORMAT;
+                        goto Failure;
+                    }
+
+                    /* A session image this import just loaded already counts this load */
+                    if (LdrEntry != SessionLoaded)
+                    {
+                        Status = MiReferenceSessionImage(LdrEntry);
+                        if (!NT_SUCCESS(Status))
+                        {
+                            RtlFreeUnicodeString(&NameString);
+                            goto Failure;
+                        }
+                    }
+                }
                 /* Check if we haven't loaded yet, and we need references */
-                if (!(Loaded) && (ReferenceNeeded))
+                else if (!(Loaded) && (ReferenceNeeded))
                 {
                     /* Make sure we're not already loading */
                     if (!(LdrEntry->Flags & LDRP_LOAD_IN_PROGRESS))
@@ -1709,7 +1837,7 @@ CheckDllState:
             Status = MmLoadSystemImage(&DllName,
                                        NamePrefix,
                                        NULL,
-                                       FALSE,
+                                       MI_IS_SESSION_IMAGE_ADDRESS(ImageBase) ? 1 : 0,
                                        (PVOID *)&DllEntry,
                                        &DllBase);
 
@@ -1745,7 +1873,7 @@ CheckDllState:
                 Status = MmLoadSystemImage(&DllName,
                                            NamePrefix,
                                            NULL,
-                                           FALSE,
+                                           MI_IS_SESSION_IMAGE_ADDRESS(ImageBase) ? 1 : 0,
                                            (PVOID *)&DllEntry,
                                            &DllBase);
             }
@@ -1784,7 +1912,7 @@ CheckDllState:
                 Status = MmLoadSystemImage(&DllName,
                                            NamePrefix,
                                            NULL,
-                                           FALSE,
+                                           MI_IS_SESSION_IMAGE_ADDRESS(ImageBase) ? 1 : 0,
                                            (PVOID *)&DllEntry,
                                            &DllBase);
             }
@@ -1815,6 +1943,7 @@ CheckDllState:
 
             /* We're now loaded */
             Loaded = TRUE;
+            SessionLoaded = DllEntry;
 
             /* Sanity check */
             ASSERT(DllBase == DllEntry->DllBase);
@@ -1834,7 +1963,8 @@ CheckDllState:
         }
 
         /* Check if we're support to reference this import */
-        if ((ReferenceNeeded) && (LoadedImports))
+        /* A session image is always recorded: its reference is per session and goes with the importer */
+        if ((ReferenceNeeded || MiIsSessionImage(LdrEntry)) && (LoadedImports))
         {
             /* Make sure we're not already loading */
             if (!(LdrEntry->Flags & LDRP_LOAD_IN_PROGRESS))
@@ -1977,11 +2107,33 @@ Failure:
     /* The dependencies are still loaded here: list everything that is missing */
     if (LogMissing) MiLogMissingImports(ImageBase, Status, FailedModuleName);
 
+    /*
+     * The name of the failing import is that of its loader entry, which the releases below can free (an
+     * import this load brought in): the caller gets a copy of its own (low bit set: the caller frees it)
+     */
+    if (*MissingDriver && !((ULONG_PTR)*MissingDriver & 1))
+    {
+        SIZE_T NameSize = (wcslen(*MissingDriver) + 1) * sizeof(WCHAR);
+        PWCHAR NameCopy = ExAllocatePoolWithTag(PagedPool, NameSize, TAG_LDR_WSTR);
+
+        if (NameCopy)
+        {
+            RtlCopyMemory(NameCopy, *MissingDriver, NameSize);
+            *MissingDriver = NameCopy;
+            *(PULONG_PTR)MissingDriver |= 1;
+        }
+        else
+        {
+            *MissingDriver = NULL;
+        }
+    }
+
     /* Cleanup and return */
     RtlFreeUnicodeString(&NameString);
 
     if (LoadedImports)
     {
+        if (MI_IS_SESSION_IMAGE_ADDRESS(ImageBase)) LoadedImports = MiReleaseSessionImports(LoadedImports);
         MiDereferenceImports(LoadedImports);
         ExFreePoolWithTag(LoadedImports, TAG_LDR_IMPORTS);
     }
@@ -3033,8 +3185,8 @@ MiWriteProtectSystemImage(
     /* Large page mapped images are not supported */
     NT_ASSERT(!MI_IS_PHYSICAL_ADDRESS(ImageBase));
 
-    /* Session images are not yet supported */
-    NT_ASSERT(!MI_IS_SESSION_ADDRESS(ImageBase));
+    /* Session images are protected in the current session's page tables */
+    NT_ASSERT(!MI_IS_SESSION_ADDRESS(ImageBase) || MI_IS_SESSION_IMAGE_ADDRESS(ImageBase));
 
     /* Get the NT headers */
     NtHeaders = RtlImageNtHeader(ImageBase);
@@ -3515,6 +3667,9 @@ MmLoadSystemImage(IN PUNICODE_STRING FileName,
         ASSERT(NamePrefix == NULL);
         ASSERT(LoadedName == NULL);
 
+        /* Session images exist only with NitroSessions */
+        if (!MmNitroSessions) return STATUS_NOT_SUPPORTED;
+
         /* Make sure the process is in session too */
         if (!PsGetCurrentProcess()->ProcessInSession) return STATUS_NO_MEMORY;
     }
@@ -3661,18 +3816,36 @@ LoaderScan:
         }
 
         /* Check if this was supposed to be a session load */
-        if (!Flags)
+        if (!Flags && MiIsSessionImage(LdrEntry))
+        {
+            /* A session image is never handed out as a global one */
+            DPRINT1("%wZ is loaded as a session image, not as a global image\n", &LdrEntry->BaseDllName);
+            Status = STATUS_INVALID_IMAGE_FORMAT;
+        }
+        else if (!Flags)
         {
             /* It wasn't, so just return the data */
             *ModuleObject = LdrEntry;
             *ImageBaseAddress = LdrEntry->DllBase;
             Status = STATUS_IMAGE_ALREADY_LOADED;
         }
+        else if (MiIsSessionImage(LdrEntry))
+        {
+            /* One more load of the session image, in this session */
+            Status = MiReferenceSessionImage(LdrEntry);
+            if (NT_SUCCESS(Status))
+            {
+                *ModuleObject = LdrEntry;
+                *ImageBaseAddress = LdrEntry->DllBase;
+            }
+        }
         else
         {
-            /* We don't support session loading yet */
-            UNIMPLEMENTED_DBGBREAK("Unsupported Session-Load!\n");
-            Status = STATUS_NOT_IMPLEMENTED;
+            /* A global image is not loaded again in session space */
+            DPRINT1("%wZ is loaded as a global image, not as a session image\n", &LdrEntry->BaseDllName);
+            *ModuleObject = LdrEntry;
+            *ImageBaseAddress = LdrEntry->DllBase;
+            Status = STATUS_IMAGE_ALREADY_LOADED;
         }
 
         /* Do cleanup */
@@ -3768,14 +3941,6 @@ LoaderScan:
         ZwClose(SectionHandle);
         if (!NT_SUCCESS(Status)) goto Quickie;
 
-        /* Check if this was supposed to be a session-load */
-        if (Flags)
-        {
-            /* We don't support session loading yet */
-            UNIMPLEMENTED_DBGBREAK("Unsupported Session-Load!\n");
-            goto Quickie;
-        }
-
         /* Check the loader list again, we should end up in the path below */
         goto LoaderScan;
     }
@@ -3789,7 +3954,7 @@ LoaderScan:
     Status = MiLoadImageSection(&Section,
                                 &ModuleLoadBase,
                                 FileName,
-                                FALSE,
+                                Flags ? TRUE : FALSE,
                                 NULL);
     ASSERT(Status != STATUS_ALREADY_COMMITTED);
 
@@ -3808,11 +3973,11 @@ LoaderScan:
                                  &BaseName,
                                  TRUE);
         }
-
-        /* Dereference the section */
-        ObDereferenceObject(Section);
-        Section = NULL;
     }
+
+    /* Dereference the section: the image has pages of its own */
+    ObDereferenceObject(Section);
+    Section = NULL;
 
     /* Check for failure of the load earlier */
     if (!NT_SUCCESS(Status))
@@ -3956,10 +4121,9 @@ LoaderScan:
         goto Quickie;
     }
 
-    /* Update the loader entry */
-    LdrEntry->Flags |= (LDRP_SYSTEM_MAPPED |
-                        LDRP_ENTRY_PROCESSED |
-                        LDRP_MM_LOADED);
+    /* Update the loader entry (a session image is not in system PTE space) */
+    LdrEntry->Flags |= (LDRP_ENTRY_PROCESSED | LDRP_MM_LOADED);
+    if (!Flags) LdrEntry->Flags |= LDRP_SYSTEM_MAPPED;
     LdrEntry->Flags &= ~LDRP_LOAD_IN_PROGRESS;
     LdrEntry->LoadedImports = LoadedImports;
 
@@ -3967,6 +4131,24 @@ LoaderScan:
 
     /* Apply the kernel shims to the driver */
     KseDriverLoadImage(LdrEntry);
+
+    /* A session image: the copy for the other sessions is taken now, before the cookie and protections */
+    if (Flags)
+    {
+        Status = MiCreateSessionImage(LdrEntry, BYTES_TO_PAGES(DriverSize));
+        if (!NT_SUCCESS(Status))
+        {
+            LdrEntry->LoadedImports = MiReleaseSessionImports(LdrEntry->LoadedImports);
+            MiDereferenceImports(LdrEntry->LoadedImports);
+            MiProcessLoaderEntry(LdrEntry, FALSE);
+            MiClearImports(LdrEntry);
+            if (LdrEntry->FullDllName.Buffer)
+                ExFreePoolWithTag(LdrEntry->FullDllName.Buffer, TAG_LDR_WSTR);
+            ExFreePoolWithTag(LdrEntry, TAG_MODULE_OBJECT);
+            LdrEntry = NULL;
+            goto Quickie;
+        }
+    }
 
     /* Write-protect the system image */
     MiWriteProtectSystemImage(LdrEntry->DllBase);
@@ -4031,9 +4213,9 @@ LoaderScan:
         LdrEntry->Flags |= LDRP_DEBUG_SYMBOLS_LOADED;
     }
 
-    /* Page the driver */
+    /* Page the driver (session images stay resident) */
     ASSERT(Section == NULL);
-    MiEnablePagingOfDriver(LdrEntry);
+    if (!Flags) MiEnablePagingOfDriver(LdrEntry);
 
     /* Return pointers */
     *ModuleObject = LdrEntry;
@@ -4048,7 +4230,15 @@ Quickie:
     if (!NT_SUCCESS(Status) && (ModuleLoadBase != NULL))
     {
         ASSERT(LockOwned);
-        MiUnmapSystemImage(ModuleLoadBase, DriverSize);
+        if (MI_IS_SESSION_IMAGE_ADDRESS(ModuleLoadBase))
+        {
+            MiUnmapSessionImagePages(ModuleLoadBase, BYTES_TO_PAGES(DriverSize));
+            MiReleaseSessionImageVa(ModuleLoadBase, BYTES_TO_PAGES(DriverSize));
+        }
+        else
+        {
+            MiUnmapSystemImage(ModuleLoadBase, DriverSize);
+        }
         ModuleLoadBase = NULL;
     }
 

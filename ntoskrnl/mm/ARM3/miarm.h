@@ -2343,6 +2343,26 @@ MiInsertPageInFreeList(
     IN PFN_NUMBER PageFrameIndex
 );
 
+NTSTATUS
+NTAPI
+MiSessionCommitPageTables(
+    IN PVOID StartVa,
+    IN PVOID EndVa
+);
+
+/* Session images (sessimg.c) */
+BOOLEAN NTAPI MiIsSessionImage(_In_ PLDR_DATA_TABLE_ENTRY LdrEntry);
+NTSTATUS NTAPI MiReserveSessionImageVa(_In_ PFN_COUNT PageCount, _Out_ PVOID *Base);
+VOID NTAPI MiReleaseSessionImageVa(_In_ PVOID Base, _In_ PFN_COUNT PageCount);
+NTSTATUS NTAPI MiMapSessionImagePages(_In_ PVOID Base, _In_ PFN_COUNT PageCount);
+VOID NTAPI MiUnmapSessionImagePages(_In_ PVOID Base, _In_ PFN_COUNT PageCount);
+NTSTATUS NTAPI MiCreateSessionImage(_In_ PLDR_DATA_TABLE_ENTRY LdrEntry, _In_ PFN_COUNT PageCount);
+NTSTATUS NTAPI MiReferenceSessionImage(_In_ PLDR_DATA_TABLE_ENTRY LdrEntry);
+BOOLEAN NTAPI MiDereferenceSessionImage(_In_ PLDR_DATA_TABLE_ENTRY LdrEntry, _In_ BOOLEAN EntryReference);
+NTSTATUS NTAPI MiUnloadSystemImageEx(_In_ PVOID ImageHandle, _In_ BOOLEAN EntryReference);
+PLOAD_IMPORTS NTAPI MiReleaseSessionImports(_In_ PLOAD_IMPORTS Imports);
+PVOID NTAPI LdrpInitSecurityCookie(PLDR_DATA_TABLE_ENTRY LdrEntry);
+
 PFN_COUNT
 NTAPI
 MiDeleteSystemPageableVm(

@@ -876,6 +876,8 @@
 @ extern NlsMbOemCodePageTag
 @ extern NlsOemCodePage
 @ extern NlsOemLeadByteInfo
+@ stdcall NitroMmLoadSessionImageForTest(ptr ptr ptr)
+@ stdcall NitroMmUnloadSessionImageForTest(ptr)
 @ stdcall NtAddAtom(wstr long ptr)
 @ stdcall NtAdjustPrivilegesToken(ptr long ptr long ptr ptr)
 @ stdcall NtAllocateLocallyUniqueId(ptr)

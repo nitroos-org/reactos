@@ -1,0 +1,2 @@
+@ stdcall SessTestIncrement()
+@ stdcall SessTestMissing()
