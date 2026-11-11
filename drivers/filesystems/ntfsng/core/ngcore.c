@@ -112,12 +112,48 @@ struct ngc_vol {
 	struct ngc_stat *stc;
 	unsigned int stc_mask;
 	unsigned long stc_hits, stc_stores;
+	/* Names that ngc_lookup found lately (see ngc_nc_find).  Everything that uses or changes it holds the volume lock. */
+	struct ngc_ncache *nc;
+	unsigned long nc_hits, nc_stores;
 };
+
+/*
+ * Names ngc_lookup found lately: (directory, name) -> the record the name led to, direct-mapped by a hash of the
+ * directory's record number and the name with the volume's case folding.  An entry is valid while the generation
+ * of its directory is the one it was stored under: every change of a directory's names (create, unlink, rename,
+ * link, short name; ngc_nc_dirty) counts up the generation of the directories it touches, which voids all their
+ * entries at once.  The generations are kept in a small table indexed by a hash of the record number: two directories
+ * can share one, which only voids more than necessary.  Only names of up to NGC_NC_NAME units are kept.  An entry keeps
+ * the name as the directory stores it (the lookup's `real` name) when the lookup that made it asked for it.
+ * Uses of the cache and changes of the names both run under the volume lock, so no lock of its own.
+ */
+#define NGC_NC_N 4096
+#define NGC_NC_NAME 32
+#define NGC_NC_DGEN 1024
+struct ngc_nce {
+	u64 dir;				/* record number of the directory, 0: empty */
+	u64 child;				/* record number of the file the name led to */
+	u64 gen;				/* generation of the directory when this was stored */
+	u16 seq;				/* its sequence number */
+	u8 nlen;				/* length of name, in UTF-16 units */
+	u8 rlen;				/* length of real, 0: the stored name was not kept */
+	unsigned short name[NGC_NC_NAME];	/* as asked */
+	unsigned short real[NGC_NC_NAME];	/* as stored in the directory */
+};
+struct ngc_ncache {
+	u64 dgen[NGC_NC_DGEN];
+	struct ngc_nce e[NGC_NC_N];
+};
+/* 0: off (registry NoNameCache=1), 1: on, 2: verify (registry NameCacheVerify=1): a hit is checked against the lookup, which is used */
+int ngc_nc_mode = 1;
+static unsigned long ngc_nc_bad;
 
 static void ngc_sdc_drop(struct ngc_vol *v, unsigned long long mft_no);
 static void ngc_stc_evicting(struct inode *i);
 static void ngc_stc_added(struct inode *i);
 static void ngc_stc_free(struct ngc_vol *v);
+static void ngc_nc_free(struct ngc_vol *v);
+static void ngc_nc_dirty(struct ngc_vol *v, struct inode *dir);
 static void ngc_sdc_flush(struct ngc_vol *v);
 
 /* Mount-time consistency check: 0 never, 1 after an unclean shutdown or when $MFT is at most 64 MB, 2 always. */
@@ -626,6 +662,9 @@ void ngc_umount(ngc_vol *v, int discard)
 	if (v->watched)
 		kshim_watch_del(v->watched);
 	ngc_stc_free(v);
+	if (v->nc_stores)
+		printk(KERN_WARNING "NAMECACHE: mode %d: %lu hits, %lu stores, %lu mismatches\n", ngc_nc_mode, v->nc_hits, v->nc_stores, ngc_nc_bad);
+	ngc_nc_free(v);
 	ngc_sdc_flush(v);
 	kfree(v->jv);
 	kfree(v->bounce);
@@ -749,15 +788,120 @@ static void ngc_fix_type(struct inode *vi)
 	ntfs_set_vfs_operations(vi, vi->i_mode, 0);
 }
 
+static inline unsigned int ngc_nc_dslot(u64 dir)
+{
+	return (unsigned int)((dir * 0x9E3779B97F4A7C15ULL) >> 54) & (NGC_NC_DGEN - 1);
+}
+
+static inline unsigned int ngc_nc_fold(const struct ntfs_volume *vol, unsigned int c)
+{
+	return c < vol->upcase_len ? le16_to_cpu(vol->upcase[c]) : c;
+}
+
+static struct ngc_nce *ngc_nc_slot(struct ngc_vol *v, u64 dir, const unsigned short *name, unsigned int len)
+{
+	const struct ntfs_volume *vol = NTFS_SB(v->sb);
+	u32 h = (u32)(dir * 0x9E3779B1u) ^ 0x811C9DC5u;
+	unsigned int i;
+	for (i = 0; i < len; i++)
+		h = (h ^ ngc_nc_fold(vol, name[i])) * 16777619u;
+	return &v->nc->e[(h ^ (h >> 15)) & (NGC_NC_N - 1)];
+}
+
+/* The entry for @name in @dir when it is valid and has what the caller needs (@want_real), else NULL. */
+static struct ngc_nce *ngc_nc_find(struct ngc_vol *v, struct inode *dir, const unsigned short *name, unsigned int len,
+		bool want_real)
+{
+	const struct ntfs_volume *vol = NTFS_SB(v->sb);
+	u64 dno = NTFS_I(dir)->mft_no;
+	struct ngc_nce *e;
+	unsigned int i;
+
+	if (!v->nc || !ngc_nc_mode || !len || len > NGC_NC_NAME)
+		return NULL;
+	e = ngc_nc_slot(v, dno, name, len);
+	if (e->dir != dno || e->nlen != len || e->gen != v->nc->dgen[ngc_nc_dslot(dno)] || (want_real && !e->rlen))
+		return NULL;
+	for (i = 0; i < len; i++)
+		if (ngc_nc_fold(vol, e->name[i]) != ngc_nc_fold(vol, name[i]))
+			return NULL;
+	return e;
+}
+
+static void ngc_nc_store(struct ngc_vol *v, struct inode *dir, const unsigned short *name, unsigned int len,
+		struct inode *vi, const unsigned short *real, unsigned int rlen)
+{
+	u64 dno = NTFS_I(dir)->mft_no;
+	struct ngc_nce *e;
+
+	if (!ngc_nc_mode || !len || len > NGC_NC_NAME)
+		return;
+	if (!v->nc) {
+		v->nc = kvzalloc(sizeof(*v->nc), GFP_NOFS);
+		if (!v->nc)
+			return;
+	}
+	e = ngc_nc_slot(v, dno, name, len);
+	e->dir = dno;
+	e->child = NTFS_I(vi)->mft_no;
+	e->seq = NTFS_I(vi)->seq_no;
+	e->gen = v->nc->dgen[ngc_nc_dslot(dno)];
+	e->nlen = len;
+	memcpy(e->name, name, len * sizeof(*name));
+	e->rlen = (real && rlen && rlen <= NGC_NC_NAME) ? rlen : 0;
+	if (e->rlen)
+		memcpy(e->real, real, rlen * sizeof(*real));
+	v->nc_stores++;
+}
+
+/* The names of @dir change (or may): everything kept for it is void. */
+static void ngc_nc_dirty(struct ngc_vol *v, struct inode *dir)
+{
+	if (v->nc)
+		v->nc->dgen[ngc_nc_dslot(NTFS_I(dir)->mft_no)]++;
+}
+
+static void ngc_nc_free(struct ngc_vol *v)
+{
+	kvfree(v->nc);
+	v->nc = NULL;
+}
+
+void ngc_set_namecache(int mode)
+{
+	ngc_nc_mode = mode;
+}
+
 static int ngc_lookup_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *name, unsigned int len, ngc_node **out,
 		unsigned short *real, unsigned int *real_len)
 {
 	struct inode *dir = (struct inode *)dirn, *vi;
 	struct dentry *d, *r;
+	struct ngc_nce *hit;
+	unsigned short kept[NGC_NC_NAME];
+	unsigned int kept_len = 0;
 
 	*out = NULL;
 	if (!S_ISDIR(dir->i_mode))
 		return -ENOTDIR;
+	/* A name found lately in this directory, whose directory has not changed its names since: the same record. */
+	hit = ngc_nc_find(v, dir, name, len, real && real_len);
+	if (hit && ngc_nc_mode == 1) {
+		vi = ntfs_iget(v->sb, hit->child);
+		if (!IS_ERR(vi) && NTFS_I(vi)->seq_no == hit->seq) {
+			if (real && real_len) {
+				memcpy(real, hit->real, hit->rlen * sizeof(*real));
+				*real_len = hit->rlen;
+			}
+			ngc_fix_type(vi);
+			*out = (ngc_node *)vi;
+			v->nc_hits++;
+			return 0;
+		}
+		if (!IS_ERR(vi))
+			iput(vi);
+		/* Not loadable, or another sequence number: what the directory says counts. */
+	}
 	d = ngc_mkdentry(v, name, len, NULL);
 	if (IS_ERR(d))
 		return PTR_ERR(d);
@@ -767,6 +911,14 @@ static int ngc_lookup_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *nam
 		return PTR_ERR(r);
 	}
 	vi = r ? r->d_inode : d->d_inode;
+	if (hit && ngc_nc_mode == 2)
+		v->nc_hits++;
+	if (hit && ngc_nc_mode == 2 && (!vi || NTFS_I(vi)->mft_no != hit->child || NTFS_I(vi)->seq_no != hit->seq)) {
+		ngc_nc_bad++;
+		printk(KERN_ERR "NAMECACHE: mismatch in directory %llx: cached record %llx seq %x, directory says %llx seq %x (%lu so far)\n",
+		       (unsigned long long)NTFS_I(dir)->mft_no, (unsigned long long)hit->child, hit->seq,
+		       vi ? (unsigned long long)NTFS_I(vi)->mft_no : 0ULL, vi ? NTFS_I(vi)->seq_no : 0, ngc_nc_bad);
+	}
 	if (vi && real && real_len) {
 		/* The name as stored: the case-folded match, or exactly what was asked. */
 		if (d->kshim_ci_name) {
@@ -777,10 +929,15 @@ static int ngc_lookup_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *nam
 			memcpy(real, name, len * sizeof(*real));
 			*real_len = len;
 		}
+		if (*real_len <= NGC_NC_NAME) {
+			memcpy(kept, real, *real_len * sizeof(*kept));
+			kept_len = *real_len;
+		}
 	}
 	ngc_freedentry(d);
 	if (!vi)
 		return -ENOENT;
+	ngc_nc_store(v, dir, name, len, vi, kept_len ? kept : NULL, kept_len);
 	ngc_fix_type(vi);
 	*out = (ngc_node *)vi;
 	return 0;
@@ -4042,6 +4199,7 @@ static int ngc_add_short_name_impl(ngc_vol *v, ngc_node *dirn, ngc_node *n, cons
 
 	if (sb_rdonly(v->sb))
 		return -EROFS;
+	ngc_nc_dirty(v, (struct inode *)dirn);
 	if (NInoAttr(ni) || !slen || slen > 12 || !llen || llen > NTFS_MAX_NAME_LEN)
 		return -EINVAL;
 	err = ngc_mark_dirty(v);
@@ -4197,6 +4355,7 @@ static int ngc_create_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *nam
 	*out = NULL;
 	if (sb_rdonly(v->sb))
 		return -EROFS;
+	ngc_nc_dirty(v, dir);
 	if (!S_ISDIR(dir->i_mode))
 		return -ENOTDIR;
 	err = ngc_mark_dirty(v);
@@ -4255,6 +4414,7 @@ static int ngc_unlink_impl(ngc_vol *v, ngc_node *dirn, const unsigned short *nam
 	err = ngc_mark_dirty(v);
 	if (err)
 		return err;
+	ngc_nc_dirty(v, dir);
 	d = ngc_mkdentry(v, name, len, vi);
 	if (IS_ERR(d))
 		return PTR_ERR(d);
@@ -4297,6 +4457,8 @@ static int ngc_rename_impl(ngc_vol *v, ngc_node *odirn, const unsigned short *on
 	err = ngc_mark_dirty(v);
 	if (err)
 		return err;
+	ngc_nc_dirty(v, odir);
+	ngc_nc_dirty(v, ndir);
 	od = ngc_mkdentry(v, oname, olen, (struct inode *)n);
 	nd = ngc_mkdentry(v, nname, nlen, (struct inode *)target);
 	if (IS_ERR(od) || IS_ERR(nd)) {
@@ -4326,6 +4488,7 @@ static int ngc_link_impl(ngc_vol *v, ngc_node *n, ngc_node *ndirn, const unsigne
 	err = ngc_mark_dirty(v);
 	if (err)
 		return err;
+	ngc_nc_dirty(v, ndir);
 	od = ngc_mkdentry(v, nname, nlen, vi);
 	nd = ngc_mkdentry(v, nname, nlen, NULL);
 	if (IS_ERR(od) || IS_ERR(nd)) {
@@ -4739,6 +4902,7 @@ int ngc_check(ngc_vol *v, unsigned int flags, struct ngc_check *out)
 	struct ngc_fsck_res *r;
 	int err = 0, rw = !sb_rdonly(v->sb), fix = !!(flags & NGC_CHECK_FIX);
 	memset(out, 0, sizeof(*out));
+	ngc_nc_free(v);		/* a repair may change any directory */
 	if (!rw)
 		out->flags |= NGC_CHK_READONLY;
 	if (v->damaged)
