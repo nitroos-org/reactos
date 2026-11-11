@@ -110,6 +110,8 @@ KMT_TESTFUNC Test_MmSessionSpace;
 KMT_TESTFUNC Test_MmSessionImage;
 KMT_TESTFUNC Test_MmSessionImageBugCheck;
 KMT_TESTFUNC Test_MmSessionTables;
+KMT_TESTFUNC Test_MmCodeProtect;
+KMT_TESTFUNC Test_MmCodeProtectWrite;
 KMT_TESTFUNC Test_NpfsConnect;
 KMT_TESTFUNC Test_NpfsCreate;
 KMT_TESTFUNC Test_NpfsFileInfo;
@@ -258,6 +260,8 @@ const KMT_TEST TestList[] =
     { "MmSessionImage",                     Test_MmSessionImage },
     { "-MmSessionImageBugCheck",            Test_MmSessionImageBugCheck },
     { "MmSessionTables",                    Test_MmSessionTables },
+    { "MmCodeProtect",                        Test_MmCodeProtect },
+    { "-MmCodeProtectWrite",                  Test_MmCodeProtectWrite },
     { "NpfsConnect",                        Test_NpfsConnect },
     { "NpfsCreate",                         Test_NpfsCreate },
     { "NpfsFileInfo",                       Test_NpfsFileInfo },
