@@ -108,6 +108,8 @@ KMT_TESTFUNC Test_MmSpecialPoolMalformed;
 KMT_TESTFUNC Test_MmReservedMapping;
 KMT_TESTFUNC Test_MmSessionSpace;
 KMT_TESTFUNC Test_MmSessionTables;
+KMT_TESTFUNC Test_MmCodeProtect;
+KMT_TESTFUNC Test_MmCodeProtectWrite;
 KMT_TESTFUNC Test_NpfsConnect;
 KMT_TESTFUNC Test_NpfsCreate;
 KMT_TESTFUNC Test_NpfsFileInfo;
@@ -254,6 +256,8 @@ const KMT_TEST TestList[] =
     { "MmReservedMapping",                  Test_MmReservedMapping },
     { "MmSessionSpace",                     Test_MmSessionSpace },
     { "MmSessionTables",                    Test_MmSessionTables },
+    { "MmCodeProtect",                        Test_MmCodeProtect },
+    { "-MmCodeProtectWrite",                  Test_MmCodeProtectWrite },
     { "NpfsConnect",                        Test_NpfsConnect },
     { "NpfsCreate",                         Test_NpfsCreate },
     { "NpfsFileInfo",                       Test_NpfsFileInfo },
