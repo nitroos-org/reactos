@@ -23,7 +23,8 @@ const PSB_API_ROUTINE CsrServerSbApiDispatch[SbpMaxApiNumber - SbpCreateSession]
     CsrSbCreateSession,
     CsrSbTerminateSession,
     CsrSbForeignSessionComplete,
-    CsrSbCreateProcess
+    CsrSbCreateProcess,
+    CsrSbCreateRemoteProcess
 };
 
 #if DBG
@@ -33,6 +34,7 @@ const PCSTR CsrServerSbApiName[SbpMaxApiNumber - SbpCreateSession + 1] =
     "SbTerminateSession",
     "SbForeignSessionComplete",
     "SbCreateProcess",
+    "SbCreateRemoteProcess",
     "Unknown CSR Sb Api Number"
 };
 #endif
@@ -440,6 +442,362 @@ CsrIsSessionManagerClient(IN PCLIENT_ID Sender)
     Status = NtQueryInformationProcess(SenderProcess, ProcessTimes, &Times, sizeof(Times), NULL);
     NtClose(SenderProcess);
     return NT_SUCCESS(Status) && (Times.CreateTime.QuadPart == CsrSmssCreateTime.QuadPart);
+}
+
+/* Removes an NT session that no process used, without telling SMSS (it deletes its own on failure) */
+static
+VOID
+CsrFreeUnusedNtSession(IN PCSR_NT_SESSION NtSession)
+{
+    CsrAcquireNtSessionLock();
+    RemoveEntryList(&NtSession->SessionLink);
+    CsrReleaseNtSessionLock();
+    RtlFreeHeap(CsrHeap, 0, NtSession);
+}
+
+/*
+ * Drops a reference on an NT session without telling SMSS when it was the last one. Used by the Sb thread
+ * for a forwarded registration that failed: SMSS deletes its session record itself then, and the Sb thread
+ * never calls SMSS while SMSS waits for its answer (see SmpForwardProcessRegistration).
+ */
+static
+VOID
+CsrDereferenceNtSessionQuietly(IN PCSR_NT_SESSION NtSession)
+{
+    CsrAcquireNtSessionLock();
+    ASSERT(NtSession->ReferenceCount != 0);
+    if (--NtSession->ReferenceCount == 0)
+    {
+        RemoveEntryList(&NtSession->SessionLink);
+        CsrReleaseNtSessionLock();
+        RtlFreeHeap(CsrHeap, 0, NtSession);
+        return;
+    }
+    CsrReleaseNtSessionLock();
+}
+
+/*
+ * Registers a process of our session that was created by a process of
+ * another session (CreateProcessAsUser from a service, for instance). The
+ * request names the process and its first thread by id only. Every check
+ * fails closed, and nothing is changed before all of them passed:
+ * - the thread belongs to the process;
+ * - the process is still alive and in our session, as the kernel reports it;
+ * - it is not csrss itself and not registered yet.
+ * Known limit, as for a process registered by CsrCreateProcess in its own
+ * session: if the creator kills the process after the alive check and
+ * before it connected to our API port, the records stay (nothing watches a
+ * process that never connected). It needs SeTcbPrivilege to create into
+ * this session; one record per such process.
+ */
+static
+NTSTATUS
+CsrCreateRemoteProcess(IN ULONG SmSessionId,
+                       IN ULONG MuSessionId,
+                       IN PCLIENT_ID ClientId,
+                       IN ULONG Flags)
+{
+    NTSTATUS Status;
+    HANDLE hProcess = NULL, hThread = NULL;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    CLIENT_ID OpenCid;
+    PROCESS_BASIC_INFORMATION ProcessInfo;
+    THREAD_BASIC_INFORMATION ThreadInfo;
+    KERNEL_USER_TIMES ProcTimes, ThrTimes, EntryTimes;
+    ULONG ProcessSessionId;
+    PCSR_NT_SESSION NtSession = NULL, NtSessionHeld;
+    PCSR_PROCESS CsrProcess, Entry;
+    PCSR_THREAD CsrThread;
+    PCSR_SERVER_DLL ServerDll;
+    PLIST_ENTRY NextEntry;
+    PVOID ProcessData;
+    ULONG i;
+
+    /* The request: for this session, with known flags */
+    if ((MuSessionId != CsrKernelSessionId) ||
+        (Flags & ~SM_REMOTE_PROCESS_VALID_FLAGS) ||
+        !ClientId->UniqueProcess ||
+        !ClientId->UniqueThread ||
+        !SmSessionId)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Never csrss itself */
+    if (ClientId->UniqueProcess == NtCurrentTeb()->ClientId.UniqueProcess) return STATUS_ACCESS_DENIED;
+
+    /* Open the process and the thread ourselves; no handle comes with the request */
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    OpenCid.UniqueProcess = ClientId->UniqueProcess;
+    OpenCid.UniqueThread = NULL;
+    Status = NtOpenProcess(&hProcess, PROCESS_ALL_ACCESS, &ObjectAttributes, &OpenCid);
+    if (!NT_SUCCESS(Status)) return Status;
+    OpenCid.UniqueProcess = NULL;
+    OpenCid.UniqueThread = ClientId->UniqueThread;
+    Status = NtOpenThread(&hThread, THREAD_ALL_ACCESS, &ObjectAttributes, &OpenCid);
+    if (!NT_SUCCESS(Status)) goto Quit;
+
+    /* The thread must belong to the process */
+    Status = NtQueryInformationProcess(hProcess, ProcessBasicInformation,
+                                       &ProcessInfo, sizeof(ProcessInfo), NULL);
+    if (!NT_SUCCESS(Status)) goto Quit;
+    Status = NtQueryInformationThread(hThread, ThreadBasicInformation,
+                                      &ThreadInfo, sizeof(ThreadInfo), NULL);
+    if (!NT_SUCCESS(Status)) goto Quit;
+    if (((HANDLE)ProcessInfo.UniqueProcessId != ClientId->UniqueProcess) ||
+        (ThreadInfo.ClientId.UniqueProcess != ClientId->UniqueProcess) ||
+        (ThreadInfo.ClientId.UniqueThread != ClientId->UniqueThread))
+    {
+        Status = STATUS_INVALID_CID;
+        goto Quit;
+    }
+
+    /* The process must still be alive (its creator may have killed it already) */
+    {
+        LARGE_INTEGER Timeout;
+
+        Timeout.QuadPart = 0;
+        if (NtWaitForSingleObject(hProcess, FALSE, &Timeout) != STATUS_TIMEOUT)
+        {
+            Status = STATUS_PROCESS_IS_TERMINATING;
+            goto Quit;
+        }
+    }
+
+    /* The process must be in our session (the kernel's view, not its PEB) */
+    Status = NtQueryInformationProcess(hProcess, ProcessSessionInformation,
+                                       &ProcessSessionId, sizeof(ProcessSessionId), NULL);
+    if (!NT_SUCCESS(Status)) goto Quit;
+    if (ProcessSessionId != CsrKernelSessionId)
+    {
+        Status = STATUS_ACCESS_DENIED;
+        goto Quit;
+    }
+
+    Status = NtQueryInformationProcess(hProcess, ProcessTimes,
+                                       &ProcTimes, sizeof(ProcTimes), NULL);
+    if (!NT_SUCCESS(Status)) goto Quit;
+    Status = NtQueryInformationThread(hThread, ThreadTimes,
+                                      &ThrTimes, sizeof(ThrTimes), NULL);
+    if (!NT_SUCCESS(Status)) goto Quit;
+
+    NtSession = CsrAllocateNtSession(SmSessionId);
+    if (!NtSession)
+    {
+        Status = STATUS_NO_MEMORY;
+        goto Quit;
+    }
+
+    CsrAcquireProcessLock();
+
+    /* Not registered yet. A record of a process that died and whose pid or
+       tid now names another one does not count: the create times differ */
+    for (NextEntry = CsrRootProcess->ListLink.Flink;
+         NextEntry != &CsrRootProcess->ListLink;
+         NextEntry = NextEntry->Flink)
+    {
+        Entry = CONTAINING_RECORD(NextEntry, CSR_PROCESS, ListLink);
+        if (Entry->ClientId.UniqueProcess != ClientId->UniqueProcess) continue;
+        if (!Entry->ProcessHandle ||
+            !NT_SUCCESS(NtQueryInformationProcess(Entry->ProcessHandle, ProcessTimes,
+                                                  &EntryTimes, sizeof(EntryTimes), NULL)) ||
+            (EntryTimes.CreateTime.QuadPart == ProcTimes.CreateTime.QuadPart))
+        {
+            Status = STATUS_OBJECT_NAME_COLLISION;
+            goto QuitLocked;
+        }
+    }
+    CsrThread = CsrLocateThreadByClientId(NULL, ClientId);
+    if (CsrThread && (CsrThread->CreateTime.QuadPart == ThrTimes.CreateTime.QuadPart))
+    {
+        Status = STATUS_OBJECT_NAME_COLLISION;
+        goto QuitLocked;
+    }
+
+    /* Every check passed: create the records */
+    CsrProcess = CsrAllocateProcess();
+    if (!CsrProcess)
+    {
+        Status = STATUS_NO_MEMORY;
+        goto QuitLocked;
+    }
+    CsrThread = CsrAllocateThread(CsrProcess);
+    if (!CsrThread)
+    {
+        CsrDeallocateProcess(CsrProcess);
+        Status = STATUS_NO_MEMORY;
+        goto QuitLocked;
+    }
+
+    /* Exceptions of the process come to our port */
+    Status = NtSetInformationProcess(hProcess, ProcessExceptionPort,
+                                     &CsrApiPort, sizeof(CsrApiPort));
+    if (!NT_SUCCESS(Status))
+    {
+        CsrDeallocateThread(CsrThread);
+        CsrDeallocateProcess(CsrProcess);
+        goto QuitLocked;
+    }
+
+    CsrThread->CreateTime = ThrTimes.CreateTime;
+    CsrThread->ClientId = *ClientId;
+    CsrThread->ThreadHandle = hThread;
+    CsrThread->Flags = 0;
+    Status = CsrInsertThread(CsrProcess, CsrThread);
+    if (!NT_SUCCESS(Status))
+    {
+        CsrDeallocateThread(CsrThread);
+        CsrDeallocateProcess(CsrProcess);
+        goto QuitLocked;
+    }
+    ProtectHandle(hThread);
+    hThread = NULL;
+
+    CsrProcess->ClientId = *ClientId;
+    CsrProcess->ProcessHandle = hProcess;
+    hProcess = NULL;
+    CsrProcess->NtSession = NtSession;
+    NtSession = NULL;
+    CsrProcess->ShutdownLevel = 0x280;
+
+    /* No creator in this session: the process leads its own group */
+    CsrProcess->ProcessGroupId = HandleToUlong(ClientId->UniqueProcess);
+    CsrProcess->ProcessGroupSequence = CsrProcess->SequenceNumber;
+    if (Flags & SM_REMOTE_PROCESS_CONSOLE_APP) CsrProcess->Flags |= CsrProcessIsConsoleApp;
+
+    CsrSetBackgroundPriority(CsrProcess);
+
+    /* Per-server data, initialized by the servers' new-process callbacks */
+    ProcessData = &CsrProcess->ServerData[CSR_SERVER_DLL_MAX];
+    for (i = 0; i < CSR_SERVER_DLL_MAX; i++)
+    {
+        ServerDll = CsrLoadedServerDll[i];
+        if (ServerDll && ServerDll->SizeOfProcessData)
+        {
+            CsrProcess->ServerData[i] = ProcessData;
+            ProcessData = (PVOID)((ULONG_PTR)ProcessData + ServerDll->SizeOfProcessData);
+        }
+        else
+        {
+            CsrProcess->ServerData[i] = NULL;
+        }
+    }
+
+    /*
+     * Our own reference on the NT session while we may still destroy the process: if a server's
+     * new-process callback fails, the process's reference goes with it, and ours is then dropped
+     * without SmSessionComplete (see CsrDereferenceNtSessionQuietly).
+     */
+    CsrReferenceNtSession(CsrProcess->NtSession);
+    NtSessionHeld = CsrProcess->NtSession;
+
+    CsrProcess->InheritStatus = STATUS_SUCCESS;
+    CsrInsertProcess(NULL, CsrProcess);
+    Status = CsrProcess->InheritStatus;
+    if (NT_SUCCESS(Status))
+    {
+        /*
+         * Registered. Drop our reference while the Process Lock still keeps the process, and with it
+         * its own reference, from going: once the lock is released the process can connect and exit at
+         * once, and ours must not be the last one then (SMSS keeps the record of a registration that
+         * succeeded until SmSessionComplete).
+         */
+        CsrDereferenceNtSessionQuietly(NtSessionHeld);
+        CsrReleaseProcessLock();
+        return Status;
+    }
+    CsrReleaseProcessLock();
+    CsrDestroyProcess(ClientId, Status);
+    CsrDereferenceNtSessionQuietly(NtSessionHeld);
+    return Status;
+
+QuitLocked:
+    CsrReleaseProcessLock();
+Quit:
+    if (NtSession) CsrFreeUnusedNtSession(NtSession);
+    if (hThread) NtClose(hThread);
+    if (hProcess) NtClose(hProcess);
+    return Status;
+}
+
+/*++
+ * @name CsrSbCreateRemoteProcess
+ *
+ * NitroOS. SMSS forwards the registration of a process created into our
+ * session from another session (SmForwardProcessRegistration). Only SMSS may
+ * send it.
+ *
+ * @param ApiMessage
+ *        Pointer to the Session Manager API Message.
+ *
+ * @return TRUE, the status is in the message.
+ *
+ *--*/
+BOOLEAN
+NTAPI
+CsrSbCreateRemoteProcess(IN PSB_API_MSG ApiMessage)
+{
+    PSB_CREATE_REMOTE_PROCESS_MSG CreateRemote = &ApiMessage->u.CreateRemoteProcess;
+    CLIENT_ID ClientId = CreateRemote->ClientId;
+
+    if (!CsrIsSessionManagerClient(&ApiMessage->h.ClientId))
+    {
+        DPRINT1("CSRSS: SbCreateRemoteProcess refused: %lx.%lx is not the Session Manager\n",
+                ApiMessage->h.ClientId.UniqueProcess, ApiMessage->h.ClientId.UniqueThread);
+        ApiMessage->ReturnValue = STATUS_ACCESS_DENIED;
+        return TRUE;
+    }
+
+    ApiMessage->ReturnValue = CsrCreateRemoteProcess(CreateRemote->SessionId,
+                                                     CreateRemote->MuSessionId,
+                                                     &ClientId,
+                                                     CreateRemote->Flags);
+    if (!NT_SUCCESS(ApiMessage->ReturnValue))
+    {
+        DPRINT1("CSRSS: SbCreateRemoteProcess %lx.%lx in session %lu failed: %lx\n",
+                ClientId.UniqueProcess, ClientId.UniqueThread,
+                CreateRemote->MuSessionId, ApiMessage->ReturnValue);
+    }
+    else
+    {
+        DPRINT("CSRSS: SbCreateRemoteProcess %lx.%lx in session %lu\n",
+               ClientId.UniqueProcess, ClientId.UniqueThread, CreateRemote->MuSessionId);
+    }
+    return TRUE;
+}
+
+/*++
+ * @name CsrForwardProcessRegistration
+ *
+ * NitroOS. Called by basesrv for a process the client created into another
+ * session: SMSS has the csrss of that session register it.
+ *
+ * @param ClientId
+ *        The process and its first thread.
+ *
+ * @param MuSessionId
+ *        The session the process is in.
+ *
+ * @param Flags
+ *        CsrProcessCreateNewGroup and CsrProcessIsConsoleApp only.
+ *
+ * @return The status of the registration.
+ *
+ *--*/
+NTSTATUS
+NTAPI
+CsrForwardProcessRegistration(IN PCLIENT_ID ClientId,
+                              IN ULONG MuSessionId,
+                              IN ULONG Flags)
+{
+    ULONG SmFlags = 0;
+
+    if (Flags & ~(CsrProcessCreateNewGroup | CsrProcessIsConsoleApp)) return STATUS_INVALID_PARAMETER;
+    if (!CsrSmApiPort) return STATUS_NOT_SUPPORTED;
+
+    if (Flags & CsrProcessCreateNewGroup) SmFlags |= SM_REMOTE_PROCESS_NEW_GROUP;
+    if (Flags & CsrProcessIsConsoleApp) SmFlags |= SM_REMOTE_PROCESS_CONSOLE_APP;
+    return SmForwardProcessRegistration(CsrSmApiPort, ClientId, MuSessionId, SmFlags);
 }
 
 /*++

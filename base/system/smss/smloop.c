@@ -32,6 +32,10 @@ NTSTATUS
     _In_ HANDLE SmApiPort);
 
 volatile LONG SmTotalApiThreads;
+
+/* The LPC message type, without the flag bits the kernel adds above it */
+#define SMP_LPC_TYPE(Msg) ((Msg)->h.u2.s2.Type & 0xFF)
+
 HANDLE SmUniqueProcessId;
 
 /*
@@ -109,8 +113,13 @@ SmpSessionComplete(IN PSM_API_MSG SmApiMsg,
                    IN PSMP_CLIENT_CONTEXT ClientContext,
                    IN HANDLE SmApiPort)
 {
-    DPRINT1("%s is not yet implemented\n", __FUNCTION__);
-    return STATUS_NOT_IMPLEMENTED;
+    /*
+     * A subsystem tells SMSS that the last process of one of its sessions is gone: drop the record SMSS
+     * allocated for it (one per SbCreateSession and per forwarded registration). Only the subsystem the
+     * session was given to may complete it.
+     */
+    if (!ClientContext->Subsystem) return STATUS_ACCESS_DENIED;
+    return SmpCompleteSession(SmApiMsg->u.SessionComplete.SessionId, ClientContext->Subsystem);
 }
 
 NTSTATUS
@@ -324,6 +333,225 @@ SmpStopCsr(IN PSM_API_MSG SmApiMsg,
     return STATUS_NOT_IMPLEMENTED;
 }
 
+/*
+ * NitroOS sessions design 3.5 (option A): cross-session CSR registration.
+ *
+ * When a process is created into another session, the creator's csrss cannot
+ * register it: the process will connect to the csrss of its own session. The
+ * creator's basesrv asks SMSS instead, and SMSS forwards the request over the
+ * Sb port of the target session's csrss, where SMSS is the client. SMSS
+ * serves this only for a csrss it started itself, identified by the process
+ * object it holds for it: alive, the pid the kernel stamped on the message,
+ * and the same create time as the sender. Any other caller, LocalSystem
+ * included, gets STATUS_ACCESS_DENIED.
+ */
+static
+NTSTATUS
+SmpQueryProcessCreateTime(
+    _In_ HANDLE ProcessHandle,
+    _Out_ PLARGE_INTEGER CreateTime)
+{
+    NTSTATUS Status;
+    KERNEL_USER_TIMES Times;
+
+    Status = NtQueryInformationProcess(ProcessHandle,
+                                       ProcessTimes,
+                                       &Times,
+                                       sizeof(Times),
+                                       NULL);
+    if (NT_SUCCESS(Status)) *CreateTime = Times.CreateTime;
+    return Status;
+}
+
+/* The referenced record of the csrss that sent the message, or NULL */
+static
+PSMP_SUBSYSTEM
+SmpLocateSenderCsr(
+    _In_ PSM_API_MSG SmApiMsg,
+    _In_ PSMP_CLIENT_CONTEXT ClientContext)
+{
+    PSMP_SUBSYSTEM Subsystem = NULL, Entry;
+    PLIST_ENTRY NextEntry;
+    PROCESS_BASIC_INFORMATION BasicInfo;
+    LARGE_INTEGER HeldCreateTime, SenderCreateTime, Timeout;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE SenderProcess;
+    NTSTATUS Status;
+
+    /* SMSS itself is not a csrss; the connection must belong to a subsystem */
+    if (SmApiMsg->h.ClientId.UniqueProcess == SmUniqueProcessId) return NULL;
+    if (!ClientContext->Subsystem) return NULL;
+
+    /* The Windows subsystem record of this connection, with the sender's pid */
+    RtlEnterCriticalSection(&SmpKnownSubSysLock);
+    for (NextEntry = SmpKnownSubSysHead.Flink;
+         NextEntry != &SmpKnownSubSysHead;
+         NextEntry = NextEntry->Flink)
+    {
+        Entry = CONTAINING_RECORD(NextEntry, SMP_SUBSYSTEM, Entry);
+        if ((Entry == ClientContext->Subsystem) &&
+            (Entry->ClientId.UniqueProcess == SmApiMsg->h.ClientId.UniqueProcess) &&
+            (Entry->ImageType == IMAGE_SUBSYSTEM_WINDOWS_GUI) &&
+            (Entry->ProcessHandle != NULL) &&
+            !(Entry->Terminating))
+        {
+            Entry->ReferenceCount++;
+            Subsystem = Entry;
+            break;
+        }
+    }
+    RtlLeaveCriticalSection(&SmpKnownSubSysLock);
+    if (!Subsystem) return NULL;
+
+    /* The process object SMSS holds: still alive, with the sender's pid */
+    Timeout.QuadPart = 0;
+    Status = NtWaitForSingleObject(Subsystem->ProcessHandle, FALSE, &Timeout);
+    if (Status != STATUS_TIMEOUT) goto Fail;
+    Status = NtQueryInformationProcess(Subsystem->ProcessHandle,
+                                       ProcessBasicInformation,
+                                       &BasicInfo,
+                                       sizeof(BasicInfo),
+                                       NULL);
+    if (!NT_SUCCESS(Status) ||
+        ((HANDLE)BasicInfo.UniqueProcessId != SmApiMsg->h.ClientId.UniqueProcess))
+    {
+        goto Fail;
+    }
+    Status = SmpQueryProcessCreateTime(Subsystem->ProcessHandle, &HeldCreateTime);
+    if (!NT_SUCCESS(Status)) goto Fail;
+
+    /* The sender, by the client id the kernel stamped on the message (its
+       thread waits for our reply), must be that same process */
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    Status = NtOpenProcess(&SenderProcess,
+                           PROCESS_QUERY_INFORMATION,
+                           &ObjectAttributes,
+                           &SmApiMsg->h.ClientId);
+    if (!NT_SUCCESS(Status)) goto Fail;
+    Status = SmpQueryProcessCreateTime(SenderProcess, &SenderCreateTime);
+    NtClose(SenderProcess);
+    if (!NT_SUCCESS(Status) || (SenderCreateTime.QuadPart != HeldCreateTime.QuadPart)) goto Fail;
+
+    return Subsystem;
+
+Fail:
+    SmpDereferenceSubsystem(Subsystem);
+    return NULL;
+}
+
+/*
+ * SbCreateRemoteProcess to the Windows subsystem of TargetSessionId. The
+ * session in the message is the same one except in the SMSS self-test
+ * (NitroSessionsTestForward), which checks that the target refuses another.
+ */
+NTSTATUS
+NTAPI
+SmpSbCreateRemoteProcessEx(
+    _In_ PCLIENT_ID ClientId,
+    _In_ ULONG TargetSessionId,
+    _In_ ULONG MuSessionId,
+    _In_ ULONG Flags)
+{
+    NTSTATUS Status;
+    PSMP_SUBSYSTEM Target;
+    ULONG SessionId;
+    SB_API_MSG SbApiMsg;
+    PSB_CREATE_REMOTE_PROCESS_MSG CreateRemote = &SbApiMsg.u.CreateRemoteProcess;
+
+    /* The Windows subsystem of the target session, connected back to */
+    Target = SmpLocateKnownSubSysByType(TargetSessionId, IMAGE_SUBSYSTEM_WINDOWS_GUI);
+    if (!Target) return STATUS_OBJECT_NAME_NOT_FOUND;
+    if (!Target->SbApiPort)
+    {
+        SmpDereferenceSubsystem(Target);
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    /* A CSR NT session for the process, as SbCreateSession has one */
+    SessionId = SmpAllocateSessionId(Target, NULL);
+
+    RtlZeroMemory(&SbApiMsg, sizeof(SbApiMsg));
+    CreateRemote->SessionId = SessionId;
+    CreateRemote->MuSessionId = MuSessionId;
+    CreateRemote->ClientId = *ClientId;
+    CreateRemote->Flags = Flags;
+    SbApiMsg.ApiNumber = SbpCreateRemoteProcess;
+    SbApiMsg.h.u1.s1.DataLength = sizeof(SB_CREATE_REMOTE_PROCESS_MSG) + 8;
+    SbApiMsg.h.u1.s1.TotalLength = sizeof(SbApiMsg);
+    Status = NtRequestWaitReplyPort(Target->SbApiPort, &SbApiMsg.h, &SbApiMsg.h);
+    if (NT_SUCCESS(Status)) Status = SbApiMsg.ReturnValue;
+
+    if (!NT_SUCCESS(Status)) SmpDeleteSession(SessionId);
+    SmpDereferenceSubsystem(Target);
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+SmpForwardProcessRegistration(
+    _In_ PSM_API_MSG SmApiMsg,
+    _In_ PSMP_CLIENT_CONTEXT ClientContext,
+    _In_ HANDLE SmApiPort)
+{
+    PSM_FORWARD_PROCESS_REGISTRATION_MSG Forward = &SmApiMsg->u.ForwardRegistration;
+    PSMP_SUBSYSTEM Sender;
+    CLIENT_ID ClientId;
+    ULONG MuSessionId, Flags, SenderSessionId;
+    NTSTATUS Status;
+
+    /* Capture the request */
+    ClientId = Forward->ClientId;
+    MuSessionId = Forward->MuSessionId;
+    Flags = Forward->Flags;
+
+    Sender = SmpLocateSenderCsr(SmApiMsg, ClientContext);
+    if (!Sender)
+    {
+        DPRINT1("SMSS: Forwarded registration refused: %lx.%lx is not a csrss SMSS started\n",
+                SmApiMsg->h.ClientId.UniqueProcess, SmApiMsg->h.ClientId.UniqueThread);
+        return STATUS_ACCESS_DENIED;
+    }
+    SenderSessionId = Sender->MuSessionId;
+    SmpDereferenceSubsystem(Sender);
+
+    /* Only for another session than the sender's, with known flags */
+    if ((Flags & ~SM_REMOTE_PROCESS_VALID_FLAGS) ||
+        (MuSessionId == SenderSessionId) ||
+        !ClientId.UniqueProcess ||
+        !ClientId.UniqueThread)
+    {
+        DPRINT1("SMSS: Forwarded registration refused: bad request (session %lu from session %lu, flags %lx)\n",
+                MuSessionId, SenderSessionId, Flags);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /*
+     * The forward holds this API thread until the target csrss's Sb thread answers, and any number of
+     * forwards may do so at once, up to every API thread. That cannot deadlock because nothing the Sb
+     * thread waits for while it answers ever waits for SMSS:
+     * - the Sb thread itself never calls SMSS (on failure it drops the NT session quietly, and SMSS
+     *   deletes the session record below);
+     * - SmSessionComplete, the only SMSS call a csrss makes while it may hold a lock (the last process
+     *   of an NT session goes), is a datagram: it is queued, nobody waits for an API thread;
+     * - the other SMSS call of a running csrss is this forward, from a basesrv API thread that holds no
+     *   CSR lock while it waits.
+     * So the Sb thread only waits for csrss locks held by threads that make progress, each forward
+     * ends, and its API thread comes back.
+     */
+    Status = SmpSbCreateRemoteProcessEx(&ClientId, MuSessionId, MuSessionId, Flags);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("SMSS: Forwarded registration of %lx.%lx from session %lu to session %lu failed: %lx\n",
+                ClientId.UniqueProcess, ClientId.UniqueThread, SenderSessionId, MuSessionId, Status);
+    }
+    else
+    {
+        DPRINT("SMSS: Forwarded registration of %lx.%lx from session %lu to session %lu\n",
+               ClientId.UniqueProcess, ClientId.UniqueThread, SenderSessionId, MuSessionId);
+    }
+    return Status;
+}
+
 const PSM_API_HANDLER SmpApiDispatch[SmpMaxApiNumber - SmpCreateForeignSessionApi] =
 {
     SmpCreateForeignSession,
@@ -332,7 +560,8 @@ const PSM_API_HANDLER SmpApiDispatch[SmpMaxApiNumber - SmpCreateForeignSessionAp
     SmpExecPgm,
     SmpLoadDeferedSubsystem,
     SmpStartCsr,
-    SmpStopCsr
+    SmpStopCsr,
+    SmpForwardProcessRegistration
 };
 
 #if DBG
@@ -345,6 +574,7 @@ const PCSTR SmpApiName[SmpMaxApiNumber - SmpCreateForeignSessionApi + 1] =
     "SmLoadDeferedSubsystem",
     "SmStartCsr",
     "SmStopCsr",
+    "SmForwardProcessRegistration",
     "Unknown Sm Api Number"
 };
 #endif
@@ -569,6 +799,43 @@ SmpApiLoop(
                 if (!ClientContext)
                 {
                     ReplyMsg = NULL;
+                    break;
+                }
+
+                /*
+                 * Only a request has a sender waiting for the reply. Replying to anything else fails
+                 * (no thread waits for that message id) without receiving, and this loop would serve
+                 * the same message again and again. A datagram is accepted for SmSessionComplete only,
+                 * which subsystems send without waiting (see SmSessionComplete in smlib).
+                 */
+                if (SMP_LPC_TYPE(&RequestMsg) != LPC_REQUEST)
+                {
+                    ReplyMsg = NULL;
+                    if ((SMP_LPC_TYPE(&RequestMsg) != LPC_DATAGRAM) ||
+                        (RequestMsg.ApiNumber != SmpSessionCompleteApi))
+                    {
+                        DPRINT1("SMSS: Ignoring message type %x, Api %lu from %lx.%lx\n",
+                                RequestMsg.h.u2.s2.Type, RequestMsg.ApiNumber,
+                                RequestMsg.h.ClientId.UniqueProcess,
+                                RequestMsg.h.ClientId.UniqueThread);
+                        break;
+                    }
+                    _SEH2_TRY
+                    {
+                        Status = SmpApiDispatch[SmpSessionCompleteApi](&RequestMsg, ClientContext, SmApiPort);
+                        if (!NT_SUCCESS(Status) && (Status != STATUS_NOT_FOUND))
+                        {
+                            DPRINT1("SMSS: SmSessionComplete(%lu) from %lx.%lx: %lx\n",
+                                    RequestMsg.u.SessionComplete.SessionId,
+                                    RequestMsg.h.ClientId.UniqueProcess,
+                                    RequestMsg.h.ClientId.UniqueThread, Status);
+                        }
+                    }
+                    _SEH2_EXCEPT(SmpUnhandledExceptionFilter(_SEH2_GetExceptionInformation()))
+                    {
+                        _SEH2_YIELD(break);
+                    }
+                    _SEH2_END;
                     break;
                 }
 

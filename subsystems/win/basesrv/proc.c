@@ -111,6 +111,35 @@ BaseSrvCheckNewProcess(IN PCSR_PROCESS Creator,
     return STATUS_SUCCESS;
 }
 
+/*
+ * NitroOS sessions design 3.5 (option A). The client created the process into
+ * another session (CreateProcessAsUser with a token of that session, which
+ * needs SeTcbPrivilege). The process will connect to the csrss of its own
+ * session, so that csrss must register it: SMSS has it do so. The ids and the
+ * child-of-the-client rule were checked by BaseSrvCheckNewProcess, which also
+ * means a create with a parent-process attribute (parent != client) is refused
+ * here. Anything of the creator's session (its console handles, a pseudo
+ * console, a VDM) cannot follow the process there and is refused.
+ *
+ * The caller keeps ProcessHandle and ThreadHandle open until this returns:
+ * they pin the process and thread ids that SMSS and the target csrss open by
+ * id. Do not close them before the forward has returned.
+ */
+static
+NTSTATUS
+BaseSrvForwardCreateProcess(IN PBASE_CREATE_PROCESS Request,
+                            IN ULONG TargetSessionId,
+                            IN ULONG Flags)
+{
+    CLIENT_ID ClientId;
+
+    if (Request->VdmBinaryType || Request->ConsoleHandleCount || Request->PseudoConsoleProcessId)
+        return STATUS_NOT_SUPPORTED;
+
+    ClientId = Request->ClientId;
+    return CsrForwardProcessRegistration(&ClientId, TargetSessionId, Flags);
+}
+
 CSR_API(BaseSrvCreateProcess)
 {
     NTSTATUS Status;
@@ -119,6 +148,7 @@ CSR_API(BaseSrvCreateProcess)
     PCSR_THREAD CsrThread;
     PCSR_PROCESS Process;
     ULONG Flags = 0, DebugFlags = 0, VdmPower = 0;
+    ULONG ProcessSessionId, OwnSessionId;
 
     if (CreateProcessRequest->ConsoleHandleCount &&
         (!CreateProcessRequest->HandleListPresent ||
@@ -182,6 +212,38 @@ CSR_API(BaseSrvCreateProcess)
         DPRINT1("BASESRV: process %lx.%lx refused: %lx\n",
                 CreateProcessRequest->ClientId.UniqueProcess,
                 CreateProcessRequest->ClientId.UniqueThread, Status);
+        NtClose(ProcessHandle);
+        NtClose(ThreadHandle);
+        return Status;
+    }
+
+    /* A process in another session registers with the csrss of that session */
+    Status = NtQueryInformationProcess(ProcessHandle, ProcessSessionInformation,
+                                       &ProcessSessionId, sizeof(ProcessSessionId), NULL);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessSessionInformation,
+                                           &OwnSessionId, sizeof(OwnSessionId), NULL);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        NtClose(ProcessHandle);
+        NtClose(ThreadHandle);
+        return Status;
+    }
+    if (ProcessSessionId != OwnSessionId)
+    {
+        if (CreateProcessRequest->CreationFlags & CREATE_NEW_PROCESS_GROUP) DebugFlags |= CsrProcessCreateNewGroup;
+        if ((Flags & 2) == 0) DebugFlags |= CsrProcessIsConsoleApp;
+        Status = BaseSrvForwardCreateProcess(CreateProcessRequest, ProcessSessionId, DebugFlags);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("BASESRV: registration of %lx.%lx in session %lu failed: %lx\n",
+                    CreateProcessRequest->ClientId.UniqueProcess,
+                    CreateProcessRequest->ClientId.UniqueThread,
+                    ProcessSessionId, Status);
+        }
+        /* Only now: the handles pinned the ids during the forward */
         NtClose(ProcessHandle);
         NtClose(ThreadHandle);
         return Status;

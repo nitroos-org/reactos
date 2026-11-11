@@ -32,6 +32,7 @@ typedef enum _SMSRV_API_NUMBER
     SmpLoadDeferedSubsystemApi,
     SmpStartCsrApi,
     SmpStopCsrApi,
+    SmpForwardProcessRegistrationApi, /* NitroOS: cross-session CSR registration */
 
     SmpMaxApiNumber
 } SMSRV_API_NUMBER;
@@ -92,6 +93,25 @@ typedef struct _SM_STOP_CSR_MSG
     ULONG MuSessionId;
 } SM_STOP_CSR_MSG, *PSM_STOP_CSR_MSG;
 
+/*
+ * NitroOS (sessions design 3.5, option A): the csrss of the creating session
+ * asks SMSS to register a process it did not create records for, because the
+ * process is in another session, with the csrss of that session. SMSS accepts
+ * it only from a csrss it started itself and forwards it over the target
+ * csrss's Sb port (SbpCreateRemoteProcess). No handles are passed: the target
+ * csrss opens the process and thread by id and checks them itself.
+ */
+#define SM_REMOTE_PROCESS_NEW_GROUP     0x1 /* CREATE_NEW_PROCESS_GROUP */
+#define SM_REMOTE_PROCESS_CONSOLE_APP   0x2 /* a console (CUI) application */
+#define SM_REMOTE_PROCESS_VALID_FLAGS   (SM_REMOTE_PROCESS_NEW_GROUP | SM_REMOTE_PROCESS_CONSOLE_APP)
+
+typedef struct _SM_FORWARD_PROCESS_REGISTRATION_MSG
+{
+    CLIENT_ID ClientId;     /* the new process and its first thread */
+    ULONG MuSessionId;      /* the session the process is in */
+    ULONG Flags;            /* SM_REMOTE_PROCESS_* */
+} SM_FORWARD_PROCESS_REGISTRATION_MSG, *PSM_FORWARD_PROCESS_REGISTRATION_MSG;
+
 #if defined(__REACTOS__) && DBG
 #include "smrosdbg.h"
 #endif
@@ -113,6 +133,7 @@ typedef struct _SM_API_MSG
         SM_LOAD_DEFERED_SUBSYSTEM_MSG LoadDefered;
         SM_START_CSR_MSG StartCsr;
         SM_STOP_CSR_MSG StopCsr;
+        SM_FORWARD_PROCESS_REGISTRATION_MSG ForwardRegistration;
 
 #if defined(__REACTOS__) && DBG
         SM_QUERYINFO_MSG QueryInfo;
@@ -147,6 +168,7 @@ typedef enum _SB_API_NUMBER
     SbpTerminateSession,
     SbpForeignSessionComplete,
     SbpCreateProcess,
+    SbpCreateRemoteProcess, /* NitroOS: SMSS forwards SmpForwardProcessRegistrationApi */
 
     SbpMaxApiNumber
 } SB_API_NUMBER;
@@ -211,6 +233,14 @@ C_ASSERT(sizeof(SB_CREATE_PROCESS_MSG) == 0x18);
 C_ASSERT(sizeof(SB_CREATE_PROCESS_MSG) == 0x28);
 #endif
 
+typedef struct _SB_CREATE_REMOTE_PROCESS_MSG
+{
+    ULONG SessionId;        /* the SMSS session id for the CSR NT session */
+    ULONG MuSessionId;      /* must be the session of the receiving csrss */
+    CLIENT_ID ClientId;     /* the process and its first thread, opened by id */
+    ULONG Flags;            /* SM_REMOTE_PROCESS_* */
+} SB_CREATE_REMOTE_PROCESS_MSG, *PSB_CREATE_REMOTE_PROCESS_MSG;
+
 #ifdef CreateProcess
 #undef CreateProcess
 #endif
@@ -243,6 +273,7 @@ typedef struct _SB_API_MSG
                 SB_TERMINATE_SESSION_MSG TerminateSession;
                 SB_FOREIGN_SESSION_COMPLETE_MSG ForeignSessionComplete;
                 SB_CREATE_PROCESS_MSG CreateProcess;
+                SB_CREATE_REMOTE_PROCESS_MSG CreateRemoteProcess;
             } u;
         };
     };
@@ -319,5 +350,13 @@ NTAPI
 SmStopCsr(
     _In_ HANDLE SmApiPort,
     _In_ ULONG MuSessionId);
+
+NTSTATUS
+NTAPI
+SmForwardProcessRegistration(
+    _In_ HANDLE SmApiPort,
+    _In_ PCLIENT_ID ClientId,
+    _In_ ULONG MuSessionId,
+    _In_ ULONG Flags);
 
 #endif // _SM_MSG_

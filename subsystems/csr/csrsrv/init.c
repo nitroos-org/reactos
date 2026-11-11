@@ -42,6 +42,8 @@ ULONG SessionId;
 HANDLE CsrSmssProcess = NULL;
 HANDLE CsrSmssProcessId = NULL;
 LARGE_INTEGER CsrSmssCreateTime;
+/* Our session as the kernel reports it (sessions design 3.5: SbCreateRemoteProcess) */
+ULONG CsrKernelSessionId = (ULONG)-1;
 HANDLE BNOLinksDirectory;
 HANDLE SessionObjectDirectory;
 HANDLE DosDevicesDirectory;
@@ -1219,11 +1221,20 @@ VOID
 CsrRecordSessionManager(VOID)
 {
     NTSTATUS Status;
+    ULONG KernelSessionId;
     PROCESS_BASIC_INFORMATION BasicInfo;
     KERNEL_USER_TIMES OwnTimes, ParentTimes;
     OBJECT_ATTRIBUTES ObjectAttributes;
     CLIENT_ID ClientId;
     HANDLE Parent;
+
+    /* Our session, as the kernel reports it */
+    Status = NtQueryInformationProcess(NtCurrentProcess(),
+                                       ProcessSessionInformation,
+                                       &KernelSessionId,
+                                       sizeof(KernelSessionId),
+                                       NULL);
+    if (NT_SUCCESS(Status)) CsrKernelSessionId = KernelSessionId;
 
     Status = NtQueryInformationProcess(NtCurrentProcess(),
                                        ProcessBasicInformation,
