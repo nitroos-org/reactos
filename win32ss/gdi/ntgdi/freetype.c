@@ -252,6 +252,13 @@ do { \
 static RTL_STATIC_LIST_HEAD(g_FontCacheListHead);
 static UINT g_FontCacheNumEntries;
 
+/* The list above keeps the entries in the order of their last use (the last one is dropped when the cache is
+ * full). A lookup that walked it compared every entry in front of the match, and a text that cycles through
+ * many glyphs always matched deep in the list, so the entries are also chained by hash. */
+#define FONT_CACHE_BUCKETS 256
+static PFONT_CACHE_ENTRY g_FontCacheBuckets[FONT_CACHE_BUCKETS];
+#define FONT_CACHE_BUCKET(dwHash) (((dwHash) ^ ((dwHash) >> 8) ^ ((dwHash) >> 16)) % FONT_CACHE_BUCKETS)
+
 static PWCHAR g_ElfScripts[32] =   /* These are in the order of the fsCsb[0] bits */
 {
     L"Western", /* 00 */
@@ -482,10 +489,21 @@ SharedFace_AddRef(PSHARED_FACE Ptr)
 static void
 RemoveCachedEntry(PFONT_CACHE_ENTRY Entry)
 {
+    PFONT_CACHE_ENTRY *ppLink;
+
     ASSERT_FREETYPE_LOCK_HELD();
 
     FT_Done_Glyph((FT_Glyph)Entry->BitmapGlyph);
     RemoveEntryList(&Entry->ListEntry);
+    for (ppLink = &g_FontCacheBuckets[FONT_CACHE_BUCKET(Entry->dwHash)]; *ppLink != NULL;
+         ppLink = &(*ppLink)->HashNext)
+    {
+        if (*ppLink == Entry)
+        {
+            *ppLink = Entry->HashNext;
+            break;
+        }
+    }
     ExFreePoolWithTag(Entry, TAG_FONT);
     g_FontCacheNumEntries--;
     ASSERT(g_FontCacheNumEntries <= MAX_FONT_CACHE);
@@ -1050,6 +1068,7 @@ InitFontSupport(VOID)
     ULONG ulError;
 
     g_FontCacheNumEntries = 0;
+    RtlZeroMemory(g_FontCacheBuckets, sizeof(g_FontCacheBuckets));
 
     g_FreeTypeLock = ExAllocatePoolWithTag(NonPagedPool, sizeof(FAST_MUTEX), TAG_INTERNAL_SYNC);
     if (g_FreeTypeLock == NULL)
@@ -4094,17 +4113,14 @@ IntGetHash(IN LPCVOID pv, IN DWORD cdw)
 static FT_BitmapGlyph
 IntFindGlyphCache(IN const FONT_CACHE_ENTRY *pCache)
 {
-    PLIST_ENTRY CurrentEntry;
     PFONT_CACHE_ENTRY FontEntry;
     DWORD dwHash = pCache->dwHash;
 
     ASSERT_FREETYPE_LOCK_HELD();
 
-    for (CurrentEntry = g_FontCacheListHead.Flink;
-         CurrentEntry != &g_FontCacheListHead;
-         CurrentEntry = CurrentEntry->Flink)
+    for (FontEntry = g_FontCacheBuckets[FONT_CACHE_BUCKET(dwHash)]; FontEntry != NULL;
+         FontEntry = FontEntry->HashNext)
     {
-        FontEntry = CONTAINING_RECORD(CurrentEntry, FONT_CACHE_ENTRY, ListEntry);
         if (FontEntry->dwHash == dwHash &&
             FontEntry->Hashed.GlyphIndex == pCache->Hashed.GlyphIndex &&
             FontEntry->Hashed.Face == pCache->Hashed.Face &&
@@ -4118,13 +4134,14 @@ IntFindGlyphCache(IN const FONT_CACHE_ENTRY *pCache)
         }
     }
 
-    if (CurrentEntry == &g_FontCacheListHead)
+    if (FontEntry == NULL)
     {
         return NULL;
     }
 
-    RemoveEntryList(CurrentEntry);
-    InsertHeadList(&g_FontCacheListHead, CurrentEntry);
+    /* Most recently used first, so that the entry dropped when the cache is full is the least recently used */
+    RemoveEntryList(&FontEntry->ListEntry);
+    InsertHeadList(&g_FontCacheListHead, &FontEntry->ListEntry);
     return FontEntry->BitmapGlyph;
 }
 
@@ -4223,6 +4240,8 @@ IntGetBitmapGlyphWithCache(
     NewEntry->Hashed = Cache->Hashed;
 
     InsertHeadList(&g_FontCacheListHead, &NewEntry->ListEntry);
+    NewEntry->HashNext = g_FontCacheBuckets[FONT_CACHE_BUCKET(NewEntry->dwHash)];
+    g_FontCacheBuckets[FONT_CACHE_BUCKET(NewEntry->dwHash)] = NewEntry;
     if (++g_FontCacheNumEntries > MAX_FONT_CACHE)
     {
         NewEntry = CONTAINING_RECORD(g_FontCacheListHead.Blink, FONT_CACHE_ENTRY, ListEntry);
@@ -7564,14 +7583,14 @@ IntExtTextOutW(
      */
 
     PDC_ATTR pdcattr;
-    SURFOBJ *psoDest, *psoGlyph;
+    SURFOBJ *psoDest, *psoGlyph = NULL;
     SURFACE *psurf;
     INT glyph_index, i, cUnits, iDx;
     FT_Face face;
     FT_BitmapGlyph realglyph;
     LONGLONG X64, Y64, RealXStart64, RealYStart64, DeltaX64, DeltaY64;
     RECTL DestRect, MaskRect;
-    HBITMAP hbmGlyph;
+    HBITMAP hbmGlyph = NULL;
     SIZEL glyphSize;
     FONTOBJ *FontObj;
     PFONTGDI FontGDI;
@@ -7900,23 +7919,43 @@ IntExtTextOutW(
              * glyph size. Then use memset with 0 to clear it and sourcerect to
              * limit the work of the transbitblt.
              */
-            hbmGlyph = EngCreateBitmap(glyphSize, realglyph->bitmap.pitch,
-                                       bLcdGlyph ? BMF_24BPP : BMF_8BPP, BMF_TOPDOWN,
-                                       realglyph->bitmap.buffer);
-            if (!hbmGlyph)
+            /* One surface serves all the glyphs of the string; a new one is only needed when the format changes
+             * (a surface and its handle per glyph cost more than the blit of a small glyph) */
+            if (psoGlyph != NULL &&
+                psoGlyph->iBitmapFormat == (bLcdGlyph ? BMF_24BPP : BMF_8BPP))
             {
-                DPRINT1("WARNING: EngCreateBitmap() failed!\n");
-                bResult = FALSE;
-                break;
+                SURFACE_vSetCallerBits(psoGlyph, glyphSize.cx, glyphSize.cy,
+                                       realglyph->bitmap.pitch, realglyph->bitmap.buffer);
             }
-
-            psoGlyph = EngLockSurface((HSURF)hbmGlyph);
-            if (!psoGlyph)
+            else
             {
-                EngDeleteSurface((HSURF)hbmGlyph);
-                DPRINT1("WARNING: EngLockSurface() failed!\n");
-                bResult = FALSE;
-                break;
+                if (psoGlyph != NULL)
+                {
+                    EngUnlockSurface(psoGlyph);
+                    EngDeleteSurface((HSURF)hbmGlyph);
+                    psoGlyph = NULL;
+                    hbmGlyph = NULL;
+                }
+
+                hbmGlyph = EngCreateBitmap(glyphSize, realglyph->bitmap.pitch,
+                                           bLcdGlyph ? BMF_24BPP : BMF_8BPP, BMF_TOPDOWN,
+                                           realglyph->bitmap.buffer);
+                if (!hbmGlyph)
+                {
+                    DPRINT1("WARNING: EngCreateBitmap() failed!\n");
+                    bResult = FALSE;
+                    break;
+                }
+
+                psoGlyph = EngLockSurface((HSURF)hbmGlyph);
+                if (!psoGlyph)
+                {
+                    EngDeleteSurface((HSURF)hbmGlyph);
+                    hbmGlyph = NULL;
+                    DPRINT1("WARNING: EngLockSurface() failed!\n");
+                    bResult = FALSE;
+                    break;
+                }
             }
 
             /*
@@ -7953,8 +7992,6 @@ IntExtTextOutW(
                 DPRINT1("Failed to MaskBlt a glyph!\n");
             }
 
-            EngUnlockSurface(psoGlyph);
-            EngDeleteSurface((HSURF)hbmGlyph);
         }
 
         if (DoBreak)
@@ -7986,6 +8023,14 @@ IntExtTextOutW(
 
         DPRINT("New X64, New Y64: %I64d, %I64d\n", X64, Y64);
     }
+    if (psoGlyph != NULL)
+    {
+        EngUnlockSurface(psoGlyph);
+        EngDeleteSurface((HSURF)hbmGlyph);
+        psoGlyph = NULL;
+        hbmGlyph = NULL;
+    }
+
     /* Don't update position if String == NULL. Fixes CORE-19721. */
     if ((pdcattr->flTextAlign & TA_UPDATECP) && String)
         pdcattr->ptlCurrent.x = DestRect.right - dc->ptlDCOrig.x;

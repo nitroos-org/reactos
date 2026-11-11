@@ -8,6 +8,7 @@
 #pragma once
 
 #include <apitest.h>
+#include <stdlib.h>
 #include <wingdi.h>
 #include <winddi.h>
 
@@ -16,6 +17,12 @@
 #define ROP4_USES_PATTERN(Rop4) ((((Rop4) & 0xF0F0) >> 4) != ((Rop4) & 0x0F0F))
 #define IS_VALID_ROP4(rop) (((rop) & 0xFFFF0000) == 0)
 #define R3_OPINDEX_SRCCOPY 0xCC
+
+/* The pool allocation of the fast path */
+#define NonPagedPool 0
+#define TAG_DIB 'bDmS'
+#define ExAllocatePoolWithTag(PoolType, Size, Tag) malloc(Size)
+#define ExFreePoolWithTag(Ptr, Tag) free(Ptr)
 
 #ifndef FASTCALL
 #define FASTCALL __fastcall
