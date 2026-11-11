@@ -2253,6 +2253,13 @@ tcp_eff_send_mss_netif(u16_t sendmss, struct netif *outif, const ip_addr_t *dest
 
   LWIP_UNUSED_ARG(dest); /* in case IPv6 is disabled */
 
+  /* Only the loopback interface takes segments above TCP_MSS: whatever another interface reports as
+     its MTU, and a route that is not known, keep the TCP_MSS bound */
+  if (sendmss > TCP_MSS &&
+      (outif == NULL || !ip4_addr_isloopback(netif_ip4_addr(outif)))) {
+    sendmss = TCP_MSS;
+  }
+
   LWIP_ASSERT("tcp_eff_send_mss_netif: invalid dst_ip", dest != NULL);
 
 #if LWIP_IPV6
