@@ -509,6 +509,36 @@ KeRemoveQueue(IN PKQUEUE Queue,
 }
 
 /*
+ * Takes one entry back out of the queue if it is still in it (not removed, and not handed straight to a waiting
+ * thread). Used by wait completion packets to cancel a packet that was queued but not yet removed.
+ */
+BOOLEAN
+NTAPI
+KeRemoveEntryQueue(IN PKQUEUE Queue,
+                   IN PLIST_ENTRY Entry)
+{
+    PLIST_ENTRY Current;
+    BOOLEAN Found = FALSE;
+    KIRQL OldIrql;
+    ASSERT_QUEUE(Queue);
+    ASSERT_IRQL_LESS_OR_EQUAL(DISPATCH_LEVEL);
+
+    OldIrql = KiAcquireDispatcherLock();
+    for (Current = Queue->EntryListHead.Flink; Current != &Queue->EntryListHead; Current = Current->Flink)
+    {
+        if (Current == Entry)
+        {
+            RemoveEntryList(Entry);
+            Queue->Header.SignalState--;
+            Found = TRUE;
+            break;
+        }
+    }
+    KiReleaseDispatcherLock(OldIrql);
+    return Found;
+}
+
+/*
  * @implemented
  */
 PLIST_ENTRY

@@ -288,7 +288,8 @@ typedef enum _COMPLETION_PACKET_TYPE
     {
     IopCompletionPacketIrp,
     IopCompletionPacketMini,
-    IopCompletionPacketQuota
+    IopCompletionPacketQuota,
+    IopCompletionPacketWait     /* the embedded packet of a wait completion packet object (ex/waitcomp.c) */
 } COMPLETION_PACKET_TYPE, *PCOMPLETION_PACKET_TYPE;
 
 //
@@ -311,6 +312,13 @@ typedef struct _IOP_MINI_COMPLETION_PACKET
     NTSTATUS IoStatus;
     ULONG_PTR IoStatusInformation;
 } IOP_MINI_COMPLETION_PACKET, *PIOP_MINI_COMPLETION_PACKET;
+
+/* The consumer of an I/O completion port took a wait completion packet entry out of the queue (ex/waitcomp.c) */
+VOID
+NTAPI
+ExWcpPacketDequeued(
+    _In_ PIOP_MINI_COMPLETION_PACKET Packet
+);
 
 //
 // I/O Completion Context for IoSetIoCompletionRoutineEx

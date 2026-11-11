@@ -157,7 +157,7 @@ SVC_(RequestDeviceWakeup, 0) // FIXME
 SVC_(SavepointTransaction, 0) // FIXME
 #endif
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-SVC_(AssociateWaitCompletionPacket, 0) // FIXME
+SVC_(AssociateWaitCompletionPacket, 8)
 #endif
 #if (NTDDI_VERSION >= NTDDI_VISTASP1 && NTDDI_VERSION <= NTDDI_VISTASP2)
 SVC2_(xHalPostMicrocodeUpdate, 0) // FIXME
@@ -166,7 +166,7 @@ SVC2_(xHalPostMicrocodeUpdate, 0) // FIXME
 SVC_(CancelIoFileEx, 3)
 SVC_(CancelSynchronousIoFile, 3)
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-SVC_(CancelWaitCompletionPacket, 0) // FIXME
+SVC_(CancelWaitCompletionPacket, 2)
 #endif // (NTDDI_VERSION >= NTDDI_WIN8)
 SVC_(CommitComplete, 2)
 SVC_(CommitEnlistment, 2)
@@ -239,7 +239,7 @@ SVC_(CreateTransactionManager, 6)
 SVC_(CreateUserProcess, 11)
 #endif
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-SVC_(CreateWaitCompletionPacket, 0) // FIXME
+SVC_(CreateWaitCompletionPacket, 3)
 #endif
 SVC_(CreateWaitablePort, 5)
 #if (NTDDI_VERSION >= NTDDI_WIN8)

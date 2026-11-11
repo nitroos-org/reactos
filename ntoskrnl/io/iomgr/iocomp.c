@@ -128,6 +128,16 @@ IopUnpackCompletionEntry(IN PLIST_ENTRY ListEntry,
         /* Free the IRP */
         IoFreeIrp(Irp);
     }
+    else if (Packet->PacketType == IopCompletionPacketWait)
+    {
+        /* The embedded packet of a wait completion packet object: it is not freed, it becomes idle again */
+        Entry->KeyContext = Packet->KeyContext;
+        Entry->ApcContext = Packet->ApcContext;
+        RtlZeroMemory(&Entry->IoStatusBlock, sizeof(Entry->IoStatusBlock));
+        Entry->IoStatusBlock.Status = Packet->IoStatus;
+        Entry->IoStatusBlock.Information = Packet->IoStatusInformation;
+        ExWcpPacketDequeued(Packet);
+    }
     else
     {
         /* Save values */
