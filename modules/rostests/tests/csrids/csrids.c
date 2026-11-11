@@ -423,6 +423,8 @@ PidReuseTest(VOID)
     GetExitCodeProcess(Spawner.hProcess, &OrphanPid);
     CloseHandle(Spawner.hProcess);
     CloseHandle(Spawner.hThread);
+    /* The orphan must be older than the process that takes the pid: more than a clock tick (create times compare with <) */
+    Sleep(100);
     Orphan = OpenProcess(PROCESS_ALL_ACCESS, FALSE, OrphanPid);
     Snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     Entry.dwSize = sizeof(Entry);
