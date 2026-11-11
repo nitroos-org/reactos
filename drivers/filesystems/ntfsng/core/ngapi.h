@@ -130,6 +130,7 @@ void ngc_set_data_fua(ngc_vol *v, int on);	/* under the volume lock, around a wr
 void ngc_set_defer(ngc_vol *v, int on);	/* under the volume lock, around a write-through write: its direct data writes are sent and waited for later */
 int ngc_drain_data(ngc_vol *v);	/* waits for them (the calling thread's); -EIO if one failed */
 void ngc_commit_prestart(ngc_vol *v);	/* after ngc_commit_begin returned NGC_COMMIT_IO, still under the lock: slot writes in flight with the data writes, both waited for */
+void ngc_set_namecache(int mode);	/* 0: off (registry NoNameCache=1), 1: on (default), 2: verify every hit (NameCacheVerify=1) */
 void ngc_set_no_retain(int off);	/* 1: no retained transactions (registry NoRetainedCommit=1): every commit is in place when it returns */
 /* The core calls fn(ctx) (under the volume lock, never blocking) when the overlay is past its threshold and a commit is wanted. */
 void ngc_set_commit_kick(ngc_vol *v, void (*fn)(void *ctx), void *ctx);
@@ -250,7 +251,8 @@ int ngc_dio_zero_begin(ngc_vol *v, ngc_node *n, unsigned long long upto, struct 
  * (locked) maps the clusters of [off, off+len) into runs and pins the node; the caller then fills the
  * buffer without the volume lock: a run with dev == NGC_DIO_ZERO is zeroed (hole, past the initialized size or
  * EOF), any other is read from the device (dev = device offset, len = bytes, boff = offset in the buffer; runs
- * are in buffer order and a later run may overwrite the tail of an earlier one); ngc_rdio_end (locked) unpins.
+ * are in buffer order and a later run may overwrite the tail of an earlier one; only the last run's len can be
+ * unaligned, when the request's is: the caller reads that last sector through a bounce buffer); ngc_rdio_end (locked) unpins.
  * ngc_rdio_begin returns 0 (pinned: ngc_rdio_end must follow) or -NGC_EAGAIN (use ngc_read_direct / ngc_read
  * instead, nothing changed).  The data is what the stream held when ngc_rdio_begin ran (the clusters cannot be
  * freed meanwhile: see the drain below).
