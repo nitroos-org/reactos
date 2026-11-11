@@ -1610,6 +1610,7 @@ MiResolveImageReferences(IN PVOID ImageBase,
     ULONG ImportSize, ImportCount = 0, LoadedImportsSize, ExportSize;
     PLOAD_IMPORTS LoadedImports, NewImports;
     PLDR_DATA_TABLE_ENTRY SessionLoaded = NULL;
+    USHORT MissingDriverLength = 0;
     ULONG i;
     BOOLEAN GdiLink, NormalLink;
     BOOLEAN ReferenceNeeded, Loaded;
@@ -1980,6 +1981,7 @@ CheckDllState:
 
         /* Set the missing driver name and get the export directory */
         *MissingDriver = LdrEntry->BaseDllName.Buffer;
+        MissingDriverLength = LdrEntry->BaseDllName.Length;
         ExportDirectory = RtlImageDirectoryEntryToData(ImportBase,
                                                        TRUE,
                                                        IMAGE_DIRECTORY_ENTRY_EXPORT,
@@ -2113,12 +2115,13 @@ Failure:
      */
     if (*MissingDriver && !((ULONG_PTR)*MissingDriver & 1))
     {
-        SIZE_T NameSize = (wcslen(*MissingDriver) + 1) * sizeof(WCHAR);
+        SIZE_T NameSize = MissingDriverLength + sizeof(WCHAR);
         PWCHAR NameCopy = ExAllocatePoolWithTag(PagedPool, NameSize, TAG_LDR_WSTR);
 
         if (NameCopy)
         {
-            RtlCopyMemory(NameCopy, *MissingDriver, NameSize);
+            RtlCopyMemory(NameCopy, *MissingDriver, MissingDriverLength);
+            NameCopy[MissingDriverLength / sizeof(WCHAR)] = UNICODE_NULL;
             *MissingDriver = NameCopy;
             *(PULONG_PTR)MissingDriver |= 1;
         }
@@ -4313,6 +4316,9 @@ MmPageEntireDriver(IN PVOID AddressWithinSection)
     /* Get the loader entry */
     LdrEntry = MiLookupDataTableEntry(AddressWithinSection);
     if (!LdrEntry) return NULL;
+
+    /* A session image stays resident */
+    if (MiIsSessionImage(LdrEntry)) return LdrEntry->DllBase;
 
     /* Check if paging of kernel mode is disabled or if the driver is mapped as an image */
     if ((MmDisablePagingExecutive) || (LdrEntry->SectionPointer))
