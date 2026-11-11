@@ -52,6 +52,10 @@ extern POBJECT_TYPE NTSYSAPI PsJobType;
  * kernel32 continues to create the initial thread through NtCreateThread. */
 #define ROS_PS_ATTRIBUTE_HANDLE_LIST 0x0002000b
 #define ROS_PS_MAX_HANDLE_COUNT (1UL << 24)
+/* ReactOS-private input: the session of the new process (ULONG). A session other than the
+ * creator's needs SeTcbPrivilege (or a kernel-mode caller) */
+#define ROS_PS_ATTRIBUTE_SESSION_ID  0x00020101
+#define ROS_PS_MAX_ATTRIBUTES 2
 typedef struct _ROS_PS_ATTRIBUTE
 {
     ULONG_PTR Attribute;

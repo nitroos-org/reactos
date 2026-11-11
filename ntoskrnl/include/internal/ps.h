@@ -273,7 +273,8 @@ PspCreateProcess(
     IN HANDLE ExceptionPort OPTIONAL,
     IN BOOLEAN InJob,
     IN PHANDLE HandleList OPTIONAL,
-    IN SIZE_T HandleCount
+    IN SIZE_T HandleCount,
+    IN PEPROCESS SessionMember OPTIONAL
 );
 
 //

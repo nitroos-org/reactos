@@ -391,7 +391,8 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
                  IN HANDLE ExceptionPort OPTIONAL,
                  IN BOOLEAN InJob,
                  IN PHANDLE HandleList OPTIONAL,
-                 IN SIZE_T HandleCount)
+                 IN SIZE_T HandleCount,
+                 IN PEPROCESS SessionMember OPTIONAL)
 {
     HANDLE hProcess;
     PEPROCESS Process, Parent;
@@ -600,10 +601,30 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
     /* Check if this is the initial process being built */
     if (Parent)
     {
-        /* Create the address space for the child */
-        if (!MmCreateProcessAddressSpace(MinWs,
-                                         Process,
-                                         DirectoryTableBase))
+        /*
+         * Create the address space for the child. In another session (NitroSessions): attached to a process
+         * of that session, so that the child joins it (MiSessionAddProcess takes the current session)
+         */
+        if (SessionMember)
+        {
+            KAPC_STATE SessionApcState;
+            BOOLEAN Created = FALSE;
+
+            Status = MmAttachSession(SessionMember, &SessionApcState);
+            if (NT_SUCCESS(Status))
+            {
+                Created = MmCreateProcessAddressSpace(MinWs, Process, DirectoryTableBase);
+                MmDetachSession(SessionMember, &SessionApcState);
+            }
+            if (!Created)
+            {
+                if (NT_SUCCESS(Status)) Status = STATUS_INSUFFICIENT_RESOURCES;
+                goto CleanupWithRef;
+            }
+        }
+        else if (!MmCreateProcessAddressSpace(MinWs,
+                                              Process,
+                                              DirectoryTableBase))
         {
             /* Failed */
             Status = STATUS_INSUFFICIENT_RESOURCES;
@@ -981,7 +1002,7 @@ PsCreateSystemProcess(OUT PHANDLE ProcessHandle,
                             NULL,
                             NULL,
                             NULL,
-                            FALSE, NULL, 0);
+                            FALSE, NULL, 0, NULL);
 }
 
 /*
@@ -1494,7 +1515,7 @@ NtCreateProcessEx(OUT PHANDLE ProcessHandle,
                                   SectionHandle,
                                   DebugPort,
                                   ExceptionPort,
-                                  InJob, NULL, 0);
+                                  InJob, NULL, 0, NULL);
     }
 
     /* Return Status */
@@ -1528,7 +1549,12 @@ NtCreateProcessWithAttributes(OUT PHANDLE ProcessHandle,
                               IN PROS_PS_ATTRIBUTE_LIST AttributeList)
 {
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
-    ROS_PS_ATTRIBUTE_LIST Attributes;
+    ROS_PS_ATTRIBUTE Captured[ROS_PS_MAX_ATTRIBUTES];
+    SIZE_T TotalLength = 0, AttributeCount = 0;
+    PROS_PS_ATTRIBUTE HandleAttribute = NULL;
+    BOOLEAN HaveSession = FALSE;
+    ULONG TargetSession = 0;
+    PEPROCESS SessionMember = NULL;
     PHANDLE Handles = NULL;
     SIZE_T Count = 0, CaptureSize = 0, i;
     BOOLEAN Empty = FALSE;
@@ -1536,35 +1562,76 @@ NtCreateProcessWithAttributes(OUT PHANDLE ProcessHandle,
     NTSTATUS Status = STATUS_SUCCESS;
     PAGED_CODE();
 
-    if (!ParentProcess || !(Flags & PROCESS_CREATE_FLAGS_INHERIT_HANDLES))
+    if (!ParentProcess)
         return STATUS_INVALID_PARAMETER;
 
     _SEH2_TRY
     {
+        /* The list: a length, then one or two attributes, each type at most once */
         if (PreviousMode != KernelMode)
         {
             ProbeForWriteHandle(ProcessHandle);
-            ProbeForRead(AttributeList, sizeof(Attributes), sizeof(ULONG_PTR));
+            ProbeForRead(AttributeList, FIELD_OFFSET(ROS_PS_ATTRIBUTE_LIST, Attributes), sizeof(ULONG_PTR));
         }
-        Attributes = *AttributeList;
-        if (Attributes.TotalLength != sizeof(Attributes) ||
-            Attributes.Attributes[0].Attribute != ROS_PS_ATTRIBUTE_HANDLE_LIST ||
-            Attributes.Attributes[0].ReturnLength ||
-            Attributes.Attributes[0].Size % sizeof(HANDLE) ||
-            Attributes.Attributes[0].Size / sizeof(HANDLE) > ROS_PS_MAX_HANDLE_COUNT)
+        TotalLength = AttributeList->TotalLength;
+        if (TotalLength < FIELD_OFFSET(ROS_PS_ATTRIBUTE_LIST, Attributes) + sizeof(ROS_PS_ATTRIBUTE) ||
+            TotalLength > FIELD_OFFSET(ROS_PS_ATTRIBUTE_LIST, Attributes) + ROS_PS_MAX_ATTRIBUTES * sizeof(ROS_PS_ATTRIBUTE) ||
+            (TotalLength - FIELD_OFFSET(ROS_PS_ATTRIBUTE_LIST, Attributes)) % sizeof(ROS_PS_ATTRIBUTE))
         {
             Status = STATUS_INVALID_PARAMETER;
+            _SEH2_LEAVE;
         }
-        else
+        AttributeCount = (TotalLength - FIELD_OFFSET(ROS_PS_ATTRIBUTE_LIST, Attributes)) / sizeof(ROS_PS_ATTRIBUTE);
+        if (PreviousMode != KernelMode)
+            ProbeForRead(AttributeList, TotalLength, sizeof(ULONG_PTR));
+        RtlCopyMemory(Captured, AttributeList->Attributes, AttributeCount * sizeof(ROS_PS_ATTRIBUTE));
+
+        for (i = 0; i < AttributeCount; i++)
         {
-            Count = Attributes.Attributes[0].Size / sizeof(HANDLE);
+            if (Captured[i].ReturnLength)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+            if (Captured[i].Attribute == ROS_PS_ATTRIBUTE_HANDLE_LIST && !HandleAttribute)
+            {
+                HandleAttribute = &Captured[i];
+            }
+            else if (Captured[i].Attribute == ROS_PS_ATTRIBUTE_SESSION_ID && !HaveSession &&
+                     Captured[i].Size == sizeof(ULONG))
+            {
+                if (PreviousMode != KernelMode)
+                    ProbeForRead(Captured[i].ValuePtr, sizeof(ULONG), sizeof(ULONG));
+                TargetSession = *(PULONG)Captured[i].ValuePtr;
+                HaveSession = TRUE;
+            }
+            else
+            {
+                /* Unknown, malformed or repeated */
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+        }
+        if (!NT_SUCCESS(Status))
+            _SEH2_LEAVE;
+
+        /* An explicit handle list needs handle inheritance */
+        if (HandleAttribute)
+        {
+            if (!(Flags & PROCESS_CREATE_FLAGS_INHERIT_HANDLES) ||
+                HandleAttribute->Size % sizeof(HANDLE) ||
+                HandleAttribute->Size / sizeof(HANDLE) > ROS_PS_MAX_HANDLE_COUNT)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                _SEH2_LEAVE;
+            }
+            Count = HandleAttribute->Size / sizeof(HANDLE);
             if (PreviousMode != KernelMode)
-                ProbeForRead(Attributes.Attributes[0].ValuePtr,
-                             Attributes.Attributes[0].Size, sizeof(HANDLE));
+                ProbeForRead(HandleAttribute->ValuePtr, HandleAttribute->Size, sizeof(HANDLE));
             /* Allocate a sentinel for an explicit empty list, distinct from
              * NULL, which means the legacy inherit-all path. Charge explicitly:
              * ExAllocatePoolWithQuotaTag does not charge page-sized allocations. */
-            CaptureSize = Count ? Attributes.Attributes[0].Size : sizeof(HANDLE);
+            CaptureSize = Count ? HandleAttribute->Size : sizeof(HANDLE);
             Status = PsChargeProcessPagedPoolQuota(PsGetCurrentProcess(), CaptureSize);
             if (NT_SUCCESS(Status))
             {
@@ -1573,8 +1640,7 @@ NtCreateProcessWithAttributes(OUT PHANDLE ProcessHandle,
                 if (!Handles)
                     Status = STATUS_INSUFFICIENT_RESOURCES;
                 else if (Count)
-                    RtlCopyMemory(Handles, Attributes.Attributes[0].ValuePtr,
-                                  Attributes.Attributes[0].Size);
+                    RtlCopyMemory(Handles, HandleAttribute->ValuePtr, HandleAttribute->Size);
             }
         }
     }
@@ -1584,7 +1650,25 @@ NtCreateProcessWithAttributes(OUT PHANDLE ProcessHandle,
     }
     _SEH2_END;
 
-    if (NT_SUCCESS(Status))
+    /*
+     * Another session than the creator's (NitroSessions): only for a kernel-mode caller or one holding
+     * SeTcbPrivilege, and only into a session that exists and is not going away
+     */
+    if (NT_SUCCESS(Status) && HaveSession && (TargetSession != PsGetCurrentProcessSessionId()))
+    {
+        if ((PreviousMode != KernelMode) && !SeSinglePrivilegeCheck(SeTcbPrivilege, PreviousMode))
+        {
+            Status = STATUS_PRIVILEGE_NOT_HELD;
+        }
+        else
+        {
+            /* A session that does not exist or is going away: access denied, as on Windows */
+            SessionMember = MmGetSessionById(TargetSession);
+            if (!SessionMember) Status = STATUS_ACCESS_DENIED;
+        }
+    }
+
+    if (NT_SUCCESS(Status) && Handles)
     {
         /* Native handles permit two tag bits; reject pseudo/kernel handles. */
         for (i = 0; i < Count; ++i)
@@ -1597,25 +1681,26 @@ NtCreateProcessWithAttributes(OUT PHANDLE ProcessHandle,
             }
             Handles[i] = (HANDLE)((ULONG_PTR)Handles[i] & ~(ULONG_PTR)3);
         }
-    }
-    if (NT_SUCCESS(Status))
-    {
-        /* A NULL entry selects an empty table on both reference systems. */
-        if (Empty) Count = 0;
-        qsort(Handles, Count, sizeof(HANDLE), PspCompareHandleValues);
-        for (i = 1; i < Count; ++i)
+        if (NT_SUCCESS(Status))
         {
-            if (Handles[i] == Handles[i - 1])
+            /* A NULL entry selects an empty table on both reference systems. */
+            if (Empty) Count = 0;
+            qsort(Handles, Count, sizeof(HANDLE), PspCompareHandleValues);
+            for (i = 1; i < Count; ++i)
             {
-                Status = STATUS_INVALID_PARAMETER;
-                break;
+                if (Handles[i] == Handles[i - 1])
+                {
+                    Status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
             }
         }
-        if (NT_SUCCESS(Status))
-            Status = PspCreateProcess(ProcessHandle, DesiredAccess, ObjectAttributes,
-                                      ParentProcess, Flags, SectionHandle, DebugPort,
-                                      ExceptionPort, InJob, Handles, Count);
     }
+    if (NT_SUCCESS(Status))
+        Status = PspCreateProcess(ProcessHandle, DesiredAccess, ObjectAttributes,
+                                  ParentProcess, Flags, SectionHandle, DebugPort,
+                                  ExceptionPort, InJob, Handles, Count, SessionMember);
+    if (SessionMember) MmQuitNextSession(SessionMember);
     if (Handles) ExFreePoolWithTag(Handles, 'lHsP');
     if (QuotaCharged)
         PsReturnProcessPagedPoolQuota(PsGetCurrentProcess(), CaptureSize);
