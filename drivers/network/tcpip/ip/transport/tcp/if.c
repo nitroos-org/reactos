@@ -54,6 +54,15 @@ TCPSendDataCallback(struct netif *netif, struct pbuf *p, const ip4_addr_t *dest)
         return ERR_IF;
     }
 
+    /* A whole TCP datagram to the loopback netif goes straight to the loopback queue (loopback.c).
+     * Fragments take the IP layer's path, which reassembles them */
+    if (LoopFastPath && netif->state == Loopback && Header->Protocol == IPPROTO_TCP &&
+        p->len >= sizeof(IPv4_HEADER) && p->tot_len <= netif->mtu &&
+        !(WN2H(Header->FlagsFragOfs) & (IPv4_MF_MASK | IPv4_FRAGOFS_MASK)))
+    {
+        return LoopTransmitPbuf(p) ? ERR_OK : ERR_MEM;
+    }
+
     IPInitializePacket(&Packet, LocalAddress.Type);
 
     if (!(NCE = RouteGetRouteToDestination(&RemoteAddress)))
