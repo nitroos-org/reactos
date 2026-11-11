@@ -2107,6 +2107,27 @@ Failure:
     /* The dependencies are still loaded here: list everything that is missing */
     if (LogMissing) MiLogMissingImports(ImageBase, Status, FailedModuleName);
 
+    /*
+     * The name of the failing import is that of its loader entry, which the releases below can free (an
+     * import this load brought in): the caller gets a copy of its own (low bit set: the caller frees it)
+     */
+    if (*MissingDriver && !((ULONG_PTR)*MissingDriver & 1))
+    {
+        SIZE_T NameSize = (wcslen(*MissingDriver) + 1) * sizeof(WCHAR);
+        PWCHAR NameCopy = ExAllocatePoolWithTag(PagedPool, NameSize, TAG_LDR_WSTR);
+
+        if (NameCopy)
+        {
+            RtlCopyMemory(NameCopy, *MissingDriver, NameSize);
+            *MissingDriver = NameCopy;
+            *(PULONG_PTR)MissingDriver |= 1;
+        }
+        else
+        {
+            *MissingDriver = NULL;
+        }
+    }
+
     /* Cleanup and return */
     RtlFreeUnicodeString(&NameString);
 
