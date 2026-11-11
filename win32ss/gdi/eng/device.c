@@ -640,6 +640,10 @@ EngpUpdateMonitorDevices(
     NTSTATUS Status;
     HANDLE hkRegistry;
 
+    /* The memory display of a session without the console has no device: no monitors */
+    if (!pGraphicsDevice->DeviceObject)
+        return STATUS_UNSUCCESSFUL;
+
     /* Request right PDO for device relations */
     Status = EngpPnPTargetRelationRequest(pGraphicsDevice->DeviceObject, &pDeviceRelations);
     if (!NT_SUCCESS(Status))
