@@ -381,6 +381,7 @@ static ULONG CountPendingConnections(PAFD_FCB FCB)
 static NTSTATUS IssueListen(PAFD_FCB FCB)
 {
     NTSTATUS Status;
+    ULONG Room;
 
     Status = TdiBuildNullConnectionInfoInPlace(FCB->ListenIrp.ConnectionCallInfo,
                                                FCB->LocalAddress->Address[0].AddressType);
@@ -390,12 +391,18 @@ static NTSTATUS IssueListen(PAFD_FCB FCB)
                                                FCB->LocalAddress->Address[0].AddressType);
     ASSERT(Status == STATUS_SUCCESS);
 
-    Status = TdiListen( &FCB->ListenIrp.InFlightRequest,
-                        FCB->Connection.Object,
-                        &FCB->ListenIrp.ConnectionCallInfo,
-                        &FCB->ListenIrp.ConnectionReturnInfo,
-                        ListenComplete,
-                        FCB );
+    /* The listen request states how many connections the queue has room for, so tcpip refuses the
+       ones beyond it before it answers them, as Windows does */
+    Room = CountPendingConnections(FCB);
+    Room = Room < FCB->Backlog ? FCB->Backlog - Room : 1;
+
+    Status = TdiListenEx( &FCB->ListenIrp.InFlightRequest,
+                          FCB->Connection.Object,
+                          &FCB->ListenIrp.ConnectionCallInfo,
+                          &FCB->ListenIrp.ConnectionReturnInfo,
+                          ListenComplete,
+                          FCB,
+                          (ULONG)min(Room, 0x7FFF) << 16 );
 
     if (Status == STATUS_PENDING)
         Status = STATUS_SUCCESS;
@@ -478,6 +485,10 @@ static VOID NTAPI RelistenWorker(PDEVICE_OBJECT DeviceObject, PVOID Context)
     {
         for (Attempt = 1; FCB->SharedData.State == SOCKET_STATE_LISTENING; Attempt++)
         {
+            /* A full queue waits for an accept */
+            if (CountPendingConnections(FCB) >= FCB->Backlog)
+                break;
+
             /* A listen that fails before TdiListen returns is retried here, not queued again */
             FCB->Relistening = TRUE;
             ReleaseListenConnection(FCB);
@@ -504,6 +515,20 @@ static VOID NTAPI RelistenWorker(PDEVICE_OBJECT DeviceObject, PVOID Context)
     /* Set under the lock: AfdCloseSocket waits for the event, then for the lock */
     KeSetEvent(&FCB->RelistenIdle, IO_NO_INCREMENT, FALSE);
     SocketStateUnlock(FCB);
+}
+
+/* An accept made room in a full queue that stopped listening: listen again from a system thread */
+static VOID ResumeListen(PAFD_FCB FCB)
+{
+    if (FCB->SharedData.State != SOCKET_STATE_LISTENING || FCB->ListenIrp.InFlightRequest ||
+        FCB->Relistening || !KeReadStateEvent(&FCB->RelistenIdle) ||
+        CountPendingConnections(FCB) >= FCB->Backlog)
+    {
+        return;
+    }
+
+    KeClearEvent(&FCB->RelistenIdle);
+    IoQueueWorkItem(FCB->RelistenWorkItem, RelistenWorker, DelayedWorkQueue, FCB);
 }
 
 /* Hands queued connections to waiting AcceptEx requests from a system thread:
@@ -540,6 +565,8 @@ static VOID NTAPI AcceptWorker(PDEVICE_OBJECT DeviceObject, PVOID Context)
             SatisfySuperAccept(FCB, Irp, Qelt);
             FreeQueuedConnection(Qelt);
         }
+
+        ResumeListen(FCB);
 
         if (!IsListEmpty(&FCB->PendingConnections))
         {
@@ -680,8 +707,13 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
     /* Drop a connection that could not be queued for accept */
     ReleaseListenConnection(FCB);
 
-    /* tcpip completes a listen from a worker thread, at PASSIVE_LEVEL, so listen again here */
-    Status = ListenAgain(FCB);
+    /* tcpip completes a listen from a worker thread, at PASSIVE_LEVEL, so listen again here. A full
+     * queue does not listen: tcpip then refuses the connections the queue has no room for, and
+     * the accept that makes room listens again */
+    if (CountPendingConnections(FCB) >= FCB->Backlog)
+        Status = STATUS_SUCCESS;
+    else
+        Status = ListenAgain(FCB);
 
     /* The worker retries a listen that could not be issued here */
     if (!NT_SUCCESS(Status) && !FCB->Relistening)
@@ -960,6 +992,8 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             AFD_DbgPrint(MID_TRACE,("Completed a wait for accept\n"));
 
             FreeQueuedConnection(PendingConnObj);
+
+            ResumeListen(FCB);
 
             if( !IsListEmpty( &FCB->PendingConnections ) )
             {

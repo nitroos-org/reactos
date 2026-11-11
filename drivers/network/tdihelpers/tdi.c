@@ -468,6 +468,19 @@ NTSTATUS TdiListen(
     PTDI_CONNECTION_INFORMATION *ReturnConnectionInfo,
     PIO_COMPLETION_ROUTINE  CompletionRoutine,
     PVOID CompletionContext)
+{
+    return TdiListenEx(Irp, ConnectionObject, RequestConnectionInfo, ReturnConnectionInfo,
+                       CompletionRoutine, CompletionContext, 0);
+}
+
+NTSTATUS TdiListenEx(
+    PIRP *Irp,
+    PFILE_OBJECT ConnectionObject,
+    PTDI_CONNECTION_INFORMATION *RequestConnectionInfo,
+    PTDI_CONNECTION_INFORMATION *ReturnConnectionInfo,
+    PIO_COMPLETION_ROUTINE  CompletionRoutine,
+    PVOID CompletionContext,
+    ULONG Flags)
 /*!
  * @brief    Listen on a connection endpoint for a connection request from a remote peer
  *
@@ -506,7 +519,7 @@ NTSTATUS TdiListen(
                    ConnectionObject,
                    CompletionRoutine,
                    CompletionContext,
-                   0,
+                   Flags,
                    *RequestConnectionInfo,
                    *ReturnConnectionInfo);
 
