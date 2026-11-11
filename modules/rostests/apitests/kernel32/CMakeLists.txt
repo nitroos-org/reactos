@@ -193,6 +193,7 @@ list(APPEND SOURCE
     PssSnapshot.c
     QueueUserAPC.c
     QueueUserWorkItem.c
+    QueueUserWorkItemStream.c
     RaiseFailFastException.c
     ReadDirectoryChanges.c
     ReadDirectoryChangesRename.c

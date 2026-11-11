@@ -82,6 +82,7 @@ if(ARCH STREQUAL "i386")
 elseif(ARCH STREQUAL "amd64")
     list(APPEND ASM_SOURCE
         dispatch/amd64/dispatch.S
+        rtl/amd64/systime.S
         compat/amd64/msys2.S)
 elseif(ARCH STREQUAL "arm")
     list(APPEND ASM_SOURCE dispatch/arm/stubs_asm.s)
