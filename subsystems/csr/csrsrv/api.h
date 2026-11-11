@@ -53,6 +53,9 @@ extern PVOID *CsrSrvSharedStaticServerData;
 extern HANDLE CsrInitializationEvent;
 extern PCSR_SERVER_DLL CsrLoadedServerDll[CSR_SERVER_DLL_MAX];
 extern ULONG CsrMaxApiRequestThreads;
+extern HANDLE CsrSmssProcess;
+extern HANDLE CsrSmssProcessId;
+extern LARGE_INTEGER CsrSmssCreateTime;
 
 /****************************************************/
 extern UNICODE_STRING CsrSbApiPortName;
