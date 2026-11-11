@@ -127,6 +127,8 @@ typedef struct _SHARED_FACE_CACHE {
     UINT OutlineRequiredSize;
     UNICODE_STRING FontFamily;
     UNICODE_STRING FullName;
+    UNICODE_STRING StyleName;   /* TT_NAME_ID_FONT_SUBFAMILY */
+    UNICODE_STRING UniqueName;  /* TT_NAME_ID_UNIQUE_ID */
 } SHARED_FACE_CACHE, *PSHARED_FACE_CACHE;
 
 typedef struct _SHARED_FACE {
