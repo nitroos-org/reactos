@@ -388,8 +388,12 @@ AtaAhciPortHandleEvents(
         ChanData->PortNotification(AtaRequestComplete, ChanData->PortContext, CommandsCompleted);
     }
 
-    /* Asynchronous notification received */
-    if (InterruptStatus & AHCI_PXIRQ_SDBS)
+    /*
+     * Asynchronous notification received. PxSNTF is a reserved register when the HBA does not
+     * advertise it, so a Set Device Bits FIS (every NCQ completion) needs no access to it then.
+     */
+    if ((InterruptStatus & AHCI_PXIRQ_SDBS) &&
+        (ChanData->Controller->AhciCapabilities & AHCI_CAP_SSNTF))
     {
         ULONG Message = AHCI_PORT_READ(ChanData->IoBase, PxSataNotification);
 
