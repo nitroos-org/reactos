@@ -14,6 +14,22 @@
  *              to the file and to the debugger.
  *              "child <session>" is the process the test creates: it exits
  *              with 0x5E55 when it runs in that session.
+ *              Without a session 1 (NitroSessions absent or 0) the cases that
+ *              need it are reported as SKIP, not FAIL.
+ *              "concurrent-forwards": STRESS_THREADS threads create children
+ *              into session 1 at once, console and detached, which exit at
+ *              once: forwards through SMSS overlap with each other and with
+ *              the exits of forwarded processes (SmSessionComplete), more of
+ *              them than SMSS has API threads. Every create must return and
+ *              every child must run, within a bound; then one more forward
+ *              must still work.
+ *              "svc <file> soak <seconds> [session [detached]]": only that,
+ *              repeated for <seconds>, one line a minute with the counts,
+ *              the slowest create and the private bytes and handles of SMSS
+ *              and of the csrss of that session. Session 0 is the control:
+ *              the same creates in the service's own session, no forward.
+ *              "detached": no console children (consrv leaks a desktop
+ *              handle per console, which exhausts session 1 after about 650).
  * COPYRIGHT:   Copyright 2026 Tomas Srnka
  */
 
@@ -46,8 +62,15 @@ typedef NTSTATUS (NTAPI *PRTL_CREATE_USER_THREAD)(HANDLE, PSECURITY_DESCRIPTOR, 
 #define CHILD_OK 0x5E55
 #define TARGET_SESSION 1
 
+#define STRESS_THREADS 4
+#define STRESS_ROUNDS 15
+#define STRESS_CHILD_WAIT 60000
+#define STRESS_BOUND 300000
+
 static FILE *Out;
+static BOOL StressDetachedOnly;
 static ULONG Failures;
+static ULONG Skips;
 
 static
 VOID
@@ -78,12 +101,49 @@ Check(const char *Name, NTSTATUS Status, NTSTATUS Expected)
 }
 
 static
+VOID
+Skip(const char *Name, const char *Why)
+{
+    Log("SESSFWD %s SKIP (%s)\n", Name, Why);
+    Skips++;
+}
+
+static
 ULONG
 ProcessSession(HANDLE Process)
 {
     ULONG Session = (ULONG)-1;
     NtQueryInformationProcess(Process, ProcessSessionInformation, &Session, sizeof(Session), NULL);
     return Session;
+}
+
+/* The id of the first process with this image name in the given session, or 0 */
+static
+DWORD
+FindPidInSession(const WCHAR *Image, ULONG Session)
+{
+    HANDLE Snapshot;
+    PROCESSENTRY32W Entry;
+    DWORD Pid = 0, ProcSession;
+
+    Snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (Snapshot == INVALID_HANDLE_VALUE) return 0;
+    Entry.dwSize = sizeof(Entry);
+    if (Process32FirstW(Snapshot, &Entry))
+    {
+        do
+        {
+            if (!_wcsicmp(Entry.szExeFile, Image) &&
+                ProcessIdToSessionId(Entry.th32ProcessID, &ProcSession) &&
+                (ProcSession == Session))
+            {
+                Pid = Entry.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(Snapshot, &Entry));
+    }
+    CloseHandle(Snapshot);
+    return Pid;
 }
 
 /* A primary token of this process with the given session (needs SeTcbPrivilege) */
@@ -316,14 +376,206 @@ RunChild(const char *Name, HANDLE Token, ULONG Session, DWORD CreationFlags)
     CloseHandle(ProcessInfo.hThread);
 }
 
+/* "sessfwd.exe child <session>" created as the token: TRUE when it ran there; the create time in ms */
+static
+BOOL
+StressChild(HANDLE Token, ULONG Session, DWORD CreationFlags, PDWORD CreateMs, PDWORD Error)
+{
+    WCHAR Self[MAX_PATH], CommandLine[MAX_PATH + 32];
+    STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
+    PROCESS_INFORMATION ProcessInfo;
+    DWORD ExitCode = 0, Wait, Start;
+    BOOL Created;
+
+    GetModuleFileNameW(NULL, Self, MAX_PATH);
+    _snwprintf(CommandLine, RTL_NUMBER_OF(CommandLine), L"\"%s\" child %lu", Self, Session);
+    Start = GetTickCount();
+    Created = CreateProcessAsUserW(Token, NULL, CommandLine, NULL, NULL, FALSE, CreationFlags,
+                                   NULL, NULL, &StartupInfo, &ProcessInfo);
+    *CreateMs = GetTickCount() - Start;
+    *Error = Created ? 0 : GetLastError();
+    if (!Created) return FALSE;
+    Wait = WaitForSingleObject(ProcessInfo.hProcess, STRESS_CHILD_WAIT);
+    GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode);
+    if (Wait != WAIT_OBJECT_0)
+    {
+        TerminateProcess(ProcessInfo.hProcess, 1);
+        *Error = 0x80000000 | Wait;
+    }
+    else if (ExitCode != CHILD_OK)
+    {
+        *Error = ExitCode;
+    }
+    CloseHandle(ProcessInfo.hProcess);
+    CloseHandle(ProcessInfo.hThread);
+    return (Wait == WAIT_OBJECT_0) && (ExitCode == CHILD_OK);
+}
+
+typedef struct _STRESS
+{
+    HANDLE Token;
+    ULONG Session;
+    ULONG Index;
+    ULONG Rounds;
+    LONG Ok;
+    LONG Bad;
+    DWORD MaxCreateMs;
+    DWORD FirstError;
+} STRESS, *PSTRESS;
+
+static
+DWORD
+WINAPI
+StressThread(PVOID Parameter)
+{
+    PSTRESS Stress = Parameter;
+    DWORD CreateMs, Error;
+    ULONG i;
+
+    for (i = 0; i < Stress->Rounds; i++)
+    {
+        /* Odd threads: console children (a console of their own in session 1, consrv on exit too) */
+        if (StressChild(Stress->Token, Stress->Session, ((Stress->Index & 1) && !StressDetachedOnly) ? 0 : DETACHED_PROCESS, &CreateMs, &Error))
+        {
+            Stress->Ok++;
+        }
+        else
+        {
+            if (!Stress->Bad) Stress->FirstError = Error;
+            Stress->Bad++;
+        }
+        if (CreateMs > Stress->MaxCreateMs) Stress->MaxCreateMs = CreateMs;
+    }
+    return 0;
+}
+
+/*
+ * STRESS_THREADS threads, Rounds children each, all at once. TRUE when every create returned and every
+ * child ran in session 1 within the bound. On a hang the threads are left behind (stuck in the create).
+ */
+static
+BOOL
+StressRun(HANDLE Token, ULONG Session, ULONG Rounds, PLONG Ok, PLONG Bad, PDWORD MaxCreateMs, PDWORD FirstError, PDWORD Wait)
+{
+    STRESS Stress[STRESS_THREADS];
+    HANDLE Threads[STRESS_THREADS];
+    ULONG i, Started = 0;
+
+    *Ok = *Bad = 0;
+    *MaxCreateMs = *FirstError = 0;
+    RtlZeroMemory(Stress, sizeof(Stress));
+    for (i = 0; i < STRESS_THREADS; i++)
+    {
+        Stress[i].Token = Token;
+        Stress[i].Session = Session;
+        Stress[i].Index = i;
+        Stress[i].Rounds = Rounds;
+        Threads[i] = CreateThread(NULL, 0, StressThread, &Stress[i], 0, NULL);
+        if (!Threads[i]) break;
+        Started++;
+    }
+    *Wait = Started ? WaitForMultipleObjects(Started, Threads, TRUE, STRESS_BOUND) : WAIT_FAILED;
+    for (i = 0; i < Started; i++)
+    {
+        *Ok += Stress[i].Ok;
+        *Bad += Stress[i].Bad;
+        if (Stress[i].MaxCreateMs > *MaxCreateMs) *MaxCreateMs = Stress[i].MaxCreateMs;
+        if (Stress[i].Bad && !*FirstError) *FirstError = Stress[i].FirstError;
+        CloseHandle(Threads[i]);
+    }
+    return (Started == STRESS_THREADS) && (*Wait == WAIT_OBJECT_0) && !*Bad &&
+           (*Ok == (LONG)(STRESS_THREADS * Rounds));
+}
+
+/* Private bytes and handle count of the process with this pid */
+static
+VOID
+ProcessUsage(DWORD Pid, PSIZE_T Private, PULONG Handles)
+{
+    HANDLE Process;
+    VM_COUNTERS_EX Counters;
+
+    *Private = 0;
+    *Handles = 0;
+    Process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, Pid);
+    if (!Process) return;
+    if (NT_SUCCESS(NtQueryInformationProcess(Process, ProcessVmCounters, &Counters, sizeof(Counters), NULL)))
+        *Private = Counters.PrivateUsage;
+    NtQueryInformationProcess(Process, ProcessHandleCount, Handles, sizeof(*Handles), NULL);
+    CloseHandle(Process);
+}
+
+/* "svc <file> soak <seconds> [session]": the stress again and again; one line a minute. Session 0 (our own)
+   is the control without any forward */
+static
+VOID
+Soak(ULONG Seconds, ULONG Session)
+{
+    BOOLEAN Old;
+    HANDLE Token;
+    DWORD Start, LastLine, MaxCreateMs, FirstError, Wait, SmssPid, CsrPid, Max = 0;
+    LONG Ok, Bad;
+    ULONG Batches = 0, TotalOk = 0, TotalBad = 0, SmssHandles, CsrHandles;
+    SIZE_T SmssPrivate, CsrPrivate;
+    BOOL Pass;
+
+    RtlAdjustPrivilege(SE_TCB_PRIVILEGE, TRUE, FALSE, &Old);
+    Log("SESSFWD soak start seconds=%lu threads=%u session=%lu%s\n", Seconds, STRESS_THREADS, Session,
+        StressDetachedOnly ? " detached only" : "");
+    SmssPid = FindPidInSession(L"smss.exe", 0);
+    CsrPid = FindPidInSession(L"csrss.exe", Session);
+    Token = TokenForSession(Session);
+    if (!Token || !CsrPid)
+    {
+        Log("SESSFWD soak no session 1 (token %p, csrss %lu) FAIL\n", Token, CsrPid);
+        Failures++;
+        return;
+    }
+    Start = LastLine = GetTickCount();
+    ProcessUsage(SmssPid, &SmssPrivate, &SmssHandles);
+    ProcessUsage(CsrPid, &CsrPrivate, &CsrHandles);
+    Log("SESSFWD soak t=0 smss-private=%Iu smss-handles=%lu csrss-private=%Iu csrss-handles=%lu\n",
+        SmssPrivate, SmssHandles, CsrPrivate, CsrHandles);
+    for (;;)
+    {
+        Pass = StressRun(Token, Session, 5, &Ok, &Bad, &MaxCreateMs, &FirstError, &Wait);
+        Batches++;
+        TotalOk += Ok;
+        TotalBad += Bad;
+        if (MaxCreateMs > Max) Max = MaxCreateMs;
+        if (!Pass)
+        {
+            Log("SESSFWD soak batch %lu FAIL ok=%ld bad=%ld wait=%lx first-error=%lx\n",
+                Batches, Ok, Bad, Wait, FirstError);
+            Failures++;
+            if (Wait != WAIT_OBJECT_0) break;
+        }
+        if ((GetTickCount() - LastLine >= 60000) || (GetTickCount() - Start >= Seconds * 1000))
+        {
+            LastLine = GetTickCount();
+            ProcessUsage(SmssPid, &SmssPrivate, &SmssHandles);
+            ProcessUsage(CsrPid, &CsrPrivate, &CsrHandles);
+            Log("SESSFWD soak t=%lu batches=%lu ok=%lu bad=%lu max-create-ms=%lu smss-private=%Iu smss-handles=%lu "
+                "csrss-private=%Iu csrss-handles=%lu\n",
+                (GetTickCount() - Start) / 1000, Batches, TotalOk, TotalBad, Max,
+                SmssPrivate, SmssHandles, CsrPrivate, CsrHandles);
+        }
+        if (GetTickCount() - Start >= Seconds * 1000) break;
+    }
+    CloseHandle(Token);
+    Log("SESSFWD soak done batches=%lu ok=%lu bad=%lu max-create-ms=%lu failures=%lu %s\n",
+        Batches, TotalOk, TotalBad, Max, Failures, Failures ? "FAIL" : "PASS");
+}
+
 static
 VOID
 Tests(VOID)
 {
     BOOLEAN Old;
     HANDLE Token, Process, Thread, OtherProcess, OtherThread, SmPort = NULL;
-    CLIENT_ID ClientId, BadId, OtherId;
+    CLIENT_ID ClientId, BadId, OtherId, OwnId;
     NTSTATUS Status;
+    BOOL Session1;
 
     Log("SESSFWD start session=%lu pid=%lu\n", ProcessSession(NtCurrentProcess()), GetCurrentProcessId());
     RtlAdjustPrivilege(SE_TCB_PRIVILEGE, TRUE, FALSE, &Old);
@@ -331,12 +583,66 @@ Tests(VOID)
     /* Control: a child in our own session, registered with our csrss as before */
     RunChild("own-session-child", NULL, ProcessSession(NtCurrentProcess()), 0);
 
+    /* Negative: SMSS forwards only for a csrss it started; we are LocalSystem in session 0. It refuses
+       the sender before it looks at the request, so any ids do (this needs no session 1) */
+    OwnId.UniqueProcess = UlongToHandle(GetCurrentProcessId());
+    OwnId.UniqueThread = UlongToHandle(GetCurrentThreadId());
+    Status = SmConnectToSm(NULL, NULL, 0, &SmPort);
+    Log("SESSFWD sm-connect status=%08lx\n", Status);
+    if (NT_SUCCESS(Status))
+    {
+        Status = SmForwardProcessRegistration(SmPort, &OwnId, TARGET_SESSION, 0);
+        Check("sm-forward-from-system-service", Status, STATUS_ACCESS_DENIED);
+        NtClose(SmPort);
+    }
+    else
+    {
+        Failures++;
+    }
+
+    /* Everything else needs a session 1 (NitroSessions 4 or 5) */
+    Session1 = (FindPidInSession(L"csrss.exe", TARGET_SESSION) != 0);
+    Log("SESSFWD session-1 %s\n", Session1 ? "present" : "absent");
+    if (!Session1)
+    {
+        Skip("session1-detached-child", "no session 1");
+        Skip("session1-console-child", "no session 1");
+        Skip("concurrent-forwards", "no session 1");
+        Skip("sb-create-remote-from-system-service", "no session 1");
+        Skip("base-create-wrong-tid", "no session 1");
+        Skip("base-create-thread-of-another-process", "no session 1");
+        Skip("base-create-not-our-child", "no session 1");
+        Skip("base-create-forwarded", "no session 1");
+        Skip("base-create-forwarded-twice", "no session 1");
+        goto Done;
+    }
+
     /* CreateProcessAsUser into session 1: registered with session 1's csrss */
     Token = TokenForSession(TARGET_SESSION);
     if (Token)
     {
+        LONG Ok, Bad;
+        DWORD MaxCreateMs, FirstError, Wait;
+        BOOL Pass;
+
         RunChild("session1-detached-child", Token, TARGET_SESSION, DETACHED_PROCESS);
         RunChild("session1-console-child", Token, TARGET_SESSION, 0);
+
+        /* Concurrent forwards, more than SMSS has API threads, while forwarded children exit */
+        Pass = StressRun(Token, TARGET_SESSION, STRESS_ROUNDS, &Ok, &Bad, &MaxCreateMs, &FirstError, &Wait);
+        Log("SESSFWD concurrent-forwards threads=%u rounds=%u ok=%ld bad=%ld wait=%lx max-create-ms=%lu "
+            "first-error=%lx %s\n", STRESS_THREADS, STRESS_ROUNDS, Ok, Bad, Wait, MaxCreateMs, FirstError,
+            Pass ? "PASS" : "FAIL");
+        if (!Pass) Failures++;
+        if (Wait != WAIT_OBJECT_0)
+        {
+            /* A hang: the stuck threads keep the token; the rest would hang as well */
+            Log("SESSFWD concurrent-forwards: creates did not return within %u ms\n", STRESS_BOUND);
+            goto Done;
+        }
+
+        /* SMSS and session 1's csrss still serve a forward afterwards */
+        RunChild("after-concurrent-forwards-child", Token, TARGET_SESSION, DETACHED_PROCESS);
         CloseHandle(Token);
     }
     else
@@ -354,20 +660,6 @@ Tests(VOID)
     {
         Failures++;
         goto Done;
-    }
-
-    /* Negative: SMSS forwards only for a csrss it started; we are LocalSystem in session 0 */
-    Status = SmConnectToSm(NULL, NULL, 0, &SmPort);
-    Log("SESSFWD sm-connect status=%08lx\n", Status);
-    if (NT_SUCCESS(Status))
-    {
-        Status = SmForwardProcessRegistration(SmPort, &ClientId, TARGET_SESSION, 0);
-        Check("sm-forward-from-system-service", Status, STATUS_ACCESS_DENIED);
-        NtClose(SmPort);
-    }
-    else
-    {
-        Failures++;
     }
 
     /* Negative: the target csrss serves its Sb port only for SMSS: the connection itself is refused
@@ -422,7 +714,7 @@ Tests(VOID)
     NtClose(Process);
 
 Done:
-    Log("SESSFWD done failures=%lu\n", Failures);
+    Log("SESSFWD done failures=%lu skipped=%lu\n", Failures, Skips);
 }
 
 static SERVICE_STATUS_HANDLE StatusHandle;
@@ -435,6 +727,8 @@ Report(DWORD State)
     SetServiceStatus(StatusHandle, &Status);
 }
 
+static ULONG SoakSeconds, SoakSession = TARGET_SESSION;
+
 static
 VOID
 WINAPI
@@ -442,7 +736,8 @@ ServiceMain(DWORD Argc, LPWSTR *Argv)
 {
     StatusHandle = RegisterServiceCtrlHandlerW(L"sfwd", NULL);
     Report(SERVICE_RUNNING);
-    Tests();
+    if (SoakSeconds) Soak(SoakSeconds, SoakSession);
+    else Tests();
     Report(SERVICE_STOPPED);
 }
 
@@ -460,6 +755,9 @@ wmain(int argc, wchar_t *argv[])
         SERVICE_TABLE_ENTRYW Table[] = { { L"sfwd", ServiceMain }, { NULL, NULL } };
 
         if (argc > 2) Out = _wfopen(argv[2], L"w");
+        if ((argc > 4) && !_wcsicmp(argv[3], L"soak")) SoakSeconds = wcstoul(argv[4], NULL, 10);
+        if ((argc > 5) && SoakSeconds) SoakSession = wcstoul(argv[5], NULL, 10);
+        if ((argc > 6) && SoakSeconds && !_wcsicmp(argv[6], L"detached")) StressDetachedOnly = TRUE;
         StartServiceCtrlDispatcherW(Table);
         if (Out) fclose(Out);
         return 0;
