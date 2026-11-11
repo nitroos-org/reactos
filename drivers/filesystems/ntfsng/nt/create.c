@@ -107,6 +107,38 @@ static PNG_FCB NgInsertOrFindFcb(PNG_VCB Vcb, PNG_FCB Candidate)
     return Candidate;
 }
 
+/*
+ * The FCB of (MFT record, unnamed stream) for an open of an existing file, counted as NgInsertOrFindFcb counts a found one
+ * (RefCount and Opening), or NULL.  The caller holds CoreLock: FcbListLock is taken inside it, the order a last cleanup
+ * uses (NgCleanupGated); no path takes CoreLock with FcbListLock held.
+ */
+static PNG_FCB NgFindFcbForOpen(PNG_VCB Vcb, ULONGLONG MftNo)
+{
+    PLIST_ENTRY Entry, Head = NgFcbBucket(Vcb, MftNo);
+    PNG_FCB Found = NULL;
+    ExAcquireFastMutex(&Vcb->FcbListLock);
+    for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
+    {
+        PNG_FCB Fcb = CONTAINING_RECORD(Entry, NG_FCB, HashLinks);
+        if (Fcb->MftNo == MftNo && Fcb->Stream.Length == 0)
+        {
+            InterlockedIncrement(&Fcb->RefCount);
+            Fcb->Opening++;
+            /* In use again: not a candidate for the trim until its next last cleanup. */
+            if (Fcb->IdleLinks.Flink)
+            {
+                RemoveEntryList(&Fcb->IdleLinks);
+                Fcb->IdleLinks.Flink = Fcb->IdleLinks.Blink = NULL;
+                Vcb->IdleCount--;
+            }
+            Found = Fcb;
+            break;
+        }
+    }
+    ExReleaseFastMutex(&Vcb->FcbListLock);
+    return Found;
+}
+
 /* SeManageVolumePrivilege, enabled, in the security context of a user-mode open. */
 static BOOLEAN NgHasManageVolumePrivilege(PACCESS_STATE As)
 {
@@ -1310,6 +1342,22 @@ walked:
         ngc_put(Parent);
         Parent = NULL;
     }
+    /*
+     * An open of a file that has an FCB already (one a handle keeps, or one Mm and Cc keep alive after the last handle)
+     * takes that FCB here and lets go of the node the walk found, in this hold: a candidate FCB made first and thrown
+     * away when the insertion finds the old one had to put its node under the lock again.  The FCB found is counted
+     * in Opening from here; every exit below goes through out:, which gives it back.
+     */
+    if (NT_SUCCESS(Status) && !Created && !Stream.Length && !OpenTarget && Node)
+    {
+        Fcb = NgFindFcbForOpen(Vcb, St.mft_ref & 0xffffffffffffULL);
+        if (Fcb)
+        {
+            Opening = TRUE;
+            ngc_put(Node);
+            Node = NULL;
+        }
+    }
     if (Exclusive)
         NgReleaseCore(Vcb);
     else
@@ -1458,7 +1506,8 @@ walked:
     }
 
     Ccb = NgAllocateCcb(&Full);
-    Fcb = NgAllocateFcb(Vcb);
+    if (!Fcb)
+        Fcb = NgAllocateFcb(Vcb);
     if (!Ccb || !Fcb || Stream.Length > sizeof(Fcb->StreamBuffer))
     {
         Status = STATUS_INSUFFICIENT_RESOURCES;
@@ -1473,23 +1522,27 @@ walked:
     Ccb->DeleteOnClose = Ccb->OpenedDeleteOnClose = (Options & FILE_DELETE_ON_CLOSE) != 0;
     Ccb->AppendOnly = (Effective & FILE_APPEND_DATA) && !(Effective & FILE_WRITE_DATA);
     Ccb->Granted = Effective;
-    Fcb->Node = Node;
-    Fcb->HasNode = TRUE;
-    Node = NULL;
-    Fcb->IsDirectory = IsDir;
-    Fcb->IsRoot = (Full.Length == sizeof(WCHAR));
-    RtlInitEmptyUnicodeString(&Fcb->Stream, Fcb->StreamBuffer, sizeof(Fcb->StreamBuffer));
-    RtlCopyUnicodeString(&Fcb->Stream, &Stream);
-    NgSetStat(Fcb, &St);    /* the state the walk read under the lock: this FCB is not shared yet */
-    Fcb->LogicalVdl = Fcb->Header.FileSize.QuadPart;
-    /* A new segment holds pages read from the stream, none past its end (a read past it is zero filled) */
-    Fcb->TailZeroFrom = Fcb->Header.FileSize.QuadPart;
-    Found = NgInsertOrFindFcb(Vcb, Fcb);
-    Opening = TRUE;
-    if (Found != Fcb)
+    if (!Opening)
     {
-        NgDereferenceFcb(Fcb);
-        Fcb = Found;
+        /* No FCB for the file when the walk looked: this one is the candidate (not shared until inserted). */
+        Fcb->Node = Node;
+        Fcb->HasNode = TRUE;
+        Node = NULL;
+        Fcb->IsDirectory = IsDir;
+        Fcb->IsRoot = (Full.Length == sizeof(WCHAR));
+        RtlInitEmptyUnicodeString(&Fcb->Stream, Fcb->StreamBuffer, sizeof(Fcb->StreamBuffer));
+        RtlCopyUnicodeString(&Fcb->Stream, &Stream);
+        NgSetStat(Fcb, &St);    /* the state the walk read under the lock: this FCB is not shared yet */
+        Fcb->LogicalVdl = Fcb->Header.FileSize.QuadPart;
+        /* A new segment holds pages read from the stream, none past its end (a read past it is zero filled) */
+        Fcb->TailZeroFrom = Fcb->Header.FileSize.QuadPart;
+        Found = NgInsertOrFindFcb(Vcb, Fcb);
+        Opening = TRUE;
+        if (Found != Fcb)
+        {
+            NgDereferenceFcb(Fcb);
+            Fcb = Found;
+        }
     }
     if (Fcb->DeletePending)
     {
