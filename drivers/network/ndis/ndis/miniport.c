@@ -1147,36 +1147,65 @@ MiniScheduleWorker(
         IoQueueWorkItem(IoWorkItem, MiniportWorker, DelayedWorkQueue, NULL);
 }
 
-/* Sends a packet that waited in the queue to a serialized miniport, which the caller runs */
+/* The most packets that waited in the queue which one call of the miniport takes */
+#define MINI_SEND_BATCH 16
+
+/*
+ * Sends packets that waited in the queue to a serialized miniport, which the caller runs.
+ * A miniport with a SendPackets handler gets them in one call: it can tell its adapter once
+ * (for the e1000 a register write that is a VM exit each) instead of once per packet. It sets
+ * the status of each packet; the ones that got RESOURCES (and everything after the first of
+ * them) wait for the next turn, in their order.
+ */
 static
 VOID
-MiniSendQueuedPacket(
+MiniSendQueuedPackets(
     PLOGICAL_ADAPTER Adapter,
-    PNDIS_PACKET     Packet)
+    PNDIS_PACKET     *Packets,
+    UINT             Count)
 {
     PNDIS_M_DRIVER_BLOCK Driver = Adapter->NdisMiniportBlock.DriverHandle;
-    NDIS_STATUS NdisStatus;
+    NDIS_STATUS NdisStatus[MINI_SEND_BATCH];
     KIRQL OldIrql;
+    UINT i;
+
+    ASSERT(Count && Count <= MINI_SEND_BATCH);
 
     /* Serialized miniports send at DISPATCH_LEVEL */
     KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
     if (Driver->MiniportCharacteristics.SendPacketsHandler)
     {
         (*Driver->MiniportCharacteristics.SendPacketsHandler)(
-            Adapter->NdisMiniportBlock.MiniportAdapterContext, &Packet, 1);
-        NdisStatus = NDIS_GET_PACKET_STATUS(Packet);
+            Adapter->NdisMiniportBlock.MiniportAdapterContext, Packets, Count);
+        for (i = 0; i < Count; i++)
+            NdisStatus[i] = NDIS_GET_PACKET_STATUS(Packets[i]);
     }
     else
     {
-        NdisStatus = (*Driver->MiniportCharacteristics.SendHandler)(
-            Adapter->NdisMiniportBlock.MiniportAdapterContext, Packet, Packet->Private.Flags);
+        for (i = 0; i < Count; i++)
+        {
+            if ((i > 0) && (NdisStatus[i - 1] == NDIS_STATUS_RESOURCES))
+            {
+                NdisStatus[i] = NDIS_STATUS_RESOURCES;
+                continue;
+            }
+            NdisStatus[i] = (*Driver->MiniportCharacteristics.SendHandler)(
+                Adapter->NdisMiniportBlock.MiniportAdapterContext, Packets[i], Packets[i]->Private.Flags);
+        }
     }
     KeLowerIrql(OldIrql);
 
-    if (NdisStatus == NDIS_STATUS_RESOURCES)
-        MiniQueueWorkItem(Adapter, NdisWorkItemSend, Packet, TRUE);
-    else if (NdisStatus != NDIS_STATUS_PENDING)
-        MiniSendComplete(Adapter, Packet, NdisStatus);
+    /* Back to the top of the queue last to first, so that they keep their order */
+    for (i = Count; i-- > 0;)
+    {
+        if (NdisStatus[i] == NDIS_STATUS_RESOURCES)
+            MiniQueueWorkItem(Adapter, NdisWorkItemSend, Packets[i], TRUE);
+    }
+    for (i = 0; i < Count; i++)
+    {
+        if ((NdisStatus[i] != NDIS_STATUS_RESOURCES) && (NdisStatus[i] != NDIS_STATUS_PENDING))
+            MiniSendComplete(Adapter, Packets[i], NdisStatus[i]);
+    }
 }
 
 static
@@ -1245,6 +1274,12 @@ MiniLeaveSerialized(
     PNDIS_MINIPORT_INTERRUPT RunDpc;
     NDIS_WORK_ITEM_TYPE WorkItemType;
     PVOID WorkItemContext;
+    PNDIS_PACKET Packets[MINI_SEND_BATCH];
+    UINT Count;
+    /* Only a miniport with a SendPackets handler takes an array; the others are sent one at a
+       time as they always were */
+    UINT MaxBatch = Adapter->NdisMiniportBlock.DriverHandle->MiniportCharacteristics.SendPacketsHandler ?
+                    MINI_SEND_BATCH : 1;
     ULONG Budget = ((Adapter->Stopping && (Caller != MiniLeaveWorkerTurn)) ||
                     ((Caller == MiniLeaveInterruptDpc) && Adapter->SendThread)) ? 0 : 64;
 
@@ -1263,9 +1298,22 @@ MiniLeaveSerialized(
         {
             break;
         }
+        Packets[0] = (PNDIS_PACKET)WorkItemContext;
+        Count = 1;
+
+        /* The sends that queued up behind it go in the same call, under the same limits */
+        while (Budget && (Count < MaxBatch) &&
+               !Adapter->NdisMiniportBlock.FirstPendingPacket &&
+               Adapter->WorkQueueHead &&
+               (Adapter->WorkQueueHead->WorkItemType == NdisWorkItemSend) &&
+               (MiniDequeueWorkItem(Adapter, &WorkItemType, &WorkItemContext) == NDIS_STATUS_SUCCESS))
+        {
+            Budget--;
+            Packets[Count++] = (PNDIS_PACKET)WorkItemContext;
+        }
         KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
 
-        MiniSendQueuedPacket(Adapter, (PNDIS_PACKET)WorkItemContext);
+        MiniSendQueuedPackets(Adapter, Packets, Count);
     }
 
     Adapter->MiniportBusy = FALSE;

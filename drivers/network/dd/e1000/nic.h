@@ -17,6 +17,8 @@
 #define E1000_TAG '001e'
 
 #define MAXIMUM_FRAME_SIZE   1522
+#define RX_TAIL_BATCH        16
+#define TX_KICK_BATCH        2
 #define RECEIVE_BUFFER_SIZE  2048
 
 #define DRIVER_VERSION 1
@@ -89,6 +91,12 @@ typedef struct _E1000_ADAPTER
     volatile PUCHAR ReceiveBuffer;
     NDIS_PHYSICAL_ADDRESS ReceiveBufferPa;
     ULONG ReceiveBufferEntrySize;
+
+    /* The last descriptor given back to the adapter, and the tail register value (RDT) written last.
+       The registers are device memory (every access is a VM exit): the ring is tracked here, and
+       the tail is written when a batch of descriptors is back, not for each interrupt */
+    ULONG ReceiveTail;
+    ULONG ReceiveTailWritten;
 
 } E1000_ADAPTER, *PE1000_ADAPTER;
 
@@ -164,6 +172,13 @@ VOID
 NTAPI
 NICUpdateLinkStatus(
     IN PE1000_ADAPTER Adapter);
+
+VOID
+NTAPI
+MiniportSendPackets(
+    _In_ NDIS_HANDLE MiniportAdapterContext,
+    _In_ PPNDIS_PACKET PacketArray,
+    _In_ UINT NumberOfPackets);
 
 NDIS_STATUS
 NTAPI
