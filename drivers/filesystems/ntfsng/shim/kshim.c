@@ -1228,6 +1228,18 @@ static unsigned long kshim_icache_unused_limit(void)
 	}
 	return lim;
 }
+/*
+ * Bytes the unused inodes may hold (what kshim_icache_cost adds up): the count limit times 3 KB, so 12 MB at the smallest
+ * (1 GB of RAM or less) up to 96 MB (8 GB or more), per volume.  The count limit alone bounds the bytes only as far as every
+ * inode costs the same: a plain file costs about 2.6 KB (inode 1368, copy of its MFT record 1024, a small runlist), and the
+ * rest of an inode grows with how fragmented the file is (runlist, attribute list, extent records), so the same count can
+ * hold more memory as the files held are more fragmented (the 3 h soak: the average pool allocation of the file system went
+ * from 1456 to 1712 bytes with the count flat).  3 KB is 1.15 times a plain file: the byte limit does not bind on ordinary
+ * files and holds the heavy ones.
+ */
+#define KSHIM_ICACHE_AVG_BYTES 3072UL
+#define KSHIM_ICACHE_BYTES (KSHIM_ICACHE_UNUSED * KSHIM_ICACHE_AVG_BYTES)
+unsigned int (*kshim_icache_cost)(struct inode *i);
 /* Folio pages (nonpaged pool) before unused inodes are evicted: 96 MB, or 1/16 of memory if less. */
 #define KSHIM_PC_PAGES_SOFT kshim_pc_soft_limit()
 unsigned long kshim_pc_soft_limit(void)
@@ -1252,7 +1264,7 @@ void (*kshim_icache_added)(struct inode *i);
 static struct inode *kshim_lru_take(struct super_block *sb, bool more);
 static void kshim_lru_evict(struct inode *v);
 static void kshim_icache_trim_pressure(struct super_block *sb);
-unsigned long kshim_icache_pressure_evicted;
+unsigned long kshim_icache_pressure_evicted, kshim_icache_byte_evicted;
 static void ihash_add_locked(struct inode *i)
 {
 	struct super_block *sb = i->i_sb;
@@ -1290,6 +1302,8 @@ static void lru_del_locked(struct inode *i)
 	i->kshim_lru_prev = i->kshim_lru_next = NULL;
 	i->kshim_in_lru = 0;
 	sb->kshim_lru_count--;
+	sb->kshim_lru_bytes -= i->kshim_lru_bytes;
+	i->kshim_lru_bytes = 0;
 }
 static void lru_add_locked(struct inode *i)
 {
@@ -1303,6 +1317,9 @@ static void lru_add_locked(struct inode *i)
 	sb->kshim_lru_tail = i;
 	i->kshim_in_lru = 1;
 	sb->kshim_lru_count++;
+	/* Nobody uses an unused inode, so what it holds cannot change while it is on the list. */
+	i->kshim_lru_bytes = kshim_icache_cost ? kshim_icache_cost(i) : 0;
+	sb->kshim_lru_bytes += i->kshim_lru_bytes;
 }
 void inode_init_once(struct inode *i) { memset(i, 0, sizeof(*i)); }
 static void kshim_inode_init(struct super_block *sb, struct inode *i)
@@ -1585,7 +1602,11 @@ void kshim_icache_trim(struct super_block *sb)
 	struct inode *v;
 	int budget = 64;	/* the page count also holds pages of inodes in use: evict a bounded batch for it */
 	long tries = sb->kshim_lru_count + 64;	/* an inode whose writeback fails goes back on the list */
+	/* Over the byte limit: the oldest go, down to a quarter of the count limit (never below 1024) so a few heavy inodes cannot empty the list. */
+	unsigned long byte_floor = KSHIM_ICACHE_UNUSED / 4;
+	if (byte_floor < 1024) byte_floor = 1024;
 	while (tries-- > 0 && (v = kshim_lru_take(sb, sb->kshim_lru_count > KSHIM_ICACHE_UNUSED ||
+				   (sb->kshim_lru_bytes > KSHIM_ICACHE_BYTES && sb->kshim_lru_count > byte_floor && ++kshim_icache_byte_evicted) ||
 				   (sb->kshim_lru_count && kshim_pc_pages > KSHIM_PC_PAGES_SOFT && budget-- > 0))))
 		kshim_lru_evict(v);
 	kshim_icache_trim_pressure(sb);

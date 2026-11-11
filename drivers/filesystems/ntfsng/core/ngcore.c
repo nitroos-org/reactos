@@ -56,6 +56,7 @@ struct inode *kshim_icache_peek(struct super_block *sb, unsigned long hashval,
 		int (*test)(struct inode *, void *), void *data);
 int kshim_icache_busy(struct super_block *sb, unsigned long hashval,
 		int (*test)(struct inode *, void *), void *data);
+extern unsigned int (*kshim_icache_cost)(struct inode *i);
 extern unsigned long kshim_pc_pages, kshim_inodes_live, kshim_counter_reads;
 void kshim_dump_allocs(void);
 int kshim_dev_rw(struct block_device *b, int write, u64 off, void *buf, size_t len);
@@ -288,6 +289,45 @@ static bool ngc_icache_ok(struct inode *i)
 }
 
 /*
+ * What an unused inode holds in nonpaged pool (kshim_icache_cost, once, when it joins the unused list): the inode with its
+ * NTFS part, the copy of its MFT record that stays with it (mrec), its runlist, attribute list, stream name and reparse
+ * target, and for each extent record the same again; every allocation with the shim's and the pool's header.  A plain file is
+ * about 2.6 KB (1368 + 1024 + a two-element runlist, measured: 16,381 unused inodes, 24.0 MB in the 4 GB case); what the count limit alone
+ * does not bound is the rest, a file in many fragments, a long attribute list, a name, extent records.  Nobody holds the inode,
+ * so its fields are stable.
+ */
+#define NGC_ALLOC_OVH 48u	/* struct khdr of the shim (32) + the pool header (16) */
+static unsigned long ngc_ni_cost(const struct ntfs_inode *ni)
+{
+	unsigned long n = ni->runlist.count * sizeof(struct runlist_element) + ni->attr_list_size + (unsigned long)ni->name_len * 2;
+	if (ni->runlist.rl)
+		n += NGC_ALLOC_OVH;
+	if (ni->attr_list)
+		n += NGC_ALLOC_OVH;
+	if (ni->name)
+		n += NGC_ALLOC_OVH;
+	if (ni->mrec && ni->vol)
+		n += ni->vol->mft_record_size + NGC_ALLOC_OVH;
+	if (ni->target)
+		n += strlen(ni->target) + 1 + NGC_ALLOC_OVH;
+	return n;
+}
+
+static unsigned int ngc_icache_cost(struct inode *i)
+{
+	struct ntfs_inode *ni = NTFS_I(i);
+	unsigned long n = sizeof(struct big_ntfs_inode) + NGC_ALLOC_OVH + ngc_ni_cost(ni);
+	s32 k;
+	if (ni->nr_extents > 0 && ni->ext.extent_ntfs_inos) {
+		n += (unsigned long)ni->nr_extents * sizeof(void *) + NGC_ALLOC_OVH;
+		for (k = 0; k < ni->nr_extents; k++)
+			if (ni->ext.extent_ntfs_inos[k])
+				n += sizeof(struct ntfs_inode) + NGC_ALLOC_OVH + ngc_ni_cost(ni->ext.extent_ntfs_inos[k]);
+	}
+	return n > ~0u / 2 ? ~0u / 2 : n;
+}
+
+/*
  * The core's error reports that mean the metadata on disk is (or would be) inconsistent.  They pass
  * through ntfs_error, which with on_errors=continue does nothing, and most of them do not set
  * NVolErrors.  Out-of-space and out-of-memory reports do not match and leave the volume as it is.
@@ -347,6 +387,7 @@ int ngc_init(void)
 			ngc_inited = 1;
 		kshim_is_data_inode = ngc_is_data_inode;
 		kshim_icache_ok = ngc_icache_ok;
+		kshim_icache_cost = ngc_icache_cost;
 		kshim_icache_evicting = ngc_stc_evicting;
 		kshim_icache_added = ngc_stc_added;
 		kshim_core_error = ngc_core_error;
