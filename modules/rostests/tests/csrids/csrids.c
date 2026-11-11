@@ -247,6 +247,153 @@ ThreadTests(VOID)
     }
 }
 
+/* The ids of a thread handle, as csrss reads them */
+static
+BOOL
+IdsOfThread(HANDLE Thread, PCLIENT_ID Ids)
+{
+    THREAD_BASIC_INFORMATION Info;
+
+    if (!NT_SUCCESS(NtQueryInformationThread(Thread, ThreadBasicInformation, &Info, sizeof(Info), NULL)))
+        return FALSE;
+    *Ids = Info.ClientId;
+    return TRUE;
+}
+
+/* Handle count of the first csrss.exe, 0 when it cannot be read */
+static
+DWORD
+CsrssHandleCount(VOID)
+{
+    HANDLE Snapshot, Process;
+    PROCESSENTRY32W Entry;
+    DWORD Count = 0, Pid = 0;
+
+    Snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (Snapshot == INVALID_HANDLE_VALUE) return 0;
+    Entry.dwSize = sizeof(Entry);
+    if (Process32FirstW(Snapshot, &Entry))
+        do
+            if (!_wcsicmp(Entry.szExeFile, L"csrss.exe")) { Pid = Entry.th32ProcessID; break; }
+        while (Process32NextW(Snapshot, &Entry));
+    CloseHandle(Snapshot);
+    if (!Pid) return 0;
+    Process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, Pid);
+    if (!Process) Process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, Pid);
+    if (!Process) return 0;
+    if (!GetProcessHandleCount(Process, &Count)) Count = 0;
+    CloseHandle(Process);
+    return Count;
+}
+
+static DWORD WINAPI Quick(LPVOID Arg) { return 0x77; }
+
+/* A thread of ours through kernel32 (registered with csrss) that runs and returns 0x77 */
+static
+NTSTATUS
+QuickThreadWorks(VOID)
+{
+    HANDLE Thread = CreateThread(NULL, 0, Quick, NULL, 0, NULL);
+    DWORD Code = 0;
+
+    if (!Thread) return STATUS_UNSUCCESSFUL;
+    WaitForSingleObject(Thread, 10000);
+    GetExitCodeThread(Thread, &Code);
+    CloseHandle(Thread);
+    return (Code == 0x77) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+}
+
+/*
+ * A thread that is already dead is registered with the ids of its own handle: the ids check passes and
+ * the insert fails (STATUS_THREAD_IS_TERMINATING). That failure must leave csrss as it was: its process
+ * lock and references balanced (for our own process and for a remote one), no handle kept, and later
+ * registrations still working.
+ */
+static
+VOID
+DeadThreadTests(VOID)
+{
+    HANDLE Dead, Remote, RemoteDead;
+    CLIENT_ID Ids, RemoteIds;
+    DWORD Before, After, Code, I, Bad = 0, RemoteBad = 0;
+    WCHAR Self[MAX_PATH], CommandLine[MAX_PATH + 16];
+    STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
+    PROCESS_INFORMATION ProcessInfo;
+    LPTHREAD_START_ROUTINE Exit = (LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "ExitThread");
+
+    /* Our own dead thread */
+    Dead = CreateThread(NULL, 0, Quick, NULL, 0, NULL);
+    if (!Dead || WaitForSingleObject(Dead, 10000) != WAIT_OBJECT_0 || !IdsOfThread(Dead, &Ids))
+    {
+        Check("deadthread-setup", STATUS_UNSUCCESSFUL, STATUS_SUCCESS);
+        if (Dead) CloseHandle(Dead);
+        return;
+    }
+    Check("deadthread-register", CallBaseCreateThread(Dead, &Ids), STATUS_THREAD_IS_TERMINATING);
+
+    Before = CsrssHandleCount();
+    for (I = 0; I < 1000; I++)
+        if (CallBaseCreateThread(Dead, &Ids) != STATUS_THREAD_IS_TERMINATING) Bad++;
+    After = CsrssHandleCount();
+    Log("CSRIDS deadthread-own: 1000 calls, %lu with another status; csrss handles %lu -> %lu\n", Bad, Before, After);
+    Check("deadthread-own-repeat", Bad ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS, STATUS_SUCCESS);
+    if (Before)
+        Check("deadthread-own-no-handle-leak", (After <= Before + 8) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL, STATUS_SUCCESS);
+    else
+        Log("CSRIDS deadthread-own-no-handle-leak: csrss handle count not readable SKIP\n");
+    CloseHandle(Dead);
+    Check("deadthread-own-then-createthread", QuickThreadWorks(), STATUS_SUCCESS);
+
+    /* The same for a remote target: a dead thread of a registered child, named with the child's ids */
+    GetModuleFileNameW(NULL, Self, MAX_PATH);
+    _snwprintf(CommandLine, RTL_NUMBER_OF(CommandLine), L"\"%s\" childwait", Self);
+    if (!CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
+    {
+        Check("deadthread-remote-setup", STATUS_UNSUCCESSFUL, STATUS_SUCCESS);
+        return;
+    }
+    Sleep(1000);
+    RemoteDead = CreateRemoteThread(ProcessInfo.hProcess, NULL, 0, Exit, (LPVOID)0x5E55, 0, NULL);
+    if (!RemoteDead || WaitForSingleObject(RemoteDead, 10000) != WAIT_OBJECT_0 || !IdsOfThread(RemoteDead, &RemoteIds))
+    {
+        Check("deadthread-remote-setup", STATUS_UNSUCCESSFUL, STATUS_SUCCESS);
+    }
+    else
+    {
+        Check("deadthread-remote-register", CallBaseCreateThread(RemoteDead, &RemoteIds), STATUS_THREAD_IS_TERMINATING);
+        Before = CsrssHandleCount();
+        for (I = 0; I < 1000; I++)
+            if (CallBaseCreateThread(RemoteDead, &RemoteIds) != STATUS_THREAD_IS_TERMINATING) RemoteBad++;
+        After = CsrssHandleCount();
+        Log("CSRIDS deadthread-remote: 1000 calls, %lu with another status; csrss handles %lu -> %lu\n", RemoteBad, Before, After);
+        Check("deadthread-remote-repeat", RemoteBad ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS, STATUS_SUCCESS);
+        if (Before)
+            Check("deadthread-remote-no-handle-leak", (After <= Before + 8) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL, STATUS_SUCCESS);
+        else
+            Log("CSRIDS deadthread-remote-no-handle-leak: csrss handle count not readable SKIP\n");
+
+        /* The child is still registered and still takes threads (its process lock and references are intact) */
+        Remote = CreateRemoteThread(ProcessInfo.hProcess, NULL, 0, Exit, (LPVOID)0x5E55, 0, NULL);
+        Code = 0;
+        if (Remote)
+        {
+            WaitForSingleObject(Remote, 10000);
+            GetExitCodeThread(Remote, &Code);
+            CloseHandle(Remote);
+        }
+        Check("deadthread-remote-then-createremotethread", (Remote && Code == 0x5E55) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL, STATUS_SUCCESS);
+    }
+    if (RemoteDead) CloseHandle(RemoteDead);
+
+    /* Ending the child runs its teardown in csrss with the references as they should be */
+    TerminateProcess(ProcessInfo.hProcess, 0);
+    WaitForSingleObject(ProcessInfo.hProcess, 10000);
+    CloseHandle(ProcessInfo.hProcess);
+    CloseHandle(ProcessInfo.hThread);
+    Sleep(500);
+    Check("deadthread-after-child-exit-createthread", QuickThreadWorks(), STATUS_SUCCESS);
+}
+
 /*
  * rvcsrss 2: the create-time branch of BaseSrvCheckNewProcess. A spawner process creates an unregistered
  * child and exits; once its pid is free we create processes until one gets that pid. That process names the
@@ -437,6 +584,7 @@ Tests(BOOL System)
     Log("CSRIDS start pid=%lu system=%d\n", GetCurrentProcessId(), System);
     BaseTests();
     ThreadTests();
+    DeadThreadTests();
     PidReuseTest();
     if (System) SbTests();
     Log("CSRIDS done failures=%lu\n", Failures);
@@ -491,6 +639,18 @@ wmain(int argc, wchar_t *argv[])
         Id.UniqueProcess = UlongToHandle(Pid);
         Id.UniqueThread = UlongToHandle(Tid);
         return (int)CallBaseCreateProcess((HANDLE)P, (HANDLE)T, &Id);
+    }
+
+    if ((argc > 1) && !_wcsicmp(argv[1], L"threads"))
+    {
+        /* Only the thread registration cases (a 32-bit build under WoW64 runs these) */
+        if (argc > 2) Out = _wfopen(argv[2], L"w");
+        Log("CSRIDS start pid=%lu threads-only %s\n", GetCurrentProcessId(), sizeof(void *) == 4 ? "32-bit" : "64-bit");
+        ThreadTests();
+        DeadThreadTests();
+        Log("CSRIDS done failures=%lu\n", Failures);
+        if (Out) fclose(Out);
+        return Failures ? 1 : 0;
     }
 
     if ((argc > 1) && !_wcsicmp(argv[1], L"svc"))
