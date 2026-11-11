@@ -830,6 +830,69 @@ ObpCloseHandleTableEntry(IN PHANDLE_TABLE HandleTable,
     return STATUS_SUCCESS;
 }
 
+/*
+ * Undo the handle count, and for a type with a handle database the entry for Process, that
+ * ObpIncrementHandleCount or ObpIncrementUnnamedHandleCount took for a handle that is not created after
+ * all (the type's open procedure refused it, or the database could not grow). No close callback runs: the
+ * object never finished opening for that process. Called with the object lock held.
+ */
+static
+VOID
+ObpUndoHandleCount(
+    _In_ POBJECT_HEADER ObjectHeader,
+    _In_ POBJECT_TYPE ObjectType,
+    _In_ PEPROCESS Process,
+    _In_ BOOLEAN DataBaseAdded)
+{
+    InterlockedDecrementSizeT(&ObjectHeader->HandleCount);
+    if (DataBaseAdded && ObjectType->TypeInfo.MaintainHandleCount)
+    {
+        POBJECT_HEADER_HANDLE_INFO HandleInfo;
+        POBJECT_HANDLE_COUNT_ENTRY HandleEntry = NULL;
+        POBJECT_HANDLE_COUNT_DATABASE HandleDatabase;
+        ULONG Entries;
+
+        HandleInfo = OBJECT_HEADER_TO_HANDLE_INFO(ObjectHeader);
+        if (ObjectHeader->Flags & OB_FLAG_SINGLE_PROCESS)
+        {
+            ASSERT(HandleInfo->SingleEntry.Process == Process);
+            ASSERT(HandleInfo->SingleEntry.HandleCount > 0);
+            HandleInfo->SingleEntry.HandleCount--;
+            HandleEntry = &HandleInfo->SingleEntry;
+        }
+        else
+        {
+            HandleDatabase = HandleInfo->HandleCountDatabase;
+            if (HandleDatabase)
+            {
+                Entries = HandleDatabase->CountEntries;
+                HandleEntry = &HandleDatabase->HandleCountEntries[0];
+                while (Entries)
+                {
+                    if ((HandleEntry->HandleCount) &&
+                        (HandleEntry->Process == Process))
+                    {
+                        HandleEntry->HandleCount--;
+                        break;
+                    }
+
+                    HandleEntry++;
+                    Entries--;
+                }
+
+                /* Not found: nothing to clear */
+                if (!Entries) HandleEntry = NULL;
+            }
+        }
+
+        /* Clear a now-empty entry, as ObpDecrementHandleCount does */
+        if ((HandleEntry) && !(HandleEntry->HandleCount))
+        {
+            HandleEntry->Process = NULL;
+        }
+    }
+}
+
 /*++
 * @name ObpIncrementHandleCount
 *
@@ -1042,9 +1105,11 @@ ObpIncrementHandleCount(IN PVOID Object,
                                             &ProcessHandleCount);
         if (!NT_SUCCESS(Status))
         {
-            /* FIXME: This should never happen for now */
-            DPRINT1("Unhandled case\n");
-            ASSERT(FALSE);
+            /* The database could not grow: no handle, balance the count we took (lock still held) */
+            DPRINT1("ObpIncrementHandleCount: handle database failed, Status %lx\n", Status);
+            ObpUndoHandleCount(ObjectHeader, ObjectType, Process, FALSE);
+            if (Exclusive && !ObjectHeader->HandleCount)
+                OBJECT_HEADER_TO_QUOTA_INFO(ObjectHeader)->ExclusiveProcess = NULL;
             goto Quickie;
         }
     }
@@ -1087,7 +1152,8 @@ ObpIncrementHandleCount(IN PVOID Object,
              * the close procedure. An open procedure fails when it cannot
              * get what the handle needs; a desktop maps its heap into the
              * process, which fails when the process has no address space
-             * left (a 32-bit process, or a WoW64 view below 2 GB).
+             * left (a 32-bit process, or a WoW64 view below 2 GB); a window
+             * station or desktop of another session is refused.
              */
             ObpDecrementHandleCountEx(Object, Process, *GrantedAccess, ObjectType, TRUE);
             goto Quickie;
@@ -1314,60 +1380,9 @@ ObpIncrementUnnamedHandleCount(IN PVOID Object,
         /* Check if the open procedure failed */
         if (!NT_SUCCESS(Status))
         {
-            /* FIXME: This should never happen for now */
-            DPRINT1("Unhandled case\n");
-            ASSERT(FALSE);
-            /* Open failed after we took the count and dropped the lock; undo both
-               the handle count and, for tracked types, the database entry we added,
-               with no close callback since the object never finished opening */
+            /* The type refused the handle: undo the count and the database entry, no close callback */
             ObpAcquireObjectLock(ObjectHeader);
-            InterlockedDecrementSizeT(&ObjectHeader->HandleCount);
-            if (ObjectType->TypeInfo.MaintainHandleCount)
-            {
-                POBJECT_HEADER_HANDLE_INFO HandleInfo;
-                POBJECT_HANDLE_COUNT_ENTRY HandleEntry = NULL;
-                POBJECT_HANDLE_COUNT_DATABASE HandleDatabase;
-                ULONG Entries;
-
-                HandleInfo = OBJECT_HEADER_TO_HANDLE_INFO(ObjectHeader);
-                if (ObjectHeader->Flags & OB_FLAG_SINGLE_PROCESS)
-                {
-                    ASSERT(HandleInfo->SingleEntry.Process == Process);
-                    ASSERT(HandleInfo->SingleEntry.HandleCount > 0);
-                    HandleInfo->SingleEntry.HandleCount--;
-                    HandleEntry = &HandleInfo->SingleEntry;
-                }
-                else
-                {
-                    HandleDatabase = HandleInfo->HandleCountDatabase;
-                    if (HandleDatabase)
-                    {
-                        Entries = HandleDatabase->CountEntries;
-                        HandleEntry = &HandleDatabase->HandleCountEntries[0];
-                        while (Entries)
-                        {
-                            if ((HandleEntry->HandleCount) &&
-                                (HandleEntry->Process == Process))
-                            {
-                                HandleEntry->HandleCount--;
-                                break;
-                            }
-
-                            HandleEntry++;
-                            Entries--;
-                        }
-
-                        /* Not found: nothing to clear */
-                        if (!Entries) HandleEntry = NULL;
-                    }
-                }
-
-                /* Clear a now-empty entry, as ObpDecrementHandleCount does */
-                if ((HandleEntry) && !(HandleEntry->HandleCount))
-                {
-                    HandleEntry->Process = NULL;
-                }
-            }
+            ObpUndoHandleCount(ObjectHeader, ObjectType, Process, TRUE);
             ObpReleaseObjectLock(ObjectHeader);
             goto Quickie;
         }
