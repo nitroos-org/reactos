@@ -2176,16 +2176,23 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         if (Ccb && !Ccb->Orphaned)
             NgNotify(Vcb, &Ccb->Path, FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
     }
-    /* Mm may keep this FCB alive long after the last handle: park the core inode (see NgEnsureNode). */
+    /*
+     * Mm may keep this FCB alive long after the last handle: park the core inode (see NgEnsureNode).  An FCB that holds
+     * no node and has no allocation to give back (a parked one that was only queried: NgFillStat reads through a node of
+     * its own) has nothing to park, and its last cleanup does not take CoreLock.  A node that is attached to it later
+     * belongs to a user of the FCB without a handle (a paging transfer), which parks it itself.
+     */
     if (Last && Fcb->HasNode)
     {
-        NgAcquireCore(Vcb);
+        BOOLEAN Core = Fcb->Node || Fcb->Grown;
+        if (Core)
+            NgAcquireCore(Vcb);
         ExAcquireFastMutex(&Vcb->FcbListLock);
         Last = (Fcb->OpenHandles == 0);
         if (Last && Fcb->Deleted)
             NgFcbRemoveLocked(Fcb);     /* removed with POSIX semantics while handles were open (NgDeleteNow KeepOpen) */
         ExReleaseFastMutex(&Vcb->FcbListLock);
-        if (Last)
+        if (Last && Core)
         {
             /* The allocation ahead of the size (ngc_set_size) is given back once nobody has the stream open. */
             if (Fcb->Grown && !Fcb->Deleted && !NgEnsureNode(Fcb))
@@ -2196,7 +2203,8 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             }
             NgParkNode(Fcb);
         }
-        NgReleaseCore(Vcb);
+        if (Core)
+            NgReleaseCore(Vcb);
     }
     ExReleaseResourceLite(Fcb->Header.Resource);
     FileObject->Flags |= FO_CLEANUP_COMPLETE;
