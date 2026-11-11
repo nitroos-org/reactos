@@ -555,12 +555,13 @@ ObpValidateAccessMask(IN PACCESS_STATE AccessState,
 * @remarks None.
 *
 *--*/
+static
 VOID
-NTAPI
-ObpDecrementHandleCount(IN PVOID ObjectBody,
-                        IN PEPROCESS Process,
-                        IN ACCESS_MASK GrantedAccess,
-                        IN POBJECT_TYPE ObjectType)
+ObpDecrementHandleCountEx(IN PVOID ObjectBody,
+                          IN PEPROCESS Process,
+                          IN ACCESS_MASK GrantedAccess,
+                          IN POBJECT_TYPE ObjectType,
+                          IN BOOLEAN OpenFailed)
 {
     POBJECT_HEADER ObjectHeader;
     LONG SystemHandleCount, ProcessHandleCount;
@@ -659,6 +660,16 @@ ObpDecrementHandleCount(IN PVOID ObjectBody,
     /* Release the lock */
     ObpReleaseObjectLock(ObjectHeader);
 
+    /*
+     * A handle whose open procedure failed was never opened: the close
+     * procedure has nothing to undo, and the type did not count it yet
+     */
+    if (OpenFailed)
+    {
+        ObpDeleteNameCheck(ObjectBody);
+        return;
+    }
+
     /* Check if we have a close procedure */
     if (ObjectType->TypeInfo.CloseProcedure)
     {
@@ -684,6 +695,16 @@ ObpDecrementHandleCount(IN PVOID ObjectBody,
             ObjectBody,
             ObjectHeader->HandleCount,
             ObjectHeader->PointerCount);
+}
+
+VOID
+NTAPI
+ObpDecrementHandleCount(IN PVOID ObjectBody,
+                        IN PEPROCESS Process,
+                        IN ACCESS_MASK GrantedAccess,
+                        IN POBJECT_TYPE ObjectType)
+{
+    ObpDecrementHandleCountEx(ObjectBody, Process, GrantedAccess, ObjectType, FALSE);
 }
 
 /*++
@@ -1060,23 +1081,15 @@ ObpIncrementHandleCount(IN PVOID Object,
         /* Check if the open procedure failed */
         if (!NT_SUCCESS(Status))
         {
-#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-            if (Process->Wow64Process != NULL && ObjectType == ExDesktopObjectType)
-            {
-                /* A WoW64 desktop view can run out of low address space.
-                 * No handle was created and the failed open acquired no view,
-                 * so undo our count without invoking the close callback. */
-                ASSERT(!ObjectType->TypeInfo.MaintainHandleCount);
-                ASSERT(!Exclusive);
-                ObpAcquireObjectLock(ObjectHeader);
-                InterlockedDecrementSizeT(&ObjectHeader->HandleCount);
-                ObpReleaseObjectLock(ObjectHeader);
-                goto Quickie;
-            }
-#endif
-            /* FIXME: This should never happen for now */
-            DPRINT1("Unhandled case\n");
-            ASSERT(FALSE);
+            /*
+             * No handle is created for a failed open: take back the counts
+             * taken above (the object's and the process's) without calling
+             * the close procedure. An open procedure fails when it cannot
+             * get what the handle needs; a desktop maps its heap into the
+             * process, which fails when the process has no address space
+             * left (a 32-bit process, or a WoW64 view below 2 GB).
+             */
+            ObpDecrementHandleCountEx(Object, Process, *GrantedAccess, ObjectType, TRUE);
             goto Quickie;
         }
     }
