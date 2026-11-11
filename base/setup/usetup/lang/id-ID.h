@@ -152,14 +152,14 @@ static MUI_ENTRY idIDWelcomePageEntries[] =
     {
         6,
         23,
-        "Untuk informasi lebih lanjut terkait ReactOS, mohon kunjungi:",
+        "Untuk informasi lebih lanjut terkait " BRAND_PRODUCT_NAME ", mohon kunjungi:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

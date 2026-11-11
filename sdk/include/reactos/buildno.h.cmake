@@ -41,6 +41,9 @@
 #define BRAND_VERSION_FULL_STR      "@NITRO_TITLE@"
 #define BRAND_VERSION_FULL_RC       "@NITRO_TITLE@\0"
 #define BRAND_NOTICE_STR            "@NITRO_NOTICE@"
+/* Help, support and bug-report links shown to users (one place; see version.cmake) */
+#define BRAND_SUPPORT_URL           "@NITRO_SUPPORT_URL@"
+#define BRAND_ISSUES_URL            "@NITRO_ISSUES_URL@"
 #define BRAND_BASED_ON_VERSION_RC   "Based on ReactOS @KERNEL_VERSION_MAJOR@.@KERNEL_VERSION_MINOR@.@KERNEL_VERSION_PATCH_LEVEL@\0"
 
 #define REACTOS_COMPILER_NAME       "@CMAKE_C_COMPILER_ID@"

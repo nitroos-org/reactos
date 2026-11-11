@@ -160,14 +160,14 @@ static MUI_ENTRY csCZWelcomePageEntries[] =
     {
         6,
         23,
-        "V\241ce informac\241 o ReactOS naleznete na adrese:",
+        "V\241ce informac\241 o " BRAND_PRODUCT_NAME " naleznete na adrese:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

@@ -396,8 +396,8 @@ listing of credits."
  it under the terms of the GNU General Public License as published by\n\
  the Free Software Foundation; either version 2 of the License, or\n\
  (at your option) any later version.\n"
-    STRING_VERSION_HELP5 "\nBug 報告發送到 <ros-dev@reactos.org>。\n\
-更新可在 https://reactos.org 檢視。"
+    STRING_VERSION_HELP5 "\nBug 報告發送到 " BRAND_ISSUES_URL "。\n\
+更新可在 " BRAND_SUPPORT_URL " 檢視。"
     STRING_VERSION_HELP6 "\nFreeDOS 版本作者：\n"
     STRING_VERSION_HELP7 "\nReactOS 版本作者：\n"
     STRING_VOL_HELP1 " 磁碟機 %c 中的磁碟區標籤是 %s\n"

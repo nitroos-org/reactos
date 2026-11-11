@@ -175,8 +175,8 @@ BEGIN
     IDS_APPTITLE "ReactOS 程序管理器"
     IDS_APP_AUTHORS "Copyright 2009 Dmitry Chapyshev"
     IDS_WELCOME_TITLE "欢迎使用 ReactOS 程序管理器！"
-    IDS_WELCOME_TEXT "从左栏选择一个类别，然后选择要安装或卸载的程序。\nReactOS 网站："
-    IDS_WELCOME_URL "https://reactos.org"
+    IDS_WELCOME_TEXT "从左栏选择一个类别，然后选择要安装或卸载的程序。\n" BRAND_PRODUCT_NAME " 网站："
+    IDS_WELCOME_URL BRAND_SUPPORT_URL
 
     IDS_APPWIZ_TITLE "添加/删除程序"
     IDS_APPWIZ_TEXT1 "选择“应用程序”或“更新”，查看系统中已安装的程序或更新。"

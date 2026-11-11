@@ -154,14 +154,14 @@ static MUI_ENTRY etEEWelcomePageEntries[] =
     {
         6,
         23,
-        "ReactOS'i kohta saab rohkem infot:",
+        "" BRAND_PRODUCT_NAME "'i kohta saab rohkem infot:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

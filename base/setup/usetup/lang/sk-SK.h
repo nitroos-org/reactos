@@ -160,14 +160,14 @@ static MUI_ENTRY skSKWelcomePageEntries[] =
     {
         6,
         23,
-        "Pre viac inform\240ci\241 o syst\202me ReactOS, nav\347t\241vte pros\241m:",
+        "Pre viac inform\240ci\241 o syst\202me " BRAND_PRODUCT_NAME ", nav\347t\241vte pros\241m:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },

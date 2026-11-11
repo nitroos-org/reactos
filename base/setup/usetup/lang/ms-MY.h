@@ -151,14 +151,14 @@ static MUI_ENTRY msMYWelcomePageEntries[] =
     {
         6,
         23,
-        "Untuk maklumat lanjut mengenai ReactOS, sila layari:",
+        "Untuk maklumat lanjut mengenai " BRAND_PRODUCT_NAME ", sila layari:",
         TEXT_STYLE_NORMAL,
         TEXT_ID_STATIC
     },
     {
         6,
         24,
-        "https://reactos.org/",
+        BRAND_SUPPORT_URL,
         TEXT_STYLE_HIGHLIGHT,
         TEXT_ID_STATIC
     },
