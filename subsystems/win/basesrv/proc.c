@@ -282,6 +282,42 @@ CSR_API(BaseSrvCreateProcess)
     return Status;
 }
 
+/*
+ * The thread the client registers (CreateThread, CreateRemoteThread) must be the thread of the handle it
+ * passes: process and thread ids read from the handle (ThreadBasicInformation) must equal the request's.
+ * CsrCreateThread stores the request's ids, and a remote registration locks the process the request names,
+ * so without this a client could add a thread with ids of its choice to any registered process. A thread of
+ * another process is still accepted when the client really holds a handle to it (CreateRemoteThread).
+ */
+static
+NTSTATUS
+BaseSrvCheckNewThread(IN PCSR_PROCESS Client,
+                      IN PBASE_CREATE_THREAD Request)
+{
+    NTSTATUS Status;
+    HANDLE ThreadHandle;
+    THREAD_BASIC_INFORMATION ThreadInfo;
+
+    Status = NtDuplicateObject(Client->ProcessHandle,
+                               Request->ThreadHandle,
+                               NtCurrentProcess(),
+                               &ThreadHandle,
+                               THREAD_QUERY_LIMITED_INFORMATION,
+                               0,
+                               0);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = NtQueryInformationThread(ThreadHandle, ThreadBasicInformation,
+                                      &ThreadInfo, sizeof(ThreadInfo), NULL);
+    NtClose(ThreadHandle);
+    if (!NT_SUCCESS(Status)) return Status;
+    if ((ThreadInfo.ClientId.UniqueProcess != Request->ClientId.UniqueProcess) ||
+        (ThreadInfo.ClientId.UniqueThread != Request->ClientId.UniqueThread))
+    {
+        return STATUS_INVALID_CID;
+    }
+    return STATUS_SUCCESS;
+}
+
 CSR_API(BaseSrvCreateThread)
 {
     NTSTATUS Status;
@@ -298,6 +334,16 @@ CSR_API(BaseSrvCreateThread)
                 CreateThreadRequest->ClientId.UniqueProcess,
                 CreateThreadRequest->ClientId.UniqueThread);
         return STATUS_SUCCESS; // server-to-server
+    }
+
+    /* The ids must be those of the thread the client passes (CsrCreateThread stores them) */
+    Status = BaseSrvCheckNewThread(CurrentThread->Process, CreateThreadRequest);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("BASESRV: thread %lx.%lx refused: %lx\n",
+                CreateThreadRequest->ClientId.UniqueProcess,
+                CreateThreadRequest->ClientId.UniqueThread, Status);
+        return Status;
     }
 
     /* Get the CSR Process for this request */
