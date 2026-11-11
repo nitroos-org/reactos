@@ -514,6 +514,8 @@ PDEVOBJ_Create(
     /* Try to get a display driver */
     if (ldevtype == LDEV_DEVICE_META)
         pldev = LDEVOBJ_pLoadInternal(MultiEnableDriver, ldevtype);
+    else if (pGraphicsDevice && (pGraphicsDevice == gpHeadlessGraphicsDevice))
+        pldev = LDEVOBJ_pLoadInternal(HeadlessEnableDriver, ldevtype);
     else
         pldev = LDEVOBJ_pLoadDriver(pdm->dmDeviceName, ldevtype);
     if (!pldev)

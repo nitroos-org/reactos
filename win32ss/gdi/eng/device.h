@@ -3,6 +3,21 @@
 
 #define TAG_GDEV 'gdev'
 
+/* NitroSessions: a session without the console draws into memory (headless.c) */
+extern BOOLEAN gbHeadlessSession;
+extern PGRAPHICS_DEVICE gpHeadlessGraphicsDevice;
+
+BOOL
+APIENTRY
+HeadlessEnableDriver(
+    _In_ ULONG iEngineVersion,
+    _In_ ULONG cj,
+    _Inout_bytecount_(cj) PDRVENABLEDATA pded);
+
+VOID
+HeadlessFillMode(
+    _Out_ PDEVMODEW pdm);
+
 VOID
 NTAPI
 PDEVOBJ_vRefreshModeList(
