@@ -31,6 +31,25 @@ SessTestCounterAddress(VOID)
     return (PVOID)&Counter;
 }
 
+/* Kept off the global lists: a lookaside list and a resource in session space (the image's data) */
+static PAGED_LOOKASIDE_LIST SessionLookaside;
+static ERESOURCE SessionResource;
+
+BOOLEAN
+NTAPI
+SessTestListsOffGlobal(VOID)
+{
+    BOOLEAN Off;
+
+    ExInitializePagedLookasideList(&SessionLookaside, NULL, NULL, 0, 64, 'tSeS', 0);
+    ExInitializeResourceLite(&SessionResource);
+    Off = (SessionLookaside.L.ListEntry.Flink == &SessionLookaside.L.ListEntry) &&
+          (SessionResource.SystemResourcesList.Flink == &SessionResource.SystemResourcesList);
+    ExDeleteResourceLite(&SessionResource);
+    ExDeletePagedLookasideList(&SessionLookaside);
+    return Off;
+}
+
 /* Stops the system from inside the session image (debugger symbol check) */
 VOID
 NTAPI

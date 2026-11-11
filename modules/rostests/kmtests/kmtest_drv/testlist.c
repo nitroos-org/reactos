@@ -107,6 +107,7 @@ KMT_TESTFUNC Test_MmSpecialPoolUseAfterFreeNoInts;
 KMT_TESTFUNC Test_MmSpecialPoolMalformed;
 KMT_TESTFUNC Test_MmReservedMapping;
 KMT_TESTFUNC Test_MmSessionSpace;
+KMT_TESTFUNC Test_KeServiceTableAgain;
 KMT_TESTFUNC Test_MmSessionImage;
 KMT_TESTFUNC Test_MmSessionImageBugCheck;
 KMT_TESTFUNC Test_MmSessionTables;
@@ -257,6 +258,7 @@ const KMT_TEST TestList[] =
     { "-MmSpecialPoolMalformed",            Test_MmSpecialPoolMalformed },
     { "MmReservedMapping",                  Test_MmReservedMapping },
     { "MmSessionSpace",                     Test_MmSessionSpace },
+    { "KeServiceTableAgain",                Test_KeServiceTableAgain },
     { "MmSessionImage",                     Test_MmSessionImage },
     { "-MmSessionImageBugCheck",            Test_MmSessionImageBugCheck },
     { "MmSessionTables",                    Test_MmSessionTables },
