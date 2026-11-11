@@ -5600,8 +5600,8 @@ Quickie:
     /* Check if we had created a token */
     if (TokenHandle)
     {
-        /* And if the user asked for one */
-        if (hUserToken)
+        /* And if the user asked for one (CreateProcessAsUser passes a token but no place for a new one) */
+        if (hUserToken && hNewToken)
         {
             /* Then return it */
             *hNewToken = TokenHandle;

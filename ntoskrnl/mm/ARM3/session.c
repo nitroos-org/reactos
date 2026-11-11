@@ -1375,6 +1375,7 @@ MmGetSessionById(
     PMM_SESSION_SPACE Session;
     PEPROCESS Process = NULL, Candidate;
     KIRQL OldIrql;
+    ULONG Pass;
 
     /* Acquire the expansion lock while touching the session */
     OldIrql = MiAcquireExpansionLock();
@@ -1392,16 +1393,30 @@ MmGetSessionById(
         /* A session that is going away cannot be entered any more */
         if (Session->u.Flags.DeletePending) break;
 
-        /* Return the first process of the session that is not being deleted */
-        for (ProcessEntry = Session->ProcessList.Flink;
-             ProcessEntry != &Session->ProcessList;
-             ProcessEntry = ProcessEntry->Flink)
+        /*
+         * A process of the session to attach to. A process joins the session list while its address
+         * space is being created, before KeInitializeProcess (so its page directory is not set yet), and
+         * stays on it while it exits: never take one whose address space is not complete or is gone.
+         * First pass: a live process (not exiting, with threads); second pass: any usable one.
+         */
+        for (Pass = 0; (Pass < 2) && !Process; Pass++)
         {
-            Candidate = CONTAINING_RECORD(ProcessEntry, EPROCESS, SessionProcessLinks);
-            if (ObReferenceObjectSafe(Candidate))
+            for (ProcessEntry = Session->ProcessList.Flink;
+                 ProcessEntry != &Session->ProcessList;
+                 ProcessEntry = ProcessEntry->Flink)
             {
-                Process = Candidate;
-                break;
+                Candidate = CONTAINING_RECORD(ProcessEntry, EPROCESS, SessionProcessLinks);
+                if ((Candidate->AddressSpaceInitialized < 2) || Candidate->VmDeleted) continue;
+                if ((Pass == 0) &&
+                    (Candidate->ProcessExiting || Candidate->ProcessDelete || !Candidate->ActiveThreads))
+                {
+                    continue;
+                }
+                if (ObReferenceObjectSafe(Candidate))
+                {
+                    Process = Candidate;
+                    break;
+                }
             }
         }
         break;
