@@ -9,6 +9,7 @@
 /* INCLUDES *******************************************************************/
 
 #include "srv.h"
+#include <ndk/kefuncs.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -178,7 +179,14 @@ CsrDereferenceNtSession(IN PCSR_NT_SESSION Session,
         /* Release the lock */
         CsrReleaseNtSessionLock();
 
-        /* Tell SM that we're done here */
+        /*
+         * Tell SM that we're done here. We may be called with a CSR lock held (the Process Lock when the
+         * caller held it recursively, a server DLL lock such as a console lock), and the target's Sb
+         * thread of a forward can need such a lock while SMSS waits for it. That is only safe because
+         * SmSessionComplete never waits for SMSS (a datagram): if it ever becomes a request that needs
+         * a free SMSS API thread, the cycle is back. A failed send is logged there; the SMSS record of
+         * the session is then not freed.
+         */
         SmSessionComplete(CsrSmApiPort, Session->SessionId, ExitStatus);
 
         /* Free the Session Object */
@@ -766,6 +774,10 @@ CsrSbCreateRemoteProcess(IN PSB_API_MSG ApiMessage)
     return TRUE;
 }
 
+/* How long a forward waits for SMSS to have a turn: 500 times 10 ms (about 8 s with the 15.6 ms timer tick) */
+#define CSR_FORWARD_BUSY_RETRIES 500
+#define CSR_FORWARD_BUSY_DELAY_MS 10
+
 /*++
  * @name CsrForwardProcessRegistration
  *
@@ -790,14 +802,35 @@ CsrForwardProcessRegistration(IN PCLIENT_ID ClientId,
                               IN ULONG MuSessionId,
                               IN ULONG Flags)
 {
-    ULONG SmFlags = 0;
+    ULONG SmFlags = 0, Tries;
+    NTSTATUS Status;
+    LARGE_INTEGER Delay;
 
     if (Flags & ~(CsrProcessCreateNewGroup | CsrProcessIsConsoleApp)) return STATUS_INVALID_PARAMETER;
     if (!CsrSmApiPort) return STATUS_NOT_SUPPORTED;
 
     if (Flags & CsrProcessCreateNewGroup) SmFlags |= SM_REMOTE_PROCESS_NEW_GROUP;
     if (Flags & CsrProcessIsConsoleApp) SmFlags |= SM_REMOTE_PROCESS_CONSOLE_APP;
-    return SmForwardProcessRegistration(CsrSmApiPort, ClientId, MuSessionId, SmFlags);
+
+    /*
+     * SMSS runs a limited number of forwards at once (one API thread is always left for its other
+     * requests) and answers STATUS_DEVICE_BUSY for the rest at once. Wait for a turn, for a bounded
+     * time (a few seconds): a slow target is a delay, a target that never answers is a failed create, not a hung
+     * client. This thread holds no CSR lock here.
+     */
+    for (Tries = 0; ; Tries++)
+    {
+        Status = SmForwardProcessRegistration(CsrSmApiPort, ClientId, MuSessionId, SmFlags);
+        if ((Status != STATUS_DEVICE_BUSY) || (Tries >= CSR_FORWARD_BUSY_RETRIES)) break;
+        Delay.QuadPart = -10000LL * CSR_FORWARD_BUSY_DELAY_MS;
+        NtDelayExecution(FALSE, &Delay);
+    }
+    if (Status == STATUS_DEVICE_BUSY)
+    {
+        DPRINT1("CSRSRV: Forwarded registration of %p.%p to session %lu: SMSS busy after %u tries, failed\n",
+                ClientId->UniqueProcess, ClientId->UniqueThread, MuSessionId, CSR_FORWARD_BUSY_RETRIES);
+    }
+    return Status;
 }
 
 /*++
