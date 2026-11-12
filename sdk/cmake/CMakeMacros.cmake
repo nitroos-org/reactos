@@ -648,8 +648,71 @@ endfunction()
 # set_module_type(my_driver kernelmodedriver)
 # sign_driver_if_needed(my_driver)
 
+# Windows 10 compatibility manifest for every user-mode executable.
+#
+# Windows 10 tells a program that does not name Windows 8.1/10 in its manifest (<supportedOS>) that it runs on 6.2.
+# NitroOS has to be able to do the same to third-party programs, so every executable we ship has to say 10.0 itself:
+# the shared sdk/include/reactos/manifest.xml and the per-executable manifests carry the Windows 10 GUID, and an
+# executable that has no manifest at all gets sdk/include/reactos/manifest_compat.rc (the same GUID, nothing else).
+# native-pefixup --require-supportedos=win10 then fails the build for a win32cui/win32gui executable without it.
+# Test programs (modules/rostests) stay unmanifested on purpose: they probe the unmanifested behaviour.
+
+# Does the resource script FILE (or an .rc it includes) already define an RT_MANIFEST?
+function(_ros_rc_has_manifest _result _file _srcdir _depth)
+    set(${_result} FALSE PARENT_SCOPE)
+    if(NOT EXISTS "${_file}" OR _depth GREATER 6)
+        return()
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_file}")
+    file(READ "${_file}" _text)
+    string(REGEX REPLACE "//[^\n]*" "" _text "${_text}")
+    if(_text MATCHES "RT_MANIFEST|manifest_exe\\.rc|manifest_compat\\.rc|CREATEPROCESS_MANIFEST_RESOURCE_ID|[ \t]24[ \t]+(DISCARDABLE[ \t]+)?\"")
+        set(${_result} TRUE PARENT_SCOPE)
+        return()
+    endif()
+    get_filename_component(_dir "${_file}" DIRECTORY)
+    string(REGEX MATCHALL "#[ \t]*include[ \t]*[<\"][^>\"]+\\.rc[>\"]" _incs "${_text}")
+    foreach(_inc ${_incs})
+        string(REGEX REPLACE "#[ \t]*include[ \t]*[<\"]([^>\"]+)[>\"]" "\\1" _name "${_inc}")
+        foreach(_base "${_dir}" "${_srcdir}")
+            if(EXISTS "${_base}/${_name}")
+                math(EXPR _next "${_depth} + 1")
+                _ros_rc_has_manifest(_sub "${_base}/${_name}" "${_srcdir}" ${_next})
+                if(_sub)
+                    set(${_result} TRUE PARENT_SCOPE)
+                    return()
+                endif()
+                break()
+            endif()
+        endforeach()
+    endforeach()
+endfunction()
+
+function(ros_add_compat_manifest MODULE)
+    get_target_property(_sources ${MODULE} SOURCES)
+    foreach(_src ${_sources})
+        if(_src MATCHES "\\.rc$")
+            if(IS_ABSOLUTE "${_src}")
+                set(_rc "${_src}")
+            else()
+                set(_rc "${CMAKE_CURRENT_SOURCE_DIR}/${_src}")
+            endif()
+            _ros_rc_has_manifest(_has "${_rc}" "${CMAKE_CURRENT_SOURCE_DIR}" 0)
+            if(_has)
+                # manifest_exe.rc pulls in manifest.xml, which the resource compiler dependency scan does not see:
+                # an edit of it must rebuild the resource (the lint would otherwise fail on a stale incremental build)
+                set_property(SOURCE "${_rc}" APPEND PROPERTY OBJECT_DEPENDS ${REACTOS_SOURCE_DIR}/sdk/include/reactos/manifest.xml)
+                return()
+            endif()
+        endif()
+    endforeach()
+    set(_compat_rc ${REACTOS_SOURCE_DIR}/sdk/include/reactos/manifest_compat.rc)
+    set_source_files_properties(${_compat_rc} PROPERTIES OBJECT_DEPENDS ${REACTOS_SOURCE_DIR}/sdk/include/reactos/manifest_compat.xml)
+    target_sources(${MODULE} PRIVATE ${_compat_rc})
+endfunction()
+
 function(set_module_type MODULE TYPE)
-    cmake_parse_arguments(__module "UNICODE" "IMAGEBASE" "ENTRYPOINT" ${ARGN})
+    cmake_parse_arguments(__module "UNICODE;NO_COMPAT_MANIFEST" "IMAGEBASE" "ENTRYPOINT" ${ARGN})
 
     if(__module_UNPARSED_ARGUMENTS)
         message(STATUS "set_module_type : unparsed arguments ${__module_UNPARSED_ARGUMENTS}, module : ${MODULE}")
@@ -675,6 +738,15 @@ function(set_module_type MODULE TYPE)
         set_subsystem(${MODULE} console)
     elseif(${TYPE} STREQUAL win32gui)
         set_subsystem(${MODULE} windows)
+    endif()
+
+    # Windows 10 compatibility manifest (see ros_add_compat_manifest) and the lint that enforces it
+    if((TYPE STREQUAL win32cui OR TYPE STREQUAL win32gui) AND NOT __module_NO_COMPAT_MANIFEST AND NOT MSVC
+       AND NOT CMAKE_CURRENT_SOURCE_DIR MATCHES "/modules/rostests(/|$)")
+        ros_add_compat_manifest(${MODULE})
+        add_custom_command(TARGET ${MODULE} POST_BUILD
+            COMMAND native-pefixup --require-supportedos=win10 $<TARGET_FILE:${MODULE}>)
+        set_property(TARGET ${MODULE} APPEND PROPERTY LINK_DEPENDS $<TARGET_PROPERTY:native-pefixup,IMPORTED_LOCATION>)
     endif()
 
     # Set unicode definitions
