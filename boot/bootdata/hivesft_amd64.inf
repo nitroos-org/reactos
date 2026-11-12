@@ -9,12 +9,13 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","BuildLabEx",2,"19041.1.amd6
 ; The 32-bit view of the version values hivesft.inf puts in HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion. Windows 10 keeps
 ; the same values in both views (measured on 22H2, both views identical) and 32-bit installers read them from Wow6432Node.
 ; The kernel writes CurrentVersion, CurrentBuildNumber, BuildLab, CurrentType and SystemRoot to both views at boot
-; (CmpSetVersionDataForView). Keep these lines equal to the ones in hivesft.inf: apitests kernel32 RegCurrentVersion compares the views.
+; (CmpSetVersionDataForView) and syssetup writes InstallationType to both (DoWriteInstallationType). Keep these lines equal to the ones in hivesft.inf: apitests kernel32 RegCurrentVersion compares the views.
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","ProductName",2,"Windows 10 Pro"
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","CurrentMajorVersionNumber",0x00010003,10
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","CurrentMinorVersionNumber",0x00010003,0
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","CurrentBuild",2,"19045"
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","EditionID",2,"Professional"
+HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","CompositionEditionID",2,"Professional"
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","DisplayVersion",2,"22H2"
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","UBR",0x00010003,5247
 HKLM,"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion","BuildLabEx",2,"19041.1.amd64fre.vb_release.191206-1406"
