@@ -250,6 +250,21 @@ DefWndStartSizeMove(PWND Wnd, WPARAM wParam, POINT *capturePoint)
     return hittest;
 }
 
+/*
+ * The limits of the mouse while sizing add the window rectangle and the capture point to the track sizes
+ * the window returned from WM_GETMINMAXINFO. A window that means "no maximum" returns MAXLONG (Chromium and
+ * Electron do): the sum wrapped to a huge negative number, the clamped mouse position followed it, and the
+ * window got a rectangle of about MAXLONG (invisible, with its frame drawn at nonsense places). Sum in 64 bits
+ * and saturate.
+ */
+static LONG
+DefWndSatLong(LONGLONG v)
+{
+    if (v > MAXLONG) return MAXLONG;
+    if (v < (-MAXLONG - 1)) return (-MAXLONG - 1);
+    return (LONG)v;
+}
+
 //
 //  System Command Size and Move
 /*
@@ -304,23 +319,23 @@ DefWndKeySelectEdge(WPARAM vk, PWND pWndParent, LONG *pHittest, const RECT *pRec
    /* the limits of the new edge, as the loop computes them for the edge it starts with */
    if (vk == VK_LEFT)
    {
-      pMouseRect->left  = max( pMouseRect->left, pRect->right-maxTrack.x+pt.x-pRect->left );
-      pMouseRect->right = min( pMouseRect->right, pRect->right-minTrack.x+pt.x-pRect->left );
+      pMouseRect->left  = max(pMouseRect->left, DefWndSatLong((LONGLONG)pRect->right-maxTrack.x+pt.x-pRect->left));
+      pMouseRect->right = min(pMouseRect->right, DefWndSatLong((LONGLONG)pRect->right-minTrack.x+pt.x-pRect->left));
    }
    else if (vk == VK_RIGHT)
    {
-      pMouseRect->left  = max( pMouseRect->left, pRect->left+minTrack.x+pt.x-pRect->right );
-      pMouseRect->right = min( pMouseRect->right, pRect->left+maxTrack.x+pt.x-pRect->right );
+      pMouseRect->left  = max(pMouseRect->left, DefWndSatLong((LONGLONG)pRect->left+minTrack.x+pt.x-pRect->right));
+      pMouseRect->right = min(pMouseRect->right, DefWndSatLong((LONGLONG)pRect->left+maxTrack.x+pt.x-pRect->right));
    }
    else if (vk == VK_UP)
    {
-      pMouseRect->top    = max( pMouseRect->top, pRect->bottom-maxTrack.y+pt.y-pRect->top );
-      pMouseRect->bottom = min( pMouseRect->bottom, pRect->bottom-minTrack.y+pt.y-pRect->top );
+      pMouseRect->top    = max(pMouseRect->top, DefWndSatLong((LONGLONG)pRect->bottom-maxTrack.y+pt.y-pRect->top));
+      pMouseRect->bottom = min(pMouseRect->bottom, DefWndSatLong((LONGLONG)pRect->bottom-minTrack.y+pt.y-pRect->top));
    }
    else
    {
-      pMouseRect->top    = max( pMouseRect->top, pRect->top+minTrack.y+pt.y-pRect->bottom );
-      pMouseRect->bottom = min( pMouseRect->bottom, pRect->top+maxTrack.y+pt.y-pRect->bottom );
+      pMouseRect->top    = max(pMouseRect->top, DefWndSatLong((LONGLONG)pRect->top+minTrack.y+pt.y-pRect->bottom));
+      pMouseRect->bottom = min(pMouseRect->bottom, DefWndSatLong((LONGLONG)pRect->top+maxTrack.y+pt.y-pRect->bottom));
    }
 
    UserSetCursorPos(pt.x, pt.y, 0, 0, FALSE);
@@ -442,23 +457,23 @@ DefWndDoSizeMove(PWND pwnd, WORD wParam)
 
    if (ON_LEFT_BORDER(hittest))
    {
-      mouseRect.left  = max( mouseRect.left, sizingRect.right-maxTrack.x+capturePoint.x-sizingRect.left );
-      mouseRect.right = min( mouseRect.right, sizingRect.right-minTrack.x+capturePoint.x-sizingRect.left );
+      mouseRect.left  = max(mouseRect.left, DefWndSatLong((LONGLONG)sizingRect.right-maxTrack.x+capturePoint.x-sizingRect.left));
+      mouseRect.right = min(mouseRect.right, DefWndSatLong((LONGLONG)sizingRect.right-minTrack.x+capturePoint.x-sizingRect.left));
    }
    else if (ON_RIGHT_BORDER(hittest))
    {
-      mouseRect.left  = max( mouseRect.left, sizingRect.left+minTrack.x+capturePoint.x-sizingRect.right );
-      mouseRect.right = min( mouseRect.right, sizingRect.left+maxTrack.x+capturePoint.x-sizingRect.right );
+      mouseRect.left  = max(mouseRect.left, DefWndSatLong((LONGLONG)sizingRect.left+minTrack.x+capturePoint.x-sizingRect.right));
+      mouseRect.right = min(mouseRect.right, DefWndSatLong((LONGLONG)sizingRect.left+maxTrack.x+capturePoint.x-sizingRect.right));
    }
    if (ON_TOP_BORDER(hittest))
    {
-      mouseRect.top    = max( mouseRect.top, sizingRect.bottom-maxTrack.y+capturePoint.y-sizingRect.top );
-      mouseRect.bottom = min( mouseRect.bottom,sizingRect.bottom-minTrack.y+capturePoint.y-sizingRect.top);
+      mouseRect.top    = max(mouseRect.top, DefWndSatLong((LONGLONG)sizingRect.bottom-maxTrack.y+capturePoint.y-sizingRect.top));
+      mouseRect.bottom = min(mouseRect.bottom, DefWndSatLong((LONGLONG)sizingRect.bottom-minTrack.y+capturePoint.y-sizingRect.top));
    }
    else if (ON_BOTTOM_BORDER(hittest))
    {
-      mouseRect.top    = max( mouseRect.top, sizingRect.top+minTrack.y+capturePoint.y-sizingRect.bottom );
-      mouseRect.bottom = min( mouseRect.bottom, sizingRect.top+maxTrack.y+capturePoint.y-sizingRect.bottom );
+      mouseRect.top    = max(mouseRect.top, DefWndSatLong((LONGLONG)sizingRect.top+minTrack.y+capturePoint.y-sizingRect.bottom));
+      mouseRect.bottom = min(mouseRect.bottom, DefWndSatLong((LONGLONG)sizingRect.top+maxTrack.y+capturePoint.y-sizingRect.bottom));
    }
 
    hdc = UserGetDCEx( pWndParent, 0, DCX_CACHE );
