@@ -1373,8 +1373,15 @@ ConSrvRemoveConsole(
  * CreateRemoteThread takes the CSR process lock (CsrCreateRemoteThread), and
  * CSR holds that lock while it calls us to lock a console (ConSrvNewProcess,
  * SrvAttachConsole), so it must never be called with a console locked.
- * An event is not queued when the newest queued event of its process is the
- * same one; other events are all kept, in order. The queue is capped.
+ * Every event is queued, in order (identical consecutive ones included: they
+ * are not coalesced); the queue is capped. Each is delivered by a thread of
+ * its own in the target process, and the thread count is not limited: Windows
+ * does the same (oracle, Windows 10 22H2, 2026-11-12: 1000 Ctrl+Break events
+ * sent in a tight loop to a console process with a 100 ms handler gave 1003
+ * threads in a 64-bit process and 898 in a 32-bit one, every event accepted;
+ * the handlers run one at a time, in the dispatcher of kernel32, none
+ * coalesced. A 32-bit process runs out of address space at about 900 such
+ * threads and loses the events whose thread cannot be created).
  * Without the worker, requests fail: delivering from the caller would bring
  * back the lock order inversion. CtrlEventLock is a leaf lock.
  */
