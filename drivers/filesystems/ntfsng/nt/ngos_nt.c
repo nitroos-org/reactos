@@ -285,7 +285,8 @@ static VOID NgDevIoFree(PIRP Irp, UCHAR Major, void *buf, unsigned int len, BOOL
     }
     if (Irp->MdlAddress)
     {
-        /* An MDL made of the PFNs of another MDL's locked pages (NgDevWritePagesV) holds no lock of its own */
+        /* A partial MDL of another MDL's locked pages (NgDevWritePagesV) holds no lock of its own; IoFreeMdl
+           undoes a mapping that a driver below made of it */
         if (UnlockPages)
             MmUnlockPages(Irp->MdlAddress);
         IoFreeMdl(Irp->MdlAddress);
@@ -615,8 +616,11 @@ int ngos_dev_write_fua(void *dev, unsigned long long off, void *buf, unsigned in
  * deeper than one (NCQ), and the transfer takes the time of the slowest request, not the sum.  Waves of
  * NG_IOV_WAVE requests: every request of a wave is sent before the first is waited for, and all are waited for,
  * whatever fails, before the buffers are given back.  A request comes from a buffer (Src NULL) or, for a paging write
- * of the file system, from the locked pages of the MDL the paging write came with (Src): the request gets an MDL
- * of its own made of those pages' PFNs, so the pages are neither copied nor probed again.
+ * of the file system, from the locked pages of the MDL the paging write came with (Src): the request gets a partial
+ * MDL of Src (IoBuildPartialMdl), so the pages are neither copied nor probed again.  It must be a partial MDL: a
+ * driver below may map the request's pages (MmGetSystemAddressForMdlSafe for a PIO transfer, or a miniport asking
+ * for the system address), and only a partial MDL has that mapping undone when it is freed (IoFreeMdl ->
+ * MmPrepareMdlForReuse).  An MDL made of copied PFNs was freed still mapped: its system PTEs were never given back.
  */
 #define NG_IOV_WAVE 8
 typedef struct _NG_WR
@@ -664,10 +668,10 @@ static int NgDevWriteWave(PDEVICE_OBJECT Dev, const NG_WR *W, ULONG N, BOOLEAN W
             {
                 PIO_STACK_LOCATION Stack;
                 PMDL Mdl;
-                ULONG Pages = ADDRESS_AND_SIZE_TO_SPAN_PAGES(NULL, R->Len);
+                PCHAR Va = (PCHAR)MmGetMdlVirtualAddress(R->Src) + R->SrcOff;
 
                 Req[i].Irp = IoAllocateIrp(Dev->StackSize, FALSE);
-                Mdl = Req[i].Irp ? IoAllocateMdl(NULL, R->Len, FALSE, FALSE, NULL) : NULL;
+                Mdl = Req[i].Irp ? IoAllocateMdl(Va, R->Len, FALSE, FALSE, NULL) : NULL;
                 if (Req[i].Irp && !Mdl)
                 {
                     IoFreeIrp(Req[i].Irp);
@@ -675,9 +679,7 @@ static int NgDevWriteWave(PDEVICE_OBJECT Dev, const NG_WR *W, ULONG N, BOOLEAN W
                 }
                 if (Req[i].Irp)
                 {
-                    RtlCopyMemory(MmGetMdlPfnArray(Mdl), MmGetMdlPfnArray(R->Src) + ((R->Src->ByteOffset + R->SrcOff) >> PAGE_SHIFT),
-                                  Pages * sizeof(PFN_NUMBER));
-                    Mdl->MdlFlags |= MDL_PAGES_LOCKED;
+                    IoBuildPartialMdl(R->Src, Mdl, Va, R->Len);
                     Req[i].Irp->MdlAddress = Mdl;
                     Stack = IoGetNextIrpStackLocation(Req[i].Irp);
                     Stack->MajorFunction = IRP_MJ_WRITE;
