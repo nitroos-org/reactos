@@ -109,26 +109,6 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     }
 
     /*
-     * A guard page above the current stack limit is left over from a guard
-     * region that a deeper hit already passed (the region is several pages
-     * and the stack can be probed out of order). Hardware cleared its guard
-     * on this hit and the page is committed and in use: the stack has grown
-     * past it, so leave the limit and the pages below alone. The limit is
-     * user-writable and only compared here; a forged one can skip the
-     * growth below but never makes the code commit outside the stack.
-     */
-#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-    if (GuestTeb) CurrentLimit = (ULONG_PTR)UlongToPtr(GuestTeb->NtTib.StackLimit);
-    else
-#endif
-        CurrentLimit = (ULONG_PTR)Teb->NtTib.StackLimit;
-    if ((ULONG_PTR)PAGE_ALIGN(Address) >= (ULONG_PTR)PAGE_ALIGN(CurrentLimit))
-    {
-        DPRINT("Guard page %p is above the stack limit %p\n", Address, (PVOID)CurrentLimit);
-        return STATUS_PAGE_FAULT_GUARD_PAGE;
-    }
-
-    /*
      * The guarantee is the stack space left to the handler when the
      * overflow is raised. The TEB is writable from user mode, so do not
      * let it exceed the stack reservation.
@@ -180,6 +160,32 @@ MiCheckForUserStackOverflow(IN PVOID Address,
         }
 
         return STATUS_STACK_OVERFLOW;
+    }
+
+    /*
+     * A guard page above the current stack limit is left over from a guard
+     * region that a deeper hit already passed (the region is several pages
+     * and the stack can be probed out of order). Hardware cleared its guard
+     * on this hit and the page is committed and in use: the stack has grown
+     * past it, so leave the limit and the pages below alone. The limit is
+     * user-writable and only compared here; a forged one can skip the
+     * growth below but never makes the code commit outside the stack.
+     *
+     * This comes after the check for the end of the stack: once an overflow
+     * was raised the limit stays at the bottom of the stack, and a runtime
+     * that arms guard pages in the last pages itself (the JVM, for its
+     * yellow zone) must get its next overflow from them. Taken as left over,
+     * they let the thread run on below its stack.
+     */
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+    if (GuestTeb) CurrentLimit = (ULONG_PTR)UlongToPtr(GuestTeb->NtTib.StackLimit);
+    else
+#endif
+        CurrentLimit = (ULONG_PTR)Teb->NtTib.StackLimit;
+    if ((ULONG_PTR)PAGE_ALIGN(Address) >= (ULONG_PTR)PAGE_ALIGN(CurrentLimit))
+    {
+        DPRINT("Guard page %p is above the stack limit %p\n", Address, (PVOID)CurrentLimit);
+        return STATUS_PAGE_FAULT_GUARD_PAGE;
     }
 
     /* Don't handle this flag yet */
