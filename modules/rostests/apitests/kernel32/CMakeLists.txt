@@ -209,6 +209,7 @@ list(APPEND SOURCE
     SetCurrentDirectory.c
     SetSearchPathMode.c
     SetThreadStackGuarantee.c
+    StackOverflowRearm.c
     ThreadStackCommit.c
     SetUnhandledExceptionFilter.c
     SuspendThreadContext.c
