@@ -43,10 +43,14 @@
 /*
  * The thread of an associated packet is charged to the creating process as nonpaged pool quota (a kernel stack and
  * the thread object), so a process quota limits how many a process can have; and, because the default quota is
- * unlimited, the number of such threads in the system is capped.
+ * unlimited, the number of such threads is capped: per process (EPROCESS::WaitCompletionPacketThreads), so that one
+ * process cannot take them all, and in the system. Windows has no such thread and no such limit (a packet is only
+ * its object there); the per-process failure is the status of an exhausted process quota, the system-wide one the
+ * status of exhausted pool.
  */
-#define WCP_THREAD_QUOTA_CHARGE 0x8000
-#define WCP_MAX_THREADS         4096
+#define WCP_THREAD_QUOTA_CHARGE         0x8000
+#define WCP_MAX_THREADS                 4096
+#define WCP_MAX_THREADS_PER_PROCESS     1024
 static volatile LONG ExpWcpThreads;
 
 typedef enum _WCP_STATE
@@ -294,6 +298,7 @@ ExpWcpDelete(IN PVOID Object)
         KeWaitForSingleObject(Wcp->Thread, Executive, KernelMode, FALSE, NULL);
         ObDereferenceObject(Wcp->Thread);
         PsReturnProcessNonPagedPoolQuota(Wcp->ChargedProcess, WCP_THREAD_QUOTA_CHARGE);
+        InterlockedDecrement(&Wcp->ChargedProcess->WaitCompletionPacketThreads);
         ObDereferenceObject(Wcp->ChargedProcess);
         InterlockedDecrement(&ExpWcpThreads);
     }
@@ -476,10 +481,15 @@ NtAssociateWaitCompletionPacket(IN HANDLE WaitCompletionPacketHandle,
     {
         HANDLE ThreadHandle;
         PEPROCESS Process = PsGetCurrentProcess();
+        LONG ProcessThreads = InterlockedIncrement(&Process->WaitCompletionPacketThreads);
 
         if (InterlockedIncrement(&ExpWcpThreads) > WCP_MAX_THREADS)
         {
             Status = STATUS_INSUFFICIENT_RESOURCES;
+        }
+        else if (ProcessThreads > WCP_MAX_THREADS_PER_PROCESS)
+        {
+            Status = STATUS_QUOTA_EXCEEDED;
         }
         else
         {
@@ -506,6 +516,7 @@ NtAssociateWaitCompletionPacket(IN HANDLE WaitCompletionPacketHandle,
         }
         if (!NT_SUCCESS(Status))
         {
+            InterlockedDecrement(&Process->WaitCompletionPacketThreads);
             InterlockedDecrement(&ExpWcpThreads);
             ExReleaseFastMutex(&Wcp->OpMutex);
             goto Fail;

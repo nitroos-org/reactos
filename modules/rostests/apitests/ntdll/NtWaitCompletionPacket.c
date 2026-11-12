@@ -25,6 +25,7 @@
  */
 
 #include "precomp.h"
+#include <strsafe.h>
 
 typedef NTSTATUS (NTAPI *PFN_CREATE)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
 typedef NTSTATUS (NTAPI *PFN_ASSOC)(HANDLE, HANDLE, HANDLE, PVOID, PVOID, NTSTATUS, ULONG_PTR, PBOOLEAN);
@@ -565,10 +566,75 @@ static void TestNoLeak(void)
     ok(After <= Before + 1, "System threads before %lu, after %lu\n", Before, After);
 }
 
+static DWORD WINAPI ChildThread(LPVOID Parameter)
+{
+    return 0x600D;
+}
+
+/* The child process: one thread and one associated packet that fires; returns the first failure, or 0 */
+static NTSTATUS RunChild(void)
+{
+    HANDLE Port = MakePort(), Event = MakeEvent(SynchronizationEvent, FALSE), Packet = NULL, Thread;
+    PVOID Key, Context;
+    IO_STATUS_BLOCK Iosb;
+    LARGE_INTEGER Timeout;
+    BOOLEAN Already = 0xCC;
+    DWORD Code = 0;
+    NTSTATUS Status;
+
+    Thread = CreateThread(NULL, 0, ChildThread, NULL, 0, NULL);
+    if (!Thread) return 0xC1000001;
+    WaitForSingleObject(Thread, 10000);
+    GetExitCodeThread(Thread, &Code);
+    CloseHandle(Thread);
+    if (Code != 0x600D) return 0xC1000002;
+
+    Status = pCreate(&Packet, 0x1F0003, NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = pAssoc(Packet, Port, Event, TARGET_KEY, TARGET_CONTEXT, STATUS_SUCCESS, TARGET_INFO, &Already);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (Already != FALSE) return 0xC1000003;
+    NtSetEvent(Event, NULL);
+    Timeout.QuadPart = -10 * 1000 * 1000 * 5;
+    Status = NtRemoveIoCompletion(Port, &Key, &Context, &Iosb, &Timeout);
+    if (Status != STATUS_SUCCESS) return Status ? Status : 0xC1000004;
+    if (Key != TARGET_KEY || Context != TARGET_CONTEXT) return 0xC1000005;
+    NtClose(Packet);
+    NtClose(Port);
+    NtClose(Event);
+    return STATUS_SUCCESS;
+}
+
+/* Runs this test in a child process with RunChild: its result */
+static NTSTATUS StartChild(void)
+{
+    WCHAR FileName[MAX_PATH], CommandLine[MAX_PATH + 64];
+    STARTUPINFOW StartupInfo;
+    PROCESS_INFORMATION ProcessInfo;
+    DWORD ExitCode = 0xC1000010;
+
+    GetModuleFileNameW(NULL, FileName, _countof(FileName));
+    StringCbPrintfW(CommandLine, sizeof(CommandLine), L"\"%ls\" NtWaitCompletionPacket child", FileName);
+    RtlZeroMemory(&StartupInfo, sizeof(StartupInfo));
+    StartupInfo.cb = sizeof(StartupInfo);
+    if (!CreateProcessW(FileName, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
+        return 0xC1000011;
+    CloseHandle(ProcessInfo.hThread);
+    if (WaitForSingleObject(ProcessInfo.hProcess, 60000) != WAIT_OBJECT_0)
+    {
+        TerminateProcess(ProcessInfo.hProcess, 0xC1000012);
+        WaitForSingleObject(ProcessInfo.hProcess, 10000);
+    }
+    GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode);
+    CloseHandle(ProcessInfo.hProcess);
+    return (NTSTATUS)ExitCode;
+}
+
 /*
- * Every associated packet costs a kernel thread, which is charged to the process quota and capped system-wide
- * (ReactOS only): associate packets until a resource failure or a bound, check the failure is a clean status, and
- * that closing them all gives everything back (System thread count, and a packet can be associated again).
+ * On ReactOS every associated packet costs a kernel thread, which is charged to the process quota and capped per
+ * process and system-wide (Windows has neither limit): associate packets until a resource failure or a bound, check
+ * the failure is a clean status, that another process can still create threads and use packets meanwhile, and that
+ * closing them all gives everything back (System thread count, and a packet can be associated again).
  */
 static void TestResources(void)
 {
@@ -598,6 +664,10 @@ static void TestResources(void)
     ok(Count == BOUND || Status == STATUS_INSUFFICIENT_RESOURCES || Status == STATUS_QUOTA_EXCEEDED ||
        Status == STATUS_NO_MEMORY, "stopped after %lu packets with %08lx\n", Count, Status);
     trace("%lu packets associated, last status %08lx, System threads %lu -> %lu\n", Count, Status, Before, Peak);
+
+    /* What this process holds does not stop another one */
+    Status = StartChild();
+    ok_hex(Status, STATUS_SUCCESS);
 
     /* The system is fine while they exist */
     Check = MakeEvent(NotificationEvent, TRUE);
@@ -685,6 +755,8 @@ static void TestRace(void)
 START_TEST(NtWaitCompletionPacket)
 {
     HMODULE Ntdll = GetModuleHandleW(L"ntdll.dll");
+    char **argv;
+    int argc;
 
     pCreate = (PFN_CREATE)GetProcAddress(Ntdll, "NtCreateWaitCompletionPacket");
     pAssoc = (PFN_ASSOC)GetProcAddress(Ntdll, "NtAssociateWaitCompletionPacket");
@@ -696,6 +768,10 @@ START_TEST(NtWaitCompletionPacket)
         skip("Wait completion packets are not available\n");
         return;
     }
+
+    argc = winetest_get_mainargs(&argv);
+    if (argc >= 3 && !strcmp(argv[2], "child"))
+        ExitProcess(RunChild());
 
     TestCreate();
     TestLifecycle();
