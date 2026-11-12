@@ -37,6 +37,7 @@ extern void func_getsockname(void);
 extern void func_handleinherit(void);
 extern void func_sendcancel(void);
 extern void func_sendwhole(void);
+extern void func_routinectx(void);
 extern void func_tcpnodelay(void);
 extern void func_inheritedsocket(void);
 extern void func_inheritedsocketchild(void);
@@ -120,6 +121,7 @@ const struct test winetest_testlist[] =
     { "handleinherit", func_handleinherit },
     { "sendcancel", func_sendcancel },
     { "sendwhole", func_sendwhole },
+    { "routinectx", func_routinectx },
     { "addresschange", func_addresschange },
     { "asyncselect", func_asyncselect },
     { "tcpnodelay", func_tcpnodelay },
