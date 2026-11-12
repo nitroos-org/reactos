@@ -733,6 +733,40 @@ static void Test_UlwHistoryReset(void)
     DeleteObject(hbm);
 }
 
+/* Level 2: a whole update whose source range is outside the source bitmap copies nothing: the content stays premultiplied */
+static void Test_UlwAlphaKept(void)
+{
+    BLENDFUNCTION Blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    POINT Far = { 0x7FFFFFF0, 0 };
+    HDC hdc;
+    HBITMAP hbm = MakeDib(&hdc, 0x80000080, 200, 150, NULL);   /* 50% blue, premultiplied */
+    HWND hBack, hWnd;
+    COLORREF c;
+
+    if (g_Level >= 2)
+    {
+        hBack = CreateBack();
+        hWnd = CreateTop(L"LcBlue", WS_EX_LAYERED, TRUE);
+        Pump();
+        ok(Ulw(hWnd, hdc, 100, 100, 200, 150), "UpdateLayeredWindow failed: %lu\n", GetLastError());
+        Pump();
+        c = ScreenPixel(200, 175);
+        ok(Near(c, RGB(100, 0, 128)), "50%% blue over red: 0x%06lx, expected (100,0,128)\n", c);
+        {
+            POINT Pos = { 100, 100 };
+            SIZE Size = { 200, 150 };
+            UpdateLayeredWindow(hWnd, NULL, &Pos, &Size, hdc, &Far, 0, &Blend, ULW_ALPHA);
+        }
+        Pump();
+        c = ScreenPixel(200, 175);
+        ok(Near(c, RGB(100, 0, 128)), "after an update with the source out of range: 0x%06lx, expected the same blend (100,0,128)\n", c);
+        DestroyWindow(hWnd);
+        DestroyWindow(hBack);
+    }
+    DeleteDC(hdc);
+    DeleteObject(hbm);
+}
+
 START_TEST(LayeredCompose)
 {
     g_Level = GetRedirectionLevel();
@@ -759,4 +793,5 @@ START_TEST(LayeredCompose)
     Test_GlassChild();
     Test_UlwBudget();
     Test_UlwHistoryReset();
+    Test_UlwAlphaKept();
 }
