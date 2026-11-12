@@ -94,6 +94,11 @@ static LONG PayloadSize(UINT Msg, WPARAM Wparam, LONG Size)
         return Size == sizeof(DRAWITEMSTRUCT) ? sizeof(DRAWITEM32) : -2;
     case WM_HELP:
         return Size == sizeof(HELPINFO) ? sizeof(HELPINFO32) : -2;
+    case WM_NEXTMENU:
+        return Size == sizeof(MDINEXTMENU) ? sizeof(MDINEXTMENU32) : -2;
+    case WM_COPYGLOBALDATA:
+        /* wParam bytes of the sender's global block, opaque to the kernel and to this layer */
+        return Size;
     case WM_COPYDATA:
         /* The record is followed by its cbData bytes */
         return Size >= sizeof(COPYDATASTRUCT) ? Size - sizeof(COPYDATASTRUCT) + sizeof(COPYDATA32) : -2;
@@ -148,6 +153,8 @@ static VOID PackPayload(PVOID To, const PVOID From, UINT Msg, WPARAM Wparam, ULO
     }
     case WM_HELP:
         HelpNativeTo32(To, From); break;
+    case WM_NEXTMENU:
+        NextMenuNativeTo32(To, From); break;
     case WM_COPYDATA:
     {
         const COPYDATASTRUCT *Native = From;
@@ -213,6 +220,9 @@ static VOID UnpackPayload(PVOID To, const PVOID From, UINT Msg, WPARAM Wparam, U
     case WM_HELP:
         /* the whole record is the reply, as win32k copies it back */
         Help32ToNative(To, From); break;
+    case WM_NEXTMENU:
+        /* win32k copies the record back: the menu loop reads hmenuNext and hwndNext from it */
+        NextMenu32ToNative(To, From); break;
     case WM_GETMINMAXINFO: case WM_GETTEXT: case WM_STYLECHANGING: case WM_SIZING: case WM_MOVING:
         RtlCopyMemory(To, From, Size); break;
     }

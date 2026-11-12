@@ -86,6 +86,16 @@ VOID HelpNativeTo32(HELPINFO32 *To, const HELPINFO *From)
     To->dwContextId = (ULONG)From->dwContextId;
     To->MousePos = From->MousePos;
 }
+/* MDINEXTMENU: three handles, written back by the receiver (the menu loop reads hmenuNext / hwndNext) */
+VOID NextMenu32ToNative(MDINEXTMENU *To, const MDINEXTMENU32 *From)
+{
+    To->hmenuIn = H32(From->hmenuIn); To->hmenuNext = H32(From->hmenuNext); To->hwndNext = H32(From->hwndNext);
+}
+VOID NextMenuNativeTo32(MDINEXTMENU32 *To, const MDINEXTMENU *From)
+{
+    To->hmenuIn = HandleToUlong(From->hmenuIn); To->hmenuNext = HandleToUlong(From->hmenuNext);
+    To->hwndNext = HandleToUlong(From->hwndNext);
+}
 static VOID Class32ToNative(WNDCLASSEXW *To, const CLASS32 *From)
 {
     To->cbSize = sizeof(*To); To->style = From->style;
@@ -119,20 +129,35 @@ static VOID PaintNativeTo32(PAINT32 *To, const PAINTSTRUCT *From)
  * procedure as it is, the kernel's message table has no size for them): the pointer travels as the guest
  * pointer, zero-extended, and the window procedure reads the guest layout. That holds while the receiver
  * runs in this process, and only for a send that waits for it (not SendNotifyMessage or a callback send). */
-static BOOL IsGuestPointerMessage(UINT Message)
+static BOOL IsGuestPointerMessage(UINT Message, ULONG Wparam)
 {
     switch (Message)
     {
     case WM_DELETEITEM: case WM_COMPAREITEM: case WM_MDICREATE: case WM_MENUGETOBJECT: case 0x0164 /* CB_GETCOMBOBOXINFO */:
         return TRUE;
+    /* The Win16-era list box drag messages: lParam is a DROPSTRUCT that win32k does not read or capture
+     * (WM_DROPOBJECT, WM_QUERYDROPOBJECT, WM_BEGINDRAG, WM_DRAGLOOP, WM_DRAGSELECT, WM_DRAGMOVE) */
+    case 0x022a: case 0x022b: case 0x022c: case 0x022d: case 0x022e: case 0x022f:
+        return TRUE;
+    /* WM_IME_REQUEST: every command has a COMPOSITIONFORM / CANDIDATEFORM / LOGFONT / RECONVERTSTRING /
+     * IMECHARPOSITION record (flat, no pointers) or none */
+    case 0x0288:
+        return TRUE;
+    /* WM_IME_CONTROL: IMC_GET/SETCANDIDATEPOS, IMC_GET/SETCOMPOSITIONFONT, IMC_GET/SETCOMPOSITIONWINDOW carry a
+     * record; the others (conversion/sentence/open status, status window position packed as x,y) are scalars */
+    case 0x0283:
+        return Wparam >= 0x07 && Wparam <= 0x0c;
     }
     return FALSE;
 }
 
-/* TRUE: send the guest pointer on. Otherwise the last error is set. */
-static BOOL GuestPointerAllowed(const ULONG *a)
+/* TRUE: send the guest pointer on. Otherwise the last error is set. Async: the message is not in win32k's table of
+ * pointer messages (WM_IME_REQUEST), which refuses an unwaited send for them; the record is then only
+ * as valid as it is on i386, where the pointer travels raw too. */
+static BOOL GuestPointerAllowed(const ULONG *a, BOOL Async)
 {
     ULONG_PTR Thread;
+    BOOL Waits = TRUE;
     switch (a[5])
     {
     case FNID_DEFWINDOWPROC: case FNID_SCROLLBAR: case FNID_DESKTOP: case FNID_MENU:
@@ -140,9 +165,14 @@ static BOOL GuestPointerAllowed(const ULONG *a)
     case FNID_CALLWNDPROC: case FNID_CALLWNDPROCRET:
         break;
     case FNID_SENDNOTIFYMESSAGE: case FNID_SENDMESSAGECALLBACK:
-        /* the sender would not wait for the receiver: like win32k does for the messages in its table */
-        RtlSetLastWin32Error(ERROR_MESSAGE_SYNC_ONLY);
-        return FALSE;
+        if (!Async)
+        {
+            /* the sender would not wait for the receiver: like win32k does for the messages in its table */
+            RtlSetLastWin32Error(ERROR_MESSAGE_SYNC_ONLY);
+            return FALSE;
+        }
+        Waits = FALSE;
+        break;
     default:
         RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED);
         return FALSE;
@@ -156,11 +186,11 @@ static BOOL GuestPointerAllowed(const ULONG *a)
     Thread = NtUserQueryWindow(H(0), QUERY_WINDOW_UNIQUE_THREAD_ID);
     /* not a window: win32k fails the call without looking at lParam */
     if (!Thread || Thread == (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread) return TRUE;
-    /* another thread of this process: the pointer is valid there. The sender waits for the receiver (a send with
-     * a timeout can return first, leaving the receiver a record on a stack that is gone, as it does on i386).
-     * A window of another process cannot read the guest's memory at all. */
-    if ((a[5] == FNID_SENDMESSAGE || a[5] == FNID_SENDMESSAGEFF || a[5] == FNID_SENDMESSAGEWTOOPTION) &&
-        NtUserQueryWindow(H(0), QUERY_WINDOW_UNIQUE_PROCESS_ID) == (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess)
+    /* another thread of this process: the pointer is valid there. A send that waits has the sender wait for the
+     * receiver (a send with a timeout can return first, leaving the receiver a record on a stack that is gone,
+     * as it does on i386). A window of another process cannot read the guest's memory at all. */
+    if (NtUserQueryWindow(H(0), QUERY_WINDOW_UNIQUE_PROCESS_ID) == (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess &&
+        (!Waits || a[5] == FNID_SENDMESSAGE || a[5] == FNID_SENDMESSAGEFF || a[5] == FNID_SENDMESSAGEWTOOPTION))
         return TRUE;
     RtlSetLastWin32Error(ERROR_CALL_NOT_IMPLEMENTED);
     return FALSE;
@@ -174,7 +204,7 @@ static ULONG_PTR MessageCall(ULONG *a)
     union
     {
         CREATESTRUCTW Create; WINDOWPOS Pos; struct { NCCALCSIZE_PARAMS Params; WINDOWPOS Pos; } Nc;
-        MEASUREITEMSTRUCT Measure; DRAWITEMSTRUCT Draw; HELPINFO Help;
+        MEASUREITEMSTRUCT Measure; DRAWITEMSTRUCT Draw; HELPINFO Help; MDINEXTMENU NextMenu;
     } Buffer;
     DOSENDMESSAGE Timeout;
     CALL_BACK_INFO Callback;
@@ -211,11 +241,11 @@ static ULONG_PTR MessageCall(ULONG *a)
             Param = (LPARAM)P(3);
         }
     }
-    else if (IsGuestPointerMessage(a[1]))
+    else if (IsGuestPointerMessage(a[1], a[2]))
     {
         if (a[3])
         {
-            if (!GuestPointerAllowed(a)) return FALSE;
+            if (!GuestPointerAllowed(a, a[1] == 0x0288 || a[1] == 0x0283)) return FALSE;
             Param = (LPARAM)P(3);
         }
     }
@@ -287,6 +317,10 @@ static ULONG_PTR MessageCall(ULONG *a)
         Buffer.Draw.itemData = From->itemData;
         Param = (LPARAM)&Buffer.Draw; break;
     }
+    case WM_NEXTMENU:
+        /* win32k copies sizeof(MDINEXTMENU) to and from the receiver */
+        RtlZeroMemory(&Buffer.NextMenu, sizeof(Buffer.NextMenu));
+        NextMenu32ToNative(&Buffer.NextMenu, P(3)); Param = (LPARAM)&Buffer.NextMenu; break;
     case WM_HELP:
         /* win32k copies sizeof(HELPINFO) to and from the receiver */
         RtlZeroMemory(&Buffer.Help, sizeof(Buffer.Help));
@@ -338,6 +372,9 @@ static ULONG_PTR MessageCall(ULONG *a)
     case LB_SELECTSTRING: case LB_GETTEXT: case LB_GETITEMRECT:
     case CB_ADDSTRING: case CB_INSERTSTRING: case CB_FINDSTRING: case CB_FINDSTRINGEXACT:
     case CB_SELECTSTRING: case CB_GETLBTEXT: case CB_GETDROPPEDCONTROLRECT: case WM_ASKCBFORMATNAME:
+    /* WM_COPYGLOBALDATA: wParam bytes at lParam in the guest, which win32k copies (READ); the receiver's
+     * user32 turns the copy into a new global block */
+    case WM_COPYGLOBALDATA:
         Param = (LPARAM)P(3); break;
     }
     Ret = NtUserMessageCall(H(0), a[1], a[2], Param, ResultInfo, a[5], a[6]);
@@ -358,6 +395,13 @@ static ULONG_PTR MessageCall(ULONG *a)
         /* write only what changed: the record may be in read-only memory */
         HELPINFO32 Back, *To = P(3);
         HelpNativeTo32(&Back, &Buffer.Help);
+        if (RtlCompareMemory(&Back, To, sizeof(Back)) != sizeof(Back)) *To = Back;
+        break;
+    }
+    case WM_NEXTMENU:
+    {
+        MDINEXTMENU32 Back, *To = P(3);
+        NextMenuNativeTo32(&Back, &Buffer.NextMenu);
         if (RtlCompareMemory(&Back, To, sizeof(Back)) != sizeof(Back)) *To = Back;
         break;
     }

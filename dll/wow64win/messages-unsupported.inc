@@ -1,19 +1,7 @@
 /* Generated from message catalogue. */
-case 0x0049: /* WM_COPYGLOBALDATA */
 case 0x004e: /* WM_NOTIFY */
-case 0x0213: /* WM_NEXTMENU */
 case 0x0218: /* WM_POWERBROADCAST */
 case 0x0219: /* WM_DEVICECHANGE */
-case 0x022a: /* WM_DROPOBJECT */
-case 0x022b: /* WM_QUERYDROPOBJECT */
-case 0x022c: /* WM_BEGINDRAG */
-case 0x022d: /* WM_DRAGLOOP */
-case 0x022e: /* WM_DRAGSELECT */
-case 0x022f: /* WM_DRAGMOVE */
-case 0x0282: /* WM_IME_NOTIFY */
-case 0x0283: /* WM_IME_CONTROL */
-case 0x0287: /* WM_IME_SYSTEM */
-case 0x0288: /* WM_IME_REQUEST */
 case 0x03e2: /* WM_DDE_ADVISE */
 case 0x03e4: /* WM_DDE_ACK */
 case 0x03e5: /* WM_DDE_DATA */
