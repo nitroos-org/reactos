@@ -47,6 +47,7 @@ extern void func_shortname(void);
 extern void func_listen(void);
 extern void func_udpconnreset(void);
 extern void func_manysockets(void);
+extern void func_nbconnect(void);
 extern void func_nonblocking(void);
 extern void func_nostartup(void);
 extern void func_OwnHostname(void);
@@ -131,6 +132,7 @@ const struct test winetest_testlist[] =
     { "listen", func_listen },
     { "udpconnreset", func_udpconnreset },
     { "manysockets", func_manysockets },
+    { "nbconnect", func_nbconnect },
     { "nonblocking", func_nonblocking },
     { "nostartup", func_nostartup },
     { "open_osfhandle", func_open_osfhandle },
