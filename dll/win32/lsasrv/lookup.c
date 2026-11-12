@@ -8,6 +8,7 @@
  */
 
 #include "lsasrv.h"
+#include <svcsid.h>
 
 #include "resources.h"
 
@@ -506,6 +507,26 @@ LsapInitSids(VOID)
                   SidTypeWellKnownGroup,
                   NULL);
 
+    /* NT SERVICE: the domain of the service SIDs (S-1-5-80) and its group of all services */
+    SubAuthorities[0] = SECURITY_SERVICE_ID_BASE_RID;
+    LsapCreateSid(&NtAuthority,
+                  1,
+                  SubAuthorities,
+                  L"NT SERVICE",
+                  L"NT SERVICE",
+                  SidTypeDomain,
+                  NULL);
+
+    SubAuthorities[0] = SECURITY_SERVICE_ID_BASE_RID;
+    SubAuthorities[1] = 0;
+    LsapCreateSid(&NtAuthority,
+                  2,
+                  SubAuthorities,
+                  L"ALL SERVICES",
+                  L"NT SERVICE",
+                  SidTypeWellKnownGroup,
+                  NULL);
+
     /* Builtin Domain Sid */
     LsapLoadString(hInstance, IDS_BUILTIN_DOMAIN_RID, szAccountName, ARRAYSIZE(szAccountName));
     LsapLoadString(hInstance, IDS_BUILTIN_DOMAIN_RID, szDomainName, ARRAYSIZE(szDomainName));
@@ -767,6 +788,30 @@ LsapLookupFullyQualifiedWellKnownName(PUNICODE_STRING AccountName,
     return NULL;
 }
 
+
+
+static PSID
+LsapBuildServiceSid(PCWSTR Name, ULONG Chars)
+{
+    SID_IDENTIFIER_AUTHORITY Authority = {SECURITY_NT_AUTHORITY};
+    ULONG SubAuthorities[5];
+    PSID Sid;
+    ULONG i;
+
+    if (!LsapServiceNameToSubAuthorities(Name, Chars, SubAuthorities))
+        return NULL;
+
+    Sid = MIDL_user_allocate(RtlLengthRequiredSid(LSAP_SERVICE_SID_SUBAUTHS));
+    if (Sid == NULL)
+        return NULL;
+
+    RtlInitializeSid(Sid, &Authority, LSAP_SERVICE_SID_SUBAUTHS);
+    *RtlSubAuthoritySid(Sid, 0) = SECURITY_SERVICE_ID_BASE_RID;
+    for (i = 0; i < 5; i++)
+        *RtlSubAuthoritySid(Sid, i + 1) = SubAuthorities[i];
+
+    return Sid;
+}
 
 static
 NTSTATUS
@@ -1617,6 +1662,121 @@ done:
 
 static
 NTSTATUS
+LsapLookupServiceNames(DWORD Count,
+                       PRPC_UNICODE_STRING DomainNames,
+                       PRPC_UNICODE_STRING AccountNames,
+                       PLSAPR_REFERENCED_DOMAIN_LIST DomainsBuffer,
+                       PLSAPR_TRANSLATED_SID_EX2 SidsBuffer,
+                       PULONG Mapped)
+{
+    UNICODE_STRING ServiceDomain = RTL_CONSTANT_STRING(L"NT SERVICE");
+    PWELL_KNOWN_SID Domain;
+    ULONG DomainIndex;
+    ULONG i;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    Domain = LsapLookupIsolatedWellKnownName(&ServiceDomain);
+
+    for (i = 0; i < Count; i++)
+    {
+        PSID Sid;
+        ULONG Chars = AccountNames[i].Length / sizeof(WCHAR);
+
+        if (SidsBuffer[i].Use != SidTypeUnknown || Domain == NULL)
+            continue;
+
+        if (!RtlEqualUnicodeString((PUNICODE_STRING)&DomainNames[i], &ServiceDomain, TRUE))
+            continue;
+
+        if (!LsapServiceExists(AccountNames[i].Buffer, Chars))
+            continue;
+
+        Sid = LsapBuildServiceSid(AccountNames[i].Buffer, Chars);
+        if (Sid == NULL)
+            continue;
+
+        Status = LsapAddDomainToDomainsList(DomainsBuffer,
+                                            &Domain->AccountName,
+                                            Domain->Sid,
+                                            &DomainIndex);
+        if (!NT_SUCCESS(Status))
+        {
+            MIDL_user_free(Sid);
+            return Status;
+        }
+
+        SidsBuffer[i].Use = SidTypeWellKnownGroup;
+        SidsBuffer[i].Sid = Sid;
+        SidsBuffer[i].DomainIndex = DomainIndex;
+        SidsBuffer[i].Flags = 0;
+        (*Mapped)++;
+    }
+
+    return Status;
+}
+
+
+static
+NTSTATUS
+LsapLookupServiceSids(PLSAPR_SID_ENUM_BUFFER SidEnumBuffer,
+                      PLSAPR_TRANSLATED_NAME_EX NamesBuffer,
+                      PLSAPR_REFERENCED_DOMAIN_LIST DomainsBuffer,
+                      PULONG Mapped)
+{
+    UNICODE_STRING ServiceDomain = RTL_CONSTANT_STRING(L"NT SERVICE");
+    PWELL_KNOWN_SID Domain;
+    WCHAR Name[257];
+    ULONG DomainIndex, Chars;
+    ULONG i;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    Domain = LsapLookupIsolatedWellKnownName(&ServiceDomain);
+    if (Domain == NULL)
+        return STATUS_SUCCESS;
+
+    for (i = 0; i < SidEnumBuffer->Entries; i++)
+    {
+        if (NamesBuffer[i].Use != SidTypeUnknown)
+            continue;
+
+        Chars = LsapFindServiceBySid(SidEnumBuffer->SidInfo[i].Sid, Name, ARRAYSIZE(Name));
+        if (Chars == 0)
+            continue;
+
+        NamesBuffer[i].Name.Buffer = MIDL_user_allocate((Chars + 1) * sizeof(WCHAR));
+        if (NamesBuffer[i].Name.Buffer == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        RtlCopyMemory(NamesBuffer[i].Name.Buffer, Name, Chars * sizeof(WCHAR));
+        NamesBuffer[i].Name.Buffer[Chars] = UNICODE_NULL;
+        NamesBuffer[i].Name.Length = (USHORT)(Chars * sizeof(WCHAR));
+        NamesBuffer[i].Name.MaximumLength = (USHORT)((Chars + 1) * sizeof(WCHAR));
+
+        Status = LsapAddDomainToDomainsList(DomainsBuffer,
+                                            &Domain->AccountName,
+                                            Domain->Sid,
+                                            &DomainIndex);
+        if (!NT_SUCCESS(Status))
+        {
+            MIDL_user_free(NamesBuffer[i].Name.Buffer);
+            NamesBuffer[i].Name.Buffer = NULL;
+            NamesBuffer[i].Name.Length = 0;
+            NamesBuffer[i].Name.MaximumLength = 0;
+            return Status;
+        }
+
+        NamesBuffer[i].Use = SidTypeWellKnownGroup;
+        NamesBuffer[i].Flags = 0;
+        NamesBuffer[i].DomainIndex = DomainIndex;
+        (*Mapped)++;
+    }
+
+    return Status;
+}
+
+
+static
+NTSTATUS
 LsapLookupBuiltinNames(DWORD Count,
                        PRPC_UNICODE_STRING DomainNames,
                        PRPC_UNICODE_STRING AccountNames,
@@ -1944,6 +2104,23 @@ LsapLookupNames(DWORD Count,
         Status != STATUS_SOME_NOT_MAPPED)
     {
         TRACE("LsapLookupFullyQualifiedWellKnownNames failed! (Status %lx)\n", Status);
+        goto done;
+    }
+
+    if (Mapped == Count)
+        goto done;
+
+    Status = LsapLookupServiceNames(Count,
+                                    DomainNames,
+                                    AccountNames,
+                                    DomainsBuffer,
+                                    SidsBuffer,
+                                    &Mapped);
+    if (!NT_SUCCESS(Status) &&
+        Status != STATUS_NONE_MAPPED &&
+        Status != STATUS_SOME_NOT_MAPPED)
+    {
+        TRACE("LsapLookupServiceNames failed! (Status %lx)\n", Status);
         goto done;
     }
 
@@ -2466,6 +2643,19 @@ LsapLookupSids(PLSAPR_SID_ENUM_BUFFER SidEnumBuffer,
                                      NamesBuffer,
                                      DomainsBuffer,
                                      &Mapped);
+    if (!NT_SUCCESS(Status) &&
+        Status != STATUS_NONE_MAPPED &&
+        Status != STATUS_SOME_NOT_MAPPED)
+        goto done;
+
+    if (Mapped == SidEnumBuffer->Entries)
+        goto done;
+
+    /* Look-up service SIDs (NT SERVICE\\<service>) */
+    Status = LsapLookupServiceSids(SidEnumBuffer,
+                                   NamesBuffer,
+                                   DomainsBuffer,
+                                   &Mapped);
     if (!NT_SUCCESS(Status) &&
         Status != STATUS_NONE_MAPPED &&
         Status != STATUS_SOME_NOT_MAPPED)

@@ -669,11 +669,10 @@ LookupAccountNameW(LPCWSTR lpSystemName,
     UNICODE_STRING AccountName;
     LSA_HANDLE PolicyHandle = NULL;
     PLSA_REFERENCED_DOMAIN_LIST ReferencedDomains = NULL;
-    PLSA_TRANSLATED_SID TranslatedSid = NULL;
-    PSID pDomainSid;
+    PLSA_TRANSLATED_SID2 TranslatedSid = NULL;
+    PLSA_TRUST_INFORMATION Domain;
     DWORD dwDomainNameLength;
     DWORD dwSidLength;
-    UCHAR nSubAuthorities;
     BOOL bResult;
     NTSTATUS Status;
 
@@ -696,26 +695,33 @@ LookupAccountNameW(LPCWSTR lpSystemName,
     RtlInitUnicodeString(&AccountName,
                          lpAccountName);
 
-    Status = LsaLookupNames(PolicyHandle,
-                            1,
-                            &AccountName,
-                            &ReferencedDomains,
-                            &TranslatedSid);
+    /* LsaLookupNames2 returns the whole SID. The SID of an account that is not
+     * relative to a domain (NT SERVICE\<service>, S-1-5-80-a-b-c-d-e) cannot be rebuilt
+     * from a domain SID and one relative id, and Windows returns the domain SID itself
+     * for a domain name. */
+    Status = LsaLookupNames2(PolicyHandle,
+                             0,
+                             1,
+                             &AccountName,
+                             &ReferencedDomains,
+                             &TranslatedSid);
 
     LsaClose(PolicyHandle);
 
-    if (!NT_SUCCESS(Status) || Status == STATUS_SOME_NOT_MAPPED)
+    if (!NT_SUCCESS(Status) || Status == STATUS_SOME_NOT_MAPPED ||
+        ReferencedDomains == NULL || TranslatedSid == NULL ||
+        TranslatedSid->Sid == NULL || TranslatedSid->DomainIndex < 0 ||
+        (ULONG)TranslatedSid->DomainIndex >= ReferencedDomains->Entries)
     {
-        SetLastError(LsaNtStatusToWinError(Status));
+        SetLastError(NT_SUCCESS(Status) ? ERROR_NONE_MAPPED : LsaNtStatusToWinError(Status));
         bResult = FALSE;
     }
     else
     {
-        pDomainSid = ReferencedDomains->Domains[TranslatedSid->DomainIndex].Sid;
-        nSubAuthorities = *GetSidSubAuthorityCount(pDomainSid);
-        dwSidLength = GetSidLengthRequired(nSubAuthorities + 1);
+        Domain = &ReferencedDomains->Domains[TranslatedSid->DomainIndex];
+        dwSidLength = GetLengthSid(TranslatedSid->Sid);
 
-        dwDomainNameLength = ReferencedDomains->Domains->Name.Length / sizeof(WCHAR);
+        dwDomainNameLength = Domain->Name.Length / sizeof(WCHAR);
 
         if (*cbSid < dwSidLength ||
             *cchReferencedDomainName < dwDomainNameLength + 1)
@@ -727,11 +733,10 @@ LookupAccountNameW(LPCWSTR lpSystemName,
         }
         else
         {
-            CopySid(*cbSid, Sid, pDomainSid);
-            *GetSidSubAuthorityCount(Sid) = nSubAuthorities + 1;
-            *GetSidSubAuthority(Sid, (DWORD)nSubAuthorities) = TranslatedSid->RelativeId;
+            CopySid(*cbSid, Sid, TranslatedSid->Sid);
+            *cbSid = dwSidLength;
 
-            RtlCopyMemory(ReferencedDomainName, ReferencedDomains->Domains->Name.Buffer, dwDomainNameLength * sizeof(WCHAR));
+            RtlCopyMemory(ReferencedDomainName, Domain->Name.Buffer, dwDomainNameLength * sizeof(WCHAR));
             ReferencedDomainName[dwDomainNameLength] = L'\0';
 
             *cchReferencedDomainName = dwDomainNameLength;
