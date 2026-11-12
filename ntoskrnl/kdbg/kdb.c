@@ -1626,10 +1626,10 @@ EnterKdbg:;
                   FirstChance ? "first" : "last", ExceptionCode, ExceptionString);
 
         if (ExceptionCode == STATUS_ACCESS_VIOLATION &&
-            ExceptionRecord && ExceptionRecord->NumberParameters != 0)
+            ExceptionRecord && ExceptionRecord->NumberParameters >= 2)
         {
-            ULONG_PTR TrapCr2 = __readcr2();
-            KdbPrintf("Memory at 0x%p could not be accessed\n", TrapCr2);
+            /* The address saved when the fault was taken; CR2 may belong to a later fault by now */
+            KdbPrintf("Memory at 0x%p could not be accessed\n", (PVOID)(ULONG_PTR)ExceptionRecord->ExceptionInformation[1]);
         }
     }
 
