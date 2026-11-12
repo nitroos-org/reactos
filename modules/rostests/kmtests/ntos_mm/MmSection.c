@@ -983,6 +983,411 @@ TestPhysicalMemorySection(VOID)
     ExFreePoolWithTag(MyPage, 'MPmK');
 }
 
+typedef struct _USER_MAP_ARGS
+{
+    PVOID Mapping;
+    LARGE_INTEGER Offset;
+    SIZE_T ViewSize;
+} USER_MAP_ARGS, *PUSER_MAP_ARGS;
+
+/* NtMapViewOfSection with every parameter in user memory, as a user-mode caller passes them */
+static
+NTSTATUS
+UserMapView(
+    _In_ HANDLE SectionHandle,
+    _In_ PUSER_MAP_ARGS Args,
+    _In_opt_ PVOID BaseHint,
+    _In_ ULONGLONG Offset,
+    _In_ SIZE_T Size)
+{
+    KmtStartSeh()
+        Args->Mapping = BaseHint;
+        Args->Offset.QuadPart = Offset;
+        Args->ViewSize = Size;
+    KmtEndSeh(STATUS_SUCCESS);
+
+    return NtMapViewOfSection(SectionHandle,
+                              NtCurrentProcess(),
+                              &Args->Mapping,
+                              0,
+                              0,
+                              &Args->Offset,
+                              &Args->ViewSize,
+                              ViewUnmap,
+                              0,
+                              PAGE_READWRITE);
+}
+
+static
+VOID
+UserUnmapView(
+    _In_ PUSER_MAP_ARGS Args)
+{
+    KmtStartSeh()
+        ZwUnmapViewOfSection(ZwCurrentProcess(), Args->Mapping);
+    KmtEndSeh(STATUS_SUCCESS);
+}
+
+/* Nothing (no stale VAD) may be left at the address after a refused map: a fixed reservation there must work */
+static
+BOOLEAN
+RangeIsFree(
+    _In_ PVOID Address)
+{
+    PVOID Base = Address;
+    SIZE_T Size = 4 * PAGE_SIZE;
+    NTSTATUS Status;
+
+    Status = ZwAllocateVirtualMemory(ZwCurrentProcess(), &Base, 0, &Size, MEM_RESERVE, PAGE_READWRITE);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+    Size = 0;
+    Status = ZwFreeVirtualMemory(ZwCurrentProcess(), &Base, &Size, MEM_RELEASE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    return TRUE;
+}
+
+static
+VOID
+CheckRangeFree(
+    _In_ PVOID Address)
+{
+    ok(RangeIsFree(Address), "A refused map left something at %p\n", Address);
+}
+
+#define VIEW_HINT ((PVOID)(ULONG_PTR)0x10000000)
+#define VIEW_GRANULARITY 0x10000
+
+/*
+ * Views a user-mode caller asks for that lie past the end of a section, or past
+ * what the processor can address. Windows 10 lets a user-mode caller map the
+ * physical memory section at and past the highest page, but a view that starts
+ * past the end with no size, or reaches an impossible physical address, must
+ * fail cleanly (no inverted VAD, no bugcheck when the page is touched); every
+ * other section type still refuses a view that ends past the section.
+ */
+static
+VOID
+TestSectionViewBounds(VOID)
+{
+    UNICODE_STRING SectionName = RTL_CONSTANT_STRING(L"\\Device\\PhysicalMemory");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE SectionHandle;
+    SYSTEM_BASIC_INFORMATION BasicInfo;
+    LARGE_INTEGER MaximumSize;
+    PUSER_MAP_ARGS Args;
+    PVOID UserMem = NULL;
+    SIZE_T UserSize = PAGE_SIZE;
+    ULONGLONG SectionSize, Offset;
+    NTSTATUS Status, Expected;
+
+    Status = ZwAllocateVirtualMemory(ZwCurrentProcess(), &UserMem, 0, &UserSize, MEM_COMMIT, PAGE_READWRITE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (skip(NT_SUCCESS(Status), "No user memory\n"))
+        return;
+    Args = UserMem;
+
+    /* The address the views below ask for has to be free to begin with */
+    if (skip(RangeIsFree(VIEW_HINT), "View address is not free\n"))
+        goto FreeUser;
+
+    /* ---- The physical memory section ---- */
+    Status = ZwQuerySystemInformation(SystemBasicInformation, &BasicInfo, sizeof(BasicInfo), NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    SectionSize = (ULONGLONG)BasicInfo.HighestPhysicalPageNumber << PAGE_SHIFT;
+
+    InitializeObjectAttributes(&ObjectAttributes, &SectionName, 0, NULL, NULL);
+    Status = ZwOpenSection(&SectionHandle, SECTION_ALL_ACCESS, &ObjectAttributes);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!skip(NT_SUCCESS(Status), "No section\n"))
+    {
+        /* Before Windows 10 the map past the highest page is refused earlier, with another status */
+        Expected = (GetNTVersion() < _WIN32_WINNT_WIN10) ? STATUS_INVALID_PARAMETER_6 : STATUS_INVALID_VIEW_SIZE;
+
+        /* Starts past the end of the section, no size: the size would be section size minus offset, below zero */
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, SectionSize + PAGE_SIZE, 0);
+        ok_eq_hex(Status, Expected);
+        CheckRangeFree(VIEW_HINT);
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, SectionSize + 64 * PAGE_SIZE, 0);
+        ok_eq_hex(Status, Expected);
+        CheckRangeFree(VIEW_HINT);
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, SectionSize + PAGE_SIZE - 1, 0);
+        ok_eq_hex(Status, Expected);
+        CheckRangeFree(VIEW_HINT);
+
+        /* Starts exactly at the end of the section, no size: nothing is left */
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, SectionSize, 0);
+        ok_eq_hex(Status, STATUS_INVALID_VIEW_SIZE);
+        CheckRangeFree(VIEW_HINT);
+
+        /* Pages that no processor can address */
+#ifdef _M_AMD64
+        Offset = 1ULL << 52;
+#else
+        Offset = 1ULL << 32;
+#endif
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, Offset, PAGE_SIZE);
+        ok_eq_hex(Status, Expected);
+        CheckRangeFree(VIEW_HINT);
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, Offset, 0);
+        ok_eq_hex(Status, Expected);
+        CheckRangeFree(VIEW_HINT);
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, 0x7FFFFFFFFFFFF000ULL, PAGE_SIZE);
+        ok_eq_hex(Status, Expected);
+        CheckRangeFree(VIEW_HINT);
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, 0xFFFFFFFFFFFFF000ULL, 2 * PAGE_SIZE);
+        ok_eq_hex(Status, STATUS_INVALID_VIEW_SIZE);
+        CheckRangeFree(VIEW_HINT);
+
+        /* The last page of the section still maps, from page 0 up to the end */
+        Status = UserMapView(SectionHandle, Args, NULL, SectionSize - PAGE_SIZE, 0);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            ok_eq_size(Args->ViewSize, PAGE_SIZE);
+            UserUnmapView(Args);
+        }
+
+        ObCloseHandle(SectionHandle, UserMode);
+    }
+
+    /* ---- Any other section keeps its refusals ---- */
+    InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+    MaximumSize.QuadPart = 2 * VIEW_GRANULARITY;
+    Status = ZwCreateSection(&SectionHandle, SECTION_ALL_ACCESS, &ObjectAttributes, &MaximumSize,
+                             PAGE_READWRITE, SEC_COMMIT, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!skip(NT_SUCCESS(Status), "No pagefile section\n"))
+    {
+        /* (Views of a section that is not physical memory start on the 64 KiB allocation granularity.) Ends past the end */
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, 0, 3 * VIEW_GRANULARITY);
+        ok_eq_hex(Status, STATUS_INVALID_VIEW_SIZE);
+        CheckRangeFree(VIEW_HINT);
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, VIEW_GRANULARITY, 2 * VIEW_GRANULARITY);
+        ok_eq_hex(Status, STATUS_INVALID_VIEW_SIZE);
+        CheckRangeFree(VIEW_HINT);
+        /* Starts at or past the end */
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, 2 * VIEW_GRANULARITY, PAGE_SIZE);
+        ok_eq_hex(Status, STATUS_INVALID_VIEW_SIZE);
+        CheckRangeFree(VIEW_HINT);
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, 3 * VIEW_GRANULARITY, 0);
+        ok_eq_hex(Status, STATUS_INVALID_VIEW_SIZE);
+        CheckRangeFree(VIEW_HINT);
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, 2 * VIEW_GRANULARITY, 0);
+        ok_eq_hex(Status, STATUS_INVALID_VIEW_SIZE);
+        CheckRangeFree(VIEW_HINT);
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, 0x7FFFFFFFFFFF0000ULL, 0);
+        ok_eq_hex(Status, STATUS_INVALID_VIEW_SIZE);
+        CheckRangeFree(VIEW_HINT);
+        /* The section itself maps, whole and from its last page */
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, 0, 0);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            ok_eq_size(Args->ViewSize, 2 * VIEW_GRANULARITY);
+            UserUnmapView(Args);
+        }
+        Status = UserMapView(SectionHandle, Args, VIEW_HINT, VIEW_GRANULARITY, 0);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            ok_eq_size(Args->ViewSize, VIEW_GRANULARITY);
+            UserUnmapView(Args);
+        }
+        ObCloseHandle(SectionHandle, UserMode);
+    }
+
+FreeUser:
+    UserSize = 0;
+    Status = ZwFreeVirtualMemory(ZwCurrentProcess(), &UserMem, &UserSize, MEM_RELEASE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+}
+
+/* Generic rights of a section object (documented SECTION_* masks) */
+static GENERIC_MAPPING PhysMemSectionMapping =
+{
+    STANDARD_RIGHTS_READ | SECTION_QUERY | SECTION_MAP_READ,
+    STANDARD_RIGHTS_WRITE | SECTION_MAP_WRITE,
+    STANDARD_RIGHTS_EXECUTE | SECTION_MAP_EXECUTE,
+    SECTION_ALL_ACCESS
+};
+
+static
+BOOLEAN
+PhysMemAccessCheck(
+    _In_ PSECURITY_DESCRIPTOR Sd,
+    _In_ PACCESS_TOKEN Token,
+    _In_ ACCESS_MASK Desired,
+    _Out_ PNTSTATUS AccessStatus)
+{
+    SECURITY_SUBJECT_CONTEXT Context;
+    ACCESS_MASK Granted = 0;
+
+    /* A subject with only a primary token: the access check runs against that token */
+    Context.ClientToken = NULL;
+    Context.ImpersonationLevel = SecurityAnonymous;
+    Context.PrimaryToken = Token;
+    Context.ProcessAuditId = NULL;
+    return SeAccessCheck(Sd, &Context, FALSE, Desired, 0, NULL,
+                         &PhysMemSectionMapping, UserMode, &Granted, AccessStatus);
+}
+
+/*
+ * Who can get at \Device\PhysicalMemory. Windows 10 refuses every user-mode open of
+ * it, also with READ_CONTROL and also for SYSTEM holding SeTcbPrivilege (the object is
+ * kernel-exclusive), so the DACL only matters to kernel code that checks access on
+ * someone's behalf: it must grant nobody but SYSTEM and the Administrators.
+ */
+static
+VOID
+TestPhysicalMemorySectionSecurity(VOID)
+{
+    UNICODE_STRING SectionName = RTL_CONSTANT_STRING(L"\\Device\\PhysicalMemory");
+    static const ACCESS_MASK UserAccess[] = { READ_CONTROL, SECTION_QUERY, SECTION_MAP_READ,
+                                              SECTION_MAP_READ | SECTION_MAP_WRITE, MAXIMUM_ALLOWED };
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE SectionHandle;
+    PVOID SectionObject;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    BOOLEAN SdAllocated = FALSE, DaclPresent = FALSE, DaclDefaulted = FALSE, Granted;
+    PACL Dacl = NULL;
+    PACE_HEADER Ace;
+    PSID AceSid;
+    ULONG i, AllowedOthers = 0, AllowedSystem = 0;
+    PACCESS_TOKEN SystemToken, OwnToken, StandardToken = NULL;
+    TOKEN_GROUPS DisableAdmins, RestrictEveryone;
+    PTOKEN_USER UserInfo;
+    BOOLEAN RunsAsSystem;
+    NTSTATUS Status, AccessStatus;
+    struct
+    {
+        OBJECT_ATTRIBUTES ObjectAttributes;
+        UNICODE_STRING Name;
+        WCHAR Buffer[32];
+    } *UserOpen;
+    PVOID UserMem = NULL;
+    SIZE_T UserSize = PAGE_SIZE;
+
+    /* Kernel mode opens it */
+    InitializeObjectAttributes(&ObjectAttributes, &SectionName, OBJ_KERNEL_HANDLE, NULL, NULL);
+    Status = ZwOpenSection(&SectionHandle, READ_CONTROL, &ObjectAttributes);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (skip(NT_SUCCESS(Status), "No section\n"))
+        return;
+    Status = ObReferenceObjectByHandle(SectionHandle, 0, NULL, KernelMode, &SectionObject, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ObCloseHandle(SectionHandle, KernelMode);
+    if (skip(NT_SUCCESS(Status), "No section object\n"))
+        return;
+
+    /* The DACL grants nobody but SYSTEM and the Administrators */
+    Status = ObGetObjectSecurity(SectionObject, &Sd, &SdAllocated);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!skip(NT_SUCCESS(Status) && Sd != NULL, "No security descriptor\n"))
+    {
+        Status = RtlGetDaclSecurityDescriptor(Sd, &DaclPresent, &Dacl, &DaclDefaulted);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok(DaclPresent && Dacl != NULL, "No DACL (present %u, %p): everyone would have access\n", DaclPresent, Dacl);
+        for (i = 0; Dacl != NULL && i < Dacl->AceCount; i++)
+        {
+            if (!NT_SUCCESS(RtlGetAce(Dacl, i, (PVOID*)&Ace)))
+                continue;
+            if (Ace->AceType == ACCESS_ALLOWED_ACE_TYPE || Ace->AceType == ACCESS_ALLOWED_CALLBACK_ACE_TYPE)
+            {
+                /* Both have the SID right after the mask */
+                AceSid = (PSID)&((PACCESS_ALLOWED_ACE)Ace)->SidStart;
+                if (RtlEqualSid(AceSid, SeExports->SeLocalSystemSid))
+                    AllowedSystem++;
+                else if (!RtlEqualSid(AceSid, SeExports->SeAliasAdminsSid))
+                    AllowedOthers++;
+            }
+            else if (Ace->AceType == ACCESS_ALLOWED_COMPOUND_ACE_TYPE ||
+                     Ace->AceType == ACCESS_ALLOWED_OBJECT_ACE_TYPE ||
+                     Ace->AceType == ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE)
+            {
+                /* No allow ACE of these kinds is expected; any of them is a way in that this scan cannot vouch for */
+                AllowedOthers++;
+            }
+        }
+        ok(AllowedSystem >= 1, "No access-allowed ACE for SYSTEM\n");
+        ok_eq_ulong(AllowedOthers, 0UL);
+
+        /* SYSTEM is allowed to map it read/write */
+        SystemToken = PsReferencePrimaryToken(PsInitialSystemProcess);
+        Granted = PhysMemAccessCheck(Sd, SystemToken, SECTION_MAP_READ | SECTION_MAP_WRITE, &AccessStatus);
+        ok(Granted, "SYSTEM refused SECTION_MAP_READ|SECTION_MAP_WRITE\n");
+        ok_eq_hex(AccessStatus, STATUS_SUCCESS);
+        PsDereferencePrimaryToken(SystemToken);
+
+        /* A standard user (our token without the Administrators group and without privileges, or restricted to Everyone when we are SYSTEM) is refused */
+        OwnToken = PsReferencePrimaryToken(PsGetCurrentProcess());
+        DisableAdmins.GroupCount = 1;
+        DisableAdmins.Groups[0].Sid = SeExports->SeAliasAdminsSid;
+        DisableAdmins.Groups[0].Attributes = 0;
+        /*
+         * When the test runs as SYSTEM (a service), the token\x27s user SID is the one the DACL
+         * allows, so dropping Administrators proves nothing. A token cannot be created with
+         * another user SID from here, so restrict the token to Everyone instead: the access
+         * check then also has to pass for Everyone, which is what an ordinary user would be
+         * limited to.
+         */
+        RestrictEveryone.GroupCount = 1;
+        RestrictEveryone.Groups[0].Sid = SeExports->SeWorldSid;
+        RestrictEveryone.Groups[0].Attributes = 0;
+        Status = SeQueryInformationToken(OwnToken, TokenUser, (PVOID*)&UserInfo);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        RunsAsSystem = NT_SUCCESS(Status) && RtlEqualSid(UserInfo->User.Sid, SeExports->SeLocalSystemSid);
+        if (NT_SUCCESS(Status))
+            ExFreePool(UserInfo);
+        trace("Caller token user is %s\n", RunsAsSystem ? "SYSTEM" : "not SYSTEM");
+        Status = SeFilterToken(OwnToken, DISABLE_MAX_PRIVILEGE, &DisableAdmins, NULL,
+                               RunsAsSystem ? &RestrictEveryone : NULL, &StandardToken);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!skip(NT_SUCCESS(Status), "No filtered token\n"))
+        {
+            for (i = 0; i < RTL_NUMBER_OF(UserAccess); i++)
+            {
+                if (UserAccess[i] == MAXIMUM_ALLOWED)
+                    continue;
+                Granted = PhysMemAccessCheck(Sd, StandardToken, UserAccess[i], &AccessStatus);
+                ok(!Granted, "Standard user granted 0x%lx\n", UserAccess[i]);
+                ok_eq_hex(AccessStatus, STATUS_ACCESS_DENIED);
+            }
+            ObDereferenceObject(StandardToken);
+        }
+        PsDereferencePrimaryToken(OwnToken);
+        ObReleaseObjectSecurity(Sd, SdAllocated);
+    }
+    ObDereferenceObject(SectionObject);
+
+    /* A user-mode open is refused, whatever access is asked for (our caller is an administrator) */
+    Status = ZwAllocateVirtualMemory(ZwCurrentProcess(), &UserMem, 0, &UserSize, MEM_COMMIT, PAGE_READWRITE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (skip(NT_SUCCESS(Status), "No user memory\n"))
+        return;
+    UserOpen = UserMem;
+    for (i = 0; i < RTL_NUMBER_OF(UserAccess); i++)
+    {
+        KmtStartSeh()
+            RtlCopyMemory(UserOpen->Buffer, SectionName.Buffer, SectionName.Length);
+            UserOpen->Name.Buffer = UserOpen->Buffer;
+            UserOpen->Name.Length = SectionName.Length;
+            UserOpen->Name.MaximumLength = SectionName.Length;
+            InitializeObjectAttributes(&UserOpen->ObjectAttributes, &UserOpen->Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        KmtEndSeh(STATUS_SUCCESS);
+        /* What NtOpenSection does for a user-mode caller */
+        SectionHandle = NULL;
+        Status = ObOpenObjectByName(&UserOpen->ObjectAttributes, MmSectionObjectType, UserMode,
+                                    NULL, UserAccess[i], NULL, &SectionHandle);
+        ok(Status == STATUS_ACCESS_DENIED, "User-mode open with 0x%lx: 0x%lx\n", UserAccess[i], Status);
+        if (NT_SUCCESS(Status))
+            ObCloseHandle(SectionHandle, UserMode);
+    }
+    UserSize = 0;
+    Status = ZwFreeVirtualMemory(ZwCurrentProcess(), &UserMem, &UserSize, MEM_RELEASE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+}
+
 START_TEST(MmSection)
 {
     NTSTATUS Status;
@@ -1073,4 +1478,6 @@ START_TEST(MmSection)
         ZwClose(FileHandle1);
 
     TestPhysicalMemorySection();
+    TestPhysicalMemorySectionSecurity();
+    TestSectionViewBounds();
 }

@@ -52,6 +52,8 @@
 
 #include "ARM3/miarm.h"
 
+static ULONG64 MiPhysMemMaxAddress(VOID);
+
 #undef MmSetPageEntrySectionSegment
 #define MmSetPageEntrySectionSegment(S,O,E) \
         _MmSetPageEntrySectionSegment((S),(O),(E),__FILE__,__LINE__)
@@ -5112,8 +5114,10 @@ MiMapViewOfSection(
         /* Check if the offset and size are bigger than the section itself */
         if (((ULONG64)RequestedOffset + *ViewSize) > (ULONG64)SectionLimit)
         {
-            /* This is allowed for physical memory sections and kernel mode callers */
-            if (!Section->u.Flags.PhysicalMemory || (ExGetPreviousMode() == UserMode))
+            /* This is allowed for physical memory sections and kernel mode callers
+             * (and, since Windows 10, user mode callers too) */
+            if (!Section->u.Flags.PhysicalMemory ||
+                ((ExGetPreviousMode() == UserMode) && !MI_PHYSMEM_USER_MAP_PAST_RAM()))
             {
                 DPRINT1("Section offset and size are larger than section\n");
                 Status = STATUS_INVALID_VIEW_SIZE;
@@ -5124,7 +5128,18 @@ MiMapViewOfSection(
         if ((*ViewSize) == 0)
         {
             /* Calculate a view size and make sure it doesn't overflow a SIZE_T */
-            ULONG64 CalculatedSize = Section->SizeOfSection.QuadPart - ViewOffset;
+            ULONG64 CalculatedSize;
+
+            /* A view that starts past the end of the section would make the subtraction wrap.
+             * The check above only covers it when the offset is not allowed to lie past the end. */
+            if ((ULONG64)ViewOffset > (ULONG64)Section->SizeOfSection.QuadPart)
+            {
+                DPRINT1("Section offset is past the end of the section\n");
+                Status = STATUS_INVALID_VIEW_SIZE;
+                goto Exit;
+            }
+
+            CalculatedSize = Section->SizeOfSection.QuadPart - ViewOffset;
             if (CalculatedSize > SIZE_T_MAX)
             {
                 DPRINT1("ViewSize is larger than SIZE_T_MAX\n");
@@ -5136,7 +5151,8 @@ MiMapViewOfSection(
         }
         else if ((ExGetPreviousMode() == UserMode) &&
             (((*ViewSize)+ViewOffset) > Section->SizeOfSection.QuadPart) &&
-            (!Section->u.Flags.Reserve))
+            (!Section->u.Flags.Reserve) &&
+            !(Section->u.Flags.PhysicalMemory && MI_PHYSMEM_USER_MAP_PAST_RAM()))
         {
             /* Dubious */
             (*ViewSize) = MIN(Section->SizeOfSection.QuadPart - ViewOffset, SIZE_T_MAX - PAGE_SIZE);
@@ -5147,6 +5163,15 @@ MiMapViewOfSection(
         /* Nothing left to map: a section of size 0, or a view that starts at its end */
         if (*ViewSize == 0)
         {
+            Status = STATUS_INVALID_VIEW_SIZE;
+            goto Exit;
+        }
+
+        /* A page of the physical memory section above what the processor can address cannot be mapped */
+        if (Section->u.Flags.PhysicalMemory && (ExGetPreviousMode() == UserMode) &&
+            (((ULONG64)ViewOffset + *ViewSize) > MiPhysMemMaxAddress()))
+        {
+            DPRINT1("Physical memory view is beyond the highest addressable physical address\n");
             Status = STATUS_INVALID_VIEW_SIZE;
             goto Exit;
         }
@@ -5261,6 +5286,42 @@ Exit:
     }
 
     return Status;
+}
+
+/*
+ * The highest physical address the processor can map, as an exclusive bound:
+ * the page-frame field of a PTE is only so wide, and a page above it makes the
+ * hardware fault on a present PTE (a view of the physical memory section must
+ * not be able to reach that).
+ */
+static
+ULONG64
+MiPhysMemMaxAddress(VOID)
+{
+#if defined(_M_AMD64)
+    int Regs[4];
+    ULONG Bits = 36;
+
+    __cpuid(Regs, 0x80000000);
+    if ((ULONG)Regs[0] >= 0x80000008)
+    {
+        __cpuid(Regs, 0x80000008);
+        Bits = (ULONG)Regs[0] & 0xFF;
+        if (Bits < 32)
+            Bits = 32;
+        else if (Bits > 52)
+            Bits = 52;
+    }
+    return 1ULL << Bits;
+#elif defined(_M_IX86)
+#ifdef _X86PAE_
+    return 1ULL << 36;
+#else
+    return 1ULL << 32;
+#endif
+#else
+    return ~0ULL;
+#endif
 }
 
 NTSTATUS
