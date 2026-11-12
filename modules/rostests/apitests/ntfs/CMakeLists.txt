@@ -5,6 +5,7 @@ list(APPEND SOURCE
     delete.c
     inherit.c
     notify.c
+    pagingwrite.c
     recreuse.c
     relopen.c
     reparse.c
