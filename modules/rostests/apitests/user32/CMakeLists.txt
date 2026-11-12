@@ -82,6 +82,7 @@ list(APPEND SOURCE
     MouseHookTransport.c
     MouseWheel.c
     KeyboardLLHook.c
+    LayeredCompose.c
     LoadImage.c
     LoadImageGCC.c
     LoadImagePngIcon.c
