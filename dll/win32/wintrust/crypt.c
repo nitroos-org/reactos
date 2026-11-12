@@ -874,6 +874,27 @@ static BOOL WINTRUST_PutSignedMsgToPEFile(SIP_SUBJECTINFO* pSubjectInfo, DWORD p
     cert->wRevision = WIN_CERT_REVISION_2_0;
     cert->wCertificateType = WIN_CERT_TYPE_PKCS_SIGNED_DATA;
     memcpy(cert->bCertificate, pbSignedDataMsg, cbSignedDataMsg);
+
+    /* The certificate table of the first signature starts on an 8-byte boundary; the zeros before it are part of the
+     * image digest (pe_image_hash counts them for the unsigned file) */
+    {
+        DWORD count = 0, end = GetFileSize(file, NULL);
+
+        if (end != INVALID_FILE_SIZE && (end % 8) && ImageEnumerateCertificates(file, CERT_SECTION_TYPE_ANY, &count, NULL, 0) &&
+            !count)
+        {
+            static const BYTE zero[8];
+            DWORD pad = 8 - (end % 8), written;
+
+            SetFilePointer(file, 0, NULL, FILE_END);
+            if (!WriteFile(file, zero, pad, &written, NULL) || written != pad)
+            {
+                free(cert);
+                if (file != pSubjectInfo->hFile) CloseHandle(file);
+                return FALSE;
+            }
+        }
+    }
     ret = ImageAddCertificate(file, cert, pdwIndex);
 
     free(cert);
@@ -1440,7 +1461,6 @@ static BOOL fill_indirect_data(const char *data_oid, const BYTE *data, DWORD dat
     out->Digest.cbData = digest_len;
     out->Digest.pbData = p;
     memcpy(p, digest, digest_len);
-    *size = need;
     return TRUE;
 }
 
