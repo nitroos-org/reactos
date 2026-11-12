@@ -1648,6 +1648,116 @@ out:
     if (sp) REL(sp);
 }
 
+/*
+ * ICompositor2 (guid 735081dc-5e24-45da-a38f-e32cc349a9a0, slots 6.. CreateAmbientLight, CreateAnimationGroup,
+ * CreateBackdropBrush, CreateDistantLight, CreateDropShadow, CreateImplicitAnimationCollection, CreateLayerVisual, ...)
+ * and ICompositionSurfaceBrush3 (guid 550bb289-1fe0-42e5-8195-1eefa87ff08e, 6/7 get/put SnapToPixels): microsoft/windows-rs
+ * (MIT OR Apache-2.0), the published `windows` crate 0.62.2 (vcs commit 32c3144490c016fe496a0aed769bce60987a2e9d,
+ * src/Windows/UI/Composition/mod.rs). The members of ICompositor2 create classes that are not available yet: S_OK
+ * (Windows) or E_NOTIMPL (here) is accepted.
+ */
+typedef struct ICompositor2T ICompositor2T;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ICompositor2T *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ICompositor2T *This);
+    ULONG (STDMETHODCALLTYPE *Release)(ICompositor2T *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(ICompositor2T *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(ICompositor2T *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(ICompositor2T *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *CreateAmbientLight)(ICompositor2T *This, IUnknown **result);
+    HRESULT (STDMETHODCALLTYPE *CreateAnimationGroup)(ICompositor2T *This, IUnknown **result);
+    HRESULT (STDMETHODCALLTYPE *CreateBackdropBrush)(ICompositor2T *This, IUnknown **result);
+    HRESULT (STDMETHODCALLTYPE *CreateDistantLight)(ICompositor2T *This, IUnknown **result);
+    HRESULT (STDMETHODCALLTYPE *CreateDropShadow)(ICompositor2T *This, IUnknown **result);
+    HRESULT (STDMETHODCALLTYPE *CreateImplicitAnimationCollection)(ICompositor2T *This, IUnknown **result);
+    HRESULT (STDMETHODCALLTYPE *CreateLayerVisual)(ICompositor2T *This, IUnknown **result);
+} ICompositor2TVtbl;
+struct ICompositor2T { const ICompositor2TVtbl *lpVtbl; };
+static const GUID IID_ICompositor2T = {0x735081dc, 0x5e24, 0x45da, {0xa3, 0x8f, 0xe3, 0x2c, 0xc3, 0x49, 0xa9, 0xa0}};
+
+typedef struct ISurfBrush3T ISurfBrush3T;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ISurfBrush3T *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ISurfBrush3T *This);
+    ULONG (STDMETHODCALLTYPE *Release)(ISurfBrush3T *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(ISurfBrush3T *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(ISurfBrush3T *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(ISurfBrush3T *This, int *level);
+    HRESULT (STDMETHODCALLTYPE *get_SnapToPixels)(ISurfBrush3T *This, BOOLEAN *v);
+    HRESULT (STDMETHODCALLTYPE *put_SnapToPixels)(ISurfBrush3T *This, BOOLEAN v);
+} ISurfBrush3TVtbl;
+struct ISurfBrush3T { const ISurfBrush3TVtbl *lpVtbl; };
+static const GUID IID_ISurfBrush3T = {0x550bb289, 0x1fe0, 0x42e5, {0x81, 0x95, 0x1e, 0xef, 0xa8, 0x7f, 0xf0, 0x8e}};
+
+static void TestCompositor2AndBrush3(void)
+{
+    ICompositor2T *c2 = NULL;
+    ISurfBrush3T *b3 = NULL;
+    WICompositionSurfaceBrush *brush = NULL;
+    IUnknown *u1 = NULL, *u2 = NULL, *made;
+    IID *iids = NULL;
+    ULONG count = 0;
+    BOOLEAN b;
+    HRESULT hr;
+
+    hr = QI(Comp, &IID_ICompositor2T, (void **)&c2);
+    ok(hr == S_OK && c2, "QI ICompositor2 %#lx\n", hr);
+    if (c2)
+    {
+        QI(c2, &IID_IUnknown, (void **)&u1);
+        QI(Comp, &IID_IUnknown, (void **)&u2);
+        ok(u1 == u2, "ICompositor2 identity %p vs %p\n", u1, u2);
+        REL(u1); REL(u2);
+        hr = c2->lpVtbl->GetIids(c2, &count, &iids);
+        ok(hr == S_OK && iids, "GetIids %#lx\n", hr);
+        if (iids)
+        {
+            ok(HasIid(iids, count, &IID_ICompositor2T), "GetIids lacks ICompositor2\n");
+            CoTaskMemFree(iids);
+        }
+        made = (IUnknown *)0x1234;
+        hr = c2->lpVtbl->CreateLayerVisual(c2, &made);
+        ok(hr == S_OK || hr == E_NOTIMPL, "CreateLayerVisual %#lx\n", hr);
+        if (hr == S_OK && made) REL(made);
+        else ok(made == NULL, "CreateLayerVisual failed but returned %p\n", made);
+        made = (IUnknown *)0x1234;
+        hr = c2->lpVtbl->CreateBackdropBrush(c2, &made);
+        ok(hr == S_OK || hr == E_NOTIMPL, "CreateBackdropBrush %#lx\n", hr);
+        if (hr == S_OK && made) REL(made);
+        else ok(made == NULL, "CreateBackdropBrush failed but returned %p\n", made);
+        REL(c2);
+    }
+
+    hr = Comp->lpVtbl->CreateSurfaceBrush(Comp, &brush);
+    ok(hr == S_OK && brush, "CreateSurfaceBrush %#lx\n", hr);
+    if (!brush) return;
+    hr = QI(brush, &IID_ISurfBrush3T, (void **)&b3);
+    ok(hr == S_OK && b3, "QI ICompositionSurfaceBrush3 %#lx\n", hr);
+    if (b3)
+    {
+        QI(b3, &IID_IUnknown, (void **)&u1);
+        QI(brush, &IID_IUnknown, (void **)&u2);
+        ok(u1 == u2, "ICompositionSurfaceBrush3 identity %p vs %p\n", u1, u2);
+        REL(u1); REL(u2);
+        hr = b3->lpVtbl->get_SnapToPixels(b3, NULL);
+        ok(hr == E_POINTER, "get_SnapToPixels(NULL) %#lx\n", hr);
+        hr = b3->lpVtbl->put_SnapToPixels(b3, TRUE);
+        ok(hr == S_OK, "put_SnapToPixels %#lx\n", hr);
+        b = FALSE;
+        hr = b3->lpVtbl->get_SnapToPixels(b3, &b);
+        ok(hr == S_OK && b, "SnapToPixels after put(TRUE) %#lx %u\n", hr, b);
+        hr = b3->lpVtbl->put_SnapToPixels(b3, FALSE);
+        ok(hr == S_OK, "put_SnapToPixels(FALSE) %#lx\n", hr);
+        b = TRUE;
+        hr = b3->lpVtbl->get_SnapToPixels(b3, &b);
+        ok(hr == S_OK && !b, "SnapToPixels after put(FALSE) %#lx %u\n", hr, b);
+        REL(b3);
+    }
+    REL(brush);
+}
+
 static void TestVisualInteractionSource(PRO_ACTIVATE pRoActivateInstance, PWCS pWindowsCreateString, PWDS pWindowsDeleteString)
 {
     const WCHAR name[] = L"Windows.UI.Composition.Interactions.VisualInteractionSource";
@@ -1855,6 +1965,7 @@ START_TEST(Composition)
         TestStretch();
         TestDesktopTarget();
         TestVisual2();
+        TestCompositor2AndBrush3();
         TestVisualInteractionSource(pRoActivateInstance, pWindowsCreateString, pWindowsDeleteString);
         REL(Comp);
     }

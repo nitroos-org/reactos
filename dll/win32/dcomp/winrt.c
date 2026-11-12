@@ -174,6 +174,40 @@ typedef struct WIAsyncInfoVtbl
 struct WIAsyncInfo { const WIAsyncInfoVtbl *lpVtbl; };
 
 DEFINE_GUID(IID_ICompositorDesktopInterop, 0x29e691fa, 0x4567, 0x4dca, 0xb3, 0x19, 0xd0, 0xf2, 0x07, 0xeb, 0x68, 0x07);
+/*
+ * ICompositor2 (Windows.UI.Composition), guid 735081dc-5e24-45da-a38f-e32cc349a9a0. Source: microsoft/windows-rs
+ * (MIT OR Apache-2.0), the published `windows` crate 0.62.2 (vcs commit 32c3144490c016fe496a0aed769bce60987a2e9d),
+ * src/Windows/UI/Composition/mod.rs (ICompositor2_Vtbl). Members in slot order after IInspectable:
+ * 6 CreateAmbientLight, 7 CreateAnimationGroup, 8 CreateBackdropBrush, 9 CreateDistantLight, 10 CreateDropShadow,
+ * 11 CreateImplicitAnimationCollection, 12 CreateLayerVisual, 13 CreateMaskBrush, 14 CreateNineGridBrush,
+ * 15 CreatePointLight, 16 CreateSpotLight, 17 CreateStepEasingFunction, 18 CreateStepEasingFunctionWithStepCount(int).
+ * Every member creates a class this object model does not have: E_NOTIMPL with a FIXME naming the member.
+ */
+typedef struct ICompositor2 ICompositor2;
+typedef struct ICompositor2Vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ICompositor2 *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ICompositor2 *This);
+    ULONG (STDMETHODCALLTYPE *Release)(ICompositor2 *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(ICompositor2 *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(ICompositor2 *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(ICompositor2 *This, TrustLevel *level);
+    HRESULT (STDMETHODCALLTYPE *CreateAmbientLight)(ICompositor2 *This, void **result);
+    HRESULT (STDMETHODCALLTYPE *CreateAnimationGroup)(ICompositor2 *This, void **result);
+    HRESULT (STDMETHODCALLTYPE *CreateBackdropBrush)(ICompositor2 *This, void **result);
+    HRESULT (STDMETHODCALLTYPE *CreateDistantLight)(ICompositor2 *This, void **result);
+    HRESULT (STDMETHODCALLTYPE *CreateDropShadow)(ICompositor2 *This, void **result);
+    HRESULT (STDMETHODCALLTYPE *CreateImplicitAnimationCollection)(ICompositor2 *This, void **result);
+    HRESULT (STDMETHODCALLTYPE *CreateLayerVisual)(ICompositor2 *This, void **result);
+    HRESULT (STDMETHODCALLTYPE *CreateMaskBrush)(ICompositor2 *This, void **result);
+    HRESULT (STDMETHODCALLTYPE *CreateNineGridBrush)(ICompositor2 *This, void **result);
+    HRESULT (STDMETHODCALLTYPE *CreatePointLight)(ICompositor2 *This, void **result);
+    HRESULT (STDMETHODCALLTYPE *CreateSpotLight)(ICompositor2 *This, void **result);
+    HRESULT (STDMETHODCALLTYPE *CreateStepEasingFunction)(ICompositor2 *This, void **result);
+    HRESULT (STDMETHODCALLTYPE *CreateStepEasingFunctionWithStepCount)(ICompositor2 *This, INT32 steps, void **result);
+} ICompositor2Vtbl;
+struct ICompositor2 { const ICompositor2Vtbl *lpVtbl; };
+DEFINE_GUID(IID_ICompositor2, 0x735081dc, 0x5e24, 0x45da, 0xa3, 0x8f, 0xe3, 0x2c, 0xc3, 0x49, 0xa9, 0xa0);
 DEFINE_GUID(IID_ICompositorController, 0x2d75f35a, 0x70a7, 0x4395, 0xba, 0x2d, 0xce, 0xf0, 0xb1, 0x83, 0x99, 0xf9);
 DEFINE_GUID(IID_WIAsyncAction, 0x5a648006, 0x843a, 0x4da9, 0x86, 0x5b, 0x9d, 0x26, 0xe5, 0xdf, 0xad, 0x7b);
 DEFINE_GUID(IID_WIAsyncInfo, 0x00000036, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
@@ -387,6 +421,7 @@ struct compositor
 {
     IInspectable IInspectable_iface;    /* identity */
     ICompositor ICompositor_iface;
+    ICompositor2 ICompositor2_iface;
     ICompositorInterop ICompositorInterop_iface;
     ICompositorDesktopInterop ICompositorDesktopInterop_iface;
     IClosable IClosable_iface;
@@ -473,6 +508,8 @@ static HRESULT STDMETHODCALLTYPE compositor_id_QueryInterface(IInspectable *ifac
         *out = &This->IInspectable_iface;
     else if (IsEqualGUID(iid, &IID___x_ABI_CWindows_CUI_CComposition_CICompositor))
         *out = &This->ICompositor_iface;
+    else if (IsEqualGUID(iid, &IID_ICompositor2))
+        *out = &This->ICompositor2_iface;
     else if (IsEqualGUID(iid, &IID___x_ABI_CWindows_CUI_CComposition_CICompositorInterop))
         *out = &This->ICompositorInterop_iface;
     else if (IsEqualGUID(iid, &IID_ICompositorDesktopInterop))
@@ -514,6 +551,7 @@ static ULONG STDMETHODCALLTYPE compositor_id_Release(IInspectable *iface)
 static HRESULT STDMETHODCALLTYPE compositor_id_GetIids(IInspectable *iface, ULONG *count, IID **iids)
 {
     const IID *list[] = { &IID___x_ABI_CWindows_CUI_CComposition_CICompositor,
+                          &IID_ICompositor2,
                           &IID___x_ABI_CWindows_CUI_CComposition_CICompositorInterop,
                           &IID___x_ABI_CWindows_CFoundation_CIClosable };
     return make_iids(count, iids, list, ARRAY_SIZE(list));
@@ -586,6 +624,45 @@ static const ICompositorVtbl compositor_vtbl =
     compositor_CreateVector3KeyFrameAnimation,
     compositor_CreateVector4KeyFrameAnimation,
     compositor_GetCommitBatch,
+};
+
+/* ICompositor2: see the comment at its definition; nothing here can be created yet */
+static inline struct compositor *comp_from_comp2(ICompositor2 *i)
+{ return CONTAINING_RECORD(i, struct compositor, ICompositor2_iface); }
+FWD_UNKNOWN(compositor2, ICompositor2, comp_from_comp2, IInspectable_iface)
+
+#define C2_STUB(N) \
+static HRESULT STDMETHODCALLTYPE compositor2_##N(ICompositor2 *iface, void **result) \
+{ FIXME("ICompositor2::" #N ": not implemented\n"); if (result) *result = NULL; return E_NOTIMPL; }
+C2_STUB(CreateAmbientLight)
+C2_STUB(CreateAnimationGroup)
+C2_STUB(CreateBackdropBrush)
+C2_STUB(CreateDistantLight)
+C2_STUB(CreateDropShadow)
+C2_STUB(CreateImplicitAnimationCollection)
+C2_STUB(CreateLayerVisual)
+C2_STUB(CreateMaskBrush)
+C2_STUB(CreateNineGridBrush)
+C2_STUB(CreatePointLight)
+C2_STUB(CreateSpotLight)
+C2_STUB(CreateStepEasingFunction)
+static HRESULT STDMETHODCALLTYPE compositor2_CreateStepEasingFunctionWithStepCount(ICompositor2 *iface, INT32 steps,
+        void **result)
+{
+    FIXME("ICompositor2::CreateStepEasingFunctionWithStepCount(%d): not implemented\n", steps);
+    if (result) *result = NULL;
+    return E_NOTIMPL;
+}
+
+static const ICompositor2Vtbl compositor2_vtbl =
+{
+    compositor2_QueryInterface, compositor2_AddRef, compositor2_Release, compositor2_GetIids,
+    compositor2_GetRuntimeClassName, compositor2_GetTrustLevel,
+    compositor2_CreateAmbientLight, compositor2_CreateAnimationGroup, compositor2_CreateBackdropBrush,
+    compositor2_CreateDistantLight, compositor2_CreateDropShadow, compositor2_CreateImplicitAnimationCollection,
+    compositor2_CreateLayerVisual, compositor2_CreateMaskBrush, compositor2_CreateNineGridBrush,
+    compositor2_CreatePointLight, compositor2_CreateSpotLight, compositor2_CreateStepEasingFunction,
+    compositor2_CreateStepEasingFunctionWithStepCount,
 };
 
 /* ICompositorInterop is a plain IUnknown interface */
@@ -681,6 +758,7 @@ static HRESULT compositor_create(struct compositor **out)
     if (!This) return E_OUTOFMEMORY;
     This->IInspectable_iface.lpVtbl = &compositor_id_vtbl;
     This->ICompositor_iface.lpVtbl = &compositor_vtbl;
+    This->ICompositor2_iface.lpVtbl = &compositor2_vtbl;
     This->ICompositorInterop_iface.lpVtbl = &interop_vtbl;
     This->ICompositorDesktopInterop_iface.lpVtbl = &desktop_vtbl;
     This->IClosable_iface.lpVtbl = &compositor_closable_vtbl;
