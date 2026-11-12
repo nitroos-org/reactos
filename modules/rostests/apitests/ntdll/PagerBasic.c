@@ -360,7 +360,7 @@ START_TEST(PagerBasic)
     PROCESS_INFORMATION ProcessInfo;
     WCHAR CommandLine[MAX_PATH + 32];
     PUCHAR Base, Locked;
-    ULONG i, SlotsBefore, SlotsAfter, Written, Written1, Written2, Old32, Resident;
+    ULONG i, SlotsBefore, SlotsAfter, SlotsOut, Written, Written1, Written2, Old32, Resident;
     SIZE_T Private, Size;
     NTSTATUS Status;
     BOOLEAN Old;
@@ -407,6 +407,15 @@ START_TEST(PagerBasic)
     }
 
     TestCommandRules();
+
+    /*
+     * The process owns pages besides the test range (heap, stack, data): every page-out below sends
+     * the dirty ones to the paging file, and they stay there until they are touched again or the
+     * process exits. Take the baseline after they went out once, so that the checks below measure
+     * what the test range and the child hold, not the footprint of the process itself.
+     */
+    PageOutEverything(TRUE);
+    SlotsBefore = PagingFileInUse();
 
     Status = NtQuerySystemInformation(SystemMemoryListInformation, &ListInfo, sizeof(ListInfo), NULL);
     ok_ntstatus(Status, STATUS_SUCCESS);
@@ -554,8 +563,11 @@ START_TEST(PagerBasic)
 
     /* 8. Release of paged-out pages gives their slots back */
     PageOutEverything(TRUE);
+    SlotsOut = PagingFileInUse();
+    ok(SlotsOut >= SlotsBefore + TEST_PAGES / 2, "paging file in use %lu with the test range out, was %lu\n", SlotsOut, SlotsBefore);
     FreePages(Base);
     SlotsAfter = PagingFileInUse();
+    ok(SlotsAfter + TEST_PAGES / 2 <= SlotsOut, "paging file in use %lu after the release, was %lu with the range out\n", SlotsAfter, SlotsOut);
     ok(SlotsAfter <= SlotsBefore + 16, "paging file in use %lu, was %lu\n", SlotsAfter, SlotsBefore);
 
     /* 9. Process exit with paged-out pages gives their slots back */
