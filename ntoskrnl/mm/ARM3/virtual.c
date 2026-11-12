@@ -6067,6 +6067,21 @@ NtQueryVirtualMemory(IN HANDLE ProcessHandle,
 }
 
 /*
+ * An explicit base below 64 KB is refused with STATUS_CONFLICTING_ADDRESSES (Windows 10 x64), except the legacy
+ * reservations of the VDM's first megabyte, which start at address 1 (kernel32's CreateProcessInternalW and ntvdm,
+ * also in the WoW64 NTVDM) or 4 (RtlCreateUserProcess with RTL_USER_PROCESS_PARAMETERS_RESERVE_1MB: smss, csrss).
+ * A NULL base means "any address" for NtAllocateVirtualMemory.
+ */
+FORCEINLINE
+BOOLEAN
+MiIsLegacyVdmReserve(
+    _In_ BOOLEAN IsEx,
+    _In_ ULONG_PTR StartingAddress)
+{
+    return (!IsEx && ((StartingAddress == 1) || (StartingAddress == 4)));
+}
+
+/*
  * NtAllocateVirtualMemory and NtAllocateVirtualMemoryEx.
  *
  * Ex only: LowestAddress, HighestRequired and Alignment come from a MEM_ADDRESS_REQUIREMENTS
@@ -6540,7 +6555,7 @@ MiAllocateVirtualMemory(IN HANDLE ProcessHandle,
                                 HighestAddress,
                                 StartingAddress ? MM_VIRTMEM_GRANULARITY : max(Alignment, MM_VIRTMEM_GRANULARITY),
                                 AllocationType & ~MEM_REPLACE_PLACEHOLDER,
-                                !IsEx);
+                                MiIsLegacyVdmReserve(IsEx, StartingAddress));
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("Failed to insert the VAD!\n");
