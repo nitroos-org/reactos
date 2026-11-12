@@ -14,6 +14,7 @@
 EXTERN KiDispatchException:PROC
 EXTERN KeBugCheckWithTf:PROC
 EXTERN MmAccessFault:PROC
+EXTERN KiSystemServiceIrqlFault:PROC
 EXTERN KiSystemFatalException:PROC
 EXTERN KiNpxNotAvailableFaultHandler:PROC
 EXTERN KiGeneralProtectionFaultHandler:PROC
@@ -1073,6 +1074,12 @@ GLOBAL_LABEL KiSystemCall64Again
 
 GLOBAL_LABEL KiSystemServiceExit
 
+    /* A system service returns at PASSIVE_LEVEL; Windows bug checks
+       IRQL_GT_ZERO_AT_SYSTEM_SERVICE here in every build */
+    mov rcx, cr8
+    test ecx, ecx
+    jnz KiSystemServiceIrqlError
+
 #ifdef NITRO_THREAD_LOCK_TRACE
     /* Diagnostic: a service returns at PASSIVE_LEVEL with no thread lock held */
     sub rsp, 48
@@ -1162,6 +1169,12 @@ NoUserApcPending:
 
     /* return to user mode */
     sysretq
+
+KiSystemServiceIrqlError:
+    /* rcx = IRQL; the service number is in the trap frame (rax at entry) */
+    mov rdx, rcx
+    mov rcx, [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rax]
+    call KiSystemServiceIrqlFault
 
 .ENDP
 
