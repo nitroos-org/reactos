@@ -3793,6 +3793,7 @@ typedef HANDLE HCERTCHAINENGINE;
 #define CERT_CHAIN_USE_LOCAL_MACHINE_STORE  0x00000008
 #define CERT_CHAIN_ENABLE_CACHE_AUTO_UPDATE 0x00000010
 #define CERT_CHAIN_ENABLE_SHARE_STORE       0x00000020
+#define CERT_CHAIN_EXCLUSIVE_ENABLE_CA_FLAG 0x00000001
 
 typedef struct _CERT_CHAIN_ENGINE_CONFIG
 {
@@ -3808,6 +3809,7 @@ typedef struct _CERT_CHAIN_ENGINE_CONFIG
     DWORD       CycleDetectionModulus;
     HCERTSTORE  hExclusiveRoot;
     HCERTSTORE  hExclusiveRootTrustedPeople;
+    DWORD       dwExclusiveFlags;
 } CERT_CHAIN_ENGINE_CONFIG, *PCERT_CHAIN_ENGINE_CONFIG;
 
 /* message-related definitions */

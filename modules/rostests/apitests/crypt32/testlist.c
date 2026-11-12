@@ -2,6 +2,7 @@
 #define STANDALONE
 #include <apitest.h>
 
+extern void func_CertChainEngine(void);
 extern void func_CertEnumSystemStore(void);
 extern void func_CertEnumSystemStoreLocation(void);
 extern void func_ChainTrust(void);
@@ -11,6 +12,7 @@ extern void func_CryptStringToBinaryStrict(void);
 
 const struct test winetest_testlist[] =
 {
+    { "CertChainEngine", func_CertChainEngine },
     { "CertEnumSystemStore", func_CertEnumSystemStore },
     { "CertEnumSystemStoreLocation", func_CertEnumSystemStoreLocation },
     { "ChainTrust", func_ChainTrust },
