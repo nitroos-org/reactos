@@ -3215,4 +3215,10 @@ MiDeletePdeDeferred(
 #endif
 }
 
+BOOLEAN
+NTAPI
+MiIsViewProtectionCompatible(
+    _In_ ULONG ViewProtectionMask,
+    _In_ ULONG ProtectionMask);
+
 /* EOF */
