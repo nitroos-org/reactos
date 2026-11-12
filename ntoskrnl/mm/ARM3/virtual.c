@@ -16,7 +16,8 @@
 #include <mm/ARM3/miarm.h>
 
 /* MmFlushVirtualMemory writes a view in pieces of this many bytes (MmFlushSegment takes a ULONG length) */
-#define MI_FLUSH_VIEW_CHUNK (256 * 1024 * 1024)
+/* A flush walks a view in chunks of this size; the locks are dropped between chunks */
+#define MI_FLUSH_VIEW_CHUNK ((ULONG_PTR)MM_TAKE_VIEW_DIRTY_MAX_PAGES * PAGE_SIZE)
 
 #define MI_MAPPED_COPY_PAGES  14
 #define MI_POOL_COPY_BYTES    512
@@ -1634,16 +1635,16 @@ MmFlushVirtualMemory(IN PEPROCESS Process,
                      IN OUT PSIZE_T RegionSize,
                      OUT PIO_STATUS_BLOCK IoStatusBlock)
 {
-    ULONG_PTR Start, End, ViewEnd;
+    ULONG_PTR Start, End, ViewEnd = 0, ChunkStart, ChunkEnd = 0;
     PMMADDRESS_NODE Node;
     PMMVAD Vad;
     PMEMORY_AREA MemoryArea;
     PMM_SECTION_SEGMENT Segment = NULL;
-    PFILE_OBJECT FileObject;
-    LARGE_INTEGER Offset;
+    PFILE_OBJECT FileObject = NULL;
+    LONGLONG FileStart = 0;
     KAPC_STATE ApcState;
-    BOOLEAN Attached = FALSE;
-    NTSTATUS Status;
+    BOOLEAN Attached;
+    NTSTATUS Status = STATUS_SUCCESS;
     PAGED_CODE();
 
     /*
@@ -1653,6 +1654,11 @@ MmFlushVirtualMemory(IN PEPROCESS Process,
      * on success the size and Information are the rounded length; a range that is not inside one view gives
      * STATUS_NOT_MAPPED_VIEW, an image view or a pagefile-backed view STATUS_NOT_MAPPED_DATA (which
      * FlushViewOfFile reports as success).
+     *
+     * The range is walked in chunks of MI_FLUSH_VIEW_CHUNK.  Per chunk: attach, take the address space lock, find
+     * the view again, move the dirty bits of the chunk's PTEs to the segment (MmTakeViewDirtyBits takes the
+     * segment lock and keeps it until its TB flush is done), drop both locks and detach; then take the file
+     * system's locks and write the chunk.  So a huge or size-0 flush never holds a lock for more than one chunk.
      */
     IoStatusBlock->Status = STATUS_SUCCESS;
     IoStatusBlock->Information = 0;
@@ -1660,79 +1666,125 @@ MmFlushVirtualMemory(IN PEPROCESS Process,
     End = ROUND_TO_PAGES((ULONG_PTR)*BaseAddress + *RegionSize);
     *BaseAddress = (PVOID)Start;
 
-    if (Process != PsGetCurrentProcess())
+    for (ChunkStart = Start; ChunkStart < End || Segment == NULL; ChunkStart = ChunkEnd)
     {
-        KeStackAttachProcess(&Process->Pcb, &ApcState);
-        Attached = TRUE;
-    }
-    MmLockAddressSpace(&Process->Vm);
+        BOOLEAN Take = FALSE;
 
-    if (Process->VmDeleted)
-    {
-        Status = STATUS_PROCESS_IS_TERMINATING;
-    }
-    else if (MiCheckForConflictingNode(Start >> PAGE_SHIFT, Start >> PAGE_SHIFT, &Process->VadRoot, &Node) != TableFoundNode)
-    {
-        Status = STATUS_NOT_MAPPED_VIEW;
-    }
-    else
-    {
-        Vad = (PMMVAD)Node;
-        ViewEnd = (Vad->EndingVpn + 1) << PAGE_SHIFT;
-        if (*RegionSize == 0)
-            End = ViewEnd;
-        MemoryArea = MI_IS_MEMORY_AREA_VAD(Vad) ? (PMEMORY_AREA)Vad : NULL;
-
-        if ((End > ViewEnd) || (End <= Start) || (!MemoryArea && Vad->u.VadFlags.PrivateMemory) ||
-            (MemoryArea && ((MemoryArea->Type != MEMORY_AREA_SECTION_VIEW) || MemoryArea->DeleteInProgress)))
+        Attached = FALSE;
+        if (Process != PsGetCurrentProcess())
         {
-            Status = STATUS_NOT_MAPPED_VIEW;
+            KeStackAttachProcess(&Process->Pcb, &ApcState);
+            Attached = TRUE;
         }
-        else if (!MemoryArea || !(*MemoryArea->SectionData.Segment->Flags & MM_DATAFILE_SEGMENT))
+        MmLockAddressSpace(&Process->Vm);
+
+        if (Process->VmDeleted)
         {
-            /* A pagefile-backed (ARM3) view, an image view or a physical memory view: no file data to write */
-            Status = STATUS_NOT_MAPPED_DATA;
+            /* Later chunks: the views are gone, their dirty bits went to the segment, which the write still covers */
+            if (!Segment)
+                Status = STATUS_PROCESS_IS_TERMINATING;
+        }
+        else if (MiCheckForConflictingNode(ChunkStart >> PAGE_SHIFT, ChunkStart >> PAGE_SHIFT,
+                                           &Process->VadRoot, &Node) != TableFoundNode)
+        {
+            if (!Segment)
+                Status = STATUS_NOT_MAPPED_VIEW;
         }
         else
         {
-            /* Pages written through this view are dirty only in its PTEs: tell the segment, then write them */
-            Segment = MemoryArea->SectionData.Segment;
-            MmTakeViewDirtyBits(Process, MemoryArea, Start, End);
-            Offset.QuadPart = MemoryArea->SectionData.ViewOffset + (Start - MA_GetStartingAddress(MemoryArea));
-            /* The view holds a reference until it is unmapped, which waits for the address space lock */
-            InterlockedIncrement64(Segment->ReferenceCount);
-            Status = STATUS_SUCCESS;
+            Vad = (PMMVAD)Node;
+            ViewEnd = (Vad->EndingVpn + 1) << PAGE_SHIFT;
+            MemoryArea = MI_IS_MEMORY_AREA_VAD(Vad) ? (PMEMORY_AREA)Vad : NULL;
+
+            if (!Segment)
+            {
+                /* First chunk: validate the whole range */
+                if (*RegionSize == 0)
+                    End = ViewEnd;
+
+                if ((End > ViewEnd) || (End <= Start) || (!MemoryArea && Vad->u.VadFlags.PrivateMemory) ||
+                    (MemoryArea && MemoryArea->DeleteInProgress))
+                {
+                    Status = STATUS_NOT_MAPPED_VIEW;
+                }
+                else if (!MemoryArea || (MemoryArea->Type != MEMORY_AREA_SECTION_VIEW) ||
+                         !(*MemoryArea->SectionData.Segment->Flags & MM_DATAFILE_SEGMENT))
+                {
+                    /*
+                     * A pagefile-backed (ARM3) view, an image view or a physical memory view: no file data to
+                     * write.  (The only other kind of memory area a user address can have, MEMORY_AREA_CACHE, is
+                     * in system space, so the type test is for safety; it gets the same row as the other
+                     * non-data views.)
+                     */
+                    Status = STATUS_NOT_MAPPED_DATA;
+                }
+                else
+                {
+                    Segment = MemoryArea->SectionData.Segment;
+                    FileStart = MemoryArea->SectionData.ViewOffset + (Start - MA_GetStartingAddress(MemoryArea));
+                    FileObject = Segment->FileObject;
+                    /* The view holds a reference until it is unmapped, which waits for the address space lock */
+                    InterlockedIncrement64(Segment->ReferenceCount);
+                    Take = TRUE;
+                }
+            }
+            else if (MemoryArea && (MemoryArea->Type == MEMORY_AREA_SECTION_VIEW) && !MemoryArea->DeleteInProgress &&
+                     (MemoryArea->SectionData.Segment == Segment) && (ChunkStart >= MA_GetStartingAddress(MemoryArea)) &&
+                     (MemoryArea->SectionData.ViewOffset + (ChunkStart - MA_GetStartingAddress(MemoryArea)) ==
+                      FileStart + (LONGLONG)(ChunkStart - Start)))
+            {
+                /* Later chunk: the same file range is still mapped here (maybe by another view) */
+                Take = TRUE;
+            }
+            /* else: the view was unmapped meanwhile; its dirty bits went to the segment at the unmap */
+
+            if (Take)
+            {
+                ChunkEnd = (End - ChunkStart > MI_FLUSH_VIEW_CHUNK) ? (ChunkStart + MI_FLUSH_VIEW_CHUNK) : End;
+                if (ChunkEnd > ViewEnd)
+                {
+                    /* Only a later chunk, after a replaced view: do not harvest beyond it */
+                    Take = FALSE;
+                }
+                else
+                {
+                    MmTakeViewDirtyBits(Process, MemoryArea, ChunkStart, ChunkEnd);
+                }
+            }
         }
-    }
 
-    MmUnlockAddressSpace(&Process->Vm);
-    if (Attached)
-        KeUnstackDetachProcess(&ApcState);
+        MmUnlockAddressSpace(&Process->Vm);
+        if (Attached)
+            KeUnstackDetachProcess(&ApcState);
 
-    if (!Segment)
-        return Status;
+        if (!Segment)
+            return Status;
 
-    /* The file system's locks as for a cache flush (a paging write of the file runs under them), then the write */
-    FileObject = Segment->FileObject;
-    Status = FsRtlAcquireFileForCcFlushEx(FileObject);
-    if (NT_SUCCESS(Status))
-    {
-        ULONG_PTR Done;
+        ChunkEnd = (End - ChunkStart > MI_FLUSH_VIEW_CHUNK) ? (ChunkStart + MI_FLUSH_VIEW_CHUNK) : End;
 
-        for (Done = 0; Done < End - Start; Done += MI_FLUSH_VIEW_CHUNK)
+        /*
+         * The file system's locks as for a cache flush (a paging write of the file runs under them), then the
+         * write of this chunk.  If the lock cannot be acquired the call fails, but nothing is lost: the dirty bits
+         * of this and the earlier chunks are already in the segment's entries (dirty there), where the lazy writer
+         * and the next flush find them.
+         */
+        Status = FsRtlAcquireFileForCcFlushEx(FileObject);
+        if (NT_SUCCESS(Status))
         {
             LARGE_INTEGER ChunkOffset;
             IO_STATUS_BLOCK Iosb;
 
-            ChunkOffset.QuadPart = Offset.QuadPart + Done;
+            ChunkOffset.QuadPart = FileStart + (LONGLONG)(ChunkStart - Start);
             Status = MmFlushSegment(FileObject->SectionObjectPointer, &ChunkOffset,
-                                    (ULONG)min(End - Start - Done, (ULONG_PTR)MI_FLUSH_VIEW_CHUNK), &Iosb);
-            if (!NT_SUCCESS(Status))
-                break;
+                                    (ULONG)(ChunkEnd - ChunkStart), &Iosb);
+            FsRtlReleaseFileForCcFlush(FileObject);
         }
-        FsRtlReleaseFileForCcFlush(FileObject);
+        if (!NT_SUCCESS(Status))
+            break;
     }
-    MmDereferenceSegment(Segment);
+
+    if (Segment)
+        MmDereferenceSegment(Segment);
 
     if (NT_SUCCESS(Status))
     {

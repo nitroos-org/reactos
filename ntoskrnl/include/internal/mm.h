@@ -1696,13 +1696,6 @@ MmSetDirtyBit(PEPROCESS Process, PVOID Address, BOOLEAN Bit);
 #define MmSetCleanPage(__P, __A) MmSetDirtyBit(__P, __A, FALSE)
 #define MmSetDirtyPage(__P, __A) MmSetDirtyBit(__P, __A, TRUE)
 
-BOOLEAN
-NTAPI
-MmTakeDirtyBit(
-    _In_ PEPROCESS Process,
-    _In_ PVOID Address,
-    _In_ PFN_NUMBER Page);
-
 PFN_NUMBER
 NTAPI
 MmGetPfnForProcess(
@@ -1809,6 +1802,19 @@ MmFlushTbList(
     List->Count = 0;
     List->Entire = FALSE;
 }
+
+/*
+ * Takes the hardware dirty bit of a user PTE (see i386/page.c).  The TB entry is NOT flushed: the caller adds the
+ * address to FlushList (when TRUE is returned) and must flush the list before it marks the page dirty elsewhere
+ * and before it releases the lock that keeps others from sampling that mark.
+ */
+BOOLEAN
+NTAPI
+MmTakeDirtyBit(
+    _In_ PEPROCESS Process,
+    _In_ PVOID Address,
+    _In_ PFN_NUMBER Page,
+    _Inout_ PMM_TB_FLUSH_LIST FlushList);
 
 /*
  * A freed page table: flush every TB entry and paging-structure cache on every
@@ -2168,6 +2174,9 @@ MmIsDataSectionResident(
     _In_ PSECTION_OBJECT_POINTERS SectionObjectPointer,
     _In_ LONGLONG Offset,
     _In_ ULONG Length);
+
+/* The most pages one MmTakeViewDirtyBits call covers (a bounded lock hold and a bounded bitmap) */
+#define MM_TAKE_VIEW_DIRTY_MAX_PAGES 1024
 
 VOID
 NTAPI
