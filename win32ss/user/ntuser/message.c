@@ -680,8 +680,11 @@ CopyMsgToUserMem(MSG *UserModeMsg, MSG *KernelModeMsg)
 //
 // Wakeup any thread/process waiting on idle input.
 //
+// The queue of the calling thread has nothing for it: reset the spin count and release the
+// threads waiting in WaitForInputIdle. No hook runs here.
+//
 VOID FASTCALL
-IdlePing(VOID)
+IdleSignal(VOID)
 {
    PPROCESSINFO ppi = PsGetCurrentProcessWin32Process();
    PTHREADINFO pti;
@@ -691,23 +694,38 @@ IdlePing(VOID)
    if ( pti )
    {
       pti->pClientInfo->cSpins = 0; // Reset spins.
-
-      if ( pti->pDeskInfo && pti == gptiForeground )
-      {
-         if ( pti->fsHooks & HOOKID_TO_FLAG(WH_FOREGROUNDIDLE) ||
-              pti->pDeskInfo->fsHooks & HOOKID_TO_FLAG(WH_FOREGROUNDIDLE) )
-         {
-            co_HOOK_CallHooks(WH_FOREGROUNDIDLE,HC_ACTION,0,0);
-         }
-      }
    }
 
-   TRACE("IdlePing ppi %p\n", ppi);
+   TRACE("IdleSignal ppi %p\n", ppi);
    if ( ppi && ppi->InputIdleEvent )
    {
       TRACE("InputIdleEvent\n");
       KeSetEvent( ppi->InputIdleEvent, IO_NO_INCREMENT, FALSE);
    }
+}
+
+//
+// The thread is about to wait for input (GetMessage, WaitMessage, MsgWaitForMultipleObjects*):
+// the WH_FOREGROUNDIDLE hook of the foreground thread runs, then IdleSignal.
+// PeekMessage does not call it: it does not wait, and an application that posts a message to itself
+// from the hook (SWT does, every time it ran asynchronous work) would find that message in its next
+// PeekMessage and never get to sleep.
+//
+VOID FASTCALL
+IdlePing(VOID)
+{
+   PTHREADINFO pti = PsGetCurrentThreadWin32Thread();
+
+   if ( pti && pti->pDeskInfo && pti == gptiForeground )
+   {
+      if ( pti->fsHooks & HOOKID_TO_FLAG(WH_FOREGROUNDIDLE) ||
+           pti->pDeskInfo->fsHooks & HOOKID_TO_FLAG(WH_FOREGROUNDIDLE) )
+      {
+         co_HOOK_CallHooks(WH_FOREGROUNDIDLE,HC_ACTION,0,0);
+      }
+   }
+
+   IdleSignal();
 }
 
 VOID FASTCALL
@@ -1480,7 +1498,7 @@ co_IntGetPeekMessage( PMSG pMsg,
                  empty-queue PeekMessage, even with PM_NOYIELD (probably its
                  spin detection, cSpins below); measured on a Windows 10
                  22H2 machine, not implemented here */
-              IdlePing();
+              IdleSignal();
               // Fall through to exit.
               IdlePong();
            }

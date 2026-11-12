@@ -54,6 +54,7 @@ extern void func_Handle32(void);
 extern void func_HookInputBatch(void);
 extern void func_UserLowsBatch(void);
 extern void func_HookChainUnhookUaf(void);
+extern void func_ForegroundIdleHook(void);
 extern void func_HookFamilies(void);
 extern void func_HungWindow(void);
 extern void func_WindowPosChanged(void);
@@ -214,6 +215,7 @@ const struct test winetest_testlist[] =
     { "HookInputBatch", func_HookInputBatch },
     { "UserLowsBatch", func_UserLowsBatch },
     { "HookChainUnhookUaf", func_HookChainUnhookUaf },
+    { "ForegroundIdleHook", func_ForegroundIdleHook },
     { "HookFamilies", func_HookFamilies },
     { "HungWindow", func_HungWindow },
     { "WindowPosChanged", func_WindowPosChanged },

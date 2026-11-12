@@ -71,6 +71,7 @@ extern void func_GetPixel(void);
 extern void func_GetRandomRgn(void);
 extern void func_GetStockObject(void);
 extern void func_GetTextExtentExPoint(void);
+extern void func_GetCharPlacementReorder(void);
 extern void func_GetTextExtentKerning(void);
 extern void func_GetTextExtentQuality(void);
 extern void func_GetTextFace(void);
@@ -178,6 +179,7 @@ const struct test winetest_testlist[] =
     { "GetRandomRgn", func_GetRandomRgn },
     { "GetStockObject", func_GetStockObject },
     { "GetTextExtentExPoint", func_GetTextExtentExPoint },
+    { "GetCharPlacementReorder", func_GetCharPlacementReorder },
     { "GetTextExtentKerning", func_GetTextExtentKerning },
     { "GetTextExtentQuality", func_GetTextExtentQuality },
     { "GetTextMetrics", func_GetTextMetrics },
