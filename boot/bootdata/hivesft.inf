@@ -678,6 +678,7 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","CurrentMajorVersionNumber",
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","CurrentMinorVersionNumber",0x00010003,0
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","CurrentBuild",2,"19045"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","EditionID",2,"Professional"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","CompositionEditionID",2,"Professional"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","DisplayVersion",2,"22H2"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","UBR",0x00010003,5247
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion","RegDone",0x00000002,""
