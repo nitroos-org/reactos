@@ -1284,6 +1284,9 @@ MmInitializeProcessAddressSpace(IN PEPROCESS Process,
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("MiCreateSharedUserPageVad() failed: 0x%lx\n", Status);
+
+        /* Do not return still attached to the process: the caller deletes it */
+        KeDetachProcess();
         return Status;
     }
 #endif
