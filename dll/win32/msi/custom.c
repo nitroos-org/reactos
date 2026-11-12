@@ -323,7 +323,7 @@ static UINT custom_get_process_return( HANDLE process )
     GetExitCodeProcess( process, &rc );
     TRACE( "exit code is %lu\n", rc );
     if (rc != 0)
-        return ERROR_FUNCTION_FAILED;
+        return ERROR_INSTALL_FAILURE; /* Windows: an exe action that exits non-zero fails the install (1722, 1603) */
     return ERROR_SUCCESS;
 }
 
@@ -1091,6 +1091,20 @@ static HANDLE execute_command( const WCHAR *app, WCHAR *arg, const WCHAR *dir )
     return info.hProcess;
 }
 
+/* An exe custom action whose process cannot be started (missing file, bad image, property not set): on Windows the
+ * action fails with 1721 and the install with 1603, unless the action is marked to ignore its return
+ * (msidbCustomActionTypeContinue) or runs asynchronously (verified on Windows 10 22H2, DoAction and ACTION=ADMIN). */
+static UINT exe_launch_failed( UINT type, const WCHAR *action )
+{
+    if (type & (msidbCustomActionTypeContinue | msidbCustomActionTypeAsync))
+    {
+        WARN("custom action %s: program could not be run, ignored (type %#x)\n", debugstr_w(action), type);
+        return ERROR_SUCCESS;
+    }
+    ERR("custom action %s: program could not be run\n", debugstr_w(action));
+    return ERROR_INSTALL_FAILURE;
+}
+
 static UINT HANDLE_CustomType2( MSIPACKAGE *package, const WCHAR *source, const WCHAR *target,
                                 INT type, const WCHAR *action )
 {
@@ -1106,7 +1120,7 @@ static UINT HANDLE_CustomType2( MSIPACKAGE *package, const WCHAR *source, const 
 
     handle = execute_command( binary->tmpfile, arg, L"C:\\" );
     free( arg );
-    if (handle == INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
+    if (handle == INVALID_HANDLE_VALUE) return exe_launch_failed( type, action );
     return wait_process_handle( package, type, handle, action );
 }
 
@@ -1149,7 +1163,7 @@ static UINT HANDLE_CustomType18( MSIPACKAGE *package, const WCHAR *source, const
 
     handle = execute_command( file->TargetPath, arg, L"C:\\" );
     free( arg );
-    if (handle == INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
+    if (handle == INVALID_HANDLE_VALUE) return exe_launch_failed( type, action );
     return wait_process_handle( package, type, handle, action );
 }
 
@@ -1316,7 +1330,7 @@ static UINT HANDLE_CustomType50( MSIPACKAGE *package, const WCHAR *source, const
     WCHAR *exe, *arg;
     HANDLE handle;
 
-    if (!(exe = msi_dup_property( package->db, source ))) return ERROR_SUCCESS;
+    if (!(exe = msi_dup_property( package->db, source ))) return exe_launch_failed( type, action );
 
     deformat_string( package, target, &arg );
     TRACE("exe %s arg %s\n", debugstr_w(exe), debugstr_w(arg));
@@ -1324,7 +1338,7 @@ static UINT HANDLE_CustomType50( MSIPACKAGE *package, const WCHAR *source, const
     handle = execute_command( exe, arg, L"C:\\" );
     free( exe );
     free( arg );
-    if (handle == INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
+    if (handle == INVALID_HANDLE_VALUE) return exe_launch_failed( type, action );
     return wait_process_handle( package, type, handle, action );
 }
 
@@ -1347,7 +1361,7 @@ static UINT HANDLE_CustomType34( MSIPACKAGE *package, const WCHAR *source, const
 
     handle = execute_command( NULL, cmd, workingdir );
     free( cmd );
-    if (handle == INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
+    if (handle == INVALID_HANDLE_VALUE) return exe_launch_failed( type, action );
     return wait_process_handle( package, type, handle, action );
 }
 
