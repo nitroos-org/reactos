@@ -221,7 +221,9 @@ static const struct fallback_description
    Besides the upstream Noto names, the lists name the fonts NitroOS ships in %WINDIR%\Fonts (media/fonts):
    Noto Sans SC / Noto Sans KR (Han, kana, Hangul; the SC subset has no Hangul), Noto Emoji (monochrome),
    Noto Sans Symbols 2, Tahoma (Latin, Greek, Cyrillic, Hebrew, Arabic) and FreeSans (Hebrew, Armenian, Georgian,
-   Devanagari, Bengali).  Nothing shipped covers Thai, Lao, Khmer, Tamil and the other Indic scripts, those stay
+   Devanagari, Bengali) and Lucida Console (DejaVu Sans Mono based; last in the punctuation, currency and symbol
+   entries because it has the arrows to bar such as U+21E5, which the Tab key hint of Chrome uses, space
+   characters, currency signs and arrows the other families lack).  Nothing shipped covers Thai, Lao, Khmer, Tamil and the other Indic scripts, those stay
    unmapped.  A family that is not installed is skipped.  Keep at most 4 families per entry. */
 system_fallback_config[] =
 {
@@ -285,13 +287,13 @@ system_fallback_config[] =
 
     /* General Punctuation, Currency, Letterlike, Number Forms */
     { "2000-206F, 20A0-20CF, "
-      "2100-218F",              L"Tahoma, Noto Sans SC" },
+      "2100-218F",              L"Tahoma, Noto Sans SC, Lucida Console" },
 
     /* Arrows, Math Operators, Misc Technical, Box Drawing, Geometric Shapes, Misc Symbols, Dingbats, Braille,
        Supplemental Arrows and Misc Symbols and Arrows */
     { "2190-23FF, 2460-24FF, "
       "2500-27FF, 2800-28FF, "
-      "2900-2BFF",              L"Noto Sans Symbols 2, Noto Emoji, Noto Sans SC" },
+      "2900-2BFF",              L"Noto Sans Symbols 2, Noto Emoji, Noto Sans SC, Lucida Console" },
 
     { "1680-169F",              L"Noto Sans Ogham" },
 
