@@ -1497,6 +1497,8 @@ typedef struct _ETHREAD
            ULONG PriorityRegionActive:4;
 #else
            ULONG ApcNeeded:1;
+           /* ReactOS: a page-file fault of the thread waited once for read-ahead pages; its next page-file read clears it */
+           ULONG PagerReadAheadWaited:1;
 #endif
         };
         ULONG SameThreadApcFlags;
