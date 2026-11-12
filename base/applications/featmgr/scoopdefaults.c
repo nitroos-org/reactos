@@ -25,6 +25,8 @@
  * The text is scanned (strings, // and block comments skipped) and one member is spliced in before
  * the closing brace; everything else stays byte for byte (BOM, comments, indentation, line ends,
  * trailing commas). A file that does not look like one JSON object is left alone.
+ * Nothing under persist\<app> is trusted (the tree is writable by standard users): no link is followed
+ * (see WalkChain); a link anywhere on the path skips that app with a log line.
  * Default 2: WezTerm ("wezterm", "wezterm-nightly"): its bundled conpty.dll/OpenConsole.exe are renamed to
  * *.off so it uses the system ConPTY (same ConDrv reason; TODO CONSOLE-condrv-device). Default 3:
  * Alacritty gets %APPDATA%\alacritty\alacritty.toml (font the image ships, pwsh/cmd) when the user has none;
@@ -92,12 +94,15 @@ static BOOL SkipString(const char *s, size_t n, size_t *i)
 
 typedef enum { ED_ADDED = 0, ED_PRESENT, ED_BAD } ED_RESULT;
 
+#define EK_MAXDEPTH 64      /* deeper than this is not a settings file */
+
 /* Ensure the top-level object of in[0..n) has a member "key". On ED_ADDED the out pointer and length describe a
  * HeapAlloc'd edited copy. Tested through the install hook (tests\roundtrip.cmd), not directly. */
 static ED_RESULT EnsureKey(const char *in, size_t n, const char *key, const char *value, char **out, size_t *outLen)
 {
     size_t i = 0, lastTok = (size_t)-1, closeAt = 0, klen = strlen(key);
     int depth = 0;
+    char stack[EK_MAXDEPTH];                          /* the bracket that opened each level: '{' or '[' */
     BOOL crlf = (memchr(in, '\r', n) != NULL), haveMember = FALSE, expectKey = FALSE;
     const char *eol = crlf ? "\r\n" : "\n";
     char *o, *p;
@@ -106,6 +111,7 @@ static ED_RESULT EnsureKey(const char *in, size_t n, const char *key, const char
     BOOL emptyDoc;
 
     *out = NULL; *outLen = 0;
+    if (n && memchr(in, '\0', n)) return ED_BAD;      /* a NUL is never JSON text (UTF-16 without a BOM looks like this) */
     /* locate the opening brace; an empty or comment-only file gets a fresh object */
     if (!SkipBlank(in, n, &i)) return ED_BAD;
     emptyDoc = (i >= n);
@@ -133,6 +139,8 @@ static ED_RESULT EnsureKey(const char *in, size_t n, const char *key, const char
             }
             if (in[i] == '{' || in[i] == '[')
             {
+                if (depth >= EK_MAXDEPTH) return ED_BAD;
+                stack[depth] = in[i];
                 depth++;
                 if (depth == 1) expectKey = TRUE;
                 else if (depth == 2) haveMember = TRUE;
@@ -141,6 +149,8 @@ static ED_RESULT EnsureKey(const char *in, size_t n, const char *key, const char
             }
             if (in[i] == '}' || in[i] == ']')
             {
+                /* '}' closes only '{' and ']' only '[': a mismatch is not a JSON object */
+                if (depth <= 0 || stack[depth - 1] != (in[i] == '}' ? '{' : '[')) return ED_BAD;
                 depth--;
                 if (depth == 0)
                 {
@@ -150,7 +160,6 @@ static ED_RESULT EnsureKey(const char *in, size_t n, const char *key, const char
                     if (!SkipBlank(in, n, &t) || t < n) return ED_BAD;
                     break;
                 }
-                if (depth < 0) return ED_BAD;
                 lastTok = i++;
                 continue;
             }
@@ -225,30 +234,73 @@ static ED_RESULT EnsureKey(const char *in, size_t n, const char *key, const char
 
 /* ---- file side ------------------------------------------------------------------ */
 
-static BOOL MakeDirs(LPWSTR path)    /* creates every missing directory of path (a directory path) */
+/* C:\scoop inherits the ACL of C:\ (a standard user may create folders there) and featmgr runs elevated, so
+ * persist\<app> and everything below it is not trusted: a junction, symbolic link or mount point planted there
+ * must not redirect a create, read, write or rename. Every component from "persist" down to the file is checked
+ * (GetFileAttributes does not follow a link at the last component); a link anywhere refuses the whole app,
+ * which is logged and skipped (first boot never fails because of it). What remains is the window between the
+ * check and the use; the temp file is therefore created with CREATE_NEW and the chain is checked again right
+ * before the rename. */
+
+typedef enum { WALK_OK = 0, WALK_MISSING, WALK_LINK, WALK_ERR } WALK_RESULT;
+
+/* Check (and with create: create) every directory of path below root, then the leaf. path must start with
+ * root + '\\'. leafDir: the leaf is a directory (created when create is set), else a file (never created here,
+ * and it must not be a directory). WALK_MISSING: something does not exist (only without create). */
+static WALK_RESULT WalkChain(LPCWSTR root, LPCWSTR path, BOOL create, BOOL leafDir)
 {
-    WCHAR *p;
-    for (p = path + 3; *p; p++)
+    WCHAR buf[MAX_PATH];
+    size_t rl = wcslen(root), pl = wcslen(path), k;
+    DWORD a;
+
+    if (pl >= MAX_PATH || pl <= rl + 1 || _wcsnicmp(path, root, rl) || path[rl] != L'\\') return WALK_ERR;
+    StringCchCopyW(buf, MAX_PATH, path);
+    for (k = rl + 1; k <= pl; k++)
     {
-        if (*p == L'\\')
+        BOOL leaf = (k == pl);
+        if (!leaf && buf[k] != L'\\') continue;
+        if (!leaf) buf[k] = L'\0';
+        a = GetFileAttributesW(buf);
+        if (a == INVALID_FILE_ATTRIBUTES)
         {
-            *p = L'\0';
-            if (!CreateDirectoryW(path, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) { *p = L'\\'; return FALSE; }
-            *p = L'\\';
+            DWORD e = GetLastError();
+            if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND) return WALK_ERR;
+            if (!create || (leaf && !leafDir)) return create ? WALK_OK : WALK_MISSING;
+            if (!CreateDirectoryW(buf, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return WALK_ERR;
+            a = GetFileAttributesW(buf);                    /* what was really created */
+            if (a == INVALID_FILE_ATTRIBUTES) return WALK_ERR;
         }
+        if (a & FILE_ATTRIBUTE_REPARSE_POINT) return WALK_LINK;
+        if ((!leaf || leafDir) && !(a & FILE_ATTRIBUTE_DIRECTORY)) return WALK_ERR;
+        if (leaf && !leafDir && (a & FILE_ATTRIBUTE_DIRECTORY)) return WALK_ERR;
+        if (!leaf) buf[k] = L'\\';
     }
-    return CreateDirectoryW(path, NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
+    return WALK_OK;
 }
 
+static void LogWalk(FILE *log, WALK_RESULT w, LPCWSTR path)
+{
+    if (w == WALK_LINK)
+        LOGF(log, L"  note: %s is or lies below a link (junction/symbolic link); refused, its default was not set\n", path);
+    else
+        LOGF(log, L"  note: %s is not a plain folder/file chain; its default was not set\n", path);
+}
+
+/* *exists is FALSE when the file is not there. A link at the leaf is refused (WALK_LINK is checked by the caller;
+ * the handle is opened with FILE_FLAG_OPEN_REPARSE_POINT and its attributes checked as well). */
 static BOOL ReadFileAll(LPCWSTR path, char **buf, size_t *len, BOOL *exists)
 {
-    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    BY_HANDLE_FILE_INFORMATION bi;
     LARGE_INTEGER sz;
     DWORD got = 0;
     *buf = NULL; *len = 0; *exists = FALSE;
     if (h == INVALID_HANDLE_VALUE)
         return GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND;
     *exists = TRUE;
+    if (!GetFileInformationByHandle(h, &bi) || (bi.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)))
+    { CloseHandle(h); return FALSE; }
     if (!GetFileSizeEx(h, &sz) || sz.QuadPart > 4 * 1024 * 1024) { CloseHandle(h); return FALSE; }
     *buf = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)sz.QuadPart + 1);
     if (!*buf) { CloseHandle(h); return FALSE; }
@@ -261,19 +313,43 @@ static BOOL ReadFileAll(LPCWSTR path, char **buf, size_t *len, BOOL *exists)
     return TRUE;
 }
 
-static BOOL WriteFileReplace(LPCWSTR path, const char *bom, size_t nbom, const char *data, size_t len)
+/* Writes path through <path>.nitro-tmp. Refuses (FALSE, logged) when the folder chain, the temp name or the
+ * target is a link. A leftover plain temp file from an interrupted run is removed first; a link there is not
+ * touched. */
+static BOOL WriteFileReplace(LPCWSTR root, LPCWSTR path, const char *bom, size_t nbom, const char *data, size_t len, FILE *log)
 {
     WCHAR tmp[MAX_PATH];
     HANDLE h;
-    DWORD w;
+    DWORD w, a;
+    WALK_RESULT wr;
     BOOL ok;
+
     if (FAILED(StringCchPrintfW(tmp, MAX_PATH, L"%s.nitro-tmp", path))) return FALSE;
-    h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    wr = WalkChain(root, tmp, FALSE, FALSE);               /* folders, and the temp name if it exists */
+    if (wr == WALK_LINK || wr == WALK_ERR) { LogWalk(log, wr, tmp); return FALSE; }
+    if (wr == WALK_OK && !DeleteFileW(tmp)) return FALSE;  /* a plain leftover of an earlier run */
+    h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     if (h == INVALID_HANDLE_VALUE) return FALSE;
     ok = (!nbom || (WriteFile(h, bom, (DWORD)nbom, &w, NULL) && w == nbom))
       && (!len || (WriteFile(h, data, (DWORD)len, &w, NULL) && w == (DWORD)len));
     CloseHandle(h);
-    if (ok) ok = MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING);
+    if (ok)
+    {
+        /* the chain and the target once more right before the rename */
+        wr = WalkChain(root, tmp, FALSE, FALSE);
+        if (wr != WALK_OK) { LogWalk(log, wr == WALK_MISSING ? WALK_ERR : wr, tmp); ok = FALSE; }
+        else
+        {
+            wr = WalkChain(root, path, FALSE, FALSE);
+            if (wr == WALK_LINK || wr == WALK_ERR) { LogWalk(log, wr, path); ok = FALSE; }
+            else
+            {
+                a = GetFileAttributesW(path);
+                ok = !(a != INVALID_FILE_ATTRIBUTES && (a & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)))
+                     && MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING);
+            }
+        }
+    }
     if (!ok) DeleteFileW(tmp);
     return ok;
 }
@@ -285,15 +361,28 @@ static void ApplyOne(LPCWSTR root, const APP_DEFAULT *d, FILE *log)
     size_t len, elen = 0, skip = 0;
     BOOL exists;
     ED_RESULT r;
+    WALK_RESULT wr;
 
-    StringCchPrintfW(dir, MAX_PATH, L"%s\\persist\\%s\\data\\user-data\\User", root, d->App);
-    StringCchPrintfW(file, MAX_PATH, L"%s\\settings.json", dir);
+    if (FAILED(StringCchPrintfW(dir, MAX_PATH, L"%s\\persist\\%s\\data\\user-data\\User", root, d->App))
+        || FAILED(StringCchPrintfW(file, MAX_PATH, L"%s\\settings.json", dir)))
+    {
+        LOGF(log, L"  note: the settings path of %s is too long; its default was not set\n", d->App);
+        return;
+    }
+    wr = WalkChain(root, file, FALSE, FALSE);
+    if (wr == WALK_LINK || wr == WALK_ERR)
+    {
+        LogWalk(log, wr, file);
+        return;
+    }
     if (!ReadFileAll(file, &buf, &len, &exists))
     {
         LOGF(log, L"  note: cannot read %s; its default was not set\n", file);
         return;
     }
-    if (exists && len >= 2 && ((BYTE)buf[0] == 0xFF || (BYTE)buf[0] == 0xFE))   /* UTF-16: VS Code never writes it */
+    /* UTF-16: VS Code never writes it. With a BOM (FF FE / FE FF), and without one: JSON starts with an ASCII
+     * character, so a NUL in the first two bytes is UTF-16LE or BE. */
+    if (exists && len >= 2 && ((BYTE)buf[0] == 0xFF || (BYTE)buf[0] == 0xFE || buf[0] == 0 || buf[1] == 0))
     {
         LOGF(log, L"  note: %s is UTF-16; left unchanged\n", file);
         HeapFree(GetProcessHeap(), 0, buf);
@@ -307,9 +396,12 @@ static void ApplyOne(LPCWSTR root, const APP_DEFAULT *d, FILE *log)
         LOGF(log, L"  note: %s is not a JSON object; left unchanged (set %S to %S by hand)\n", file, d->Key, d->Value);
     else
     {
-        if (!exists && !MakeDirs(dir))
-            LOGF(log, L"  note: cannot create %s\n", dir);
-        else if (WriteFileReplace(file, buf, skip, edited, elen))
+        wr = WalkChain(root, dir, !exists, TRUE);          /* create what is missing, link by link; no link is followed */
+        if (wr == WALK_LINK || wr == WALK_ERR)
+            LogWalk(log, wr, dir);
+        else if (wr == WALK_MISSING)
+            LOGF(log, L"  note: %s vanished; its default was not set\n", dir);
+        else if (WriteFileReplace(root, file, buf, skip, edited, elen, log))
             LOGF(log, L"  NitroOS default: %S = %S in %s (VS Code terminal; TODO CONSOLE-condrv-device)\n", d->Key, d->Value, file);
         else
             LOGF(log, L"  note: cannot write %s; its default was not set\n", file);
@@ -324,7 +416,7 @@ static void ApplyOne(LPCWSTR root, const APP_DEFAULT *d, FILE *log)
  * user must not redirect them: none of the operations below follows a reparse point. Every directory on
  * the way is checked for FILE_ATTRIBUTE_REPARSE_POINT first, files are created with CREATE_NEW (plus
  * FILE_FLAG_OPEN_REPARSE_POINT), and only regular files directly inside an app's version directory are
- * renamed. (The VS Code path above is older and does not do this: FEATMGR-scoopdefaults-reparse-hardening.)
+ * renamed. (The VS Code path above does the same for persist\<app> and below: WalkChain.)
  */
 
 #define ATTR_BAD (INVALID_FILE_ATTRIBUTES)
@@ -571,14 +663,14 @@ void FmScoopAppDefaults(LPCWSTR app, FILE *log)
     for (k = 0; k < ARRAYSIZE(g_Defaults); k++)
     {
         if (_wcsicmp(app, g_Defaults[k].App)) continue;
-        StringCchPrintfW(cur, MAX_PATH, L"%s\\apps\\%s\\current", root, app);
+        if (FAILED(StringCchPrintfW(cur, MAX_PATH, L"%s\\apps\\%s\\current", root, app))) continue;
         if (GetFileAttributesW(cur) == INVALID_FILE_ATTRIBUTES) continue;   /* not installed */
         ApplyOne(root, &g_Defaults[k], log);
     }
     for (k = 0; k < ARRAYSIZE(g_Hooks); k++)
     {
         if (_wcsicmp(app, g_Hooks[k].App)) continue;
-        StringCchPrintfW(cur, MAX_PATH, L"%s\\apps\\%s\\current", root, app);
+        if (FAILED(StringCchPrintfW(cur, MAX_PATH, L"%s\\apps\\%s\\current", root, app))) continue;
         if (GetFileAttributesW(cur) == INVALID_FILE_ATTRIBUTES) continue;   /* not installed */
         g_Hooks[k].Fn(root, g_Hooks[k].App, log);
     }

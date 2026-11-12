@@ -1,0 +1,5 @@
+{
+    "editor.fontSize": 14,
+    "files.exclude": { "**/.git": true },
+    "workbench.list": [ { "a": 1 }, [ 2, 3 ] ]
+}
