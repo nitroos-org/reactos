@@ -1600,6 +1600,7 @@ extern PDRIVER_OBJECT IopRootDriverObject;
 #define NITRO_ERR_DRIVER_MISSING_IMPORTS         ((NTSTATUS)0xC0047000L)
 #define NITRO_WARN_OB_CALLBACKS_NO_INTEGRITY     ((NTSTATUS)0x80047001L)
 #define NITRO_ERR_VOLUME_WRITE_BLOCKED           ((NTSTATUS)0xC0047002L) /* logged by ntfsng */
+#define NITRO_WARN_STUB_CALLED                   ((NTSTATUS)0x80047003L) /* ex/stubhit.c */
 
 /* System event log entry of source NitroKernel (error.c) */
 VOID

@@ -83,7 +83,7 @@ IoWMIAllocateInstanceIds(IN GUID *Guid,
                          IN ULONG InstanceCount,
                          OUT ULONG *FirstInstanceId)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -97,7 +97,7 @@ IoWMISuggestInstanceName(IN PDEVICE_OBJECT PhysicalDeviceObject OPTIONAL,
                          IN BOOLEAN CombineNames,
                          OUT PUNICODE_STRING SuggestedInstanceName)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -219,7 +219,7 @@ IoWMIQueryAllDataMultiple(IN PVOID *DataBlockObjectList,
                           IN OUT ULONG *InOutBufferSize,
                           OUT PVOID OutBuffer)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -233,7 +233,7 @@ IoWMIQuerySingleInstance(IN PVOID DataBlockObject,
                          IN OUT ULONG *InOutBufferSize,
                          OUT PVOID OutBuffer)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -248,7 +248,7 @@ IoWMIQuerySingleInstanceMultiple(IN PVOID *DataBlockObjectList,
                                  IN OUT ULONG *InOutBufferSize,
                                  OUT PVOID OutBuffer)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -263,7 +263,7 @@ IoWMISetSingleInstance(IN PVOID DataBlockObject,
                        IN ULONG ValueBufferSize,
                        IN PVOID ValueBuffer)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -279,7 +279,7 @@ IoWMISetSingleItem(IN PVOID DataBlockObject,
                    IN ULONG ValueBufferSize,
                    IN PVOID ValueBuffer)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -295,7 +295,7 @@ IoWMIExecuteMethod(IN PVOID DataBlockObject,
                    IN OUT PULONG OutBufferSize,
                    IN OUT PUCHAR InOutBuffer)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -338,7 +338,7 @@ IoWMIHandleToInstanceName(IN PVOID DataBlockObject,
                           IN HANDLE FileHandle,
                           OUT PUNICODE_STRING InstanceName)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -351,7 +351,7 @@ IoWMIDeviceObjectToInstanceName(IN PVOID DataBlockObject,
                                 IN PDEVICE_OBJECT DeviceObject,
                                 OUT PUNICODE_STRING InstanceName)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -366,7 +366,7 @@ WmiQueryTraceInformation(IN TRACE_INFORMATION_CLASS TraceInformationClass,
                          OUT PULONG RequiredLength OPTIONAL,
                          IN PVOID Buffer OPTIONAL)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -381,7 +381,7 @@ WmiTraceMessage(IN TRACEHANDLE LoggerHandle,
                 IN USHORT MessageNumber,
                 IN ...)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -396,7 +396,7 @@ WmiTraceMessageVa(IN TRACEHANDLE LoggerHandle,
                   IN USHORT MessageNumber,
                   IN va_list MessageArgList)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -404,7 +404,7 @@ NTSTATUS
 NTAPI
 WmiFlushTrace(IN OUT PWMI_LOGGER_INFORMATION LoggerInfo)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -413,7 +413,7 @@ FASTCALL
 WmiGetClock(IN WMI_CLOCK_TYPE ClockType,
             IN PVOID Context)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -421,7 +421,7 @@ NTSTATUS
 NTAPI
 WmiQueryTrace(IN OUT PWMI_LOGGER_INFORMATION LoggerInfo)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -429,7 +429,7 @@ NTSTATUS
 NTAPI
 WmiStartTrace(IN OUT PWMI_LOGGER_INFORMATION LoggerInfo)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -437,7 +437,7 @@ NTSTATUS
 NTAPI
 WmiStopTrace(IN PWMI_LOGGER_INFORMATION LoggerInfo)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -445,7 +445,7 @@ NTSTATUS
 FASTCALL
 WmiTraceFastEvent(IN PWNODE_HEADER Wnode)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -453,7 +453,7 @@ NTSTATUS
 NTAPI
 WmiUpdateTrace(IN OUT PWMI_LOGGER_INFORMATION LoggerInfo)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 

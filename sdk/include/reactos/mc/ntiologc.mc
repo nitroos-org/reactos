@@ -388,3 +388,11 @@ SymbolicName=NITRO_ERR_VOLUME_WRITE_BLOCKED
 Language=English
 A write to an NTFS volume failed. The file system accepts no further writes to that volume until it is mounted again. What was committed is intact, and the change that was interrupted is completed when the volume is mounted. The error code is in the data.
 .
+
+MessageId=0x7003
+Severity=Warning
+Facility=IO
+SymbolicName=NITRO_WARN_STUB_CALLED
+Language=English
+The routine %1 is exported by the system but not implemented; it was called by %2 (the call fails or does nothing). The complete list is under HKLM\SYSTEM\CurrentControlSet\Control\NitroOS\StubHits.
+.

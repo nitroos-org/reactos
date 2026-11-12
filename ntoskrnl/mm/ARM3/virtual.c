@@ -4222,7 +4222,7 @@ PVOID
 NTAPI
 MmGetVirtualForPhysical(IN PHYSICAL_ADDRESS PhysicalAddress)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return 0;
 }
 

@@ -37,7 +37,7 @@ NTAPI
 MmMarkPhysicalMemoryAsBad(IN PPHYSICAL_ADDRESS StartAddress,
                           IN OUT PLARGE_INTEGER NumberOfBytes)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -49,7 +49,7 @@ NTAPI
 MmMarkPhysicalMemoryAsGood(IN PPHYSICAL_ADDRESS StartAddress,
                            IN OUT PLARGE_INTEGER NumberOfBytes)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
@@ -61,7 +61,7 @@ NTAPI
 MmRemovePhysicalMemory(IN PPHYSICAL_ADDRESS StartAddress,
                        IN OUT PLARGE_INTEGER NumberOfBytes)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 
