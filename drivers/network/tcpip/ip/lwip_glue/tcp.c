@@ -1439,14 +1439,16 @@ LibTCPAllocateEphemeralPortLocked(const ip4_addr_t *RemoteIp, u16_t RemotePort)
     }
 
     Port = TCPAllocateEphemeralPort(LibTCPLocalPortUsed);
-    if (Port == (UINT)-1 && RemoteIp)
+    if (Port == (UINT)-1)
     {
-        /* Every port is taken, or only the TIME-WAIT of this remote endpoint holds the free ones: Windows
-           answers the second with WSAEADDRINUSE and the first with WSAENOBUFS */
+        /* No port without a TIME-WAIT in the way (of any remote endpoint, or of this one). A TIME-WAIT does not
+           keep a port from being bound; it only makes a connect to the remote endpoint it belongs to fail: with
+           a remote endpoint known that is the answer (Windows: WSAEADDRINUSE; WSAENOBUFS when ports are all in
+           use), without one the port is taken and a connect from it finds out */
         LibTCPIgnoreTimeWait = TRUE;
         Port = TCPAllocateEphemeralPort(LibTCPLocalPortUsed);
         LibTCPIgnoreTimeWait = FALSE;
-        if (Port != (UINT)-1)
+        if (Port != (UINT)-1 && RemoteIp)
         {
             TCPFreePort(Port);
             Port = LIBTCP_PORT_TIME_WAIT;
