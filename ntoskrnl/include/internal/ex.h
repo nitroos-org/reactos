@@ -297,6 +297,7 @@ VOID
 NTAPI
 ExpInitializeWorkerThreads(VOID);
 
+
 VOID
 NTAPI
 ExSwapinWorkerThreads(IN BOOLEAN AllowSwap);

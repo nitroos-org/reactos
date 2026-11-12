@@ -651,6 +651,7 @@ IopInitDriverImplementation(
     VOID
 );
 
+
 NTSTATUS
 IopGetSystemPowerDeviceObject(
     IN PDEVICE_OBJECT *DeviceObject

@@ -467,6 +467,40 @@ ExAcquireSharedWaitForExclusive(
     PERESOURCE Resource,
   _In_ BOOLEAN Wait);
 
+typedef ULONG64 POOL_FLAGS;
+
+#define POOL_FLAG_USE_QUOTA         0x0000000000000001ULL
+#define POOL_FLAG_UNINITIALIZED     0x0000000000000002ULL
+#define POOL_FLAG_CACHE_ALIGNED     0x0000000000000008ULL
+#define POOL_FLAG_RAISE_ON_FAILURE  0x0000000000000020ULL
+#define POOL_FLAG_NON_PAGED         0x0000000000000040ULL
+#define POOL_FLAG_NON_PAGED_EXECUTE 0x0000000000000080ULL
+#define POOL_FLAG_PAGED             0x0000000000000100ULL
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_Must_inspect_result_
+_Ret_maybenull_
+NTKERNELAPI
+PVOID
+NTAPI
+ExAllocatePool2(
+  _In_ POOL_FLAGS Flags,
+  _In_ SIZE_T NumberOfBytes,
+  _In_ ULONG Tag);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_Must_inspect_result_
+_Ret_maybenull_
+NTKERNELAPI
+PVOID
+NTAPI
+ExAllocatePool3(
+  _In_ POOL_FLAGS Flags,
+  _In_ SIZE_T NumberOfBytes,
+  _In_ ULONG Tag,
+  _In_reads_opt_(ExtendedParametersCount) PVOID ExtendedParameters,
+  _In_ ULONG ExtendedParametersCount);
+
 __drv_preferredFunction("ExAllocatePoolWithTag",
                         "No tag interferes with debugging.")
 __drv_allocatesMem(Mem)
