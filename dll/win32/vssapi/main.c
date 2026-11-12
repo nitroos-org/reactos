@@ -96,6 +96,94 @@ HRESULT __thiscall VSSAPI_CVssWriter_Unsubscribe( struct CVssWriter *writer )
 }
 DEFINE_THISCALL_WRAPPER( VSSAPI_CVssWriter_Unsubscribe, 4 )
 
+#ifdef _WIN64
+/* The members of CVssWriter that the writers of 64-bit programs import. Like the 32-bit ones above they
+ * do nothing: there is no Volume Shadow Copy service to subscribe to, so the writer is never called. The
+ * virtual members are the base class defaults of the real class, which return TRUE. */
+
+/******************************************************************
+ *  ?SetWriterFailure@CVssWriter@@IEAAJJ@Z
+ */
+HRESULT VSSAPI_CVssWriter_SetWriterFailure( struct CVssWriter *writer, HRESULT failure )
+{
+    FIXME( "%p, %#x\n", writer, failure );
+    return S_OK;
+}
+
+/******************************************************************
+ *  ?IsPathAffected@CVssWriter@@IEBA_NPEBG@Z
+ */
+BOOL VSSAPI_CVssWriter_IsPathAffected( const struct CVssWriter *writer, LPCWSTR path )
+{
+    FIXME( "%p, %s\n", writer, debugstr_w(path) );
+    return FALSE;
+}
+
+/******************************************************************
+ *  ?GetCurrentSnapshotSetId@CVssWriter@@IEBA?AU_GUID@@XZ
+ */
+VSS_ID *VSSAPI_CVssWriter_GetCurrentSnapshotSetId( const struct CVssWriter *writer, VSS_ID *id )
+{
+    FIXME( "%p\n", writer );
+    memset( id, 0, sizeof(*id) );
+    return id;
+}
+
+/******************************************************************
+ *  ?GetBackupType@CVssWriter@@IEBA?AW4_VSS_BACKUP_TYPE@@XZ
+ */
+VSS_BACKUP_TYPE VSSAPI_CVssWriter_GetBackupType( const struct CVssWriter *writer )
+{
+    FIXME( "%p\n", writer );
+    return VSS_BT_UNDEFINED;
+}
+
+/******************************************************************
+ *  ?AreComponentsSelected@CVssWriter@@IEBA_NXZ
+ */
+BOOL VSSAPI_CVssWriter_AreComponentsSelected( const struct CVssWriter *writer )
+{
+    FIXME( "%p\n", writer );
+    return FALSE;
+}
+
+/******************************************************************
+ *  ?OnVSSShutdown@CVssWriter@@UEAA_NXZ
+ */
+BOOL VSSAPI_CVssWriter_OnVSSShutdown( struct CVssWriter *writer )
+{
+    FIXME( "%p\n", writer );
+    return TRUE;
+}
+
+/******************************************************************
+ *  ?OnVSSApplicationStartup@CVssWriter@@UEAA_NXZ
+ */
+BOOL VSSAPI_CVssWriter_OnVSSApplicationStartup( struct CVssWriter *writer )
+{
+    FIXME( "%p\n", writer );
+    return TRUE;
+}
+
+/******************************************************************
+ *  ?OnBackOffIOOnVolume@CVssWriter@@UEAA_NPEAGU_GUID@@1@Z
+ */
+BOOL VSSAPI_CVssWriter_OnBackOffIOOnVolume( struct CVssWriter *writer, WCHAR *volume, const VSS_ID *snapshot_id, const VSS_ID *provider_id )
+{
+    FIXME( "%p, %p, %p, %p\n", writer, volume, snapshot_id, provider_id );
+    return TRUE;
+}
+
+/******************************************************************
+ *  ?OnContinueIOOnVolume@CVssWriter@@UEAA_NPEAGU_GUID@@1@Z
+ */
+BOOL VSSAPI_CVssWriter_OnContinueIOOnVolume( struct CVssWriter *writer, WCHAR *volume, const VSS_ID *snapshot_id, const VSS_ID *provider_id )
+{
+    FIXME( "%p, %p, %p, %p\n", writer, volume, snapshot_id, provider_id );
+    return TRUE;
+}
+#endif
+
 HRESULT WINAPI CreateVssBackupComponentsInternal(IVssBackupComponents **backup)
 {
     FIXME("%p\n", backup);
