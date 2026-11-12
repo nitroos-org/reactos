@@ -200,6 +200,11 @@ IopDeleteIoCompletion(PVOID ObjectBody)
                     ObDereferenceObject(Irp->Tail.Overlay.Thread);
                 IoFreeIrp(Irp);
             }
+            else if (Packet->PacketType == IopCompletionPacketWait)
+            {
+                /* Cannot happen: a queued wait completion packet holds a reference on the port */
+                ASSERT(FALSE);
+            }
             else
             {
                 /* Use common routine */
