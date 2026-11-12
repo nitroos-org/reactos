@@ -494,6 +494,21 @@ Again:
         goto Arm3Done;
     }
 
+    /*
+     * User mode touched an address without a VAD that is not mapped: every ReactOS memory area has a VAD in the
+     * same tree, so MmNotPresentFault would find none under the address space lock and fail with an access
+     * violation. Fail here instead: threads that fault on such addresses (the null pointer checks of managed
+     * runtimes, for one) then do not queue on that lock. A VAD inserted meanwhile is a race the caller had anyway.
+     */
+    if ((Mode == UserMode) &&
+        (Vad == NULL) &&
+        ((ULONG_PTR)Address <= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) &&
+        MI_IS_NOT_PRESENT_FAULT(FaultCode))
+    {
+        MiPagerEndOfFault();
+        return STATUS_ACCESS_VIOLATION;
+    }
+
     /* Keep same old ReactOS Behaviour */
     if (!MI_IS_NOT_PRESENT_FAULT(FaultCode))
     {
