@@ -923,7 +923,10 @@ RepeatChainedInfo:
                 break;
 
             case UWOP_SPARE_CODE:
-                ASSERT(FALSE);
+                /* No operation is defined for this code; skip its three slots.
+                   The unwind data comes from the image, so this is not an
+                   internal error to assert on: with an assertion here, a debug
+                   build stops in the debugger for any image that uses it. */
                 i += 3;
                 break;
 
