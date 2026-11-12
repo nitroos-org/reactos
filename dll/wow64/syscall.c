@@ -3074,6 +3074,15 @@ static NTSTATUS Dispatch(ULONG Number, const ULONG *a, WOW64_CLEANUP *Cleanup)
         return NtNotifyChangeDirectoryFile(H(0), H(1), Routine, P(3), (PVOID)(0x8000000000000000ULL | a[4]),
                                            P(5), a[6], a[7], (BOOLEAN)a[8]);
     }
+    case W64_NtNotifyChangeDirectoryFileEx:
+    {
+        /* NtNotifyChangeDirectoryFile with the information class as the tenth argument; the records
+         * (FILE_NOTIFY_INFORMATION, FILE_NOTIFY_EXTENDED_INFORMATION) are the same in both layouts. */
+        PIO_APC_ROUTINE Routine = a[2] ? (PIO_APC_ROUTINE)(ULONG_PTR)(-((LONG64)a[2] << 2)) : NULL;
+        ProbeOutput(a[4], sizeof(WOW64_IOSB));
+        return NtNotifyChangeDirectoryFileEx(H(0), H(1), Routine, P(3), (PVOID)(0x8000000000000000ULL | a[4]),
+                                             P(5), a[6], a[7], (BOOLEAN)a[8], a[9]);
+    }
     case W64_NtOpenProcess:
     case W64_NtOpenThread:
     {

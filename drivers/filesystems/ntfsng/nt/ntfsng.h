@@ -405,9 +405,13 @@ VOID NgPosixUnlink(PNG_FCB Fcb);
 #define NG_DISP_VALID_MASK                  0x0000001f
 BOOLEAN NgValidName(PCUNICODE_STRING Name);
 VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action);
+/* NgNotify with what Fcb (may be NULL) holds for watchers that read FILE_NOTIFY_EXTENDED_INFORMATION records;
+   ParentMftNo: the directory that holds the name */
+VOID NgNotifyFcb(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action, PNG_FCB Fcb, ULONGLONG ParentMftNo);
+VOID NgFillNotifyExtended(PNG_FCB Fcb, ULONGLONG ParentMftNo, PFILE_NOTIFY_EXTENDED_INFORMATION I);
 VOID NgLockNotifyPath(PNG_VCB Vcb);
 VOID NgUnlockNotifyPath(PNG_VCB Vcb);
-VOID NgNotifyCcb(PNG_VCB Vcb, PNG_CCB Ccb, ULONG Filter, ULONG Action);
+VOID NgNotifyCcb(PNG_VCB Vcb, PNG_CCB Ccb, PNG_FCB Fcb, ULONG Filter, ULONG Action);
 NTSTATUS NgCleanup(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 NTSTATUS NgClose(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 

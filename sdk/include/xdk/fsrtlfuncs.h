@@ -760,6 +760,24 @@ FsRtlNotifyFullReportChange(
   _In_ ULONG Action,
   _In_opt_ PVOID TargetContext);
 
+#ifdef __REACTOS__
+/* ReactOS-specific: FsRtlNotifyFullReportChange for file systems that can fill FILE_NOTIFY_EXTENDED_INFORMATION */
+NTKERNELAPI
+VOID
+NTAPI
+FsRtlNotifyFullReportChangeExtended(
+  _In_ PNOTIFY_SYNC NotifySync,
+  _In_ PLIST_ENTRY NotifyList,
+  _In_ PSTRING FullTargetName,
+  _In_ USHORT TargetNameOffset,
+  _In_opt_ PSTRING StreamName,
+  _In_opt_ PSTRING NormalizedParentName,
+  _In_ ULONG FilterMatch,
+  _In_ ULONG Action,
+  _In_opt_ PVOID TargetContext,
+  _In_opt_ PFILE_NOTIFY_EXTENDED_INFORMATION ExtendedInfo);
+#endif
+
 _IRQL_requires_max_(APC_LEVEL)
 NTKERNELAPI
 VOID

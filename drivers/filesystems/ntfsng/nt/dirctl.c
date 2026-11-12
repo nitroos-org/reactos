@@ -477,9 +477,14 @@ NTSTATUS NgDirectoryControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     PNG_VCB Vcb = DeviceObject->DeviceExtension;
     NTSTATUS Status;
 
-    if (Stack->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY)
+    if (Stack->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY || Stack->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX)
     {
         if (!Fcb || !Ccb || !Fcb->IsDirectory)
+            return STATUS_INVALID_PARAMETER;
+        /* FsRtl reads the record layout from the request; the classes of the extended request are these two */
+        if (Stack->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX &&
+            Stack->Parameters.NotifyDirectoryEx.DirectoryNotifyInformationClass != DirectoryNotifyInformation &&
+            Stack->Parameters.NotifyDirectoryEx.DirectoryNotifyInformationClass != DirectoryNotifyExtendedInformation)
             return STATUS_INVALID_PARAMETER;
         /* FsRtl keeps the IRP and completes it when a reported change matches the filter.  It reads the
          * directory's name whenever a change is reported: the handle's own path (no allocation per
