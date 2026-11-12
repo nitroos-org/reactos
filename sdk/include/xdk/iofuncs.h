@@ -2531,6 +2531,20 @@ $endif (_NTIFS_)
 
 #endif /* (NTDDI_VERSION >= NTDDI_WINXP) */
 
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoCreateSystemThread(
+  _Inout_ PVOID IoObject,
+  _Out_ PHANDLE ThreadHandle,
+  _In_ ULONG DesiredAccess,
+  _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+  _In_opt_ HANDLE ProcessHandle,
+  _Out_opt_ PCLIENT_ID ClientId,
+  _In_ PKSTART_ROUTINE StartRoutine,
+  _In_opt_ PVOID StartContext);
+
 $if (_WDMDDK_)
 #if (NTDDI_VERSION >= NTDDI_WINXPSP1)
 NTKERNELAPI

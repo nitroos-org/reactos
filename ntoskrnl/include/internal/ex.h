@@ -297,6 +297,16 @@ VOID
 NTAPI
 ExpInitializeWorkerThreads(VOID);
 
+/* Stub-hit logger (ex/stubhit.c): first call of an exported stub is recorded */
+VOID
+NTAPI
+ExpStubHit(
+    _In_ PCSTR Function,
+    _In_ PVOID ReturnAddress);
+
+#define NTOS_STUB_HIT() \
+    do { UNIMPLEMENTED; ExpStubHit(__FUNCTION__, _ReturnAddress()); } while (0)
+
 VOID
 NTAPI
 ExSwapinWorkerThreads(IN BOOLEAN AllowSwap);

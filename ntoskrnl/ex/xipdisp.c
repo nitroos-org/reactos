@@ -21,7 +21,7 @@ XIPDispatch(IN ULONG DispatchCode,
             OUT PVOID Buffer,
             IN ULONG BufferSize)
 {
-    UNIMPLEMENTED;
+    NTOS_STUB_HIT();
     return STATUS_NOT_IMPLEMENTED;
 }
 

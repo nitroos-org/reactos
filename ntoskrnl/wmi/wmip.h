@@ -16,6 +16,13 @@ typedef struct _WMIP_GUID_OBJECT
     GUID Guid;
     PIRP Irp;
     LIST_ENTRY IrpLink;
+
+    /* Kernel notification callback (IoWMISetNotificationCallback) */
+    LIST_ENTRY NotifyLink;
+    WMI_NOTIFICATION_CALLBACK NotifyCallback;
+    PVOID NotifyContext;
+    LONG NotifyInFlight;
+    BOOLEAN NotifyLinked;
 } WMIP_GUID_OBJECT, *PWMIP_GUID_OBJECT;
 
 
@@ -49,6 +56,28 @@ WmipOpenGuidObjectByName(
     _In_ KPROCESSOR_MODE AccessMode,
     _Out_ PHANDLE OutGuidObjectHandle,
     _Outptr_ PVOID *OutGuidObject);
+
+VOID
+NTAPI
+WmipNotifyInitialize(
+    VOID);
+
+VOID
+NTAPI
+WmipNotifyRemove(
+    _In_ PWMIP_GUID_OBJECT GuidObject);
+
+NTSTATUS
+NTAPI
+WmipNotifySetCallback(
+    _In_ PWMIP_GUID_OBJECT GuidObject,
+    _In_opt_ WMI_NOTIFICATION_CALLBACK Callback,
+    _In_opt_ PVOID Context);
+
+VOID
+NTAPI
+WmipNotifyDeliver(
+    _In_ PWNODE_HEADER Wnode);
 
 NTSTATUS
 NTAPI

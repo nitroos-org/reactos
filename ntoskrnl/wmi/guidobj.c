@@ -89,6 +89,9 @@ WmipDeleteMethod(
 {
     PWMIP_GUID_OBJECT GuidObject = Object;
 
+    /* Make sure no notification callback outlives the object */
+    WmipNotifyRemove(GuidObject);
+
     /* Check if the object is attached to an IRP */
     if (GuidObject->Irp != NULL)
     {
@@ -117,6 +120,8 @@ WmipInitializeGuidObjectType(
     static UNICODE_STRING GuidObjectName = RTL_CONSTANT_STRING(L"WmiGuid");
     OBJECT_TYPE_INITIALIZER ObjectTypeInitializer;
     NTSTATUS Status;
+
+    WmipNotifyInitialize();
 
     /* Setup the object type initializer */
     RtlZeroMemory(&ObjectTypeInitializer, sizeof(ObjectTypeInitializer));

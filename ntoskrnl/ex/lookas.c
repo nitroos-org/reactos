@@ -492,3 +492,118 @@ ExInitializePagedLookasideList(IN PPAGED_LOOKASIDE_LIST Lookaside,
 }
 
 /* EOF */
+
+/*
+ * Extended lookaside lists (Windows Vista and later), from the public WDK
+ * documentation. The allocate and free routines take the lookaside list as a
+ * last parameter, and drivers allocate from and free to the list with inline
+ * code that works directly on the fields set up here. Unlike the older lists
+ * these are not linked into the lists the system tunes the depth of: the depth
+ * stays at its initial value.
+ */
+
+/* Documented flag values (the DDI level this file is built for predates them) */
+#ifndef EX_LOOKASIDE_LIST_EX_FLAGS_RAISE_ON_FAIL
+#define EX_LOOKASIDE_LIST_EX_FLAGS_RAISE_ON_FAIL 0x00000001UL
+#define EX_LOOKASIDE_LIST_EX_FLAGS_FAIL_NO_RAISE 0x00000002UL
+#endif
+
+static
+PVOID
+NTAPI
+ExpDefaultAllocateEx(
+    _In_ POOL_TYPE PoolType,
+    _In_ SIZE_T NumberOfBytes,
+    _In_ ULONG Tag,
+    _Inout_ PLOOKASIDE_LIST_EX Lookaside)
+{
+    UNREFERENCED_PARAMETER(Lookaside);
+    return ExAllocatePoolWithTag(PoolType, NumberOfBytes, Tag);
+}
+
+static
+VOID
+NTAPI
+ExpDefaultFreeEx(
+    _In_ PVOID Buffer,
+    _Inout_ PLOOKASIDE_LIST_EX Lookaside)
+{
+    UNREFERENCED_PARAMETER(Lookaside);
+    ExFreePool(Buffer);
+}
+
+NTSTATUS
+NTAPI
+ExInitializeLookasideListEx(
+    _Out_ PLOOKASIDE_LIST_EX Lookaside,
+    _In_opt_ PALLOCATE_FUNCTION_EX Allocate,
+    _In_opt_ PFREE_FUNCTION_EX Free,
+    _In_ POOL_TYPE PoolType,
+    _In_ ULONG Flags,
+    _In_ SIZE_T Size,
+    _In_ ULONG Tag,
+    _In_ USHORT Depth)
+{
+    UNREFERENCED_PARAMETER(Depth); /* reserved in the documentation: "set to zero" */
+
+    /* Only the two documented flags, and not both */
+    if ((Flags & ~(EX_LOOKASIDE_LIST_EX_FLAGS_RAISE_ON_FAIL | EX_LOOKASIDE_LIST_EX_FLAGS_FAIL_NO_RAISE)) ||
+        ((Flags & EX_LOOKASIDE_LIST_EX_FLAGS_RAISE_ON_FAIL) && (Flags & EX_LOOKASIDE_LIST_EX_FLAGS_FAIL_NO_RAISE)))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (Size < LOOKASIDE_MINIMUM_BLOCK_SIZE || Size > MAXULONG)
+        return STATUS_INVALID_PARAMETER;
+
+    ExInitializeSListHead(&Lookaside->L.ListHead);
+    Lookaside->L.TotalAllocates = 0;
+    Lookaside->L.AllocateMisses = 0;
+    Lookaside->L.TotalFrees = 0;
+    Lookaside->L.FreeMisses = 0;
+    Lookaside->L.Type = PoolType;
+    if (Flags & EX_LOOKASIDE_LIST_EX_FLAGS_RAISE_ON_FAIL)
+        Lookaside->L.Type |= POOL_RAISE_IF_ALLOCATION_FAILURE;
+    Lookaside->L.Tag = Tag;
+    Lookaside->L.Size = (ULONG)Size;
+    Lookaside->L.Depth = 4;
+    Lookaside->L.MaximumDepth = 256;
+    Lookaside->L.LastTotalAllocates = 0;
+    Lookaside->L.LastAllocateMisses = 0;
+    InitializeListHead(&Lookaside->L.ListEntry);
+
+    /* Special pool has to see every free of a selected allocation */
+    if (MmSpecialPoolEnabled && MmSpecialPoolSelectsLookaside(Size, Tag))
+    {
+        Lookaside->L.Depth = 0;
+        Lookaside->L.MaximumDepth = 0;
+    }
+
+    Lookaside->L.AllocateEx = Allocate ? Allocate : ExpDefaultAllocateEx;
+    Lookaside->L.FreeEx = Free ? Free : ExpDefaultFreeEx;
+
+    return STATUS_SUCCESS;
+}
+
+VOID
+NTAPI
+ExFlushLookasideListEx(
+    _Inout_ PLOOKASIDE_LIST_EX Lookaside)
+{
+    PVOID Entry;
+
+    /* Pop all entries off the stack and release their resources */
+    for (;;)
+    {
+        Entry = InterlockedPopEntrySList(&Lookaside->L.ListHead);
+        if (!Entry) break;
+        (*Lookaside->L.FreeEx)(Entry, Lookaside);
+    }
+}
+
+VOID
+NTAPI
+ExDeleteLookasideListEx(
+    _Inout_ PLOOKASIDE_LIST_EX Lookaside)
+{
+    ExFlushLookasideListEx(Lookaside);
+}
