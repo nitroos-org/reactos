@@ -33,6 +33,8 @@ static const GUID IID_Closable = {0x30d5a829, 0x7fa4, 0x4026, {0x83, 0xbb, 0xd7,
 static const GUID IID_Agile    = {0x94ea2b94, 0xe9cc, 0x49e0, {0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90}};
 static const GUID IID_ICompositor = {0xb403ca50, 0x7f8c, 0x4e83, {0x98, 0x5f, 0xcc, 0x45, 0x06, 0x00, 0x36, 0xd8}};
 static const GUID IID_ICompositorInterop = {0x25297d5c, 0x3ad4, 0x4c9c, {0xb5, 0xcf, 0xe3, 0x6a, 0x38, 0x51, 0x23, 0x30}};
+/* ICompositorDesktopInterop: learn.microsoft.com, "Using the Visual layer with Windows Forms" (C# declaration) */
+static const GUID IID_ICompositorDesktopInterop = {0x29e691fa, 0x4567, 0x4dca, {0xb3, 0x19, 0xd0, 0xf2, 0x07, 0xeb, 0x68, 0x07}};
 static const GUID IID_Unknown1 = {0x12345678, 0x1234, 0x1234, {0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34}};
 
 typedef HRESULT (WINAPI *PRO_GET_ACTIVATION_FACTORY)(PVOID, REFIID, void **);
@@ -114,6 +116,23 @@ static void TestClass(const WCHAR *Name, BOOL IsCompositor)
         ok(hr == S_OK && Iface, "QI(ICompositorInterop) returned 0x%08lx\n", hr);
         if (Iface)
             Iface->lpVtbl->Release(Iface);
+
+        Iface = NULL;
+        hr = Obj->lpVtbl->QueryInterface(Obj, &IID_ICompositorDesktopInterop, (void **)&Iface);
+        ok(hr == S_OK && Iface, "QI(ICompositorDesktopInterop) returned 0x%08lx\n", hr);
+        if (Iface)
+        {
+            IObj *Unk = NULL, *Unk2 = NULL;
+
+            Iface->lpVtbl->QueryInterface(Iface, &IID_IUnknown, (void **)&Unk);
+            Obj->lpVtbl->QueryInterface(Obj, &IID_IUnknown, (void **)&Unk2);
+            ok(Unk != NULL && Unk == Unk2, "ICompositorDesktopInterop identity %p vs %p\n", Unk, Unk2);
+            if (Unk)
+                Unk->lpVtbl->Release(Unk);
+            if (Unk2)
+                Unk2->lpVtbl->Release(Unk2);
+            Iface->lpVtbl->Release(Iface);
+        }
 
         Iface = NULL;
         hr = Obj->lpVtbl->QueryInterface(Obj, &IID_ICompositor, (void **)&Iface);
