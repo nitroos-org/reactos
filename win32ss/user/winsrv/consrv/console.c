@@ -243,6 +243,29 @@ ConsoleFreeUnicodeString(IN PUNICODE_STRING UnicodeString)
 
 /* CONSOLE VALIDATION FUNCTIONS ***********************************************/
 
+/*
+ * Frees the console allocation. The console must have been removed from the
+ * console list, its terminal and buffers destroyed, and nobody may use it again.
+ */
+static VOID
+ConSrvFreeConsole(IN PCONSRV_CONSOLE Console)
+{
+    ConsoleFreeHeap(Console);
+}
+
+/*
+ * Drops the lookup count taken by ConSrvValidateConsole. If the console was
+ * deleted in the meantime and this was the last lookup, it frees the memory.
+ * A validation that succeeded left the console running and locked, so the
+ * deletion (which has to enter its lock first) cannot have completed.
+ */
+static VOID
+ConSrvEndConsoleLookup(IN PCONSRV_CONSOLE Console)
+{
+    if (_InterlockedDecrement(&Console->LookupState) == CONSRV_CONSOLE_DELETED)
+        ConSrvFreeConsole(Console);
+}
+
 BOOLEAN NTAPI
 ConSrvValidateConsole(OUT PCONSRV_CONSOLE* Console,
                       IN HANDLE ConsoleHandle,
@@ -276,6 +299,14 @@ ConSrvValidateConsole(OUT PCONSRV_CONSOLE* Console,
 
     ValidatedConsole = ConsoleList[Index];
 
+    /*
+     * Keep the allocation alive while we validate it: the console can be
+     * deleted as soon as the list is unlocked. A console that is no longer in
+     * the list gets no new lookups, so the deleting thread only has to wait for
+     * the lookups that are already counted here.
+     */
+    _InterlockedIncrement(&ValidatedConsole->LookupState);
+
     /* Unlock the console list */
     ConSrvUnlockConsoleList();
 
@@ -283,6 +314,9 @@ ConSrvValidateConsole(OUT PCONSRV_CONSOLE* Console,
                                          ExpectedState,
                                          LockConsole);
     if (RetVal) *Console = ValidatedConsole;
+
+    /* We are done with the lookup; free the console if it was deleted meanwhile */
+    ConSrvEndConsoleLookup(ValidatedConsole);
 
     return RetVal;
 }
@@ -780,6 +814,7 @@ ConSrvInitConsole(OUT PHANDLE NewConsoleHandle,
         DPRINT1("NtCreateEvent(InitEvents[INIT_SUCCESS]) failed: %lu\n", Status);
         ConDrvDeleteConsole((PCONSOLE)Console);
         ConSrvDeinitTerminal(&Terminal);
+        ConsoleFreeHeap(Console); /* never inserted in the console list */
         return Status;
     }
     Status = NtCreateEvent(&Console->InitEvents[INIT_FAILURE], EVENT_ALL_ACCESS,
@@ -790,6 +825,7 @@ ConSrvInitConsole(OUT PHANDLE NewConsoleHandle,
         NtClose(Console->InitEvents[INIT_SUCCESS]);
         ConDrvDeleteConsole((PCONSOLE)Console);
         ConSrvDeinitTerminal(&Terminal);
+        ConsoleFreeHeap(Console); /* never inserted in the console list */
         return Status;
     }
 
@@ -805,6 +841,7 @@ ConSrvInitConsole(OUT PHANDLE NewConsoleHandle,
         NtClose(Console->InitEvents[INIT_SUCCESS]);
         ConDrvDeleteConsole((PCONSOLE)Console);
         ConSrvDeinitTerminal(&Terminal);
+        ConsoleFreeHeap(Console); /* never inserted in the console list */
         return Status;
     }
     DPRINT("Terminal attached\n");
@@ -861,6 +898,9 @@ ConSrvInitConsole(OUT PHANDLE NewConsoleHandle,
 VOID NTAPI
 ConSrvDeleteConsole(PCONSRV_CONSOLE Console)
 {
+    /* The frontend ConSrvInitTerminal allocated; detaching the terminal below forgets it */
+    PFRONTEND FrontEnd = Console->TermIFace.Context;
+
     DPRINT("ConSrvDeleteConsole\n");
 
     // FIXME: Send a terminate message to all the processes owning this console.
@@ -895,9 +935,27 @@ ConSrvDeleteConsole(PCONSRV_CONSOLE Console)
     ConsoleFreeUnicodeString(&Console->OriginalTitle);
     ConsoleFreeUnicodeString(&Console->Title);
 
-    /* Deinit the ConSrv terminal */
-    // FIXME!!
-    // ConSrvDeinitTerminal(&Terminal);
+    /*
+     * Deinit the ConSrv terminal: the frontend itself was deinitialised when the
+     * terminal was detached (ConDrvDeleteConsole); free what ConSrvInitTerminal
+     * allocated for it, if the console was really destroyed above.
+     */
+    if (FrontEnd != NULL && Console->State == CONSOLE_IN_DESTRUCTION)
+    {
+        TERMINAL Terminal;
+
+        RtlZeroMemory(&Terminal, sizeof(Terminal));
+        Terminal.Context = FrontEnd;
+        ConSrvDeinitTerminal(&Terminal);
+    }
+
+    /*
+     * Free the console itself. It left the console list above, so no new lookup
+     * can find it; free it now if no lookup is still validating it, otherwise the
+     * last of them frees it (ConSrvEndConsoleLookup).
+     */
+    if (!(_InterlockedOr(&Console->LookupState, CONSRV_CONSOLE_DELETED) & ~CONSRV_CONSOLE_DELETED))
+        ConSrvFreeConsole(Console);
 }
 
 
