@@ -211,14 +211,18 @@ static DWORD WINAPI SuspendThreadProc(PVOID Parameter)
     BOOL WriteBack = (Parameter != NULL);
     ULONG Round = 0;
     CONTEXT Context;
-    ULONG_PTR Pc;
+    ULONG_PTR Pc = 0;
+    ULONG Mask;
     HANDLE Thread;
+    BOOL Bad;
 
     while (!Stop)
     {
-        Thread = Faulters[(Round++ * 7) % FaulterCount];
+        Thread = Faulters[Round++ % FaulterCount];
         if (SuspendThread(Thread) == (DWORD)-1)
             continue;
+        Bad = FALSE;
+        Mask = 0;
         RtlZeroMemory(&Context, sizeof(Context));
         Context.ContextFlags = CONTEXT_FULL | CONTEXT_EXCEPTION_REQUEST;
         if (GetThreadContext(Thread, &Context))
@@ -228,9 +232,10 @@ static DWORD WINAPI SuspendThreadProc(PVOID Parameter)
             /* Between loading the values and checking them (the faulting instructions are checked by the handler) */
             if ((Pc > (ULONG_PTR)FaultContextLiveStart) && (Pc < (ULONG_PTR)FaultContextLiveEnd) &&
                 (Pc != (ULONG_PTR)FaultContextFaultIp) && (Pc != (ULONG_PTR)FaultContextDivideIp) &&
-                CheckRegisters(&Context))
+                (Mask = CheckRegisters(&Context)) != 0)
             {
-                Report(&BadSuspend, "suspended at %p: registers %lx differ", (PVOID)Pc, CheckRegisters(&Context));
+                /* Reported after the resume: the target may hold a CRT lock */
+                Bad = TRUE;
             }
             if (WriteBack)
             {
@@ -239,19 +244,22 @@ static DWORD WINAPI SuspendThreadProc(PVOID Parameter)
             }
         }
         ResumeThread(Thread);
+        if (Bad)
+            Report(&BadSuspend, "suspended at %p: registers %lx differ", (PVOID)Pc, Mask);
         if ((Round & 15) == 0)
             Sleep(0);
     }
     return 0;
 }
 
-static VOID RunThreads(PCSTR Name, BOOL Noise, ULONG SuspendMode)
+static BOOL RunThreads(PCSTR Name, BOOL Noise, ULONG SuspendMode)
 {
     HANDLE Threads[MAX_FAULTERS + MAX_NOISE + 2];
     ULONG Count = 0, NoiseCount, i, Processors;
     SYSTEM_INFO SystemInfo;
     DWORD Wait;
     LONG Shown;
+    BOOL Stopped = TRUE;
 
     GetSystemInfo(&SystemInfo);
     Processors = SystemInfo.dwNumberOfProcessors;
@@ -288,10 +296,18 @@ static VOID RunThreads(PCSTR Name, BOOL Noise, ULONG SuspendMode)
             Count++;
     }
 
-    Sleep(RUN_MS);
-    Stop = 1;
-    Wait = WaitForMultipleObjects(Count, Threads, TRUE, 60000);
-    ok(Wait == WAIT_OBJECT_0, "%s: the threads did not stop: %lu\n", Name, Wait);
+    if (Count)
+    {
+        Sleep(RUN_MS);
+        Stop = 1;
+        Wait = WaitForMultipleObjects(Count, Threads, TRUE, 60000);
+        Stopped = (Wait == WAIT_OBJECT_0);
+        ok(Stopped, "%s: the threads did not stop: %lu\n", Name, Wait);
+    }
+    else
+    {
+        Stop = 1;
+    }
     for (i = 0; i < Count; i++)
         CloseHandle(Threads[i]);
 
@@ -309,6 +325,7 @@ static VOID RunThreads(PCSTR Name, BOOL Noise, ULONG SuspendMode)
         ok(Suspends > 0, "%s: no thread was suspended\n", Name);
         ok(BadSuspend == 0, "%s: %ld contexts of suspended threads were wrong\n", Name, BadSuspend);
     }
+    return Stopped;
 }
 
 START_TEST(FaultContext)
@@ -325,10 +342,12 @@ START_TEST(FaultContext)
     if (!Handler)
         return;
 
-    RunThreads("faults", FALSE, 0);
-    RunThreads("faults+paging", TRUE, 0);
-    RunThreads("faults+paging+suspend", TRUE, 2);
-
-    RemoveVectoredExceptionHandler(Handler);
-    VirtualFree(NoAccessPage, 0, MEM_RELEASE);
+    /* After a timeout the threads may still run: keep Stop set, skip the rest and keep the handler and the page */
+    if (RunThreads("faults", FALSE, 0) &&
+        RunThreads("faults+paging", TRUE, 0) &&
+        RunThreads("faults+paging+suspend", TRUE, 2))
+    {
+        RemoveVectoredExceptionHandler(Handler);
+        VirtualFree(NoAccessPage, 0, MEM_RELEASE);
+    }
 }
