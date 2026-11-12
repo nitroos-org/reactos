@@ -768,6 +768,7 @@ static INT NLS_GetDateTimeFormatW(LCID lcid, DWORD dwFlags,
                       ++format;
                       if (!IsLiteralMarker(*format)) break;
                     }
+                    ++format; /* a literal character, or the second quote of an escaped one */
                   }
                 }
                 if (*format != ' ') break;

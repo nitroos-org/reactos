@@ -171,8 +171,46 @@ Test_EnUsDateFormats(void)
     }
 }
 
+static
+DWORD
+WINAPI
+GenitiveThread(LPVOID Param)
+{
+    SYSTEMTIME St = { 2026, 11, 0, 8, 0, 0, 0, 0 };
+    WCHAR *Buffer = Param;
+
+    /* MMMM followed by a quoted literal and a numeric day: the look-ahead for the genitive month name must skip the literal */
+    return GetDateFormatW(MAKELCID(0x0419, SORT_DEFAULT), 0, &St, L"yyyy' of 'MMMM'x' d", Buffer, 64);
+}
+
+static
+void
+Test_GenitiveLookAhead(void)
+{
+    WCHAR Buffer[64] = L"";
+    HANDLE Thread = CreateThread(NULL, 0, GenitiveThread, Buffer, 0, NULL);
+
+    if (!Thread)
+    {
+        skip("CreateThread failed (error %lu)\n", GetLastError());
+        return;
+    }
+    if (WaitForSingleObject(Thread, 10000) != WAIT_OBJECT_0)
+    {
+        ok(0, "GetDateFormatW with a literal after MMMM does not return\n");
+        TerminateThread(Thread, 1);
+    }
+    else
+    {
+        /* the genitive form of November in Russian */
+        ok(!wcscmp(Buffer, L"2026 of \x043d\x043e\x044f\x0431\x0440\x044f" L"x 8"), "got '%ls'\n", Buffer);
+    }
+    CloseHandle(Thread);
+}
+
 START_TEST(CalendarInfo)
 {
+    Test_GenitiveLookAhead();
     Test_ShortestDayNamesAndMonthDay();
     Test_YearRange();
     Test_EnUsDateFormats();
