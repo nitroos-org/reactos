@@ -656,7 +656,18 @@ UINT TCPAllocatePort(const UINT HintPort)
         }
     }
     else
-        return LibTCPAllocateEphemeralPort();
+        return LibTCPAllocateEphemeralPort(NULL, 0);
+}
+
+/* An ephemeral port for a connect to RemoteAddress:RemotePort (network order): only a TIME-WAIT of that remote endpoint
+   keeps a port from it. (UINT)-1: every port is taken (WSAENOBUFS); TCP_PORT_TIME_WAIT: free ports exist, but each has
+   a TIME-WAIT of this remote endpoint (WSAEADDRINUSE, as Windows) */
+UINT TCPAllocatePortForRemote(ULONG RemoteAddress, USHORT RemotePort)
+{
+    ip4_addr_t Remote;
+
+    Remote.addr = RemoteAddress;
+    return LibTCPAllocateEphemeralPort(&Remote, lwip_ntohs(RemotePort));
 }
 
 /* A free port of the dynamic range that InUse does not report as taken */

@@ -114,7 +114,11 @@ extern VOID TCPFreePort(const UINT Port);
 PTCP_PCB    LibTCPSocket(void *arg);
 VOID        LibTCPFreeSocket(PTCP_PCB pcb);
 err_t       LibTCPBind(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port, u16_t *const BoundPort);
-UINT        LibTCPAllocateEphemeralPort(VOID);
+/* RemoteIp NULL: no remote endpoint known, ports with any TIME-WAIT PCB are skipped. Otherwise only the TIME-WAIT of that
+   remote endpoint (RemotePort in host order) counts. Returns the port in network order, (UINT)-1 when every port is taken,
+   or LIBTCP_PORT_TIME_WAIT when only that remote endpoint's TIME-WAIT keeps the free ports from it */
+#define LIBTCP_PORT_TIME_WAIT ((UINT)-2)
+UINT        LibTCPAllocateEphemeralPort(const ip4_addr_t *RemoteIp, u16_t RemotePort);
 PTCP_PCB    LibTCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog);
 VOID        LibTCPClaimPendingAccept(PCONNECTION_ENDPOINT Listener);
 err_t       LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len, ULONG *sent, const int safe, PTDI_BUCKET Bucket);

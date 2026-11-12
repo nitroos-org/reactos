@@ -2250,6 +2250,22 @@ WSPConnect(SOCKET Handle,
         Socket->HelperData->WSHGetWildcardSockaddr(Socket->HelperContext,
                                                    BindAddress,
                                                    &BindAddressLength);
+
+        /* Tell the transport which remote endpoint the port is for (see AFD_TCP_CONNECT_HINT) */
+        if (BindAddress->sa_family == AF_INET &&
+            BindAddressLength >= (INT)sizeof(SOCKADDR_IN) &&
+            SocketAddress->sa_family == AF_INET &&
+            SocketAddressLength >= (INT)sizeof(SOCKADDR_IN) &&
+            Socket->SharedData->SocketType == SOCK_STREAM)
+        {
+            AFD_TCP_CONNECT_HINT Hint;
+
+            Hint.RemoteAddress = ((const SOCKADDR_IN *)SocketAddress)->sin_addr.s_addr;
+            Hint.RemotePort = ((const SOCKADDR_IN *)SocketAddress)->sin_port;
+            Hint.Magic = AFD_TCP_CONNECT_HINT_MAGIC;
+            RtlCopyMemory(((PSOCKADDR_IN)BindAddress)->sin_zero, &Hint, sizeof(Hint));
+        }
+
         /* Bind it */
         BindError = WSPBind(Handle, BindAddress, BindAddressLength, lpErrno);
         HeapFree(GetProcessHeap(), 0, BindAddress);
