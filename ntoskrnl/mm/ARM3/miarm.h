@@ -772,14 +772,19 @@ MiIsMemoryTypeInvisible(TYPE_OF_MEMORY MemoryType)
 #ifdef _M_AMD64
 /*
  * The page-table entries that map the user range, at each level of the self-map:
- * from the entry for address 0 up to the entry for MI_HIGHEST_USER_ADDRESS (the
- * 128 TiB user range is PML4 entries 0-255). Derived from the user range instead of
- * hard-coded, so the owner bit and the page-table reference counts follow it.
+ * from the entry for address 0 through the last entry of PML4 slot 255 (the 128 TiB
+ * user range is PML4 entries 0-255), so that the page tables of the top 64 KiB,
+ * above MM_HIGHEST_VAD_ADDRESS, are user page tables too (owner bit, reference
+ * counts). The self-map entry and the kernel half are above the user half.
  */
-#define MI_USER_PXE_END ((ULONG_PTR)MiAddressToPxe(MI_HIGHEST_USER_ADDRESS) + sizeof(MMPTE))
-#define MI_USER_PPE_END ((ULONG_PTR)MiAddressToPpe(MI_HIGHEST_USER_ADDRESS) + sizeof(MMPTE))
-#define MI_USER_PDE_END ((ULONG_PTR)MiAddressToPde(MI_HIGHEST_USER_ADDRESS) + sizeof(MMPTE))
-#define MI_USER_PTE_END ((ULONG_PTR)MiAddressToPte(MI_HIGHEST_USER_ADDRESS) + sizeof(MMPTE))
+#define MI_LAST_USER_HALF_ADDRESS ((PVOID)0x00007FFFFFFFFFFFULL)
+#define MI_USER_PXE_END ((ULONG_PTR)MiAddressToPxe(MI_LAST_USER_HALF_ADDRESS) + sizeof(MMPTE))
+#define MI_USER_PPE_END ((ULONG_PTR)MiAddressToPpe(MI_LAST_USER_HALF_ADDRESS) + sizeof(MMPTE))
+#define MI_USER_PDE_END ((ULONG_PTR)MiAddressToPde(MI_LAST_USER_HALF_ADDRESS) + sizeof(MMPTE))
+#define MI_USER_PTE_END ((ULONG_PTR)MiAddressToPte(MI_LAST_USER_HALF_ADDRESS) + sizeof(MMPTE))
+
+/* The user range lies in the user half, which ends before the self-map's PML4 slot */
+C_ASSERT(((ULONG_PTR)PTE_BASE >> PXI_SHIFT) % (1 << 9) >= 256);
 
 FORCEINLINE
 BOOLEAN
