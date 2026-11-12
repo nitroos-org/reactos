@@ -18,6 +18,12 @@
 
 /* GLOBALS ********************************************************************/
 
+#ifdef _M_AMD64
+/* The probe address is the first address above the user range (user-mode
+ * code, such as the WoW64 thunks, derives its never-mapped address the same way) */
+C_ASSERT((ULONG_PTR)MI_USER_PROBE_ADDRESS == (ULONG_PTR)MI_HIGHEST_USER_ADDRESS + 1);
+#endif
+
 //
 // These are all registry-configurable, but by default, the memory manager will
 // figure out the most appropriate values.

@@ -21,10 +21,13 @@ static VOID GuestProbe(ULONG Address, ULONGLONG Length)
 
 /* A guest structure that cannot be read must not reach the native service in
  * its 32-bit layout. It is replaced by an address in the never-mapped 64 KiB
- * at the native user probe address, which fails every probe and access there,
+ * at the native user probe address (one past the highest user address, the
+ * same value the kernel uses), which fails every probe and access there,
  * so the service fails exactly as for an inaccessible argument of its own.
  * The low bits are kept so that misalignment is still reported first. */
-#define GUEST_UNREADABLE(Address) ((PVOID)(ULONG_PTR)(0x00007FFFFFFF0000ULL | ((Address) & 3)))
+#define GUEST_UNREADABLE_BASE ((ULONG_PTR)MI_HIGHEST_USER_ADDRESS + 1)
+C_ASSERT((GUEST_UNREADABLE_BASE & 0xFFFF) == 0);
+#define GUEST_UNREADABLE(Address) ((PVOID)(GUEST_UNREADABLE_BASE | ((Address) & 3)))
 
 static PUNICODE_STRING StringIn(UNICODE_STRING *To, ULONG Address)
 {
