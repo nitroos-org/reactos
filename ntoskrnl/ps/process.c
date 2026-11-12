@@ -416,6 +416,7 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
     SECURITY_SUBJECT_CONTEXT SubjectContext;
     BOOLEAN NeedsPeb = FALSE;
     INITIAL_PEB InitialPeb;
+    BOOLEAN SessionJoinFailed = FALSE;
 
     PAGED_CODE();
 
@@ -626,6 +627,15 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
                 if (NT_SUCCESS(Status)) Status = STATUS_INSUFFICIENT_RESOURCES;
                 goto CleanupWithRef;
             }
+
+            /*
+             * The process looked up can leave the session after the lookup (it exits), and the session can
+             * lose its last process: then the child did not join it (MiSessionAddProcess joins only a live
+             * session, from the attached process's membership). The address space is built, so it is
+             * finished below (empty) and freed with the process; the create fails, as for a session that does
+             * not exist. SessionMember->Session stays valid: our reference to that process keeps it.
+             */
+            if (Process->Session != SessionMember->Session) SessionJoinFailed = TRUE;
         }
         else if (!MmCreateProcessAddressSpace(MinWs,
                                               Process,
@@ -657,6 +667,20 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
                         DirectoryTableBase,
                         BooleanFlagOn(Process->DefaultHardErrorProcessing,
                                       SEM_NOALIGNMENTFAULTEXCEPT));
+
+    /* NitroSessions: the child is not in the session that was asked for. Fail closed */
+    if (SessionJoinFailed)
+    {
+        ULONG NoFlags = 0;
+
+        /*
+         * Finish the address space empty (no image, as for a child of the System process), so that the
+         * process deletion frees all its pages: one left at phase 1 keeps them (MmDeleteProcessAddressSpace)
+         */
+        MmInitializeProcessAddressSpace(Process, NULL, NULL, &NoFlags, NULL);
+        Status = STATUS_ACCESS_DENIED;
+        goto CleanupWithRef;
+    }
 
     /* Duplicate Parent Token */
     Status = PspInitializeProcessSecurity(Process, Parent);
