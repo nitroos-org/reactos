@@ -2,6 +2,7 @@
 list(APPEND SOURCE
     CloseThemeData.c
     DrawThemeParentBackground.c
+    DrawThemeParentBackgroundEx.c
     GetThemeParseErrorInfo.c
     Ordinals.c
     PanningFeedback.c
