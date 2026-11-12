@@ -1,0 +1,301 @@
+# Windows geographical location identifiers: decimal id, short name, long name (tab separated)
+2	Antigua and Barbuda	Antigua and Barbuda
+3	Afghanistan	Islamic Republic of Afghanistan
+4	Algeria	Democratic and Popular Republic of Algeria
+5	Azerbaijan	Republic of Azerbaijan
+6	Albania	Republic of Albania
+7	Armenia	Republic of Armenia
+8	Andorra	Principality of Andorra
+9	Angola	Republic of Angola
+10	American Samoa	Territory of American Samoa
+11	Argentina	Argentine Republic
+12	Australia	Commonwealth of Australia
+14	Austria	Republic of Austria
+17	Bahrain	Kingdom of Bahrain
+18	Barbados	Barbados
+19	Botswana	Republic of Botswana
+20	Bermuda	Bermuda
+21	Belgium	Kingdom of Belgium
+22	Bahamas, The	Commonwealth of The Bahamas
+23	Bangladesh	People's Republic of Bangladesh
+24	Belize	Belize
+25	Bosnia and Herzegovina	Bosnia and Herzegovina
+26	Bolivia	Plurinational State of Bolivia"
+27	Myanmar	Republic of the Union of Myanmar
+28	Benin	Republic of Benin
+29	Belarus	Republic of Belarus
+30	Solomon Islands	Solomon Islands
+32	Brazil	Federative Republic of Brazil
+34	Bhutan	Kingdom of Bhutan
+35	Bulgaria	Republic of Bulgaria
+37	Brunei	Negara Brunei Darussalam
+38	Burundi	Republic of Burundi
+39	Canada	Canada
+40	Cambodia	Kingdom of Cambodia
+41	Chad	Republic of Chad
+42	Sri Lanka	Democratic Socialist Republic of Sri Lanka
+43	Congo	Republic of the Congo
+44	Congo (DRC)	Democratic Republic of the Congo
+45	China	People's Republic of China
+46	Chile	Republic of Chile
+49	Cameroon	Republic of Cameroon
+50	Comoros	Union of Comoros
+51	Colombia	Republic of Colombia
+54	Costa Rica	Republic of Costa Rica
+55	Central African Republic	Central African Republic
+56	Cuba	Republic of Cuba
+57	Cabo Verde	Republic of Cabo Verde
+59	Cyprus	Republic of Cyprus
+61	Denmark	Kingdom of Denmark
+62	Djibouti	Republic of Djibouti
+63	Dominica	Commonwealth of Dominica
+65	Dominican Republic	Dominican Republic
+66	Ecuador	Republic of Ecuador
+67	Egypt	Arab Republic of Egypt
+68	Ireland	Ireland
+69	Equatorial Guinea	Republic of Equatorial Guinea
+70	Estonia	Republic of Estonia
+71	Eritrea	State of Eritrea
+72	El Salvador	Republic of El Salvador
+73	Ethiopia	Federal Democratic Republic of Ethiopia
+75	Czech Republic	Czech Republic
+77	Finland	Republic of Finland
+78	Fiji	The Republic of Fiji
+80	Micronesia	Federated States of Micronesia
+81	Faroe Islands	Faroe Islands
+84	France	French Republic
+86	Gambia	Republic of The Gambia
+87	Gabon	Gabonese Republic
+88	Georgia	Georgia
+89	Ghana	Republic of Ghana
+90	Gibraltar	Gibraltar
+91	Grenada	Grenada
+93	Greenland	Greenland
+94	Germany	Federal Republic of Germany
+98	Greece	Hellenic Republic
+99	Guatemala	Republic of Guatemala
+100	Guinea	Republic of Guinea
+101	Guyana	Cooperative Republic of Guyana
+103	Haiti	Republic of Haiti
+104	Hong Kong SAR	Hong Kong Special Administrative Region
+106	Honduras	Republic of Honduras
+108	Croatia	Republic of Croatia
+109	Hungary	Republic of Hungary
+110	Iceland	Republic of Iceland
+111	Indonesia	Republic of Indonesia
+113	India	Republic of India
+114	British Indian Ocean Territory	British Indian Ocean Territory
+116	Iran	Islamic Republic of Iran
+117	Israel	State of Israel
+118	Italy	Italian Republic
+119	Côte d'Ivoire	Republic of Côte d'Ivoire
+121	Iraq	Republic of Iraq
+122	Japan	Japan
+124	Jamaica	Jamaica
+125	Jan Mayen	Jan Mayen
+126	Jordan	Hashemite Kingdom of Jordan
+127	Johnston Atoll	
+129	Kenya	Republic of Kenya
+130	Kyrgyzstan	Kyrgyz Republic
+131	North Korea	Democratic People's Republic of Korea
+133	Kiribati	Republic of Kiribati
+134	Korea	Republic of Korea
+136	Kuwait	State of Kuwait
+137	Kazakhstan	Republic of Kazakhstan
+138	Laos	Lao People's Democratic Republic
+139	Lebanon	Republic of Lebanon
+140	Latvia	Republic of Latvia
+141	Lithuania	Republic of Lithuania
+142	Liberia	Republic of Liberia
+143	Slovakia	Slovak Republic
+145	Liechtenstein	Principality of Liechtenstein
+146	Lesotho	Kingdom of Lesotho
+147	Luxembourg	Grand Duchy of Luxembourg
+148	Libya	Libya
+149	Madagascar	Republic of Madagascar
+151	Macao SAR	Macao Special Administrative Region
+152	Moldova	Republic of Moldova
+154	Mongolia	Mongolia
+156	Malawi	Republic of Malawi
+157	Mali	Republic of Mali
+158	Monaco	Principality of Monaco
+159	Morocco	Kingdom of Morocco
+160	Mauritius	Republic of Mauritius
+162	Mauritania	Islamic Republic of Mauritania
+163	Malta	Republic of Malta
+164	Oman	Sultanate of Oman
+165	Maldives	Republic of Maldives
+166	Mexico	United Mexican States
+167	Malaysia	Federation of Malaysia
+168	Mozambique	Republic of Mozambique
+173	Niger	Republic of Niger
+174	Vanuatu	Republic of Vanuatu
+175	Nigeria	Federal Republic of Nigeria
+176	Netherlands	Kingdom of the Netherlands
+177	Norway	Kingdom of Norway
+178	Nepal	Federal Democratic Republic of Nepal
+180	Nauru	Republic of Nauru
+181	Suriname	Republic of Suriname
+182	Nicaragua	Republic of Nicaragua
+183	New Zealand	New Zealand
+184	Palestinian Authority	Palestinian National Authority
+185	Paraguay	Republic of Paraguay
+187	Peru	Republic of Peru
+190	Pakistan	Islamic Republic of Pakistan
+191	Poland	Republic of Poland
+192	Panama	Republic of Panama
+193	Portugal	Portuguese Republic
+194	Papua New Guinea	Independent State of Papua New Guinea
+195	Palau	Republic of Palau
+196	Guinea-Bissau	Republic of Guinea-Bissau
+197	Qatar	State of Qatar
+198	Réunion	Department of Réunion
+199	Marshall Islands	Republic of the Marshall Islands
+200	Romania	Romania
+201	Philippines	Republic of the Philippines
+202	Puerto Rico	Commonwealth of Puerto Rico
+203	Russia	Russian Federation
+204	Rwanda	Republic of Rwanda
+205	Saudi Arabia	Kingdom of Saudi Arabia
+206	Saint Pierre and Miquelon	Territorial Collectivity of Saint Pierre and Miquelon
+207	Saint Kitts and Nevis	Federation of Saint Kitts and Nevis
+208	Seychelles	Republic of Seychelles
+209	South Africa	Republic of South Africa
+210	Senegal	Republic of Senegal
+212	Slovenia	Republic of Slovenia
+213	Sierra Leone	Republic of Sierra Leone
+214	San Marino	Republic of San Marino
+215	Singapore	Republic of Singapore
+216	Somalia	Federal Republic of Somalia
+217	Spain	Kingdom of Spain
+218	Saint Lucia	Saint Lucia
+219	Sudan	Republic of the Sudan
+220	Svalbard	Svalbard
+221	Sweden	Kingdom of Sweden
+222	Syria	Syrian Arab Republic
+223	Switzerland	Swiss Confederation
+224	United Arab Emirates	United Arab Emirates
+225	Trinidad and Tobago	Republic of Trinidad and Tobago
+227	Thailand	Kingdom of Thailand
+228	Tajikistan	Republic of Tajikistan
+231	Tonga	Kingdom of Tonga
+232	Togo	Togolese Republic
+233	São Tomé and Príncipe	Democratic Republic of São Tomé and Príncipe
+234	Tunisia	Tunisian Republic
+235	Türkiye	Republic of Türkiye
+236	Tuvalu	Tuvalu
+237	Taiwan	Taiwan
+238	Turkmenistan	Republic of Turkmenistan
+239	Tanzania	United Republic of Tanzania
+240	Uganda	Republic of Uganda
+241	Ukraine	Ukraine
+242	United Kingdom	United Kingdom of Great Britain and Northern Ireland
+244	United States	United States of America
+245	Burkina Faso	Burkina Faso
+246	Uruguay	Oriental Republic of Uruguay
+247	Uzbekistan	Republic of Uzbekistan
+248	Saint Vincent and the Grenadines	Saint Vincent and the Grenadines
+249	Venezuela	Bolivarian Republic of Venezuela
+251	Vietnam	Socialist Republic of Vietnam
+252	U.S. Virgin Islands	Virgin Islands of the United States
+253	Vatican City	State of Vatican City
+254	Namibia	Republic of Namibia
+258	Wake Island	
+259	Samoa	Independent State of Samoa
+260	Swaziland	Kingdom of Swaziland
+261	Yemen	Republic of Yemen
+263	Zambia	Republic of Zambia
+264	Zimbabwe	Republic of Zimbabwe
+269	Serbia and Montenegro (Former)	Serbia
+270	Montenegro	Montenegro
+271	Serbia	Serbia
+273	Curaçao	
+276	South Sudan	The Republic of South Sudan
+300	Anguilla	Anguilla
+301	Antarctica	Antarctica
+302	Aruba	Aruba
+303	Ascension Island	
+304	Ashmore and Cartier Islands	Territory of Ashmore and Cartier Islands
+305	Baker Island	
+306	Bouvet Island	
+307	Cayman Islands	Cayman Islands
+308	Channel Islands	
+309	Christmas Island	Territory of Christmas Island
+310	Clipperton Island	
+311	Cocos (Keeling) Islands	Territory of Cocos (Keeling) Islands
+312	Cook Islands	
+313	Coral Sea Islands	Coral Sea Islands Territory
+314	Diego Garcia	
+315	Falkland Islands	Falkland Islands
+317	French Guiana	Department of Guiana
+318	French Polynesia	Territory of French Polynesia
+319	French Southern Territories	Territory of the French Southern and Antarctic Lands
+321	Guadeloupe	Department of Guadeloupe
+322	Guam	Territory of Guam
+323	Guantanamo Bay	
+324	Guernsey	Bailiwick of Guernsey
+325	Heard Island and McDonald Islands	Territory of Heard Island and McDonald Islands
+326	Howland Island	
+327	Jarvis Island	
+328	Jersey	Bailiwick of Jersey
+329	Kingman Reef	
+330	Martinique	Department of Martinique
+331	Mayotte	Territorial Collectivity of Mayotte
+332	Montserrat	Montserrat
+333	Netherlands Antilles (Former)	
+334	New Caledonia	Territory of New Caledonia and Dependencies
+335	Niue	
+336	Norfolk Island	Territory of Norfolk Island
+337	Northern Mariana Islands	Commonwealth of the Northern Mariana Islands
+338	Palmyra Atoll	
+339	Pitcairn Islands	Pitcairn, Henderson, Ducie, and Oeno Islands
+340	Rota Island	
+341	Saipan	
+342	South Georgia and the South Sandwich Islands	South Georgia and the South Sandwich Islands
+343	St Helena, Ascension and Tristan da Cunha	Saint Helena, Ascension, and Tristan da Cunha
+346	Tinian Island	
+347	Tokelau	Tokelau
+348	Tristan da Cunha	
+349	Turks and Caicos Islands	Turks and Caicos Islands
+351	British Virgin Islands	British Virgin Islands
+352	Wallis and Futuna	Territory of the Wallis and Futuna Islands
+742	Africa	
+2129	Asia	
+10541	Europe	
+15126	Isle of Man	Isle of Man
+19618	North Macedonia	The Former Yugoslav Republic of North Macedonia
+20900	Melanesia	
+21206	Micronesia	Federated States of Micronesia
+21242	Midway Islands	
+23581	Northern America	
+26286	Polynesia	
+27082	Central America	
+27114	Oceania	
+30967	Sint Maarten	Country of Sint Maarten
+31396	South America	
+31706	Saint Martin	Overseas Collectivity of Saint Martin
+39070	World	
+42483	Western Africa	
+42484	Middle Africa	
+42487	Northern Africa	
+47590	Central Asia	
+47599	South-Eastern Asia	
+47600	Eastern Asia	
+47603	Eastern Africa	
+47609	Eastern Europe	
+47610	Southern Europe	
+47611	Middle East	Western Asia
+47614	Southern Asia	
+7299303	Timor-Leste	Democratic Republic of Timor-Leste
+9914689	Kosovo	Kosovo
+10026358	Americas	
+10028789	Åland Islands	Åland Islands
+10039880	Caribbean	
+10039882	Northern Europe	
+10039883	Southern Africa	
+10210824	Western Europe	
+10210825	Australia and New Zealand	
+161832015	Saint Barthélemy	Overseas Collectivity of Saint Barthélemy
+161832256	U.S. Minor Outlying Islands	United States Minor Outlying Islands
+161832257	Latin America and the Caribbean	
+161832258	Bonaire, Sint Eustatius and Saba	
