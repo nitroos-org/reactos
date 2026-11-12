@@ -40,6 +40,41 @@ ULONG KiIdlePollMicroseconds;
 #define KiIsProcessorPolling(Number) FALSE
 #endif
 
+#ifdef KI_THREAD_LOCK_TRACE
+volatile LONG KiThreadLockDepth[MAXIMUM_PROCESSORS];
+
+DECLSPEC_NORETURN
+VOID
+NTAPI
+KiThreadLockFault(ULONG Kind, PVOID Thread, LONG64 Word, ULONG_PTR Site)
+{
+    /* 1 = spin timeout, 2 = released by another thread, 3+ = held at a switch point */
+    KeBugCheckEx(0xDEADDEAD, ((ULONG_PTR)Kind << 56) | ((ULONG_PTR)Thread & 0x00FFFFFFFFFFFFFFULL),
+                 (ULONG_PTR)Thread, (ULONG_PTR)Word, Site);
+}
+#endif
+
+#ifdef KI_THREAD_LOCK_TRACE
+/* Called by KiSystemServiceExit (trace builds): IRQL_GT_ZERO_AT_SYSTEM_SERVICE
+   with the service number of the trap frame, the IRQL, the held thread lock
+   count and the thread */
+VOID
+NTAPI
+KiSystemServiceExitCheck(VOID)
+{
+    KIRQL Irql = KeGetCurrentIrql();
+    LONG Depth = KiThreadLockDepthHere();
+    PKTHREAD Thread = KeGetCurrentThread();
+
+    if ((Irql != PASSIVE_LEVEL) || Depth)
+    {
+        KeBugCheckEx(IRQL_GT_ZERO_AT_SYSTEM_SERVICE,
+                     Thread->TrapFrame ? (ULONG_PTR)Thread->TrapFrame->Rax : 0,
+                     Irql, Depth, (ULONG_PTR)Thread);
+    }
+}
+#endif
+
 /* FUNCTIONS *****************************************************************/
 
 PKTHREAD
@@ -250,8 +285,12 @@ KiTryAcquireThreadLock(
 {
     ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
 
+#ifdef KI_THREAD_LOCK_TRACE
+    return KiTlTryAcquire(Thread, KI_TL_WORD(KI_TL_SITE()));
+#else
     return !(*(volatile LONG_PTR *)&Thread->ThreadLock) &&
            !InterlockedExchange((PLONG)&Thread->ThreadLock, 1);
+#endif
 }
 
 /*
@@ -847,6 +886,7 @@ KiSwapThread(IN PKTHREAD CurrentThread,
     LONG_PTR WaitStatus;
     PKTHREAD NextThread;
     ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
+    KiCheckThreadLockDepth(3);
 #if defined(_M_IX86) || defined(_M_AMD64)
     /* Until the switch, this processor could not serve IPIs */
     ASSERT(__readeflags() & EFLAGS_INTERRUPT_MASK);
@@ -1386,6 +1426,7 @@ NtYieldExecution(VOID)
             KiReleaseThreadLock(Thread);
 
             /* Set context swap busy */
+            KiCheckThreadLockDepth(4);
             KiSetThreadSwapBusy(Thread);
 
             /* Set the new thread as running */

@@ -1034,3 +1034,25 @@ KiFloatingErrorHandler(
     /* Nothing is pending that software has to handle (spurious or already cleared) */
     return STATUS_SUCCESS;
 }
+
+/*
+ * Called by KiSystemServiceExit when a system service returns above
+ * PASSIVE_LEVEL. Windows: IRQL_GT_ZERO_AT_SYSTEM_SERVICE, parameter 1 the
+ * service (here its number, as in the trap frame), parameter 2 the IRQL.
+ * Returning to user mode at a raised IRQL leaves the thread unpreemptible
+ * by DPCs and APCs and fails later, far from the cause (BAD_POOL_CALLER at
+ * the next allocation, a lock that is never released).
+ */
+DECLSPEC_NORETURN
+VOID
+NTAPI
+KiSystemServiceIrqlFault(
+    _In_ ULONG_PTR ServiceNumber,
+    _In_ ULONG_PTR Irql)
+{
+    KeBugCheckEx(IRQL_GT_ZERO_AT_SYSTEM_SERVICE,
+                 ServiceNumber,
+                 Irql,
+                 0,
+                 (ULONG_PTR)KeGetCurrentThread());
+}

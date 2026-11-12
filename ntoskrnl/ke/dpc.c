@@ -557,6 +557,7 @@ KiQuantumEnd(VOID)
     NextThread = Prcb->NextThread;
 
     /* Set current thread's swap busy to true */
+    KiCheckThreadLockDepth(5);
     KiSetThreadSwapBusy(Thread);
 
     /* Switch threads in PRCB */
@@ -593,6 +594,8 @@ KiRetireDpcList(IN PKPRCB Prcb)
 #ifdef CONFIG_SMP
     KIRQL OldIrql;
 #endif
+
+    KiCheckThreadLockDepth(6);
 
     /* Get data and list variables before starting anything else */
     DpcData = &Prcb->DpcData[DPC_NORMAL];

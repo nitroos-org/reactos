@@ -204,6 +204,7 @@ KiExitDispatcher(IN KIRQL OldIrql)
 
     /* Make sure we're at synchronization level */
     ASSERT(KeGetCurrentIrql() == SYNCH_LEVEL);
+    KiCheckThreadLockDepth(7);
 
     /* Check if we have deferred threads */
     KiCheckDeferredReadyList(Prcb);

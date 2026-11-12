@@ -63,8 +63,17 @@ KeQueryBasePriorityThread(IN PKTHREAD Thread)
     /* Lock the thread */
     KiAcquireThreadLock(Thread);
 
-    /* Get the Process */
-    Process = Thread->ApcStatePointer[0]->Process;
+    /*
+     * The thread's own process. Not ApcStatePointer[0]->Process: a detach
+     * (KeDetachProcess, the nested KeUnstackDetachProcess) clears
+     * SavedApcState.Process before it points ApcStatePointer[0] back at
+     * ApcState, under the APC lock and not the thread lock, so that read can
+     * see NULL here. The fault at SYNCH_LEVEL was taken by the caller's SEH
+     * (NtQueryInformationThread) and the service returned to user mode at
+     * SYNCH_LEVEL with this lock held: the next locker of the thread spun
+     * forever, the caller's next pool allocation was BAD_POOL_CALLER.
+     */
+    Process = Thread->Process;
 
     /* Calculate the base increment */
     BaseIncrement = Thread->BasePriority - Process->BasePriority;
