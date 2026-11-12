@@ -65,12 +65,12 @@ static void Describe(HANDLE Handle, PCWSTR ExpectedType, BOOLEAN Inherit)
         ok_hex(Type->InvalidAttributes, 0xB0);
         ok_int(Type->SecurityRequired, 0);
         ok_int(Type->MaintainHandleCount, 0);
+        ok_int(Type->PoolType, 512);
     }
 
     Status = NtQueryObject(Handle, ObjectHandleFlagInformation, &Flags, sizeof(Flags), &Length);
     ok_hex(Status, STATUS_SUCCESS);
-    /* ReactOS reports the OBJ_INHERIT bit (2) in this BOOLEAN, Windows 1 */
-    ok_int(Flags.Inherit != 0, Inherit);
+    ok_int(Flags.Inherit, Inherit);
     ok_int(Flags.ProtectFromClose, 0);
 }
 

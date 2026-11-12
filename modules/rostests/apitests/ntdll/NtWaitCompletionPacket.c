@@ -167,7 +167,7 @@ static void TestCreate(void)
 
         Status = NtQueryObject(Handle, ObjectHandleFlagInformation, &Flags, sizeof(Flags), &Length);
         ok_hex(Status, STATUS_SUCCESS);
-        ok(Flags.Inherit != 0, "OBJ_INHERIT not applied\n");
+        ok_int(Flags.Inherit, 1);
         NtClose(Handle);
     }
 

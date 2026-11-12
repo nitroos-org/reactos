@@ -121,6 +121,8 @@ extern void func_NtQueryWnfStateData(void);
 extern void func_NtAlertThreadByThreadId(void);
 extern void func_NtAllocateReserveObject(void);
 extern void func_NtWaitCompletionPacket(void);
+extern void func_NtSetIoCompletionEx(void);
+extern void func_NtQueryObjectHandleFlags(void);
 extern void func_NtOpenKeyTransacted(void);
 extern void func_NtQuerySecurityObject(void);
 extern void func_NtQuerySection(void);
@@ -386,6 +388,8 @@ const struct test winetest_testlist[] =
     { "NtAlertThreadByThreadId",       func_NtAlertThreadByThreadId },
     { "NtAllocateReserveObject",       func_NtAllocateReserveObject },
     { "NtWaitCompletionPacket",         func_NtWaitCompletionPacket },
+    { "NtSetIoCompletionEx",            func_NtSetIoCompletionEx },
+    { "NtQueryObjectHandleFlags",       func_NtQueryObjectHandleFlags },
     { "NtOpenKeyTransacted",           func_NtOpenKeyTransacted },
     { "NtQuerySecurityObject", func_NtQuerySecurityObject },
     { "NtQuerySection",                 func_NtQuerySection },
