@@ -910,6 +910,8 @@ CreateProcessAsUserCommon(
         if (!CreateDefaultProcessSecurityCommon(hToken, &DefaultSd))
         {
             ERR("Failed to create common security descriptor for the token for new process\n");
+            SecurityError = GetLastError();
+            Status = STATUS_UNSUCCESSFUL;
             Success = FALSE;
             goto Quit;
         }
@@ -1108,22 +1110,23 @@ Quit:
         NtClose(OriginalImpersonationToken);
     }
 
-    /* Terminate the process and set the last error status */
-    if (!NT_SUCCESS(Status))
+    /*
+     * On any failure the process goes: it is terminated, and its handles are closed rather than left to a
+     * caller that is told the call failed (and may be in another session, NitroSessions). Then the last
+     * error is set, after the closes, which could change it.
+     */
+    if (!Success)
     {
+        if (NT_SUCCESS(Status)) Status = STATUS_UNSUCCESSFUL;
         TerminateProcess(lpProcessInformation->hProcess, Status);
-        if (SecurityError != ERROR_SUCCESS)
-        {
-            CloseHandle(lpProcessInformation->hThread);
-            CloseHandle(lpProcessInformation->hProcess);
-            ZeroMemory(lpProcessInformation, sizeof(*lpProcessInformation));
-        }
+        CloseHandle(lpProcessInformation->hThread);
+        CloseHandle(lpProcessInformation->hProcess);
+        ZeroMemory(lpProcessInformation, sizeof(*lpProcessInformation));
         SetLastError(SecurityError ? SecurityError : RtlNtStatusToDosError(Status));
     }
-
-    /* Resume the main thread only after completing its security. */
-    if (NT_SUCCESS(Status) && !(dwCreationFlags & CREATE_SUSPENDED))
+    else if (!(dwCreationFlags & CREATE_SUSPENDED))
     {
+        /* Resume the main thread only after completing its security. */
         ResumeThread(lpProcessInformation->hThread);
     }
 

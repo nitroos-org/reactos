@@ -2615,7 +2615,7 @@ MiReleaseProcessReferenceToSessionDataPage(
     IN PMM_SESSION_SPACE SessionGlobal
 );
 
-VOID
+BOOLEAN
 NTAPI
 MiSessionAddProcess(
     IN PEPROCESS NewProcess
