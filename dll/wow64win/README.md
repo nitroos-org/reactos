@@ -51,7 +51,7 @@ COMPOSITIONFONT, COMPOSITIONWINDOW: flat records) travel like the owner-draw mes
 pointer; WM_IME_REQUEST, which is not in win32k's pointer table, is also allowed for SendNotifyMessage and callback sends
 inside the process, as on i386. The scalar IME commands, WM_IME_NOTIFY and WM_IME_SYSTEM carry no pointer. WM_COPYGLOBALDATA
 is a flat block of wParam bytes at the guest pointer: win32k copies it, the receiving user32 makes the new global block.
-Still unsupported with a non-NULL lParam: WM_DDE_ADVISE/ACK/DATA/POKE/EXECUTE (and the DDEPOST / DDEGET callbacks).
+WM_DDE_ACK, ADVISE, DATA, POKE and EXECUTE carry a packed pair or a global handle of the sender (no layout), and the DDEPOST / DDEGET callbacks of win32k's DDE hooks widen the message header and return the sender's block pointer and the packed lParam (raw DDE and DDEML between 32-bit processes). Not covered: the CF_BITMAP / CF_DIB / CF_PALETTE formats, where win32k reads an 8-byte HGDIOBJ from the block.
 
 Current limits include hooks on threads of other processes, journal hooks,
 DDE conversation callbacks, IME callbacks,

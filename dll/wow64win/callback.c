@@ -596,6 +596,18 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
             if (Payload == -2) { ReportMessage(Native->Msg, Native->lParamBufferSize); break; }
             GuestLength = sizeof(WINDOWPROC32) + max(Payload,0); Status = STATUS_SUCCESS; break;
         }
+        case USER32_CALLBACK_DDEPOST:
+            /* the sender's user32 packs the message into a block of its own: the pointer and size come back */
+            if (Length == sizeof(DDEPOSTGET_CALLBACK_ARGUMENTS)) { GuestLength = sizeof(DDEPOSTGET32); Status = STATUS_SUCCESS; }
+            break;
+        case USER32_CALLBACK_DDEGET:
+        {
+            /* the packed block follows the header; the receiver's user32 makes its own global block of it */
+            DDEPOSTGET_CALLBACK_ARGUMENTS *Native = Buffer;
+            if (Length >= sizeof(*Native) && Native->size >= 0 && Length == sizeof(*Native) + Native->size)
+            { GuestLength = sizeof(DDEPOSTGET32) + Native->size; Status = STATUS_SUCCESS; }
+            break;
+        }
         case USER32_CALLBACK_SENDASYNCPROC:
             if (Length == sizeof(SENDASYNCPROC_CALLBACK_ARGUMENTS)) { GuestLength = 20; Status = STATUS_SUCCESS; } break;
         case USER32_CALLBACK_CLIENTTHREADSTARTUP: case USER32_CALLBACK_LOADSYSMENUTEMPLATE:
@@ -657,6 +669,18 @@ static NTSTATUS Callback(ULONG Id, PVOID Buffer, ULONG Length)
                 Target->wParam = Native->wParam; Target->lParam = Native->lParam;
                 Target->lParamBufferSize = Payload; Target->Result = 0;
                 if (Payload >= 0) PackPayload(Target+1,Native+1,Native->Msg,Native->wParam,Native->lParamBufferSize);
+                break;
+            }
+            case USER32_CALLBACK_DDEPOST: case USER32_CALLBACK_DDEGET:
+            {
+                DDEPOSTGET_CALLBACK_ARGUMENTS *Native = Buffer; DDEPOSTGET32 *Target = Guest;
+                Target->Type = Native->Type;
+                Target->Msg.hwnd = HandleToUlong(Native->hwnd); Target->Msg.message = Native->message;
+                Target->Msg.wParam = (ULONG)Native->wParam; Target->Msg.lParam = (ULONG)Native->lParam;
+                Target->Msg.time = Native->time; Target->Msg.pt = Native->pt;
+                Target->size = Native->size; Target->pvData = (ULONG)(ULONG_PTR)Native->pvData;
+                if (Id == USER32_CALLBACK_DDEGET && Native->size)
+                    RtlCopyMemory(Target->buffer, Native->buffer, Native->size);
                 break;
             }
             case USER32_CALLBACK_SENDASYNCPROC:
@@ -804,6 +828,20 @@ NTSTATUS NTAPI Wow64WinCallbackReturn(PVOID Buffer, ULONG Length, NTSTATUS Statu
             Native->Result = Guest->Result;
             if (Native->lParamBufferSize >= 0)
                 UnpackPayload(Native+1,Guest+1,Native->Msg,Native->wParam,Native->lParamBufferSize);
+            Output = Native; OutputLength = Frame->NativeLength; break;
+        }
+        case USER32_CALLBACK_DDEPOST: case USER32_CALLBACK_DDEGET:
+        {
+            DDEPOSTGET_CALLBACK_ARGUMENTS *Native = Frame->Native;
+            const DDEPOSTGET32 *Guest = Buffer;
+            if (!Buffer || Length != Frame->GuestLength) { Status = STATUS_INFO_LENGTH_MISMATCH; break; }
+            /* the packed lParam (a pair of words or a global handle) is a guest value, never a pointer to widen;
+             * pvData is the guest address of the block the kernel copies size bytes from */
+            Native->lParam = (LONG)Guest->Msg.lParam;
+            if (Frame->Id == USER32_CALLBACK_DDEPOST)
+            {
+                Native->size = Guest->size; Native->pvData = (PVOID)(ULONG_PTR)Guest->pvData;
+            }
             Output = Native; OutputLength = Frame->NativeLength; break;
         }
         case USER32_CALLBACK_CLIENTLOADLIBRARY:
