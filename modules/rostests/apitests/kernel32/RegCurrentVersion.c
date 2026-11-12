@@ -93,7 +93,7 @@ static void CompareViews(void)
     {
         L"CurrentVersion", L"CurrentMajorVersionNumber", L"CurrentMinorVersionNumber", L"CurrentBuild",
         L"CurrentBuildNumber", L"ProductName", L"EditionID", L"DisplayVersion", L"UBR", L"BuildLab", L"BuildLabEx",
-        L"CurrentType", L"SystemRoot"
+        L"CurrentType", L"SystemRoot", L"CompositionEditionID", L"InstallationType"
     };
     HKEY Key64, Key32;
     ULONG i;

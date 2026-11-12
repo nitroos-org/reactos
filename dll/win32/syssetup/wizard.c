@@ -714,6 +714,17 @@ DoWriteInstallationType(INSTALLATION_TYPE nOption)
         goto Error;
     }
 
+    /* Windows keeps InstallationType in both registry views; the 32-bit view is Wow6432Node
+       on a WoW64 system and the same key elsewhere (not fatal: only 32-bit installers read it) */
+    RegCloseKey(hKey);
+    hKey = NULL;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, s_szCurrentVersion, 0, KEY_WRITE | KEY_WOW64_32KEY, &hKey) == ERROR_SUCCESS)
+    {
+        RegSetValueExW(hKey, L"InstallationType", 0, REG_SZ, (const BYTE *)InstallationTypes[nOption], cbData);
+        RegCloseKey(hKey);
+        hKey = NULL;
+    }
+
 Error:
     if (hKey)
         RegCloseKey(hKey);
