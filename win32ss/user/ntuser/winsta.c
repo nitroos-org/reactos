@@ -132,11 +132,16 @@ IntWinStaObjectDelete(
             ObDereferenceObject(gpDesktopSwitchEvent);
             gpDesktopSwitchEvent = NULL;
 
-            /* Close the handle in the CSRSS process */
+            /* Close the handle in the CSRSS process. Once CSRSS exits (the CSRSS of a
+               session other than 0 does when the session ends) its handle table closes
+               the handle, or already did and is gone */
             ASSERT(gpepCSRSS);
-            KeStackAttachProcess(&gpepCSRSS->Pcb, &ApcState);
-            ObCloseHandle(ghDesktopSwitchEvent, UserMode);
-            KeUnstackDetachProcess(&ApcState);
+            if (!PsGetProcessExitProcessCalled(gpepCSRSS))
+            {
+                KeStackAttachProcess(&gpepCSRSS->Pcb, &ApcState);
+                ObCloseHandle(ghDesktopSwitchEvent, UserMode);
+                KeUnstackDetachProcess(&ApcState);
+            }
             ghDesktopSwitchEvent = NULL;
         }
     }

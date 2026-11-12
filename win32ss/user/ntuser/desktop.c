@@ -265,6 +265,138 @@ IntFreeDesktopWindow(IN PWND pwnd)
     return TRUE;
 }
 
+/* CSRSS exited while desktop windows of its desktop thread still had child windows */
+static BOOLEAN gbDesktopWindowsLeft = FALSE;
+
+/*
+ * The desktop window and the message window of a desktop are owned by the desktop
+ * thread but live as long as their desktop: IntDesktopObjectDelete frees them. The
+ * desktop thread runs in CSRSS, and the CSRSS of a session other than 0 exits when
+ * the session ends (session 0's is a critical process). Its threads end in any
+ * order, so the desktop thread must not destroy these windows at its exit: the
+ * top-level windows of the other threads, CSRSS's console windows among them, are
+ * their children and still unlink from them.
+ */
+BOOLEAN
+IntIsDesktopOwnedWindow(_In_ PWND pwnd)
+{
+    PDESKTOP pdesk = pwnd->head.rpdesk;
+
+    if (!pdesk)
+        return FALSE;
+
+    return (pdesk->pDeskInfo && pdesk->pDeskInfo->spwnd == pwnd) ||
+           (pdesk->spwndMessage == pwnd);
+}
+
+/*
+ * The last Win32 thread of the desktop thread's process (CSRSS) is exiting. Free the
+ * desktop and message windows the desktop thread left (IntIsDesktopOwnedWindow) now,
+ * while CSRSS still has its Win32 process and the system classes these windows use
+ * (DestroyProcessClasses frees them next), then drop the reference DesktopThreadMain
+ * took. A window that still has a child stays: a process of the session still has a
+ * top-level window, CSRSS was terminated before it. Then the desktop thread's
+ * THREADINFO and CSRSS's classes stay until the desktop frees the window
+ * (IntReleaseDesktopThread); a desktop deleted with no Win32 process left to free
+ * its window in leaves its heap and keeps them (IntFreeDesktopWindow).
+ * Called with the USER lock, from the thread callout.
+ */
+VOID
+IntDesktopThreadProcessExit(_In_ PPROCESSINFO ppi)
+{
+    PTHREADINFO ptiDesktop = gptiDesktopThread;
+    ULONG i, Freed = 0, Left = 0;
+
+    ASSERT(UserIsEnteredExclusive());
+
+    if (!ptiDesktop || ptiDesktop->ppi != ppi)
+        return;
+
+    for (i = 0; i < gHandleTable->allocated_handles; i++)
+    {
+        PUSER_HANDLE_ENTRY Entry = &gHandleTable->handles[i];
+        PWND pwnd;
+        PDESKTOP pdesk;
+
+        if (Entry->type != TYPE_WINDOW || Entry->pi != ptiDesktop ||
+            (Entry->flags & HANDLEENTRY_INDESTROY))
+        {
+            continue;
+        }
+
+        pwnd = Entry->ptr;
+        if (!IntIsDesktopOwnedWindow(pwnd))
+            continue;
+
+        if (pwnd->spwndChild)
+        {
+            Left++;
+            continue;
+        }
+
+        pdesk = pwnd->head.rpdesk;
+        if (!IntFreeDesktopWindow(pwnd))
+        {
+            Left++;
+            continue;
+        }
+
+        Freed++;
+        if (pdesk->pDeskInfo && pdesk->pDeskInfo->spwnd == pwnd)
+            pdesk->pDeskInfo->spwnd = NULL;
+        if (pdesk->spwndMessage == pwnd)
+            pdesk->spwndMessage = NULL;
+    }
+
+    if (Left)
+    {
+        ERR("CSRSS exits while %lu desktop windows still have child windows: they stay, "
+            "with the desktop thread's THREADINFO and the classes of CSRSS\n", Left);
+        ppi->W32PF_flags &= ~W32PF_CLASSESREGISTERED;
+        gbDesktopWindowsLeft = TRUE;
+        return;
+    }
+
+    TRACE("CSRSS exits: freed %lu windows of the desktop thread\n", Freed);
+    gptiDesktopThread = NULL;
+    IntDereferenceThreadInfo(ptiDesktop);
+}
+
+/*
+ * A desktop freed the last of the windows IntDesktopThreadProcessExit had to leave:
+ * free CSRSS's classes they used and drop the desktop thread's THREADINFO. Called
+ * with the USER lock.
+ */
+static VOID
+IntReleaseDesktopThread(VOID)
+{
+    PTHREADINFO ptiDesktop = gptiDesktopThread;
+    ULONG i;
+
+    ASSERT(UserIsEnteredExclusive());
+
+    if (!gbDesktopWindowsLeft || !ptiDesktop)
+        return;
+
+    for (i = 0; i < gHandleTable->allocated_handles; i++)
+    {
+        PUSER_HANDLE_ENTRY Entry = &gHandleTable->handles[i];
+
+        if (Entry->type == TYPE_WINDOW && Entry->pi == ptiDesktop &&
+            !(Entry->flags & HANDLEENTRY_INDESTROY) &&
+            IntIsDesktopOwnedWindow(Entry->ptr))
+        {
+            return;
+        }
+    }
+
+    ERR("The windows CSRSS left are gone, releasing the desktop thread\n");
+    gbDesktopWindowsLeft = FALSE;
+    DestroyProcessClasses(ptiDesktop->ppi);
+    gptiDesktopThread = NULL;
+    IntDereferenceThreadInfo(ptiDesktop);
+}
+
 /*
  * A desktop that is deleted cannot stay the input desktop: nothing references it
  * for that (a thread on a desktop references it, so no thread is on it any more).
@@ -389,6 +521,11 @@ IntDesktopObjectDelete(
 
     /* Remove the desktop from the window station's list of associated desktops */
     RemoveEntryList(&pdesk->ListEntry);
+
+    /* CSRSS has exited: the desktop thread may have no window left now */
+    if (!bLeakHeap)
+        IntReleaseDesktopThread();
+
     UserLeave();
 
     /* Free the heap, unless a window still lives in it (see IntFreeDesktopWindow) */
@@ -1887,6 +2024,10 @@ VOID NTAPI DesktopThreadMain(VOID)
 
     gptiDesktopThread = PsGetCurrentThreadWin32Thread();
 
+    /* The desktop and message windows of the desktops are this thread's and may
+       outlive it (see IntIsDesktopOwnedWindow): they keep its THREADINFO */
+    IntReferenceThreadInfo(gptiDesktopThread);
+
     UserEnterExclusive();
 
     /* Register system classes. This thread does not belong to any desktop so the
@@ -2876,7 +3017,13 @@ IntCreateDesktop(
 
     ptiCurrent = PsGetCurrentThreadWin32Thread();
     ASSERT(ptiCurrent);
-    ASSERT(gptiDesktopThread);
+
+    /* The desktop thread owns the windows of a desktop: none once CSRSS has exited */
+    if (!gptiDesktopThread || (gptiDesktopThread->TIF_flags & TIF_INCLEANUP))
+    {
+        ERR("No desktop thread (CSRSS has exited), cannot create a desktop\n");
+        return STATUS_UNSUCCESSFUL;
+    }
 
     /* Turn off hooks when calling any CreateWindowEx from inside win32k */
     NoHooks = (ptiCurrent->TIF_flags & TIF_DISABLEHOOKS);
