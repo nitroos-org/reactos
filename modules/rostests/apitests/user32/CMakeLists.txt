@@ -66,6 +66,8 @@ list(APPEND SOURCE
     SetParentKillOrder.c
     WmCancelModeLastError.c
     WmGetDlgCode.c
+    WmDdeml.c
+    WmDde.c
     WmMenuDragIme.c
     WmPointerMessages.c
     InitializeLpkHooks.c
