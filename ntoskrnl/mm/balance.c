@@ -40,6 +40,12 @@ static CLIENT_ID MiBalancerThreadId;
 static HANDLE MiBalancerThreadHandle = NULL;
 static KEVENT MiBalancerEvent;
 static KEVENT MiBalancerDoneEvent;
+/*
+ * Passes of the balancer that ended. A waiter (MmRebalanceMemoryConsumersAndWait) snapshots it before it
+ * asks for a pass and waits until it has moved: no thread resets the done event, so one waiter cannot
+ * erase the end of a pass another has not yet seen (the balancer itself resets it when a pass starts).
+ */
+static volatile LONG MiBalancerPassSeq;
 static KTIMER MiBalancerTimer;
 
 static LONG PageOutThreadActive;
@@ -336,6 +342,8 @@ BOOLEAN
 NTAPI
 MmRebalanceMemoryConsumersAndWait(VOID)
 {
+    LONG Seen;
+
     ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);
 
     /*
@@ -361,9 +369,23 @@ MmRebalanceMemoryConsumersAndWait(VOID)
         return FALSE;
     }
 
-    KeResetEvent(&MiBalancerDoneEvent);
+    Seen = MiBalancerPassSeq;
     MmRebalanceMemoryConsumers();
-    KeWaitForSingleObject(&MiBalancerDoneEvent, Executive, KernelMode, FALSE, NULL);
+    while (MiBalancerPassSeq == Seen)
+    {
+        KeWaitForSingleObject(&MiBalancerDoneEvent, Executive, KernelMode, FALSE, NULL);
+        if (MiBalancerPassSeq == Seen)
+        {
+            /*
+             * The event still shows the end of an earlier pass: the balancer has not woken up
+             * to reset it yet. Give it the processor instead of spinning on a signalled event.
+             */
+            LARGE_INTEGER Delay;
+
+            Delay.QuadPart = -10 * 1000; /* 1 ms */
+            KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        }
+    }
 
     /* A real balancer pass ran: progress is possible, the caller may retry. */
     return TRUE;
@@ -478,6 +500,8 @@ MiBalancerThread(PVOID Unused)
 
     while (TRUE)
     {
+        /* The pass that ended (or boot): count it, then release every waiter that saw the old count */
+        InterlockedIncrement(&MiBalancerPassSeq);
         KeSetEvent(&MiBalancerDoneEvent, IO_NO_INCREMENT, FALSE);
         Status = KeWaitForMultipleObjects(_countof(WaitObjects),
                                           WaitObjects,
@@ -492,6 +516,9 @@ MiBalancerThread(PVOID Unused)
         {
             ULONG InitialTarget = 0;
             ULONG Target;
+
+            /* A new pass: what a waiter sees from now on is not the end of an earlier one */
+            KeResetEvent(&MiBalancerDoneEvent);
             ULONG NrFreedPages;
             /* NitroPager: what this pass freed (cache + pager) and the usable pages before it */
             ULONG PagerPassFreed = 0;
@@ -578,8 +605,10 @@ MiInitBalancerThread(VOID)
      * (MmRebalanceMemoryConsumersAndWait). As a synchronization event it released one of
      * them, and the others waited for a later pass, which nobody asked for once the request
      * flag was cleared: up to the 2 s timer (pager2, 2026-11-12: single waits of 0.3 to
-     * 1.5 s while a process filled RAM with dirty pages). Each waiter resets it before it
-     * asks for a pass, so it never returns on the end of a pass that ended before its request.
+     * 1.5 s while a process filled RAM with dirty pages). The balancer resets it when a pass
+     * starts and sets it when the pass ends, after it counted the pass in MiBalancerPassSeq;
+     * a waiter waits for that count to move, so it never returns on a pass that ended before
+     * its request, and no waiter can erase the end of a pass for another (rvpager2 finding 1).
      */
     KeInitializeEvent(&MiBalancerDoneEvent, NotificationEvent, FALSE);
     KeInitializeTimerEx(&MiBalancerTimer, SynchronizationTimer);
