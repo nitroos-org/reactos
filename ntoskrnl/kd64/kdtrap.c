@@ -47,17 +47,16 @@
 
 /* FUNCTIONS *****************************************************************/
 
+/*
+ * Whether KdpReport passes the exception to the debugger. Also the question of
+ * the exception dispatcher whether the debugger is going to look at the
+ * exception (and the memory of its process) at all.
+ */
 BOOLEAN
 NTAPI
-KdpReport(IN PKTRAP_FRAME TrapFrame,
-          IN PKEXCEPTION_FRAME ExceptionFrame,
-          IN PEXCEPTION_RECORD ExceptionRecord,
-          IN PCONTEXT ContextRecord,
-          IN KPROCESSOR_MODE PreviousMode,
-          IN BOOLEAN SecondChanceException)
+KdpIsExceptionReported(IN PEXCEPTION_RECORD ExceptionRecord,
+                       IN BOOLEAN SecondChanceException)
 {
-    BOOLEAN Enable, Handled;
-    PKPRCB Prcb;
     NTSTATUS ExceptionCode;
 
     /*
@@ -71,6 +70,7 @@ KdpReport(IN PKTRAP_FRAME TrapFrame,
         (ExceptionCode == STATUS_ASSERTION_FAILURE))
     {
         /* This is a debug exception; we always pass them to the debugger */
+        return TRUE;
     }
     else if (NtGlobalFlag & FLG_STOP_ON_EXCEPTION)
     {
@@ -89,15 +89,31 @@ KdpReport(IN PKTRAP_FRAME TrapFrame,
             /* Let the exception handler, if any, try to handle it */
             return FALSE;
         }
+        return TRUE;
     }
-    else if (SecondChanceException == FALSE)
-    {
-        /*
-         * This isn't a debug exception and the stop-on-exception flag isn't set,
-         * so don't bother handling it
-         */
+
+    /*
+     * This isn't a debug exception and the stop-on-exception flag isn't set:
+     * only a second chance exception is passed on
+     */
+    return (SecondChanceException != FALSE);
+}
+
+BOOLEAN
+NTAPI
+KdpReport(IN PKTRAP_FRAME TrapFrame,
+          IN PKEXCEPTION_FRAME ExceptionFrame,
+          IN PEXCEPTION_RECORD ExceptionRecord,
+          IN PCONTEXT ContextRecord,
+          IN KPROCESSOR_MODE PreviousMode,
+          IN BOOLEAN SecondChanceException)
+{
+    BOOLEAN Enable, Handled;
+    PKPRCB Prcb;
+
+    /* Determine whether to pass the exception to the debugger */
+    if (!KdpIsExceptionReported(ExceptionRecord, SecondChanceException))
         return FALSE;
-    }
 
     /* Enter the debugger */
     Enable = KdEnterDebugger(TrapFrame, ExceptionFrame);

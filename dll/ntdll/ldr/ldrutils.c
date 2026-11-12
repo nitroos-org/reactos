@@ -1787,7 +1787,8 @@ LdrpAllocateDataTableEntry(IN PVOID BaseAddress)
  * entry, also for code that is in no module at all (JIT code), so threads that take exceptions waited for each other
  * and for any thread loading a module. This copy is searched without a lock: a reader retries when the sequence
  * changed under it. The loader changes it together with the lists. A module that does not fit (more than
- * LDRP_IMAGE_RANGE_MAX at once) sets Overflow, and from then on a miss is looked up on the list.
+ * LDRP_IMAGE_RANGE_MAX at once) is counted in Dropped, and as long as there is one a miss is looked up on the list;
+ * unloading the dropped modules brings the table back to the whole list.
  */
 #define LDRP_IMAGE_RANGE_MAX 512
 
@@ -1801,7 +1802,7 @@ static struct
 {
     volatile LONG Sequence; /* Odd while the table changes */
     ULONG Count;
-    BOOLEAN Overflow;
+    ULONG Dropped;          /* Modules on the list that have no entry in Ranges */
     LDRP_IMAGE_RANGE Ranges[LDRP_IMAGE_RANGE_MAX];
 } LdrpImageRanges;
 
@@ -1829,7 +1830,7 @@ LdrpInsertImageRange(
     }
     else
     {
-        LdrpImageRanges.Overflow = TRUE;
+        LdrpImageRanges.Dropped++;
     }
 
     InterlockedIncrement(&LdrpImageRanges.Sequence);
@@ -1845,6 +1846,7 @@ LdrpRemoveImageRange(
     _In_ PLDR_DATA_TABLE_ENTRY LdrEntry)
 {
     ULONG_PTR Base = (ULONG_PTR)LdrEntry->DllBase;
+    BOOLEAN Found = FALSE;
     ULONG i;
 
     RtlAcquireSRWLockExclusive(&LdrpImageRangesLock);
@@ -1855,12 +1857,17 @@ LdrpRemoveImageRange(
         if ((LdrpImageRanges.Ranges[i].Base == Base) &&
             (LdrpImageRanges.Ranges[i].End == Base + LdrEntry->SizeOfImage))
         {
+            Found = TRUE;
             LdrpImageRanges.Count--;
             for (; i < LdrpImageRanges.Count; i++)
                 LdrpImageRanges.Ranges[i] = LdrpImageRanges.Ranges[i + 1];
             break;
         }
     }
+
+    /* A module that is on the list and has no range is one that was dropped */
+    if (!Found && (LdrpImageRanges.Dropped > 0))
+        LdrpImageRanges.Dropped--;
 
     InterlockedIncrement(&LdrpImageRanges.Sequence);
     RtlReleaseSRWLockExclusive(&LdrpImageRangesLock);
@@ -1880,7 +1887,7 @@ LdrpLookupImageRange(
 {
     ULONG_PTR Pc = (ULONG_PTR)Address, Found;
     ULONG Low, High, Middle, Spins = 0;
-    BOOLEAN Overflow;
+    BOOLEAN Incomplete;
     LONG Sequence;
 
     for (;;)
@@ -1916,14 +1923,14 @@ LdrpLookupImageRange(
                 break;
             }
         }
-        Overflow = LdrpImageRanges.Overflow;
+        Incomplete = (LdrpImageRanges.Dropped != 0);
 
         MemoryBarrier();
         if (LdrpImageRanges.Sequence == Sequence)
             break;
     }
 
-    if (!Found && Overflow)
+    if (!Found && Incomplete)
         return FALSE;
 
     *ImageBase = (PVOID)Found;

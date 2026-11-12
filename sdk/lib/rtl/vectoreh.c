@@ -23,6 +23,7 @@ typedef struct _RTL_VECTORED_HANDLER_ENTRY
     LIST_ENTRY ListEntry;
     PVECTORED_EXCEPTION_HANDLER VectoredHandler;
     LONG Refs;      /* The registration plus the walks that call it; the one that drops the last unlinks it */
+    BOOLEAN Removed;/* Set under the exclusive lock by the one remove that counts; a removed entry is not called */
 } RTL_VECTORED_HANDLER_ENTRY, *PRTL_VECTORED_HANDLER_ENTRY;
 
 /* FUNCTIONS ***************************************************************/
@@ -37,24 +38,21 @@ RtlpInitializeVectoredExceptionHandling(VOID)
     InitializeListHead(&RtlpVectoredContinueList);
 }
 
-/* Takes a reference on an entry that is still registered. An entry whose last reference is gone stays on the list
-   until the thread that dropped it gets the lock exclusively, it must not be called any more. */
+/* Takes a reference on an entry that is still registered. Call it with the lock held (shared or exclusive): Removed
+   only changes under the exclusive lock, so an entry that was removed before the walk took the lock is never called,
+   not even while a walk that started earlier is still inside its handler (then the entry only waits for that walk to
+   drop the last reference and unlink it). */
 static
 BOOLEAN
 RtlpReferenceVectoredHandler(
     _Inout_ PRTL_VECTORED_HANDLER_ENTRY Entry)
 {
-    LONG Refs = Entry->Refs, Old;
+    if (Entry->Removed)
+        return FALSE;
 
-    while (Refs > 0)
-    {
-        Old = InterlockedCompareExchange(&Entry->Refs, Refs + 1, Refs);
-        if (Old == Refs)
-            return TRUE;
-        Refs = Old;
-    }
-
-    return FALSE;
+    /* The registration reference is still there, so the count cannot reach 0 under us */
+    InterlockedIncrement(&Entry->Refs);
+    return TRUE;
 }
 
 static
@@ -123,7 +121,8 @@ RtlpCallVectoredHandlers(IN PEXCEPTION_RECORD ExceptionRecord,
                                                      ListEntry);
 
         /* Reference it so it doesn't go away while we are using it. One that
-           was removed and is about to be unlinked is not called. */
+           was removed is not called, also when it is still on the list
+           because another walk is inside it. */
         if (!RtlpReferenceVectoredHandler(VectoredExceptionHandler))
         {
             CurrentEntry = CurrentEntry->Flink;
@@ -210,6 +209,7 @@ RtlpAddVectoredHandler(IN ULONG FirstHandler,
     /* Set it up, encoding the pointer for security */
     VectoredHandlerEntry->VectoredHandler = RtlEncodePointer(VectoredHandler);
     VectoredHandlerEntry->Refs = 1;
+    VectoredHandlerEntry->Removed = FALSE;
 
     /* Lock the list before modifying it */
     RtlAcquireSRWLockExclusive(&RtlpVectoredHandlerLock);
@@ -272,11 +272,16 @@ RtlpRemoveVectoredHandler(IN PVOID VectoredHandlerHandle,
              * If we can't remove it now then it will be done
              * right after it is not in use anymore.
              *
-             * Caller is supposed to keep track of if it has deleted the
-             * entry and should not call us twice for the same entry.
-             * We could maybe throw in some kind of ASSERT to detect this
-             * if this was to become a problem.
+             * An entry that was removed already but is still on the list
+             * (a walk is inside its handler) is not found: the registration
+             * is gone, and the reference of that walk is not ours to drop.
              */
+            if (VectoredExceptionHandler->Removed)
+                break;
+
+            /* From now on no walk starts the handler: the lock is exclusive */
+            VectoredExceptionHandler->Removed = TRUE;
+
             if (InterlockedDecrement(&VectoredExceptionHandler->Refs) == 0)
             {
                 /* Not in use, ok to remove and free */
