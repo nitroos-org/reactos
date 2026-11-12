@@ -33,6 +33,7 @@ list(APPEND SOURCE
     sendcancel.c
     sendwhole.c
     routinectx.c
+    notconn.c
     tcpnodelay.c
     inheritedsocket.c
     helpers.c
