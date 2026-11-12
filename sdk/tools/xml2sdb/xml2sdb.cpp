@@ -33,6 +33,8 @@ C_ASSERT(sizeof(TAG) == 2);
 C_ASSERT(sizeof(TAGID) == 4);
 
 
+extern time_t g_BuildTime;
+
 extern "C"
 VOID NTAPI RtlSecondsSince1970ToTime(IN ULONG SecondsSince1970,
                           OUT PLARGE_INTEGER Time);
@@ -884,7 +886,7 @@ bool Database::toSdb(LPCWSTR path)
     pdb = SdbCreateDatabase(path, DOS_PATH);
     TAGID tidDatabase = BeginWriteListTag(TAG_DATABASE);
     LARGE_INTEGER li = { 0 };
-    RtlSecondsSince1970ToTime(time(0), &li);
+    RtlSecondsSince1970ToTime(g_BuildTime ? g_BuildTime : time(0), &li);
     WriteQWord(TAG_TIME, li.QuadPart);
     WriteString(TAG_COMPILER_VERSION, szCompilerVersion);
     WriteDWord(TAG_OS_PLATFORM, platform);
