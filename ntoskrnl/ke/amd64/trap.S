@@ -1073,6 +1073,15 @@ GLOBAL_LABEL KiSystemCall64Again
 
 GLOBAL_LABEL KiSystemServiceExit
 
+#ifdef NITRO_THREAD_LOCK_TRACE
+    /* Diagnostic: a service returns at PASSIVE_LEVEL with no thread lock held */
+    sub rsp, 48
+    mov [rsp + 40], rax
+    call KiSystemServiceExitCheck
+    mov rax, [rsp + 40]
+    add rsp, 48
+#endif
+
     ASSERT_TRAP_FRAME_INTS_ENABLED rsp + MAX_SYSCALL_PARAM_SIZE
 
     /* Check for pending user APCs */

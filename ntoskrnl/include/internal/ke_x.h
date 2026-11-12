@@ -130,6 +130,48 @@ KeGetPreviousMode(VOID)
     KeLeaveCriticalRegionThread(_Thread);                                   \
 }
 
+/*
+ * Thread lock trace (diagnostic, lane thrlock 2026-11-12): the lock word holds
+ * the owner (low 32 bits of the KTHREAD, bit 0 set) and the low 32 bits of the
+ * acquiring instruction; a per-processor count of held thread locks must be 0
+ * wherever a thread can switch or IRQL drops below DISPATCH_LEVEL.
+ * Faults bugcheck 0xDEADDEAD (kind, thread, lock word, site).
+ */
+#if defined(NITRO_THREAD_LOCK_TRACE) && defined(_M_AMD64) && defined(__GNUC__)
+#define KI_THREAD_LOCK_TRACE
+#define KI_TL_TIMEOUT (1ULL << 35)
+#define KI_TL_SITE() ({ ULONG_PTR _s; __asm__ __volatile__("lea 0(%%rip), %0" : "=r"(_s)); _s; })
+#define KI_TL_WORD(Site) ((LONG64)(((ULONG64)(ULONG)(Site) << 32) | \
+                          ((ULONG)(ULONG_PTR)KeGetCurrentThread() | 1)))
+extern volatile LONG KiThreadLockDepth[MAXIMUM_PROCESSORS];
+DECLSPEC_NORETURN VOID NTAPI KiThreadLockFault(ULONG Kind, PVOID Thread, LONG64 Word, ULONG_PTR Site);
+FORCEINLINE
+BOOLEAN
+KiTlTryAcquire(PKTHREAD Thread, LONG64 Word)
+{
+    if (*(volatile LONG64 *)&Thread->ThreadLock) return FALSE;
+    if (InterlockedCompareExchange64((PLONG64)&Thread->ThreadLock, Word, 0)) return FALSE;
+    KiThreadLockDepth[KeGetCurrentProcessorNumber()]++;
+    return TRUE;
+}
+/* Below DISPATCH_LEVEL the thread can move to another processor between
+   reading its number and reading the count: read both with interrupts off */
+FORCEINLINE
+LONG
+KiThreadLockDepthHere(VOID)
+{
+    BOOLEAN Enabled = KeDisableInterrupts();
+    LONG Depth = KiThreadLockDepth[KeGetCurrentProcessorNumber()];
+    KeRestoreInterrupts(Enabled);
+    return Depth;
+}
+#define KiCheckThreadLockDepth(Kind) \
+    do { LONG _d = KiThreadLockDepthHere(); \
+         if (_d) KiThreadLockFault((Kind), KeGetCurrentThread(), _d, KI_TL_SITE()); } while (0)
+#else
+#define KiCheckThreadLockDepth(Kind) ((void)0)
+#endif
+
 #ifndef CONFIG_SMP
 
 //
@@ -528,6 +570,29 @@ KiReleasePrcbLock(IN PKPRCB Prcb)
 // Since this is a simple optimized spin-lock, it must be be only acquired
 // at dispatcher level or higher!
 //
+#ifdef KI_THREAD_LOCK_TRACE
+FORCEINLINE
+VOID
+KiAcquireThreadLock(IN PKTHREAD Thread)
+{
+    ULONG_PTR Site = KI_TL_SITE();
+    LONG64 Word = KI_TL_WORD(Site);
+    ULONG64 Start = 0;
+
+    for (;;)
+    {
+        if (!InterlockedCompareExchange64((PLONG64)&Thread->ThreadLock, Word, 0)) break;
+        if (!Start) Start = __rdtsc();
+        do
+        {
+            YieldProcessor();
+            if ((__rdtsc() - Start) > KI_TL_TIMEOUT)
+                KiThreadLockFault(1, Thread, *(volatile LONG64 *)&Thread->ThreadLock, Site);
+        } while (*(volatile LONG64 *)&Thread->ThreadLock);
+    }
+    KiThreadLockDepth[KeGetCurrentProcessorNumber()]++;
+}
+#else
 FORCEINLINE
 VOID
 KiAcquireThreadLock(IN PKTHREAD Thread)
@@ -549,6 +614,7 @@ KiAcquireThreadLock(IN PKTHREAD Thread)
         } while (Thread->ThreadLock);
     }
 }
+#endif
 
 //
 // This routine releases the thread lock so that other callers can touch
@@ -564,8 +630,18 @@ KiReleaseThreadLock(IN PKTHREAD Thread)
     /* Make sure we are still above dispatch */
     ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
 
+#ifdef KI_THREAD_LOCK_TRACE
+    {
+        LONG64 Old;
+        KiThreadLockDepth[KeGetCurrentProcessorNumber()]--;
+        Old = InterlockedExchange64((PLONG64)&Thread->ThreadLock, 0);
+        if ((ULONG)Old != ((ULONG)(ULONG_PTR)KeGetCurrentThread() | 1))
+            KiThreadLockFault(2, Thread, Old, KI_TL_SITE());
+    }
+#else
     /* Release it */
     InterlockedAnd((PLONG)&Thread->ThreadLock, 0);
+#endif
 }
 
 //
@@ -577,11 +653,15 @@ FORCEINLINE
 BOOLEAN
 KiTryThreadLock(IN PKTHREAD Thread)
 {
+#ifdef KI_THREAD_LOCK_TRACE
+    return !KiTlTryAcquire(Thread, KI_TL_WORD(KI_TL_SITE()));
+#else
     /* Skip the exchange when another processor visibly holds the lock */
     if (Thread->ThreadLock) return TRUE;
 
     /* Try to acquire it; it is ours if it was free */
     return (InterlockedExchange((PLONG)&Thread->ThreadLock, 1) != 0);
+#endif
 }
 
 FORCEINLINE

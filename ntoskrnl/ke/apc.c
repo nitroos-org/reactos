@@ -323,6 +323,8 @@ KiDeliverApc(IN KPROCESSOR_MODE DeliveryMode,
     PVOID SystemArgument2;
     ASSERT_IRQL_EQUAL(APC_LEVEL);
 
+    KiCheckThreadLockDepth(8);
+
     /* Save the old trap frame and set current one */
     OldTrapFrame = Thread->TrapFrame;
     Thread->TrapFrame = TrapFrame;
