@@ -880,7 +880,11 @@ interface pnp
     __stdcall
     PNP_RegisterNotification(
         [in] handle_t hBinding,
-        [in] DWORD_PTR hRecipient,
+        /* Fixed width on the wire: a WoW64 (32-bit) client calls the 64-bit umpnpmgr. As
+         * DWORD_PTR the 32-bit stub marshalled 4 bytes and the 64-bit stub read 8, so the
+         * rest of the request was misparsed (RPC_S_INVALID_BOUND) and
+         * RegisterDeviceNotification failed. */
+        [in] unsigned hyper hRecipient,
         [in, string, ref] LPWSTR pszName,
         [in, size_is(ulNotificationFilterSize)] BYTE *pNotificationFilter,
         [in] DWORD ulNotificationFilterSize,
