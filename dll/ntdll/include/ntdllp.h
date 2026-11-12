@@ -139,6 +139,12 @@ LdrpAllocateDataTableEntry(IN PVOID BaseAddress);
 VOID NTAPI
 LdrpInsertMemoryTableEntry(IN PLDR_DATA_TABLE_ENTRY LdrEntry);
 
+VOID NTAPI
+LdrpRemoveImageRange(_In_ PLDR_DATA_TABLE_ENTRY LdrEntry);
+
+BOOLEAN NTAPI
+LdrpLookupImageRange(_In_ PVOID Address, _Out_ PVOID *ImageBase);
+
 NTSTATUS NTAPI
 LdrpLoadDll(IN BOOLEAN Redirected,
             IN PWSTR DllPath OPTIONAL,

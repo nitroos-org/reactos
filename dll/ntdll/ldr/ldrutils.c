@@ -1470,6 +1470,7 @@ SkipCheck:
         {
             /* Remove the DLL from the lists */
             RemoveEntryList(&LdrEntry->InLoadOrderLinks);
+            LdrpRemoveImageRange(LdrEntry);
             RemoveEntryList(&LdrEntry->InMemoryOrderLinks);
             RemoveEntryList(&LdrEntry->HashLinks);
 
@@ -1681,6 +1682,7 @@ FailRelocate:
             {
                 /* Remove it from the lists */
                 RemoveEntryList(&LdrEntry->InLoadOrderLinks);
+                LdrpRemoveImageRange(LdrEntry);
                 RemoveEntryList(&LdrEntry->InMemoryOrderLinks);
                 RemoveEntryList(&LdrEntry->HashLinks);
 
@@ -1779,6 +1781,155 @@ LdrpAllocateDataTableEntry(IN PVOID BaseAddress)
     return LdrEntry;
 }
 
+/*
+ * The address range of every module on the loader lists, sorted by base, for RtlPcToFileHeader. The exception
+ * dispatcher looks up the module of every frame it walks; the loader list needs the loader lock and a walk of every
+ * entry, also for code that is in no module at all (JIT code), so threads that take exceptions waited for each other
+ * and for any thread loading a module. This copy is searched without a lock: a reader retries when the sequence
+ * changed under it. The loader changes it together with the lists. A module that does not fit (more than
+ * LDRP_IMAGE_RANGE_MAX at once) sets Overflow, and from then on a miss is looked up on the list.
+ */
+#define LDRP_IMAGE_RANGE_MAX 512
+
+typedef struct _LDRP_IMAGE_RANGE
+{
+    ULONG_PTR Base;
+    ULONG_PTR End;
+} LDRP_IMAGE_RANGE;
+
+static struct
+{
+    volatile LONG Sequence; /* Odd while the table changes */
+    ULONG Count;
+    BOOLEAN Overflow;
+    LDRP_IMAGE_RANGE Ranges[LDRP_IMAGE_RANGE_MAX];
+} LdrpImageRanges;
+
+/* Writers are serialized by the loader lock already; this only guards against a caller that is not */
+static RTL_SRWLOCK LdrpImageRangesLock = RTL_SRWLOCK_INIT;
+
+static
+VOID
+LdrpInsertImageRange(
+    _In_ PLDR_DATA_TABLE_ENTRY LdrEntry)
+{
+    ULONG_PTR Base = (ULONG_PTR)LdrEntry->DllBase;
+    ULONG i;
+
+    RtlAcquireSRWLockExclusive(&LdrpImageRangesLock);
+    InterlockedIncrement(&LdrpImageRanges.Sequence);
+
+    if (LdrpImageRanges.Count < LDRP_IMAGE_RANGE_MAX)
+    {
+        for (i = LdrpImageRanges.Count; (i > 0) && (LdrpImageRanges.Ranges[i - 1].Base > Base); i--)
+            LdrpImageRanges.Ranges[i] = LdrpImageRanges.Ranges[i - 1];
+        LdrpImageRanges.Ranges[i].Base = Base;
+        LdrpImageRanges.Ranges[i].End = Base + LdrEntry->SizeOfImage;
+        LdrpImageRanges.Count++;
+    }
+    else
+    {
+        LdrpImageRanges.Overflow = TRUE;
+    }
+
+    InterlockedIncrement(&LdrpImageRanges.Sequence);
+    RtlReleaseSRWLockExclusive(&LdrpImageRangesLock);
+}
+
+/*!
+ * \brief Removes a module from the address ranges; call it where the module leaves InLoadOrderModuleList
+ */
+VOID
+NTAPI
+LdrpRemoveImageRange(
+    _In_ PLDR_DATA_TABLE_ENTRY LdrEntry)
+{
+    ULONG_PTR Base = (ULONG_PTR)LdrEntry->DllBase;
+    ULONG i;
+
+    RtlAcquireSRWLockExclusive(&LdrpImageRangesLock);
+    InterlockedIncrement(&LdrpImageRanges.Sequence);
+
+    for (i = 0; i < LdrpImageRanges.Count; i++)
+    {
+        if ((LdrpImageRanges.Ranges[i].Base == Base) &&
+            (LdrpImageRanges.Ranges[i].End == Base + LdrEntry->SizeOfImage))
+        {
+            LdrpImageRanges.Count--;
+            for (; i < LdrpImageRanges.Count; i++)
+                LdrpImageRanges.Ranges[i] = LdrpImageRanges.Ranges[i + 1];
+            break;
+        }
+    }
+
+    InterlockedIncrement(&LdrpImageRanges.Sequence);
+    RtlReleaseSRWLockExclusive(&LdrpImageRangesLock);
+}
+
+/*!
+ * \brief Finds the module that contains an address, without a lock
+ *
+ * \return TRUE when the answer is known: *ImageBase is the base of the module, or NULL for an address in no module.
+ *         FALSE when the caller has to search the loader list (the table overflowed, or a writer is slow).
+ */
+BOOLEAN
+NTAPI
+LdrpLookupImageRange(
+    _In_ PVOID Address,
+    _Out_ PVOID *ImageBase)
+{
+    ULONG_PTR Pc = (ULONG_PTR)Address, Found;
+    ULONG Low, High, Middle, Spins = 0;
+    BOOLEAN Overflow;
+    LONG Sequence;
+
+    for (;;)
+    {
+        Sequence = LdrpImageRanges.Sequence;
+        if (Sequence & 1)
+        {
+            /* A writer that does not finish soon (suspended) holds the loader lock: wait for it there */
+            if (++Spins > 1000)
+                return FALSE;
+            YieldProcessor();
+            continue;
+        }
+        MemoryBarrier();
+
+        Found = 0;
+        Low = 0;
+        High = min(LdrpImageRanges.Count, LDRP_IMAGE_RANGE_MAX);
+        while (Low < High)
+        {
+            Middle = (Low + High) / 2;
+            if (Pc < LdrpImageRanges.Ranges[Middle].Base)
+            {
+                High = Middle;
+            }
+            else if (Pc >= LdrpImageRanges.Ranges[Middle].End)
+            {
+                Low = Middle + 1;
+            }
+            else
+            {
+                Found = LdrpImageRanges.Ranges[Middle].Base;
+                break;
+            }
+        }
+        Overflow = LdrpImageRanges.Overflow;
+
+        MemoryBarrier();
+        if (LdrpImageRanges.Sequence == Sequence)
+            break;
+    }
+
+    if (!Found && Overflow)
+        return FALSE;
+
+    *ImageBase = (PVOID)Found;
+    return TRUE;
+}
+
 VOID
 NTAPI
 LdrpInsertMemoryTableEntry(IN PLDR_DATA_TABLE_ENTRY LdrEntry)
@@ -1793,6 +1944,7 @@ LdrpInsertMemoryTableEntry(IN PLDR_DATA_TABLE_ENTRY LdrEntry)
     /* Insert into other lists */
     InsertTailList(&PebData->InLoadOrderModuleList, &LdrEntry->InLoadOrderLinks);
     InsertTailList(&PebData->InMemoryOrderModuleList, &LdrEntry->InMemoryOrderLinks);
+    LdrpInsertImageRange(LdrEntry);
 }
 
 VOID
