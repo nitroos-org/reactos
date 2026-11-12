@@ -271,7 +271,11 @@ void Test_SingleInstruction(
     /* VMCALL raises #UD on AMD, but a hypervisor on AMD may take that #UD and handle the
        instruction itself: KVM emulates VMCALL there and refuses it in user mode with #GP.
        The kernel then classifies that #GP: Windows 10 22H2 under KVM on AMD reports an
-       access violation, ReactOS a privileged instruction. Accept either. */
+       access violation, ReactOS a privileged instruction. Accept either.
+       No rule is measured that would tell the two apart (which #GP causes come out as which
+       status), so this stays an either-or: the Windows value is the access violation, and
+       accepting the privileged instruction is a known ReactOS difference. The relaxation
+       holds only for this row, on AMD with a hypervisor. */
     if ((g_CpuVendor == CPU_VENDOR_AMD) && (g_CpuFeatures & CPU_FEATURE_HV) &&
         (Flags & FL_HVCALL) && (ExpectedStatus == STATUS_ILLEGAL_INSTRUCTION) &&
         ((Status == STATUS_PRIVILEGED_INSTRUCTION) || (Status == STATUS_ACCESS_VIOLATION)))

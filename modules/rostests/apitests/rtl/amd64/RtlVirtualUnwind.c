@@ -506,8 +506,9 @@ static VOID Test_SpareCode(VOID)
 
     /* Same idea as Test_Epilog, but UWOP_SPARE_CODE consumes 3 slots.
      * The unwinder used to assert on this code in debug builds, which
-     * stopped the test in the debugger; the handler below stays in case
-     * an unwinder raises an exception for it. */
+     * stopped the test in the debugger. Windows does not raise for it,
+     * so any exception (an access violation of the walker included) is a
+     * failure. */
     RtlZeroMemory(g_StackBuffer, sizeof(g_StackBuffer));
     g_StackBuffer[0] = 0xAAAAAAAAAAAAAAAAULL;
     g_StackBuffer[1] = 0xBBBBBBBBBBBBBBBBULL;
@@ -526,8 +527,8 @@ static VOID Test_SpareCode(VOID)
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
-        skip("UWOP_SPARE_CODE triggered exception 0x%08lx\n",
-             _SEH2_GetExceptionCode());
+        ok(0, "UWOP_SPARE_CODE raised exception 0x%08lx\n",
+           _SEH2_GetExceptionCode());
     }
     _SEH2_END;
 }
@@ -760,6 +761,85 @@ static VOID Test_EpilogChained(VOID)
     }
 }
 
+typedef struct _UNDEFINED_OP_CALL
+{
+    ULONG Op;
+    ULONG OpInfo;
+    ULONG CountOfCodes;
+    NTSTATUS ExceptionCode;
+    BOOLEAN Returned;
+} UNDEFINED_OP_CALL;
+
+static DWORD WINAPI
+UndefinedOpThread(PVOID Param)
+{
+    UNDEFINED_OP_CALL *Call = Param;
+    TEST_UNWIND_INFO *Info;
+    CONTEXT Ctx;
+    ULONG i;
+
+    for (i = 0; i < RTL_NUMBER_OF(g_StackBuffer); i++)
+        g_StackBuffer[i] = 0xA000 + i;
+
+    /* The op in the first slot, then zero slots (UWOP_PUSH_NONVOL, RAX) */
+    Info = ResetUnwindInfo(1, 0, Call->CountOfCodes);
+    SetCode(Info, 0, 0, Call->Op, Call->OpInfo);
+
+    _SEH2_TRY
+    {
+        RunUnwind(&Ctx, (ULONG_PTR)g_StackBuffer, 0, NULL);
+        Call->Returned = TRUE;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Call->ExceptionCode = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    return 0;
+}
+
+static VOID Test_UndefinedOps(VOID)
+{
+    /* The unwind codes are image data: an undefined op must not hang the
+     * walk or run past a table. Windows raises STATUS_BAD_FUNCTION_TABLE
+     * from RtlVirtualUnwind for the ops 11 to 15 (measured, Windows 10),
+     * with any OpInfo and also for the last code. The walk runs in a
+     * thread so that a walk that never advances fails the test instead of
+     * stopping it. */
+    static const struct { ULONG OpInfo; ULONG CountOfCodes; } Variants[] =
+        { { 0, 6 }, { 1, 6 }, { 15, 6 }, { 0, 1 } };
+    ULONG Op, v;
+
+    for (Op = 11; Op < 16; Op++)
+    {
+        for (v = 0; v < RTL_NUMBER_OF(Variants); v++)
+        {
+            UNDEFINED_OP_CALL Call = { Op, Variants[v].OpInfo, Variants[v].CountOfCodes,
+                                       STATUS_SUCCESS, FALSE };
+            HANDLE Thread = CreateThread(NULL, 0, UndefinedOpThread, &Call, 0, NULL);
+
+            if (Thread == NULL)
+            {
+                ok(0, "CreateThread failed: %lu\n", GetLastError());
+                return;
+            }
+            if (WaitForSingleObject(Thread, 5000) == WAIT_TIMEOUT)
+            {
+                ok(0, "op %lu info %lu count %lu: the unwind did not finish (hang)\n",
+                   Op, Variants[v].OpInfo, Variants[v].CountOfCodes);
+                /* The thread is stuck in the walker and uses g_Image: stop here */
+                TerminateThread(Thread, 0);
+                CloseHandle(Thread);
+                return;
+            }
+            CloseHandle(Thread);
+            ok(!Call.Returned, "op %lu info %lu count %lu: the unwind returned\n",
+               Op, Variants[v].OpInfo, Variants[v].CountOfCodes);
+            ok_hex(Call.ExceptionCode, STATUS_BAD_FUNCTION_TABLE);
+        }
+    }
+}
+
 START_TEST(RtlVirtualUnwind)
 {
     RtlpInitialize();
@@ -779,6 +859,7 @@ START_TEST(RtlVirtualUnwind)
     Test_SaveXmm128Far();
     Test_Epilog();
     Test_SpareCode();
+    Test_UndefinedOps();
     Test_EpilogRet();
     Test_EpilogTailCall();
     Test_EpilogChained();
