@@ -1,0 +1,49 @@
+/*
+ * PROJECT:     ReactOS API tests
+ * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
+ * PURPOSE:     Client stubs for the interface_access test: one interface per registration of the test server,
+ *              each with one operation, so a refused call is seen the way an application sees it (the status
+ *              is raised as an exception by the stub) and not through the low-level runtime entry points
+ */
+
+[uuid(5ec0ac00-4321-1234-0000-000000000001), version(1.0)]
+interface ndr_plain
+{
+    int ndr_plain_call([in] handle_t handle);
+}
+
+[uuid(5ec0ac01-4321-1234-0000-000000000002), version(1.0)]
+interface ndr_local
+{
+    int ndr_local_call([in] handle_t handle);
+}
+
+[uuid(5ec0ac02-4321-1234-0000-000000000003), version(1.0)]
+interface ndr_allow
+{
+    int ndr_allow_call([in] handle_t handle);
+}
+
+[uuid(5ec0ac03-4321-1234-0000-000000000004), version(1.0)]
+interface ndr_deny
+{
+    int ndr_deny_call([in] handle_t handle);
+}
+
+[uuid(5ec0ac04-4321-1234-0000-000000000005), version(1.0)]
+interface ndr_deny_other
+{
+    int ndr_deny_other_call([in] handle_t handle);
+}
+
+[uuid(5ec0ac05-4321-1234-0000-000000000006), version(1.0)]
+interface ndr_nocache
+{
+    int ndr_nocache_call([in] handle_t handle);
+}
+
+[uuid(5ec0ac06-4321-1234-0000-000000000007), version(1.0)]
+interface ndr_local_deny
+{
+    int ndr_local_deny_call([in] handle_t handle);
+}
