@@ -5,7 +5,8 @@
  * COPYRIGHT:   Copyright 2026 Tomas Srnka <tomas.srnka@e2b.dev>
  *
  * Stage 2: ContainerVisual, SpriteVisual, VisualCollection, CompositionColorBrush, CompositionSurfaceBrush,
- * InsetClip behave as documented. Stage 3: CompositionGraphicsDevice from a D3D11 device, CompositionDrawingSurface
+ * InsetClip behave as documented. ICompositorDesktopInterop::CreateDesktopWindowTarget and CompositionTarget.Root.
+ * Stage 3: CompositionGraphicsDevice from a D3D11 device, CompositionDrawingSurface
  * drawn through D2D, Resize/Scroll. The pixel tests render the tree with the Nitro-private INitroCompositionTest
  * hook into a bitmap and compare pixels. The parts that use Nitro-private interfaces are skipped where the
  * interface is absent (Windows).
@@ -35,7 +36,7 @@
 WIFACE(ICompositor) WIFACE(ICompositorInterop) WIFACE(IVisual) WIFACE(IContainerVisual) WIFACE(ISpriteVisual)
 WIFACE(IVisualCollection) WIFACE(ICompositionBrush) WIFACE(ICompositionColorBrush) WIFACE(ICompositionSurfaceBrush)
 WIFACE(ICompositionClip) WIFACE(IInsetClip) WIFACE(ICompositionGraphicsDevice) WIFACE(ICompositionSurface)
-WIFACE(ICompositionDrawingSurface) WIFACE(ICompositionObject)
+WIFACE(ICompositionDrawingSurface) WIFACE(ICompositionObject) WIFACE(ICompositionTarget)
 typedef __x_ABI_CWindows_CUI_CColor Color;
 typedef __x_ABI_CWindows_CFoundation_CNumerics_CVector2 Vec2;
 typedef __x_ABI_CWindows_CFoundation_CNumerics_CVector3 Vec3;
@@ -51,6 +52,21 @@ typedef __x_ABI_CWindows_CFoundation_CNumerics_CVector3 Vec3;
 #define IID_SurfBrush IID___x_ABI_CWindows_CUI_CComposition_CICompositionSurfaceBrush
 #define IID_Surface IID___x_ABI_CWindows_CUI_CComposition_CICompositionSurface
 #define IID_Clip IID___x_ABI_CWindows_CUI_CComposition_CICompositionClip
+#define IID_Target IID___x_ABI_CWindows_CUI_CComposition_CICompositionTarget
+
+/* ICompositorDesktopInterop: IID and first method from the C# declaration on learn.microsoft.com ("Using the Visual
+ * layer with Windows Forms"); only that method is declared there, so only it is used */
+typedef struct IDesktopInterop IDesktopInterop;
+typedef struct
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IDesktopInterop *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IDesktopInterop *This);
+    ULONG (STDMETHODCALLTYPE *Release)(IDesktopInterop *This);
+    HRESULT (STDMETHODCALLTYPE *CreateDesktopWindowTarget)(IDesktopInterop *This, HWND hwnd, BOOL topmost,
+            IInspectable **result);
+} IDesktopInteropVtbl;
+struct IDesktopInterop { const IDesktopInteropVtbl *lpVtbl; };
+static const GUID IID_DesktopInterop = {0x29e691fa, 0x4567, 0x4dca, {0xb3, 0x19, 0xd0, 0xf2, 0x07, 0xeb, 0x68, 0x07}};
 
 #define QI(p, iid, out) (p)->lpVtbl->QueryInterface(p, iid, (void **)(out))
 #define REL(p) (p)->lpVtbl->Release(p)
@@ -926,6 +942,117 @@ static LONG WINAPI CrashFilter(EXCEPTION_POINTERS *ep)
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+static ULONG RefOf(IUnknown *u)
+{
+    u->lpVtbl->AddRef(u);
+    return u->lpVtbl->Release(u);
+}
+
+static void TestDesktopTarget(void)
+{
+    IDesktopInterop *di = NULL;
+    IInspectable *t = NULL, *t2 = NULL;
+    WICompositionTarget *ct = NULL;
+    WICompositionObject *obj = NULL;
+    WICompositor *c2 = NULL;
+    WIVisual *v, *got;
+    IUnknown *u1 = NULL, *u2 = NULL;
+    HSTRING cls = NULL;
+    HMODULE combase = GetModuleHandleW(L"combase.dll");
+    LPCWSTR (WINAPI *pRaw)(HSTRING, UINT32 *) = combase ? (void *)GetProcAddress(combase, "WindowsGetStringRawBuffer") : NULL;
+    HRESULT (WINAPI *pDel)(HSTRING) = combase ? (void *)GetProcAddress(combase, "WindowsDeleteString") : NULL;
+    ULONG comp_ref, vis_ref;
+    HWND hwnd;
+    HRESULT hr;
+
+    hr = QI(Comp, &IID_DesktopInterop, (void **)&di);
+    ok(hr == S_OK && di, "QI ICompositorDesktopInterop %#lx\n", hr);
+    if (!di) return;
+    QI(di, &IID_IUnknown, (void **)&u1);
+    QI(Comp, &IID_IUnknown, (void **)&u2);
+    ok(u1 == u2, "identity %p vs %p\n", u1, u2);
+    REL(u1); REL(u2);
+
+    hwnd = CreateWindowExW(0, L"STATIC", L"dcomp target", WS_OVERLAPPEDWINDOW, 0, 0, 200, 150, NULL, NULL, NULL, NULL);
+    ok(hwnd != NULL, "CreateWindowExW failed %lu\n", GetLastError());
+    if (!hwnd) { REL(di); return; }
+    comp_ref = RefOf((IUnknown *)Comp);
+
+    hr = di->lpVtbl->CreateDesktopWindowTarget(di, hwnd, TRUE, &t);
+    ok(hr == S_OK && t, "CreateDesktopWindowTarget %#lx %p\n", hr, t);
+    if (!t) goto out;
+    hr = t->lpVtbl->GetRuntimeClassName(t, &cls);
+    ok(hr == S_OK, "GetRuntimeClassName %#lx\n", hr);
+    if (hr == S_OK && pRaw && pDel)
+    {
+        ok(!lstrcmpW(pRaw(cls, NULL), L"Windows.UI.Composition.Desktop.DesktopWindowTarget"), "class %ls\n",
+           pRaw(cls, NULL));
+        pDel(cls);
+    }
+
+    hr = QI(t, &IID_Target, (void **)&ct);
+    ok(hr == S_OK && ct, "QI ICompositionTarget %#lx\n", hr);
+    hr = QI(t, &IID_CompObject, (void **)&obj);
+    ok(hr == S_OK && obj, "QI ICompositionObject %#lx\n", hr);
+    if (obj)
+    {
+        hr = obj->lpVtbl->get_Compositor(obj, &c2);
+        ok(hr == S_OK && c2, "get_Compositor %#lx\n", hr);
+        if (c2)
+        {
+            QI(c2, &IID_IUnknown, (void **)&u1);
+            QI(Comp, &IID_IUnknown, (void **)&u2);
+            ok(u1 == u2, "target's Compositor %p vs %p\n", u1, u2);
+            REL(u1); REL(u2); REL(c2);
+        }
+        REL(obj);
+    }
+    if (ct)
+    {
+        got = (WIVisual *)0xdead;
+        hr = ct->lpVtbl->get_Root(ct, &got);
+        ok(hr == S_OK && got == NULL, "initial Root %#lx %p\n", hr, got);
+        v = NewContainer(0, 0, 100, 100);
+        if (v)
+        {
+            vis_ref = RefOf((IUnknown *)v);
+            hr = ct->lpVtbl->put_Root(ct, v);
+            ok(hr == S_OK, "put_Root %#lx\n", hr);
+            got = NULL;
+            hr = ct->lpVtbl->get_Root(ct, &got);
+            ok(hr == S_OK && got, "get_Root %#lx %p\n", hr, got);
+            if (got)
+            {
+                QI(got, &IID_IUnknown, (void **)&u1);
+                QI(v, &IID_IUnknown, (void **)&u2);
+                ok(u1 == u2, "Root %p is not the visual %p\n", u1, u2);
+                REL(u1); REL(u2); REL(got);
+            }
+            /* a second target on the same window is not checked: its result is not documented */
+            hr = ct->lpVtbl->put_Root(ct, NULL);
+            ok(hr == S_OK, "put_Root(NULL) %#lx\n", hr);
+            hr = ct->lpVtbl->get_Root(ct, &got);
+            ok(hr == S_OK && got == NULL, "Root after NULL %#lx %p\n", hr, got);
+            ok(RefOf((IUnknown *)v) == vis_ref, "visual refs %lu, were %lu\n", RefOf((IUnknown *)v), vis_ref);
+            /* the target keeps its root alive; releasing the target drops it */
+            ct->lpVtbl->put_Root(ct, v);
+            REL(v);
+        }
+        REL(ct);
+    }
+    REL(t);
+    ok(RefOf((IUnknown *)Comp) == comp_ref, "Compositor refs %lu after the target, were %lu\n",
+       RefOf((IUnknown *)Comp), comp_ref);
+
+    /* topmost FALSE works as well */
+    hr = di->lpVtbl->CreateDesktopWindowTarget(di, hwnd, FALSE, &t2);
+    ok(hr == S_OK && t2, "CreateDesktopWindowTarget(topmost FALSE) %#lx %p\n", hr, t2);
+    if (t2) REL(t2);
+out:
+    DestroyWindow(hwnd);
+    REL(di);
+}
+
 START_TEST(Composition)
 {
     SetUnhandledExceptionFilter(CrashFilter);
@@ -965,6 +1092,7 @@ START_TEST(Composition)
         TestPixels();
         TestSurfaces();
         TestStretch();
+        TestDesktopTarget();
         REL(Comp);
     }
     CoUninitialize();

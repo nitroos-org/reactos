@@ -88,6 +88,7 @@ static const struct iface_entry iface_table[] =
     IE(ICompositionGraphicsDevice, gdev, KM(K_GDEVICE), TRUE),
     IE(ICompositionSurface, surface, KM(K_DSURFACE), TRUE),
     IE(ICompositionDrawingSurface, dsurf, KM(K_DSURFACE), TRUE),
+    IE(ICompositionTarget, target, KM(K_TARGET), TRUE),
     { &IID___x_ABI_CWindows_CFoundation_CIClosable, offsetof(struct cobj, closable), KM_ALL, TRUE },
     { &IID_IAgileObject, offsetof(struct cobj, agile), KM_ALL, FALSE },
     { &IID_INitroDrawingSurfaceInterop, offsetof(struct cobj, dsinterop), KM(K_DSURFACE), FALSE },
@@ -100,6 +101,7 @@ static const WCHAR *const kind_names[] =
     L"Windows.UI.Composition.VisualCollection", L"Windows.UI.Composition.CompositionColorBrush",
     L"Windows.UI.Composition.CompositionSurfaceBrush", L"Windows.UI.Composition.InsetClip",
     L"Windows.UI.Composition.CompositionGraphicsDevice", L"Windows.UI.Composition.CompositionDrawingSurface",
+    L"Windows.UI.Composition.Desktop.DesktopWindowTarget",
 };
 
 static void cobj_destroy(struct cobj *o);
@@ -216,6 +218,7 @@ INSP_FWD(ins, WIInsetClip, inset)
 INSP_FWD(gdv, WICompositionGraphicsDevice, gdev)
 INSP_FWD(srf, WICompositionSurface, surface)
 INSP_FWD(dsf, WICompositionDrawingSurface, dsurf)
+INSP_FWD(tgt, WICompositionTarget, target)
 INSP_FWD(clo, WIClosable, closable)
 UNK_FWD(agl, IAgileObject, agile)
 UNK_FWD(tst, INitroCompositionTest, test)
@@ -270,7 +273,7 @@ static void release_cobj(struct cobj *o)
 static void cobj_destroy(struct cobj *o)
 {
     struct cobj **kids;
-    struct cobj *vclip, *sbrush, *collection, *gfxdev;
+    struct cobj *vclip, *sbrush, *collection, *gfxdev, *root;
     IUnknown *bsurface;
     int i, n;
 
@@ -283,6 +286,7 @@ static void cobj_destroy(struct cobj *o)
     collection = o->collection; o->collection = NULL;
     vclip = o->vclip; o->vclip = NULL;
     sbrush = o->sbrush; o->sbrush = NULL;
+    root = o->root; o->root = NULL;
     bsurface = o->bsurface; o->bsurface = NULL;
     gfxdev = o->gfxdev;
     comp_unlock();
@@ -292,6 +296,7 @@ static void cobj_destroy(struct cobj *o)
     release_cobj(collection);
     release_cobj(vclip);
     release_cobj(sbrush);
+    release_cobj(root);
     if (bsurface) IUnknown_Release(bsurface);
 
     if (o->kind == K_GDEVICE) gfx_device_free(o);
@@ -1137,6 +1142,52 @@ static const INitroCompositionTestVtbl nitro_test_vtbl_impl =
 
 /* ---- creation ---- */
 
+/* ---- DesktopWindowTarget: CompositionTarget.Root (documented); created by ICompositorDesktopInterop ---- */
+
+#define TGT(i) OBJ_OF(i, target)
+
+static HRESULT STDMETHODCALLTYPE tgt_get_Root(WICompositionTarget *i, WIVisual **v)
+{
+    struct cobj *o = TGT(i);
+
+    if (!v) return E_POINTER;
+    comp_lock();
+    *v = o->root ? &o->root->visual : NULL;
+    if (o->root) id_AddRef(&o->root->identity);
+    comp_unlock();
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE tgt_put_Root(WICompositionTarget *i, WIVisual *v)
+{
+    struct cobj *o = TGT(i), *old, *r = NULL;
+
+    if (v && !(r = visual_from(v)))
+    {
+        FIXME("CompositionTarget.Root: foreign visual %p\n", v);
+        return E_INVALIDARG;
+    }
+    if (r) id_AddRef(&r->identity);
+    comp_lock(); old = o->root; o->root = r; comp_unlock();
+    release_cobj(old);
+    return S_OK;
+}
+
+static const WICompositionTargetVtbl target_vtbl = { INSP_HEAD(tgt), tgt_get_Root, tgt_put_Root };
+
+HRESULT comp_new_desktop_target(IUnknown *compositor, HWND hwnd, BOOL topmost, IInspectable **out)
+{
+    struct cobj *o;
+    HRESULT hr;
+
+    if (FAILED(hr = comp_create(compositor, K_TARGET, &o))) return hr;
+    o->hwnd = hwnd;
+    o->topmost = topmost;
+    FIXME("DesktopWindowTarget for window %p: the visual tree is not presented yet (no window surfaces)\n", hwnd);
+    *out = &o->identity;
+    return S_OK;
+}
+
 HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out)
 {
     struct cobj *o = comp_alloc_obj(kind, compositor);
@@ -1155,6 +1206,7 @@ HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out
     o->gdev.lpVtbl = &gdev_vtbl;
     o->surface.lpVtbl = &surface_vtbl;
     o->dsurf.lpVtbl = &dsurf_vtbl;
+    o->target.lpVtbl = &target_vtbl;
     o->dsinterop.lpVtbl = &nitro_dsinterop_vtbl;
     o->test.lpVtbl = &nitro_test_vtbl_impl;
     o->closable.lpVtbl = &closable_vtbl;

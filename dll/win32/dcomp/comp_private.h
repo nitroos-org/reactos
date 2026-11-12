@@ -27,6 +27,7 @@ WIFACE(ICompositionGraphicsDevice)
 WIFACE(ICompositionSurface)
 WIFACE(ICompositionDrawingSurface)
 WIFACE(ICompositor)
+WIFACE(ICompositionTarget)
 
 typedef __x_ABI_CWindows_CFoundation_CIClosable WIClosable;
 typedef __x_ABI_CWindows_CFoundation_CIClosableVtbl WIClosableVtbl;
@@ -37,7 +38,7 @@ typedef __x_ABI_CWindows_CFoundation_CNumerics_CMatrix4x4 Mat4;
 
 enum cobj_kind
 {
-    K_CONTAINER, K_SPRITE, K_VCOLL, K_COLORBRUSH, K_SURFBRUSH, K_INSETCLIP, K_GDEVICE, K_DSURFACE
+    K_CONTAINER, K_SPRITE, K_VCOLL, K_COLORBRUSH, K_SURFBRUSH, K_INSETCLIP, K_GDEVICE, K_DSURFACE, K_TARGET
 };
 #define KM(k) (1u << (k))
 #define KM_VISUAL (KM(K_CONTAINER) | KM(K_SPRITE))
@@ -60,6 +61,7 @@ struct cobj
     WICompositionGraphicsDevice gdev;
     WICompositionSurface surface;
     WICompositionDrawingSurface dsurf;
+    WICompositionTarget target;
     INitroDrawingSurfaceInterop dsinterop;
     INitroCompositionTest test;
     WIClosable closable;
@@ -110,6 +112,11 @@ struct cobj
     IUnknown *dc;                   /* ID2D1DeviceContext between BeginDraw and EndDraw */
     IUnknown *dcbitmap;             /* ID2D1Bitmap1 */
     BOOL drawing, suspended;
+
+    /* DesktopWindowTarget */
+    HWND hwnd;                      /* the window it was created for; nothing is presented to it yet */
+    BOOL topmost;                   /* stored only: IDesktopWindowTarget (IsTopmost) is not implemented */
+    struct cobj *root;              /* CompositionTarget.Root, referenced */
 };
 
 void comp_lock(void);
@@ -131,3 +138,4 @@ HRESULT comp_new_graphics_device(IUnknown *compositor, IUnknown *device, WICompo
 struct cobj *cobj_from_iface(void *iface, size_t offset);
 HRESULT comp_surface_brush_set_surface(struct cobj *brush, WICompositionSurface *surface);
 HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out);
+HRESULT comp_new_desktop_target(IUnknown *compositor, HWND hwnd, BOOL topmost, IInspectable **out);

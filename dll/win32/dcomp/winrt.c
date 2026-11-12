@@ -13,12 +13,14 @@
  * The Compositor creates the stage 2 object model (composition.c: ContainerVisual, SpriteVisual, brushes, InsetClip)
  * and, through ICompositorInterop::CreateGraphicsDevice, the stage 3 graphics device and drawing surfaces
  * (compgfx.c). Every other member of ICompositor and ICompositorInterop returns E_NOTIMPL and logs a FIXME
- * naming interface and member. An interface that has no clean public source for its IID stays a FIXME as well:
- * QueryInterface for an IID the object does not know logs it by value, so the log shows which interface a
+ * naming interface and member. ICompositorDesktopInterop::CreateDesktopWindowTarget creates a
+ * Windows.UI.Composition.Desktop.DesktopWindowTarget (composition.c) that keeps CompositionTarget.Root but does
+ * not present anything yet (stage 4). An interface that has no clean public source for its IID stays a FIXME as
+ * well: QueryInterface for an IID the object does not know logs it by value, so the log shows which interface a
  * caller asks for next. Known gaps (no IID or vtable from learn.microsoft.com, Wine or mingw-w64):
  *   ICompositorController (Compositor, Commit, EnsurePreviousCommitCompletedAsync, CommitNeeded),
- *   ICompositorDesktopInterop (CreateDesktopWindowTarget), ICompositor2 .. ICompositor7 and the other
- *   ICompositorWith* interfaces, ICompositorStatics.
+ *   ICompositorDesktopInterop methods after CreateDesktopWindowTarget, IDesktopWindowTarget (IsTopmost),
+ *   ICompositor2 .. ICompositor7 and the other ICompositorWith* interfaces, ICompositorStatics.
  */
 
 #include <stdarg.h>
@@ -51,6 +53,30 @@ typedef __x_ABI_CWindows_CUI_CComposition_CICompositorInterop ICompositorInterop
 typedef __x_ABI_CWindows_CUI_CComposition_CICompositorInteropVtbl ICompositorInteropVtbl;
 typedef __x_ABI_CWindows_CFoundation_CIClosable IClosable;
 typedef __x_ABI_CWindows_CFoundation_CIClosableVtbl IClosableVtbl;
+
+/*
+ * ICompositorDesktopInterop (windows.ui.composition.interop.h). Source: the C# declaration of the interface on
+ * learn.microsoft.com, "Using the Visual layer with Windows Forms" (MicrosoftDocs/windows-dev-docs-pr,
+ * uwp/composition/using-the-visual-layer-with-windows-forms.md, page git_commit_id
+ * 6b6b4abfd0405ca8dc14905fd4aa4ab21ca74fee; the WPF page carries the same declaration):
+ * [Guid("29E691FA-4567-4DCA-B319-D0F207EB6807")], InterfaceIsIUnknown, first method
+ * CreateDesktopWindowTarget(HWND hwndTarget, BOOL isTopmost, IDesktopWindowTarget **result). That page declares no
+ * further method, so this vtable ends there: a later method has no public source for its slot.
+ * The result is documented as a DesktopWindowTarget; the page's sample only queries it for ICompositionTarget.
+ * IDesktopWindowTarget itself has no public IID, so the pointer returned is the object's IInspectable identity.
+ */
+typedef struct ICompositorDesktopInterop ICompositorDesktopInterop;
+typedef struct ICompositorDesktopInteropVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ICompositorDesktopInterop *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ICompositorDesktopInterop *This);
+    ULONG (STDMETHODCALLTYPE *Release)(ICompositorDesktopInterop *This);
+    HRESULT (STDMETHODCALLTYPE *CreateDesktopWindowTarget)(ICompositorDesktopInterop *This, HWND hwnd, BOOL topmost,
+            IInspectable **result);
+} ICompositorDesktopInteropVtbl;
+struct ICompositorDesktopInterop { const ICompositorDesktopInteropVtbl *lpVtbl; };
+
+DEFINE_GUID(IID_ICompositorDesktopInterop, 0x29e691fa, 0x4567, 0x4dca, 0xb3, 0x19, 0xd0, 0xf2, 0x07, 0xeb, 0x68, 0x07);
 
 static const WCHAR name_compositor[] = L"Windows.UI.Composition.Compositor";
 static const WCHAR name_controller[] = L"Windows.UI.Composition.Core.CompositorController";
@@ -257,6 +283,7 @@ struct compositor
     IInspectable IInspectable_iface;    /* identity */
     ICompositor ICompositor_iface;
     ICompositorInterop ICompositorInterop_iface;
+    ICompositorDesktopInterop ICompositorDesktopInterop_iface;
     IClosable IClosable_iface;
     IAgileObject IAgileObject_iface;
     IUnknown *marshal;                  /* free-threaded marshaler */
@@ -283,6 +310,8 @@ static inline struct compositor *comp_from_identity(IInspectable *i)
 { return CONTAINING_RECORD(i, struct compositor, IInspectable_iface); }
 static inline struct compositor *comp_from_interop(ICompositorInterop *i)
 { return CONTAINING_RECORD(i, struct compositor, ICompositorInterop_iface); }
+static inline struct compositor *comp_from_desktop(ICompositorDesktopInterop *i)
+{ return CONTAINING_RECORD(i, struct compositor, ICompositorDesktopInterop_iface); }
 static inline struct compositor *comp_from_closable(IClosable *i)
 { return CONTAINING_RECORD(i, struct compositor, IClosable_iface); }
 static inline struct compositor *comp_from_agile(IAgileObject *i)
@@ -329,6 +358,8 @@ static HRESULT STDMETHODCALLTYPE compositor_id_QueryInterface(IInspectable *ifac
         *out = &This->ICompositor_iface;
     else if (IsEqualGUID(iid, &IID___x_ABI_CWindows_CUI_CComposition_CICompositorInterop))
         *out = &This->ICompositorInterop_iface;
+    else if (IsEqualGUID(iid, &IID_ICompositorDesktopInterop))
+        *out = &This->ICompositorDesktopInterop_iface;
     else if (IsEqualGUID(iid, &IID___x_ABI_CWindows_CFoundation_CIClosable))
         *out = &This->IClosable_iface;
     else if (IsEqualGUID(iid, &IID_IAgileObject))
@@ -456,6 +487,34 @@ static const ICompositorInteropVtbl interop_vtbl =
     interop_CreateGraphicsDevice,
 };
 
+/* ICompositorDesktopInterop is a plain IUnknown interface */
+static HRESULT STDMETHODCALLTYPE desktop_QueryInterface(ICompositorDesktopInterop *iface, REFIID iid, void **out)
+{ return IInspectable_QueryInterface(&comp_from_desktop(iface)->IInspectable_iface, iid, out); }
+static ULONG STDMETHODCALLTYPE desktop_AddRef(ICompositorDesktopInterop *iface)
+{ return IInspectable_AddRef(&comp_from_desktop(iface)->IInspectable_iface); }
+static ULONG STDMETHODCALLTYPE desktop_Release(ICompositorDesktopInterop *iface)
+{ return IInspectable_Release(&comp_from_desktop(iface)->IInspectable_iface); }
+
+static HRESULT STDMETHODCALLTYPE desktop_CreateDesktopWindowTarget(ICompositorDesktopInterop *iface, HWND hwnd,
+        BOOL topmost, IInspectable **result)
+{
+    struct compositor *This = comp_from_desktop(iface);
+
+    TRACE("%p, hwnd %p, topmost %d, result %p\n", iface, hwnd, topmost, result);
+    /* What Windows answers for a NULL, foreign, child or already targeted window is neither documented nor
+     * measured yet (an oracle probe outside an interactive session cannot create a Compositor): verify on the
+     * oracle in an interactive session before adding checks. */
+    if (!result) return E_POINTER;
+    *result = NULL;
+    return comp_new_desktop_target((IUnknown *)&This->IInspectable_iface, hwnd, topmost, result);
+}
+
+static const ICompositorDesktopInteropVtbl desktop_vtbl =
+{
+    desktop_QueryInterface, desktop_AddRef, desktop_Release,
+    desktop_CreateDesktopWindowTarget,
+};
+
 #define IFACE_CLOSABLE(prefix, T, from, ident, ctype) \
 static HRESULT STDMETHODCALLTYPE prefix##_c_QueryInterface(IClosable *iface, REFIID iid, void **out) \
 { return IInspectable_QueryInterface(&from(iface)->ident, iid, out); } \
@@ -499,6 +558,7 @@ static HRESULT compositor_create(struct compositor **out)
     This->IInspectable_iface.lpVtbl = &compositor_id_vtbl;
     This->ICompositor_iface.lpVtbl = &compositor_vtbl;
     This->ICompositorInterop_iface.lpVtbl = &interop_vtbl;
+    This->ICompositorDesktopInterop_iface.lpVtbl = &desktop_vtbl;
     This->IClosable_iface.lpVtbl = &compositor_closable_vtbl;
     This->IAgileObject_iface.lpVtbl = &compositor_agile_vtbl;
     This->ref = 1;
