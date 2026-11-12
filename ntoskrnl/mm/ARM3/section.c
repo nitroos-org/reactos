@@ -136,6 +136,41 @@ MiIsProtectionCompatible(IN ULONG SectionPageProtection,
 }
 
 /*
+ * VirtualProtect documents that for a mapped view the new protection must be compatible with the access
+ * protection the view was mapped with. Windows 10 applies the rule to NtProtectVirtualMemory and to
+ * NtAllocateVirtualMemory(MEM_COMMIT) in a view of a page-file section, failing with STATUS_SECTION_PROTECTION
+ * (oracle: a PAGE_NOACCESS view refuses PAGE_READWRITE and PAGE_READONLY on both paths). The combinations
+ * follow the expectations of Wine's kernel32 test_mapping (run against Windows): the access rights asked
+ * for - read, write, execute, with copy-on-write counting as read - must be a subset of the view's.
+ * PAGE_NOACCESS fits every view; a PAGE_NOACCESS view takes nothing else.
+ */
+#define MI_ACCESS_R 1
+#define MI_ACCESS_W 2
+#define MI_ACCESS_X 4
+static const UCHAR MiAccessOfProtection[8] =
+{
+    0,                                          /* MM_ZERO_ACCESS */
+    MI_ACCESS_R,                                /* MM_READONLY */
+    MI_ACCESS_R | MI_ACCESS_X,                  /* MM_EXECUTE */
+    MI_ACCESS_R | MI_ACCESS_X,                  /* MM_EXECUTE_READ */
+    MI_ACCESS_R | MI_ACCESS_W,                  /* MM_READWRITE */
+    MI_ACCESS_R,                                /* MM_WRITECOPY */
+    MI_ACCESS_R | MI_ACCESS_W | MI_ACCESS_X,    /* MM_EXECUTE_READWRITE */
+    MI_ACCESS_R | MI_ACCESS_X                   /* MM_EXECUTE_WRITECOPY */
+};
+
+BOOLEAN
+NTAPI
+MiIsViewProtectionCompatible(IN ULONG ViewProtectionMask,
+                             IN ULONG ProtectionMask)
+{
+    UCHAR ViewAccess = MiAccessOfProtection[ViewProtectionMask & MM_PROTECT_ACCESS];
+    UCHAR Access = MiAccessOfProtection[ProtectionMask & MM_PROTECT_ACCESS];
+
+    return ((Access & ~ViewAccess) == 0);
+}
+
+/*
  * Windows accepts the PAGE_TARGETS_INVALID / PAGE_TARGETS_NO_UPDATE bit (0x40000000) together with an execute
  * protection, in allocations, protection changes and views, and reports the plain protection afterwards; it fails
  * the call with STATUS_INVALID_PAGE_PROTECTION when the base protection has no execute right. There is no call
