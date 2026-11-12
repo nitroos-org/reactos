@@ -9,11 +9,115 @@
 
 #include <k32.h>
 #include <compat_undoc.h>
+#include <verlie.h>
+#include <verifyver.h>
 
 #define NDEBUG
 #include <debug.h>
 
 /* FUNCTIONS ******************************************************************/
+
+/*
+ * The version Windows 10 tells a program (switch "UnmanifestedVersionLie", see verlie.h).
+ * Measured on Windows 10 22H2: the highest supportedOS GUID in the program's own manifest decides.
+ * Windows 10 -> the real version; Windows 8.1 -> 6.3.9600; anything else, no GUID, or no manifest -> 6.2.9200.
+ * Without any supportedOS element the PE header OS version counts (>= 10.0 real, 6.3 .. 9.x -> 6.3); a supportedOS wins over it.
+ */
+#define BASEP_VERLIE_OFF    0   /* switch off: the old behaviour, untouched */
+#define BASEP_VERLIE_REAL   1   /* switch on, the program targets Windows 10: the real version */
+#define BASEP_VERLIE_WIN81  2   /* switch on: 6.3.9600 */
+#define BASEP_VERLIE_WIN8   3   /* switch on: 6.2.9200 */
+
+static volatile LONG g_VerLieMode = -1;
+
+static LONG
+BaseGetVersionLieMode(VOID)
+{
+    static const GUID GuidWin81 = {0x1f676c76, 0x80e1, 0x4239, {0x95, 0xbb, 0x83, 0xd0, 0xf6, 0xd0, 0xda, 0x78}};
+    static const GUID GuidWin10 = {0x8e0f7a12, 0xbfb3, 0x4fe8, {0xb9, 0xa5, 0x48, 0xfd, 0x50, 0xa1, 0x5a, 0x9a}};
+    LONG Mode = g_VerLieMode;
+    ACTIVATION_CONTEXT_COMPATIBILITY_INFORMATION *Info;
+    SIZE_T Required = 0;
+    BOOLEAN HaveOsElement = FALSE;
+    PIMAGE_NT_HEADERS NtHeaders;
+    PPEB Peb = NtCurrentPeb();
+    ULONG i;
+
+    if (Mode >= 0)
+        return Mode;
+
+    if (!RosVersionLieEnabled())
+    {
+        g_VerLieMode = BASEP_VERLIE_OFF;
+        return BASEP_VERLIE_OFF;
+    }
+
+    /* Nothing found -> Windows 8 */
+    Mode = BASEP_VERLIE_WIN8;
+
+    /* A NULL handle selects the process (executable) activation context, not the active one */
+    if (RtlQueryInformationActivationContext(RTL_QUERY_ACTIVATION_CONTEXT_FLAG_NO_ADDREF, NULL, NULL,
+                                             CompatibilityInformationInActivationContext,
+                                             NULL, 0, &Required) == STATUS_BUFFER_TOO_SMALL && Required)
+    {
+        Info = RtlAllocateHeap(RtlGetProcessHeap(), 0, Required);
+        if (Info)
+        {
+            if (NT_SUCCESS(RtlQueryInformationActivationContext(RTL_QUERY_ACTIVATION_CONTEXT_FLAG_NO_ADDREF, NULL, NULL,
+                                                                CompatibilityInformationInActivationContext,
+                                                                Info, Required, &Required)))
+            {
+                for (i = 0; i < Info->ElementCount; ++i)
+                {
+                    if (Info->Elements[i].Type != ACTCTX_COMPATIBILITY_ELEMENT_TYPE_OS)
+                        continue;
+
+                    HaveOsElement = TRUE;
+                    if (RtlCompareMemory(&Info->Elements[i].Id, &GuidWin10, sizeof(GUID)) == sizeof(GUID))
+                        Mode = BASEP_VERLIE_REAL;
+                    else if (Mode != BASEP_VERLIE_REAL &&
+                             RtlCompareMemory(&Info->Elements[i].Id, &GuidWin81, sizeof(GUID)) == sizeof(GUID))
+                        Mode = BASEP_VERLIE_WIN81;
+                }
+            }
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Info);
+        }
+    }
+
+    /* A program whose manifest names no supportedOS (or that has none): the OS version in its PE header counts
+       (measured on Windows 10: also with a manifest that has no compatibility section, or an empty one) */
+    if (!HaveOsElement &&
+        (NtHeaders = RtlImageNtHeader(Peb->ImageBaseAddress)) != NULL)
+    {
+        if (NtHeaders->OptionalHeader.MajorOperatingSystemVersion >= 10)
+            Mode = BASEP_VERLIE_REAL;
+        else if (NtHeaders->OptionalHeader.MajorOperatingSystemVersion > 6 ||
+                 (NtHeaders->OptionalHeader.MajorOperatingSystemVersion == 6 &&
+                  NtHeaders->OptionalHeader.MinorOperatingSystemVersion >= 3))
+            Mode = BASEP_VERLIE_WIN81;
+    }
+
+    g_VerLieMode = Mode;
+    return Mode;
+}
+
+/* Replaces the version numbers of what RtlGetVersion returned when the program is told a lower version */
+static VOID
+BaseApplyVersionLie(LONG Mode, PULONG Major, PULONG Minor, PULONG Build)
+{
+    if (Mode == BASEP_VERLIE_WIN81)
+    {
+        *Major = 6;
+        *Minor = 3;
+        *Build = 9600;
+    }
+    else if (Mode == BASEP_VERLIE_WIN8)
+    {
+        *Major = 6;
+        *Minor = 2;
+        *Build = 9200;
+    }
+}
 
 /*
  * @implemented
@@ -25,7 +129,19 @@ GetVersion(VOID)
     PPEB Peb = NtCurrentPeb();
     ULONG MajorVersion = Peb->OSMajorVersion;
     ULONG MinorVersion = Peb->OSMinorVersion;
+    ULONG BuildNumber = Peb->OSBuildNumber;
     UINT EffectiveVersion;
+    LONG LieMode = BaseGetVersionLieMode();
+
+    if (LieMode != BASEP_VERLIE_OFF)
+    {
+        /* The version Windows 10 tells this program; the manifest raise below is not used */
+        BaseApplyVersionLie(LieMode, &MajorVersion, &MinorVersion, &BuildNumber);
+        return (DWORD)( ((Peb->OSPlatformId ^ 2) << 30) |
+                         (BuildNumber            << 16) |
+                         (MinorVersion           << 8 ) |
+                          MajorVersion );
+    }
 
     /* A process that declares a Windows version in its application manifest
      * must observe that version, as on Windows. ReactOS detects the manifest
@@ -66,6 +182,10 @@ GetVersionExW(IN LPOSVERSIONINFOW lpVersionInformation)
     Status = RtlGetVersion((PRTL_OSVERSIONINFOW)lpVersionInformation);
     if (Status == STATUS_SUCCESS)
     {
+        BaseApplyVersionLie(BaseGetVersionLieMode(),
+                            &lpVersionInformation->dwMajorVersion,
+                            &lpVersionInformation->dwMinorVersion,
+                            &lpVersionInformation->dwBuildNumber);
         if (lpVersionInformation->dwOSVersionInfoSize == sizeof(OSVERSIONINFOEXW))
         {
             lpVersionInformationEx = (PVOID)lpVersionInformation;
@@ -137,10 +257,29 @@ VerifyVersionInfoW(IN LPOSVERSIONINFOEXW lpVersionInformation,
                    IN DWORDLONG dwlConditionMask)
 {
     NTSTATUS Status;
+    LONG LieMode = BaseGetVersionLieMode();
 
-    Status = RtlVerifyVersionInfo((PRTL_OSVERSIONINFOEXW)lpVersionInformation,
-                                  dwTypeMask,
-                                  dwlConditionMask);
+    if (LieMode != BASEP_VERLIE_OFF)
+    {
+        /* Compare against the version this program is told */
+        RTL_OSVERSIONINFOEXW Have;
+
+        RtlZeroMemory(&Have, sizeof(Have));
+        Have.dwOSVersionInfoSize = sizeof(Have);
+        Status = RtlGetVersion((PRTL_OSVERSIONINFOW)&Have);
+        if (Status == STATUS_SUCCESS)
+        {
+            BaseApplyVersionLie(LieMode, &Have.dwMajorVersion, &Have.dwMinorVersion, &Have.dwBuildNumber);
+            Status = RtlpVerifyVersionInfo(&Have, (PRTL_OSVERSIONINFOEXW)lpVersionInformation,
+                                           dwTypeMask, dwlConditionMask);
+        }
+    }
+    else
+    {
+        Status = RtlVerifyVersionInfo((PRTL_OSVERSIONINFOEXW)lpVersionInformation,
+                                      dwTypeMask,
+                                      dwlConditionMask);
+    }
     switch (Status)
     {
         case STATUS_INVALID_PARAMETER:

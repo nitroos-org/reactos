@@ -15,6 +15,7 @@ extern void func_manifestcompat(void);
 extern void func_procparamflags(void);
 extern void func_sysmain(void);
 extern void func_versionlie(void);
+extern void func_versionmatrix(void);
 
 const struct test winetest_testlist[] =
 {
@@ -30,5 +31,6 @@ const struct test winetest_testlist[] =
     { "procparamflags", func_procparamflags },
     { "sysmain", func_sysmain },
     { "versionlie", func_versionlie },
+    { "versionmatrix", func_versionmatrix },
     { 0, 0 }
 };

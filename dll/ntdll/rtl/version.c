@@ -12,6 +12,7 @@
 
 #include <ntdll.h>
 #include <compat_undoc.h>
+#include <verlie.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -168,7 +169,8 @@ RtlGetNtVersionNumbers(OUT PULONG pMajorVersion,
      * RtlGetVersion() and GetVersion(): base::win::OSInfo and similar callers read
      * this export and must agree with them. Only ever raises the version. */
     EffectiveVersion = RosGetProcessEffectiveVersion();
-    if (EffectiveVersion > ((Major << 8) | Minor))
+    /* With the unmanifested-version switch on, this export stays real (kernel32 does the lie) */
+    if (EffectiveVersion > ((Major << 8) | Minor) && !RosVersionLieEnabled())
     {
         Major = EffectiveVersion >> 8;
         Minor = EffectiveVersion & 0xFF;
@@ -213,7 +215,8 @@ RtlGetVersion(IN OUT PRTL_OSVERSIONINFOW lpVersionInformation)
      * GetVersionEx() agrees with GetVersion() for manifested apps (as on Windows). */
     {
         UINT EffectiveVersion = RosGetProcessEffectiveVersion();
-        if (EffectiveVersion > ((Peb->OSMajorVersion << 8) | Peb->OSMinorVersion))
+        /* With the unmanifested-version switch on, RtlGetVersion stays real (kernel32 does the lie) */
+        if (EffectiveVersion > ((Peb->OSMajorVersion << 8) | Peb->OSMinorVersion) && !RosVersionLieEnabled())
         {
             lpVersionInformation->dwMajorVersion = EffectiveVersion >> 8;
             lpVersionInformation->dwMinorVersion = EffectiveVersion & 0xFF;
