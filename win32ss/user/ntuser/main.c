@@ -853,6 +853,10 @@ ExitThreadCallback(PETHREAD Thread)
     /* Decrement thread count and check if its 0 */
     ppiCurrent->cThreads--;
 
+    /* The last Win32 thread of CSRSS: the windows the desktop thread left */
+    if (ppiCurrent->cThreads == 0 && gptiDesktopThread && gptiDesktopThread->ppi == ppiCurrent)
+        IntDesktopThreadProcessExit(ppiCurrent);
+
     if (ptiCurrent->TIF_flags & TIF_GUITHREADINITIALIZED)
     {
         /* Do now some process cleanup that requires a valid win32 thread */
