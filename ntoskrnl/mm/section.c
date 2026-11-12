@@ -6776,10 +6776,22 @@ MiFlushDirtyCluster(
 /*
  * FlushViewOfFile (MmFlushVirtualMemory): a page written through a mapped view is dirty only in the PTE of the view
  * until the view is unmapped or the page is taken from the process.  Move those dirty bits of [Start, End) of the
- * view into the segment's page entries, so the segment flush that follows writes the data.  The PTE's bit is
- * cleared (with its TB entry flushed) before the entry is marked, so a write after this sets it again and is
- * caught by a later flush.  A private copy (copy-on-write view) maps another page and keeps its dirty bit.
+ * view (at most MM_TAKE_VIEW_DIRTY_MAX_PAGES pages) into the segment's page entries, so the segment flush that
+ * follows writes the data.  A private copy (copy-on-write view) maps another page and keeps its dirty bit.
  * The caller holds the address space lock and is attached to the process.
+ *
+ * Why no dirty bit is lost although the TB flush is one batch for all the pages:
+ *  1. Pass 1 clears each PTE's Dirty bit with a compare-exchange (a concurrent Accessed/Dirty set makes it retry)
+ *     and records the page.  From then on a processor that still has the old TB entry (Dirty already set in it)
+ *     may write without setting the PTE's bit again.  That write goes into the page itself.
+ *  2. The batch's TB flush returns only when every processor running the process has dropped its entries.  A write
+ *     after that goes through a fresh walk and sets the PTE's Dirty bit again; the next flush or the unmap takes it.
+ *  3. Pass 2 marks the recorded pages dirty in the segment, after the flush and still under the segment lock.  The
+ *     lazy writer and the page-out path read the entries only under that lock, so none of them can see the page
+ *     unmarked after the bit was taken, and none writes the page before the mark.
+ *  4. The caller's segment flush (MmFlushSegment) runs after this returns, i.e. after step 3.  A write of step 1
+ *     happened before the TB flush completed, so it is in the page when the segment flush reads it.
+ * So the only writes this call does not cover are the ones after step 2, which set the PTE bit again.
  */
 VOID
 NTAPI
@@ -6793,22 +6805,46 @@ MmTakeViewDirtyBits(
     ULONG_PTR Address;
     LARGE_INTEGER Offset;
     ULONG_PTR Entry;
+    MM_TB_FLUSH_LIST FlushList;
+    ULONG_PTR Taken[MM_TAKE_VIEW_DIRTY_MAX_PAGES / (8 * sizeof(ULONG_PTR))];
+    ULONG Index, Pages;
 
     ASSERT(Process == PsGetCurrentProcess());
     ASSERT(MemoryArea->Type == MEMORY_AREA_SECTION_VIEW);
     ASSERT(FlagOn(*Segment->Flags, MM_DATAFILE_SEGMENT));
     ASSERT((Start >= MA_GetStartingAddress(MemoryArea)) && (End <= MA_GetEndingAddress(MemoryArea)));
+    ASSERT((End - Start) <= ((ULONG_PTR)MM_TAKE_VIEW_DIRTY_MAX_PAGES * PAGE_SIZE));
+
+    Pages = (ULONG)((End - Start) >> PAGE_SHIFT);
+    RtlZeroMemory(Taken, sizeof(Taken));
+    MmInitializeTbFlushList(&FlushList, FALSE);
 
     MmLockSectionSegment(Segment);
 
-    for (Address = Start; Address < End; Address += PAGE_SIZE)
+    /* Pass 1: clear the PTE bits */
+    for (Index = 0; Index < Pages; Index++)
     {
+        Address = Start + ((ULONG_PTR)Index << PAGE_SHIFT);
         Offset.QuadPart = MemoryArea->SectionData.ViewOffset + (Address - MA_GetStartingAddress(MemoryArea));
         Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
         if ((Entry == 0) || IS_SWAP_FROM_SSE(Entry) || MM_IS_WAIT_PTE(Entry))
             continue;
-        if (MmTakeDirtyBit(Process, (PVOID)Address, PFN_FROM_SSE(Entry)))
-            MmSetPageEntrySectionSegment(Segment, &Offset, DIRTY_SSE(Entry));
+        if (MmTakeDirtyBit(Process, (PVOID)Address, PFN_FROM_SSE(Entry), &FlushList))
+            Taken[Index / (8 * sizeof(ULONG_PTR))] |= (ULONG_PTR)1 << (Index % (8 * sizeof(ULONG_PTR)));
+    }
+
+    /* One TB flush for the batch, before the pages are marked and before the segment lock is released */
+    MmFlushTbList(&FlushList);
+
+    /* Pass 2: mark them in the segment (the entries cannot have changed: the segment lock is held) */
+    for (Index = 0; Index < Pages; Index++)
+    {
+        if (!(Taken[Index / (8 * sizeof(ULONG_PTR))] & ((ULONG_PTR)1 << (Index % (8 * sizeof(ULONG_PTR))))))
+            continue;
+        Address = Start + ((ULONG_PTR)Index << PAGE_SHIFT);
+        Offset.QuadPart = MemoryArea->SectionData.ViewOffset + (Address - MA_GetStartingAddress(MemoryArea));
+        Entry = MmGetPageEntrySectionSegment(Segment, &Offset);
+        MmSetPageEntrySectionSegment(Segment, &Offset, DIRTY_SSE(Entry));
     }
 
     MmUnlockSectionSegment(Segment);
