@@ -36,7 +36,7 @@ add_wow64_apitest(kernel32
     ConsoleWriteLatency SetConsoleWindowInfo WerRegisterMemoryFile
     CancelIoEx ReadDirectoryChanges)
 # ConsoleCaret, ConsoleCtrlEventRace, ConsoleCtrlHandler and ConsoleDisplayMode also call user32/gdi32: kernel32_apitest only
-add_wow64_apitest(ntdll StackOverflowDispatch NtRaiseHardErrorMode
+add_wow64_apitest(ntdll StackOverflowDispatch FaultContext NtRaiseHardErrorMode
     Wow64Continue ThreadDebugRegisters Wow64ServiceArguments Wow64FloatState Wow64QuerySystemTime NtAccessCheckByType NtAccessCheckByTypeResultList Wow64SystemRangeStart Wow64HandleInformation Wow64QueryVirtualMemory NtQueryVirtualMemoryRegion Wow64PowerInformation Wow64QueryInformationProcess Wow64FailedOpenHandle NtOpenKey NtOpenKeyEx NtQueryKey NtQueryValueKey
     RtlDetermineDosPathNameType RtlUnicodeStringToAnsiString StackOverflow StackOverflowThread StackDeepRecursion SystemCallStubs
     Wow64SystemProcessInformation NtSetInformationFile NtQueryInformationFile NtQueryVolumeInformationFile NtQueryDirectoryFile
@@ -68,10 +68,10 @@ if(ARCH STREQUAL "i386")
     set_module_type(wow64_gui_load win32cui)
     add_importlibs(wow64_gui_load msvcrt kernel32)
 
-    add_asm_files(wow64_continue_asm ../ntdll/i386/Wow64Continue.S ../ntdll/i386/StackOverflowDispatch.S)
+    add_asm_files(wow64_continue_asm ../ntdll/i386/Wow64Continue.S ../ntdll/i386/StackOverflowDispatch.S ../ntdll/i386/FaultContext.S)
     target_sources(ntdll_wow64_apitest PRIVATE ${wow64_continue_asm})
 elseif(ARCH STREQUAL "amd64")
-    add_asm_files(wow64_continue_asm ../ntdll/amd64/Wow64Continue.S ../ntdll/amd64/StackOverflowDispatch.S)
+    add_asm_files(wow64_continue_asm ../ntdll/amd64/Wow64Continue.S ../ntdll/amd64/StackOverflowDispatch.S ../ntdll/amd64/FaultContext.S)
     target_sources(ntdll_wow64_apitest PRIVATE ${wow64_continue_asm})
 endif()
 
