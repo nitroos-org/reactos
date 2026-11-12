@@ -34,8 +34,16 @@
 #endif /* REACTOS_VERSION_DLL */
 #endif /* REACTOS_FILEVERSION */
 
+/* System DLLs carry the Windows 10 22H2 product version, as every Windows DLL does
+ * (Windows: PRODUCTVERSION 10.0.19041.x). OpenJDK reads dwProductVersion of kernel32.dll to
+ * derive os.name/os.version (java_props_md.c); other programs do the same to detect the OS.
+ * Executables and the display strings (ProductName, About, winver) keep the ReactOS numbers. */
 #ifndef REACTOS_PRODUCTVERSION
+#ifdef REACTOS_VERSION_DLL
+#define REACTOS_PRODUCTVERSION 10,0,19045,5247
+#else
 #define REACTOS_PRODUCTVERSION KERNEL_VERSION_MAJOR,KERNEL_VERSION_MINOR,KERNEL_VERSION_PATCH_LEVEL,0
+#endif /* REACTOS_VERSION_DLL */
 #endif /* REACTOS_PRODUCTVERSION */
 
 #ifndef REACTOS_FILEFLAGSMASK
@@ -99,7 +107,11 @@
 #endif /* REACTOS_STR_PRODUCT_NAME */
 
 #ifndef REACTOS_STR_PRODUCT_VERSION
+#ifdef REACTOS_VERSION_DLL
+#define REACTOS_STR_PRODUCT_VERSION "10.0.19045.5247"
+#else
 #define REACTOS_STR_PRODUCT_VERSION KERNEL_VERSION_RC
+#endif /* REACTOS_VERSION_DLL */
 #endif /* REACTOS_STR_PRODUCT_VERSION */
 
 #ifndef REACTOS_STR_PRODUCT_BUILD
