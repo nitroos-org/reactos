@@ -13,6 +13,7 @@ extern void func_OnlineIdSystemAuthenticator(void);
 extern void func_Language(void);
 extern void func_OnlineIdServiceTicketRequest(void);
 extern void func_PropertyValue(void);
+extern void func_ApiInformation(void);
 
 const struct test winetest_testlist[] =
 {
@@ -21,5 +22,6 @@ const struct test winetest_testlist[] =
     { "Language", func_Language },
     { "OnlineIdServiceTicketRequest", func_OnlineIdServiceTicketRequest },
     { "PropertyValue", func_PropertyValue },
+    { "ApiInformation", func_ApiInformation },
     { 0, 0 }
 };

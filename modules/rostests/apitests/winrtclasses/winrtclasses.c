@@ -1109,3 +1109,293 @@ START_TEST(PropertyValue)
 
     RELEASE(statics);
 }
+
+/* ---- ApiInformation ----
+ * Windows.Foundation.Metadata.ApiInformation. IApiInformationStatics: member order and id from microsoft/windows-rs
+ * (Windows/Foundation/Metadata/mod.rs). The answers are those of this system's own types and contracts (see
+ * dll/win32/wintypes/apiinformation.c), so the test only asks for types it knows to be provided or to be absent. */
+
+DEFINE_GUID(IID_IApiInformationStatics_, 0x997439fe, 0xf681, 0x4a11, 0xb4, 0x16, 0xc1, 0x3a, 0x47, 0xe8, 0xba, 0x36);
+
+#define AI_ISTYPE 6
+#define AI_ISMETHOD 7
+#define AI_ISMETHODARITY 8
+#define AI_ISEVENT 9
+#define AI_ISPROPERTY 10
+#define AI_ISREADONLYPROP 11
+#define AI_ISWRITEABLEPROP 12
+#define AI_ISENUMVALUE 13
+#define AI_CONTRACT 14
+#define AI_CONTRACTMINOR 15
+
+static const WCHAR ApiInfoClass[] = L"Windows.Foundation.Metadata.ApiInformation";
+static const WCHAR ClassKeyBase[] = L"SOFTWARE\\Microsoft\\WindowsRuntime\\ActivatableClassId\\";
+
+static void TestApiInformationRegistration(void)
+{
+    HKEY key;
+    WCHAR path[MAX_PATH], key_name[256];
+    DWORD type, size, value;
+    LONG ret;
+
+    wcscpy(key_name, ClassKeyBase);
+    wcscat(key_name, ApiInfoClass);
+    ret = RegOpenKeyExW(HKEY_LOCAL_MACHINE, key_name, 0, KEY_READ, &key);
+    ok(ret == ERROR_SUCCESS, "the class key is not registered: %ld\n", ret);
+    if (ret)
+        return;
+    size = sizeof(path);
+    ret = RegQueryValueExW(key, L"DllPath", NULL, &type, (BYTE *)path, &size);
+    ok(ret == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ), "DllPath: %ld, type %lu\n", ret, type);
+    if (ret == ERROR_SUCCESS)
+    {
+        WCHAR *end = path + wcslen(path) - wcslen(L"wintypes.dll");
+        ok(end >= path && _wcsicmp(end, L"wintypes.dll") == 0, "DllPath is '%ls', expected wintypes.dll\n", path);
+    }
+    size = sizeof(value);
+    ret = RegQueryValueExW(key, L"ActivationType", NULL, &type, (BYTE *)&value, &size);
+    ok(ret == ERROR_SUCCESS && type == REG_DWORD && value == 0, "ActivationType: %ld, type %lu, value %lu\n", ret, type, value);
+    RegCloseKey(key);
+}
+
+static BYTE AiType(void *statics, const WCHAR *name, HRESULT *phr)
+{
+    HSTRING h = name ? Str(name) : NULL;
+    BYTE present = 0xEE;
+    HRESULT hr = ((PFN_HSTR_OUT)VTBL(statics)[AI_ISTYPE])(statics, h, &present);
+
+    if (phr)
+        *phr = hr;
+    if (h)
+        pWindowsDeleteString(h);
+    return present;
+}
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_2HSTR_OUT)(void *, HSTRING, HSTRING, void *);
+typedef HRESULT (STDMETHODCALLTYPE *PFN_2HSTR_U32_OUT)(void *, HSTRING, HSTRING, UINT32, void *);
+typedef HRESULT (STDMETHODCALLTYPE *PFN_HSTR_U16_OUT)(void *, HSTRING, UINT16, void *);
+typedef HRESULT (STDMETHODCALLTYPE *PFN_HSTR_U16_U16_OUT)(void *, HSTRING, UINT16, UINT16, void *);
+
+static BYTE AiMember(void *statics, int slot, const WCHAR *type, const WCHAR *member, HRESULT *phr)
+{
+    HSTRING t = type ? Str(type) : NULL, m = member ? Str(member) : NULL;
+    BYTE present = 0xEE;
+    HRESULT hr = ((PFN_2HSTR_OUT)VTBL(statics)[slot])(statics, t, m, &present);
+
+    if (phr)
+        *phr = hr;
+    if (t)
+        pWindowsDeleteString(t);
+    if (m)
+        pWindowsDeleteString(m);
+    return present;
+}
+
+static BYTE AiContract(void *statics, const WCHAR *name, UINT16 major, int with_minor, UINT16 minor, HRESULT *phr)
+{
+    HSTRING h = name ? Str(name) : NULL;
+    BYTE present = 0xEE;
+    HRESULT hr;
+
+    if (with_minor)
+        hr = ((PFN_HSTR_U16_U16_OUT)VTBL(statics)[AI_CONTRACTMINOR])(statics, h, major, minor, &present);
+    else
+        hr = ((PFN_HSTR_U16_OUT)VTBL(statics)[AI_CONTRACT])(statics, h, major, &present);
+    if (phr)
+        *phr = hr;
+    if (h)
+        pWindowsDeleteString(h);
+    return present;
+}
+
+/* A class key that points at a DLL that is there or is not: IsTypePresent follows the registration */
+static void TestApiInformationRegisteredClasses(void *statics)
+{
+    static const WCHAR Scratch[] = L"Windows.NitroApiTest.ScratchClass";
+    WCHAR key_name[256], dll[MAX_PATH];
+    HKEY key;
+    HRESULT hr;
+    BYTE present;
+    LONG ret;
+
+    wcscpy(key_name, ClassKeyBase);
+    wcscat(key_name, Scratch);
+    present = AiType(statics, Scratch, &hr);
+    ok(hr == S_OK && present == 0, "unregistered scratch class: 0x%08lx, %u\n", hr, present);
+
+    ret = RegCreateKeyExW(HKEY_LOCAL_MACHINE, key_name, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, NULL);
+    if (ret)
+    {
+        skip("cannot create a class key (%ld)\n", ret);
+        return;
+    }
+    wcscpy(dll, L"%SystemRoot%\\system32\\nitro-no-such-file.dll");
+    RegSetValueExW(key, L"DllPath", 0, REG_EXPAND_SZ, (BYTE *)dll, (wcslen(dll) + 1) * sizeof(WCHAR));
+    present = AiType(statics, Scratch, &hr);
+    ok(hr == S_OK && present == 0, "registered class with a missing DLL: 0x%08lx, %u\n", hr, present);
+
+    wcscpy(dll, L"%SystemRoot%\\system32\\kernel32.dll");
+    RegSetValueExW(key, L"DllPath", 0, REG_EXPAND_SZ, (BYTE *)dll, (wcslen(dll) + 1) * sizeof(WCHAR));
+    present = AiType(statics, Scratch, &hr);
+    ok(hr == S_OK && present == 1, "registered class with its DLL: 0x%08lx, %u\n", hr, present);
+    present = AiType(statics, L"Windows.nitroapitest.scratchclass", &hr);
+    ok(hr == S_OK && present == 0, "case of a registered class (names are case-sensitive): 0x%08lx, %u\n", hr, present);
+
+    RegCloseKey(key);
+    RegDeleteKeyW(HKEY_LOCAL_MACHINE, key_name);
+    present = AiType(statics, Scratch, &hr);
+    ok(hr == S_OK && present == 0, "deleted scratch class: 0x%08lx, %u\n", hr, present);
+}
+
+START_TEST(ApiInformation)
+{
+    void *statics = NULL, *af = NULL, *obj;
+    HRESULT hr;
+    BYTE present;
+    HSTRING name;
+    ULONG count;
+    IID *iids;
+    int level;
+
+    TestApiInformationRegistration();
+
+    if (!Init())
+    {
+        skip("combase.dll has no Windows Runtime activation\n");
+        return;
+    }
+    name = Str(ApiInfoClass);
+    hr = pRoGetActivationFactory(name, &IID_IApiInformationStatics_, &statics);
+    pWindowsDeleteString(name);
+    ok(hr == S_OK && statics, "RoGetActivationFactory(ApiInformation) returned 0x%08lx, %p\n", hr, statics);
+    if (!statics)
+        return;
+
+    /* measured on Windows 10: the factory of a static class has no runtime class name */
+    name = (HSTRING)1;
+    hr = GETNAME(statics, &name);
+    ok(hr == 0x8000000E /* E_ILLEGAL_METHOD_CALL */ && !name, "GetRuntimeClassName: 0x%08lx, %p\n", hr, name);
+    level = -1;
+    hr = GETTRUST(statics, &level);
+    ok(hr == S_OK && level == 0, "GetTrustLevel: 0x%08lx, %d\n", hr, level);
+    hr = QI(statics, &IID_IAF, &af);
+    ok(hr == S_OK && af, "QI(IActivationFactory) returned 0x%08lx\n", hr);
+    if (af)
+    {
+        obj = (void *)1;
+        hr = ((PFN_OUT)VTBL(af)[6])(af, &obj);
+        ok(FAILED(hr) && !obj, "ActivateInstance of a static class: 0x%08lx, %p\n", hr, obj);
+        RELEASE(af);
+    }
+    iids = NULL;
+    count = 0;
+    hr = ((PFN_GETIIDS)VTBL(statics)[3])(statics, &count, &iids);
+    ok(hr == S_OK && count == 2 && iids && IsEqualGUID(&iids[0], &IID_IAF) && IsEqualGUID(&iids[1], &IID_IApiInformationStatics_),
+       "GetIids: 0x%08lx, %lu\n", hr, count);
+    if (iids)
+        CoTaskMemFree(iids);
+
+    /* contracts: the table of RoIsApiContractPresent */
+    present = AiContract(statics, L"Windows.Foundation.UniversalApiContract", 1, 0, 0, &hr);
+    ok(hr == S_OK && present == 1, "UniversalApiContract 1: 0x%08lx, %u\n", hr, present);
+    present = AiContract(statics, L"Windows.Foundation.UniversalApiContract", 10, 0, 0, &hr);
+    ok(hr == S_OK && present == 1, "UniversalApiContract 10: 0x%08lx, %u\n", hr, present);
+    present = AiContract(statics, L"Windows.Foundation.UniversalApiContract", 11, 0, 0, &hr);
+    ok(hr == S_OK && present == 0, "UniversalApiContract 11: 0x%08lx, %u\n", hr, present);
+    present = AiContract(statics, L"Windows.Foundation.UniversalApiContract", 10, 1, 0, &hr);
+    ok(hr == S_OK && present == 1, "UniversalApiContract 10.0: 0x%08lx, %u\n", hr, present);
+    present = AiContract(statics, L"Windows.Foundation.UniversalApiContract", 10, 1, 1, &hr);
+    ok(hr == S_OK && present == 0, "UniversalApiContract 10.1: 0x%08lx, %u\n", hr, present);
+    present = AiContract(statics, L"Windows.Foundation.UniversalApiContract", 9, 1, 5, &hr);
+    ok(hr == S_OK && present == 1, "UniversalApiContract 9.5: 0x%08lx, %u\n", hr, present);
+    present = AiContract(statics, L"Windows.Foundation.NoSuchContract", 1, 0, 0, &hr);
+    ok(hr == S_OK && present == 0, "unknown contract: 0x%08lx, %u\n", hr, present);
+    present = AiContract(statics, L"windows.foundation.universalapicontract", 1, 0, 0, &hr);
+    ok(hr == S_OK && present == 1, "contract name in lower case: 0x%08lx, %u\n", hr, present);
+    present = AiContract(statics, L"", 1, 0, 0, &hr);
+    ok(hr == E_INVALIDARG && present == 0, "empty contract name: 0x%08lx, %u\n", hr, present);
+    present = AiContract(statics, NULL, 1, 1, 0, &hr);
+    ok(hr == E_INVALIDARG && present == 0, "NULL contract name: 0x%08lx, %u\n", hr, present);
+
+    /* types: what this system provides */
+    present = AiType(statics, ApiInfoClass, &hr);
+    ok(hr == S_OK && present == 1, "IsTypePresent(ApiInformation): 0x%08lx, %u\n", hr, present);
+    present = AiType(statics, L"Windows.Foundation.PropertyValue", &hr);
+    ok(hr == S_OK && present == 1, "IsTypePresent(PropertyValue): 0x%08lx, %u\n", hr, present);
+    present = AiType(statics, L"Windows.Foundation.IPropertyValue", &hr);
+    ok(hr == S_OK && present == 1, "IsTypePresent(IPropertyValue): 0x%08lx, %u\n", hr, present);
+    present = AiType(statics, L"Windows.Foundation.PropertyType", &hr);
+    ok(hr == S_OK && present == 1, "IsTypePresent(PropertyType): 0x%08lx, %u\n", hr, present);
+    present = AiType(statics, L"Windows.Nonexistent.NoSuchType", &hr);
+    ok(hr == S_OK && present == 0, "IsTypePresent(unknown type): 0x%08lx, %u\n", hr, present);
+    /* measured on Windows 10: a name in a namespace that is not known fails with 0x80073D54 (also a name in lower case) */
+    present = AiType(statics, L"Nonexistent.Type.Name", &hr);
+    ok(hr == 0x80073D54 && present == 0, "IsTypePresent(unknown namespace): 0x%08lx, %u\n", hr, present);
+    present = AiType(statics, L"System.String", &hr);
+    ok(hr == 0x80073D54 && present == 0, "IsTypePresent(System.String): 0x%08lx, %u\n", hr, present);
+    present = AiType(statics, L"windows.foundation.metadata.apiinformation", &hr);
+    ok(hr == 0x80073D54 && present == 0, "IsTypePresent(lower case): 0x%08lx, %u\n", hr, present);
+    present = AiType(statics, L"Windows.Foundation.Metadata.ApiInformation ", &hr);
+    ok(hr == S_OK && present == 0, "IsTypePresent(name and a space): 0x%08lx, %u\n", hr, present);
+    present = AiType(statics, L"Windows.Foundation", &hr);
+    ok(hr == S_OK && present == 0, "IsTypePresent(a namespace): 0x%08lx, %u\n", hr, present);
+    present = AiType(statics, L"Windows", &hr);
+    ok(hr == S_OK && present == 0, "IsTypePresent(Windows): 0x%08lx, %u\n", hr, present);
+    present = AiType(statics, L"", &hr);
+    ok(hr == E_INVALIDARG && present == 0, "IsTypePresent(empty): 0x%08lx, %u\n", hr, present);
+    present = AiType(statics, NULL, &hr);
+    ok(hr == E_INVALIDARG && present == 0, "IsTypePresent(NULL): 0x%08lx, %u\n", hr, present);
+    TestApiInformationRegisteredClasses(statics);
+
+    /* members */
+    present = AiMember(statics, AI_ISMETHOD, ApiInfoClass, L"IsTypePresent", &hr);
+    ok(hr == S_OK && present == 1, "IsMethodPresent(IsTypePresent): 0x%08lx, %u\n", hr, present);
+    present = AiMember(statics, AI_ISMETHOD, ApiInfoClass, L"IsApiContractPresent", &hr);
+    ok(hr == S_OK && present == 1, "IsMethodPresent(IsApiContractPresent): 0x%08lx, %u\n", hr, present);
+    present = AiMember(statics, AI_ISMETHOD, ApiInfoClass, L"isTypePresent", &hr);
+    ok(hr == S_OK && present == 0, "IsMethodPresent(isTypePresent, names are case-sensitive): 0x%08lx, %u\n", hr, present);
+    present = AiMember(statics, AI_ISMETHOD, ApiInfoClass, L"NoSuchMethod", &hr);
+    ok(hr == S_OK && present == 0, "IsMethodPresent(NoSuchMethod): 0x%08lx, %u\n", hr, present);
+    present = AiMember(statics, AI_ISMETHOD, L"Windows.Nonexistent.NoSuchType", L"IsTypePresent", &hr);
+    ok(hr == S_OK && present == 0, "IsMethodPresent(unknown type): 0x%08lx, %u\n", hr, present);
+    {
+        HSTRING t = Str(ApiInfoClass), m = Str(L"IsApiContractPresent");
+
+        present = 0xEE;
+        hr = ((PFN_2HSTR_U32_OUT)VTBL(statics)[AI_ISMETHODARITY])(statics, t, m, 3, &present);
+        ok(hr == S_OK && present == 1, "IsMethodPresent(IsApiContractPresent, 3): 0x%08lx, %u\n", hr, present);
+        present = 0xEE;
+        hr = ((PFN_2HSTR_U32_OUT)VTBL(statics)[AI_ISMETHODARITY])(statics, t, m, 4, &present);
+        ok(hr == S_OK && present == 0, "IsMethodPresent(IsApiContractPresent, 4): 0x%08lx, %u\n", hr, present);
+        pWindowsDeleteString(t);
+        pWindowsDeleteString(m);
+    }
+    present = AiMember(statics, AI_ISEVENT, ApiInfoClass, L"Changed", &hr);
+    ok(hr == S_OK && present == 0, "IsEventPresent: 0x%08lx, %u\n", hr, present);
+    present = AiMember(statics, AI_ISPROPERTY, ApiInfoClass, L"IsTypePresent", &hr);
+    ok(hr == S_OK && present == 0, "IsPropertyPresent: 0x%08lx, %u\n", hr, present);
+    present = AiMember(statics, AI_ISREADONLYPROP, ApiInfoClass, L"IsTypePresent", &hr);
+    ok(hr == S_OK && present == 0, "IsReadOnlyPropertyPresent: 0x%08lx, %u\n", hr, present);
+    present = AiMember(statics, AI_ISWRITEABLEPROP, ApiInfoClass, L"IsTypePresent", &hr);
+    ok(hr == S_OK && present == 0, "IsWriteablePropertyPresent: 0x%08lx, %u\n", hr, present);
+    present = AiMember(statics, AI_ISENUMVALUE, L"Windows.Foundation.PropertyType", L"UInt8", &hr);
+    ok(hr == S_OK && present == 1, "IsEnumNamedValuePresent(UInt8): 0x%08lx, %u\n", hr, present);
+    present = AiMember(statics, AI_ISENUMVALUE, L"Windows.Foundation.PropertyType", L"RectArray", &hr);
+    ok(hr == S_OK && present == 1, "IsEnumNamedValuePresent(RectArray): 0x%08lx, %u\n", hr, present);
+    present = AiMember(statics, AI_ISENUMVALUE, L"Windows.Foundation.PropertyType", L"NoSuchValue", &hr);
+    ok(hr == S_OK && present == 0, "IsEnumNamedValuePresent(NoSuchValue): 0x%08lx, %u\n", hr, present);
+    present = AiMember(statics, AI_ISENUMVALUE, ApiInfoClass, L"UInt8", &hr);
+    ok(hr == S_OK && present == 0, "IsEnumNamedValuePresent(not an enum): 0x%08lx, %u\n", hr, present);
+    present = AiMember(statics, AI_ISMETHOD, NULL, L"IsTypePresent", &hr);
+    ok(hr == E_INVALIDARG && present == 0, "IsMethodPresent(NULL type): 0x%08lx, %u\n", hr, present);
+    present = AiMember(statics, AI_ISMETHOD, ApiInfoClass, L"", &hr);
+    ok(hr == E_INVALIDARG && present == 0, "IsMethodPresent(empty member): 0x%08lx, %u\n", hr, present);
+
+    /* a NULL result pointer */
+    name = Str(ApiInfoClass);
+    hr = ((PFN_HSTR_OUT)VTBL(statics)[AI_ISTYPE])(statics, name, NULL);
+    ok(hr == E_POINTER, "IsTypePresent(NULL result): 0x%08lx\n", hr);
+    pWindowsDeleteString(name);
+
+    RELEASE(statics);
+}
