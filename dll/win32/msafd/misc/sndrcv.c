@@ -1172,13 +1172,14 @@ WSPSend(SOCKET Handle,
             }
         }
         
-        Event = lpOverlapped->hEvent;
-        // APCContext is unsupported when using event
-        if (Event)
+        /* With a completion routine hEvent is ignored (it is free for the application to carry context),
+         * the request completes through the APC set up above */
+        if (!lpCompletionRoutine)
         {
-            if (lpCompletionRoutine)
-                HeapFree(GetProcessHeap(), 0, APCContext);
-            APCContext = NULL;
+            Event = lpOverlapped->hEvent;
+            // APCContext is unsupported when using event
+            if (Event)
+                APCContext = NULL;
         }
 
         SendInfo.AfdFlags |= AFD_OVERLAPPED;
