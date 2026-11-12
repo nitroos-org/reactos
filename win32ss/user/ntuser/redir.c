@@ -1138,7 +1138,7 @@ UserRedirUpdateLayered(
 {
     PREDIR r;
     RECTL rc;
-    BOOL bAlpha = FALSE;
+    BOOL bAlpha = FALSE, bCopied;
 
     *pbRet = FALSE;
     if (gRedirLevel < 2 || !Wnd || !Wnd->spwndParent || !UserIsDesktopWindow(Wnd->spwndParent) ||
@@ -1161,15 +1161,16 @@ UserRedirUpdateLayered(
             bWhole = TRUE;
         if (!RECTL_bIsEmptyRect(&rc))
         {
-            if (!GreRedirLoadFromDC(r->psurf, hdcSrc, pptSrc ? pptSrc->x : 0, pptSrc ? pptSrc->y : 0, &rc, &bAlpha))
+            if (!GreRedirLoadFromDC(r->psurf, hdcSrc, pptSrc ? pptSrc->x : 0, pptSrc ? pptSrc->y : 0, &rc, &bAlpha, &bCopied))
             {
                 /* Not a memory DC with a bitmap, or its bits could not be read (verify the error code on the oracle) */
                 EngSetLastError(ERROR_INVALID_PARAMETER);
                 return TRUE;
             }
             /* The alpha of the whole content: taken from a full update, or the first one; a partial update of
-               another format does not change how the rest is blended */
-            if (bWhole || !r->bUlw)
+               another format does not change how the rest is blended. A source range wholly outside the source
+               bitmap copied nothing: the content (and how it is blended) stays as it was */
+            if (bCopied && (bWhole || !r->bUlw))
                 r->bUlwAlpha = (BOOLEAN)bAlpha;
         }
     }
