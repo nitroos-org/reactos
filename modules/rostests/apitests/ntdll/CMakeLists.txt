@@ -269,6 +269,7 @@ list(APPEND SOURCE
     SystemCallStubs.c
     SystemDllTls.c
     SystemInfo.c
+    ThreadLockStress.c
     UserModeException.c
     ZwQuerySystemInformationEx.c
     Timer.c
