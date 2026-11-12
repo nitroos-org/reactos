@@ -29,6 +29,10 @@ typedef struct _TEST_CONTEXT
 } TEST_CONTEXT, *PTEST_CONTEXT;
 
 
+/* Windows 10 reports the generic STATUS_INVALID_PARAMETER where earlier versions number the parameter
+   (invalid ZeroBits, invalid AllocationType) */
+#define NT10_OR(Nt10Status, OldStatus) ((GetNTVersion() >= _WIN32_WINNT_WIN10) ? (Nt10Status) : (OldStatus))
+
 #define ALLOC_MEMORY_WITH_FREE(ProcessHandle, BaseAddress, ZeroBits, RegionSize, AllocationType, Protect, RetStatus, FreeStatus)   \
     do {                                                                                                                   \
         PVOID __BaseSave = BaseAddress;                                                                                    \
@@ -121,11 +125,11 @@ SimpleErrorChecks(VOID)
 
     //ZERO BITS TESTS
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 21, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_NO_MEMORY, STATUS_MEMORY_NOT_ALLOCATED);
-    ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 22, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_INVALID_PARAMETER_3, STATUS_MEMORY_NOT_ALLOCATED);
+    ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 22, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, NT10_OR(STATUS_INVALID_PARAMETER, STATUS_INVALID_PARAMETER_3), STATUS_MEMORY_NOT_ALLOCATED);
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 3, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_SUCCESS, STATUS_SUCCESS);
     // -1 is valid on x64, see ZeroBitsTest below
 #ifndef _WIN64
-    ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, -1, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_INVALID_PARAMETER_3, STATUS_MEMORY_NOT_ALLOCATED);
+    ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, -1, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, NT10_OR(STATUS_INVALID_PARAMETER, STATUS_INVALID_PARAMETER_3), STATUS_MEMORY_NOT_ALLOCATED);
 #endif
 
     //REGION SIZE TESTS
@@ -145,7 +149,7 @@ SimpleErrorChecks(VOID)
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize, (MEM_PHYSICAL | MEM_RESERVE), PAGE_READWRITE, STATUS_SUCCESS, STATUS_SUCCESS);
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize, (MEM_PHYSICAL | MEM_COMMIT), PAGE_READWRITE, STATUS_INVALID_PARAMETER_5, STATUS_MEMORY_NOT_ALLOCATED);
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize, (MEM_RESET | MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_INVALID_PARAMETER_5, STATUS_MEMORY_NOT_ALLOCATED);
-    ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize, -1, PAGE_READWRITE, STATUS_INVALID_PARAMETER_5, STATUS_MEMORY_NOT_ALLOCATED);
+    ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize, -1, PAGE_READWRITE, NT10_OR(STATUS_INVALID_PARAMETER, STATUS_INVALID_PARAMETER_5), STATUS_MEMORY_NOT_ALLOCATED);
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize,  MEM_COMMIT, PAGE_READWRITE, STATUS_SUCCESS, STATUS_SUCCESS);
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize,  MEM_RESERVE, PAGE_READWRITE, STATUS_SUCCESS, STATUS_SUCCESS);
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize,  MEM_RESERVE, PAGE_WRITECOPY, STATUS_INVALID_PAGE_PROTECTION, STATUS_MEMORY_NOT_ALLOCATED);
@@ -592,7 +596,9 @@ START_TEST(ZwAllocateVirtualMemory)
 #ifdef _WIN64
     ok_eq_hex(Status, STATUS_COMMITMENT_LIMIT);
 #else
-    ok_eq_hex(Status, STATUS_NO_MEMORY);
+    /* Committing runs into the commit limit or, with enough of it, into the 2 GB address space */
+    ok(Status == STATUS_NO_MEMORY || Status == STATUS_COMMITMENT_LIMIT,
+       "Expected STATUS_NO_MEMORY or STATUS_COMMITMENT_LIMIT, got 0x%lx\n", Status);
 #endif
 
     ZeroBitsTest();
