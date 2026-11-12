@@ -260,30 +260,57 @@ IdsOfThread(HANDLE Thread, PCLIENT_ID Ids)
     return TRUE;
 }
 
-/* Handle count of the first csrss.exe, 0 when it cannot be read */
+/* A handle to the first csrss.exe, NULL when it cannot be opened */
 static
-DWORD
-CsrssHandleCount(VOID)
+HANDLE
+OpenCsrss(VOID)
 {
     HANDLE Snapshot, Process;
     PROCESSENTRY32W Entry;
-    DWORD Count = 0, Pid = 0;
+    DWORD Pid = 0;
 
     Snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (Snapshot == INVALID_HANDLE_VALUE) return 0;
+    if (Snapshot == INVALID_HANDLE_VALUE) return NULL;
     Entry.dwSize = sizeof(Entry);
     if (Process32FirstW(Snapshot, &Entry))
         do
             if (!_wcsicmp(Entry.szExeFile, L"csrss.exe")) { Pid = Entry.th32ProcessID; break; }
         while (Process32NextW(Snapshot, &Entry));
     CloseHandle(Snapshot);
-    if (!Pid) return 0;
+    if (!Pid) return NULL;
     Process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, Pid);
     if (!Process) Process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, Pid);
+    return Process;
+}
+
+/* Handle count of the first csrss.exe, 0 when it cannot be read */
+static
+DWORD
+CsrssHandleCount(VOID)
+{
+    HANDLE Process = OpenCsrss();
+    DWORD Count = 0;
+
     if (!Process) return 0;
     if (!GetProcessHandleCount(Process, &Count)) Count = 0;
     CloseHandle(Process);
     return Count;
+}
+
+/* Private bytes of the first csrss.exe, 0 when they cannot be read */
+static
+SIZE_T
+CsrssPrivateBytes(VOID)
+{
+    HANDLE Process = OpenCsrss();
+    VM_COUNTERS_EX Counters;
+    SIZE_T Bytes = 0;
+
+    if (!Process) return 0;
+    if (NT_SUCCESS(NtQueryInformationProcess(Process, ProcessVmCounters, &Counters, sizeof(Counters), NULL)))
+        Bytes = Counters.PrivateUsage;
+    CloseHandle(Process);
+    return Bytes;
 }
 
 static DWORD WINAPI Quick(LPVOID Arg) { return 0x77; }
@@ -513,6 +540,76 @@ ConsoleChildLeakTest(VOID)
 }
 
 /*
+ * A console is a heap allocation in csrss (the console itself, its frontend, screen and input buffers): all of
+ * it has to go when the last process of the console exits. Every console that was left behind costs csrss about
+ * 800 bytes for good, so a few thousand console children must not make its private bytes grow by anything like
+ * that. The children run in batches (a console each: the service has none), after a warm-up that lets the heap
+ * reach its working size. Readable in the LocalSystem service run only, like the handle checks.
+ */
+#define PRIVATE_BATCH     8
+#define PRIVATE_WARMUP    100
+#define PRIVATE_ROUNDS    400
+#define PRIVATE_PER_CHILD 400
+
+static
+BOOL
+RunConsoleBatch(PWCHAR CommandLine)
+{
+    STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
+    PROCESS_INFORMATION Children[PRIVATE_BATCH];
+    DWORD I, Started = 0, Code;
+    BOOL Ok = TRUE;
+
+    for (I = 0; I < PRIVATE_BATCH; I++)
+    {
+        if (CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &Children[Started]))
+            Started++;
+        else
+            Ok = FALSE;
+    }
+    for (I = 0; I < Started; I++)
+    {
+        Code = 0;
+        WaitForSingleObject(Children[I].hProcess, 30000);
+        GetExitCodeProcess(Children[I].hProcess, &Code);
+        if (Code != CHILD_OK) Ok = FALSE;
+        CloseHandle(Children[I].hProcess);
+        CloseHandle(Children[I].hThread);
+    }
+    return Ok;
+}
+
+static
+VOID
+ConsoleChildPrivateTest(VOID)
+{
+    WCHAR Self[MAX_PATH], CommandLine[MAX_PATH + 16];
+    SIZE_T Before, After, Allowed;
+    DWORD I, Bad = 0, Children = PRIVATE_BATCH * PRIVATE_ROUNDS;
+
+    if (!CsrssPrivateBytes())
+    {
+        Log("CSRIDS console-child-no-private-growth: csrss private bytes not readable SKIP\n");
+        return;
+    }
+
+    GetModuleFileNameW(NULL, Self, MAX_PATH);
+    _snwprintf(CommandLine, RTL_NUMBER_OF(CommandLine), L"\"%s\" child", Self);
+    for (I = 0; I < PRIVATE_WARMUP; I++)
+        if (!RunConsoleBatch(CommandLine)) Bad++;
+    Sleep(1500);
+    Before = CsrssPrivateBytes();
+    for (I = 0; I < PRIVATE_ROUNDS; I++)
+        if (!RunConsoleBatch(CommandLine)) Bad++;
+    Sleep(1500);
+    After = CsrssPrivateBytes();
+    Allowed = (SIZE_T)Children * PRIVATE_PER_CHILD;
+    Log("CSRIDS console-child-no-private-growth: %lu children, %lu failed batches; csrss private bytes %Iu -> %Iu (%Id per child, limit %u)\n",
+        Children, Bad, Before, After, ((SSIZE_T)After - (SSIZE_T)Before) / (SSIZE_T)Children, (UINT)PRIVATE_PER_CHILD);
+    Check("console-child-no-private-growth", (!Bad && After <= Before + Allowed) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL, STATUS_SUCCESS);
+}
+
+/*
  * rvcsrss 2: the create-time branch of BaseSrvCheckNewProcess. A spawner process creates an unregistered
  * child and exits; once its pid is free we create processes until one gets that pid. That process names the
  * orphan as its new process: the parent pid matches, but the orphan is older than it: refused.
@@ -707,6 +804,7 @@ Tests(BOOL System)
     DeadThreadTests();
     ProcessLeakTests();
     ConsoleChildLeakTest();
+    ConsoleChildPrivateTest();
     PidReuseTest();
     if (System) SbTests();
     Log("CSRIDS done failures=%lu\n", Failures);
