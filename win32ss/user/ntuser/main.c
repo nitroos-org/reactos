@@ -809,6 +809,7 @@ ExitThreadCallback(PETHREAD Thread)
     PEPROCESS Process;
     PTHREADINFO ptiCurrent;
     PWINDOWLIST pwl, pwlNext;
+    BOOLEAN bCsrssLast;
 
     Process = Thread->ThreadsProcess;
 
@@ -853,9 +854,10 @@ ExitThreadCallback(PETHREAD Thread)
     /* Decrement thread count and check if its 0 */
     ppiCurrent->cThreads--;
 
-    /* The last Win32 thread of CSRSS: the windows the desktop thread left */
-    if (ppiCurrent->cThreads == 0 && gptiDesktopThread && gptiDesktopThread->ppi == ppiCurrent)
-        IntDesktopThreadProcessExit(ppiCurrent);
+    /* The last Win32 thread of CSRSS: its desktop thread's windows go once this thread's
+       own windows (a console window is a child of the desktop window) are destroyed */
+    bCsrssLast = (ppiCurrent->cThreads == 0 && gptiDesktopThread &&
+                  gptiDesktopThread->ppi == ppiCurrent);
 
     if (ptiCurrent->TIF_flags & TIF_GUITHREADINITIALIZED)
     {
@@ -901,6 +903,12 @@ ExitThreadCallback(PETHREAD Thread)
         }
         UserAssignmentUnlock((PVOID*)&ptiCurrent->spDefaultImc);
 
+        if (bCsrssLast)
+        {
+            IntDesktopThreadProcessExit(ppiCurrent);
+            bCsrssLast = FALSE;
+        }
+
         if (ppiCurrent && ppiCurrent->ptiList == ptiCurrent && !ptiCurrent->ptiSibling &&
             ppiCurrent->W32PF_flags & W32PF_CLASSESREGISTERED)
         {
@@ -932,6 +940,21 @@ ExitThreadCallback(PETHREAD Thread)
     {
        KeSetKernelStackSwapEnable(TRUE);
        ptiCurrent->cEnterCount = 0;
+    }
+
+    /* The last thread of CSRSS never became a GUI thread: it has no windows or
+       classes of its own to wait for, but the desktop thread's windows and CSRSS's
+       classes still go with it */
+    if (bCsrssLast)
+    {
+        IntDesktopThreadProcessExit(ppiCurrent);
+
+        if (ppiCurrent->ptiList == ptiCurrent && !ptiCurrent->ptiSibling &&
+            (ppiCurrent->W32PF_flags & W32PF_CLASSESREGISTERED))
+        {
+            DestroyProcessClasses(ppiCurrent);
+            ppiCurrent->W32PF_flags &= ~W32PF_CLASSESREGISTERED;
+        }
     }
 
     /* Find the THREADINFO in the PROCESSINFO's list */

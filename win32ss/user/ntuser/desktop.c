@@ -227,11 +227,19 @@ IntFreeDesktopWindow(IN PWND pwnd)
     BOOLEAN bBorrowed = FALSE, bAttached = FALSE;
     KAPC_STATE ApcState;
 
-    ASSERT(gptiDesktopThread != NULL);
-    ASSERT(pwnd->head.pti == gptiDesktopThread);
-    ASSERT(pwnd->spwndChild == NULL);
     ASSERT(UserIsEnteredExclusive());
     ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL); /* not in a DPC */
+
+    /* The desktop thread is gone (IntDesktopThreadProcessExit, IntReleaseDesktopThread):
+       nothing is left to own the window or to free it with. Leak it and its heap. */
+    if (gptiDesktopThread == NULL)
+    {
+        WARN("No desktop thread to free window %p of a deleted desktop with, leaking it\n", pwnd);
+        return FALSE;
+    }
+
+    ASSERT(pwnd->head.pti == gptiDesktopThread);
+    ASSERT(pwnd->spwndChild == NULL);
 
     if (PsGetCurrentProcessWin32Process() == NULL)
     {
@@ -315,26 +323,38 @@ IntDesktopThreadProcessExit(_In_ PPROCESSINFO ppi)
     for (i = 0; i < gHandleTable->allocated_handles; i++)
     {
         PUSER_HANDLE_ENTRY Entry = &gHandleTable->handles[i];
-        PWND pwnd;
+        PWND pwnd, pwndOther;
         PDESKTOP pdesk;
 
-        if (Entry->type != TYPE_WINDOW || Entry->pi != ptiDesktop ||
-            (Entry->flags & HANDLEENTRY_INDESTROY))
-        {
+        if (Entry->type != TYPE_WINDOW || Entry->pi != ptiDesktop)
             continue;
-        }
 
         pwnd = Entry->ptr;
         if (!IntIsDesktopOwnedWindow(pwnd))
             continue;
 
-        if (pwnd->spwndChild)
+        /* One in destroy is not ours to free: it stays, and so does the THREADINFO */
+        if (Entry->flags & HANDLEENTRY_INDESTROY)
         {
             Left++;
             continue;
         }
 
         pdesk = pwnd->head.rpdesk;
+        pwndOther = (pdesk->pDeskInfo && pdesk->pDeskInfo->spwnd == pwnd) ?
+                    pdesk->spwndMessage : (pdesk->pDeskInfo ? pdesk->pDeskInfo->spwnd : NULL);
+
+        /* A window with children stays. So do both windows of a desktop when one has
+           children or is in destroy: a thread of the desktop reaches them through the
+           desktop's pointers, which are NULL once a window is freed (nothing may
+           find the desktop with only one of the two) */
+        if (pwnd->spwndChild ||
+            (pwndOther && (pwndOther->spwndChild || UserObjectInDestroy(UserHMGetHandle(pwndOther)))))
+        {
+            Left++;
+            continue;
+        }
+
         if (!IntFreeDesktopWindow(pwnd))
         {
             Left++;
@@ -343,21 +363,25 @@ IntDesktopThreadProcessExit(_In_ PPROCESSINFO ppi)
 
         Freed++;
         if (pdesk->pDeskInfo && pdesk->pDeskInfo->spwnd == pwnd)
+        {
             pdesk->pDeskInfo->spwnd = NULL;
+            pdesk->DesktopWindow = NULL;
+        }
         if (pdesk->spwndMessage == pwnd)
             pdesk->spwndMessage = NULL;
     }
 
     if (Left)
     {
-        ERR("CSRSS exits while %lu desktop windows still have child windows: they stay, "
-            "with the desktop thread's THREADINFO and the classes of CSRSS\n", Left);
+        WARN("CSRSS exits while %lu desktop windows still have child windows: they stay, "
+             "with the desktop thread's THREADINFO and the classes of CSRSS\n", Left);
         ppi->W32PF_flags &= ~W32PF_CLASSESREGISTERED;
         gbDesktopWindowsLeft = TRUE;
         return;
     }
 
     TRACE("CSRSS exits: freed %lu windows of the desktop thread\n", Freed);
+    /* As in IntReleaseDesktopThread: no desktop thread for the nested delete */
     gptiDesktopThread = NULL;
     IntDereferenceThreadInfo(ptiDesktop);
 }
@@ -383,16 +407,21 @@ IntReleaseDesktopThread(VOID)
         PUSER_HANDLE_ENTRY Entry = &gHandleTable->handles[i];
 
         if (Entry->type == TYPE_WINDOW && Entry->pi == ptiDesktop &&
-            !(Entry->flags & HANDLEENTRY_INDESTROY) &&
             IntIsDesktopOwnedWindow(Entry->ptr))
         {
             return;
         }
     }
 
-    ERR("The windows CSRSS left are gone, releasing the desktop thread\n");
+    WARN("The windows CSRSS left are gone, releasing the desktop thread\n");
     gbDesktopWindowsLeft = FALSE;
     DestroyProcessClasses(ptiDesktop->ppi);
+
+    /* The last reference to the THREADINFO ends in UserDeleteW32Process, which drops
+       the startup desktop of CSRSS: another desktop delete, nested under the USER lock
+       we hold. It finds no desktop thread (IntFreeDesktopWindow leaks then rather than
+       free a window with a THREADINFO that is going away), and no window of its own to
+       free: none of the windows tested above is left. */
     gptiDesktopThread = NULL;
     IntDereferenceThreadInfo(ptiDesktop);
 }
@@ -2102,7 +2131,10 @@ co_IntShowDesktop(PDESKTOP Desktop, ULONG Width, ULONG Height, BOOL bRedraw)
 {
     PWND pwnd = Desktop->pDeskInfo->spwnd;
     UINT flags = SWP_NOACTIVATE|SWP_NOZORDER|SWP_SHOWWINDOW;
-    ASSERT(pwnd);
+
+    /* The desktop window is gone when CSRSS exited (IntDesktopThreadProcessExit) */
+    if (!pwnd)
+        return STATUS_UNSUCCESSFUL;
 
     if (!bRedraw)
         flags |= SWP_NOREDRAW;
@@ -3018,13 +3050,6 @@ IntCreateDesktop(
     ptiCurrent = PsGetCurrentThreadWin32Thread();
     ASSERT(ptiCurrent);
 
-    /* The desktop thread owns the windows of a desktop: none once CSRSS has exited */
-    if (!gptiDesktopThread || (gptiDesktopThread->TIF_flags & TIF_INCLEANUP))
-    {
-        ERR("No desktop thread (CSRSS has exited), cannot create a desktop\n");
-        return STATUS_UNSUCCESSFUL;
-    }
-
     /* Turn off hooks when calling any CreateWindowEx from inside win32k */
     NoHooks = (ptiCurrent->TIF_flags & TIF_DISABLEHOOKS);
     ptiCurrent->TIF_flags |= TIF_DISABLEHOOKS;
@@ -3051,6 +3076,16 @@ IntCreateDesktop(
     {
         TRACE("IntCreateDesktop opened desktop '%wZ'\n", ObjectAttributes->ObjectName);
         Status = STATUS_SUCCESS;
+        goto Quit;
+    }
+
+    /* The desktop thread owns the windows of a desktop: none once CSRSS has exited.
+       Opening an existing desktop above does not need it. The desktop just created
+       goes with the failed status (Quit closes the handle) */
+    if (!gptiDesktopThread || (gptiDesktopThread->TIF_flags & TIF_INCLEANUP))
+    {
+        WARN("No desktop thread (CSRSS has exited), cannot create a desktop\n");
+        Status = STATUS_UNSUCCESSFUL;
         goto Quit;
     }
 
@@ -3654,7 +3689,8 @@ NtUserSwitchDesktop(HDESK hdesk)
     /* The first time SwitchDesktop is called, gpdeskInputDesktop is NULL */
     if (gpdeskInputDesktop != NULL)
     {
-        if ((gpdeskInputDesktop->pDeskInfo->spwnd->style & WS_VISIBLE) == WS_VISIBLE)
+        if (gpdeskInputDesktop->pDeskInfo->spwnd &&
+            (gpdeskInputDesktop->pDeskInfo->spwnd->style & WS_VISIBLE) == WS_VISIBLE)
             bRedrawDesktop = TRUE;
 
         /* Hide the previous desktop window */
