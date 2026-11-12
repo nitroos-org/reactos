@@ -2483,7 +2483,7 @@ SmpInit(IN PUNICODE_STRING InitialCommand,
     OBJECT_ATTRIBUTES ObjectAttributes;
     UNICODE_STRING PortName, EventName;
     HANDLE EventHandle, PortHandle;
-    ULONG HardErrorMode;
+    ULONG HardErrorMode, ApiThread;
 
     /* Create the SMSS Heap */
     SmBaseTag = RtlCreateTagHeap(RtlGetProcessHeap(),
@@ -2539,29 +2539,21 @@ SmpInit(IN PUNICODE_STRING InitialCommand,
     ASSERT(NT_SUCCESS(Status));
     SmpDebugPort = PortHandle;
 
-    /* Create two SM API threads */
-    Status = RtlCreateUserThread(NtCurrentProcess(),
-                                 NULL,
-                                 FALSE,
-                                 0,
-                                 0,
-                                 0,
-                                 SmpApiLoop,
-                                 PortHandle,
-                                 NULL,
-                                 NULL);
-    ASSERT(NT_SUCCESS(Status));
-    Status = RtlCreateUserThread(NtCurrentProcess(),
-                                 NULL,
-                                 FALSE,
-                                 0,
-                                 0,
-                                 0,
-                                 SmpApiLoop,
-                                 PortHandle,
-                                 NULL,
-                                 NULL);
-    ASSERT(NT_SUCCESS(Status));
+    /* Create the SM API threads */
+    for (ApiThread = 0; ApiThread < SMP_API_THREADS; ApiThread++)
+    {
+        Status = RtlCreateUserThread(NtCurrentProcess(),
+                                     NULL,
+                                     FALSE,
+                                     0,
+                                     0,
+                                     0,
+                                     SmpApiLoop,
+                                     PortHandle,
+                                     NULL,
+                                     NULL);
+        ASSERT(NT_SUCCESS(Status));
+    }
 
     /* Create the write event that autochk can set after running */
     RtlInitUnicodeString(&EventName, L"\\Device\\VolumesSafeForWriteAccess");
