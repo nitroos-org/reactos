@@ -582,7 +582,7 @@ RawInputThreadMain(VOID)
             }
         }
         ReleaseDeviceInfoListMutex();
-        ERR("Raw Input Thread Exit (thread terminated)\n");
+        TRACE("Raw Input Thread Exit (thread terminated)\n");
         return;
     }
 

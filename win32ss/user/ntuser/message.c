@@ -2952,6 +2952,8 @@ NtUserMessageCall( HWND hWnd,
                {
                   rpdesk = CONTAINING_RECORD(DesktopEntry, DESKTOP, ListEntry);
                   pwndDesk = rpdesk->pDeskInfo->spwnd;
+                  if (!pwndDesk) /* CSRSS has exited (IntDesktopThreadProcessExit) */
+                      continue;
                   List = IntWinListChildren(pwndDesk);
 
                   if (parm.flags & BSF_QUERY)
