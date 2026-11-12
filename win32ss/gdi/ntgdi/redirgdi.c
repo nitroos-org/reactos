@@ -280,12 +280,19 @@ GreRedirComposeLayer(
         return TRUE;
 
     /* Where both the frame buffer and the layer have pixels (screen coordinates) */
-    rcLimit.left = max(xFB, pl->x);
-    rcLimit.top = max(yFB, pl->y);
-    rcLimit.right = min(xFB + pso->sizlBitmap.cx, pl->x + psoSrc->sizlBitmap.cx);
-    rcLimit.bottom = min(yFB + pso->sizlBitmap.cy, pl->y + psoSrc->sizlBitmap.cy);
-    if (rcLimit.left >= rcLimit.right || rcLimit.top >= rcLimit.bottom)
-        return TRUE;
+    {
+        /* 64-bit: window positions are not bounded; the result lies in the frame buffer, so it fits a LONG */
+        LONGLONG l = max((LONGLONG)xFB, (LONGLONG)pl->x), t = max((LONGLONG)yFB, (LONGLONG)pl->y);
+        LONGLONG r = min((LONGLONG)xFB + pso->sizlBitmap.cx, (LONGLONG)pl->x + psoSrc->sizlBitmap.cx);
+        LONGLONG b = min((LONGLONG)yFB + pso->sizlBitmap.cy, (LONGLONG)pl->y + psoSrc->sizlBitmap.cy);
+
+        if (l >= r || t >= b)
+            return TRUE;
+        rcLimit.left = (LONG)l;
+        rcLimit.top = (LONG)t;
+        rcLimit.right = (LONG)r;
+        rcLimit.bottom = (LONG)b;
+    }
 
     for (i = 0; i < prgnScreen->rdh.nCount; i++)
     {
@@ -293,8 +300,8 @@ GreRedirComposeLayer(
             continue;
         for (y = rc.top; y < rc.bottom; y++)
         {
-            PULONG pDst = (PULONG)((PBYTE)pso->pvScan0 + (y - yFB) * pso->lDelta) + (rc.left - xFB);
-            const ULONG *pSrc = (const ULONG *)((PBYTE)psoSrc->pvScan0 + (y - pl->y) * psoSrc->lDelta) + (rc.left - pl->x);
+            PULONG pDst = (PULONG)((PBYTE)pso->pvScan0 + (LONG_PTR)(y - yFB) * pso->lDelta) + (rc.left - xFB);
+            const ULONG *pSrc = (const ULONG *)((PBYTE)psoSrc->pvScan0 + (LONG_PTR)(y - pl->y) * psoSrc->lDelta) + (rc.left - pl->x);
 
             if (pl->Mode == REDIRMODE_COPY)
                 RtlCopyMemory(pDst, pSrc, (rc.right - rc.left) * sizeof(ULONG));
@@ -302,6 +309,27 @@ GreRedirComposeLayer(
                 RedirBlendRow(pDst, pSrc, rc.right - rc.left, pl);
         }
     }
+    return TRUE;
+}
+
+/* Zeroes the top-left cx x cy of a 32 bpp surface (the frame buffer, before a pass) */
+BOOL
+NTAPI
+GreRedirClearRect(
+    _In_ PSURFACE psurf,
+    _In_ LONG cx,
+    _In_ LONG cy)
+{
+    SURFOBJ *pso = &psurf->SurfObj;
+    LONG y;
+
+    if (pso->iBitmapFormat != BMF_32BPP || !pso->pvScan0 || cx < 0 || cy < 0 ||
+        cx > pso->sizlBitmap.cx || cy > pso->sizlBitmap.cy)
+    {
+        return FALSE;
+    }
+    for (y = 0; y < cy; y++)
+        RtlZeroMemory((PBYTE)pso->pvScan0 + (LONG_PTR)y * pso->lDelta, (SIZE_T)cx * 4);
     return TRUE;
 }
 
@@ -352,33 +380,31 @@ GreRedirLoadFromDC(
         return FALSE;
     }
 
-    /* The source rectangle (device coordinates of the memory DC), both clipped to their surfaces */
-    xSrc += pdc->ptlDCOrig.x;
-    ySrc += pdc->ptlDCOrig.y;
-    rcDst.left = max(rcDst.left, 0);
-    rcDst.top = max(rcDst.top, 0);
-    rcDst.right = min(rcDst.right, psurfDst->SurfObj.sizlBitmap.cx);
-    rcDst.bottom = min(rcDst.bottom, psurfDst->SurfObj.sizlBitmap.cy);
-    rcSrc.left = xSrc + rcDst.left;
-    rcSrc.top = ySrc + rcDst.top;
-    rcSrc.right = xSrc + rcDst.right;
-    rcSrc.bottom = ySrc + rcDst.bottom;
-    if (rcSrc.left < 0) { rcDst.left -= rcSrc.left; rcSrc.left = 0; }
-    if (rcSrc.top < 0) { rcDst.top -= rcSrc.top; rcSrc.top = 0; }
-    if (rcSrc.right > psurfSrc->SurfObj.sizlBitmap.cx)
+    /*
+     * The source rectangle (device coordinates of the memory DC), both clipped to their surfaces. xSrc and ySrc
+     * come from the caller (UpdateLayeredWindow's pptSrc) unchecked: 64-bit arithmetic, so no sum wraps, and the
+     * source rectangle is inside the source bitmap before any address is computed.
+     */
     {
-        rcDst.right -= rcSrc.right - psurfSrc->SurfObj.sizlBitmap.cx;
-        rcSrc.right = psurfSrc->SurfObj.sizlBitmap.cx;
-    }
-    if (rcSrc.bottom > psurfSrc->SurfObj.sizlBitmap.cy)
-    {
-        rcDst.bottom -= rcSrc.bottom - psurfSrc->SurfObj.sizlBitmap.cy;
-        rcSrc.bottom = psurfSrc->SurfObj.sizlBitmap.cy;
-    }
-    if (rcDst.left >= rcDst.right || rcDst.top >= rcDst.bottom)
-    {
-        DC_UnlockDc(pdc);
-        return TRUE;
+        LONGLONG xs = (LONGLONG)xSrc + pdc->ptlDCOrig.x, ys = (LONGLONG)ySrc + pdc->ptlDCOrig.y;
+        LONGLONG dl = max(rcDst.left, 0), dt = max(rcDst.top, 0);
+        LONGLONG dr = min(rcDst.right, psurfDst->SurfObj.sizlBitmap.cx), db = min(rcDst.bottom, psurfDst->SurfObj.sizlBitmap.cy);
+        LONGLONG sl = xs + dl, st = ys + dt, sr = xs + dr, sb = ys + db;
+        LONGLONG cxs = psurfSrc->SurfObj.sizlBitmap.cx, cys = psurfSrc->SurfObj.sizlBitmap.cy;
+
+        if (sl < 0) { dl -= sl; sl = 0; }
+        if (st < 0) { dt -= st; st = 0; }
+        if (sr > cxs) { dr -= sr - cxs; sr = cxs; }
+        if (sb > cys) { db -= sb - cys; sb = cys; }
+        if (dl >= dr || dt >= db || sl >= sr || st >= sb)
+        {
+            DC_UnlockDc(pdc);
+            return TRUE;
+        }
+        /* All within [0, size] of their surfaces now: they fit in a LONG */
+        ASSERT(sl >= 0 && sr <= cxs && st >= 0 && sb <= cys && sr - sl == dr - dl && sb - st == db - dt);
+        rcDst.left = (LONG)dl; rcDst.top = (LONG)dt; rcDst.right = (LONG)dr; rcDst.bottom = (LONG)db;
+        rcSrc.left = (LONG)sl; rcSrc.top = (LONG)st; rcSrc.right = (LONG)sr; rcSrc.bottom = (LONG)sb;
     }
 
     if (RedirIsBgr32(psurfSrc))
@@ -390,9 +416,9 @@ GreRedirLoadFromDC(
 
             for (y = 0; y < rcDst.bottom - rcDst.top; y++)
             {
-                RtlCopyMemory((PBYTE)psurfDst->SurfObj.pvScan0 + (rcDst.top + y) * psurfDst->SurfObj.lDelta + rcDst.left * 4,
-                              (PBYTE)psurfSrc->SurfObj.pvScan0 + (rcSrc.top + y) * psurfSrc->SurfObj.lDelta + rcSrc.left * 4,
-                              (rcDst.right - rcDst.left) * 4);
+                RtlCopyMemory((PBYTE)psurfDst->SurfObj.pvScan0 + (LONG_PTR)(rcDst.top + y) * psurfDst->SurfObj.lDelta + (LONG_PTR)rcDst.left * 4,
+                              (PBYTE)psurfSrc->SurfObj.pvScan0 + (LONG_PTR)(rcSrc.top + y) * psurfSrc->SurfObj.lDelta + (LONG_PTR)rcSrc.left * 4,
+                              (SIZE_T)(rcDst.right - rcDst.left) * 4);
             }
             bRet = TRUE;
             *pbAlpha = TRUE;
@@ -409,7 +435,16 @@ GreRedirLoadFromDC(
         POINTL ptl = { rcSrc.left, rcSrc.top };
 
         EXLATEOBJ_vInitialize(&exlo, psurfSrc->ppal, psurfDst->ppal, 0, 0, 0);
-        bRet = EngCopyBits(&psurfDst->SurfObj, &psurfSrc->SurfObj, NULL, &exlo.xlo, &rcDst, &ptl);
+        /* The same: a DIB section's bits can be user memory another thread unmaps */
+        _SEH2_TRY
+        {
+            bRet = EngCopyBits(&psurfDst->SurfObj, &psurfSrc->SurfObj, NULL, &exlo.xlo, &rcDst, &ptl);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            bRet = FALSE;
+        }
+        _SEH2_END;
         EXLATEOBJ_vCleanup(&exlo);
     }
     DC_UnlockDc(pdc);

@@ -459,6 +459,121 @@ static void Test_HitTest(void)
     DestroyWindow(hBack);
 }
 
+/*
+ * UpdateLayeredWindow with a source point far outside the source bitmap (near INT_MAX / INT_MIN), and with a wide
+ * source: nothing outside the bitmap is read. The window keeps the content it had (level 2: checked through
+ * PrintWindow; other levels: no crash, the return value is traced).
+ */
+static void Test_UlwSourceRange(void)
+{
+    BLENDFUNCTION Blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    POINT Pos = { 100, 100 }, Src = { 0, 0 };
+    SIZE Size = { 200, 150 };
+    static const POINT Far[] = { { 0x7FFFFFF0, 0 }, { (LONG)0x80000010, 0 }, { 0, 0x7FFFFFF0 }, { 0, (LONG)0x80000010 },
+                                 { 0x7FFFFF00, 0x7FFFFF00 }, { -100, -100 }, { 150, 100 } };
+    HWND hWnd = CreateTop(L"LcBlue", WS_EX_LAYERED, TRUE);
+    HDC hdcSrc, hdcWide, hdcScreen = GetDC(NULL), hdcMem = CreateCompatibleDC(hdcScreen);
+    HBITMAP hbmSrc = MakeDib(&hdcSrc, 0xFF00C800, 200, 150, NULL), hbmWide;
+    HBITMAP hbm = CreateCompatibleBitmap(hdcScreen, 200, 150);
+    HGDIOBJ old = SelectObject(hdcMem, hbm);
+    COLORREF c;
+    BOOL Ret;
+    int i;
+
+    Pump();
+    ok(UpdateLayeredWindow(hWnd, NULL, &Pos, &Size, hdcSrc, &Src, 0, &Blend, ULW_ALPHA), "UpdateLayeredWindow failed: %lu\n", GetLastError());
+    Pump();
+    for (i = 0; i < (int)(sizeof(Far) / sizeof(Far[0])); i++)
+    {
+        POINT p = Far[i];
+        SetLastError(0xdeadbeef);
+        Ret = UpdateLayeredWindow(hWnd, NULL, &Pos, &Size, hdcSrc, &p, 0, &Blend, ULW_ALPHA);
+        trace("source point (%ld,%ld): ret %d, error %lu\n", p.x, p.y, Ret, GetLastError());
+        Pump();
+        if (g_Level >= 2 && (p.x <= -200 || p.x >= 200 || p.y <= -150 || p.y >= 150))
+        {
+            /* Level 2: nothing of the source is in range, the content stays green */
+            SetPixel(hdcMem, 100, 75, RGB(1, 2, 3));
+            ok(PrintWindow(hWnd, hdcMem, PW_RENDERFULLCONTENT), "PrintWindow failed: %lu\n", GetLastError());
+            c = GetPixel(hdcMem, 100, 75);
+            ok(Near(c, RGB(0, 200, 0)), "source point (%ld,%ld): content 0x%06lx, expected the earlier green\n", p.x, p.y, c);
+        }
+    }
+
+    /* A wide source (a large scan line) at its right edge: only the columns that exist are copied */
+    hbmWide = MakeDib(&hdcWide, 0xFFC80000, 65536, 4, NULL);   /* opaque red */
+    if (hbmWide)
+    {
+        POINT p = { 65536 - 50, 2 };
+        Ret = UpdateLayeredWindow(hWnd, NULL, &Pos, &Size, hdcWide, &p, 0, &Blend, ULW_ALPHA);
+        trace("wide source at (%ld,%ld): ret %d\n", p.x, p.y, Ret);
+        Pump();
+        if (g_Level >= 2)
+        {
+            SetPixel(hdcMem, 10, 1, RGB(1, 2, 3));
+            SetPixel(hdcMem, 100, 75, RGB(1, 2, 3));
+            ok(PrintWindow(hWnd, hdcMem, PW_RENDERFULLCONTENT), "PrintWindow failed: %lu\n", GetLastError());
+            c = GetPixel(hdcMem, 10, 1);
+            ok(Near(c, RGB(200, 0, 0)), "wide source, a column in range: 0x%06lx, expected red\n", c);
+            c = GetPixel(hdcMem, 100, 75);
+            ok(Near(c, RGB(0, 200, 0)), "wide source, out of range: 0x%06lx, expected the earlier green\n", c);
+        }
+        DeleteDC(hdcWide);
+        DeleteObject(hbmWide);
+    }
+
+    DestroyWindow(hWnd);
+    DeleteDC(hdcSrc);
+    DeleteObject(hbmSrc);
+    SelectObject(hdcMem, old);
+    DeleteObject(hbm);
+    DeleteDC(hdcMem);
+    ReleaseDC(NULL, hdcScreen);
+}
+
+/*
+ * A glass child window (DwmExtendFrameIntoClientArea on a child) of an opaque top-level window. Levels 0 and 1 keep
+ * what they did before level 2 existed (the pixel is traced, to compare builds); level 2 draws it opaque: DWM glass
+ * is for top-level windows (verify on the oracle).
+ */
+static void Test_GlassChild(void)
+{
+    HRESULT (WINAPI *pExtend)(HWND, const LC_MARGINS *);
+    LC_MARGINS Glass = { -1, -1, -1, -1 };
+    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
+    HWND hTop, hChild;
+    HDC hdc, hdcWnd;
+    HBITMAP hbm;
+    COLORREF c;
+
+    pExtend = hDwm ? (PVOID)GetProcAddress(hDwm, "DwmExtendFrameIntoClientArea") : NULL;
+    if (!pExtend)
+    {
+        skip("DwmExtendFrameIntoClientArea is not available\n");
+        return;
+    }
+    hTop = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"LcRed", L"", WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN,
+                           50, 50, 400, 300, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    hChild = CreateWindowExW(0, L"LcNone", L"", WS_CHILD, 50, 50, 200, 150, hTop, NULL, GetModuleHandleW(NULL), NULL);
+    trace("glass child: DwmExtendFrameIntoClientArea 0x%08lx\n", pExtend(hChild, &Glass));
+    ShowWindow(hChild, SW_SHOWNA);
+    UpdateWindow(hTop);
+    Pump();
+    hbm = MakeDib(&hdc, 0x80000080, 200, 150, NULL);
+    hdcWnd = GetDC(hChild);
+    BitBlt(hdcWnd, 0, 0, 200, 150, hdc, 0, 0, SRCCOPY);
+    ReleaseDC(hChild, hdcWnd);
+    Pump();
+    c = ScreenPixel(200, 175);
+    trace("glass child, level %d: 0x%06lx\n", g_Level, c);
+    if (g_Level >= 2)
+        ok(Near(c, RGB(0, 0, 128)), "glass child at level 2: 0x%06lx, expected the pixels as they are (0,0,128)\n", c);
+    DestroyWindow(hTop);
+    DeleteDC(hdc);
+    DeleteObject(hbm);
+    FreeLibrary(hDwm);
+}
+
 START_TEST(LayeredCompose)
 {
     g_Level = GetRedirectionLevel();
@@ -481,4 +596,6 @@ START_TEST(LayeredCompose)
     Test_GlassFollows();
     Test_PrintLayered();
     Test_HitTest();
+    Test_UlwSourceRange();
+    Test_GlassChild();
 }

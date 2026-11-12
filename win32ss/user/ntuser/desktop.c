@@ -314,6 +314,8 @@ IntLeaveInputDesktop(IN PDESKTOP pdesk)
     }
 
     gpdeskInputDesktop = pdeskNew;
+    /* Window redirection: no composed pixels of the old input desktop are kept */
+    UserRedirFreeFrameBuffer();
     if (pwinsta)
         pwinsta->ActiveDesktop = pdeskNew;
 
@@ -3519,6 +3521,8 @@ NtUserSwitchDesktop(HDESK hdesk)
 
     /* Set the global state */
     gpdeskInputDesktop = pdesk;
+    /* Window redirection: no composed pixels of the old input desktop are kept */
+    UserRedirFreeFrameBuffer();
 
     /* Show the new desktop window */
     co_IntShowDesktop(pdesk, UserGetSystemMetrics(SM_CXSCREEN), UserGetSystemMetrics(SM_CYSCREEN), bRedrawDesktop);
