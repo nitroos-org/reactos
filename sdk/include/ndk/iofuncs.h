@@ -331,6 +331,22 @@ NtNotifyChangeDirectoryFile(
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
+NtNotifyChangeDirectoryFileEx(
+    _In_ HANDLE FileHandle,
+    _In_opt_ HANDLE Event,
+    _In_opt_ PIO_APC_ROUTINE ApcRoutine,
+    _In_opt_ PVOID ApcContext,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+    _Out_ PVOID Buffer,
+    _In_ ULONG BufferSize,
+    _In_ ULONG CompletionFilter,
+    _In_ BOOLEAN WatchTree,
+    _In_ ULONG DirectoryNotifyInformationClass /* DIRECTORY_NOTIFY_INFORMATION_CLASS */
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
 NtOpenFile(
     _Out_ PHANDLE FileHandle,
     _In_ ACCESS_MASK DesiredAccess,

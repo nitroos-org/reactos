@@ -29,6 +29,26 @@ static VOID NgBasic(PNG_FCB Fcb, PFILE_BASIC_INFORMATION B)
     B->FileAttributes = NgFileAttributes(Fcb, &Fcb->Stat);
 }
 
+/* The fixed part of a FILE_NOTIFY_EXTENDED_INFORMATION record for Fcb, from what the FCB holds now (a snapshot taken
+ * without its resource: each field is one aligned read, the set may be a moment apart). ParentMftNo names the
+ * directory holding the name that changed; its record number only, the sequence number is not at hand. The reparse
+ * tag is not stored with the FCB (0); there are no extended attributes (EaSize 0). */
+VOID NgFillNotifyExtended(PNG_FCB Fcb, ULONGLONG ParentMftNo, PFILE_NOTIFY_EXTENDED_INFORMATION I)
+{
+    RtlZeroMemory(I, FIELD_OFFSET(FILE_NOTIFY_EXTENDED_INFORMATION, FileName));
+    if (!Fcb)
+        return;
+    I->CreationTime.QuadPart = Fcb->Stat.crtime;
+    I->LastModificationTime.QuadPart = Fcb->Stat.mtime;
+    I->LastChangeTime.QuadPart = Fcb->Stat.ctime;
+    I->LastAccessTime.QuadPart = Fcb->Stat.atime;
+    I->AllocatedLength.QuadPart = Fcb->IsDirectory ? 0 : Fcb->Stat.alloc;
+    I->FileSize.QuadPart = Fcb->IsDirectory ? 0 : Fcb->Stat.size;
+    I->FileAttributes = NgFileAttributes(Fcb, &Fcb->Stat);
+    I->FileId.QuadPart = Fcb->Stat.mft_ref;
+    I->ParentFileId.QuadPart = ParentMftNo;
+}
+
 /*
  * As NTFS on Windows 10 (measured on 22H2): a pending delete of a file takes its name out of the link count (a file
  * with one name whose delete is pending, or whose name a POSIX delete moved to $Extend\$Deleted, has 0; a named
@@ -681,8 +701,8 @@ VOID NgPosixUnlink(PNG_FCB Fcb)
         return;
     }
     if (Fcb->DelPath.Buffer)
-        NgNotify(Vcb, &Fcb->DelPath, Fcb->IsDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
-                 FILE_ACTION_REMOVED);
+        NgNotifyFcb(Vcb, &Fcb->DelPath, Fcb->IsDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
+                    FILE_ACTION_REMOVED, Fcb, Fcb->DelParentMftNo);
     ExAcquireFastMutex(&Vcb->FcbListLock);
     for (Entry = Fcb->CcbList.Flink; Entry != &Fcb->CcbList; Entry = Entry->Flink)
     {
@@ -1050,7 +1070,7 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
     }
     if (IsLink)
     {
-        NgNotify(Vcb, &NewPath, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_ADDED);
+        NgNotifyFcb(Vcb, &NewPath, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_ADDED, Fcb, NewDirMftNo);
     }
     else
     {
@@ -1060,7 +1080,8 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         ULONG Filter = Fcb->IsDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME;
         PLIST_ENTRY Entry;
         OldPath = Ccb->Path;
-        NgNotify(Vcb, &OldPath, Filter, Moved ? FILE_ACTION_REMOVED : FILE_ACTION_RENAMED_OLD_NAME);
+        NgNotifyFcb(Vcb, &OldPath, Filter, Moved ? FILE_ACTION_REMOVED : FILE_ACTION_RENAMED_OLD_NAME, Fcb,
+                    Ccb->ParentMftNo);
         /* Every handle opened by the old name takes the new one (a directory has a single name;
          * a file's other hard links keep theirs), this handle last: the others are matched
          * against its old name. */
@@ -1093,7 +1114,7 @@ static NTSTATUS NgRenameOrLink(PNG_FCB Fcb, PNG_CCB Ccb, PIO_STACK_LOCATION Stac
         }
         NgRetitleCcb(Vcb, Ccb, &Spare[0], &NewPath, NewDirMftNo, &NewName);
         ExReleaseFastMutex(&Vcb->FcbListLock);
-        NgNotify(Vcb, &NewPath, Filter, Moved ? FILE_ACTION_ADDED : FILE_ACTION_RENAMED_NEW_NAME);
+        NgNotifyFcb(Vcb, &NewPath, Filter, Moved ? FILE_ACTION_ADDED : FILE_ACTION_RENAMED_NEW_NAME, Fcb, NewDirMftNo);
     }
 out:
     if (Target || NewDir)

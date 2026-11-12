@@ -549,7 +549,7 @@ FsRtlNotifyCompleteIrpList(IN PNOTIFY_CHANGE NotifyChange,
     /* The cleanup and delete marks stay: they tell later requests, and reports, that
      * this notification is finished, whatever the completions below did to it */
     NotifyChange->Flags &= (NOTIFY_IMMEDIATELY | WATCH_TREE | WATCH_ROOT |
-                            CLEANUP_IN_PROCESS | DELETE_IN_PROCESS);
+                            CLEANUP_IN_PROCESS | DELETE_IN_PROCESS | NOTIFY_EXTENDED);
     NotifyChange->DataLength = 0;
     NotifyChange->LastEntry = 0;
 
@@ -644,19 +644,23 @@ FsRtlNotifySetCancelRoutine(IN PIRP Irp,
 /*
  * @implemented
  */
+static
 BOOLEAN
-FsRtlNotifyUpdateBuffer(OUT PFILE_NOTIFY_INFORMATION OutputBuffer,
-                        IN ULONG Action,
-                        IN PSTRING ParentName,
-                        IN PSTRING TargetName,
-                        IN PSTRING StreamName,
-                        IN BOOLEAN IsUnicode,
-                        IN ULONG DataLength)
+FsRtlNotifyUpdateBufferEx(OUT PVOID OutputBuffer,
+                          IN ULONG Action,
+                          IN PSTRING ParentName,
+                          IN PSTRING TargetName,
+                          IN PSTRING StreamName,
+                          IN BOOLEAN IsUnicode,
+                          IN ULONG DataLength,
+                          IN BOOLEAN Extended,
+                          IN PFILE_NOTIFY_EXTENDED_INFORMATION Template OPTIONAL)
 {
     /* Unless there's an issue with buffers, there's no reason to fail */
     BOOLEAN Succeed = TRUE;
-    ULONG Capacity, Written = 0, Needed, ResultSize;
+    ULONG Capacity, Written = 0, Needed, ResultSize, HeaderLength;
     PSTRING Names[3];
+    PWCHAR FileName;
     ULONG i;
 
     PAGED_CODE();
@@ -669,11 +673,14 @@ FsRtlNotifyUpdateBuffer(OUT PFILE_NOTIFY_INFORMATION OutputBuffer,
      * Every write is checked against the space DataLength accounted for,
      * so a wrong length computed by the caller can't run past the entry
      */
-    if (DataLength < FIELD_OFFSET(FILE_NOTIFY_INFORMATION, FileName))
+    HeaderLength = Extended ? FIELD_OFFSET(FILE_NOTIFY_EXTENDED_INFORMATION, FileName) :
+                              FIELD_OFFSET(FILE_NOTIFY_INFORMATION, FileName);
+    if (DataLength < HeaderLength)
     {
         return FALSE;
     }
-    Capacity = DataLength - FIELD_OFFSET(FILE_NOTIFY_INFORMATION, FileName);
+    Capacity = DataLength - HeaderLength;
+    FileName = (PWCHAR)((ULONG_PTR)OutputBuffer + HeaderLength);
 
     Names[0] = ParentName;
     Names[1] = TargetName;
@@ -681,8 +688,26 @@ FsRtlNotifyUpdateBuffer(OUT PFILE_NOTIFY_INFORMATION OutputBuffer,
 
     _SEH2_TRY
     {
-        OutputBuffer->NextEntryOffset = 0;
-        OutputBuffer->Action = Action;
+        /* The records start 4-byte aligned only, so the header goes through byte copies */
+        if (Extended)
+        {
+            FILE_NOTIFY_EXTENDED_INFORMATION Header;
+
+            /* What the file system knew about the object; nothing known reads as zero */
+            RtlZeroMemory(&Header, FIELD_OFFSET(FILE_NOTIFY_EXTENDED_INFORMATION, FileName));
+            if (Template)
+            {
+                RtlCopyMemory(&Header, Template, FIELD_OFFSET(FILE_NOTIFY_EXTENDED_INFORMATION, FileName));
+            }
+            Header.NextEntryOffset = 0;
+            Header.Action = Action;
+            RtlCopyMemory(OutputBuffer, &Header, FIELD_OFFSET(FILE_NOTIFY_EXTENDED_INFORMATION, FileName));
+        }
+        else
+        {
+            ((PFILE_NOTIFY_INFORMATION)OutputBuffer)->NextEntryOffset = 0;
+            ((PFILE_NOTIFY_INFORMATION)OutputBuffer)->Action = Action;
+        }
 
         for (i = 0; i < 3; ++i)
         {
@@ -708,7 +733,7 @@ FsRtlNotifyUpdateBuffer(OUT PFILE_NOTIFY_INFORMATION OutputBuffer,
                     Succeed = FALSE;
                     break;
                 }
-                OutputBuffer->FileName[Written / sizeof(WCHAR)] = Separator;
+                FileName[Written / sizeof(WCHAR)] = Separator;
                 Written += sizeof(WCHAR);
             }
 
@@ -730,13 +755,13 @@ FsRtlNotifyUpdateBuffer(OUT PFILE_NOTIFY_INFORMATION OutputBuffer,
 
                 if (IsUnicode)
                 {
-                    RtlCopyMemory((PVOID)((ULONG_PTR)OutputBuffer->FileName + Written),
+                    RtlCopyMemory((PVOID)((ULONG_PTR)FileName + Written),
                                   Name->Buffer, Name->Length);
                     ResultSize = Name->Length;
                 }
                 else
                 {
-                    RtlOemToUnicodeN((PWCHAR)((ULONG_PTR)OutputBuffer->FileName + Written),
+                    RtlOemToUnicodeN((PWCHAR)((ULONG_PTR)FileName + Written),
                                      Capacity - Written, &ResultSize,
                                      Name->Buffer, Name->Length);
                 }
@@ -750,12 +775,19 @@ FsRtlNotifyUpdateBuffer(OUT PFILE_NOTIFY_INFORMATION OutputBuffer,
                     Succeed = FALSE;
                     break;
                 }
-                OutputBuffer->FileName[Written / sizeof(WCHAR)] = Separator;
+                FileName[Written / sizeof(WCHAR)] = Separator;
                 Written += sizeof(WCHAR);
             }
         }
 
-        OutputBuffer->FileNameLength = Written;
+        if (Extended)
+        {
+            *(PULONG)((ULONG_PTR)OutputBuffer + FIELD_OFFSET(FILE_NOTIFY_EXTENDED_INFORMATION, FileNameLength)) = Written;
+        }
+        else
+        {
+            ((PFILE_NOTIFY_INFORMATION)OutputBuffer)->FileNameLength = Written;
+        }
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -764,6 +796,22 @@ FsRtlNotifyUpdateBuffer(OUT PFILE_NOTIFY_INFORMATION OutputBuffer,
     _SEH2_END;
 
     return Succeed;
+}
+
+/*
+ * @implemented
+ */
+BOOLEAN
+FsRtlNotifyUpdateBuffer(OUT PFILE_NOTIFY_INFORMATION OutputBuffer,
+                        IN ULONG Action,
+                        IN PSTRING ParentName,
+                        IN PSTRING TargetName,
+                        IN PSTRING StreamName,
+                        IN BOOLEAN IsUnicode,
+                        IN ULONG DataLength)
+{
+    return FsRtlNotifyUpdateBufferEx(OutputBuffer, Action, ParentName, TargetName, StreamName,
+                                     IsUnicode, DataLength, FALSE, NULL);
 }
 
 /* PUBLIC FUNCTIONS **********************************************************/
@@ -985,6 +1033,7 @@ FsRtlNotifyFilterChangeDirectory(IN PNOTIFY_SYNC NotifySync,
     PIO_STACK_LOCATION Stack;
     PNOTIFY_CHANGE NotifyChange = NULL;
     PREAL_NOTIFY_SYNC RealNotifySync;
+    BOOLEAN WantsExtended;
 
     PAGED_CODE();
 
@@ -1021,10 +1070,36 @@ FsRtlNotifyFilterChangeDirectory(IN PNOTIFY_SYNC NotifySync,
             _SEH2_LEAVE;
         }
 
+        /* The record layout the IRP asks for */
+        WantsExtended = Stack->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY_EX &&
+                        Stack->Parameters.NotifyDirectoryEx.DirectoryNotifyInformationClass ==
+                        DirectoryNotifyExtendedInformation;
+
         /* Try to find a matching notification has been already registered */
         NotifyChange = FsRtlIsNotifyOnList(NotifyList, FsContext);
         if (NotifyChange)
         {
+            /* The handle was read with the other record layout: what is buffered cannot be handed out in
+             * this one, so it is dropped and this read tells the watcher to re-enumerate */
+            if (!!(NotifyChange->Flags & NOTIFY_EXTENDED) != WantsExtended)
+            {
+                NotifyChange->Flags ^= NOTIFY_EXTENDED;
+                if (NotifyChange->DataLength != 0)
+                {
+                    if (NotifyChange->AllocatedBuffer != NULL)
+                    {
+                        PsReturnProcessPagedPoolQuota(NotifyChange->OwningProcess, NotifyChange->ThisBufferLength);
+                        ExFreePoolWithTag(NotifyChange->AllocatedBuffer, TAG_FS_NOTIFICATIONS);
+                    }
+                    NotifyChange->Buffer = NULL;
+                    NotifyChange->AllocatedBuffer = NULL;
+                    NotifyChange->LastEntry = 0;
+                    NotifyChange->DataLength = 0;
+                    NotifyChange->ThisBufferLength = 0;
+                    NotifyChange->Flags |= NOTIFY_IMMEDIATELY;
+                    NotifyChange->Flags &= ~NOTIFY_LATER;
+                }
+            }
             /* If it's been found, and is cleaned up, immediatly complete */
             if (NotifyChange->Flags & CLEANUP_IN_PROCESS)
             {
@@ -1090,6 +1165,10 @@ FsRtlNotifyFilterChangeDirectory(IN PNOTIFY_SYNC NotifySync,
         if (WatchTree)
         {
             NotifyChange->Flags |= WATCH_TREE;
+        }
+        if (WantsExtended)
+        {
+            NotifyChange->Flags |= NOTIFY_EXTENDED;
         }
 
         /* If string is empty, faulty to ANSI */
@@ -1199,18 +1278,19 @@ HandleIRP:
  * @remarks None
  *
  *--*/
+static
 VOID
-NTAPI
-FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
-                              IN PLIST_ENTRY NotifyList,
-                              IN PSTRING FullTargetName,
-                              IN USHORT TargetNameOffset,
-                              IN PSTRING StreamName OPTIONAL,
-                              IN PSTRING NormalizedParentName OPTIONAL,
-                              IN ULONG FilterMatch,
-                              IN ULONG Action,
-                              IN PVOID TargetContext,
-                              IN PVOID FilterContext)
+FsRtlNotifyReportChangeInternal(IN PNOTIFY_SYNC NotifySync,
+                                IN PLIST_ENTRY NotifyList,
+                                IN PSTRING FullTargetName,
+                                IN USHORT TargetNameOffset,
+                                IN PSTRING StreamName OPTIONAL,
+                                IN PSTRING NormalizedParentName OPTIONAL,
+                                IN ULONG FilterMatch,
+                                IN ULONG Action,
+                                IN PVOID TargetContext,
+                                IN PVOID FilterContext,
+                                IN PFILE_NOTIFY_EXTENDED_INFORMATION ExtendedInfo OPTIONAL)
 {
     PIRP Irp;
     PVOID OutputBuffer;
@@ -1220,7 +1300,7 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
     PNOTIFY_CHANGE NotifyChange;
     PREAL_NOTIFY_SYNC RealNotifySync;
     PFILE_NOTIFY_INFORMATION FileNotifyInfo;
-    BOOLEAN IsStream, IsParent, PoolQuotaCharged;
+    BOOLEAN IsStream, IsParent, PoolQuotaCharged, Extended;
     STRING TargetDirectory, TargetName, ParentName, IntNormalizedParentName;
     ULONG NumberOfBytes, TargetNumberOfParts, FullNumberOfParts, LastPartOffset, ParentNameOffset, ParentNameLength;
     ULONG DataLength, AlignedDataLength;
@@ -1486,7 +1566,9 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
                     }
 
                     /* Start to count amount of data to write, we've first the structure itself */
-                    DataLength = FIELD_OFFSET(FILE_NOTIFY_INFORMATION, FileName);
+                    Extended = (NotifyChange->Flags & NOTIFY_EXTENDED) != 0;
+                    DataLength = Extended ? FIELD_OFFSET(FILE_NOTIFY_EXTENDED_INFORMATION, FileName) :
+                                            FIELD_OFFSET(FILE_NOTIFY_INFORMATION, FileName);
 
                     /* If stream, we'll just append stream name */
                     if (IsStream)
@@ -1624,10 +1706,10 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
                         /* Finally, if we have a buffer, fill it in! */
                         if (OutputBuffer != NULL)
                         {
-                            if (FsRtlNotifyUpdateBuffer((FILE_NOTIFY_INFORMATION *)OutputBuffer,
-                                                         Action, &ParentName, &TargetName,
-                                                         StreamName, NotifyChange->CharacterSize == sizeof(WCHAR),
-                                                         DataLength))
+                            if (FsRtlNotifyUpdateBufferEx(OutputBuffer,
+                                                          Action, &ParentName, &TargetName,
+                                                          StreamName, NotifyChange->CharacterSize == sizeof(WCHAR),
+                                                          DataLength, Extended, ExtendedInfo))
                             {
                                 NotifyChange->DataLength = DataLength + AlignedDataLength;
                             }
@@ -1689,6 +1771,55 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
         FsRtlNotifyReleaseFastMutex(RealNotifySync);
     }
     _SEH2_END;
+}
+
+VOID
+NTAPI
+FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
+                              IN PLIST_ENTRY NotifyList,
+                              IN PSTRING FullTargetName,
+                              IN USHORT TargetNameOffset,
+                              IN PSTRING StreamName OPTIONAL,
+                              IN PSTRING NormalizedParentName OPTIONAL,
+                              IN ULONG FilterMatch,
+                              IN ULONG Action,
+                              IN PVOID TargetContext,
+                              IN PVOID FilterContext)
+{
+    FsRtlNotifyReportChangeInternal(NotifySync, NotifyList, FullTargetName, TargetNameOffset, StreamName,
+                                    NormalizedParentName, FilterMatch, Action, TargetContext, FilterContext,
+                                    NULL);
+}
+
+/*++
+ * @name FsRtlNotifyFullReportChangeExtended
+ * @implemented
+ *
+ * Reports a change like FsRtlNotifyFullReportChange and also hands over what the file system knows about the
+ * object, for the watchers that asked for FILE_NOTIFY_EXTENDED_INFORMATION records. Not part of the Windows
+ * kernel interface: our file systems that support the extended class call it.
+ *
+ * @param ExtendedInfo
+ *        The record's fixed part (time stamps, sizes, attributes, ids; NextEntryOffset, Action and the name
+ *        are filled in here). NULL: those fields read as zero. Watchers of the plain class ignore it.
+ *
+ *--*/
+VOID
+NTAPI
+FsRtlNotifyFullReportChangeExtended(IN PNOTIFY_SYNC NotifySync,
+                                    IN PLIST_ENTRY NotifyList,
+                                    IN PSTRING FullTargetName,
+                                    IN USHORT TargetNameOffset,
+                                    IN PSTRING StreamName OPTIONAL,
+                                    IN PSTRING NormalizedParentName OPTIONAL,
+                                    IN ULONG FilterMatch,
+                                    IN ULONG Action,
+                                    IN PVOID TargetContext,
+                                    IN PFILE_NOTIFY_EXTENDED_INFORMATION ExtendedInfo OPTIONAL)
+{
+    FsRtlNotifyReportChangeInternal(NotifySync, NotifyList, FullTargetName, TargetNameOffset, StreamName,
+                                    NormalizedParentName, FilterMatch, Action, TargetContext, NULL,
+                                    ExtendedInfo);
 }
 
 /*++

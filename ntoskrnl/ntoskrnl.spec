@@ -283,6 +283,7 @@
 @ stdcall FsRtlNotifyFilterReportChange(ptr ptr ptr long ptr ptr long long ptr ptr)
 @ stdcall FsRtlNotifyFullChangeDirectory(ptr ptr ptr ptr long long long ptr ptr ptr)
 @ stdcall FsRtlNotifyFullReportChange(ptr ptr ptr long ptr ptr long long ptr)
+@ stdcall FsRtlNotifyFullReportChangeExtended(ptr ptr ptr long ptr ptr long long ptr ptr)
 @ stdcall FsRtlNotifyInitializeSync(ptr)
 @ stdcall FsRtlNotifyReportChange(ptr ptr ptr ptr long)
 @ stdcall FsRtlNotifyUninitializeSync(ptr)

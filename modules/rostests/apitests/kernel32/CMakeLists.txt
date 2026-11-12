@@ -199,6 +199,7 @@ list(APPEND SOURCE
     QueueUserWorkItemStream.c
     RaiseFailFastException.c
     ReadDirectoryChanges.c
+    ReadDirectoryChangesEx.c
     ReadDirectoryChangesRename.c
     ReadFile.c
     RegisterWait.c

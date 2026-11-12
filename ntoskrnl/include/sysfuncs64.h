@@ -347,6 +347,9 @@ SVC_(ModifyBootEntry, 1)
 SVC_(ModifyDriverEntry, 1)
 #endif
 SVC_(NotifyChangeDirectoryFile, 9)
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+SVC_(NotifyChangeDirectoryFileEx, 10)
+#endif
 SVC_(NotifyChangeKey, 10)
 SVC_(NotifyChangeMultipleKeys, 12)
 #if (NTDDI_VERSION >= NTDDI_WIN7)

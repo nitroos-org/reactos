@@ -513,20 +513,27 @@ VOID NgUnlockNotifyPath(PNG_VCB Vcb)
 /* Reports a change of the object at Path ("\\dir\\name") to directory change notification. */
 VOID NgNotify(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action)
 {
+    NgNotifyFcb(Vcb, Path, Filter, Action, NULL, 0);
+}
+
+VOID NgNotifyFcb(PNG_VCB Vcb, PCUNICODE_STRING Path, ULONG Filter, ULONG Action, PNG_FCB Fcb, ULONGLONG ParentMftNo)
+{
     USHORT i = Path->Length / sizeof(WCHAR);
+    FILE_NOTIFY_EXTENDED_INFORMATION Info;
     if (!Vcb->NotifySync || !Path->Length)
         return;
     while (i > 0 && Path->Buffer[i - 1] != L'\\')
         i--;
     /* FsRtl compares Path with each watcher's NotifyPath, reading the latter's length again and again */
     NgLockNotifyPath(Vcb);
-    FsRtlNotifyFullReportChange(Vcb->NotifySync, &Vcb->DirNotifyList, (PSTRING)Path, (USHORT)(i * sizeof(WCHAR)),
-                                NULL, NULL, Filter, Action, NULL);
+    NgFillNotifyExtended(Fcb, ParentMftNo, &Info);
+    FsRtlNotifyFullReportChangeExtended(Vcb->NotifySync, &Vcb->DirNotifyList, (PSTRING)Path,
+                                        (USHORT)(i * sizeof(WCHAR)), NULL, NULL, Filter, Action, NULL, &Info);
     NgUnlockNotifyPath(Vcb);
 }
 
 /* NgNotify with the name of Ccb's handle, taken under FcbListLock (a rename through another handle may change it). */
-VOID NgNotifyCcb(PNG_VCB Vcb, PNG_CCB Ccb, ULONG Filter, ULONG Action)
+VOID NgNotifyCcb(PNG_VCB Vcb, PNG_CCB Ccb, PNG_FCB Fcb, ULONG Filter, ULONG Action)
 {
     UNICODE_STRING Copy;
     if (!Vcb->NotifySync)
@@ -539,7 +546,7 @@ VOID NgNotifyCcb(PNG_VCB Vcb, PNG_CCB Ccb, ULONG Filter, ULONG Action)
     ExReleaseFastMutex(&Vcb->FcbListLock);
     if (!Copy.Buffer)
         return;
-    NgNotify(Vcb, &Copy, Filter, Action);
+    NgNotifyFcb(Vcb, &Copy, Filter, Action, Fcb, Ccb->ParentMftNo);
     ExFreePoolWithTag(Copy.Buffer, TAG_NTFSNG);
 }
 
@@ -1771,13 +1778,14 @@ walked:
             goto out;
         }
         Information = Disposition == FILE_SUPERSEDE ? FILE_SUPERSEDED : FILE_OVERWRITTEN;
-        NgNotify(Vcb, &Full, FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_ATTRIBUTES,
-                 FILE_ACTION_MODIFIED);
+        NgNotifyFcb(Vcb, &Full, FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_ATTRIBUTES,
+                    FILE_ACTION_MODIFIED, Fcb, Ccb->ParentMftNo);
     }
     if (Created && Stream.Length)
-        NgNotify(Vcb, &Full, FILE_NOTIFY_CHANGE_STREAM_NAME, FILE_ACTION_ADDED_STREAM);
+        NgNotifyFcb(Vcb, &Full, FILE_NOTIFY_CHANGE_STREAM_NAME, FILE_ACTION_ADDED_STREAM, Fcb, Ccb->ParentMftNo);
     else if (Created)
-        NgNotify(Vcb, &Full, IsDir ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_ADDED);
+        NgNotifyFcb(Vcb, &Full, IsDir ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_ADDED,
+                    Fcb, Ccb->ParentMftNo);
 
     Irp->IoStatus.Information = Information;
     Shared = FALSE;
@@ -2145,10 +2153,11 @@ NTSTATUS NgDeleteNow(PNG_FCB Fcb, BOOLEAN KeepOpen)
     else if (Fcb->DelPath.Buffer)
     {
         if (Fcb->Stream.Length)
-            NgNotify(Vcb, &Fcb->DelPath, FILE_NOTIFY_CHANGE_STREAM_NAME, FILE_ACTION_REMOVED_STREAM);
+            NgNotifyFcb(Vcb, &Fcb->DelPath, FILE_NOTIFY_CHANGE_STREAM_NAME, FILE_ACTION_REMOVED_STREAM, Fcb,
+                        Fcb->DelParentMftNo);
         else
-            NgNotify(Vcb, &Fcb->DelPath, Fcb->IsDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
-                     FILE_ACTION_REMOVED);
+            NgNotifyFcb(Vcb, &Fcb->DelPath, Fcb->IsDirectory ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
+                        FILE_ACTION_REMOVED, Fcb, Fcb->DelParentMftNo);
     }
     return Err ? NgErrnoToStatus(Err) : STATUS_SUCCESS;
 }
@@ -2290,7 +2299,8 @@ static NTSTATUS NgCleanupGated(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         /* NTFS updates the last write time when a modified handle is cleaned up. */
         NgApplyModified(Fcb);
         if (Ccb && !Ccb->Orphaned)
-            NgNotify(Vcb, &Ccb->Path, FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
+            NgNotifyFcb(Vcb, &Ccb->Path, FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED,
+                        Fcb, Ccb->ParentMftNo);
     }
     /*
      * Mm may keep this FCB alive long after the last handle: park the core inode (see NgEnsureNode).  An FCB that holds
