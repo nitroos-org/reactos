@@ -67,6 +67,7 @@ KMT_TESTFUNC Test_IoInterrupt;
 KMT_TESTFUNC Test_IoIrp;
 KMT_TESTFUNC Test_IoMdl;
 KMT_TESTFUNC Test_IoCreateDeviceSecure;
+KMT_TESTFUNC Test_KeProcessorGroups;
 KMT_TESTFUNC Test_ObWithTag;
 KMT_TESTFUNC Test_IoCreateSystemThread;
 KMT_TESTFUNC Test_IoNonFileName;
@@ -225,6 +226,7 @@ const KMT_TEST TestList[] =
     { "IoIrp",                              Test_IoIrp },
     { "IoMdl",                              Test_IoMdl },
     { "IoCreateDeviceSecure",               Test_IoCreateDeviceSecure },
+    { "KeProcessorGroups",                  Test_KeProcessorGroups },
     { "ObWithTag",                          Test_ObWithTag },
     { "IoCreateSystemThread",               Test_IoCreateSystemThread },
     { "IoNonFileName",                      Test_IoNonFileName },
