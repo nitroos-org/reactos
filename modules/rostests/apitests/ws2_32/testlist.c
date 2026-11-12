@@ -71,6 +71,7 @@ extern void func_udprecv(void);
 extern void func_udpzerolen(void);
 extern void func_v6only(void);
 extern void func_udpoptions(void);
+extern void func_ephport(void);
 extern void func_timewait(void);
 extern void func_transmitfile(void);
 extern void func_WSAAsync(void);
@@ -156,6 +157,7 @@ const struct test winetest_testlist[] =
     { "udpzerolen", func_udpzerolen },
     { "v6only", func_v6only },
     { "udpoptions", func_udpoptions },
+    { "ephport", func_ephport },
     { "timewait", func_timewait },
     { "transmitfile", func_transmitfile },
     { "WSAAsync", func_WSAAsync },

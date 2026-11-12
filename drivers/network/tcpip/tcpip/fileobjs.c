@@ -583,13 +583,19 @@ NTSTATUS FileOpenAddress(
       {
           /* No port given: reserve an ephemeral one now, so that getsockname
              after bind reports it for a wildcard address as well */
-          AllocatedPort = TCPAllocatePort(0);
+          PTCP_CONNECT_HINT Hint = (PTCP_CONNECT_HINT)Address->Address[0].Address[0].sin_zero;
 
-          /* Every ephemeral port is taken: WSAENOBUFS, as on Windows */
-          if (AllocatedPort == (UINT)-1)
+          if (Hint->Magic == TCP_CONNECT_HINT_MAGIC)
+              AllocatedPort = TCPAllocatePortForRemote(Hint->RemoteAddress, Hint->RemotePort);
+          else
+              AllocatedPort = TCPAllocatePort(0);
+
+          /* Every ephemeral port is taken: WSAENOBUFS, as on Windows. The free ones all hold a TIME-WAIT of the
+             remote endpoint the connect is for: WSAEADDRINUSE, as on Windows */
+          if (AllocatedPort == (UINT)-1 || AllocatedPort == TCP_PORT_TIME_WAIT)
           {
               ExFreePoolWithTag(AddrFile, ADDR_FILE_TAG);
-              return STATUS_INSUFFICIENT_RESOURCES;
+              return AllocatedPort == TCP_PORT_TIME_WAIT ? STATUS_ADDRESS_ALREADY_EXISTS : STATUS_INSUFFICIENT_RESOURCES;
           }
           AddrFile->Port = AllocatedPort;
       }
