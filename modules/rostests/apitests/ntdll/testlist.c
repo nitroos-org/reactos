@@ -246,6 +246,7 @@ extern void func_FaultContext(void);
 extern void func_PageFaultAddress(void);
 extern void func_SectionFaultCost(void);
 extern void func_SectionPageLeak(void);
+extern void func_SectionViewProtect(void);
 extern void func_SectionVirtualLockLeak(void);
 extern void func_StackDeepRecursion(void);
 extern void func_BadSegmentFault(void);
@@ -515,6 +516,7 @@ const struct test winetest_testlist[] =
     { "PageFaultAddress",               func_PageFaultAddress },
     { "SectionFaultCost",               func_SectionFaultCost },
     { "SectionPageLeak",                func_SectionPageLeak },
+    { "SectionViewProtect",             func_SectionViewProtect },
     { "SectionVirtualLockLeak",         func_SectionVirtualLockLeak },
     { "StackDeepRecursion",             func_StackDeepRecursion },
     { "BadSegmentFault",                func_BadSegmentFault },
