@@ -7,8 +7,11 @@
  * A dispatcher queue runs work items on one thread, in priority order, when that thread dispatches window
  * messages. This follows the documented contract (dispatcherqueue.h, Windows.System.DispatcherQueue*); the
  * argument checks of CreateDispatcherQueueController were measured on Windows 10 22H2 with coremessaging_apitest
- * (E_INVALIDARG, output left alone). Windows ends the process for an unknown apartment type; this returns
- * E_INVALIDARG instead. Each queue has a message-only
+ * (E_INVALIDARG, output left alone). Windows ends the process for an unknown apartment type, and for a
+ * dedicated thread with DQTAT_COM_NONE (measured 2026-11-12); this returns E_INVALIDARG for the first and accepts the
+ * second (the Windows.System statics make such a queue). For DQTYPE_THREAD_CURRENT every apartment option (NONE, ASTA,
+ * STA) succeeds on a thread in no apartment, an STA or the MTA (measured, x64 and x86); the caller's apartment is left
+ * as it was. Each queue has a message-only
  * window on its thread: work items, timers and the shutdown sequence arrive there as messages, so they run
  * in whatever message loop the thread has (the caller's for DQTYPE_THREAD_CURRENT, our own for
  * DQTYPE_THREAD_DEDICATED). Microsoft Word loads this DLL for its composition (WinComp) renderer.
@@ -1926,8 +1929,9 @@ HRESULT WINAPI CreateDispatcherQueueController(DispatcherQueueOptions options, P
 
     if (options.threadType == DQTYPE_THREAD_CURRENT)
     {
-        if (options.apartmentType != DQTAT_COM_NONE)
-            return E_INVALIDARG;
+        /* any apartment option is accepted, whatever apartment the thread is in (measured on Windows 10 22H2, all nine
+         * combinations): the option is not acted on for the calling thread, which keeps the apartment it had (none
+         * stays none) */
         if (TlsGetValue(dq_tls))
             return RPC_E_WRONG_THREAD;
         if (!(queue = queue_create(FALSE)))

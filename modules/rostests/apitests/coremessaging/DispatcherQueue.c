@@ -412,8 +412,8 @@ static DWORD WINAPI ArgsThread(void *Param)
     trace("thread type 3: hr %08lx out %p\n", hr, C);
     if (SUCCEEDED(hr) && C) C->lpVtbl->Release(C);
 
-    /* Windows 10 22H2 ends the process for an unknown apartment type (measured), so that, a NULL controller
-     * pointer and a COM apartment for the current thread (neither measured) are not tried */
+    /* Windows 10 22H2 ends the process for an unknown apartment type (measured), so that and a NULL controller
+     * pointer are not tried; every apartment option for the current thread is in MatrixThread */
 
     /* nothing above made a queue for this thread */
     Q = ForCurrentThread();
@@ -1453,6 +1453,106 @@ static void TestThreadExit(void)
     E.C->lpVtbl->Release(E.C);
 }
 
+/* ---- thread type x apartment option x apartment of the calling thread ---- */
+
+/* Measured on Windows 10 22H2 (2026-11-12, x64 and x86), each cell on a fresh thread: DQTYPE_THREAD_CURRENT with
+ * COM_NONE, COM_ASTA and COM_STA all return S_OK on a thread in no apartment, in an STA and in the MTA (the first
+ * version of this file had E_INVALIDARG for ASTA and STA); the calling thread keeps the apartment it had; a second
+ * controller for the thread is RPC_E_WRONG_THREAD. DQTYPE_THREAD_DEDICATED with ASTA or STA is S_OK from all three,
+ * and with COM_NONE it ends the process, so that cell runs only on this implementation. Not measured: whether the
+ * queue of a current thread outside the requested apartment dispatches (the probe's handler was not agile:
+ * TryEnqueue is RO_E_MUST_BE_AGILE then), so that is only traced where the apartment does not match. */
+#define CELL(Type, Apt, Caller) ((void *)(ULONG_PTR)(((Type) << 8) | ((Apt) << 4) | (Caller)))
+
+static DWORD WINAPI MatrixThread(void *Param)
+{
+    static const char *const AptNames[] = { "COM_NONE", "COM_ASTA", "COM_STA" };
+    static const char *const CallerNames[] = { "no apartment", "STA", "MTA" };
+    int Type = ((ULONG_PTR)Param >> 8) & 0xf, Apt = ((ULONG_PTR)Param >> 4) & 0xf, Caller = (ULONG_PTR)Param & 0xf;
+    int T0 = -1, Q0 = -1, T1 = -1, Q1 = -1;
+    HRESULT hr, hr0 = E_NOTIMPL, hr1 = E_NOTIMPL;
+    CmController *C = (CmController *)(ULONG_PTR)0x1234, *C2 = (CmController *)(ULONG_PTR)0x1234;
+    CmQueue *Q = NULL, *Cur;
+    CmAsyncAction *Act = NULL;
+    TestHandler H;
+    CmBool r = 0;
+    LONG Before;
+    char Cell[96];
+
+    wsprintfA(Cell, "%s, %s, caller in %s", Type == 2 ? "current thread" : "dedicated thread", AptNames[Apt], CallerNames[Caller]);
+    if (Caller == 1)
+        CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    else if (Caller == 2)
+        CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (pCoGetApartmentType)
+        hr0 = pCoGetApartmentType(&T0, &Q0);
+
+    hr = pCreate(Opts(sizeof(CmOptions), Type, Apt), &C);
+    ok(hr == S_OK, "%s: CreateDispatcherQueueController returned %08lx\n", Cell, hr);
+    if (hr != S_OK || !C || C == (CmController *)(ULONG_PTR)0x1234)
+        return 0;
+
+    if (pCoGetApartmentType)
+        hr1 = pCoGetApartmentType(&T1, &Q1);
+    ok(hr0 == hr1 && T0 == T1 && Q0 == Q1, "%s: the apartment of the caller changed from %08lx %d %d to %08lx %d %d\n", Cell,
+       hr0, T0, Q0, hr1, T1, Q1);
+
+    hr = C->lpVtbl->get_DispatcherQueue(C, &Q);
+    ok(hr == S_OK && Q, "%s: get_DispatcherQueue returned %08lx\n", Cell, hr);
+    if (!Q)
+    {
+        C->lpVtbl->Release(C);
+        return 0;
+    }
+    Cur = ForCurrentThread();
+    if (Type == 2)
+    {
+        ok(SameObject(Cur, Q), "%s: GetForCurrentThread gives %p, not the queue %p\n", Cell, Cur, Q);
+        hr = pCreate(Opts(sizeof(CmOptions), Type, Apt), &C2);
+        ok(hr == RPC_E_WRONG_THREAD, "%s: a second controller returned %08lx\n", Cell, hr);
+        if (hr == S_OK && C2 != (CmController *)(ULONG_PTR)0x1234)
+            C2->lpVtbl->Release(C2);
+
+        InitHandler(&H, 1);
+        Before = g_OrderCount;
+        hr = Q->lpVtbl->TryEnqueue(Q, &H.Iface, &r);
+        ok(hr == S_OK && r == 1, "%s: TryEnqueue returned %08lx %u\n", Cell, hr, r);
+        Pump(2000, &g_OrderCount, Before + 1);
+        if (g_OrderCount > Before)
+            ok(H.ThreadId == GetCurrentThreadId(), "%s: the item ran on thread %lx\n", Cell, H.ThreadId);
+        else if ((Apt == 0) || (Apt == 1 && Caller == 1) || (Apt == 2 && Caller == 1))
+            ok(0, "%s: the item did not run\n", Cell);
+        else
+            trace("%s: the item did not run\n", Cell);
+    }
+    else
+        ok(Cur == NULL, "%s: the calling thread has queue %p\n", Cell, Cur);
+    if (Cur) Cur->lpVtbl->Release(Cur);
+
+    hr = C->lpVtbl->ShutdownQueueAsync(C, &Act);
+    ok(hr == S_OK, "%s: ShutdownQueueAsync returned %08lx\n", Cell, hr);
+    if (Type == 2)
+        Pump(300, NULL, 0);
+    if (Act) Act->lpVtbl->Release(Act);
+    Q->lpVtbl->Release(Q);
+    C->lpVtbl->Release(C);
+    return 0;
+}
+
+static void TestMatrix(void)
+{
+    int Type, Apt, Caller;
+
+    for (Type = 2; Type >= 1; Type--)
+        for (Apt = 0; Apt <= 2; Apt++)
+            for (Caller = 0; Caller <= 2; Caller++)
+            {
+                if (Type == 1 && Apt == 0 && !IsOurs()) /* ends the process on Windows */
+                    continue;
+                RunOnThread(MatrixThread, CELL(Type, Apt, Caller));
+            }
+}
+
 START_TEST(DispatcherQueueThreads)
 {
     HMODULE Mod = LoadLibraryW(L"CoreMessaging.dll");
@@ -1725,7 +1825,9 @@ START_TEST(DispatcherQueue)
 
     RunOnThread(ArgsThread, NULL);
     RunOnThread(CurrentThread, NULL);
-    TestDedicated(0, FALSE);
+    TestMatrix();
+    if (IsOurs()) /* ends the process on Windows */
+        TestDedicated(0, FALSE);
     TestDedicated(1, FALSE);
     TestDedicated(2, FALSE);
     TestDedicated(0, TRUE);
