@@ -30,6 +30,19 @@ GetLayeredStatus(PWND pWnd)
    return FALSE;
 }
 
+/* The SetLayeredWindowAttributes values (FALSE: not set) */
+BOOL FASTCALL
+IntGetLayeredAttributes(PWND pWnd, COLORREF *pcrKey, BYTE *pbAlpha, DWORD *pdwFlags)
+{
+   PLRD_PROP pLrdProp = UserGetProp(pWnd, AtomLayer, TRUE);
+   if (!pLrdProp || !pLrdProp->is_Layered)
+      return FALSE;
+   *pcrKey = pLrdProp->Key;
+   *pbAlpha = pLrdProp->Alpha;
+   *pdwFlags = pLrdProp->Flags;
+   return TRUE;
+}
+
 BOOL FASTCALL
 SetLayeredStatus(PWND pWnd, BYTE set)
 {
@@ -89,11 +102,14 @@ IntSetLayeredWindowAttributes(PWND pWnd,
       pLrdProp->Flags = dwFlags;
 
       pLrdProp->is_Layered = 1;
-  
+
+      /* Level 2 (redir.c): the compositor applies the alpha and the colour key to what the window paints */
+      UserRedirLayeredSet(pWnd, !was_Layered);
+
       if (!was_Layered)
          co_UserRedrawWindow(pWnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME );
    }
-   // FIXME: Now set some bits to the Window DC!!!!
+   /* Levels 0 and 1: nothing applies them (no backing store); level 2 composes them */
    return TRUE;
 }
 
@@ -147,7 +163,10 @@ IntUpdateLayeredWindowI( PWND pWnd,
 {
    PWND Parent;
    RECT Window, Client;
+   RECTL OldWindow = pWnd->rcWindow;
    BOOL Moved = FALSE, PointerCrossed = FALSE, UseBackdrop = FALSE;
+   /* Level 2 (redir.c): a top-level window keeps the content in its surface, composed with what is below */
+   BOOL Redirect = gRedirLevel >= 2 && pWnd->spwndParent && UserIsDesktopWindow(pWnd->spwndParent);
    RECT NewRect = { 0 };
    SIZE Offset;
    BOOL ret = FALSE;
@@ -204,7 +223,7 @@ IntUpdateLayeredWindowI( PWND pWnd,
     * before the window moves onto it or draws. A window that is a child or hidden, or a screen that cannot be captured,
     * leaves the blend on the screen.
     */
-   if ((info->dwFlags & ULW_ALPHA) && info->hdcSrc && (pWnd->style & WS_VISIBLE) && !(pWnd->style & WS_CHILD))
+   if (!Redirect && (info->dwFlags & ULW_ALPHA) && info->hdcSrc && (pWnd->style & WS_VISIBLE) && !(pWnd->style & WS_CHILD))
    {
       NewRect = Window;
       UseBackdrop = GlassBackdropPrepare(UserHMGetHandle(pWnd), (PRECTL)&NewRect);
@@ -248,7 +267,13 @@ IntUpdateLayeredWindowI( PWND pWnd,
       }
    }
 
-   if (info->hdcSrc)
+   if (Redirect &&
+       UserRedirUpdateLayered(pWnd, &OldWindow, info->hdcSrc, info->pptSrc, info->prcDirty, info->pblend,
+                              info->crKey, info->dwFlags, &ret))
+   {
+      /* Done in the window's surface */
+   }
+   else if (info->hdcSrc)
    {
       HDC hdc, hdcBuffer;
       BOOL bOwnDc;

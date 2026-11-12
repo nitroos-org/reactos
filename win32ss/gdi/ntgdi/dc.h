@@ -159,6 +159,24 @@ VOID NTAPI GreRedirDeleteSurface(_In_ struct _SURFACE *psurf);
 BOOL NTAPI GreRedirPresent(_In_ struct _SURFACE *psurf, _In_ struct _REGION *prgnScreen, _In_ LONG xWnd, _In_ LONG yWnd);
 BOOL NTAPI GreRedirSeedFromScreen(_In_ struct _SURFACE *psurf, _In_ struct _REGION *prgnScreen, _In_ LONG xWnd, _In_ LONG yWnd);
 BOOL NTAPI GreRedirCopyToDC(_In_ struct _SURFACE *psurf, _In_ HDC hdcDest, _In_ LONG xSrc, _In_ LONG ySrc, _In_ LONG cx, _In_ LONG cy);
+
+/* Level 2 composition (NitroRedirection 2): one window's surface drawn into the frame buffer of a compose pass */
+#define REDIRMODE_COPY      0       /* opaque */
+#define REDIRMODE_ALPHA     1       /* constant alpha over what is below; the surface's own alpha is not used */
+#define REDIRMODE_PREMUL    2       /* premultiplied per-pixel alpha, times the constant alpha (UpdateLayeredWindow) */
+#define REDIRMODE_GLASS     3       /* premultiplied per-pixel alpha; a pixel with alpha 0 and a colour is opaque (GDI drawing) */
+#define REDIRMODE_MASK      0xFF
+#define REDIRMODE_KEY       0x100   /* pixels of the colour key are not drawn */
+typedef struct _REDIR_LAYER
+{
+    struct _SURFACE *psurf; /* 32 bpp */
+    LONG x, y;              /* screen position of the surface's pixel 0, 0 */
+    ULONG Mode;             /* REDIRMODE_* */
+    BYTE Alpha;             /* constant alpha */
+    ULONG Key;              /* colour key, as a surface pixel (0x00RRGGBB) */
+} REDIR_LAYER, *PREDIR_LAYER;
+BOOL NTAPI GreRedirComposeLayer(_In_ struct _SURFACE *psurfFB, _In_ LONG xFB, _In_ LONG yFB, _In_ const REDIR_LAYER *pl, _In_ struct _REGION *prgnScreen);
+BOOL NTAPI GreRedirLoadFromDC(_In_ struct _SURFACE *psurfDst, _In_ HDC hdcSrc, _In_ LONG xSrc, _In_ LONG ySrc, _In_ const RECTL *prclDst, _Out_ PBOOL pbAlpha);
 /* ntuser/redir.c */
 VOID FASTCALL UserRedirMarkDirty(_In_ PVOID pvRedir, _In_opt_ const RECTL *prcl);
 // typedef struct _DC *PDC;

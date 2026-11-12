@@ -843,6 +843,10 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
 
    if (bUpdateVisRgn) DceUpdateVisRgn(Dce, Wnd, Flags);
 
+   /* Level 2: the content of an UpdateLayeredWindow window is what it gave; GDI drawing into it shows nothing */
+   if (Dce->pRedir && UserRedirIsUlw(Dce->pRedir))
+      bRedirLost = TRUE;
+
    if (bRedirLost)
    {
       PREGION RgnEmpty = IntSysCreateRectpRgn(0, 0, 0, 0);
@@ -854,9 +858,10 @@ UserGetDCEx(PWND Wnd OPTIONAL, HANDLE ClipRegion, ULONG Flags)
       Dce->RedirFlags |= DCE_REDIR_VISSTALE;
    }
 
-   /* A window marked as glass (HWNDPARAM_ROUTINE_ROS_SETGLASS): its DC blends 32 bpp DIB copies with alpha */
+   /* A window marked as glass (HWNDPARAM_ROUTINE_ROS_SETGLASS): its DC blends 32 bpp DIB copies with alpha.
+      Not when it draws into a surface (level 2): the copies keep their alpha there, the compositor blends them. */
    {
-      BOOL bGlass = Wnd && UserGetProp(Wnd, gpsi->atomFrostedWindowProp, TRUE) != NULL;
+      BOOL bGlass = Wnd && !Dce->pRedir && UserGetProp(Wnd, gpsi->atomFrostedWindowProp, TRUE) != NULL;
 
       if (bGlass || Dce->bGlass)
       {
