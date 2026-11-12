@@ -6808,6 +6808,20 @@ RetryCommit:
             goto FailPathNoLock;
         }
 
+#ifdef _M_AMD64
+        //
+        // Sparse Prototype PTEs: make their pages writable first
+        //
+        if (CommitPages && MI_IS_SPARSE_PROTOTYPE_PTE(PointerPte) &&
+            !NT_SUCCESS(MiPopulateSparsePrototypePtes(PointerPte, LastPte)))
+        {
+            MiReturnCommit(CommitPages);
+            KeReleaseGuardedMutexUnsafe(&MmSectionCommitMutex);
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto FailPath;
+        }
+#endif
+
         //
         // Get the segment template PTE and start looping each page
         //

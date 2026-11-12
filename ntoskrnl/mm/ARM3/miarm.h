@@ -245,6 +245,19 @@ extern const ULONG MmProtectToValue[32];
 #define MI_IS_SESSION_ADDRESS(Address) \
     (((Address) >= MmSessionBase) && ((Address) < MiSessionSpaceEnd))
 
+/* Prototype PTEs of large reserved page-file sections (protopte.c, amd64) */
+#ifdef _M_AMD64
+#define MI_IS_SPARSE_PROTOTYPE_PTE(Pte) \
+    (((ULONG_PTR)(Pte) >= MI_SPARSE_PROTO_START) && ((ULONG_PTR)(Pte) <= MI_SPARSE_PROTO_END))
+#else
+#define MI_IS_SPARSE_PROTOTYPE_PTE(Pte) FALSE
+#endif
+
+/* Where Prototype PTEs live: paged pool, or the sparse range */
+#define MI_IS_PROTOTYPE_PTE_ADDRESS(Pte) \
+    ((((PMMPTE)(Pte) >= (PMMPTE)MmPagedPoolStart) && ((PMMPTE)(Pte) <= (PMMPTE)MmPagedPoolEnd)) || \
+     MI_IS_SPARSE_PROTOTYPE_PTE(Pte))
+
 #define MI_IS_SESSION_PTE(Pte) \
     ((((PMMPTE)Pte) >= MiSessionBasePte) && (((PMMPTE)Pte) < MiSessionLastPte))
 
@@ -3227,5 +3240,36 @@ NTAPI
 MiIsViewProtectionCompatible(
     _In_ ULONG ViewProtectionMask,
     _In_ ULONG ProtectionMask);
+
+/* protopte.c */
+#ifdef _M_AMD64
+CODE_SEG("INIT")
+VOID
+NTAPI
+MiInitializeSparsePrototypePtes(VOID);
+
+NTSTATUS
+NTAPI
+MiAllocateSparsePrototypePtes(
+    _In_ PFN_COUNT PteCount,
+    _Out_ PMMPTE *PrototypePtes);
+
+NTSTATUS
+NTAPI
+MiPopulateSparsePrototypePtes(
+    _In_ PMMPTE FirstPte,
+    _In_ PMMPTE LastPte);
+
+VOID
+NTAPI
+MiFreeSparsePrototypePtes(
+    _In_ PMMPTE PrototypePtes,
+    _In_ PFN_COUNT PteCount);
+
+PMMPTE
+NTAPI
+MiSkipEmptySparsePrototypePtes(
+    _In_ PMMPTE PrototypePte);
+#endif
 
 /* EOF */
