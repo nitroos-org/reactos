@@ -50,6 +50,8 @@ typedef NTSTATUS (NTAPI *PLSA_COPY_TO_CLIENT_BUFFER)(PLSA_CLIENT_REQUEST, ULONG,
 typedef NTSTATUS (NTAPI *PLSA_COPY_FROM_CLIENT_BUFFER)(PLSA_CLIENT_REQUEST,
  ULONG, PVOID, PVOID);
 
+typedef BOOLEAN (NTAPI *PLSA_IS_TRUSTED_CLIENT)(PLSA_CLIENT_REQUEST);
+
 typedef struct LSA_DISPATCH_TABLE
 {
     PLSA_CREATE_LOGON_SESSION CreateLogonSession;
@@ -63,6 +65,7 @@ typedef struct LSA_DISPATCH_TABLE
     PLSA_FREE_CLIENT_BUFFER FreeClientBuffer;
     PLSA_COPY_TO_CLIENT_BUFFER CopyToClientBuffer;
     PLSA_COPY_FROM_CLIENT_BUFFER CopyFromClientBuffer;
+    PLSA_IS_TRUSTED_CLIENT IsTrustedClient;
 } LSA_DISPATCH_TABLE, *PLSA_DISPATCH_TABLE;
 
 
@@ -384,6 +387,18 @@ LsapFreeHeap(IN PVOID Base)
 }
 
 
+/* Does the client of this request hold SeTcbPrivilege (judged when it connected)? */
+static
+BOOLEAN
+NTAPI
+LsapIsTrustedClientRequest(IN PLSA_CLIENT_REQUEST ClientRequest)
+{
+    PLSAP_LOGON_CONTEXT LogonContext = (PLSAP_LOGON_CONTEXT)ClientRequest;
+
+    return (LogonContext != NULL && LogonContext->TrustedCaller) ? TRUE : FALSE;
+}
+
+
 static
 NTSTATUS
 NTAPI
@@ -494,6 +509,7 @@ LsapInitAuthPackages(VOID)
     DispatchTable.FreeClientBuffer = &LsapFreeClientBuffer;
     DispatchTable.CopyToClientBuffer = &LsapCopyToClientBuffer;
     DispatchTable.CopyFromClientBuffer = &LsapCopyFromClientBuffer;
+    DispatchTable.IsTrustedClient = &LsapIsTrustedClientRequest;
 
     /* Add registered authentication packages */
     Status = RtlQueryRegistryValues(RTL_REGISTRY_CONTROL,
