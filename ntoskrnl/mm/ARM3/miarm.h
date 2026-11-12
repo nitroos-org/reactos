@@ -2136,6 +2136,18 @@ MmArmAccessFault(
     IN PVOID TrapInformation
 );
 
+#if DBG
+/* Debug builds only: a kernel fault at IRQL > APC_LEVEL that no page fault can resolve bugchecks as on Windows */
+DECLSPEC_NORETURN
+VOID
+NTAPI
+MiBugCheckFaultAtRaisedIrql(
+    IN ULONG FaultCode,
+    IN PVOID Address,
+    IN PVOID TrapInformation
+);
+#endif
+
 NTSTATUS
 FASTCALL
 MiCheckPdeForPagedPool(

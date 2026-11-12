@@ -412,6 +412,28 @@ Again:
         goto Arm3Done;
     }
 
+#if DBG
+    /*
+     * A kernel mode fault at IRQL > APC_LEVEL cannot take the working set locks below and cannot be resolved:
+     * Windows bugchecks IRQL_NOT_LESS_OR_EQUAL. Release builds keep today's path (catchable exception).
+     */
+    if ((Mode == KernelMode) && (KeGetCurrentIrql() > APC_LEVEL))
+    {
+        if ((ULONG_PTR)Address <= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS)
+        {
+            /* User address: nothing can make it valid at this IRQL */
+            if (!MmIsAddressValid(Address))
+                MiBugCheckFaultAtRaisedIrql(FaultCode, Address, TrapInformation);
+        }
+        else
+        {
+            /* System address: ARM3 checks the page table entries without a lock and bugchecks if invalid */
+            Status = MmArmAccessFault(FaultCode, Address, Mode, TrapInformation);
+            goto Arm3Done;
+        }
+    }
+#endif
+
     /* Is there a ReactOS address space yet? */
     if (MmGetKernelAddressSpace())
     {
