@@ -711,7 +711,7 @@ CMP_RegisterNotification(
     RpcTryExcept
     {
         ret = PNP_RegisterNotification(BindingHandle,
-                                       (DWORD_PTR)hRecipient,
+                                       (ULONG64)(DWORD_PTR)hRecipient,
                                        szNameBuffer,
                                        (BYTE*)lpvNotificationFilter,
                                        ((DEV_BROADCAST_HDR*)lpvNotificationFilter)->dbch_size,
@@ -4692,8 +4692,12 @@ CM_Get_Device_Interface_List_ExW(
             return CR_FAILURE;
     }
 
+    /* The RPC counts bytes, the API characters */
+    if (BufferLen > MAXULONG / sizeof(WCHAR))
+        return CR_INVALID_DATA;
+
     *Buffer = 0;
-    BufferSize = BufferLen;
+    BufferSize = BufferLen * sizeof(WCHAR);
 
     RpcTryExcept
     {
@@ -4842,6 +4846,10 @@ CM_Get_Device_Interface_List_Size_ExW(
         ret = RpcStatusToCmStatus(RpcExceptionCode());
     }
     RpcEndExcept;
+
+    /* The RPC counts bytes, the API characters */
+    if (ret == CR_SUCCESS)
+        *pulLen /= sizeof(WCHAR);
 
     return ret;
 }

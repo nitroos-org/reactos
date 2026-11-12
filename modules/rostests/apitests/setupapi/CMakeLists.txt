@@ -8,6 +8,8 @@ list(APPEND SOURCE
     CM_Get_Device_Interface_Property.c
     CM_Get_DevNode_Property_Keys.c
     CM_Register_Notification.c
+    CM_Get_Device_Interface_List.c
+    RegisterDeviceNotification.c
     devclass.c
     RootBusDisable.c
     RootDeviceDisable.c

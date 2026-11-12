@@ -2702,9 +2702,10 @@ TAB_InsertItemT (TAB_INFO *infoPtr, INT iItem, const TCITEMW *pti, BOOL bUnicode
   TRACE("[%p]: added item %d %s\n",
         infoPtr->hwnd, iItem, debugstr_w(item->pszText));
 
-  /* If we haven't set the current focus yet, set it now. */
+  /* If we haven't set the current focus yet, set it now. Windows moves the focus
+     silently: it neither selects the tab nor notifies the parent. */
   if (infoPtr->uFocus == -1)
-    TAB_SetCurFocus(infoPtr, iItem);
+    infoPtr->uFocus = iItem;
 
   return iItem;
 }
