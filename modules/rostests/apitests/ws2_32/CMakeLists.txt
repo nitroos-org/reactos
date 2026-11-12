@@ -42,6 +42,7 @@ list(APPEND SOURCE
     listen.c
     udpconnreset.c
     manysockets.c
+    nbconnect.c
     nonblocking.c
     nostartup.c
     open_osfhandle.c
