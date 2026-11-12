@@ -491,6 +491,26 @@ static VOID LanReceivePacket(
     BOOLEAN LegacyReceive,
     BOOLEAN FromOwnLink);
 
+/* The bytes in the buffers of a packet a miniport lent us, counted from the buffer chain.
+   NdisQueryPacketLength returns the length cached in the packet from its first query, and a
+   miniport that resizes a recycled receive buffer for each frame (NdisAdjustBufferLength)
+   without NdisRecalculatePacketCounts leaves the cache at the length of the first frame the
+   packet carried. Frames longer than that then failed the length check of IPv4Receive: a
+   lending dc21x4 lost the data segments that followed a short frame in its buffer and the TCP
+   window collapsed until the sender retransmitted (0.03 MB/s on QEMU user networking) */
+static UINT LanLentPacketLength(PNDIS_PACKET Packet) {
+    PNDIS_BUFFER Buffer;
+    UINT Length = 0;
+
+    NdisQueryPacket(Packet, NULL, NULL, &Buffer, NULL);
+    while (Buffer) {
+        Length += MmGetMdlByteCount(Buffer);
+        NdisGetNextBuffer(Buffer, &Buffer);
+    }
+
+    return Length;
+}
+
 static VOID LanReceiveItem( PLAN_WQ_ITEM WorkItem ) {
     PNDIS_PACKET Packet;
     PLAN_ADAPTER Adapter;
@@ -595,7 +615,7 @@ static VOID LanReceivePacket(
         IPPacket.Position = Adapter->HeaderSize;
 
         /* Calculate packet size (excluding media header) */
-        NdisQueryPacketLength(IPPacket.NdisPacket, &IPPacket.TotalSize);
+        IPPacket.TotalSize = LanLentPacketLength(IPPacket.NdisPacket);
     }
 
     TI_DbgPrint
@@ -749,7 +769,7 @@ static VOID LanSubmitReceiveCopy(
     UINT Length, Size;
     PCHAR Data;
 
-    NdisQueryPacketLength(NdisPacket, &Length);
+    Length = LanLentPacketLength(NdisPacket);
     if (Length <= Adapter->HeaderSize ||
         GetPacketTypeFromNdisPacket(Adapter, NdisPacket, &PacketType, &NonUnicast) != NDIS_STATUS_SUCCESS)
         return;

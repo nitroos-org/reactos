@@ -413,6 +413,10 @@ DcHandleRxReceivedFrames(
 
         NdisAdjustBufferLength(Rcb->NdisBuffer, PacketLength);
 
+        /* The packet caches its length from the first query of the stack, which a lent
+           receive buffer outlives: the next frame in it has another length */
+        NdisRecalculatePacketCounts(Rcb->Packet);
+
         /* Receive buffers are in cached memory */
         NdisFlushBuffer(Rcb->NdisBuffer, FALSE);
 
