@@ -183,3 +183,270 @@ GreRedirSeedFromScreen(
 {
     return RedirScreenCopy(psurf, prgnScreen, xWnd, yWnd, FALSE);
 }
+
+/*
+ * Level 2 (NitroRedirection 2): a compose pass builds what the screen shows in a frame buffer (psurfFB, whose
+ * pixel 0, 0 is at xFB, yFB on the screen), from the bottom window up, and copies it to the screen in one blit.
+ * Draws the layer pl through prgnScreen (screen coordinates) into the frame buffer: copied, or blended with
+ * what the windows below put there. Both surfaces are 32 bpp B, G, R, A in memory.
+ */
+static __inline ULONG
+RedirMul255(ULONG a, ULONG b)
+{
+    ULONG t = a * b + 128;
+    return (t + (t >> 8)) >> 8;
+}
+
+static VOID
+RedirBlendRow(PULONG pDst, const ULONG *pSrc, LONG cx, const REDIR_LAYER *pl)
+{
+    ULONG Mode = pl->Mode & REDIRMODE_MASK, Ca = pl->Alpha;
+    BOOL bKey = (pl->Mode & REDIRMODE_KEY) != 0;
+    LONG i;
+
+    for (i = 0; i < cx; i++)
+    {
+        ULONG s = pSrc[i], d, sa, inv;
+
+        if (bKey && (s & 0x00FFFFFF) == pl->Key)
+            continue;
+        switch (Mode)
+        {
+            case REDIRMODE_COPY:
+                pDst[i] = s;
+                continue;
+            case REDIRMODE_ALPHA:
+                sa = Ca;
+                /* Not premultiplied: the colour is scaled by the constant alpha first */
+                s = (RedirMul255(s & 0xFF, sa)) | (RedirMul255((s >> 8) & 0xFF, sa) << 8) |
+                    (RedirMul255((s >> 16) & 0xFF, sa) << 16);
+                break;
+            case REDIRMODE_GLASS:
+                sa = s >> 24;
+                /* GDI leaves alpha 0: such a pixel with a colour is drawn as it is, black with alpha 0 is glass */
+                if (sa == 0 && (s & 0x00FFFFFF) != 0)
+                {
+                    pDst[i] = s | 0xFF000000;
+                    continue;
+                }
+                break;
+            default: /* REDIRMODE_PREMUL */
+                sa = s >> 24;
+                if (Ca != 255)
+                {
+                    s = (RedirMul255(s & 0xFF, Ca)) | (RedirMul255((s >> 8) & 0xFF, Ca) << 8) |
+                        (RedirMul255((s >> 16) & 0xFF, Ca) << 16);
+                    sa = RedirMul255(sa, Ca);
+                }
+                break;
+        }
+        if (sa == 255)
+        {
+            pDst[i] = s | 0xFF000000;
+            continue;
+        }
+        /* source + destination * (255 - alpha) / 255, per channel (premultiplied) */
+        d = pDst[i];
+        inv = 255 - sa;
+        {
+            ULONG b = (s & 0xFF) + RedirMul255(d & 0xFF, inv);
+            ULONG g = ((s >> 8) & 0xFF) + RedirMul255((d >> 8) & 0xFF, inv);
+            ULONG r = ((s >> 16) & 0xFF) + RedirMul255((d >> 16) & 0xFF, inv);
+            pDst[i] = 0xFF000000 | (min(r, 255) << 16) | (min(g, 255) << 8) | min(b, 255);
+        }
+    }
+}
+
+BOOL
+NTAPI
+GreRedirComposeLayer(
+    _In_ PSURFACE psurfFB,
+    _In_ LONG xFB,
+    _In_ LONG yFB,
+    _In_ const REDIR_LAYER *pl,
+    _In_ PREGION prgnScreen)
+{
+    SURFOBJ *pso = &psurfFB->SurfObj, *psoSrc;
+    RECTL rcLimit, rc;
+    ULONG i;
+    LONG y;
+
+    if (!pl->psurf || !prgnScreen)
+        return FALSE;
+    psoSrc = &pl->psurf->SurfObj;
+    if (pso->iBitmapFormat != BMF_32BPP || psoSrc->iBitmapFormat != BMF_32BPP || !pso->pvScan0 || !psoSrc->pvScan0)
+        return FALSE;
+    if ((pl->Mode & REDIRMODE_MASK) == REDIRMODE_ALPHA && pl->Alpha == 0)
+        return TRUE;
+
+    /* Where both the frame buffer and the layer have pixels (screen coordinates) */
+    {
+        /* 64-bit: window positions are not bounded; the result lies in the frame buffer, so it fits a LONG */
+        LONGLONG l = max((LONGLONG)xFB, (LONGLONG)pl->x), t = max((LONGLONG)yFB, (LONGLONG)pl->y);
+        LONGLONG r = min((LONGLONG)xFB + pso->sizlBitmap.cx, (LONGLONG)pl->x + psoSrc->sizlBitmap.cx);
+        LONGLONG b = min((LONGLONG)yFB + pso->sizlBitmap.cy, (LONGLONG)pl->y + psoSrc->sizlBitmap.cy);
+
+        if (l >= r || t >= b)
+            return TRUE;
+        rcLimit.left = (LONG)l;
+        rcLimit.top = (LONG)t;
+        rcLimit.right = (LONG)r;
+        rcLimit.bottom = (LONG)b;
+    }
+
+    for (i = 0; i < prgnScreen->rdh.nCount; i++)
+    {
+        if (!RECTL_bIntersectRect(&rc, &prgnScreen->Buffer[i], &rcLimit))
+            continue;
+        for (y = rc.top; y < rc.bottom; y++)
+        {
+            PULONG pDst = (PULONG)((PBYTE)pso->pvScan0 + (LONG_PTR)(y - yFB) * pso->lDelta) + (rc.left - xFB);
+            const ULONG *pSrc = (const ULONG *)((PBYTE)psoSrc->pvScan0 + (LONG_PTR)(y - pl->y) * psoSrc->lDelta) + (rc.left - pl->x);
+
+            if (pl->Mode == REDIRMODE_COPY)
+                RtlCopyMemory(pDst, pSrc, (rc.right - rc.left) * sizeof(ULONG));
+            else
+                RedirBlendRow(pDst, pSrc, rc.right - rc.left, pl);
+        }
+    }
+    return TRUE;
+}
+
+/* Zeroes the top-left cx x cy of a 32 bpp surface (the frame buffer, before a pass) */
+BOOL
+NTAPI
+GreRedirClearRect(
+    _In_ PSURFACE psurf,
+    _In_ LONG cx,
+    _In_ LONG cy)
+{
+    SURFOBJ *pso = &psurf->SurfObj;
+    LONG y;
+
+    if (pso->iBitmapFormat != BMF_32BPP || !pso->pvScan0 || cx < 0 || cy < 0 ||
+        cx > pso->sizlBitmap.cx || cy > pso->sizlBitmap.cy)
+    {
+        return FALSE;
+    }
+    for (y = 0; y < cy; y++)
+        RtlZeroMemory((PBYTE)pso->pvScan0 + (LONG_PTR)y * pso->lDelta, (SIZE_T)cx * 4);
+    return TRUE;
+}
+
+/* 32 bpp with bytes B, G, R and a fourth one (alpha), with bits */
+static BOOL
+RedirIsBgr32(PSURFACE psurf)
+{
+    PPALETTE ppal = psurf->ppal;
+
+    if (psurf->SurfObj.iBitmapFormat != BMF_32BPP || !psurf->SurfObj.pvScan0 || !ppal || (ppal->flFlags & PAL_INDEXED))
+        return FALSE;
+    if (ppal->flFlags & PAL_BGR)
+        return TRUE;
+    return (ppal->flFlags & PAL_BITFIELDS) &&
+           ppal->RedMask == 0x00FF0000 && ppal->GreenMask == 0x0000FF00 && ppal->BlueMask == 0x000000FF;
+}
+
+/*
+ * UpdateLayeredWindow at level 2: copies the bitmap of the memory DC hdcSrc, from xSrc, ySrc, into prclDst of a
+ * window's surface, replacing what was there. *pbAlpha: the alpha channel was copied too (a 32 bpp source), so
+ * the content has per-pixel alpha. Parts of prclDst the source does not cover are left as they are.
+ */
+BOOL
+NTAPI
+GreRedirLoadFromDC(
+    _In_ PSURFACE psurfDst,
+    _In_ HDC hdcSrc,
+    _In_ LONG xSrc,
+    _In_ LONG ySrc,
+    _In_ const RECTL *prclDst,
+    _Out_ PBOOL pbAlpha)
+{
+    PDC pdc;
+    PSURFACE psurfSrc;
+    RECTL rcDst = *prclDst, rcSrc;
+    BOOL bRet = FALSE;
+
+    *pbAlpha = FALSE;
+    if (!psurfDst || !psurfDst->SurfObj.pvScan0 || psurfDst->SurfObj.iBitmapFormat != BMF_32BPP)
+        return FALSE;
+    pdc = DC_LockDc(hdcSrc);
+    if (!pdc)
+        return FALSE;
+    psurfSrc = pdc->dclevel.pSurface;
+    if (pdc->dctype != DCTYPE_MEMORY || !psurfSrc)
+    {
+        DC_UnlockDc(pdc);
+        return FALSE;
+    }
+
+    /*
+     * The source rectangle (device coordinates of the memory DC), both clipped to their surfaces. xSrc and ySrc
+     * come from the caller (UpdateLayeredWindow's pptSrc) unchecked: 64-bit arithmetic, so no sum wraps, and the
+     * source rectangle is inside the source bitmap before any address is computed.
+     */
+    {
+        LONGLONG xs = (LONGLONG)xSrc + pdc->ptlDCOrig.x, ys = (LONGLONG)ySrc + pdc->ptlDCOrig.y;
+        LONGLONG dl = max(rcDst.left, 0), dt = max(rcDst.top, 0);
+        LONGLONG dr = min(rcDst.right, psurfDst->SurfObj.sizlBitmap.cx), db = min(rcDst.bottom, psurfDst->SurfObj.sizlBitmap.cy);
+        LONGLONG sl = xs + dl, st = ys + dt, sr = xs + dr, sb = ys + db;
+        LONGLONG cxs = psurfSrc->SurfObj.sizlBitmap.cx, cys = psurfSrc->SurfObj.sizlBitmap.cy;
+
+        if (sl < 0) { dl -= sl; sl = 0; }
+        if (st < 0) { dt -= st; st = 0; }
+        if (sr > cxs) { dr -= sr - cxs; sr = cxs; }
+        if (sb > cys) { db -= sb - cys; sb = cys; }
+        if (dl >= dr || dt >= db || sl >= sr || st >= sb)
+        {
+            DC_UnlockDc(pdc);
+            return TRUE;
+        }
+        /* All within [0, size] of their surfaces now: they fit in a LONG */
+        ASSERT(sl >= 0 && sr <= cxs && st >= 0 && sb <= cys && sr - sl == dr - dl && sb - st == db - dt);
+        rcDst.left = (LONG)dl; rcDst.top = (LONG)dt; rcDst.right = (LONG)dr; rcDst.bottom = (LONG)db;
+        rcSrc.left = (LONG)sl; rcSrc.top = (LONG)st; rcSrc.right = (LONG)sr; rcSrc.bottom = (LONG)sb;
+    }
+
+    if (RedirIsBgr32(psurfSrc))
+    {
+        /* As it is, alpha included; a DIB section's bits can be user memory */
+        _SEH2_TRY
+        {
+            LONG y;
+
+            for (y = 0; y < rcDst.bottom - rcDst.top; y++)
+            {
+                RtlCopyMemory((PBYTE)psurfDst->SurfObj.pvScan0 + (LONG_PTR)(rcDst.top + y) * psurfDst->SurfObj.lDelta + (LONG_PTR)rcDst.left * 4,
+                              (PBYTE)psurfSrc->SurfObj.pvScan0 + (LONG_PTR)(rcSrc.top + y) * psurfSrc->SurfObj.lDelta + (LONG_PTR)rcSrc.left * 4,
+                              (SIZE_T)(rcDst.right - rcDst.left) * 4);
+            }
+            bRet = TRUE;
+            *pbAlpha = TRUE;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            bRet = FALSE;
+        }
+        _SEH2_END;
+    }
+    else
+    {
+        EXLATEOBJ exlo;
+        POINTL ptl = { rcSrc.left, rcSrc.top };
+
+        EXLATEOBJ_vInitialize(&exlo, psurfSrc->ppal, psurfDst->ppal, 0, 0, 0);
+        /* The same: a DIB section's bits can be user memory another thread unmaps */
+        _SEH2_TRY
+        {
+            bRet = EngCopyBits(&psurfDst->SurfObj, &psurfSrc->SurfObj, NULL, &exlo.xlo, &rcDst, &ptl);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            bRet = FALSE;
+        }
+        _SEH2_END;
+        EXLATEOBJ_vCleanup(&exlo);
+    }
+    DC_UnlockDc(pdc);
+    return bRet;
+}

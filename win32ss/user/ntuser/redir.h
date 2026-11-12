@@ -20,6 +20,17 @@ VOID FASTCALL UserRedirPresentPending(VOID);
 BOOL FASTCALL UserRedirHasSurface(PWND Wnd);
 VOID FASTCALL UserRedirExpose(PWND DesktopWnd, PREGION RgnScreen);
 BOOL FASTCALL UserRedirCopyToDC(PWND Wnd, HDC hdc, LONG xSrc, LONG ySrc, LONG cx, LONG cy);
+/* Level 2 (layered and glass windows composed) */
+BOOL FASTCALL UserRedirIsUlw(PVOID pvRedir);
+BOOL FASTCALL UserRedirNoPaint(PWND Wnd);
+BOOL FASTCALL UserRedirKeepOnHide(PWND Wnd);
+VOID FASTCALL UserRedirLayoutChanged(PWND Wnd, const RECTL *prcOld);
+VOID FASTCALL UserRedirLayeredSet(PWND Wnd, BOOL bFirst);
+BOOL FASTCALL UserRedirLayeredFits(PWND Wnd, LONG cx, LONG cy);
+VOID FASTCALL UserRedirUlwSeen(PWND Wnd);
+VOID FASTCALL UserRedirFreeFrameBuffer(VOID);
+BOOL FASTCALL UserRedirUpdateLayered(PWND Wnd, const RECTL *prcOld, HDC hdcSrc, const POINT *pptSrc, const RECT *prcDirty,
+                                     const BLENDFUNCTION *pBlend, COLORREF crKey, DWORD dwFlags, PBOOL pbRet);
 
 /* windc.c */
 VOID FASTCALL DceRedirUnbindAll(PVOID pvRedir);

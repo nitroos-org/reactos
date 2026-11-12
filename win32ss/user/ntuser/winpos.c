@@ -2158,8 +2158,9 @@ co_WinPosSetWindowPosEx(
 
       Window->style &= ~WS_VISIBLE; //IntSetStyle( Window, 0, WS_VISIBLE );
       Window->head.pti->cVisWindows--;
-      /* A hidden window keeps no surface (shown again, it is painted again) */
-      UserRedirDetachWindow(Window);
+      /* A hidden window keeps no surface (shown again, it is painted again); level 2: UpdateLayeredWindow's content stays */
+      if (!UserRedirKeepOnHide(Window))
+         UserRedirDetachWindow(Window);
       IntNotifyWinEvent(EVENT_OBJECT_HIDE, Window, OBJID_WINDOW, CHILDID_SELF, WEF_SETBYWNDPTI);
    }
    else if (WinPos.flags & SWP_SHOWWINDOW)
@@ -2417,7 +2418,8 @@ co_WinPosSetWindowPosEx(
                    IntInvalidateWindows( Parent, DirtyRgn, RDW_ERASE | RDW_INVALIDATE);
                    co_IntPaintWindows(Parent, RDW_NOCHILDREN, FALSE);
                 }
-                if (!bRedirKeep)
+                /* Level 2: a layered window not set yet, or UpdateLayeredWindow's, is not painted (redir.c, oracle W3) */
+                if (!bRedirKeep && !UserRedirNoPaint(Window))
                    IntInvalidateWindows(Window, DirtyRgn, RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN);
              }
              else if (RgnType != ERROR && RgnType == NULLREGION) // Must be the same. See CORE-7166 & CORE-15934, NC HACK fix.
@@ -2621,6 +2623,9 @@ co_WinPosSetWindowPosEx(
    /* A redirected window that moved or came up in the z-order shows its content (kept in its surface) */
    if (gRedirLevel && (bRedirKeep || OldWindowRect.left != NewWindowRect.left || OldWindowRect.top != NewWindowRect.top))
       UserRedirWindowMoved(Window);
+   /* Level 2: translucent windows over the old and the new place show what is below them now */
+   if (gRedirLevel >= 2 && (WinPos.flags & SWP_AGG_STATUSFLAGS) != SWP_AGG_NOPOSCHANGE)
+      UserRedirLayoutChanged(Window, &OldWindowRect);
 
    /* And last, send the WM_WINDOWPOSCHANGED message */
 
