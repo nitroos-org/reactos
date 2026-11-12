@@ -12,6 +12,9 @@
  *   when the struct is exported with the name '_load_config_used'
  * - Setting the linker version of the PE header (--linkerversion=MAJOR.MINOR),
  *   which binutils always sets to its own version
+ * - Checking (no changes to the file) that a GUI/console executable has a manifest naming
+ *   Windows 10 in its compatibility section (--require-supportedos=win10), the build lint that keeps
+ *   every NitroOS executable from being told "Windows 8" by the version APIs
  */
 
 #include <errno.h>
@@ -186,6 +189,157 @@ static int driver_fixup(enum fixup_mode mode, unsigned char *buffer, PIMAGE_NT_H
 
 /* NOTE: This function tokenizes its parameter in place.
  * Its format is: name[=newname][,[[!]{CDEIKOMPRSUW}][A{1248PTSX}]] */
+/* ---- --require-supportedos=win10: lint, reads only ---- */
+
+#define RT_MANIFEST_ID 24
+/* the host pecoff.h has no names for these */
+#define LINT_IMAGE_FILE_DLL 0x2000
+#define LINT_SUBSYSTEM_GUI 2
+#define LINT_SUBSYSTEM_CUI 3
+#define SUPPORTEDOS_WIN10_GUID "8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a"
+
+static unsigned int rd16(const unsigned char *p) { return p[0] | (p[1] << 8); }
+static unsigned int rd32(const unsigned char *p) { return p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned int)p[3] << 24); }
+
+/* Case-insensitive search of an ASCII needle in an ASCII (wide = 0) or UTF-16LE (wide = 1) haystack */
+static int contains_text(const unsigned char *hay, size_t len, const char *needle, int wide)
+{
+    size_t n = strlen(needle), step = wide ? 2 : 1, i, j;
+
+    if (len < n * step)
+        return 0;
+    for (i = 0; i + n * step <= len; i++)
+    {
+        for (j = 0; j < n; j++)
+        {
+            unsigned char c = hay[i + j * step], d = (unsigned char)needle[j];
+            if (wide && hay[i + j * step + 1] != 0)
+                break;
+            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+            if (d >= 'A' && d <= 'Z') d += 'a' - 'A';
+            if (c != d)
+                break;
+        }
+        if (j == n)
+            return 1;
+    }
+    return 0;
+}
+
+/* Returns 0 when the image is fine (or not subject to the lint), 1 when it is a GUI/console executable without the Windows 10 GUID */
+static int check_supportedos(unsigned char *buffer, size_t len)
+{
+    size_t pe = rd32(buffer + 0x3c), oh, dd, sec0, rsrc_off = 0, i;
+    unsigned int nsec, osz, chars, magic, subsystem, rsrc_rva, rsrc_size, k;
+    int found_manifest = 0;
+
+    if (pe + 24 + 96 > len)
+        return 0;
+    nsec = rd16(buffer + pe + 6);
+    osz = rd16(buffer + pe + 20);
+    chars = rd16(buffer + pe + 22);
+    oh = pe + 24;
+    magic = rd16(buffer + oh);
+    subsystem = rd16(buffer + oh + 68);
+
+    /* Only executables of the Windows GUI / console subsystems run under the version APIs' manifest rule */
+    if ((chars & LINT_IMAGE_FILE_DLL) || (subsystem != LINT_SUBSYSTEM_GUI && subsystem != LINT_SUBSYSTEM_CUI))
+        return 0;
+
+    dd = oh + (magic == 0x20b ? 112 : 96);
+    if (dd + 24 > len)
+        goto missing;
+    rsrc_rva = rd32(buffer + dd + 16);
+    rsrc_size = rd32(buffer + dd + 20);
+    if (!rsrc_rva || !rsrc_size)
+        goto missing;
+    sec0 = oh + osz;
+    for (i = 0; i < nsec; i++)
+    {
+        size_t sh = sec0 + 40 * i;
+        unsigned int va, vs, raw, rawsz;
+        if (sh + 40 > len)
+            break;
+        vs = rd32(buffer + sh + 8); va = rd32(buffer + sh + 12); rawsz = rd32(buffer + sh + 16); raw = rd32(buffer + sh + 20);
+        if (rsrc_rva >= va && rsrc_rva < va + (vs > rawsz ? vs : rawsz))
+        {
+            rsrc_off = raw + (rsrc_rva - va);
+            break;
+        }
+    }
+    if (!rsrc_off || rsrc_off + 16 > len)
+        goto missing;
+
+    /* type level: find RT_MANIFEST, then every name and language below it */
+    {
+        unsigned int n1 = rd16(buffer + rsrc_off + 12) + rd16(buffer + rsrc_off + 14);
+        for (k = 0; k < n1 && rsrc_off + 16 + 8 * (k + 1) <= len; k++)
+        {
+            unsigned int id = rd32(buffer + rsrc_off + 16 + 8 * k), sub1 = rd32(buffer + rsrc_off + 20 + 8 * k);
+            size_t d2, j2;
+            unsigned int n2;
+            if (id != RT_MANIFEST_ID || !(sub1 & 0x80000000))
+                continue;
+            d2 = rsrc_off + (sub1 & 0x7fffffff);
+            if (d2 + 16 > len)
+                continue;
+            n2 = rd16(buffer + d2 + 12) + rd16(buffer + d2 + 14);
+            for (j2 = 0; j2 < n2 && d2 + 16 + 8 * (j2 + 1) <= len; j2++)
+            {
+                unsigned int sub2 = rd32(buffer + d2 + 20 + 8 * j2);
+                size_t d3, j3;
+                unsigned int n3;
+                if (!(sub2 & 0x80000000))
+                    continue;
+                d3 = rsrc_off + (sub2 & 0x7fffffff);
+                if (d3 + 16 > len)
+                    continue;
+                n3 = rd16(buffer + d3 + 12) + rd16(buffer + d3 + 14);
+                for (j3 = 0; j3 < n3 && d3 + 16 + 8 * (j3 + 1) <= len; j3++)
+                {
+                    unsigned int leaf = rd32(buffer + d3 + 20 + 8 * j3);
+                    size_t de = rsrc_off + (leaf & 0x7fffffff);
+                    unsigned int data_rva, data_size;
+                    size_t data_off = 0, s;
+                    if ((leaf & 0x80000000) || de + 8 > len)
+                        continue;
+                    data_rva = rd32(buffer + de);
+                    data_size = rd32(buffer + de + 4);
+                    for (s = 0; s < nsec; s++)
+                    {
+                        size_t sh = sec0 + 40 * s;
+                        unsigned int va, vs, raw, rawsz;
+                        if (sh + 40 > len)
+                            break;
+                        vs = rd32(buffer + sh + 8); va = rd32(buffer + sh + 12); rawsz = rd32(buffer + sh + 16); raw = rd32(buffer + sh + 20);
+                        if (data_rva >= va && data_rva < va + (vs > rawsz ? vs : rawsz))
+                        {
+                            data_off = raw + (data_rva - va);
+                            break;
+                        }
+                    }
+                    if (!data_off || data_off + data_size > len)
+                        continue;
+                    found_manifest = 1;
+                    if (contains_text(buffer + data_off, data_size, "supportedOS", 0) &&
+                        contains_text(buffer + data_off, data_size, SUPPORTEDOS_WIN10_GUID, 0))
+                        return 0;
+                    if (contains_text(buffer + data_off, data_size, "supportedOS", 1) &&
+                        contains_text(buffer + data_off, data_size, SUPPORTEDOS_WIN10_GUID, 1))
+                        return 0;
+                }
+            }
+        }
+    }
+
+missing:
+    error("%s; it needs <supportedOS Id=\"{%s}\"/> (Windows 10) in a compatibility element. "
+          "Use sdk/include/reactos/manifest.xml or add the element to the manifest of the module "
+          "(a module without any manifest gets one from set_module_type; NO_COMPAT_MANIFEST opts a module out)\n",
+          found_manifest ? "the manifest does not name Windows 10" : "no manifest", SUPPORTEDOS_WIN10_GUID);
+    return 1;
+}
+
 static int change_section_attribs(char* section_attribs, unsigned char* buffer, PIMAGE_NT_HEADERS nt_header)
 {
     char *sectionName, *newSectionName;
@@ -406,7 +560,10 @@ print_usage(void)
            "                        Overrides the attributes of a section, optionally\n"
            "                        changing its name and its alignment;\n"
            "  --linkerversion=major.minor\n"
-           "                        Sets the linker version of the image header.\n");
+           "                        Sets the linker version of the image header;\n"
+           "  --require-supportedos=win10\n"
+           "                        Only check (the file is not modified): fail if a GUI or console\n"
+           "                        executable has no manifest naming Windows 10.\n");
 }
 
 int main(int argc, char **argv)
@@ -421,6 +578,7 @@ int main(int argc, char **argv)
     PIMAGE_NT_HEADERS nt_header;
     unsigned int linker_major = 0, linker_minor = 0;
     int set_linker_version = 0;
+    int require_supportedos = 0;
 
     g_ApplicationName = argv[0];
 
@@ -467,6 +625,10 @@ int main(int argc, char **argv)
         else if (strncmp(&argv[i][2], "section:", 8) == 0)
         {
             /* Section attributes override, will be handled later */
+        }
+        else if (strcmp(&argv[i][2], "require-supportedos=win10") == 0)
+        {
+            require_supportedos = 1;
         }
         else if (strncmp(&argv[i][2], "linkerversion=", 14) == 0)
         {
@@ -544,6 +706,13 @@ int main(int argc, char **argv)
     }
 
     result = 0;
+
+    /* Lint only: no fixups, nothing written */
+    if (require_supportedos)
+    {
+        result = check_supportedos(buffer, len);
+        goto Quit;
+    }
 
     /* Apply mode fixups */
     if (mode != MODE_NONE)

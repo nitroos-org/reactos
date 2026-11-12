@@ -1,0 +1,11 @@
+/*
+ * Compatibility-only manifest for executables that have no manifest of their own:
+ * declares Windows 10 and nothing else (no trustInfo, no dependencies), so adding it
+ * changes only what the loader knows about the supported OS.
+ * Added to every win32cui/win32gui module by set_module_type (sdk/cmake/CMakeMacros.cmake).
+ */
+
+#include <windef.h>
+#include <winuser.h>
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "manifest_compat.xml"
