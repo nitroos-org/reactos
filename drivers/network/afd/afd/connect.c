@@ -310,14 +310,8 @@ MakeSocketIntoConnection(PAFD_FCB FCB, BOOL Receive) {
         if( !FCB->Recv.Window ) return STATUS_NO_MEMORY;
     }
 
-    if (!FCB->Send.Window)
-    {
-        FCB->Send.Window = ExAllocatePoolWithTag(PagedPool,
-                                                 FCB->Send.Size,
-                                                 TAG_AFD_DATA_BUFFER);
-
-        if( !FCB->Send.Window ) return STATUS_NO_MEMORY;
-    }
+    /* The send window is allocated by the first send (AfdConnectedSocketWriteData): a 64 KB window
+     * for every connected socket took 640 MB of paged pool for 5000 connections (i386 ran out) */
 
     FCB->SharedData.State = SOCKET_STATE_CONNECTED;
     FCB->SharedData.ConnectTime = 0; // Not used

@@ -854,6 +854,14 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
 
+    /* Allocated by the first send rather than when the socket is connected */
+    if( !FCB->Send.Window )
+    {
+        FCB->Send.Window = ExAllocatePoolWithTag( PagedPool, FCB->Send.Size, TAG_AFD_DATA_BUFFER );
+        if( !FCB->Send.Window )
+            return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
+    }
+
     /* A datagram socket signals FD_WRITE when it is bound or connected, not on each send */
     if( !(FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) )
         FCB->EventSelectDisabled &= ~AFD_EVENT_SEND;
