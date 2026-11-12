@@ -3773,6 +3773,23 @@ NtDuplicateObject(IN HANDLE SourceProcessHandle,
     return Status;
 }
 
+/* Tagged variant (Windows 7 and later): the tag is only a debugging aid, see obref.c */
+NTSTATUS
+NTAPI
+ObOpenObjectByPointerWithTag(IN PVOID Object,
+                             IN ULONG HandleAttributes,
+                             IN PACCESS_STATE PassedAccessState,
+                             IN ACCESS_MASK DesiredAccess,
+                             IN POBJECT_TYPE ObjectType,
+                             IN KPROCESSOR_MODE AccessMode,
+                             IN ULONG Tag,
+                             OUT PHANDLE Handle)
+{
+    UNREFERENCED_PARAMETER(Tag);
+    return ObOpenObjectByPointer(Object, HandleAttributes, PassedAccessState,
+                                 DesiredAccess, ObjectType, AccessMode, Handle);
+}
+
 BOOLEAN
 NTAPI
 ObIsKernelHandle(IN HANDLE Handle)
