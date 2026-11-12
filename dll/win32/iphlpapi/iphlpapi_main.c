@@ -2592,6 +2592,102 @@ DWORD WINAPI GetTcpTable(PMIB_TCPTABLE pTcpTable, PDWORD pdwSize, BOOL bOrder)
 
 
 /******************************************************************
+ *    GetTcpTable2 (IPHLPAPI.@)
+ *
+ * Get the table of TCP connections with the owning process and the offload state.
+ *
+ * PARAMS
+ *  pTcpTable [Out]    buffer for the MIB_TCPTABLE2
+ *  pdwSize   [In/Out] length of the output buffer
+ *  bOrder    [In]     whether to order the table
+ *
+ * RETURNS
+ *  Success: NO_ERROR
+ *  Failure: ERROR_INSUFFICIENT_BUFFER (the size is set), ERROR_INVALID_PARAMETER
+ *
+ * NOTES
+ *  The rows are those of GetExtendedTcpTable(TCP_TABLE_OWNER_PID_ALL); the stack has no connection
+ *  offload, so the offload state is always TcpConnectionOffloadStateInHost.
+ */
+DWORD WINAPI GetTcpTable2(PMIB_TCPTABLE2 pTcpTable, PULONG pdwSize, BOOL bOrder)
+{
+    PMIB_TCPTABLE_OWNER_PID owner = NULL;
+    DWORD ret, ownerSize = 0, size, i, tries;
+
+    if (!pdwSize)
+        return ERROR_INVALID_PARAMETER;
+
+    /* the table can grow between the size query and the read */
+    for (tries = 0; tries < 8; tries++)
+    {
+        ret = GetExtendedTcpTable(owner, &ownerSize, bOrder, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+        if (ret != ERROR_INSUFFICIENT_BUFFER)
+            break;
+        HeapFree(GetProcessHeap(), 0, owner);
+        owner = HeapAlloc(GetProcessHeap(), 0, ownerSize);
+        if (!owner)
+            return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    if (ret != NO_ERROR)
+    {
+        HeapFree(GetProcessHeap(), 0, owner);
+        return ret == ERROR_INSUFFICIENT_BUFFER ? ERROR_NOT_ENOUGH_MEMORY : ret;
+    }
+
+    size = FIELD_OFFSET(MIB_TCPTABLE2, table) + owner->dwNumEntries * sizeof(MIB_TCPROW2);
+    if (size > *pdwSize || !pTcpTable)
+    {
+        *pdwSize = size;
+        HeapFree(GetProcessHeap(), 0, owner);
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    pTcpTable->dwNumEntries = owner->dwNumEntries;
+    for (i = 0; i < owner->dwNumEntries; i++)
+    {
+        pTcpTable->table[i].dwState = owner->table[i].dwState;
+        pTcpTable->table[i].dwLocalAddr = owner->table[i].dwLocalAddr;
+        pTcpTable->table[i].dwLocalPort = owner->table[i].dwLocalPort;
+        pTcpTable->table[i].dwRemoteAddr = owner->table[i].dwRemoteAddr;
+        pTcpTable->table[i].dwRemotePort = owner->table[i].dwRemotePort;
+        pTcpTable->table[i].dwOwningPid = owner->table[i].dwOwningPid;
+        pTcpTable->table[i].dwOffloadState = TcpConnectionOffloadStateInHost;
+    }
+    *pdwSize = size;
+    HeapFree(GetProcessHeap(), 0, owner);
+    return NO_ERROR;
+}
+
+
+/******************************************************************
+ *    GetTcp6Table2 (IPHLPAPI.@)
+ *
+ * Get the table of IPv6 TCP connections.
+ *
+ * NOTES
+ *  The stack does not enumerate IPv6 connections (GetExtendedTcpTable rejects AF_INET6 too), so the
+ *  table is empty.
+ */
+DWORD WINAPI GetTcp6Table2(PMIB_TCP6TABLE2 pTcpTable, PULONG pdwSize, BOOL bOrder)
+{
+    DWORD size = FIELD_OFFSET(MIB_TCP6TABLE2, table);
+
+    if (!pdwSize)
+        return ERROR_INVALID_PARAMETER;
+
+    if (size > *pdwSize || !pTcpTable)
+    {
+        *pdwSize = size;
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    pTcpTable->dwNumEntries = 0;
+    *pdwSize = size;
+    return NO_ERROR;
+}
+
+
+/******************************************************************
  *    GetUdpStatisticsEx (IPHLPAPI.@)
  *
  * PARAMS
@@ -2932,6 +3028,28 @@ DWORD WINAPI ConvertLengthToIpv4Mask(ULONG MaskLength, PULONG Mask)
 
   /* the mask is in network byte order */
   *Mask = MaskLength ? htonl(0xffffffffUL << (32 - MaskLength)) : 0;
+  return NO_ERROR;
+}
+
+DWORD WINAPI ConvertIpv4MaskToLength(ULONG Mask, PUINT8 MaskLength)
+{
+  ULONG Host = ntohl(Mask);
+  UINT8 Length = 0;
+
+  /* Windows faults on a NULL length, this fails instead */
+  if (!MaskLength)
+    return ERROR_INVALID_PARAMETER;
+
+  /* the mask is in network byte order, and only a run of one bits followed by zero bits is a mask */
+  while (Host & 0x80000000UL)
+  {
+    Length++;
+    Host <<= 1;
+  }
+  if (Host)
+    return ERROR_INVALID_PARAMETER;
+
+  *MaskLength = Length;
   return NO_ERROR;
 }
 

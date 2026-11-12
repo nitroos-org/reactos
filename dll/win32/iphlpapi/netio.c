@@ -738,6 +738,91 @@ DWORD WINAPI GetUnicastIpAddressEntry(PMIB_UNICASTIPADDRESS_ROW Row)
   return Found ? NO_ERROR : Error;
 }
 
+VOID WINAPI InitializeUnicastIpAddressEntry(PMIB_UNICASTIPADDRESS_ROW Row)
+{
+  if (!Row)
+    return;
+
+  /* UNVERIFIED against Windows: the oracle probe of the oraxe2 lane returned no output */
+  memset(Row, 0, sizeof(*Row));
+  Row->OnLinkPrefixLength = 255;
+  Row->ValidLifetime = 0xffffffff;
+  Row->PreferredLifetime = 0xffffffff;
+}
+
+/* The IPv4 address of the interface the row names, or the error to return. The stack keeps one IPv4 address
+   per interface, and its NTE context (DeleteIPAddress) is the index of the interface. */
+static DWORD unicast_row_interface(const MIB_UNICASTIPADDRESS_ROW *Row, DWORD *Index, DWORD *Current)
+{
+  NETIO_IF *List, *If;
+  PMIB_IPADDRTABLE Addresses;
+  ULONG Count, j;
+  DWORD Result, Error;
+
+  *Current = 0;
+  Result = collect_interfaces(&List, &Count);
+  if (Result != NO_ERROR)
+    return Result;
+
+  If = find_row_interface(List, Count, Row->InterfaceLuid.Value, Row->InterfaceIndex, &Error);
+  if (If)
+  {
+    *Index = If->Index;
+    if (get_address_table(&Addresses))
+    {
+      for (j = 0; j < Addresses->dwNumEntries; j++)
+        if (Addresses->table[j].dwIndex == If->Index && Addresses->table[j].dwAddr)
+          *Current = Addresses->table[j].dwAddr;
+      HeapFree(GetProcessHeap(), 0, Addresses);
+    }
+  }
+  HeapFree(GetProcessHeap(), 0, List);
+  return Error;
+}
+
+DWORD WINAPI CreateUnicastIpAddressEntry(const MIB_UNICASTIPADDRESS_ROW *Row)
+{
+  DWORD Index = 0, Current, Error, Context, Instance;
+  ULONG Mask;
+
+  if (!Row || (Row->Address.si_family != AF_INET && Row->Address.si_family != AF_INET6))
+    return ERROR_INVALID_PARAMETER;
+  if (Row->Address.si_family == AF_INET6)
+    return ERROR_NOT_SUPPORTED;
+  if (!Row->Address.Ipv4.sin_addr.s_addr || Row->OnLinkPrefixLength > 32)
+    return ERROR_INVALID_PARAMETER;
+
+  Error = unicast_row_interface(Row, &Index, &Current);
+  if (Error != NO_ERROR)
+    return Error;
+  if (Current == Row->Address.Ipv4.sin_addr.s_addr)
+    return ERROR_OBJECT_ALREADY_EXISTS;
+  /* a second address on an interface would replace the first in this stack */
+  if (Current)
+    return ERROR_NOT_SUPPORTED;
+
+  ConvertLengthToIpv4Mask(Row->OnLinkPrefixLength, &Mask);
+  return AddIPAddress(Row->Address.Ipv4.sin_addr.s_addr, Mask, Index, &Context, &Instance);
+}
+
+DWORD WINAPI DeleteUnicastIpAddressEntry(const MIB_UNICASTIPADDRESS_ROW *Row)
+{
+  DWORD Index = 0, Current, Error;
+
+  if (!Row || (Row->Address.si_family != AF_INET && Row->Address.si_family != AF_INET6))
+    return ERROR_INVALID_PARAMETER;
+  if (Row->Address.si_family == AF_INET6)
+    return ERROR_NOT_FOUND;
+
+  Error = unicast_row_interface(Row, &Index, &Current);
+  if (Error != NO_ERROR)
+    return Error;
+  if (!Row->Address.Ipv4.sin_addr.s_addr || Current != Row->Address.Ipv4.sin_addr.s_addr)
+    return ERROR_NOT_FOUND;
+
+  return DeleteIPAddress(Index);
+}
+
 /* ---- interface names and luids ---- */
 
 static const struct { ULONG Type; const char *Name; } TypeNames[] =
