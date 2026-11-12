@@ -542,8 +542,11 @@ PageFaultError:
     shr r9d, 1
     and r9d, 9
 
-    /* Set parameter 2 to faulting address */
-    mov r10, cr2  // Param2 = faulting address
+    /* Set parameter 2 to the faulting address saved on entry. CR2 is not read again: interrupts were enabled
+       and MmAccessFault may have waited, so another page fault on this processor (another thread, after a
+       context switch) can have changed it. The address of an access violation tells a deliberate fault (the
+       JVM safepoint poll page, for instance) from a crash. */
+    mov r10, [rbp + KTRAP_FRAME_FaultAddress] // Param2 = faulting address
 
     cmp eax, STATUS_ACCESS_VIOLATION
     je AccessViolation
