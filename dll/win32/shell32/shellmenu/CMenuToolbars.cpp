@@ -1162,7 +1162,8 @@ HRESULT CMenuToolbarBase::PopupItem(INT iItem, BOOL keyInitiated)
 CMenuStaticToolbar::CMenuStaticToolbar(CMenuBand *menuBand) :
     CMenuToolbarBase(menuBand, FALSE),
     m_hmenu(NULL),
-    m_hwndMenu(NULL)
+    m_hwndMenu(NULL),
+    m_skipLeadingSeparator(FALSE)
 {
 }
 
@@ -1200,6 +1201,22 @@ HRESULT  CMenuStaticToolbar::SetMenu(
     return S_OK;
 }
 
+HRESULT CMenuStaticToolbar::HideLeadingSeparator()
+{
+    m_skipLeadingSeparator = TRUE;
+
+    if (!IsWindow() || GetButtonCount() == 0)
+        return S_OK;
+
+    TBBUTTON tbb = { 0 };
+    if (SendMessageW(TB_GETBUTTON, 0, (LPARAM)&tbb) && (tbb.fsStyle & BTNS_SEP))
+    {
+        DeleteButton(0);
+        m_hasSizes = FALSE;
+    }
+    return S_OK;
+}
+
 HRESULT CMenuStaticToolbar::FillToolbar(BOOL clearFirst)
 {
     int i;
@@ -1231,6 +1248,8 @@ HRESULT CMenuStaticToolbar::FillToolbar(BOOL clearFirst)
 
         if (info.fType & MFT_SEPARATOR)
         {
+            if (m_skipLeadingSeparator && i == 0)
+                continue;
             AddSeparator(last);
         }
         else if (!(info.fType & MFT_BITMAP))
@@ -1380,10 +1399,13 @@ HRESULT CMenuSFToolbar::FillToolbar(BOOL clearFirst)
         hr = eidl->Next(1, &item, NULL);
     }
 
-    // If no items were added, show the "empty" placeholder
+    // If no items were added, show the "empty" placeholder. The top level Start menu has no such item: with
+    // nothing pinned its section is simply absent, and the static items start the menu.
     if (DPA_GetPtrCount(dpaSort) == 0)
     {
         DPA_Destroy(dpaSort);
+        if ((m_initFlags & (SMINIT_TOPLEVEL | SMINIT_VERTICAL)) == (SMINIT_TOPLEVEL | SMINIT_VERTICAL))
+            return S_OK;
         return AddPlaceholder();
     }
 
