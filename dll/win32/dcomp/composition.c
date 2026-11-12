@@ -84,6 +84,7 @@ static const struct iface_entry iface_table[] =
     IE(ICompositionBrush, brush, KM_BRUSH, TRUE),
     IE(ICompositionColorBrush, colorbrush, KM(K_COLORBRUSH), TRUE),
     IE(ICompositionSurfaceBrush, surfbrush, KM(K_SURFBRUSH), TRUE),
+    { &IID_ICompositionSurfaceBrush3, offsetof(struct cobj, surfbrush3), KM(K_SURFBRUSH), TRUE },
     IE(ICompositionClip, clip, KM(K_INSETCLIP), TRUE),
     IE(IInsetClip, inset, KM(K_INSETCLIP), TRUE),
     IE(ICompositionGraphicsDevice, gdev, KM(K_GDEVICE), TRUE),
@@ -222,6 +223,7 @@ INSP_FWD(vcol, WIVisualCollection, vcoll)
 INSP_FWD(brs, WICompositionBrush, brush)
 INSP_FWD(cbr, WICompositionColorBrush, colorbrush)
 INSP_FWD(sbr, WICompositionSurfaceBrush, surfbrush)
+INSP_FWD(sb3, WICompositionSurfaceBrush3, surfbrush3)
 INSP_FWD(clp, WICompositionClip, clip)
 INSP_FWD(ins, WIInsetClip, inset)
 INSP_FWD(gdv, WICompositionGraphicsDevice, gdev)
@@ -1230,6 +1232,12 @@ HRESULT comp_new_desktop_target(IUnknown *compositor, HWND hwnd, BOOL topmost, W
 }
 
 
+static HRESULT STDMETHODCALLTYPE sb3_get_SnapToPixels(WICompositionSurfaceBrush3 *i, BOOLEAN *v)
+{ struct cobj *o = OBJ_OF(i, surfbrush3); if (!v) return E_POINTER; comp_lock(); *v = o->snap; comp_unlock(); return S_OK; }
+static HRESULT STDMETHODCALLTYPE sb3_put_SnapToPixels(WICompositionSurfaceBrush3 *i, BOOLEAN v)
+{ struct cobj *o = OBJ_OF(i, surfbrush3); comp_lock(); o->snap = v; comp_unlock(); return S_OK; }
+static const WICompositionSurfaceBrush3Vtbl surfbrush3_vtbl = { INSP_HEAD(sb3), sb3_get_SnapToPixels, sb3_put_SnapToPixels };
+
 /* ---- IVisual2: the values are kept, nothing applies them yet (no renderer) ---- */
 
 #define VIS2(i) OBJ_OF(i, visual2)
@@ -1415,6 +1423,7 @@ HRESULT comp_create(IUnknown *compositor, enum cobj_kind kind, struct cobj **out
     o->brush.lpVtbl = &brush_vtbl;
     o->colorbrush.lpVtbl = &colorbrush_vtbl;
     o->surfbrush.lpVtbl = &surfbrush_vtbl;
+    o->surfbrush3.lpVtbl = &surfbrush3_vtbl;
     o->clip.lpVtbl = &clip_vtbl;
     o->inset.lpVtbl = &inset_vtbl;
     o->gdev.lpVtbl = &gdev_vtbl;

@@ -212,6 +212,27 @@ typedef struct WIVisual2Vtbl
 struct WIVisual2 { const WIVisual2Vtbl *lpVtbl; };
 DEFINE_GUID(IID_IVisual2, 0x3052b611, 0x56c3, 0x4c3e, 0x8b, 0xf3, 0xf6, 0xe1, 0xad, 0x47, 0x3f, 0x06);
 
+/*
+ * Windows.UI.Composition.ICompositionSurfaceBrush3. Source: microsoft/windows-rs (MIT OR Apache-2.0), the published
+ * `windows` crate 0.62.2 (vcs commit 32c3144490c016fe496a0aed769bce60987a2e9d), src/Windows/UI/Composition/mod.rs
+ * (ICompositionSurfaceBrush3_Vtbl): guid 550bb289-1fe0-42e5-8195-1eefa87ff08e, slots after IInspectable:
+ * 6/7 get/put SnapToPixels (bool). Facts only.
+ */
+typedef struct WICompositionSurfaceBrush3 WICompositionSurfaceBrush3;
+typedef struct WICompositionSurfaceBrush3Vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(WICompositionSurfaceBrush3 *This, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(WICompositionSurfaceBrush3 *This);
+    ULONG (STDMETHODCALLTYPE *Release)(WICompositionSurfaceBrush3 *This);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(WICompositionSurfaceBrush3 *This, ULONG *count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(WICompositionSurfaceBrush3 *This, HSTRING *name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(WICompositionSurfaceBrush3 *This, TrustLevel *level);
+    HRESULT (STDMETHODCALLTYPE *get_SnapToPixels)(WICompositionSurfaceBrush3 *This, BOOLEAN *value);
+    HRESULT (STDMETHODCALLTYPE *put_SnapToPixels)(WICompositionSurfaceBrush3 *This, BOOLEAN value);
+} WICompositionSurfaceBrush3Vtbl;
+struct WICompositionSurfaceBrush3 { const WICompositionSurfaceBrush3Vtbl *lpVtbl; };
+DEFINE_GUID(IID_ICompositionSurfaceBrush3, 0x550bb289, 0x1fe0, 0x42e5, 0x81, 0x95, 0x1e, 0xef, 0xa8, 0x7f, 0xf0, 0x8e);
+
 enum cobj_kind
 {
     K_CONTAINER, K_SPRITE, K_VCOLL, K_COLORBRUSH, K_SURFBRUSH, K_INSETCLIP, K_GDEVICE, K_DSURFACE, K_TARGET, K_VISRC
@@ -233,6 +254,7 @@ struct cobj
     WICompositionBrush brush;
     WICompositionColorBrush colorbrush;
     WICompositionSurfaceBrush surfbrush;
+    WICompositionSurfaceBrush3 surfbrush3;
     WICompositionClip clip;
     WIInsetClip inset;
     WICompositionGraphicsDevice gdev;
@@ -284,6 +306,7 @@ struct cobj
     int bitmap_interp, stretch;
     float halign, valign;
     IUnknown *bsurface;             /* the ICompositionSurface identity, referenced */
+    BOOLEAN snap;                   /* ICompositionSurfaceBrush3.SnapToPixels (stored, not applied yet) */
 
     /* inset clip */
     float inset_l, inset_t, inset_r, inset_b;
